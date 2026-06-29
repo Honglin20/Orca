@@ -10,16 +10,18 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "mozzielol" }]
-# schema 层零依赖铁律：核心运行时仅依赖 pydantic。yaml/pytest 仅测试用，不进核心依赖。
+# schema 仍零依赖（仅 pydantic）；compile/ 是运行时翻译层，读 YAML + 解析 jinja2 meta，
+# 故 pyyaml / jinja2 进运行时依赖（非仅测试）。schema 本身不 import 它们，零依赖铁律不变。
 dependencies = [
     "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "jinja2>=3.0",
 ]
 
 [dependency-groups]
-# 仅开发/测试期依赖（uv sync 自动安装）。schema 本身零依赖（除 pydantic）。
+# 仅开发/测试期依赖（uv sync 自动安装）。
 dev = [
     "pytest>=8.0",
-    "pyyaml>=6.0",
 ]
 
 [tool.hatch.build.targets.wheel]

@@ -1,0 +1,7 @@
+# parser 层：agent 未声明 prompt，且无约定文件 agents/orphan.md
+name: missing_prompt
+entry: orphan
+nodes:
+  - name: orphan
+    kind: agent
+    routes: [{to: "$end"}]

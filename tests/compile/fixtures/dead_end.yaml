@@ -1,0 +1,12 @@
+# ⑥ 死胡同：a→b→a 路由环且无 $end 出口，从 entry 永远到不了终态
+name: dead_end
+entry: a
+nodes:
+  - name: a
+    kind: agent
+    prompt: pa
+    routes: [{to: b}]
+  - name: b
+    kind: agent
+    prompt: pb
+    routes: [{to: a}]

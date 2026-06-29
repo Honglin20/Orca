@@ -1,0 +1,14 @@
+# ⑤ after 静态依赖环（a→b→a），二者均有 $end 出口以隔离环错误
+name: after_cycle
+entry: a
+nodes:
+  - name: a
+    kind: agent
+    prompt: pa
+    after: [b]
+    routes: [{to: "$end"}]
+  - name: b
+    kind: agent
+    prompt: pb
+    after: [a]
+    routes: [{to: "$end"}]

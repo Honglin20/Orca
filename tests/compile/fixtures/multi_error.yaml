@@ -1,0 +1,10 @@
+# 聚合：一处 YAML 多个独立错误，须一次报全（SPEC §6.4）
+# ② entry 不存在 + ③ after 引用 ghost + ④ route 引用 nowhere + ⑦ prompt 引用 nope
+name: multi_error
+entry: ghost_entry
+nodes:
+  - name: a
+    kind: agent
+    prompt: "use {{ nope.output.x }}"
+    after: [ghost]
+    routes: [{to: nowhere}]

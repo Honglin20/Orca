@@ -1,0 +1,12 @@
+# ① name 重复
+name: dup
+entry: a
+nodes:
+  - name: a
+    kind: agent
+    prompt: pa
+    routes: [{to: "$end"}]
+  - name: a
+    kind: agent
+    prompt: pa again
+    routes: [{to: "$end"}]

@@ -1,0 +1,14 @@
+# ⑧ foreach.source 引用不存在的 node
+name: bad_foreach_source
+entry: f
+nodes:
+  - name: f
+    kind: agent
+    prompt: pf
+    routes: [{to: "$end"}]
+  - name: fe
+    kind: foreach
+    after: [f]
+    source: ghost.output.items
+    body: {kind: agent, prompt: "eval {{ item }}"}
+    routes: [{to: "$end"}]

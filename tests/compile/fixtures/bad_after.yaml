@@ -1,0 +1,9 @@
+# ③ after 引用不存在的 node
+name: bad_after
+entry: a
+nodes:
+  - name: a
+    kind: agent
+    prompt: pa
+    after: [ghost]
+    routes: [{to: "$end"}]

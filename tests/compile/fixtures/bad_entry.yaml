@@ -1,0 +1,8 @@
+# ② entry 不存在
+name: bad_entry
+entry: missing
+nodes:
+  - name: a
+    kind: agent
+    prompt: pa
+    routes: [{to: "$end"}]

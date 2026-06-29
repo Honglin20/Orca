@@ -1,0 +1,8 @@
+# ④ route.to 引用不存在的 node
+name: bad_route
+entry: a
+nodes:
+  - name: a
+    kind: agent
+    prompt: pa
+    routes: [{to: nowhere}]

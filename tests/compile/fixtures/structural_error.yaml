@@ -1,0 +1,7 @@
+# parser 层：结构错（未知 kind）→ pydantic ValidationError 被包装成 ConfigurationError
+name: structural_error
+entry: a
+nodes:
+  - name: a
+    kind: not_a_real_kind
+    prompt: pa

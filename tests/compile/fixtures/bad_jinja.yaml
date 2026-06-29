@@ -1,0 +1,8 @@
+# ⑦ Jinja2 引用不存在的 node
+name: bad_jinja
+entry: a
+nodes:
+  - name: a
+    kind: agent
+    prompt: "结果 {{ ghost.output.x }}"
+    routes: [{to: "$end"}]
