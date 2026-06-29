@@ -11,7 +11,7 @@
 |---|---|---|---|
 | **0** | 骨架 | pyproject + 目录 + SDD 模板 | ✅ |
 | **1** | `schema/` | 纯数据结构（workflow/event/state）| ✅ |
-| **2** | `compile/` | YAML→Workflow 解析 + 两层校验 | ⬜ 讨论中 |
+| **2** | `compile/` | YAML→Workflow 解析 + 两层校验 | ✅ |
 | **3** | `events/` | EventBus + tape 持久化 | ⬜ |
 | **4** | `exec/` | 执行内核（CLIRunner + Executor + Translator）| ⬜ |
 | **5** | `run/` | 编排（Orchestrator + Router）| ⬜ |
@@ -42,10 +42,10 @@ pyproject.toml（uv + hatchling + pydantic）+ docs 目录 + SDD 模板。
 workflow.py / event.py / state.py，纯 pydantic 模型，43 测试绿。
 SPEC：[`specs/phase-1-schema.md`](specs/phase-1-schema.md)
 
-### Phase 2 ⬜ compile/
+### Phase 2 ✅ compile/
 **做什么**：YAML 文件 → 校验过的 Workflow model。两层校验：① pydantic 结构（phase 1 已做）② 语义校验（name 唯一/entry 存在/引用有效/after 无环/可达/Jinja2 引用）。
 **对外接口极简**：`load_workflow(path) -> Workflow` 一个函数（用户/LLM 只需知道这个）。内部校验要全（errors 收集 + warnings）。
-**验证**：nas.yaml 解析通过；错误 YAML 被拒且错误信息精确。
+**验证**：nas.yaml 解析通过；错误 YAML 被拒且错误信息精确。103 测试全绿（schema 50 不回归 + compile 53）。
 SPEC：[`specs/phase-2-compile.md`](specs/phase-2-compile.md)
 
 ### Phase 3 ⬜ events/

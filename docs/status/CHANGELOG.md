@@ -17,6 +17,10 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-06-30] 阶段 2 compile/ 解析校验层 —— YAML→Workflow + 两层校验（结构 pydantic + 语义 8 项 + warnings），103 测试全绿
+- commit: `5b5ba06`（feat(compile): phase 2 解析与校验层）
+- 详情：[release note](../releases/2026-06-30-phase2-compile.md)
+
 ## [2026-06-29] 阶段 1 schema/ 数据层 —— 纯数据结构地基（workflow/event/state），50 测试全绿
 - commit: `d69c47c`（实现）+ `6d7dfea`（二次 review 修复：SPEC 25→21 + 测试加固）
 - 详情：[release note](../releases/2026-06-29-phase1-schema.md)
