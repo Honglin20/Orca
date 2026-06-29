@@ -1,0 +1,27 @@
+name: batch_assess
+entry: finder
+
+nodes:
+  - name: finder
+    kind: agent
+    prompt: "找出候选结构，输出 JSON {candidates: [...]}"
+    output_schema:
+      type: object
+      properties: {candidates: {type: array, items: {type: string}}}
+      required: [candidates]
+
+  - name: assessor
+    kind: foreach
+    after: [finder]
+    source: finder.output.candidates   # 运行时取数组
+    item_var: candidate
+    max_concurrent: 3
+    body:
+      kind: agent
+      prompt: "评估这个结构：{{ candidate }}"
+    failure_mode: continue_on_error
+
+  - name: picker
+    kind: agent
+    after: [assessor]
+    prompt: "从评估结果选最佳：{{ assessor.output.outputs }}"

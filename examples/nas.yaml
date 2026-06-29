@@ -1,0 +1,75 @@
+# nas.yaml
+name: nas
+description: 迭代式神经结构搜索
+entry: optimizer
+
+inputs:
+  iterations:
+    type: int
+    default: 3
+    description: 优化迭代轮数
+
+nodes:
+  # ── agent：长 prompt 从约定文件 agents/optimizer.md 加载，结构化输出 ──
+  - name: optimizer
+    kind: agent
+    output_schema:
+      type: object
+      properties:
+        structure: {type: string}
+        candidates: {type: array, items: {type: string}}
+      required: [structure]
+    routes:
+      - when: "output.structure is defined"
+        to: trainer
+      - to: $end
+
+  # ── agent：训练，短 prompt 内联，白名单工具 ──
+  - name: trainer
+    kind: agent
+    after: [optimizer]
+    prompt: |
+      训练结构 {{ optimizer.output.structure }}，
+      用 Bash 跑 train.py，读 metrics.json。
+    tools: [Bash, Read]
+    routes:
+      - to: evaluator
+
+  # ── script：评估（确定性，不烧 token）──
+  - name: evaluator
+    kind: script
+    after: [trainer]
+    command: "python eval.py --model {{ trainer.output.model_path }}"
+    routes:
+      - when: "output.exit_code == 0"
+        to: reviewer
+      - to: optimizer                 # 评估失败 → 回 optimizer 重设计（循环）
+
+  # ── agent：评判，多路路由 ──
+  - name: reviewer
+    kind: agent
+    after: [evaluator]
+    prompt: "准确率 {{ evaluator.output.stdout }}，继续优化还是完成？"
+    output_schema:
+      type: object
+      properties: {decision: {type: string, enum: [continue, done]}}
+      required: [decision]
+    routes:
+      - when: "output.decision == 'continue'"
+        to: optimizer                 # 回环循环
+      - when: "output.decision == 'done'"
+        to: $end
+
+  # ── set：记录最佳（纯计算存值）──
+  - name: record_best
+    kind: set
+    after: [reviewer]
+    values:
+      best_structure: "{{ optimizer.output.structure }}"
+      best_accuracy: "{{ evaluator.output.stdout }}"
+    routes:
+      - to: $end
+
+outputs:
+  best_structure: "{{ record_best.output.best_structure }}"
+  final_accuracy: "{{ record_best.output.best_accuracy }}"

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "orca"
+version = "0.1.0"
+description = "Orca — vendor-neutral、event-sourced、可视化的 coding-agent 编排控制平面"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "mozzielol" }]
+# schema 层零依赖铁律：核心运行时仅依赖 pydantic。yaml/pytest 仅测试用，不进核心依赖。
+dependencies = [
+    "pydantic>=2.0",
+]
+
+[dependency-groups]
+# 仅开发/测试期依赖（uv sync 自动安装）。schema 本身零依赖（除 pydantic）。
+dev = [
+    "pytest>=8.0",
+    "pyyaml>=6.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["orca"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

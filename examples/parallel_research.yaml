@@ -1,0 +1,13 @@
+name: parallel_research
+entry: researcher_a
+
+nodes:
+  - name: researcher_a                 # 入口
+    kind: agent                        # prompt 省略 → 从 agents/researcher_a.md 加载
+  - name: researcher_b                 # 同层入口（a/b 自动并行）
+    kind: agent                        # prompt 省略 → 从 agents/researcher_b.md 加载
+  - name: synthesizer
+    kind: agent
+    after: [researcher_a, researcher_b]   # 汇聚点，等两者都完成
+    prompt: |
+      综合：{{ researcher_a.output }} / {{ researcher_b.output }}
