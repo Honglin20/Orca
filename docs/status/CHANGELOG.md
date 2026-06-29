@@ -17,3 +17,7 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-06-29] 阶段 1 schema/ 数据层 —— 纯数据结构地基（workflow/event/state），43 测试全绿
+- commit: `d69c47c`
+- 详情：[release note](../releases/2026-06-29-phase1-schema.md)
+
