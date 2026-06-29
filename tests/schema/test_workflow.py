@@ -138,6 +138,12 @@ def test_foreach_body_rejects_set():
         ForeachNode(name="f", source="s", body={"kind": "set", "values": {}})
 
 
+def test_foreach_body_rejects_foreach():
+    # 对称闭合：body 同样拒绝 foreach（已测 set，补 foreach）
+    with pytest.raises(ValidationError):
+        ForeachNode(name="f", source="s", body={"kind": "foreach"})
+
+
 def test_foreach_body_rejects_unknown_kind():
     with pytest.raises(ValidationError):
         ForeachNode(name="f", source="s", body={"kind": "bogus"})
@@ -148,6 +154,15 @@ def test_workflow_extra_forbid():
         Workflow(name="w", entry="a", nodes=[], bogus=1)
 
 
+def test_extra_forbid_via_dict_path():
+    # 真实失败模式：YAML→dict→Workflow 路径上，节点 dict 的多余字段被拒
+    # （非仅直接构造子类；discriminated union 分派后整体验证 extra=forbid）
+    with pytest.raises(ValidationError):
+        Workflow(
+            name="w", entry="a", nodes=[{"name": "a", "kind": "agent", "bogus": 1}]
+        )
+
+
 # ── Route ──
 
 
@@ -155,6 +170,12 @@ def test_route_construct():
     r = Route(to="trainer")
     assert r.when is None
     assert r.to == "trainer"
+
+
+def test_route_to_end_marker():
+    # SPEC §2.2："$end" 是合法路由目标（终态）。锁定它，防回归误禁
+    r = Route(to="$end")
+    assert r.to == "$end"
 
 
 def test_route_to_required():
@@ -215,3 +236,49 @@ def test_example_yaml_parses(name, entry):
     assert wf.name == name
     assert wf.entry == entry
     assert len(wf.nodes) > 0
+
+
+def _load_example(name):
+    with (EXAMPLES / f"{name}.yaml").open() as f:
+        return Workflow(**yaml.safe_load(f))
+
+
+def test_nas_yaml_deep_parse():
+    """E2E 深度验证：分派正确 + inputs/outputs 真被解析（SPEC §7.4 实质，非浅断言）。"""
+    wf = _load_example("nas")
+    by_name = {n.name: n for n in wf.nodes}
+
+    # 分派正确性：evaluator 必须是 ScriptNode（不能被静默吞成 AgentNode）
+    assert isinstance(by_name["evaluator"], ScriptNode)
+    assert isinstance(by_name["optimizer"], AgentNode)
+    assert by_name["optimizer"].output_schema is not None
+    assert isinstance(by_name["record_best"], SetNode)
+
+    # inputs 解析
+    assert wf.inputs["iterations"].type == "int"
+    assert wf.inputs["iterations"].default == 3
+
+    # outputs 解析
+    assert "best_structure" in wf.outputs
+    assert "final_accuracy" in wf.outputs
+
+
+def test_batch_assess_yaml_deep_parse():
+    """E2E：foreach 节点 + 无名 body 分派 + foreach 专属字段被解析。"""
+    wf = _load_example("batch_assess")
+    by_name = {n.name: n for n in wf.nodes}
+    assessor = by_name["assessor"]
+    assert isinstance(assessor, ForeachNode)
+    assert isinstance(assessor.body, AgentNode)  # 无名 body 正确分派
+    assert assessor.source == "finder.output.candidates"
+    assert assessor.item_var == "candidate"
+    assert assessor.max_concurrent == 3
+    assert assessor.failure_mode == "continue_on_error"
+
+
+def test_parallel_research_yaml_deep_parse():
+    """E2E：静态并行 after 汇聚被解析。"""
+    wf = _load_example("parallel_research")
+    by_name = {n.name: n for n in wf.nodes}
+    assert by_name["synthesizer"].after == ["researcher_a", "researcher_b"]
+    assert by_name["researcher_a"].after == []  # 入口候选

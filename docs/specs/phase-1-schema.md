@@ -464,7 +464,7 @@ nodes:
 ### 7.3 EventType 验收
 - [ ] `Event(type="workflow_started", seq=1, timestamp=0)` 能构造
 - [ ] `Event(type="nonexistent", seq=1, timestamp=0)` 被 Literal 拒绝
-- [ ] 所有 25 个 event type 都能构造
+- [ ] 所有 21 个 event type 都能构造
 
 ### 7.4 端到端验收
 - [ ] §6.1 的 nas.yaml 能被解析成 Workflow 对象（用 yaml.safe_load + Workflow(**data)，临时脚本验证即可，正式 parser 在 compile/ 阶段）
@@ -495,7 +495,7 @@ nodes:
 | foreach | for_each: 块 | 无（回指循环）| kind: foreach |
 | script | type: script | 无 | kind: script |
 | set | type: set | 无（用 state）| kind: set |
-| 事件类型 | 裸字符串 38 处 | — | Literal 联合体 25 个 |
+| 事件类型 | 裸字符串 38 处 | — | Literal 联合体 21 个 |
 | extra="forbid" | 全用 | — | 全用 |
 | prompt | 内联 | 约定 `<name>.md` | 约定优先 + 可选内联 |
 
@@ -552,7 +552,7 @@ nodes:
 ## 产出要求
 1. 上述 4 个 schema 文件
 2. `tests/schema/test_workflow.py` —— 各 kind 构造、discriminator 分派、extra 报错、Route 校验
-3. `tests/schema/test_event.py` —— Event 构造、EventType Literal 约束（含 25 个 type 全覆盖）
+3. `tests/schema/test_event.py` —— Event 构造、EventType Literal 约束（含 21 个 type 全覆盖）
 4. `tests/schema/test_state.py` —— RunState/UsageSummary 构造（含递归 node_breakdown）
 5. `examples/nas.yaml`（用 SPEC §6.1）
 6. `examples/parallel_research.yaml`（用 SPEC §6.2）
@@ -564,7 +564,7 @@ nodes:
 - [ ] discriminated union 分派正确（agent/script/set/foreach）
 - [ ] `kind="nonexistent"` 被拒
 - [ ] 每个 kind `extra="forbid"`：多余字段报错
-- [ ] `Event(type="nonexistent")` 被 Literal 拒绝；25 个 type 全部能构造
+- [ ] `Event(type="nonexistent")` 被 Literal 拒绝；21 个 type 全部能构造
 - [ ] 3 个 examples/*.yaml 都能被解析成 Workflow 对象（临时脚本验证）
 - [ ] 所有测试通过
 

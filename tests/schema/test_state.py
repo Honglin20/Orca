@@ -60,6 +60,16 @@ def test_usage_summary_recursive():
     assert outer.node_breakdown["trainer"].node_breakdown["sub"].input_tokens == 2
 
 
+def test_usage_summary_recursive_from_dict():
+    """从嵌套 dict 构造，真正走 pydantic 递归校验（非构造后手动 mutate）。"""
+    u = UsageSummary(
+        node_breakdown={"a": {"node_breakdown": {"b": {"input_tokens": 1}}}}
+    )
+    assert isinstance(u.node_breakdown["a"], UsageSummary)
+    assert isinstance(u.node_breakdown["a"].node_breakdown["b"], UsageSummary)
+    assert u.node_breakdown["a"].node_breakdown["b"].input_tokens == 1
+
+
 def test_usage_summary_extra_forbid():
     with pytest.raises(ValidationError):
         UsageSummary(bogus=1)
