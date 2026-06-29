@@ -44,10 +44,29 @@
 - ✅ 已加测试：`test_node_status_rejects_completed` —— 反向覆盖 Status（node 级，`done`）绝不容纳 `completed`（workflow 级），防后人误扩 Literal。
 - 不改：裸可变默认值 `= []` / `{}` —— 与 SPEC 写法逐字一致，pydantic v2 已正确深拷贝（已测无共享别名）；`Event.data: dict` 无结构 —— 与 SPEC 一致，payload 校验属后续层。
 
+## 二次 review 修复（用户 review 报告，commit `6d7dfea`）
+
+针对用户 4-agent 交叉 review 报告，全部处理（🔴2 必须 + 🟡4 建议；🟢3 仅供了解无需改）：
+
+🔴 必须
+1. **SPEC 文档笔误**：EventType 实为 21 个（§3.2 Literal 代码块为准），修正 §7.3/§8/§10 四处 prose 的「25」→「21」（纯文档修复）。
+2. **E2E 测试太浅**：原 `test_example_yaml_parses` 只断言 name/entry/len(nodes)。新增 `test_nas_yaml_deep_parse` / `test_batch_assess_yaml_deep_parse` / `test_parallel_research_yaml_deep_parse`，真正证明分派正确性（evaluator→ScriptNode，无名 foreach body→AgentNode）+ inputs/outputs/after/foreach 专属字段被解析。
+
+🟡 建议
+3. **extra=forbid 走 dict 路径**：新增 `test_extra_forbid_via_dict_path`，覆盖 YAML→dict→Workflow 真实失败模式（非仅直接构造子类）。
+4. **Route `to="$end"` 正向测试**：新增 `test_route_to_end_marker`，锁定 §2.2 允许的终态标记，防回归误禁。
+5. **UsageSummary 递归走 pydantic 校验**：新增 `test_usage_summary_recursive_from_dict`，从嵌套 dict 构造（非构造后 mutate），真正验证递归 model_rebuild 生效。
+6. **ForeachBody 拒绝 foreach**：新增 `test_foreach_body_rejects_foreach`，与 `test_foreach_body_rejects_set` 对称闭合。
+
+🟢 仅供了解（已确认，不改）
+- Node.name 可选：唯一可行解，docstring + CURRENT.md 已记录，compile/ 须补校验（遗留项）。
+- 可变默认值 `= []`/`{}`：pydantic v2 深拷贝安全；若后续开严格 lint（RUF012/B006）再迁 `default_factory`。
+- SDD 流程：计划/release/CHANGELOG/CURRENT/自我 review 全齐。
+
 ## 验证结果
 
 - `uv sync` 成功（Python 3.12.13, pydantic 2.13.4, pytest 9.1.1, pyyaml 6.0.3）。
-- `uv run pytest` → **43 passed**（test_event 6 / test_state 9 / test_workflow 28）。
+- `uv run pytest` → **50 passed**（test_event 6 / test_state 10 / test_workflow 34）。
 - 验收 7.1 import 通过；运行时 `Requires-Dist = ['pydantic>=2.0']`（pytest/pyyaml 不在运行时依赖）。
 - 验收 7.4：nas / parallel_research / batch_assess 三个 yaml 经 `yaml.safe_load → Workflow(**data)` 均解析成功。
 
@@ -57,7 +76,7 @@
 - [x] 7.2 discriminated union：agent/script/set 分派、foreach 从 dict 分派、`kind="nonexistent"` 拒、缺 kind 拒、各 kind `extra="forbid"`
 - [x] 7.3 EventType：合法构造、`type="nonexistent"` 拒、21 个 type 全覆盖
 - [x] 7.4 端到端：3 个 examples yaml 全部解析成 Workflow
-- [x] 7.5 测试：3 个测试文件，全绿（43 passed）
+- [x] 7.5 测试：3 个测试文件，全绿（50 passed）
 - [x] 7.6 文件：3 个 examples + pyproject（uv+hatchling+pydantic>=2.0+pytest）
 
 ## 未做（后续阶段，不在本阶段范围）
