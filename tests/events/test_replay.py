@@ -152,6 +152,22 @@ def test_workflow_lifecycle_branches():
     assert s.current_node is None
 
 
+def test_workflow_started_recovers_workflow_name_not_entry():
+    """workflow_started 的 workflow_name 字段正确恢复进 RunState（**非 entry**）。
+
+    回归防护：旧 reducer 误把 entry（入口 node 名）赋给 workflow_name。
+    entry 是 node 名（如 "start_node"），workflow_name 是 workflow 名（如 "nas-review"）。
+    """
+    s = _state()
+    s = apply_event(
+        s,
+        _evt("workflow_started", seq=1, entry="start_node", workflow_name="nas-review"),
+    )
+    assert s.status == "running"
+    assert s.workflow_name == "nas-review"  # workflow 名
+    assert s.workflow_name != "start_node"  # 不是入口 node 名
+
+
 def test_workflow_failed_sets_status_and_current_node():
     s = _state()
     s = apply_event(s, _evt("workflow_started", seq=1))

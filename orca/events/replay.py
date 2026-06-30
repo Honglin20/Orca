@@ -56,14 +56,14 @@ def apply_event(state: RunState, event: Event) -> RunState:
     data = event.data
 
     if t == "workflow_started":
-        return state.model_copy(
-            update={
-                "status": "running",
-                "workflow_name": data.get("entry", state.workflow_name)
-                if not state.workflow_name
-                else state.workflow_name,
-            }
-        )
+        # workflow_name 来自 payload 的 workflow_name 字段（**非 entry** —— entry 是入口
+        # node 名，不是 workflow 名）。仅在 state.workflow_name 为空时填入（首次；
+        # 后续 workflow_started 不覆盖，保留最早值）。
+        update = {"status": "running"}
+        wf_name = data.get("workflow_name")
+        if not state.workflow_name and wf_name:
+            update["workflow_name"] = wf_name
+        return state.model_copy(update=update)
 
     if t == "workflow_completed":
         return state.model_copy(update={"status": "completed", "current_node": None})

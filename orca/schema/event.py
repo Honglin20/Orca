@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict
 # retry / for_each / parallel 每次调用都产生新 session_id；attempt（第几次重试）reducer 派生，不入库。
 EventType = Literal[
     # ── workflow 生命周期（node=None, session_id=None）──
-    "workflow_started",  # data: {inputs, node_count, entry}
+    "workflow_started",  # data: {inputs, node_count, entry, workflow_name}
     "workflow_completed",  # data: {elapsed, outputs}
     "workflow_failed",  # data: {error_type, message, node}  # node=导致失败的 node（payload）
     # ── node 生命周期（顶层 node + session_id 标识本次调用；attempt 派生）──

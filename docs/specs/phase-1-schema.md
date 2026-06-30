@@ -198,7 +198,7 @@ EventType = Literal[
     # retry/for_each/parallel 每次调用产生新 session_id；attempt 派生不入库。
 
     # ── workflow 生命周期（node=None, session_id=None）──
-    "workflow_started",                 # data: {inputs, node_count, entry}
+    "workflow_started",                 # data: {inputs, node_count, entry, workflow_name}
     "workflow_completed",               # data: {elapsed, outputs}
     "workflow_failed",                  # data: {error_type, message, node}  # node=导致失败的 node
 
