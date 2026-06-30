@@ -87,7 +87,7 @@ orca/iface/web/static/.gitignore + .gitkeep   vite outDir（构建产物 ignored
 
 ## Commit
 
-- `feat(web): phase 9b 前端骨架 — react-router 路由 + Zustand 单 store fold + 懒加载/WS hooks + 页面骨架`（SHA 见 CHANGELOG）
+- `feat(web): phase 9b 前端骨架 — react-router 路由 + Zustand 单 store fold + 懒加载/WS hooks + 页面骨架`（commit `0347a66`）
 
 ## 给后续阶段的契约（SPEC §8）
 
