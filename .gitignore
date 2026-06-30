@@ -26,3 +26,9 @@ htmlcov/
 .DS_Store
 .idea/
 .vscode/
+
+# External reference repos (read-only design references, not Orca code)
+references/
+
+# Codegraph local index
+.codegraph/
