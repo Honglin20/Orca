@@ -89,7 +89,7 @@ dispatch `code-reviewer` 后修复全部 blocker + major：
 
 ## commit SHA
 
-（待填，commit 后回填）
+`b34c87d`
 
 ## 下一步
 
