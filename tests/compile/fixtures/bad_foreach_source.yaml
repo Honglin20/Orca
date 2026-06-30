@@ -5,10 +5,9 @@ nodes:
   - name: f
     kind: agent
     prompt: pf
-    routes: [{to: "$end"}]
+    routes: [{to: fe}]
   - name: fe
     kind: foreach
-    after: [f]
     source: ghost.output.items
     body: {kind: agent, prompt: "eval {{ item }}"}
     routes: [{to: "$end"}]

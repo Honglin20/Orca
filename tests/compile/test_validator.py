@@ -1,6 +1,7 @@
-"""tests/compile/test_validator.py —— 8 项语义校验各正/反例 + 聚合 + warnings。
+"""tests/compile/test_validator.py —— 9 项语义校验各正/反例 + 聚合 + warnings。
 
-直接调 validate_workflow（内部入口），逐项验证 SPEC §4 的 8 条规则。
+直接调 validate_workflow（内部入口），逐项验证 SPEC §4 的 9 条规则
+（①②④⑥⑦⑧⑨⑩⑪⑬，③⑤ 随 after 废除）。
 测试覆盖意图（非仅行为）：每项校验对「正确工作流」放行、对「对应错误」精确报错；
 errors 聚合（多处错一次报全）；warnings 不阻止返回。
 """
@@ -18,12 +19,13 @@ from orca.schema import Workflow
 
 
 def _wf(nodes: list, *, entry: str = "a", outputs: dict | None = None,
-        inputs: dict | None = None) -> Workflow:
+        inputs: dict | None = None, parallel: list | None = None) -> Workflow:
     """用 dict 构造 Workflow（贴近 YAML→dict→Workflow 真实路径）。"""
     return Workflow(
         name="w",
         entry=entry,
         nodes=nodes,
+        parallel=parallel or [],
         outputs=outputs or {},
         inputs=inputs or {},
     )
@@ -80,23 +82,6 @@ def test_entry_missing():
     assert any("entry" in e and "ghost" in e for e in errs)
 
 
-# ── ③ after 引用有效 ──
-
-
-def test_after_ref_missing():
-    wf = _wf([_agent("a", after=["ghost"], routes=[{"to": "$end"}])])
-    errs = _errors(wf)
-    assert any("after" in e and "ghost" in e for e in errs)
-
-
-def test_after_ref_valid():
-    wf = _wf([
-        _agent("a", routes=[{"to": "b"}]),
-        _agent("b", after=["a"], routes=[{"to": "$end"}]),
-    ])
-    validate_workflow(wf)  # 不抛
-
-
 # ── ④ routes[].to 引用有效 ──
 
 
@@ -111,20 +96,15 @@ def test_route_to_end_marker_valid():
     validate_workflow(wf)  # $end 合法，不抛
 
 
-# ── ⑤ after 静态边无环 ──
+# ── ⑥ route 回指是合法循环（单轨：route 环只要有 $end 出口即合法）──
 
 
-def test_after_cycle_detected():
-    wf = _wf([
-        _agent("a", after=["b"], routes=[{"to": "$end"}]),
-        _agent("b", after=["a"], routes=[{"to": "$end"}]),
-    ])
-    errs = _errors(wf)
-    assert any("环" in e and "→" in e for e in errs)
+def test_route_backedge_is_legal_loop():
+    """route 回指是合法循环（单轨模型：route 环只要有 $end 出口即放行）。
 
-
-def test_route_backedge_is_not_after_cycle():
-    """route 回指是合法循环，不算 after 环（SPEC §4⑤）。a⇄b 仅靠 route 连通且有 $end 出口。"""
+    a⇄b 仅靠 route 连通，a 有 $end 出口 → 不报死胡同。
+    （迁移前这测试叫 test_route_backedge_is_not_after_cycle，after 废除后改名。）
+    """
     wf = _wf([
         _agent("a", routes=[{"when": "output.loop == true", "to": "b"}, {"to": "$end"}]),
         _agent("b", routes=[{"to": "a"}]),
@@ -174,7 +154,7 @@ def test_jinja_ref_to_nonexistent_node():
 def test_jinja_ref_to_existing_node_ok():
     wf = _wf([
         _agent("a", routes=[{"to": "b"}]),
-        _agent("b", prompt="got {{ a.output }}", after=["a"], routes=[{"to": "$end"}]),
+        _agent("b", prompt="got {{ a.output }}", routes=[{"to": "$end"}]),
     ])
     validate_workflow(wf)
 
@@ -223,12 +203,48 @@ def test_jinja_route_when_output_is_valid():
     validate_workflow(wf)
 
 
+def test_jinja_parallel_group_route_when_checked():
+    """⑦ 一致性：parallel 组 route.when 引用不存在的 node → error（与 node 路由同校验）。
+
+    回归：_iter_templates 曾漏遍历 wf.parallel，导致组路由的坏引用被静默放行。
+    """
+    wf = _wf(
+        [
+            _agent("a", routes=[{"to": "split"}]),
+            _agent("b", routes=[{"to": "$end"}]),
+            _agent("c", routes=[{"to": "$end"}]),
+        ],
+        parallel=[{
+            "name": "split", "branches": ["b", "c"],
+            "routes": [{"when": "ghost.output.x == 1", "to": "$end"}],
+        }],
+    )
+    errs = _errors(wf)
+    assert any("split" in e and "ghost" in e for e in errs)
+
+
+def test_jinja_parallel_group_route_when_output_valid():
+    """⑦ 正向：parallel 组 route.when 引用 output（组聚合输出）合法。"""
+    wf = _wf(
+        [
+            _agent("a", routes=[{"to": "split"}]),
+            _agent("b", routes=[{"to": "$end"}]),
+            _agent("c", routes=[{"to": "$end"}]),
+        ],
+        parallel=[{
+            "name": "split", "branches": ["b", "c"],
+            "routes": [{"when": "output.count == 2", "to": "$end"}],
+        }],
+    )
+    validate_workflow(wf)
+
+
 def test_jinja_foreach_body_item_var_valid():
     """foreach body 里 item_var（candidate）合法，不被当未知 node。"""
     wf = _wf([
         _agent("f", routes=[{"to": "fe"}]),
         {
-            "name": "fe", "kind": "foreach", "after": ["f"],
+            "name": "fe", "kind": "foreach",
             "source": "f.output.items", "item_var": "candidate",
             "body": {"kind": "agent", "prompt": "eval {{ candidate }}"},
             "routes": [{"to": "$end"}],
@@ -251,7 +267,7 @@ def test_foreach_source_missing_node():
     wf = _wf([
         _agent("f", routes=[{"to": "$end"}]),
         {
-            "name": "fe", "kind": "foreach", "after": ["f"],
+            "name": "fe", "kind": "foreach",
             "source": "ghost.output.items",
             "body": {"kind": "agent", "prompt": "x"},
             "routes": [{"to": "$end"}],
@@ -265,7 +281,7 @@ def test_foreach_source_existing_node_ok():
     wf = _wf([
         _agent("f", routes=[{"to": "fe"}]),
         {
-            "name": "fe", "kind": "foreach", "after": ["f"],
+            "name": "fe", "kind": "foreach",
             "source": "f.output.items",
             "body": {"kind": "agent", "prompt": "x"},
             "routes": [{"to": "$end"}],
@@ -278,20 +294,24 @@ def test_foreach_source_existing_node_ok():
 
 
 def test_errors_aggregated():
-    """一处工作流多处独立错误 → ConfigurationError.errors 含全部，不止首个。"""
+    """一处工作流多处独立错误 → ConfigurationError.errors 含全部，不止首个。
+
+    凑 ≥4 个独立错误：② entry 不存在(ghost_entry) + ④ route 引用 nowhere
+    + ⑪ 兜底 route(nowhere 无 when)不是最后一条 + ⑦ prompt 引用 nope。
+    """
     wf = _wf(
-        [_agent("a", prompt="use {{ nope.output.x }}", after=["ghost"],
-                routes=[{"to": "nowhere"}])],
+        [_agent("a", prompt="use {{ nope.output.x }}",
+                routes=[{"to": "nowhere"}, {"when": "output.x", "to": "$end"}])],
         entry="ghost_entry",
     )
     errs = _errors(wf)
-    # 至少 4 个独立错误：entry 不存在 / after ghost / route nowhere / jinja nope
+    # 至少 4 个独立错误：entry 不存在 / route nowhere / 兜底不在最后 / jinja nope
     assert len(errs) >= 4
     joined = " ".join(errs)
     assert "ghost_entry" in joined
-    assert "ghost" in joined
     assert "nowhere" in joined
     assert "nope" in joined
+    assert "最后一条" in joined
 
 
 # ── ValidationResult 行为（SPEC §1）──
@@ -321,14 +341,19 @@ def test_validation_result_returns_warnings_when_clean():
     [
         ("dup_name", "重复"),
         ("bad_entry", "entry"),
-        ("bad_after", "after"),
         ("bad_route", "route"),
-        ("after_cycle", "环"),
         ("dead_end", "$end"),
         ("bad_jinja", "ghost"),
         ("bad_foreach_source", "source"),
         ("multi_error", "ghost_entry"),
         ("structural_error", "结构校验"),
+        # phase 5 新增 fixture
+        ("bad_parallel_branches", "branch"),
+        ("bad_parallel_too_few", "branches"),
+        ("bad_parallel_dup_branch", "重复"),
+        ("bad_parallel_self_ref", "自引用"),
+        ("bad_route_fallback", "最后一条"),
+        ("bad_entry_is_parallel", "parallel 组"),
     ],
 )
 def test_fixture_rejected(fixtures_dir, fixture, keyword):
@@ -338,8 +363,250 @@ def test_fixture_rejected(fixtures_dir, fixture, keyword):
     assert keyword in joined, f"{fixture}: 期望含 '{keyword}'，实得 {exc.value.errors}"
 
 
+def test_parallel_reachable_fixture_valid(fixtures_dir):
+    """parallel_reachable.yaml：合法 parallel 组 + entry 经组可达 $end → 不抛。"""
+    wf = load_workflow(fixtures_dir / "parallel_reachable.yaml")
+    validate_workflow(wf)
+
+
 def test_multi_error_fixture_aggregated(fixtures_dir):
     """multi_error.yaml 一处 YAML 含 4 个独立错 → 一次报全。"""
     with pytest.raises(ConfigurationError) as exc:
         load_workflow(fixtures_dir / "multi_error.yaml")
     assert len(exc.value.errors) >= 4
+
+
+# ── phase 5 单轨化：⑩⑪⑬④⑥ parallel 组 / 兜底位置 / entry 非组 ────────────────
+#
+# 以下用 _wf(parallel=[...]) 内联构造，逐项验证 SPEC §2.2 的新校验意图。
+# ⑩ parallel 组结构：branches < 2 / 引用不存在 node / 重复 / 自引用 / 组名与 node 名冲突
+# ⑪ 兜底 route 位置（node 与 parallel 组都校验）
+# ⑬ entry 不能指向 parallel 组
+# ④ route.to 指向 parallel 组名 → 合法
+# ⑥ entry 经 parallel 组可达 $end；parallel 组死胡同
+
+
+def _parallel_diamond(*, group_routes=None, branches=None, group_name="split",
+                      entry_routes=None):
+    """构造一个 a→split(parallel 组)→d 的 diamond 骨架，便于 ⑩⑥ 测试复用。"""
+    return _wf(
+        [
+            _agent("a", routes=entry_routes if entry_routes is not None else [{"to": group_name}]),
+            _agent("b", routes=[{"to": "$end"}]),
+            _agent("c", routes=[{"to": "$end"}]),
+            _agent("d", routes=[{"to": "$end"}]),
+        ],
+        parallel=[{
+            "name": group_name,
+            "branches": branches if branches is not None else ["b", "c"],
+            "routes": group_routes if group_routes is not None else [{"to": "d"}],
+        }],
+    )
+
+
+# ── ⑩ parallel 组结构 ──
+
+
+def test_parallel_branches_too_few():
+    """⑩-1：branches 长度 < 2 → error（少于 2 不是并行）。"""
+    wf = _parallel_diamond(branches=["b"])
+    errs = _errors(wf)
+    assert any("branches" in e and "< 2" in e for e in errs)
+
+
+def test_parallel_branch_ref_missing():
+    """⑩-2：branch 引用不存在的 node → error。"""
+    wf = _parallel_diamond(branches=["b", "ghost"])
+    errs = _errors(wf)
+    assert any("branch" in e and "ghost" in e for e in errs)
+
+
+def test_parallel_branch_duplicate():
+    """⑩-3：branches 重复 → error。"""
+    wf = _parallel_diamond(branches=["b", "b"])
+    errs = _errors(wf)
+    assert any("重复" in e and "b" in e for e in errs)
+
+
+def test_parallel_self_reference():
+    """⑩-4：组 route 自引用 → error。"""
+    wf = _parallel_diamond(group_routes=[{"to": "split"}])
+    errs = _errors(wf)
+    assert any("自引用" in e and "split" in e for e in errs)
+
+
+def test_parallel_group_name_collides_with_node():
+    """① 扩展：parallel 组名与 node 名冲突 → error（共享命名空间）。"""
+    wf = _wf(
+        [_agent("a", routes=[{"to": "$end"}]), _agent("dup", routes=[{"to": "$end"}])],
+        parallel=[{"name": "dup", "branches": ["a", "dup"], "routes": [{"to": "$end"}]}],
+    )
+    errs = _errors(wf)
+    assert any("重复" in e and "dup" in e for e in errs)
+
+
+def test_parallel_branch_cannot_reference_group():
+    """⑩-2：branch 不能指向另一个 parallel 组（组内不嵌套组）。"""
+    wf = _wf(
+        [
+            _agent("a", routes=[{"to": "outer"}]),
+            _agent("b", routes=[{"to": "$end"}]),
+            _agent("c", routes=[{"to": "$end"}]),
+        ],
+        parallel=[
+            {"name": "outer", "branches": ["b", "inner"], "routes": [{"to": "$end"}]},
+            {"name": "inner", "branches": ["b", "c"], "routes": [{"to": "$end"}]},
+        ],
+    )
+    errs = _errors(wf)
+    # outer 的 branch 'inner' 是组名不是 node → ⑩-2 报错
+    assert any("branch" in e and "inner" in e for e in errs)
+
+
+def test_parallel_group_empty_name():
+    """① 扩展：parallel 组 name 空字符串 → error（与 node 空 name 对称）。"""
+    wf = _wf(
+        [_agent("a", routes=[{"to": "$end"}]), _agent("b", routes=[{"to": "$end"}])],
+        parallel=[{"name": "", "branches": ["a", "b"], "routes": [{"to": "$end"}]}],
+    )
+    errs = _errors(wf)
+    assert any("parallel 组" in e and "name" in e for e in errs)
+
+
+# ── ⑪ 兜底 route 位置（node 与 parallel 组都校验）──
+
+
+def test_route_fallback_not_last_on_node():
+    """⑪：node 的兜底 route（when=None）不在最后 → error（其后的 route 不可达）。"""
+    wf = _wf([
+        _agent("a", routes=[{"to": "b"}, {"when": "output.x", "to": "$end"}]),
+        _agent("b", routes=[{"to": "$end"}]),
+    ])
+    errs = _errors(wf)
+    assert any("最后一条" in e and "a" in e for e in errs)
+
+
+def test_route_fallback_not_last_on_parallel_group():
+    """⑪：parallel 组的兜底 route 不在最后 → error。"""
+    wf = _parallel_diamond(
+        group_routes=[{"to": "d"}, {"when": "output.x", "to": "$end"}],
+    )
+    errs = _errors(wf)
+    assert any("最后一条" in e and "split" in e for e in errs)
+
+
+def test_route_fallback_last_is_ok():
+    """⑪ 正向：兜底 route 是最后一条 → 不报。"""
+    wf = _wf([
+        _agent("a", routes=[{"when": "output.x", "to": "b"}, {"to": "$end"}]),
+        _agent("b", routes=[{"to": "$end"}]),
+    ])
+    validate_workflow(wf)
+
+
+def test_route_single_fallback_route_is_ok():
+    """⑪ 边界：单条兜底 route（len=1，i=0==len-1）合法 —— node 与 parallel 组两侧。
+
+    回归：_check_fallback_last 的 `i != len(routes)-1` 在 len==1 时不应误报。
+    """
+    # node 侧单 route（已被多个测试隐式覆盖，此处显式锁定）
+    validate_workflow(_wf([_agent("a", routes=[{"to": "$end"}])]))
+    # parallel 组侧单 route（无显式覆盖，补上）
+    validate_workflow(_wf(
+        [
+            _agent("a", routes=[{"to": "split"}]),
+            _agent("b", routes=[{"to": "$end"}]),
+            _agent("c", routes=[{"to": "$end"}]),
+        ],
+        parallel=[{"name": "split", "branches": ["b", "c"], "routes": [{"to": "$end"}]}],
+    ))
+
+
+# ── ⑬ entry 不能是 parallel 组 ──
+
+
+def test_entry_cannot_be_parallel_group():
+    """⑬：entry 指向 parallel 组 → error（entry 必须是 node）。"""
+    wf = _wf(
+        [_agent("a", routes=[{"to": "$end"}]), _agent("b", routes=[{"to": "$end"}])],
+        entry="split",
+        parallel=[{"name": "split", "branches": ["a", "b"], "routes": [{"to": "$end"}]}],
+    )
+    errs = _errors(wf)
+    assert any("parallel 组" in e and "split" in e for e in errs)
+
+
+# ── ④ route.to 指向 parallel 组名 → 合法 ──
+
+
+def test_route_to_parallel_group_name_valid():
+    """④：node 的 route.to 指向 parallel 组名 → 合法（不报 ④）。"""
+    wf = _parallel_diamond()  # a.routes → split（组名）
+    validate_workflow(wf)  # 整个 diamond 合法
+
+
+def test_parallel_group_route_to_node_valid():
+    """④：parallel 组的 route.to 指向 node → 合法。"""
+    wf = _parallel_diamond(group_routes=[{"to": "d"}])
+    validate_workflow(wf)
+
+
+# ── ⑥ entry 经 parallel 组可达 $end（含死胡同检测）──
+
+
+def test_parallel_group_reachable_to_end():
+    """⑥：entry→parallel 组→组 routes→$end，可达 → 不报死胡同。"""
+    wf = _parallel_diamond()  # a→split, split→d, d→$end；b/c 各自 $end
+    validate_workflow(wf)
+
+
+def test_parallel_group_no_routes_is_implicit_terminal():
+    """⑥：parallel 组无 routes = 隐式终态（SPEC §2.2⑥ line 215）。
+
+    node→group(group.routes=[])，组完成后隐式结束；branches 各自有 $end 出口，
+    可达性展开到 branches → $end，不报死胡同。
+    且组本身经 a→split 可达，不应被误报孤立（回归：successors_of 曾漏把组名标记可达）。
+    """
+    wf = _wf(
+        [
+            _agent("a", routes=[{"to": "split"}]),
+            _agent("b", routes=[{"to": "$end"}]),
+            _agent("c", routes=[{"to": "$end"}]),
+        ],
+        parallel=[{"name": "split", "branches": ["b", "c"]}],  # 无 routes
+    )
+    warnings = validate_workflow(wf)
+    # 组 split 经 a 路由可达，绝不能被误报孤立
+    assert not any("split" in w and "孤立" in w for w in warnings), \
+        f"组 split 经 a→split 可达，不应报孤立：{warnings}"
+
+
+def test_parallel_group_dead_end_detected():
+    """⑥：parallel 组完成后无 $end 出口且组 routes 指向死胡同 → 报死胡同。
+
+    split.branches=[b,c] 都 routes→b（无 $end 出口的环）→ b/c 死胡同；
+    split.routes 也指向 b（死胡同）→ split 死胡同；a→split 死胡同。
+    """
+    wf = _wf(
+        [
+            _agent("a", routes=[{"to": "split"}]),
+            _agent("b", routes=[{"to": "b"}]),  # 自环无 $end
+            _agent("c", routes=[{"to": "b"}]),
+        ],
+        parallel=[{
+            "name": "split", "branches": ["b", "c"], "routes": [{"to": "b"}],
+        }],
+    )
+    errs = _errors(wf)
+    assert any("$end" in e for e in errs)
+
+
+def test_parallel_group_orphan_is_warning():
+    """⑥：parallel 组从 entry 不可达 → warning（不阻止）。"""
+    wf = _wf(
+        [_agent("a", routes=[{"to": "$end"}]),
+         _agent("b", routes=[{"to": "$end"}]), _agent("c", routes=[{"to": "$end"}])],
+        parallel=[{"name": "orphan_group", "branches": ["b", "c"], "routes": [{"to": "$end"}]}],
+    )
+    warnings = validate_workflow(wf)
+    assert any("orphan_group" in w and "parallel 组" in w for w in warnings)

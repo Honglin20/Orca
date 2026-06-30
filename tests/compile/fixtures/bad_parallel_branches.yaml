@@ -1,0 +1,20 @@
+# ⑩ parallel 组 branch 引用不存在的 node
+name: bad_parallel_branches
+entry: a
+nodes:
+  - name: a
+    kind: agent
+    prompt: pa
+    routes: [{to: split}]
+  - name: b
+    kind: agent
+    prompt: pb
+    routes: [{to: "$end"}]
+  - name: c
+    kind: agent
+    prompt: pc
+    routes: [{to: "$end"}]
+parallel:
+  - name: split
+    branches: [b, ghost]      # ghost 不存在
+    routes: [{to: "$end"}]

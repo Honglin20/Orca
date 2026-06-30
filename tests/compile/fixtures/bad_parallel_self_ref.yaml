@@ -1,0 +1,20 @@
+# ⑩ parallel 组 route 自引用（指向自己 → 死锁）
+name: bad_parallel_self_ref
+entry: a
+nodes:
+  - name: a
+    kind: agent
+    prompt: pa
+    routes: [{to: split}]
+  - name: b
+    kind: agent
+    prompt: pb
+    routes: [{to: "$end"}]
+  - name: c
+    kind: agent
+    prompt: pc
+    routes: [{to: "$end"}]
+parallel:
+  - name: split
+    branches: [b, c]
+    routes: [{to: split}]    # 自引用

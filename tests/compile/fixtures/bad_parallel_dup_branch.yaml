@@ -1,0 +1,16 @@
+# ⑩ parallel 组 branches 重复（同一 node 出现两次）
+name: bad_parallel_dup_branch
+entry: a
+nodes:
+  - name: a
+    kind: agent
+    prompt: pa
+    routes: [{to: split}]
+  - name: b
+    kind: agent
+    prompt: pb
+    routes: [{to: "$end"}]
+parallel:
+  - name: split
+    branches: [b, b]         # b 重复
+    routes: [{to: "$end"}]

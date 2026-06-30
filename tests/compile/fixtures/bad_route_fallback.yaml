@@ -1,0 +1,15 @@
+# ⑪ 兜底 route（when=None）不是最后一条 → 其后 route 永远不可达（死代码）
+name: bad_route_fallback
+entry: a
+nodes:
+  - name: a
+    kind: agent
+    prompt: pa
+    routes:
+      - to: b                  # 无 when=兜底，但排在最前
+      - when: "output.x == 1"
+        to: $end
+  - name: b
+    kind: agent
+    prompt: pb
+    routes: [{to: "$end"}]

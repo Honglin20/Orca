@@ -1,11 +1,15 @@
 """workflow.py —— 工作流静态结构定义（纯数据，零执行逻辑）。
 
-回答「跑什么？」：Workflow / Node（基类 + 4 个 kind）/ Route / InputDef。
+回答「跑什么？」：Workflow / Node（基类 + 4 个 kind）/ Route / InputDef / ParallelGroup。
+
+控制流模型（phase 5 单轨化）：**routes 单指针** + **parallel 组显式并行**。
+- routes（node 与 parallel 组的出边）：first-match-wins，每步只去一个 target。
+- parallel 组（顶层独立列表）：branches 并行 asyncio.gather，全部完成后按组 routes 推进。
 
 铁律：本模块只有 pydantic 模型，无解析、无校验、无持久化。
 - YAML→Workflow 在 compile/ 阶段做
-- name 全局唯一 / entry 存在 / after·routes 引用合法 / DAG 无环 等「结构校验」也在 compile/ 层
-  （见 SPEC §2.4：schema 层只定义字段，compile/ 层校验）
+- name 全局唯一 / entry 存在 / routes 引用合法 / parallel 组校验 / 死锁检测 等「结构校验」
+  也在 compile/ 层（见 SPEC §2.4：schema 层只定义字段，compile/ 层校验）
 - 模板渲染、输出摘取在 exec/ 阶段做
 """
 
@@ -39,13 +43,15 @@ class Node(BaseModel):
 
     `name` 在 schema 层可选：顶层 node 的「非空 + 全局唯一」由 compile/ 层强制
     （SPEC §2.4），foreach 的内嵌 `body` 模板本就无名（SPEC §6.3）。
+
+    控制流只由 ``routes`` 表达（单指针 first-match-wins）；静态依赖双轨已在
+    phase 5 单轨化迁移中废除。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     name: str = ""  # 唯一标识；可选，compile/ 层强制顶层非空唯一
-    after: list[str] = []  # 静态依赖（默认空 = 入口候选）
-    routes: list[Route] = []  # 条件路由（first-match-wins）
+    routes: list[Route] = []  # 条件路由（first-match-wins）；唯一控制流
 
 
 class AgentNode(Node):
@@ -117,6 +123,27 @@ class ForeachNode(Node):
     failure_mode: Literal["fail_fast", "continue_on_error", "all_or_nothing"] = "fail_fast"
 
 
+class ParallelGroup(BaseModel):
+    """静态并行组（顶层独立列表项，Workflow.parallel 的元素）。
+
+    branches 是已知 node 名列表（必须在 nodes 里定义），全部并行执行，
+    等全部完成后（asyncio.gather）按 routes 推进单指针。
+
+    用于表达 DAG 分叉+合并（diamond）：某 node 的 route.to 指向 parallel 组名，
+    组的 branches 并行跑完后，组的 route 推进单指针。
+
+    name 与 node 名共享命名空间（全局唯一，compile/ 层强制）；entry 不能指向
+    parallel 组（entry 必须是 node）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str  # 组名（全局唯一，与 node 名共享命名空间）
+    branches: list[str]  # 并行分支的 node 名（≥2，必须在 nodes 中已定义）
+    failure_mode: Literal["fail_fast", "continue_on_error", "all_or_nothing"] = "fail_fast"
+    routes: list[Route] = []  # 组完成后路由（同 node.routes 语义）
+
+
 # 顶层 node 判别联合：按 kind 字段分派到具体子类。
 # 与 ForeachBody 对照：这里包含全部 4 个 kind（顶层 DAG），body 仅允许 agent/script。
 AnnotatedNode = Annotated[
@@ -128,15 +155,18 @@ AnnotatedNode = Annotated[
 class Workflow(BaseModel):
     """工作流定义（顶层结构）。
 
-    entry 为唯一显式入口；nodes 为判别联合；outputs 为最终输出映射。
-    所有结构合法性（entry 存在、name 唯一、引用合法、无环）由 compile/ 层校验。
+    entry 为唯一显式入口（必须是 node 名，不能是 parallel 组名）；nodes 为判别联合；
+    parallel 为静态并行组独立列表（表达 DAG 分叉+合并）；outputs 为最终输出映射。
+    所有结构合法性（entry 存在且非组、name 唯一含组名、routes 引用合法、parallel 组
+    结构、死锁检测）由 compile/ 层校验。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     name: str
     description: str = ""
-    entry: str  # 起始 node 名（显式，唯一入口）
+    entry: str  # 起始 node 名（显式，唯一入口；不能是 parallel 组）
     inputs: dict[str, InputDef] = {}  # 工作流输入声明（可选）
     nodes: list[AnnotatedNode]  # 所有节点（discriminated union）
+    parallel: list[ParallelGroup] = []  # 静态并行组（顶层独立列表）
     outputs: dict[str, str] = {}  # 最终输出映射 {key: "{{ node.output.field }}"}

@@ -9,10 +9,11 @@ nodes:
       type: object
       properties: {candidates: {type: array, items: {type: string}}}
       required: [candidates]
+    routes:
+      - to: assessor
 
   - name: assessor
     kind: foreach
-    after: [finder]
     source: finder.output.candidates   # 运行时取数组
     item_var: candidate
     max_concurrent: 3
@@ -20,8 +21,11 @@ nodes:
       kind: agent
       prompt: "评估这个结构：{{ candidate }}"
     failure_mode: continue_on_error
+    routes:
+      - to: picker
 
   - name: picker
     kind: agent
-    after: [assessor]
     prompt: "从评估结果选最佳：{{ assessor.output.outputs }}"
+    routes:
+      - to: $end

@@ -21,7 +21,7 @@
 ### 1. orca/schema/workflow.py
 - `Workflow`：name / description / entry / inputs / nodes / outputs
 - `InputDef`：type / required / default / description
-- `Node`（基类）：name / after / routes
+- `Node`（基类）：name / routes（phase 5 单轨化：去 after）
 - `Route`：when / to
 - `AgentNode`：prompt / tools / executor / model / output_schema
 - `ScriptNode`：command / parse_json / timeout

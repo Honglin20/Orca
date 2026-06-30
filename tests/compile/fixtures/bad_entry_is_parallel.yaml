@@ -1,0 +1,16 @@
+# ⑬ entry 指向 parallel 组（entry 必须是 node）
+name: bad_entry_is_parallel
+entry: split
+nodes:
+  - name: a
+    kind: agent
+    prompt: pa
+    routes: [{to: "$end"}]
+  - name: b
+    kind: agent
+    prompt: pb
+    routes: [{to: "$end"}]
+parallel:
+  - name: split
+    branches: [a, b]
+    routes: [{to: "$end"}]

@@ -16,6 +16,7 @@ from orca.schema import (
     ForeachNode,
     InputDef,
     Node,
+    ParallelGroup,
     Route,
     ScriptNode,
     SetNode,
@@ -277,8 +278,89 @@ def test_batch_assess_yaml_deep_parse():
 
 
 def test_parallel_research_yaml_deep_parse():
-    """E2E：静态并行 after 汇聚被解析。"""
+    """E2E：parallel 组（diamond 汇聚）被解析为顶层独立列表。
+
+    注意：researcher_a 既是 entry 又在 researchers_merge.branches 里——这是有意为之。
+    运行时 parallel 组幂等执行（已执行的 branch 跳过，SPEC §4.4），不会跑两次；
+    静态校验只判可达性（a→组→synthesizer→$end），不重复执行归 5-R。
+    """
     wf = _load_example("parallel_research")
+    # parallel 组作为顶层独立列表存在
+    assert len(wf.parallel) == 1
+    group = wf.parallel[0]
+    assert isinstance(group, ParallelGroup)
+    assert group.name == "researchers_merge"
+    assert group.branches == ["researcher_a", "researcher_b"]
+    assert group.failure_mode == "continue_on_error"
+    # 组完成后路由到 synthesizer
+    assert [r.to for r in group.routes] == ["synthesizer"]
+    # researcher_a 作为 entry，完成后路由到 parallel 组（route.to 指向组名合法）
     by_name = {n.name: n for n in wf.nodes}
-    assert by_name["synthesizer"].after == ["researcher_a", "researcher_b"]
-    assert by_name["researcher_a"].after == []  # 入口候选
+    assert [r.to for r in by_name["researcher_a"].routes] == ["researchers_merge"]
+
+
+# ── phase 5 单轨化：after 字段删除 + ParallelGroup + Workflow.parallel ────────
+
+
+def test_node_has_no_after():
+    """after 字段已删除（phase 5 单轨化迁移）。"""
+    n = AgentNode(name="a", prompt="p", routes=[{"to": "$end"}])
+    assert not hasattr(n, "after")
+
+
+def test_parallel_group_basic():
+    g = ParallelGroup(name="g", branches=["a", "b"])
+    assert g.name == "g"
+    assert g.branches == ["a", "b"]
+    assert g.failure_mode == "fail_fast"  # 默认
+    assert g.routes == []
+
+
+def test_parallel_group_failure_mode_literal():
+    """failure_mode 是 Literal，非法值被拒（fail loud）。"""
+    with pytest.raises(ValidationError):
+        ParallelGroup(name="g", branches=["a"], failure_mode="invalid")
+
+
+def test_parallel_group_extra_forbid():
+    with pytest.raises(ValidationError):
+        ParallelGroup(name="g", branches=["a", "b"], bogus=1)
+
+
+def test_parallel_group_routes_required_field_is_to():
+    """组的 route 同样要求 to 字段（Route schema）。"""
+    g = ParallelGroup(name="g", branches=["a", "b"], routes=[{"to": "$end"}])
+    assert g.routes[0].to == "$end"
+
+
+def test_workflow_parallel_default_empty():
+    """Workflow.parallel 默认空列表。"""
+    wf = Workflow(
+        name="w", entry="a", nodes=[AgentNode(name="a", prompt="p", routes=[{"to": "$end"}])]
+    )
+    assert wf.parallel == []
+
+
+def test_workflow_accepts_parallel_via_dict():
+    """YAML→dict→Workflow 路径上 parallel 列表被解析为 ParallelGroup。"""
+    wf = Workflow(
+        name="w",
+        entry="a",
+        nodes=[
+            {"name": "a", "kind": "agent", "prompt": "p", "routes": [{"to": "split"}]},
+            {"name": "b", "kind": "agent", "prompt": "p", "routes": [{"to": "$end"}]},
+            {"name": "c", "kind": "agent", "prompt": "p", "routes": [{"to": "$end"}]},
+        ],
+        parallel=[{"name": "split", "branches": ["b", "c"], "routes": [{"to": "$end"}]}],
+    )
+    assert len(wf.parallel) == 1
+    assert isinstance(wf.parallel[0], ParallelGroup)
+    assert wf.parallel[0].branches == ["b", "c"]
+
+
+def test_node_extra_forbid_rejects_after():
+    """after 字段已删除 → YAML 里写 after 应被 extra=forbid 拒（fail loud）。"""
+    with pytest.raises(ValidationError):
+        Workflow(
+            name="w", entry="a", nodes=[{"name": "a", "kind": "agent", "after": ["b"]}]
+        )

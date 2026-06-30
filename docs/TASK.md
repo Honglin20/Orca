@@ -21,7 +21,7 @@
 ```
 ①描述 →  model    （纯数据：Workflow/Node/Event）
 ②结构 →  compile  （YAML → DAG，纯解析零运行时）
-③执行 →  run      （编排：拓扑/并行/路由，后端无关）
+③执行 →  run      （编排：单指针推进/parallel 组/路由，后端无关）
 ③'执行 → exec     （执行：claude/ccr/codex，可扩展）
 ④事件 →  events   （EventBus + tape，唯一真相源）
 ⑤交互 →  gates    （暂停+决策：human/interrupt，作为 extension）
@@ -304,7 +304,7 @@ LangGraph 全部、pydantic-ai 全部、双 store/4 replay、node_factory 巨石
 ### 🎯 关键路径（phase 5-7：端到端可用）
 
 - **phase 5**：run/（编排层）
-  - Orchestrator（拓扑序 / 并行 asyncio.gather / foreach 分批 / 循环控制）
+  - Orchestrator（单指针推进 / parallel 组并行 asyncio.gather / foreach 分批 / 循环控制）
   - Router（Jinja2 first-match-wins，确定性条件）
   - EventBus 写 tape（每个事件 emit 后 append）
   - 验证：`orca run nas.yaml` 端到端跑完整 workflow，事件全部入 tape

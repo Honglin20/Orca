@@ -49,20 +49,26 @@ load_workflow(path):
 |---|---|---|---|
 | ① | name 非空 + 全局唯一 | 收集顶层 name；空 → error；计数>1 → error | 「空」/「重复」 |
 | ② | entry 存在 | `wf.entry in names` | 「entry」「不存在」 |
-| ③ | after 引用有效 | 每个 after 项 ∈ names | 「after」「不存在」 |
-| ④ | routes[].to 有效 | ∈ names ∪ {"$end"} | 「route」「不存在」 |
-| ⑤ | after 静态边无环 | Kahn 拓扑（仅 after 边）；剩余节点→有环；再 DFS 取一条环路径拼消息 | 「环」+ 路径 `a → b → a` |
-| ⑥ | entry 可达终态 | 见 §5 图模型 | 「死胡同」/「$end」 |
+| ③ | ~~after 引用有效~~ | ~~每个 after 项 ∈ names~~ | **phase 5 单轨化已废**（after 字段删除） |
+| ④ | routes[].to 有效 | ∈ names ∪ {"$end"}（phase 5 扩展含 parallel 组名；node 与组两侧） | 「route」「不存在」 |
+| ⑤ | ~~after 静态边无环~~ | ~~原 Kahn 算法~~ | **phase 5 单轨化已废**（routes 回指是合法循环，死锁改运行时） |
+| ⑥ | entry 可达终态 | 见 §5 图模型（phase 5：routes 前向边 + parallel 组展开） | 「死胡同」/「$end」 |
 | ⑦ | Jinja2 浅校验 | `meta.find_undeclared_variables`，按字段类型判合法 root（见 §6） | 「引用」「不存在」/ warning「未声明 input」 |
 | ⑧ | foreach.source node 存在 | 拆 `.`，首段 ∈ names | 「source」「不存在」 |
 
-## 5. 图模型（⑤ 环检测 + ⑥ 可达性）
+> phase 5 单轨化新增：⑩ parallel 组结构、⑪ 兜底 route 位置、⑬ entry 非 parallel 组。详见 [phase-5-run SPEC](../specs/phase-5-run.md) §2.2。
+
+## 5. 图模型（~~⑤ 环检测~~ phase 5 已废 + ⑥ 可达性）
+
+> phase 5 单轨化：废除 after 反向边与 ⑤ 静态环检测（原 Kahn 算法）。
+> ⑥ 可达性改为沿 routes 前向边（route.to 指向 parallel 组时展开为组 branches）
+> + 不动点算法，详见 [phase-5-run SPEC](../specs/phase-5-run.md) §2.2⑥。
 
 **前向边**（控制流）：
 - route 边：`N → r.to`（`r.to != "$end"`）
-- after 反向边：`X.after ∋ N` ⇒ `N → X`
+- ~~after 反向边~~（phase 5 废）
 
-**⑤ 环检测**：仅 after 边（route 是条件边、回指合法，不参与）。Kahn：对 `A→X (A∈X.after)` 构图算入度，拓扑排序后若有剩余节点 ⇒ 有环；DFS 在剩余子图取一条环写进消息。
+**⑤ 环检测**：**phase 5 单轨化已废**——routes 回指是合法循环，死锁改运行时检测，不再做静态环校验。
 
 **⑥ 可达性（裁决 A，见 §7）**：
 - `terminal(N)` = `N` 有 `to="$end"` 的 route **或** `N.routes` 为空（**无 route = 隐式终态**）。
@@ -106,9 +112,9 @@ SPEC §4⑦ 字面列「prompt / when / outputs」（举例口吻）；但 schem
 - pydantic 结构错 → ConfigurationError（包装）；YAML 语法错 → yaml.YAMLError 透传
 - ConfigurationError.errors / .warnings 结构
 
-`tests/compile/test_validator.py`（直接调 `validate_workflow`，8 项各正/反例）：
-- ① name 空 / 重复 ② entry 不存在 ③ after 引用不存在 ④ route.to 不存在
-- ⑤ after 环（含环路径消息）+ route 回指不算环（合法循环）
+`tests/compile/test_validator.py`（直接调 `validate_workflow`，9 项各正/反例）：
+- ① name 空 / 重复 ② entry 不存在 ⑬ entry 指向 parallel 组 ④ route.to 不存在（node+组两侧）
+- ~~⑤ after 环~~（phase 5 废）+ route 回指不算死胡同（合法循环）
 - ⑥ entry 死胡同（error）+ 孤立节点（warning）+ 隐式终态（无 route 通过）
 - ⑦ 引用不存在 node（error）+ 未声明 input（warning）+ foreach body 的 item_var 合法 + when 的 output 合法
 - ⑧ foreach.source 引用不存在 node（error）

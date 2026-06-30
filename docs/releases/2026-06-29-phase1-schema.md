@@ -50,7 +50,7 @@
 
 🔴 必须
 1. **SPEC 文档笔误**：EventType 实为 21 个（§3.2 Literal 代码块为准），修正 §7.3/§8/§10 四处 prose 的「25」→「21」（纯文档修复）。
-2. **E2E 测试太浅**：原 `test_example_yaml_parses` 只断言 name/entry/len(nodes)。新增 `test_nas_yaml_deep_parse` / `test_batch_assess_yaml_deep_parse` / `test_parallel_research_yaml_deep_parse`，真正证明分派正确性（evaluator→ScriptNode，无名 foreach body→AgentNode）+ inputs/outputs/after/foreach 专属字段被解析。
+2. **E2E 测试太浅**：原 `test_example_yaml_parses` 只断言 name/entry/len(nodes)。新增 `test_nas_yaml_deep_parse` / `test_batch_assess_yaml_deep_parse` / `test_parallel_research_yaml_deep_parse`，真正证明分派正确性（evaluator→ScriptNode，无名 foreach body→AgentNode）+ inputs/outputs/foreach 专属字段被解析。（phase 5 单轨化后，parallel_research 深解析改断言 `wf.parallel` 组结构，不再断言 after。）
 
 🟡 建议
 3. **extra=forbid 走 dict 路径**：新增 `test_extra_forbid_via_dict_path`，覆盖 YAML→dict→Workflow 真实失败模式（非仅直接构造子类）。

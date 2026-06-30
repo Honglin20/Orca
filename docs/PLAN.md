@@ -43,7 +43,7 @@ workflow.py / event.py / state.py，纯 pydantic 模型，43 测试绿。
 SPEC：[`specs/phase-1-schema.md`](specs/phase-1-schema.md)
 
 ### Phase 2 ✅ compile/
-**做什么**：YAML 文件 → 校验过的 Workflow model。两层校验：① pydantic 结构（phase 1 已做）② 语义校验（name 唯一/entry 存在/引用有效/after 无环/可达/Jinja2 引用）。
+**做什么**：YAML 文件 → 校验过的 Workflow model。两层校验：① pydantic 结构（phase 1 已做）② 语义校验（name 唯一/entry 存在/引用有效/parallel 组结构/兜底 route 位置/可达/Jinja2 引用）。
 **对外接口极简**：`load_workflow(path) -> Workflow` 一个函数（用户/LLM 只需知道这个）。内部校验要全（errors 收集 + warnings）。
 **验证**：nas.yaml 解析通过；错误 YAML 被拒且错误信息精确。103 测试全绿（schema 50 不回归 + compile 53）。
 SPEC：[`specs/phase-2-compile.md`](specs/phase-2-compile.md)
@@ -59,7 +59,7 @@ SPEC：[`specs/phase-2-compile.md`](specs/phase-2-compile.md)
 **验证**：单个 AgentNode 能跑，stdout 流出 agent_message/agent_tool_call/agent_usage 事件。
 
 ### Phase 5 ⬜ run/
-**做什么**：Orchestrator（拓扑排序 + 并行 asyncio.gather + foreach 分批）+ Router（Jinja2 first-match-wins）。
+**做什么**：Orchestrator（单指针推进 + parallel 组并行 asyncio.gather + foreach 分批）+ Router（Jinja2 first-match-wins）。
 **不引入 LangGraph**。
 **验证**：`orca run nas.yaml` 跑完整 workflow，event 写进 tape，outputs 正确。
 

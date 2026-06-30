@@ -3,7 +3,7 @@
 覆盖 SPEC §6.7 / §6.8：
   - validate_workflow 追加 _check_profiles（第 ⑨ 项），issue 正确汇入 ValidationResult
   - capability error 阻止 workflow（随 ConfigurationError 抛出）；warning 不阻止
-  - 与 phase 2 的 8 项校验共存不回归（聚合一次报全）
+  - 与 phase 2 的结构校验共存不回归（聚合一次报全；含 ⑨ 共 9 项）
   - 端到端：ccr + output_schema 不报 error（prompt_injection 仍支持结构化输出）
 
 注：compile 单向依赖 profiles（``from orca.profiles import validate_workflow_profiles``）。
@@ -152,23 +152,22 @@ def test_ccr_with_output_schema_prompt_injection_not_error():
 def test_phase2_and_capability_errors_aggregate():
     """phase 2 结构错误 + capability 错误共存，一次报全（聚合，SPEC §6.7）。
 
-    验证：① 环（phase 2 ⑤）+ 未知 executor（⑨）同时出现时，两者都在 errors 里。
+    验证：⑥ 死胡同（phase 2 routes 环无 $end 出口）+ 未知 executor（⑨）同时出现时，
+    两者都在 errors 里。（迁移前用 after 环测，after 废除后改用 routes 死胡同。）
     """
     register(_profile("claude"))
     wf = _wf([
-        AgentNode(name="a", prompt="p", executor="ghost", after=["b"],
-                  routes=[{"to": "$end"}]),
-        AgentNode(name="b", prompt="p", executor="claude", after=["a"],
-                  routes=[{"to": "$end"}]),
+        AgentNode(name="a", prompt="p", executor="ghost", routes=[{"to": "b"}]),
+        AgentNode(name="b", prompt="p", executor="claude", routes=[{"to": "a"}]),
     ])
     errs = _errors(wf)
-    # 既有 phase 2 的环错误，也有 capability 的 unknown executor 错误
-    assert any("环" in e or "依赖" in e for e in errs), f"应含 phase 2 环错误：{errs}"
+    # 既有 phase 2 的死胡同错误（⑥），也有 capability 的 unknown executor 错误（⑨）
+    assert any("$end" in e or "死胡同" in e for e in errs), f"应含 phase 2 死胡同错误：{errs}"
     assert any("ghost" in e for e in errs), f"应含 capability 错误：{errs}"
 
 
 def test_phase2_checks_still_run():
-    """phase 2 的 8 项校验仍正常工作（_check_profiles 不影响它们，SPEC §6.7 不回归）。"""
+    """phase 2 的 9 项校验仍正常工作（_check_profiles 不影响它们，SPEC §6.7 不回归）。"""
     register(_profile("claude"))
     # entry 不存在（phase 2 ②）
     wf = _wf([

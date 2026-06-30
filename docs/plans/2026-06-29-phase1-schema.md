@@ -18,7 +18,7 @@
 ### 1. `orca/schema/workflow.py`
 - `InputDef`：type / required(=True) / default(=None) / description(="") —— `extra=forbid`
 - `Route`：when(str|None=None) / to(str) —— `extra=forbid`
-- `Node`（基类）：name / after(list[str]=[]) / routes(list[Route]=[]) —— `extra=forbid`
+- `Node`（基类）：name(str="") / routes(list[Route]=[]) —— `extra=forbid`（phase 5 单轨化后去 after；详见 [phase-5-run SPEC](../specs/phase-5-run.md) §2.1）
 - `AgentNode(Node)`：kind=Literal["agent"]="agent" / prompt(str|None=None) / tools(list[str]|None=None) / executor(str="claude") / model(str|None=None) / output_schema(dict|None=None)
 - `ScriptNode(Node)`：kind=Literal["script"] / command(str) / parse_json(bool=False) / timeout(float|None=None)
 - `SetNode(Node)`：kind=Literal["set"] / values(dict[str,str])

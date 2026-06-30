@@ -1,0 +1,26 @@
+# 正向用例：合法 parallel 组 + entry 经 parallel 组可达 $end（diamond）
+# a → split(parallel 组, branches=[b,c]) → 组 routes → d → $end
+# b、c 各自也有 $end 出口（隐式汇聚后由组 routes 推进到 d）
+name: parallel_reachable
+entry: a
+nodes:
+  - name: a
+    kind: agent
+    prompt: pa
+    routes: [{to: split}]
+  - name: b
+    kind: agent
+    prompt: pb
+    routes: [{to: "$end"}]
+  - name: c
+    kind: agent
+    prompt: pc
+    routes: [{to: "$end"}]
+  - name: d
+    kind: agent
+    prompt: pd
+    routes: [{to: "$end"}]
+parallel:
+  - name: split
+    branches: [b, c]
+    routes: [{to: d}]

@@ -1,0 +1,16 @@
+# ⑩ parallel 组 branches 长度 < 2（少于 2 不是并行）
+name: bad_parallel_too_few
+entry: a
+nodes:
+  - name: a
+    kind: agent
+    prompt: pa
+    routes: [{to: split}]
+  - name: b
+    kind: agent
+    prompt: pb
+    routes: [{to: "$end"}]
+parallel:
+  - name: split
+    branches: [b]            # 仅 1 个分支，不是并行
+    routes: [{to: "$end"}]
