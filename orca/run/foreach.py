@@ -49,6 +49,9 @@ async def run_foreach(
     # 1. 运行时求值 source（Jinja2 渲染 source 表达式 → 数组）
     arr = _eval_source_array(node.source, ctx)
 
+    # max(1, ...) 是 defense-in-depth：compile 层（validator._check_foreach_source）
+    # 已校验 max_concurrent >= 1，但程序化 API 直接构造 ForeachNode 喂 run_foreach 可
+    # 绕过 compile —— 此处兜底防止 Semaphore(0) 触发永久阻塞 RuntimeError。
     sem = asyncio.Semaphore(max(1, node.max_concurrent))
 
     async def run_one(idx: int, item: Any) -> Any:

@@ -106,21 +106,22 @@ def resolve_max_iter(wf: Workflow, inputs: dict, *, cli_override: int | None = N
 
     优先级：``--max-iter`` (cli_override) > ``inputs["iterations"]`` > yaml
     ``wf.inputs["iterations"].default`` > 全局兜底 100。
+
+    fail loud（铁律 4）：``inputs["iterations"]`` / yaml default 显式声明却**非法**
+    （非数字 / 无法 int 化）→ ``ValueError``（让上层 orchestrator 捕获 → workflow_failed），
+    不静默降级 —— 否则用户以为覆盖生效实际没用，是隐性 bug。
+    ``cli_override`` 由 argparse ``type=int`` 保证类型合法；programmatic API 传非法值
+    同样 raise（int() 自身会抛）。
     """
     if cli_override is not None:
         return int(cli_override)
     if "iterations" in inputs:
-        try:
-            return int(inputs["iterations"])
-        except (TypeError, ValueError):
-            # 类型错（如字符串非数字）→ fail loud 由上层；此处退化到下一优先级
-            pass
+        # 显式声明的 iterations 非法 → fail loud（不降级，否则用户感知不到覆盖失效）
+        return int(inputs["iterations"])
     declared = wf.inputs.get("iterations")
     if declared is not None and declared.default is not None:
-        try:
-            return int(declared.default)
-        except (TypeError, ValueError):
-            pass
+        # yaml default 非法 → 同样 fail loud（schema 已声明却给坏值，是配置错误）
+        return int(declared.default)
     return _DEFAULT_MAX_ITER
 
 

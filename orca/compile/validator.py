@@ -547,6 +547,9 @@ def _check_foreach_source(wf: Workflow, result: ValidationResult) -> None:
     """source 形如 ``finder.output.candidates`` 的 dotted 路径，首段必须是真实 node。
 
     不校验字段是否存在/是否数组（运行时归 run/，SPEC §4⑧）。
+
+    同时校验 ``max_concurrent >= 1``（编译期 fail loud，避免 run 层
+    ``asyncio.Semaphore(max(1, ...))`` 静默把 0 改成 1）。
     """
     names = _name_set(wf)
     for node in wf.nodes:
@@ -557,6 +560,11 @@ def _check_foreach_source(wf: Workflow, result: ValidationResult) -> None:
             result.add_error(
                 f"foreach 节点 '{node.name}' 的 source '{node.source}' "
                 f"引用了不存在的 node '{first}'"
+            )
+        if node.max_concurrent < 1:
+            result.add_error(
+                f"foreach 节点 '{node.name}' 的 max_concurrent={node.max_concurrent} "
+                "必须 >= 1（并发上限不能为 0 或负数）"
             )
 
 

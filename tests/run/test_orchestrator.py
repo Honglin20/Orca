@@ -496,3 +496,141 @@ def test_workflow_failed_carries_node_for_max_iter(tmp_path):
     _orch_run(orch)
     failed_ev = [e for e in orch.bus.tape.replay() if e.type == "workflow_failed"][0]
     assert failed_ev.data["node"] == "counter"  # 卡在 counter 回环
+
+
+# ── continue_on_error 部分失败的聚合经主循环透传到下游（intent 覆盖）────────────
+
+
+def test_parallel_continue_on_error_partial_failure_aggregation_visible_downstream(
+    tmp_path, monkeypatch,
+):
+    """parallel 组 ``continue_on_error`` + 一败一成 → 组不抛，下游 merger 能读聚合。
+
+    意图（覆盖 review gap）：验证「部分失败时聚合 dict（含 outputs/errors/count/succeeded）
+    真的进了 ``ctx.outputs[group]``，下游 node 可引用 ``group.output.outputs.x`` 与
+    ``group.output.errors.y``」。之前单测只验证 run_parallel_group 的返回 dict，
+    未覆盖经 orchestrator 累加后的跨节点引用 —— 这是 parallel 部分失败的核心契约。
+    """
+    from orca.exec.factory import make_executor as real_make_executor
+    from orca.schema import ParallelGroup
+
+    def fake_make_executor(node):
+        if node.name == "branch_a":
+            return FakeExecutor.produces({"v": "A"}, node_name=node.name)
+        if node.name == "branch_b":
+            return FakeExecutor.failing(error_type="ExecError", message="b 挂了", node_name=node.name)
+        return real_make_executor(node)
+
+    monkeypatch.setattr("orca.exec.factory.make_executor", fake_make_executor)
+
+    wf = Workflow(
+        name="par_partial",
+        entry="start",
+        nodes=[
+            SetNode(name="start", values={"go": "1"}, routes=[Route(to="split")]),
+            SetNode(name="branch_a", values={"v": "A"}, routes=[Route(to="$end")]),
+            SetNode(name="branch_b", values={"v": "B"}, routes=[Route(to="$end")]),
+            SetNode(
+                name="merger",
+                values={
+                    "ok": "{{ split.output.outputs.branch_a.v }}",
+                    "failed": "{{ split.output.errors.branch_b }}",
+                    "count": "{{ split.output.count }}",
+                    "succeeded": "{{ split.output.succeeded }}",
+                },
+                routes=[Route(to="$end")],
+            ),
+        ],
+        parallel=[
+            ParallelGroup(
+                name="split", branches=["branch_a", "branch_b"],
+                failure_mode="continue_on_error", routes=[Route(to="merger")],
+            ),
+        ],
+        outputs={
+            "ok": "{{ merger.output.ok }}",
+            "failed": "{{ merger.output.failed }}",
+            "count": "{{ merger.output.count }}",
+        },
+    )
+    orch = _orch(wf, tmp_path)
+    state = _orch_run(orch)
+    # continue_on_error + 部分成功 → 不抛 → workflow_completed
+    assert state.status == "completed"
+    completed_ev = [e for e in orch.bus.tape.replay() if e.type == "workflow_completed"][0]
+    outputs = completed_ev.data["outputs"]
+    assert outputs["ok"] == "A"          # 成功 branch 的值透传到下游
+    assert "b 挂了" in outputs["failed"]  # 失败 branch 的 error message 可见
+    assert outputs["count"] == "2"       # 聚合 count 透传
+
+
+def test_foreach_continue_on_error_partial_failure_aggregation_visible_downstream(
+    tmp_path, monkeypatch,
+):
+    """foreach ``continue_on_error`` + 部分失败 → 不抛，下游能读 count/succeeded/errors。
+
+    意图（覆盖 review gap）：验证「foreach 部分失败时聚合 dict 经 orchestrator 累加进
+    ``ctx.outputs[node]``，下游 node 可引用 ``node.output.count`` /
+    ``node.output.succeeded``」。之前单测只验证 run_foreach 的返回 dict。
+    """
+    from orca.exec.factory import make_executor as real_make_executor
+    from orca.schema import ForeachNode
+
+    def fake_make_executor(node):
+        if node.name == "worker":
+            # 第 0 / 2 个 item 成功，第 1 个失败 —— 用 ctx.locals._index 区分
+            class _ItemAware(FakeExecutor):
+                async def exec(self, n, ctx):
+                    if ctx.locals.get("_index") == 1:
+                        async for e in FakeExecutor.failing(
+                            error_type="ExecError", message="item1 挂了", node_name="worker",
+                        ).exec(n, ctx):
+                            yield e
+                        return
+                    async for e in FakeExecutor.produces(
+                        {"done": True}, node_name="worker",
+                    ).exec(n, ctx):
+                        yield e
+            return _ItemAware(
+                FakeExecutor.produces({"done": True}, node_name="worker")._events,
+                node_name="worker",
+            )
+        return real_make_executor(node)
+
+    monkeypatch.setattr("orca.exec.factory.make_executor", fake_make_executor)
+
+    wf = Workflow(
+        name="fe_partial",
+        entry="maker",
+        nodes=[
+            SetNode(name="maker", values={"items": "[0,1,2]"}, routes=[Route(to="processor")]),
+            ForeachNode(
+                name="processor",
+                source="maker.output.items",
+                item_var="item",
+                body=ScriptNode(name="worker", command="echo {{ item }}", routes=[]),
+                max_concurrent=2,
+                failure_mode="continue_on_error",
+                routes=[Route(to="reporter")],
+            ),
+            SetNode(
+                name="reporter",
+                values={
+                    "count": "{{ processor.output.count }}",
+                    "succeeded": "{{ processor.output.succeeded }}",
+                },
+                routes=[Route(to="$end")],
+            ),
+        ],
+        outputs={
+            "count": "{{ reporter.output.count }}",
+            "succeeded": "{{ reporter.output.succeeded }}",
+        },
+    )
+    orch = _orch(wf, tmp_path)
+    state = _orch_run(orch)
+    assert state.status == "completed"
+    completed_ev = [e for e in orch.bus.tape.replay() if e.type == "workflow_completed"][0]
+    outputs = completed_ev.data["outputs"]
+    assert outputs["count"] == "3"       # 总数 3
+    assert outputs["succeeded"] == "2"   # 2 成功（item 0 / 2），1 失败（item 1）

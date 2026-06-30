@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from orca.run.lifecycle import (
     _DEFAULT_MAX_ITER,
     gen_run_id,
@@ -137,3 +139,35 @@ def test_resolve_max_iter_global_fallback():
 
 def test_resolve_max_iter_default_is_100():
     assert _DEFAULT_MAX_ITER == 100
+
+
+# ── resolve_max_iter fail loud（非法值不静默降级，铁律 4）────────────────────
+
+
+def test_resolve_max_iter_illegal_inputs_iterations_raises():
+    """``inputs["iterations"]`` 显式声明却非法（非数字）→ ValueError（不降级到 yaml default）。
+
+    意图：用户传 ``-i iterations=abc`` 期待覆盖生效；若静默降级到 yaml default / 100，
+    用户感知不到覆盖失效 —— 是隐性 bug。fail loud（铁律 4）。
+    """
+    wf = _wf(inputs={"iterations": InputDef(type="int", default=50)})
+    with pytest.raises(ValueError):
+        resolve_max_iter(wf, {"iterations": "abc"})
+
+
+def test_resolve_max_iter_illegal_yaml_default_raises():
+    """yaml ``inputs.iterations.default`` 非法 → ValueError（schema 声明却给坏值，是配置错误）。
+
+    意图：yaml 作者把 default 写成 ``default: "lots"`` 是配置错误，应在解析期暴露而非
+    静默退化到 100 让 workflow 跑飞。
+    """
+    wf = _wf(inputs={"iterations": InputDef(type="int", default="lots")})
+    with pytest.raises(ValueError):
+        resolve_max_iter(wf, {})
+
+
+def test_resolve_max_iter_cli_override_non_int_raises():
+    """programmatic API 传非 int cli_override → int() 自身 raise（不静默吞）。"""
+    wf = _wf(inputs={})
+    with pytest.raises((ValueError, TypeError)):
+        resolve_max_iter(wf, {}, cli_override="fast")  # type: ignore[arg-type]

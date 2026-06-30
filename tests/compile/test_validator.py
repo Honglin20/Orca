@@ -290,6 +290,42 @@ def test_foreach_source_existing_node_ok():
     validate_workflow(wf)
 
 
+def test_foreach_max_concurrent_zero_rejected():
+    """max_concurrent < 1 → 编译期 error（run 层 ``Semaphore(max(1, ...))`` 不再静默改写）。
+
+    意图：用户写 ``max_concurrent: 0`` 是误配置（并发上限无意义），应在编译期 fail loud
+    而非被 run 层静默改成 1（用户感知不到配置失效）。
+    """
+    wf = _wf([
+        _agent("f", routes=[{"to": "fe"}]),
+        {
+            "name": "fe", "kind": "foreach",
+            "source": "f.output.items",
+            "max_concurrent": 0,
+            "body": {"kind": "agent", "prompt": "x"},
+            "routes": [{"to": "$end"}],
+        },
+    ], entry="f")
+    errs = _errors(wf)
+    assert any("max_concurrent" in e and "0" in e for e in errs)
+
+
+def test_foreach_max_concurrent_negative_rejected():
+    """负数 max_concurrent 同样拒绝。"""
+    wf = _wf([
+        _agent("f", routes=[{"to": "fe"}]),
+        {
+            "name": "fe", "kind": "foreach",
+            "source": "f.output.items",
+            "max_concurrent": -3,
+            "body": {"kind": "agent", "prompt": "x"},
+            "routes": [{"to": "$end"}],
+        },
+    ], entry="f")
+    errs = _errors(wf)
+    assert any("max_concurrent" in e for e in errs)
+
+
 # ── errors 聚合（SPEC §6.4）──
 
 

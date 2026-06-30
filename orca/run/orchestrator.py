@@ -92,6 +92,11 @@ class Orchestrator:
             task=task,
         )
         self.task = task
+        # resolve_max_iter 在 __init__ 调用（run() 之前）：非法 iterations（如 "abc"）
+        # 会 raise ValueError → 异常直透调用方，**不发 workflow_failed**（语义：配置错误
+        # 属启动前置条件不满足，workflow 未真正开始；类比 argparse type=int 解析失败 exit）。
+        # 运行期四类错误（ExecError/RouteError/MaxIterations/GroupFailure）才进 run() 的
+        # except 链 → workflow_failed（SPEC §3.4 / 铁律 4）。
         self.max_iter = resolve_max_iter(wf, merged_inputs, cli_override=max_iter)
 
         # 索引：node 名 → node；parallel 组名 → ParallelGroup
