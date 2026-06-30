@@ -21,7 +21,14 @@ dependencies = [
     "jsonschema>=4.0",
     "fastapi>=0.138.2",
     "httpx>=0.28.1",
+    "textual>=8.2.8",
+    "typer>=0.26.8",
+    "uvicorn>=0.49.0",
 ]
+
+[project.scripts]
+# CLI 入口（phase 7 SPEC §5.2）：``orca run/validate/list``。
+orca = "orca.iface.cli.commands:main"
 
 [dependency-groups]
 # 仅开发/测试期依赖（uv sync 自动安装）。

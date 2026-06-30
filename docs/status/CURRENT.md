@@ -7,28 +7,32 @@
 
 ## 当前任务
 
-**无活跃任务** —— 阶段 6（gates/ HMIL 层）已完成。
+**无活跃任务** —— 阶段 7（iface/cli CLI 壳）已完成。
 
-- **状态**：✅ 已完成（478 测试全绿：442 基线 + 36 净增，零回归；5 条铁律全过；hook 桥 4 路径安全语义有测试）
-- **release note**：[`docs/releases/2026-06-30-phase6-gates.md`](../releases/2026-06-30-phase6-gates.md)
+- **状态**：✅ 已完成（557 测试全绿 = 478 phase 1-6 + 79 phase 7 净增，零回归；5 条铁律
+  grep 验证全过；`orca --help` 显示 run/validate/list）
+- **里程碑**：🎉 **Orca 已是可用 CLI 工具**（单 backend + 单 shell + 完整 user journey）
+- **release note**：[`docs/releases/2026-06-30-phase7-cli.md`](../releases/2026-06-30-phase7-cli.md)
 - **CHANGELOG**：[`docs/status/CHANGELOG.md`](CHANGELOG.md)
 
 ## 下一步（待启动新 session）
 
-阶段 7：CLI 壳（Textual TUI + 同步 input() gate UX）。
-参考 [`docs/specs/phase-7-cli.md`](../specs/phase-7-cli.md) +
-[`docs/specs/shells-design-draft.md`](../specs/shells-design-draft.md)（三壳共同契约 §3 CLI 决策）。
+阶段 9：Web 壳（FastAPI + WebSocket + React+Vite+ReactFlow+Zustand SPA）。
+参考 [`docs/specs/phase-9-web.md`](../specs/phase-9-web.md) +
+[`docs/specs/shells-design-draft.md`](../specs/shells-design-draft.md) §4。
 
-phase 6 提供给 phase 7 的契约：
-- `HumanGateHandler`（`from orca.gates import HumanGateHandler`）：CLI 壳订阅
-  `human_decision_requested` 事件渲染 ModalScreen，用户答后调
-  `handler.resolve(gate_id, answer, "cli")`。
-- gate 事件流经 EventBus（`subscribe()` → 渲染；`human_decision_resolved` → 自动 dismiss ModalScreen）。
-- `HumanGate`（`from orca.gates import HumanGate`）：source 字段驱动渲染分支
-  （tool_permission=权限弹窗 / agent_ask=问答弹窗）。
+phase 7 提供给 phase 9 的契约：
+- CLI 壳验证了「壳订阅事件流 + gate 走 handler.resolve」范式，Web 壳照搬（渲染层换 React）。
+- `_GateHttpBridge` 的双线程隔离模式：web server 是单进程 uvicorn（同引擎事件循环），
+  比 CLI 更简单（不需 TUI loop 隔离），但 `register_gate_routes` + `HumanGateHandler` +
+  `SessionContextRegistry` 共享对象的模式直接复用。
+- GateModal 的 source 分支渲染（tool_permission/agent_ask）是 Web 弹窗的 UI 对照。
 
-## phase 6 遗留（非阻断，后续可优化）
+## phase 7 遗留（非阻断，后续可优化）
 
-- gate 持久化恢复（崩溃后未 resolved 的 gate 怎么办）—— SPEC §9 明确留后，phase 6 gate 写
-  tape 但崩溃恢复语义未实现。
-- 三壳并发真跑竞速的端到端测试归 phase 7+9 集成（phase 6 单壳能 resolve 即可）。
+- `_GateHttpBridge` 优雅退出有 1 条 gc RuntimeWarning（broadcaster task 在 loop close 时
+  未完全 await 完）——非致命、可见（fail loud 满足），多线程 asyncio loop 生命周期清理
+  的已知边缘，可后续用 lifespan shutdown hook 进一步收敛。
+- parallel 组进度（`DagTree.set_group_progress`）已实现且有单测，但 `_dispatch_to_widgets`
+  未接 reducer 事件（无 foreach/parallel 进度事件驱动入口）——后续 phase 补 reducer
+  事件接线即可。
