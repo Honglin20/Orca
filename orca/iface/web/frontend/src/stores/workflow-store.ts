@@ -38,6 +38,12 @@ export interface WorkflowState {
   nodes: Record<string, NodeState>;
   /** 派生：当前 gate（human_decision_requested 设，resolved 清）。null 表示无活跃 gate。 */
   gate: GateState | null;
+  /**
+   * 派生：最近一次抢答/已答信息（human_decision_resolved 设）。用于 ResolvedToast
+   * 显示「已被 [source] 答」——三通道竞速广播（SPEC §1.5）。null = 尚无已解决 gate。
+   * 注：本字段是「最近一次」快照而非真相源（真相在 tape），仅驱动 toast 短暂显示。
+   */
+  lastResolved: { by: string; answer: string } | null;
   workflowName: string;
   status: WorkflowStatus; // workflow 级；"idle" = 未加载任何 run（前端派生态）
   cost: number; // 派生：累计 cost_usd（agent_usage fold）
@@ -97,6 +103,7 @@ type Handler = (
 type ImmerDraft = {
   nodes: Record<string, NodeState>;
   gate: GateState | null;
+  lastResolved: { by: string; answer: string } | null;
   workflowName: string;
   status: WorkflowStatus;
   cost: number;
@@ -203,8 +210,14 @@ const eventHandlers: Record<string, Handler> = {
           : undefined,
     };
   },
-  human_decision_resolved: (s) => {
+  human_decision_resolved: (s, d) => {
+    // 三通道竞速广播（SPEC §1.5）：收到 resolved → 清 gate + 记 lastResolved
+    // （驱动 ResolvedToast「已被 [source] 答：[answer]」，2s 后 toast 自清）。
     s.gate = null; // 清（无论赢家；幂等）
+    s.lastResolved = {
+      by: String(d.resolved_by ?? ""),
+      answer: String(d.answer ?? ""),
+    };
   },
 
   // ── 自定义（9d chart/table 渲染读 events；fold 无派生）──
@@ -244,6 +257,7 @@ export const useWorkflowStore = create<WorkflowState>()(
     events: [],
     nodes: {},
     gate: null,
+    lastResolved: null,
     workflowName: "",
     status: "idle",
     cost: 0,

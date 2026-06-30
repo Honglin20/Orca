@@ -20,6 +20,7 @@ import { WorkflowGraph } from "@/components/graph/WorkflowGraph";
 import { NodeDetail } from "@/components/detail/NodeDetail";
 import { LogStream } from "@/components/detail/LogStream";
 import { ReplayBar } from "@/components/layout/ReplayBar";
+import { ChartRenderer } from "@/components/chart/ChartRenderer";
 
 type Tab = "dag" | "log" | "output" | "yaml";
 
@@ -104,13 +105,12 @@ export function RunDetailPage() {
               </button>
             ))}
           </div>
-          <div className="flex-1 overflow-hidden">
+          <div className="flex-1 overflow-auto">
             {tab === "dag" && <WorkflowGraph />}
             {tab === "log" && <LogStream />}
             {tab === "output" && (
-              <div className="p-4 text-sm text-slate-500">
-                Output 视图 —— phase 9d 实现。
-              </div>
+              // phase 9d：Output 视图 = 所有节点的图表（nodeId undefined 取全部，SPEC §2.6 Output Panel）。
+              <ChartRenderer />
             )}
             {tab === "yaml" && (
               <div className="p-4 text-sm text-slate-500">

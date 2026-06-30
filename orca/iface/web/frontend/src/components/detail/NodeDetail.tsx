@@ -6,6 +6,7 @@
 import { useMemo } from "react";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import { formatLogLine } from "./LogStream";
+import { ChartRenderer } from "@/components/chart/ChartRenderer";
 
 export function NodeDetail() {
   const selectedNode = useWorkflowStore((s) => s.selectedNode);
@@ -80,6 +81,11 @@ export function NodeDetail() {
             ))}
           </ul>
         )}
+        {/* phase 9d：该节点的图表（SPEC §2.6）。chart 是事件（铁律 4），从 store.events filter。 */}
+        <div className="mt-4 border-t border-slate-200 pt-3">
+          <h4 className="mb-2 text-xs uppercase text-slate-500">图表</h4>
+          <ChartRenderer nodeId={selectedNode} />
+        </div>
       </div>
     </div>
   );

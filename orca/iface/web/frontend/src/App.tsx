@@ -11,6 +11,7 @@ import { StatusBar } from "@/components/layout/StatusBar";
 import { RunsListPage } from "@/components/pages/RunsListPage";
 import { NewRunPage } from "@/components/pages/NewRunPage";
 import { RunDetailPage } from "@/components/pages/RunDetailPage";
+import { GateDialog } from "@/components/gate/GateDialog";
 
 function Layout({ children }: { children: React.ReactNode }) {
   return (
@@ -21,6 +22,9 @@ function Layout({ children }: { children: React.ReactNode }) {
         <main className="flex-1 overflow-hidden bg-slate-50">{children}</main>
       </div>
       <StatusBar />
+      {/* GateDialog 挂在 app 根（SPEC §1.2）：gate 激活时覆盖任何页面（fixed inset-0）。
+          gate 状态全读 store.gate（铁律 1），不存本地状态。 */}
+      <GateDialog />
     </div>
   );
 }
