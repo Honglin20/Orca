@@ -1,0 +1,241 @@
+"""executor.py —— ClaudeExecutor（claude -p 子进程路线，SPEC §4.3）。
+
+回答「怎么 spawn claude、翻译它的流、产出 Orca 事件流？」：CLIRunner（通用子进程）+
+profile.translator（claude 协议，profiles 层）+ extract_and_validate（结构化提取）。
+
+执行流程（SPEC §4.3）：
+  1. ``session_id = uuid4().hex``（入口生成，全程复用，铁律 5）
+  2. ``yield node_started``
+  3. ``prompt = render_prompt(node, ctx)``
+  4. ``cfg = _build_spawn_config(node, profile, prompt)``（argv 动态拼：--model /
+     --allowed-tools / --append-system-prompt；flags 来自 profile）
+  5. ``on_result`` 钩子收集 result 文本 / usage / cost（CLIRunner 检测 result 行时回调）
+  6. ``runner = CLIRunner(cfg, on_result)``
+  7. ``async for line in runner.stream(): for ev in profile.translator(line, session_id): yield ev``
+  8. 有序互斥判定（SPEC §2.4）：timed_out → exit_code!=0 → result.is_error → 无 result
+     → 各自 raise ExecError
+  9. ``output = extract_and_validate(result_text, node.output_schema)``（SPEC §2.7）
+  10. ``yield agent_usage``（若 on_result 收到 usage，补一个汇总——translator 已发过，
+      但 executor 视角的 node_completed.data 也带 usage，供 orchestrator 聚合）
+  11. ``yield node_completed(node, session_id, {output, elapsed, usage?})``
+  12. ``except ExecError: yield node_failed + error``（fail loud，铁律 4）
+
+argv 构造（SPEC §2.1，重写不迁移）：
+  - flags 来自 ``profile.flags``（``-p --output-format stream-json ...``）
+  - ``--model <m>``：仅当 ``node.model`` 显式指定
+  - ``--allowed-tools "<t1 t2 ...>"``：仅当 ``node.tools`` 非 None（None=全开，不传该 flag）；
+    **单 flag + 空格 join**（非 variadic，SPEC §2.1）
+  - ``--append-system-prompt "<agent md>"``：仅当加载了 agents/<name>.md（本阶段 prompt
+    内联或 md 内容统一进 stdin，不拆 system-prompt；保留接口位）
+
+错误映射（SPEC §6 / §2.4 有序互斥）：见 ``orca/exec/error.py``。
+
+依赖单向：本模块依赖 ``orca.exec.{interface,context,error,render,runner}`` +
+``orca.exec.claude.result_extractor`` + ``orca.schema`` + ``orca.profiles``（profile 类型）；
+不依赖 events.bus/run/compile。
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import time
+import uuid
+from collections.abc import AsyncIterator
+from typing import Any
+
+from orca.exec.claude.result_extractor import extract_and_validate
+from orca.exec.context import RunContext
+from orca.exec.error import ExecError
+from orca.exec.interface import Executor
+from orca.exec.render import render_prompt
+from orca.exec.runner import CLIRunner, SpawnConfig
+from orca.profiles.base import CliProfile
+from orca.schema import AgentNode, Event
+
+logger = logging.getLogger(__name__)
+
+
+class ClaudeExecutor(Executor):
+    """claude -p 子进程路线的 executor（SPEC §4.3）。
+
+    持有一个 ``CliProfile``（描述如何 spawn / 解析 claude）。profile.translator 是纯函数
+    （profiles 层），executor 调它把 stream-json 行翻译成 Event。
+    """
+
+    def __init__(self, profile: CliProfile) -> None:
+        self.profile = profile
+
+    async def exec(self, node: AgentNode, ctx: RunContext) -> AsyncIterator[Event]:
+        """执行 agent node，产出完整生命周期事件流（SPEC §4.3）。
+
+        见模块 docstring 的 12 步流程。失败路径 emit ``node_failed`` + ``error``（fail loud）。
+        """
+        # 决策 2 / 铁律 5：session_id 入口生成，全程复用；seq=0 占位由 orchestrator 重分配。
+        session_id = uuid.uuid4().hex
+
+        def _ev(event_type: str, data: dict[str, Any], *, n: str | None = None) -> Event:
+            return Event(
+                seq=0,  # 占位：executor 不写 tape，phase 5 tape.append 重分配全局 seq（决策 2）
+                type=event_type,  # type: ignore[arg-type]
+                timestamp=time.time(),
+                node=n if n is not None else node.name,
+                session_id=session_id,
+                data=data,
+            )
+
+        # 1-2. node_started
+        yield _ev("node_started", {"executor": self.profile.name, "kind": "agent"})
+
+        try:
+            # 3. 渲染 prompt（render_prompt：内联或 agents/<name>.md，Jinja2 ctx）
+            prompt = render_prompt(node, ctx)
+
+            # 4. 构造 spawn config（argv 动态拼 + env overlay）
+            cfg = _build_spawn_config(node, self.profile, prompt)
+
+            # 5. on_result 钩子收集 result 文本 / usage / cost
+            result_holder: dict[str, Any] = {
+                "result_text": None,
+                "usage": None,
+                "cost": 0.0,
+                "is_error": False,
+            }
+
+            def on_result(raw_result: str, usage: dict, cost: float, is_error: bool) -> None:
+                result_holder["result_text"] = raw_result
+                result_holder["usage"] = usage
+                result_holder["cost"] = cost
+                result_holder["is_error"] = is_error
+
+            # 6-7. CLIRunner 跑子进程，逐行喂 translator
+            runner = CLIRunner(cfg, on_result=on_result)
+            async for line in runner.stream():
+                for ev in self.profile.translator(line, session_id):
+                    # translator 是纯函数，只设 session_id（SPEC §3.2）；node 字段由 executor
+                    # 富化（SPEC §4.2「所有事件顶层带 node + session_id」）。translator 不知
+                    # node 名（纯函数无 ctx），故此处补 node=node.name。
+                    yield ev.model_copy(update={"node": node.name})
+
+            # 8. 有序互斥判定（SPEC §2.4）：timed_out → exit_code → is_error → no_result
+            if runner.timed_out:
+                raise ExecError(
+                    phase="timeout",
+                    message=(
+                        f"claude 子进程超时（timeout={cfg.timeout}s，elapsed="
+                        f"{runner.elapsed:.1f}s）；stderr 末尾：{runner.stderr[-300:]}"
+                    ),
+                )
+            if runner.exit_code != 0:
+                raise ExecError(
+                    phase="spawn",
+                    message=(
+                        f"claude 子进程非零退出（exit_code={runner.exit_code}）；"
+                        f"stderr 末尾：{runner.stderr[-500:]}"
+                    ),
+                )
+            # result.is_error=true（SPEC §2.4 第 3 项 / §6 phase=stream）：claude 自己报错
+            # （如 API error）。on_result 透传 is_error，executor 据此走 stream 错误路径。
+            if result_holder["is_error"]:
+                raise ExecError(
+                    phase="stream",
+                    message=(
+                        f"claude 流报错（result.is_error=true）："
+                        f"{result_holder['result_text']!s}[:500]"
+                    ),
+                )
+            if result_holder["result_text"] is None:
+                raise ExecError(
+                    phase="result_parse",
+                    message=(
+                        f"claude exit 0 但流里无 result 事件（result_text 缺失）；"
+                        f"stderr 末尾：{runner.stderr[-300:]}"
+                    ),
+                )
+
+            # 9. 结构化提取（SPEC §2.7）
+            output = extract_and_validate(result_holder["result_text"], node.output_schema)
+
+            # 10-11. node_completed（带 output / elapsed / usage?）
+            completed_data: dict[str, Any] = {
+                "output": output,
+                "elapsed": runner.elapsed,
+            }
+            if result_holder["usage"] is not None:
+                completed_data["usage"] = _normalize_usage(
+                    result_holder["usage"], result_holder["cost"]
+                )
+            yield _ev("node_completed", completed_data)
+
+        except ExecError as e:
+            # 12. fail loud：node_failed + error 双发（SPEC §6 / 铁律 4）
+            err_data = {
+                "error_type": e.error_type,
+                "message": e.message,
+                "phase": e.phase,
+            }
+            yield _ev("node_failed", err_data)
+            yield _ev("error", err_data)
+
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+
+def _build_spawn_config(
+    node: AgentNode, profile: CliProfile, prompt: str
+) -> SpawnConfig:
+    """按 SPEC §2.1 拼动态 argv + env overlay。
+
+    - ``--model <m>``：仅当 ``node.model`` 显式指定（None 不传）
+    - ``--allowed-tools "<t1 t2 ...>"``：仅当 ``node.tools`` 非 None（None=全开）；
+      单 flag + 空格 join（非 variadic）
+    - ``--append-system-prompt``：本阶段 prompt 统一进 stdin（不拆 system-prompt）；保留接口位
+    - env overlay：profile 声明的前缀（claude = ANTHROPIC_ / CLAUDE_）对应 os.environ 子集
+    """
+    extra_args: list[str] = []
+    if node.model is not None:
+        extra_args.extend(["--model", node.model])
+    if node.tools is not None:
+        # SPEC §2.1：单 flag + 空格 join（非 variadic，variadic 会吞位置参数）
+        extra_args.extend(["--allowed-tools", " ".join(node.tools)])
+    # mcp_flag_args 本阶段为空（MCP 配置归 phase 9，SPEC §5）
+
+    env_overlay = _build_env_overlay(profile.env_overlay_prefixes)
+    cli_path = profile.resolve_cli_path()  # env > default，运行时读（SPEC §2.6）
+
+    return SpawnConfig(
+        cli_path=cli_path,
+        flags=profile.flags,
+        extra_args=extra_args,
+        mcp_flag_args=[],
+        prompt=prompt,
+        prompt_channel=profile.prompt_channel,
+        env_overlay=env_overlay,
+        timeout=None,  # 本阶段不做单 node 超时（retry/interrupt 归 phase 5，SPEC §5）
+    )
+
+
+def _build_env_overlay(prefixes: tuple[str, ...]) -> dict[str, str]:
+    """从 os.environ 取前缀匹配的 env 变量，作为子进程 overlay（SPEC §2.6）。
+
+    profile.env_overlay_prefixes（claude = ("ANTHROPIC_", "CLAUDE_")）声明的前缀对应
+    的环境变量透传给 claude 子进程（如 ANTHROPIC_API_KEY）。
+    """
+    overlay: dict[str, str] = {}
+    for key, value in os.environ.items():
+        if any(key.startswith(prefix) for prefix in prefixes):
+            overlay[key] = value
+    return overlay
+
+
+def _normalize_usage(usage: dict, cost: float) -> dict[str, Any]:
+    """把 claude result.usage 归一成 agent_usage 的 payload（SPEC §3.3）。
+
+    cache_tokens = usage.cache_read_input_tokens；cost_usd = 顶层 total_cost_usd。
+    """
+    return {
+        "input_tokens": usage.get("input_tokens", 0),
+        "output_tokens": usage.get("output_tokens", 0),
+        "cache_tokens": usage.get("cache_read_input_tokens", 0),
+        "cost_usd": cost,
+    }

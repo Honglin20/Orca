@@ -1,0 +1,61 @@
+"""error.py —— ExecError（含 phase / error_type / message）+ 错误→事件映射辅助。
+
+回答「executor 失败时怎么 fail loud？」：所有失败路径 raise ``ExecError(phase=...)``，
+executor 捕获后 emit ``node_failed`` + ``error`` 双事件（SPEC §6 / 铁律 4）。
+
+phase 取值（SPEC §6 错误映射表，有序互斥判定 §2.4）：
+  - ``timeout``       → ``ExecTimeout``        ``proc.wait()`` 超时
+  - ``spawn``         → ``CliExitNonZero``     exit_code != 0
+  - ``stream``        → ``ClaudeStreamError``  result.is_error == true
+  - ``result_parse``  → ``NoResultEvent``      exit 0 但无 result 事件
+  - ``schema``        → ``SchemaValidationError`` 结构化提取 / schema 校验失败
+  - ``render``        → ``RenderError``        Jinja2 渲染失败
+
+``json_decode`` 是例外（非 fail loud）：claude 偶发非 JSON 心跳行，debug log + 跳过，
+不进入此错误体系。
+"""
+
+from __future__ import annotations
+
+
+class ExecError(Exception):
+    """executor 失败的统一异常（SPEC §6）。
+
+    携带三类诊断维度：
+      - ``phase``：错误阶段（6 选 1，见模块 docstring），驱动 ``error_type`` 映射。
+      - ``error_type``：机器可读的错误类别（``phase_to_error_type`` 派生）。
+      - ``message``：人读错误描述。
+
+    executor 捕获后 emit ``node_failed``（给状态机）+ ``error``（给诊断）双事件。
+    """
+
+    def __init__(self, phase: str, message: str, error_type: str | None = None) -> None:
+        self.phase = phase
+        self.message = message
+        # error_type 默认由 phase 派生；显式传入可覆盖（如 stream 附 api_error_status）。
+        self.error_type = error_type if error_type is not None else phase_to_error_type(phase)
+        super().__init__(f"[{self.phase}] {self.message}")
+
+
+# phase → error_type 映射表（SPEC §6）。新增 phase 在此补一行即可（OCP 局部扩展）。
+_PHASE_TO_ERROR_TYPE: dict[str, str] = {
+    "timeout": "ExecTimeout",
+    "spawn": "CliExitNonZero",
+    "stream": "ClaudeStreamError",
+    "result_parse": "NoResultEvent",
+    "schema": "SchemaValidationError",
+    "render": "RenderError",
+}
+
+
+def phase_to_error_type(phase: str) -> str:
+    """phase → error_type 映射（SPEC §6）。
+
+    未知 phase 抛 ``ValueError``（fail loud：映射表漏补是 bug，不应静默兜底）。
+    """
+    try:
+        return _PHASE_TO_ERROR_TYPE[phase]
+    except KeyError:
+        raise ValueError(
+            f"未知 error phase {phase!r}（合法：{sorted(_PHASE_TO_ERROR_TYPE)}）"
+        ) from None

@@ -12,10 +12,13 @@ license = { text = "MIT" }
 authors = [{ name = "mozzielol" }]
 # schema 仍零依赖（仅 pydantic）；compile/ 是运行时翻译层，读 YAML + 解析 jinja2 meta，
 # 故 pyyaml / jinja2 进运行时依赖（非仅测试）。schema 本身不 import 它们，零依赖铁律不变。
+# jsonschema：exec/ 的 result_extractor 用它做结构化输出校验（SPEC phase-4 §2.7），
+# 进运行时依赖（ClaudeExecutor 跑时即用，非仅测试）。
 dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "jinja2>=3.0",
+    "jsonschema>=4.0",
 ]
 
 [dependency-groups]
@@ -30,3 +33,8 @@ packages = ["orca"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+    # integration：真 spawn claude 的烟雾测试。CI 默认不跑（-m "not integration"）；
+    # 本地 ``pytest -m integration`` 可选跑（需 claude CLI + API key）。SPEC §7.10 / §12。
+    "integration: 真 spawn claude 的集成测试（慢 / 需 API key，CI skip）",
+]

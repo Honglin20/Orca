@@ -23,7 +23,7 @@ EventType = Literal[
     # ── node 生命周期（顶层 node + session_id 标识本次调用；attempt 派生）──
     "node_started",  # 本次调用开始（顶层 node + session_id 标识）
     "node_completed",  # data: {elapsed, output}
-    "node_failed",  # data: {error_type, message}
+    "node_failed",  # data: {error_type, message, phase}（phase 见 exec/error.py 6 类）
     "node_skipped",  # data: {reason}
     # ── agent 流式（claude stream-json 翻译产出；均带 session_id）──
     "agent_message",  # data: {text}
