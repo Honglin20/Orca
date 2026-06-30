@@ -1,7 +1,7 @@
 # Release Note —— 阶段 6：gates/ HMIL 层
 
 > **日期**：2026-07-01
-> **commit**：`<待回填>`
+> **commit**：`2edcefc`
 > **SPEC**：[`docs/specs/phase-6-gates.md`](../specs/phase-6-gates.md)
 > **计划**：[`docs/plans/2026-06-30-phase6-gates.md`](../plans/2026-06-30-phase6-gates.md)
 > **前置**：phase 5（Orchestrator + EventBus）
