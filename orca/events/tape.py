@@ -203,16 +203,18 @@ class Tape:
     def __del__(self) -> None:
         """GC 兜未显式 close 时兜底关闭写句柄（leak 安全网）。
 
-        生产路径由 ``EventBus.close`` → ``Tape.close`` 显式关闭（run 终态后必跑）。
-        本方法仅兜底那些**忘记显式 close** 的调用方（典型为只读 inspect / 测试构造）——
-        与 Python 内建 ``open()`` 对象自带的 ``__del__`` 兜关行为一致。不抛、不静默吞
-        已记录的运行错误（``append`` 失败仍 fail loud 在 emit 侧）；仅保证不留未关闭句柄。
+        生产路径由 ``EventBus.close`` → ``Tape.close`` 显式关闭（run 终态后必跑）。本方法
+        仅兜底**忘记显式 close** 的调用方（典型为只读 inspect / 测试构造里零散的 _bus
+        helper）——与 Python 内建 ``open()`` 对象自带的 dealloc 兜关行为一致。不抛（GC 期间
+        抛异常会被吞并打 ``Exception ignored`` 噪声）。只读 Tape（``_fh is None``）无句柄
+        可关，静默跳过。**不在 dealloc 时 emit warning**：GC 时机不确定，warning 会被
+        归因到当时正跑的任意测试（误报噪声），反而掩盖真实来源——故用惰性打开（root cause）
+        + 测试侧显式 close（见 tests/run/conftest.py make_bus 自动 close fixture）保 fail loud。
         """
         try:
             if not self._closed and self._fh is not None:
                 self._fh.close()
         except Exception:
-            # __del__ 绝不能抛（GC 期间抛异常会被吞并打 ``Exception ignored`` 噪声，噪声更大）
             pass
 
     # ── resume / 初始化内部 ───────────────────────────────────────────────────

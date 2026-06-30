@@ -20,6 +20,10 @@ from orca.exec.context import RunContext
 from orca.exec.interface import Executor
 from orca.schema import Event
 
+# make_bus 创建的 Tape 登记于此；autouse fixture 在每个测试后显式 close（fail loud：
+# 不依赖 GC 兜底，避免 ResourceWarning 噪声 + 让「未关闭」立即可见）。
+_TRACKED_TAPES: list[Tape] = []
+
 
 def run_async(coro):
     """统一 asyncio.run（无 pytest-asyncio）。"""
@@ -29,6 +33,7 @@ def run_async(coro):
 def make_bus(tmp_path: Path, run_id: str = "r1") -> tuple[EventBus, Tape]:
     """构造 (EventBus, Tape) pair（Tape 写 tmp_path，不污染 cwd）。"""
     tape = Tape(tmp_path / "events.jsonl", run_id=run_id)
+    _TRACKED_TAPES.append(tape)
     return EventBus(tape), tape
 
 
@@ -107,3 +112,16 @@ def _reset_profiles_registry():
     _reset_for_test()
     yield
     _reset_for_test()
+
+
+@pytest.fixture(autouse=True)
+def _close_tracked_tapes():
+    """每个 run 测试后显式关闭 make_bus 创建的 Tape（幂等，重复 close 安全）。
+
+    让「Tape 未关闭」在测试侧就解决，不依赖 Tape.__del__ 的 GC 兜底（那会产生
+    ResourceWarning 噪声）。run_workflow 路径自己已 close，这里对未走的单测补齐。
+    """
+    yield
+    for tape in _TRACKED_TAPES:
+        tape.close()
+    _TRACKED_TAPES.clear()
