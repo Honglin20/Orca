@@ -1,9 +1,17 @@
-# 入口壳设计草稿（CLI / Web / MCP）
+# 入口壳设计（CLI / Web / MCP）
 
-> **状态**：草稿（design draft）—— 进入 phase 7 / 9 / 10 **前必读**，读完再写对应阶段的完整 SPEC。
-> **依据**：[TASK.md](../TASK.md) §3 §4 + 2026-06-30 生态调研讨论（CC 协议约束 / HandleId pattern / 竞品对照）。
+> **状态**：定稿（2026-06-30 收敛）—— 进入 phase 7 / 9 / 10 **前必读**，读完再写对应阶段的完整 SPEC。
+> **依据**：[TASK.md](../TASK.md) §3 §4 + 2026-06-30 生态调研（CC 协议约束 / HandleId pattern / 竞品对照 / Conductor 前端范式 / TUI 框架选型）。
 > **范围**：三壳的形态、共同契约、关键技术约束、端到端 user journey。
-> **不是**：最终 SPEC。接口签名 / 数据契约 / 验收标准由对应 phase 的 SPEC 文档落实（如 `phase-7-cli.md`、`phase-9-web.md`、`phase-10-mcp.md`），本草稿只给设计骨架 + 决策依据。
+> **不是**：最终 SPEC。接口签名 / 数据契约 / 验收标准由对应 phase 的 SPEC 文档落实（如 `phase-7-cli.md`、`phase-9-web.md`、`phase-10-mcp.md`），本设计只给设计骨架 + 决策依据。
+
+> **2026-06-30 定稿收敛的决策**（替换原草稿的开放项）：
+> 1. **三通道竞速取消语义 = 广播**（详见 §6.3，已锁定）。
+> 2. **hook HTTP 桥 = 安全优先，超时/不可达即拒绝**（详见 phase-6 SPEC §hook）。
+> 3. **CLI 壳技术栈 = Textual**（不是 Rich Live，详见 §3，gate prompt 是硬约束）。
+> 4. **Web 壳技术栈 = React+Vite+ReactFlow+Zustand**（Conductor 实际验证，详见 §4）。
+> 5. **tape replay = 单路径 fold（apply_event），不是双路径**（详见 §4.3 + phase-3 SPEC §6.0 铁律 3）。
+> 6. **唯一真相源铁律**：tape 是唯一真相，三壳无自己的业务真相，UI 只是真相的推送（详见 §4.3）。
 
 ---
 
@@ -82,32 +90,62 @@ class HumanGateHandler:
 
 ## 3. CLI 壳（phase 7）
 
-### 3.1 形态
+### 3.1 技术栈决策：Textual（不是 Rich Live）
 
+**决策**：CLI 壳用 **Textual**（基于 Rich 的完整 app 框架），不是 Rich Live。
+
+**理由（2026-06-30 调研，硬证据）**：CLI 壳需求三件套——①DAG 节点状态面板 ②实时滚动日志流 ③**阻塞式 gate prompt**。Rich Live 能做 ①②，但 **③是 Rich 的硬限制**：Rich 官方确认 Live 渲染期间无法接收输入（[Discussion #1791](https://github.com/Textualize/rich/discussions/1791)）。Textual 的 `ModalScreen` + `push_screen_wait` 原生支持「DAG 在跑 + 中央弹出 gate 模态 + 阻塞等答案 + 背景不冻结」，正好覆盖三件套。同作者（Will McGugan），Textual 基于 Rich，渲染同样漂亮。
+
+### 3.2 布局（融合 claude agent view + Dagger + lazygit）
+
+**主屏（DAG 在跑）**：
 ```
-$ orca run workflows/deploy.yaml --inputs env=staging
-═══════════════════════════════════════════════════════
-  Orca · run deploy-20260630-abc123
-─────────────────────────────────────────────────────────
-  ▆▆▆▆▆▆▆▆░░░░░░░░  node 3/5  evaluator (running)
-
-  [plan] agent_message   正在分析部署计划...
-  [plan] agent_tool_call Read("deploy.yaml")
-  [plan] agent_tool_result ...
-
-  ⏸  GATE: 批准部署到 staging 吗？ [y/N]:
-═══════════════════════════════════════════════════════
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ Orca Run #42 · nas · sonnet · 3/7 nodes · ⏸ 2 awaiting gate                   │ Header
+├────────────────┬─────────────────────────────────────────────────────────────┤
+│ DAG OUTLINE    │ ACTIVE NODE: research                                        │
+│ (左侧 Tree)     │ ───────────────────────────────────────────                  │
+│ ✓ fetch        │ ┃ researcher_a  ✽ working 12s  [claude]                      │
+│ ✓ parse        │ │  ⠋ searching "rich layout"                                 │
+│ ◐ research     │ ┃ researcher_b  ✽ working 12s  [claude]                      │
+│ ⏸ review       │ │  ✓ found 8 results                                          │
+│ ○ test         │ ◐ parallel group: 1/2 done                                   │
+│ ○ deploy       ├─────────────────────────────────────────────────────────────┤
+│                │ LOG STREAM (RichLog 自动滚动)                                │
+│ ⏸=blocked ✽=run│ 14:02:11 [r_a] tool: WebSearch("rich …")                    │
+│ ✓=done ○=wait  │ 14:02:12 [r_a] → 8 results                                  │
+├────────────────┴─────────────────────────────────────────────────────────────┤
+│ > <派发新任务 / ! shell / g 跳到 gate>           ↑↓选 Space peek Enter attach │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.2 设计要点
+**Gate 触发时（ModalScreen 覆盖中央，DAG 继续跑）**：
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ Orca Run #42 · ... · ⏸ 2 awaiting gate                            ░░░░░░░░░░ │
+├────────────────┬────────────────────────────────────░──────────────────────┤
+│ ⏸ review       │                     ░ ┌──────────────────────────────┐  │
+│                │  LOG STREAM ...     ░ │  🔒 GATE: review               │  │
+│                │  14:02:20 [review]  ░ │  Claude wants to run:         │  │
+│                │  needs input       ░ │  Bash("rm -rf node_modules")  │  │
+│                │                     ░ │   [批准]  [拒绝]  [编辑]      │  │
+├────────────────┴─────────────────────░─└──────────────────────────────╝─┤
+│ > ...                                                  ░░░░░░░░░░░░░░░░░░ │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
 
-- **gate = 同步阻塞 `input()`**：HumanGateHandler.request() 在 CLI 壳里直接 `Rich.Prompt.ask(...)` 阻塞当前协程，用户回车后 `resolve()`。
-- **事件流渲染**：Rich Live region 滚动渲染 agent_message/tool_call/tool_result；DAG 进度条单独面板。
+布局来源：Header/awaiting 计数（仿 claude agent view tab 标题）+ 左侧 DAG Tree 状态图标（仿 agent view 行状态）+ 右上 Active Node 行摘要 + 并行子 agent 进度列（仿 Dagger）+ 右下 RichLog + 底部 input/footer（仿 lazygit 三段式）+ Gate ModalScreen。
+
+### 3.3 设计要点
+
+- **gate = ModalScreen**：HumanGateHandler.request() 在 CLI 壳里 `await push_screen_wait(GateModal)` 阻塞当前 worker，用户答后 `resolve()`。DAG/日志继续刷新（Textual 决定性优势）。
+- **编排主流程 = `@work` 协程**：pipeline 写成顺序代码，到 gate 节点 `await push_screen_wait`，UI 全程不冻结。
+- **事件流渲染**：左侧 DAG Tree 状态编码 + 右下 RichLog 滚动渲染 agent_message/tool_call/tool_result。
 - **退出语义**：workflow 终态（completed/failed）后 CLI 退出，exit code 反映成功失败。
 - **tape 同步落盘**：每个事件 emit 后 tape append（phase 3 已实现），CLI 退出时 tape 已完整。
 - **HMIL 三通道竞速**：CLI 壳参与（用户在终端答）。
 
-### 3.3 边界
+### 3.4 边界
 
 - ❌ 不做时间旅行 replay（CLI 是一次性，要看历史走 Web）。
 - ❌ 不做多 run 并发（CLI 一次只跑一个 workflow；多 run 走 Web）。
@@ -116,39 +154,86 @@ $ orca run workflows/deploy.yaml --inputs env=staging
 
 ## 4. Web 壳（phase 9）
 
-### 4.1 形态
+### 4.1 技术栈决策：React + Vite + ReactFlow + Zustand（2026-06-30 定稿）
+
+**决策**：Web 壳后端 **FastAPI + uvicorn**（单进程同引擎 asyncio 循环），前端 **React 19 + Vite + ReactFlow（DAG 渲染）+ dagre（自动布局）+ Zustand（单 store）+ Tailwind**，图表用 **recharts**（render_chart）。
+
+**理由（2026-06-30 调研 Conductor 实际实现）**：
+1. **Conductor 实际用的就是这套**（不是它过时 design.md 说的「单 HTML+Cytoscape」）——ReactFlow+dagre 是 DAG 可视化成熟方案，Conductor 还解决了回环边反向喂图的难题（直接抄）。
+2. **Zustand 单 store + eventHandlers 表**就是事件溯源前端范式，契合唯一真相源（§4.3）。
+3. **后端单进程 uvicorn**（同引擎事件循环），零 IPC、零序列化开销（Conductor 设计决策 D4，验证过）。
+4. **图表库 recharts**：轻量，React 生态最简单，做 render_chart。
+
+> Go/Rust 后端对 Orca **无参考价值**——单个编排器事件量小（几百到几千），Python asyncio 足够；用 Go/Rust 要重写 exec/CLIRunner + 跨语言 IPC + 失去 Python 生态。Orca 全栈 Python + 前端 React 独立是正确选择。
+
+### 4.2 形态
 
 浏览器打开 `http://localhost:7428`：
 
 ```
-┌──────────────┬───────────────────────────┬──────────────┐
-│ Runs         │ ┌─── DAG Preview ─────┐   │ Log Stream   │
-│ • deploy-abc │ │  plan → evaluator   │   │ agent_msg... │
-│ • review-def │ │  ↓                   │   │ tool_call... │
-│              │ │  deploy ⏸ (gate)    │   │              │
-│              │ └──────────────────────┘   │              │
-│              │                            │              │
-│              │ ┌─── Gate 弹窗 ──────┐    │              │
-│              │ │ 批准部署到 staging? │    │              │
-│              │ │ [Yes] [No] [Edit]  │    │              │
-│              │ └────────────────────┘    │              │
-└──────────────┴───────────────────────────┴──────────────┘
+┌──────────────┬────────────────────────────────────┬──────────────┐
+│ Runs         │ ┌─── DAG Preview (ReactFlow) ───┐ │ Log Stream   │
+│ • deploy-abc │ │   plan → evaluator → deploy    │ │ agent_msg... │
+│ • review-def │ │   ⏸ deploy (gate)              │ │ tool_call... │
+│ (history)    │ └────────────────────────────────┘ │              │
+│              │ ┌─── Replay Bar (历史 run) ──────┐ │              │
+│              │ │ ◄ ▶ ████░░░░░░ Event 12/47  5x│ │              │
+│              │ └────────────────────────────────┘ │              │
+│              │ ┌─── Gate 弹窗 ──────┐            │              │
+│              │ │ 批准部署到 staging? │            │              │
+│              │ │ [Yes] [No] [Edit]  │            │              │
+│              │ └────────────────────┘            │              │
+│              │ ┌─── Chart (render_chart) ──────┐ │              │
+│              │ │ ▆▆▆ token cost over nodes     │ │              │
+│              │ └────────────────────────────────┘ │              │
+└──────────────┴────────────────────────────────────┴──────────────┘
 ```
 
-### 4.2 设计要点
+### 4.3 唯一真相源铁律（2026-06-30 定稿，最重要）
 
-- **FastAPI + WebSocket 单通道**（学 Conductor web/server.py）：所有事件 / gate / 决策走一条 WS。
-- **单 store + 单 reducer**（routeEvent，从 AgentHarness 迁移 + 简化）——**根治 AgentHarness 多 store 投影分裂问题**（CLAUDE.md 项目背景）。
+**Tape 是唯一真相源。三壳无自己的业务真相，UI 只是真相的推送。** 这是根治 AgentHarness 多 store 投影分裂灾难的根本。
+
+**5 条具体铁律**（phase 9 SPEC 必须逐条验收）：
+1. **Tape 唯一真相**：所有 UI 状态都是 tape 的 fold 派生物（Conductor 验证：前端 handler 表，派生状态随时可重建）。
+2. **前端无业务真相**：前端只有事件 handler 表（fold）+ 临时 UI 交互态（selectedNode 等，不算业务真相）。
+3. **重连 = 全量重放**（Conductor 验证最简单正确）：WS 断了重连，`GET /api/state` 拿全量事件 replay，状态必然一致。
+4. **gate 状态写 tape**：requested/resolved 都是事件，三壳从同一份 tape 读。
+5. **WS 单通道**（反 AgentHarness 双 WS）：所有事件/gate/决策走一条 WS；反向通道同 WS 收 gate_response。
+
+### 4.4 tape replay UI（单路径，不是双路径）
+
+**tape replay = 时间旅行调试**：选历史 run → 拖时间轴 → 回到「第 N 个事件发生时」的状态看 DAG/输出。**它不是新路径，是同一个 fold 的两种数据注入时机**：
+
+- **live**：WS 实时推事件 → `apply_event` fold
+- **replay**：HTTP 拿历史事件，按时间戳推进 → `apply_event` fold
+- **fold 函数只有一份**（phase 3 `replay.py` 的 `apply_event`），live 和 replay 的状态计算永远一致。
+
+**这是避免 AgentHarness 双路径灾难的关键**：AgentHarness 用两套渲染代码（live 一套 + replay 一套）→ 漂移。Orca 用同一份 `apply_event`（phase 3 SPEC §6.0 铁律 3「一条读路径：streaming = replay = 同一个 apply_event」已锁定）。
+
+**性能优化（避免 Conductor 的缺点）**：Conductor 的 replay 每次拖滑块全量重置+全量重放，长 workflow 卡。Orca 用**增量 apply**（前进 apply N..M，后退 rollback）或 checkpoint 快照。phase 9 SPEC 落实。
+
+### 4.5 render_chart 接入（phase 9 独立 feature）
+
+**机制**：Claude 调 MCP 工具 `render_chart(spec)` → 产出 `custom` 事件（`data.kind="chart"`）→ 写 tape → 前端按 `data.kind` 分发渲染（recharts）。
+
+- schema 已支持：`custom` 事件 + `data.kind: "chart"|"table"|"image"|...`（phase 1 已定义）。
+- `render_chart` MCP 工具本身在 phase 10 MCP 壳实现；phase 9 Web 壳**只做前端渲染**（订阅 `custom` 事件，按 kind 分发到 recharts/表格/图片组件）。
+- **phase 9 验收**：能渲染一个测试用的 `custom(chart)` 事件（手动注入或 demo workflow 产出）。
+- render_chart 工具的完整实现（让 claude 能调）归 phase 10。
+
+### 4.6 设计要点
+
 - **gate UX 主战场**：弹窗可富（选项 / 自由文本 / 上下文 / 取消）。
-- **tape replay UI**（独有杀手锏）：选历史 run → 回放事件流（时间旅行调试），CLI/MCP 都没有。
 - **HMIL 三通道竞速**：Web 壳参与（用户在浏览器答）。
 - **多 run 并发**：server 模式天然支持。
 
-### 4.3 必须避免的反模式（来自 AgentHarness 教训）
+### 4.7 必须避免的反模式（来自 AgentHarness 教训）
 
 - ❌ 多 store（run store / event store / message store 各一份真相）。
 - ❌ 非幂等 reducer（同事件重放结果不一致）。
 - ❌ 多 sidecar（每个 store 配一个 sidecar 文件，多真相源漂移）。
+- ❌ 双 WS / 双激活管线。
+- ❌ live 和 replay 两套渲染代码。
 - → **单 tape 唯一真相源 + 幂等 reducer + 一条读路径**（CLAUDE.md 底线）。
 
 ---
@@ -315,11 +400,22 @@ class HumanGateHandler:
 | Web | 浏览器点按钮 → HTTP POST | HTTP handler → `human_gate_handler.resolve(...)` |
 | MCP | Claude 调 `resolve_gate` tool | MCP handler → `human_gate_handler.resolve(...)` |
 
-### 6.3 输家收到"已被答"信号
+### 6.3 竞速取消语义：广播（2026-06-30 定稿）
 
-- CLI：在 input() 返回前可能就被抢答——需要可中断的 prompt（Rich 支持 `asyncio` 集成）。
-- Web：弹窗自动关闭，显示"已被 [CLI/MCP] 答"。
-- MCP：`resolve_gate` 返回 `{ok: false, status: "...", _hint: "Gate already resolved by another shell"}`；同时 `get_task_status` 返回的 status 跳过 needs_decision 直接到 running/completed。
+**语义**：任一壳 resolve → gate 立即变 `resolved`，把答案**广播**给所有订阅该 gate 的壳。
+
+- **赢家**：`resolve()` 返回 `True`，gate 状态变 resolved，引擎 resume。
+- **其他壳（输家）**：通过订阅的 `human_decision_resolved` 事件收到广播（事件含 `gate_id, answer, source`）→ 各自关闭输入界面，显示「已被 [source] 答：[answer]」。
+- **晚到的输入**：在 resolved 之后到达 → `resolve()` 返回 `False`（已 resolved），输入**静默丢弃 + 记 warning**（fail loud：可见，但不冲突）。
+
+**为什么是广播而不是纯取消**（决策记录）：广播让所有壳**视觉上同步**——不会出现「Web 已答了 CLI 还在傻等」。这正体现唯一真相源：gate 的 resolved 状态写进 tape，所有壳从同一个 `human_decision_resolved` 事件读状态，必然一致。
+
+**各壳的广播接收路径**：
+- CLI：ModalScreen 收到 `human_decision_resolved` 事件 → 自动 dismiss 并显示「已被 [source] 答」（Textual 事件驱动，无需中断 input）。
+- Web：弹窗收到 `human_decision_resolved` WS 消息 → 自动关闭，显示「已被 [source] 答」。
+- MCP：`resolve_gate` 返回 `{ok: false, _hint: "Gate already resolved by [source]"}`；后续 `get_task_status` 的 status 跳过 needs_decision 直接到 running/completed。
+
+> **安全约束**：竞速只决定「谁的答案生效」，不影响 gate 事件本身——`human_decision_requested` 和 `human_decision_resolved` 都写进同一个 tape，是唯一真相。三壳读同一份 tape，无投影分裂。
 
 ---
 
