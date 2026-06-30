@@ -13,7 +13,11 @@ export default defineConfig({
   },
   build: {
     outDir: "../static",
-    emptyOutDir: true,
+    // outDir 在 vite root（frontend/）之外。**必须 false**：true 会清空 ../static，
+    // 物理删除其中被 git 跟踪的 .gitignore/.gitkeep（构建产物靠 static/.gitignore 的 `*`
+    // 规则忽略）。false 下 vite 不清空，仅写入新产物（旧 hash 资产由 .gitignore 忽略，
+    // 不影响服务——index.html 永远指向当前 hash；需彻底清理时 rm -rf static/assets）。
+    emptyOutDir: false,
   },
   test: {
     environment: "happy-dom",
