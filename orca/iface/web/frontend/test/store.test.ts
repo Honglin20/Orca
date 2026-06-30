@@ -201,8 +201,9 @@ describe("workflow-store", () => {
     expect(useWorkflowStore.getState().gate).toBeNull();
   });
 
-  it("未知 type 静默忽略（不 crash，仅缓存 event）", () => {
+  it("未知 type 不 crash 但 warn（fail loud，仅缓存 event）", () => {
     const store = useWorkflowStore.getState();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const unknown = {
       seq: 1,
       type: "totally_unknown_type" as EventType,
@@ -212,9 +213,12 @@ describe("workflow-store", () => {
       data: {},
     } as WorkflowEvent;
     expect(() => store.processEvent(unknown)).not.toThrow();
+    // fail loud：未知 type 记 warn（让 handler 缺失可被发现）
+    expect(warnSpy).toHaveBeenCalled();
     // 仍缓存（让 9c/9d 可读），但派生态不变
     expect(useWorkflowStore.getState().events.length).toBe(1);
     expect(useWorkflowStore.getState().status).toBe("idle");
+    warnSpy.mockRestore();
   });
 
   // ── 5. loadRun（fetch /events → replayState → nodes 正确）────────────────

@@ -12,11 +12,14 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@dagrejs/dagre": "^3.0.0",
+    "@xyflow/react": "^12.11.1",
     "immer": "^11.1.8",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-resizable-panels": "^2.1.7",
     "react-router-dom": "^6.28.0",
+    "react-window": "^2.2.7",
     "zustand": "^5.0.2"
   },
   "devDependencies": {

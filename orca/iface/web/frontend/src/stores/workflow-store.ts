@@ -20,6 +20,14 @@ import type {
   WorkflowEvent,
   WorkflowStatus,
 } from "@/types/events";
+import type { WorkflowTopology } from "@/types/topology";
+import {
+  enterReplay as replayEnter,
+  exitReplay as replayExit,
+  resetDerived,
+  resetReplayBuffer,
+  setReplayTarget as replaySetTarget,
+} from "./replay-actions";
 
 // ── store state 形状（业务派生 + UI 交互态 + actions，SPEC §3.1）──────────────
 export interface WorkflowState {
@@ -33,6 +41,12 @@ export interface WorkflowState {
   workflowName: string;
   status: WorkflowStatus; // workflow 级；"idle" = 未加载任何 run（前端派生态）
   cost: number; // 派生：累计 cost_usd（agent_usage fold）
+  /**
+   * 派生：静态 DAG 拓扑（phase 9c）。来自 workflow_started.data.topology（单一真相源 = tape，
+   * SPEC §0.1 铁律）。workflow_started handler 提取；workflowDef 出现后 DAG 即可布局（无需
+   * 等 route_taken 增量拼边）。null = 尚未收到 workflow_started。
+   */
+  workflowDef: WorkflowTopology | null;
 
   // === UI 交互态（非业务真相，铁律 2）===
   selectedNode: string | null;
@@ -54,6 +68,16 @@ export interface WorkflowState {
   setSelectedNode: (node: string | null) => void;
   setReplayMode: (on: boolean) => void;
   setReplayPosition: (pos: number) => void;
+  /**
+   * phase 9c tape replay 增量定位（SPEC §2.3，反 Conductor 全量重放）。
+   * 前进：apply events[current+1..pos]；后退：从最近 checkpoint 恢复再 apply 到 pos。
+   * 详见 stores/replay-actions.ts。
+   */
+  setReplayTarget: (pos: number) => void;
+  /** 进入 replay 模式：缓存 live 末态（live==replay 断言基线）+ 初始化 events 缓存。 */
+  enterReplay: () => void;
+  /** 退出 replay：恢复 live 末态（replayPosition 拨回末尾）。 */
+  exitReplay: () => void;
 }
 
 // ── eventHandlers 表（唯一状态计算路径，SPEC §3.1）──────────────────────────────
@@ -81,6 +105,7 @@ type ImmerDraft = {
   replayMode: boolean;
   replayPosition: number;
   activeRunId: string | null;
+  workflowDef: WorkflowTopology | null;
 };
 
 const eventHandlers: Record<string, Handler> = {
@@ -88,6 +113,12 @@ const eventHandlers: Record<string, Handler> = {
   workflow_started: (s, d) => {
     s.status = "running";
     s.workflowName = String(d.workflow_name ?? "");
+    // phase 9c：提取静态拓扑到 workflowDef（单一真相源 = tape，SPEC §0.1 铁律）。
+    // workflow_started 只发一次，幂等无虞。topology 缺失（旧后端兼容）→ 留 null，DAG 不渲染。
+    const topo = d.topology;
+    if (topo && typeof topo === "object" && Array.isArray((topo as Record<string, unknown>).nodes)) {
+      s.workflowDef = topo as unknown as import("@/types/topology").WorkflowTopology;
+    }
   },
   workflow_completed: (s) => {
     // workflow 级终态（对齐 RunState.status "completed"；与 node 的 "done" 有意区分）
@@ -124,11 +155,29 @@ const eventHandlers: Record<string, Handler> = {
   // ── 路由（9c DAG 渲染读 events，fold 无派生）──
   route_taken: () => {},
 
-  // ── 并发（foreach；9c 读 events）──
-  foreach_started: () => {},
+  // ── 并发（foreach；progress 派生给 9c DAG widget，SPEC §1.2）──
+  foreach_started: (s, d, e) => {
+    if (!e.node) return;
+    const total = Number(d.item_count ?? 0);
+    // 起始：0/total；foreach_item_completed 递增 done 计数
+    s.nodes[e.node] = { status: "running", progress: `0/${total}` };
+  },
   foreach_item_started: () => {},
-  foreach_item_completed: () => {},
-  foreach_completed: () => {},
+  foreach_item_completed: (s, _d, e) => {
+    if (!e.node) return;
+    const cur = s.nodes[e.node];
+    if (!cur || !cur.progress) return;
+    const [done, total] = cur.progress.split("/").map(Number);
+    if (Number.isFinite(done) && Number.isFinite(total)) {
+      cur.progress = `${done + 1}/${total}`;
+    }
+  },
+  foreach_completed: (s, _d, e) => {
+    if (!e.node) return;
+    // 完成后保持 progress（显示满进度），status 走 done
+    const cur = s.nodes[e.node];
+    s.nodes[e.node] = { status: "done", progress: cur?.progress };
+  },
 
   // ── HMIL gate（9d 弹窗读 store.gate）──
   human_decision_requested: (s, d, e) => {
@@ -165,6 +214,29 @@ const eventHandlers: Record<string, Handler> = {
   error: () => {},
 };
 
+// ── fold 核心（handler dispatch，无 dedup/无 events.push）──────────────────────
+// 提取出来让 replay 复用：replay 重新 apply 同 seq 事件是预期行为（从头 fold），故走
+// applyOneRaw（= foldEvent）绕过 processEvent 的 seq 去重。**handler 表只有一份**（铁律 1），
+// 区别仅在外壳（live: dedup+push；replay: 不 dedup/不 push，events 缓存已冻结）。
+function foldEvent(state: ImmerDraft, event: WorkflowEvent): void {
+  const handler = eventHandlers[event.type];
+  if (handler) {
+    try {
+      handler(state, event.data ?? {}, event);
+    } catch (err) {
+      // fail loud（记 console，但不 crash store —— 单条坏事件不该毁整个 fold）
+      console.error(
+        `[orca] event handler 抛异常 type=${event.type} seq=${event.seq}`,
+        err
+      );
+    }
+  } else {
+    // 未知 type：fail loud（warn，但不 crash）。后端新增 event type 但前端 handler 表未同步时
+    // 能被发现，而非静默丢失派生。processEvent 外壳仍负责 events.push（让 9c/9d 可读）。
+    console.warn(`[orca] 未知的 event type="${event.type}" (seq=${event.seq})，无 handler`);
+  }
+}
+
 // ── 单 store（铁律 4：全前端唯一 create()）──────────────────────────────────────
 // immer middleware：set 回调内直接 mutate draft，immer 生成新引用（不可变 + 可读性双赢）。
 export const useWorkflowStore = create<WorkflowState>()(
@@ -175,6 +247,7 @@ export const useWorkflowStore = create<WorkflowState>()(
     workflowName: "",
     status: "idle",
     cost: 0,
+    workflowDef: null,
 
     selectedNode: null,
     replayMode: false,
@@ -183,27 +256,14 @@ export const useWorkflowStore = create<WorkflowState>()(
 
     processEvent: (event) => {
       set((state) => {
-        // ── 幂等 guard：同 seq 已存在则跳过（live 重连重放 + replay 都安全）──
-        // 见 store.test.ts「fold idempotent」断言。
+        // ── 幂等 guard：同 seq 已存在则跳过（live 重连重放安全）──
+        // 见 store.test.ts「fold idempotent」断言。replay 的 apply 走 applyOneRaw（绕过此 guard）。
         if (state.events.some((e) => e.seq === event.seq)) {
           return; // 不变（immer：不 mutate 即返回原 state）
         }
 
-        // ── 派生：调对应 handler（未知 type 静默忽略，不 crash，SPEC §3.2）──
-        const handler = eventHandlers[event.type];
-        if (handler) {
-          try {
-            // immer draft 直接传给 handler —— handler 内 mutate 即可
-            handler(state, event.data ?? {}, event);
-          } catch (err) {
-            // fail loud（记 console，但不 crash store —— 单条坏事件不该毁整个 fold）
-            console.error(
-              `[orca] event handler 抛异常 type=${event.type} seq=${event.seq}`,
-              err
-            );
-          }
-        }
-        // 未知 type：仅缓存 event（让 9c/9d 仍可读），不改派生态
+        // ── fold 核心（handler dispatch；replay 复用同一份，铁律 1）──
+        foldEvent(state, event);
 
         // events append（已在 seq guard 排除重复）
         state.events.push(event);
@@ -214,14 +274,10 @@ export const useWorkflowStore = create<WorkflowState>()(
       // 重置派生态 → 逐条 processEvent（live/replay 共用同一路径，铁律 4）
       set((state) => {
         state.events = [];
-        state.nodes = {};
-        state.gate = null;
-        state.workflowName = "";
-        state.status = "idle";
-        state.cost = 0;
         state.selectedNode = null;
         state.replayPosition = 0;
       });
+      resetDerived(set);
       events.forEach((e) => get().processEvent(e));
     },
 
@@ -246,18 +302,15 @@ export const useWorkflowStore = create<WorkflowState>()(
 
     unloadRun: () => {
       // 切走 → 清当前 run 的派生态（懒加载红线：不累积，铁律 1）
+      resetReplayBuffer(); // replay buffer 也清（跟随 run 生命周期）
       set((state) => {
         state.activeRunId = null;
         state.events = [];
-        state.nodes = {};
-        state.gate = null;
-        state.workflowName = "";
-        state.status = "idle";
-        state.cost = 0;
         state.selectedNode = null;
         state.replayMode = false;
         state.replayPosition = 0;
       });
+      resetDerived(set);
     },
 
     setSelectedNode: (node) =>
@@ -270,8 +323,27 @@ export const useWorkflowStore = create<WorkflowState>()(
       }),
     setReplayPosition: (pos) =>
       set((state) => {
+        // 仅设 UI 滑块位置标记（不触发 fold）。增量 fold 走 setReplayTarget。
         state.replayPosition = pos;
       }),
+
+    // ── phase 9c replay actions（增量 apply + checkpoint，SPEC §2.3）──
+    setReplayTarget: (pos) => {
+      // applyOne：复用 foldEvent（同一 handler 表，铁律 1），但绕过 seq 去重 + 不 push
+      // events（replay 时 events 缓存已冻结在 buffer，不该被 replay 的 apply 污染）。
+      const applyOne = (event: WorkflowEvent) => {
+        set((state) => {
+          foldEvent(state, event);
+        });
+      };
+      replaySetTarget(pos, get, set, applyOne);
+    },
+    enterReplay: () => {
+      replayEnter(get, set);
+    },
+    exitReplay: () => {
+      replayExit(set);
+    },
   }))
 );
 

@@ -89,6 +89,44 @@ def test_make_workflow_started_payload():
     assert data["node_count"] == 1
 
 
+def test_make_workflow_started_topology_summary():
+    """phase 9c：workflow_started data 含紧凑拓扑摘要（DAG 布局用）。"""
+    from orca.schema import ParallelGroup, Route, ScriptNode, SetNode
+
+    wf = Workflow(
+        name="demo",
+        entry="start",
+        nodes=[
+            ScriptNode(
+                name="start",
+                command="echo",
+                routes=[Route(to="decide")],
+            ),
+            SetNode(
+                name="decide",
+                values={"x": "1"},
+                routes=[Route(when="x > 0", to="start"), Route(to="$end")],
+            ),
+        ],
+        parallel=[
+            ParallelGroup(name="grp", branches=["start", "decide"], routes=[]),
+        ],
+    )
+    t, data = make_workflow_started("run-1", wf, {})
+    topo = data["topology"]
+    assert topo["entry"] == "start"
+    assert {"name": "start", "kind": "script"} in topo["nodes"]
+    assert {"name": "decide", "kind": "set"} in topo["nodes"]
+    # 含回环边 decide→start（when 字段保留）
+    cyc = [r for r in topo["routes"] if r["from"] == "decide" and r["to"] == "start"]
+    assert len(cyc) == 1 and cyc[0]["when"] == "x > 0"
+    # 兜底边无 when 字段
+    fallback = [r for r in topo["routes"] if r["from"] == "decide" and r["to"] == "$end"]
+    assert len(fallback) == 1 and "when" not in fallback[0]
+    # parallel 组 + 组的 routes
+    assert topo["parallel"] == [{"name": "grp", "branches": ["start", "decide"]}]
+
+
 def test_make_workflow_completed_payload():
     t, data = make_workflow_completed(_wf(), {"result": "ok"}, elapsed=1.23)
     assert t == "workflow_completed"

@@ -79,6 +79,8 @@ export type NodeStatus = "pending" | "running" | "done" | "failed" | "skipped";
 export interface NodeState {
   status: NodeStatus;
   output?: unknown; // node_completed 的 data.output（最后写者胜，幂等）
+  /** foreach/parallel 进度（"done/total"），phase 9c DAG widget 读。 */
+  progress?: string;
 }
 
 // ── GateState（派生：当前 human gate，phase 9d 弹窗读）────────────────────────

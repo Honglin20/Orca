@@ -59,15 +59,47 @@ def make_workflow_started(
 ) -> tuple[str, dict]:
     """构造 ``workflow_started`` 的 (type, data)（SPEC §3.4 data payload）。
 
-    data: ``{inputs, node_count, entry, workflow_name}``。
+    data: ``{inputs, node_count, entry, workflow_name, topology}``。
+
+    ``topology``（phase 9c）：静态 DAG 拓扑摘要，让前端 DAG 在第一个事件即能布局
+    （无需等 ``route_taken`` 增量拼边）。设计决策：拓扑进 tape（单一真相源），live 和
+    历史 run replay 都从事件拿，无第二数据源 / 额外 endpoint。摘要含 node name+kind、
+    routes（from→to）、parallel 组（name+branches）—— **非完整 yaml**，保持 payload 小。
     """
     data = {
         "inputs": dict(inputs),
         "node_count": len(wf.nodes),
         "entry": wf.entry,
         "workflow_name": wf.name,
+        "topology": _topology_summary(wf),
     }
     return "workflow_started", data
+
+
+def _topology_summary(wf: Workflow) -> dict:
+    """构造紧凑拓扑摘要（phase 9c DAG 布局用）。
+
+    nodes: ``[{name, kind}]``；routes: ``[{from, to, when?}]``（含 node + parallel 组的
+    出边，from/to 为节点/组名）；parallel: ``[{name, branches}]``。when 缺省表示兜底路由。
+    foreach 的 body 不展开（它是动态并行，运行时才知道分支数；前端按 foreach_started
+    事件的 item_count 渲染分支）。
+    """
+    nodes = [{"name": n.name, "kind": n.kind} for n in wf.nodes]
+    routes: list[dict] = []
+    for n in wf.nodes:
+        for r in n.routes:
+            edge: dict = {"from": n.name, "to": r.to}
+            if r.when is not None:
+                edge["when"] = r.when
+            routes.append(edge)
+    parallel = [{"name": g.name, "branches": list(g.branches)} for g in wf.parallel]
+    for g in wf.parallel:
+        for r in g.routes:
+            edge = {"from": g.name, "to": r.to}
+            if r.when is not None:
+                edge["when"] = r.when
+            routes.append(edge)
+    return {"entry": wf.entry, "nodes": nodes, "routes": routes, "parallel": parallel}
 
 
 def make_workflow_completed(
