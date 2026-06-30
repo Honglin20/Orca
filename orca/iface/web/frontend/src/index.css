@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Skeleton global styling; phase 9c/9d will flesh out the design system. */
+html,
+body,
+#root {
+  height: 100%;
+}

@@ -1,0 +1,17 @@
+node_modules/
+dist/
+
+# phase 9b build output (regenerable) is ignored via orca/iface/web/static/.gitignore
+# (cross-directory gitignore patterns are unreliable; keep the rule local to static/).
+
+# tsc / vite stray build artifacts (only .ts sources are committed)
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+
+# vite/vitest caches
+.vite/
+coverage/
+
+# os noise
+.DS_Store
