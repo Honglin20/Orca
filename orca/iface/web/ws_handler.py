@@ -1,0 +1,162 @@
+"""ws_handler.py —— WebSocket 单通道 + 按 run 订阅 + gate_response 反向（SPEC §4）。
+
+回答「事件怎么按需推给前端？」：单条 ``/ws``。前端发 ``subscribe(run_id)`` → 后端为该
+WS 起一个 pump task，把**该 run 的 bus 订阅事件**推给 WS（带 ``run_id`` 标签）。切 run
+（再 subscribe / unsubscribe）→ cancel 旧 pump。反向通道：同 WS 收 ``gate_response`` →
+对应 run 的 ``gate_handler.resolve``。
+
+设计规则（SPEC §0.1 铁律 3 / §4.2 / §9 决策 4）：
+  - **单通道**：所有事件/gate 走一条 ``/ws``（反双 WS）。
+  - **按需订阅**：subscribe(A) 后只推 A 的事件（**不推所有 run 洪流**，断言覆盖）。
+  - **切 run**：unsubscribe / 再 subscribe → cancel 旧 pump（无 leaked task）。
+  - **反向 gate_response**：同 WS 收 ``{type:gate_response, ...}`` → resolve 当前订阅 run
+    的 gate_handler。
+  - **断开清理**：WS 断开 → cancel 当前 pump + 清 _subs（无 leaked task/coroutine）。
+  - **无并行内存事件 list**：pump 直接转发 bus 订阅事件到 WS，不缓存（铁律 1）。
+
+依赖单向：本模块依赖 ``orca.iface.web.run_manager``（同层）+ ``fastapi``（WS 框架），
+不依赖 run/exec 内部（不含编排逻辑——纯转发）。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from fastapi import WebSocket, WebSocketDisconnect
+
+from orca.events.bus import Subscription
+
+if TYPE_CHECKING:
+    from orca.iface.web.run_manager import RunHandle, RunManager
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _RunSubscription:
+    """一个 WS 当前订阅某 run 的状态：handle + bus subscription + pump task。
+
+    切 run / 断开时 cancel pump（无 leaked task）。
+    """
+
+    handle: RunHandle
+    sub: Subscription
+    pump: asyncio.Task
+
+
+class WebServer:
+    """WS 单通道端点 + 按 run 订阅管理（SPEC §4.1）。
+
+    用法（``server.py`` 挂载）::
+
+        web_server = WebServer(manager)
+        app.websocket("/ws")(web_server.ws_endpoint)
+    """
+
+    def __init__(self, manager: RunManager):
+        self._manager = manager
+        # WS → 当前订阅。一个 WS 同时只订阅一个 run（subscribe 切换覆盖旧订阅）。
+        self._subs: dict[WebSocket, _RunSubscription] = {}
+
+    async def ws_endpoint(self, ws: WebSocket) -> None:
+        """单通道 WS 端点：accept → 循环 receive → 分派 subscribe/unsubscribe/gate_response。
+
+        断开（WebSocketDisconnect / 异常）→ 清理当前订阅（cancel pump），无 leaked task。
+        """
+        await ws.accept()
+        try:
+            while True:
+                msg = await ws.receive_json()
+                await self._dispatch(ws, msg)
+        except WebSocketDisconnect:
+            pass  # 正常断开
+        except Exception:  # noqa: BLE001 — 任何异常都走清理路径（fail loud 记 warning）
+            logger.warning("ws_endpoint 异常，连接将清理", exc_info=True)
+        finally:
+            await self._cleanup(ws)
+
+    async def _dispatch(self, ws: WebSocket, msg: dict) -> None:
+        """分派一条客户端消息。未知 type 记 warning（fail loud），不崩连接。"""
+        mtype = msg.get("type")
+        if mtype == "subscribe":
+            await self._handle_subscribe(ws, msg.get("run_id"))
+        elif mtype == "unsubscribe":
+            await self._cancel_sub(ws)
+        elif mtype == "gate_response":
+            await self._handle_gate_response(ws, msg)
+        else:
+            logger.warning("ws 收到未知消息 type=%s（忽略）", mtype)
+
+    async def _handle_subscribe(self, ws: WebSocket, run_id: object | None) -> None:
+        """订阅某 run：cancel 旧订阅 → 订阅 handle.bus → 起 pump task。
+
+        未知 run_id → 不订阅（fail loud 记 warning），保留旧订阅语义清晰起见也 cancel。
+        """
+        if not isinstance(run_id, str):
+            logger.warning("ws subscribe 缺 run_id（忽略）")
+            return
+        handle = self._manager.get_handle(run_id)
+        if handle is None:
+            logger.warning("ws subscribe 未知 run_id=%s（忽略）", run_id)
+            return
+        # 切 run：先 cancel 旧订阅（无论新旧是否同 run，语义统一）。
+        await self._cancel_sub(ws)
+        sub = handle.bus.subscribe()
+        pump = asyncio.create_task(
+            self._pump(ws, sub, run_id),
+            name=f"orca-web-ws-pump-{run_id}",
+        )
+        self._subs[ws] = _RunSubscription(handle=handle, sub=sub, pump=pump)
+
+    async def _handle_gate_response(self, ws: WebSocket, msg: dict) -> None:
+        """反向通道：gate_response → 当前订阅 run 的 gate_handler.resolve。
+
+        ``resolve`` 同步返回是否赢家（False = 晚到，fail loud 已在 handler 内记 warning）。
+        未订阅 run 时无 gate_handler 可 resolve → 记 warning。
+        """
+        run_sub = self._subs.get(ws)
+        if run_sub is None:
+            logger.warning("ws gate_response 但未订阅任何 run（忽略）")
+            return
+        gate_id = msg.get("gate_id")
+        answer = msg.get("answer")
+        if not gate_id or answer is None:
+            logger.warning("ws gate_response 缺 gate_id/answer（忽略）")
+            return
+        run_sub.handle.gate_handler.resolve(str(gate_id), str(answer), "web")
+
+    async def _pump(self, ws: WebSocket, sub: Subscription, run_id: str) -> None:
+        """把某 run 的 bus 事件推给 WS（带 run_id 标签）。
+
+        正常退出：bus close（sub.events 收到 None 哨兵）或 WS 断开（send 抛）。
+        任何异常都不该 leak —— 调用方（_cleanup）保证 cancel。
+        """
+        try:
+            async for event in sub.events():
+                payload = event.model_dump()
+                payload["run_id"] = run_id  # 标签：让前端区分来源 run
+                await ws.send_json(payload)
+        except WebSocketDisconnect:
+            pass  # WS 断开，正常退出
+        except Exception:  # noqa: BLE001 — pump 异常 fail loud 记 warning，不 crash server
+            logger.warning("ws pump（run=%s）异常退出", run_id, exc_info=True)
+
+    async def _cancel_sub(self, ws: WebSocket) -> None:
+        """cancel 当前 WS 的订阅 pump（若有）。幂等。"""
+        run_sub = self._subs.pop(ws, None)
+        if run_sub is None:
+            return
+        run_sub.sub.cancel()
+        if not run_sub.pump.done():
+            run_sub.pump.cancel()
+            try:
+                await run_sub.pump
+            except asyncio.CancelledError:
+                pass
+
+    async def _cleanup(self, ws: WebSocket) -> None:
+        """WS 断开时的清理：cancel pump + 移出 _subs。幂等。"""
+        await self._cancel_sub(ws)

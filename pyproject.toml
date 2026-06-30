@@ -24,6 +24,7 @@ dependencies = [
     "textual>=8.2.8",
     "typer>=0.26.8",
     "uvicorn>=0.49.0",
+    "websockets>=16.0",
 ]
 
 [project.scripts]
@@ -46,4 +47,11 @@ markers = [
     # integration：真 spawn claude 的烟雾测试。CI 默认不跑（-m "not integration"）；
     # 本地 ``pytest -m integration`` 可选跑（需 claude CLI + API key）。SPEC §7.10 / §12。
     "integration: 真 spawn claude 的集成测试（慢 / 需 API key，CI skip）",
+]
+filterwarnings = [
+    # 第三方库弃用噪音（非本项目代码可修）：websockets 14+ 的 legacy 模块 + uvicorn 的
+    # websockets_impl 导入路径触发 DeprecationWarning。仅 phase-7 真 server 测试命中。
+    # 不影响 RuntimeWarning 检查（``-W "error::RuntimeWarning"`` 仍 0 命中）。
+    "ignore:websockets.legacy is deprecated:DeprecationWarning",
+    "ignore:websockets.server.WebSocketServerProtocol is deprecated:DeprecationWarning",
 ]

@@ -43,6 +43,59 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def resolve_session_context(
+    registry: SessionContextRegistry, payload: dict[str, Any]
+) -> tuple[str, str | None]:
+    """从 hook payload 的 session_id 反查 ``(run_id, node)``（SPEC §6）。
+
+    未注册 / 缺 session_id → fallback ``(unknown, None)``（workflow 级 gate）+ 记 warning。
+    phase-6 单 run 与 phase-9a 多 run 分发共用此函数（DRY）。
+    """
+    session_id = payload.get("session_id")
+    if session_id is None:
+        return "unknown", None
+    ctx = registry.lookup(session_id)
+    if ctx is not None:
+        return ctx.run_id, ctx.node
+    # 未注册 session_id：hook 来了但 orchestrator 还没 register（race），或 hook 桥配置错。
+    # fallback workflow 级 gate + 记 warning（fail loud）。
+    logger.warning(
+        "hook 桥收到未注册的 session_id=%s，fallback 到 workflow 级 gate", session_id,
+    )
+    return "unknown", None
+
+
+def build_gate_from_hook_payload(
+    payload: dict[str, Any], run_id: str, node: str | None,
+) -> HumanGate:
+    """从 hook POST payload 构造 ``HumanGate(source=tool_permission)``。
+
+    phase-6 单 run 与 phase-9a 多 run 分发共用此构造（DRY：HumanGate context 字段集
+    单一来源，避免两处分头维护 drift）。
+    """
+    session_id = payload.get("session_id")
+    tool_name = payload.get("tool_name", "<unknown>")
+    tool_input = payload.get("tool_input", {})
+    tool_use_id = payload.get("tool_use_id")
+    return HumanGate(
+        id=uuid4().hex,
+        prompt=f"批准 {tool_name} 调用？",
+        options=["allow", "deny"],  # hook 语义只有允许/拒绝
+        context={
+            "tool": tool_name,
+            "tool_input": tool_input,
+            "tool_use_id": tool_use_id,
+            "session_id": session_id,
+        },
+        source="tool_permission",
+        run_id=run_id,
+        node=node,
+        # session_id 透传到 event 顶层（phase 3 §3.3 身份模型）——壳 reducer 据此
+        # 关联 gate 事件到具体 claude 会话。从 hook stdin 来的 claude session_id。
+        session_id=session_id,
+    )
+
+
 def register_gate_routes(
     app: FastAPI,
     handler: HumanGateHandler,
@@ -69,44 +122,8 @@ def register_gate_routes(
         阻塞至任一壳 resolve（gate 无限等）。返回 ``{decision, resolved_by}``。
         hook 桥根据 decision exit 0/2。
         """
-        session_id = payload.get("session_id")
-        tool_name = payload.get("tool_name", "<unknown>")
-        tool_input = payload.get("tool_input", {})
-        tool_use_id = payload.get("tool_use_id")
-
-        # session_id → (run_id, node) 反查（SPEC §6）。未注册 → fallback workflow 级。
-        run_id = "unknown"
-        node: str | None = None
-        if session_id is not None:
-            ctx = registry.lookup(session_id)
-            if ctx is not None:
-                run_id = ctx.run_id
-                node = ctx.node
-            else:
-                # 未注册 session_id：hook 来了但 orchestrator 还没 register（race），
-                # 或 hook 桥配置错。fallback workflow 级 gate + 记 warning（fail loud）。
-                logger.warning(
-                    "hook 桥收到未注册的 session_id=%s，fallback 到 workflow 级 gate",
-                    session_id,
-                )
-
-        gate = HumanGate(
-            id=uuid4().hex,
-            prompt=f"批准 {tool_name} 调用？",
-            options=["allow", "deny"],  # hook 语义只有允许/拒绝
-            context={
-                "tool": tool_name,
-                "tool_input": tool_input,
-                "tool_use_id": tool_use_id,
-                "session_id": session_id,
-            },
-            source="tool_permission",
-            run_id=run_id,
-            node=node,
-            # session_id 透传到 event 顶层（phase 3 §3.3 身份模型）——壳 reducer 据此
-            # 关联 gate 事件到具体 claude 会话。从 hook stdin 来的 claude session_id。
-            session_id=session_id,
-        )
+        run_id, node = resolve_session_context(registry, payload)
+        gate = build_gate_from_hook_payload(payload, run_id, node)
 
         try:
             answer, resolved_by = await handler.request(gate)

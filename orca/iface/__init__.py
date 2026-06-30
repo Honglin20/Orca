@@ -8,7 +8,7 @@
 
 子包：
   - cli/  : Textual TUI 壳（phase 7）—— 终端跑 workflow + gate ModalScreen
-  - web/  : FastAPI + SPA 壳（phase 9，未实现）
+  - web/  : FastAPI + SPA 壳（phase 9a 后端；9b 前端）—— 浏览器跑/看/回放 workflow
   - mcp/  : MCP server 壳（phase 10，未实现）
 """
 
