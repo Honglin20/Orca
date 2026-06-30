@@ -7,27 +7,28 @@
 
 ## 当前任务
 
-**无活跃任务** —— 阶段 5-R（run/ 编排层）已完成。
+**无活跃任务** —— 阶段 6（gates/ HMIL 层）已完成。
 
-- **状态**：✅ 已完成（442 测试全绿：353 基线 + 89 净增，零回归；5 条铁律全过；9 demo 端到端全跑通）
-- **release note**：[`docs/releases/2026-06-30-phase5-run.md`](../releases/2026-06-30-phase5-run.md)
+- **状态**：✅ 已完成（478 测试全绿：442 基线 + 36 净增，零回归；5 条铁律全过；hook 桥 4 路径安全语义有测试）
+- **release note**：[`docs/releases/2026-06-30-phase6-gates.md`](../releases/2026-06-30-phase6-gates.md)
 - **CHANGELOG**：[`docs/status/CHANGELOG.md`](CHANGELOG.md)
 
 ## 下一步（待启动新 session）
 
-阶段 6：gates/（HumanGate + HTTP hook bridge + 三通道竞速）。
-参考 [`docs/specs/phase-6-gates.md`](../specs/phase-6-gates.md) +
-[`docs/specs/shells-design-draft.md`](../specs/shells-design-draft.md)（三壳共同契约 + HandleId pattern）。
+阶段 7：CLI 壳（Textual TUI + 同步 input() gate UX）。
+参考 [`docs/specs/phase-7-cli.md`](../specs/phase-7-cli.md) +
+[`docs/specs/shells-design-draft.md`](../specs/shells-design-draft.md)（三壳共同契约 §3 CLI 决策）。
 
-phase 5-R 提供给 phase 6 的契约：
-- `run_workflow(wf, inputs, task, max_iter, tape_path, run_id) -> RunState`（`from orca.run import run_workflow`）
-- `python -m orca.run <yaml> [task] [-i k=v]... [--max-iter N]` 最小入口已就位（phase 7 CLI 包装成 typer 子命令）
-- 事件流经 EventBus（subscribe → WS 推 / GET /api/state 读 tape，phase 9）
-- Tape 落 `./runs/<run_id>.jsonl`，`replay_state(tape)` 重建 RunState
-- gate 注入位置：orchestrator `_dispatch` 前后（node 执行前 / 后），parallel/foreach 内部也可插
+phase 6 提供给 phase 7 的契约：
+- `HumanGateHandler`（`from orca.gates import HumanGateHandler`）：CLI 壳订阅
+  `human_decision_requested` 事件渲染 ModalScreen，用户答后调
+  `handler.resolve(gate_id, answer, "cli")`。
+- gate 事件流经 EventBus（`subscribe()` → 渲染；`human_decision_resolved` → 自动 dismiss ModalScreen）。
+- `HumanGate`（`from orca.gates import HumanGate`）：source 字段驱动渲染分支
+  （tool_permission=权限弹窗 / agent_ask=问答弹窗）。
 
-## phase 5-R 遗留（非阻断，后续可优化）
+## phase 6 遗留（非阻断，后续可优化）
 
-- `fail_fast` 在 gather 语义下与 `all_or_nothing` 等价（真正的「不等其余」需 `asyncio.wait(FIRST_EXCEPTION)`）
-- `run_workflow` 返回值未带 tape_path（调用方需猜 `./runs/<run_id>.jsonl`，phase 7 CLI 完善时补）
-- foreach `_eval_source_array` 仅支持 JSON 兼容的字符串化数组（Python repr 风格如 `[True, None]` 不支持）
+- gate 持久化恢复（崩溃后未 resolved 的 gate 怎么办）—— SPEC §9 明确留后，phase 6 gate 写
+  tape 但崩溃恢复语义未实现。
+- 三壳并发真跑竞速的端到端测试归 phase 7+9 集成（phase 6 单壳能 resolve 即可）。
