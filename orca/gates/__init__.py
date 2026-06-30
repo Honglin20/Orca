@@ -21,7 +21,11 @@
 from orca.gates.ask_user import ask_user
 from orca.gates.context_registry import SessionContextRegistry
 from orca.gates.handler import HumanGateHandler
-from orca.gates.http_endpoint import register_gate_routes
+from orca.gates.http_endpoint import (
+    build_gate_from_hook_payload,
+    register_gate_routes,
+    resolve_session_context,
+)
 from orca.gates.types import HumanGate
 
 __all__ = [
@@ -30,4 +34,6 @@ __all__ = [
     "SessionContextRegistry",
     "ask_user",
     "register_gate_routes",
+    "resolve_session_context",
+    "build_gate_from_hook_payload",
 ]

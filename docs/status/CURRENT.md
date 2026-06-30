@@ -7,29 +7,31 @@
 
 ## 当前任务
 
-**无活跃任务** —— 阶段 7（iface/cli CLI 壳）已完成。
+**phase 9 全部完成** —— 9a（后端）/ 9b（前端骨架）/ 9c（DAG + replay）/ 9d（gate 弹窗 + render_chart）
+四子阶段全部交付，在 **`phase9-web` 分支** 上。**分支可合并 master**。
 
-- **状态**：✅ 已完成（557 测试全绿 = 478 phase 1-6 + 79 phase 7 净增，零回归；5 条铁律
-  grep 验证全过；`orca --help` 显示 run/validate/list）
-- **里程碑**：🎉 **Orca 已是可用 CLI 工具**（单 backend + 单 shell + 完整 user journey）
-- **release note**：[`docs/releases/2026-06-30-phase7-cli.md`](../releases/2026-06-30-phase7-cli.md)
-- **CHANGELOG**：[`docs/status/CHANGELOG.md`](CHANGELOG.md)
+- **状态**：✅ phase 9 完成（Web 壳全栈可用：列表 / 详情 / DAG 可视化 / 流式日志 / tape replay /
+  gate 弹窗 / chart 渲染 / Output 视图）
+- **9d release note**：[`docs/releases/2026-06-30-phase9d-web-gate-chart.md`](../releases/2026-06-30-phase9d-web-gate-chart.md)
+- **9d commit**：`6d0c5e1`（`feat(web):` 前缀）
+- **验收**：vitest 84 passed（gate 10 + chart 16 + 既有 58 零回归）；npm run build 成功；
+  pytest 595 通过 0 RuntimeWarning；playwright 9d 6 场景 collected；五铁律 + §1.6 全过
 
-## 下一步（待启动新 session）
+## 下一步
 
-阶段 9：Web 壳（FastAPI + WebSocket + React+Vite+ReactFlow+Zustand SPA）。
-参考 [`docs/specs/phase-9-web.md`](../specs/phase-9-web.md) +
-[`docs/specs/shells-design-draft.md`](../specs/shells-design-draft.md) §4。
+**phase 9 收尾**：`phase9-web` 分支已就绪，可发起合并到 master（4 个子阶段 commit：
+`b34c87d` 9a / `0347a66` 9b / `adc856c` 9c / `6d0c5e1` 9d）。
 
-phase 7 提供给 phase 9 的契约：
-- CLI 壳验证了「壳订阅事件流 + gate 走 handler.resolve」范式，Web 壳照搬（渲染层换 React）。
-- `_GateHttpBridge` 的双线程隔离模式：web server 是单进程 uvicorn（同引擎事件循环），
-  比 CLI 更简单（不需 TUI loop 隔离），但 `register_gate_routes` + `HumanGateHandler` +
-  `SessionContextRegistry` 共享对象的模式直接复用。
-- GateModal 的 source 分支渲染（tool_permission/agent_ask）是 Web 弹窗的 UI 对照。
+**phase 10（MCP）**：让 claude 能调 `render_chart` + `ask_user` 工具（9d 已就位前端渲染，
+phase 10 补 MCP 工具实现让 claude 实际产出 chart/ask 事件）。SPEC 待写。
 
-## phase 7 遗留（非阻断，后续可优化）
+### 9c deferred（仍待根治，非阻塞）
+- **n4 双轮询根治**：`RunsListPage` + `RunsSidebar` 各自 `useRunsList`（2×/2s 元数据轮询）。
+  根治需 React Context 提升 `useRunsList` 单实例。
 
-- parallel 组进度（`DagTree.set_group_progress`）已实现且有单测，但 `_dispatch_to_widgets`
-  未接 reducer 事件（无 foreach/parallel 进度事件驱动入口）——后续 phase 补 reducer
-  事件接线即可。
+## 必读文件（phase 10 开工前）
+
+1. [`docs/specs/shells-design-draft.md`](../specs/shells-design-draft.md)（三壳共同契约 + MCP 约束）
+2. [`docs/releases/2026-06-30-phase9d-web-gate-chart.md`](../releases/2026-06-30-phase9d-web-gate-chart.md)（chart 渲染契约，phase 10 MCP 补工具）
+3. [`orca/iface/web/frontend/src/components/chart/types.ts`](../../orca/iface/web/frontend/src/components/chart/types.ts)（ChartPayload 契约）
+4. [`orca/gates/types.py`](../../orca/gates/types.py)（HumanGate，phase 10 ask_user 工具复用）

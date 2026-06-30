@@ -168,6 +168,15 @@ class HumanGateHandler:
                 if self._resolved_queue is None:
                     self._gates_meta.pop(gate.id, None)
 
+    def has_pending(self, gate_id: str) -> bool:
+        """该 gate_id 是否在 pending（未 resolved、未取消）。
+
+        多 run 分发（phase 9a web）从外部查询「哪个 run 持有此 gate」时用，避免直接
+        访问私有 ``_pending``。返回 True = 存在且未 done。
+        """
+        fut = self._pending.get(gate_id)
+        return fut is not None and not fut.done()
+
     def resolve(self, gate_id: str, answer: str, source: str) -> bool:
         """任一壳调它喂答案。返回是否是赢家（FIRST_COMPLETED）。
 

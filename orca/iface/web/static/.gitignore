@@ -1,0 +1,5 @@
+# phase 9b 前端构建产物（regenerable via `npm run build`）—— 只跟踪 .gitkeep 占位。
+# 这是 vite outDir，emptyOutDir=true 会清空；只保 .gitkeep 让目录存在。
+*
+!.gitignore
+!.gitkeep

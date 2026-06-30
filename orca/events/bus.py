@@ -113,6 +113,7 @@ class EventBus:
     def __init__(self, tape: Tape):
         self.tape = tape
         self._subs: list[Subscription] = []
+        self._closed = False
 
     async def emit(
         self,
@@ -154,7 +155,14 @@ class EventBus:
         return sub
 
     def close(self) -> None:
-        """关闭 bus：关闭 Tape 句柄 + 通知所有订阅者终止。"""
+        """关闭 bus：关闭 Tape 句柄 + 通知所有订阅者终止。
+
+        幂等（与 ``Tape.close`` 对齐）：重复调用直接返回。RunManager 的 ``_teardown_handle``
+        可能在 run 终态 + shutdown 两次执行 close，幂等 guard 防重复操作埋雷。
+        """
+        if self._closed:
+            return
+        self._closed = True
         for sub in self._subs:
             sub._close()
         self._subs.clear()
