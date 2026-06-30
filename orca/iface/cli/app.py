@@ -198,9 +198,22 @@ class _GateHttpBridge:
         loop 里跑完，否则 ``_broadcaster`` task 会泄漏（loop close 时报「Task was destroyed
         but it is pending」）。故用 ``run_coroutine_threadsafe`` 把「stop uvicorn + stop
         handler」的完整 async 清理 schedule 到线程 loop 并阻塞等结果——干净退出无泄漏。
+
+        幂等 + 无泄漏保证（消除 ``coroutine ... was never awaited``）：
+          1. 启动失败路径（端口占用等 ``_start_error`` 非 None，或 ``_server`` 从未赋值）
+             短路：没有 uvicorn / handler 要停，直接 join 线程，**不构造任何 coroutine**
+             （否则在线程 finally 关 loop 的 TOCTOU 窗口里它会被 GC 当作未 await 泄漏）。
+          2. 正常路径只在「loop 未关闭 + loop 仍 alive」时才 schedule 清理 coroutine；
+             future.result 超时分支用 ``future.cancel()`` 让目标 loop（Task 的合法 owner）
+             取消 Task，而非从本线程 ``coro.close()`` 一个已被 wrap 的 coroutine（会被
+             asyncio 当作双重驱动，行为未定义）。RuntimeError 分支 coro 尚未被 wrap，
+             ``coro.close()`` 安全且必要。
         """
         if self._thread is None or self._loop is None:
             return
+
+        import asyncio as _asyncio
+
         loop = self._loop
 
         async def _graceful_shutdown() -> None:
@@ -213,24 +226,25 @@ class _GateHttpBridge:
             except Exception:  # noqa: BLE001 —— stop 失败不阻断线程退出
                 logger.exception("HTTP bridge shutdown: handler.stop 异常")
 
-        import asyncio as _asyncio
+        # 启动失败 / server 从未起来：没有 async 资源要清理。短路，避免在「线程正关 loop」
+        # 的竞态窗口里构造注定无法 await 的 coroutine（occupied-port 路径的泄漏根因）。
+        startup_failed = self._start_error is not None or self._server is None
+        if not startup_failed and not loop.is_closed():
+            coro = _graceful_shutdown()
+            try:
+                future = _asyncio.run_coroutine_threadsafe(coro, loop)
+                future.result(timeout=5.0)  # 阻塞等 async 清理完成
+            except RuntimeError:
+                # loop 在 schedule 后、result 前被线程 finally 关闭：coroutine 可能未被
+                # drive → 必须 close，否则 GC 报「coroutine was never awaited」。
+                coro.close()
+            except Exception:  # noqa: BLE001 —— future 超时 / cancel：兜底记 error
+                # 超时分支：coro 已被 wrap 成 Task 在目标 loop 上跑，用 future.cancel 让
+                # 合法 owner 取消它（不要从本线程 coro.close —— 双重驱动，行为未定义）。
+                future.cancel()
+                logger.exception("HTTP bridge graceful shutdown 超时或异常")
 
-        # loop 可能已被线程 finally 关闭（occupied-port 早退路径）——先探测，避免在死 loop
-        # 上 schedule coroutine 产生「coroutine was never awaited」泄漏。
-        if loop.is_closed():
-            self._thread = None
-            self._loop = None
-            self._server = None
-            return
-        try:
-            future = _asyncio.run_coroutine_threadsafe(_graceful_shutdown(), loop)
-            future.result(timeout=5.0)  # 阻塞等 async 清理完成
-        except RuntimeError:
-            # loop 在调度后关闭：忽略（stop 幂等）
-            pass
-        except Exception:  # noqa: BLE001 —— future 超时 / cancel：兜底记 error
-            logger.exception("HTTP bridge graceful shutdown 超时或异常")
-
+        # 无论上面走哪条分支，都 join 线程 + 清状态（幂等：重复 stop 第二次走最顶 return）。
         self._thread.join(timeout=5.0)
         self._thread = None
         self._loop = None

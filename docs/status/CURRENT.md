@@ -30,9 +30,6 @@ phase 7 提供给 phase 9 的契约：
 
 ## phase 7 遗留（非阻断，后续可优化）
 
-- `_GateHttpBridge` 优雅退出有 1 条 gc RuntimeWarning（broadcaster task 在 loop close 时
-  未完全 await 完）——非致命、可见（fail loud 满足），多线程 asyncio loop 生命周期清理
-  的已知边缘，可后续用 lifespan shutdown hook 进一步收敛。
 - parallel 组进度（`DagTree.set_group_progress`）已实现且有单测，但 `_dispatch_to_widgets`
   未接 reducer 事件（无 foreach/parallel 进度事件驱动入口）——后续 phase 补 reducer
   事件接线即可。
