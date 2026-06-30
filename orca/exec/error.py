@@ -21,19 +21,30 @@ from __future__ import annotations
 class ExecError(Exception):
     """executor 失败的统一异常（SPEC §6）。
 
-    携带三类诊断维度：
+    携带四类诊断维度：
       - ``phase``：错误阶段（6 选 1，见模块 docstring），驱动 ``error_type`` 映射。
       - ``error_type``：机器可读的错误类别（``phase_to_error_type`` 派生）。
       - ``message``：人读错误描述。
+      - ``node``：导致失败的 node 名（可选；executor 自身不知「在哪个 node 跑」——
+        由上层 adapter / orchestrator 在桥接时注入，便于 ``workflow_failed.data.node``
+        精确定位失败位置，SPEC §3.4）。
 
     executor 捕获后 emit ``node_failed``（给状态机）+ ``error``（给诊断）双事件。
     """
 
-    def __init__(self, phase: str, message: str, error_type: str | None = None) -> None:
+    def __init__(
+        self,
+        phase: str,
+        message: str,
+        error_type: str | None = None,
+        *,
+        node: str | None = None,
+    ) -> None:
         self.phase = phase
         self.message = message
         # error_type 默认由 phase 派生；显式传入可覆盖（如 stream 附 api_error_status）。
         self.error_type = error_type if error_type is not None else phase_to_error_type(phase)
+        self.node = node  # 失败 node 名（adapter 注入；None = executor 内部异常未关联 node）
         super().__init__(f"[{self.phase}] {self.message}")
 
 

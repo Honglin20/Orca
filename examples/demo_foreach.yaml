@@ -1,0 +1,27 @@
+name: demo_foreach
+description: |
+  数组分批并行 demo（maker set 产出数组 → foreach body 对每个元素并行执行）。
+  演示 foreach 分批 + Semaphore 限并发 + 聚合 count。
+entry: maker
+nodes:
+  - name: maker
+    kind: set
+    values:
+      items: "[1,2,3]"
+    routes:
+      - to: processor
+  - name: processor
+    kind: foreach
+    source: "maker.output.items"
+    item_var: item
+    index_var: _index
+    max_concurrent: 2
+    failure_mode: continue_on_error
+    body:
+      kind: script
+      name: worker
+      command: "echo item {{ item }}"
+    routes:
+      - to: $end
+outputs:
+  processed: "{{ processor.output.count }}"

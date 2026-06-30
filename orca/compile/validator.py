@@ -117,8 +117,18 @@ def _top_level_names(wf: Workflow) -> list[str]:
 
 
 def _name_set(wf: Workflow) -> set[str]:
-    """仅 node 名集合（Jinja2 引用合法 root、foreach source 等只认 node 名）。"""
+    """仅 node 名集合（⑩ branch 校验、foreach source 等只认 node 名）。"""
     return set(_top_level_names(wf))
+
+
+def _jinja_root_set(wf: Workflow) -> set[str]:
+    """Jinja2 引用合法 root：node 名 + parallel 组名 + ``workflow`` + ``inputs``。
+
+    parallel 组名也合法：orchestrator 把组的聚合输出存进 ``ctx.outputs[group.name]``
+    （与 node 同形 ``{"output": raw}``），故模板可 ``{{ group.output.outputs.x }}``
+    引用组聚合结果。
+    """
+    return _name_set(wf) | _parallel_group_names(wf)
 
 
 def _parallel_group_names(wf: Workflow) -> set[str]:
@@ -479,25 +489,51 @@ def _workflow_input_keys(ast) -> list[str]:
     return keys
 
 
+def _inputs_top_keys(ast) -> list[str]:
+    """提取 ``inputs.<key>`` 与 ``inputs['<key>']`` 的 <key>（render 暴露的顶层 inputs）。
+
+    与 ``_workflow_input_keys`` 平行：``inputs.X`` 是 render._namespace 暴露的等价写法
+    （见 orca/exec/render.py）。提取 <key> 用于「X 是否在 wf.inputs 声明」的 warning 校验。
+    """
+    keys: list[str] = []
+    # inputs.key —— Getattr(Name('inputs'), 'key')
+    for n in ast.find_all(Getattr):
+        inner = n.node
+        if isinstance(inner, Name) and inner.name == "inputs":
+            keys.append(n.attr)
+    # inputs['key'] —— Getitem(Name('inputs'), Const('key'))
+    for n in ast.find_all(Getitem):
+        inner = n.node
+        if isinstance(inner, Name) and inner.name == "inputs" and isinstance(n.arg, Const):
+            keys.append(n.arg.value)
+    return keys
+
+
 def _check_jinja2_refs(wf: Workflow, result: ValidationResult) -> None:
     """浅校验：每个 undeclared 变量的 root 必须是真实 node / workflow / 上下文合法变量。
 
     不校验 ``.output.field`` 字段级（运行时归 run/，SPEC §4⑦）。``workflow.input.X``
-    的 X 未声明 → warning（非致命）。
+    与 ``inputs.X`` 的 X 未声明 → warning（非致命）。
+
+    ``inputs`` 是 render 层 ``_namespace`` 暴露的顶层变量（``{{ inputs.x }}``，
+    见 orca/exec/render.py），与 ``workflow.input.X`` 等价 —— 两种写法都允许，
+    X 未在 ``wf.inputs`` 声明 → warning（非致命，允许运行时注入未声明的 key）。
     """
-    names = _name_set(wf)
+    names = _jinja_root_set(wf)
     for location, text, is_expr, extras in _iter_templates(wf):
         ast, err = _parse_for_meta(text, is_expr)
         if err is not None:
             result.add_error(f"{location}：{err}")
             continue
-        valid_roots = names | {"workflow"} | extras
+        # inputs 是 render._namespace 暴露的顶层变量（{{ inputs.x }}）
+        valid_roots = names | {"workflow", "inputs"} | extras
         for var in sorted(find_undeclared_variables(ast)):
             if var not in valid_roots:
                 result.add_error(
                     f"{location} 引用了不存在的 node/变量 '{var}'"
                 )
-        for key in _workflow_input_keys(ast):
+        # workflow.input.X 与 inputs.X 的声明校验（warning）
+        for key in _workflow_input_keys(ast) + _inputs_top_keys(ast):
             if key not in wf.inputs:
                 result.add_warning(
                     f"{location} 引用了未声明的 workflow input '{key}'"

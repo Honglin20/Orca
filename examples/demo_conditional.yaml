@@ -1,0 +1,24 @@
+name: demo_conditional
+description: 条件分支 demo（set 决策值驱动路由，agent 极简 prompt）。
+entry: decide
+nodes:
+  - name: decide
+    kind: set
+    values:
+      path: "high"
+    routes:
+      - when: "output.path == 'high'"
+        to: high_agent
+      - to: low_agent
+  - name: high_agent
+    kind: agent
+    prompt: "回复 HIGH"
+    routes:
+      - to: $end
+  - name: low_agent
+    kind: agent
+    prompt: "回复 LOW"
+    routes:
+      - to: $end
+outputs:
+  taken: "{{ decide.output.path }}"

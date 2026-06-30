@@ -113,3 +113,43 @@ def test_render_prompt_none_md_with_jinja_render_error(tmp_path, monkeypatch):
     node = AgentNode(name="bad", prompt=None)
     with pytest.raises(ExecError, match="render"):
         render_prompt(node, _ctx())
+
+
+# ── locals 注入（foreach body 用，phase 5 扩展）───────────────────────────────
+
+
+def test_render_template_resolves_locals_item():
+    """{{ item }} 取 ctx.locals['item']（foreach body 裸引用，无 inputs. 前缀）。"""
+    ctx = RunContext(inputs={}, outputs={}, run_id="r1", locals={"item": "apple"})
+    assert render_template("process {{ item }}", ctx) == "process apple"
+
+
+def test_render_template_resolves_locals_index():
+    """{{ _index }} 取 ctx.locals['_index']（foreach 索引变量）。"""
+    ctx = RunContext(inputs={}, outputs={}, run_id="r1", locals={"item": "x", "_index": 2})
+    assert render_template("#{{ _index }}: {{ item }}", ctx) == "#2: x"
+
+
+def test_render_template_locals_compose_with_inputs_and_outputs():
+    """locals 与 inputs / outputs 同层共存（三者摊到 Jinja2 顶层命名空间）。
+
+    注意：``task`` 字段不摊顶层（它仅作为 ctx 数据字段供日志/事件用，渲染时走
+    ``inputs.task``，由 orchestrator 把位置参数 task 注入 inputs）。此处验证 locals
+    与 inputs / outputs 的共存，``item`` 来自 locals，``prev.output.v`` 来自 outputs。
+    """
+    ctx = RunContext(
+        inputs={"task": "T"},
+        outputs={"prev": {"output": {"v": 1}}},
+        run_id="r1",
+        locals={"item": "y"},
+    )
+    out = render_template(
+        "{{ inputs.task }}/{{ prev.output.v }}/{{ item }}", ctx
+    )
+    assert out == "T/1/y"
+
+
+def test_render_template_empty_locals_no_effect():
+    """locals 默认空 dict，对普通 node 渲染无影响（零回归）。"""
+    ctx = RunContext(inputs={"x": "1"}, outputs={}, run_id="r1", locals={})
+    assert render_template("{{ inputs.x }}", ctx) == "1"

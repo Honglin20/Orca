@@ -1,0 +1,17 @@
+name: demo_task
+description: |
+  task 位置参数注入 demo（agent prompt 引用 {{ inputs.task }}）。
+  运行：orca run examples/demo_task.yaml "测试任务"（task 注入 inputs.task）。
+entry: worker
+inputs:
+  task:
+    type: string
+    description: "任务描述"
+nodes:
+  - name: worker
+    kind: agent
+    prompt: "任务：{{ inputs.task }}，回复 DONE"
+    routes:
+      - to: $end
+outputs:
+  reply: "{{ worker.output }}"

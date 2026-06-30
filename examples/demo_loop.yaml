@@ -1,0 +1,27 @@
+name: demo_loop
+description: |
+  回环循环 demo（counter set 自引用上轮 output.n 计数，n>=3 停 → done）。
+  演示 routes 回环 + 终止条件。set 是无状态的，但可经「self-reference + is defined
+  守卫」跨轮累加（首轮 counter.output 未定义 → 用 inputs.start 兜底）。
+entry: counter
+inputs:
+  start:
+    type: int
+    required: false
+    default: 0
+nodes:
+  - name: counter
+    kind: set
+    values:
+      n: "{{ (counter.output.n if counter is defined and counter.output is defined else inputs.start | default(0)) | int + 1 }}"
+    routes:
+      - when: "output.n | int >= 3"
+        to: done
+      - to: counter
+  - name: done
+    kind: script
+    command: "echo done"
+    routes:
+      - to: $end
+outputs:
+  final_count: "{{ counter.output.n }}"

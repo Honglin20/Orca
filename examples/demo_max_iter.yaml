@@ -1,0 +1,20 @@
+name: demo_max_iter
+description: |
+  循环不终止 demo（counter 永远 n=1，when 永不命中 → max_iter → workflow_failed）。
+  演示 fail loud：MaxIterations 触发 workflow_failed（与 demo_failure 的「非零退出不失败」对照）。
+entry: counter
+nodes:
+  - name: counter
+    kind: set
+    values:
+      n: "{{ 1 }}"
+    routes:
+      - when: "output.n | int >= 999"
+        to: done
+      - to: counter
+  - name: done
+    kind: script
+    command: "echo done"
+    routes:
+      - to: $end
+outputs: {}

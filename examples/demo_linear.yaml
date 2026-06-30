@@ -1,0 +1,21 @@
+name: demo_linear
+description: 线性推进 demo（a→b→c→$end，全 script，零 token）。
+entry: a
+nodes:
+  - name: a
+    kind: script
+    command: "echo step_a"
+    routes:
+      - to: b
+  - name: b
+    kind: script
+    command: "echo step_b"
+    routes:
+      - to: c
+  - name: c
+    kind: script
+    command: "echo step_c"
+    routes:
+      - to: $end
+outputs:
+  result: "{{ c.output.stdout }}"

@@ -6,8 +6,9 @@
 Jinja2 命名空间（SPEC §4.7）：
   - ``{{ inputs.x }}`` → ``ctx.inputs["x"]``
   - ``{{ node_name.output.field }}`` → ``ctx.outputs["node_name"]["output"]["field"]``
-    （已完成 node 的 output 累积在 ``ctx.outputs``）
-  - ``{{ item }}`` / ``{{ _index }}`` → foreach body 注入（phase 5，本阶段 foreach 不做）
+    （已完成 node 的 output 累积在 ``ctx.outputs``，存 ``{"output": raw}`` 包装）
+  - ``{{ item }}`` / ``{{ _index }}`` → ``ctx.locals["item"]``（foreach body 注入，
+    由 phase 5 orchestrator 经 ``RunContext.with_locals`` 派生实例）
 
 设计：
   - **UndefinedError 显式开**（``StrictUndefined``）：引用未定义变量 fail loud，
@@ -45,11 +46,16 @@ def _namespace(ctx: RunContext) -> dict[str, Any]:
 
     - ``inputs``：直接放 ``ctx.inputs``
     - 每个 node 的 output：以 node 名为 key 放顶层（``ctx.outputs`` 展开），
-      支持 ``{{ optimizer.output.structure }}`` 这种点路径
+      支持 ``{{ optimizer.output.structure }}`` 这种点路径（``outputs["optimizer"]
+      = {"output": {...}}``，故 ``{{ optimizer.output.structure }}`` 取得到）
+    - ``locals``：foreach body 注入的局部变量（``{{ item }}`` / ``{{ _index }}``）
+      摊到顶层；普通 node ``locals`` 为空 dict（无影响）。
     """
     ns: dict[str, Any] = {"inputs": dict(ctx.inputs)}
-    # ctx.outputs 的 key（node 名）直接做顶层变量，value（output dict）原样暴露
+    # ctx.outputs 的 key（node 名）直接做顶层变量，value（{"output": raw} dict）原样暴露
     ns.update(ctx.outputs)
+    # ctx.locals 摊顶层（foreach body 的 item / _index；普通 node 为空，update 无影响）
+    ns.update(ctx.locals)
     return ns
 
 

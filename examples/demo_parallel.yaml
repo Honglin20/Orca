@@ -1,0 +1,35 @@
+name: demo_parallel
+description: |
+  并行组 demo（start → split 组并行跑 branch_a/b → merger 汇聚 → $end）。
+  演示 parallel 组并行执行 + 汇聚 + 幂等（start 已执行则跳过）。
+entry: start
+nodes:
+  - name: start
+    kind: script
+    command: "echo go"
+    routes:
+      - to: split
+  - name: branch_a
+    kind: script
+    command: "echo a"
+    routes:
+      - to: $end
+  - name: branch_b
+    kind: script
+    command: "echo b"
+    routes:
+      - to: $end
+  - name: merger
+    kind: set
+    values:
+      summary: "merged {{ split.output.outputs.branch_a.stdout | trim }} + {{ split.output.outputs.branch_b.stdout | trim }}"
+    routes:
+      - to: $end
+parallel:
+  - name: split
+    branches: [branch_a, branch_b]
+    failure_mode: continue_on_error
+    routes:
+      - to: merger
+outputs:
+  result: "{{ merger.output.summary }}"

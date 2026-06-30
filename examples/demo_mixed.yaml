@@ -1,0 +1,31 @@
+name: demo_mixed
+description: |
+  综合 demo（script → agent → set 判决 → reporter，简化 nas）。
+  set verdict='pass' 确定性走 reporter；演示多节点类型 + 条件分支。
+entry: prep
+nodes:
+  - name: prep
+    kind: script
+    command: "echo data"
+    routes:
+      - to: analyzer
+  - name: analyzer
+    kind: agent
+    prompt: "分析 {{ prep.output.stdout }}，回复 OK"
+    routes:
+      - to: judge
+  - name: judge
+    kind: set
+    values:
+      verdict: "pass"
+    routes:
+      - when: "output.verdict == 'pass'"
+        to: reporter
+      - to: prep
+  - name: reporter
+    kind: script
+    command: "echo final"
+    routes:
+      - to: $end
+outputs:
+  result: "{{ reporter.output.stdout }}"

@@ -1,0 +1,13 @@
+name: demo_failure
+description: |
+  非零退出码记录 demo（script exit 1 不 fail loud，仍记录到 output.exit_code）。
+  演示 phase 4 SPEC §4.6 既定语义：script 非零退出是业务结果，workflow 仍 completed。
+entry: failing
+nodes:
+  - name: failing
+    kind: script
+    command: "exit 1"
+    routes:
+      - to: $end
+outputs:
+  exit_code: "{{ failing.output.exit_code }}"
