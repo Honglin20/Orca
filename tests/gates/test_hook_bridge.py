@@ -123,6 +123,7 @@ def test_hook_allow_exits_0():
         assert _run_hook(str(port)) == 0
     finally:
         server.shutdown()
+        server.server_close()  # shutdown 只停 serve_forever 循环；server_close 才真正关监听 socket（否则 ResourceWarning: unclosed socket）
 
 
 def test_hook_deny_exits_2():
@@ -132,6 +133,7 @@ def test_hook_deny_exits_2():
         assert _run_hook(str(port)) == 2
     finally:
         server.shutdown()
+        server.server_close()  # shutdown 只停 serve_forever 循环；server_close 才真正关监听 socket（否则 ResourceWarning: unclosed socket）
 
 
 def test_hook_unreachable_exits_2():
@@ -153,6 +155,7 @@ def test_hook_timeout_exits_2():
         assert _run_hook(str(port), timeout="1") == 2
     finally:
         server.shutdown()
+        server.server_close()  # shutdown 只停 serve_forever 循环；server_close 才真正关监听 socket（否则 ResourceWarning: unclosed socket）
 
 
 def test_hook_malformed_response_exits_2():
@@ -162,6 +165,7 @@ def test_hook_malformed_response_exits_2():
         assert _run_hook(str(port)) == 2
     finally:
         server.shutdown()
+        server.server_close()  # shutdown 只停 serve_forever 循环；server_close 才真正关监听 socket（否则 ResourceWarning: unclosed socket）
 
 
 def test_hook_missing_decision_field_exits_2():
@@ -171,6 +175,7 @@ def test_hook_missing_decision_field_exits_2():
         assert _run_hook(str(port)) == 2
     finally:
         server.shutdown()
+        server.server_close()  # shutdown 只停 serve_forever 循环；server_close 才真正关监听 socket（否则 ResourceWarning: unclosed socket）
 
 
 def test_hook_unknown_decision_exits_2():
@@ -180,6 +185,7 @@ def test_hook_unknown_decision_exits_2():
         assert _run_hook(str(port)) == 2
     finally:
         server.shutdown()
+        server.server_close()  # shutdown 只停 serve_forever 循环；server_close 才真正关监听 socket（否则 ResourceWarning: unclosed socket）
 
 
 def test_hook_empty_stdin_still_safety_first():
@@ -209,6 +215,7 @@ def test_hook_empty_stdin_still_safety_first():
         assert proc.returncode == 0
     finally:
         server.shutdown()
+        server.server_close()  # shutdown 只停 serve_forever 循环；server_close 才真正关监听 socket（否则 ResourceWarning: unclosed socket）
 
     # deny
     server, port = _start_mock_server({"decision": "deny"})
@@ -229,6 +236,7 @@ def test_hook_empty_stdin_still_safety_first():
         assert proc.returncode == 2
     finally:
         server.shutdown()
+        server.server_close()  # shutdown 只停 serve_forever 循环；server_close 才真正关监听 socket（否则 ResourceWarning: unclosed socket）
 
 
 def test_hook_invalid_timeout_env_falls_back():
@@ -238,6 +246,7 @@ def test_hook_invalid_timeout_env_falls_back():
         assert _run_hook(str(port), timeout="not-a-number") == 0
     finally:
         server.shutdown()
+        server.server_close()  # shutdown 只停 serve_forever 循环；server_close 才真正关监听 socket（否则 ResourceWarning: unclosed socket）
 
 
 # ── 2. /gate + /gate/respond 端点（httpx.AsyncClient + ASGI transport）─────

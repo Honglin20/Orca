@@ -7,20 +7,15 @@
 
 ## 当前任务
 
-**phase 9 全部完成** —— 9a（后端）/ 9b（前端骨架）/ 9c（DAG + replay）/ 9d（gate 弹窗 + render_chart）
-四子阶段全部交付，在 **`phase9-web` 分支** 上。**分支可合并 master**。
+**phase 1-9 全部完成并合并 master**。最近一次提交是 phase-1 critical infra 卫生修复：
 
-- **状态**：✅ phase 9 完成（Web 壳全栈可用：列表 / 详情 / DAG 可视化 / 流式日志 / tape replay /
-  gate 弹窗 / chart 渲染 / Output 视图）
-- **9d release note**：[`docs/releases/2026-06-30-phase9d-web-gate-chart.md`](../releases/2026-06-30-phase9d-web-gate-chart.md)
-- **9d commit**：`6d0c5e1`（`feat(web):` 前缀）
-- **验收**：vitest 84 passed（gate 10 + chart 16 + 既有 58 零回归）；npm run build 成功；
-  pytest 595 通过 0 RuntimeWarning；playwright 9d 6 场景 collected；五铁律 + §1.6 全过
+- **状态**：✅ Tape 写句柄惰性打开（消除 ResourceWarning）完成。`Tape.__init__` 不再 eager-open
+  append handle —— 只读构造（replay/inspect）不再泄漏未关闭句柄；首次 `append()` 在锁内惰性打开；
+  `__del__` leak 安全网兜底忘 close 的调用方。
+- **release note**：[`docs/releases/2026-07-01-tape-lazy-open.md`](../releases/2026-07-01-tape-lazy-open.md)
+- **验收**：`-W "error::ResourceWarning"` 全绿（30→0）、RuntimeWarning 全绿、599 passed 零回归、vitest 84 passed
 
 ## 下一步
-
-**phase 9 收尾**：`phase9-web` 分支已就绪，可发起合并到 master（4 个子阶段 commit：
-`b34c87d` 9a / `0347a66` 9b / `adc856c` 9c / `6d0c5e1` 9d）。
 
 **phase 10（MCP）**：让 claude 能调 `render_chart` + `ask_user` 工具（9d 已就位前端渲染，
 phase 10 补 MCP 工具实现让 claude 实际产出 chart/ask 事件）。SPEC 待写。

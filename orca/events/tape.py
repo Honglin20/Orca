@@ -80,8 +80,10 @@ class Tape:
         else:
             self._last_seq = 0
 
-        # 追加模式打开文件句柄（不存在则创建）。后续 append 直接 write+flush 到此句柄。
-        self._fh = open(self.path, "a", encoding="utf-8")
+        # 写句柄惰性打开：只读 Tape 构造（replay/inspect）不应开写句柄（曾 eager-open 导致 GC
+        # 时 ResourceWarning：构造即开 append handle 但只读用，永不关闭）。首次 append 才开。
+        # resume/续写路径只读文件（read_text/write_text），不碰本句柄，故 resume 截断不受影响。
+        self._fh = None
 
     # ── 公开 API ──────────────────────────────────────────────────────────────
 
@@ -94,6 +96,10 @@ class Tape:
         入参是**不含 seq 的 event 字段 dict**（type/timestamp/node/session_id/data），
         本方法填入 seq 后落盘并返回。落盘前**构造 Event 做一次校验**（fail loud：
         type 不在 EventType / 字段非法时立即在 emit 侧报错，而非延迟到 replay）。
+
+        写句柄惰性打开：首次 append 时（在 ``async with self._lock`` 内，与并发 append 串行）
+        才 open append handle；只读构造（replay/inspect）永不打开，避免 GC 时未关闭句柄的
+        ResourceWarning。
         """
         if self._closed:
             raise RuntimeError("Tape 已 close，不能再 append")
@@ -107,6 +113,11 @@ class Tape:
         safe_data = _json_safe(event_data.get("data", {}))
 
         async with self._lock:
+            # 惰性打开写句柄：必须在锁内（并发 append 才不会都看到 _fh is None 各自 open，
+            # 避免句柄泄漏/竞态）。不存在则创建（与原 eager open 语义一致），后续 append 直接
+            # write+flush 到此句柄。
+            if self._fh is None:
+                self._fh = open(self.path, "a", encoding="utf-8")
             # 校验在分配 seq **之前**：非法 type / extra 字段 → 抛 ValidationError，
             # 此时 _last_seq 未自增（坏事件不留 seq 间隙，SPEC「seq 序 == 文件行序」铁律）。
             # 用占位 seq=0 构造仅校验字段（type/timestamp/node/session_id/data），
@@ -179,10 +190,30 @@ class Tape:
         return self._last_seq
 
     def close(self) -> None:
-        """关闭文件句柄。close 后 append 抛 RuntimeError（fail loud）。"""
+        """关闭写句柄（若曾打开）。close 后 append 抛 RuntimeError（fail loud）。
+
+        幂等：重复调用直接返回。只读 Tape（从未 append，_fh 仍为 None）也能干净关闭 ——
+        没有句柄可关，仅标记 ``_closed``。
+        """
         if not self._closed:
-            self._fh.close()
+            if self._fh is not None:
+                self._fh.close()
             self._closed = True
+
+    def __del__(self) -> None:
+        """GC 兜未显式 close 时兜底关闭写句柄（leak 安全网）。
+
+        生产路径由 ``EventBus.close`` → ``Tape.close`` 显式关闭（run 终态后必跑）。
+        本方法仅兜底那些**忘记显式 close** 的调用方（典型为只读 inspect / 测试构造）——
+        与 Python 内建 ``open()`` 对象自带的 ``__del__`` 兜关行为一致。不抛、不静默吞
+        已记录的运行错误（``append`` 失败仍 fail loud 在 emit 侧）；仅保证不留未关闭句柄。
+        """
+        try:
+            if not self._closed and self._fh is not None:
+                self._fh.close()
+        except Exception:
+            # __del__ 绝不能抛（GC 期间抛异常会被吞并打 ``Exception ignored`` 噪声，噪声更大）
+            pass
 
     # ── resume / 初始化内部 ───────────────────────────────────────────────────
 

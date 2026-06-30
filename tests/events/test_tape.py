@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import weakref
 from pathlib import Path
 
 from orca.events.tape import Tape, _json_safe
@@ -90,6 +91,8 @@ def test_replay_preserves_order(tmp_path):
         events = list(tape2.replay())
         assert [e.seq for e in events] == [1, 2, 3, 4, 5]
         assert [e.data["idx"] for e in events] == [0, 1, 2, 3, 4]
+        # 非 resume 重开（_scan_last_seq → replay）也不应开写句柄（lazy-open 不变量）
+        assert tape2._fh is None
     finally:
         tape2.close()
 
@@ -377,3 +380,134 @@ def test_append_after_close_raises(tmp_path):
     tape.close()
     with pytest.raises(RuntimeError, match="已 close"):
         _run(tape.append(_event_data()))
+
+
+# ── 写句柄惰性打开（只读构造不泄漏 append handle）─────────────────────────────
+
+
+def test_readonly_construction_does_not_open_write_handle(tmp_path):
+    """只读构造（replay/inspect）不开写句柄（root-cause fix for ResourceWarning）。
+
+    回归保护：曾经 ``__init__`` eager-open append handle，导致测试中 ``Tape(path).replay()``
+    这类只读用法 GC 时报 ``ResourceWarning: unclosed file``（~30 条）。修复后写句柄惰性打开，
+    只读构造 ``_fh`` 始终为 None。
+    """
+    path = tmp_path / "events.jsonl"
+    # 预置内容（模拟已有 tape 文件被重开做 replay/inspect）
+    path.write_text(
+        json.dumps({"seq": 1, "type": "node_started", "timestamp": 1.0,
+                    "node": "a", "session_id": None, "data": {}}) + "\n",
+        encoding="utf-8",
+    )
+
+    tape = _make_tape(tmp_path)
+    try:
+        # 构造 + replay 都不应打开写句柄
+        assert tape._fh is None
+        events = list(tape.replay())
+        assert [e.seq for e in events] == [1]
+        # replay 后仍不应打开写句柄
+        assert tape._fh is None
+        assert tape.last_seq() == 1
+        assert tape._fh is None  # last_seq() 也不开句柄
+    finally:
+        tape.close()  # 从未 append，close 也不应炸（幂等 + 无句柄可关）
+
+    # GC 不应触发 ResourceWarning（句柄从未打开）。手动 gc.collect + simplefilter('error') 钉死「无泄漏」。
+    import gc
+    import warnings
+
+    tape2 = _make_tape(tmp_path)
+    ref = weakref.ref(tape2)
+    events = list(tape2.replay())  # 只读
+    assert tape2._fh is None
+    del events
+    del tape2
+    gc.collect()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ResourceWarning)
+        gc.collect()  # 回收 tape2 —— 无 append handle，不应 ResourceWarning
+    assert ref() is None
+
+
+def test_append_opens_write_handle_lazily(tmp_path):
+    """首次 append 才打开写句柄；append 后 _fh 非 None；close 后 append 仍 fail loud。
+
+    与上一个测试互补：覆盖「写路径」正确惰性打开（而非退化成永不打开）。
+    """
+    tape = _make_tape(tmp_path)
+    try:
+        assert tape._fh is None  # 构造时未开
+        s1 = _run(tape.append(_event_data()))
+        assert s1 == 1
+        assert tape._fh is not None  # 首次 append 后开了
+        # 第二次 append 复用同一句柄（不重复 open）
+        fh_after_first = tape._fh
+        _run(tape.append(_event_data()))
+        assert tape._fh is fh_after_first
+    finally:
+        tape.close()
+    # close 后句柄已关 + append fail loud（fail-loud 铁律不退化）
+    import pytest
+
+    with pytest.raises(RuntimeError, match="已 close"):
+        _run(tape.append(_event_data()))
+
+
+def test_resume_does_not_open_write_handle_until_append(tmp_path, caplog):
+    """resume 路径（read_text/write_text 截断残行）不应触发写句柄打开。
+
+    验证修复对 resume 路径无副作用：resume 在 ``__init__`` 内只读文件截断残行，
+    写句柄仍应保持 None 直到首次 append（截断用 write_text，不是 _fh）。
+    """
+    path = tmp_path / "events.jsonl"
+    path.write_text(
+        json.dumps({"seq": 1, "type": "node_started", "timestamp": 1.0,
+                    "node": "a", "session_id": None, "data": {}}) + "\n"
+        + '{"seq": 2, "type": "node_started", "timestamp"',  # 残行
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.WARNING):
+        tape = Tape(path, run_id="r1", resume=True)
+        try:
+            # resume 截断完成，但写句柄仍未开（截断用 write_text，非 _fh）
+            assert tape._fh is None
+            assert tape.last_seq() == 1
+            assert tape._fh is None
+            # 首次 append 才开
+            _run(tape.append(_event_data()))
+            assert tape._fh is not None
+        finally:
+            tape.close()
+    assert any("截断末尾" in r.message for r in caplog.records)
+
+
+def test_lazy_open_failure_is_fail_loud(tmp_path, monkeypatch):
+    """惰性 open 路失败（权限拒绝 / 磁盘满）须沿 append 协程外抛，不静默吞（fail-loud 铁律不退化）。
+
+    验证：``open()`` 在锁内抛 OSError 时，``_fh`` 仍为 None（赋值未发生），下次 append 可重试 ——
+    即 lazy-open 不会把 open 失败「吃掉」成 None 然后假装成功。
+    """
+    import builtins
+    import pytest
+
+    tape = _make_tape(tmp_path)
+    try:
+        original_open = builtins.open
+
+        def boom_open(*args, **kwargs):
+            raise OSError("模拟磁盘满 / 权限拒绝")
+
+        monkeypatch.setattr(builtins, "open", boom_open)
+        with pytest.raises(OSError, match="模拟磁盘满"):
+            _run(tape.append(_event_data()))
+        # open 失败后 _fh 仍 None（可重试）
+        assert tape._fh is None
+        # 恢复真实 open 后 append 正常
+        monkeypatch.undo()
+        s2 = _run(tape.append(_event_data()))
+        assert tape._fh is not None
+        assert tape.last_seq() == 1
+    finally:
+        monkeypatch.setattr(builtins, "open", original_open)
+        tape.close()
