@@ -88,6 +88,7 @@ def validate_workflow(wf: Workflow) -> list[str]:
     _check_entry_reachable_to_end(wf, result)  # ⑥
     _check_jinja2_refs(wf, result)             # ⑦
     _check_foreach_source(wf, result)          # ⑧
+    _check_profiles(wf, result)                # ⑨ capability 校验（profiles/validate）
     return result.raise_if_errors()
 
 
@@ -438,3 +439,25 @@ def _check_foreach_source(wf: Workflow, result: ValidationResult) -> None:
                 f"foreach 节点 '{node.name}' 的 source '{node.source}' "
                 f"引用了不存在的 node '{first}'"
             )
+
+
+# ── ⑨ capability 校验（profiles/validate 产出 issue → 汇入 result）──────────────
+
+
+def _check_profiles(wf: Workflow, result: ValidationResult) -> None:
+    """⑨ capability 校验：调 ``profiles.validate_workflow_profiles``，issue 汇入 result。
+
+    单向依赖：``compile → profiles``（profiles 不 import compile，SPEC §4.9）。
+    issue.severity 决定 add_error / add_warning，仍走 ``raise_if_errors`` 聚合裁决
+    （与 phase 2 的 8 项共存，一次报全）。
+
+    规则仅基于 AgentNode 真实字段（executor / output_schema / foreach body），不自创字段。
+    """
+    from orca.profiles import validate_workflow_profiles  # 单向依赖 compile → profiles
+
+    for issue in validate_workflow_profiles(wf):
+        msg = f"node '{issue.node}': {issue.message}"
+        if issue.severity == "error":
+            result.add_error(msg)
+        else:
+            result.add_warning(msg)

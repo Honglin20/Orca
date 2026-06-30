@@ -12,17 +12,20 @@ from pydantic import BaseModel, ConfigDict
 
 # 事件类型全集（Literal 联合体，非 Enum：更兼容 pydantic + IDE，typo 编译期捕获）。
 # 每个 type 旁注释其 data payload 字段。新增类型需改此定义（SPEC §3.4 权衡：可接受的小代价）。
+#
+# 身份维度（顶层字段，非 data）：node = DAG 步骤；session_id = 一次 agent 调用（独立 context）。
+# retry / for_each / parallel 每次调用都产生新 session_id；attempt（第几次重试）reducer 派生，不入库。
 EventType = Literal[
-    # ── workflow 生命周期 ──
+    # ── workflow 生命周期（node=None, session_id=None）──
     "workflow_started",  # data: {inputs, node_count, entry}
     "workflow_completed",  # data: {elapsed, outputs}
-    "workflow_failed",  # data: {error_type, message, node}
-    # ── node 生命周期 ──
-    "node_started",  # data: {node, iteration?}
-    "node_completed",  # data: {node, elapsed, output}
-    "node_failed",  # data: {node, error_type, message}
-    "node_skipped",  # data: {node, reason}
-    # ── agent 流式（claude stream-json 翻译产出）──
+    "workflow_failed",  # data: {error_type, message, node}  # node=导致失败的 node（payload）
+    # ── node 生命周期（顶层 node + session_id 标识本次调用；attempt 派生）──
+    "node_started",  # 本次调用开始（顶层 node + session_id 标识）
+    "node_completed",  # data: {elapsed, output}
+    "node_failed",  # data: {error_type, message}
+    "node_skipped",  # data: {reason}
+    # ── agent 流式（claude stream-json 翻译产出；均带 session_id）──
     "agent_message",  # data: {text}
     "agent_thinking",  # data: {text}
     "agent_tool_call",  # data: {tool, args, tool_call_id}
@@ -50,6 +53,9 @@ class Event(BaseModel):
 
     type 决定 data 的 payload 结构（见 EventType 注释）。data 为自由 dict，
     schema 层不校验各 type 的 payload 字段（由产出方约定）。
+
+    身份维度（顶层）：node = DAG 步骤；session_id = 一次 agent 调用（独立 context）。
+    workflow 级事件两者皆 None；agent 流式事件两者皆有。详见 phase-3 SPEC 身份模型。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -58,4 +64,5 @@ class Event(BaseModel):
     type: EventType
     timestamp: float  # epoch 秒
     node: str | None = None  # 哪个 node 产出；workflow 级为 None
+    session_id: str | None = None  # 哪次 agent 调用（独立 context）；workflow/node 级生命周期可为 None
     data: dict = {}  # 各 type 特定 payload

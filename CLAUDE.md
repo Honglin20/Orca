@@ -4,6 +4,10 @@ This file provides guidance to Claude Code when working with this repository.
 
 > 框架设计与决策见 [docs/TASK.md](docs/TASK.md)。本文件只包含**协作规则**。
 
+## 项目背景
+
+Orca 是对 AgentHarness（前一个 claude code 编排框架）的重写，目标是根治后者的结构性缺陷——前端多 store + 非幂等 reducer 导致渲染卡顿、6 种 sidecar 造成多真相源漂移。本仓库所有架构决策围绕「不重蹈覆辙」展开：单 tape 唯一真相源 + 幂等 reducer + 一条读路径是底线（诊断见 `docs/specs/phase-3-events.md` §1）。
+
 ---
 
 ## 协作原则（12-Rule）

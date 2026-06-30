@@ -7,16 +7,18 @@
 
 ## 当前任务
 
-**无活跃任务** —— 阶段 2（compile/ 解析与校验层）已完成。
+**无活跃任务** —— 阶段 3（events/ + profiles/ + capability 校验闭环）已完成。
 
-- **状态**：✅ 已完成（commit `5b5ba06`，103 测试全绿：schema 50 + compile 53）
-- **release note**：[`docs/releases/2026-06-30-phase2-compile.md`](../releases/2026-06-30-phase2-compile.md)
+- **状态**：✅ 已完成（195 测试全绿：schema 50 + compile 53 + events 45 + profiles 32 + compile-profiles 8... 详见 release note）
+- **release note**：[`docs/releases/2026-06-30-phase3-events-profiles.md`](../releases/2026-06-30-phase3-events-profiles.md)
 - **CHANGELOG**：[`docs/status/CHANGELOG.md`](CHANGELOG.md)
 
 ## 下一步（待启动新 session）
 
-阶段 3：events/（EventBus + tape 持久化）。参考 [`docs/TASK.md`](../TASK.md) §3 / §10 + [`docs/PLAN.md`](../PLAN.md)。
-开工前先写对应阶段 SPEC（`docs/specs/phase-3-events.md`）再实现。
+阶段 4：exec/（executor 子系统）。参考 [`docs/TASK.md`](../TASK.md) §3 / §6 + [`docs/PLAN.md`](../PLAN.md)。
+核心：`make_executor(node) → get_profile(node.executor) → SubprocessExecutor(profile=...)`；
+真 translator 从 AgentHarness 迁移（phase 3 已留 dummy 占位 + 类型契约）；translator 产出 Event → `bus.emit(..., session_id=...)`。
+开工前先写对应阶段 SPEC（`docs/specs/phase-4-exec.md`）再实现。
 
 ## 阶段 2 遗留给 run/ 的运行时校验（勿忘）
 

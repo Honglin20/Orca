@@ -186,6 +186,7 @@ class Event(BaseModel):
     type: EventType                     # 事件类型
     timestamp: float                    # epoch 秒
     node: str | None = None             # 哪个 node 产出；workflow 级为 None
+    session_id: str | None = None       # 哪次 agent 调用（独立 context）；workflow 级为 None
     data: dict = {}                     # 各 type 特定 payload
 ```
 
@@ -193,18 +194,21 @@ class Event(BaseModel):
 
 ```python
 EventType = Literal[
-    # ── workflow 生命周期 ──
+    # 身份维度（顶层字段）：node = DAG 步骤；session_id = 一次 agent 调用（独立 context）。
+    # retry/for_each/parallel 每次调用产生新 session_id；attempt 派生不入库。
+
+    # ── workflow 生命周期（node=None, session_id=None）──
     "workflow_started",                 # data: {inputs, node_count, entry}
     "workflow_completed",               # data: {elapsed, outputs}
-    "workflow_failed",                  # data: {error_type, message, node}
+    "workflow_failed",                  # data: {error_type, message, node}  # node=导致失败的 node
 
-    # ── node 生命周期 ──
-    "node_started",                     # data: {node, iteration?}
-    "node_completed",                   # data: {node, elapsed, output}
-    "node_failed",                      # data: {node, error_type, message}
-    "node_skipped",                     # data: {node, reason}
+    # ── node 生命周期（顶层 node + session_id；attempt 派生）──
+    "node_started",                     # 本次调用开始（顶层 node + session_id）
+    "node_completed",                   # data: {elapsed, output}
+    "node_failed",                      # data: {error_type, message}
+    "node_skipped",                     # data: {reason}
 
-    # ── agent 流式（claude stream-json 翻译产出）──
+    # ── agent 流式（claude stream-json 翻译产出；均带 session_id）──
     "agent_message",                    # data: {text}
     "agent_thinking",                   # data: {text}
     "agent_tool_call",                  # data: {tool, args, tool_call_id}

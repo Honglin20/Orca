@@ -17,6 +17,10 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-06-30] 阶段 3 events/ + profiles/ + capability 校验闭环 —— Tape 唯一真相源（append-only JSONL + Lock 覆盖 seq+write+flush + resume 清残行）+ EventBus（异步 fan-out + session_id 透传）+ 幂等 reducer + CliProfile/ProviderCapabilities 命令替换层 + compile `_check_profiles`（⑨），195 测试全绿（103 基线 + 92 新增，零回归）
+- commit: `41e3db5`（feat(events): phase 3 事件层 + profiles 命令替换层 + capability 校验闭环）
+- 详情：[release note](../releases/2026-06-30-phase3-events-profiles.md)
+
 ## [2026-06-30] 阶段 2 compile/ 解析校验层 —— YAML→Workflow + 两层校验（结构 pydantic + 语义 8 项 + warnings），103 测试全绿
 - commit: `5b5ba06`（feat(compile): phase 2 解析与校验层）
 - 详情：[release note](../releases/2026-06-30-phase2-compile.md)
