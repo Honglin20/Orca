@@ -246,6 +246,44 @@ def serve(
     asyncio.run(run_server(manager, host=host, port=port))
 
 
+@app.command()
+def mcp(
+    with_web: bool = typer.Option(
+        False, "--with-web", help="同进程额外挂 Web UI（stdin EOF 后转 daemon）"
+    ),
+    web_port: int = typer.Option(
+        7428, "--web-port", help="--with-web 模式 Web 监听端口"
+    ),
+    max_concurrent: int = typer.Option(
+        3, "--max-concurrent", help="最大并发 run 数（超过排队）"
+    ),
+    idle_timeout: int = typer.Option(
+        30,
+        "--idle-timeout",
+        help="--with-web 模式下，无活跃 run 持续 N 分钟后退出（仅 daemon 生效）",
+    ),
+) -> None:
+    """启动 MCP server（stdio JSON-RPC），供 Claude Code / opencode / Cursor 接入。
+
+    CC 拉起本命令后通过 stdin/stdout 调四件套工具（start_workflow / get_task_status /
+    resolve_gate / cancel_task）。无 --with-web 时随 CC session 生灭（stdin EOF 退出）；
+    --with-web 时同进程挂 Web UI，stdin EOF 后转 daemon 继续监控（idle_timeout 分钟无活跃 run 退出）。
+    """
+    import asyncio
+
+    # 延迟 import：mcp SDK 仅 mcp 命令需要（让 run/validate/list/serve/--help 不拉 mcp 栈）。
+    from orca.iface.mcp import run_mcp_server
+
+    asyncio.run(
+        run_mcp_server(
+            with_web=with_web,
+            web_port=web_port,
+            max_concurrent=max_concurrent,
+            idle_timeout=idle_timeout,
+        )
+    )
+
+
 # ── 入口 ─────────────────────────────────────────────────────────────────────
 
 

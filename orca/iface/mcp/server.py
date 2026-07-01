@@ -1,8 +1,8 @@
-"""server.py —— MCP server + 工具注册 + stdio 生命周期（SPEC phase-10 §1 §2）。
+"""server.py —— MCP server 骨架 + 工具注册 + stdio 生命周期（SPEC phase-10 §1 §2）。
 
 回答「外部 MCP 客户端（Claude Code / opencode / Cursor）怎么把 Orca workflow 当工具调？」：
-单 ``RunManager`` + ``FastMCP`` + HandleId 工具集，stdio JSON-RPC。所有 tool 秒级返回
-（§0.1 第三条 HandleId pattern）。
+单 ``RunManager`` + ``FastMCP`` + HandleId 三件套工具（start_workflow / get_task_status /
+resolve_gate）+ cancel_task，stdio JSON-RPC。所有 tool 秒级返回（§0.1 第三条 HandleId pattern）。
 
 设计规则（SPEC §0.1 七条铁律 / §1.4 单例 / §1.3 stdin EOF 双行为）：
   - **单进程单 RunManager**：``run_mcp_server`` 构造后立刻 ``_assert_runmanager_singleton``
@@ -10,27 +10,34 @@
   - **HandleId pattern**：tool 不阻塞等 gate / 等事件（CC 60s 超时）。start_workflow 复用
     ``manager.start_run``（非阻塞后台 task）；get_task_status 读 tape（replay_state +
     pending_gates）；resolve_gate 复用 ``handler.resolve``（同步非阻塞）。
-  - **stdio flush 兜底**：``run_stdio`` 用 SDK 默认 stdio；``transport.FlushingStdoutWriter``
-    留作纵深防御 + 单测 mock。
+  - **stdio flush 兜底**：``run_stdio`` 用 SDK 默认 stdio（SDK 1.27.2 已每行 flush）；
+    ``transport.FlushingStdoutWriter`` 留作纵深防御 + 单测 mock。
   - **source="mcp"**：resolve_gate 第三参数写死（壳标识，§0.1 第五条）。
   - **不依赖客户端能力**：禁用 elicitation / progress notification（§0.1 第六条）。
   - **返回值文本摘要**：get_task_status 返回 dict 无 dag/chart_json（§0.1 第七条）。
-
-D3：补 start_workflow / get_task_status / resolve_gate 三件套（D4 补 cancel_task + 生命周期）。
+  - **stdin EOF 双行为**：无 --with-web → run_stdio 返回即 drain + 退出；有 --with-web
+    → run_stdio 返回后进 daemon 模式等 idle/signal（§1.3）。
 
 依赖单向：本模块依赖 ``orca.iface.web.run_manager``（RunManager，同进程共享）+
-``orca.iface.mcp.transport`` + ``orca.iface.mcp.hints`` + mcp SDK。**不含**编排/gate 决策
-逻辑——manager 才是托管入口。
+``orca.gates``（HumanGate 类型）+ ``orca.iface.mcp.transport`` + ``orca.iface.mcp.hints`` +
+mcp SDK（FastMCP / stdio_server）。**不含**编排/gate 决策逻辑——manager 才是托管入口。
 """
 
 from __future__ import annotations
 
+import asyncio
 import gc
-import inspect
 import logging
+import signal
 from typing import TYPE_CHECKING, Any
 
-from orca.iface.mcp.hints import after_resolve, after_start, by_status, unknown_task
+from orca.iface.mcp.hints import (
+    after_cancel,
+    after_resolve,
+    after_start,
+    by_status,
+    unknown_task,
+)
 from orca.iface.mcp.transport import FlushingStdoutWriter  # noqa: F401 — 纵深防御，单测/SPEC §4.4 引用
 
 if TYPE_CHECKING:
@@ -67,6 +74,13 @@ def _assert_runmanager_singleton(manager: RunManager) -> None:
 
 class OrcaMcpServer:
     """单 RunManager + FastMCP + tool 注册（SPEC §1.4 / §2）。
+
+    用法::
+
+        manager = RunManager(max_concurrent=3)
+        _assert_runmanager_singleton(manager)
+        server = OrcaMcpServer(manager)
+        await server.run_stdio()  # 阻塞，stdin EOF 退出
 
     Tool 实现作为 **bound method**（``self.tool_start_workflow`` 等），既给 FastMCP 注册
     也给单测直接调（绕开 stdio round-trip，SPEC §D3.5 / §D4.4）。
@@ -151,6 +165,19 @@ class OrcaMcpServer:
             "_hint": after_resolve(ok),
         }
 
+    async def tool_cancel_task(self, task_id: str, reason: str | None = None) -> dict:
+        """取消 run。已终态的 run 调它返回 ok=False。
+
+        **Always call get_task_status(task_id=...) after this returns** to confirm
+        the run entered the cancelled state.
+        """
+        ok = await self._manager.cancel_run(task_id, reason)
+        return {
+            "ok": ok,
+            "status": "cancelled" if ok else "terminal",
+            "_hint": after_cancel(ok),
+        }
+
     # ── 构造 + 注册 ────────────────────────────────────────────────────────────
 
     def __init__(self, manager: RunManager) -> None:
@@ -161,15 +188,15 @@ class OrcaMcpServer:
         self._register_tools()
 
     def _register_tools(self) -> None:
-        """注册三件套到 FastMCP（SPEC §2.1）。
+        """注册四件套到 FastMCP（SPEC §2.1）。
 
         ``FastMCP.add_tool(fn, name, description=...)``：fn 的类型注解自动派生 inputSchema，
         description 来自 tool docstring（含强指令，§2.4）。bound method 直接传——FastMCP
         内部用 ``inspect.signature`` 解析参数注解。``inspect.cleandoc`` 去除 docstring 缩进，
         让客户端看到的 description 不带前导空格。
-
-        D4 在此追加 cancel_task。
         """
+        import inspect
+
         self._mcp.add_tool(
             self.tool_start_workflow,
             name="start_workflow",
@@ -184,6 +211,11 @@ class OrcaMcpServer:
             self.tool_resolve_gate,
             name="resolve_gate",
             description=inspect.cleandoc(self.tool_resolve_gate.__doc__ or ""),
+        )
+        self._mcp.add_tool(
+            self.tool_cancel_task,
+            name="cancel_task",
+            description=inspect.cleandoc(self.tool_cancel_task.__doc__ or ""),
         )
 
     # ── stdio 生命周期 ─────────────────────────────────────────────────────────
@@ -210,8 +242,15 @@ async def run_mcp_server(
 ) -> None:
     """启动 MCP server（SPEC §1.4 / §5.5）。
 
-    D3 仅落 start_workflow / get_task_status / resolve_gate 三件套；D4 补 cancel_task
-    + stdin EOF 双行为生命周期（--with-web 守护模式）。
+    入口（``orca mcp`` 命令调）。流程：
+      1. 构造唯一 RunManager（``runs_dir`` 可覆盖，测试用 tmp_path）。
+      2. ``_assert_runmanager_singleton`` 断言进程内实例数 == 1。
+      3. 构造 OrcaMcpServer。
+      4. 可选挂 Web（``--with-web``）：同进程 asyncio task 跑 ``run_server``，共享 manager。
+      5. ``run_stdio`` 阻塞跑（stdin EOF 返回）。
+      6. 生命周期分支（§1.3）：
+         - 无 --with-web：drain in-flight tool call（最大 5s）+ cancel 后台 run + 退出。
+         - 有 --with-web：进 daemon 模式，等 idle_timeout 分钟无活跃 run OR SIGINT/SIGTERM。
     """
     from pathlib import Path
 
@@ -224,4 +263,112 @@ async def run_mcp_server(
     _assert_runmanager_singleton(manager)
 
     server = OrcaMcpServer(manager)
-    await server.run_stdio()
+
+    web_task: asyncio.Task | None = None
+    if with_web:
+        web_task = asyncio.create_task(
+            _run_web_in_process(manager, port=web_port),
+            name="orca-mcp-web-sidecar",
+        )
+        logger.info("MCP --with-web: Web UI 同进程挂载于 http://127.0.0.1:%d", web_port)
+
+    try:
+        await server.run_stdio()
+    finally:
+        # stdin EOF 已到。SPEC §1.3 双行为分支。
+        if not with_web:
+            await _drain_and_cancel(manager, web_task)
+        else:
+            await _wait_for_idle_or_signal(manager, idle_timeout, web_task)
+
+
+async def _run_web_in_process(manager: RunManager, *, port: int) -> None:
+    """同进程 asyncio task 跑 Web server（SPEC §1.4 / §0.1 第一条）。
+
+    共享同一 manager 实例（**禁止** subprocess 起 Web——会丢失 in-memory run owner）。
+    用 asyncio task（非 thread）：``run_server`` 本就是 async，与 MCP 同 loop 跑最干净，
+    零线程间同步。
+    """
+    from orca.iface.web import run_server
+
+    await run_server(manager, host="127.0.0.1", port=port)
+
+
+async def _drain_and_cancel(
+    manager: RunManager, web_task: asyncio.Task | None
+) -> None:
+    """纯 MCP 模式收尾：drain in-flight tool + cancel 后台 run（SPEC §1.3）。
+
+    - 等 in-flight tool call（最大 5s）：复用 ``manager.shutdown`` 的 timeout 机制。
+    - cancel 所有未完成 run task（gate-await 的 / orchestrator 跑的）。
+    - 关 Web task（若误进——shouldn't happen in this branch）。
+    """
+    if web_task is not None and not web_task.done():
+        web_task.cancel()
+        try:
+            await web_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+    try:
+        await manager.shutdown(timeout=5.0)
+    except Exception:  # noqa: BLE001 — shutdown 不应崩退出路径
+        logger.warning("manager.shutdown 异常（退出路径兜底吞）", exc_info=True)
+
+
+async def _wait_for_idle_or_signal(
+    manager: RunManager,
+    idle_timeout_minutes: int,
+    web_task: asyncio.Task | None,
+) -> None:
+    """daemon 模式：等无活跃 run 持续 N 分钟 OR SIGINT/SIGTERM（SPEC §1.3）。
+
+    退出条件（任一满足）：
+      - 连续 ``idle_timeout_minutes`` 分钟无 status in {queued, running} 的 run。
+      - 收到 SIGINT / SIGTERM。
+
+    退出时收尾：cancel 后台 run + 关 Web task。
+    """
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
+
+    def _on_signal(signum: int) -> None:
+        logger.info("MCP daemon 收到信号 %d，开始退出", signum)
+        stop_event.set()
+
+    # 信号处理（Unix；Windows NotImplementedError 退化到默认 KeyboardInterrupt）。
+    installed_sigs: list[signal.Signals] = []
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _on_signal, sig)
+            installed_sigs.append(sig)
+        except (NotImplementedError, RuntimeError):
+            pass
+
+    idle_seconds = max(0, idle_timeout_minutes) * 60
+    idle_since: float | None = None
+
+    try:
+        while not stop_event.is_set():
+            await asyncio.sleep(60)
+            active = sum(
+                1
+                for h in manager._runs.values()
+                if h.status in ("queued", "running")
+            )
+            if active == 0:
+                if idle_since is None:
+                    idle_since = loop.time()
+                elif loop.time() - idle_since >= idle_seconds:
+                    logger.info(
+                        "MCP daemon 无活跃 run 持续 %d 分钟，退出", idle_timeout_minutes
+                    )
+                    return
+            else:
+                idle_since = None
+    finally:
+        for sig in installed_sigs:
+            try:
+                loop.remove_signal_handler(sig)
+            except (NotImplementedError, RuntimeError, ValueError):
+                pass
+        await _drain_and_cancel(manager, web_task)

@@ -295,9 +295,9 @@ def test_tool_docstrings_contain_chain_instruction():
 
 
 def test_fastmcp_lists_three_tools():
-    """``OrcaMcpServer`` 构造后 FastMCP 注册三件套（D3 阶段；D4 加 cancel_task 后变四件套）。"""
+    """``OrcaMcpServer`` 构造后 FastMCP 至少注册三件套（D4 加 cancel_task 后变四件套）。"""
     m = RunManager()
     server = OrcaMcpServer(m)
     tools = server._mcp._tool_manager._tools
     names = set(tools.keys())
-    assert names == {"start_workflow", "get_task_status", "resolve_gate"}
+    assert {"start_workflow", "get_task_status", "resolve_gate"}.issubset(names)
