@@ -337,3 +337,214 @@ def test_single_read_path_apply_event_is_the_reducer():
     finally:
         tape2.close()
     assert replayed == s  # live（逐 apply_event）== replay（fold apply_event）
+
+
+# ── phase 11 收官 e2e sweep：reducer 穷尽性 + 富 phase-11 tape 回放 ──────────────
+#
+# 这两个测试是 phase 11 final sweep 的回归守门：
+#   1. **穷尽性**：遍历 EventType Literal 全集，断言每个 type 要么有 reducer 分支（投影状态）
+#      要么在显式 no-op 集合里（且**不**触发 fail-loud warning）。回归场景：未来新增
+#      EventType 忘了加 reducer 分支 → 现有 test_known_noop_events_dont_mutate_state
+#      （硬编码 8 个）抓不到，test_unknown_event_type_warns_fail_loud 只测一个虚构 type；
+#      本测试遍历真 Literal 全集，新增 type 漏 reducer 分支时立即可见（warning = 漏分支）。
+#   2. **富 phase-11 tape**：构造含所有 phase 11 事件类型（interrupt_* / prompt_rendered /
+#      workflow_resumed / retry_* / wait_* / validator_* / dialog_*）交错的 tape，replay 不崩
+#      + 终态正确。回归场景：未来 reducer 改动让富 phase-11 tape 回放挂掉（reducer 不幂等 /
+#      分支顺序依赖 / 顶层 RunState schema 变）会被此测试抓住。
+
+
+def test_every_event_type_has_reducer_branch_or_explicit_noop(caplog):
+    """穷尽性守门：遍历 EventType Literal 全集，每个 type 应用都不触发 fail-loud warning。
+
+    INTENT（SPEC §6.0 铁律 4 / final sweep item8 等价 reducer 侧）：reducer 对每个 EventType
+    要么投影状态（有专属分支），要么显式 no-op（在 apply_event 的 no-op 集合里）。触发 warning
+    路径意味着「新增了 EventType 但 reducer 没跟上」——单 Tape 唯一真相源会静默丢该事件的
+    状态投影，违反 fail-loud。
+
+    与既有测试的区别：
+      - test_known_noop_events_dont_mutate_state：硬编码 8 个 type，新增 type 漏分支抓不到。
+      - test_unknown_event_type_warns_fail_loud：用 model_construct 造虚构 type，只验 warning
+        路径本身；不验「真 Literal 全集都不走 warning」。
+      - 本测试：遍历真 Literal，新增 type 漏 reducer 分支时立即可见。
+    """
+    import logging
+    import typing
+
+    from orca.schema import EventType
+
+    types = typing.get_args(EventType)
+    assert len(types) > 0  # sanity：Literal 非空（防止 import 漂移）
+
+    s = _state()
+    with caplog.at_level(logging.WARNING):
+        for i, t in enumerate(types):
+            # 用合理 node/session/data 构造（reducer 只读 type + node + data.get(...)，对 payload
+            # 形状不敏感；workflow 级事件 node=None）。
+            is_workflow_level = t.startswith("workflow_")
+            s = apply_event(
+                s, _evt(
+                    t, seq=i + 1,
+                    node=None if is_workflow_level else "a",
+                    session_id="s1" if not is_workflow_level else None,
+                ),
+            )
+
+    # 无任何 type 走到 fail-loud warning 分支（即无「reducer 无 X 分支」记录）。
+    leaked = [r.message for r in caplog.records if "无 " in r.message and "分支" in r.message]
+    assert leaked == [], (
+        f"以下 EventType 触发了 fail-loud warning（reducer 漏分支 / 漏 no-op 集合）：{leaked}"
+    )
+
+
+def test_replay_tape_rich_with_all_phase11_event_types_no_crash(tmp_path):
+    """富 phase-11 tape 回放守门：含全部 phase 11 事件类型交错，replay 不崩 + 终态正确。
+
+    INTENT（final sweep C 项）：phase 11 引入 14 个新事件类型（interrupt_* / prompt_rendered /
+    workflow_resumed / retry_* / wait_* / validator_* / dialog_*）。一个真实 phase-11 workflow
+    的 tape 会交错这些类型（node 重试时 retry_started 夹 node_started 之间；wait node 夹
+    interrupt_resolved 之间；validator 夹 node_completed 之间）。本测试构造这样一个交错
+    tape，断言：
+      1. replay_state 不崩（未来 reducer 改动让富 tape 回放挂掉会被抓）。
+      2. 终态正确：最后一个 route_taken 的 to 字段 = current_node；node_status 反映各 node
+         最终状态（done / skipped / failed）。
+      3. 幂等：replay 两次结果相同（SPEC §6.0 铁律 2）。
+
+    回归场景：
+      - 未来 reducer 给 retry_started/validator_started 加 node_status 推进（让同 node 多 attempt
+        状态反复跳）→ 终态 node_status 会错（取到中间 attempt 而非最终）。
+      - 未来 reducer 给 wait_started 加 current_node 覆盖 → current_node 会被 wait 事件污染。
+      - 未来 RunState schema 变（加必填字段）→ 老 tape 回放挂。
+    """
+    path = tmp_path / "rich.jsonl"
+    tape = Tape(path, run_id="r1")
+    try:
+        # workflow 起 + 入口 node a（agent，配 retry + validator）。
+        _run(tape.append({"type": "workflow_started", "timestamp": 1.0,
+                          "node": None, "session_id": None,
+                          "data": {"workflow_name": "rich_wf", "entry": "a"}}))
+        # node a 第一次 attempt：started → prompt → 失败（spawn_error，可重试）。
+        _run(tape.append({"type": "node_started", "timestamp": 2.0,
+                          "node": "a", "session_id": "s1", "data": {"kind": "agent"}}))
+        _run(tape.append({"type": "prompt_rendered", "timestamp": 2.1,
+                          "node": "a", "session_id": "s1",
+                          "data": {"node": "a", "session_id": "s1", "preview": "do A"}}))
+        _run(tape.append({"type": "retry_started", "timestamp": 2.5,
+                          "node": "a", "session_id": "s1",
+                          "data": {"attempt": 2, "max_attempts": 3, "error_type": "spawn_error",
+                                   "delay_seconds": 0.0}}))
+        _run(tape.append({"type": "node_failed", "timestamp": 2.4,
+                          "node": "a", "session_id": "s1",
+                          "data": {"error_type": "spawn_error", "message": "boom",
+                                   "phase": "spawn"}}))
+        # node a 第二次 attempt：started → prompt → completed（output 写入）。
+        _run(tape.append({"type": "node_started", "timestamp": 3.0,
+                          "node": "a", "session_id": "s2", "data": {"kind": "agent"}}))
+        _run(tape.append({"type": "prompt_rendered", "timestamp": 3.1,
+                          "node": "a", "session_id": "s2",
+                          "data": {"node": "a", "session_id": "s2", "preview": "do A (retry)"}}))
+        _run(tape.append({"type": "retry_succeeded", "timestamp": 3.2,
+                          "node": "a", "session_id": "s2",
+                          "data": {"attempt_total": 2, "node": "a"}}))
+        # validator：started → failed（重试）→ started → passed。
+        _run(tape.append({"type": "validator_started", "timestamp": 3.3,
+                          "node": "a", "session_id": "s2",
+                          "data": {"node": "a", "criteria_preview": "must be valid"}}))
+        _run(tape.append({"type": "validator_failed", "timestamp": 3.4,
+                          "node": "a", "session_id": "s2",
+                          "data": {"node": "a", "issues": ["bad"], "retrying": True}}))
+        _run(tape.append({"type": "validator_started", "timestamp": 3.5,
+                          "node": "a", "session_id": "s2",
+                          "data": {"node": "a", "criteria_preview": "must be valid"}}))
+        _run(tape.append({"type": "validator_passed", "timestamp": 3.6,
+                          "node": "a", "session_id": "s2",
+                          "data": {"node": "a", "issues": []}}))
+        _run(tape.append({"type": "node_completed", "timestamp": 3.7,
+                          "node": "a", "session_id": "s2",
+                          "data": {"output": {"result": "ok-a"}, "elapsed": 0.7}}))
+        # route a → b（wait node）。
+        _run(tape.append({"type": "route_taken", "timestamp": 4.0,
+                          "node": None, "session_id": None,
+                          "data": {"from": "a", "to": "b"}}))
+        # node b：wait node，被 Ctrl+G 打断。
+        _run(tape.append({"type": "node_started", "timestamp": 4.1,
+                          "node": "b", "session_id": "s3", "data": {"kind": "wait"}}))
+        _run(tape.append({"type": "wait_started", "timestamp": 4.2,
+                          "node": "b", "session_id": "s3",
+                          "data": {"duration_seconds": 60.0, "reason": "rate limit"}}))
+        _run(tape.append({"type": "interrupt_requested", "timestamp": 4.3,
+                          "node": "b", "session_id": None,
+                          "data": {"interrupt_id": "i1", "node": "b", "run_id": "r1",
+                                   "elapsed_at_request": 0.1, "source": "cli"}}))
+        _run(tape.append({"type": "wait_completed", "timestamp": 4.4,
+                          "node": "b", "session_id": "s3",
+                          "data": {"elapsed_seconds": 0.1, "interrupted": True}}))
+        _run(tape.append({"type": "interrupt_resolved", "timestamp": 4.5,
+                          "node": "b", "session_id": None,
+                          "data": {"interrupt_id": "i1", "action": "continue",
+                                   "guidance": "skip weights", "resolved_by": "cli"}}))
+        _run(tape.append({"type": "node_completed", "timestamp": 4.6,
+                          "node": "b", "session_id": "s3",
+                          "data": {"output": {"interrupted": True}, "elapsed": 0.1}}))
+        # route b → c。
+        _run(tape.append({"type": "route_taken", "timestamp": 5.0,
+                          "node": None, "session_id": None,
+                          "data": {"from": "b", "to": "c"}}))
+        # node c：skipped（用户 P4 显式 skip 到下游）。
+        _run(tape.append({"type": "node_skipped", "timestamp": 5.1,
+                          "node": "c", "session_id": None,
+                          "data": {"reason": "user_interrupt_skip"}}))
+        _run(tape.append({"type": "interrupt_resolved", "timestamp": 5.2,
+                          "node": "c", "session_id": None,
+                          "data": {"interrupt_id": "i2", "action": "skip",
+                                   "skip_target": "$end", "resolved_by": "cli"}}))
+        _run(tape.append({"type": "route_taken", "timestamp": 5.3,
+                          "node": None, "session_id": None,
+                          "data": {"from": "c", "to": "$end"}}))
+        # dialog（post-run，node a 上多轮）。
+        _run(tape.append({"type": "dialog_started", "timestamp": 6.0,
+                          "node": "a", "session_id": "dlg1",
+                          "data": {"node": "a", "session_id": "dlg1",
+                                   "initial_prompt": "why X?"}}))
+        _run(tape.append({"type": "dialog_message", "timestamp": 6.1,
+                          "node": "a", "session_id": "dlg1",
+                          "data": {"role": "user", "text": "why?", "turn": 1}}))
+        _run(tape.append({"type": "dialog_message", "timestamp": 6.2,
+                          "node": "a", "session_id": "dlg1",
+                          "data": {"role": "agent", "text": "because", "turn": 1}}))
+        _run(tape.append({"type": "dialog_ended", "timestamp": 6.3,
+                          "node": "a", "session_id": "dlg1",
+                          "data": {"node": "a", "total_turns": 1, "conclusion": "done"}}))
+        _run(tape.append({"type": "workflow_resumed", "timestamp": 7.0,
+                          "node": None, "session_id": None,
+                          "data": {"from_tape": "rich.jsonl", "resumed_node": "c",
+                                   "replayed_events": 20}}))
+        _run(tape.append({"type": "workflow_completed", "timestamp": 8.0,
+                          "node": None, "session_id": None,
+                          "data": {"elapsed": 7.0, "outputs": {}}}))
+    finally:
+        tape.close()
+
+    # replay 两次（验幂等：富 tape 重放两次结果相同）。
+    t1 = Tape(path, run_id="r1")
+    t2 = Tape(path, run_id="r1")
+    try:
+        state1 = replay_state(t1)
+        state2 = replay_state(t2)
+    finally:
+        t1.close()
+        t2.close()
+
+    assert state1 == state2  # 幂等（SPEC §6.0 铁律 2）
+
+    # 终态断言（reducer 投影的正确性，可观测结果）。
+    assert state1.status == "completed"
+    assert state1.workflow_name == "rich_wf"
+    # current_node = 最后一个 route_taken 的 to（c → $end 之间 reducer 把 to=$end 写入；
+    # workflow_completed 把 current_node 置 None）。
+    assert state1.current_node is None
+    # node_status：a 最终 done（重试 + validator 后）；b done；c skipped。
+    assert state1.node_status.get("a") == "done"
+    assert state1.node_status.get("b") == "done"
+    assert state1.node_status.get("c") == "skipped"
+    # context：a 的最终 output 是 s2 的（last-writer-wins，retry 后的正确输出）。
+    assert state1.context.get("a") == {"result": "ok-a"}

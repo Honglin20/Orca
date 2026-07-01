@@ -86,6 +86,9 @@ def _describe(event_type: str, data: dict[str, Any]) -> str:
         return f"node completed ({data.get('elapsed', '?')}s)"
     if event_type == "node_failed":
         return f"node FAILED: {data.get('message', data.get('error_type', '?'))}"
+    if event_type == "node_skipped":
+        # skipped node（用户 SKIP / route 容错跳过）。显示原因（可观测）。
+        return f"node skipped: {data.get('reason', '?')}"
     if event_type == "human_decision_requested":
         return f"gate: {_truncate(data.get('prompt', ''))}"
     if event_type == "human_decision_resolved":
@@ -96,8 +99,28 @@ def _describe(event_type: str, data: dict[str, Any]) -> str:
         return "workflow completed"
     if event_type == "workflow_failed":
         return f"workflow FAILED: {data.get('error_type', '?')}"
+    if event_type == "workflow_cancelled":
+        # 用户取消（MCP cancel_task / RunManager.cancel_run）。显示取消原因（可观测）。
+        return f"workflow cancelled: {data.get('reason', '?')}"
     if event_type == "route_taken":
         return f"route: {data.get('from', '?')} → {data.get('to', '?')}"
+    # ── 并发（foreach）：让用户在 LogStream 看到 fan-out 进度 ──────────────────
+    if event_type == "foreach_started":
+        return (
+            f"fan-out: {data.get('item_count', '?')} items "
+            f"(concurrency={data.get('max_concurrent', '?')})"
+        )
+    if event_type == "foreach_item_started":
+        return f"  item[{data.get('index', '?')}] started: {data.get('item_key', '?')}"
+    if event_type == "foreach_item_completed":
+        return f"  item[{data.get('index', '?')}] completed"
+    if event_type == "foreach_completed":
+        return f"fan-out done: {data.get('count', '?')} items (succeeded={data.get('succeeded', '?')})"
+    # ── 自定义渲染 + 错误（MCP 工具产出 / 内部错误）──────────────────────────
+    if event_type == "custom":
+        return f"custom: {data.get('kind', '?')}"
+    if event_type == "error":
+        return f"error: {data.get('message', data.get('error_type', '?'))}"
     # phase 11 §3 / §4：中断 + Guidance 可观测事件。
     if event_type == "interrupt_requested":
         return (

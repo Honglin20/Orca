@@ -118,7 +118,7 @@ def apply_event(state: RunState, event: Event) -> RunState:
         return state.model_copy(update={"current_node": to})
 
     # 已知但顶层 RunState 不投影的事件：foreach_* / human_decision_* / custom / error /
-    # phase 11 中断 + resume + retry + validator + wait 可观测事件。
+    # phase 11 中断 + resume + retry + validator + wait + dialog 可观测事件。
     # 这些事件的语义留给前端 reducer（按 session_id 分组 / 自定义渲染）：
     # - foreach 输出随 node_completed 进 context；
     # - gate 决策、custom 渲染不进顶层状态；
@@ -129,6 +129,8 @@ def apply_event(state: RunState, event: Event) -> RunState:
     #   retry/validator 的最终成败由它们包裹的 node_completed/node_failed 承担，retry_started/
     #   validator_started 等本身不推进 node_status —— 否则同 node 多 attempt 会让 running/done
     #   状态反复跳）。
+    # - dialog_*（SPEC §11.7 裁定 1）：dialog 是 post-run 可观测事件，唯一真相在 tape 的
+    #   dialog_message 事件（不写 ctx.dialog_history）；不推进 node_status / current_node。
     # 保持 reducer 幂等 + 最小。
     if t in (
         "foreach_started", "foreach_item_started", "foreach_item_completed",
@@ -137,6 +139,7 @@ def apply_event(state: RunState, event: Event) -> RunState:
         "workflow_resumed", "retry_started", "retry_succeeded", "retry_exhausted",
         "validator_started", "validator_passed", "validator_failed",
         "wait_started", "wait_completed",
+        "dialog_started", "dialog_message", "dialog_ended",
         "custom", "error",
     ):
         return state
