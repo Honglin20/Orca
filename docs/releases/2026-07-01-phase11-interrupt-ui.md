@@ -3,7 +3,7 @@
 > **日期**：2026-07-01
 > **SPEC**：[phase-11-cli-enrichment.md](../specs/phase-11-cli-enrichment.md) §2.2 / §2.3 / §2.4 / §3
 > **PLAN**：[2026-07-01-phase11-cli-enrichment.md](../plans/2026-07-01-phase11-cli-enrichment.md) P0.2 + P1.1（Step A 部分）
-> **commit**：`<TBD>`
+> **commit**：`9db57f4`
 > **状态**：Step A 完成（中断 UI + orchestrator wiring）；Step B（guidance 注入 + SIGINT）随后
 
 ---

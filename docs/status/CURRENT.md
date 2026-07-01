@@ -14,7 +14,7 @@ Step A（中断 UI + orchestrator wiring）已 commit；Step B（guidance 注入
 - **SPEC**：[`docs/specs/phase-11-cli-enrichment.md`](../specs/phase-11-cli-enrichment.md) §3（中断 UI）/ §4（guidance）/ §2.3（request_interrupt）/ §10.3（review 修订）
 - **计划**：[`docs/plans/2026-07-01-phase11-cli-enrichment.md`](../plans/2026-07-01-phase11-cli-enrichment.md) P0.2 + P1.1（顶部 9 处 API 订正）
 
-## Step A 已完成（commit `<TBD>`）
+## Step A 已完成（commit `9db57f4`）
 
 - `orca/gates/_broadcaster_mixin.py`（DRY 抽 mixin）+ `interrupt.py`（InterruptHandler）。
 - `orca/gates/types.py`（InterruptRequest）+ `schema/event.py`（+3 事件类型）。
