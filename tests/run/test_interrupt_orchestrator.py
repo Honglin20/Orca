@@ -80,8 +80,9 @@ def test_handle_interrupt_continue_accumulates_guidance(tmp_path):
             id="i1", node="a", run_id="r1", session_id="s1", elapsed_at_request=1.0,
         )
         orch._interrupt_pending = ireq
-        action = await orch._handle_interrupt("a", {})
+        action, skip_target = await orch._handle_interrupt("a", {})
         assert action == "continue"
+        assert skip_target is None  # continue 分支无 skip_target
         assert orch._guidance_acc == ["用 CPU"]
         # _make_ctx 注入 guidance
         ctx = orch._make_ctx({})
@@ -106,28 +107,34 @@ def test_handle_interrupt_continue_no_guidance_no_accumulation(tmp_path):
 
 
 def test_handle_interrupt_abort_returns_abort(tmp_path):
-    """abort → _handle_interrupt 返回 abort（drive_loop 据 raise WorkflowAborted）。"""
+    """abort → _handle_interrupt 返回 (abort, None)（drive_loop 据 raise WorkflowAborted）。"""
 
     async def scenario():
         orch = _make_orch(tmp_path, interrupt_handler=_FakeInterruptHandler("abort"))
         ireq = InterruptRequest(id="i1", node="a", run_id="r1", elapsed_at_request=1.0)
         orch._interrupt_pending = ireq
-        action = await orch._handle_interrupt("a", {})
+        action, skip_target = await orch._handle_interrupt("a", {})
         assert action == "abort"
+        assert skip_target is None  # abort 分支无 skip_target
         orch.bus.close()
 
     run_async(scenario())
 
 
 def test_handle_interrupt_skip_returns_skip(tmp_path):
-    """skip → _handle_interrupt 返回 skip（drive_loop 据此推进下一 node）。"""
+    """skip → _handle_interrupt 返回 (skip, None)（无显式 target 时；drive_loop 据此推进下一 node）。
+
+    P4 后 _handle_interrupt 返回 tuple；显式 skip_target 的端到端覆盖见
+    tests/run/test_skip_to_agent.py。
+    """
 
     async def scenario():
         orch = _make_orch(tmp_path, interrupt_handler=_FakeInterruptHandler("skip"))
         ireq = InterruptRequest(id="i1", node="a", run_id="r1", elapsed_at_request=1.0)
         orch._interrupt_pending = ireq
-        action = await orch._handle_interrupt("a", {})
+        action, skip_target = await orch._handle_interrupt("a", {})
         assert action == "skip"
+        assert skip_target is None  # 无显式 target（走 route 求值）
         orch.bus.close()
 
     run_async(scenario())

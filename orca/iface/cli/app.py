@@ -654,11 +654,28 @@ class OrcaApp(App):
         modal = InterruptModal(ireq)
         action, guidance = await self.push_screen_wait(modal)
 
+        # phase 11 §9 P4：SKIP 时弹 NodeSelectModal 让用户选目标 node。
+        # - 用户选具体 node → skip_target = 该 node 名（直接跳，不经 route 求值）。
+        # - 用户选「route-default」/ Esc → skip_target = None（走兜底 route / 默认下一 node）。
+        # 放在 request_interrupt 之前：把目标随中断请求一起登记，node 边界 _handle_interrupt
+        # 一次性消费（action + guidance + skip_target）。
+        skip_target: str | None = None
+        if action == "skip":
+            from orca.iface.cli.screens.node_select_modal import NodeSelectModal
+
+            # 候选 = workflow 全部 node 名 + parallel 组名（排除当前 node，modal 内再滤一次）。
+            candidates = [n.name for n in self.wf.nodes]
+            candidates.extend(g.name for g in self.wf.parallel)
+            select_modal = NodeSelectModal(current_node=node, candidate_nodes=candidates)
+            skip_target = await self.push_screen_wait(select_modal)
+
         # CLI 单壳路径（SPEC §3.1 时序）：用户已在 modal 答完，把 (action, guidance) 随
         # request_interrupt 一起带入。orchestrator 在 node 边界 _handle_interrupt 直接消费它
         # （record_resolved emit requested + 入队 resolved 写 Tape），**不**调 handler.resolve
         # ——resolve 是多壳竞速路径（await-future），CLI 单壳不需要且时序不匹配（review §2.1）。
-        orch.request_interrupt(ireq, answer=(action, guidance))
+        orch.request_interrupt(
+            ireq, answer=(action, guidance), skip_target=skip_target,
+        )
 
     # ── phase 11 §6：Dialog（agent 跑完后多轮追问）──────────────────────
 

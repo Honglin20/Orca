@@ -1,0 +1,53 @@
+name: demo_skip
+description: |
+  phase 11 §9 P4 Skip to Agent 演示。3-agent 线性链（analyzer → configurator → runner），
+  验证 Ctrl+G + SKIP + 选目标 node 跳过中间 node 的能力。
+
+  真实 E2E walkthrough（需 claude CLI + ANTHROPIC_API_KEY）：
+
+    orca run examples/demo_skip.yaml
+
+  跑到 analyzer 时按 Ctrl+G → InterruptModal：
+    - CONTINUE：analyzer 重跑（可带 guidance）。
+    - SKIP：弹 NodeSelectModal 选目标 node：
+        * route-default (next)：沿兜底 route 跳（本 wf analyzer 无兜底，会 NoRouteMatch →
+          此选项适合有 when=None 兜底的 wf）。
+        * configurator：跳到 configurator（analyzer 被 skip，output=None）。
+        * runner：直接跳到 runner，绕过 configurator。
+    - ABORT：中止 workflow。
+
+  P4 关键验证点：
+    1. SKIP + 选 runner → tape 含 node_skipped{analyzer} + route_taken{analyzer→runner}，
+       configurator 不执行（被绕过）。
+    2. interrupt_resolved.data 含 skip_target: "runner"（可观测跳转意图）。
+    3. runner 的 prompt 引用 analyzer.output 时，因 analyzer 被 skip（output=None），
+       route 求值容错（§9.2）—— 本 wf runner prompt 用 default filter 显式兜底。
+
+  automatable 证明见 tests/run/test_skip_to_agent.py（fake executor，不依赖真 claude）。
+entry: analyzer
+inputs:
+  topic:
+    type: string
+    description: "分析主题"
+    default: "Orca 的 Skip to Agent 设计"
+nodes:
+  - name: analyzer
+    kind: agent
+    prompt: "分析 {{ inputs.topic }}，输出一段摘要"
+    routes:
+      - to: configurator
+  - name: configurator
+    kind: agent
+    # analyzer 被 skip 时 output=None，用 default filter 兜底（避免 StrictUndefined 崩溃）。
+    prompt: >-
+      基于 analyzer 的摘要（{{ analyzer.output | default('<skipped: analyzer 未跑>') }}），
+      生成配置方案
+    routes:
+      - to: runner
+  - name: runner
+    kind: agent
+    prompt: "执行方案：{{ configurator.output | default('<skipped: configurator 未跑>') }}"
+    routes:
+      - to: $end
+outputs:
+  result: "{{ runner.output }}"

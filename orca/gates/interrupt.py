@@ -44,7 +44,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from orca.gates._broadcaster_mixin import BroadcasterMixin
 from orca.gates.types import InterruptAction, InterruptRequest, InterruptSource
@@ -137,9 +137,15 @@ class InterruptHandler(BroadcasterMixin):
         action: InterruptAction,
         guidance: str | None,
         source: InterruptSource,
+        skip_target: str | None = None,
     ) -> None:
         """CLI 单壳路径：用户已在 modal 答完，**同步** emit ``interrupt_requested`` +
         ``interrupt_resolved`` 写 Tape（含订阅者 fan-out）。
+
+        ``skip_target``（phase 11 §9 P4 Skip to Agent）：当 ``action == "skip"`` 且用户
+        显式选了目标 node 时传入目标 node 名。非 skip 分支 / 无显式目标时 None。
+        写进 ``interrupt_resolved.data.skip_target`` 供 tape 可观测（reducer 对此字段
+        no-op，不改顶层 RunState——跳转结果由 route_taken / node_skipped 承担状态转换）。
 
         与 ``request``/``resolve`` 的区别（SPEC §3.1 时序）：
           - 多壳路径（web/mcp）：``request`` emit requested + await future；壳 ``resolve`` 同步
@@ -181,14 +187,19 @@ class InterruptHandler(BroadcasterMixin):
         )
         # 同步写 Tape + fan-out 订阅者（关键正确性：resolved 必须在返回前落盘，不交给
         # async broadcaster——避免与 run() 的 bus.close() 竞态丢事件）。
+        # phase 11 §9 P4：skip_target 仅在 skip + 显式目标时写入；其余分支省略（reducer
+        # 对未知字段 no-op，schema 不约束 interrupt_resolved.data 形状）。
+        resolved_data: dict[str, Any] = {
+            "interrupt_id": ireq.id,
+            "action": action,
+            "guidance": guidance,
+            "resolved_by": source,
+        }
+        if skip_target is not None:
+            resolved_data["skip_target"] = skip_target
         await self._bus.emit(
             "interrupt_resolved",
-            data={
-                "interrupt_id": ireq.id,
-                "action": action,
-                "guidance": guidance,
-                "resolved_by": source,
-            },
+            data=resolved_data,
             node=ireq.node,
             session_id=ireq.session_id,
         )

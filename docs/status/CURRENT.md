@@ -7,31 +7,30 @@
 
 ## 当前任务
 
-**phase 11 wave-3 e2e 审计 bugfix 完成 —— Ctrl+G 立即打断 sleeping wait node（879→888，0 回归）。**
+**phase 11 P4 Skip to Agent 完成 —— 显式 skip 目标 + NodeSelectModal + §9.2 route 容错（888→904，0 回归）。**
 
-wave-3 e2e 审计（`test-coverage-e2e` agent）发现 SPEC §9.7.6 + §10.2 item9 承诺的「Ctrl+G →
-wait node 立即结束」实际不工作：`notify_all_waits` 原本只在 node 边界 `_handle_interrupt` 触发，
-wait sleep 期间 `_drive_loop` 阻塞在 `_dispatch` 到不了边界 → 对 sleeping wait 是死代码。
-surgical fix：`Orchestrator.request_interrupt` 登记 pending 的同时即时调 `bus.notify_all_waits()`
-（保留 record_resolved/resolve 里的同一调用作 defense-in-depth，覆盖多壳 resolve 路径）。
-xfail 复现测试翻转 pass + 8 新 wave-3 e2e 测试采纳。dispatch code-reviewer：无 🔴/🟡。
+wave-1 SKIP 只能沿 route 跳，无兜底 route 时 NoRouteMatch 崩溃（SPEC §10.2 item12）。本 wave 补齐：
+`request_interrupt` 加 `skip_target` 参数 → `_drive_loop` 直接跳该 node；`NodeSelectModal`
+（pattern A：InterruptModal → app 推选择器）；router §9.2 容错（skipped node None output 走兜底）；
+`_validate_skip_target` fail loud（ValueError）；`interrupt_resolved.data.skip_target` 写 tape。
+code-reviewer 1 🔴（验证顺序致脏 tape，已修：校验前置到 record_resolved 之前）+ 3 🟡 全修。
 
-- **最新 release note**：[`2026-07-02-phase11-wait-interrupt-fix.md`](../releases/2026-07-02-phase11-wait-interrupt-fix.md)
-- **SPEC**：[`docs/specs/phase-11-cli-enrichment.md`](../specs/phase-11-cli-enrichment.md) §9.7.6 / §10.2 item9
+- **最新 release note**：[`2026-07-02-phase11-skip-to-agent.md`](../releases/2026-07-02-phase11-skip-to-agent.md)
+- **SPEC**：[`docs/specs/phase-11-cli-enrichment.md`](../specs/phase-11-cli-enrichment.md) §9 / §10.2 item12 / §11.8
 
 ## 待办
 
-1. **wave 3 已完成**（Validator + Wait + Dialog 全绿）。
-2. **人工 E2E（待真 TTY + ANTHROPIC_API_KEY）**：`orca run examples/with_dialog.yaml`（真 claude
-   多轮对话；自动化证明已在 `tests/gates/test_dialog.py::test_send_turn_accumulates_history`）。
-3. **后续 wave**：daemon(P3.2) → Skip(P4)。
+1. **phase 11 P0-P4 全部完成**（CI / Retry / Interrupt / ask_user / Validator / Dialog / Resume / Wait / Skip）。
+2. **唯一剩余**：P3.2 daemon `--background`（task #11，pending）—— 非本 phase 核心闭环，可滚动。
+3. **人工 E2E（待真 TTY + ANTHROPIC_API_KEY）**：`orca run examples/demo_skip.yaml`
+   （Ctrl+G + SKIP + 选目标 node，自动化证明已在 `tests/run/test_skip_to_agent.py`）。
 
 ## 必读文件
 
-1. [`docs/specs/phase-11-cli-enrichment.md`](../specs/phase-11-cli-enrichment.md) §6 / §11.7
-2. [`docs/releases/2026-07-02-phase11-dialog.md`](../releases/2026-07-02-phase11-dialog.md)
-3. [`orca/gates/dialog.py`](../../orca/gates/dialog.py)（DialogHandler 3-method split + Rule 7 裁定）
-   + [`orca/iface/cli/screens/dialog_modal.py`](../../orca/iface/cli/screens/dialog_modal.py)（Textual modal）
+1. [`docs/specs/phase-11-cli-enrichment.md`](../specs/phase-11-cli-enrichment.md) §9 / §11.8
+2. [`docs/releases/2026-07-02-phase11-skip-to-agent.md`](../releases/2026-07-02-phase11-skip-to-agent.md)
+3. [`orca/run/orchestrator.py`](../../orca/run/orchestrator.py)（`_handle_interrupt` 返回 tuple +
+   `_validate_skip_target`）+ [`orca/iface/cli/screens/node_select_modal.py`](../../orca/iface/cli/screens/node_select_modal.py)
 
 ## 裁定的决策（不再讨论）
 

@@ -77,6 +77,7 @@ class Orchestrator:
         "wf", "bus", "run_id", "ctx", "task", "max_iter",
         "_node_by_name", "_parallel_by_name", "_guidance_acc",
         "_interrupt_handler", "_interrupt_pending", "_interrupt_answer",
+        "_interrupt_skip_target",
         "_agent_tools_server",
     )
 
@@ -122,6 +123,9 @@ class Orchestrator:
         # phase 11 §3.1：CLI 单壳路径下用户已答完的 (action, guidance)，随 request_interrupt 带入。
         # node 边界 _handle_interrupt 直接消费它（不经 handler.request 的 await-future）。
         self._interrupt_answer: tuple[str, str | None] | None = None
+        # phase 11 §9 P4：SKIP 时用户显式选的目标 node（NodeSelectModal 选定）。
+        # None = 走 route 求值（兜底 route / 默认下一 node）；非 None = 直接跳该 node。
+        self._interrupt_skip_target: str | None = None
         # task 注入 inputs.task（SPEC §5：位置参数 task = -i task="..." 语法糖）
         merged_inputs = dict(inputs or {})
         if task is not None:
@@ -174,6 +178,7 @@ class Orchestrator:
         self,
         ireq: InterruptRequest,
         answer: tuple[str, str | None] | None = None,
+        skip_target: str | None = None,
     ) -> None:
         """CLI 层（InterruptModal dismiss 后）调此方法登记一次中断请求。
 
@@ -192,6 +197,11 @@ class Orchestrator:
         ``answer=None``（多壳路径，phase 11 web/mcp，本 step 不启用）：``_handle_interrupt``
         退化为 ``await handler.request(ireq)`` 等任一壳 resolve。
 
+        ``skip_target``（phase 11 §9 P4）：SKIP 时用户显式选的目标 node（NodeSelectModal）。
+        仅 ``answer=("skip", None)`` 时有意义；非 None 时 ``_drive_loop`` 直接跳该 node，
+        **不**经 route 求值（避免无兜底 route 时 NoRouteMatch 崩溃，SPEC §10.2 item12）。
+        校验推迟到 node 边界 ``_handle_interrupt``（见 ``_validate_skip_target``），此处仅登记。
+
         **调用方线程/循环契约**：本方法是同步（``def``，非 ``async def``），必须在
         orchestrator 的事件循环线程上调用——与 wait node 注册 wait handle 的 loop 同源，
         这样 ``bus.notify_all_waits`` 里的 ``asyncio.Event.set`` 才不会跨线程（bus 的
@@ -209,6 +219,7 @@ class Orchestrator:
             return
         self._interrupt_pending = ireq
         self._interrupt_answer = answer
+        self._interrupt_skip_target = skip_target
         # phase 11 §9.7.6：**立即**唤醒任何正在 interruptible sleep 的 wait node。
         # 这是「Ctrl+G 打断 wait node」e2e 修复的关键——``_handle_interrupt`` 在 node 边界
         # 触发（``_drive_loop`` 顶部），但 wait node 在 ``asyncio.sleep`` 期间 ``_drive_loop``
@@ -446,6 +457,7 @@ class Orchestrator:
         orch._interrupt_handler = None
         orch._interrupt_pending = None
         orch._interrupt_answer = None
+        orch._interrupt_skip_target = None
         # phase 11 §5：resume 不接 agent_tools_server（ask_user 交互态不跨进程恢复）。
         orch._agent_tools_server = None
         # resume 专用状态（run_from_state 消费）。
@@ -568,7 +580,7 @@ class Orchestrator:
             # pending 由 CLI 层 ``request_interrupt`` 登记；node 边界消费（-p 路线限制：
             # 无法中断工具调用中，但 Conductor SDK 也只在 message 间——同粒度，实测够用）。
             if self._interrupt_pending is not None and self._interrupt_handler is not None:
-                action = await self._handle_interrupt(current, outputs_acc)
+                action, skip_target = await self._handle_interrupt(current, outputs_acc)
                 if action == "abort":
                     raise WorkflowAborted(current)
                 if action == "skip":
@@ -578,7 +590,17 @@ class Orchestrator:
                         "node_skipped", {"reason": "user_interrupt_skip"}, node=current,
                     )
                     outputs_acc[current] = {"output": None, "skipped": True}
-                    current = await self._next_node_after(current, outputs_acc, None)
+                    if skip_target is not None:
+                        # phase 11 §9 P4：用户显式选了目标 node → 直接跳，不经 route 求值
+                        # （避免无兜底 route 时 NoRouteMatch 崩溃，SPEC §10.2 item12）。
+                        # 校验已在 _handle_interrupt 完成（_validate_skip_target）。
+                        await self.bus.emit(
+                            "route_taken", {"from": current, "to": skip_target},
+                        )
+                        current = skip_target
+                    else:
+                        # 无显式目标 → 沿 route 求值（兜底 route / 默认下一 node，wave-1 行为）。
+                        current = await self._next_node_after(current, outputs_acc, None)
                     continue
                 # continue: guidance 已在 _handle_interrupt 累积进 _guidance_acc，
                 # 下面 _make_ctx 自动带上（Step B 起 render_prompt 拼 [User Guidance]）。
@@ -599,11 +621,17 @@ class Orchestrator:
 
     async def _handle_interrupt(
         self, current: str, outputs_acc: dict[str, Any]
-    ) -> str:
+    ) -> tuple[str, str | None]:
         """消费 ``_interrupt_pending`` → 拿用户答 ``(action, guidance)`` → 累积 guidance。
 
-        SPEC §2.3 / §3.1 / §3.3 / §4.1。返回 action（``"continue"``/``"skip"``/``"abort"``）。
+        SPEC §2.3 / §3.1 / §3.3 / §4.1 / §9（P4 Skip to Agent）。返回 ``(action, skip_target)``：
+          - action = ``"continue"``/``"skip"``/``"abort"``；
+          - skip_target 仅在 action=``"skip"`` 且用户显式选了目标 node 时非 None（P4）；
+            其余分支恒 None。
+
         continue 分支把 guidance 累积进 ``self._guidance_acc``（_make_ctx 注入 ctx）。
+        skip 分支消费 ``self._interrupt_skip_target``（NodeSelectModal 选定），并经
+        ``_validate_skip_target`` fail-loud 校验目标存在（P4 SPEC §9 task2）。
 
         两条取答路径（SPEC §3.1 时序）：
           - **CLI 单壳**（``_interrupt_answer`` 非 None）：用户在 InterruptModal 答完随
@@ -618,22 +646,57 @@ class Orchestrator:
         ireq = self._interrupt_pending
         assert ireq is not None  # _drive_loop 调用前保证
         answer = self._interrupt_answer
-        # 消费 pending + answer（防内存泄漏 + 防二次消费）。
+        skip_target = self._interrupt_skip_target
+        # 消费 pending + answer + skip_target（防内存泄漏 + 防二次消费）。
         self._interrupt_pending = None
         self._interrupt_answer = None
+        self._interrupt_skip_target = None
 
         if answer is not None:
-            # CLI 单壳路径：用户已答，record_resolved 同步 emit requested + resolved 写 Tape。
+            # CLI 单壳路径：用户已答。
             action, guidance = answer
-            await self._interrupt_handler.record_resolved(ireq, action, guidance, ireq.source)
+            # P4：先校验显式 skip 目标（fail loud），再 emit resolved 写 Tape。
+            # **顺序关键**：若先 emit 再校验，校验失败（ValueError）时 tape 已留下孤儿
+            # interrupt_resolved{skip, skip_target=<bad>}，随后 workflow_failed{ValueError}
+            # 与之矛盾——违反单 Tape 唯一真相源一致性。校验是纯函数无副作用，前置零成本。
+            if action == "skip" and skip_target is not None:
+                self._validate_skip_target(skip_target, current)
+            # 校验通过 → record_resolved 同步 emit requested + resolved 写 Tape。
+            # skip_target 仅在 skip 分支 + 非 None 时写入 interrupt_resolved.data。
+            await self._interrupt_handler.record_resolved(
+                ireq, action, guidance, ireq.source, skip_target=skip_target,
+            )
         else:
             # 多壳路径：await handler.request（emit requested + 等任一壳 resolve）。
+            # 多壳路径暂不支持显式 skip_target（P3 web/mcp 接入时再补 NodeSelectModal
+            # 等价物）；返回的 skip_target 恒 None（走 route 求值，wave-1 行为）。
             action, guidance = await self._interrupt_handler.request(ireq)
+            skip_target = None
 
         if action == "continue" and guidance:
             # 累积 guidance → _make_ctx 自动注入后续 ctx → render_prompt 拼 [User Guidance] 段
             self._guidance_acc.append(guidance)
-        return action
+
+        return action, skip_target
+
+    def _validate_skip_target(self, target: str, current: str) -> None:
+        """校验 SKIP 显式目标 node 合法（P4 SPEC §9 task2）。
+
+        - **存在**：target 必须是 ``wf.nodes`` 里的 node 名 / parallel 组名。否则 raise
+          ``ValueError``（fail loud，clear error —— **非** NoRouteMatch 崩溃，SPEC §10.2 item12）。
+        - **非当前**：target != current（skip 到自己会死循环）。
+        - P4 简化：不约束 reachability / cycle / required-inputs（SPEC §9 task2「allow skipping
+          to any defined node」）。生产期偶发的 cycle 由 ``max_iter`` 兜底（防死循环）。
+        """
+        defined = target in self._node_by_name or target in self._parallel_by_name
+        if not defined:
+            raise ValueError(
+                f"SKIP 目标 node {target!r} 不存在（wf 中无此 node / parallel 组）"
+            )
+        if target == current:
+            raise ValueError(
+                f"SKIP 目标 node {target!r} 与当前 node 同名（不能 skip 到自己，会死循环）"
+            )
 
     async def _next_node_after(
         self, current: str, outputs_acc: dict[str, Any], raw_output: Any

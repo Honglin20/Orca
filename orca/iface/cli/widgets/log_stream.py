@@ -110,6 +110,10 @@ def _describe(event_type: str, data: dict[str, Any]) -> str:
         text = f"interrupt {action}"
         if guidance:
             text += f": {_truncate(guidance)}"
+        # phase 11 §9 P4：skip + 显式目标时附带目标 node 名（可观测跳转意图）。
+        skip_target = data.get("skip_target")
+        if action == "skip" and skip_target:
+            text += f" → {skip_target}"
         return text
     if event_type == "prompt_rendered":
         # preview 是 prompt 末尾 ~200 字符（含 [User Guidance] 段时直观可见）。

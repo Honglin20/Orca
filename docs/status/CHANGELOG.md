@@ -17,6 +17,15 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-07-02] phase 11 P4 —— Skip to Agent（显式 skip 目标 + NodeSelectModal + §9.2 route 容错）
+wave-1 SKIP 只能沿 route 跳，无兜底 route 时 NoRouteMatch 崩溃（SPEC §10.2 item12）。本 wave 补齐：
+`request_interrupt` 加 `skip_target` 参数 → `_drive_loop` 直接跳该 node（不经 route 求值）；
+`NodeSelectModal`（iface/cli/screens/）让用户选目标（pattern A：InterruptModal → app 推选择器）；
+router §9.2 容错（skipped node 的 None output 让 when 求值失败走兜底，非崩溃）；`_validate_skip_target`
+fail loud（ValueError，非 NoRouteMatch）；`interrupt_resolved.data.skip_target` 写 tape 可观测。
+code-reviewer 1 🔴（验证顺序致脏 tape）+ 3 🟡 全修。888→904 零回归。Commit: 见 git log。
+- 详情：[release note](releases/2026-07-02-phase11-skip-to-agent.md)
+
 ## [2026-07-02] phase 11 fix —— Ctrl+G 立即唤醒 sleeping wait node（wave-3 e2e 审计 bugfix）
 wave-3 e2e 审计发现 SPEC §9.7.6 + §10.2 item9 承诺的「Ctrl+G 打断 wait node」实际不工作：
 `notify_all_waits` 原本只在 node 边界 `_handle_interrupt` 触发，wait sleep 期间 drive_loop 阻塞
