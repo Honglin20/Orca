@@ -80,6 +80,15 @@ _PHASE_TO_ERROR_TYPE: dict[str, str] = {
     # phase 11 §9.7.5（Wait Node）：duration 超过 24h 硬上限 = 配置错（非渲染语法错），
     # 单列 phase 让 retry 白名单 / 诊断能区分。WaitExecutor 显式带 error_type="ConfigError"。
     "config": "ConfigError",
+    # phase 11 §9.6.6（Validator）：validator 校验用尽 → ExecError(phase="validator")。
+    # error_type 用字面 "validator_failed"（与 RetryPolicy.retry_on 白名单 Literal 取值一致，
+    # 让 ``retry_on: [validator_failed]`` 能命中 —— 当前实现 validator 与 retry 独立预算，
+    # 此 error_type 透传到 workflow_failed.data.error_type，供诊断 / 壳渲染）。
+    "validator": "validator_failed",
+    # phase 11 §4.2（Interrupt）：用户 Ctrl+G SIGINT claude 子进程。
+    # ClaudeExecutor emit node_failed{phase:"interrupted"}，非 ExecError 路径（不发 error_type
+    # 映射）；登记此处让 future phase_to_error_type 查询不 fail loud。
+    "interrupted": "Interrupted",
 }
 
 

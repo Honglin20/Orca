@@ -148,6 +148,19 @@ def _describe(event_type: str, data: dict[str, Any]) -> str:
         interrupted = data.get("interrupted", False)
         suffix = " (interrupted)" if interrupted else ""
         return f"⏳ wait done{suffix} ({secs:.1f}s)"
+    # phase 11 §9.6：Semantic Output Validator 可观测事件（让用户看到「校验开始 / 通过 / 失败+是否重试」）。
+    if event_type == "validator_started":
+        return f"🔍 validating: {_truncate(data.get('criteria_preview', ''))}"
+    if event_type == "validator_passed":
+        return "✓ validator passed"
+    if event_type == "validator_failed":
+        retrying = data.get("retrying", False)
+        issues = data.get("issues", [])
+        summary = "; ".join(str(i) for i in issues[:2])  # 最多 2 条，防爆宽
+        if len(issues) > 2:
+            summary += f" (+{len(issues) - 2} more)"
+        suffix = " (retrying)" if retrying else " (exhausted)"
+        return f"✗ validator failed{suffix}: {summary}"
     return event_type
 
 

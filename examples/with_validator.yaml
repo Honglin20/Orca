@@ -1,0 +1,63 @@
+# examples/with_validator.yaml —— Semantic Output Validator 演示（phase 11 §9.6）
+#
+# 单 agent node，声明 ValidatorConfig：agent 产出 JSON 后，spawn 第二个 claude -p 做 LLM
+# 二次语义校验（非 shape/type 校验，是「含义是否正确」）。校验失败 → 把 issues 作 guidance
+# 反馈给 agent 重 spawn（最多 max_retries 次）；用尽 → fail loud（ExecError(phase="validator")）。
+#
+# 与 output_schema（结构化校验，exec/ 层确定）正交：
+#   output_schema 校「字段在 / 类型对」（如 model_class 是字符串）
+#   validator     校「语义合规」（如 model_class 是合法 Python 标识符 / weights_path 是绝对路径）
+#
+# 真实 E2E：真实校验需要真实 claude（agent 产出 + validator 判断），automatable 证明见：
+#   tests/exec/test_validator.py（validate_output 单元：passed/failed/fail-safe/cli_path）
+#   tests/run/test_validator_orchestrator.py（orchestrator loop：retry/guidance/exhausted/
+#     validator 与 retry 预算独立）
+#
+# validator 字段语义（SPEC §9.6.2 + §11.6 deviation）：
+#   criteria     自然语言校验标准（喂给 validator claude 的 prompt）
+#   max_retries  校验失败时的 agent 重跑次数（总尝试 = max_retries + 1）；0 = 只校验一次
+#   model        可选校验用模型（省 token：用 haiku 校验 sonnet 产出）
+#
+# §11.6 deviation（重要）：validator 与 retry 是**独立**机制 + **独立**预算：
+#   - retry（RetryPolicy）：管 transient claude 失败（spawn_error/timeout/api_error/http_429）
+#   - validator（ValidatorConfig）：管语义校验失败
+#   两者各管各的失败域，不嵌套计数。可同时声明（见本文件 retry + validator 组合）。
+#
+# 运行：orca run examples/with_validator.yaml
+
+name: with_validator
+description: 演示 Semantic Output Validator（LLM 二次语义校验 agent output）
+entry: generator
+
+inputs:
+  hint:
+    type: string
+    required: false
+    default: "SimpleNet"
+    description: 给 agent 的 class 名提示（测试时可故意给非法值触发 validator 失败）
+
+nodes:
+  - name: generator
+    kind: agent
+    prompt: |
+      产出一个 Python 类配置 JSON，格式：
+      {"model_class": "<类名>", "weights_path": "<绝对路径>"}
+      类名根据 hint 决定：{{ inputs.hint }}
+    output_schema:
+      type: object
+      properties:
+        model_class: {type: string}
+        weights_path: {type: string}
+      required: [model_class, weights_path]
+    # validator：语义校验（output_schema 只校 shape/type，校不出「类名是合法标识符」）
+    validator:
+      criteria: |
+        model_class 必须是合法的 Python 标识符（字母/下划线开头，不含 - 或数字开头）；
+        weights_path 必须是绝对路径（以 / 开头）。
+      max_retries: 1  # 校验失败可再跑 1 次（总尝试 2 次）
+      # model: null   # 用默认模型；可设 haiku 省 token
+    routes:
+      - to: "$end"
+
+outputs:
+  result: "{{ generator.output }}"

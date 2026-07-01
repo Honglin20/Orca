@@ -81,6 +81,30 @@ class RetryPolicy(BaseModel):
     jitter: bool = True  # ±20% jitter 防雪崩（同一批 429 同时重试）
 
 
+class ValidatorConfig(BaseModel):
+    """语义输出校验配置（phase 11 §9.6.2，LLM 二次校验 agent output 语义质量）。
+
+    与 ``output_schema``（shape/type 结构化校验，exec/ 层确定）正交：``criteria`` 是自然语言
+    描述的语义标准（如「model_class 必须是合法 Python 标识符」「weights_path 必须是绝对路径」），
+    由 ``validate_output`` spawn 第二个 claude -p 做判断，返回 ``{passed, issues}``。
+
+    ``max_retries`` 是 validator 自身的重试预算（SPEC §11.6 deviation）：与 ``RetryPolicy`` 的
+    transient 失败重试**独立**。``max_retries=N`` 表示校验失败可再跑 N 次（总尝试 = N+1）。
+    每次重试把上次的 issues 作为 guidance 拼进 prompt（``ctx.with_guidance``），让 agent 修正。
+
+    ``model`` 可选指定校验用的 LLM 模型（省 token：用 haiku 校验 sonnet 的产出）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # min_length=1：空 criteria 是配置错（无校验标准 = validator 无意义），加载期 fail loud（铁律 12），
+    # 与 RetryPolicy.max_attempts 的 ge=1 同模式。
+    criteria: str = Field(min_length=1)  # 自然语言校验标准（喂给 validator claude 的 prompt）
+    # ge=0：max_retries=0 表示只校验一次，失败即放弃（不重跑 agent）。
+    max_retries: int = Field(default=1, ge=0)  # 校验失败时的 agent 重跑次数（总尝试 = max_retries+1）
+    model: str | None = None  # 校验用模型覆盖（None=默认模型；可设 haiku 省 token）
+
+
 class AgentNode(Node):
     """LLM agent 节点（核心 kind）。
 
@@ -97,6 +121,7 @@ class AgentNode(Node):
     model: str | None = None  # 模型覆盖
     output_schema: dict | None = None  # None=自由文本；{...}=结构化 JSON schema
     retry: RetryPolicy | None = None  # None=不重试（向后兼容）；见 RetryPolicy
+    validator: ValidatorConfig | None = None  # None=不校验（向后兼容）；见 ValidatorConfig
 
 
 class ScriptNode(Node):

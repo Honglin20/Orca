@@ -56,6 +56,10 @@ EventType = Literal[
     # ── phase 11 §9.7：Wait Node（asyncio.sleep 节点，可被 Ctrl+G 打断）──
     "wait_started",  # data: {duration_seconds, reason}
     "wait_completed",  # data: {elapsed_seconds, interrupted: bool}
+    # ── phase 11 §9.6：Semantic Output Validator（LLM 二次校验 agent output 语义）──
+    "validator_started",  # data: {node, criteria_preview}（校验开始：criteria 前 100 字符）
+    "validator_passed",  # data: {node, issues: []}（校验通过，issues 恒空）
+    "validator_failed",  # data: {node, issues: [str], retrying: bool}（校验失败 + 是否还会重试）
     # ── 自定义（MCP 工具产出，前端按 data.kind 分发渲染）──
     "custom",  # data: {kind: "chart"|"table"|"image"|..., ...}
     # ── 错误 ──

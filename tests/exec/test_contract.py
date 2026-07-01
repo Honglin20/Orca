@@ -112,6 +112,10 @@ def test_exec_error_explicit_error_type_override():
         ("render", "RenderError"),
         # phase 11 §9.7.5（Wait Node）：duration 超上限走 config phase
         ("config", "ConfigError"),
+        # phase 11 §9.6.6（Validator）：validator 用尽 → phase="validator"
+        ("validator", "validator_failed"),
+        # phase 11 §4.2（Interrupt）：用户 SIGINT → phase="interrupted"
+        ("interrupted", "Interrupted"),
     ],
 )
 def test_phase_to_error_type_all_mappings(phase, expected):

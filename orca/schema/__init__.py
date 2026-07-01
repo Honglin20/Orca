@@ -22,6 +22,7 @@ from orca.schema.workflow import (
     Route,
     ScriptNode,
     SetNode,
+    ValidatorConfig,
     WaitNode,
     Workflow,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "AnnotatedNode",
     "ParallelGroup",
     "RetryPolicy",
+    "ValidatorConfig",
     "Event",
     "EventType",
     "RunState",

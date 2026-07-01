@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from orca.exec.mcp_tools.server import AgentToolsMcpServer
     from orca.gates.interrupt import InterruptHandler
     from orca.gates.types import InterruptRequest
-    from orca.schema import Node, RunState, Workflow
+    from orca.schema import AgentNode, Node, RunState, Workflow
 
 logger = logging.getLogger(__name__)
 
@@ -660,20 +660,128 @@ class Orchestrator:
             return await run_foreach(  # type: ignore[arg-type]
                 node, ctx, self.bus, agent_tools_server=self._agent_tools_server,
             )
-        # 普通 node：make_executor + execute_and_emit
+        # agent node：validator 声明 → 走 validator loop（包裹 execute + 二次校验 + 重跑）；
+        # 否则走既有 execute 路径（retry-only 或 plain，向后兼容）。
+        # node.kind=="agent" 经 pydantic discriminated union 已保证 node 是 AgentNode 实例，
+        # node.validator / node.retry 字段必然存在，直接访问无需 getattr 防御。
+        if node.kind == "agent" and node.validator is not None:  # type: ignore[union-attr]
+            return await self._dispatch_with_validator(current, ctx, node)  # type: ignore[arg-type]
+        return await self._execute_agent(current, ctx, node)
+
+    async def _execute_agent(self, current: str, ctx: RunContext, node: Node) -> Any:
+        """执行单个 agent / script / set node（无 validator 路径，DRY 抽出供两处复用）。
+
+        agent node 声明 retry → execute_with_retry（transient 失败自动重试 + retry_* 事件）；
+        否则 execute_and_emit（既有路径，向后兼容）。script/set node 走 execute_and_emit。
+        """
         from orca.exec.factory import make_executor
 
         executor = make_executor(node, self._agent_tools_server, bus=self.bus)
-        # phase 11 §9.5.5：agent node 声明 retry → 走 execute_with_retry（transient
-        # 失败自动重试 + retry_started/succeeded/exhausted 事件）；否则既有路径（向后兼容）。
-        # node.kind=="agent" 经 pydantic discriminated union 已保证 node 是 AgentNode 实例，
-        # node.retry 字段必然存在（RetryPolicy | None），直接访问无需 getattr 防御。
-        if node.kind == "agent" and node.retry is not None:  # type: ignore[union-attr]
+        # node.kind=="agent" 已保证 node 是 AgentNode；node.retry 字段必然存在。
+        if node.kind == "agent" and getattr(node, "retry", None) is not None:  # type: ignore[union-attr]
             from orca.run.retry import execute_with_retry
 
             output, _events = await execute_with_retry(executor, node, ctx, self.bus)  # type: ignore[arg-type]
             return output
         return await execute_and_emit(executor, node, ctx, self.bus)
+
+    async def _dispatch_with_validator(
+        self, current: str, ctx: RunContext, node: AgentNode,
+    ) -> Any:
+        """phase 11 §9.6.5（+ §11.6 deviation）：validator loop 包裹 execute。
+
+        循环（SPEC §11.6 deviation —— validator 与 retry 是**独立**机制 + **独立**预算）::
+
+            attempts_left = max_retries + 1
+            while True:
+                output = await _execute_agent(current, ctx, node)
+                    # 内部：node.retry → execute_with_retry（transient 失败重试，独立预算）；
+                    #       否则 execute_and_emit
+                passed, issues = await validate_output(output, validator, ...)
+                if passed: return output
+                attempts_left -= 1
+                if attempts_left <= 0:
+                    emit validator_failed(retrying=False)
+                    raise ExecError(phase="validator")
+                emit validator_failed(retrying=True)
+                ctx = ctx.with_guidance(issues)  # 反馈给下次 spawn
+
+        **§11.6 deviation**：SPEC §9.6.5 原文写「validator 与 retry 共享单一 retry loop」，
+        但 wave-2 ``execute_with_retry`` 已是自包含 transient-retry primitive（27 测试，committed）。
+        组合化解：``_execute_agent`` 调 ``execute_with_retry``（retry 预算 = ``retry.max_attempts``，
+        管 spawn_error/timeout/api_error/http_429），validator 在其**外层**包一层（validator 预算
+        = ``validator.max_retries``，管语义校验失败）。两个 loop 各管各的失败域，不嵌套计数。
+        ``validator_failed`` 留在 RetryPolicy.retry_on Literal 里（harmless：executor 不发此
+        error_type，故对 retry loop 是 no-op），不 churn wave-2 schema。
+
+        validator_failed 在此 emit（持 ``attempts_left`` 才能算出 ``retrying``，SPEC §9.6.3）。
+        **validator_started / validator_passed 也由本 loop emit**（Rule 7 裁定：validate_output
+        纯返回 ``(passed, issues)`` 不持 bus，三类 validator_* 事件单一 emitter 集中在此 ——
+        化解铁律 2 张力，见 ``orca/exec/validator.py`` 模块 docstring 的「事件归属裁定」）。
+        """
+        from orca.exec.validator import validate_output
+        from orca.profiles import get_profile
+
+        validator = node.validator
+        assert validator is not None  # _dispatch 调用前保证
+        # profile：与 make_executor 同源解析（get_profile(node.executor)），保证 validator 的
+        # cli_path / flags 与主 agent 一致（ccr 中转对两者都生效）。
+        profile = get_profile(node.executor)
+
+        attempts_left = validator.max_retries + 1
+        # ctx 在 loop 内随 guidance 累积派生新实例（frozen）；attempt 间用最新 ctx spawn。
+        loop_ctx = ctx
+        while True:
+            # 1) 执行 agent（内含 retry 路径，transient 失败由 execute_with_retry 独立处理）
+            output = await self._execute_agent(current, loop_ctx, node)
+
+            # 2) validator_started（每次校验前 emit；criteria_preview = criteria 前 100 字符，
+            #    SPEC §9.6.3）。validate_output 不 emit（Rule 7：单一 emitter 在 orchestrator）。
+            await self.bus.emit(
+                "validator_started",
+                {"node": current, "criteria_preview": validator.criteria[:100]},
+                node=current,
+            )
+
+            # 3) 二次语义校验（spawn 第二个 claude；fail-safe：validator 自身崩 → passed=True）
+            passed, issues = await validate_output(
+                output, validator, profile, model=validator.model,
+            )
+
+            # 4) 通过 → emit validator_passed（issues 恒 []，SPEC §9.6.3）+ 返回
+            if passed:
+                await self.bus.emit(
+                    "validator_passed",
+                    {"node": current, "issues": []},
+                    node=current,
+                )
+                return output
+
+            # 4) 失败：消耗一次 validator 预算
+            attempts_left -= 1
+            if attempts_left <= 0:
+                # 预算用尽 → emit validator_failed(retrying=False) + raise（fail loud）
+                await self.bus.emit(
+                    "validator_failed",
+                    {"node": current, "issues": issues, "retrying": False},
+                    node=current,
+                )
+                raise ExecError(
+                    phase="validator",
+                    message=(
+                        f"validator 校验失败（预算用尽，max_retries={validator.max_retries}）："
+                        f"issues={issues}"
+                    ),
+                )
+
+            # 5) 还有预算 → emit validator_failed(retrying=True) + 把 issues 作 guidance 反馈
+            await self.bus.emit(
+                "validator_failed",
+                {"node": current, "issues": issues, "retrying": True},
+                node=current,
+            )
+            guidance_text = "上次输出未通过校验：" + "; ".join(issues)
+            loop_ctx = loop_ctx.with_guidance(guidance_text)
 
     def _routes_of(self, name: str) -> list:
         """取 current 的 routes（node 或 parallel 组）。"""

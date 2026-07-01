@@ -118,23 +118,25 @@ def apply_event(state: RunState, event: Event) -> RunState:
         return state.model_copy(update={"current_node": to})
 
     # 已知但顶层 RunState 不投影的事件：foreach_* / human_decision_* / custom / error /
-    # phase 11 中断 + resume + retry 可观测事件。
+    # phase 11 中断 + resume + retry + validator + wait 可观测事件。
     # 这些事件的语义留给前端 reducer（按 session_id 分组 / 自定义渲染）：
     # - foreach 输出随 node_completed 进 context；
     # - gate 决策、custom 渲染不进顶层状态；
     # - error 细节由 workflow_failed 分支承担状态转换（已处理）；
-    # - interrupt_*/prompt_rendered/workflow_resumed/retry_* 是可观测标记，不改顶层状态
-    #   （resume 后状态由已落盘的 node_completed/route_taken 重建，resumed 事件本身
-    #   不推进 node_status / current_node —— drive_loop 后续 dispatch 才推进；
-    #   retry 的最终成败由它包裹的 node_completed/node_failed 承担，retry_started/
-    #   retry_succeeded/retry_exhausted 本身不推进 node_status —— 否则同 node 多 attempt
-    #   会让 running/done 状态反复跳）。
+    # - interrupt_*/prompt_rendered/workflow_resumed/retry_*/validator_*/wait_* 是可观测标记，
+    #   不改顶层状态（resume 后状态由已落盘的 node_completed/route_taken 重建，resumed 事件
+    #   本身不推进 node_status / current_node —— drive_loop 后续 dispatch 才推进；
+    #   retry/validator 的最终成败由它们包裹的 node_completed/node_failed 承担，retry_started/
+    #   validator_started 等本身不推进 node_status —— 否则同 node 多 attempt 会让 running/done
+    #   状态反复跳）。
     # 保持 reducer 幂等 + 最小。
     if t in (
         "foreach_started", "foreach_item_started", "foreach_item_completed",
         "foreach_completed", "human_decision_requested", "human_decision_resolved",
         "interrupt_requested", "interrupt_resolved", "prompt_rendered",
         "workflow_resumed", "retry_started", "retry_succeeded", "retry_exhausted",
+        "validator_started", "validator_passed", "validator_failed",
+        "wait_started", "wait_completed",
         "custom", "error",
     ):
         return state
