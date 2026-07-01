@@ -53,6 +53,16 @@ class RunContext:
     user_guidance: tuple[str, ...] = ()
     # phase 11 §2.1：历次中断记录（debug/replay 用）。
     interrupt_history: tuple[dict[str, Any], ...] = ()
+    # phase 11 §2.1 / §6：Dialog 多轮历史（agent 跑完后用户按 d 追问）。
+    # 每条 {"role": "user"|"agent", "text": str, "turn": int}。frozen → tuple 累积
+    # （``with_dialog_turn`` 派生新实例）。默认空 tuple = 无 dialog（向后兼容）。
+    #
+    # **真相源说明（review 裁定）**：dialog 的唯一真相在 **tape 的 ``dialog_message`` 事件**——
+    # DialogHandler 不写本字段（dialog 是 post-run，ctx 已不在 orchestrator 流水里，写它无回流
+    # 路径）。本字段 + ``with_dialog_turn`` 是为**未来 web shell replay 注入**预留的 mutation
+    # 原语（web 端从 tape 重放 dialog_message 构造 ctx 时用）。当前 CLI 路径保持空 tuple，
+    # 不构成第二真相源（反 AgentHarness 多 store 漂移，本项目顶层铁律）。
+    dialog_history: tuple[dict[str, Any], ...] = ()
 
     def with_locals(self, locals_: dict[str, Any]) -> RunContext:
         """派生带 locals 的新 frozen 实例（foreach body 用，注入 item / _index）。
@@ -67,6 +77,7 @@ class RunContext:
             locals=dict(locals_),  # 拷贝，避免外部 mutate 污染 frozen 快照
             user_guidance=self.user_guidance,
             interrupt_history=self.interrupt_history,
+            dialog_history=self.dialog_history,
         )
 
     def with_guidance(self, text: str) -> RunContext:
@@ -104,4 +115,25 @@ class RunContext:
             "Incorporate this guidance into your response:\n"
             f"{entries}"
         )
+
+    def with_dialog_turn(self, role: str, text: str, turn: int) -> RunContext:
+        """派生带追加 dialog 轮次的新 frozen 实例（phase 11 §6）。
+
+        DialogHandler ``send_turn`` / ``end_dialog`` 调此方法把每轮 user/agent 话累积进 ctx。
+        与 ``with_guidance`` 同 pattern（frozen → tuple + ``dataclasses.replace``），但条目是
+        dict（含 role / text / turn，三类语义信息），而非纯字符串（guidance 只需话本身）。
+
+        Args:
+            role: ``"user"`` 或 ``"agent"``（由 DialogHandler 决定，本方法不校验——
+                调用方契约保证；非法值会让 dialog_history 后续渲染混乱，属调用方 bug）。
+            text: 这一轮的文本（agent reply 或 user 输入）。
+            turn: 轮次序号（DialogHandler 维护计数器；同一次 dialog 内 user 与 agent
+                共享同一 turn 号——一轮对话 = 一个 user turn + 一个 agent turn）。
+
+        空 / 全空白 text 不追加（无意义，防 dialog_history 留空轮次）。
+        """
+        if not text or not text.strip():
+            return self
+        entry = {"role": role, "text": text, "turn": turn}
+        return dataclasses.replace(self, dialog_history=self.dialog_history + (entry,))
 

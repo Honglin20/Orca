@@ -17,6 +17,16 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-07-02] phase 11 P2.2 —— Dialog（agent 跑完后多轮追问，重 spawn claude 拼历史）
+用户按 `d` 键就已完成 agent 的 output 多轮追问：`DialogHandler` 3-method split（start/send/end），
+每轮重 spawn claude 把「output + 完整历史 + 本轮问题」拼进 prompt（`-p` 路线无 in-process
+session，靠 prompt 拼历史）。Rule 7 裁定 3-method split（SPEC §6.2 单一 run_dialog 无法在轮间
+交还 UI 控制）；`ctx.dialog_history` 是 web shell replay 预留位（真相在 tape）；抽
+`orca/exec/env.py` 化解三处 `_build_env_overlay` 重复（Rule 6 DRY）。+27 测试断言 INTENT
+（含历史累积核心契约 + send 失败 fail loud + 按钮复位），852→879 零回归。
+- commit: caa3943
+- 详情：[release note](releases/2026-07-02-phase11-dialog.md)
+
 ## [2026-07-02] phase 11 P2.1 —— Semantic Output Validator（LLM 二次语义校验 agent output）
 agent 产出后 spawn 第二个 claude -p 做 LLM 语义校验（非 shape/type），失败时 issues 作 guidance
 反馈重 spawn，直到通过或预算用尽（fail-safe：validator 自身崩 → 当作 passed）。`validate_output`

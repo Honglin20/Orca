@@ -41,10 +41,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import TYPE_CHECKING, Any
 
 from orca.exec.claude.result_extractor import extract_and_validate
+from orca.exec.env import build_env_overlay
 from orca.exec.runner import CLIRunner, SpawnConfig
 
 if TYPE_CHECKING:
@@ -228,21 +228,6 @@ def _build_validator_spawn_config(
         mcp_flag_args=[],  # validator 不挂 MCP（无 ask_user 需求）
         prompt=prompt,
         prompt_channel=profile.prompt_channel,
-        env_overlay=_build_env_overlay(profile.env_overlay_prefixes),
+        env_overlay=build_env_overlay(profile.env_overlay_prefixes),
         timeout=None,  # validator 是短 query，理论上很快；timeout 归 retry/interrupt 外层管
     )
-
-
-def _build_env_overlay(prefixes: tuple[str, ...]) -> dict[str, str]:
-    """从 os.environ 取前缀匹配的 env 变量，作为子进程 overlay（SPEC §2.6，DRY）。
-
-    与 ``orca.exec.claude.executor._build_env_overlay`` 同实现（profile.env_overlay_prefixes
-    声明的前缀透传给子进程，如 ``ANTHROPIC_API_KEY``）。本模块不 import claude/executor.py
-    （避免 exec/claude → exec/validator 的 runtime 环依赖；两者都是 exec/ 平级叶子），
-    故内联同款实现。若未来需统一，抽到 ``orca/exec/env.py`` 共享（YAGNI：暂只有两处）。
-    """
-    overlay: dict[str, str] = {}
-    for key, value in os.environ.items():
-        if any(key.startswith(prefix) for prefix in prefixes):
-            overlay[key] = value
-    return overlay

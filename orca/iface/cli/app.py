@@ -40,7 +40,7 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -280,6 +280,8 @@ class OrcaApp(App):
         Binding("g", "goto_gate", "跳到 gate"),
         # phase 11 §2.4 / §3.1：Ctrl+G 弹 InterruptModal（中断纠偏）。
         Binding("ctrl+g", "interrupt", "中断/纠偏"),
+        # phase 11 §2.4 / §6.1：d 弹 DialogModal（agent 跑完后多轮追问）。
+        Binding("d", "dialog", "对话"),
     ]
 
     def __init__(
@@ -352,6 +354,16 @@ class OrcaApp(App):
         # 已完成 node 数（header done 显示）。
         self._done_nodes: int = 0
         self._total_nodes: int = len(wf.nodes)
+        # phase 11 §6.1：最近一个完成的 agent node 名 + 其 output（action_dialog 按 d 弹
+        # DialogModal 用）。只有 agent node 的 output 值得追问（script/set 是确定性输出）。
+        # node_completed 事件 data 含 {output, elapsed}，此处记 (node, output)。
+        # 多个 agent 完成时取最后一个（用户按 d 时最关心的往往是刚跑完的那个）。
+        self._last_completed_agent_node: str | None = None
+        self._last_completed_agent_output: Any = None
+        # agent node 名集合（判定 node_completed 时是否记 agent output）。
+        self._agent_node_names: set[str] = {
+            n.name for n in wf.nodes if getattr(n, "kind", None) == "agent"
+        }
 
     # ── Textual 钩子 ─────────────────────────────────────────────────────
 
@@ -492,6 +504,10 @@ class OrcaApp(App):
             tree.set_status(node or "", "done")
             self._done_nodes += 1
             self._refresh_header()
+            # phase 11 §6.1：记最近完成的 agent node + output（action_dialog 按 d 用）。
+            if node and node in self._agent_node_names:
+                self._last_completed_agent_node = node
+                self._last_completed_agent_output = data.get("output")
         elif etype == "node_failed":
             self.query_one(DagTree).set_status(node or "", "failed")
         elif etype == "route_taken":
@@ -643,6 +659,41 @@ class OrcaApp(App):
         # （record_resolved emit requested + 入队 resolved 写 Tape），**不**调 handler.resolve
         # ——resolve 是多壳竞速路径（await-future），CLI 单壳不需要且时序不匹配（review §2.1）。
         orch.request_interrupt(ireq, answer=(action, guidance))
+
+    # ── phase 11 §6：Dialog（agent 跑完后多轮追问）──────────────────────
+
+    def action_dialog(self) -> None:
+        """d 键：找最近完成的 agent node → 弹 DialogModal 多轮追问（SPEC §6.1）。
+
+        非阻塞（push_screen 非 wait）：dialog 不影响 DAG 推进（SPEC §6.3：post-completion 模式）。
+        workflow 通常已跑完或跑到下游时用户才按 d，故 dialog 自然 post-run。
+
+        无完成的 agent node → 写 hint 到 LogStream 提示（不弹 modal）。
+        DialogHandler 懒构造（首次按 d 时建，profile 从 get_profile("claude") 拿，bus 复用 app 的）。
+        """
+        node = self._last_completed_agent_node
+        output = self._last_completed_agent_output
+        if node is None:
+            # 无完成的 agent node（workflow 全 script / 尚未跑到 agent / agent 失败）
+            self.query_one(LogStream).write(
+                "(无可追问的 agent node：尚无 agent 完成产出)",
+            )
+            return
+
+        from orca.exec.context import RunContext
+        from orca.gates.dialog import DialogHandler
+        from orca.iface.cli.screens.dialog_modal import DialogModal
+        from orca.profiles import get_profile
+
+        # DialogHandler 懒构造（profile + bus）。每次按 d 新建一个 handler（dialog 间状态隔离，
+        # 不复用——同一次 run 多次 dialog 各自独立）。get_profile("claude") 与 agent spawn 同源。
+        handler = DialogHandler(get_profile("claude"), self.bus)
+        # 最小 ctx：dialog handler 仅用 run_id（spawn env overlay 路由用）。outputs/inputs 不参与
+        # dialog 逻辑（agent_output 已显式传入），故空 dict 足够。
+        ctx = RunContext(
+            inputs=self._inputs, outputs={}, run_id=self.run_id, task=self._task,
+        )
+        self.push_screen(DialogModal(handler, node, output, ctx, bus=self.bus))
 
     # ── header 刷新（SPEC §4.4）─────────────────────────────────────────
 

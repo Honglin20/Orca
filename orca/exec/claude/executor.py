@@ -42,7 +42,6 @@ argv 构造（SPEC §2.1，重写不迁移）：
 from __future__ import annotations
 
 import logging
-import os
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -50,6 +49,7 @@ from typing import TYPE_CHECKING, Any
 
 from orca.exec.claude.result_extractor import extract_and_validate
 from orca.exec.context import RunContext
+from orca.exec.env import build_env_overlay
 from orca.exec.error import ExecError
 from orca.exec.interface import Executor
 from orca.exec.render import render_prompt
@@ -297,7 +297,7 @@ def _build_spawn_config(
         )
         mcp_flag_args = ["--mcp-config", str(config_path)]
 
-    env_overlay = _build_env_overlay(profile.env_overlay_prefixes)
+    env_overlay = build_env_overlay(profile.env_overlay_prefixes)
     cli_path = profile.resolve_cli_path()  # env > default，运行时读（SPEC §2.6）
 
     return SpawnConfig(
@@ -310,19 +310,6 @@ def _build_spawn_config(
         env_overlay=env_overlay,
         timeout=None,  # 本阶段不做单 node 超时（retry/interrupt 归 phase 5，SPEC §5）
     )
-
-
-def _build_env_overlay(prefixes: tuple[str, ...]) -> dict[str, str]:
-    """从 os.environ 取前缀匹配的 env 变量，作为子进程 overlay（SPEC §2.6）。
-
-    profile.env_overlay_prefixes（claude = ("ANTHROPIC_", "CLAUDE_")）声明的前缀对应
-    的环境变量透传给 claude 子进程（如 ANTHROPIC_API_KEY）。
-    """
-    overlay: dict[str, str] = {}
-    for key, value in os.environ.items():
-        if any(key.startswith(prefix) for prefix in prefixes):
-            overlay[key] = value
-    return overlay
 
 
 def _normalize_usage(usage: dict, cost: float) -> dict[str, Any]:

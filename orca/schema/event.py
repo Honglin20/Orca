@@ -60,6 +60,10 @@ EventType = Literal[
     "validator_started",  # data: {node, criteria_preview}（校验开始：criteria 前 100 字符）
     "validator_passed",  # data: {node, issues: []}（校验通过，issues 恒空）
     "validator_failed",  # data: {node, issues: [str], retrying: bool}（校验失败 + 是否还会重试）
+    # ── phase 11 §6：Dialog（agent 跑完后多轮追问，重 spawn claude 拼历史）──
+    "dialog_started",  # data: {node, session_id, initial_prompt}（进入 dialog 模式）
+    "dialog_message",   # data: {role: "user"|"agent", text, turn}（每轮 user/agent 话）
+    "dialog_ended",     # data: {node, total_turns, conclusion}（退出 dialog 模式）
     # ── 自定义（MCP 工具产出，前端按 data.kind 分发渲染）──
     "custom",  # data: {kind: "chart"|"table"|"image"|..., ...}
     # ── 错误 ──

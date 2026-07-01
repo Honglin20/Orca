@@ -161,6 +161,19 @@ def _describe(event_type: str, data: dict[str, Any]) -> str:
             summary += f" (+{len(issues) - 2} more)"
         suffix = " (retrying)" if retrying else " (exhausted)"
         return f"✗ validator failed{suffix}: {summary}"
+    # phase 11 §6：Dialog（agent 跑完后多轮追问）可观测事件。
+    if event_type == "dialog_started":
+        return f"💬 dialog started at {data.get('node', '?')}: {_truncate(data.get('initial_prompt', ''))}"
+    if event_type == "dialog_message":
+        role = data.get("role", "?")
+        text = data.get("text", "")
+        turn = data.get("turn", "?")
+        return f"💬 {role} (turn {turn}): {_truncate(text)}"
+    if event_type == "dialog_ended":
+        return (
+            f"💬 dialog ended at {data.get('node', '?')}: "
+            f"{data.get('total_turns', 0)} turn(s)"
+        )
     return event_type
 
 

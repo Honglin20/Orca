@@ -53,7 +53,7 @@ def test_all_event_types_construct():
 
 
 def test_event_type_count_matches_spec_literal():
-    """SPEC §3.2 的 Literal 代码块实际 34 个值。
+    """SPEC §3.2 的 Literal 代码块实际 37 个值。
 
     - 22（phase 1-10，含 workflow_cancelled）
     - +3（phase 11 §2.2：interrupt_requested / interrupt_resolved / prompt_rendered）
@@ -61,7 +61,8 @@ def test_event_type_count_matches_spec_literal():
     - +3（phase 11 §9.5.3：retry_started / retry_succeeded / retry_exhausted）
     - +2（phase 11 §9.7.3：wait_started / wait_completed —— Wait Node）
     - +3（phase 11 §9.6.3：validator_started / validator_passed / validator_failed —— Validator）
+    - +3（phase 11 §6：dialog_started / dialog_message / dialog_ended —— Dialog）
 
     显式断言数量，防止后续误删/误增 type 而不自知（fail loud）。
     """
-    assert len(typing.get_args(EventType)) == 34
+    assert len(typing.get_args(EventType)) == 37

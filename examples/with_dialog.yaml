@@ -1,0 +1,52 @@
+# examples/with_dialog.yaml —— Dialog（agent 跑完后多轮追问）演示（phase 11 §6）
+#
+# 单 agent node 跑完后，用户在 CLI 按 ``d`` 键 → DialogModal 弹出 → 就 agent 的 output 多轮追问。
+# DialogHandler 每轮重 spawn 一个 claude -p，把「agent output + 完整对话历史 + 本轮问题」拼进
+# prompt，拿回 agent reply（``-p`` 路线无 in-process session，靠 prompt 拼历史模拟多轮）。
+#
+# 与 Interrupt（Ctrl+G）的区别（SPEC §6.3）：
+#   - Interrupt：node 跑**中**纠偏（SIGINT 杀 + 重 spawn 同 node，影响 DAG 推进）
+#   - Dialog：node 跑**完后**追问（重 spawn 临时对话 claude，不影响 DAG——dialog 是 post-run）
+#
+# Token 成本（SPEC §6.2）：每轮重 spawn + 拼全历史，token 随轮次线性增长。用户主动按
+# 「结束对话」停止。这是 ``-p`` 路线的正确性代价（无 in-process session 保活）。
+#
+# 真实 E2E：真实对话需要真实 claude（每轮 spawn）。automatable 证明见：
+#   tests/gates/test_dialog.py（DialogHandler 单元：start/send/end + 历史累积 + fail loud）
+#   tests/iface/cli/test_dialog_modal.py（modal pilot：发送/结束按钮 + history 渲染）
+#   tests/iface/cli/test_app.py::TestDialogFlow（d 键弹 modal / hint + dialog_* 事件分发）
+#
+# 人工 E2E 步骤：
+#   1. ``orca run examples/with_dialog.yaml``
+#   2. 等 worker agent 跑完（output 写 tape）
+#   3. 按 ``d`` 键 → DialogModal 弹出（标题 ``💬 DIALOG · node=worker`` + output 摘要）
+#   4. 输入「为什么 result 是这个值？」+ 回车 → history 显示 ``user>`` + ``agent>`` 回复
+#   5. 继续追问几轮（每轮重 spawn claude，历史累积）
+#   6. 点「结束对话」或按 Esc → ``dialog_ended`` 写 tape，modal 关闭
+#   7. tape 含 ``dialog_started`` + N×``dialog_message`` + ``dialog_ended``
+#
+# 运行：orca run examples/with_dialog.yaml
+
+name: with_dialog
+description: 演示 Dialog（agent 跑完后多轮追问，重 spawn claude 拼历史）
+entry: worker
+
+inputs:
+  topic:
+    type: string
+    required: false
+    default: "解释 Python 的装饰器"
+    description: 给 agent 的任务主题（产出后用户可按 d 追问细节）
+
+nodes:
+  - name: worker
+    kind: agent
+    prompt: |
+      任务：{{ inputs.topic }}。
+      请给出一个简洁的解释 + 一个最小可运行示例代码。
+      输出格式：先一段解释，再 ```python 代码块。
+    routes:
+      - to: $end
+
+outputs:
+  explanation: "{{ worker.output }}"

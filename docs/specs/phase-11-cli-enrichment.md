@@ -1443,3 +1443,26 @@ foreach 分支忽略此参（向后兼容）。orchestrator `_dispatch` 与 `par
 
    `validator_failed` 保留在 `RetryPolicy.retry_on` Literal（harmless：executor 不发此 error_type，
    对 retry loop 是 no-op）—— 不 churn wave-2 schema。两 loop 各管各的失败域，不嵌套计数。
+
+### 11.7 Dialog 3-method split（P2.2，2026-07-02）—— 与 SPEC §6.2 伪代码的偏离
+
+**偏离**：SPEC §6.2 伪代码写单一 ``run_dialog``（整体跑，内部循环）。实现改拆为 **3 个方法**：
+``start_dialog`` / ``send_turn`` / ``end_dialog``（``orca/gates/dialog.py``）。
+
+**理由（PLAN correction #7 / Rule 7 裁定）**：Textual ``ModalScreen`` 需要在 agent reply 与下一轮
+user 输入之间**交还控制给 UI**（让用户敲下一句）。单一阻塞 ``run_dialog`` 无法在每轮 yield 给 UI——
+它会阻塞整个 modal 直到 dialog 结束，用户中途没法看 history / 改问题。3-method split 让
+``DialogModal``（``iface/cli/screens/dialog_modal.py``）逐轮触发 ``send_turn``（每轮一个
+``@work`` worker），UI 在轮间保持响应。SPEC §6.2 的伪代码是接口示意，实现以 3-method split 为准。
+
+**配套裁定（review feedback，2026-07-02）**：
+1. **``ctx.dialog_history`` 字段是「未来 web shell replay 注入」预留位，当前 CLI 不写**。
+   dialog 的唯一真相在 **tape 的 ``dialog_message`` 事件**——DialogHandler 不写 ctx.dialog_history
+   （dialog 是 post-run，ctx 已不在 orchestrator 流水里，无回流路径）。这避免重蹈 AgentHarness
+   「多 store 多真相源漂移」覆辙。``with_dialog_turn`` 方法保留为未来 web shell 从 tape 重放构造
+   ctx 的 mutation 原语。
+2. **``_build_env_overlay`` 抽到 ``orca/exec/env.py::build_env_overlay``**（Rule 6 DRY）——原
+   exec/claude/executor + exec/validator + gates/dialog 三处内联重复，第三处触发抽象。
+3. **DialogHandler 持 bus 且 emit**（与 InterruptHandler/HumanGateHandler 同层同 pattern）——
+   不违反铁律 2（铁律 2 禁 exec/ import bus；gates/ 本就是控制流 + 事件层）。
+

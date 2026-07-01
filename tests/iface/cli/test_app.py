@@ -637,3 +637,166 @@ class TestInterruptFlow:
                 assert app._current_session_id == "sess-running"
                 assert app._node_started_at is not None
         run_async(scenario())
+
+
+# ── phase 11 §6：Dialog UI（d → DialogModal + 事件分发）─────────────────────
+
+
+def _agent_workflow(tmp_path: Path) -> Path:
+    """含一个 agent node 的最小 workflow（让 _agent_node_names 非空 + node_completed 记 output）。"""
+    p = tmp_path / "wf_agent.yaml"
+    p.write_text(yaml.safe_dump({
+        "name": "t",
+        "entry": "worker",
+        "nodes": [
+            {"name": "worker", "kind": "agent", "prompt": "do X",
+             "routes": [{"to": "$end"}]},
+        ],
+    }), encoding="utf-8")
+    return p
+
+
+class TestDialogFlow:
+    """d 键弹 DialogModal（有完成的 agent node 时）/ 写 hint（无时）+ dialog_* 事件分发。"""
+
+    def test_d_pushes_dialog_modal_when_agent_completed(self, tmp_path):
+        """有完成的 agent node + output → 按 d 弹 DialogModal（SPEC §6.1）。"""
+        from orca.iface.cli.screens.dialog_modal import DialogModal
+
+        wf = _load(_agent_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # 注入 node_completed（agent kind + output）→ app 记 _last_completed_agent_node
+                app._dispatch_to_widgets(_event(
+                    "node_completed", {"output": {"result": "done"}, "elapsed": 1.2},
+                    node="worker", session_id="sess-x",
+                ))
+                await pilot.pause()
+                assert app._last_completed_agent_node == "worker"
+                assert app._last_completed_agent_output == {"result": "done"}
+                # 按 d → 弹 DialogModal
+                await pilot.press("d")
+                await pilot.pause()
+                await pilot.pause()
+                assert isinstance(app.screen, DialogModal)
+        run_async(scenario())
+
+    def test_d_warns_when_no_completed_agent(self, tmp_path):
+        """无完成的 agent node（全 script / 尚未跑到 agent）→ 按 d 不弹 modal，LogStream 写提示。"""
+        from orca.iface.cli.screens.dialog_modal import DialogModal
+
+        wf = _load(_linear_workflow(tmp_path))  # 全 script，无 agent
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("d")
+                await pilot.pause()
+                await pilot.pause()
+                # 不弹 DialogModal
+                assert not isinstance(app.screen, DialogModal)
+                # LogStream 写提示
+                text = _flatten_strips(app.query_one(LogStream).lines)
+                assert "无可追问" in text or "agent" in text
+        run_async(scenario())
+
+    def test_node_completed_agent_records_output_script_does_not(self, tmp_path):
+        """agent node 的 node_completed → 记 output；script node 的不记（只追问 agent 产出）。"""
+        # 混合 workflow：script + agent
+        p = tmp_path / "mix.yaml"
+        p.write_text(yaml.safe_dump({
+            "name": "t", "entry": "s",
+            "nodes": [
+                {"name": "s", "kind": "script", "command": "echo hi",
+                 "routes": [{"to": "a"}]},
+                {"name": "a", "kind": "agent", "prompt": "x",
+                 "routes": [{"to": "$end"}]},
+            ],
+        }), encoding="utf-8")
+        wf = _load(p)
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # script node_completed → 不记
+                app._dispatch_to_widgets(_event(
+                    "node_completed", {"output": "hi", "elapsed": 0.1},
+                    node="s", session_id="s1",
+                ))
+                await pilot.pause()
+                assert app._last_completed_agent_node is None
+                # agent node_completed → 记
+                app._dispatch_to_widgets(_event(
+                    "node_completed", {"output": {"r": 1}, "elapsed": 2.0},
+                    node="a", session_id="a1",
+                ))
+                await pilot.pause()
+                assert app._last_completed_agent_node == "a"
+                assert app._last_completed_agent_output == {"r": 1}
+        run_async(scenario())
+
+    def test_app_dispatches_dialog_started_to_logstream(self, tmp_path):
+        """注入 dialog_started 事件 → LogStream 显示描述（含 node + preview）。"""
+        wf = _load(_linear_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app._dispatch_to_widgets(_event(
+                    "dialog_started",
+                    {"node": "cfg", "session_id": "dlg-1",
+                     "initial_prompt": '{"model_class": "SimpleNet"}'},
+                    node="cfg", session_id="dlg-1",
+                ))
+                await pilot.pause()
+                await pilot.pause()
+                text = _flatten_strips(app.query_one(LogStream).lines)
+                assert "dialog started" in text
+                assert "cfg" in text
+        run_async(scenario())
+
+    def test_app_dispatches_dialog_message_to_logstream(self, tmp_path):
+        """注入 dialog_message 事件 → LogStream 显示 role + turn + text 摘要。"""
+        wf = _load(_linear_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app._dispatch_to_widgets(_event(
+                    "dialog_message",
+                    {"role": "agent", "text": "因为 target_project 没有那个字段", "turn": 2},
+                    node="cfg", session_id="dlg-1",
+                ))
+                await pilot.pause()
+                await pilot.pause()
+                text = _flatten_strips(app.query_one(LogStream).lines)
+                assert "agent" in text
+                assert "turn 2" in text
+        run_async(scenario())
+
+    def test_app_dispatches_dialog_ended_to_logstream(self, tmp_path):
+        """注入 dialog_ended 事件 → LogStream 显示 node + total_turns。"""
+        wf = _load(_linear_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app._dispatch_to_widgets(_event(
+                    "dialog_ended",
+                    {"node": "cfg", "total_turns": 3, "conclusion": "user_ended"},
+                    node="cfg", session_id="dlg-1",
+                ))
+                await pilot.pause()
+                await pilot.pause()
+                text = _flatten_strips(app.query_one(LogStream).lines)
+                assert "dialog ended" in text
+                assert "3 turn" in text
+        run_async(scenario())
