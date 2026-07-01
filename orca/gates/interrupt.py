@@ -192,6 +192,11 @@ class InterruptHandler(BroadcasterMixin):
             node=ireq.node,
             session_id=ireq.session_id,
         )
+        # phase 11 §9.7.6：打断所有 interruptible wait node（Ctrl+G 应让正在 sleep 的
+        # wait 立即结束，而非等它睡满）。bus.notify_all_waits 幂等（无 handle 返 0）。
+        woken = self._bus.notify_all_waits()
+        if woken:
+            logger.info("interrupt %s 打断了 %d 个 wait node", ireq.id, woken)
 
     def resolve(
         self,
@@ -228,6 +233,14 @@ class InterruptHandler(BroadcasterMixin):
                 logger.warning(
                     "interrupt %s resolved 但 broadcaster 未启动，resolved 事件未广播",
                     interrupt_id,
+                )
+            # phase 11 §9.7.6：打断所有 interruptible wait node（Ctrl+G 应让正在 sleep 的
+            # wait 立即结束）。放锁外避免持锁调 bus；notify 自带锁。先 set_result 再 notify：
+            # wait node 不依赖 future，set 顺序无强约束，但 future 路径优先保编排唤醒。
+            woken = self._bus.notify_all_waits()
+            if woken:
+                logger.info(
+                    "interrupt %s 打断了 %d 个 wait node", interrupt_id, woken
                 )
             return True
 

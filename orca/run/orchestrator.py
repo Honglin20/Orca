@@ -663,7 +663,7 @@ class Orchestrator:
         # 普通 node：make_executor + execute_and_emit
         from orca.exec.factory import make_executor
 
-        executor = make_executor(node, self._agent_tools_server)
+        executor = make_executor(node, self._agent_tools_server, bus=self.bus)
         # phase 11 §9.5.5：agent node 声明 retry → 走 execute_with_retry（transient
         # 失败自动重试 + retry_started/succeeded/exhausted 事件）；否则既有路径（向后兼容）。
         # node.kind=="agent" 经 pydantic discriminated union 已保证 node 是 AgentNode 实例，

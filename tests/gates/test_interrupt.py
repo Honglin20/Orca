@@ -353,3 +353,60 @@ def test_record_resolved_no_deadlock_without_future(tmp_path):
 
     run_async(scenario())
 
+
+
+# ── phase 11 §9.7.6：record_resolved / resolve 打断 interruptible wait ─────────
+
+
+def test_record_resolved_notifies_wait_handles(tmp_path):
+    """CLI 单壳路径：record_resolved 调 bus.notify_all_waits 打断 interruptible wait。
+
+    INTENT：Ctrl+G 触发 interrupt → 正在 sleep 的 wait node 立即结束。这是 wait↔interrupt
+    协同的端到端证据（SPEC §9.7.6）。注册一个 wait handle，record_resolved 后它应被 set。
+    """
+    import asyncio
+
+    wait_handle = asyncio.Event()
+
+    async def scenario():
+        bus, _ = make_bus(tmp_path)
+        handler = InterruptHandler(bus)
+        await handler.start()
+        try:
+            bus.register_wait_handle(wait_handle)
+            assert not wait_handle.is_set()
+            ireq = make_ireq("i1", node="w", session_id="sess-w")
+            await handler.record_resolved(ireq, "continue", None, "cli")
+        finally:
+            await handler.stop()
+            bus.close()
+
+    run_async(scenario())
+    assert wait_handle.is_set()  # 被 notify_all_waits 唤醒
+
+
+def test_resolve_notifies_wait_handles(tmp_path):
+    """多壳路径：resolve 也调 bus.notify_all_waits（同一 chokepoint 覆盖两条路径）。"""
+    import asyncio
+
+    wait_handle = asyncio.Event()
+
+    async def scenario():
+        bus, _ = make_bus(tmp_path)
+        handler = InterruptHandler(bus)
+        await handler.start()
+        try:
+            bus.register_wait_handle(wait_handle)
+            # request + resolve（多壳路径，需先 request 注册 future）
+            ireq = make_ireq("i2", node="w", session_id="sess-w2")
+            task = asyncio.create_task(handler.request(ireq))
+            await asyncio.sleep(0.03)  # 让 request 进入 await fut
+            ok = handler.resolve("i2", "continue", "go", "web")
+            assert ok is True
+            await asyncio.wait_for(task, timeout=2.0)
+        finally:
+            await handler.stop()
+            bus.close()
+
+    run_async(scenario())
+    assert wait_handle.is_set()

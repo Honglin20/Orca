@@ -151,6 +151,25 @@ class ForeachNode(Node):
     failure_mode: Literal["fail_fast", "continue_on_error", "all_or_nothing"] = "fail_fast"
 
 
+class WaitNode(Node):
+    """等待节点（phase 11 §9.7）：``asyncio.sleep`` 一段时长，可被 Ctrl+G 打断。
+
+    典型用途：API rate-limit 退避、轮询间隔、人工节奏控制。``duration`` 支持 Jinja2
+    渲染（如 ``"{{ inputs.wait_time }}s"``），单位 ``s``/``m``/``h``/``d`` 或纯数字（秒）。
+
+    ``interruptible=True``（默认）：WaitExecutor 注册 wait handle，用户 Ctrl+G 时
+    ``bus.notify_all_waits()`` 立即打断，emit ``wait_completed{interrupted=True}``。
+    ``interruptible=False``：必须等满，Ctrl+G 等下一 node 边界生效（与中断系统既有契约一致）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["wait"] = "wait"
+    duration: str  # Jinja2 渲染："30s"/"5m"/"2h"/"1d"/"30"（纯数字 = 秒）
+    reason: str = ""  # 人类可读说明（写入 tape 便于调试）
+    interruptible: bool = True
+
+
 class ParallelGroup(BaseModel):
     """静态并行组（顶层独立列表项，Workflow.parallel 的元素）。
 
@@ -173,9 +192,9 @@ class ParallelGroup(BaseModel):
 
 
 # 顶层 node 判别联合：按 kind 字段分派到具体子类。
-# 与 ForeachBody 对照：这里包含全部 4 个 kind（顶层 DAG），body 仅允许 agent/script。
+# 与 ForeachBody 对照：这里包含全部 5 个 kind（顶层 DAG），body 仅允许 agent/script。
 AnnotatedNode = Annotated[
-    Union[AgentNode, ScriptNode, SetNode, ForeachNode],
+    Union[AgentNode, ScriptNode, SetNode, ForeachNode, WaitNode],
     Field(discriminator="kind"),
 ]
 

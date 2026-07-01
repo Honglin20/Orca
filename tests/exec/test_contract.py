@@ -4,7 +4,7 @@
   - public API 可 import（Executor / make_executor / RunContext / ExecError）
   - Executor 是 ABC（不能直接实例化）
   - RunContext frozen（mutation 抛 FrozenInstanceError）
-  - ExecError 字段（phase / error_type / message）+ phase_to_error_type 6 映射
+  - ExecError 字段（phase / error_type / message）+ phase_to_error_type 全映射覆盖
   - 依赖单向铁律 1：exec/ 不 import orca.run / orca.compile
   - 依赖单向铁律 2：exec/ 不 import orca.events.bus / Tape（只允许 orca.schema.Event）
 """
@@ -110,10 +110,12 @@ def test_exec_error_explicit_error_type_override():
         ("result_parse", "NoResultEvent"),
         ("schema", "SchemaValidationError"),
         ("render", "RenderError"),
+        # phase 11 §9.7.5（Wait Node）：duration 超上限走 config phase
+        ("config", "ConfigError"),
     ],
 )
-def test_phase_to_error_type_all_six_mappings(phase, expected):
-    """SPEC §6：6 个 phase 各映射到固定 error_type。"""
+def test_phase_to_error_type_all_mappings(phase, expected):
+    """SPEC §6：每个已登记 phase 各映射到固定 error_type（新增 phase 同步补此表 + 映射表）。"""
     assert phase_to_error_type(phase) == expected
 
 

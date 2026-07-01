@@ -713,7 +713,7 @@ def test_orchestrator_retry_integration_fail_then_succeed(tmp_path, monkeypatch)
     ])
     # orchestrator._dispatch 内 `from orca.exec.factory import make_executor` 每次调用
     # 重绑模块属性，故 patch factory 模块级符号即可生效。
-    monkeypatch.setattr(factory_mod, "make_executor", lambda node, agent_tools_server=None: fake)
+    monkeypatch.setattr(factory_mod, "make_executor", lambda node, agent_tools_server=None, bus=None: fake)
 
     from orca.run.orchestrator import Orchestrator
     orch = Orchestrator(wf, bus, inputs={}, run_id="r1")
@@ -742,7 +742,7 @@ def test_orchestrator_retry_exhausted_workflow_failed(tmp_path, monkeypatch):
         _fail("spawn_error", "a2", node_name="fetch"),
         _fail("spawn_error", "a3", node_name="fetch"),
     ])
-    monkeypatch.setattr(factory_mod, "make_executor", lambda node, agent_tools_server=None: fake)
+    monkeypatch.setattr(factory_mod, "make_executor", lambda node, agent_tools_server=None, bus=None: fake)
 
     from orca.run.orchestrator import Orchestrator
     orch = Orchestrator(wf, bus, inputs={}, run_id="r1")

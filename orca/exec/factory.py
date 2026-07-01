@@ -6,6 +6,7 @@
   - ``AgentNode``   → ``ClaudeExecutor(get_profile(node.executor), agent_tools_server)``
   - ``ScriptNode``  → ``ScriptExecutor()``
   - ``SetNode``     → ``SetExecutor()``
+  - ``WaitNode``    → ``WaitExecutor(bus)``（phase 11 §9.7，需 bus 注册 wait handle）
   - ``ForeachNode`` → ``raise NotImplementedError``（编排归 phase 5，本阶段不做）
 
 OCP：加新 kind / 新 backend 不改本函数核心（agent backend 切换靠 profiles 注册表，
@@ -15,8 +16,13 @@ phase 11 §5.4（review C4）：``make_executor`` 加可选第二参 ``agent_too
 agent 分支透传给 ``ClaudeExecutor``（用于 ``--mcp-config`` ask_user 挂载）；script/set/
 foreach 分支忽略它（None == 既有行为，向后兼容）。
 
+phase 11 §9.7.4：``make_executor`` 加可选第三参 ``bus``，仅 wait 分支透传给
+``WaitExecutor``（``interruptible=True`` 时注册 wait handle，InterruptHandler 经
+``bus.notify_all_waits()`` 打断）；None == script/set/foreach 既有行为（向后兼容）。
+
 依赖单向：本模块依赖 ``orca.profiles``（agent backend 解析）+ exec 内部子模块；
-不依赖 run/compile。``AgentToolsMcpServer`` 仅用于类型注解（``TYPE_CHECKING``）。
+不依赖 run/compile。``AgentToolsMcpServer`` / ``WaitHandleRegistry`` 仅用于类型注解
+（``TYPE_CHECKING``）；wait 路径的 bus 由 orchestrator 透传（结构化满足 Protocol）。
 """
 
 from __future__ import annotations
@@ -24,16 +30,19 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from orca.exec.interface import Executor
-from orca.schema import AgentNode, ForeachNode, Node, ScriptNode, SetNode
+from orca.schema import AgentNode, ForeachNode, Node, ScriptNode, SetNode, WaitNode
 
 if TYPE_CHECKING:
     from orca.exec.mcp_tools.server import AgentToolsMcpServer
+    from orca.exec.wait import WaitHandleRegistry
 
 
 def make_executor(
-    node: Node, agent_tools_server: AgentToolsMcpServer | None = None
+    node: Node,
+    agent_tools_server: AgentToolsMcpServer | None = None,
+    bus: WaitHandleRegistry | None = None,
 ) -> Executor:
-    """按 ``node.kind`` 分派到对应 Executor 实例（SPEC §7.8 / phase 11 §5.4）。
+    """按 ``node.kind`` 分派到对应 Executor 实例（SPEC §7.8 / phase 11 §5.4 / §9.7.4）。
 
     AgentNode 经 ``get_profile(node.executor)`` 解析 backend（默认 "claude"）；
     不存在 / 被 disable 的 executor → ``get_profile`` 抛 ``ValueError``（透传，fail loud）。
@@ -41,6 +50,11 @@ def make_executor(
     ``agent_tools_server``（phase 11 §5.4）：仅 agent 分支透传给 ``ClaudeExecutor``——
     非空时 spawn claude 带 ``--mcp-config``（暴露 ask_user）；None == 既有行为（向后兼容）。
     script/set/foreach 分支忽略此参。
+
+    ``bus``（phase 11 §9.7.4）：仅 wait 分支透传给 ``WaitExecutor``——wait node 的
+    ``interruptible=True`` 路径要 ``register_wait_handle``。None 时遇到 WaitNode →
+    fail loud（``ValueError``）：interruptible wait 没 bus 无法注册 handle，静默跳过会
+    让 Ctrl+G 打断契约失效（SPEC §9.7.6）。script/set/foreach 分支忽略此参。
 
     ForeachNode 本阶段 ``raise NotImplementedError``（foreach 分批 / 并行归 phase 5 编排层）。
     """
@@ -62,12 +76,24 @@ def make_executor(
 
         return SetExecutor()
 
+    if isinstance(node, WaitNode):
+        from orca.exec.wait import WaitExecutor
+
+        if bus is None:
+            # interruptible wait 没 bus 无法注册 handle → fail loud（打断契约不能静默失效）。
+            # interruptible=False 理论上不需 bus，但保持单一构造路径（避免按字段分叉构造）：
+            # 调用方一律传 bus，WaitExecutor 仅 interruptible 分支才用。
+            raise ValueError(
+                "WaitExecutor 需要 bus（wait handle 注册），make_executor 未传入 bus"
+            )
+        return WaitExecutor(bus)
+
     if isinstance(node, ForeachNode):
         raise NotImplementedError(
             "foreach 归 phase 5 编排层（分批 / 并行 / 失败策略），本阶段 exec/ 不实现"
         )
 
-    # 不该到这里：node.kind 是 Literal 联合，4 选 1 之外是 schema 层漏校验。
+    # 不该到这里：node.kind 是 Literal 联合，5 选 1 之外是 schema 层漏校验。
     raise TypeError(
         f"make_executor 不支持 node kind {node.kind!r}（type={type(node).__name__}）"
     )

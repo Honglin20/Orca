@@ -216,7 +216,7 @@ def test_orchestrator_unregisters_run_sessions_after_completion_no_leak(tmp_path
     # ── run-A ──────────────────────────────────────────────────────────────
     bus_a, _ = make_bus(tmp_path / "runA")
     fake_a = _RegisteringFakeAgent("run-A-id", "a", server)
-    factory_mod.make_executor = lambda node, agent_tools_server=None: fake_a
+    factory_mod.make_executor = lambda node, agent_tools_server=None, bus=None: fake_a
     try:
         orch_a = Orchestrator(
             _agent_wf("A"), bus_a, run_id="run-A-id", agent_tools_server=server,
@@ -240,7 +240,7 @@ def test_orchestrator_unregisters_run_sessions_after_completion_no_leak(tmp_path
     # ── run-B（同一 server + registry，模拟「daemon 长跑多 run」场景）─────────
     bus_b, _ = make_bus(tmp_path / "runB")
     fake_b = _RegisteringFakeAgent("run-B-id", "a", server)
-    factory_mod.make_executor = lambda node, agent_tools_server=None: fake_b
+    factory_mod.make_executor = lambda node, agent_tools_server=None, bus=None: fake_b
     try:
         orch_b = Orchestrator(
             _agent_wf("B"), bus_b, run_id="run-B-id", agent_tools_server=server,

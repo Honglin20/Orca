@@ -135,6 +135,19 @@ def _describe(event_type: str, data: dict[str, Any]) -> str:
             f"✗ retry exhausted after {data.get('attempts', '?')} attempt(s) "
             f"(last: {data.get('last_error_type', '?')})"
         )
+    # phase 11 §9.7：Wait Node 可观测事件（让用户看到「wait 开始 + 时长 / wait 结束 + 是否被打断」）。
+    if event_type == "wait_started":
+        secs = data.get("duration_seconds", 0)
+        reason = data.get("reason")
+        text = f"⏳ wait {secs:.1f}s"
+        if reason:
+            text += f": {_truncate(reason)}"
+        return text
+    if event_type == "wait_completed":
+        secs = data.get("elapsed_seconds", 0)
+        interrupted = data.get("interrupted", False)
+        suffix = " (interrupted)" if interrupted else ""
+        return f"⏳ wait done{suffix} ({secs:.1f}s)"
     return event_type
 
 

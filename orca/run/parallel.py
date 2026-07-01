@@ -76,7 +76,7 @@ async def run_parallel_group(
         from orca.exec.factory import make_executor
 
         try:
-            executor = make_executor(node, agent_tools_server)
+            executor = make_executor(node, agent_tools_server, bus=bus)
             raw = await execute_and_emit(executor, node, ctx, bus)
             # 包装成 {"output": raw}（render 约定 + 与 ctx.outputs 同形）
             return branch_name, {"output": raw}

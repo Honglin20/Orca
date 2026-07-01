@@ -1,0 +1,28 @@
+name: with_wait
+description: |
+  Wait Node demo（phase 11 §9.7）。一个 wait 节点睡 2s，下游 script 读
+  ``{{ w.output.interrupted }}`` 验证 wait output 形态。
+  手动 E2E（Ctrl+G 打断 wait）：
+
+    orca run examples/with_wait.yaml
+
+  跑到 wait 节点（~立即）时按 Ctrl+G → wait 立即结束（interrupted=True），
+  下游 script 输出 ``interrupted=True``；不按则 ~2s 后 ``interrupted=False``。
+  Ctrl+G 打断 wait 的自动化证明见 tests/exec/test_wait.py
+  ::test_wait_executor_interruptible_can_be_cancelled。
+entry: w
+nodes:
+  - name: w
+    kind: wait
+    duration: "2s"
+    reason: "演示 wait node（2 秒）"
+    interruptible: true
+    routes:
+      - to: s
+  - name: s
+    kind: script
+    command: 'echo "wait done, interrupted={{ w.output.interrupted }}"'
+    routes:
+      - to: $end
+outputs:
+  result: "{{ s.output.stdout }}"

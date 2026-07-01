@@ -53,6 +53,9 @@ EventType = Literal[
     "retry_started",  # data: {attempt, max_attempts, error_type, delay_seconds, node}
     "retry_succeeded",  # data: {attempt_total, node}（重试后成功）
     "retry_exhausted",  # data: {attempts, last_error_type, node}（重试用完仍失败）
+    # ── phase 11 §9.7：Wait Node（asyncio.sleep 节点，可被 Ctrl+G 打断）──
+    "wait_started",  # data: {duration_seconds, reason}
+    "wait_completed",  # data: {elapsed_seconds, interrupted: bool}
     # ── 自定义（MCP 工具产出，前端按 data.kind 分发渲染）──
     "custom",  # data: {kind: "chart"|"table"|"image"|..., ...}
     # ── 错误 ──

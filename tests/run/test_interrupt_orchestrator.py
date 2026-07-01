@@ -245,7 +245,7 @@ def test_e2e_interrupt_continue_guidance_renders_in_respawn(tmp_path):
     import orca.exec.factory as factory_mod
     import orca.run.executor_adapter as adapter_mod
     orig_make_executor = factory_mod.make_executor
-    factory_mod.make_executor = lambda node, agent_tools_server=None: fake_exec
+    factory_mod.make_executor = lambda node, agent_tools_server=None, bus=None: fake_exec
     # execute_and_emit 从 factory 取 executor；它 import 的是模块级引用，patch factory_mod 即可
 
     async def scenario():

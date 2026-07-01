@@ -77,6 +77,9 @@ _PHASE_TO_ERROR_TYPE: dict[str, str] = {
     "result_parse": "NoResultEvent",
     "schema": "SchemaValidationError",
     "render": "RenderError",
+    # phase 11 §9.7.5（Wait Node）：duration 超过 24h 硬上限 = 配置错（非渲染语法错），
+    # 单列 phase 让 retry 白名单 / 诊断能区分。WaitExecutor 显式带 error_type="ConfigError"。
+    "config": "ConfigError",
 }
 
 

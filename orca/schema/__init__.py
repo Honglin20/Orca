@@ -22,6 +22,7 @@ from orca.schema.workflow import (
     Route,
     ScriptNode,
     SetNode,
+    WaitNode,
     Workflow,
 )
 
@@ -34,6 +35,7 @@ __all__ = [
     "ScriptNode",
     "SetNode",
     "ForeachNode",
+    "WaitNode",
     "AnnotatedNode",
     "ParallelGroup",
     "RetryPolicy",

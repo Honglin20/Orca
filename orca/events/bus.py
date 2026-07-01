@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from typing import AsyncIterator
 
@@ -114,6 +115,15 @@ class EventBus:
         self.tape = tape
         self._subs: list[Subscription] = []
         self._closed = False
+        # phase 11 §9.7.6：wait-handle 注册表。WaitExecutor 进入 interruptible sleep 前
+        # register 一个 asyncio.Event；InterruptHandler 收到 Ctrl+G 时 notify_all_waits
+        # 把它们全 set()，让 interruptible wait node 立即结束。``threading.Lock`` 保护
+        # 集合的 add/discard/迭代（防并发 register/unregister 损坏 set 迭代器）。
+        # 注：当前所有 resolve/notify 调用点都在事件循环线程（HTTP/WS/MCP/CLI 端点均
+        # async def），``asyncio.Event.set`` 的跨线程安全不由本 Lock 保证；未来若引入
+        # 线程化 resolve 路径，需经 ``loop.call_soon_threadsafe(handle.set)``。
+        self._wait_handles: set[asyncio.Event] = set()
+        self._wait_handles_lock = threading.Lock()
 
     async def emit(
         self,
@@ -153,6 +163,39 @@ class EventBus:
         sub = Subscription(queue_max=queue_max)
         self._subs.append(sub)
         return sub
+
+    # ── phase 11 §9.7.6：wait-handle API（WaitExecutor ↔ InterruptHandler 协同）──
+
+    def register_wait_handle(self, handle: asyncio.Event) -> None:
+        """WaitExecutor 进入 interruptible sleep 前注册一个 handle（幂等）。
+
+        InterruptHandler 收到 Ctrl+G 时调 ``notify_all_waits`` 把所有已注册 handle
+        ``set()``，让 interruptible wait node 立即结束（``wait_completed.interrupted=True``）。
+        """
+        with self._wait_handles_lock:
+            self._wait_handles.add(handle)
+
+    def unregister_wait_handle(self, handle: asyncio.Event) -> None:
+        """sleep 结束（正常完成 / 被打断）后注销 handle（幂等：未注册不报错）。"""
+        with self._wait_handles_lock:
+            self._wait_handles.discard(handle)
+
+    def notify_all_waits(self) -> int:
+        """set 所有已注册 wait handle，返回被唤醒的数量。
+
+        InterruptHandler 收到 Ctrl+G 时调（``resolve`` / ``record_resolved`` 路径都调）。
+        返回值用于日志可观测（被唤醒的 wait node 数）。
+
+        线程安全范围：``threading.Lock`` 保护 wait-handle 集合的 snapshot（防并发
+        register/unregister 损坏迭代）；snapshot 后在锁外逐个 ``handle.set()``。
+        ``asyncio.Event.set`` 本身的跨线程安全不由本 Lock 保证 —— 调用方应在事件循环
+        线程上调用（当前所有 resolve 路径均满足：HTTP/WS/MCP/CLI 端点都是 async def）。
+        """
+        with self._wait_handles_lock:
+            handles = list(self._wait_handles)
+        for handle in handles:
+            handle.set()
+        return len(handles)
 
     def close(self) -> None:
         """关闭 bus：关闭 Tape 句柄 + 通知所有订阅者终止。
