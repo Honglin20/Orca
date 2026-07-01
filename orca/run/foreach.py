@@ -32,6 +32,7 @@ from orca.run.executor_adapter import execute_and_emit
 if TYPE_CHECKING:
     from orca.events.bus import EventBus
     from orca.exec.context import RunContext
+    from orca.exec.mcp_tools.server import AgentToolsMcpServer
     from orca.schema import ForeachNode
 
 logger = logging.getLogger(__name__)
@@ -41,10 +42,15 @@ async def run_foreach(
     node: ForeachNode,
     ctx: RunContext,
     bus: EventBus,
+    *,
+    agent_tools_server: AgentToolsMcpServer | None = None,
 ) -> dict[str, Any]:
     """分批并行执行 ``node.body``，返回聚合 dict（{outputs, errors, count, succeeded}）。
 
     失败：按 ``node.failure_mode`` 决策（共享 ``decide_failure``）。
+
+    phase 11 §5.4：``agent_tools_server`` 透传给 body 的 agent executor（body 是 agent 时
+    可用 ask_user）。None == 既有行为（向后兼容）。
     """
     # 1. 运行时求值 source（Jinja2 渲染 source 表达式 → 数组）
     arr = _eval_source_array(node.source, ctx)
@@ -63,7 +69,7 @@ async def run_foreach(
             # lazy import：便于测试 monkeypatch orca.exec.factory.make_executor 统一生效
             from orca.exec.factory import make_executor
 
-            executor = make_executor(node.body)
+            executor = make_executor(node.body, agent_tools_server)
             return await execute_and_emit(executor, node.body, body_ctx, bus)
 
     raw_results = await asyncio.gather(

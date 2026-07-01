@@ -319,6 +319,15 @@ class OrcaApp(App):
         self._current_session_id: str | None = None
         self._node_started_at: float | None = None
         self.session_registry = SessionContextRegistry()
+        # phase 11 §5：AgentToolsMcpServer（ask_user 挂载，给被编排的 claude -p 调）。
+        # runs_dir 与 tape 同目录（mcp-config 写到 runs/<run_id>/mcp_<session>.json）。
+        # lazy-start（orchestrator.run 内，第一个 agent spawn 前）；None 路径 == 无 ask_user。
+        from orca.exec.mcp_tools.server import AgentToolsMcpServer
+
+        runs_dir = Path(path).parent if tape_path is not None else Path("runs")
+        self.agent_tools_server = AgentToolsMcpServer(
+            self.gate_handler, self.session_registry, runs_dir=runs_dir,
+        )
 
         # gate HTTP 桥（hook POST 入口）。gate_port=None → 读 ORCA_PORT env / 默认 7421。
         port = gate_port if gate_port is not None else _gate_port_from_env()
@@ -423,6 +432,7 @@ class OrcaApp(App):
                 self.wf, self.bus, self._inputs,
                 task=self._task, max_iter=self._max_iter, run_id=self.run_id,
                 interrupt_handler=self.interrupt_handler,
+                agent_tools_server=self.agent_tools_server,
             )
             self._orchestrator = orch
             state = await orch.run()

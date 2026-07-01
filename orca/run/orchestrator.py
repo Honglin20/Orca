@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from orca.events.bus import EventBus
     from orca.events.tape import Tape
     from orca.exec.context import RunContext
+    from orca.exec.mcp_tools.server import AgentToolsMcpServer
     from orca.gates.interrupt import InterruptHandler
     from orca.gates.types import InterruptRequest
     from orca.schema import Node, RunState, Workflow
@@ -76,6 +77,7 @@ class Orchestrator:
         "wf", "bus", "run_id", "ctx", "task", "max_iter",
         "_node_by_name", "_parallel_by_name", "_guidance_acc",
         "_interrupt_handler", "_interrupt_pending", "_interrupt_answer",
+        "_agent_tools_server",
     )
 
     def _assert_drive_fields_complete(self) -> None:
@@ -105,6 +107,7 @@ class Orchestrator:
         max_iter: int | None = None,
         run_id: str | None = None,
         interrupt_handler: InterruptHandler | None = None,
+        agent_tools_server: AgentToolsMcpServer | None = None,
     ):
         self.wf = wf
         self.bus = bus
@@ -112,6 +115,10 @@ class Orchestrator:
         # 既有测试不受影响，向后兼容）。注入后 CLI 层经 ``request_interrupt`` 登记 pending。
         self._interrupt_handler = interrupt_handler
         self._interrupt_pending: InterruptRequest | None = None
+        # phase 11 §5.1：可选 AgentToolsMcpServer（ask_user 挂载）。None = 无 ask_user 支持
+        # （向后兼容）。注入后 ``run`` 起 SSE server，spawn agent 时写 mcp-config + register
+        # session。lazy start：第一个 agent spawn 前 server 必须已起（start 在 run() 开头）。
+        self._agent_tools_server = agent_tools_server
         # phase 11 §3.1：CLI 单壳路径下用户已答完的 (action, guidance)，随 request_interrupt 带入。
         # node 边界 _handle_interrupt 直接消费它（不经 handler.request 的 await-future）。
         self._interrupt_answer: tuple[str, str | None] | None = None
@@ -204,6 +211,21 @@ class Orchestrator:
         t, data = make_workflow_started(self.run_id, self.wf, self.ctx.inputs)
         await self.bus.emit(t, data)
 
+        # phase 11 §5.1：lazy-start AgentToolsMcpServer（若注入）。在 workflow_started 之后、
+        # 第一个 agent spawn 之前起（SSE server 绑 loopback port，给被编排的 claude -p 连）。
+        # start 失败（port bind 等）→ workflow_failed（fail loud，铁律 12）：注入 ask_user server
+        # 的 workflow 若 server 起不来，每个 agent spawn 都会崩；半静默降级只会延后错误。
+        try:
+            await self._start_agent_tools()
+        except Exception as e:
+            t2, data2 = make_workflow_failed(
+                "AgentToolsServerStartFailed",
+                f"AgentToolsMcpServer 启动失败：{e}",
+            )
+            await self.bus.emit(t2, data2)
+            await self._stop_agent_tools()
+            self.bus.close()
+            return replay_state(self.bus.tape)
         try:
             final_outputs = await self._drive_loop()
         except (ExecError, RouteError, MaxIterationsError, GroupFailure, WorkflowAborted) as e:
@@ -214,14 +236,43 @@ class Orchestrator:
                 error_type, str(e), node=node,
             )
             await self.bus.emit(t2, data2)
+            await self._stop_agent_tools()
             self.bus.close()
             return replay_state(self.bus.tape)
 
         elapsed = now_monotonic() - start_ts
         t3, data3 = make_workflow_completed(self.wf, final_outputs, elapsed=elapsed)
         await self.bus.emit(t3, data3)
+        await self._stop_agent_tools()
         self.bus.close()
         return replay_state(self.bus.tape)
+
+    async def _start_agent_tools(self) -> None:
+        """phase 11 §5.1：lazy-start AgentToolsMcpServer（若注入）。幂等。
+
+        **fail loud（铁律 12）**：start 失败（port bind 失败等）直接 propagate——若 ask_user
+        server 起不来，注入它的 workflow 必然在每个 agent spawn 时崩（write_config 拿不到
+        port）；半静默降级只会让错误延后且定位困难。propagate 让 workflow_failed 立即可见。
+        """
+        if self._agent_tools_server is not None:
+            await self._agent_tools_server.start()
+
+    async def _stop_agent_tools(self) -> None:
+        """phase 11 §5.1：stop AgentToolsMcpServer（若注入）+ 清理 run 的 session 路由。
+
+        **SPEC §6 清理契约**：run 结束时 ``unregister_run(run_id)`` 清空该 run 注册的全部
+        claude session 路由（防内存泄漏）。session_id 由 executor 内部 uuid 生成，orchestrator
+        不持有，故按 run_id 批清（而非逐 node 清）。stop + unregister 都幂等。
+        """
+        if self._agent_tools_server is not None:
+            try:
+                self._agent_tools_server.unregister_run(self.run_id)
+            except Exception:  # noqa: BLE001 — 清理不应阻断退出
+                logger.warning("unregister_run 异常（已吞）", exc_info=True)
+            try:
+                await self._agent_tools_server.stop()
+            except Exception:  # noqa: BLE001 — 退出路径兜底
+                logger.warning("AgentToolsMcpServer.stop 异常（已吞）", exc_info=True)
 
     # ── phase 11 §7：Checkpoint Resume（SPEC §7.2）─────────────────────────────
 
@@ -365,6 +416,8 @@ class Orchestrator:
         orch._interrupt_handler = None
         orch._interrupt_pending = None
         orch._interrupt_answer = None
+        # phase 11 §5：resume 不接 agent_tools_server（ask_user 交互态不跨进程恢复）。
+        orch._agent_tools_server = None
         # resume 专用状态（run_from_state 消费）。
         orch._resume_replayed_events = 0
         orch._resume_initial_outputs = outputs_acc
@@ -426,6 +479,9 @@ class Orchestrator:
             },
         )
 
+        # phase 11 §5.1：resume 路径默认 _agent_tools_server=None（_bare_instance 设），
+        # 此处 no-op；若未来 resume 也注入 server，此处与 run() 对称起停。
+        await self._start_agent_tools()
         try:
             final_outputs = await self._drive_from(
                 self._resume_start_node, self._resume_initial_outputs
@@ -435,12 +491,14 @@ class Orchestrator:
             node = _error_node(e)
             t2, data2 = make_workflow_failed(error_type, str(e), node=node)
             await self.bus.emit(t2, data2)
+            await self._stop_agent_tools()
             self.bus.close()
             return replay_state(self.bus.tape)
 
         elapsed = now_monotonic() - start_ts
         t3, data3 = make_workflow_completed(self.wf, final_outputs, elapsed=elapsed)
         await self.bus.emit(t3, data3)
+        await self._stop_agent_tools()
         self.bus.close()
         return replay_state(self.bus.tape)
 
@@ -590,18 +648,22 @@ class Orchestrator:
         """按 current 类型分派：parallel 组 / foreach / 普通 node。"""
         if current in self._parallel_by_name:
             group = self._parallel_by_name[current]
-            return await run_parallel_group(group, ctx, self.bus, self.wf)
+            return await run_parallel_group(
+                group, ctx, self.bus, self.wf, agent_tools_server=self._agent_tools_server,
+            )
         node = self._node_by_name.get(current)
         if node is None:
             # compile 层已保证 route.to 合法，到这里是 schema 漏校验 → fail loud
             raise ValueError(f"current {current!r} 既非 node 也非 parallel 组（schema 漏校验）")
         if node.kind == "foreach":
             # node.kind=="foreach" 已保证类型（schema 判别联合）；kind 判定即契约
-            return await run_foreach(node, ctx, self.bus)  # type: ignore[arg-type]
+            return await run_foreach(  # type: ignore[arg-type]
+                node, ctx, self.bus, agent_tools_server=self._agent_tools_server,
+            )
         # 普通 node：make_executor + execute_and_emit
         from orca.exec.factory import make_executor
 
-        executor = make_executor(node)
+        executor = make_executor(node, self._agent_tools_server)
         # phase 11 §9.5.5：agent node 声明 retry → 走 execute_with_retry（transient
         # 失败自动重试 + retry_started/succeeded/exhausted 事件）；否则既有路径（向后兼容）。
         # node.kind=="agent" 经 pydantic discriminated union 已保证 node 是 AgentNode 实例，

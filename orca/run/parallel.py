@@ -29,6 +29,7 @@ from orca.run.executor_adapter import execute_and_emit
 if TYPE_CHECKING:
     from orca.events.bus import EventBus
     from orca.exec.context import RunContext
+    from orca.exec.mcp_tools.server import AgentToolsMcpServer
     from orca.schema import ParallelGroup, Workflow
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,8 @@ async def run_parallel_group(
     ctx: RunContext,
     bus: EventBus,
     wf: Workflow,
+    *,
+    agent_tools_server: AgentToolsMcpServer | None = None,
 ) -> dict[str, Any]:
     """并行执行 ``group.branches``，返回**raw 聚合 dict**（orchestrator 统一包
     ``{"output": raw}``，本函数不重复包装）。
@@ -47,6 +50,9 @@ async def run_parallel_group(
 
     幂等：branch 已在 ``ctx.outputs`` 则跳过（用已有 ``{"output": raw}`` 包装结果）。
     失败：按 ``group.failure_mode`` 决策（共享 ``decide_failure``）；抛 ``GroupFailure``。
+
+    phase 11 §5.4：``agent_tools_server`` 透传给 branch 的 agent executor（branch 是 agent
+    时可用 ask_user）。None == 既有行为（向后兼容）。
     """
     node_by_name = {n.name: n for n in wf.nodes}
 
@@ -70,7 +76,7 @@ async def run_parallel_group(
         from orca.exec.factory import make_executor
 
         try:
-            executor = make_executor(node)
+            executor = make_executor(node, agent_tools_server)
             raw = await execute_and_emit(executor, node, ctx, bus)
             # 包装成 {"output": raw}（render 约定 + 与 ctx.outputs 同形）
             return branch_name, {"output": raw}

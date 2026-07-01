@@ -50,7 +50,7 @@ def _wf(branches: list[str], failure_mode: str = "fail_fast") -> Workflow:
 def _patch_executors(monkeypatch, branch_to_executor: dict[str, FakeExecutor]):
     """monkeypatch make_executor：按 node.name 分派到预设 FakeExecutor。"""
 
-    def fake(node):
+    def fake(node, agent_tools_server=None):
         return branch_to_executor.get(node.name, FakeExecutor.produces({"default": True}, node_name=node.name))
 
     monkeypatch.setattr("orca.exec.factory.make_executor", fake)

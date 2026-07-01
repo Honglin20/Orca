@@ -24,15 +24,21 @@ import threading
 from typing import NamedTuple
 
 
-class RunContext(NamedTuple):
-    """``lookup`` 返回的 (run_id, node) 二元组（NamedTuple 提供字段名访问）。"""
+class SessionLoc(NamedTuple):
+    """``lookup`` 返回的 (run_id, node) 二元组（NamedTuple 提供字段名访问）。
+
+    phase 11 §5.5（review B2）重命名：原 ``RunContext`` 与 ``orca.exec.context.RunContext``
+    （frozen dataclass）同名混淆，本类改为 ``SessionLoc``（gates 语义：定位一次 claude
+    session 所属的 run/node）。字段不变（``run_id`` / ``node``）——跨阶段契约变更，
+    release note 记录。
+    """
 
     run_id: str
     node: str
 
 
 class SessionContextRegistry:
-    """claude session_id → (run_id, node) 映射（SPEC §6）。
+    """claude session_id → SessionLoc 映射（SPEC §6）。
 
     orchestrator spawn claude 时 ``register``；hook 桥的 ``/gate`` 端点 ``lookup``；
     node 完成时 ``unregister``。同 session_id 重复 register 走 last-writer-wins
@@ -40,15 +46,15 @@ class SessionContextRegistry:
     """
 
     def __init__(self) -> None:
-        self._map: dict[str, RunContext] = {}
+        self._map: dict[str, SessionLoc] = {}
         self._lock = threading.Lock()
 
     def register(self, session_id: str, run_id: str, node: str) -> None:
-        """注册 / 覆盖 session_id → (run_id, node)。last-writer-wins。"""
+        """注册 / 覆盖 session_id → SessionLoc(run_id, node)。last-writer-wins。"""
         with self._lock:
-            self._map[session_id] = RunContext(run_id=run_id, node=node)
+            self._map[session_id] = SessionLoc(run_id=run_id, node=node)
 
-    def lookup(self, session_id: str) -> RunContext | None:
+    def lookup(self, session_id: str) -> SessionLoc | None:
         """查询。未注册返回 None（hook 桥据此决定是否构造 workflow 级 gate）。"""
         with self._lock:
             return self._map.get(session_id)
@@ -57,3 +63,16 @@ class SessionContextRegistry:
         """清理。未注册的 session_id 静默忽略（幂等，方便 node 完成路径统一调用）。"""
         with self._lock:
             self._map.pop(session_id, None)
+
+    def unregister_run(self, run_id: str) -> int:
+        """清理某 run 的**全部** session 路由（workflow 结束时调，防内存泄漏）。
+
+        AgentToolsMcpServer 每个被编排的 claude session 都 register 一条；run 结束时
+        orchestrator 调此方法一次性清空该 run 的所有条目（session_id 由 executor 内部 uuid
+        生成，orchestrator 不持有，故按 run_id 批清）。返回清理的条目数（可观测）。
+        """
+        with self._lock:
+            doomed = [sid for sid, loc in self._map.items() if loc.run_id == run_id]
+            for sid in doomed:
+                self._map.pop(sid, None)
+            return len(doomed)

@@ -102,7 +102,7 @@ def _make_partial_tape(
     real_make = factory_mod.make_executor
     fired = {"_f": False}
 
-    def patched_make(node):
+    def patched_make(node, agent_tools_server=None):
         if node.name in completed_nodes:
             return real_make(node)
         # crash_before 第一次被调时模拟崩溃（raise → workflow_failed）。

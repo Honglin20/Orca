@@ -1,0 +1,34 @@
+# examples/with_ask_user.yaml —— ask_user 工具挂载演示（phase 11 §5）。
+#
+# 单 agent，prompt 指示它调 ask_user 问用户偏好。被编排的 claude -p 经 --mcp-config 连
+# Orca 内嵌的 SSE MCP server（AgentToolsMcpServer），调 ask_user 触发 HumanGate(source=
+# agent_ask) → CLI 弹 AskGate → 用户答 → agent 收到答案继续。
+#
+# 真实 E2E（手动，需 claude CLI + ANTHROPIC_API_KEY + SSE 连通性）：
+#   orca run examples/with_ask_user.yaml
+#   # 跑到 asker agent 时，claude 调 ask_user → CLI 弹问 → 答 "sonnet" / "haiku" → agent 继续
+#   # tape 含 human_decision_requested(source=agent_ask) + human_decision_resolved 配对
+#
+# SSE 连通性已由 spike 验证（2026-07-02，real claude 调通 echo 工具）。
+
+name: with_ask_user
+
+inputs:
+  task:
+    type: string
+    description: 要做的事（默认演示）
+    default: "帮我选一个模型"
+
+nodes:
+  - name: asker
+    kind: agent
+    prompt: |
+      用户的需求：{{ inputs.task }}
+
+      在开始前，调 ask_user 工具问用户想用哪个模型（选项：sonnet / haiku）。
+      拿到答案后，简短回复「好的，用 <答案> 来做」，然后结束。不要做实际工作。
+    routes:
+      - to: $end
+
+outputs:
+  reply: "{{ asker.output }}"
