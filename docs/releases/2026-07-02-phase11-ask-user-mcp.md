@@ -125,7 +125,7 @@ test_interrupt_orchestrator / test_resume_e2e。纯兼容 shim，无行为弱化
 
 ## Commit
 
-（待填）
+`dcc3e63`
 
 ## 必读文件更新
 
