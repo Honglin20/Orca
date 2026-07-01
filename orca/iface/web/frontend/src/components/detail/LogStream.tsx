@@ -89,31 +89,46 @@ export function formatLogLine(event: WorkflowEvent): string {
   return `${ts} [${sess}] ${node}: ${detail}`;
 }
 
-/** 单行渲染（react-window v2 rowComponent：props 直接展开 RowProps）。 */
+/** 单行渲染（react-window v2 rowComponent：props 直接展开 RowProps）。
+ *
+ * session 头是**独立行**（不是塞进事件行的 block div）—— 把头与事件都拍平进 items，
+ * 每行单线高 28px。早先把头 ``<div>`` 和事件文本塞同一固定高行，导致 2 线内容挤进 28px
+ * 视觉错位（头与事件文本粘连），且头与事件行内 ``[sess]`` 重复。
+ */
 function LogRow({ index, style, items }: RowComponentProps<LogRowData>): React.ReactElement {
   const item = items[index];
-  const isErr =
-    item.event.type.includes("failed") || item.event.type === "error";
+  if (item.kind === "header") {
+    return (
+      <div
+        style={style}
+        className="flex items-end px-2 pb-0.5 text-[10px] uppercase tracking-wide text-indigo-500"
+        data-testid={`log-header-${index}`}
+      >
+        session {item.session}
+      </div>
+    );
+  }
+  const isErr = item.event.type.includes("failed") || item.event.type === "error";
   return (
     <div
       style={style}
-      className={`whitespace-nowrap px-2 font-mono text-xs ${
-        item.isGroupStart ? "border-t border-slate-200 pt-1" : ""
-      } ${isErr ? "text-red-600" : "text-slate-700"}`}
+      className={`flex items-center whitespace-nowrap px-2 font-mono text-xs ${
+        isErr ? "text-red-600" : "text-slate-700"
+      }`}
       data-testid={`log-row-${index}`}
     >
-      {item.isGroupStart && (
-        <div className="mb-0.5 text-[10px] uppercase text-indigo-500">
-          session {item.event.session_id?.slice(0, 8) ?? "—"}
-        </div>
-      )}
       {formatLogLine(item.event)}
     </div>
   );
 }
 
+/** 一个扁平行：session 分组头 或 事件。 */
+type LogItem =
+  | { kind: "header"; session: string }
+  | { kind: "event"; event: WorkflowEvent };
+
 interface LogRowData {
-  items: { event: WorkflowEvent; isGroupStart: boolean }[];
+  items: LogItem[];
 }
 
 export function LogStream() {
@@ -124,15 +139,21 @@ export function LogStream() {
   // replay 模式只显示 events[0..replayPosition]（同一真相，SPEC §3.2）
   const visible = replayMode ? events.slice(0, replayPosition + 1) : events;
 
-  // 按 session_id 分组：连续相同 session 的第一条标 isGroupStart（组头）
+  // 按 session_id 分组：连续相同 session 前插一个 header 行（独立行，SPEC §3.2）。
+  // 仅**真实** session（非 null）才插头——workflow_*  / route_taken 等无 session 的事件
+  // 本就 ``[------]`` 内联标 sessionless，再插 ``session —`` 头只会每行一个噪声头。
   const items = useMemo(() => {
+    const out: LogItem[] = [];
     let prevSession: string | null = null;
-    return visible.map((event, i) => {
+    for (const event of visible) {
       const sess = event.session_id ?? null;
-      const isGroupStart = i === 0 || sess !== prevSession;
+      if (sess !== null && sess !== prevSession) {
+        out.push({ kind: "header", session: sess });
+      }
+      out.push({ kind: "event", event });
       prevSession = sess;
-      return { event, isGroupStart };
-    });
+    }
+    return out;
   }, [visible]);
 
   if (items.length === 0) {

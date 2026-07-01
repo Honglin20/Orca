@@ -32,3 +32,6 @@ references/
 
 # Codegraph local index
 .codegraph/
+
+# Runtime tape output (orca run/serve 写入)
+runs/
