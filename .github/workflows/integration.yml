@@ -1,0 +1,119 @@
+# integration.yml —— phase 11 P0.1 opt-in 真 claude E2E（SPEC §0 / §10.1 / 计划 P0.1）
+#
+# 仅当 PR comment 内容恰好含 `/integration` 时触发。跑 `tests/iface/cli/test_integration.py`
+# （标 `@pytest.mark.integration`，需真 spawn claude + ANTHROPIC_API_KEY）。
+#
+# 安全：comment 作者必须有仓库 write 权限（guard job 校验），防止任意用户烧 API key。
+#
+# 详见 docs/specs/phase-11-cli-enrichment.md §10.1、docs/releases/2026-07-01-phase11-ci.md。
+
+name: integration
+
+on:
+  issue_comment:
+    types: [created]
+
+# 同一 PR 多次 /integration 只跑最后一次
+concurrency:
+  group: integration-pr-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  # 守门 job：必须是 PR 上的 comment、内容含 /integration、作者有 write 权限、非 fork PR
+  guard:
+    name: guard (trigger + permission)
+    runs-on: ubuntu-latest
+    if: |
+      github.event.issue.pull_request != null &&
+      contains(github.event.comment.body, '/integration')
+    outputs:
+      pr-sha: ${{ steps.pr.outputs.sha }}
+      authorized: ${{ steps.perm.outputs.requested }}
+    steps:
+      - name: Verify write permission + fork rejection
+        id: perm
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // 1) comment 作者必须对 base 仓库有 write 权限（admin/maintain/write），防陌生人烧 key
+            // 2) 拒绝 fork PR：fork 的 HEAD 代码由外部控制，跑其测试代码 + 消耗真 API key 不安全
+            const actor = context.payload.comment.user.login;
+            try {
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number,
+              });
+              if (pr.head.repo && pr.head.repo.fork) {
+                core.setOutput("requested", "false");
+                core.setFailed(`PR #${pr.number} 来自 fork（${pr.head.repo.full_name}），拒绝跑 integration（信任边界仅限 base 仓库成员的 PR）。`);
+                return;
+              }
+              const { data: perm } = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                username: actor,
+              });
+              const allowed = ["admin", "maintain", "write"].includes(perm.permission);
+              core.setOutput("requested", allowed ? "true" : "false");
+              if (!allowed) {
+                core.setFailed(`@${actor} 无 write 权限，拒绝触发 integration（需 admin/maintain/write）。`);
+              }
+            } catch (err) {
+              core.setFailed(`权限校验失败：${err.message}`);
+            }
+
+      - name: Fetch PR HEAD sha
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            core.setOutput("sha", pr.head.sha);
+
+  integration:
+    name: pytest -m integration (real claude)
+    needs: guard
+    if: needs.guard.outputs.authorized == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout PR HEAD
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.guard.outputs.pr-sha }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Sync dependencies
+        run: uv sync
+
+      - name: Install claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Verify API key present
+        # fail loud：secret 未配置会让 _has_claude() 静默全 skip → CI 假绿，必须前置拦截
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::error::ANTHROPIC_API_KEY secret 未配置，integration 测试无法跑"
+            exit 1
+          fi
+
+      - name: Run integration tests
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: uv run pytest tests/iface/cli/test_integration.py -m integration

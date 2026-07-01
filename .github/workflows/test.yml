@@ -1,0 +1,51 @@
+# test.yml —— phase 11 P0.1 CI gate（SPEC §0 / §10.1 / 计划 P0.1）
+#
+# 每次 push / PR 自动跑全量单测（排除 integration），绿才允许合并。
+# integration 测试需真 spawn claude + ANTHROPIC_API_KEY，由 integration.yml
+# 经 PR comment `/integration` 显式触发，本 gate 永不跑它们。
+#
+# 详见 docs/specs/phase-11-cli-enrichment.md §10.1、docs/releases/2026-07-01-phase11-ci.md。
+
+name: test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# 同一分支新 push 取消旧 run，省 CI 额度
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        # 不锁定 uv 版本：跟随最新（@v3 action 默认即 latest），换 uv 不必改 workflow
+        with:
+          version: "latest"
+
+      - name: Sync dependencies
+        run: uv sync
+
+      - name: Run tests (exclude integration)
+        run: uv run pytest tests/ -m "not integration"
