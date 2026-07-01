@@ -21,6 +21,11 @@ dependencies = [
     "jsonschema>=4.0",
     "fastapi>=0.138.2",
     "httpx>=0.28.1",
+    # mcp SDK：1.27+ 经 pyjwt[crypto] 依赖 cryptography。cryptography 49 在 darwin x86_64
+    # 无预编译 wheel（需 rust/maturin 本地构建，CI 不友好），故锁 cryptography<49 走预编译
+    # wheel，避免构建地狱。若未来 cryptography 49 提供更广平台 wheel，可放宽。
+    "cryptography<49",
+    "mcp>=1.0,<1.28",
     "textual>=8.2.8",
     "typer>=0.26.8",
     "uvicorn>=0.49.0",
