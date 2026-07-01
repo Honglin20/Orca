@@ -1,0 +1,108 @@
+# mxint_analysis —— 迁移自 AgentHarness 的 mxint-analysis（保骨架换内容）
+# 5 agent 链路：analyzer → configurator → runner → diagnostic_saver → report_painter
+# 验证 Orca 的 agent DAG 推进 + 结构化输出 schema + 工具白名单 + tape 持久化。
+#
+# 跑：`orca run examples/mxint_analysis.yaml`
+name: mxint_analysis
+description: |
+  迁移自 AgentHarness mxint-analysis 的端到端测试 workflow（保骨架换内容）。
+  5 个 agent 顺序推进，每步带结构化输出 schema；目标项目用轻量 Python 替代
+  （无 torch / bitx 依赖），核心验证 Orca 框架的 DAG 推进 / schema 提取 /
+  工具白名单 / CLI 打印 / tape 持久化。
+entry: analyzer
+
+inputs:
+  target_project:
+    type: string
+    description: "目标项目目录（相对 cwd；analyzer 在此目录下扫 *.py 找 model/data/weights）"
+    default: "tests/e2e_mxint/target_project"
+    required: false
+
+nodes:
+  # ── agent 1/5：分析目标项目 ─────────────────────────────────────────
+  - name: analyzer
+    kind: agent
+    tools: [Bash, Read, Grep, Glob, TodoWrite]
+    output_schema:
+      type: object
+      properties:
+        model_class: {type: string, description: "nn.Module 类名"}
+        model_module: {type: string, description: "相对项目根的 import 路径"}
+        dataset: {type: string, description: "数据集名"}
+        weights_path: {type: string, description: "权重文件绝对路径或 NOT_FOUND"}
+        weights_exist: {type: boolean, description: "权重是否真实存在"}
+        summary: {type: string, description: "一句话项目描述"}
+      required: [model_class, model_module, dataset, weights_path, weights_exist, summary]
+      additionalProperties: false
+    routes:
+      - to: configurator
+
+  # ── agent 2/5：写 adapter + 拼 cli_command ──────────────────────────
+  - name: configurator
+    kind: agent
+    tools: [Bash, Read, Write, Edit, Grep, Glob, TodoWrite]
+    output_schema:
+      type: object
+      properties:
+        adapter_path: {type: string, description: "adapter .py 绝对路径"}
+        cli_command: {type: string, description: "完整可执行的 cli 命令"}
+        device: {type: string, description: "由检测命令输出决定的 device 字符串"}
+        summary: {type: string, description: "一句话配置摘要"}
+      required: [adapter_path, cli_command, device, summary]
+      additionalProperties: false
+    routes:
+      - to: runner
+
+  # ── agent 3/5：跑诊断脚本，回收 output_dir + 精度/QSNR ─────────────
+  - name: runner
+    kind: agent
+    tools: [Bash, Read, Write]
+    output_schema:
+      type: object
+      properties:
+        status: {type: string, enum: [success, error], description: "success/error"}
+        output_dir: {type: string, description: "脚本实际写入的 output_dir"}
+        fp32_accuracy: {type: number, description: "FP32 精度"}
+        quant_accuracy: {type: number, description: "量化后精度"}
+        accuracy_delta: {type: number, description: "quant - fp32"}
+        worst_layer: {type: string, description: "最差层名"}
+        worst_qsnr_db: {type: number, description: "最差层 QSNR (dB)"}
+        summary: {type: string, description: "一句话结果摘要"}
+      required: [status, output_dir, summary]
+      additionalProperties: false
+    routes:
+      - when: "output.status == 'success'"
+        to: diagnostic_saver
+      - to: $end                       # runner 失败 → 直接收工（不继续下游）
+
+  # ── agent 4/5：跑 diagnostic pipeline，落盘诊断 JSON ────────────────
+  - name: diagnostic_saver
+    kind: agent
+    tools: [Bash]
+    output_schema:
+      type: object
+      properties:
+        diagnostic_dir: {type: string, description: "诊断目录绝对路径"}
+        status: {type: string, enum: [success, error]}
+        summary: {type: string, description: "一句话 pipeline 结果"}
+      required: [diagnostic_dir, status, summary]
+      additionalProperties: false
+    routes:
+      - when: "output.status == 'success'"
+        to: report_painter
+      - to: $end                       # diagnostic 失败 → 直接收工
+
+  # ── agent 5/5：综合诊断数据 → 写 REPORT.md（无 render_chart）────────
+  - name: report_painter
+    kind: agent
+    tools: [Bash, Read]
+    # 自由文本输出（无 output_schema）：报告 markdown 全文存进 output
+    routes:
+      - to: $end
+
+outputs:
+  final_status: "{{ runner.output.status }}"
+  fp32_accuracy: "{{ runner.output.fp32_accuracy }}"
+  quant_accuracy: "{{ runner.output.quant_accuracy }}"
+  diagnostic_dir: "{{ diagnostic_saver.output.diagnostic_dir }}"
+  report_preview: "{{ report_painter.output }}"

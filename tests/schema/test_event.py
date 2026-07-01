@@ -53,8 +53,12 @@ def test_all_event_types_construct():
 
 
 def test_event_type_count_matches_spec_literal():
-    """SPEC §3.2 的 Literal 代码块实际 22 个值（含 phase-10 新增的 workflow_cancelled）。
+    """SPEC §3.2 的 Literal 代码块实际 25 个值。
+
+    - 22（phase 1-10，含 workflow_cancelled）
+    - +3（phase 11 §2.2：interrupt_requested / interrupt_resolved / prompt_rendered）
 
     显式断言数量，防止后续误删/误增 type 而不自知（fail loud）。
+    phase 11 后续 wave 还会加 retry_*/validator_*/wait_* 等，届时同步更新此数。
     """
-    assert len(typing.get_args(EventType)) == 22
+    assert len(typing.get_args(EventType)) == 25

@@ -52,7 +52,10 @@ from orca.events.bus import EventBus
 from orca.events.tape import Tape
 from orca.gates.context_registry import SessionContextRegistry
 from orca.gates.handler import HumanGateHandler
+from orca.gates.interrupt import InterruptHandler
+from orca.gates.types import InterruptRequest
 from orca.iface.cli.screens.gate_modal import GateModal
+from orca.iface.cli.screens.interrupt_modal import InterruptModal
 from orca.iface.cli.widgets import ActiveNode, DagTree, Header, LogStream
 from orca.iface.cli.widgets.header import HeaderStats
 from orca.run.lifecycle import gen_run_id
@@ -275,6 +278,8 @@ class OrcaApp(App):
     BINDINGS = [
         Binding("q", "quit", "退出"),
         Binding("g", "goto_gate", "跳到 gate"),
+        # phase 11 §2.4 / §3.1：Ctrl+G 弹 InterruptModal（中断纠偏）。
+        Binding("ctrl+g", "interrupt", "中断/纠偏"),
     ]
 
     def __init__(
@@ -303,6 +308,16 @@ class OrcaApp(App):
         tape = Tape(path, run_id=self.run_id)
         self.bus = EventBus(tape)
         self.gate_handler = HumanGateHandler(self.bus)
+        # phase 11 §3：InterruptHandler（与 gate_handler 共享同一 bus/tape）。
+        # 经 Orchestrator(interrupt_handler=...) 注入；None = 该 run 无中断支持。
+        self.interrupt_handler = InterruptHandler(self.bus)
+        # 当前 run 的 Orchestrator 句柄（_run_pipeline 内构造后回填）。
+        # action_interrupt 经它调 request_interrupt；run 开始前为 None（无法中断）。
+        self._orchestrator: Orchestrator | None = None
+        # 当前在跑的 node 名 + session_id（action_interrupt 构造 InterruptRequest 用）。
+        self._current_node: str | None = None
+        self._current_session_id: str | None = None
+        self._node_started_at: float | None = None
         self.session_registry = SessionContextRegistry()
 
         # gate HTTP 桥（hook POST 入口）。gate_port=None → 读 ORCA_PORT env / 默认 7421。
@@ -341,12 +356,17 @@ class OrcaApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        """初始化 widget（build DagTree / header / active node）+ 起事件消费 worker。
+        """初始化 widget（build DagTree / header / active node）+ 起事件消费 worker
+        + kickoff 编排主流程。
 
-        **不**在 on_mount 起编排 worker（``_run_pipeline``）和 HTTP 桥（``_http_bridge``）：
-        那是 ``kickoff()`` 的职责，由真实入口（``commands._run_workflow`` → ``app.run`` 之前
-        或 on_mount 后）显式调用。这样单测可以 ``run_test()`` 后只验 widget 渲染 + 事件分发，
-        不被真编排（spawn claude/script）和 HTTP 桥（uvicorn）干扰。
+        on_mount 在 Textual event loop 已 running 时被调，故此处 spawn ``@work`` worker
+        安全（与 ``_consume_events`` 同 pattern）。**不**在 ``commands._run_workflow``
+        里调 kickoff：那是 ``app.run()`` **之前**，loop 尚未起，``@work`` decorator
+        试图 ``asyncio.create_task`` 时 ``events.get_running_loop()`` 抛 RuntimeError
+        （真实 ``orca run`` 撞过的 bug）。
+
+        单测用 ``run_test()`` 时 on_mount 同样会触发；如不希望真起编排（避免 spawn
+        claude / uvicorn），可把 ``kickoff`` 替换成 no-op（见 ``test_app._patched_app``）。
         """
         tree = self.query_one(DagTree)
         tree.build_from_workflow(self._node_names, self._parallel_groups)
@@ -357,16 +377,18 @@ class OrcaApp(App):
         active = self.query_one(ActiveNode)
         active.set_active(self.wf.entry)
 
-        # 订阅事件 + 起事件消费 worker（编排 worker 由 kickoff 单独起）。
+        # 订阅事件 + 起事件消费 worker（@work，loop 已 running，安全）。
         self._sub = self.bus.subscribe()
         self._consume_events()
+        # kickoff 编排主流程 + HTTP 桥（@work，loop 已 running）。kickoff 幂等，测试可
+        # 替换为 no-op 跳过真起编排。
+        self.kickoff()
 
     def kickoff(self) -> None:
-        """启动编排主流程 + gate HTTP 桥（真实入口调，单测不调）。
+        """启动编排主流程 + gate HTTP 桥（on_mount 自动调，单测可替换为 no-op）。
 
-        分离出 ``on_mount`` 是 SRP：on_mount 是「组件就绪」，kickoff 是「业务开始」。
-        ``commands._run_workflow`` 在 ``app.run()`` 前调一次（``app.run`` 阻塞，
-        故 kickoff 必须先于 run 调，让它注册的 worker 在 run 的 loop 里跑）。
+        幂等：重复调直接 return（on_mount 已调时，外部再调 no-op）。
+        必须在 Textual event loop running 时调（``@work`` decorator 依赖 loop）。
         """
         if self._kicked_off:
             return  # 幂等
@@ -393,23 +415,32 @@ class OrcaApp(App):
         # handler broadcaster 必须先起（在 TUI loop 里起，与 _consume_events 同 loop）。
         # _http_bridge 线程里有自己的 loop + 自己的 broadcaster（线程隔离）—— 两边都 start
         # 是幂等的；TUI loop 这边的 broadcaster 负责把 resolved 事件 emit 给 TUI 订阅者。
+        # phase 11：interrupt_handler 也起 broadcaster（同 loop，resolved 事件经它广播）。
         await self.gate_handler.start()
+        await self.interrupt_handler.start()
         try:
             orch = Orchestrator(
                 self.wf, self.bus, self._inputs,
                 task=self._task, max_iter=self._max_iter, run_id=self.run_id,
+                interrupt_handler=self.interrupt_handler,
             )
+            self._orchestrator = orch
             state = await orch.run()
             self.terminal_state = state
         except Exception:  # noqa: BLE001 —— 编排顶层兜底
             logger.exception("Orchestrator 运行异常")
             # terminal_state 留 None（commands 据 None → exit 1，fail loud）
         finally:
-            # orchestrator.run() 已 close bus；这里只确认 broadcaster 停（无 in-flight gate）。
+            self._orchestrator = None
+            # orchestrator.run() 已 close bus；这里只确认 broadcaster 停（无 in-flight gate/interrupt）。
             try:
                 await self.gate_handler.stop()
             except Exception:  # noqa: BLE001
                 logger.exception("gate_handler.stop 异常")
+            try:
+                await self.interrupt_handler.stop()
+            except Exception:  # noqa: BLE001
+                logger.exception("interrupt_handler.stop 异常")
             # 触发退出（让 _run_workflow.run() 返回）。若用户已在 q 退出则 no-op。
             try:
                 self.exit()
@@ -441,6 +472,11 @@ class OrcaApp(App):
             tree.set_status(node or "", "running")
             if node:
                 self.query_one(ActiveNode).set_active(node)
+                # phase 11 §3：追踪当前 node + 起始时间 + session（action_interrupt 用）。
+                import time as _time
+                self._current_node = node
+                self._node_started_at = _time.monotonic()
+                self._current_session_id = event.session_id
         elif etype == "node_completed":
             tree = self.query_one(DagTree)
             tree.set_status(node or "", "done")
@@ -552,6 +588,55 @@ class OrcaApp(App):
             self.query_one(LogStream).write("(gate 已在屏上，用方向键 + 回车答)")
         else:
             self.query_one(LogStream).write("(当前无 gate 在等)")
+
+    @work(name="orca-interrupt-push")
+    async def action_interrupt(self) -> None:
+        """Ctrl+G：弹 InterruptModal 等用户答 → 登记 pending + resolve。
+
+        SPEC §3.1 / §2.3。@work worker：``push_screen_wait`` 阻塞本 worker 但 UI 事件循环
+        继续刷新（与 _push_gate_modal 同 pattern，SPEC §6.0 铁律 3）。
+
+        流程：
+          1. 构造 InterruptRequest（当前 node + 已耗时）。
+          2. push InterruptModal → dismiss 返回 ``(action, guidance)``。
+          3. ``orchestrator.request_interrupt(ireq)`` 登记 pending（node 边界消费）。
+          4. ``interrupt_handler.resolve(ireq.id, action, guidance, "cli")`` 喂答案。
+        """
+        import time
+        import uuid
+
+        orch = self._orchestrator
+        if orch is None:
+            # run 尚未开始 / 已结束 → 无可中断目标
+            self.query_one(LogStream).write("(无可中断的 run：编排未在跑)")
+            return
+
+        node = self._current_node or self.wf.entry
+        elapsed = (
+            time.monotonic() - self._node_started_at
+            if self._node_started_at is not None
+            else 0.0
+        )
+        ireq = InterruptRequest(
+            id=uuid.uuid4().hex,
+            node=node,
+            run_id=self.run_id,
+            session_id=self._current_session_id,
+            elapsed_at_request=elapsed,
+            source="cli",
+        )
+        modal = InterruptModal(ireq)
+        action, guidance = await self.push_screen_wait(modal)
+
+        # 登记 pending（orchestrator 在 node 边界消费）+ resolve（喂给 handler，
+        # 编排 _handle_interrupt await 的 future 立即解除阻塞）。
+        orch.request_interrupt(ireq)
+        ok = self.interrupt_handler.resolve(ireq.id, action, guidance, "cli")
+        if not ok:
+            logger.warning(
+                "interrupt %s CLI 答案 (%s) 被 reject（已被别壳答？），fail loud",
+                ireq.id, action,
+            )
 
     # ── header 刷新（SPEC §4.4）─────────────────────────────────────────
 

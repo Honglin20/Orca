@@ -1,9 +1,13 @@
-"""types.py —— HumanGate 原语（统一两个决策来源）。
+"""types.py —— HumanGate + InterruptRequest 原语（统一两个决策来源 + 中断）。
 
 回答「人机决策的数据模型是什么？」：两个决策来源（Claude 想调危险工具 / agent
 主动问用户）**本质同源**——都是「暂停引擎、等人决策、继续」。统一为 ``HumanGate``
 frozen dataclass，用 ``source`` 字段区分壳的渲染分支（权限弹窗 vs 问答弹窗），
 **不在数据流上分化**（避免「两套机制」，SPEC §1.2）。
+
+phase 11 §3.2 新增 ``InterruptRequest``：用户 Ctrl+G 触发「中断当前 workflow 纠偏」
+的请求原语。语义与 gate 不同（gate 是「等决策」、interrupt 是「等用户意图 continue/
+skip/abort」），但同样 frozen + 同样经 handler 暂停/广播/恢复。
 
 字段语义（SPEC §1.1）：
   - ``id``：uuid4 hex，gate 唯一标识（壳 resolve 用它定位）。
@@ -20,18 +24,24 @@ frozen dataclass，用 ``source`` 字段区分壳的渲染分支（权限弹窗 
 设计原则：
   - **frozen**：gate 构造后不可变（多壳并发读同一份，无 race）。
   - **source 仅是渲染依据**：两个 source 共用同一模型，仅 ``context`` 内容不同。
-  - 零逻辑：纯数据，不含行为（行为在 ``HumanGateHandler``）。
+  - 零逻辑：纯数据，不含行为（行为在 ``HumanGateHandler`` / ``InterruptHandler``）。
 
 依赖单向：本模块零依赖（仅 stdlib + typing），不依赖任何 orca 子包。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 # 决策来源（仅驱动壳的渲染分支；data 流统一）。
 GateSource = Literal["tool_permission", "agent_ask"]
+
+# interrupt 请求来源（驱动壳渲染分支 + 事件 resolved_by）。
+InterruptSource = Literal["cli", "web", "mcp"]
+
+# interrupt 用户回答的动作（CONTINUE/SKIP/ABORT 三选一）。
+InterruptAction = Literal["continue", "skip", "abort"]
 
 
 @dataclass(frozen=True)
@@ -51,3 +61,33 @@ class HumanGate:
     session_id: str | None = None
     options: list[str] | None = None
     timeout_hint: float | None = None
+
+
+@dataclass(frozen=True)
+class InterruptRequest:
+    """用户中断 workflow 的请求原语（phase 11 SPEC §3.2）。
+
+    用户按 Ctrl+G（CLI）/ Web 按钮 / MCP 调用 → 构造一个 ``InterruptRequest`` →
+    ``Orchestrator.request_interrupt(ireq)`` 登记 pending → node 边界 ``_handle_interrupt``
+    消费 → ``InterruptHandler.request(ireq)`` 暂停等用户答 ``(action, guidance)``。
+
+    frozen：多壳并发读同一份不 race（与 HumanGate 同设计）。
+
+    字段语义（SPEC §3.2）：
+      - ``id``：gate_id 同算法的 uuid4 hex，唯一标识（resolve 定位 + 事件配对）。
+      - ``node``：触发时正在跑的 node（中断生效于此 node 边界）。
+      - ``run_id``：哪个 run。
+      - ``session_id``：触发时在跑的 claude session（None = 非 agent node / workflow 级）。
+      - ``source``：哪个壳触发的（``"cli"``/``"web"``/``"mcp"``）。
+      - ``elapsed_at_request``：中断时当前 node 已跑的秒数（给 modal 显示「已跑 X 秒」）。
+      - ``context``：任意附加（如 node prompt 摘要），给 modal 渲染用。
+    """
+
+    id: str
+    node: str
+    run_id: str
+    elapsed_at_request: float
+    session_id: str | None = None
+    source: InterruptSource = "cli"
+    context: dict = field(default_factory=dict)
+

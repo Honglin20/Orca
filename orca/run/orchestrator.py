@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 from orca.exec.error import ExecError
 from orca.run.aggregate import GroupFailure
-from orca.run.errors import MaxIterationsError
+from orca.run.errors import MaxIterationsError, WorkflowAborted
 from orca.run.executor_adapter import execute_and_emit
 from orca.run.foreach import run_foreach
 from orca.run.lifecycle import (
@@ -53,6 +53,8 @@ if TYPE_CHECKING:
 
     from orca.events.bus import EventBus
     from orca.exec.context import RunContext
+    from orca.gates.interrupt import InterruptHandler
+    from orca.gates.types import InterruptRequest
     from orca.schema import Node, RunState, Workflow
 
 logger = logging.getLogger(__name__)
@@ -73,13 +75,32 @@ class Orchestrator:
         task: str | None = None,
         max_iter: int | None = None,
         run_id: str | None = None,
+        interrupt_handler: InterruptHandler | None = None,
     ):
         self.wf = wf
         self.bus = bus
+        # phase 11 §3：可选 InterruptHandler 注入。None = 无中断支持（非交互 run /
+        # 既有测试不受影响，向后兼容）。注入后 CLI 层经 ``request_interrupt`` 登记 pending。
+        self._interrupt_handler = interrupt_handler
+        self._interrupt_pending: InterruptRequest | None = None
         # task 注入 inputs.task（SPEC §5：位置参数 task = -i task="..." 语法糖）
         merged_inputs = dict(inputs or {})
         if task is not None:
             merged_inputs.setdefault("task", task)
+        # 填充 wf.inputs 声明的 default：yaml 里 ``inputs.<name>.default`` 未被 CLI/-i
+        # 覆盖时，必须生效进 ctx.inputs（SPEC phase-1 §3.2 InputDef 契约）。
+        # 历史 gap：仅 ``iterations`` 的 default 在 resolve_max_iter 里被消费（特例），
+        # 其它声明 default 的 input（如 ``target_project``）在 render 时 UndefinedError。
+        # 必填 input 缺失 + 无 default → fail loud（启动前置条件不满足，类比 argparse）。
+        for name, idef in wf.inputs.items():
+            if name in merged_inputs:
+                continue
+            if idef.default is not None:
+                merged_inputs[name] = idef.default
+            elif idef.required:
+                raise ValueError(
+                    f"必填 input {name!r}（type={idef.type}）未提供且无 default"
+                )
         # gen run_id（若调用方未传，内部 gen；测试可注入固定 id）
         self.run_id = run_id or gen_run_id(wf.name)
         # RunContext 构造（frozen，node 间构造新实例累加 outputs）
@@ -103,6 +124,31 @@ class Orchestrator:
         self._node_by_name: dict[str, Node] = {n.name: n for n in wf.nodes}
         self._parallel_by_name = {g.name: g for g in wf.parallel}
 
+        # phase 11 §4：累积的用户 guidance（continue + guidance 时追加）。
+        # 每次 _make_ctx 把它注入 RunContext.user_guidance（Step B 接 render_prompt）。
+        # 单 run 生命周期内单调累加；用 list 因 frozen tuple 在 _make_ctx 里构造。
+        self._guidance_acc: list[str] = []
+
+    # ── phase 11：中断公开通道（SPEC §2.3）──────────────────────────────────
+
+    def request_interrupt(self, ireq: InterruptRequest) -> None:
+        """CLI 层（InterruptModal dismiss 后）调此方法登记一次中断请求。
+
+        幂等：重复登记同一 run 仅保留最新一条（node 边界只消费一次）。
+        无 interrupt_handler 注入时调用 = 配置错误（fail loud，记 warning）。
+
+        SPEC §2.3 测试 A 修正：CLI 层经此**公开方法**设置 pending，**不**经任何
+        ``_orchestrator_proxy``、**不**直接 mutate 私有属性。
+        """
+        if self._interrupt_handler is None:
+            logger.warning(
+                "request_interrupt 被调但 Orchestrator 未注入 InterruptHandler"
+                "（非交互 run？中断请求被忽略，ireq.id=%s）",
+                ireq.id,
+            )
+            return
+        self._interrupt_pending = ireq
+
     async def run(self) -> RunState:
         """跑完整个 workflow，返回 replay_state(tape)（tape 派生的 RunState）。"""
         from orca.events.replay import replay_state
@@ -114,8 +160,8 @@ class Orchestrator:
 
         try:
             final_outputs = await self._drive_loop()
-        except (ExecError, RouteError, MaxIterationsError, GroupFailure) as e:
-            # fail loud：四类编排错误 → workflow_failed
+        except (ExecError, RouteError, MaxIterationsError, GroupFailure, WorkflowAborted) as e:
+            # fail loud：五类编排错误 → workflow_failed
             error_type = _classify_error(e)
             node = _error_node(e)
             t2, data2 = make_workflow_failed(
@@ -134,7 +180,8 @@ class Orchestrator:
     async def _drive_loop(self) -> dict[str, Any]:
         """单指针主循环。返回 evaluate_outputs 的最终输出 dict。
 
-        抛出 RouteError / MaxIterationsError / ExecError / GroupFailure 由 ``run`` 接住。
+        抛出 RouteError / MaxIterationsError / ExecError / GroupFailure / WorkflowAborted
+        由 ``run`` 接住。
         """
         current = self.wf.entry
         # 可变 outputs 累加器：node 间构造新 frozen RunContext（_make_ctx 从此快照派生）
@@ -146,6 +193,26 @@ class Orchestrator:
             if iterations > self.max_iter:
                 raise MaxIterationsError(self.max_iter, current=current)
 
+            # ── phase 11 §2.3：node 边界检查 interrupt pending ──────────────────
+            # pending 由 CLI 层 ``request_interrupt`` 登记；node 边界消费（-p 路线限制：
+            # 无法中断工具调用中，但 Conductor SDK 也只在 message 间——同粒度，实测够用）。
+            if self._interrupt_pending is not None and self._interrupt_handler is not None:
+                action = await self._handle_interrupt(current, outputs_acc)
+                if action == "abort":
+                    raise WorkflowAborted(current)
+                if action == "skip":
+                    # 当前 node 标 skipped，output 记 None（下游引用走兜底 route），
+                    # 推进到下一 node（不执行当前）。继续 while 循环。
+                    await self.bus.emit(
+                        "node_skipped", {"reason": "user_interrupt_skip"}, node=current,
+                    )
+                    outputs_acc[current] = {"output": None, "skipped": True}
+                    current = await self._next_node_after(current, outputs_acc, None)
+                    continue
+                # continue: guidance 已在 _handle_interrupt 累积进 _guidance_acc，
+                # 下面 _make_ctx 自动带上（Step B 起 render_prompt 拼 [User Guidance]）。
+            # ───────────────────────────────────────────────────────────────
+
             # 执行步 ctx：含历史 outputs（不含本步 —— 本步尚未产出）
             step_ctx = self._make_ctx(outputs_acc)
 
@@ -155,19 +222,53 @@ class Orchestrator:
             outputs_acc[current] = {"output": raw_output}
 
             # 路由求值（用更新后的 ctx —— 含本步 output）
-            routes = self._routes_of(current)
-            ctx_for_route = self._make_ctx(outputs_acc)
-            try:
-                nxt = resolve(routes, raw_output, ctx_for_route)
-            except RouteError as e:
-                # 补 node 名（resolve 不知 node；此处补全诊断）
-                e.node = current
-                raise
-            # emit route_taken（让 reducer 的 current_node 跟踪对）
-            await self.bus.emit("route_taken", {"from": current, "to": nxt})
-            current = nxt
+            current = await self._next_node_after(current, outputs_acc, raw_output)
 
         return self._evaluate_outputs(outputs_acc)
+
+    async def _handle_interrupt(
+        self, current: str, outputs_acc: dict[str, Any]
+    ) -> str:
+        """消费 ``_interrupt_pending`` → SIGINT 当前 runner（若有）→ 等用户答。
+
+        SPEC §2.3 / §3.3 / §4.1。返回 action（``"continue"``/``"skip"``/``"abort"``）。
+        continue 分支把 guidance 累积进 ``self._guidance_acc``（_make_ctx 注入 ctx）。
+        emit ``interrupt_resolved`` 由 ``InterruptHandler._broadcaster`` 负责（广播给三壳）。
+
+        ``_handle_interrupt`` 自身**不** emit interrupt_* 事件——``request`` 先 emit
+        ``interrupt_requested``，``_emit_resolved`` 异步 emit ``interrupt_resolved``，
+        本方法只在中间做 SIGINT + guidance 累积（单一职责，不与 handler 的 emit 逻辑耦合）。
+        """
+        assert self._interrupt_handler is not None  # _drive_loop 调用前保证
+        ireq = self._interrupt_pending
+        assert ireq is not None  # _drive_loop 调用前保证
+        self._interrupt_pending = None  # 消费掉
+
+        action, guidance = await self._interrupt_handler.request(ireq)
+
+        if action == "continue" and guidance:
+            # 累积 guidance → _make_ctx 自动注入后续 ctx → render_prompt 拼 [User Guidance] 段
+            self._guidance_acc.append(guidance)
+        return action
+
+    async def _next_node_after(
+        self, current: str, outputs_acc: dict[str, Any], raw_output: Any
+    ) -> str:
+        """对 current 的 routes 求值下一 node，emit route_taken（DRY：drive_loop / skip 共用）。
+
+        skip 路径传 ``raw_output=None``：当前 node 未执行，下游 routes 据此求值（兜底
+        route ``when=None`` 命中）。
+        """
+        routes = self._routes_of(current)
+        ctx_for_route = self._make_ctx(outputs_acc)
+        try:
+            nxt = resolve(routes, raw_output, ctx_for_route)
+        except RouteError as e:
+            e.node = current
+            raise
+        # emit route_taken（让 reducer 的 current_node 跟踪对）
+        await self.bus.emit("route_taken", {"from": current, "to": nxt})
+        return nxt
 
     def _make_ctx(self, outputs_acc: dict[str, Any]) -> RunContext:
         """从累加的 outputs 构造 frozen RunContext 快照（DRY：dispatch / route / outputs 共用）。
@@ -228,6 +329,8 @@ def _classify_error(e: Exception) -> str:
     """编排错误 → workflow_failed 的 error_type（SPEC §3.4 / 铁律 4）。"""
     if isinstance(e, MaxIterationsError):
         return "MaxIterations"
+    if isinstance(e, WorkflowAborted):
+        return "WorkflowAborted"
     if isinstance(e, RouteError):
         return "NoRouteMatch"
     if isinstance(e, GroupFailure):
@@ -244,6 +347,7 @@ def _error_node(e: Exception) -> str | None:
     - ``ExecError``：executor 失败的 node（adapter 注入 err.node）
     - ``GroupFailure``：parallel / foreach 组名
     - ``MaxIterationsError``：超迭代卡在的 node（current）
+    - ``WorkflowAborted``：用户中止时正在跑的 node
     """
     if isinstance(e, RouteError):
         return e.node
@@ -253,4 +357,6 @@ def _error_node(e: Exception) -> str | None:
         return e.group_name
     if isinstance(e, MaxIterationsError):
         return e.current
+    if isinstance(e, WorkflowAborted):
+        return e.node
     return None

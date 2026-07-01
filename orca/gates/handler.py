@@ -36,6 +36,7 @@ import logging
 import threading
 from typing import TYPE_CHECKING, Final
 
+from orca.gates._broadcaster_mixin import BroadcasterMixin
 from orca.gates.types import HumanGate
 
 if TYPE_CHECKING:
@@ -43,12 +44,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# broadcaster 退出哨兵：``stop()`` 投此值入队，``_broadcaster`` 收到即 return。
-# 用私有单例 sentinel 而非 None，避免与 (gate_id, answer, source) 元组形态冲突。
-_STOP: Final = object()
+# broadcaster 退出哨兵（向后兼容别名）：实际定义在 ``_broadcaster_mixin``。本模块历史
+# 暴露此符号给单测，保留以防外部引用（``from orca.gates.handler import _STOP``）。
+# 新代码不应直接用本符号，改 import 自 ``_broadcaster_mixin``。
+from orca.gates._broadcaster_mixin import _STOP as _STOP  # noqa: E402,F401
 
 
-class HumanGateHandler:
+class HumanGateHandler(BroadcasterMixin):
     """暂停 / 竞速 / 广播 / 恢复（SPEC §2 §4）。
 
     用法（orchestrator 或壳侧）::
@@ -75,52 +77,16 @@ class HumanGateHandler:
         # 否则两个线程在 GIL 释放点交错会触发 asyncio.InvalidStateError（race first-wins
         # 失效）。与 context_registry.py 的 threading.Lock 用法一致。
         self._resolve_lock = threading.Lock()
-        # resolved gate 队列：resolve 入队（不阻塞），_broadcaster 出队 emit。
-        # 惰性创建：绑定到 start() 所在 event loop（与 Tape.Lock 同理，Python 3.12 绑 loop）。
+        # BroadcasterMixin 的共享状态（start/stop/_broadcaster 在 mixin 实现）。
+        # 惰性创建：_resolved_queue 绑定到 start() 所在 event loop（与 Tape.Lock 同理，
+        # Python 3.12 绑 loop）。
         self._resolved_queue: asyncio.Queue[object] | None = None
         self._broadcaster_task: asyncio.Task[None] | None = None
+        # mixin 用本 logger 报 broadcaster 生命周期错误（归属本模块而非 mixin）。
+        self._broadcaster_logger = logger
 
     # ── 公开 API ─────────────────────────────────────────────────────────────
-
-    async def start(self) -> None:
-        """启动 ``_broadcaster`` 后台协程。
-
-        必须在有 running event loop 时调用（request 前）。重复 start 是幂等的
-        （已运行则直接返回，不创建第二个 task）。
-        """
-        if self._broadcaster_task is not None and not self._broadcaster_task.done():
-            return  # 幂等：已启动
-        if self._resolved_queue is None:
-            self._resolved_queue = asyncio.Queue()
-        self._broadcaster_task = asyncio.create_task(
-            self._broadcaster(), name="orca-gates-broadcaster"
-        )
-
-    async def stop(self) -> None:
-        """停止 ``_broadcaster``：投哨兵 + await task 干净退出。
-
-        幂等：未 start / 已 stop 直接返回。调用后 resolved 事件不再被 emit（request
-        已完成的 gate 仍能返回；后续 resolve 仍 set_result，只是广播丢失 —— 通常在
-        orchestrator 收尾时调用，已无在途 gate）。
-        """
-        task = self._broadcaster_task
-        queue = self._resolved_queue
-        if task is None or queue is None:
-            return  # 幂等：未 start
-        if not task.done():
-            await queue.put(_STOP)
-            try:
-                await asyncio.wait_for(task, timeout=5.0)
-            except asyncio.TimeoutError:
-                # broadcaster 卡住：cancel 兜底（不应发生，fail loud 记 error）
-                logger.error("HumanGateHandler broadcaster 5s 内未退出，强制 cancel")
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    # cancel 后 task 抛 CancelledError 是预期路径，正常吞
-                    pass
-        self._broadcaster_task = None
+    # start / stop 继承自 BroadcasterMixin（共享生命周期 pattern，SPEC §3.3 DRY）。
 
     async def request(self, gate: HumanGate) -> tuple[str, str]:
         """emit ``human_decision_requested`` 写 Tape + 暂停 + 等任一壳 resolve。
@@ -216,42 +182,27 @@ class HumanGateHandler:
 
     # ── 内部 ─────────────────────────────────────────────────────────────────
 
-    async def _broadcaster(self) -> None:
-        """后台协程：从 ``_resolved_queue`` 取 resolved gate → emit ``human_decision_resolved``。
+    async def _emit_resolved(self, item: object) -> None:
+        """``_broadcaster`` 出队的 resolved item → emit ``human_decision_resolved``（SPEC §4.1）。
 
-        resolve() 只唤醒 request()；广播由本协程统一 emit（避免 resolve 阻塞在 emit 上，
-        SPEC §10 决策 11）。三壳订阅 bus 收到 resolved 事件 → 同步关闭各自的 gate UI。
+        item 形态：``(gate_id, answer, source)``（resolve 入队时定型）。从 ``_gates_meta``
+        取 node / session_id 透传到 event 顶层（与 requested 一致，phase 3 §3.3 身份模型），
+        emit 后清 meta（防内存泄漏）。
 
-        退出：``stop()`` 投 ``_STOP`` 哨兵入队，本协程收到即 return。
+        emit 失败由 ``BroadcasterMixin._broadcaster`` 捕获记 exception（不阻断后续广播）。
         """
-        assert self._resolved_queue is not None  # start() 保证
-        queue = self._resolved_queue
-        while True:
-            item = await queue.get()
-            if item is _STOP:
-                return
-            gate_id, answer, source = item  # type: ignore[misc]
-            gate = self._gates_meta.pop(gate_id, None)
-            node = gate.node if gate is not None else None
-            session_id = gate.session_id if gate is not None else None
-            # emit resolved（写 Tape + 三壳订阅者收到广播，视觉同步）。session_id 透传
-            # 到 event 顶层（与 requested 一致，phase 3 §3.3 身份模型）。
-            try:
-                await self._bus.emit(
-                    "human_decision_resolved",
-                    data={
-                        "gate_id": gate_id,
-                        "answer": answer,
-                        "resolved_by": source,
-                    },
-                    node=node,
-                    session_id=session_id,
-                )
-            except Exception:
-                # emit 失败不阻断 broadcaster（后续 gate 仍能广播）；记 error 让其可见。
-                # 注意：emit 失败意味着 Tape 可能未落 resolved 行（罕见，如 Tape 已 close），
-                # 三壳读不到 resolved → 各自 UI 不会自动关。fail loud 记 error 暴露问题。
-                logger.exception(
-                    "broadcaster emit human_decision_resolved 失败（gate=%s）",
-                    gate_id,
-                )
+        gate_id, answer, source = item  # type: ignore[misc]
+        gate = self._gates_meta.pop(gate_id, None)
+        node = gate.node if gate is not None else None
+        session_id = gate.session_id if gate is not None else None
+        await self._bus.emit(
+            "human_decision_resolved",
+            data={
+                "gate_id": gate_id,
+                "answer": answer,
+                "resolved_by": source,
+            },
+            node=node,
+            session_id=session_id,
+        )
+

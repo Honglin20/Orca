@@ -32,8 +32,15 @@ def _app(tmp_path, wf, **kwargs):
 
     review blocker 修复：OrcaApp 默认 tape_path 是 ``./runs/<run_id>.jsonl``，测试若不
     注入会在仓库根目录创建文件。所有 pilot 测试都经此 helper 构造 app。
+
+    自动 mock ``kickoff`` 为 no-op：on_mount 现在会自动调 kickoff（修复 ``orca run``
+    真实运行的 ``no running event loop`` bug），但 pilot 测试用 ``_event()`` 注入 fake
+    events 测渲染，不需要真起编排（spawn claude / uvicorn）。需要真起编排的测试可
+    显式 ``app.kickoff = OrcaApp.kickoff.__get__(app)`` 还原。
     """
-    return OrcaApp(wf=wf, tape_path=tmp_path / "events.jsonl", **kwargs)
+    app = OrcaApp(wf=wf, tape_path=tmp_path / "events.jsonl", **kwargs)
+    app.kickoff = lambda: None  # type: ignore[method-assign]  # no-op：pilot 测试不真起编排
+    return app
 
 
 def _linear_workflow(tmp_path: Path) -> Path:
@@ -507,3 +514,126 @@ def _flatten_strips(strips) -> str:
         for segment in strip._segments:
             parts.append(segment.text)
     return "".join(parts)
+
+
+# ── phase 11 §3：Interrupt UI（Ctrl+G → InterruptModal + 事件分发）───────────
+
+
+class TestInterruptFlow:
+    """Ctrl+G 弹 InterruptModal + interrupt_* 事件分发到 LogStream（SPEC §3.1）。"""
+
+    def test_ctrl_g_pushes_interrupt_modal(self, tmp_path):
+        """pilot 按 Ctrl+G → InterruptModal 在屏。"""
+        from orca.iface.cli.screens.interrupt_modal import InterruptModal
+
+        wf = _load(_linear_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+        # action_interrupt 需要 _orchestrator 非 None；mock 一个避免它早 return。
+        app._orchestrator = object()  # truthy 占位
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("ctrl+g")
+                await pilot.pause()
+                await pilot.pause()  # @work action_interrupt 异步起
+                assert isinstance(app.screen, InterruptModal)
+        run_async(scenario())
+
+    def test_ctrl_g_without_orchestrator_warns_no_modal(self, tmp_path):
+        """无编排在跑（_orchestrator=None）→ Ctrl+G 不弹 modal，LogStream 写提示。"""
+        wf = _load(_linear_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+        # _orchestrator 默认 None（未起编排）
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("ctrl+g")
+                await pilot.pause()
+                await pilot.pause()
+                # 不弹 InterruptModal
+                from orca.iface.cli.screens.interrupt_modal import InterruptModal
+                assert not isinstance(app.screen, InterruptModal)
+        run_async(scenario())
+
+    def test_app_dispatches_interrupt_resolved_to_logstream(self, tmp_path):
+        """注入 interrupt_resolved 事件 → LogStream 显示描述（SPEC §4.3 全部入日志）。"""
+        wf = _load(_linear_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app._dispatch_to_widgets(_event(
+                    "interrupt_resolved",
+                    {"interrupt_id": "i1", "action": "continue",
+                     "guidance": "用更保守的方案", "resolved_by": "cli"},
+                    node="cfg", session_id="sess-x",
+                ))
+                await pilot.pause()
+                await pilot.pause()  # RichLog 异步 flush
+                text = _flatten_strips(app.query_one(LogStream).lines)
+                assert "interrupt continue" in text
+                assert "用更保守的方案" in text
+        run_async(scenario())
+
+    def test_app_dispatches_interrupt_requested_to_logstream(self, tmp_path):
+        """注入 interrupt_requested 事件 → LogStream 显示描述。"""
+        wf = _load(_linear_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app._dispatch_to_widgets(_event(
+                    "interrupt_requested",
+                    {"interrupt_id": "i1", "node": "cfg", "run_id": "r1",
+                     "session_id": "sess-x", "elapsed_at_request": 12.3,
+                     "source": "cli"},
+                    node="cfg", session_id="sess-x",
+                ))
+                await pilot.pause()
+                await pilot.pause()
+                text = _flatten_strips(app.query_one(LogStream).lines)
+                assert "interrupt requested" in text
+                assert "cfg" in text
+        run_async(scenario())
+
+    def test_app_dispatches_prompt_rendered_to_logstream(self, tmp_path):
+        """注入 prompt_rendered 事件 → LogStream 显示描述（含 preview 截断）。"""
+        wf = _load(_linear_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app._dispatch_to_widgets(_event(
+                    "prompt_rendered",
+                    {"node": "cfg", "session_id": "sess-x",
+                     "preview": "任务描述...\n\n[User Guidance]\n- 用更保守的方案"},
+                    node="cfg", session_id="sess-x",
+                ))
+                await pilot.pause()
+                await pilot.pause()
+                text = _flatten_strips(app.query_one(LogStream).lines)
+                assert "prompt rendered" in text
+        run_async(scenario())
+
+    def test_node_started_tracks_current_node_and_session(self, tmp_path):
+        """node_started 事件 → app 追踪 _current_node / _current_session_id（action_interrupt 用）。"""
+        wf = _load(_linear_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app._dispatch_to_widgets(_event(
+                    "node_started", {"kind": "agent"},
+                    node="cfg", session_id="sess-running",
+                ))
+                await pilot.pause()
+                assert app._current_node == "cfg"
+                assert app._current_session_id == "sess-running"
+                assert app._node_started_at is not None
+        run_async(scenario())

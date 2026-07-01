@@ -42,6 +42,11 @@ EventType = Literal[
     # ── HMIL（gates extension 产出；核心只认这个事件，不认 gate 实体）──
     "human_decision_requested",  # data: {gate_id, prompt, options?, source, context}
     "human_decision_resolved",  # data: {gate_id, answer}
+    # ── phase 11：优雅中断 + Guidance（SPEC §2.2）──
+    "interrupt_requested",  # data: {interrupt_id, node, run_id, session_id?, elapsed_at_request, source}
+    "interrupt_resolved",  # data: {interrupt_id, action: continue|skip|abort, guidance: str?, resolved_by}
+    # ── phase 11：prompt 渲染可观测（SPEC §2.2 / §10.2 item3 B5：guidance 注入的观测证据）──
+    "prompt_rendered",  # data: {node, session_id, preview}  preview = prompt 末尾 ~200 字符
     # ── 自定义（MCP 工具产出，前端按 data.kind 分发渲染）──
     "custom",  # data: {kind: "chart"|"table"|"image"|..., ...}
     # ── 错误 ──

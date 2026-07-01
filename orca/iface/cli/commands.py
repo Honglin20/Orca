@@ -318,8 +318,10 @@ def _run_workflow(config: RunConfig) -> int:
         task=config.task,
         max_iter=config.max_iter,
     )
-    # 起编排 worker + gate HTTP 桥（必须在 run 前调：run 阻塞，worker 需在 run 的 loop 内起）。
-    tui.kickoff()
+    # 不在此处调 kickoff：``@work`` decorator 需要 Textual event loop running，
+    # 而 ``tui.run()`` 是阻塞起 loop 的入口——run() 之前 loop 还没起，调 kickoff 会撞
+    # ``no running event loop`` RuntimeError。kickoff 由 ``OrcaApp.on_mount`` 自动调
+    # （那时 loop 已 running，与 ``_consume_events`` 同 pattern）。
     try:
         tui.run()
     except Exception:  # noqa: BLE001 —— 顶层兜底，任何异常 → exit 1

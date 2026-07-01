@@ -73,6 +73,13 @@ def _describe(event_type: str, data: dict[str, Any]) -> str:
     if event_type == "agent_tool_result":
         result = data.get("result", "")
         return f"→ {_truncate(result)}"
+    if event_type == "agent_usage":
+        # token 摘要：in/out/cache + cost（SPEC §3.3 payload）。让用户在 LogStream 直接看消耗，
+        # 不必去 tape 翻 jsonl。零值字段也显示（对比 cache hit/miss 更直观）。
+        return (
+            f"usage: in={data.get('input_tokens', 0)} out={data.get('output_tokens', 0)}"
+            f" cache={data.get('cache_tokens', 0)} cost=${data.get('cost_usd', 0):.4f}"
+        )
     if event_type == "node_started":
         return f"node started (kind={data.get('kind', '?')})"
     if event_type == "node_completed":
@@ -91,6 +98,22 @@ def _describe(event_type: str, data: dict[str, Any]) -> str:
         return f"workflow FAILED: {data.get('error_type', '?')}"
     if event_type == "route_taken":
         return f"route: {data.get('from', '?')} → {data.get('to', '?')}"
+    # phase 11 §3 / §4：中断 + Guidance 可观测事件。
+    if event_type == "interrupt_requested":
+        return (
+            f"⏸ interrupt requested at {data.get('node', '?')} "
+            f"({data.get('elapsed_at_request', 0):.1f}s)"
+        )
+    if event_type == "interrupt_resolved":
+        action = data.get("action", "?")
+        guidance = data.get("guidance")
+        text = f"interrupt {action}"
+        if guidance:
+            text += f": {_truncate(guidance)}"
+        return text
+    if event_type == "prompt_rendered":
+        # preview 是 prompt 末尾 ~200 字符（含 [User Guidance] 段时直观可见）。
+        return f"prompt rendered: {_truncate(data.get('preview', ''), limit=80)}"
     return event_type
 
 
