@@ -7,18 +7,17 @@
 
 ## 当前任务
 
-**phase 11 第三波 P2.2 Dialog 实现完成 —— 全绿（852→879，0 回归）。**
+**phase 11 wave-3 e2e 审计 bugfix 完成 —— Ctrl+G 立即打断 sleeping wait node（879→888，0 回归）。**
 
-wave 3 第三项：agent 跑完后多轮追问。`DialogHandler` 3-method split（start_dialog / send_turn /
-end_dialog），每轮重 spawn claude 把「agent_output + 完整历史 + 本轮 user 输入」拼进 prompt
-（`-p` 路线无 in-process session，靠 prompt 拼历史模拟多轮）。Rule 7 裁定：3-method split
-而非 SPEC §6.2 单一 run_dialog（Textual modal 需在轮间交还 UI 控制）；`ctx.dialog_history`
-是 web shell replay 预留位（真相在 tape 的 dialog_message 事件，不写 ctx 避免第二真相源）；
-抽 `orca/exec/env.py` 化解三处 `_build_env_overlay` 重复（Rule 6 DRY）。27 新测试断言 INTENT
-（含历史累积核心契约 + send 失败 fail loud + 按钮复位 + profile.resolve_cli_path review C5）。
+wave-3 e2e 审计（`test-coverage-e2e` agent）发现 SPEC §9.7.6 + §10.2 item9 承诺的「Ctrl+G →
+wait node 立即结束」实际不工作：`notify_all_waits` 原本只在 node 边界 `_handle_interrupt` 触发，
+wait sleep 期间 `_drive_loop` 阻塞在 `_dispatch` 到不了边界 → 对 sleeping wait 是死代码。
+surgical fix：`Orchestrator.request_interrupt` 登记 pending 的同时即时调 `bus.notify_all_waits()`
+（保留 record_resolved/resolve 里的同一调用作 defense-in-depth，覆盖多壳 resolve 路径）。
+xfail 复现测试翻转 pass + 8 新 wave-3 e2e 测试采纳。dispatch code-reviewer：无 🔴/🟡。
 
-- **最新 release note**：[`2026-07-02-phase11-dialog.md`](../releases/2026-07-02-phase11-dialog.md)
-- **SPEC**：[`docs/specs/phase-11-cli-enrichment.md`](../specs/phase-11-cli-enrichment.md) §6 / §11.7
+- **最新 release note**：[`2026-07-02-phase11-wait-interrupt-fix.md`](../releases/2026-07-02-phase11-wait-interrupt-fix.md)
+- **SPEC**：[`docs/specs/phase-11-cli-enrichment.md`](../specs/phase-11-cli-enrichment.md) §9.7.6 / §10.2 item9
 
 ## 待办
 

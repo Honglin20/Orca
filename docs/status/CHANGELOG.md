@@ -17,6 +17,15 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-07-02] phase 11 fix —— Ctrl+G 立即唤醒 sleeping wait node（wave-3 e2e 审计 bugfix）
+wave-3 e2e 审计发现 SPEC §9.7.6 + §10.2 item9 承诺的「Ctrl+G 打断 wait node」实际不工作：
+`notify_all_waits` 原本只在 node 边界 `_handle_interrupt` 触发，wait sleep 期间 drive_loop 阻塞
+在 `_dispatch` 到不了边界 → 对 sleeping wait 是死代码。修复：`Orchestrator.request_interrupt`
+登记 pending 的同时即时调 `bus.notify_all_waits()`（保留 record_resolved/resolve 里的同一调用
+作 defense-in-depth）。xfail 复现测试翻转 pass + 8 新 wave-3 e2e 测试采纳，879→888 零回归。
+- commit: 89b23ab
+- 详情：[release note](releases/2026-07-02-phase11-wait-interrupt-fix.md)
+
 ## [2026-07-02] phase 11 P2.2 —— Dialog（agent 跑完后多轮追问，重 spawn claude 拼历史）
 用户按 `d` 键就已完成 agent 的 output 多轮追问：`DialogHandler` 3-method split（start/send/end），
 每轮重 spawn claude 把「output + 完整历史 + 本轮问题」拼进 prompt（`-p` 路线无 in-process
