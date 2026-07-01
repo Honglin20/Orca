@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from orca.events.bus import EventBus
+    from orca.events.tape import Tape
     from orca.exec.context import RunContext
     from orca.gates.interrupt import InterruptHandler
     from orca.gates.types import InterruptRequest
@@ -65,6 +66,34 @@ class Orchestrator:
 
     不持有可变运行态在 ``self`` —— 每次跑都从 fresh ``ctx`` 开始（可重入 / 可测）。
     """
+
+    # drive_loop / _dispatch / _make_ctx / _next_node_after 依赖的实例字段清单。
+    # ``__init__`` 与 resume 专用 ``_bare_instance``（bypass ``__init__``）都必须设置全部
+    # 这些字段。``_drive_from`` 在入口调 ``_assert_drive_fields_complete`` 校验，任一缺失
+    # 立即 fail loud（防字段漂移：未来给 ``__init__`` 加字段却忘了同步 ``_bare_instance``
+    # 时，此处报清晰错误，而非延迟到 AttributeError）。review §鲁棒性 🔴 建议。
+    _DRIVE_REQUIRED_FIELDS = (
+        "wf", "bus", "run_id", "ctx", "task", "max_iter",
+        "_node_by_name", "_parallel_by_name", "_guidance_acc",
+        "_interrupt_handler", "_interrupt_pending", "_interrupt_answer",
+    )
+
+    def _assert_drive_fields_complete(self) -> None:
+        """校验实例含 drive_loop 所需全部字段（resume bypass __init__ 的安全网）。
+
+        正常 ``__init__`` 路径天然满足；``_bare_instance``（resume）bypass ``__init__``，
+        手动设字段，本方法确保不漏。缺失 → RuntimeError fail loud（清晰归因，非AttributeError）。
+        """
+        missing = [
+            name for name in self._DRIVE_REQUIRED_FIELDS
+            if not hasattr(self, name)
+        ]
+        if missing:
+            raise RuntimeError(
+                f"Orchestrator 缺 drive 所需字段：{missing}。"
+                "正常 __init__ 路径不应触发；若用 from_tape/_bare_instance，"
+                "请检查是否漏设字段（字段漂移）。"
+            )
 
     def __init__(
         self,
@@ -194,15 +223,252 @@ class Orchestrator:
         self.bus.close()
         return replay_state(self.bus.tape)
 
+    # ── phase 11 §7：Checkpoint Resume（SPEC §7.2）─────────────────────────────
+
+    @classmethod
+    def from_tape(
+        cls,
+        tape_path: Path,
+        bus: EventBus,
+        wf: Workflow,
+    ) -> Orchestrator:
+        """从 Tape 重放构造 Orchestrator，恢复到崩溃前状态（SPEC §7.2）。
+
+        - 读 Tape（``resume=True`` 截断末尾残行，SPEC §7.3 fail-soft）。
+        - ``replay_state`` → 拿已完成 node 列表 + outputs aggregate。
+        - typed exception 对每个失败模式（CLI 层映射 exit code）：
+            * ``EmptyTapeError``：Tape 无事件。
+            * ``AlreadyCompletedError``：已是 workflow_completed 终态。
+            * ``ParallelGroupMidCrashError``：崩溃在 parallel 组中间。
+            * ``MidFileCorruptError``：Tape 中段损坏（replay 不可信）。
+        - resume entry = 最后一个 node_completed 的下一 node（用 routes 求值，
+          与 drive_loop 同一 ``_next_node_after``，避免自造路由逻辑）。
+        - RunContext 携带已完成 outputs（从 state 派生，不手搓）。
+
+        ``bus`` 由调用方传入（其 Tape 已用 ``resume=True`` 构造，残行已截断）。本方法
+        只读 Tape（``replay_state``）+ 校验 + 构造 Orchestrator 实例，不写 Tape。
+        """
+        from orca.events.replay import replay_state
+        from orca.run.resume import (
+            AlreadyCompletedError,
+            EmptyTapeError,
+            MidFileCorruptError,
+            _detect_parallel_mid_crash,
+            _find_first_corrupt_line,
+            _outputs_acc_from_state,
+        )
+
+        # 1) 中段损坏检测（严格，区别于 replay 的 fail-soft）+ 顺带计 valid 事件数。
+        #    复用本次扫描的 valid_event_count 作为 replayed_events（避免再多读一遍 tape）。
+        corrupt, event_count = _find_first_corrupt_line(tape_path)
+        if corrupt is not None:
+            lineno, preview = corrupt
+            raise MidFileCorruptError(tape_path, lineno, preview)
+
+        # 2) replay（bus.tape 已 resume=True 截断残行；此处用同一路径再读，状态一致）
+        tape = bus.tape
+        state = replay_state(tape)
+
+        # 3) 失败模式判定（按 SPEC §7.3 顺序）。
+        if event_count == 0:
+            raise EmptyTapeError(tape_path)
+        if state.status == "completed":
+            raise AlreadyCompletedError(state.run_id)
+        parallel_err = _detect_parallel_mid_crash(state, wf)
+        if parallel_err is not None:
+            raise parallel_err
+
+        # 4) 定位 resume 起点：current_node（reducer 据 route_taken 维护）即崩溃点的
+        #    下一 node。若 current_node 为 None（如 tape 末尾正好是 node_completed 但
+        #    route_taken 还没 emit），回退到「最后一个 done node 的下一 node」。
+        resume_node = state.current_node
+        outputs_acc = _outputs_acc_from_state(state)
+        if resume_node is None or resume_node == "$end":
+            # 无明确 current_node：找最后一个 done node，对其 routes 求值下一 node。
+            done_nodes = [
+                n for n, s in state.node_status.items() if s == "done"
+            ]
+            if not done_nodes:
+                # 一个 node 都没完成（如首个 node 崩溃）→ 从 wf.entry 重跑。
+                resume_node = wf.entry
+            else:
+                # 最后完成的 node 名（按 tape 顺序，reducer 的 node_status 不保序；
+                # 用 state.context 的 key 集合 + wf.nodes 顺序推断最后完成者）。
+                last_done = cls._find_last_done_node_name(tape, done_nodes)
+                resume_node = cls._next_node_for_resume(wf, last_done, outputs_acc)
+
+        # 5) 构造 Orchestrator（bypass __init__：避免重新 gen run_id / 重置 ctx）。
+        orch = cls._bare_instance(wf, bus, state, resume_node, outputs_acc)
+        # 记录 replayed 事件数，供 run_from_state emit workflow_resumed 用。
+        orch._resume_replayed_events = event_count
+        orch._resume_initial_outputs = outputs_acc
+        orch._resume_start_node = resume_node
+        return orch
+
+    @staticmethod
+    def _next_node_for_resume(
+        wf: Workflow, last_done: str | None, outputs_acc: dict[str, Any]
+    ) -> str:
+        """对 ``last_done`` 的 routes 求值下一 node（resume 起点）。
+
+        ``last_done=None``（无任何 node 完成）→ ``wf.entry``。
+        """
+        if last_done is None:
+            return wf.entry
+        from orca.run.router import resolve
+
+        node_by_name = {n.name: n for n in wf.nodes}
+        parallel_by_name = {g.name: g for g in wf.parallel}
+        if last_done in parallel_by_name:
+            routes = parallel_by_name[last_done].routes
+        else:
+            routes = node_by_name[last_done].routes
+        # ctx 仅用于 route 求值（outputs 已含 last_done 的 output）。
+        from orca.exec.context import RunContext
+
+        ctx = RunContext(
+            inputs={}, outputs=dict(outputs_acc), run_id="", task=None,
+        )
+        return resolve(routes, outputs_acc.get(last_done, {}).get("output"), ctx)
+
+    @staticmethod
+    def _bare_instance(
+        wf: Workflow,
+        bus: EventBus,
+        state: RunState,
+        resume_node: str,
+        outputs_acc: dict[str, Any],
+    ) -> Orchestrator:
+        """构造 bypass ``__init__`` 的 Orchestrator（resume 专用，复用 drive 逻辑）。
+
+        不重新 gen run_id（沿用 state.run_id，保 tape 连续性）；不重跑 inputs default
+        填充（已完成 node 不再需要 inputs 校验）；其余索引 / 控制字段同 ``__init__``。
+        """
+        from orca.exec.context import RunContext
+
+        orch = Orchestrator.__new__(Orchestrator)
+        orch.wf = wf
+        orch.bus = bus
+        orch.run_id = state.run_id
+        # RunContext：inputs 从 workflow_started 事件取（保 render 能拿 inputs.*）。
+        # 若取不到（罕见，如 workflow_started 残行被截断）回退空 dict。
+        inputs = Orchestrator._inputs_from_tape(bus.tape)
+        orch.ctx = RunContext(
+            inputs=inputs, outputs={}, run_id=state.run_id, task=None,
+        )
+        orch.task = None
+        orch.max_iter = resolve_max_iter(wf, inputs)
+        orch._node_by_name = {n.name: n for n in wf.nodes}
+        orch._parallel_by_name = {g.name: g for g in wf.parallel}
+        orch._guidance_acc: list[str] = []
+        # 中断字段：resume 不接 interrupt handler（交互态不跨进程恢复）。
+        orch._interrupt_handler = None
+        orch._interrupt_pending = None
+        orch._interrupt_answer = None
+        # resume 专用状态（run_from_state 消费）。
+        orch._resume_replayed_events = 0
+        orch._resume_initial_outputs = outputs_acc
+        orch._resume_start_node = resume_node
+        return orch
+
+    @staticmethod
+    def _inputs_from_tape(tape: Tape) -> dict[str, Any]:
+        """从 Tape 的 ``workflow_started.data.inputs`` 取原始 inputs（render 用）。
+
+        取不到（罕见：workflow_started 残行被截断 / 异常 tape）→ 返空 dict + warning。
+        空 inputs 下 render ``{{ inputs.x }}`` 会 UndefinedError，warning 让归因可见
+        （review §鲁棒性 建议：不静默返 {}）。
+        """
+        for event in tape.replay():
+            if event.type == "workflow_started":
+                inputs = event.data.get("inputs")
+                if isinstance(inputs, dict):
+                    return inputs
+        logger.warning(
+            "resume：Tape %s 未找到 workflow_started.data.inputs，回退空 inputs"
+            "（后续 render {{ inputs.* }} 可能 UndefinedError）",
+            getattr(tape, "path", "?"),
+        )
+        return {}
+
+    @staticmethod
+    def _find_last_done_node_name(tape: Tape, done_nodes: list[str]) -> str | None:
+        """扫 Tape 找最后一个 ``node_completed`` 的 node 名（保序，区别于 state.node_status）。
+
+        ``state.node_status`` 是 dict（无序），无法直接知道哪个 done node 是最后完成的。
+        本方法扫 Tape 的 ``node_completed`` 事件序列，返回序列中最后一个其 node 在
+        ``done_nodes`` 里的名字。无匹配返回 None。
+        """
+        done_set = set(done_nodes)
+        last: str | None = None
+        for event in tape.replay():
+            if event.type == "node_completed" and event.node in done_set:
+                last = event.node
+        return last
+
+    async def run_from_state(self) -> RunState:
+        """从 ``from_tape`` 恢复的状态续跑（SPEC §7.2）。
+
+        先 emit ``workflow_resumed``（写 Tape，可观测），再调 ``_drive_from`` 从 resume
+        node 续跑。错误处理 / workflow_completed / bus.close 与 ``run`` 一致（DRY：
+        共用 ``_classify_error`` / ``_error_node`` / lifecycle helpers）。
+        """
+        from orca.events.replay import replay_state
+
+        start_ts = now_monotonic()
+        # workflow_resumed：data = {from_tape, resumed_node, replayed_events}（SPEC §2.2）。
+        await self.bus.emit(
+            "workflow_resumed",
+            {
+                "from_tape": str(self.bus.tape.path),
+                "resumed_node": self._resume_start_node,
+                "replayed_events": self._resume_replayed_events,
+            },
+        )
+
+        try:
+            final_outputs = await self._drive_from(
+                self._resume_start_node, self._resume_initial_outputs
+            )
+        except (ExecError, RouteError, MaxIterationsError, GroupFailure, WorkflowAborted) as e:
+            error_type = _classify_error(e)
+            node = _error_node(e)
+            t2, data2 = make_workflow_failed(error_type, str(e), node=node)
+            await self.bus.emit(t2, data2)
+            self.bus.close()
+            return replay_state(self.bus.tape)
+
+        elapsed = now_monotonic() - start_ts
+        t3, data3 = make_workflow_completed(self.wf, final_outputs, elapsed=elapsed)
+        await self.bus.emit(t3, data3)
+        self.bus.close()
+        return replay_state(self.bus.tape)
+
     async def _drive_loop(self) -> dict[str, Any]:
-        """单指针主循环。返回 evaluate_outputs 的最终输出 dict。
+        """单指针主循环（SPEC §4.2）。返回 evaluate_outputs 的最终输出 dict。
 
         抛出 RouteError / MaxIterationsError / ExecError / GroupFailure / WorkflowAborted
         由 ``run`` 接住。
+
+        phase 11 §7：循环体抽到 ``_drive_from``，``run_from_state``（resume）复用同一段
+        node 边界 + dispatch + 路由逻辑，仅起始 node / 初始 outputs_acc 不同（DRY）。
         """
-        current = self.wf.entry
+        return await self._drive_from(self.wf.entry, {})
+
+    async def _drive_from(
+        self, start_node: str, initial_outputs: dict[str, Any]
+    ) -> dict[str, Any]:
+        """单指针主循环的可参数化核心（``run`` 与 ``run_from_state`` 共享，DRY）。
+
+        - ``start_node``：起始 node（首次 run = ``wf.entry``；resume = 崩溃点的下一 node）。
+        - ``initial_outputs``：预填充的 outputs 累加器（resume 时含已完成 node 的 outputs；
+          首次 run 为空 dict）。
+        """
+        # 安全网：校验实例含 drive 所需全部字段（resume bypass __init__ 时防字段漂移）。
+        self._assert_drive_fields_complete()
+        current = start_node
         # 可变 outputs 累加器：node 间构造新 frozen RunContext（_make_ctx 从此快照派生）
-        outputs_acc: dict[str, Any] = {}
+        outputs_acc: dict[str, Any] = dict(initial_outputs)
 
         iterations = 0
         while current != "$end":

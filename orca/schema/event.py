@@ -47,6 +47,8 @@ EventType = Literal[
     "interrupt_resolved",  # data: {interrupt_id, action: continue|skip|abort, guidance: str?, resolved_by}
     # ── phase 11：prompt 渲染可观测（SPEC §2.2 / §10.2 item3 B5：guidance 注入的观测证据）──
     "prompt_rendered",  # data: {node, session_id, preview}  preview = prompt 末尾 ~200 字符
+    # ── phase 11 §7：Checkpoint Resume（Tape 即 checkpoint，SPEC §1.4 / §7.2）──
+    "workflow_resumed",  # data: {from_tape: str, resumed_node: str, replayed_events: int}
     # ── 自定义（MCP 工具产出，前端按 data.kind 分发渲染）──
     "custom",  # data: {kind: "chart"|"table"|"image"|..., ...}
     # ── 错误 ──

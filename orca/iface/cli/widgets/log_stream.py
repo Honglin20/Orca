@@ -114,6 +114,13 @@ def _describe(event_type: str, data: dict[str, Any]) -> str:
     if event_type == "prompt_rendered":
         # preview 是 prompt 末尾 ~200 字符（含 [User Guidance] 段时直观可见）。
         return f"prompt rendered: {_truncate(data.get('preview', ''), limit=80)}"
+    if event_type == "workflow_resumed":
+        # phase 11 §7：从 Tape 重放恢复后 emit。让用户看到「从哪个 node 续跑 + 重放了多少事件」。
+        return (
+            f"↻ resumed from {data.get('from_tape', '?')}: "
+            f"node={data.get('resumed_node', '?')} "
+            f"(replayed {data.get('replayed_events', 0)} events)"
+        )
     return event_type
 
 

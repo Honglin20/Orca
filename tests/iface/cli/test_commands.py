@@ -247,6 +247,126 @@ class TestRunExitCodes:
         assert result.exit_code == EXIT_ARG_OR_VALIDATE
 
 
+# ── resume 命令（phase 11 §7 Checkpoint Resume）─────────────────────────────
+
+
+class TestResumeCommand:
+    """``orca resume`` 失败模式 → exit code 映射（SPEC §7.3）。
+
+    不真跑续跑（那需要完整 tape + workflow，由 tests/run/test_resume.py 覆盖 from_tape
+    核心逻辑）；此处覆盖 **CLI 层** 的参数解析 + typed exception → exit code。
+    """
+
+    def test_resume_missing_file_exits_two(self, tmp_path):
+        """Tape 文件不存在 → exit 2（SPEC §7.3）。"""
+        result = runner.invoke(
+            app, ["resume", str(tmp_path / "nonexistent.jsonl")],
+        )
+        assert result.exit_code == EXIT_ARG_OR_VALIDATE
+        assert "Tape 不存在" in result.output
+
+    def test_resume_missing_file_as_run_id_exits_two(self, tmp_path, monkeypatch):
+        """参数视为 run_id，查 runs/<run_id>.jsonl 不存在 → exit 2。
+
+        用 monkeypatch 把 cwd 切到 tmp_path（避免读到真实 ./runs/）。
+        """
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(app, ["resume", "fake-run-id-12345"])
+        assert result.exit_code == EXIT_ARG_OR_VALIDATE
+        # 解析为 runs/fake-run-id-12345.jsonl。
+        assert "runs/fake-run-id-12345.jsonl" in result.output
+
+    def test_resume_run_id_resolution_finds_file(self, tmp_path, monkeypatch):
+        """run_id 解析：runs/<run_id>.jsonl 存在 → 走到 yaml 解析步骤（验证路径解析正确）。
+
+        构造一个空 tape（触发 EmptyTapeError → exit 2），验证 run_id 被正确拼成
+        runs/<run_id>.jsonl 并打开（而非报「Tape 不存在」）。
+        """
+        monkeypatch.chdir(tmp_path)
+        runs_dir = tmp_path / "runs"
+        runs_dir.mkdir()
+        tape_path = runs_dir / "my-run-123.jsonl"
+        tape_path.write_text("", encoding="utf-8")  # 空 tape
+
+        result = runner.invoke(app, ["resume", "my-run-123"])
+        # 空 tape → EmptyTapeError → exit 2（但不是「Tape 不存在」——证明 run_id 解析成功）。
+        assert result.exit_code == EXIT_ARG_OR_VALIDATE
+        assert "Tape 不存在" not in result.output
+
+    def test_resume_empty_tape_exits_two(self, tmp_path):
+        """空 tape（0 字节）→ exit 2（EmptyTapeError）。
+
+        传 --yaml 跳过 yaml 解析前置（空 tape 无 workflow_started 推断不出 yaml），
+        直达 from_tape 的 EmptyTapeError。
+        """
+        tape_path = tmp_path / "empty.jsonl"
+        tape_path.write_text("", encoding="utf-8")
+        yaml_path = _write_yaml(tmp_path, "wf", _linear_wf())
+        result = runner.invoke(
+            app, ["resume", str(tape_path), "--yaml", str(yaml_path)],
+        )
+        assert result.exit_code == EXIT_ARG_OR_VALIDATE
+        assert "无状态可恢复" in result.output or "为空" in result.output
+
+    def test_resume_completed_tape_exits_zero(self, tmp_path, monkeypatch):
+        """Tape 以 workflow_completed 结尾 → exit 0（「已完成，无需 resume」）。
+
+        需要可解析的 yaml：在 tmp_path 写 yaml + 用 --yaml 指定。
+        """
+        # 构造一个完成的 tape（跑真实 workflow）。
+        import asyncio
+
+        from orca.events.bus import EventBus
+        from orca.events.tape import Tape
+        from orca.run.orchestrator import Orchestrator
+        from orca.schema import Workflow, ScriptNode, Route
+
+        wf = Workflow(
+            name="resume_cli_test",
+            entry="a",
+            nodes=[ScriptNode(name="a", command="echo hi", routes=[Route(to="$end")])],
+        )
+        tape_path = tmp_path / "done.jsonl"
+        tape = Tape(tape_path, run_id="done")
+        bus = EventBus(tape)
+        orch = Orchestrator(wf, bus, inputs={}, run_id="done")
+        state = asyncio.run(orch.run())
+        assert state.status == "completed"
+
+        # 写一份 yaml 供 resume 重建 Workflow。
+        yaml_path = _write_yaml(
+            tmp_path, "wf",
+            {"name": "resume_cli_test", "entry": "a",
+             "nodes": [{"name": "a", "kind": "script", "command": "echo hi",
+                        "routes": [{"to": "$end"}]}]},
+        )
+
+        result = runner.invoke(
+            app, ["resume", str(tape_path), "--yaml", str(yaml_path)],
+        )
+        assert result.exit_code == EXIT_OK
+        assert "已完成" in result.output
+
+    def test_resume_no_yaml_and_unresolvable_exits_two(self, tmp_path, monkeypatch):
+        """无 --yaml 且 tape 的 workflow_name 在 examples/ 找不到 → exit 2（fail loud）。"""
+        # 构造一个含 workflow_started 的 tape（任意 workflow_name）。
+        import json as _json
+
+        tape_path = tmp_path / "x.jsonl"
+        line = _json.dumps({
+            "seq": 1, "type": "workflow_started", "timestamp": 1.0,
+            "node": None, "session_id": None,
+            "data": {"inputs": {}, "node_count": 1, "entry": "a",
+                     "workflow_name": "totally_unique_unresolvable", "topology": {}},
+        })
+        tape_path.write_text(line + "\n", encoding="utf-8")
+
+        monkeypatch.chdir(tmp_path)  # 无 examples/ → 推断失败
+        result = runner.invoke(app, ["resume", str(tape_path)])
+        assert result.exit_code == EXIT_ARG_OR_VALIDATE
+        assert "--yaml" in result.output
+
+
 class TestExitCodeConstants:
     """退出码常量值锁定（SPEC §5.3）。"""
 
