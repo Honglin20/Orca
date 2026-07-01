@@ -1,12 +1,14 @@
 // components/chart/ChartWidget.tsx —— 按 chart_type 分派（SPEC §2.4）。
 //
-// 9d 范围只 5 种：line/bar/scatter/pareto/table。未知类型 fail loud（显示提示，不静默崩）。
+// 7 种 chart_type：line/bar/area/scatter/pareto/radar/table。未知类型 fail loud（显示提示，不静默崩）。
 
 import type { ChartPayload } from "./types";
 import { LineChartWidget } from "./widgets/LineChartWidget";
 import { BarChartWidget } from "./widgets/BarChartWidget";
+import { AreaChartWidget } from "./widgets/AreaChartWidget";
 import { ScatterChartWidget } from "./widgets/ScatterChartWidget";
 import { ParetoChartWidget } from "./widgets/ParetoChartWidget";
+import { RadarChartWidget } from "./widgets/RadarChartWidget";
 import { DataTableWidget } from "./widgets/DataTableWidget";
 
 export function ChartWidget({ payload }: { payload: ChartPayload }) {
@@ -15,10 +17,14 @@ export function ChartWidget({ payload }: { payload: ChartPayload }) {
       return <LineChartWidget payload={payload} />;
     case "bar":
       return <BarChartWidget payload={payload} />;
+    case "area":
+      return <AreaChartWidget payload={payload} />;
     case "scatter":
       return <ScatterChartWidget payload={payload} />;
     case "pareto":
       return <ParetoChartWidget payload={payload} />;
+    case "radar":
+      return <RadarChartWidget payload={payload} />;
     case "table":
       return <DataTableWidget payload={payload} />;
     default:

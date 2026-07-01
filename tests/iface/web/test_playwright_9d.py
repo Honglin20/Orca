@@ -289,6 +289,119 @@ class TestGateAndChart:
         """5 种图：line/bar/scatter/pareto/table 各注入一种 → 断言对应 widget。"""
         asyncio.run(self._chart_five_types(live_server))
 
+    async def _chart_area_radar(self, live_server):
+        """area + radar 图：各注入一种 → 真实浏览器断言对应 widget + PALETTE 着色。
+
+        happy-dom 单测下 Area/Radar 渲染已通过（chart.test.tsx），此处额外在真实浏览器
+        下断言 .recharts-area / .recharts-radar path + stroke 在 PALETTE，作为集成层保险。
+        """
+        base_url, manager = live_server
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
+            page = await browser.new_page()
+            await _goto_output_tab(page, base_url)
+
+            seq = 70
+            for chart_type, data, x, y in [
+                ("area", [{"x": 1, "y": 2}, {"x": 2, "y": 4}, {"x": 3, "y": 6}], "x", "y"),
+                (
+                    "radar",
+                    [
+                        {"dimension": "speed", "value": 6},
+                        {"dimension": "power", "value": 8},
+                        {"dimension": "range", "value": 4},
+                    ],
+                    "dimension",
+                    "value",
+                ),
+            ]:
+                await _inject(
+                    page,
+                    {
+                        "seq": seq,
+                        "type": "custom",
+                        "timestamp": 1,
+                        "node": "n",
+                        "session_id": "s",
+                        "data": {
+                            "kind": "chart",
+                            "chart": {
+                                "chart_type": chart_type,
+                                "data": data,
+                                "x": x,
+                                "y": y,
+                                "label": f"g-{chart_type}",
+                                "title": f"t-{chart_type}",
+                            },
+                        },
+                    },
+                )
+                seq += 1
+
+            palette = [
+                "#5B8DB8", "#E29D3E", "#D4605A", "#6BA5A0",
+                "#6B9E5C", "#C9A843", "#9A7BA8", "#E08E9B",
+            ]
+            # area：至少一条 path 的 stroke 落在 PALETTE（曲线 path stroke=PALETTE）。
+            await page.wait_for_selector(".recharts-area path", timeout=5000)
+            area_strokes = await page.locator(".recharts-area path").evaluate_all(
+                "els => els.map(e => e.getAttribute('stroke')).filter(s => s && s !== 'none')"
+            )
+            assert any(s in palette for s in area_strokes), f"area stroke {area_strokes} not in PALETTE"
+
+            # radar：.recharts-radar path stroke 落在 PALETTE + 维度轴 tick ≥ 3。
+            await page.wait_for_selector(".recharts-radar path", timeout=5000)
+            radar_stroke = await page.locator(".recharts-radar path").first.get_attribute("stroke")
+            assert radar_stroke in palette, f"radar stroke {radar_stroke} not in PALETTE"
+            ticks = await page.locator(".recharts-polar-angle-axis-tick").count()
+            assert ticks >= 3, f"radar polar-angle ticks {ticks} < 3"
+
+            # area hue 多系列（happy-dom 下 <Area> shape 不渲染，故真实浏览器补验证）：
+            # 长格式 (x, series, y) → pivot 宽格式 → 2 条曲线，各 stroke 落 PALETTE。
+            await _inject(
+                page,
+                {
+                    "seq": 80,
+                    "type": "custom",
+                    "timestamp": 1,
+                    "node": "n",
+                    "session_id": "s",
+                    "data": {
+                        "kind": "chart",
+                        "chart": {
+                            "chart_type": "area",
+                            "data": [
+                                {"x": 1, "series": "A", "y": 2},
+                                {"x": 2, "series": "A", "y": 4},
+                                {"x": 1, "series": "B", "y": 1},
+                                {"x": 2, "series": "B", "y": 3},
+                            ],
+                            "x": "x",
+                            "y": "y",
+                            "hue": "series",
+                            "label": "g-area-hue",
+                            "title": "area-hue",
+                        },
+                    },
+                },
+            )
+            await page.wait_for_selector(
+                '[data-label="g-area-hue"] .recharts-area path', timeout=5000
+            )
+            hue_strokes = await page.locator(
+                '[data-label="g-area-hue"] .recharts-area path'
+            ).evaluate_all(
+                "els => els.map(e => e.getAttribute('stroke')).filter(s => s && s !== 'none')"
+            )
+            assert len(hue_strokes) >= 2, f"area hue series count {hue_strokes} < 2"
+            assert all(s in palette for s in hue_strokes), f"area hue strokes {hue_strokes} not all in PALETTE"
+
+            await browser.close()
+
+    def test_chart_area_radar(self, live_server):
+        """area + radar 图：各注入一种 → 真实浏览器断言 widget + PALETTE。"""
+        asyncio.run(self._chart_area_radar(live_server))
+
     async def _pareto_front_line(self, live_server):
         """pareto 前沿连线渲染（SPEC §2.4 pareto = 散点 + 前沿 line）。
 
