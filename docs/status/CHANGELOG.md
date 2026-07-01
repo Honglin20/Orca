@@ -17,6 +17,14 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-07-02] phase 11 收官 —— CLI feature 补全全部完成（11 feature，652→959 测试，0 回归）
+对抗评审（fail→conditional-pass，22 真问题闭环）→ 4 wave clean-code-builder + 4 wave test-coverage-e2e →
+code-reviewer 横切审计（0 🔴 0 🟡）。交付 CI / Interrupt+Guidance / Resume / Retry / ask_user MCP /
+Wait / Validator / Dialog / Skip / daemon 共 11 feature；e2e 审计狩猎并修复 2 个单 Tape 不变量
+critical bug（interrupt_resolved 丢事件 / Ctrl+G 打不断 wait）；9 处 SPEC 偏离全部 Rule 7 裁定双落。
+Budget（D3）/ attach（D2）descoped。commit: `120085f`→`d295922`（见各条）。
+- 详情：[release note](releases/2026-07-02-phase11-complete.md)
+
 ## [2026-07-02] phase 11 P3.2 —— daemon `--background` 模式 + ps/logs/wait（attach descoped）
 长跑 workflow 不占终端：`orca run --background` fork detached child（headless Orchestrator，
 非 TUI——detached 无 TTY Textual 会崩，SPEC §11.9 裁定），父进程立即返回 run_id + pid；
