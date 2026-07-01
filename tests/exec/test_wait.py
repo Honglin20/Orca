@@ -389,3 +389,210 @@ def test_parallel_group_two_waits_independent(tmp_path):
     # 各自 output.interrupted=True
     assert result["outputs"]["wa"]["interrupted"] is True
     assert result["outputs"]["wb"]["interrupted"] is True
+
+
+# ── e2e：Ctrl+G interrupt 经 orchestrator 打断真实 WaitExecutor ──────────────
+
+
+def test_e2e_ctrl_g_interrupt_breaks_real_wait_node_through_orchestrator(tmp_path):
+    """Ctrl+G → request_interrupt → 真实 WaitExecutor 应立即结束（wait_completed.interrupted=True）。
+
+    INTENT（SPEC §9.7.6 + §10.2 item9 e2e 可观测契约）：现有 interrupt↔wait 测试只在
+    「handler→bus 裸 asyncio.Event」层验证 fan-out（test_record_resolved_notifies_wait_handles），
+    以及在 parallel group 层验证两 wait 独立（test_parallel_group_two_waits_independent）。
+    但**没有**一条 e2e 把「真 WaitExecutor + 真 Orchestrator + 真 InterruptHandler + Ctrl+G
+    pending」串起来。SPEC §9.7.6 / §10.2 item9 明确要求：「Ctrl+G → wait node 立即结束
+    （wait_completed.interrupted=True）」。
+
+    **KNOWN BUG（xfail strict）**：当前实现下此 e2e 路径不通——
+    ``InterruptHandler.record_resolved``（含 ``bus.notify_all_waits``）只在 orchestrator 的
+    ``_handle_interrupt`` 里调，而 ``_handle_interrupt`` 在 **node 边界**（``_drive_loop`` 顶部）
+    触发。当 wait node 正在 ``asyncio.sleep`` 时，drive_loop 阻塞在 ``_dispatch`` 内，根本到不了
+    node 边界 → ``notify_all_waits`` 永远不在 wait sleep 期间被调 → wait 睡满才结束（interrupted=False）。
+
+    即：``notify_all_waits`` 的接线对「Ctrl+G 打断 wait」的 e2e 路径是**死代码**。现有单元测试
+    （直接调 ``bus.notify_all_waits()`` 或 ``record_resolved``）之所以绿，是因为它们绕过了
+    orchestrator drive_loop，直接戳 handler/bus 层。
+
+    重现证据（修复后断言会通过；当前断言会失败 → xfail 捕获）：
+      - wait_completed.interrupted 为 False（应 True）；
+      - wait_completed.elapsed_seconds ≈ 2s（应 << 2s，证明没被打断）。
+
+    修复方向（架构变更，留给 orchestrator owner，不在本测试审计范围）：
+    ``Orchestrator.request_interrupt`` 在登记 pending 的**同时**，若 ``interrupt_handler`` 已
+    start，立即调 ``bus.notify_all_waits()``（不等 node 边界）——让正在 sleep 的 wait 当场被打断。
+    node 边界的 ``_handle_interrupt`` 仍负责 emit requested/resolved + guidance 累积（控制流语义不变）。
+    """
+    from orca.gates.interrupt import InterruptHandler
+    from orca.gates.types import InterruptRequest
+    from orca.run.orchestrator import Orchestrator
+    from orca.schema import Route, ScriptNode, Workflow
+
+    tape = Tape(tmp_path / "events.jsonl", run_id="r1")
+    bus = EventBus(tape)
+    interrupt_handler = InterruptHandler(bus)
+    wf = Workflow(
+        name="wait_interrupt_e2e",
+        entry="w",
+        nodes=[
+            WaitNode(
+                name="w", duration="2s", interruptible=True,
+                reason="rate-limit backoff", routes=[Route(to="s")],
+            ),
+            ScriptNode(
+                name="s",
+                command='echo "interrupted={{ w.output.interrupted }}"',
+                routes=[Route(to="$end")],
+            ),
+        ],
+        outputs={"result": "{{ s.output.stdout }}"},
+    )
+
+    async def scenario():
+        await interrupt_handler.start()
+        try:
+            orch = Orchestrator(
+                wf, bus, inputs={}, run_id="r1", interrupt_handler=interrupt_handler,
+            )
+            run_task = asyncio.create_task(orch.run())
+            # 让 wait_started emit + register handle（asyncio 调度让出）。2s sleep 足够留余量。
+            await asyncio.sleep(0.15)
+            # 用户按 Ctrl+G + 选 CONTINUE（无 guidance）：
+            ireq = InterruptRequest(
+                id="i1", node="w", run_id="r1", session_id="sess-w",
+                elapsed_at_request=0.15,
+            )
+            orch.request_interrupt(ireq, answer=("continue", None))
+            state = await asyncio.wait_for(run_task, timeout=5.0)
+            return state
+        finally:
+            await interrupt_handler.stop()
+            bus.close()
+
+    state = _run(scenario())
+
+    # 终态 completed（CONTINUE 不中止 workflow）——这条在 bug 下也成立（wait 睡满后仍 continue）
+    assert state.status == "completed"
+    types = [e.type for e in tape.replay()]
+
+    # interrupt 配对落 tape（即使在 bug 下，requested/resolved 也在 wait 完成后的 node 边界 emit）
+    assert types.count("interrupt_requested") == 1
+    assert types.count("interrupt_resolved") == 1
+
+    # ── 这两条断言在当前 bug 下失败（wait 没被打断）→ xfail 捕获 ──
+    wait_done = next(e for e in tape.replay() if e.type == "wait_completed")
+    # BUG 重现点 1：interrupted 应 True，实际 False
+    assert wait_done.data["interrupted"] is True, (
+        f"KNOWN BUG 重现：wait 应被 Ctrl+G 打断（interrupted=True），实际 False。"
+        f" elapsed={wait_done.data['elapsed_seconds']}"
+    )
+    # BUG 重现点 2：elapsed 应远小于额定 2s（证明被 notify 提前唤醒）
+    assert wait_done.data["elapsed_seconds"] < 1.5, (
+        f"KNOWN BUG 重现：wait 应被提前打断（elapsed << 2s），实际睡满 "
+        f"{wait_done.data['elapsed_seconds']}s"
+    )
+
+
+def test_e2e_wait_started_emits_reason_on_tape(tmp_path):
+    """wait_started.data.reason 落 tape（SPEC §9.7.3 payload 契约：含 reason 字段）。
+
+    INTENT：现有测试只断言 duration_seconds，未守护 reason 字段。reason 是写 tape 给人读
+    的「为什么等」说明（SPEC §9.7.2 reason 字段 docstring）。若实现漏 emit reason，
+    LogStream / replay 看不到等待理由——可观测性退化。本测试锁定 reason 透传。
+    """
+    from orca.run.orchestrator import Orchestrator
+    from orca.schema import Route, ScriptNode, Workflow
+
+    tape = Tape(tmp_path / "events.jsonl", run_id="r1")
+    bus = EventBus(tape)
+    wf = Workflow(
+        name="wait_reason",
+        entry="w",
+        nodes=[
+            WaitNode(
+                name="w", duration="0.05s", reason="等 API rate-limit 恢复",
+                routes=[Route(to="s")],
+            ),
+            ScriptNode(name="s", command="echo ok", routes=[Route(to="$end")]),
+        ],
+        outputs={},
+    )
+    orch = Orchestrator(wf, bus)
+    _run(orch.run())
+    bus.close()
+
+    started = next(e for e in tape.replay() if e.type == "wait_started")
+    assert started.data["reason"] == "等 API rate-limit 恢复"
+    # duration_seconds 同时在场（不互相挤掉）
+    assert started.data["duration_seconds"] == pytest.approx(0.05)
+
+
+def test_wait_handle_does_not_leak_across_two_consecutive_runs(tmp_path):
+    """两 run 顺序跑（共享 bus）→ run-A 的 wait handle 在 wait 完成后注销干净，
+    run-B 跑前 notify_all_waits 返 0（无残留 handle 唤醒死协程）。
+
+    INTENT（防泄漏不变量，镜像 ask_user 的 test_orchestrator_unregisters_run_sessions_..._no_leak）：
+    WaitExecutor 在 finally 里 unregister_wait_handle。若该注销漏了（如异常路径未走 finally、
+    或 bus 的 wait_handles 集合清理逻辑误改），handle 会跨 run 累积 → 一个 stale handle
+    被 notify_all_waits 唤醒后指向已结束的协程（"Task was destroyed but pending" 警告 +
+    潜在 use-after-free）。本测试跑两个 run（各一个 interruptible wait），每跑完断言
+    notify_all_waits 返 0。
+    """
+    from orca.run.orchestrator import Orchestrator
+    from orca.schema import Route, ScriptNode, Workflow
+
+    def _wf(label: str) -> Workflow:
+        return Workflow(
+            name=f"leak_{label}",
+            entry="w",
+            nodes=[
+                WaitNode(name="w", duration="0.05s", interruptible=True, routes=[Route(to="s")]),
+                ScriptNode(name="s", command="echo ok", routes=[Route(to="$end")]),
+            ],
+            outputs={},
+        )
+
+    # run-A
+    tape_a = Tape(tmp_path / "runA.jsonl", run_id="rA")
+    bus_a = EventBus(tape_a)
+    orch_a = Orchestrator(_wf("A"), bus_a, run_id="rA")
+    state_a = _run(orch_a.run())
+    # run-A 完成：wait handle 应已注销（finally），bus.notify_all_waits 返 0
+    assert state_a.status == "completed"
+    assert bus_a.notify_all_waits() == 0, "run-A wait handle 未注销干净（泄漏）"
+    bus_a.close()
+
+    # run-B（独立 bus，模拟 daemon 长跑多 run；同样应无残留）
+    tape_b = Tape(tmp_path / "runB.jsonl", run_id="rB")
+    bus_b = EventBus(tape_b)
+    orch_b = Orchestrator(_wf("B"), bus_b, run_id="rB")
+    state_b = _run(orch_b.run())
+    assert state_b.status == "completed"
+    assert bus_b.notify_all_waits() == 0, "run-B wait handle 未注销干净（泄漏）"
+    bus_b.close()
+
+
+def test_wait_handle_unregisters_even_when_interrupted(tmp_path):
+    """interruptible wait 被打断后 handle 也注销（异常/打断路径走 finally，不泄漏）。
+
+    INTENT：test_wait_handle_does_not_leak_across_two_consecutive_runs 只覆盖正常完成。
+    打断路径是 Ctrl+G 的高频场景——若 unregister 只在 try 块尾（非 finally），打断时会漏注销。
+    本测试显式打断一个 wait，断言打断后 notify_all_waits 返 0。
+    """
+    bus = _bus(tmp_path)
+    try:
+        node = WaitNode(name="w", duration="2s", interruptible=True)
+        executor = WaitExecutor(bus)
+
+        async def scenario():
+            task = asyncio.create_task(_collect(executor, node, _ctx()))
+            await asyncio.sleep(0.05)  # 进入 sleep + register handle
+            bus.notify_all_waits()      # 打断
+            return await task
+
+        _run(scenario())
+    finally:
+        pass
+    # 打断后 handle 必须已注销（finally 兜底）
+    assert bus.notify_all_waits() == 0, "被打断的 wait handle 未注销（打断路径泄漏）"
+    bus.close()

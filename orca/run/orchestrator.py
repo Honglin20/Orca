@@ -191,6 +191,14 @@ class Orchestrator:
 
         ``answer=None``（多壳路径，phase 11 web/mcp，本 step 不启用）：``_handle_interrupt``
         退化为 ``await handler.request(ireq)`` 等任一壳 resolve。
+
+        **调用方线程/循环契约**：本方法是同步（``def``，非 ``async def``），必须在
+        orchestrator 的事件循环线程上调用——与 wait node 注册 wait handle 的 loop 同源，
+        这样 ``bus.notify_all_waits`` 里的 ``asyncio.Event.set`` 才不会跨线程（bus 的
+        ``_wait_handles_lock`` 只保护 handle 集合 snapshot，不保证 ``Event.set`` 跨线程安全，
+        见 ``orca/events/bus.py::notify_all_waits`` docstring）。CLI 单壳路径天然满足
+        （Textual action 在 app loop 线程派发）；未来 daemon ``--background``（P3.2）若引入
+        跨线程触发，需经 ``loop.call_soon_threadsafe`` 桥接。
         """
         if self._interrupt_handler is None:
             logger.warning(
@@ -201,6 +209,28 @@ class Orchestrator:
             return
         self._interrupt_pending = ireq
         self._interrupt_answer = answer
+        # phase 11 §9.7.6：**立即**唤醒任何正在 interruptible sleep 的 wait node。
+        # 这是「Ctrl+G 打断 wait node」e2e 修复的关键——``_handle_interrupt`` 在 node 边界
+        # 触发（``_drive_loop`` 顶部），但 wait node 在 ``asyncio.sleep`` 期间 ``_drive_loop``
+        # 阻塞在 ``_dispatch`` 内，永远到不了 node 边界 → 只在 ``record_resolved`` 里调
+        # ``notify_all_waits`` 对「Ctrl+G 打断正在 sleep 的 wait」是死代码（wait 睡满才
+        # 走到边界，notify 已无意义）。此处登记 pending 的**同时**即时 notify，让正在 sleep
+        # 的 wait 当场被 ``asyncio.Event.set`` 唤醒（``wait_completed.interrupted=True``）。
+        #
+        # 职责划分（Rule 7 裁定，保留 ``record_resolved`` 里的同一调用，defense-in-depth）：
+        #   - 这里：**即时副作用**（唤醒 sleeping wait）—— 与「登记 pending」同一时刻，纯「unblock」。
+        #   - ``record_resolved`` / ``resolve``（node 边界，unchanged）：控制流消费
+        #     （emit requested/resolved + SIGINT + guidance 累积 + continue/skip/abort）。
+        # 两者都保留：``record_resolved`` 覆盖多壳 resolve 路径（不经 ``request_interrupt``，
+        # 直接 ``handler.resolve``），以及「resolve 期间又登记了新 wait」的二次唤醒场景。
+        # ``notify_all_waits`` 幂等（无 handle 返 0），重复调无害。线程安全由 bus 的
+        # ``_wait_handles_lock`` 保证；``request_interrupt`` 在 CLI action 的 loop 线程上调，
+        # 与 wait node 注册 handle 的 loop 同源，无跨线程 ``asyncio.Event.set`` 问题。
+        woken = self.bus.notify_all_waits()
+        if woken:
+            logger.info(
+                "request_interrupt %s 即时唤醒 %d 个 wait node", ireq.id, woken
+            )
 
     async def run(self) -> RunState:
         """跑完整个 workflow，返回 replay_state(tape)（tape 派生的 RunState）。"""

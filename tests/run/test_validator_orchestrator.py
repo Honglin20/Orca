@@ -577,3 +577,66 @@ def test_validator_multi_failure_guidance_accumulates(tmp_path, monkeypatch):
     all_guidance = " ".join(fake.ctx_guidance_history[2])
     assert "issue-1" in all_guidance
     assert "issue-2" in all_guidance
+
+
+# ── 9. validator fail-safe 端到端可观测（SPEC §9.6.6）──────────────────────────
+
+
+def test_validator_llm_crash_fail_safe_continues_workflow_e2e(tmp_path, monkeypatch):
+    """validator LLM 自身崩（spawn 抛异常）→ fail-safe 当作 passed → workflow 继续 + completed。
+
+    INTENT（SPEC §9.6.6 可观测端到端，非仅单元）：``validate_output`` 单元测试
+    （tests/exec/test_validator.py::test_validate_output_*_fail_safe）已断言函数返回 (True, [])。
+    但**没有**测试证明 orchestrator 的 ``_dispatch_with_validator`` loop 在 validator 「假装崩」时
+    真的让 workflow 继续到 completed（而非卡住 / raise / workflow_failed）。本测试用真实
+    ``validate_output``（不 monkeypatch 返回值），仅 monkeypatch ``CLIRunner`` 让它抛异常，
+    驱动整个 loop：agent 产出 → validator_started → validator spawn 崩 → fail-safe →
+    validator_passed → node_completed → workflow_completed。
+
+    这是 fail-safe 契约的端到端证据（不阻塞 workflow）—— 单元返回值 (True,[]) 不足以证明
+    orchestrator loop 真的据此继续。
+    """
+    from orca.run.orchestrator import Orchestrator
+    from orca.exec import validator as validator_mod
+
+    wf = _load_wf_with_validator(tmp_path, max_retries=1)
+    tape = Tape(tmp_path / "e.jsonl", run_id="r1")
+    bus = EventBus(tape)
+    fake = _ScriptedExecutor([_complete({"model_class": "SimpleNet"}, node_name="agent")])
+    _patch_make_executor(monkeypatch, fake)
+
+    # 让真 validate_output 内部的 CLIRunner 在 stream() 抛异常（模拟 validator claude
+    # binary 不存在 / subprocess 启动失败）。注意：真 CLIRunner.__init__ 不 spawn（只存
+    # cfg），spawn 在 stream() 内 create_subprocess_exec —— 那才是 fail-safe try/except
+    # 覆盖的真实失败点。本 factory 在 stream() 抛，复刻真实路径。
+    class _CrashingRunner:
+        def __init__(self, cfg, on_result=None):
+            self.exit_code = 127
+            self.stderr = "[Errno 2] No such file: claude"
+            self.timed_out = False
+            self.was_interrupted = False
+            self.elapsed = 0.0
+
+        async def stream(self):
+            raise FileNotFoundError("[Errno 2] No such file: claude")
+            yield  # noqa: unreachable —— 让 stream 是 async generator
+
+    monkeypatch.setattr(validator_mod, "CLIRunner", _CrashingRunner)
+
+    orch = Orchestrator(wf, bus, inputs={}, run_id="r1")
+    state = run_async(orch.run())
+
+    # fail-safe → workflow 继续（不阻塞）
+    assert state.status == "completed", (
+        f"validator LLM 崩应 fail-safe 让 workflow 继续，实际 status={state.status}"
+    )
+    types = _tape_types(tape)
+    # validator_started emit 了（loop 进入校验）
+    assert types.count("validator_started") == 1
+    # fail-safe 路径 emit validator_passed（passed=True 归一化）—— 不 emit validator_failed
+    assert types.count("validator_passed") == 1
+    assert types.count("validator_failed") == 0, (
+        "validator LLM 自身崩应 fail-safe（passed），不应 emit validator_failed"
+    )
+    # agent 的 output 被 workflow 接受（不因 validator 崩而丢）
+    assert state.context["agent"] == {"model_class": "SimpleNet"}

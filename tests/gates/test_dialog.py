@@ -336,3 +336,155 @@ def test_with_dialog_turn_empty_text_noop(ctx):
     """空 / 全空白 text 不追加（防 dialog_history 留空轮次）。"""
     assert ctx.with_dialog_turn("user", "", 1) is ctx  # 返回原实例
     assert ctx.with_dialog_turn("user", "   ", 1) is ctx
+
+
+# ── 8. 3 轮历史累积（防 off-by-one 漂移）────────────────────────────────────
+
+
+def test_send_turn_three_turns_full_history_replayed(monkeypatch, handler, ctx):
+    """3 轮 send_turn → 第 3 轮 spawn 的 prompt 含**全部**前 2 轮的 user + agent 文本，按序。
+
+    INTENT（SPEC §6.2 核心契约的更强守护）：``test_send_turn_accumulates_history`` 只测 2 轮
+    （第 2 轮 prompt 含第 1 轮）。但「累积」逻辑若是 off-by-one（如 ``history[:-1]`` 误切成
+    ``history[1:]``、或循环上界写错），2 轮场景可能侥幸通过而 3 轮暴露。本测试 3 轮，断言：
+      - 第 3 轮 prompt 含 turn-1 user + turn-1 agent + turn-2 user + turn-2 agent（全历史）；
+      - 且按时间序出现（turn-1 内容在 turn-2 内容之前，防顺序错乱）。
+    """
+    factory = FakeRunnerFactory(reply_provider=lambda turn: f"reply {turn}")
+    monkeypatch.setattr("orca.gates.dialog.CLIRunner", factory)
+
+    dialog_id = run_async(handler.start_dialog("n", {"out": 1}, ctx))
+    run_async(handler.send_turn(dialog_id, "问题一", ctx))
+    run_async(handler.send_turn(dialog_id, "问题二", ctx))
+    run_async(handler.send_turn(dialog_id, "问题三", ctx))
+
+    assert len(factory.prompts) == 3
+    third_prompt = factory.prompts[2]
+
+    # 第 3 轮 prompt 必须含全部前两轮的 user + agent 文本
+    assert "问题一" in third_prompt       # turn-1 user
+    assert "reply 1" in third_prompt      # turn-1 agent
+    assert "问题二" in third_prompt       # turn-2 user
+    assert "reply 2" in third_prompt      # turn-2 agent
+    assert "问题三" in third_prompt       # 本轮 user（turn-3）
+    # 本轮 agent reply 还未产生（reply 3 是本轮的输出，不该在 prompt 里）
+    assert "reply 3" not in third_prompt
+
+    # 顺序守护：turn-1 内容出现在 turn-2 内容之前（防历史顺序错乱）
+    assert third_prompt.index("问题一") < third_prompt.index("问题二"), (
+        "历史应按时间序回放：turn-1 必须在 turn-2 之前"
+    )
+
+
+# ── 9. dialog 事件序列不变量（SPEC §6 事件契约）──────────────────────────────
+
+
+def test_dialog_event_ordering_contract_on_tape(monkeypatch, handler, bus, ctx, tmp_path):
+    """完整一轮 dialog 的 tape 事件序列满足 SPEC §6 不变量：
+      - dialog_started 恰好 1 次，且在所有 dialog_message 之前；
+      - dialog_message 严格 user/agent 交替，每组以 user 开头；
+      - turn 号单调递增（1,1,2,2,...），同组 user/agent 共享 turn；
+      - dialog_ended 恰好 1 次，在所有 message 之后。
+
+    INTENT：单测覆盖了「单轮 send_turn 发 user+agent 两条」（test_send_turn_emits_user_then_agent_messages），
+    但未守护**多轮**的事件序列不变量。若 turn 计数非单调、或 message 顺序错乱（如 agent 先于
+    user）、或 dialog_started 漏发/重发，用户从 tape replay 看到的对话会断裂。本测试驱动
+    2 轮 send_turn，断言完整序列契约。
+    """
+    factory = FakeRunnerFactory(reply_provider=lambda turn: f"a{turn}")
+    monkeypatch.setattr("orca.gates.dialog.CLIRunner", factory)
+
+    dialog_id = run_async(handler.start_dialog("cfg", {"k": "v"}, ctx))
+    run_async(handler.send_turn(dialog_id, "q1", ctx))
+    run_async(handler.send_turn(dialog_id, "q2", ctx))
+    run_async(handler.end_dialog(dialog_id, ctx))
+
+    events = _read_tape(tmp_path)
+    types = [e["type"] for e in events]
+
+    # dialog_started 恰 1 次，且是第一个 dialog_* 事件
+    assert types.count("dialog_started") == 1
+    first_dialog_idx = next(i for i, t in enumerate(types) if t.startswith("dialog_"))
+    assert types[first_dialog_idx] == "dialog_started"
+
+    # dialog_ended 恰 1 次，且是最后一个 dialog_* 事件
+    assert types.count("dialog_ended") == 1
+    last_dialog_idx = max(i for i, t in enumerate(types) if t.startswith("dialog_"))
+    assert types[last_dialog_idx] == "dialog_ended"
+
+    # message 序列：严格 user/agent 交替，user 开头，turn 单调
+    messages = [e for e in events if e["type"] == "dialog_message"]
+    assert len(messages) == 4  # 2 轮 × (user + agent)
+    expected_roles = ["user", "agent", "user", "agent"]
+    expected_turns = [1, 1, 2, 2]
+    for i, (msg, exp_role, exp_turn) in enumerate(zip(messages, expected_roles, expected_turns)):
+        assert msg["data"]["role"] == exp_role, (
+            f"message[{i}] role 应为 {exp_role}，实际 {msg['data']['role']}"
+        )
+        assert msg["data"]["turn"] == exp_turn, (
+            f"message[{i}] turn 应为 {exp_turn}，实际 {msg['data']['turn']}"
+        )
+    # turn 单调递增（按 user 消息的 turn 序列）
+    user_turns = [m["data"]["turn"] for m in messages if m["data"]["role"] == "user"]
+    assert user_turns == sorted(set(user_turns)), "turn 应单调递增"
+
+
+# ── 10. end_dialog 无轮次（total_turns:0 干净退出）────────────────────────────
+
+
+def test_end_dialog_without_any_turn_emits_zero_turns(monkeypatch, handler, bus, ctx, tmp_path):
+    """start_dialog → 立即 end_dialog（无 send_turn）→ dialog_ended{total_turns:0}，无 phantom message。
+
+    INTENT：用户打开 dialog 后立刻关掉（看了一眼 agent output 就结束）是合法路径。本测试守护：
+      - 不崩（start/end 都是合法调用）；
+      - dialog_ended.total_turns == 0（无 phantom turn 被记）；
+      - tape 无任何 dialog_message 事件（没发过 turn）。
+    若 end_dialog 误把「未 send 过」当「第 0 轮」记一条 phantom message，或 turn_count 初值错，
+    此测试会失败。
+    """
+    factory = FakeRunnerFactory(reply_provider=lambda turn: "x")
+    monkeypatch.setattr("orca.gates.dialog.CLIRunner", factory)
+
+    dialog_id = run_async(handler.start_dialog("n", {"o": 1}, ctx))
+    run_async(handler.end_dialog(dialog_id, ctx))
+
+    events = _read_tape(tmp_path)
+    ended = [e for e in events if e["type"] == "dialog_ended"]
+    assert len(ended) == 1
+    assert ended[0]["data"]["total_turns"] == 0
+    # 无任何 dialog_message（没发过 turn）
+    messages = [e for e in events if e["type"] == "dialog_message"]
+    assert messages == [], f"无 send_turn 却出现 dialog_message：{messages}"
+
+
+# ── 11. dialog_message 文本保真（含边界字符，无截断/转义破坏）─────────────────
+
+
+def test_dialog_message_text_fidelity_with_edge_characters(monkeypatch, handler, bus, ctx, tmp_path):
+    """agent reply 含特殊字符（引号 / 换行 / Unicode / 大括号）→ tape 上的 dialog_message.text
+    与 send_turn 返回值**逐字一致**（无截断、无 JSON 转义破坏、无大括号被 prompt 模板吞）。
+
+    INTENT：``_build_dialog_prompt`` 用 ``str.replace`` 注入历史文本，``{agent_output}`` /
+    ``{history}`` / ``{user_text}`` 占位。若 reply 文本含 ``{`` ``}``，且注入顺序有 bug（如先
+    replace user_text 再 replace agent_output，reply 里的 ``{agent_output}`` 会被二次替换），
+    文本会被污染。本测试用含 ``{}`` / 引号 / 换行 / emoji 的 reply，断言 tape.text == 返回值。
+    """
+    tricky_reply = '含 "引号" 和 {大括号} 以及\n换行 + emoji 🎉 and {user_text}'
+    factory = FakeRunnerFactory(reply_provider=lambda turn: tricky_reply)
+    monkeypatch.setattr("orca.gates.dialog.CLIRunner", factory)
+
+    dialog_id = run_async(handler.start_dialog("n", {"o": 1}, ctx))
+    returned = run_async(handler.send_turn(dialog_id, "问一个边界问题", ctx))
+
+    # 返回值与预设一致
+    assert returned == tricky_reply
+    # tape 上的 agent message.text 与返回值逐字一致（无截断/污染）
+    events = _read_tape(tmp_path)
+    agent_msgs = [
+        e for e in events
+        if e["type"] == "dialog_message" and e["data"]["role"] == "agent"
+    ]
+    assert len(agent_msgs) == 1
+    assert agent_msgs[0]["data"]["text"] == tricky_reply, (
+        "agent reply 在 tape 上被截断或污染（应与返回值逐字一致）"
+    )
