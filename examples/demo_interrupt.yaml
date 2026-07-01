@@ -1,0 +1,20 @@
+name: demo_interrupt
+description: |
+  phase 11 §3 中断 UI + Guidance 注入演示。单 agent node（可被 Ctrl+G 中断 + CONTINUE 带 guidance 重跑）。
+  真实 E2E：`orca run examples/demo_interrupt.yaml`，跑到 agent 时按 Ctrl+G → 输入纠偏话 + CONTINUE →
+  验证重 spawn 的 prompt 末尾含 [User Guidance] 段、tape 含 interrupt_requested/interrupt_resolved 配对。
+  需 claude CLI + ANTHROPIC_API_KEY（agent node 调真 claude）。
+entry: worker
+inputs:
+  task:
+    type: string
+    description: "给 agent 的任务（演示用，可被 Ctrl+G 中断 + guidance 纠偏）"
+    default: "用一句话介绍 Orca 框架的单 Tape 唯一真相源设计"
+nodes:
+  - name: worker
+    kind: agent
+    prompt: "{{ inputs.task }}"
+    routes:
+      - to: $end
+outputs:
+  answer: "{{ worker.output }}"

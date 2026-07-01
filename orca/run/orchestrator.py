@@ -83,6 +83,9 @@ class Orchestrator:
         # 既有测试不受影响，向后兼容）。注入后 CLI 层经 ``request_interrupt`` 登记 pending。
         self._interrupt_handler = interrupt_handler
         self._interrupt_pending: InterruptRequest | None = None
+        # phase 11 §3.1：CLI 单壳路径下用户已答完的 (action, guidance)，随 request_interrupt 带入。
+        # node 边界 _handle_interrupt 直接消费它（不经 handler.request 的 await-future）。
+        self._interrupt_answer: tuple[str, str | None] | None = None
         # task 注入 inputs.task（SPEC §5：位置参数 task = -i task="..." 语法糖）
         merged_inputs = dict(inputs or {})
         if task is not None:
@@ -131,7 +134,11 @@ class Orchestrator:
 
     # ── phase 11：中断公开通道（SPEC §2.3）──────────────────────────────────
 
-    def request_interrupt(self, ireq: InterruptRequest) -> None:
+    def request_interrupt(
+        self,
+        ireq: InterruptRequest,
+        answer: tuple[str, str | None] | None = None,
+    ) -> None:
         """CLI 层（InterruptModal dismiss 后）调此方法登记一次中断请求。
 
         幂等：重复登记同一 run 仅保留最新一条（node 边界只消费一次）。
@@ -139,6 +146,15 @@ class Orchestrator:
 
         SPEC §2.3 测试 A 修正：CLI 层经此**公开方法**设置 pending，**不**经任何
         ``_orchestrator_proxy``、**不**直接 mutate 私有属性。
+
+        ``answer``（CLI 单壳路径，phase 11 §3.1）：用户在 InterruptModal 里已答完，
+        ``(action, guidance)`` 随请求一起带上。node 边界 ``_handle_interrupt`` 直接消费它，
+        **不**走 ``handler.request`` 的 await-future 机制（那是多壳竞速用，CLI 单壳不需要；
+        且 await-future 要求 resolve 在 request 之后，但 CLI 的 resolve（modal dismiss）
+        发生在 node 边界**之前**——时序不匹配，强行 await 会死锁）。
+
+        ``answer=None``（多壳路径，phase 11 web/mcp，本 step 不启用）：``_handle_interrupt``
+        退化为 ``await handler.request(ireq)`` 等任一壳 resolve。
         """
         if self._interrupt_handler is None:
             logger.warning(
@@ -148,6 +164,7 @@ class Orchestrator:
             )
             return
         self._interrupt_pending = ireq
+        self._interrupt_answer = answer
 
     async def run(self) -> RunState:
         """跑完整个 workflow，返回 replay_state(tape)（tape 派生的 RunState）。"""
@@ -229,22 +246,34 @@ class Orchestrator:
     async def _handle_interrupt(
         self, current: str, outputs_acc: dict[str, Any]
     ) -> str:
-        """消费 ``_interrupt_pending`` → SIGINT 当前 runner（若有）→ 等用户答。
+        """消费 ``_interrupt_pending`` → 拿用户答 ``(action, guidance)`` → 累积 guidance。
 
-        SPEC §2.3 / §3.3 / §4.1。返回 action（``"continue"``/``"skip"``/``"abort"``）。
+        SPEC §2.3 / §3.1 / §3.3 / §4.1。返回 action（``"continue"``/``"skip"``/``"abort"``）。
         continue 分支把 guidance 累积进 ``self._guidance_acc``（_make_ctx 注入 ctx）。
-        emit ``interrupt_resolved`` 由 ``InterruptHandler._broadcaster`` 负责（广播给三壳）。
 
-        ``_handle_interrupt`` 自身**不** emit interrupt_* 事件——``request`` 先 emit
-        ``interrupt_requested``，``_emit_resolved`` 异步 emit ``interrupt_resolved``，
-        本方法只在中间做 SIGINT + guidance 累积（单一职责，不与 handler 的 emit 逻辑耦合）。
+        两条取答路径（SPEC §3.1 时序）：
+          - **CLI 单壳**（``_interrupt_answer`` 非 None）：用户在 InterruptModal 答完随
+            ``request_interrupt`` 带入。调 ``handler.record_resolved`` emit requested + 入队
+            resolved（broadcaster 写 Tape）。**不经 await-future**——modal dismiss 在 node 边界
+            之前，await-future 会死锁（review §2.1 critical bug 的修复）。
+          - **多壳**（``_interrupt_answer`` None）：``await handler.request(ireq)`` 等任一壳 resolve
+            （web/mcp，phase 11 本 step 不启用，留接口）。
         """
         assert self._interrupt_handler is not None  # _drive_loop 调用前保证
         ireq = self._interrupt_pending
         assert ireq is not None  # _drive_loop 调用前保证
-        self._interrupt_pending = None  # 消费掉
+        answer = self._interrupt_answer
+        # 消费 pending + answer（防内存泄漏 + 防二次消费）。
+        self._interrupt_pending = None
+        self._interrupt_answer = None
 
-        action, guidance = await self._interrupt_handler.request(ireq)
+        if answer is not None:
+            # CLI 单壳路径：用户已答，record_resolved emit requested + 入队 resolved 写 Tape。
+            action, guidance = answer
+            await self._interrupt_handler.record_resolved(ireq, action, guidance, ireq.source)
+        else:
+            # 多壳路径：await handler.request（emit requested + 等任一壳 resolve）。
+            action, guidance = await self._interrupt_handler.request(ireq)
 
         if action == "continue" and guidance:
             # 累积 guidance → _make_ctx 自动注入后续 ctx → render_prompt 拼 [User Guidance] 段
@@ -275,6 +304,10 @@ class Orchestrator:
 
         inputs / task / run_id 来自初始化（不可变），outputs 取当前累加快照（拷贝，避免
         frozen 实例持有可变引用）。
+
+        phase 11 §4：把累积的 ``_guidance_acc``（Ctrl+G + CONTINUE 时追加）注入 ctx，
+        render_prompt 拼 ``[User Guidance]`` 段（SPEC §10.3 修正 C3：走既有 _make_ctx，
+        不新增 with_outputs）。空 acc = 无 guidance（向后兼容）。
         """
         from orca.exec.context import RunContext
 
@@ -283,6 +316,7 @@ class Orchestrator:
             outputs=dict(outputs_acc),
             run_id=self.run_id,
             task=self.task,
+            user_guidance=tuple(self._guidance_acc),
         )
 
     async def _dispatch(self, current: str, ctx: RunContext) -> Any:

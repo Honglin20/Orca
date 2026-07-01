@@ -106,12 +106,26 @@ class CLIRunner:
         self._on_result = on_result
         self._result = CliRunResult()
         self._start_time: float | None = None
+        # phase 11 §4.2：当前子进程句柄（send_sigint 用）。stream() 期间赋值，结束清空。
+        self._proc: asyncio.subprocess.Process | None = None
+        # phase 11 §4.2：是否被用户 SIGINT 中断（send_sigint 置 True）。
+        # ClaudeExecutor 据此区分「用户主动中断」与「子进程崩」（前者不当 error）。
+        self._was_interrupted: bool = False
 
     # ── 对外属性（executor 判定用）────────────────────────────────────────────
 
     @property
     def timed_out(self) -> bool:
         return self._result.timed_out
+
+    @property
+    def was_interrupted(self) -> bool:
+        """是否被用户 SIGINT 中断（phase 11 §4.2）。
+
+        ``send_sigint`` 置 True；ClaudeExecutor 据此跳过 spawn 错误判定（用户主动中断
+        不是 transient error，retry 也应短路，SPEC §9.5.2）。
+        """
+        return self._was_interrupted
 
     @property
     def exit_code(self) -> int:
@@ -151,6 +165,8 @@ class CLIRunner:
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
+        # phase 11 §4.2：暴露 proc 句柄给 send_sigint（用户 Ctrl+G 中断用）。
+        self._proc = proc
 
         # stderr 累积 task（与 stdout readline 并行；超时/结束都收尾）。
         stderr_chunks: list[bytes] = []
@@ -336,3 +352,32 @@ class CLIRunner:
         self._result.stderr = stderr_bytes.decode("utf-8", errors="replace")
         if self._start_time is not None:
             self._result.elapsed = time.monotonic() - self._start_time
+        # phase 11 §4.2：清 proc 句柄（stream 结束，proc 不再可 SIGINT）。
+        # **不**复位 _was_interrupted：executor 在 stream() 返回后读此标志判定「用户中断 vs 崩」，
+        # 复位会丢信号。CLIRunner 是一次性使用（ClaudeExecutor.exec 每次 new），不复用——
+        # 见 send_sigint docstring 的 one-use 契约。
+        self._proc = None
+
+    # ── 用户中断（phase 11 §4.2）─────────────────────────────────────────────
+
+    def send_sigint(self) -> bool:
+        """向子进程发 SIGINT（用户 Ctrl+G + CONTINUE 触发中断时调）。
+
+        -p 路线：SIGINT 让 claude 优雅退出（写最后的 stream-json result 行后关闭）。
+        比 kill -9 友好（不丢失 buffered output）。executor 据 ``was_interrupted`` 把
+        非零退出码判为「用户中断」而非「子进程崩」（SPEC §4.2）。
+
+        返回是否真的发了信号（proc 存活时 True；已退出 / 未启动时 False，幂等）。
+        线程安全：从 TUI loop 调，proc.send_signal 是同步 syscall（asyncio subprocess
+        的 Process 对象跨 loop 安全，底层是 OS pid）。
+        """
+        proc = self._proc
+        if proc is None or proc.returncode is not None:
+            return False  # 未启动 / 已退出
+        self._was_interrupted = True
+        try:
+            proc.send_signal(signal.SIGINT)
+        except ProcessLookupError:
+            # 极端 race：刚检查存活，发信号前已退出 → 幂等返回 False。
+            return False
+        return True

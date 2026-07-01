@@ -91,6 +91,14 @@ class ClaudeExecutor(Executor):
             # 3. 渲染 prompt（render_prompt：内联或 agents/<name>.md，Jinja2 ctx）
             prompt = render_prompt(node, ctx)
 
+            # phase 11 §2.2 / §10.2 item3 B5：spawn 前发 prompt_rendered 让 guidance 注入
+            # 可观测（preview=末尾 ~200 字符，含 [User Guidance] 段时直观可见）。
+            yield _ev("prompt_rendered", {
+                "node": node.name,
+                "session_id": session_id,
+                "preview": prompt[-200:],
+            })
+
             # 4. 构造 spawn config（argv 动态拼 + env overlay）
             cfg = _build_spawn_config(node, self.profile, prompt)
 
@@ -116,6 +124,19 @@ class ClaudeExecutor(Executor):
                     # 富化（SPEC §4.2「所有事件顶层带 node + session_id」）。translator 不知
                     # node 名（纯函数无 ctx），故此处补 node=node.name。
                     yield ev.model_copy(update={"node": node.name})
+
+            # phase 11 §4.2：用户 SIGINT 中断优先判定（在 timed_out / exit_code 之前）。
+            # was_interrupted=True 表示用户 Ctrl+G 主动中断（非子进程崩）→ 不当 error：
+            # emit node_failed{was_interrupted:true} 让 orchestrator 在 node 边界决定
+            # continue/skip/abort，retry 也据此短路（SPEC §9.5.2 error_type 对齐表）。
+            if runner.was_interrupted:
+                yield _ev("node_failed", {
+                    "error_type": "Interrupted",
+                    "message": "claude 子进程被用户 SIGINT 中断（Ctrl+G）",
+                    "phase": "interrupted",
+                    "was_interrupted": True,
+                })
+                return
 
             # 8. 有序互斥判定（SPEC §2.4）：timed_out → exit_code → is_error → no_result
             if runner.timed_out:

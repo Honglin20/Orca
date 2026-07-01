@@ -124,6 +124,88 @@ def test_render_template_resolves_locals_item():
     assert render_template("process {{ item }}", ctx) == "process apple"
 
 
+# ── phase 11 §4：guidance section 拼接 ──────────────────────────────────────
+
+
+def test_render_prompt_appends_guidance_section():
+    """ctx 含 user_guidance → 渲染后 prompt 末尾有 [User Guidance] 段 + 每条 guidance。"""
+    ctx = RunContext(
+        inputs={}, outputs={}, run_id="r1",
+        user_guidance=("用更保守的方案", "省 token"),
+    )
+    node = AgentNode(name="x", prompt="任务 X")
+    rendered = render_prompt(node, ctx)
+    assert rendered.startswith("任务 X")
+    assert "[User Guidance]" in rendered
+    assert "- 用更保守的方案" in rendered
+    assert "- 省 token" in rendered
+    assert "Incorporate this guidance" in rendered
+
+
+def test_render_prompt_empty_guidance_no_section():
+    """ctx 无 guidance（空 tuple）→ 渲染后无 [User Guidance] 段（向后兼容）。"""
+    ctx = RunContext(inputs={}, outputs={}, run_id="r1")  # user_guidance 默认 ()
+    node = AgentNode(name="x", prompt="任务 X")
+    rendered = render_prompt(node, ctx)
+    assert rendered == "任务 X"
+    assert "[User Guidance]" not in rendered
+
+
+def test_render_prompt_single_guidance():
+    """单条 guidance 也正确拼接。"""
+    ctx = RunContext(inputs={}, outputs={}, run_id="r1", user_guidance=("only one",))
+    node = AgentNode(name="x", prompt="do thing")
+    rendered = render_prompt(node, ctx)
+    assert "[User Guidance]" in rendered
+    assert "- only one" in rendered
+
+
+def test_guidance_prompt_section_format_exact():
+    """guidance_prompt_section 逐字对齐 Conductor（SPEC §4.1 / §1.2 实证）。"""
+    ctx = RunContext(
+        inputs={}, outputs={}, run_id="r1",
+        user_guidance=("g1", "g2"),
+    )
+    section = ctx.guidance_prompt_section()
+    assert section == (
+        "\n\n[User Guidance]\n"
+        "The following guidance was provided by the user during workflow execution. "
+        "Incorporate this guidance into your response:\n"
+        "- g1\n- g2"
+    )
+
+
+def test_guidance_prompt_section_none_when_empty():
+    """无 guidance → guidance_prompt_section 返回 None。"""
+    ctx = RunContext(inputs={}, outputs={}, run_id="r1")
+    assert ctx.guidance_prompt_section() is None
+
+
+def test_context_with_guidance_immutable():
+    """with_guidance 返回新 frozen 实例，原 ctx 不变（frozen 语义，SPEC §4.1）。"""
+    ctx = RunContext(inputs={}, outputs={}, run_id="r1")
+    new_ctx = ctx.with_guidance("用更保守的方案")
+    assert ctx.user_guidance == ()  # 原实例不变
+    assert new_ctx.user_guidance == ("用更保守的方案",)
+    assert new_ctx is not ctx
+
+
+def test_context_with_guidance_accumulates():
+    """多次 with_guidance 累积（不覆盖）。"""
+    ctx = RunContext(inputs={}, outputs={}, run_id="r1")
+    ctx = ctx.with_guidance("g1").with_guidance("g2")
+    assert ctx.user_guidance == ("g1", "g2")
+
+
+def test_context_with_guidance_empty_ignored():
+    """空 / 全空白 guidance 不累积（防 prompt 末尾空 guidance 段）。"""
+    ctx = RunContext(inputs={}, outputs={}, run_id="r1")
+    assert ctx.with_guidance("").user_guidance == ()
+    assert ctx.with_guidance("   ").user_guidance == ()
+    assert ctx.with_guidance("real").user_guidance == ("real",)
+
+
+
 def test_render_template_resolves_locals_index():
     """{{ _index }} 取 ctx.locals['_index']（foreach 索引变量）。"""
     ctx = RunContext(inputs={}, outputs={}, run_id="r1", locals={"item": "x", "_index": 2})

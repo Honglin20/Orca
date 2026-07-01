@@ -87,11 +87,25 @@ def render_prompt(node, ctx: RunContext) -> str:
       文件不存在 → ``ExecError(phase="render")``（fail loud）
 
     agents/<name>.md 的内容经 Jinja2 渲染（支持 ``{{ inputs.x }}`` 引用）。
+
+    phase 11 §4：渲染完 base prompt 后，若 ``ctx.user_guidance`` 非空，拼 ``[User Guidance]``
+    段到末尾（``ctx.guidance_prompt_section()``）。这是用户 Ctrl+G + CONTINUE 注入纠偏话的
+    落地点——重 spawn 的 agent 看到 prompt 末尾的 guidance 段。无 guidance 时返回 base 原样。
     """
     if node.prompt is not None:
-        return render_template(node.prompt, ctx)
+        base = render_template(node.prompt, ctx)
+    else:
+        base = _load_agent_md(node, ctx)
 
-    # None → 约定加载 agents/<name>.md（cwd 相对路径，与 compile/ 的引用解析一致）
+    # phase 11 §4：拼 guidance section（无 guidance 时 section=None，原样返回）。
+    guidance_section = ctx.guidance_prompt_section()
+    if guidance_section:
+        return base + guidance_section
+    return base
+
+
+def _load_agent_md(node, ctx: RunContext) -> str:
+    """加载 agents/<node.name>.md 并 Jinja2 渲染（SPEC §4.6）。"""
     md_path = Path("agents") / f"{node.name}.md"
     if not md_path.is_file():
         raise ExecError(
@@ -109,3 +123,4 @@ def render_prompt(node, ctx: RunContext) -> str:
             message=f"读取 agent prompt 文件 {md_path} 失败：{e}",
         ) from e
     return render_template(md_text, ctx)
+

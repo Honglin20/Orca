@@ -628,15 +628,11 @@ class OrcaApp(App):
         modal = InterruptModal(ireq)
         action, guidance = await self.push_screen_wait(modal)
 
-        # 登记 pending（orchestrator 在 node 边界消费）+ resolve（喂给 handler，
-        # 编排 _handle_interrupt await 的 future 立即解除阻塞）。
-        orch.request_interrupt(ireq)
-        ok = self.interrupt_handler.resolve(ireq.id, action, guidance, "cli")
-        if not ok:
-            logger.warning(
-                "interrupt %s CLI 答案 (%s) 被 reject（已被别壳答？），fail loud",
-                ireq.id, action,
-            )
+        # CLI 单壳路径（SPEC §3.1 时序）：用户已在 modal 答完，把 (action, guidance) 随
+        # request_interrupt 一起带入。orchestrator 在 node 边界 _handle_interrupt 直接消费它
+        # （record_resolved emit requested + 入队 resolved 写 Tape），**不**调 handler.resolve
+        # ——resolve 是多壳竞速路径（await-future），CLI 单壳不需要且时序不匹配（review §2.1）。
+        orch.request_interrupt(ireq, answer=(action, guidance))
 
     # ── header 刷新（SPEC §4.4）─────────────────────────────────────────
 

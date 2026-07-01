@@ -128,6 +128,50 @@ class InterruptHandler(BroadcasterMixin):
         fut = self._pending.get(interrupt_id)
         return fut is not None and not fut.done()
 
+    async def record_resolved(
+        self,
+        ireq: InterruptRequest,
+        action: InterruptAction,
+        guidance: str | None,
+        source: InterruptSource,
+    ) -> None:
+        """CLI 单壳路径：用户已在 modal 答完，emit ``interrupt_requested`` + 入队让 broadcaster
+        emit ``interrupt_resolved``（写 Tape）。
+
+        与 ``request``/``resolve`` 的区别（SPEC §3.1 时序）：
+          - 多壳路径（web/mcp）：``request`` emit requested + await future；壳 ``resolve`` set_result
+            + 入队；broadcaster emit resolved。resolve 必须在 request 之后（future 先注册）。
+          - CLI 单壳路径（本方法）：用户在 InterruptModal 里答完，``action``/``guidance`` 已知，
+            Orchestrator ``_handle_interrupt`` 在 node 边界直接调本方法——不经 future 机制
+            （CLI 不需要竞速，且 modal dismiss 发生在 node 边界**之前**，时序不匹配 await-future）。
+
+        本方法 emit ``interrupt_requested``（写 Tape，三壳可见有人请求中断）+ 入队 resolved
+        payload（broadcaster 异步 emit ``interrupt_resolved`` 写 Tape）。两者都写 Tape，唯一真相源。
+        """
+        await self._bus.emit(
+            "interrupt_requested",
+            data={
+                "interrupt_id": ireq.id,
+                "node": ireq.node,
+                "run_id": ireq.run_id,
+                "session_id": ireq.session_id,
+                "elapsed_at_request": ireq.elapsed_at_request,
+                "source": ireq.source,
+            },
+            node=ireq.node,
+            session_id=ireq.session_id,
+        )
+        # 登记 meta（_emit_resolved 取 node/session_id 用）+ 入队让 broadcaster emit resolved。
+        async with self._lock:
+            self._interrupts_meta[ireq.id] = ireq
+        if self._resolved_queue is not None:
+            self._resolved_queue.put_nowait((ireq.id, action, guidance, source))
+        else:
+            logger.warning(
+                "interrupt %s record_resolved 但 broadcaster 未启动，resolved 事件未广播",
+                ireq.id,
+            )
+
     def resolve(
         self,
         interrupt_id: str,

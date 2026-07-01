@@ -42,6 +42,8 @@ class FakeRunner:
         self.timed_out = timed_out
         self.elapsed = elapsed
         self.stderr = stderr
+        # phase 11 §4.2：默认未被用户 SIGINT 中断。
+        self.was_interrupted = False
 
     async def stream(self) -> AsyncIterator[str]:
         for line in self._lines:

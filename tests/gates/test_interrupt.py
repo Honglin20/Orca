@@ -294,3 +294,62 @@ def test_has_pending(tmp_path):
             bus.close()
 
     run_async(scenario())
+
+
+# ── record_resolved（CLI 单壳路径，SPEC §3.1）───────────────────────────────
+
+
+def test_record_resolved_emits_requested_and_resolved_to_tape(tmp_path):
+    """CLI 单壳路径：record_resolved emit interrupt_requested + broadcaster emit
+    interrupt_resolved（两者都写 Tape）。不经 await-future（review §2.1 修复）。"""
+
+    async def scenario():
+        bus, _ = make_bus(tmp_path)
+        handler = InterruptHandler(bus)
+        await handler.start()
+        try:
+            ireq = make_ireq("i1", node="cfg", session_id="sess-x")
+            await handler.record_resolved(ireq, "continue", "skip weights", "cli")
+            await asyncio.sleep(0.05)  # 等 broadcaster emit resolved
+        finally:
+            await handler.stop()
+            bus.close()
+
+    run_async(scenario())
+    from orca.events.tape import Tape
+
+    events = list(Tape(tmp_path / "events.jsonl", run_id="r1").replay())
+    types = [e.type for e in events]
+    assert "interrupt_requested" in types
+    assert "interrupt_resolved" in types
+    requested = next(e for e in events if e.type == "interrupt_requested")
+    assert requested.data["interrupt_id"] == "i1"
+    assert requested.node == "cfg"
+    resolved = next(e for e in events if e.type == "interrupt_resolved")
+    assert resolved.data["action"] == "continue"
+    assert resolved.data["guidance"] == "skip weights"
+    assert resolved.data["resolved_by"] == "cli"
+
+
+def test_record_resolved_no_deadlock_without_future(tmp_path):
+    """record_resolved 不注册 future（不 await），故不依赖 resolve 时序——CLI 单壳安全。"""
+
+    async def scenario():
+        bus, _ = make_bus(tmp_path)
+        handler = InterruptHandler(bus)
+        await handler.start()
+        try:
+            # 注意：不调 handler.request（不注册 future），直接 record_resolved。
+            # 验证：不阻塞、不死锁、has_pending 始终 False（无 future）。
+            ireq = make_ireq("i1")
+            assert handler.has_pending("i1") is False
+            await asyncio.wait_for(
+                handler.record_resolved(ireq, "abort", None, "cli"), timeout=2.0,
+            )
+            assert handler.has_pending("i1") is False  # 无 future 注册
+        finally:
+            await handler.stop()
+            bus.close()
+
+    run_async(scenario())
+

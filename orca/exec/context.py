@@ -14,13 +14,19 @@
     同时注入 ``inputs.task``；保留此字段供 lifecycle 事件 / 日志引用（非必须，默认 None）。
   - ``locals``：foreach body 注入的局部变量（``{{ item }}`` / ``{{ _index }}``）。
     空 dict = 非 foreach 上下文；foreach 时由 orchestrator 经 ``with_locals`` 派生新实例。
+  - ``user_guidance``（phase 11 §4）：累积的用户纠偏话（Ctrl+G + CONTINUE 时追加）。
+    frozen → 用 tuple 累积（``with_guidance`` 派生新实例）；render_prompt 把它拼成
+    ``[User Guidance]`` 段附到 agent prompt 末尾。默认空 tuple = 无 guidance（向后兼容）。
+  - ``interrupt_history``（phase 11 §2.1）：历次中断记录（debug/replay 用，{node/action/
+    guidance/elapsed}）。本 step 字段先加，记录由 orchestrator 在 _handle_interrupt 写入。
 
 frozen：执行上下文是不可变快照（一个 node 执行期间上游输出不应变）；
-orchestrator 在 node 间构造新 RunContext（累加新输出）。
+orchestrator 在 node 间构造新 RunContext（累加新输出 / guidance）。
 """
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,6 +39,9 @@ class RunContext:
 
     ``locals`` 默认空 dict（普通 node 执行）；foreach body 经 ``with_locals`` 派生带
     item/index 的新实例，render 的 ``_namespace`` 把 locals 摊到 Jinja2 顶层。
+
+    ``user_guidance`` 默认空 tuple（无纠偏）；用户 Ctrl+G + CONTINUE 时 orchestrator 经
+    ``with_guidance`` 派生带新 guidance 的实例，render_prompt 拼 ``[User Guidance]`` 段。
     """
 
     inputs: dict[str, Any]  # workflow 输入
@@ -40,6 +49,10 @@ class RunContext:
     run_id: str  # 当前 run id
     task: str | None = None  # 位置参数 task（同时进 inputs.task；此字段供日志/事件）
     locals: dict[str, Any] = field(default_factory=dict)  # foreach body 局部变量
+    # phase 11 §4：累积的用户 guidance（Ctrl+G + CONTINUE 追加）。
+    user_guidance: tuple[str, ...] = ()
+    # phase 11 §2.1：历次中断记录（debug/replay 用）。
+    interrupt_history: tuple[dict[str, Any], ...] = ()
 
     def with_locals(self, locals_: dict[str, Any]) -> RunContext:
         """派生带 locals 的新 frozen 实例（foreach body 用，注入 item / _index）。
@@ -52,4 +65,43 @@ class RunContext:
             run_id=self.run_id,
             task=self.task,
             locals=dict(locals_),  # 拷贝，避免外部 mutate 污染 frozen 快照
+            user_guidance=self.user_guidance,
+            interrupt_history=self.interrupt_history,
         )
+
+    def with_guidance(self, text: str) -> RunContext:
+        """派生带追加 guidance 的新 frozen 实例（phase 11 §4.1）。
+
+        orchestrator ``_handle_interrupt`` 的 continue 分支调此方法把用户纠偏话累积进 ctx；
+        后续 ``render_prompt`` 经 ``guidance_prompt_section`` 把它拼到 agent prompt 末尾。
+
+        frozen → 累积用 tuple + ``dataclasses.replace``（与 outputs 累加机制一致）。
+        空 / 全空白 text 不追加（无意义，防 prompt 末尾空 guidance 段）。
+        """
+        if not text or not text.strip():
+            return self  # 空 guidance 不累积（向后兼容：CONTINUE 无文本 = 无 guidance）
+        return dataclasses.replace(self, user_guidance=self.user_guidance + (text,))
+
+    def guidance_prompt_section(self) -> str | None:
+        """拼 ``[User Guidance]`` prompt 段（phase 11 §4.1，逐字对齐 Conductor）。
+
+        无 guidance → None（render_prompt 不追加）。有 → 返回：
+
+            \\n\\n[User Guidance]\\n
+            The following guidance was provided by the user during workflow execution. \\
+            Incorporate this guidance into your response:\\n
+            - <g1>\\n
+            - <g2>
+
+        多条 guidance 全部列出（累积语义：每次 Ctrl+G + CONTINUE 都追加，agent 看到全部历史纠偏）。
+        """
+        if not self.user_guidance:
+            return None
+        entries = "\n".join(f"- {g}" for g in self.user_guidance)
+        return (
+            "\n\n[User Guidance]\n"
+            "The following guidance was provided by the user during workflow execution. "
+            "Incorporate this guidance into your response:\n"
+            f"{entries}"
+        )
+
