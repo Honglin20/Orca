@@ -74,7 +74,16 @@ def live_server(tmp_path):
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
-    loop.run_until_complete(asyncio.sleep(0.3))
+    # loop 在 daemon 线程跑 server.serve()，主线程不能对它 run_until_complete（已 running）；
+    # 改轮询端口等 server accept 就绪。
+    import time
+    _deadline = time.time() + 5.0
+    while time.time() < _deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                break
+        except OSError:
+            time.sleep(0.05)
     base_url = f"http://127.0.0.1:{port}"
     yield base_url, manager
     server.should_exit = True
@@ -95,6 +104,24 @@ async def _inject(page, event):
     )
 
 
+async def _goto_output_tab(page, base_url):
+    """导航到 run 详情页的 Output tab（ChartRenderer 只在 RunDetailPage output tab 内挂载）。
+
+    GateDialog 挂在 app 根（任何页都全局可用），但 chart widget 只在
+    ``RunDetailPage`` 的 ``tab==="output"`` 分支渲染 ``<ChartRenderer />`` —— 在首页 ``/``
+    注入 chart 事件不会渲染任何 widget（store 收了事件但无挂载组件消费）。
+
+    用一个虚构 run_id（后端 404 不影响：debug 注入绕过后端，store 直接 processEvent）；
+    ``?debug=1`` 暴露 ``window.__orcaStore``。
+    """
+    await page.goto(f"{base_url}/runs/debug-chart-stub?debug=1")
+    await page.wait_for_selector("body", timeout=5000)
+    # 切到 Output tab 挂载 ChartRenderer（默认是 dag tab）。
+    # 挂载后空态会渲染 ``[data-testid=chart-empty]``，注入事件后才出 chart-renderer。
+    await page.click("[data-testid=tab-output]")
+    await page.wait_for_selector("[data-testid=chart-empty]", timeout=3000)
+
+
 skip_reason = "playwright 未安装（pip install playwright && playwright install chromium）"
 
 
@@ -102,7 +129,7 @@ skip_reason = "playwright 未安装（pip install playwright && playwright insta
 class TestGateAndChart:
     """phase 9d gate 弹窗 + chart 渲染 playwright 验收。"""
 
-    async def test_gate_dialog_permission_and_respond(self, live_server):
+    async def _gate_dialog_permission_and_respond(self, live_server):
         """gate 弹出 + PermissionGate 4 按钮 + 答 gate → POST /gate/respond body 正确。"""
         base_url, manager = live_server
         async with async_playwright() as p:
@@ -152,7 +179,11 @@ class TestGateAndChart:
 
             await browser.close()
 
-    async def test_race_broadcast_toast(self, live_server):
+    def test_gate_dialog_permission_and_respond(self, live_server):
+        """gate 弹出 + PermissionGate 4 按钮 + 答 gate → POST /gate/respond body 正确。"""
+        asyncio.run(self._gate_dialog_permission_and_respond(live_server))
+
+    async def _race_broadcast_toast(self, live_server):
         """抢答：注入 resolved 事件 → 弹窗关 + ResolvedToast 显示。"""
         base_url, manager = live_server
         async with async_playwright() as p:
@@ -204,14 +235,18 @@ class TestGateAndChart:
 
             await browser.close()
 
-    async def test_chart_line_renders_with_palette(self, live_server):
+    def test_race_broadcast_toast(self, live_server):
+        """抢答：注入 resolved 事件 → 弹窗关 + ResolvedToast 显示。"""
+        asyncio.run(self._race_broadcast_toast(live_server))
+
+    async def _chart_line_renders_with_palette(self, live_server):
         """注入 custom(chart,line) → .recharts-line 可见 + stroke 在 PALETTE。"""
         base_url, manager = live_server
         async with async_playwright() as p:
             browser = await p.chromium.launch()
             page = await browser.new_page()
-            await page.goto(f"{base_url}/?debug=1")
-            await page.wait_for_selector("body", timeout=5000)
+            # chart 只在 RunDetailPage output tab 渲染，不能在首页 / 注入
+            await _goto_output_tab(page, base_url)
 
             await _inject(
                 page,
@@ -240,14 +275,17 @@ class TestGateAndChart:
 
             await browser.close()
 
-    async def test_chart_five_types(self, live_server):
+    def test_chart_line_renders_with_palette(self, live_server):
+        """注入 custom(chart,line) → .recharts-line 可见 + stroke 在 PALETTE。"""
+        asyncio.run(self._chart_line_renders_with_palette(live_server))
+
+    async def _chart_five_types(self, live_server):
         """5 种图：line/bar/scatter/pareto/table 各注入一种 → 断言对应 widget。"""
         base_url, manager = live_server
         async with async_playwright() as p:
             browser = await p.chromium.launch()
             page = await browser.new_page()
-            await page.goto(f"{base_url}/?debug=1")
-            await page.wait_for_selector("body", timeout=5000)
+            await _goto_output_tab(page, base_url)
 
             types_selectors = [
                 ("line", ".recharts-line path"),
@@ -294,7 +332,11 @@ class TestGateAndChart:
 
             await browser.close()
 
-    async def test_pareto_front_line(self, live_server):
+    def test_chart_five_types(self, live_server):
+        """5 种图：line/bar/scatter/pareto/table 各注入一种 → 断言对应 widget。"""
+        asyncio.run(self._chart_five_types(live_server))
+
+    async def _pareto_front_line(self, live_server):
         """pareto 前沿连线渲染（SPEC §2.4 pareto = 散点 + 前沿 line）。
 
         happy-dom 单测下 recharts ComposedChart 对 per-series Line 渲染不稳定，故前沿线
@@ -304,8 +346,7 @@ class TestGateAndChart:
         async with async_playwright() as p:
             browser = await p.chromium.launch()
             page = await browser.new_page()
-            await page.goto(f"{base_url}/?debug=1")
-            await page.wait_for_selector("body", timeout=5000)
+            await _goto_output_tab(page, base_url)
 
             await _inject(
                 page,
@@ -347,14 +388,17 @@ class TestGateAndChart:
 
             await browser.close()
 
-    async def test_realtime_dedupe(self, live_server):
+    def test_pareto_front_line(self, live_server):
+        """pareto 前沿连线渲染（SPEC §2.4 pareto = 散点 + 前沿 line）。"""
+        asyncio.run(self._pareto_front_line(live_server))
+
+    async def _realtime_dedupe(self, live_server):
         """同 label+title 两次 → 只 1 个 chart（不堆积，SPEC §2.7）。"""
         base_url, manager = live_server
         async with async_playwright() as p:
             browser = await p.chromium.launch()
             page = await browser.new_page()
-            await page.goto(f"{base_url}/?debug=1")
-            await page.wait_for_selector("body", timeout=5000)
+            await _goto_output_tab(page, base_url)
 
             for seq, y in [(40, 2), (41, 4)]:
                 await _inject(
@@ -384,3 +428,7 @@ class TestGateAndChart:
             assert count == 1, f"同 label+title 应只 1 chart（实时替换），实际 {count}"
 
             await browser.close()
+
+    def test_realtime_dedupe(self, live_server):
+        """同 label+title 两次 → 只 1 个 chart（不堆积，SPEC §2.7）。"""
+        asyncio.run(self._realtime_dedupe(live_server))

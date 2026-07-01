@@ -74,9 +74,30 @@ def create_app(manager: RunManager) -> FastAPI:
     app.state.web_server = web_server
     app.websocket("/ws")(web_server.ws_endpoint)
 
-    # 静态前端（phase 9b 构建产物）。9a 占位 .gitkeep，目录存在即挂载（spa 兜容）。
+    # 静态前端（phase 9b 构建产物）+ **SPA fallback**。
+    # 前端用 BrowserRouter（客户端路由），``/runs/<id>`` 等深链在后端没有对应文件 —— 必须回退
+    # 到 index.html 让客户端路由接管，否则深链/刷新返回 ``{"detail":"Not Found"}`` 404（整个
+    # 详情页废）。挂 ``/assets``（vite hashed JS/CSS）+ catch-all GET → index.html。
+    # catch-all 注册在所有 API router 之后，故 ``/api/*`` ``/gate`` ``/ws`` 优先匹配不被吞。
     if _STATIC_DIR.exists():
-        app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")
+        _assets = _STATIC_DIR / "assets"
+        if _assets.exists():
+            app.mount("/assets", StaticFiles(directory=str(_assets)), name="assets")
+
+        from fastapi.responses import FileResponse, JSONResponse
+
+        _index = _STATIC_DIR / "index.html"
+
+        @app.get("/{full_path:path}", include_in_schema=False)
+        async def _spa_fallback(full_path: str):  # noqa: ARG001
+            """非 API/WS/gate 的 GET → 返回 index.html（客户端路由接管）。"""
+            if _index.exists():
+                return FileResponse(str(_index))
+            # 前端未构建：可操作提示而非裸 404。
+            return JSONResponse(
+                {"detail": "frontend not built — run: cd orca/iface/web/frontend && npm run build"},
+                status_code=404,
+            )
 
     return app
 

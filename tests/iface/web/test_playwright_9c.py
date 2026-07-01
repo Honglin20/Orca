@@ -112,7 +112,16 @@ def live_server(tmp_path):
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
-    loop.run_until_complete(asyncio.sleep(0.3))
+    # loop 在 daemon 线程跑 server.serve()，主线程不能对它 run_until_complete（已 running）；
+    # 改轮询端口等 server accept 就绪。
+    import time
+    _deadline = time.time() + 5.0
+    while time.time() < _deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                break
+        except OSError:
+            time.sleep(0.05)
     base_url = f"http://127.0.0.1:{port}"
     yield base_url, manager
     server.should_exit = True
@@ -174,8 +183,15 @@ def test_cyclic_layout_no_overlap(live_server, tmp_path):
             nodes = page.locator(".react-flow__node")
             count = await nodes.count()
             assert count >= 2, "cyclic workflow 至少渲染 start/loop 节点"
-            # 取每个节点的 data-testid（含 node name）+ bounding box
-            boxes = await nodes.allBoundingBoxes()
+            # 取每个节点的 data-testid（含 node name）+ bounding box。
+            # Python playwright 的 Locator 没有 all_bounding_boxes —— 用 evaluate_all 一次
+            # 往返拿到所有节点的 getBoundingClientRect（避免 N 次 bounding_box() 往返）。
+            boxes = await nodes.evaluate_all(
+                "(els) => els.map(e => {"
+                "  const r = e.getBoundingClientRect();"
+                "  return {x: r.x, y: r.y, width: r.width, height: r.height};"
+                "})"
+            )
             testids = await nodes.evaluate_all(
                 "(els) => els.map(e => e.getAttribute('data-testid'))"
             )

@@ -74,7 +74,16 @@ def live_server(tmp_path):
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
-    loop.run_until_complete(asyncio.sleep(0.3))
+    # loop 在 daemon 线程跑 server.serve()，主线程不能对它 run_until_complete（已 running）；
+    # 改轮询端口等 server accept 就绪。
+    import time
+    _deadline = time.time() + 5.0
+    while time.time() < _deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                break
+        except OSError:
+            time.sleep(0.05)
     base_url = f"http://127.0.0.1:{port}"
     yield base_url, manager
     server.should_exit = True
@@ -213,8 +222,11 @@ def test_new_run_form(live_server, tmp_path):
             await page.goto(f"{base_url}/runs/new")
             await page.fill("input[placeholder='workflows/demo.yaml']", str(yaml_path))
             await page.click("button[type=submit]")
-            await page.wait_for_url("**/runs/run-*", timeout=5000)
-            assert "/runs/run-" in page.url
+            # run_id 形如 ``demo-20260701-075614-7f6455``（slug-ts-nanoid），不是 run-*。
+            # demo.yaml 的 name=demo → slug=demo；等 URL 跳出 /runs/new 即表单已提交 + 导航。
+            await page.wait_for_url("**/runs/demo-*-*", timeout=5000)
+            assert "/runs/new" not in page.url, "表单提交后应离开 /runs/new"
+            assert "/runs/demo-" in page.url, f"应跳转到 /runs/demo-<ts>-<nanoid>，实际 {page.url}"
             await browser.close()
 
     asyncio.run(go())

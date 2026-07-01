@@ -7,13 +7,14 @@
 
 ## 当前任务
 
-**phase 1-9 全部完成并合并 master**。最近一次提交是 phase-1 critical infra 卫生修复：
+**phase 1-9 全部完成并合并 master**。最近一次提交是 phase 9 浏览器 E2E 修复：
 
-- **状态**：✅ Tape 写句柄惰性打开（消除 ResourceWarning）完成。`Tape.__init__` 不再 eager-open
-  append handle —— 只读构造（replay/inspect）不再泄漏未关闭句柄；首次 `append()` 在锁内惰性打开；
-  `__del__` leak 安全网兜底忘 close 的调用方。
-- **release note**：[`docs/releases/2026-07-01-tape-lazy-open.md`](../releases/2026-07-01-tape-lazy-open.md)
-- **验收**：`-W "error::ResourceWarning"` 全绿（30→0）、RuntimeWarning 全绿、599 passed 零回归、vitest 84 passed
+- **状态**：✅ phase 9 playwright E2E 全绿（20 passed）。修了一个真实后端 bug（SPA 深链 404 ——
+  `server.py` 加 catch-all GET → index.html fallback，让 `/runs/<id>` 刷新/直链不再返回 404）
+  + 4 个测试文件的测试代码 bug（live_server fixture / WS race / run_id URL 模式 / playwright
+  snake_case API / 9d async 包装 / chart 测试挂载点）。
+- **release note**：[`docs/releases/2026-07-01-phase9-browser-e2e-fix.md`](../releases/2026-07-01-phase9-browser-e2e-fix.md)
+- **验收**：playwright E2E 20 passed（test_playwright 3 + 9b 6 + 9c 5 + 9d 6）、默认套件 599 passed 0 warnings、vitest 84 passed
 
 ## 下一步
 

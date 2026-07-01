@@ -34,6 +34,7 @@ orca = "orca.iface.cli.commands:main"
 [dependency-groups]
 # 仅开发/测试期依赖（uv sync 自动安装）。
 dev = [
+    "playwright>=1.61.0",
     "pytest>=8.0",
 ]
 
