@@ -38,6 +38,7 @@ orchestrator 对 gate 透明（phase 6 §2.3）—— gate 触发在两个独立
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -303,7 +304,14 @@ class OrcaApp(App):
         # 构造 app 自己的 bus + tape（不复用 run_workflow：那个内部构造会吞 bus，
         # TUI 需要在 orchestrator 跑前 subscribe，故此处显式构造）。run_id 由 orchestrator
         # 内部 gen（若调用方没传）；为 header 显示提前 gen 一份（与 orchestrator.run_id 同算法）。
-        self.run_id = gen_run_id(wf.name)
+        #
+        # phase 11 §8 P3.2 daemon：detached child 经 ``ORCA_BG_RUN_ID`` 拿父进程生成的
+        # run_id，复用它而非重新 gen —— 保证 ``~/.orca/runs/<run_id>.json`` metadata、
+        # tape 文件名、OrcaApp.run_id 三者一致（确定性，``ps``/``logs``/``wait`` 据此定位）。
+        from orca.iface.cli.bg_runner import ENV_BG_RUN_ID
+
+        bg_run_id = os.environ.get(ENV_BG_RUN_ID)
+        self.run_id = bg_run_id or gen_run_id(wf.name)
         # tape_path：默认 ``./runs/<run_id>.jsonl``（生产路径）；测试传 tmp_path 避免污染
         # CWD + 文件句柄泄漏。web 壳复用 OrcaApp 时也可注入自己的 run 目录。
         path = tape_path if tape_path is not None else Path("runs") / f"{self.run_id}.jsonl"
@@ -727,8 +735,6 @@ class OrcaApp(App):
 
 def _gate_port_from_env() -> int:
     """读 ``ORCA_PORT`` env（hook 桥端口，默认 7421，phase 6 hook_script 一致）。"""
-    import os
-
     raw = os.environ.get("ORCA_PORT", str(_DEFAULT_GATE_PORT))
     try:
         port = int(raw)

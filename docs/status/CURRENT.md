@@ -7,30 +7,27 @@
 
 ## 当前任务
 
-**phase 11 P4 Skip to Agent 完成 —— 显式 skip 目标 + NodeSelectModal + §9.2 route 容错（888→904，0 回归）。**
+**phase 11 全部完成（P0-P4，CI / Retry / Interrupt / ask_user / Validator / Dialog / Resume / Wait / Daemon / Skip）。**
+本仓库在 CLI 场景下达到 Conductor 等量功能水平。最后一块 P3.2 daemon `--background` 已合并：
+`orca run --background` fork detached child（headless，非 TUI）+ `ps`/`logs`/`wait` 三件套。
 
-wave-1 SKIP 只能沿 route 跳，无兜底 route 时 NoRouteMatch 崩溃（SPEC §10.2 item12）。本 wave 补齐：
-`request_interrupt` 加 `skip_target` 参数 → `_drive_loop` 直接跳该 node；`NodeSelectModal`
-（pattern A：InterruptModal → app 推选择器）；router §9.2 容错（skipped node None output 走兜底）；
-`_validate_skip_target` fail loud（ValueError）；`interrupt_resolved.data.skip_target` 写 tape。
-code-reviewer 1 🔴（验证顺序致脏 tape，已修：校验前置到 record_resolved 之前）+ 3 🟡 全修。
-
-- **最新 release note**：[`2026-07-02-phase11-skip-to-agent.md`](../releases/2026-07-02-phase11-skip-to-agent.md)
-- **SPEC**：[`docs/specs/phase-11-cli-enrichment.md`](../specs/phase-11-cli-enrichment.md) §9 / §10.2 item12 / §11.8
+- **最新 release note**：[`2026-07-02-phase11-daemon.md`](../releases/2026-07-02-phase11-daemon.md)
+- **SPEC**：[`docs/specs/phase-11-cli-enrichment.md`](../specs/phase-11-cli-enrichment.md) §8 / §11.9（headless 裁定）
 
 ## 待办
 
-1. **phase 11 P0-P4 全部完成**（CI / Retry / Interrupt / ask_user / Validator / Dialog / Resume / Wait / Skip）。
-2. **唯一剩余**：P3.2 daemon `--background`（task #11，pending）—— 非本 phase 核心闭环，可滚动。
-3. **人工 E2E（待真 TTY + ANTHROPIC_API_KEY）**：`orca run examples/demo_skip.yaml`
-   （Ctrl+G + SKIP + 选目标 node，自动化证明已在 `tests/run/test_skip_to_agent.py`）。
+1. **phase 11 收官**：无剩余子任务。可选 polish（非阻塞）：
+   - 读写 attach（descoped D2，需 UDS 控制通道，留后续 phase）
+   - 人工 E2E（待真 TTY + ANTHROPIC_API_KEY）：mxint_analysis 全流程实跑
+2. **下一步方向**（未规划，等用户指示）：
+   - Web phase（前端 InterruptModal/DialogModal/cancel 端点）
+   - phase 12+ polish（Self-Update / Workflow Registry / Budget 等推迟项）
 
 ## 必读文件
 
-1. [`docs/specs/phase-11-cli-enrichment.md`](../specs/phase-11-cli-enrichment.md) §9 / §11.8
-2. [`docs/releases/2026-07-02-phase11-skip-to-agent.md`](../releases/2026-07-02-phase11-skip-to-agent.md)
-3. [`orca/run/orchestrator.py`](../../orca/run/orchestrator.py)（`_handle_interrupt` 返回 tuple +
-   `_validate_skip_target`）+ [`orca/iface/cli/screens/node_select_modal.py`](../../orca/iface/cli/screens/node_select_modal.py)
+1. [`docs/specs/phase-11-cli-enrichment.md`](../specs/phase-11-cli-enrichment.md) §8 / §11.9
+2. [`docs/releases/2026-07-02-phase11-daemon.md`](../releases/2026-07-02-phase11-daemon.md)
+3. [`orca/iface/cli/bg_runner.py`](../../orca/iface/cli/bg_runner.py)（daemonize seam + BgRunMeta）
 
 ## 裁定的决策（不再讨论）
 
@@ -47,3 +44,6 @@ code-reviewer 1 🔴（验证顺序致脏 tape，已修：校验前置到 record
    （Textual modal 轮间交还 UI 控制）。`ctx.dialog_history` 是 web shell replay 预留位（真相在 tape）。
    `_build_env_overlay` 抽到 `orca/exec/env.py`（Rule 6 DRY）。DialogHandler 持 bus emit（gates 层，
    与 InterruptHandler 同 pattern，不违反铁律 2）。
+9. **daemon detached child 走 headless 而非 TUI**（SPEC §11.9，2026-07-02）：detached 无 TTY，
+   Textual 会崩；child 检测 `ORCA_BG_RUN_ID` env 走 `_run_workflow_headless`（直接 Orchestrator.run）。
+   Tape/metadata 一致性不变（resume 可接）。

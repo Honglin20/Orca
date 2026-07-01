@@ -1493,3 +1493,22 @@ pattern B（InterruptModal 内嵌选 node 视图）。理由：保持 InterruptM
 三选一 + guidance），NodeSelectModal 单一职责（skip 到哪），各自独立类不相互 import（ISP）。
 SPEC §9 task3 的「pick one, document」以本裁定为准。
 
+### 11.9 daemon detached child 走 headless 而非 TUI（P3.2，2026-07-02）
+
+**偏离**：SPEC §8.2 字面描述「子进程跑的就是普通的 foreground ``orca run``，只是 parentless
+且 stdio 落到日志文件」，暗示 detached child 经 execv 重启后跑与 foreground 同款的 Textual TUI。
+实现中 detached child **不走 TUI**，改走 **headless Orchestrator 路径**（``_run_workflow_headless``，
+直接 ``Orchestrator.run()`` + ``asyncio.run``，与 resume 的 ``run_from_state`` 同 headless pattern）。
+
+**理由（裁定，Rule 7）**：detached child 经 ``os.setsid()`` 脱离了 controlling terminal，**无 TTY**。
+Textual TUI 在无 TTY 环境下会 hang / 崩（init 序列 ``[?1049h[?1000h...`` 写不出、read stdin 阻塞）。
+spike 实证（2026-07-02）：``orca run --background`` 后 child 启动 TUI，写一堆 terminal escape 到
+日志后卡死，``ps`` 最终标 crashed。**裁定**：detached child 检测 ``ORCA_BG_RUN_ID`` env 存在 →
+``_run_workflow`` 跳过 TUI 分支，调 ``_run_workflow_headless`` 直接跑 orchestrator（无 TUI 依赖）。
+
+**Tape / metadata 一致性不变**：headless 与 TUI 走同一 ``Orchestrator.run()``，事件写同一 Tape
+（``runs/<run_id>.jsonl``），``resume`` 后续接得上。run_id 经 ``ORCA_BG_RUN_ID`` env 传入
+（父进程 gen，子进程复用），保 metadata / tape / OrcaApp.run_id 三者一致（确定性）。
+SPEC §8.2 「普通的 foreground run」语义上应理解为「跑同一个 workflow」而非「同一个 TUI 入口」；
+本裁定 + release note ``2026-07-02-phase11-daemon.md`` 为准。
+

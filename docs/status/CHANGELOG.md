@@ -17,6 +17,15 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-07-02] phase 11 P3.2 —— daemon `--background` 模式 + ps/logs/wait（attach descoped）
+长跑 workflow 不占终端：`orca run --background` fork detached child（headless Orchestrator，
+非 TUI——detached 无 TTY Textual 会崩，SPEC §11.9 裁定），父进程立即返回 run_id + pid；
+配合 `ps`（dead pid 标 crashed，fail loud）/ `logs <id> [-f]` / `wait <id>` 三件套。
+`daemonize` 5-callback seam 可测（CI 不留孤儿）；run_id 经 env 父子一致（metadata/tape/orchestrator
+三处对齐，resume 可接）。code-reviewer 1 🔴（BaseException 漏 SIGTERM）+ 6 🟡 + 2 🟢 全修。
+904→956（+52），0 回归。Commit: 见 git log。
+- 详情：[release note](releases/2026-07-02-phase11-daemon.md)
+
 ## [2026-07-02] phase 11 P4 —— Skip to Agent（显式 skip 目标 + NodeSelectModal + §9.2 route 容错）
 wave-1 SKIP 只能沿 route 跳，无兜底 route 时 NoRouteMatch 崩溃（SPEC §10.2 item12）。本 wave 补齐：
 `request_interrupt` 加 `skip_target` 参数 → `_drive_loop` 直接跳该 node（不经 route 求值）；
