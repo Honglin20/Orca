@@ -753,3 +753,243 @@ def test_orchestrator_retry_exhausted_workflow_failed(tmp_path, monkeypatch):
     assert types.count("retry_started") == 2
     assert "retry_exhausted" in types
     assert "workflow_failed" in types
+
+
+# ── 14. 单 Tape 契约不变量：无孤儿 retry_started ──────────────────────────────
+#
+# 每个 retry_started 必然有一个后继的终态事件（retry_succeeded 或 retry_exhausted）。
+# 孤儿 retry_started = workflow 卡在「说要重试但永远没结论」—— 单 tape 唯一真相源契约
+# （CLAUDE.md 底线）会被违反。本组在 tape 序列上做配对检查，覆盖成功/用尽两条路径。
+
+
+def _assert_no_orphan_retry_started(tape: Tape) -> None:
+    """断言 tape 上无孤儿 retry_started：最后一个 retry_* 事件必须是终态。
+
+    retry 序列的契约是「N 个 retry_started 后必有恰好 1 个终态（retry_succeeded 或
+    retry_exhausted）」——成功路径是 N started + 1 succeeded，用尽路径是 N started +
+    1 exhausted。孤儿 = 序列以 retry_started 收尾（说要重试但永远没结论），违反单 tape
+    唯一真相源（workflow 会卡住）。
+
+    本断言检查：(a) 至少有 1 个终态事件；(b) 最后一个 retry_* 事件是终态（非 started）；
+    (c) 最后一个终态在最后一个 started 之后。这三条共同保证 retry 序列闭环。
+    """
+    types = _tape_types(tape)
+    retry_events = [(i, t) for i, t in enumerate(types) if t.startswith("retry_")]
+    assert retry_events, "本断言仅用于有 retry 事件的 tape（调用方应先确认 retry 发生）"
+    terminals = [(i, t) for i, t in retry_events if t != "retry_started"]
+    assert terminals, (
+        f"有 retry_started 但无任何终态（succeeded/exhausted）——孤儿，workflow 卡住。序列：{types}"
+    )
+    last_event_idx, last_event_type = retry_events[-1]
+    assert last_event_type != "retry_started", (
+        f"最后一个 retry_* 事件是 retry_started(idx={last_event_idx})，无终态收尾"
+        f"——孤儿 started。序列：{types}"
+    )
+    last_started = max(i for i, t in retry_events if t == "retry_started")
+    last_terminal = terminals[-1][0]  # terminals 末位 idx（retry_events 已按 idx 升序）
+    assert last_started < last_terminal, (
+        f"最后 retry_started(idx={last_started}) 在最后终态(idx={last_terminal}) 之后"
+        f"——started 未闭环。序列：{types}"
+    )
+
+
+def test_retry_success_path_no_orphan_retry_started(tmp_path):
+    """成功路径：retry_started 后必有 retry_succeeded，无孤儿（单 tape 契约不变量）。
+
+    INTENT：transient 失败 → 重试 → 成功，tape 上每个 started 都配对 succeeded。
+    防御未来重构（如把 retry_started 移到不同位置）打破「started 必有结论」契约。
+    """
+    bus, tape = _bus(tmp_path)
+    node = _retry_node(max_attempts=3)
+    executor = _ScriptedExecutor([
+        _fail("spawn_error", "attempt 1"),
+        _fail("spawn_error", "attempt 2"),
+        _complete({"ok": True}),
+    ])
+    output, _ = run_async(execute_with_retry(executor, node, _ctx(), bus))
+    assert output == {"ok": True}
+    _assert_no_orphan_retry_started(tape)
+
+
+def test_retry_exhausted_path_no_orphan_retry_started(tmp_path):
+    """用尽路径：retry_started×N + retry_exhausted（1 个终态覆盖全部 started）。
+
+    INTENT：max_attempts=3 → 2 个 retry_started（attempt 2、3 前）+ 1 retry_exhausted。
+    配对契约：started 数 == succeeded+exhausted 数（这里 = 0 + 1 = 1）。
+    **注意**：与成功路径不同，用尽路径是「多个 started 共享一个 exhausted 终态」——
+    exhausted 标记整个 retry 序列结束，故配对检查用「终态总数」而非「逐 started 配对」。
+    """
+    bus, tape = _bus(tmp_path)
+    node = _retry_node(max_attempts=3)
+    executor = _ScriptedExecutor([
+        _fail("spawn_error", "a1"),
+        _fail("spawn_error", "a2"),
+        _fail("spawn_error", "a3"),
+    ])
+    with pytest.raises(ExecError):
+        run_async(execute_with_retry(executor, node, _ctx(), bus))
+    # 用尽路径：2 started + 1 exhausted（exhausted 是整个序列的唯一终态）。
+    types = _tape_types(tape)
+    assert types.count("retry_started") == 2
+    assert types.count("retry_exhausted") == 1
+    # 最后一个事件是 retry_exhausted（终态写在最末）
+    assert types[-1] == "retry_exhausted"
+
+
+# ── 15. tape 顺序不变量：每 attempt 的 node_failed → retry_started → node_started ──
+
+
+def test_retry_tape_ordering_node_failed_then_started_then_next_attempt(tmp_path):
+    """tape 顺序：node_failed → retry_started → node_started（下一 attempt）严格有序。
+
+    INTENT：用户/壳从 tape 重放看到的「失败 → 决定重试 → 开始下一轮」时序必须正确，
+    反序（先 started 后 failed）会让 LogStream 渲染混乱 + 诊断误导。两个 attempt 各校验。
+    """
+    bus, tape = _bus(tmp_path)
+    node = _retry_node(max_attempts=3)
+    executor = _ScriptedExecutor([
+        _fail("spawn_error", "a1"),
+        _fail("spawn_error", "a2"),
+        _complete("ok"),
+    ])
+    run_async(execute_with_retry(executor, node, _ctx(), bus))
+
+    types = _tape_types(tape)
+    # 两轮重试 → 两组 (node_failed, retry_started, node_started)
+    # 第 1 轮：attempt1 的 node_failed(idx of last node_failed before first retry_started)
+    # 找所有 retry_started 位置，校验其前是 node_failed、其后是 node_started
+    started_positions = [i for i, t in enumerate(types) if t == "retry_started"]
+    assert len(started_positions) == 2
+    for sp in started_positions:
+        assert types[sp - 1] == "node_failed", (
+            f"retry_started(idx={sp}) 前应是 node_failed，实际 {types[sp-1]}。序列：{types}"
+        )
+        assert types[sp + 1] == "node_started", (
+            f"retry_started(idx={sp}) 后应是 node_started（下一 attempt），"
+            f"实际 {types[sp+1]}。序列：{types}"
+        )
+
+
+# ── 16. _classify_for_retry 直接单元覆盖（SPEC §9.5.2 error_type 对齐表全表）─────
+#
+# 现有测试经 execute_with_retry loop 间接验证映射；本组直接对 _classify_for_retry 单元化
+# 全表覆盖，让对齐表的每一行都有可读的、独立的契约断言（loop 测试混在一起，单点失败难定位）。
+
+
+def test_classify_for_retry_full_alignment_table():
+    """_classify_for_retry 全表直接断言（SPEC §9.5.2 error_type 对齐表）。
+
+    每行：executor 产出的 error_type → retry_on 白名单取值。
+    ClaudeStreamError 细分：message 含限流关键词 → http_429，否则 api_error。
+    """
+    from orca.run.retry import _classify_for_retry
+
+    # spawn 链
+    assert _classify_for_retry("CliExitNonZero", {"message": "exit 1"}) == "spawn_error"
+    # timeout 链
+    assert _classify_for_retry("ExecTimeout", {"message": "60s"}) == "timeout"
+    # stream 链：generic（无限流关键词）→ api_error
+    assert _classify_for_retry(
+        "ClaudeStreamError", {"message": "internal server error"}
+    ) == "api_error"
+    # stream 链：限流关键词命中 → http_429（每个关键词都验）
+    for kw in ("rate_limit", "overloaded", "429", "api_retry", "529"):
+        assert _classify_for_retry(
+            "ClaudeStreamError", {"message": f"got {kw} from upstream"}
+        ) == "http_429", f"ClaudeStreamError+{kw!r} 应归 http_429"
+    # validator_failed / 自定义 → 原样透传（让 retry_on=[validator_failed] 直接命中）
+    assert _classify_for_retry("validator_failed", {}) == "validator_failed"
+    assert _classify_for_retry("SomeNewErrorType", {}) == "SomeNewErrorType"
+    # 空串 → 空串（不在任何白名单，不重试）
+    assert _classify_for_retry("", {}) == ""
+
+
+def test_classify_for_retry_message_keyword_is_case_insensitive_and_substring():
+    """限流关键词判定：大小写不敏感 + 子串匹配（message.lower() 后 in 判定）。
+
+    INTENT：claude 流的 error message 大小写/格式不可控（如 "Rate_Limit" / "OVERLOADED"），
+    _API_ERROR_KEYS 的子串匹配必须容忍。这是 http_429 细分可靠性的边界保障。
+    """
+    from orca.run.retry import _classify_for_retry
+
+    # 大小写混合
+    assert _classify_for_retry(
+        "ClaudeStreamError", {"message": "Rate_Limit_Exceeded"}
+    ) == "http_429"
+    assert _classify_for_retry(
+        "ClaudeStreamError", {"message": "OVERLOADED -- retry later"}
+    ) == "http_429"
+    # 子串（非整词）
+    assert _classify_for_retry(
+        "ClaudeStreamError", {"message": "error code 429 too many requests"}
+    ) == "http_429"
+    # message 缺失 / None → 不命中关键词 → api_error（不崩）
+    assert _classify_for_retry("ClaudeStreamError", {}) == "api_error"
+    assert _classify_for_retry("ClaudeStreamError", {"message": None}) == "api_error"
+
+
+def test_classify_for_retry_api_error_keyword_subclassifies_when_text_contains_it():
+    """边界：ClaudeStreamError 的 message 含字面 'api_error' → 归 http_429（非 api_error）。
+
+    INTENT：``_API_ERROR_KEYS`` 包含 ``"api_error"`` 自身（见 retry.py:78），故一条
+    message 含 'api_error' 的 ClaudeStreamError 会被细分为 http_429，而非 api_error。
+    这是当前实现的真实语义（关键词列表驱动，非 error_type 字面值）——本测试记录此行为，
+    防止未来误改关键词列表后悄悄改变 http_429/api_error 边界。如果实现方有意移除
+    'api_error' 关键词，请同步更新本测试（不是 bug，是契约文档）。
+    """
+    from orca.run.retry import _API_ERROR_KEYS, _classify_for_retry
+
+    # 契约文档：'api_error' 在关键词列表里
+    assert "api_error" in _API_ERROR_KEYS
+    # 故 message 含 'api_error' → http_429
+    assert _classify_for_retry(
+        "ClaudeStreamError", {"message": "upstream api_error"}
+    ) == "http_429"
+
+
+# ── 17. max_attempts=1 等价 retry=None（同失败面，回归保护）────────────────────
+
+
+def test_retry_max_attempts_one_equivalent_to_no_retry_same_failure_surface(tmp_path):
+    """max_attempts=1 与 retry=None 在「单次失败」路径上失败面一致（回归保护）。
+
+    INTENT：SPEC §9.5.6「max_attempts=1 等价无 retry」。差异仅在 retry_exhausted 事件
+    有无（policy 显式声明的可观测标记）；其余失败面（单次 node_failed、ExecError 抛出、
+    error_type 透传）必须一致。若未来 max_attempts=1 退化为不发 exhausted 或多跑一次，
+    本测试会失败。
+    """
+    # ── retry=None 路径（execute_and_emit）──────────────────────────────────
+    bus_none, tape_none = _bus(tmp_path / "none")
+    node_none = AgentNode(name="n", prompt="p", routes=[])  # retry=None
+    executor_none = _ScriptedExecutor([_fail("spawn_error", "boom")])
+    err_none: ExecError | None = None
+    try:
+        run_async(execute_and_emit(executor_none, node_none, _ctx(), bus_none))
+    except ExecError as e:
+        err_none = e
+    assert err_none is not None
+    types_none = _tape_types(tape_none)
+    assert types_none.count("node_failed") == 1
+    assert not any(t.startswith("retry_") for t in types_none)  # 无任何 retry_*
+
+    # ── max_attempts=1 路径（execute_with_retry）──────────────────────────
+    bus_one, tape_one = _bus(tmp_path / "one")
+    node_one = _retry_node(max_attempts=1)
+    executor_one = _ScriptedExecutor([_fail("spawn_error", "boom")])
+    err_one: ExecError | None = None
+    try:
+        run_async(execute_with_retry(executor_one, node_one, _ctx(), bus_one))
+    except ExecError as e:
+        err_one = e
+    assert err_one is not None
+
+    # 失败面一致：单次 node_failed + 同 error_type + 同 message
+    types_one = _tape_types(tape_one)
+    assert types_one.count("node_failed") == 1, "max_attempts=1 应只跑一次（单 node_failed）"
+    assert types_one.count("node_started") == 1
+    assert err_one.error_type == err_none.error_type == "spawn_error"
+    assert err_one.message == err_none.message == "boom"
+    # 唯一差异：max_attempts=1 多一个 retry_exhausted（policy 显式声明的可观测标记）
+    assert types_one.count("retry_exhausted") == 1
+    # 关键回归保护：max_attempts=1 绝不 emit retry_started（没有第二次 attempt）
+    assert types_one.count("retry_started") == 0

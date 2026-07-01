@@ -325,6 +325,101 @@ def test_ask_user_tool_signature_has_routing_params(tmp_path):
     assert "orca_node" in params
 
 
+# ── 并发隔离：两个 ask_user 各自有独立 gate_id，答案不串台 ─────────────────────
+
+
+def test_concurrent_ask_user_calls_get_distinct_gates_no_crosstalk(tmp_path):
+    """两个并发 ask_user（不同 run:node）拿独立 gate_id；答 gate-A 不送达 gate-B。
+
+    INTENT（隔离不变量 + 路由确定性）：session_id=f"{run_id}:{node}" 是确定性派生。
+    两个不同的 (run, node) 组合 → 两个独立 HumanGate（独立 gate_id / 独立 future）。
+    resolve(gate_A) 只唤醒 A 的 await，B 仍 pending；resolve(gate_B) 才唤醒 B。
+    若路由串台（如两个调用共享一个 future / gate_id 碰撞），workflow 会把 A 的答案送给
+    B 的 agent——正确性 + 安全漏洞。本测试是 ask_user 路由可靠性的核心契约。
+
+    验证 SPEC §10.2 item4 的并发面：两对独立的 (requested, resolved) 各自 gate_id 一致。
+    """
+    from tests.gates.conftest import make_bus
+    from orca.gates.context_registry import SessionContextRegistry
+
+    bus, _ = make_bus(tmp_path)
+    handler = _make_handler(bus)
+    srv = AgentToolsMcpServer(handler, SessionContextRegistry(), runs_dir=tmp_path)
+
+    async def scenario():
+        await handler.start()
+        port = await srv.start()
+        await _settle_server_start()
+        try:
+            # 两个并发 ask_user（不同 run + node）
+            task_a = asyncio.create_task(
+                _call_ask_user_with_args(
+                    port, prompt="A?", orca_run_id="run-A", orca_node="agent-1"
+                )
+            )
+            task_b = asyncio.create_task(
+                _call_ask_user_with_args(
+                    port, prompt="B?", orca_run_id="run-B", orca_node="agent-2"
+                )
+            )
+
+            # 等两个 gate 都进 pending（两个独立 gate_id）
+            gate_a, gate_b = await _wait_for_two_pending(handler, timeout=5.0)
+            assert gate_a != gate_b, (
+                f"两个并发 ask_user 拿到相同 gate_id（{gate_a}）——路由碰撞，答案会串台"
+            )
+
+            # 校验路由参确实各不相同（meta 里 run/node 独立）
+            meta_a = handler._gates_meta[gate_a]
+            meta_b = handler._gates_meta[gate_b]
+            assert (meta_a.run_id, meta_a.node) == ("run-A", "agent-1")
+            assert (meta_b.run_id, meta_b.node) == ("run-B", "agent-2")
+            assert meta_a.session_id == "run-A:agent-1"
+            assert meta_b.session_id == "run-B:agent-2"
+
+            # 先答 A，B 仍 pending（隔离：A 的 resolve 不唤醒 B）
+            assert handler.resolve(gate_a, "answer-for-A", "cli") is True
+            # B 的 resolve 必须返 False（已 resolved 的 gate 才返 False；B 还没 resolve，
+            # 这里测的是「A 的 resolve 不影响 B 的 future」——验证 B 仍在 pending）
+            assert handler.has_pending(gate_b), (
+                "答 gate-A 后 gate-B 不应被唤醒（隔离不变量）——B 应仍在 pending"
+            )
+            # B 的 task 此刻不应完成（仍阻塞等答案）
+            done, _pending = await asyncio.wait({task_a, task_b}, timeout=0.3)
+            assert task_a in done and task_b not in done, (
+                "答 A 后只有 A 的 task 应完成；B 应仍阻塞"
+            )
+            assert await task_a == "answer-for-A"
+
+            # 再答 B
+            assert handler.resolve(gate_b, "answer-for-B", "web") is True
+            assert await asyncio.wait_for(task_b, timeout=5.0) == "answer-for-B"
+
+            # SPEC §10.2 item4 并发面：tape 上两对独立 (requested, resolved)，gate_id 各自配对
+            await asyncio.sleep(0.1)  # 等 broadcaster emit resolved 落 tape
+            events = list(bus.tape.replay())
+            requested = [e for e in events if e.type == "human_decision_requested"]
+            resolved = [e for e in events if e.type == "human_decision_resolved"]
+            assert len(requested) == 2
+            assert len(resolved) == 2
+            req_ids = {e.data["gate_id"] for e in requested}
+            res_ids = {e.data["gate_id"] for e in resolved}
+            assert req_ids == res_ids == {gate_a, gate_b}, (
+                f"requested/resolved gate_id 集合应一致且 = {{{gate_a}, {gate_b}}}，"
+                f"实际 req={req_ids} res={res_ids}"
+            )
+            # 答案不串台：A 的 resolved 答案是 answer-for-A，B 的是 answer-for-B
+            ans_by_gate = {e.data["gate_id"]: e.data["answer"] for e in resolved}
+            assert ans_by_gate[gate_a] == "answer-for-A"
+            assert ans_by_gate[gate_b] == "answer-for-B"
+        finally:
+            await srv.stop()
+            await handler.stop()
+            bus.close()
+
+    asyncio.run(scenario())
+
+
 # ── 异步 helpers ──────────────────────────────────────────────────────────────
 
 
@@ -368,3 +463,37 @@ async def _wait_for_pending(handler: HumanGateHandler, timeout: float = 5.0) -> 
             return next(iter(handler._pending))
         await asyncio.sleep(0.02)
     raise AssertionError(f"handler._pending 在 {timeout}s 内未出现（ask_user 未到 request）")
+
+
+async def _wait_for_two_pending(
+    handler: HumanGateHandler, timeout: float = 5.0
+) -> tuple[str, str]:
+    """等 handler._pending 出现至少 2 个 gate_id（两个并发 ask_user 都进 pending）。
+
+    返回 (first, second)（插入序）。用于并发隔离测试——验证两个 ask_user 拿到独立 gate。
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if len(handler._pending) >= 2:
+            ids = list(handler._pending)
+            return ids[0], ids[1]
+        await asyncio.sleep(0.02)
+    raise AssertionError(
+        f"handler._pending 在 {timeout}s 内未出现 2 个 gate（并发 ask_user 未都到 request）"
+    )
+
+
+async def _call_ask_user_with_args(
+    port: int, *, prompt: str, orca_run_id: str, orca_node: str, options: list[str] | None = None
+) -> str:
+    """经 in-memory Client 调 ask_user，路由参可配置（并发隔离测试用）。"""
+    url = f"http://127.0.0.1:{port}/sse"
+    args: dict = {"prompt": prompt, "orca_run_id": orca_run_id, "orca_node": orca_node}
+    if options is not None:
+        args["options"] = options
+    async with sse_client(url) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool("ask_user", args)
+            assert result.content, "ask_user returned empty content"
+            return result.content[0].text  # type: ignore[union-attr]

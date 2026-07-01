@@ -284,3 +284,76 @@ def test_claude_executor_appends_ask_user_instruction_when_server_present(tmp_pa
             await server.stop()
 
     run_async(scenario())
+
+
+# ── §11.3 allowed-tools 边界：空 tools list + 去重 ────────────────────────────
+
+
+def test_build_spawn_config_appends_ask_user_when_tools_is_empty_list(tmp_path):
+    """node.tools=[]（空白名单，非 None）+ 注入 server → allowed-tools 含 ask_user。
+
+    INTENT（§11.3 边界）：``node.tools`` 有三种状态——None（全开）/ []（声明但空，
+    实际等于「无工具」）/ [...](白名单)。注入 server 时三种都须让 ask_user 可用：
+      - None → 仅声明 ask_user（既有测试覆盖）
+      - [...] → append ask_user（既有测试覆盖）
+      - [] → append ask_user（**本测试**）——空 list 是「用户显式声明了白名单结构但没列
+        任何工具」，与 None（全开）语义不同；注入 server 时应让 ask_user 可用，否则
+        agent 在「全空 tools + ask_user 挂载」配置下无法问用户。
+    """
+    from orca.exec.claude.executor import _build_spawn_config
+
+    handler, server = _make_server(tmp_path)
+    profile = get_profile("claude")
+    node = AgentNode(name="empty_tools", prompt="x", tools=[])
+
+    async def scenario():
+        await server.start()
+        try:
+            cfg = _build_spawn_config(
+                node, profile, "prompt", server, run_id="r-et", session_id="s-et",
+            )
+            assert "--allowed-tools" in cfg.extra_args
+            tools_idx = cfg.extra_args.index("--allowed-tools")
+            tools_str = cfg.extra_args[tools_idx + 1]
+            assert _ASK_USER_TOOL_NAME in tools_str, (
+                f"tools=[] + server 注入应让 ask_user 可用，实际 allowed-tools={tools_str!r}"
+            )
+        finally:
+            await server.stop()
+
+    run_async(scenario())
+
+
+def test_build_spawn_config_does_not_duplicate_ask_user_if_already_in_tools(tmp_path):
+    """node.tools 已含 ask_user + 注入 server → allowed-tools 不重复（去重不变量）。
+
+    INTENT（§11.3 去重）：用户在 yaml 里手动声明了 ``mcp__orca-agent-tools__ask_user``
+    （如想显式控制顺序），注入 server 时实现走 ``if X not in tools_list`` 分支不重复
+    append。重复会让 claude ``--allowed-tools`` 解析出错或行为未定义。回归保护。
+    """
+    from orca.exec.claude.executor import _build_spawn_config
+
+    handler, server = _make_server(tmp_path)
+    profile = get_profile("claude")
+    node = AgentNode(
+        name="dedup", prompt="x", tools=["Bash", _ASK_USER_TOOL_NAME],
+    )
+
+    async def scenario():
+        await server.start()
+        try:
+            cfg = _build_spawn_config(
+                node, profile, "prompt", server, run_id="r-dd", session_id="s-dd",
+            )
+            tools_idx = cfg.extra_args.index("--allowed-tools")
+            tools_str = cfg.extra_args[tools_idx + 1]
+            # ask_user 恰好出现一次（去重生效）
+            assert tools_str.count(_ASK_USER_TOOL_NAME) == 1, (
+                f"ask_user 应去重（恰好 1 次），实际 allowed-tools={tools_str!r}"
+            )
+            # Bash 保留
+            assert "Bash" in tools_str
+        finally:
+            await server.stop()
+
+    run_async(scenario())
