@@ -53,8 +53,8 @@ def test_all_event_types_construct():
 
 
 def test_event_type_count_matches_spec_literal():
-    """SPEC §3.2 的 Literal 代码块实际 21 个值（prose「25」为笔误，以代码块契约为准）。
+    """SPEC §3.2 的 Literal 代码块实际 22 个值（含 phase-10 新增的 workflow_cancelled）。
 
     显式断言数量，防止后续误删/误增 type 而不自知（fail loud）。
     """
-    assert len(typing.get_args(EventType)) == 21
+    assert len(typing.get_args(EventType)) == 22

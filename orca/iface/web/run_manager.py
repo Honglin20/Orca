@@ -34,6 +34,8 @@ from orca.events.replay import replay_state
 from orca.events.tape import Tape
 from orca.gates.context_registry import SessionContextRegistry
 from orca.gates.handler import HumanGateHandler
+from orca.gates.pending import pending_gates_from_tape
+from orca.gates.types import HumanGate
 from orca.run.lifecycle import gen_run_id
 from orca.run.orchestrator import Orchestrator
 from orca.schema import Event, RunState, Workflow
@@ -43,7 +45,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-RunStatus = Literal["queued", "running", "completed", "failed"]
+RunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 
 
 @dataclass
@@ -195,6 +197,150 @@ class RunManager:
         """取 run 的 RunHandle（WS 订阅 / gate 分发用）。未知返回 None。"""
         return self._runs.get(run_id)
 
+    # ── 程序化客户端查询（MCP / 其它 shell）—— tape-only query path ─────────
+
+    def pending_gates(self, run_id: str) -> list[HumanGate]:
+        """返回 run 当前未 resolved 的 gate（SPEC phase-10 §3.3 / §5.1）。
+
+        **tape-only**：派生自 ``pending_gates_from_tape(handle.tape)``，不读
+        ``gate_handler._pending`` / ``_gates_meta``（runtime await 状态，重启即丢）。
+        重启进程后仍能查（tape 在磁盘），多壳读同一份不漂移。
+
+        未知 run_id → KeyError（fail loud，SPEC §6.0 铁律 4）。
+        """
+        handle = self._require_handle(run_id)
+        return pending_gates_from_tape(handle.tape)
+
+    def run_summary(self, run_id: str) -> dict | None:
+        """MCP / 其它程序化客户端友好的 run 摘要（SPEC phase-10 §3.3）。
+
+        返回 dict（不含 ``_hint``——``_hint`` 是 MCP 层加的引导字段，§9.10）::
+
+            {
+                "task_id": str,
+                "status": "running" | "needs_decision" | "completed" | "failed" | "cancelled",
+                "current_node": str | None,
+                "progress": "3/7",  # done/total
+                "cost": float,
+                "elapsed": float,
+                "gate": dict | None,  # 仅 needs_decision 时填充
+                "output": dict | None,  # 仅 completed 时填充（来自 workflow_completed.data.outputs）
+                "error": str | None,  # 仅 failed 时填充
+            }
+
+        未知 run_id → None（MCP ``get_task_status`` 据此返回 ``status="unknown"``）。
+
+        全部数据派生自 tape + handle.status（实时），无并行真相源。
+        """
+        handle = self._runs.get(run_id)
+        if handle is None:
+            return None
+        meta = self._meta_from_handle(handle)
+        state = replay_state(handle.tape)
+        gates = pending_gates_from_tape(handle.tape)
+        status = self._derive_mcp_status(meta.status, gates)
+        summary: dict = {
+            "task_id": run_id,
+            "status": status,
+            "current_node": state.current_node,
+            "progress": meta.progress,
+            "cost": meta.cost,
+            "elapsed": meta.elapsed,
+            "gate": None,
+            "output": None,
+            "error": None,
+        }
+        if status == "needs_decision" and gates:
+            summary["gate"] = _gate_to_dict(gates[0])
+        elif status == "completed":
+            # outputs 来自 workflow_completed 事件 data.outputs（reducer 不进 context）。
+            # 扫 tape 找最后一个 workflow_completed（幂等，SPEC §3 单一读路径）。
+            summary["output"] = _outputs_from_tape(handle.tape)
+        elif status == "failed":
+            summary["error"] = meta.error
+        return summary
+
+    @staticmethod
+    def _derive_mcp_status(
+        run_status: RunStatus, pending_gates: list[HumanGate]
+    ) -> str:
+        """RunStatus + pending_gates → MCP status（SPEC phase-10 §3.3）。
+
+        映射规则：
+          - 终态优先（completed / failed / cancelled 直接返回）
+          - 非终态且有 pending gate → ``needs_decision``（优先于 running）
+          - 其它 → ``running``（含 queued，对 MCP 客户端而言 queued 等价 running）
+
+        ``needs_decision`` 优先于 ``running``：哪怕 status 显示 running，只要 tape 里
+        有未 resolved gate，MCP 客户端第一关心的是"该决策了"。
+        """
+        if run_status == "completed":
+            return "completed"
+        if run_status == "failed":
+            return "failed"
+        if run_status == "cancelled":
+            return "cancelled"
+        if pending_gates:
+            return "needs_decision"
+        return "running"
+
+    async def cancel_run(self, run_id: str, reason: str | None = None) -> bool:
+        """取消 run（SPEC phase-10 §5.3）。
+
+        步骤（顺序重要）：
+          1. ``bus.emit("workflow_cancelled", ...)`` 写 tape（**唯一真相**，重启后
+             replay 仍见 cancelled，不漂移）—— 必须在 task.cancel 前，避免与 task
+             finally 的 teardown（关 bus）竞态。
+          2. ``handle.status = "cancelled"``（runtime 状态，list_runs 立刻反映）。
+          3. cancel asyncio task（停止编排，触发 task 内 finally 收尾）。
+          4. await task 完成（让 _run_with_sem 的 finally 跑完，teardown 幂等）。
+          5. teardown gate_handler + bus（幂等，可能已被 task finally 调用）。
+
+        返回值：
+          - True：成功 cancel（task 已 cancel + tape 已写 cancelled）
+          - False：已终态（completed / failed / cancelled），业务可恢复（§6.1 验收）
+          - KeyError：未知 run_id（fail loud，§6.0 铁律 4）
+        """
+        handle = self._require_handle(run_id)
+        if handle.status in ("completed", "failed", "cancelled"):
+            return False
+
+        # 1. emit workflow_cancelled 写 tape（唯一真相，SPEC §5.4 决策 9）。
+        # 先 emit 后 cancel task：task finally 会 teardown 关 bus，emit 必须在 bus 还
+        # 活着时完成，避免 RuntimeError: Tape 已 close。
+        try:
+            await handle.bus.emit(
+                "workflow_cancelled",
+                data={"reason": reason or "user_cancelled"},
+            )
+        except Exception:  # noqa: BLE001 — emit 失败不阻断 cancel（tape 可能已 close）
+            logger.warning(
+                "run %s emit workflow_cancelled 失败（tape 可能已 close）",
+                run_id,
+                exc_info=True,
+            )
+
+        # 2. runtime status 转 cancelled（list_runs 立刻反映）
+        handle.status = "cancelled"
+
+        # 3. cancel asyncio task（若有 in-flight orchestrator.run）
+        task = handle._task
+        if task is not None and not task.done():
+            task.cancel()
+
+        # 4. await task 完成（让 finally 跑完，避免 leaked task）。task 被 cancel 后会
+        # 抛 CancelledError——这是预期路径，正常吞。其它异常（编排失败）也吞——cancel
+        # 本就是用户主动终止，编排异常已被 status 转 cancelled 覆盖（用户语义优先）。
+        if task is not None and not task.done():
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+        # 5. teardown（与正常终态路径一致，幂等——task finally 可能已调过）
+        await self._teardown_handle(handle)
+        return True
+
     async def wait_done(self, run_id: str, timeout: float = 30.0) -> None:
         """等某 run 到终态（completed/failed）。测试 + WS 收尾用。
 
@@ -329,3 +475,38 @@ def _extract_cost(state: RunState) -> float:
         return 0.0
     # UsageSummary 形态见 schema/state.py；cost 字段可能不存在（纯 script run 无 token）。
     return float(getattr(usage, "cost", 0.0) or 0.0)
+
+
+def _gate_to_dict(gate: HumanGate) -> dict:
+    """HumanGate → MCP 友好的 dict（run_summary 的 gate 字段）。
+
+    返回字段（SPEC phase-10 §2.2 / §3.3）：gate_id / prompt / options / context /
+    source / run_id / node / session_id。客户端据此渲染决策 UI + 调 resolve_gate。
+    """
+    return {
+        "gate_id": gate.id,
+        "prompt": gate.prompt,
+        "options": gate.options,
+        "context": gate.context,
+        "source": gate.source,
+        "run_id": gate.run_id,
+        "node": gate.node,
+        "session_id": gate.session_id,
+    }
+
+
+def _outputs_from_tape(tape: Tape) -> dict | None:
+    """扫 tape 找最后一个 workflow_completed 事件的 data.outputs（run_summary 用）。
+
+    reducer 不把 outputs 投影进 RunState.context（node_completed 累积的是每 node 的
+    output，键是 node 名，非 "outputs"）；workflow 级最终 outputs 在
+    ``workflow_completed.data.outputs`` 字段。返回 None 表示无 completed 事件 / 无
+    outputs 字段（如纯 script run 也应有 ``{}`` 至少）。
+    """
+    outputs: dict | None = None
+    for event in tape.replay():
+        if event.type == "workflow_completed":
+            data_outputs = event.data.get("outputs")
+            if isinstance(data_outputs, dict):
+                outputs = data_outputs
+    return outputs

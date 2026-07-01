@@ -20,6 +20,7 @@ EventType = Literal[
     "workflow_started",  # data: {inputs, node_count, entry, workflow_name}
     "workflow_completed",  # data: {elapsed, outputs}
     "workflow_failed",  # data: {error_type, message, node}  # node=导致失败的 node（payload）
+    "workflow_cancelled",  # data: {reason}  # 用户取消（MCP cancel_task / RunManager.cancel_run）
     # ── node 生命周期（顶层 node + session_id 标识本次调用；attempt 派生）──
     "node_started",  # 本次调用开始（顶层 node + session_id 标识）
     "node_completed",  # data: {elapsed, output}

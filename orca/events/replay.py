@@ -77,6 +77,12 @@ def apply_event(state: RunState, event: Event) -> RunState:
             update["current_node"] = node
         return state.model_copy(update=update)
 
+    if t == "workflow_cancelled":
+        # 用户取消（MCP cancel_task / RunManager.cancel_run）。语义与 failed 类似（终态），
+        # 但 status 区分 cancelled，让壳 / MCP 客户端能渲染不同的"已取消"UI。current_node
+        # 不覆盖（保留最近已知位置，便于事后追查在哪被取消）。
+        return state.model_copy(update={"status": "cancelled"})
+
     if t == "node_started":
         # last-writer-wins：同 node 多 session（retry）取最后写入的 running
         node_status = {**state.node_status, node: "running"}

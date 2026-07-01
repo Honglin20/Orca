@@ -45,7 +45,7 @@ class RunState(BaseModel):
 
     run_id: str
     workflow_name: str
-    status: Literal["pending", "running", "completed", "failed"] = "pending"
+    status: Literal["pending", "running", "completed", "failed", "cancelled"] = "pending"
     current_node: str | None = None
     node_status: dict[str, Status] = {}  # 每个 node 的状态
     context: dict[str, Any] = {}  # 所有已完成 node 的输出（accumulate）
