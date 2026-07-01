@@ -71,13 +71,10 @@ async def execute_and_emit(
             output = event.data.get("output")
             seen_completed = True
         elif event.type == "node_failed":
-            # fail loud：透传 executor 已构造的 error_type / phase / message + node 名
-            err_data = event.data
-            raise ExecError(
-                phase=err_data.get("phase", "node_failed"),
-                message=err_data.get("message", "executor 产出 node_failed（无消息）"),
-                error_type=err_data.get("error_type"),
-                node=getattr(node, "name", None),  # 注入失败 node 名（SPEC §3.4）
+            # fail loud：透传 executor 已构造的 error_type / phase / message + node 名。
+            # 构造走 ExecError.from_failed_data（DRY：与 run.retry.execute_with_retry 共享）。
+            raise ExecError.from_failed_data(
+                event.data, node=getattr(node, "name", None),  # 注入失败 node 名（SPEC §3.4）
             )
 
     if not seen_completed:

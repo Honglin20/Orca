@@ -1,0 +1,54 @@
+# examples/with_retry.yaml —— Retry Policy 演示（phase 11 §9.5）
+#
+# 单 agent node，声明 RetryPolicy：claude 子进程偶发失败（spawn_error / api_error /
+# http_429 限流）时自动重试，带 exponential backoff + ±20% jitter 防雪崩。
+#
+# 真实 E2E：真实重试需要真实 flaky claude（如人工制造 429）， automatable 证明见
+# tests/run/test_retry.py::test_orchestrator_retry_integration_fail_then_succeed
+# （fake executor fail-then-succeed → tape 含 retry_started + retry_succeeded +
+# workflow_completed）。
+#
+# retry 字段语义（SPEC §9.5.2）：
+#   max_attempts          总尝试次数（含首次）；1 = 等价无 retry
+#   backoff               constant / linear / exponential
+#   initial_delay_seconds 首次重试前等待秒数（backoff 基数）
+#   max_delay_seconds     单次延迟上限（防 exponential 爆炸）
+#   retry_on              触发重试的 error_type 白名单（与 node_failed.data 对齐）：
+#                         spawn_error / timeout / api_error / http_429 / validator_failed
+#   jitter                ±20% 抖动（防同一批 429 同时重试）
+#
+# 运行：orca run examples/with_retry.yaml
+
+name: with_retry
+description: 演示 Retry Policy（节点级自动重试 transient claude 失败）
+entry: fetch_api
+
+inputs:
+  url:
+    type: string
+    required: false
+    default: "https://api.example.com/data"
+
+nodes:
+  - name: fetch_api
+    kind: agent
+    prompt: |
+      调用以下 URL 拉取数据，返回 JSON：
+      {{ inputs.url }}
+
+      若遇到限流（429），你的调用方（Orca）会自动重试 —— 你只需正常发起请求。
+    routes:
+      - to: $end
+    retry:
+      max_attempts: 3
+      backoff: exponential        # 1s → 2s → 4s（cap 60s）+ ±20% jitter
+      initial_delay_seconds: 1.0
+      max_delay_seconds: 60.0
+      retry_on:
+        - spawn_error             # claude 子进程非零退出（非 SIGINT）
+        - api_error               # claude 流报 result.is_error=true（含 500/overloaded）
+        - http_429                # 限流（result_text 含 rate_limit / 429）
+      jitter: true                # ±20%，防雪崩
+
+outputs:
+  fetched: "{{ fetch_api.output }}"

@@ -121,6 +121,20 @@ def _describe(event_type: str, data: dict[str, Any]) -> str:
             f"node={data.get('resumed_node', '?')} "
             f"(replayed {data.get('replayed_events', 0)} events)"
         )
+    # phase 11 §9.5.3：Retry Policy 可观测事件（让用户看到「第 N 次重试 / 重试后成功 / 用尽」）。
+    if event_type == "retry_started":
+        return (
+            f"↻ retry #{data.get('attempt', '?')}/{data.get('max_attempts', '?')} "
+            f"after {data.get('error_type', '?')} "
+            f"(wait {data.get('delay_seconds', 0):.1f}s)"
+        )
+    if event_type == "retry_succeeded":
+        return f"✓ retry succeeded after {data.get('attempt_total', '?')} attempt(s)"
+    if event_type == "retry_exhausted":
+        return (
+            f"✗ retry exhausted after {data.get('attempts', '?')} attempt(s) "
+            f"(last: {data.get('last_error_type', '?')})"
+        )
     return event_type
 
 

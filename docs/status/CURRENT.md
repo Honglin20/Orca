@@ -7,22 +7,21 @@
 
 ## 当前任务
 
-**phase 11 第一波全部落地 + wave-1 e2e 审计闭环 —— 全绿（0 xfail）。**
+**phase 11 第二波 P0.3 Retry Policy 落地 —— 全绿（0 回归）。**
 
-第一波 feature：CI(P0.1) ✓ + Interrupt/Guidance(P1.1) ✓ + Resume(P2.2) ✓。wave-1 e2e
-覆盖审计发现 1 个 critical bug（`interrupt_resolved` 同步写 Tape 修复，已闭环）+ 补齐
-e2e 契约测试（中断三分支配对不变量 / SKIP / ABORT / 多壳 await-future / prompt_rendered
-不变量 / emit-on-closed-bus fail-loud）。
+wave 2 第一项：Retry Policy（节点级自动重试 transient claude 失败）。`execute_with_retry`
+核心 loop + `_classify_for_retry` error_type 对齐层（CliExitNonZero→spawn_error 等，
+SPEC §9.5.2）+ RetryPolicy schema（ge 校验）+ ExecError.from_failed_data DRY + orchestrator
+集成 + reducer/LogStream 描述。27 新测试覆盖意图（含 5 条对齐层契约）。
 
-- **最新 release note**：[`2026-07-02-phase11-interrupt-resolved-fix.md`](../releases/2026-07-02-phase11-interrupt-resolved-fix.md)
-- **SPEC**：[`docs/specs/phase-11-cli-enrichment.md`](../specs/phase-11-cli-enrichment.md)
+- **最新 release note**：[`2026-07-02-phase11-retry-policy.md`](../releases/2026-07-02-phase11-retry-policy.md)
+- **SPEC**：[`docs/specs/phase-11-cli-enrichment.md`](../specs/phase-11-cli-enrichment.md) §9.5
 
 ## 待办
 
-1. **人工 E2E**：`orca run examples/mxint_analysis.yaml` → `kill -9` → `orca resume runs/<id>.jsonl
-   --yaml examples/mxint_analysis.yaml` → 验证 `workflow_resumed` + 续跑至 `workflow_completed`
-   （需真 claude，automatable 断言已由 `test_resume_emits_workflow_resumed_and_completes` 覆盖）。
-2. **后续 wave**：Retry(P0.2) → ask_user(P1.2) → Validator/Dialog/Wait → daemon/Skip。
+1. **wave 2 续**：ask_user(P1.2) —— SSE spike 前置（SPEC §5.3），失败则 feature 推迟。
+2. **人工 E2E（待真 claude）**：`orca run examples/with_retry.yaml`（真实 flaky 才触发 retry）。
+3. **后续 wave**：Validator(P2.1，复用 execute_with_retry) → Dialog(P2.2) → Wait(P3.1) → daemon(P3.2) → Skip(P4)。
 
 ## 必读文件
 

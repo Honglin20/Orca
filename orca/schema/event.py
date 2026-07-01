@@ -49,6 +49,10 @@ EventType = Literal[
     "prompt_rendered",  # data: {node, session_id, preview}  preview = prompt 末尾 ~200 字符
     # ── phase 11 §7：Checkpoint Resume（Tape 即 checkpoint，SPEC §1.4 / §7.2）──
     "workflow_resumed",  # data: {from_tape: str, resumed_node: str, replayed_events: int}
+    # ── phase 11 §9.5：Retry Policy（节点级自动重试 transient claude 失败，SPEC §9.5.3）──
+    "retry_started",  # data: {attempt, max_attempts, error_type, delay_seconds, node}
+    "retry_succeeded",  # data: {attempt_total, node}（重试后成功）
+    "retry_exhausted",  # data: {attempts, last_error_type, node}（重试用完仍失败）
     # ── 自定义（MCP 工具产出，前端按 data.kind 分发渲染）──
     "custom",  # data: {kind: "chart"|"table"|"image"|..., ...}
     # ── 错误 ──

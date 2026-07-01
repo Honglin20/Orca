@@ -602,6 +602,15 @@ class Orchestrator:
         from orca.exec.factory import make_executor
 
         executor = make_executor(node)
+        # phase 11 §9.5.5：agent node 声明 retry → 走 execute_with_retry（transient
+        # 失败自动重试 + retry_started/succeeded/exhausted 事件）；否则既有路径（向后兼容）。
+        # node.kind=="agent" 经 pydantic discriminated union 已保证 node 是 AgentNode 实例，
+        # node.retry 字段必然存在（RetryPolicy | None），直接访问无需 getattr 防御。
+        if node.kind == "agent" and node.retry is not None:  # type: ignore[union-attr]
+            from orca.run.retry import execute_with_retry
+
+            output, _events = await execute_with_retry(executor, node, ctx, self.bus)  # type: ignore[arg-type]
+            return output
         return await execute_and_emit(executor, node, ctx, self.bus)
 
     def _routes_of(self, name: str) -> list:

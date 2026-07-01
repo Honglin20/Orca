@@ -54,6 +54,33 @@ class Node(BaseModel):
     routes: list[Route] = []  # 条件路由（first-match-wins）；唯一控制流
 
 
+class RetryPolicy(BaseModel):
+    """节点级重试策略（phase 11 §9.5.2，Orca 自创设计，借鉴 Conductor 思路）。
+
+    触发重试的条件：``node_failed`` 事件的 ``error_type`` 命中 ``retry_on`` 白名单。
+    用户 SIGINT 中断（``was_interrupted=true``）**不**进重试白名单判定 —— retry loop
+    优先短路退出（见 SPEC §9.5.2 error_type 对齐表 / was_interrupted 短路）。
+
+    Conductor 对照（不冒充参考）：Conductor 为 ``backoff: Literal["fixed","exponential"]``
+    + 单 ``delay_seconds`` + ``retry_on: Literal["provider_error","timeout"]``，无
+    ``jitter`` / ``max_delay`` / ``linear``。本字段语义不同。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # ge=1：max_attempts=0 会让 retry loop range(1,1) 空跑 → 撞「不可达」分支，错误信息
+    # 误导。schema 层 fail loud（"max_attempts 必须 ≥1"）让配置错在加载期暴露。
+    max_attempts: int = Field(default=3, ge=1)  # 总尝试次数（含首次）；1 = 等价无 retry
+    backoff: Literal["constant", "linear", "exponential"] = "exponential"
+    # ge=0：负 delay 会产生负 sleep（asyncio.sleep 负值立即返回，但语义错且掩盖配置错）。
+    initial_delay_seconds: float = Field(default=1.0, ge=0.0)
+    max_delay_seconds: float = Field(default=60.0, ge=0.0)  # 单次延迟上限（防 exponential 爆炸）
+    retry_on: list[
+        Literal["spawn_error", "timeout", "api_error", "http_429", "validator_failed"]
+    ] = ["spawn_error"]
+    jitter: bool = True  # ±20% jitter 防雪崩（同一批 429 同时重试）
+
+
 class AgentNode(Node):
     """LLM agent 节点（核心 kind）。
 
@@ -69,6 +96,7 @@ class AgentNode(Node):
     executor: str = "claude"  # "claude" / "ccr" / "codex"（未来）
     model: str | None = None  # 模型覆盖
     output_schema: dict | None = None  # None=自由文本；{...}=结构化 JSON schema
+    retry: RetryPolicy | None = None  # None=不重试（向后兼容）；见 RetryPolicy
 
 
 class ScriptNode(Node):

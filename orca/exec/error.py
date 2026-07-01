@@ -47,6 +47,27 @@ class ExecError(Exception):
         self.node = node  # 失败 node 名（adapter 注入；None = executor 内部异常未关联 node）
         super().__init__(f"[{self.phase}] {self.message}")
 
+    @classmethod
+    def from_failed_data(cls, err_data: dict, *, node: str | None = None) -> ExecError:
+        """从 ``node_failed`` 事件的 data 构造 ExecError（DRY 单点）。
+
+        ``executor_adapter.execute_and_emit`` 与 ``run.retry.execute_with_retry`` 都从
+        ``node_failed.data`` 透传 ``phase`` / ``error_type`` / ``message`` 构造 ExecError ——
+        本方法是这两处（及未来 wave 3 validator）共享的唯一构造点，避免逻辑漂移。
+
+        Args:
+            err_data: ``node_failed`` 事件的 data dict（含 error_type / message / phase）。
+                缺字段用合理 default（phase="node_failed"，message="executor 产出
+                node_failed（无消息）"），error_type=None 走 phase 派生。
+            node: 失败 node 名（adapter / retry loop 注入；None = 未关联）。
+        """
+        return cls(
+            phase=err_data.get("phase", "node_failed"),
+            message=err_data.get("message", "executor 产出 node_failed（无消息）"),
+            error_type=err_data.get("error_type"),
+            node=node,
+        )
+
 
 # phase → error_type 映射表（SPEC §6）。新增 phase 在此补一行即可（OCP 局部扩展）。
 _PHASE_TO_ERROR_TYPE: dict[str, str] = {
