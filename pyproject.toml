@@ -61,4 +61,9 @@ filterwarnings = [
     "ignore:websockets.legacy is deprecated:DeprecationWarning",
     "ignore:websockets.server.WebSocketServerProtocol is deprecated:DeprecationWarning",
     "ignore:remove second argument of ws_handler:DeprecationWarning",
+    # asyncio subprocess transport GC 时机小毛病（CPython 3.12 已知）：``stdio_client``
+    # E2E 起的真 ``orca mcp`` 子进程 transport 在 ``asyncio.run`` 关 loop 后才被 GC，
+    # ``__del__`` 调 ``call_soon`` raise ``Event loop is closed``。非 Orca bug / 非 mcp SDK bug，
+    # 是 CPython 的 ``BaseSubprocessTransport.__del__`` 时机问题。不影响测试结果（test 仍 pass）。
+    "ignore:Exception ignored in.*BaseSubprocessTransport:pytest.PytestUnraisableExceptionWarning",
 ]

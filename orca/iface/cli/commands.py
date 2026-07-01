@@ -262,6 +262,11 @@ def mcp(
         "--idle-timeout",
         help="--with-web 模式下，无活跃 run 持续 N 分钟后退出（仅 daemon 生效）",
     ),
+    runs_dir: str | None = typer.Option(
+        None,
+        "--runs-dir",
+        help="tape 落盘目录（默认 ./runs）。测试隔离用，业务无需配置",
+    ),
 ) -> None:
     """启动 MCP server（stdio JSON-RPC），供 Claude Code / opencode / Cursor 接入。
 
@@ -280,6 +285,7 @@ def mcp(
             web_port=web_port,
             max_concurrent=max_concurrent,
             idle_timeout=idle_timeout,
+            runs_dir=runs_dir,
         )
     )
 
