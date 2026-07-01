@@ -3,7 +3,7 @@
 > **日期**：2026-07-02
 > **SPEC**：[phase-11-cli-enrichment.md](../specs/phase-11-cli-enrichment.md) §2.1 / §4 / §10.2 item3 B5 / §10.3 C3
 > **PLAN**：[2026-07-01-phase11-cli-enrichment.md](../plans/2026-07-01-phase11-cli-enrichment.md) P1.1（Step B 部分）
-> **commit**：`<TBD>`
+> **commit**：`2c622b7`
 > **状态**：Step B 完成（guidance 注入闭环 + SIGINT-as-interrupt + review §2.1 死锁修复）；feature 可合并
 
 ---

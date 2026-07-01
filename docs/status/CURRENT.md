@@ -7,14 +7,14 @@
 
 ## 当前任务
 
-**phase 11 第一波 P1.1 Interrupt UI + Guidance 注入 —— 已完成（Step A `9db57f4` + Step B `<TBD>`）。**
+**phase 11 第一波 P1.1 Interrupt UI + Guidance 注入 —— 已完成（Step A `9db57f4` + Step B `2c622b7`）。**
 
 feature 可合并：Ctrl+G → InterruptModal（CONTINUE/SKIP/ABORT + guidance）→ orchestrator node 边界
 消费 → guidance 累积进 ctx → 重 spawn prompt 含 `[User Guidance]`。review §2.1 critical 死锁已修。
 
 - **SPEC**：[`docs/specs/phase-11-cli-enrichment.md`](../specs/phase-11-cli-enrichment.md) §3（中断 UI）/ §4（guidance）/ §11.1（CLI 单壳路径偏离）
 - **Step A**：commit `9db57f4`，release note [`2026-07-01-phase11-interrupt-ui.md`](../releases/2026-07-01-phase11-interrupt-ui.md)
-- **Step B**：commit `<TBD>`，release note [`2026-07-02-phase11-guidance-injection.md`](../releases/2026-07-02-phase11-guidance-injection.md)
+- **Step B**：commit `2c622b7`，release note [`2026-07-02-phase11-guidance-injection.md`](../releases/2026-07-02-phase11-guidance-injection.md)
 
 ## 待办
 
