@@ -7,12 +7,17 @@
 from __future__ import annotations
 
 import asyncio
+import socket
+import threading
+import time
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from orca.iface.web.run_manager import RunManager
+from orca.iface.web.server import create_app
 
 
 def run_async(coro):
@@ -65,3 +70,48 @@ def manager(tmp_path: Path) -> RunManager:
 def yaml_path(tmp_path: Path) -> Path:
     """demo workflow yaml 路径（纯 script，零 claude）。"""
     return demo_linear_yaml(tmp_path)
+
+
+def free_port() -> int:
+    """让 OS 分配一个空闲端口（bind 后读 sockname）。供 live_server 用。"""
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture
+def live_server(tmp_path: Path):
+    """启动真 uvicorn server（同进程，daemon 线程跑），yield ``(base_url, manager)``。
+
+    供所有 playwright/integration 测试共用（DRY：原 4 个测试文件各抄一份）。
+    server 在独立 daemon 线程 + 自己的 asyncio loop 里跑 ``server.serve()``；主线程**不能**
+    对该 loop ``run_until_complete``（已 running）—— 改轮询端口等 accept 就绪。teardown
+    ``should_exit`` + ``join`` + ``manager.shutdown``（loop 已停，可 run_until_complete）。
+    """
+    import uvicorn
+
+    manager = RunManager(runs_dir=tmp_path / "runs")
+    app = create_app(manager)
+    port = free_port()
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    loop = asyncio.new_event_loop()
+
+    def _serve() -> None:
+        loop.run_until_complete(server.serve())
+
+    thread = threading.Thread(target=_serve, daemon=True)
+    thread.start()
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                break
+        except OSError:
+            time.sleep(0.05)
+    base_url = f"http://127.0.0.1:{port}"
+    yield base_url, manager
+    server.should_exit = True
+    thread.join(timeout=5.0)
+    loop.run_until_complete(manager.shutdown())
+    loop.close()

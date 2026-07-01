@@ -9,14 +9,9 @@ phase 9a 无 UI，但用 playwright 的 ``page.request``（fetch）+ ``page.eval
 from __future__ import annotations
 
 import asyncio
-import socket
-from contextlib import closing
 from pathlib import Path
 
 import pytest
-
-from orca.iface.web.run_manager import RunManager
-from orca.iface.web.server import create_app
 
 pytestmark = pytest.mark.integration
 
@@ -25,12 +20,6 @@ try:
     from playwright.async_api import async_playwright  # noqa: F401
 except ImportError:
     _PLAYWRIGHT_AVAILABLE = False
-
-
-def _free_port() -> int:
-    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 def _demo_yaml(tmp_path: Path) -> Path:
@@ -80,47 +69,10 @@ nodes:
     return p
 
 
-@pytest.fixture
-def live_server(tmp_path):
-    """启动真 uvicorn server，yield (base_url, manager)。teardown 关 server。"""
-    import uvicorn
-
-    manager = RunManager(runs_dir=tmp_path / "runs")
-    app = create_app(manager)
-    port = _free_port()
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
-    server = uvicorn.Server(config)
-    loop = asyncio.new_event_loop()
-
-    def run():
-        loop.run_until_complete(server.serve())
-
-    import threading
-    t = threading.Thread(target=run, daemon=True)
-    t.start()
-    # loop 在 daemon 线程跑 server.serve()，主线程不能对它 run_until_complete（已 running）；
-    # 改轮询端口等 server accept 就绪。
-    import time
-    _deadline = time.time() + 5.0
-    while time.time() < _deadline:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-                break
-        except OSError:
-            time.sleep(0.05)
-    base_url = f"http://127.0.0.1:{port}"
-    yield base_url, manager, loop
-    # graceful：通过 should_exit（不能对 running loop run_until_complete）
-    server.should_exit = True
-    t.join(timeout=5.0)
-    loop.run_until_complete(manager.shutdown())
-    loop.close()
-
-
 @pytest.mark.skipif(not _PLAYWRIGHT_AVAILABLE, reason="playwright 未安装")
 def test_playwright_runs_api(live_server, tmp_path):
     """playwright fetch('/api/runs') 返回非空元数据列表（懒加载断言）。SPEC §6.8。"""
-    base_url, manager, loop = live_server
+    base_url, manager = live_server
     yaml_path = _demo_yaml(tmp_path)
 
     async def go():
@@ -144,7 +96,7 @@ def test_playwright_runs_api(live_server, tmp_path):
 @pytest.mark.skipif(not _PLAYWRIGHT_AVAILABLE, reason="playwright 未安装")
 def test_playwright_events_api(live_server, tmp_path):
     """playwright fetch('/api/runs/<id>/events') 返回事件数组。SPEC §6.8。"""
-    base_url, manager, loop = live_server
+    base_url, manager = live_server
     yaml_path = _demo_yaml(tmp_path)
 
     async def go():
@@ -174,7 +126,7 @@ def test_playwright_ws_subscribe(live_server, tmp_path):
       3. 事件 type 是编排真发的事件（node_started/node_completed/workflow_started 等），
          证明是 bus fan-out 转发，而非 WS 层自造
     """
-    base_url, manager, loop = live_server
+    base_url, manager = live_server
     yaml_path = _slow_yaml(tmp_path)
 
     async def go():

@@ -21,14 +21,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import socket
-import threading
-from contextlib import closing
 
 import pytest
-
-from orca.iface.web.run_manager import RunManager
-from orca.iface.web.server import create_app
 
 pytestmark = pytest.mark.integration
 
@@ -49,47 +43,6 @@ PALETTE = [
     "#9A7BA8",  # soft mauve
     "#E08E9B",  # dusty rose
 ]
-
-
-def _free_port() -> int:
-    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-@pytest.fixture
-def live_server(tmp_path):
-    """启动真 uvicorn server（同 test_playwright_9c.py 模式）。"""
-    import uvicorn
-
-    manager = RunManager(runs_dir=tmp_path / "runs")
-    app = create_app(manager)
-    port = _free_port()
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
-    server = uvicorn.Server(config)
-    loop = asyncio.new_event_loop()
-
-    def run():
-        loop.run_until_complete(server.serve())
-
-    t = threading.Thread(target=run, daemon=True)
-    t.start()
-    # loop 在 daemon 线程跑 server.serve()，主线程不能对它 run_until_complete（已 running）；
-    # 改轮询端口等 server accept 就绪。
-    import time
-    _deadline = time.time() + 5.0
-    while time.time() < _deadline:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-                break
-        except OSError:
-            time.sleep(0.05)
-    base_url = f"http://127.0.0.1:{port}"
-    yield base_url, manager
-    server.should_exit = True
-    t.join(timeout=5.0)
-    loop.run_until_complete(manager.shutdown())
-    loop.close()
 
 
 async def _inject(page, event):

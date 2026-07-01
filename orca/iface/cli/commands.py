@@ -220,6 +220,32 @@ def list_workflows(
         typer.echo(f"  {p.name}")
 
 
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="监听地址"),
+    port: int = typer.Option(7428, "--port", help="监听端口（浏览器访问 http://<host>:<port>）"),
+    max_concurrent: int = typer.Option(
+        3, "--max-concurrent", help="最大并发 run 数（超过排队）"
+    ),
+) -> None:
+    """启动 Web UI（FastAPI + WebSocket，多 run 管理 + DAG + gate + tape replay + chart）。
+
+    首次使用需先构建前端（一次性）::
+
+        cd orca/iface/web/frontend && npm install && npm run build
+
+    然后执行本命令，浏览器打开 http://127.0.0.1:7428 。hook 桥默认同端口（ORCA_PORT 可覆盖）。
+    """
+    import asyncio
+
+    # 延迟 import：fastapi/uvicorn 仅 serve 路径需要（让 run/validate/list/--help 不拉 web 栈）。
+    from orca.iface.web import RunManager, run_server
+
+    manager = RunManager(max_concurrent=max_concurrent)
+    typer.echo(f"Orca Web UI → http://{host}:{port}  (Ctrl-C 退出)")
+    asyncio.run(run_server(manager, host=host, port=port))
+
+
 # ── 入口 ─────────────────────────────────────────────────────────────────────
 
 
