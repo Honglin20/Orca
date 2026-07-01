@@ -18,6 +18,9 @@ set_result + 后台 broadcaster emit resolved），但语义不同——
   - **resolve 是同步非阻塞**：壳调它喂答案立即返回（是否赢家 first-wins）。
     resolve 不直接 emit——广播由 ``_broadcaster`` 异步负责（避免 resolve 阻塞在 emit 上，
     SPEC §2.2 决策 2 / §10 决策 11）。
+  - **record_resolved 是 CLI 单壳路径**：``_handle_interrupt`` 在 node 边界直接调它。
+    与 ``resolve`` 不同，``record_resolved`` **同步 await bus.emit("interrupt_resolved")``**
+    写 Tape（关键正确性修复，见方法 docstring），async broadcaster 仅负责通知订阅者刷新 UI。
   - **first-wins race**：多壳并发 resolve 同 interrupt_id → ``_resolve_lock``（threading.Lock）
     保护「get + done check + set_result + put_nowait」原子段，只第一个赢家返回 True。
   - **晚到 / 未知 resolve = fail loud**：返回 False + warning（SPEC §10 决策 7）。
@@ -135,18 +138,33 @@ class InterruptHandler(BroadcasterMixin):
         guidance: str | None,
         source: InterruptSource,
     ) -> None:
-        """CLI 单壳路径：用户已在 modal 答完，emit ``interrupt_requested`` + 入队让 broadcaster
-        emit ``interrupt_resolved``（写 Tape）。
+        """CLI 单壳路径：用户已在 modal 答完，**同步** emit ``interrupt_requested`` +
+        ``interrupt_resolved`` 写 Tape（含订阅者 fan-out）。
 
         与 ``request``/``resolve`` 的区别（SPEC §3.1 时序）：
-          - 多壳路径（web/mcp）：``request`` emit requested + await future；壳 ``resolve`` set_result
-            + 入队；broadcaster emit resolved。resolve 必须在 request 之后（future 先注册）。
+          - 多壳路径（web/mcp）：``request`` emit requested + await future；壳 ``resolve`` 同步
+            set_result + 入队；broadcaster 异步 emit resolved。resolve 必须在 request 之后
+            （future 先注册）。broadcaster 在此路径是必须的：``resolve`` 是同步方法不能
+            ``await emit``，只能投队列让 async broadcaster 代发。
           - CLI 单壳路径（本方法）：用户在 InterruptModal 里答完，``action``/``guidance`` 已知，
             Orchestrator ``_handle_interrupt`` 在 node 边界直接调本方法——不经 future 机制
             （CLI 不需要竞速，且 modal dismiss 发生在 node 边界**之前**，时序不匹配 await-future）。
 
-        本方法 emit ``interrupt_requested``（写 Tape，三壳可见有人请求中断）+ 入队 resolved
-        payload（broadcaster 异步 emit ``interrupt_resolved`` 写 Tape）。两者都写 Tape，唯一真相源。
+        **关键正确性（tape 写同步，不经 broadcaster）**：``interrupt_resolved`` 必须**同步**
+        await bus.emit 写 Tape（SPEC §4.1 ``_handle_interrupt`` 内同步 emit 的契约描述）。
+        绝不能把「写 Tape」这一步交给 async broadcaster 异步负责——否则 abort/skip 分支
+        ``_drive_loop`` 立即结束 → ``run()`` 的 ``bus.close()`` 早于 broadcaster flush，
+        ``emit`` 撞 close 抛 RuntimeError 被吞 → ``interrupt_resolved`` 永久丢失，违反单
+        Tape 配对不变量 + 唯一真相源铁律（wave-1 e2e 审计发现的 critical bug）。
+
+        本方法是 async，可直接 ``await emit``，故**不经 broadcaster**——``bus.emit`` 第一动作
+        写 Tape、第二动作同步 ``put_nowait`` 给所有订阅者（bus.py fan-out），Tape 写 + 订阅者
+        通知在一次 await 内全部完成，与后续 ``bus.close()`` 无竞态。broadcaster 仅留给同步
+        ``resolve()`` 入口（它无法 await emit，必须靠 async 代发）。
+
+        **不登记 ``_interrupts_meta``**：该 dict 仅供 ``_emit_resolved``（broadcaster 出队时）
+        取 node/session_id。本同步路径已直接带 node/session_id 调 emit，无需登记 meta——
+        后续维护者勿误以为 record_resolved 会写 meta 而依赖它。
         """
         await self._bus.emit(
             "interrupt_requested",
@@ -161,16 +179,19 @@ class InterruptHandler(BroadcasterMixin):
             node=ireq.node,
             session_id=ireq.session_id,
         )
-        # 登记 meta（_emit_resolved 取 node/session_id 用）+ 入队让 broadcaster emit resolved。
-        async with self._lock:
-            self._interrupts_meta[ireq.id] = ireq
-        if self._resolved_queue is not None:
-            self._resolved_queue.put_nowait((ireq.id, action, guidance, source))
-        else:
-            logger.warning(
-                "interrupt %s record_resolved 但 broadcaster 未启动，resolved 事件未广播",
-                ireq.id,
-            )
+        # 同步写 Tape + fan-out 订阅者（关键正确性：resolved 必须在返回前落盘，不交给
+        # async broadcaster——避免与 run() 的 bus.close() 竞态丢事件）。
+        await self._bus.emit(
+            "interrupt_resolved",
+            data={
+                "interrupt_id": ireq.id,
+                "action": action,
+                "guidance": guidance,
+                "resolved_by": source,
+            },
+            node=ireq.node,
+            session_id=ireq.session_id,
+        )
 
     def resolve(
         self,

@@ -519,8 +519,9 @@ class Orchestrator:
 
         两条取答路径（SPEC §3.1 时序）：
           - **CLI 单壳**（``_interrupt_answer`` 非 None）：用户在 InterruptModal 答完随
-            ``request_interrupt`` 带入。调 ``handler.record_resolved`` emit requested + 入队
-            resolved（broadcaster 写 Tape）。**不经 await-future**——modal dismiss 在 node 边界
+            ``request_interrupt`` 带入。调 ``handler.record_resolved`` **同步** emit requested +
+            resolved 写 Tape（不交给 async broadcaster——避免与 ``run()`` 的 ``bus.close()``
+            竞态丢事件，wave-1 e2e 修复）。**不经 await-future**——modal dismiss 在 node 边界
             之前，await-future 会死锁（review §2.1 critical bug 的修复）。
           - **多壳**（``_interrupt_answer`` None）：``await handler.request(ireq)`` 等任一壳 resolve
             （web/mcp，phase 11 本 step 不启用，留接口）。
@@ -534,7 +535,7 @@ class Orchestrator:
         self._interrupt_answer = None
 
         if answer is not None:
-            # CLI 单壳路径：用户已答，record_resolved emit requested + 入队 resolved 写 Tape。
+            # CLI 单壳路径：用户已答，record_resolved 同步 emit requested + resolved 写 Tape。
             action, guidance = answer
             await self._interrupt_handler.record_resolved(ireq, action, guidance, ireq.source)
         else:

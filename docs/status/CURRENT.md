@@ -7,22 +7,22 @@
 
 ## 当前任务
 
-**phase 11 第一波 P2.2 Checkpoint Resume —— 已完成。**
+**phase 11 第一波全部落地 + wave-1 e2e 审计闭环 —— 全绿（0 xfail）。**
 
-feature 可合并：`orca resume <tape|run_id>` 读 Tape 重放到崩溃前状态，emit `workflow_resumed`
-后续跑。6 种失败模式（missing/empty/mid-corrupt/trailing-partial/completed/parallel-mid-crash）
-各有 typed exception → exit code。code-reviewer 全部反馈闭环。
+第一波 feature：CI(P0.1) ✓ + Interrupt/Guidance(P1.1) ✓ + Resume(P2.2) ✓。wave-1 e2e
+覆盖审计发现 1 个 critical bug（`interrupt_resolved` 同步写 Tape 修复，已闭环）+ 补齐
+e2e 契约测试（中断三分支配对不变量 / SKIP / ABORT / 多壳 await-future / prompt_rendered
+不变量 / emit-on-closed-bus fail-loud）。
 
-- **SPEC**：[`docs/specs/phase-11-cli-enrichment.md`](../specs/phase-11-cli-enrichment.md) §7 / §2.2 / §7.3 / §10.3
-- **release note**：[`2026-07-02-phase11-checkpoint-resume.md`](../releases/2026-07-02-phase11-checkpoint-resume.md)
+- **最新 release note**：[`2026-07-02-phase11-interrupt-resolved-fix.md`](../releases/2026-07-02-phase11-interrupt-resolved-fix.md)
+- **SPEC**：[`docs/specs/phase-11-cli-enrichment.md`](../specs/phase-11-cli-enrichment.md)
 
 ## 待办
 
 1. **人工 E2E**：`orca run examples/mxint_analysis.yaml` → `kill -9` → `orca resume runs/<id>.jsonl
    --yaml examples/mxint_analysis.yaml` → 验证 `workflow_resumed` + 续跑至 `workflow_completed`
    （需真 claude，automatable 断言已由 `test_resume_emits_workflow_resumed_and_completes` 覆盖）。
-2. **第一波完成**：CI(P0.1) ✓ + Interrupt/Guidance(P1.1) ✓ + Resume(P2.2) ✓ —— 第一波全部落地。
-3. **后续 wave**：Retry(P0.2) → ask_user(P1.2) → Validator/Dialog/Wait → daemon/Skip。
+2. **后续 wave**：Retry(P0.2) → ask_user(P1.2) → Validator/Dialog/Wait → daemon/Skip。
 
 ## 必读文件
 
