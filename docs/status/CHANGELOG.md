@@ -17,6 +17,22 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-07-02] agent 可观测性 + TUI 闪退 + 子进程泄漏修复（4 bug）
+排查 demo_mixed 529 闪退时定位的 4 个 Orca 自身 bug：① OnResult 加 `api_error_status` 第 5 参
+（全仓 11 处同步），executor `_result_diag()` 让 529 等 API 错误详情落到 `node_failed`（原只带空 stderr）；
+② translator ApiRetry 对齐真实字段 `attempt`/`retry_delay_ms`/`error_status`（原读 `retry_count`/`wait_seconds`
+永远 null，显示「第 ? 次」）；③ TUI 终态后停留 + notify 提示「按 q 退出」（原 `self.exit()` 闪退）；
+④ `CLIRunner.stream()` finally terminate proc（原中途 q 强退留孤儿 claude）。7 新测试，985 passed 0 回归。
+Commit: `f422d98`。详见 [release note](releases/2026-07-02-agent-observability-tui-fixes.md)。
+
+## [2026-07-02] terminate step —— 新增 node kind `terminate`（业务级显式工作流终止节点）
+新增第 6 个 node kind：触达即终止，`status=success` → `workflow_completed`（用 terminate.outputs），
+`status=failed` → `workflow_failed{error_type=WorkflowTerminated, message=reason}`。补 `TerminateExecutor`
+（仿 set_node 模板）+ factory 分派 + orchestrator 终态分发（新 `WorkflowTerminated` 异常 + `_finalize_terminated`
+helper）+ compile 层 4 项 fail loud 校验（routes 空 / 非entry / 非parallel branch / 非foreach body）。
+零 EventType/reducer 改动（复用既有 `node_completed`）；19 新测试，1013 passed 0 回归。
+Commit: `41a5936`。详见 [release note](releases/2026-07-02-terminate-step.md)。
+
 ## [2026-07-02] phase 11 收官 —— CLI feature 补全全部完成（11 feature，652→959 测试，0 回归）
 对抗评审（fail→conditional-pass，22 真问题闭环）→ 4 wave clean-code-builder + 4 wave test-coverage-e2e →
 code-reviewer 横切审计（0 🔴 0 🟡）。交付 CI / Interrupt+Guidance / Resume / Retry / ask_user MCP /

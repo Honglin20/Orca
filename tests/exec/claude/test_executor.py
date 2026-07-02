@@ -48,8 +48,9 @@ def run_async(coro):
 class FakeRunner:
     """CLIRunner 替身：按预设行 yield，暴露 timed_out/exit_code/elapsed/stderr。
 
-    检测到 result 行时回调 on_result（含 is_error 透传，SPEC §2.4 需要）。
-    与 test_e2e.py 的 FakeRunner 同构（DRY 受限于 tests 非包，故就地复制）。
+    检测到 result 行时回调 on_result（含 is_error + api_error_status 透传，SPEC §2.4 /
+    §6 可观测性需要）。与 test_e2e.py 的 FakeRunner 同构（DRY 受限于 tests 非包，故就地复制）。
+    与真实 CLIRunner 的 OnResult 5 参签名保持一致。
     """
 
     def __init__(
@@ -89,6 +90,7 @@ class FakeRunner:
             obj.get("usage") or {},
             obj.get("total_cost_usd") or 0.0,
             bool(obj.get("is_error", False)),
+            obj.get("api_error_status"),
         )
 
 
@@ -261,6 +263,45 @@ def test_error_path_stream_is_error(executor, monkeypatch):
     failed = _failed_event(events)
     assert failed.data["phase"] == "stream"
     assert failed.data["error_type"] == "ClaudeStreamError"
+
+
+def test_error_path_message_carries_api_error_status(executor, monkeypatch):
+    """Bug1：claude 把 API 错误写在 result 行（api_error_status / result 文本），不在 stderr。
+
+    典型 529 早退场景：exit_code!=0 且 stderr 空，node_failed.message 仍须带 HTTP 错误码
+    + 错误描述（否则用户看到「exit_code=1；stderr 末尾：」完全无信息）。
+    """
+    lines = [
+        json.dumps({"type": "result", "subtype": "error", "is_error": True,
+                  "api_error_status": 529, "result": "API Error: 529 overloaded",
+                  "total_cost_usd": 0.0, "usage": {}}),
+    ]
+    patch_runner_with_lines(monkeypatch, lines, exit_code=1, stderr="")
+    node = AgentNode(name="a", prompt="p")
+    events = run_async(_collect(node, executor, RunContext({}, {}, "r1")))
+    failed = _failed_event(events)
+    assert failed.data["phase"] == "spawn"
+    msg = failed.data["message"]
+    assert "529" in msg           # HTTP 错误码可见（_result_diag 产出）
+    assert "overloaded" in msg    # 错误描述可见
+
+
+def test_error_path_stream_message_carries_api_error_status(executor, monkeypatch):
+    """Bug1（stream 分支）：exit_code=0 + result.is_error=true + api_error_status →
+    node_failed(phase=stream) 的 message 也带 HTTP 错误码（claude 重试到放弃、返回
+    is_error result 的场景）。_result_diag 在 spawn / stream 分支共用，显式用例防回归。
+    """
+    lines = [
+        json.dumps({"type": "result", "subtype": "error", "is_error": True,
+                  "api_error_status": 529, "result": "API Error: 529 overloaded",
+                  "total_cost_usd": 0.0, "usage": {}}),
+    ]
+    patch_runner_with_lines(monkeypatch, lines, exit_code=0)
+    node = AgentNode(name="a", prompt="p")
+    events = run_async(_collect(node, executor, RunContext({}, {}, "r1")))
+    failed = _failed_event(events)
+    assert failed.data["phase"] == "stream"
+    assert "529" in failed.data["message"]
 
 
 def test_error_path_result_parse_no_result(executor, monkeypatch):

@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 from orca.exec.error import ExecError
 from orca.run.aggregate import GroupFailure
-from orca.run.errors import MaxIterationsError, WorkflowAborted
+from orca.run.errors import MaxIterationsError, WorkflowAborted, WorkflowTerminated
 from orca.run.executor_adapter import execute_and_emit
 from orca.run.foreach import run_foreach
 from orca.run.lifecycle import (
@@ -269,6 +269,12 @@ class Orchestrator:
             return replay_state(self.bus.tape)
         try:
             final_outputs = await self._drive_loop()
+        except WorkflowTerminated as e:
+            # terminate step：触达 TerminateNode 的业务级终止信号。status=success →
+            # emit workflow_completed（用 terminate.outputs 替代 wf.outputs 求值）；
+            # status=failed → emit workflow_failed{WorkflowTerminated}（带 reason）。
+            # 与其它 except 并列而非走 _classify_error：terminate 不是「错误」，是显式声明。
+            return await self._finalize_terminated(e, start_ts)
         except (ExecError, RouteError, MaxIterationsError, GroupFailure, WorkflowAborted) as e:
             # fail loud：五类编排错误 → workflow_failed
             error_type = _classify_error(e)
@@ -314,6 +320,34 @@ class Orchestrator:
                 await self._agent_tools_server.stop()
             except Exception:  # noqa: BLE001 — 退出路径兜底
                 logger.warning("AgentToolsMcpServer.stop 异常（已吞）", exc_info=True)
+
+    async def _finalize_terminated(
+        self, e: WorkflowTerminated, start_ts: float
+    ) -> RunState:
+        """terminate step 收尾：据 ``e.status`` emit workflow_completed / failed 并 close。
+
+        ``run`` 与 ``run_from_state`` 共享此 helper（DRY：两入口的 terminate 处理对称）。
+        与 ``_classify_error`` 路径并列但**不**走它——terminate 不是「错误」，是显式声明，
+        status=success 时还要 emit workflow_completed（错误路径永远只 emit workflow_failed）。
+
+        - ``status="success"`` → ``workflow_completed``，``outputs=e.outputs``（terminate
+          节点的渲染后 outputs，**不**走 ``_evaluate_outputs(wf.outputs)``）。
+        - ``status="failed"`` → ``workflow_failed``，``error_type="WorkflowTerminated"``，
+          ``message=e.reason``，``node=e.node``。
+        """
+        from orca.events.replay import replay_state
+
+        if e.status == "success":
+            elapsed = now_monotonic() - start_ts
+            t, data = make_workflow_completed(self.wf, e.outputs, elapsed=elapsed)
+        else:
+            t, data = make_workflow_failed(
+                "WorkflowTerminated", e.reason, node=e.node,
+            )
+        await self.bus.emit(t, data)
+        await self._stop_agent_tools()
+        self.bus.close()
+        return replay_state(self.bus.tape)
 
     # ── phase 11 §7：Checkpoint Resume（SPEC §7.2）─────────────────────────────
 
@@ -528,6 +562,10 @@ class Orchestrator:
             final_outputs = await self._drive_from(
                 self._resume_start_node, self._resume_initial_outputs
             )
+        except WorkflowTerminated as e:
+            # terminate step（与 run() 对称）：status=success → workflow_completed；
+            # status=failed → workflow_failed{WorkflowTerminated}。
+            return await self._finalize_terminated(e, start_ts)
         except (ExecError, RouteError, MaxIterationsError, GroupFailure, WorkflowAborted) as e:
             error_type = _classify_error(e)
             node = _error_node(e)
@@ -613,6 +651,23 @@ class Orchestrator:
             raw_output = await self._dispatch(current, step_ctx)
             # 累加：包装成 {"output": raw}（render._namespace 约定）
             outputs_acc[current] = {"output": raw_output}
+
+            # terminate step：触达 TerminateNode 时**不**评估 routes，直接 raise
+            # WorkflowTerminated 信号（run / run_from_state 据信号 emit workflow_completed
+            # 或 workflow_failed{WorkflowTerminated}）。executor 已正常 emit node_completed
+            # （按 Executor 标准契约）；这里只是控制流的「不再推进」。
+            #
+            # 单向依赖铁律：executor 不 emit workflow 级事件；orchestrator 在此判断 kind
+            # 决定终态。raw_output 是 executor 给的 data["output"]（TerminateExecutor 把
+            # status/reason/outputs 装进 output 字段，见 orca/exec/terminate.py）。
+            node_obj = self._node_by_name.get(current)
+            if node_obj is not None and node_obj.kind == "terminate":
+                raise WorkflowTerminated(
+                    status=raw_output["status"],
+                    reason=raw_output["reason"],
+                    outputs=raw_output["outputs"],
+                    node=current,
+                )
 
             # 路由求值（用更新后的 ctx —— 含本步 output）
             current = await self._next_node_after(current, outputs_acc, raw_output)

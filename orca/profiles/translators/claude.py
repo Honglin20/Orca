@@ -262,11 +262,53 @@ def _translate_result(obj: dict, session_id: str) -> list[Event]:
 def _translate_system(obj: dict, session_id: str) -> list[Event]:
     """system 行：api_retry 发 warning 级 error 事件（可见但不阻断，SPEC §6 / §3.1）。
 
-    - ``subtype=api_retry`` → [error(phase=api_retry, retry_count, wait_seconds)]（warning 级）
-    - ``subtype=init`` / ``status`` → []（可选记日志，不产事件）
+    - ``subtype=api_retry`` → [error(phase=api_retry, retry_count, wait_seconds, error_status)]
+      warning 级。字段名按**真实 claude（2.1.195）协议**：``attempt`` / ``retry_delay_ms`` /
+      ``error_status``（HTTP 码）/ ``error``（描述）/ ``max_retries``；旧字段名
+      ``retry_count`` / ``wait_seconds`` 作 fallback（向后兼容旧 fixture / 其他 backend）。
+    - ``subtype=init`` / ``status`` / ``hook_*`` → []（不产事件）
+
+    实测真实行（2026-07-02，智谱 529 触发抓取）::
+
+        {"type":"system","subtype":"api_retry","attempt":1,"max_retries":10,
+         "retry_delay_ms":547.07,"error_status":529,"error":"overloaded"}
+
+    message 优雅降级：字段缺失时省略对应片段，不显示无信息的 ``?`` 占位符。
     """
     subtype = obj.get("subtype")
     if subtype == "api_retry":
+        # 真实 claude 发 attempt / retry_delay_ms / error_status；旧名 fallback 兼容。
+        attempt = obj.get("attempt", obj.get("retry_count"))
+        retry_delay_ms = obj.get("retry_delay_ms")
+        wait_seconds = obj.get("wait_seconds")
+        if retry_delay_ms is not None and wait_seconds is None:
+            try:
+                wait_seconds = float(retry_delay_ms) / 1000.0
+            except (TypeError, ValueError):
+                wait_seconds = None
+        error_status = obj.get("error_status")
+        error = obj.get("error") or ""
+        max_retries = obj.get("max_retries")
+
+        # message 优雅降级：缺失字段不出现「?」（无信息且难看）。
+        parts: list[str] = ["claude 限流重试"]
+        if attempt is not None:
+            parts.append(
+                f"第 {attempt}/{max_retries} 次"
+                if max_retries is not None
+                else f"第 {attempt} 次"
+            )
+        if wait_seconds is not None:
+            parts.append(f"等待 {wait_seconds:.1f}s")
+        detail = (
+            f"HTTP {error_status} {error}".strip()
+            if error_status is not None
+            else error
+        )
+        message = " ".join(parts)
+        if detail:
+            message = f"{message}（{detail}）"
+
         return [
             _event(
                 "error",
@@ -274,12 +316,11 @@ def _translate_system(obj: dict, session_id: str) -> list[Event]:
                 {
                     "error_type": "ApiRetry",
                     "phase": "api_retry",
-                    "message": (
-                        f"claude 限流重试：第 {obj.get('retry_count', '?')} 次，"
-                        f"等待 {obj.get('wait_seconds', '?')}s（{obj.get('error', '')}）"
-                    ),
-                    "retry_count": obj.get("retry_count"),
-                    "wait_seconds": obj.get("wait_seconds"),
+                    "message": message,
+                    "retry_count": attempt,
+                    "wait_seconds": wait_seconds,
+                    "error_status": error_status,
+                    "max_retries": max_retries,
                 },
             )
         ]

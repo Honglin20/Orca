@@ -5,21 +5,22 @@
 
 ---
 
-## 当前状态：phase 11 已收官，无进行中任务
+## 当前状态：4 bug 修复完成，无进行中任务
 
-**phase 11 CLI feature 补全全部完成**（11 feature，652→959 测试，0 回归，code-reviewer 横切 0 🔴 0 🟡）。
+**agent 可观测性 + TUI 闪退 + 子进程泄漏修复**全部完成（4 bug + 7 新测试 + 6 FakeRunner 同步，985 passed 0 回归，code-reviewer 0 🔴 0 🟡）。
 
-- **收官 release note**：[`docs/releases/2026-07-02-phase11-complete.md`](../releases/2026-07-02-phase11-complete.md)
-- **SPEC**：[`docs/specs/phase-11-cli-enrichment.md`](../specs/phase-11-cli-enrichment.md)（§10.3 评审修订 + §11.1-§11.9 偏离记录）
-- **CHANGELOG**：顶部 phase 11 收官条目 + 各 feature 逐条索引
+- **release note**：[`docs/releases/2026-07-02-agent-observability-tui-fixes.md`](../releases/2026-07-02-agent-observability-tui-fixes.md)
+- **CHANGELOG**：顶部 4-bug-fix 索引
+- 四个 bug：① OnResult 加 `api_error_status` 第 5 参（全仓 11 处），`_result_diag()` 让 529 落到 `node_failed`；② translator ApiRetry 对齐真实字段 `attempt`/`retry_delay_ms`/`error_status`；③ TUI 终态停留 + notify「按 q 退出」（不闪退）；④ `stream()` finally terminate proc（防孤儿 claude）。
 
 ## 待办（等用户指示方向）
 
-1. **可选 polish（非阻塞）**：读写 attach（descoped D2，需 UDS 控制通道）；`_stop_agent_tools` 异常收窄。
-2. **真 claude E2E（manual，待 TTY + API key）**：mxint_analysis 全流程实跑；走 CI `/integration` PR comment 或本地 `pytest -m integration`。
-3. **下一阶段（未规划）**：Web phase（前端 InterruptModal/DialogModal/cancel 端点）；phase 12+ polish（Self-Update / Workflow Registry 等推迟项）。
+1. **Bug3 端到端 TUI 验证（manual，待智谱恢复或换可用模型）**：`uv run orca run examples/demo_mixed.yaml`，failed 时 TUI 应停留显示「按 q 退出」而非闪退；中途 `q` 后 `pgrep -af claude` 应无孤儿。
+2. **可选 polish（非阻塞）**：读写 attach（descoped D2，需 UDS）；`_stop_agent_tools` 异常收窄。
+3. **真 claude E2E（manual）**：mxint_analysis 全流程实跑；CI `/integration` PR comment 或本地 `pytest -m integration`。
+4. **下一阶段（未规划）**：Web phase（前端 InterruptModal/DialogModal/cancel 端点 + terminate 节点 widget）；phase 12+ polish。
 
 ## 必读文件（下一任务开工前按需）
 
-- [`docs/releases/2026-07-02-phase11-complete.md`](../releases/2026-07-02-phase11-complete.md)（phase 11 全貌）
-- [`docs/specs/phase-11-cli-enrichment.md`](../specs/phase-11-cli-enrichment.md)
+- [`docs/releases/2026-07-02-agent-observability-tui-fixes.md`](../releases/2026-07-02-agent-observability-tui-fixes.md)（本次 4 bug 全貌）
+- [`docs/releases/2026-07-02-terminate-step.md`](../releases/2026-07-02-terminate-step.md)（terminate step，前一里程碑）

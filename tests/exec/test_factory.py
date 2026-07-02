@@ -4,6 +4,7 @@
   - AgentNode → ClaudeExecutor（用 builtin claude profile）
   - ScriptNode → ScriptExecutor
   - SetNode → SetExecutor
+  - TerminateNode → TerminateExecutor（terminate step）
   - ForeachNode → NotImplementedError
   - AgentNode executor="nonexistent" → 透传 get_profile 的 ValueError（fail loud）
 """
@@ -16,7 +17,8 @@ from orca.exec import make_executor
 from orca.exec.claude.executor import ClaudeExecutor
 from orca.exec.script import ScriptExecutor
 from orca.exec.set_node import SetExecutor
-from orca.schema import AgentNode, ForeachNode, ScriptNode, SetNode
+from orca.exec.terminate import TerminateExecutor
+from orca.schema import AgentNode, ForeachNode, ScriptNode, SetNode, TerminateNode
 
 # profiles 注册表重置由 tests/exec/conftest.py 的 autouse fixture 负责。
 
@@ -44,6 +46,12 @@ def test_dispatch_script_to_script_executor():
 def test_dispatch_set_to_set_executor():
     exe = make_executor(SetNode(name="st", values={"a": "1"}))
     assert isinstance(exe, SetExecutor)
+
+
+def test_dispatch_terminate_to_terminate_executor():
+    """TerminateNode → TerminateExecutor（terminate step，SPEC §7.8）。"""
+    exe = make_executor(TerminateNode(name="t", status="success"))
+    assert isinstance(exe, TerminateExecutor)
 
 
 def test_dispatch_foreach_raises_not_implemented():

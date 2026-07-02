@@ -148,11 +148,17 @@ async def validate_output(
     cfg = _build_validator_spawn_config(profile, prompt, effective_model)
 
     # 3. CLIRunner 跑子进程，捕获 result_text（流式丢弃 —— validator 不需 token 级显示）
-    result_holder: dict[str, Any] = {"result_text": None, "is_error": False}
+    result_holder: dict[str, Any] = {
+        "result_text": None, "is_error": False, "api_error_status": None,
+    }
 
-    def on_result(raw_result: str, usage: dict, cost: float, is_error: bool) -> None:
+    def on_result(
+        raw_result: str, usage: dict, cost: float, is_error: bool,
+        api_error_status: int | None = None,
+    ) -> None:
         result_holder["result_text"] = raw_result
         result_holder["is_error"] = is_error
+        result_holder["api_error_status"] = api_error_status
 
     runner = CLIRunner(cfg, on_result=on_result)
     try:
@@ -169,9 +175,11 @@ async def validate_output(
     if runner.exit_code != 0 or result_holder["is_error"]:
         logger.warning(
             "validator claude 自身失败（fail-safe → 当作 passed）：exit_code=%s, "
-            "is_error=%s, stderr 末尾=%s",
+            "is_error=%s, api_error_status=%s, result=%s, stderr 末尾=%s",
             runner.exit_code,
             result_holder["is_error"],
+            result_holder["api_error_status"],
+            (result_holder["result_text"] or "")[:300],
             runner.stderr[-300:],
         )
         return True, []

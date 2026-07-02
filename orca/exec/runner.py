@@ -45,16 +45,21 @@ logger = logging.getLogger(__name__)
 
 # 超时后 SIGTERM 的 grace 秒数；仍存活才 SIGKILL（SPEC §2.5）。
 _KILL_GRACE_SECONDS = 10.0
+# stream() 异常退出（外部 cancel / 中途退出）时，terminate proc 后等其退出的 grace 秒；
+# 超时则 SIGKILL 兜底（防孤儿子进程，烧 API quota）。正常完成路径 proc 已 exit，不走此分支。
+_TERMINATE_GRACE_SECONDS = 3.0
 # stderr 累积上限（防异常 claude 喷爆内存；错误诊断只需末尾片段）。
 _STDERR_MAX_BYTES = 64 * 1024
 
 
-# on_result 回调签名：(raw_result 文本, usage dict, cost_usd float, is_error bool)。
-# translator 仍翻译该行产 agent_usage，但 result 文本经此回调交 executor（保持 translator 纯函数）。
-# is_error 透传：executor 据 result.is_error 做 stream 错误判定（SPEC §2.4 第 3 项 / §6）。
-# 注：SPEC §4.4 草图写的是 ``(str, dict, float)``，这里加 ``is_error`` 是为满足 §2.4 的
-# 有序错误判定（否则 executor 无法区分 success result 与 error result）—— 见 release note。
-OnResult = Callable[[str, dict[str, Any], float, bool], None]
+# on_result 回调签名：(raw_result 文本, usage dict, cost_usd float, is_error bool,
+# api_error_status int | None)。translator 仍翻译该行产 agent_usage，但 result 文本经此
+# 回调交 executor（保持 translator 纯函数）。is_error + api_error_status 透传：executor 据此
+# 做 stream 错误判定（SPEC §2.4 第 3 项 / §6），并把 HTTP 错误码（如 529）落到 node_failed。
+# 注：SPEC §4.4 草图写的是 ``(str, dict, float)``，逐步加 ``is_error`` / ``api_error_status``
+# 是为满足 §2.4 的有序错误判定 + 可观测性（否则 executor 无法区分 success result 与 error
+# result，也丢了 claude 写在 result 行的 API 错误详情）—— 见 release note。
+OnResult = Callable[[str, dict[str, Any], float, bool, int | None], None]
 
 
 @dataclass
@@ -94,7 +99,7 @@ class CLIRunner:
 
     用法（executor 视角）::
 
-        runner = CLIRunner(cfg, on_result=lambda r, u, c: holder.update(...))
+        runner = CLIRunner(cfg, on_result=lambda r, u, c, e, s: holder.update(...))
         async for line in runner.stream():
             for ev in translator(line, session_id):
                 yield ev
@@ -196,6 +201,20 @@ class CLIRunner:
         finally:
             stderr_task.cancel()
             await asyncio.gather(stderr_task, return_exceptions=True)
+            # 防 proc 孤儿：外部 cancel / 异常退出时 stream 提前结束，proc 可能仍存活
+            # （asyncio 子进程不随父 task cancel 自动死，会变孤儿继续跑、烧 API quota）。
+            # 正常完成路径 proc 已 exit（上面 await proc.wait() 返回，returncode 非 None），
+            # 跳过此分支。SIGTERM → grace wait → SIGKILL 兜底。
+            if proc.returncode is None:
+                try:
+                    proc.terminate()
+                    await asyncio.wait_for(proc.wait(), timeout=_TERMINATE_GRACE_SECONDS)
+                except (asyncio.TimeoutError, asyncio.CancelledError, ProcessLookupError):
+                    # grace 超时 / 被取消 / 进程已自行退出：SIGKILL 兜底（同步 syscall，不 await）。
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
             self._finalize(proc, stderr_chunks)
 
     # ── argv ─────────────────────────────────────────────────────────────────
@@ -281,8 +300,17 @@ class CLIRunner:
         usage = obj.get("usage") or {}
         cost = obj.get("total_cost_usd") or 0.0
         is_error = bool(obj.get("is_error", False))
+        # api_error_status（HTTP 错误码，如 529）：claude 把 API 错误写在 result 行顶层，
+        # 不在 stderr。透传给 executor 让 node_failed 带结构化错误码（可观测性，SPEC §6）。
+        # 容错：非 int（缺失 / 异常值）→ None。
+        api_error_status = obj.get("api_error_status")
+        if api_error_status is not None:
+            try:
+                api_error_status = int(api_error_status)
+            except (TypeError, ValueError):
+                api_error_status = None
         try:
-            self._on_result(raw_result, usage, cost, is_error)
+            self._on_result(raw_result, usage, cost, is_error, api_error_status)
         except Exception:  # noqa: BLE001 - on_result 是调用方回调，其异常不应阻断流
             logger.exception("on_result 回调抛异常（已忽略，不阻断 stdout 流）")
 

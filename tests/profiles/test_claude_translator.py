@@ -246,14 +246,21 @@ def test_result_is_error_returns_empty():
 
 
 def test_system_api_retry_to_error_event():
+    """真实 claude（2.1.195）api_retry 行字段：attempt / retry_delay_ms / error_status。
+
+    实测抓取（2026-07-02 智谱 529 触发）：claude 发的是 attempt/max_retries/
+    retry_delay_ms/error_status/error，**不是** retry_count/wait_seconds。translator 必须
+    用真实字段名（旧版读 retry_count/wait_seconds → 永远 null，message 显示「第 ? 次」）。
+    """
     line = json.dumps(
         {
             "type": "system",
             "subtype": "api_retry",
-            "retry_count": 2,
-            "max_retries": 5,
-            "wait_seconds": 3.5,
-            "error": "rate limited",
+            "attempt": 1,
+            "max_retries": 10,
+            "retry_delay_ms": 547.07,
+            "error_status": 529,
+            "error": "overloaded",
         }
     )
     events = claude_translator(line, SESSION)
@@ -262,10 +269,34 @@ def test_system_api_retry_to_error_event():
     assert ev.type == "error"
     assert ev.data["phase"] == "api_retry"
     assert ev.data["error_type"] == "ApiRetry"
+    assert ev.data["retry_count"] == 1                              # attempt → retry_count
+    assert ev.data["wait_seconds"] == pytest.approx(0.547, abs=0.01)  # retry_delay_ms / 1000
+    assert ev.data["error_status"] == 529
+    assert ev.data["max_retries"] == 10
+    assert "第 1/10 次" in ev.data["message"]
+    assert "等待 0.5s" in ev.data["message"]
+    assert "529" in ev.data["message"]
+    assert "overloaded" in ev.data["message"]
+    assert ev.session_id == SESSION
+
+
+def test_system_api_retry_legacy_fields_fallback():
+    """旧字段名（retry_count / wait_seconds）向后兼容 fallback（其他 backend / 旧 fixture）。"""
+    line = json.dumps(
+        {
+            "type": "system",
+            "subtype": "api_retry",
+            "retry_count": 2,
+            "wait_seconds": 3.5,
+            "error": "rate limited",
+        }
+    )
+    ev = claude_translator(line, SESSION)[0]
     assert ev.data["retry_count"] == 2
     assert ev.data["wait_seconds"] == 3.5
+    assert ev.data["error_status"] is None
+    assert "第 2 次" in ev.data["message"]
     assert "rate limited" in ev.data["message"]
-    assert ev.session_id == SESSION
 
 
 def test_system_init_returns_empty():

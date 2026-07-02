@@ -192,13 +192,17 @@ class DialogHandler:
         prompt = _build_dialog_prompt(state.agent_output, state.history, user_text)
         cfg = _build_dialog_spawn_config(state.profile, prompt)
 
-        result_holder: dict[str, Any] = {"result_text": None, "is_error": False}
+        result_holder: dict[str, Any] = {
+            "result_text": None, "is_error": False, "api_error_status": None,
+        }
 
         def on_result(
             raw_result: str, usage: dict, cost: float, is_error: bool,
+            api_error_status: int | None = None,
         ) -> None:
             result_holder["result_text"] = raw_result
             result_holder["is_error"] = is_error
+            result_holder["api_error_status"] = api_error_status
 
         runner = CLIRunner(cfg, on_result=on_result)
         # 流式丢弃（dialog reply 不需 token 级流进 tape——dialog_message 事件记最终文本即可）。
@@ -211,7 +215,10 @@ class DialogHandler:
         if runner.exit_code != 0 or result_holder["is_error"]:
             raise RuntimeError(
                 f"dialog claude spawn 失败：exit_code={runner.exit_code}, "
-                f"is_error={result_holder['is_error']}, stderr 末尾={runner.stderr[-300:]}",
+                f"is_error={result_holder['is_error']}, "
+                f"api_error_status={result_holder['api_error_status']}, "
+                f"result={(result_holder['result_text'] or '')[:300]}, "
+                f"stderr 末尾={runner.stderr[-300:]}",
             )
         result_text = result_holder["result_text"]
         if result_text is None:

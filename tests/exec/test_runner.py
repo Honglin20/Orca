@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
+import time
 
 import pytest
 
@@ -113,13 +115,17 @@ def test_on_result_fires_for_result_line():
     captured: dict = {}
     runner = CLIRunner(
         _cfg([code]),
-        on_result=lambda r, u, c, e: captured.update(raw=r, usage=u, cost=c, is_error=e),
+        on_result=lambda r, u, c, e, s: captured.update(
+            raw=r, usage=u, cost=c, is_error=e, api_error_status=s,
+        ),
     )
     _run(_collect(runner))
     assert captured["raw"] == "DONE"
     assert captured["usage"]["input_tokens"] == 100
     assert captured["cost"] == pytest.approx(0.17)
     assert captured["is_error"] is False
+    # success result 行无 api_error_status → 透传 None（Bug1：回调始终收 5 参）。
+    assert captured["api_error_status"] is None
 
 
 def test_non_json_line_skipped_silently():
@@ -131,7 +137,7 @@ def test_non_json_line_skipped_silently():
     captured: list = []
     runner = CLIRunner(
         _cfg([code]),
-        on_result=lambda r, u, c, e: captured.append(r),
+        on_result=lambda r, u, c, e, s: captured.append(r),
     )
     lines = _run(_collect(runner))
     assert "not-json-heartbeat" in lines
@@ -144,7 +150,7 @@ def test_non_result_json_line_does_not_fire_on_result():
     captured: list = []
     runner = CLIRunner(
         _cfg([code]),
-        on_result=lambda r, u, c, e: captured.append(r),
+        on_result=lambda r, u, c, e, s: captured.append(r),
     )
     _run(_collect(runner))
     assert captured == []
@@ -200,3 +206,74 @@ def test_cli_path_multiple_tokens_shlex_split():
     assert argv[0] == PY
     lines = _run(_collect(runner))
     assert lines == ["ok"]
+
+
+# ── api_error_status 透传（Bug1：HTTP 错误码落到 on_result）──────────────────
+
+
+def test_on_result_passes_api_error_status():
+    """Bug1：result 行的 api_error_status（HTTP 码，如 529）透传给 on_result 第 5 参。
+
+    claude 把 API 错误写在 stdout 的 result 行顶层（不在 stderr），runner 必须把它带出，
+    否则 executor 的 node_failed 完全看不到失败原因（典型 529 早退 stderr 空）。
+    """
+    code = (
+        "import json; print(json.dumps("
+        "{'type':'result','subtype':'success','result':'API Error: 529 overloaded',"
+        "'is_error':True,'api_error_status':529,'usage':{}}))"
+    )
+    captured: dict = {}
+    runner = CLIRunner(
+        _cfg([code]),
+        on_result=lambda r, u, c, e, s: captured.update(
+            raw=r, is_error=e, api_error_status=s,
+        ),
+    )
+    _run(_collect(runner))
+    assert captured["is_error"] is True
+    assert captured["api_error_status"] == 529
+
+
+# ── cancel 时 terminate proc（Bug4：防孤儿子进程）─────────────────────────────
+
+
+def test_stream_terminates_orphan_proc_on_cancel(tmp_path):
+    """Bug4：stream 被外部 cancel 时若 proc 仍存活，finally 必须 terminate（防孤儿 claude）。
+
+    asyncio 子进程不随父 task cancel 自动死；若 finally 不 terminate，强退后会留孤儿进程
+    继续跑（如 529 重试）烧 API quota。
+    """
+    pid_file = tmp_path / "child.pid"
+    code = (
+        "import os, time; "
+        f"open({str(pid_file)!r}, 'w').write(str(os.getpid())); "
+        "time.sleep(30)"  # 模拟 claude 在跑（长任务），不自行退出
+    )
+    runner = CLIRunner(_cfg([code]))
+
+    async def run_then_cancel():
+        task = asyncio.create_task(_collect(runner))
+        # 等子进程写 PID 文件（确保已 spawn 且存活）
+        for _ in range(100):
+            if pid_file.exists() and pid_file.read_text().strip():
+                break
+            await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    _run(run_then_cancel())
+    assert pid_file.exists(), "子进程未启动（PID 文件没写）"
+    pid = int(pid_file.read_text().strip())
+
+    # finally 应已 terminate proc；轮询确认子进程死（含 _TERMINATE_GRACE_SECONDS 余量）。
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return  # 子进程已死 ✓
+        time.sleep(0.1)
+    pytest.fail(f"子进程 PID={pid} 在 cancel 后仍存活（Bug4 未修：孤儿子进程）")
