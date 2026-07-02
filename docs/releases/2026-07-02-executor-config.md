@@ -130,7 +130,7 @@ stream-json」或「退出码 -1」，丢失「超时」诊断。外层 `asyncio
 
 ## commit
 
-_(SHA 提交后回填)_
+`ce559b6`
 
 ## 后续
 

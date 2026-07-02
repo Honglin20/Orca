@@ -25,7 +25,7 @@ binary override，`orca` 启动期 `os.environ.setdefault` 注入，复用既有
 fail loud）。顺带把 ccr profile 的 dummy translator 接上 `claude_translator`（ccr 协议兼容）。
 config.py + executor_cmds.py（含纯函数 classify）+ 35 单测 + 9 e2e（假脚本走完整 spawn 链路，
 不 mock CLIRunner）+ 2 integration。终审 0 🔴 1 🟡（已修）/ 2 🟢（跳过）。1031 passed 0 回归。
-Commit: _(SHA 待回填)_。详见 [release note](releases/2026-07-02-executor-config.md)。
+Commit: `ce559b6`。详见 [release note](releases/2026-07-02-executor-config.md)。
 
 ## [2026-07-02] agent 可观测性 + TUI 闪退 + 子进程泄漏修复（4 bug）
 排查 demo_mixed 529 闪退时定位的 4 个 Orca 自身 bug：① OnResult 加 `api_error_status` 第 5 参
