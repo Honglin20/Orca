@@ -283,10 +283,16 @@ def _build_spawn_config(
     # spike 验证：claude -p 默认不给 MCP 工具授权，必须显式 ``--allowed-tools`` 才能调
     # ask_user。无 server 时不动 tools（保持 SPEC §2.1 既有行为：None=全开不传 flag，
     # 非 None=声明白名单），向后兼容。
+    #
+    # capability guard（opencode）：opencode 的 ``mcp_tools=False``——它不认 claude 的
+    # ``--allowed-tools`` / ``--mcp-config`` flag，强行注入会让 yargs dump help 后 exit 1。
+    # 仅当 backend 声明支持 mcp_tools 时才注入；否则跳过（agent_tools_server 仍可持有
+    # session 路由信息，但不强加 backend 不支持的 flag）。
+    supports_mcp = profile.capabilities.mcp_tools
     extra_args: list[str] = []
     if node.model is not None:
         extra_args.extend(["--model", node.model])
-    if agent_tools_server is not None:
+    if agent_tools_server is not None and supports_mcp:
         if node.tools is None:
             # 全开 → 仅需显式声明 ask_user（其余 claude 内置工具默认可用）
             tools_list: list[str] = [_ASK_USER_TOOL_NAME]
@@ -302,8 +308,10 @@ def _build_spawn_config(
             extra_args.extend(["--allowed-tools", " ".join(node.tools)])
 
     # ── 2. mcp-config（phase 11 §5.4）：注入 server 时写 SSE config 文件 ──
+    # capability guard（opencode）：mcp_tools=False 的 backend 不认 ``--mcp-config``，
+    # 同 §1 不强加（仍 fail loud 校验 run_id/session_id 在 claude 路径不变）。
     mcp_flag_args: list[str] = []
-    if agent_tools_server is not None:
+    if agent_tools_server is not None and supports_mcp:
         if not run_id or not session_id:
             # 编程错误：agent_tools_server 注入了但 run_id/session_id 没带 → fail loud。
             raise RuntimeError(
