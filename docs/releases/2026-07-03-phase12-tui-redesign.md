@@ -93,4 +93,4 @@ S10（opencode 后端 e2e）不在本提交范围—— 由 `test-coverage-e2e` 
 
 ## Commit SHA
 
-（提交后回填）
+`38fd78c`（分支 `phase12-tui-redesign`）
