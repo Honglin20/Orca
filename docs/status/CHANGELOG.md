@@ -17,6 +17,16 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-07-02] orca executor —— 持久化后端二进制配置 + 健康检查
+新增 `orca executor set/show/unset/list/test` 命令组：`~/.orca/config.json` 持久化 per-profile
+binary override，`orca` 启动期 `os.environ.setdefault` 注入，复用既有 `resolve_cli_path()` 运行时
+读 env——**exec/profile/registry 零核心改动**（OCP）。`pip install` 后 `orca executor set claude
+"ccr code"` 一次设、全局生效；`executor test` 真起子进程自检协议兼容性（两层超时 + spawn 失败
+fail loud）。顺带把 ccr profile 的 dummy translator 接上 `claude_translator`（ccr 协议兼容）。
+config.py + executor_cmds.py（含纯函数 classify）+ 35 单测 + 9 e2e（假脚本走完整 spawn 链路，
+不 mock CLIRunner）+ 2 integration。终审 0 🔴 1 🟡（已修）/ 2 🟢（跳过）。1031 passed 0 回归。
+Commit: _(SHA 待回填)_。详见 [release note](releases/2026-07-02-executor-config.md)。
+
 ## [2026-07-02] agent 可观测性 + TUI 闪退 + 子进程泄漏修复（4 bug）
 排查 demo_mixed 529 闪退时定位的 4 个 Orca 自身 bug：① OnResult 加 `api_error_status` 第 5 参
 （全仓 11 处同步），executor `_result_diag()` 让 529 等 API 错误详情落到 `node_failed`（原只带空 stderr）；

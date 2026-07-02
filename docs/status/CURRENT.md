@@ -5,22 +5,29 @@
 
 ---
 
-## 当前状态：4 bug 修复完成，无进行中任务
+## 当前状态：`orca executor` 特性完成，无进行中任务
 
-**agent 可观测性 + TUI 闪退 + 子进程泄漏修复**全部完成（4 bug + 7 新测试 + 6 FakeRunner 同步，985 passed 0 回归，code-reviewer 0 🔴 0 🟡）。
+**持久化后端二进制配置 + 健康检查**完成：`orca executor set/show/unset/list/test` 命令组 +
+`~/.orca/config.json` + 启动期 env 注入。复用既有 `resolve_cli_path()`，**exec/profile/registry
+零核心改动**（OCP）。1031 passed 0 回归；终审 0 🔴 1 🟡（已修）/ 2 🟢（跳过）。
 
-- **release note**：[`docs/releases/2026-07-02-agent-observability-tui-fixes.md`](../releases/2026-07-02-agent-observability-tui-fixes.md)
-- **CHANGELOG**：顶部 4-bug-fix 索引
-- 四个 bug：① OnResult 加 `api_error_status` 第 5 参（全仓 11 处），`_result_diag()` 让 529 落到 `node_failed`；② translator ApiRetry 对齐真实字段 `attempt`/`retry_delay_ms`/`error_status`；③ TUI 终态停留 + notify「按 q 退出」（不闪退）；④ `stream()` finally terminate proc（防孤儿 claude）。
+- **release note**：[`docs/releases/2026-07-02-executor-config.md`](../releases/2026-07-02-executor-config.md)
+- **CHANGELOG**：顶部 `orca executor` 索引
+- **核心交付**：① `orca/iface/cli/config.py`（config 持久化 + env 注入，`setdefault` 保 env>config>default）；
+  ② `orca/iface/cli/executor_cmds.py`（sub-Typer + 纯函数 `classify` + `test` 复用 CLIRunner）；
+  ③ `commands.py` `main()` 注入 + `add_typer`；④ ccr profile translator 接上 `claude_translator`。
+- **测试**：35 单测（FakeRunner）+ 9 e2e（假脚本走完整 spawn 链路，不 mock CLIRunner）+ 2 integration（真 claude）。
 
 ## 待办（等用户指示方向）
 
-1. **Bug3 端到端 TUI 验证（manual，待智谱恢复或换可用模型）**：`uv run orca run examples/demo_mixed.yaml`，failed 时 TUI 应停留显示「按 q 退出」而非闪退；中途 `q` 后 `pgrep -af claude` 应无孤儿。
-2. **可选 polish（非阻塞）**：读写 attach（descoped D2，需 UDS）；`_stop_agent_tools` 异常收窄。
-3. **真 claude E2E（manual）**：mxint_analysis 全流程实跑；CI `/integration` PR comment 或本地 `pytest -m integration`。
-4. **下一阶段（未规划）**：Web phase（前端 InterruptModal/DialogModal/cancel 端点 + terminate 节点 widget）；phase 12+ polish。
+1. **`orca executor` 真实端到端 manual 验证（待 ccr/claude + key 环境）**：
+   `orca executor set claude "ccr code"` → `test` ✓ → `run` 实际 spawn ccr code →
+   `ORCA_CLAUDE_CLI=claude run` 临时回 claude（证 env>config 优先级）→ `unset` 回 default。
+2. **前序 4-bug-fix 的 TUI 端到端验证**（仍待 manual）：`demo_mixed` failed 时 TUI 停留「按 q 退出」。
+3. **下一阶段（未规划）**：Web phase（前端 InterruptModal/DialogModal/cancel 端点 + terminate widget）；
+   异协议 backend（codex/opencode）= 新 profile + translator（`executor set/test` 自动支持）。
 
 ## 必读文件（下一任务开工前按需）
 
-- [`docs/releases/2026-07-02-agent-observability-tui-fixes.md`](../releases/2026-07-02-agent-observability-tui-fixes.md)（本次 4 bug 全貌）
-- [`docs/releases/2026-07-02-terminate-step.md`](../releases/2026-07-02-terminate-step.md)（terminate step，前一里程碑）
+- [`docs/releases/2026-07-02-executor-config.md`](../releases/2026-07-02-executor-config.md)（本次特性全貌 + 设计逻辑）
+- [`docs/releases/2026-07-02-agent-observability-tui-fixes.md`](../releases/2026-07-02-agent-observability-tui-fixes.md)（前序 4 bug）

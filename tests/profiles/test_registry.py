@@ -95,6 +95,17 @@ def test_get_profile_ccr_returns_cli_profile():
     assert p.capabilities.mcp_tools is False  # ccr 不透传 mcp
 
 
+def test_ccr_translator_reuses_claude_translator():
+    """ccr 协议兼容 claude stream-json，translator 应复用 claude_translator（非 dummy）。
+
+    锁住 builtin/ccr.py 的修复：之前用 ``_dummy_translator``（返回 ``[]``），导致
+    ``executor: ccr`` 跑得起来但事件全丢。复用 claude_translator 后事件映射正常。
+    """
+    from orca.profiles.translators import claude_translator
+
+    assert get_profile("ccr").translator is claude_translator
+
+
 # ── 不存在 → ValueError（fail loud）──────────────────────────────────────────
 
 

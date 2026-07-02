@@ -292,6 +292,16 @@ def list_workflows(
         typer.echo(f"  {p.name}")
 
 
+# ── executor 子命令组（后端二进制配置与健康检查）──────────────────────────────
+# sub-Typer：executor show/set/unset/list/test 共享名词，比扁平 executor-show UX 好。
+# 注：此处非函数内延迟 import——Typer app 装配必须在模块级（add_typer 修改模块级 ``app``
+# 装配状态），无法延迟。executor_cmds 模块自身导入无重副作用（只 import typer + profiles +
+# config），与 textual 那种重运行时不同。
+from orca.iface.cli.executor_cmds import app as executor_app
+
+app.add_typer(executor_app, name="executor", help="配置/测试 agent 后端二进制")
+
+
 # ── ps / logs / wait 子命令（phase 11 §8 P3.2 daemon）─────────────────────────
 
 
@@ -848,6 +858,11 @@ def _run_workflow_headless(
 
 def main() -> None:
     """console_scripts 入口（pyproject ``[project.scripts] orca``）。"""
+    # 函数内 import（保模块导入零副作用，对齐 commands.py:17-18 的 textual 延迟 import 纪律）：
+    # 把 ~/.orca/config.json 的 binary override 注入对应 env var，之后所有 orca run 生效。
+    from orca.iface.cli.config import bootstrap_config
+
+    bootstrap_config()
     # 子进程默认不 buffered，让 TUI 内的 print/echo 立即可见。
     app()
 

@@ -2,7 +2,11 @@
 
 ``default_cli_path="ccr code"``（shlex 拆分）。ccr 是 claude 兼容路由器，但能力与 claude
 不同：不支持 mcp_tools（路由层不透传 mcp config）、不支持 native 结构化输出（走 prompt
-注入）。phase 4 迁移真 translator 时按实情调整，phase 3 用 dummy 占位。
+注入）。
+
+**translator 复用 claude_translator**：ccr 自述协议兼容 claude stream-json，故事件映射走
+同一套规则（``claude_translator`` 对未知 ``type`` 返回 ``[]``，优雅降级）。result_extractor
+仍用 dummy（phase 4 按实情落真实现）。
 
 capabilities 按 ccr 实情（SPEC §4.4 + plan B.4）：mcp_tools=False（路由层限制）、
 structured_output="prompt_injection"（非 native）。这使 validate 对 ``ccr + output_schema``
@@ -13,12 +17,7 @@ from __future__ import annotations
 
 from orca.profiles.base import CliProfile
 from orca.profiles.capabilities import ProviderCapabilities
-
-
-def _dummy_translator(line: str, session_id: str) -> list:
-    """占位 translator（phase 4 落真实现）。类型匹配 claude dummy。"""
-    _ = (line, session_id)
-    return []
+from orca.profiles.translators import claude_translator
 
 
 def _dummy_result_extractor(result_text: str) -> str:
@@ -52,7 +51,7 @@ PROFILE = CliProfile(
     mcp_flag_template=None,  # ccr 路由层不透传 mcp config
     env_overlay_prefixes=("ANTHROPIC_", "CLAUDE_", "CCR_"),
     stream_format="json",
-    translator=_dummy_translator,
+    translator=claude_translator,
     result_extractor=_dummy_result_extractor,
     prompt_paradigm="minimal",
 )

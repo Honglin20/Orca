@@ -102,6 +102,22 @@ uv run orca list                # 列出可用 workflow
 - 退出码：completed→`0` / failed→`1` / 参数或校验错→`2`。
 - `orca run` 默认进 Textual TUI（DAG 树 / 日志流 / 答 gate）。无 TTY 自动提示用 `--background`。
 
+### 后端二进制配置（`orca executor`）
+
+换 agent 后端 binary（如 `claude -p` → `ccr code -p`），**设一次、全局生效**——不用每次命令前缀 env、不用改 shell rc：
+
+```bash
+orca executor set claude "ccr code"   # 写 ~/.orca/config.json，之后所有 orca run 都 spawn ccr code
+orca executor test claude             # 真起子进程自检：✓ 端到端 OK / ✗ 给出原因（未装/协议不兼容/无 key）
+orca executor show                    # 看每个 profile 的 default / effective binary / env 名
+orca executor list                    # 列可用 profile + override 标记
+orca executor unset claude            # 清除 override，恢复 default
+```
+
+- **优先级**：shell env > config 文件 > profile default。临时覆盖单次：`ORCA_CLAUDE_CLI=claude orca run ...`（显式 `export` 永远赢 config）。
+- **覆盖范围**：同协议 binary 替换（`ccr code` / `claude-ds-flash` / 不同路径的 `claude`）。异协议后端（codex/opencode）需新增 profile + translator（见 [`docs/releases/2026-07-02-executor-config.md`](docs/releases/2026-07-02-executor-config.md)）。
+- `pip install` 后直接 `orca executor ...` 即可，无需 `uv run`。
+
 ### 后台 / 续跑（phase 11）
 
 ```bash
