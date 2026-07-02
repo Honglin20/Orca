@@ -23,7 +23,7 @@
 加 translator + profile 两文件（events 模式，prompt_channel=argv）。E2E 发现并修 runner 的
 argv-channel stdin 不关闭导致 opencode 永久挂死的真实 bug。真实 orca CLI 双后端 E2E 跑通
 （opencode glm-4.6v + claude/deepseek，均 completed）。688 passed 0 回归。
-Commit: <回填>。详见 [release note](releases/2026-07-03-opencode-backend.md)。
+Commit: `f3129d1`。详见 [release note](releases/2026-07-03-opencode-backend.md)。
 
 ## [2026-07-02] orca executor —— 持久化后端二进制配置 + 健康检查
 新增 `orca executor set/show/unset/list/test` 命令组：`~/.orca/config.json` 持久化 per-profile
