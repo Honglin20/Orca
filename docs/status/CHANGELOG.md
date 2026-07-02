@@ -23,7 +23,7 @@
 ② translator ApiRetry 对齐真实字段 `attempt`/`retry_delay_ms`/`error_status`（原读 `retry_count`/`wait_seconds`
 永远 null，显示「第 ? 次」）；③ TUI 终态后停留 + notify 提示「按 q 退出」（原 `self.exit()` 闪退）；
 ④ `CLIRunner.stream()` finally terminate proc（原中途 q 强退留孤儿 claude）。7 新测试，985 passed 0 回归。
-Commit: `（待填）`。详见 [release note](releases/2026-07-02-agent-observability-tui-fixes.md)。
+Commit: `f422d98`。详见 [release note](releases/2026-07-02-agent-observability-tui-fixes.md)。
 
 ## [2026-07-02] terminate step —— 新增 node kind `terminate`（业务级显式工作流终止节点）
 新增第 6 个 node kind：触达即终止，`status=success` → `workflow_completed`（用 terminate.outputs），
