@@ -65,7 +65,7 @@
 ## 验证结果
 
 - **CLI 测试**：`pytest tests/iface/cli/` → **268 passed, 7 skipped**（7 skipped 全是需 claude CLI + API key 的集成测试）。
-- **全量测试**：`pytest tests/` → **1131 passed, 30 skipped, 0 failed**（基线 1082 → 1131，净增 49 个 phase-12 测试，**0 回归**）。
+- **全量测试**：`pytest tests/` → **1133 passed, 30 skipped, 0 failed**（含 S10 e2e 2 项；基线 1082 → 1133，净增 51 测试，**0 回归**）。
 - **6 文件零后端 import grep**：CLEAN（`TestZeroBackendImport` 守护）。
 - **headless SVG 截图**：`docs/assets/phase12_demo_parallel.svg`（含拓扑节点 + 状态图标 + 流式/输出/图表 tab + line chart braille 渲染）。
 - **DagLayout spike**：LayeredDagLayout 过全部硬断言（100 seeded 随机拓扑 + 4 边界），**未 fallback**。
@@ -87,10 +87,23 @@
 **删除**：
 - `orca/iface/cli/widgets/dag_tree.py` / `active_node.py`
 
-## 不做（S10 留 separate agent）
+## S10 —— opencode 后端 e2e 验收（test-coverage-e2e）
 
-S10（opencode 后端 e2e）不在本提交范围—— 由 `test-coverage-e2e` agent 用 **opencode 后端**真跑验收（需 opencode profile + chart 生产者就绪）。
+**真跑通过**：opencode 后端（`opencode_translator`、`glm-4.6v`、events 模式、argv 通道）驱动 TUI 端到端 —— `tests/e2e_phase12/test_opencode_e2e.py` **2 passed**（真 `opencode run` 子进程，真回答落 tape，如 `REPORT: Terminal charts visualize data in CLI without GUI overhead.`）。
+
+- **SPEC §6 逐项过**（有断言证据）：DagGraph 拓扑+状态图标、`j/k` 选中 pin（`_auto_follow=False`、NodeDetail 跟随）、NodeDetail 流式 N 行（**opencode 无 `agent_thinking` 也过** = executor-agnostic 铁证）、输出 tab、`c` 聚焦图表 tab、ChartBrowser `__workflow__` 顶层。
+- **图表渲染**（goal「render_chart 渲染 + 多副图规整」）：`render_chart` **生产者尚不存在**（phase-10 deferred；`examples/agents/report_painter.md:2` 明示「render_chart 在 Orca CLI 不可用，故全部用 markdown 表格替代」）。按 SPEC §0.3/§6.1 解耦契约——运行中向 `app.bus` emit 合法 `custom(kind=chart)` 事件（ChartPayload 取自 `types.ts`）→ 走 ChartPanel/ChartCanvas **真渲染路径**：line chart **braille**（SVG 含 34 个 braille 字符，非降级）、2 label×2 title 分组规整、同 label+title **替换不堆积**、`node=None`→`__workflow__` 桶。**报告未声称生产者跑过**——只证渲染侧。
+- **headless SVG**：`docs/assets/phase12_opencode_e2e.svg`（拓扑节点 + 真回答 + braille 图 + training/eval 分组）。
+
+### S10 顺带修的真 bug（surgical，e2e 的硬 blocker）
+
+`ClaudeExecutor._build_spawn_config` 无条件注入 `--allowed-tools`/`--mcp-config` → opencode（`capabilities.mcp_tools=False`）不认这俩 flag → yargs dump `--help` exit 1 → 每个 opencode agent node spawn 即 `CliExitNonZero`。**不修则 opencode 根本跑不起来**。修：注入 gate 到 `profile.capabilities.mcp_tools`（`orca/exec/claude/executor.py` ~6 行；capability 契约本就为此声明）。`agent_tools_server` 仍透传（session 路由不变），仅压掉不支持的 flag。回归：`tests/iface/cli/ tests/profiles/` 345 passed + `tests/exec/...` 100 passed，**0 回归**；全量 1133 passed。
+
+### 已知外部 gap（不阻塞 phase-12）
+
+`render_chart` MCP 工具（chart 生产者）未实现（phase-10）。TUI 渲染侧已就绪 + 验证（见上）；待生产者落地后，可补一次「agent 真调 render_chart → 图自动出」的回归（无需改 TUI，解耦铁律保证）。
 
 ## Commit SHA
 
-`38fd78c`（分支 `phase12-tui-redesign`）
+- `38fd78c` —— S0-S9 主实现（分支 `phase12-tui-redesign`）
+- `<待回填>` —— S10 e2e + opencode spawn capability-guard fix
