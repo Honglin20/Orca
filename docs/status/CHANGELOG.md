@@ -23,7 +23,7 @@
 （仿 set_node 模板）+ factory 分派 + orchestrator 终态分发（新 `WorkflowTerminated` 异常 + `_finalize_terminated`
 helper）+ compile 层 4 项 fail loud 校验（routes 空 / 非entry / 非parallel branch / 非foreach body）。
 零 EventType/reducer 改动（复用既有 `node_completed`）；19 新测试，1013 passed 0 回归。
-Commit: `<填>`。详见 [release note](releases/2026-07-02-terminate-step.md)。
+Commit: `41a5936`。详见 [release note](releases/2026-07-02-terminate-step.md)。
 
 ## [2026-07-02] phase 11 收官 —— CLI feature 补全全部完成（11 feature，652→959 测试，0 回归）
 对抗评审（fail→conditional-pass，22 真问题闭环）→ 4 wave clean-code-builder + 4 wave test-coverage-e2e →
