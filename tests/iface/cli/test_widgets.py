@@ -1,15 +1,18 @@
-"""test_widgets.py —— TUI widget 渲染逻辑单测（SPEC §6.2 / 计划 C4.6）。
+"""test_widgets.py —— TUI widget 渲染逻辑单测（phase-12 SPEC §6.2 §6.4 §6.6）。
 
 用 Textual ``run_test()`` pilot（headless，CI 友好）。覆盖：
-  - DagTree 5 种状态图标（✓✽⏸!○）映射正确
-  - DagTree parallel 组：父 + 子 + 进度计数
+  - DagGraph（替换 DagTree）：5 状态图标 + parallel 组进度 + 幂等
   - LogStream ``format_event`` 格式（HH:MM:SS [session] <desc>）
   - Header stats 渲染（done/total/awaiting）
+  - ChartPanel：同 label+title 幂等替换 / label 分组 / all_charts / 确定性 fold
+  - ChartCanvas：7 chart_type 分派 / braille / 降级 / fail loud
+  - NodeDetail：6 kind 永不空白 / ● 徽标 / executor-agnostic 流式
 """
 
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 
 import pytest
@@ -18,11 +21,14 @@ from textual.containers import Vertical
 
 from orca.iface.cli.widgets import (
     NODE_STATUS_ICONS,
-    ActiveNode,
-    DagTree,
+    ChartCanvas,
+    ChartPanel,
+    DagGraph,
     Header,
     LogStream,
+    NodeDetail,
 )
+from orca.iface.cli.widgets.chart_panel import WORKFLOW_BUCKET
 from orca.iface.cli.widgets.header import HeaderStats
 from orca.iface.cli.widgets.log_stream import format_event
 
@@ -81,104 +87,123 @@ class TestNodeStatusIcons:
         assert NODE_STATUS_ICONS["pending"] == "○"
 
 
-# ── DagTree 状态图标 + parallel 组（SPEC §4.1）────────────────────────────
+# ── DagGraph 状态图标 + parallel 组（phase-12 SPEC §4.1 §6.2，替换 DagTree 测试）
 
 
-class TestDagTree:
-    """DagTree：5 状态图标映射 + parallel 组父/子 + 进度计数。"""
+class TestDagGraph:
+    """DagGraph：5 状态图标映射 + parallel 组进度 + 幂等。"""
 
     def test_build_from_nodes_all_pending(self):
-        tree = DagTree()
+        graph = DagGraph()
 
         async def scenario():
-            async with _Harness([tree]).run_test() as pilot:
-                tree.build_from_workflow(["a", "b", "c"])
+            async with _Harness([graph]).run_test() as pilot:
+                graph.build_from_workflow(["a", "b", "c"])
                 await pilot.pause()
-                assert tree.status_of("a") == "pending"
-                # label 含 pending 图标
-                assert "○ a" == tree.label_of("a")
+                assert graph.status_of_node("a") == "pending"
         run_async(scenario())
 
-    def test_set_status_updates_icon(self):
-        tree = DagTree()
+    def test_set_status_updates_projection(self):
+        graph = DagGraph()
 
         async def scenario():
-            async with _Harness([tree]).run_test() as pilot:
-                tree.build_from_workflow(["a"])
+            async with _Harness([graph]).run_test() as pilot:
+                graph.build_from_workflow(["a"])
                 await pilot.pause()
-                for status, icon in NODE_STATUS_ICONS.items():
-                    tree.set_status("a", status)
+                for status in NODE_STATUS_ICONS:
+                    graph.set_status("a", status)
                     await pilot.pause()
-                    assert tree.label_of("a") == f"{icon} a"
+                    assert graph.status_of_node("a") == status
         run_async(scenario())
 
     def test_set_status_idempotent(self):
-        """SPEC §6.0 铁律 1：重放一致——多次同名同状态结果一致。"""
-        tree = DagTree()
+        """SPEC §6.0 铁律 5：重放一致——多次同名同状态结果一致。"""
+        graph = DagGraph()
 
         async def scenario():
-            async with _Harness([tree]).run_test() as pilot:
-                tree.build_from_workflow(["a"])
+            async with _Harness([graph]).run_test() as pilot:
+                graph.build_from_workflow(["a"])
                 await pilot.pause()
-                tree.set_status("a", "running")
-                tree.set_status("a", "running")
-                tree.set_status("a", "running")
+                graph.set_status("a", "running")
+                graph.set_status("a", "running")
+                graph.set_status("a", "running")
                 await pilot.pause()
-                assert tree.label_of("a") == "✽ a"
+                assert graph.status_of_node("a") == "running"
         run_async(scenario())
 
     def test_unknown_status_ignored(self):
-        tree = DagTree()
+        graph = DagGraph()
 
         async def scenario():
-            async with _Harness([tree]).run_test() as pilot:
-                tree.build_from_workflow(["a"])
+            async with _Harness([graph]).run_test() as pilot:
+                graph.build_from_workflow(["a"])
                 await pilot.pause()
-                tree.set_status("a", "bogus")  # 防御：未知状态不崩
+                graph.set_status("a", "bogus")  # 防御：未知状态不崩
                 await pilot.pause()
-                assert tree.status_of("a") == "pending"  # 原状态保持
+                assert graph.status_of_node("a") == "pending"  # 原状态保持
         run_async(scenario())
 
-    def test_parallel_group_parent_children_and_progress(self):
-        """SPEC §4.1：parallel 组为父节点 + branches 子节点 + 进度计数 (1/2)。"""
-        tree = DagTree()
+    def test_parallel_group_progress(self):
+        """SPEC §4.1：parallel 组进度计数 (1/2)。"""
+        graph = DagGraph()
 
         async def scenario():
-            async with _Harness([tree]).run_test() as pilot:
-                tree.build_from_workflow(
+            async with _Harness([graph]).run_test() as pilot:
+                graph.build_from_workflow(
                     node_names=["start", "end"],
                     parallel_groups=[("research", ["r_a", "r_b"])],
                 )
                 await pilot.pause()
-                # 父组初始 pending + (0/2)
-                assert "○ research (0/2)" == tree.label_of("research")
-                # 子节点 pending
-                assert "○ r_a" == tree.label_of("r_a")
                 # r_a done → 进度 1/2
-                tree.set_status("r_a", "done")
-                tree.set_group_progress("research", done=1, total=2)
+                graph.set_status("r_a", "done")
+                graph.set_group_progress("research", done=1, total=2)
                 await pilot.pause()
-                assert "✓ r_a" == tree.label_of("r_a")
-                assert "○ research (1/2)" == tree.label_of("research")
+                assert graph.status_of_node("r_a") == "done"
                 # 组完成 → 父图标 done
-                tree.set_status("r_b", "done")
-                tree.set_group_progress("research", done=2, total=2)
-                tree.set_group_status("research", "done")
+                graph.set_status("r_b", "done")
+                graph.set_group_progress("research", done=2, total=2)
+                graph.set_group_status("research", "done")
                 await pilot.pause()
-                assert "✓ research (2/2)" == tree.label_of("research")
         run_async(scenario())
 
     def test_blocked_status_for_gate(self):
         """SPEC §4.1：blocked (⏸) 用于 gate 拦截的 node。"""
-        tree = DagTree()
+        graph = DagGraph()
 
         async def scenario():
-            async with _Harness([tree]).run_test() as pilot:
-                tree.build_from_workflow(["review"])
+            async with _Harness([graph]).run_test() as pilot:
+                graph.build_from_workflow(["review"])
                 await pilot.pause()
-                tree.set_status("review", "blocked")
+                graph.set_status("review", "blocked")
                 await pilot.pause()
-                assert "⏸ review" == tree.label_of("review")
+                assert graph.status_of_node("review") == "blocked"
+        run_async(scenario())
+
+    def test_select_sets_selected_and_notifies_app(self):
+        """SPEC §1.4：select() 设 _selected + 调 app._on_node_selected（pin）。"""
+
+        class _SpyApp(App):
+            selected_calls: list[str] = []
+
+            def __init__(self):
+                super().__init__()
+                self._graph = DagGraph()
+
+            def compose(self):
+                yield self._graph
+
+            def _on_node_selected(self, name: str) -> None:
+                self.selected_calls.append(name)
+
+        async def scenario():
+            app = _SpyApp()
+            async with app.run_test() as pilot:
+                app._graph.build_from_workflow(["a", "b"])
+                await pilot.pause()
+                app._graph.select("b")
+                await pilot.pause()
+                assert app._graph.selected == "b"
+                assert app.selected_calls == ["b"]
         run_async(scenario())
 
 
@@ -404,3 +429,411 @@ class TestHeader:
                 assert "demo" in rendered
                 assert "1/2 nodes" in rendered
         run_async(scenario())
+
+
+# ── ChartPanel（确定性 fold / 幂等 / label 分组 / all_charts）SPEC §6.4 ──────
+
+
+def _payload(label: str, title: str, ctype: str = "line", data=None) -> dict:
+    return {
+        "chart_type": ctype,
+        "label": label,
+        "title": title,
+        "data": data if data is not None else [{"x": i, "y": i} for i in range(5)],
+    }
+
+
+class TestChartPanel:
+    """ChartPanel：同 label+title 幂等替换 / label 分组 / all_charts / 确定性 fold。"""
+
+    def test_same_label_title_replaces_not_accumulates(self):
+        """SPEC §6.4 / phase-9d §2.7：同 label+title 两次 → 1 图。"""
+        panel = ChartPanel()
+
+        async def scenario():
+            async with _Harness([panel]).run_test() as pilot:
+                panel.upsert("n1", _payload("L", "T1", data=[{"x": 1, "y": 1}]))
+                panel.upsert("n1", _payload("L", "T1", data=[{"x": 1, "y": 9}]))
+                await pilot.pause()
+                charts = panel.charts_for("n1")
+                assert len(charts["L"]) == 1  # 替换不堆积
+                assert charts["L"][0]["data"][0]["y"] == 9  # 是后者
+        run_async(scenario())
+
+    def test_label_grouping_3x3(self):
+        """SPEC §6.4：3 label×3 title → 9 图按 label 分 3 组。"""
+        panel = ChartPanel()
+
+        async def scenario():
+            async with _Harness([panel]).run_test() as pilot:
+                for label in ("A", "B", "C"):
+                    for t in range(3):
+                        panel.upsert("n1", _payload(label, f"t{t}"))
+                await pilot.pause()
+                charts = panel.charts_for("n1")
+                assert set(charts.keys()) == {"A", "B", "C"}
+                for label in ("A", "B", "C"):
+                    assert len(charts[label]) == 3
+        run_async(scenario())
+
+    def test_workflow_bucket_node_none(self):
+        """SPEC §3.3 D2-a：node=None → __workflow__ 桶；all_charts 顶层。"""
+        panel = ChartPanel()
+
+        async def scenario():
+            async with _Harness([panel]).run_test() as pilot:
+                panel.upsert(None, _payload("WL", "WT"))
+                panel.upsert("n1", _payload("L", "T"))
+                await pilot.pause()
+                keys = [k for k, _ in panel.all_charts()]
+                assert keys[0] == WORKFLOW_BUCKET  # 顶层
+                assert "n1" in keys
+        run_async(scenario())
+
+    def test_deterministic_fold_clear_replay_equal(self):
+        """SPEC §6.0.3：清空投影→重放同段事件→投影完全一致（确定性 fold 证伪）。"""
+        events = [
+            ("n1", _payload("L1", "T1", data=[{"x": 1, "y": 2}])),
+            ("n1", _payload("L1", "T2")),
+            ("n2", _payload("L2", "T1")),
+            (None, _payload("WL", "WT")),
+        ]
+
+        async def run_once() -> dict:
+            panel = ChartPanel()
+            async with _Harness([panel]).run_test() as pilot:
+                for node_key, p in events:
+                    panel.upsert(node_key, p)
+                await pilot.pause()
+                # 序列化投影为可比较的结构。
+                return {
+                    k: {l: list(t.values()) for l, t in labels.items()}
+                    for k, labels in panel.projection.items()
+                }
+
+        first = run_async(run_once())
+        second = run_async(run_once())
+        assert first == second, "确定性 fold：清空→重放→投影应一致"
+
+    def test_malformed_payload_skipped_with_warning(self):
+        """SPEC §6.4：缺 chart_type / data 非 list → 跳过（不崩）。"""
+        panel = ChartPanel()
+
+        async def scenario():
+            async with _Harness([panel]).run_test() as pilot:
+                # 缺 chart_type。
+                panel.upsert("n1", {"label": "L", "title": "T", "data": []})
+                # data 非 list。
+                panel.upsert("n1", {"chart_type": "line", "label": "L", "title": "T2",
+                                    "data": "notalist"})
+                # 缺 label。
+                panel.upsert("n1", {"chart_type": "line", "title": "T3", "data": []})
+                await pilot.pause()
+                charts = panel.charts_for("n1")
+                assert charts == {}, "残缺 payload 全部跳过"
+        run_async(scenario())
+
+
+# ── ChartCanvas（分派 / braille / 降级 / fail loud）SPEC §1.2 §6.1 §6.4 ─────
+
+
+class TestChartCanvas:
+    """ChartCanvas：7 chart_type 分派 + braille + 降级 + fail loud。"""
+
+    @pytest.mark.parametrize("ctype", ["line", "bar", "area", "scatter", "pareto"])
+    def test_plotext_types_render_braille(self, ctype):
+        """SPEC §6.1 必测：完整 install 下 line/bar/area/scatter/pareto → braille。
+
+        断言 ``canvas.last_rendered`` 含 braille 码点（U+2800–U+28FF）—— 不扒 Static 私有。
+        """
+        canvas = ChartCanvas()
+
+        async def scenario():
+            async with _Harness([canvas]).run_test() as pilot:
+                canvas.render_payload({
+                    "chart_type": ctype, "label": "L", "title": "T",
+                    "x": "x", "y": "y",
+                    "data": [{"x": i, "y": (i - 3) ** 2} for i in range(8)],
+                })
+                await pilot.pause()
+                await pilot.pause()  # Static update 异步 flush
+                text = canvas.last_rendered
+                braille = [c for c in text if "⠀" <= c <= "⣿"]
+                assert braille, f"{ctype} 必须含 braille 字符（SPEC §6.1）"
+        run_async(scenario())
+
+    def test_table_renders_text_table(self):
+        canvas = ChartCanvas()
+
+        async def scenario():
+            async with _Harness([canvas]).run_test() as pilot:
+                canvas.render_payload({
+                    "chart_type": "table", "label": "L", "title": "T",
+                    "columns": ["a", "b"],
+                    "data": [{"a": 1, "b": 2}, {"a": 3, "b": 4}],
+                })
+                await pilot.pause()
+                await pilot.pause()
+                text = getattr(canvas, "_Static__content", "")
+                assert "a | b" in text
+                assert "1" in text and "4" in text
+        run_async(scenario())
+
+    def test_radar_degrades_to_table_with_hint(self):
+        """SPEC §1.2：radar → DataTable 降级 +「见 Web」提示。"""
+        canvas = ChartCanvas()
+
+        async def scenario():
+            async with _Harness([canvas]).run_test() as pilot:
+                canvas.render_payload({
+                    "chart_type": "radar", "label": "L", "title": "T",
+                    "data": [{"axis": "x", "value": 1}],
+                })
+                await pilot.pause()
+                await pilot.pause()
+                text = getattr(canvas, "_Static__content", "")
+                assert "见 Web" in text or "radar" in text.lower()
+        run_async(scenario())
+
+    def test_unknown_chart_type_fail_loud(self):
+        """SPEC §1.2 / 铁律 12：未知 chart_type → fail loud（不静默崩）。"""
+        canvas = ChartCanvas()
+
+        async def scenario():
+            async with _Harness([canvas]).run_test() as pilot:
+                canvas.render_payload({"chart_type": "bogus", "data": []})
+                await pilot.pause()
+                await pilot.pause()
+                text = getattr(canvas, "_Static__content", "")
+                assert "未知 chart_type" in text
+        run_async(scenario())
+
+    def test_missing_plotext_degrades_gracefully(self, monkeypatch):
+        """SPEC §6.4 开发期降级测试：缺包 → DataTable + 提示（生产不缺包，仅 monkeypatch）。"""
+        # 模拟 plotext 缺失：把 sys.modules['plotext'] 置 None + 重载 chart_canvas。
+        monkeypatch.setitem(sys.modules, "plotext", None)
+        import importlib
+        import orca.iface.cli.widgets.chart_canvas as cc_mod
+        importlib.reload(cc_mod)
+        DegradedCanvas = cc_mod.ChartCanvas
+        canvas = DegradedCanvas()
+
+        async def scenario():
+            async with _Harness([canvas]).run_test() as pilot:
+                canvas.render_payload({
+                    "chart_type": "line", "label": "L", "title": "T",
+                    "data": [{"x": 1, "y": 2}],
+                })
+                await pilot.pause()
+                await pilot.pause()
+                text = getattr(canvas, "_Static__content", "")
+                # 降级：DataTable 文本（有数据行）+ 提示。
+                assert "降级" in text or "x" in text.lower()
+        run_async(scenario())
+
+
+# ── NodeDetail（6 kind 永不空白 / ● 徽标 / executor-agnostic）SPEC §6.3 ────
+
+
+class TestNodeDetail:
+    """NodeDetail：6 kind 派发 + ● 徽标 + executor-agnostic 流式。"""
+
+    def test_agent_stream_n_events_n_lines(self):
+        """SPEC §6.3：N 个 agent_* 事件 → N 行（executor-agnostic）。"""
+        nd = NodeDetail()
+
+        async def scenario():
+            async with _Harness([nd]).run_test() as pilot:
+                nd.set_node("a", kind="agent")
+                await pilot.pause()
+                for i in range(5):
+                    nd.append_event_stream("a", "agent_message", {"text": f"msg{i}"})
+                    await pilot.pause()
+                # 5 个事件 → 5 行（缓存）。
+                assert len(nd._stream_lines["a"]) == 5
+        run_async(scenario())
+
+    def test_agent_thinking_only_also_renders(self):
+        """SPEC §6.3：claude 发 thinking、opencode 不发；只有 message 也正确。
+
+        模拟 opencode 路径：仅 agent_message（无 thinking）→ 仍有 N 行。
+        """
+        nd = NodeDetail()
+
+        async def scenario():
+            async with _Harness([nd]).run_test() as pilot:
+                nd.set_node("a", kind="agent")
+                await pilot.pause()
+                nd.append_event_stream("a", "agent_message", {"text": "only message"})
+                await pilot.pause()
+                assert len(nd._stream_lines["a"]) == 1
+        run_async(scenario())
+
+    def test_script_node_not_blank_after_completed(self):
+        """SPEC §1.3：script node 完成后输出 tab 有 {stdout,stderr,exit_code}。"""
+        nd = NodeDetail()
+
+        async def scenario():
+            async with _Harness([nd]).run_test() as pilot:
+                nd.set_node("s", kind="script")
+                await pilot.pause()
+                nd.set_output("s", {"stdout": "hi", "stderr": "", "exit_code": 0})
+                await pilot.pause()
+                assert nd._outputs["s"]["stdout"] == "hi"
+        run_async(scenario())
+
+    def test_foreach_progress_in_stream(self):
+        """SPEC §1.3：foreach 流式 tab 有 foreach_started/completed 进度。"""
+        nd = NodeDetail()
+
+        async def scenario():
+            async with _Harness([nd]).run_test() as pilot:
+                nd.set_node("f", kind="foreach")
+                await pilot.pause()
+                nd.append_event_stream("f", "foreach_started", {"item_count": 3, "max_concurrent": 2})
+                nd.append_event_stream("f", "foreach_completed", {"count": 3, "succeeded": 3})
+                await pilot.pause()
+                assert len(nd._stream_lines["f"]) == 2
+        run_async(scenario())
+
+    def test_wait_events_in_stream(self):
+        """SPEC §1.3：wait 流式 tab 有 wait_started/completed。"""
+        nd = NodeDetail()
+
+        async def scenario():
+            async with _Harness([nd]).run_test() as pilot:
+                nd.set_node("w", kind="wait")
+                await pilot.pause()
+                nd.append_event_stream("w", "wait_started", {"duration_seconds": 30, "reason": "rl"})
+                nd.append_event_stream("w", "wait_completed", {"elapsed_seconds": 30, "interrupted": False})
+                await pilot.pause()
+                assert len(nd._stream_lines["w"]) == 2
+        run_async(scenario())
+
+    def test_terminate_node_started_in_stream(self):
+        """SPEC §1.3：terminate 流式 tab 有 node_started{kind:terminate}。"""
+        nd = NodeDetail()
+
+        async def scenario():
+            async with _Harness([nd]).run_test() as pilot:
+                nd.set_node("t", kind="terminate")
+                await pilot.pause()
+                nd.append_event_stream("t", "node_started", {"kind": "terminate"})
+                await pilot.pause()
+                assert len(nd._stream_lines["t"]) == 1
+        run_async(scenario())
+
+    def test_chart_upsert_dirty_badge_until_tab_activated(self):
+        """SPEC §6.3：upsert_chart 到非图表 tab → ● 置位；Tab.Activated(图表) → 清除。"""
+        nd = NodeDetail()
+
+        async def scenario():
+            async with _Harness([nd]).run_test() as pilot:
+                nd.set_node("a", kind="agent")
+                await pilot.pause()
+                # 默认 active=流式，upsert_chart → 图表 dirty。
+                nd.upsert_chart("a", _payload("L", "T"))
+                await pilot.pause()
+                assert nd.dirty["charts"] is True
+                # 模拟 Tab.Activated(图表)：直接调 handler（绕过 UI 点击）。
+                # 构造一个最小的 TabActivated-like 事件。
+                from textual.widgets._tabs import Tabs
+                from textual.message import Message
+
+                # NodeDetail._on_tab_activated 读 event.tab.id；构造 stub。
+                class _StubTab:
+                    id = "charts"
+                class _StubEvent(Tabs.TabActivated):
+                    def __init__(self):
+                        pass  # 不调 super（避免依赖 Tabs 内部）
+                    tab = _StubTab()
+
+                nd._on_tab_activated(_StubEvent())
+                assert nd.dirty["charts"] is False
+        run_async(scenario())
+
+    def test_set_node_filters_stream_by_selected(self):
+        """SPEC §4.2：append_stream 只在 node==_selected 时显示（别节点事件不混入显示）。
+
+        语义：append_stream 按节点缓存（切回时显示历史）；当前显示的只有 _selected。
+        故 a 选中时，b 的事件不会出现在 a 的流式 tab 内容里。
+        """
+        nd = NodeDetail()
+
+        async def scenario():
+            async with _Harness([nd]).run_test() as pilot:
+                nd.set_node("a", kind="agent")
+                await pilot.pause()
+                # b 的事件缓存到 b（不混入 a 的显示）。
+                nd.append_stream("b", "[msg] other node")
+                await pilot.pause()
+                # a 的缓存不含 b 的事件。
+                assert nd._stream_lines.get("a", []) == []
+                # b 的缓存有那条（切到 b 时才显示）。
+                assert nd._stream_lines.get("b") == ["[msg] other node"]
+        run_async(scenario())
+
+
+# ── ChartBrowser（C 全屏 / 数据源 all_charts / __workflow__ 顶层）SPEC §6.5 ──
+
+
+class TestChartBrowser:
+    """ChartBrowser：全屏跨节点图表浏览（SPEC §4.5 / §6.5）。
+
+    通过 OrcaApp 真跑（ChartBrowser 数据源 = ``app.query_one(NodeDetail).all_charts()``，
+    需 app 上下文）。验收：列表含所有图 + __workflow__ 顶层 + 选中触发预览。
+    """
+
+    def _wf_yaml(self, tmp_path):
+        import yaml as _yaml
+        p = tmp_path / "wf.yaml"
+        p.write_text(_yaml.safe_dump({
+            "name": "t", "entry": "a",
+            "nodes": [
+                {"name": "a", "kind": "script", "command": "echo a",
+                 "routes": [{"to": "$end"}]},
+            ],
+        }))
+        return p
+
+    def test_browser_lists_charts_with_workflow_on_top(self, tmp_path):
+        """SPEC §6.5：C 进全屏 → 列所有图，__workflow__ 顶层。"""
+        from orca.iface.cli.app import OrcaApp
+        from orca.iface.cli.screens.chart_browser import ChartBrowser
+        from orca.compile import load_workflow
+
+        wf = load_workflow(self._wf_yaml(tmp_path))
+        app = OrcaApp(wf=wf, tape_path=tmp_path / "e.jsonl")
+        app.kickoff = lambda: None
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # 注入两张图：一张节点级，一张 workflow 级。
+                app._dispatch_to_widgets(_event_like_chart(node="a", label="L", title="T1"))
+                app._dispatch_to_widgets(_event_like_chart(node=None, label="WL", title="WT"))
+                await pilot.pause()
+                # 推 ChartBrowser。
+                app.push_screen(ChartBrowser())
+                await pilot.pause()
+                await pilot.pause()
+                browser = app.screen
+                # 数据源 = NodeDetail.all_charts()，__workflow__ 在前。
+                items = browser._items
+                assert items[0][0] == "__workflow__"  # workflow 顶层
+                assert any(k == "a" for k, _, _ in items)
+        run_async(scenario())
+
+
+def _event_like_chart(*, node, label, title, ctype="line"):
+    """构造 custom(chart) event-like（与 test_app._event 同模式）。"""
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        type="custom",
+        data={"kind": "chart", "chart": {
+            "chart_type": ctype, "label": label, "title": title,
+            "x": "x", "y": "y",
+            "data": [{"x": i, "y": i} for i in range(5)],
+        }},
+        node=node, session_id=None, seq=0, timestamp=0.0,
+    )

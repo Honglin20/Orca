@@ -17,6 +17,10 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-07-03] phase 12 CLI TUI 重设计（拓扑图 + NodeDetail + 终端图表）
+重设计三面板：左 DagTree→DagGraph 拓扑图（分层+连边，max 33%）、右上 ActiveNode→NodeDetail（流式/输出/图表 tab，6 kind 永不空白）、新增终端图表渲染（plotext braille）+ ChartBrowser 全屏。6 新文件零后端 import、壳无真相、确定性 fold、`_selected_node`/`_auto_follow` 不写 tape（全有单测守护）。LayeredDagLayout spike 全过（未 fallback）。1131 passed 0 回归（基线 1082→1131，净增 49 测试）。code-reviewer 1 blocker + 6 major + 2 minor 全修。
+Commit: `<待回填>`。详见 [release note](releases/2026-07-03-phase12-tui-redesign.md)。
+
 ## [2026-07-03] 后端统一抽象 + opencode 后端接入
 把"后端怎么信号 done+result+usage+错误"下沉成 profile 字段 `TerminalContract`（`result_line` /
 `events` 两模式）+ 共享 `RunAccumulator`，executor 保留一处小分支，runner 不动。加 opencode =

@@ -5,29 +5,20 @@
 
 ---
 
-## 当前状态：`orca executor` 特性完成，无进行中任务
+## 当前状态：phase-12 TUI 重设计 S0–S9 完成，S10 e2e 待跑
 
-**持久化后端二进制配置 + 健康检查**完成：`orca executor set/show/unset/list/test` 命令组 +
-`~/.orca/config.json` + 启动期 env 注入。复用既有 `resolve_cli_path()`，**exec/profile/registry
-零核心改动**（OCP）。1031 passed 0 回归；终审 0 🔴 1 🟡（已修）/ 2 🟢（跳过）。
+- **SPEC（v2，对抗审闭环）**：[`docs/specs/phase-12-cli-tui-redesign.md`](../specs/phase-12-cli-tui-redesign.md)
+- **计划**：[`docs/plans/2026-07-03-phase12-tui-redesign.md`](../plans/2026-07-03-phase12-tui-redesign.md)（S0–S10）
+- **S0–S9 已完成**（clean-code-builder）：6 新 widget/screen + app.py 接线 + 单测 + 自审 + 提交。1131 passed 0 回归（基线 1082→1131，净增 49 测试）。详见 [release note](../releases/2026-07-03-phase12-tui-redesign.md)。
+- **S10 待跑**（test-coverage-e2e，**opencode 后端**）：需 opencode profile + chart 生产者就绪；探测不到则等待。
 
-- **release note**：[`docs/releases/2026-07-02-executor-config.md`](../releases/2026-07-02-executor-config.md)
-- **CHANGELOG**：顶部 `orca executor` 索引
-- **核心交付**：① `orca/iface/cli/config.py`（config 持久化 + env 注入，`setdefault` 保 env>config>default）；
-  ② `orca/iface/cli/executor_cmds.py`（sub-Typer + 纯函数 `classify` + `test` 复用 CLIRunner）；
-  ③ `commands.py` `main()` 注入 + `add_typer`；④ ccr profile translator 接上 `claude_translator`。
-- **测试**：35 单测（FakeRunner）+ 9 e2e（假脚本走完整 spawn 链路，不 mock CLIRunner）+ 2 integration（真 claude）。
+## 待办
 
-## 待办（等用户指示方向）
-
-1. **`orca executor` 真实端到端 manual 验证（待 ccr/claude + key 环境）**：
-   `orca executor set claude "ccr code"` → `test` ✓ → `run` 实际 spawn ccr code →
-   `ORCA_CLAUDE_CLI=claude run` 临时回 claude（证 env>config 优先级）→ `unset` 回 default。
-2. **前序 4-bug-fix 的 TUI 端到端验证**（仍待 manual）：`demo_mixed` failed 时 TUI 停留「按 q 退出」。
-3. **下一阶段（未规划）**：Web phase（前端 InterruptModal/DialogModal/cancel 端点 + terminate widget）；
-   异协议 backend（codex/opencode）= 新 profile + translator（`executor set/test` 自动支持）。
+1. **phase-12 S10 e2e（opencode 后端，test-coverage-e2e）**（当前）—— 探测 opencode + render_chart 就绪后跑真 agent workflow，验收 SPEC §6 全位置。
+2. **`orca executor` 真实端到端 manual 验证（待 ccr/claude + key 环境）**。
+3. **前序 4-bug-fix 的 TUI 端到端验证**（仍待 manual）。
 
 ## 必读文件（下一任务开工前按需）
 
-- [`docs/releases/2026-07-02-executor-config.md`](../releases/2026-07-02-executor-config.md)（本次特性全貌 + 设计逻辑）
-- [`docs/releases/2026-07-02-agent-observability-tui-fixes.md`](../releases/2026-07-02-agent-observability-tui-fixes.md)（前序 4 bug）
+- [`docs/specs/phase-12-cli-tui-redesign.md`](../specs/phase-12-cli-tui-redesign.md) §6（验收标准）+ [`docs/releases/2026-07-03-phase12-tui-redesign.md`](../releases/2026-07-03-phase12-tui-redesign.md)（S0–S9 做了啥 + 偏差）
+- [`docs/specs/phase-9d-web-gate-chart.md`](../specs/phase-9d-web-gate-chart.md) §2 + `orca/iface/web/frontend/src/components/chart/types.ts`（图表契约 source of truth）
