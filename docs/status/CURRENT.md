@@ -5,21 +5,21 @@
 
 ---
 
-## 当前状态：phase 11 已收官，无进行中任务
+## 当前状态：terminate step 已完成，无进行中任务
 
-**phase 11 CLI feature 补全全部完成**（11 feature，652→959 测试，0 回归，code-reviewer 横切 0 🔴 0 🟡）。
+**terminate step（显式工作流终止节点）全部完成**（5 处代码改动 + 19 新测试 + example，1013 passed 0 回归）。
 
-- **收官 release note**：[`docs/releases/2026-07-02-phase11-complete.md`](../releases/2026-07-02-phase11-complete.md)
-- **SPEC**：[`docs/specs/phase-11-cli-enrichment.md`](../specs/phase-11-cli-enrichment.md)（§10.3 评审修订 + §11.1-§11.9 偏离记录）
-- **CHANGELOG**：顶部 phase 11 收官条目 + 各 feature 逐条索引
+- **release note**：[`docs/releases/2026-07-02-terminate-step.md`](../releases/2026-07-02-terminate-step.md)
+- **mini 计划**：[`docs/plans/2026-07-02-terminate-step.md`](../plans/2026-07-02-terminate-step.md)
+- **CHANGELOG**：顶部 terminate step 索引
 
 ## 待办（等用户指示方向）
 
 1. **可选 polish（非阻塞）**：读写 attach（descoped D2，需 UDS 控制通道）；`_stop_agent_tools` 异常收窄。
 2. **真 claude E2E（manual，待 TTY + API key）**：mxint_analysis 全流程实跑；走 CI `/integration` PR comment 或本地 `pytest -m integration`。
-3. **下一阶段（未规划）**：Web phase（前端 InterruptModal/DialogModal/cancel 端点）；phase 12+ polish（Self-Update / Workflow Registry 等推迟项）。
+3. **下一阶段（未规划）**：Web phase（前端 InterruptModal/DialogModal/cancel 端点 + terminate 节点 widget）；phase 12+ polish（Self-Update / Workflow Registry 等推迟项）。
 
 ## 必读文件（下一任务开工前按需）
 
-- [`docs/releases/2026-07-02-phase11-complete.md`](../releases/2026-07-02-phase11-complete.md)（phase 11 全貌）
-- [`docs/specs/phase-11-cli-enrichment.md`](../specs/phase-11-cli-enrichment.md)
+- [`docs/releases/2026-07-02-terminate-step.md`](../releases/2026-07-02-terminate-step.md)（terminate step 全貌）
+- [`docs/releases/2026-07-02-phase11-complete.md`](../releases/2026-07-02-phase11-complete.md)（phase 11 全貌，前一里程碑）

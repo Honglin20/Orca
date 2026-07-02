@@ -195,6 +195,33 @@ class WaitNode(Node):
     interruptible: bool = True
 
 
+class TerminateNode(Node):
+    """显式工作流终止节点（业务级成功/失败退出点）。
+
+    触达即终止，**不评估 routes**（compile 层强制 routes 为空，语义冲突 fail loud）。
+      - ``status="success"`` → orchestrator emit ``workflow_completed``，data.outputs
+        用本节点的 ``outputs``（渲染后）替代 ``workflow.outputs``。
+      - ``status="failed"`` → orchestrator emit ``workflow_failed``，error_type
+        =``WorkflowTerminated``，message=渲染后的 ``reason``，node=本节点名。
+
+    与默认 ``route.to="$end"`` 的区别：那个只能 success 终止；terminate 能显式 failed。
+    典型用途：分类器走不到任何 handler 时显式 reject（业务兜底，非错误处理）。
+
+    约束（compile 层校验，违反 → ConfigurationError）：
+      - ``routes`` 必须空（terminate 不评估路由）
+      - 不能作为 ``workflow.entry``（必须先经业务节点才有意义）
+      - 不能出现在 ``ParallelGroup.branches`` 或 ``ForeachNode.body`` 里（同 Conductor 限制：
+        terminate 表达「整个 workflow 的终止」，组内/循环内终止语义不清）
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["terminate"] = "terminate"
+    status: Literal["success", "failed"]
+    reason: str = ""  # Jinja2 渲染，写入 workflow_failed.data.message（status=failed 时）
+    outputs: dict[str, str] = {}  # status=success 时替代 workflow.outputs（每 key 独立 Jinja2 渲染）
+
+
 class ParallelGroup(BaseModel):
     """静态并行组（顶层独立列表项，Workflow.parallel 的元素）。
 
@@ -217,9 +244,10 @@ class ParallelGroup(BaseModel):
 
 
 # 顶层 node 判别联合：按 kind 字段分派到具体子类。
-# 与 ForeachBody 对照：这里包含全部 5 个 kind（顶层 DAG），body 仅允许 agent/script。
+# 与 ForeachBody 对照：这里包含全部 6 个 kind（顶层 DAG），body 仅允许 agent/script
+# （terminate 在 foreach body 内无意义，故不进 ForeachBody 联合）。
 AnnotatedNode = Annotated[
-    Union[AgentNode, ScriptNode, SetNode, ForeachNode, WaitNode],
+    Union[AgentNode, ScriptNode, SetNode, ForeachNode, WaitNode, TerminateNode],
     Field(discriminator="kind"),
 ]
 

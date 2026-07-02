@@ -3,11 +3,12 @@
 回答「给定 node，用哪个 executor 跑？」：单一分派入口（SPEC §4.1 / §7.8）。
 
 分派规则（SPEC §7.8）：
-  - ``AgentNode``   → ``ClaudeExecutor(get_profile(node.executor), agent_tools_server)``
-  - ``ScriptNode``  → ``ScriptExecutor()``
-  - ``SetNode``     → ``SetExecutor()``
-  - ``WaitNode``    → ``WaitExecutor(bus)``（phase 11 §9.7，需 bus 注册 wait handle）
-  - ``ForeachNode`` → ``raise NotImplementedError``（编排归 phase 5，本阶段不做）
+  - ``AgentNode``     → ``ClaudeExecutor(get_profile(node.executor), agent_tools_server)``
+  - ``ScriptNode``    → ``ScriptExecutor()``
+  - ``SetNode``       → ``SetExecutor()``
+  - ``WaitNode``      → ``WaitExecutor(bus)``（phase 11 §9.7，需 bus 注册 wait handle）
+  - ``TerminateNode`` → ``TerminateExecutor()``（业务级显式终止节点）
+  - ``ForeachNode``   → ``raise NotImplementedError``（编排归 phase 5，本阶段不做）
 
 OCP：加新 kind / 新 backend 不改本函数核心（agent backend 切换靠 profiles 注册表，
 新叶子 kind 靠新增 Executor 子类 + 这里的分派项）。
@@ -30,7 +31,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from orca.exec.interface import Executor
-from orca.schema import AgentNode, ForeachNode, Node, ScriptNode, SetNode, WaitNode
+from orca.schema import (
+    AgentNode,
+    ForeachNode,
+    Node,
+    ScriptNode,
+    SetNode,
+    TerminateNode,
+    WaitNode,
+)
 
 if TYPE_CHECKING:
     from orca.exec.mcp_tools.server import AgentToolsMcpServer
@@ -49,12 +58,15 @@ def make_executor(
 
     ``agent_tools_server``（phase 11 §5.4）：仅 agent 分支透传给 ``ClaudeExecutor``——
     非空时 spawn claude 带 ``--mcp-config``（暴露 ask_user）；None == 既有行为（向后兼容）。
-    script/set/foreach 分支忽略此参。
+    script/set/foreach/terminate 分支忽略此参。
 
     ``bus``（phase 11 §9.7.4）：仅 wait 分支透传给 ``WaitExecutor``——wait node 的
     ``interruptible=True`` 路径要 ``register_wait_handle``。None 时遇到 WaitNode →
     fail loud（``ValueError``）：interruptible wait 没 bus 无法注册 handle，静默跳过会
-    让 Ctrl+G 打断契约失效（SPEC §9.7.6）。script/set/foreach 分支忽略此参。
+    让 Ctrl+G 打断契约失效（SPEC §9.7.6）。script/set/foreach/terminate 分支忽略此参。
+
+    TerminateNode 是纯渲染节点（无子进程 / 无 wait handle），不需要 bus / agent_tools_server；
+    orchestrator 据 ``node_completed.data.status`` 分发 workflow 级终态事件。
 
     ForeachNode 本阶段 ``raise NotImplementedError``（foreach 分批 / 并行归 phase 5 编排层）。
     """
@@ -88,12 +100,17 @@ def make_executor(
             )
         return WaitExecutor(bus)
 
+    if isinstance(node, TerminateNode):
+        from orca.exec.terminate import TerminateExecutor
+
+        return TerminateExecutor()
+
     if isinstance(node, ForeachNode):
         raise NotImplementedError(
             "foreach 归 phase 5 编排层（分批 / 并行 / 失败策略），本阶段 exec/ 不实现"
         )
 
-    # 不该到这里：node.kind 是 Literal 联合，5 选 1 之外是 schema 层漏校验。
+    # 不该到这里：node.kind 是 Literal 联合，6 选 1 之外是 schema 层漏校验。
     raise TypeError(
         f"make_executor 不支持 node kind {node.kind!r}（type={type(node).__name__}）"
     )

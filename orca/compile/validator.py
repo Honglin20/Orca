@@ -40,6 +40,7 @@ from orca.schema import (
     ParallelGroup,
     ScriptNode,
     SetNode,
+    TerminateNode,
     Workflow,
 )
 
@@ -104,6 +105,7 @@ def validate_workflow(wf: Workflow) -> list[str]:
     _check_route_fallback_last(wf, result)     # ⑪ 兜底 route 位置（node + parallel 组）
     _check_jinja2_refs(wf, result)             # ⑦
     _check_foreach_source(wf, result)          # ⑧
+    _check_terminate_constraints(wf, result)   # terminate step 约束（routes 空 / 非entry / 非parallel branch / 非foreach body）
     _check_profiles(wf, result)                # ⑨ capability 校验（profiles/validate）
     return result.raise_if_errors()
 
@@ -401,6 +403,13 @@ def _iter_templates(
         elif isinstance(node, SetNode):
             for key, expr in node.values.items():
                 yield (f"node '{node.name}'.values.{key}", expr, False, set())
+        elif isinstance(node, TerminateNode):
+            # terminate 的 reason / outputs 都是 Jinja2 模板（同 set_node 渲染机制），
+            # 同样需浅校验未声明引用（fail loud 在 compile 期而非 run 期）。
+            if node.reason:
+                yield (f"node '{node.name}'.reason", node.reason, False, set())
+            for key, expr in node.outputs.items():
+                yield (f"node '{node.name}'.outputs.{key}", expr, False, set())
 
         for route in node.routes:
             if route.when:
@@ -565,6 +574,55 @@ def _check_foreach_source(wf: Workflow, result: ValidationResult) -> None:
             result.add_error(
                 f"foreach 节点 '{node.name}' 的 max_concurrent={node.max_concurrent} "
                 "必须 >= 1（并发上限不能为 0 或负数）"
+            )
+
+
+# ── terminate step 约束校验（routes 空 / 非entry / 非parallel branch / 非foreach body）──
+
+
+def _check_terminate_constraints(wf: Workflow, result: ValidationResult) -> None:
+    """``TerminateNode`` 的 4 项 fail loud 约束（terminate step）：
+
+      1. ``routes`` 必须空（terminate 触达即终止，不评估路由；非空 routes 是死代码 + 语义冲突）
+      2. 不能作为 ``wf.entry``（terminate 必须先经业务节点才有意义；entry 即 terminate
+         等于 workflow 永远立即终止，是配置错误）
+      3. 不能在 ``ParallelGroup.branches`` 里（terminate 表达「整个 workflow 终止」，
+         在并行分支里语义不清——其它分支如何处理？同 Conductor 限制）
+      4. ``ForeachNode.body`` 不能含 terminate：schema 层已通过 ``ForeachBody`` 判别联合
+         （仅 agent/script）拦掉；此处不做兜底（pydantic 解析阶段就 raise，到不了这里）。
+
+    校验动机（铁律 4 fail loud）：terminate 是工作流作者的**显式**业务退出声明；放错位置
+    （routes 非空 / 当 entry / 在并行组里）会在运行时产生混乱（routes 被静默忽略 / workflow
+    从入口立即结束 / parallel 组因某 branch terminate 而 abort 其它 branch），编译期暴露比
+    运行期调试便宜得多。
+    """
+    # 1) routes 必须空 + 2) 非 entry
+    for node in wf.nodes:
+        if not isinstance(node, TerminateNode):
+            continue
+        if node.routes:
+            result.add_error(
+                f"terminate 节点 '{node.name}' 的 routes 必须为空（terminate 触达即终止，"
+                f"不评估路由；当前有 {len(node.routes)} 条 routes 是死代码 + 语义冲突）"
+            )
+        if wf.entry == node.name:
+            result.add_error(
+                f"terminate 节点 '{node.name}' 不能作为 workflow.entry（terminate 必须"
+                "先经业务节点才有意义；entry 即 terminate 等于 workflow 永远立即终止）"
+            )
+
+    # 3) parallel 组的 branches 不能含 terminate node
+    # _name_set 已含全部顶层 node 名，但 terminate 是按 name 找——把所有 terminate
+    # node 名收集起来，对每个 parallel 组的 branches 做交集判定。
+    terminate_names = {
+        n.name for n in wf.nodes if isinstance(n, TerminateNode) and n.name
+    }
+    for group in wf.parallel:
+        bad_branches = [b for b in group.branches if b in terminate_names]
+        for b in bad_branches:
+            result.add_error(
+                f"parallel 组 '{group.name}' 的 branch '{b}' 是 terminate 节点"
+                "（terminate 表达整个 workflow 的终止，不能在并行分支里）"
             )
 
 

@@ -646,3 +646,89 @@ def test_parallel_group_orphan_is_warning():
     )
     warnings = validate_workflow(wf)
     assert any("orphan_group" in w and "parallel 组" in w for w in warnings)
+
+
+# ── terminate step 约束（routes 空 / 非entry / 非parallel branch / 非foreach body）──
+
+
+def _terminate(name: str = "t", **kw) -> dict:
+    """单 terminate 节点 dict。"""
+    d = {"name": name, "kind": "terminate", "status": kw.pop("status", "failed")}
+    d.update(kw)
+    return d
+
+
+def test_terminate_valid_minimal():
+    """合法 terminate 节点：routes 空，被业务 node 路由到。"""
+    wf = _wf([
+        _agent("classifier", routes=[{"to": "reject"}]),
+        _terminate("reject", status="failed", reason="reject {{ classifier.output.x }}"),
+    ], entry="classifier")
+    validate_workflow(wf)  # 不抛
+
+
+def test_terminate_with_routes_rejected():
+    """terminate.routes 非空 → error（terminate 不评估路由，非空 routes 是死代码）。"""
+    wf = _wf([
+        _agent("a", routes=[{"to": "t"}]),
+        _terminate("t", status="failed", routes=[{"to": "$end"}]),
+    ], entry="a")
+    errs = _errors(wf)
+    assert any("terminate" in e and "'t'" in e and "routes" in e for e in errs), errs
+
+
+def test_terminate_as_entry_rejected():
+    """terminate 作为 workflow.entry → error（必须先经业务节点）。"""
+    wf = _wf([
+        _terminate("t", status="success"),
+        _agent("a", routes=[{"to": "$end"}]),
+    ], entry="t")
+    errs = _errors(wf)
+    assert any("terminate" in e and "entry" in e for e in errs), errs
+
+
+def test_terminate_in_parallel_branches_rejected():
+    """terminate 出现在 parallel 组的 branches 里 → error（语义不清，同 Conductor 限制）。"""
+    wf = _wf([
+        _agent("a", routes=[{"to": "split"}]),
+        _agent("b", routes=[{"to": "$end"}]),
+        _terminate("c", status="failed"),
+    ], entry="a", parallel=[{"name": "split", "branches": ["b", "c"], "routes": [{"to": "$end"}]}])
+    errs = _errors(wf)
+    assert any("terminate" in e and "branch" in e and "'c'" in e for e in errs), errs
+
+
+def test_terminate_in_foreach_body_rejected_by_schema():
+    """terminate 出现在 foreach body → schema 层 ForeachBody 判别联合就拦（pydantic raise）。
+
+    schema 层 fail loud：ForeachBody 仅允许 agent/script，terminate 不在联合里 →
+    ValidationError 在 Workflow 构造时抛，到不了 compile/validator。
+    """
+    from pydantic import ValidationError
+
+    bad_body = {"name": "leaf", "kind": "terminate", "status": "failed"}
+    with pytest.raises(ValidationError):
+        Workflow(
+            name="w",
+            entry="fe",
+            nodes=[{"name": "fe", "kind": "foreach", "source": "x.y", "body": bad_body}],
+        )
+
+
+def test_terminate_jinja_ref_validated():
+    """terminate.reason / outputs 的 Jinja2 引用也走 ⑦ 浅校验（fail loud 在 compile 期）。"""
+    wf = _wf([
+        _agent("a", routes=[{"to": "t"}]),
+        _terminate("t", status="failed", reason="bad {{ ghost.output.x }}"),
+    ], entry="a")
+    errs = _errors(wf)
+    assert any("ghost" in e for e in errs), errs
+
+
+def test_terminate_success_with_outputs_valid():
+    """status=success + outputs 引用合法 node → 通过校验。"""
+    wf = _wf([
+        _agent("classifier", routes=[{"to": "done"}]),
+        _terminate("done", status="success", outputs={"cat": "{{ classifier.output.x }}"}),
+    ], entry="classifier")
+    validate_workflow(wf)  # 不抛

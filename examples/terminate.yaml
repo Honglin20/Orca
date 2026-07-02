@@ -1,0 +1,64 @@
+name: terminate
+description: |
+  terminate step demo：业务级显式工作流终止节点。
+
+  分类器（script 模拟）据 output.json.category 路由：
+    - "A" / "B" → 走对应 handler（script 输出确认信息）→ $end 正常完成
+    - 其它（兜底）→ reject_terminate（kind=terminate, status=failed）
+
+  触达 terminate 节点时**不**评估 routes，直接终止工作流：
+    - status=success → workflow_completed，用 terminate.outputs 替代 wf.outputs
+    - status=failed  → workflow_failed{error_type=WorkflowTerminated, message=reason}
+
+  与默认 route.to="$end" 区别：那个只能 success；terminate 能显式 failed（业务兜底）。
+
+  试试不同 input 看 routing：
+    orca run examples/terminate.yaml -i category=A    # → handler_a → $end → completed
+    orca run examples/terminate.yaml -i category=B    # → handler_b → $end → completed
+    orca run examples/terminate.yaml -i category=X    # → reject_terminate → failed
+entry: classifier
+inputs:
+  category:
+    type: string
+    required: true
+    description: 模拟分类结果（A/B 走 handler，其它走 reject_terminate）
+nodes:
+  - name: classifier
+    kind: script
+    command: |
+      echo '{"category": "{{ inputs.category }}"}'
+    parse_json: true
+    routes:
+      - {when: "output.json.category == 'A'", to: handler_a}
+      - {when: "output.json.category == 'B'", to: handler_b}
+      - {to: reject_terminate}   # 兜底：未知类别显式 reject
+
+  - name: handler_a
+    kind: script
+    command: "echo 'handling A'"
+    routes:
+      - {to: finish_ok}
+
+  - name: handler_b
+    kind: script
+    command: "echo 'handling B'"
+    routes:
+      - {to: finish_ok}
+
+  - name: finish_ok
+    kind: terminate
+    status: success
+    outputs:
+      handled_category: "{{ classifier.output.json.category }}"
+      status_message: "handled normally"
+
+  - name: reject_terminate
+    kind: terminate
+    status: failed
+    reason: "未知类别 {{ classifier.output.json.category }}（无对应 handler）"
+    outputs:
+      rejected_category: "{{ classifier.output.json.category }}"
+
+outputs:
+  # 仅 handler 路径正常完成时使用；terminate success 路径用自己的 outputs 覆盖
+  result: "{{ classifier.output.json.category }}"
