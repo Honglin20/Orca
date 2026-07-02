@@ -47,6 +47,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
+from orca.exec.claude.accumulator import RunAccumulator
 from orca.exec.claude.result_extractor import extract_and_validate
 from orca.exec.context import RunContext
 from orca.exec.env import build_env_overlay
@@ -140,24 +141,18 @@ class ClaudeExecutor(Executor):
                     session_id=session_id, run_id=ctx.run_id, node=node.name,
                 )
 
-            # 5. on_result 钩子收集 result 文本 / usage / cost / API 错误码
-            result_holder: dict[str, Any] = {
-                "result_text": None,
-                "usage": None,
-                "cost": 0.0,
-                "is_error": False,
-                "api_error_status": None,  # claude result 行顶层 HTTP 错误码（如 529）
-            }
+            # 5. 终态累积器（跨后端共享）：result_line 模式由 on_result 回调填；
+            # events 模式由 consume_event 逐事件填。两模式共用同一组字段 + diagnose。
+            accumulator = RunAccumulator()
 
-            def on_result(
-                raw_result: str, usage: dict, cost: float, is_error: bool,
-                api_error_status: int | None = None,
-            ) -> None:
-                result_holder["result_text"] = raw_result
-                result_holder["usage"] = usage
-                result_holder["cost"] = cost
-                result_holder["is_error"] = is_error
-                result_holder["api_error_status"] = api_error_status
+            # 按 profile.terminal.mode 分派 on_result：
+            #   result_line（claude/ccr）→ make_on_result_hook()（行为逐字同重构前闭包，
+            #     CLIRunner 检测到 result 行回调 5 参一次性填满累积器）；
+            #   events（opencode）→ on_result=None（无终止行），终态由 consume_event 累积。
+            if self.profile.terminal.mode == "result_line":
+                on_result = accumulator.make_on_result_hook()
+            else:
+                on_result = None
 
             # 6-7. CLIRunner 跑子进程，逐行喂 translator
             runner = CLIRunner(cfg, on_result=on_result)
@@ -166,7 +161,18 @@ class ClaudeExecutor(Executor):
                     # translator 是纯函数，只设 session_id（SPEC §3.2）；node 字段由 executor
                     # 富化（SPEC §4.2「所有事件顶层带 node + session_id」）。translator 不知
                     # node 名（纯函数无 ctx），故此处补 node=node.name。
-                    yield ev.model_copy(update={"node": node.name})
+                    enriched = ev.model_copy(update={"node": node.name})
+                    # events 模式：翻译事件既 yield（推 tape/订阅者）又喂累积器收集终态。
+                    # result_line 模式 on_result 已填累积器，consume_event 在 agent_usage 上
+                    # 会重复写 usage/cost——故仅 events 模式调用（避免 claude 双写）。
+                    if self.profile.terminal.mode == "events":
+                        accumulator.consume_event(enriched)
+                    yield enriched
+
+            # events 模式 EOF 后：把累积的 agent_message 片段固化成 result_text，统一后续
+            # 错误判定 / extract_and_validate / node_completed 的读路径（与 result_line 一致）。
+            if self.profile.terminal.mode == "events":
+                accumulator.result_text = accumulator.events_result_text
 
             # phase 11 §4.2：用户 SIGINT 中断优先判定（在 timed_out / exit_code 之前）。
             # was_interrupted=True 表示用户 Ctrl+G 主动中断（非子进程崩）→ 不当 error：
@@ -181,30 +187,22 @@ class ClaudeExecutor(Executor):
                 })
                 return
 
-            # 错误诊断摘要（SPEC §6 可观测性）：claude 把 API 错误（如 529 overloaded）写在
-            # stdout 的 result 行（is_error + api_error_status + result 文本），**不在 stderr**。
-            # 故 node_failed 的 message 必须带上 result 诊断，否则 stderr 空时（典型 529 早退
-            # 场景）用户完全看不到失败原因。DRY：4 个 ExecError 分支共用此摘要。
+            # 错误诊断摘要（SPEC §6 可观测性）：后端把 API 错误（如 529 overloaded）写在
+            # stdout 的 result 行（is_error + api_error_status + result 文本）或 error 事件，
+            # **不在 stderr**。故 node_failed 的 message 必须带上 result 诊断，否则 stderr 空
+            # 时（典型 529 早退场景）用户完全看不到失败原因。DRY：4 个 ExecError 分支共用
+            # RunAccumulator.diagnose（两模式同一摘要）。
+            backend = self.profile.name  # claude / ccr / opencode（错误信息带真实 backend 名）
+
             def _result_diag() -> str:
-                parts: list[str] = []
-                status = result_holder.get("api_error_status")
-                if status is not None:
-                    parts.append(f"HTTP {status}")
-                if result_holder.get("is_error"):
-                    parts.append("result.is_error=true")
-                rt = result_holder.get("result_text")
-                if rt:
-                    parts.append(f"result={str(rt)[:300]!r}")
-                if runner.stderr:
-                    parts.append(f"stderr末尾={runner.stderr[-300:]!r}")
-                return "；".join(parts) if parts else "（无 stderr / result 详情）"
+                return accumulator.diagnose(runner.stderr)
 
             # 8. 有序互斥判定（SPEC §2.4）：timed_out → exit_code → is_error → no_result
             if runner.timed_out:
                 raise ExecError(
                     phase="timeout",
                     message=(
-                        f"claude 子进程超时（timeout={cfg.timeout}s，elapsed="
+                        f"{backend} 子进程超时（timeout={cfg.timeout}s，elapsed="
                         f"{runner.elapsed:.1f}s）；{_result_diag()}"
                     ),
                 )
@@ -212,36 +210,37 @@ class ClaudeExecutor(Executor):
                 raise ExecError(
                     phase="spawn",
                     message=(
-                        f"claude 子进程非零退出（exit_code={runner.exit_code}）；{_result_diag()}"
+                        f"{backend} 子进程非零退出（exit_code={runner.exit_code}）；{_result_diag()}"
                     ),
                 )
-            # result.is_error=true（SPEC §2.4 第 3 项 / §6 phase=stream）：claude 自己报错
-            # （如 API error）。on_result 透传 is_error + api_error_status，executor 据此
-            # 走 stream 错误路径并把 HTTP 错误码带进 node_failed。
-            if result_holder["is_error"]:
+            # result.is_error=true（SPEC §2.4 第 3 项 / §6 phase=stream）：后端自报错误
+            # （如 API error）。result_line 模式 on_result 透传 is_error + api_error_status；
+            # events 模式 consume_event 从 error 事件抓 is_error。executor 据此走 stream
+            # 错误路径并把 HTTP 错误码带进 node_failed。
+            if accumulator.is_error:
                 raise ExecError(
                     phase="stream",
-                    message=f"claude 流报错（result.is_error=true）；{_result_diag()}",
+                    message=f"{backend} 流报错（result.is_error=true）；{_result_diag()}",
                 )
-            if result_holder["result_text"] is None:
+            if accumulator.result_text is None:
                 raise ExecError(
                     phase="result_parse",
                     message=(
-                        f"claude exit 0 但流里无 result 事件（result_text 缺失）；{_result_diag()}"
+                        f"{backend} exit 0 但流里无最终答案（result_text 缺失）；{_result_diag()}"
                     ),
                 )
 
             # 9. 结构化提取（SPEC §2.7）
-            output = extract_and_validate(result_holder["result_text"], node.output_schema)
+            output = extract_and_validate(accumulator.result_text, node.output_schema)
 
             # 10-11. node_completed（带 output / elapsed / usage?）
             completed_data: dict[str, Any] = {
                 "output": output,
                 "elapsed": runner.elapsed,
             }
-            if result_holder["usage"] is not None:
+            if accumulator.usage is not None:
                 completed_data["usage"] = _normalize_usage(
-                    result_holder["usage"], result_holder["cost"]
+                    accumulator.usage, accumulator.cost
                 )
             yield _ev("node_completed", completed_data)
 

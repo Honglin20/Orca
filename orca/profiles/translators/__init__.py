@@ -13,5 +13,6 @@ translator 是「这个 backend 的 stream-json 行 → Orca Event」的协议�
 """
 
 from orca.profiles.translators.claude import claude_translator
+from orca.profiles.translators.opencode import opencode_translator
 
-__all__ = ["claude_translator"]
+__all__ = ["claude_translator", "opencode_translator"]
