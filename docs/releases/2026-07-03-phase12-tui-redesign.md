@@ -106,4 +106,5 @@
 ## Commit SHA
 
 - `38fd78c` —— S0-S9 主实现（分支 `phase12-tui-redesign`）
-- `<待回填>` —— S10 e2e + opencode spawn capability-guard fix
+- `cd6c1ee` —— opencode spawn capability-guard fix（S10 的硬 blocker）
+- `81d2f93` —— S10 opencode e2e + snapshot + docs
