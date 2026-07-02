@@ -140,19 +140,24 @@ class ClaudeExecutor(Executor):
                     session_id=session_id, run_id=ctx.run_id, node=node.name,
                 )
 
-            # 5. on_result 钩子收集 result 文本 / usage / cost
+            # 5. on_result 钩子收集 result 文本 / usage / cost / API 错误码
             result_holder: dict[str, Any] = {
                 "result_text": None,
                 "usage": None,
                 "cost": 0.0,
                 "is_error": False,
+                "api_error_status": None,  # claude result 行顶层 HTTP 错误码（如 529）
             }
 
-            def on_result(raw_result: str, usage: dict, cost: float, is_error: bool) -> None:
+            def on_result(
+                raw_result: str, usage: dict, cost: float, is_error: bool,
+                api_error_status: int | None = None,
+            ) -> None:
                 result_holder["result_text"] = raw_result
                 result_holder["usage"] = usage
                 result_holder["cost"] = cost
                 result_holder["is_error"] = is_error
+                result_holder["api_error_status"] = api_error_status
 
             # 6-7. CLIRunner 跑子进程，逐行喂 translator
             runner = CLIRunner(cfg, on_result=on_result)
@@ -176,39 +181,53 @@ class ClaudeExecutor(Executor):
                 })
                 return
 
+            # 错误诊断摘要（SPEC §6 可观测性）：claude 把 API 错误（如 529 overloaded）写在
+            # stdout 的 result 行（is_error + api_error_status + result 文本），**不在 stderr**。
+            # 故 node_failed 的 message 必须带上 result 诊断，否则 stderr 空时（典型 529 早退
+            # 场景）用户完全看不到失败原因。DRY：4 个 ExecError 分支共用此摘要。
+            def _result_diag() -> str:
+                parts: list[str] = []
+                status = result_holder.get("api_error_status")
+                if status is not None:
+                    parts.append(f"HTTP {status}")
+                if result_holder.get("is_error"):
+                    parts.append("result.is_error=true")
+                rt = result_holder.get("result_text")
+                if rt:
+                    parts.append(f"result={str(rt)[:300]!r}")
+                if runner.stderr:
+                    parts.append(f"stderr末尾={runner.stderr[-300:]!r}")
+                return "；".join(parts) if parts else "（无 stderr / result 详情）"
+
             # 8. 有序互斥判定（SPEC §2.4）：timed_out → exit_code → is_error → no_result
             if runner.timed_out:
                 raise ExecError(
                     phase="timeout",
                     message=(
                         f"claude 子进程超时（timeout={cfg.timeout}s，elapsed="
-                        f"{runner.elapsed:.1f}s）；stderr 末尾：{runner.stderr[-300:]}"
+                        f"{runner.elapsed:.1f}s）；{_result_diag()}"
                     ),
                 )
             if runner.exit_code != 0:
                 raise ExecError(
                     phase="spawn",
                     message=(
-                        f"claude 子进程非零退出（exit_code={runner.exit_code}）；"
-                        f"stderr 末尾：{runner.stderr[-500:]}"
+                        f"claude 子进程非零退出（exit_code={runner.exit_code}）；{_result_diag()}"
                     ),
                 )
             # result.is_error=true（SPEC §2.4 第 3 项 / §6 phase=stream）：claude 自己报错
-            # （如 API error）。on_result 透传 is_error，executor 据此走 stream 错误路径。
+            # （如 API error）。on_result 透传 is_error + api_error_status，executor 据此
+            # 走 stream 错误路径并把 HTTP 错误码带进 node_failed。
             if result_holder["is_error"]:
                 raise ExecError(
                     phase="stream",
-                    message=(
-                        f"claude 流报错（result.is_error=true）："
-                        f"{result_holder['result_text']!s}[:500]"
-                    ),
+                    message=f"claude 流报错（result.is_error=true）；{_result_diag()}",
                 )
             if result_holder["result_text"] is None:
                 raise ExecError(
                     phase="result_parse",
                     message=(
-                        f"claude exit 0 但流里无 result 事件（result_text 缺失）；"
-                        f"stderr 末尾：{runner.stderr[-300:]}"
+                        f"claude exit 0 但流里无 result 事件（result_text 缺失）；{_result_diag()}"
                     ),
                 )
 

@@ -120,6 +120,7 @@ class _SigintFakeRunner:
             self._on_result(
                 obj.get("result", ""), obj.get("usage") or {},
                 obj.get("total_cost_usd") or 0.0, bool(obj.get("is_error", False)),
+                obj.get("api_error_status"),
             )
 
 

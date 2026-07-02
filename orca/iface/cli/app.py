@@ -31,8 +31,10 @@ orchestrator 对 gate 透明（phase 6 §2.3）—— gate 触发在两个独立
 线程」的崩溃，也避免 uvicorn 嵌入 Textual 的兼容性坑（uvicorn ``Server.serve`` 必须在
 其 loop 内 await，跨 loop 调用会 raise）。loop 隔离 + 共享对象锁 = 干净的双线程拓扑。
 
-退出语义：编排 worker 跑完 → ``terminal_state`` 存 ``RunState``（tape 派生）→
-``self.exit()`` → ``commands._run_workflow`` 据 ``terminal_state.status`` 决定 exit 0/1。
+退出语义：编排 worker 跑完 → ``terminal_state`` 存 ``RunState``（tape 派生）→ **TUI 停留**
+（不再自动 ``self.exit()``，终态 notify 提示「按 q 退出」）→ 用户按 ``q`` → ``self.exit()`` →
+``commands._run_workflow`` 据 ``terminal_state.status`` 决定 exit 0/1。中途 ``q`` 强退 →
+``terminal_state`` 仍 None → exit 1（fail loud）。
 """
 
 from __future__ import annotations
@@ -471,11 +473,10 @@ class OrcaApp(App):
                 await self.interrupt_handler.stop()
             except Exception:  # noqa: BLE001
                 logger.exception("interrupt_handler.stop 异常")
-            # 触发退出（让 _run_workflow.run() 返回）。若用户已在 q 退出则 no-op。
-            try:
-                self.exit()
-            except Exception:  # noqa: BLE001 —— TUI 已退出时 self.exit 可能 raise
-                pass
+            # 不主动 self.exit()：TUI 终态后停留，让用户看结果 / 错误后再按 q 退出
+            # （commands._run_workflow 在 tui.run() 返回后读 terminal_state 决定 exit code）。
+            # 终态提示由 _dispatch_to_widgets 的 workflow_completed/failed 分支 notify。
+            # 中途 q 强退：terminal_state 仍 None → exit 1（既有逻辑，保持）。
 
     # ── worker 2：事件消费（SPEC §3.2 _consume_events）──────────────────
 
@@ -562,6 +563,18 @@ class OrcaApp(App):
             log = self.query_one(LogStream)
             log.append_event(etype, data, node=node, session_id=event.session_id,
                              timestamp=event.timestamp)
+            # TUI 不再自动退出（_run_orchestrator finally 不调 self.exit），终态后停留。
+            # 显式 notify 让用户知道已到终态 + 如何离开（timeout=0 持久不消失）。
+            if etype == "workflow_failed":
+                self.notify(
+                    "workflow failed — 见日志详情，按 q 退出",
+                    severity="error", timeout=0,
+                )
+            else:
+                self.notify(
+                    "workflow completed — 按 q 退出",
+                    severity="information", timeout=0,
+                )
 
         # 所有事件都入 LogStream（保证「发生了什么」可见；SPEC §4.3 全部入日志）
         else:
