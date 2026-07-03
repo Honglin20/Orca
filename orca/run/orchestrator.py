@@ -821,10 +821,18 @@ class Orchestrator:
 
         agent node 声明 retry → execute_with_retry（transient 失败自动重试 + retry_* 事件）；
         否则 execute_and_emit（既有路径，向后兼容）。script/set node 走 execute_and_emit。
+
+        phase-13 §2：``runs_dir`` 从 ``self.bus.tape.path.parent`` 推导（同 tape 父目录），
+        透传给 ``ClaudeExecutor`` 用于 spawn env 注入 ``ORCA_CHART_SOCK``。
         """
         from orca.exec.factory import make_executor
 
-        executor = make_executor(node, self._agent_tools_server, bus=self.bus)
+        executor = make_executor(
+            node,
+            self._agent_tools_server,
+            bus=self.bus,
+            runs_dir=self.bus.tape.path.parent,
+        )
         # node.kind=="agent" 已保证 node 是 AgentNode；node.retry 字段必然存在。
         if node.kind == "agent" and getattr(node, "retry", None) is not None:  # type: ignore[union-attr]
             from orca.run.retry import execute_with_retry

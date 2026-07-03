@@ -41,7 +41,7 @@ def test_foreach_source_resolved_at_runtime(tmp_path, monkeypatch):
     bus, _ = make_bus(tmp_path)
     seen_items: list = []
 
-    def factory(node, agent_tools_server=None, bus=None):
+    def factory(node, agent_tools_server=None, bus=None, **kwargs):
         # body 节点：用 FakeExecutor，但捕获收到的 ctx.locals[item]
         class CapturingFake(FakeExecutor):
             async def exec(self, n, ctx):
@@ -76,7 +76,7 @@ def test_foreach_source_resolved_at_runtime(tmp_path, monkeypatch):
 def test_foreach_empty_source_aggregates_zero(tmp_path, monkeypatch):
     """source = [] → count=0，无 body 执行。"""
     bus, _ = make_bus(tmp_path)
-    _patch_executors(monkeypatch, lambda n, agent_tools_server=None, bus=None: FakeExecutor.produces({}, node_name=n.name))
+    _patch_executors(monkeypatch, lambda n, agent_tools_server=None, bus=None, **kwargs: FakeExecutor.produces({}, node_name=n.name))
 
     node = ForeachNode(
         name="p", source="maker.output.items", item_var="item",
@@ -113,7 +113,7 @@ def test_foreach_respects_max_concurrent(tmp_path, monkeypatch):
     current_concurrent = {"n": 0}
     max_observed = {"n": 0}
 
-    def factory(node, agent_tools_server=None, bus=None):
+    def factory(node, agent_tools_server=None, bus=None, **kwargs):
         inner = FakeExecutor.produces({"ok": True}, node_name=node.name)
 
         class ThrottledFake(FakeExecutor):
@@ -152,7 +152,7 @@ def test_foreach_respects_max_concurrent(tmp_path, monkeypatch):
 def _failing_for(indices: set[int], total: int):
     """工厂：指定 index 的 item 失败，其余成功。"""
 
-    def factory(node, agent_tools_server=None, bus=None):
+    def factory(node, agent_tools_server=None, bus=None, **kwargs):
         # 每次 make_executor 都返回一个独立 executor；按 call count 判定 index
         factory.calls = getattr(factory, "calls", -1) + 1
         idx = factory.calls
@@ -236,7 +236,7 @@ def test_foreach_custom_item_and_index_var(tmp_path, monkeypatch):
     bus, _ = make_bus(tmp_path)
     seen = []
 
-    def factory(node, agent_tools_server=None, bus=None):
+    def factory(node, agent_tools_server=None, bus=None, **kwargs):
         inner = FakeExecutor.produces({"ok": True}, node_name=node.name)
 
         class CapturingFake(FakeExecutor):

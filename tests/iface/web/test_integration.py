@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import socket
 from contextlib import closing
 from pathlib import Path
@@ -58,7 +59,7 @@ def test_full_flow_real_server(tmp_path):
     import uvicorn
 
     yaml_path = _demo_yaml(tmp_path)
-    manager = RunManager(runs_dir=tmp_path / "runs")
+    manager = RunManager(runs_dir=Path(f"/tmp/orca-int-{hashlib.md5(str(tmp_path).encode()).hexdigest()[:6]}/runs"))
     app = create_app(manager)
     port = _free_port()
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
@@ -115,7 +116,7 @@ def test_events_endpoint_after_completion(tmp_path):
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
     yaml_path = _demo_yaml(tmp_path)
-    manager = RunManager(runs_dir=tmp_path / "runs")
+    manager = RunManager(runs_dir=Path(f"/tmp/orca-int-{hashlib.md5(str(tmp_path).encode()).hexdigest()[:6]}/runs"))
     app = create_app(manager)
 
     async def start_run():

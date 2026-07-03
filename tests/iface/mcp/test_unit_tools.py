@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 from orca.iface.mcp.server import OrcaMcpServer
@@ -101,7 +102,13 @@ nodes:
         encoding="utf-8",
     )
 
-    manager = _RM(runs_dir=tmp_path / "runs")
+    # phase-13 §7.7：用短路径避免 macOS tmp_path 触发 SOCK_PATH_MAX（RunManager
+    # 启动 chart ingestor 时 fail loud check）
+    import hashlib
+    h = hashlib.md5(str(tmp_path).encode()).hexdigest()[:6]
+    short_runs = Path(f"/tmp/orca-mcp-{h}/runs")
+    short_runs.parent.mkdir(parents=True, exist_ok=True)
+    manager = _RM(runs_dir=short_runs)
 
     async def slow_run_with_sem(handle, inputs, task, max_iter):
         await asyncio.sleep(10)  # 模拟 10s 长跑

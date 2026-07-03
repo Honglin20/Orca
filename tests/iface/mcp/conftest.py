@@ -34,6 +34,18 @@ def run_async(coro):
     return asyncio.run(coro)
 
 
+def _short_runs_dir(tmp_path: Path) -> Path:
+    """phase-13 §7.7：短路径 runs_dir（避免 macOS /private/var/folders 触发 SOCK_PATH_MAX）。
+
+    pytest tmp_path 在 macOS 是 /private/var/folders/.../pytest-of-user/pytest-NN/，加
+    ``runs/<run_id>.sock`` 后超 90 字节，触发 RunManager.start_run 的 SOCK_PATH_MAX fail loud。
+    与 SPEC §7.7 workaround 一致用 /tmp 短前缀（md5 哈希避免并发测试撞名）。
+    """
+    import hashlib
+    h = hashlib.md5(str(tmp_path).encode()).hexdigest()[:6]
+    return Path(f"/tmp/orca-mcp-{h}")
+
+
 def make_tape(tmp_path: Path, run_id: str = "r1", name: str = "events.jsonl") -> Tape:
     """构造空 Tape（写 tmp_path，不污染 cwd）。调用方自己 append 事件。"""
     return Tape(tmp_path / name, run_id=run_id)
@@ -55,6 +67,10 @@ async def orca_mcp_subprocess(runs_dir: Path, *extra: str):
     用 ``uv run orca`` 拉 console_script（不用 ``python -m orca.iface.cli.commands`` ——
     ``orca.iface.cli.__init__`` 会拉 textual import，无必要且慢）。
 
+    phase-13 §7.7：``runs_dir`` 长度超 SOCK_PATH_MAX（90）时自动转 /tmp/orca-mcp-<hash>/
+    短路径（macOS pytest tmp_path 在 /private/var/folders 触发 fail loud）。stderr 仍写到
+    原 runs_dir（调用方期望）。
+
     **注**：asyncio subprocess transport 在 Python 3.12 有 ``__del__`` GC 时机小毛病——
     transport 对象在 ``asyncio.run`` 关 loop 后才被 GC，``__del__`` 调 ``call_soon`` raise
     ``RuntimeError: Event loop is closed``（pytest 报 ``PytestUnraisableExceptionWarning``）。
@@ -64,12 +80,20 @@ async def orca_mcp_subprocess(runs_dir: Path, *extra: str):
     from mcp.client.session import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
 
-    stderr_path = runs_dir / "server.stderr"
+    # phase-13 §7.7：长路径转短路径（同 make_inprocess_harness）
+    candidate = runs_dir.resolve()
+    if len(str(candidate)) + 50 > 90:  # 留 50 字节给 run_id + .sock
+        actual = _short_runs_dir(runs_dir)
+        actual.mkdir(parents=True, exist_ok=True)
+    else:
+        actual = runs_dir
+    stderr_path = runs_dir / "server.stderr"  # stderr 仍写到原 tmp_path（调用方期望）
+    runs_dir.mkdir(parents=True, exist_ok=True)
     stderr_file = open(stderr_path, "w", encoding="utf-8")
     try:
         params = StdioServerParameters(
             command="uv",
-            args=["run", "orca", "mcp", "--runs-dir", str(runs_dir),
+            args=["run", "orca", "mcp", "--runs-dir", str(actual),
                   "--max-concurrent", "3", *extra],
             cwd=str(Path(__file__).resolve().parents[3]),
             errlog=stderr_file,
@@ -109,8 +133,14 @@ class InProcessHarness:
 
 
 def make_inprocess_harness(runs_dir: Path) -> InProcessHarness:
-    """构造 InProcessHarness（runs_dir 隔离到 tmp_path）。"""
-    return InProcessHarness(runs_dir=runs_dir)
+    """构造 InProcessHarness（runs_dir 自动转短路径，避免 macOS SOCK_PATH_MAX）。
+
+    phase-13 §7.7：原 ``runs_dir`` 用 tmp_path，在 macOS 长度超 90 → RunManager.start_run
+    fail loud。本 helper 把 tmp_path 映射到 /tmp/orca-mcp-<hash>/（同 SOCK_PATH_MAX workaround）。
+    """
+    short_dir = _short_runs_dir(runs_dir)
+    short_dir.mkdir(parents=True, exist_ok=True)
+    return InProcessHarness(runs_dir=short_dir)
 
 
 # ── helpers（E2E 共用）─────────────────────────────────────────────────────────

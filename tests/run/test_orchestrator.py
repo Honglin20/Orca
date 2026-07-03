@@ -290,7 +290,7 @@ def test_no_route_match_workflow_failed(tmp_path):
 def test_executor_failure_workflow_failed(tmp_path, monkeypatch):
     """executor node_failed → workflow_failed（透传 error_type + node 名，F1）。"""
 
-    def fake_make_executor(node, agent_tools_server=None, bus=None):
+    def fake_make_executor(node, agent_tools_server=None, bus=None, **kwargs):
         return FakeExecutor.failing(
             error_type="ExecTimeout", message="超时了", phase="timeout", node_name=node.name,
         )
@@ -364,7 +364,7 @@ def test_orchestrator_runs_parallel_group_and_merges(tmp_path, monkeypatch):
     """
     from orca.exec.factory import make_executor as real_make_executor
 
-    def fake_make_executor(node, agent_tools_server=None, bus=None):
+    def fake_make_executor(node, agent_tools_server=None, bus=None, **kwargs):
         if node.name == "branch_a":
             return FakeExecutor.produces({"v": "A"}, node_name=node.name)
         if node.name == "branch_b":
@@ -418,7 +418,7 @@ def test_orchestrator_runs_foreach_with_locals(tmp_path, monkeypatch):
 
     seen_items = []
 
-    def fake_make_executor(node, agent_tools_server=None, bus=None):
+    def fake_make_executor(node, agent_tools_server=None, bus=None, **kwargs):
         if node.name == "worker":
             class CapturingFake(FakeExecutor):
                 def __init__(self):
@@ -514,7 +514,7 @@ def test_parallel_continue_on_error_partial_failure_aggregation_visible_downstre
     from orca.exec.factory import make_executor as real_make_executor
     from orca.schema import ParallelGroup
 
-    def fake_make_executor(node, agent_tools_server=None, bus=None):
+    def fake_make_executor(node, agent_tools_server=None, bus=None, **kwargs):
         if node.name == "branch_a":
             return FakeExecutor.produces({"v": "A"}, node_name=node.name)
         if node.name == "branch_b":
@@ -576,7 +576,7 @@ def test_foreach_continue_on_error_partial_failure_aggregation_visible_downstrea
     from orca.exec.factory import make_executor as real_make_executor
     from orca.schema import ForeachNode
 
-    def fake_make_executor(node, agent_tools_server=None, bus=None):
+    def fake_make_executor(node, agent_tools_server=None, bus=None, **kwargs):
         if node.name == "worker":
             # 第 0 / 2 个 item 成功，第 1 个失败 —— 用 ctx.locals._index 区分
             class _ItemAware(FakeExecutor):

@@ -45,8 +45,10 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from orca.chart._limits import SOCK_PATH_MAX
 from orca.exec.claude.accumulator import RunAccumulator
 from orca.exec.claude.result_extractor import extract_and_validate
 from orca.exec.context import RunContext
@@ -84,9 +86,15 @@ class ClaudeExecutor(Executor):
         self,
         profile: CliProfile,
         agent_tools_server: AgentToolsMcpServer | None = None,
+        *,
+        runs_dir: Path | None = None,
     ) -> None:
         self.profile = profile
         self._agent_tools_server = agent_tools_server
+        # phase-13 §2：chart ingestor sock 父目录（``runs/<run_id>.sock`` 寻址用）。
+        # None == 不注 ``ORCA_CHART_SOCK`` env（向后兼容，script 端 render_chart fail loud）。
+        # 由 orchestrator 从 ``self.bus.tape.path.parent`` 推导传入（同 tape 父目录）。
+        self._runs_dir = runs_dir
 
     async def exec(self, node: AgentNode, ctx: RunContext) -> AsyncIterator[Event]:
         """执行 agent node，产出完整生命周期事件流（SPEC §4.3）。
@@ -127,9 +135,12 @@ class ClaudeExecutor(Executor):
             })
 
             # 4. 构造 spawn config（argv 动态拼 + env overlay + 可选 mcp-config）
+            # phase-13 §2：若 ``self._runs_dir`` 已注入，算 chart sock path（agent 子进程
+            # 经 env 继承传到 script 子进程，render_chart 据此连 ingestor）。
+            chart_sock = _resolve_chart_sock_path(self._runs_dir, ctx.run_id)
             cfg = _build_spawn_config(
                 node, self.profile, prompt, self._agent_tools_server,
-                run_id=ctx.run_id, session_id=session_id,
+                run_id=ctx.run_id, session_id=session_id, chart_sock=chart_sock,
             )
 
             # phase 11 §5.5（review B2）：register debt —— spawn 前（写 mcp-config 之后）
@@ -266,8 +277,9 @@ def _build_spawn_config(
     *,
     run_id: str = "",
     session_id: str = "",
+    chart_sock: str = "",
 ) -> SpawnConfig:
-    """按 SPEC §2.1 拼动态 argv + env overlay + 可选 --mcp-config（phase 11 §5.4）。
+    """按 SPEC §2.1 拼动态 argv + env overlay + 可选 --mcp-config（phase 11 §5.4）+ chart 路由（phase-13 §2）。
 
     - ``--model <m>``：仅当 ``node.model`` 显式指定（None 不传）
     - ``--allowed-tools "<t1 t2 ...>"``：``node.tools`` 非 None 时取其声明；
@@ -277,7 +289,11 @@ def _build_spawn_config(
       （否则用户的白名单会把 ask_user 屏蔽掉）。
     - phase 11 §5.4：``--mcp-config <path>`` 仅当 ``agent_tools_server`` 注入；
       ``path`` 由 ``agent_tools_server.write_config`` 产出（SSE url 指向 loopback port）。
-    - env overlay：profile 声明的前缀（claude = ANTHROPIC_ / CLAUDE_）对应 os.environ 子集
+    - env overlay：profile 声明的前缀（claude = ANTHROPIC_ / CLAUDE_）对应 os.environ 子集。
+    - phase-13 §2：``chart_sock`` 非空 → 透传 ``build_env_overlay(chart_sock=...)`` → 子进程
+      ``ORCA_CHART_SOCK`` 注入（缺则不注，向后兼容）。同 ``run_id`` / ``session_id`` / ``node``
+      （后者取 ``node.name``）一起组成 chart 路由 4 件套，子进程内 ``orca.chart.render_chart``
+      据此推图到正确 run 的 ingestor。
     """
     # ── 1. tools：仅当注入 agent_tools_server 时合并 ask_user 权限 ──────────
     # spike 验证：claude -p 默认不给 MCP 工具授权，必须显式 ``--allowed-tools`` 才能调
@@ -323,7 +339,15 @@ def _build_spawn_config(
         )
         mcp_flag_args = ["--mcp-config", str(config_path)]
 
-    env_overlay = build_env_overlay(profile.env_overlay_prefixes)
+    # phase-13 §2：env overlay 加 4 个 ORCA_* keyword（缺省空串 → 不注，向后兼容）。
+    # chart_sock 由 ClaudeExecutor.exec 经 ``_resolve_chart_sock_path`` 算出。
+    env_overlay = build_env_overlay(
+        profile.env_overlay_prefixes,
+        run_id=run_id,
+        node=node.name,
+        session_id=session_id,
+        chart_sock=chart_sock,
+    )
     cli_path = profile.resolve_cli_path()  # env > default，运行时读（SPEC §2.6）
 
     return SpawnConfig(
@@ -349,6 +373,36 @@ def _normalize_usage(usage: dict, cost: float) -> dict[str, Any]:
         "cache_tokens": usage.get("cache_read_input_tokens", 0),
         "cost_usd": cost,
     }
+
+
+def _resolve_chart_sock_path(runs_dir: Path | None, run_id: str) -> str:
+    """phase-13 §2 / §7.7：算 ``runs/<run_id>.sock`` 绝对路径，过长则 log warning + 返回空。
+
+    - ``runs_dir is None`` → 返回空串（不注 ``ORCA_CHART_SOCK`` env，向后兼容；
+      script 端 render_chart 会 fail loud 提示）。
+    - resolved path > ``SOCK_PATH_MAX``（90 字节）→ log warning 并返回空串。
+      **不 raise**（executor 路径只生成路径，ingestor 启动时 RunManager 已先做过 fail loud
+      check；此处 executor 二次发现过长 → 退化为不注 env，让 script 端 §7.1 fail loud
+      而非 executor 阻塞整个 run）。
+
+    返回的路径用于：
+      1. ``build_env_overlay(chart_sock=...)`` → 子进程 ``ORCA_CHART_SOCK``
+      2. script 子进程内 ``orca.chart.render_chart`` 据此连 ingestor
+    """
+    if runs_dir is None:
+        return ""
+    sock_path = (runs_dir / f"{run_id}.sock").resolve()
+    resolved = str(sock_path)
+    if len(resolved) > SOCK_PATH_MAX:
+        # executor 路径不 raise（避免阻塞 run）；RunManager 启动 ingestor 前已先 fail loud。
+        logger.warning(
+            "phase-13: chart sock path 过长（%d > %d 字节）：%r；"
+            "退化为不注 ORCA_CHART_SOCK env（script 端 render_chart 会 fail loud）。"
+            "建议改 ORCA_RUNS_DIR 到短路径（如 /tmp/orca-runs/）。",
+            len(resolved), SOCK_PATH_MAX, resolved,
+        )
+        return ""
+    return resolved
 
 
 def _append_ask_user_instruction(prompt: str, run_id: str, node: str) -> str:

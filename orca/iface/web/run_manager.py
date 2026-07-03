@@ -29,7 +29,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from orca.compile import ConfigurationError, load_workflow
+from orca.chart._limits import SOCK_PATH_MAX
 from orca.events.bus import EventBus
+from orca.events.chart_ingestor import chart_ingestor, make_crash_callback
 from orca.events.replay import replay_state
 from orca.events.tape import Tape
 from orca.gates.context_registry import SessionContextRegistry
@@ -68,6 +70,9 @@ class RunHandle:
     _task: asyncio.Task | None = field(default=None, repr=False)
     # gate_handler 是否已 start（收尾时只 stop 已 start 的，幂等）。
     _gate_started: bool = field(default=False, repr=False)
+    # phase-13 §3.1：per-run chart ingestor task（script → emit custom(chart) → tape）。
+    # ``resume=True`` 重开模式不起（SPEC §3.1 YAGNI）。teardown 时 cancel + unlink socket。
+    _chart_ingestor: asyncio.Task | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -127,19 +132,26 @@ class RunManager:
         inputs: dict | None = None,
         task: str | None = None,
         max_iter: int | None = None,
+        *,
+        resume: bool = False,
     ) -> str:
         """启动一个 run（后台 task，不阻塞）。返回 run_id。
 
         - 加载 + 校验 workflow（``ConfigurationError`` 透传给调用方 → routes 层 400）。
         - 构造独立 tape + bus + gate_handler + RunHandle。
         - 创建后台 task ``_run_with_sem``（sem 内并发 + 状态机）。
+        - phase-13 §3.1：非 resume 模式起 per-run chart ingestor（``runs/<run_id>.sock``）。
 
         不阻塞：``await`` 返回时 run 已注册（status=queued），实际执行在后台。
+
+        Args:
+            resume: phase-3 §3.5 resume 模式（重开已存在 tape）。True → **不起 chart ingestor**
+                （SPEC §3.1 YAGNI：script 调 render_chart 会因 socket 不存在 fail loud）。
         """
         wf = load_workflow(Path(yaml_path))
         run_id = gen_run_id(wf.name)
         tape_path = self._runs_dir / f"{run_id}.jsonl"
-        tape = Tape(tape_path, run_id=run_id)
+        tape = Tape(tape_path, run_id=run_id, resume=resume)
         bus = EventBus(tape)
         gate_handler = HumanGateHandler(bus)
         handle = RunHandle(
@@ -150,6 +162,26 @@ class RunManager:
             gate_handler=gate_handler,
             status="queued",
         )
+        # phase-13 §3.1：起 per-run chart ingestor（resume 模式不起，SPEC §3.1）。
+        # sock_path 与 start_run 生命周期一致：teardown 时 cancel + unlink。
+        if not resume:
+            sock_path = self._runs_dir / f"{run_id}.sock"
+            # SPEC §7.7：sock path 长度检查（macOS sun_path=104 / Linux 108，取 90 留余量）。
+            # 在 ingestor 启动前 fail loud——避免 ``asyncio.start_unix_server`` 抛 OSError 后
+            # crash callback 进入无限重起循环。错误信息提示用户改 ORCA_RUNS_DIR。
+            resolved = str(sock_path.resolve())
+            if len(resolved) > SOCK_PATH_MAX:
+                raise RuntimeError(
+                    f"socket path 过长（{len(resolved)} > {SOCK_PATH_MAX} 字节）："
+                    f"{resolved!r}。请改 ORCA_RUNS_DIR env 到短路径（如 /tmp/orca-runs/）。"
+                )
+            handle._chart_ingestor = asyncio.create_task(
+                chart_ingestor(sock_path, bus, run_id),
+                name=f"orca-chart-ingestor-{run_id}",
+            )
+            handle._chart_ingestor.add_done_callback(
+                make_crash_callback(sock_path, bus, run_id)
+            )
         async with self._lock:
             self._runs[run_id] = handle
         handle._task = asyncio.create_task(
@@ -454,7 +486,23 @@ class RunManager:
                 await self._teardown_handle(handle)
 
     async def _teardown_handle(self, handle: RunHandle) -> None:
-        """清理一个 handle 的资源（幂等）：stop gate_handler + close bus。"""
+        """清理一个 handle 的资源（幂等）：cancel chart ingestor + stop gate_handler + close bus。"""
+        # phase-13 §3.1：先 cancel chart ingestor（防新事件落已 close 的 tape）。
+        if handle._chart_ingestor is not None and not handle._chart_ingestor.done():
+            handle._chart_ingestor.cancel()
+            try:
+                await handle._chart_ingestor
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001 — ingestor task 异常不应阻塞 teardown
+                logger.warning("run %s chart ingestor 异常退出", handle.run_id, exc_info=True)
+        # 兜底 unlink socket 文件（crash 重起 task 的 cleanup 不依赖此，但保证 run 结束无残留）。
+        sock_path = self._runs_dir / f"{handle.run_id}.sock"
+        try:
+            Path(sock_path).unlink(missing_ok=True)
+        except OSError as e:  # noqa: BLE001
+            logger.warning("run %s sock unlink 失败 %s: %r", handle.run_id, sock_path, e)
+
         if handle._gate_started:
             try:
                 await handle.gate_handler.stop()
