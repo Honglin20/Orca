@@ -21,7 +21,7 @@ profile.translator（claude 协议，profiles 层）+ extract_and_validate（结
   12. ``except ExecError: yield node_failed + error``（fail loud，铁律 4）
 
 argv 构造（SPEC §2.1，重写不迁移）：
-  - flags 来自 ``profile.flags``（``-p --output-format stream-json ...``）
+  - flags 来自 ``profile.resolve_flags()``（env > config > default，``-p --output-format stream-json ...``）
   - ``--model <m>``：仅当 ``node.model`` 显式指定
   - ``--allowed-tools "<t1 t2 ...>"``：仅当 ``node.tools`` 非 None（None=全开，不传该 flag）；
     **单 flag + 空格 join**（非 variadic，SPEC §2.1）
@@ -141,6 +141,7 @@ class ClaudeExecutor(Executor):
             cfg = _build_spawn_config(
                 node, self.profile, prompt, self._agent_tools_server,
                 run_id=ctx.run_id, session_id=session_id, chart_sock=chart_sock,
+                agent_resources=node.resources_root or "",
             )
 
             # phase 11 §5.5（review B2）：register debt —— spawn 前（写 mcp-config 之后）
@@ -278,6 +279,7 @@ def _build_spawn_config(
     run_id: str = "",
     session_id: str = "",
     chart_sock: str = "",
+    agent_resources: str = "",
 ) -> SpawnConfig:
     """按 SPEC §2.1 拼动态 argv + env overlay + 可选 --mcp-config（phase 11 §5.4）+ chart 路由（phase-13 §2）。
 
@@ -319,8 +321,11 @@ def _build_spawn_config(
                 tools_list.append(_ASK_USER_TOOL_NAME)
         extra_args.extend(["--allowed-tools", " ".join(tools_list)])
     else:
-        # 既有行为（SPEC §2.1）：None=全开不传 flag；非 None=声明白名单单 flag + 空格 join
-        if node.tools is not None:
+        # 既有行为（SPEC §2.1）：None=全开不传 flag；非 None=声明白名单单 flag + 空格 join。
+        # capability guard（opencode）：mcp_tools=False 的 backend 不认 ``--allowed-tools``，
+        # node.tools 非 None 时也不注（opencode 工具权限走别的机制；强注 → yargs dump help exit 1）。
+        # phase-14 暴露：frontmatter ``tools:`` 合并到 node.tools 让此分支对 opencode 触发 → 修。
+        if node.tools is not None and supports_mcp:
             extra_args.extend(["--allowed-tools", " ".join(node.tools)])
 
     # ── 2. mcp-config（phase 11 §5.4）：注入 server 时写 SSE config 文件 ──
@@ -347,12 +352,13 @@ def _build_spawn_config(
         node=node.name,
         session_id=session_id,
         chart_sock=chart_sock,
+        agent_resources=agent_resources,
     )
     cli_path = profile.resolve_cli_path()  # env > default，运行时读（SPEC §2.6）
 
     return SpawnConfig(
         cli_path=cli_path,
-        flags=profile.flags,
+        flags=profile.resolve_flags(),
         extra_args=extra_args,
         mcp_flag_args=mcp_flag_args,
         prompt=prompt,

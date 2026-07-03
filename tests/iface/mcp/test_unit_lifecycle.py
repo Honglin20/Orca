@@ -70,8 +70,8 @@ def test_cancel_task_passes_none_reason():
     mock_manager.cancel_run.assert_awaited_once_with("r1", None)
 
 
-def test_fastmcp_lists_four_tools_after_d4():
-    """D4 加 cancel_task 后 FastMCP 注册四件套（start/get/resolve/cancel）。"""
+def test_fastmcp_lists_six_tools_phase14():
+    """FastMCP 注册六件套：start/get/resolve/cancel + phase-14 list_agents/get_agent。"""
     m = RunManager()
     server = OrcaMcpServer(m)
     tools = server._mcp._tool_manager._tools
@@ -81,6 +81,8 @@ def test_fastmcp_lists_four_tools_after_d4():
         "get_task_status",
         "resolve_gate",
         "cancel_task",
+        "list_agents",
+        "get_agent",
     }
 
 

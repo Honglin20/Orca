@@ -178,6 +178,96 @@ class OrcaMcpServer:
             "_hint": after_cancel(ok),
         }
 
+    # ── phase-14：agent 池查询（纯读，list_agents / get_agent）─────────────────
+
+    def _agent_resolve_context(self, yaml_path: str | None):
+        """构造 agent 解析上下文（LocalPoolResolver 用）。
+
+        yaml_path 给定 → workflow_dir = 其父目录（扫 workflow 同目录 agents/）；否则 workflow_dir = cwd。
+        两者都叠加 cwd/agents/（跨 workflow 复用），first-wins（workflow 同目录优先）。
+        """
+        from pathlib import Path
+
+        from orca.compile.agents import ResolveContext
+
+        cwd = Path.cwd()
+        workflow_dir = Path(yaml_path).resolve().parent if yaml_path else cwd
+        return ResolveContext(workflow_dir=workflow_dir, cwd=cwd)
+
+    async def tool_list_agents(self, yaml_path: str | None = None) -> dict:
+        """List available agents in the agent pool (read-only, instant).
+
+        Scans ``agents/`` directories (workflow-local + cwd). Pass ``yaml_path`` to
+        also scan that workflow's sibling ``agents/`` dir. Use get_agent(name=...) for
+        full details; use start_workflow to run a workflow that references an agent.
+
+        参数：
+          - yaml_path: 可选，workflow YAML 路径（额外扫其同目录 agents/）。
+
+        返回 ``{agents: [{name, description, has_resources}]}``。has_resources=True 表示
+        文件夹形态 agent（含 scripts/refs 子目录，运行时可经 ``$ORCA_AGENT_RESOURCES`` 访问）。
+        """
+        from orca.compile.agents import LocalPoolResolver
+
+        ctx = self._agent_resolve_context(yaml_path)
+        resolver = LocalPoolResolver()
+        items: list[dict[str, Any]] = []
+        for name, is_folder in resolver.discover(context=ctx):
+            # 取 description（resolve 一次拿 frontmatter meta；agent 数少，开销可接受）
+            description = ""
+            try:
+                handle = resolver.resolve(name, context=ctx)
+                description = handle.meta.description
+            except Exception:  # noqa: BLE001 — 列表不应因单个 agent 解析失败而中断
+                logger.warning("list_agents: 解析 agent %r 失败（跳过 description）", name, exc_info=True)
+            items.append(
+                {"name": name, "description": description, "has_resources": is_folder}
+            )
+        return {"agents": items}
+
+    async def tool_get_agent(self, name: str, yaml_path: str | None = None) -> dict:
+        """Get one agent's details: prompt preview + frontmatter meta + resources.
+
+        agent 不存在 → 返回 ``{name, error}``（不 raise，MCP 友好）。prompt_preview 截断
+        前 500 字。resources 仅文件夹形态 agent 列出（agent.md 除外）。
+
+        参数：
+          - name: agent 名（pool 内的 <name>）。
+          - yaml_path: 可选，workflow YAML 路径（额外扫其同目录 agents/）。
+        """
+        from pathlib import Path
+
+        from orca.compile.agents import AgentNotFound, LocalPoolResolver
+
+        ctx = self._agent_resolve_context(yaml_path)
+        resolver = LocalPoolResolver()
+        try:
+            handle = resolver.resolve(name, context=ctx)
+        except AgentNotFound as e:
+            return {"name": name, "error": str(e)}
+
+        resources: list[str] = []
+        if handle.is_folder:
+            try:
+                for p in sorted(handle.resources_root.iterdir()):
+                    if p.name == "agent.md":
+                        continue
+                    resources.append(p.name + ("/" if p.is_dir() else ""))
+            except OSError:
+                logger.warning("get_agent: 列资源目录 %r 失败", handle.resources_root, exc_info=True)
+
+        return {
+            "name": name,
+            "description": handle.meta.description,
+            "model": handle.meta.model,
+            "tools": handle.meta.tools,
+            "executor": handle.meta.executor,
+            "has_resources": handle.is_folder,
+            "resources": resources,
+            "prompt_preview": handle.prompt[:500],
+            "source": handle.source,
+        }
+
     # ── 构造 + 注册 ────────────────────────────────────────────────────────────
 
     def __init__(self, manager: RunManager) -> None:
@@ -216,6 +306,16 @@ class OrcaMcpServer:
             self.tool_cancel_task,
             name="cancel_task",
             description=inspect.cleandoc(self.tool_cancel_task.__doc__ or ""),
+        )
+        self._mcp.add_tool(
+            self.tool_list_agents,
+            name="list_agents",
+            description=inspect.cleandoc(self.tool_list_agents.__doc__ or ""),
+        )
+        self._mcp.add_tool(
+            self.tool_get_agent,
+            name="get_agent",
+            description=inspect.cleandoc(self.tool_get_agent.__doc__ or ""),
         )
 
     # ── stdio 生命周期 ─────────────────────────────────────────────────────────

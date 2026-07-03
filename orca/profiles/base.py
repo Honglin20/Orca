@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 from dataclasses import dataclass, field
 from typing import Callable, Literal
 
@@ -67,6 +68,13 @@ class CliProfile:
     # events 模式（opencode）显式覆盖。默认值保既有调用零改动（向后兼容）。
     terminal: TerminalContract = field(default_factory=lambda: RESULT_LINE)
 
+    # ── flags override 通道（镜像 cli_path_env 的 env 注入机制）──
+    # 空串 = 无 override 通道（默认）：``resolve_flags()`` 直接返回 ``self.flags``。
+    # 非空 = env 变量名（如 ``ORCA_CLAUDE_FLAGS``）；``orca executor set-flags`` 写 config.json，
+    # 启动期 ``apply_config_env`` 把 config 注入此 env，``resolve_flags()`` 运行时读。
+    # 默认空保 6 处测试 fake 零改动（向后兼容）。加在 terminal 之后不破坏 frozen。
+    flags_env: str = ""
+
     # ── prompt 形状 ──
     prompt_paradigm: Literal["minimal"] = "minimal"  # 暂只支持 minimal
 
@@ -79,3 +87,24 @@ class CliProfile:
         exec/ 层（phase 4）的职责，本层只解析路径选择。
         """
         return os.environ.get(self.cli_path_env, self.default_cli_path)
+
+    def resolve_flags(self) -> tuple[str, ...]:
+        """返回实际 flags：env > config > default，运行时读（与 ``resolve_cli_path`` 同构）。
+
+        三态（**逐字按 plan Part B 实现**）：
+          1. ``flags_env == ""``（无 override 通道，如 project profile 未设此字段）→ ``self.flags``。
+          2. ``flags_env`` 显式设（**含空串** = 显式清空 flags，如 ``ORCA_OPENCODE_FLAGS=``）→
+             ``tuple(shlex.split(env_value))``。``shlex.split('') == []`` round-trip 安全。
+          3. ``flags_env`` 未设（不在 ``os.environ``）→ ``self.flags``（default）。
+
+        优先级 shell env > config（启动期 ``apply_config_env`` 已 ``setdefault`` 进 env）>
+        profile default。三态区分「未设 / 显式置空 / 显式置值」。
+
+        依赖单向：只读 ``os.environ``（stdlib），**不** import iface.cli.config——profiles
+        是依赖底层，env 注入逻辑在 iface 层（合法 iface→profiles 方向）。
+        """
+        if not self.flags_env:
+            return self.flags
+        if self.flags_env in os.environ:
+            return tuple(shlex.split(os.environ[self.flags_env]))
+        return self.flags

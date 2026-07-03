@@ -5,25 +5,32 @@
 
 ---
 
-## 当前状态：phase-13 render_chart 接入完成（S1-S5 全过），无进行中任务
+## 当前状态：phase-14 Agent 一等化（批 1）完成；正在整理 examples
 
-**phase-13 script-side render_chart 接入收官**：env 身份路由 + per-run Unix socket + 大数据三道关 + executor-agnostic（ClaudeExecutor + ScriptExecutor 双闭环）。
-- **SPEC**：[`phase-13-render-chart.md`](../specs/phase-13-render-chart.md)（对抗审闭环 v1，16 处修订）｜**计划**：[`2026-07-03-phase13-render-chart.md`](../plans/2026-07-03-phase13-render-chart.md)｜**release**：[`2026-07-03-phase13-render-chart.md`](../releases/2026-07-03-phase13-render-chart.md)
-- **验证**：**1224 passed 0 回归**（baseline 1208→1224，新增 16 测试：10 单测 + 6 e2e）。
-- **S5 真跑通过**：E2E-1～5 全过（含 E2E-5 压测 3 run × 10 chart 无丢失/串扰）；E2E-6 **opencode + deepseek-v4-flash** 真跑 + 4 验证点（agent_message 完整 / TUI 各面板合理 / render_chart 推送 / 图表排布）逐条通过 + TUI snapshot 留档。
-- **S5 顺带修 2 实施 gap**：ScriptExecutor 漏 chart env（违反 SPEC §11 #9 executor-agnostic）+ OrcaApp CLI shell 漏起 ingestor（与 RunManager 不对称）—— e2e 真跑发现的设计盲点。
-- **CLAUDE.md 已记录**：测试后端固定使用 **opencode + deepseek-v4-flash**，不再用 claude 作后端测试。
-- 分支：`phase13-render-chart`（未 merge）。
+**phase-14 Agent 一等化 + Route 输出变换（批 1）收官**：agent 从内嵌 prompt 升级为可命名/可复用/可携带资源的一等公民（统一解析层 + 文件夹化 + frontmatter + Route.output + MCP list/get）。
+- **SPEC**：[`phase-14-agent-first-class.md`](../specs/phase-14-agent-first-class.md)（对抗审闭环 v2，2 P0 + 5 P1 修订）｜**release**：[`2026-07-03-phase14-agent-first-class.md`](../releases/2026-07-03-phase14-agent-first-class.md)
+- **验证**：**1276 passed 0 回归**；**opencode+deepseek-v4-flash 真跑 e2e**（E2E-1 agent 引用 GREETER_OK + E2E-2 文件夹化 resources `$ORCA_AGENT_RESOURCES` → SECRET_FLAG_42）。
+- **顺带修**：executor capability guard（opencode + frontmatter tools 不注 `--allowed-tools` → dump help exit 1）。
+- 分支：`phase13-render-chart`（phase-14 在此 commit；未 merge）。
+- **与并行进程边界**：commit 含 `executor.py`（共享）+ `profiles/base.py`（resolve_flags 定义，executor 依赖）；builtin/terminal/dialog/validator/executor_cmds/config 留工作树由并行进程 commit。
+
+## 进行中：整理 examples（goal 硬要求）
+
+收尾任务，要求：
+1. 每个 example **有意义** + TUI 有明确信息（让人知道在干什么）
+2. **script example 与 agent example 分开**（目录或命名）
+3. **agent example 必须用 opencode 真跑过**（不 mock），全部跑通
+4. 补 **render-chart** example（当前无）
+5. 涵盖全面、功能正确
 
 ## 待办（等用户指示方向）
 
-1. **phase-13 分支 merge / PR**（等用户决定）。
-2. **phase-12 分支 merge / PR**（仍待，等用户决定）。
-3. **前序 4-bug-fix 的 TUI 端到端验证**（仍待 manual）。
+1. **phase-14 分支 merge / PR**（等用户决定）。
+2. **批 2（phase-15）**：轻量本地包分发（多 pool + `name@source`）+ workspace-instruction（SPEC 已预留 `AgentResolver` 接口 + `ResolveContext.extra_roots`）。
+3. phase-12 / phase-13 分支 merge / PR（仍待）。
 
 ## 必读文件（下一任务开工前按需）
 
-- [`docs/releases/2026-07-03-phase13-render-chart.md`](../releases/2026-07-03-phase13-render-chart.md)（phase-13 全貌 + S5 + 偏差 + 已知 gap）
-- [`docs/specs/phase-13-render-chart.md`](../specs/phase-13-render-chart.md) §0.1 铁律 + §6 chart 事件契约 + §11 关键决策备忘
-- [`docs/releases/2026-07-03-phase12-tui-redesign.md`](../releases/2026-07-03-phase12-tui-redesign.md)（phase-12 全貌 + S10，render_chart 渲染侧已就绪）
-- [`orca/chart/_limits.py`](../../orca/chart/_limits.py)（大数据 / socket 限制常量同源 source of truth）
+- [`docs/releases/2026-07-03-phase14-agent-first-class.md`](../releases/2026-07-03-phase14-agent-first-class.md)（phase-14 全貌 + 物化时序修正 + executor capability guard 修复 + 与并行进程边界）
+- [`docs/specs/phase-14-agent-first-class.md`](../specs/phase-14-agent-first-class.md) §0.1 八铁律 + §3 解析层 + §5 Route 信息流 + §0.4 resources_root 裁定
+- [`orca/compile/agents.py`](../../orca/compile/agents.py)（`AgentResolver`/`LocalPoolResolver`/`AgentHandle`，批 2 扩展点）

@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from orca.exec.mcp_tools.server import AgentToolsMcpServer
     from orca.gates.interrupt import InterruptHandler
     from orca.gates.types import InterruptRequest
-    from orca.schema import AgentNode, Node, RunState, Workflow
+    from orca.schema import AgentNode, Node, Route, RunState, Workflow
 
 logger = logging.getLogger(__name__)
 
@@ -607,6 +607,8 @@ class Orchestrator:
         current = start_node
         # 可变 outputs 累加器：node 间构造新 frozen RunContext（_make_ctx 从此快照派生）
         outputs_acc: dict[str, Any] = dict(initial_outputs)
+        # phase-14：命中 $end 的 route（含 output），drive loop 退出后 _evaluate_outputs 用
+        end_route: Route | None = None
 
         iterations = 0
         while current != "$end":
@@ -638,7 +640,11 @@ class Orchestrator:
                         current = skip_target
                     else:
                         # 无显式目标 → 沿 route 求值（兜底 route / 默认下一 node，wave-1 行为）。
-                        current = await self._next_node_after(current, outputs_acc, None)
+                        # phase-14：skip 也经 _next_node_after 拿 route（router skip 容错命中兜底
+                        # route，含 output）；skip 到 $end 时 end_route = 兜底 route（C2 统一语义）。
+                        current, route = await self._next_node_after(current, outputs_acc, None)
+                        if current == "$end":
+                            end_route = route
                     continue
                 # continue: guidance 已在 _handle_interrupt 累积进 _guidance_acc，
                 # 下面 _make_ctx 自动带上（Step B 起 render_prompt 拼 [User Guidance]）。
@@ -670,9 +676,11 @@ class Orchestrator:
                 )
 
             # 路由求值（用更新后的 ctx —— 含本步 output）
-            current = await self._next_node_after(current, outputs_acc, raw_output)
+            current, route = await self._next_node_after(current, outputs_acc, raw_output)
+            if current == "$end":
+                end_route = route  # 命中终点的 route（含 output），供 _evaluate_outputs
 
-        return self._evaluate_outputs(outputs_acc)
+        return self._evaluate_outputs(outputs_acc, end_route=end_route)
 
     async def _handle_interrupt(
         self, current: str, outputs_acc: dict[str, Any]
@@ -755,22 +763,26 @@ class Orchestrator:
 
     async def _next_node_after(
         self, current: str, outputs_acc: dict[str, Any], raw_output: Any
-    ) -> str:
+    ) -> tuple[str, Route]:
         """对 current 的 routes 求值下一 node，emit route_taken（DRY：drive_loop / skip 共用）。
 
+        phase-14：返回 ``(target, 命中的 Route)``。route 含 ``output``——到 ``$end`` 时
+        ``_evaluate_outputs`` 用它做输出变换（非 ``$end`` 时 route 仅诊断用）。
+
         skip 路径传 ``raw_output=None``：当前 node 未执行，下游 routes 据此求值（兜底
-        route ``when=None`` 命中）。
+        route ``when=None`` 命中；router skip 容错返回该兜底 route，含 output）。
         """
         routes = self._routes_of(current)
         ctx_for_route = self._make_ctx(outputs_acc)
         try:
-            nxt = resolve(routes, raw_output, ctx_for_route)
+            route = resolve(routes, raw_output, ctx_for_route)
         except RouteError as e:
             e.node = current
             raise
+        nxt = route.to
         # emit route_taken（让 reducer 的 current_node 跟踪对）
         await self.bus.emit("route_taken", {"from": current, "to": nxt})
-        return nxt
+        return nxt, route
 
     def _make_ctx(self, outputs_acc: dict[str, Any]) -> RunContext:
         """从累加的 outputs 构造 frozen RunContext 快照（DRY：dispatch / route / outputs 共用）。
@@ -945,20 +957,23 @@ class Orchestrator:
             return self._parallel_by_name[name].routes
         return self._node_by_name[name].routes
 
-    def _evaluate_outputs(self, outputs_acc: dict[str, Any]) -> dict[str, Any]:
-        """渲染 ``wf.outputs`` 模板 → 最终输出 dict（SPEC §4.2 末）。
+    def _evaluate_outputs(
+        self, outputs_acc: dict[str, Any], *, end_route: Route | None = None,
+    ) -> dict[str, Any]:
+        """渲染 final output 模板 → 最终输出 dict（SPEC §4.2 + phase-14 Route.output）。
 
-        用 Jinja2 渲染每个 value；ctx 含全部已完成 node 的 outputs。
+        phase-14：若 ``end_route`` 带 ``output``（命中 ``$end`` 的那条 route 的输出变换），
+        用它渲染（每条到 ``$end`` 的 route 可独立变换 final output）；否则 fallback
+        ``wf.outputs``。skip 显式目标到 ``$end``（不经 route 求值）→ ``end_route=None`` →
+        fallback ``wf.outputs``（SPEC §0.1 #5）。
         """
         from orca.exec.render import render_template
 
-        if not self.wf.outputs:
+        templates = end_route.output if (end_route and end_route.output) else self.wf.outputs
+        if not templates:
             return {}
         ctx = self._make_ctx(outputs_acc)
-        result: dict[str, Any] = {}
-        for key, template in self.wf.outputs.items():
-            result[key] = render_template(template, ctx)
-        return result
+        return {key: render_template(tpl, ctx) for key, tpl in templates.items()}
 
 
 def _classify_error(e: Exception) -> str:

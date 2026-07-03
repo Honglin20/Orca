@@ -492,7 +492,8 @@ def test_router_resolve_tolerates_skipped_none_output():
     ]
     ctx = RunContext(inputs={}, outputs={}, run_id="r", task=None)
     # output=None（skipped）→ 第一条 when 求值失败 → 容错跳过 → 兜底 → c。
-    assert resolve(routes, None, ctx) == "c"
+    # phase-14：resolve 返回 Route 对象，取 .to。
+    assert resolve(routes, None, ctx).to == "c"
 
 
 def test_router_resolve_non_skipped_failure_still_fails_loud():

@@ -103,6 +103,7 @@ def validate_workflow(wf: Workflow) -> list[str]:
     _check_entry_reachable_to_end(wf, result)  # ⑥（routes 前向边 + parallel 展开）
     _check_parallel_groups(wf, result)         # ⑩ parallel 组结构
     _check_route_fallback_last(wf, result)     # ⑪ 兜底 route 位置（node + parallel 组）
+    _check_route_output_only_at_end(wf, result)  # phase-14：route.output 仅 $end 生效（非 $end warn）
     _check_jinja2_refs(wf, result)             # ⑦
     _check_foreach_source(wf, result)          # ⑧
     _check_terminate_constraints(wf, result)   # terminate step 约束（routes 空 / 非entry / 非parallel branch / 非foreach body）
@@ -381,6 +382,35 @@ def _check_fallback_last(
             )
 
 
+# ── phase-14：Route.output 仅在 to="$end" 生效（非 $end 死代码 warn）──────────
+
+
+def _check_route_output_only_at_end(wf: Workflow, result: ValidationResult) -> None:
+    """``Route.output`` 仅在 ``to="$end"`` 生效；非 ``$end`` route 的 output 是死代码 → warn。
+
+    语义（SPEC §0.1 #5 / §5）：``output`` 是 workflow 到达终点时的输出变换模板；
+    route 到中间 node 时 output 无消费点（orchestrator 只在命中 ``$end`` 时取
+    ``end_route.output``），故非 ``$end`` 的 output 会被静默忽略 → 编译期 warn 提示
+    （非 error：未来若扩展中间节点输出变换，此 warn 可移除）。
+    """
+    for node in wf.nodes:
+        if not node.name:
+            continue
+        for route in node.routes:
+            if route.output and route.to != "$end":
+                result.add_warning(
+                    f"node '{node.name}' 的 route.output 仅在 to=\"$end\" 生效"
+                    f"（当前 to='{route.to}'，此 output 是死代码将被忽略）"
+                )
+    for group in wf.parallel:
+        for route in group.routes:
+            if route.output and route.to != "$end":
+                result.add_warning(
+                    f"parallel 组 '{group.name}' 的 route.output 仅在 to=\"$end\" 生效"
+                    f"（当前 to='{route.to}'，此 output 是死代码将被忽略）"
+                )
+
+
 # ── ⑦ Jinja2 引用浅校验 ──────────────────────────────────────────────────────
 
 
@@ -420,6 +450,15 @@ def _iter_templates(
                     True,
                     {"output"},
                 )
+            # phase-14：Route.output 每 key 是 Jinja2 模板（到 $end 时的输出变换），同 wf.outputs 形
+            if route.output:
+                for key, expr in route.output.items():
+                    yield (
+                        f"node '{node.name}'.route.output.{key}",
+                        expr,
+                        False,
+                        set(),
+                    )
 
         if isinstance(node, ForeachNode):
             body_extras = {node.item_var, node.index_var}
@@ -450,6 +489,15 @@ def _iter_templates(
                     True,
                     {"output"},
                 )
+            # phase-14：parallel 组 route.output 同 node（到 $end 输出变换）
+            if route.output:
+                for key, expr in route.output.items():
+                    yield (
+                        f"parallel 组 '{group.name}'.route.output.{key}",
+                        expr,
+                        False,
+                        set(),
+                    )
 
     for key, expr in wf.outputs.items():
         yield (f"workflow.outputs.{key}", expr, False, set())

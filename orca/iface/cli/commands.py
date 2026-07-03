@@ -263,14 +263,24 @@ def validate(
     yaml: Path = typer.Argument(..., help="workflow YAML 文件路径"),
 ) -> None:
     """校验 workflow（不跑，只做结构 + 语义校验，报告 errors/warnings）。"""
+    import warnings
+
     try:
-        load_workflow(yaml)
+        # phase-14：捕获 compile 期 DeprecationWarning（旧约定 prompt=None + name 匹配），
+        # 展示到 stderr（不阻断，exit 0）。simplefilter("always") 确保每次都捕获（默认
+        # DeprecationWarning 在 Python 3.2+ 只显示一次且非 main 时静默）。
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            load_workflow(yaml)
     except ConfigurationError as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(code=EXIT_ARG_OR_VALIDATE)
     except FileNotFoundError:
         typer.echo(f"文件不存在：{yaml}", err=True)
         raise typer.Exit(code=EXIT_ARG_OR_VALIDATE)
+    for w in caught:
+        if issubclass(w.category, DeprecationWarning):
+            typer.echo(f"⚠️  {w.message}", err=True)
     typer.echo(f"✓ {yaml} 校验通过")
 
 

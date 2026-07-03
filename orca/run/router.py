@@ -55,8 +55,8 @@ _ENV = Environment(
 )
 
 
-def resolve(routes: list[Route], output: Any, ctx: RunContext) -> str:
-    """first-match-wins 求值路由（SPEC §3.1）。
+def resolve(routes: list[Route], output: Any, ctx: RunContext) -> Route:
+    """first-match-wins 求值路由（SPEC §3.1 / phase-14：返回命中 Route 对象）。
 
     Args:
         routes: 该 node / parallel 组的出边列表（顺序敏感）。
@@ -67,7 +67,9 @@ def resolve(routes: list[Route], output: Any, ctx: RunContext) -> str:
         ctx: 当前 RunContext（``ctx.outputs`` 已含历史 node 的 ``{"output": raw}`` 包装）。
 
     Returns:
-        target（node 名 / parallel 组名 / ``"$end"``）。
+        命中的 ``Route`` 对象（``target = route.to``）。phase-14：调用方从返回的 route 取
+        ``.output``（到 ``$end`` 时用于 ``_evaluate_outputs`` 的输出变换）；非 ``$end`` 时
+        route 仅用于诊断（target 推进单指针）。
 
     Raises:
         RouteError: 全部 ``when`` 不匹配且无兜底 route（fail loud）。
@@ -92,7 +94,7 @@ def resolve(routes: list[Route], output: Any, ctx: RunContext) -> str:
     skip_tolerant = output is None
     for route in routes:
         if route.when is None:
-            return route.to  # 兜底（catch-all），SPEC §3.1
+            return route  # 兜底（catch-all），SPEC §3.1；phase-14 返回 Route 对象
         try:
             matched = _eval_jinja2_bool(route.when, eval_ctx)
         except RouteError:
@@ -101,7 +103,7 @@ def resolve(routes: list[Route], output: Any, ctx: RunContext) -> str:
             # skip 路径：when 引用 None output 的字段失败 → 视为不匹配，继续找兜底 route
             continue
         if matched:
-            return route.to
+            return route  # phase-14：返回 Route 对象（target = route.to）
     raise RouteError(
         f"无 route 匹配（output={output!r}，已评估 {len(routes)} 条 when 均不命中且无兜底）",
         node=None,  # 由 orchestrator 调用处补充 node 名
