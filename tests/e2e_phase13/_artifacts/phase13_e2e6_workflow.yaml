@@ -1,0 +1,20 @@
+name: p13_e2e6
+description: phase-13 E2E-6 opencode+deepseek 真 render_chart e2e
+entry: runner
+nodes:
+  - name: runner
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: |
+      You are a chart-emission bot. Run the following shell command EXACTLY THREE TIMES
+      (the chart_demo.py script pushes a line chart to the orca tape each call).
+      Do not call any other tool. Do not add any commentary before/after.
+      After running all three commands, reply with exactly: DONE
+
+      Command (run 3 times in total, sequentially):
+        python3 /Users/mozzie/Desktop/Projects/Orca/tests/e2e_phase13/scripts/chart_demo.py
+    routes:
+      - to: $end
+outputs:
+  result: "{{ runner.output }}"
