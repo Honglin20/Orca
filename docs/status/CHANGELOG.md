@@ -17,6 +17,10 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-07-03] phase 13 script-side render_chart 接入（env 身份路由 + per-run Unix socket + 大数据三道关 + opencode+deepseek e2e）
+让 claude/opencode/script 节点 spawn 的 script 子进程调 `orca.chart.render_chart` 推图：env 注入 4 个 ORCA_*（ClaudeExecutor + ScriptExecutor 都接，**executor-agnostic S5 闭环**）→ subprocess 链自然继承 → per-run Unix socket 传输 → tape 落 custom(chart) → 三壳零改动渲染。**对抗审闭环 16 处修订**（4 blocker + 9 major + 3 minor，含 ack timeout / sock 路径长度 / resume 边界 / opencode env 继承 / envelope 含义 / hue 分组降采样 / table 取前 N 等）。**大数据三道关**：自动降采样（max_points=2000，6 chart_type 各自策略）+ 2MB 硬上限 + ingestor 复核。**E2E-5 压测**：3 run × 10 chart 无丢失/串扰；**E2E-6 opencode+deepseek-v4-flash 真跑**：4 验证点（agent_message 完整性 / TUI 各面板合理 / render_chart 推送 / 图表排布）逐条通过；TUI snapshot 留档。**1224 passed 0 回归**（baseline 1208→1224，新增 16 测试）。S5 顺带修 2 实施 gap：ScriptExecutor 漏 chart env（违反 SPEC §11 #9）+ OrcaApp CLI shell 漏起 ingestor。
+Commit：`1740a98`（S1-S4）+ `f260935`（S5 实施 gap 补丁）+ `b562a12`（S5 e2e）。详见 [release note](releases/2026-07-03-phase13-render-chart.md)。
+
 ## [2026-07-03] phase 12 CLI TUI 重设计（拓扑图 + NodeDetail + 终端图表 + opencode e2e）
 重设计三面板：左 DagTree→DagGraph 拓扑图（分层+连边，max 33%）、右上 ActiveNode→NodeDetail（流式/输出/图表 tab，6 kind 永不空白）、新增终端图表渲染（plotext braille）+ ChartBrowser 全屏。6 新文件零后端 import、壳无真相、确定性 fold、`_selected_node`/`_auto_follow` 不写 tape（全有单测守护）。LayeredDagLayout spike 全过（未 fallback）。**S10 e2e：opencode 后端（glm-4.6v）真跑驱动 TUI 端到端通过**（SPEC §6 逐项 + 断言证据；图表渲染走解耦注入真路径——braille + 多图分组规整；`render_chart` 生产者未实现，待 phase-10）。e2e 顺带修真 bug：`ClaudeExecutor` 无条件注 `--allowed-tools`/`--mcp-config` → opencode spawn 失败，gate 到 `capabilities.mcp_tools` 修复。**1133 passed 0 回归**（基线 1082→1133，净增 51 测试）。
 Commit: `38fd78c`（S0-S9）+ `cd6c1ee`（opencode spawn fix）+ `81d2f93`（S10 e2e）。详见 [release note](releases/2026-07-03-phase12-tui-redesign.md)。
