@@ -1,0 +1,28 @@
+# examples/render_chart.yaml —— render_chart 推图演示（phase-13 + phase-14 文件夹化 agent）
+#
+# 演示两件事：
+#   1. phase-14 文件夹化 agent：plotter 引用 examples/agents/plotter/（agent.md +
+#      scripts/chart_demo.py 资源）。spawn 时 orca 注入 ORCA_AGENT_RESOURCES，agent 的
+#      Bash 工具据此访问自带脚本（不依赖 cwd）。
+#   2. phase-13 render_chart：agent spawn 的 script 子进程调 orca.chart.render_chart →
+#      经 per-run Unix socket → tape 落 custom(chart) → TUI 图表 tab 显示（braille 折线）。
+#      identity（run_id/node/session_id/sock）沿 env 链继承（铁律 #2）。
+#
+# 运行（在项目根）：orca run examples/render_chart.yaml
+# 跑完后看 TUI 图表 tab（选中 plotter 节点 → 切图表 tab），或读 tape 的 custom(chart) 事件。
+
+name: render_chart
+description: "render_chart 推图演示（文件夹化 agent plotter + scripts 资源；agent→script→orca.chart.render_chart→tape custom(chart)→TUI 图表 tab）"
+entry: plotter
+
+nodes:
+  - name: plotter
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: plotter                # phase-14 文件夹化引用 examples/agents/plotter/agent.md
+    routes:
+      - to: $end
+
+outputs:
+  reply: "{{ plotter.output }}"

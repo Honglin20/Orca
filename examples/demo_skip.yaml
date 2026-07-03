@@ -33,11 +33,15 @@ inputs:
 nodes:
   - name: analyzer
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
     prompt: "分析 {{ inputs.topic }}，输出一段摘要"
     routes:
       - to: configurator
   - name: configurator
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
     # analyzer 被 skip 时 output=None，用 default filter 兜底（避免 StrictUndefined 崩溃）。
     prompt: >-
       基于 analyzer 的摘要（{{ analyzer.output | default('<skipped: analyzer 未跑>') }}），
@@ -46,6 +50,8 @@ nodes:
       - to: runner
   - name: runner
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
     prompt: "执行方案：{{ configurator.output | default('<skipped: configurator 未跑>') }}"
     routes:
       - to: $end

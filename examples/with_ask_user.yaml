@@ -12,6 +12,8 @@
 # SSE 连通性已由 spike 验证（2026-07-02，real claude 调通 echo 工具）。
 
 name: with_ask_user
+description: ask_user 工具挂载演示（agent 调 ask_user 问用户偏好 → HumanGate(source=agent_ask) → CLI 弹问 → 答案回流 agent）
+entry: asker
 
 inputs:
   task:

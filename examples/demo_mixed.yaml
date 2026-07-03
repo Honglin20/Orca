@@ -11,6 +11,8 @@ nodes:
       - to: analyzer
   - name: analyzer
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
     prompt: "分析 {{ prep.output.stdout }}，回复 OK"
     routes:
       - to: judge

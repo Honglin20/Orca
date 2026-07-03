@@ -13,6 +13,8 @@ inputs:
 nodes:
   - name: worker
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
     prompt: "{{ inputs.task }}"
     routes:
       - to: $end

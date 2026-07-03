@@ -12,11 +12,15 @@ nodes:
       - to: low_agent
   - name: high_agent
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
     prompt: "回复 HIGH"
     routes:
       - to: $end
   - name: low_agent
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
     prompt: "回复 LOW"
     routes:
       - to: $end

@@ -22,6 +22,8 @@ nodes:
   # ── agent 1/5：分析目标项目 ─────────────────────────────────────────
   - name: analyzer
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
     tools: [Bash, Read, Grep, Glob, TodoWrite]
     output_schema:
       type: object
@@ -40,6 +42,8 @@ nodes:
   # ── agent 2/5：写 adapter + 拼 cli_command ──────────────────────────
   - name: configurator
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
     tools: [Bash, Read, Write, Edit, Grep, Glob, TodoWrite]
     output_schema:
       type: object
@@ -56,6 +60,8 @@ nodes:
   # ── agent 3/5：跑诊断脚本，回收 output_dir + 精度/QSNR ─────────────
   - name: runner
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
     tools: [Bash, Read, Write]
     output_schema:
       type: object
@@ -78,6 +84,8 @@ nodes:
   # ── agent 4/5：跑 diagnostic pipeline，落盘诊断 JSON ────────────────
   - name: diagnostic_saver
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
     tools: [Bash]
     output_schema:
       type: object
@@ -95,6 +103,8 @@ nodes:
   # ── agent 5/5：综合诊断数据 → 写 REPORT.md（无 render_chart）────────
   - name: report_painter
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
     tools: [Bash, Read]
     # 自由文本输出（无 output_schema）：报告 markdown 全文存进 output
     routes:
