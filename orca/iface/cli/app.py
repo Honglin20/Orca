@@ -39,6 +39,7 @@ orchestrator 对 gate 透明（phase 6 §2.3）—— gate 触发在两个独立
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
@@ -51,7 +52,9 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer
 
+from orca.chart._limits import SOCK_PATH_MAX
 from orca.events.bus import EventBus
+from orca.events.chart_ingestor import chart_ingestor, make_crash_callback
 from orca.events.tape import Tape
 from orca.gates.context_registry import SessionContextRegistry
 from orca.gates.handler import HumanGateHandler
@@ -357,6 +360,14 @@ class OrcaApp(App):
         self.agent_tools_server = AgentToolsMcpServer(
             self.gate_handler, self.session_registry, runs_dir=runs_dir,
         )
+        # phase-13 §3.1：per-run chart ingestor task（与 RunManager.start_run 对称）。
+        # script 子进程（agent spawn 的 Bash 工具或直接 script node）经 env 拿 sock path
+        # → ``orca.chart.render_chart`` 推图到此 ingestor → emit custom(chart) → tape。
+        # ``_run_pipeline`` 启动时 create_task；finally cancel + unlink socket。
+        # None == ingestor 未起（_run_pipeline 还没跑 / sock path 过长退化）。
+        self._chart_ingestor_task: asyncio.Task | None = None
+        self._chart_sock_path: Path = runs_dir / f"{self.run_id}.sock"
+        self._runs_dir = runs_dir
 
         # gate HTTP 桥（hook POST 入口）。gate_port=None → 读 ORCA_PORT env / 默认 7421。
         port = gate_port if gate_port is not None else _gate_port_from_env()
@@ -487,6 +498,28 @@ class OrcaApp(App):
         # phase 11：interrupt_handler 也起 broadcaster（同 loop，resolved 事件经它广播）。
         await self.gate_handler.start()
         await self.interrupt_handler.start()
+        # phase-13 §3.1：起 per-run chart ingestor（与 RunManager.start_run 对称）。
+        # sock path 长度过长（macOS SOCK_PATH_MAX=90）→ log warning + 不起 ingestor
+        # （script 端 render_chart 会 fail loud 提示）。不 raise（避免阻塞整个 run）。
+        try:
+            resolved_sock = str(self._chart_sock_path.resolve())
+            if len(resolved_sock) > SOCK_PATH_MAX:
+                logger.warning(
+                    "phase-13: chart sock path 过长（%d > %d 字节）：%r；"
+                    "TUI 不起 ingestor（script 端 render_chart 会 fail loud）。"
+                    "改 tape_path 到短路径（如 /tmp/orca-<run_id>/tape.jsonl）。",
+                    len(resolved_sock), SOCK_PATH_MAX, resolved_sock,
+                )
+            else:
+                self._chart_ingestor_task = asyncio.create_task(
+                    chart_ingestor(self._chart_sock_path, self.bus, self.run_id),
+                    name=f"orca-chart-ingestor-{self.run_id}",
+                )
+                self._chart_ingestor_task.add_done_callback(
+                    make_crash_callback(self._chart_sock_path, self.bus, self.run_id)
+                )
+        except Exception:  # noqa: BLE001 —— ingestor 启动失败不应阻塞编排
+            logger.exception("chart_ingestor 启动失败（不影响编排主流程）")
         try:
             orch = Orchestrator(
                 self.wf, self.bus, self._inputs,
@@ -502,6 +535,19 @@ class OrcaApp(App):
             # terminal_state 留 None（commands 据 None → exit 1，fail loud）
         finally:
             self._orchestrator = None
+            # phase-13 §3.1：先 cancel chart ingestor（防 in-flight chart 写已 close 的 tape）。
+            if self._chart_ingestor_task is not None and not self._chart_ingestor_task.done():
+                self._chart_ingestor_task.cancel()
+                try:
+                    await self._chart_ingestor_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:  # noqa: BLE001
+                    logger.warning("chart_ingestor 异常退出", exc_info=True)
+            try:
+                self._chart_sock_path.unlink(missing_ok=True)
+            except OSError as e:  # noqa: BLE001
+                logger.warning("sock unlink 失败 %s: %r", self._chart_sock_path, e)
             # orchestrator.run() 已 close bus；这里只确认 broadcaster 停（无 in-flight gate/interrupt）。
             try:
                 await self.gate_handler.stop()
