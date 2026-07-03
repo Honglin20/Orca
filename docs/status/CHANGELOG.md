@@ -17,6 +17,10 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-07-03] examples 整理（固化 opencode 后端 + description + render_chart example + 全跑通 e2e）
+13 agent example 固化 `executor: opencode` + `model: "deepseek/deepseek-v4-flash"`（with_ask_user 保留 claude——ask_user 需 mcp_tools=True）；补全 21 example description（TUI 信息明确）；`examples/README.md` 分类（纯 script / agent workflow / claude-only 例外）；新建 render_chart example（**文件夹化 agent** plotter + scripts/chart_demo.py 资源，演示 phase-14 `ORCA_AGENT_RESOURCES` + phase-13 chart 链路）；parallel_research 迁移 phase-14 `agent: <name>` 显式引用（消除旧约定 warn）。**验证**：8 script + 13 agent + render_chart 全跑通（opencode+deepseek-v4-flash **真跑不 mock**）；with_ask_user 例外（claude-only）。tests: test_examples_script + test_examples_opencode。
+Commit：`c5c13b1`。详见 `examples/README.md`。
+
 ## [2026-07-03] phase 14 Agent 一等化（agent 池 + 文件夹化 + 统一解析层）+ Route 输出变换（批 1）
 agent 从内嵌 prompt 升级为可命名/可复用/可携带资源的一等公民：新增 `orca/compile/agents.py` 统一解析层（`AgentResolver` Protocol + `LocalPoolResolver`，**删 `_load_prompts` + `_load_agent_md` 双加载债**）→ `AgentNode.agent` 显式引用 + 文件夹化（`<name>/agent.md` + 资源子目录）+ frontmatter 元数据 + `Route.output` 终点输出变换 + MCP `list_agents`/`get_agent`。**spec-review-adversarial 对抗审闭环**（2 P0 + 5 P1：warn 通道/skip end_route 统一/tools None 消歧/is_folder/frontmatter 精确算法/空串防御）。实现期修 SPEC 隐含缺陷（互斥预检须物化前）。**opencode+deepseek-v4-flash 真跑 e2e**：E2E-1 agent 引用（GREETER_OK）+ E2E-2 文件夹化 resources（`$ORCA_AGENT_RESOURCES` → SECRET_FLAG_42）。顺带修 executor capability guard（opencode + tools 不注 `--allowed-tools`）。**1276 passed 0 回归**。批 2（包分发 + workspace-instruction）留 phase-15。
 Commit：`74d65b3`。详见 [release note](releases/2026-07-03-phase14-agent-first-class.md)。

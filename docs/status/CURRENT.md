@@ -5,32 +5,32 @@
 
 ---
 
-## 当前状态：phase-14 Agent 一等化（批 1）完成；正在整理 examples
+## 当前状态：phase-14（批 1）+ examples 整理完成；无进行中任务
 
-**phase-14 Agent 一等化 + Route 输出变换（批 1）收官**：agent 从内嵌 prompt 升级为可命名/可复用/可携带资源的一等公民（统一解析层 + 文件夹化 + frontmatter + Route.output + MCP list/get）。
-- **SPEC**：[`phase-14-agent-first-class.md`](../specs/phase-14-agent-first-class.md)（对抗审闭环 v2，2 P0 + 5 P1 修订）｜**release**：[`2026-07-03-phase14-agent-first-class.md`](../releases/2026-07-03-phase14-agent-first-class.md)
-- **验证**：**1276 passed 0 回归**；**opencode+deepseek-v4-flash 真跑 e2e**（E2E-1 agent 引用 GREETER_OK + E2E-2 文件夹化 resources `$ORCA_AGENT_RESOURCES` → SECRET_FLAG_42）。
-- **顺带修**：executor capability guard（opencode + frontmatter tools 不注 `--allowed-tools` → dump help exit 1）。
-- 分支：`phase13-render-chart`（phase-14 在此 commit；未 merge）。
-- **与并行进程边界**：commit 含 `executor.py`（共享）+ `profiles/base.py`（resolve_flags 定义，executor 依赖）；builtin/terminal/dialog/validator/executor_cmds/config 留工作树由并行进程 commit。
+**phase-14 Agent 一等化 + Route 输出变换（批 1）完成**（commit `74d65b3` + backfill `7befc2c` + M1 fixup `956015f`）
+- agent 一等化（agent 池 + 文件夹化 + 统一解析层 `AgentResolver`）+ Route.output 终点输出变换 + MCP list_agents/get_agent。
+- 走完整流程：SPEC → spec-review-adversarial 对抗审（闭环 2 P0 + 5 P1）→ 实现 11 文件 → code-reviewer 审通过（可合并，无 blocker/major）→ opencode+deepseek-v4-flash 真跑 e2e（E2E-1 agent 引用 + E2E-2 文件夹化 resources `$ORCA_AGENT_RESOURCES`）→ commit。**1276 passed 0 回归**。
 
-## 进行中：整理 examples（goal 硬要求）
+**examples 整理完成**（commit `c5c13b1`）
+- 13 agent example 固化 `executor: opencode` + `model: "deepseek/deepseek-v4-flash"`（with_ask_user 保留 claude——ask_user 需 mcp_tools）。
+- description 补全（21 example，TUI 信息明确）+ examples/README.md 分类（纯 script / agent workflow / claude-only 例外）。
+- 新建 render_chart example：文件夹化 agent plotter（agent.md + scripts/chart_demo.py 资源，演示 phase-14 `ORCA_AGENT_RESOURCES` + phase-13 chart 链路）。
+- parallel_research 迁移到 phase-14 `agent: <name>` 显式引用（消除旧约定 deprecation warn）。
+- **验证**：8 script + 13 agent + render_chart 全跑通（opencode+deepseek-v4-flash 真跑，**不 mock**）；with_ask_user 例外（claude-only，需 ANTHROPIC_API_KEY）。
 
-收尾任务，要求：
-1. 每个 example **有意义** + TUI 有明确信息（让人知道在干什么）
-2. **script example 与 agent example 分开**（目录或命名）
-3. **agent example 必须用 opencode 真跑过**（不 mock），全部跑通
-4. 补 **render-chart** example（当前无）
-5. 涵盖全面、功能正确
+## 与并行进程的边界
+- phase-14 commit 含 `executor.py`（共享）+ `profiles/base.py`（resolve_flags 定义，executor 依赖）。
+- examples commit 只 `examples/` + 新建 `tests/`。
+- 留工作树（并行进程持有）：`profiles/builtin/*` + `terminal.py` + `gates/dialog.py` + `exec/validator.py` + `executor_cmds.py` + `config.py` + `tests/e2e_mxint/` + 它们的测试。
 
 ## 待办（等用户指示方向）
-
-1. **phase-14 分支 merge / PR**（等用户决定）。
+1. phase-14 / examples 分支 merge / PR（分支 `phase13-render-chart`）。
 2. **批 2（phase-15）**：轻量本地包分发（多 pool + `name@source`）+ workspace-instruction（SPEC 已预留 `AgentResolver` 接口 + `ResolveContext.extra_roots`）。
 3. phase-12 / phase-13 分支 merge / PR（仍待）。
+4. code-reviewer M2/M3（resolve_flags setdefault 文档交叉引用 + stacklevel 指向）+ N3（tape artifact 含开发机路径，可 sanitize）—— minor/nit，下个 commit 顺手。
 
 ## 必读文件（下一任务开工前按需）
-
 - [`docs/releases/2026-07-03-phase14-agent-first-class.md`](../releases/2026-07-03-phase14-agent-first-class.md)（phase-14 全貌 + 物化时序修正 + executor capability guard 修复 + 与并行进程边界）
 - [`docs/specs/phase-14-agent-first-class.md`](../specs/phase-14-agent-first-class.md) §0.1 八铁律 + §3 解析层 + §5 Route 信息流 + §0.4 resources_root 裁定
 - [`orca/compile/agents.py`](../../orca/compile/agents.py)（`AgentResolver`/`LocalPoolResolver`/`AgentHandle`，批 2 扩展点）
+- [`examples/README.md`](../../examples/README.md)（examples 分类索引）
