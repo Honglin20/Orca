@@ -207,7 +207,8 @@ class OrcaMcpServer:
         返回 ``{agents: [{name, description, has_resources}]}``。has_resources=True 表示
         文件夹形态 agent（含 scripts/refs 子目录，运行时可经 ``$ORCA_AGENT_RESOURCES`` 访问）。
         """
-        from orca.compile.agents import LocalPoolResolver
+        from orca.compile.agents import AgentNotFound, LocalPoolResolver
+        from orca.compile.validator import ConfigurationError
 
         ctx = self._agent_resolve_context(yaml_path)
         resolver = LocalPoolResolver()
@@ -218,7 +219,7 @@ class OrcaMcpServer:
             try:
                 handle = resolver.resolve(name, context=ctx)
                 description = handle.meta.description
-            except Exception:  # noqa: BLE001 — 列表不应因单个 agent 解析失败而中断
+            except (AgentNotFound, ConfigurationError, OSError):  # 已知解析失败不中断列表（M1 收窄，防吞程序 bug）
                 logger.warning("list_agents: 解析 agent %r 失败（跳过 description）", name, exc_info=True)
             items.append(
                 {"name": name, "description": description, "has_resources": is_folder}
