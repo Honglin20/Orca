@@ -17,6 +17,18 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-07-03] phase 12 CLI TUI 重设计（拓扑图 + NodeDetail + 终端图表 + opencode e2e）
+重设计三面板：左 DagTree→DagGraph 拓扑图（分层+连边，max 33%）、右上 ActiveNode→NodeDetail（流式/输出/图表 tab，6 kind 永不空白）、新增终端图表渲染（plotext braille）+ ChartBrowser 全屏。6 新文件零后端 import、壳无真相、确定性 fold、`_selected_node`/`_auto_follow` 不写 tape（全有单测守护）。LayeredDagLayout spike 全过（未 fallback）。**S10 e2e：opencode 后端（glm-4.6v）真跑驱动 TUI 端到端通过**（SPEC §6 逐项 + 断言证据；图表渲染走解耦注入真路径——braille + 多图分组规整；`render_chart` 生产者未实现，待 phase-10）。e2e 顺带修真 bug：`ClaudeExecutor` 无条件注 `--allowed-tools`/`--mcp-config` → opencode spawn 失败，gate 到 `capabilities.mcp_tools` 修复。**1133 passed 0 回归**（基线 1082→1133，净增 51 测试）。
+Commit: `38fd78c`（S0-S9）+ `cd6c1ee`（opencode spawn fix）+ `81d2f93`（S10 e2e）。详见 [release note](releases/2026-07-03-phase12-tui-redesign.md)。
+
+## [2026-07-03] 后端统一抽象 + opencode 后端接入
+把"后端怎么信号 done+result+usage+错误"下沉成 profile 字段 `TerminalContract`（`result_line` /
+`events` 两模式）+ 共享 `RunAccumulator`，executor 保留一处小分支，runner 不动。加 opencode =
+加 translator + profile 两文件（events 模式，prompt_channel=argv）。E2E 发现并修 runner 的
+argv-channel stdin 不关闭导致 opencode 永久挂死的真实 bug。真实 orca CLI 双后端 E2E 跑通
+（opencode glm-4.6v + claude/deepseek，均 completed）。688 passed 0 回归。
+Commit: `f3129d1`。详见 [release note](releases/2026-07-03-opencode-backend.md)。
+
 ## [2026-07-02] orca executor —— 持久化后端二进制配置 + 健康检查
 新增 `orca executor set/show/unset/list/test` 命令组：`~/.orca/config.json` 持久化 per-profile
 binary override，`orca` 启动期 `os.environ.setdefault` 注入，复用既有 `resolve_cli_path()` 运行时

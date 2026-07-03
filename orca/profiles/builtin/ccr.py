@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from orca.profiles.base import CliProfile
 from orca.profiles.capabilities import ProviderCapabilities
+from orca.profiles.terminal import RESULT_LINE
 from orca.profiles.translators import claude_translator
 
 
@@ -53,5 +54,6 @@ PROFILE = CliProfile(
     stream_format="json",
     translator=claude_translator,
     result_extractor=_dummy_result_extractor,
+    terminal=RESULT_LINE,
     prompt_paradigm="minimal",
 )

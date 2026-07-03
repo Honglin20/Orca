@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Literal
 
 from orca.profiles.capabilities import ProviderCapabilities
+from orca.profiles.terminal import RESULT_LINE, TerminalContract
 from orca.schema import Event
 
 # translator：stream-json 一行 → 一批 Event（phase 4 落真实现，phase 3 用 dummy）。
@@ -58,6 +59,13 @@ class CliProfile:
     stream_format: Literal["json", "text"]  # stdout 流格式
     translator: Translator  # stream-json line → list[Event]（phase 3 dummy）
     result_extractor: ResultExtractor  # 解析最终 result（phase 3 dummy）
+
+    # ── 如何信号终态（done + 最终答案 + usage + 错误）──
+    # result_line：流末尾有终止行（claude/ccr），CLIRunner on_result 回调交终态；
+    # events：无终止行，executor 用 RunAccumulator 边流边累积（opencode）。
+    # 默认 RESULT_LINE：claude 是基准后端，绝大多数 profile / 测试 helper 都属此模式；
+    # events 模式（opencode）显式覆盖。默认值保既有调用零改动（向后兼容）。
+    terminal: TerminalContract = field(default_factory=lambda: RESULT_LINE)
 
     # ── prompt 形状 ──
     prompt_paradigm: Literal["minimal"] = "minimal"  # 暂只支持 minimal

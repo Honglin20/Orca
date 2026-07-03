@@ -181,6 +181,16 @@ class CLIRunner:
             # stdin pump（prompt_channel=stdin 时写 prompt 后 close；claude 靠 EOF 知输入结束）。
             if self._cfg.prompt_channel == "stdin":
                 await self._pump_stdin(proc, self._cfg.prompt)
+            else:
+                # prompt_channel=argv（opencode 等）：prompt 经 argv 传，**stdin 不写但仍须 close**。
+                # 否则 stdin PIPE 永远开着——opencode 会等 stdin EOF 才开始处理（实测：挂死，
+                # 40s+ 不出一行）。claude 不受影响（它走 stdin channel，_pump_stdin 已 close）。
+                # 直接 close + best-effort wait_closed；子进程已退出时 close 偶发 BrokenPipe，忽略。
+                try:
+                    proc.stdin.close()
+                    await proc.stdin.wait_closed()
+                except (BrokenPipeError, ConnectionResetError, RuntimeError):
+                    pass
 
             # readline 循环 + 超时守卫。超时语义：**两行之间**的间隔（每行 readline 各自包
             # wait_for），非总墙钟——慢但持续的流（token 间隔 < timeout）不会误杀；停滞的

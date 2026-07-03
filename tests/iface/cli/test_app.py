@@ -19,7 +19,7 @@ from unittest.mock import patch
 import yaml
 
 from orca.iface.cli.app import OrcaApp, _GateHttpBridge
-from orca.iface.cli.widgets import ActiveNode, DagTree, Header, LogStream
+from orca.iface.cli.widgets import DagGraph, Header, LogStream, NodeDetail
 from orca.iface.cli.screens.gate_modal import GateModal
 
 
@@ -90,8 +90,8 @@ class TestCompose:
             async with app.run_test() as pilot:
                 await pilot.pause()
                 assert app.query_one(Header) is not None
-                assert app.query_one(DagTree) is not None
-                assert app.query_one(ActiveNode) is not None
+                assert app.query_one(DagGraph) is not None
+                assert app.query_one(NodeDetail) is not None
                 assert app.query_one(LogStream) is not None
         run_async(scenario())
 
@@ -103,8 +103,8 @@ class TestCompose:
         async def scenario():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                tree = app.query_one(DagTree)
-                assert "○ a" == tree.label_of("a")
+                tree = app.query_one(DagGraph)
+                assert tree.status_of_node("a") == "pending"
         run_async(scenario())
 
     def test_header_shows_workflow_name(self, tmp_path):
@@ -135,10 +135,10 @@ class TestEventDispatch:
                 await pilot.pause()
                 app._dispatch_to_widgets(_event("node_started", {"kind": "script"}, node="a"))
                 await pilot.pause()
-                tree = app.query_one(DagTree)
-                assert "✽ a" == tree.label_of("a")  # running
+                tree = app.query_one(DagGraph)
+                assert tree.status_of_node("a") == "running"  # running
                 # ActiveNode 切到 a
-                assert app.query_one(ActiveNode).active == "a"
+                assert app.query_one(NodeDetail).active == "a"
         run_async(scenario())
 
     def test_node_completed_sets_done_icon_and_increments_header(self, tmp_path):
@@ -150,8 +150,8 @@ class TestEventDispatch:
                 await pilot.pause()
                 app._dispatch_to_widgets(_event("node_completed", {"elapsed": 0.5}, node="a"))
                 await pilot.pause()
-                tree = app.query_one(DagTree)
-                assert "✓ a" == tree.label_of("a")  # done
+                tree = app.query_one(DagGraph)
+                assert tree.status_of_node("a") == "done"  # done
                 header = app.query_one(Header)
                 assert header.stats.done == 1
                 assert "1/1 nodes" in header.stats.render_text()
@@ -168,7 +168,7 @@ class TestEventDispatch:
                     _event("node_failed", {"error_type": "ExecTimeout", "message": "boom"}, node="a"),
                 )
                 await pilot.pause()
-                assert "! a" == app.query_one(DagTree).label_of("a")
+                assert app.query_one(DagGraph).status_of_node("a") == "failed"
         run_async(scenario())
 
     def test_log_stream_receives_agent_events(self, tmp_path):
@@ -202,7 +202,7 @@ class TestEventDispatch:
                     app._dispatch_to_widgets(_event("node_started", {}, node="a"))
                     await pilot.pause()
                 # running 状态保持（不会因重放退化成 done 或 pending）
-                assert "✽ a" == app.query_one(DagTree).label_of("a")
+                assert app.query_one(DagGraph).status_of_node("a") == "running"
         run_async(scenario())
 
 
@@ -297,7 +297,7 @@ class TestGateFlow:
                 # gate modal 还在（用户没答）
                 assert isinstance(app.screen, GateModal)
                 # node b 的图标确实更新了（证明 gate 没冻结 DAG 渲染）
-                assert "✓ b" == app.query_one(DagTree).label_of("b")
+                assert app.query_one(DagGraph).status_of_node("b") == "done"
         run_async(scenario())
 
     def test_broadcast_loser_dismisses_modal_without_resolve(self, tmp_path):
@@ -341,7 +341,7 @@ class TestGateFlow:
                 app._dispatch_to_widgets(self._gate_request_event(node="a"))
                 await pilot.pause()
                 await pilot.pause()
-                assert "⏸ a" == app.query_one(DagTree).label_of("a")  # blocked
+                assert app.query_one(DagGraph).status_of_node("a") == "blocked"
                 app._dispatch_to_widgets(_event(
                     "human_decision_resolved",
                     {"gate_id": "g-test", "answer": "allow", "resolved_by": "web"},
@@ -349,7 +349,7 @@ class TestGateFlow:
                 ))
                 await pilot.pause()
                 # node 解除 blocked → running
-                assert "✽ a" == app.query_one(DagTree).label_of("a")
+                assert app.query_one(DagGraph).status_of_node("a") == "running"
         run_async(scenario())
 
 
@@ -800,3 +800,161 @@ class TestDialogFlow:
                 assert "dialog ended" in text
                 assert "3 turn" in text
         run_async(scenario())
+
+
+# ── phase-12 §3.3 / §6.1：chart 分发 + 解耦验收 + 临时态不写 tape ────────────
+
+
+from orca.iface.cli.widgets.chart_panel import WORKFLOW_BUCKET
+
+
+class TestChartDispatch:
+    """phase-12 §3.3：custom(kind=chart) → NodeDetail 图表 tab（确定性 fold 落点）。"""
+
+    def _chart_event(self, *, ctype="line", node="x", label="L", title="T"):
+        return _event(
+            "custom",
+            {"kind": "chart", "chart": {
+                "chart_type": ctype, "label": label, "title": title,
+                "x": "x", "y": "y",
+                "data": [{"x": i, "y": i} for i in range(5)],
+            }},
+            node=node,
+        )
+
+    def test_chart_event_dispatches_to_node_detail(self, tmp_path):
+        """SPEC §6.1 headless 解耦验收：无生产者，emit custom(chart) → 图表 tab 出现该图。"""
+        wf = _load(_linear_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app._dispatch_to_widgets(self._chart_event(node="a"))
+                await pilot.pause()
+                nd = app.query_one(NodeDetail)
+                charts = nd._chart_panel.charts_for("a")
+                assert "L" in charts
+                assert charts["L"][0]["title"] == "T"
+        run_async(scenario())
+
+    def test_chart_node_none_goes_to_workflow_bucket(self, tmp_path):
+        """SPEC §3.3 D2-a：node=None → __workflow__ 桶。"""
+        wf = _load(_linear_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app._dispatch_to_widgets(self._chart_event(node=None))
+                await pilot.pause()
+                nd = app.query_one(NodeDetail)
+                keys = [k for k, _ in nd.all_charts()]
+                assert keys[0] == WORKFLOW_BUCKET
+        run_async(scenario())
+
+    def test_chart_non_dict_payload_skipped(self, tmp_path):
+        """SPEC §6.4：payload 非 dict → 跳过 + warning（不崩）。"""
+        wf = _load(_linear_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app._dispatch_to_widgets(_event(
+                    "custom", {"kind": "chart", "chart": "notadict"}, node="a",
+                ))
+                await pilot.pause()
+                # 无图表入（非 dict 跳过）。
+                nd = app.query_one(NodeDetail)
+                assert nd._chart_panel.charts_for("a") == {}
+        run_async(scenario())
+
+    def test_selected_node_and_auto_follow_not_in_tape(self, tmp_path):
+        """SPEC §6.0.4：_selected_node / _auto_follow 是临时 UI 态，不写 tape。
+
+        选中 + pin 后，tape 里无选中/跟随痕迹（真相只有事件流）。
+        """
+        wf = _load(_linear_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # pin：选中 a → _auto_follow=False。
+                app._on_node_selected("a")
+                await pilot.pause()
+                assert app._auto_follow is False
+                assert app._selected_node == "a"
+                # tape 里只有真业务事件（这里没 emit 任何业务事件，故 tape 应空 / 无选中痕迹）。
+                # 读 tape 文件，确认不含 _selected_node / _auto_follow 字样。
+                tape_path = tmp_path / "events.jsonl"
+                if tape_path.exists():
+                    content = tape_path.read_text()
+                    assert "_selected_node" not in content
+                    assert "_auto_follow" not in content
+        run_async(scenario())
+
+    def test_auto_follow_default_true_pin_makes_false(self, tmp_path):
+        """SPEC §1.4：默认 True；j/k 选中 → False（pin）。"""
+        wf = _load(_linear_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+        assert app._auto_follow is True
+        assert app._selected_node is None
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # on_mount 把 entry 设为 _selected_node，_auto_follow 仍 True。
+                assert app._selected_node == "a"
+                assert app._auto_follow is True
+                # pin。
+                app._on_node_selected("a")
+                assert app._auto_follow is False
+                # a 恢复跟随。
+                app.action_follow_active()
+                assert app._auto_follow is True
+        run_async(scenario())
+
+
+# ── phase-12 §0.3 / §6.1：6 新文件零后端 import 断言 ────────────────────────
+
+
+class TestZeroBackendImport:
+    """SPEC §6.1 解耦验收：6 个新文件不得 import orca.exec/run/iface.mcp/render_chart。"""
+
+    NEW_FILES = [
+        "orca/iface/cli/widgets/dag_layout.py",
+        "orca/iface/cli/widgets/dag_graph.py",
+        "orca/iface/cli/widgets/node_detail.py",
+        "orca/iface/cli/widgets/chart_panel.py",
+        "orca/iface/cli/widgets/chart_canvas.py",
+        "orca/iface/cli/screens/chart_browser.py",
+    ]
+
+    FORBIDDEN_PATTERNS = [
+        "import orca.exec",
+        "from orca.exec",
+        "import orca.run",
+        "from orca.run",
+        "import orca.iface.mcp",
+        "from orca.iface.mcp",
+        "render_chart",
+    ]
+
+    def test_no_backend_imports_in_six_new_files(self):
+        """grep 断言：6 个新文件源码不含禁止的 import / render_chart 引用。"""
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parents[3]
+        violations = []
+        for rel in self.NEW_FILES:
+            path = root / rel
+            assert path.exists(), f"新文件缺失: {rel}"
+            text = path.read_text(encoding="utf-8")
+            for pat in self.FORBIDDEN_PATTERNS:
+                if pat in text:
+                    violations.append((rel, pat))
+        assert violations == [], (
+            f"6 新文件含禁止的后端 import（违反 SPEC §0.3 解耦边界）：{violations}"
+        )

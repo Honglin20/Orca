@@ -1,0 +1,35 @@
+name: opencode_tui_e2e
+description: |
+  phase-12 S10 e2e：最小真 agent workflow（opencode 后端）+ script + 条件 route。
+  拓扑：entry(script) → analyst(agent, opencode) → [route] → reporter(agent, opencode) → $end
+  目的：让 DagGraph 显示非平凡拓扑 + NodeDetail 流式（opencode agent_message 整块）+
+  输出 tab + LogStream 真事件，再注入 chart 事件验证渲染。
+entry: entry
+nodes:
+  - name: entry
+    kind: script
+    command: "echo entry_ok"
+    routes:
+      - to: analyst
+  - name: analyst
+    kind: agent
+    executor: opencode
+    model: "zhipuai-coding-plan/glm-4.6v"
+    prompt: |
+      You are a terse analyst. Reply with ONE short sentence (max 12 words)
+      summarizing: "a CLI tool that renders DAG topology in the terminal".
+      No preamble, no markdown.
+    routes:
+      - to: reporter
+  - name: reporter
+    kind: agent
+    executor: opencode
+    model: "zhipuai-coding-plan/glm-4.6v"
+    prompt: |
+      You are a terse reporter. Reply with ONE short sentence (max 12 words)
+      starting with "REPORT:" about why terminal charts are useful.
+      No preamble, no markdown.
+    routes:
+      - to: "$end"
+outputs:
+  result: "{{ reporter.output }}"

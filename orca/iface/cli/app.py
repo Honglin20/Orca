@@ -57,9 +57,10 @@ from orca.gates.context_registry import SessionContextRegistry
 from orca.gates.handler import HumanGateHandler
 from orca.gates.interrupt import InterruptHandler
 from orca.gates.types import InterruptRequest
+from orca.iface.cli.screens.chart_browser import ChartBrowser
 from orca.iface.cli.screens.gate_modal import GateModal
 from orca.iface.cli.screens.interrupt_modal import InterruptModal
-from orca.iface.cli.widgets import ActiveNode, DagTree, Header, LogStream
+from orca.iface.cli.widgets import DagGraph, Header, LogStream, NodeDetail
 from orca.iface.cli.widgets.header import HeaderStats
 from orca.run.lifecycle import gen_run_id
 from orca.run.orchestrator import Orchestrator
@@ -276,6 +277,16 @@ class OrcaApp(App):
     #main-row {
         height: 1fr;
     }
+    /* phase-12 SPEC §3.2：左图窄（max 1/3），右列 NodeDetail 高于 LogStream（3fr/2fr）。 */
+    #right-col {
+        width: 1fr;
+    }
+    NodeDetail {
+        height: 3fr;
+    }
+    LogStream {
+        height: 2fr;
+    }
     """
 
     BINDINGS = [
@@ -285,6 +296,12 @@ class OrcaApp(App):
         Binding("ctrl+g", "interrupt", "中断/纠偏"),
         # phase 11 §2.4 / §6.1：d 弹 DialogModal（agent 跑完后多轮追问）。
         Binding("d", "dialog", "对话"),
+        # phase-12 SPEC §5：a 恢复 auto-follow；c 聚焦 NodeDetail 图表 tab；
+        # C 全屏 ChartBrowser；/ LogStream 过滤；Tab focus_next（Textual 默认）。
+        Binding("a", "follow_active", "跟随活跃"),
+        Binding("c", "focus_charts", "图表 tab"),
+        Binding("C", "open_chart_browser", "全屏图表"),
+        Binding("slash", "filter_log", "过滤日志"),
     ]
 
     def __init__(
@@ -374,16 +391,27 @@ class OrcaApp(App):
         self._agent_node_names: set[str] = {
             n.name for n in wf.nodes if getattr(n, "kind", None) == "agent"
         }
+        # phase-12 SPEC §3.1：node 名 → kind（agent/script/set/foreach/wait/terminate）。
+        # 静态从 wf.nodes 派生（不读 node_started.data.kind —— foreach 无顶层该事件，
+        # run/foreach.py:73）。经 NodeDetail.set_node(name, kind) 透传，驱动 6 kind 派发。
+        self._node_kinds: dict[str, str] = {
+            n.name: n.kind for n in wf.nodes if n.name
+        }
+        # phase-12 SPEC §1.4：临时 UI 交互态（不写 tape、不算业务真相，与 _active_modal 同类）。
+        # _auto_follow 默认 True（node_started 自动跟随 running 节点）；j/k 或点选 → False（pin）；
+        # a → 恢复 True。_selected_node 驱动 NodeDetail 全部内容。
+        self._selected_node: str | None = None
+        self._auto_follow: bool = True
 
     # ── Textual 钩子 ─────────────────────────────────────────────────────
 
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="main-row"):
-            yield DagTree()
-            with Vertical():
-                yield ActiveNode()
-                yield LogStream()
+            yield DagGraph()                       # phase-12：左图拓扑（窄，max 1/3）
+            with Vertical(id="right-col"):
+                yield NodeDetail()                 # 右上：tab 化详情（3fr）
+                yield LogStream()                  # 右下：日志（2fr）
         yield Footer()
 
     def on_mount(self) -> None:
@@ -399,14 +427,24 @@ class OrcaApp(App):
         单测用 ``run_test()`` 时 on_mount 同样会触发；如不希望真起编排（避免 spawn
         claude / uvicorn），可把 ``kickoff`` 替换成 no-op（见 ``test_app._patched_app``）。
         """
-        tree = self.query_one(DagTree)
-        tree.build_from_workflow(self._node_names, self._parallel_groups)
+        tree = self.query_one(DagGraph)
+        # routes 派生：{node_or_group: [target, ...]}（含 $end，build_from_workflow 内忽略）。
+        # 顶层 node 的 routes + parallel 组的 routes（组完成后路由）。
+        routes: dict[str, list[str]] = {}
+        for n in self.wf.nodes:
+            if n.name:
+                routes[n.name] = [r.to for r in n.routes]
+        for g in self.wf.parallel:
+            routes[g.name] = [r.to for r in g.routes]
+        tree.build_from_workflow(self._node_names, self._parallel_groups, routes)
         header = self.query_one(Header)
         header.update_stats(HeaderStats(
             run_id=self.run_id, workflow_name=self.wf.name, total=self._total_nodes,
         ))
-        active = self.query_one(ActiveNode)
-        active.set_active(self.wf.entry)
+        # NodeDetail 初始选中 entry（auto-follow 默认 True，首个 node_started 会覆盖）。
+        active = self.query_one(NodeDetail)
+        active.set_node(self.wf.entry, self._node_kinds.get(self.wf.entry))
+        self._selected_node = self.wf.entry
 
         # 订阅事件 + 起事件消费 worker（@work，loop 已 running，安全）。
         self._sub = self.bus.subscribe()
@@ -497,28 +535,39 @@ class OrcaApp(App):
         data = event.data or {}
         node = event.node
 
-        # node 生命周期 → DagTree 图标
+        # node 生命周期 → DagGraph 图标 + NodeDetail 切换
         if etype == "node_started":
-            tree = self.query_one(DagTree)
-            tree.set_status(node or "", "running")
+            graph = self.query_one(DagGraph)
+            graph.set_status(node or "", "running")
             if node:
-                self.query_one(ActiveNode).set_active(node)
+                # phase-12 SPEC §1.4：auto-follow（默认 True）→ _selected_node 跟随 running。
+                # pin 后（_auto_follow=False）node_started 不覆盖选中。
+                if self._auto_follow:
+                    self._selected_node = node
+                    self.query_one(NodeDetail).set_node(
+                        node, self._node_kinds.get(node),
+                    )
+                # node_started 也入流式 tab（terminate kind 的主源，SPEC §1.3 表）。
+                self.query_one(NodeDetail).append_event_stream(node, etype, data)
                 # phase 11 §3：追踪当前 node + 起始时间 + session（action_interrupt 用）。
                 import time as _time
                 self._current_node = node
                 self._node_started_at = _time.monotonic()
                 self._current_session_id = event.session_id
         elif etype == "node_completed":
-            tree = self.query_one(DagTree)
-            tree.set_status(node or "", "done")
+            graph = self.query_one(DagGraph)
+            graph.set_status(node or "", "done")
             self._done_nodes += 1
             self._refresh_header()
+            if node:
+                # phase-12 SPEC §1.3：输出 tab 显 node_completed.data.output（6 kind 通用）。
+                self.query_one(NodeDetail).set_output(node, data.get("output"))
             # phase 11 §6.1：记最近完成的 agent node + output（action_dialog 按 d 用）。
             if node and node in self._agent_node_names:
                 self._last_completed_agent_node = node
                 self._last_completed_agent_output = data.get("output")
         elif etype == "node_failed":
-            self.query_one(DagTree).set_status(node or "", "failed")
+            self.query_one(DagGraph).set_status(node or "", "failed")
         elif etype == "route_taken":
             pass  # 日志里看即可，DAG 图标由 node_* 事件驱动
 
@@ -529,7 +578,7 @@ class OrcaApp(App):
             self._refresh_header()
             # 当前节点 → blocked 图标（gate 拦在 node 内的 claude 工具调用循环）
             if node:
-                self.query_one(DagTree).set_status(node, "blocked")
+                self.query_one(DagGraph).set_status(node, "blocked")
             # 推 GateModal 参与竞速（@work 内 push_screen_wait）
             self._push_gate_modal(event)
         elif etype == "human_decision_resolved":
@@ -538,7 +587,7 @@ class OrcaApp(App):
             self._refresh_header()
             # node 解除 blocked → 回 running（claude resume 继续跑）
             if node:
-                self.query_one(DagTree).set_status(node, "running")
+                self.query_one(DagGraph).set_status(node, "running")
             # 广播输家：本壳 modal 还在 → notify_resolved_externally 让它 dismiss
             if self._active_modal is not None:
                 self._active_modal.notify_resolved_externally(
@@ -546,13 +595,40 @@ class OrcaApp(App):
                     answer=str(data.get("answer", "")),
                 )
 
-        # agent 流式 → ActiveNode + LogStream
+        # agent 流式 → NodeDetail 流式 tab + LogStream（executor-agnostic：N 事件→N 行）
         elif etype in ("agent_message", "agent_thinking", "agent_tool_call", "agent_tool_result"):
             log = self.query_one(LogStream)
             log.append_event(
                 etype, data, node=node,
                 session_id=event.session_id, timestamp=event.timestamp,
             )
+            if node:
+                self.query_one(NodeDetail).append_event_stream(node, etype, data)
+
+        # foreach / wait 流式事件 → NodeDetail 流式 tab（SPEC §1.3 表）
+        elif etype in (
+            "foreach_started", "foreach_completed",
+            "foreach_item_started", "foreach_item_completed",
+            "wait_started", "wait_completed",
+        ):
+            log = self.query_one(LogStream)
+            log.append_event(
+                etype, data, node=node,
+                session_id=event.session_id, timestamp=event.timestamp,
+            )
+            if node:
+                self.query_one(NodeDetail).append_event_stream(node, etype, data)
+
+        # phase-12 SPEC §3.3：custom(kind=chart) → NodeDetail 图表 tab（确定性 fold 落点）。
+        elif etype == "custom" and data.get("kind") == "chart":
+            payload = data.get("chart")
+            if not isinstance(payload, dict):
+                # 防御：非 dict 静默跳过 + warning（SPEC §6.4 同语义）。
+                logger.warning("custom(chart) payload 非 dict，跳过: %r", type(payload).__name__)
+                return
+            # node=None → __workflow__ 桶（SPEC §3.3 D2-a；workflow 级图归此，ChartBrowser 顶层）。
+            node_key = node if node is not None else "__workflow__"
+            self.query_one(NodeDetail).upsert_chart(node_key, payload)
 
         # workflow 终态
         elif etype == "workflow_started":
@@ -732,6 +808,51 @@ class OrcaApp(App):
             inputs=self._inputs, outputs={}, run_id=self.run_id, task=self._task,
         )
         self.push_screen(DialogModal(handler, node, output, ctx, bus=self.bus))
+
+    # ── phase-12 §1.4 / §5：选中 + auto-follow + 图表键位 ────────────────────
+
+    def _on_node_selected(self, name: str) -> None:
+        """DagGraph 选中（j/k / click）回调（SPEC §1.4）。
+
+        pin：``_auto_follow=False``；``_selected_node=name``；NodeDetail 切到该节点。
+        后续 ``node_started`` 不再覆盖选中（除非用户按 ``a`` 恢复跟随）。
+        """
+        self._selected_node = name
+        self._auto_follow = False
+        self.query_one(NodeDetail).set_node(name, self._node_kinds.get(name))
+
+    def action_follow_active(self) -> None:
+        """``a`` 键：恢复 auto-follow（SPEC §1.4 / §5）。
+
+        ``_auto_follow=True``；``_selected_node=当前 running 节点``（无 running 则不变）。
+        """
+        self._auto_follow = True
+        running = self._current_node
+        if running is not None:
+            self._selected_node = running
+            self.query_one(NodeDetail).set_node(
+                running, self._node_kinds.get(running),
+            )
+
+    def action_focus_charts(self) -> None:
+        """``c`` 键：聚焦 NodeDetail + 切图表 tab（SPEC §5）。"""
+        nd = self.query_one(NodeDetail)
+        self.set_focus(nd)
+        nd.action_focus_charts()
+
+    def action_open_chart_browser(self) -> None:
+        """``C`` 键：全屏 ChartBrowser（SPEC §4.5 / §5）。Esc/q 退。"""
+        self.push_screen(ChartBrowser())
+
+    def action_filter_log(self) -> None:
+        """``/`` 键：LogStream 过滤（SPEC §4.4 / §5）。
+
+        简化实现：写提示到 LogStream（输入框 modal 留后续；本 phase 只接键位 + 提示，
+        不阻塞 DAG 推进）。聚焦 LogStream 供 j/k 滚动。
+        """
+        log = self.query_one(LogStream)
+        self.set_focus(log)
+        log.write("(/ 过滤：输入后回车；当前实现为占位，过滤逻辑留后续)")
 
     # ── header 刷新（SPEC §4.4）─────────────────────────────────────────
 

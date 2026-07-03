@@ -27,6 +27,9 @@ dependencies = [
     "cryptography<49",
     "mcp>=1.0,<1.28",
     "textual>=8.2.8",
+    # phase-12 §1.2：图表终端渲染（braille）。line/bar/area/scatter/pareto 走 plotext；
+    # 缺包仅开发期 monkeypatch 测试降级，生产路径不降级（SPEC §6.1 必测 braille）。
+    "textual-plotext>=1.0.1",
     "typer>=0.26.8",
     "uvicorn>=0.49.0",
     "websockets>=16.0",

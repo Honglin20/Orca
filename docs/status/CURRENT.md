@@ -5,29 +5,22 @@
 
 ---
 
-## 当前状态：`orca executor` 特性完成，无进行中任务
+## 当前状态：phase-12 TUI 重设计完成（S0–S10 全过），无进行中任务
 
-**持久化后端二进制配置 + 健康检查**完成：`orca executor set/show/unset/list/test` 命令组 +
-`~/.orca/config.json` + 启动期 env 注入。复用既有 `resolve_cli_path()`，**exec/profile/registry
-零核心改动**（OCP）。1031 passed 0 回归；终审 0 🔴 1 🟡（已修）/ 2 🟢（跳过）。
-
-- **release note**：[`docs/releases/2026-07-02-executor-config.md`](../releases/2026-07-02-executor-config.md)
-- **CHANGELOG**：顶部 `orca executor` 索引
-- **核心交付**：① `orca/iface/cli/config.py`（config 持久化 + env 注入，`setdefault` 保 env>config>default）；
-  ② `orca/iface/cli/executor_cmds.py`（sub-Typer + 纯函数 `classify` + `test` 复用 CLIRunner）；
-  ③ `commands.py` `main()` 注入 + `add_typer`；④ ccr profile translator 接上 `claude_translator`。
-- **测试**：35 单测（FakeRunner）+ 9 e2e（假脚本走完整 spawn 链路，不 mock CLIRunner）+ 2 integration（真 claude）。
+**phase-12 CLI TUI 重设计收官**：DagGraph 拓扑图 + NodeDetail（6 kind 永不空）+ 终端图表渲染（plotext braille）+ ChartBrowser。
+- **SPEC**：[`phase-12-cli-tui-redesign.md`](../specs/phase-12-cli-tui-redesign.md)（v2 对抗审闭环）｜**计划**：[`2026-07-03-phase12-tui-redesign.md`](../plans/2026-07-03-phase12-tui-redesign.md)｜**release**：[`2026-07-03-phase12-tui-redesign.md`](../releases/2026-07-03-phase12-tui-redesign.md)
+- **验证**：1133 passed 0 回归；**S10 = opencode 后端真跑 e2e 通过**（glm-4.6v，SPEC §6 逐项 + 断言证据；图表走解耦注入真路径，braille + 多图分组规整）。
+- **e2e 顺带修真 bug**：`ClaudeExecutor` 无条件注 `--allowed-tools`/`--mcp-config` → opencode spawn 失败，gate 到 `capabilities.mcp_tools` 修复。
+- 分支：`phase12-tui-redesign`（未 merge）。
 
 ## 待办（等用户指示方向）
 
-1. **`orca executor` 真实端到端 manual 验证（待 ccr/claude + key 环境）**：
-   `orca executor set claude "ccr code"` → `test` ✓ → `run` 实际 spawn ccr code →
-   `ORCA_CLAUDE_CLI=claude run` 临时回 claude（证 env>config 优先级）→ `unset` 回 default。
-2. **前序 4-bug-fix 的 TUI 端到端验证**（仍待 manual）：`demo_mixed` failed 时 TUI 停留「按 q 退出」。
-3. **下一阶段（未规划）**：Web phase（前端 InterruptModal/DialogModal/cancel 端点 + terminate widget）；
-   异协议 backend（codex/opencode）= 新 profile + translator（`executor set/test` 自动支持）。
+1. **`render_chart` MCP 生产者（phase-10，外部）**：未实现；TUI 渲染侧已就绪 + 验证。落地后可补「agent 真调 render_chart → 图自动出」回归（无需改 TUI）。
+2. **phase-12 分支 merge / PR**（等用户决定）。
+3. **`orca executor` 真实端到端 manual 验证（待 ccr/claude + key 环境）**。
+4. **前序 4-bug-fix 的 TUI 端到端验证**（仍待 manual）。
 
 ## 必读文件（下一任务开工前按需）
 
-- [`docs/releases/2026-07-02-executor-config.md`](../releases/2026-07-02-executor-config.md)（本次特性全貌 + 设计逻辑）
-- [`docs/releases/2026-07-02-agent-observability-tui-fixes.md`](../releases/2026-07-02-agent-observability-tui-fixes.md)（前序 4 bug）
+- [`docs/releases/2026-07-03-phase12-tui-redesign.md`](../releases/2026-07-03-phase12-tui-redesign.md)（phase-12 全貌 + S10 + 偏差 + 已知 gap）
+- [`docs/specs/phase-9d-web-gate-chart.md`](../specs/phase-9d-web-gate-chart.md) §2 + `orca/iface/web/frontend/src/components/chart/types.ts`（图表契约 source of truth）
