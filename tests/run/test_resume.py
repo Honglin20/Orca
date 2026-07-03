@@ -93,7 +93,7 @@ def _write_partial_crash_tape(
 
     real_make = factory_mod.make_executor
 
-    def patched_make(node, agent_tools_server=None, bus=None):
+    def patched_make(node, agent_tools_server=None, bus=None, **kwargs):
         # 已完成的 node 不应再被 dispatch（resume 时跳过）；若被调，给确定性 executor。
         if node.name in completed_nodes:
             return real_make(node)

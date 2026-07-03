@@ -56,13 +56,21 @@ outputs:
 
 
 def make_manager(tmp_path: Path, max_concurrent: int = 3) -> RunManager:
-    """构造 RunManager（runs_dir 写 tmp_path，不污染 cwd）。"""
-    return RunManager(max_concurrent=max_concurrent, runs_dir=tmp_path / "runs")
+    """构造 RunManager（runs_dir 写短路径，避免 macOS tmp_path 触发 SOCK_PATH_MAX）。
+
+    phase-13 §7.7：sock path > 90 字节 fail loud（RunManager.start_run 启动 ingestor 前
+    check）。pytest tmp_path 在 macOS 是 /private/var/folders/.../pytest-of-user/pytest-NN/，
+    加上 runs/<run_id>.sock 后超 90，触发 RuntimeError。与 SPEC workaround 一致用 /tmp 短前缀
+    （哈希后缀避免并发测试撞名）。
+    """
+    import hashlib
+    h = hashlib.md5(str(tmp_path).encode()).hexdigest()[:6]
+    return RunManager(max_concurrent=max_concurrent, runs_dir=Path(f"/tmp/orca-t{h}/runs"))
 
 
 @pytest.fixture
 def manager(tmp_path: Path) -> RunManager:
-    """默认 RunManager fixture（max_concurrent=3，runs 写 tmp_path）。"""
+    """默认 RunManager fixture（max_concurrent=3，runs 写短路径）。"""
     return make_manager(tmp_path)
 
 
@@ -90,7 +98,10 @@ def live_server(tmp_path: Path):
     """
     import uvicorn
 
-    manager = RunManager(runs_dir=tmp_path / "runs")
+    # phase-13 §7.7：用短路径避免 macOS tmp_path 触发 SOCK_PATH_MAX（同 make_manager）
+    import hashlib
+    h = hashlib.md5(str(tmp_path).encode()).hexdigest()[:6]
+    manager = RunManager(runs_dir=Path(f"/tmp/orca-t{h}/runs"))
     app = create_app(manager)
     port = free_port()
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")

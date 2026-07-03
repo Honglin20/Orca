@@ -98,7 +98,7 @@ def _patch_factory_to_fake(fake_exec: _RecordingAgentExecutor):
     import orca.exec.factory as factory_mod
 
     orig = factory_mod.make_executor
-    factory_mod.make_executor = lambda node, agent_tools_server=None, bus=None: fake_exec
+    factory_mod.make_executor = lambda node, agent_tools_server=None, bus=None, **kwargs: fake_exec
     return orig
 
 

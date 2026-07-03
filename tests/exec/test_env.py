@@ -5,6 +5,7 @@
   - 不匹配的不透传
   - 空 prefixes → 空 overlay
   - 多前缀任一命中即透传
+  - phase-13 §2：4 个 ORCA_* keyword 注入（chart 路由）+ 缺省不注（backward compat）
 
 抽这层的动机（review 裁定 Rule 6）：原三处内联重复（exec/claude/executor + exec/validator +
 gates/dialog），第三处出现即触发 DRY 抽象。
@@ -49,3 +50,79 @@ def test_build_env_overlay_multiple_prefixes_any_match(monkeypatch):
     assert overlay["ANTHROPIC_API_KEY"] == "sk-1"
     assert overlay["CLAUDE_CODE_TIMEOUT"] == "30"
     assert "UNRELATED_VAR" not in overlay
+
+
+# ── phase-13 §2：ORCA_* chart 路由注入（缺省不注 → backward compat）────────
+
+
+def test_build_env_overlay_no_chart_kwargs_no_inject():
+    """旧调用方式 ``build_env_overlay(prefixes)`` 不注任何 ORCA_*（backward compat）。
+
+    意图：phase-13 引入 4 个 keyword 之前，既有调用方（validator / dialog / 旧 executor
+    测试）不传任何 keyword → env overlay 必须不含 ORCA_*，行为与重构前完全一致。
+    """
+    overlay = build_env_overlay(("ANTHROPIC_",))
+    assert "ORCA_RUN_ID" not in overlay
+    assert "ORCA_NODE" not in overlay
+    assert "ORCA_SESSION_ID" not in overlay
+    assert "ORCA_CHART_SOCK" not in overlay
+
+
+def test_build_env_overlay_injects_all_four_orca_chart_vars(monkeypatch):
+    """4 个 keyword 全传 → overlay 含全部 ORCA_* 路由变量。
+
+    意图：ClaudeExecutor spawn 时显式传 4 个 keyword（phase-13 §2.2），子进程 env 必含
+    全部 4 个 ORCA_*（script 端 render_chart 据此路由 chart 事件）。
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-1")  # 确保 prefix 透传仍工作
+    overlay = build_env_overlay(
+        ("ANTHROPIC_",),
+        run_id="demo-abc123",
+        node="train",
+        session_id="sess-xyz",
+        chart_sock="/tmp/orca-runs/demo-abc123.sock",
+    )
+    assert overlay["ORCA_RUN_ID"] == "demo-abc123"
+    assert overlay["ORCA_NODE"] == "train"
+    assert overlay["ORCA_SESSION_ID"] == "sess-xyz"
+    assert overlay["ORCA_CHART_SOCK"] == "/tmp/orca-runs/demo-abc123.sock"
+    # prefix 透传仍工作（ORCA_* 与 ANTHROPIC_* 共存）
+    assert overlay["ANTHROPIC_API_KEY"] == "sk-1"
+
+
+def test_build_env_overlay_partial_kwargs_partial_inject():
+    """仅传 run_id/node → 仅注 2 个 ORCA_*，其余 2 个不出现在 overlay。
+
+    意图：keyword 缺省 = 空串 = 不注（不是注空串值）。这对后续 executor 渐进迁移重要
+    （如先接 run_id/node，session_id/chart_sock 后接，过渡期不会污染 env）。
+    """
+    overlay = build_env_overlay(
+        (),
+        run_id="demo-1",
+        node="train",
+        # session_id / chart_sock 故意缺省
+    )
+    assert overlay["ORCA_RUN_ID"] == "demo-1"
+    assert overlay["ORCA_NODE"] == "train"
+    assert "ORCA_SESSION_ID" not in overlay
+    assert "ORCA_CHART_SOCK" not in overlay
+
+
+def test_build_env_overlay_empty_string_kwarg_not_injected():
+    """显式传空串 keyword → 不注（与缺省等价，防 ``overlay[k]="")`` 污染 env）。
+
+    意图：调用方某些场景可能显式传 ``chart_sock=""``（如运行时尚未决定 sock 路径），
+    应等价于缺省——不注 ORCA_CHART_SOCK，而非注入空值（空值会让 script 端 §7.1 fail
+    loud 信息更难定位）。
+    """
+    overlay = build_env_overlay(
+        (),
+        run_id="demo-1",
+        node="",
+        session_id="",
+        chart_sock="",
+    )
+    assert overlay["ORCA_RUN_ID"] == "demo-1"
+    assert "ORCA_NODE" not in overlay
+    assert "ORCA_SESSION_ID" not in overlay
+    assert "ORCA_CHART_SOCK" not in overlay

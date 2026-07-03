@@ -169,12 +169,16 @@ def _patch_validate(monkeypatch, verdicts: list[tuple[bool, list[str]]]):
 
 
 def _patch_make_executor(monkeypatch, fake: Executor):
-    """把 orchestrator._dispatch 内的 make_executor 替换成返回 fake。"""
+    """把 orchestrator._dispatch 内的 make_executor 替换成返回 fake。
+
+    lambda 接受 ``**kwargs``：orchestrator 后续可能新增 keyword 透传给 ``make_executor``
+    （如 phase-13 的 ``runs_dir``），mock 不应被新 keyword 打破（surgical）。
+    """
     from orca.exec import factory as factory_mod
 
     monkeypatch.setattr(
         factory_mod, "make_executor",
-        lambda node, agent_tools_server=None, bus=None: fake,
+        lambda node, agent_tools_server=None, bus=None, **kwargs: fake,
     )
 
 
