@@ -7,7 +7,7 @@
 
 ## 当前状态：TUI 重设计 v1 完成；无进行中任务
 
-**TUI 重设计 v1 完成**（commit `4c5ca2d`）
+**TUI 重设计 v1 完成**（commit `7bd43ef`）
 - 对齐 spec v1.1（spec-review-adversarial conditional-pass → 5 P0 + 3 用户决策闭环）
 - DAG 3 行盒子（name / status+iter / elapsed+tok 或 error）+ fan-in `(N inputs · M/N arrived)`
   副标 + `after=None` 单独 section + ≥5 并行 outline fallback

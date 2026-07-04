@@ -83,7 +83,7 @@ reducer 维护 `node_session_ids: dict[node, list[session_id]]`：
 
 ## Commit
 
-按 logical chunk 单 commit（14 文件，atomic 改造）：`4c5ca2d`
+按 logical chunk 单 commit（14 文件，atomic 改造）：`7bd43ef`
 - `orca/iface/cli/widgets/_event_filter.py`（新）
 - `orca/iface/cli/widgets/_dag_render.py`（新）
 - `orca/iface/cli/widgets/activity_stream.py`（新）
