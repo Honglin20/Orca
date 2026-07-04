@@ -153,7 +153,7 @@ SVG 截屏：`tests/iface/cli/_artifacts/gap_verify_mxint.svg` + `gap_verify_dem
 
 ## Commit
 
-- `fix(tui): GAP-A/B/C/E 真用户验证 spec 违规收口`（SHA 见 CHANGELOG）
+- `225933e` `fix(tui): GAP-A/B/C/E 真用户验证 spec 违规收口`
 
 ## Deviation from plan
 
