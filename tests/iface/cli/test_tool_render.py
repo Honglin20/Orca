@@ -171,6 +171,151 @@ class TestFailLoud:
         )
 
 
+# ── GAP #1 闭环：opencode read 文件 XML envelope（spec §6.3）─────────────────
+
+
+# 真实 tape 证据样本（取自 ``runs/demo_task-20260704-085641-f15c8d.jsonl`` seq=5，
+# 截短为 7 行 + 末尾 marker）。GAP #1：opencode ``read`` 一个**文件**也返回 XML
+# envelope，原实现只检测 ``<type>directory</type>``，file 走兜底 → 双重行号 +
+# tag 泄漏 + EOF marker 漏出。修复后应剥 envelope 还原干净文本。
+_OPENCODE_READ_FILE_ENVELOPE = (
+    "<path>/abs/pyproject.toml</path>\n"
+    "<type>file</type>\n"
+    "<content>\n"
+    "1: [build-system]\n"
+    "2: requires = [\"hatchling\"]\n"
+    "3: build-backend = \"hatchling.build\"\n"
+    "4: \n"
+    "5: [project]\n"
+    "6: name = \"orca\"\n"
+    "(End of file - total 6 lines)\n"
+    "</content>"
+)
+
+
+class TestOpencodeReadFileEnvelope:
+    """GAP #1：opencode ``read`` 文件 XML envelope 解析（spec §6.3 订正）。"""
+
+    def test_opencode_read_file_strips_envelope(self):
+        """剥 envelope：payload.content 不含 ``<path>`` / ``<type>file</type>`` /
+        ``<content>`` tag、不含 ``N:`` 行号前缀、不含 ``(End of file`` marker。"""
+        item = normalize_tool(
+            executor="opencode",
+            tool_name="read",
+            args={"filePath": "/abs/pyproject.toml"},
+            result=_OPENCODE_READ_FILE_ENVELOPE,
+            status="completed",
+        )
+        assert item.payload["is_dir"] is False
+        content = item.payload["content"]
+        # 还原成纯文本，逐项断言
+        rendered_text = "\n".join(line["text"] for line in content)
+        # 不含 envelope tag（spec §6.3 file envelope 应被剥）
+        assert "<path>" not in rendered_text
+        assert "<type>file</type>" not in rendered_text
+        assert "<content>" not in rendered_text
+        assert "</content>" not in rendered_text
+        # 不含 opencode 自加的 ``N:`` 行号前缀（避免与 Rich Syntax 双重行号）
+        for line in content:
+            # ``N: `` 仅当整行以数字开头 + 冒号才视作残留前缀；正常 TOML 行首无此模式
+            assert not (line["text"] and line["text"][0].isdigit() and ":" in line["text"][:6]), (
+                f"行 {line['n']} 仍含 ``N:`` 行号前缀：{line['text']!r}"
+            )
+        # 不含尾部 EOF marker
+        assert "(End of file" not in rendered_text
+
+    def test_opencode_read_file_preserves_line_count(self):
+        """剥 envelope 后行数 == 原文件行数（fixture 6 行；EOF marker 不算）。"""
+        item = normalize_tool(
+            executor="opencode",
+            tool_name="read",
+            args={"filePath": "/abs/pyproject.toml"},
+            result=_OPENCODE_READ_FILE_ENVELOPE,
+            status="completed",
+        )
+        content = item.payload["content"]
+        # fixture 含 6 行原文（含 1 个空行）+ EOF marker（被剥）
+        assert len(content) == 6, f"应剥到 6 行，实际 {len(content)}"
+        # 行号连续 1..6（_line_numbered 契约）
+        assert [c["n"] for c in content] == list(range(1, 7))
+        # 关键行字面值（剥 ``N: `` 前缀后）
+        assert content[0]["text"] == "[build-system]"
+        assert content[1]["text"] == "requires = [\"hatchling\"]"
+        # 空行（fixture 第 4 行）：opencode 给 ``4: ``（带尾空格），剥后应是空串
+        assert content[3]["text"] == "", f"空行应剥为空串，实际 {content[3]['text']!r}"
+
+    def test_opencode_read_file_tape_evidence(self):
+        """真实 tape 证据回归（``runs/demo_task-20260704-085641-f15c8d.jsonl`` seq=5）。
+
+        读取 tape 提取 seq=5 的 result → normalize → 验证 payload.content 干净。
+        这是 GAP #1 的真跑证据 anchor，防 opencode 升级 envelope shape 时静默漂移。
+        """
+        tape_path = Path(__file__).resolve().parents[3] / "runs/demo_task-20260704-085641-f15c8d.jsonl"
+        if not tape_path.exists():
+            pytest.skip(f"真实 tape 不存在：{tape_path}（CI 环境无 runs/ 时跳过）")
+        result_text = None
+        for line in tape_path.read_text().splitlines():
+            try:
+                ev = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if ev.get("seq") == 5 and ev.get("type") == "agent_tool_result":
+                result_text = ev["data"]["result"]
+                break
+        assert result_text is not None, "tape seq=5 agent_tool_result 不存在"
+        # 必须是 file envelope（不是 directory）—— 这是 GAP #1 的前提
+        assert "<type>file</type>" in result_text
+
+        item = normalize_tool(
+            executor="opencode",
+            tool_name="read",
+            args={"filePath": "/abs/pyproject.toml"},
+            result=result_text,
+            status="completed",
+        )
+        content = item.payload["content"]
+        rendered_text = "\n".join(line["text"] for line in content)
+        # 不变量：envelope tag 全被剥
+        assert "<path>" not in rendered_text
+        assert "<type>file</type>" not in rendered_text
+        assert "<content>" not in rendered_text
+        # EOF marker 不出现
+        assert "(End of file" not in rendered_text
+        # 行数 == 原 tape 末尾 marker 声明的 total（72 行）
+        assert len(content) == 72, (
+            f"剥 envelope 后应得 72 行（与 opencode 声明一致），实际 {len(content)}"
+        )
+
+
+class TestFileWriteSubtitle:
+    """GAP #2：file_write subtitle（spec §8.1 ``✏ <path> (new, NB)``）。"""
+
+    def test_file_write_subtitle_new_bytes(self):
+        """file_write payload → subtitle == ``new, NB``。"""
+        item = normalize_tool(
+            executor="claude",
+            tool_name="Write",
+            args={"file_path": "new.py", "content": "import os\n\nprint(os.getcwd())\n"},
+            result="",
+            status="completed",
+        )
+        assert item.kind == "file_write"
+        # content 是 ``import os\n\nprint(os.getcwd())\n`` → 30 bytes (utf-8)
+        assert item.payload["bytes"] == 30
+        assert item.subtitle == "new, 30B"
+
+    def test_file_write_subtitle_zero_bytes(self):
+        """空文件：subtitle == ``new, 0B``（边界：bytes=0 仍渲染 new marker）。"""
+        item = normalize_tool(
+            executor="opencode",
+            tool_name="write",
+            args={"filePath": "empty.txt", "content": ""},
+            result="",
+            status="completed",
+        )
+        assert item.subtitle == "new, 0B"
+
+
 # ── reducer（spec §9）─────────────────────────────────────────────────────────
 
 

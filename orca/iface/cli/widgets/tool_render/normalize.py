@@ -12,8 +12,9 @@
 
 fail loud（§6.2 / §13）：
   - args 非 dict → ``NormalizeError``（translator 层应保证 args 已解析为 dict）
-  - opencode read 目录 XML 解析失败 → 降级 ``is_dir=False`` + warning log（不 raise，
-    避免单工具渲染失败阻塞整个 TUI；fail visible 而非 fail loud）
+  - opencode read XML envelope（``<type>directory</type>`` / ``<type>file</type>``）解析
+    失败 → 降级 ``is_dir=False`` + warning log（不 raise，避免单工具渲染失败阻塞整个
+    TUI；fail visible 而非 fail loud）
 
 依赖单向（§7.2）：只依赖 ``orca.schema`` + stdlib，**禁止** import ``orca.exec`` /
 ``orca.run`` / ``orca.events.bus``。
@@ -127,22 +128,52 @@ def normalize_tool(
 def _normalize_file_read(args: dict[str, Any], result: str | None) -> dict[str, Any]:
     """file_read payload（§5.2 / §6.3）。
 
-    - opencode read 目录：result 含 ``<type>directory</type>`` XML → 解析 entries
-    - 其他情况：按文件读取，result 文本行号化为 content
+    - opencode read 目录：result 是 XML envelope（``<type>directory</type>``）→ 解析 entries
+    - opencode read 文件：result **同样是 XML envelope**（``<type>file</type>`` + ``<content>`` 内
+      每行带 opencode 自加的 ``N:`` 前缀 + 尾部 ``(End of file - total N lines)`` marker）→
+      剥 envelope + 剥前缀 + 剥尾部 marker → 行号化为 content
+    - claude Read / 其他：result 是文件原文，直接行号化为 content
     """
     path = str(args.get("file_path") or args.get("filePath") or args.get("path") or "")
     text = result or ""
 
-    if "<type>directory</type>" in text:
-        entries = _parse_opencode_dir_entries(text)
-        if entries is not None:
-            return {"path": path, "is_dir": True, "entries": entries, "truncated": False}
-        # XML 解析失败 → 降级 + warning（§13 fail visible：不 raise）
-        logger.warning(
-            "opencode read 目录 XML 解析失败，降级 is_dir=False 原样文本展示（path=%s）",
-            path,
-        )
+    # 仅在起手式像 opencode envelope 时（``<path>`` 开头）才尝试 XML 解析，
+    # 避免把 claude Read 的普通文件原文（如含 ``<html>`` 的 HTML 文件）误判。
+    if text.lstrip().startswith("<path>"):
+        envelope = _parse_opencode_xml_envelope(text)
+        if envelope is not None:
+            if envelope["type"] == "directory":
+                entries = envelope.get("entries")
+                if entries is not None:
+                    return {"path": path, "is_dir": True, "entries": entries, "truncated": False}
+                logger.warning(
+                    "opencode read 目录 XML 缺 entries，降级原样文本展示（path=%s）",
+                    path,
+                )
+            elif envelope["type"] == "file":
+                content_text = envelope.get("content", "")
+                if content_text is not None:
+                    content = _line_numbered(content_text)
+                    return {"path": path, "is_dir": False, "content": content, "truncated": False}
+                logger.warning(
+                    "opencode read 文件 XML 缺 content，降级原样文本展示（path=%s）",
+                    path,
+                )
+            else:
+                # type 已解析但取值未知（如 future ``<type>symlink>``）→ fail visible
+                logger.warning(
+                    "opencode read XML envelope 未知 type=%r，降级原样文本展示（path=%s）",
+                    envelope.get("type"),
+                    path,
+                )
+        else:
+            # 起手式像 envelope 但解析失败 → fail visible（§13）
+            logger.warning(
+                "opencode read XML envelope 解析失败，降级原样文本展示（path=%s）",
+                path,
+            )
 
+    # 兜底：原文行号化（claude Read 普通文件 / XML 解析失败 / type 未知）
     content = _line_numbered(text)
     return {"path": path, "is_dir": False, "content": content, "truncated": False}
 
@@ -249,12 +280,15 @@ def _make_subtitle(kind: RenderToolKind, payload: dict[str, Any]) -> str:
     """per-kind subtitle（§8.1 副标题，可选）。
 
     - file_edit：``+12 -3``
+    - file_write：``new, NB``（§8.1 file_write header ``✏ <path> (new, NB)``）
     - glob：``N matches``
     - file_read 目录：``N entries``
     - 其他：空串
     """
     if kind == "file_edit":
         return f"+{payload.get('added', 0)} -{payload.get('deleted', 0)}"
+    if kind == "file_write":
+        return f"new, {payload.get('bytes', 0)}B"
     if kind == "glob":
         n = len(payload.get("matches", []))
         return f"{n} match{'es' if n != 1 else ''}"
@@ -279,11 +313,14 @@ def _line_numbered(text: str) -> list[dict[str, Any]]:
     return [{"n": i + 1, "text": line} for i, line in enumerate(lines)]
 
 
-def _parse_opencode_dir_entries(text: str) -> list[str] | None:
-    """opencode read 目录 XML → entries 列表（§6.3 实测 shape）。
+def _parse_opencode_xml_envelope(text: str) -> dict[str, Any] | None:
+    """opencode read 的 XML envelope → ``{type, path, entries?, content?}``（§6.3 实测 shape）。
 
-    样本（``runs/demo_task-20260703-221337-c94151.jsonl``）::
+    opencode ``read`` 对**目录**和**文件**都返回 XML envelope（实测 tape 证据：
+    ``runs/demo_task-20260703-221337-c94151.jsonl`` seq=20 目录 / ``runs/demo_task-20260704-085641-f15c8d.jsonl``
+    seq=5 文件）::
 
+        目录：
         <path>/abs/path</path>
         <type>directory</type>
         <entries>
@@ -293,26 +330,76 @@ def _parse_opencode_dir_entries(text: str) -> list[str] | None:
         (17 entries)
         </entries>
 
-    返回 ``None`` 表示解析失败（caller 决定降级策略）。
+        文件：
+        <path>/abs/path/pyproject.toml</path>
+        <type>file</type>
+        <content>
+        1: [build-system]
+        2: requires = ["hatchling"]
+        ...
+        72: </content>
+        (End of file - total 72 lines)
+        </content>
+
+    归一化策略：
+      - directory：``<entries>`` 内文本按行解析 → entries 列表（剥 ``(... entries)`` 尾注）
+      - file：``<content>`` 内文本剥 opencode 自加的 ``N:`` 行号前缀 + 尾部
+        ``(End of file - total N lines)`` marker → 干净的文件原文
+      - 解析失败（XML 不合法 / 缺关键字段）→ 返回 ``None``，caller 决定降级策略
+
+    返回 dict 形如::
+
+        {"type": "directory", "path": "/abs", "entries": ["a", "b"]}
+        {"type": "file", "path": "/abs/f", "content": "<干净的文件原文>"}
     """
     try:
         root = ET.fromstring(text)
     except ET.ParseError:
-        # 退化：正则提取 ``<entries>...</entries>`` 内容（容错：opencode 加包装层时）
-        m = re.search(r"<entries>(.*?)</entries>", text, re.DOTALL)
-        if m is None:
+        # 退化路径：正则提取关键节点内容（容错：opencode 加包装层时 ElementTree 拒解析）
+        m_type = re.search(r"<type>(\w+)</type>", text)
+        if m_type is None:
             return None
-        body = m.group(1)
-    else:
-        # ElementTree 把 ``<entries>`` 内的纯文本当作 root.text / tail；
-        # opencode 的 entries 是 ``\n`` 分隔的纯文本，不是子标签。
-        entries_elem = root.find("entries")
-        if entries_elem is not None:
-            body = entries_elem.text or ""
-        else:
-            body = root.text or ""
+        vtype = m_type.group(1)
+        m_path = re.search(r"<path>(.*?)</path>", text, re.DOTALL)
+        path = m_path.group(1).strip() if m_path else ""
+        if vtype == "directory":
+            m = re.search(r"<entries>(.*?)</entries>", text, re.DOTALL)
+            if m is None:
+                return None
+            entries = _parse_opencode_dir_entries_body(m.group(1))
+            return {"type": "directory", "path": path, "entries": entries}
+        if vtype == "file":
+            m = re.search(r"<content>(.*?)</content>", text, re.DOTALL)
+            if m is None:
+                return None
+            content = _strip_opencode_file_content(m.group(1))
+            return {"type": "file", "path": path, "content": content}
+        return None
 
-    # 解析行：去空白 + 去 ``(... entries)`` 尾注（opencode 自动生成）。
+    # ElementTree 路径（正常 envelope）
+    vtype_elem = root.find("type")
+    path_elem = root.find("path")
+    vtype = vtype_elem.text.strip() if vtype_elem is not None and vtype_elem.text else ""
+    path = path_elem.text.strip() if path_elem is not None and path_elem.text else ""
+
+    if vtype == "directory":
+        entries_elem = root.find("entries")
+        body = entries_elem.text or "" if entries_elem is not None else ""
+        entries = _parse_opencode_dir_entries_body(body)
+        return {"type": "directory", "path": path, "entries": entries}
+    if vtype == "file":
+        content_elem = root.find("content")
+        body = content_elem.text or "" if content_elem is not None else ""
+        content = _strip_opencode_file_content(body)
+        return {"type": "file", "path": path, "content": content}
+    return None
+
+
+def _parse_opencode_dir_entries_body(body: str) -> list[str]:
+    """``<entries>`` 节点内文本 → entries 列表。
+
+    去空白行 + 剥 ``(... entries)`` 尾注（opencode 自动生成）。
+    """
     raw_lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
     entries: list[str] = []
     for ln in raw_lines:
@@ -320,6 +407,49 @@ def _parse_opencode_dir_entries(text: str) -> list[str] | None:
             continue
         entries.append(ln)
     return entries
+
+
+# opencode ``read`` 文件 ``<content>`` 内每行 ``N: `` 前缀（N 是 1-based 行号）。
+_OPENCODE_LINE_PREFIX_RE = re.compile(r"^\s*(\d+):\s?")
+
+# opencode ``read`` 文件尾部 marker ``(End of file - total N lines)``。
+_OPENCODE_EOF_MARKER_RE = re.compile(r"^\(End of file[^)]*\)\s*$")
+
+
+def _strip_opencode_file_content(body: str) -> str:
+    """``<content>`` 节点内文本 → 干净的文件原文。
+
+    剥三层 opencode 自加修饰：
+      1. envelope 起手换行（``<content>\\n<file line 1>``）
+      2. 每行行首的 ``N: `` 行号前缀（``1: foo`` → ``foo``；空行可能无前缀，保留）
+      3. 尾部 ``(End of file - total N lines)`` marker + envelope 收尾换行
+
+    用 ``split("\\n")`` 而非 ``splitlines()``：前者保留末尾空字符串，能精确表达
+    "文件最后一行是空行"的语义（opencode marker 之前的最后一个空行属于文件原内容）。
+    """
+    lines = body.split("\n")
+    # 1) 剥 envelope 起手换行（``<content>\\n<file line 1>``，body 必以 ``""`` 起）
+    if lines and lines[0] == "":
+        lines.pop(0)
+
+    # 2/3) 剥 ``N: `` 行号前缀 + EOF marker
+    out_lines: list[str] = []
+    for ln in lines:
+        if _OPENCODE_EOF_MARKER_RE.match(ln):
+            continue
+        m = _OPENCODE_LINE_PREFIX_RE.match(ln)
+        if m:
+            out_lines.append(ln[m.end():])
+        else:
+            out_lines.append(ln)
+
+    # 剥 envelope 收尾换行（``<last line>\\n</content>`` 产生末尾**一个**空字符串）。
+    # 注意：只剥一次——文件末行若本身是空行（如 opencode 的 ``7: `` 行），其语义
+    # 必须保留；多剥会丢行数。
+    if out_lines and out_lines[-1] == "":
+        out_lines.pop()
+
+    return "\n".join(out_lines)
 
 
 def _parse_path_list(result: str | None) -> list[str]:
