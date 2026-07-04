@@ -679,7 +679,7 @@ class OrcaApp(App):
                 node, status="failed", error_msg=msg,
             )
 
-        # agent_usage → 收敛到 Header footer（spec §6.2）
+        # agent_usage → 收敛到 Header footer（spec §6.2）+ DAG 节点投影（spec §4.4 <tok>）
         if etype == "agent_usage" and node:
             in_tok = int(data.get("input_tokens", 0))
             out_tok = int(data.get("output_tokens", 0))
@@ -691,6 +691,12 @@ class OrcaApp(App):
                     name=node, tokens=in_tok + out_tok, cost_usd=cost,
                 )
                 self._per_node_last_usage_seq[node] = event.seq
+                # spec §4.4 <tok> 字段：与 Header footer 同源同步（同一 agent_usage event
+                # 投影到 DAG NodeProjection.tokens）。GAP-A 修复：原仅投 Header，DAG 行 3
+                # 永远显 "-- tok"；此处补投影使行 3 显实际数字。
+                self.query_one(DagGraph).update_node_projection(
+                    node, tokens=in_tok + out_tok,
+                )
             self._refresh_header()
 
         # ── 第 2 段：node 生命周期 → DAG 图标 + auto-follow ────────────────

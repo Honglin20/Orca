@@ -43,6 +43,9 @@ logger = logging.getLogger(__name__)
 _DETAIL_LINE_CAP = 200
 # 摘要行 / 标题最大字符数（spec §5.4 字段级定义里 ``data.text[:50]`` 等）
 _TITLE_LIMIT = 50
+# spec §5.4 GAP-B/C：tool_call cache 上限（防止长跑 workflow 无限增长）。
+# 取 LRU 语义：超限时按 FIFO 丢最旧（dict 保插入序，pop(next(iter)) 即最旧）。
+_TOOL_CALL_CACHE_CAP = 500
 
 
 @dataclass
@@ -78,6 +81,22 @@ def _truncate(s: Any, limit: int = _TITLE_LIMIT) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1] + "…"
+
+
+def _format_elapsed_sec(elapsed: float) -> str:
+    """秒数格式化（``0.8s`` / ``12s`` / ``1m30s``）—— tool_result meta 用。
+
+    与 ``_dag_render.format_elapsed`` 同语义但精度更细（tool_result 普遍 < 1s，
+    需保留 1 位小数；node elapsed 普遍整秒）。
+    """
+    if elapsed < 0:
+        return "0s"
+    if elapsed < 60:
+        # < 10s 显 1 位小数（0.8s）；否则整数（避免 12.345s 噪音）
+        return f"{elapsed:.1f}s" if elapsed < 10 else f"{elapsed:.0f}s"
+    minutes = int(elapsed // 60)
+    secs = elapsed - minutes * 60
+    return f"{minutes}m{secs:.0f}s"
 
 
 def _arg_title(tool: str, args: Any) -> str:
@@ -230,7 +249,14 @@ def _build_summary_line(event_type: str, data: dict) -> str:
 
 
 def _build_meta_line(event_type: str, data: dict) -> str:
-    """spec §5.4 meta source 列：每事件第 2 行元信息（可空）。"""
+    """spec §5.4 meta source 列：每事件第 2 行元信息（可空）。
+
+    spec v1.1.1 GAP-C 修订：tool_result meta 主路径为 ``<N> lines · <elapsed>s``。
+    ``elapsed`` 从 ``agent_tool_call.timestamp`` + ``agent_tool_result.timestamp``
+    派生（顶层 Event 字段，spec §3）。``exit_code`` 是 canonical Event 不支持字段
+    （spec §11 裁决 12.8 不动 schema），故主路径不显示；若未来 translator 补了
+    exit_code（如 codex shell tool），则追加 ``· exit <code>``。
+    """
     if event_type == "agent_tool_call":
         return "running..."
     if event_type == "agent_tool_result":
@@ -239,10 +265,10 @@ def _build_meta_line(event_type: str, data: dict) -> str:
         exit_code = data.get("exit_code")
         elapsed = data.get("elapsed")
         parts = [f"{lines} lines"]
+        if elapsed is not None:
+            parts.append(f"{_format_elapsed_sec(elapsed)}")
         if exit_code is not None:
             parts.append(f"exit {exit_code}")
-        if elapsed is not None:
-            parts.append(f"{elapsed}s")
         return " · ".join(parts)
     if event_type == "agent_message":
         text = data.get("text", "")
@@ -429,6 +455,11 @@ class ActivityStream(Static):
         # 内部 RichLog 实例（compose 后挂载）
         self._log: RichLog | None = None
         self._detail_view: Static | None = None
+        # spec §5.4 GAP-B/C：tool_call_id → (tool, args, call_timestamp) cache。
+        # agent_tool_call 到达时填；agent_tool_result 到达时反查（派生 tool name + args +
+        # elapsed）。reducer 派生 fold（重放同 tape 必产相同 cache，因依据仅 Event 字段）。
+        # 大 workflow 上限保护：仅保留最近 _TOOL_CALL_CACHE_CAP 条（避免无限增长）。
+        self._tool_call_cache: dict[str, tuple[str, dict, float]] = {}
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -466,9 +497,47 @@ class ActivityStream(Static):
         node: str | None = None,
         timestamp: float | None = None,
     ) -> None:
-        """追加一条事件（spec §5）。``hide_main`` / ``hide_all`` 不进 Stream。"""
+        """追加一条事件（spec §5）。``hide_main`` / ``hide_all`` 不进 Stream。
+
+        spec §5.4 GAP-B/C：``agent_tool_call`` 填 tool_call_id cache；
+        ``agent_tool_result`` 反查 cache 派生 (tool, args, elapsed)——canonical
+        Event 的 result data 仅含 ``{tool_call_id, result}``，tool/args 必须从
+        同 tool_call_id 的 call event 反查（spec §5.4 "与 call 同 entry，meta 升级"）。
+        """
+        # 派生 fold：维护 cache（agent_tool_call 填）+ 反查（agent_tool_result 用）。
+        # 仅依赖 Event 字段（tool_call_id / tool / args / timestamp），重放同 tape
+        # 必产相同 cache 内容（fold 性质）。
+        ts = timestamp if timestamp is not None else time.time()
+        enriched_data = data
+        if event_type == "agent_tool_call":
+            tcid = data.get("tool_call_id")
+            if tcid:
+                self._tool_call_cache[tcid] = (
+                    str(data.get("tool", "")),
+                    data.get("args", {}) or {},
+                    ts,
+                )
+                # LRU 上限保护：超 cap 丢最旧（dict 保插入序）。
+                if len(self._tool_call_cache) > _TOOL_CALL_CACHE_CAP:
+                    self._tool_call_cache.pop(next(iter(self._tool_call_cache)), None)
+        elif event_type == "agent_tool_result":
+            tcid = data.get("tool_call_id")
+            cached = self._tool_call_cache.get(tcid) if tcid else None
+            if cached is not None:
+                cached_tool, cached_args, call_ts = cached
+                # 派生 elapsed（GAP-C）：result.timestamp - call.timestamp（顶层 Event 字段）。
+                elapsed = max(0.0, ts - call_ts)
+                # 仅当 result data 未自带 tool/args/elapsed 时填（防御：translator 未来
+                # 若直接在 result.data 里补，则尊重 translator；当前 canonical 都没补）。
+                enriched_data = {
+                    **data,
+                    "tool": data.get("tool", cached_tool),
+                    "args": data.get("args", cached_args),
+                    "elapsed": data.get("elapsed", elapsed),
+                }
+
         entry = build_entry(
-            seq, event_type, data,
+            seq, event_type, enriched_data,
             node=node, timestamp=timestamp, executor=self._executor,
         )
         if entry is None:

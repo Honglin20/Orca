@@ -85,6 +85,8 @@ class DagGraph(Static):
         # spec v1.1 §4.4：3 行盒子投影（iter/elapsed/tokens/error/fan_in）。
         self._node_projections: dict[str, NodeProjection] = {}
         self._selected: str | None = None
+        # spec GAP-E：self-loop 节点集合（loop workflow 重入用，build_from_workflow 时填）。
+        self._self_loop_nodes: set[str] = set()
         # 可替换布局策略（OCP）：默认 LayeredDagLayout，overflow 切 CompactOutlineLayout。
         self._layout: DagLayout = LayeredDagLayout()
         self._fallback: DagLayout = CompactOutlineLayout()
@@ -139,10 +141,18 @@ class DagGraph(Static):
 
         edges: list[Edge] = []
         node_list = [n for n in node_names if n not in group_names]
+        # spec GAP-E：self-loop（node → node，如 demo_loop 的 counter → counter）合法
+        # （loop workflow 用 routes 自指表达重入）。检测时排除 self-loop（不算环）；
+        # 拓扑里也不画回到自身的边线（视觉混乱），改用 iter N 标注重入次数。
+        self._self_loop_nodes: set[str] = set()
         # 顶层 node routes。
         for src, targets in (routes or {}).items():
             for tgt in targets:
                 if not tgt or tgt == "$end":
+                    continue
+                if src == tgt:
+                    # self-loop：记标记，不进 edges（避免 detect_cycle 误报 + fan_in 自增）。
+                    self._self_loop_nodes.add(src)
                     continue
                 edges.append(Edge(src=src, dst=tgt, kind=EDGE_ROUTE))
         # parallel 组 fanout + merge。
@@ -164,6 +174,7 @@ class DagGraph(Static):
             parallel_groups=groups,
         )
         # 构造期做一次环检测（fail loud；手工拼的 Topology 不经 build_topology，故在此复检）。
+        # 注：self-loop 已在 edges 构造时跳过，故此处不会误报 counter → counter。
         self._assert_acyclic(self._topo)
         # spec v1.1 §4.5 O2=a：fan_in_total = 静态拓扑入边数（含 parallel merge 边）。
         indeg: dict[str, int] = {n: 0 for n in self._topo.nodes}

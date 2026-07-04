@@ -16,6 +16,7 @@ spec v1.1 acceptance criteria：
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from textual.app import App, ComposeResult
@@ -517,3 +518,368 @@ class TestIterVsSelectedNodeSeparation:
         selected_1 = None  # 重启清零
         selected_2 = None  # 再次重启也清零
         assert selected_1 == selected_2  # 不像 iter 那样从事件重建
+
+
+# ── §4.4 / §5.4 真用户验证 GAP-A/B/C/E 收口（v1.1.1）─────────────────────────
+
+
+class TestGapADagTokensProjection:
+    """GAP-A：app.py agent_usage → 同步 DagGraph.update_node_projection(tokens=...)。
+
+    spec §4.4 acceptance：DAG 行 3 显实际 token 数（取该 session_id 最后一条
+    agent_usage.data.input_tokens + output_tokens），不应显 ``-- tok``。
+    """
+
+    def test_agent_usage_updates_dag_projection(self):
+        """agent_usage event 同步投 Header footer + DagGraph NodeProjection.tokens。"""
+        from orca.iface.cli.app import OrcaApp
+        from orca.iface.cli.widgets.dag_graph import DagGraph
+        from orca.schema.event import Event
+        from orca.schema.workflow import AgentNode, Route, Workflow
+
+        wf = Workflow(
+            name="t", entry="analyzer",
+            nodes=[AgentNode(name="analyzer", executor="opencode"),
+                   AgentNode(name="configurator", executor="opencode")],
+            parallel=[],
+        )
+        for n in wf.nodes:
+            n.routes = [Route(to="$end")]
+
+        app = OrcaApp(wf=wf, tape_path=Path("/tmp/_gap_a.jsonl"))
+        app.kickoff = lambda: None  # type: ignore[assignment]
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                # 1. node_started：analyzer 启动
+                app._dispatch_to_widgets(Event(
+                    seq=1, type="node_started", timestamp=1.0,
+                    node="analyzer", session_id="s1",
+                    data={"executor": "opencode", "kind": "agent"},
+                ))
+                # 2. agent_usage：input=102 + output=367 = 469 tok
+                app._dispatch_to_widgets(Event(
+                    seq=2, type="agent_usage", timestamp=2.0,
+                    node="analyzer", session_id="s1",
+                    data={"input_tokens": 102, "output_tokens": 367,
+                          "cache_tokens": 13440, "cost_usd": 0.0001},
+                ))
+                await pilot.pause()
+                graph = app.query_one(DagGraph)
+                proj = graph.projection_of("analyzer")
+                assert proj is not None
+                # GAP-A：tokens 必须被投影（不是 None）
+                assert proj.tokens == 469
+                # Header footer 也同步（DRY 检查）
+                assert app._per_node_usage["analyzer"].tokens == 469
+        run_async(scenario())
+
+    def test_multiple_usage_last_seq_wins(self):
+        """spec §4.4 acceptance：取最后一条 agent_usage（累积值覆盖）。"""
+        from orca.iface.cli.app import OrcaApp
+        from orca.iface.cli.widgets.dag_graph import DagGraph
+        from orca.schema.event import Event
+        from orca.schema.workflow import AgentNode, Route, Workflow
+
+        wf = Workflow(
+            name="t", entry="a",
+            nodes=[AgentNode(name="a", executor="opencode")],
+            parallel=[],
+        )
+        wf.nodes[0].routes = [Route(to="$end")]
+
+        app = OrcaApp(wf=wf, tape_path=Path("/tmp/_gap_a2.jsonl"))
+        app.kickoff = lambda: None  # type: ignore[assignment]
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                app._dispatch_to_widgets(Event(
+                    seq=1, type="node_started", timestamp=1.0,
+                    node="a", session_id="s1",
+                    data={"executor": "opencode", "kind": "agent"},
+                ))
+                # 第一条 usage
+                app._dispatch_to_widgets(Event(
+                    seq=2, type="agent_usage", timestamp=2.0,
+                    node="a", session_id="s1",
+                    data={"input_tokens": 100, "output_tokens": 50,
+                          "cost_usd": 0.0},
+                ))
+                # 第二条 usage（覆盖）
+                app._dispatch_to_widgets(Event(
+                    seq=3, type="agent_usage", timestamp=3.0,
+                    node="a", session_id="s1",
+                    data={"input_tokens": 200, "output_tokens": 100,
+                          "cost_usd": 0.0},
+                ))
+                await pilot.pause()
+                proj = app.query_one(DagGraph).projection_of("a")
+                # 取最后一条（累积覆盖）
+                assert proj.tokens == 300
+        run_async(scenario())
+
+
+class TestGapBToolResultSummaryFromCache:
+    """GAP-B：tool_result summary 显 tool name + args（从 tool_call_id cache 反查）。
+
+    spec §5.4 acceptance：60 个 tool_result entry summary 显 ``glob **/*.py`` 等，
+    不显 ``? {}``。canonical Event 的 result.data 仅含 ``{tool_call_id, result}``。
+    """
+
+    def test_tool_result_uses_call_cache_for_summary(self):
+        """agent_tool_result 反查 call cache 拿 tool + args。"""
+        stream = ActivityStream()
+
+        async def scenario():
+            async with _Harness(stream).run_test() as pilot:
+                # 1. agent_tool_call：填 cache
+                stream.append_event(
+                    1, "agent_tool_call",
+                    {"tool": "glob",
+                     "args": {"pattern": "**/*.py", "path": "/tmp/proj"},
+                     "tool_call_id": "call_00_X"},
+                    node="analyzer", timestamp=100.0,
+                )
+                # 2. agent_tool_result：canonical data 仅 {tool_call_id, result}
+                stream.append_event(
+                    2, "agent_tool_result",
+                    {"tool_call_id": "call_00_X",
+                     "result": "/tmp/proj/a.py\n/tmp/proj/b.py"},
+                    node="analyzer", timestamp=100.5,
+                )
+                await pilot.pause()
+                entries = stream.entries
+                # 找 tool_result entry
+                result_entry = next(
+                    (e for e in entries if e.event_type == "agent_tool_result"), None,
+                )
+                assert result_entry is not None
+                # GAP-B：summary 含 tool name + 主要参数（不应是 "?  {}"）
+                assert "glob" in result_entry.summary_line
+                assert "**/*.py" in result_entry.summary_line
+                assert "?" not in result_entry.summary_line
+        run_async(scenario())
+
+    def test_tool_result_meta_includes_elapsed(self):
+        """GAP-C：meta 含 ``· <elapsed>s``（从 call/result timestamp 派生）。"""
+        stream = ActivityStream()
+
+        async def scenario():
+            async with _Harness(stream).run_test() as pilot:
+                stream.append_event(
+                    1, "agent_tool_call",
+                    {"tool": "bash", "args": {"command": "python -c '1+1'"},
+                     "tool_call_id": "call_bash_1"},
+                    node="runner", timestamp=200.0,
+                )
+                stream.append_event(
+                    2, "agent_tool_result",
+                    {"tool_call_id": "call_bash_1", "result": "ok\nline2\nline3"},
+                    node="runner", timestamp=200.8,  # 0.8s 后
+                )
+                await pilot.pause()
+                result_entry = next(
+                    (e for e in stream.entries if e.event_type == "agent_tool_result"),
+                    None,
+                )
+                assert result_entry is not None
+                meta = result_entry.meta_line
+                # GAP-C：含 elapsed（0.8s）；不含 exit（canonical 不支持）
+                assert "lines" in meta
+                assert "0.8s" in meta
+                # exit_code 缺失 → 不显 "exit"
+                assert "exit" not in meta
+        run_async(scenario())
+
+    def test_tool_result_meta_shows_exit_if_translator_provided(self):
+        """forward-compat：若 translator 补了 exit_code（未来），meta 追加 ``· exit N``。"""
+        stream = ActivityStream()
+
+        async def scenario():
+            async with _Harness(stream).run_test() as pilot:
+                stream.append_event(
+                    1, "agent_tool_call",
+                    {"tool": "bash", "args": {"command": "false"},
+                     "tool_call_id": "call_bash_2"},
+                    node="runner", timestamp=300.0,
+                )
+                # 假设 translator 补了 exit_code=1 + elapsed（虽然当前 canonical 没有）
+                stream.append_event(
+                    2, "agent_tool_result",
+                    {"tool_call_id": "call_bash_2", "result": "",
+                     "exit_code": 1, "elapsed": 1.5},
+                    node="runner", timestamp=301.5,
+                )
+                await pilot.pause()
+                result_entry = next(
+                    (e for e in stream.entries if e.event_type == "agent_tool_result"),
+                    None,
+                )
+                meta = result_entry.meta_line
+                assert "1.5s" in meta
+                assert "exit 1" in meta
+        run_async(scenario())
+
+    def test_tool_call_id_cache_lru_cap(self):
+        """cache 有上限（防止长跑 workflow 无限增长）。"""
+        from orca.iface.cli.widgets.activity_stream import _TOOL_CALL_CACHE_CAP
+        stream = ActivityStream()
+
+        async def scenario():
+            async with _Harness(stream).run_test() as pilot:
+                # 填超 cap 条
+                for i in range(_TOOL_CALL_CACHE_CAP + 10):
+                    stream.append_event(
+                        i + 1, "agent_tool_call",
+                        {"tool": "read", "args": {"filePath": f"/tmp/{i}.py"},
+                         "tool_call_id": f"call_{i}"},
+                        node="a", timestamp=float(i),
+                    )
+                await pilot.pause()
+                assert len(stream._tool_call_cache) <= _TOOL_CALL_CACHE_CAP
+        run_async(scenario())
+
+    def test_replay_rebuilds_same_cache(self):
+        """cache 是 fold（重放同 tape 必产相同内容）。"""
+        def replay():
+            stream = ActivityStream()
+
+            async def scenario():
+                async with _Harness(stream).run_test() as pilot:
+                    stream.append_event(
+                        1, "agent_tool_call",
+                        {"tool": "glob", "args": {"pattern": "**/*.py"},
+                         "tool_call_id": "call_x"},
+                        node="a", timestamp=1.0,
+                    )
+                    stream.append_event(
+                        2, "agent_tool_result",
+                        {"tool_call_id": "call_x", "result": "a.py"},
+                        node="a", timestamp=1.5,
+                    )
+                    await pilot.pause()
+                return stream
+            return run_async(scenario())
+
+        s1 = replay()
+        s2 = replay()
+        # 同 tape 重放：cache 内容一致（fold 性质）
+        assert s1._tool_call_cache == s2._tool_call_cache
+        # 且 result entry summary 一致
+        r1 = next(e for e in s1.entries if e.event_type == "agent_tool_result")
+        r2 = next(e for e in s2.entries if e.event_type == "agent_tool_result")
+        assert r1.summary_line == r2.summary_line
+        assert r1.meta_line == r2.meta_line
+
+
+class TestGapESelfLoopWorkflow:
+    """GAP-E：build_from_workflow 允许 self-loop（loop workflow 重入语义）。
+
+    spec §4.4.1 acceptance：重放 demo_loop tape（counter → counter）→ 该节点
+    iter N 与 node_started 次数一致；DagGraph 不抛 CycleDetected。
+    """
+
+    def test_build_from_workflow_allows_self_loop(self):
+        """counter → counter self-loop 不抛 CycleDetected。"""
+        graph = DagGraph()
+
+        async def scenario():
+            async with _Harness(graph).run_test() as pilot:
+                # demo_loop 拓扑：counter → counter / counter → done / done → $end
+                graph.build_from_workflow(
+                    ["counter", "done"], None,
+                    {"counter": ["done", "counter"], "done": ["$end"]},
+                )
+                await pilot.pause()
+                # 不抛异常即通过；自循环节点标记了
+                assert "counter" in graph._self_loop_nodes
+                # done 不是 self-loop
+                assert "done" not in graph._self_loop_nodes
+        run_async(scenario())
+
+    def test_self_loop_excluded_from_fan_in(self):
+        """self-loop 不算 fan_in（counter 的 fan_in_total = 0）。"""
+        graph = DagGraph()
+
+        async def scenario():
+            async with _Harness(graph).run_test() as pilot:
+                graph.build_from_workflow(
+                    ["counter", "done"], None,
+                    {"counter": ["done", "counter"], "done": ["$end"]},
+                )
+                await pilot.pause()
+                proj = graph.projection_of("counter")
+                assert proj is not None
+                # self-loop 不算入边
+                assert proj.fan_in_total == 0
+                # done 的 fan_in_total = 1（counter → done）
+                proj_done = graph.projection_of("done")
+                assert proj_done.fan_in_total == 1
+        run_async(scenario())
+
+    def test_multi_node_cycle_still_raises(self):
+        """多节点环（A→B→A）仍 fail loud（spec §11 风险表）。"""
+        from orca.iface.cli.widgets.dag_layout import CycleDetected
+        graph = DagGraph()
+
+        async def scenario():
+            async with _Harness(graph).run_test() as pilot:
+                with pytest.raises(CycleDetected):
+                    graph.build_from_workflow(
+                        ["a", "b"], None,
+                        {"a": ["b"], "b": ["a"]},  # a→b→a 真环
+                    )
+        run_async(scenario())
+
+    def test_loop_workflow_iter_matches_node_started_count(self):
+        """spec §4.4.1 acceptance：loop tape 重放，counter iter N == node_started 次数。
+
+        模拟 demo_loop tape：counter node_started × 3（不同 session_id）→ iter=3。
+        """
+        from orca.iface.cli.app import OrcaApp
+        from orca.iface.cli.widgets.dag_graph import DagGraph
+        from orca.schema.event import Event
+        from orca.schema.workflow import Route, ScriptNode, SetNode, Workflow
+
+        wf = Workflow(
+            name="demo_loop", entry="counter",
+            nodes=[SetNode(name="counter", values={"n": "0"}),
+                   ScriptNode(name="done", command="echo done")],
+            parallel=[],
+        )
+        wf.nodes[0].routes = [
+            Route(to="done", when="output.n | int >= 3"),
+            Route(to="counter"),
+        ]
+        wf.nodes[1].routes = [Route(to="$end")]
+
+        app = OrcaApp(wf=wf, tape_path=Path("/tmp/_gap_e.jsonl"))
+        app.kickoff = lambda: None  # type: ignore[assignment]
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                # 模拟 demo_loop：counter 跑 3 次（不同 session_id），然后 done 一次
+                for i in range(3):
+                    app._dispatch_to_widgets(Event(
+                        seq=i + 1, type="node_started", timestamp=float(i + 1),
+                        node="counter", session_id=f"sid-{i}",
+                        data={"executor": "opencode", "kind": "set"},
+                    ))
+                    app._dispatch_to_widgets(Event(
+                        seq=i + 10, type="node_completed", timestamp=float(i + 11),
+                        node="counter", session_id=f"sid-{i}",
+                        data={"elapsed": float(i + 1), "output": {"n": i + 1}},
+                    ))
+                # done 一次
+                app._dispatch_to_widgets(Event(
+                    seq=99, type="node_started", timestamp=100.0,
+                    node="done", session_id="sid-done",
+                    data={"executor": "opencode", "kind": "script"},
+                ))
+                await pilot.pause()
+                graph = app.query_one(DagGraph)
+                proj = graph.projection_of("counter")
+                assert proj is not None
+                # iter N == node_started 次数（3）
+                assert proj.iter_n == 3
+        run_async(scenario())
