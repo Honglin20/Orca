@@ -7,7 +7,7 @@
 
 ## 当前状态：phase-15 render layer v1（TUI 端）完成；无进行中任务
 
-**phase-15 render layer v1 e2e gaps 闭环完成**（commit 见 CHANGELOG）
+**phase-15 render layer v1 e2e gaps 闭环完成**（commit `900fcfd`）
 - GAP#1（P1）：opencode `read` **文件** XML envelope 未解析（与目录同形）→ 抽统一
   `_parse_opencode_xml_envelope` helper（DRY）+ `_strip_opencode_file_content` 剥三层
   修饰（envelope 起手换行 + opencode 自带 `N:` 行号前缀 + EOF marker）+ 仅 `<path>`

@@ -82,7 +82,7 @@ phase-15 v1（commit `ae0126b` + `edd738f`）走 spec → 实现 → 1327 passed
 
 ## Commit
 
-- `fix(render): phase-15 e2e gaps (opencode read file envelope + file_write subtitle)`
+- `900fcfd` —— `fix(render): phase-15 e2e gaps (opencode read file envelope + file_write subtitle)`
 
 ## 非目标（surgical）
 
