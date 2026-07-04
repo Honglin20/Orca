@@ -17,6 +17,10 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-07-04] phase-15 render layer v1（TUI 端）
+实现 render-layer-design-draft §11.1 v1：在 canonical Event 之上加 iface 层纯函数渲染抽象（`normalize_tool` → RenderItem → `render_tool` → Rich renderable）。新增 `orca/schema/render_item.py` + `orca/iface/cli/widgets/tool_render/`（normalize/kinds/registry/reduce，单向依赖 only schema+rich+stdlib）+ `tests/e2e_phase15/_artifacts/render_tool_cases.json` 11 case fixtures + `tests/iface/cli/test_tool_render.py` 32 test（snapshot + fail loud + reducer + claude-code 对齐 acceptance §14.1）。迁移：log_stream 工具事件摘要共享 `describe_tool_event`（DRY，行为不变）；node_detail 流式 tab 工具事件升级为 Rich tool card（opencode read 目录现渲染为 17 条目树，不再 XML 一坨）+ thinking dim+italic 纯文本 + `t` 键切可见性（§12.8）。**1327 passed 0 回归**（baseline 1276）。Web 端 / shiki 流式 / 复制按钮 / codex 显式不做（v1 外）。
+Commit：`ae0126b` + `edd738f`。详见 [release note](releases/2026-07-04-render-layer-v1.md)。
+
 ## [2026-07-03] examples 整理（固化 opencode 后端 + description + render_chart example + 全跑通 e2e）
 13 agent example 固化 `executor: opencode` + `model: "deepseek/deepseek-v4-flash"`（with_ask_user 保留 claude——ask_user 需 mcp_tools=True）；补全 21 example description（TUI 信息明确）；`examples/README.md` 分类（纯 script / agent workflow / claude-only 例外）；新建 render_chart example（**文件夹化 agent** plotter + scripts/chart_demo.py 资源，演示 phase-14 `ORCA_AGENT_RESOURCES` + phase-13 chart 链路）；parallel_research 迁移 phase-14 `agent: <name>` 显式引用（消除旧约定 warn）。**验证**：8 script + 13 agent + render_chart 全跑通（opencode+deepseek-v4-flash **真跑不 mock**）；with_ask_user 例外（claude-only）。tests: test_examples_script + test_examples_opencode。
 Commit：`c5c13b1`。详见 `examples/README.md`。
