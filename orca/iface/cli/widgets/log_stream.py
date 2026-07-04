@@ -7,6 +7,8 @@
   - **壳无真相**：widget 只渲染注入的事件描述，不订阅 bus、不存业务状态。
   - **格式可测**：``format_event`` 是纯函数，单测直接断言格式（SPEC §6.5）。
   - **session 截短**：完整 session_id 太长（uuid），取前 8 字符显示（仿 agent view）。
+  - **工具事件共享摘要**（render-layer §7.3）：``agent_tool_call`` / ``agent_tool_result``
+    的单行摘要由 ``tool_render.describe_tool_event`` 生成（与 node_detail 同源，反 DRY）。
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ import time
 from typing import Any
 
 from textual.widgets import RichLog
+
+from orca.iface.cli.widgets.tool_render import describe_tool_event
 
 # 日志行里 session_id 的显示长度（uuid4 hex 截前 8 字符，足够区分且省空间）。
 _SESSION_DISPLAY_LEN = 8
@@ -67,12 +71,10 @@ def _describe(event_type: str, data: dict[str, Any]) -> str:
     if event_type == "agent_thinking":
         return f"(thinking) {_truncate(data.get('text', ''))}"
     if event_type == "agent_tool_call":
-        tool = data.get("tool", "?")
-        args = data.get("args", {})
-        return f"tool: {tool}({_truncate(args)})"
+        # render-layer §7.3：工具事件摘要共享（与 node_detail 同源函数，反 DRY）。
+        return describe_tool_event(event_type, data, detail="log")
     if event_type == "agent_tool_result":
-        result = data.get("result", "")
-        return f"→ {_truncate(result)}"
+        return describe_tool_event(event_type, data, detail="log")
     if event_type == "agent_usage":
         # token 摘要：in/out/cache + cost（SPEC §3.3 payload）。让用户在 LogStream 直接看消耗，
         # 不必去 tape 翻 jsonl。零值字段也显示（对比 cache hit/miss 更直观）。

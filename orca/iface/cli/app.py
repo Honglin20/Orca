@@ -305,6 +305,8 @@ class OrcaApp(App):
         Binding("c", "focus_charts", "图表 tab"),
         Binding("C", "open_chart_browser", "全屏图表"),
         Binding("slash", "filter_log", "过滤日志"),
+        # phase-15 render layer §12.8：t 切 thinking 可见性（dim+italic 纯文本默认展开）。
+        Binding("t", "toggle_thinking", "切换 thinking"),
     ]
 
     def __init__(
@@ -407,6 +409,13 @@ class OrcaApp(App):
         # run/foreach.py:73）。经 NodeDetail.set_node(name, kind) 透传，驱动 6 kind 派发。
         self._node_kinds: dict[str, str] = {
             n.name: n.kind for n in wf.nodes if n.name
+        }
+        # phase-15 render layer §6.1：node 名 → executor（"claude" / "opencode" / ...）。
+        # normalize_tool 查 ``(executor, tool) → kind`` 表用。仅 agent node 有 executor；
+        # script/set/foreach/wait/terminate 不产 agent_tool_call，executor 占位无影响。
+        self._node_executors: dict[str, str] = {
+            n.name: getattr(n, "executor", "claude") or "claude"
+            for n in wf.nodes if n.name
         }
         # phase-12 SPEC §1.4：临时 UI 交互态（不写 tape、不算业务真相，与 _active_modal 同类）。
         # _auto_follow 默认 True（node_started 自动跟随 running 节点）；j/k 或点选 → False（pin）；
@@ -649,7 +658,10 @@ class OrcaApp(App):
                 session_id=event.session_id, timestamp=event.timestamp,
             )
             if node:
-                self.query_one(NodeDetail).append_event_stream(node, etype, data)
+                # phase-15 render layer §6.1：透传 executor（normalize_tool 查 §6.1 表用）。
+                nd = self.query_one(NodeDetail)
+                nd.set_executor(self._node_executors.get(node, "claude"))
+                nd.append_event_stream(node, etype, data)
 
         # foreach / wait 流式事件 → NodeDetail 流式 tab（SPEC §1.3 表）
         elif etype in (
@@ -899,6 +911,19 @@ class OrcaApp(App):
         log = self.query_one(LogStream)
         self.set_focus(log)
         log.write("(/ 过滤：输入后回车；当前实现为占位，过滤逻辑留后续)")
+
+    def action_toggle_thinking(self) -> None:
+        """``t`` 键：切换 thinking 可见性（phase-15 render layer §12.8）。
+
+        spec §12.8：thinking 默认展开（dim+italic 纯文本），``t`` 切全局可见性。
+        切换后立即重渲 NodeDetail 流式 tab + notify 用户当前状态。
+        """
+        nd = self.query_one(NodeDetail)
+        visible = nd.toggle_thinking()
+        self.notify(
+            f"thinking 已{'显示' if visible else '隐藏'}",
+            severity="information", timeout=2,
+        )
 
     # ── header 刷新（SPEC §4.4）─────────────────────────────────────────
 

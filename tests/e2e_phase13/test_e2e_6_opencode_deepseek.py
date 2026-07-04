@@ -167,7 +167,9 @@ outputs:
             graph.select("runner")
             await pilot.pause(0.2)
             stream_lines = nd._stream_lines.get("runner", [])
-            stream_text = "\n".join(stream_lines)
+            # phase-15 render layer：list 可能含 str / RenderItem / _ThinkingChunk 混合，
+            # 转 str 后 join（既兼容老 str-only，也兼容新混合）。
+            stream_text = "\n".join(str(s) for s in stream_lines)
             # opencode translator 给 agent_message 加 [msg] 前缀（phase-12 §6.3）
             assert "[msg]" in stream_text, (
                 f"验证点 1 失败：TUI 流式 tab 缺 [msg] 行（agent_message 未渲染）；"
