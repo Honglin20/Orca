@@ -7,7 +7,7 @@
 
 ## 当前状态：mxint_analysis 真实 bitx 量化分析迁移完成；无进行中任务
 
-**mxint_analysis 真实 bitx 量化分析迁移完成**（commit `<this commit>`）
+**mxint_analysis 真实 bitx 量化分析迁移完成**（commit `838695f`）
 - 将 `examples/mxint_analysis.yaml` + 5 agent prompts + `tests/e2e_mxint/` 从简化 stub
   迁移到真实 bitx 量化分析（保 opencode+deepseek-v4-flash 后端）
 - target：真实 `ConfigurableMLP`（8970 params，sklearn digits 8x8，~90% eval_acc，
