@@ -10,6 +10,7 @@
 """
 
 from orca.schema.event import Event, EventType
+from orca.schema.render_item import RenderItem, RenderToolKind, ToolStatus
 from orca.schema.state import RunState, Status, UsageSummary
 from orca.schema.workflow import (
     AgentNode,
@@ -45,6 +46,9 @@ __all__ = [
     "ValidatorConfig",
     "Event",
     "EventType",
+    "RenderItem",
+    "RenderToolKind",
+    "ToolStatus",
     "RunState",
     "Status",
     "UsageSummary",
