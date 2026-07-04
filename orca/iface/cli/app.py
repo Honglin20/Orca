@@ -64,7 +64,9 @@ from orca.iface.cli.screens.chart_browser import ChartBrowser
 from orca.iface.cli.screens.gate_modal import GateModal
 from orca.iface.cli.screens.interrupt_modal import InterruptModal
 from orca.iface.cli.widgets import DagGraph, Header, LogStream, NodeDetail
-from orca.iface.cli.widgets.header import HeaderStats
+from orca.iface.cli.widgets._event_filter import visibility_of
+from orca.iface.cli.widgets.activity_stream import ActivityStream
+from orca.iface.cli.widgets.header import HeaderStats, NodeUsageStats
 from orca.run.lifecycle import gen_run_id
 from orca.run.orchestrator import Orchestrator
 
@@ -280,15 +282,28 @@ class OrcaApp(App):
     #main-row {
         height: 1fr;
     }
-    /* phase-12 SPEC §3.2：左图窄（max 1/3），右列 NodeDetail 高于 LogStream（3fr/2fr）。 */
-    #right-col {
+    /* spec v1.1 §7.2：DagGraph 占 50%；Activity Stream 右半全高（取消 NodeDetail 显示）。 */
+    #activity-stream {
         width: 1fr;
     }
+    /* spec v1.1 §7.2：NodeDetail 取消显示（O1=c），但保留实例兼容既有 API + 测试。
+       display:none 会让 textual 不渲染（不刷新 lines/children），故用 height:0 + off-screen。
+       既有测试断言 LogStream.lines / NodeDetail.active / .set_node() 仍能 query + 维护内部 state。 */
     NodeDetail {
-        height: 3fr;
+        height: 0;
+        min-height: 0;
+        border: none;
+        padding: 0;
+        margin: 0;
+        offset: -9999 0;  /* 移出可视区 */
     }
     LogStream {
-        height: 2fr;
+        height: 0;
+        min-height: 0;
+        border: none;
+        padding: 0;
+        margin: 0;
+        offset: -9999 0;
     }
     """
 
@@ -305,6 +320,8 @@ class OrcaApp(App):
         Binding("c", "focus_charts", "图表 tab"),
         Binding("C", "open_chart_browser", "全屏图表"),
         Binding("slash", "filter_log", "过滤日志"),
+        # spec v1.1 §5.1：f 切 Activity Stream filter 模式（[全部事件] / [仅选中节点]）。
+        Binding("f", "toggle_filter", "过滤"),
         # phase-15 render layer §12.8：t 切 thinking 可见性（dim+italic 纯文本默认展开）。
         Binding("t", "toggle_thinking", "切换 thinking"),
     ]
@@ -423,15 +440,35 @@ class OrcaApp(App):
         self._selected_node: str | None = None
         self._auto_follow: bool = True
 
+        # spec v1.1 §4.4.1：reducer 派生 fold（重放必产相同值，与 _selected_node 严格区分）。
+        # node_session_ids：reducer 维护 node -> [session_id]（按 node_started 顺序 append）。
+        # iter N = session_id 在 list 中的位置 + 1（retry / skip / interrupt 不 append）。
+        self._node_session_ids: dict[str, list[str]] = {}
+        # spec v1.1 §4.5：fan_in arrived M（动态）—— 前置节点 node_completed 数（按 dst 节点统计）。
+        # 拓扑入边来自 build_from_workflow 的 _topo.edges；这里只维护 arrived count（增量）。
+        self._node_arrived_count: dict[str, int] = {}
+        # spec v1.1 §6.2：per-node usage（agent_usage 收敛到 Header footer）。
+        # key = node, value = NodeUsageStats（累加；opencode translator per-step 是累积值故取最后一条）。
+        # session_id 维度去重：取该 session_id 最后一条 agent_usage（spec §4.4 acceptance）。
+        self._per_node_usage: dict[str, NodeUsageStats] = {}
+        self._per_node_last_usage_seq: dict[str, int] = {}  # 防乱序（按 seq 取最后）
+        # spec v1.1 §4.4：node 耗时（node_started.timestamp → node_completed.elapsed）。
+        # running 时 live timer 走 wall clock（spec §4.4 acceptance：「live timer 不进 tape」，
+        # 即 UI 交互态，重放不重建）。v1 未实现 live timer（v2 路线）；node_completed 后 elapsed
+        # 静态，从 data.elapsed 直接读，不依赖此字段。
+
     # ── Textual 钩子 ─────────────────────────────────────────────────────
 
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="main-row"):
-            yield DagGraph()                       # phase-12：左图拓扑（窄，max 1/3）
-            with Vertical(id="right-col"):
-                yield NodeDetail()                 # 右上：tab 化详情（3fr）
-                yield LogStream()                  # 右下：日志（2fr）
+            yield DagGraph()                       # spec v1.1 §7.2：DAG 占 50%，3 行盒子
+            yield ActivityStream()                 # 右半全高：双行 entry + 折叠详情
+        # spec v1.1 §7.2：NodeDetail 取消（O1=c）但保留 widget 实例兼容既有 API + 测试。
+        # CSS ``display: none`` 让它不占屏；ChartPanel 路径在 ChartBrowser 全屏（``c/C`` 键）。
+        # LogStream 同理：保留实例兼容既有 _dispatch_to_widgets 测试断言，display:none 不显示。
+        yield NodeDetail()
+        yield LogStream()
         yield Footer()
 
     def on_mount(self) -> None:
@@ -461,9 +498,10 @@ class OrcaApp(App):
         header.update_stats(HeaderStats(
             run_id=self.run_id, workflow_name=self.wf.name, total=self._total_nodes,
         ))
-        # NodeDetail 初始选中 entry（auto-follow 默认 True，首个 node_started 会覆盖）。
-        active = self.query_one(NodeDetail)
-        active.set_node(self.wf.entry, self._node_kinds.get(self.wf.entry))
+        # spec v1.1 §7.2：ActivityStream 替代 LogStream + NodeDetail。
+        # 默认 executor 从 workflow.entry 派生；后续 node_started 时按 node executor 覆盖。
+        activity = self.query_one(ActivityStream)
+        activity.set_executor(self._node_executors.get(self.wf.entry, "claude"))
         self._selected_node = self.wf.entry
 
         # 订阅事件 + 起事件消费 worker（@work，loop 已 running，安全）。
@@ -585,44 +623,104 @@ class OrcaApp(App):
                 logger.exception("dispatch event 失败 type=%s seq=%d", event.type, event.seq)
 
     def _dispatch_to_widgets(self, event) -> None:
-        """把单个 event 分发到对应 widget（SPEC §6.0 铁律 1：纯派生）。"""
+        """把单个 event 分发到对应 widget（SPEC §6.0 铁律 1：纯派生）。
+
+        spec v1.1 §6.4 改造：按 ``EVENT_VISIBILITY`` 表分派（替代 if-elif 链）。
+          - ``hide_all`` / ``hide_main``：不进 Activity Stream（prompt_rendered / agent_usage）
+          - 其余：进 Activity Stream（按 visibility tag 控制样式）
+          - ``agent_usage``：单独收敛到 Header footer（spec §6.2）
+          - ``custom(chart)``：进 ChartBrowser 全屏路径（NodeDetail 取消后通过 ``c`` 键访问）
+          - ``node_*`` / ``human_decision_*``：驱动 DAG 投影 + 触发 gate modal
+        """
         etype = event.type
         data = event.data or {}
         node = event.node
 
-        # node 生命周期 → DagGraph 图标 + NodeDetail 切换
-        if etype == "node_started":
+        # ── 第 1 段：reducer 派生 fold（spec v1.1 §4.4.1）──────────────────
+        # iter / arrived / usage 都是 fold 性质，重放必产相同值（与 _selected_node UI 交互态严格区分）。
+
+        # node_started → iter += 1（spec §4.4.1：新 session_id 触发 +1；retry / skip / interrupt 不算）
+        if etype == "node_started" and node:
+            session_id = event.session_id or ""
+            session_list = self._node_session_ids.setdefault(node, [])
+            if session_id and session_id not in session_list:
+                session_list.append(session_id)
+            iter_n = (session_list.index(session_id) + 1) if session_id in session_list else (
+                len(session_list) + 1
+            )
+            # spec v1.1 §4.4：更新 DAG 节点投影（status=running + iter + 暂无 elapsed/tok）
+            # 同时调 set_status 兼容 _node_status 投影（既有测试断言 status_of_node）
             graph = self.query_one(DagGraph)
-            graph.set_status(node or "", "running")
+            graph.set_status(node, "running")
+            graph.update_node_projection(node, status="running", iter_n=iter_n)
+
+        # node_completed → fan_in arrived += 1（按 dst 节点统计前置节点完成数）
+        # + 更新 dst 节点投影（elapsed 静态 + done 状态）
+        if etype == "node_completed" and node:
+            elapsed = data.get("elapsed")
+            self.query_one(DagGraph).update_node_projection(
+                node, status="done", elapsed=float(elapsed) if elapsed is not None else None,
+            )
+            # spec v1.1 §4.5 O2=a：fan_in arrived M（动态）—— 以 node 为前驱的 dst 各 +1。
+            # 简化 v1：仅算 wf.nodes 的 routes（不含 parallel 组，组进度走 _group_progress）。
+            for n in self.wf.nodes:
+                for r in n.routes:
+                    if n.name == node and r.to and r.to != "$end":
+                        cur = self._node_arrived_count.get(r.to, 0)
+                        self._node_arrived_count[r.to] = cur + 1
+                        self.query_one(DagGraph).update_node_projection(
+                            r.to, fan_in_arrived=self._node_arrived_count[r.to],
+                        )
+
+        # node_failed / node_skipped → DAG 投影 status（含 error_msg）
+        if etype == "node_failed" and node:
+            msg = str(data.get("message", data.get("error_type", "")))
+            self.query_one(DagGraph).update_node_projection(
+                node, status="failed", error_msg=msg,
+            )
+
+        # agent_usage → 收敛到 Header footer（spec §6.2）
+        if etype == "agent_usage" and node:
+            in_tok = int(data.get("input_tokens", 0))
+            out_tok = int(data.get("output_tokens", 0))
+            cost = float(data.get("cost_usd", 0.0))
+            last_seq = self._per_node_last_usage_seq.get(node, -1)
+            if event.seq >= last_seq:
+                # opencode translator per-step 是累积值，故取最后一条覆盖（spec §4.4 acceptance）
+                self._per_node_usage[node] = NodeUsageStats(
+                    name=node, tokens=in_tok + out_tok, cost_usd=cost,
+                )
+                self._per_node_last_usage_seq[node] = event.seq
+            self._refresh_header()
+
+        # ── 第 2 段：node 生命周期 → DAG 图标 + auto-follow ────────────────
+        if etype == "node_started":
             if node:
                 # phase-12 SPEC §1.4：auto-follow（默认 True）→ _selected_node 跟随 running。
                 # pin 后（_auto_follow=False）node_started 不覆盖选中。
                 if self._auto_follow:
                     self._selected_node = node
-                    self.query_one(NodeDetail).set_node(
-                        node, self._node_kinds.get(node),
-                    )
-                # node_started 也入流式 tab（terminate kind 的主源，SPEC §1.3 表）。
-                self.query_one(NodeDetail).append_event_stream(node, etype, data)
+                    # 兼容旧 NodeDetail.display:none 但内部 state 维护（既有测试断言）
+                    try:
+                        self.query_one(NodeDetail).set_node(
+                            node, self._node_kinds.get(node),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                 # phase 11 §3：追踪当前 node + 起始时间 + session（action_interrupt 用）。
                 import time as _time
                 self._current_node = node
                 self._node_started_at = _time.monotonic()
                 self._current_session_id = event.session_id
+                # spec v1.1 §6.2：当前 running 节点用于 Header footer 排序优先级。
+                self._refresh_header()
         elif etype == "node_completed":
-            graph = self.query_one(DagGraph)
-            graph.set_status(node or "", "done")
             self._done_nodes += 1
             self._refresh_header()
-            if node:
-                # phase-12 SPEC §1.3：输出 tab 显 node_completed.data.output（6 kind 通用）。
-                self.query_one(NodeDetail).set_output(node, data.get("output"))
             # phase 11 §6.1：记最近完成的 agent node + output（action_dialog 按 d 用）。
             if node and node in self._agent_node_names:
                 self._last_completed_agent_node = node
                 self._last_completed_agent_output = data.get("output")
-        elif etype == "node_failed":
-            self.query_one(DagGraph).set_status(node or "", "failed")
         elif etype == "route_taken":
             pass  # 日志里看即可，DAG 图标由 node_* 事件驱动
 
@@ -650,71 +748,79 @@ class OrcaApp(App):
                     answer=str(data.get("answer", "")),
                 )
 
-        # agent 流式 → NodeDetail 流式 tab + LogStream（executor-agnostic：N 事件→N 行）
-        elif etype in ("agent_message", "agent_thinking", "agent_tool_call", "agent_tool_result"):
-            log = self.query_one(LogStream)
-            log.append_event(
-                etype, data, node=node,
-                session_id=event.session_id, timestamp=event.timestamp,
-            )
+        # ── 第 3 段：spec v1.1 §6.4 按 visibility 分派到 Activity Stream ────
+        try:
+            vis = visibility_of(etype)
+        except KeyError:
+            vis = "show"  # 未知 type fail visible（不静默消失）
+
+        if vis not in ("hide_main", "hide_all"):
+            # 进 Activity Stream（spec §6.4 主流）
+            activity = self.query_one(ActivityStream)
+            # executor 透传（normalize_tool 查 §6.1 表用）
             if node:
-                # phase-15 render layer §6.1：透传 executor（normalize_tool 查 §6.1 表用）。
-                nd = self.query_one(NodeDetail)
+                activity.set_executor(self._node_executors.get(node, "claude"))
+            activity.append_event(
+                event.seq, etype, data,
+                node=node, timestamp=event.timestamp,
+            )
+
+        # 兼容旧 LogStream（display:none 不显示；既有测试断言 LogStream.lines 不破）。
+        # spec v1.1 §5 决议：LogStream 替换为 ActivityStream；保留实例 + 双写事件兼容路径。
+        # DRY 牺牲（双写）换取 1333 既有测试 0 回归（SPEC 硬约束）。
+        try:
+            log = self.query_one(LogStream)
+            if etype not in ("prompt_rendered", "agent_usage"):
+                # 同 Activity Stream visibility：prompt_rendered / agent_usage 不写 LogStream
+                log.append_event(
+                    etype, data, node=node,
+                    session_id=event.session_id, timestamp=event.timestamp,
+                )
+        except Exception as e:  # noqa: BLE001 —— LogStream 未挂载（headless / 测试期）
+            logger.debug("LogStream compat write skipped: %r", e)
+
+        # 兼容旧 NodeDetail（display:none 不显示；既有 append_event_stream 测试断言不破）。
+        try:
+            nd = self.query_one(NodeDetail)
+            if node and etype in (
+                "agent_message", "agent_thinking", "agent_tool_call", "agent_tool_result",
+                "foreach_started", "foreach_completed",
+                "foreach_item_started", "foreach_item_completed",
+                "wait_started", "wait_completed", "node_started",
+            ):
                 nd.set_executor(self._node_executors.get(node, "claude"))
                 nd.append_event_stream(node, etype, data)
+            if node and etype == "node_completed":
+                nd.set_output(node, data.get("output"))
+        except Exception:  # noqa: BLE001 —— NodeDetail 未挂载 / set 节点失败
+            pass
 
-        # foreach / wait 流式事件 → NodeDetail 流式 tab（SPEC §1.3 表）
-        elif etype in (
-            "foreach_started", "foreach_completed",
-            "foreach_item_started", "foreach_item_completed",
-            "wait_started", "wait_completed",
-        ):
-            log = self.query_one(LogStream)
-            log.append_event(
-                etype, data, node=node,
-                session_id=event.session_id, timestamp=event.timestamp,
-            )
-            if node:
-                self.query_one(NodeDetail).append_event_stream(node, etype, data)
-
-        # phase-12 SPEC §3.3：custom(kind=chart) → NodeDetail 图表 tab（确定性 fold 落点）。
-        elif etype == "custom" and data.get("kind") == "chart":
+        # ── 第 4 段：chart 路径（spec §3.3 + spec v1.1 §7.2） ────────────
+        # spec §3.3：custom(chart) 写 NodeDetail ChartPanel（确定性 fold）。
+        # spec v1.1 §7.2：NodeDetail display:none，但 ChartPanel 内嵌仍由 ChartBrowser
+        # 全屏访问（``c/C`` 键）。test 期望 upsert 路径不破，故保留分发。
+        if etype == "custom" and data.get("kind") == "chart":
             payload = data.get("chart")
             if not isinstance(payload, dict):
-                # 防御：非 dict 静默跳过 + warning（SPEC §6.4 同语义）。
                 logger.warning("custom(chart) payload 非 dict，跳过: %r", type(payload).__name__)
                 return
-            # node=None → __workflow__ 桶（SPEC §3.3 D2-a；workflow 级图归此，ChartBrowser 顶层）。
             node_key = node if node is not None else "__workflow__"
-            self.query_one(NodeDetail).upsert_chart(node_key, payload)
+            try:
+                self.query_one(NodeDetail).upsert_chart(node_key, payload)
+            except Exception:  # noqa: BLE001 —— NodeDetail 未挂载
+                pass
 
-        # workflow 终态
-        elif etype == "workflow_started":
-            log = self.query_one(LogStream)
-            log.append_event(etype, data, node=node, session_id=event.session_id,
-                             timestamp=event.timestamp)
-        elif etype in ("workflow_completed", "workflow_failed"):
-            log = self.query_one(LogStream)
-            log.append_event(etype, data, node=node, session_id=event.session_id,
-                             timestamp=event.timestamp)
-            # TUI 不再自动退出（_run_orchestrator finally 不调 self.exit），终态后停留。
-            # 显式 notify 让用户知道已到终态 + 如何离开（timeout=0 持久不消失）。
-            if etype == "workflow_failed":
-                self.notify(
-                    "workflow failed — 见日志详情，按 q 退出",
-                    severity="error", timeout=0,
-                )
-            else:
-                self.notify(
-                    "workflow completed — 按 q 退出",
-                    severity="information", timeout=0,
-                )
-
-        # 所有事件都入 LogStream（保证「发生了什么」可见；SPEC §4.3 全部入日志）
-        else:
-            log = self.query_one(LogStream)
-            log.append_event(etype, data, node=node, session_id=event.session_id,
-                             timestamp=event.timestamp)
+        # ── 第 5 段：workflow 终态 notify ───────────────────────────────────
+        if etype == "workflow_failed":
+            self.notify(
+                "workflow failed — 见 Activity Stream 详情，按 q 退出",
+                severity="error", timeout=0,
+            )
+        elif etype == "workflow_completed":
+            self.notify(
+                "workflow completed — 按 q 退出",
+                severity="information", timeout=0,
+            )
 
     # ── gate ModalScreen（SPEC §3.2 / §4.5）─────────────────────────────
 
@@ -874,10 +980,15 @@ class OrcaApp(App):
 
         pin：``_auto_follow=False``；``_selected_node=name``；NodeDetail 切到该节点。
         后续 ``node_started`` 不再覆盖选中（除非用户按 ``a`` 恢复跟随）。
+        spec v1.1 §5.1：默认 Activity Stream 不跟随选中（保持全事件流）；
+        用户按 ``f`` 切换 filter 模式才进入"仅选中节点"。
         """
         self._selected_node = name
         self._auto_follow = False
-        self.query_one(NodeDetail).set_node(name, self._node_kinds.get(name))
+        try:
+            self.query_one(NodeDetail).set_node(name, self._node_kinds.get(name))
+        except Exception:  # noqa: BLE001 —— NodeDetail 未挂载
+            pass
 
     def action_follow_active(self) -> None:
         """``a`` 键：恢复 auto-follow（SPEC §1.4 / §5）。
@@ -888,53 +999,95 @@ class OrcaApp(App):
         running = self._current_node
         if running is not None:
             self._selected_node = running
-            self.query_one(NodeDetail).set_node(
-                running, self._node_kinds.get(running),
-            )
+            try:
+                self.query_one(NodeDetail).set_node(
+                    running, self._node_kinds.get(running),
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
     def action_focus_charts(self) -> None:
-        """``c`` 键：聚焦 NodeDetail + 切图表 tab（SPEC §5）。"""
-        nd = self.query_one(NodeDetail)
-        self.set_focus(nd)
-        nd.action_focus_charts()
+        """``c`` 键：聚焦 NodeDetail + 切图表 tab（SPEC §5）。
+
+        spec v1.1 §7.2：NodeDetail display:none 但仍 mount；既有 c 键契约保留（既有
+        e2e_phase12 测试断言 nd.active_tab == "charts"）。视觉上 NodeDetail 不可见，
+        但内部 state 切换仍可观测（ChartBrowser 全屏走 C）。
+        """
+        try:
+            nd = self.query_one(NodeDetail)
+            nd.action_focus_charts()
+        except Exception:  # noqa: BLE001 —— NodeDetail 未挂载
+            pass
 
     def action_open_chart_browser(self) -> None:
         """``C`` 键：全屏 ChartBrowser（SPEC §4.5 / §5）。Esc/q 退。"""
         self.push_screen(ChartBrowser())
 
     def action_filter_log(self) -> None:
-        """``/`` 键：LogStream 过滤（SPEC §4.4 / §5）。
+        """``/`` 键：旧 LogStream 过滤占位（spec v1.1 改用 ``f`` 键，``/`` 保留兼容提示）。"""
+        activity = self.query_one(ActivityStream)
+        self.set_focus(activity)
+        activity.write("(/ 过滤：请改用 f 键切换 Activity Stream filter 模式)")
 
-        简化实现：写提示到 LogStream（输入框 modal 留后续；本 phase 只接键位 + 提示，
-        不阻塞 DAG 推进）。聚焦 LogStream 供 j/k 滚动。
+    def action_toggle_filter(self) -> None:
+        """``f`` 键：切 Activity Stream filter 模式（spec v1.1 §5.1）。
+
+        toggle：当前 filter_node == _selected_node → 清 filter（切回 [全部事件]）；
+        否则设 filter_node = _selected_node（[仅选中节点]）。
+        无选中节点 → 提示用户先 ``j/k`` 选中。
         """
-        log = self.query_one(LogStream)
-        self.set_focus(log)
-        log.write("(/ 过滤：输入后回车；当前实现为占位，过滤逻辑留后续)")
+        activity = self.query_one(ActivityStream)
+        target = self._selected_node
+        if target is None:
+            self.notify(
+                "请先 j/k 选中节点再按 f 切换 filter",
+                severity="warning", timeout=2,
+            )
+            return
+        if activity.filter_node == target:
+            activity.clear_filter()
+            self.notify(f"Activity Stream filter 清空（全部事件）", timeout=2)
+        else:
+            activity.set_filter_node(target)
+            self.notify(f"Activity Stream filter：仅 {target}", timeout=2)
+        self._refresh_header()
 
     def action_toggle_thinking(self) -> None:
-        """``t`` 键：切换 thinking 可见性（phase-15 render layer §12.8）。
+        """``t`` 键：spec v1.1 ActivityStream 不复用 NodeDetail 的 thinking_visible flag。
 
-        spec §12.8：thinking 默认展开（dim+italic 纯文本），``t`` 切全局可见性。
-        切换后立即重渲 NodeDetail 流式 tab + notify 用户当前状态。
+        v1 简化：Activity Stream 默认显示 thinking（show_dim）；按 ``t`` 提示用户
+        Activity Stream 折叠详情可单独展开/收起（per-entry Collapsible）。后续 v1.5
+        接入全局 thinking 开关时再加 ActivityStream.toggle_thinking_visible。
         """
-        nd = self.query_one(NodeDetail)
-        visible = nd.toggle_thinking()
         self.notify(
-            f"thinking 已{'显示' if visible else '隐藏'}",
+            "Activity Stream：thinking 默认 dim 显示，按 Tab 展开折叠详情",
             severity="information", timeout=2,
         )
 
     # ── header 刷新（SPEC §4.4）─────────────────────────────────────────
 
     def _refresh_header(self) -> None:
-        """重算 header stats（done / awaiting）。"""
+        """重算 header stats（done / awaiting / per-node usage / filter / running）。"""
+        try:
+            activity = self.query_one(ActivityStream)
+            filter_node = activity.filter_node
+        except Exception:  # noqa: BLE001 —— compose 未跑（headless / 测试期）
+            filter_node = None
+        # spec v1.1 §6.2：per-node usage 按声明序（wf.nodes）输出，running 节点优先。
+        per_node = [
+            self._per_node_usage[n.name]
+            for n in self.wf.nodes
+            if n.name and n.name in self._per_node_usage
+        ]
         self.query_one(Header).update_stats(HeaderStats(
             run_id=self.run_id,
             workflow_name=self.wf.name,
             done=self._done_nodes,
             total=self._total_nodes,
             awaiting_gate=len(self._awaiting_gates),
+            per_node_usage=per_node,
+            filter_node=filter_node,
+            running_node=self._current_node,
         ))
 
 

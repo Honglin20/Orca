@@ -1,16 +1,17 @@
-"""dag_graph.py —— DAG 拓扑图 widget（phase-12 SPEC §1.1 §4.1 §6.2，替换 dag_tree.py）。
+"""dag_graph.py —— DAG 拓扑图 widget（phase-12 SPEC §1.1 §4.1 §6.2，替换 dag_tree.py；
+tui-redesign v1.1 §4 升级 3 行盒子 + fan-in + after=None section）。
 
-回答「整个 DAG 走到哪了？拓扑长啥样？」：左侧画**带边的拓扑图**（节点=盒子，
-parallel 组画成「扇出→汇聚」），状态烤进节点（图标+颜色），可键盘/鼠标选中。
-宽度收窄到 ~1/4（CSS max-width: 33%）。
+回答「整个 DAG 走到哪了？拓扑长啥样？」：左侧画**带边的拓扑图**（节点=3 行盒子，
+parallel 组画成「扇出→汇聚」），状态烤进节点（图标+iter+耗时/tok），可键盘/鼠标选中。
+宽度占 50%（spec v1.1 §7.2）。
 
 设计原则：
-  - **壳无真相**：widget 只持 ``node->status`` 投影 + 拓扑，由 app ``set_status`` 更新；
-    不订阅 bus、不读 tape、不解析 Event。
+  - **壳无真相**：widget 只持 ``node->NodeProjection`` 投影 + 拓扑，由 app
+    ``update_node_projection`` 更新；不订阅 bus、不读 tape、不解析 Event。
   - **布局可替换（OCP）**：``render()`` 委托 ``DagLayout`` 策略；超 ``cols_budget``
-    → 切 ``CompactOutlineLayout`` fallback（不崩、不溢出）。
-  - **依赖单向**：仅 import textual + stdlib + 本包常量 + ``dag_layout``；**不** import
-    ``orca.exec`` / ``orca.run`` / ``orca.iface.mcp`` / chart-producer（SPEC §0.3）。
+    → 切 ``CompactOutlineLayout`` fallback（不崩、不溢出）；同层并行 ≥ 5 切 outline（spec §4.3）。
+  - **依赖单向**：仅 import textual + stdlib + 本包常量 + ``dag_layout`` + ``_dag_render``；
+    **不** import ``orca.exec`` / ``orca.run`` / ``orca.iface.mcp`` / chart-producer（SPEC §0.3）。
 """
 
 from __future__ import annotations
@@ -20,6 +21,13 @@ from typing import Iterable
 from textual.binding import Binding
 from textual.widgets import Static
 
+from orca.iface.cli.widgets._dag_render import (
+    NodeProjection,
+    render_after_none_section,
+    render_main_branch_nodes,
+    should_fallback_to_outline,
+    split_main_and_after_none,
+)
 from orca.iface.cli.widgets._icons import NODE_STATUS_ICONS
 from orca.iface.cli.widgets.dag_layout import (
     CompactOutlineLayout,
@@ -32,8 +40,8 @@ from orca.iface.cli.widgets.dag_layout import (
     detect_cycle,
 )
 
-# 图表渲染用的列预算（与 CSS ``max-width: 33%`` 对齐，120 列终端约 32~40 列）。
-_COLS_BUDGET = 32
+# 图表渲染用的列预算（spec v1.1 §7.2：DagGraph 占 50%，120 列终端约 50~60 列）。
+_COLS_BUDGET = 50
 
 
 class DagGraph(Static):
@@ -53,9 +61,9 @@ class DagGraph(Static):
 
     DEFAULT_CSS = """
     DagGraph {
-        width: 32;
-        min-width: 24;
-        max-width: 33%;
+        width: 1fr;
+        min-width: 30;
+        max-width: 50%;
         border: round $primary;
         padding: 0 1;
         background: $surface;
@@ -74,6 +82,8 @@ class DagGraph(Static):
         self._node_status: dict[str, str] = {}
         self._group_status: dict[str, str] = {}
         self._group_progress: dict[str, tuple[int, int]] = {}
+        # spec v1.1 §4.4：3 行盒子投影（iter/elapsed/tokens/error/fan_in）。
+        self._node_projections: dict[str, NodeProjection] = {}
         self._selected: str | None = None
         # 可替换布局策略（OCP）：默认 LayeredDagLayout，overflow 切 CompactOutlineLayout。
         self._layout: DagLayout = LayeredDagLayout()
@@ -101,17 +111,22 @@ class DagGraph(Static):
         self._node_status.clear()
         self._group_status.clear()
         self._group_progress.clear()
+        self._node_projections.clear()
         groups = list(parallel_groups or [])
         group_names = {g for g, _ in groups}
         for name in node_names:
             if name in group_names:
                 continue
             self._node_status[name] = "pending"
+            # spec v1.1 §4.4：初始 NodeProjection（status=pending, iter=1, fan_in=0）。
+            # fan_in_total 在下面 edges 构造完后补齐。
+            self._node_projections[name] = NodeProjection(name=name, status="pending")
         for gname, branches in groups:
             self._group_status[gname] = "pending"
             self._group_progress[gname] = (0, len(branches))
             for b in branches:
                 self._node_status[b] = "pending"
+                self._node_projections[b] = NodeProjection(name=b, status="pending")
 
         # 构造 Topology（含环检测）。routes 形如 {node: [targets]}——为复用 build_topology
         # （它从 Workflow 派生），此处直接手工拼 Topology（避免强依赖 Workflow 类型）。
@@ -150,6 +165,14 @@ class DagGraph(Static):
         )
         # 构造期做一次环检测（fail loud；手工拼的 Topology 不经 build_topology，故在此复检）。
         self._assert_acyclic(self._topo)
+        # spec v1.1 §4.5 O2=a：fan_in_total = 静态拓扑入边数（含 parallel merge 边）。
+        indeg: dict[str, int] = {n: 0 for n in self._topo.nodes}
+        for e in self._topo.edges:
+            if e.dst in indeg:
+                indeg[e.dst] += 1
+        for n, total in indeg.items():
+            if n in self._node_projections:
+                self._node_projections[n].fan_in_total = total
         self._rerender()
 
     @staticmethod
@@ -185,6 +208,52 @@ class DagGraph(Static):
         """更新 parallel 组进度计数（``1/3``）。幂等。"""
         self._group_progress[group_name] = (done, total)
         self._rerender()
+
+    # ── spec v1.1 §4.4：3 行盒子投影更新 ─────────────────────────────────
+
+    def update_node_projection(
+        self,
+        name: str,
+        *,
+        status: str | None = None,
+        iter_n: int | None = None,
+        elapsed: float | None = None,
+        tokens: int | None = None,
+        error_msg: str | None = None,
+        fan_in_arrived: int | None = None,
+    ) -> None:
+        """更新单节点的渲染投影（spec v1.1 §4.4 字段级定义）。
+
+        只更新显式传入的字段（None 表示不修改）。幂等：相同调用序列产相同投影。
+
+        ``fan_in_total`` 是静态拓扑派生（在 ``build_from_workflow`` 时一次性算），
+        本方法不接收——它的更新走 ``set_fan_in_arrived``（M 动态）。
+
+        reducer 派生 fold 性质（spec §4.4.1）：重放同 tape 必产相同投影。
+        """
+        if name not in self._node_projections:
+            return  # 未知节点防御（与 set_status 同语义）
+        proj = self._node_projections[name]
+        if status is not None and status in NODE_STATUS_ICONS:
+            proj.status = status
+            # 同步老 _node_status（既有 _rerender 兼容路径用）
+            if name in self._node_status:
+                self._node_status[name] = status
+        if iter_n is not None:
+            proj.iter_n = iter_n
+        if elapsed is not None:
+            proj.elapsed = elapsed
+        if tokens is not None:
+            proj.tokens = tokens
+        if error_msg is not None:
+            proj.error_msg = error_msg
+        if fan_in_arrived is not None:
+            proj.fan_in_arrived = fan_in_arrived
+        self._rerender()
+
+    def projection_of(self, name: str) -> NodeProjection | None:
+        """读单节点当前投影（测试用，DRY 通道）。"""
+        return self._node_projections.get(name)
 
     # ── 选中（j/k / click）─────────────────────────────────────────────────
 
@@ -248,30 +317,63 @@ class DagGraph(Static):
     # ── 渲染 ──────────────────────────────────────────────────────────
 
     def _rerender(self) -> None:
-        """重渲染（委托 DagLayout；overflow 切 fallback）。"""
+        """重渲染：spec v1.1 §4 主流走 3 行盒子渲染；fallback 走 CompactOutlineLayout。
+
+        决策树：
+          1. 同层并行 ≥ 5（spec §4.3）或窄屏 → fallback ``CompactOutlineLayout``（既有）
+          2. 否则用新 ``_dag_render`` 的 3 行盒子 + fan-in 副标 + after=None section
+        """
         if self._topo is None:
             self.update("(no workflow loaded)")
             return
-        # 合并 node + group 状态投影（layout 只用 node 状态，group 进度单独画在 title）。
-        ir = self._layout.layout(
+        # 主流分层（用既有 LayeredDagLayout 算拓扑序，仅取 layers + edges 派生）。
+        layered = self._layout.layout(
             self._topo, self._node_status, self._selected, _COLS_BUDGET,
         )
-        if ir.overflow:
+        # fallback 决策（spec §4.3）
+        layer_counts = [len(layer) for layer in layered.layers]
+        if should_fallback_to_outline(layer_counts, _COLS_BUDGET) or layered.overflow:
             ir = self._fallback.layout(
                 self._topo, self._node_status, self._selected, _COLS_BUDGET,
             )
-        # 标题：parallel 组进度（如 ``◎ split (2/2)``）。
+            self._render_with_title("\n".join(ir.lines))
+            return
+        # 主流：3 行盒子渲染（spec §4.4 §4.5 §4.6）
+        main_layer_names = [[nb.name for nb in layer] for layer in layered.layers]
+        # 平展到主流节点列表 + 旁支（after=None）
+        flat_nodes: list[str] = [n for layer in main_layer_names for n in layer]
+        edges_simple = [(e.src, e.dst) for e in self._topo.edges]
+        main_nodes, after_none_nodes, merge_target = split_main_and_after_none(
+            flat_nodes, edges_simple,
+        )
+        # 主流按 layered 分层 reflow（保持 layer 算法的同层横向）
+        # 但 split_main_and_after_none 返回的是平展列表；需要把 main_nodes 重映射回分层。
+        main_set = set(main_nodes)
+        main_layers_filtered = [
+            [n for n in layer if n in main_set]
+            for layer in main_layer_names
+        ]
+        main_layers_filtered = [l for l in main_layers_filtered if l]
+        body_lines = render_main_branch_nodes(self._node_projections, main_layers_filtered)
+        if after_none_nodes:
+            body_lines.extend(render_after_none_section(
+                self._node_projections, after_none_nodes, merge_target,
+            ))
+        body = "\n".join(body_lines) if body_lines else "(empty topology)"
+        self._render_with_title(body)
+
+    def _render_with_title(self, body: str) -> None:
+        """渲染顶层：title（parallel 组进度）+ body + footer（keybinding hint）。"""
         title_parts = []
-        for gname, _ in (self._topo.parallel_groups or []):
-            done, total = self._group_progress.get(gname, (0, 0))
-            status = self._group_status.get(gname, "pending")
-            icon = NODE_STATUS_ICONS.get(status, "○")
-            title_parts.append(f"{icon} {gname} ({done}/{total})")
-        body = "\n".join(ir.lines)
+        if self._topo is not None:
+            for gname, _ in (self._topo.parallel_groups or []):
+                done, total = self._group_progress.get(gname, (0, 0))
+                status = self._group_status.get(gname, "pending")
+                icon = NODE_STATUS_ICONS.get(status, "○")
+                title_parts.append(f"{icon} {gname} ({done}/{total})")
         if title_parts:
-            header = "  ".join(title_parts) + "\n" + ("─" * min(_COLS_BUDGET, 32)) + "\n"
+            header = "  ".join(title_parts) + "\n" + ("─" * min(_COLS_BUDGET, 50)) + "\n"
         else:
             header = ""
-        # 选中提示（C 全屏 / a 跟随）放底部。
-        footer = "\n[j/k 选中 · a 跟随]"
+        footer = "\n[j/k 选中 · a 跟随 · f 过滤]"
         self.update(header + body + footer)

@@ -601,7 +601,11 @@ class TestInterruptFlow:
         run_async(scenario())
 
     def test_app_dispatches_prompt_rendered_to_logstream(self, tmp_path):
-        """注入 prompt_rendered 事件 → LogStream 显示描述（含 preview 截断）。"""
+        """spec v1.1 §6.1：prompt_rendered 是调试事件，TUI 完全不显示（hide_all）。
+
+        旧 v1.0 测试断言"prompt rendered"显示，spec v1.1 反转该决议（noise governance）。
+        本测试改为反向断言：LogStream / ActivityStream 都不含 prompt rendered。
+        """
         wf = _load(_linear_workflow(tmp_path))
         app = _app(tmp_path, wf)
 
@@ -617,7 +621,9 @@ class TestInterruptFlow:
                 await pilot.pause()
                 await pilot.pause()
                 text = _flatten_strips(app.query_one(LogStream).lines)
-                assert "prompt rendered" in text
+                # spec v1.1 §6.1：prompt_rendered 完全不显示
+                assert "prompt rendered" not in text
+                assert "prompt_rendered" not in text
         run_async(scenario())
 
     def test_node_started_tracks_current_node_and_session(self, tmp_path):

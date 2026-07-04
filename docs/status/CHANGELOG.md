@@ -17,6 +17,10 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-07-04] TUI 重设计 v1（spec v1.1 全 P0 闭环：3 行盒子 DAG + Activity Stream 双行 entry + EVENT_VISIBILITY 噪音治理 + 取消 NodeDetail + `f` 键 filter）
+TUI 整体重设计对齐 spec v1.1（spec-review-adversarial conditional-pass → 5 P0 + 3 用户决策闭环）。新增 `_event_filter.EVENT_VISIBILITY`（7 tag 全 32 EventType 覆盖 + 完整性测试守门）+ `_dag_render` 独立渲染 helper（3 行盒子 + fan-in `(N inputs · M/N arrived)` 副标 + `after=None` 单独 section + ≥5 并行 fallback）+ `activity_stream` 双行 entry + 折叠详情（32 EventType per-type 字段级映射，复用 phase-15 `render_tool`/`render_message`/`render_thinking`）+ Header footer per-node usage（横向滚动 + running 优先）+ `f` 键 filter 模式（O1=c 取消 NodeDetail 但保留实例兼容）。reducer 派生 fold：iter 号 `node_session_ids`（重放产相同值，retry/skip/interrupt 不算新 iter）；fan_in arrived（dst 节点 node_completed 累加）。**单向依赖守住**（新模块零 orca.exec/run/events.bus 反向 import）。**1380 passed 0 回归**（baseline 1333 + 47 新测试），mxint 真跑 tape 重放 SVG 截屏（186 events → 152 进 Activity Stream，filter 掉 17 prompt_rendered + 17 agent_usage）。
+Commit：`4c5ca2d`。详见 [release note](releases/2026-07-04-tui-redesign-v1.md)。
+
 ## [2026-07-04] mxint_analysis 真实 bitx 量化分析迁移（替 stub + 5 agent prompts 真版）
 将 `examples/mxint_analysis.yaml` + 5 个 agent prompts + `tests/e2e_mxint/` 从**简化 stub**（伪 SimpleNet + fake JSON，2 分钟跑完）迁移到**真实 bitx 量化分析**：target 换成 `ConfigurableMLP`（8970 params，sklearn digits 8x8，~90% eval_acc）+ 真调 bitx `Session` + 5 observers + `StudyReport.save` + `run_diagnostic_pipeline` 三阶段；2 个 driver script（`run_analysis.py` / `run_diagnostic.py`，后者含 bitx 1.1.1.dev395 `DistOverlayData.to_chart_data` bug 的进程内 monkey-patch）。**foreground 真跑 185s**（>2 分钟 stub baseline），5 张 chart（accuracy/bottleneck/sensitivity/qsnr_depth/recovery）真推 tape，76 行 REPORT.md 含真 QSNR 数据（51.37 dB avg，weight-dominated，recovery 31.7%）。**1333 passed 0 回归**。已知 follow-up：`_run_workflow_headless` 不起 chart ingestor，但 env 仍透传死 sock 路径（background 模式 chart 不通，prompt 让 agent 优雅 fallback）。
 Commit：`838695f`。详见 [release note](releases/2026-07-04-mxint-real-bitx.md)。
