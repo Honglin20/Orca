@@ -64,15 +64,21 @@ from orca.iface.cli.screens.chart_browser import ChartBrowser
 from orca.iface.cli.screens.gate_modal import GateModal
 from orca.iface.cli.screens.interrupt_modal import InterruptModal
 from orca.iface.cli.widgets import AgentsList, AgentHistory, Header, LogStream, NodeDetail
-# spec v2 §11.5：dispatch 内 EVENT_LEVEL 表 Step 4 引入（替换 v1.1.1 visibility_of）；
-# 当前 v1.1.1 ActivityStream 双写已删（Step 1b），LogStream 双写分支仍硬编码 type
-# 过滤（不依赖 visibility_of），Step 4 一并替换为 EVENT_LEVEL 表 + toggle_debug。
+# spec v2 §3 + §11.5 #6：dispatch 走 ``EVENT_LEVEL.get()`` 三态派发（合法 level /
+# None-as-explicit-skip / 表未登记）。Step 4 LogStream widget 已内置此表，本模块
+# dispatch 显式复用同一份常量（避免双真相源）—— LEVEL_INFO 兜底 + LEVEL_DEBUG toggle。
+from orca.iface.cli.widgets.log_stream import (
+    EVENTS_NOT_IN_LOG_STREAM,
+    EVENT_LEVEL,
+    LEVEL_DEBUG,
+    LEVEL_INFO,
+)
 from orca.iface.cli.widgets.header import HeaderStats, NodeUsageStats
 from orca.run.lifecycle import gen_run_id
 from orca.run.orchestrator import Orchestrator
 
 if TYPE_CHECKING:
-    from orca.schema import RunState, Workflow
+    from orca.schema import Event, RunState, Workflow
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +88,11 @@ _DEFAULT_GATE_PORT = 7421
 
 # push_screen_wait 返回的「别壳先答」哨兵前缀（见 GateModal.notify_resolved_externally）。
 _BROADCAST_PREFIX = "__orca_broadcast__"
+
+# spec v2 §9 R3 + §3：``_node_events`` 桶 FIFO 上限（防长跑 workflow 内存爆）。
+# 桶是 reducer fold 派生（重放必产相同列表），丢最旧不丢真相（tape 是真相源）。
+# AgentHistory 头部行显示 ``⚠ truncated`` 标记（见 ``_TRUNCATED_THRESHOLD``）。
+_NODE_EVENTS_CAP = 1000
 
 
 class _GateHttpBridge:
@@ -280,8 +291,7 @@ class OrcaApp(App):
     Screen {
         layout: vertical;
     }
-    /* spec v2 §2.1：三块布局（左 30% AgentsList / 右上 70% AgentHistory / 右下 LogStream）。
-       Step 1a 占位：AgentsList / AgentHistory 是空 shell；LogStream 内容仍是 v1.1.1。
+    /* spec v2 §2.1：三块布局（左 30% AgentsList / 右上 70% AgentHistory / 右下 30% LogStream）。
        NodeDetail 保留实例（display:none，chart 路径唯一入口，spec §6.3）。 */
     #main-row {
         height: 1fr;
@@ -306,6 +316,9 @@ class OrcaApp(App):
     }
     LogStream {
         height: 3fr;
+        border: round $warning;
+        padding: 0 1;
+        background: $surface;
     }
     /* spec v1.1 §7.2 / v2 §6.3：NodeDetail 保留实例（display:none，chart 路径）。
        height:0 + off-screen 让它不占屏；既有测试断言 query + 内部 state 仍可调。 */
@@ -326,15 +339,13 @@ class OrcaApp(App):
         Binding("ctrl+g", "interrupt", "中断/纠偏"),
         # phase 11 §2.4 / §6.1：d 弹 DialogModal（agent 跑完后多轮追问）。
         Binding("d", "dialog", "对话"),
-        # phase-12 SPEC §5：a 恢复 auto-follow；c 聚焦 NodeDetail 图表 tab；
-        # C 全屏 ChartBrowser；/ LogStream 过滤；Tab focus_next（Textual 默认）。
+        # spec v2 §1.2：a 恢复 auto-follow；c 聚焦 NodeDetail 图表 tab；C 全屏 ChartBrowser。
+        # L 切 debug log（在 LogStream widget 内 BINDINGS，spec §2.4）。
         Binding("a", "follow_active", "跟随活跃"),
         Binding("c", "focus_charts", "图表 tab"),
         Binding("C", "open_chart_browser", "全屏图表"),
-        Binding("slash", "filter_log", "过滤日志"),
-        # spec v1.1 §5.1：f 切 Activity Stream filter 模式（[全部事件] / [仅选中节点]）。
-        Binding("f", "toggle_filter", "过滤"),
-        # phase-15 render layer §12.8：t 切 thinking 可见性（dim+italic 纯文本默认展开）。
+        # spec v2 §1.2：thinking 默认显示（dim indigo，见 AgentHistory TYPE-LABEL）；
+        # t 键提示用户用 Enter 展开折叠详情（不再 toggle 显隐）。
         Binding("t", "toggle_thinking", "切换 thinking"),
     ]
 
@@ -456,8 +467,13 @@ class OrcaApp(App):
         # node_session_ids：reducer 维护 node -> [session_id]（按 node_started 顺序 append）。
         # iter N = session_id 在 list 中的位置 + 1（retry / skip / interrupt 不 append）。
         self._node_session_ids: dict[str, list[str]] = {}
+        # spec v2 §3：_node_events 分桶（agent_history 切换用）。
+        # reducer fold：按 event.node 累积 events，切换 agent 时从这里取（纯前端切换，
+        # 不读 tape）。FIFO 上限保护（_NODE_EVENTS_CAP）：超 1000 events/node 丢最旧
+        # （spec §9 R3 + AgentHistory 头部行 truncated 标记）；tape 是真相源，丢的不丢真相。
+        self._node_events: dict[str, list[Event]] = {}
         # spec v2 §11.5 #5：删 v1.1.1 _node_arrived_count（fan-in 已取消，DagGraph 删了，
-        # 孤儿字段不留）。Step 5 _dispatch_to_widgets 改造时一并清掉 fan_in arrived M 调用。
+        # 孤儿字段不留）。
         # spec v1.1 §6.2：per-node usage（agent_usage 收敛到 Header footer）。
         # key = node, value = NodeUsageStats（累加；opencode translator per-step 是累积值故取最后一条）。
         # session_id 维度去重：取该 session_id 最后一条 agent_usage（spec §4.4 acceptance）。
@@ -471,23 +487,22 @@ class OrcaApp(App):
     # ── Textual 钩子 ─────────────────────────────────────────────────────
 
     def compose(self) -> ComposeResult:
+        """spec v2 §2.1 三块布局：Header / [AgentsList | (AgentHistory / LogStream)] / NodeDetail / Footer。
+
+        NodeDetail 保留实例（spec §6.3，display:none 移出可视区，仅 chart 路径消费）。
+        """
         yield Header()
         with Horizontal(id="main-row"):
-            # TODO Step 5：AgentsList 占位（Step 2 填充实现，build_from_workflow 改 build）。
             yield AgentsList()                       # v2 左 30%（spec §2.2）
             with Vertical(id="right-pane"):          # v2 右侧 70%（spec §2.1）
-                # TODO Step 5：AgentHistory 占位（Step 3 填充实现，set_node / append_event）。
                 yield AgentHistory()                 # v2 右上 7fr（spec §2.3）
-                # Step 4 已完成：LogStream widget 内部按 EVENT_LEVEL 表派生（spec §2.4）。
-                # Step 5 待做：dispatch 改用 EVENT_LEVEL.get(etype) 三态派发（删硬编码 type 过滤）。
                 yield LogStream()                    # v2 右下 3fr（spec §2.4 Conductor Log View）
-            # v1.1.1 残留（Step 1b 删 ActivityStream；Step 5 删 NodeDetail stream/output 双写）。
-            # 暂保留实例：NodeDetail chart 路径仍活跃（c/C 键）；ActivityStream 已删（Step 1b）。
+            # spec §6.3：NodeDetail 保留实例（display:none，仅 chart 路径）。
             yield NodeDetail()
         yield Footer()
 
     def on_mount(self) -> None:
-        """初始化 widget（build DagTree / header / active node）+ 起事件消费 worker
+        """初始化 widget（AgentsList.build / Header / AgentHistory executor + 起事件消费 worker
         + kickoff 编排主流程。
 
         on_mount 在 Textual event loop 已 running 时被调，故此处 spawn ``@work`` worker
@@ -499,23 +514,19 @@ class OrcaApp(App):
         单测用 ``run_test()`` 时 on_mount 同样会触发；如不希望真起编排（避免 spawn
         claude / uvicorn），可把 ``kickoff`` 替换成 no-op（见 ``test_app._patched_app``）。
         """
-        # ── TODO Step 5：AgentsList.build(node_names) 替换 DagGraph.build_from_workflow ──
-        # v2 左侧 AgentsList 暂为空 shell（Step 2 填充 build 方法）。既有 v1.1.1 DagGraph
-        # build_from_workflow 调用全注释（DagGraph 已删）。routes 派生 + parallel_groups 暂
-        # 不用（Step 5 重启 AgentsList.build 时一并恢复）。
-        # routes 派生保留代码（注释，避免 Step 5 重写时丢逻辑）：
-        # routes: dict[str, list[str]] = {}
-        # for n in self.wf.nodes:
-        #     if n.name:
-        #         routes[n.name] = [r.to for r in n.routes]
-        # for g in self.wf.parallel:
-        #     routes[g.name] = [r.to for r in g.routes]
+        # spec v2 §2.2：AgentsList.build（拓扑序纵向）。
+        self.query_one(AgentsList).build(self._node_names)
+        # Header 初始化（既有逻辑保留）。
         header = self.query_one(Header)
         header.update_stats(HeaderStats(
             run_id=self.run_id, workflow_name=self.wf.name, total=self._total_nodes,
         ))
-        # TODO Step 5：v2 AgentHistory.set_executor(self._node_executors.get(self.wf.entry, "claude"))
-        # 取代 v1.1.1 ActivityStream.set_executor（ActivityStream 已删，Step 3 AgentHistory 填充）。
+        # spec v2 §2.3：AgentHistory 初始 executor（normalize_tool 查表用）。
+        # entry node 的 executor 默认对齐（switch agent 时由 dispatch 重新 set）。
+        self.query_one(AgentHistory).set_executor(
+            self._node_executors.get(self.wf.entry or "", "claude"),
+        )
+        # 默认选中 entry node（与 v1.1.1 一致；auto-follow=True 仍会随 running 切换）。
         self._selected_node = self.wf.entry
 
         # 订阅事件 + 起事件消费 worker（@work，loop 已 running，安全）。
@@ -637,74 +648,117 @@ class OrcaApp(App):
                 logger.exception("dispatch event 失败 type=%s seq=%d", event.type, event.seq)
 
     def _dispatch_to_widgets(self, event) -> None:
-        """把单个 event 分发到对应 widget（SPEC §6.0 铁律 1：纯派生）。
+        """把单个 event 分发到 v2 三块 widget（spec v2 §3 + §11.5 接口审计 7 条）。
 
-        spec v2 §3 / §11.5：v2 三块布局 + node 分桶 + EVENT_LEVEL 表派生。
-        当前 Step 1b 状态（v1.1.1 ActivityStream 已删，Step 2-5 未完成）：
-          - ``node_*`` / ``agent_usage`` / gate / interrupt：fold + AgentsList（Step 2）
-            + auto-follow 触发 NodeDetail display:none（chart 路径）；
-            AgentsList.update_node 调用 Step 5 接回（当前为 TODO 占位注释）。
-          - ``agent_message`` / ``agent_thinking`` / ``agent_tool_*``：Step 3 AgentHistory
-            + Step 5 _node_events 分桶后此处发；当前不发任何 widget（TODO Step 5）。
-          - ``prompt_rendered`` / ``agent_usage``：不进 LogStream（硬编码 v1.1.1 兼容）。
-          - ``custom(chart)``：进 NodeDetail ChartPanel（chart 路径，display:none）。
-          - workflow 终态：notify（``workflow_failed`` / ``workflow_completed``）。
+        数据流（reducer fold，重放必产相同状态）：
+          1. ``_node_events[event.node]`` 分桶（agent_history 切换用，spec §3）；
+             FIFO 上限 ``_NODE_EVENTS_CAP``（1000 events/node，spec §9 R3）。
+          2. reducer fold（``_node_iter`` / ``_node_status`` / ``_node_usage``，
+             v1.1.1 §4.4.1 保留；spec §11.5 #5 ``_node_arrived_count`` 已删）。
+          3. ``AgentsList.update_node()`` —— 节点状态投影（status / elapsed / tokens / iter）。
+          4. ``AgentHistory.append_event()`` —— **仅 selected_node** 的事件追加
+             （reviewer P1-12：auto-follow 时 node_started 触发 _selected_node 更新
+             + AgentHistory.set_node 全量重渲，否则用户看不到后续 agent）。
+          5. ``LogStream.append_event()`` —— 按 ``EVENT_LEVEL`` 表派发高层事件
+             （spec §11.5 #6 + reviewer P0-3：``dict.get()`` 三态，无 try/except KeyError 死代码）。
+          6. ``NodeDetail.upsert_chart()`` —— 仅 chart 路径（spec §6.3 保留实例）。
+
+        接口统一性铁律（spec §11.5 + 用户底线）：本方法是节点状态/错误/事件类型的**唯一**
+        消费入口；widget 不重新分类、不重新命名；canonical Event schema 不动。
         """
         etype = event.type
         data = event.data or {}
         node = event.node
 
-        # ── 第 1 段：reducer 派生 fold（spec v1.1 §4.4.1）──────────────────
-        # iter / arrived / usage 都是 fold 性质，重放必产相同值（与 _selected_node UI 交互态严格区分）。
+        # ── 1. _node_events 分桶（spec v2 §3，agent_history 切换用）──────────
+        # reducer fold：按 event.node 累积 events，切换 agent 时从这里取（纯前端切换，
+        # 不读 tape）。FIFO 上限保护：超 _NODE_EVENTS_CAP（1000）丢最旧，不丢真相（tape 在）。
+        if node:
+            bucket = self._node_events.setdefault(node, [])
+            bucket.append(event)
+            if len(bucket) > _NODE_EVENTS_CAP:
+                bucket.pop(0)
 
-        # node_started → iter += 1（spec §4.4.1：新 session_id 触发 +1；retry / skip / interrupt 不算）
+        # ── 2. reducer fold + AgentsList 投影（spec v1.1 §4.4.1 + v2 §2.2）──
         if etype == "node_started" and node:
+            # iter fold（spec §4.4.1：retry 时新 session_id 触发 +1；spec §3 修订）
             session_id = event.session_id or ""
             session_list = self._node_session_ids.setdefault(node, [])
             if session_id and session_id not in session_list:
                 session_list.append(session_id)
-            iter_n = (session_list.index(session_id) + 1) if session_id in session_list else (
-                len(session_list) + 1
+            iter_n = (
+                (session_list.index(session_id) + 1) if session_id in session_list
+                else (len(session_list) + 1)
             )
-            # ── TODO Step 5：DagGraph 投影改为 AgentsList.update_node() ──
-            # v2 左侧 AgentsList 暂为空 shell（Step 2 填充 update_node 方法）。
-            # 既有 v1.1.1 DagGraph 调用全注释（DagGraph 已删）：
-            # graph = self.query_one(DagGraph)
-            # graph.set_status(node, "running")
-            # graph.update_node_projection(node, status="running", iter_n=iter_n)
-            _ = iter_n  # 占位（Step 5 重写为 AgentsList.update_node(node, status="running", iter_n=iter_n)）
+            self.query_one(AgentsList).update_node(node, status="running", iter_n=iter_n)
+            # reviewer P1-12 + spec §11.5 #7：auto-follow 必须**在 dispatch 内**——
+            # _auto_follow=True 时 node_started 触发 _selected_node 更新 + AgentHistory
+            # 全量重渲（从 _node_events 桶取），否则用户看不到后续 agent 输出。
+            if self._auto_follow:
+                self._selected_node = node
+                try:
+                    self.query_one(AgentHistory).set_executor(
+                        self._node_executors.get(node, "claude"),
+                    )
+                    self.query_one(AgentHistory).set_node(
+                        node, self._node_events.get(node, []),
+                    )
+                except Exception:  # noqa: BLE001 —— AgentHistory 未挂载（headless）
+                    pass
+            # phase 11 §3：追踪当前 node + session（action_interrupt 用，既有逻辑保留）。
+            import time as _time
+            self._current_node = node
+            self._node_started_at = _time.monotonic()
+            self._current_session_id = event.session_id
+            self._refresh_header()
 
-        # node_completed → fan_in arrived += 1（按 dst 节点统计前置节点完成数）
-        # + 更新 dst 节点投影（elapsed 静态 + done 状态）
-        if etype == "node_completed" and node:
+        elif etype == "node_completed" and node:
             elapsed = data.get("elapsed")
-            # ── TODO Step 5：DagGraph 投影改为 AgentsList.update_node() ──
-            # v2 fan-in 已取消（spec §0 决策 1）；agent_usage 仍收敛到 Header footer。
-            # self.query_one(DagGraph).update_node_projection(
-            #     node, status="done", elapsed=float(elapsed) if elapsed is not None else None,
-            # )
-            # spec v1.1 §4.5 O2=a：fan_in arrived M（动态）—— 已随 DagGraph 删除一并取消。
-            # v2 §11.5 #5：_node_arrived_count 字段已删；以下循环保留为注释占位（Step 5 一并删）。
-            # for n in self.wf.nodes:
-            #     for r in n.routes:
-            #         if n.name == node and r.to and r.to != "$end":
-            #             cur = self._node_arrived_count.get(r.to, 0)
-            #             self._node_arrived_count[r.to] = cur + 1
-            #             self.query_one(DagGraph).update_node_projection(
-            #                 r.to, fan_in_arrived=self._node_arrived_count[r.to],
-            #             )
-            _ = elapsed  # 占位（Step 5 重写为 AgentsList.update_node(node, status="done", elapsed=elapsed)）
+            self.query_one(AgentsList).update_node(
+                node, status="done",
+                elapsed=float(elapsed) if elapsed is not None else None,
+            )
+            self._done_nodes += 1
+            self._refresh_header()
+            # phase 11 §6.1：记最近完成的 agent node + output（action_dialog 按 d 用）。
+            if node in self._agent_node_names:
+                self._last_completed_agent_node = node
+                self._last_completed_agent_output = data.get("output")
 
-        # node_failed / node_skipped → DAG 投影 status（含 error_msg）
-        if etype == "node_failed" and node:
+        elif etype == "node_failed" and node:
             msg = str(data.get("message", data.get("error_type", "")))
-            # ── TODO Step 5：DagGraph 投影改为 AgentsList.update_node(status="failed", error_msg=msg) ──
-            # self.query_one(DagGraph).update_node_projection(
-            #     node, status="failed", error_msg=msg,
-            # )
-            _ = msg  # 占位（Step 5 重写为 AgentsList.update_node）
+            self.query_one(AgentsList).update_node(node, status="failed", error_msg=msg)
 
-        # agent_usage → 收敛到 Header footer（spec §6.2）+ DAG 节点投影（spec §4.4 <tok>）
+        elif etype == "node_skipped" and node:
+            # spec v2 §11.5：v1.1.1 DagGraph fan-in 副标已取消；AgentsList 不需要单独处理
+            # （status 不变，保持上一态）。LogStream 会按 LEVEL_WARN 显示一行。
+            pass
+
+        # gate 事件（既有逻辑保留，只改 widget 引用 DagGraph → AgentsList）
+        elif etype == "human_decision_requested":
+            gate_id = data.get("gate_id", "")
+            self._awaiting_gates.add(gate_id)
+            self._refresh_header()
+            if node:
+                self.query_one(AgentsList).update_node(node, status="blocked")
+            # 推 GateModal 参与竞速（@work 内 push_screen_wait）。
+            self._push_gate_modal(event)
+
+        elif etype == "human_decision_resolved":
+            gate_id = data.get("gate_id", "")
+            self._awaiting_gates.discard(gate_id)
+            self._refresh_header()
+            if node:
+                # node 解除 blocked → 回 running（claude resume 继续跑）。
+                self.query_one(AgentsList).update_node(node, status="running")
+            # 广播输家：本壳 modal 还在 → notify_resolved_externally 让它 dismiss。
+            if self._active_modal is not None:
+                self._active_modal.notify_resolved_externally(
+                    source=str(data.get("resolved_by", "?")),
+                    answer=str(data.get("answer", "")),
+                )
+
+        # agent_usage 收敛（既有逻辑保留；新增 AgentsList tokens 投影）
         if etype == "agent_usage" and node:
             in_tok = int(data.get("input_tokens", 0))
             out_tok = int(data.get("output_tokens", 0))
@@ -716,130 +770,65 @@ class OrcaApp(App):
                     name=node, tokens=in_tok + out_tok, cost_usd=cost,
                 )
                 self._per_node_last_usage_seq[node] = event.seq
-                # spec §4.4 <tok> 字段：与 Header footer 同源同步（同一 agent_usage event
-                # 投影到 AgentsList 节点 tokens 字段）。GAP-A 修复（v1.1.1）。
-                # ── TODO Step 5：DagGraph.update_node_projection 改 AgentsList.update_node(tokens=...) ──
-                # self.query_one(DagGraph).update_node_projection(
-                #     node, tokens=in_tok + out_tok,
-                # )
-                pass
+                # spec v2 §11.5 + reviewer P1-12 fix：投影到 AgentsList 行
+                # （替代旧 DagGraph.update_node_projection）。
+                self.query_one(AgentsList).update_node(node, tokens=in_tok + out_tok)
             self._refresh_header()
 
-        # ── 第 2 段：node 生命周期 → DAG 图标 + auto-follow ────────────────
-        if etype == "node_started":
-            if node:
-                # phase-12 SPEC §1.4：auto-follow（默认 True）→ _selected_node 跟随 running。
-                # pin 后（_auto_follow=False）node_started 不覆盖选中。
-                if self._auto_follow:
-                    self._selected_node = node
-                    # 兼容旧 NodeDetail.display:none 但内部 state 维护（既有测试断言）
-                    try:
-                        self.query_one(NodeDetail).set_node(
-                            node, self._node_kinds.get(node),
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
-                # phase 11 §3：追踪当前 node + 起始时间 + session（action_interrupt 用）。
-                import time as _time
-                self._current_node = node
-                self._node_started_at = _time.monotonic()
-                self._current_session_id = event.session_id
-                # spec v1.1 §6.2：当前 running 节点用于 Header footer 排序优先级。
-                self._refresh_header()
-        elif etype == "node_completed":
-            self._done_nodes += 1
-            self._refresh_header()
-            # phase 11 §6.1：记最近完成的 agent node + output（action_dialog 按 d 用）。
-            if node and node in self._agent_node_names:
-                self._last_completed_agent_node = node
-                self._last_completed_agent_output = data.get("output")
-        elif etype == "route_taken":
-            pass  # 日志里看即可，DAG 图标由 node_* 事件驱动
+        # ── 3. AgentHistory 分派（仅 selected_node 的事件，spec v2 §3）──────
+        # 调用方负责过滤 node == _selected_node（避免双重渲染：auto-follow 路径已 set_node
+        # 全量重渲，append_event 走增量追加仅对当前选中节点）。
+        if node and node == self._selected_node:
+            try:
+                self.query_one(AgentHistory).append_event(event)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("AgentHistory append skipped: %r", e)
 
-        # gate 事件（SPEC §4.5 决策 5：双重身份）
-        elif etype == "human_decision_requested":
-            gate_id = data.get("gate_id", "")
-            self._awaiting_gates.add(gate_id)
-            self._refresh_header()
-            # ── TODO Step 5：DagGraph.set_status(node, "blocked") 改 AgentsList.update_node(status="blocked") ──
-            # 当前节点 → blocked 图标（gate 拦在 node 内的 claude 工具调用循环）
-            # if node:
-            #     self.query_one(DagGraph).set_status(node, "blocked")
-            # 推 GateModal 参与竞速（@work 内 push_screen_wait）
-            self._push_gate_modal(event)
-        elif etype == "human_decision_resolved":
-            gate_id = data.get("gate_id", "")
-            self._awaiting_gates.discard(gate_id)
-            self._refresh_header()
-            # ── TODO Step 5：DagGraph.set_status(node, "running") 改 AgentsList.update_node(status="running") ──
-            # node 解除 blocked → 回 running（claude resume 继续跑）
-            # if node:
-            #     self.query_one(DagGraph).set_status(node, "running")
-            # 广播输家：本壳 modal 还在 → notify_resolved_externally 让它 dismiss
-            if self._active_modal is not None:
-                self._active_modal.notify_resolved_externally(
-                    source=str(data.get("resolved_by", "?")),
-                    answer=str(data.get("answer", "")),
-                )
-
-        # ── TODO Step 5：v2 AgentHistory.append_event 仅 selected_node + LogStream 走 EVENT_LEVEL
-        # spec v2 §11.5 #6：dispatch 用 EVENT_LEVEL.get(etype) 三态派发（合法 level /
-        # None-as-explicit-skip / 表未登记）；Step 4 LogStream widget 已内置 EVENT_LEVEL
-        # 表自过滤（append_event 内调 level_of 决定是否写），但 dispatch 仍走 v1.1.1
-        # ``etype not in (prompt_rendered, agent_usage)`` 兼容路径——Step 5 改为显式三态。
-
-        # LogStream 写入（Step 4 widget 已自过滤；dispatch 仍走 v1.1.1 兼容 if-etype）。
-        # spec v1.1 §5 决议：LogStream 替换为 ActivityStream；保留实例 + 双写事件兼容路径。
-        # v2 §4.4：ActivityStream 已删（Step 1b）；Step 4 widget 改为高层节点事件 +
-        # EVENT_LEVEL 表派生；此 dispatch 分支 Step 5 改用 level_of() 三态派发后简化。
+        # ── 4. LogStream 分派（按 EVENT_LEVEL 三态，spec v2 §11.5 #6）──────
+        # reviewer P0-3：dict.get() 三态语义，无 try/except KeyError 死代码。
+        #   - 合法 level：表内已登记的 EventType（30 个），返回对应 level 字符串。
+        #   - None (explicit skip)：EVENTS_NOT_IN_LOG_STREAM 白名单 7 个
+        #     （agent_* / prompt_rendered / custom），归 AgentHistory / Header / chart 路径。
+        #   - 未登记 type：LEVEL_INFO 兜底（fail visible，spec §11.5 #6）。
+        level = EVENT_LEVEL.get(etype)
+        if level is None and etype not in EVENTS_NOT_IN_LOG_STREAM:
+            # 未登记 EventType（schema 加新 type 漏登记）→ fail visible，发 info 行不静默吞。
+            level = LEVEL_INFO
+        # debug toggle 真相源在 LogStream widget（L 键 binding）；dispatch 直接查 widget flag
+        # （避免「dispatch 层 mirror + widget 层真相」双真相源；spec §11.5 #6 单一真相）。
         try:
-            log = self.query_one(LogStream)
-            if etype not in ("prompt_rendered", "agent_usage"):
-                # LogStream widget 内置 EVENT_LEVEL 表 + EVENTS_NOT_IN_LOG_STREAM 白名单
-                # （spec §2.4 + §11.5 #6）：agent_* / custom 等 level=None 事件 append_event
-                # 内部直接 return，不会写入。故此处 if-etype 只是冗余防御（Step 5 删）。
-                log.append_event(
-                    etype, data, node=node,
-                    session_id=event.session_id, timestamp=event.timestamp,
+            show_debug = self.query_one(LogStream).show_debug
+        except Exception:  # noqa: BLE001 —— LogStream 未挂载（极端 headless 路径）
+            show_debug = False
+        if level is not None and (level != LEVEL_DEBUG or show_debug):
+            try:
+                self.query_one(LogStream).append_event(
+                    etype, data, node=node, session_id=event.session_id,
+                    timestamp=event.timestamp,
                 )
-        except Exception as e:  # noqa: BLE001 —— LogStream 未挂载（headless / 测试期）
-            logger.debug("LogStream compat write skipped: %r", e)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("LogStream append skipped: %r", e)
 
-        # 兼容旧 NodeDetail（display:none 不显示；既有 append_event_stream 测试断言不破）。
-        try:
-            nd = self.query_one(NodeDetail)
-            if node and etype in (
-                "agent_message", "agent_thinking", "agent_tool_call", "agent_tool_result",
-                "foreach_started", "foreach_completed",
-                "foreach_item_started", "foreach_item_completed",
-                "wait_started", "wait_completed", "node_started",
-            ):
-                nd.set_executor(self._node_executors.get(node, "claude"))
-                nd.append_event_stream(node, etype, data)
-            if node and etype == "node_completed":
-                nd.set_output(node, data.get("output"))
-        except Exception:  # noqa: BLE001 —— NodeDetail 未挂载 / set 节点失败
-            pass
-
-        # ── 第 4 段：chart 路径（spec §3.3 + spec v1.1 §7.2） ────────────
-        # spec §3.3：custom(chart) 写 NodeDetail ChartPanel（确定性 fold）。
-        # spec v1.1 §7.2：NodeDetail display:none，但 ChartPanel 内嵌仍由 ChartBrowser
-        # 全屏访问（``c/C`` 键）。test 期望 upsert 路径不破，故保留分发。
+        # ── 5. NodeDetail chart 路径（保留实例但 display:none，仅 chart 消费）──
+        # spec §6.3：NodeDetail 不再走 stream/output tab 路径（v1.1.1 双写已删）；
+        # 仅 ``custom(kind=chart)`` 走 ChartPanel（``c`` 键聚焦 / ``C`` 键 ChartBrowser 全屏）。
         if etype == "custom" and data.get("kind") == "chart":
             payload = data.get("chart")
             if not isinstance(payload, dict):
-                logger.warning("custom(chart) payload 非 dict，跳过: %r", type(payload).__name__)
-                return
+                logger.warning(
+                    "custom(chart) payload 非 dict，跳过: %r", type(payload).__name__,
+                )
+                return  # 早返回，避免下面 workflow 终态分支误中
             node_key = node if node is not None else "__workflow__"
             try:
                 self.query_one(NodeDetail).upsert_chart(node_key, payload)
             except Exception:  # noqa: BLE001 —— NodeDetail 未挂载
                 pass
 
-        # ── 第 5 段：workflow 终态 notify ───────────────────────────────────
+        # ── 6. workflow 终态 notify（既有逻辑保留）──────────────────────────
         if etype == "workflow_failed":
             self.notify(
-                "workflow failed — 见 Log Stream + Agent History（Step 4/3 待填充），按 q 退出",
+                "workflow failed — 见 Log Stream 详情，按 q 退出",
                 severity="error", timeout=0,
             )
         elif etype == "workflow_completed":
@@ -1001,42 +990,52 @@ class OrcaApp(App):
 
     # ── phase-12 §1.4 / §5：选中 + auto-follow + 图表键位 ────────────────────
 
-    def _on_node_selected(self, name: str) -> None:
-        """节点选中回调（v2 AgentsList.select 调；v1.1.1 DagGraph 已删，Step 5 重写为 AgentsList）。
+    def _on_node_selected(self, name: str | None) -> None:
+        """AgentsList.select 回调（spec v2 §3 切换语义）。
 
-        pin：``_auto_follow=False``；``_selected_node=name``；NodeDetail 切到该节点。
-        后续 ``node_started`` 不再覆盖选中（除非用户按 ``a`` 恢复跟随）。
-        spec v2 §3：选中即驱动 AgentHistory（Step 3）从 ``_node_events[name]`` 全量重渲
-        （Step 5 _dispatch_to_widgets 改造时分桶 + 此处调 AgentHistory.set_node）。
-        v1.1.1 ActivityStream filter_node 概念已取消（Step 1b），不再有 [全部事件] / [仅 X]。
+        pin：``_auto_follow=False``；``_selected_node=name``；
+        AgentHistory 从 ``_node_events`` 桶全量重渲（纯前端切换，不读 tape）。
+
+        v1.1.1 ActivityStream filter_node 概念已取消（spec §1.2 + §2.3：v2 用 j/k 切换）。
+        NodeDetail 保留实例但仅 chart 路径活跃（spec §6.3），不再 set_node 切 stream tab。
         """
+        if not name:
+            return
         self._selected_node = name
         self._auto_follow = False
+        events = self._node_events.get(name, [])
         try:
-            self.query_one(NodeDetail).set_node(name, self._node_kinds.get(name))
-        except Exception:  # noqa: BLE001 —— NodeDetail 未挂载
-            pass
+            # 切换 agent 时也同步 executor（normalize_tool 查表用）。
+            self.query_one(AgentHistory).set_executor(
+                self._node_executors.get(name, "claude"),
+            )
+            self.query_one(AgentHistory).set_node(name, events)
+        except Exception as e:  # noqa: BLE001 —— AgentHistory 未挂载（headless）
+            logger.debug("AgentHistory set_node skipped: %r", e)
 
     def action_follow_active(self) -> None:
         """``a`` 键：恢复 auto-follow（SPEC §1.4 / §5）。
 
         ``_auto_follow=True``；``_selected_node=当前 running 节点``（无 running 则不变）。
+        AgentHistory 从 ``_node_events`` 桶全量重渲（与 ``_on_node_selected`` 同语义）。
         """
         self._auto_follow = True
         running = self._current_node
         if running is not None:
             self._selected_node = running
+            events = self._node_events.get(running, [])
             try:
-                self.query_one(NodeDetail).set_node(
-                    running, self._node_kinds.get(running),
+                self.query_one(AgentHistory).set_executor(
+                    self._node_executors.get(running, "claude"),
                 )
+                self.query_one(AgentHistory).set_node(running, events)
             except Exception:  # noqa: BLE001
                 pass
 
     def action_focus_charts(self) -> None:
         """``c`` 键：聚焦 NodeDetail + 切图表 tab（SPEC §5）。
 
-        spec v1.1 §7.2：NodeDetail display:none 但仍 mount；既有 c 键契约保留（既有
+        spec §6.3：NodeDetail display:none 但仍 mount；c 键切换内部 tab state（既有
         e2e_phase12 测试断言 nd.active_tab == "charts"）。视觉上 NodeDetail 不可见，
         但内部 state 切换仍可观测（ChartBrowser 全屏走 C）。
         """
@@ -1050,38 +1049,14 @@ class OrcaApp(App):
         """``C`` 键：全屏 ChartBrowser（SPEC §4.5 / §5）。Esc/q 退。"""
         self.push_screen(ChartBrowser())
 
-    def action_filter_log(self) -> None:
-        """``/`` 键：v1.1.1 LogStream 过滤占位。
-
-        TODO Step 5：v2 取消 LogStream filter（Log Stream 改为高层节点事件 + 5 level icon），
-        j/k 切 agent 即可；``/`` 键 Step 5 一并删（BINDINGS 里去掉 slash）。
-        当前保留只发 notify 占位（不调 ActivityStream——已删 Step 1b）。
-        """
-        self.notify(
-            "(/ 键 v2 待实现：j/k 切 agent，L 切 debug log（Step 5）)",
-            severity="information", timeout=2,
-        )
-
-    def action_toggle_filter(self) -> None:
-        """``f`` 键：v1.1.1 Activity Stream filter 模式 toggle。
-
-        TODO Step 5：v2 取消 filter 概念（ActivityStream 已删 Step 1b；j/k 切 agent
-        替代 filter_node）。当前发 notify 占位提示用户用 j/k；Step 5 把 BINDINGS 里
-        的 ``f`` 键删掉。
-        """
-        self.notify(
-            "(f 键 v2 已取消：用 j/k 切 agent（Step 2/5）)",
-            severity="information", timeout=2,
-        )
-
     def action_toggle_thinking(self) -> None:
-        """``t`` 键：v1.1.1 ActivityStream thinking toggle（已删）。
+        """``t`` 键：v2 thinking 默认显示（dim indigo，见 AgentHistory TYPE-LABEL）。
 
-        TODO Step 5：v2 AgentHistory（Step 3）默认显示 thinking（dim indigo），无需
-        切换；``t`` 键 Step 5 从 BINDINGS 删（或重映射为 AgentHistory 内 toggle）。
+        spec v2 §1.2：thinking 不再 toggle 显隐，按 ``t`` 提示用户用 Enter 展开折叠详情
+        （Enter 是 AgentHistory 内 toggle_expand 的 binding）。
         """
         self.notify(
-            "(t 键 v2 暂无实现：thinking 默认显示（Step 3 AgentHistory）)",
+            "AgentHistory: thinking 默认 dim 显示，按 Enter 展开折叠详情",
             severity="information", timeout=2,
         )
 
@@ -1089,9 +1064,8 @@ class OrcaApp(App):
 
     def _refresh_header(self) -> None:
         """重算 header stats（done / awaiting / per-node usage / running）。"""
-        # TODO Step 5：v2 取消 filter 概念（ActivityStream 已删，j/k 替代 filter_node）。
-        # 当前 filter_node 永远 None；Step 5 把 Header footer 的 [全部事件] / [仅 X] 标签
-        # 一并删（HeaderStats 字段 + Header.render_footer_text Step 5 清理）。
+        # spec v2 §1.2 + §2.3：ActivityStream filter_node 概念取消（v2 用 j/k 切 agent）。
+        # 保留 ``filter_node=None`` 参数兼容 HeaderStats（Header footer 显示逻辑由 Step 6 清理）。
         filter_node: str | None = None
         # spec v1.1 §6.2：per-node usage 按声明序（wf.nodes）输出，running 节点优先。
         per_node = [

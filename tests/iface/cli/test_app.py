@@ -90,23 +90,25 @@ class TestCompose:
             async with app.run_test() as pilot:
                 await pilot.pause()
                 assert app.query_one(Header) is not None
-                # TODO Step 6: full AgentsList assertions（Step 2 填充后改回 status_of_node 等断言）
+                # spec v2 §2.1：三块布局 compose
                 assert app.query_one(AgentsList) is not None
-                assert app.query_one(NodeDetail) is not None
+                assert app.query_one(NodeDetail) is not None  # chart 路径保留实例
                 assert app.query_one(LogStream) is not None
         run_async(scenario())
 
-    def test_dag_tree_built_from_workflow(self, tmp_path):
-        """DagTree 初始化：全部 node 显示为 pending。"""
+    def test_agents_list_built_from_workflow(self, tmp_path):
+        """AgentsList 初始化：build 后含全部 node 名（pending 状态）。"""
         wf = _load(_linear_workflow(tmp_path))
         app = _app(tmp_path, wf)
 
         async def scenario():
             async with app.run_test() as pilot:
                 await pilot.pause()
-                # TODO Step 6: AgentsList.build(node_names) + status_of_node (Step 2 填充)
+                # spec v2 §2.2：build 接收 node_names，初始化全 pending 投影
                 tree = app.query_one(AgentsList)
-                assert tree is not None
+                proj = tree.projection_of("a")
+                assert proj is not None
+                assert proj.status == "pending"
         run_async(scenario())
 
     def test_header_shows_workflow_name(self, tmp_path):
@@ -137,11 +139,14 @@ class TestEventDispatch:
                 await pilot.pause()
                 app._dispatch_to_widgets(_event("node_started", {"kind": "script"}, node="a"))
                 await pilot.pause()
-                # TODO Step 6: AgentsList.update_node(status="running") 投影断言（Step 2 填充后回填）
+                # spec v2 §2.2：AgentsList 投影 status='running' + iter_n=1
                 tree = app.query_one(AgentsList)
-                assert tree is not None
-                # ActiveNode 切到 a
-                assert app.query_one(NodeDetail).active == "a"
+                proj = tree.projection_of("a")
+                assert proj is not None
+                assert proj.status == "running"
+                assert proj.iter_n == 1
+                # spec v2 §3：auto-follow=True 时 AgentHistory 同步切到 a
+                assert app.query_one(AgentHistory).node_name == "a"
         run_async(scenario())
 
     def test_node_completed_sets_done_icon_and_increments_header(self, tmp_path):
@@ -153,9 +158,12 @@ class TestEventDispatch:
                 await pilot.pause()
                 app._dispatch_to_widgets(_event("node_completed", {"elapsed": 0.5}, node="a"))
                 await pilot.pause()
-                # TODO Step 6: AgentsList.update_node(status="done", elapsed=...) 投影断言（Step 2 填充后回填）
-                tree = app.query_one(AgentsList)
-                assert tree is not None
+                # spec v2 §2.2：AgentsList 投影 status='done' + elapsed
+                proj = app.query_one(AgentsList).projection_of("a")
+                assert proj is not None
+                assert proj.status == "done"
+                assert proj.elapsed == 0.5
+                # Header 计数
                 header = app.query_one(Header)
                 assert header.stats.done == 1
                 assert "1/1 nodes" in header.stats.render_text()
@@ -172,9 +180,11 @@ class TestEventDispatch:
                     _event("node_failed", {"error_type": "ExecTimeout", "message": "boom"}, node="a"),
                 )
                 await pilot.pause()
-                # TODO Step 6: AgentsList.update_node(status="failed", error_msg=...) 投影断言（Step 2 填充后回填）
-                tree = app.query_one(AgentsList)
-                assert tree is not None
+                # spec v2 §2.2：AgentsList 投影 status='failed' + error_msg
+                proj = app.query_one(AgentsList).projection_of("a")
+                assert proj is not None
+                assert proj.status == "failed"
+                assert "boom" in (proj.error_msg or "")
         run_async(scenario())
 
     def test_log_stream_receives_high_level_events(self, tmp_path):
@@ -213,10 +223,10 @@ class TestEventDispatch:
                 for _ in range(2):
                     app._dispatch_to_widgets(_event("node_started", {}, node="a"))
                     await pilot.pause()
-                # TODO Step 6: AgentsList.update_node(status="running") 重放后状态保持 running（Step 2 填充后回填）
-                # running 状态保持（不会因重放退化成 done 或 pending）
-                tree = app.query_one(AgentsList)
-                assert tree is not None
+                # spec v2 §2.2：重放后 status 保持 running（不会因重放退化成 done 或 pending）
+                proj = app.query_one(AgentsList).projection_of("a")
+                assert proj is not None
+                assert proj.status == "running"
         run_async(scenario())
 
 
@@ -310,9 +320,10 @@ class TestGateFlow:
                 await pilot.pause()
                 # gate modal 还在（用户没答）
                 assert isinstance(app.screen, GateModal)
-                # node b 的图标确实更新了（证明 gate 没冻结 DAG 渲染）
-                # TODO Step 6: AgentsList.update_node(status="done") 投影断言（Step 2 填充后回填）
-                assert app.query_one(AgentsList) is not None
+                # spec v2 §2.2：node b 投影 status='done'（证明 gate 没冻结 AgentsList 渲染）
+                proj_b = app.query_one(AgentsList).projection_of("b")
+                assert proj_b is not None
+                assert proj_b.status == "done"
         run_async(scenario())
 
     def test_broadcast_loser_dismisses_modal_without_resolve(self, tmp_path):
@@ -356,17 +367,20 @@ class TestGateFlow:
                 app._dispatch_to_widgets(self._gate_request_event(node="a"))
                 await pilot.pause()
                 await pilot.pause()
-                # TODO Step 6: AgentsList.update_node(status="blocked") 投影断言（Step 2 填充后回填）
-                assert app.query_one(AgentsList) is not None
+                # spec v2 §2.2：gate requested → node 投影 status='blocked'
+                proj_a = app.query_one(AgentsList).projection_of("a")
+                assert proj_a is not None
+                assert proj_a.status == "blocked"
                 app._dispatch_to_widgets(_event(
                     "human_decision_resolved",
                     {"gate_id": "g-test", "answer": "allow", "resolved_by": "web"},
                     node="a", session_id="sess-gate",
                 ))
                 await pilot.pause()
-                # node 解除 blocked → running
-                # TODO Step 6: AgentsList.update_node(status="running") 投影断言（Step 2 填充后回填）
-                assert app.query_one(AgentsList) is not None
+                # spec v2 §2.2：node 解除 blocked → 回 running（claude resume 继续跑）
+                proj_a = app.query_one(AgentsList).projection_of("a")
+                assert proj_a is not None
+                assert proj_a.status == "running"
         run_async(scenario())
 
 
@@ -989,3 +1003,248 @@ class TestZeroBackendImport:
         assert violations == [], (
             f"6 新文件含禁止的后端 import（违反 SPEC §0.3 解耦边界）：{violations}"
         )
+
+
+# ── spec v2 §3 + §11.5：Step 5 dispatch 分桶 + 三块布局 + auto-follow ──────
+
+
+from orca.iface.cli.widgets import AgentHistory
+
+
+def _two_node_workflow(tmp_path: Path) -> Path:
+    """2-node workflow（analyzer → runner），用于切换 agent / auto-follow 测试。"""
+    p = tmp_path / "wf_two.yaml"
+    p.write_text(yaml.safe_dump({
+        "name": "two",
+        "entry": "analyzer",
+        "nodes": [
+            {"name": "analyzer", "kind": "agent", "prompt": "do X",
+             "routes": [{"to": "runner"}]},
+            {"name": "runner", "kind": "agent", "prompt": "do Y",
+             "routes": [{"to": "$end"}]},
+        ],
+    }), encoding="utf-8")
+    return p
+
+
+class TestV2Dispatch:
+    """v2 _dispatch_to_widgets + _node_events 分桶（spec §3 + §11.5）。
+
+    9 个测试覆盖 spec §11.5 接口审计 7 条 + reviewer P1-12 auto-follow + P0-3 dict 三态。
+    """
+
+    def test_node_events_bucketing(self, tmp_path):
+        """dispatch 3 events(node=analyzer) → _node_events['analyzer'] 含 3 条。"""
+        wf = _load(_two_node_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                for i in range(3):
+                    app._dispatch_to_widgets(_event(
+                        "agent_message", {"text": f"msg{i}"}, node="analyzer",
+                        session_id="s1", seq=i,
+                    ))
+                await pilot.pause()
+                bucket = app._node_events.get("analyzer", [])
+                assert len(bucket) == 3
+                assert [e.seq for e in bucket] == [0, 1, 2]
+        run_async(scenario())
+
+    def test_dispatch_only_selected_to_history(self, tmp_path):
+        """dispatch 1 event(node=runner) 但 selected=analyzer → AgentHistory 不收（避免双重渲染）。"""
+        wf = _load(_two_node_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # 默认 selected_node = entry = analyzer
+                assert app._selected_node == "analyzer"
+                # dispatch runner 的 agent_message → 不应进 AgentHistory
+                app._dispatch_to_widgets(_event(
+                    "agent_message", {"text": "runner msg"}, node="runner",
+                    session_id="r1", seq=10,
+                ))
+                await pilot.pause()
+                hist = app.query_one(AgentHistory)
+                # AgentHistory 不收（node != selected_node）
+                assert all(e.event_type != "agent_message" for e in hist.entries), (
+                    f"runner event 误进 AgentHistory: {hist.entries}"
+                )
+        run_async(scenario())
+
+    def test_switch_agent_reflow_history(self, tmp_path):
+        """j 切换到 runner → AgentHistory.set_node 调用 + 含该 node events。
+
+        spec v2 §3：切换 agent 时从 _node_events 桶全量重渲（纯前端，不读 tape）。
+        """
+        wf = _load(_two_node_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # 先填 runner 桶（不切 agent，仅 dispatch）
+                app._dispatch_to_widgets(_event(
+                    "agent_message", {"text": "runner msg"}, node="runner",
+                    session_id="r1", seq=10,
+                ))
+                await pilot.pause()
+                # 切换到 runner
+                app._on_node_selected("runner")
+                await pilot.pause()
+                hist = app.query_one(AgentHistory)
+                assert hist.node_name == "runner"
+                # set_node 从桶取 events，应含 1 条 agent_message
+                assert any(e.event_type == "agent_message" for e in hist.entries), (
+                    f"切换后 AgentHistory 不含 runner events: {hist.entries}"
+                )
+        run_async(scenario())
+
+    def test_auto_follow_on_node_started(self, tmp_path):
+        """reviewer P1-12：_auto_follow=True 时 node_started 触发 _selected_node 更新。
+
+        场景：默认 auto-follow；切到 analyzer → 切到 runner（node_started 触发跟随）。
+        """
+        wf = _load(_two_node_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # 默认 selected_node = entry = analyzer
+                assert app._selected_node == "analyzer"
+                # node_started on runner（auto_follow=True）→ selected 切到 runner
+                app._dispatch_to_widgets(_event(
+                    "node_started", {"kind": "agent"}, node="runner",
+                    session_id="r1", seq=100,
+                ))
+                await pilot.pause()
+                assert app._selected_node == "runner"
+                # AgentHistory 同步切到 runner
+                assert app.query_one(AgentHistory).node_name == "runner"
+        run_async(scenario())
+
+    def test_log_stream_receives_high_level_only(self, tmp_path):
+        """dispatch agent_message → LogStream 不收；dispatch node_started → LogStream 收。
+
+        spec v2 §11.5 #6：EVENT_LEVEL 三态，agent_message 显式 None（归 AgentHistory）。
+        """
+        wf = _load(_two_node_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # dispatch agent_message（不进 LogStream）
+                app._dispatch_to_widgets(_event(
+                    "agent_message", {"text": "hi"}, node="analyzer",
+                    session_id="a1", seq=1,
+                ))
+                await pilot.pause()
+                await pilot.pause()
+                text_after_msg = _flatten_strips(app.query_one(LogStream).lines)
+                assert "hi" not in text_after_msg  # agent_message 不进 LogStream
+                # dispatch node_started（进 LogStream，LEVEL_INFO）
+                app._dispatch_to_widgets(_event(
+                    "node_started", {"kind": "agent"}, node="analyzer",
+                    session_id="a1", seq=2,
+                ))
+                await pilot.pause()
+                await pilot.pause()
+                text_after_start = _flatten_strips(app.query_one(LogStream).lines)
+                assert "node started" in text_after_start
+        run_async(scenario())
+
+    def test_log_stream_skips_agent_events(self, tmp_path):
+        """dispatch agent_message / agent_tool_call → LogStream 不收（None level）。"""
+        wf = _load(_two_node_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app._dispatch_to_widgets(_event(
+                    "agent_message", {"text": "secret"}, node="analyzer",
+                    session_id="a1", seq=1,
+                ))
+                app._dispatch_to_widgets(_event(
+                    "agent_tool_call",
+                    {"tool": "Bash", "args": {"command": "ls"}, "tool_call_id": "tc1"},
+                    node="analyzer", session_id="a1", seq=2,
+                ))
+                await pilot.pause()
+                await pilot.pause()
+                text = _flatten_strips(app.query_one(LogStream).lines)
+                assert "secret" not in text
+                assert "Bash" not in text
+        run_async(scenario())
+
+    def test_log_stream_debug_hidden_by_default(self, tmp_path):
+        """dispatch route_taken → LogStream 默认不收（DEBUG level，需 L 键 toggle）。"""
+        wf = _load(_two_node_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app._dispatch_to_widgets(_event(
+                    "route_taken", {"from": "analyzer", "to": "runner"},
+                    node="analyzer", session_id="a1", seq=1,
+                ))
+                await pilot.pause()
+                await pilot.pause()
+                text_default = _flatten_strips(app.query_one(LogStream).lines)
+                assert "route" not in text_default
+                # spec v2 §2.4：debug toggle 真相源在 LogStream widget（L 键 binding）。
+                app.query_one(LogStream).toggle_debug()
+                app._dispatch_to_widgets(_event(
+                    "route_taken", {"from": "analyzer", "to": "runner"},
+                    node="analyzer", session_id="a1", seq=2,
+                ))
+                await pilot.pause()
+                await pilot.pause()
+                text_debug = _flatten_strips(app.query_one(LogStream).lines)
+                assert "route" in text_debug
+        run_async(scenario())
+
+    def test_compose_three_panels(self, tmp_path):
+        """query AgentsList / AgentHistory / LogStream 三 widget 均 mount（spec §2.1）。"""
+        wf = _load(_two_node_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert app.query_one(AgentsList) is not None
+                assert app.query_one(AgentHistory) is not None
+                assert app.query_one(LogStream) is not None
+        run_async(scenario())
+
+    def test_node_failed_dispatches_to_agents_list_and_log_stream(self, tmp_path):
+        """dispatch node_failed → AgentsList.update_node(status='failed') + LogStream 收 error level。"""
+        wf = _load(_two_node_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app._dispatch_to_widgets(_event(
+                    "node_failed",
+                    {"error_type": "ExecError", "message": "kaboom"},
+                    node="analyzer", session_id="a1", seq=5,
+                ))
+                await pilot.pause()
+                await pilot.pause()
+                # AgentsList 投影 status='failed'
+                proj = app.query_one(AgentsList).projection_of("analyzer")
+                assert proj is not None
+                assert proj.status == "failed"
+                assert "kaboom" in (proj.error_msg or "")
+                # LogStream 收 LEVEL_ERROR（含完整 message）
+                text = _flatten_strips(app.query_one(LogStream).lines)
+                assert "node FAILED" in text
+                assert "kaboom" in text  # reviewer P1-10：完整不截断
+        run_async(scenario())
