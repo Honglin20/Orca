@@ -106,9 +106,15 @@ class AgentHistory(Static):
     """
 
     BINDINGS = [
-        Binding("enter", "toggle_expand", "展开/收起", show=False),
-        Binding("j", "cursor_down", "下条", show=False),
-        Binding("k", "cursor_up", "上条", show=False),
+        # spec v2 §2.3 + §2.2：j/k/Enter/L 全部在 OrcaApp 级 BINDINGS 上提，原因：
+        # 1. AgentHistory 是 ``Static``（``can_focus=False`` 默认），widget BINDINGS 在
+        #    无 focus 时不触发；
+        # 2. 内嵌的 ``RichLog(agent-history-log)`` 拿默认焦点后吞 j/k/L 字符，且其 BINDINGS
+        #    优先级高于 App 级，会拦截 widget 自己绑的 j/k。
+        # 解决：widget BINDINGS 完全不绑 j/k/L/enter，全部由 App 级 BINDINGS 命中后转发到
+        # 既有 action_* 方法（单测通道保留：``test_action_toggle_expand`` 等仍直接调 widget
+        # action_*，接口零修改）。
+        # 这里 BINDINGS 留空是为了不与 App 级冲突（widget BINDINGS 命中后 App 级失效）。
     ]
 
     def __init__(self) -> None:

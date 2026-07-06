@@ -340,13 +340,25 @@ class OrcaApp(App):
         # phase 11 §2.4 / §6.1：d 弹 DialogModal（agent 跑完后多轮追问）。
         Binding("d", "dialog", "对话"),
         # spec v2 §1.2：a 恢复 auto-follow；c 聚焦 NodeDetail 图表 tab；C 全屏 ChartBrowser。
-        # L 切 debug log（在 LogStream widget 内 BINDINGS，spec §2.4）。
         Binding("a", "follow_active", "跟随活跃"),
         Binding("c", "focus_charts", "图表 tab"),
         Binding("C", "open_chart_browser", "全屏图表"),
         # spec v2 §1.2：thinking 默认显示（dim indigo，见 AgentHistory TYPE-LABEL）；
         # t 键提示用户用 Enter 展开折叠详情（不再 toggle 显隐）。
         Binding("t", "toggle_thinking", "切换 thinking"),
+        # spec v2 §2.2 + §8 #2：j/k 切 agent（用户原话「切换 agent 查看历史记录」）。
+        # 关键：j/k 必须在 App 级 BINDINGS 上提——AgentsList/AgentHistory widget 都是
+        # ``Static``（``can_focus=False`` 默认），widget BINDINGS 在无焦点时不触发；
+        # 同时 AgentHistory 内嵌的 RichLog（``agent-history-log``）拿到默认焦点后会吞
+        # ``j``/``k``/``L`` 字符。App 级 BINDINGS 优先级最高，覆盖 RichLog 字符吞咽行为。
+        # widget 内的 action_select_next/prev 仍是单测通道（不破坏既有接口）。
+        Binding("j", "agents_next", "下一 agent"),
+        Binding("k", "agents_prev", "上一 agent"),
+        # spec v2 §2.3 + reviewer P0-6：Enter 切换折叠详情。同样需 App 级绑定覆盖
+        # RichLog 字符吞咽（RichLog 默认 focus 时 Enter 也被吃）。
+        Binding("enter", "history_toggle_expand", "展开/收起"),
+        # spec v2 §2.4：L 键切 debug 显示。同上，App 级覆盖 RichLog。
+        Binding("L", "log_toggle_debug", "切 debug 日志"),
     ]
 
     def __init__(
@@ -1064,6 +1076,53 @@ class OrcaApp(App):
             "AgentHistory: thinking 默认 dim 显示，按 Enter 展开折叠详情",
             severity="information", timeout=2,
         )
+
+    # spec v2 §2.2 / §2.3 / §2.4：App 级 BINDINGS 上提的 4 个键的 action 转发。
+    # widget 自身 BINDINGS 在无 focus 时不触发 + RichLog 拿默认焦点后吞字符；
+    # App 级 BINDINGS 命中后调既有 widget action_* 方法（接口零修改，单测通道保留）。
+
+    def action_agents_next(self) -> None:
+        """``j`` 键：调 AgentsList.action_select_next（spec v2 §2.2 + §8 #2）。
+
+        App 级上提原因见 BINDINGS 注释（AgentsList widget 是 Static can_focus=False，
+        widget BINDINGS 在无 focus 时不触发；AgentHistory 内嵌 RichLog 拿默认焦点后
+        吞 j 字符）。本方法仅转发到 AgentsList.action_select_next——后者调 select()
+        → ``_on_node_selected`` → ``AgentHistory.set_node`` 全量重渲。
+        """
+        try:
+            self.query_one(AgentsList).action_select_next()
+        except Exception:  # noqa: BLE001 —— AgentsList 未挂载（极端 headless）
+            pass
+
+    def action_agents_prev(self) -> None:
+        """``k`` 键：调 AgentsList.action_select_prev（spec v2 §2.2 + §8 #2）。"""
+        try:
+            self.query_one(AgentsList).action_select_prev()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def action_history_toggle_expand(self) -> None:
+        """``Enter`` 键：调 AgentHistory.action_toggle_expand（spec v2 §2.3 + reviewer P0-6）。
+
+        注意：AgentHistory 自身也绑了 enter（widget 级 BINDINGS），但 RichLog 默认 focus
+        时字符会被吞。App 级 BINDINGS 优先命中本方法 → 转发到 widget action（不破坏
+        既有单测通道：``test_action_toggle_expand`` 直接调 widget.action_toggle_expand）。
+        """
+        try:
+            self.query_one(AgentHistory).action_toggle_expand()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def action_log_toggle_debug(self) -> None:
+        """``L`` 键：调 LogStream.action_toggle_debug（spec v2 §2.4）。
+
+        LogStream 是 RichLog（can_focus=True 默认），自己拿焦点时也会吞 L 字符；
+        App 级 BINDINGS 上提确保命中。
+        """
+        try:
+            self.query_one(LogStream).action_toggle_debug()
+        except Exception:  # noqa: BLE001
+            pass
 
     # ── header 刷新（SPEC §4.4）─────────────────────────────────────────
 

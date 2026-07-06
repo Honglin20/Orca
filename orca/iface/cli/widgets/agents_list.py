@@ -55,8 +55,9 @@ class AgentsList(Static):
     """
 
     BINDINGS = [
-        Binding("j", "select_next", "下一 agent", show=False),
-        Binding("k", "select_prev", "上一 agent", show=False),
+        # spec v2 §2.2：j/k 切 agent。原 widget 级 BINDINGS 在 ``Static`` 默认
+        # ``can_focus=False`` 时不触发；改为 OrcaApp 级 BINDINGS 上提（spec §2.2）。
+        # 单测通道保留：``test_widgets.py`` 直接调 ``action_select_next/prev``。
     ]
 
     def __init__(self) -> None:

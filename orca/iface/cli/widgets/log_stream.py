@@ -291,7 +291,11 @@ class LogStream(RichLog):
     """
 
     BINDINGS = [
-        Binding("L", "toggle_debug", "切 debug 日志", show=False),
+        # spec v2 §2.4：L 键切 debug 显示。但 ``LogStream`` 是 ``RichLog`` 子类
+        # （``can_focus=True`` 默认），自己拿焦点时 RichLog 会吞 ``L`` 字符。
+        # 同时 widget 级 BINDINGS 优先级高于 App 级，会让本 widget 抢先处理。
+        # 解决：widget BINDINGS 不绑 L，由 OrcaApp 级 BINDINGS 上提（spec §2.4）。
+        # 单测通道保留：``test_log_stream.py`` 直接调 ``action_toggle_debug``。
     ]
 
     def __init__(self) -> None:
