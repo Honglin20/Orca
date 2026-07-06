@@ -47,7 +47,7 @@ _TYPE_LABELS: dict[str, str] = {
     "interrupt_resolved":        "INT",
 }
 
-# spec §2.3 tool_call_id cache LRU 上限（迁自 v1.1.1 ActivityStream）
+# spec §2.3 tool_call_id cache LRU 上限（GAP-B/C 修复机制，spec §2.3）
 _TOOL_CALL_CACHE_CAP = 500
 
 # 头部行 truncated 标记阈值（spec §9 R3 FIFO 上限是 1000 events/node）

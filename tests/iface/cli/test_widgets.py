@@ -171,7 +171,7 @@ class TestAgentsList:
         assert proj.elapsed == 20.0      # 新增
 
     def test_update_node_unknown_name_ignored(self):
-        """未知 name 静默忽略（防御；与 v1.1.1 DagGraph.set_status 同语义）。"""
+        """未知 name 静默忽略（防御；与 AgentsList._projections.get(name) 同语义）。"""
         lst = AgentsList()
         lst.build(["analyzer"])
         lst.update_node("nonexistent", status="running")  # 不抛
@@ -201,7 +201,7 @@ class TestAgentsList:
         lst.build(["analyzer", "configurator"])
         # textual widget.app 在未 mount 时返 None（不抛）；select 内用 getattr 兜底，
         # 故未挂载时不会调 _on_node_selected。本测试通过 setattr 注入 mock app
-        #（绕过 textual 真起 app pilot；与 v1.1.1 DagGraph 测试同模式）。
+        #（绕过 textual 真起 app pilot；headless widget 单测同模式）。
         mock_app = _MockApp()
         type(lst).app = property(lambda _: mock_app)  # type: ignore[misc]
         try:

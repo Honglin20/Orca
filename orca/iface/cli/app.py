@@ -472,8 +472,6 @@ class OrcaApp(App):
         # 不读 tape）。FIFO 上限保护（_NODE_EVENTS_CAP）：超 1000 events/node 丢最旧
         # （spec §9 R3 + AgentHistory 头部行 truncated 标记）；tape 是真相源，丢的不丢真相。
         self._node_events: dict[str, list[Event]] = {}
-        # spec v2 §11.5 #5：删 v1.1.1 _node_arrived_count（fan-in 已取消，DagGraph 删了，
-        # 孤儿字段不留）。
         # spec v1.1 §6.2：per-node usage（agent_usage 收敛到 Header footer）。
         # key = node, value = NodeUsageStats（累加；opencode translator per-step 是累积值故取最后一条）。
         # session_id 维度去重：取该 session_id 最后一条 agent_usage（spec §4.4 acceptance）。
@@ -730,11 +728,11 @@ class OrcaApp(App):
             self.query_one(AgentsList).update_node(node, status="failed", error_msg=msg)
 
         elif etype == "node_skipped" and node:
-            # spec v2 §11.5：v1.1.1 DagGraph fan-in 副标已取消；AgentsList 不需要单独处理
-            # （status 不变，保持上一态）。LogStream 会按 LEVEL_WARN 显示一行。
+            # spec v2 §2.2：AgentsList 不单独处理 skip（status 保持上一态），
+            # LogStream 会按 LEVEL_WARN 显示一行。
             pass
 
-        # gate 事件（既有逻辑保留，只改 widget 引用 DagGraph → AgentsList）
+        # gate 事件（既有逻辑保留，仅 widget 引用换为 v2 AgentsList）
         elif etype == "human_decision_requested":
             gate_id = data.get("gate_id", "")
             self._awaiting_gates.add(gate_id)
@@ -770,8 +768,7 @@ class OrcaApp(App):
                     name=node, tokens=in_tok + out_tok, cost_usd=cost,
                 )
                 self._per_node_last_usage_seq[node] = event.seq
-                # spec v2 §11.5 + reviewer P1-12 fix：投影到 AgentsList 行
-                # （替代旧 DagGraph.update_node_projection）。
+                # spec v2 §11.5 + reviewer P1-12 fix：投影到 AgentsList 行（tokens 字段）。
                 self.query_one(AgentsList).update_node(node, tokens=in_tok + out_tok)
             self._refresh_header()
 
@@ -996,8 +993,10 @@ class OrcaApp(App):
         pin：``_auto_follow=False``；``_selected_node=name``；
         AgentHistory 从 ``_node_events`` 桶全量重渲（纯前端切换，不读 tape）。
 
-        v1.1.1 ActivityStream filter_node 概念已取消（spec §1.2 + §2.3：v2 用 j/k 切换）。
-        NodeDetail 保留实例但仅 chart 路径活跃（spec §6.3），不再 set_node 切 stream tab。
+        v2 spec §1.2 + §2.3：单 agent 视图（j/k 切换）。
+        NodeDetail 保留实例但仅 chart 路径活跃（spec §6.3）：仍调 ``set_node`` 同步
+        ChartPanel 的节点过滤（``c`` 键 / ``C`` 键 ChartBrowser 仍依赖此过滤），
+        但 stream/output tab 不再有数据流入（spec §4.4 双写已删）。
         """
         if not name:
             return
@@ -1012,6 +1011,12 @@ class OrcaApp(App):
             self.query_one(AgentHistory).set_node(name, events)
         except Exception as e:  # noqa: BLE001 —— AgentHistory 未挂载（headless）
             logger.debug("AgentHistory set_node skipped: %r", e)
+        try:
+            # spec §6.3：NodeDetail 仅 chart 路径活跃，但 chart 过滤仍按 selected_node。
+            kind = self._node_kinds.get(name)
+            self.query_one(NodeDetail).set_node(name, kind=kind)
+        except Exception as e:  # noqa: BLE001 —— NodeDetail 未挂载（headless）
+            logger.debug("NodeDetail set_node skipped: %r", e)
 
     def action_follow_active(self) -> None:
         """``a`` 键：恢复 auto-follow（SPEC §1.4 / §5）。
@@ -1064,8 +1069,8 @@ class OrcaApp(App):
 
     def _refresh_header(self) -> None:
         """重算 header stats（done / awaiting / per-node usage / running）。"""
-        # spec v2 §1.2 + §2.3：ActivityStream filter_node 概念取消（v2 用 j/k 切 agent）。
-        # 保留 ``filter_node=None`` 参数兼容 HeaderStats（Header footer 显示逻辑由 Step 6 清理）。
+        # spec v2 §1.2 + §2.3：单 agent 视图（j/k 切换）。
+        # 保留 ``filter_node=None`` 参数兼容 HeaderStats（Header footer 显示全部节点）。
         filter_node: str | None = None
         # spec v1.1 §6.2：per-node usage 按声明序（wf.nodes）输出，running 节点优先。
         per_node = [

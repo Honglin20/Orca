@@ -1,12 +1,8 @@
 """_event_summary.py —— v2 共享事件派生纯函数（spec v2 §2.3 / §2.4）。
 
-**目的**：v2 AgentHistory（Step 3）+ LogStream（Step 4）共享事件派生函数——
+**目的**：v2 AgentHistory + LogStream 共享事件派生函数——
 ``AgentHistory`` 双行 entry（summary 行 + meta 行 + 折叠详情）；
 ``LogStream`` 高层节点事件（message 模板，部分需 elapsed / issue 等派生）。
-
-**迁入历史**：6 个 module-level 纯函数源自从前 v1.1.1 ``activity_stream.py``
-（commit `225933e`），v2 Step 1b（迁移并删该文件后）保留这些函数供两 widget
-共享，避免重复实现（DRY）。
 
 **frozen 性质**：纯函数 + 无全局状态，便于单测，不依赖 textual 事件循环。
 

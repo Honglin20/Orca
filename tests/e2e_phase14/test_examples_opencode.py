@@ -3,7 +3,7 @@
 13 个 agent example（含 render_chart）：每个用 opencode 真跑，断言到终态（completed/failed）。
 goal 硬要求：agent example 必须 opencode 真跑过（不 mock）。
 
-**驱动方式**（避免 OrcaApp DagGraph widget 的 _assert_acyclic 对复杂 DAG 误抛）：
+**驱动方式**（避免 OrcaApp TUI 编排路径对复杂 DAG 的额外干扰）：
   - 多数 agent example 用 ``run_workflow``（真 spawn opencode 但不起 TUI，纯编排验证）。
   - render_chart 用 ``OrcaApp``（需起 per-run chart ingestor + 断言 tape 含 custom(chart)）。
 

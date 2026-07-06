@@ -2,7 +2,7 @@
 
 4 个用户重点验证点：
   1. **agent_message 完整性**：opencode events 模式不丢消息（每条 agent_message 在 TUI 流式 tab 可见）
-  2. **TUI 各面板显示合理**：DagGraph / NodeDetail / LogStream / ChartBrowser 渲染对
+  2. **TUI 各面板显示合理**：AgentsList / NodeDetail / LogStream / ChartBrowser 渲染对
   3. **render_chart 正确推送**：tape 含 custom(chart) + 图表 tab 真渲染（line chart braille 字符）
   4. **图表排布合理**：多图按 label 折叠、不同 label 分组、同 label+title 替换不堆积
 
@@ -94,7 +94,7 @@ class TestOpencodeDeepseekE2E:
     async def _scenario(self, tape_path: Path):
         from orca.compile import load_workflow
         from orca.iface.cli.app import OrcaApp
-        from orca.iface.cli.widgets.dag_graph import DagGraph
+        from orca.iface.cli.widgets import AgentHistory, AgentsList
         from orca.iface.cli.widgets.node_detail import NodeDetail
         from orca.iface.cli.widgets.chart_canvas import _PLOTEXT_OK
 
@@ -161,31 +161,34 @@ outputs:
                 f"验证点 1 失败：agent_message 应含 'DONE'；joined={joined!r}"
             )
 
-            # TUI 流式 tab：每条 agent_message 都应在 NodeDetail 的流式缓冲里
+            # TUI AgentHistory：opencode 每条 agent_message 都应在 AgentHistory entries 里
+            # （spec v2 §2.3：AgentHistory 替代 v1.1.1 NodeDetail 流式 tab）。
             nd = app.query_one(NodeDetail)
-            graph = app.query_one(DagGraph)
-            graph.select("runner")
+            lst = app.query_one(AgentsList)
+            history = app.query_one(AgentHistory)
+            lst.select("runner")
             await pilot.pause(0.2)
-            stream_lines = nd._stream_lines.get("runner", [])
-            # phase-15 render layer：list 可能含 str / RenderItem / _ThinkingChunk 混合，
-            # 转 str 后 join（既兼容老 str-only，也兼容新混合）。
-            stream_text = "\n".join(str(s) for s in stream_lines)
-            # opencode translator 给 agent_message 加 [msg] 前缀（phase-12 §6.3）
-            assert "[msg]" in stream_text, (
-                f"验证点 1 失败：TUI 流式 tab 缺 [msg] 行（agent_message 未渲染）；"
-                f"stream_lines={stream_lines}"
+            # AgentHistory entries 含至少 1 条 agent_message（TYPE_LABEL "MSG"）
+            msg_entries = [e for e in history.entries if e.event_type == "agent_message"]
+            assert msg_entries, (
+                f"验证点 1 失败：AgentHistory 缺 agent_message entry；"
+                f"entries types={[e.event_type for e in history.entries]}"
             )
 
             # ── 验证点 2：TUI 各面板显示合理 ────────────────────────────────
-            # DagGraph 渲染含 runner
-            graph_render = str(graph.render())
-            assert "runner" in graph_render, (
-                f"验证点 2 失败：DagGraph 渲染缺 runner；render={graph_render!r}"
+            # AgentsList 含 runner 节点（拓扑已 build）+ 投影 status=done
+            runner_proj = lst.projection_of("runner")
+            assert runner_proj is not None, (
+                "验证点 2 失败：AgentsList 应含 runner 节点（dispatch 后 build 已注入）"
+            )
+            # AgentsList.content 含 runner 字面（拓扑序行渲染）
+            content_str = str(lst.content)
+            assert "runner" in content_str, (
+                f"验证点 2 失败：AgentsList 渲染缺 runner；content={content_str!r}"
             )
             # runner 状态为 done
-            assert graph.status_of_node("runner") == "done", (
-                f"验证点 2 失败：runner 应 done；"
-                f"got {graph.status_of_node('runner')!r}"
+            assert runner_proj.status == "done", (
+                f"验证点 2 失败：runner 应 done；got {runner_proj.status!r}"
             )
             # NodeDetail active=runner / kind=agent
             assert nd.active == "runner"

@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orca.compile import load_workflow
 from orca.iface.cli.app import OrcaApp
-from orca.iface.cli.widgets.dag_graph import DagGraph
+from orca.iface.cli.widgets import AgentsList
 from orca.iface.cli.widgets.node_detail import NodeDetail
 
 ART = Path(__file__).parent / "_artifacts"
@@ -34,14 +34,15 @@ async def main():
     async def inject():
         for _ in range(300):
             try:
-                if app.query_one(DagGraph).status_of_node("analyst") == "running":
+                proj = app.query_one(AgentsList).projection_of("analyst")
+                if proj is not None and proj.status == "running":
                     break
             except Exception:
                 pass
             await asyncio.sleep(0.1)
         await asyncio.sleep(0.4)
         try:
-            app.query_one(DagGraph).select("reporter")
+            app.query_one(AgentsList).select("reporter")
         except Exception:
             pass
         for p, n in [
@@ -67,7 +68,7 @@ async def main():
         await pilot.pause(0.5)
 
         # Focus reporter + charts tab for the screenshot.
-        app.query_one(DagGraph).select("reporter")
+        app.query_one(AgentsList).select("reporter")
         await pilot.pause(0.1)
         cp = app.query_one(NodeDetail)._chart_panel
         cp._focus = ("reporter", "training", "loss")

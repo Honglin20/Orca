@@ -636,7 +636,7 @@ class TestInterruptFlow:
         """spec v1.1 §6.1：prompt_rendered 是调试事件，TUI 完全不显示（hide_all）。
 
         旧 v1.0 测试断言"prompt rendered"显示，spec v1.1 反转该决议（noise governance）。
-        本测试改为反向断言：LogStream / ActivityStream 都不含 prompt rendered。
+        本测试改为反向断言：LogStream / AgentHistory 都不含 prompt rendered。
         """
         wf = _load(_linear_workflow(tmp_path))
         app = _app(tmp_path, wf)
