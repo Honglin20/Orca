@@ -36,27 +36,37 @@ def _make_server_with_mock_manager() -> tuple[OrcaMcpServer, MagicMock]:
 
 
 def test_cancel_task_running():
-    """cancel_task running：mock manager.cancel_run 返回 True → ok=True + status="cancelled"。"""
+    """cancel_task running：mock manager.cancel_run 返回 True → ok=True + status="cancelled"。
+
+    v4 Result 信封：``{ok: True, data: {ok: True, status: "cancelled"}, _hint: ...}``。
+    外层 ``ok`` 是信封状态；内层 ``data.ok`` 是 cancel 业务结果。
+    """
     server, mock_manager = _make_server_with_mock_manager()
     mock_manager.cancel_run = AsyncMock(return_value=True)
 
     result = run_async(server.tool_cancel_task(task_id="r1", reason="user_aborted"))
 
     assert result["ok"] is True
-    assert result["status"] == "cancelled"
+    assert result["data"]["ok"] is True
+    assert result["data"]["status"] == "cancelled"
     assert "cancelled" in result["_hint"].lower()
     mock_manager.cancel_run.assert_awaited_once_with("r1", "user_aborted")
 
 
 def test_cancel_task_already_terminal():
-    """cancel_task 已终态：mock 返回 False → ok=False + status="terminal"。"""
+    """cancel_task 已终态：mock 返回 False → 业务 ok=False（信封仍 ok，是 cancel 被拒）。
+
+    v4：cancel 已终态不是 error（用户操作语义合法，只是 run 已结束），返 ``ok=True`` 信封 +
+    ``data.ok=False`` 引导查 status。
+    """
     server, mock_manager = _make_server_with_mock_manager()
     mock_manager.cancel_run = AsyncMock(return_value=False)
 
     result = run_async(server.tool_cancel_task(task_id="r1"))
 
-    assert result["ok"] is False
-    assert result["status"] == "terminal"
+    assert result["ok"] is True
+    assert result["data"]["ok"] is False
+    assert result["data"]["status"] == "terminal"
     assert "terminal" in result["_hint"].lower()
 
 
@@ -70,18 +80,28 @@ def test_cancel_task_passes_none_reason():
     mock_manager.cancel_run.assert_awaited_once_with("r1", None)
 
 
-def test_fastmcp_lists_six_tools_phase14():
-    """FastMCP 注册六件套：start/get/resolve/cancel + phase-14 list_agents/get_agent。"""
+def test_fastmcp_lists_nine_tools_v4():
+    """v4：FastMCP 注册 9 工具（Discovery 4 + Lifecycle 3 + History 2）。
+
+    v4 删 ``resolve_gate``（execute phase 永不中断），加 4 新工具：
+    list_workflows / describe_workflow / get_agent_prompt / get_task_history。
+    """
     m = RunManager()
     server = OrcaMcpServer(m)
     tools = server._mcp._tool_manager._tools
     names = set(tools.keys())
     assert names == {
+        # Discovery 4
+        "list_workflows",
+        "describe_workflow",
+        "list_agents",
+        "get_agent_prompt",
+        # Lifecycle 3
         "start_workflow",
         "get_task_status",
-        "resolve_gate",
         "cancel_task",
-        "list_agents",
+        # History 2
+        "get_task_history",
         "get_agent",
     }
 

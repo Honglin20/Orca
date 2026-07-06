@@ -8,12 +8,8 @@
   - **逐条 flush**：连续 5 个 tool call 并发（``asyncio.gather``），server 必须逐条 flush
     应答，不批量 / 不丢（规避 opencode #21516：客户端不等 reply 批量发时 server 必须配合）。
 
-为何用 ``list_tools`` 而非真 tool call：list_tools 是 MCP 协议层最轻的调用（无副作用、
-无状态），纯粹测 stdio flush 通路。若 list_tools 并发能逐条收到，tool call 必然也能
-（同走 ``stdio_server`` 写路径）。
-
-附加：并发 5 个 ``start_workflow``（不同 yaml copy）断言各 task_id 唯一——进一步验证
-并发 stdio round-trip 不串。
+v4 更新（2026-07-07）：期望 9 工具（Discovery 4 + Lifecycle 3 + History 2）；start_workflow
+E2E 用 catalog 模式（cwd 指向含 ``workflows/`` 的 tmp_path）。
 """
 
 from __future__ import annotations
@@ -24,19 +20,28 @@ from pathlib import Path
 
 from tests.iface.mcp.conftest import (
     orca_mcp_subprocess,
-    parse_tool_result,
     run_async,
 )
 
 # demo_linear 路径（项目根 examples/demo_linear.yaml）。
 DEMO_LINEAR = str(Path(__file__).resolve().parents[3] / "examples" / "demo_linear.yaml")
 
-# 期望的四件套 tool 名（D4 后 FastMCP 注册四个）。
-_EXPECTED_TOOLS = {"start_workflow", "get_task_status", "resolve_gate", "cancel_task"}
+# v4 期望的 9 工具名（Discovery 4 + Lifecycle 3 + History 2）。
+_EXPECTED_TOOLS = {
+    "list_workflows",
+    "describe_workflow",
+    "list_agents",
+    "get_agent_prompt",
+    "start_workflow",
+    "get_task_status",
+    "cancel_task",
+    "get_task_history",
+    "get_agent",
+}
 
 
 def test_e2e_concurrent_list_tools_all_receive_full_tool_list(tmp_path):
-    """E2E-5：并发 5 个 list_tools，每个都收到完整四件套（不批量 / 不丢）。
+    """E2E-5：并发 5 个 list_tools，每个都收到完整 9 工具（不批量 / 不丢）。
 
     SPEC §6.3 E2E-5：规避 opencode #21516，server 必须逐条 flush 应答。
     """
@@ -54,34 +59,36 @@ def test_e2e_concurrent_list_tools_all_receive_full_tool_list(tmp_path):
     assert len(tool_sets) == 5, f"应收到 5 个 reply，实得 {len(tool_sets)}"
     for i, names in enumerate(tool_sets):
         assert _EXPECTED_TOOLS.issubset(names), (
-            f"reply {i} 应含四件套，实得 {names}（缺 {_EXPECTED_TOOLS - names}）"
+            f"reply {i} 应含 9 工具，实得 {names}（缺 {_EXPECTED_TOOLS - names}）"
         )
 
 
 def test_e2e_concurrent_start_workflow_yields_unique_task_ids(tmp_path):
-    """附加：并发 5 个 start_workflow（不同 yaml copy），各 task_id 唯一（不串）。
+    """附加：并发 5 个 start_workflow（catalog 模式），各 task_id 唯一（不串）。
 
-    进一步验证并发 stdio round-trip 不串：每个 start_workflow 应返回独立 task_id。
-    用 5 份 yaml copy（避免文件锁 / 路径冲突；其实同文件也没事，但显式 copy 更稳）。
+    v4：start_workflow 用 ``name`` 而非 ``yaml_path``。需要在 subprocess 的 cwd 下有
+    ``workflows/demo_linear.yaml``。tmp_path/workflows/ 放一份，cwd=tmp_path。
     """
-    yaml_copies: list[str] = []
-    for i in range(5):
-        p = tmp_path / f"demo_{i}.yaml"
-        shutil.copyfile(DEMO_LINEAR, p)
-        yaml_copies.append(str(p))
+    # 在 tmp_path/workflows/ 放 demo_linear.yaml（catalog 扫描目录）
+    workflows_dir = tmp_path / "workflows"
+    workflows_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(DEMO_LINEAR, workflows_dir / "demo_linear.yaml")
 
     async def scenario() -> list[str]:
-        async with orca_mcp_subprocess(tmp_path) as session:
-            # 并发发 5 个 start_workflow
+        async with orca_mcp_subprocess(tmp_path, cwd=tmp_path) as session:
+            # 并发发 5 个 start_workflow（name-based，v4 catalog 模式）
             results = await asyncio.gather(*[
-                session.call_tool("start_workflow", {"yaml_path": yp})
-                for yp in yaml_copies
+                session.call_tool("start_workflow", {"name": "demo_linear"})
+                for _ in range(5)
             ])
             task_ids: list[str] = []
             for r in results:
+                from tests.iface.mcp.conftest import parse_tool_result
                 d = parse_tool_result(r)
-                assert d["status"] == "running", f"start 应返回 running，实得 {d}"
-                task_ids.append(d["task_id"])
+                # v4 Result 信封：{ok: True, data: {task_id, status: "running"}, _hint}
+                assert d["ok"] is True, f"start_workflow 应 ok=True，实得 {d}"
+                assert d["data"]["status"] == "running", f"start 应返回 running，实得 {d}"
+                task_ids.append(d["data"]["task_id"])
             return task_ids
 
     task_ids = run_async(scenario())

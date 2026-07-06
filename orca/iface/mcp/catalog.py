@@ -1,0 +1,177 @@
+"""catalog.py —— workflow catalog（纯函数 + 文件系统，SPEC phase-10 §5.6）。
+
+回答「``list_workflows`` / ``describe_workflow`` 数据从哪来？」：扫项目级 + 用户级
+``workflows/`` 目录，用 ``compile.load_workflow`` 加载每个 YAML，提取元信息（含 v4
+``has_setup`` 标记 + setup phase 元信息）。
+
+设计约束（§5.6 关键约束）：
+  - 纯函数 + 文件系统，无 daemon 注册表、无 db。
+  - 加载失败（yaml 语法错 / agent 引用缺失）→ log warning + 跳过，不中断列表。
+  - ``find_workflow_by_name`` / ``find_workflow_yaml_path`` 给 ``start_workflow`` /
+    ``describe_workflow`` 反查用（name → yaml_path）。
+
+三重杠杆 A（§2.8）：``list_workflows`` 返 ``has_setup`` 标记，主 session 选 workflow
+阶段就知道「这个 workflow 需要 setup」。
+
+依赖单向：本模块依赖 ``orca.compile``（load_workflow）+ ``orca.schema``（Workflow）。
+不依赖 run/exec/events。纯函数。
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any
+
+from orca.compile import ConfigurationError, load_workflow
+from orca.schema.workflow import Workflow
+
+logger = logging.getLogger(__name__)
+
+
+# workflow catalog 扫描目录（first-wins：project-local 优先于 user-global）。
+def _workflow_dirs() -> list[Path]:
+    """catalog 扫描目录列表（project-local + user-global）。
+
+    返回顺序决定 ``find_workflow_by_name`` 的优先级（first-wins）。``~/.orca/workflows``
+    在 user home 下，跨 project 共享（与 agent pool 同模式）。
+    """
+    return [
+        Path.cwd() / "workflows",
+        Path.home() / ".orca" / "workflows",
+    ]
+
+
+def list_workflows() -> list[dict[str, Any]]:
+    """扫描 catalog 目录，返回 workflow 元信息列表（SPEC §5.6 / §2.2）。
+
+    每项字段：``{name, description, has_setup, entry, inputs_count}``。
+    ``has_setup`` 是三重杠杆 A（§2.8）：主 session 据此知道是否需调 get_agent_prompt。
+
+    加载失败的 YAML 跳过（log warning，不中断列表）。
+    """
+    seen: dict[str, dict[str, Any]] = {}
+    for d in _workflow_dirs():
+        if not d.is_dir():
+            continue
+        try:
+            yaml_paths = sorted(d.glob("*.yaml"))
+        except OSError:
+            continue
+        for yaml_path in yaml_paths:
+            try:
+                wf = load_workflow(yaml_path)
+            except (ConfigurationError, Exception) as e:  # noqa: BLE001
+                logger.warning(
+                    "catalog: 跳过 %s（加载失败：%s）", yaml_path, e
+                )
+                continue
+            if wf.name in seen:
+                continue  # first-wins（project-local 优先）
+            seen[wf.name] = {
+                "name": wf.name,
+                "description": wf.description,
+                "has_setup": bool(wf.setup),
+                "entry": wf.entry,
+                "inputs_count": len(wf.inputs),
+            }
+    return list(seen.values())
+
+
+def describe_workflow(wf: Workflow) -> dict[str, Any]:
+    """从已加载的 ``Workflow`` 提取详查字典（SPEC §2.2 / §2.7）。
+
+    返回字段：``{name, description, inputs_schema, setup, has_setup, estimated_runtime}``。
+    ``setup`` 字段（``has_setup=True`` 时非空）：setup phase agent 元信息列表，每项
+    ``{name, description, output_schema}``。主 session 据此判断「是否需 setup」。
+    """
+    return {
+        "name": wf.name,
+        "description": wf.description,
+        "inputs_schema": _inputs_to_schema(wf),
+        "setup": [
+            {
+                "name": a.name,
+                "description": a.prompt[:200] if a.prompt else "",
+                "output_schema": a.output_schema,
+            }
+            for a in (wf.setup or [])
+        ],
+        "has_setup": bool(wf.setup),
+        "estimated_runtime": _estimate_runtime(wf),
+    }
+
+
+def find_workflow(name: str) -> tuple[Workflow, str] | None:
+    """按 ``wf.name`` 查找并加载 workflow（SPEC §5.6 / §2.3 start_workflow 依赖）。
+
+    **按 workflow name 字段匹配，不是文件名**：用户可把 ``setup_demo`` workflow
+    存在 ``my_setup.yaml`` 里，catalog 按 ``wf.name`` 找到它。
+
+    Returns ``(Workflow, yaml_path)`` 元组（DRY：避免 server 层重复扫 catalog 两次）。
+    first-wins：project-local 优先于 user-global。未找到 → None。
+    """
+    for d in _workflow_dirs():
+        if not d.is_dir():
+            continue
+        try:
+            yaml_paths = sorted(d.glob("*.yaml"))
+        except OSError:
+            continue
+        for yaml_path in yaml_paths:
+            try:
+                wf = load_workflow(yaml_path)
+            except (ConfigurationError, Exception) as e:  # noqa: BLE001
+                logger.warning(
+                    "catalog: 加载 %s 失败：%s", yaml_path, e
+                )
+                continue
+            if wf.name == name:
+                return (wf, str(yaml_path))
+    return None
+
+
+def find_workflow_by_name(name: str) -> Workflow | None:
+    """按 ``wf.name`` 查找并加载 workflow（薄 wrapper，SPEC §5.6）。
+
+    仅返 Workflow（不需要 yaml_path 的调用方用）。需要 yaml_path 的场景调
+    ``find_workflow`` 取元组（DRY，避免重复扫 catalog）。
+    """
+    result = find_workflow(name)
+    return result[0] if result is not None else None
+
+
+def find_workflow_yaml_path(name: str) -> str | None:
+    """按 ``wf.name`` 反查 yaml_path（薄 wrapper）。"""
+    result = find_workflow(name)
+    return result[1] if result is not None else None
+
+
+def _inputs_to_schema(wf: Workflow) -> dict[str, dict[str, Any]]:
+    """wf.inputs → JSON-schema 友好的 ``{key: {type, required, description}}`` 字典。"""
+    out: dict[str, dict[str, Any]] = {}
+    for key, idef in wf.inputs.items():
+        out[key] = {
+            "type": idef.type,
+            "required": idef.required,
+            "description": idef.description,
+        }
+        if idef.default is not None:
+            out[key]["default"] = idef.default
+    return out
+
+
+def _estimate_runtime(wf: Workflow) -> str:
+    """粗估 runtime（基于 node 数量，非精确——给主 session 参考用）。
+
+    他uristic：``len(nodes)`` 个 agent × 平均 30s/node（含 setup phase）。
+    仅用于 ``describe_workflow`` 展示，不参与调度决策。
+    """
+    agent_count = sum(
+        1 for n in wf.nodes if hasattr(n, "kind") and n.kind == "agent"
+    ) + len(wf.setup or [])
+    if agent_count == 0:
+        return "<10s（纯 script / set 节点）"
+    if agent_count <= 2:
+        return f"~{agent_count * 30}s（{agent_count} agent）"
+    return f"~{(agent_count * 30) // 60}m（{agent_count} agent）"
