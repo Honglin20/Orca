@@ -484,9 +484,10 @@ class OrcaMcpServer:
             ResolveContext,
         )
 
+        cwd = Path.cwd()
         ctx = ResolveContext(
-            workflow_dir=Path(yaml_path).resolve().parent if yaml_path else _cwd(),
-            cwd=_cwd(),
+            workflow_dir=Path(yaml_path).resolve().parent if yaml_path else cwd,
+            cwd=cwd,
         )
         resolver = LocalPoolResolver()
         try:

@@ -635,6 +635,45 @@ def test_get_task_history_returns_events():
     assert result["data"]["events"][1]["summary"] == "ok"
 
 
+# ── get_agent（History 组，防 _cwd 回归）──────────────────────────────────────
+
+
+def test_get_agent_nonexistent_returns_business_config(tmp_path, monkeypatch):
+    """get_agent 未知 name → ok=False + kind=business_config（不 raise NameError）。
+
+    回归守护：早期实现误删 _cwd() helper 导致 NameError（E2E 实测发现）。
+    """
+    # 隔离 cwd 到 tmp_path（避免扫到项目 agents/）
+    monkeypatch.chdir(tmp_path)
+    server, _ = _make_server_with_mock_manager()
+
+    result = run_async(server.tool_get_agent(name="nonexistent_xyz"))
+
+    assert result["ok"] is False
+    assert result["error"]["kind"] == "business_config"
+    assert "list_agents" in result["_hint"]
+
+
+def test_get_agent_returns_prompt_preview(tmp_path, monkeypatch):
+    """get_agent 找到 agent → 返 prompt_preview + meta。"""
+    # 合成 agent pool
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "simple.md").write_text(
+        "---\ndescription: test agent\n---\nDo the thing.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    server, _ = _make_server_with_mock_manager()
+
+    result = run_async(server.tool_get_agent(name="simple"))
+
+    assert result["ok"] is True
+    assert result["data"]["name"] == "simple"
+    assert result["data"]["description"] == "test agent"
+    assert "Do the thing" in result["data"]["prompt_preview"]
+
+
 # ── FastMCP 注册 9 工具 ──────────────────────────────────────────────────────
 
 
