@@ -90,7 +90,6 @@ async def execute_and_emit(
                 f"executor 执行 node {getattr(node, 'name', '?')!r} 未产出 "
                 "node_completed（生命周期违约）"
             ),
-            error_type="NodeLifecycleViolation",
             node=getattr(node, "name", None),
         )
     return output

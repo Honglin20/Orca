@@ -1,10 +1,10 @@
 """tests/exec/test_contract.py —— 契约层结构/import/ABC/错误映射/依赖单向。
 
 覆盖 SPEC §7.1 / §7.2 + 开发计划 A.6：
-  - public API 可 import（Executor / make_executor / RunContext / ExecError）
+  - public API 可 import（Executor / make_executor / RunContext / ExecError / ErrorKind）
   - Executor 是 ABC（不能直接实例化）
   - RunContext frozen（mutation 抛 FrozenInstanceError）
-  - ExecError 字段（phase / error_type / message）+ phase_to_error_type 全映射覆盖
+  - ExecError 字段（kind / phase / message）+ phase_to_error_type 全映射覆盖
   - 依赖单向铁律 1：exec/ 不 import orca.run / orca.compile
   - 依赖单向铁律 2：exec/ 不 import orca.events.bus / Tape（只允许 orca.schema.Event）
 """
@@ -16,7 +16,14 @@ from pathlib import Path
 
 import pytest
 
-from orca.exec import ExecError, Executor, RunContext, make_executor, phase_to_error_type
+from orca.exec import (
+    ExecError,
+    ErrorKind,
+    Executor,
+    RunContext,
+    make_executor,
+    phase_to_error_type,
+)
 from orca.schema import AgentNode, ForeachNode, ScriptNode, SetNode
 
 EXEC_DIR = Path(__file__).resolve().parents[2] / "orca" / "exec"
@@ -87,18 +94,33 @@ def test_run_context_is_frozen():
 # ── ExecError + phase_to_error_type ──────────────────────────────────────────
 
 
-def test_exec_error_fields_default_error_type():
+def test_exec_error_fields_default_kind():
+    """phase=timeout → kind=TRANSPORT_TIMEOUT（默认派生，ADR §4.1.1）。"""
     e = ExecError(phase="timeout", message="超时")
     assert e.phase == "timeout"
-    assert e.error_type == "ExecTimeout"
+    assert e.kind is ErrorKind.TRANSPORT_TIMEOUT
     assert e.message == "超时"
     assert "timeout" in str(e)
 
 
-def test_exec_error_explicit_error_type_override():
-    """stream phase 可显式覆盖 error_type（附 api_error_status 等额外诊断）。"""
-    e = ExecError(phase="stream", message="claude 报错", error_type="ClaudeApiError")
-    assert e.error_type == "ClaudeApiError"
+def test_exec_error_explicit_kind_override():
+    """显式传 kind 覆盖默认（如 stream BUSINESS_AGENT 走 classifier 精分后）。"""
+    e = ExecError(
+        phase="stream", message="claude 报错", kind=ErrorKind.BUSINESS_AGENT,
+    )
+    assert e.kind is ErrorKind.BUSINESS_AGENT
+
+
+def test_exec_error_kind_accepts_str_value():
+    """kind 接受字符串值（容错：dataclass / dict 反序列化场景）。"""
+    e = ExecError(phase="stream", message="x", kind="business_agent")
+    assert e.kind is ErrorKind.BUSINESS_AGENT
+
+
+def test_exec_error_legacy_error_type_property():
+    """error_type 是派生只读属性（迁移期诊断），返回 legacy phase→name 映射。"""
+    e = ExecError(phase="timeout", message="x")
+    assert e.error_type == "ExecTimeout"  # 派生自 phase（诊断映射，非字段）
 
 
 @pytest.mark.parametrize(
@@ -123,10 +145,13 @@ def test_phase_to_error_type_all_mappings(phase, expected):
     assert phase_to_error_type(phase) == expected
 
 
-def test_phase_to_error_type_unknown_raises():
-    """未知 phase fail loud（映射表漏补是 bug）。"""
-    with pytest.raises(ValueError, match="未知 error phase"):
-        phase_to_error_type("bogus")
+def test_phase_to_error_type_unknown_returns_unknown():
+    """phase_to_error_type 已退为诊断映射，未知 phase 返 ``"Unknown"``（容错，SPEC §4.2）。
+
+    旧版（v1）fail loud ValueError 已废弃：``error_type`` 不再是权威分类轴，未知 phase
+    漏补表不应让 raise 路径崩溃；kind 由 ``_DEFAULT_KIND_FOR_PHASE`` 兜底为 UNKNOWN。
+    """
+    assert phase_to_error_type("bogus") == "Unknown"
 
 
 # ── make_executor 分派（factory 真实现，覆盖 SPEC §7.8 的 fail-loud 边界） ─────

@@ -38,6 +38,7 @@ from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
 from orca.exec.context import RunContext
+from orca.exec.error import ExecError
 from orca.exec.interface import Executor
 from orca.exec.render import render_template
 from orca.schema import Event, WaitNode
@@ -130,80 +131,84 @@ class WaitExecutor(Executor):
 
         yield _ev("node_started", {"kind": "wait", "duration": node.duration})
 
-        # 渲染 + 解析 duration（非法 → node_failed{RenderError}，fail loud）
+        # 渲染 + 解析 duration（非法 → raise ExecError(phase=render)；与 set_node 对称，
+        # 走标准 except ExecError emit 分支，确保 classifier 能正确分类）
         try:
-            duration_str = render_template(node.duration, ctx)
-            duration_seconds = parse_duration(duration_str)
-        except ValueError as e:
-            yield _ev(
-                "node_failed",
-                {
-                    "error_type": "RenderError",
-                    "phase": "render",
-                    "message": f"invalid duration {node.duration!r}: {e}",
-                },
-            )
-            return
+            try:
+                duration_str = render_template(node.duration, ctx)
+                duration_seconds = parse_duration(duration_str)
+            except ValueError as e:
+                raise ExecError(
+                    phase="render",
+                    message=f"invalid duration {node.duration!r}: {e}",
+                ) from e
 
-        # 硬上限（防配置错，SPEC §9.7.5）
-        if duration_seconds > MAX_DURATION_SECONDS:
-            yield _ev(
-                "node_failed",
-                {
-                    "error_type": "ConfigError",
-                    "phase": "config",
-                    "message": (
+            # 硬上限（防配置错，SPEC §9.7.5）
+            if duration_seconds > MAX_DURATION_SECONDS:
+                raise ExecError(
+                    phase="config",
+                    message=(
                         f"duration {duration_seconds}s exceeds max "
                         f"{MAX_DURATION_SECONDS}s (24h)"
                     ),
-                },
+                )
+
+            yield _ev(
+                "wait_started",
+                {"duration_seconds": duration_seconds, "reason": node.reason},
             )
-            return
 
-        yield _ev(
-            "wait_started",
-            {"duration_seconds": duration_seconds, "reason": node.reason},
-        )
+            interrupted = False
+            if node.interruptible:
+                # 注册 wait handle：InterruptHandler 收到 Ctrl+G 时 registry.notify_all_waits()
+                # 把它 set()，asyncio.wait FIRST_COMPLETED 立即返回（interrupted=True）。
+                interrupt_evt = asyncio.Event()
+                self._bus.register_wait_handle(interrupt_evt)
+                try:
+                    sleep_task = asyncio.create_task(
+                        asyncio.sleep(duration_seconds), name=f"wait-sleep-{node.name}"
+                    )
+                    int_task = asyncio.create_task(
+                        interrupt_evt.wait(), name=f"wait-interrupt-{node.name}"
+                    )
+                    done, pending = await asyncio.wait(
+                        {sleep_task, int_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for task in pending:
+                        task.cancel()
+                    # await 已取消的 pending 任务，让取消传播落地（防「Task was destroyed but
+                    # pending」警告）；CancelledError / 其他异常都吞掉（结果不重要）。
+                    for task in pending:
+                        try:
+                            await task
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                    interrupted = int_task in done
+                finally:
+                    self._bus.unregister_wait_handle(interrupt_evt)
+            else:
+                # 不可打断：必须等满（Ctrl+G 等下一 node 边界生效，与中断系统既有契约一致）。
+                await asyncio.sleep(duration_seconds)
 
-        interrupted = False
-        if node.interruptible:
-            # 注册 wait handle：InterruptHandler 收到 Ctrl+G 时 registry.notify_all_waits()
-            # 把它 set()，asyncio.wait FIRST_COMPLETED 立即返回（interrupted=True）。
-            interrupt_evt = asyncio.Event()
-            self._bus.register_wait_handle(interrupt_evt)
-            try:
-                sleep_task = asyncio.create_task(
-                    asyncio.sleep(duration_seconds), name=f"wait-sleep-{node.name}"
-                )
-                int_task = asyncio.create_task(
-                    interrupt_evt.wait(), name=f"wait-interrupt-{node.name}"
-                )
-                done, pending = await asyncio.wait(
-                    {sleep_task, int_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for task in pending:
-                    task.cancel()
-                # await 已取消的 pending 任务，让取消传播落地（防「Task was destroyed but
-                # pending」警告）；CancelledError / 其他异常都吞掉（结果不重要）。
-                for task in pending:
-                    try:
-                        await task
-                    except (asyncio.CancelledError, Exception):
-                        pass
-                interrupted = int_task in done
-            finally:
-                self._bus.unregister_wait_handle(interrupt_evt)
-        else:
-            # 不可打断：必须等满（Ctrl+G 等下一 node 边界生效，与中断系统既有契约一致）。
-            await asyncio.sleep(duration_seconds)
+            elapsed = time.monotonic() - start
+            yield _ev(
+                "wait_completed",
+                {"elapsed_seconds": elapsed, "interrupted": interrupted},
+            )
+            yield _ev(
+                "node_completed",
+                {"output": {"interrupted": interrupted}, "elapsed": elapsed},
+            )
 
-        elapsed = time.monotonic() - start
-        yield _ev(
-            "wait_completed",
-            {"elapsed_seconds": elapsed, "interrupted": interrupted},
-        )
-        yield _ev(
-            "node_completed",
-            {"output": {"interrupted": interrupted}, "elapsed": elapsed},
-        )
+        except ExecError as e:
+            elapsed = time.monotonic() - start
+            err_data = {
+                "kind": e.kind.value,
+                "error_type": e.error_type,
+                "message": e.message,
+                "phase": e.phase,
+            }
+            yield _ev("node_failed", err_data)
+            yield _ev("error", err_data)
+

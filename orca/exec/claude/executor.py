@@ -192,6 +192,7 @@ class ClaudeExecutor(Executor):
             # continue/skip/abort，retry 也据此短路（SPEC §9.5.2 error_type 对齐表）。
             if runner.was_interrupted:
                 yield _ev("node_failed", {
+                    "kind": "business_gate",
                     "error_type": "Interrupted",
                     "message": "claude 子进程被用户 SIGINT 中断（Ctrl+G）",
                     "phase": "interrupted",
@@ -259,6 +260,7 @@ class ClaudeExecutor(Executor):
         except ExecError as e:
             # 12. fail loud：node_failed + error 双发（SPEC §6 / 铁律 4）
             err_data = {
+                "kind": e.kind.value,
                 "error_type": e.error_type,
                 "message": e.message,
                 "phase": e.phase,

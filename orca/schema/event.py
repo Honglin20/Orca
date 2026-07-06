@@ -19,12 +19,14 @@ EventType = Literal[
     # ── workflow 生命周期（node=None, session_id=None）──
     "workflow_started",  # data: {inputs, node_count, entry, workflow_name}
     "workflow_completed",  # data: {elapsed, outputs}
-    "workflow_failed",  # data: {error_type, message, node}  # node=导致失败的 node（payload）
+    # phase-11 v2.1 / ADR §4.1.2：kind 是唯一分类权威；error_type 读兼容期保留（旧 tape）
+    "workflow_failed",  # data: {kind, error_type(读兼容), message, node}
     "workflow_cancelled",  # data: {reason}  # 用户取消（MCP cancel_task / RunManager.cancel_run）
     # ── node 生命周期（顶层 node + session_id 标识本次调用；attempt 派生）──
     "node_started",  # 本次调用开始（顶层 node + session_id 标识）
     "node_completed",  # data: {elapsed, output}
-    "node_failed",  # data: {error_type, message, phase}（phase 见 exec/error.py 6 类）
+    # phase-11 v2.1：data 含 kind（权威）+ error_type（读兼容）+ message + phase
+    "node_failed",  # data: {kind, error_type(读兼容), message, phase}（phase 见 exec/error.py）
     "node_skipped",  # data: {reason}
     # ── agent 流式（claude stream-json 翻译产出；均带 session_id）──
     "agent_message",  # data: {text}
@@ -50,9 +52,11 @@ EventType = Literal[
     # ── phase 11 §7：Checkpoint Resume（Tape 即 checkpoint，SPEC §1.4 / §7.2）──
     "workflow_resumed",  # data: {from_tape: str, resumed_node: str, replayed_events: int}
     # ── phase 11 §9.5：Retry Policy（节点级自动重试 transient claude 失败，SPEC §9.5.3）──
-    "retry_started",  # data: {attempt, max_attempts, error_type, delay_seconds, node}
-    "retry_succeeded",  # data: {attempt_total, node}（重试后成功）
-    "retry_exhausted",  # data: {attempts, last_error_type, node}（重试用完仍失败）
+    # ADR §4.5 合并决策：retry_started.data 扩展 layer/reason/next_retry_at/kind
+    # （不新增 retry_attempted EventType，旧字段 error_type 保留读兼容期）。
+    "retry_started",  # data: {attempt, max_attempts, kind, error_type(兼容), delay_seconds, node, layer, reason, next_retry_at}
+    "retry_succeeded",  # data: {attempt_total, node, layer?}（重试后成功）
+    "retry_exhausted",  # data: {attempts, last_kind, last_error_type(兼容), node, layer?}（重试用完仍失败）
     # ── phase 11 §9.7：Wait Node（asyncio.sleep 节点，可被 Ctrl+G 打断）──
     "wait_started",  # data: {duration_seconds, reason}
     "wait_completed",  # data: {elapsed_seconds, interrupted: bool}
@@ -67,7 +71,8 @@ EventType = Literal[
     # ── 自定义（MCP 工具产出，前端按 data.kind 分发渲染）──
     "custom",  # data: {kind: "chart"|"table"|"image"|..., ...}
     # ── 错误 ──
-    "error",  # data: {error_type, message, phase?}
+    # phase-11 v2.1：data 含 kind（权威）+ error_type（读兼容）+ message + phase?
+    "error",  # data: {kind, error_type(读兼容), message, phase?}
 ]
 
 

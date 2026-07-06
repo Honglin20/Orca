@@ -17,11 +17,12 @@ parallel 组 / foreach，累加 ``ctx.outputs``，路由 first-match-wins 决定
         current = router.resolve(routes_of(current), output, ctx)
     emit workflow_completed(evaluate_outputs(wf.outputs, ctx))
 
-fail loud（铁律 4）：三类错误均 emit ``workflow_failed``：
-  - ``ExecError``（executor 失败）→ error_type 由 phase 映射（ExecTimeout / ...）
-  - ``RouteError``（路由死锁）→ error_type=``NoRouteMatch``
-  - ``MaxIterationsError``（超迭代）→ error_type=``MaxIterations``
-  - ``GroupFailure``（parallel / foreach 内部失败）→ error_type=``GroupFailure``
+fail loud（铁律 4）：编排错误均 emit ``workflow_failed``（kind 取自 ``_classify_error``）：
+  - ``ExecError``（executor 失败 / RouteError / MaxIterationsError / WorkflowAborted）
+    → kind 透传 e.kind（BUSINESS_GATE / BUSINESS_CONFIG / TRANSPORT_* / ...）
+  - ``GroupFailure``（parallel / foreach 内部失败）→ kind=``business_agent``
+  - ``WorkflowTerminated``（保留独立 signal，非 ExecError 子类）→ orchestrator 翻译：
+    success → workflow_completed；failed → workflow_failed{kind: business_agent}
 
 依赖单向：本模块依赖 ``orca.{schema, events, exec}`` + ``orca.run.*`` 子模块；
 是最上层消费者，不被任何模块 import。
@@ -273,14 +274,18 @@ class Orchestrator:
             # terminate step：触达 TerminateNode 的业务级终止信号。status=success →
             # emit workflow_completed（用 terminate.outputs 替代 wf.outputs 求值）；
             # status=failed → emit workflow_failed{WorkflowTerminated}（带 reason）。
-            # 与其它 except 并列而非走 _classify_error：terminate 不是「错误」，是显式声明。
+            # **必须在 except ExecError 之前**（WorkflowTerminated 是独立 exception，
+            # phase-11 §4.2 AST 守门）；走 _finalize_terminated 翻译，不走 _classify_error。
             return await self._finalize_terminated(e, start_ts)
-        except (ExecError, RouteError, MaxIterationsError, GroupFailure, WorkflowAborted) as e:
-            # fail loud：五类编排错误 → workflow_failed
-            error_type = _classify_error(e)
+        except (ExecError, GroupFailure) as e:
+            # fail loud：ExecError（含 RouteError / MaxIterationsError / WorkflowAborted
+            # 子类）+ GroupFailure（parallel / foreach 内部失败）→ workflow_failed。
+            # kind 是唯一分类轴（ADR §4.1 决策 1.4）：_classify_error 返 ErrorKind 值，
+            # 不返字符串字面量（phase-11 §4.2 / §6 验收 8）。
+            kind = _classify_error(e)
             node = _error_node(e)
             t2, data2 = make_workflow_failed(
-                error_type, str(e), node=node,
+                kind, str(e), node=node,
             )
             await self.bus.emit(t2, data2)
             await self._stop_agent_tools()
@@ -327,12 +332,13 @@ class Orchestrator:
         """terminate step 收尾：据 ``e.status`` emit workflow_completed / failed 并 close。
 
         ``run`` 与 ``run_from_state`` 共享此 helper（DRY：两入口的 terminate 处理对称）。
-        与 ``_classify_error`` 路径并列但**不**走它——terminate 不是「错误」，是显式声明，
+        与 ``_classify_error`` 路径并列但**不**走它——WorkflowTerminated 是显式声明，
         status=success 时还要 emit workflow_completed（错误路径永远只 emit workflow_failed）。
 
         - ``status="success"`` → ``workflow_completed``，``outputs=e.outputs``（terminate
           节点的渲染后 outputs，**不**走 ``_evaluate_outputs(wf.outputs)``）。
-        - ``status="failed"`` → ``workflow_failed``，``error_type="WorkflowTerminated"``，
+        - ``status="failed"`` → ``workflow_failed{kind: business_agent}``（ADR §4.1 决策 1.2
+          翻译规则：TerminateNode failed 路径翻译为 node_failed{kind=BUSINESS_AGENT}），
           ``message=e.reason``，``node=e.node``。
         """
         from orca.events.replay import replay_state
@@ -342,7 +348,7 @@ class Orchestrator:
             t, data = make_workflow_completed(self.wf, e.outputs, elapsed=elapsed)
         else:
             t, data = make_workflow_failed(
-                "WorkflowTerminated", e.reason, node=e.node,
+                "business_agent", e.reason, node=e.node,
             )
         await self.bus.emit(t, data)
         await self._stop_agent_tools()
@@ -455,7 +461,7 @@ class Orchestrator:
         ctx = RunContext(
             inputs={}, outputs=dict(outputs_acc), run_id="", task=None,
         )
-        return resolve(routes, outputs_acc.get(last_done, {}).get("output"), ctx)
+        return resolve(routes, outputs_acc.get(last_done, {}).get("output"), ctx).to
 
     @staticmethod
     def _bare_instance(
@@ -564,12 +570,12 @@ class Orchestrator:
             )
         except WorkflowTerminated as e:
             # terminate step（与 run() 对称）：status=success → workflow_completed；
-            # status=failed → workflow_failed{WorkflowTerminated}。
+            # status=failed → workflow_failed{kind: business_agent}（翻译规则 §4.1 决策 1.2）。
             return await self._finalize_terminated(e, start_ts)
-        except (ExecError, RouteError, MaxIterationsError, GroupFailure, WorkflowAborted) as e:
-            error_type = _classify_error(e)
+        except (ExecError, GroupFailure) as e:
+            kind = _classify_error(e)
             node = _error_node(e)
-            t2, data2 = make_workflow_failed(error_type, str(e), node=node)
+            t2, data2 = make_workflow_failed(kind, str(e), node=node)
             await self.bus.emit(t2, data2)
             await self._stop_agent_tools()
             self.bus.close()
@@ -977,18 +983,25 @@ class Orchestrator:
 
 
 def _classify_error(e: Exception) -> str:
-    """编排错误 → workflow_failed 的 error_type（SPEC §3.4 / 铁律 4）。"""
-    if isinstance(e, MaxIterationsError):
-        return "MaxIterations"
-    if isinstance(e, WorkflowAborted):
-        return "WorkflowAborted"
-    if isinstance(e, RouteError):
-        return "NoRouteMatch"
+    """编排错误 → workflow_failed 的 kind 值（phase-11 §4.2 / §6 验收 8）。
+
+    **kind 是唯一分类轴**（ADR §4.1 决策 1.4）：返 ``ErrorKind.X.value`` 不返字符串字面量。
+    ExecError 子类的 ``e.kind`` 直接透传，不重新分类（避免跨层重新分类导致重试循环风险，
+    铁律 4 / P2）。
+    """
+    from orca.exec.error_kinds import ErrorKind
+
     if isinstance(e, GroupFailure):
-        return "GroupFailure"
+        # parallel / foreach 内部分支失败 → 检查 __cause__ 是否为 ExecError，若是透传其 kind。
+        cause = e.__cause__
+        if isinstance(cause, ExecError):
+            return cause.kind.value
+        return ErrorKind.BUSINESS_AGENT.value
     if isinstance(e, ExecError):
-        return e.error_type  # 透传 executor 的 error_type（ExecTimeout / RenderError / ...）
-    return e.__class__.__name__
+        # RouteError / MaxIterationsError / WorkflowAborted 都是 ExecError 子类；
+        # e.kind 已在子类构造器固定（不重新分类）。
+        return e.kind.value
+    return ErrorKind.UNKNOWN.value
 
 
 def _error_node(e: Exception) -> str | None:

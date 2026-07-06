@@ -118,7 +118,7 @@ def test_demo_max_iter_workflow_fails(tmp_path, monkeypatch):
     assert state.status == "failed"
     failed = _failed_event(state)
     assert failed is not None
-    assert failed.data["error_type"] == "MaxIterations"
+    assert failed.data["kind"] == "business_config"
 
 
 def test_demo_parallel_merges_branches(tmp_path, monkeypatch):

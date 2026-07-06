@@ -229,6 +229,7 @@ def _translate_error(obj: dict, session_id: str) -> list[Event]:
             "error",
             session_id,
             {
+                "kind": "business_agent",
                 "error_type": err.get("name") or "OpencodeError",
                 "phase": "stream",
                 "message": message,

@@ -1,49 +1,65 @@
-"""errors.py —— 编排层异常（MaxIterationsError + WorkflowAborted + WorkflowTerminated + 复用 RouteError）。
+"""errors.py —— 编排层异常（ExecError 子类 + WorkflowTerminated 独立 signal）。
 
-回答「编排层失败怎么表达？」：五类编排错误/信号，各自分明、不互相吞（CLAUDE.md 报错处理铁律）：
-  - ``RouteError``（router.py）：路由死锁（全 when 不匹配且无兜底）。
-  - ``MaxIterationsError``（本文件）：主循环超 ``max_iter`` 仍到不了 ``$end``（死循环）。
-  - ``WorkflowAborted``（本文件，phase 11 §3）：用户 Ctrl+G + ABORT 中止 workflow。
-  - ``WorkflowTerminated``（本文件，terminate step）：触达 ``TerminateNode`` —— 业务级
-    显式终止（success / failed 两种），由 orchestrator 在 ``_drive_from`` 检测到
-    ``kind=terminate`` 时 raise，``run`` / ``run_from_state`` 捕获并据 status 分发
-    ``workflow_completed`` 或 ``workflow_failed{WorkflowTerminated}``。
-  - ``ExecError``（exec/error.py）：executor 失败（node_failed / 生命周期违约）。
+phase-11 SPEC v2.1 §4.2 / ADR §4.1 决策 1.2：编排 exception 归类如下：
 
-四类错误均被 orchestrator 捕获 → emit ``workflow_failed``（error_type 区分）；
-``WorkflowTerminated`` 是例外——它可能成功（status=success），由 ``run`` 据其 ``status``
-字段选择 emit ``workflow_completed`` 或 ``workflow_failed``。
+  | exception           | 处置                       | kind                |
+  |---------------------|----------------------------|---------------------|
+  | WorkflowAborted     | ExecError 子类             | BUSINESS_GATE       |
+  | MaxIterationsError  | ExecError 子类             | BUSINESS_CONFIG     |
+  | RouteError          | ExecError 子类             | BUSINESS_CONFIG     |
+  | WorkflowTerminated  | 保留独立（非 ExecError 子类） | —                  |
 
-依赖单向：本模块不依赖任何 orca 子模块（纯异常定义）。
+WorkflowTerminated 为什么保留独立（闭环审视 I7/B10）：它可 ``status="success"``
+（orchestrator success 路径 emit workflow_completed），是控制流 signal 不是 error。
+若归 ExecError，success 路径会 raise 一个 BUSINESS_AGENT error 被 ``except ExecError``
+误捕获误日志。
+
+**子类构造器契约**（v2.1 闭环审视 Q5）：固定 ``(kind, phase)`` 元组，调用方不能覆盖：
+  - WorkflowAborted     → (BUSINESS_GATE,    "interrupted")
+  - MaxIterationsError  → (BUSINESS_CONFIG,  "max_iterations")
+  - RouteError          → (BUSINESS_CONFIG,  "route_deadlock")
+
+子类保留各自额外诊断字段（MaxIter.max_iter / RouteError.node+output / WorkflowAborted.node）。
+
+依赖单向：本模块依赖 ``orca.exec.error``（ExecError），不依赖 schema/events/iface。
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from orca.exec.error import ExecError
+from orca.exec.error_kinds import ErrorKind
 
-class MaxIterationsError(Exception):
+
+class MaxIterationsError(ExecError):
     """主循环超过 ``max_iter`` 仍到不了 ``$end``（SPEC §4.6 / 铁律 4 fail loud）。
 
-    触发：循环 routes 不终止（如 demo_max_iter 的空回环）。
-    上抛 → orchestrator 捕获 → emit workflow_failed（error_type=``MaxIterations``）。
+    固定 kind=``BUSINESS_CONFIG``，phase=``max_iterations``（编排层 phase，仅诊断）。
+    上抛 → orchestrator 捕获 → emit workflow_failed{kind: business_config}。
+
+    保留语义字段 ``max_iter`` / ``current``（诊断用）。
     """
 
     def __init__(self, max_iter: int, *, current: str | None = None):
         self.max_iter = max_iter
         self.current = current  # 卡在哪个 node（诊断用）
         super().__init__(
-            f"主循环超过 max_iter={max_iter} 仍未到 $end"
-            + (f"（卡在 {current}）" if current else "")
+            phase="max_iterations",
+            message=(
+                f"主循环超过 max_iter={max_iter} 仍未到 $end"
+                + (f"（卡在 {current}）" if current else "")
+            ),
+            kind=ErrorKind.BUSINESS_CONFIG,
+            node=current,  # 失败 node 名（adapter 注入；orchestrator _error_node 读 e.node）
         )
 
 
-class WorkflowAborted(Exception):
+class WorkflowAborted(ExecError):
     """用户 Ctrl+G + ABORT 中止 workflow（phase 11 SPEC §3 / 铁律 4 fail loud）。
 
-    触发：``InterruptHandler.resolve(action="abort")`` → orchestrator ``_handle_interrupt``
-    收到 ``action="abort"`` → raise 本异常。
-    上抛 → orchestrator 捕获 → emit workflow_failed（error_type=``WorkflowAborted``）。
+    固定 kind=``BUSINESS_GATE``，phase=``interrupted``。
+    上抛 → orchestrator 捕获 → emit workflow_failed{kind: business_gate}。
 
     ``node`` 是用户 abort 时正在跑的 node（诊断用，SPEC §3.4 node 字段）。
     """
@@ -51,29 +67,29 @@ class WorkflowAborted(Exception):
     def __init__(self, node: str | None = None):
         self.node = node
         super().__init__(
-            "workflow 被用户中止（Ctrl+G + ABORT）"
-            + (f"（node={node}）" if node else "")
+            phase="interrupted",
+            message=(
+                "workflow 被用户中止（Ctrl+G + ABORT）"
+                + (f"（node={node}）" if node else "")
+            ),
+            kind=ErrorKind.BUSINESS_GATE,
+            node=node,
         )
 
 
 class WorkflowTerminated(Exception):
-    """触达 ``TerminateNode`` 的业务级终止信号（terminate step）。
+    """触达 ``TerminateNode`` 的业务级终止信号（terminate step，**保留独立**）。
 
     由 orchestrator ``_drive_from`` 在 ``_dispatch`` 完成后、route 求值前检测到
     ``TerminateNode`` 时 raise。携带 terminate executor 产出的 ``status`` / ``reason``
     / ``outputs`` / ``node``，由 ``run`` / ``run_from_state`` 捕获并分发：
 
-      - ``status="success"`` → emit ``workflow_completed``，``outputs`` 用 terminate 节点
-        的 ``outputs``（渲染后的），**不**走 ``evaluate_outputs(wf.outputs)``。
-      - ``status="failed"`` → emit ``workflow_failed``，``error_type="WorkflowTerminated"``，
-        ``message=reason``，``node=<terminate node name>``。
+      - ``status="success"`` → emit ``workflow_completed``
+      - ``status="failed"`` → orchestrator 翻译为 ``node_failed{kind=BUSINESS_AGENT}``
+        事件（ADR §4.1 决策 1.2 翻译规则）
 
-    与 ``WorkflowAborted`` 区分：abort 是用户主动中断（控制流信号），terminate 是工作流
-    作者显式声明的业务退出点（YAML 里写死的）。两者 error_type 不同，shell 端可据此时
-    区分渲染。
-
-    与正常 ``$end`` 终止区分：``$end`` 只能 success；terminate 能显式 failed（典型用途：
-    分类器走不到任何 handler 时显式 reject）。
+    **非 ExecError 子类**：success 路径不发 error；failed 路径由 orchestrator 显式翻译
+    为 node_failed，不经 ``_classify_error``。
     """
 
     def __init__(
@@ -93,4 +109,3 @@ class WorkflowTerminated(Exception):
             + (f"，reason={reason!r}" if reason else "")
             + "）"
         )
-

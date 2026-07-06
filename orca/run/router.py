@@ -1,6 +1,6 @@
 """router.py —— routes first-match-wins 求值（纯函数，SPEC §3）。
 
-回答「节点完成后下一步去哪？」：``resolve(routes, output, ctx) -> target``。
+回答「节点完成后下一步去哪？」：``resolve(routes, output, ctx) -> Route``。
 纯函数、无副作用、无 I/O —— 同输入永远同输出（铁律 5）。
 
 求值规则（SPEC §3.1）：
@@ -25,24 +25,36 @@ from typing import TYPE_CHECKING, Any
 
 from jinja2 import Environment, StrictUndefined, TemplateError
 
+from orca.exec.error import ExecError
+from orca.exec.error_kinds import ErrorKind
 from orca.schema import Route
 
 if TYPE_CHECKING:
     from orca.exec.context import RunContext
 
 
-class RouteError(Exception):
+class RouteError(ExecError):
     """路由死锁：所有 ``when`` 不匹配且无兜底 route（SPEC §3.4 / 铁律 4）。
+
+    phase-11 SPEC v2.1 §4.2 / ADR §4.1 决策 1.2：``RouteError`` 改 ``ExecError`` 子类，
+    固定 ``(kind=BUSINESS_CONFIG, phase="route_deadlock")``。
 
     触发场景：节点完成后没有任何 route 可走（编译期校验只保证 route.to 合法，
     不保证运行时一定命中）。本异常上抛 → orchestrator 捕获 → emit ``workflow_failed``
-    （error_type=``NoRouteMatch``）。
+    （kind=``business_config``）。
+
+    保留诊断字段 ``node``（卡在哪个 node）/ ``output``（导致死锁的 output）。
     """
 
     def __init__(self, message: str, *, node: str | None = None, output: Any = None):
-        self.node = node  # 卡在哪个 node（用于 workflow_failed payload）
         self.output = output  # 导致死锁的 output（诊断用）
-        super().__init__(message)
+        super().__init__(
+            phase="route_deadlock",
+            message=message,
+            kind=ErrorKind.BUSINESS_CONFIG,
+            node=node,
+            raw={"output_repr": repr(output)} if output is not None else None,
+        )
 
 
 # 复用 render.py 的 Jinja2 Environment 约定：StrictUndefined 让未定义变量 fail loud。
