@@ -88,24 +88,209 @@ class TestNodeStatusIcons:
         assert NODE_STATUS_ICONS["pending"] == "○"
 
 
-# ── v2 AgentsList / AgentHistory 空 shell（Step 2/3 填充实现）──────────────────
+# ── v2 AgentsList（spec §2.2 完整实现，Step 2 填充）────────────────────────────
 
 
-class TestAgentsListShell:
-    """v2 左侧 AgentsList：Step 1a 占位空 shell，仅 import + 实例化。
+class TestAgentsList:
+    """v2 AgentsList widget 单元测试（spec §2.2 + §5.1）。
 
-    Step 2 填充拓扑序渲染 / status icon / j/k 导航后改为完整单测。
+    INTENT（CLAUDE.md 铁律 9）：测试不是「widget update 不崩」，而是
+    「用户能看到 agent 列表 + 状态 + 切换」——断言渲染内容含拓扑序、状态 icon、
+    选中标记、错误摘要；断言 j/k 切换会通知 app（驱动 AgentHistory 重渲）。
     """
 
-    def test_agents_list_imports(self):
-        """import AgentsList 不崩（Step 1a 占位守门）。"""
-        from orca.iface.cli.widgets import AgentsList as _AL
-        assert _AL is AgentsList
+    def test_build_renders_topo_order(self):
+        """build() 后渲染顺序与输入一致（用户看 agent 列表按拓扑序排列）。"""
+        lst = AgentsList()
+        lst.build(["analyzer", "configurator", "runner"])
+        # 用 Static.content 公开 API（render() 返 Visual，content 返原始字符串）
+        content = lst.content if isinstance(lst.content, str) else str(lst.content)
+        assert "analyzer" in content
+        assert "configurator" in content
+        assert "runner" in content
+        # 拓扑序：analyzer 必须在 configurator 之前
+        assert content.find("analyzer") < content.find("configurator") < content.find("runner")
 
-    def test_agents_list_can_instantiate(self):
-        """空 shell 可实例化（compose 时挂得上）。"""
-        widget = AgentsList()
-        assert widget is not None
+    def test_build_selects_first_by_default(self):
+        """build 后默认选中第一个（j/k 从头开始；auto-follow 之前用户的视觉锚点）。"""
+        lst = AgentsList()
+        lst.build(["analyzer", "configurator"])
+        assert lst.selected == "analyzer"
+        # 渲染内容含选中标记 ▸ 在 analyzer 前
+        content = lst.content if isinstance(lst.content, str) else str(lst.content)
+        analyzer_idx = content.find("analyzer")
+        assert analyzer_idx > 0
+        assert content[analyzer_idx - 2] == "▸"  # sel_mark 在 name 前 2 格（sel + space）
+
+    def test_build_empty_nodes_renders_placeholder(self):
+        """build([]) 渲染占位（不崩；用户空 workflow 看到提示）。"""
+        lst = AgentsList()
+        lst.build([])
+        assert lst.selected is None
+        content = lst.content if isinstance(lst.content, str) else str(lst.content)
+        assert "no agents" in content
+
+    def test_update_node_status_running(self):
+        """update_node(status='running') 投影生效（用户看到 agent 进入 running 状态）。"""
+        lst = AgentsList()
+        lst.build(["analyzer"])
+        lst.update_node("analyzer", status="running", iter_n=1)
+        proj = lst.projection_of("analyzer")
+        assert proj is not None
+        assert proj.status == "running"
+        assert proj.iter_n == 1
+        # 渲染内容含 running icon ✽
+        content = lst.content if isinstance(lst.content, str) else str(lst.content)
+        assert "✽" in content
+
+    def test_update_node_done_with_elapsed_tokens(self):
+        """update_node(status='done', elapsed, tokens) 投影生效（用户看到完成耗时 + tok）。"""
+        lst = AgentsList()
+        lst.build(["analyzer"])
+        lst.update_node("analyzer", status="done", elapsed=14.0, tokens=1234)
+        proj = lst.projection_of("analyzer")
+        assert proj.status == "done"
+        assert proj.elapsed == 14.0
+        assert proj.tokens == 1234
+        # 渲染含 ✓ done icon + 14s + 1.2k
+        content = lst.content if isinstance(lst.content, str) else str(lst.content)
+        assert "✓" in content
+        assert "14s" in content
+        assert "1.2k" in content
+
+    def test_update_node_partial_field_update(self):
+        """update_node(elapsed=...) 不覆盖既有 status/tokens（部分字段更新语义）。"""
+        lst = AgentsList()
+        lst.build(["analyzer"])
+        lst.update_node("analyzer", status="running", iter_n=1, tokens=500)
+        lst.update_node("analyzer", elapsed=20.0)  # 部分更新
+        proj = lst.projection_of("analyzer")
+        assert proj.status == "running"  # 保留
+        assert proj.tokens == 500        # 保留
+        assert proj.iter_n == 1          # 保留
+        assert proj.elapsed == 20.0      # 新增
+
+    def test_update_node_unknown_name_ignored(self):
+        """未知 name 静默忽略（防御；与 v1.1.1 DagGraph.set_status 同语义）。"""
+        lst = AgentsList()
+        lst.build(["analyzer"])
+        lst.update_node("nonexistent", status="running")  # 不抛
+        assert lst.projection_of("nonexistent") is None
+        # 已有节点不受影响
+        assert lst.projection_of("analyzer").status == "pending"
+
+    def test_update_node_unknown_status_ignored(self):
+        """未知 status 字符串忽略（防御；spec §11.5 item2 不引入新 enum，只接受 NODE_STATUS_ICONS keys）。"""
+        lst = AgentsList()
+        lst.build(["analyzer"])
+        lst.update_node("analyzer", status="bogus_state")
+        proj = lst.projection_of("analyzer")
+        # status 没改成 bogus，仍是 pending
+        assert proj.status == "pending"
+
+    def test_select_triggers_app_callback(self):
+        """select(name) 调 app._on_node_selected(name)（duck-typing；spec §3 切换语义）。"""
+        lst = AgentsList()
+
+        class _MockApp:
+            def __init__(self) -> None:
+                self.selected_called_with: str | None = None
+            def _on_node_selected(self, name: str) -> None:
+                self.selected_called_with = name
+
+        lst.build(["analyzer", "configurator"])
+        # textual widget.app 在未 mount 时返 None（不抛）；select 内用 getattr 兜底，
+        # 故未挂载时不会调 _on_node_selected。本测试通过 setattr 注入 mock app
+        #（绕过 textual 真起 app pilot；与 v1.1.1 DagGraph 测试同模式）。
+        mock_app = _MockApp()
+        type(lst).app = property(lambda _: mock_app)  # type: ignore[misc]
+        try:
+            lst.select("configurator")
+        finally:
+            # 还原（避免污染后续测试）
+            del type(lst).app
+        assert mock_app.selected_called_with == "configurator"
+        assert lst.selected == "configurator"
+
+    def test_j_k_navigation_wraps(self):
+        """j/k 在边界 wrap（最后一个 → 第一个；用户线性遍历不会卡死在边界）。"""
+        lst = AgentsList()
+
+        class _MockApp:
+            def __init__(self) -> None:
+                self.history: list[str] = []
+            def _on_node_selected(self, name: str) -> None:
+                self.history.append(name)
+
+        mock_app = _MockApp()
+        type(lst).app = property(lambda _: mock_app)  # type: ignore[misc]
+        try:
+            lst.build(["a", "b", "c"])
+            assert lst.selected == "a"
+            lst.action_select_next()  # a → b
+            assert lst.selected == "b"
+            lst.action_select_next()  # b → c
+            assert lst.selected == "c"
+            lst.action_select_next()  # c → a (wrap)
+            assert lst.selected == "a"
+            lst.action_select_prev()  # a → c (wrap back)
+            assert lst.selected == "c"
+        finally:
+            del type(lst).app
+
+    def test_select_unknown_name_ignored(self):
+        """select(unknown) 静默忽略（防御；不污染 _selected）。"""
+        lst = AgentsList()
+        lst.build(["a", "b"])
+        original = lst.selected
+        lst.select("nonexistent")
+        assert lst.selected == original  # 不变
+
+    def test_iter_n_display_when_loop_reentry(self):
+        """iter_n >= 2 时显示「iter N」（loop workflow 重入可视化；用户看 agent 跑第几轮）。"""
+        lst = AgentsList()
+        lst.build(["counter"])
+        lst.update_node("counter", status="running", iter_n=2, tokens=800)
+        content = lst.content if isinstance(lst.content, str) else str(lst.content)
+        assert "iter 2" in content
+
+    def test_failed_status_shows_error_summary(self):
+        """failed 状态第二行显错误摘要前 30 字符（用户看到失败原因；spec §6.3 错误显示）。"""
+        lst = AgentsList()
+        lst.build(["runner"])
+        lst.update_node(
+            "runner",
+            status="failed",
+            error_msg="RuntimeError: cuda OOM at layer 47 in training loop",
+        )
+        content = lst.content if isinstance(lst.content, str) else str(lst.content)
+        # 第二行错误标记 + 摘要（前 30 字符）
+        assert "!" in content
+        # 前 30 字符: "RuntimeError: cuda OOM at layer "[:30] == "RuntimeError: cuda OOM at la"
+        assert "RuntimeError" in content
+        # 完整原文（>30）不应全显（避免行宽爆炸，第二行只显前 30）
+        assert "training loop" not in content
+
+    def test_format_elapsed_helper(self):
+        """_format_elapsed 边界值（spec §2.2：< 60s 显 {n}s；>= 60s 显 {m}m{s}s）。"""
+        from orca.iface.cli.widgets.agents_list import _format_elapsed
+        assert _format_elapsed(0) == "0s"
+        assert _format_elapsed(14.0) == "14s"
+        assert _format_elapsed(59.9) == "60s"  # 59.9 → :.0f 取整 60
+        assert _format_elapsed(60.0) == "1m0s"
+        assert _format_elapsed(90.0) == "1m30s"
+        assert _format_elapsed(-5) == "0s"  # 负值兜底
+
+    def test_format_tokens_helper(self):
+        """_format_tokens 边界值（spec §2.2：< 1000 显原数；>= 1000 显 {k}k）。"""
+        from orca.iface.cli.widgets.agents_list import _format_tokens
+        assert _format_tokens(0) == "0"
+        assert _format_tokens(500) == "500"
+        assert _format_tokens(999) == "999"
+        assert _format_tokens(1000) == "1.0k"
+        assert _format_tokens(1234) == "1.2k"
+        assert _format_tokens(24000) == "24.0k"
+        assert _format_tokens(-1) == "0"  # 负值兜底
 
 
 class TestAgentHistoryShell:
