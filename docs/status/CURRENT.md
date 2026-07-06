@@ -7,6 +7,27 @@
 
 ---
 
+## 当前状态：phase-10 MCP v4 实现完成（2026-07-07）；下一模块待定
+
+### ✅ 已完成：phase-10 MCP v4（9 工具 + setup/execute 分相 + Result 信封）
+
+**Commit**：`df563f4`。详见 [release note](../releases/2026-07-07-phase-10-mcp-v4.md) + [CHANGELOG](CHANGELOG.md)。
+
+**交付**：
+- server.py 重写：6 旧工具（含 resolve_gate）→ 9 v4 工具（Discovery 4 + Lifecycle 3 + History 2）
+- setup/execute 分相：workflow.setup 字段 + compile validator（execute phase 拦截 ask_user/gate + setup phase 结构约束）
+- 三重杠杆防跳过 setup：list_workflows has_setup / start_workflow setup_required 强校验 / tool description 引导
+- Result 信封（ADR §4.1）：所有 tool 返 `{ok, data?, error?, _hint?}`，error.kind 是 ErrorKind 值（无 layer）
+- 新模块：catalog.py / setup_phase.py / agent_catalog.py / tape_index.py + hints.py 扩展
+- 1638 passed / 0 回归（baseline 1596 + 42 新增）
+
+**遗留技术债**（详见 release note）：
+- 🔴 setup_outputs 校验通过但不注入 RunManager runtime context（任务约束"不动 RunManager"）
+- CLI 挂载（orca mcp subcommand）在 executor_cmds.py（dirty，并行工作持有）
+- RunManager.start_run 签名扩展 + orchestrator setup_context 消费待后续 phase
+
+---
+
 ## 当前状态：TUI v2 review remediation + 批 1 backend 完成（2026-07-07）；下一模块 phase-12-capabilities
 
 ### ✅ 已完成：TUI v2 review remediation + 批 1 backend（Status.blocked + projections.py）
