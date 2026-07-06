@@ -2,7 +2,8 @@
 
 用 Textual ``run_test()`` pilot（headless，CI 友好）。覆盖：
   - AgentsList / AgentHistory：v2 三块布局 widget（Step 2/3 填充；Step 1a 仅占位 import）
-  - LogStream ``format_event`` 格式（HH:MM:SS [session] <desc>）
+  - LogStream ``format_event`` v2 单测在 ``tests/iface/cli/test_log_stream.py``
+    （spec §2.4 Conductor Log View 风格 + EVENT_LEVEL 表派生）
   - Header stats 渲染（done/total/awaiting）
   - ChartPanel：同 label+title 幂等替换 / label 分组 / all_charts / 确定性 fold
   - ChartCanvas：7 chart_type 分派 / braille / 降级 / fail loud
@@ -13,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import sys
-import time
 
 import pytest
 from textual.app import App, ComposeResult
@@ -26,12 +26,12 @@ from orca.iface.cli.widgets import (
     ChartCanvas,
     ChartPanel,
     Header,
-    LogStream,
     NodeDetail,
 )
 from orca.iface.cli.widgets.chart_panel import WORKFLOW_BUCKET
 from orca.iface.cli.widgets.header import HeaderStats
-from orca.iface.cli.widgets.log_stream import format_event
+# 注：LogStream ``format_event`` v2 单测拆到 ``tests/iface/cli/test_log_stream.py``
+# （spec §2.4 Conductor Log View 风格 + EVENT_LEVEL 表派生；spec v2 §4.2 改造点）。
 
 
 # ── pilot 跑 widget 的 helper app（共享）────────────────────────────────────
@@ -606,186 +606,8 @@ class TestAgentHistory:
         assert hist.expanded_seqs == set()
 
 
-# ── LogStream format_event（SPEC §4.3：HH:MM:SS [session] <desc>）─────────
-
-
-class TestLogStreamFormat:
-    """``format_event`` 纯函数：格式 + 各事件类型描述。"""
-
-    FIXED_TS = time.mktime(time.strptime("14:02:11", "%H:%M:%S"))
-
-    def test_basic_format(self):
-        line = format_event(
-            "agent_message", {"text": "hello"},
-            session_id="abcdef0123456789", timestamp=self.FIXED_TS,
-        )
-        assert line == "14:02:11 [abcdef01] hello"
-
-    def test_session_truncated_to_8_chars(self):
-        line = format_event(
-            "agent_message", {"text": "x"},
-            session_id="0123456789abcdef", timestamp=self.FIXED_TS,
-        )
-        assert "[01234567]" in line
-
-    def test_no_session_shows_dash(self):
-        line = format_event(
-            "agent_message", {"text": "x"}, session_id=None, timestamp=self.FIXED_TS,
-        )
-        assert "[-]" in line
-
-    def test_node_prefix_when_node_given(self):
-        line = format_event(
-            "agent_message", {"text": "x"},
-            node="research", session_id="abcd1234", timestamp=self.FIXED_TS,
-        )
-        assert "14:02:11 [abcd1234] research · x" == line
-
-    def test_agent_tool_call_described(self):
-        line = format_event(
-            "agent_tool_call", {"tool": "Bash", "args": {"command": "ls"}},
-            session_id="s1", timestamp=self.FIXED_TS,
-        )
-        assert "tool: Bash(" in line
-
-    def test_node_lifecycle_described(self):
-        assert "node started" in format_event(
-            "node_started", {"kind": "script"}, timestamp=self.FIXED_TS,
-        )
-        assert "node completed" in format_event(
-            "node_completed", {"elapsed": 1.2}, timestamp=self.FIXED_TS,
-        )
-        assert "node FAILED" in format_event(
-            "node_failed", {"message": "boom"}, timestamp=self.FIXED_TS,
-        )
-
-    def test_gate_events_described(self):
-        req = format_event(
-            "human_decision_requested", {"prompt": "批准 Bash？"},
-            timestamp=self.FIXED_TS,
-        )
-        assert "gate: 批准 Bash？" == req.split("] ", 1)[1]
-        res = format_event(
-            "human_decision_resolved",
-            {"resolved_by": "web", "answer": "allow"},
-            timestamp=self.FIXED_TS,
-        )
-        assert "gate resolved by web" in res
-
-    def test_long_text_truncated(self):
-        long_text = "x" * 200
-        line = format_event(
-            "agent_message", {"text": long_text}, timestamp=self.FIXED_TS,
-        )
-        # 描述截短到 60 + 1（…），不会占满终端宽度
-        desc = line.split("] ", 1)[1]
-        assert len(desc) <= 61
-        assert desc.endswith("…")
-
-    # ── phase 11 收官 sweep item8：每个 EventType 都有非泛型描述 ────────────────
-
-    # 各 EventType 的合理 payload（让 _describe 的 data.get(...) 拿到非空值，
-    # 避免「描述 = 截短的空串」误判为「有专属描述」）。
-    _PAYLOADS = {
-        "workflow_started": {"workflow_name": "wf"},
-        "workflow_completed": {"elapsed": 1.0},
-        "workflow_failed": {"error_type": "spawn_error", "message": "boom"},
-        "workflow_cancelled": {"reason": "user"},
-        "node_started": {"kind": "agent"},
-        "node_completed": {"elapsed": 1.0},
-        "node_failed": {"message": "boom", "error_type": "spawn_error"},
-        "node_skipped": {"reason": "user"},
-        "agent_message": {"text": "hi"},
-        "agent_thinking": {"text": "hmm"},
-        "agent_tool_call": {"tool": "Bash", "args": {"cmd": "ls"}},
-        "agent_tool_result": {"tool_call_id": "1", "result": "ok"},
-        "agent_usage": {"input_tokens": 1, "output_tokens": 2,
-                        "cache_tokens": 3, "cost_usd": 0.1},
-        "route_taken": {"from": "a", "to": "b"},
-        "foreach_started": {"item_count": 3, "max_concurrent": 2},
-        "foreach_item_started": {"index": 0, "item_key": "k"},
-        "foreach_item_completed": {"index": 0, "output": "x"},
-        "foreach_completed": {"count": 3, "succeeded": 3},
-        "human_decision_requested": {"gate_id": "g", "prompt": "approve?"},
-        "human_decision_resolved": {"gate_id": "g", "answer": "yes"},
-        "interrupt_requested": {"node": "a", "elapsed_at_request": 1.0},
-        "interrupt_resolved": {"action": "skip", "skip_target": "b"},
-        "prompt_rendered": {"preview": "..."},
-        "workflow_resumed": {"from_tape": "t.jsonl", "resumed_node": "a",
-                             "replayed_events": 5},
-        "retry_started": {"attempt": 1, "max_attempts": 3, "error_type": "spawn_error",
-                          "delay_seconds": 1.0},
-        "retry_succeeded": {"attempt_total": 2},
-        "retry_exhausted": {"attempts": 3, "last_error_type": "spawn_error"},
-        "wait_started": {"duration_seconds": 60.0, "reason": "rl"},
-        "wait_completed": {"elapsed_seconds": 60.0, "interrupted": False},
-        "validator_started": {"criteria_preview": "must be valid"},
-        "validator_passed": {},
-        "validator_failed": {"issues": ["bad"], "retrying": True},
-        "dialog_started": {"node": "a", "initial_prompt": "why?"},
-        "dialog_message": {"role": "user", "text": "hi", "turn": 1},
-        "dialog_ended": {"node": "a", "total_turns": 1},
-        "custom": {"kind": "chart"},
-        "error": {"error_type": "ValueError", "message": "boom"},
-    }
-
-    def test_every_event_type_has_non_generic_description(self):
-        """穷尽性守门：遍历 EventType Literal 全集，每个 type 的描述都不落入泛型 fallback。
-
-        INTENT（SPEC §10.2 item8 / final sweep）：LogStream 必须给**每个**新 EventType 一个
-        非泛型描述（``_describe`` 不落入末尾的 ``return event_type`` 兜底）。否则用户在 LogStream
-        看到的就是裸 type 名（如 ``retry_started``）而非人类可读描述，违反 item8。
-
-        与既有测试的区别：
-          - 既有 ad-hoc 测试（test_node_lifecycle_described / test_gate_events_described）只挑几个
-            type 断言，不遍历全集；新增 type 漏 ``_describe`` 分支时这些测试抓不到。
-          - 本测试遍历真 Literal 全集，新增 type 漏分支时立即可见（描述 == 裸 type 名）。
-        """
-        import typing
-
-        from orca.schema import EventType
-
-        types = typing.get_args(EventType)
-        assert len(types) > 0  # sanity：Literal 非空
-
-        leaked = []
-        for t in types:
-            payload = self._PAYLOADS.get(t, {})
-            desc = format_event(t, payload, timestamp=self.FIXED_TS)
-            # 描述段 = 去掉时间戳 + session 前缀后的部分。
-            body = desc.split("] ", 1)[1] if "] " in desc else desc
-            # node 前缀（``node · desc``）也要剥掉，只看 _describe 产出。
-            if " · " in body:
-                body = body.split(" · ", 1)[1]
-            # 泛型 fallback：body 与裸 type 名相同（_describe 未匹配任何 if 分支）。
-            if body == t:
-                leaked.append(t)
-        assert leaked == [], (
-            f"以下 EventType 落入 format_event 泛型 fallback（_describe 漏分支，"
-            f"LogStream 会显示裸 type 名）：{leaked}"
-        )
-
-
-class TestLogStreamWidget:
-    """LogStream widget：append_event 写入文本。"""
-
-    def test_append_event_writes_line(self):
-        stream = LogStream()
-
-        async def scenario():
-            async with _Harness([stream]).run_test() as pilot:
-                stream.append_event(
-                    "agent_message", {"text": "hello"},
-                    session_id="abcdef0123", timestamp=TestLogStreamFormat.FIXED_TS,
-                )
-                await pilot.pause()
-                await pilot.pause()  # RichLog 异步渲染，双 pause 确保 flush
-                # RichLog.lines 是 Strip 列表（segment 组），flatten 成纯文本断言
-                text = _flatten_strips(stream.lines)
-                assert "hello" in text
-                assert "14:02:11" in text
-                assert "abcdef01" in text  # session 截短
-        run_async(scenario())
+# spec v2 §2.4：LogStream ``format_event`` + widget 行为单测拆到独立文件
+# ``tests/iface/cli/test_log_stream.py``（Conductor Log View 风格 + EVENT_LEVEL 表派生）。
 
 
 # ── Header stats（SPEC §4.4）────────────────────────────────────────────────

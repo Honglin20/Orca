@@ -1,10 +1,16 @@
-"""test_event_filter.py —— EVENT_VISIBILITY 表完整性 + 派发语义测试。
+"""test_event_visibility.py —— EVENT_VISIBILITY 表完整性 + 派发语义测试。
 
-spec v1.1 §6.4 acceptance criteria：
+spec v2 §11.1 + §2.4 acceptance criteria：
   - 完整性测试（``test_event_visibility_completeness``）：用 ``EventType.__args__``
     逐一断言覆盖；漏 EventType → 立即 fail（fail loud）。
   - 新增 EventType 守卫：CI 跑完整性测试，schema 加新 type 但忘加 visibility 时自动 fail。
   - 派发语义：每个 visibility tag 都至少有 1 个 EventType（无孤儿 tag）。
+
+v2 重映射（spec §11.1）：
+  - ``show`` / ``show_dim`` → Agent History（业务核心：message/tool_call/...）
+  - ``show_compact`` / ``show_warn`` / ``show_error`` → Log Stream（高层节点事件）
+  - ``hide_main`` → Header footer（agent_usage）或 ChartPanel 路径（custom chart）
+  - ``hide_all`` → 仅 tape（prompt_rendered）
 """
 
 from __future__ import annotations
@@ -95,26 +101,33 @@ class TestNoiseGovernanceAssignments:
         assert EVENT_VISIBILITY["agent_usage"] == "hide_main"
 
     def test_error_classes_are_show_error(self):
-        """§6.3：error/failed/exhausted 主流 + DAG 框双重显示。"""
+        """§6.3：error/failed/exhausted → Log Stream + Red 强调。"""
         assert EVENT_VISIBILITY["error"] == "show_error"
         assert EVENT_VISIBILITY["node_failed"] == "show_error"
         assert EVENT_VISIBILITY["workflow_failed"] == "show_error"
         assert EVENT_VISIBILITY["retry_exhausted"] == "show_error"
-        assert EVENT_VISIBILITY["validator_failed"] == "show_error"
 
     def test_warn_classes_are_show_warn(self):
-        """gate/interrupt/retry_started 主流 + DAG 框双重显示（warn=黄）。"""
+        """gate/interrupt/retry_started/validator_failed → Log Stream + Amber 强调。"""
         assert EVENT_VISIBILITY["human_decision_requested"] == "show_warn"
         assert EVENT_VISIBILITY["interrupt_requested"] == "show_warn"
         assert EVENT_VISIBILITY["retry_started"] == "show_warn"
+        assert EVENT_VISIBILITY["validator_failed"] == "show_warn"  # v2：与 EVENT_LEVEL 对齐
 
     def test_business_core_is_show(self):
-        """业务核心事件双行 entry（message/tool/...）。"""
+        """v2 §11.1：业务核心事件 → Agent History（show/show_dim）。"""
         assert EVENT_VISIBILITY["agent_message"] == "show"
         assert EVENT_VISIBILITY["agent_tool_call"] == "show"
         assert EVENT_VISIBILITY["agent_tool_result"] == "show"
-        assert EVENT_VISIBILITY["custom"] == "show"
-        assert EVENT_VISIBILITY["dialog_message"] == "show"
+
+    def test_custom_goes_to_chart_panel_not_log_stream(self):
+        """v2 §11.1：custom(chart) 走 NodeDetail ChartPanel 路径（hide_main），
+        不进 Log Stream / Agent History。"""
+        assert EVENT_VISIBILITY["custom"] == "hide_main"
+
+    def test_dialog_message_goes_to_log_stream(self):
+        """v2 §11.1：dialog_message 是 debug 级事件（→ Log Stream 默认隐藏）。"""
+        assert EVENT_VISIBILITY["dialog_message"] == "show_compact"
 
     def test_thinking_is_show_dim(self):
         """thinking 弱化（dim）但仍可见。"""

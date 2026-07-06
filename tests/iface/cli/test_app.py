@@ -177,7 +177,12 @@ class TestEventDispatch:
                 assert tree is not None
         run_async(scenario())
 
-    def test_log_stream_receives_agent_events(self, tmp_path):
+    def test_log_stream_receives_high_level_events(self, tmp_path):
+        """v2 §2.4：高层节点事件（node_started/completed 等）写入 LogStream。
+
+        旧 v1.1.1 测试用 agent_message（v2 不进 LogStream，归 Agent History）；
+        重写为 node_started（LEVEL_INFO，始终写入）。
+        """
         wf = _load(_linear_workflow(tmp_path))
         app = _app(tmp_path, wf)
 
@@ -185,14 +190,15 @@ class TestEventDispatch:
             async with app.run_test() as pilot:
                 await pilot.pause()
                 app._dispatch_to_widgets(
-                    _event("agent_message", {"text": "hello"},
-                           node="a", session_id="abcd1234"),
+                    _event("node_started", {"kind": "script"}, node="a"),
                 )
                 await pilot.pause()
                 await pilot.pause()  # RichLog 异步 flush
                 log = app.query_one(LogStream)
                 text = _flatten_strips(log.lines)
-                assert "hello" in text
+                # v2 格式含 node + "node started"
+                assert "node started" in text
+                assert "›" in text  # LEVEL_INFO icon
         run_async(scenario())
 
     def test_idempotent_dispatch_replay_consistent(self, tmp_path):
@@ -569,7 +575,7 @@ class TestInterruptFlow:
         run_async(scenario())
 
     def test_app_dispatches_interrupt_resolved_to_logstream(self, tmp_path):
-        """注入 interrupt_resolved 事件 → LogStream 显示描述（SPEC §4.3 全部入日志）。"""
+        """注入 interrupt_resolved 事件 → LogStream 显示描述（v2 §2.4 warn level）。"""
         wf = _load(_linear_workflow(tmp_path))
         app = _app(tmp_path, wf)
 
@@ -585,7 +591,8 @@ class TestInterruptFlow:
                 await pilot.pause()
                 await pilot.pause()  # RichLog 异步 flush
                 text = _flatten_strips(app.query_one(LogStream).lines)
-                assert "interrupt continue" in text
+                # v2 format: "interrupt: continue: 用更保守的方案"
+                assert "interrupt: continue" in text
                 assert "用更保守的方案" in text
         run_async(scenario())
 
@@ -758,13 +765,18 @@ class TestDialogFlow:
         run_async(scenario())
 
     def test_app_dispatches_dialog_started_to_logstream(self, tmp_path):
-        """注入 dialog_started 事件 → LogStream 显示描述（含 node + preview）。"""
+        """注入 dialog_started 事件 → LogStream 显示描述（debug level，需 toggle_debug）。
+
+        v2 §2.4：dialog_* 改为 debug level（默认隐藏，L 键 toggle 显示）。
+        """
         wf = _load(_linear_workflow(tmp_path))
         app = _app(tmp_path, wf)
 
         async def scenario():
             async with app.run_test() as pilot:
                 await pilot.pause()
+                # debug 默认隐藏，开启 debug 才能 dispatch 到 LogStream
+                app.query_one(LogStream).toggle_debug()
                 app._dispatch_to_widgets(_event(
                     "dialog_started",
                     {"node": "cfg", "session_id": "dlg-1",
@@ -779,13 +791,14 @@ class TestDialogFlow:
         run_async(scenario())
 
     def test_app_dispatches_dialog_message_to_logstream(self, tmp_path):
-        """注入 dialog_message 事件 → LogStream 显示 role + turn + text 摘要。"""
+        """注入 dialog_message 事件 → LogStream 显示 role + turn + text 摘要（debug）。"""
         wf = _load(_linear_workflow(tmp_path))
         app = _app(tmp_path, wf)
 
         async def scenario():
             async with app.run_test() as pilot:
                 await pilot.pause()
+                app.query_one(LogStream).toggle_debug()
                 app._dispatch_to_widgets(_event(
                     "dialog_message",
                     {"role": "agent", "text": "因为 target_project 没有那个字段", "turn": 2},
@@ -799,13 +812,14 @@ class TestDialogFlow:
         run_async(scenario())
 
     def test_app_dispatches_dialog_ended_to_logstream(self, tmp_path):
-        """注入 dialog_ended 事件 → LogStream 显示 node + total_turns。"""
+        """注入 dialog_ended 事件 → LogStream 显示 total_turns（debug level）。"""
         wf = _load(_linear_workflow(tmp_path))
         app = _app(tmp_path, wf)
 
         async def scenario():
             async with app.run_test() as pilot:
                 await pilot.pause()
+                app.query_one(LogStream).toggle_debug()
                 app._dispatch_to_widgets(_event(
                     "dialog_ended",
                     {"node": "cfg", "total_turns": 3, "conclusion": "user_ended"},

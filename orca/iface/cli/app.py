@@ -478,8 +478,9 @@ class OrcaApp(App):
             with Vertical(id="right-pane"):          # v2 右侧 70%（spec §2.1）
                 # TODO Step 5：AgentHistory 占位（Step 3 填充实现，set_node / append_event）。
                 yield AgentHistory()                 # v2 右上 7fr（spec §2.3）
-                # TODO Step 4：LogStream 内容从 v1.1.1 改为高层节点事件（spec §2.4）。
-                yield LogStream()                    # v2 右下 3fr（Step 4 改造）
+                # Step 4 已完成：LogStream widget 内部按 EVENT_LEVEL 表派生（spec §2.4）。
+                # Step 5 待做：dispatch 改用 EVENT_LEVEL.get(etype) 三态派发（删硬编码 type 过滤）。
+                yield LogStream()                    # v2 右下 3fr（spec §2.4 Conductor Log View）
             # v1.1.1 残留（Step 1b 删 ActivityStream；Step 5 删 NodeDetail stream/output 双写）。
             # 暂保留实例：NodeDetail chart 路径仍活跃（c/C 键）；ActivityStream 已删（Step 1b）。
             yield NodeDetail()
@@ -782,21 +783,21 @@ class OrcaApp(App):
                 )
 
         # ── TODO Step 5：v2 AgentHistory.append_event 仅 selected_node + LogStream 走 EVENT_LEVEL
-        # spec v2 §11.5 #6：dispatch 用 EVENT_LEVEL.get(etype) 三态派生（合法 level /
-        # None-as-explicit-skip / 表未登记）；Step 4 加 EVENT_LEVEL 表后此处替换。
-        # v1.1.1 ActivityStream 写入分支已删（Step 1b），dispatch 暂不发 agent_message /
-        # agent_thinking / agent_tool_call / agent_tool_result 等到任何 widget——Step 3
-        # AgentHistory 填充 + Step 5 dispatch 改造时一并恢复（用 _node_events 分桶）。
+        # spec v2 §11.5 #6：dispatch 用 EVENT_LEVEL.get(etype) 三态派发（合法 level /
+        # None-as-explicit-skip / 表未登记）；Step 4 LogStream widget 已内置 EVENT_LEVEL
+        # 表自过滤（append_event 内调 level_of 决定是否写），但 dispatch 仍走 v1.1.1
+        # ``etype not in (prompt_rendered, agent_usage)`` 兼容路径——Step 5 改为显式三态。
 
-        # 兼容旧 LogStream（display:none 不显示；既有测试断言 LogStream.lines 不破）。
+        # LogStream 写入（Step 4 widget 已自过滤；dispatch 仍走 v1.1.1 兼容 if-etype）。
         # spec v1.1 §5 决议：LogStream 替换为 ActivityStream；保留实例 + 双写事件兼容路径。
-        # v2 §4.4：ActivityStream 已删（Step 1b），LogStream 仍硬编码过滤 prompt_rendered /
-        # agent_usage（与 Activity Stream visibility 同源）；Step 4 改造为高层节点事件 +
-        # EVENT_LEVEL 表后此双写分支 Step 5 一并删。
+        # v2 §4.4：ActivityStream 已删（Step 1b）；Step 4 widget 改为高层节点事件 +
+        # EVENT_LEVEL 表派生；此 dispatch 分支 Step 5 改用 level_of() 三态派发后简化。
         try:
             log = self.query_one(LogStream)
             if etype not in ("prompt_rendered", "agent_usage"):
-                # 同 Activity Stream visibility：prompt_rendered / agent_usage 不写 LogStream
+                # LogStream widget 内置 EVENT_LEVEL 表 + EVENTS_NOT_IN_LOG_STREAM 白名单
+                # （spec §2.4 + §11.5 #6）：agent_* / custom 等 level=None 事件 append_event
+                # 内部直接 return，不会写入。故此处 if-etype 只是冗余防御（Step 5 删）。
                 log.append_event(
                     etype, data, node=node,
                     session_id=event.session_id, timestamp=event.timestamp,
