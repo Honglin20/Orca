@@ -86,8 +86,9 @@ def _truncate(s: Any, limit: int = _TITLE_LIMIT) -> str:
 def _format_elapsed_sec(elapsed: float) -> str:
     """秒数格式化（``0.8s`` / ``12s`` / ``1m30s``）—— tool_result meta 用。
 
-    与 ``_dag_render.format_elapsed`` 同语义但精度更细（tool_result 普遍 < 1s，
-    需保留 1 位小数；node elapsed 普遍整秒）。
+    精度比 node elapsed 更细（tool_result 普遍 < 1s，需保留 1 位小数；node elapsed
+    普遍整秒）。v1.1.1 ``_dag_render.format_elapsed`` 已随 dag_* widget 删除一并取消
+    （v2 Step 1a）；本函数 Step 1b 迁入 ``_event_summary`` 后由 AgentHistory / LogStream 共享。
     """
     if elapsed < 0:
         return "0s"

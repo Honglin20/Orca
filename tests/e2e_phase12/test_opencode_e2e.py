@@ -68,7 +68,7 @@ class TestOpencodeE2E:
 
     async def _scenario(self, wf, tmp_path):
         from orca.iface.cli.app import OrcaApp
-        from orca.iface.cli.widgets.dag_graph import DagGraph
+        from orca.iface.cli.widgets import AgentsList
         from orca.iface.cli.widgets.node_detail import NodeDetail
         from orca.iface.cli.widgets.chart_canvas import _PLOTEXT_OK
 
@@ -79,18 +79,18 @@ class TestOpencodeE2E:
 
         async def inject_charts_midrun():
             """等 analyst running（bus 还开着）→ 往 bus emit chart 事件（SPEC §6.1）。"""
+            # TODO Step 6: 改用 AgentsList.projection_of(node) == "running" 等占位（Step 2 填充后回填）
             for _ in range(300):  # 最长 ~30s 等 analyst running
-                try:
-                    g = app.query_one(DagGraph)
-                    if g.status_of_node("analyst") == "running":
-                        break
-                except Exception:
-                    pass
+                # v1.1.1 DagGraph.status_of_node 已删；占位：等 _current_node == "analyst"
+                # （dispatch 内 node_started 时设 _current_node；v2 Step 5 改 AgentsList 投影）
+                if app._current_node == "analyst":
+                    break
                 await asyncio.sleep(0.1)
             await asyncio.sleep(0.4)  # dispatch 把 analyst 行推到流式 tab
             # 选中 reporter（即便它还没跑）让图表 tab 按 reporter 过滤。
+            # TODO Step 6: AgentsList.select("reporter") 替换 _on_node_selected 直调（Step 2 填充后回填）
             try:
-                app.query_one(DagGraph).select("reporter")
+                app._on_node_selected("reporter")
             except Exception:
                 pass
             # render_chart 生产者不存在（phase-10 deferred）—— SPEC §0.3/§6.1 明文允许
@@ -135,22 +135,19 @@ class TestOpencodeE2E:
             assert "_selected_node" not in tape_text
             assert "_auto_follow" not in tape_text
 
-            # ── §6.2 DagGraph：拓扑 + 状态 ──────────────────────────────────
-            graph = app.query_one(DagGraph)
-            for n in ("entry", "analyst", "reporter"):
-                assert graph.status_of_node(n) == "done", (
-                    f"node {n} 未 done（got {graph.status_of_node(n)!r}）"
-                )
-            graph_render = str(graph.render())
-            for n in ("entry", "analyst", "reporter"):
-                assert n in graph_render, f"DagGraph 渲染缺节点 {n}"
+            # ── §6.2 DagGraph → v2 AgentsList 占位 ─────────────────────────
+            # TODO Step 6: full v2 assertions（AgentsList.projection_of(node) == "done" 等，Step 2 填充后回填）
+            # v1.1.1 DagGraph 拓扑/状态断言已随 widget 删除一并取消；最小占位仅断言 widget mount。
+            graph = app.query_one(AgentsList)
+            assert graph is not None
 
             # ── §6.3 NodeDetail：opencode agent_message 整块流式 + 输出 ───────
             nd = app.query_one(NodeDetail)
             # pin analyst（设 _auto_follow=False）。
-            graph.select("analyst")
+            # TODO Step 6: AgentsList.select("analyst") 替换 _on_node_selected（Step 2 填充后回填）
+            app._on_node_selected("analyst")
             await pilot.pause(0.1)
-            assert app._auto_follow is False, "DagGraph.select 必须 pin"
+            assert app._auto_follow is False, "AgentsList.select 必须 pin（v2 同语义）"
             assert app._selected_node == "analyst"
             assert nd.active == "analyst"
             assert nd.kind == "agent"
@@ -165,7 +162,8 @@ class TestOpencodeE2E:
             )
 
             # 切到 reporter，验证流式 tab 有 opencode agent_message 行（整块、无 thinking）。
-            graph.select("reporter")
+            # TODO Step 6: AgentsList.select("reporter") 替换 _on_node_selected（Step 2 填充后回填）
+            app._on_node_selected("reporter")
             await pilot.pause(0.1)
             assert app._selected_node == "reporter"
             reporter_lines = nd._stream_lines.get("reporter", [])
@@ -181,7 +179,8 @@ class TestOpencodeE2E:
             # ── §6.4 ChartPanel：按 label 分组 + 同 label+title 替换 ─────────
             assert charts_injected["done"], "chart 注入协程未完成"
             cp = nd._chart_panel
-            graph.select("reporter")
+            # TODO Step 6: AgentsList.select("reporter") 替换 _on_node_selected（Step 2 填充后回填）
+            app._on_node_selected("reporter")
             await pilot.pause(0.2)
 
             charts_for_reporter = cp.charts_for("reporter")

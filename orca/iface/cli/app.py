@@ -63,8 +63,9 @@ from orca.gates.types import InterruptRequest
 from orca.iface.cli.screens.chart_browser import ChartBrowser
 from orca.iface.cli.screens.gate_modal import GateModal
 from orca.iface.cli.screens.interrupt_modal import InterruptModal
-from orca.iface.cli.widgets import DagGraph, Header, LogStream, NodeDetail
+from orca.iface.cli.widgets import AgentsList, AgentHistory, Header, LogStream, NodeDetail
 from orca.iface.cli.widgets._event_filter import visibility_of
+# ActivityStream 保留（Step 1b 删：迁函数到 _event_summary 后删文件）
 from orca.iface.cli.widgets.activity_stream import ActivityStream
 from orca.iface.cli.widgets.header import HeaderStats, NodeUsageStats
 from orca.run.lifecycle import gen_run_id
@@ -279,16 +280,35 @@ class OrcaApp(App):
     Screen {
         layout: vertical;
     }
+    /* spec v2 §2.1：三块布局（左 30% AgentsList / 右上 70% AgentHistory / 右下 LogStream）。
+       Step 1a 占位：AgentsList / AgentHistory 是空 shell；LogStream 内容仍是 v1.1.1。
+       NodeDetail 保留实例（display:none，chart 路径唯一入口，spec §6.3）。 */
     #main-row {
         height: 1fr;
     }
-    /* spec v1.1 §7.2：DagGraph 占 50%；Activity Stream 右半全高（取消 NodeDetail 显示）。 */
-    #activity-stream {
-        width: 1fr;
+    AgentsList {
+        width: 30%;
+        min-width: 20;
+        max-width: 40;
+        border: round $primary;
+        padding: 0 1;
+        background: $surface;
     }
-    /* spec v1.1 §7.2：NodeDetail 取消显示（O1=c），但保留实例兼容既有 API + 测试。
-       display:none 会让 textual 不渲染（不刷新 lines/children），故用 height:0 + off-screen。
-       既有测试断言 LogStream.lines / NodeDetail.active / .set_node() 仍能 query + 维护内部 state。 */
+    #right-pane {
+        width: 1fr;
+        height: 1fr;
+    }
+    AgentHistory {
+        height: 7fr;
+        border: round $success;
+        padding: 0 1;
+        background: $surface;
+    }
+    LogStream {
+        height: 3fr;
+    }
+    /* spec v1.1 §7.2 / v2 §6.3：NodeDetail 保留实例（display:none，chart 路径）。
+       height:0 + off-screen 让它不占屏；既有测试断言 query + 内部 state 仍可调。 */
     NodeDetail {
         height: 0;
         min-height: 0;
@@ -297,13 +317,15 @@ class OrcaApp(App):
         margin: 0;
         offset: -9999 0;  /* 移出可视区 */
     }
-    LogStream {
+    /* v1.1.1 残留：ActivityStream 暂保留实例（Step 1b 删），on_mount / dispatch
+       仍 query_one(ActivityStream) 双写——display:none 让它不占屏但实例仍 mount。 */
+    ActivityStream {
         height: 0;
         min-height: 0;
         border: none;
         padding: 0;
         margin: 0;
-        offset: -9999 0;
+        offset: -9999 0;  /* 移出可视区 */
     }
     """
 
@@ -444,9 +466,8 @@ class OrcaApp(App):
         # node_session_ids：reducer 维护 node -> [session_id]（按 node_started 顺序 append）。
         # iter N = session_id 在 list 中的位置 + 1（retry / skip / interrupt 不 append）。
         self._node_session_ids: dict[str, list[str]] = {}
-        # spec v1.1 §4.5：fan_in arrived M（动态）—— 前置节点 node_completed 数（按 dst 节点统计）。
-        # 拓扑入边来自 build_from_workflow 的 _topo.edges；这里只维护 arrived count（增量）。
-        self._node_arrived_count: dict[str, int] = {}
+        # spec v2 §11.5 #5：删 v1.1.1 _node_arrived_count（fan-in 已取消，DagGraph 删了，
+        # 孤儿字段不留）。Step 5 _dispatch_to_widgets 改造时一并清掉 fan_in arrived M 调用。
         # spec v1.1 §6.2：per-node usage（agent_usage 收敛到 Header footer）。
         # key = node, value = NodeUsageStats（累加；opencode translator per-step 是累积值故取最后一条）。
         # session_id 维度去重：取该 session_id 最后一条 agent_usage（spec §4.4 acceptance）。
@@ -462,13 +483,18 @@ class OrcaApp(App):
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="main-row"):
-            yield DagGraph()                       # spec v1.1 §7.2：DAG 占 50%，3 行盒子
-            yield ActivityStream()                 # 右半全高：双行 entry + 折叠详情
-        # spec v1.1 §7.2：NodeDetail 取消（O1=c）但保留 widget 实例兼容既有 API + 测试。
-        # CSS ``display: none`` 让它不占屏；ChartPanel 路径在 ChartBrowser 全屏（``c/C`` 键）。
-        # LogStream 同理：保留实例兼容既有 _dispatch_to_widgets 测试断言，display:none 不显示。
-        yield NodeDetail()
-        yield LogStream()
+            # TODO Step 5：AgentsList 占位（Step 2 填充实现，build_from_workflow 改 build）。
+            yield AgentsList()                       # v2 左 30%（spec §2.2）
+            with Vertical(id="right-pane"):          # v2 右侧 70%（spec §2.1）
+                # TODO Step 5：AgentHistory 占位（Step 3 填充实现，set_node / append_event）。
+                yield AgentHistory()                 # v2 右上 7fr（spec §2.3）
+                # TODO Step 4：LogStream 内容从 v1.1.1 改为高层节点事件（spec §2.4）。
+                yield LogStream()                    # v2 右下 3fr（Step 4 改造）
+            # v1.1.1 残留（Step 1b 删 ActivityStream；Step 5 删 NodeDetail stream/output 双写）。
+            # 暂保留实例：NodeDetail chart 路径仍活跃（c/C 键）；ActivityStream 仍被 on_mount
+            # query_one + dispatch 双写引用（Step 1b 删文件时一并清这些调用点）。
+            yield ActivityStream()
+            yield NodeDetail()
         yield Footer()
 
     def on_mount(self) -> None:
@@ -484,16 +510,17 @@ class OrcaApp(App):
         单测用 ``run_test()`` 时 on_mount 同样会触发；如不希望真起编排（避免 spawn
         claude / uvicorn），可把 ``kickoff`` 替换成 no-op（见 ``test_app._patched_app``）。
         """
-        tree = self.query_one(DagGraph)
-        # routes 派生：{node_or_group: [target, ...]}（含 $end，build_from_workflow 内忽略）。
-        # 顶层 node 的 routes + parallel 组的 routes（组完成后路由）。
-        routes: dict[str, list[str]] = {}
-        for n in self.wf.nodes:
-            if n.name:
-                routes[n.name] = [r.to for r in n.routes]
-        for g in self.wf.parallel:
-            routes[g.name] = [r.to for r in g.routes]
-        tree.build_from_workflow(self._node_names, self._parallel_groups, routes)
+        # ── TODO Step 5：AgentsList.build(node_names) 替换 DagGraph.build_from_workflow ──
+        # v2 左侧 AgentsList 暂为空 shell（Step 2 填充 build 方法）。既有 v1.1.1 DagGraph
+        # build_from_workflow 调用全注释（DagGraph 已删）。routes 派生 + parallel_groups 暂
+        # 不用（Step 5 重启 AgentsList.build 时一并恢复）。
+        # routes 派生保留代码（注释，避免 Step 5 重写时丢逻辑）：
+        # routes: dict[str, list[str]] = {}
+        # for n in self.wf.nodes:
+        #     if n.name:
+        #         routes[n.name] = [r.to for r in n.routes]
+        # for g in self.wf.parallel:
+        #     routes[g.name] = [r.to for r in g.routes]
         header = self.query_one(Header)
         header.update_stats(HeaderStats(
             run_id=self.run_id, workflow_name=self.wf.name, total=self._total_nodes,
@@ -648,36 +675,43 @@ class OrcaApp(App):
             iter_n = (session_list.index(session_id) + 1) if session_id in session_list else (
                 len(session_list) + 1
             )
-            # spec v1.1 §4.4：更新 DAG 节点投影（status=running + iter + 暂无 elapsed/tok）
-            # 同时调 set_status 兼容 _node_status 投影（既有测试断言 status_of_node）
-            graph = self.query_one(DagGraph)
-            graph.set_status(node, "running")
-            graph.update_node_projection(node, status="running", iter_n=iter_n)
+            # ── TODO Step 5：DagGraph 投影改为 AgentsList.update_node() ──
+            # v2 左侧 AgentsList 暂为空 shell（Step 2 填充 update_node 方法）。
+            # 既有 v1.1.1 DagGraph 调用全注释（DagGraph 已删）：
+            # graph = self.query_one(DagGraph)
+            # graph.set_status(node, "running")
+            # graph.update_node_projection(node, status="running", iter_n=iter_n)
+            _ = iter_n  # 占位（Step 5 重写为 AgentsList.update_node(node, status="running", iter_n=iter_n)）
 
         # node_completed → fan_in arrived += 1（按 dst 节点统计前置节点完成数）
         # + 更新 dst 节点投影（elapsed 静态 + done 状态）
         if etype == "node_completed" and node:
             elapsed = data.get("elapsed")
-            self.query_one(DagGraph).update_node_projection(
-                node, status="done", elapsed=float(elapsed) if elapsed is not None else None,
-            )
-            # spec v1.1 §4.5 O2=a：fan_in arrived M（动态）—— 以 node 为前驱的 dst 各 +1。
-            # 简化 v1：仅算 wf.nodes 的 routes（不含 parallel 组，组进度走 _group_progress）。
-            for n in self.wf.nodes:
-                for r in n.routes:
-                    if n.name == node and r.to and r.to != "$end":
-                        cur = self._node_arrived_count.get(r.to, 0)
-                        self._node_arrived_count[r.to] = cur + 1
-                        self.query_one(DagGraph).update_node_projection(
-                            r.to, fan_in_arrived=self._node_arrived_count[r.to],
-                        )
+            # ── TODO Step 5：DagGraph 投影改为 AgentsList.update_node() ──
+            # v2 fan-in 已取消（spec §0 决策 1）；agent_usage 仍收敛到 Header footer。
+            # self.query_one(DagGraph).update_node_projection(
+            #     node, status="done", elapsed=float(elapsed) if elapsed is not None else None,
+            # )
+            # spec v1.1 §4.5 O2=a：fan_in arrived M（动态）—— 已随 DagGraph 删除一并取消。
+            # v2 §11.5 #5：_node_arrived_count 字段已删；以下循环保留为注释占位（Step 5 一并删）。
+            # for n in self.wf.nodes:
+            #     for r in n.routes:
+            #         if n.name == node and r.to and r.to != "$end":
+            #             cur = self._node_arrived_count.get(r.to, 0)
+            #             self._node_arrived_count[r.to] = cur + 1
+            #             self.query_one(DagGraph).update_node_projection(
+            #                 r.to, fan_in_arrived=self._node_arrived_count[r.to],
+            #             )
+            _ = elapsed  # 占位（Step 5 重写为 AgentsList.update_node(node, status="done", elapsed=elapsed)）
 
         # node_failed / node_skipped → DAG 投影 status（含 error_msg）
         if etype == "node_failed" and node:
             msg = str(data.get("message", data.get("error_type", "")))
-            self.query_one(DagGraph).update_node_projection(
-                node, status="failed", error_msg=msg,
-            )
+            # ── TODO Step 5：DagGraph 投影改为 AgentsList.update_node(status="failed", error_msg=msg) ──
+            # self.query_one(DagGraph).update_node_projection(
+            #     node, status="failed", error_msg=msg,
+            # )
+            _ = msg  # 占位（Step 5 重写为 AgentsList.update_node）
 
         # agent_usage → 收敛到 Header footer（spec §6.2）+ DAG 节点投影（spec §4.4 <tok>）
         if etype == "agent_usage" and node:
@@ -692,11 +726,12 @@ class OrcaApp(App):
                 )
                 self._per_node_last_usage_seq[node] = event.seq
                 # spec §4.4 <tok> 字段：与 Header footer 同源同步（同一 agent_usage event
-                # 投影到 DAG NodeProjection.tokens）。GAP-A 修复：原仅投 Header，DAG 行 3
-                # 永远显 "-- tok"；此处补投影使行 3 显实际数字。
-                self.query_one(DagGraph).update_node_projection(
-                    node, tokens=in_tok + out_tok,
-                )
+                # 投影到 AgentsList 节点 tokens 字段）。GAP-A 修复（v1.1.1）。
+                # ── TODO Step 5：DagGraph.update_node_projection 改 AgentsList.update_node(tokens=...) ──
+                # self.query_one(DagGraph).update_node_projection(
+                #     node, tokens=in_tok + out_tok,
+                # )
+                pass
             self._refresh_header()
 
         # ── 第 2 段：node 生命周期 → DAG 图标 + auto-follow ────────────────
@@ -735,18 +770,20 @@ class OrcaApp(App):
             gate_id = data.get("gate_id", "")
             self._awaiting_gates.add(gate_id)
             self._refresh_header()
+            # ── TODO Step 5：DagGraph.set_status(node, "blocked") 改 AgentsList.update_node(status="blocked") ──
             # 当前节点 → blocked 图标（gate 拦在 node 内的 claude 工具调用循环）
-            if node:
-                self.query_one(DagGraph).set_status(node, "blocked")
+            # if node:
+            #     self.query_one(DagGraph).set_status(node, "blocked")
             # 推 GateModal 参与竞速（@work 内 push_screen_wait）
             self._push_gate_modal(event)
         elif etype == "human_decision_resolved":
             gate_id = data.get("gate_id", "")
             self._awaiting_gates.discard(gate_id)
             self._refresh_header()
+            # ── TODO Step 5：DagGraph.set_status(node, "running") 改 AgentsList.update_node(status="running") ──
             # node 解除 blocked → 回 running（claude resume 继续跑）
-            if node:
-                self.query_one(DagGraph).set_status(node, "running")
+            # if node:
+            #     self.query_one(DagGraph).set_status(node, "running")
             # 广播输家：本壳 modal 还在 → notify_resolved_externally 让它 dismiss
             if self._active_modal is not None:
                 self._active_modal.notify_resolved_externally(
@@ -982,12 +1019,12 @@ class OrcaApp(App):
     # ── phase-12 §1.4 / §5：选中 + auto-follow + 图表键位 ────────────────────
 
     def _on_node_selected(self, name: str) -> None:
-        """DagGraph 选中（j/k / click）回调（SPEC §1.4）。
+        """节点选中回调（v2 AgentsList.select 调；v1.1.1 DagGraph 已删，Step 5 重写为 AgentsList）。
 
         pin：``_auto_follow=False``；``_selected_node=name``；NodeDetail 切到该节点。
         后续 ``node_started`` 不再覆盖选中（除非用户按 ``a`` 恢复跟随）。
         spec v1.1 §5.1：默认 Activity Stream 不跟随选中（保持全事件流）；
-        用户按 ``f`` 切换 filter 模式才进入"仅选中节点"。
+        用户按 ``f`` 切换 filter 模式才进入"仅选中节点"（Step 1b 删 ActivityStream 时一并清）。
         """
         self._selected_node = name
         self._auto_follow = False

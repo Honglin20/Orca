@@ -202,7 +202,7 @@ class NodeDetail(Static):
     # ── 节点切换 ──────────────────────────────────────────────────────────
 
     def set_node(self, name: str | None, kind: str | None = None) -> None:
-        """切换选中节点（DagGraph.select / auto-follow 调）。
+        """切换选中节点（v2 AgentsList.select / auto-follow 调；v1.1.1 DagGraph 已删）。
 
         SPEC §1.4：``_selected`` 驱动全部 tab 内容（流式/输出/图表都按它过滤）。
         kind 决定流式/输出 tab 的数据源（SPEC §1.3 表）；``node_started`` 的 kind

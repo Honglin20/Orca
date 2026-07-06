@@ -1,7 +1,7 @@
 """test_widgets.py —— TUI widget 渲染逻辑单测（phase-12 SPEC §6.2 §6.4 §6.6）。
 
 用 Textual ``run_test()`` pilot（headless，CI 友好）。覆盖：
-  - DagGraph（替换 DagTree）：5 状态图标 + parallel 组进度 + 幂等
+  - AgentsList / AgentHistory：v2 三块布局 widget（Step 2/3 填充；Step 1a 仅占位 import）
   - LogStream ``format_event`` 格式（HH:MM:SS [session] <desc>）
   - Header stats 渲染（done/total/awaiting）
   - ChartPanel：同 label+title 幂等替换 / label 分组 / all_charts / 确定性 fold
@@ -21,9 +21,10 @@ from textual.containers import Vertical
 
 from orca.iface.cli.widgets import (
     NODE_STATUS_ICONS,
+    AgentsList,
+    AgentHistory,
     ChartCanvas,
     ChartPanel,
-    DagGraph,
     Header,
     LogStream,
     NodeDetail,
@@ -87,124 +88,41 @@ class TestNodeStatusIcons:
         assert NODE_STATUS_ICONS["pending"] == "○"
 
 
-# ── DagGraph 状态图标 + parallel 组（phase-12 SPEC §4.1 §6.2，替换 DagTree 测试）
+# ── v2 AgentsList / AgentHistory 空 shell（Step 2/3 填充实现）──────────────────
 
 
-class TestDagGraph:
-    """DagGraph：5 状态图标映射 + parallel 组进度 + 幂等。"""
+class TestAgentsListShell:
+    """v2 左侧 AgentsList：Step 1a 占位空 shell，仅 import + 实例化。
 
-    def test_build_from_nodes_all_pending(self):
-        graph = DagGraph()
+    Step 2 填充拓扑序渲染 / status icon / j/k 导航后改为完整单测。
+    """
 
-        async def scenario():
-            async with _Harness([graph]).run_test() as pilot:
-                graph.build_from_workflow(["a", "b", "c"])
-                await pilot.pause()
-                assert graph.status_of_node("a") == "pending"
-        run_async(scenario())
+    def test_agents_list_imports(self):
+        """import AgentsList 不崩（Step 1a 占位守门）。"""
+        from orca.iface.cli.widgets import AgentsList as _AL
+        assert _AL is AgentsList
 
-    def test_set_status_updates_projection(self):
-        graph = DagGraph()
+    def test_agents_list_can_instantiate(self):
+        """空 shell 可实例化（compose 时挂得上）。"""
+        widget = AgentsList()
+        assert widget is not None
 
-        async def scenario():
-            async with _Harness([graph]).run_test() as pilot:
-                graph.build_from_workflow(["a"])
-                await pilot.pause()
-                for status in NODE_STATUS_ICONS:
-                    graph.set_status("a", status)
-                    await pilot.pause()
-                    assert graph.status_of_node("a") == status
-        run_async(scenario())
 
-    def test_set_status_idempotent(self):
-        """SPEC §6.0 铁律 5：重放一致——多次同名同状态结果一致。"""
-        graph = DagGraph()
+class TestAgentHistoryShell:
+    """v2 右上 AgentHistory：Step 1a 占位空 shell，仅 import + 实例化。
 
-        async def scenario():
-            async with _Harness([graph]).run_test() as pilot:
-                graph.build_from_workflow(["a"])
-                await pilot.pause()
-                graph.set_status("a", "running")
-                graph.set_status("a", "running")
-                graph.set_status("a", "running")
-                await pilot.pause()
-                assert graph.status_of_node("a") == "running"
-        run_async(scenario())
+    Step 3 填充 set_node / append_event / last message 默认展开后改为完整单测。
+    """
 
-    def test_unknown_status_ignored(self):
-        graph = DagGraph()
+    def test_agent_history_imports(self):
+        """import AgentHistory 不崩（Step 1a 占位守门）。"""
+        from orca.iface.cli.widgets import AgentHistory as _AH
+        assert _AH is AgentHistory
 
-        async def scenario():
-            async with _Harness([graph]).run_test() as pilot:
-                graph.build_from_workflow(["a"])
-                await pilot.pause()
-                graph.set_status("a", "bogus")  # 防御：未知状态不崩
-                await pilot.pause()
-                assert graph.status_of_node("a") == "pending"  # 原状态保持
-        run_async(scenario())
-
-    def test_parallel_group_progress(self):
-        """SPEC §4.1：parallel 组进度计数 (1/2)。"""
-        graph = DagGraph()
-
-        async def scenario():
-            async with _Harness([graph]).run_test() as pilot:
-                graph.build_from_workflow(
-                    node_names=["start", "end"],
-                    parallel_groups=[("research", ["r_a", "r_b"])],
-                )
-                await pilot.pause()
-                # r_a done → 进度 1/2
-                graph.set_status("r_a", "done")
-                graph.set_group_progress("research", done=1, total=2)
-                await pilot.pause()
-                assert graph.status_of_node("r_a") == "done"
-                # 组完成 → 父图标 done
-                graph.set_status("r_b", "done")
-                graph.set_group_progress("research", done=2, total=2)
-                graph.set_group_status("research", "done")
-                await pilot.pause()
-        run_async(scenario())
-
-    def test_blocked_status_for_gate(self):
-        """SPEC §4.1：blocked (⏸) 用于 gate 拦截的 node。"""
-        graph = DagGraph()
-
-        async def scenario():
-            async with _Harness([graph]).run_test() as pilot:
-                graph.build_from_workflow(["review"])
-                await pilot.pause()
-                graph.set_status("review", "blocked")
-                await pilot.pause()
-                assert graph.status_of_node("review") == "blocked"
-        run_async(scenario())
-
-    def test_select_sets_selected_and_notifies_app(self):
-        """SPEC §1.4：select() 设 _selected + 调 app._on_node_selected（pin）。"""
-
-        class _SpyApp(App):
-            selected_calls: list[str] = []
-
-            def __init__(self):
-                super().__init__()
-                self._graph = DagGraph()
-
-            def compose(self):
-                yield self._graph
-
-            def _on_node_selected(self, name: str) -> None:
-                self.selected_calls.append(name)
-
-        async def scenario():
-            app = _SpyApp()
-            async with app.run_test() as pilot:
-                app._graph.build_from_workflow(["a", "b"])
-                await pilot.pause()
-                app._graph.select("b")
-                await pilot.pause()
-                assert app._graph.selected == "b"
-                assert app.selected_calls == ["b"]
-        run_async(scenario())
+    def test_agent_history_can_instantiate(self):
+        """空 shell 可实例化（compose 时挂得上）。"""
+        widget = AgentHistory()
+        assert widget is not None
 
 
 # ── LogStream format_event（SPEC §4.3：HH:MM:SS [session] <desc>）─────────
