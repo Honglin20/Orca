@@ -7,23 +7,28 @@
 
 ---
 
-## 当前状态：phase-11-error-handling 实现完成（2026-07-07）；按 ADR §7 批次推进下一模块
+## 当前状态：phase-11-process-lifecycle 实现完成（2026-07-07）；下一模块 phase-12-capabilities
+
+### ✅ 已完成：phase-11-process-lifecycle 实现（批 3a，exec/iface）
+
+**Commit**：`cdc3469`。详见 [release note](../releases/2026-07-07-phase-11-process-lifecycle.md) + [CHANGELOG](CHANGELOG.md)。
+
+**交付**：
+- 新增 `orca/exec/registry.py`（ProcessRegistry DI + 三段式 cancel + 平台分支）+ `orca/iface/exit_codes.py`（ExitCode 5 档）
+- runner.py / script.py 接入 `start_new_session=True` + registry.acquire/release（推翻 phase-3 §2.5）
+- orchestrator.py 加 `shutdown()` 方法（不动 phase-11-error except 链）
+- run/__main__.py SIGTERM handler 只设 Event（signal-safe）+ 退出码经 `exit_for_terminal_status` 派生
+- 1558 passed 0 回归（baseline 1525 + 33 新增）
+
+**遗留技术债**（详见 release note §5）：
+- DI 传递链未完全闭合（5 处 CLIRunner 调用点未传 run_id/node_id；正确性不受影响；phase-12 Adapter Protocol 一并设计）
+- gates/hook_script.py 退出码未迁移（批 4）
+- 真实孙子进程 E2E 需非沙箱环境（mock 时序单测覆盖契约）
+- Windows test_cancel_windows.py 缺失（平台分支代码已就位）
 
 ### ✅ 已完成：phase-11-error-handling 实现（批 2，纯 exec/run/schema/iface）
 
 **Commit**：`451dd39`。详见 [release note](../releases/2026-07-07-phase-11-error-handling.md) + [CHANGELOG](CHANGELOG.md)。
-
-**交付**：
-- 新增 `orca/exec/{error_kinds,result,classifier,retry}.py`（4 模块）+ 4 测试文件（139 测试）
-- ExecError 字段集改 `{kind,message,phase,node,raw}`；`error_type` 降级为派生 property（迁移期诊断）
-- `WorkflowAborted/MaxIter/RouteError` 改 ExecError 子类（固定 kind,phase）；`WorkflowTerminated` 保留独立
-- error_type→kind 全量迁移（emit 写 kind + 读兼容期 error_type）；retry_started.data 扩展 layer/kind/reason/next_retry_at
-- 1525 passed 0 回归（baseline 1386 + 139 新增）
-
-**遗留**（显式技术债，绑 phase-13 PR）：
-- emit 端顶层双写 kind + error_type（用户禁止改 TUI widgets；TUI 工作树负责迁移读兼容）
-- ExecError.error_type 派生 property（与上面同步移除）
-- 编排 retry path 已直接 emit retry_started（不调 `exec/retry.emit_retry_started` helper）—— helper 与 orchestrator emit 各一份，phase-12 考虑统一
 
 ### 🔥 进行中：接口收敛 → 各 phase SPEC 回填 → 实现（goal 2026-07-07）
 
