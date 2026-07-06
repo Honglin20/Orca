@@ -34,6 +34,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from orca.exec.error import ExecError
+from orca.exec.registry import ProcessRegistry, get_default_registry
 from orca.run.aggregate import GroupFailure
 from orca.run.errors import MaxIterationsError, WorkflowAborted, WorkflowTerminated
 from orca.run.executor_adapter import execute_and_emit
@@ -110,6 +111,7 @@ class Orchestrator:
         run_id: str | None = None,
         interrupt_handler: InterruptHandler | None = None,
         agent_tools_server: AgentToolsMcpServer | None = None,
+        registry: ProcessRegistry | None = None,
     ):
         self.wf = wf
         self.bus = bus
@@ -172,6 +174,10 @@ class Orchestrator:
         # 每次 _make_ctx 把它注入 RunContext.user_guidance（Step B 接 render_prompt）。
         # 单 run 生命周期内单调累加；用 list 因 frozen tuple 在 _make_ctx 里构造。
         self._guidance_acc: list[str] = []
+        # phase-11-process §1.2（ADR §4.7）：DI 注入 ProcessRegistry。
+        # production 用 ``get_default_registry()``；测试 / CLI 入口可注入独立实例。
+        # ``shutdown()`` 经此 registry 兜底清理未释放的子进程（signal / atexit 三处都调）。
+        self._registry: ProcessRegistry = registry or get_default_registry()
 
     # ── phase 11：中断公开通道（SPEC §2.3）──────────────────────────────────
 
@@ -243,6 +249,22 @@ class Orchestrator:
             logger.info(
                 "request_interrupt %s 即时唤醒 %d 个 wait node", ireq.id, woken
             )
+
+    def shutdown(self) -> None:
+        """phase-11-process §1.2：兜底清理未释放的子进程（signal / atexit / CLI 入口三处都调）。
+
+        幂等（铁律 5）：``ProcessRegistry.shutdown`` 内 ``_shutting_down`` flag 保护，
+        多次调直接 return，不报错。
+
+        与 ``run()`` 内 ``self.bus.close()`` 的关系：bus.close 关 Tape 文件，
+        registry.shutdown 杀进程——两者正交，run() 自然结束路径 proc 都已 release，
+        此方法对正常路径是 no-op，仅作 signal / 异常退出兜底。
+
+        **不在 except 链里调**（避免与 phase-11-error 改过的 except 链耦合）：
+        本方法只对 ``__main__`` / signal handler / atexit 暴露；``run`` 内的清理走
+        既有 ``_stop_agent_tools + bus.close`` 路径。
+        """
+        self._registry.shutdown()
 
     async def run(self) -> RunState:
         """跑完整个 workflow，返回 replay_state(tape)（tape 派生的 RunState）。"""
@@ -500,6 +522,8 @@ class Orchestrator:
         orch._interrupt_skip_target = None
         # phase 11 §5：resume 不接 agent_tools_server（ask_user 交互态不跨进程恢复）。
         orch._agent_tools_server = None
+        # phase-11-process：resume 用 default registry（同 process；signal 兜底仍生效）。
+        orch._registry = get_default_registry()
         # resume 专用状态（run_from_state 消费）。
         orch._resume_replayed_events = 0
         orch._resume_initial_outputs = outputs_acc

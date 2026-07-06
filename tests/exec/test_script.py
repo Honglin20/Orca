@@ -130,3 +130,46 @@ def test_lifecycle_and_session_id_consistent():
     sids = {e.session_id for e in events}
     assert len(sids) == 1
     assert next(iter(sids)) is not None
+
+
+# ── phase-11-process：registry 集成（铁律 1：每个 spawn 必须注册）────────────
+
+
+def test_script_executor_registers_spawn_in_registry(process_local):
+    """phase-11-process §1 铁律 1：script spawn 必须经 registry.acquire 登记。
+
+    verify intent：注入独立 registry，跑完 echo 后该 pid 不在 registry（已 release）。
+    """
+    from orca.exec.registry import ProcessRegistry
+    assert isinstance(process_local, ProcessRegistry)
+    exe = ScriptExecutor(registry=process_local)
+    node = ScriptNode(name="s", command="echo registered")
+
+    async def _collect_local():
+        return [ev async for ev in exe.exec(node, _ctx())]
+
+    events = _run(_collect_local())
+    assert events[-1].type == "node_completed"
+    # 跑完 release：registry 内无残留 entry
+    with process_local._lock:
+        assert process_local._procs == {}
+
+
+def test_script_executor_timeout_path_uses_registry_kill_one(process_local):
+    """phase-11-process §2.2：timeout 路径委托 registry.kill_one（不再用 proc.kill 单进程）。
+
+    verify intent：注入独立 registry，timeout 后该 pid 不在 registry（kill_one 内 release）。
+    """
+    exe = ScriptExecutor(registry=process_local)
+    node = ScriptNode(name="s", command="sleep 30", timeout=0.3)
+
+    async def _collect_local():
+        return [ev async for ev in exe.exec(node, _ctx())]
+
+    events = _run(_collect_local())
+    failed = [e for e in events if e.type == "node_failed"]
+    assert len(failed) == 1
+    assert failed[0].data["phase"] == "timeout"
+    # kill_one 已 release：registry 内无残留
+    with process_local._lock:
+        assert process_local._procs == {}
