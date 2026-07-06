@@ -91,6 +91,6 @@ $ python -m pytest tests/ --ignore=tests/e2e_phase13 --ignore=tests/e2e_phase14 
 1512 passed, 30 skipped in 155.50s
 ```
 
-## Commit SHAs
+## Commit SHA
 
-待 commit 后填入。
+`451dd39`

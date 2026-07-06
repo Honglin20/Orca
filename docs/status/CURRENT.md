@@ -11,7 +11,7 @@
 
 ### ✅ 已完成：phase-11-error-handling 实现（批 2，纯 exec/run/schema/iface）
 
-**Commit**：待填入。详见 [release note](../releases/2026-07-07-phase-11-error-handling.md) + [CHANGELOG](CHANGELOG.md)。
+**Commit**：`451dd39`。详见 [release note](../releases/2026-07-07-phase-11-error-handling.md) + [CHANGELOG](CHANGELOG.md)。
 
 **交付**：
 - 新增 `orca/exec/{error_kinds,result,classifier,retry}.py`（4 模块）+ 4 测试文件（139 测试）
