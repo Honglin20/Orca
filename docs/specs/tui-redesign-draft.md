@@ -1,6 +1,12 @@
 # TUI Redesign Design Draft
 
-> **状态**：design draft v1.1.1（v1.1 + 真用户验证 4 GAP 收口：A/B/C/E）
+> **状态**：**deprecated by v2**（2026-07-07；见 [`tui-redesign-v2-design-draft.md`](./tui-redesign-v2-design-draft.md)）
+>
+> 本文档描述的 v1.1.1 双栏布局（DagGraph + ActivityStream）已被 v2 三块布局（AgentsList + AgentHistory + LogStream）取代。
+> v1.1.1 commit `225933e` 已上线，但相关 widget（DagGraph / dag_layout / _dag_render / ActivityStream）已在 v2 实施时全部删除。
+> 本文档保留作为历史记录（release note 引用），不再作为有效 SPEC。
+>
+> 原始状态：design draft v1.1.1（v1.1 + 真用户验证 4 GAP 收口：A/B/C/E）
 > **关联**：phase-12（CLI TUI 当前实现）/ phase-15（render layer v1，已完成）/ 后续 phase（待立项）
 > **必读前置**：[`render-layer-design-draft.md`](./render-layer-design-draft.md)（tool 渲染层契约）、[`phase-12-cli-tui-redesign.md`](./phase-12-cli-tui-redesign.md)（当前 TUI 结构）、[`shells-design-draft.md`](./shells-design-draft.md)（三壳共同契约）
 > **裁决原则**：满足 CLAUDE.md「单 tape 唯一真相源 + 幂等 reducer + 一条读路径」底线；不动 canonical Event schema、不动 phase-15 render layer 契约；只动 widget 渲染层 + DagLayout 策略。

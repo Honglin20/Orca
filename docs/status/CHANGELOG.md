@@ -17,6 +17,10 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-07-07] TUI Redesign v2 —— 取消 DAG + agent 输出可见 + 切换 agent 看历史（三块布局重写）
+TUI 三块布局重写：左 30% AgentsList + 右上 70% AgentHistory + 右下 30% LogStream。真删 v1.1.1 widget（DagGraph / dag_layout / _dag_render / activity_stream）+ display:none 双写兼容路径。用户核心需求闭环（last message 默认展开 + j/k 切换 + Log Stream 5 level icon）。
+SPEC：[tui-redesign-v2-design-draft.md](../specs/tui-redesign-v2-design-draft.md) · release：[2026-07-07-tui-redesign-v2.md](../releases/2026-07-07-tui-redesign-v2.md) · commits：59021c9 + 5f9988c + e252653 + ab3b254 + 0e9e877 + 77f5685 + 85ecb61
+
 ## [2026-07-07] phase-11-error-handling —— 统一错误处理（ErrorKind 11 分类 + Result 信封 + classifier 双入口）
 ExecError 字段集改 `{kind,message,phase,node,raw}`（kind 必填唯一分类轴）；新增 4 个 exec/ 层模块（`error_kinds.py` / `result.py` / `classifier.py` / `retry.py`）；`WorkflowAborted/MaxIter/RouteError` 改 ExecError 子类（固定 kind,phase），`WorkflowTerminated` 保留独立；error_type→kind 全量迁移（emit 写 kind + 读兼容期保留 error_type）；retry_started.data 扩展 layer/kind/reason/next_retry_at；编排 exception 子类化 + orchestrator except 顺序（WorkflowTerminated 先于 ExecError）。code-reviewer 3 个 🔴 + 8 个 🟡 闭环（wait.py 走标准 ExecError 路径 / `_classify_error` 用 ErrorKind.X.value / classifier profile 钩子加 warning log / DRY `_with_retryable` helper / 补 transport retry 测试）；test-coverage-e2e 真跑 demo_max_iter + opencode bad model 发现 2 处 emit defect（**Defect A**：orchestrator retry path 漏写 `next_retry_at` / **Defect B**：`layer` 与 `kind` 经两份派生表不一致）→ 已修 + 加 regression test。**1525 passed 0 回归**（baseline 1386 + 139 新增）。Commit：`451dd39`。详见 [release note](releases/2026-07-07-phase-11-error-handling.md)。
 
