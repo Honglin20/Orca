@@ -64,9 +64,9 @@ from orca.iface.cli.screens.chart_browser import ChartBrowser
 from orca.iface.cli.screens.gate_modal import GateModal
 from orca.iface.cli.screens.interrupt_modal import InterruptModal
 from orca.iface.cli.widgets import AgentsList, AgentHistory, Header, LogStream, NodeDetail
-from orca.iface.cli.widgets._event_filter import visibility_of
-# ActivityStream 保留（Step 1b 删：迁函数到 _event_summary 后删文件）
-from orca.iface.cli.widgets.activity_stream import ActivityStream
+# spec v2 §11.5：dispatch 内 EVENT_LEVEL 表 Step 4 引入（替换 v1.1.1 visibility_of）；
+# 当前 v1.1.1 ActivityStream 双写已删（Step 1b），LogStream 双写分支仍硬编码 type
+# 过滤（不依赖 visibility_of），Step 4 一并替换为 EVENT_LEVEL 表 + toggle_debug。
 from orca.iface.cli.widgets.header import HeaderStats, NodeUsageStats
 from orca.run.lifecycle import gen_run_id
 from orca.run.orchestrator import Orchestrator
@@ -317,16 +317,6 @@ class OrcaApp(App):
         margin: 0;
         offset: -9999 0;  /* 移出可视区 */
     }
-    /* v1.1.1 残留：ActivityStream 暂保留实例（Step 1b 删），on_mount / dispatch
-       仍 query_one(ActivityStream) 双写——display:none 让它不占屏但实例仍 mount。 */
-    ActivityStream {
-        height: 0;
-        min-height: 0;
-        border: none;
-        padding: 0;
-        margin: 0;
-        offset: -9999 0;  /* 移出可视区 */
-    }
     """
 
     BINDINGS = [
@@ -491,9 +481,7 @@ class OrcaApp(App):
                 # TODO Step 4：LogStream 内容从 v1.1.1 改为高层节点事件（spec §2.4）。
                 yield LogStream()                    # v2 右下 3fr（Step 4 改造）
             # v1.1.1 残留（Step 1b 删 ActivityStream；Step 5 删 NodeDetail stream/output 双写）。
-            # 暂保留实例：NodeDetail chart 路径仍活跃（c/C 键）；ActivityStream 仍被 on_mount
-            # query_one + dispatch 双写引用（Step 1b 删文件时一并清这些调用点）。
-            yield ActivityStream()
+            # 暂保留实例：NodeDetail chart 路径仍活跃（c/C 键）；ActivityStream 已删（Step 1b）。
             yield NodeDetail()
         yield Footer()
 
@@ -525,10 +513,8 @@ class OrcaApp(App):
         header.update_stats(HeaderStats(
             run_id=self.run_id, workflow_name=self.wf.name, total=self._total_nodes,
         ))
-        # spec v1.1 §7.2：ActivityStream 替代 LogStream + NodeDetail。
-        # 默认 executor 从 workflow.entry 派生；后续 node_started 时按 node executor 覆盖。
-        activity = self.query_one(ActivityStream)
-        activity.set_executor(self._node_executors.get(self.wf.entry, "claude"))
+        # TODO Step 5：v2 AgentHistory.set_executor(self._node_executors.get(self.wf.entry, "claude"))
+        # 取代 v1.1.1 ActivityStream.set_executor（ActivityStream 已删，Step 3 AgentHistory 填充）。
         self._selected_node = self.wf.entry
 
         # 订阅事件 + 起事件消费 worker（@work，loop 已 running，安全）。
@@ -652,12 +638,16 @@ class OrcaApp(App):
     def _dispatch_to_widgets(self, event) -> None:
         """把单个 event 分发到对应 widget（SPEC §6.0 铁律 1：纯派生）。
 
-        spec v1.1 §6.4 改造：按 ``EVENT_VISIBILITY`` 表分派（替代 if-elif 链）。
-          - ``hide_all`` / ``hide_main``：不进 Activity Stream（prompt_rendered / agent_usage）
-          - 其余：进 Activity Stream（按 visibility tag 控制样式）
-          - ``agent_usage``：单独收敛到 Header footer（spec §6.2）
-          - ``custom(chart)``：进 ChartBrowser 全屏路径（NodeDetail 取消后通过 ``c`` 键访问）
-          - ``node_*`` / ``human_decision_*``：驱动 DAG 投影 + 触发 gate modal
+        spec v2 §3 / §11.5：v2 三块布局 + node 分桶 + EVENT_LEVEL 表派生。
+        当前 Step 1b 状态（v1.1.1 ActivityStream 已删，Step 2-5 未完成）：
+          - ``node_*`` / ``agent_usage`` / gate / interrupt：fold + AgentsList（Step 2）
+            + auto-follow 触发 NodeDetail display:none（chart 路径）；
+            AgentsList.update_node 调用 Step 5 接回（当前为 TODO 占位注释）。
+          - ``agent_message`` / ``agent_thinking`` / ``agent_tool_*``：Step 3 AgentHistory
+            + Step 5 _node_events 分桶后此处发；当前不发任何 widget（TODO Step 5）。
+          - ``prompt_rendered`` / ``agent_usage``：不进 LogStream（硬编码 v1.1.1 兼容）。
+          - ``custom(chart)``：进 NodeDetail ChartPanel（chart 路径，display:none）。
+          - workflow 终态：notify（``workflow_failed`` / ``workflow_completed``）。
         """
         etype = event.type
         data = event.data or {}
@@ -791,26 +781,18 @@ class OrcaApp(App):
                     answer=str(data.get("answer", "")),
                 )
 
-        # ── 第 3 段：spec v1.1 §6.4 按 visibility 分派到 Activity Stream ────
-        try:
-            vis = visibility_of(etype)
-        except KeyError:
-            vis = "show"  # 未知 type fail visible（不静默消失）
-
-        if vis not in ("hide_main", "hide_all"):
-            # 进 Activity Stream（spec §6.4 主流）
-            activity = self.query_one(ActivityStream)
-            # executor 透传（normalize_tool 查 §6.1 表用）
-            if node:
-                activity.set_executor(self._node_executors.get(node, "claude"))
-            activity.append_event(
-                event.seq, etype, data,
-                node=node, timestamp=event.timestamp,
-            )
+        # ── TODO Step 5：v2 AgentHistory.append_event 仅 selected_node + LogStream 走 EVENT_LEVEL
+        # spec v2 §11.5 #6：dispatch 用 EVENT_LEVEL.get(etype) 三态派生（合法 level /
+        # None-as-explicit-skip / 表未登记）；Step 4 加 EVENT_LEVEL 表后此处替换。
+        # v1.1.1 ActivityStream 写入分支已删（Step 1b），dispatch 暂不发 agent_message /
+        # agent_thinking / agent_tool_call / agent_tool_result 等到任何 widget——Step 3
+        # AgentHistory 填充 + Step 5 dispatch 改造时一并恢复（用 _node_events 分桶）。
 
         # 兼容旧 LogStream（display:none 不显示；既有测试断言 LogStream.lines 不破）。
         # spec v1.1 §5 决议：LogStream 替换为 ActivityStream；保留实例 + 双写事件兼容路径。
-        # DRY 牺牲（双写）换取 1333 既有测试 0 回归（SPEC 硬约束）。
+        # v2 §4.4：ActivityStream 已删（Step 1b），LogStream 仍硬编码过滤 prompt_rendered /
+        # agent_usage（与 Activity Stream visibility 同源）；Step 4 改造为高层节点事件 +
+        # EVENT_LEVEL 表后此双写分支 Step 5 一并删。
         try:
             log = self.query_one(LogStream)
             if etype not in ("prompt_rendered", "agent_usage"):
@@ -856,7 +838,7 @@ class OrcaApp(App):
         # ── 第 5 段：workflow 终态 notify ───────────────────────────────────
         if etype == "workflow_failed":
             self.notify(
-                "workflow failed — 见 Activity Stream 详情，按 q 退出",
+                "workflow failed — 见 Log Stream + Agent History（Step 4/3 待填充），按 q 退出",
                 severity="error", timeout=0,
             )
         elif etype == "workflow_completed":
@@ -1023,8 +1005,9 @@ class OrcaApp(App):
 
         pin：``_auto_follow=False``；``_selected_node=name``；NodeDetail 切到该节点。
         后续 ``node_started`` 不再覆盖选中（除非用户按 ``a`` 恢复跟随）。
-        spec v1.1 §5.1：默认 Activity Stream 不跟随选中（保持全事件流）；
-        用户按 ``f`` 切换 filter 模式才进入"仅选中节点"（Step 1b 删 ActivityStream 时一并清）。
+        spec v2 §3：选中即驱动 AgentHistory（Step 3）从 ``_node_events[name]`` 全量重渲
+        （Step 5 _dispatch_to_widgets 改造时分桶 + 此处调 AgentHistory.set_node）。
+        v1.1.1 ActivityStream filter_node 概念已取消（Step 1b），不再有 [全部事件] / [仅 X]。
         """
         self._selected_node = name
         self._auto_follow = False
@@ -1067,55 +1050,48 @@ class OrcaApp(App):
         self.push_screen(ChartBrowser())
 
     def action_filter_log(self) -> None:
-        """``/`` 键：旧 LogStream 过滤占位（spec v1.1 改用 ``f`` 键，``/`` 保留兼容提示）。"""
-        activity = self.query_one(ActivityStream)
-        self.set_focus(activity)
-        activity.write("(/ 过滤：请改用 f 键切换 Activity Stream filter 模式)")
+        """``/`` 键：v1.1.1 LogStream 过滤占位。
 
-    def action_toggle_filter(self) -> None:
-        """``f`` 键：切 Activity Stream filter 模式（spec v1.1 §5.1）。
-
-        toggle：当前 filter_node == _selected_node → 清 filter（切回 [全部事件]）；
-        否则设 filter_node = _selected_node（[仅选中节点]）。
-        无选中节点 → 提示用户先 ``j/k`` 选中。
-        """
-        activity = self.query_one(ActivityStream)
-        target = self._selected_node
-        if target is None:
-            self.notify(
-                "请先 j/k 选中节点再按 f 切换 filter",
-                severity="warning", timeout=2,
-            )
-            return
-        if activity.filter_node == target:
-            activity.clear_filter()
-            self.notify(f"Activity Stream filter 清空（全部事件）", timeout=2)
-        else:
-            activity.set_filter_node(target)
-            self.notify(f"Activity Stream filter：仅 {target}", timeout=2)
-        self._refresh_header()
-
-    def action_toggle_thinking(self) -> None:
-        """``t`` 键：spec v1.1 ActivityStream 不复用 NodeDetail 的 thinking_visible flag。
-
-        v1 简化：Activity Stream 默认显示 thinking（show_dim）；按 ``t`` 提示用户
-        Activity Stream 折叠详情可单独展开/收起（per-entry Collapsible）。后续 v1.5
-        接入全局 thinking 开关时再加 ActivityStream.toggle_thinking_visible。
+        TODO Step 5：v2 取消 LogStream filter（Log Stream 改为高层节点事件 + 5 level icon），
+        j/k 切 agent 即可；``/`` 键 Step 5 一并删（BINDINGS 里去掉 slash）。
+        当前保留只发 notify 占位（不调 ActivityStream——已删 Step 1b）。
         """
         self.notify(
-            "Activity Stream：thinking 默认 dim 显示，按 Tab 展开折叠详情",
+            "(/ 键 v2 待实现：j/k 切 agent，L 切 debug log（Step 5）)",
+            severity="information", timeout=2,
+        )
+
+    def action_toggle_filter(self) -> None:
+        """``f`` 键：v1.1.1 Activity Stream filter 模式 toggle。
+
+        TODO Step 5：v2 取消 filter 概念（ActivityStream 已删 Step 1b；j/k 切 agent
+        替代 filter_node）。当前发 notify 占位提示用户用 j/k；Step 5 把 BINDINGS 里
+        的 ``f`` 键删掉。
+        """
+        self.notify(
+            "(f 键 v2 已取消：用 j/k 切 agent（Step 2/5）)",
+            severity="information", timeout=2,
+        )
+
+    def action_toggle_thinking(self) -> None:
+        """``t`` 键：v1.1.1 ActivityStream thinking toggle（已删）。
+
+        TODO Step 5：v2 AgentHistory（Step 3）默认显示 thinking（dim indigo），无需
+        切换；``t`` 键 Step 5 从 BINDINGS 删（或重映射为 AgentHistory 内 toggle）。
+        """
+        self.notify(
+            "(t 键 v2 暂无实现：thinking 默认显示（Step 3 AgentHistory）)",
             severity="information", timeout=2,
         )
 
     # ── header 刷新（SPEC §4.4）─────────────────────────────────────────
 
     def _refresh_header(self) -> None:
-        """重算 header stats（done / awaiting / per-node usage / filter / running）。"""
-        try:
-            activity = self.query_one(ActivityStream)
-            filter_node = activity.filter_node
-        except Exception:  # noqa: BLE001 —— compose 未跑（headless / 测试期）
-            filter_node = None
+        """重算 header stats（done / awaiting / per-node usage / running）。"""
+        # TODO Step 5：v2 取消 filter 概念（ActivityStream 已删，j/k 替代 filter_node）。
+        # 当前 filter_node 永远 None；Step 5 把 Header footer 的 [全部事件] / [仅 X] 标签
+        # 一并删（HeaderStats 字段 + Header.render_footer_text Step 5 清理）。
+        filter_node: str | None = None
         # spec v1.1 §6.2：per-node usage 按声明序（wf.nodes）输出，running 节点优先。
         per_node = [
             self._per_node_usage[n.name]

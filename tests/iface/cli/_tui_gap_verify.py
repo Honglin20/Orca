@@ -1,6 +1,13 @@
-"""GAP-A/B/C/E 真用户验证脚本：重放 mxint + demo_loop tape，断言关键修复点。
+"""GAP 真用户验证脚本（v1.1.1 已 deprecated by v2）。
 
-非测试文件——是开发期验证脚本（pytest 不收）。直接 python 运行。
+**TODO Step 6**：v1.1.1 ActivityStream / DagGraph 已删（Step 1a/1b），本脚本
+原断言全失效。Step 2-5 v2 widget 填充 + e2e fixture 更新后此脚本重写为：
+  - mxint tape 重放 → v2 AgentsList 5 agent 拓扑序 + AgentHistory last message 展开
+  - demo_loop tape 重放 → counter iter N 显示 + self-loop 不 crash
+  - with_retry tape 重放 → Log Stream retry chain 完整
+
+当前文件仅保留 tape 加载 helper（load_wf_from_tape）+ 主入口；verifier 函数
+改为 TODO 占位 print（保留运行入口，pytest 不收本文件）。
 """
 from __future__ import annotations
 
@@ -9,8 +16,6 @@ import json
 from pathlib import Path
 
 from orca.iface.cli.app import OrcaApp
-from orca.iface.cli.widgets.activity_stream import ActivityStream
-from orca.iface.cli.widgets.dag_graph import DagGraph
 from orca.schema.event import Event
 from orca.schema.workflow import (
     AgentNode, Route, ScriptNode, SetNode, Workflow,
@@ -85,69 +90,25 @@ def replay_and_verify(tape_path: Path, label: str, verifier) -> None:
 
 
 def verify_mxint(app: OrcaApp) -> None:
-    # GAP-A：5 节点 NodeProjection.tokens 全非 None
-    graph = app.query_one(DagGraph)
-    print("\n[GAP-A] DAG NodeProjection.tokens（应显实际数字，非 None）：")
-    nodes_with_tokens = 0
-    for name in ("analyzer", "configurator", "runner", "diagnostic_saver", "report_painter"):
-        proj = graph.projection_of(name)
-        if proj is None:
-            print(f"  {name}: (无 projection)")
-            continue
-        print(f"  {name}: status={proj.status} iter={proj.iter_n} elapsed={proj.elapsed} tokens={proj.tokens}")
-        if proj.tokens is not None:
-            nodes_with_tokens += 1
-    assert nodes_with_tokens == 5, f"GAP-A 失败：仅 {nodes_with_tokens}/5 节点有 tokens"
-    print(f"  ✓ 5/5 节点 tokens 全非 None")
+    """TODO Step 6：v2 AgentsList + AgentHistory 断言。
 
-    # GAP-B：60 个 tool_result entry summary 含 tool name + 主要参数
-    activity = app.query_one(ActivityStream)
-    result_entries = [e for e in activity.entries if e.event_type == "agent_tool_result"]
-    print(f"\n[GAP-B] tool_result entry summary（{len(result_entries)} 条，应显 tool + args 非 '?  {{}}'）：")
-    # 抽 5 条样本
-    for i, e in enumerate(result_entries[:5]):
-        print(f"  #{i}: summary={e.summary_line!r}  meta={e.meta_line!r}")
-    bad_count = sum(1 for e in result_entries if e.summary_line.startswith("?  {}"))
-    assert bad_count == 0, f"GAP-B 失败：{bad_count} 条 result summary 显 '?  {{}}'"
-    # 检查含 tool name（如 glob/read/bash）
-    has_tool_name = sum(1 for e in result_entries if any(
-        t in e.summary_line for t in ("glob", "read", "bash", "grep", "write", "edit")
-    ))
-    print(f"  含 tool name: {has_tool_name}/{len(result_entries)}")
-    assert has_tool_name >= len(result_entries) * 0.9, \
-        f"GAP-B 失败：仅 {has_tool_name}/{len(result_entries)} 含 tool name"
-    print(f"  ✓ 0 条 '?  {{}}'，{has_tool_name} 条含 tool name")
-
-    # GAP-C：tool_result meta 含 elapsed
-    has_elapsed = sum(1 for e in result_entries if "s" in e.meta_line and "lines" in e.meta_line)
-    print(f"\n[GAP-C] tool_result meta 含 elapsed（{has_elapsed}/{len(result_entries)}）：")
-    for e in result_entries[:5]:
-        print(f"  meta={e.meta_line!r}")
-    assert has_elapsed == len(result_entries), \
-        f"GAP-C 失败：仅 {has_elapsed}/{len(result_entries)} 含 elapsed"
-    # 不含 exit（canonical 不支持）
-    has_exit = sum(1 for e in result_entries if "exit" in e.meta_line)
-    assert has_exit == 0, f"GAP-C 失败：{has_exit} 条 meta 显 exit（应不显）"
-    print(f"  ✓ 全部含 elapsed · 0 条显 exit")
-    print("\n✓ mxint tape 验证全通过（GAP-A/B/C）")
+    原 GAP-A/B/C（v1.1.1 DagGraph tokens / ActivityStream tool_result summary）
+    已删；Step 2 AgentsList 填充后改为：
+      - 5 节点 AgentsList.update_node(tokens=...) 投影正确
+      - AgentHistory entries 含 tool_result summary（从 _event_summary 派生）
+    """
+    print("\n[TODO Step 6] verify_mxint: v2 widget 断言待 Step 2/3 填充后补")
 
 
 def verify_demo_loop(app: OrcaApp) -> None:
-    # GAP-E：counter self-loop 不 crash + iter ≥ 2
-    graph = app.query_one(DagGraph)
-    counter = graph.projection_of("counter")
-    done = graph.projection_of("done")
-    print(f"\n[GAP-E] counter (self-loop) projection:")
-    print(f"  counter: status={counter.status if counter else None} iter={counter.iter_n if counter else None}")
-    print(f"  done:    status={done.status if done else None} iter={done.iter_n if done else None}")
-    assert counter is not None, "GAP-E 失败：counter projection 缺失"
-    # counter 应 iter ≥ 2（demo_loop tape 里跑 3 次）
-    assert counter.iter_n >= 2, f"GAP-E 失败：counter iter={counter.iter_n}（应 ≥ 2）"
-    # self-loop 节点集合含 counter
-    assert "counter" in graph._self_loop_nodes, "GAP-E 失败：counter 未在 self_loop_nodes"
-    print(f"  ✓ counter iter={counter.iter_n}（demo_loop node_started 次数 3 一致）")
-    print(f"  ✓ counter ∈ self_loop_nodes（不抛 CycleDetected）")
-    print("\n✓ demo_loop tape 验证全通过（GAP-E）")
+    """TODO Step 6：v2 loop workflow iter N 显示断言。
+
+    原 GAP-E（v1.1.1 DagGraph self_loop_nodes + iter_n）已删；Step 2 AgentsList
+    填充后改为：
+      - counter iter N == node_started 次数（AgentsList 显示 "iter 3"）
+      - self-loop 节点不抛错（dispatch 兼容）
+    """
+    print("\n[TODO Step 6] verify_demo_loop: v2 loop workflow 断言待 Step 2 填充后补")
 
 
 if __name__ == "__main__":
@@ -156,4 +117,4 @@ if __name__ == "__main__":
     print("\n=== GAP 真用户验证 2：demo_loop tape（14 events）===")
     replay_and_verify(DEMO_LOOP_TAPE, "demo_loop", verify_demo_loop)
     print("\n" + "=" * 60)
-    print("✓ 全部 GAP 真用户验证通过（A/B/C/E）")
+    print("（TODO Step 6）v2 widget 断言待填充（Step 2/3/5）")

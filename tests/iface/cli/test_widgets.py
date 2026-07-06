@@ -755,3 +755,58 @@ def _event_like_chart(*, node, label, title, ctype="line"):
         }},
         node=node, session_id=None, seq=0, timestamp=0.0,
     )
+
+
+# ── v2 _event_summary 共享纯函数（Step 1b 迁入；Step 3 AgentHistory / Step 4
+#    LogStream 单测填充时再补完整字段级断言；当前最小守门：6 函数能 import）。 ──────
+
+
+class TestEventSummaryImports:
+    """spec v2 §2.3 / §2.4：6 个共享事件派生纯函数 import 守门（Step 1b 占位）。
+
+    Step 3 AgentHistory 填充时补 set_node / append_event / last message 默认展开 等单测
+    （调 _build_summary_line / _build_meta_line / _build_detail_renderable 断言字段级输出）；
+    Step 4 LogStream 改造时同理补 EVENT_LEVEL 表派生单测。
+    """
+
+    def test_event_summary_imports(self):
+        """6 个共享函数能 import（Step 1b 占位守门，防迁移漏函数）。"""
+        from orca.iface.cli.widgets._event_summary import (
+            _arg_title,
+            _build_detail_renderable,
+            _build_meta_line,
+            _build_summary_line,
+            _format_elapsed_sec,
+            _truncate,
+        )
+        # sanity：所有函数都是 callable
+        for fn in (
+            _arg_title, _build_detail_renderable, _build_meta_line,
+            _build_summary_line, _format_elapsed_sec, _truncate,
+        ):
+            assert callable(fn)
+
+    def test_truncate_basic(self):
+        """spec §5.4：超长字符截断 + …。"""
+        from orca.iface.cli.widgets._event_summary import _truncate
+        assert _truncate("hello", 5) == "hello"
+        assert _truncate("hello world", 5) == "hell…"
+
+    def test_format_elapsed_sec_three_buckets(self):
+        """秒数格式化：< 10s 显 1 位小数（0.8s）；< 60s 整数（12s）；≥ 60s m+s。"""
+        from orca.iface.cli.widgets._event_summary import _format_elapsed_sec
+        assert _format_elapsed_sec(0.8) == "0.8s"
+        assert _format_elapsed_sec(12.0) == "12s"
+        assert _format_elapsed_sec(75.0) == "1m15s"
+
+    def test_arg_title_per_tool(self):
+        """per-tool 一句话标题：read 取 filePath / bash 取 command / glob 取 pattern。"""
+        from orca.iface.cli.widgets._event_summary import _arg_title
+        assert _arg_title("read", {"filePath": "/tmp/x.py"}) == "/tmp/x.py"
+        assert _arg_title("bash", {"command": "ls"}) == "ls"
+        assert _arg_title("glob", {"pattern": "**/*.py"}) == "**/*.py"
+
+    def test_build_summary_line_basic(self):
+        """node_started → "node started (kind=<kind>)"。"""
+        from orca.iface.cli.widgets._event_summary import _build_summary_line
+        assert _build_summary_line("node_started", {"kind": "agent"}) == "node started (kind=agent)"
