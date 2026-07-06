@@ -103,6 +103,32 @@ def apply_event(state: RunState, event: Event) -> RunState:
         node_status = {**state.node_status, node: "skipped"}
         return state.model_copy(update={"node_status": node_status})
 
+    # ADR §4.3：blocked 派生（不入 tape，由 gate/interrupt 事件 fold 派生）。
+    # node 当前 None / running 且收到 human_decision_requested / interrupt_requested
+    # → blocked。resolved 时 blocked → running（claude resume / interrupt 答完后继续）。
+    #
+    # 覆盖 None（node 未 started）是对齐既有 TUI 行为（``update_node(status="blocked")``
+    # 无条件覆盖）——gate 可能在 node_started 之前到达（竞态 / 测试场景），此时也视为 blocked。
+    # 不覆盖终态（done / failed / skipped）——node 已完成时 gate 无意义。
+    #
+    # 边缘情况（已知限制，UI-only impact，rare in practice）：同 node 多个 gate 同时 active
+    # 时，首个 resolved 会把 blocked 回 running（其他 gate 仍 active）。proper 多 gate
+    # 计数需 RunState 加 active_blockers 字段，超出批 1 范围；现有 TUI 手动
+    # update_node(status=...) 的语义本就如此，本派生算法对齐既有行为。
+    if t in ("human_decision_requested", "interrupt_requested"):
+        if node:
+            current = state.node_status.get(node)
+            if current is None or current == "running":
+                node_status = {**state.node_status, node: "blocked"}
+                return state.model_copy(update={"node_status": node_status})
+        return state
+
+    if t in ("human_decision_resolved", "interrupt_resolved"):
+        if node and state.node_status.get(node) == "blocked":
+            node_status = {**state.node_status, node: "running"}
+            return state.model_copy(update={"node_status": node_status})
+        return state
+
     if t in ("agent_message", "agent_thinking", "agent_tool_call",
              "agent_tool_result", "agent_usage"):
         # session 级流式细节不进 RunState（留给前端按 session_id 分组，phase 6）。
@@ -134,8 +160,7 @@ def apply_event(state: RunState, event: Event) -> RunState:
     # 保持 reducer 幂等 + 最小。
     if t in (
         "foreach_started", "foreach_item_started", "foreach_item_completed",
-        "foreach_completed", "human_decision_requested", "human_decision_resolved",
-        "interrupt_requested", "interrupt_resolved", "prompt_rendered",
+        "foreach_completed", "prompt_rendered",
         "workflow_resumed", "retry_started", "retry_succeeded", "retry_exhausted",
         "validator_started", "validator_passed", "validator_failed",
         "wait_started", "wait_completed",

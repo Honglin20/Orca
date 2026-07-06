@@ -76,13 +76,14 @@ def test_usage_summary_extra_forbid():
 
 
 def test_status_literal_values():
-    """Status 是 node 级状态：含 done（非 completed）。"""
+    """Status 是 node 级状态：含 done（非 completed）+ blocked（ADR §4.3 派生态）。"""
     assert set(typing.get_args(Status)) == {
         "pending",
         "running",
         "done",
         "failed",
         "skipped",
+        "blocked",
     }
 
 

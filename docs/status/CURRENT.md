@@ -7,6 +7,32 @@
 
 ---
 
+## 当前状态：TUI v2 review remediation + 批 1 backend 完成（2026-07-07）；下一模块 phase-12-capabilities
+
+### ✅ 已完成：TUI v2 review remediation + 批 1 backend（Status.blocked + projections.py）
+
+**Commit**：见 `git log`（commit message 末尾含 Claude+Happy co-author）。详见
+[release note](../releases/2026-07-07-tui-v2-review-batch1-projections.md) + [CHANGELOG](CHANGELOG.md)。
+
+**交付**：
+- 🔴 **Enter 展开回归修复**（commit 5562e5e 引入）：App 级 BINDINGS 加 `down`/`up`
+  （`priority=True` 覆盖 RichLog scroll）转发到 `AgentHistory.action_cursor_down/up`；
+  3 pilot 测试走真实 `pilot.press` 路径（不直设私有属性）
+- 🟡 **批 1 ADR §4.3/§4.3.1**：`Status` Literal 加 `blocked`；`orca/run/projections.py`
+  单一派生算法源（4 函数 batch fold，委托 apply_event）；`apply_event` 扩展 blocked
+  派生（gate/interrupt 同源，None/running/terminal 三路径）；TUI 删独立 fold 副本全部
+  改调 projections（DRY）；`agents_list.py` 类型收紧 + 删 `== "failed"` 字面量比较（P4）
+- ADR §8.1 守门：`tests/iface/cli/test_status_literal.py` AST 检查 widget 无 Status
+  字面量比较（含 fixture 路径 `parents[3]` + `.exists()` 断言防路径回归）
+- 1596 passed / 0 回归（baseline 1558 + 38 新增）
+
+**遗留 follow-up**（详见 release note）：
+- 性能 O(N²)：`_dispatch_to_widgets` 每事件全量 refold `_all_events`（批 4 增量化）
+- 多 gate 同时 active 的精确计数（批 4 给 RunState 加 active_blockers 字段）
+- ADR §8.1 表述订正（"无 `== blocked`" → "无 Status 字面量比较"，batch 2 PR 一并）
+
+---
+
 ## 当前状态：phase-11-process-lifecycle 实现完成（2026-07-07）；下一模块 phase-12-capabilities
 
 ### ✅ 已完成：phase-11-process-lifecycle 实现（批 3a，exec/iface）

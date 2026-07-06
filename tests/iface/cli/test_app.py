@@ -1248,3 +1248,120 @@ class TestV2Dispatch:
                 assert "node FAILED" in text
                 assert "kaboom" in text  # reviewer P1-10：完整不截断
         run_async(scenario())
+
+
+# ── review remediation（commit 5562e5e 回归修复）：down/up + Enter 真实键位 pilot ──
+
+
+class TestHistoryCursorAndExpand:
+    """端到端 pilot：down/up 选中 entry → Enter 展开折叠详情。
+
+    防 commit 5562e5e 回归再次发生：当时 j/k hoist 到 App 级做 agent 切换后，
+    **无键绑定到** ``AgentHistory.action_cursor_down/up``，``_selected_seq`` 恒 None →
+    ``action_toggle_expand`` 早 return。单测直接设 ``_selected_seq`` 绕过真实键位，
+    故未发现。
+
+    本测试走真实 Textual pilot.press 路径：down → 选中第 1 条；enter → 展开状态翻转。
+    不直接设私有属性，确保 App 级 BINDINGS（``down`` / ``up`` / ``enter``）真实触发。
+    """
+
+    def _make_history_events(self, app, node: str = "analyzer"):
+        """向 app dispatch 2 条 events（thinking + message），让 AgentHistory 有 entries."""
+        # first entry: agent_thinking（默认折叠，因为 last-message 自动展开只展开 message）
+        app._dispatch_to_widgets(_event(
+            "agent_thinking", {"text": "thinking..."}, node=node,
+            session_id="s1", seq=1,
+        ))
+        # last entry: agent_message（默认展开——last-message rule）
+        app._dispatch_to_widgets(_event(
+            "agent_message", {"text": "final answer"}, node=node,
+            session_id="s1", seq=2,
+        ))
+
+    def test_down_arrow_selects_first_entry(self, tmp_path):
+        """down 键选中 AgentHistory 第 1 条 entry（_selected_seq 从 None → seq[0]）。"""
+        wf = _load(_two_node_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                self._make_history_events(app)
+                await pilot.pause()
+                hist = app.query_one(AgentHistory)
+                # 初始未选中
+                assert hist._selected_seq is None
+                # 按 down → App 级 BINDINGS 命中 action_history_cursor_down
+                # → 转发 AgentHistory.action_cursor_down → _selected_seq = entries[0].seq
+                await pilot.press("down")
+                await pilot.pause()
+                assert hist._selected_seq == 1, (
+                    f"down 键未选中第 1 条 entry（_selected_seq={hist._selected_seq}），"
+                    "commit 5562e5e 回归路径：App 级 BINDINGS 未转发到 action_cursor_down"
+                )
+        run_async(scenario())
+
+    def test_down_then_enter_toggles_expand(self, tmp_path):
+        """down 选中 entry → Enter 展开折叠详情（reviewer P0-6 真实键位端到端）。
+
+        场景：2 条 entries（thinking seq=1 折叠 / message seq=2 默认展开）。
+        down 选中 seq=1 → Enter 展开它（_expanded_seqs 加入 1）。
+        """
+        wf = _load(_two_node_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                self._make_history_events(app)
+                await pilot.pause()
+                hist = app.query_one(AgentHistory)
+                # 初始：last message（seq=2）展开，seq=1 折叠
+                assert hist.expanded_seqs == {2}
+                # down 选中 seq=1
+                await pilot.press("down")
+                await pilot.pause()
+                assert hist._selected_seq == 1
+                # Enter → toggle_expand（应把 seq=1 加入 _expanded_seqs）
+                await pilot.press("enter")
+                await pilot.pause()
+                assert 1 in hist.expanded_seqs, (
+                    "Enter 未展开 down 选中的 entry；commit 5562e5e 回归路径："
+                    "action_history_cursor_down 未被任何 App 级 BINDINGS 触发"
+                )
+                assert 2 in hist.expanded_seqs  # last message 保留展开
+                # 再 Enter → 收起 seq=1
+                await pilot.press("enter")
+                await pilot.pause()
+                assert 1 not in hist.expanded_seqs
+                assert 2 in hist.expanded_seqs  # last message 保留展开
+        run_async(scenario())
+
+    def test_down_up_navigate_between_entries(self, tmp_path):
+        """down → down → up 在 entries 间导航（不 wrap）。"""
+        wf = _load(_two_node_workflow(tmp_path))
+        app = _app(tmp_path, wf)
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                self._make_history_events(app)
+                await pilot.pause()
+                hist = app.query_one(AgentHistory)
+                # down → seq=1
+                await pilot.press("down")
+                await pilot.pause()
+                assert hist._selected_seq == 1
+                # down → seq=2
+                await pilot.press("down")
+                await pilot.pause()
+                assert hist._selected_seq == 2
+                # down → 末条不 wrap（保持 seq=2）
+                await pilot.press("down")
+                await pilot.pause()
+                assert hist._selected_seq == 2
+                # up → 回 seq=1
+                await pilot.press("up")
+                await pilot.pause()
+                assert hist._selected_seq == 1
+        run_async(scenario())

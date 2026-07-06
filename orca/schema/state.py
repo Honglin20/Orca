@@ -12,7 +12,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict
 
 # 单个 node 的状态（注意：用 "done"，与 RunState.status 的 "completed" 区分，SPEC §4.2 有意为之）。
-Status = Literal["pending", "running", "done", "failed", "skipped"]
+#
+# ``blocked``（ADR §4.3 / 接口收敛 v2 §4.3）：reducer fold 派生态，不入 tape。派生条件 =
+# 该 node 当前 ``running`` 且有未 resolved 的 ``human_decision_requested`` /
+# ``interrupt_requested`` 事件。``projections.node_status`` 与 ``apply_event`` 同源派生
+# （P4：消费层不许自造 blocked 字符串）。
+Status = Literal["pending", "running", "done", "failed", "skipped", "blocked"]
 
 
 class UsageSummary(BaseModel):

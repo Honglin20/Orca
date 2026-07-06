@@ -72,11 +72,12 @@ def _flatten_strips(strips) -> str:
 
 
 class TestNodeStatusIcons:
-    """SPEC §4.1：5 种状态图标 ✓✽⏸!○。常量锁定防 drift。"""
+    """SPEC §4.1 + ADR §8.1：6 种状态图标（全覆盖 canonical Status Literal）。常量锁定防 drift。"""
 
-    def test_five_icons_defined(self):
+    def test_six_icons_defined(self):
+        # ADR §8.1 守门：icon 表 key 必须与 Status Literal 完全一致。
         assert set(NODE_STATUS_ICONS.keys()) == {
-            "pending", "running", "done", "failed", "blocked",
+            "pending", "running", "done", "failed", "skipped", "blocked",
         }
 
     def test_icon_values_locked(self):
@@ -86,6 +87,8 @@ class TestNodeStatusIcons:
         assert NODE_STATUS_ICONS["blocked"] == "⏸"
         assert NODE_STATUS_ICONS["failed"] == "!"
         assert NODE_STATUS_ICONS["pending"] == "○"
+        # skipped（ADR §8.1 全覆盖要求，icon 表不漏 key）
+        assert NODE_STATUS_ICONS["skipped"] == "⊘"
 
 
 # ── v2 AgentsList（spec §2.2 完整实现，Step 2 填充）────────────────────────────

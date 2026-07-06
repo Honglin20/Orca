@@ -17,6 +17,18 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-07-07] TUI v2 review remediation + 批 1 backend（Status.blocked + projections.py）
+- 修 commit 5562e5e 回归（j/k hoist 后 down/up 无绑定，Enter 展开非末条 entry 失效）：
+  App 级 BINDINGS 加 `down`/`up`（`priority=True` 覆盖 RichLog scroll）+ 3 pilot 测试。
+- 批 1（ADR §4.3/§4.3.1）：Status Literal 加 `blocked`；`orca/run/projections.py` 单一
+  派生算法源（node_status / node_usage / node_session_ids / node_iter），apply_event
+  扩展 blocked fold（gate/interrupt 同源），TUI 删独立 fold 副本（`_node_session_ids` /
+  `_per_node_last_usage_seq`）全部改调 projections（DRY）；`agents_list.py` 类型收紧
+  Status + 删 `== "failed"` 字面量比较（P4）；AST 守门（`test_status_literal.py`）。
+- 1596 passed / 0 回归（baseline 1558 + 38 新增）。
+- commit: 见 `git log`（commit message 末尾含 Claude+Happy co-author）。
+- 详情：[release note](releases/2026-07-07-tui-v2-review-batch1-projections.md)。
+
 ## [2026-07-07] phase-11-process-lifecycle —— 子进程生命周期管理（ProcessRegistry DI + 进程组 cancel + 退出码 5 档）
 新增 `orca/exec/registry.py`（ProcessRegistry DI + 三段式 cancel SIGTERM→SIGKILL→cleanup + 平台分支 POSIX killpg/Windows CTRL_BREAK）+ `orca/iface/exit_codes.py`（ExitCode 5 档 0/1/2/3/130 + `exit_for_terminal_status` 纯函数派生）；runner.py / script.py 接入 `start_new_session=True` 进程组隔离（推翻 phase-3 §2.5 旧决策）+ registry.acquire/release；orchestrator.py 加 `shutdown()` 方法（不动 phase-11-error except 链）；run/__main__.py SIGTERM handler 只设 `threading.Event`（signal-safe，SPEC §1.3）+ 退出码经权威派生。code-reviewer 2 🔴 + 5 🟡 闭环（script.py 铁律 1+2 违规修复 / DI 闭环留 phase-12 follow-up / `_handle_timeout` 加 2s 超时防御 / singleton 测试复位 / asyncio.run+signal 交互注释 / script.py try/finally 覆盖 CancelledError）；test-coverage-e2e 真跑 5 项验证全过（退出码 0/1/2 / pgid==pid 证 start_new_session / shutdown 3 次幂等 / grep 守门 clean）。**1558 passed 0 回归**（baseline 1525 + 33 新增）。Commit：`cdc3469`。详见 [release note](releases/2026-07-07-phase-11-process-lifecycle.md)。
 

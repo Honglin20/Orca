@@ -20,13 +20,16 @@ from textual.binding import Binding
 from textual.widgets import Static
 
 from orca.iface.cli.widgets._icons import NODE_STATUS_ICONS
+from orca.schema.state import Status
 
 
 @dataclass
 class NodeProj:
     """单 agent 的渲染投影（spec §2.2 字段）。仅 widget 内部状态，由 update_node 派生。"""
     name: str
-    status: str = "pending"        # pending / running / done / failed / blocked（NODE_STATUS_ICONS keys）
+    # Status 是 canonical Literal（schema 层权威）；widget 不自造 status 字符串（P4）。
+    # ``blocked`` / ``running`` 等值由 app.dispatch 经 ``projections.node_status`` 派生后注入。
+    status: Status = "pending"
     elapsed: float | None = None   # 秒
     tokens: int | None = None
     iter_n: int = 1
@@ -86,7 +89,7 @@ class AgentsList(Static):
         self,
         name: str,
         *,
-        status: str | None = None,
+        status: Status | None = None,
         elapsed: float | None = None,
         tokens: int | None = None,
         error_msg: str | None = None,
@@ -186,8 +189,11 @@ class AgentsList(Static):
             if extras:
                 line = f"{line}  · {'  · '.join(extras)}"
 
-            # 失败时第二行显错误摘要（spec §2.2 + §6.3 错误显示）
-            if proj.status == "failed" and proj.error_msg:
+            # 失败时第二行显错误摘要（spec §2.2 + §6.3 错误显示）。
+            # P4 / ADR §8.1：不字面量比较 status——``error_msg`` 仅 ``failed`` 节点由
+            # app.dispatch 注入（``update_node(error_msg=...)``），truthiness 与
+            # ``status == "failed"`` 等价且更鲁棒（未来加新失败态不需改 widget）。
+            if proj.error_msg:
                 err = proj.error_msg[:30]
                 line = f"{line}\n    ! {err}"
 

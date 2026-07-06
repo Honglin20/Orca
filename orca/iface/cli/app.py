@@ -74,6 +74,7 @@ from orca.iface.cli.widgets.log_stream import (
     LEVEL_INFO,
 )
 from orca.iface.cli.widgets.header import HeaderStats, NodeUsageStats
+from orca.run import projections
 from orca.run.lifecycle import gen_run_id
 from orca.run.orchestrator import Orchestrator
 
@@ -357,6 +358,26 @@ class OrcaApp(App):
         # spec v2 §2.3 + reviewer P0-6：Enter 切换折叠详情。同样需 App 级绑定覆盖
         # RichLog 字符吞咽（RichLog 默认 focus 时 Enter 也被吃）。
         Binding("enter", "history_toggle_expand", "展开/收起"),
+        # review remediation（commit 5562e5e 回归修复）：down/up 箭头选中 AgentHistory
+        # 上一条/下一条 entry，让 Enter 能展开非末条 entry。
+        #
+        # Rationale（为何不与 j/k 冲突）：
+        # - j/k 已 hoist 到 App 级做**跨 agent 切换**（AgentsList.action_select_next/prev，
+        #   spec v2 §2.2），驱动 AgentHistory.set_node 全量重渲（切到不同 agent 的 events）。
+        # - down/up 做**同 agent 内 entry 导航**（AgentHistory.action_cursor_down/up，
+        #   spec v2 §2.3），选中某条 entry 后 Enter 展开其折叠详情。
+        # - 两套键位职责正交：j/k 横向切 agent，down/up 纵向切 entry。与 Conductor /
+        #   VS Code 的「文件树 j/k + 编辑器内 down/up」模式一致（用户直觉迁移零成本）。
+        # - 不复用 j/k 的另一原因：j/k 已被 AgentsList 占用，再用 j/k 做 entry 导航会
+        #   让 action_select_next 与 action_cursor_down 互相覆盖（一个键绑两个 action）。
+        #
+        # ``priority=True`` 关键：RichLog（AgentHistory 内嵌的 agent-history-log）继承
+        # ScrollableContainer，默认绑 down/up 做滚屏。无 priority 时 widget 级 BINDINGS
+        # 优先于 App 级，down/up 被 RichLog 吞做滚屏，action_history_cursor_* 永不触发
+        # （commit 5562e5e 回归的根因之一）。priority=True 让 App 级命中优先，RichLog
+        # 不再吞 down/up；用户仍可用 PageDown/PageUp 滚屏（未被 App 级占用）。
+        Binding("down", "history_cursor_down", "下一条 entry", priority=True),
+        Binding("up", "history_cursor_up", "上一条 entry", priority=True),
         # spec v2 §2.4：L 键切 debug 显示。同上，App 级覆盖 RichLog。
         Binding("L", "log_toggle_debug", "切 debug 日志"),
     ]
@@ -476,19 +497,26 @@ class OrcaApp(App):
         self._auto_follow: bool = True
 
         # spec v1.1 §4.4.1：reducer 派生 fold（重放必产相同值，与 _selected_node 严格区分）。
-        # node_session_ids：reducer 维护 node -> [session_id]（按 node_started 顺序 append）。
-        # iter N = session_id 在 list 中的位置 + 1（retry / skip / interrupt 不 append）。
-        self._node_session_ids: dict[str, list[str]] = {}
+        # ADR §4.3.1（接口收敛 v2）：node fold 单一算法源在 ``orca.run.projections``，
+        # TUI 维护一份全局 ``_all_events`` 列表后 batch 调 projections 派生 status /
+        # usage / iter / session_ids（消除 RunState fold 与 TUI fold 两份独立派生）。
+        # 旧字段（``_node_session_ids`` / ``_per_node_last_usage_seq``）删除——projections
+        # 内置同算法（DRY），TUI 不再持有副本。
+        #
+        # ``_all_events``：全局事件流（projections 输入）。无界（TUI 是交互式工具，典型
+        # workflow ≤ 数千 events；超大规模 workflow 走 background 模式不经 TUI）。
+        # ``_node_events``（per-node 桶）与此正交：后者服务于 AgentHistory 切换渲染，
+        # 有 FIFO 上限；前者服务于 projections，无上限（保 status 派生完整）。
+        self._all_events: list[Event] = []
         # spec v2 §3：_node_events 分桶（agent_history 切换用）。
         # reducer fold：按 event.node 累积 events，切换 agent 时从这里取（纯前端切换，
         # 不读 tape）。FIFO 上限保护（_NODE_EVENTS_CAP）：超 1000 events/node 丢最旧
         # （spec §9 R3 + AgentHistory 头部行 truncated 标记）；tape 是真相源，丢的不丢真相。
         self._node_events: dict[str, list[Event]] = {}
         # spec v1.1 §6.2：per-node usage（agent_usage 收敛到 Header footer）。
-        # key = node, value = NodeUsageStats（累加；opencode translator per-step 是累积值故取最后一条）。
-        # session_id 维度去重：取该 session_id 最后一条 agent_usage（spec §4.4 acceptance）。
+        # 缓存自 ``projections.node_usage``（HeaderStats 的 ``per_node_usage`` 字段消费）。
+        # 真正算法源在 ``projections`` —— 本字段是 UI 渲染缓存（DRY §4.3.1）。
         self._per_node_usage: dict[str, NodeUsageStats] = {}
-        self._per_node_last_usage_seq: dict[str, int] = {}  # 防乱序（按 seq 取最后）
         # spec v1.1 §4.4：node 耗时（node_started.timestamp → node_completed.elapsed）。
         # running 时 live timer 走 wall clock（spec §4.4 acceptance：「live timer 不进 tape」，
         # 即 UI 交互态，重放不重建）。v1 未实现 live timer（v2 路线）；node_completed 后 elapsed
@@ -661,11 +689,14 @@ class OrcaApp(App):
         """把单个 event 分发到 v2 三块 widget（spec v2 §3 + §11.5 接口审计 7 条）。
 
         数据流（reducer fold，重放必产相同状态）：
-          1. ``_node_events[event.node]`` 分桶（agent_history 切换用，spec §3）；
-             FIFO 上限 ``_NODE_EVENTS_CAP``（1000 events/node，spec §9 R3）。
-          2. reducer fold（``_node_iter`` / ``_node_status`` / ``_node_usage``，
-             v1.1.1 §4.4.1 保留；spec §11.5 #5 ``_node_arrived_count`` 已删）。
-          3. ``AgentsList.update_node()`` —— 节点状态投影（status / elapsed / tokens / iter）。
+          1. ``_all_events`` 全局累积 + ``_node_events[event.node]`` 分桶（agent_history
+             切换用，spec §3）；分桶 FIFO 上限 ``_NODE_EVENTS_CAP``（1000 events/node，
+             spec §9 R3）。
+          2. ADR §4.3.1 DRY fold：``projections.node_status / node_usage /
+             node_session_ids`` 是单一派生算法源，TUI 不再持有独立 fold 副本
+             （删 ``_node_session_ids`` / ``_per_node_last_usage_seq``）。
+          3. ``AgentsList.update_node()`` —— 节点状态投影（status / elapsed / tokens / iter），
+             status 经 projections 派生（P4：blocked 不再字面量）。
           4. ``AgentHistory.append_event()`` —— **仅 selected_node** 的事件追加
              （reviewer P1-12：auto-follow 时 node_started 触发 _selected_node 更新
              + AgentHistory.set_node 全量重渲，否则用户看不到后续 agent）。
@@ -680,27 +711,31 @@ class OrcaApp(App):
         data = event.data or {}
         node = event.node
 
-        # ── 1. _node_events 分桶（spec v2 §3，agent_history 切换用）──────────
-        # reducer fold：按 event.node 累积 events，切换 agent 时从这里取（纯前端切换，
-        # 不读 tape）。FIFO 上限保护：超 _NODE_EVENTS_CAP（1000）丢最旧，不丢真相（tape 在）。
+        # ── 1. 全局 events 累积（projections 输入）+ _node_events 分桶（agent_history）──
+        # 全局 list 无界（保 status 派生完整）；per-node 桶 FIFO 上限（spec §9 R3）。
+        # 两者正交：_all_events 喂 projections（派生 status/usage/iter）；_node_events 喂
+        # AgentHistory 切换（渲染用，可丢最旧）。
+        self._all_events.append(event)
         if node:
             bucket = self._node_events.setdefault(node, [])
             bucket.append(event)
             if len(bucket) > _NODE_EVENTS_CAP:
                 bucket.pop(0)
 
-        # ── 2. reducer fold + AgentsList 投影（spec v1.1 §4.4.1 + v2 §2.2）──
+        # ── 2. projections-driven fold + AgentsList 投影（ADR §4.3.1 DRY + P4）──
+        # status / iter / tokens 全部经 projections 派生（消除 TUI 与 RunState 两份独立 fold）。
         if etype == "node_started" and node:
-            # iter fold（spec §4.4.1：retry 时新 session_id 触发 +1；spec §3 修订）
-            session_id = event.session_id or ""
-            session_list = self._node_session_ids.setdefault(node, [])
-            if session_id and session_id not in session_list:
-                session_list.append(session_id)
-            iter_n = (
-                (session_list.index(session_id) + 1) if session_id in session_list
-                else (len(session_list) + 1)
-            )
-            self.query_one(AgentsList).update_node(node, status="running", iter_n=iter_n)
+            # iter 派生（projections.node_session_ids）：retry 时新 session_id 触发 +1。
+            sid = event.session_id or ""
+            sessions = projections.node_session_ids(self._all_events).get(node, [])
+            if sid and sid in sessions:
+                iter_n = sessions.index(sid) + 1
+            else:
+                # 空 session_id / 未登记（防御乱序）：取 list 长度 + 1（与既有逻辑对齐）。
+                iter_n = len(sessions) + 1
+            # status 派生（projections.node_status）：blocked 也由它派生（P4）。
+            status = projections.node_status(self._all_events).get(node, "running")
+            self.query_one(AgentsList).update_node(node, status=status, iter_n=iter_n)
             # reviewer P1-12 + spec §11.5 #7：auto-follow 必须**在 dispatch 内**——
             # _auto_follow=True 时 node_started 触发 _selected_node 更新 + AgentHistory
             # 全量重渲（从 _node_events 桶取），否则用户看不到后续 agent 输出。
@@ -724,8 +759,9 @@ class OrcaApp(App):
 
         elif etype == "node_completed" and node:
             elapsed = data.get("elapsed")
+            status = projections.node_status(self._all_events).get(node, "done")
             self.query_one(AgentsList).update_node(
-                node, status="done",
+                node, status=status,
                 elapsed=float(elapsed) if elapsed is not None else None,
             )
             self._done_nodes += 1
@@ -737,20 +773,24 @@ class OrcaApp(App):
 
         elif etype == "node_failed" and node:
             msg = str(data.get("message", data.get("error_type", "")))
-            self.query_one(AgentsList).update_node(node, status="failed", error_msg=msg)
+            status = projections.node_status(self._all_events).get(node, "failed")
+            self.query_one(AgentsList).update_node(node, status=status, error_msg=msg)
 
         elif etype == "node_skipped" and node:
             # spec v2 §2.2：AgentsList 不单独处理 skip（status 保持上一态），
             # LogStream 会按 LEVEL_WARN 显示一行。
             pass
 
-        # gate 事件（既有逻辑保留，仅 widget 引用换为 v2 AgentsList）
+        # gate / interrupt 事件（ADR §4.3：blocked 派生走 projections，P4 合规）
         elif etype == "human_decision_requested":
             gate_id = data.get("gate_id", "")
             self._awaiting_gates.add(gate_id)
             self._refresh_header()
             if node:
-                self.query_one(AgentsList).update_node(node, status="blocked")
+                # status 从 projections 派生（apply_event overlay running→blocked）。
+                # 不再字面量 "blocked"——P4 守门（test_status_literal.py AST 检查）。
+                status = projections.node_status(self._all_events).get(node, "running")
+                self.query_one(AgentsList).update_node(node, status=status)
             # 推 GateModal 参与竞速（@work 内 push_screen_wait）。
             self._push_gate_modal(event)
 
@@ -759,8 +799,9 @@ class OrcaApp(App):
             self._awaiting_gates.discard(gate_id)
             self._refresh_header()
             if node:
-                # node 解除 blocked → 回 running（claude resume 继续跑）。
-                self.query_one(AgentsList).update_node(node, status="running")
+                # status 从 projections 派生（apply_event overlay blocked→running）。
+                status = projections.node_status(self._all_events).get(node, "running")
+                self.query_one(AgentsList).update_node(node, status=status)
             # 广播输家：本壳 modal 还在 → notify_resolved_externally 让它 dismiss。
             if self._active_modal is not None:
                 self._active_modal.notify_resolved_externally(
@@ -768,20 +809,24 @@ class OrcaApp(App):
                     answer=str(data.get("answer", "")),
                 )
 
-        # agent_usage 收敛（既有逻辑保留；新增 AgentsList tokens 投影）
+        elif etype in ("interrupt_requested", "interrupt_resolved") and node:
+            # phase 11 §3：interrupt 事件也经 projections 派生 blocked（与 gate 同源，
+            # ADR §4.3 派生规则覆盖 gate + interrupt 两类）。
+            status = projections.node_status(self._all_events).get(node, "running")
+            self.query_one(AgentsList).update_node(node, status=status)
+
+        # agent_usage 收敛（projections.node_usage 单一算法源，ADR §4.3.1 DRY）
         if etype == "agent_usage" and node:
-            in_tok = int(data.get("input_tokens", 0))
-            out_tok = int(data.get("output_tokens", 0))
-            cost = float(data.get("cost_usd", 0.0))
-            last_seq = self._per_node_last_usage_seq.get(node, -1)
-            if event.seq >= last_seq:
-                # opencode translator per-step 是累积值，故取最后一条覆盖（spec §4.4 acceptance）
+            usage_map = projections.node_usage(self._all_events)
+            usage = usage_map.get(node)
+            if usage is not None:
+                tokens = usage.input_tokens + usage.output_tokens
+                # _per_node_usage 是 HeaderStats 渲染缓存（NodeUsageStats 转 UsageSummary）。
                 self._per_node_usage[node] = NodeUsageStats(
-                    name=node, tokens=in_tok + out_tok, cost_usd=cost,
+                    name=node, tokens=tokens, cost_usd=usage.cost_usd,
                 )
-                self._per_node_last_usage_seq[node] = event.seq
                 # spec v2 §11.5 + reviewer P1-12 fix：投影到 AgentsList 行（tokens 字段）。
-                self.query_one(AgentsList).update_node(node, tokens=in_tok + out_tok)
+                self.query_one(AgentsList).update_node(node, tokens=tokens)
             self._refresh_header()
 
         # ── 3. AgentHistory 分派（仅 selected_node 的事件，spec v2 §3）──────
@@ -1110,6 +1155,25 @@ class OrcaApp(App):
         """
         try:
             self.query_one(AgentHistory).action_toggle_expand()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def action_history_cursor_down(self) -> None:
+        """``down`` 键：调 AgentHistory.action_cursor_down（review remediation commit 5562e5e）。
+
+        Rationale 见 BINDINGS 注释：j/k 已被 AgentsList 占用做横向 agent 切换；
+        down/up 做同 agent 内纵向 entry 导航，职责正交。App 级 BINDINGS 优先命中本方法
+        → 转发到 widget action（单测通道保留：``test_widgets.py`` 直接调 widget.action_cursor_*）。
+        """
+        try:
+            self.query_one(AgentHistory).action_cursor_down()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def action_history_cursor_up(self) -> None:
+        """``up`` 键：调 AgentHistory.action_cursor_up（review remediation commit 5562e5e）。"""
+        try:
+            self.query_one(AgentHistory).action_cursor_up()
         except Exception:  # noqa: BLE001
             pass
 
