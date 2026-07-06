@@ -293,21 +293,317 @@ class TestAgentsList:
         assert _format_tokens(-1) == "0"  # 负值兜底
 
 
-class TestAgentHistoryShell:
-    """v2 右上 AgentHistory：Step 1a 占位空 shell，仅 import + 实例化。
+class TestAgentHistory:
+    """v2 右上 AgentHistory widget 单元测试（spec §2.3 + §5.1 + §5.4）。
 
-    Step 3 填充 set_node / append_event / last message 默认展开后改为完整单测。
+    INTENT（CLAUDE.md 铁律 9）：测试不是「set_node 不崩」，而是「用户能看到 agent
+    历史流 + last message 默认展开 + 切换 agent 时正确 reset」——断言 entries
+    内容、_expanded_seqs 状态、tool_call_id cache 派生 elapsed、last message 自动
+    跟随、shallow copy 防御。
+
+    headless 测试策略（不真起 textual pilot）：直接实例化 AgentHistory 调
+    set_node / append_event，跳过 textual RichLog 渲染（_log is None 时各 path
+    防御 skip）；真渲染 + SVG 验证留 Step 6 e2e。
     """
 
-    def test_agent_history_imports(self):
-        """import AgentHistory 不崩（Step 1a 占位守门）。"""
-        from orca.iface.cli.widgets import AgentHistory as _AH
-        assert _AH is AgentHistory
+    def _make_event(
+        self,
+        seq: int,
+        etype: str,
+        data: dict | None = None,
+        *,
+        node: str = "analyzer",
+        timestamp: float | None = None,
+    ):
+        """构造 canonical Event 测试 fixture。"""
+        from orca.schema import Event
+        return Event(
+            seq=seq,
+            type=etype,
+            timestamp=timestamp if timestamp is not None else 1000000.0 + seq,
+            node=node,
+            session_id="test-session",
+            data=data or {},
+        )
 
-    def test_agent_history_can_instantiate(self):
-        """空 shell 可实例化（compose 时挂得上）。"""
-        widget = AgentHistory()
-        assert widget is not None
+    def test_set_node_full_reflow(self):
+        """set_node([3 events]) → entries 含 3 条 + node_name 正确（spec §2.3 set_node）。"""
+        hist = AgentHistory()
+        events = [
+            self._make_event(1, "node_started", {"kind": "agent"}),
+            self._make_event(2, "agent_message", {"text": "hello"}),
+            self._make_event(3, "agent_tool_call",
+                             {"tool": "read", "args": {}, "tool_call_id": "tc1"}),
+        ]
+        hist.set_node("analyzer", events)
+        assert len(hist.entries) == 3
+        assert hist.node_name == "analyzer"
+
+    def test_set_node_resets_expanded_to_last_message(self):
+        """set_node(A, [msg1]) → set_node(B, [msg10]) → 切回 A：expanded_seqs reset。
+
+        spec §2.3：set_node 强制 reset _expanded_seqs 到当前 agent last message，
+        避免上一个 agent 的 seq 残留污染。
+        """
+        hist = AgentHistory()
+        events_a = [self._make_event(1, "agent_message", {"text": "A msg"})]
+        events_b = [self._make_event(10, "agent_message", {"text": "B msg"})]
+        hist.set_node("a", events_a)
+        assert hist.expanded_seqs == {1}
+        hist.set_node("b", events_b)
+        assert hist.expanded_seqs == {10}  # reset to B's last message
+        # 切回 A：expanded_seqs 应该是 A 的 last message（1），不是之前的 {10}
+        hist.set_node("a", events_a)
+        assert hist.expanded_seqs == {1}
+        assert 10 not in hist.expanded_seqs
+
+    def test_set_node_defensive_copy(self):
+        """set_node 后修改传入 list → widget 内部不污染（reviewer P1-7 浅拷贝）。
+
+        浅拷贝防御：app 层后续 _node_events[node].append(event) 不应影响 widget
+        内部 _entries 列表。
+        """
+        hist = AgentHistory()
+        events = [self._make_event(1, "agent_message", {"text": "msg"})]
+        hist.set_node("analyzer", events)
+        # 调用方修改原 list
+        events.append(self._make_event(2, "agent_message", {"text": "extra"}))
+        # widget 内部 _entries 不应被污染（仍然是 1 条）
+        assert len(hist.entries) == 1
+
+    def test_append_event_incremental(self):
+        """append 1 event → entry 数 +1（不全 reflow，spec §3 增量追加）。"""
+        hist = AgentHistory()
+        events = [self._make_event(1, "node_started", {"kind": "agent"})]
+        hist.set_node("analyzer", events)
+        assert len(hist.entries) == 1
+        hist.append_event(self._make_event(2, "agent_message", {"text": "msg"}))
+        assert len(hist.entries) == 2
+
+    def test_type_label_6_kinds(self):
+        """每 event_type → 正确 TYPE_LABEL（spec §2.3 6 种 label）。"""
+        hist = AgentHistory()
+        events = [
+            self._make_event(1, "agent_thinking", {"text": "..."}),
+            self._make_event(2, "agent_tool_call",
+                             {"tool": "read", "args": {}, "tool_call_id": "x"}),
+            self._make_event(3, "agent_tool_result",
+                             {"tool_call_id": "x", "result": "..."}),
+            self._make_event(4, "agent_message", {"text": "msg"}),
+            self._make_event(5, "human_decision_requested",
+                             {"gate_id": "g1", "prompt": "?", "source": "x"}),
+            self._make_event(6, "interrupt_requested", {"node": "analyzer"}),
+        ]
+        hist.set_node("analyzer", events)
+        # 检查每条 entry 的 summary 含正确 type_label（前 6 字符）
+        labels = [e.summary.split("  ")[0].strip() for e in hist.entries]
+        assert "THINK" in labels[0]
+        assert "TOOL →" in labels[1]
+        assert "TOOL ←" in labels[2]
+        assert "MSG" in labels[3]
+        assert "GATE" in labels[4]
+        assert "INT" in labels[5]
+
+    def test_last_message_default_expanded(self):
+        """3 events 末尾 MSG → 折叠块默认展开（spec §2.3 + 用户核心需求）。"""
+        hist = AgentHistory()
+        events = [
+            self._make_event(1, "agent_thinking", {"text": "..."}),
+            self._make_event(2, "agent_tool_call",
+                             {"tool": "read", "args": {}, "tool_call_id": "x"}),
+            self._make_event(3, "agent_message", {"text": "final answer"}),
+        ]
+        hist.set_node("analyzer", events)
+        assert hist.expanded_seqs == {3}  # last message seq 默认展开
+
+    def test_new_message_replaces_expanded(self):
+        """append 新 MSG → 旧 MSG 收起，新 MSG 展开（spec §2.3 自动跟随）。"""
+        hist = AgentHistory()
+        events = [self._make_event(1, "agent_message", {"text": "msg1"})]
+        hist.set_node("analyzer", events)
+        assert hist.expanded_seqs == {1}
+        hist.append_event(self._make_event(2, "agent_message", {"text": "msg2"}))
+        assert hist.expanded_seqs == {2}  # 替换，不是 add
+        assert 1 not in hist.expanded_seqs
+
+    def test_tool_call_cache_derives_elapsed(self):
+        """call + 2.5s 后 result → meta 含 elapsed（spec §2.3 GAP-B/C 修复）。"""
+        hist = AgentHistory()
+        call_event = self._make_event(
+            1, "agent_tool_call",
+            {"tool": "read", "args": {"filePath": "/tmp/x.py"}, "tool_call_id": "tc1"},
+            timestamp=1000.0,
+        )
+        result_event = self._make_event(
+            2, "agent_tool_result",
+            {"tool_call_id": "tc1", "result": "file content"},
+            timestamp=1002.5,  # 2.5s 后
+        )
+        hist.set_node("analyzer", [call_event, result_event])
+        # result entry 的 meta 应含 "2.5s"（_format_elapsed_sec(2.5) == "2.5s"）
+        result_entry = next(e for e in hist.entries if e.event_type == "agent_tool_result")
+        assert "2.5s" in result_entry.meta
+
+    def test_folded_detail_uses_phase15(self):
+        """折叠块内容调 phase-15 render_tool / render_message（spec §5.5 复用契约）。"""
+        hist = AgentHistory()
+        hist.set_executor("claude")
+        events = [
+            self._make_event(
+                1, "agent_tool_call",
+                {"tool": "read", "args": {"filePath": "/tmp/x.py"}, "tool_call_id": "tc1"},
+            ),
+            self._make_event(2, "agent_message", {"text": "hello world"}),
+        ]
+        hist.set_node("analyzer", events)
+        # tool_call entry 应该有折叠详情（render_tool 输出）
+        call_entry = next(e for e in hist.entries if e.event_type == "agent_tool_call")
+        assert call_entry.detail is not None
+        # message entry 也应该有折叠详情（render_message 输出）
+        msg_entry = next(e for e in hist.entries if e.event_type == "agent_message")
+        assert msg_entry.detail is not None
+
+    def test_no_message_no_expanded(self):
+        """events 无 agent_message → expanded_seqs 为空（spec §2.3 默认展开规则）。"""
+        hist = AgentHistory()
+        events = [self._make_event(1, "agent_thinking", {"text": "..."})]
+        hist.set_node("analyzer", events)
+        assert hist.expanded_seqs == set()
+
+    def test_set_node_clears_tool_call_cache(self):
+        """set_node 切换 agent → _tool_call_cache 清空（per-node 隔离）。"""
+        hist = AgentHistory()
+        events = [
+            self._make_event(
+                1, "agent_tool_call",
+                {"tool": "read", "args": {}, "tool_call_id": "tc1"},
+            ),
+        ]
+        hist.set_node("a", events)
+        assert "tc1" in hist._tool_call_cache
+        # 切换到 agent b（无 events）
+        hist.set_node("b", [])
+        assert len(hist._tool_call_cache) == 0
+
+    def test_set_executor_changes_normalize_table(self):
+        """set_executor('opencode') → 后续 normalize_tool 用 opencode 后端。"""
+        hist = AgentHistory()
+        hist.set_executor("opencode")
+        assert hist._executor == "opencode"
+        # 默认 claude
+        hist2 = AgentHistory()
+        assert hist2._executor == "claude"
+
+    def test_action_toggle_expand(self):
+        """action_toggle_expand：Enter 键切换选中 entry 的展开状态（reviewer P0-6 Enter）。"""
+        hist = AgentHistory()
+        events = [
+            self._make_event(1, "agent_thinking", {"text": "..."}),
+            self._make_event(2, "agent_message", {"text": "msg"}),
+        ]
+        hist.set_node("analyzer", events)
+        # 初始：seq=2 (last msg) 展开，seq=1 折叠
+        assert hist.expanded_seqs == {2}
+        # 选中 seq=1（thinking），按 Enter 展开
+        hist._selected_seq = 1
+        hist.action_toggle_expand()
+        assert 1 in hist.expanded_seqs
+        assert 2 in hist.expanded_seqs  # last message 不被影响
+        # 再 Enter → 收起
+        hist.action_toggle_expand()
+        assert 1 not in hist.expanded_seqs
+        assert 2 in hist.expanded_seqs  # last message 保留展开
+
+    def test_action_cursor_down_up(self):
+        """j/k 导航：action_cursor_down/up 切换 _selected_seq。"""
+        hist = AgentHistory()
+        events = [
+            self._make_event(1, "agent_thinking", {"text": "..."}),
+            self._make_event(2, "agent_message", {"text": "msg"}),
+            self._make_event(3, "agent_tool_call",
+                             {"tool": "read", "args": {}, "tool_call_id": "x"}),
+        ]
+        hist.set_node("analyzer", events)
+        # 初始未选中
+        assert hist._selected_seq is None
+        # j → 选中第 1 条
+        hist.action_cursor_down()
+        assert hist._selected_seq == 1
+        # j → 第 2 条
+        hist.action_cursor_down()
+        assert hist._selected_seq == 2
+        # j → 第 3 条
+        hist.action_cursor_down()
+        assert hist._selected_seq == 3
+        # k → 回到第 2 条
+        hist.action_cursor_up()
+        assert hist._selected_seq == 2
+
+    def test_action_cursor_no_wrap_at_boundary(self):
+        """j 在末条不 wrap / k 在首条不 wrap（边界防御）。"""
+        hist = AgentHistory()
+        events = [
+            self._make_event(1, "agent_message", {"text": "first"}),
+            self._make_event(2, "agent_message", {"text": "last"}),
+        ]
+        hist.set_node("analyzer", events)
+        # 跳到末条
+        hist._selected_seq = 2
+        hist.action_cursor_down()  # 末条之后 → 不动（不 wrap 回首条）
+        assert hist._selected_seq == 2
+        # 跳回首条
+        hist._selected_seq = 1
+        hist.action_cursor_up()  # 首条之前 → 不动（不 wrap 到末条）
+        assert hist._selected_seq == 1
+
+    def test_action_cursor_empty_entries_noop(self):
+        """entries 为空时 j/k 不抛（headless 防御；spec §2.3 set_node(None, []) 路径）。"""
+        hist = AgentHistory()
+        hist.set_node(None, [])
+        # 空 entries：j/k 不抛、不改 _selected_seq
+        hist.action_cursor_down()
+        assert hist._selected_seq is None
+        hist.action_cursor_up()
+        assert hist._selected_seq is None
+
+    def test_action_toggle_expand_no_selection_noop(self):
+        """未选中 entry 时 Enter 不抛（headless 防御）。"""
+        hist = AgentHistory()
+        events = [self._make_event(1, "agent_message", {"text": "msg"})]
+        hist.set_node("analyzer", events)
+        assert hist._selected_seq is None
+        # Enter 不抛、不改 expanded_seqs
+        hist.action_toggle_expand()
+        assert hist.expanded_seqs == {1}
+
+    def test_tool_call_cache_lru_cap(self):
+        """tool_call_id cache 超 _TOOL_CALL_CACHE_CAP → 丢最旧（防爆内存）。"""
+        from orca.iface.cli.widgets.agent_history import _TOOL_CALL_CACHE_CAP
+        hist = AgentHistory()
+        # 填 _TOOL_CALL_CACHE_CAP + 1 条 call
+        events = []
+        for i in range(_TOOL_CALL_CACHE_CAP + 1):
+            events.append(self._make_event(
+                i + 1, "agent_tool_call",
+                {"tool": "read", "args": {}, "tool_call_id": f"tc{i}"},
+            ))
+        hist.set_node("analyzer", events)
+        # cache 不超 cap
+        assert len(hist._tool_call_cache) <= _TOOL_CALL_CACHE_CAP
+        # 最旧的（tc0）应该被丢
+        assert "tc0" not in hist._tool_call_cache
+
+    def test_node_name_none_empties_entries(self):
+        """set_node(None, []) → 清空状态（spec §2.3）。"""
+        hist = AgentHistory()
+        events = [self._make_event(1, "agent_message", {"text": "msg"})]
+        hist.set_node("analyzer", events)
+        assert len(hist.entries) == 1
+        # 切换到 None agent
+        hist.set_node(None, [])
+        assert hist.node_name is None
+        assert len(hist.entries) == 0
+        assert hist.expanded_seqs == set()
 
 
 # ── LogStream format_event（SPEC §4.3：HH:MM:SS [session] <desc>）─────────
