@@ -68,6 +68,10 @@ _TYPE_LABELS: dict[str, str] = {
 # spec §2.3 tool_call_id cache LRU 上限（GAP-B/C 修复机制，spec §2.3）
 _TOOL_CALL_CACHE_CAP = 500
 
+# _pending_results LRU 上限（phase-16 §0.2 铁律 #5：result 早于 call 的 orphan 缓冲，
+# 两路径共用；translator 丢 call 时防 dict 无界增长）。
+_PENDING_RESULTS_CAP = 500
+
 # 头部行 truncated 标记阈值（spec §9 R3 FIFO 上限是 1000 events/node）
 _TRUNCATED_THRESHOLD = 1000
 
@@ -249,10 +253,10 @@ class AgentHistory(Static):
         self._tcid_to_entry_idx.clear()
         self._pending_results.clear()
         # reducer fold：逐 event 处理（call 建条目；result 就地升级 by tcid 匹配）。
-        # buffer_orphans=True：乱序 result 暂存 pending，保证 reducer fold 顺序无关。
+        # 与 append_event 共用同一 _apply_event（铁律 #5：replay == live，构造性保证）。
         self._entries = []
         for e in events:
-            self._fold_event(e, buffer_orphans=True)
+            self._apply_event(e)
         # 排序（防御乱序，reducer fold 性质保证一致）+ 重建 index map（位置可能变）
         self._entries.sort(key=lambda e: e.seq)
         self._rebuild_tcid_index()
@@ -261,27 +265,26 @@ class AgentHistory(Static):
         self._selected_seq = None
         self._reflow()
 
-    def _fold_event(self, event: Event, *, buffer_orphans: bool) -> None:
-        """reducer fold 单条 event 进 ``_entries``（phase-16 §2.2 + §5.6）。
+    def _apply_event(self, event: Event) -> None:
+        """**单一 fold 核心**（phase-16 SPEC §0.2 铁律 #5：replay == live，构造性保证）。
+
+        ``set_node``（批量/replay）与 ``append_event``（增量/live ``orca run``）**共用本方法**
+        ——禁止两套配对/缓冲逻辑（旧实现的 ``buffer_orphans=True/False`` 分支已删，那是
+        「多套接口」违反铁律 #4，会导致同一事件流在 replay 与 live 下产出不同 entry）。
 
         - ``agent_tool_call``：建 running ToolEntry append；填 ``_tool_call_cache`` +
           ``_tcid_to_entry_idx``。若 ``_pending_results`` 有匹配 tcid（result 早到），
           立即就地升级（保证乱序回放顺序无关）。
         - ``agent_tool_result``：``_tcid_to_entry_idx`` O(1) 反查 call 位 index，
-          **就地升级**（保持原 seq 和列表位置，``merged.seq = call.seq``）；
-          无匹配 + ``buffer_orphans=True`` → 暂存 ``_pending_results``（set_node 全量
-          fold 用，保证 reducer fold 顺序无关）；
-          无匹配 + ``buffer_orphans=False`` → **降级独立 entry**（append_event 增量
-          路径用——生产期事件流时序保证 call 先于 result，orphan 即 translator 丢事件，
-          fail loud：降级显示而非静默吞，SPEC §0.2 #5）。
+          **就地升级**（保持原 seq 和列表位置，``merged.seq = call.seq``）；无匹配 + 有 tcid
+          → 暂存 ``_pending_results``（**两路径同一语义**：等 call 到达再配对，不降级独立
+          entry——降级会制造 replay/live 分叉）；无 tcid（异常 result）→ 独立 entry（无法配对）。
         - 其余：直接 append。
 
-        顺序无关性（phase-16 §5.6 reducer fold 铁律 #1）：``set_node`` 路径
-        (``buffer_orphans=True``) 配对靠 ``tool_call_id`` 匹配 + pending 缓冲，正序/逆序
-        回放产**相同** ``(seq, kind, summary)`` 集合。
+        顺序无关性（phase-16 §5.6 reducer fold 铁律 #1）：配对靠 ``tool_call_id`` 匹配 +
+        ``_pending_results`` 缓冲（两路径同一缓冲），正序/逆序/乱序回放产相同结果。
 
-        性能（reviewer P1-1）：call/result 配对 O(1) 经 ``_tcid_to_entry_idx``；不再
-        O(N) 扫描。set_node 末尾 sort 后整体重建 index map（O(N) 一次）。
+        性能（reviewer P1-1）：call/result 配对 O(1) 经 ``_tcid_to_entry_idx``。
         """
         etype = event.type
         if etype == "agent_tool_call":
@@ -309,11 +312,15 @@ class AgentHistory(Static):
                 # 配对完成：从 index map 移除（防后续同 tcid result 重复命中）
                 if tcid is not None:
                     self._tcid_to_entry_idx.pop(tcid, None)
-            elif tcid and buffer_orphans:
-                # set_node 全量 fold：result 早于 call → 暂存 pending（保证顺序无关）
+            elif tcid:
+                # result 早于 call（或 call 丢失）→ 暂存 pending 等配对（两路径同一语义，
+                # 不降级独立 entry——降级会制造 replay/live 分叉，违反铁律 #5）。LRU 防泄漏。
                 self._pending_results[tcid] = event
+                if len(self._pending_results) > _PENDING_RESULTS_CAP:
+                    oldest = next(iter(self._pending_results))
+                    self._pending_results.pop(oldest, None)
             else:
-                # append_event 增量路径 or 无 tcid 异常 result：降级独立 entry（fail loud）
+                # 无 tcid 的异常 result：无法配对，独立 entry（genuine anomaly，非路径分支）
                 entry = self._build_entry_from_event(event)
                 self._entries.append(entry)
         else:
@@ -356,8 +363,8 @@ class AgentHistory(Static):
 
         phase-16 §2.4：因 detail 现在内联在同一条 RichLog，追加 / toggle 都触发全量 reflow。
         """
-        # buffer_orphans=False：增量路径不缓冲，orphan result 直接降级独立 entry（fail loud）
-        self._fold_event(event, buffer_orphans=False)
+        # 单一 fold 核心 _apply_event（铁律 #5：与 set_node 共用，replay == live 构造性保证）。
+        self._apply_event(event)
         # 保持 seq 排序（防御乱序）+ 维护 index map（就地升级位置不变，但若 sort 触发需重建）。
         # 假设：生产期 seq 单调递增，乱序仅限末位（translator 重试边界）；set_node 全量
         # 路径已有统一 sort + rebuild 兜底，故此处局部守卫足够。
@@ -564,9 +571,17 @@ class AgentHistory(Static):
             self._log.write(Text(meta_text, style=style))
 
     def _style_for_kind(self, kind: EntryKind) -> str:
-        """phase-16 §2.3 视觉分级样式映射（Rich style 字符串）。"""
+        """phase-16 §2.3 视觉分级样式映射（Rich style 字符串）。
+
+        **必须用 Rich 原生颜色名**（如 ``green`` / ``cyan``），**不能**用 Textual 设计
+        token（``$success`` 等）—— Rich 的 ``Style.parse`` 不识别 ``$token``，会把整个
+        style 串当无效静默丢弃（实测 ``bold $success`` 渲染出零 ANSI 码 = 纯文本，导致
+        message 与 tool 视觉无差异）。Textual token 只在 Textual CSS / ``Widget.styles``
+        里有效。message 用 ``bold green``（对齐 AgentHistory ``border: round $success`` 的
+        绿色基调 + 用户「MSG 突出」诉求）。
+        """
         if kind == "message":
-            return "bold $success"
+            return "bold green"
         if kind == "thinking":
             return "dim italic"
         return ""

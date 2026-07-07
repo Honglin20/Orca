@@ -20,15 +20,18 @@
 
 > **`t` 键现状说明**（目标④衍生）：`action_toggle_thinking` 当前**仅 notify 提示**「按 Enter 展开折叠」，**不**实现 thinking 显隐 toggle（与 `app.py` 现状一致）。本阶段**不动 action 语义**（铁律 #4 接口零变化）；§0.1 目标不含「t 实现 toggle」。
 
-### 0.2 七条铁律（违反即返工）
+### 0.2 八条铁律（违反即返工）
 
 1. **壳无真相**：AgentHistory 所有内容由 `_dispatch_to_widgets` 注入的事件派生；不订阅 bus、不读 tape（重放/replay 必产相同渲染）。
 2. **render layer 零改动**：`normalize_tool` / `render_tool` / `render_message` / `render_thinking` 原样复用。本阶段只改「像素怎么摆」，不改「RenderItem 怎么来」。
 3. **依赖单向**：AgentHistory 仅 import `orca.schema` + textual + rich + stdlib + 本包 `_event_summary` / `tool_render`；禁止 `orca.exec` / `orca.run` / `orca.events.bus`。
 4. **接口统一性**：AgentHistory 公开 API（`set_node` / `append_event` / `set_executor` / `action_*`）签名**零变化**——OrcaApp 调用点不动。
-5. **fail loud**：配对乱序（result 早于 call）—— **测试期**降级即 fail（§5.2 AC：`merged==False` entry 数 == 0）；**生产期**降级记 LogStream warning + 继续渲染。不静默吞。render layer 抛 `NormalizeError` 既有处理保留。
-6. **E2E 验收不可替代**（**本阶段核心铁律**，见 §5）：每个按键功能**必须**用 `pilot.press` 真实键位驱动 TUI + 断言**可观测结果**验收。**禁止只用代码 review / 只用直调 `action_*` 的单测冒充验收**。直调单测可保留作快速回归，但**不能作为按钮功能的唯一证据**。
-7. **不留兼容路径**：删 `#agent-history-detail*` DOM + `_detail_view` + `_refresh_detail`；新旧渲染模型不并存（接口统一性铁律）。
+5. **单一 fold 路径（重放 == 实跑，构造性保证）**：`set_node`（批量/replay）与 `append_event`（增量/live `orca run`）**共用同一个** `_apply_event(event)` 核心逻辑——**禁止两套配对/缓冲逻辑**（如 `buffer_orphans=True/False` 分支）。`set_node = reset + ∑ _apply_event`；`append_event = _apply_event`。reducer fold 顺序无关性靠 `_pending_results` 缓冲（**两路径同一缓冲语义**），不靠路径分支。**replay 与 live 必产相同 `_entries`/渲染，由构造保证**（§5.6 加构造性 AC：`set_node(events) == loop(append_event)`），不是仅靠 reverse-replay 测试事后验证。orphan 缓冲有 LRU 上限防泄漏。
+6. **fail loud（不静默吞）**：call 无 result（type-2 orphan，`merged==False`）由 §5.2 AC（`merged==False` 数 == 0）检测；result 无 call（type-1 orphan）暂存 `_pending_results` 等配对，不降级为独立 entry（避免两路径分叉）。translator 丢事件是真 bug，用 LogStream warning 暴露，**不靠路径分支区分测试/生产**。render layer 抛 `NormalizeError` 既有处理保留。
+7. **E2E 验收不可替代**（**本阶段核心铁律**，见 §5）：每个按键功能**必须**用 `pilot.press` 真实键位驱动 TUI + 断言**可观测结果**验收。**禁止只用代码 review / 只用直调 `action_*` 的单测冒充验收**。直调单测可保留作快速回归，但**不能作为按钮功能的唯一证据**。
+8. **不留兼容路径**：删 `#agent-history-detail*` DOM + `_detail_view` + `_refresh_detail`；新旧渲染模型不并存（接口统一性铁律）。
+
+> **Rich 样式颜色规则（铁律 #4 接口统一性衍生）**：Rich `Text(style=...)` **必须用 Rich 原生颜色名**（`green` / `cyan` / `dim` 等），**禁止用 Textual 设计 token**（`$success` 等）—— Rich 的 `Style.parse` 不识别 `$token`，会把整个 style 串当无效**静默丢弃**（实测 `bold $success` 渲染出零 ANSI = 纯文本，导致 message 与 tool 视觉无差异）。Textual token 只在 Textual CSS / `Widget.styles` 有效。视觉分级用 `bold green`（message）/ `dim italic`（thinking）/ 默认（tool+other，靠 `✓/…/✗` icon 区分）。
 
 ### 0.3 反模式（必须避免）
 

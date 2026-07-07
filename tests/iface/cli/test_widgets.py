@@ -484,24 +484,91 @@ class TestAgentHistory:
         assert hist2.entries[0].kind == "tool"
         assert hist2.entries[0].merged is False
 
-    def test_append_orphan_result_degrades_not_silent(self):
-        """phase-16 §0.2 #5 fail loud：append_event 路径 orphan result 降级独立 entry。
+    def test_append_orphan_result_buffered_same_as_set_node(self):
+        """phase-16 §0.2 铁律 #5（单一 fold 路径）：append_event 与 set_node 对 orphan
+        result **同一行为**——都暂存 ``_pending_results`` 等配对，**不**降级独立 entry。
 
-        增量路径不缓冲 pending（生产期事件流时序保证 call 先于 result）；若 result 无
-        call 配对（translator 丢事件），降级为独立 entry显示而非静默吞——fail loud。
+        旧实现 ``buffer_orphans=True/False`` 分支（set_node 缓冲 / append 降级）是「多套
+        接口」违反铁律 #4，会导致同一事件流在 replay 与 live 下产出不同 entry。统一后
+        两路径共用 ``_apply_event``：orphan result（有 tcid 无 call）一律缓冲。
         """
+        # append_event 路径
         hist = AgentHistory()
-        hist.set_node("analyzer", [])  # 空 entries
+        hist.set_node("analyzer", [])
         orphan = self._make_event(
             1, "agent_tool_result",
             {"tool_call_id": "lost", "result": "no call arrived"},
         )
         hist.append_event(orphan)
-        # 降级为独立 entry（merged=False），不静默丢
-        assert len(hist.entries) == 1
-        assert hist.entries[0].kind == "tool"
-        assert hist.entries[0].merged is False
-        assert "lost" not in hist._pending_results  # 增量路径不缓冲
+        assert len(hist.entries) == 0  # 不降级独立 entry
+        assert "lost" in hist._pending_results  # 与 set_node 同：缓冲等配对
+        # set_node 路径同行为
+        hist2 = AgentHistory()
+        hist2.set_node("a", [orphan])
+        assert len(hist2.entries) == 0
+        assert "lost" in hist2._pending_results
+
+    def test_set_node_equals_append_event_loop(self):
+        """phase-16 §0.2 铁律 #5 构造性 AC：replay(set_node) == live(append_event loop)。
+
+        同一事件流，set_node 批量 fold 与逐条 append_event 必产**相同** ``_entries``
+        （seq/kind/summary/meta/merged/tool_status/tool_name）。这是「单一 fold 路径」的
+        **构造性**验证——不靠 reverse-replay 事后测，而是直接比两路径输出。若两路径
+        分叉（多套接口），此测试立即抓住。
+        """
+        events = [
+            self._make_event(1, "agent_thinking", {"text": "think..."}),
+            self._make_event(2, "agent_tool_call",
+                             {"tool": "read", "args": {"filePath": "/a"}, "tool_call_id": "tc1"}),
+            self._make_event(3, "agent_tool_result",
+                             {"tool_call_id": "tc1", "result": "A"}, timestamp=1000003.0),
+            self._make_event(4, "agent_tool_call",
+                             {"tool": "bash", "args": {"command": "ls"}, "tool_call_id": "tc2"}),
+            self._make_event(5, "agent_tool_result",
+                             {"tool_call_id": "tc2", "result": "B"}, timestamp=1000005.0),
+            self._make_event(6, "agent_message", {"text": "done"}),
+        ]
+        # path A: set_node（replay/batch，orquestrator replay / 切 agent 用）
+        a = AgentHistory()
+        a.set_node("analyzer", events)
+        # path B: append_event loop（live ``orca run`` 增量用）
+        b = AgentHistory()
+        b.set_node("analyzer", [])
+        for e in events:
+            b.append_event(e)
+
+        def key(e):
+            return (e.seq, e.kind, e.summary, e.meta, e.merged, e.tool_status, e.tool_name)
+        assert [key(e) for e in a.entries] == [key(e) for e in b.entries], (
+            "set_node 与 append_event loop 产出不同 _entries —— 单一 fold 路径被破坏"
+        )
+
+    def test_message_summary_renders_bold_green_ansi(self):
+        """phase-16 §0.2 Rich 颜色规则 + §2.3：message summary 实际渲染出 bold + green ANSI。
+
+        用户实测「MSG 没突出」根因：旧 ``bold $success`` 中 ``$success`` 是 Textual token，
+        Rich ``Style.parse`` 不识别 → 整串丢弃 → 零 ANSI = 纯文本。锁定修复：message 样式
+        用 Rich 原生 ``green``，Console 实渲染含 ``\\x1b[1m``（bold）+ ``\\x1b[32m``（green）。
+        """
+        import io
+        from rich.console import Console
+        from rich.text import Text
+        hist = AgentHistory()
+        style = hist._style_for_kind("message")
+        # 无 Textual token（$ 会让 Rich 丢整串 style）
+        assert "$" not in style, f"message style 含 Textual token {style!r}（Rich 不识别）"
+        # 实渲染：bold + green ANSI 必须出现
+        buf = io.StringIO()
+        c = Console(file=buf, force_terminal=True, color_system="truecolor", width=80)
+        c.print(Text("MSG hi", style=style))
+        ansi = buf.getvalue()
+        # Rich 可能把 bold+green 合并成一个 SGR（``\x1b[1;32m``）或分两个（``\x1b[1m\x1b[32m``），
+        # 两种都接受。核心：bold code (1) + green code (32) 都在 ANSI 里。
+        assert ("\x1b[1;32m" in ansi) or ("\x1b[1m" in ansi and "\x1b[32m" in ansi), (
+            f"message 未渲染 bold+green（用户「MSG 没突出」复现），ansi={ansi!r}"
+        )
+        # thinking 仍 dim italic（Rich 原生，本来就工作）
+        assert "dim" in hist._style_for_kind("thinking")
 
     def test_tool_result_error_marks_failed_status(self):
         """phase-16 §2.3：result.error 或非零 exit_code → tool_status='failed'（✗ icon）。
