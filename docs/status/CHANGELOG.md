@@ -17,6 +17,12 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-07-07] TUI bugfix 批次 A —— layout + AgentHistory 三体感 bug
+- layout：NodeDetail `display:none`（修右侧栏全黑：原 `height:0+offset` 不移出布局流，把 `#right-pane` 挤到 width=1）+ AgentsList `height:1fr`（修左栏 auto-size 截断）。
+- A.1 Enter 无选中时默认作用于最后一条（修「Enter 没反应」）；A.2 移除死键 `c`（App + NodeDetail 两处，图表统一走 `C`）；A.3 `#agent-history-detail` 包 VerticalScroll（修长 report 截断）。
+- code-reviewer 回改：删 NodeDetail 残留 `c` 绑定（接口统一性）+ docstring + 空 entries 显式测试。
+- 详情：[release note](releases/2026-07-07-tui-bugfix-batch-a.md)。
+
 ## [2026-07-07] setup_outputs 注入 runtime context（phase-10 🔴 技术债回填）
 MCP `start_workflow(setup_outputs=...)` 真注入：校验后穿透 RunManager.start_run → _run_with_sem → Orchestrator.__init__ 包成 `{agent: {"output": raw}}` 存 RunContext.setup → render 暴露 `{{ setup.<agent>.output.<field> }}`；_make_ctx 透传 setup。resume + setup phase → fail loud（边界声明）。code-reviewer 🔴 修复：`with_locals` 改用 `dataclasses.replace`（原手工列字段漏传 setup，foreach body 引用 `{{ setup.* }}` 静默拿空 dict）+ 补 foreach+setup 回归测试。E2E setup workflow 强化（deploy 真消费 setup 变量）。1688 passed / 0 回归。详见 [release note](releases/2026-07-07-setup-outputs-injection.md)。
 

@@ -569,15 +569,44 @@ class TestAgentHistory:
         hist.action_cursor_up()
         assert hist._selected_seq is None
 
-    def test_action_toggle_expand_no_selection_noop(self):
-        """未选中 entry 时 Enter 不抛（headless 防御）。"""
+    def test_action_toggle_expand_defaults_to_last(self):
+        """未选中 entry 时 Enter 默认作用于最后一条（修复「Enter 没反应」体感 bug）。
+
+        旧逻辑：``_selected_seq is None`` → 直接 return（用户必须先 ↓ 选中才能 Enter，
+        反直觉）。新逻辑：无选中时作用于最后一条 entry，直接按 Enter 即可收起/展开。
+        光标不移动（不触发全量 reflow）。
+        """
         hist = AgentHistory()
-        events = [self._make_event(1, "agent_message", {"text": "msg"})]
+        events = [
+            self._make_event(1, "agent_thinking", {"text": "..."}),
+            self._make_event(2, "agent_message", {"text": "msg"}),
+        ]
         hist.set_node("analyzer", events)
         assert hist._selected_seq is None
-        # Enter 不抛、不改 expanded_seqs
+        assert hist.expanded_seqs == {2}  # last msg 默认展开
+        # Enter（无选中）→ 默认作用于最后一条 seq=2 → 收起
         hist.action_toggle_expand()
-        assert hist.expanded_seqs == {1}
+        assert hist.expanded_seqs == set()
+        # 再 Enter → 展开
+        hist.action_toggle_expand()
+        assert hist.expanded_seqs == {2}
+        # 光标未被移动（不触发 reflow，保持 None）
+        assert hist._selected_seq is None
+
+    def test_action_toggle_expand_empty_entries_noop(self):
+        """空 entries（set_node(None, [])）时 Enter 不抛、不改状态（headless 防御）。
+
+        锁定 action_toggle_expand 的空 entries 早 return 守卫为显式契约（A.1 改动了
+        该分支，从隐式覆盖升为显式断言）。
+        """
+        hist = AgentHistory()
+        hist.set_node(None, [])  # 空 entries
+        assert hist._entries == []
+        assert hist._selected_seq is None
+        # Enter 不抛、不改 expanded_seqs / _selected_seq
+        hist.action_toggle_expand()
+        assert hist.expanded_seqs == set()
+        assert hist._selected_seq is None
 
     def test_tool_call_cache_lru_cap(self):
         """tool_call_id cache 超 _TOOL_CALL_CACHE_CAP → 丢最旧（防爆内存）。"""

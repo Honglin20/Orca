@@ -301,6 +301,7 @@ class OrcaApp(App):
         width: 30%;
         min-width: 20;
         max-width: 40;
+        height: 1fr;  /* 填满 #main-row 横向容器的高度（否则 auto 只够内容行，多 node 截断）*/
         border: round $primary;
         padding: 0 1;
         background: $surface;
@@ -322,14 +323,18 @@ class OrcaApp(App):
         background: $surface;
     }
     /* spec v1.1 §7.2 / v2 §6.3：NodeDetail 保留实例（display:none，chart 路径）。
-       height:0 + off-screen 让它不占屏；既有测试断言 query + 内部 state 仍可调。 */
+       **必须**用 ``display: none`` 而非 ``height:0 + offset``：``offset`` 只是视觉位移
+       （≈ CSS position:relative），widget **仍占布局宽**——在 ``#main-row``（Horizontal）
+       里与 ``#right-pane`` 抢横向空间，把右侧栏挤到 width≈1（AgentHistory/LogStream 全黑）。
+       ``display: none`` 才真移出布局流；widget 仍 mounted + queryable（既有 ``c`` 键 /
+       ChartBrowser / ``nd.active_tab`` 断言照常，spec §6.3）。 */
     NodeDetail {
+        display: none;
         height: 0;
         min-height: 0;
         border: none;
         padding: 0;
         margin: 0;
-        offset: -9999 0;  /* 移出可视区 */
     }
     """
 
@@ -340,9 +345,11 @@ class OrcaApp(App):
         Binding("ctrl+g", "interrupt", "中断/纠偏"),
         # phase 11 §2.4 / §6.1：d 弹 DialogModal（agent 跑完后多轮追问）。
         Binding("d", "dialog", "对话"),
-        # spec v2 §1.2：a 恢复 auto-follow；c 聚焦 NodeDetail 图表 tab；C 全屏 ChartBrowser。
+        # spec v2 §1.2：a 恢复 auto-follow；C 全屏 ChartBrowser 看图表。
+        # （小写 c 曾绑图表 tab——App 级 + NodeDetail widget 级两处都已移除：NodeDetail 是
+        #   display:none 不可见，c 从未触发（死键）。图表统一走 C。``action_focus_charts``
+        #   方法保留：phase-12 e2e 直接调它断言 nd.active_tab 内部 state，不依赖键位。）
         Binding("a", "follow_active", "跟随活跃"),
-        Binding("c", "focus_charts", "图表 tab"),
         Binding("C", "open_chart_browser", "全屏图表"),
         # spec v2 §1.2：thinking 默认显示（dim indigo，见 AgentHistory TYPE-LABEL）；
         # t 键提示用户用 Enter 展开折叠详情（不再 toggle 显隐）。

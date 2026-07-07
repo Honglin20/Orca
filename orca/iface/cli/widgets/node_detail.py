@@ -146,9 +146,11 @@ class NodeDetail(Static):
     }
     """
 
-    BINDINGS = [
-        Binding("c", "action_focus_charts", "图表 tab", show=False),
-    ]
+    BINDINGS: list[Binding] = []
+    # 图表查看统一走 App 级 ``C``（ChartBrowser 全屏，spec §6.3）。历史曾在此绑 ``c`` →
+    # ``action_focus_charts``，但 NodeDetail 是 display:none 不可见 + Static can_focus=False
+    # → 该键从未触发（死键）。A 阶段同步移除，落实「图表只走 C」无歧义契约。
+    # ``action_focus_charts`` 方法保留：phase-12 e2e 直调它断言 nd.active_tab 内部 state。
 
     def __init__(self) -> None:
         super().__init__("", id="node-detail")

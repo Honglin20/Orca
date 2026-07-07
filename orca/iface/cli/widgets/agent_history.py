@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from rich.console import RenderableType
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Vertical, VerticalScroll
 from textual.widgets import RichLog, Static
 
 from orca.iface.cli.widgets._event_summary import (
@@ -96,12 +96,15 @@ class AgentHistory(Static):
     #agent-history-log {
         height: 1fr;
     }
-    #agent-history-detail {
+    #agent-history-detail-wrap {
         height: auto;
         max-height: 50%;
         border-top: solid $accent;
         padding: 0 1;
         background: $panel;
+    }
+    #agent-history-detail {
+        height: auto;
     }
     """
 
@@ -145,7 +148,10 @@ class AgentHistory(Static):
         yield Static("", id="agent-history-header")
         with Vertical():
             yield RichLog(id="agent-history-log", markup=False, wrap=True, auto_scroll=True)
-            yield Static("", id="agent-history-detail")
+            # detail 包在 VerticalScroll 里：长 report（report_painter 的 Markdown）可滚动，
+            # 不再被 Static + max-height 截断（B 阶段会改成 inline 流，此处最小可用）。
+            with VerticalScroll(id="agent-history-detail-wrap"):
+                yield Static("", id="agent-history-detail")
 
     def on_mount(self) -> None:
         self._log = self.query_one("#agent-history-log", RichLog)
@@ -382,13 +388,26 @@ class AgentHistory(Static):
                 return
 
     def action_toggle_expand(self) -> None:
-        """Enter：toggle 当前选中 entry 的展开状态（spec §2.3 + reviewer P0-6）。"""
-        if self._selected_seq is None:
-            return
-        if self._selected_seq in self._expanded_seqs:
-            self._expanded_seqs.discard(self._selected_seq)
+        """Enter：toggle 当前选中 entry 的展开状态（spec §2.3 + reviewer P0-6）。
+
+        未选中（``_selected_seq is None``）时默认作用于**最后一条** entry——
+        用户直接按 Enter 即可展开/收起当前 message，不必先 ↓ 选中（修复「Enter 没反应」
+        体感 bug：旧逻辑在无选中时直接 return，用户不知要先导航）。不移动光标，避免触发
+        全量 reflow（长跑性能）；detail 面板刷新即给出展开/收起反馈。
+
+        注：默认作用于 ``entries[-1]``，**任意 event_type**（可能是 message / tool_result /
+        thinking）。这与 ``_compute_default_expanded`` 的「last **message** 自动展开」规则
+        **有意区分**：自动展开只挑 message；Enter 无选中时作用于物理末条（用户当前关注点）。
+        """
+        seq = self._selected_seq
+        if seq is None:
+            if not self._entries:
+                return
+            seq = self._entries[-1].seq
+        if seq in self._expanded_seqs:
+            self._expanded_seqs.discard(seq)
         else:
-            self._expanded_seqs.add(self._selected_seq)
+            self._expanded_seqs.add(seq)
         self._refresh_detail()
 
     # ── 兼容旧 LogStream.write API（hint 行 / 占位提示等）─────────────
