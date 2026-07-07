@@ -364,7 +364,7 @@ def _build_spawn_config(
         extra_args=extra_args,
         mcp_flag_args=mcp_flag_args,
         prompt=prompt,
-        prompt_channel=profile.prompt_channel,
+        prompt_channel=profile.resolve_prompt_channel(),  # env > config > default（2026-07-07）
         env_overlay=env_overlay,
         timeout=None,  # 本阶段不做单 node 超时（retry/interrupt 归 phase 5，SPEC §5）
     )

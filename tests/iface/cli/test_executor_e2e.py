@@ -98,27 +98,27 @@ def _write_exec_script(tmp_path: Path, name: str, source: str) -> Path:
 
 @pytest.fixture(autouse=True)
 def _isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """每个测试把 config_path 指到 tmp_path、清 ``ORCA_*_CLI`` env、重置 registry。
+    """每个测试把 config_path / project_config_path 指到 tmp_path、清 ``ORCA_*`` env、重置 registry。
 
     ``apply_config_env`` 用 ``os.environ.setdefault`` 直接写 env（非 monkeypatch.setenv），
-    故 teardown 显式清理被写入的 ``ORCA_*_CLI``，防污染后续测试（如
-    ``test_registry.test_resolve_cli_path_env_overrides_default``）。
+    故 teardown 显式清理被写入的 ``ORCA_*``，防污染后续测试。重置 ``_shell_env_snapshot``
+    让 show 来源判定每测试重抓。两层 config 都隔离，避免 ``set --scope project``（默认）
+    污染真实仓库 ``./.orca/config.json``。
     """
-    cfg_file = tmp_path / "config.json"
-    monkeypatch.setattr(config_mod, "config_path", lambda: cfg_file)
-    pre_env = {
-        k: os.environ[k]
-        for k in list(os.environ)
-        if k.startswith("ORCA_") and k.endswith("_CLI")
-    }
+    user_cfg = tmp_path / "user_config.json"
+    proj_cfg = tmp_path / "proj" / ".orca" / "config.json"
+    monkeypatch.setattr(config_mod, "config_path", lambda: user_cfg)
+    monkeypatch.setattr(config_mod, "project_config_path", lambda: proj_cfg)
+    pre_env = {k: os.environ[k] for k in list(os.environ) if k.startswith("ORCA_")}
     for key in list(os.environ):
-        if key.startswith("ORCA_") and key.endswith("_CLI"):
+        if key.startswith("ORCA_"):
             monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(config_mod, "_shell_env_snapshot", None)
     _reset_for_test()
     yield
     _reset_for_test()
     for key in list(os.environ):
-        if key.startswith("ORCA_") and key.endswith("_CLI") and key not in pre_env:
+        if key.startswith("ORCA_") and key not in pre_env:
             os.environ.pop(key, None)
     for key, val in pre_env.items():
         os.environ[key] = val
@@ -232,40 +232,40 @@ class TestExecutorConfigLifecycle:
     def test_set_then_show_displays_effective_binary(
         self, tmp_path: Path, monkeypatch
     ):
-        """set 写 config → show 显示 effective = 写入值 + override 标记。"""
+        """set 写 config → show 显示 effective = 写入值 + 来源标注。"""
         script = _write_exec_script(tmp_path, "good_backend.py", _GOOD_SCRIPT)
-        # set 命令的 binary 参数是「替换后的 binary」——直接传脚本路径
         set_result = runner.invoke(
-            app, ["executor", "set", "claude", str(script)]
+            app, ["executor", "set", "claude", "--binary", str(script)]
         )
         assert set_result.exit_code == 0
-        assert "已设置 claude" in set_result.output
+        assert "已写入" in set_result.output
 
-        # show 读回：effective 应是脚本路径（config override 生效）
-        show_result = runner.invoke(app, ["executor", "show"])
+        # show 读回：生效命令含脚本路径（项目 config override 生效）
+        show_result = runner.invoke(app, ["executor", "show", "claude"])
         assert show_result.exit_code == 0
         assert str(script) in show_result.output
-        assert "config override" in show_result.output
+        assert "← 项目" in show_result.output  # 来源标注
 
-        # config 文件确实写入
-        cfg = json.loads(config_mod.config_path().read_text(encoding="utf-8"))
+        # config 文件确实写入（默认 scope=project）
+        cfg = json.loads(config_mod.project_config_path().read_text(encoding="utf-8"))
         assert cfg["binaries"]["claude"] == str(script)
 
     def test_unset_restores_default_binary(self, tmp_path: Path):
-        """set 后 unset → show 回 default（``claude``），override 标记消失。"""
+        """set 后 unset → show 回 default（``claude``）。"""
         script = _write_exec_script(tmp_path, "lifecycle_backend.py", _GOOD_SCRIPT)
-        runner.invoke(app, ["executor", "set", "claude", str(script)])
+        runner.invoke(app, ["executor", "set", "claude", "--binary", str(script)])
 
         unset_result = runner.invoke(app, ["executor", "unset", "claude"])
         assert unset_result.exit_code == 0
-        assert "已清除" in unset_result.output
+        assert "清除" in unset_result.output
 
-        # show 应回到 default，无 override 标记
-        show_result = runner.invoke(app, ["executor", "show"])
+        # show 应回到 default
+        show_result = runner.invoke(app, ["executor", "show", "claude"])
         assert show_result.exit_code == 0
-        assert "config override" not in show_result.output
+        assert "← default" in show_result.output
+        assert str(script) not in show_result.output
         # config 文件中 claude 已移除
-        cfg = json.loads(config_mod.config_path().read_text(encoding="utf-8"))
+        cfg = json.loads(config_mod.project_config_path().read_text(encoding="utf-8"))
         assert "claude" not in cfg.get("binaries", {})
 
     def test_set_multi_token_binary_then_test_uses_it(
@@ -295,7 +295,7 @@ class TestExecutorConfigLifecycle:
 
         # set 多 token binary → 写 config
         set_result = runner.invoke(
-            app, ["executor", "set", "claude", "ccr code"]
+            app, ["executor", "set", "claude", "--binary", "ccr code"]
         )
         assert set_result.exit_code == 0
 
@@ -315,7 +315,7 @@ class TestExecutorConfigLifecycle:
         """
         # config 写脚本 A
         script_a = _write_exec_script(tmp_path, "backend_a.py", _GOOD_SCRIPT)
-        runner.invoke(app, ["executor", "set", "claude", str(script_a)])
+        runner.invoke(app, ["executor", "set", "claude", "--binary", str(script_a)])
 
         # env 设脚本 B（也吐 result，内容不同便于区分）
         script_b = _write_exec_script(

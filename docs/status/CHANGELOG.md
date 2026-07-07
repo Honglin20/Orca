@@ -15,6 +15,10 @@
 
 ---
 
+## [2026-07-07] executor CLI 扩展 —— 命令唯一真相源 + spawn 参数全可改 —— `orca executor show` 打印完整生效 argv + 每字段来源（env/项目/用户/default）；`set --binary/--flags/--prompt-channel/--scope` 三维可改 + 项目/用户两层 config；接通 phase-14 遗留的 `resolve_flags` 死通道，新增 `resolve_prompt_channel`
+- commit: `<待 commit>`
+- 详情：[release note](../releases/2026-07-07-executor-cli-extend.md)
+
 ## [2026-07-07] create-workflow skill + orca skill install + headless benchmark —— 通用 workflow 生成/转换 skill（吃描述或既有素材 → 归一化 DAG → Orca YAML+agent md，强制 orca validate 闭环），显式装 CC+opencode 两边；16 case 公平 headless benchmark + harness，评测闭环从 8/16 → 16/16，抽象 H1-H7 通用规则
 - commit: `09fd7a8`
 - 详情：[release note](../releases/2026-07-07-create-workflow-skill.md)

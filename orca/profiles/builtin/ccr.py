@@ -55,5 +55,7 @@ PROFILE = CliProfile(
     translator=claude_translator,
     result_extractor=_dummy_result_extractor,
     terminal=RESULT_LINE,
+    flags_env="ORCA_CCR_FLAGS",
+    prompt_channel_env="ORCA_CCR_PROMPT_CHANNEL",
     prompt_paradigm="minimal",
 )

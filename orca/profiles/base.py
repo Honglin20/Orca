@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shlex
 from dataclasses import dataclass, field
@@ -26,6 +27,11 @@ from typing import Callable, Literal
 from orca.profiles.capabilities import ProviderCapabilities
 from orca.profiles.terminal import RESULT_LINE, TerminalContract
 from orca.schema import Event
+
+logger = logging.getLogger(__name__)
+
+# resolve_prompt_channel 合法值集（与 prompt_channel 字段 Literal 同步）。
+_VALID_PROMPT_CHANNELS: frozenset[str] = frozenset({"stdin", "argv"})
 
 # translator：stream-json 一行 → 一批 Event（phase 4 落真实现，phase 3 用 dummy）。
 # 入参含 session_id 上下文（translator 把流片段映射成带 session_id 的事件）。
@@ -70,10 +76,16 @@ class CliProfile:
 
     # ── flags override 通道（镜像 cli_path_env 的 env 注入机制）──
     # 空串 = 无 override 通道（默认）：``resolve_flags()`` 直接返回 ``self.flags``。
-    # 非空 = env 变量名（如 ``ORCA_CLAUDE_FLAGS``）；``orca executor set-flags`` 写 config.json，
+    # 非空 = env 变量名（如 ``ORCA_CLAUDE_FLAGS``）；``orca executor set --flags`` 写 config.json，
     # 启动期 ``apply_config_env`` 把 config 注入此 env，``resolve_flags()`` 运行时读。
-    # 默认空保 6 处测试 fake 零改动（向后兼容）。加在 terminal 之后不破坏 frozen。
+    # 默认空保既有测试 fake 零改动（向后兼容）。
     flags_env: str = ""
+
+    # ── prompt_channel override 通道（同构 flags_env，2026-07-07 executor CLI 扩展）──
+    # 空串 = 无 override 通道（默认）：``resolve_prompt_channel()`` 直接返回 ``self.prompt_channel``。
+    # 非空 = env 变量名（如 ``ORCA_OPENCODE_PROMPT_CHANNEL``）；``orca executor set --prompt-channel``
+    # 写 config.json，启动期 ``apply_config_env`` 注入此 env，``resolve_prompt_channel()`` 运行时读。
+    prompt_channel_env: str = ""
 
     # ── prompt 形状 ──
     prompt_paradigm: Literal["minimal"] = "minimal"  # 暂只支持 minimal
@@ -108,3 +120,27 @@ class CliProfile:
         if self.flags_env in os.environ:
             return tuple(shlex.split(os.environ[self.flags_env]))
         return self.flags
+
+    def resolve_prompt_channel(self) -> Literal["stdin", "argv"]:
+        """返回实际 prompt 投递方式：env > config > default，运行时读（与 ``resolve_flags`` 同构）。
+
+        三态（同 ``resolve_flags``）：
+          1. ``prompt_channel_env == ""``（无 override 通道）→ ``self.prompt_channel``。
+          2. ``prompt_channel_env`` 显式设且 env 值合法（``stdin``/``argv``）→ 该值。
+          3. env 值非法（用户手填错）→ warn + 回落 ``self.prompt_channel``（fail loud 但可恢复，
+             不让一个坏值挂死整个 spawn）。
+
+        双层校验：``apply_config_env`` 注入前已校验一次；此处在 resolve 层再校验（防 shell 直接
+        ``export ORCA_OPENCODE_PROMPT_CHANNEL=garbage`` 绕过注入）。
+        """
+        if not self.prompt_channel_env:
+            return self.prompt_channel
+        if self.prompt_channel_env in os.environ:
+            val = os.environ[self.prompt_channel_env]
+            if val in _VALID_PROMPT_CHANNELS:
+                return val  # type: ignore[return-value]
+            logger.warning(
+                "profile %r 的 prompt_channel env %s=%r 非法（必须 stdin|argv），回落 default %r",
+                self.name, self.prompt_channel_env, val, self.prompt_channel,
+            )
+        return self.prompt_channel

@@ -60,5 +60,7 @@ PROFILE = CliProfile(
     translator=opencode_translator,
     result_extractor=_dummy_result_extractor,
     terminal=EVENTS,
+    flags_env="ORCA_OPENCODE_FLAGS",
+    prompt_channel_env="ORCA_OPENCODE_PROMPT_CHANNEL",
     prompt_paradigm="minimal",
 )
