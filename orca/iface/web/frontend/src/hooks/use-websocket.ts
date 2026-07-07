@@ -7,7 +7,12 @@
 //   3. onclose（非主动关）→ 指数退避重连；重连发 ``{type:"resume",run_id,since:last_seq_seen}``
 //      （D6）；server 重放 seq>since 的事件；resume 失败 → client 全量 re-fetch + re-fold
 //      + 丢弃 _textBuf（调用方负责 dropBuffer）。
-//   4. unmount / 切 run → 关旧 WS + cancel pending reconnect（无 leak）
+//   4. unmount / 切 run → 关旧 WS + cancel pending reconnect + cancel watchdog（无 leak）
+//
+// **D4 resume-fallback watchdog**（SPEC §0 D6 失败路径）：重连发 resume 后启 watchdog 计时；
+// 若 ``RESUME_WATCHDOG_MS`` 内未收到任何事件 → 判定 resume 失败（server 不识别 / 历史丢失），
+// 触发全量 re-fetch（``GET /api/runs/<id>/events``）+ ``loadFromEvents`` re-fold +
+// ``onResumeFallback()`` 让调用方 drop _textBuf。任一事件到达即清 watchdog（resume 成功）。
 //
 // 单一加载路径：初始加载 useRunEvents；WS 仅在重连时 resume 或 fallback 全量。
 
@@ -19,6 +24,12 @@ import type { WsClientMessage } from "@/types/store-types";
 const INITIAL_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 30_000;
 const READY_OPEN = 1;
+/**
+ * resume 发出后等这么久还没收到任何事件 → 判定 resume 失败，触发全量 re-fetch。
+ * 取 3s：太短易误判（server 重放延迟 / 网络抖动），太长用户感知卡顿。后端 ws_handler
+ * 在 resume 后立即 emit backlog（同 tick），3s 足够覆盖 P99 网络 RTT。
+ */
+const RESUME_WATCHDOG_MS = 3_000;
 
 export interface WebSocketDeps {
   createSocket?: (url: string) => WebSocket;
@@ -43,16 +54,64 @@ export function useWebSocket(
     if (!runId) return;
 
     const createSocket = deps.createSocket ?? ((url: string) => new WebSocket(url));
-    // fetchImpl 当前 chunk 不再直接用（resume-fallback watchdog 留给后续 chunk）；
-    // 保留 deps.fetchImpl 入口以稳定 API surface，并供测试注入。
-    void deps.fetchImpl;
+    const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
     const wsUrl = deps.wsUrl ?? defaultWsUrl();
+    const onResumeFallback = deps.onResumeFallback;
 
     let closedByUs = false;
     let backoff = INITIAL_BACKOFF_MS;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    /** D4 resume watchdog：resume 发出后启；超时未收事件 → fallback 全量重拉。 */
+    let resumeWatchdog: ReturnType<typeof setTimeout> | null = null;
     let socket: WebSocket | null = null;
     let everConnected = false;
+
+    /** D4 全量 re-fetch + re-fold + drop _textBuf（resume 失败 / ws 不可用 fallback）。 */
+    const triggerResumeFallback = async () => {
+      try {
+        const resp = await fetchImpl(
+          `/api/runs/${encodeURIComponent(runId)}/events`
+        );
+        if (!resp.ok) {
+          console.error(
+            `[orca] resume-fallback 全量重拉失败 HTTP ${resp.status} (run=${runId})`
+          );
+          return;
+        }
+        const events = (await resp.json()) as WebEvent[];
+        // 全量 re-fold（loadFromEvents 内部 sort by seq + refold）。
+        useWorkflowStore.getState().loadFromEvents(events);
+      } catch (err) {
+        // fail loud：网络错误不静默吞（SPEC 铁律 12）。下次重连仍会再次尝试。
+        console.error(
+          `[orca] resume-fallback 全量重拉网络错误 (run=${runId})`,
+          err
+        );
+        return;
+      }
+      // dropBuffer 必须在 loadFromEvents 之后：先 re-fold 真相，再让 streaming hook 清
+      // 旧 buffer（顺序反之会在 re-fold 渲染的瞬间残留旧 buffer frame）。
+      onResumeFallback?.();
+    };
+
+    /** 清 watchdog（任一事件到达即 resume 成功）。 */
+    const clearResumeWatchdog = () => {
+      if (resumeWatchdog !== null) {
+        clearTimeout(resumeWatchdog);
+        resumeWatchdog = null;
+      }
+    };
+
+    const armResumeWatchdog = () => {
+      clearResumeWatchdog();
+      resumeWatchdog = setTimeout(() => {
+        resumeWatchdog = null;
+        console.warn(
+          `[orca] resume 后 ${RESUME_WATCHDOG_MS}ms 未收到事件，触发全量重拉 fallback (run=${runId})`
+        );
+        void triggerResumeFallback();
+      }, RESUME_WATCHDOG_MS);
+    };
 
     const sendSubscribe = (sock: WebSocket) => {
       if (sock.readyState === READY_OPEN) {
@@ -69,11 +128,6 @@ export function useWebSocket(
       sock.send(JSON.stringify(msg));
     };
 
-    // D6 resume 失败 fallback（全量 re-fetch + re-fold + drop _textBuf）：当前 chunk 不
-    // 主动调用——server ws_handler 已支持 resume 协议（重放 seq>since），fallback 路径
-    // 在 watchdog（resume 后 N 秒未收到事件）接入时再加（YAGNI）。deps.onResumeFallback
-    // 通道保留，调用方（streaming hook）已可挂 dropBuffer。
-
     const open = () => {
       socket = createSocket(wsUrl);
       const wasReconnect = everConnected;
@@ -82,37 +136,44 @@ export function useWebSocket(
       socket.onopen = () => {
         backoff = INITIAL_BACKOFF_MS;
         if (wasReconnect) {
-          // 重连：发 resume（server 重放 seq>since）。若 server 不支持 resume 协议
-          // （回复 error 或忽略），onmessage 仍可补；最坏 fallback 全量重拉在 close 后触发。
-          // 简化：重连先 resume；同时记一个 watchdog——若 N 秒内未收到任何事件，触发全量
-          // 重拉。这里直接 resume + subscribe 兜底（subscribe 保证后续 live 不丢）。
+          // 重连：发 resume（server 重放 seq>since）。同时启 watchdog——若 RESUME_WATCHDOG_MS
+          // 内未收到任何事件，判定 resume 失败（server 不识别 / 历史丢失），触发全量重拉。
           sendResume(socket!);
           // 兜底：resume 后也 subscribe（保证 server 不识别 resume 时仍接上 live 流）。
-          // 注：resume + subscribe 双发是幂等的——server 看 resume 优先（重放历史），再看
-          // subscribe 转入 live；若 server 不识别 resume 则只当 subscribe 处理（live 接上），
-          // 缺失的历史事件由 onclose 后的 fallback 全量重拉补（极少触发）。
+          // resume + subscribe 双发幂等——server 看 resume 优先（重放历史），再看 subscribe
+          // 转入 live；若 server 不识别 resume 则只当 subscribe 处理，缺失历史由 watchdog
+          // 触发的全量重拉补。
           sendSubscribe(socket!);
-          // 若 lastSeqSeen=0（重连前未收到任何事件），resume 退化为全量场景——server 应
-          // 重放全部。这里不主动 fallback：让 server 决定；client 只在真正错失时（人工
-          // 监控）触发——避免在正常 resume 路径里做激进重拉。
+          armResumeWatchdog();
         } else {
           sendSubscribe(socket!);
         }
       };
 
       socket.onmessage = (ev: MessageEvent) => {
-        let event: WebEvent;
+        let parsed: Record<string, unknown>;
         try {
-          event = JSON.parse(ev.data) as WebEvent;
+          parsed = JSON.parse(ev.data) as Record<string, unknown>;
         } catch (err) {
           console.error("[orca] ws 收到非 JSON 消息，忽略", err);
           return;
         }
-        if (event.run_id !== runId) return;
-        processEvent(event);
+        // D4 watchdog ack：server resume 重放完毕（含零事件重放即 client 已 caught-up 场景）
+        // 后发 ``{type:"resume_ok"}`` 帧。本帧**不进 tape**（控制平面，非业务事件）→ 不调
+        // processEvent，只清 watchdog。避免 idle 场景下「无事件 = resume 失败」的误判。
+        if (parsed.type === "resume_ok") {
+          if (parsed.run_id === runId) clearResumeWatchdog();
+          return;
+        }
+        // 业务事件：run_id 匹配过滤 + 清 watchdog（任一事件 = resume 成功）。
+        if (parsed.run_id !== runId) return;
+        clearResumeWatchdog();
+        processEvent(parsed as unknown as WebEvent);
       };
 
       socket.onclose = () => {
+        // 重连前清 watchdog（避免重连间隙触发误 fallback）
+        clearResumeWatchdog();
         if (closedByUs) return;
         reconnectTimer = setTimeout(() => {
           backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
@@ -130,6 +191,7 @@ export function useWebSocket(
     return () => {
       closedByUs = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      clearResumeWatchdog();
       if (socket) {
         socket.onopen = null;
         socket.onmessage = null;

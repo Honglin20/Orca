@@ -164,6 +164,106 @@ def test_resume_replays_events_after_since(tmp_path):
     run_async(go())
 
 
+# ── D4 watchdog 配套：resume_ok ack 帧（重放完毕后发，client 据此清 watchdog）─────
+
+def test_resume_emits_resume_ok_after_replay(tmp_path):
+    """resume(since=K) → 重放完毕 → 发 ``{type:"resume_ok", last_seq}`` ack。
+
+    D4 watchdog 真义：idle 场景（重放零事件 / client 已 caught-up）也发 ack，让 client
+    清 watchdog，避免误触发全量重拉。
+    """
+    manager, handles = _manager_with_handles(tmp_path, "runAck")
+    handle = handles["runAck"]
+
+    async def go():
+        # 注入 2 条历史事件
+        for i in range(1, 3):
+            await handle.tape.append(
+                {
+                    "type": "node_started",
+                    "node": f"n{i}",
+                    "session_id": None,
+                    "data": {},
+                    "timestamp": float(i),
+                }
+            )
+
+        server = WebServer(manager)
+        ws = FakeWebSocket()
+        endpoint_task = asyncio.create_task(server.ws_endpoint(ws))
+        await asyncio.sleep(0.01)
+        # resume(since=1) → 重放 seq=2 → resume_ok(last_seq=2)
+        await server._dispatch(
+            ws, {"type": "resume", "run_id": "runAck", "since": 1}
+        )
+        # 第一条：seq=2 业务事件
+        msg_event = await ws.client_recv(timeout=1.0)
+        assert msg_event["seq"] == 2
+        assert msg_event["run_id"] == "runAck"
+        # 第二条：resume_ok ack（控制平面帧，不进 EventType）
+        msg_ack = await ws.client_recv(timeout=1.0)
+        assert msg_ack["type"] == "resume_ok"
+        assert msg_ack["run_id"] == "runAck"
+        assert msg_ack["last_seq"] == 2
+
+        ws.feed_disconnect()
+        await asyncio.sleep(0.02)
+        await server._cleanup(ws)
+        endpoint_task.cancel()
+        try:
+            await endpoint_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        await _close_handles(manager)
+
+    run_async(go())
+
+
+def test_resume_zero_replay_still_emits_resume_ok(tmp_path):
+    """client 已 caught-up（seq > since 无事件）→ resume_ok(last_seq=0) ack。
+
+    D4 BLOCKER fix：idle 场景（重放零事件）也必须发 ack，否则 client 误判 resume 失败。
+    """
+    manager, handles = _manager_with_handles(tmp_path, "runIdle")
+    handle = handles["runIdle"]
+
+    async def go():
+        await handle.tape.append(
+            {
+                "type": "node_started",
+                "node": "n1",
+                "session_id": None,
+                "data": {},
+                "timestamp": 1.0,
+            }
+        )
+
+        server = WebServer(manager)
+        ws = FakeWebSocket()
+        endpoint_task = asyncio.create_task(server.ws_endpoint(ws))
+        await asyncio.sleep(0.01)
+        # resume(since=5) → tape 中无 seq>5 → 零重放，但仍发 ack
+        await server._dispatch(
+            ws, {"type": "resume", "run_id": "runIdle", "since": 5}
+        )
+        msg = await ws.client_recv(timeout=1.0)
+        assert msg["type"] == "resume_ok"
+        assert msg["run_id"] == "runIdle"
+        assert msg["last_seq"] == 0
+
+        ws.feed_disconnect()
+        await asyncio.sleep(0.02)
+        await server._cleanup(ws)
+        endpoint_task.cancel()
+        try:
+            await endpoint_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        await _close_handles(manager)
+
+    run_async(go())
+
+
 # ── fallback 1：run_id 未知 → 回退 subscribe ──────────────────────────────────
 
 def test_resume_unknown_run_falls_back_to_subscribe(tmp_path):

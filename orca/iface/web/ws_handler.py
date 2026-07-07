@@ -102,6 +102,9 @@ class WebServer:
         - run_id 未知 / since 非数字 → 记 warning + 不崩，回退到 subscribe（live 流接上）。
         - 否则：把 tape 中 seq>since 的事件按 seq 升序发给 WS（带 run_id 标签），再 subscribe。
         - resume 失败（tape 读异常等）→ 记 warning，回退 subscribe（live 流不丢）。
+        - **resume_ok ack**（D4 watchdog 配套）：重放完毕后发 ``{type:"resume_ok", run_id,
+          last_seq}`` 帧，client 据此清 resume-fallback watchdog（避免 idle 场景误触发
+          全量重拉——SPEC §0 D6 真义是「resume 失败」非「无事件」）。
         """
         if not isinstance(run_id, str):
             logger.warning("ws resume 缺 run_id（回退 subscribe）")
@@ -116,6 +119,8 @@ class WebServer:
         if handle is None:
             logger.warning("ws resume 未知 run_id=%s（回退 subscribe）", run_id)
             return
+        last_seq = 0
+        replayed_ok = False
         try:
             if since_seq is not None:
                 # 按 seq 升序重放历史（Tape.replay(since_seq) 已保证 seq>since 升序）。
@@ -123,6 +128,9 @@ class WebServer:
                     payload = event.model_dump()
                     payload["run_id"] = run_id
                     await ws.send_json(payload)
+                    if event.seq > last_seq:
+                        last_seq = event.seq
+                replayed_ok = True
         except Exception:  # noqa: BLE001 — resume 失败 fail loud，不阻断后续 subscribe
             logger.warning(
                 "ws resume 重放失败 run_id=%s since=%s（回退 subscribe）",
@@ -132,6 +140,21 @@ class WebServer:
             )
         # 重放完毕（或失败）→ subscribe 接 live 流（与初始 subscribe 共用路径）
         await self._handle_subscribe(ws, run_id)
+        # D4 watchdog ack：**仅当 resume 协议真正执行**（since_seq 合法 + 重放无异常）才发
+        # resume_ok。invalid since / unknown run 等回退 subscribe 路径不发——避免误升级 client
+        # 状态。type 故意不进 EventType（控制平面帧，不进 tape）；前端 onmessage 见
+        # type="resume_ok" 即清 watchdog（不 processEvent）。
+        if replayed_ok:
+            try:
+                await ws.send_json(
+                    {"type": "resume_ok", "run_id": run_id, "last_seq": last_seq}
+                )
+            except Exception:  # noqa: BLE001 — WS 已断 / send 失败 → 不阻塞 dispatch
+                logger.warning(
+                    "ws resume_ok send 失败 run_id=%s（client 会经 onclose 重连）",
+                    run_id,
+                    exc_info=True,
+                )
 
     async def _handle_subscribe(self, ws: WebSocket, run_id: object | None) -> None:
         """订阅某 run：cancel 旧订阅 → 订阅 handle.bus → 起 pump task。

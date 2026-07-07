@@ -5,6 +5,17 @@
 
 ---
 
+## [2026-07-08] Web Shell v2 Chunk D（completion + polish + bundle split）
+
+完成前端**所有剩余项**（D1-D7）+ 86% bundle 减重（initial 2,035 KB → 290 KB / gzip 93.65 KB）。
+D3 image URL rewrite（backend `/api/runs/<id>/assets/<path>` + 前端 `rewriteImageSrc` +
+path traversal / symlink 守卫）/ D4 resume-fallback watchdog + `resume_ok` 协议 ack 帧（idle
+场景不误触发全量重拉）/ D5 view 层 lazy 切分（ConversationView / ChartsView / WorkflowGraph
+独立 chunk）/ D7 StatusLine 折叠修正（Chunk B YAGNI 偏离）+ e2e Gate / lazy DAG / markdown
+渲染 / image rewrite / ws-fallback / dropBuffer 时序断言。1 BLOCKER + 3 MAJOR + 5 MINOR
+全闭环。249 npm tests + 64 backend tests 双绿。**前端实现 COMPLETE，ready for e2e。**
+详见 [release note](../releases/2026-07-08-web-shell-v2-chunk-d-completion-polish.md)。
+
 ## [2026-07-08] Web Shell v2 Chunk C（ChartsView + LogStream + TopBar + AgentsRail + useElapsedTick）
 
 按 SPEC §5.1/§5.2/§5.4/§5.5/§5.6/§5.7 + §0 D5/D9 实现 6 个面板完整渲染 + 单一共享

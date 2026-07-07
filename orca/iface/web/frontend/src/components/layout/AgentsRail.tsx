@@ -9,7 +9,7 @@
 // D5 elapsed：``selectNodeElapsed(state, node, now)``——running 时 live tick，完成 snap。
 // D9 stall：``selectStall`` —— 当前 node 无新事件 > 5s → 琥珀「思考中 Ns」。
 
-import { useState } from "react";
+import { Suspense, lazy, useState } from "react";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import {
   selectAgents,
@@ -20,7 +20,13 @@ import {
 } from "@/selectors";
 import { useElapsedNow } from "@/hooks/use-elapsed-tick";
 import type { NodeStatus } from "@/types/store-types";
-import { WorkflowGraph } from "@/components/graph/WorkflowGraph";
+
+// D5/D2：xyflow 全家桶（~250KB）懒挂——只在用户点 [DAG] 按钮才下载。
+const WorkflowGraph = lazy(() =>
+  import("@/components/graph/WorkflowGraph").then((m) => ({
+    default: m.WorkflowGraph,
+  }))
+);
 
 const STATUS_ICON: Record<NodeStatus, string> = {
   pending: "○",
@@ -41,16 +47,37 @@ function statusColor(status: NodeStatus): string {
 
 /** AgentsRail 内部用 ``formatElapsed(seconds, "seconds")``（紧凑秒级精度）。 */
 
-
+function DagFallback() {
+  return (
+    <div
+      className="flex h-full items-center justify-center text-sm text-slate-400"
+      data-testid="dag-fallback"
+    >
+      <span className="animate-pulse">加载 DAG…</span>
+    </div>
+  );
+}
 
 export function AgentsRail() {
-  // selectAgents 只读 nodes map 派生；订阅粒度优化：用整体 state 订阅，靠 React 浅比较。
-  // 优化空间 YAGNI（agent 数通常 < 20）。
-  const state = useWorkflowStore();
-  const agents = selectAgents(state);
+  // 细粒度订阅（SPEC §1.6/§4 性能意图）：只订阅 selectors 实际依赖的字段（workflowDef +
+  // nodes + events），避免「无 selector 整体订阅」导致流式每帧 WS setState 都触发本组件
+  // re-render（即便 nodes/events 内容未变）。setSelectedNode 是 stable action ref，订阅一次即可。
+  // 重渲染真正必要的时机：workflowDef 变（拓扑首次到达）/ nodes 变（status/elapsed/tokens 派生）
+  // / events 变（stall 派生）/ selectedNode 变（高亮）/ now 变（tick → elapsed 推进）。
+  const workflowDef = useWorkflowStore((s) => s.workflowDef);
+  const nodes = useWorkflowStore((s) => s.nodes);
+  const events = useWorkflowStore((s) => s.events);
   const selectedNode = useWorkflowStore((s) => s.selectedNode);
   const setSelectedNode = useWorkflowStore((s) => s.setSelectedNode);
   const [showDag, setShowDag] = useState(false);
+
+  // 构造 selectors 期望的最小 state shape（DRY：未来加字段时只改这里）。`as unknown as`
+  // 类型断言把只读字段子集与 WorkflowState 接口对齐——selectors 只读这三个字段，访问其它
+  // 字段会运行时报错（fail loud）。
+  const state = { workflowDef, nodes, events } as unknown as Parameters<
+    typeof selectAgents
+  >[0];
+  const agents = selectAgents(state);
 
   // 单一共享 tick —— N agent 共用一个 timer（SPEC §5.2）。
   const now = useElapsedNow();
@@ -142,7 +169,10 @@ export function AgentsRail() {
             className="absolute inset-8 rounded bg-white p-2 shadow"
             onClick={(e) => e.stopPropagation()}
           >
-            <WorkflowGraph />
+            {/* D2：懒挂——首次打开才下载 xyflow chunk */}
+            <Suspense fallback={<DagFallback />}>
+              <WorkflowGraph />
+            </Suspense>
           </div>
         </div>
       )}

@@ -126,6 +126,50 @@ class RunManager:
         """共享 SessionContextRegistry（routes/gate.py 多 run 分发用）。"""
         return self._registry
 
+    @property
+    def runs_dir(self) -> Path:
+        """runs 资源根目录（SPEC §0 D10：assets 路由据此解析 run-scoped 资源）。
+
+        只读暴露：routes 层 ``GET /api/runs/<id>/assets/<path>`` 用 ``runs_dir / run_id /
+        assets / <rel>`` 解析，受 ``_resolve_asset_path`` 守卫防越界。
+        """
+        return self._runs_dir
+
+    def resolve_asset_path(self, run_id: str, rel_path: str) -> Path | None:
+        """解析 run 私有 asset 路径（SPEC §0 D10）。
+
+        - 未知 run_id → None（routes 层 404）
+        - 路径越界（``..`` / 绝对路径 escape）→ None（fail loud 404）
+        - 文件不存在 → None
+        - 合法且存在 → 返回 resolved absolute path
+
+        单一职责：本方法只做路径解析 + 越界守卫；IO 读字节流由 routes 层 FileResponse 负责。
+        """
+        if self._runs.get(run_id) is None:
+            return None
+        assets_root = (self._runs_dir / run_id / "assets").resolve()
+        decoded = rel_path.strip()
+        if not decoded:
+            return None
+        # 注意：``.resolve()`` 会跟随 symlink，故先在未 resolve 的路径上 check symlink
+        # （否则 ``candidate`` 已是 symlink 目标，``is_symlink()`` 必 False）。
+        unresolved = assets_root / decoded
+        if unresolved.is_symlink():
+            return None
+        candidate = unresolved.resolve()
+        try:
+            candidate.relative_to(assets_root)
+        except ValueError:
+            return None
+        # 二次 check（防御纵深：路径中某段可能是 symlink，unresolved 末端未指向但中间段是）
+        # ——此处 ``candidate`` 已 resolve，是真实物理路径；若与 unresolved 不同且非末端 symlink，
+        # 上面未 resolve 检查已拦下。再加 ``candidate.is_symlink()`` 兜底中间段 symlink。
+        if candidate.is_symlink():
+            return None
+        if not candidate.is_file():
+            return None
+        return candidate
+
     async def start_run(
         self,
         yaml_path: str | Path,

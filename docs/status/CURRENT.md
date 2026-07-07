@@ -7,6 +7,53 @@
 
 ---
 
+## ✅ 侧任务完成（2026-07-08）：web-shell-v2 Chunk D（completion + polish + bundle split）
+
+按 SPEC §0 D10/D6 / §5.3/§5.6/§5.7/§6/§7/§9 完成 Web Shell v2 前端**所有剩余项**——
+前端实现**全部完成**，进入「ready for test-coverage-e2e 真链路验证」状态。
+
+**交付**：
+- **D1 Gate modal**：Chunk C 已完整接入；补 e2e 测试（requested → modal → answer → POST
+  → resolved → close + toast 单测贯穿）。
+- **D2 DAG overlay**：`AgentsRail` 用 `React.lazy` + `Suspense` 包装 `WorkflowGraph`；
+  xyflow chunk（~217 KB）懒挂，首屏不下载。新增 lazy 解析测试。
+- **D3 image URL rewrite**：backend `GET /api/runs/<id>/assets/<path>`（三重守卫：未知 run /
+  path traversal / symlink / missing）+ 前端 `rewriteImageSrc`（相对 / `file://` / 裸文件名
+  → endpoint；绝对 URL / data: / blob: 直通）。RunManager 新增 `runs_dir` property +
+  `resolve_asset_path` 方法（SRP）。
+- **D4 resume-fallback watchdog**：`use-websocket.ts` resume 后启 3s watchdog；超时无事件 →
+  全量 re-fetch + re-fold + dropBuffer。**协议补丁**（review BLOCKER 闭环）：server
+  `_handle_resume` 重放完毕发 `{type:"resume_ok", run_id, last_seq}` ack（仅 resume 协议真正
+  执行时发）→ client 收到清 watchdog，消除 idle 误触发。
+- **D5 bundle split**：`ConversationView`（~1MB markdown）/ `ChartsView`（~440KB recharts）/
+  `WorkflowGraph`（~217KB xyflow）在 `RunDetailPage` 用 `React.lazy` 拆独立 chunk。
+  **initial bundle 2,035 KB → 290 KB（gzip 93.65 KB，-86%）**。
+- **D6 AH theme polish**：`chartTheme.ts` 8-color palette + 状态色 + 排版已就位（Chunk C）。
+  **lucide 偏离**记录：选 unicode/emoji（零依赖 / 跨平台一致 / 现有达意），SPEC §7 是建议
+  非强约束。
+- **D7 StatusLine 修正**：Chunk B 单行不可折叠 → 可折叠（默认折叠 + chevron + 展开 JSON；
+  `validator_failed` 默认展开）。DiffView 保留 index-diff（rationale 在文件头注释）。
+
+**闭环 review**（`code-reviewer`）：1 BLOCKER（D4 idle 误触发）+ 3 MAJOR（AgentsRail 全 store
+订阅 / MarkdownText 无渲染测试 / file:// 语义）+ 5 MINOR（注释措辞 / symlink 防御 / 测试名
+强化 / dropBuffer 时序断言 / resume_ok 不发条件）全闭环。详见
+[release note](../releases/2026-07-08-web-shell-v2-chunk-d-completion-polish.md)。
+
+**验证**：249 npm tests（baseline 223 → +26 新增）+ 64 backend tests 双绿。`npm run build`
+双绿，bundle split 实证（initial 290 KB / gzip 93.65 KB）。AC grep：禁用模式命中 0；
+Zustand store 1 个；events.ts codegen 同步。
+
+**遗留 follow-up（移交 test-coverage-e2e）**：
+- 🔵 Playwright 真浏览器逐屏 DOM 视觉断言（折叠展开 / ▎ 消失 / chart 渲染 / gate 模态 /
+  DAG 浮层 / image rewrite 真链路）。
+- 🔵 agent 真链路写图片到 `<runs_dir>/<run_id>/assets/` 后引用相对路径（D3 端到端）。
+- 🔵 ConversationView lazy chunk 1MB+ 仍偏大：未来 manualChunks 细分 katex/prism 独立 chunk。
+- 🟡 lucide 图标（SPEC §7 建议）偏离已记录，择期 polish。
+
+**前端实现 COMPLETE，ready for e2e。**
+
+---
+
 ## ✅ 侧任务完成（2026-07-08）：web-shell-v2 Chunk C（ChartsView + LogStream + TopBar + AgentsRail + useElapsedTick）
 
 按 SPEC §5.1/§5.2/§5.4/§5.5/§5.6/§5.7 + §0 D5/D9 实现 Web Shell v2 前端 Chunk C

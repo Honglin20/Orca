@@ -1,18 +1,22 @@
-"""runs.py —— 懒加载 REST 路由（SPEC §3）。
+"""runs.py —— 懒加载 REST 路由（SPEC §3 / §0 D10 assets）。
 
-回答「前端怎么拿 run 列表 / 全量事件 / 单 run 状态？」：
+回答「前端怎么拿 run 列表 / 全量事件 / 单 run 状态 / agent 产出的图片资源？」：
   - ``GET /api/runs`` → ``list[RunMeta]``，**绝不返回事件**（懒加载红线，§0.1 铁律 2）。
   - ``GET /api/runs/<id>/events`` → ``list[Event]``（懒加载，唯一来源 ``tape.replay``）。
   - ``GET /api/runs/<id>`` → ``{meta, state}``（元数据 + RunState 快照，**不含全量事件**）。
+  - ``GET /api/runs/<id>/assets/<path>`` → 图片资源字节流（SPEC §0 D10；markdown 内相对
+    / file:// 路径前端重写到此处）。
 
 依赖单向：本模块依赖 ``orca.iface.web.run_manager``（同层）+ fastapi，不含编排逻辑。
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
 
 from orca.events.replay import replay_state
 
@@ -61,6 +65,30 @@ def build_router(manager: RunManager) -> APIRouter:
         except KeyError:
             raise HTTPException(status_code=404, detail=f"unknown run_id: {run_id}")
         return [e.model_dump() for e in events]
+
+    @router.get("/{run_id}/assets/{asset_path:path}")
+    async def get_run_asset(run_id: str, asset_path: str) -> FileResponse:
+        """某 run 的图片/二进制资源（SPEC §0 D10）。
+
+        前端 markdown renderer 把 ``![](rel.png)`` / ``file://...`` / 裸文件名 rewrite 到
+        ``/api/runs/<id>/assets/<encoded>``，由本端点解码 path 后从 ``<runs_dir>/<run_id>/
+        assets/<path>`` 取文件。
+
+        - 未知 run_id → 404
+        - 路径越界（``..`` / 绝对路径）→ 404（fail loud，不暴露 fs）
+        - 文件不存在 → 404
+
+        解析 + 越界守卫委托 ``manager.resolve_asset_path``（SRP：路径解析在 manager，
+        IO 字节流在 routes）。
+        """
+        candidate = manager.resolve_asset_path(run_id, asset_path)
+        if candidate is None:
+            # 不区分 unknown run / path escape / file missing——统一 404（不暴露 fs 细节）。
+            raise HTTPException(
+                status_code=404,
+                detail=f"asset not found: {asset_path}",
+            )
+        return FileResponse(str(candidate))
 
     return router
 

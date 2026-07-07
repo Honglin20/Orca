@@ -6,13 +6,16 @@
 //   - 右 LogStream（常驻最右，虚拟化 live）
 // 顶 TopBar（status + elapsed + cost）。**无** Replay 控件（SPEC §3.1 / §8）。
 //
-// Chunk A：3 栏布局 + tab 切换骨架；会话/图表内容用占位组件（D2/D3 全渲染留后续 chunk）。
+// **D5 bundle split**：ConversationView（含 react-markdown 全家桶 ~2MB）/ ChartsView
+// （recharts ~400KB）/ WorkflowGraph（xyflow ~250KB）各自 ``React.lazy`` 拆独立 chunk。
+// 首屏（TopBar + AgentsRail + LogStream）只剩 ~200KB——conversation/charts/DAG 首次切
+// 到才拉对应 chunk。Suspense fallback 给极简骨架（不污染首屏 chunk）。
 //
 // 关键（铁律 1 + 5）：
 //   - useRunEvents(runId)：mount → 懒加载 GET /events；unmount → unloadRun
-//   - useWebSocket(runId)：mount → subscribe；重连发 resume（D6）
+//   - useWebSocket(runId)：mount → subscribe；重连发 resume（D6）+ resume 失败 fallback
 
-import { useCallback, useState } from "react";
+import { Suspense, lazy, useCallback, useState } from "react";
 import { useParams } from "react-router-dom";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { useRunEvents } from "@/hooks/use-run-events";
@@ -22,9 +25,17 @@ import { useElapsedTickActive } from "@/hooks/use-elapsed-tick";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import { TopBar } from "@/components/layout/TopBar";
 import { AgentsRail } from "@/components/layout/AgentsRail";
-import { ConversationView } from "@/components/views/ConversationView";
-import { ChartsView } from "@/components/views/ChartsView";
 import { LogStream } from "@/components/detail/LogStream";
+
+// D5：重依赖 view 懒挂——独立 chunk，首屏不加载。
+const ConversationView = lazy(() =>
+  import("@/components/views/ConversationView").then((m) => ({
+    default: m.ConversationView,
+  }))
+);
+const ChartsView = lazy(() =>
+  import("@/components/views/ChartsView").then((m) => ({ default: m.ChartsView }))
+);
 
 type Tab = "conversation" | "charts";
 
@@ -84,13 +95,15 @@ export function RunDetailPage() {
               ))}
             </div>
             <div className="flex-1 overflow-auto">
-              {tab === "conversation" && (
-                <ConversationView
-                  nodeId={selectedNode}
-                  onChartClick={() => setTab("charts")}
-                />
-              )}
-              {tab === "charts" && <ChartsView />}
+              <Suspense fallback={<TabFallback label="加载会话…" />}>
+                {tab === "conversation" && (
+                  <ConversationView
+                    nodeId={selectedNode}
+                    onChartClick={() => setTab("charts")}
+                  />
+                )}
+                {tab === "charts" && <ChartsView />}
+              </Suspense>
             </div>
           </div>
         </Panel>
@@ -109,6 +122,17 @@ export function RunDetailPage() {
           </div>
         </Panel>
       </PanelGroup>
+    </div>
+  );
+}
+
+function TabFallback({ label }: { label: string }) {
+  return (
+    <div
+      className="flex h-full items-center justify-center text-sm text-slate-400"
+      data-testid="tab-fallback"
+    >
+      <span className="animate-pulse">{label}</span>
     </div>
   );
 }

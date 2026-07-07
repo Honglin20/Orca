@@ -167,7 +167,7 @@ describe("AgentsRail —— token 小字（agent_usage fold）", () => {
   });
 });
 
-describe("AgentsRail —— DAG 浮层 lazy 挂载（§5.7）", () => {
+describe("AgentsRail —— DAG 浮层 lazy 挂载（§5.7 / D2 lazy）", () => {
   test("默认不渲染 dag-overlay；点 DAG 按钮后挂载", () => {
     emitWorkflowStarted();
     render(<RailRoot active={false} />);
@@ -184,5 +184,34 @@ describe("AgentsRail —— DAG 浮层 lazy 挂载（§5.7）", () => {
     // 点背景（overlay 本身，非内部 stop-propagation 容器）
     fireEvent.click(overlay);
     expect(screen.queryByTestId("dag-overlay")).not.toBeInTheDocument();
+  });
+
+  test("D2 lazy：点 DAG 按钮 → 内部 WorkflowGraph 经 React.lazy 渲染（lazy chunk 解析后 workflow-graph testid 出现）", async () => {
+    // workflow_started 已 emit → store.workflowDef 非 null → WorkflowGraph 渲染 ReactFlow。
+    // React.lazy 在 vitest 下异步 resolve（dynamic import），用 findByTestId 等 lazy chunk
+    // 解析完成。若 lazy import 路径错（如 module specifier 拼错）→ 永久 fallback，timeout fail。
+    emitWorkflowStarted();
+    render(<RailRoot active={false} />);
+    fireEvent.click(screen.getByTestId("dag-toggle"));
+    expect(screen.getByTestId("dag-overlay")).toBeInTheDocument();
+    // Suspense fallback 先出现（验证 lazy 包装确实生效）
+    expect(screen.getByTestId("dag-fallback")).toBeInTheDocument();
+    // 等 lazy 解析完成 → workflow-graph testid 出现
+    const graph = await screen.findByTestId("workflow-graph", undefined, {
+      timeout: 1000,
+    });
+    expect(graph).toBeInTheDocument();
+  });
+
+  test("D2 lazy：拓扑未知（无 workflow_started）时浮层仍挂（lazy 解析后占位文本可见，不崩）", async () => {
+    // 不 emit workflow_started → WorkflowGraph 渲染「等待 workflow_started 事件以获取拓扑…」占位。
+    render(<RailRoot active={false} />);
+    fireEvent.click(screen.getByTestId("dag-toggle"));
+    expect(screen.getByTestId("dag-overlay")).toBeInTheDocument();
+    // 等 lazy 解析后 WorkflowGraph 内部渲染占位文本
+    const placeholder = await screen.findByText(/等待 workflow_started/, undefined, {
+      timeout: 1000,
+    });
+    expect(placeholder).toBeInTheDocument();
   });
 });

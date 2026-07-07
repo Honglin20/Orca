@@ -273,3 +273,76 @@ describe("GateDialog — 不乐观更新（SPEC §1.6 铁律）", () => {
     unmount();
   });
 });
+
+// ── D1：完整 e2e（requested → modal open → answer → gate_response sent → resolved → close + toast）──
+describe("GateDialog —— D1 完整 e2e 流程", () => {
+  test("requested → 弹窗 → 提交 answer → POST 发出 → resolved → 关闭 + toast", async () => {
+    const fetchSpy = vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, gate_id: "ge2e" }), { status: 200 }),
+    );
+
+    // Step 1: human_decision_requested → 弹窗显示
+    useWorkflowStore.getState().processEvent({
+      seq: _seq++,
+      type: "human_decision_requested",
+      timestamp: Date.now() / 1000,
+      node: "researcher",
+      session_id: "researcher",
+      data: {
+        gate_id: "ge2e",
+        prompt: "选哪个方向？",
+        source: "agent_ask",
+        options: ["north", "south", "east"],
+      },
+    });
+    render(<GateDialog />);
+    expect(screen.getByTestId("gate-dialog")).toBeInTheDocument();
+    expect(screen.getByTestId("gate-prompt").textContent).toBe("选哪个方向？");
+    expect(screen.getByText("north")).toBeInTheDocument();
+
+    // Step 2: 选 "south" + 提交
+    const radioSouth = screen.getAllByRole("radio").find(
+      (r) => (r as HTMLInputElement).value === "south",
+    ) as HTMLInputElement;
+    radioSouth.click();
+    // AskGate 用 radio onChange；提交按钮在 gate-submit
+    screen.getByTestId("gate-submit").click();
+
+    // Step 3: gate_response 经 POST /gate/respond 发出（body 含 gate_id + answer + source=web）
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(String(url)).toBe("/gate/respond");
+    expect(init?.method).toBe("POST");
+    const body = JSON.parse(String(init?.body));
+    expect(body).toEqual({ gate_id: "ge2e", answer: "south", source: "web" });
+
+    // Step 4: 不乐观更新——POST 后弹窗仍可见（等 resolved 事件）
+    expect(screen.getByTestId("gate-dialog")).toBeInTheDocument();
+    expect(useWorkflowStore.getState().gate).not.toBeNull();
+
+    // Step 5: human_decision_resolved 到达 → 弹窗关 + toast 显示
+    act(() => {
+      useWorkflowStore.getState().processEvent({
+        seq: _seq++,
+        type: "human_decision_resolved",
+        timestamp: Date.now() / 1000,
+        node: null,
+        session_id: null,
+        data: { gate_id: "ge2e", answer: "south", resolved_by: "web" },
+      });
+    });
+    await waitFor(() =>
+      expect(screen.queryByTestId("gate-dialog")).not.toBeInTheDocument(),
+    );
+    // store.gate=null + lastResolved 派生
+    expect(useWorkflowStore.getState().gate).toBeNull();
+    expect(useWorkflowStore.getState().lastResolved).toEqual({
+      by: "web",
+      answer: "south",
+    });
+    // ResolvedToast 显示（含 answer）
+    const toast = screen.getByTestId("resolved-toast");
+    expect(toast.textContent).toContain("south");
+    expect(toast.textContent).toContain("web");
+  });
+});
