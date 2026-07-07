@@ -66,6 +66,11 @@ def _default_tape_path(run_id: str) -> Path:
     return default_tape_path(run_id)
 
 
+def _default_rundir() -> Path:
+    """rundir = tape 文件所在目录（runs/）。所有 in-session run 共享同一 rundir。"""
+    return _default_tape_path("__probe__").parent
+
+
 def _setup_logging(level: str = "INFO") -> None:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
@@ -441,8 +446,17 @@ async def _next_in_critical_section(
 @app.command(name="status")
 def status(
     run_id: str = typer.Argument(None, help="run id（省略则列 runs/ 下全部 run tape）"),
+    json_output: bool = typer.Option(
+        False, "--json",
+        help="输出 JSON（plugin messages.transform 入口用，SPEC §2.6.2 改写契约）",
+    ),
 ) -> None:
-    """查看 in-session run 的 workflow 进度（读 tape replay_state）。"""
+    """查看 in-session run 的 workflow 进度（读 tape replay_state）。
+
+    SPEC §2.6.2：当 plugin 入口（``/orca status`` → ``messages.transform``）调用时，
+    stdout 必须是 JSON ``{status, current_node, node_status, progress}``，plugin
+    据此提取顶层字段替换 user 消息文本。人类 UX 默认多行文本（v7 行为保留）。
+    """
     from orca.events.replay import replay_state
 
     if run_id is None:
@@ -464,21 +478,62 @@ def status(
         typer.echo(typer.style(f"run {run_id!r} 无 tape", fg=typer.colors.RED))
         raise typer.Exit(1)
     state = replay_state(Tape(tape_path, run_id=run_id))
+    done = sum(1 for s in state.node_status.values() if s == "done")
+    progress = f"{done}/{len(state.node_status)}"
+
+    if json_output:
+        # SPEC §2.6.2 plugin 改写契约：顶层字段供 plugin rewriteText 提取。
+        typer.echo(json.dumps({
+            "run_id": run_id,
+            "status": state.status,
+            "current_node": state.current_node,
+            "node_status": dict(state.node_status),
+            "progress": progress,
+        }, ensure_ascii=False))
+        return
+
     typer.echo(f"run {run_id}")
     typer.echo(f"  status:      {state.status}")
     typer.echo(f"  current_node: {state.current_node}")
     typer.echo(f"  node_status: {dict(state.node_status)}")
-    done = sum(1 for s in state.node_status.values() if s == "done")
-    typer.echo(f"  progress:    {done}/{len(state.node_status)} done")
+    typer.echo(f"  progress:    {progress} done")
 
 
 @app.command()
 def stop(
-    run_id: str = typer.Argument(..., help="要停的 run id"),
+    run_id: str = typer.Argument(
+        None, help="要停的 run id（省略时按 --owner 查激活 marker，SPEC §2.6.2 plugin 入口用）",
+    ),
+    owner: str = typer.Option(
+        None, "--owner", help="opencode sessionID（marker 文件名 key，省 run_id 时按此查 marker）",
+    ),
     log_level: str = typer.Option("INFO", "--log-level", help="INFO/DEBUG/WARN/ERROR"),
 ) -> None:
-    """停一个 run：清激活 marker + per-call flock emit ``workflow_cancelled``。"""
+    """停一个 run：清激活 marker + per-call flock emit ``workflow_cancelled``。
+
+    SPEC §2.6.2 plugin 入口契约：``/orca stop`` 不带 args → plugin 用 sessionID 作
+    ``--owner`` 查 marker 拿 run_id；CLI 据此 stop。两调用形态共用本子命令（单一接口）。
+    """
     _setup_logging(log_level)
+
+    # run_id 省略时按 --owner 查 marker（plugin transform 入口路径）。
+    if run_id is None and owner is not None:
+        mpath0 = marker_path(_default_rundir(), owner)
+        m = read_marker(mpath0)
+        if m is None:
+            typer.echo(json.dumps({
+                "ok": False, "run_id": None, "reason": "no-active-marker-for-owner",
+            }))
+            return
+        run_id = m.run_id
+
+    if run_id is None:
+        typer.echo(json.dumps({
+            "ok": False, "run_id": None,
+            "reason": "missing run_id (positional or --owner required)",
+        }))
+        raise typer.Exit(1)
+
     tape_path = _default_tape_path(run_id)
     rundir = tape_path.parent
     mpath = find_marker_by_run_id(rundir, run_id)
@@ -516,10 +571,15 @@ def start(
         "deepseek/deepseek-v4-flash", "--model", help="provider/model（记入 marker）",
     ),
 ) -> None:
-    """CC 路：生成 settings.json Stop/PostToolUse hook 片段 + 写 marker + 打印指引。
+    """CC + opencode 双宿主准备：写 marker（CC）+ 生成 opencode plugin/command 模板文件
+    + 打印 CC settings.json Stop/PostToolUse hook 片段 + 接入指引。
 
-    用户把 stdout 的 ``settings.json`` 片段贴进 ``.claude/settings.json``，CC 启动后
+    CC：用户把 stdout 的 ``settings.json`` 片段贴进 ``.claude/settings.json``，CC 启动后
     Stop/PostToolUse hook 自动 spawn ``orca in-session next`` 驱动 workflow。
+
+    opencode（v8）：把仓库模板 ``orca.ts`` + ``orca.md`` 写入项目 ``.opencode/plugin/`` +
+    ``.opencode/command/``（一次性安装）。用户在 opencode 里敲 ``/orca run <wf>`` →
+    ``experimental.chat.messages.transform`` 入口 → marker 派发 → CLI。
     """
     from orca.iface.in_session.templates import render_cc_settings_fragment
 
@@ -537,6 +597,9 @@ def start(
         owner=run_id, model=model, session_id=None, no_output_count=0,
     ))
 
+    # v8：写 opencode 模板文件（.opencode/plugin/orca.ts + .opencode/command/orca.md）。
+    opencode_paths = _install_opencode_templates()
+
     fragment = render_cc_settings_fragment(
         run_id=run_id, tape_path=tape_real, yaml_path=yaml_real, model=model,
     )
@@ -545,13 +608,197 @@ def start(
     typer.echo(f"tape:     {tape_real}")
     typer.echo(f"marker:   {mpath}")
     typer.echo("")
-    typer.echo(typer.style("把以下片段贴进 .claude/settings.json：", fg=typer.colors.CYAN, bold=True))
+    typer.echo(typer.style(
+        f"opencode 模板已写入：{opencode_paths['plugin']} + {opencode_paths['command']}",
+        fg=typer.colors.GREEN,
+    ))
+    typer.echo(typer.style(
+        "  → 重启 opencode 后敲 `/orca doctor` 自检入口链路。",
+        fg=typer.colors.GREEN,
+    ))
+    typer.echo(typer.style(
+        "  → `$ARGUMENTS` 限制：args 不得含 `>` 或换行（marker regex 行首/行尾锚定）。",
+        fg=typer.colors.YELLOW,
+    ))
+    typer.echo("")
+    typer.echo(typer.style("把以下片段贴进 .claude/settings.json（CC 路）：", fg=typer.colors.CYAN, bold=True))
     typer.echo(json.dumps(fragment, indent=2, ensure_ascii=False))
     typer.echo("")
     typer.echo(typer.style("然后：", fg=typer.colors.CYAN))
     typer.echo("  1. 在 CC 里打开一个会话（Stop/PostToolUse hook 自动生效）。")
     typer.echo("  2. 让主 session 派 Task subagent 执行节点（每节点一 turn）。")
     typer.echo(f"  3. 跑完用 `orca in-session status {run_id}` 看结果。")
+    typer.echo("  4. opencode 路径：重启 opencode → `/orca doctor` → `/orca run <wf>`。")
+
+
+def _install_opencode_templates() -> dict[str, Path]:
+    """把仓库模板 ``orca.ts`` + ``orca.md`` 写入项目 cwd 的 ``.opencode/``。
+
+    幂等：文件存在且内容相同则不覆盖（避免抹掉用户改动）；存在但内容不同 → 覆盖并 backup
+    旧文件（``.bak``）。返回写入路径。
+    """
+    import importlib.resources as ir
+
+    tmpl_root = Path(__file__).parent / "templates" / "opencode"
+    src_plugin = tmpl_root / "orca.ts"
+    src_command = tmpl_root / "command" / "orca.md"
+
+    dst_plugin_dir = Path(".opencode/plugin")
+    dst_command_dir = Path(".opencode/command")
+    dst_plugin_dir.mkdir(parents=True, exist_ok=True)
+    dst_command_dir.mkdir(parents=True, exist_ok=True)
+
+    dst_plugin = dst_plugin_dir / "orca.ts"
+    dst_command = dst_command_dir / "orca.md"
+
+    _atomic_write_with_backup(dst_plugin, src_plugin.read_text(encoding="utf-8"))
+    _atomic_write_with_backup(dst_command, src_command.read_text(encoding="utf-8"))
+
+    return {"plugin": dst_plugin, "command": dst_command}
+
+
+def _atomic_write_with_backup(dst: Path, content: str) -> None:
+    """幂等写入：内容相同跳过；不同先 backup 再覆盖（``dst.bak``）。"""
+    if dst.exists():
+        same: bool | None = None
+        try:
+            same = dst.read_text(encoding="utf-8") == content
+        except OSError as e:
+            # 读失败（权限 / 编码异常）→ log warn 后 passthrough（按「内容不同」处理）
+            logger.warning("read %s 比对失败（按覆盖处理）：%s", dst, e)
+            same = False
+        if same:
+            return   # 内容一致，不动
+        # 内容不同 → backup
+        bak = dst.with_suffix(dst.suffix + ".bak")
+        try:
+            dst.replace(bak)
+        except OSError as e:
+            logger.warning("backup %s → %s 失败：%s", dst, bak, e)
+    tmp = dst.with_suffix(dst.suffix + f".tmp.{os.getpid()}")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, dst)
+
+
+@app.command()
+def doctor(
+    log_level: str = typer.Option("INFO", "--log-level", help="INFO/DEBUG/WARN/ERROR"),
+) -> None:
+    """入口链路自检（SPEC v8 §2.7，D-v8-2）。
+
+    只报能自证的 3 项（B3 闭环）：
+      1. **plugin 加载 + transform 触发**：doctor 能被调到 = plugin 已加载 +
+         ``experimental.chat.messages.transform`` 已注册并触发（自证价值）。
+      2. **marker 派发**：transform 正确 regex 解析 ``doctor`` 子命令并 spawn 到 CLI
+         （doctor 在跑即证，§2.6.1）。
+      3. **CLI 可达**：``orca in-session`` 版本 + 关键依赖（load_workflow / Tape /
+         advance_step / marker）导入无误 + orca 版本。
+
+    **不在 doctor 范围**（B3 自检盲区，§2.7）：
+      - ``session.idle`` hook 真触发：静态跑 doctor 时无 workflow 在跑，idle 必然 N=0；
+        报告仅标注「需跑 ``/orca run`` 验证」，不给 pass/fail。
+
+    输出 JSON ``{ok, report, checks:[{name, pass, detail}]}``：plugin ``messages.transform``
+    据 §2.6.2 提取 ``.report`` 替换 user 消息文本。
+
+    **一次性消费保证**（§2.6.1）：``report`` 文本描述 marker 用反引号 `` `orca:cmd` ``，
+    不写完整 marker（避免下一轮 transform 误命中）。
+    """
+    _setup_logging(log_level)
+
+    checks: list[dict[str, Any]] = []
+
+    # ① plugin 加载 + transform 触发：doctor 在跑 = 此链路通（自证，B3 闭环）。
+    checks.append({
+        "name": "plugin_load_and_transform_trigger",
+        "pass": True,
+        "detail": (
+            "doctor 被 spawn 到 = opencode plugin 已加载 + "
+            "`experimental.chat.messages.transform` 已注册并触发（自证）"
+        ),
+    })
+
+    # ② marker 派发：regex 正确解析 `doctor` 子命令（doctor 在跑即证，§2.6.1）。
+    # 用 Python 复跑 SPEC §2.6.1 regex 验证 `doctor` 字面能命中。
+    # 一次性消费：detail 描述 marker 用反引号，不写完整 marker（§2.6.1）。
+    import re
+    from orca.iface.in_session.templates import MARKER_LITERAL, MARKER_REGEX
+
+    pattern = re.compile(MARKER_REGEX)
+    # 构造 sample 用于内测，但 detail 文本不直接 echo sample 字面（一次性消费守门）。
+    sample_sub = "doctor"
+    sample_full_marker = f"<!--orca:cmd {sample_sub}-->"
+    match = pattern.match(sample_full_marker)
+    checks.append({
+        "name": "marker_dispatch",
+        "pass": match is not None and match.group(1) == "doctor",
+        "detail": (
+            f"regex 命中 `orca:cmd {sample_sub}` marker（sub=doctor）"
+            if match else
+            "regex 未命中 `orca:cmd doctor` marker（异常）"
+        ),
+    })
+
+    # ③ CLI 可达：关键依赖导入 + orca 版本。
+    import_errors: list[str] = []
+    try:
+        from orca.compile import load_workflow as _wf  # noqa: F401
+    except Exception as e:
+        import_errors.append(f"load_workflow: {e}")
+    try:
+        from orca.events.tape import Tape as _Tape  # noqa: F401
+    except Exception as e:
+        import_errors.append(f"Tape: {e}")
+    try:
+        from orca.run.step import advance_step as _adv  # noqa: F401
+    except Exception as e:
+        import_errors.append(f"advance_step: {e}")
+    try:
+        from orca.iface.in_session import marker as _marker  # noqa: F401
+    except Exception as e:
+        import_errors.append(f"marker: {e}")
+
+    try:
+        import orca as _orca_pkg
+        version = getattr(_orca_pkg, "__version__", "unknown")
+    except Exception as e:
+        version = f"unknown (import failed: {e})"
+
+    cli_ok = not import_errors
+    cli_detail = (
+        f"orca v{version}; imports ok (load_workflow/Tape/advance_step/marker)"
+        if cli_ok else
+        f"orca v{version}; import errors: {'; '.join(import_errors)}"
+    )
+    checks.append({
+        "name": "cli_imports_ok",
+        "pass": cli_ok,
+        "detail": cli_detail,
+    })
+
+    ok = all(c["pass"] for c in checks)
+
+    # report 文本（SPEC §2.7）：3 项 + idle 标注。一次性消费：marker 用反引号描述。
+    lines = ["Orca in-session 入口链路自检（v8 §2.7）", ""]
+    for c in checks:
+        mark = "PASS" if c["pass"] else "FAIL"
+        lines.append(f"[{mark}] {c['name']}: {c['detail']}")
+    lines.append("")
+    lines.append(
+        "注：`session.idle` hook 真触发 + 多 session 绑定（M3）不在 doctor 自检范围 —— "
+        "需跑 `/orca run <wf>` 验证（静态跑 doctor 时 idle 必 N=0）。"
+    )
+    lines.append(
+        "marker 入口：plugin 在每条 user 消息最后 text part 检测 "
+        "`orca:cmd <sub> <args>` marker（行首/行尾锚定），命中则 spawn 对应 CLI 子命令。"
+    )
+    report = "\n".join(lines)
+
+    typer.echo(json.dumps({
+        "ok": ok,
+        "report": report,
+        "checks": checks,
+    }, ensure_ascii=False))
 
 
 @app.command()

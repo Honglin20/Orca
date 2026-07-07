@@ -10,7 +10,8 @@
 
 from __future__ import annotations
 
+from orca.iface.in_session.templates._constants import MARKER_LITERAL, MARKER_REGEX
 from orca.iface.in_session.templates.cc_hooks import render_cc_settings_fragment
 
-__all__ = ["render_cc_settings_fragment"]
+__all__ = ["MARKER_LITERAL", "MARKER_REGEX", "render_cc_settings_fragment"]
 
