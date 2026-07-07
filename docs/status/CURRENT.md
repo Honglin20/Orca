@@ -15,7 +15,7 @@ F SDK message-fetch 非 list 改 REST fetch / G bootstrap+next prompt 未 prepen
 （cli.py 单一常量 `_TASK_TOOL_INSTRUCTION`）/ E plugin 不透传 --model（动态抽 `info.model`）。
 加 6 签名契约测试（`tests/iface/in_session/test_in_session_v8.py:668-803`）防再回退 —— 根因教训
 「TS 纯单测验不出运行时签名 bug」写进测试注释。baseline 83 → after 89 全绿，0 回归。守门 grep
-（8 禁词）clean。详见 [release note](../releases/2026-07-08-in-session-shell-v8.1-bugfixes.md)。
+（8 禁词）clean。Commit: `8bea9dd`。详见 [release note](../releases/2026-07-08-in-session-shell-v8.1-bugfixes.md)。
 
 **未实证项**（SPEC §9.2，留 `test-coverage-e2e` 真链路验）：shipped 模板开箱跑 `/orca doctor` +
 `/orca run` 3 节点（不该再需要打补丁）。重点：**这次 shipped 模板要开箱即用**。

@@ -24,7 +24,7 @@ spike 回退导致）：A transform hook 签名（单参 → 两参 `(input, out
 info.model 动态抽，非 CLI 默认）。加 6 签名契约测试（断言 shipped 模板 transform/event/fetch/model
 四处的代码形态 == spike 实证形态 + bootstrap prompt startswith Task 指令）—— 防再回退，根因教训
 「TS 纯单测验不出运行时签名 bug」写进测试注释。baseline 83 → after 89 全绿，0 回归。守门 grep
-（8 禁词）clean。详见 [release note](../releases/2026-07-08-in-session-shell-v8.1-bugfixes.md)。
+（8 禁词）clean。Commit: `8bea9dd`。详见 [release note](../releases/2026-07-08-in-session-shell-v8.1-bugfixes.md)。
 
 ---
 
