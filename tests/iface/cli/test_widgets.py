@@ -297,16 +297,16 @@ class TestAgentsList:
 
 
 class TestAgentHistory:
-    """v2 右上 AgentHistory widget 单元测试（spec §2.3 + §5.1 + §5.4）。
+    """phase-16 单流 inline AgentHistory widget 单元测试（spec §2.3 + §5.1 + §5.4 + phase-16 SPEC §5）。
 
     INTENT（CLAUDE.md 铁律 9）：测试不是「set_node 不崩」，而是「用户能看到 agent
-    历史流 + last message 默认展开 + 切换 agent 时正确 reset」——断言 entries
-    内容、_expanded_seqs 状态、tool_call_id cache 派生 elapsed、last message 自动
-    跟随、shallow copy 防御。
+    历史流 + last message 默认展开 + 切换 agent 时正确 reset + 工具配对成一条」——
+    断言 entries 内容、kind 派生、_expanded_seqs 状态、tool_call+result 配对 merged、
+    就地升级保持 seq/位置、乱序回放集合相等（reducer fold）、shallow copy 防御。
 
     headless 测试策略（不真起 textual pilot）：直接实例化 AgentHistory 调
     set_node / append_event，跳过 textual RichLog 渲染（_log is None 时各 path
-    防御 skip）；真渲染 + SVG 验证留 Step 6 e2e。
+    防御 skip）；真渲染 + Enter 内联展开 E2E 留 tests/e2e_phase16/。
     """
 
     def _make_event(
@@ -383,8 +383,11 @@ class TestAgentHistory:
         hist.append_event(self._make_event(2, "agent_message", {"text": "msg"}))
         assert len(hist.entries) == 2
 
-    def test_type_label_6_kinds(self):
-        """每 event_type → 正确 TYPE_LABEL（spec §2.3 6 种 label）。"""
+    def test_kind_derivation_per_event_type(self):
+        """每 event_type → 正确 EntryKind（phase-16 §3.2 _HistEntry.kind 派生）。
+
+        tool_call + tool_result 配对后归一类 ``"tool"``；message/thinking/other 各自分类。
+        """
         hist = AgentHistory()
         events = [
             self._make_event(1, "agent_thinking", {"text": "..."}),
@@ -398,17 +401,223 @@ class TestAgentHistory:
             self._make_event(6, "interrupt_requested", {"node": "analyzer"}),
         ]
         hist.set_node("analyzer", events)
-        # 检查每条 entry 的 summary 含正确 type_label（前 6 字符）
-        labels = [e.summary.split("  ")[0].strip() for e in hist.entries]
-        assert "THINK" in labels[0]
-        assert "TOOL →" in labels[1]
-        assert "TOOL ←" in labels[2]
-        assert "MSG" in labels[3]
-        assert "GATE" in labels[4]
-        assert "INT" in labels[5]
+        # phase-16 §2.2：tool_call+result 配对成一条 → 总 entry 数 == 5（不是 6）
+        assert len(hist.entries) == 5
+        kinds = [e.kind for e in hist.entries]
+        assert kinds[0] == "thinking"
+        assert kinds[1] == "tool"        # 配对后的 tool entry
+        assert "tool" not in kinds[2:]   # 不再有第二条 tool entry
+        assert kinds[2] == "message"
+        assert kinds[3] == "other"       # gate
+        assert kinds[4] == "other"       # interrupt
+
+    def test_tool_pairing_in_place_upgrade_keeps_seq_and_position(self):
+        """phase-16 §2.2 核心：tool_result 到达时**就地升级**对应 call entry。
+
+        - call.seq 保持（merged.seq == call.seq）
+        - 列表位置保持（不 remove+append，避免 _selected_seq dangling）
+        - merged.tool_status == "completed"；merged.merged == True
+        - 配对后 _entries 数 == call 数（每对一条）
+        """
+        hist = AgentHistory()
+        events = [
+            self._make_event(1, "agent_tool_call",
+                             {"tool": "read", "args": {"filePath": "/a"}, "tool_call_id": "tc1"}),
+            self._make_event(2, "agent_tool_call",
+                             {"tool": "bash", "args": {"command": "ls"}, "tool_call_id": "tc2"}),
+            self._make_event(10, "agent_tool_result",
+                             {"tool_call_id": "tc1", "result": "A"}, timestamp=1000010.0),
+            self._make_event(11, "agent_tool_result",
+                             {"tool_call_id": "tc2", "result": "B"}, timestamp=1000011.0),
+        ]
+        hist.set_node("analyzer", events)
+        # 配对后 2 条 tool entry（不是 4）
+        tool_entries = [e for e in hist.entries if e.kind == "tool"]
+        assert len(tool_entries) == 2
+        # seq 保持 call 的 seq（1 / 2），位置在前面（不是 append 到末尾的 10/11）
+        assert tool_entries[0].seq == 1
+        assert tool_entries[1].seq == 2
+        assert tool_entries[0].merged is True
+        assert tool_entries[1].merged is True
+        assert tool_entries[0].tool_status == "completed"
+        # summary 含 result 派生的 elapsed（meta 行）
+        assert "0.0s" in tool_entries[0].meta or "s" in tool_entries[0].meta
+
+    def test_tool_pairing_no_unmatched_in_normal_replay(self):
+        """phase-16 §5.2 AC：正常 replay 后 ``merged==False`` tool entry 数 == 0。
+
+        所有 call 都应被 result 配对；降级即 fail loud（测试期语义，SPEC §0.2 #5）。
+        """
+        hist = AgentHistory()
+        events = [
+            self._make_event(1, "agent_tool_call",
+                             {"tool": "read", "args": {}, "tool_call_id": "tc1"}),
+            self._make_event(2, "agent_tool_result",
+                             {"tool_call_id": "tc1", "result": "x"}),
+        ]
+        hist.set_node("analyzer", events)
+        unmatched = [e for e in hist.entries if e.kind == "tool" and not e.merged]
+        assert unmatched == [], "正常配对不应有 unmatched tool entry（降级即 fail）"
+
+    def test_tool_result_without_call_buffered_in_pending(self):
+        """phase-16 §5.6 + §7：result 无 call 配对 → 暂存 _pending_results（不降级独立 entry）。
+
+        set_node 全量 fold 路径：乱序 result 不立即成 entry（保证 reducer fold 顺序无关）；
+        无 tcid 的异常 result 才降级独立 entry（merged=False）。
+        """
+        hist = AgentHistory()
+        # result 有 tcid 但无 call → 进 pending（不成独立 entry）
+        events = [
+            self._make_event(1, "agent_tool_result",
+                             {"tool_call_id": "orphan", "result": "no call"}),
+        ]
+        hist.set_node("analyzer", events)
+        # 不成独立 entry（暂存 pending，等 call）
+        assert len(hist.entries) == 0
+        assert "orphan" in hist._pending_results
+        # 无 tcid 的异常 result → 降级独立 entry（兜底）
+        hist2 = AgentHistory()
+        hist2.set_node("a", [
+            self._make_event(1, "agent_tool_result", {"result": "no tcid"}),
+        ])
+        assert len(hist2.entries) == 1
+        assert hist2.entries[0].kind == "tool"
+        assert hist2.entries[0].merged is False
+
+    def test_append_orphan_result_degrades_not_silent(self):
+        """phase-16 §0.2 #5 fail loud：append_event 路径 orphan result 降级独立 entry。
+
+        增量路径不缓冲 pending（生产期事件流时序保证 call 先于 result）；若 result 无
+        call 配对（translator 丢事件），降级为独立 entry显示而非静默吞——fail loud。
+        """
+        hist = AgentHistory()
+        hist.set_node("analyzer", [])  # 空 entries
+        orphan = self._make_event(
+            1, "agent_tool_result",
+            {"tool_call_id": "lost", "result": "no call arrived"},
+        )
+        hist.append_event(orphan)
+        # 降级为独立 entry（merged=False），不静默丢
+        assert len(hist.entries) == 1
+        assert hist.entries[0].kind == "tool"
+        assert hist.entries[0].merged is False
+        assert "lost" not in hist._pending_results  # 增量路径不缓冲
+
+    def test_tool_result_error_marks_failed_status(self):
+        """phase-16 §2.3：result.error 或非零 exit_code → tool_status='failed'（✗ icon）。
+
+        merged ToolEntry 的 tool_status 派生自 result.data：error 字段存在或 exit_code!=0
+        即 failed；用于 summary 行 status icon（✓/…/✗）。
+        """
+        hist = AgentHistory()
+        call = self._make_event(1, "agent_tool_call",
+                                {"tool": "bash", "args": {"command": "x"},
+                                 "tool_call_id": "tc1"})
+        # result 带 error → failed
+        result_err = self._make_event(2, "agent_tool_result",
+                                      {"tool_call_id": "tc1", "result": "",
+                                       "error": "command not found"})
+        hist.set_node("a", [call, result_err])
+        tool_entry = next(e for e in hist.entries if e.kind == "tool")
+        assert tool_entry.tool_status == "failed"
+        assert tool_entry.merged is True
+
+        # result 带 exit_code != 0 → failed
+        hist2 = AgentHistory()
+        call2 = self._make_event(1, "agent_tool_call",
+                                 {"tool": "bash", "args": {}, "tool_call_id": "tc2"})
+        result_exit = self._make_event(2, "agent_tool_result",
+                                       {"tool_call_id": "tc2", "result": "",
+                                        "exit_code": 127})
+        hist2.set_node("a", [call2, result_exit])
+        tool_entry2 = next(e for e in hist2.entries if e.kind == "tool")
+        assert tool_entry2.tool_status == "failed"
+
+        # 正常 result → completed
+        hist3 = AgentHistory()
+        call3 = self._make_event(1, "agent_tool_call",
+                                 {"tool": "bash", "args": {}, "tool_call_id": "tc3"})
+        result_ok = self._make_event(2, "agent_tool_result",
+                                     {"tool_call_id": "tc3", "result": "ok"})
+        hist3.set_node("a", [call3, result_ok])
+        tool_entry3 = next(e for e in hist3.entries if e.kind == "tool")
+        assert tool_entry3.tool_status == "completed"
+
+    def test_out_of_order_replay_set_equal(self):
+        """phase-16 §5.6 reducer fold：逆序回放 → (seq, kind, summary) 集合与正序相等。
+
+        配对/派生必须是 event list 的纯函数（顺序无关）。逆序时 result 早于 call，
+        但 _fold_event 暂存 pending result，call 到达时补配对——集合输出不变。
+        若不等 → 配对是顺序敏感的假 fold，铁律 #1 破。
+        """
+        call = self._make_event(5, "agent_tool_call",
+                                {"tool": "read", "args": {}, "tool_call_id": "tc1"})
+        result = self._make_event(6, "agent_tool_result",
+                                  {"tool_call_id": "tc1", "result": "x"})
+        msg = self._make_event(7, "agent_message", {"text": "done"})
+
+        # 正序
+        hist_fwd = AgentHistory()
+        hist_fwd.set_node("a", [call, result, msg])
+
+        # 逆序（result 早于 call）
+        hist_rev = AgentHistory()
+        hist_rev.set_node("a", [msg, result, call])
+
+        # 集合相等：(seq, kind) 多重集一致（summary 可能因 elapsed 微差，比对 seq+kind）
+        fwd_set = sorted((e.seq, e.kind) for e in hist_fwd.entries)
+        rev_set = sorted((e.seq, e.kind) for e in hist_rev.entries)
+        assert fwd_set == rev_set, (
+            f"reducer fold 顺序无关失败：正序 {fwd_set} 逆序 {rev_set}"
+        )
+        # 两边都应：1 条 tool (seq=5, merged) + 1 条 message (seq=7)
+        assert fwd_set == [(5, "tool"), (7, "message")]
+        # 两边的 tool entry 都已 merged（pending 补配对）
+        fwd_tool = next(e for e in hist_fwd.entries if e.kind == "tool")
+        rev_tool = next(e for e in hist_rev.entries if e.kind == "tool")
+        assert fwd_tool.merged is True
+        assert rev_tool.merged is True
+
+    def test_deterministic_replay_same_set(self):
+        """phase-16 §5.6：同一 tape 正序回放两次 → (seq, kind, summary) 四元组逐项相等。"""
+        events = [
+            self._make_event(1, "agent_tool_call",
+                             {"tool": "read", "args": {"filePath": "/x"}, "tool_call_id": "tc1"}),
+            self._make_event(2, "agent_tool_result",
+                             {"tool_call_id": "tc1", "result": "y"}, timestamp=1000002.0),
+            self._make_event(3, "agent_message", {"text": "done"}),
+        ]
+        hist1 = AgentHistory()
+        hist1.set_node("a", events)
+        hist2 = AgentHistory()
+        hist2.set_node("a", events)
+        assert [(e.seq, e.kind, e.summary, e.meta) for e in hist1.entries] == \
+               [(e.seq, e.kind, e.summary, e.meta) for e in hist2.entries]
+
+    def test_in_place_upgrade_keeps_selected_seq_valid(self):
+        """phase-16 §2.2：就地升级（不 remove+append）防止 _selected_seq dangling。
+
+        场景：用户 ↓ 选中 call entry（seq=5），随后 result 到达。若 remove+append，
+        _selected_seq=5 会指向已删 entry；就地升级保持 seq=5 → 选中仍有效。
+        """
+        hist = AgentHistory()
+        call = self._make_event(5, "agent_tool_call",
+                                {"tool": "read", "args": {}, "tool_call_id": "tc1"})
+        hist.set_node("analyzer", [call])
+        hist._selected_seq = 5  # 选中 call entry
+        # result 到达（增量 append）
+        result = self._make_event(6, "agent_tool_result",
+                                  {"tool_call_id": "tc1", "result": "x"})
+        hist.append_event(result)
+        # 配对后原 call 位 seq 仍为 5（不 dangling）
+        assert hist._selected_seq == 5
+        tool_entries = [e for e in hist.entries if e.kind == "tool"]
+        assert len(tool_entries) == 1
+        assert tool_entries[0].seq == 5  # 就地升级保持 seq
+        assert tool_entries[0].merged is True
 
     def test_last_message_default_expanded(self):
-        """3 events 末尾 MSG → 折叠块默认展开（spec §2.3 + 用户核心需求）。"""
+        """3 events 末尾 MSG → 默认展开（spec §2.3 + 用户核心需求）。"""
         hist = AgentHistory()
         events = [
             self._make_event(1, "agent_thinking", {"text": "..."}),
@@ -429,8 +638,11 @@ class TestAgentHistory:
         assert hist.expanded_seqs == {2}  # 替换，不是 add
         assert 1 not in hist.expanded_seqs
 
-    def test_tool_call_cache_derives_elapsed(self):
-        """call + 2.5s 后 result → meta 含 elapsed（spec §2.3 GAP-B/C 修复）。"""
+    def test_tool_call_cache_derives_elapsed_on_merge(self):
+        """phase-16 §2.2：call + 2.5s 后 result → merged entry meta 含 elapsed（GAP-B/C）。
+
+        phase-16 变化：result 不再独立 entry；elapsed 派生在 merged ToolEntry 上。
+        """
         hist = AgentHistory()
         call_event = self._make_event(
             1, "agent_tool_call",
@@ -443,12 +655,13 @@ class TestAgentHistory:
             timestamp=1002.5,  # 2.5s 后
         )
         hist.set_node("analyzer", [call_event, result_event])
-        # result entry 的 meta 应含 "2.5s"（_format_elapsed_sec(2.5) == "2.5s"）
-        result_entry = next(e for e in hist.entries if e.event_type == "agent_tool_result")
-        assert "2.5s" in result_entry.meta
+        # 配对后唯一 tool entry 的 meta 应含 "2.5s"
+        tool_entry = next(e for e in hist.entries if e.kind == "tool")
+        assert "2.5s" in tool_entry.meta
+        assert tool_entry.merged is True
 
     def test_folded_detail_uses_phase15(self):
-        """折叠块内容调 phase-15 render_tool / render_message（spec §5.5 复用契约）。"""
+        """内联 detail 调 phase-15 render_tool / render_message（spec §5.5 复用契约）。"""
         hist = AgentHistory()
         hist.set_executor("claude")
         events = [
@@ -459,11 +672,11 @@ class TestAgentHistory:
             self._make_event(2, "agent_message", {"text": "hello world"}),
         ]
         hist.set_node("analyzer", events)
-        # tool_call entry 应该有折叠详情（render_tool 输出）
-        call_entry = next(e for e in hist.entries if e.event_type == "agent_tool_call")
-        assert call_entry.detail is not None
-        # message entry 也应该有折叠详情（render_message 输出）
-        msg_entry = next(e for e in hist.entries if e.event_type == "agent_message")
+        # tool entry 应该有内联详情（render_tool 输出）
+        tool_entry = next(e for e in hist.entries if e.kind == "tool")
+        assert tool_entry.detail is not None
+        # message entry 也应该有内联详情（render_message 输出）
+        msg_entry = next(e for e in hist.entries if e.kind == "message")
         assert msg_entry.detail is not None
 
     def test_no_message_no_expanded(self):
@@ -574,7 +787,6 @@ class TestAgentHistory:
 
         旧逻辑：``_selected_seq is None`` → 直接 return（用户必须先 ↓ 选中才能 Enter，
         反直觉）。新逻辑：无选中时作用于最后一条 entry，直接按 Enter 即可收起/展开。
-        光标不移动（不触发全量 reflow）。
         """
         hist = AgentHistory()
         events = [
@@ -590,7 +802,7 @@ class TestAgentHistory:
         # 再 Enter → 展开
         hist.action_toggle_expand()
         assert hist.expanded_seqs == {2}
-        # 光标未被移动（不触发 reflow，保持 None）
+        # 光标未被移动（保持 None）
         assert hist._selected_seq is None
 
     def test_action_toggle_expand_empty_entries_noop(self):
@@ -612,7 +824,7 @@ class TestAgentHistory:
         """tool_call_id cache 超 _TOOL_CALL_CACHE_CAP → 丢最旧（防爆内存）。"""
         from orca.iface.cli.widgets.agent_history import _TOOL_CALL_CACHE_CAP
         hist = AgentHistory()
-        # 填 _TOOL_CALL_CACHE_CAP + 1 条 call
+        # 填 _TOOL_CALL_CACHE_CAP + 1 条 call（无 result，全部 unmatched）
         events = []
         for i in range(_TOOL_CALL_CACHE_CAP + 1):
             events.append(self._make_event(

@@ -9,6 +9,15 @@
 
 ## 当前状态：CLI/MCP list 统一 + setup_outputs 注入完成（2026-07-07）；下一模块待定
 
+### ✅ 已完成：phase-16 AgentHistory 单流重构（CC 风格 inline + 工具配对折叠）
+
+AgentHistory 从「两区」（RichLog 摘要 + 独立 detail 面板）重构为**单条 RichLog inline 流**：tool_call+tool_result 配对成一条 entry（就地升级保 seq/位置）；message bold+主题色 / tool `✓/…/✗` icon 视觉分级；Enter 全量 reflow；删 `#agent-history-detail*` DOM（铁律 #7）；reducer fold 顺序无关（`_pending_results` 缓冲）。**详见** [release note](../releases/2026-07-07-phase-16-agent-history-single-stream.md) + [CHANGELOG](CHANGELOG.md)。
+
+**遗留 follow-up**（移交下一 agent `test-coverage-e2e`）：
+- 🔵 SPEC §5.1 九行按键矩阵完整 E2E（↓↑/jk/C/a/L/t 每键 §5.0 元 AC + state + 双向渲染文本）→ `tests/e2e_phase16/test_tui_buttons_e2e.py`
+- 🔵 SPEC §5.3 Console.capture ANSI bold/主题色断言（message 视觉分级）
+- 🔵 SPEC §5.5 render layer 字节契约（本阶段零改动，无需验；若后续动了再补）
+
 ### ✅ 已完成：CLI `list` 与 MCP `list_workflows` 统一（catalog 同源）
 
 CLI `list` 委托 MCP 同源 `catalog.list_workflows()`（按 `wf.name` 扫 `./workflows` + `~/.orca/workflows`），删旧 `--dir` 扫 `./examples` 按文件名逻辑。**Commit**：`b8e5581`。详见 [release note](../releases/2026-07-07-cli-list-mcp-unify.md)。

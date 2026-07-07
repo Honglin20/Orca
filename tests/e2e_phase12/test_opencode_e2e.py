@@ -170,10 +170,17 @@ class TestOpencodeE2E:
                 f"analyst 应至少 1 条 agent_message（opencode events 模式不丢）；"
                 f"event_types={[e.type for e in analyst_events]}"
             )
-            # AgentHistory 应已显示这些 events（set_node 全量重渲）
-            assert len(history.entries) == len(analyst_events), (
-                f"AgentHistory entries 数应 == _node_events[analyst]；"
-                f"got history={len(history.entries)}, node_events={len(analyst_events)}"
+            # AgentHistory 应已显示这些 events（set_node 全量重渲）。
+            # phase-16 契约：tool_call + tool_result 配对成**一条** entry，故 entries 数
+            # ≤ events 数（每对 tool 减 1）。验证：entries 数 == events 数 - tool 对数。
+            n_tool_calls = sum(1 for e in analyst_events if e.type == "agent_tool_call")
+            n_tool_results = sum(1 for e in analyst_events if e.type == "agent_tool_result")
+            n_pairs = min(n_tool_calls, n_tool_results)
+            expected_entries = len(analyst_events) - n_pairs
+            assert len(history.entries) == expected_entries, (
+                f"AgentHistory entries 数应 == events - tool 对数；"
+                f"got history={len(history.entries)}, expected={expected_entries}, "
+                f"events={len(analyst_events)}, pairs={n_pairs}"
             )
 
             # 切到 reporter，验证 AgentHistory 含 opencode agent_message（整块、无 thinking）。

@@ -17,6 +17,9 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-07-07] phase-16 —— AgentHistory 单流重构（CC 风格 inline + 工具配对折叠）
+AgentHistory 从「两区」（RichLog 摘要 + 独立 detail 面板）重构为**单条 RichLog inline 流**：tool_call+tool_result 按 `tool_call_id` 配对成一条 entry（就地升级保 seq/位置，避 `_selected_seq` dangling）；message bold+主题色 / thinking dim italic / tool `✓/…/✗` icon 视觉分级；Enter 全量 reflow（detail 内联）。删 `#agent-history-detail*` DOM（铁律 #7 无兼容路径）。reducer fold 顺序无关（`_pending_results` 缓冲）。28 单测 + 3 真 tape boot smoke + 1 phase-12 e2e 断言回填；mxint report_painter 79 events fold 30.9ms（< 300ms SPEC §7 标准）。详见 [release note](releases/2026-07-07-phase-16-agent-history-single-stream.md)。
+
 ## [2026-07-07] TUI bugfix 批次 A —— layout + AgentHistory 三体感 bug
 - layout：NodeDetail `display:none`（修右侧栏全黑：原 `height:0+offset` 不移出布局流，把 `#right-pane` 挤到 width=1）+ AgentsList `height:1fr`（修左栏 auto-size 截断）。
 - A.1 Enter 无选中时默认作用于最后一条（修「Enter 没反应」）；A.2 移除死键 `c`（App + NodeDetail 两处，图表统一走 `C`）；A.3 `#agent-history-detail` 包 VerticalScroll（修长 report 截断）。
