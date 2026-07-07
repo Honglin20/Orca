@@ -7,39 +7,59 @@
 
 ---
 
-## ✅ 侧任务完成（2026-07-08）：web-shell-v2 Chunk A（foundation）
+## ✅ 侧任务完成（2026-07-08）：web-shell-v2 Chunk C（ChartsView + LogStream + TopBar + AgentsRail + useElapsedTick）
 
-按 SPEC §0 D1/D2/D6/D7/D8 + §3.1/§3.3/§4/§8/§10 实现前端基础层（推倒重写第一刀）。
+按 SPEC §5.1/§5.2/§5.4/§5.5/§5.6/§5.7 + §0 D5/D9 实现 Web Shell v2 前端 Chunk C
+（Chunk A 单 store fold + selectors + RAF streaming + WS resume / B ConversationView
+全渲染 已就位）。
 
 **交付**：
-- **A1 codegen（D1）**：新 `scripts/gen_events_ts.py` 从 `orca/schema/event.py` EventType Literal
-  生成 `events.ts`（39 个 EventType + WebEvent 接口）；`prebuild` wired `--check`；新 pytest
-  drift guard `tests/iface/web/test_events_ts_drift.py` 锁基数=39。根治 21↔39 漂移。
-- **A2 删除过期（§8 无兼容层）**：删 RunsListPage/NewRunPage/RunsSidebar/StatusBar/use-runs-list/
-  use-replay/replay-actions/ReplayBar/NodeDetail/旧 formatLogLine；WorkflowGraph/ChartRenderer/
-  LogStream 删 replay 切片逻辑。
-- **A3 单 store = fold(tape)（§3.1 D7/D8）**：seq 升序 sort + refold（序无关）；D8 unknown_event/
-  agent_step_started 显式 no-op；agent_usage 聚合 cost + reasoning_tokens + per-node tokens。
-- **A4 纯 selectors**：selectAgents/Conversation（D2 按 node 分组）/Charts（D3 group/identity upsert
-  + D7 序无关）/Log（穷尽 39 type readable 摘要，无 no-op fallback）。
-- **A5 流式 + transport**：`useStreamingText` RAF 批处理 + 多 session sync-flush + dropBuffer（AH
-  边界）；`useWebSocket` D6 reconnect resume(run_id, since=last_seq_seen)；server-side `_handle_resume`
-  重放 `tape.replay(since_seq=N)` + 4 条 fallback（run 未知 / since 非数 / tape 异常 / since=0 全量）。
-- **A6 3-column 布局骨架**：AgentsRail / [会话|图表] tabs（占位）/ LogStream（虚拟化 + auto-scroll）/
-  TopBar（status + elapsed snap + cost）。
-- **A7 测试**：store.test/selectors.test（fixture T + sort/reverse D7）/streaming.test/ws-resume.test
-  （client + server-side `_handle_resume` 5 条分支）。
+- **C1 ChartsView 全渲染（§5.4）**：新 `LazyChartWidget`（IntersectionObserver +
+  300px skeleton + 进入视口一次后 disconnect 永久挂载）；ChartGroup 重写 删
+  `dedupeByLabelTitle`（selectCharts 是唯一去重真相出口，铁律 1）+ 响应式 grid
+  `repeat(auto-fit, minmax(300px, 1fr))`；ChartPayload 加 `size`/`series` 字段；
+  ScatterChartWidget 升级消费 `size` → ZAxis 气泡图（参考 AH BubbleChartWidget）。
+- **C2 LogStream auto-scroll 真实化（§5.5）**：react-window v2 `useListRef` +
+  `scrollToRow`（替换 hash anchor 占位）；pinned 状态机简化（初始 pinned / wheel 上滚
+  unset / 点跳最新 re-pin）；删「onRowsRendered 自动恢复 pinned」——事件少全可见时
+  stopIndex 总是末行会让 wheel 上滚立即被覆盖（HIG：predictable over magic）。
+- **C3 TopBar 全功能（§5.1 + D5）**：status 5 档 + D5 elapsed（running tick / completed
+  snap / **failed+cancelled 也 snap**——读 tape 末条 workflow_* 事件 ts 推算，纯 tape 读）+
+  cost（agent_usage fold）。
+- **C4 AgentsRail 全功能（§5.2 + D2/D5/D9）**：显示 topology 全节点（含 pending）+
+  per-agent elapsed（running tick / completed snap）+ D9 stall（>5s 琥珀「思考中 Ns」/
+  💭）+ token 小字 + 选中切 D2。
+- **C5 Gate（§5.6）**：现有 GateDialog/PermissionGate/AskGate/ResolvedToast 已完整覆盖
+  D4 + 三通道 + 不乐观更新 + gate_response POST；本 chunk 验证不重写。
+- **C6 DAG overlay（§5.7）**：现有 AgentsRail `showDag` + WorkflowGraph 浮层已就位；
+  补 lazy 挂 + 背景关闭测试。
+- **C7 useElapsedTick（§0 D5/D9/§6）**：新 hook `src/hooks/use-elapsed-tick.ts`——
+  模块级 singleton + useSyncExternalStore（React 18 tearing-free）；`useElapsedTickActive`
+  在页根引用计数（N consumer active 只开 1 setInterval）；`useElapsedNow` 消费者订阅，
+  返回 Unix 秒（与 WebEvent.timestamp 一致）。RunDetailPage mount `useElapsedTickActive(
+  status === "running")`。selectStall 单位对齐（events ts 秒 → sinceMs 毫秒 与
+  `WEB_STALL_THRESHOLD_MS` 比较）。
 
-**验证**：77 前端测试 + 55 后端测试全绿；`npm run build` + `npm test` 双绿。详见 [release note](../releases/2026-07-08-web-shell-v2-chunk-a-foundation.md) + [SPEC](../specs/web-shell-v2-spec.md)。
+**闭环 review**（`code-reviewer` 双 pass）：1 BLOCKER（LogStream onRowsRendered 死代码）+
+4 MAJOR（ChartGroup 双重去重 / failed elapsed 丢失 / formatElapsed DRY / LogStream 测试
+假信心）+ 6 MINOR（注释漂移 / TICK_INTERVAL_MS 顺序 / 测试 helper prod 暴露 /
+ScatterChartWidget z fallback）+ 1 NEW（log-stream 文件头注释漂移）全闭环。
 
-**遗留 follow-up（Chunk B/C/D）**：
-- 🔵 Chunk B（ConversationView 全渲染）：§5.3 全表 + markdown（gfm+math+katex+prism）+ 折叠规则
-  + ▎ 流式光标 + 工具展开（DiffView/FileContentView）+ react-window 虚拟化（>500 条）
-- 🔵 Chunk C（ChartsView 全渲染）：§5.4 完整 7 widget + ChartGroup collapsible + IntersectionObserver
-  懒挂 + AH chartTheme 8 色 CSS-var 主题感知
-- 🔵 Chunk D（liveness + 样式 + 验收）：useElapsedTick（D5）/ stall 阈值（D9）/ image URL rewrite（D10）/
-  LogStream 真 scrollToIndex（react-window v2 ref API spike）/ resume-fallback watchdog（D6 全量重拉兜底）/
-  Playwright 逐屏 DOM 断言
+**验证**：53 新测（baseline 170 → **223 passed**，13 test file）。`npm run build` +
+`npm test` 双绿。详见 [release note](../releases/2026-07-08-web-shell-v2-chunk-c-charts-log-tb-rail-tick.md) + [SPEC §5.1/§5.2/§5.4/§5.5/§5.6/§5.7](../specs/web-shell-v2-spec.md)。
+**Commit**：`<TBD>`。
+
+**遗留 follow-up（Chunk D）**：
+- 🔵 Chunk D（liveness + 样式 + 验收）：image URL rewrite（D10）/ resume-fallback
+  watchdog / Playwright 逐屏 DOM 视觉断言（含折叠展开 / ▎ 消失 / chart 渲染 / gate
+  模态真浏览器）
+- 🟡 bundle size 警告（~2MB）：react-markdown 全家桶；可考虑 dynamic import / manualChunks
+- 🟡 StatusLine 折叠偏离 SPEC（Chunk B 遗留，单行无 payload，YAGNI；择期与 SPEC 作者对齐）
+- 🟡 DiffView 用逐行 index diff（Chunk B 遗留，非 LCS）：编辑噪声大；可换 `diff` npm 包
+
+---
+
+## ✅ 侧任务完成（2026-07-08）：web-shell-v2 Chunk B（ConversationView 全渲染）
 
 ---
 
@@ -53,8 +73,15 @@ F SDK message-fetch 非 list 改 REST fetch / G bootstrap+next prompt 未 prepen
 「TS 纯单测验不出运行时签名 bug」写进测试注释。baseline 83 → after 89 全绿，0 回归。守门 grep
 （8 禁词）clean。Commit: `8bea9dd`。详见 [release note](../releases/2026-07-08-in-session-shell-v8.1-bugfixes.md)。
 
-**未实证项**（SPEC §9.2，留 `test-coverage-e2e` 真链路验）：shipped 模板开箱跑 `/orca doctor` +
-`/orca run` 3 节点（不该再需要打补丁）。重点：**这次 shipped 模板要开箱即用**。
+**e2e 复验闭环（`test-coverage-e2e`，`/tmp/orca-e2e-v81/`，8/8 PASS）**：shipped v8.1 开箱即用、零 patch 零 mock
+—— `orca in-session start` 落模板 → 真 opencode 1.14.22 → `/orca doctor` 一键自检（plugin/marker/CLI 3 项 PASS）
++ `/orca run` 3-agent 端到端跑通到 `workflow_completed`（真 tape 11 事件 ws/ns/nc/rt ×3/wc，每节点 task 子代理、
+子 session 过滤生效）。G2 编排骨架对齐（修订契约）+ 合规 fail loud + 6 签名契约测试 + model 透传全 PASS。
+复现脚本 `/tmp/orca-e2e-v81/repro.sh`。**in-session shell v8.1 全流程（spec→3 轮 review→impl→e2e）闭环落地。**
+
+**follow-up（非阻塞，e2e 发现）**：validator/router 语义不一致——非 entry 节点无 `routes` 时 `orca validate`
+通过（当隐式终态）但 runtime router raise `RouteError: 无 route 匹配`。择期：validator 拒绝无 routes 的非 entry
+节点，或 router 把无 routes 当 `$end`。
 
 ---
 

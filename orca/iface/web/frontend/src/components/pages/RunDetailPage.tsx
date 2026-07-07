@@ -18,6 +18,7 @@ import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { useRunEvents } from "@/hooks/use-run-events";
 import { useWebSocket } from "@/hooks/use-websocket";
 import { useStreamingText } from "@/hooks/use-streaming-text";
+import { useElapsedTickActive } from "@/hooks/use-elapsed-tick";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import { TopBar } from "@/components/layout/TopBar";
 import { AgentsRail } from "@/components/layout/AgentsRail";
@@ -37,6 +38,11 @@ export function RunDetailPage() {
     streaming.dropBuffer();
   }, [streaming]);
   useWebSocket(runId, { onResumeFallback });
+
+  // SPEC §5.2 / §0 D5 单一 elapsed tick 在页根：running 时启 tick，完成 / 终态停。
+  // 所有 TopBar / AgentsRail 共用模块级 singleton timer（N agent = 1 timer）。
+  const status = useWorkflowStore((s) => s.status);
+  useElapsedTickActive(status === "running");
 
   const [tab, setTab] = useState<Tab>("conversation");
   const selectedNode = useWorkflowStore((s) => s.selectedNode);

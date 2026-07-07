@@ -1,4 +1,7 @@
 // components/chart/widgets/ScatterChartWidget.tsx —— recharts ScatterChart（迁移自 AgentHarness，chartTheme）。
+//
+// 当 ``payload.size`` 指定时切到气泡图（ZAxis 按 size 列映射半径，参考 AH BubbleChartWidget）。
+// 无 size → 等径散点（ZAxis range=[36,36] 固定）。
 
 import {
   CartesianGrid,
@@ -13,6 +16,8 @@ import {
 } from "recharts";
 import type { ChartPayload } from "../types";
 import {
+  BOX_FILL_OPACITY,
+  BOX_STROKE_WIDTH,
   CHART_MARGIN,
   LEGEND_STYLE,
   PALETTE,
@@ -23,9 +28,10 @@ import {
 import { computeNiceTicks, extractNumericValues, formatTick } from "../axisUtils";
 
 export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
-  const { data, x, y, hue, title } = payload;
+  const { data, x, y, hue, size, title } = payload;
   const xKey = x ?? "x";
   const yKey = y ?? "y";
+  const sizeKey = size; // undefined → 等径散点
   const gridProps = getGridProps();
   const axisTick = getAxisTick();
   const tooltipStyle = getTooltipStyle();
@@ -35,12 +41,29 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
   const xConfig = computeNiceTicks(allXValues);
   const yConfig = computeNiceTicks(allYValues);
 
+  // 行 → 散点数据：含可选 size（气泡）。z 字段固定名供 ZAxis dataKey 读取。
+  // 缺失 size 列值 → z=1（最小气泡）：鲁棒回退，避免缺失字段导致 NaN 渲染失败。
+  const toPoint = (d: Record<string, unknown>) => {
+    const pt: Record<string, number> = {
+      [xKey]: Number(d[xKey]),
+      [yKey]: Number(d[yKey]),
+    };
+    if (sizeKey) {
+      const z = Number(d[sizeKey] ?? 1);
+      pt.z = Number.isFinite(z) ? z : 1;
+    }
+    return pt;
+  };
+
+  // ZAxis 配置：size 列存在 → 气泡（range [50,400] 与 AH 一致）；否则等径 [36,36]。
+  const zAxisConfig = sizeKey
+    ? { dataKey: "z", range: [50, 400] as [number, number] }
+    : { dataKey: undefined as undefined, range: [36, 36] as [number, number] };
+
   if (hue) {
     const hueValues = Array.from(new Set(data.map((d) => String(d[hue]))));
     const scatterSets = hueValues.map((val) =>
-      data
-        .filter((d) => String(d[hue]) === val)
-        .map((d) => ({ [xKey]: d[xKey], [yKey]: d[yKey] })),
+      data.filter((d) => String(d[hue]) === val).map(toPoint),
     );
 
     return (
@@ -68,7 +91,7 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
                 ticks={yConfig.ticks}
                 tickFormatter={formatTick}
               />
-              <ZAxis range={[36, 36]} />
+              <ZAxis dataKey={zAxisConfig.dataKey} range={zAxisConfig.range} />
               <Tooltip contentStyle={tooltipStyle} cursor={{ strokeDasharray: "3 3" }} />
               <Legend wrapperStyle={LEGEND_STYLE} />
               {hueValues.map((val, i) => (
@@ -76,9 +99,10 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
                   key={val}
                   name={val}
                   data={scatterSets[i]}
-                  fill="none"
+                  fill={PALETTE[i % PALETTE.length]}
+                  fillOpacity={sizeKey ? BOX_FILL_OPACITY : undefined}
                   stroke={PALETTE[i % PALETTE.length]}
-                  strokeWidth={1.5}
+                  strokeWidth={BOX_STROKE_WIDTH}
                 />
               ))}
             </ScatterChart>
@@ -88,7 +112,7 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
     );
   }
 
-  const scatterData = data.map((d) => ({ [xKey]: d[xKey], [yKey]: d[yKey] }));
+  const scatterData = data.map(toPoint);
 
   return (
     <div data-testid="chart-widget">
@@ -115,9 +139,15 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
               ticks={yConfig.ticks}
               tickFormatter={formatTick}
             />
-            <ZAxis range={[36, 36]} />
+            <ZAxis dataKey={zAxisConfig.dataKey} range={zAxisConfig.range} />
             <Tooltip contentStyle={tooltipStyle} cursor={{ strokeDasharray: "3 3" }} />
-            <Scatter data={scatterData} fill="none" stroke={PALETTE[0]} strokeWidth={1.5} />
+            <Scatter
+              data={scatterData}
+              fill={PALETTE[0]}
+              fillOpacity={sizeKey ? BOX_FILL_OPACITY : undefined}
+              stroke={PALETTE[0]}
+              strokeWidth={BOX_STROKE_WIDTH}
+            />
           </ScatterChart>
         </ResponsiveContainer>
       </div>

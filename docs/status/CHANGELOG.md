@@ -5,6 +5,28 @@
 
 ---
 
+## [2026-07-08] Web Shell v2 Chunk C（ChartsView + LogStream + TopBar + AgentsRail + useElapsedTick）
+
+按 SPEC §5.1/§5.2/§5.4/§5.5/§5.6/§5.7 + §0 D5/D9 实现 6 个面板完整渲染 + 单一共享
+elapsed tick。ChartsView（IntersectionObserver 懒挂 + 响应式 grid + scatter→bubble 扩
+展 + selectCharts 唯一去重真相出口）/ LogStream（react-window v2 `scrollToRow` auto-scroll，
+predictable-over-magic 状态机）/ TopBar（D5 elapsed live→snap，failed/cancelled 也 snap，
+读 tape 末条 workflow_* 事件 ts）/ AgentsRail（per-agent elapsed + D9 stall + 单一 timer
+断言）/ useElapsedTick（singleton useSyncExternalStore，N consumer = 1 setInterval）。
+53 新测（170→223）全绿，build 绿。闭环 review 1 BLOCKER + 4 MAJOR + 6 MINOR 全闭环。
+Commit: `<TBD>`。详见 [release note](../releases/2026-07-08-web-shell-v2-chunk-c-charts-log-tb-rail-tick.md)。
+
+## [2026-07-08] Web Shell v2 Chunk B（ConversationView 全渲染）—— markdown + 折叠 + ▎ IFF + 工具展开 + 虚拟化
+
+按 SPEC §5.3 实现中栏「会话」页签完整渲染。markdown stack（react-markdown + gfm +
+math + katex + prism）+ per-EventType 全表（prompt/thinking/message/tool/dialog/
+chart/custom/error/divider/status/unknown）+ 折叠规则（默认折叠/成组/永不折叠）+
+▎ IFF（selectStreamingCursor：finished tape 必 false）+ smart arg（bash/read/write/
+render_chart）+ DiffView/FileContentView（轻量自建）+ react-window v2 虚拟化（>500 条，
+函数式 rowHeight 按 kind 估高）。闭环 review 1 BLOCKER + 4 MAJOR + 4 MINOR/NIT。
+93 新前端测试（含 EventType 穷尽表驱动 + B1 回归 + 折叠 DOM oracle），170 passed。
+Commit: `5a26957`。详见 [release note](../releases/2026-07-08-web-shell-v2-chunk-b-conversation.md)。
+
 ## [2026-07-08] Web Shell v2 Chunk A（foundation）—— codegen + 单 store fold + selectors + RAF 流式 + WS resume + 删除过期
 
 按 SPEC §0 D1/D2/D6/D7/D8 + §3.1/§3.3/§4/§8/§10 实现前端基础层。新 `scripts/gen_events_ts.py`

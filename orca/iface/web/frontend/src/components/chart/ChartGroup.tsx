@@ -1,21 +1,25 @@
-// components/chart/ChartGroup.tsx —— 按 label 分组（可折叠）+ 同 label+title 替换（实时更新，SPEC §2.4 §2.7）+ 按 chart_type 分派 widget。
+// components/chart/ChartGroup.tsx —— 按 label 分组（可折叠）+ 响应式 grid + 懒挂（SPEC §5.4）。
 //
-// 实时时更新（SPEC §2.7）：同 label+title 取最新事件（dedupeByLabelTitle 后只 1 个 chart）。
+// **去重真相出口在 selectCharts**（铁律 1：selectors 是唯一 view 输入）。selectCharts 已按
+// SPEC §5.4 identity（``title || chart_type+seq``）upsert 去重；ChartGroup 不再二次去重——
+// 否则空 title 的多 chart 会被压成最后一个（违反 identity 契约）。
+//
 // 折叠：UI 交互态（local useState，非业务真相）—— 点击折叠/展开该组 charts。
+//
+// 布局：响应式 grid ``repeat(auto-fit, minmax(300px, 1fr))``（SPEC §5.4）—— 容器宽度
+// 自适应；每列最小 300px，超出自动 wrap。chart widget 内部 ``aspect-[4/3]`` 限高。
+//
+// 懒挂：每 chart 包 ``LazyChartWidget``（IntersectionObserver + 300px skeleton）。
 
 import { useState } from "react";
 import type { ChartPayload } from "./types";
-import { ChartWidget } from "./ChartWidget";
+import { LazyChartWidget } from "./LazyChartWidget";
 
-/** 同 label+title 取最新（实时更新：迭代过程图表刷新不堆积，SPEC §2.7）。 */
-export function dedupeByLabelTitle(charts: ChartPayload[]): ChartPayload[] {
-  // 用 Map 按 title 覆盖，保留首次出现顺序
-  const byTitle = new Map<string, ChartPayload>();
-  for (const c of charts) {
-    byTitle.set(c.title, c); // 后者覆盖前者
-  }
-  return Array.from(byTitle.values());
-}
+const GRID_STYLE: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
+  gap: 12,
+};
 
 export function ChartGroup({
   label,
@@ -26,7 +30,6 @@ export function ChartGroup({
 }) {
   // collapsed 仅 UI 交互态（非业务真相，铁律 2）——与 gate 状态不同，折叠是纯展示层
   const [collapsed, setCollapsed] = useState(false);
-  const latest = dedupeByLabelTitle(charts);
 
   return (
     <div
@@ -43,12 +46,16 @@ export function ChartGroup({
         <span>
           {collapsed ? "▶" : "▼"} {label}
         </span>
-        <span className="text-xs text-slate-400">{latest.length} 图</span>
+        <span className="text-xs text-slate-400">{charts.length} 图</span>
       </button>
       {!collapsed && (
-        <div className="space-y-3 border-t border-slate-100 p-3">
-          {latest.map((c) => (
-            <ChartWidget key={c.title} payload={c} />
+        <div className="border-t border-slate-100 p-3" style={GRID_STYLE}>
+          {charts.map((c, i) => (
+            // 用 title 优先作 key（selectCharts identity 的稳定部分）；无 title 回退 index
+            <LazyChartWidget
+              key={c.title || `chart-${i}`}
+              payload={c}
+            />
           ))}
         </div>
       )}

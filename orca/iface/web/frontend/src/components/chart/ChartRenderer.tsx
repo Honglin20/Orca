@@ -1,11 +1,11 @@
 // components/chart/ChartRenderer.tsx —— 主入口：用 selectCharts 选择 custom(chart) 事件
-// → 按 group 分组（SPEC §2.4 / §0 D3 / D7）。
+// → 按 group 分组渲染（SPEC §5.4 / §0 D3 / D7）。
 //
 // 铁律 4（SPEC §0.1）：chart 是事件不是图片——从 store.events filter type==="custom" &&
 // data.kind==="chart"（D7 seq 升序 fold，序无关）。**不单独存 chart store/通道**。
 //
-// Chunk A：本组件是 ChartsView 页签的占位实现（ChartGroup/ChartWidget 渲染留给后续 chunk）；
-// 当前用 selectCharts 输出 + 列表占位，证明 selector 序无关（D7）。
+// **去重真相出口 = selectCharts**（identity=title||chart_type+seq，upsert）。ChartGroup
+// 不再二次去重（铁律 1：selectors 是唯一 view 输入）。
 
 import { useMemo } from "react";
 import { useWorkflowStore } from "@/stores/workflow-store";

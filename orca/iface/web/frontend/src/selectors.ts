@@ -25,17 +25,189 @@ export interface AgentRow {
   reasoningTokens?: number;
 }
 
+/**
+ * 格式化 token 小字（ AgentsRail / TopBar 用，DRY）。
+ * 优先 ``in/out`` 折叠为 ``1.2k`` 风格；无 token → undefined。
+ */
+export function formatTokens(input?: number, output?: number): string | undefined {
+  if (input === undefined && output === undefined) return undefined;
+  const fmt = (n: number | undefined): string => {
+    if (n === undefined) return "0";
+    if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+    return String(n);
+  };
+  return `${fmt(input)}/${fmt(output)}`;
+}
+
+/**
+ * 格式化秒数为 ``Ns`` / ``Nm Ns``（AgentsRail / TopBar 共用，DRY）。
+ *
+ * @param seconds 秒数（float 可）
+ * @param precision ``"tenths"`` → ``30.4s``（TopBar 高精度）；``"seconds"`` → ``30s``（AgentsRail 紧凑）
+ */
+export function formatElapsed(
+  seconds: number,
+  precision: "tenths" | "seconds" = "seconds"
+): string {
+  if (seconds < 60) {
+    return precision === "tenths"
+      ? `${seconds.toFixed(1)}s`
+      : `${seconds.toFixed(0)}s`;
+  }
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}m${s.toString().padStart(2, "0")}s`;
+}
+
 export function selectAgents(state: WorkflowState): AgentRow[] {
-  return Object.entries(state.nodes).map(([node, ns]: [string, NodeState]) => ({
-    node,
-    status: ns.status,
-    progress: ns.progress,
-    elapsed: ns.elapsed,
-    startedAt: ns.startedAt,
-    inputTokens: ns.inputTokens,
-    outputTokens: ns.outputTokens,
-    reasoningTokens: ns.reasoningTokens,
-  }));
+  // 先从拓扑拿到全部 DAG 节点名（保持拓扑顺序；无拓扑时空），保证未启动的节点也以
+  // pending 出现在 AgentsRail（SPEC §5.2：「每 agent」含未启动）。运行态 node 覆盖
+  // pending 占位（同 node 名只保留 state.nodes 的实际状态）。
+  const orderedNames: string[] = [];
+  const seen = new Set<string>();
+  if (state.workflowDef) {
+    for (const n of state.workflowDef.nodes) {
+      const name = typeof n.name === "string" ? n.name : "";
+      if (!name || seen.has(name)) continue;
+      orderedNames.push(name);
+      seen.add(name);
+    }
+  }
+  // state.nodes 内的运行态节点（拓扑未列的也补上 —— 防御 topology 缺漏）
+  for (const name of Object.keys(state.nodes)) {
+    if (!seen.has(name)) {
+      orderedNames.push(name);
+      seen.add(name);
+    }
+  }
+  return orderedNames.map((node) => {
+    const ns: NodeState | undefined = state.nodes[node];
+    return {
+      node,
+      status: ns?.status ?? "pending",
+      progress: ns?.progress,
+      elapsed: ns?.elapsed,
+      startedAt: ns?.startedAt,
+      inputTokens: ns?.inputTokens,
+      outputTokens: ns?.outputTokens,
+      reasoningTokens: ns?.reasoningTokens,
+    };
+  });
+}
+
+// ── selectWorkflowElapsed / selectNodeElapsed / selectStall（SPEC §0 D5 / §6 D9）─
+// D5：running 时 wall-clock tick（``now - startedAt``）；完成 snap 到 tape 的 elapsed
+// 字段（``workflowElapsed`` / NodeState.elapsed），停 tick（防 wall-clock 成前端真相）。
+// D9：current step 无新事件 > threshold（默认 5s）→ 琥珀「思考中 Ns」。
+
+/**
+ * workflow 级 elapsed（秒）。
+ *
+ * - completed：snap 到 ``workflowElapsed``（``workflow_completed.data.elapsed``，D5 权威）
+ * - running：``now - workflowStartedAt``（live tick）
+ * - failed/cancelled：tape 的终态事件 timestamp − workflowStartedAt
+ *   （SPEC §0 D5 字面只点名 ``workflow_completed``，但 §5.1 TopBar AC 是 elapsed 语义，
+ *    closed review 同意此扩展：failed/cancelled 也是终态需 snap。``workflowElapsed`` 只
+ *    有 completed 写入；failed/cancelled 通过读 state.events 末条 workflow_* 事件 ts 推算，
+ *    纯 tape 读不重派生 —— 符合铁律 1）
+ * - idle/未启动：null
+ */
+export function selectWorkflowElapsed(
+  state: WorkflowState,
+  now: number
+): number | null {
+  // D5 权威 snap：workflow_completed.data.elapsed
+  if (state.workflowElapsed !== null) return state.workflowElapsed;
+  if (state.workflowStartedAt === null) return null;
+  if (state.status === "running") {
+    return Math.max(0, now - state.workflowStartedAt);
+  }
+  // failed/cancelled 终态：从 tape 末条 workflow_* 事件读 ts snap（无 wall-clock 漂移）
+  if (state.status === "failed" || state.status === "cancelled") {
+    const terminalTs = findWorkflowTerminalTs(state);
+    if (terminalTs !== null) {
+      return Math.max(0, terminalTs - state.workflowStartedAt);
+    }
+    // 理论不可达（failed/cancelled 必有对应事件）；fail loud 不静默返回 null
+    console.warn(
+      "[orca] selectWorkflowElapsed: status=" +
+        state.status +
+        " 但 tape 无 workflow_failed/cancelled 事件"
+    );
+    return null;
+  }
+  return null;
+}
+
+/** 在 events 里倒序找 workflow_failed/cancelled 的 timestamp（state.events 已 seq 升序）。 */
+function findWorkflowTerminalTs(state: WorkflowState): number | null {
+  for (let i = state.events.length - 1; i >= 0; i--) {
+    const t = state.events[i].type;
+    if (t === "workflow_failed" || t === "workflow_cancelled") {
+      return state.events[i].timestamp;
+    }
+  }
+  return null;
+}
+
+/**
+ * 节点级 elapsed（秒）。
+ * - 已完成（done/failed/skipped）：snap 到 NodeState.elapsed（D5）
+ * - running：``now - startedAt``（live tick）
+ * - 未启动：null
+ */
+export function selectNodeElapsed(
+  state: WorkflowState,
+  node: string,
+  now: number
+): number | null {
+  const ns = state.nodes[node];
+  if (!ns) return null;
+  if (ns.status !== "running") return ns.elapsed ?? null;
+  if (ns.startedAt == null) return null;
+  return Math.max(0, now - ns.startedAt);
+}
+
+/** Stall 阈值默认值（ms）；可经 ``WEB_STALL_THRESHOLD_MS`` env 覆盖（SPEC §0 D9 / §6）。 */
+export const DEFAULT_STALL_THRESHOLD_MS = 5000;
+
+/**
+ * 节点 stall 检测（SPEC §0 D9 / §6）。
+ *
+ * 当前 node 状态 running 且（``now`` − 该 node 最后事件 timestamp）> threshold → stalled。
+ * 当 ``agent_thinking`` 事件在流（即该 node 最后事件是 agent_thinking）→ 更准确
+ * （明确「思考中」）；否则仅 wall-clock 静默（opencode 块级，SPEC §6 诚实呈现）。
+ *
+ * **单位对齐**：``WebEvent.timestamp`` 是 Unix **秒**（``Date.now()/1000``）；本 selector
+ * 的 ``now`` 入参也是秒。``thresholdMs`` / 返回的 ``sinceMs`` 是 **毫秒**（与 SPEC
+ * ``WEB_STALL_THRESHOLD_MS`` 命名一致）；内部 ``(now - lastTs) * 1000`` 把秒差转 ms。
+ *
+ * 返回 null = 非 running / 无最后事件 / 未超阈值；否则返回 ``{ sinceMs, thinking }``。
+ */
+export function selectStall(
+  state: WorkflowState,
+  node: string,
+  now: number,
+  thresholdMs: number = DEFAULT_STALL_THRESHOLD_MS
+): { sinceMs: number; thinking: boolean } | null {
+  const ns = state.nodes[node];
+  if (!ns || ns.status !== "running") return null;
+  // 找该 node 最后一个事件的 timestamp（state.events 已 seq 升序 → 倒序找首条）
+  let lastTs: number | null = null;
+  let lastType: string | null = null;
+  for (let i = state.events.length - 1; i >= 0; i--) {
+    const e = state.events[i];
+    if (e.node === node) {
+      lastTs = e.timestamp;
+      lastType = e.type;
+      break;
+    }
+  }
+  if (lastTs === null) return null;
+  // now / lastTs 都是秒；转 ms 与 thresholdMs 比较。
+  const sinceMs = Math.max(0, now - lastTs) * 1000;
+  if (sinceMs <= thresholdMs) return null;
+  return { sinceMs, thinking: lastType === "agent_thinking" };
 }
 
 // ── selectConversation：events → per-node 对话模型（D2 按 node 分组）──────────────
