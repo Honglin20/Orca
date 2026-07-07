@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-08] Web Shell v2 —— 推倒重写 COMPLETE（单 tape + AH 风格，e2e PASS）
+
+旧 Web 很差 → 按 SDD（SPEC→spec-review→clean-code→test-e2e）推倒重写前端：单 tape 唯一真相 + 单 Zustand store + codegen + AH 风格渲染（markdown/流式 RAF/工具折叠/DiffView/Charts/LogStream liveness/Gate/DAG）。后端 B1/B2（opencode translator lossless：reasoning/step_start/reasoning_tokens/unknown_event + `--thinking` 开关，EventType 37→39）。test-coverage-e2e 真跑（opencode+deepseek `--thinking` + Playwright + 全 39 类型 fixture）3 Must 全 PASS，铁律 AC 全过，npm 249 + py web 64 测试绿。Commits：c3a738f + 84a2645 + 5a26957 + 01af451 + 7d76934 + 60539b8。详见 [release note](../releases/2026-07-08-web-shell-v2.md) + [SPEC](../specs/web-shell-v2-spec.md)。Follow-up：demo_task 真 run 挂起（后端 opencode 冷启动，非前端）、DiffView LCS、Conv chunk 再拆、LogStream auto-scroll 真跑触发。
+
 ## [2026-07-08] Web Shell v2 Chunk D（completion + polish + bundle split）
 
 完成前端**所有剩余项**（D1-D7）+ 86% bundle 减重（initial 2,035 KB → 290 KB / gzip 93.65 KB）。

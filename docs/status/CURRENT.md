@@ -7,6 +7,18 @@
 
 ---
 
+## ✅ 主任务完成（2026-07-08）：Web Shell v2 推倒重写 COMPLETE（e2e PASS）
+
+按 SDD 全流程完成：SPEC（`docs/specs/web-shell-v2-spec.md` rev2，spec-review PASS）→ clean-code 分块实现（后端 B1/B2 `c3a738f` + 前端 Chunk A `84a2645` / B `5a26957` / C `01af451` / D `7d76934` / 铁律闭环 `60539b8`）→ test-coverage-e2e 真跑裁决 **3 Must 全 PASS + 铁律 AC 全过**（单 Zustand store、codegen 39==39、grep 0 命中；npm 249 + py web 64 绿）。详见 [release note](../releases/2026-07-08-web-shell-v2.md)。下方各 Chunk 块为实施期记录，已被本 release note 取代。
+
+**Follow-up（非阻塞，单独立项）**：
+- `demo_task.yaml` 真 run 挂起（后端 opencode 冷启动/auth，非 v2 前端；`render_chart.yaml` 同 server 7s 跑通）。
+- DiffView index-diff → LCS（有 rationale，AH 同款手写已生产验证）。
+- ConversationView lazy chunk 1.06MB → `manualChunks` 再拆 katex/prism。
+- LogStream auto-scroll up-pause/jump-latest 真跑触发（无 run 溢出视口；单测覆盖）。
+
+---
+
 ## ✅ 侧任务完成（2026-07-08）：web-shell-v2 Chunk D（completion + polish + bundle split）
 
 按 SPEC §0 D10/D6 / §5.3/§5.6/§5.7/§6/§7/§9 完成 Web Shell v2 前端**所有剩余项**——
