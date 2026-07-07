@@ -11,13 +11,13 @@ import { describe, expect, vi, test, afterEach } from "vitest";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import { GateDialog } from "@/components/gate/GateDialog";
-import type { WorkflowEvent } from "@/types/events";
+import type { WebEvent } from "@/types/events";
 
 let _seq = 1;
 function gateRequestedEvent(
   source: string,
   data: Record<string, unknown>,
-): WorkflowEvent {
+): WebEvent {
   return {
     seq: _seq++,
     type: "human_decision_requested",

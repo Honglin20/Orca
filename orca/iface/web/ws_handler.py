@@ -87,8 +87,51 @@ class WebServer:
             await self._cancel_sub(ws)
         elif mtype == "gate_response":
             await self._handle_gate_response(ws, msg)
+        elif mtype == "resume":
+            # web-shell-v2 §0 D6：client 重连发 resume(run_id, since=last_seq_seen)；
+            # server 重放 seq>since 的历史事件，再 subscribe（接 live 流）。
+            await self._handle_resume(ws, msg.get("run_id"), msg.get("since"))
         else:
             logger.warning("ws 收到未知消息 type=%s（忽略）", mtype)
+
+    async def _handle_resume(
+        self, ws: WebSocket, run_id: object | None, since: object | None
+    ) -> None:
+        """D6 resume：重放 run 的 tape 中 seq > since 的事件，然后 subscribe 接 live 流。
+
+        - run_id 未知 / since 非数字 → 记 warning + 不崩，回退到 subscribe（live 流接上）。
+        - 否则：把 tape 中 seq>since 的事件按 seq 升序发给 WS（带 run_id 标签），再 subscribe。
+        - resume 失败（tape 读异常等）→ 记 warning，回退 subscribe（live 流不丢）。
+        """
+        if not isinstance(run_id, str):
+            logger.warning("ws resume 缺 run_id（回退 subscribe）")
+            return
+        since_seq: int | None
+        if isinstance(since, (int, float)) and not isinstance(since, bool):
+            since_seq = int(since)
+        else:
+            since_seq = None
+            logger.warning("ws resume since 非数字 run_id=%s（回退 subscribe）", run_id)
+        handle = self._manager.get_handle(run_id)
+        if handle is None:
+            logger.warning("ws resume 未知 run_id=%s（回退 subscribe）", run_id)
+            return
+        try:
+            if since_seq is not None:
+                # 按 seq 升序重放历史（Tape.replay(since_seq) 已保证 seq>since 升序）。
+                for event in handle.tape.replay(since_seq=since_seq):
+                    payload = event.model_dump()
+                    payload["run_id"] = run_id
+                    await ws.send_json(payload)
+        except Exception:  # noqa: BLE001 — resume 失败 fail loud，不阻断后续 subscribe
+            logger.warning(
+                "ws resume 重放失败 run_id=%s since=%s（回退 subscribe）",
+                run_id,
+                since_seq,
+                exc_info=True,
+            )
+        # 重放完毕（或失败）→ subscribe 接 live 流（与初始 subscribe 共用路径）
+        await self._handle_subscribe(ws, run_id)
 
     async def _handle_subscribe(self, ws: WebSocket, run_id: object | None) -> None:
         """订阅某 run：cancel 旧订阅 → 订阅 handle.bus → 起 pump task。

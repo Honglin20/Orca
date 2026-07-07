@@ -7,6 +7,42 @@
 
 ---
 
+## ✅ 侧任务完成（2026-07-08）：web-shell-v2 Chunk A（foundation）
+
+按 SPEC §0 D1/D2/D6/D7/D8 + §3.1/§3.3/§4/§8/§10 实现前端基础层（推倒重写第一刀）。
+
+**交付**：
+- **A1 codegen（D1）**：新 `scripts/gen_events_ts.py` 从 `orca/schema/event.py` EventType Literal
+  生成 `events.ts`（39 个 EventType + WebEvent 接口）；`prebuild` wired `--check`；新 pytest
+  drift guard `tests/iface/web/test_events_ts_drift.py` 锁基数=39。根治 21↔39 漂移。
+- **A2 删除过期（§8 无兼容层）**：删 RunsListPage/NewRunPage/RunsSidebar/StatusBar/use-runs-list/
+  use-replay/replay-actions/ReplayBar/NodeDetail/旧 formatLogLine；WorkflowGraph/ChartRenderer/
+  LogStream 删 replay 切片逻辑。
+- **A3 单 store = fold(tape)（§3.1 D7/D8）**：seq 升序 sort + refold（序无关）；D8 unknown_event/
+  agent_step_started 显式 no-op；agent_usage 聚合 cost + reasoning_tokens + per-node tokens。
+- **A4 纯 selectors**：selectAgents/Conversation（D2 按 node 分组）/Charts（D3 group/identity upsert
+  + D7 序无关）/Log（穷尽 39 type readable 摘要，无 no-op fallback）。
+- **A5 流式 + transport**：`useStreamingText` RAF 批处理 + 多 session sync-flush + dropBuffer（AH
+  边界）；`useWebSocket` D6 reconnect resume(run_id, since=last_seq_seen)；server-side `_handle_resume`
+  重放 `tape.replay(since_seq=N)` + 4 条 fallback（run 未知 / since 非数 / tape 异常 / since=0 全量）。
+- **A6 3-column 布局骨架**：AgentsRail / [会话|图表] tabs（占位）/ LogStream（虚拟化 + auto-scroll）/
+  TopBar（status + elapsed snap + cost）。
+- **A7 测试**：store.test/selectors.test（fixture T + sort/reverse D7）/streaming.test/ws-resume.test
+  （client + server-side `_handle_resume` 5 条分支）。
+
+**验证**：77 前端测试 + 55 后端测试全绿；`npm run build` + `npm test` 双绿。详见 [release note](../releases/2026-07-08-web-shell-v2-chunk-a-foundation.md) + [SPEC](../specs/web-shell-v2-spec.md)。
+
+**遗留 follow-up（Chunk B/C/D）**：
+- 🔵 Chunk B（ConversationView 全渲染）：§5.3 全表 + markdown（gfm+math+katex+prism）+ 折叠规则
+  + ▎ 流式光标 + 工具展开（DiffView/FileContentView）+ react-window 虚拟化（>500 条）
+- 🔵 Chunk C（ChartsView 全渲染）：§5.4 完整 7 widget + ChartGroup collapsible + IntersectionObserver
+  懒挂 + AH chartTheme 8 色 CSS-var 主题感知
+- 🔵 Chunk D（liveness + 样式 + 验收）：useElapsedTick（D5）/ stall 阈值（D9）/ image URL rewrite（D10）/
+  LogStream 真 scrollToIndex（react-window v2 ref API spike）/ resume-fallback watchdog（D6 全量重拉兜底）/
+  Playwright 逐屏 DOM 断言
+
+---
+
 ## ✅ 侧任务完成（2026-07-08）：in-session shell v8.1 —— 修 5 bug + 签名契约测试
 
 按 SPEC v8 + e2e `/tmp/orca-e2e-v8/` 实证，修 shipped plugin 5 bug（builder 上一轮从 spike 回退）：

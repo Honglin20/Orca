@@ -6,6 +6,8 @@
   "description": "Orca web SPA skeleton — react-router navigation + Zustand single store + lazy loading + WS hook (phase 9b)",
   "scripts": {
     "dev": "vite",
+    "gen:events": "python ../../../../scripts/gen_events_ts.py",
+    "prebuild": "python ../../../../scripts/gen_events_ts.py --check",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",

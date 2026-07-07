@@ -46,8 +46,6 @@ function WorkflowGraphInner() {
   const workflowDef = useWorkflowStore((s) => s.workflowDef);
   const nodes = useWorkflowStore((s) => s.nodes);
   const events = useWorkflowStore((s) => s.events);
-  const replayMode = useWorkflowStore((s) => s.replayMode);
-  const replayPosition = useWorkflowStore((s) => s.replayPosition);
   const setSelectedNode = useWorkflowStore((s) => s.setSelectedNode);
 
   const [flowNodes, setFlowNodes] = useState<WorkflowFlowNode[]>([]);
@@ -71,12 +69,10 @@ function WorkflowGraphInner() {
   }, [nodes]);
 
   // Effect 3: route_taken 走过的边高亮（增量标记，不全量 rebuild）
-  // replay 模式只看 events[0..replayPosition]，live 看全部
+  // web-shell-v2：无 Replay，state 永远 = fold(全量 events)（SPEC §3.1）。
   const takenEdgeKeys = useMemo(() => {
-    const end = replayMode ? replayPosition + 1 : events.length;
     const keys = new Set<string>();
-    for (let i = 0; i < end && i < events.length; i++) {
-      const e = events[i];
+    for (const e of events) {
       if (e.type === "route_taken") {
         const from = String(e.data?.from ?? "");
         const to = String(e.data?.to ?? "");
@@ -84,7 +80,7 @@ function WorkflowGraphInner() {
       }
     }
     return keys;
-  }, [events, replayMode, replayPosition]);
+  }, [events]);
 
   useEffect(() => {
     setFlowEdges((prev) => markTakenEdges(prev, takenEdgeKeys));

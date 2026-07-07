@@ -3,7 +3,8 @@
 // 提供：构造 workflow_started（含 topology）+ node_* + route_taken 事件流的 helper，
 // 让 graph/replay/log 测试共享一致的事件构造逻辑（DRY）。
 
-import type { WorkflowEvent, WorkflowStatus } from "@/types/events";
+import type { WorkflowStatus } from "@/types/store-types";
+import type { WebEvent } from "@/types/events";
 import type { WorkflowTopology } from "@/types/topology";
 
 let _seq = 0;
@@ -55,7 +56,7 @@ export const FOR_EACH_TOPOLOGY: WorkflowTopology = {
 
 export interface MakeEventOpts {
   seq?: number;
-  type?: WorkflowEvent["type"];
+  type?: WebEvent["type"];
   timestamp?: number;
   node?: string | null;
   session_id?: string | null;
@@ -63,7 +64,7 @@ export interface MakeEventOpts {
 }
 
 /** 构造单条事件（seq 自增，可覆盖）。 */
-export function mkEvent(opts: MakeEventOpts = {}): WorkflowEvent {
+export function mkEvent(opts: MakeEventOpts = {}): WebEvent {
   _seq += 1;
   return {
     seq: opts.seq ?? _seq,
@@ -76,7 +77,7 @@ export function mkEvent(opts: MakeEventOpts = {}): WorkflowEvent {
 }
 
 /** workflow_started 事件（含 topology）。 */
-export function mkWorkflowStarted(topology: WorkflowTopology): WorkflowEvent {
+export function mkWorkflowStarted(topology: WorkflowTopology): WebEvent {
   return mkEvent({
     type: "workflow_started",
     data: { workflow_name: "demo", node_count: topology.nodes.length, entry: topology.entry, topology },
@@ -87,8 +88,8 @@ export function mkWorkflowStarted(topology: WorkflowTopology): WorkflowEvent {
  * 构造一条完整的 demo 事件流：workflow_started → 2 个 node 各 started/completed →
  * workflow_completed。每个 node 用独立 session_id（测 session 分组）。
  */
-export function buildDemoStream(topology: WorkflowTopology = LINEAR_TOPOLOGY): WorkflowEvent[] {
-  const events: WorkflowEvent[] = [];
+export function buildDemoStream(topology: WorkflowTopology = LINEAR_TOPOLOGY): WebEvent[] {
+  const events: WebEvent[] = [];
   events.push(mkWorkflowStarted(topology));
   for (const n of topology.nodes) {
     events.push(mkEvent({ type: "node_started", node: n.name, session_id: `s-${n.name}` }));
@@ -123,8 +124,8 @@ export const FOREACH_TOPOLOGY: WorkflowTopology = {
  * 构造覆盖全部有派生逻辑 handler 的「富」事件流（agent_usage→cost / foreach→progress /
  * human_decision→gate），让 live==replay 断言真正压到所有有副作用的 handler。
  */
-export function buildRichStream(topology: WorkflowTopology = LINEAR_TOPOLOGY): WorkflowEvent[] {
-  const events: WorkflowEvent[] = [];
+export function buildRichStream(topology: WorkflowTopology = LINEAR_TOPOLOGY): WebEvent[] {
+  const events: WebEvent[] = [];
   events.push(mkWorkflowStarted(topology));
   // 第一个 node：agent，带 usage（cost 派生）+ message（无派生但有 session）
   const n0 = topology.nodes[0];
@@ -197,8 +198,8 @@ export function buildRichStream(topology: WorkflowTopology = LINEAR_TOPOLOGY): W
 }
 
 /** 构造 N 个 node_completed 事件的长流（测 checkpoint / 增量 apply）。 */
-export function buildLongStream(nodeCount: number): WorkflowEvent[] {
-  const events: WorkflowEvent[] = [];
+export function buildLongStream(nodeCount: number): WebEvent[] {
+  const events: WebEvent[] = [];
   events.push(mkWorkflowStarted(LINEAR_TOPOLOGY));
   for (let i = 0; i < nodeCount; i++) {
     events.push(

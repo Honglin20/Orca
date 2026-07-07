@@ -1,11 +1,12 @@
-// test/chart.test.tsx —— chart 渲染测试（D2/D3 验收）。
+// test/chart.test.tsx —— chart 渲染测试（D2/D3/D7 验收）。
 //
-// 覆盖 SPEC §3.2：
+// 覆盖 SPEC §3.2 / §0 D3 / D7：
 //   - 5 种 widget 各渲染对应 recharts class（.recharts-line / .recharts-bar / .recharts-scatter / table rows）
 //   - PALETTE 配色实际使用（读 SVG stroke/fill 断言在 PALETTE）
 //   - label 分组（不同 label 不同 section）
 //   - 同 label+title 替换（dedupe → 只 1 个 chart，不堆积）
-//   - replay 模式只显示到 replayPosition 的 chart
+//
+// web-shell-v2 §8：删除 Replay 同步测试块（无 Replay 功能）。
 //
 // 注：recharts ResponsiveContainer 在 happy-dom 下异步渲染（measure 后 useEffect 出子 SVG），
 // 故 SVG 断言用 waitFor 等待异步渲染完成。
@@ -18,10 +19,10 @@ import { ChartWidget } from "@/components/chart/ChartWidget";
 import { dedupeByLabelTitle } from "@/components/chart/ChartGroup";
 import { PALETTE } from "@/components/chart/chartTheme";
 import type { ChartPayload, ChartType } from "@/components/chart/types";
-import type { WorkflowEvent } from "@/types/events";
+import type { WebEvent } from "@/types/events";
 
 let _seq = 100;
-function chartEvent(node: string, payload: ChartPayload): WorkflowEvent {
+function chartEvent(node: string, payload: ChartPayload): WebEvent {
   return {
     seq: _seq++,
     type: "custom",
@@ -465,41 +466,5 @@ describe("ChartRenderer —— label 分组 + 实时更新（SPEC §2.4 §2.7）
 
     const widgets = screen.getAllByTestId("chart-widget");
     expect(widgets.length).toBe(2);
-  });
-});
-
-describe("ChartRenderer —— replay 同步（SPEC §2.7）", () => {
-  test("replay 模式只显示到 replayPosition 的 chart", () => {
-    const store = useWorkflowStore.getState();
-    // 注入两个 chart 事件（同 label+title 模拟实时更新）
-    store.processEvent(
-      chartEvent("n1", {
-        ...LINE_PAYLOAD,
-        label: "g",
-        title: "t",
-        data: [{ x: 1, y: 1 }],
-      }),
-    );
-    store.processEvent(
-      chartEvent("n1", {
-        ...LINE_PAYLOAD,
-        label: "g",
-        title: "t",
-        data: [{ x: 2, y: 2 }],
-      }),
-    );
-
-    // 进 replay 模式 + 拨 replayPosition 到第一个事件（只显示 1 个 chart）
-    store.setReplayMode(true);
-    store.setReplayPosition(0);
-
-    render(<ChartRenderer nodeId="n1" />);
-    // replayPosition=0 → events[0..0]，只第一个事件 → 1 chart
-    const widgets = screen.getAllByTestId("chart-widget");
-    expect(widgets.length).toBe(1);
-
-    // 拨到末尾 → 2 个事件去重后 1 chart（同 label+title 替换）
-    store.setReplayPosition(1);
-    expect(screen.getAllByTestId("chart-widget").length).toBe(1);
   });
 });

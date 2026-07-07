@@ -9,7 +9,7 @@
 //   - gate.options 空 → textarea 自由文本（输入作为 answer）
 
 import { useEffect, useState } from "react";
-import type { GateState } from "@/types/events";
+import type { GateState } from "@/types/store-types";
 import { postGateRespond } from "./post-gate-respond";
 
 export function AskGate({ gate }: { gate: GateState }) {

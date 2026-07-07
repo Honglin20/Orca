@@ -6,7 +6,7 @@
 // 不清 store.gate / 不关弹窗。弹窗关闭只能由 backend emit human_decision_resolved（store.gate→null）触发。
 
 import { useState } from "react";
-import type { GateState } from "@/types/events";
+import type { GateState } from "@/types/store-types";
 import { postGateRespond } from "./post-gate-respond";
 
 /** 工具权限 4 选项（对齐 hook 桥 allow/deny + 扩展 edit/skip）。 */

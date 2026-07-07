@@ -5,6 +5,18 @@
 
 ---
 
+## [2026-07-08] Web Shell v2 Chunk A（foundation）—— codegen + 单 store fold + selectors + RAF 流式 + WS resume + 删除过期
+
+按 SPEC §0 D1/D2/D6/D7/D8 + §3.1/§3.3/§4/§8/§10 实现前端基础层。新 `scripts/gen_events_ts.py`
+（D1 codegen）+ pytest drift guard 根治 21↔39 漂移；删 Replay/multi-run/NodeDetail/formatLogLine
+全部（§8 无兼容层）；单 Zustand store = fold(tape)，seq 升序 + refold（D7 序无关）；纯 selector
+（selectAgents/Conversation/Charts/Log）；`useStreamingText` RAF 批处理 + 多 session sync-flush；
+WS reconnect resume by seq（D6）+ server-side `_handle_resume`（重放 tape.replay(since_seq=N)）。
+3-column 占位布局（AgentsRail/[会话|图表]/LogStream）。77 前端测试 + 55 后端测试全绿。
+详见 [release note](releases/2026-07-08-web-shell-v2-chunk-a-foundation.md)。
+
+---
+
 ## 模板
 
 ```
