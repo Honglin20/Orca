@@ -15,6 +15,14 @@
 
 ---
 
+## [2026-07-07] in-session shell v7 —— 薄 CLI 唯一大脑 + plugin/hook 哑传输
+按 SPEC v7 + ADR v3 实现：CLI `bootstrap/next/stop/status/start` 唯一大脑（per-call flock
++ `Tape.append_batch` 单次 write 原子化 B1 + `--output` 空串 normalize B2 + 失败 taxonomy F6
++ 合规计数 F11 + marker RMW 在 flock 临界区内 N2）；plugin / CC hook = 哑传输（零业务逻辑，
+grep 守门）；daemon 降级无头 CI。43 新测全绿，子集 1591 passed / 0 回归。
+- commit: `<填 SHA>`
+- 详情：[release note](../releases/2026-07-07-in-session-shell-v7.md)
+
 ## [2026-07-07] executor CLI 扩展 —— 命令唯一真相源 + spawn 参数全可改 —— `orca executor show` 打印完整生效 argv + 每字段来源（env/项目/用户/default）；`set --binary/--flags/--prompt-channel/--scope` 三维可改 + 项目/用户两层 config；接通 phase-14 遗留的 `resolve_flags` 死通道，新增 `resolve_prompt_channel`
 - commit: `f4b10da`
 - 详情：[release note](../releases/2026-07-07-executor-cli-extend.md)

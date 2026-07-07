@@ -13,31 +13,21 @@
 
 ---
 
-## 🔴 当前活跃任务（未完成）：in-session shell —— 交互式 opencode 内置 hook 驱动 workflow
+## ✅ 侧任务完成（2026-07-07）：in-session shell v7 —— 薄 CLI 唯一大脑 + plugin/hook 哑传输
 
-**目标 UX**（立项、CCW 一致）：用户**启动交互式 opencode** → 在会话里敲一个命令跑 workflow → **opencode 进程内的 hook**（`session.idle` 事件）自动推进每个节点 → 主 session 用自带 subagent 执行 → 全程在交互界面里。**不要**外挂 server / HTTP / 额外终端。
+按 SPEC v7 + ADR v3 实现。CLI `bootstrap/next/stop/status/start` = 唯一大脑（per-call flock +
+`Tape.append_batch` 单次 write 原子化 B1 + `--output` 空串 normalize B2 + 失败 taxonomy F6 +
+合规计数 F11 + marker RMW 在 flock 临界区内 N2）；plugin / CC hook 模板 = 哑传输（grep 守门
+零业务逻辑）；daemon 降级无头 CI（I3.3a）。43 新测全绿，子集 1591 passed / 0 回归。详情见
+[release note](../releases/2026-07-07-in-session-shell-v7.md) + SPEC
+[`in-session-shell-design-draft.md`](../specs/in-session-shell-design-draft.md) v7。
 
-### ✅ 已完成（Orca 大脑，宿主无关，已 commit/push `fb5588e`）
-- `orca/run/step.py`：`advance_step` 决策纯函数（确定性算下一步，drive_loop/from_tape 零改）
-- `orca/iface/in_session/{daemon,cli}.py`：daemon 独占 tape（flock+pid+半写恢复）+ `observe`/`next` 单一接口；`serve`/`status` 命令
-- SPEC v5（`docs/specs/in-session-shell-design-draft.md`）+ 铁律 1 扩展 ADR v2（`docs/specs/2026-07-07-in-session-iron-law-1-adr.md`），经两轮 spec-review-adversarial
-- **serve 模式 e2e 已验**（真 opencode serve + deepseek + daemon）：3 节点 completed、tape 与 `orca run` 逐 seq 对齐、并发两 run 隔离、Demo 5 证 idle→注入循环可靠
+**未 spike 项**（SPEC §9.2 明示，留 `test-coverage-e2e` 真链路验）：`/orca` 命令的
+`command.execute.before` 拦截真链路 / `bootstrap` 命令端到端 / 多 session 绑定（M3）/
+CC output cache 端到端（真 `claude -p` + hook 全链路）/ G2 序列对齐 vs `orca run` 同 wf tape。
 
-### ❌ GAP（离目标 UX 差的，任务未完成的根因）
-当前实现是 **serve 模式**（无头 HTTP/SSE 外挂 daemon）——**不是用户要的交互式内置 hook UX**。真正缺的是：
-1. **opencode in-process plugin**（`.opencode/plugins/orca.ts`）：注册 `/orca <wf.yaml>` slash 命令 + `event` hook 捕 `session.idle` → 调 `orca in-session next`（薄 CLI）拿下一节点 prompt → `client.session.prompt()` 注入回主 session 循环。模型不调任何 Orca 工具，hook 在 opencode 进程内推进。
-2. **薄 CLI** `orca in-session next/observe`（包 `advance_step`，plugin 经它调，tape 按调用 flock）。
-3. **serve 模式**降级为"无头测试/CI 用"，不作主 UX。
-
-### ⛔ 阻塞点
-opencode plugin 跑在 **bun** 上；本环境无 bun、`.opencode/plugins/*.ts` **加载挂死**（Demo 4 期未啃透就绕到 serve）。这是 spec-review Q3/Q4 点名、当时标"phase SPEC 落实"和稀泥的风险——用户已明确不接受。
-
-### ▶ 下一步（开工第一件事）
-**spike**：交互式 opencode + 零依赖 `.opencode/plugins/orca.ts` 能否加载 + 其 `event` hook 在 `session.idle` 能否真触发 + 能否调 `client.session.prompt` 注入。
-- 过 → 写真 plugin（注册 `/orca` 命令 + idle hook 调 orca CLI）；serve 降级无头测试。
-- 不过（bun 卡死）→ `brew install bun` 再试，或评估 opencode 1.14 plugin 可用性。
-
-**必读**：[`in-session-shell-design-draft.md`](../specs/in-session-shell-design-draft.md) v5（§2/§5 hook 机制 + §10 开放问题 1 = opencode TUI follow-up）+ [`2026-07-07-in-session-iron-law-1-adr.md`](../specs/2026-07-07-in-session-iron-law-1-adr.md)。Demo 产物：`/tmp/orca-demo5`（idle 循环）、`/tmp/orca-v5-e2e`（serve 全链路）。
+**遗留 follow-up**：daemon.py 推进循环仍逐条 emit（B-8，ADR I2 跨进程写者语义一致性），
+留 daemon 迁 ExitCode + emit_batch 时一并改（与 `test_exit_codes` 长红同 PR）。
 
 ---
 

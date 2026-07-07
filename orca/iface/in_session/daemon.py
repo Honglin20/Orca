@@ -1,23 +1,20 @@
-"""orca/iface/in_session/daemon.py —— in-session shell 的 daemon（v5，hook-driven）。
+"""orca/iface/in_session/daemon.py —— in-session shell 无头 CI daemon（ADR v3 I3.3a）。
 
-回答「opencode/CC 主 session 怎么连到 Orca 的确定性编排？」：daemon **独占一个 run
-的 tape**（ADR v2 D1=c + 铁律 1 扩展），**对外**暴露 observe/next 两 RPC（单一接口，
-铁律 8），**对内**委托 ``orca.run.step.advance_step`` 原子决策（D-v4-1：observe 只缓存
-output 不落盘，next 一次原子 emit ``[node_completed, route_taken, node_started]``，
-消除中断悬空态 A）。
+**降级**（SPEC v7）：主 UX 改用 per-call 薄 CLI（``cli.py bootstrap/next``，I3.3b）。
+本模块保留为**无头 CI / 长跑批处理**形态：连 ``opencode serve`` SSE 自驱动跑无人值守
+workflow，不依赖交互界面。daemon 持续持锁（I3.3a：pid 探活 + 孤儿锁接管）。
 
-推进由 **hook 驱动**（非模型调工具）：模型不调任何 Orca 工具，只接收注入的节点 prompt
-并用自带 subagent 执行；hook 在 turn 结束时推进。两宿主前端（v5）：
-  - **opencode**：daemon = 主动 SSE 订阅者，连 ``opencode serve`` 的 ``/event``，见
-    ``session.next.tool.success``(tool=task)→observe、``session.idle``→next+``prompt_async``
-    注入下一 prompt（Demo 5 实测 3-turn 循环可靠）。
-  - **CC**：daemon = 被动 Unix socket，hook 脚本（Stop/PostToolUse）经 socket 调
-    observe/next（D-v4-3=b：不开 MCP stdio，模型不调 Orca 工具）。
+回答「无头 CI 怎么跑 in-session workflow？」：daemon **独占一个 run 的 tape**（ADR v3
++ 铁律 1 扩展），构造时抢 flock + 写 pid 文件 + ``Tape(resume=True)`` 半写恢复，
+``run_opencode`` 连 opencode serve SSE 自驱动推进。
 
-护栏（ADR v2 §2）：flock 独占 + pid 探活 + 仅本地 FS + ``Tape(resume=True)`` 半写恢复 +
+护栏（ADR v3 §2 I3.3a）：flock 独占 + pid 探活 + 仅本地 FS + 半写恢复 +
 宿主存活检测（孤儿锁反向）+ cleanup（atexit/SIGTERM 幂等）。
 
-不在此模块：CLI 命令面（``cli.py``）、CC hook 脚本模板（``cli.py start`` 生成）。
+不在此模块：
+  - 主 UX 路径（``cli.py bootstrap/next/stop/status/start``，per-call CLI 形态）
+  - CC hook 脚本模板（``templates/cc_hooks.py``，``cli.py start`` 生成）
+  - opencode plugin 模板（``templates/opencode/``，零业务逻辑哑传输）
 """
 
 from __future__ import annotations

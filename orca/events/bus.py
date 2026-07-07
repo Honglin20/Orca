@@ -155,6 +155,43 @@ class EventBus:
             sub._enqueue(event)
         return event
 
+    async def emit_batch(
+        self,
+        items: list[dict],
+    ) -> list[Event]:
+        """**单次 write 原子化批量 emit**（SPEC §6 / ADR v3 I2，B1 闭环）。
+
+        透传 ``Tape.append_batch``（一次 write+flush 落整批），返回构造好的 Event 列表；
+        再逐条 fan-out 到订阅者（顺序与 items 一致）。
+
+        入参：list of **不含 seq 的 event 字段 dict**（同 ``emit`` 的内部 event_data 形态）：
+            ``{"type":..., "data":..., "node":..., "session_id":..., "timestamp":...}``。
+        ``timestamp`` 缺省时由本方法填 ``time.time()``（同 ``emit``）。
+
+        用途：in-session CLI ``next`` 拿到 ``advance_step`` 的 emits 后一次原子落盘。
+        drive_loop 继续用单条 ``emit``（不增量改稳定路径，ADR 方案 E）。
+        """
+        if not items:
+            return []
+        now = time.time()
+        event_datas = [
+            {
+                "type": it["type"],
+                "timestamp": it.get("timestamp", now),
+                "node": it.get("node"),
+                "session_id": it.get("session_id"),
+                "data": it.get("data", {}),
+            }
+            for it in items
+        ]
+        seqs = await self.tape.append_batch(event_datas)
+        events = [Event(seq=seq, **ed) for seq, ed in zip(seqs, event_datas)]
+        # fan-out 在锁外（顺序与 items 一致；慢订阅者靠 per-queue 满策略保护）。
+        for sub in self._subs:
+            for event in events:
+                sub._enqueue(event)
+        return events
+
     def subscribe(self, queue_max: int = _DEFAULT_QUEUE_MAX) -> Subscription:
         """返回一个 Subscription，自带 ``asyncio.Queue`` + cursor。
 
