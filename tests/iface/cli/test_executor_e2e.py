@@ -80,6 +80,27 @@ while True:
     time.sleep(0.05)
 """
 
+# opencode 好脚本（events 模式）：prompt_channel=argv（prompt 是 argv 末尾位置参数，
+# CLIRunner argv 分支立即 close stdin，故脚本不读 stdin）。吐 opencode NDJSON part 信封——
+# step_start / text / step_finish（无 result 行；step_finish 带 tokens/cost）。
+# 对齐真实抓取 ``tests/profiles/fixtures/opencode_sample.jsonl`` 的字段结构。
+_OPENCODE_GOOD_SCRIPT = """\
+import sys
+# prompt 在 argv（runner.py:299 append），脚本忽略之；stdin 已被 CLIRunner close。
+print('{"type":"step_start","part":{"type":"step-start"}}', flush=True)
+print('{"type":"text","part":{"type":"text","text":"OK"}}', flush=True)
+print('{"type":"step_finish","part":{"type":"step-finish","tokens":{"input":11178,"output":41,"cache":{"read":43}},"cost":0.0034}}', flush=True)
+sys.exit(0)
+"""
+
+# opencode 坏脚本：只吐非 JSON 行（模拟「二进制没吐 NDJSON」）。classify events 模式
+# 走「非 stream-json」分支。
+_OPENCODE_BAD_JSON_SCRIPT = """\
+import sys
+print("检测到新版本：1.2.3，请升级", flush=True)  # 非 JSON 横幅行（被 _record_type 跳过）
+sys.exit(0)
+"""
+
 
 def _write_exec_script(tmp_path: Path, name: str, source: str) -> Path:
     """写一个 python 脚本到 tmp_path 并 chmod 0o755，返回路径。
@@ -217,6 +238,49 @@ class TestExecutorTestFullSpawnChain:
         result = runner.invoke(app, ["executor", "test", "claude"])
         assert result.exit_code == 1
         assert "二进制无法启动" in result.output
+
+    # ── opencode（events 模式）：回归 ``orca executor test opencode`` 误判 bug ────
+    # classify 原只识 claude 事件 type，opencode 的 step_start/text/step_finish 全漏识 →
+    # 「非 stream-json」。修复后 classify 按 profile.terminal.mode="events" 选 opencode
+    # 事件集 + step_finish 终止信号。此处走真 spawn 链路（argv prompt + NDJSON stdout）。
+
+    def test_opencode_good_script_passes_end_to_end(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """opencode 好脚本（吐 step_start/text/step_finish NDJSON）→ exit 0 + 端到端 OK。
+
+        全链路：opencode profile（prompt_channel=argv）→ SpawnConfig → CLIRunner argv 分支
+        （close stdin）→ readline → _record_type(收集 step_start/text/step_finish)
+        → classify(terminal_mode=events, saw_terminal=step_finish∈seen) → PASS。
+        on_result 不触发（events 模式无 result 行）——证 saw_terminal 从 seen_types 派生。
+        """
+        script = _write_exec_script(
+            tmp_path, "opencode_backend.py", _OPENCODE_GOOD_SCRIPT
+        )
+        monkeypatch.setenv("ORCA_OPENCODE_CLI", str(script))
+
+        result = runner.invoke(app, ["executor", "test", "opencode"])
+        assert result.exit_code == 0, f"stdout={result.output!r}"
+        assert "端到端 OK" in result.output
+        assert "step_finish" in result.output
+
+    def test_opencode_non_json_banner_still_fails_when_no_events(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """opencode 只吐非 JSON 横幅（模拟「nga 版本提示」污染 stdout）且无 NDJSON 事件
+        → classify events 模式走「非 stream-json」FAIL。
+
+        证非 JSON 横幅行本身无害（_record_type 跳过），FAIL 的根因是没见到任何 opencode
+        协议事件——而非横幅「污染」。即横幅只在「二进制彻底没吐 NDJSON」时才体现为失败。
+        """
+        script = _write_exec_script(
+            tmp_path, "opencode_bad.py", _OPENCODE_BAD_JSON_SCRIPT
+        )
+        monkeypatch.setenv("ORCA_OPENCODE_CLI", str(script))
+
+        result = runner.invoke(app, ["executor", "test", "opencode"])
+        assert result.exit_code == 1, f"stdout={result.output!r}"
+        assert "非 stream-json" in result.output
 
 
 # ── 配置生命周期：set → show → unset（端到端经 CLI）─────────────────────────────

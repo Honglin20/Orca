@@ -33,7 +33,7 @@ import asyncio
 import json
 import logging
 import shlex
-from typing import Any
+from typing import Any, Literal
 
 import typer
 
@@ -75,6 +75,21 @@ _VALID_FIELDS = set(_FIELD_META.keys()) | {"all"}
 
 # ── 可测性 seam：判定逻辑抽纯函数（gotcha R3）─────────────────────────────────
 
+# 各 terminal_mode 的已知协议事件 type（**诊断镜像**）：classify 据此判断 stdout 是否
+# 在吐该后端的协议流——只问「见到任意已知事件吗」，不做字段级翻译。authoritative 协议
+# 映射在 translator（``claude_translator`` / ``opencode_translator``）。判别键是
+# ``profile.terminal.mode``（单一真相源），classify 不自行重新分类协议。加新 events-mode
+# 后端时扩展本表（follow-up：把已知事件集提到 ``TerminalContract`` 让 profile 持有，
+# 彻底单一真相源——现仅 claude/opencode 两套，diagnostic 镜像可接受）。
+_STREAM_EVENT_TYPES_BY_MODE: dict[str, frozenset[str]] = {
+    "result_line": frozenset(  # claude stream-json
+        {"stream_event", "assistant", "user", "result", "system"}
+    ),
+    "events": frozenset(  # opencode NDJSON part 信封（translator 逐字映射的同 5 类）
+        {"step_start", "text", "tool_use", "step_finish", "error"}
+    ),
+}
+
 
 def classify(
     seen_types: set[str],
@@ -82,42 +97,59 @@ def classify(
     exit_code: int,
     timed_out: bool,
     stderr: str,
+    terminal_mode: Literal["result_line", "events"] = "result_line",
 ) -> tuple[bool, str]:
     """根据 CLIRunner 运行特征判定 PASS/FAIL + 人类可读消息（纯函数，单测友好）。
 
-    判定顺序（对齐 SPEC §2.4 有序错误判定）：
+    ``terminal_mode`` 取自 ``profile.terminal.mode``（单一真相源，非本函数重新分类）：
+      - ``result_line``（claude / ccr）：stdout 是 claude stream-json；**终止信号 = result 行**
+        （CLIRunner ``on_result`` 回调置 ``saw_result``）。
+      - ``events``（opencode）：stdout 是 opencode NDJSON（part 信封），**无终止行**——
+        终止信号 = 收到 ``step_finish``（usage 回报），从 ``seen_types`` 派生。
+        （opencode 每个 reasoning step 发一条 step_finish；健康检查见到一条即证端到端通。）
+
+    判定顺序（参考 SPEC §2.4 有序互斥思路；classify 是健康检查诊断，分支关注点 / 顺序
+    与 runtime executor 的 error phase 分类不同，勿逐分支对照）：
       1. ``timed_out`` → FAIL「超时」
-      2. 收到了 stream-json 事件但 ``exit_code != 0`` 且无 result 行 → FAIL「退出码非 0」
-      3. 完全没有 stream-json 协议事件 → FAIL「非 stream-json / 协议不兼容」（附 stderr 片段）
-      4. ``saw_result`` → PASS「端到端 OK」
-      5. 有事件、exit=0 但无 result → PASS + warn「流正常但未收到 result 行」
+      2. 收到协议事件但 ``exit_code != 0`` 且无终止信号 → FAIL「退出码非 0」
+      3. 完全没有协议事件 → FAIL「非 stream-json / 协议不兼容」（附 stderr 片段）
+      4. 收到终止信号 → PASS「端到端 OK」
+      5. 有事件、exit=0 但无终止信号 → PASS + warn「流正常但未收到 <终止标记>」
 
     Args:
         seen_types: 本次运行观察到的 stdout 行顶层 ``type`` 集合。
-        saw_result: 是否检测到 ``type=result`` 行。
+        saw_result: 是否检测到终止信号。result_line 模式 = ``type=result`` 行（on_result
+            回调）；events 模式此参恒 False（opencode 无 result 行），classify 改从
+            ``seen_types`` 派生 ``step_finish``。
         exit_code: 子进程退出码（``-1`` = 未知 / 被强杀）。
         timed_out: 是否触发超时。
         stderr: 子进程 stderr（用于 FAIL 消息诊断）。
+        terminal_mode: profile 的终止契约模式，决定协议事件集 + 终止信号语义。
     """
     if timed_out:
         return False, f"✗ 超时（{int(_TEST_WALL_CLOCK_TIMEOUT)}s 内未完成）"
 
-    # stream-json 协议已知事件 type（出现任意一个即认定二进制在吐 stream-json）。
-    stream_event_types = {"stream_event", "assistant", "user", "result", "system"}
-    has_stream_events = bool(seen_types & stream_event_types)
+    known_types = _STREAM_EVENT_TYPES_BY_MODE[terminal_mode]
+    has_stream_events = bool(seen_types & known_types)
 
-    if has_stream_events and exit_code != 0 and not saw_result:
-        return False, f"✗ 退出码 {exit_code}（未收到 result 行，疑似错误退出）"
+    # 终止信号：result_line→result 行（saw_result）；events→step_finish（seen_types 派生）。
+    saw_terminal = saw_result or (
+        terminal_mode == "events" and "step_finish" in seen_types
+    )
+
+    if has_stream_events and exit_code != 0 and not saw_terminal:
+        return False, f"✗ 退出码 {exit_code}（未收到完成信号，疑似错误退出）"
 
     if not has_stream_events:
         snippet = stderr.strip()[:500] if stderr.strip() else "<无 stderr 输出>"
         return False, f"✗ 非 stream-json / 协议不兼容。stderr：{snippet}"
 
-    if saw_result:
-        return True, "✓ 端到端 OK（收到 result 行）"
+    marker = "step_finish 行" if terminal_mode == "events" else "result 行"
+    if saw_terminal:
+        return True, f"✓ 端到端 OK（收到 {marker}）"
 
-    # 有事件、exit=0、无 result：流是活的但 result 行丢失——判 PASS + warn（疑似降级）。
-    return True, "✓ PASS（warn：流正常但未收到 result 行）"
+    # 有事件、exit=0、无终止信号：流是活的但终止标记丢失——判 PASS + warn（疑似降级）。
+    return True, f"✓ PASS（warn：流正常但未收到 {marker}）"
 
 
 def _record_type(line: str, seen_types: set[str]) -> None:
@@ -418,9 +450,11 @@ def list_profiles() -> None:
 def test_binary(
     profile: str = typer.Argument("claude", help="要测试的 profile 名"),
 ) -> None:
-    """真起一个子进程，验证 ``profile`` 的 binary 能吐 claude stream-json。
+    """真起一个子进程，验证 ``profile`` 的 binary 能吐该 profile 的协议流。
 
-    复用 ``SpawnConfig`` + ``CLIRunner``（无需 AgentNode）。判定逻辑见 ``classify``。
+    claude / ccr 走 ``result_line``（stream-json + result 终止行）；opencode 走 ``events``
+    （NDJSON part 信封，step_finish 报 usage，无终止行）。复用 ``SpawnConfig`` + ``CLIRunner``
+    （无需 AgentNode）；``classify`` 据 ``profile.terminal.mode`` 选协议事件集与终止信号。
     """
     bootstrap_config()
     # 延迟 import：避免模块导入期触发 exec 依赖（对齐 commands.py 的延迟 import 纪律）。
@@ -465,7 +499,9 @@ def test_binary(
         # 外层 wall-clock 兜底（gotcha G4）：子进程永不退出但持续吐行（绕过逐行 timeout）。
         runner = holder.get("runner")
         stderr = runner.stderr if runner is not None else ""
-        verdict, msg = classify(seen_types, saw_result, -1, True, stderr)
+        verdict, msg = classify(
+            seen_types, saw_result, -1, True, stderr, p.terminal.mode
+        )
         typer.echo(msg)
         raise typer.Exit(code=0 if verdict else 1)
     except (FileNotFoundError, PermissionError, OSError) as e:
@@ -483,7 +519,12 @@ def test_binary(
     internal_timed_out = runner.timed_out if runner is not None else False
 
     verdict, msg = classify(
-        seen_types, saw_result, exit_code, internal_timed_out, stderr
+        seen_types,
+        saw_result,
+        exit_code,
+        internal_timed_out,
+        stderr,
+        p.terminal.mode,
     )
     typer.echo(msg)
     raise typer.Exit(code=0 if verdict else 1)

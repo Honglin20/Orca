@@ -265,6 +265,49 @@ class TestClassify:
         assert "x" * 500 in msg
         assert "x" * 600 not in msg
 
+    # ── events 模式（opencode：NDJSON part 信封，无 result 行）─────────────────
+    # terminal_mode="events" 走 opencode 协议事件集 + step_finish 终止信号。
+    # 回归 ``orca executor test opencode`` 误判「非 stream-json」的 bug：classify
+    # 原只识 claude 事件 type，opencode 的 step_start/text/step_finish 全部漏识。
+
+    def test_events_mode_step_finish_pass(self):
+        # 收到 step_finish → 终止信号就位 → 端到端 OK（即使 saw_result=False、无 result 行）
+        ok, msg = classify(
+            {"step_start", "text", "step_finish"}, False, 0, False, "", "events"
+        )
+        assert ok is True
+        assert "端到端 OK" in msg
+        assert "step_finish" in msg
+
+    def test_events_mode_text_no_step_finish_pass_warn(self):
+        # 有 events 事件、exit=0、但无 step_finish → PASS + warn（流活但终止标记丢失）
+        ok, msg = classify(
+            {"step_start", "text"}, False, 0, False, "", "events"
+        )
+        assert ok is True
+        assert "未收到 step_finish" in msg
+
+    def test_events_mode_no_events_fail(self):
+        # 完全没有协议事件 → 非 stream-json（opencode 二进制没吐 NDJSON）
+        ok, msg = classify(set(), False, 0, False, "", "events")
+        assert ok is False
+        assert "非 stream-json" in msg
+
+    def test_events_mode_claude_types_not_recognized(self):
+        # 反证：claude 的 result/stream_event 在 events 模式不属已知集 → 非 stream-json。
+        # 锁住「mode 决定协议事件集」，classify 不是把两套 type 混在一起。
+        ok, msg = classify(
+            {"result", "stream_event"}, False, 0, False, "", "events"
+        )
+        assert ok is False
+        assert "非 stream-json" in msg
+
+    def test_events_mode_text_nonzero_exit_no_step_finish_fail(self):
+        # 有 events 事件但 exit!=0 且无 step_finish → 退出码 FAIL（区别于「非 stream-json」）
+        ok, msg = classify({"text"}, False, 1, False, "", "events")
+        assert ok is False
+        assert "退出码 1" in msg
+
 
 # ── executor set / unset（三维 + scope）────────────────────────────────────────
 
