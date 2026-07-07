@@ -17,6 +17,9 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-07-07] CLI `list` 与 MCP `list_workflows` 统一（catalog 同源）
+CLI `list` 子命令委托 MCP 同源的 `catalog.list_workflows()`（按 `wf.name` 扫 `./workflows` + `~/.orca/workflows`，first-wins），删旧 `--dir` 扫 `./examples` 按文件名逻辑（接口统一铁律：全量替换）。CLI 与 MCP 现在看到完全一致的 workflow 列表。详见 [release note](releases/2026-07-07-cli-list-mcp-unify.md)。
+
 ## [2026-07-07] phase-10 MCP v4（9 工具 + setup/execute 分相 + Result 信封）
 server.py 重写：6 旧工具（含 resolve_gate）→ 9 v4 工具（Discovery 4 + Lifecycle 3 + History 2）；setup/execute 分相（workflow.setup 字段 + compile validator execute phase 拦截 ask_user/gate + setup phase 结构约束）；三重杠杆防跳过 setup；Result 信封（kind 是 ErrorKind 值，无 layer）；新增 catalog / setup_phase / agent_catalog / tape_index 模块。Commit: df563f4。详见 [release note](releases/2026-07-07-phase-10-mcp-v4.md)。
 

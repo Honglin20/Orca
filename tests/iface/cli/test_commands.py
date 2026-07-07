@@ -187,26 +187,80 @@ class TestValidateCommand:
 
 
 class TestListCommand:
-    """``orca list`` 子命令：列目录 / 空目录 / 不存在目录。"""
+    """``orca list`` 子命令：与 MCP ``list_workflows`` 同源（catalog 驱动，按 name）。
 
-    def test_list_lists_yaml_files(self, tmp_path):
-        (tmp_path / "a.yaml").write_text("name: a\n", encoding="utf-8")
-        (tmp_path / "b.yaml").write_text("name: b\n", encoding="utf-8")
-        (tmp_path / "not_yaml.txt").write_text("x", encoding="utf-8")
-        result = runner.invoke(app, ["list", "--dir", str(tmp_path)])
+    monkeypatch ``catalog._workflow_dirs`` 指向 tmp_path 隔离，避免读到真实
+    ``./workflows`` / ``~/.orca/workflows``。
+    """
+
+    SIMPLE = (
+        "name: simple\n"
+        "description: 简单 workflow\n"
+        "entry: a\n"
+        "nodes:\n"
+        "  - name: a\n"
+        "    kind: script\n"
+        '    command: "echo hi"\n'
+        "    routes:\n"
+        "      - to: $end\n"
+    )
+    SETUP = (
+        "name: setup_demo\n"
+        "description: 带 setup\n"
+        "setup:\n"
+        "  - name: collector\n"
+        "    kind: agent\n"
+        '    prompt: "collect"\n'
+        "entry: a\n"
+        "nodes:\n"
+        "  - name: a\n"
+        "    kind: script\n"
+        '    command: "echo hi"\n'
+        "    routes:\n"
+        "      - to: $end\n"
+    )
+
+    def test_list_shows_workflow_names(self, tmp_path, monkeypatch):
+        wf_dir = tmp_path / "workflows"
+        wf_dir.mkdir()
+        (wf_dir / "simple.yaml").write_text(self.SIMPLE, encoding="utf-8")
+        monkeypatch.setattr(
+            "orca.iface.mcp.catalog._workflow_dirs", lambda: [wf_dir]
+        )
+
+        result = runner.invoke(app, ["list"])
+
         assert result.exit_code == EXIT_OK
-        assert "a.yaml" in result.stdout
-        assert "b.yaml" in result.stdout
-        assert "not_yaml.txt" not in result.stdout
+        assert "simple" in result.stdout
+        assert "简单 workflow" in result.stdout
+        # 按 name 列出，不输出文件名
+        assert "simple.yaml" not in result.stdout
 
-    def test_list_empty_dir_note(self, tmp_path):
-        result = runner.invoke(app, ["list", "--dir", str(tmp_path)])
+    def test_list_marks_has_setup(self, tmp_path, monkeypatch):
+        wf_dir = tmp_path / "workflows"
+        wf_dir.mkdir()
+        (wf_dir / "setup.yaml").write_text(self.SETUP, encoding="utf-8")
+        monkeypatch.setattr(
+            "orca.iface.mcp.catalog._workflow_dirs", lambda: [wf_dir]
+        )
+
+        result = runner.invoke(app, ["list"])
+
         assert result.exit_code == EXIT_OK
-        assert "无" in result.stdout  # 「（X 下无 .yaml 文件）」
+        assert "setup_demo" in result.stdout
+        assert "⚙setup" in result.stdout
 
-    def test_list_nonexistent_dir_exits_two(self, tmp_path):
-        result = runner.invoke(app, ["list", "--dir", str(tmp_path / "nope")])
-        assert result.exit_code == EXIT_ARG_OR_VALIDATE
+    def test_list_empty_note(self, tmp_path, monkeypatch):
+        wf_dir = tmp_path / "workflows"
+        wf_dir.mkdir()
+        monkeypatch.setattr(
+            "orca.iface.mcp.catalog._workflow_dirs", lambda: [wf_dir]
+        )
+
+        result = runner.invoke(app, ["list"])
+
+        assert result.exit_code == EXIT_OK
+        assert "无可用 workflow" in result.stdout
 
 
 # ── run 命令：退出码边界（不真跑 TUI，只验校验前置）────────────────────────

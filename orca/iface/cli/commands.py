@@ -285,21 +285,29 @@ def validate(
 
 
 @app.command(name="list")
-def list_workflows(
-    examples_dir: Path = typer.Option(
-        Path("examples"), "--dir", help="扫描的 workflow 目录（默认 ./examples）",
-    ),
-) -> None:
-    """列出目录下的 workflow yaml 文件。"""
-    if not examples_dir.is_dir():
-        typer.echo(f"目录不存在：{examples_dir}", err=True)
-        raise typer.Exit(code=EXIT_ARG_OR_VALIDATE)
-    yamls = sorted(p for p in examples_dir.glob("*.yaml"))
-    if not yamls:
-        typer.echo(f"（{examples_dir} 下无 .yaml 文件）")
+def list_workflows() -> None:
+    """列出可用 workflow（按 name，与 MCP ``list_workflows`` 同源）。
+
+    扫描 ``./workflows`` + ``~/.orca/workflows``（first-wins，project-local 优先），
+    按 workflow 的 ``name`` 字段列出——与 MCP 壳的 ``list_workflows`` 走**同一个**
+    ``catalog.list_workflows``，保证 CLI 与 MCP 看到的一致（接口统一铁律）。
+
+    匹配键是 ``wf.name`` 不是文件名：``my_setup.yaml`` 里 ``name: setup_demo``
+    会以 ``setup_demo`` 列出。加载失败的 yaml 跳过（catalog 内部 log warning）。
+    """
+    # 延迟 import：catalog 属 iface/mcp 子包，按本模块依赖边界不在顶层引入；
+    # 仅 ``list`` 命令需要，函数内取用（catalog 本身轻量，只依赖 compile+schema）。
+    from orca.iface.mcp.catalog import list_workflows as _catalog_list
+
+    items = _catalog_list()
+    if not items:
+        typer.echo("（无可用 workflow；扫描了 ./workflows + ~/.orca/workflows）")
         return
-    for p in yamls:
-        typer.echo(f"  {p.name}")
+    typer.echo("可用 workflow（./workflows + ~/.orca/workflows）：")
+    for it in items:
+        marker = " ⚙setup" if it.get("has_setup") else ""
+        desc = it.get("description") or ""
+        typer.echo(f"  {it['name']}{marker}  {desc}".rstrip())
 
 
 # ── executor 子命令组（后端二进制配置与健康检查）──────────────────────────────
