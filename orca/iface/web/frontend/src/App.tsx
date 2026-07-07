@@ -1,8 +1,8 @@
 // App.tsx —— 单 run 根（SPEC §4 / §8 删除多 run 外壳）。
 //
 // 单 run/页：URL ``/runs/:runId`` 是唯一详情路由；``/`` 重定向到「最新 active run」
-// （Chunk A 占位：临时显示「无活跃 run」提示，列表/选择 UI 后置）。**无** RunsListPage /
-// NewRunPage / RunsSidebar（已删，SPEC §8）。
+// （Chunk A 占位：临时显示「无活跃 run」提示，列表/选择 UI 后置）。多 run 外壳
+// （run 列表页 / 侧栏 / 轮询 hook）已删，SPEC §8。
 //
 // GateDialog 挂在根（SPEC §5.6）：human_decision_requested → 中心模态浮层。
 
