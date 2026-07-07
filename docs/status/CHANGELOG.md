@@ -16,10 +16,14 @@
 ---
 
 ## [2026-07-07] create-workflow skill + orca skill install + headless benchmark —— 通用 workflow 生成/转换 skill（吃描述或既有素材 → 归一化 DAG → Orca YAML+agent md，强制 orca validate 闭环），显式装 CC+opencode 两边；16 case 公平 headless benchmark + harness，评测闭环从 8/16 → 16/16，抽象 H1-H7 通用规则
-- commit: <待填>
+- commit: `09fd7a8`
 - 详情：[release note](../releases/2026-07-07-create-workflow-skill.md)
 
 <!-- 新条目加在这里（本行下方）-->
+
+## [2026-07-07] in-session shell（hook 驱动，宿主主 session 执行 workflow）—— 第四种执行驱动模式：宿主（opencode/CC）主 session 用自带 subagent 跑每个节点，Orca daemon 独占 tape + `observe`/`next` 单一接口 + `session.idle`/Stop hook 自动推进（立项、CCW 一致）。纯增量（drive_loop/from_tape/三壳零改），daemon 经 `advance_step` 原子决策、flock 独占 + 半写恢复 + 仅本地 FS（铁律 1 扩展走 ADR）。opencode serve 模式端到端验证：3 节点 `completed`、tape 事件序列与 `orca run` 逐 seq 对齐、并发两 run 隔离。v1：opencode serve + CC、仅 agent 节点（parallel/foreach/gate fail loud 走 TUI/Web）。
+- commit: <待填>
+- 详情：[release note](../releases/2026-07-07-in-session-shell.md)
 
 ## [2026-07-07] phase-16 —— AgentHistory 单流重构（CC 风格 inline + 工具配对折叠）
 AgentHistory 从「两区」（RichLog 摘要 + 独立 detail 面板）重构为**单条 RichLog inline 流**：tool_call+tool_result 按 `tool_call_id` 配对成一条 entry（就地升级保 seq/位置，避 `_selected_seq` dangling）；message bold+主题色 / thinking dim italic / tool `✓/…/✗` icon 视觉分级；Enter 全量 reflow（detail 内联）。删 `#agent-history-detail*` DOM（铁律 #7 无兼容路径）。reducer fold 顺序无关（`_pending_results` 缓冲）。28 单测 + 3 真 tape boot smoke + 1 phase-12 e2e 断言回填；mxint report_painter 79 events fold 30.9ms（< 300ms SPEC §7 标准）。详见 [release note](releases/2026-07-07-phase-16-agent-history-single-stream.md)。

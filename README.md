@@ -200,6 +200,57 @@ python scripts/run_skill_benchmark.py 01 11          # 跑指定 case
 
 ---
 
+## in-session shell（宿主主 session 执行 workflow）
+
+前三壳（CLI/Web/MCP）都是 Orca 起子进程跑 workflow。**in-session shell 反过来**：宿主（opencode / Claude Code）的**主 session 用自带 subagent 执行每个节点**，Orca daemon 只独占 tape + 确定性算下一步 + hook 自动推进。体验等价 CCW，真相源仍是 Orca 单 tape。
+
+**适用**：想让"你正在对话的主 session"亲自跑完整 workflow（保留主 session 上下文、用宿主原生 subagent），而非 fire-and-forget 给 Orca 子进程。
+
+### 安装（opencode 主目标）
+
+in-session shell 无需单独安装——它是 `orca` CLI 的内置子命令组（`orca in-session ...`），随 `orca` 一起装。前置：装好 `orca`（见上方"安装"）+ 配好 opencode（`opencode` 二进制 + provider auth）。
+
+### 使用（opencode serve 模式，v1）
+
+```bash
+# 1) 起 opencode headless server（daemon 经它的 /event SSE 自驱动）
+opencode serve --port 4097 &                       # 设 OPENCODE_SERVER_PASSWORD
+
+# 2) 建一个 opencode session，拿到 session id
+SID=$(curl -s -u opencode:pw -X POST http://127.0.0.1:4097/session -d '{}' \
+      -H "Content-Type: application/json" | jq -r .id)
+
+# 3) 起 Orca in-session daemon：读 workflow、独占 tape、连 opencode 自驱动推进
+orca in-session serve \
+  --yaml my_workflow.yaml --tape runs/r1.jsonl --run-id r1 \
+  --opencode-url http://127.0.0.1:4097 --session "$SID" \
+  --model deepseek/deepseek-v4-flash --opencode-auth opencode:pw
+
+# 4) 看进度（任意时刻）
+orca in-session status r1
+```
+
+daemon 启动即注入首节点 prompt，主 session 用 subagent 执行；每节点 turn 结束（`session.idle`）daemon 自动记 tape + 算下一节点 + 注入下一 prompt，直到 `workflow_completed`。
+
+### 命令面
+
+| 命令 | 用途 |
+|---|---|
+| `orca in-session serve --yaml --tape --run-id --opencode-url --session --model --opencode-auth` | daemon 入口（opencode 前端自驱动；一般由上面流程起） |
+| `orca in-session status [<run_id>]` | 读 tape 报 workflow 进度；省略 run_id 列全部 run |
+| `orca validate <wf.yaml>` | 前置校验 workflow（in-session v1 仅支持 agent 节点；parallel/foreach/gate 会 fail loud 指引走 TUI/Web） |
+
+### 设计与约束
+
+- **hook 驱动**（立项、CCW 一致）：模型不调任何 Orca 工具，由 `session.idle` 事件自动推进（opencode）/ `Stop` hook（CC）。
+- **daemon 单一接口** `observe`/`next`（对内委托 `advance_step` 原子），两宿主映射同一对操作。
+- **独占 tape**（flock + pid 探活 + 半写恢复 + 仅本地 FS），崩溃可 `resume` 续跑。
+- v1 范围：opencode **serve 模式**（交互 TUI 列 follow-up）、CC Stop hook；不支持 parallel/foreach/gate（走 TUI/Web）。
+
+详见 [设计草稿](docs/specs/in-session-shell-design-draft.md) + [铁律 1 扩展 ADR](docs/specs/2026-07-07-in-session-iron-law-1-adr.md)。
+
+---
+
 ## Web UI
 
 ```bash

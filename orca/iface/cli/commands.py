@@ -328,6 +328,17 @@ from orca.iface.cli.skill_cmds import app as skill_app
 app.add_typer(skill_app, name="skill", help="安装/管理随包 Orca skill（create-workflow）")
 
 
+# ── in-session 子命令组（in-session shell v5：hook-driven）──────────────────
+# sub-Typer：同 executor/skill 模式。in_session.cli 顶层只 import typer + compile +
+# run.lifecycle（轻量），无循环；bg_runner 用 lazy import（见 cli._default_tape_path）。
+from orca.iface.in_session.cli import app as in_session_app
+
+app.add_typer(
+    in_session_app, name="in-session",
+    help="in-session shell：宿主主 session（opencode/CC）执行 workflow，daemon 独占 tape + hook 驱动推进",
+)
+
+
 # ── ps / logs / wait 子命令（phase 11 §8 P3.2 daemon）─────────────────────────
 
 
