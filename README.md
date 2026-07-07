@@ -102,20 +102,33 @@ uv run orca list                # 列出可用 workflow
 - 退出码：completed→`0` / failed→`1` / 参数或校验错→`2`。
 - `orca run` 默认进 Textual TUI（DAG 树 / 日志流 / 答 gate）。无 TTY 自动提示用 `--background`。
 
-### 后端二进制配置（`orca executor`）
+### 后端命令配置（`orca executor`）—— 唯一真相源
 
-换 agent 后端 binary（如 `claude -p` → `ccr code -p`），**设一次、全局生效**——不用每次命令前缀 env、不用改 shell rc：
+每个 backend 最终拼出的命令（binary + flags + prompt 投递方式）**完整可见、任意可改**——换平台不用改 profile 源码。`show` 是**唯一真相源**：打印生效 argv + 每字段来源（env / 项目 / 用户 / default）。
 
 ```bash
-orca executor set claude "ccr code"   # 写 ~/.orca/config.json，之后所有 orca run 都 spawn ccr code
-orca executor test claude             # 真起子进程自检：✓ 端到端 OK / ✗ 给出原因（未装/协议不兼容/无 key）
-orca executor show                    # 看每个 profile 的 default / effective binary / env 名
-orca executor list                    # 列可用 profile + override 标记
-orca executor unset claude            # 清除 override，恢复 default
+orca executor show [profile]          # 生效命令（唯一真相源）+ 每字段来源标注
+orca executor set <profile> \         # 三维任组，写完回打生效命令
+    [--binary <path>] [--flags "<s>"] [--prompt-channel <stdin|argv>] [--scope project|user]
+orca executor unset <profile> [binary|flags|prompt_channel|all] [--scope ...]
+orca executor list                    # 列可用 profile + 标 * 哪个被 override
+orca executor test <profile>          # 真起子进程自检：✓ 端到端 OK / ✗ 给出原因（未装/协议不兼容/无 key）
 ```
 
-- **优先级**：shell env > config 文件 > profile default。临时覆盖单次：`ORCA_CLAUDE_CLI=claude orca run ...`（显式 `export` 永远赢 config）。
-- **覆盖范围**：同协议 binary 替换（`ccr code` / `claude-ds-flash` / 不同路径的 `claude`）。异协议后端（codex/opencode）需新增 profile + translator（见 [`docs/releases/2026-07-02-executor-config.md`](docs/releases/2026-07-02-executor-config.md)）。
+换平台示例（本仓的 opencode 后端换成 `nga`，且它不带 `--dangerously-skip-permissions`）：
+
+```bash
+orca executor set opencode --binary nga --flags "run --format json"   # 默认 --scope project
+orca executor show opencode
+#   binary   nga              ← 项目  (default: opencode)
+#   flags    run --format json  ← 项目  (default: run --format json --dangerously-skip-permissions)
+# ▶ 生效命令（唯一真相源）:
+#   nga run --format json "<prompt>" [--model <node.model>]
+```
+
+- **优先级**（per-profile per-field，多 fallback 生效只一份）：`shell env` > 项目 `.orca/config.json` > 用户 `~/.orca/config.json` > profile default。临时覆盖单次：`ORCA_OPENCODE_CLI=nga orca run ...`（显式 `export` 永远赢 config）。
+- **两层 config**：项目级 `.orca/config.json`（跟仓库走，可 check-in 共享）per-field 覆盖用户级 `~/.orca/config.json`（个人默认）。`--scope project|user` 选写哪层（默认 project）。
+- **可改范围**：spawn 参数（binary / flags / prompt_channel）。`flags` 规范存 list（`["run","--format","json"]`），`--flags` 输入串自动 shlex 拆 list。**协议参数**（translator / 终态契约 / 事件格式）改了会破坏解析，仍需新增 profile + translator（见 [`docs/releases/2026-07-02-executor-config.md`](docs/releases/2026-07-02-executor-config.md) + [`2026-07-07-executor-cli-extend.md`](docs/releases/2026-07-07-executor-cli-extend.md)）。
 - `pip install` 后直接 `orca executor ...` 即可，无需 `uv run`。
 
 ### 后台 / 续跑（phase 11）
