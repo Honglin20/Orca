@@ -42,9 +42,8 @@ export function selectAgents(state: WorkflowState): AgentRow[] {
 // 输出按 seq 升序的事件分组（每 node 一个数组）。retry/foreach 多 session_id 在同 node
 // 内合并（细分隔符是渲染层职责，本 selector 只输出按 (node, seq) 排序的事件流）。
 //
-// 「orphan tool_result」（无对应 call）在本 selector 不进 conversation——渲染层决定是否
-// 进 LogStream warn。本 selector 输出**全部** events 供视图分类；orphan 判定是视图层关注点
-// （DiffView/ToolCallMessage 内做）。
+// 「orphan tool_result」（无对应 call）在本 selector 不剔除——保留全部 conversation 相关
+// 事件供视图分类；orphan 判定 + 剔除在视图层 ``buildEntries`` 内做（warn + 跳过）。
 export interface ConversationGroup {
   node: string;
   events: WebEvent[];
@@ -61,43 +60,91 @@ export function selectConversation(
   // 仅取该 node 的 conversation-相关事件，按 seq 升序（state.events 已是 seq-sorted）。
   // SPEC §5.3：foreach_* / retry_* / interrupt_* / validator_* / wait_* 在 conversation 内
   // dim 渲染——故纳入 conversation 事件集（dim 是渲染层决定，本 selector 只输出事件流）。
-  const convTypes = new Set<WebEvent["type"]>([
-    "prompt_rendered",
-    "agent_thinking",
-    "agent_message",
-    "agent_tool_call",
-    "agent_tool_result",
-    "agent_step_started",
-    "dialog_started",
-    "dialog_message",
-    "dialog_ended",
-    "node_started",
-    "node_completed",
-    "node_failed",
-    "node_skipped",
-    "retry_started",
-    "retry_succeeded",
-    "retry_exhausted",
-    "interrupt_requested",
-    "interrupt_resolved",
-    "validator_started",
-    "validator_passed",
-    "validator_failed",
-    "wait_started",
-    "wait_completed",
-    "foreach_started",
-    "foreach_item_started",
-    "foreach_item_completed",
-    "foreach_completed",
-    "custom",
-    "workflow_failed",
-    "unknown_event",
-  ]);
-  const events = state.events.filter(
-    (e) => e.node === nodeId && convTypes.has(e.type)
-  );
+  //
+  // **workflow_failed** 特例：make_workflow_failed 在编排层把责任 node 写入 ``data.node``
+  // （top-level ``e.node`` 仍为 null，对齐 schema/event.py 注释）。SPEC §5.3 要求它进
+  // conversation 红 block —— 故同时按 top-level ``e.node`` 或 ``data.node`` 匹配。
+  // 这是 tape 字段的合法读取（不是视图层重派生），符合铁律 1。
+  const events = state.events.filter((e) => {
+    if (!CONVERSATION_TYPES.has(e.type)) return false;
+    if (e.node === nodeId) return true;
+    if (e.type === "workflow_failed") {
+      const dn = e.data?.node;
+      return typeof dn === "string" && dn === nodeId;
+    }
+    return false;
+  });
   return { node: nodeId, events };
 }
+
+/**
+ * 选择当前节点是否应显示 ▎ 流式光标（SPEC §5.3 闭 review #4）。
+ *
+ * IFF：
+ *   1. ``state.status == "running"``（非 running 终态——completed/failed/cancelled/idle——
+ *      都不显）
+ *   2. 该 node 最后一个 conversation 事件是 ``agent_message`` / ``agent_thinking``
+ *      （隐含：其后无 ``agent_tool_call`` / ``agent_tool_result`` / ``node_completed``
+ *      ——若有，那些事件 seq 更大、会出现在末尾，从而取代 message/thinking 成为 last）
+ *
+ * 实现只看 last event：state.events 已 seq 升序，filter 后末尾就是 max-seq 事件。
+ * 若末尾是 message/thinking → 其后必无 tool/result/node_completed（它们 seq 更大但
+ * 没出现，说明未发生）。
+ */
+export function selectStreamingCursor(
+  state: WorkflowState,
+  nodeId: string | null | undefined
+): boolean {
+  if (state.status !== "running") return false;
+  if (!nodeId) return false;
+  const events = state.events;
+  // 从末尾向前找该 node 的最后一条 conversation 事件（O(k)，k 通常小）
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    const matches =
+      e.node === nodeId ||
+      // workflow_failed 可能以 data.node 关联（见 selectConversation 注释）
+      (e.type === "workflow_failed" && e.data?.node === nodeId);
+    if (!matches) continue;
+    if (!CONVERSATION_TYPES.has(e.type)) continue;
+    return e.type === "agent_message" || e.type === "agent_thinking";
+  }
+  return false;
+}
+
+/** 进 conversation 的事件集合（DRY：selectConversation / selectStreamingCursor 共用）。 */
+const CONVERSATION_TYPES = new Set<WebEvent["type"]>([
+  "prompt_rendered",
+  "agent_thinking",
+  "agent_message",
+  "agent_tool_call",
+  "agent_tool_result",
+  "agent_step_started",
+  "dialog_started",
+  "dialog_message",
+  "dialog_ended",
+  "node_started",
+  "node_completed",
+  "node_failed",
+  "node_skipped",
+  "retry_started",
+  "retry_succeeded",
+  "retry_exhausted",
+  "interrupt_requested",
+  "interrupt_resolved",
+  "validator_started",
+  "validator_passed",
+  "validator_failed",
+  "wait_started",
+  "wait_completed",
+  "foreach_started",
+  "foreach_item_started",
+  "foreach_item_completed",
+  "foreach_completed",
+  "custom",
+  "workflow_failed",
+  "unknown_event",
+]);
 
 // ── selectCharts：custom(kind=chart) → ChartsView（D3 / D7）──────────────────────
 export interface ChartEntry {

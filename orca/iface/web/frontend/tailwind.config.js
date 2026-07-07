@@ -16,6 +16,10 @@ export default {
           skipped: "#a78bfa", // violet-400
         },
       },
+      animation: {
+        // 用于 tool pending icon（⟳）的慢速旋转——avoid Tailwind `animate-spin`（太快）
+        "spin-slow": "spin 2s linear infinite",
+      },
     },
   },
   plugins: [],

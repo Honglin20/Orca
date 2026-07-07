@@ -15,14 +15,22 @@
   },
   "dependencies": {
     "@dagrejs/dagre": "^3.0.0",
+    "@types/prismjs": "^1.26.6",
     "@xyflow/react": "^12.11.1",
     "immer": "^11.1.8",
+    "katex": "^0.17.0",
+    "prismjs": "^1.30.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
     "react-resizable-panels": "^2.1.7",
     "react-router-dom": "^6.28.0",
     "react-window": "^2.2.7",
     "recharts": "^3.9.1",
+    "rehype-katex": "^7.0.1",
+    "rehype-prism-plus": "^2.0.2",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
     "zustand": "^5.0.2"
   },
   "devDependencies": {

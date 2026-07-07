@@ -78,7 +78,12 @@ export function RunDetailPage() {
               ))}
             </div>
             <div className="flex-1 overflow-auto">
-              {tab === "conversation" && <ConversationView nodeId={selectedNode} />}
+              {tab === "conversation" && (
+                <ConversationView
+                  nodeId={selectedNode}
+                  onChartClick={() => setTab("charts")}
+                />
+              )}
               {tab === "charts" && <ChartsView />}
             </div>
           </div>
