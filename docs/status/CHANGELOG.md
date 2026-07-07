@@ -15,6 +15,12 @@
 
 ---
 
+## [2026-07-07] web-shell-v2 B1/B2 —— opencode translator lossless + reasoning exposure
+
+按 SPEC §3.2 + §11 step1 实现 web-v2 后端硬前置：opencode translator lossless（reasoning→agent_thinking / step_start→agent_step_started / step_finish 加 reasoning_tokens / 未知→unknown_event）+ EventType 加 2 项 + 全消费者 grep 审计（reducer no-op、LogStream/EventVISIBILITY/AgentHistory/summary 加 arm）+ B2 supports_reasoning opt-in + reasoning_flags_env env 注入（ORCA_OPENCODE_REASONING_FLAGS，默认 off）+ fixture 扩到 9 行。1758 passed / 0 新回归。Commit: `c3a738f`。详见 [release note](../releases/2026-07-07-web-b1-b2-translator-lossless.md)。
+
+---
+
 ## [2026-07-07] in-session shell v8 —— 入口换 messages.transform + doctor 自检 + start 落 opencode 模板
 
 按 SPEC v8（§2.6/§2.6.1/§2.6.2/§2.7）实现 v7→v8 增量。v7 CLI 大脑零改；本轮重写 plugin

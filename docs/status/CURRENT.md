@@ -7,6 +7,42 @@
 
 ---
 
+## ✅ 侧任务完成（2026-07-07）：web-shell-v2 B1/B2 —— opencode translator lossless + reasoning exposure
+
+按 SPEC §3.2 + §11 step1 实现 web-v2 后端硬前置（shell 无关）。
+
+**B1 translator lossless**（`orca/profiles/translators/opencode.py`）：reasoning→`agent_thinking`；
+step_start→新 `agent_step_started`；step_finish 扩 `reasoning_tokens`；未知 envelope→新
+`unknown_event{raw, source}`。EventType 加 2 项（37→39）。新类型在 reducer 显式 no-op
+（D8：agent_step_started / unknown_event 绝不投影 RunState）。
+
+**EventType grep 审计（SPEC §11 step1）**：reducer / projections / accumulator / TUI app.py /
+LogStream / EVENT_VISIBILITY / AgentHistory / _event_summary 全部加 arm 或确认 default-no-op
+安全；新加回归测试 `TestWebV2B1NewTypesThroughConsumers`（tape 含新类型经全消费者无 crash
++ 幂等）。
+
+**B2 reasoning 暴露**：`ProviderCapabilities` +`supports_reasoning: bool = False`（opt-in）；
+`CliProfile` +`reasoning_flags_env` + `resolve_reasoning_args()`（三态 env 注入）；
+`builtin/opencode.py` 设 `supports_reasoning=True` +
+`reasoning_flags_env="ORCA_OPENCODE_REASONING_FLAGS"`；`_build_spawn_config` 追加到 extra_args
+末尾（与 `--model` 同路径，顺序：--model → reasoning）。
+
+**fixture**（`tests/profiles/fixtures/opencode_sample.jsonl`）：7→9 行，含 reasoning capture
+（deepseek-v4-flash --thinking 真抓取脱敏）+ experimental envelope。
+
+**测试**：1758 passed / 0 新回归（baseline 1751 + 7 新增；唯一 fail 是预存 B-8
+`daemon.py:105`，与本任务无关）。详见 [release note](../releases/2026-07-07-web-b1-b2-translator-lossless.md)
++ [SPEC §3.2](../specs/web-shell-v2-spec.md)。**Commit**：`c3a738f`（branch
+`phase13-in-session-v8`）。
+
+**遗留 follow-up**（不阻塞下一阶段）：
+- 🔵 `reasoning_tokens` aggregation：B1 仅 capture；`UsageSummary` 加字段 + projections
+  读取 + TUI Header 显累加留给后续阶段
+- 🔵 D1 codegen（event.py → events.ts）+ CI grep：前端任务，B1 后置
+- 🔵 `--thinking` 真链路 E2E（opencode+deepseek-v4-flash 实跑验证）
+
+---
+
 ## ✅ 侧任务完成（2026-07-07）：in-session shell v8 —— 入口换 messages.transform + doctor 自检
 
 按 SPEC v8 §2.6/§2.6.1/§2.6.2/§2.7 实现 v7→v8 增量。v7 CLI 大脑零改；重写 plugin 模板（flat

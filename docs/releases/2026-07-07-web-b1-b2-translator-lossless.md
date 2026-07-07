@@ -80,7 +80,7 @@ opencode translator 之前只翻 4 种 envelope（text/tool_use/step_finish/erro
 
 ## 5. Commit
 
-`<commit-sha>`（待填）
+`c3a738f`（branch `phase13-in-session-v8`）
 
 ## 6. 遗留 follow-up
 
