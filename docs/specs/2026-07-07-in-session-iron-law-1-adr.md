@@ -97,7 +97,7 @@ CLAUDE.md 铁律 1（唯一真相源）把底线落成一句操作约束。Agent
 
 **G1（emit 点基线快照）**：CI 测试维护一份"合法 emit 调用点基线文件清单"（v3 基线含 `orca/run/{orchestrator,executor_adapter,step}.py` + `orca/gates/` + `orca/exec/retry.py` + `orca/run/retry.py` + `orca/iface/web/run_manager.py` + `orca/iface/in_session/`（CLI 主写者 + daemon 无头 CI emit 桥））。CI grep 全仓 `bus.emit(` / `Tape.append(` 调用点，与基线 diff——**新增 emit 点必须显式登记进基线**，否则测试红。
 
-**G2（事件序列对齐回归）**：跨进程写者跑某 workflow 的 tape 与 `orca run` 跑同 workflow 的 tape，事件 `(type, seq, 关键字段)` 逐条对齐（回归测试）。**CLI 形态与 daemon 形态都要过 G2**（同一 helper，行为须一致）。因方案 E drive_loop 不动，跨进程 helper 是**新写**的 emit 逻辑，G2 是验证其与 drive_loop 行为一致的关键守门。
+**G2（编排骨架对齐回归，v3 修订）**：跨进程写者跑某 workflow 的 tape 与 `orca run` 跑同 workflow 的 tape，**只比编排骨架事件** `workflow_started/node_started/node_completed/route_taken/workflow_completed` 的 `(type, node, 相对 seq 序)`——**不比 `data.output`**（in-session 提取 `<task_result>` 干净 output vs `orca run` 模型完整文本，by design 不同）、**不比 executor 内部事件**（`agent_step_*/agent_tool_*/agent_usage/prompt_rendered` 仅 `orca run` 有；in-session 绕过 executor、宿主 subagent 即执行器，by design 无）。逐条全等跨形态结构性不可能（e2e 实证 38 vs 11 事件）；骨架对齐是 in-session 与 drive_loop 行为一致的真守门。**CLI 形态与 daemon 形态都要过 G2**（同一 helper）。
 
 ## §3. 方案评估（v3 增 per-call CLI 形态）
 

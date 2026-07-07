@@ -1,6 +1,11 @@
 # In-Session Shell 设计草稿（v7：闭环 spec-review r2，多 command 架构）
 
-> **状态**：草稿 v7（2026-07-07）。v6 经 spec-review-adversarial r2 审（conditional-fail，3 blocker F1/F2/F3 + 6 major F4-F11）+ 补跑两个 spike（F4 多轮链 / F10 payload）后修订，闭环全部 finding 并新增一硬约束（子 session idle 过滤）。**第二轮 review 判 conditional-pass，再闭环 2 blocker（B1 `Tape.append_batch` / B2 空串 normalize）+ 6 major（N1/N2/M1-M4）**。F3/F6/F10/F11 确认 closed。可进实现（剩余 major 已落 phase 验收）。
+> **状态**：草稿 v8（2026-07-07）。v7 经 e2e 发现 `command.execute.before` 在 opencode 1.14.22 runtime 不触发；补跑 spike 实证 `experimental.chat.messages.transform` 是可用入口；v8 换入口 + 加 `/orca doctor`。**第三轮 review 判 conditional-pass，4 契约 blocker（B1 改写语义/B2 marker 规范/B3 doctor 盲区/B4 sessionID 全链）+ 6 major 已全部闭环**（§2.6.1 marker 规范 / §2.6.2 改写语义+sessionID 契约 / §2.7 doctor 重写 / §2.1 bootstrap 签名 / §0 真相源声明 / §6 fsync 措辞 / §2.5 终态后 next）。review 明示"无需新 spike、可直接进实现"。
+> **v8 关键决策（在 v7 之上）**：
+> - **D-v8-1（入口机制换）**：opencode 入口从 `command.execute.before`（spike 实证 1.14.22 不触发）改为 **`experimental.chat.messages.transform`**（spike `/tmp/orca-xform` 实证可改写、模型未见原文）。单 `/orca` 命令 + marker 派发，加 command = CLI 子命令 + plugin 派发分支两处。
+> - **D-v8-2（doctor 自检）**：新增 `/orca doctor`（marker→transform→`orca in-session doctor` CLI→报告），迅速验 hooks 注册/生效/CLI 通。自证：能回报告即入口链路活。
+> - plugin 模板 3 bug 修：`ctx.client`（非 `@opencode/core/client`，#2）/ flat hooks（#3）/ `Bun.spawnSync`（#5，非 spawn+`stdout:"string"`）。
+> - v7 的 D-v7-1..7（单一大脑/单次 write/CC cache/tool_result/合规/marker RMW/子 session 过滤）全保留。
 > **v7 关键决策（在 v6 之上）**：
 > - **D-v7-1（架构铁律：单一接口）**：**薄 CLI = 唯一大脑 + 唯一 tape 写者**；plugin / CC hook = **哑传输**（command → CLI 子进程 → JSON → 注入）。Orca 逻辑全在 Python CLI（可测、单真相源），TS plugin / shell hook 不含任何 Orca 业务逻辑。**加新 command = 加 CLI 子命令 + 加 slash-command 映射，plugin 核心循环零改**（可扩展，§2.6）。
 > - **D-v7-2（F1 闭环）**：`[nc,rt,ns]` **单次 `tape.append`+flush 原子落盘**（POSIX 本地 FS 单次 write 原子），消除 mid-batch SIGKILL 窗口。删掉 v6 §6「resume 截 nc」虚构恢复（`_truncate_trailing_partial` 只截字节残行，不截完整事件）。
@@ -21,6 +26,8 @@
 
 让**宿主主 session 用自带 subagent 执行 workflow 节点**；**hook 在每个节点 turn 结束时自动推进**——CC 用 `Stop` hook、opencode 用进程内 plugin 的 `session.idle` event hook——调 Orca 薄 CLI 的 `bootstrap/next`，CLI 独占 tape（per-call flock）、确定性算下一节点、把下一节点 prompt 注入回主 session。**编排权在 Orca（薄 CLI 经 step.py，唯一大脑/唯一写者），执行权在宿主主 session，推进由 hook 自动（不依赖模型记得调工具）**。体验等价 CCW，真相源仍是 Orca 单 tape。
 
+> **真相源声明（M2，r3 闭环）**：opencode session 的 user 消息落盘（含 marker 原文 `<!--orca:cmd ...-->`、而非改写后的 entry prompt）是 opencode UI 行为，**非 Orca 真相源**。Orca 真相源**唯一是 tape**（铁律 1，CLI 写）。重放 opencode 历史见 marker 原文是已知 UI 限制，不影响正确性——重放 Orca 状态走 tape（`replay_state`），不走 opencode session。
+
 > **v7 vs v6**：v6 闭环 spike 机制；v7 闭环 spec-review r2 的 3 blocker + 6 major（单次 write 原子化 / CC cache 契约 / tool_result 提取 / 合规计数器 / busy 语义 / 失败 taxonomy）+ 新增子 session 过滤硬约束 + 明确「CLI 唯一大脑、plugin 哑传输」的可扩展多 command 架构。**v7 第二轮 review（conditional-pass）又闭环 2 blocker（B1 `Tape.append_batch` / B2 空串 normalize）+ 6 major（N1/N2/M1-M4）**，spike 措辞按实证降级。
 >
 > **Spike 决定性结论（2026-07-07）**——**实证范围 = plugin event hook + promptAsync 注入机制**（spec-review r2 M2 订正：spike 未调 orca CLI、未实现 `/orca` 命令，CLI/bootstrap 命令路径待 phase 实证）：
@@ -33,7 +40,7 @@
 - **Spike-1**（`/tmp/orca-spike/{orca.ts,log.txt}`）：加载 + idle + 1 次注入闭环（BANANA）。
 - **Spike-2 F4**（`/tmp/orca-f4/{chain.json,log.txt,orca.ts}`）：3 节点 idle 注入链 + 子 session 过滤（3 skip 实证）。
 - **Spike-2 F10**（`/tmp/orca-f10/msg3.json`）：task `state.output` payload 结构。
-- **未 spike 项（phase 实证）**：`/orca` 命令路径（`.opencode/command/*.md` + `command.execute.before` 拦截）、`orca in-session bootstrap/next` CLI、marker 绑定（M2/M3）。
+- **未 spike 项（phase 实证）**：`/orca <sub>` 经 `experimental.chat.messages.transform` 入口 + `orca in-session bootstrap/next/doctor` CLI 全链路（spike 仅证 transform 改写单条消息 + idle 注入，未证 marker 派发多子命令 + bootstrap 端到端）、marker 绑定（M3）。
 - 操作发现：plugin transpile 使 opencode serve 启动延至 ~15-20s（无 plugin ~4s）；headless serve 需 `permission:{task:allow}`（交互 TUI 用户授权）。
 
 ---
@@ -61,9 +68,12 @@
 
 **对外**（hook/plugin 调用）唯一两个 CLI 子命令：
 ```
-bootstrap <wf.yaml> [--inputs '{}'] -> {run_id, tape, done:false, node, prompt}
+bootstrap <wf.yaml> [--inputs '{}'] [--owner <key>] [--model <m>] [--session-id <sid>]
+     -> {run_id, tape, done:false, node, prompt}
   # 首次启动：gen run_id + tape 路径 + emit workflow_started + node_started(entry)
-  # → 写激活标记 → stdout JSON（entry prompt）。幂等：同 wf 再次 bootstrap 不重发（按标记已有 run_id 复用）。
+  # → 写激活标记（owner=文件名 key：opencode=sessionID / CC=run_id；session_id 入 marker 供子 session 过滤）
+  # → stdout JSON（entry prompt）。幂等：同 owner + realpath(yaml) 再次 bootstrap 不重发（按标记已有 run_id 复用）。
+  # plugin 调用：`orca in-session bootstrap <wf> --owner <sid> --session-id <sid> --model <m>`（§2.6.2 sessionID 传递契约）
 
 next --tape <p> --run-id <r> [--output <out>] [--inputs '{}']
      -> {done: bool, node?, prompt?, reason?}
@@ -167,6 +177,8 @@ CC 的 `PostToolUse(Task)`（产 output）与 `Stop`（推进 next）是**两个
 
 **无 running 节点（next 早到，时序错位）**：CLI **幂等吞 + warn**（0 退出），返 `{done:false, reason:"no-running"}`。
 
+**终态后 next（M5，r3 闭环）**：tape 已终态（completed/failed/cancelled）→ CLI 返 `{done:true, reason:"already_<status>"}` **0 退出**，不再 emit、不动 marker（step.py branch 1 已兜底）。marker 由首次返 done 的 next/stop 清；后续 next 无 marker → 返 `{done:false, reason:"no-marker"}`（0 退出，幂等，非错误）。
+
 ### 2.6 单一接口与多 command 可扩展架构（D-v7-1）
 
 **架构铁律：薄 CLI 是唯一大脑 + 唯一 tape 写者；plugin / CC hook 是哑传输。**
@@ -187,35 +199,87 @@ CC 的 `PostToolUse(Task)`（产 output）与 `Stop`（推进 next）是**两个
 **为什么这样切**：
 - **唯一真相源**：tape 只由 CLI 写（ADR 铁律 1）；Orca 状态机/决策只由 CLI 算。plugin/hook 不持有也不推导任何 Orca 状态——它们只是「把用户意图翻译成 CLI 调用、把 CLI 回包翻译成宿主动作」。
 - **不打补丁**：TS plugin / shell hook 里**禁止**出现 advance/router/marker 解析/合规判断等逻辑（那些是 CLI 的职责）。任何想在宿主侧"快速补一个行为"的冲动 → 应是 CLI 新子命令，而非 plugin 内塞逻辑。
-- **可扩展多 command**：加一个 command = **三处协同**（spec-review r2 M1 订正）：
-1. **CLI 加一个子命令**（Python，单测）—— 唯一大脑里加能力；
-2. **`.opencode/command/<name>.md` 定义 slash 命令**（opencode 命令系统：plugin 的 Hooks 类型**无**"注册新命令" hook，只有 `command.execute.before` 拦截已存在命令；命令本体由 `.opencode/command/*.md` 静态文件定义）；
-3. **plugin `command.execute.before` 拦截**该命令 → spawn 对应 CLI 子命令 → 改 `output.parts` 注入回包。
-**plugin 核心 idle 循环（session.idle → next CLI → promptAsync）零改**；加 command 只动 .md + 拦截映射 + CLI 三处。
+- **入口与多 command 机制（v8 修订，D-v8-1，推翻 v7 的 `command.execute.before`）**：
 
-> **M1 未实证项**（phase 验收必须补）：`command.execute.before` 清空/改写 `output.parts` 是否真能阻止原 `.md` prompt 注入主 session——spike 未验，phase SPEC 须实证拦截行为（含 sessionID 从命令上下文捕获，M3）。
+> **spike 实证（2026-07-07，`/tmp/orca-cmd` + `/tmp/orca-xform`）**：
+> - `command.execute.before` 在 opencode 1.14.22 runtime **不触发**（正确 plugin 下、与 `tool.execute.before` 同注册方式，独独它不响——SDK 类型有、运行时未接线）。v7 假设的"拦截 slash 命令"路径**死路**。
+> - `experimental.chat.messages.transform` **触发**且能改写送 LLM 的消息数组：spike 把 user 文本 `MAGICORCA run workflow` 改写成 entry prompt，模型只回 `TRANSFORMED`、**未见原文**。**这是可用的干净拦截机制。**
 
-**当前 command 集（v7 最小可用）**：
-| command | CLI 子命令 | 宿主侧映射 | 作用 |
-|---|---|---|---|
-| `/orca run <wf>` | `bootstrap` + idle hook 调 `next` | `.opencode/command/orca-run.md` + plugin `command.execute.before` 拦截（捕获 sessionID 写 marker，M3）；CC: `start` 生成 hook 片段 | 跑一个 workflow |
-| `/orca status` | `status` | `.opencode/command/orca-status.md` + 拦截 → CLI → 回显 | 看 run 进度 |
-| `/orca stop` | `stop` | `.opencode/command/orca-stop.md` + 拦截 → CLI → 回显 | 停 run（清 marker + emit cancelled） |
-| （未来）`/orca skip`、`/orca inject <text>` | 新 CLI 子命令 + `.md` + 拦截 | 扩展，核心 idle 循环不改 |
+**单 `/orca` 命令 + 子命令派发**（一个 `.md` 文件，子命令在 args，plugin 按 marker 派发到对应 CLI 子命令）：
+1. **`.opencode/command/orca.md`**（唯一命令文件）：body = `<!--orca:cmd $ARGUMENTS-->`（marker）。用户敲 `/orca run wf.yaml` → opencode 展开成 user 消息 `<!--orca:cmd run wf.yaml-->`。
+2. **plugin `experimental.chat.messages.transform` 钩子**（唯一入口钩子，每次 LLM 调用前触发）：按 §2.6.1 marker 规范检测最后一条 user 消息；命中 → **spawn 对应 CLI 子命令**（`run`→`bootstrap`、`status`→`status`、`stop`→`stop`、`doctor`→`doctor`）→ **解析 CLI stdout JSON，把该 user 消息文本替换为指定字段值**（§2.6.2 改写语义）→ 模型只见替换后文本，**不见 marker/原命令/原始 JSON**。无 marker → 透传（节点 prompt 等干净消息原样进 LLM）。
+3. **CLI 加子命令** = 唯一大脑里加能力（Python，单测）。
 
-> **实现守门**：CI grep `.opencode/plugin/*.ts` 与 CC hook 脚本，禁止出现 `advance`/`router`/`replay`/tape 路径/`<task_result>` 解析等关键词——宿主侧只允许 spawn CLI + parse JSON 顶层字段。违反 = 架构退化。
+**入口（bootstrap）完整时序**：`/orca run wf.yaml` → marker 消息 → `messages.transform` 检测 → spawn `orca in-session bootstrap <wf> --session-id <sid> --owner <sid>`（拿 entry prompt + 写 marker）→ 解析 stdout JSON 取 `.prompt` → 替换消息文本为 entry prompt → 模型执行节点 1 → `session.idle` → event hook 驱动下一节点（§2.2）。**入口与驱动都只 spawn CLI，单一接口；plugin 零业务逻辑（仅 marker 检测 + JSON 字段提取 + spawn，无 Orca 决策/状态）。**
+
+**加新 command = 两处**（CLI 子命令 + plugin marker 派发分支），`.md` 文件不动（统一 `/orca <sub>`），plugin 核心 idle 循环零改。比 v7 的"三处"更收敛。
+
+> **为什么 messages.transform 而非 chat.message**：messages.transform 直接连"送 LLM 的最终消息"，改写即生效（spike 实证）；chat.message 的 `ignored` flag 在 1.14.22 **不生效**（spike 实证，user 文本仍落盘进 LLM）。messages.transform 是唯一经实证的干净拦截点。bootstrap 在 transform 内 `await` spawn CLI —— **依赖 transform 支持 async + await 外部进程**（spike 单 turn 同步字符串替换实证，多 turn await 外部进程 + CLI 冷启动 ~200ms 时序待 §9.2 phase 验收实证，M3）。
+
+### 2.6.1 Marker 规范（B2 闭环）
+
+transform 的 marker 检测必须确定性、无歧义、不误伤：
+- **regex**：`^<!--\s*orca:cmd\s+(\w+)(?:\s+([^>]*?))?\s*-->$`（行首/行尾锚定 + 子命令名 `\w+` + args 非贪婪 `[^>]*?`，禁止 args 含 `>`）。opencode `.md` 命令文件 **限制 `$ARGUMENTS` 不含 `>` / 换行**（compile/install 时校验，wf 路径无此字符）。
+- **扫描范围**：仅 `out.messages` 中**最后一条 role=user 消息的最后一个 type=text part**（`findLast` 语义）。不扫历史消息、不扫 assistant/part 其他类型。
+- **一次性消费**：transform 命中并替换后，该 part 文本变为 CLI 回包字段值（entry prompt / 报告等），**替换文本保证不含 `<!--orca:cmd` 字面**——doctor 报告等若需描述 marker，用反引号或转义（如 `` `orca:cmd` ``），不写完整 marker。故下一轮 transform 不会对已替换消息误命中。
+- **session 作用域**：transform 由 opencode 按 session 调用（每 session 独立 messages 数组），marker 检测天然 session-scoped，不串 session（B4，依赖 opencode 行为，phase 实证）。
+
+### 2.6.2 改写语义 + sessionID 传递（B1/B4 闭环）
+
+- **改写字段契约**（B1）：transform 解析 CLI stdout **JSON**，按子命令提取字段替换 user 消息文本：
+  | 子命令 | stdout JSON | 替换文本取 |
+  |---|---|---|
+  | `run`(bootstrap) | `{run_id,tape,done,node,prompt}` | `.prompt`（entry 节点 prompt） |
+  | `doctor` | `{ok, report, ...}` | `.report`（自检报告文本） |
+  | `status` | `{status, node_status, ...}` | `.status` 友好串 |
+  | `stop` | `{ok, run_id, ...}` | `.ok` + run_id 友好串 |
+  JSON 顶层其他字段（run_id/tape 等）由 plugin 留作 logging/激活，**不入消息**。**禁止整 JSON 字面替换**（模型见 `{"run_id":...}` 困惑，B1）。
+- **sessionID 传递契约**（B4）：plugin 从 transform 收到的消息取 `out.messages[i].info.sessionID`（路径待 phase 实证，spike 未打印；M3 同批）→ spawn CLI 时作 `--session-id <sid>` + `--owner <sid>` argv → CLI 写 `marker.session_id`（子 session idle 过滤用，§5）。bootstrap 签名见 §2.1。
+
+**当前 command 集（v8，统一 `/orca <sub>`，单 `.md` + marker 派发）**：
+| 子命令 | CLI 子命令 | 作用 |
+|---|---|---|
+| `/orca run <wf>` | `bootstrap`（+ idle hook 调 `next`） | 跑一个 workflow（marker→transform→bootstrap→entry prompt→idle 驱动） |
+| `/orca status` | `status` | 看 run 进度（marker→transform→status→回显） |
+| `/orca stop` | `stop` | 停 run（清 marker + emit cancelled） |
+| `/orca doctor` | `doctor` | **hook 自检**（§2.7）——验 plugin 加载/messages.transform 生效/CLI 通/各 hook 注册 |
+| （未来）`/orca skip`、`/orca inject <text>` | 新 CLI 子命令 + plugin marker 派发分支 | 扩展，核心 idle 循环不改 |
+
+> CC 路无 `/orca` slash（CC 用 `.claude/commands/`，hook 是 Stop/PostToolUse）；CC 入口走 `orca in-session start`（生成 hook 片段）。两宿主**共用同一 CLI 子命令集**（唯一大脑），仅入口载体不同。
+
+> **实现守门**：CI grep `.opencode/plugins/*.ts` 与 CC hook 脚本，禁止出现 `advance`/`router`/`replay`/tape 路径/`<task_result>` 解析等关键词——宿主侧只允许 spawn CLI + parse JSON 顶层字段 + marker 派发。违反 = 架构退化。
+
+### 2.7 `/orca doctor` —— 入口链路自检 command（D-v8-2，用户要求；r3 B3/M1/M6 闭环）
+
+**目的**：一条命令迅速验证"当前 opencode 环境下，Orca 的**入口链路**（plugin 加载 → marker 派发 → CLI 可达）是否活着"。首选 opencode command 形态（交互界面直接敲），CLI 形态作 fallback。
+
+**机制（复用 messages.transform 入口，§2.6）**：`/orca doctor` → marker `<!--orca:cmd doctor-->` → `messages.transform` 检测 → spawn `orca in-session doctor` CLI → CLI 返自检 **JSON** `{ok, report, checks:[...]}` → transform 提取 `.report` 替换 user 消息文本（§2.6.2）→ 模型回显报告。
+
+**`orca in-session doctor` CLI 自检项（只报能自证的 3 项，B3 闭环）**：
+- **plugin 加载 + transform 触发**：doctor 能被调到 = plugin 已加载 + `messages.transform` 已注册并触发（**doctor 有响应即证此链路通**——这是 doctor 的核心自证价值）。
+- **marker 派发**：transform 正确 regex 解析 `doctor` 子命令并 spawn 到 CLI（doctor 在跑即证，§2.6.1）。
+- **CLI 可达**：`orca in-session` 版本 + 关键依赖导入（load_workflow / Tape / step / marker 无误）。
+
+**不在 doctor 范围（B3 自检盲区，明确标注）**：
+- **`session.idle` hook 真触发**：doctor 自检盲区——静态跑 doctor 时无 workflow 在跑，idle 必然 N=0；plugin 自报"已注册"不可信（假阳性）。idle 真触发由 **§9.2 phase 验收"基本循环跑通"间接证**（idle 不触发就推不进 workflow）。doctor 报告对 idle 仅标注"需跑 `/orca run` 验证"，不给 pass/fail。
+- **plugin 侧不维护 hook 触发计数**（M6）：去掉 v8-初版的 `count[type]++` self-instrument——它与"plugin 零 Orca 状态"守门（§2.6）冲突，且静态跑无意义。doctor 纯由 CLI（Python，大脑）生成报告，plugin 只 spawn + 提取 `.report`，零状态。
+
+**pass 判据**：①doctor 有响应（plugin+transform+marker 派发通）②CLI 版本/导入 OK。fail → 报告标红 + 提示（如"doctor 无响应→plugin 未加载/transform 未注册→查 opencode 版本与 plugin 声明"）。
+
+> doctor 是入口链路的"冒烟测试"：能在交互界面回你报告，就证明 `/orca` 入口活着。它是 v8 验收（§9.2）和未来用户/CI 排障的首选工具。idle 驱动能力由真跑 workflow 验证，不由 doctor 验。
 
 ---
 
 ## 3. 端到端时序（in-process plugin 驱动）
 
 ```
-[启动] 用户在 opencode 敲 /orca <wf.yaml>
-  → plugin 调 `orca in-session bootstrap <wf>` （per-call CLI）
-       CLI: gen run_id + tape；flock；emit workflow_started + node_started(entry)；close
-       → stdout {run_id, tape, done:false, node:entry, prompt:promptEntry}
-  → plugin 写激活标记（sessionID→{run_id,tape,model}）
-  → plugin 调 client.session.promptAsync(entry prompt) 注入
+[启动] 用户在 opencode 敲 /orca run <wf.yaml>
+  → opencode 展开命令 → user 消息 <!--orca:cmd run <wf>-->
+  → plugin `experimental.chat.messages.transform` 钩子触发，检测 marker
+       → spawn `orca in-session bootstrap <wf>` （per-call CLI）
+            CLI: gen run_id + tape；flock；emit workflow_started + node_started(entry)；close
+            → stdout {run_id, tape, done:false, node:entry, prompt:promptEntry} + 写激活 marker
+       → transform 把 user 消息文本替换为 entry prompt（模型只见 entry prompt）
 
 [每节点 N]
   ① 主 session 收到注入的 prompt（含“用 subagent 执行”）
@@ -266,7 +330,7 @@ CC 路径同构：bootstrap 由 `orca in-session start` 生成 settings.json hoo
 
 CC hook / opencode plugin 都是**静态预装**（settings.json / 项目 opencode.json `plugin` 声明），不能动态注册。隔离用**激活标记 + 主 session 过滤**：
 - `bootstrap`（opencode `/orca run`）/ `start`（CC）起一个 run 时，写一条 **session 作用域标记**（`<rundir>/orca-<sessionID>.json`，含 run_id/tape/yaml(canonical realpath)/model/sessionID/no_output_count；`os.replace` 原子写）。
-  - **主 session 绑定（M3，spec-review r2）**：sessionID 在 `/orca` 命令触发时由 plugin 从 `command.execute.before` 上下文捕获（**非** spike-2 的"首个 session.created"启发式——生产里用户已开多 session 后再 `/orca` 会绑错）。spike-2 用启发式仅证 idle 过滤可行，marker 绑定路径待 phase 实证。
+  - **主 session 绑定（M3，spec-review r2 + v8 D-v8-1）**：sessionID 由 plugin 在 `experimental.chat.messages.transform` 入口从 `out.messages[i].info.sessionID` 捕获（**非** spike-2 的"首个 session.created"启发式——生产里用户已开多 session 后再 `/orca` 会绑错）。spike-2 用启发式仅证 idle 过滤可行；v8 入口改 transform 后 sessionID 从消息取，待 phase 实证。
   - **bootstrap 幂等键（N1）**：同 session + 同 `os.path.realpath(yaml)` 视为同一 run，复用 run_id 不重发 `workflow_started`（CLI advisory lock 守 check-write，§2.4.1）。
 - hook/plugin 每次先按 sessionID 查"本 session 是否有活跃 Orca run"——**有才调 CLI，无则 passthrough**。
 - **主 session 过滤（D-v7-5）**：`task` 工具 spawn 子 session 也发 `session.idle`——plugin **严格比对 `event.properties.sessionID === marker.sessionID`**，子 session idle 一律 skip（spike-2 实证 3 次 child skip）。嵌套 task 产生孙 session 同理过滤（非 marker.sessionID 全 skip）。CC 路无子 session 问题（Stop hook 只挂主 session）。
@@ -282,7 +346,7 @@ CC hook / opencode plugin 都是**静态预装**（settings.json / 项目 openco
 - **turn 间 LLM 停了不推进**：CC `Stop decision:block` 硬拦推继续（全保证）；opencode `session.idle` event hook 注入推进（spike 证可靠）。极端停了 → tape 停在 `node_started(current)` → 下次 `/orca`（或手动 `bootstrap --resume <run_id>`）续跑该节点。
 - **反例 A（observe 落 nc、next 没调 rt 的悬空态）**：**D-v4-1 消除**——observe 不落盘（output 直接作 `next --output` 入参），next 原子批量 emit `[nc,rt,ns]`。tape 任何时刻只有完整 step。
 - **反例 B（emit 批次中途 SIGKILL：nc 落盘、rt 没落）**——**v7 用单次 write 原子化消除窗口（F1/R1，D-v7-2；spec-review r2 B1 闭环）**：新增 sanctioned 批写路径 **`Tape.append_batch(list[dict]) -> list[int]`**（ADR I2 扩展）：在 Tape 内同一把 `_lock` 下，**先对全部事件做 Event 校验 + 连续分配 seq**（坏事件 fail loud 不留 seq 间隙），**再一次 `self._fh.write("\n".join(lines)+"\n")` + 单次 `flush`** 落盘整批。`EventBus.emit_batch(list)` 透传给它。CLI `next` 拿到 `advance_step` 的 `result.emits` 后**一次 `emit_batch`**（非逐条 emit）。
-  - **POSIX 措辞订正（spec-review r2 B1）**：`PIPE_BUF` 只保证 pipe/FIFO 原子，**普通文件无 POSIX 原子规范保证**——但本地 FS（ext4/APFS）小 write（< page，三事件 JSONL 行远小于）**实践上原子**（要么全落、要么全不落），配合 `_truncate_trailing_partial` 兜底字节级残行（断电截到一半的字节）。非本地 FS 由 ADR I3.3 仅本地 FS 拒绝。**不再宣称"POSIX 规范保证原子"**。
+  - **POSIX 措辞订正（spec-review r2 B1）**：`PIPE_BUF` 只保证 pipe/FIFO 原子，**普通文件无 POSIX 原子规范保证**——但本地 FS（ext4/APFS）小 write（< page，三事件 JSONL 行远小于）**实践上对 SIGKILL/正常崩溃原子**（数据已入 kernel page cache，进程崩不丢）；**对断电不保证**（`flush()` 只刷 user-space buffer 到 page cache，不等 `os.fsync`；断电可能在 page cache 未落盘——留独立 issue，v1 接受），配合 `_truncate_trailing_partial` 兜底字节级残行。非本地 FS 由 ADR I3.3 仅本地 FS 拒绝。**不宣称"POSIX 规范保证原子"也不宣称"断电原子"**。
   - **为什么必须 append_batch 而非逐条 append**：`advance_step` 是纯决策不写 tape（`step.py:158`），返回 `list[Emit]`；若 CLI 逐条 `Tape.append`，emit 循环中途 SIGKILL 仍产"nc 落 rt 没落"悬空态——**反例 B 只是被从决策层挪到 CLI emit 循环，未消除**（spec-review r2 N3）。`append_batch` 是消除窗口的唯一手段。
   - **删掉 v6「resume 截 nc 回 started」虚构描述**（`_truncate_trailing_partial` 只截字节级残行，不截完整 nc 行）。`append_batch` 不动 drive_loop（drive_loop 继续用单条 `emit`），是 in-session 写者专用的批写扩展。
 - **无 running 节点（hook 时序错位，next 早到）**：CLI 幂等吞 + warn（Q13②），0 退出，返 `{done:false, reason:"no-running"}`。
@@ -327,15 +391,20 @@ CC hook / opencode plugin 都是**静态预装**（settings.json / 项目 openco
 
 ### 9.2 phase 验收（真实 e2e，零 mock，opencode 为主）
 - [ ] **基本循环**：opencode（serve 或交互 TUI）+ plugin + 薄 CLI，3 节点 workflow 端到端，reducer `completed`。
-- [ ] **G2 事件序列对齐**：本壳 tape 与 `orca run` 同 workflow tape，逐条比对 **(type, seq, node, data.output)** 四字段全等。
+- [ ] **G2 编排骨架对齐（v8 修订契约，e2e r2 实证结构性约束）**：本壳 tape 与 `orca run` 同 workflow tape，**只比编排骨架事件**——`workflow_started / node_started / node_completed / route_taken / workflow_completed` 的 **(type, node, 相对 seq 序)** 对齐。**不比** `data.output`（by design 不同：in-session 提取 `<task_result>` 干净 output，`orca run` 记模型完整文本）、**不比 executor 内部事件**（`prompt_rendered/agent_step_started/agent_message/agent_tool_call/agent_tool_result/agent_usage` 仅 `orca run` 有——in-session 绕过 executor，宿主 subagent 即执行器，by design 无这些事件）。逐条"四字段全等"在跨形态下结构性不可能（e2e r2 实证：38 vs 11 事件）；骨架对齐才是 in-session 与 drive_loop 行为一致的真守门。
 - [ ] **多次迭代**：≥8 节点长 workflow 跑通（CC 路径 ≤8 节点硬约束验；opencode 无上限）。
 - [ ] **并发**：两个 in-session run 同时跑 → tape/run_id 隔离、flock 独占、互不串（一 run 一 tape）。
 - [ ] **单次 write 原子化（F1/B1）**：CLI `next` emit `[nc,rt,ns]` 经 **`Tape.append_batch`**（grep 实证 CLI 用 `emit_batch`，非逐条 `emit`）；中途 SIGKILL 测试：tape 要么全 3 条、要么 0 条，无 1-2 条悬空（`_truncate_trailing_partial` 兜底字节残行）。
 - [ ] **--output 空串 normalize（B2）**：CLI `next --output ""` 与省略 `--output` 行为等价（走 branch 4 + 合规计数），不静默走 branch 3。
-- [ ] **bootstrap 端到端（未 spike 项，M2）**：`/orca run <wf>` → plugin `command.execute.before` 捕 sessionID + spawn `bootstrap` CLI + promptAsync 注入 entry，真链路跑通（spike 仅证 idle hook + promptAsync，未证 CLI/bootstrap 命令路径）。
-- [ ] **多 session 绑定（M3）**：用户已开 ≥2 session 后在某 session 触发 `/orca` → marker.sessionID 绑定正确 session，不绑"首个 created"。
+- [ ] **入口机制 messages.transform（D-v8-1，spike 已实证）**：`/orca run <wf>` → marker → `experimental.chat.messages.transform` 检测 + spawn `bootstrap` CLI + 改写 user 消息为 entry prompt → **模型只见 entry prompt（不见 marker/原命令）** → idle 驱动多节点 → `workflow_completed`。spike `/tmp/orca-xform` 已证 transform 改写生效。
+- [ ] **transform await 外部进程（M3，未 spike）**：transform 内 `await` spawn CLI 在大 workflow（≥8 节点）bootstrap + 长 wf 加载时不超时（opencode transform async 超时阈值未知，phase 实证）。
+- [ ] **marker 规范（B2）**：regex 命中 `<!--orca:cmd run wf.yaml-->`；doctor 报告含 `` `orca:cmd` `` 反引号描述不被下一轮误命中（一次性消费）；`$ARGUMENTS` 含 `>` 被校验拒绝。
+- [ ] **`command.execute.before` 不触发（已知，非缺陷）**：grep 实证 plugin **不依赖**该 hook（1.14.22 runtime 未接线）；入口走 messages.transform。
+- [ ] **doctor 自检（D-v8-2，B3 闭环）**：`/orca doctor` → 报告入口链路（plugin 加载/marker 派发/CLI 可达）+ 对 `session.idle` 标"需跑 `/orca run` 验证"（不验 idle 真触发，自检盲区）；plugin 侧无 count++ 状态。能回报告即入口链路活。
+- [ ] **plugin 模板 3 bug 已修**：grep 实证模板无 `@opencode/core/client` import（用 ctx.client）/ hooks flat（非 nested）/ `Bun.spawnSync`（非 `spawn`+`stdout:"string"`）。
+- [ ] **多 session 绑定（M3）**：用户已开 ≥2 session 后在某 session 触发 `/orca run` → marker.sessionID 绑定正确 session（从 transform 的 `out.messages[i].info.sessionID` 取，非"首个 created"启发式）。
 - [ ] **marker RMW 原子（N2）**：两 `next` 并发 → flock 串行 → no_output_count 不丢更新。
-- [ ] **`command.execute.before` 拦截实证（M1）**：拦截 `/orca` 命令、改写 parts 后，原 `.md` prompt 不注入主 session（spike 未验）。
+- [ ] **`experimental.chat.messages.transform` 入口实证（M1，D-v8-1）**：见上"入口机制"项（替换 v7 的 command.execute.before）。
 - [ ] **子 session 过滤（D-v7-5）**：跑 task-subagent workflow，plugin 日志见子 session idle 全 skip、仅主 session 注入；子代理 turn 不被污染。
 - [ ] **CC output cache 端到端（F2）**：真 `claude -p` + PostToolUse(Task)→写 cache→Stop 读 cache→`next` 推进，3 节点跑通；多 Task/turn last-write-wins；模型自干无 cache → 合规路径。
 - [ ] **subagent 合规 fail loud（F11）**：注入 prompt 但模型连续 3 次不派 Task（无 output）→ CLI emit `workflow_failed(error_type=subagent_compliance)`，不死循环。
@@ -389,7 +458,9 @@ CC hook / opencode plugin 都是**静态预装**（settings.json / 项目 openco
 | `orca/events/{tape,bus}.py` | — | `append`/`emit` 留（drive_loop 用） | **`Tape.append_batch(list[dict])`** + **`EventBus.emit_batch(list)`**（B1 sanctioned 批写路径，单次 write+flush，共用 `_lock`+Event 校验+seq 分配） |
 | `orca/iface/in_session/marker.py`（新增） | — | — | 激活 marker 读写（run_id/tape/model/sessionID/no_output_count）+ `os.replace` 原子写 + advisory lock（bootstrap 去重 F14） |
 | `orca/iface/cli/commands.py` | — | `add_typer(in_session_app)` 留 | — |
-| **新增** opencode plugin（项目内 `.opencode/plugin/orca.ts`，非仓库） | — | — | `/orca <wf|status|stop>` 命令路由（§2.6）→ spawn 对应 CLI 子命令；`session.idle` event hook：**子 session 过滤**（D-v7-5）+ in-flight mutex（F5）+ 从 `ToolPart.state.output` 提取（D-v7-4）+ spawn `next` CLI + `promptAsync`；**零 Orca 业务逻辑**（守门 §9.2） |
+| **新增** opencode plugin（仓库模板 `orca/iface/in_session/templates/opencode/orca.ts`，`start` 写入项目 `.opencode/plugins/`） | — | — | v8：`experimental.chat.messages.transform` 入口（marker `<!--orca:cmd <sub>-->` 派发 → spawn 对应 CLI → 改写消息文本，§2.6）；`session.idle` event hook：**子 session 过滤**（D-v7-5）+ in-flight mutex（F5）+ 从 `ToolPart.state.output` 提取（D-v7-4）+ spawn `next` CLI + `promptAsync`；**结构**：`export const OrcaPlugin = async (ctx) => ({...flat hooks})`（ctx.client，**非** `@opencode/core/client`）；`Bun.spawnSync`（**非** spawn+`stdout:"string"`）；self-instrument hook 触发计数供 doctor（§2.7）；**零 Orca 业务逻辑** |
+| **新增** `.opencode/command/orca.md`（仓库模板，`start` 写入） | — | — | body = `<!--orca:cmd $ARGUMENTS-->`（唯一命令文件，子命令在 args） |
+| **新增** `orca in-session doctor` CLI 子命令 | — | — | hook 自检报告（plugin 加载/marker 派发/CLI 可达/各 hook 注册+触发计数），§2.7 |
 | **新增** CC hook 脚本模板（`orca in-session start` 生成） | — | — | settings.json 片段：PostToolUse(Task)→写 output cache（§2.4.1）；Stop→读 cache+spawn `next`+`decision:block,reason:prompt`；激活标记 passthrough |
 | **删** v3 `orca_advance` MCP 工具 | 仓库内残留则删 | — | — |
 

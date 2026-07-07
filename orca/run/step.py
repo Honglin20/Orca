@@ -211,13 +211,13 @@ def advance_step(
         outputs_acc[pending] = {"output": parsed}
         nxt = Orchestrator._next_node_for_resume(wf, pending, outputs_acc)
         if nxt == END:
-            emits.append(Emit("route_taken", {"from": pending, "to": END}, node=pending))
+            emits.append(Emit("route_taken", {"from": pending, "to": END}))
             t, d = make_workflow_completed(wf, _final_outputs(wf, outputs_acc), elapsed=elapsed)
             emits.append(Emit(t, d))
             logger.info("workflow 完成（%s，elapsed=%.2fs）", rid, elapsed)
             return StepResult(emits=emits, done=True, reason="completed")
         _check_agent_node(nodes.get(nxt), nxt)
-        emits.append(Emit("route_taken", {"from": pending, "to": nxt}, node=pending))
+        emits.append(Emit("route_taken", {"from": pending, "to": nxt}))
         emits.append(Emit("node_started", {"node": nxt}, node=nxt))
         ctx = _build_ctx(wf, outputs_acc, inputs, rid)
         return StepResult(emits=emits, done=False, node=nxt,
