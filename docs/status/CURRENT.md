@@ -47,7 +47,7 @@ ScatterChartWidget z fallback）+ 1 NEW（log-stream 文件头注释漂移）全
 
 **验证**：53 新测（baseline 170 → **223 passed**，13 test file）。`npm run build` +
 `npm test` 双绿。详见 [release note](../releases/2026-07-08-web-shell-v2-chunk-c-charts-log-tb-rail-tick.md) + [SPEC §5.1/§5.2/§5.4/§5.5/§5.6/§5.7](../specs/web-shell-v2-spec.md)。
-**Commit**：`<TBD>`。
+**Commit**：`01af451`。
 
 **遗留 follow-up（Chunk D）**：
 - 🔵 Chunk D（liveness + 样式 + 验收）：image URL rewrite（D10）/ resume-fallback
