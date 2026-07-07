@@ -182,6 +182,10 @@ class AgentHistory(Static):
         self._expanded_seqs: set[int] = set()
         # 当前选中 entry seq（None = 未选中；j/k 切换）
         self._selected_seq: int | None = None
+        # 当前选中 entry **index**（phase-16：与 _selected_seq 双轨，消除 duplicate seq
+        # 歧义——真 tape report_painter 桶含两个 seq=106 的 node_started，cursor 推进靠
+        # index 而非 seq 匹配，避免死循环卡住）。set_node 重置为 None。
+        self._selected_idx: int | None = None
         # tool_call_id cache（spec §2.3 GAP-B/C 修复，迁自 v1.1.1）
         # key = tool_call_id, value = (tool_name, args_dict, call_timestamp)
         self._tool_call_cache: dict[str, tuple[str, dict, float]] = {}
@@ -263,6 +267,7 @@ class AgentHistory(Static):
         # reviewer P1-8：reset _expanded_seqs 到 last message
         self._expanded_seqs = self._compute_default_expanded()
         self._selected_seq = None
+        self._selected_idx = None
         self._reflow()
 
     def _apply_event(self, event: Event) -> None:
@@ -617,32 +622,47 @@ class AgentHistory(Static):
     # ── j/k 导航 + Enter 展开 ─────────────────────────────────────────
 
     def action_cursor_down(self) -> None:
-        """j 键：选中下一条（不 wrap；末条不动）。"""
+        """``down`` 键：选中下一条（不 wrap；末条不动）。
+
+        phase-16 修复：按 **index** 推进（不是 seq 匹配）。真 tape ``90fd22`` 的
+        report_painter 桶含两个 seq=106 的 ``node_started``（retry/重发），旧实现用
+        ``for i,e: if e.seq == _selected_seq`` 总命中**第一个** 106，从第一个 106
+        推到第二个 106 后再按 down 又回到第一个 106 → 死循环，cursor 卡住不动。
+        改为维护 ``_selected_idx``（None = 未选中），彻底消除 seq 歧义。
+        """
         if not self._entries:
             return
         if self._selected_seq is None:
+            self._selected_idx = 0
             self._selected_seq = self._entries[0].seq
             self._reflow()
             return
-        for i, e in enumerate(self._entries):
-            if e.seq == self._selected_seq and i + 1 < len(self._entries):
-                self._selected_seq = self._entries[i + 1].seq
-                self._reflow()
-                return
+        idx = self._selected_idx
+        if idx is None:
+            # state 漂移兜底（_selected_seq 设过但 _selected_idx 没同步）：从 seq 反查首匹配
+            idx = next((i for i, e in enumerate(self._entries) if e.seq == self._selected_seq), 0)
+        if idx + 1 < len(self._entries):
+            self._selected_idx = idx + 1
+            self._selected_seq = self._entries[idx + 1].seq
+            self._reflow()
 
     def action_cursor_up(self) -> None:
-        """k 键：选中上一条（不 wrap；首条不动）。"""
+        """``up`` 键：选中上一条（不 wrap；首条不动）。见 ``action_cursor_down`` 的
+        index-based 修复 rationale（消除 duplicate seq 歧义）。"""
         if not self._entries:
             return
         if self._selected_seq is None:
+            self._selected_idx = len(self._entries) - 1
             self._selected_seq = self._entries[-1].seq
             self._reflow()
             return
-        for i, e in enumerate(self._entries):
-            if e.seq == self._selected_seq and i > 0:
-                self._selected_seq = self._entries[i - 1].seq
-                self._reflow()
-                return
+        idx = self._selected_idx
+        if idx is None:
+            idx = next((i for i, e in enumerate(self._entries) if e.seq == self._selected_seq), 0)
+        if idx > 0:
+            self._selected_idx = idx - 1
+            self._selected_seq = self._entries[idx - 1].seq
+            self._reflow()
 
     def action_toggle_expand(self) -> None:
         """Enter：toggle 当前选中 entry 的展开状态（spec §2.3 + reviewer P0-6 + phase-16 §2.4）。

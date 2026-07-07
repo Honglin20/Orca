@@ -748,6 +748,15 @@ class OrcaApp(App):
             # 全量重渲（从 _node_events 桶取），否则用户看不到后续 agent 输出。
             if self._auto_follow:
                 self._selected_node = node
+                # phase-16 auto-follow sync：同步 AgentsList 可见光标（▸ marker）到
+                # 跟随节点，避免「app 选 X / 列表还显 Y」不一致——用户从 STALE 的 Y
+                # 出发按 j/k 会跳到错误 agent（real-execution 发现的 bug）。
+                # 用 set_selected_silent 不触发 _on_node_selected（否则会把 _auto_follow
+                # 改回 False，造成 auto-follow 自我取消）。
+                try:
+                    self.query_one(AgentsList).set_selected_silent(node)
+                except Exception:  # noqa: BLE001 —— AgentsList 未挂载（headless）
+                    pass
                 try:
                     self.query_one(AgentHistory).set_executor(
                         self._node_executors.get(node, "claude"),
@@ -839,7 +848,12 @@ class OrcaApp(App):
         # ── 3. AgentHistory 分派（仅 selected_node 的事件，spec v2 §3）──────
         # 调用方负责过滤 node == _selected_node（避免双重渲染：auto-follow 路径已 set_node
         # 全量重渲，append_event 走增量追加仅对当前选中节点）。
-        if node and node == self._selected_node:
+        # phase-16 double-render fix：当本 event 是 node_started 且 auto-follow 刚用
+        # set_node 全量重渲（bucket 已含该 node_started），必须**跳过** append_event——
+        # 否则 node_started 被加两次（set_node 的 fold 加 1 + append_event 再加 1），
+        # 产生重复 seq entry，破坏 §5.6 重放一致性 + 卡死 cursor advance（duplicate seq）。
+        if (node and node == self._selected_node
+                and not (etype == "node_started" and self._auto_follow)):
             try:
                 self.query_one(AgentHistory).append_event(event)
             except Exception as e:  # noqa: BLE001
@@ -855,13 +869,12 @@ class OrcaApp(App):
         if level is None and etype not in EVENTS_NOT_IN_LOG_STREAM:
             # 未登记 EventType（schema 加新 type 漏登记）→ fail visible，发 info 行不静默吞。
             level = LEVEL_INFO
-        # debug toggle 真相源在 LogStream widget（L 键 binding）；dispatch 直接查 widget flag
-        # （避免「dispatch 层 mirror + widget 层真相」双真相源；spec §11.5 #6 单一真相）。
-        try:
-            show_debug = self.query_one(LogStream).show_debug
-        except Exception:  # noqa: BLE001 —— LogStream 未挂载（极端 headless 路径）
-            show_debug = False
-        if level is not None and (level != LEVEL_DEBUG or show_debug):
+        # debug toggle 真相源**唯一**在 LogStream widget（L 键 binding + _debug_buffer）。
+        # phase-16 §5.1：dispatch 把所有 level != None 的事件都传给 LogStream，由 widget
+        # 决定写/缓冲（show_debug=False 时 debug 事件进 _debug_buffer，L 键 toggle ON 回放）。
+        # 这避免「dispatch 层 mirror show_debug + widget 层真相」双真相源（spec §11.5 #6），
+        # 同时让用户在 run 结束后按 L 能看到历史 debug 事件（SPEC §5.1 行 L「前无后有」）。
+        if level is not None:
             try:
                 self.query_one(LogStream).append_event(
                     etype, data, node=node, session_id=event.session_id,
@@ -1087,12 +1100,17 @@ class OrcaApp(App):
 
         ``_auto_follow=True``；``_selected_node=当前 running 节点``（无 running 则不变）。
         AgentHistory 从 ``_node_events`` 桶全量重渲（与 ``_on_node_selected`` 同语义）。
+        phase-16：同步 AgentsList 光标（与 auto-follow sync 同语义，避免 a 后列表不一致）。
         """
         self._auto_follow = True
         running = self._current_node
         if running is not None:
             self._selected_node = running
             events = self._node_events.get(running, [])
+            try:
+                self.query_one(AgentsList).set_selected_silent(running)
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 self.query_one(AgentHistory).set_executor(
                     self._node_executors.get(running, "claude"),

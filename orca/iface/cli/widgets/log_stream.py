@@ -303,6 +303,13 @@ class LogStream(RichLog):
         # wrap=True：node_failed 等长 message 自动换行（reviewer P1-10）。
         super().__init__(id="log-stream", markup=False, wrap=True, auto_scroll=True)
         self._show_debug: bool = False
+        # phase-16 §5.1 行 L：debug 事件缓冲。``show_debug=False`` 时到达的 debug 事件
+        # 暂存这里（formatted 字符串），用户按 L 开 debug 后**回放**已发生的 debug 事件——
+        # 否则用户在 run 结束后按 L 只看到「debug log: ON」一行空提示，看不到任何历史
+        # debug 事件（real-execution 发现的 UX gap，SPEC §5.1「前无后有」要求）。
+        # FIFO 上限保护（防长 run 内存膨胀；与 _NODE_EVENTS_CAP 同语义）。
+        self._debug_buffer: list[str] = []
+        self._debug_buffer_cap: int = 500
 
     def append_event(
         self,
@@ -317,28 +324,43 @@ class LogStream(RichLog):
 
         - ``level is None`` 的事件（``agent_*`` / ``prompt_rendered`` / ``custom``）不写
           （归 Agent History / Header footer / ChartPanel 路径）。
-        - debug 事件（``level == LEVEL_DEBUG``）默认不写；L 键 toggle 后才写。
+        - debug 事件（``level == LEVEL_DEBUG``）默认不写但**缓冲**到 ``_debug_buffer``；
+          L 键 toggle ON 时回放（phase-16 §5.1「前无后有」）。
         """
         level = level_of(event_type)
         if level is None:
             return  # 不进 Log Stream
-        if level == LEVEL_DEBUG and not self._show_debug:
-            return  # 默认隐藏 debug
         line = format_event(
             event_type, data, node=node, session_id=session_id, timestamp=timestamp,
         )
-        if line:  # format_event 可能返回空（防御性）
-            self.write(line)
+        if not line:
+            return  # format_event 可能返回空（防御性）
+        if level == LEVEL_DEBUG and not self._show_debug:
+            # 缓冲：用户后续按 L 开 debug 时回放（phase-16 §5.1「前无后有」AC）
+            self._debug_buffer.append(line)
+            if len(self._debug_buffer) > self._debug_buffer_cap:
+                self._debug_buffer.pop(0)  # FIFO 丢最旧
+            return
+        self.write(line)
 
     def action_toggle_debug(self) -> None:
         """L 键：toggle debug 事件显示（spec §2.4 + Binding ``action_*`` 约定）。"""
         self.toggle_debug()
 
     def toggle_debug(self) -> None:
-        """Toggle debug 显示；写一行提示让用户感知当前状态。"""
+        """Toggle debug 显示；写一行提示让用户感知当前状态。
+
+        phase-16 §5.1：开 debug 时回放 ``_debug_buffer`` 中累积的历史 debug 事件
+        （否则用户在 run 结束后按 L 只看到空提示，SPEC「前无后有」AC 要求实际内容）。
+        """
         self._show_debug = not self._show_debug
         status = "ON" if self._show_debug else "OFF"
         self.write(f"── debug log: {status} ──")
+        if self._show_debug and self._debug_buffer:
+            # 回放历史 debug 事件（用户开 debug 前到达的）
+            for buffered in self._debug_buffer:
+                self.write(buffered)
+            self._debug_buffer.clear()
 
     @property
     def show_debug(self) -> bool:

@@ -134,6 +134,22 @@ class AgentsList(Static):
         if handler is not None:
             handler(name)
 
+    def set_selected_silent(self, name: str | None) -> None:
+        """同步 ``_selected`` + 重渲染**不触发** ``_on_node_selected`` 回调。
+
+        phase-16 修复（auto-follow sync bug）：app ``_dispatch_to_widgets`` 在
+        ``_auto_follow=True`` 时设 ``_selected_node`` + 驱动 AgentHistory，但若不同步
+        AgentsList 的可见 ``▸`` 光标，会出现「app 选 report_painter / 列表还显 analyzer」
+        的不一致——用户按 j/k 从 STALE 的 analyzer 位置出发，跳到错误 agent。
+
+        与 ``select()`` 的区别：本方法**不**回调 app（避免 ``_on_node_selected`` 把
+        ``_auto_follow`` 改回 False，造成 auto-follow 自我取消）。仅 widget 内部一致。
+        """
+        if name is None or name not in self._projections:
+            return
+        self._selected = name
+        self._rerender()
+
     @property
     def selected(self) -> str | None:
         return self._selected
