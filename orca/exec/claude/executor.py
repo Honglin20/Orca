@@ -358,6 +358,11 @@ def _build_spawn_config(
     )
     cli_path = profile.resolve_cli_path()  # env > default，运行时读（SPEC §2.6）
 
+    # web-shell-v2 §11 step1 B2：reasoning extra_args（opencode --thinking / --variant）。
+    # opt-in——profile.reasoning_flags_env 未设 / env 未填 → []，保既有 spawn argv 不变。
+    # 与 --model / --allowed-tools 同路径（extra_args），便于 CLIRunner 拼 argv。
+    extra_args.extend(profile.resolve_reasoning_args())
+
     return SpawnConfig(
         cli_path=cli_path,
         flags=profile.resolve_flags(),

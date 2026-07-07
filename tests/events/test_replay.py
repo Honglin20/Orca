@@ -267,11 +267,33 @@ def test_known_noop_events_dont_mutate_state():
         ("foreach_item_started", {"index": 0, "item_key": "k"}),
         ("foreach_item_completed", {"index": 0, "output": "x"}),
         ("foreach_completed", {"count": 3, "succeeded": 3}),
+        ("prompt_rendered", {"preview": "..."}),
+        ("workflow_resumed", {"from_tape": "x", "replayed_events": 0}),
+        ("retry_started", {"attempt": 1, "max_attempts": 3}),
+        ("retry_succeeded", {"attempt_total": 1}),
+        ("retry_exhausted", {"attempts": 3}),
+        ("validator_started", {"criteria_preview": "..."}),
+        ("validator_passed", {"issues": []}),
+        ("validator_failed", {"issues": ["x"], "retrying": False}),
+        ("wait_started", {"duration_seconds": 1}),
+        ("wait_completed", {"elapsed_seconds": 1, "interrupted": False}),
+        ("dialog_started", {"node": "a"}),
+        ("dialog_message", {"role": "user", "text": "hi", "turn": 1}),
+        ("dialog_ended", {"total_turns": 1}),
+        # web-shell-v2 §3.2 B1 / D8：agent_step_started / unknown_event MUST no-op
+        # （agent_step_started 是 liveness 心跳；unknown_event 是 tape escape hatch。
+        # 两者绝不投影进 RunState，否则 backend 协议变化会触发非幂等状态变更）。
+        ("agent_step_started", {"step_reason": "tool-calls"}),
+        ("agent_step_started", {}),
+        ("unknown_event", {"raw": {"type": "experimental"}, "source": "opencode"}),
         ("custom", {"kind": "chart"}),
         ("error", {"error_type": "ValueError", "message": "boom"}),
     ]:
-        s2 = apply_event(s, _evt(t, seq=1, node="a"))
-        assert s2 == s  # 这些事件不进 RunState（投影留给前端 reducer）
+        # ``_evt`` 签名 ``_evt(type, seq, node=, session_id=, **data)``：剔除 data 中与
+        # ``node`` / ``session_id`` 顶层参数同名的 key（如 dialog_started.data.node），避免冲突。
+        spread = {k: v for k, v in data.items() if k not in ("node", "session_id")}
+        s2 = apply_event(s, _evt(t, seq=1, node="a", **spread))
+        assert s2 == s, f"{t} 不应改 RunState（reducer MUST no-op）"
 
 
 def test_unknown_event_type_warns_fail_loud(caplog):

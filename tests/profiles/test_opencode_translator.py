@@ -1,17 +1,21 @@
 """tests/profiles/test_opencode_translator.py —— opencode_translator 纯函数测试。
 
-覆盖（按真实 opencode v1.14.22 NDJSON 校准，fixture 见 fixtures/opencode_sample.jsonl）：
-  - step_start → []（无业务信号）
+覆盖（按真实 opencode v1.14.22 NDJSON 校准 + web-shell-v2 §3.2 B1 lossless 扩展；
+fixture 见 fixtures/opencode_sample.jsonl）：
+  - step_start → agent_step_started（web-v2 §3.2 B1，data.step_reason 可选）
+  - reasoning → agent_thinking（web-v2 §3.2 B1，--thinking on 时发；整块）
   - text → agent_message（整块，非增量）
   - tool_use completed → agent_tool_call + agent_tool_result（一次发）
   - tool_use non-completed → []（半成品不发）
-  - step_finish → agent_usage（input/output/cache.read/cost）
+  - step_finish → agent_usage（input/output/cache.read/cost + **reasoning_tokens**）
   - error → error 事件（带 message）
-  - 未知 type / 非 JSON → []（不抛）
+  - 未知 type → unknown_event（web-v2 §3.2 D8 tape escape hatch，**绝不静默丢**）
+  - 非 JSON → []（CLIRunner 兜底，translator 防御性）
   - 所有产出 Event.session_id == 入参 session_id
   - 纯函数性（同输入两次调用结果相同）
 
-fixture：``opencode_sample.jsonl``（7 行真实抓取，tool output 已脱敏缩小，无 token 泄漏）。
+fixture：``opencode_sample.jsonl``（9 行：含 reasoning capture + 1 条 experimental 未知 envelope，
+tool output 已脱敏缩小，无 token 泄漏）。
 """
 
 from __future__ import annotations
@@ -55,17 +59,104 @@ def _find(top_type: str) -> str:
 
 
 SAMPLE_STEP_START_LINE = _find("step_start")
+SAMPLE_REASONING_LINE = _find("reasoning")
 SAMPLE_TEXT_LINE = _find("text")
 SAMPLE_TOOL_USE_LINE = _find("tool_use")
 SAMPLE_STEP_FINISH_LINE = _find("step_finish")
 
 
-# ── step_start → [] ──────────────────────────────────────────────────────────
+# ── step_start → agent_step_started（web-v2 §3.2 B1 liveness 心跳）───────────
 
 
-def test_step_start_returns_empty():
-    """step_start 是回合开始信号，无业务事件（agent 生命周期由 executor 管）。"""
-    assert opencode_translator(SAMPLE_STEP_START_LINE, SESSION) == []
+def test_step_start_to_agent_step_started_with_reason():
+    """step_start（带 reason）→ agent_step_started{step_reason: <reason>}。
+
+    web-shell-v2 §3.2 B1：opencode step_start 是 liveness 心跳；part.reason 透传到前端
+    便于「第 N 步」标记。**不进 RunState**（reducer no-op），仅 AgentHistory 显示。
+
+    注：真实 opencode v1.14.22 抓取中 ``step_start.part`` 从不带 ``reason`` 字段（reason
+    只在 ``step_finish.part.reason`` 出现）。本测试**内联构造**带 reason 的 step_start，
+    锁死 translator 对该字段的 defensive 透传逻辑（防未来 opencode 协议变更 / 或其他 fork
+    后端把 reason 放 step_start 时 Orca 不丢字段）。fixture 不覆盖此分支（real protocol
+    不发），故不能用 fixture 喂。
+    """
+    line = json.dumps({
+        "type": "step_start",
+        "part": {
+            "id": "p2", "type": "step-start", "messageID": "m2",
+            "reason": "tool-calls",
+        },
+    })
+    events = opencode_translator(line, SESSION)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.type == "agent_step_started"
+    assert ev.data == {"step_reason": "tool-calls"}
+    assert ev.session_id == SESSION
+
+
+def test_step_start_reason_non_string_falls_back_to_empty_data():
+    """reason 非 str（None / 数字 / 缺失）→ data={}（防御性，part.reason 类型异常不抛）。"""
+    for reason_value in (None, 123, [], {}):
+        line = json.dumps({
+            "type": "step_start",
+            "part": {"id": "p", "type": "step-start", "reason": reason_value},
+        })
+        ev = opencode_translator(line, SESSION)[0]
+        assert ev.type == "agent_step_started"
+        assert ev.data == {}, f"reason={reason_value!r} 应被忽略（非 str）"
+
+
+def test_step_start_without_reason_emits_empty_data():
+    """step_start（无 reason，首 step）→ agent_step_started{}（data 为空 dict）。"""
+    line = json.dumps({
+        "type": "step_start",
+        "part": {"id": "p1", "type": "step-start", "messageID": "m1"},
+    })
+    events = opencode_translator(line, SESSION)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.type == "agent_step_started"
+    assert ev.data == {}  # 无 reason → 空 dict（不是 None，不是 missing key）
+
+
+# ── reasoning → agent_thinking（web-v2 §3.2 B1，--thinking on）───────────────
+
+
+def test_reasoning_to_agent_thinking_whole_block():
+    """reasoning envelope（--thinking on）→ agent_thinking{text}（整块）。
+
+    web-shell-v2 §3.2 B1 / §5.3：与 claude thinking_delta 同 canonical 事件，前端琥珀折叠。
+    opencode 块级语义（非 token 增量），整块发。
+    """
+    obj = json.loads(SAMPLE_REASONING_LINE)
+    expected_text = obj["part"]["text"]
+    events = opencode_translator(SAMPLE_REASONING_LINE, SESSION)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.type == "agent_thinking"
+    assert ev.data == {"text": expected_text}
+    assert ev.session_id == SESSION
+
+
+def test_empty_reasoning_returns_empty():
+    """空 reasoning 文本不发（与 _translate_text 同步，减少噪音）。"""
+    line = json.dumps({"type": "reasoning", "part": {"type": "reasoning", "text": ""}})
+    assert opencode_translator(line, SESSION) == []
+
+
+def test_reasoning_missing_text_key_returns_empty():
+    """reasoning 的 part.text 完全缺失（不是空串）→ []（防御性，与空串同路径）。"""
+    line = json.dumps({"type": "reasoning", "part": {"type": "reasoning"}})
+    assert opencode_translator(line, SESSION) == []
+
+
+def test_reasoning_missing_part_returns_empty():
+    """reasoning 的 part 字段缺失 / 非 dict → []（防御性）。"""
+    line = json.dumps({"type": "reasoning"})
+    assert opencode_translator(line, SESSION) == []
+    line = json.dumps({"type": "reasoning", "part": "not-a-dict"})
+    assert opencode_translator(line, SESSION) == []
 
 
 # ── text → agent_message（整块，非增量）──────────────────────────────────────
@@ -175,7 +266,8 @@ def test_tool_result_structured_output_json_serialized():
 
 
 def test_step_finish_to_agent_usage():
-    """step_finish 的 tokens/cost → agent_usage（cache_tokens 来自 cache.read）。"""
+    """step_finish 的 tokens/cost → agent_usage（cache_tokens 来自 cache.read，
+    **reasoning_tokens 来自 tokens.reasoning**，web-v2 §3.2 B1）。"""
     obj = json.loads(SAMPLE_STEP_FINISH_LINE)
     part = obj["part"]
     tokens = part["tokens"]
@@ -188,7 +280,34 @@ def test_step_finish_to_agent_usage():
     assert ev.data["output_tokens"] == tokens["output"]
     assert ev.data["cache_tokens"] == cache.get("read", 0)
     assert ev.data["cost_usd"] == part["cost"]
+    # web-v2 §3.2 B1：reasoning_tokens 从 tokens.reasoning 取
+    assert ev.data["reasoning_tokens"] == tokens.get("reasoning", 0)
     assert ev.session_id == SESSION
+
+
+def test_step_finish_without_reasoning_defaults_zero():
+    """旧 opencode 协议（无 tokens.reasoning 字段）→ reasoning_tokens=0（lossless 兜底）。
+
+    消费侧 ``data.get('reasoning_tokens', 0)`` 兜底，**不破坏旧 tape replay**。
+    """
+    line = json.dumps({
+        "type": "step_finish",
+        "part": {
+            "type": "step-finish",
+            "tokens": {"total": 100, "input": 80, "output": 20, "cache": {"read": 0}},
+            "cost": 0.001,
+        },
+    })
+    ev = opencode_translator(line, SESSION)[0]
+    assert ev.data["reasoning_tokens"] == 0
+
+
+def test_step_finish_missing_tokens_returns_empty():
+    """step_finish 的 tokens 字段缺失 / 非 dict → []（防御性，fail loud 不抛）。"""
+    line = json.dumps({"type": "step_finish", "part": {"type": "step-finish", "cost": 0.001}})
+    assert opencode_translator(line, SESSION) == []
+    line = json.dumps({"type": "step_finish", "part": {"type": "step-finish", "tokens": "x"}})
+    assert opencode_translator(line, SESSION) == []
 
 
 # ── error → error 事件 ───────────────────────────────────────────────────────
@@ -232,8 +351,31 @@ def test_error_event_missing_data_falls_back_to_name():
 # ── 未知 type / 非法结构 → []（防御性，不抛）──────────────────────────────────
 
 
-def test_unknown_type_returns_empty():
-    assert opencode_translator(json.dumps({"type": "foobar"}), SESSION) == []
+def test_unknown_type_emits_unknown_event():
+    """未知 envelope type → unknown_event（web-v2 §3.2 D8 tape escape hatch）。
+
+    **绝不静默丢**：raw 整行进 tape（reducer MUST no-op，仅 LogStream / AgentHistory dim 渲染）。
+    便于排查协议漂移（opencode 加新 envelope → 用户立刻在 LogStream 看到 ? unknown 行）。
+    """
+    line = json.dumps({"type": "experimental_event", "part": {"note": "future envelope"}})
+    events = opencode_translator(line, SESSION)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.type == "unknown_event"
+    assert ev.data["source"] == "opencode"
+    assert ev.data["raw"] == {"type": "experimental_event", "part": {"note": "future envelope"}}
+    assert ev.session_id == SESSION
+
+
+def test_missing_type_field_emits_unknown_event():
+    """完全无 type 字段的 envelope → unknown_event（防御性，fail-loud 不丢）。"""
+    line = json.dumps({"part": {"x": 1}, "sessionID": "ses_internal"})
+    events = opencode_translator(line, SESSION)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.type == "unknown_event"
+    assert ev.data["source"] == "opencode"
+    assert ev.data["raw"]["part"] == {"x": 1}
 
 
 def test_non_json_line_returns_empty():
@@ -291,14 +433,30 @@ def test_seq_zero_placeholder():
 
 
 def test_full_stream_translates_to_expected_event_types(full_stream):
-    """整 7 行 fixture 跑一遍，产出的 type 集合符合预期（覆盖 text+tool+usage）。"""
+    """整 fixture 跑一遍，产出的 type 集合符合预期（覆盖 text+tool+usage+reasoning+step_start+unknown）。"""
     all_events = []
     for line in full_stream:
         all_events.extend(opencode_translator(line, SESSION))
     types = [ev.type for ev in all_events]
-    # 这条 fixture 的语义：text → bash 工具 → step_finish → (二回合) text → step_finish
-    assert "agent_message" in types  # 文本段
-    assert "agent_tool_call" in types  # bash 工具调用
-    assert "agent_tool_result" in types  # 工具结果
-    assert "agent_usage" in types  # step_finish 的 usage（出现 2 次，每 step 一次）
-    assert types.count("agent_usage") == 2
+    # fixture 9 行的语义：
+    #   step_start(1) → agent_step_started
+    #   text(1) → agent_message
+    #   tool_use → agent_tool_call + agent_tool_result
+    #   step_finish(1, tool-calls, reasoning=67) → agent_usage (含 reasoning_tokens)
+    #   step_start(2, 无 reason) → agent_step_started
+    #   reasoning → agent_thinking
+    #   text(2) → agent_message
+    #   step_finish(2, stop, reasoning=109) → agent_usage (含 reasoning_tokens)
+    #   experimental_event → unknown_event
+    assert types.count("agent_message") == 2
+    assert types.count("agent_tool_call") == 1
+    assert types.count("agent_tool_result") == 1
+    assert types.count("agent_usage") == 2  # 每 step 一条
+    assert types.count("agent_step_started") == 2  # 两个 step
+    assert types.count("agent_thinking") == 1  # reasoning envelope
+    assert types.count("unknown_event") == 1  # experimental envelope
+    # reasoning_tokens 进 agent_usage（web-v2 §3.2 B1）
+    usage_events = [ev for ev in all_events if ev.type == "agent_usage"]
+    assert all("reasoning_tokens" in ev.data for ev in usage_events)
+    assert usage_events[0].data["reasoning_tokens"] == 67  # step 1
+    assert usage_events[1].data["reasoning_tokens"] == 109  # step 2

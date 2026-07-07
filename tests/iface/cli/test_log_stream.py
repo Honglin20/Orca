@@ -2,7 +2,7 @@
 
 INTENT（CLAUDE.md 铁律 9）：测试不是「widget 写入 X 行」，而是「**用户能在 Log Stream
 看到 node 失败原因**」——断言 ``node_failed.data.message`` 完整出现在 LogStream 输出
-（reviewer P1-10 不截断）+ 5 level icon 正确 + EVENT_LEVEL 表全覆盖 37 EventType
+（reviewer P1-10 不截断）+ 5 level icon 正确 + EVENT_LEVEL 表全覆盖全 EventType
 （fail loud 守门，防 schema 加新 type 漏 mapping）。
 """
 
@@ -41,9 +41,9 @@ class TestEventLevelCompleteness:
 
     reviewer P0-1 拆两断言：
       - 断言 1：表内每个 key 是合法 EventType，value 是 5 level 之一或 None。
-      - 断言 2：全 37 EventType 必须在表内（含显式 None 的 7 个）。
+      - 断言 2：全 EventType 必须在表内（含显式 None 的 9 个，web-v2 §3.2 B1 +2）。
 
-    reviewer P0-2：EventType Literal 数量锁 37（防 drift）。
+    reviewer P0-2：EventType Literal 数量锁（防 drift；web-v2 §3.2 B1 后 = 39）。
     """
 
     def test_event_level_in_table_valid(self):
@@ -59,7 +59,7 @@ class TestEventLevelCompleteness:
             )
 
     def test_event_level_covers_all_event_types(self):
-        """断言 2：全 37 EventType 都在表内（含显式 None 的 7 个）。"""
+        """断言 2：全 EventType 都在表内（含显式 None 的 9 个）。"""
         all_event_types = set(typing.get_args(EventType))
         in_table = set(EVENT_LEVEL.keys())
         missing = all_event_types - in_table
@@ -69,17 +69,21 @@ class TestEventLevelCompleteness:
         )
 
     def test_event_visibility_completeness(self):
-        """spec §11.1：EVENT_VISIBILITY 表全覆盖 37 EventType（fail loud 守门）。"""
+        """spec §11.1：EVENT_VISIBILITY 表全覆盖 EventType（fail loud 守门）。"""
         all_event_types = set(typing.get_args(EventType))
         in_table = set(EVENT_VISIBILITY.keys())
         missing = all_event_types - in_table
         assert missing == set(), f"EVENT_VISIBILITY 漏登记: {missing}"
 
-    def test_37_event_types_count(self):
-        """事实校对：EventType Literal 含 37 项（reviewer P0-2 防漂移）。"""
+    def test_event_type_count_drift_guard(self):
+        """事实校对：EventType Literal 项数守门（防意外漂移；web-v2 §3.2 B1 后 = 39）。
+
+        新增/删除 EventType 时此处会 fail —— 提醒同步更新：①EVENT_LEVEL 表；
+        ②EVENT_VISIBILITY 表；③reducer ``apply_event`` 分支；④本测试期望数。
+        """
         all_event_types = typing.get_args(EventType)
-        assert len(all_event_types) == 37, (
-            f"EventType 数量漂移: 期望 37, 实际 {len(all_event_types)}"
+        assert len(all_event_types) == 39, (
+            f"EventType 数量漂移: 期望 39（web-v2 §3.2 B1 后），实际 {len(all_event_types)}"
         )
 
 
@@ -98,7 +102,9 @@ class TestLevelOf:
         assert level_of("route_taken") == LEVEL_DEBUG
 
     def test_agent_events_return_none(self):
-        """7 个 agent_*/prompt_rendered/custom 显式 None（不进 Log Stream）。"""
+        """9 个 agent_*/prompt_rendered/custom/agent_step_started/unknown_event 显式 None
+        （不进 Log Stream）。web-v2 §3.2 B1：agent_step_started / unknown_event 归 Agent History。
+        """
         assert level_of("agent_message") is None
         assert level_of("agent_thinking") is None
         assert level_of("agent_tool_call") is None
@@ -106,6 +112,8 @@ class TestLevelOf:
         assert level_of("agent_usage") is None
         assert level_of("prompt_rendered") is None
         assert level_of("custom") is None
+        assert level_of("agent_step_started") is None
+        assert level_of("unknown_event") is None
 
     def test_unknown_event_returns_info(self):
         """未登记 type → LEVEL_INFO 兜底（fail visible，不静默吞；spec §11.5 #6）。"""

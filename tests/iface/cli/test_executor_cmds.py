@@ -216,6 +216,62 @@ class TestResolvePromptChannel:
         assert "非法" in caplog.text
 
 
+# ── resolve_reasoning_args（base.py，profiles 层，web-v2 §11 step1 B2）──────────
+
+
+class TestResolveReasoningArgs:
+    """``CliProfile.resolve_reasoning_args``：opt-in env 注入（与 resolve_flags 同构）。
+
+    web-shell-v2 §0 D-decisions + §11 step1 B2：opencode ``--thinking`` / ``--variant``
+    经此通道注入。**opt-in（默认 off）**：reasoning_flags_env 未设 / env 未填 → ``[]``。
+    """
+
+    def test_default_empty_for_profiles_without_channel(self):
+        """claude/ccr 无 reasoning_flags_env → 永远 []（opt-in 通道未开）。"""
+        from orca.profiles.registry import get_profile
+
+        assert get_profile("claude").resolve_reasoning_args() == []
+        assert get_profile("ccr").resolve_reasoning_args() == []
+
+    def test_opencode_default_off(self):
+        """opencode 设了 reasoning_flags_env，但 env 未填 → 仍 []（默认 off，保既有行为）。"""
+        from orca.profiles.registry import get_profile
+
+        assert get_profile("opencode").resolve_reasoning_args() == []
+
+    def test_opencode_thinking_flag(self, monkeypatch):
+        """``ORCA_OPENCODE_REASONING_FLAGS=--thinking`` → ``["--thinking"]``。"""
+        from orca.profiles.registry import get_profile
+
+        monkeypatch.setenv("ORCA_OPENCODE_REASONING_FLAGS", "--thinking")
+        assert get_profile("opencode").resolve_reasoning_args() == ["--thinking"]
+
+    def test_opencode_variant_flag_two_tokens(self, monkeypatch):
+        """``ORCA_OPENCODE_REASONING_FLAGS=--variant deepseek-reasoner`` → 两 token list。"""
+        from orca.profiles.registry import get_profile
+
+        monkeypatch.setenv("ORCA_OPENCODE_REASONING_FLAGS", "--variant deepseek-reasoner")
+        assert get_profile("opencode").resolve_reasoning_args() == [
+            "--variant", "deepseek-reasoner",
+        ]
+
+    def test_opencode_combined_thinking_and_variant(self, monkeypatch):
+        """组合 flag：``--thinking --variant foo``。"""
+        from orca.profiles.registry import get_profile
+
+        monkeypatch.setenv("ORCA_OPENCODE_REASONING_FLAGS", "--thinking --variant foo")
+        assert get_profile("opencode").resolve_reasoning_args() == [
+            "--thinking", "--variant", "foo",
+        ]
+
+    def test_explicit_empty_env_means_no_extra(self, monkeypatch):
+        """显式置空（``ORCA_OPENCODE_REASONING_FLAGS=``）= 无 flag（shlex.split('')==[]）。"""
+        from orca.profiles.registry import get_profile
+
+        monkeypatch.setenv("ORCA_OPENCODE_REASONING_FLAGS", "")
+        assert get_profile("opencode").resolve_reasoning_args() == []
+
+
 # ── classify 纯函数（全分支）──────────────────────────────────────────────────
 
 

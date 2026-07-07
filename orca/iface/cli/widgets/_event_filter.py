@@ -10,7 +10,7 @@ v2 语义重映射（spec §11.1）：
   - ``hide_all`` → 完全不显示，仅写 tape（prompt_rendered 调试事件）
 
 设计原则：
-  - **fail loud**：表必须覆盖全部 37 EventType（``test_event_visibility_completeness``
+  - **fail loud**：表必须覆盖全部 EventType（``test_event_visibility_completeness``
     守门）；schema 加新 type 漏 mapping 时测试立即 fail。
   - **依赖单向**：本模块只 import ``typing``（Literal），无 textual/rich 依赖（纯数据）。
   - **OCP**：消费者按 tag 派发（``if vis == "show"``）；新增 tag 改消费者单点，不动表。
@@ -34,7 +34,7 @@ Visibility = Literal[
     "hide_all",      # 完全不显示，仅写 tape（prompt_rendered）
 ]
 
-# 全 37 EventType → visibility tag（spec §11.1 v2 重映射）。
+# 全 EventType → visibility tag（spec §11.1 v2 重映射；web-v2 §3.2 B1 后 = 39 项）。
 # 新增 EventType 必须在此登记（否则 ``test_event_visibility_completeness`` fail loud）。
 EVENT_VISIBILITY: dict[str, Visibility] = {
     # ── workflow 生命周期（→ Log Stream）──
@@ -54,6 +54,8 @@ EVENT_VISIBILITY: dict[str, Visibility] = {
     "agent_tool_call":             "show",
     "agent_tool_result":           "show",
     "agent_usage":                 "hide_main",      # 收敛到 Header footer
+    "agent_step_started":          "show_dim",       # web-v2 §6 liveness 心跳，弱化可见
+    "unknown_event":               "show_dim",       # web-v2 §3.2 D8 tape escape hatch，弱化可见
     # ── 路由（→ Log Stream debug）──
     "route_taken":                 "show_compact",
     # ── 并发（→ Log Stream debug）──

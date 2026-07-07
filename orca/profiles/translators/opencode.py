@@ -9,22 +9,28 @@ opencode 协议与 claude stream-json 完全不同：
     ``step_finish`` 的 ``part.tokens`` / ``part.cost``；错误是单独的 ``error`` 事件。
     故 opencode 走 ``TerminalContract(mode="events")``，executor 用 RunAccumulator 累积。
 
-映射（按真实抓取字段）：
-  1. ``step_start``（``part.type="step-start"``）→ ``[]``（回合开始，无业务信号）。
-  2. ``text``（``part.text`` 整块）→ ``agent_message{text}``（**整块**，非增量——opencode
+映射（按真实抓取字段，web-shell-v2 §3.2 lossless 扩展）：
+  1. ``step_start``（``part.type="step-start"``，``part.reason`` 可选）→ ``agent_step_started``
+     （``{step_reason?: reason}``，web-shell-v2 §3.2 B1 / §6 liveness 心跳）。
+  2. ``reasoning``（``part.text`` 整块，``--thinking`` on 时发）→ ``agent_thinking{text}``
+     （与 claude thinking_delta 同 canonical 事件，前端琥珀折叠渲染）。
+  3. ``text``（``part.text`` 整块）→ ``agent_message{text}``（**整块**，非增量——opencode
      一次发完整文本段，不是 token-by-token）。
-  3. ``tool_use``（``part.tool`` / ``part.callID`` / ``part.state``）→ 完成时（``state.status
+  4. ``tool_use``（``part.tool`` / ``part.callID`` / ``part.state``）→ 完成时（``state.status
      =="completed"``）一次发 ``agent_tool_call`` + ``agent_tool_result``。opencode 把调用与
      结果合在一条事件里（state 同时带 input + output），不像 claude 分 assistant/user 两行。
-  4. ``step_finish``（``part.tokens`` / ``part.cost``）→ ``agent_usage``（input/output/cache/
-     cost；tokens 在该 step 是累积值）。**注意**：opencode 每个 reasoning step 发一条
-     ``agent_usage``（多步 = 多条），与 claude「result 行只发一次」语义不同。下游聚合
+  5. ``step_finish``（``part.tokens`` / ``part.cost``）→ ``agent_usage``（input/output/cache/
+     cost/reasoning_tokens；tokens 在该 step 是累积值）。**注意**：opencode 每个 reasoning step
+     发一条 ``agent_usage``（多步 = 多条），与 claude「result 行只发一次」语义不同。下游聚合
      cost 时取 ``node_completed.data.usage``（RunAccumulator 存的最后一条 step_finish）
      为准，不要对 tape 里的 per-step agent_usage 求和（会重复计费）。
-  5. ``error``（``error.data.message`` / ``error.name``）→ ``error`` 事件（带 message；opencode
+     ``reasoning_tokens`` 来自 ``tokens.reasoning``（无该字段 = 0；旧 tape 默认 0，
+     ``data.get('reasoning_tokens', 0)`` 消费侧兜底，**不破坏旧 tape replay**）。
+  6. ``error``（``error.data.message`` / ``error.name``）→ ``error`` 事件（带 message；opencode
      的 error.data 无结构化 HTTP 码字段，故 ``api_error_status`` 不设——RunAccumulator 抓不到
      时为 None，executor 的错误诊断照样能带 message）。
-  6. 未知 type → ``[]``（不抛，优雅降级）。
+  7. 未知 envelope type → ``unknown_event{raw, source:"opencode"}``（web-shell-v2 §3.2 / D8：
+     tape 级 escape hatch，**绝不静默丢**；reducer MUST no-op，仅 LogStream 渲染）。
 
 纯函数（铁律 3）：``opencode_translator(line, session_id) -> list[Event]``，无 self / 无 I/O /
 无副作用。fixture 驱动测试，不 spawn opencode。
@@ -70,8 +76,15 @@ def opencode_translator(line: str, session_id: str) -> list[Event]:
         return _translate_step_finish(obj, session_id)
     if top_type == "error":
         return _translate_error(obj, session_id)
-    # step_start / step-finish 之外未知 → []（不抛，优雅降级）
-    return []
+    if top_type == "reasoning":
+        return _translate_reasoning(obj, session_id)
+    if top_type == "step_start":
+        return _translate_step_start(obj, session_id)
+    # web-shell-v2 §3.2 / D8：未知 envelope → unknown_event（tape 级 escape hatch）。
+    # **不静默丢**：reducer MUST no-op（仅 LogStream 渲染），但 tape 留证据便于排查协议漂移。
+    return [_event(
+        "unknown_event", session_id, {"raw": obj, "source": "opencode"},
+    )]
 
 
 # ── 工具：构造占位 Event ─────────────────────────────────────────────────────
@@ -90,6 +103,53 @@ def _event(event_type: str, session_id: str, data: dict[str, Any]) -> Event:
         session_id=session_id,
         data=data,
     )
+
+
+# ── reasoning → agent_thinking（整块，--thinking on 时发）────────────────────
+
+
+def _translate_reasoning(obj: dict, session_id: str) -> list[Event]:
+    """reasoning 事件：``part.text`` 整块 → agent_thinking（web-shell-v2 §3.2 B1）。
+
+    opencode 在 ``--thinking`` on 时发 reasoning envelope，``part.text`` 是该 reasoning step
+    的完整推理文本（非 token 增量，与 text envelope 同款块级语义）。映射到 claude
+    thinking_delta 同款 canonical 事件 ``agent_thinking``，前端琥珀折叠渲染（D2 + §5.3）。
+
+    空文本不发（与 _translate_text 同步，减少噪音）。
+    """
+    part = obj.get("part")
+    if not isinstance(part, dict):
+        return []
+    text = part.get("text", "")
+    if not isinstance(text, str) or text == "":
+        return []
+    return [_event("agent_thinking", session_id, {"text": text})]
+
+
+# ── step_start → agent_step_started（liveness 心跳，web-shell-v2 §3.2 B1 / §6）
+
+
+def _translate_step_start(obj: dict, session_id: str) -> list[Event]:
+    """step_start 事件：``part.reason`` 可选 → agent_step_started（web-shell-v2 §3.2 B1）。
+
+    opencode 每个 reasoning step 开头发一条 step_start；``part.reason`` 是上一步结束原因
+    （如 "tool-calls" / "stop"），**首个 step_start 无 reason**（消息起点）。
+
+    映射：
+      - data = ``{"step_reason": <reason>}``（reason 存在时）
+      - data = ``{}``（reason 缺失 / None —— 首个 step_start，无前置 reason）
+
+    前端用作 liveness 心跳（web-shell-v2 §6：进度心跳 = agent_step_started）；reducer no-op
+    （不改 RunState，agent 生命周期由 executor 管）。step_reason 透传到前端便于「第 N 步」标记。
+    """
+    part = obj.get("part")
+    if not isinstance(part, dict):
+        return []
+    reason = part.get("reason")
+    data: dict[str, Any] = {}
+    if isinstance(reason, str) and reason:
+        data["step_reason"] = reason
+    return [_event("agent_step_started", session_id, data)]
 
 
 # ── text → agent_message（整块）──────────────────────────────────────────────
@@ -176,11 +236,15 @@ def _translate_step_finish(obj: dict, session_id: str) -> list[Event]:
     opencode 每个 reasoning step 结束发一条 step_finish，``part.tokens`` 是该 step 的 token
     统计（实测为累积值），``part.cost`` 是该 step 美元成本。
 
-    映射（对齐 Orca agent_usage 契约）：
+    映射（对齐 Orca agent_usage 契约 + web-shell-v2 §3.2 B1 reasoning_tokens 扩展）：
       - input_tokens = tokens.input
       - output_tokens = tokens.output
       - cache_tokens = tokens.cache.read（无 cache.read 时 0）
       - cost_usd = part.cost
+      - reasoning_tokens = tokens.reasoning（``--thinking`` on 时发；无该字段 = 0）
+
+    旧 tape（无 ``reasoning_tokens`` 字段）由消费侧 ``data.get('reasoning_tokens', 0)`` 兜底，
+    **不破坏旧 tape replay**（lossless 扩展只加字段，不改语义）。
     """
     part = obj.get("part")
     if not isinstance(part, dict):
@@ -198,6 +262,7 @@ def _translate_step_finish(obj: dict, session_id: str) -> list[Event]:
                 "output_tokens": tokens.get("output", 0),
                 "cache_tokens": cache.get("read", 0),
                 "cost_usd": part.get("cost", 0.0),
+                "reasoning_tokens": tokens.get("reasoning", 0),
             },
         )
     ]

@@ -33,7 +33,10 @@ EventType = Literal[
     "agent_thinking",  # data: {text}
     "agent_tool_call",  # data: {tool, args, tool_call_id}
     "agent_tool_result",  # data: {tool_call_id, result}
-    "agent_usage",  # data: {input_tokens, output_tokens, cache_tokens, cost_usd}
+    "agent_usage",  # data: {input_tokens, output_tokens, cache_tokens, cost_usd, reasoning_tokens?}
+    # web-shell-v2 §3.2 B1：opencode step_start → 进度心跳（liveness）；reducer no-op
+    # （只触发前端 step 标记 + LogStream，不改 RunState）。
+    "agent_step_started",  # data: {step_reason?}（opencode step_start.part.reason）
     # ── 路由 ──
     "route_taken",  # data: {from, to}
     # ── 并发 ──
@@ -73,6 +76,11 @@ EventType = Literal[
     # ── 错误 ──
     # phase-11 v2.1：data 含 kind（权威）+ error_type（读兼容）+ message + phase?
     "error",  # data: {kind, error_type(读兼容), message, phase?}
+    # web-shell-v2 §3.2 B1 / D8：tape 级 escape hatch。translator 遇未知 envelope 时
+    # 透传整行进 tape（绝不静默丢）；reducer MUST no-op（仅 LogStream 渲染）。
+    # ``raw`` 透传整条原始行，**可能含 backend 内部 id**（如 opencode 的 sessionID）——
+    # 跨信任边界导出 tape 时需脱敏。
+    "unknown_event",  # data: {raw: <original line dict>, source: "opencode"|"claude"|...}
 ]
 
 

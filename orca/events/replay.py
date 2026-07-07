@@ -138,6 +138,15 @@ def apply_event(state: RunState, event: Event) -> RunState:
         # → 显式 no-op：不修改 state（session 细节不入顶层状态）。
         return state
 
+    # web-shell-v2 §3.2 B1 / D8：agent_step_started（liveness 心跳）+ unknown_event
+    # （tape 级 escape hatch）MUST no-op——绝不投影进 RunState（仅 LogStream 渲染）。
+    # unknown_event 透传整条 raw 行进 tape 便于排查协议漂移，但 RunState 不能被污染
+    # （否则 backend 协议变化会触发非幂等状态变更）。与上方 agent_* 流式细节同属
+    # session 级 no-op，但语义不同（agent_* 是「留给前端」，这俩是「绝不投影」），
+    # 故独立分支保留注释密度。
+    if t in ("agent_step_started", "unknown_event"):
+        return state
+
     if t == "route_taken":
         # 路由事件：更新 current_node（last-writer-wins）
         to = data.get("to")

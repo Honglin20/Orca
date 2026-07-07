@@ -54,6 +54,9 @@ from orca.iface.cli.widgets._event_summary import (
 from orca.schema import Event
 
 # spec §2.3 6 TYPE-LABEL（6 字符宽，对齐 summary 行）
+# web-v2 §3.2 B1：agent_step_started / unknown_event 也归 Agent History（show_dim），
+# 显式 label 让 entry 行视觉对齐（fallback 是 event_type[:5].upper()，对 unknown_event
+# 会显 "UNKNO" 难看）。
 _TYPE_LABELS: dict[str, str] = {
     "agent_thinking":            "THINK",
     "agent_tool_call":           "TOOL",
@@ -63,6 +66,8 @@ _TYPE_LABELS: dict[str, str] = {
     "human_decision_resolved":   "GATE",
     "interrupt_requested":       "INT",
     "interrupt_resolved":        "INT",
+    "agent_step_started":        "STEP",
+    "unknown_event":             "UNK",
 }
 
 # spec §2.3 tool_call_id cache LRU 上限（GAP-B/C 修复机制，spec §2.3）

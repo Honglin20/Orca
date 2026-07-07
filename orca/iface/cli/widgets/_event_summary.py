@@ -92,6 +92,13 @@ def _build_summary_line(event_type: str, data: dict) -> str:
         return _truncate(data.get("text", "")).replace("\n", " ")
     if event_type == "agent_thinking":
         return _truncate(data.get("text", "")).replace("\n", " ")
+    if event_type == "agent_step_started":
+        # web-v2 §3.2 B1：liveness 心跳；有 reason 显「· step <reason>」，无 reason 显「· step」
+        reason = data.get("step_reason")
+        return f"step {reason}" if reason else "step"
+    if event_type == "unknown_event":
+        # web-v2 §3.2 D8：tape escape hatch，弱化可见（dim `? unknown`）
+        return "unknown"
     if event_type in ("agent_tool_call", "agent_tool_result"):
         tool = data.get("tool", "?")
         args = data.get("args", {}) or {}
@@ -277,6 +284,18 @@ def _build_detail_renderable(
         options = data.get("options") or []
         opts_text = "\n".join(f"  - {o}" for o in options) if options else ""
         return Static(f"{prompt}\n{opts_text}") if opts_text else None
+    if event_type == "unknown_event":
+        # web-v2 §3.2 D8 / §5.3：dim `? unknown` 可展开看 raw（SPEC 承诺兑现）。
+        # raw 可能含 backend 内部 id（如 opencode sessionID），仅在 TUI 本地展开——
+        # 跨信任边界导出 tape 时需脱敏（schema/event.py unknown_event 注释已声明）。
+        raw = data.get("raw")
+        if raw is None:
+            return None
+        try:
+            text = json.dumps(raw, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            text = str(raw)
+        return Static(text)
     return None
 
 

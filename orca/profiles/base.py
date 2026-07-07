@@ -87,6 +87,15 @@ class CliProfile:
     # 写 config.json，启动期 ``apply_config_env`` 注入此 env，``resolve_prompt_channel()`` 运行时读。
     prompt_channel_env: str = ""
 
+    # ── reasoning flags 通道（web-shell-v2 §0 D-decisions + §11 step1 B2）──
+    # 空串 = 无 reasoning 通道（默认）：``resolve_reasoning_args()`` 返回 ``[]``。
+    # 非空 = env 变量名（如 ``ORCA_OPENCODE_REASONING_FLAGS``）；用户/配置可设为
+    # ``"--thinking"`` / ``"--variant deepseek-reasoner"`` / 任意 opencode reasoning flag 组合。
+    # ``resolve_reasoning_args()`` 运行时 shlex.split 读；空 env → ``[]``（opt-in，默认 off）。
+    # 与 ``flags_env`` 区别：``flags_env`` **替换** flags；``reasoning_flags_env`` **追加** 到 extra_args
+    # （reasoning 是可选增强，不替换基础 flags；与 ``--model`` extra_args 同路径）。
+    reasoning_flags_env: str = ""
+
     # ── prompt 形状 ──
     prompt_paradigm: Literal["minimal"] = "minimal"  # 暂只支持 minimal
 
@@ -144,3 +153,26 @@ class CliProfile:
                 self.name, self.prompt_channel_env, val, self.prompt_channel,
             )
         return self.prompt_channel
+
+    def resolve_reasoning_args(self) -> list[str]:
+        """返回 reasoning extra_args（如 ``["--thinking"]`` 或 ``["--variant", "deepseek-reasoner"]``）。
+
+        web-shell-v2 §0 D-decisions + §11 step1 B2：opencode ``--thinking`` / ``--variant``
+        经此通道注入。**opt-in（默认 off）**：``reasoning_flags_env == ""`` 或 env 未设 → ``[]``
+        （不改 spawn argv，保既有行为）。
+
+        三态（同 ``resolve_flags`` / ``resolve_prompt_channel`` 的 env 注入机制）：
+          1. ``reasoning_flags_env == ""``（无 override 通道）→ ``[]``。
+          2. env 显式设（含空串 = 显式清空）→ ``shlex.split(env_value)``。``shlex.split('') == []``。
+          3. env 未设 → ``[]``（default，向后兼容）。
+
+        消费点：executor ``_build_spawn_config`` 把结果 append 到 extra_args（与 ``--model`` 同路径）。
+        与 ``resolve_flags`` 的关键区别：``resolve_flags`` **替换** profile.flags，本函数**只追加**
+        reasoning 专有 flag——理由：reasoning 是可选增强（不能替换 ``run --format json`` 等基础 flag），
+        且 opencode profile 的基础 flags 与 reasoning 正交（前者定协议格式，后者定模型行为）。
+        """
+        if not self.reasoning_flags_env:
+            return []
+        if self.reasoning_flags_env in os.environ:
+            return shlex.split(os.environ[self.reasoning_flags_env])
+        return []

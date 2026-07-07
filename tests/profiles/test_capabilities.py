@@ -1,6 +1,7 @@
 """tests/profiles/test_capabilities.py —— ProviderCapabilities frozen + extra="forbid"。
 
-覆盖 SPEC §6.6：frozen（构造后不可变）/ extra="forbid"（未知字段拒绝）/ 7 字段约束。
+覆盖 SPEC §6.6：frozen（构造后不可变）/ extra="forbid"（未知字段拒绝）/ 7 必填字段约束
++ supports_reasoning opt-in（web-shell-v2 §0 D + §11 step1 B2，默认 False）。
 """
 
 from __future__ import annotations
@@ -74,3 +75,25 @@ def test_field_types_are_bool_where_appropriate():
         "checkpoint_resume", "usage_tracking", "concurrent_safe",
     ):
         assert isinstance(getattr(cap, field), bool)
+
+
+def test_supports_reasoning_defaults_false():
+    """web-shell-v2 §11 step1 B2：supports_reasoning 默认 False（opt-in，保既有 profile 零改动）。
+
+    未显式传 → False（claude/ccr 走默认；opencode 显式设 True）。
+    """
+    cap = ProviderCapabilities(**_full_kwargs())
+    assert cap.supports_reasoning is False
+
+
+def test_supports_reasoning_opt_in_true():
+    """显式设 supports_reasoning=True（opencode profile 用）。"""
+    cap = ProviderCapabilities(**_full_kwargs(supports_reasoning=True))
+    assert cap.supports_reasoning is True
+
+
+def test_supports_reasoning_frozen_immutable():
+    """supports_reasoning 也受 frozen 约束（构造后不可改）。"""
+    cap = ProviderCapabilities(**_full_kwargs(supports_reasoning=True))
+    with pytest.raises((ValidationError, TypeError)):
+        cap.supports_reasoning = False  # type: ignore[misc]

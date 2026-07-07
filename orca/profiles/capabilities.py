@@ -5,8 +5,9 @@
 
 设计（SPEC §4.4，借自 Conductor ``get_capabilities`` —— 不实例化就能查）：
   - **frozen + extra="forbid"**：构造后不可变、未知字段拒绝（profile 是契约，不能漂移）。
-  - 7 个能力字段：mcp_tools / streaming_events / structured_output / interrupt /
-    checkpoint_resume / usage_tracking / concurrent_safe。
+  - 8 个能力字段（web-v2 §11 step1 B2 后）：mcp_tools / streaming_events / structured_output /
+    interrupt / checkpoint_resume / usage_tracking / concurrent_safe + supports_reasoning
+    （opt-in 默认 False）。
 
 依赖单向：本模块只依赖 pydantic，不依赖 schema/run/exec/compile。
 """
@@ -29,6 +30,11 @@ class ProviderCapabilities(BaseModel):
     - ``checkpoint_resume``：是否支持 session resume。
     - ``usage_tracking``：是否产出 token/cost。
     - ``concurrent_safe``：是否可并行 spawn（foreach/parallel body 需要，False → validate 报 error）。
+    - ``supports_reasoning``：是否支持 reasoning mode（``--thinking`` / ``--variant``）。
+      web-shell-v2 §0 D-decisions：opencode ``--thinking`` on → translator 产 ``reasoning`` envelope
+      → ``agent_thinking`` event（前端琥珀折叠渲染）。默认 False（claude/ccr 不经此路径）；
+      opencode = True。**phase-12 CapabilitySet 落地时迁 ``supports_reasoning`` + ProfileTier
+      字段（``reasoning`` tier；本字段作为占位，避免 web-v2 阻塞 phase-12）**。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -40,3 +46,6 @@ class ProviderCapabilities(BaseModel):
     checkpoint_resume: bool
     usage_tracking: bool
     concurrent_safe: bool
+    # web-v2 §0 D-decisions + §11 step1 B2：reasoning mode 支持（opt-in，默认 False）。
+    # 默认 False 保既有 profile 零改动；opencode 设 True。
+    supports_reasoning: bool = False

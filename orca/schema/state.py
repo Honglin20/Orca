@@ -24,6 +24,13 @@ class UsageSummary(BaseModel):
     """token / 成本用量汇总。
 
     node_breakdown 为每 node 的用量（递归自引用），支持按 node 下钻。
+
+    注意（web-v2 §3.2 B1）：``agent_usage`` 事件 data 已扩展 ``reasoning_tokens`` 字段
+    （translator 对 opencode ``step_finish.tokens.reasoning`` lossless capture），但本
+    ``UsageSummary`` **不聚合** ``reasoning_tokens``——B1 任务范围只覆盖 tape capture，
+    aggregation 进 TopBar/AgentsList 留给后续阶段（UsageSummary 加字段 + projections
+    读取 + TUI Header 显累加）。当前 reasoning_tokens 仅在 tape 里可查（前端可直接读
+    ``event.data.reasoning_tokens``，不依赖 UsageSummary）。
     """
 
     model_config = ConfigDict(extra="forbid")

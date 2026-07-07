@@ -7,10 +7,10 @@ debug 默认隐藏（L 键 toggle）；``node_failed`` / ``error`` / ``workflow_
 
 设计原则：
   - **壳无真相**：widget 只渲染注入的事件描述，不订阅 bus。
-  - **高层事件过滤**：``EVENT_LEVEL`` 表（37 EventType → 5 level + None），
+  - **高层事件过滤**：``EVENT_LEVEL`` 表（全 EventType → 5 level + None），
     ``agent_*`` / ``prompt_rendered`` / ``custom`` 显式 None 不进 Log Stream
     （归 Agent History / Header footer / ChartPanel 路径）。
-  - **fail loud 完整性**：``EVENT_LEVEL`` 必须覆盖全 37 EventType（reviewer P0-1）；
+  - **fail loud 完整性**：``EVENT_LEVEL`` 必须覆盖全 EventType（reviewer P0-1）；
     未登记 type → LEVEL_INFO 兜底（fail visible，spec §11.5 #6）。
   - **debug toggle**：默认隐藏 ``route_taken`` / ``foreach_*`` / ``wait_*`` /
     ``validator_started``/``validator_passed`` / ``dialog_*``；L 键 toggle 显示。
@@ -44,14 +44,17 @@ _LEVEL_ICONS: dict[str, str] = {
     LEVEL_DEBUG: "·",
 }
 
-# 7 个事件显式 None：设计上不进 Log Stream（agent_history / header footer / chart 路径消费）
+# 9 个事件显式 None：设计上不进 Log Stream（agent_history / header footer / chart 路径消费）
+# web-v2 §3.2 B1：agent_step_started / unknown_event 是 session 级流式细节，归 Agent History
+# （step 标记 / dim `? unknown` 可展开），不重复进 Log Stream（与 agent_thinking / agent_message 同归类）。
 EVENTS_NOT_IN_LOG_STREAM = frozenset({
     "agent_message", "agent_thinking", "agent_tool_call", "agent_tool_result",
     "agent_usage", "prompt_rendered", "custom",
+    "agent_step_started", "unknown_event",
 })
 
-# spec §2.4：37 EventType → level | None
-# reviewer P0-1：表内全 37 EventType，含 7 个显式 None（防 self-fail 完整性测试）
+# spec §2.4：全 EventType → level | None（web-v2 §3.2 B1 后 = 39 项）
+# reviewer P0-1：表内全 EventType，含 9 个显式 None（防 self-fail 完整性测试）
 EVENT_LEVEL: dict[str, str | None] = {
     # ── workflow 生命周期 ──
     "workflow_started":            LEVEL_INFO,
@@ -98,6 +101,8 @@ EVENT_LEVEL: dict[str, str | None] = {
     "agent_usage":                 None,
     "prompt_rendered":             None,
     "custom":                      None,
+    "agent_step_started":          None,  # web-v2 §3.2 B1：归 Agent History（step 标记）
+    "unknown_event":               None,  # web-v2 §3.2 B1：归 Agent History（dim `? unknown`）
 }
 
 
