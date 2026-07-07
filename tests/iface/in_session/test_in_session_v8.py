@@ -664,3 +664,139 @@ def test_plugin_embeds_canonical_marker_literal():
     assert m.group(1) == MARKER_LITERAL, (
         f"plugin MARKER_LITERAL `{m.group(1)}` 与 Python `{MARKER_LITERAL}` 不同步"
     )
+
+
+# ── v8.1 签名契约测试（防 builder 回退，e2e /tmp/orca-e2e-v8/ 实证形态）─────────
+#
+# 教训（task 根因）：plugin TS 纯单测（marker regex / 字段提取）验不出运行时签名 bug
+# —— 52 单测全过却 shipped inert。hook 的调用签名（参数个数、payload 包装）只能由
+# 真 opencode runtime 决定，spike 已实证的形态是唯一真相源。以下 4 测试断言 shipped
+# 模板里 transform/event/message-fetch 三处的代码形态 == spike 实证形态 + bootstrap
+# 返的 prompt prepend Task-tool 指令。任何回退 → 测试红。
+
+
+def test_transform_hook_signature_is_two_param_async_input_out():
+    """Bug A 签名契约：transform hook 必须是 ``async (input, out)`` 两参形态。
+
+    spike ``/tmp/orca-xform/.opencode/plugins/xform.ts`` 实证：opencode 1.14.22
+    runtime 实调 ``(input, out)`` 两参，``input`` 空 ``{}``、messages 在 ``out`` 上。
+    shipped v8 曾回退为单参 ``async (input) => { const out = input.out ?? input }``
+    —— runtime 下 input 为空对象、input.out 永远 undefined → messages 永远 [] →
+    transform 静默 passthrough → 整个入口链路死。
+    """
+    text = PLUGIN_TS.read_text(encoding="utf-8")
+    # hook 注册行：必须形如 `"experimental.chat.messages.transform": async (input: any, out: any) =>`
+    m = re.search(
+        r'"experimental\.chat\.messages\.transform":\s*async\s*\(input:\s*any,\s*out:\s*any\)\s*=>',
+        text,
+    )
+    assert m, (
+        "transform hook 签名必须严格 `async (input: any, out: any) =>`（e2e /tmp/orca-xform "
+        f"实证两参形态）。实际：{text.split(chr(10))[next(i for i,l in enumerate(text.split(chr(10))) if 'messages.transform' in l)][:120]}"
+    )
+
+
+def test_event_hook_payload_unwrap_input_event_fallback_input():
+    """Bug B 签名契约：event hook 必须兼容 ``input.event`` 包装形态。
+
+    spike ``/tmp/orca-f4/.opencode/plugin/orca.ts:7`` 实证：opencode 1.14.22 runtime
+    包一层 ``{event}``，即 ``input.event.type``。shipped v8 曾回退为裸 ``event: ...``
+    直访形态 → runtime 下 ``event.type`` 永远 undefined → idle 永远 early-return。
+    守门形态：``const event = input?.event ?? input``（兼容解构包装 + 直传两种）。
+    """
+    text = PLUGIN_TS.read_text(encoding="utf-8")
+    # hook 注册：event 必须接 input 单参，不能直接解构 event
+    assert re.search(r'event:\s*async\s*\(input:\s*any\)\s*=>', text), (
+        "event hook 必须 `async (input: any) =>` 单参（包装在 input.event 上）"
+    )
+    # 必须有 unwrap + 兜底直传
+    assert re.search(r'const\s+event:\s*any\s*=\s*input\?\.\s*event\s*\?\?\s*input', text), (
+        "event hook 必须含严格形态 `const event: any = input?.event ?? input`（兼容包装+直传）"
+    )
+
+
+def test_message_fetch_uses_rest_fetch_not_sdk_client_session_message():
+    """Bug F 签名契约：拉消息必须用 REST ``fetch(`/session/<sid>/message`)``。
+
+    e2e ``/tmp/orca-e2e-v8/idle-debug.log`` + ``client-debug.log`` 实证：SDK
+    ``client.session.message({id})`` 是 get-one-message-by-id（要 messageID），
+    把 sessionID 当字面占位符返 ``invalid_format prefix:"ses"``。**不是** list-messages。
+    spike patch `/tmp/orca-e2e-v8/orca.ts.patched-with-fixes` 实证可用形态 = REST。
+    """
+    text = PLUGIN_TS.read_text(encoding="utf-8")
+    code = _strip_ts_comments(text)
+    # 必须用 fetch( 拉消息
+    assert "await fetch(" in code, (
+        "拉 session message 必须用 REST `await fetch(`${base}/session/<sid>/message`)`"
+    )
+    # 守门：不得在代码（非注释）里调 client.session.message( 作 list 用途
+    assert "client.session.message(" not in code, (
+        "禁用 SDK client.session.message({id})（runtime 实证：那是 get-one-by-id，"
+        "把 sessionID 当字面占位符返 invalid_format 错）—— 用 REST fetch 替代"
+    )
+
+
+def test_bootstrap_and_next_prompt_prepend_task_tool_instruction(cwd_tmp, wf_path):
+    """Bug G 签名契约：bootstrap + next 返的 .prompt 必须 prepend Task-tool 指令。
+
+    SPEC §2.1 / §3：CLI 返的 prompt 文本须含「用 subagent」提醒，模型才会派 Task
+    工具子代理执行节点（否则模型直接文本回复 → 没 ToolPart.state.output →
+    3× compliance → workflow_failed）。e2e 实证此路径；shipped v8 漏 prepend。
+
+    单一定义（DRY）：``_TASK_TOOL_INSTRUCTION`` 常量集中在 cli.py 一处。
+    """
+    from orca.iface.in_session.cli import _TASK_TOOL_INSTRUCTION
+
+    runner = CliRunner()
+    # bootstrap：entry 节点 prompt 必须 startswith 指令前缀
+    boot = runner.invoke(app, ["bootstrap", str(wf_path)])
+    assert boot.exit_code == 0
+    boot_reply = json.loads(boot.output.splitlines()[-1])
+    assert boot_reply.get("prompt"), "bootstrap 必须返非空 prompt"
+    assert boot_reply["prompt"].startswith(_TASK_TOOL_INSTRUCTION), (
+        "bootstrap .prompt 必须 startswith _TASK_TOOL_INSTRUCTION（Bug G 闭环）"
+    )
+
+    # next：下一节点 prompt 必须 startswith 指令前缀
+    tape = boot_reply["tape"]
+    run_id = boot_reply["run_id"]
+    nxt = runner.invoke(app, ["next", "--tape", tape, "--run-id", run_id, "--output", "OUT_A"])
+    assert nxt.exit_code == 0
+    nxt_reply = json.loads(nxt.output.splitlines()[-1])
+    assert nxt_reply.get("prompt"), "next 必须返非空 prompt（2 节点 wf 第 2 节点）"
+    assert nxt_reply["prompt"].startswith(_TASK_TOOL_INSTRUCTION), (
+        "next .prompt 必须 startswith _TASK_TOOL_INSTRUCTION（Bug G 闭环）"
+    )
+
+
+def test_task_tool_instruction_is_single_source_constant():
+    """DRY 守门：Task-tool 指令是单一定义（``_TASK_TOOL_INSTRUCTION``）。
+
+    防止后续在 bootstrap / next 各处拼字面字符串导致版本漂移。
+    """
+    from orca.iface.in_session.cli import _TASK_TOOL_INSTRUCTION, _with_task_instruction
+
+    # 内容必须 mention task 工具 + 子代理
+    assert "task 工具" in _TASK_TOOL_INSTRUCTION
+    assert "子代理" in _TASK_TOOL_INSTRUCTION
+    # _with_task_instruction 是 prepend，不是 replace
+    assert _with_task_instruction("hello") == _TASK_TOOL_INSTRUCTION + "hello"
+    # None / 空串直传（不抛、不强加指令）
+    assert _with_task_instruction(None) is None
+    assert _with_task_instruction("") == ""
+
+
+def test_build_cli_args_run_branch_passes_user_model():
+    """Bug E 签名契约：buildCliArgs 的 run 分支必须把用户 model 作 --model argv。
+
+    shipped v8 曾不透传 → marker.model 永远 CLI 默认，idle 注入 promptAsync 调该
+    provider 失败（环境没配 deepseek 时尤甚）。
+    """
+    body = _extract_ts_function_body("buildCliArgs")
+    m = re.search(r'if \(sub === "run"\)(?P<body>(?:.|\n)*?)(?=\n  \}|\n    if \(sub)',
+                  body)
+    assert m, "buildCliArgs 无 run 分支"
+    run_body = m.group("body")
+    assert '"--model"' in run_body, (
+        "buildCliArgs run 分支必须含 --model 透传（Bug E：用户当前 model → marker.model）"
+    )

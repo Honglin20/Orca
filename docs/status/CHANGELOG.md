@@ -15,6 +15,19 @@
 
 ---
 
+## [2026-07-08] in-session shell v8.1 —— 修 5 bug + 签名契约测试（防 builder 回退）
+
+按 SPEC v8 + e2e `/tmp/orca-e2e-v8/` 实证，修 shipped plugin 5 个真 bug（builder 上一轮从已验证
+spike 回退导致）：A transform hook 签名（单参 → 两参 `(input, out)`）/ B event hook payload 包装
+（裸 event → `input?.event ?? input`）/ F SDK message-fetch 非 list 改 REST fetch / G bootstrap+next
+返 prompt 未 prepend Task-tool 指令（cli.py 端补，DRY 单一常量）/ E plugin 不透传 --model（从
+info.model 动态抽，非 CLI 默认）。加 6 签名契约测试（断言 shipped 模板 transform/event/fetch/model
+四处的代码形态 == spike 实证形态 + bootstrap prompt startswith Task 指令）—— 防再回退，根因教训
+「TS 纯单测验不出运行时签名 bug」写进测试注释。baseline 83 → after 89 全绿，0 回归。守门 grep
+（8 禁词）clean。详见 [release note](../releases/2026-07-08-in-session-shell-v8.1-bugfixes.md)。
+
+---
+
 ## [2026-07-07] web-shell-v2 B1/B2 —— opencode translator lossless + reasoning exposure
 
 按 SPEC §3.2 + §11 step1 实现 web-v2 后端硬前置：opencode translator lossless（reasoning→agent_thinking / step_start→agent_step_started / step_finish 加 reasoning_tokens / 未知→unknown_event）+ EventType 加 2 项 + 全消费者 grep 审计（reducer no-op、LogStream/EventVISIBILITY/AgentHistory/summary 加 arm）+ B2 supports_reasoning opt-in + reasoning_flags_env env 注入（ORCA_OPENCODE_REASONING_FLAGS，默认 off）+ fixture 扩到 9 行。1758 passed / 0 新回归。Commit: `c3a738f`。详见 [release note](../releases/2026-07-07-web-b1-b2-translator-lossless.md)。

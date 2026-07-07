@@ -7,6 +7,21 @@
 
 ---
 
+## ✅ 侧任务完成（2026-07-08）：in-session shell v8.1 —— 修 5 bug + 签名契约测试
+
+按 SPEC v8 + e2e `/tmp/orca-e2e-v8/` 实证，修 shipped plugin 5 bug（builder 上一轮从 spike 回退）：
+A transform 签名（单参→两参 `(input, out)`）/ B event payload（裸 event→`input?.event ?? input`）/
+F SDK message-fetch 非 list 改 REST fetch / G bootstrap+next prompt 未 prepend Task-tool 指令
+（cli.py 单一常量 `_TASK_TOOL_INSTRUCTION`）/ E plugin 不透传 --model（动态抽 `info.model`）。
+加 6 签名契约测试（`tests/iface/in_session/test_in_session_v8.py:668-803`）防再回退 —— 根因教训
+「TS 纯单测验不出运行时签名 bug」写进测试注释。baseline 83 → after 89 全绿，0 回归。守门 grep
+（8 禁词）clean。详见 [release note](../releases/2026-07-08-in-session-shell-v8.1-bugfixes.md)。
+
+**未实证项**（SPEC §9.2，留 `test-coverage-e2e` 真链路验）：shipped 模板开箱跑 `/orca doctor` +
+`/orca run` 3 节点（不该再需要打补丁）。重点：**这次 shipped 模板要开箱即用**。
+
+---
+
 ## ✅ 侧任务完成（2026-07-07）：web-shell-v2 B1/B2 —— opencode translator lossless + reasoning exposure
 
 按 SPEC §3.2 + §11 step1 实现 web-v2 后端硬前置（shell 无关）。

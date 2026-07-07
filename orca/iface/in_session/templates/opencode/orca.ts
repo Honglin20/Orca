@@ -27,6 +27,13 @@
 // 的 MARKER_REGEX 字面同步。行首/行尾锚定 + 子命令名 \w+ + args 非贪婪 [^>\n]*?。
 const MARKER_REGEX = /^<!--\s*orca:cmd\s+(\w+)(?:\s+([^>\n]*?))?\s*-->$/
 
+// opencode dev server base URL（REST 调用用，Bug F）。
+// 实证：opencode plugin ctx 暴露 `serverUrl`（形如 "http://127.0.0.1:<port>"）。
+// 兜底环境变量；若两者皆无 → ctx.serverUrl 缺失时 event hook 内显式 warn + return。
+const SERVER_BASE_URL_FALLBACK: string =
+  (typeof process !== "undefined" && process.env?.OPENCODE_SERVER_URL) ||
+  ""   // 空串 = 无兜底（运行时必须由 ctx.serverUrl 提供）
+
 // SPEC §2.6.1 一次性消费：替换文本不得含本字面。
 const MARKER_LITERAL = "<!--orca:cmd"
 
@@ -186,20 +193,41 @@ function findLastUserTextPart(messages: any[]): {
   return null
 }
 
+// 从 transform 的 out.messages 抽当前用户消息的 model（Bug E 闭环）。
+// opencode 实证（`/tmp/orca-e2e-v8/event-debug.log`）：每条 message 的
+// `info.model = {providerID, modelID}`，由 opencode runtime 注入用户消息。
+// 找不到 → null（CLI 端 --model 缺省，保底默认 provider/model）。
+function extractModel(messages: any[], userMsgIdx: number): string | null {
+  const m = messages[userMsgIdx]
+  const model = m?.info?.model ?? m?.model
+  if (model && typeof model.providerID === "string" && typeof model.modelID === "string") {
+    return `${model.providerID}/${model.modelID}`
+  }
+  return null
+}
+
 // ── plugin 主体 ─────────────────────────────────────────────────────────────
 
 export const OrcaPlugin = async (ctx: any) => {
   // client 从 ctx.client 取（spike `/tmp/orca-cmd` 实证；`@opencode/core/client` npm 不存在）。
   const client = ctx.client
+  // server base URL（Bug F 闭环）：REST 拉消息绕过 SDK 的 message() 单条 API。
+  // ctx.serverUrl 由 opencode runtime 注入；env 兜底；两者皆无 → 空串，event hook 内
+  // 显式 warn + return（不连不存在的端口）。
+  const serverBaseUrl: string = ctx?.serverUrl ?? SERVER_BASE_URL_FALLBACK
 
   return {
     id: "orca",
 
     // 入口钩子（v8 换入，§2.6）：每次 LLM 调用前触发。marker 检测 → spawn CLI → 改写
     // 该 user text part（非整消息、非整 JSON）。无 marker → 透传（不动）。
-    "experimental.chat.messages.transform": async (input: any) => {
-      const out = input?.out ?? input
-      const messages: any[] = out?.messages ?? []
+    //
+    // **签名（Bug A 闭环，e2e `/tmp/orca-xform` 实证）**：opencode 1.14.22 runtime 实调
+    // `(input, out)` 两参；`input` 是空 `{}`、`messages` 在 `out` 上。**不**是单参
+    // `input.out ?? input`（那是 v8 shipped 的回退错误形态，runtime 实证 input 为空）。
+    "experimental.chat.messages.transform": async (input: any, out: any) => {
+      const realOut: any = out ?? input?.out ?? input
+      const messages: any[] = realOut?.messages ?? []
       if (messages.length === 0) return input
 
       const found = findLastUserTextPart(messages)
@@ -212,6 +240,9 @@ export const OrcaPlugin = async (ctx: any) => {
       const sub = m[1]
       const args = (m[2] ?? "").trim()
       const sid = found.sessionID
+      // 当前用户消息的 model（Bug E 闭环）：透传给 bootstrap 作 --model argv，
+      // 让 marker.model 反映用户当前 model 而非 CLI 默认。
+      const userModel = extractModel(messages, found.msgIdx)
 
       // 派发到对应 CLI 子命令（§2.6.2）。
       // status/stop 若无 args 且有 sid → 查 marker 拿 run_id（plugin 透传，零业务逻辑）。
@@ -220,7 +251,7 @@ export const OrcaPlugin = async (ctx: any) => {
         const mk = await readMarker(sid)
         markerRunId = mk?.run_id ?? null
       }
-      const cliArgs = buildCliArgs(sub, args, sid, markerRunId)
+      const cliArgs = buildCliArgs(sub, args, sid, markerRunId, userModel)
       if (cliArgs === null) {
         // 未知子命令 / 缺关键 argv → 标记错误回显（一次性消费：替换文本无 marker 字面）
         found.part.text = `[orca] cannot dispatch: ${sub} (args=${args || "<empty>"})`
@@ -250,7 +281,13 @@ export const OrcaPlugin = async (ctx: any) => {
     },
 
     // 驱动钩子（§2.2 / §2.5 / §5）：session.idle 时推进 workflow。
-    event: async (event: any) => {
+    //
+    // **签名（Bug B 闭环，e2e `/tmp/orca-f4` 实证）**：opencode 1.14.22 runtime 实调外层
+    // 包一层 `{event}` —— `input.event.type` / `input.event.properties`。**不**是裸
+    // `event.type`（shipped 单参直访形态，runtime 下 event.type 永远 undefined）。
+    // 兼容解构与直传：`const event = input?.event ?? input`。
+    event: async (input: any) => {
+      const event: any = input?.event ?? input
       if (event.type !== "session.idle") return
 
       const sessionID = event.properties?.sessionID
@@ -264,9 +301,37 @@ export const OrcaPlugin = async (ctx: any) => {
       if (injecting.has(sessionID)) return
       injecting.add(sessionID)
       try {
-        // 经 client 拉本 session 最后 assistant message（D-v7-4）
-        const msgs = await client.session.message({ id: sessionID })
-        const arr: any[] = Array.isArray(msgs) ? msgs : (msgs?.data ?? [])
+        // Bug F 闭环：SDK 的 `client.session.message({id})` 是 get-one-message-by-id
+        // （要 messageID），把 sessionID 当字面占位符 → 返 `invalid_format prefix:"ses"`。
+        // **不是** list-messages。e2e 实证可用形态 = REST `GET /session/<sid>/message`
+        // （curl HTTP 200 + 完整消息数组）。此处属传输层（非 Orca 业务逻辑），守门允许，
+        // 但绕过 SDK 的原因在此注释说清。
+        if (!serverBaseUrl) {
+          // ctx.serverUrl 未注入 + env 兜底也为空（老版 opencode / 配置漏）：
+          // 显式 warn + return（不连不存在的端口）。下一轮 idle 重试。
+          console.warn("[orca] serverBaseUrl 为空：ctx.serverUrl 未注入且 OPENCODE_SERVER_URL env 未设；跳过本次 idle 推进")
+          return
+        }
+        let arr: any[] = []
+        try {
+          const resp = await fetch(
+            `${serverBaseUrl}/session/${encodeURIComponent(sessionID)}/message`,
+            { headers: { "Accept": "application/json" } },
+          )
+          if (!resp.ok) {
+            console.error(`[orca] REST /session/<sid>/message HTTP ${resp.status}: ${await resp.text().catch(() => "")}`)
+          } else {
+            const data: any = await resp.json()
+            arr = Array.isArray(data) ? data : (data?.data ?? [])
+          }
+        } catch (e) {
+          // 失败语义（非 fail loud）：transport 层错误打 console.error 日志；arr 留空 →
+          // extractTaskOutput null → next 无 --output → CLI branch 4 idempotent-replay
+          // → 合规计数器 +1（D-v7-6）→ 连续 3 次后 CLI emit workflow_failed 终态。
+          // 即真正的失败信号**延迟**经合规计数器 surfaced，非即时用户可见。
+          console.error("[orca] fetch /session/<sid>/message failed:", e)
+        }
+
         let output: string | null = null
         for (let i = arr.length - 1; i >= 0; i--) {
           const m = arr[i]
@@ -307,12 +372,18 @@ export const OrcaPlugin = async (ctx: any) => {
 // 加新 command = 这里加 case + CLI 加子命令（§2.6 「两处」）。
 function buildCliArgs(
   sub: string, args: string, sid: string | null, markerRunId: string | null,
+  userModel: string | null,
 ): string[] | null {
   if (sub === "run") {
-    // bootstrap：wf 路径在 args（必填）；sid 作 --owner + --session-id（§2.6.2 B4 闭环）
+    // bootstrap：wf 路径在 args（必填）；sid 作 --owner + --session-id（§2.6.2 B4 闭环）；
+    // 当前用户消息的 model 作 --model（Bug E 闭环：marker.model 来自用户当前 model，
+    // 不是 CLI 默认；idle 注入 promptAsync 用 marker.model 调对应 provider）。
     const wf = args.trim()
     if (!wf) return null
     const out = ["bootstrap", wf]
+    if (userModel) {
+      out.push("--model", userModel)
+    }
     if (sid) {
       out.push("--owner", sid, "--session-id", sid)
     }

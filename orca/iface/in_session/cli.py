@@ -59,6 +59,27 @@ logger = logging.getLogger(__name__)
 # subagent 合规超限阈值（D-v7-6：连续 N 次 next 无 output → workflow_failed）。
 _COMPLIANCE_LIMIT = 3
 
+# Task-tool 注入指令（SPEC §2.1 / §3，Bug G 闭环）：bootstrap + next 返的 prompt 文本
+# 必须 prepend 一段「用 subagent 执行本节点」指令，否则模型直接文本回复、不派 Task →
+# 没 ToolPart.state.output → 合规计数 → workflow_failed（e2e 实证 3× compliance）。
+# 单一定义（DRY），bootstrap + next 共用。注意 SPEC §0 真相源：opencode session 落盘的
+# 是 marker 原文（UI 行为），CLI 返的 .prompt 含 Task 指令——by design 不冲突。
+_TASK_TOOL_INSTRUCTION = (
+    "【Orca 节点执行】请用 task 工具派一个子代理执行本节点，"
+    "子代理的输出即本节点的输出。不要自己直接回答。\n\n"
+)
+
+
+def _with_task_instruction(prompt: str | None) -> str | None:
+    """把 Task-tool 指令 prepend 到节点 prompt（Bug G 闭环）。
+
+    SPEC §2.1 / §3：bootstrap + next 返的 prompt 文本须含「用 subagent」提醒，模型
+    才会派 Task 工具子代理执行节点（节点输出 = subagent output）。无 prompt → 返 None。
+    """
+    if not prompt:
+        return prompt
+    return _TASK_TOOL_INSTRUCTION + prompt
+
 
 def _default_tape_path(run_id: str) -> Path:
     """lazy import 避开 orca.iface.cli 包初始化期的循环 import。"""
@@ -297,7 +318,8 @@ def bootstrap(
         if result.node:
             reply["node"] = result.node
         if result.prompt:
-            reply["prompt"] = result.prompt
+            # Bug G 闭环：bootstrap 返的 entry prompt prepend Task-tool 指令。
+            reply["prompt"] = _with_task_instruction(result.prompt)
         typer.echo(json.dumps(reply, ensure_ascii=False))
     finally:
         try:
@@ -366,7 +388,8 @@ def next(
     if result.node:
         reply["node"] = result.node
     if result.prompt:
-        reply["prompt"] = result.prompt
+        # Bug G 闭环：next 返的下一节点 prompt prepend Task-tool 指令。
+        reply["prompt"] = _with_task_instruction(result.prompt)
     if result.reason:
         reply["reason"] = result.reason
     typer.echo(json.dumps(reply, ensure_ascii=False))
