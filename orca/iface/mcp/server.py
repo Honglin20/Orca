@@ -343,9 +343,9 @@ class OrcaMcpServer:
             task: sugar for ``inputs.task``.
             max_iter: override max_iterations.
 
-        **Tech debt**: setup_outputs is validated but not yet injected into the
-        workflow runtime context (RunManager.start_run doesn't accept it).
-        See release note for details.
+        ``setup_outputs`` 经校验后透传 ``RunManager.start_run`` → orchestrator 包成
+        ``{agent: {"output": ...}}`` 注入 ``RunContext.setup``，render 暴露为
+        ``{{ setup.<agent>.output.<field> }}``。
         """
         from orca.iface.mcp.catalog import find_workflow
         from orca.iface.mcp.setup_phase import (
@@ -365,9 +365,11 @@ class OrcaMcpServer:
             )
         wf, yaml_path = found
 
-        # 2. setup phase 校验（三重杠杆 B，§2.8）——校验失败在 manager 之前拦截
+        # 2. setup phase 校验（三重杠杆 B，§2.8）——校验失败在 manager 之前拦截。
+        # 返回值 validated 是规范化后的 setup_outputs（无 setup phase → 空 dict），
+        # 透传给 start_run 注入 runtime context（phase-10 技术债回填）。
         try:
-            validate_setup_outputs(wf.setup or [], setup_outputs)
+            validated = validate_setup_outputs(wf.setup or [], setup_outputs)
         except SetupRequired as e:
             return _err(
                 ErrorKind.BUSINESS_CONFIG,
@@ -387,12 +389,11 @@ class OrcaMcpServer:
                 hint=for_setup_invalid(e.agent_name, e.detail),
             )
 
-        # 3. 启动 run（非阻塞，HandleId pattern）
-        # TODO(phase-10 tech debt): setup_outputs validated but not injected into
-        # RunManager.start_run yet. Requires RunManager.start_run signature extension
-        # + orchestrator setup_context consumption. Tracked in release note.
+        # 3. 启动 run（非阻塞，HandleId pattern）。validated setup_outputs 透传注入
+        # runtime context（orchestrator 包成 {agent: {"output": ...}} 存 ctx.setup，
+        # render 暴露为 {{ setup.<agent>.output.<field> }}）。
         run_id = await self._manager.start_run(
-            yaml_path, inputs, task, max_iter
+            yaml_path, inputs, task, max_iter, validated
         )
         return _ok(
             {"task_id": run_id, "status": "running"},

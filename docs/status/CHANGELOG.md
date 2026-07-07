@@ -17,6 +17,9 @@
 
 <!-- 新条目加在这里（本行下方）-->
 
+## [2026-07-07] setup_outputs 注入 runtime context（phase-10 🔴 技术债回填）
+MCP `start_workflow(setup_outputs=...)` 真注入：校验后穿透 RunManager.start_run → _run_with_sem → Orchestrator.__init__ 包成 `{agent: {"output": raw}}` 存 RunContext.setup → render 暴露 `{{ setup.<agent>.output.<field> }}`；_make_ctx 透传 setup。resume + setup phase → fail loud（边界声明）。code-reviewer 🔴 修复：`with_locals` 改用 `dataclasses.replace`（原手工列字段漏传 setup，foreach body 引用 `{{ setup.* }}` 静默拿空 dict）+ 补 foreach+setup 回归测试。E2E setup workflow 强化（deploy 真消费 setup 变量）。1688 passed / 0 回归。详见 [release note](releases/2026-07-07-setup-outputs-injection.md)。
+
 ## [2026-07-07] CLI `list` 与 MCP `list_workflows` 统一（catalog 同源）
 CLI `list` 子命令委托 MCP 同源的 `catalog.list_workflows()`（按 `wf.name` 扫 `./workflows` + `~/.orca/workflows`，first-wins），删旧 `--dir` 扫 `./examples` 按文件名逻辑（接口统一铁律：全量替换）。CLI 与 MCP 现在看到完全一致的 workflow 列表。详见 [release note](releases/2026-07-07-cli-list-mcp-unify.md)。
 

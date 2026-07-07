@@ -7,6 +7,23 @@
 
 ---
 
+## 当前状态：CLI/MCP list 统一 + setup_outputs 注入完成（2026-07-07）；下一模块待定
+
+### ✅ 已完成：CLI `list` 与 MCP `list_workflows` 统一（catalog 同源）
+
+CLI `list` 委托 MCP 同源 `catalog.list_workflows()`（按 `wf.name` 扫 `./workflows` + `~/.orca/workflows`），删旧 `--dir` 扫 `./examples` 按文件名逻辑。**Commit**：`b8e5581`。详见 [release note](../releases/2026-07-07-cli-list-mcp-unify.md)。
+
+### ✅ 已完成：setup_outputs 注入 runtime context（phase-10 🔴 技术债回填）
+
+MCP `start_workflow(setup_outputs=...)` 真注入 RunManager → orchestrator → RunContext.setup → render `{{ setup.* }}`；resume+setup fail loud；review 🔴 `with_locals` 改 `dataclasses.replace`。范围：只解注入，resume 持久化 / TUI 自动执行 setup agent 声明不做。详见 [release note](../releases/2026-07-07-setup-outputs-injection.md) + [计划](../plans/2026-07-07-setup-outputs-injection.md)。
+
+**遗留 follow-up**：
+- 🔵 resume + setup：`workflow_started.data` 未持久化 setup_outputs（本次 fail loud 拦截）。
+- 🔵 TUI/Web 进程内自动跑 setup agent：orchestrator 不遍历 `wf.setup`，本次只解注入。
+- 🟡 `catalog.py` 物理位置在 `iface/mcp/`，CLI 跨子包 lazy import——择期迁 `orca/compile/catalog.py`。
+
+---
+
 ## 当前状态：phase-10 MCP v4 实现完成（2026-07-07）；下一模块待定
 
 ### ✅ 已完成：phase-10 MCP v4（9 工具 + setup/execute 分相 + Result 信封）

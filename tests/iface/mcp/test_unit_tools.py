@@ -493,7 +493,7 @@ nodes:
     short_runs.parent.mkdir(parents=True, exist_ok=True)
     manager = RunManager(runs_dir=short_runs)
 
-    async def slow_run_with_sem(handle, inputs, task, max_iter):
+    async def slow_run_with_sem(handle, inputs, task, max_iter, setup_outputs=None):
         await asyncio.sleep(5)
         handle.status = "completed"
 

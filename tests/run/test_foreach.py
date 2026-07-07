@@ -263,3 +263,50 @@ def test_foreach_custom_item_and_index_var(tmp_path, monkeypatch):
 
     run_async(run_foreach(node, ctx, bus))
     assert seen == [("a", 0), ("b", 1)]
+
+
+# ── phase-10 技术债回填：with_locals 透传 setup（review 🔴 修复）─────────────
+
+
+def test_foreach_body_ctx_carries_setup(tmp_path, monkeypatch):
+    """foreach body ctx 经 with_locals 派生后仍携带 setup（不静默清空）。
+
+    回归 ``RunContext.with_locals`` 历史 bug：手工列字段漏传 setup → setup phase +
+    foreach body 引用 ``{{ setup.* }}`` 拿空 dict。改用 ``dataclasses.replace`` 后，
+    body ctx.setup 与父 ctx 一致。
+    """
+    bus, _ = make_bus(tmp_path)
+    seen_setups = []
+
+    def factory(node, agent_tools_server=None, bus=None, **kwargs):
+        inner = FakeExecutor.produces({"ok": True}, node_name=node.name)
+
+        class CapturingFake(FakeExecutor):
+            def __init__(self):
+                super().__init__(inner._events, node_name=node.name)
+
+            async def exec(self, n, ctx):
+                seen_setups.append(dict(ctx.setup))
+                async for e in super().exec(n, ctx):
+                    yield e
+
+        return CapturingFake()
+
+    _patch_executors(monkeypatch, factory)
+
+    node = ForeachNode(
+        name="p", source="maker.output.items", item_var="item",
+        body=ScriptNode(name="body", command="echo", routes=[]),
+        max_concurrent=1,
+        routes=[Route(to="$end")],
+    )
+    ctx = RunContext(
+        inputs={}, outputs={"maker": {"output": {"items": ["a", "b"]}}}, run_id="r1",
+        setup={"collector": {"output": {"host": "orbittest"}}},
+    )
+
+    run_async(run_foreach(node, ctx, bus))
+
+    # 两个 body 都拿到完整 setup（with_locals 不再清空 setup）
+    assert len(seen_setups) == 2
+    assert all(s == {"collector": {"output": {"host": "orbittest"}}} for s in seen_setups)

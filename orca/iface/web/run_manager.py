@@ -26,7 +26,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from orca.compile import ConfigurationError, load_workflow
 from orca.chart._limits import SOCK_PATH_MAX
@@ -132,6 +132,7 @@ class RunManager:
         inputs: dict | None = None,
         task: str | None = None,
         max_iter: int | None = None,
+        setup_outputs: dict[str, Any] | None = None,
         *,
         resume: bool = False,
     ) -> str:
@@ -149,6 +150,14 @@ class RunManager:
                 （SPEC §3.1 YAGNI：script 调 render_chart 会因 socket 不存在 fail loud）。
         """
         wf = load_workflow(Path(yaml_path))
+        # phase-10 技术债回填边界声明：setup workflow 暂不支持 resume——``workflow_started``
+        # 事件目前不持久化 ``setup_outputs``，resume 后 ``{{ setup.* }}`` 会丢失。fail loud
+        # 强于静默渲染错（SPEC 铁律 4）。待 resume 路径回填 setup_outputs 持久化后解除。
+        if resume and getattr(wf, "setup", None):
+            raise ValueError(
+                "setup workflow 暂不支持 resume（setup_outputs 未持久化）。"
+                "请重新 start_workflow 并重传 setup_outputs。"
+            )
         run_id = gen_run_id(wf.name)
         tape_path = self._runs_dir / f"{run_id}.jsonl"
         tape = Tape(tape_path, run_id=run_id, resume=resume)
@@ -185,7 +194,7 @@ class RunManager:
         async with self._lock:
             self._runs[run_id] = handle
         handle._task = asyncio.create_task(
-            self._run_with_sem(handle, inputs or {}, task, max_iter),
+            self._run_with_sem(handle, inputs or {}, task, max_iter, setup_outputs),
             name=f"orca-web-run-{run_id}",
         )
         return run_id
@@ -457,6 +466,7 @@ class RunManager:
         inputs: dict,
         task: str | None,
         max_iter: int | None,
+        setup_outputs: dict[str, Any] | None = None,
     ) -> None:
         """sem 内跑 orchestrator（真并发 + max_concurrent 排队）。
 
@@ -474,6 +484,7 @@ class RunManager:
                 task=task,
                 max_iter=max_iter,
                 run_id=handle.run_id,
+                setup_outputs=setup_outputs,
             )
             try:
                 await orch.run()

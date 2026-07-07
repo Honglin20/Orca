@@ -47,7 +47,7 @@ entry: deploy
 nodes:
   - name: deploy
     kind: script
-    command: "echo 'deploy completed'"
+    command: "echo 'deploy to {{ setup.collector.output.host }}:{{ setup.collector.output.port }}'"
     routes:
       - to: $end
 outputs:
@@ -160,6 +160,10 @@ def test_e2e_setup_workflow_three_lever_b_and_completion(tmp_path):
     output = final.get("output")
     assert output is not None, f"completed 应有 output，实得 {final}"
     assert "result" in output, f"output 应有 result 键，实得 {output}"
-    assert "deploy completed" in str(output["result"]), (
+    # 注入验证：setup_outputs 真渗到 render——deploy 命令消费了 {{ setup.collector.output.* }}
+    assert "prod.example.com:22" in output["result"], (
+        f"setup_outputs 未注入 render，result={output['result']!r}"
+    )
+    assert "deploy to" in str(output["result"]), (
         f"output.result 应含 deploy 输出，实得 {output['result']!r}"
     )

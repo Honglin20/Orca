@@ -123,6 +123,29 @@ def test_render_template_resolves_locals_item():
     assert render_template("process {{ item }}", ctx) == "process apple"
 
 
+# ── phase-10 技术债回填：setup phase outputs 渲染 ────────────────────────────
+
+
+def test_render_template_setup_output_via_dotted_path():
+    """{{ setup.<agent>.output.<field> }} 取 ctx.setup（MCP setup_outputs 注入路径）。"""
+    ctx = RunContext(
+        inputs={}, outputs={}, run_id="r1",
+        setup={"collector": {"output": {"host": "example.com"}}},
+    )
+    assert render_template("host={{ setup.collector.output.host }}", ctx) == (
+        "host=example.com"
+    )
+
+
+def test_render_template_setup_empty_when_no_setup_phase():
+    """无 setup phase → ctx.setup 空 dict，setup 根不污染现有模板（向后兼容）。"""
+    ctx = RunContext(inputs={"x": "1"}, outputs={}, run_id="r1")
+    # 现有模板照常渲染
+    assert render_template("x={{ inputs.x }}", ctx) == "x=1"
+    # setup 根存在但为空 dict（不 raise）
+    assert render_template("{% if setup %}has{% else %}none{% endif %}", ctx) == "none"
+
+
 # ── phase 11 §4：guidance section 拼接 ──────────────────────────────────────
 
 
