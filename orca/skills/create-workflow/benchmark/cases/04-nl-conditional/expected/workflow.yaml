@@ -1,0 +1,35 @@
+name: classify_and_handle
+description: "条件分支：类别 A 走 handler，否则终止失败"
+entry: classifier
+inputs:
+  payload:
+    type: string
+    description: "待分类内容"
+nodes:
+  - name: classifier
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: '判断内容类别，只输出 JSON {"kind": "A" 或 "B"}。内容：{{ inputs.payload }}'
+    output_schema:
+      type: object
+      properties:
+        kind: { type: string, enum: ["A", "B"] }
+      required: [kind]
+    routes:
+      - when: 'output.json.kind == "A"'
+        to: handler
+      - to: reject # catch-all 必须最后
+  - name: handler
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "处理类别 A 的内容：{{ inputs.payload }}"
+    routes:
+      - to: $end
+  - name: reject
+    kind: terminate
+    status: failed
+    reason: "类别非 A，拒绝处理"
+outputs:
+  handled: "{{ handler.output }}"

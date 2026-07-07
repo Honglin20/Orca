@@ -1,0 +1,45 @@
+# 抄作业用：分叉+合并（diamond）。entry 跑完 → parallel 组并行两分支 → set 汇聚 → $end。
+# 内联 prompt，无外部 agent md 依赖，可直接 orca validate。
+name: parallel-merge
+description: "分叉+合并并行范式（entry→parallel 组并行两分支→set 汇聚→$end）"
+entry: starter
+inputs:
+  query:
+    type: string
+    description: "查询"
+nodes:
+  - name: starter
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "把查询 {{ inputs.query }} 拆成两个可并行的子问题，分别回复。"
+    routes:
+      - to: fanout
+  - name: branch_a
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "子问题 A 视角分析：{{ starter.output }}"
+    routes:
+      - to: $end
+  - name: branch_b
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "子问题 B 视角分析：{{ starter.output }}"
+    routes:
+      - to: $end
+  - name: merger
+    kind: set
+    values:
+      combined: "A={{ fanout.output.outputs.branch_a }} | B={{ fanout.output.outputs.branch_b }}"
+    routes:
+      - to: $end
+parallel:
+  - name: fanout
+    branches: [branch_a, branch_b]
+    failure_mode: continue_on_error
+    routes:
+      - to: merger
+outputs:
+  result: "{{ merger.output.combined }}"

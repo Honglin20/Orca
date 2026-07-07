@@ -1,0 +1,1 @@
+把 assets/foreign_workflow.yaml 里那份（别家框架的 workflow 定义，steps + depends_on）转成一个 Orca workflow。

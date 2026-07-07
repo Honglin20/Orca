@@ -1,0 +1,27 @@
+name: assess_repos
+description: "对一组 repo 并发评估（foreach 动态并行）"
+entry: maker
+nodes:
+  - name: maker
+    kind: set
+    values:
+      # 字面 JSON 数组（双引号）—— foreach 会 JSON-parse 回 list。勿用 {{ inputs.repos }}。
+      repos: '["orca", "conductor", "ccw"]'
+    routes:
+      - to: assessor
+  - name: assessor
+    kind: foreach
+    source: "maker.output.repos"
+    item_var: repo
+    max_concurrent: 3
+    failure_mode: continue_on_error
+    body:
+      kind: agent
+      name: assessor_body
+      executor: opencode
+      model: "deepseek/deepseek-v4-flash"
+      prompt: "评估这个 repo 的质量并给一句话结论：{{ repo }}"
+    routes:
+      - to: $end
+outputs:
+  assessed_count: "{{ assessor.output.count }}"

@@ -1,0 +1,33 @@
+name: config_generator
+description: "结构化输出 + 语义校验 + 重试"
+entry: generator
+inputs:
+  hint:
+    type: string
+    description: "类名提示"
+nodes:
+  - name: generator
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: |
+      产出 Python 类配置 JSON，格式：{"model_class": "<类名>", "weights_path": "<绝对路径>"}
+      类名据 hint 决定：{{ inputs.hint }}
+    output_schema:
+      type: object
+      properties:
+        model_class: { type: string }
+        weights_path: { type: string }
+      required: [model_class, weights_path]
+    validator:
+      criteria: |
+        model_class 是合法 Python 标识符（字母/下划线开头，不含 - 或数字开头）；
+        weights_path 是绝对路径（以 / 开头）。
+      max_retries: 1
+    retry:
+      max_attempts: 2
+      initial_delay_seconds: 1
+    routes:
+      - to: $end
+outputs:
+  config: "{{ generator.output }}"

@@ -1,0 +1,1 @@
+我要一个文本处理 pipeline：先 ingest 清洗输入文本去噪，再 analyze 提取要点，最后 report 写汇总报告。三步串行。生成一个 Orca workflow。

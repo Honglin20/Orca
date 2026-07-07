@@ -1,0 +1,1 @@
+assets/ 下有一个 CC skill chartgen/（含 SKILL.md 和 scripts/gen.py）。把它转成一个 Orca workflow，脚本要带过来。

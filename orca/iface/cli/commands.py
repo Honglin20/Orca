@@ -320,6 +320,14 @@ from orca.iface.cli.executor_cmds import app as executor_app
 app.add_typer(executor_app, name="executor", help="配置/测试 agent 后端二进制")
 
 
+# ── skill 子命令组（随包 skill 安装）──────────────────────────────────────────
+# sub-Typer：与 executor 同模式。``orca skill install`` 把 create-workflow 拷到
+# Claude Code / opencode 两边 skill 目录（显式命令，非 post-install 钩子——后者不可靠）。
+from orca.iface.cli.skill_cmds import app as skill_app
+
+app.add_typer(skill_app, name="skill", help="安装/管理随包 Orca skill（create-workflow）")
+
+
 # ── ps / logs / wait 子命令（phase 11 §8 P3.2 daemon）─────────────────────────
 
 

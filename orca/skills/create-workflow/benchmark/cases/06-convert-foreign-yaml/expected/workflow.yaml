@@ -1,0 +1,27 @@
+name: data_pipeline
+description: "由 AgentHarness 风格定义转换：拉取→清洗→导出"
+entry: fetch
+nodes:
+  - name: fetch
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "拉取指定数据源"
+    routes:
+      - to: clean
+  - name: clean
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "清洗拉取到的数据：{{ fetch.output }}"
+    routes:
+      - to: export
+  - name: export
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "把清洗结果导出为 json：{{ clean.output }}"
+    routes:
+      - to: $end
+outputs:
+  result: "{{ export.output }}"

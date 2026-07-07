@@ -1,0 +1,31 @@
+name: pipeline_linear
+description: "线性三 agent：清洗→分析→汇总"
+entry: ingest
+inputs:
+  task:
+    type: string
+    description: "原始输入文本"
+nodes:
+  - name: ingest
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "清洗输入文本、去噪，输出纯净文本：{{ inputs.task }}"
+    routes:
+      - to: analyze
+  - name: analyze
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "分析以下文本、提取要点：{{ ingest.output }}"
+    routes:
+      - to: report
+  - name: report
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "基于要点写汇总报告：{{ analyze.output }}"
+    routes:
+      - to: $end
+outputs:
+  report: "{{ report.output }}"

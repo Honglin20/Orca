@@ -1,0 +1,24 @@
+name: research_then_write
+description: "混合：既有 researcher（agent ref）+ skill 起草 writer（inline）"
+entry: researcher
+inputs:
+  topic:
+    type: string
+    description: "调研主题"
+nodes:
+  - name: researcher
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: researcher
+    routes:
+      - to: writer
+  - name: writer
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "据调研要点写一份报告：{{ researcher.output }}"
+    routes:
+      - to: $end
+outputs:
+  report: "{{ writer.output }}"

@@ -7,6 +7,18 @@
 
 ---
 
+## 当前状态：create-workflow skill + install + benchmark 完成（2026-07-07）；下一模块待定
+
+### ✅ 已完成：create-workflow skill + `orca skill install` + headless benchmark
+
+通用 workflow 生成/转换 skill（吃描述或既有素材 → 归一化 DAG → Orca YAML+agent md，强制 `orca validate` 闭环）。`orca skill install` 显式装 CC + opencode 两边（排除 benchmark/ 防泄露）。16 case 公平 headless benchmark + harness（opencode 后端真跑），评测闭环 8/16 → 16/16，抽象 H1-H7 通用规则。详见 [release note](../releases/2026-07-07-create-workflow-skill.md) + [CHANGELOG](CHANGELOG.md)。
+
+**交付**：`orca/skills/create-workflow/`（SKILL.md + reference + examples + benchmark）、`orca/iface/cli/skill_cmds.py`、`scripts/run_skill_benchmark.py`、3 个测试文件（34 测试全过，0 回归）。
+
+**诚实交代**：LLM 生成有固有非确定性，单次 full run 通常 14-16/16，偶发个别 case flake（每次不同，每条失效模式都有对应通用规则）。
+
+---
+
 ## 当前状态：CLI/MCP list 统一 + setup_outputs 注入完成（2026-07-07）；下一模块待定
 
 ### ✅ 已完成：phase-16 AgentHistory 单流重构（CC 风格 inline + 工具配对折叠）

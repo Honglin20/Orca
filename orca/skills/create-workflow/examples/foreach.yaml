@@ -1,0 +1,26 @@
+# 抄作业用：foreach 动态并行。set 产出数组 → foreach body 对每个元素并发执行 → $end。
+# body 只能是 agent/script；source 首段必须是真实节点名。
+name: foreach
+description: "foreach 动态并行（set 产出数组→body 对每元素并发→$end）"
+entry: maker
+nodes:
+  - name: maker
+    kind: set
+    values:
+      items: '["alpha", "beta", "gamma"]'
+    routes:
+      - to: processor
+  - name: processor
+    kind: foreach
+    source: "maker.output.items"
+    item_var: item
+    max_concurrent: 2
+    failure_mode: continue_on_error
+    body:
+      kind: script
+      name: worker
+      command: "echo processing {{ item }}"
+    routes:
+      - to: $end
+outputs:
+  count: "{{ processor.output.count }}"

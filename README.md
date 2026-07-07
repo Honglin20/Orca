@@ -163,6 +163,43 @@ uv run orca resume <run_id 或 tape 路径>              # 崩溃后续跑：Tap
 
 ---
 
+## create-workflow skill（让 AI 帮你写 workflow）
+
+手写 Orca YAML 门槛高，Orca 自带一个 `create-workflow` skill，让你用自然语言描述需求、或给它一堆既有 agent md / 别家 workflow，它自动产出可跑的 Orca workflow（YAML + agent md），并强制跑 `orca validate` 自校验（0 error 才算完成）。同时兼容 **Claude Code** 和 **opencode**。
+
+### 安装
+
+```bash
+orca skill install                       # 默认装两边：~/.claude/skills/ + ~/.config/opencode/skills/
+orca skill install --target claude       # 只装 Claude Code
+orca skill install --target opencode     # 只装 opencode
+```
+
+幂等（重跑覆盖更新，会先 `⚠` 提示）。opencode 全局目录可用 `OPENCODE_CONFIG_DIR` 覆盖。
+
+### 使用
+
+装好后，在 Claude Code 或 opencode 里直接用自然语言提需求，skill 会按描述自动触发：
+
+- **从零描述**：「我要一个调研 workflow：拆问题→两个 researcher 并行→synthesizer 合并。生成一个 Orca workflow。」
+- **转换既有素材**：把别家 workflow 定义 / 散 agent md / CC skill 放进一个文件夹，告诉它「把 `xxx/` 下的东西转成 Orca workflow」。
+- **混合**：「用 `researcher.md` 跑调研，再写个 writer 出报告，串成 workflow。」
+
+skill 会：① 归一化成 DAG → ② 写 YAML + 必要 agent md（落 `./workflows/` 或你指定的路径）→ ③ 跑 `orca validate` 自修到 0 error → ④ 画草 DAG 报告路径。生成后用 `orca run <yaml>` 跑。
+
+> skill 内部规则（agent 三态自动选、fan-in 默认 `set`、文件夹 agent 脚本走 `$ORCA_AGENT_RESOURCES`、validator/retry 正交等）见随包 `SKILL.md` + `reference/orca-workflow-contract.md`。
+
+### Benchmark（评测 skill 自身）
+
+`orca/skills/create-workflow/benchmark/` 有 16 个 case（钉死输入 + 预期产物，全过 validate）。`scripts/run_skill_benchmark.py` 是公平 headless harness（opencode 后端真跑 skill、不泄露答案）：
+
+```bash
+python scripts/run_skill_benchmark.py                # 跑全部 16 case
+python scripts/run_skill_benchmark.py 01 11          # 跑指定 case
+```
+
+---
+
 ## Web UI
 
 ```bash

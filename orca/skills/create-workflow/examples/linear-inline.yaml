@@ -1,0 +1,26 @@
+# 抄作业用：最简线性 agent workflow（内联 prompt）。两个 agent 串行，零外部依赖。
+# skill 生成短链路时照这个骨架。
+name: linear-inline
+description: "最简线性 agent workflow（a→b→$end，内联 prompt）"
+entry: a
+inputs:
+  topic:
+    type: string
+    description: "要处理的主题"
+nodes:
+  - name: a
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "针对主题 {{ inputs.topic }} 产出一句要点。"
+    routes:
+      - to: b
+  - name: b
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "基于上一步：{{ a.output }}，给一句话总结。"
+    routes:
+      - to: $end
+outputs:
+  reply: "{{ b.output }}"

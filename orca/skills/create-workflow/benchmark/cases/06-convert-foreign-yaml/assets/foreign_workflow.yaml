@@ -1,0 +1,14 @@
+workflow:
+  name: data_pipeline
+  steps:
+    - id: fetch
+      agent: true
+      prompt: "拉取指定数据源"
+    - id: clean
+      depends_on: [fetch]
+      agent: true
+      prompt: "清洗拉取到的数据"
+    - id: export
+      depends_on: [clean]
+      agent: true
+      prompt: "导出为 json"

@@ -1,0 +1,31 @@
+name: content_pipeline
+description: "由 PRD 生成：大纲→初稿→审阅"
+entry: outline
+inputs:
+  subject:
+    type: string
+    description: "文章主题"
+nodes:
+  - name: outline
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "根据主题产出文章大纲：{{ inputs.subject }}"
+    routes:
+      - to: draft
+  - name: draft
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "据大纲写初稿：{{ outline.output }}"
+    routes:
+      - to: review
+  - name: review
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "审阅初稿、标记问题、给出定稿：{{ draft.output }}"
+    routes:
+      - to: $end
+outputs:
+  article: "{{ review.output }}"

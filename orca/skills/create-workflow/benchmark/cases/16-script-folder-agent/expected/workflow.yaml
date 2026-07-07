@@ -1,0 +1,13 @@
+name: analyze_flow
+description: "单 script 封成文件夹 agent：analyze（脚本迁移 + ORCA_AGENT_RESOURCES 引用）"
+entry: analyze
+nodes:
+  - name: analyze
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: analyze
+    routes:
+      - to: $end
+outputs:
+  analysis: "{{ analyze.output }}"

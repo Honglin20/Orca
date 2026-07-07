@@ -1,0 +1,20 @@
+name: refactor_flow
+description: "由 CC skill + 编排 md 转换：complexity→refactor"
+entry: complexity
+nodes:
+  - name: complexity
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: complexity
+    routes:
+      - to: refactor
+  - name: refactor
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: refactor
+    routes:
+      - to: $end
+outputs:
+  suggestion: "{{ refactor.output }}"

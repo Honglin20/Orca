@@ -15,6 +15,10 @@
 
 ---
 
+## [2026-07-07] create-workflow skill + orca skill install + headless benchmark —— 通用 workflow 生成/转换 skill（吃描述或既有素材 → 归一化 DAG → Orca YAML+agent md，强制 orca validate 闭环），显式装 CC+opencode 两边；16 case 公平 headless benchmark + harness，评测闭环从 8/16 → 16/16，抽象 H1-H7 通用规则
+- commit: <待填>
+- 详情：[release note](../releases/2026-07-07-create-workflow-skill.md)
+
 <!-- 新条目加在这里（本行下方）-->
 
 ## [2026-07-07] phase-16 —— AgentHistory 单流重构（CC 风格 inline + 工具配对折叠）
