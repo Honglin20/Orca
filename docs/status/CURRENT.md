@@ -7,6 +7,23 @@
 
 ---
 
+## ✅ 侧任务完成（2026-07-07）：in-session shell v8 —— 入口换 messages.transform + doctor 自检
+
+按 SPEC v8 §2.6/§2.6.1/§2.6.2/§2.7 实现 v7→v8 增量。v7 CLI 大脑零改；重写 plugin 模板（flat
+hooks + ctx.client + Bun.spawnSync + `experimental.chat.messages.transform` 入口 —— spike
+实证 v7 的 `command.execute.before` 在 opencode 1.14.22 runtime 不触发）、加 `orca in-session
+doctor` 3 项自检（plugin 加载/marker 派发/CLI imports，B3 自检盲区标注 idle 需跑 `/orca run`
+验证）、统一 `/orca <sub>` 单 slash 命令、`start` 落 `.opencode/` 模板；CLI `status --json`
+（MAJOR-1）+ `stop --owner`（MAJOR-2）+ plugin `spawnCli` fail loud（MAJOR-3）全部闭环。
+52 新测全绿（in_session 31→83），全 unit 1775/1776（唯一 fail 预存 B-8 `daemon.py:105`，
+与本任务无关）。详情见 [release note](../releases/2026-07-07-in-session-shell-v8.md) + [SPEC
+v8](../specs/in-session-shell-design-draft.md)。**Commit**：`56083c1`（branch `phase13-in-session-v8`）。
+
+**未实证项**（SPEC §9.2，留 `test-coverage-e2e` 真链路验）：transform await 外部进程时序 / sessionID
+路径 / multi-session 绑定（M3）/ bootstrap 端到端 / 子 session 过滤 e2e / `/orca doctor` 真链路。
+
+---
+
 ## ✅ 侧任务完成（2026-07-07）：`orca executor` CLI 扩展 —— 命令唯一真相源 + spawn 参数全可改
 
 `show` 打印完整生效 argv + 每字段来源（env/项目/用户/default）；`set --binary/--flags/--prompt-channel/--scope` 三维可改 + 项目/用户两层 config；接通 phase-14 遗留 `resolve_flags` 死通道 + 新增 `resolve_prompt_channel`。142 测试全绿。详情见 [release note](../releases/2026-07-07-executor-cli-extend.md) + [plan](../plans/2026-07-07-executor-cli-extend.md)。**未 commit**（等用户确认）。
@@ -25,6 +42,11 @@
 **未 spike 项**（SPEC §9.2 明示，留 `test-coverage-e2e` 真链路验）：`/orca` 命令的
 `command.execute.before` 拦截真链路 / `bootstrap` 命令端到端 / 多 session 绑定（M3）/
 CC output cache 端到端（真 `claude -p` + hook 全链路）/ G2 序列对齐 vs `orca run` 同 wf tape。
+
+**e2e 验证结果（test-coverage-e2e，`/tmp/orca-e2e-v7/`）**：
+- ✅ **P0 CLI 核心**全过：G2 序列对齐（修 `step.py` route_taken.node 对齐 drive_loop 后逐 seq 全等）/ append_batch 原子+崩溃恢复 / 合规 fail loud / B2 空串 normalize / 失败 taxonomy。CLI 唯一大脑设计成立。
+- ✅ 子 session idle 过滤（plugin event hook 层）实证正确。
+- 🔴 **P1 opencode plugin 链路 BLOCKED（架构 gap）**：shipped 模板 4 缺陷——①`import @opencode/core/client`（npm 不存在，加载失败）②nested hooks 结构错③`Bun.spawn({stdout:"string"})` 非法④**`command.execute.before` hook 在 opencode 1.14.22 runtime 根本不存在**（只有 post 的 `command.executed`）→ slash 命令无法 BEFORE 拦截。spike 复核 `chat.message` 能触发但 `ignored` flag 不生效（无法抑制 user 文本）。**v7 §2.6 的 `/orca` 拦截入口机制在 1.14.22 不可实现，需重设入口**（待用户定方向）。
 
 **遗留 follow-up**：daemon.py 推进循环仍逐条 emit（B-8，ADR I2 跨进程写者语义一致性），
 留 daemon 迁 ExitCode + emit_batch 时一并改（与 `test_exit_codes` 长红同 PR）。

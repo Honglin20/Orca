@@ -15,6 +15,17 @@
 
 ---
 
+## [2026-07-07] in-session shell v8 —— 入口换 messages.transform + doctor 自检 + start 落 opencode 模板
+
+按 SPEC v8（§2.6/§2.6.1/§2.6.2/§2.7）实现 v7→v8 增量。v7 CLI 大脑零改；本轮重写 plugin
+模板（flat hooks + ctx.client + Bun.spawnSync + experimental.chat.messages.transform 入口，
+spike 实证 v7 的 command.execute.before 在 opencode 1.14.22 不触发）、加 `orca in-session doctor`
+3 项自检、统一 `/orca <sub>` 命令、start 落 .opencode/ 模板；CLI status 加 --json flag / stop
+加 --owner（MAJOR-1/2 闭环），plugin spawnCli fail loud（MAJOR-3 闭环）。52 新测全绿
+（31→83），全 unit 1775/1776（唯一 fail 预存 B-8）。
+- commit: `56083c1`
+- 详情：[release note](../releases/2026-07-07-in-session-shell-v8.md) + [SPEC](../specs/in-session-shell-design-draft.md) v8
+
 ## [2026-07-07] in-session shell v7 —— 薄 CLI 唯一大脑 + plugin/hook 哑传输
 按 SPEC v7 + ADR v3 实现：CLI `bootstrap/next/stop/status/start` 唯一大脑（per-call flock
 + `Tape.append_batch` 单次 write 原子化 B1 + `--output` 空串 normalize B2 + 失败 taxonomy F6
