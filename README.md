@@ -264,14 +264,46 @@ CC（Claude Code）路径：`orca in-session start` 生成 `.claude/settings.jso
 
 ---
 
-## Web UI
+## Web UI（v2，单 run 监控面板）
+
+v2 是**单 run/页**的监控面板（三栏：左 Agents rail / 中 `[会话 | 图表]` 页签 / 右 LogStream 常驻），tape 唯一真相源、前端纯渲染。**无 run 列表、无 +New、无 Replay**（多 run 管理后置）。首次用需先构建前端（见安装）。
 
 ```bash
-uv run orca serve                # → http://127.0.0.1:7428
+uv run orca serve                # → http://127.0.0.1:7428（默认 host 127.0.0.1）
 uv run orca serve --port 8000    # 自定义端口
 ```
 
-左侧 run 列表 → 点 **+New** 填 yaml 路径启动 → 实时 DAG / 日志；gate 弹窗富交互作答；run 完成后点 **⏮ Replay** 时间旅行回放。多 run 真并发，事件按需懒加载。首次用需先构建前端（见安装）；hook 桥（claude 工具权限拦截）复用 serve 端口。
+### 运行一个 workflow + Web 实时监控
+
+⚠️ **关键**：web 只能监控**它自己进程内**启动的 run（WS 订阅该 run 的 in-process EventBus）。`orca run --background` 是独立进程，web **看不到**（`GET /api/runs/<id>` 会 404）。所以要在 web 里看，必须**经 web 启动** run：
+
+```bash
+# 1) 起 web server
+uv run orca serve                       # → 127.0.0.1:7428
+
+# 2) 经 web 启动 workflow（POST /api/run，in-process asyncio task）
+curl -X POST http://127.0.0.1:7428/api/run \
+  -H 'Content-Type: application/json' \
+  -d '{"yaml_path":"examples/demo_mixed.yaml","inputs":{},"task":""}'
+# → {"run_id":"demo_mixed-20260708-...","status":"queued"}
+
+# 3) 浏览器打开该 run（单 run/页）
+open "http://127.0.0.1:7428/runs/<RUN_ID>"
+```
+
+打开后：左栏切 agent 看会话（prompt/thinking/message/折叠工具/DiffView）、中栏 `图表` 页签看 Recharts、右栏 LogStream 实时事件尾；gate 到达弹中心模态作答。
+
+> **已知限制（gap）**：v2 删了启动 UI（`+New`），目前只能 `POST /api/run`（curl）启动；且 `orca run`（前台 TUI / `--background`）和 `orca in-session` 起的 run 都**不在 web 的 RunManager 里**，web 无法监控——因为 RunManager 是 in-memory、不扫盘、不跨进程挂 bus。要监控这些 run，目前只能用各自 CLI（`orca logs <run_id> -f` / `orca in-session status <run_id>`）。计划补「按 tape 路径挂载」让 web 能监控任意 run（含 in-session）。
+
+### web 监控 in-session run
+
+**当前不支持。** in-session run 的 tape（`runs/<run_id>.jsonl`，格式与 `orca run` 一致）由 daemon 在另一进程独占写，web 的 RunManager 不含它、也没有「打开磁盘 tape + 挂 bus」的路由。in-session 只能用 CLI 看：
+
+```bash
+orca in-session status <run_id>          # 读 tape replay → 进度
+```
+
+（要让 web 监控 in-session，需补上同一条「按 tape 路径挂载」gap。）
 
 ---
 
