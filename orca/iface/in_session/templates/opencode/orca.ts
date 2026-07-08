@@ -37,6 +37,62 @@ const SERVER_BASE_URL_FALLBACK: string =
 // SPEC §2.6.1 一次性消费：替换文本不得含本字面。
 const MARKER_LITERAL = "<!--orca:cmd"
 
+// ── 诊断开关（2026-07-08）───────────────────────────────────────────────────
+// doctor 诊断两钩子是否真 fire：transform（入口）/ session.idle（推进）在每次触发时
+// 写心跳文件，doctor 读取作证。开关 = 环境变量 ``ORCA_DIAGNOSE=1``；未设/0 = 关（零 I/O，
+// 生产态）。plugin 加载时读一次缓存，hook 内只查布尔值。doctor 也读同 env 报告状态。
+// 用途：判定 NGA fork 是否接线 experimental transform —— 定论后 unset 即零开销。
+import { mkdirSync, writeFileSync } from "node:fs"
+
+const DIAGNOSE: boolean =
+  (typeof process !== "undefined" && process.env?.ORCA_DIAGNOSE === "1") || false
+
+// 心跳文件（plugin 作用域，非 per-run；runs/ 与 marker 同目录）。
+const PROBE_ENTRY_REL = "runs/.orca-probe-entry.json"
+const PROBE_ADVANCE_REL = "runs/.orca-probe-advance.json"
+
+// 心跳计数（进程内，plugin 重载归零；诊断期足够）。dispatch/advance 累计 = 真推进证据。
+let entryDispatchCount = 0
+let entryLastDispatchSub: string | null = null
+let idleCount = 0
+let advanceCount = 0
+let lastAdvanceRunId: string | null = null
+
+// sync 小文件写（gated by DIAGNOSE → 关时永不调用）。best-effort：失败打 console.error，
+// 不影响 hook 主流程（心跳是诊断旁路，不能拖垮/污染主路径）。
+function writeHeartbeat(relPath: string, payload: any): void {
+  try {
+    try { mkdirSync("runs", { recursive: true }) } catch { /* 已存在或无权；忽略 */ }
+    writeFileSync(relPath, JSON.stringify(payload))
+  } catch (e) {
+    console.error(`[orca] heartbeat ${relPath} failed:`, e)
+  }
+}
+
+function nowSec(): number {
+  return Math.floor(Date.now() / 1000)
+}
+
+function writeEntryHeartbeat(): void {
+  writeHeartbeat(PROBE_ENTRY_REL, {
+    diag: true,
+    last_called_at: nowSec(),
+    dispatch_count: entryDispatchCount,
+    last_dispatch_sub: entryLastDispatchSub,
+  })
+}
+
+function writeAdvanceHeartbeat(sessionID: string): void {
+  writeHeartbeat(PROBE_ADVANCE_REL, {
+    diag: true,
+    last_idle_at: nowSec(),
+    idle_count: idleCount,
+    last_session_id: sessionID,
+    advance_count: advanceCount,
+    last_advance_run_id: lastAdvanceRunId,
+  })
+}
+
 // in-flight mutex（F5 闭环）：防 await promptAsync 期间下一 idle 重入并发 spawn 两 CLI 撞 flock。
 const injecting: Set<string> = new Set()
 
@@ -171,6 +227,12 @@ function rewriteText(sub: string, reply: CliReply): string | null {
     if (reply.ok === false && reply.reason) {
       return `[orca status] failed: ${reply.reason}`
     }
+    // 列举 runs（无 run_id）：runs 数组。
+    if (Array.isArray(reply.runs)) {
+      if (reply.runs.length === 0) return "[orca status] no run tapes"
+      const lines = reply.runs.map((n: string) => `  - ${n}`).join("\n")
+      return `[orca status] ${reply.runs.length} run(s):\n${lines}`
+    }
     const status = reply.status ?? "unknown"
     const node = reply.node_status ?? {}
     const done = reply.progress ?? ""
@@ -254,6 +316,10 @@ export const OrcaPlugin = async (ctx: any) => {
     // `(input, out)` 两参；`input` 是空 `{}`、`messages` 在 `out` 上。**不**是单参
     // `input.out ?? input`（那是 v8 shipped 的回退错误形态，runtime 实证 input 为空）。
     "experimental.chat.messages.transform": async (input: any, out: any) => {
+      // 诊断心跳（每次 LLM 调用 = transform 被 opencode 调到 = 入口钩子已接线）。
+      // gated by ORCA_DIAGNOSE：关时零开销。放最前，确保即使后续 early-return 也有心跳。
+      if (DIAGNOSE) writeEntryHeartbeat()
+
       const realOut: any = out ?? input?.out ?? input
       const messages: any[] = realOut?.messages ?? []
       if (messages.length === 0) return input
@@ -285,6 +351,11 @@ export const OrcaPlugin = async (ctx: any) => {
         found.part.text = `[orca] cannot dispatch: ${sub} (args=${args || "<empty>"})`
         return input
       }
+
+      // 诊断：marker 命中并即将 spawn = transform 派发链路活（区别于「仅被调到」）。
+      entryDispatchCount += 1
+      entryLastDispatchSub = sub
+      if (DIAGNOSE) writeEntryHeartbeat()
 
       // open 是 top-level orca open（非 in-session），单独 spawn 路径（哑传输，零业务逻辑）。
       const reply = sub === "open"
@@ -323,6 +394,11 @@ export const OrcaPlugin = async (ctx: any) => {
 
       const sessionID = event.properties?.sessionID
       if (!sessionID) return
+
+      // 诊断心跳（session.idle 触达 = 推进钩子已接线；与「是否有活跃 run」无关）。
+      // gated by ORCA_DIAGNOSE。marker 检查前写，确保非激活 session 也有心跳。
+      idleCount += 1
+      if (DIAGNOSE) writeAdvanceHeartbeat(sessionID)
 
       // 子 session 过滤（D-v7-5）+ 主 session 绑定：marker 存在 = 本 session 有活跃 run。
       const marker = await readMarker(sessionID)
@@ -391,6 +467,10 @@ export const OrcaPlugin = async (ctx: any) => {
               model: { providerID, modelID },
             },
           })
+          // 诊断：成功注入下一节点 prompt = idle 真推进了一个 run（区别于「仅触发」）。
+          advanceCount += 1
+          lastAdvanceRunId = marker.run_id
+          if (DIAGNOSE) writeAdvanceHeartbeat(sessionID)
         }
       } finally {
         injecting.delete(sessionID)

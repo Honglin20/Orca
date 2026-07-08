@@ -91,7 +91,12 @@ def test_install_opencode_user_lands_all(isolated_home: Path):
     oc = isolated_home / ".config" / "opencode"
     assert (oc / "skills" / install_cmds.SKILL_NAME / "SKILL.md").is_file()
     assert (oc / "plugins" / "orca.ts").is_file()
-    assert (oc / "command" / "orca.md").is_file()
+    # 批 B：command 是 ``orca/`` 命名空间（run/status/stop/doctor），非单 orca.md
+    cmd_ns = oc / "command" / "orca"
+    assert cmd_ns.is_dir()
+    assert {p.name for p in cmd_ns.iterdir()} == {"run.md", "status.md", "stop.md", "doctor.md"}
+    # 旧单命令模板不应残留（install 清理）
+    assert not (oc / "command" / "orca.md").exists()
     cfg = json.loads((oc / "opencode.json").read_text())
     # 用户 scope：声明用绝对路径（spike：全局 config 非项目相对，必须绝对）
     assert str((oc / "plugins" / "orca.ts").resolve()) in cfg["plugin"]
@@ -197,7 +202,12 @@ def test_install_template_content_matches_bundle(isolated_home: Path):
     runner.invoke(app, ["--target", "opencode", "--scope", "user"])
     oc = isolated_home / ".config" / "opencode"
     assert (oc / "plugins" / "orca.ts").read_text() == install_cmds._opencode_plugin_src().read_text()
-    assert (oc / "command" / "orca.md").read_text() == install_cmds._opencode_command_src().read_text()
+    # 批 B：command 命名空间 4 个 .md，逐个比对随包模板
+    cmd_ns = oc / "command" / "orca"
+    bundled = {p.name: p.read_text() for p in install_cmds._opencode_command_srcs()}
+    assert set(bundled) == {"run.md", "status.md", "stop.md", "doctor.md"}
+    for name, content in bundled.items():
+        assert (cmd_ns / name).read_text() == content
 
 
 def test_install_warns_on_legacy_singular_plugin_dir(isolated_home: Path):

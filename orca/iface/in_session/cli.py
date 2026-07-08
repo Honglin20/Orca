@@ -59,6 +59,15 @@ logger = logging.getLogger(__name__)
 # subagent 合规超限阈值（D-v7-6：连续 N 次 next 无 output → workflow_failed）。
 _COMPLIANCE_LIMIT = 3
 
+# 诊断开关（2026-07-08）：doctor 探两钩子（transform 入口 / idle 推进）是否真 fire。
+# 开关 = 环境变量 ORCA_DIAGNOSE=1；plugin（TS）读同 env，开启时写心跳文件（见下），
+# doctor 读取作证。未设/0 = 关（plugin 零 I/O）。env 名与 orca.ts 的 DIAGNOSE 字面同步。
+DIAGNOSE_ENV = "ORCA_DIAGNOSE"
+# 心跳文件名（plugin 作用域，落在 rundir = runs/；与 orca.ts PROBE_*_REL 字面同步）。
+PROBE_ENTRY_NAME = ".orca-probe-entry.json"
+PROBE_ADVANCE_NAME = ".orca-probe-advance.json"
+_PROBE_FRESH_SEC = 300  # 心跳新鲜阈值：5 分钟内算 fresh
+
 # compact prompt 交付（SPEC §2.1 / §2.6.2，2026-07-08）：bootstrap + next 不再把
 # 整段渲染后的 prompt 经 .prompt 注入主 session（长 prompt 会全量进主 session 上下文且
 # 永久驻留对话历史）。改为 Orca 把渲染后 prompt 落盘到 <prompts_dir>/<node>.md，主 session
@@ -220,6 +229,11 @@ def bootstrap(
     session_id: str = typer.Option(
         None, "--session-id", help="主 session ID（记入 marker，opencode 子 session 过滤用）",
     ),
+    format: str = typer.Option(
+        "json", "--format",
+        help="输出格式：json（默认，机器读）/ prompt（批 B prompt-command 入口用：只回 entry "
+             "prompt 纯文本，让主 session 直接据其派子代理）",
+    ),
     log_level: str = typer.Option("INFO", "--log-level", help="INFO/DEBUG/WARN/ERROR"),
 ) -> None:
     """起一个 in-session run 的首步（gen run_id + tape + marker + emit ws+ns → entry prompt）。"""
@@ -330,7 +344,14 @@ def bootstrap(
             reply["prompt"] = prompt_text
         if result.prompt_file:
             reply["prompt_file"] = result.prompt_file
-        typer.echo(json.dumps(reply, ensure_ascii=False))
+
+        # 批 B（2026-07-08）：prompt-command 入口用 ``--format prompt`` —— 只回 entry prompt
+        # 纯文本（pointer），让主 session 直接据其派子代理（模型不见干净指令，不见 JSON/marker）。
+        # 兜底：无 prompt（如非 agent entry / 异常）→ 仍回 JSON 让模型看到结构化信息。
+        if format == "prompt" and prompt_text:
+            typer.echo(prompt_text)
+        else:
+            typer.echo(json.dumps(reply, ensure_ascii=False))
     finally:
         try:
             fcntl.flock(mlock_fd.fileno(), fcntl.LOCK_UN)
@@ -500,11 +521,17 @@ def status(
     if run_id is None:
         runs_dir = Path("runs")
         if not runs_dir.exists():
-            typer.echo("(无 runs/ 目录)")
+            out = {"ok": False, "reason": "no runs/ directory"}
+            typer.echo(json.dumps(out, ensure_ascii=False) if json_output else "(无 runs/ 目录)")
             return
         tapes = sorted(runs_dir.glob("*.jsonl"))
         if not tapes:
-            typer.echo("(无 run tape)")
+            out = {"ok": False, "reason": "no run tapes"}
+            typer.echo(json.dumps(out, ensure_ascii=False) if json_output else "(无 run tape)")
+            return
+        names = [tp.stem for tp in tapes]
+        if json_output:
+            typer.echo(json.dumps({"runs": names}, ensure_ascii=False))
             return
         for tp in tapes:
             typer.echo(f"- {tp.stem}")
@@ -659,118 +686,146 @@ def start(
 def doctor(
     log_level: str = typer.Option("INFO", "--log-level", help="INFO/DEBUG/WARN/ERROR"),
 ) -> None:
-    """入口链路自检（SPEC v8 §2.7，D-v8-2）。
+    """诊断 in-session 两钩子是否真 fire（2026-07-08 重设计：心跳作证，取代静态正则自检）。
 
-    只报能自证的 3 项（B3 闭环）：
-      1. **plugin 加载 + transform 触发**：doctor 能被调到 = plugin 已加载 +
-         ``experimental.chat.messages.transform`` 已注册并触发（自证价值）。
-      2. **marker 派发**：transform 正确 regex 解析 ``doctor`` 子命令并 spawn 到 CLI
-         （doctor 在跑即证，§2.6.1）。
-      3. **CLI 可达**：``orca in-session`` 版本 + 关键依赖（load_workflow / Tape /
-         advance_step / marker）导入无误 + orca 版本。
+    两钩子（plugin 侧）：
+      - **entry_hook**（``experimental.chat.messages.transform``）：每次 LLM 调用前触发。
+        ``ORCA_DIAGNOSE=1`` 时 plugin 在 transform 顶部写 ``runs/.orca-probe-entry.json``。
+      - **advance_hook**（``session.idle``）：session 空闲时触发，推进 workflow。心跳
+        ``runs/.orca-probe-advance.json``（marker 检查前写 = 仅「钩子接线」即有心跳）。
 
-    **不在 doctor 范围**（B3 自检盲区，§2.7）：
-      - ``session.idle`` hook 真触发：静态跑 doctor 时无 workflow 在跑，idle 必然 N=0；
-        报告仅标注「需跑 ``/orca run`` 验证」，不给 pass/fail。
+    诊断开关 = 环境变量 ``ORCA_DIAGNOSE=1``（plugin 加载时读一次；未设/0 = 关，零 I/O）。
+    doctor 报告开关状态 + 两钩子真实 fire 证据（status: pass/unknown/fail + 时间戳/计数）。
 
-    输出 JSON ``{ok, report, checks:[{name, pass, detail}]}``：plugin ``messages.transform``
-    据 §2.6.2 提取 ``.report`` 替换 user 消息文本。
-
-    **一次性消费保证**（§2.6.1）：``report`` 文本描述 marker 用反引号 `` `orca:cmd` ``，
-    不写完整 marker（避免下一轮 transform 误命中）。
+    **用途**：判定当前 opencode（含 NGA fork）是否接线两钩子，作为 transform 去留依据。
+    操作：``export ORCA_DIAGNOSE=1`` → 重启 opencode（plugin 读 env）→ session 内对话几句
+    → 跑本命令（``/orca doctor`` 或终端 ``orca in-session doctor``）。
     """
     _setup_logging(log_level)
 
+    diag_on = os.environ.get(DIAGNOSE_ENV) == "1"
+    rundir = _default_rundir()
+
+    def _read_probe(name: str) -> dict | None:
+        p = rundir / name
+        if not p.exists():
+            return None
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    entry = _read_probe(PROBE_ENTRY_NAME)
+    advance = _read_probe(PROBE_ADVANCE_NAME)
+    now = int(time.time())
+
     checks: list[dict[str, Any]] = []
 
-    # ① plugin 加载 + transform 触发：doctor 在跑 = 此链路通（自证，B3 闭环）。
+    # ① diag_switch：开关状态 + 切换方法。
     checks.append({
-        "name": "plugin_load_and_transform_trigger",
-        "pass": True,
+        "name": "diag_switch",
+        "status": "pass" if diag_on else "unknown",
         "detail": (
-            "doctor 被 spawn 到 = opencode plugin 已加载 + "
-            "`experimental.chat.messages.transform` 已注册并触发（自证）"
+            f"ORCA_DIAGNOSE={'1 (诊断开，钩子写心跳)' if diag_on else '未设/0 (诊断关，零 I/O)'}。"
+            " 切换：export ORCA_DIAGNOSE=1 后重启 opencode（plugin 加载时读 env）。"
         ),
     })
 
-    # ② marker 派发：regex 正确解析 `doctor` 子命令（doctor 在跑即证，§2.6.1）。
-    # 用 Python 复跑 SPEC §2.6.1 regex 验证 `doctor` 字面能命中。
-    # 一次性消费：detail 描述 marker 用反引号，不写完整 marker（§2.6.1）。
-    import re
-    from orca.iface.in_session.templates import MARKER_LITERAL, MARKER_REGEX
+    # ② entry_hook（transform）：心跳存在 + 新鲜 = 钩子在 fire。
+    if not diag_on:
+        e_status, e_detail = "unknown", (
+            "诊断关，无心跳。设 ORCA_DIAGNOSE=1 并在 session 内对话几句（每次 LLM 调用触发 "
+            "transform 写心跳），再跑 doctor。"
+        )
+    elif entry is None:
+        # 诊断开 + 明明该有心跳却没有 = transform 钩子根本没被 opencode 调到。
+        e_status, e_detail = "fail", (
+            "FAIL：诊断开但无 transform 心跳 = experimental.chat.messages.transform 钩子"
+            "未触发。本 fork（如 NGA）大概率未接线该实验钩子 → /orca marker 入口瘫。"
+            "（推进钩子 idle 是否活，见下 advance_hook。）"
+        )
+    else:
+        age = now - int(entry.get("last_called_at", 0))
+        disp = int(entry.get("dispatch_count", 0))
+        last_sub = entry.get("last_dispatch_sub")
+        sub_hint = f"，最近子命令={last_sub}" if last_sub else "，尚未 dispatch marker"
+        if age <= _PROBE_FRESH_SEC:
+            e_status = "pass"
+            e_detail = f"PASS：transform 正常 fire（{age}s 前被调，累计 dispatch {disp} 次{sub_hint}）。"
+        else:
+            e_status = "fail"
+            e_detail = (
+                f"STALE/FAIL：transform 曾 fire（{age}s 前）但近期未触发。"
+                "session 仍活跃却 stale → 钩子间歇失效或被卸载。"
+            )
+    checks.append({"name": "entry_hook", "status": e_status, "detail": e_detail})
 
-    pattern = re.compile(MARKER_REGEX)
-    # 构造 sample 用于内测，但 detail 文本不直接 echo sample 字面（一次性消费守门）。
-    sample_sub = "doctor"
-    sample_full_marker = f"<!--orca:cmd {sample_sub}-->"
-    match = pattern.match(sample_full_marker)
-    checks.append({
-        "name": "marker_dispatch",
-        "pass": match is not None and match.group(1) == "doctor",
-        "detail": (
-            f"regex 命中 `orca:cmd {sample_sub}` marker（sub=doctor）"
-            if match else
-            "regex 未命中 `orca:cmd doctor` marker（异常）"
-        ),
-    })
+    # ③ advance_hook（idle）：心跳存在 = idle 在 fire（稳定钩子；缺心跳只算 unknown 非必 fail）。
+    if not diag_on:
+        a_status, a_detail = "unknown", (
+            "诊断关，无心跳。设 ORCA_DIAGNOSE=1 并在 session 内发消息让其空闲（触发 idle），"
+            "再跑 doctor。"
+        )
+    elif advance is None:
+        a_status, a_detail = "unknown", (
+            "UNKNOWN：诊断开但未观察到 session.idle。发条消息让 session 空闲再测。"
+            "idle 是稳定钩子；此态通常只是尚未触发，非必失败。"
+        )
+    else:
+        age = now - int(advance.get("last_idle_at", 0))
+        idle_n = int(advance.get("idle_count", 0))
+        adv_n = int(advance.get("advance_count", 0))
+        last_rid = advance.get("last_advance_run_id")
+        rid_hint = f"（最近 run={last_rid}）" if last_rid else "（尚未推进活跃 run）"
+        a_status = "pass" if age <= _PROBE_FRESH_SEC else "unknown"
+        tag = "PASS" if a_status == "pass" else "STALE"
+        a_detail = f"{tag}：idle fire 过 {idle_n} 次（{age}s 前），其中推进 run {adv_n} 次{rid_hint}。"
+    checks.append({"name": "advance_hook", "status": a_status, "detail": a_detail})
 
-    # ③ CLI 可达：关键依赖导入 + orca 版本。
+    # ④ cli_imports_ok：真检查（保留），CLI 后端可达。
     import_errors: list[str] = []
-    try:
-        from orca.compile import load_workflow as _wf  # noqa: F401
-    except Exception as e:
-        import_errors.append(f"load_workflow: {e}")
-    try:
-        from orca.events.tape import Tape as _Tape  # noqa: F401
-    except Exception as e:
-        import_errors.append(f"Tape: {e}")
-    try:
-        from orca.run.step import advance_step as _adv  # noqa: F401
-    except Exception as e:
-        import_errors.append(f"advance_step: {e}")
-    try:
-        from orca.iface.in_session import marker as _marker  # noqa: F401
-    except Exception as e:
-        import_errors.append(f"marker: {e}")
-
+    for mod in ("orca.compile", "orca.events.tape", "orca.run.step",
+                "orca.iface.in_session.marker"):
+        try:
+            __import__(mod)
+        except Exception as e:  # noqa: BLE001
+            import_errors.append(f"{mod}: {e}")
     try:
         import orca as _orca_pkg
         version = getattr(_orca_pkg, "__version__", "unknown")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         version = f"unknown (import failed: {e})"
-
     cli_ok = not import_errors
-    cli_detail = (
-        f"orca v{version}; imports ok (load_workflow/Tape/advance_step/marker)"
-        if cli_ok else
-        f"orca v{version}; import errors: {'; '.join(import_errors)}"
-    )
     checks.append({
         "name": "cli_imports_ok",
-        "pass": cli_ok,
-        "detail": cli_detail,
+        "status": "pass" if cli_ok else "fail",
+        "detail": (
+            f"orca v{version}; imports ok (compile/tape/step/marker)"
+            if cli_ok else
+            f"orca v{version}; import errors: {'; '.join(import_errors)}"
+        ),
     })
 
-    ok = all(c["pass"] for c in checks)
+    # ok = 无 fail（unknown 不算失败：只是证据不足）。
+    ok = all(c["status"] != "fail" for c in checks)
 
-    # report 文本（SPEC §2.7）：3 项 + idle 标注。一次性消费：marker 用反引号描述。
-    lines = ["Orca in-session 入口链路自检（v8 §2.7）", ""]
+    lines = ["Orca in-session 钩子诊断（2026-07-08）", ""]
     for c in checks:
-        mark = "PASS" if c["pass"] else "FAIL"
-        lines.append(f"[{mark}] {c['name']}: {c['detail']}")
+        lines.append(f"[{c['status'].upper()}] {c['name']}: {c['detail']}")
     lines.append("")
-    lines.append(
-        "注：`session.idle` hook 真触发 + 多 session 绑定（M3）不在 doctor 自检范围 —— "
-        "需跑 `/orca run <wf>` 验证（静态跑 doctor 时 idle 必 N=0）。"
-    )
-    lines.append(
-        "marker 入口：plugin 在每条 user 消息最后 text part 检测 "
-        "`orca:cmd <sub> <args>` marker（行首/行尾锚定），命中则 spawn 对应 CLI 子命令。"
-    )
+    lines.append("决策矩阵（据 entry_hook / advance_hook）：")
+    lines.append("  entry FAIL + advance PASS → fork 砍 transform、留 idle → 走 prompt-command（删 transform）。")
+    lines.append("  entry PASS + advance PASS → 两钩子都活 → 保留 transform（确定性拦截）。")
+    lines.append("  两 FAIL → fork 砍更多，另议。")
+    lines.append("")
+    lines.append("心跳文件（仅 ORCA_DIAGNOSE=1 时 plugin 写）：")
+    lines.append(f"  {rundir / PROBE_ENTRY_NAME}")
+    lines.append(f"  {rundir / PROBE_ADVANCE_NAME}")
     report = "\n".join(lines)
 
     typer.echo(json.dumps({
         "ok": ok,
+        "diag": diag_on,
         "report": report,
         "checks": checks,
     }, ensure_ascii=False))

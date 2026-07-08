@@ -23,7 +23,7 @@ import pytest
 from typer.testing import CliRunner
 
 from orca.iface.in_session.cli import app
-from orca.iface.in_session.templates import MARKER_LITERAL, MARKER_REGEX
+from orca.iface.in_session.templates import MARKER_REGEX
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -32,10 +32,6 @@ from orca.iface.in_session.templates import MARKER_LITERAL, MARKER_REGEX
 PLUGIN_TS = (
     Path(__file__).resolve().parents[3]
     / "orca/iface/in_session/templates/opencode/orca.ts"
-)
-ORCA_MD = (
-    Path(__file__).resolve().parents[3]
-    / "orca/iface/in_session/templates/opencode/command/orca.md"
 )
 
 
@@ -98,71 +94,113 @@ def test_marker_regex_sub_must_be_word():
     assert re.match(MARKER_REGEX, "<!--orca:cmd RUN-->") is not None     # 大写 OK
 
 
-# ── §2.6.1 一次性消费：替换文本无 marker 字面 ──────────────────────────────
+# ── doctor 钩子诊断（2026-07-08 重设计：心跳作证，取代静态正则自检）─────────────
 
 
-def test_doctor_report_has_no_marker_literal():
-    """doctor 输出 .report 不得含 `<!--orca:cmd` 字面（一次性消费保证，§2.6.1）。
-
-    doctor 在跑 = 自证 transform 链路活；下一轮 transform 不应误命中本报告。
-    """
+def _run_doctor() -> dict:
+    """跑 ``doctor``，解析末行 JSON。"""
     runner = CliRunner()
     result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 0
-    reply = json.loads(result.output.splitlines()[-1])
-    assert MARKER_LITERAL not in reply["report"]
-    # 用反引号描述 marker（SPEC §2.7）—— 至少出现一处 backtick + orca:cmd
-    assert "`orca:cmd" in reply["report"]
+    assert result.exit_code == 0, result.output
+    return json.loads(result.output.splitlines()[-1])
 
 
-# ── §2.7 doctor CLI 自检 ─────────────────────────────────────────────────────
+def _write_probe(cwd: Path, name: str, payload: dict) -> None:
+    """写一个诊断心跳文件到 ``<cwd>/runs/<name>``（doctor 从 ``runs/`` 读）。"""
+    runs = cwd / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    (runs / name).write_text(json.dumps(payload), encoding="utf-8")
 
 
-def test_doctor_json_structure_and_checks():
-    """doctor 输出 JSON {ok, report, checks:[{name,pass,detail}]}，3 项 checks。"""
-    runner = CliRunner()
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 0
-    reply = json.loads(result.output.splitlines()[-1])
-
-    assert set(reply.keys()) >= {"ok", "report", "checks"}
+def test_doctor_json_structure(cwd_tmp, monkeypatch):
+    """doctor 输出 JSON {ok, diag, report, checks:[{name,status,detail}]} + 4 项 checks。"""
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    reply = _run_doctor()
+    assert set(reply.keys()) >= {"ok", "diag", "report", "checks"}
     assert isinstance(reply["ok"], bool)
+    assert isinstance(reply["diag"], bool)
     assert isinstance(reply["report"], str) and len(reply["report"]) > 0
     assert isinstance(reply["checks"], list)
-    assert len(reply["checks"]) == 3
-
+    assert len(reply["checks"]) == 4
     names = [c["name"] for c in reply["checks"]]
-    assert "plugin_load_and_transform_trigger" in names
-    assert "marker_dispatch" in names
-    assert "cli_imports_ok" in names
-
+    assert names == ["diag_switch", "entry_hook", "advance_hook", "cli_imports_ok"]
     for c in reply["checks"]:
-        assert set(c.keys()) == {"name", "pass", "detail"}
-        assert isinstance(c["pass"], bool)
-        assert isinstance(c["detail"], str) and len(c["detail"]) > 0
-
-    # 默认环境三项全 pass → ok=True
-    assert reply["ok"] is True
-    assert all(c["pass"] for c in reply["checks"])
+        assert set(c.keys()) == {"name", "status", "detail"}
+        assert c["status"] in ("pass", "unknown", "fail")
 
 
-def test_doctor_report_annotates_idle_blind_spot():
-    """SPEC §2.7：report 标注「session.idle 真触发不在自检范围」。"""
-    runner = CliRunner()
-    result = runner.invoke(app, ["doctor"])
-    reply = json.loads(result.output.splitlines()[-1])
-    assert "session.idle" in reply["report"]
-    assert "/orca run" in reply["report"]
+def test_doctor_diag_off_reports_unknown_and_ok(cwd_tmp, monkeypatch):
+    """诊断关：entry/advance 均 unknown（证据不足，非 fail）→ ok=True。"""
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    reply = _run_doctor()
+    assert reply["diag"] is False
+    by_name = {c["name"]: c for c in reply["checks"]}
+    assert by_name["diag_switch"]["status"] == "unknown"
+    assert by_name["entry_hook"]["status"] == "unknown"
+    assert by_name["advance_hook"]["status"] == "unknown"
+    assert reply["ok"] is True  # unknown 不算失败
 
 
-def test_doctor_marker_dispatch_check_uses_canonical_regex():
-    """doctor 的 marker_dispatch check 用 ``MARKER_REGEX`` 验证 `doctor` marker 命中。"""
-    runner = CliRunner()
-    result = runner.invoke(app, ["doctor"])
-    reply = json.loads(result.output.splitlines()[-1])
-    md = next(c for c in reply["checks"] if c["name"] == "marker_dispatch")
-    assert md["pass"] is True
-    assert "doctor" in md["detail"]
+def test_doctor_diag_on_no_heartbeat_entry_fails(cwd_tmp, monkeypatch):
+    """诊断开 + 无 transform 心跳 = entry FAIL（fork 未接 experimental transform 钩子）。"""
+    monkeypatch.setenv("ORCA_DIAGNOSE", "1")
+    reply = _run_doctor()
+    by_name = {c["name"]: c for c in reply["checks"]}
+    assert by_name["diag_switch"]["status"] == "pass"
+    assert by_name["entry_hook"]["status"] == "fail"
+    assert reply["ok"] is False
+
+
+def test_doctor_fresh_entry_heartbeat_passes(cwd_tmp, monkeypatch):
+    """诊断开 + 新鲜 entry 心跳 = entry PASS（transform 在 fire）。"""
+    import time as _t
+    monkeypatch.setenv("ORCA_DIAGNOSE", "1")
+    _write_probe(cwd_tmp, ".orca-probe-entry.json", {
+        "diag": True, "last_called_at": int(_t.time()),
+        "dispatch_count": 2, "last_dispatch_sub": "run",
+    })
+    reply = _run_doctor()
+    by_name = {c["name"]: c for c in reply["checks"]}
+    assert by_name["entry_hook"]["status"] == "pass"
+    assert "dispatch 2" in by_name["entry_hook"]["detail"]
+
+
+def test_doctor_stale_entry_heartbeat_fails(cwd_tmp, monkeypatch):
+    """诊断开 + entry 心跳过期（>5min）= FAIL/STALE（钩子间歇失效）。"""
+    monkeypatch.setenv("ORCA_DIAGNOSE", "1")
+    _write_probe(cwd_tmp, ".orca-probe-entry.json", {
+        "diag": True, "last_called_at": 0,  # 远古 → age 巨大
+        "dispatch_count": 0, "last_dispatch_sub": None,
+    })
+    reply = _run_doctor()
+    by_name = {c["name"]: c for c in reply["checks"]}
+    assert by_name["entry_hook"]["status"] == "fail"
+
+
+def test_doctor_advance_heartbeat_passes(cwd_tmp, monkeypatch):
+    """诊断开 + advance 心跳 = advance PASS（idle 在 fire，且报告推进计数）。"""
+    import time as _t
+    monkeypatch.setenv("ORCA_DIAGNOSE", "1")
+    _write_probe(cwd_tmp, ".orca-probe-advance.json", {
+        "diag": True, "last_idle_at": int(_t.time()),
+        "idle_count": 3, "advance_count": 1, "last_advance_run_id": "r-1",
+        "last_session_id": "s-1",
+    })
+    reply = _run_doctor()
+    by_name = {c["name"]: c for c in reply["checks"]}
+    assert by_name["advance_hook"]["status"] == "pass"
+    assert "推进 run 1" in by_name["advance_hook"]["detail"]
+
+
+def test_doctor_report_has_decision_matrix(cwd_tmp, monkeypatch):
+    """报告含决策矩阵（据 entry/advance PASS/FAIL 决定 transform 去留）。"""
+    monkeypatch.setenv("ORCA_DIAGNOSE", "1")
+    reply = _run_doctor()
+    assert "决策矩阵" in reply["report"]
+    assert "prompt-command" in reply["report"]  # 「砍 transform → 走 prompt-command」
+    # 心跳文件路径写进报告，便于用户定位/清理
+    assert ".orca-probe-entry.json" in reply["report"]
+
 
 
 # ── §2.6.2 改写语义（plugin TS 字段提取契约）────────────────────────────────
@@ -407,30 +445,6 @@ def test_start_does_not_write_opencode_templates(cwd_tmp, wf_path):
     )
 
 
-def test_start_command_md_substitutes_to_valid_marker():
-    """SPEC §2.6.1：orca.md body 含 ``$ARGUMENTS`` 占位符；用合法 args 替换后应成 valid marker。
-
-    opencode 在用户敲 ``/orca run wf.yaml`` 时把 ``$ARGUMENTS`` 替换为 ``run wf.yaml``。
-    orca.md body 本身**不是**合法 marker（含 ``$`` 占位符），但 substitution 后必须合法。
-    """
-    md = ORCA_MD.read_text(encoding="utf-8")
-    body_lines = [ln for ln in md.splitlines() if "orca:cmd" in ln]
-    assert body_lines, "orca.md body 无 marker 模板"
-    body = body_lines[0].strip()
-    assert "$ARGUMENTS" in body, f"orca.md body 不含 $ARGUMENTS 占位符: {body!r}"
-
-    # 模拟 opencode substitution
-    substituted = body.replace("$ARGUMENTS", "run wf.yaml")
-    m = re.match(MARKER_REGEX, substituted)
-    assert m is not None, f"substituted body 非 marker: {substituted!r}"
-    assert m.group(1) == "run"
-    assert (m.group(2) or "").strip() == "wf.yaml"
-
-    # 反例：args 含 `>` 时 substitution 后应非 marker
-    bad = body.replace("$ARGUMENTS", "run wf>yaml")
-    assert re.match(MARKER_REGEX, bad) is None
-
-
 def test_start_points_to_install_for_opencode(cwd_tmp, wf_path):
     """start 新提示：opencode 用户指向 ``orca install`` + ``/orca run``。
 
@@ -515,6 +529,19 @@ def test_status_default_human_readable_unchanged(cwd_tmp, wf_path):
     assert "status:" in result.output
     assert "running" in result.output
     assert "node_status:" in result.output
+
+
+def test_status_json_flag_no_run_id_lists_runs_json(cwd_tmp, wf_path):
+    """``status --json`` 无 run_id → JSON ``{runs: [...]}``（plugin 解析用）。"""
+    runner = CliRunner()
+    runner.invoke(app, ["bootstrap", str(wf_path)])
+    result = runner.invoke(app, ["status", "--json"])
+    assert result.exit_code == 0
+    reply = json.loads(result.output.strip())
+    assert "runs" in reply
+    assert isinstance(reply["runs"], list)
+    assert len(reply["runs"]) >= 1
+    assert ".jsonl" not in reply["runs"][0]  # stem only
 
 
 def test_plugin_status_dispatch_passes_json_flag():

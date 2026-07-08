@@ -115,9 +115,16 @@ def _opencode_plugin_src() -> Path:
     return Path(str(files("orca.iface.in_session.templates"))) / "opencode" / "orca.ts"
 
 
-def _opencode_command_src() -> Path:
-    """随包 opencode slash 命令模板（``command/orca.md`` = ``/orca`` 本体）。"""
-    return Path(str(files("orca.iface.in_session.templates"))) / "opencode" / "command" / "orca.md"
+def _opencode_command_srcs() -> list[Path]:
+    """随包 opencode slash 命令模板（``command/orca/*.md`` 命名空间 → ``/orca run|status|stop|doctor``）。
+
+    2026-07-08（批 B 入口重设计）：从单 ``command/orca.md``（marker + transform 派发）改为
+    ``command/orca/<sub>.md`` prompt-command 命名空间——每个命令是一段清晰指令（接口 + 示例 +
+    规则），模型照指令调 ``orca in-session`` CLI，**不再依赖 transform 钩子**。加命令 = 加一个
+    ``.md`` 文件，install 自动捡（按 ``templates/opencode/command/orca/`` 下 ``*.md`` 扫描）。
+    """
+    ns = Path(str(files("orca.iface.in_session.templates"))) / "opencode" / "command" / "orca"
+    return sorted(ns.glob("*.md"))
 
 
 def _skill_src() -> Path:
@@ -212,24 +219,39 @@ def _opencode_plugin_decl(hr: HostRoot, plugin_dst: Path) -> str:
 
 
 def _install_opencode(hr: HostRoot) -> dict[str, Path]:
-    """opencode 全套：skill + plugins/orca.ts + command/orca.md + opencode.json 声明合并。
+    """opencode 全套：skill + plugins/orca.ts + command/orca/*.md 命名空间 + opencode.json 声明。
 
-    返回 ``{组件: 落地路径}``。opencode.json 合并：``"plugin"`` 数组加 orca 声明（去重，
-    保已有 plugin 条目与其他键）。
+    返回 ``{组件: 落地路径}``（command 组件指向命名空间目录）。opencode.json 合并：
+    ``"plugin"`` 数组加 orca 声明（去重，保已有 plugin 条目与其他键）。
+
+    2026-07-08（批 B）：command 从单 ``orca.md`` 改 ``orca/<sub>.md`` 命名空间（prompt-command
+    入口，去 transform）。旧 ``command/orca.md`` 残留 → 清理（避免与新命名空间并存导致
+    ``/orca`` 仍命中旧 marker 模板）。
     """
     written: dict[str, Path] = {}
 
     # skill
     written["skill"] = _install_skill(hr.root)
 
-    # plugin + command（静态模板，run-agnostic）
+    # plugin + command 命名空间（静态模板，run-agnostic）
     plugin_dst = hr.root / "plugins" / "orca.ts"
     _atomic_write_with_backup(plugin_dst, _opencode_plugin_src().read_text(encoding="utf-8"))
     written["plugin"] = plugin_dst
 
-    cmd_dst = hr.root / "command" / "orca.md"
-    _atomic_write_with_backup(cmd_dst, _opencode_command_src().read_text(encoding="utf-8"))
-    written["command"] = cmd_dst
+    cmd_ns_dst = hr.root / "command" / "orca"
+    for src in _opencode_command_srcs():
+        dst = cmd_ns_dst / src.name
+        _atomic_write_with_backup(dst, src.read_text(encoding="utf-8"))
+    written["command"] = cmd_ns_dst
+
+    # 清理旧单命令模板（批 B 前：command/orca.md 的 marker 派发）——与新命名空间并存会让
+    # ``/orca`` 仍命中旧 marker 模板（transform 已删，旧模板只剩裸 marker → 模型困惑）。删之。
+    legacy_cmd = hr.root / "command" / "orca.md"
+    if legacy_cmd.exists():
+        try:
+            legacy_cmd.unlink()
+        except OSError as e:  # noqa: BLE001
+            typer.echo(f"  ⚠ 无法清理旧命令模板 {legacy_cmd}：{e}", err=True)
 
     # 迁移提示：旧 start 写的 singular plugin/ 目录（无 s）残留 → warn（不擅自删用户文件）
     legacy = hr.root / "plugin" / "orca.ts"
