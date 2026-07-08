@@ -392,32 +392,19 @@ def wf_path(tmp_path: Path) -> Path:
     return p
 
 
-def test_start_writes_opencode_plugin_template(cwd_tmp, wf_path):
-    """start v8：把仓库 orca.ts 写入项目 .opencode/plugin/orca.ts。"""
+def test_start_does_not_write_opencode_templates(cwd_tmp, wf_path):
+    """start 收窄为 CC-only run bootstrap：不再写 ``.opencode/`` 模板（落地已移到 ``orca install``）。
+
+    opencode 模板落地（plugin / command / opencode.json 声明）的覆盖在
+    ``tests/iface/cli/test_install_cmds.py``。
+    """
     runner = CliRunner()
     result = runner.invoke(app, ["start", str(wf_path)])
-    assert result.exit_code == 0
-
-    plugin_dst = cwd_tmp / ".opencode/plugin/orca.ts"
-    assert plugin_dst.exists(), "start 未写 .opencode/plugin/orca.ts"
-    # 内容 = 仓库模板（一致）
-    src = PLUGIN_TS.read_text(encoding="utf-8")
-    assert plugin_dst.read_text(encoding="utf-8") == src
-
-
-def test_start_writes_opencode_command_template(cwd_tmp, wf_path):
-    """start v8：把仓库 orca.md 写入项目 .opencode/command/orca.md。"""
-    runner = CliRunner()
-    result = runner.invoke(app, ["start", str(wf_path)])
-    assert result.exit_code == 0
-
-    cmd_dst = cwd_tmp / ".opencode/command/orca.md"
-    assert cmd_dst.exists()
-    src = ORCA_MD.read_text(encoding="utf-8")
-    assert cmd_dst.read_text(encoding="utf-8") == src
-    # md 含 marker + $ARGUMENTS
-    assert "$ARGUMENTS" in cmd_dst.read_text(encoding="utf-8")
-    assert "orca:cmd" in cmd_dst.read_text(encoding="utf-8")
+    assert result.exit_code == 0, result.output
+    # .opencode/ 不应被创建（start 只写 CC marker + 打印 settings 片段）
+    assert not (cwd_tmp / ".opencode").exists(), (
+        "start 不应再写 .opencode/（模板落地已移到 orca install）"
+    )
 
 
 def test_start_command_md_substitutes_to_valid_marker():
@@ -444,31 +431,16 @@ def test_start_command_md_substitutes_to_valid_marker():
     assert re.match(MARKER_REGEX, bad) is None
 
 
-def test_start_idempotent_when_template_unchanged(cwd_tmp, wf_path):
-    """start 多次调用：模板内容相同时不覆盖（不 backup）。"""
-    runner = CliRunner()
-    runner.invoke(app, ["start", str(wf_path)])
-    plugin_dst = cwd_tmp / ".opencode/plugin/orca.ts"
-    first_mtime = plugin_dst.stat().st_mtime_ns
+def test_start_points_to_install_for_opencode(cwd_tmp, wf_path):
+    """start 新提示：opencode 用户指向 ``orca install`` + ``/orca run``。
 
-    # 再调一次（间隔一点点，避免 mtime 完全一致）
-    import time; time.sleep(0.01)
-    runner.invoke(app, ["start", str(wf_path)])
-    assert plugin_dst.stat().st_mtime_ns == first_mtime   # 未改写
-
-    # 无 .bak 生成（内容一致跳过）
-    assert not (cwd_tmp / ".opencode/plugin/orca.ts.bak").exists()
-
-
-def test_start_prints_doctor_hint_and_arguments_constraint(cwd_tmp, wf_path):
-    """start v8：打印 `/orca doctor` 自检提示 + $ARGUMENTS 限制说明。"""
+    start 不再自落 opencode 模板 / 不再打 ``$ARGUMENTS`` 限制（那是 install 的事）。
+    """
     runner = CliRunner()
     result = runner.invoke(app, ["start", str(wf_path)])
     output = result.output
-    assert "/orca doctor" in output
-    assert "$ARGUMENTS" in output
-    # 限制提示（含 `>` 或换行关键词）
-    assert ">" in output and "换行" in output
+    assert "orca install" in output
+    assert "/orca run" in output
 
 
 def test_start_preserves_cc_marker_and_settings_fragment(cwd_tmp, wf_path):

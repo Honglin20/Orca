@@ -110,17 +110,25 @@ def test_install_idempotent(_isolated_home: Path):
     assert skill_md.read_text() == first
 
 
-def test_install_fail_loud(_isolated_home: Path, monkeypatch: pytest.MonkeyPatch):
-    """copytree 失败 → exit 1 + stderr 报路径（铁律 12，不静默吞错）。"""
-    import shutil
+def test_skill_install_deprecated_warns_and_delegates(_isolated_home: Path):
+    """``orca skill install`` 已弃用：打印 ⚠ 警告 + 委托 ``run_install``（文件仍落地，向后兼容）。
 
-    def _boom(*_args, **_kwargs):
-        raise OSError("permission denied (simulated)")
-
-    monkeypatch.setattr(skill_cmds.shutil, "copytree", _boom)
+    行为升级：opencode target 现在额外装 plugin/command/opencode.json（不再是 skill-only）。
+    fail-loud 路径（copytree 失败）由 ``test_install_cmds.test_install_fail_loud`` 覆盖
+    （monkeypatch ``install_cmds.shutil``，因为 copytree 现在在 install_cmds 里）。
+    """
     result = runner.invoke(app, ["skill", "install"])
-    assert result.exit_code == 1
-    assert "permission denied (simulated)" in result.output or "simulated" in result.output
+    assert result.exit_code == 0, result.output
+    # 弃用警告打到 stderr（CliRunner 默认 mix 进 output）
+    assert "已弃用" in result.output
+    # 委托执行：CC + opencode skill 仍落地（等价旧行为）
+    assert _skill_file(_isolated_home).is_file()
+    oc_skill = (
+        _isolated_home / ".config" / "opencode" / "skills" / skill_cmds.SKILL_NAME / "SKILL.md"
+    )
+    assert oc_skill.is_file()
+    # 行为升级：opencode 现在也装 in-session（plugin + 声明）
+    assert (_isolated_home / ".config" / "opencode" / "plugins" / "orca.ts").is_file()
 
 
 def test_orca_and_teams_both_aliases_work():

@@ -328,6 +328,14 @@ from orca.iface.cli.skill_cmds import app as skill_app
 app.add_typer(skill_app, name="skill", help="安装/管理随包 Orca skill（create-workflow）")
 
 
+# ── install 子命令组（统一安装入口：skill + in-session，全局默认）────────────
+# sub-Typer：同 executor/skill 模式。收口此前碎片化的 skill install + in-session start
+# 两步安装为一条 `orca install`（详见 docs/plans/2026-07-08-unified-install.md）。
+from orca.iface.cli.install_cmds import app as install_app
+
+app.add_typer(install_app, name="install", help="统一安装 Orca 宿主集成（skill + in-session），全局默认")
+
+
 # ── in-session 子命令组（in-session shell v5：hook-driven）──────────────────
 # sub-Typer：同 executor/skill 模式。in_session.cli 顶层只 import typer + compile +
 # run.lifecycle（轻量），无循环；bg_runner 用 lazy import（见 cli._default_tape_path）。

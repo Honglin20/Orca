@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-08] orca install —— 统一安装入口（全局默认 + 合并 skill/in-session）
+
+收口碎片化安装（`pip` → `skill install` → `in-session start` 三步、两种 scope）为单条 `orca install [--target claude|opencode|all] [--scope user|project]`（全局默认）。**Step 0 spike 钉死承重事实**：opencode 1.14.22 无 `plugins/` 目录自动发现，plugin 加载**必须** `opencode.json` `"plugin":[<path>]` 声明（项目相对 / 用户绝对）——修掉既有「光丢文件不声明」缺口（`start` 之前只写两文件不碰 opencode.json，无加载 e2e 守门）。`skill install` 降为弃用别名（warn+委托）；`in-session start` 收窄为 CC-only run bootstrap（opencode 路运行时 `bootstrap` 自举）。code-reviewer 0 BLOCKER + 4🟡/3🟢 全闭环；`tests/iface` 689 passed + 新增零业务逻辑守门。详见 [release note](../releases/2026-07-08-unified-install.md) + [plan](../plans/2026-07-08-unified-install.md)。
+
 ## [2026-07-08] in-session compact prompt —— 文件交付 + 缺字段干净 fail loud（e2e PASS）
 
 in-session shell 的节点 prompt 交付从"整段渲染文本注入主 session"改为**compact**：Orca 把渲染后 prompt 落盘到 `<rundir>/<run_id>/prompts/<node>.md`，主 session 只收一句 host-facing **指针**（"用 task 派子代理，完整指令已写入 `<path>`，先 Read 再执行"），子代理从文件读完整指令——主 session 上下文不再随节点数膨胀。两种 agent 形态（`agent:<name>` md 引用 / inline `prompt:`）渲染无差别（compile 已扁平化进 `node.prompt`）；plugin 零改动（仍读 `.prompt`）。**顺手修既有脏崩溃 bug**：`output_schema` 缺字段 / 畸形 schema / 下游 render 引用缺失字段，原本 `ExecError`/`SchemaError` 逃逸 → 无 `workflow_failed`、不清 marker、tape 悬挂、下次卡死；现 `_parse_output` 加 jsonschema 校验、`_render_or_fail` 包错 → 走既有干净 taxonomy（`output_schema_mismatch` / `render_error`）。不接 LLM `validator`——主 session 自己当判官。计划 [2026-07-08-in-session-compact-prompt](../plans/2026-07-08-in-session-compact-prompt.md)；SPEC `in-session-shell-design-draft.md` §2.1/§2.5 回填。code-reviewer 1 🔴（SchemaError 漏网）+ 🟡 全闭环。**顺手消既有债**：`InSessionError` 加 `error_kind` 显式字段 + `ERR_*` 常量，`_classify_in_session_error` 改直读字段（取代脆弱的消息子串匹配，类型安全）。92 in-session + 851 跨模块测试绿；e2e `/tmp/orca-compact-exp/repro.sh` PASS。

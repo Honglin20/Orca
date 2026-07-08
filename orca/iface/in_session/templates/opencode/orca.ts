@@ -1,4 +1,4 @@
-// .opencode/plugin/orca.ts —— in-session shell opencode plugin
+// opencode plugin（由 `orca install` 落到 .opencode/plugins/ 或 ~/.config/opencode/plugins/）—— in-session shell
 // SPEC v8（`docs/specs/in-session-shell-design-draft.md` §2.6 / §2.6.1 / §2.6.2 / §2.5）
 //
 // **架构守门**（D-v7-1，§2.6）：本 plugin 是**哑传输**。零 Orca 业务逻辑：

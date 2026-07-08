@@ -128,7 +128,7 @@ next --tape <p> --run-id <r> [--output <out>] [--inputs '{}']
 - 决策由 `advance_step` 守住（与 v5 同一纯函数，零改），只是外壳从「长驻进程包一层缓存+emit」变成「短命 CLI 直接 emit」。**铁律 1 不变量 I1（step.py helper）/ I2（同 schema）/ I3（单写者）/ I3.4（半写恢复）全部保留。**
 
 **两宿主前端**（都 spawn 薄 CLI，内部包同一 `advance_step`）：
-- **opencode**：`.opencode/plugin/orca.ts`（进程内 plugin）。`/orca <wf>` 命令 → 调 `bootstrap` CLI 拿 entry prompt → `client.session.promptAsync` 注入；`session.idle` event hook（**仅主 session，子 session skip**）→ 经 client 从最后 assistant message 的 **task ToolPart.state.output** 提取（解 `<task_result>`）→ 调 `next` CLI → `promptAsync` 注入下一 prompt。**无 socket、无 SSE、无 settings.json**，全在 opencode 进程内（spike 已证）。plugin 零 Orca 业务逻辑（§2.6）。
+- **opencode**：`.opencode/plugins/orca.ts`（进程内 plugin）。`/orca <wf>` 命令 → 调 `bootstrap` CLI 拿 entry prompt → `client.session.promptAsync` 注入；`session.idle` event hook（**仅主 session，子 session skip**）→ 经 client 从最后 assistant message 的 **task ToolPart.state.output** 提取（解 `<task_result>`）→ 调 `next` CLI → `promptAsync` 注入下一 prompt。**无 socket、无 SSE、无 settings.json**，全在 opencode 进程内（spike 已证）。plugin 零 Orca 业务逻辑（§2.6）。
 - **CC**：settings.json 的 Stop/PostToolUse hook 脚本（shell）→ 调 `next`/`bootstrap` CLI（subprocess）→ 读 stdout JSON。**无 socket daemon**（v5 的 Unix socket 前端废弃——hook 脚本直接 spawn CLI 更简单，D-v4-3=b 精神保留：模型不调 Orca 工具、无 MCP stdio）。
 
 > **长驻 daemon 不删，降级**：v5 的 SSE sidecar daemon（`daemon.py:run_opencode/_opencode_loop`）保留为**无头 CI / 长跑批处理**形态（无人值守跑 workflow，不依赖交互界面）。主 UX 不用它。
@@ -137,7 +137,7 @@ next --tape <p> --run-id <r> [--output <out>] [--inputs '{}']
 
 ### 2.4 宿主 → CLI 接入通道
 
-**opencode**：项目 `opencode.json` 声明 `"plugin": ["./.opencode/plugin/orca.ts"]`（spike 验证此声明即加载）。plugin 启动时无状态；用户敲 `/orca <wf>` 触发 bootstrap，写一条 **session 作用域激活标记**（`<rundir>/orca-<sessionID>.json`，含 `run_id`/`tape_path`/`yaml`/`model`）；后续 `session.idle` event hook 按 `sessionID` 查标记——有才调 `next` CLI，无则 passthrough（§5 隔离）。CLI 的 `--tape`/`--run-id`/`--model` 从标记读，plugin 透传。
+**opencode**：项目 `opencode.json` 声明 `"plugin": ["./.opencode/plugins/orca.ts"]`（spike 2026-07-08 验证：**声明是 plugin 加载唯一入口——opencode 1.14.22 无 `plugins/` 目录自动发现**，光丢 `.ts` 不加载；`opencode serve` 还不加载项目级 plugin，须 `run`/TUI）。安装由 `orca install` 收口（写 `plugins/orca.ts` + `command/orca.md` + 合并 `opencode.json` 声明 + skill；用户 scope 声明用绝对路径、项目 scope 用 `./.opencode/...` 相对路径；详见 `docs/plans/2026-07-08-unified-install.md`）。plugin 启动时无状态；用户敲 `/orca <wf>` 触发 bootstrap，写一条 **session 作用域激活标记**（`<rundir>/orca-<sessionID>.json`，含 `run_id`/`tape_path`/`yaml`/`model`）；后续 `session.idle` event hook 按 `sessionID` 查标记——有才调 `next` CLI，无则 passthrough（§5 隔离）。CLI 的 `--tape`/`--run-id`/`--model` 从标记读，plugin 透传。
 
 **CC**：`orca in-session start <wf.yaml>` 生成 settings.json 片段（Stop/PostToolUse hook 脚本 + 激活标记），用户贴入 `.claude/settings.json`。hook 脚本读标记拿 `--tape`/`--run-id`，spawn `orca in-session next`。
 
@@ -327,7 +327,7 @@ CC 路径同构：bootstrap 由 `orca in-session start` 生成 settings.json hoo
 | **删（v3 过期）** | model-facing `orca_advance` MCP 工具、tool-pull 循环逻辑 | 模型不调 Orca 工具，hook 驱动。**过期代码及时删除** |
 | 新增 | 薄 CLI `bootstrap`/`next` 两子命令（**单一接口，唯一大脑**，§2.6） | per-call flock(I3.3b) + advance_step + **单次 write 原子 emit**（F1）+ busy + 合规计数 + 失败 taxonomy |
 | 新增 | 激活 marker 模块（`marker.py`） | run_id/tape/model/sessionID/no_output_count；`os.replace` 原子写 + advisory lock 去重（F13/F14） |
-| 新增 | **opencode in-process plugin** `.opencode/plugin/orca.ts` | `/orca` 命令路由 + idle event hook（**子 session 过滤** D-v7-5 + in-flight mutex F5 + tool_result 提取 D-v7-4）→ spawn CLI + `promptAsync`；**零业务逻辑** |
+| 新增 | **opencode in-process plugin** `.opencode/plugins/orca.ts` | `/orca` 命令路由 + idle event hook（**子 session 过滤** D-v7-5 + in-flight mutex F5 + tool_result 提取 D-v7-4）→ spawn CLI + `promptAsync`；**零业务逻辑** |
 | 新增 | CC hook 脚本（Stop + PostToolUse，含激活标记 + output cache §2.4.1） | settings.json 片段生成；PostToolUse 写 cache / Stop 读 cache+next |
 | 降级 | v5 opencode SSE sidecar daemon | 保留为无头 CI/长跑（ADR I3.3a）；主 UX 不用 |
 | 新增 | `orca in-session bootstrap/start/status/stop` CLI | 起 run/标记、读 tape、清标记+终态 |
@@ -422,7 +422,7 @@ CC hook / opencode plugin 都是**静态预装**（settings.json / 项目 openco
 - [ ] **LOCK_NB busy（F5）**：人为并发触发两 `next` → 后到者返 `{done:false,reason:"busy"}` 0 退出，不 fail loud，下一 idle 恢复。
 - [ ] **hook 隔离**：无激活标记时 plugin/hook passthrough；激活后才动。
 - [ ] **用户中途打断**：CC Stop block 期间手动输入 / opencode idle 期间手动发消息与 plugin 注入竞态 → plugin mutex 防并发，不死锁、tape 不腐。
-- [ ] **架构守门（D-v7-1）**：grep `.opencode/plugin/*.ts` + CC hook 脚本，无 `advance`/`router`/`replay`/tape 路径/`<task_result>` 解析（宿主侧零业务逻辑）。
+- [ ] **架构守门（D-v7-1）**：grep `.opencode/plugins/*.ts` + CC hook 脚本，无 `advance`/`router`/`replay`/tape 路径/`<task_result>` 解析（宿主侧零业务逻辑）。
 - [ ] **opencode 真链路**：真 opencode + plugin + 薄 CLI + 真 deepseek，跑完真 tape。
 - [ ] **CC 真链路**：真 `claude -p` + Stop/PostToolUse hook + 薄 CLI，跑完真 tape。
 - [ ] grep：tape 写入仅薄 CLI（+ 降级 daemon）；model-facing orca_advance 已删；drive_loop 零改；step.py 未改。
@@ -441,8 +441,8 @@ CC hook / opencode plugin 都是**静态预装**（settings.json / 项目 openco
 
 ---
 
-## 11. 与"统一安装"的衔接
-本壳与 phase-10 `orca mcp` 都是对外 MCP/集成入口。注册/安装的统一（`orca mcp install --host ...` 收口两壳）作为独立小设计，不在本 SPEC；本壳的 `orca in-session start` 先打印接入指引，待统一安装设计落地后并入。
+## 11. 与"统一安装"的衔接（已落地 2026-07-08）
+本壳与 phase-10 `orca mcp` 都是对外 MCP/集成入口。注册/安装的统一已落地：**`orca install`** 收口 skill + in-session 安装（opencode plugin/command/`opencode.json` 声明 + CC skill），全局默认（`--scope user|project`），一条命令替代此前的 `orca skill install` + `orca in-session start` 两步（详见 `docs/plans/2026-07-08-unified-install.md`）。`orca skill install` 降为弃用别名（warn + 委托）；`orca in-session start` 收窄为 **CC-only run bootstrap**（写 per-run marker + 打印 `settings.json` hook 片段；opencode 路运行时由 `/orca run` → `bootstrap` 自举，不需要 `start`）。phase-10 `orca mcp` 的安装合并（`--host mcp`）仍待后续。
 
 ---
 
@@ -468,8 +468,8 @@ CC hook / opencode plugin 都是**静态预装**（settings.json / 项目 openco
 | `orca/events/{tape,bus}.py` | — | `append`/`emit` 留（drive_loop 用） | **`Tape.append_batch(list[dict])`** + **`EventBus.emit_batch(list)`**（B1 sanctioned 批写路径，单次 write+flush，共用 `_lock`+Event 校验+seq 分配） |
 | `orca/iface/in_session/marker.py`（新增） | — | — | 激活 marker 读写（run_id/tape/model/sessionID/no_output_count）+ `os.replace` 原子写 + advisory lock（bootstrap 去重 F14） |
 | `orca/iface/cli/commands.py` | — | `add_typer(in_session_app)` 留 | — |
-| **新增** opencode plugin（仓库模板 `orca/iface/in_session/templates/opencode/orca.ts`，`start` 写入项目 `.opencode/plugins/`） | — | — | v8：`experimental.chat.messages.transform` 入口（marker `<!--orca:cmd <sub>-->` 派发 → spawn 对应 CLI → 改写消息文本，§2.6）；`session.idle` event hook：**子 session 过滤**（D-v7-5）+ in-flight mutex（F5）+ 从 `ToolPart.state.output` 提取（D-v7-4）+ spawn `next` CLI + `promptAsync`；**结构**：`export const OrcaPlugin = async (ctx) => ({...flat hooks})`（ctx.client，**非** `@opencode/core/client`）；`Bun.spawnSync`（**非** spawn+`stdout:"string"`）；self-instrument hook 触发计数供 doctor（§2.7）；**零 Orca 业务逻辑** |
-| **新增** `.opencode/command/orca.md`（仓库模板，`start` 写入） | — | — | body = `<!--orca:cmd $ARGUMENTS-->`（唯一命令文件，子命令在 args） |
+| **新增** opencode plugin（仓库模板 `orca/iface/in_session/templates/opencode/orca.ts`，`orca install` 写入 `.opencode/plugins/`（项目）或 `~/.config/opencode/plugins/`（全局）） | — | — | v8：`experimental.chat.messages.transform` 入口（marker `<!--orca:cmd <sub>-->` 派发 → spawn 对应 CLI → 改写消息文本，§2.6）；`session.idle` event hook：**子 session 过滤**（D-v7-5）+ in-flight mutex（F5）+ 从 `ToolPart.state.output` 提取（D-v7-4）+ spawn `next` CLI + `promptAsync`；**结构**：`export const OrcaPlugin = async (ctx) => ({...flat hooks})`（ctx.client，**非** `@opencode/core/client`）；`Bun.spawnSync`（**非** spawn+`stdout:"string"`）；self-instrument hook 触发计数供 doctor（§2.7）；**零 Orca 业务逻辑** |
+| **新增** `.opencode/command/orca.md`（仓库模板，`orca install` 写入） | — | — | body = `<!--orca:cmd $ARGUMENTS-->`（唯一命令文件，子命令在 args） |
 | **新增** `orca in-session doctor` CLI 子命令 | — | — | hook 自检报告（plugin 加载/marker 派发/CLI 可达/各 hook 注册+触发计数），§2.7 |
 | **新增** CC hook 脚本模板（`orca in-session start` 生成） | — | — | settings.json 片段：PostToolUse(Task)→写 output cache（§2.4.1）；Stop→读 cache+spawn `next`+`decision:block,reason:prompt`；激活标记 passthrough |
 | **删** v3 `orca_advance` MCP 工具 | 仓库内残留则删 | — | — |

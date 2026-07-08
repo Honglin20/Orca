@@ -609,15 +609,15 @@ def start(
         "deepseek/deepseek-v4-flash", "--model", help="provider/model（记入 marker）",
     ),
 ) -> None:
-    """CC + opencode 双宿主准备：写 marker（CC）+ 生成 opencode plugin/command 模板文件
-    + 打印 CC settings.json Stop/PostToolUse hook 片段 + 接入指引。
+    """**CC-only run bootstrap**：写 CC 激活 marker + 打印 ``settings.json`` hook 片段。
 
-    CC：用户把 stdout 的 ``settings.json`` 片段贴进 ``.claude/settings.json``，CC 启动后
-    Stop/PostToolUse hook 自动 spawn ``orca in-session next`` 驱动 workflow。
+    一次性安装（plugin / command / ``opencode.json`` 声明）已移到 ``orca install``——本命令
+    **不再**落 opencode 模板。opencode 用户：``orca install`` 一次，然后 ``/orca run <wf>``
+    （运行时 ``bootstrap`` 子命令自举 marker，不需要本命令）。
 
-    opencode（v8）：把仓库模板 ``orca.ts`` + ``orca.md`` 写入项目 ``.opencode/plugin/`` +
-    ``.opencode/command/``（一次性安装）。用户在 opencode 里敲 ``/orca run <wf>`` →
-    ``experimental.chat.messages.transform`` 入口 → marker 派发 → CLI。
+    CC 用户：CC 无 transform plugin，run 由 Stop/PostToolUse **hook** 驱动，而 hook 脚本
+    内嵌 tape_path/run_id（**per-run**），故每次起 run 都得跑本命令生成片段 + marker。把
+    stdout 片段贴进 ``.claude/settings.json``。
     """
     from orca.iface.in_session.templates import render_cc_settings_fragment
 
@@ -635,9 +635,6 @@ def start(
         owner=run_id, model=model, session_id=None, no_output_count=0,
     ))
 
-    # v8：写 opencode 模板文件（.opencode/plugin/orca.ts + .opencode/command/orca.md）。
-    opencode_paths = _install_opencode_templates()
-
     fragment = render_cc_settings_fragment(
         run_id=run_id, tape_path=tape_real, yaml_path=yaml_real, model=model,
     )
@@ -646,19 +643,6 @@ def start(
     typer.echo(f"tape:     {tape_real}")
     typer.echo(f"marker:   {mpath}")
     typer.echo("")
-    typer.echo(typer.style(
-        f"opencode 模板已写入：{opencode_paths['plugin']} + {opencode_paths['command']}",
-        fg=typer.colors.GREEN,
-    ))
-    typer.echo(typer.style(
-        "  → 重启 opencode 后敲 `/orca doctor` 自检入口链路。",
-        fg=typer.colors.GREEN,
-    ))
-    typer.echo(typer.style(
-        "  → `$ARGUMENTS` 限制：args 不得含 `>` 或换行（marker regex 行首/行尾锚定）。",
-        fg=typer.colors.YELLOW,
-    ))
-    typer.echo("")
     typer.echo(typer.style("把以下片段贴进 .claude/settings.json（CC 路）：", fg=typer.colors.CYAN, bold=True))
     typer.echo(json.dumps(fragment, indent=2, ensure_ascii=False))
     typer.echo("")
@@ -666,56 +650,9 @@ def start(
     typer.echo("  1. 在 CC 里打开一个会话（Stop/PostToolUse hook 自动生效）。")
     typer.echo("  2. 让主 session 派 Task subagent 执行节点（每节点一 turn）。")
     typer.echo(f"  3. 跑完用 `orca in-session status {run_id}` 看结果。")
-    typer.echo("  4. opencode 路径：重启 opencode → `/orca doctor` → `/orca run <wf>`。")
-
-
-def _install_opencode_templates() -> dict[str, Path]:
-    """把仓库模板 ``orca.ts`` + ``orca.md`` 写入项目 cwd 的 ``.opencode/``。
-
-    幂等：文件存在且内容相同则不覆盖（避免抹掉用户改动）；存在但内容不同 → 覆盖并 backup
-    旧文件（``.bak``）。返回写入路径。
-    """
-    import importlib.resources as ir
-
-    tmpl_root = Path(__file__).parent / "templates" / "opencode"
-    src_plugin = tmpl_root / "orca.ts"
-    src_command = tmpl_root / "command" / "orca.md"
-
-    dst_plugin_dir = Path(".opencode/plugin")
-    dst_command_dir = Path(".opencode/command")
-    dst_plugin_dir.mkdir(parents=True, exist_ok=True)
-    dst_command_dir.mkdir(parents=True, exist_ok=True)
-
-    dst_plugin = dst_plugin_dir / "orca.ts"
-    dst_command = dst_command_dir / "orca.md"
-
-    _atomic_write_with_backup(dst_plugin, src_plugin.read_text(encoding="utf-8"))
-    _atomic_write_with_backup(dst_command, src_command.read_text(encoding="utf-8"))
-
-    return {"plugin": dst_plugin, "command": dst_command}
-
-
-def _atomic_write_with_backup(dst: Path, content: str) -> None:
-    """幂等写入：内容相同跳过；不同先 backup 再覆盖（``dst.bak``）。"""
-    if dst.exists():
-        same: bool | None = None
-        try:
-            same = dst.read_text(encoding="utf-8") == content
-        except OSError as e:
-            # 读失败（权限 / 编码异常）→ log warn 后 passthrough（按「内容不同」处理）
-            logger.warning("read %s 比对失败（按覆盖处理）：%s", dst, e)
-            same = False
-        if same:
-            return   # 内容一致，不动
-        # 内容不同 → backup
-        bak = dst.with_suffix(dst.suffix + ".bak")
-        try:
-            dst.replace(bak)
-        except OSError as e:
-            logger.warning("backup %s → %s 失败：%s", dst, bak, e)
-    tmp = dst.with_suffix(dst.suffix + f".tmp.{os.getpid()}")
-    tmp.write_text(content, encoding="utf-8")
-    os.replace(tmp, dst)
+    typer.echo("")
+    typer.echo(typer.style("opencode 用户不用本命令：", fg=typer.colors.GREEN))
+    typer.echo("  `orca install`（一次性，装 plugin/command/声明）→ 重启 → `/orca run <wf>`。")
 
 
 @app.command()

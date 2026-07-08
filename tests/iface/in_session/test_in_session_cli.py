@@ -488,7 +488,7 @@ def test_stop_emits_workflow_cancelled_and_clears_marker(cwd_tmp, wf_path):
 
 
 def test_plugin_template_has_no_orca_business_logic():
-    """``.opencode/plugin/*.ts`` 不得含 advance/router/replay/tape 路径。
+    """``.opencode/plugins/*.ts`` 不得含 advance/router/replay/tape 路径。
 
     SPEC §9.2 架构守门：宿主侧零 Orca 业务逻辑。``<task_result>`` 解析允许（扁平化提取
     非 Orca 决策），但 advance/router/replay/tape 禁止。

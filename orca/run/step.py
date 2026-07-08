@@ -187,7 +187,7 @@ def _write_prompt_file(prompts_dir: Path, node_name: str, rendered: str) -> Path
     """compact：把渲染后的 prompt 原子写到 ``<prompts_dir>/<node_name>.md``。
 
     loop 时同节点覆盖（最新即所用；逐次历史在 tape）。``tmp + os.replace`` 原子写
-    （与 marker / cli.py ``_atomic_write_with_backup`` 同模式）。OSError → fail loud。
+    （与 marker / install_cmds ``_atomic_write_with_backup`` 同模式）。OSError → fail loud。
     """
     prompts_dir = Path(prompts_dir)
     final = prompts_dir / f"{node_name}.md"

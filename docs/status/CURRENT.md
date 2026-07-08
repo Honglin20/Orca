@@ -7,6 +7,14 @@
 
 ---
 
+## ✅ 完成（2026-07-08）：orca install —— 统一安装入口（全局默认 + 合并 skill/in-session）
+
+收口碎片化安装为单条 `orca install [--target claude|opencode|all] [--scope user|project]`（全局默认）。**Step 0 spike 钉死**：opencode 1.14.22 **无** `plugins/` 目录自动发现，plugin 加载**必须** `opencode.json` `"plugin":[<path>]` 声明（项目相对 / 用户绝对）——修掉既有「`start` 光丢文件不碰 opencode.json、无加载 e2e 守门」缺口。`skill install` → 弃用别名（warn+委托）；`in-session start` → CC-only run bootstrap（opencode 路运行时 `bootstrap` 自举）。新增 `install_cmds.py` + `test_install_cmds.py`（17 case 含零业务逻辑守门）；`tests/iface` 689 passed。code-reviewer 0 BLOCKER + 4🟡/3🟢 全闭环。**未提交**（SHA 待 commit 回填）。详见 [CHANGELOG](CHANGELOG.md) + [release note](../releases/2026-07-08-unified-install.md) + [计划](../plans/2026-07-08-unified-install.md) + SPEC §2.4/§11 回填。
+
+**Follow-up（非阻塞）**：① `orca mcp` 安装合并（`--host mcp`，spec §11 已记）；② 真·opencode `/orca doctor` 端到端加载验证（需 provider auth + 交互 TUI，留 test-coverage-e2e）。
+
+---
+
 ## ✅ 完成（2026-07-08）：in-session compact prompt（文件交付 + 缺字段干净 fail loud，e2e PASS）
 
 in-session 节点 prompt 改 **compact 交付**：渲染后 prompt 落盘 `<rundir>/<run_id>/prompts/<node>.md`，主 session 只收指针（不膨胀上下文）；两 agent 形态渲染无差别、plugin 零改。**顺手修脏崩溃 bug**：`output_schema` 缺字段/畸形、render 引用缺失字段 → 现干净 `workflow_failed`（`output_schema_mismatch`/`render_error`）+ 清 marker，不再卡死。不接 LLM validator（主 session 自判）。**消既有债**：`InSessionError.error_kind` 显式字段取代 classifier 消息子串匹配。92 + 851 测试绿，e2e `/tmp/orca-compact-exp/repro.sh` PASS，code-review 🔴（SchemaError）闭环。详见 [CHANGELOG](CHANGELOG.md) + [计划](../plans/2026-07-08-in-session-compact-prompt.md) + SPEC §2.1/§2.5。
