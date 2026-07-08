@@ -182,6 +182,9 @@ class WebServer:
 
         ``resolve`` 同步返回是否赢家（False = 晚到，fail loud 已在 handler 内记 warning）。
         未订阅 run 时无 gate_handler 可 resolve → 记 warning。
+
+        **attached run 无 gate_handler**（read-only，SPEC §8 AC11）：前端 ``writable=false``
+        时 gate 模态禁提交，正常不会发 gate_response；防御性记 warning（不崩）。
         """
         run_sub = self._subs.get(ws)
         if run_sub is None:
@@ -192,7 +195,14 @@ class WebServer:
         if not gate_id or answer is None:
             logger.warning("ws gate_response 缺 gate_id/answer（忽略）")
             return
-        run_sub.handle.gate_handler.resolve(str(gate_id), str(answer), "web")
+        # attached run read-only（无 gate_handler）；前端按理不会发，防御性记 warning。
+        gate_handler = getattr(run_sub.handle, "gate_handler", None)
+        if gate_handler is None:
+            logger.warning(
+                "ws gate_response 但当前订阅 run 无 gate_handler（attached run read-only）"
+            )
+            return
+        gate_handler.resolve(str(gate_id), str(answer), "web")
 
     async def _pump(self, ws: WebSocket, sub: Subscription, run_id: str) -> None:
         """把某 run 的 bus 事件推给 WS（带 run_id 标签）。

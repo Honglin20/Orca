@@ -85,3 +85,38 @@ export interface RunMeta {
   elapsed: number;
   error: string | null;
 }
+
+// ── Huge-mode server overview（SPEC web-attach §3 / M3/M4）──────────────────────────
+// 服务端 fold 同一 tape 派生的 overview（**非第二真相源**——``load full`` 可全量拉回
+// client-fold 校验）。仅 huge=true 时 /meta 返回此字段；前端 store 在 huge 模式设此 slice。
+export interface OverviewAgent {
+  name: string;
+  status: string; // "pending" | "running" | "done" | "failed" | "skipped" | "blocked"
+  elapsed?: number;
+  tokens?: number;
+}
+export interface OverviewChart {
+  label: string;
+  title: string;
+  chart_type: string;
+}
+export interface ServerOverview {
+  agents: OverviewAgent[];
+  charts: OverviewChart[];
+  cost_usd: number;
+  run_status: string;
+}
+
+// ── /api/runs/<id>/meta 完整响应（SPEC web-attach §3）──────────────────────────────
+export interface RunMetaExtended {
+  run_id: string;
+  status: WorkflowStatus;
+  source: "in-process" | "attached";
+  event_count: number;
+  byte_size: number;
+  oldest_seq: number;
+  newest_seq: number;
+  writable: boolean;
+  huge: boolean;
+  overview?: ServerOverview;
+}

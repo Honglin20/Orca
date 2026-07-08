@@ -55,16 +55,50 @@ def build_router(manager: RunManager) -> APIRouter:
         return {"meta": _meta_to_dict(meta), "state": state.model_dump()}
 
     @router.get("/{run_id}/events")
-    async def get_run_events(run_id: str) -> list[dict[str, Any]]:
-        """某 run 全量事件（懒加载，唯一来源 ``tape.replay``，§0.1 铁律 1）。
+    async def get_run_events(
+        run_id: str,
+        since: int | None = None,
+        limit: int | None = None,
+        tail: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """某 run 事件（懒加载，唯一来源 ``tape.replay``，§0.1 铁律 1）。
+
+        向后兼容扩展（SPEC web-attach §3）：
+          - 无参 = 全量（``tape.replay()``）
+          - ``?since=N`` = ``seq > N``
+          - ``?since=N&limit=M`` = ``[N+1, N+M]``
+          - ``?tail=M`` = 最后 M 条
+
+        **M1**：本端点是 pure tape read——不 emit bus / 不 relay（bus 写入路径只在
+        follow task）。前端 huge 模式经此拉 tail + 增量窗口；client-fold。
+        """
+        try:
+            events = manager.get_run_events_window(
+                run_id, since=since, limit=limit, tail=tail
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"unknown run_id: {run_id}")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return [e.model_dump() for e in events]
+
+    @router.get("/{run_id}/meta")
+    async def get_run_meta(run_id: str) -> dict[str, Any]:
+        """扩展 meta（SPEC web-attach §3）。
+
+        返回 ``{run_id, status, source, event_count, byte_size, oldest_seq, newest_seq,
+        writable, huge, overview?}``。
+
+        - ``writable``：in-process=True / attached=False（前端 gate 模态据此禁提交）。
+        - ``huge``：``event_count > 50000`` OR ``byte_size > 5MB``（兜底阈值）。
+        - ``overview``：**仅 huge 模式返**——服务端 fold 同一 tape 派生（M4）。
 
         未知 run_id → 404。
         """
-        try:
-            events = manager.get_run_events(run_id)
-        except KeyError:
+        meta = manager.get_run_extended_meta(run_id)
+        if meta is None:
             raise HTTPException(status_code=404, detail=f"unknown run_id: {run_id}")
-        return [e.model_dump() for e in events]
+        return meta
 
     @router.get("/{run_id}/assets/{asset_path:path}")
     async def get_run_asset(run_id: str, asset_path: str) -> FileResponse:

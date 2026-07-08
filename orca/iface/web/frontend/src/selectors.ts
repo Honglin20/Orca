@@ -60,6 +60,16 @@ export function formatElapsed(
 }
 
 export function selectAgents(state: WorkflowState): AgentRow[] {
+  // SPEC web-attach §3 / M3：huge 模式下若 ``serverOverview`` 在（尚未 ``load full``），
+  // overview 优先（信任服务端 fold）；否则 client-fold（同 v2）。``loadFull`` 清
+  // ``serverOverview`` → 此分支自然回退到 client-fold（M4 可验）。
+  if (state.huge && state.serverOverview && !state.hugeFullyLoaded) {
+    return state.serverOverview.agents.map((a) => ({
+      node: a.name,
+      status: (a.status as NodeState["status"]) ?? "pending",
+      elapsed: a.elapsed,
+    }));
+  }
   // 先从拓扑拿到全部 DAG 节点名（保持拓扑顺序；无拓扑时空），保证未启动的节点也以
   // pending 出现在 AgentsRail（SPEC §5.2：「每 agent」含未启动）。运行态 node 覆盖
   // pending 占位（同 node 名只保留 state.nodes 的实际状态）。
@@ -351,6 +361,34 @@ function extractChartPayload(e: WebEvent): {
 export function selectCharts(state: WorkflowState): {
   groups: { group: string; entries: ChartEntry[] }[];
 } {
+  // SPEC web-attach §3 / M3：huge 模式 + serverOverview → 信任服务端 fold（仅 label/title/
+  // chart_type 清单，无完整 payload）→ 渲染为占位 entry（点击触发 ``loadFull`` 拉真实 payload）。
+  // ``loadFull`` 后 serverOverview 清，回退 client-fold（M4 可验：与展开后一致）。
+  if (state.huge && state.serverOverview && !state.hugeFullyLoaded) {
+    const entries: ChartEntry[] = state.serverOverview.charts.map((c, i) => ({
+      seq: -i - 1, // 负 seq 占位（避免与真实 seq 冲突；loadFull 后清）
+      node: null,
+      group: c.label || "misc",
+      identity: c.title || `${c.chart_type}#${i}`,
+      payload: {
+        label: c.label,
+        title: c.title,
+        chart_type: c.chart_type,
+      },
+    }));
+    const groupMap = new Map<string, ChartEntry[]>();
+    for (const e of entries) {
+      const arr = groupMap.get(e.group);
+      if (arr) arr.push(e);
+      else groupMap.set(e.group, [e]);
+    }
+    return {
+      groups: Array.from(groupMap.entries()).map(([group, es]) => ({
+        group,
+        entries: es,
+      })),
+    };
+  }
   // identity → entry（同 identity upsert，后到胜）
   const byIdentity = new Map<string, ChartEntry>();
   for (const e of state.events) {

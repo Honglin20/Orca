@@ -192,6 +192,26 @@ class EventBus:
                 sub._enqueue(event)
         return events
 
+    async def relay(self, event: Event) -> None:
+        """转发一个**已持久化**的事件到订阅者（SPEC web-attach §2.2 / M1）。
+
+        与 ``emit`` 的差异：``emit`` 第一动作是 ``tape.append``（写真相），而 ``relay``
+        **不写 tape**——事件已在**外部 tape**（如 attached run 的 tape 文件，由宿主进程拥有
+        flock）持久化。本方法仅 fan-out 到本 bus 的订阅者（WS pump），保留事件的 seq/timestamp
+        等字段不变。
+
+        设计意图（SPEC §1 铁律 5/6 / M1）：attached run 的「single write path」语义在
+        「外部 tape → follow task parse → relay → 订阅者」这一条流上——bus.emit 留给
+        in-process run（拥有自己 tape 写权）。attached handle 的 bus 持有 read-only
+        ``AttachedTape``（``append`` 不可达；relay 不触发任何 disk 写）。
+
+        - 不分配 seq（事件已带外部写者分配的 seq）
+        - 不写任何文件（attached run 的真相源是宿主进程的 tape，本进程只读）
+        - 不动 ``self.tape``（AttachedTape 无 write 句柄）
+        """
+        for sub in self._subs:
+            sub._enqueue(event)
+
     def subscribe(self, queue_max: int = _DEFAULT_QUEUE_MAX) -> Subscription:
         """返回一个 Subscription，自带 ``asyncio.Queue`` + cursor。
 

@@ -7,6 +7,14 @@
 
 ---
 
+## ✅ 完成（2026-07-08）：Web attach Step1（X + perf）—— attach by tape path + huge-mode + perf
+
+按 SPEC `web-attach-and-default-spec.md` rev2 §2/§3/§6/§8/§9.1 实现 web 单 run attach（read-only + tail-follow）+ huge-mode perf。**code-reviewer 2 BLOCKER + 6 MAJOR + 5 MINOR 全闭环**：perf fast-path（`_scan_meta_overview` 单遍扫 + bulk-type substring skip + regex seq 提取，60k fixture ~150ms vs naive ~8700ms；`tail_events` 反向字节块扫描 O(tail) 不物化；`since_limited` 提前 break）、probe/stat 窗口修复（initial_offset 在 probe 前捕获）、幂等检查入锁、follow 单次 open + fd/path 双 stat 检测 rotate、_emit_attach_error 负 seq 防客户端去重。后端 RunView ABC + InProcessRunHandle/AttachedRunHandle 双实现 + EventBus.relay（fan-out only）；前端 store 加 `serverOverview`/`writable`/`huge` slices + `loadRunWithMeta`/`loadEarlierChunk`/`loadFull` actions + selector huge 模式读 serverOverview + PermissionGate `writable=false` 显示 observe-only 禁提交。**1863 passed / 2 skipped（perf 默认 skip）**；铁律 grep 全过（单 `_runs` dict、单 zustand store、attacher 无 `Tape(resume=True)`、bus.emit/relay 仅 follow task）。详见 [release note](../releases/2026-07-08-web-attach-step1.md) + SPEC §2/§3/§6/§8。Commit: `5d408fe`。
+
+**Step2 待办（Y）**：`orca run` web 默认 + `orca open` CLI + `/orca open` slash + WS 驱动 auto-exit（SPEC §4/§5）。
+
+---
+
 ## ✅ 完成（2026-07-08）：orca install —— 统一安装入口（全局默认 + 合并 skill/in-session）
 
 收口碎片化安装为单条 `orca install [--target claude|opencode|all] [--scope user|project]`（全局默认）。**Step 0 spike 钉死**：opencode 1.14.22 **无** `plugins/` 目录自动发现，plugin 加载**必须** `opencode.json` `"plugin":[<path>]` 声明（项目相对 / 用户绝对）——修掉既有「`start` 光丢文件不碰 opencode.json、无加载 e2e 守门」缺口。`skill install` → 弃用别名（warn+委托）；`in-session start` → CC-only run bootstrap（opencode 路运行时 `bootstrap` 自举）。新增 `install_cmds.py` + `test_install_cmds.py`（17 case 含零业务逻辑守门）；`tests/iface` 689 passed。code-reviewer 0 BLOCKER + 4🟡/3🟢 全闭环。**未提交**（SHA 待 commit 回填）。详见 [CHANGELOG](CHANGELOG.md) + [release note](../releases/2026-07-08-unified-install.md) + [计划](../plans/2026-07-08-unified-install.md) + SPEC §2.4/§11 回填。

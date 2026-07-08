@@ -22,18 +22,26 @@ gate_handler 全隔离），``RunManager`` 用 ``asyncio.Semaphore(max_concurren
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Iterator, Literal
 
 from orca.compile import ConfigurationError, load_workflow
 from orca.chart._limits import SOCK_PATH_MAX
 from orca.events.bus import EventBus
 from orca.events.chart_ingestor import chart_ingestor, make_crash_callback
-from orca.events.replay import replay_state
+from orca.events.replay import apply_event, replay_state
 from orca.events.tape import Tape
+from orca.events.tape_reader import (
+    count_and_bounds,
+    replay as tape_reader_replay,
+    since_limited,
+    tail_events,
+)
 from orca.gates.context_registry import SessionContextRegistry
 from orca.gates.handler import HumanGateHandler
 from orca.gates.pending import pending_gates_from_tape
@@ -47,25 +55,76 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-RunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
+RunStatus = Literal[
+    "queued", "running", "completed", "failed", "cancelled", "live-pending"
+]
+RunSource = Literal["in-process", "attached"]
+
+
+# ── RunView 只读协议 + 双实现（SPEC §0 D6 / §2.3）──────────────────────────────
+# 单 registry ``_runs: dict[str, RunView]`` 同时容纳 in-process 与 attached。读路径
+# （``get_run_events`` / ``get_run_meta`` / WS）经 RunView 统一访问；写路径分支
+# （attached 不写 disk，见 ``EventBus.relay`` + ``AttachedTape``）。
+
+
+class AttachedTape:
+    """外部 tape 文件的只读视图（SPEC §0 D2 / §1 铁律 6）。
+
+    暴露与 ``Tape`` 同形的 ``replay(since_seq)`` / ``last_seq()`` / ``close()`` 读 API，
+    供 routes/ws_handler 经 ``handle.tape.replay(...)`` 读外部 tape（无需感知 in-process
+    vs attached 差异）。**永不写**：``append`` 不可达（attacher 无写权，事件已在宿主进程
+    的 tape 持久化，follow task 走 ``EventBus.relay`` 纯转发）。
+    """
+
+    def __init__(self, path: Path, run_id: str):
+        self.path = Path(path)
+        self.run_id = run_id
+
+    def replay(self, since_seq: int = 0) -> Iterator[Event]:
+        """read-only 流式（委托 ``tape_reader.replay``，永不写）。"""
+        yield from tape_reader_replay(self.path, since_seq=since_seq)
+
+    def last_seq(self) -> int:
+        """扫文件取 max seq（无写权，仅只读扫）。"""
+        _, _, newest = count_and_bounds(self.path)
+        return newest
+
+    def close(self) -> None:
+        """no-op（read-only，无写句柄）。"""
+
+    def append(self, _event_data: dict) -> int:  # pragma: no cover - 防御性 dead path
+        """永不调用：attached run 的事件落盘在宿主进程；本进程只读。"""
+        raise RuntimeError(
+            "AttachedTape.append 不可达——attached run 的事件落盘在宿主进程；"
+            "follow task 应调 EventBus.relay（仅 fan-out）"
+        )
 
 
 @dataclass
-class RunHandle:
-    """单个 run 的隔离句柄（SPEC §2.2）。
+class RunView:
+    """run 只读协议（SPEC §0 D6 / §2.3）：单 registry 中 in-process 与 attached 共用基类。
 
-    每个 run 拥有自己的 bus + tape + gate_handler —— 多 run 事件/gate 永不串。
-    ``status`` 在 start/complete/fail 时更新（``list_runs`` 反映最新）。
+    子类（``InProcessRunHandle`` / ``AttachedRunHandle``）补足各自字段。读路径只依赖
+    本基类的 ``run_id`` / ``bus`` / ``tape`` / ``status`` / ``source``。
     """
 
     run_id: str
-    wf: Workflow
     bus: EventBus
-    tape: Tape
-    gate_handler: HumanGateHandler
+    tape: Tape | AttachedTape
     status: RunStatus = "queued"
+    source: RunSource = "in-process"
     error: str | None = None
     started_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class InProcessRunHandle(RunView):
+    """in-process run 句柄（同 v2 行为，SPEC §0 D6）。orchestrator + gate + chart ingestor
+    全在进程内。``source="in-process"``，``writable=True``。"""
+
+    source: RunSource = field(default="in-process", init=False)
+    wf: Workflow | None = None
+    gate_handler: HumanGateHandler | None = None
     # run task（``_run_with_sem`` 创建）；``wait_done`` await 它。
     _task: asyncio.Task | None = field(default=None, repr=False)
     # gate_handler 是否已 start（收尾时只 stop 已 start 的，幂等）。
@@ -73,6 +132,26 @@ class RunHandle:
     # phase-13 §3.1：per-run chart ingestor task（script → emit custom(chart) → tape）。
     # ``resume=True`` 重开模式不起（SPEC §3.1 YAGNI）。teardown 时 cancel + unlink socket。
     _chart_ingestor: asyncio.Task | None = field(default=None, repr=False)
+
+
+@dataclass
+class AttachedRunHandle(RunView):
+    """attached run 句柄（SPEC §0 D6 / §2.3）：read-only + follow task + 终态/损毁追踪。
+
+    - ``source="attached"``、``tape=AttachedTape(path)``、``tape_path`` 外部 tape 文件。
+    - ``follow_task``：asyncio 任务，轮询 mtime/size 增量 → parse → ``bus.relay``。
+    - ``terminal``：None=未终态；``True``=收尾正常终态事件；``"corrupted"``=inode/truncate 损毁。
+    - **无 ``wf`` / ``gate_handler`` / ``chart_ingestor``**（attached 不跑编排）。
+    """
+
+    source: RunSource = field(default="attached", init=False)
+    tape_path: Path = field(default=Path())
+    follow_task: asyncio.Task | None = field(default=None, repr=False)
+    terminal: bool | str | None = False
+
+
+# 向后兼容别名：v2 代码引用 ``RunHandle``，本 refact 后等价于 in-process 实现。
+RunHandle = InProcessRunHandle
 
 
 @dataclass
@@ -111,13 +190,18 @@ class RunManager:
         registry: SessionContextRegistry | None = None,
     ):
         self._max_concurrent = max_concurrent
-        self._runs: dict[str, RunHandle] = {}
+        # 单 registry（SPEC §1 铁律 5 / §0 D6）：in-process 与 attached 同表。
+        self._runs: dict[str, RunView] = {}
         self._sem = asyncio.Semaphore(max_concurrent)
         self._lock = asyncio.Lock()
         self._runs_dir = Path(runs_dir)
         # 共享 registry：claude session_id → (run_id, node)。多 run 的 gate 路由从这里
         # 反查 run_id（routes/gate.py 的多 run 分发依赖它）。
         self._registry = registry or SessionContextRegistry()
+        # meta memoize（SPEC §8.4a perf）：key=(path, mtime, size)，val=(count, oldest,
+        # newest, overview_data)。hit 时 O(1)；mtime/size 变则失效。客户端高频轮询 /meta
+        # 不重算 fold。无上限（typical: 单 digit run 数 × 1 entry = 几条），YAGNI 不加 LRU。
+        self._meta_cache: dict[tuple[str, float, int], tuple[int, int, int, dict | None]] = {}
 
     # ── 公开 API ───────────────────────────────────────────────────────────
 
@@ -207,7 +291,7 @@ class RunManager:
         tape = Tape(tape_path, run_id=run_id, resume=resume)
         bus = EventBus(tape)
         gate_handler = HumanGateHandler(bus)
-        handle = RunHandle(
+        handle = InProcessRunHandle(
             run_id=run_id,
             wf=wf,
             bus=bus,
@@ -242,6 +326,542 @@ class RunManager:
             name=f"orca-web-run-{run_id}",
         )
         return run_id
+
+    # ── X — attach by tape path（SPEC web-attach §2 / §6）───────────────────────
+
+    def resolve_tape_path(self, tape_path: str) -> Path:
+        """安全解析 tape 路径（SPEC web-attach §6 三重守卫）。
+
+        守卫顺序：
+          1. **lstat 先行**：``raw.is_symlink()`` → 拒（path 中某段是 symlink）
+          2. **resolve() + relative_to(runs_dir)**：用 ``relative_to`` 非 ``startswith``
+             （防 ``runs_evil`` 前缀碰撞）；命中 ``ORCA_WEB_TAPE_ALLOWLIST`` 等价放行。
+          3. **post-resolve re-check**：再 ``resolve()`` / ``is_symlink()`` 确认无逃逸。
+          4. **open + fd re-stat 防 TOCTOU**：``os.open(O_RDONLY|O_NOFOLLOW)`` + ``fstat``
+             对比 resolved 的 stat，不一致 → 拒（race 中被替换）。
+
+        相对路径相对 CWD（与 ``orca run`` 写 tape 一致）。不符 → ``PermissionError``；
+        不存在 → ``FileNotFoundError``。routes 层统一映射为 403 / 404。
+
+        与 ``resolve_asset_path`` 等价强度（同三重守卫，新增 fd re-stat）。
+        """
+        raw = Path(tape_path)
+        # 1. lstat 先行：在 resolve() 之前 check（resolve 会跟随 symlink）。
+        if raw.is_symlink():
+            raise PermissionError(f"tape_path 含 symlink（拒）：{tape_path}")
+        try:
+            resolved = raw.resolve()
+        except (OSError, RuntimeError) as e:
+            # resolve 失败（loop / 权限）→ fail loud
+            raise PermissionError(f"tape_path resolve 失败：{tape_path} ({e})") from e
+
+        runs_dir_resolved = self._runs_dir.resolve()
+        allowed = False
+        # 2a. relative_to(runs_dir)（非 startswith——防 ``runs_evil`` 前缀碰撞）
+        try:
+            resolved.relative_to(runs_dir_resolved)
+            allowed = True
+        except ValueError:
+            pass
+        # 2b. ORCA_WEB_TAPE_ALLOWLIST（os.pathsep 分隔绝对前缀）
+        if not allowed:
+            allowlist = os.environ.get("ORCA_WEB_TAPE_ALLOWLIST", "")
+            for prefix in allowlist.split(os.pathsep):
+                prefix = prefix.strip()
+                if not prefix:
+                    continue
+                try:
+                    prefix_resolved = Path(prefix).resolve()
+                except (OSError, RuntimeError):
+                    continue
+                try:
+                    resolved.relative_to(prefix_resolved)
+                    allowed = True
+                    break
+                except ValueError:
+                    continue
+        if not allowed:
+            raise PermissionError(f"tape_path out of bounds: {tape_path}")
+
+        # 3. post-resolve re-check：防 allowlist 内某段是 symlink 指出。
+        if raw.is_symlink() or resolved.is_symlink():
+            raise PermissionError(
+                f"tape_path post-resolve 检出 symlink（拒）：{tape_path}"
+            )
+        if not resolved.is_file():
+            raise FileNotFoundError(f"tape not found: {resolved}")
+
+        # 4. open + fd re-stat 防 TOCTOU：原子 open(O_NOFOLLOW) 后从 fd 取真实 inode，
+        #    与 resolved 的 stat 对比；race 中被替换 → 不一致 → 拒。
+        try:
+            fd = os.open(str(resolved), os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError as e:
+            raise PermissionError(
+                f"tape_path open(O_NOFOLLOW) 失败（可能 symlink/权限）：{tape_path} ({e})"
+            ) from e
+        try:
+            fd_stat = os.fstat(fd)
+        finally:
+            os.close(fd)
+        try:
+            resolved_stat = resolved.stat()
+        except OSError as e:
+            raise PermissionError(
+                f"tape_path post-open stat 失败：{tape_path} ({e})"
+            ) from e
+        if fd_stat.st_ino != resolved_stat.st_ino or fd_stat.st_dev != resolved_stat.st_dev:
+            raise PermissionError(
+                f"tape_path TOCTOU 检测：fd inode 与 resolved inode 不一致（{tape_path}）"
+            )
+        return resolved
+
+    async def attach_run(
+        self,
+        tape_path: str,
+        run_id: str | None = None,
+    ) -> str:
+        """X — attach a run by tape path（SPEC §2 / §0 D6）。
+
+        read-only + stream-on-demand + tail-follow：
+          1. ``resolve_tape_path`` 安全校验（§6）→ 不符 raise ``PermissionError``/``FileNotFoundError``。
+          2. **不 bulk replay**：只读探测首行，判 ``workflow_started``；partial / 空 → ``live-pending``。
+          3. run_id：入参 > 首行 workflow_started.data.run_id > 文件名 stem。
+          4. **run_id 碰撞**（已在 ``_runs``）→ ``ValueError("run_id_collision")``；route 层 409。
+          5. **同 tape_path 重复 attach** → 幂等返回既有 handle.run_id（不重起 follow）。
+          6. 注册 ``AttachedRunHandle(bus, AttachedTape(path), follow_task)`` → 起 follow task。
+          7. follow task：asyncio poll 0.3s mtime/size 增量 → split newline → 每整行 parse →
+             ``bus.relay(event)``（fan-out only，M1 single write path）。终态事件 →
+             ``terminal=True`` + 停 follow（留 registry）。inode 变化 / size 缩小 →
+             ``terminal="corrupted"`` + emit error 事件到 bus。
+        """
+        resolved = self.resolve_tape_path(tape_path)
+
+        # **initial_offset 必须在 probe/scan 之前捕获**（MAJOR 4 修复）：probe 内部读当时
+        # 的 EOF；若 probe 之后 stat，[probe_EOF, stat_EOF] 间外部写者追加的字节会被
+        # 静默丢（probe 不见 + follow 从 stat_EOF 起不见）。stat 在前 → follow 从这个早期
+        # size 起，能覆盖 probe 期间的写入（重复部分由客户端 seq 去重吸收）。
+        try:
+            pre_probe_size = resolved.stat().st_size
+        except OSError:
+            pre_probe_size = 0
+
+        # 单次扫：同时取 first_event + existing_terminal（MAJOR 6 修复，避免两次全扫）。
+        first_event, existing_terminal = _probe_head_and_terminal(resolved)
+
+        if run_id is None:
+            if (
+                first_event is not None
+                and first_event.type == "workflow_started"
+            ):
+                rid_in_data = first_event.data.get("run_id")
+                wf_name = first_event.data.get("workflow_name")
+                run_id = (
+                    str(rid_in_data)
+                    if isinstance(rid_in_data, str) and rid_in_data
+                    else (
+                        str(wf_name)
+                        if isinstance(wf_name, str) and wf_name
+                        else resolved.stem
+                    )
+                )
+            else:
+                run_id = resolved.stem
+
+        async with self._lock:
+            # 幂等检查在锁内（MAJOR 5 修复）：避免并发同 tape_path 双注册。
+            for h in self._runs.values():
+                if (
+                    isinstance(h, AttachedRunHandle)
+                    and h.tape_path.resolve() == resolved
+                ):
+                    return h.run_id
+            if run_id in self._runs:
+                raise ValueError(f"run_id_collision: {run_id}")
+            tape = AttachedTape(resolved, run_id)
+            # attached bus 持 read-only AttachedTape；emit 不可达（relay 走 fan-out only）。
+            bus = EventBus(tape)
+            # 终态 tape → status=completed/failed/cancelled；无需起 follow（无新事件）。
+            if existing_terminal is not None:
+                status: RunStatus = (
+                    "completed"
+                    if existing_terminal == "workflow_completed"
+                    else "failed"
+                    if existing_terminal == "workflow_failed"
+                    else "cancelled"
+                )
+                handle = AttachedRunHandle(
+                    run_id=run_id,
+                    bus=bus,
+                    tape=tape,
+                    tape_path=resolved,
+                    status=status,
+                    terminal=True,
+                )
+                self._runs[run_id] = handle
+                return run_id
+            handle = AttachedRunHandle(
+                run_id=run_id,
+                bus=bus,
+                tape=tape,
+                tape_path=resolved,
+                status="live-pending" if first_event is None else "running",
+                terminal=False,
+            )
+            self._runs[run_id] = handle
+
+        # 起 follow task（轮询外部 tape 增量 → bus.relay）。
+        # D3 stream-on-demand：不 bulk replay。first_event 为 None（partial/empty）时
+        # 从 offset=0 起（含 partial 行，待 writer 补完后整行 parse）；否则从 pre_probe_size
+        # 起（probe 前的 size，覆盖 probe 期间写入，重复由 client seq 去重吸收）。
+        if first_event is None:
+            initial_offset = 0
+        else:
+            initial_offset = pre_probe_size
+        handle.follow_task = asyncio.create_task(
+            self._follow_tape(handle, resolved, initial_offset),
+            name=f"orca-web-attach-follow-{run_id}",
+        )
+        return run_id
+
+    async def _follow_tape(
+        self, handle: AttachedRunHandle, path: Path, initial_offset: int
+    ) -> None:
+        """follow task：轮询外部 tape mtime/size 增量 → split newline → bus.relay。
+
+        SPEC §2.2 step4-5：
+          - poll 0.3s（POSIX，跨平台简单实现；kqueue 是可选优化，YAGNI）。
+          - 从上次 offset 起 read 增量；按 ``\\n`` 切分，残留不足一行入 buffer 等下次 poll。
+          - 每整行 parse → ``bus.relay``（保留外部 seq）。
+          - **inode 变化**（rename/move/rotate）/ **size 缩小**（truncate）→ 停 follow +
+            ``terminal="corrupted"`` + emit ``error`` 事件到 bus（让客户端看到错）。
+          - 终态事件（workflow_completed/failed/cancelled）→ ``terminal=True`` + 停 follow
+            （handle 留 registry 供历史查询）。
+        """
+        offset = initial_offset
+        buffer = ""
+        last_size = initial_offset  # D3：初始 size = initial_offset（不视初始内容为 truncate）
+        seen_first_valid = initial_offset > 0  # 若已有内容则视首事件已见（probe 时验过）
+        # MAJOR 3 修复：循环外 open 一次，循环内 seek+read；fd 用 fstat 拿更原子的 inode。
+        try:
+            f = open(path, "r", encoding="utf-8")
+        except FileNotFoundError:
+            handle.terminal = "corrupted"
+            handle.status = "failed"
+            handle.error = "tape file disappeared"
+            logger.warning("run %s follow: tape 文件消失 %s", handle.run_id, path)
+            await self._emit_attach_error(
+                handle, "tape_file_disappeared", f"tape file vanished: {path}"
+            )
+            return
+        try:
+            try:
+                # 记 fd 的稳定 inode（fd 跟随 open 时的文件实例，即使 path 被 rename 也指向原文件）
+                fd_stat = os.fstat(f.fileno())
+                fd_inode = fd_stat.st_ino
+                fd_dev = fd_stat.st_dev
+                # 等首行可解析（live-pending → running）。5s 仍无 → corrupted（routes 层 403）。
+                first_line_deadline = time.time() + 5.0
+                while True:
+                    await asyncio.sleep(0.3)
+                    # 用 path.stat() 取「当前 path 指向的」inode（rotation 后会变）；
+                    # fd 自身的 inode 永远不变（fd 锚定 open 时的文件实例）。两者对比即可识别 rotate。
+                    try:
+                        path_st = path.stat()
+                    except FileNotFoundError:
+                        # path 消失（外部 unlink / 移走）→ corrupted
+                        handle.terminal = "corrupted"
+                        handle.status = "failed"
+                        handle.error = "tape file disappeared"
+                        logger.warning(
+                            "run %s follow: path 消失 %s", handle.run_id, path
+                        )
+                        await self._emit_attach_error(
+                            handle, "tape_file_disappeared", f"tape path vanished: {path}"
+                        )
+                        return
+
+                    # inode 变化（path 现指向不同 inode）→ rename/move/rotate
+                    if path_st.st_ino != fd_inode or path_st.st_dev != fd_dev:
+                        handle.terminal = "corrupted"
+                        handle.status = "failed"
+                        handle.error = "tape inode changed (rotate/rename)"
+                        logger.warning(
+                            "run %s follow: inode 变化 %s (path=%s, fd=%s)",
+                            handle.run_id,
+                            path,
+                            path_st.st_ino,
+                            fd_inode,
+                        )
+                        await self._emit_attach_error(
+                            handle,
+                            "tape_inode_changed",
+                            f"tape rotated/moved: {path}",
+                        )
+                        return
+
+                    # size 缩小 → truncate（fd 当前 size 用 fstat 拿，反映 fd 真实文件状态）
+                    try:
+                        cur_fd_st = os.fstat(f.fileno())
+                    except OSError:
+                        cur_fd_st = path_st
+                    cur_size = cur_fd_st.st_size
+                    if cur_size < last_size:
+                        handle.terminal = "corrupted"
+                        handle.status = "failed"
+                        handle.error = "tape truncated"
+                        logger.warning(
+                            "run %s follow: size 缩小 %s (%s→%s)",
+                            handle.run_id,
+                            path,
+                            last_size,
+                            cur_size,
+                        )
+                        await self._emit_attach_error(
+                            handle,
+                            "tape_truncated",
+                            f"tape shrank: {path} ({last_size}→{cur_size})",
+                        )
+                        return
+
+                    last_size = cur_size
+
+                    # 读增量（从 offset 到 EOF）
+                    if cur_size == offset:
+                        # 无新字节；若仍 live-pending 且超 5s → corrupted（not-orca-tape）
+                        if not seen_first_valid and time.time() > first_line_deadline:
+                            handle.terminal = "corrupted"
+                            handle.status = "failed"
+                            handle.error = "not-orca-tape"
+                            logger.warning(
+                                "run %s follow: 5s 仍无 workflow_started %s",
+                                handle.run_id,
+                                path,
+                            )
+                            await self._emit_attach_error(
+                                handle,
+                                "not_orca_tape",
+                                f"5s no workflow_started: {path}",
+                            )
+                            return
+                        continue
+
+                    try:
+                        f.seek(offset)
+                        chunk = f.read(cur_size - offset)
+                    except OSError as e:
+                        logger.warning(
+                            "run %s follow: 读增量失败 %s: %s",
+                            handle.run_id,
+                            path,
+                            e,
+                        )
+                        # 读失败不致命（下次 poll 重试）；记 warning。
+                        continue
+
+                    offset = cur_size
+                    buffer += chunk
+                    # 按 newline 切分；末尾不足一行（无 \\n）入 buffer 等下次。
+                    lines = buffer.split("\n")
+                    buffer = lines.pop()  # 末尾残留
+
+                    for raw in lines:
+                        stripped = raw.strip()
+                        if not stripped:
+                            continue
+                        try:
+                            obj = json.loads(stripped)
+                            event = Event(**obj)
+                        except (json.JSONDecodeError, Exception) as e:  # noqa: BLE001
+                            # 残行 / 校验失败 → 跳过（不污染 bus）；记 warning。
+                            logger.warning(
+                                "run %s follow: 行 parse 失败跳过 %s: %s",
+                                handle.run_id,
+                                stripped[:80],
+                                e,
+                            )
+                            continue
+
+                        if not seen_first_valid:
+                            # 首个有效事件到达 → 升级 status（live-pending → running）。
+                            if event.type == "workflow_started":
+                                seen_first_valid = True
+                                handle.status = "running"
+                        await handle.bus.relay(event)
+
+                        # 终态事件 → terminal=True + 停 follow（留 registry）
+                        if event.type in (
+                            "workflow_completed",
+                            "workflow_failed",
+                            "workflow_cancelled",
+                        ):
+                            handle.terminal = True
+                            handle.status = (
+                                "completed"
+                                if event.type == "workflow_completed"
+                                else "failed"
+                                if event.type == "workflow_failed"
+                                else "cancelled"
+                            )
+                            logger.info(
+                                "run %s follow: 终态事件 %s，停止 follow",
+                                handle.run_id,
+                                event.type,
+                            )
+                            return
+            finally:
+                try:
+                    f.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        except asyncio.CancelledError:
+            # shutdown / detach：clean exit（不标 corrupted）
+            raise
+        except Exception as e:  # noqa: BLE001 — follow task 任何异常 → corrupted
+            handle.terminal = "corrupted"
+            handle.status = "failed"
+            handle.error = f"follow_task_crashed: {type(e).__name__}: {e}"
+            logger.exception("run %s follow task 异常退出", handle.run_id)
+            await self._emit_attach_error(
+                handle,
+                "follow_task_crashed",
+                f"follow task crashed: {e}",
+            )
+
+    async def _emit_attach_error(
+        self, handle: AttachedRunHandle, kind: str, message: str
+    ) -> None:
+        """attached follow 异常 → emit ``error`` 事件到 bus（让订阅 WS 看到）。
+
+        **fan-out only**（``bus.relay``）——attached run 无写权，本事件不落外部 tape。
+        客户端 ``error`` 事件渲染（LogStream 红行 / TopBar 失败指示）。
+
+        **seq**：用单调负数（``-time.monotonic_ns()``）避免客户端 seq 去重吞掉多个 error
+        事件（processEvent 按 seq 去重，``seq=0`` 多次会被吞）。
+        """
+        try:
+            error_event = Event(
+                seq=-(time.monotonic_ns() & 0x7FFFFFFF) - 1,  # 负 seq：不与真实 seq 冲突
+                type="error",
+                timestamp=time.time(),
+                node=None,
+                session_id=None,
+                data={"kind": kind, "message": message, "source": "attach_follow"},
+            )
+            await handle.bus.relay(error_event)
+        except Exception:  # noqa: BLE001 — relay 失败不应阻塞 follow 退出
+            logger.warning("run %s attach error relay 失败", handle.run_id, exc_info=True)
+
+    # ── X — windowed events + extended meta（SPEC web-attach §3）──────────────
+
+    def get_run_events_window(
+        self,
+        run_id: str,
+        *,
+        since: int | None = None,
+        limit: int | None = None,
+        tail: int | None = None,
+    ) -> list[Event]:
+        """窗口化读事件（SPEC §3 / M1：pure tape read，**不 emit bus**）。
+
+        - 无参：全量（同 ``get_run_events``）
+        - ``since=N``：``seq > N``
+        - ``since=N & limit=M``：``[N+1, N+M]``（顺序 = tape 行序 = seq 升序）
+        - ``tail=M``：最后 M 条
+
+        **perf（SPEC §8.4b）**：``tail`` 走 ``tape_reader.tail_events`` 反向字节块扫描
+        （与 tape 总大小无关，O(last_M_lines_bytes)）；``since+limit`` 走 ``since_limited``
+        提前 break（O(limit)，不物化全量）。只有 ``since`` 单参（无 limit）才物化（client
+        需要全量）。
+
+        in-process 走 ``Tape.replay``，attached 走 ``tape_reader.replay``。
+        **bus.emit / relay 不在此路径**（M1）。
+        """
+        handle = self._require_handle(run_id)
+        # 校验
+        if tail is not None and tail < 0:
+            raise ValueError(f"tail must be >= 0: {tail}")
+        if limit is not None and limit < 0:
+            raise ValueError(f"limit must be >= 0: {limit}")
+
+        # ``tail`` 路径优先（与 since 互斥语义：tail 总是返回最后 M 条）
+        if tail is not None:
+            if tail == 0:
+                return []
+            # attached / in-process 都有 ``tape.path``（Tape 与 AttachedTape 同形）
+            tp = _handle_tape_path(handle)
+            if tp is None:
+                return list(handle.tape.replay())[-tail:]
+            return tail_events(tp, tail)
+
+        since_seq = since if since is not None else 0
+        if limit is not None:
+            # ``since+limit``：正向扫提前 break（O(limit)）
+            tp = _handle_tape_path(handle)
+            if tp is None:
+                return list(handle.tape.replay(since_seq=since_seq))[:limit]
+            return since_limited(tp, since_seq, limit)
+
+        # 无 limit（``since`` 单参 或 全量）
+        return list(handle.tape.replay(since_seq=since_seq))
+
+    def get_run_extended_meta(self, run_id: str) -> dict | None:
+        """扩展 meta（SPEC web-attach §3）：``{run_id, status, source, event_count,
+        byte_size, oldest_seq, newest_seq, writable, huge, overview?}``。
+
+        - ``writable``：in-process=True / attached=False（前端 gate 模态据此禁提交）。
+        - ``huge``：``event_count > 50000`` OR ``byte_size > 5MB``（兜底阈值；SPEC §3）。
+        - ``overview``：**仅 huge 模式返** —— 服务端 fold 同一 tape 派生 agents/charts/
+          cost/run_status（**非第二真相源**——可经 ``load full`` 展开校验，M4）。
+
+        **perf（SPEC §8.4a）**：单次扫文件（``_scan_meta_overview``），同时累计
+        ``(count, bounds, topology, charts, state)``——避免 ``_compute_overview`` 三遍
+        replay 的 O(3N) 退化。memoize key = ``(path, mtime, size)``，hit 时 O(1)。
+
+        单一真相源仍是 tape；overview 是派生视图，与客户端 fold 同源（前端信任 + 可验）。
+        """
+        handle = self._runs.get(run_id)
+        if handle is None:
+            return None
+        tape_path = _handle_tape_path(handle)
+        if tape_path is None or not tape_path.exists():
+            byte_size = 0
+            event_count, oldest_seq, newest_seq = 0, 0, 0
+            overview_data = None
+        else:
+            byte_size = tape_path.stat().st_size
+            # memoize：mtime+size 不变则复用（client 高频轮询 /meta 不重算）
+            mtime = tape_path.stat().st_mtime
+            cache_key = (str(tape_path), mtime, byte_size)
+            cached = self._meta_cache.get(cache_key)
+            if cached is not None:
+                event_count, oldest_seq, newest_seq, overview_data = cached
+            else:
+                event_count, oldest_seq, newest_seq, overview_data = (
+                    _scan_meta_overview(tape_path)
+                )
+                self._meta_cache[cache_key] = (
+                    event_count,
+                    oldest_seq,
+                    newest_seq,
+                    overview_data,
+                )
+        is_attached = isinstance(handle, AttachedRunHandle)
+        huge = event_count > 50_000 or byte_size > 5_000_000
+        meta: dict = {
+            "run_id": run_id,
+            "status": handle.status,
+            "source": handle.source,
+            "event_count": event_count,
+            "byte_size": byte_size,
+            "oldest_seq": oldest_seq,
+            "newest_seq": newest_seq,
+            "writable": not is_attached,
+            "huge": huge,
+        }
+        if huge and overview_data is not None:
+            # M4：huge 模式服务端 fold 派生 overview（同一 tape，非第二真相源）。
+            meta["overview"] = overview_data["overview"]
+        return meta
 
     def list_runs(self) -> list[RunMeta]:
         """返回所有 run 的元数据（**不含事件**，懒加载红线 SPEC §0.1 铁律 2）。
@@ -278,8 +898,12 @@ class RunManager:
             return None
         return self._meta_from_handle(handle)
 
-    def get_handle(self, run_id: str) -> RunHandle | None:
-        """取 run 的 RunHandle（WS 订阅 / gate 分发用）。未知返回 None。"""
+    def get_handle(self, run_id: str) -> RunView | None:
+        """取 run 的 RunView（WS 订阅 / gate 分发用）。未知返回 None。
+
+        返回 ``RunView`` 基类（in-process 与 attached 共用）。调用方需感知 ``source``
+        字段或 ``isinstance`` 判定 attached 形态（attached 无 ``wf`` / ``gate_handler``）。
+        """
         return self._runs.get(run_id)
 
     # ── 程序化客户端查询（MCP / 其它 shell）—— tape-only query path ─────────
@@ -430,8 +1054,14 @@ class RunManager:
         """等某 run 到终态（completed/failed）。测试 + WS 收尾用。
 
         超时 raise ``asyncio.TimeoutError``（fail loud，不静默 hang）。
+
+        attached run：follow task 是长循环（不自然 done），等终态事件由 follow task 自身
+        翻 ``terminal=True``；本方法对 attached 直接返回（不等）——测试侧用 ``sleep`` +
+        ``get_run_meta`` 轮询验证。
         """
         handle = self._require_handle(run_id)
+        if isinstance(handle, AttachedRunHandle):
+            return  # attached：follow task 不自然 done，本方法不适用
         if handle._task is None:
             return
         await asyncio.wait_for(asyncio.shield(handle._task), timeout=timeout)
@@ -441,12 +1071,16 @@ class RunManager:
 
         ``run_server`` lifespan 退出时调。保证无 leaked task / 未关 tape。
 
-        - 每个未 done task ``wait_for(timeout)``：run 卡在 gate（SPEC §2.2 gate 无 timeout
-          无限等）时超时 → cancel task 兜底，避免 server 退出 hang。
-        - 之后逐 handle teardown（stop gate_handler + close bus）。
+        - in-process：每未 done task ``wait_for(timeout)``（卡在 gate 超时 → cancel），
+          之后逐 handle teardown。
+        - attached：teardown 内部 cancel follow task（停 tail）。
         """
+        # 收 in-process 的 run task（attached 无 ``_task``）
+        in_proc_handles = [
+            h for h in self._runs.values() if isinstance(h, InProcessRunHandle)
+        ]
         pending = [
-            h._task for h in self._runs.values()
+            h._task for h in in_proc_handles
             if h._task is not None and not h._task.done()
         ]
         for task in pending:
@@ -469,30 +1103,48 @@ class RunManager:
 
     # ── 内部 ───────────────────────────────────────────────────────────────
 
-    def _require_handle(self, run_id: str) -> RunHandle:
+    def _require_handle(self, run_id: str) -> RunView:
         handle = self._runs.get(run_id)
         if handle is None:
             raise KeyError(f"unknown run_id: {run_id}")
         return handle
 
-    def _meta_from_handle(self, handle: RunHandle) -> RunMeta:
+    def _meta_from_handle(self, handle: RunView) -> RunMeta:
         """从 handle + tape 派生 RunMeta（progress/cost 从 replay_state，§9 决策 6）。
 
         ``replay_state`` 失败（tape 损坏等罕见）→ progress 退化为 "?/?"，status 仍取
         handle.status（fail loud 记 warning，不崩 list_runs）。
+
+        attached 形态（``wf=None``）：topology 不存在，``total`` 从 tape
+        ``workflow_started.data.topology.nodes`` 推导（若有效）或省略（``?``）；不读 ``wf``。
         """
+        wf_name_fallback = (
+            handle.wf.name
+            if (isinstance(handle, InProcessRunHandle) and handle.wf is not None)
+            else handle.run_id
+        )
+        wf_total: int | None
+        if isinstance(handle, InProcessRunHandle) and handle.wf is not None:
+            wf_total = len(handle.wf.nodes)
+        else:
+            wf_total = None  # attached: 从 tape topology 推
         try:
             state = replay_state(handle.tape)
-            total = len(handle.wf.nodes)
-            done = sum(1 for s in state.node_status.values() if s == "done")
-            progress = f"{done}/{total}"
+            if wf_total is None:
+                # attached：topology 从 workflow_started.data.topology.nodes（若有效）
+                wf_total = _topology_node_count_from_tape(handle.tape)
+            if wf_total is None or wf_total < 0:
+                progress = "?"
+            else:
+                done = sum(1 for s in state.node_status.values() if s == "done")
+                progress = f"{done}/{wf_total}"
             cost = _extract_cost(state)
-            workflow_name = state.workflow_name or handle.wf.name
+            workflow_name = state.workflow_name or wf_name_fallback
         except Exception:  # noqa: BLE001 — tape 读失败不应崩 list_runs
             logger.warning("run %s replay 失败，元数据退化", handle.run_id, exc_info=True)
-            progress = f"?/{len(handle.wf.nodes)}"
+            progress = "?" if wf_total is None else f"?/{wf_total}"
             cost = 0.0
-            workflow_name = handle.wf.name
+            workflow_name = wf_name_fallback
         elapsed = time.time() - handle.started_at
         return RunMeta(
             run_id=handle.run_id,
@@ -540,8 +1192,35 @@ class RunManager:
             finally:
                 await self._teardown_handle(handle)
 
-    async def _teardown_handle(self, handle: RunHandle) -> None:
-        """清理一个 handle 的资源（幂等）：cancel chart ingestor + stop gate_handler + close bus。"""
+    async def _teardown_handle(self, handle: RunView) -> None:
+        """清理一个 handle 的资源（幂等）。
+
+        in-process（SPEC §2.3）：cancel chart ingestor + unlink sock + stop gate_handler
+        + close bus（同 v2）。
+
+        attached（SPEC §2.3 / §0 D6）：cancel follow task（停止 tail）；**跳过 sock unlink**
+        （sock 是 in-process chart ingestor 的，属别进程）；attached 无 gate_handler；
+        ``AttachedTape.close`` no-op。bus.close 仍调（幂等；EventBus.close 通知订阅者终态）。
+        """
+        if isinstance(handle, AttachedRunHandle):
+            # attached：cancel follow task 即可（无 sock / gate_handler / chart ingestor）。
+            if handle.follow_task is not None and not handle.follow_task.done():
+                handle.follow_task.cancel()
+                try:
+                    await handle.follow_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "run %s follow task 异常退出", handle.run_id, exc_info=True
+                    )
+            try:
+                handle.bus.close()
+            except Exception:  # noqa: BLE001
+                logger.warning("run %s bus.close 异常", handle.run_id, exc_info=True)
+            return
+
+        # in-process 路径（原 v2 行为）
         # phase-13 §3.1：先 cancel chart ingestor（防新事件落已 close 的 tape）。
         if handle._chart_ingestor is not None and not handle._chart_ingestor.done():
             handle._chart_ingestor.cancel()
@@ -613,3 +1292,259 @@ def _outputs_from_tape(tape: Tape) -> dict | None:
             if isinstance(data_outputs, dict):
                 outputs = data_outputs
     return outputs
+
+
+# ── X — attach helpers（SPEC web-attach §2 / §3）─────────────────────────────
+
+
+def _probe_first_event(path: Path) -> Event | None:
+    """read-only 探测 tape 首个有效事件（不 bulk replay）。
+
+    partial / 空 / 全残行 → None。首行有效 → 返回 Event。
+    用于 ``attach_run`` 判 ``workflow_started`` + 推导 run_id。
+    """
+    try:
+        for event in tape_reader_replay(path, since_seq=0):
+            return event
+    except FileNotFoundError:
+        return None
+    return None
+
+
+def _scan_terminal_type(path: Path) -> str | None:
+    """read-only 扫 tape 找最末的终态事件类型（D3：不进 bus，仅 status 判定）。
+
+    返回 ``"workflow_completed"`` / ``"workflow_failed"`` / ``"workflow_cancelled"``
+    或 None（无终态事件）。用于 ``attach_run`` 跳过终态 tape 的 follow task。
+    """
+    last_terminal: str | None = None
+    try:
+        for event in tape_reader_replay(path, since_seq=0):
+            if event.type in (
+                "workflow_completed",
+                "workflow_failed",
+                "workflow_cancelled",
+            ):
+                last_terminal = event.type
+    except FileNotFoundError:
+        return None
+    return last_terminal
+
+
+def _probe_head_and_terminal(path: Path) -> tuple[Event | None, str | None]:
+    """单次扫同时取首个事件 + 最末终态事件类型（MAJOR 6 修复，避免两次全扫）。
+
+    返回 ``(first_event, last_terminal_type)``。partial / 空 → ``(None, None)``。
+    一遍扫描完成两个意图：首个有效事件 + 是否已到终态。
+    """
+    first_event: Event | None = None
+    last_terminal: str | None = None
+    try:
+        for event in tape_reader_replay(path, since_seq=0):
+            if first_event is None:
+                first_event = event
+            if event.type in (
+                "workflow_completed",
+                "workflow_failed",
+                "workflow_cancelled",
+            ):
+                last_terminal = event.type
+    except FileNotFoundError:
+        return (None, None)
+    return (first_event, last_terminal)
+
+
+def _topology_node_count_from_tape(tape: Tape | AttachedTape) -> int | None:
+    """扫 tape 找 workflow_started.data.topology.nodes（attached run 用）。
+
+    attached run 无 ``wf`` 对象，但 topology 在 workflow_started 事件里（phase-9c 决策）。
+    返回 ``len(nodes)`` 或 None（无 workflow_started / topology 缺失 / shape 异常）。
+    """
+    for event in tape.replay():
+        if event.type != "workflow_started":
+            continue
+        topo = event.data.get("topology")
+        if not isinstance(topo, dict):
+            return None
+        nodes = topo.get("nodes")
+        if not isinstance(nodes, list):
+            return None
+        return len(nodes)
+    return None
+
+
+def _handle_tape_path(handle: RunView) -> Path | None:
+    """取 handle 对应的 tape 文件路径（meta 的 byte_size / event_count / tail-events 用）。
+
+    统一走 ``handle.tape.path``（Tape 与 AttachedTape 同形），避免 AttachedRunHandle
+    ``tape_path`` 字段与 ``tape.path`` 语义重合（两者必须一致，本方法单一来源）。
+    """
+    if isinstance(handle, (InProcessRunHandle, AttachedRunHandle)):
+        tp = getattr(handle.tape, "path", None)
+        return Path(tp) if tp is not None else None
+    return None
+
+
+# Bulk event types that don't affect meta/overview (skip in fast-path).
+# Pre-compiled markers for substring check (cheaper than full json.loads).
+_META_BULK_MARKERS = (
+    '"agent_message"',
+    '"agent_thinking"',
+    '"agent_tool_call"',
+    '"agent_tool_result"',
+    '"agent_step_started"',
+    '"unknown_event"',
+    '"prompt_rendered"',
+    '"route_taken"',
+    '"retry_started"',
+    '"retry_succeeded"',
+    '"retry_exhausted"',
+    '"validator_started"',
+    '"validator_passed"',
+    '"validator_failed"',
+    '"wait_started"',
+    '"wait_completed"',
+    '"dialog_started"',
+    '"dialog_message"',
+    '"dialog_ended"',
+    '"foreach_started"',
+    '"foreach_item_started"',
+    '"foreach_item_completed"',
+    '"foreach_completed"',
+    '"interrupt_requested"',
+    '"interrupt_resolved"',
+    '"human_decision_requested"',
+    '"human_decision_resolved"',
+    '"workflow_resumed"',
+)
+_META_SEQ_RE = __import__("re").compile(r'"seq":\s*(\d+)')
+
+
+def _scan_meta_overview(path: Path) -> tuple[int, int, int, dict | None]:
+    """单遍扫 tape 同时累计 ``(event_count, oldest_seq, newest_seq, overview_data)``。
+
+    SPEC §8.4a perf 修复（BLOCKER 2）：原 ``_compute_overview`` 调 ``replay_state`` +
+    2 次全扫 = 3 遍 O(N)；现合并为 1 遍，且只算 huge 模式需要的 overview 数据。
+
+    **fast-path**（perf 关键）：``agent_message``/``agent_thinking``/``agent_tool_*``
+    占 huge tape 99% 行数但不影响 overview —— substring check 后用 regex 提取 seq
+    跳过 json.loads（避免 Python stdlib json 的 ~500ms/60k 行开销）。只有 ``workflow_*`` /
+    ``node_*`` / ``agent_usage`` / ``custom`` 进 full parse + fold。
+
+    overview_data 形如 ``{"overview": {agents, charts, cost_usd, run_status}}``。
+    """
+    count = 0
+    oldest = 0
+    newest = 0
+    node_status: dict[str, str] = {}
+    wf_status = "pending"
+    topo_nodes: list[str] = []
+    charts: list[dict] = []
+    saw_topology = False
+    cost = 0.0
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                stripped = raw.strip()
+                if not stripped:
+                    continue
+
+                # Fast-path: bulk event types → substring check + regex seq（no json.loads）
+                is_bulk = False
+                for marker in _META_BULK_MARKERS:
+                    if marker in stripped:
+                        is_bulk = True
+                        break
+                if is_bulk:
+                    m = _META_SEQ_RE.search(stripped)
+                    if m:
+                        try:
+                            seq = int(m.group(1))
+                        except ValueError:
+                            continue
+                        count += 1
+                        if oldest == 0 or seq < oldest:
+                            oldest = seq
+                        if seq > newest:
+                            newest = seq
+                    continue
+
+                # Full parse for state-changing types
+                try:
+                    obj = json.loads(stripped)
+                except json.JSONDecodeError:
+                    break  # partial 末行
+                seq = obj.get("seq")
+                if not isinstance(seq, int):
+                    continue
+                count += 1
+                if oldest == 0 or seq < oldest:
+                    oldest = seq
+                if seq > newest:
+                    newest = seq
+
+                t = obj.get("type")
+                node = obj.get("node")
+                data = obj.get("data") or {}
+
+                if t == "workflow_started":
+                    wf_status = "running"
+                    if not saw_topology:
+                        saw_topology = True
+                        topo = data.get("topology")
+                        if isinstance(topo, dict):
+                            nodes = topo.get("nodes")
+                            if isinstance(nodes, list):
+                                for n in nodes:
+                                    if isinstance(n, dict):
+                                        name = n.get("name")
+                                        if isinstance(name, str):
+                                            topo_nodes.append(name)
+                elif t == "workflow_completed":
+                    wf_status = "completed"
+                elif t == "workflow_failed":
+                    wf_status = "failed"
+                elif t == "workflow_cancelled":
+                    wf_status = "cancelled"
+                elif t == "node_started" and isinstance(node, str):
+                    node_status[node] = "running"
+                elif t == "node_completed" and isinstance(node, str):
+                    node_status[node] = "done"
+                elif t == "node_failed" and isinstance(node, str):
+                    node_status[node] = "failed"
+                elif t == "node_skipped" and isinstance(node, str):
+                    node_status[node] = "skipped"
+                elif t == "agent_usage":
+                    c = data.get("cost_usd")
+                    if isinstance(c, (int, float)):
+                        cost += float(c)
+                elif t == "custom" and data.get("kind") == "chart":
+                    chart = data.get("chart")
+                    if isinstance(chart, dict):
+                        charts.append(
+                            {
+                                "label": str(chart.get("label") or "misc"),
+                                "title": str(chart.get("title") or ""),
+                                "chart_type": str(chart.get("chart_type") or "chart"),
+                            }
+                        )
+    except Exception:  # noqa: BLE001 — 读失败不应崩 /meta
+        return (count, oldest, newest, None)
+
+    # agents：topology + node_status 合并（同前端 selectAgents；保序：topo 优先 + 后来 node 补）
+    # **注**：此派生与前端 selectAgents 同源同逻辑——若改一处需同步另一处（SPEC U1：服务端
+    # fold = 客户端 fold，M4 server-asserted）。
+    for name in node_status:
+        if name not in topo_nodes:
+            topo_nodes.append(name)
+    agents = [
+        {"name": name, "status": node_status.get(name) or "pending"}
+        for name in topo_nodes
+    ]
+    overview = {
+        "agents": agents,
+        "charts": charts,
+        "cost_usd": cost,
+        "run_status": wf_status,
+    }
+    return (count, oldest, newest, {"overview": overview})

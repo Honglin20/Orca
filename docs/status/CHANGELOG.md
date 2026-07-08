@@ -5,6 +5,12 @@
 
 ---
 
+## [2026-07-08] Web attach Step1（X + perf）—— attach by tape path + huge-mode + perf
+
+按 SPEC `web-attach-and-default-spec.md` rev2 §2/§3/§6/§8 实现：后端 `POST /api/runs/attach` + `RunView` ABC 双 handle（InProcess/Attached）+ read-only tail-follow（`EventBus.relay` fan-out only）+ 安全三重守卫（lstat + relative_to + open+fd-re-stat 防 TOCTOU）+ `GET /meta` huge 模式服务端 fold 派生 overview + `GET /events?since/limit/tail` 窗口化 + `GET /api/health`；前端 huge-mode（serverOverview slice + tail + 增量 prepend + load full）+ attached run gate observe-only。perf fast-path：`_scan_meta_overview` 单遍扫 + bulk-type substring skip + regex seq 提取（60k fixture ~150ms vs naive ~8700ms）+ `tail_events` 反向扫 O(tail)。**code-reviewer 2 BLOCKER + 6 MAJOR + 5 MINOR 全闭环**。1863 passed / 2 skipped（perf 默认 skip）。Commit: `5d408fe`。详见 [release note](../releases/2026-07-08-web-attach-step1.md) + [SPEC §2/§3/§6/§8](../specs/web-attach-and-default-spec.md)。
+
+---
+
 ## [2026-07-08] orca install —— 统一安装入口（全局默认 + 合并 skill/in-session）
 
 收口碎片化安装（`pip` → `skill install` → `in-session start` 三步、两种 scope）为单条 `orca install [--target claude|opencode|all] [--scope user|project]`（全局默认）。**Step 0 spike 钉死承重事实**：opencode 1.14.22 无 `plugins/` 目录自动发现，plugin 加载**必须** `opencode.json` `"plugin":[<path>]` 声明（项目相对 / 用户绝对）——修掉既有「光丢文件不声明」缺口（`start` 之前只写两文件不碰 opencode.json，无加载 e2e 守门）。`skill install` 降为弃用别名（warn+委托）；`in-session start` 收窄为 CC-only run bootstrap（opencode 路运行时 `bootstrap` 自举）。code-reviewer 0 BLOCKER + 4🟡/3🟢 全闭环；`tests/iface` 689 passed + 新增零业务逻辑守门。详见 [release note](../releases/2026-07-08-unified-install.md) + [plan](../plans/2026-07-08-unified-install.md)。

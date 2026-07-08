@@ -21,6 +21,8 @@ import type {
   GateState,
   LastResolved,
   NodeState,
+  RunMetaExtended,
+  ServerOverview,
   WorkflowStatus,
 } from "@/types/store-types";
 import type { WorkflowTopology } from "@/types/topology";
@@ -59,6 +61,23 @@ export interface WorkflowState {
   /** 当前懒加载的 run（loadRun 设，unloadRun 清；null = 未持有任何 run）。 */
   activeRunId: string | null;
 
+  // === Huge-mode + writable 状态（SPEC web-attach §3 / M3）===
+  /**
+   * 服务端派生 overview（huge=true 时由 /meta 返回）。null = 非 huge 模式 / 已 ``load full``。
+   * selectors 在 huge 模式优先读此字段；``loadFull`` 时清此字段 → 全量 client-fold（M4 可验）。
+   */
+  serverOverview: ServerOverview | null;
+  /** writable=false（attached run，read-only）→ gate 模态禁提交（SPEC §8 AC11）。 */
+  writable: boolean;
+  /** huge 模式（/meta 判定）：tail + 增量 prepend + ``load full`` 按钮。 */
+  huge: boolean;
+  /** huge 模式下当前窗口的最旧 seq（用于 ``?since=oldest-M`` 增量 prepend）。 */
+  oldestSeqInWindow: number;
+  /** huge 模式下最新的 seq（用于 WS resume since=newest_seq）。 */
+  newestSeqInWindow: number;
+  /** huge 模式下是否已 ``load full``（全量 client-fold，clear serverOverview）。 */
+  hugeFullyLoaded: boolean;
+
   // === actions ===
   /** 统一 fold 入口（live + WS 增量）。幂等（seq 去重）。 */
   processEvent: (event: WebEvent) => void;
@@ -66,6 +85,17 @@ export interface WorkflowState {
   loadFromEvents: (events: WebEvent[]) => void;
   /** 懒加载：GET /api/runs/<id>/events → loadFromEvents。失败 fail loud。 */
   loadRun: (runId: string) => Promise<void>;
+  /**
+   * SPEC web-attach §3 huge-mode 入口：先 GET /meta → 判 huge 分支。
+   * - huge=false：GET /events 全量 → loadFromEvents（同 loadRun 行为）。
+   * - huge=true：GET /events?tail=500 → loadFromEvents（tail fold）+ 设 serverOverview。
+   *   Conversation/Log 读 tail；上滚 IntersectionObserver → ``loadEarlierChunk`` 增量 prepend。
+   */
+  loadRunWithMeta: (runId: string) => Promise<void>;
+  /** huge 模式增量 prepend：fetch ``?since=oldest-M&limit=M`` → 与既有 events 合并 fold。 */
+  loadEarlierChunk: (runId: string, chunkSize: number) => Promise<boolean>;
+  /** huge 模式 ``load full``：拉全量 + clear serverOverview（M4：可 client-fold 校验）。 */
+  loadFull: (runId: string) => Promise<void>;
   /** 卸载当前 run 的派生态（懒加载红线：切走清，不累积）。 */
   unloadRun: () => void;
   /** UI 交互态 setter（非业务真相）。 */
@@ -378,6 +408,14 @@ export const useWorkflowStore = create<WorkflowState>()(
     selectedNode: null,
     activeRunId: null,
 
+    // huge-mode + writable（SPEC web-attach §3 / M3）
+    serverOverview: null,
+    writable: true,
+    huge: false,
+    oldestSeqInWindow: 0,
+    newestSeqInWindow: 0,
+    hugeFullyLoaded: true, // 非 huge 模式视同已 full load
+
     processEvent: (event) => {
       set((state) => {
         // ── 幂等 guard：同 seq 已存在则跳过 ──
@@ -419,12 +457,143 @@ export const useWorkflowStore = create<WorkflowState>()(
       }
     },
 
+    /**
+     * SPEC web-attach §3 huge-mode 入口。先 GET /meta → 判 huge 分支。
+     *
+     * - **非 huge**：GET /events 全量 → loadFromEvents（同 loadRun）。
+     * - **huge**：GET /events?tail=500 → loadFromEvents（tail fold 进 Conversation/Log）+
+     *   设 serverOverview（overview selectors 信任服务端 fold，M3/M4）+ 记 oldest/newest
+     *   窗口边界（供 IntersectionObserver ``loadEarlierChunk`` 增量 prepend 用）。
+     * - ``writable=false``（attached run）：selectors 仍按 fold 工作，gate 模态据此禁提交。
+     */
+    loadRunWithMeta: async (runId) => {
+      let meta: RunMetaExtended | null = null;
+      try {
+        const mresp = await fetch(
+          `/api/runs/${encodeURIComponent(runId)}/meta`
+        );
+        if (mresp.ok) meta = (await mresp.json()) as RunMetaExtended;
+      } catch (err) {
+        console.warn(`[orca] loadRunWithMeta ${runId} /meta 失败，回退 full`, err);
+      }
+      if (meta && meta.huge) {
+        // huge 模式：拉 tail=500 + 设 serverOverview
+        try {
+          const resp = await fetch(
+            `/api/runs/${encodeURIComponent(runId)}/events?tail=500`
+          );
+          if (!resp.ok) {
+            console.error(
+              `[orca] loadRunWithMeta huge ${runId} tail 拉取失败 HTTP ${resp.status}`
+            );
+            return;
+          }
+          const tail = (await resp.json()) as WebEvent[];
+          set((state) => {
+            state.activeRunId = runId;
+            state.huge = true;
+            state.hugeFullyLoaded = false;
+            state.serverOverview = meta!.overview ?? null;
+            state.writable = meta!.writable;
+            state.oldestSeqInWindow =
+              tail.length > 0 ? tail[0].seq : meta!.oldest_seq;
+            state.newestSeqInWindow =
+              tail.length > 0 ? tail[tail.length - 1].seq : meta!.newest_seq;
+          });
+          get().loadFromEvents(tail);
+        } catch (err) {
+          console.error(`[orca] loadRunWithMeta huge ${runId} 网络错误`, err);
+        }
+        return;
+      }
+      // 非 huge（或 /meta 失败回退）：原有 loadRun 全量路径
+      set((state) => {
+        state.huge = false;
+        state.hugeFullyLoaded = true;
+        state.serverOverview = null;
+        state.writable = meta?.writable ?? true;
+      });
+      await get().loadRun(runId);
+    },
+
+    /**
+     * huge 模式增量 prepend：fetch ``?since=max(0, oldest-M)&limit=M`` → 与既有 events
+     * 合并 fold（O(window)，不重算全 tape）。返回 true 表示拉到新事件（窗口向上扩展）。
+     *
+     * 到达 ``oldest_seq == 1`` 时返回 false（已到顶，无更多历史）。
+     */
+    loadEarlierChunk: async (runId, chunkSize) => {
+      const state0 = get();
+      if (!state0.huge) return false;
+      if (state0.oldestSeqInWindow <= 1) return false; // 已到顶
+      const since = Math.max(0, state0.oldestSeqInWindow - 1 - chunkSize);
+      try {
+        const resp = await fetch(
+          `/api/runs/${encodeURIComponent(runId)}/events?since=${since}&limit=${chunkSize}`
+        );
+        if (!resp.ok) {
+          console.warn(
+            `[orca] loadEarlierChunk ${runId} HTTP ${resp.status}（忽略）`
+          );
+          return false;
+        }
+        const chunk = (await resp.json()) as WebEvent[];
+        if (chunk.length === 0) return false;
+        set((state) => {
+          // 合并：旧 events + chunk（processEvent 内部 seq 去重，安全）
+          const merged = [...state.events, ...chunk];
+          merged.sort((a, b) => a.seq - b.seq);
+          state.events = merged;
+          refold(state);
+          state.oldestSeqInWindow = Math.min(
+            state.oldestSeqInWindow,
+            chunk[0].seq
+          );
+        });
+        return true;
+      } catch (err) {
+        console.warn(`[orca] loadEarlierChunk ${runId} 网络错误`, err);
+        return false;
+      }
+    },
+
+    /**
+     * huge 模式 ``load full``：拉全量 events → client-fold + clear serverOverview（M4：
+     * 客户端可经此校验服务端 overview 派生与 client-fold 一致）。``hugeFullyLoaded=true``。
+     */
+    loadFull: async (runId) => {
+      try {
+        const resp = await fetch(
+          `/api/runs/${encodeURIComponent(runId)}/events`
+        );
+        if (!resp.ok) {
+          console.error(`[orca] loadFull ${runId} HTTP ${resp.status}`);
+          return;
+        }
+        const events = (await resp.json()) as WebEvent[];
+        set((state) => {
+          state.hugeFullyLoaded = true;
+          state.serverOverview = null; // clear → selectors 回退 client-fold（M4 可验）
+        });
+        get().loadFromEvents(events);
+      } catch (err) {
+        console.error(`[orca] loadFull ${runId} 网络错误`, err);
+      }
+    },
+
     unloadRun: () => {
       set((state) => {
         state.activeRunId = null;
         state.selectedNode = null;
         resetDerived(state);
         state.events = [];
+        // huge-mode 状态清空（避免下一 run 残留）
+        state.serverOverview = null;
+        state.writable = true;
+        state.huge = false;
+        state.oldestSeqInWindow = 0;
+        state.newestSeqInWindow = 0;
+        state.hugeFullyLoaded = true;
       });
     },
 

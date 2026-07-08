@@ -34,6 +34,7 @@ from orca.gates.http_endpoint import (
     build_gate_from_hook_payload,
     resolve_session_context,
 )
+from orca.iface.web.run_manager import InProcessRunHandle
 
 if TYPE_CHECKING:
     from orca.iface.web.run_manager import RunManager
@@ -65,13 +66,15 @@ def build_router(manager: RunManager) -> APIRouter:
         handler = None
         if run_id_resolved != "unknown":
             handle = manager.get_handle(run_id_resolved)
-            if handle is not None:
+            if isinstance(handle, InProcessRunHandle):
                 handler = handle.gate_handler
         if handler is None:
-            # session_id 未注册/未知 run：fallback 仅当恰好一个活跃 run（避免错路由多 run）
+            # session_id 未注册/未知 run：fallback 仅当恰好一个活跃 in-process run
+            # （attached run 是 read-only，无 gate_handler；排除）
             active = [
                 h for h in manager._runs.values()
-                if h.status in ("running", "queued")
+                if isinstance(h, InProcessRunHandle)
+                and h.status in ("running", "queued")
             ]
             if len(active) == 1:
                 handler = active[0].gate_handler
@@ -117,12 +120,14 @@ def build_router(manager: RunManager) -> APIRouter:
         resolved_run_id: str | None = None
         if run_id is not None:
             handle = manager.get_handle(run_id)
-            if handle is not None:
+            if isinstance(handle, InProcessRunHandle):
                 handler = handle.gate_handler
                 resolved_run_id = run_id
         else:
-            # 无 run_id：遍历找持有该 pending gate 的 handler（公开 API，不访问私有 _pending）。
+            # 无 run_id：遍历找持有该 pending gate 的 in-process handler（attached 无 gate_handler）。
             for h in manager._runs.values():
+                if not isinstance(h, InProcessRunHandle):
+                    continue
                 if h.gate_handler.has_pending(str(gate_id)):
                     handler = h.gate_handler
                     resolved_run_id = h.run_id
