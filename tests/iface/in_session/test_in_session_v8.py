@@ -736,54 +736,65 @@ def test_message_fetch_uses_rest_fetch_not_sdk_client_session_message():
     )
 
 
-def test_bootstrap_and_next_prompt_prepend_task_tool_instruction(cwd_tmp, wf_path):
-    """Bug G 签名契约：bootstrap + next 返的 .prompt 必须 prepend Task-tool 指令。
+def test_bootstrap_and_next_return_pointer_and_write_prompt_file(cwd_tmp, wf_path):
+    """compact 交付契约（2026-07-08，替代 Bug G 的 prepend 形态）。
 
-    SPEC §2.1 / §3：CLI 返的 prompt 文本须含「用 subagent」提醒，模型才会派 Task
-    工具子代理执行节点（否则模型直接文本回复 → 没 ToolPart.state.output →
-    3× compliance → workflow_failed）。e2e 实证此路径；shipped v8 漏 prepend。
-
-    单一定义（DRY）：``_TASK_TOOL_INSTRUCTION`` 常量集中在 cli.py 一处。
+    bootstrap + next 不再把整段渲染后 prompt 经 .prompt 注入主 session；改为：
+      1. ``.prompt`` = host-facing **指针**（"用 task 工具派子代理"+"完整指令已写入 <path>"）。
+      2. ``.prompt_file`` = 渲染后 prompt 落盘路径，文件含渲染全文（含上游 output 插值）。
+    两种 agent 形态渲染无差别（compile 已扁平化）；plugin 仍读 .prompt（指针文本）。
     """
-    from orca.iface.in_session.cli import _TASK_TOOL_INSTRUCTION
-
     runner = CliRunner()
-    # bootstrap：entry 节点 prompt 必须 startswith 指令前缀
+
+    # bootstrap：entry 节点 → 指针 + 文件（含 entry prompt 全文）
     boot = runner.invoke(app, ["bootstrap", str(wf_path)])
     assert boot.exit_code == 0
     boot_reply = json.loads(boot.output.splitlines()[-1])
-    assert boot_reply.get("prompt"), "bootstrap 必须返非空 prompt"
-    assert boot_reply["prompt"].startswith(_TASK_TOOL_INSTRUCTION), (
-        "bootstrap .prompt 必须 startswith _TASK_TOOL_INSTRUCTION（Bug G 闭环）"
+    assert boot_reply.get("prompt_file"), "compact：bootstrap 必须返 .prompt_file"
+    pointer = boot_reply["prompt"]
+    assert "task 工具" in pointer and "完整节点指令已写入" in pointer, (
+        "bootstrap .prompt 必须是 host-facing 指针（含 task 工具 + 文件路径提示）"
+    )
+    entry_file = Path(boot_reply["prompt_file"])
+    assert entry_file.is_file(), f"compact prompt 文件未落盘：{entry_file}"
+    assert "产出 A。" in entry_file.read_text(encoding="utf-8"), (
+        "compact prompt 文件必须含 entry 节点渲染全文"
     )
 
-    # next：下一节点 prompt 必须 startswith 指令前缀
+    # next：下一节点 → 指针 + 文件（含上游 output 插值后的渲染全文）
     tape = boot_reply["tape"]
     run_id = boot_reply["run_id"]
     nxt = runner.invoke(app, ["next", "--tape", tape, "--run-id", run_id, "--output", "OUT_A"])
     assert nxt.exit_code == 0
     nxt_reply = json.loads(nxt.output.splitlines()[-1])
-    assert nxt_reply.get("prompt"), "next 必须返非空 prompt（2 节点 wf 第 2 节点）"
-    assert nxt_reply["prompt"].startswith(_TASK_TOOL_INSTRUCTION), (
-        "next .prompt 必须 startswith _TASK_TOOL_INSTRUCTION（Bug G 闭环）"
+    assert nxt_reply.get("prompt_file"), "compact：next 必须返 .prompt_file"
+    assert "task 工具" in nxt_reply["prompt"], "next .prompt 必须是指针"
+    b_file = Path(nxt_reply["prompt_file"])
+    assert b_file.is_file() and b_file.name == "b.md", (
+        f"next compact prompt 文件按节点名命名：<prompts_dir>/b.md，实得 {b_file}"
+    )
+    # node b prompt = "基于 {{ a.output }} 总结。" → 渲染后上游 output 已代入
+    assert "基于 OUT_A 总结。" in b_file.read_text(encoding="utf-8"), (
+        "compact prompt 文件必须含 Jinja 渲染后的完整文本（上游 output 已插值），而非 {{ }} 占位符"
     )
 
 
-def test_task_tool_instruction_is_single_source_constant():
-    """DRY 守门：Task-tool 指令是单一定义（``_TASK_TOOL_INSTRUCTION``）。
+def test_build_pointer_is_single_source():
+    """DRY 守门：指针文本单一定义（``_build_pointer``），防 bootstrap/next 各处拼字面漂移。"""
+    from orca.iface.in_session.cli import _build_pointer
+    from orca.run.step import StepResult
 
-    防止后续在 bootstrap / next 各处拼字面字符串导致版本漂移。
-    """
-    from orca.iface.in_session.cli import _TASK_TOOL_INSTRUCTION, _with_task_instruction
+    # 有 resources_root：指针含 task 工具 + 子代理 + 文件路径 + 资源目录
+    r = StepResult(node="x", prompt_file="/abs/path/x.md", resources_root="/agents/x")
+    p = _build_pointer(r)
+    assert "task 工具" in p and "子代理" in p
+    assert "/abs/path/x.md" in p
+    assert "/agents/x" in p
 
-    # 内容必须 mention task 工具 + 子代理
-    assert "task 工具" in _TASK_TOOL_INSTRUCTION
-    assert "子代理" in _TASK_TOOL_INSTRUCTION
-    # _with_task_instruction 是 prepend，不是 replace
-    assert _with_task_instruction("hello") == _TASK_TOOL_INSTRUCTION + "hello"
-    # None / 空串直传（不抛、不强加指令）
-    assert _with_task_instruction(None) is None
-    assert _with_task_instruction("") == ""
+    # 无 resources_root：不附资源目录行
+    r2 = StepResult(node="y", prompt_file="/p/y.md", resources_root=None)
+    p2 = _build_pointer(r2)
+    assert "/p/y.md" in p2 and "资源目录" not in p2
 
 
 def test_build_cli_args_run_branch_passes_user_model():

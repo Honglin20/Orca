@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-08] in-session compact prompt —— 文件交付 + 缺字段干净 fail loud（e2e PASS）
+
+in-session shell 的节点 prompt 交付从"整段渲染文本注入主 session"改为**compact**：Orca 把渲染后 prompt 落盘到 `<rundir>/<run_id>/prompts/<node>.md`，主 session 只收一句 host-facing **指针**（"用 task 派子代理，完整指令已写入 `<path>`，先 Read 再执行"），子代理从文件读完整指令——主 session 上下文不再随节点数膨胀。两种 agent 形态（`agent:<name>` md 引用 / inline `prompt:`）渲染无差别（compile 已扁平化进 `node.prompt`）；plugin 零改动（仍读 `.prompt`）。**顺手修既有脏崩溃 bug**：`output_schema` 缺字段 / 畸形 schema / 下游 render 引用缺失字段，原本 `ExecError`/`SchemaError` 逃逸 → 无 `workflow_failed`、不清 marker、tape 悬挂、下次卡死；现 `_parse_output` 加 jsonschema 校验、`_render_or_fail` 包错 → 走既有干净 taxonomy（`output_schema_mismatch` / `render_error`）。不接 LLM `validator`——主 session 自己当判官。计划 [2026-07-08-in-session-compact-prompt](../plans/2026-07-08-in-session-compact-prompt.md)；SPEC `in-session-shell-design-draft.md` §2.1/§2.5 回填。code-reviewer 1 🔴（SchemaError 漏网）+ 🟡 全闭环。**顺手消既有债**：`InSessionError` 加 `error_kind` 显式字段 + `ERR_*` 常量，`_classify_in_session_error` 改直读字段（取代脆弱的消息子串匹配，类型安全）。92 in-session + 851 跨模块测试绿；e2e `/tmp/orca-compact-exp/repro.sh` PASS。
+
 ## [2026-07-08] Web Shell v2 —— 推倒重写 COMPLETE（单 tape + AH 风格，e2e PASS）
 
 旧 Web 很差 → 按 SDD（SPEC→spec-review→clean-code→test-e2e）推倒重写前端：单 tape 唯一真相 + 单 Zustand store + codegen + AH 风格渲染（markdown/流式 RAF/工具折叠/DiffView/Charts/LogStream liveness/Gate/DAG）。后端 B1/B2（opencode translator lossless：reasoning/step_start/reasoning_tokens/unknown_event + `--thinking` 开关，EventType 37→39）。test-coverage-e2e 真跑（opencode+deepseek `--thinking` + Playwright + 全 39 类型 fixture）3 Must 全 PASS，铁律 AC 全过，npm 249 + py web 64 测试绿。Commits：c3a738f + 84a2645 + 5a26957 + 01af451 + 7d76934 + 60539b8。详见 [release note](../releases/2026-07-08-web-shell-v2.md) + [SPEC](../specs/web-shell-v2-spec.md)。Follow-up：demo_task 真 run 挂起（后端 opencode 冷启动，非前端）、DiffView LCS、Conv chunk 再拆、LogStream auto-scroll 真跑触发。

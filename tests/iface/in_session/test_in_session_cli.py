@@ -272,6 +272,144 @@ def test_failure_unsupported_node_kind(cwd_tmp):
     assert result.exit_code == 1
 
 
+def test_failure_output_schema_field_violation(cwd_tmp):
+    """output_schema 声明 + output 是合法 JSON 但缺 required 字段 → output_schema_mismatch。
+
+    2026-07-08：``_parse_output`` 加 jsonschema 字段校验。缺字段在 parse 期被抓（早于
+    下游 render 的 UndefinedError），归类 output_schema_mismatch，干净 workflow_failed。
+    （此前仅 json.loads，缺字段漏到 render → 脏崩溃。）
+    """
+    yaml_text = AGENT_WF_YAML.replace(
+        'prompt: "产出 step A 的输出。"',
+        'prompt: "产出 step A 的输出。"\n    output_schema:\n      type: object\n      required: [k]\n      properties:\n        k: {type: string}',
+    )
+    p = cwd_tmp / "wf_schema_field.yaml"
+    p.write_text(yaml_text, encoding="utf-8")
+
+    runner = CliRunner()
+    boot = _bootstrap(runner, p)
+    run_id, tape = boot["run_id"], boot["tape"]
+
+    # 合法 JSON 但缺 required 字段 k
+    result = runner.invoke(app, [
+        "next", "--tape", tape, "--run-id", run_id, "--output", '{"x": 1}',
+    ])
+    assert result.exit_code == 1
+    reply = json.loads(result.output.splitlines()[-1])
+    assert reply["done"] is True
+    assert "failed" in reply["reason"]
+    lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
+    last = json.loads(lines[-1])
+    assert last["type"] == "workflow_failed"
+    assert last["data"]["kind"] == "output_schema_mismatch"
+
+
+def test_advance_step_inline_fallback_vs_compact(tmp_path):
+    """``advance_step`` 交付模式守门：``prompts_dir=None`` → inline 全量 prompt；给定 → compact 文件。
+
+    daemon / 直调单测走 inline（``prompts_dir=None``）；生产 bootstrap/next 走 compact。
+    两模式渲染内容一致（同 ``render_prompt`` 输出），仅交付载体不同。
+    """
+    from orca.compile import load_workflow
+    from orca.events.tape import Tape
+    from orca.run.step import advance_step
+
+    wf_path = tmp_path / "wf.yaml"
+    wf_path.write_text(AGENT_WF_YAML, encoding="utf-8")
+    wf = load_workflow(wf_path)
+
+    # inline 回退（prompts_dir=None）：prompt=渲染全文、prompt_file=None、resources_root=None
+    tape1 = Tape(tmp_path / "tape1.jsonl", run_id="r1", resume=True)
+    res_inline = advance_step(tape1, wf, run_id="r1", prompts_dir=None)
+    assert res_inline.prompt_file is None, "inline 回退不落盘"
+    assert res_inline.resources_root is None
+    assert res_inline.prompt and "产出 step A" in res_inline.prompt, (
+        "inline 回退返全量渲染 prompt（含 entry 指令文本）"
+    )
+
+    # compact（prompts_dir 给定）：prompt=None、prompt_file 落盘、文件内容 == inline 全量
+    tape2 = Tape(tmp_path / "tape2.jsonl", run_id="r2", resume=True)
+    pdir = tmp_path / "prompts"
+    res_compact = advance_step(tape2, wf, run_id="r2", prompts_dir=pdir)
+    assert res_compact.prompt is None, "compact 不返全量 prompt（只返指针，由 cli 拼）"
+    assert res_compact.prompt_file is not None
+    compact_text = Path(res_compact.prompt_file).read_text(encoding="utf-8")
+    assert compact_text == res_inline.prompt, (
+        "compact 落盘内容必须 == inline 全量渲染文本（同 render_prompt 输出）"
+    )
+
+
+def test_failure_output_schema_malformed(cwd_tmp):
+    """output_schema 自身畸形（YAML 写错）→ 干净 workflow_failed（review 🔴，D-v8.x-2）。
+
+    ``jsonschema.validate`` 对畸形 schema 抛 ``SchemaError``（非 ``ValidationError`` 子类）。
+    只 catch ValidationError 会逃逸成脏崩溃。``_parse_output`` 必须 catch 两者。
+    """
+    # required 元素非字符串 → SchemaError
+    yaml_text = AGENT_WF_YAML.replace(
+        'prompt: "产出 step A 的输出。"',
+        'prompt: "产出 step A 的输出。"\n    output_schema:\n      type: object\n      required: [1, 2, 3]',
+    )
+    p = cwd_tmp / "wf_schema_malformed.yaml"
+    p.write_text(yaml_text, encoding="utf-8")
+
+    runner = CliRunner()
+    boot = _bootstrap(runner, p)
+    run_id, tape = boot["run_id"], boot["tape"]
+
+    result = runner.invoke(app, [
+        "next", "--tape", tape, "--run-id", run_id, "--output", '{"k": "v"}',
+    ])
+    assert result.exit_code == 1, f"malformed schema 应 fail loud，实得 exit 0: {result.output}"
+    reply = json.loads(result.output.splitlines()[-1])
+    assert reply["done"] is True
+    assert "failed" in reply["reason"]
+    lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
+    last = json.loads(lines[-1])
+    assert last["type"] == "workflow_failed"
+    # 归类 output_schema_mismatch（消息含 output_schema；语义为 schema 畸形见 message）
+    assert last["data"]["kind"] == "output_schema_mismatch"
+    """下游 prompt 引用上游缺失字段（无 schema）→ 干净 workflow_failed(render_error) + 清 marker。
+
+    2026-07-08 bug 闭环：此前 render 抛 ``ExecError``（非 InSessionError）逃逸 cli.py 的
+    ``except InSessionError`` → 脏崩溃（无 workflow_failed、不清 marker、tape 悬挂、下次卡死）。
+    现 ``_render_or_fail`` 把 ExecError 包成 InSessionError("渲染节点…") → 走既有干净路径。
+    """
+    # node b 引用 a.output.nope（a 无 schema，output 是自由文本，无 nope 字段）
+    yaml_text = AGENT_WF_YAML.replace(
+        'prompt: "基于 {{ a.output }} 总结。"',
+        'prompt: "基于 {{ a.output.nope }} 总结。"',
+    )
+    p = cwd_tmp / "wf_render_err.yaml"
+    p.write_text(yaml_text, encoding="utf-8")
+
+    runner = CliRunner()
+    boot = _bootstrap(runner, p)
+    run_id, tape = boot["run_id"], boot["tape"]
+
+    result = runner.invoke(app, [
+        "next", "--tape", tape, "--run-id", run_id, "--output", "OUT_A",
+    ])
+    assert result.exit_code == 1
+    reply = json.loads(result.output.splitlines()[-1])
+    assert reply["done"] is True
+    assert "failed" in reply["reason"]
+
+    # 干净终态：tape 末条 workflow_failed(render_error)
+    lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
+    last = json.loads(lines[-1])
+    assert last["type"] == "workflow_failed"
+    assert last["data"]["kind"] == "render_error", (
+        f"render 错必须归类 render_error，实得 {last['data']['kind']}"
+    )
+
+    # marker 已清（不卡死）：runs/orca-<owner>.json 不存在（owner=run_id，CLI bootstrap 路径）
+    marker = Path(tape).parent / f"orca-{run_id}.json"
+    assert not marker.exists(), (
+        f"render_error 终态后 marker 必须清除（否则下次 /orca run 卡死），仍存在：{marker}"
+    )
+
+
 # ── F5：LOCK_NB busy ────────────────────────────────────────────────────────
 
 
@@ -414,37 +552,28 @@ def test_event_sequence_matches_expected_shape(cwd_tmp, wf_path):
 # ── 补丁：state_corrupt / bootstrap busy / stop busy / status / no-marker / start ──
 
 
-def test_classify_in_session_error_full_taxonomy():
-    """单元测试 ``_classify_in_session_error`` 五类映射（F6 闭环）。
+def test_classify_in_session_error_uses_explicit_kind():
+    """``_classify_in_session_error`` 直读 ``exc.error_kind``（取代消息子串匹配，类型安全）。
 
-    step.py raise 文案与 CLI 映射表的契约由本测试守住——任何 step.py 文案改动会触发此测试。
+    分类由 step.py 各 raise 处传 ``error_kind=ERR_*`` 显式携带；本测试守门「显式字段」契约：
+    每个常量经 classifier 直返同名；缺省 → ``internal_error`` 兜底。
+    raise 文案改动**不应**再触发本测试（旧子串匹配已移除）。
     """
     from orca.iface.in_session.cli import _classify_in_session_error
-    from orca.run.step import InSessionError
+    from orca.run.step import (
+        ERR_OUTPUT_SCHEMA_MISMATCH, ERR_RENDER_ERROR, ERR_UNSUPPORTED_NODE_KIND,
+        ERR_STATE_CORRUPT, ERR_INTERNAL_ERROR, InSessionError,
+    )
 
-    # output_schema_mismatch（_parse_output raise）
-    assert _classify_in_session_error(InSessionError(
-        "节点 'x' 声明了 output_schema 但宿主输出非 JSON：'abc'"
-    )) == "output_schema_mismatch"
+    # 各 taxonomy 常量经 classifier 直返（消息任意，不参与分类）
+    for kind in (ERR_OUTPUT_SCHEMA_MISMATCH, ERR_RENDER_ERROR,
+                 ERR_UNSUPPORTED_NODE_KIND, ERR_STATE_CORRUPT):
+        assert _classify_in_session_error(
+            InSessionError("任意文案，不参与分类", error_kind=kind)
+        ) == kind
 
-    # unsupported_node_kind（_check_agent_node raise）
-    assert _classify_in_session_error(InSessionError(
-        "节点 'y' 不在 workflow.nodes 中"
-    )) == "unsupported_node_kind"
-    assert _classify_in_session_error(InSessionError(
-        "in-session shell v1 仅支持 agent 节点，'z' 是 'script'"
-    )) == "unsupported_node_kind"
-
-    # state_corrupt（branch 3/4 + 多 running raise）
-    assert _classify_in_session_error(InSessionError(
-        "advance(output=...) 但 tape 中无 running 节点（状态腐败 / 重复完成）"
-    )) == "state_corrupt"
-    assert _classify_in_session_error(InSessionError(
-        "tape 中存在多个 running 节点 ['a', 'b']（状态腐败 / 并发调用）"
-    )) == "state_corrupt"
-
-    # 兜底：未知消息 → internal_error（fail loud 不静默）
-    assert _classify_in_session_error(InSessionError("未知错误")) == "internal_error"
+    # 缺省 error_kind → internal_error 兜底（fail loud 不静默）
+    assert _classify_in_session_error(InSessionError("未知错误")) == ERR_INTERNAL_ERROR
 
 
 def test_stop_busy_when_tape_flock_held(cwd_tmp, wf_path):

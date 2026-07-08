@@ -59,26 +59,44 @@ logger = logging.getLogger(__name__)
 # subagent 合规超限阈值（D-v7-6：连续 N 次 next 无 output → workflow_failed）。
 _COMPLIANCE_LIMIT = 3
 
-# Task-tool 注入指令（SPEC §2.1 / §3，Bug G 闭环）：bootstrap + next 返的 prompt 文本
-# 必须 prepend 一段「用 subagent 执行本节点」指令，否则模型直接文本回复、不派 Task →
-# 没 ToolPart.state.output → 合规计数 → workflow_failed（e2e 实证 3× compliance）。
-# 单一定义（DRY），bootstrap + next 共用。注意 SPEC §0 真相源：opencode session 落盘的
-# 是 marker 原文（UI 行为），CLI 返的 .prompt 含 Task 指令——by design 不冲突。
-_TASK_TOOL_INSTRUCTION = (
-    "【Orca 节点执行】请用 task 工具派一个子代理执行本节点，"
-    "子代理的输出即本节点的输出。不要自己直接回答。\n\n"
-)
+# compact prompt 交付（SPEC §2.1 / §2.6.2，2026-07-08）：bootstrap + next 不再把
+# 整段渲染后的 prompt 经 .prompt 注入主 session（长 prompt 会全量进主 session 上下文且
+# 永久驻留对话历史）。改为 Orca 把渲染后 prompt 落盘到 <prompts_dir>/<node>.md，主 session
+# 只收一句 host-facing **指针**（"派子代理读 <path> 执行"），子代理从文件读完整指令。
+# 两种 agent 形态（agent:<name> 引用 md / inline prompt）渲染时无差别（compile 已扁平化）。
+# plugin 仍读 reply.prompt（现是指针文本），零改动。
 
 
-def _with_task_instruction(prompt: str | None) -> str | None:
-    """把 Task-tool 指令 prepend 到节点 prompt（Bug G 闭环）。
+def _prompts_dir_for(tape_path: Path, run_id: str) -> Path:
+    """compact prompt 文件目录：``<rundir>/<run_id>/prompts/``（rundir = tape 同目录）。"""
+    return Path(tape_path).parent / run_id / "prompts"
 
-    SPEC §2.1 / §3：bootstrap + next 返的 prompt 文本须含「用 subagent」提醒，模型
-    才会派 Task 工具子代理执行节点（节点输出 = subagent output）。无 prompt → 返 None。
+
+def _build_pointer(result: Any) -> str:
+    """把 StepResult(prompt_file, resources_root) 拼成 host-facing 指针文本。
+
+    主 session 收到这句即知：派 task 子代理、读哪个文件、可选资源目录。子代理读文件执行，
+    其输出即本节点输出（仍经 plugin 的 ToolPart.state.output 提取 → next --output）。
     """
-    if not prompt:
-        return prompt
-    return _TASK_TOOL_INSTRUCTION + prompt
+    lines = [
+        "【Orca 节点执行】请用 task 工具派一个子代理执行本节点，不要自己直接回答。",
+        f"完整节点指令已写入：{result.prompt_file}",
+        "请子代理先 Read 该文件，按其要求执行；子代理的输出即本节点的输出。",
+    ]
+    if result.resources_root:
+        lines.append(f"附资源目录（脚本/参考，按需 Read）：{result.resources_root}")
+    return "\n".join(lines) + "\n"
+
+
+def _reply_prompt(result: Any) -> str | None:
+    """compact：``prompt_file`` 给定 → 返指针；否则 inline 回退全量 ``prompt``。
+
+    inline 回退仅在 advance_step 未传 prompts_dir 时出现（daemon 形态 / 直调单测）；
+    生产路径（bootstrap/next）恒传 prompts_dir → 恒走指针。
+    """
+    if result.prompt_file:
+        return _build_pointer(result)
+    return result.prompt
 
 
 def _default_tape_path(run_id: str) -> Path:
@@ -145,24 +163,13 @@ def _release_flock(fd: Any) -> None:
 
 
 def _classify_in_session_error(exc: InSessionError) -> str:
-    """把 ``InSessionError`` 的消息映射到 SPEC §2.5 表的 ``error_type``。
+    """读 ``exc.error_kind``（SPEC §2.5 ``error_type``），取代脆弱的消息子串匹配。
 
-    step.py 零改（ADR 方案 E），故按**消息关键短语**分类（消息字符串稳定，由本模块与
-    step.py 共同维护——添加新 raise 时同步更新此表）。匹配不到 → ``internal_error``
+    分类由 step.py 各 raise 处显式传 ``error_kind=ERR_*`` 携带（类型安全：加新 kind = 加
+    常量 + raise 处传，不必维护本函数的关键词表）。``error_kind`` 缺省 → ``internal_error``
     （兜底，fail loud 不静默）。
     """
-    msg = str(exc)
-    if "声明了 output_schema" in msg or "非 JSON" in msg:
-        return "output_schema_mismatch"
-    if "不在 workflow.nodes" in msg or "仅支持 agent 节点" in msg:
-        return "unsupported_node_kind"
-    if (
-        "状态腐败" in msg
-        or "无 running 节点" in msg
-        or "多个 running" in msg
-    ):
-        return "state_corrupt"
-    return "internal_error"
+    return getattr(exc, "error_kind", None) or "internal_error"
 
 
 async def _emit_workflow_failed(
@@ -265,7 +272,8 @@ def bootstrap(
         fd, _ = acquired
         try:
             result = asyncio.run(_advance_and_emit(bus, wf, tape, output=None, inputs=inp,
-                                                   run_id=run_id, elapsed=0.0))
+                                                   run_id=run_id, elapsed=0.0,
+                                                   prompts_dir=_prompts_dir_for(tape_path, run_id)))
         except InSessionError as e:
             # bootstrap 失败 = 配置坏（如 entry 不是 agent 节点），fail loud。
             asyncio.run(_emit_workflow_failed(
@@ -317,9 +325,11 @@ def bootstrap(
         }
         if result.node:
             reply["node"] = result.node
-        if result.prompt:
-            # Bug G 闭环：bootstrap 返的 entry prompt prepend Task-tool 指令。
-            reply["prompt"] = _with_task_instruction(result.prompt)
+        prompt_text = _reply_prompt(result)
+        if prompt_text:
+            reply["prompt"] = prompt_text
+        if result.prompt_file:
+            reply["prompt_file"] = result.prompt_file
         typer.echo(json.dumps(reply, ensure_ascii=False))
     finally:
         try:
@@ -369,6 +379,7 @@ def next(
     try:
         result, compliance_failed = asyncio.run(_next_in_critical_section(
             bus, tape_obj, run_id, normalized_output, inp, start_ts, mpath,
+            _prompts_dir_for(tape_path, run_id),
         ))
     except InSessionError as e:
         error_type = _classify_in_session_error(e)
@@ -387,9 +398,11 @@ def next(
     reply: dict[str, Any] = {"done": result.done or compliance_failed}
     if result.node:
         reply["node"] = result.node
-    if result.prompt:
-        # Bug G 闭环：next 返的下一节点 prompt prepend Task-tool 指令。
-        reply["prompt"] = _with_task_instruction(result.prompt)
+    prompt_text = _reply_prompt(result)
+    if prompt_text:
+        reply["prompt"] = prompt_text
+    if result.prompt_file:
+        reply["prompt_file"] = result.prompt_file
     if result.reason:
         reply["reason"] = result.reason
     typer.echo(json.dumps(reply, ensure_ascii=False))
@@ -402,11 +415,12 @@ def next(
 
 async def _advance_and_emit(
     bus: EventBus, wf, tape: Tape, *, output: str | None,
-    inputs: dict, run_id: str, elapsed: float,
+    inputs: dict, run_id: str, elapsed: float, prompts_dir: Path | None = None,
 ):
     """调 advance_step + emit_batch（单次 write 原子化，B1）。"""
     result = advance_step(
         tape, wf, output=output, inputs=inputs, run_id=run_id, elapsed=elapsed,
+        prompts_dir=prompts_dir,
     )
     if result.emits:
         await bus.emit_batch(_emits_to_event_datas(result.emits))
@@ -416,6 +430,7 @@ async def _advance_and_emit(
 async def _next_in_critical_section(
     bus: EventBus, tape: Tape, run_id: str, output: str | None,
     inputs: dict, start_ts: float, mpath: Path | None,
+    prompts_dir: Path | None = None,
 ):
     """flock 临界区内的 next 主体：advance + emit_batch + marker RMW（N2）+ 合规计数 (F11)。
 
@@ -437,7 +452,7 @@ async def _next_in_critical_section(
     wf = load_workflow(marker.yaml)
     result = advance_step(
         tape, wf, output=output, inputs=inputs, run_id=run_id,
-        elapsed=now_monotonic() - start_ts,
+        elapsed=now_monotonic() - start_ts, prompts_dir=prompts_dir,
     )
     if result.emits:
         # B1 单次 write 原子化整批 [nc, rt, ns] / [nc, rt, workflow_completed]。

@@ -1,6 +1,12 @@
 # In-Session Shell 设计草稿（v7：闭环 spec-review r2，多 command 架构）
 
-> **状态**：草稿 v8（2026-07-07）。v7 经 e2e 发现 `command.execute.before` 在 opencode 1.14.22 runtime 不触发；补跑 spike 实证 `experimental.chat.messages.transform` 是可用入口；v8 换入口 + 加 `/orca doctor`。**第三轮 review 判 conditional-pass，4 契约 blocker（B1 改写语义/B2 marker 规范/B3 doctor 盲区/B4 sessionID 全链）+ 6 major 已全部闭环**（§2.6.1 marker 规范 / §2.6.2 改写语义+sessionID 契约 / §2.7 doctor 重写 / §2.1 bootstrap 签名 / §0 真相源声明 / §6 fsync 措辞 / §2.5 终态后 next）。review 明示"无需新 spike、可直接进实现"。
+> **状态**：草稿 v8.x（2026-07-08，compact prompt 增量）。v8（2026-07-07）换入口 + 加 doctor；v8.x 在 v8 之上做 **compact prompt 交付**（D-v8.x-1）+ 修 **缺字段脏崩溃**（D-v8.x-2）。两改动见下方「v8.x 关键决策」；实施计划 [`docs/plans/2026-07-08-in-session-compact-prompt.md`](../plans/2026-07-08-in-session-compact-prompt.md)，e2e 实验脚本 `/tmp/orca-compact-exp/repro.sh`。
+>
+> **v8.x 关键决策（在 v8 之上）**：
+> - **D-v8.x-1（compact prompt 交付）**：bootstrap/next 不再把**整段渲染后 prompt** 经 `.prompt` 注入主 session（长 prompt 全量进主 session 上下文且永久驻留对话历史）。改为 Orca 把渲染后 prompt 落盘到 `<rundir>/<run_id>/prompts/<node>.md`，主 session 只收一句 host-facing **指针**（"用 task 工具派子代理，完整指令已写入 `<path>`，先 Read 再执行"），子代理从文件读完整指令。`StepResult` 加 `prompt_file`/`resources_root`；CLI reply 加 `.prompt_file`；plugin **零改动**（仍读 `.prompt`，现是指针文本）。两种 agent 形态（`agent:<name>` 引用 md / inline `prompt:`）渲染无差别——compile 已把 md 扁平化进 `node.prompt`，`render_prompt` 统一渲染（§2.1）。inline 回退（`prompts_dir=None`，daemon/单测）仍返全量 `.prompt`。
+> - **D-v8.x-2（缺字段干净 fail loud）**：`output_schema` 声明时 `_parse_output` 加 **jsonschema 字段校验**（缺字段在 parse 期被抓，归类 `output_schema_mismatch`）；`_render_or_fail` 把 render 期 `ExecError`（下游 prompt 引用上游缺失字段 / 模板错）包成 `InSessionError("渲染节点…")` → 走 cli.py 既有 `except InSessionError` 干净路径（emit `workflow_failed(render_error)` + 清 marker）。修掉 v8 的脏崩溃（ExecError 逃逸 → 无 workflow_failed、不清 marker、tape 悬挂、下次 `/orca run` 卡死）。不接 LLM `validator`——in-session 主 session 自己当判官，子代理在 turn 内据 rendered prompt 里的 output_schema 要求自我纠正；产不对则 Orca 层 fail loud（不做重试循环）。
+
+> **状态（v8，2026-07-07）**：草稿 v8（2026-07-07）。v7 经 e2e 发现 `command.execute.before` 在 opencode 1.14.22 runtime 不触发；补跑 spike 实证 `experimental.chat.messages.transform` 是可用入口；v8 换入口 + 加 `/orca doctor`。**第三轮 review 判 conditional-pass，4 契约 blocker（B1 改写语义/B2 marker 规范/B3 doctor 盲区/B4 sessionID 全链）+ 6 major 已全部闭环**（§2.6.1 marker 规范 / §2.6.2 改写语义+sessionID 契约 / §2.7 doctor 重写 / §2.1 bootstrap 签名 / §0 真相源声明 / §6 fsync 措辞 / §2.5 终态后 next）。review 明示"无需新 spike、可直接进实现"。
 > **v8 关键决策（在 v7 之上）**：
 > - **D-v8-1（入口机制换）**：opencode 入口从 `command.execute.before`（spike 实证 1.14.22 不触发）改为 **`experimental.chat.messages.transform`**（spike `/tmp/orca-xform` 实证可改写、模型未见原文）。单 `/orca` 命令 + marker 派发，加 command = CLI 子命令 + plugin 派发分支两处。
 > - **D-v8-2（doctor 自检）**：新增 `/orca doctor`（marker→transform→`orca in-session doctor` CLI→报告），迅速验 hooks 注册/生效/CLI 通。自证：能回报告即入口链路活。
@@ -69,14 +75,14 @@
 **对外**（hook/plugin 调用）唯一两个 CLI 子命令：
 ```
 bootstrap <wf.yaml> [--inputs '{}'] [--owner <key>] [--model <m>] [--session-id <sid>]
-     -> {run_id, tape, done:false, node, prompt}
+     -> {run_id, tape, done:false, node, prompt, prompt_file?}
   # 首次启动：gen run_id + tape 路径 + emit workflow_started + node_started(entry)
   # → 写激活标记（owner=文件名 key：opencode=sessionID / CC=run_id；session_id 入 marker 供子 session 过滤）
-  # → stdout JSON（entry prompt）。幂等：同 owner + realpath(yaml) 再次 bootstrap 不重发（按标记已有 run_id 复用）。
+  # → stdout JSON。幂等：同 owner + realpath(yaml) 再次 bootstrap 不重发（按标记已有 run_id 复用）。
   # plugin 调用：`orca in-session bootstrap <wf> --owner <sid> --session-id <sid> --model <m>`（§2.6.2 sessionID 传递契约）
 
 next --tape <p> --run-id <r> [--output <out>] [--inputs '{}']
-     -> {done: bool, node?, prompt?, reason?}
+     -> {done: bool, node?, prompt?, prompt_file?, reason?}
   # per-call：open(resume=True) + flock → 委托 advance_step(output=<normalized>) 一次原子决策
   #   → **单次 write 原子 emit** [nc,rt,ns]（Tape.append_batch，见 §6 / B1）→ close → stdout JSON
   # **--output normalize（B2 闭环）**：CLI 入口把 `--output ""`（空串）与 `--output` 缺失
@@ -88,9 +94,11 @@ next --tape <p> --run-id <r> [--output <out>] [--inputs '{}']
   #   3. idempotent-replay：无 output 但有 running（hook 重发/宿主丢失 prompt）→ 不 emit，重发 running 节点 prompt
 ```
 
-**关键（消除中断反例 A，D-v4-1 保留）**：observe 不再独立落盘——output 直接作 `next --output` 入参，next 内一次原子批量 emit `[nc,rt,ns]`。任何时刻 tape 只有完整 step（nc 后必跟 rt+ns 同批 emit），无"nc 落盘但 rt 没落"的悬空态。`advance_step` 是既有原子纯函数（`orca/run/step.py`，**不改**），薄 CLI 只包 flock+emit+JSON。
+**compact prompt 交付（v8.x D-v8.x-1，2026-07-08）**：`.prompt` 不再是整段渲染后的节点 prompt 全文，而是 **host-facing 指针**（"用 task 工具派子代理，完整指令已写入 `<prompt_file>`，先 Read 再执行；附资源目录 `<resources_root>`"）。Orca 把渲染后 prompt 落盘到 `<rundir>/<run_id>/prompts/<node>.md`（loop 时同节点覆盖），回复另带 `.prompt_file` 字段（plugin 可选 log，不改写用 `.prompt`）。主 session 上下文只过指针、不膨胀；子代理从文件读完整渲染指令（Jinja 已由 Orca 解析，上游 output 已插值）。inline 回退（daemon / `advance_step(prompts_dir=None)`）仍返全量 `.prompt`、无 `.prompt_file`。
 
-**所有宿主、所有 hook/plugin，都只映射到 bootstrap/next。** 无 model-facing 工具、无第三操作（bootstrap 是 next 的一个分支，独立成 CLI 子命令仅为首次拿 entry prompt 的便利）。「提醒用 subagent」折进 `next`/`bootstrap` 返回的 prompt 文本。
+**关键（消除中断反例 A，D-v4-1 保留）**：observe 不再独立落盘——output 直接作 `next --output` 入参，next 内一次原子批量 emit `[nc,rt,ns]`。任何时刻 tape 只有完整 step（nc 后必跟 rt+ns 同批 emit），无"nc 落盘但 rt 没落"的悬空态。`advance_step` 是既有原子纯函数（`orca/run/step.py`，决策逻辑不改），薄 CLI 只包 flock+emit+JSON+指针拼装。
+
+**所有宿主、所有 hook/plugin，都只映射到 bootstrap/next。** 无 model-facing 工具、无第三操作（bootstrap 是 next 的一个分支，独立成 CLI 子命令仅为首次拿 entry prompt 的便利）。「用 task 派子代理」提醒折进指针文本（compact 后 `.prompt` 即指针）。
 
 ### 2.2 宿主 hook → 薄 CLI 操作映射
 
@@ -167,7 +175,9 @@ CC 的 `PostToolUse(Task)`（产 output）与 `Stop`（推进 next）是**两个
 
 | 触发 | error_type | 来源 |
 |---|---|---|
-| output_schema 解析失败 | `output_schema_mismatch` | step.py `_parse_output` raise |
+| output_schema 解析失败（非 JSON） | `output_schema_mismatch` | step.py `_parse_output` raise |
+| output_schema 字段违反（jsonschema 校验，缺字段/类型错，v8.x D-v8.x-2） | `output_schema_mismatch` | step.py `_parse_output` jsonschema.validate raise |
+| 下游 prompt 渲染失败（引用上游缺失字段 / 模板错，v8.x D-v8.x-2） | `render_error` | step.py `_render_or_fail` 把 `ExecError` 包成 `InSessionError("渲染节点…")` |
 | 不支持节点（script/parallel/gate） | `unsupported_node_kind` | step.py `_check_agent_node` raise |
 | 状态腐败（output 给但无 running） | `state_corrupt` | step.py branch raise |
 | subagent 合规超限（N 次无 output） | `subagent_compliance` | marker 计数器 ≥3，CLI 主动 emit |

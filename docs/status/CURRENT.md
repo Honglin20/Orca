@@ -7,6 +7,12 @@
 
 ---
 
+## ✅ 完成（2026-07-08）：in-session compact prompt（文件交付 + 缺字段干净 fail loud，e2e PASS）
+
+in-session 节点 prompt 改 **compact 交付**：渲染后 prompt 落盘 `<rundir>/<run_id>/prompts/<node>.md`，主 session 只收指针（不膨胀上下文）；两 agent 形态渲染无差别、plugin 零改。**顺手修脏崩溃 bug**：`output_schema` 缺字段/畸形、render 引用缺失字段 → 现干净 `workflow_failed`（`output_schema_mismatch`/`render_error`）+ 清 marker，不再卡死。不接 LLM validator（主 session 自判）。**消既有债**：`InSessionError.error_kind` 显式字段取代 classifier 消息子串匹配。92 + 851 测试绿，e2e `/tmp/orca-compact-exp/repro.sh` PASS，code-review 🔴（SchemaError）闭环。详见 [CHANGELOG](CHANGELOG.md) + [计划](../plans/2026-07-08-in-session-compact-prompt.md) + SPEC §2.1/§2.5。
+
+---
+
 ## ✅ 主任务完成（2026-07-08）：Web Shell v2 推倒重写 COMPLETE（e2e PASS）
 
 按 SDD 全流程完成：SPEC（`docs/specs/web-shell-v2-spec.md` rev2，spec-review PASS）→ clean-code 分块实现（后端 B1/B2 `c3a738f` + 前端 Chunk A `84a2645` / B `5a26957` / C `01af451` / D `7d76934` / 铁律闭环 `60539b8`）→ test-coverage-e2e 真跑裁决 **3 Must 全 PASS + 铁律 AC 全过**（单 Zustand store、codegen 39==39、grep 0 命中；npm 249 + py web 64 绿）。详见 [release note](../releases/2026-07-08-web-shell-v2.md)。下方各 Chunk 块为实施期记录，已被本 release note 取代。
