@@ -3,6 +3,16 @@
 > 新 session 开工前**必读**此文件 + `CLAUDE.md` + 对应阶段 SPEC。
 > 完成任务后清空本文件（移到 release note），**不积累**。
 
+## 🔥 当前任务（2026-07-08）：in-session 入口重设计（去 transform）+ 部署刚需 —— 计划已写，待确认
+
+spike PASS（`opencode run --command ... --pure`：模型照 prompt-command 调 bootstrap + 派子代理，不读 yaml/不改源码）→ 计划 [`docs/plans/2026-07-08-in-session-entry-redesign-and-deploy.md`](../plans/2026-07-08-in-session-entry-redesign-and-deploy.md)。
+
+**核心决策**：入口（run/status/stop/doctor）改 prompt-command，**删 transform 钩子 + marker**；推进保留 idle/Stop（B1，稳定钩子）；session 绑定 first-idle-claims；权限硬兜底；README 写 CC vs opencode 差异。涵盖全部遗留问题：Q1 socket 短路径 / Q2 Web 远程化+host-port 统一 / Q3 前端产物进 git（`pip install -e .` 免 build）/ Q4 Web 阻塞语义。合计 ~6.5d（批 A 部署 2.5d + 批 B 重设计 4d）。**待用户确认计划后开工。**
+
+**待清理**：模型误改的 `cli.py`/`orca.ts`/`analyzer.md`（`/orca status` 跑偏所致，非有意）待用户确认 revert。
+
+---
+
 > **接口整理前置（铁律）**：每个阶段实施前必须先做接口整理与规划——涉及接口改造的（schema / 事件 / 错误信封 / 能力声明 / 状态机 / 退出码 / widget API 等）**必须先把接口定义讨论清楚并写进 SPEC 或 ADR**，明确「真相源在哪一层、其他层只翻译不重新分类」，不允许实施期临时定义、不允许新旧接口并存。已识别的接口风险见各 phase 待办前置 ADR（如 phase-11 错误接口三层映射 / phase-12 capabilities 替换清单）。
 
 ---

@@ -48,7 +48,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from orca.chart._limits import SOCK_PATH_MAX
+from orca.chart._paths import chart_sock_path
 from orca.exec.claude.accumulator import RunAccumulator
 from orca.exec.claude.result_extractor import extract_and_validate
 from orca.exec.context import RunContext
@@ -389,14 +389,17 @@ def _normalize_usage(usage: dict, cost: float) -> dict[str, Any]:
 
 
 def _resolve_chart_sock_path(runs_dir: Path | None, run_id: str) -> str:
-    """phase-13 §2 / §7.7：算 ``runs/<run_id>.sock`` 绝对路径，过长则 log warning + 返回空。
+    """phase-13 §2 / §7.7（2026-07-08 短路径化）：算 chart ingestor socket 绝对路径。
+
+    与 ``orca.exec.script._resolve_chart_sock_path`` 逐字同语义（SPEC §11 #9 两 executor 对称）。
+
+    socket 走 ``<tmp>/orca-<sha1(run_id)[:10]>.sock``（``orca.chart._paths.chart_sock_path``），
+    与 runs 目录解耦——规避深服务器路径致 ``sun_path`` 超限。两端（RunManager bind + 此处
+    env 注入）同源。
 
     - ``runs_dir is None`` → 返回空串（不注 ``ORCA_CHART_SOCK`` env，向后兼容；
       script 端 render_chart 会 fail loud 提示）。
-    - resolved path > ``SOCK_PATH_MAX``（90 字节）→ log warning 并返回空串。
-      **不 raise**（executor 路径只生成路径，ingestor 启动时 RunManager 已先做过 fail loud
-      check；此处 executor 二次发现过长 → 退化为不注 env，让 script 端 §7.1 fail loud
-      而非 executor 阻塞整个 run）。
+    - 路径恒短（temp 目录 + 10 hex），不再有"过长退化"分支。
 
     返回的路径用于：
       1. ``build_env_overlay(chart_sock=...)`` → 子进程 ``ORCA_CHART_SOCK``
@@ -404,18 +407,7 @@ def _resolve_chart_sock_path(runs_dir: Path | None, run_id: str) -> str:
     """
     if runs_dir is None:
         return ""
-    sock_path = (runs_dir / f"{run_id}.sock").resolve()
-    resolved = str(sock_path)
-    if len(resolved) > SOCK_PATH_MAX:
-        # executor 路径不 raise（避免阻塞 run）；RunManager 启动 ingestor 前已先 fail loud。
-        logger.warning(
-            "phase-13: chart sock path 过长（%d > %d 字节）：%r；"
-            "退化为不注 ORCA_CHART_SOCK env（script 端 render_chart 会 fail loud）。"
-            "建议改 ORCA_RUNS_DIR 到短路径（如 /tmp/orca-runs/）。",
-            len(resolved), SOCK_PATH_MAX, resolved,
-        )
-        return ""
-    return resolved
+    return str(chart_sock_path(run_id).resolve())
 
 
 def _append_ask_user_instruction(prompt: str, run_id: str, node: str) -> str:

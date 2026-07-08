@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, Iterator, Literal
 
 from orca.compile import ConfigurationError, load_workflow
 from orca.chart._limits import SOCK_PATH_MAX
+from orca.chart._paths import chart_sock_path
 from orca.events.bus import EventBus
 from orca.events.chart_ingestor import chart_ingestor, make_crash_callback
 from orca.events.replay import apply_event, replay_state
@@ -302,15 +303,17 @@ class RunManager:
         # phase-13 §3.1：起 per-run chart ingestor（resume 模式不起，SPEC §3.1）。
         # sock_path 与 start_run 生命周期一致：teardown 时 cancel + unlink。
         if not resume:
-            sock_path = self._runs_dir / f"{run_id}.sock"
-            # SPEC §7.7：sock path 长度检查（macOS sun_path=104 / Linux 108，取 90 留余量）。
-            # 在 ingestor 启动前 fail loud——避免 ``asyncio.start_unix_server`` 抛 OSError 后
-            # crash callback 进入无限重起循环。错误信息提示用户改 ORCA_RUNS_DIR。
+            # phase-13 §7.7（2026-07-08 短路径化）：socket 走 ``<tmp>/orca-<hash>.sock``
+            # （``chart_sock_path``），与 runs 目录解耦——runs 可能是深服务器路径致 sun_path
+            # 超限。tape/jsonl/prompts 仍在 runs 目录不变。两端（此处 bind + script env）同源。
+            sock_path = chart_sock_path(run_id)
             resolved = str(sock_path.resolve())
             if len(resolved) > SOCK_PATH_MAX:
+                # 防御性兜底：temp 目录路径正常远短于上限；若 TMPDIR 异常长仍 fail loud，
+                # 避免 asyncio.start_unix_server 抛 OSError 触发 crash callback 无限重起。
                 raise RuntimeError(
                     f"socket path 过长（{len(resolved)} > {SOCK_PATH_MAX} 字节）："
-                    f"{resolved!r}。请改 ORCA_RUNS_DIR env 到短路径（如 /tmp/orca-runs/）。"
+                    f"{resolved!r}。请改 TMPDIR env 到短路径。"
                 )
             handle._chart_ingestor = asyncio.create_task(
                 chart_ingestor(sock_path, bus, run_id),
@@ -1273,7 +1276,8 @@ class RunManager:
             except Exception:  # noqa: BLE001 — ingestor task 异常不应阻塞 teardown
                 logger.warning("run %s chart ingestor 异常退出", handle.run_id, exc_info=True)
         # 兜底 unlink socket 文件（crash 重起 task 的 cleanup 不依赖此，但保证 run 结束无残留）。
-        sock_path = self._runs_dir / f"{handle.run_id}.sock"
+        # §7.7 短路径化：socket 在 <tmp>/orca-<hash>.sock（chart_sock_path），与 runs 目录解耦。
+        sock_path = chart_sock_path(handle.run_id)
         try:
             Path(sock_path).unlink(missing_ok=True)
         except OSError as e:  # noqa: BLE001

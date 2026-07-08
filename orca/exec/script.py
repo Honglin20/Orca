@@ -35,7 +35,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from orca.chart._limits import SOCK_PATH_MAX
+from orca.chart._paths import chart_sock_path
 from orca.exec.context import RunContext
 from orca.exec.env import build_env_overlay
 from orca.exec.error import ExecError
@@ -198,29 +198,22 @@ def _try_parse_json(text: str) -> Any:
 
 
 def _resolve_chart_sock_path(runs_dir: Path | None, run_id: str) -> str:
-    """phase-13 §2 / §7.7：算 ``runs/<run_id>.sock`` 绝对路径，过长则 log warning + 返回空。
+    """phase-13 §2 / §7.7（2026-07-08 短路径化）：算 chart ingestor socket 绝对路径。
 
     与 ``orca.exec.claude.executor._resolve_chart_sock_path`` 逐字同语义（DRY：两处共实现
     会绕开 executor-agnostic 契约，SPEC §11 #9 要求两 executor 对称；保持函数级对称）。
 
+    socket 走 ``<tmp>/orca-<sha1(run_id)[:10]>.sock``（``orca.chart._paths.chart_sock_path``），
+    与 runs 目录解耦——规避深服务器路径致 ``sun_path`` 超限。两端（RunManager bind + 此处
+    env 注入）同源，run_id 派生确定性短路径。
+
     - ``runs_dir is None`` → 返回空串（不注 ``ORCA_CHART_SOCK`` env，向后兼容；
       script 端 render_chart 会 fail loud 提示）。
-    - resolved path > ``SOCK_PATH_MAX``（90 字节）→ log warning 并返回空串。**不 raise**
-      （executor 路径只生成路径，ingestor 启动时 RunManager 已先做过 fail loud check）。
+    - 路径恒短（temp 目录 + 10 hex），不再有"过长退化"分支。
     """
     if runs_dir is None:
         return ""
-    sock_path = (runs_dir / f"{run_id}.sock").resolve()
-    resolved = str(sock_path)
-    if len(resolved) > SOCK_PATH_MAX:
-        logger.warning(
-            "phase-13: chart sock path 过长（%d > %d 字节）：%r；"
-            "退化为不注 ORCA_CHART_SOCK env（script 端 render_chart 会 fail loud）。"
-            "建议改 ORCA_RUNS_DIR 到短路径（如 /tmp/orca-runs/）。",
-            len(resolved), SOCK_PATH_MAX, resolved,
-        )
-        return ""
-    return resolved
+    return str(chart_sock_path(run_id).resolve())
 
 
 def _build_spawn_env(

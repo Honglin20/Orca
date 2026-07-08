@@ -37,6 +37,7 @@ from orca.iface.cli.commands import (
     _is_port_free,
     _probe_orca_server,
     _web_autoexit_seconds,
+    resolve_web_endpoint,
 )
 
 runner = CliRunner()
@@ -69,6 +70,62 @@ def wf_path(tmp_path: Path) -> Path:
 
 def _is_httpx_available() -> bool:
     return importlib.util.find_spec("httpx") is not None
+
+
+# ── resolve_web_endpoint（host/port 单一真相源 + 远程可见性）──────────────────
+
+
+class TestResolveWebEndpoint:
+    """``resolve_web_endpoint``：serve/run/open 三路径共用的端点解析（2026-07-08 远程化）。
+
+    覆盖意图：默认 bind 0.0.0.0（远程可见）；--host / ORCA_WEB_HOST 覆盖；display_host
+    在 bind 0.0.0.0 时给实际 IP（ORCA_PUBLIC_HOST 优先）；port --port / ORCA_WEB_PORT 覆盖。
+    """
+
+    def test_defaults_bind_all_interfaces(self, monkeypatch):
+        """无参 → bind 0.0.0.0（远程可访问），port 默认 7428。"""
+        monkeypatch.delenv("ORCA_WEB_HOST", raising=False)
+        monkeypatch.delenv("ORCA_WEB_PORT", raising=False)
+        monkeypatch.delenv("ORCA_PUBLIC_HOST", raising=False)
+        bind, display, port = resolve_web_endpoint(host=None, port=None)
+        assert bind == "0.0.0.0"
+        assert port == DEFAULT_WEB_PORT
+        # display 是某 IP（探测或 loopback），非 0.0.0.0（不能点开）
+        assert display != "0.0.0.0"
+
+    def test_explicit_host_overrides_env_and_default(self, monkeypatch):
+        monkeypatch.setenv("ORCA_WEB_HOST", "9.9.9.9")
+        bind, display, port = resolve_web_endpoint(host="1.2.3.4", port=None)
+        assert bind == "1.2.3.4"
+        assert display == "1.2.3.4"  # 具体地址 → display = bind
+
+    def test_env_host_when_no_flag(self, monkeypatch):
+        monkeypatch.setenv("ORCA_WEB_HOST", "127.0.0.1")
+        bind, display, port = resolve_web_endpoint(host=None, port=None)
+        assert bind == "127.0.0.1"
+        assert display == "127.0.0.1"
+
+    def test_public_host_env_overrides_detection(self, monkeypatch):
+        """bind 0.0.0.0 + ORCA_PUBLIC_HOST → display 用 env（容器/反代场景）。"""
+        monkeypatch.setenv("ORCA_PUBLIC_HOST", "my-server.example.com")
+        bind, display, port = resolve_web_endpoint(host=None, port=None)
+        assert bind == "0.0.0.0"
+        assert display == "my-server.example.com"
+
+    def test_port_flag_overrides_env(self, monkeypatch):
+        monkeypatch.setenv("ORCA_WEB_PORT", "8000")
+        bind, display, port = resolve_web_endpoint(host=None, port=9000)
+        assert port == 9000
+
+    def test_port_env_when_no_flag(self, monkeypatch):
+        monkeypatch.setenv("ORCA_WEB_PORT", "8000")
+        _, _, port = resolve_web_endpoint(host=None, port=None)
+        assert port == 8000
+
+    def test_invalid_port_env_falls_back(self, monkeypatch):
+        monkeypatch.setenv("ORCA_WEB_PORT", "not-a-number")
+        _, _, port = resolve_web_endpoint(host=None, port=None)
+        assert port == DEFAULT_WEB_PORT
 
 
 # ── _web_autoexit_seconds env 解析（AC5 测试加速前置）────────────────────────
@@ -220,7 +277,7 @@ class TestRunWebDefault:
         """默认（无 flag）→ ``_run_web_default`` 调用（非 _run_workflow）。"""
         called = {"web": 0, "tui": 0}
 
-        def _fake_web(config, *, port, stay):
+        def _fake_web(config, *, host, port, stay):
             called["web"] += 1
             return 0
 
@@ -320,9 +377,12 @@ class TestRunWebDefault:
         """无既有 orca server（probe None）→ 进入 ``_serve_and_run_inprocess`` 分支。"""
         calls = {"serve": 0, "args": None}
 
-        async def _fake_serve(config, wf, *, host, port, stay):
+        async def _fake_serve(config, wf, *, bind_host, display_host, port, stay):
             calls["serve"] += 1
-            calls["args"] = {"host": host, "port": port, "stay": stay}
+            calls["args"] = {
+                "bind_host": bind_host, "display_host": display_host,
+                "port": port, "stay": stay,
+            }
             return 0
 
         monkeypatch.setattr(
@@ -418,7 +478,8 @@ class TestServeAndRunInprocess:
             return await _serve_and_run_inprocess(
                 RunConfig(yaml_path=wf_path),
                 wf=None,
-                host="127.0.0.1",
+                bind_host="127.0.0.1",
+                display_host="127.0.0.1",
                 port=12345,
                 stay=False,
             )
@@ -518,7 +579,8 @@ class TestServeAndRunInprocess:
             return await _serve_and_run_inprocess(
                 RunConfig(yaml_path=wf_path),
                 wf=None,
-                host="127.0.0.1",
+                bind_host="127.0.0.1",
+                display_host="127.0.0.1",
                 port=12345,
                 stay=False,
             )
@@ -757,7 +819,7 @@ class TestOrcaOpen:
         )
         monkeypatch.setattr(
             "orca.iface.cli.commands._find_free_port",
-            lambda preferred=None: 12345,
+            lambda preferred=None, bind_host="127.0.0.1": 12345,
         )
 
         def _spawn(host, port):

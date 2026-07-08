@@ -21,6 +21,7 @@ from orca.exec.claude.executor import (
     _resolve_chart_sock_path,
 )
 from orca.chart._limits import SOCK_PATH_MAX
+from orca.chart._paths import chart_sock_path
 from orca.exec.context import RunContext
 from orca.profiles import get_profile
 from orca.profiles.base import CliProfile
@@ -117,14 +118,19 @@ def test_spawn_config_env_overlay_backward_compat_no_kwargs(monkeypatch):
 
 
 def test_resolve_chart_sock_path_returns_resolved(tmp_path):
-    """正常路径 → 返回 resolved 绝对路径（用 /tmp 短路径避免 macOS tmp_path 太长）。"""
+    """runs_dir 给定 → 返回 ``chart_sock_path(run_id)`` 短路径（与 runs_dir 无关）。
+
+    2026-07-08 短路径化：socket 走 ``<tmp>/orca-<hash>.sock``。
+    """
     import hashlib
     h = hashlib.md5(str(tmp_path).encode()).hexdigest()[:6]
     short_dir = Path(f"/tmp/orca-t{h}")
     short_dir.mkdir(parents=True, exist_ok=True)
     try:
+        from orca.chart._paths import chart_sock_path
         out = _resolve_chart_sock_path(short_dir, "demo-1")
-        assert out == str((short_dir / "demo-1.sock").resolve())
+        assert out == str(chart_sock_path("demo-1").resolve())
+        assert len(out) < SOCK_PATH_MAX
     finally:
         import shutil
         shutil.rmtree(short_dir, ignore_errors=True)
@@ -135,20 +141,17 @@ def test_resolve_chart_sock_path_none_returns_empty():
     assert _resolve_chart_sock_path(None, "demo-1") == ""
 
 
-def test_resolve_chart_sock_path_too_long_logs_warning_returns_empty(tmp_path, caplog):
-    """resolved path > SOCK_PATH_MAX → log warning + 返回空串（不 raise，避免阻塞 run）。
+def test_resolve_chart_sock_path_deep_runs_dir_returns_short_path(tmp_path):
+    """深 runs_dir → 仍返回短 ``<tmp>/orca-<hash>.sock``（不再因路径过长退化空串）。
 
-    意图：executor 路径只生成路径，RunManager 启动 ingestor 时已 fail loud。executor 二次
-    发现过长 → 退化为不注 env，让 script 端 §7.1 fail loud（而非 executor 阻塞）。
+    2026-07-08 短路径化回归（与 ScriptExecutor 同语义，SPEC §11 #9）。
     """
-    # 构造极深路径
+    from orca.chart._paths import chart_sock_path
     deep = tmp_path / ("a" * 100)
     deep.mkdir(parents=True, exist_ok=True)
-    with caplog.at_level("WARNING", logger="orca.exec.claude.executor"):
-        out = _resolve_chart_sock_path(deep, "demo-1")
-    assert out == ""
-    # log warning 含 workaround 提示
-    assert any("chart sock path 过长" in r.message or "ORCA_RUNS_DIR" in r.message for r in caplog.records)
+    out = _resolve_chart_sock_path(deep, "demo-1")
+    assert out == str(chart_sock_path("demo-1").resolve())
+    assert len(out) < SOCK_PATH_MAX
 
 
 # ── ClaudeExecutor.exec：env 注入端到端（mock subprocess）─────────────────
@@ -204,7 +207,7 @@ def test_executor_exec_passes_chart_sock_to_spawn_config(monkeypatch, tmp_path):
         assert cfg.env_overlay["ORCA_RUN_ID"] == "demo-xyz"
         assert cfg.env_overlay["ORCA_NODE"] == "train"
         assert "ORCA_SESSION_ID" in cfg.env_overlay  # uuid，不固定值
-        expected_sock = str((short_dir / "demo-xyz.sock").resolve())
+        expected_sock = str(chart_sock_path("demo-xyz").resolve())
         assert cfg.env_overlay["ORCA_CHART_SOCK"] == expected_sock
     finally:
         shutil.rmtree(short_dir, ignore_errors=True)
