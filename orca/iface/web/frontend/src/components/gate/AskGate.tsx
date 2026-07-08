@@ -11,6 +11,7 @@
 import { useEffect, useState } from "react";
 import type { GateState } from "@/types/store-types";
 import { postGateRespond } from "./post-gate-respond";
+import { GateObserveOnlyNotice, useGateWritable } from "./gate-writable";
 
 export function AskGate({ gate }: { gate: GateState }) {
   const hasOptions = Array.isArray(gate.options) && gate.options.length > 0;
@@ -19,6 +20,9 @@ export function AskGate({ gate }: { gate: GateState }) {
   // submitting 仅 UX 反馈，不清 gate（SPEC §1.6）。
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // SPEC web-attach §8 AC11：attached run（``writable=false``）→ 模态显 observe-only，
+  // 禁用提交（agent_ask 也属 gate modal，同 PermissionGate 守卫）。
+  const writable = useGateWritable();
 
   // gate 切换（不同 gate_id）→ 重置 selected 到新 options 首项。
   // 正常情况 resolved→requested 之间 gate 会先变 null（GateDialog 不渲染 AskGate），下次是新 mount；
@@ -32,6 +36,7 @@ export function AskGate({ gate }: { gate: GateState }) {
     const answer = hasOptions ? selected : text;
     if (!answer.trim()) return;
     if (submitting) return;
+    if (!writable) return; // attached read-only：禁提交（与 PermissionGate 同守卫）
     setSubmitting(true);
     setError(null);
     try {
@@ -96,11 +101,12 @@ export function AskGate({ gate }: { gate: GateState }) {
               提交失败：{error}
             </p>
           )}
+          <GateObserveOnlyNotice />
         </div>
         <div className="flex justify-end gap-2 border-t border-slate-200 px-5 py-3">
           <button
             type="button"
-            disabled={submitting}
+            disabled={submitting || !writable}
             onClick={handleSubmit}
             className="rounded bg-indigo-600 px-3 py-1.5 text-sm text-white hover:bg-indigo-700 disabled:opacity-50"
             data-testid="gate-submit"

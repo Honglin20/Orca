@@ -239,6 +239,73 @@ def test_attach_run_id_collision_raises(tmp_path):
             await manager.attach_run(str(tape_path2), run_id=run_id1)
         await manager.shutdown()
 
+
+# ── not-orca-tape：首行非 workflow_started（AC9 / SPEC §6.7 / §2.2 step2）─────────
+
+
+def test_attach_non_workflow_started_first_line_rejected(tmp_path):
+    """首行**完整可解析**但非 ``workflow_started`` → PermissionError('not-orca-tape')。
+
+    SPEC §6.7 / §8 AC9：首行非 Orca tape → 403。routes 层把 PermissionError → 403。
+    本测试断言 RunManager 层的契约：完整首行非 workflow_started → 立即拒（不进 live-pending，
+    不起 follow task）。partial / 空首行走另一条路（live-pending → 5s → corrupted），由
+    test_attach_follow_failures 覆盖。
+    """
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    tape_path = runs_dir / "notorca.jsonl"
+    # 首行是完整合法 JSON Event，但 type=agent_message（非 workflow_started）
+    tape_path.write_text(
+        json.dumps(
+            {
+                "seq": 1,
+                "type": "agent_message",
+                "timestamp": 1.0,
+                "node": "x",
+                "session_id": None,
+                "data": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    manager = _make_manager_with_runs_dir(tmp_path, runs_dir)
+
+    async def go():
+        with pytest.raises(PermissionError, match="not-orca-tape"):
+            await manager.attach_run(str(tape_path), run_id="notorca-fresh")
+        # 未注册进 registry（不留污染）
+        assert "notorca-fresh" not in manager._runs
+        assert len(manager._runs) == 0
+
+    run_async(go())
+
+
+def test_attach_partial_first_line_goes_live_pending(tmp_path):
+    """partial 首行（无完整 \\n） → **不**立即拒，走 live-pending（回归守卫）。
+
+    修复 not-orca-tape 拒绝路径时不能误伤 partial 首行场景：partial 不属「完整可解析非
+    workflow_started」，属 SPEC §2.2 step2 的 live-pending → 5s → corrupted 路径。
+    """
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    tape_path = runs_dir / "partial.jsonl"
+    # partial 首行：非完整 JSON（无换行，writer 还在 flush）
+    tape_path.write_text(
+        '{"seq": 1, "type": "agent_mess', encoding="utf-8"
+    )
+
+    manager = _make_manager_with_runs_dir(tmp_path, runs_dir)
+
+    async def go():
+        # 不抛——partial 走 live-pending
+        run_id = await manager.attach_run(str(tape_path), run_id="partial-run")
+        handle = manager.get_handle(run_id)
+        assert handle is not None
+        assert handle.status == "live-pending"
+        await manager.shutdown()
+
     run_async(go())
 
 

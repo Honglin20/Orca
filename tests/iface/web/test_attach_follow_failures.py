@@ -150,6 +150,68 @@ def test_follow_partial_first_line_5s_not_orca_tape(tmp_path):
     run_async(go())
 
 
+def test_follow_partial_then_complete_non_wf_started_rejected(tmp_path):
+    """partial 首行写完后是**非 workflow_started** 完整事件 → follow 立即 not-orca-tape。
+
+    SPEC §6.7 / §8 AC9 守卫：upfront reject 只能挡住 probe 时已 complete 的非 wf-started
+    首行；probe 时仍 partial（writer 还在 flush）→ first_event=None → live-pending → follow。
+    若 writer 补完的整行 parse 出来不是 workflow_started，follow 必须立即拒（不 relay、
+    不待 5s 空闲超时——事件一旦 relay 会污染客户端 fold）。本测试覆盖该 partial→complete
+    非 wf-started 路径。
+    """
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    tape_path = runs_dir / "pl.jsonl"
+    # 初始 partial 半行（probe 时 first_event=None → live-pending → follow 起来）
+    tape_path.write_text('{"seq": 1, "type": "agent_mes', encoding="utf-8")
+
+    manager = _make_manager_with_runs_dir(tmp_path, runs_dir)
+
+    async def go():
+        run_id = await manager.attach_run(str(tape_path), run_id="pl-run")
+        handle = manager.get_handle(run_id)
+        assert isinstance(handle, AttachedRunHandle)
+        assert handle.status == "live-pending"
+        # 订阅 bus：捕获 follow relay 的事件（验证非 wf-started 首事件**不被 relay**）
+        sub = handle.bus.subscribe()
+        received: list = []
+
+        async def drain() -> None:
+            async for ev in sub.events():
+                received.append(ev)
+                if ev.type == "error":
+                    return
+
+        drainer = asyncio.create_task(drain())
+        # 补完首行：完整合法 JSON，但 type=agent_message（非 workflow_started）
+        with tape_path.open("a", encoding="utf-8") as f:
+            f.write(
+                'sage", "timestamp": 1.0, "node": "x", "session_id": null, "data": {}}\n'
+            )
+        # 等 follow poll（0.3s）读增量 + parse → 立即 not-orca-tape（不待 5s）
+        for _ in range(30):
+            if handle.terminal:
+                break
+            await asyncio.sleep(0.1)
+        # 让 drainer 收尾（error 事件已 relay）
+        try:
+            await asyncio.wait_for(drainer, timeout=2.0)
+        except asyncio.TimeoutError:
+            drainer.cancel()
+        # 立即拒：terminal=corrupted / status=failed / error=not-orca-tape
+        assert handle.terminal == "corrupted"
+        assert handle.status == "failed"
+        assert handle.error == "not-orca-tape"
+        # 关键：非 wf-started 首事件**未被 relay**（不污染客户端 fold）。
+        # bus 上只应有 follow emit 的 ``error`` 事件（not_orca_tape），无 ``agent_message``。
+        types = [e.type for e in received]
+        assert "agent_message" not in types
+        assert "error" in types
+        await manager.shutdown()
+
+    run_async(go())
+
+
 def test_follow_inode_change_rename_detected(tmp_path):
     """tape rename（inode 变化）→ corrupted。"""
     runs_dir = tmp_path / "runs"

@@ -274,6 +274,64 @@ describe("GateDialog — 不乐观更新（SPEC §1.6 铁律）", () => {
   });
 });
 
+// ── writable=false（attached run）→ AskGate / PermissionGate 共用 observe-only 守卫 ──
+// SPEC web-attach §8 AC11 / §3：attached run writable=false → gate modal（不仅 PermissionGate）
+// 显 observe-only + 禁提交。AskGate 也属 gate modal，必须有同款守卫（DRY：共享 hook + 组件）。
+describe("GateDialog — writable=false observe-only（SPEC web-attach §8 AC11）", () => {
+  test("AskGate writable=false → 显 observe-only + 禁提交 + 不发 POST", async () => {
+    const fetchSpy = vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+
+    // 先标 writable=false（模拟 attached run meta）
+    useWorkflowStore.setState({ writable: false });
+    useWorkflowStore
+      .getState()
+      .processEvent(gateRequestedEvent("agent_ask", ASK_GATE_OPTIONS));
+    render(<GateDialog />);
+
+    // observe-only 提示出现
+    expect(screen.getByTestId("gate-observe-only")).toBeInTheDocument();
+    expect(screen.getByTestId("gate-observe-only").textContent).toContain(
+      "observe-only",
+    );
+    // 提交按钮 disabled
+    expect(screen.getByTestId("gate-submit")).toBeDisabled();
+    // 点提交（即使强制 enable）也不会发 POST——handleSubmit 内 !writable 守卫
+    screen.getByTestId("gate-submit").click();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test("PermissionGate writable=false → observe-only 仍工作（共享组件不回归）", () => {
+    useWorkflowStore.setState({ writable: false });
+    useWorkflowStore
+      .getState()
+      .processEvent(gateRequestedEvent("tool_permission", TOOL_PERMISSION_GATE));
+    render(<GateDialog />);
+    expect(screen.getByTestId("gate-observe-only")).toBeInTheDocument();
+    // 所有 4 按钮均 disabled
+    for (const ans of ["allow", "deny", "edit", "skip"]) {
+      expect(screen.getByTestId(`gate-${ans}`)).toBeDisabled();
+    }
+  });
+
+  test("writable=true（in-process）→ AskGate 不显 observe-only + 可提交", async () => {
+    const fetchSpy = vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, gate_id: "g2" }), { status: 200 }),
+    );
+    useWorkflowStore.setState({ writable: true });
+    useWorkflowStore
+      .getState()
+      .processEvent(gateRequestedEvent("agent_ask", ASK_GATE_OPTIONS));
+    render(<GateDialog />);
+    expect(screen.queryByTestId("gate-observe-only")).not.toBeInTheDocument();
+    expect(screen.getByTestId("gate-submit")).not.toBeDisabled();
+    screen.getByTestId("gate-submit").click();
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+  });
+});
+
 // ── D1：完整 e2e（requested → modal open → answer → gate_response sent → resolved → close + toast）──
 describe("GateDialog —— D1 完整 e2e 流程", () => {
   test("requested → 弹窗 → 提交 answer → POST 发出 → resolved → 关闭 + toast", async () => {

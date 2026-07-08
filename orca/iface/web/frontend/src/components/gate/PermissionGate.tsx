@@ -7,8 +7,8 @@
 
 import { useState } from "react";
 import type { GateState } from "@/types/store-types";
-import { useWorkflowStore } from "@/stores/workflow-store";
 import { postGateRespond } from "./post-gate-respond";
+import { GateObserveOnlyNotice, useGateWritable } from "./gate-writable";
 
 /** 工具权限 4 选项（对齐 hook 桥 allow/deny + 扩展 edit/skip）。 */
 type PermissionAnswer = "allow" | "deny" | "edit" | "skip";
@@ -26,7 +26,7 @@ export function PermissionGate({ gate }: { gate: GateState }) {
   const [error, setError] = useState<string | null>(null);
   // SPEC web-attach §8 AC11：attached run（``writable=false``）→ 模态显 observe-only，
   // 禁用提交按钮（用户应在 run 自己的 shell 作答）。
-  const writable = useWorkflowStore((s) => s.writable);
+  const writable = useGateWritable();
 
   const tool = String(gate.context?.tool ?? "<unknown>");
   const toolInput = gate.context?.tool_input ?? {};
@@ -80,14 +80,7 @@ export function PermissionGate({ gate }: { gate: GateState }) {
               提交失败：{error}
             </p>
           )}
-          {!writable && (
-            <p
-              className="mt-2 text-xs text-amber-700"
-              data-testid="gate-observe-only"
-            >
-              observe-only（attached run）—— 请在该 run 自己的 shell 作答
-            </p>
-          )}
+          <GateObserveOnlyNotice />
         </div>
         <div className="flex justify-end gap-2 border-t border-slate-200 px-5 py-3">
           {BUTTONS.map((b) => (

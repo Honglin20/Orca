@@ -62,10 +62,14 @@ class WebServer:
         # WS → 当前订阅。一个 WS 同时只订阅一个 run（subscribe 切换覆盖旧订阅）。
         self._subs: dict[WebSocket, _RunSubscription] = {}
         # D4 WS 事件驱动 auto-exit：任一 WS connect/disconnect 重置计时；
-        # ``now - last_ws_activity_at > N AND run.terminal`` → 进程退出（``orca run`` web
-        # 默认路径用，SPEC §0 D4 / §4 step4）。初值 = 构造时刻，让无 WS 接入的窗口也计时。
-        # 单调钟（不受系统时间回拨影响）；``orca run`` 进程读此属性判退出。
+        # ``now - last_ws_activity_at > N AND run.terminal AND 无活跃 WS`` → 进程退出
+        # （``orca run`` web 默认路径用，SPEC §0 D4 / §4 step4 / §8 AC5 负向）。
+        # 初值 = 构造时刻，让无 WS 接入的窗口也计时。单调钟（不受系统时间回拨影响）。
         self.last_ws_activity_at: float = time.monotonic()
+        # **活跃 WS 连接计数**（SPEC §8 AC5 负向「有活跃 WS 不退」）：connect++ / disconnect--。
+        # 仅当 ``active_ws_count == 0`` 时 auto-exit 计时窗口才生效——长存活 WS 不会因为
+        # 「connect 时刻已超过 N 秒」被误判为可退（修复旧版只 touch 不计数的缺陷）。
+        self.active_ws_count: int = 0
 
     def _touch_ws_activity(self) -> None:
         """重置 WS 活动计时（connect/disconnect 调用）。"""
@@ -77,9 +81,13 @@ class WebServer:
         断开（WebSocketDisconnect / 异常）→ 清理当前订阅（cancel pump），无 leaked task。
         """
         await ws.accept()
-        # connect → 重置 auto-exit 计时（D4）。
-        self._touch_ws_activity()
         try:
+            # connect → 计数 +1 + 重置 auto-exit 计时（D4 / §8 AC5 负向：active WS → no exit）。
+            # increment 在 try 内：accept 成功后到此处无 await，asyncio cancel 不会插队；
+            # 但放进 try 确保「increment 与 decrement 经同一 try/finally 配对」不变量显式
+            # （任何退出路径 finally 都能见到计数并 -1，不靠 try 外的副作用）。
+            self.active_ws_count += 1
+            self._touch_ws_activity()
             while True:
                 msg = await ws.receive_json()
                 await self._dispatch(ws, msg)
@@ -89,8 +97,11 @@ class WebServer:
             logger.warning("ws_endpoint 异常，连接将清理", exc_info=True)
         finally:
             await self._cleanup(ws)
-            # disconnect → 重置 auto-exit 计时（D4）。无论是否曾经订阅都 touch——
-            # 任何 WS 来过又走都算"客户端活跃过"，给浏览器重连窗口。
+            # disconnect → 计数 -1 + 重置 auto-exit 计时（D4）。无论是否曾经订阅都 touch——
+            # 任何 WS 来过又走都算"客户端活跃过"，给浏览器重连窗口。计数 clamp 至 0
+            # （防御性：异常路径下双 decrement 不应变负）。
+            if self.active_ws_count > 0:
+                self.active_ws_count -= 1
             self._touch_ws_activity()
 
     async def _dispatch(self, ws: WebSocket, msg: dict) -> None:

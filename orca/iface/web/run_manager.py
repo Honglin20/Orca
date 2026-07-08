@@ -448,6 +448,15 @@ class RunManager:
         # 单次扫：同时取 first_event + existing_terminal（MAJOR 6 修复，避免两次全扫）。
         first_event, existing_terminal = _probe_head_and_terminal(resolved)
 
+        # SPEC §6.7 / §2.2 step2 / §8 AC9：首行**完整可解析**但非 ``workflow_started``
+        # → 立即 403 ``not-orca-tape``（routes 层 PermissionError → 403）。partial / 空
+        # 首行（``first_event is None``）走 live-pending → 5s → corrupted 路径，不在此拒。
+        if first_event is not None and first_event.type != "workflow_started":
+            raise PermissionError(
+                f"not-orca-tape: first complete line is '{first_event.type}', "
+                f"expected 'workflow_started'"
+            )
+
         if run_id is None:
             if (
                 first_event is not None
@@ -517,14 +526,23 @@ class RunManager:
             initial_offset = 0
         else:
             initial_offset = pre_probe_size
+        # probe_validated：probe 已确认首行是 ``workflow_started``（upfront reject 保证了
+        # first_event 非 None 时必为 wf-started）。显式传入 follow，避免旧版 ``initial_offset > 0``
+        # 推断式 bypass——那条 bypass 在 upfront reject 加入前会误把「complete non-wf-started
+        # 首行」标成已验过，从而跳过 5s→not-orca-tape 拒绝路径（AC9 / §6.7）。
+        probe_validated = first_event is not None
         handle.follow_task = asyncio.create_task(
-            self._follow_tape(handle, resolved, initial_offset),
+            self._follow_tape(handle, resolved, initial_offset, probe_validated),
             name=f"orca-web-attach-follow-{run_id}",
         )
         return run_id
 
     async def _follow_tape(
-        self, handle: AttachedRunHandle, path: Path, initial_offset: int
+        self,
+        handle: AttachedRunHandle,
+        path: Path,
+        initial_offset: int,
+        probe_validated: bool,
     ) -> None:
         """follow task：轮询外部 tape mtime/size 增量 → split newline → bus.relay。
 
@@ -540,7 +558,10 @@ class RunManager:
         offset = initial_offset
         buffer = ""
         last_size = initial_offset  # D3：初始 size = initial_offset（不视初始内容为 truncate）
-        seen_first_valid = initial_offset > 0  # 若已有内容则视首事件已见（probe 时验过）
+        # 显式标志（AC9 / §6.7）：probe 已验过首行 wf-started → follow 信任，不重复校验；
+        # 否则 follow 必须等到首个 ``workflow_started`` 才升级 running，5s 仍无 → not-orca-tape。
+        # 旧版 ``initial_offset > 0`` 推断式 bypass 已废（upfront reject 后语义等价但意图不显）。
+        seen_first_valid = probe_validated
         # MAJOR 3 修复：循环外 open 一次，循环内 seek+read；fd 用 fstat 拿更原子的 inode。
         try:
             f = open(path, "r", encoding="utf-8")
@@ -682,10 +703,31 @@ class RunManager:
                             continue
 
                         if not seen_first_valid:
-                            # 首个有效事件到达 → 升级 status（live-pending → running）。
+                            # AC9 / §6.7：首个完整事件必须是 ``workflow_started``。
+                            # - 是 wf-started → 升级 running + relay。
+                            # - 非 wf-started（partial 首行写完后发现是别的类型）→ 立即
+                            #   ``not-orca-tape`` 拒（不 relay、不待 5s 空闲超时——事件一旦
+                            #   relay 会污染客户端 fold）。
                             if event.type == "workflow_started":
                                 seen_first_valid = True
                                 handle.status = "running"
+                            else:
+                                handle.terminal = "corrupted"
+                                handle.status = "failed"
+                                handle.error = "not-orca-tape"
+                                logger.warning(
+                                    "run %s follow: 首个完整事件非 workflow_started "
+                                    "(type=%s) → not-orca-tape",
+                                    handle.run_id,
+                                    event.type,
+                                )
+                                await self._emit_attach_error(
+                                    handle,
+                                    "not_orca_tape",
+                                    f"first complete event is '{event.type}', "
+                                    f"expected 'workflow_started': {path}",
+                                )
+                                return
                         await handle.bus.relay(event)
 
                         # 终态事件 → terminal=True + 停 follow（留 registry）

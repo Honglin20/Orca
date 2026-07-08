@@ -603,16 +603,17 @@ class TestSpawnAndAttachHelpers:
 
 
 class TestWSAutoexit:
-    """WS 活动计时器：``_wait_ws_autoexit`` 单元测试（SPEC §0 D4 / §4 step4）。"""
+    """WS 活动计时器：``_wait_ws_autoexit`` 单元测试（SPEC §0 D4 / §4 step4 / §8 AC5 负向）。"""
 
     def test_autoexit_returns_when_window_elapsed(self):
-        """无 WS 活动 + window 过 → 返回（允许 caller 退出）。"""
+        """无活跃 WS + window 过 → 返回（允许 caller 退出）。"""
         from orca.iface.cli.commands import _wait_ws_autoexit
 
         class _FakeWebServer:
             def __init__(self, offset: float):
-                # last_ws_activity_at 设为 offset 秒前。
+                # last_ws_activity_at 设为 offset 秒前；无活跃 WS。
                 self.last_ws_activity_at = time.monotonic() - offset
+                self.active_ws_count = 0
 
         # window=0.05s + last 1s 前 → 立即满足条件返回。
         async def _go():
@@ -623,12 +624,13 @@ class TestWSAutoexit:
         assert time.monotonic() - start < 1.0  # 远小于 window
 
     def test_autoexit_blocks_when_within_window(self):
-        """窗口内（last 刚 touch）→ 至少等 window 才返回。"""
+        """窗口内（last 刚 touch，无活跃 WS）→ 至少等 window 才返回。"""
         from orca.iface.cli.commands import _wait_ws_autoexit
 
         class _Fresh:
             def __init__(self):
                 self.last_ws_activity_at = time.monotonic()
+                self.active_ws_count = 0
 
         async def _go():
             await _wait_ws_autoexit(_Fresh(), 0.4)
@@ -638,29 +640,44 @@ class TestWSAutoexit:
         elapsed = time.monotonic() - start
         assert elapsed >= 0.3  # 至少等了 ~window（不立即退）
 
-    def test_autoexit_respects_activity_reset(self):
-        """WS 活动重置 → 窗口重新计算（间接：mock ``last_ws_activity_at`` 不变则按窗口退）。"""
+    def test_autoexit_blocks_while_ws_active(self):
+        """SPEC §8 AC5 负向「有活跃 WS 不退」：``active_ws_count > 0`` → 永不退。
+
+        even if last_ws_activity_at 远在过去（修复旧版只 touch 不计数的缺陷）。
+        """
         from orca.iface.cli.commands import _wait_ws_autoexit
 
-        # 模拟「有活跃 WS」：last_ws_activity_at 一直 = now（持续重置）→ 永不退。
-        # 测试用 1.5s 上限避免无限循环。
-        class _Active:
+        class _ActiveWS:
             def __init__(self):
-                self._start = time.monotonic()
-
-            @property
-            def last_ws_activity_at(self):
-                # 持续 = 当前时间（活跃 WS）
-                return time.monotonic()
+                # 旧 bug 复现条件：last 远在过去（窗口显然已过），但有活跃 WS 连接。
+                self.last_ws_activity_at = time.monotonic() - 100.0
+                self.active_ws_count = 1
 
         async def _go():
             await asyncio.wait_for(
-                _wait_ws_autoexit(_Active(), 0.3), timeout=1.0,
+                _wait_ws_autoexit(_ActiveWS(), 0.05), timeout=1.0,
             )
 
         # 活跃 WS → 永不自然返回 → asyncio.wait_for 超时抛 TimeoutError。
         with pytest.raises(asyncio.TimeoutError):
             asyncio.run(_go())
+
+    def test_autoexit_fires_after_ws_disconnect(self):
+        """SPEC §8 AC5：活跃 WS 断开后 + window 过 → 退（负向 AC 的正面：可退条件）。"""
+        from orca.iface.cli.commands import _wait_ws_autoexit
+
+        # 模拟「WS 刚断开」：count 回到 0，last_ws_activity_at 在 window 之前。
+        class _JustDisconnected:
+            def __init__(self):
+                self.last_ws_activity_at = time.monotonic() - 1.0
+                self.active_ws_count = 0
+
+        async def _go():
+            await _wait_ws_autoexit(_JustDisconnected(), 0.05)
+
+        start = time.monotonic()
+        asyncio.run(_go())
+        assert time.monotonic() - start < 1.0  # 立即满足条件返回
 
 
 # ── orca open（AC7）─────────────────────────────────────────────────────────

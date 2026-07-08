@@ -1307,14 +1307,21 @@ async def _wait_server_started(server, timeout: float = 5.0) -> None:
 
 
 async def _wait_ws_autoexit(web_server, autoexit_seconds: float) -> None:
-    """轮询 ``web_server.last_ws_activity_at``：``now - last > N`` → 返回（让 caller 退）。
+    """轮询 WS auto-exit 条件：``无活跃 WS AND now - last_ws_activity_at > N`` → 返回。
 
-    SPEC §0 D4 / §4 step4 语义。窗口内 WS connect/disconnect 重置计时（WebServer 内部
-    touch）。本函数仅在 run 已终态后调；故条件满足即可退出。
+    SPEC §0 D4 / §4 step4 / §8 AC5 负向「有活跃 WS 不退」。窗口内 WS connect/disconnect
+    重置 ``last_ws_activity_at``（``WebServer`` 内部 touch）；``active_ws_count`` 由
+    ``WebServer`` 维护（connect++ / disconnect--）。本函数仅在 run 已终态后调；任一条件
+    不满足则继续等。**负向 AC**：只要 ``active_ws_count > 0``（有 WS 仍连着）→ 永不退。
     """
     while True:
         now = time.monotonic()
-        if now - web_server.last_ws_activity_at > autoexit_seconds:
+        # 直接访问字段（fail-loud）：``WebServer.__init__`` 保证 ``active_ws_count`` 存在，
+        # 防御性 ``getattr`` 默认值会吞掉「传错对象」类调用方 bug（违反 SPEC 鲁棒性条款）。
+        active = web_server.active_ws_count
+        if active == 0 and (
+            now - web_server.last_ws_activity_at > autoexit_seconds
+        ):
             return
         await asyncio.sleep(1.0)
 

@@ -446,3 +446,38 @@ def test_ws_reconnect_within_window_resets_timer(tmp_path):
         await _close_handles(manager)
 
     run_async(go())
+
+
+def test_ws_active_count_tracks_connect_disconnect(tmp_path):
+    """SPEC §8 AC5 负向核心：``WebServer.active_ws_count`` 必须准确追踪连接数。
+
+    旧 bug：只 touch ``last_ws_activity_at`` 不计数 → 安静的长存活 WS 在窗口过后
+    被误判可退（``_wait_ws_autoexit`` 误返回）。本测试直接断言真实 ``WebServer`` 在
+    connect→++/disconnect→--（含两路并发 WS）下维护正确计数。
+    """
+    manager, _ = _manager_with_handles(tmp_path, "runA")
+
+    async def go():
+        server = WebServer(manager)
+        assert server.active_ws_count == 0  # 初始
+        ws1 = FakeWebSocket()
+        t1 = asyncio.create_task(server.ws_endpoint(ws1))
+        await asyncio.sleep(0.05)
+        assert server.active_ws_count == 1  # 第一路 connect 后
+        ws2 = FakeWebSocket()
+        t2 = asyncio.create_task(server.ws_endpoint(ws2))
+        await asyncio.sleep(0.05)
+        assert server.active_ws_count == 2  # 两路并发
+        # 断开第一路 → 计数回到 1（仍有一路活跃 → 不退）
+        ws1.feed_disconnect()
+        await asyncio.sleep(0.05)
+        assert server.active_ws_count == 1
+        # 断开第二路 → 计数回到 0（可退条件之一满足）
+        ws2.feed_disconnect()
+        await asyncio.sleep(0.05)
+        assert server.active_ws_count == 0
+        # 计数不会变负（防御性 clamp），且最终精确归零
+        assert server.active_ws_count == 0
+        await _close_handles(manager)
+
+    run_async(go())
