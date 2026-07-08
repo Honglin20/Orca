@@ -7,6 +7,14 @@
 
 ---
 
+## ✅ 完成（2026-07-08）：Web attach + web 默认 + in-session open —— COMPLETE（e2e PASS）
+
+Web v2 的「只认 in-process run」gap 补齐 → web 现可监控**任意单个 run**（`--background` / in-session / 别处 tape）。SDD 全流程：SPEC rev2 spec-review PASS → Step1 `69e5c7b`（attach + tail-follow + seq-windowed + 安全 + huge 模式）→ Step2 `fe81e42`（`orca run` web 默认 + `orca open` + `/orca open`）→ 3 e2e defect 修 `58947fd` → test-coverage-e2e 真跑 PASS。tape 唯一真相源不变、单 store/registry 不变、read-only attach（不抢 flock）。详见 [release note](../releases/2026-07-08-web-attach.md)。**`orca run` 默认行为已变**：默认起 web 监控（浏览器自动开），`--tui` opt-in。
+
+**Follow-up（非阻塞）**：`/orca open` slash fork-and-return（当前同步阻塞 ~10s）；`orca open` detached serve PID 管理（`orca ps` 不列）。
+
+---
+
 ## 📋 ADR 草稿（2026-07-08）：三壳统一（单一读路径 + 渲染契约 + 视觉）—— Draft，待 spec-review，不立即实施
 
 经 `orca serve` 真跑 mxint 全程监控 + TUI 使用发现：铁律 1「一条读路径」在 web 断成两条（fold/visibility 各两份 py vs ts）；TUI 渲染盲区（script stdout 无渲染 / agent message 默认折叠 / route 藏 debug）；web 配色割裂（DAG 栏白 / 中间灰）。**只起 ADR，不修复**。分 4 phase：① TUI 痛点立即可修（独立，零架构改动）② 单一读路径（架构地基，后端单一派生 + visibility tag + codegen）③ 渲染增强（借鉴 Conductor 节点类型 Detail + AnimatedEdge）④ 视觉配色（最低，参考 OpenAI/Apple）。详见 [ADR](../specs/2026-07-08-shell-unification-adr.md)。**待 `spec-review-adversarial` 审视后再立项实施。**

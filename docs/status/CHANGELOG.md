@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-08] Web attach + web 默认 + in-session open —— COMPLETE（e2e PASS，让 web 监控任意单 run）
+
+Web v2 只认 in-process run 的 gap 补齐：**X** web 按 tape 路径 attach（read-only `tape_reader` + tail-follow + `RunView` 双 handle 单 registry）+ seq-windowed `/meta`/`/events` huge 模式 perf（103MB fixture `/meta` 5.2ms / `tail=500` 41.5ms）+ 安全 `relative_to` 三重守卫；**Y** `orca run` 默认起 web（浏览器自动开 + WS client-count 驱动 auto-exit）+ `orca open` / `/orca open` 打开任意 run（含 `--background` / in-session，observe-only）。SDD 全流程：SPEC rev2 spec-review PASS → Step1 `69e5c7b` → Step2 `fe81e42` → 3 e2e defect 修 `58947fd` → test-coverage-e2e 真跑 PASS（live P99=250ms / 安全 5+allowlist / §7 失败路径全过 / 铁律 grep）。pytest 674 + npm 262 绿。详见 [release note](../releases/2026-07-08-web-attach.md) + [SPEC](../specs/web-attach-and-default-spec.md)。Follow-up：`/orca open` fork-and-return、detached serve PID 管理。
+
 ## [2026-07-08] Web attach 3 e2e 缺陷修复（AC9 / AC11 / AC5 负向）
 
 修 `test-coverage-e2e` 发现的 3 个真实缺陷：AC9 非 wf-started 首完整行被误判 running（upfront reject + 显式 probe_validated 参数替换 offset 推断 bypass + follow 立即拒 partial→complete 非 wf-started）；AC11 AskGate 忽略 writable=false（抽共享 gate-writable helper）；AC5 负向 活跃 WS 不挡 auto-exit（WebServer.active_ws_count + _wait_ws_autoexit count==0 AND window）。+5 后端 +3 前端测试；87 passed + 262 npm 绿。Commit: `58947fd`。routes 层 HTTP 403 端到端回归守门补 `test_attach_routes.py`（+2 TestClient 用例，code-review 🟡#2 闭环）。Commit: `3f7aa00`。详见 SPEC `docs/specs/web-attach-and-default-spec.md` §6.7/§8 AC9/AC11/AC5。

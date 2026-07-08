@@ -130,6 +130,7 @@
 6. `orca run --tui` → Textual TUI 启动；`--background` → detached + run_id+pid。
 7. `orca open <id>` / `/orca open` → serve 起/复用 + attach + 浏览器开。
 8. **安全（6 样例）**：`../../etc/passwd` / `/runs_evil/x`（前缀碰撞）/ `runs/good/../../etc` / symlink-out / symlink-in-then-escape / URL 编码 `%2e%2e` → 全 403；allowlist 命中放行、未命中 403 各一。
+   - **transport nuance（e2e 实证）**：`%2e%2e` 经 **JSON body** 传输时不被 URL-decode（传输是 JSON 非 URL path），字面 `%2e%2e` 是不存在的文件名 → **404**（非 403）。**无 traversal 旁路**（安全保证成立）；404 对 JSON-body transport 可接受。URL-path transport 才需 `%2e%2e`→403。
 9. 非 Orca tape / partial 首行 5s → 403。
 10. huge 模式：overview 从 `/meta.overview`（服务端派生）；tail 窗口 live；上滚增量 prepend（O(window)）；"load full" 拉全量。
 11. gate attached run（writable=false）→ 模态显 observe-only，禁提交。
