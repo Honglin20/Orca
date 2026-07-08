@@ -5,6 +5,12 @@
 
 ---
 
+## [2026-07-08] Web attach 3 e2e 缺陷修复（AC9 / AC11 / AC5 负向）
+
+修 `test-coverage-e2e` 发现的 3 个真实缺陷：AC9 非 wf-started 首完整行被误判 running（upfront reject + 显式 probe_validated 参数替换 offset 推断 bypass + follow 立即拒 partial→complete 非 wf-started）；AC11 AskGate 忽略 writable=false（抽共享 gate-writable helper）；AC5 负向 活跃 WS 不挡 auto-exit（WebServer.active_ws_count + _wait_ws_autoexit count==0 AND window）。+5 后端 +3 前端测试；87 passed + 262 npm 绿。Commit: `58947fd`。详见 SPEC `docs/specs/web-attach-and-default-spec.md` §6.7/§8 AC9/AC11/AC5。
+
+---
+
 ## [2026-07-08] Web attach Step2（Y）—— `orca run` web 默认 + `orca open` + `/orca open` slash
 
 按 SPEC `web-attach-and-default-spec.md` rev2 §4/§5/§8 AC5-7/11 实现 Web attach Step2：`orca run <wf>` 默认走 web（probe 7428 → 复用 `POST /api/run` / 否则起新 in-process serve + RunManager.start_run in-process + `webbrowser.open` + WS 驱动 auto-exit（`last_ws_activity_at` env `ORCA_WEB_AUTOEXIT_SECONDS`）+ Ctrl-C 路径闭环）；`orca open <id>` CLI（probe / spawn detached serve / attach / browser）；`/orca open <id>` slash 走新 `spawnTopLevelCli`（plugin 哑传输 grep 守门 + 三元路由 signature-contract）。`--tui` opt-in 保留旧 Textual TUI；`--background` 不变。**code-reviewer 4 BLOCKER + 6 MAJOR + 3 MINOR 全闭环**（asyncio CancelledError / 双 shutdown / spawn FileNotFoundError / yaml_path resolve / --stay warning / routing signature）。674 passed / 30 skipped（+15 新增）+ npm 259 绿；铁律 grep 全过。Web attach feature COMPLETE（Step1 + Step2）。Commit: `fe81e42`。详见 [release note](../releases/2026-07-08-web-attach-step2.md) + [SPEC §4/§5](../specs/web-attach-and-default-spec.md)。
