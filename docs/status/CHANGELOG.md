@@ -7,7 +7,7 @@
 
 ## [2026-07-08] Web attach Step1（X + perf）—— attach by tape path + huge-mode + perf
 
-按 SPEC `web-attach-and-default-spec.md` rev2 §2/§3/§6/§8 实现：后端 `POST /api/runs/attach` + `RunView` ABC 双 handle（InProcess/Attached）+ read-only tail-follow（`EventBus.relay` fan-out only）+ 安全三重守卫（lstat + relative_to + open+fd-re-stat 防 TOCTOU）+ `GET /meta` huge 模式服务端 fold 派生 overview + `GET /events?since/limit/tail` 窗口化 + `GET /api/health`；前端 huge-mode（serverOverview slice + tail + 增量 prepend + load full）+ attached run gate observe-only。perf fast-path：`_scan_meta_overview` 单遍扫 + bulk-type substring skip + regex seq 提取（60k fixture ~150ms vs naive ~8700ms）+ `tail_events` 反向扫 O(tail)。**code-reviewer 2 BLOCKER + 6 MAJOR + 5 MINOR 全闭环**。1863 passed / 2 skipped（perf 默认 skip）。Commit: `5d408fe`。详见 [release note](../releases/2026-07-08-web-attach-step1.md) + [SPEC §2/§3/§6/§8](../specs/web-attach-and-default-spec.md)。
+按 SPEC `web-attach-and-default-spec.md` rev2 §2/§3/§6/§8 实现：后端 `POST /api/runs/attach` + `RunView` ABC 双 handle（InProcess/Attached）+ read-only tail-follow（`EventBus.relay` fan-out only）+ 安全三重守卫（lstat + relative_to + open+fd-re-stat 防 TOCTOU）+ `GET /meta` huge 模式服务端 fold 派生 overview + `GET /events?since/limit/tail` 窗口化 + `GET /api/health`；前端 huge-mode（serverOverview slice + tail + 增量 prepend + load full）+ attached run gate observe-only。perf fast-path：`_scan_meta_overview` 单遍扫 + bulk-type substring skip + regex seq 提取（60k fixture ~150ms vs naive ~8700ms）+ `tail_events` 反向扫 O(tail)。**code-reviewer 2 BLOCKER + 6 MAJOR + 5 MINOR 全闭环**。1863 passed / 2 skipped（perf 默认 skip）。Commit: `69e5c7b`。详见 [release note](../releases/2026-07-08-web-attach-step1.md) + [SPEC §2/§3/§6/§8](../specs/web-attach-and-default-spec.md)。
 
 ---
 
