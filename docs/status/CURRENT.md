@@ -7,11 +7,21 @@
 
 ---
 
+## 📋 ADR 草稿（2026-07-08）：三壳统一（单一读路径 + 渲染契约 + 视觉）—— Draft，待 spec-review，不立即实施
+
+经 `orca serve` 真跑 mxint 全程监控 + TUI 使用发现：铁律 1「一条读路径」在 web 断成两条（fold/visibility 各两份 py vs ts）；TUI 渲染盲区（script stdout 无渲染 / agent message 默认折叠 / route 藏 debug）；web 配色割裂（DAG 栏白 / 中间灰）。**只起 ADR，不修复**。分 4 phase：① TUI 痛点立即可修（独立，零架构改动）② 单一读路径（架构地基，后端单一派生 + visibility tag + codegen）③ 渲染增强（借鉴 Conductor 节点类型 Detail + AnimatedEdge）④ 视觉配色（最低，参考 OpenAI/Apple）。详见 [ADR](../specs/2026-07-08-shell-unification-adr.md)。**待 `spec-review-adversarial` 审视后再立项实施。**
+
+## ✅ 完成（2026-07-08）：Web attach Step2（Y）—— `orca run` web 默认 + `orca open` + `/orca open` slash
+
+按 SPEC `web-attach-and-default-spec.md` rev2 §4/§5/§8 AC5-7/11 实现 Web attach Step2：`orca run <wf>` 默认走 web（probe 7428 → 复用 `POST /api/run` / 否则起新 in-process serve + RunManager.start_run in-process + `webbrowser.open` + WS 驱动 auto-exit（`last_ws_activity_at` env `ORCA_WEB_AUTOEXIT_SECONDS`）+ Ctrl-C 路径闭环）；`orca open <id>` CLI（probe / spawn detached serve / attach / browser）；`/orca open <id>` slash 走新 `spawnTopLevelCli`（plugin 哑传输 grep 守门 + 三元路由 signature-contract）。`--tui` opt-in 保留旧 Textual TUI；`--background` 不变。**code-reviewer 4 BLOCKER + 6 MAJOR + 3 MINOR 全闭环**（asyncio CancelledError 而非 KeyboardInterrupt / manager.shutdown 单一真相源 lifespan / `_spawn_background_serve` FileNotFoundError 捕获 / yaml_path resolve 跨进程 / `--stay` 复用模式提示 / routing signature test）。674 passed / 30 skipped（+15 新增）+ npm 259 绿；铁律 grep 全过。**Web attach feature COMPLETE（Step1 + Step2）**。详见 [release note](../releases/2026-07-08-web-attach-step2.md) + [CHANGELOG](CHANGELOG.md)。Commit: `6616b51`。
+
+**遗留 follow-up（非阻塞）**：① 真浏览器 + 真后台 serve + 真 attach E2E（playwright + 真子进程）；② slash `open` 在 opencode event loop 内同步阻塞 ~10s（架构议题，单独立项「`orca open` fork-and-return」）；③ `orca open` spawn 的 detached serve 无 PID 文件管理（`orca ps` 不列）。
+
+---
+
 ## ✅ 完成（2026-07-08）：Web attach Step1（X + perf）—— attach by tape path + huge-mode + perf
 
-按 SPEC `web-attach-and-default-spec.md` rev2 §2/§3/§6/§8/§9.1 实现 web 单 run attach（read-only + tail-follow）+ huge-mode perf。**code-reviewer 2 BLOCKER + 6 MAJOR + 5 MINOR 全闭环**：perf fast-path（`_scan_meta_overview` 单遍扫 + bulk-type substring skip + regex seq 提取，60k fixture ~150ms vs naive ~8700ms；`tail_events` 反向字节块扫描 O(tail) 不物化；`since_limited` 提前 break）、probe/stat 窗口修复（initial_offset 在 probe 前捕获）、幂等检查入锁、follow 单次 open + fd/path 双 stat 检测 rotate、_emit_attach_error 负 seq 防客户端去重。后端 RunView ABC + InProcessRunHandle/AttachedRunHandle 双实现 + EventBus.relay（fan-out only）；前端 store 加 `serverOverview`/`writable`/`huge` slices + `loadRunWithMeta`/`loadEarlierChunk`/`loadFull` actions + selector huge 模式读 serverOverview + PermissionGate `writable=false` 显示 observe-only 禁提交。**1863 passed / 2 skipped（perf 默认 skip）**；铁律 grep 全过（单 `_runs` dict、单 zustand store、attacher 无 `Tape(resume=True)`、bus.emit/relay 仅 follow task）。详见 [release note](../releases/2026-07-08-web-attach-step1.md) + SPEC §2/§3/§6/§8。Commit: `69e5c7b`。
-
-**Step2 待办（Y）**：`orca run` web 默认 + `orca open` CLI + `/orca open` slash + WS 驱动 auto-exit（SPEC §4/§5）。
+按 SPEC `web-attach-and-default-spec.md` rev2 §2/§3/§6/§8/§9.1 实现 web 单 run attach（read-only + tail-follow）+ huge-mode perf。**code-reviewer 2 BLOCKER + 6 MAJOR + 5 MINOR 全闭环**。**1863 passed / 2 skipped（perf 默认 skip）**；铁律 grep 全过。详见 [release note](../releases/2026-07-08-web-attach-step1.md) + SPEC §2/§3/§6/§8。Commit: `69e5c7b`。
 
 ---
 

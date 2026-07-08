@@ -86,6 +86,29 @@ function spawnCli(args: string[]): CliReply | null {
   }
 }
 
+// 顶层 ``orca`` 命令（非 ``orca in-session``）哑传输。仅 ``open`` 用此路径（SPEC §5）：
+// ``/orca open <run_id>`` marker → 调 ``orca open`` CLI（起后台 serve + attach + 浏览器）。
+// ``open`` 不返结构化 JSON（人类可读 echo）；统一包成 ``{ok}`` 信封让 ``rewriteText`` 走 ack 分支。
+function spawnTopLevelCli(args: string[]): CliReply | null {
+  let r: any
+  try {
+    r = Bun.spawnSync(["orca", ...args], {
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+  } catch (e) {
+    console.error("[orca] spawn orca (top-level) failed:", e)
+    return null
+  }
+  const stderr = (r.stderr && r.stderr.toString()) ?? ""
+  if (r.exitCode !== 0) {
+    const tail = stderr.trim().slice(0, 400)
+    return { __orca_error: true, exitCode: r.exitCode, stderr: tail }
+  }
+  // open 不要求结构化 stdout；返回 ``{ok:true}`` 让 rewriteText("open", reply) 走 ack。
+  return { ok: true }
+}
+
 async function readMarker(sessionID: string): Promise<Marker | null> {
   // marker 文件名 = runs/orca-<owner>.json；owner=sessionID for opencode（§5）。
   const path = `runs/orca-${sessionID}.json`
@@ -161,6 +184,11 @@ function rewriteText(sub: string, reply: CliReply): string | null {
     const ok = reply.ok ?? false
     const rid = reply.run_id ?? ""
     return `[orca stop] ok=${ok} run_id=${rid}`
+  }
+  if (sub === "open") {
+    // open（top-level orca open，非 in-session）：CLI 起后台 serve + attach + 浏览器开。
+    // stdout 无结构化字段（人类可读 echo）→ 给一个 ack 让 LLM 知道「已开浏览器」。
+    return `[orca open] browser opened for run (see terminal echo).`
   }
   return null
 }
@@ -258,7 +286,10 @@ export const OrcaPlugin = async (ctx: any) => {
         return input
       }
 
-      const reply = spawnCli(cliArgs)
+      // open 是 top-level orca open（非 in-session），单独 spawn 路径（哑传输，零业务逻辑）。
+      const reply = sub === "open"
+        ? spawnTopLevelCli(cliArgs)
+        : spawnCli(cliArgs)
       if (!reply) {
         found.part.text = `[orca] CLI spawn failed for: ${sub}`
         return input
@@ -406,6 +437,13 @@ function buildCliArgs(
   if (sub === "doctor") {
     // doctor：无 argv
     return ["doctor"]
+  }
+  if (sub === "open") {
+    // open：top-level ``orca open <run_id>``（非 in-session）。哑传输：plugin 只把 args
+    // 透传给 CLI，零业务逻辑（CLI 负责起后台 serve + attach + 浏览器，SPEC §5）。
+    const rid = args.trim()
+    if (!rid) return null
+    return ["open", rid]
   }
   return null
 }

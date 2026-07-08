@@ -5,6 +5,12 @@
 
 ---
 
+## [2026-07-08] Web attach Step2（Y）—— `orca run` web 默认 + `orca open` + `/orca open` slash
+
+按 SPEC `web-attach-and-default-spec.md` rev2 §4/§5/§8 AC5-7/11 实现 Web attach Step2：`orca run <wf>` 默认走 web（probe 7428 → 复用 `POST /api/run` / 否则起新 in-process serve + RunManager.start_run in-process + `webbrowser.open` + WS 驱动 auto-exit（`last_ws_activity_at` env `ORCA_WEB_AUTOEXIT_SECONDS`）+ Ctrl-C 路径闭环）；`orca open <id>` CLI（probe / spawn detached serve / attach / browser）；`/orca open <id>` slash 走新 `spawnTopLevelCli`（plugin 哑传输 grep 守门 + 三元路由 signature-contract）。`--tui` opt-in 保留旧 Textual TUI；`--background` 不变。**code-reviewer 4 BLOCKER + 6 MAJOR + 3 MINOR 全闭环**（asyncio CancelledError / 双 shutdown / spawn FileNotFoundError / yaml_path resolve / --stay warning / routing signature）。674 passed / 30 skipped（+15 新增）+ npm 259 绿；铁律 grep 全过。Web attach feature COMPLETE（Step1 + Step2）。Commit: `6616b51`。详见 [release note](../releases/2026-07-08-web-attach-step2.md) + [SPEC §4/§5](../specs/web-attach-and-default-spec.md)。
+
+---
+
 ## [2026-07-08] Web attach Step1（X + perf）—— attach by tape path + huge-mode + perf
 
 按 SPEC `web-attach-and-default-spec.md` rev2 §2/§3/§6/§8 实现：后端 `POST /api/runs/attach` + `RunView` ABC 双 handle（InProcess/Attached）+ read-only tail-follow（`EventBus.relay` fan-out only）+ 安全三重守卫（lstat + relative_to + open+fd-re-stat 防 TOCTOU）+ `GET /meta` huge 模式服务端 fold 派生 overview + `GET /events?since/limit/tail` 窗口化 + `GET /api/health`；前端 huge-mode（serverOverview slice + tail + 增量 prepend + load full）+ attached run gate observe-only。perf fast-path：`_scan_meta_overview` 单遍扫 + bulk-type substring skip + regex seq 提取（60k fixture ~150ms vs naive ~8700ms）+ `tail_events` 反向扫 O(tail)。**code-reviewer 2 BLOCKER + 6 MAJOR + 5 MINOR 全闭环**。1863 passed / 2 skipped（perf 默认 skip）。Commit: `69e5c7b`。详见 [release note](../releases/2026-07-08-web-attach-step1.md) + [SPEC §2/§3/§6/§8](../specs/web-attach-and-default-spec.md)。

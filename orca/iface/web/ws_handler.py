@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -60,6 +61,15 @@ class WebServer:
         self._manager = manager
         # WS → 当前订阅。一个 WS 同时只订阅一个 run（subscribe 切换覆盖旧订阅）。
         self._subs: dict[WebSocket, _RunSubscription] = {}
+        # D4 WS 事件驱动 auto-exit：任一 WS connect/disconnect 重置计时；
+        # ``now - last_ws_activity_at > N AND run.terminal`` → 进程退出（``orca run`` web
+        # 默认路径用，SPEC §0 D4 / §4 step4）。初值 = 构造时刻，让无 WS 接入的窗口也计时。
+        # 单调钟（不受系统时间回拨影响）；``orca run`` 进程读此属性判退出。
+        self.last_ws_activity_at: float = time.monotonic()
+
+    def _touch_ws_activity(self) -> None:
+        """重置 WS 活动计时（connect/disconnect 调用）。"""
+        self.last_ws_activity_at = time.monotonic()
 
     async def ws_endpoint(self, ws: WebSocket) -> None:
         """单通道 WS 端点：accept → 循环 receive → 分派 subscribe/unsubscribe/gate_response。
@@ -67,6 +77,8 @@ class WebServer:
         断开（WebSocketDisconnect / 异常）→ 清理当前订阅（cancel pump），无 leaked task。
         """
         await ws.accept()
+        # connect → 重置 auto-exit 计时（D4）。
+        self._touch_ws_activity()
         try:
             while True:
                 msg = await ws.receive_json()
@@ -77,6 +89,9 @@ class WebServer:
             logger.warning("ws_endpoint 异常，连接将清理", exc_info=True)
         finally:
             await self._cleanup(ws)
+            # disconnect → 重置 auto-exit 计时（D4）。无论是否曾经订阅都 touch——
+            # 任何 WS 来过又走都算"客户端活跃过"，给浏览器重连窗口。
+            self._touch_ws_activity()
 
     async def _dispatch(self, ws: WebSocket, msg: dict) -> None:
         """分派一条客户端消息。未知 type 记 warning（fail loud），不崩连接。"""
