@@ -3,6 +3,12 @@
 > 新 session 开工前**必读**此文件 + `CLAUDE.md` + 对应阶段 SPEC。
 > 完成任务后清空本文件（移到 release note），**不积累**。
 
+## ✅ 完成（2026-07-09）：in-session 三件打磨（outputs 求值 + inputs 从 tape 恢复 + prompt 收紧）
+
+model-driven advance 补丁（`4b3a4d6`）之上的 surgical polish，commit `f86df86`。① `_final_outputs`（step.py）fail-loud stub → `render_template` 求 `wf.outputs`（in-session 专用，不动正常 orca run）；② `advance_step`（step.py）改 `Orchestrator._inputs_from_tape` 恢复 inputs → 模型不必每步重传 `--inputs`（修非 entry 节点 `{{ inputs.* }}` 渲染隐患）；③ `run.md`/`_drive_protocol` 加「主 session 不许自己 Read 节点 .md，由子代理 Read」+ 修 stale「Orca 自动推进」+ `bootstrap --format prompt` 补驱动协议（遗留 #2）。COMMAND→MCP 不换。in_session 96 passed（+3 新增）；tests/run+iface 1007 passed 0 回归；code-reviewer PASS。详见 [release note](../releases/2026-07-09-in-session-outputs-inputs-prompt-polish.md)。follow-up：`end_route.output`（phase-14 per-route 变换）/ 批 B plugin 重写 + doctor.md / CC 路同步。
+
+---
+
 ## 🔥 当前任务（2026-07-09）：in-session model-driven advance 补丁（unblock，非最终设计）
 
 > **背景**：in-session 推进原走「plugin idle 钩子 → REST `GET /session/<sid>/message` 抽 task 子代理产出 → `next --output`」。实测 4 次全挂：REST 依赖 opencode dev server，`ctx.serverUrl` 断链 → 抽不到产出 → `next` 无 `--output` → `advance_step` 幂等重发 → analyzer 被 replay 死循环（`no_output_count` 攀升）+ marker 泄漏 + `run: no expected field`（bootstrap reused 分支返 `prompt:null`，无状态 plugin 接不住）。结论：REST 路在本环境结构性不可行（CCW 调研佐证：CCW 用 session-resume，根本不往外抽产出）。

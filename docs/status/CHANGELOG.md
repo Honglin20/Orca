@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-09] in-session 三件打磨（outputs 求值 + inputs 从 tape 恢复 + prompt 收紧）
+
+model-driven advance 补丁（`4b3a4d6`）之上的 surgical polish：① `_final_outputs` fail-loud stub → `render_template` 求 `wf.outputs`（与 `Orchestrator._evaluate_outputs` 同源，渲染错 fail loud `ERR_RENDER_ERROR`，in-session 专用不动正常路径）；② `advance_step` 改 `Orchestrator._inputs_from_tape` 恢复 inputs（模型不必每步重传 `--inputs`，修非 entry 节点 `{{ inputs.* }}` 渲染隐患）；③ `run.md`/`_drive_protocol` 加「不许自己 Read 节点 .md」+ 修 stale 自动推进 + `bootstrap --format prompt` 补驱动协议（CURRENT 遗留 #2）。COMMAND→MCP 不换（解决不了实际失败模式 + 重复 phase-10）。in_session 96 passed（+3）；tests/run+iface 1007 passed 0 回归；code-reviewer PASS。Commit: `f86df86`。详见 [release note](../releases/2026-07-09-in-session-outputs-inputs-prompt-polish.md) + [计划](../plans/2026-07-09-in-session-outputs-inputs-prompt-polish.md)。
+
 ## [2026-07-08] Web attach + web 默认 + in-session open —— COMPLETE（e2e PASS，让 web 监控任意单 run）
 
 Web v2 只认 in-process run 的 gap 补齐：**X** web 按 tape 路径 attach（read-only `tape_reader` + tail-follow + `RunView` 双 handle 单 registry）+ seq-windowed `/meta`/`/events` huge 模式 perf（103MB fixture `/meta` 5.2ms / `tail=500` 41.5ms）+ 安全 `relative_to` 三重守卫；**Y** `orca run` 默认起 web（浏览器自动开 + WS client-count 驱动 auto-exit）+ `orca open` / `/orca open` 打开任意 run（含 `--background` / in-session，observe-only）。SDD 全流程：SPEC rev2 spec-review PASS → Step1 `69e5c7b` → Step2 `fe81e42` → 3 e2e defect 修 `58947fd` → test-coverage-e2e 真跑 PASS（live P99=250ms / 安全 5+allowlist / §7 失败路径全过 / 铁律 grep）。pytest 674 + npm 262 绿。详见 [release note](../releases/2026-07-08-web-attach.md) + [SPEC](../specs/web-attach-and-default-spec.md)。Follow-up：`/orca open` fork-and-return、detached serve PID 管理。
