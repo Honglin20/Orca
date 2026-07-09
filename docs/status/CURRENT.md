@@ -3,15 +3,49 @@
 > 新 session 开工前**必读**此文件 + `CLAUDE.md` + 对应阶段 SPEC。
 > 完成任务后清空本文件（移到 release note），**不积累**。
 
-## 🔥 当前任务（2026-07-08）：in-session 入口重设计（去 transform）+ 部署刚需 —— 计划已写，待确认
+## 🔥 当前任务（2026-07-09）：in-session model-driven advance 补丁（unblock，非最终设计）
 
-spike PASS（`opencode run --command ... --pure`：模型照 prompt-command 调 bootstrap + 派子代理，不读 yaml/不改源码）→ 计划 [`docs/plans/2026-07-08-in-session-entry-redesign-and-deploy.md`](../plans/2026-07-08-in-session-entry-redesign-and-deploy.md)。
+> **背景**：in-session 推进原走「plugin idle 钩子 → REST `GET /session/<sid>/message` 抽 task 子代理产出 → `next --output`」。实测 4 次全挂：REST 依赖 opencode dev server，`ctx.serverUrl` 断链 → 抽不到产出 → `next` 无 `--output` → `advance_step` 幂等重发 → analyzer 被 replay 死循环（`no_output_count` 攀升）+ marker 泄漏 + `run: no expected field`（bootstrap reused 分支返 `prompt:null`，无状态 plugin 接不住）。结论：REST 路在本环境结构性不可行（CCW 调研佐证：CCW 用 session-resume，根本不往外抽产出）。
 
-**核心决策**：入口（run/status/stop/doctor）改 prompt-command，**删 transform 钩子 + marker**；推进保留 idle/Stop（B1，稳定钩子）；session 绑定 first-idle-claims；权限硬兜底；README 写 CC vs opencode 差异。涵盖全部遗留问题：Q1 socket 短路径 / Q2 Web 远程化+host-port 统一 / Q3 前端产物进 git（`pip install -e .` 免 build）/ Q4 Web 阻塞语义。合计 ~6.5d（批 A 部署 2.5d + 批 B 重设计 4d）。**待用户确认计划后开工。**
+### 方案（补丁）
+推进改 **model-driven**：主 session 模型自己调 `orca in-session next --run-id <id> --output '<产出>'`，Orca CLI 内部写 tape/marker。不再依赖任何 opencode 钩子或 REST（与 CCW「模型调 cli 工具」、phase-10 MCP 工具驱动同向）。
+- `cli.py`：+`_drive_protocol(run_id)`——bootstrap/next 的 `reply.prompt` 末尾附「驱动协议」（派子代理 → 调 next --output → 读 JSON 的 done/prompt 循环）；`next --tape` 改**可选**（省略时 `_default_tape_path(run_id)` 派生，**run_id 是唯一句柄**，tape 是其纯函数）。
+- `orca.ts`（仓库模板 + 已装 `~/.config/opencode/`）：idle 钩子 **neuter**——只留诊断心跳，REST/next/promptAsync 整段标 DEAD 不执行。
+- 验证：93 in_session 单测绿 + dry-run（`next --run-id` only 推进成功 / tape 派生校验 / 协议无 `--tape`）。模型已实证会自调 next。
 
-**待清理**：模型误改的 `cli.py`/`orca.ts`/`analyzer.md`（`/orca status` 跑偏所致，非有意）待用户确认 revert。
+### ⚠️ 与批 B 决策冲突（批 B 整理时一并收口）
+批 B §决策「推进保留 idle/Stop（B1，稳定钩子）」——本补丁**推翻此条**：idle 不再驱动推进。批 B 续做时「推进」应并到 model-driven，而非恢复 idle 抽产出。
+
+### 遗留（架构未清理，后续解决）
+1. **plugin 死代码**：`orca.ts` idle 钩子内 REST fetch / `extractTaskOutput` / spawn next / `promptAsync` + 模块级 `serverBaseUrl`/`extractTaskOutput`/`injecting` 死引用，整理时清掉。
+2. **`--format prompt` 未接协议**：bootstrap 的 prompt-command 分支（批 B 入口，当前休眠）没附驱动协议；切到 prompt-command 入口时补。
+3. **`--output` 大产出引号风险**：先按 shell arg 传；若模型产出含特殊字符/超长挂掉，加 `--output-file <path>`。
+4. **合规兜底语义变了**：idle neuter 后，模型不调 next → workflow **静默卡住**（不再有 idle 重试推它）。「卡住可见」但无自动 nudge；整理时定夺是否留 idle 作纯 nudge 安全网（只提醒、不抽 REST）。
+5. **未写 design draft**：model-driven advance 完整设计未落 `docs/specs/`；与批 B（prompt-command 入口）+ phase-10 MCP 的统一未做。**这是补丁非终态。**
+6. **CC 未对齐**：`cc_hooks.py` 仍 hook 抽产出模式，未同步 model-driven。
+7. **新行为无单测**：`--tape` 可选派生 / 驱动协议 present 仅 dry-run 验证，未加针对单测（现有 93 覆盖旧 `--tape` 显式路径）。
+8. **端到端待确认**：opencode 真链路（模型完整跑 mxint → 自调 next → `workflow_completed`）待用户跑通。
 
 ---
+
+## 🔥 当前任务（2026-07-08）：in-session 入口重设计（批 B）—— 批 A 已提交，批 B 半成品断点
+
+> **新 session 必读**：本块 + [`docs/plans/2026-07-08-in-session-entry-redesign-and-deploy.md`](../plans/2026-07-08-in-session-entry-redesign-and-deploy.md) §「批 B 断点续传」+ memory `in-session-entry-via-prompt-command` / `deterministic-over-model-mediated`。
+>
+> **新 session 开工顺序（用户明确要求）**：① **先 review / 审视**当前未提交状态（批 B 半成品 + 模型误改并存，见计划 §断点续传「工作树状态」）→ ② 审视通过后**把批 B 全部做完**（W5 核心 + W6-W9 + 测试 + 真 opencode spike），自洽后单个 commit。
+
+### 决策（已冻结，勿重新讨论）
+入口（run/status/stop/doctor）= **prompt-command**（清晰指令 + 接口 + 示例，模型照指令调 `orca in-session` CLI）；**删 transform 钩子 + marker 正则 + buildCliArgs**；推进保留 idle/Stop（B1，稳定钩子）；marker 默认按 **run_id keyed**（`owner=run_id`，session_id=null），plugin idle 钩子 **glob+claim** 认领；权限硬兜底；README 写 CC vs opencode 差异。spike PASS（`opencode run --command ... --pure`：模型照 prompt-command 调 bootstrap + 派子代理，不读 yaml/不改源码）。
+
+### 进度
+- ✅ **批 A 已提交 `89e240b`**：W1 socket 短路径 / W2 Web 远程化+host-port 统一 / W3 前端产物进 git / W4 阻塞语义。1260 passed。
+- 🚧 **批 B W5 干净半边（未提交，mid-flight，in-session 暂非功能态）**：4 个 command 模板（`templates/opencode/command/orca/{run,status,stop,doctor}.md`）+ install_cmds 改命名空间（17 测试绿）+ bootstrap `--format prompt`（干跑 ✓）。**当前工作树：旧 transform plugin 配新无 marker 命令 = 推进断链，预期的中间态，未提交。**
+- ⏳ **批 B 剩余（review 后一次性做完）**：plugin `orca.ts` 重写（删 transform，仅留 idle + glob+claim 绑定）/ marker binding（W6）/ `next`/`stop` 读 run_id-keyed marker / doctor 自证（W7）/ 权限兜底（W8）/ README 差异（W9）/ 删 `_constants.MARKER_REGEX` + CC hooks 一致性 / 改 `test_in_session_v8.py`（删 transform 契约、加 claim）+ 真 opencode spike。详见计划 §断点续传。
+
+**模型误改（review 时裁定）**：`cli.py` status() 的 `runs` 分支 + `orca.ts` rewriteText 的 runs 数组（`/orca status` 跑偏所致，非有意；cli.py 另含我合法的 `--format` 改动，**勿误删**）；`analyzer.md` 输出风格改动（意图不明）。
+
+---
+
 
 > **接口整理前置（铁律）**：每个阶段实施前必须先做接口整理与规划——涉及接口改造的（schema / 事件 / 错误信封 / 能力声明 / 状态机 / 退出码 / widget API 等）**必须先把接口定义讨论清楚并写进 SPEC 或 ADR**，明确「真相源在哪一层、其他层只翻译不重新分类」，不允许实施期临时定义、不允许新旧接口并存。已识别的接口风险见各 phase 待办前置 ADR（如 phase-11 错误接口三层映射 / phase-12 capabilities 替换清单）。
 

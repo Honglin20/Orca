@@ -400,6 +400,13 @@ export const OrcaPlugin = async (ctx: any) => {
       idleCount += 1
       if (DIAGNOSE) writeAdvanceHeartbeat(sessionID)
 
+      // 【patch 2026-07-09】model-driven advance：推进改由主 session 模型自己调
+      // `orca in-session next --output <产出>` 驱动（CLI 在每个节点 prompt 后附「驱动协议」）。
+      // idle 钩子不再 REST 抽产出 / 不再 spawn next / 不再 promptAsync —— 旧 REST 路径依赖
+      // opencode dev server，断链即 replay 死循环。下方 marker/REST/next/promptAsync 代码
+      // 已废弃（DEAD），保留待「整理」阶段一并删除。
+      return
+
       // 子 session 过滤（D-v7-5）+ 主 session 绑定：marker 存在 = 本 session 有活跃 run。
       const marker = await readMarker(sessionID)
       if (!marker) return   // 非激活 session → passthrough

@@ -108,6 +108,29 @@ def _reply_prompt(result: Any) -> str | None:
     return result.prompt
 
 
+def _drive_protocol(run_id: str) -> str:
+    """model-driven advance 协议文本（补丁 2026-07-09）：附在每个节点 prompt 后。
+
+    告诉主 session 模型如何**自己**推进 workflow——派子代理 → 调 ``orca in-session next
+    --output`` → 读返回 → 重复/停。取代 plugin idle 钩子的 REST 产出抽取（旧路径依赖
+    opencode dev server REST，断链即 replay 死循环；见 plugin event 钩子注释）。
+    **run_id 是唯一句柄**：tape 路径是 run_id 的纯函数（bootstrap 用 _default_tape_path 建），
+    next 按 --run-id 自己定位 tape，模型只需传 run_id + 产出，不必背 tape 路径。
+    合规计数器仍是兜底：模型连续 3 次不调 next/无 output → CLI emit workflow_failed（卡住可见）。
+    """
+    return (
+        "\n【Orca 驱动协议】你（主 session）负责推进，不要等系统自动推进：\n"
+        "1. 用 task 工具派一个子代理执行上面这个节点（子代理先 Read 节点指令文件，按要求做完）。\n"
+        "2. 子代理返回后，把它的产出作为 --output，**原样**执行下面这条命令"
+        "（--run-id 是唯一句柄，必须用下面给定的值；tape 由 Orca 自己按 run_id 定位，不要传）：\n"
+        f"   orca in-session next --run-id {run_id} --output '<子代理的产出>'\n"
+        "3. 读上面命令的 stdout（一段 JSON）：\n"
+        "   - 若 done 为 true → workflow 已结束，停止推进，向用户总结结果。\n"
+        "   - 否则 JSON 里的 prompt 字段就是下一个节点的指令 → 回到第 1 步继续。\n"
+        "要点：--output 用单引号包住整段产出；--run-id 必传；严格按 next 返回的 prompt 逐节点做。\n"
+    )
+
+
 def _default_tape_path(run_id: str) -> Path:
     """lazy import 避开 orca.iface.cli 包初始化期的循环 import。"""
     from orca.iface.cli.bg_runner import default_tape_path
@@ -340,8 +363,9 @@ def bootstrap(
         if result.node:
             reply["node"] = result.node
         prompt_text = _reply_prompt(result)
+        # model-driven advance 补丁：entry prompt 后附「驱动协议」，模型据此自调 next --output。
         if prompt_text:
-            reply["prompt"] = prompt_text
+            reply["prompt"] = prompt_text + _drive_protocol(run_id)
         if result.prompt_file:
             reply["prompt_file"] = result.prompt_file
 
@@ -361,7 +385,7 @@ def bootstrap(
 
 @app.command()
 def next(
-    tape: Path = typer.Option(..., "--tape", help="tape 文件路径"),
+    tape: Path = typer.Option(None, "--tape", help="tape 文件路径（可选；省略则按 --run-id 派生默认路径 runs/<run_id>.jsonl）"),
     run_id: str = typer.Option(..., "--run-id", help="run id"),
     output: str = typer.Option(
         None, "--output",
@@ -380,7 +404,9 @@ def next(
     except json.JSONDecodeError as e:
         raise typer.BadParameter(f"--inputs 不是合法 JSON：{e}") from e
 
-    tape_path = Path(tape)
+    # --tape 可选（model-driven advance 补丁）：省略时 tape 路径是 run_id 的纯函数
+    # （bootstrap 用 _default_tape_path 建 tape），故 run_id 即可定位，模型不必背 tape 路径。
+    tape_path = Path(tape) if tape else _default_tape_path(run_id)
 
     # per-call flock（LOCK_NB → busy 0 退出，F5）。
     acquired = _try_acquire_flock(tape_path)
@@ -420,8 +446,9 @@ def next(
     if result.node:
         reply["node"] = result.node
     prompt_text = _reply_prompt(result)
+    # model-driven advance 补丁：每个 next 返回的 prompt 也附「驱动协议」，让模型继续自驱。
     if prompt_text:
-        reply["prompt"] = prompt_text
+        reply["prompt"] = prompt_text + _drive_protocol(run_id)
     if result.prompt_file:
         reply["prompt_file"] = result.prompt_file
     if result.reason:
