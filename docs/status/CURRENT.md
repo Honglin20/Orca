@@ -24,7 +24,7 @@ model-driven advance 补丁（`4b3a4d6`）之上的 surgical polish，commit `f8
 
 ### 遗留（架构未清理，后续解决）
 1. **plugin 死代码**：`orca.ts` idle 钩子内 REST fetch / `extractTaskOutput` / spawn next / `promptAsync` + 模块级 `serverBaseUrl`/`extractTaskOutput`/`injecting` 死引用，整理时清掉。
-2. **`--format prompt` 未接协议**：bootstrap 的 prompt-command 分支（批 B 入口，当前休眠）没附驱动协议；切到 prompt-command 入口时补。
+2. ~~**`--format prompt` 未接协议**~~ **已修（`f86df86`，2026-07-09）**：bootstrap `--format prompt` 现已附驱动协议（与 JSON 路径一致）。
 3. **`--output` 大产出引号风险**：先按 shell arg 传；若模型产出含特殊字符/超长挂掉，加 `--output-file <path>`。
 4. **合规兜底语义变了**：idle neuter 后，模型不调 next → workflow **静默卡住**（不再有 idle 重试推它）。「卡住可见」但无自动 nudge；整理时定夺是否留 idle 作纯 nudge 安全网（只提醒、不抽 REST）。
 5. **未写 design draft**：model-driven advance 完整设计未落 `docs/specs/`；与批 B（prompt-command 入口）+ phase-10 MCP 的统一未做。**这是补丁非终态。**
