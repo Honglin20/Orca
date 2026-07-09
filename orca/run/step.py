@@ -34,7 +34,7 @@ import jsonschema
 
 from orca.events.replay import replay_state
 from orca.exec.error import ExecError
-from orca.exec.render import render_prompt
+from orca.exec.render import render_prompt, render_template
 from orca.run.lifecycle import (
     make_workflow_completed,
     make_workflow_started,
@@ -219,20 +219,34 @@ def _deliver(node: Any, ctx: Any, prompts_dir: Path | None) -> tuple[str | None,
     return rendered, None, None
 
 
-def _final_outputs(wf: Workflow, outputs_acc: dict[str, Any]) -> dict[str, Any]:
+def _final_outputs(
+    wf: Workflow, outputs_acc: dict[str, Any], inputs: dict[str, Any], run_id: str,
+) -> dict[str, Any]:
     """workflow_completed 的 outputs。
 
-    v1：``wf.outputs`` 非空（声明了输出模板）时 fail loud —— 完整 ``evaluate_outputs``
-    模板求值与 drive_loop 对齐留独立 phase（避免改 drive_loop，方案 E）。无声明则
-    返各节点 raw output 集合。
+    ``wf.outputs`` 声明了输出模板 → 渲染（与 ``Orchestrator._evaluate_outputs`` 同源：
+    ``render_template`` + ``_build_ctx``，tape 是 inputs/outputs 真相源）；无声明 →
+    返各节点 raw output 集合（旧行为）。
+
+    已知 DRY 债（同 ``_resolve_inputs``）：渲染逻辑短期与 orchestrator 内联一份，
+    不抽共享函数以免动 drive_loop。phase-14 的 ``end_route.output``（命中 ``$end`` 那条
+    route 的独立输出变换）in-session 暂不支持 —— 此处只求 ``wf.outputs``（覆盖绝大多数
+    workflow；per-route 变换留 follow-up）。
     """
-    if getattr(wf, "outputs", None):
+    templates = getattr(wf, "outputs", None)
+    if not templates:
+        return {node: acc.get("output") for node, acc in outputs_acc.items()}
+    ctx = _build_ctx(wf, outputs_acc, inputs, run_id)
+    try:
+        return {key: render_template(tpl, ctx) for key, tpl in templates.items()}
+    except ExecError as e:
+        # 渲染失败（上游 output 缺字段 / 模板语法错）→ fail loud 统一走 InSessionError
+        # （cli 层 except 捕获 → emit workflow_failed），不静默返 {}（鲁棒性底线）。
+        # 精确 catch ExecError（render_template 仅抛此），与同文件 ``_render_or_fail`` 一致。
         raise InSessionError(
-            "in-session shell v1 不支持 wf.outputs 模板（evaluate_outputs 未对齐；"
-            "用 orca run / TUI / Web）",
-            error_kind=ERR_INTERNAL_ERROR,  # workflow 级特性不支持（非 node kind），归 internal_error
-        )
-    return {node: acc.get("output") for node, acc in outputs_acc.items()}
+            f"渲染 workflow outputs 模板失败（可能上游 output 缺字段或模板错）：{e}",
+            error_kind=ERR_RENDER_ERROR,
+        ) from e
 
 
 def _resolve_inputs(wf: Workflow, inputs: dict[str, Any] | None) -> dict[str, Any]:
@@ -280,7 +294,13 @@ def advance_step(
     None 时 inline 回退（StepResult.prompt 全文，单测决策逻辑用）。
     """
     state = replay_state(tape)
-    inputs = _resolve_inputs(wf, inputs)
+    # tape 是 inputs 真相源（workflow_started.data.inputs）：next 不传 --inputs 时从 tape
+    # 恢复（deterministic —— 模型不必每步重传，且修掉非 entry 节点 {{ inputs.* }} 依赖 CLI
+    # 重传的隐患）。bootstrap 首调时 tape 无 workflow_started → _inputs_from_tape 返 {} →
+    # 自然 fallback 到 CLI 传入的 inputs。与 Orchestrator resume（_inputs_from_tape）同源。
+    tape_inputs = Orchestrator._inputs_from_tape(tape)
+    merged = {**tape_inputs, **(inputs or {})}  # CLI override 罕见但保留兼容
+    inputs = _resolve_inputs(wf, merged)
     rid = run_id or getattr(tape, "run_id", "") or ""
 
     # 1. 已终态（重复调用 / crash 后重启撞终态）—— 幂等，不 emit。
@@ -320,7 +340,7 @@ def advance_step(
         nxt = Orchestrator._next_node_for_resume(wf, pending, outputs_acc)
         if nxt == END:
             emits.append(Emit("route_taken", {"from": pending, "to": END}))
-            t, d = make_workflow_completed(wf, _final_outputs(wf, outputs_acc), elapsed=elapsed)
+            t, d = make_workflow_completed(wf, _final_outputs(wf, outputs_acc, inputs, rid), elapsed=elapsed)
             emits.append(Emit(t, d))
             logger.info("workflow 完成（%s，elapsed=%.2fs）", rid, elapsed)
             return StepResult(emits=emits, done=True, reason="completed")

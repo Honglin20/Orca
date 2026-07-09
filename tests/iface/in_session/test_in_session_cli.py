@@ -708,3 +708,138 @@ def test_marker_files_cleaned_after_workflow_completes(cwd_tmp, wf_path):
     # workflow_completed 后 marker 已清
     markers = list(cwd_tmp.glob("runs/orca-*.json"))
     assert len(markers) == 0
+
+
+# ── outputs 模板求值 + inputs 从 tape 恢复（2026-07-09 补丁）────────────────────
+
+
+OUTPUTS_WF_YAML = """\
+name: outputs_wf
+description: 带 outputs 模板的 workflow（in-session outputs 求值测试）。
+entry: a
+nodes:
+  - name: a
+    kind: agent
+    executor: opencode
+    model: deepseek/deepseek-v4-flash
+    prompt: "产出 step A 的输出。"
+    routes:
+      - to: $end
+outputs:
+  result: "A={{ a.output }}"
+"""
+
+
+def test_next_completes_with_outputs_template_evaluated(cwd_tmp, tmp_path):
+    """``wf.outputs`` 声明模板 → in-session 跑完应**求值**（不再 fail loud）。
+
+    回归 2026-07-09 补丁：``_final_outputs`` 从 fail loud 改为 ``render_template``
+    求 ``wf.outputs``（与 ``Orchestrator._evaluate_outputs`` 同源）。
+    """
+    wf_path = tmp_path / "wf_outputs.yaml"
+    wf_path.write_text(OUTPUTS_WF_YAML, encoding="utf-8")
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id, tape = boot["run_id"], boot["tape"]
+
+    reply = _next(runner, tape, run_id, "--output", "out_a")
+    assert reply["done"] is True
+
+    # workflow_completed.data.outputs = 模板求值结果（{{ a.output }} → "out_a"）
+    lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
+    wc = json.loads(lines[-1])
+    assert wc["type"] == "workflow_completed"
+    assert wc["data"]["outputs"] == {"result": "A=out_a"}
+
+
+INPUTS_WF_YAML = """\
+name: inputs_wf
+description: 非 entry 节点引用 inputs（inputs 从 tape 恢复测试）。
+entry: a
+inputs:
+  task:
+    type: string
+    required: true
+nodes:
+  - name: a
+    kind: agent
+    executor: opencode
+    model: deepseek/deepseek-v4-flash
+    prompt: "step A。"
+    routes:
+      - to: b
+  - name: b
+    kind: agent
+    executor: opencode
+    model: deepseek/deepseek-v4-flash
+    prompt: "基于输入 {{ inputs.task }} 继续。"
+    routes:
+      - to: $end
+"""
+
+
+def test_next_recovers_inputs_from_tape_without_inputs_arg(cwd_tmp, tmp_path):
+    """``next`` 不传 ``--inputs`` → 非 entry 节点 ``{{ inputs.* }}`` 仍正确渲染。
+
+    回归 2026-07-09 补丁：``advance_step`` 改从 tape（``workflow_started.data.inputs``）
+    恢复 inputs（同 ``Orchestrator._inputs_from_tape``），模型不必每步重传 ``--inputs``，
+    且修掉非 entry 节点 ``{{ inputs.* }}`` 依赖 CLI 重传的隐患。
+    """
+    wf_path = tmp_path / "wf_inputs.yaml"
+    wf_path.write_text(INPUTS_WF_YAML, encoding="utf-8")
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path, "--inputs", '{"task":"hello"}')
+    run_id, tape = boot["run_id"], boot["tape"]
+
+    # next 只传 --output，不传 --inputs → 推进到 b（inputs 从 tape 恢复）
+    reply = _next(runner, tape, run_id, "--output", "out_a")
+    assert reply["done"] is False
+    assert reply["node"] == "b"
+
+    # node b 的 prompt 文件应含渲染后的 inputs.task（从 tape 恢复，非 undefined）
+    b_prompt = (Path(tape).parent / run_id / "prompts" / "b.md").read_text(encoding="utf-8")
+    assert "hello" in b_prompt               # inputs.task 已渲染
+    assert "{{ inputs.task" not in b_prompt  # 模板已求值，无残留未渲染标记
+
+
+OUTPUTS_BAD_WF_YAML = """\
+name: outputs_bad_wf
+description: outputs 模板引用存在节点的缺失字段（过 compile 校验、render 期 fail-loud）。
+entry: a
+nodes:
+  - name: a
+    kind: agent
+    executor: opencode
+    model: deepseek/deepseek-v4-flash
+    prompt: "产出 step A 的输出。"
+    routes:
+      - to: $end
+outputs:
+  result: "{{ a.output.nonexistent }}"
+"""
+
+
+def test_next_outputs_template_render_failure_fails_loud(cwd_tmp, tmp_path):
+    """outputs 模板引用存在节点的缺失字段 → render 期 fail loud（``ERR_RENDER_ERROR`` → workflow_failed），不静默返 {}。
+
+    注：引用**不存在的节点**会被 compile validator 在 bootstrap 期拦下；此处用存在节点
+    ``a`` 的缺失字段路径，过 compile 校验、在 ``_final_outputs`` render 期触发。
+    """
+    wf_path = tmp_path / "wf_outputs_bad.yaml"
+    wf_path.write_text(OUTPUTS_BAD_WF_YAML, encoding="utf-8")
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id, tape = boot["run_id"], boot["tape"]
+
+    result = runner.invoke(app, [
+        "next", "--tape", tape, "--run-id", run_id, "--output", "out_a",
+    ])
+    assert result.exit_code == 1   # fail loud
+    reply = json.loads(result.output.splitlines()[-1])
+    assert reply["done"] is True
+    assert "failed" in reply["reason"]
+
+    lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
+    last = json.loads(lines[-1])
+    assert last["type"] == "workflow_failed"
+    assert last["data"]["kind"] == "render_error"

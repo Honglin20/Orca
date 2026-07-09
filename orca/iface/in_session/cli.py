@@ -120,7 +120,8 @@ def _drive_protocol(run_id: str) -> str:
     """
     return (
         "\n【Orca 驱动协议】你（主 session）负责推进，不要等系统自动推进：\n"
-        "1. 用 task 工具派一个子代理执行上面这个节点（子代理先 Read 节点指令文件，按要求做完）。\n"
+        "1. 用 task 工具派一个子代理执行上面这个节点：**由子代理 Read 节点指令文件**并按要求"
+        "做完；**你不许自己 Read 该文件**（会撑爆你的上下文）。\n"
         "2. 子代理返回后，把它的产出作为 --output，**原样**执行下面这条命令"
         "（--run-id 是唯一句柄，必须用下面给定的值；tape 由 Orca 自己按 run_id 定位，不要传）：\n"
         f"   orca in-session next --run-id {run_id} --output '<子代理的产出>'\n"
@@ -369,11 +370,13 @@ def bootstrap(
         if result.prompt_file:
             reply["prompt_file"] = result.prompt_file
 
-        # 批 B（2026-07-08）：prompt-command 入口用 ``--format prompt`` —— 只回 entry prompt
-        # 纯文本（pointer），让主 session 直接据其派子代理（模型不见干净指令，不见 JSON/marker）。
+        # 批 B（2026-07-08）：prompt-command 入口用 ``--format prompt`` —— 回 entry prompt
+        # 纯文本（pointer）**+ 驱动协议**（model-driven advance：模型据此自调 next --output）。
+        # 早期仅回 pointer 漏了驱动协议 → 模型拿到入口指令却不知如何推进（CURRENT 遗留 #2）；
+        # 本补丁补齐，与 JSON 路径（reply["prompt"] = prompt_text + 驱动协议）一致。
         # 兜底：无 prompt（如非 agent entry / 异常）→ 仍回 JSON 让模型看到结构化信息。
         if format == "prompt" and prompt_text:
-            typer.echo(prompt_text)
+            typer.echo(prompt_text + _drive_protocol(run_id))
         else:
             typer.echo(json.dumps(reply, ensure_ascii=False))
     finally:
