@@ -1,0 +1,1 @@
+我要一个 workflow：给定一组 repo（orca、conductor、ccw），对每个 repo 并发跑一个 assessor agent 评估质量，最后输出评估总数。生成一个 Orca workflow。

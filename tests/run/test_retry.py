@@ -228,9 +228,37 @@ def test_retry_success_on_second_attempt_emits_started_and_succeeded(tmp_path):
     assert started.data["max_attempts"] == 3
     assert started.data["error_type"] == "spawn_error"
     assert started.data["node"] == "n"
+    # ADR §4.5：retry_started.data 带 layer/kind/next_retry_at（E2E 闭环 Defect A/B）
+    assert started.data["kind"] == "transport_process"  # spawn_error → TRANSPORT_PROCESS
+    assert started.data["layer"] == "transport"         # 与 kind 一致（E2E 闭环 Defect B）
+    assert started.data["reason"]
+    # next_retry_at：delay > 0 时为 ISO 时间戳，delay = 0 时为 None（本测试 default delay=0）
+    assert "next_retry_at" in started.data
     succeeded = next(e for e in tape.replay() if e.type == "retry_succeeded")
     assert succeeded.data["attempt_total"] == 2
     assert "retry_exhausted" not in types
+
+
+def test_retry_started_next_retry_at_iso_when_delay_positive(tmp_path):
+    """ADR §4.5 / E2E 闭环 Defect A：delay > 0 时 next_retry_at 必须是 ISO 时间戳。
+
+    INTENT：用户能看到「下次重试在何时」（不缺字段）。orchestrator retry path 此前
+    直接构造 dict 漏写 next_retry_at，E2E agent 实测发现。
+    """
+    bus, tape = _bus(tmp_path)
+    # delay=0.1s > 0 → next_retry_at 必须是 ISO 字符串
+    node = _retry_node(
+        max_attempts=2, backoff="constant", initial_delay_seconds=0.1, jitter=False,
+    )
+    executor = _ScriptedExecutor([
+        _fail("spawn_error", "fail"),
+        _complete({"result": "ok"}),
+    ])
+    run_async(execute_with_retry(executor, node, _ctx(), bus))
+    started = next(e for e in tape.replay() if e.type == "retry_started")
+    assert started.data["next_retry_at"] is not None
+    assert isinstance(started.data["next_retry_at"], str)
+    assert "T" in started.data["next_retry_at"]  # ISO 8601 含 T
 
 
 # ── 4. 用尽 → retry_exhausted + re-raise ─────────────────────────────────────

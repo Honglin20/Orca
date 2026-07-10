@@ -1,0 +1,35 @@
+name: assembled_parallel
+description: "由散 agent md 组装：两 researcher 并行→synthesizer 合并"
+entry: researcher_a
+inputs:
+  topic:
+    type: string
+    description: "调研主题"
+nodes:
+  - name: researcher_a
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: researcher_a
+    routes:
+      - to: fanout
+  - name: researcher_b
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: researcher_b
+  - name: synthesizer
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "合并两路调研并出综合结论：A={{ fanout.output.outputs.researcher_a }} || B={{ fanout.output.outputs.researcher_b }}"
+    routes:
+      - to: $end
+parallel:
+  - name: fanout
+    branches: [researcher_a, researcher_b]
+    failure_mode: continue_on_error
+    routes:
+      - to: synthesizer
+outputs:
+  synthesis: "{{ synthesizer.output }}"

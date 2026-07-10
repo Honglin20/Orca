@@ -17,11 +17,12 @@ parallel 组 / foreach，累加 ``ctx.outputs``，路由 first-match-wins 决定
         current = router.resolve(routes_of(current), output, ctx)
     emit workflow_completed(evaluate_outputs(wf.outputs, ctx))
 
-fail loud（铁律 4）：三类错误均 emit ``workflow_failed``：
-  - ``ExecError``（executor 失败）→ error_type 由 phase 映射（ExecTimeout / ...）
-  - ``RouteError``（路由死锁）→ error_type=``NoRouteMatch``
-  - ``MaxIterationsError``（超迭代）→ error_type=``MaxIterations``
-  - ``GroupFailure``（parallel / foreach 内部失败）→ error_type=``GroupFailure``
+fail loud（铁律 4）：编排错误均 emit ``workflow_failed``（kind 取自 ``_classify_error``）：
+  - ``ExecError``（executor 失败 / RouteError / MaxIterationsError / WorkflowAborted）
+    → kind 透传 e.kind（BUSINESS_GATE / BUSINESS_CONFIG / TRANSPORT_* / ...）
+  - ``GroupFailure``（parallel / foreach 内部失败）→ kind=``business_agent``
+  - ``WorkflowTerminated``（保留独立 signal，非 ExecError 子类）→ orchestrator 翻译：
+    success → workflow_completed；failed → workflow_failed{kind: business_agent}
 
 依赖单向：本模块依赖 ``orca.{schema, events, exec}`` + ``orca.run.*`` 子模块；
 是最上层消费者，不被任何模块 import。
@@ -33,6 +34,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from orca.exec.error import ExecError
+from orca.exec.registry import ProcessRegistry, get_default_registry
 from orca.run.aggregate import GroupFailure
 from orca.run.errors import MaxIterationsError, WorkflowAborted, WorkflowTerminated
 from orca.run.executor_adapter import execute_and_emit
@@ -57,7 +59,7 @@ if TYPE_CHECKING:
     from orca.exec.mcp_tools.server import AgentToolsMcpServer
     from orca.gates.interrupt import InterruptHandler
     from orca.gates.types import InterruptRequest
-    from orca.schema import AgentNode, Node, RunState, Workflow
+    from orca.schema import AgentNode, Node, Route, RunState, Workflow
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +111,8 @@ class Orchestrator:
         run_id: str | None = None,
         interrupt_handler: InterruptHandler | None = None,
         agent_tools_server: AgentToolsMcpServer | None = None,
+        registry: ProcessRegistry | None = None,
+        setup_outputs: dict[str, Any] | None = None,
     ):
         self.wf = wf
         self.bus = bus
@@ -149,11 +153,21 @@ class Orchestrator:
         # RunContext 构造（frozen，node 间构造新实例累加 outputs）
         from orca.exec.context import RunContext
 
+        # phase-10 技术债回填：setup_outputs（MCP 壳主 session 替 setup agent 收集的 outputs）
+        # 包成 ``{agent_name: {"output": raw}}`` 存入 ctx.setup，render 暴露为
+        # ``{{ setup.<agent>.output.<field> }}``（与 node outputs 同形约定）。
+        # 调用方传 ``{agent: {field: val}}``（裸 outputs，见 setup_phase.validate_setup_outputs）。
+        # None / 空 → 空 dict（无 setup phase，绝大多数 workflow 不受影响）。
+        setup_ns = {
+            agent: {"output": outputs}
+            for agent, outputs in (setup_outputs or {}).items()
+        }
         self.ctx = RunContext(
             inputs=merged_inputs,
             outputs={},
             run_id=self.run_id,
             task=task,
+            setup=setup_ns,
         )
         self.task = task
         # resolve_max_iter 在 __init__ 调用（run() 之前）：非法 iterations（如 "abc"）
@@ -171,6 +185,10 @@ class Orchestrator:
         # 每次 _make_ctx 把它注入 RunContext.user_guidance（Step B 接 render_prompt）。
         # 单 run 生命周期内单调累加；用 list 因 frozen tuple 在 _make_ctx 里构造。
         self._guidance_acc: list[str] = []
+        # phase-11-process §1.2（ADR §4.7）：DI 注入 ProcessRegistry。
+        # production 用 ``get_default_registry()``；测试 / CLI 入口可注入独立实例。
+        # ``shutdown()`` 经此 registry 兜底清理未释放的子进程（signal / atexit 三处都调）。
+        self._registry: ProcessRegistry = registry or get_default_registry()
 
     # ── phase 11：中断公开通道（SPEC §2.3）──────────────────────────────────
 
@@ -243,6 +261,22 @@ class Orchestrator:
                 "request_interrupt %s 即时唤醒 %d 个 wait node", ireq.id, woken
             )
 
+    def shutdown(self) -> None:
+        """phase-11-process §1.2：兜底清理未释放的子进程（signal / atexit / CLI 入口三处都调）。
+
+        幂等（铁律 5）：``ProcessRegistry.shutdown`` 内 ``_shutting_down`` flag 保护，
+        多次调直接 return，不报错。
+
+        与 ``run()`` 内 ``self.bus.close()`` 的关系：bus.close 关 Tape 文件，
+        registry.shutdown 杀进程——两者正交，run() 自然结束路径 proc 都已 release，
+        此方法对正常路径是 no-op，仅作 signal / 异常退出兜底。
+
+        **不在 except 链里调**（避免与 phase-11-error 改过的 except 链耦合）：
+        本方法只对 ``__main__`` / signal handler / atexit 暴露；``run`` 内的清理走
+        既有 ``_stop_agent_tools + bus.close`` 路径。
+        """
+        self._registry.shutdown()
+
     async def run(self) -> RunState:
         """跑完整个 workflow，返回 replay_state(tape)（tape 派生的 RunState）。"""
         from orca.events.replay import replay_state
@@ -273,14 +307,18 @@ class Orchestrator:
             # terminate step：触达 TerminateNode 的业务级终止信号。status=success →
             # emit workflow_completed（用 terminate.outputs 替代 wf.outputs 求值）；
             # status=failed → emit workflow_failed{WorkflowTerminated}（带 reason）。
-            # 与其它 except 并列而非走 _classify_error：terminate 不是「错误」，是显式声明。
+            # **必须在 except ExecError 之前**（WorkflowTerminated 是独立 exception，
+            # phase-11 §4.2 AST 守门）；走 _finalize_terminated 翻译，不走 _classify_error。
             return await self._finalize_terminated(e, start_ts)
-        except (ExecError, RouteError, MaxIterationsError, GroupFailure, WorkflowAborted) as e:
-            # fail loud：五类编排错误 → workflow_failed
-            error_type = _classify_error(e)
+        except (ExecError, GroupFailure) as e:
+            # fail loud：ExecError（含 RouteError / MaxIterationsError / WorkflowAborted
+            # 子类）+ GroupFailure（parallel / foreach 内部失败）→ workflow_failed。
+            # kind 是唯一分类轴（ADR §4.1 决策 1.4）：_classify_error 返 ErrorKind 值，
+            # 不返字符串字面量（phase-11 §4.2 / §6 验收 8）。
+            kind = _classify_error(e)
             node = _error_node(e)
             t2, data2 = make_workflow_failed(
-                error_type, str(e), node=node,
+                kind, str(e), node=node,
             )
             await self.bus.emit(t2, data2)
             await self._stop_agent_tools()
@@ -327,12 +365,13 @@ class Orchestrator:
         """terminate step 收尾：据 ``e.status`` emit workflow_completed / failed 并 close。
 
         ``run`` 与 ``run_from_state`` 共享此 helper（DRY：两入口的 terminate 处理对称）。
-        与 ``_classify_error`` 路径并列但**不**走它——terminate 不是「错误」，是显式声明，
+        与 ``_classify_error`` 路径并列但**不**走它——WorkflowTerminated 是显式声明，
         status=success 时还要 emit workflow_completed（错误路径永远只 emit workflow_failed）。
 
         - ``status="success"`` → ``workflow_completed``，``outputs=e.outputs``（terminate
           节点的渲染后 outputs，**不**走 ``_evaluate_outputs(wf.outputs)``）。
-        - ``status="failed"`` → ``workflow_failed``，``error_type="WorkflowTerminated"``，
+        - ``status="failed"`` → ``workflow_failed{kind: business_agent}``（ADR §4.1 决策 1.2
+          翻译规则：TerminateNode failed 路径翻译为 node_failed{kind=BUSINESS_AGENT}），
           ``message=e.reason``，``node=e.node``。
         """
         from orca.events.replay import replay_state
@@ -342,7 +381,7 @@ class Orchestrator:
             t, data = make_workflow_completed(self.wf, e.outputs, elapsed=elapsed)
         else:
             t, data = make_workflow_failed(
-                "WorkflowTerminated", e.reason, node=e.node,
+                "business_agent", e.reason, node=e.node,
             )
         await self.bus.emit(t, data)
         await self._stop_agent_tools()
@@ -455,7 +494,7 @@ class Orchestrator:
         ctx = RunContext(
             inputs={}, outputs=dict(outputs_acc), run_id="", task=None,
         )
-        return resolve(routes, outputs_acc.get(last_done, {}).get("output"), ctx)
+        return resolve(routes, outputs_acc.get(last_done, {}).get("output"), ctx).to
 
     @staticmethod
     def _bare_instance(
@@ -494,6 +533,8 @@ class Orchestrator:
         orch._interrupt_skip_target = None
         # phase 11 §5：resume 不接 agent_tools_server（ask_user 交互态不跨进程恢复）。
         orch._agent_tools_server = None
+        # phase-11-process：resume 用 default registry（同 process；signal 兜底仍生效）。
+        orch._registry = get_default_registry()
         # resume 专用状态（run_from_state 消费）。
         orch._resume_replayed_events = 0
         orch._resume_initial_outputs = outputs_acc
@@ -564,12 +605,12 @@ class Orchestrator:
             )
         except WorkflowTerminated as e:
             # terminate step（与 run() 对称）：status=success → workflow_completed；
-            # status=failed → workflow_failed{WorkflowTerminated}。
+            # status=failed → workflow_failed{kind: business_agent}（翻译规则 §4.1 决策 1.2）。
             return await self._finalize_terminated(e, start_ts)
-        except (ExecError, RouteError, MaxIterationsError, GroupFailure, WorkflowAborted) as e:
-            error_type = _classify_error(e)
+        except (ExecError, GroupFailure) as e:
+            kind = _classify_error(e)
             node = _error_node(e)
-            t2, data2 = make_workflow_failed(error_type, str(e), node=node)
+            t2, data2 = make_workflow_failed(kind, str(e), node=node)
             await self.bus.emit(t2, data2)
             await self._stop_agent_tools()
             self.bus.close()
@@ -607,6 +648,8 @@ class Orchestrator:
         current = start_node
         # 可变 outputs 累加器：node 间构造新 frozen RunContext（_make_ctx 从此快照派生）
         outputs_acc: dict[str, Any] = dict(initial_outputs)
+        # phase-14：命中 $end 的 route（含 output），drive loop 退出后 _evaluate_outputs 用
+        end_route: Route | None = None
 
         iterations = 0
         while current != "$end":
@@ -638,7 +681,11 @@ class Orchestrator:
                         current = skip_target
                     else:
                         # 无显式目标 → 沿 route 求值（兜底 route / 默认下一 node，wave-1 行为）。
-                        current = await self._next_node_after(current, outputs_acc, None)
+                        # phase-14：skip 也经 _next_node_after 拿 route（router skip 容错命中兜底
+                        # route，含 output）；skip 到 $end 时 end_route = 兜底 route（C2 统一语义）。
+                        current, route = await self._next_node_after(current, outputs_acc, None)
+                        if current == "$end":
+                            end_route = route
                     continue
                 # continue: guidance 已在 _handle_interrupt 累积进 _guidance_acc，
                 # 下面 _make_ctx 自动带上（Step B 起 render_prompt 拼 [User Guidance]）。
@@ -670,9 +717,11 @@ class Orchestrator:
                 )
 
             # 路由求值（用更新后的 ctx —— 含本步 output）
-            current = await self._next_node_after(current, outputs_acc, raw_output)
+            current, route = await self._next_node_after(current, outputs_acc, raw_output)
+            if current == "$end":
+                end_route = route  # 命中终点的 route（含 output），供 _evaluate_outputs
 
-        return self._evaluate_outputs(outputs_acc)
+        return self._evaluate_outputs(outputs_acc, end_route=end_route)
 
     async def _handle_interrupt(
         self, current: str, outputs_acc: dict[str, Any]
@@ -755,22 +804,26 @@ class Orchestrator:
 
     async def _next_node_after(
         self, current: str, outputs_acc: dict[str, Any], raw_output: Any
-    ) -> str:
+    ) -> tuple[str, Route]:
         """对 current 的 routes 求值下一 node，emit route_taken（DRY：drive_loop / skip 共用）。
 
+        phase-14：返回 ``(target, 命中的 Route)``。route 含 ``output``——到 ``$end`` 时
+        ``_evaluate_outputs`` 用它做输出变换（非 ``$end`` 时 route 仅诊断用）。
+
         skip 路径传 ``raw_output=None``：当前 node 未执行，下游 routes 据此求值（兜底
-        route ``when=None`` 命中）。
+        route ``when=None`` 命中；router skip 容错返回该兜底 route，含 output）。
         """
         routes = self._routes_of(current)
         ctx_for_route = self._make_ctx(outputs_acc)
         try:
-            nxt = resolve(routes, raw_output, ctx_for_route)
+            route = resolve(routes, raw_output, ctx_for_route)
         except RouteError as e:
             e.node = current
             raise
+        nxt = route.to
         # emit route_taken（让 reducer 的 current_node 跟踪对）
         await self.bus.emit("route_taken", {"from": current, "to": nxt})
-        return nxt
+        return nxt, route
 
     def _make_ctx(self, outputs_acc: dict[str, Any]) -> RunContext:
         """从累加的 outputs 构造 frozen RunContext 快照（DRY：dispatch / route / outputs 共用）。
@@ -790,6 +843,8 @@ class Orchestrator:
             run_id=self.run_id,
             task=self.task,
             user_guidance=tuple(self._guidance_acc),
+            # setup phase outputs 透传（不可变，来自 __init__ 注入；render 暴露 setup 根）
+            setup=self.ctx.setup,
         )
 
     async def _dispatch(self, current: str, ctx: RunContext) -> Any:
@@ -945,35 +1000,45 @@ class Orchestrator:
             return self._parallel_by_name[name].routes
         return self._node_by_name[name].routes
 
-    def _evaluate_outputs(self, outputs_acc: dict[str, Any]) -> dict[str, Any]:
-        """渲染 ``wf.outputs`` 模板 → 最终输出 dict（SPEC §4.2 末）。
+    def _evaluate_outputs(
+        self, outputs_acc: dict[str, Any], *, end_route: Route | None = None,
+    ) -> dict[str, Any]:
+        """渲染 final output 模板 → 最终输出 dict（SPEC §4.2 + phase-14 Route.output）。
 
-        用 Jinja2 渲染每个 value；ctx 含全部已完成 node 的 outputs。
+        phase-14：若 ``end_route`` 带 ``output``（命中 ``$end`` 的那条 route 的输出变换），
+        用它渲染（每条到 ``$end`` 的 route 可独立变换 final output）；否则 fallback
+        ``wf.outputs``。skip 显式目标到 ``$end``（不经 route 求值）→ ``end_route=None`` →
+        fallback ``wf.outputs``（SPEC §0.1 #5）。
         """
         from orca.exec.render import render_template
 
-        if not self.wf.outputs:
+        templates = end_route.output if (end_route and end_route.output) else self.wf.outputs
+        if not templates:
             return {}
         ctx = self._make_ctx(outputs_acc)
-        result: dict[str, Any] = {}
-        for key, template in self.wf.outputs.items():
-            result[key] = render_template(template, ctx)
-        return result
+        return {key: render_template(tpl, ctx) for key, tpl in templates.items()}
 
 
 def _classify_error(e: Exception) -> str:
-    """编排错误 → workflow_failed 的 error_type（SPEC §3.4 / 铁律 4）。"""
-    if isinstance(e, MaxIterationsError):
-        return "MaxIterations"
-    if isinstance(e, WorkflowAborted):
-        return "WorkflowAborted"
-    if isinstance(e, RouteError):
-        return "NoRouteMatch"
+    """编排错误 → workflow_failed 的 kind 值（phase-11 §4.2 / §6 验收 8）。
+
+    **kind 是唯一分类轴**（ADR §4.1 决策 1.4）：返 ``ErrorKind.X.value`` 不返字符串字面量。
+    ExecError 子类的 ``e.kind`` 直接透传，不重新分类（避免跨层重新分类导致重试循环风险，
+    铁律 4 / P2）。
+    """
+    from orca.exec.error_kinds import ErrorKind
+
     if isinstance(e, GroupFailure):
-        return "GroupFailure"
+        # parallel / foreach 内部分支失败 → 检查 __cause__ 是否为 ExecError，若是透传其 kind。
+        cause = e.__cause__
+        if isinstance(cause, ExecError):
+            return cause.kind.value
+        return ErrorKind.BUSINESS_AGENT.value
     if isinstance(e, ExecError):
-        return e.error_type  # 透传 executor 的 error_type（ExecTimeout / RenderError / ...）
-    return e.__class__.__name__
+        # RouteError / MaxIterationsError / WorkflowAborted 都是 ExecError 子类；
+        # e.kind 已在子类构造器固定（不重新分类）。
+        return e.kind.value
+    return ErrorKind.UNKNOWN.value
 
 
 def _error_node(e: Exception) -> str | None:

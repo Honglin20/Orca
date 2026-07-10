@@ -1,9 +1,12 @@
 name: batch_assess
+description: "演示 foreach 批量评估（多个 agent 并发评估候选并聚合）"
 entry: finder
 
 nodes:
   - name: finder
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
     prompt: "找出候选结构，输出 JSON {candidates: [...]}"
     output_schema:
       type: object
@@ -19,6 +22,8 @@ nodes:
     max_concurrent: 3
     body:
       kind: agent
+      executor: opencode
+      model: "deepseek/deepseek-v4-flash"
       prompt: "评估这个结构：{{ candidate }}"
     failure_mode: continue_on_error
     routes:
@@ -26,6 +31,8 @@ nodes:
 
   - name: picker
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
     prompt: "从评估结果选最佳：{{ assessor.output.outputs }}"
     routes:
       - to: $end

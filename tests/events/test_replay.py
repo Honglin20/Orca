@@ -214,10 +214,52 @@ def test_route_taken_updates_current_node():
     assert s.current_node == "b"
 
 
+# ── ADR §4.3：blocked 派生（不入 tape，由 gate/interrupt 事件 fold）─────────
+
+
+def test_human_decision_derives_blocked():
+    """ADR §4.3：human_decision_requested → node_status=blocked（None 或 running 时覆盖）。
+
+    blocked 是 fold 派生态，不入 tape；reducer 据 gate 事件直接派生。
+    """
+    s = _state()
+    # node 未 started（None）+ gate requested → blocked（对齐既有 TUI 行为）
+    s = apply_event(s, _evt("human_decision_requested", seq=1, node="a", gate_id="g"))
+    assert s.node_status.get("a") == "blocked"
+    # gate resolved → blocked 回 running（claude resume 继续）
+    s = apply_event(s, _evt("human_decision_resolved", seq=2, node="a", gate_id="g"))
+    assert s.node_status.get("a") == "running"
+
+
+def test_interrupt_derives_blocked_same_as_gate():
+    """ADR §4.3：interrupt_requested/resolved 与 gate 同源派生 blocked。"""
+    s = _state()
+    s = apply_event(s, _evt("node_started", seq=1, node="a"))
+    assert s.node_status.get("a") == "running"
+    s = apply_event(s, _evt("interrupt_requested", seq=2, node="a"))
+    assert s.node_status.get("a") == "blocked"
+    s = apply_event(s, _evt("interrupt_resolved", seq=3, node="a"))
+    assert s.node_status.get("a") == "running"
+
+
+def test_blocked_does_not_override_terminal_status():
+    """终态（done/failed/skipped）不被 blocked 覆盖（node 已完成时 gate 无意义）。"""
+    s_done = apply_event(_state(), _evt("node_completed", seq=1, node="a"))
+    s_done = apply_event(s_done, _evt("human_decision_requested", seq=2, node="a"))
+    assert s_done.node_status.get("a") == "done"
+
+    s_failed = apply_event(_state(), _evt("node_failed", seq=1, node="a"))
+    s_failed = apply_event(s_failed, _evt("interrupt_requested", seq=2, node="a"))
+    assert s_failed.node_status.get("a") == "failed"
+
+
 def test_known_noop_events_dont_mutate_state():
-    """foreach_* / human_decision_* / custom / error：不修改 RunState（保持 reducer 幂等 + 最小）。
+    """foreach_* / custom / error：不修改 RunState（保持 reducer 幂等 + 最小）。
 
     这些事件的语义投影留给前端 reducer（按 session_id 分组 / 自定义渲染）。
+
+    注意：``human_decision_*`` / ``interrupt_*`` 不在此列——它们经 ADR §4.3 blocked
+    派生修改 ``node_status``（见 ``test_human_decision_derives_blocked``）。
     """
     s = _state()
     for t, data in [
@@ -225,13 +267,33 @@ def test_known_noop_events_dont_mutate_state():
         ("foreach_item_started", {"index": 0, "item_key": "k"}),
         ("foreach_item_completed", {"index": 0, "output": "x"}),
         ("foreach_completed", {"count": 3, "succeeded": 3}),
-        ("human_decision_requested", {"gate_id": "g", "prompt": "p"}),
-        ("human_decision_resolved", {"gate_id": "g", "answer": "yes"}),
+        ("prompt_rendered", {"preview": "..."}),
+        ("workflow_resumed", {"from_tape": "x", "replayed_events": 0}),
+        ("retry_started", {"attempt": 1, "max_attempts": 3}),
+        ("retry_succeeded", {"attempt_total": 1}),
+        ("retry_exhausted", {"attempts": 3}),
+        ("validator_started", {"criteria_preview": "..."}),
+        ("validator_passed", {"issues": []}),
+        ("validator_failed", {"issues": ["x"], "retrying": False}),
+        ("wait_started", {"duration_seconds": 1}),
+        ("wait_completed", {"elapsed_seconds": 1, "interrupted": False}),
+        ("dialog_started", {"node": "a"}),
+        ("dialog_message", {"role": "user", "text": "hi", "turn": 1}),
+        ("dialog_ended", {"total_turns": 1}),
+        # web-shell-v2 §3.2 B1 / D8：agent_step_started / unknown_event MUST no-op
+        # （agent_step_started 是 liveness 心跳；unknown_event 是 tape escape hatch。
+        # 两者绝不投影进 RunState，否则 backend 协议变化会触发非幂等状态变更）。
+        ("agent_step_started", {"step_reason": "tool-calls"}),
+        ("agent_step_started", {}),
+        ("unknown_event", {"raw": {"type": "experimental"}, "source": "opencode"}),
         ("custom", {"kind": "chart"}),
         ("error", {"error_type": "ValueError", "message": "boom"}),
     ]:
-        s2 = apply_event(s, _evt(t, seq=1, node="a"))
-        assert s2 == s  # 这些事件不进 RunState（投影留给前端 reducer）
+        # ``_evt`` 签名 ``_evt(type, seq, node=, session_id=, **data)``：剔除 data 中与
+        # ``node`` / ``session_id`` 顶层参数同名的 key（如 dialog_started.data.node），避免冲突。
+        spread = {k: v for k, v in data.items() if k not in ("node", "session_id")}
+        s2 = apply_event(s, _evt(t, seq=1, node="a", **spread))
+        assert s2 == s, f"{t} 不应改 RunState（reducer MUST no-op）"
 
 
 def test_unknown_event_type_warns_fail_loud(caplog):

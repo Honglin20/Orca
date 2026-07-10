@@ -231,11 +231,11 @@ def _build_validator_spawn_config(
 
     return SpawnConfig(
         cli_path=profile.resolve_cli_path(),  # review C5：env > default，不硬编码
-        flags=profile.flags,
+        flags=profile.resolve_flags(),  # env > config > default（2026-07-07 executor CLI 扩展）
         extra_args=extra_args,
         mcp_flag_args=[],  # validator 不挂 MCP（无 ask_user 需求）
         prompt=prompt,
-        prompt_channel=profile.prompt_channel,
+        prompt_channel=profile.resolve_prompt_channel(),  # env > config > default
         env_overlay=build_env_overlay(profile.env_overlay_prefixes),
         timeout=None,  # validator 是短 query，理论上很快；timeout 归 retry/interrupt 外层管
     )

@@ -21,7 +21,7 @@ profile.translator（claude 协议，profiles 层）+ extract_and_validate（结
   12. ``except ExecError: yield node_failed + error``（fail loud，铁律 4）
 
 argv 构造（SPEC §2.1，重写不迁移）：
-  - flags 来自 ``profile.flags``（``-p --output-format stream-json ...``）
+  - flags 来自 ``profile.resolve_flags()``（env > config > default，``-p --output-format stream-json ...``）
   - ``--model <m>``：仅当 ``node.model`` 显式指定
   - ``--allowed-tools "<t1 t2 ...>"``：仅当 ``node.tools`` 非 None（None=全开，不传该 flag）；
     **单 flag + 空格 join**（非 variadic，SPEC §2.1）
@@ -48,7 +48,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from orca.chart._limits import SOCK_PATH_MAX
+from orca.chart._paths import chart_sock_path
 from orca.exec.claude.accumulator import RunAccumulator
 from orca.exec.claude.result_extractor import extract_and_validate
 from orca.exec.context import RunContext
@@ -141,6 +141,7 @@ class ClaudeExecutor(Executor):
             cfg = _build_spawn_config(
                 node, self.profile, prompt, self._agent_tools_server,
                 run_id=ctx.run_id, session_id=session_id, chart_sock=chart_sock,
+                agent_resources=node.resources_root or "",
             )
 
             # phase 11 §5.5（review B2）：register debt —— spawn 前（写 mcp-config 之后）
@@ -191,6 +192,7 @@ class ClaudeExecutor(Executor):
             # continue/skip/abort，retry 也据此短路（SPEC §9.5.2 error_type 对齐表）。
             if runner.was_interrupted:
                 yield _ev("node_failed", {
+                    "kind": "business_gate",
                     "error_type": "Interrupted",
                     "message": "claude 子进程被用户 SIGINT 中断（Ctrl+G）",
                     "phase": "interrupted",
@@ -258,6 +260,7 @@ class ClaudeExecutor(Executor):
         except ExecError as e:
             # 12. fail loud：node_failed + error 双发（SPEC §6 / 铁律 4）
             err_data = {
+                "kind": e.kind.value,
                 "error_type": e.error_type,
                 "message": e.message,
                 "phase": e.phase,
@@ -278,6 +281,7 @@ def _build_spawn_config(
     run_id: str = "",
     session_id: str = "",
     chart_sock: str = "",
+    agent_resources: str = "",
 ) -> SpawnConfig:
     """按 SPEC §2.1 拼动态 argv + env overlay + 可选 --mcp-config（phase 11 §5.4）+ chart 路由（phase-13 §2）。
 
@@ -319,8 +323,11 @@ def _build_spawn_config(
                 tools_list.append(_ASK_USER_TOOL_NAME)
         extra_args.extend(["--allowed-tools", " ".join(tools_list)])
     else:
-        # 既有行为（SPEC §2.1）：None=全开不传 flag；非 None=声明白名单单 flag + 空格 join
-        if node.tools is not None:
+        # 既有行为（SPEC §2.1）：None=全开不传 flag；非 None=声明白名单单 flag + 空格 join。
+        # capability guard（opencode）：mcp_tools=False 的 backend 不认 ``--allowed-tools``，
+        # node.tools 非 None 时也不注（opencode 工具权限走别的机制；强注 → yargs dump help exit 1）。
+        # phase-14 暴露：frontmatter ``tools:`` 合并到 node.tools 让此分支对 opencode 触发 → 修。
+        if node.tools is not None and supports_mcp:
             extra_args.extend(["--allowed-tools", " ".join(node.tools)])
 
     # ── 2. mcp-config（phase 11 §5.4）：注入 server 时写 SSE config 文件 ──
@@ -347,16 +354,22 @@ def _build_spawn_config(
         node=node.name,
         session_id=session_id,
         chart_sock=chart_sock,
+        agent_resources=agent_resources,
     )
     cli_path = profile.resolve_cli_path()  # env > default，运行时读（SPEC §2.6）
 
+    # web-shell-v2 §11 step1 B2：reasoning extra_args（opencode --thinking / --variant）。
+    # opt-in——profile.reasoning_flags_env 未设 / env 未填 → []，保既有 spawn argv 不变。
+    # 与 --model / --allowed-tools 同路径（extra_args），便于 CLIRunner 拼 argv。
+    extra_args.extend(profile.resolve_reasoning_args())
+
     return SpawnConfig(
         cli_path=cli_path,
-        flags=profile.flags,
+        flags=profile.resolve_flags(),
         extra_args=extra_args,
         mcp_flag_args=mcp_flag_args,
         prompt=prompt,
-        prompt_channel=profile.prompt_channel,
+        prompt_channel=profile.resolve_prompt_channel(),  # env > config > default（2026-07-07）
         env_overlay=env_overlay,
         timeout=None,  # 本阶段不做单 node 超时（retry/interrupt 归 phase 5，SPEC §5）
     )
@@ -376,14 +389,17 @@ def _normalize_usage(usage: dict, cost: float) -> dict[str, Any]:
 
 
 def _resolve_chart_sock_path(runs_dir: Path | None, run_id: str) -> str:
-    """phase-13 §2 / §7.7：算 ``runs/<run_id>.sock`` 绝对路径，过长则 log warning + 返回空。
+    """phase-13 §2 / §7.7（2026-07-08 短路径化）：算 chart ingestor socket 绝对路径。
+
+    与 ``orca.exec.script._resolve_chart_sock_path`` 逐字同语义（SPEC §11 #9 两 executor 对称）。
+
+    socket 走 ``<tmp>/orca-<sha1(run_id)[:10]>.sock``（``orca.chart._paths.chart_sock_path``），
+    与 runs 目录解耦——规避深服务器路径致 ``sun_path`` 超限。两端（RunManager bind + 此处
+    env 注入）同源。
 
     - ``runs_dir is None`` → 返回空串（不注 ``ORCA_CHART_SOCK`` env，向后兼容；
       script 端 render_chart 会 fail loud 提示）。
-    - resolved path > ``SOCK_PATH_MAX``（90 字节）→ log warning 并返回空串。
-      **不 raise**（executor 路径只生成路径，ingestor 启动时 RunManager 已先做过 fail loud
-      check；此处 executor 二次发现过长 → 退化为不注 env，让 script 端 §7.1 fail loud
-      而非 executor 阻塞整个 run）。
+    - 路径恒短（temp 目录 + 10 hex），不再有"过长退化"分支。
 
     返回的路径用于：
       1. ``build_env_overlay(chart_sock=...)`` → 子进程 ``ORCA_CHART_SOCK``
@@ -391,18 +407,7 @@ def _resolve_chart_sock_path(runs_dir: Path | None, run_id: str) -> str:
     """
     if runs_dir is None:
         return ""
-    sock_path = (runs_dir / f"{run_id}.sock").resolve()
-    resolved = str(sock_path)
-    if len(resolved) > SOCK_PATH_MAX:
-        # executor 路径不 raise（避免阻塞 run）；RunManager 启动 ingestor 前已先 fail loud。
-        logger.warning(
-            "phase-13: chart sock path 过长（%d > %d 字节）：%r；"
-            "退化为不注 ORCA_CHART_SOCK env（script 端 render_chart 会 fail loud）。"
-            "建议改 ORCA_RUNS_DIR 到短路径（如 /tmp/orca-runs/）。",
-            len(resolved), SOCK_PATH_MAX, resolved,
-        )
-        return ""
-    return resolved
+    return str(chart_sock_path(run_id).resolve())
 
 
 def _append_ask_user_instruction(prompt: str, run_id: str, node: str) -> str:

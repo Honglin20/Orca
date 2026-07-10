@@ -13,6 +13,10 @@ usage 在 step_finish；错误是 error 事件。故走 ``TerminalContract(mode=
 capabilities 保守（v1 实情）：mcp_tools=False（暂不透传 mcp config）、structured_output=
 "prompt_injection"（非 native，靠 prompt 引导）、checkpoint_resume=False、usage_tracking=True
 （step_finish 带 tokens/cost）、interrupt=True（SIGINT 友好）、concurrent_safe=True。
+web-v2 §0 D + §11 step1 B2：supports_reasoning=True（``--thinking`` on 时 translator 产
+``reasoning`` envelope → ``agent_thinking`` event；``reasoning_tokens`` 进 ``agent_usage``）。
+reasoning_flags_env = ``ORCA_OPENCODE_REASONING_FLAGS``（opt-in；env 设 ``"--thinking"`` /
+``"--variant <model>"`` 时 ``resolve_reasoning_args()`` 追加到 extra_args；默认空 = off）。
 
 result_extractor 仍用 dummy：events 模式不经 profile.result_extractor（最终答案由
 RunAccumulator 累积），保留是为 CliProfile 类型契约完整（同 claude profile 的设计理由）。
@@ -44,6 +48,7 @@ PROFILE = CliProfile(
         checkpoint_resume=False,
         usage_tracking=True,
         concurrent_safe=True,
+        supports_reasoning=True,  # web-v2 §0 D + §11 step1 B2：opencode --thinking / --variant
     ),
     cli_path_env="ORCA_OPENCODE_CLI",
     default_cli_path="opencode",
@@ -60,5 +65,8 @@ PROFILE = CliProfile(
     translator=opencode_translator,
     result_extractor=_dummy_result_extractor,
     terminal=EVENTS,
+    flags_env="ORCA_OPENCODE_FLAGS",
+    prompt_channel_env="ORCA_OPENCODE_PROMPT_CHANNEL",
+    reasoning_flags_env="ORCA_OPENCODE_REASONING_FLAGS",  # web-v2 B2：opt-in --thinking / --variant
     prompt_paradigm="minimal",
 )

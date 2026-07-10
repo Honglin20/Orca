@@ -68,7 +68,7 @@ class TestOpencodeE2E:
 
     async def _scenario(self, wf, tmp_path):
         from orca.iface.cli.app import OrcaApp
-        from orca.iface.cli.widgets.dag_graph import DagGraph
+        from orca.iface.cli.widgets import AgentsList, AgentHistory
         from orca.iface.cli.widgets.node_detail import NodeDetail
         from orca.iface.cli.widgets.chart_canvas import _PLOTEXT_OK
 
@@ -80,17 +80,14 @@ class TestOpencodeE2E:
         async def inject_charts_midrun():
             """等 analyst running（bus 还开着）→ 往 bus emit chart 事件（SPEC §6.1）。"""
             for _ in range(300):  # 最长 ~30s 等 analyst running
-                try:
-                    g = app.query_one(DagGraph)
-                    if g.status_of_node("analyst") == "running":
-                        break
-                except Exception:
-                    pass
+                proj = app.query_one(AgentsList).projection_of("analyst")
+                if proj is not None and proj.status == "running":
+                    break
                 await asyncio.sleep(0.1)
-            await asyncio.sleep(0.4)  # dispatch 把 analyst 行推到流式 tab
+            await asyncio.sleep(0.4)  # dispatch 把 analyst 行推到 AgentHistory
             # 选中 reporter（即便它还没跑）让图表 tab 按 reporter 过滤。
             try:
-                app.query_one(DagGraph).select("reporter")
+                app.query_one(AgentsList).select("reporter")
             except Exception:
                 pass
             # render_chart 生产者不存在（phase-10 deferred）—— SPEC §0.3/§6.1 明文允许
@@ -135,53 +132,76 @@ class TestOpencodeE2E:
             assert "_selected_node" not in tape_text
             assert "_auto_follow" not in tape_text
 
-            # ── §6.2 DagGraph：拓扑 + 状态 ──────────────────────────────────
-            graph = app.query_one(DagGraph)
-            for n in ("entry", "analyst", "reporter"):
-                assert graph.status_of_node(n) == "done", (
-                    f"node {n} 未 done（got {graph.status_of_node(n)!r}）"
-                )
-            graph_render = str(graph.render())
-            for n in ("entry", "analyst", "reporter"):
-                assert n in graph_render, f"DagGraph 渲染缺节点 {n}"
+            # ── §6.2 v2 AgentsList 状态投影 ────────────────────────────────
+            # analyst 应为 done（dispatcher 跑完后状态由 node_completed 推进）。
+            lst = app.query_one(AgentsList)
+            analyst_proj = lst.projection_of("analyst")
+            assert analyst_proj is not None, "AgentsList 应含 analyst 节点"
+            assert analyst_proj.status == "done", (
+                f"analyst 应 done；got {analyst_proj.status!r}"
+            )
+            # reporter 也应 done（terminal_state == completed 时所有 agent 都终态）
+            reporter_proj = lst.projection_of("reporter")
+            assert reporter_proj is not None, "AgentsList 应含 reporter 节点"
+            assert reporter_proj.status == "done", (
+                f"reporter 应 done；got {reporter_proj.status!r}"
+            )
 
-            # ── §6.3 NodeDetail：opencode agent_message 整块流式 + 输出 ───────
+            # ── §6.3 AgentHistory：opencode agent_message 整块可见 ───────────
+            # spec v2 §6.3：NodeDetail 仅 chart 路径活跃（display:none）；
+            # 流式/输出改由 AgentHistory 承担（spec §2.3）。
             nd = app.query_one(NodeDetail)
-            # pin analyst（设 _auto_follow=False）。
-            graph.select("analyst")
+            history = app.query_one(AgentHistory)
+            # pin analyst（select 触发 _on_node_selected → _auto_follow=False）。
+            lst.select("analyst")
             await pilot.pause(0.1)
-            assert app._auto_follow is False, "DagGraph.select 必须 pin"
+            assert app._auto_follow is False, "AgentsList.select 必须 pin（v2 同语义）"
             assert app._selected_node == "analyst"
-            assert nd.active == "analyst"
-            assert nd.kind == "agent"
-            # analyst 输出 tab 有内容（opencode 最终答案文本）。
-            analyst_output = nd._outputs.get("analyst")
-            assert analyst_output, (
-                f"analyst 输出 tab 空（opencode 应在 node_completed 推 output）；"
-                f"_outputs={nd._outputs!r}"
+            assert history.node_name == "analyst", (
+                f"AgentHistory.node_name 应为 analyst；got {history.node_name!r}"
             )
-            assert str(analyst_output).strip(), (
-                f"analyst 输出空字符串；got {analyst_output!r}"
+            # analyst 输出：opencode 在 node_completed 前至少 1 条 agent_message（events 模式不丢）。
+            analyst_events = app._node_events.get("analyst", [])
+            analyst_msgs = [
+                e for e in analyst_events
+                if e.type == "agent_message"
+            ]
+            assert analyst_msgs, (
+                f"analyst 应至少 1 条 agent_message（opencode events 模式不丢）；"
+                f"event_types={[e.type for e in analyst_events]}"
+            )
+            # AgentHistory 应已显示这些 events（set_node 全量重渲）。
+            # phase-16 契约：tool_call + tool_result 配对成**一条** entry，故 entries 数
+            # ≤ events 数（每对 tool 减 1）。验证：entries 数 == events 数 - tool 对数。
+            n_tool_calls = sum(1 for e in analyst_events if e.type == "agent_tool_call")
+            n_tool_results = sum(1 for e in analyst_events if e.type == "agent_tool_result")
+            n_pairs = min(n_tool_calls, n_tool_results)
+            expected_entries = len(analyst_events) - n_pairs
+            assert len(history.entries) == expected_entries, (
+                f"AgentHistory entries 数应 == events - tool 对数；"
+                f"got history={len(history.entries)}, expected={expected_entries}, "
+                f"events={len(analyst_events)}, pairs={n_pairs}"
             )
 
-            # 切到 reporter，验证流式 tab 有 opencode agent_message 行（整块、无 thinking）。
-            graph.select("reporter")
+            # 切到 reporter，验证 AgentHistory 含 opencode agent_message（整块、无 thinking）。
+            lst.select("reporter")
             await pilot.pause(0.1)
             assert app._selected_node == "reporter"
-            reporter_lines = nd._stream_lines.get("reporter", [])
-            joined = "\n".join(reporter_lines)
-            assert "[msg]" in joined, (
-                f"reporter 流式 tab 缺 [msg] 行（opencode agent_message 整块）；got:\n{joined}"
+            assert history.node_name == "reporter"
+            reporter_events = app._node_events.get("reporter", [])
+            reporter_types = {e.type for e in reporter_events}
+            assert "agent_message" in reporter_types, (
+                f"reporter 应有 agent_message 事件；got types={reporter_types}"
             )
             # executor-agnostic 关键证明：opencode **不发** agent_thinking。
-            assert "[think]" not in joined, (
-                f"opencode 不应发 agent_thinking；got:\n{joined}"
+            assert "agent_thinking" not in reporter_types, (
+                f"opencode 不应发 agent_thinking；got types={reporter_types}"
             )
 
             # ── §6.4 ChartPanel：按 label 分组 + 同 label+title 替换 ─────────
             assert charts_injected["done"], "chart 注入协程未完成"
             cp = nd._chart_panel
-            graph.select("reporter")
+            lst.select("reporter")
             await pilot.pause(0.2)
 
             charts_for_reporter = cp.charts_for("reporter")

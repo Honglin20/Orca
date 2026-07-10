@@ -185,8 +185,32 @@ def run(
         False, "--background", "-b",
         help="后台跑（fork detached，立即返回 run_id，不占终端；用 ``orca ps/logs/wait`` 管理）",
     ),
+    tui: bool = typer.Option(
+        False, "--tui",
+        help="启动 Textual TUI（opt-in；默认走 web）。保留旧 TUI 交互（D5）",
+    ),
+    port: int | None = typer.Option(
+        None, "--port",
+        help="web 模式监听端口（默认探测 7428：是 orca 则复用，否则起新 in-process serve）",
+    ),
+    web_host: str | None = typer.Option(
+        None, "--host",
+        help="web 模式监听地址（默认 0.0.0.0 远程可访问；ORCA_WEB_HOST env 同效）",
+    ),
+    stay: bool = typer.Option(
+        False, "--stay",
+        help="web 模式不自动退出（默认 run 终态 + 无 WS 活动 N 秒后退；SPEC §0 D4）",
+    ),
 ) -> None:
-    """跑一个 workflow（启动 Textual TUI，看 DAG 进度 / 日志 / 答 gate）。
+    """跑一个 workflow。
+
+    默认行为（SPEC §4）：起 in-process web serve + ``webbrowser.open(/runs/<id>)`` +
+    WS 驱动 auto-exit（run 终态 + 无 WS 活动 15s 退，``ORCA_WEB_AUTOEXIT_SECONDS`` 可调）。
+
+    模式开关：
+      - 默认：web（D4）。同主机既有 orca server（默认端口 7428）→ POST /api/run 复用。
+      - ``--tui``：旧 Textual TUI（opt-in 保留，D5）。
+      - ``--background``：fork detached 子进程跑（立即返回 run_id + pid）。
 
     ``--background``：fork 出脱离终端的子进程跑 workflow，父进程立即返回 run_id + pid
     （SPEC §8 P3.2 daemon）。配合 ``orca ps`` / ``orca logs <id>`` / ``orca wait <id>``。
@@ -200,8 +224,23 @@ def run(
         raise typer.Exit(_start_background(yaml, task, inputs, max_iter))
 
     config = parse_run_args(yaml, task, inputs, max_iter)
-    # 启动 TUI 在独立函数（延迟 import textual，让 import orca.iface.cli.commands 不拉 textual）。
-    raise typer.Exit(_run_workflow(config))
+
+    if tui:
+        # opt-in 旧 TUI（D5）：启动 Textual TUI 在独立函数（延迟 import textual）。
+        raise typer.Exit(_run_workflow(config))
+
+    # detached headless daemon child（ORCA_BG_RUN_ID env）—— 无 TTY，web 路径不便起
+    # server（浏览器无意义）+ 旧 TUI 会崩 → 走 _run_workflow_headless（与 phase-11 一致）。
+    from orca.iface.cli.bg_runner import ENV_BG_RUN_ID
+
+    bg_run_id = os.environ.get(ENV_BG_RUN_ID)
+    if bg_run_id is not None:
+        raise typer.Exit(_run_workflow_headless(
+            config, _load_wf_or_exit(config.yaml_path), bg_run_id,
+        ))
+
+    # 默认：web（SPEC §4 / §0 D4）。
+    raise typer.Exit(_run_web_default(config, host=web_host, port=port, stay=stay))
 
 
 def _start_background(
@@ -263,33 +302,51 @@ def validate(
     yaml: Path = typer.Argument(..., help="workflow YAML 文件路径"),
 ) -> None:
     """校验 workflow（不跑，只做结构 + 语义校验，报告 errors/warnings）。"""
+    import warnings
+
     try:
-        load_workflow(yaml)
+        # phase-14：捕获 compile 期 DeprecationWarning（旧约定 prompt=None + name 匹配），
+        # 展示到 stderr（不阻断，exit 0）。simplefilter("always") 确保每次都捕获（默认
+        # DeprecationWarning 在 Python 3.2+ 只显示一次且非 main 时静默）。
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            load_workflow(yaml)
     except ConfigurationError as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(code=EXIT_ARG_OR_VALIDATE)
     except FileNotFoundError:
         typer.echo(f"文件不存在：{yaml}", err=True)
         raise typer.Exit(code=EXIT_ARG_OR_VALIDATE)
+    for w in caught:
+        if issubclass(w.category, DeprecationWarning):
+            typer.echo(f"⚠️  {w.message}", err=True)
     typer.echo(f"✓ {yaml} 校验通过")
 
 
 @app.command(name="list")
-def list_workflows(
-    examples_dir: Path = typer.Option(
-        Path("examples"), "--dir", help="扫描的 workflow 目录（默认 ./examples）",
-    ),
-) -> None:
-    """列出目录下的 workflow yaml 文件。"""
-    if not examples_dir.is_dir():
-        typer.echo(f"目录不存在：{examples_dir}", err=True)
-        raise typer.Exit(code=EXIT_ARG_OR_VALIDATE)
-    yamls = sorted(p for p in examples_dir.glob("*.yaml"))
-    if not yamls:
-        typer.echo(f"（{examples_dir} 下无 .yaml 文件）")
+def list_workflows() -> None:
+    """列出可用 workflow（按 name，与 MCP ``list_workflows`` 同源）。
+
+    扫描 ``./workflows`` + ``~/.orca/workflows``（first-wins，project-local 优先），
+    按 workflow 的 ``name`` 字段列出——与 MCP 壳的 ``list_workflows`` 走**同一个**
+    ``catalog.list_workflows``，保证 CLI 与 MCP 看到的一致（接口统一铁律）。
+
+    匹配键是 ``wf.name`` 不是文件名：``my_setup.yaml`` 里 ``name: setup_demo``
+    会以 ``setup_demo`` 列出。加载失败的 yaml 跳过（catalog 内部 log warning）。
+    """
+    # 延迟 import：catalog 属 iface/mcp 子包，按本模块依赖边界不在顶层引入；
+    # 仅 ``list`` 命令需要，函数内取用（catalog 本身轻量，只依赖 compile+schema）。
+    from orca.iface.mcp.catalog import list_workflows as _catalog_list
+
+    items = _catalog_list()
+    if not items:
+        typer.echo("（无可用 workflow；扫描了 ./workflows + ~/.orca/workflows）")
         return
-    for p in yamls:
-        typer.echo(f"  {p.name}")
+    typer.echo("可用 workflow（./workflows + ~/.orca/workflows）：")
+    for it in items:
+        marker = " ⚙setup" if it.get("has_setup") else ""
+        desc = it.get("description") or ""
+        typer.echo(f"  {it['name']}{marker}  {desc}".rstrip())
 
 
 # ── executor 子命令组（后端二进制配置与健康检查）──────────────────────────────
@@ -300,6 +357,33 @@ def list_workflows(
 from orca.iface.cli.executor_cmds import app as executor_app
 
 app.add_typer(executor_app, name="executor", help="配置/测试 agent 后端二进制")
+
+
+# ── skill 子命令组（随包 skill 安装）──────────────────────────────────────────
+# sub-Typer：与 executor 同模式。``orca skill install`` 把 create-workflow 拷到
+# Claude Code / opencode 两边 skill 目录（显式命令，非 post-install 钩子——后者不可靠）。
+from orca.iface.cli.skill_cmds import app as skill_app
+
+app.add_typer(skill_app, name="skill", help="安装/管理随包 Orca skill（create-workflow）")
+
+
+# ── install 子命令组（统一安装入口：skill + in-session，全局默认）────────────
+# sub-Typer：同 executor/skill 模式。收口此前碎片化的 skill install + in-session start
+# 两步安装为一条 `orca install`（详见 docs/plans/2026-07-08-unified-install.md）。
+from orca.iface.cli.install_cmds import app as install_app
+
+app.add_typer(install_app, name="install", help="统一安装 Orca 宿主集成（skill + in-session），全局默认")
+
+
+# ── in-session 子命令组（in-session shell v5：hook-driven）──────────────────
+# sub-Typer：同 executor/skill 模式。in_session.cli 顶层只 import typer + compile +
+# run.lifecycle（轻量），无循环；bg_runner 用 lazy import（见 cli._default_tape_path）。
+from orca.iface.in_session.cli import app as in_session_app
+
+app.add_typer(
+    in_session_app, name="in-session",
+    help="in-session shell：宿主主 session（opencode/CC）执行 workflow，daemon 独占 tape + hook 驱动推进",
+)
 
 
 # ── ps / logs / wait 子命令（phase 11 §8 P3.2 daemon）─────────────────────────
@@ -672,28 +756,36 @@ def _read_run_id(tape_path: Path) -> str | None:
 
 @app.command()
 def serve(
-    host: str = typer.Option("127.0.0.1", "--host", help="监听地址"),
-    port: int = typer.Option(7428, "--port", help="监听端口（浏览器访问 http://<host>:<port>）"),
+    host: str | None = typer.Option(
+        None, "--host",
+        help="监听地址（默认 0.0.0.0 远程可访问；ORCA_WEB_HOST env 同效）",
+    ),
+    port: int | None = typer.Option(
+        None, "--port",
+        help="监听端口（默认 7428；ORCA_WEB_PORT env 同效）",
+    ),
     max_concurrent: int = typer.Option(
         3, "--max-concurrent", help="最大并发 run 数（超过排队）"
     ),
 ) -> None:
     """启动 Web UI（FastAPI + WebSocket，多 run 管理 + DAG + gate + tape replay + chart）。
 
-    首次使用需先构建前端（一次性）::
+    默认监听 ``0.0.0.0``（远程服务器可达）；本地想限制回环用 ``--host 127.0.0.1``。
+    打印的 URL 用本机实际 IP（``ORCA_PUBLIC_HOST`` env 可显式覆盖，容器/反代场景）。
+
+    首次使用需先构建前端（一次性；``pip install orca`` 的 wheel 已含构建产物，免此步）::
 
         cd orca/iface/web/frontend && npm install && npm run build
-
-    然后执行本命令，浏览器打开 http://127.0.0.1:7428 。hook 桥默认同端口（ORCA_PORT 可覆盖）。
     """
     import asyncio
 
     # 延迟 import：fastapi/uvicorn 仅 serve 路径需要（让 run/validate/list/--help 不拉 web 栈）。
     from orca.iface.web import RunManager, run_server
 
+    bind_host, display_host, actual_port = resolve_web_endpoint(host=host, port=port)
     manager = RunManager(max_concurrent=max_concurrent)
-    typer.echo(f"Orca Web UI → http://{host}:{port}  (Ctrl-C 退出)")
-    asyncio.run(run_server(manager, host=host, port=port))
+    typer.echo(f"Orca Web UI → http://{display_host}:{actual_port}  (bind {bind_host}, Ctrl-C 退出)")
+    asyncio.run(run_server(manager, host=bind_host, port=actual_port))
 
 
 @app.command()
@@ -854,6 +946,629 @@ def _run_workflow_headless(
         bg_run_id, "completed" if state.status == "completed" else "failed"
     )
     return exit_code
+
+
+# ── web 默认（SPEC §4 / §0 D4）────────────────────────────────────────────────
+
+
+DEFAULT_WEB_PORT = 7428
+# WS 驱动 auto-exit 默认窗口（SPEC §0 D4 / §4 step4）。``ORCA_WEB_AUTOEXIT_SECONDS`` env 覆盖
+# （测试加速用）。窗口语义：run 到终态后，最近一次 WS connect/disconnect 起 N 秒内无新 WS
+# 活动 → 进程退。N=15 给浏览器足够重连窗口（page refresh / network blip）。
+DEFAULT_WEB_AUTOEXIT_SECONDS = 15
+
+# 默认 bind 0.0.0.0：服务器场景远程可访问（用户痛点：原 127.0.0.1 远程浏览器打不开）。
+# 本地仍可用 ``--host 127.0.0.1`` 或 ``ORCA_WEB_HOST=127.0.0.1`` 收回。
+DEFAULT_WEB_BIND_HOST = "0.0.0.0"
+
+
+def _detect_public_host() -> str:
+    """bind=0.0.0.0 时，给 URL 用的可访问 IP。
+
+    优先级：``ORCA_PUBLIC_HOST`` env（容器/反向代理/公网 NAT 场景用户显式给）> 探测本机
+    首个非 loopback IPv4（UDP connect 法，不发真包，仅让 OS 选出口 IP）> 回 127.0.0.1。
+    """
+    explicit = os.environ.get("ORCA_PUBLIC_HOST")
+    if explicit:
+        return explicit
+    import socket
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # 8.8.8.8 仅作路由选择目标，connect 不发真包；getsockname 给 OS 选的出口 IP。
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and ip != "0.0.0.0":
+            return ip
+    except Exception:  # noqa: BLE001 — 探测失败回 loopback（本地仍可用）
+        pass
+    return "127.0.0.1"
+
+
+def resolve_web_endpoint(
+    *, host: str | None, port: int | None
+) -> tuple[str, str, int]:
+    """统一解析 web 监听端点（``serve`` / ``run`` / ``open`` 三路径共用，单一真相源）。
+
+    回答「host/port 默认值在哪算、各启动方式别各写一份」。返回 ``(bind_host, display_host, port)``：
+
+      - **bind_host**：uvicorn 实际 bind 地址（远程可见性的关键）。优先级
+        ``--host`` > ``ORCA_WEB_HOST`` env > ``DEFAULT_WEB_BIND_HOST`` (0.0.0.0)。
+      - **display_host**：打印 / 点开的 URL 里的地址。bind=0.0.0.0/:: → 探测本机实际 IP
+        （``ORCA_PUBLIC_HOST`` 可显式覆盖，容器/反代）；bind 具体地址 → 用该地址。
+      - **port**：``--port`` > ``ORCA_WEB_PORT`` env > ``DEFAULT_WEB_PORT`` (7428)。
+
+    **本地复用探测**始终走 127.0.0.1（只复用本机 server，不跨机）；见各调用点。
+    """
+    bind_host = host or os.environ.get("ORCA_WEB_HOST") or DEFAULT_WEB_BIND_HOST
+    raw_port_env = os.environ.get("ORCA_WEB_PORT")
+    if port is not None:
+        resolved_port = port
+    elif raw_port_env:
+        try:
+            resolved_port = int(raw_port_env)
+        except ValueError:
+            logger.warning("ORCA_WEB_PORT=%r 非数字，用默认 %s", raw_port_env, DEFAULT_WEB_PORT)
+            resolved_port = DEFAULT_WEB_PORT
+    else:
+        resolved_port = DEFAULT_WEB_PORT
+    if bind_host in ("0.0.0.0", "::"):
+        display_host = _detect_public_host()
+    else:
+        display_host = bind_host
+    return bind_host, display_host, resolved_port
+
+
+def _web_autoexit_seconds() -> float:
+    """读 ``ORCA_WEB_AUTOEXIT_SECONDS`` env；非法值 → 用默认（fail-soft，不阻断 run）。"""
+    raw = os.environ.get("ORCA_WEB_AUTOEXIT_SECONDS")
+    if not raw:
+        return DEFAULT_WEB_AUTOEXIT_SECONDS
+    try:
+        n = float(raw)
+    except ValueError:
+        logger.warning(
+            "ORCA_WEB_AUTOEXIT_SECONDS=%r 非数字，用默认 %ss",
+            raw, DEFAULT_WEB_AUTOEXIT_SECONDS,
+        )
+        return DEFAULT_WEB_AUTOEXIT_SECONDS
+    return n if n > 0 else DEFAULT_WEB_AUTOEXIT_SECONDS
+
+
+def _load_wf_or_exit(yaml_path: Path):
+    """共享前置校验：yaml 不存在 / ConfigurationError → exit 2（fail loud）。"""
+    try:
+        return load_workflow(yaml_path)
+    except ConfigurationError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=EXIT_ARG_OR_VALIDATE)
+    except FileNotFoundError:
+        typer.echo(f"workflow 文件不存在：{yaml_path}", err=True)
+        raise typer.Exit(code=EXIT_ARG_OR_VALIDATE)
+
+
+def _probe_orca_server(host: str, port: int, timeout: float = 0.5) -> dict | None:
+    """``GET /api/health`` 探测端口是否为 orca server。
+
+    返回：
+      - health JSON dict（``{app:"orca", version, pid}``）当 port 是 orca；
+      - ``None`` 当端口不可达 / 非 orca / 超时。
+
+    timeout 短（0.5s）：探测就该快，慢则视为不可达。
+    """
+    import httpx
+
+    try:
+        r = httpx.get(
+            f"http://{host}:{port}/api/health",
+            timeout=timeout,
+        )
+    except Exception:  # noqa: BLE001 — 任何网络异常都视为"不可达"
+        return None
+    if r.status_code != 200:
+        return None
+    try:
+        body = r.json()
+    except Exception:  # noqa: BLE001 — JSON 解析失败视为非 orca
+        return None
+    return body if isinstance(body, dict) and body.get("app") == "orca" else None
+
+
+def _find_free_port(preferred: int | None = None, *, bind_host: str = "127.0.0.1") -> int:
+    """挑空闲端口。``preferred`` 优先（OS 给则用）；否则 OS 任选。
+
+    SPEC §4 step1：「否/不可达 → 选空闲端口起新 in-process serve」。
+
+    ``bind_host``：试探绑定地址，应与 uvicorn 实际 bind 一致（0.0.0.0 时绑 0.0.0.0 才能准确
+    反映"该端口在所有网卡上是否可用"）。
+    """
+    import socket
+
+    if preferred is not None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind((bind_host, preferred))
+                return preferred
+            except OSError:
+                pass  # preferred 被占 → fall through 到 OS 任选
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((bind_host, 0))
+        return s.getsockname()[1]
+
+
+def _open_browser_or_print(url: str) -> None:
+    """``webbrowser.open`` 失败 / 无 DISPLAY → 打印 URL（SPEC §7：不阻塞 run）。"""
+    import webbrowser
+
+    try:
+        opened = webbrowser.open(url)
+    except Exception:  # noqa: BLE001 — 跨平台 webbrowser 偶发抛
+        opened = False
+    if not opened:
+        typer.echo(f"（浏览器未自动打开，手动访问：{url}）")
+
+
+def _post_run_to_existing(
+    host: str, port: int, config: "RunConfig"
+) -> str:
+    """复用既有 orca server：``POST /api/run`` 起一个新 run（SPEC §4 step1 复用分支）。
+
+    返回 ``run_id``。失败 → raise ``RuntimeError``（调用方 fail loud exit 1）。
+
+    **跨进程绝对路径**：yaml_path 必须 resolve 为绝对路径再 POST——既有 server 的 CWD
+    可能与本进程不同（用户在 /dirA 跑 ``orca run ./wf.yaml``，server 在 /dirB），相对
+    路径会在 server 端被错误解析（fail loud ConfigurationError，但语义错位）。
+    """
+    import httpx
+
+    body = {
+        "yaml_path": str(Path(config.yaml_path).resolve()),
+        "inputs": config.inputs,
+        "task": config.task,
+        "max_iter": config.max_iter,
+    }
+    try:
+        r = httpx.post(
+            f"http://{host}:{port}/api/run",
+            json=body,
+            timeout=30.0,  # workflow 加载 / 校验可能慢
+        )
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"POST /api/run 网络异常：{e}") from e
+    if r.status_code != 200:
+        raise RuntimeError(
+            f"POST /api/run HTTP {r.status_code}: {r.text[:200]}"
+        )
+    data = r.json()
+    return str(data["run_id"])
+
+
+def _poll_run_terminal(
+    host: str, port: int, run_id: str, timeout: float | None = None
+) -> str:
+    """轮询 ``GET /api/runs/<id>/meta`` 直到 run.status 终态；返回最终 status。
+
+    用于「复用既有 server」分支：client 不起 serve，无法直接 await handle._task，
+    故轮询 meta。间隔 0.5s。``timeout`` 超 → raise TimeoutError（fail loud）。
+    """
+    import httpx
+
+    terminal = {"completed", "failed", "cancelled"}
+    deadline = (time.monotonic() + timeout) if timeout is not None else None
+    last_status = "unknown"
+    while True:
+        try:
+            r = httpx.get(
+                f"http://{host}:{port}/api/runs/{run_id}/meta",
+                timeout=5.0,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("poll meta 网络异常（重试）：%s", e)
+        else:
+            if r.status_code == 200:
+                data = r.json()
+                last_status = str(data.get("status", "unknown"))
+                if last_status in terminal:
+                    return last_status
+            else:
+                logger.warning(
+                    "poll meta HTTP %s（重试）：%s",
+                    r.status_code, r.text[:200],
+                )
+        if deadline is not None and time.monotonic() > deadline:
+            raise TimeoutError(f"poll run {run_id} terminal 超时（last={last_status}）")
+        time.sleep(0.5)
+
+
+def _run_web_default(
+    config: "RunConfig", *, host: str | None, port: int | None, stay: bool
+) -> int:
+    """``orca run`` web 默认入口（SPEC §4 / §0 D4）。
+
+    流程：
+      1. 端口探测：``--port`` 或默认 7428。``GET /api/health`` 探测（**始终本地 127.0.0.1**，
+         只复用本机 server）：是 orca → 复用（POST /api/run + 轮询 meta 到终态）；否 / 不可达
+         → 起新 in-process serve。``--port`` 显式且被非 orca 占 → fail loud (exit 2)。
+      2. in-process serve：``RunManager.start_run`` (in-process，bus 驱动，**不 attach**) +
+         ``webbrowser.open(/runs/<id>)`` + ``uvicorn.Server.serve()`` 同事件循环。
+         bind ``bind_host``（默认 0.0.0.0 远程可见），URL 用 ``display_host``（本机实际 IP）。
+      3. WS 驱动 auto-exit：run.terminal AND ``now - last_ws_activity_at > N`` → 关 serve。
+         ``--stay`` → 永不 auto-exit（直到 Ctrl-C / serve 自身退出）。
+
+    退出码：completed→0 / failed→1 / arg-or-validate 错（yaml / port 占用）→2。
+    """
+    wf = _load_wf_or_exit(config.yaml_path)  # 校验前置（fail loud）
+
+    bind_host, display_host, target_port = resolve_web_endpoint(host=host, port=port)
+    probe_host = "127.0.0.1"  # 复用探测始终本地（不跨机复用）
+    health = _probe_orca_server(probe_host, target_port)
+
+    if health is not None:
+        # 复用既有 orca server（SPEC §4 step1 复用分支）。
+        if stay:
+            # 复用模式下既有 server 独立运行，--stay 无适用对象（提示而非静默忽略）。
+            typer.echo(
+                "（--stay 在复用既有 server 模式下不适用；用 Ctrl-C 退出本命令）",
+                err=True,
+            )
+        try:
+            run_id = _post_run_to_existing(probe_host, target_port, config)
+        except RuntimeError as e:
+            # 复用既有 server 失败（HTTP / 网络异常）→ fail loud exit 1，不 traceback。
+            typer.echo(f"复用既有 orca server 失败：{e}", err=True)
+            return EXIT_RUN_FAILED
+        url = f"http://{display_host}:{target_port}/runs/{run_id}"
+        _open_browser_or_print(url)
+        typer.echo(f"Orca Web UI（复用既有 server）→ {url}  (Ctrl-C 退出)")
+        final_status = _poll_run_terminal(probe_host, target_port, run_id)
+        return EXIT_OK if final_status == "completed" else EXIT_RUN_FAILED
+
+    # 非 orca 占用 + --port 显式 → fail loud（SPEC §4 step1 + §7「--port 被占」）。
+    # 探测返回 None 但端口可达非 orca → health 是 None 且 _probe 已判定非 orca；
+    # 用 socket bind 二次确认是否真不可用（_probe 的 None 涵盖两种情况，bind 失败 = 占）。
+    if port is not None and not _is_port_free(bind_host, target_port):
+        typer.echo(
+            f"--port {target_port} 被非 orca server 占用（health 探测非 orca）",
+            err=True,
+        )
+        return EXIT_ARG_OR_VALIDATE
+
+    # 无既有 orca → 起新 in-process serve。端口：target 若空闲则用，否则挑空闲。
+    actual_port = (
+        target_port if _is_port_free(bind_host, target_port)
+        else _find_free_port(bind_host=bind_host)
+    )
+    try:
+        return asyncio.run(_serve_and_run_inprocess(
+            config, wf, bind_host=bind_host, display_host=display_host,
+            port=actual_port, stay=stay,
+        ))
+    except KeyboardInterrupt:
+        # Ctrl-C：asyncio.run 在 Py3.11+ 把 SIGINT 转为主 task CancelledError，
+        # 我们在协程内捕获后者；外层 asyncio.run 仍会重抛 KeyboardInterrupt → 此处映射 exit 130
+        # （Unix SIGINT convention；SPEC §4 step5 退出码 0/1/2 不覆盖用户主动中断）。
+        return 130
+
+
+def _is_port_free(host: str, port: int) -> bool:
+    """``bind`` 试探端口是否空闲（不 hold）。"""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
+async def _serve_and_run_inprocess(
+    config: "RunConfig", wf, *, bind_host: str, display_host: str, port: int, stay: bool
+) -> int:
+    """in-process：起 serve + start_run + webbrowser.open + WS 驱动 auto-exit。
+
+    单事件循环：uvicorn ``server.serve()`` task + 等待 run 终态 + WS 计时检查。
+    任一退出条件触发 → ``server.should_exit = True`` → serve task 收尾 → 返回。
+
+    顺序（避免浏览器先于 server ready）：
+      1. 起 serve task；
+      2. 等 uvicorn ``startup`` 完成（``server.started`` flag）；
+      3. ``start_run``（in-process）；
+      4. ``webbrowser.open``；
+      5. 等 run terminal + WS 驱动 auto-exit。
+
+    **shutdown 归属**：``manager.shutdown()`` 由 uvicorn lifespan 负责（server.py:54-57
+    shutdown 时调）；本函数 finally **不再调** —— 避免双调语义混乱（_teardown_handle 虽
+    幂等，但属实现细节；资源生命周期单一真相源 = lifespan）。
+
+    **Ctrl-C 语义（Py3.11+）**：``asyncio.run`` 收 SIGINT 时 cancel 主 task（在 await 处
+    抛 ``CancelledError``，**非** ``KeyboardInterrupt``）；我们在 ``except CancelledError``
+    里走 cleanup + 返回默认 exit code（外层 ``_run_web_default`` 再映射 130）。
+    """
+    import uvicorn
+
+    from orca.iface.web import RunManager
+    from orca.iface.web.server import create_app
+
+    manager = RunManager(max_concurrent=3)
+    app = create_app(manager)
+    web_server = app.state.web_server  # WebServer（持 last_ws_activity_at）
+
+    uvicorn_config = uvicorn.Config(
+        app, host=bind_host, port=port, log_level="warning",
+    )
+    server = uvicorn.Server(uvicorn_config)
+    serve_task = asyncio.create_task(
+        server.serve(), name="orca-web-default-serve",
+    )
+
+    exit_code = EXIT_RUN_FAILED
+    cancelled = False
+    try:
+        # 1) 等 uvicorn startup（avoid browser racing the bind）。
+        await _wait_server_started(server, timeout=5.0)
+
+        # 2) 启动 run（in-process；走 bus，不 attach）。
+        try:
+            run_id = await manager.start_run(
+                config.yaml_path, config.inputs, config.task, config.max_iter
+            )
+        except ConfigurationError as e:
+            typer.echo(str(e), err=True)
+            return EXIT_ARG_OR_VALIDATE
+        except FileNotFoundError:
+            typer.echo(f"workflow 文件不存在：{config.yaml_path}", err=True)
+            return EXIT_ARG_OR_VALIDATE
+
+        # 3) 浏览器打开（server 已 ready）。URL 用 display_host（本机实际 IP，可点击）。
+        url = f"http://{display_host}:{port}/runs/{run_id}"
+        _open_browser_or_print(url)
+        typer.echo(f"Orca Web UI → {url}  (bind {bind_host}, Ctrl-C 退出)")
+        logger.info(
+            "orca run web-default: run_id=%s port=%s stay=%s", run_id, port, stay,
+        )
+
+        # 4) 等 run 终态（handle._task done）。
+        handle = manager.get_handle(run_id)
+        run_task = getattr(handle, "_task", None) if handle else None
+        if run_task is not None:
+            await asyncio.shield(run_task)
+        # 读终态 status → exit code（0 completed / 1 failed）。
+        handle = manager.get_handle(run_id)
+        if handle is not None:
+            status = getattr(handle, "status", "failed")
+            exit_code = EXIT_OK if status == "completed" else EXIT_RUN_FAILED
+
+        # 5) run 终态后：WS 驱动 auto-exit（除非 --stay）。
+        autoexit_seconds = _web_autoexit_seconds()
+        if not stay:
+            await _wait_ws_autoexit(web_server, autoexit_seconds)
+        else:
+            # --stay：serve 直到 Ctrl-C / 外部 should_exit。
+            await serve_task
+    except asyncio.CancelledError:
+        # Ctrl-C：asyncio.run 把 SIGINT 转为主 task cancel（Py3.11+）。捕获后走 cleanup，
+        # exit_code 由调用方（_run_web_default 外层）映射 130；此处保留当前 exit_code。
+        cancelled = True
+    finally:
+        # 触发 uvicorn 优雅 shutdown —— lifespan 会调 manager.shutdown（单一真相源）；
+        # 本 finally 不再重复调 manager.shutdown，避免双 shutdown 语义混乱。
+        server.should_exit = True
+        if not serve_task.done():
+            try:
+                await asyncio.wait_for(serve_task, timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                serve_task.cancel()
+        # 若 uvicorn 没起完（_wait_server_started 抛）→ lifespan 不一定跑；显式兜底 shutdown。
+        # 但用 ``hasattr`` + ``called`` 守门不靠谱（shutdown 无 flag）；改：只在 serve_task
+        # 异常退出（非 should_exit 触发）时显式调一次。
+        if cancelled or serve_task.cancelled() or (
+            serve_task.done() and serve_task.exception() is not None
+        ):
+            try:
+                await manager.shutdown()
+            except Exception:  # noqa: BLE001 — shutdown 失败不掩盖主路径 exit code
+                logger.warning("manager.shutdown 兜底失败（已 try/except）", exc_info=True)
+    return exit_code
+
+
+async def _wait_server_started(server, timeout: float = 5.0) -> None:
+    """等 uvicorn ``server.started`` flag True（startup 完成）。
+
+    uvicorn 0.x 在 lifespan startup 后设 ``server.started = True``。超时 → 视为启动失败，
+    fail loud（raise RuntimeError）。短 timeout 避免在 bind 失败时无限 hang。
+    """
+    deadline = time.monotonic() + timeout
+    while not getattr(server, "started", False):
+        if time.monotonic() > deadline:
+            raise RuntimeError(
+                f"uvicorn server 未在 {timeout}s 内 startup（port 可能被占）"
+            )
+        await asyncio.sleep(0.05)
+
+
+async def _wait_ws_autoexit(web_server, autoexit_seconds: float) -> None:
+    """轮询 WS auto-exit 条件：``无活跃 WS AND now - last_ws_activity_at > N`` → 返回。
+
+    SPEC §0 D4 / §4 step4 / §8 AC5 负向「有活跃 WS 不退」。窗口内 WS connect/disconnect
+    重置 ``last_ws_activity_at``（``WebServer`` 内部 touch）；``active_ws_count`` 由
+    ``WebServer`` 维护（connect++ / disconnect--）。本函数仅在 run 已终态后调；任一条件
+    不满足则继续等。**负向 AC**：只要 ``active_ws_count > 0``（有 WS 仍连着）→ 永不退。
+    """
+    while True:
+        now = time.monotonic()
+        # 直接访问字段（fail-loud）：``WebServer.__init__`` 保证 ``active_ws_count`` 存在，
+        # 防御性 ``getattr`` 默认值会吞掉「传错对象」类调用方 bug（违反 SPEC 鲁棒性条款）。
+        active = web_server.active_ws_count
+        if active == 0 and (
+            now - web_server.last_ws_activity_at > autoexit_seconds
+        ):
+            return
+        await asyncio.sleep(1.0)
+
+
+# ── orca open（SPEC §5）────────────────────────────────────────────────────────
+
+
+@app.command(name="open")
+def open_run(
+    run_id: str = typer.Argument(..., help="要打开的 run_id（或 ``--tape`` 显式指定 tape 路径）"),
+    tape: Path | None = typer.Option(
+        None, "--tape",
+        help="显式 tape 路径（默认 ``runs/<run_id>.jsonl``）",
+    ),
+    host: str | None = typer.Option(
+        None, "--host",
+        help="web server 监听地址（默认 0.0.0.0 远程可访问；ORCA_WEB_HOST env 同效）",
+    ),
+    port: int | None = typer.Option(
+        None, "--port",
+        help="web server 端口（默认探测 7428：是 orca 则复用，否则起后台 ``orca serve``）",
+    ),
+) -> None:
+    """attach 一个既有 run（按 tape 路径），打开 web 观察窗（SPEC §5）。
+
+    典型场景：``orca run --background`` 后用 ``orca open <id>`` 看 live 进度；或
+    in-session shell 跑到一半想看完整 DAG。attached run 是 **read-only**（前端 gate
+    禁提交，meta.writable=false）。
+
+    流程（SPEC §5）：
+      1. 探测默认端口 7428（``GET /api/health``，本地 127.0.0.1）；是 orca → 复用；否/不可达
+         → 后台起 ``orca serve``（空闲端口或默认，bind host 同 --host）。
+      2. 解析 tape 路径（``runs/<run_id>.jsonl`` 或 ``--tape``）。
+      3. ``POST /api/runs/attach {tape_path, run_id}``。
+      4. ``webbrowser.open(/runs/<run_id>)``（URL 用本机实际 IP）。
+
+    失败：tape 不存在 → exit 2；attach 403/404/409 → exit 1（fail loud）。
+    """
+    raise typer.Exit(_open_run(run_id, tape_path=tape, host=host, port=port))
+
+
+def _open_run(
+    run_id: str, *, tape_path: Path | None, host: str | None, port: int | None
+) -> int:
+    """``orca open`` 核心：probe / spawn-serve / attach / browser open。
+
+    host/port 经 ``resolve_web_endpoint`` 统一解析（与 serve/run 同源）：bind ``bind_host``
+    （默认 0.0.0.0），URL 用 ``display_host``（本机实际 IP）。HTTP 复用探测始终本地 127.0.0.1。
+    """
+    bind_host, display_host, target_port = resolve_web_endpoint(host=host, port=port)
+    probe_host = "127.0.0.1"  # 复用 / attach 探测始终本地
+
+    # 1) 解析 tape 路径。
+    tape = tape_path if tape_path is not None else _resolve_tape_path(run_id)
+    if not tape.is_file():
+        typer.echo(f"Tape 不存在：{tape}（用 --tape <path> 显式指定）", err=True)
+        return EXIT_ARG_OR_VALIDATE
+
+    # 2) 端口探测：target port 是 orca → 复用；否 → 起后台 serve。
+    health = _probe_orca_server(probe_host, target_port)
+    if health is not None:
+        actual_port = target_port
+    else:
+        # 显式 --port 且被非 orca 占 → fail loud；否则挑端口 + 起后台 serve。
+        if port is not None and not _is_port_free(bind_host, target_port):
+            typer.echo(
+                f"--port {target_port} 被非 orca server 占用",
+                err=True,
+            )
+            return EXIT_ARG_OR_VALIDATE
+        actual_port = (
+            target_port if _is_port_free(bind_host, target_port)
+            else _find_free_port(bind_host=bind_host)
+        )
+        if not _spawn_background_serve(bind_host, actual_port):
+            # orca 不在 PATH（FileNotFoundError）→ fail loud exit 1
+            typer.echo(
+                "无法起后台 ``orca serve``：可执行不在 $PATH",
+                err=True,
+            )
+            return EXIT_RUN_FAILED
+        # 等 serve 起来（health 探测重试）。
+        if not _wait_for_health(probe_host, actual_port, timeout=10.0):
+            typer.echo(
+                f"后台 orca serve 未在 {actual_port} 上 ready（超时 10s）",
+                err=True,
+            )
+            return EXIT_RUN_FAILED
+
+    # 3) POST /api/runs/attach。
+    attach_error_code = _attach_and_get_error(probe_host, actual_port, str(tape), run_id)
+    if attach_error_code is not None:
+        return attach_error_code
+
+    # 4) 浏览器打开（URL 用 display_host，远程可点击）。
+    url = f"http://{display_host}:{actual_port}/runs/{run_id}"
+    _open_browser_or_print(url)
+    typer.echo(f"Orca Web UI（attached）→ {url}  (browser tab 可关闭；server 后台运行)")
+    return EXIT_OK
+
+
+def _spawn_background_serve(host: str, port: int) -> bool:
+    """后台起 ``orca serve --port <port>``（detached，SPEC §5 step1）。
+
+    返回 True 启动成功；False 表示 ``orca`` 可执行不在 PATH（fail loud，调用方 exit 1）。
+    detached + DEVNULL：用户经浏览器交互，不依赖 stdout。
+    """
+    import subprocess
+
+    try:
+        subprocess.Popen(
+            ["orca", "serve", "--host", host, "--port", str(port)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except FileNotFoundError:
+        logger.error(
+            "`orca` 可执行不在 $PATH（venv 未激活？pyproject 入口未安装？）；"
+            "无法起后台 serve",
+        )
+        return False
+    return True
+
+
+def _wait_for_health(host: str, port: int, *, timeout: float) -> bool:
+    """轮询 ``GET /api/health`` 直到 orca ready 或超时。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _probe_orca_server(host, port, timeout=1.0) is not None:
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def _attach_and_get_error(
+    host: str, port: int, tape_path: str, run_id: str
+) -> int | None:
+    """``POST /api/runs/attach``；失败 → 返回 exit code（None = 成功）。"""
+    import httpx
+
+    try:
+        r = httpx.post(
+            f"http://{host}:{port}/api/runs/attach",
+            json={"tape_path": tape_path, "run_id": run_id},
+            timeout=10.0,
+        )
+    except Exception as e:  # noqa: BLE001
+        typer.echo(f"attach 网络异常：{e}", err=True)
+        return EXIT_RUN_FAILED
+
+    if r.status_code == 200:
+        return None
+    # 失败映射：403/404/409 → exit 1（fail loud）；其它 → exit 1。
+    detail = ""
+    try:
+        detail = r.json().get("detail", r.text[:200])
+    except Exception:  # noqa: BLE001
+        detail = r.text[:200]
+    typer.echo(
+        f"attach 失败：HTTP {r.status_code} - {detail}",
+        err=True,
+    )
+    return EXIT_RUN_FAILED
 
 
 def main() -> None:

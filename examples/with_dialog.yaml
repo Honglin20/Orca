@@ -41,6 +41,8 @@ inputs:
 nodes:
   - name: worker
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
     prompt: |
       任务：{{ inputs.topic }}。
       请给出一个简洁的解释 + 一个最小可运行示例代码。

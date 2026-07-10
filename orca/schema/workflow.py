@@ -36,6 +36,10 @@ class Route(BaseModel):
 
     when: str | None = None  # Jinja2 表达式；None = 兜底
     to: str  # 目标 node 名 / "$end"
+    # phase-14：route 到 $end 时的输出变换模板（每 key 独立 Jinja2 渲染）。
+    # None = 走 wf.outputs fallback；非空 = 用它替代 wf.outputs 渲染 final output。
+    # 仅 to="$end" 时生效（route.to 非 $end 且 output 非空 → compile validator warn 死代码）。
+    output: dict[str, str] | None = None
 
 
 class Node(BaseModel):
@@ -108,14 +112,26 @@ class ValidatorConfig(BaseModel):
 class AgentNode(Node):
     """LLM agent 节点（核心 kind）。
 
-    prompt 约定：省略/None → 从 agents/<name>.md 加载（compile/ 层做）；非空 → 内联短 prompt。
+    prompt 来源（phase-14 三态，compile validator 强制 + deprecation）：
+      - ``prompt`` 非空 → 内联短 prompt（直接渲染）
+      - ``agent`` 非空 → 引用 agent 池（``agents/<agent>/agent.md`` 或 ``agents/<agent>.md``），
+        compile 期由 ``AgentResolver`` 物化进 ``prompt`` + ``resources_root``。
+        与 ``prompt`` **互斥**（同时非空 → compile validator error）。
+      - 两者皆 None（旧约定）→ ``name`` 匹配 ``agents/<name>.md``，**deprecation warn**，
+        内部当 ``agent=name`` 走 resolver。foreach body 无 name，body 双 None → error。
+    ``resources_root`` 是 compile 物化的 **runtime cache**（与 ``prompt`` 同模式：用户写 ``agent``
+    时 compile 填 prompt + resources_root）。非 yaml 契约字段（用户写无效，resolver 总覆盖）。
     输出摘取：output_schema=None → 自由文本（取整段 result）；非 None → 结构化（exec/ 层做）。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["agent"] = "agent"
-    prompt: str | None = None  # 内联短 prompt；None=约定加载 agents/<name>.md
+    prompt: str | None = None  # 内联短 prompt；None=约定/引用加载（compile/ 层物化）
+    agent: str | None = None  # 【phase-14】agent 池引用名（如 "analyzer"）；与 prompt 互斥
+    # 【phase-14 · runtime cache】compile 期由 resolver 物化填入，agent 资源目录绝对路径。
+    # 非 yaml 契约（用户写无效）；spawn 时 executor 注入 env ORCA_AGENT_RESOURCES 给 agent Bash 工具。
+    resources_root: str | None = None
     tools: list[str] | None = None  # None=全开（默认）；[...]=白名单
     executor: str = "claude"  # "claude" / "ccr" / "codex"（未来）
     model: str | None = None  # 模型覆盖
@@ -259,14 +275,20 @@ class Workflow(BaseModel):
     parallel 为静态并行组独立列表（表达 DAG 分叉+合并）；outputs 为最终输出映射。
     所有结构合法性（entry 存在且非组、name 唯一含组名、routes 引用合法、parallel 组
     结构、死锁检测）由 compile/ 层校验。
+
+    phase-10 v4：``setup`` 是 setup phase（可选，空 list = 无 setup）。三壳消费范式不同
+    （TUI/Web 实跑 setup agent + ask_user/gate；MCP 主 session 替 setup agent 跑，结果
+    作为 ``setup_outputs`` 传给 ``start_workflow`` 跳过 setup phase 实际执行）。
+    execute phase（``nodes``）的 agent **不配 ask_user/gate 工具**（compile validator 强制）。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     name: str
     description: str = ""
+    setup: list[AgentNode] = []  # 【phase-10 v4】setup phase（可选；空 list = 无 setup）
     entry: str  # 起始 node 名（显式，唯一入口；不能是 parallel 组）
     inputs: dict[str, InputDef] = {}  # 工作流输入声明（可选）
-    nodes: list[AnnotatedNode]  # 所有节点（discriminated union）
+    nodes: list[AnnotatedNode]  # execute phase 节点（discriminated union）
     parallel: list[ParallelGroup] = []  # 静态并行组（顶层独立列表）
     outputs: dict[str, str] = {}  # 最终输出映射 {key: "{{ node.output.field }}"}

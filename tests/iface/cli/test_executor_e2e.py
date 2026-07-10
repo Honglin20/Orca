@@ -80,6 +80,27 @@ while True:
     time.sleep(0.05)
 """
 
+# opencode 好脚本（events 模式）：prompt_channel=argv（prompt 是 argv 末尾位置参数，
+# CLIRunner argv 分支立即 close stdin，故脚本不读 stdin）。吐 opencode NDJSON part 信封——
+# step_start / text / step_finish（无 result 行；step_finish 带 tokens/cost）。
+# 对齐真实抓取 ``tests/profiles/fixtures/opencode_sample.jsonl`` 的字段结构。
+_OPENCODE_GOOD_SCRIPT = """\
+import sys
+# prompt 在 argv（runner.py:299 append），脚本忽略之；stdin 已被 CLIRunner close。
+print('{"type":"step_start","part":{"type":"step-start"}}', flush=True)
+print('{"type":"text","part":{"type":"text","text":"OK"}}', flush=True)
+print('{"type":"step_finish","part":{"type":"step-finish","tokens":{"input":11178,"output":41,"cache":{"read":43}},"cost":0.0034}}', flush=True)
+sys.exit(0)
+"""
+
+# opencode 坏脚本：只吐非 JSON 行（模拟「二进制没吐 NDJSON」）。classify events 模式
+# 走「非 stream-json」分支。
+_OPENCODE_BAD_JSON_SCRIPT = """\
+import sys
+print("检测到新版本：1.2.3，请升级", flush=True)  # 非 JSON 横幅行（被 _record_type 跳过）
+sys.exit(0)
+"""
+
 
 def _write_exec_script(tmp_path: Path, name: str, source: str) -> Path:
     """写一个 python 脚本到 tmp_path 并 chmod 0o755，返回路径。
@@ -98,27 +119,27 @@ def _write_exec_script(tmp_path: Path, name: str, source: str) -> Path:
 
 @pytest.fixture(autouse=True)
 def _isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """每个测试把 config_path 指到 tmp_path、清 ``ORCA_*_CLI`` env、重置 registry。
+    """每个测试把 config_path / project_config_path 指到 tmp_path、清 ``ORCA_*`` env、重置 registry。
 
     ``apply_config_env`` 用 ``os.environ.setdefault`` 直接写 env（非 monkeypatch.setenv），
-    故 teardown 显式清理被写入的 ``ORCA_*_CLI``，防污染后续测试（如
-    ``test_registry.test_resolve_cli_path_env_overrides_default``）。
+    故 teardown 显式清理被写入的 ``ORCA_*``，防污染后续测试。重置 ``_shell_env_snapshot``
+    让 show 来源判定每测试重抓。两层 config 都隔离，避免 ``set --scope project``（默认）
+    污染真实仓库 ``./.orca/config.json``。
     """
-    cfg_file = tmp_path / "config.json"
-    monkeypatch.setattr(config_mod, "config_path", lambda: cfg_file)
-    pre_env = {
-        k: os.environ[k]
-        for k in list(os.environ)
-        if k.startswith("ORCA_") and k.endswith("_CLI")
-    }
+    user_cfg = tmp_path / "user_config.json"
+    proj_cfg = tmp_path / "proj" / ".orca" / "config.json"
+    monkeypatch.setattr(config_mod, "config_path", lambda: user_cfg)
+    monkeypatch.setattr(config_mod, "project_config_path", lambda: proj_cfg)
+    pre_env = {k: os.environ[k] for k in list(os.environ) if k.startswith("ORCA_")}
     for key in list(os.environ):
-        if key.startswith("ORCA_") and key.endswith("_CLI"):
+        if key.startswith("ORCA_"):
             monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(config_mod, "_shell_env_snapshot", None)
     _reset_for_test()
     yield
     _reset_for_test()
     for key in list(os.environ):
-        if key.startswith("ORCA_") and key.endswith("_CLI") and key not in pre_env:
+        if key.startswith("ORCA_") and key not in pre_env:
             os.environ.pop(key, None)
     for key, val in pre_env.items():
         os.environ[key] = val
@@ -218,6 +239,49 @@ class TestExecutorTestFullSpawnChain:
         assert result.exit_code == 1
         assert "二进制无法启动" in result.output
 
+    # ── opencode（events 模式）：回归 ``orca executor test opencode`` 误判 bug ────
+    # classify 原只识 claude 事件 type，opencode 的 step_start/text/step_finish 全漏识 →
+    # 「非 stream-json」。修复后 classify 按 profile.terminal.mode="events" 选 opencode
+    # 事件集 + step_finish 终止信号。此处走真 spawn 链路（argv prompt + NDJSON stdout）。
+
+    def test_opencode_good_script_passes_end_to_end(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """opencode 好脚本（吐 step_start/text/step_finish NDJSON）→ exit 0 + 端到端 OK。
+
+        全链路：opencode profile（prompt_channel=argv）→ SpawnConfig → CLIRunner argv 分支
+        （close stdin）→ readline → _record_type(收集 step_start/text/step_finish)
+        → classify(terminal_mode=events, saw_terminal=step_finish∈seen) → PASS。
+        on_result 不触发（events 模式无 result 行）——证 saw_terminal 从 seen_types 派生。
+        """
+        script = _write_exec_script(
+            tmp_path, "opencode_backend.py", _OPENCODE_GOOD_SCRIPT
+        )
+        monkeypatch.setenv("ORCA_OPENCODE_CLI", str(script))
+
+        result = runner.invoke(app, ["executor", "test", "opencode"])
+        assert result.exit_code == 0, f"stdout={result.output!r}"
+        assert "端到端 OK" in result.output
+        assert "step_finish" in result.output
+
+    def test_opencode_non_json_banner_still_fails_when_no_events(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """opencode 只吐非 JSON 横幅（模拟「nga 版本提示」污染 stdout）且无 NDJSON 事件
+        → classify events 模式走「非 stream-json」FAIL。
+
+        证非 JSON 横幅行本身无害（_record_type 跳过），FAIL 的根因是没见到任何 opencode
+        协议事件——而非横幅「污染」。即横幅只在「二进制彻底没吐 NDJSON」时才体现为失败。
+        """
+        script = _write_exec_script(
+            tmp_path, "opencode_bad.py", _OPENCODE_BAD_JSON_SCRIPT
+        )
+        monkeypatch.setenv("ORCA_OPENCODE_CLI", str(script))
+
+        result = runner.invoke(app, ["executor", "test", "opencode"])
+        assert result.exit_code == 1, f"stdout={result.output!r}"
+        assert "非 stream-json" in result.output
+
 
 # ── 配置生命周期：set → show → unset（端到端经 CLI）─────────────────────────────
 
@@ -232,40 +296,40 @@ class TestExecutorConfigLifecycle:
     def test_set_then_show_displays_effective_binary(
         self, tmp_path: Path, monkeypatch
     ):
-        """set 写 config → show 显示 effective = 写入值 + override 标记。"""
+        """set 写 config → show 显示 effective = 写入值 + 来源标注。"""
         script = _write_exec_script(tmp_path, "good_backend.py", _GOOD_SCRIPT)
-        # set 命令的 binary 参数是「替换后的 binary」——直接传脚本路径
         set_result = runner.invoke(
-            app, ["executor", "set", "claude", str(script)]
+            app, ["executor", "set", "claude", "--binary", str(script)]
         )
         assert set_result.exit_code == 0
-        assert "已设置 claude" in set_result.output
+        assert "已写入" in set_result.output
 
-        # show 读回：effective 应是脚本路径（config override 生效）
-        show_result = runner.invoke(app, ["executor", "show"])
+        # show 读回：生效命令含脚本路径（项目 config override 生效）
+        show_result = runner.invoke(app, ["executor", "show", "claude"])
         assert show_result.exit_code == 0
         assert str(script) in show_result.output
-        assert "config override" in show_result.output
+        assert "← 项目" in show_result.output  # 来源标注
 
-        # config 文件确实写入
-        cfg = json.loads(config_mod.config_path().read_text(encoding="utf-8"))
+        # config 文件确实写入（默认 scope=project）
+        cfg = json.loads(config_mod.project_config_path().read_text(encoding="utf-8"))
         assert cfg["binaries"]["claude"] == str(script)
 
     def test_unset_restores_default_binary(self, tmp_path: Path):
-        """set 后 unset → show 回 default（``claude``），override 标记消失。"""
+        """set 后 unset → show 回 default（``claude``）。"""
         script = _write_exec_script(tmp_path, "lifecycle_backend.py", _GOOD_SCRIPT)
-        runner.invoke(app, ["executor", "set", "claude", str(script)])
+        runner.invoke(app, ["executor", "set", "claude", "--binary", str(script)])
 
         unset_result = runner.invoke(app, ["executor", "unset", "claude"])
         assert unset_result.exit_code == 0
-        assert "已清除" in unset_result.output
+        assert "清除" in unset_result.output
 
-        # show 应回到 default，无 override 标记
-        show_result = runner.invoke(app, ["executor", "show"])
+        # show 应回到 default
+        show_result = runner.invoke(app, ["executor", "show", "claude"])
         assert show_result.exit_code == 0
-        assert "config override" not in show_result.output
+        assert "← default" in show_result.output
+        assert str(script) not in show_result.output
         # config 文件中 claude 已移除
-        cfg = json.loads(config_mod.config_path().read_text(encoding="utf-8"))
+        cfg = json.loads(config_mod.project_config_path().read_text(encoding="utf-8"))
         assert "claude" not in cfg.get("binaries", {})
 
     def test_set_multi_token_binary_then_test_uses_it(
@@ -295,7 +359,7 @@ class TestExecutorConfigLifecycle:
 
         # set 多 token binary → 写 config
         set_result = runner.invoke(
-            app, ["executor", "set", "claude", "ccr code"]
+            app, ["executor", "set", "claude", "--binary", "ccr code"]
         )
         assert set_result.exit_code == 0
 
@@ -315,7 +379,7 @@ class TestExecutorConfigLifecycle:
         """
         # config 写脚本 A
         script_a = _write_exec_script(tmp_path, "backend_a.py", _GOOD_SCRIPT)
-        runner.invoke(app, ["executor", "set", "claude", str(script_a)])
+        runner.invoke(app, ["executor", "set", "claude", "--binary", str(script_a)])
 
         # env 设脚本 B（也吐 result，内容不同便于区分）
         script_b = _write_exec_script(

@@ -7,6 +7,9 @@
   - 变量解析：``output`` / ``inputs`` / ``node_name.output.field``
   - 纯函数性：同输入两次调用结果相同
   - Jinja2 语法错 / 未定义变量 → RouteError（fail loud）
+
+phase-14：``resolve`` 返回命中的 ``Route`` 对象（非 target str）。本文件用 ``_target``
+helper 取 ``.to`` 保持断言简洁；直测 RouteError 的用例仍直接调 ``resolve``。
 """
 
 from __future__ import annotations
@@ -27,6 +30,11 @@ def _ctx(inputs=None, outputs=None) -> RunContext:
     )
 
 
+def _target(routes, output, ctx) -> str:
+    """phase-14：resolve 返回 Route，本 helper 取 .to（断言 target 用）。"""
+    return resolve(routes, output, ctx).to
+
+
 # ── first-match-wins / 兜底 ──────────────────────────────────────────────────
 
 
@@ -36,7 +44,7 @@ def test_resolve_picks_first_matching_when():
         Route(when="output.x > 0", to="A"),
         Route(to="B"),  # 兜底
     ]
-    assert resolve(routes, {"x": 5}, _ctx()) == "A"
+    assert _target(routes, {"x": 5}, _ctx()) == "A"
 
 
 def test_resolve_falls_back_to_catchall():
@@ -45,7 +53,7 @@ def test_resolve_falls_back_to_catchall():
         Route(when="output.x > 0", to="A"),
         Route(to="B"),
     ]
-    assert resolve(routes, {"x": -1}, _ctx()) == "B"
+    assert _target(routes, {"x": -1}, _ctx()) == "B"
 
 
 def test_resolve_no_match_no_catchall_raises_route_error():
@@ -61,13 +69,22 @@ def test_resolve_when_none_always_matches_first():
         Route(to="DEFAULT"),  # when=None 在首位，无条件命中
         Route(when="output.x > 0", to="A"),  # 这条永远不可达（compile 会拦，运行时也不该到这）
     ]
-    assert resolve(routes, {"x": 999}, _ctx()) == "DEFAULT"
+    assert _target(routes, {"x": 999}, _ctx()) == "DEFAULT"
 
 
 def test_resolve_returns_end_target():
     """路由到 $end（终止信号）正确返回。"""
     routes = [Route(to="$end")]
-    assert resolve(routes, {}, _ctx()) == "$end"
+    assert _target(routes, {}, _ctx()) == "$end"
+
+
+def test_resolve_returns_route_object_with_output():
+    """phase-14：resolve 返回 Route 对象（含 output），调用方可取 .to / .output。"""
+    routes = [Route(to="$end", output={"summary": "{{ a.output }}"})]
+    route = resolve(routes, {}, _ctx())
+    assert isinstance(route, Route)
+    assert route.to == "$end"
+    assert route.output == {"summary": "{{ a.output }}"}
 
 
 # ── 变量解析 ──────────────────────────────────────────────────────────────────
@@ -79,8 +96,8 @@ def test_resolve_reads_output_var():
         Route(when="output.exit_code == 0", to="ok"),
         Route(to="fail"),
     ]
-    assert resolve(routes, {"exit_code": 0}, _ctx()) == "ok"
-    assert resolve(routes, {"exit_code": 1}, _ctx()) == "fail"
+    assert _target(routes, {"exit_code": 0}, _ctx()) == "ok"
+    assert _target(routes, {"exit_code": 1}, _ctx()) == "fail"
 
 
 def test_resolve_reads_inputs_var():
@@ -89,8 +106,8 @@ def test_resolve_reads_inputs_var():
         Route(when="inputs.iterations >= 5", to="many"),
         Route(to="few"),
     ]
-    assert resolve(routes, {}, _ctx(inputs={"iterations": 10})) == "many"
-    assert resolve(routes, {}, _ctx(inputs={"iterations": 1})) == "few"
+    assert _target(routes, {}, _ctx(inputs={"iterations": 10})) == "many"
+    assert _target(routes, {}, _ctx(inputs={"iterations": 1})) == "few"
 
 
 def test_resolve_reads_other_node_output():
@@ -100,9 +117,9 @@ def test_resolve_reads_other_node_output():
         Route(to="low"),
     ]
     ctx = _ctx(outputs={"decide": {"output": {"path": "high"}}})
-    assert resolve(routes, {}, ctx) == "high"
+    assert _target(routes, {}, ctx) == "high"
     ctx2 = _ctx(outputs={"decide": {"output": {"path": "low"}}})
-    assert resolve(routes, {}, ctx2) == "low"
+    assert _target(routes, {}, ctx2) == "low"
 
 
 # ── 纯函数性 ──────────────────────────────────────────────────────────────────
@@ -118,7 +135,7 @@ def test_resolve_is_pure_same_input_same_output():
     out = {"n": 5}
     first = resolve(routes, out, ctx)
     second = resolve(routes, out, ctx)
-    assert first == second == "done"
+    assert first.to == second.to == "done"
     # ctx 未被 mutate（纯函数）
     assert ctx.outputs == {}
 
@@ -167,7 +184,7 @@ def test_resolve_truthy_string_falsy_literals():
     ]
     # 'false' / 'none' / '0' / '[]' / '{}' / 'null' / 空串 → 假
     for falsy in ("false", "none", "0", "[]", "{}", "null", ""):
-        assert resolve(routes, {"flag": falsy}, _ctx()) == "falsy", falsy
+        assert _target(routes, {"flag": falsy}, _ctx()) == "falsy", falsy
     # 非空非 falsy 字面量 → 真
     for truthy in ("yes", "true", "1 ", "abc"):
-        assert resolve(routes, {"flag": truthy}, _ctx()) == "truthy", truthy
+        assert _target(routes, {"flag": truthy}, _ctx()) == "truthy", truthy

@@ -1,11 +1,12 @@
-// test/chart.test.tsx —— chart 渲染测试（D2/D3 验收）。
+// test/chart.test.tsx —— chart 渲染测试（D2/D3/D7 验收）。
 //
-// 覆盖 SPEC §3.2：
+// 覆盖 SPEC §3.2 / §0 D3 / D7：
 //   - 5 种 widget 各渲染对应 recharts class（.recharts-line / .recharts-bar / .recharts-scatter / table rows）
 //   - PALETTE 配色实际使用（读 SVG stroke/fill 断言在 PALETTE）
 //   - label 分组（不同 label 不同 section）
 //   - 同 label+title 替换（dedupe → 只 1 个 chart，不堆积）
-//   - replay 模式只显示到 replayPosition 的 chart
+//
+// web-shell-v2 §8：删除 Replay 同步测试块（无 Replay 功能）。
 //
 // 注：recharts ResponsiveContainer 在 happy-dom 下异步渲染（measure 后 useEffect 出子 SVG），
 // 故 SVG 断言用 waitFor 等待异步渲染完成。
@@ -15,13 +16,14 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { ChartWidget } from "@/components/chart/ChartWidget";
-import { dedupeByLabelTitle } from "@/components/chart/ChartGroup";
+import { ChartGroup } from "@/components/chart/ChartGroup";
 import { PALETTE } from "@/components/chart/chartTheme";
+import { selectCharts } from "@/selectors";
 import type { ChartPayload, ChartType } from "@/components/chart/types";
-import type { WorkflowEvent } from "@/types/events";
+import type { WebEvent } from "@/types/events";
 
 let _seq = 100;
-function chartEvent(node: string, payload: ChartPayload): WorkflowEvent {
+function chartEvent(node: string, payload: ChartPayload): WebEvent {
   return {
     seq: _seq++,
     type: "custom",
@@ -417,27 +419,38 @@ describe("ChartRenderer —— label 分组 + 实时更新（SPEC §2.4 §2.7）
     expect(widgets.length).toBe(1);
   });
 
-  test("dedupeByLabelTitle 单元（直接断言）", () => {
+  test("dedupe 真相在 selectCharts：同 title 两条事件经 selector 后只产出 1 chart（ChartRenderer 不再二次去重）", async () => {
+    // 两条同 label+title 事件：selectCharts 已 upsert 去重（identity=title）
+    useWorkflowStore.getState().processEvent(
+      chartEvent("n1", { ...LINE_PAYLOAD, label: "组A", title: "loss", data: [{ x: 1, y: 2 }] }),
+    );
+    useWorkflowStore.getState().processEvent(
+      chartEvent("n1", { ...LINE_PAYLOAD, label: "组A", title: "loss", data: [{ x: 2, y: 4 }] }),
+    );
+    render(<ChartRenderer nodeId="n1" />);
+    const widgets = screen.getAllByTestId("chart-widget");
+    expect(widgets.length).toBe(1);
+  });
+
+  test("空 title 多 chart 共存（identity = chart_type+seq；ChartGroup 不二次去重，铁律 1）", async () => {
+    // 空 title → selectCharts identity = chart_type#seq，两个独立 chart；ChartGroup 必须都渲染
     const a: ChartPayload = {
-      ...LINE_PAYLOAD,
-      label: "g",
-      title: "t",
-      data: [{ x: 1, y: 1 }],
+      ...SCATTER_PAYLOAD,
+      title: "",
+      data: [{ x: 1, y: 2 }],
     };
     const b: ChartPayload = {
-      ...LINE_PAYLOAD,
-      label: "g",
-      title: "t",
-      data: [{ x: 2, y: 2 }],
+      ...SCATTER_PAYLOAD,
+      title: "",
+      data: [{ x: 3, y: 4 }],
     };
-    const c: ChartPayload = {
-      ...LINE_PAYLOAD,
-      label: "g",
-      title: "other",
-      data: [{ x: 1, y: 1 }],
-    };
-    expect(dedupeByLabelTitle([a, b])).toHaveLength(1); // 同 title → 替换
-    expect(dedupeByLabelTitle([a, b, c])).toHaveLength(2); // 不同 title → 各 1
+    useWorkflowStore.getState().processEvent(chartEvent("n1", a));
+    useWorkflowStore.getState().processEvent(chartEvent("n1", b));
+    render(<ChartRenderer nodeId="n1" />);
+    // 两个空 title chart 都渲染（selectCharts identity 用 seq 区分；ChartGroup 不压成 1）
+    await waitFor(() => {
+      expect(screen.getAllByTestId("chart-widget").length).toBe(2);
+    });
   });
 
   test("nodeId 过滤：只显示指定节点的 chart", () => {
@@ -468,38 +481,106 @@ describe("ChartRenderer —— label 分组 + 实时更新（SPEC §2.4 §2.7）
   });
 });
 
-describe("ChartRenderer —— replay 同步（SPEC §2.7）", () => {
-  test("replay 模式只显示到 replayPosition 的 chart", () => {
-    const store = useWorkflowStore.getState();
-    // 注入两个 chart 事件（同 label+title 模拟实时更新）
-    store.processEvent(
-      chartEvent("n1", {
-        ...LINE_PAYLOAD,
-        label: "g",
-        title: "t",
-        data: [{ x: 1, y: 1 }],
-      }),
+describe("ChartGroup —— 响应式 grid + IntersectionObserver 懒挂（SPEC §5.4）", () => {
+  test("响应式 grid：gridTemplateColumns = repeat(auto-fit, minmax(300px, 1fr))", async () => {
+    render(
+      <ChartGroup
+        label="g1"
+        charts={[{ ...LINE_PAYLOAD, label: "g1", title: "t1" }]}
+      />,
     );
-    store.processEvent(
-      chartEvent("n1", {
-        ...LINE_PAYLOAD,
-        label: "g",
-        title: "t",
-        data: [{ x: 2, y: 2 }],
-      }),
+    // 展开（默认未折叠）→ 找到 grid 容器（border-t 内的 div）
+    const group = screen.getByTestId("chart-group");
+    const gridContainer = group.querySelector(
+      'div[style*="grid-template-columns"]',
+    ) as HTMLElement | null;
+    expect(gridContainer).toBeTruthy();
+    const style = gridContainer!.getAttribute("style") ?? "";
+    expect(style).toContain("repeat(auto-fit, minmax(300px, 1fr))");
+  });
+
+  test("chart 进入视口（IO stub）→ 挂载 ChartWidget（无 skeleton 残留）", async () => {
+    // setup.ts 的 IOStub 立即触发 isIntersecting=true → LazyChartWidget 直接渲染 ChartWidget
+    render(
+      <ChartGroup
+        label="g1"
+        charts={[{ ...LINE_PAYLOAD, label: "g1", title: "t1" }]}
+      />,
     );
+    // chart-widget 立即出现（IO stub 同步触发）
+    await waitFor(() => {
+      expect(screen.getAllByTestId("chart-widget").length).toBe(1);
+    });
+    // skeleton 已被 widget 取代
+    expect(screen.queryAllByTestId("chart-skeleton").length).toBe(0);
+  });
+});
 
-    // 进 replay 模式 + 拨 replayPosition 到第一个事件（只显示 1 个 chart）
-    store.setReplayMode(true);
-    store.setReplayPosition(0);
+describe("ScatterChartWidget —— size 字段（气泡图，SPEC §5.4 D3）", () => {
+  test("size 字段：z 列映射（widget 渲染不抛错，scatter path 存在）", async () => {
+    const bubble: ChartPayload = {
+      chart_type: "scatter",
+      data: [
+        { x: 1, y: 2, z: 10 },
+        { x: 3, y: 4, z: 50 },
+      ],
+      x: "x",
+      y: "y",
+      size: "z",
+      label: "g1",
+      title: "bubble-t",
+    };
+    render(<ChartWidget payload={bubble} />);
+    await waitFor(() => {
+      expect(document.querySelector(".recharts-scatter path")).toBeTruthy();
+    });
+    // 断言 size 字段被消费：渲染出 path 且无报错（recharts ZAxis 不产可见 DOM class
+    // 无法直接断言 dataKey；bubble 与 scatter-without-size 的差别由 prod UI 验证）。
+  });
 
-    render(<ChartRenderer nodeId="n1" />);
-    // replayPosition=0 → events[0..0]，只第一个事件 → 1 chart
-    const widgets = screen.getAllByTestId("chart-widget");
-    expect(widgets.length).toBe(1);
+  test("hue + size 组合：每 hue 一组气泡", async () => {
+    const bubble: ChartPayload = {
+      chart_type: "scatter",
+      data: [
+        { x: 1, y: 2, z: 10, group: "A" },
+        { x: 3, y: 4, z: 50, group: "B" },
+      ],
+      x: "x",
+      y: "y",
+      size: "z",
+      hue: "group",
+      label: "g1",
+      title: "bubble-hue-t",
+    };
+    render(<ChartWidget payload={bubble} />);
+    await waitFor(() => {
+      // 两组 hue → 两个 legend item
+      const legendItems = document.querySelectorAll(".recharts-legend-item");
+      expect(legendItems.length).toBe(2);
+    });
+  });
+});
 
-    // 拨到末尾 → 2 个事件去重后 1 chart（同 label+title 替换）
-    store.setReplayPosition(1);
-    expect(screen.getAllByTestId("chart-widget").length).toBe(1);
+describe("selectCharts D7 序无关（SPEC §0 D7 / §9 AC2）", () => {
+  test("selectCharts(T) == selectCharts(sort(T)) == selectCharts(reverse(T))", () => {
+    // 直接断言 selector 输出（render 不参与）。同一 store 三次 fold 顺序不同 → 同集。
+    const events: WebEvent[] = [
+      chartEvent("n1", { ...LINE_PAYLOAD, label: "g", title: "t1", data: [{ x: 1, y: 1 }] }),
+      chartEvent("n1", { ...BAR_PAYLOAD, label: "g", title: "t2", data: [{ x: 1, y: 1 }] }),
+      chartEvent("n2", { ...AREA_PAYLOAD, label: "g2", title: "t3", data: [{ x: 1, y: 1 }] }),
+    ];
+    useWorkflowStore.getState().loadFromEvents(events);
+    const baseline = JSON.stringify(selectCharts(useWorkflowStore.getState()));
+
+    // 升序
+    useWorkflowStore.getState().loadFromEvents([...events].sort((a, b) => a.seq - b.seq));
+    const asc = JSON.stringify(selectCharts(useWorkflowStore.getState()));
+
+    // 降序
+    useWorkflowStore.getState().loadFromEvents([...events].sort((a, b) => b.seq - a.seq));
+    const desc = JSON.stringify(selectCharts(useWorkflowStore.getState()));
+
+    expect(asc).toBe(baseline);
+    expect(desc).toBe(baseline);
   });
 });

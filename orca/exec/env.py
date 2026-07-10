@@ -31,6 +31,7 @@ def build_env_overlay(
     node: str = "",
     session_id: str = "",
     chart_sock: str = "",
+    agent_resources: str = "",
 ) -> dict[str, str]:
     """从 ``os.environ`` 取前缀匹配的 env 变量，作为子进程 overlay（SPEC phase-4 §2.6）。
 
@@ -42,6 +43,9 @@ def build_env_overlay(
         session_id: phase-13 §2 chart 路由用，executor 入口生成的 uuid。空串 → 不注。
         chart_sock: phase-13 §2 chart 路由用，``runs_dir / f"{run_id}.sock"`` 绝对路径。
             空串 → 不注。
+        agent_resources: phase-14 agent 资源目录绝对路径（``node.resources_root``，文件夹
+            agent 的根目录，含 scripts/refs）。空串 → 不注；非空 → 子进程 ``ORCA_AGENT_RESOURCES``，
+            agent 的 Bash 工具据此 ``$ORCA_AGENT_RESOURCES/scripts/x.sh`` 引用 agent 自带资源。
 
     Returns:
         ``{key: value}`` dict，传入 ``SpawnConfig.env_overlay``。子进程继承这些变量（如
@@ -64,4 +68,7 @@ def build_env_overlay(
         overlay["ORCA_SESSION_ID"] = session_id
     if chart_sock:
         overlay["ORCA_CHART_SOCK"] = chart_sock
+    # phase-14：agent 资源目录（文件夹 agent 的根），agent Bash 工具据 $ORCA_AGENT_RESOURCES 引用 scripts/refs。
+    if agent_resources:
+        overlay["ORCA_AGENT_RESOURCES"] = agent_resources
     return overlay

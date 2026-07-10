@@ -103,6 +103,32 @@ def apply_event(state: RunState, event: Event) -> RunState:
         node_status = {**state.node_status, node: "skipped"}
         return state.model_copy(update={"node_status": node_status})
 
+    # ADR §4.3：blocked 派生（不入 tape，由 gate/interrupt 事件 fold 派生）。
+    # node 当前 None / running 且收到 human_decision_requested / interrupt_requested
+    # → blocked。resolved 时 blocked → running（claude resume / interrupt 答完后继续）。
+    #
+    # 覆盖 None（node 未 started）是对齐既有 TUI 行为（``update_node(status="blocked")``
+    # 无条件覆盖）——gate 可能在 node_started 之前到达（竞态 / 测试场景），此时也视为 blocked。
+    # 不覆盖终态（done / failed / skipped）——node 已完成时 gate 无意义。
+    #
+    # 边缘情况（已知限制，UI-only impact，rare in practice）：同 node 多个 gate 同时 active
+    # 时，首个 resolved 会把 blocked 回 running（其他 gate 仍 active）。proper 多 gate
+    # 计数需 RunState 加 active_blockers 字段，超出批 1 范围；现有 TUI 手动
+    # update_node(status=...) 的语义本就如此，本派生算法对齐既有行为。
+    if t in ("human_decision_requested", "interrupt_requested"):
+        if node:
+            current = state.node_status.get(node)
+            if current is None or current == "running":
+                node_status = {**state.node_status, node: "blocked"}
+                return state.model_copy(update={"node_status": node_status})
+        return state
+
+    if t in ("human_decision_resolved", "interrupt_resolved"):
+        if node and state.node_status.get(node) == "blocked":
+            node_status = {**state.node_status, node: "running"}
+            return state.model_copy(update={"node_status": node_status})
+        return state
+
     if t in ("agent_message", "agent_thinking", "agent_tool_call",
              "agent_tool_result", "agent_usage"):
         # session 级流式细节不进 RunState（留给前端按 session_id 分组，phase 6）。
@@ -110,6 +136,15 @@ def apply_event(state: RunState, event: Event) -> RunState:
         # 故此处仅在顶层 usage 存在时覆盖为最新一次的快照；phase 5 的 orchestrator 负责
         # 跨 session 聚合。phase 3 不进 RunState，保持 reducer 纯粹幂等。
         # → 显式 no-op：不修改 state（session 细节不入顶层状态）。
+        return state
+
+    # web-shell-v2 §3.2 B1 / D8：agent_step_started（liveness 心跳）+ unknown_event
+    # （tape 级 escape hatch）MUST no-op——绝不投影进 RunState（仅 LogStream 渲染）。
+    # unknown_event 透传整条 raw 行进 tape 便于排查协议漂移，但 RunState 不能被污染
+    # （否则 backend 协议变化会触发非幂等状态变更）。与上方 agent_* 流式细节同属
+    # session 级 no-op，但语义不同（agent_* 是「留给前端」，这俩是「绝不投影」），
+    # 故独立分支保留注释密度。
+    if t in ("agent_step_started", "unknown_event"):
         return state
 
     if t == "route_taken":
@@ -134,8 +169,7 @@ def apply_event(state: RunState, event: Event) -> RunState:
     # 保持 reducer 幂等 + 最小。
     if t in (
         "foreach_started", "foreach_item_started", "foreach_item_completed",
-        "foreach_completed", "human_decision_requested", "human_decision_resolved",
-        "interrupt_requested", "interrupt_resolved", "prompt_rendered",
+        "foreach_completed", "prompt_rendered",
         "workflow_resumed", "retry_started", "retry_succeeded", "retry_exhausted",
         "validator_started", "validator_passed", "validator_failed",
         "wait_started", "wait_completed",

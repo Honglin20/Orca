@@ -1,0 +1,31 @@
+name: article_pipeline
+description: "由 prose workflow.md + 散 prompt 转换：调研→撰文→润色"
+entry: researcher
+inputs:
+  topic:
+    type: string
+    description: "文章主题"
+nodes:
+  - name: researcher
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "调研主题 {{ inputs.topic }}，输出 3 条要点。"
+    routes:
+      - to: writer
+  - name: writer
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "据调研结果写初稿：{{ researcher.output }}"
+    routes:
+      - to: editor
+  - name: editor
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "润色初稿、定稿：{{ writer.output }}"
+    routes:
+      - to: $end
+outputs:
+  article: "{{ editor.output }}"

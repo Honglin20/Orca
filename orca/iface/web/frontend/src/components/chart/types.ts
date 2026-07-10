@@ -26,6 +26,14 @@ export interface ChartPayload {
   title: string;
   /** hue 分组（line/bar/area/scatter/radar 多系列着色） */
   hue?: string;
+  /** 散点大小（scatter 类型作气泡图；ZAxis dataKey 映射，SPEC §5.4 / §0 D3） */
+  size?: string;
+  /**
+   * 多系列列名（备用扩展位，SPEC §5.4 列入契约但当前 7 widget 均用 ``hue`` 表达多系列，
+   * 无 widget 消费 ``series``）。保留字段：未来若引入双轴 / 复合 chart（如 AH
+   * DistOverlayChartWidget 的 series 配置）时使用，避免后续契约再扩。
+   */
+  series?: string;
   /** pareto 特有：前沿方向 */
   pareto_direction?: "max" | "min";
   pareto_x_direction?: "max" | "min";

@@ -1,0 +1,13 @@
+name: chart_flow
+description: "由含脚本的 CC skill 转换：chartgen 文件夹 agent + 迁移脚本 + 路径重写"
+entry: chartgen
+nodes:
+  - name: chartgen
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: chartgen
+    routes:
+      - to: $end
+outputs:
+  chart: "{{ chartgen.output }}"

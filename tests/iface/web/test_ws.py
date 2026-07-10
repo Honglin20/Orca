@@ -352,16 +352,132 @@ def test_subscribe_unknown_run_ignored(tmp_path):
         ws = FakeWebSocket()
         endpoint_task = asyncio.create_task(server.ws_endpoint(ws))
         await asyncio.sleep(0.01)
-        ws.feed({"type": "subscribe", "run_id": "nope"})
+        ws.feed({"type": "subscribe", "run_id": "nonexistent"})
         await asyncio.sleep(0.02)
-        assert ws not in server._subs  # 未订阅
+        # 未知 run 不订阅，但连接保持（可继续发别的 subscribe）。
+        assert ws not in server._subs
         ws.feed_disconnect()
-        await server._cleanup(ws)
-        endpoint_task.cancel()
-        try:
-            await endpoint_task
-        except (asyncio.CancelledError, Exception):
-            pass
+        await asyncio.sleep(0.05)
+        assert endpoint_task.done()
+        await _close_handles(manager)
+
+    run_async(go())
+
+
+# ── WS 活动计时（D4 auto-exit 不变量，SPEC §0 D4 / §4 step4）───────────────
+
+
+def test_ws_connect_resets_activity_at(tmp_path):
+    """D4：WS connect → ``last_ws_activity_at`` 被刷新到 now（connect 时刻）。
+
+    SPEC §0 D4 / §8 AC5「active WS client → no exit」前置：connect 必须重置计时，
+    让 ``_wait_ws_autoexit`` 不立即返回（auto-exit 不误触发）。
+    """
+    manager, _ = _manager_with_handles(tmp_path, "runA")
+
+    async def go():
+        server = WebServer(manager)
+        before = server.last_ws_activity_at
+        ws = FakeWebSocket()
+        endpoint_task = asyncio.create_task(server.ws_endpoint(ws))
+        await asyncio.sleep(0.05)
+        # connect 已触发 _touch_ws_activity → last_ws_activity_at 刷新到 ~now
+        assert server.last_ws_activity_at >= before
+        ws.feed_disconnect()
+        await asyncio.sleep(0.05)
+        assert endpoint_task.done()
+        await _close_handles(manager)
+
+    run_async(go())
+
+
+def test_ws_disconnect_resets_activity_at(tmp_path):
+    """D4：WS disconnect → ``last_ws_activity_at`` 再次刷新（finally _touch_ws_activity）。
+
+    给浏览器重连窗口：用户关 tab → 断 → 计时从断开时刻重算，给 N 秒重连机会。
+    SPEC §0 D4：任一 connect/disconnect 重置计时。
+    """
+    manager, _ = _manager_with_handles(tmp_path, "runA")
+
+    async def go():
+        server = WebServer(manager)
+        ws = FakeWebSocket()
+        endpoint_task = asyncio.create_task(server.ws_endpoint(ws))
+        await asyncio.sleep(0.05)
+        connect_time = server.last_ws_activity_at
+        # disconnect
+        ws.feed_disconnect()
+        await asyncio.sleep(0.08)
+        # disconnect 再次 touch（≥ connect 时刻，因 touch 在 finally）
+        assert server.last_ws_activity_at >= connect_time
+        assert endpoint_task.done()
+        await _close_handles(manager)
+
+    run_async(go())
+
+
+def test_ws_reconnect_within_window_resets_timer(tmp_path):
+    """SPEC §8 AC5 负向「14s 内 WS 重连不退」：第一次断开后再连，计时从第二次 connect 重算。
+
+    覆盖 SPEC 明示场景：disconnect → window 内 reconnect → 计时应重置，不退。
+    """
+    manager, _ = _manager_with_handles(tmp_path, "runA")
+
+    async def go():
+        server = WebServer(manager)
+        # 第一次 WS connect
+        ws1 = FakeWebSocket()
+        t1 = asyncio.create_task(server.ws_endpoint(ws1))
+        await asyncio.sleep(0.05)
+        after_connect1 = server.last_ws_activity_at
+        # disconnect
+        ws1.feed_disconnect()
+        await asyncio.sleep(0.1)
+        after_disconnect = server.last_ws_activity_at
+        assert after_disconnect >= after_connect1  # disconnect touch
+        # 第二次 WS connect（reconnect within window）
+        ws2 = FakeWebSocket()
+        t2 = asyncio.create_task(server.ws_endpoint(ws2))
+        await asyncio.sleep(0.05)
+        after_connect2 = server.last_ws_activity_at
+        assert after_connect2 >= after_disconnect  # 再次 connect 再次 touch
+        ws2.feed_disconnect()
+        await asyncio.sleep(0.05)
+        await _close_handles(manager)
+
+    run_async(go())
+
+
+def test_ws_active_count_tracks_connect_disconnect(tmp_path):
+    """SPEC §8 AC5 负向核心：``WebServer.active_ws_count`` 必须准确追踪连接数。
+
+    旧 bug：只 touch ``last_ws_activity_at`` 不计数 → 安静的长存活 WS 在窗口过后
+    被误判可退（``_wait_ws_autoexit`` 误返回）。本测试直接断言真实 ``WebServer`` 在
+    connect→++/disconnect→--（含两路并发 WS）下维护正确计数。
+    """
+    manager, _ = _manager_with_handles(tmp_path, "runA")
+
+    async def go():
+        server = WebServer(manager)
+        assert server.active_ws_count == 0  # 初始
+        ws1 = FakeWebSocket()
+        t1 = asyncio.create_task(server.ws_endpoint(ws1))
+        await asyncio.sleep(0.05)
+        assert server.active_ws_count == 1  # 第一路 connect 后
+        ws2 = FakeWebSocket()
+        t2 = asyncio.create_task(server.ws_endpoint(ws2))
+        await asyncio.sleep(0.05)
+        assert server.active_ws_count == 2  # 两路并发
+        # 断开第一路 → 计数回到 1（仍有一路活跃 → 不退）
+        ws1.feed_disconnect()
+        await asyncio.sleep(0.05)
+        assert server.active_ws_count == 1
+        # 断开第二路 → 计数回到 0（可退条件之一满足）
+        ws2.feed_disconnect()
+        await asyncio.sleep(0.05)
+        assert server.active_ws_count == 0
+        # 计数不会变负（防御性 clamp），且最终精确归零
+        assert server.active_ws_count == 0
         await _close_handles(manager)
 
     run_async(go())

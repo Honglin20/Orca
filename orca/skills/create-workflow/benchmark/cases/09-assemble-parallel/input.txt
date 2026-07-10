@@ -1,0 +1,1 @@
+assets/ 下有两个研究员 agent（researcher_a.md、researcher_b.md）。以 researcher_a 作为入口（它跑完后进入并行组，Orca 对已执行节点幂等跳过），让它和 researcher_b 并行调研同一个主题，完事用一个 synthesizer 合并——synthesizer 你帮我写。不要加多余的启动节点。

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -60,6 +61,19 @@ class WebServer:
         self._manager = manager
         # WS → 当前订阅。一个 WS 同时只订阅一个 run（subscribe 切换覆盖旧订阅）。
         self._subs: dict[WebSocket, _RunSubscription] = {}
+        # D4 WS 事件驱动 auto-exit：任一 WS connect/disconnect 重置计时；
+        # ``now - last_ws_activity_at > N AND run.terminal AND 无活跃 WS`` → 进程退出
+        # （``orca run`` web 默认路径用，SPEC §0 D4 / §4 step4 / §8 AC5 负向）。
+        # 初值 = 构造时刻，让无 WS 接入的窗口也计时。单调钟（不受系统时间回拨影响）。
+        self.last_ws_activity_at: float = time.monotonic()
+        # **活跃 WS 连接计数**（SPEC §8 AC5 负向「有活跃 WS 不退」）：connect++ / disconnect--。
+        # 仅当 ``active_ws_count == 0`` 时 auto-exit 计时窗口才生效——长存活 WS 不会因为
+        # 「connect 时刻已超过 N 秒」被误判为可退（修复旧版只 touch 不计数的缺陷）。
+        self.active_ws_count: int = 0
+
+    def _touch_ws_activity(self) -> None:
+        """重置 WS 活动计时（connect/disconnect 调用）。"""
+        self.last_ws_activity_at = time.monotonic()
 
     async def ws_endpoint(self, ws: WebSocket) -> None:
         """单通道 WS 端点：accept → 循环 receive → 分派 subscribe/unsubscribe/gate_response。
@@ -68,6 +82,12 @@ class WebServer:
         """
         await ws.accept()
         try:
+            # connect → 计数 +1 + 重置 auto-exit 计时（D4 / §8 AC5 负向：active WS → no exit）。
+            # increment 在 try 内：accept 成功后到此处无 await，asyncio cancel 不会插队；
+            # 但放进 try 确保「increment 与 decrement 经同一 try/finally 配对」不变量显式
+            # （任何退出路径 finally 都能见到计数并 -1，不靠 try 外的副作用）。
+            self.active_ws_count += 1
+            self._touch_ws_activity()
             while True:
                 msg = await ws.receive_json()
                 await self._dispatch(ws, msg)
@@ -77,6 +97,12 @@ class WebServer:
             logger.warning("ws_endpoint 异常，连接将清理", exc_info=True)
         finally:
             await self._cleanup(ws)
+            # disconnect → 计数 -1 + 重置 auto-exit 计时（D4）。无论是否曾经订阅都 touch——
+            # 任何 WS 来过又走都算"客户端活跃过"，给浏览器重连窗口。计数 clamp 至 0
+            # （防御性：异常路径下双 decrement 不应变负）。
+            if self.active_ws_count > 0:
+                self.active_ws_count -= 1
+            self._touch_ws_activity()
 
     async def _dispatch(self, ws: WebSocket, msg: dict) -> None:
         """分派一条客户端消息。未知 type 记 warning（fail loud），不崩连接。"""
@@ -87,8 +113,74 @@ class WebServer:
             await self._cancel_sub(ws)
         elif mtype == "gate_response":
             await self._handle_gate_response(ws, msg)
+        elif mtype == "resume":
+            # web-shell-v2 §0 D6：client 重连发 resume(run_id, since=last_seq_seen)；
+            # server 重放 seq>since 的历史事件，再 subscribe（接 live 流）。
+            await self._handle_resume(ws, msg.get("run_id"), msg.get("since"))
         else:
             logger.warning("ws 收到未知消息 type=%s（忽略）", mtype)
+
+    async def _handle_resume(
+        self, ws: WebSocket, run_id: object | None, since: object | None
+    ) -> None:
+        """D6 resume：重放 run 的 tape 中 seq > since 的事件，然后 subscribe 接 live 流。
+
+        - run_id 未知 / since 非数字 → 记 warning + 不崩，回退到 subscribe（live 流接上）。
+        - 否则：把 tape 中 seq>since 的事件按 seq 升序发给 WS（带 run_id 标签），再 subscribe。
+        - resume 失败（tape 读异常等）→ 记 warning，回退 subscribe（live 流不丢）。
+        - **resume_ok ack**（D4 watchdog 配套）：重放完毕后发 ``{type:"resume_ok", run_id,
+          last_seq}`` 帧，client 据此清 resume-fallback watchdog（避免 idle 场景误触发
+          全量重拉——SPEC §0 D6 真义是「resume 失败」非「无事件」）。
+        """
+        if not isinstance(run_id, str):
+            logger.warning("ws resume 缺 run_id（回退 subscribe）")
+            return
+        since_seq: int | None
+        if isinstance(since, (int, float)) and not isinstance(since, bool):
+            since_seq = int(since)
+        else:
+            since_seq = None
+            logger.warning("ws resume since 非数字 run_id=%s（回退 subscribe）", run_id)
+        handle = self._manager.get_handle(run_id)
+        if handle is None:
+            logger.warning("ws resume 未知 run_id=%s（回退 subscribe）", run_id)
+            return
+        last_seq = 0
+        replayed_ok = False
+        try:
+            if since_seq is not None:
+                # 按 seq 升序重放历史（Tape.replay(since_seq) 已保证 seq>since 升序）。
+                for event in handle.tape.replay(since_seq=since_seq):
+                    payload = event.model_dump()
+                    payload["run_id"] = run_id
+                    await ws.send_json(payload)
+                    if event.seq > last_seq:
+                        last_seq = event.seq
+                replayed_ok = True
+        except Exception:  # noqa: BLE001 — resume 失败 fail loud，不阻断后续 subscribe
+            logger.warning(
+                "ws resume 重放失败 run_id=%s since=%s（回退 subscribe）",
+                run_id,
+                since_seq,
+                exc_info=True,
+            )
+        # 重放完毕（或失败）→ subscribe 接 live 流（与初始 subscribe 共用路径）
+        await self._handle_subscribe(ws, run_id)
+        # D4 watchdog ack：**仅当 resume 协议真正执行**（since_seq 合法 + 重放无异常）才发
+        # resume_ok。invalid since / unknown run 等回退 subscribe 路径不发——避免误升级 client
+        # 状态。type 故意不进 EventType（控制平面帧，不进 tape）；前端 onmessage 见
+        # type="resume_ok" 即清 watchdog（不 processEvent）。
+        if replayed_ok:
+            try:
+                await ws.send_json(
+                    {"type": "resume_ok", "run_id": run_id, "last_seq": last_seq}
+                )
+            except Exception:  # noqa: BLE001 — WS 已断 / send 失败 → 不阻塞 dispatch
+                logger.warning(
+                    "ws resume_ok send 失败 run_id=%s（client 会经 onclose 重连）",
+                    run_id,
+                    exc_info=True,
+                )
 
     async def _handle_subscribe(self, ws: WebSocket, run_id: object | None) -> None:
         """订阅某 run：cancel 旧订阅 → 订阅 handle.bus → 起 pump task。
@@ -116,6 +208,9 @@ class WebServer:
 
         ``resolve`` 同步返回是否赢家（False = 晚到，fail loud 已在 handler 内记 warning）。
         未订阅 run 时无 gate_handler 可 resolve → 记 warning。
+
+        **attached run 无 gate_handler**（read-only，SPEC §8 AC11）：前端 ``writable=false``
+        时 gate 模态禁提交，正常不会发 gate_response；防御性记 warning（不崩）。
         """
         run_sub = self._subs.get(ws)
         if run_sub is None:
@@ -126,7 +221,14 @@ class WebServer:
         if not gate_id or answer is None:
             logger.warning("ws gate_response 缺 gate_id/answer（忽略）")
             return
-        run_sub.handle.gate_handler.resolve(str(gate_id), str(answer), "web")
+        # attached run read-only（无 gate_handler）；前端按理不会发，防御性记 warning。
+        gate_handler = getattr(run_sub.handle, "gate_handler", None)
+        if gate_handler is None:
+            logger.warning(
+                "ws gate_response 但当前订阅 run 无 gate_handler（attached run read-only）"
+            )
+            return
+        gate_handler.resolve(str(gate_id), str(answer), "web")
 
     async def _pump(self, ws: WebSocket, sub: Subscription, run_id: str) -> None:
         """把某 run 的 bus 事件推给 WS（带 run_id 标签）。

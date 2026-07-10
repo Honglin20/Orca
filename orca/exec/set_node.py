@@ -61,6 +61,11 @@ class SetExecutor(Executor):
 
         except ExecError as e:
             elapsed = time.monotonic() - start
-            err_data = {"error_type": e.error_type, "message": e.message, "phase": e.phase}
+            err_data = {
+                "kind": e.kind.value,
+                "error_type": e.error_type,  # 读兼容期（写只 kind 为权威）
+                "message": e.message,
+                "phase": e.phase,
+            }
             yield _ev("node_failed", err_data)
             yield _ev("error", err_data)

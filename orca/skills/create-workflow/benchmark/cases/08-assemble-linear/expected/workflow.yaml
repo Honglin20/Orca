@@ -1,0 +1,27 @@
+name: assembled_linear
+description: "由散 agent md 组装：a→b→c 线性"
+entry: a
+nodes:
+  - name: a
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: a
+    routes:
+      - to: b
+  - name: b
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: b
+    routes:
+      - to: c
+  - name: c
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: c
+    routes:
+      - to: $end
+outputs:
+  result: "{{ c.output }}"

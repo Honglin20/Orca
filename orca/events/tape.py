@@ -145,6 +145,78 @@ class Tape:
             self._fh.flush()
             return seq
 
+    async def append_batch(self, items: list[dict]) -> list[int]:
+        """**单次 write+flush 原子落盘整批事件**（SPEC §6 / ADR v3 I2，B1 闭环）。
+
+        与 ``append`` 共用同一把 ``_lock`` + Event 校验 + seq 分配，差异仅「一次
+        ``write("\n".join(lines)+"\n")`` + 单次 ``flush`` 落多行」。任一事件非法 → 抛
+        ValidationError，此时**不分配任何 seq、不落任何字节**（坏事件不留 seq 间隙）。
+
+        用途：in-session 跨进程写者（CLI ``next``）拿到 ``advance_step`` 的 emits 后
+        一次原子落盘 ``[node_completed, route_taken, node_started]``，消除「逐条 emit
+        中途 SIGKILL 产 nc 落 rt 没落」悬空窗口（反例 B，spec-review r2 B1）。drive_loop
+        继续用单条 ``append``（不增量改稳定路径，ADR 方案 E）。
+
+        入参：list of **不含 seq 的 event 字段 dict**（同 ``append`` 的 event_data 形态）。
+        返回：分配的 seq 列表（与 items 等长、单调递增）。
+        """
+        if self._closed:
+            raise RuntimeError("Tape 已 close，不能再 append")
+
+        if not items:
+            return []
+
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+
+        # 预处理：_json_safe + Event 校验（在锁内、分配 seq 之前完成；坏事件 fail loud）。
+        async with self._lock:
+            if self._fh is None:
+                self._fh = open(self.path, "a", encoding="utf-8")
+
+            safe_items: list[tuple[dict, dict]] = []
+            for event_data in items:
+                safe_data = _json_safe(event_data.get("data", {}))
+                # 占位 seq=0 仅做字段校验（type/timestamp/node/session_id/data），
+                # 真实 seq 校验通过后再分配（seq 序 == 文件行序 不变量）。
+                Event(
+                    seq=0,
+                    type=event_data["type"],
+                    timestamp=event_data.get("timestamp", 0.0),
+                    node=event_data.get("node"),
+                    session_id=event_data.get("session_id"),
+                    data=safe_data,
+                )
+                safe_items.append((event_data, safe_data))
+
+            # 全部校验通过 → 连续分配 seq + 拼行（单次 write 原子化）。
+            pre_batch_seq = self._last_seq
+            lines: list[str] = []
+            seqs: list[int] = []
+            for event_data, safe_data in safe_items:
+                self._last_seq += 1
+                seq = self._last_seq
+                payload = {
+                    "seq": seq,
+                    "type": event_data["type"],
+                    "timestamp": event_data.get("timestamp", 0.0),
+                    "node": event_data.get("node"),
+                    "session_id": event_data.get("session_id"),
+                    "data": safe_data,
+                }
+                lines.append(json.dumps(payload, ensure_ascii=False))
+                seqs.append(seq)
+            # 单次 write + 单次 flush（POSIX 本地 FS 小 write 实践上原子，B1）。
+            # write/flush 失败（SIGKILL/IO 错误等价）→ rollback _last_seq 到 batch 前，
+            # 保证内存索引与文件状态一致（fail loud 不留悬空态，spec-review r2 B1）。
+            try:
+                self._fh.write("\n".join(lines) + "\n")
+                self._fh.flush()
+            except Exception:
+                self._last_seq = pre_batch_seq
+                raise
+            return seqs
+
     def replay(self, since_seq: int = 0) -> Iterator[Event]:
         """从 since_seq 读到底（不含 since_seq 本身）。一行一事件，容忍末尾残行。
 

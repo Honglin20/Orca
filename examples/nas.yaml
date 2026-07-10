@@ -13,6 +13,8 @@ nodes:
   # ── agent：长 prompt 从约定文件 agents/optimizer.md 加载，结构化输出 ──
   - name: optimizer
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
     output_schema:
       type: object
       properties:
@@ -27,6 +29,8 @@ nodes:
   # ── agent：训练，短 prompt 内联，白名单工具 ──
   - name: trainer
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
     prompt: |
       训练结构 {{ optimizer.output.structure }}，
       用 Bash 跑 train.py，读 metrics.json。
@@ -46,6 +50,8 @@ nodes:
   # ── agent：评判，多路路由 ──
   - name: reviewer
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
     prompt: "准确率 {{ evaluator.output.stdout }}，继续优化还是完成？"
     output_schema:
       type: object

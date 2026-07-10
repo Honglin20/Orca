@@ -201,7 +201,7 @@ def test_e2e_abort_emits_workflow_failed_with_abort_reason(tmp_path):
     types = [e.type for e in tape.replay()]
     assert "workflow_failed" in types, f"ABORT 应 emit workflow_failed, got {types}"
     failed = next(e for e in tape.replay() if e.type == "workflow_failed")
-    assert failed.data["error_type"] == "WorkflowAborted"
+    assert failed.data["kind"] == "business_gate"
     # node 在 data["node"]（make_workflow_failed 把 node 放 payload，非 event 顶层）。
     assert failed.data["node"] == "a"  # abort 时的 current node
     assert "workflow_completed" not in types  # 中止不完成

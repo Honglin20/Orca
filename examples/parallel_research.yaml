@@ -3,17 +3,26 @@
 # 组 branches=[researcher_a, researcher_b] 并行执行（a 已作为 entry 执行过则幂等跳过），
 # 组全部完成后按组 routes 推进到 synthesizer 汇聚，再 $end。
 name: parallel_research
+description: "DAG 分叉+合并（diamond）并行范式（entry→parallel 组 branches 并行→汇聚 synthesizer→$end）；agent 引用 agents/<name>.md 池（phase-14 显式 agent: 引用）"
 entry: researcher_a
 
 nodes:
   - name: researcher_a                 # 入口；完成后路由到 parallel 组
-    kind: agent                        # prompt 省略 → 从 agents/researcher_a.md 加载
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: researcher_a                # phase-14 显式引用 agents/researcher_a.md
     routes:
       - to: researchers_merge
-  - name: researcher_b                 # 由 parallel 组驱动执行（不再是隐式入口）
-    kind: agent                        # prompt 省略 → 从 agents/researcher_b.md 加载
+  - name: researcher_b                 # 由 parallel 组驱动执行
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: researcher_b                # phase-14 显式引用 agents/researcher_b.md
   - name: synthesizer
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
     prompt: |
       综合：{{ researcher_a.output }} / {{ researcher_b.output }}
     routes:

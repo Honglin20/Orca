@@ -1,0 +1,4 @@
+# e2e_mxint 生成产物（每次跑 workflow 都重生，不入版本控制）
+output/
+target_project/_adapter.py
+target_project/_*.py

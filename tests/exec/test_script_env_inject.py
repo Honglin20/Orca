@@ -21,6 +21,7 @@ from unittest.mock import patch
 import pytest
 
 from orca.chart._limits import SOCK_PATH_MAX
+from orca.chart._paths import chart_sock_path
 from orca.exec.context import RunContext
 from orca.exec.script import (
     ScriptExecutor,
@@ -49,10 +50,15 @@ def _short_dir(tmp_path: Path) -> Path:
 
 
 def test_resolve_chart_sock_path_returns_resolved(tmp_path):
+    """runs_dir 给定 → 返回 ``chart_sock_path(run_id)`` 短路径（与 runs_dir 无关）。
+
+    2026-07-08 短路径化：socket 走 ``<tmp>/orca-<hash>.sock``，不再 ``runs_dir/<run_id>.sock``。
+    """
     short = _short_dir(tmp_path)
     try:
         out = _resolve_chart_sock_path(short, "demo-1")
-        assert out == str((short / "demo-1.sock").resolve())
+        assert out == str(chart_sock_path("demo-1").resolve())
+        assert len(out) < SOCK_PATH_MAX
     finally:
         shutil.rmtree(short, ignore_errors=True)
 
@@ -62,17 +68,17 @@ def test_resolve_chart_sock_path_none_returns_empty():
     assert _resolve_chart_sock_path(None, "demo-1") == ""
 
 
-def test_resolve_chart_sock_path_too_long_logs_warning_returns_empty(tmp_path, caplog):
-    """resolved path > SOCK_PATH_MAX → log warning + 返回空串（不 raise，避免阻塞 run）。"""
+def test_resolve_chart_sock_path_deep_runs_dir_returns_short_path(tmp_path):
+    """深 runs_dir → 仍返回短 ``<tmp>/orca-<hash>.sock``（不再因路径过长退化空串）。
+
+    2026-07-08 短路径化回归：曾经"深 runs 目录 → sun_path 超限 → 返回空"的退化已消除，
+    socket 与 runs 目录解耦。这是用户报的 NGA 98 字节痛点的根治。
+    """
     deep = tmp_path / ("a" * 100)
     deep.mkdir(parents=True, exist_ok=True)
-    with caplog.at_level("WARNING", logger="orca.exec.script"):
-        out = _resolve_chart_sock_path(deep, "demo-1")
-    assert out == ""
-    assert any(
-        "chart sock path 过长" in r.message or "ORCA_RUNS_DIR" in r.message
-        for r in caplog.records
-    )
+    out = _resolve_chart_sock_path(deep, "demo-1")
+    assert out == str(chart_sock_path("demo-1").resolve())
+    assert len(out) < SOCK_PATH_MAX, "深 runs_dir 不应影响 socket 路径长度"
 
 
 # ── _build_spawn_env（单测 overlay 构造）────────────────────────────────────
@@ -124,7 +130,7 @@ def test_script_executor_passes_chart_env_to_subprocess_shell(tmp_path):
 
         completed = [e for e in events if e.type == "node_completed"][0]
         stdout = completed.data["output"]["stdout"]
-        expected_sock = str((short / "demo-xyz.sock").resolve())
+        expected_sock = str(chart_sock_path("demo-xyz").resolve())
 
         # 4 个 ORCA_* 都在子进程 env 里
         assert f"ORCA_RUN_ID=demo-xyz" in stdout
@@ -157,7 +163,7 @@ def test_script_executor_passes_chart_env_to_python_subprocess(tmp_path):
 
         completed = [e for e in events if e.type == "node_completed"][0]
         stdout = completed.data["output"]["stdout"]
-        expected_sock = str((short / "py-run-1.sock").resolve())
+        expected_sock = str(chart_sock_path("py-run-1").resolve())
 
         assert "RUN_ID=py-run-1" in stdout
         assert "NODE=pyworker" in stdout
@@ -187,29 +193,25 @@ def test_script_executor_no_runs_dir_skips_chart_sock():
     assert "ORCA_CHART_SOCK=" not in stdout
 
 
-def test_script_executor_long_sock_path_logs_warning_and_skips(tmp_path, caplog):
-    """runs_dir 深 → resolved path 过长 → log warning + 不注 chart_sock，run 仍成功（不阻塞）。
+def test_script_executor_deep_runs_dir_still_injects_chart_sock(tmp_path):
+    """runs_dir 深 → chart_sock 仍注入（短 ``<tmp>/orca-<hash>.sock``，不再退化跳过）。
 
-    意图：与 ClaudeExecutor 同语义（SPEC §7.7），executor 路径不 raise。
+    2026-07-08 短路径化回归：socket 与 runs 目录解耦，深服务器路径不再导致 chart sock 缺失。
+    与 ClaudeExecutor 同语义（SPEC §11 #9 两 executor 对称）。
     """
     deep = tmp_path / ("a" * 100)
     deep.mkdir(parents=True, exist_ok=True)
-    # 用 env 命令验证 ORCA_CHART_SOCK 不在子进程 env 里
     node = ScriptNode(name="s", command="env")
     ctx = _ctx(run_id="deep-run")
-    with caplog.at_level("WARNING", logger="orca.exec.script"):
-        events = _run(_collect(node, ctx, runs_dir=deep))
+    events = _run(_collect(node, ctx, runs_dir=deep))
 
     completed = [e for e in events if e.type == "node_completed"][0]
     stdout = completed.data["output"]["stdout"]
-    # run_id / node 仍注；chart_sock 不注（路径过长退化）
+    expected_sock = str(chart_sock_path("deep-run").resolve())
+    # run_id / node 仍注；chart_sock 也注（短路径，不再因深 runs_dir 跳过）
     assert "ORCA_RUN_ID=deep-run" in stdout
     assert "ORCA_NODE=s" in stdout
-    assert "ORCA_CHART_SOCK=" not in stdout
-    assert any(
-        "chart sock path 过长" in r.message or "ORCA_RUNS_DIR" in r.message
-        for r in caplog.records
-    )
+    assert f"ORCA_CHART_SOCK={expected_sock}" in stdout
 
 
 # ── 既有 ScriptExecutor 行为零回归（构造方式 backward compat）────────────────

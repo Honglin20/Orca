@@ -1,0 +1,1 @@
+我要一个 workflow：classifier 判断输入类别；类别是 A 走 handler 处理后正常结束；不是 A 就直接判失败终止。生成一个 Orca workflow。

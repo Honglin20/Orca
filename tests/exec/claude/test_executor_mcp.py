@@ -358,3 +358,79 @@ def test_build_spawn_config_does_not_duplicate_ask_user_if_already_in_tools(tmp_
             await server.stop()
 
     run_async(scenario())
+
+
+# ── web-shell-v2 §11 step1 B2：reasoning_args 注入 ─────────────────────────
+
+
+def test_build_spawn_config_appends_reasoning_args_when_env_set(tmp_path, monkeypatch):
+    """``ORCA_OPENCODE_REASONING_FLAGS=--thinking`` → extra_args 末尾追加 ``--thinking``。
+
+    INTENT（web-v2 §11 step1 B2）：opencode ``--thinking`` / ``--variant`` 经
+    ``profile.resolve_reasoning_args()`` 注入 ``SpawnConfig.extra_args``（与 ``--model`` 同路径）。
+    默认 off（env 未设 → []，spawn argv 不变）；env 设 → 追加。回归保护：reasoning_args
+    必须出现在 extra_args 末尾（在 model / allowed-tools 之后，便于人眼区分基础 flags 与
+    reasoning 增强）。
+    """
+    from orca.exec.claude.executor import _build_spawn_config
+
+    profile = get_profile("opencode")
+    node = AgentNode(name="reasoning_node", prompt="x", model="deepseek-v4-flash")
+    monkeypatch.setenv("ORCA_OPENCODE_REASONING_FLAGS", "--thinking")
+
+    cfg = _build_spawn_config(node, profile, "prompt", agent_tools_server=None,
+                              run_id="r-rsn", session_id="s-rsn")
+    # 锁死顺序契约：--model 在前，--thinking 在末尾
+    assert "--model" in cfg.extra_args
+    assert cfg.extra_args.index("--model") < cfg.extra_args.index("--thinking")
+    assert cfg.extra_args[-1] == "--thinking"
+
+
+def test_build_spawn_config_reasoning_after_model_with_multi_token_variant(tmp_path, monkeypatch):
+    """多 token reasoning flag（``--variant foo``）：整体追加在 --model 之后。"""
+    from orca.exec.claude.executor import _build_spawn_config
+
+    profile = get_profile("opencode")
+    node = AgentNode(name="multi_reasoning", prompt="x", model="deepseek-v4-flash")
+    monkeypatch.setenv("ORCA_OPENCODE_REASONING_FLAGS", "--thinking --variant deepseek-reasoner")
+
+    cfg = _build_spawn_config(node, profile, "prompt", agent_tools_server=None,
+                              run_id="r-mr", session_id="s-mr")
+    args = cfg.extra_args
+    # --model ... --thinking --variant deepseek-reasoner（顺序锁）
+    assert args.index("--model") < args.index("--thinking")
+    assert args.index("--thinking") < args.index("--variant")
+    assert args[-1] == "deepseek-reasoner"
+
+
+def test_build_spawn_config_no_reasoning_args_by_default(tmp_path, monkeypatch):
+    """默认 off：env 未设 → extra_args 不含 reasoning flag（保既有 spawn argv）。"""
+    from orca.exec.claude.executor import _build_spawn_config
+
+    profile = get_profile("opencode")
+    node = AgentNode(name="plain_node", prompt="x")
+    monkeypatch.delenv("ORCA_OPENCODE_REASONING_FLAGS", raising=False)
+
+    cfg = _build_spawn_config(node, profile, "prompt", agent_tools_server=None,
+                              run_id="r-plain", session_id="s-plain")
+    assert "--thinking" not in cfg.extra_args
+    assert "--variant" not in cfg.extra_args
+
+
+def test_build_spawn_config_claude_unaffected_by_reasoning_env(tmp_path, monkeypatch):
+    """claude profile reasoning_flags_env="" → 即使 env 有同名变量也不影响（无通道）。
+
+    INTENT：reasoning 是 opencode 专有；claude/ccr 不开此通道（profile.reasoning_flags_env
+    为空串），resolve_reasoning_args 直接返 []，与 env 是否被设无关。回归保护：防止
+    用户误设 ``ORCA_CLAUDE_REASONING_FLAGS`` 等无效 env 影响非 reasoning backend。
+    """
+    from orca.exec.claude.executor import _build_spawn_config
+
+    profile = get_profile("claude")
+    node = AgentNode(name="claude_node", prompt="x")
+    # 即使设了 opencode 的 env，claude profile 不读它
+    monkeypatch.setenv("ORCA_OPENCODE_REASONING_FLAGS", "--thinking")
+
+    cfg = _build_spawn_config(node, profile, "prompt", agent_tools_server=None,
+                              run_id="r-claude", session_id="s-claude")
+    assert "--thinking" not in cfg.extra_args

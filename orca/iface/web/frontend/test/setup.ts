@@ -30,3 +30,33 @@ Element.prototype.getBoundingClientRect = function () {
     toJSON: () => ({}),
   } as DOMRect;
 };
+
+// ── IntersectionObserver stub（happy-dom 提供 IO 构造器但不触发 callback）
+// LazyChartWidget 用 IO 做懒挂；测试环境下让所有元素立即「intersecting」→ 同步可见。
+class IOStub {
+  callback: (entries: { isIntersecting: boolean; target: Element }[]) => void;
+  elements: Set<Element> = new Set();
+  constructor(cb: (entries: { isIntersecting: boolean; target: Element }[]) => void) {
+    this.callback = cb;
+  }
+  observe(target: Element) {
+    this.elements.add(target);
+    // 立即触发 intersecting=true（测试环境：所有 chart 默认可见）
+    this.callback([{ isIntersecting: true, target }]);
+  }
+  unobserve(target: Element) {
+    this.elements.delete(target);
+  }
+  disconnect() {
+    this.elements.clear();
+  }
+  takeRecords() {
+    return [];
+  }
+}
+Object.defineProperty(globalThis, "IntersectionObserver", {
+  configurable: true,
+  writable: true,
+  value: IOStub,
+});
+

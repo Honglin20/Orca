@@ -1,0 +1,1 @@
+我要一个 workflow：generator 产出一个 JSON {model_class, weights_path}。两层保障：(1) 语义校验——model_class 必须是合法 Python 标识符、weights_path 必须是绝对路径，不合规就重跑 generator，最多重跑 1 次（validator.max_retries=1）；(2) 瞬时失败重试——generator 调用若 transport/瞬时失败，自动重试，retry.max_attempts=2。outputs 取 generator 的整段输出。生成一个 Orca workflow。

@@ -121,13 +121,17 @@ def make_workflow_failed(
     *,
     node: str | None = None,
 ) -> tuple[str, dict]:
-    """构造 ``workflow_failed`` 的 (type, data)（SPEC §3.4）。
+    """构造 ``workflow_failed`` 的 (type, data)（SPEC §3.4 / phase-11 §4.1.2）。
 
-    data: ``{error_type, message, node}``。``node`` = 导致失败的 node（payload）；
+    phase-11 v2.1：``error_type`` 参数名保留（调用方迁移期 familiar），写入 data 时同时
+    写 ``kind``（权威）+ ``error_type``（读兼容期，旧 tape 重放识别）。
+
+    data: ``{kind, error_type, message, node}``。``node`` = 导致失败的 node（payload）；
     workflow 级失败（如 MaxIterations 在路由前）可 None。
     """
     return "workflow_failed", {
-        "error_type": error_type,
+        "kind": error_type,           # 唯一分类权威（ADR §4.1.2）
+        "error_type": error_type,     # 读兼容期：旧 reducer / 旧 widget 读此字段
         "message": message,
         "node": node,
     }

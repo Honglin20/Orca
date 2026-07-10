@@ -314,6 +314,7 @@ def _translate_system(obj: dict, session_id: str) -> list[Event]:
                 "error",
                 session_id,
                 {
+                    "kind": "business_rate_limit",
                     "error_type": "ApiRetry",
                     "phase": "api_retry",
                     "message": message,

@@ -35,11 +35,16 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from orca.chart._limits import SOCK_PATH_MAX
+from orca.chart._paths import chart_sock_path
 from orca.exec.context import RunContext
 from orca.exec.env import build_env_overlay
 from orca.exec.error import ExecError
 from orca.exec.interface import Executor
+from orca.exec.registry import (
+    ProcessRegistry,
+    get_default_registry,
+    spawn_kwargs_for_process_group,
+)
 from orca.exec.render import render_command
 from orca.schema import Event, ScriptNode
 
@@ -56,10 +61,18 @@ class ScriptExecutor(Executor):
     或 resolved sock path 过长 → 退化为不注 chart env（向后兼容；script 端 §7.1 fail loud）。
     """
 
-    def __init__(self, *, runs_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        runs_dir: Path | None = None,
+        registry: ProcessRegistry | None = None,
+    ) -> None:
         # phase-13 §2：chart ingestor sock 父目录（``runs/<run_id>.sock`` 寻址用）。
         # None == 不注 ``ORCA_CHART_SOCK`` env（向后兼容，script 端 render_chart fail loud）。
         self._runs_dir = runs_dir
+        # phase-11-process §1.2（ADR §4.7）：DI 注入 ProcessRegistry。
+        # production 用 ``get_default_registry()``；测试可注入独立实例。
+        self._registry: ProcessRegistry = registry or get_default_registry()
 
     async def exec(self, node: ScriptNode, ctx: RunContext) -> AsyncIterator[Event]:
         session_id = uuid.uuid4().hex
@@ -82,14 +95,20 @@ class ScriptExecutor(Executor):
             cmd = render_command(node.command, ctx)
 
             # 4-5. subprocess + timeout（phase-13 §2：spawn 时注入 chart env overlay）
+            # phase-11-process §1（铁律 1）+ §2.1（铁律 2）：spawn 必须经 registry.acquire
+            # 登记 + 进程组隔离（start_new_session=True），cancel 时整组杀防孤儿。
             chart_sock = _resolve_chart_sock_path(self._runs_dir, ctx.run_id)
             spawn_env = _build_spawn_env(node.name, ctx.run_id, session_id, chart_sock)
+            registry = self._registry
             try:
                 proc = await asyncio.create_subprocess_shell(
                     cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     env=spawn_env,
+                    # phase-11-process §2.1：进程组隔离（POSIX start_new_session /
+                    # Windows CREATE_NEW_PROCESS_GROUP），cancel 时 killpg 整组杀。
+                    **spawn_kwargs_for_process_group(),
                 )
             except OSError as e:
                 # shell 本身 spawn 失败（极少见，如系统资源耗尽）→ fail loud（spawn phase）
@@ -98,13 +117,27 @@ class ScriptExecutor(Executor):
                     message=f"无法 spawn shell 执行 command {cmd!r}：{e}",
                 ) from e
 
+            # phase-11-process §1：spawn 后立刻登记（铁律 1）。
+            registry.acquire(
+                proc, backend="script", run_id=ctx.run_id, node_id=node.name,
+            )
+
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(
                     proc.communicate(), timeout=node.timeout
                 )
             except asyncio.TimeoutError:
-                # 超时：kill 子进程（SIGKILL 兜底，shell 命令不指望 grace）
-                _kill_proc(proc)
+                # 超时：委托 registry.kill_one 三段式进程组 cancel（防 shell spawn 的
+                # 孙子进程变孤儿）。grace_seconds=1.0（shell 命令通常无需长 grace）。
+                try:
+                    await asyncio.to_thread(
+                        registry.kill_one, proc.pid, grace_seconds=1.0,
+                    )
+                except Exception:
+                    logger.warning(
+                        "registry.kill_one 异常（script 超时兜底吞，pid=%d）",
+                        proc.pid, exc_info=True,
+                    )
                 raise ExecError(
                     phase="timeout",
                     message=(
@@ -112,6 +145,11 @@ class ScriptExecutor(Executor):
                         f"command={cmd!r}）"
                     ),
                 )
+            finally:
+                # phase-11-process §1：幂等 release，覆盖 normal / timeout / CancelledError
+                # 三路径。kill_one 内部已 release 时此处为 no-op；CancelledError 路径
+                # 若不 release，entry 会泄漏到 atexit 才清（不致命但不洁）。
+                registry.release(proc.pid)
 
             # 6. output 组装（非零退出码不 fail loud，SPEC §4.6）
             output: dict[str, Any] = {
@@ -128,17 +166,14 @@ class ScriptExecutor(Executor):
 
         except ExecError as e:
             elapsed = time.monotonic() - start
-            err_data = {"error_type": e.error_type, "message": e.message, "phase": e.phase}
+            err_data = {
+                "kind": e.kind.value,
+                "error_type": e.error_type,
+                "message": e.message,
+                "phase": e.phase,
+            }
             yield _ev("node_failed", err_data)
             yield _ev("error", err_data)
-
-
-def _kill_proc(proc: asyncio.subprocess.Process) -> None:
-    """超时后 kill 子进程（SIGKILL 兜底；shell 命令通常无需 grace）。"""
-    try:
-        proc.kill()
-    except ProcessLookupError:
-        pass  # 已退出
 
 
 def _try_parse_json(text: str) -> Any:
@@ -163,29 +198,22 @@ def _try_parse_json(text: str) -> Any:
 
 
 def _resolve_chart_sock_path(runs_dir: Path | None, run_id: str) -> str:
-    """phase-13 §2 / §7.7：算 ``runs/<run_id>.sock`` 绝对路径，过长则 log warning + 返回空。
+    """phase-13 §2 / §7.7（2026-07-08 短路径化）：算 chart ingestor socket 绝对路径。
 
     与 ``orca.exec.claude.executor._resolve_chart_sock_path`` 逐字同语义（DRY：两处共实现
     会绕开 executor-agnostic 契约，SPEC §11 #9 要求两 executor 对称；保持函数级对称）。
 
+    socket 走 ``<tmp>/orca-<sha1(run_id)[:10]>.sock``（``orca.chart._paths.chart_sock_path``），
+    与 runs 目录解耦——规避深服务器路径致 ``sun_path`` 超限。两端（RunManager bind + 此处
+    env 注入）同源，run_id 派生确定性短路径。
+
     - ``runs_dir is None`` → 返回空串（不注 ``ORCA_CHART_SOCK`` env，向后兼容；
       script 端 render_chart 会 fail loud 提示）。
-    - resolved path > ``SOCK_PATH_MAX``（90 字节）→ log warning 并返回空串。**不 raise**
-      （executor 路径只生成路径，ingestor 启动时 RunManager 已先做过 fail loud check）。
+    - 路径恒短（temp 目录 + 10 hex），不再有"过长退化"分支。
     """
     if runs_dir is None:
         return ""
-    sock_path = (runs_dir / f"{run_id}.sock").resolve()
-    resolved = str(sock_path)
-    if len(resolved) > SOCK_PATH_MAX:
-        logger.warning(
-            "phase-13: chart sock path 过长（%d > %d 字节）：%r；"
-            "退化为不注 ORCA_CHART_SOCK env（script 端 render_chart 会 fail loud）。"
-            "建议改 ORCA_RUNS_DIR 到短路径（如 /tmp/orca-runs/）。",
-            len(resolved), SOCK_PATH_MAX, resolved,
-        )
-        return ""
-    return resolved
+    return str(chart_sock_path(run_id).resolve())
 
 
 def _build_spawn_env(

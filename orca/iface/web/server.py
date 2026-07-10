@@ -27,6 +27,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from orca.iface.web.routes import (
+    build_attach_router,
     build_gate_router,
     build_run_router,
     build_runs_router,
@@ -64,10 +65,11 @@ def create_app(manager: RunManager) -> FastAPI:
     app = FastAPI(title="orca-web", lifespan=lifespan)
     app.state.manager = manager
 
-    # 懒加载 REST + gate（多 run 分发）。
+    # 懒加载 REST + gate（多 run 分发）+ attach（X — read-only tail-follow）+ health。
     app.include_router(build_runs_router(manager))
     app.include_router(build_run_router(manager))
     app.include_router(build_gate_router(manager))
+    app.include_router(build_attach_router(manager))
 
     # WS 单通道（按需订阅）。
     web_server = WebServer(manager)

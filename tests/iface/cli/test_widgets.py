@@ -1,8 +1,9 @@
 """test_widgets.py —— TUI widget 渲染逻辑单测（phase-12 SPEC §6.2 §6.4 §6.6）。
 
 用 Textual ``run_test()`` pilot（headless，CI 友好）。覆盖：
-  - DagGraph（替换 DagTree）：5 状态图标 + parallel 组进度 + 幂等
-  - LogStream ``format_event`` 格式（HH:MM:SS [session] <desc>）
+  - AgentsList / AgentHistory：v2 三块布局 widget（Step 2/3 填充；Step 1a 仅占位 import）
+  - LogStream ``format_event`` v2 单测在 ``tests/iface/cli/test_log_stream.py``
+    （spec §2.4 Conductor Log View 风格 + EVENT_LEVEL 表派生）
   - Header stats 渲染（done/total/awaiting）
   - ChartPanel：同 label+title 幂等替换 / label 分组 / all_charts / 确定性 fold
   - ChartCanvas：7 chart_type 分派 / braille / 降级 / fail loud
@@ -13,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import sys
-import time
 
 import pytest
 from textual.app import App, ComposeResult
@@ -21,16 +21,17 @@ from textual.containers import Vertical
 
 from orca.iface.cli.widgets import (
     NODE_STATUS_ICONS,
+    AgentsList,
+    AgentHistory,
     ChartCanvas,
     ChartPanel,
-    DagGraph,
     Header,
-    LogStream,
     NodeDetail,
 )
 from orca.iface.cli.widgets.chart_panel import WORKFLOW_BUCKET
 from orca.iface.cli.widgets.header import HeaderStats
-from orca.iface.cli.widgets.log_stream import format_event
+# 注：LogStream ``format_event`` v2 单测拆到 ``tests/iface/cli/test_log_stream.py``
+# （spec §2.4 Conductor Log View 风格 + EVENT_LEVEL 表派生；spec v2 §4.2 改造点）。
 
 
 # ── pilot 跑 widget 的 helper app（共享）────────────────────────────────────
@@ -71,11 +72,12 @@ def _flatten_strips(strips) -> str:
 
 
 class TestNodeStatusIcons:
-    """SPEC §4.1：5 种状态图标 ✓✽⏸!○。常量锁定防 drift。"""
+    """SPEC §4.1 + ADR §8.1：6 种状态图标（全覆盖 canonical Status Literal）。常量锁定防 drift。"""
 
-    def test_five_icons_defined(self):
+    def test_six_icons_defined(self):
+        # ADR §8.1 守门：icon 表 key 必须与 Status Literal 完全一致。
         assert set(NODE_STATUS_ICONS.keys()) == {
-            "pending", "running", "done", "failed", "blocked",
+            "pending", "running", "done", "failed", "skipped", "blocked",
         }
 
     def test_icon_values_locked(self):
@@ -85,308 +87,838 @@ class TestNodeStatusIcons:
         assert NODE_STATUS_ICONS["blocked"] == "⏸"
         assert NODE_STATUS_ICONS["failed"] == "!"
         assert NODE_STATUS_ICONS["pending"] == "○"
+        # skipped（ADR §8.1 全覆盖要求，icon 表不漏 key）
+        assert NODE_STATUS_ICONS["skipped"] == "⊘"
 
 
-# ── DagGraph 状态图标 + parallel 组（phase-12 SPEC §4.1 §6.2，替换 DagTree 测试）
+# ── v2 AgentsList（spec §2.2 完整实现，Step 2 填充）────────────────────────────
 
 
-class TestDagGraph:
-    """DagGraph：5 状态图标映射 + parallel 组进度 + 幂等。"""
+class TestAgentsList:
+    """v2 AgentsList widget 单元测试（spec §2.2 + §5.1）。
 
-    def test_build_from_nodes_all_pending(self):
-        graph = DagGraph()
+    INTENT（CLAUDE.md 铁律 9）：测试不是「widget update 不崩」，而是
+    「用户能看到 agent 列表 + 状态 + 切换」——断言渲染内容含拓扑序、状态 icon、
+    选中标记、错误摘要；断言 j/k 切换会通知 app（驱动 AgentHistory 重渲）。
+    """
 
-        async def scenario():
-            async with _Harness([graph]).run_test() as pilot:
-                graph.build_from_workflow(["a", "b", "c"])
-                await pilot.pause()
-                assert graph.status_of_node("a") == "pending"
-        run_async(scenario())
+    def test_build_renders_topo_order(self):
+        """build() 后渲染顺序与输入一致（用户看 agent 列表按拓扑序排列）。"""
+        lst = AgentsList()
+        lst.build(["analyzer", "configurator", "runner"])
+        # 用 Static.content 公开 API（render() 返 Visual，content 返原始字符串）
+        content = lst.content if isinstance(lst.content, str) else str(lst.content)
+        assert "analyzer" in content
+        assert "configurator" in content
+        assert "runner" in content
+        # 拓扑序：analyzer 必须在 configurator 之前
+        assert content.find("analyzer") < content.find("configurator") < content.find("runner")
 
-    def test_set_status_updates_projection(self):
-        graph = DagGraph()
+    def test_build_selects_first_by_default(self):
+        """build 后默认选中第一个（j/k 从头开始；auto-follow 之前用户的视觉锚点）。"""
+        lst = AgentsList()
+        lst.build(["analyzer", "configurator"])
+        assert lst.selected == "analyzer"
+        # 渲染内容含选中标记 ▸ 在 analyzer 前
+        content = lst.content if isinstance(lst.content, str) else str(lst.content)
+        analyzer_idx = content.find("analyzer")
+        assert analyzer_idx > 0
+        assert content[analyzer_idx - 2] == "▸"  # sel_mark 在 name 前 2 格（sel + space）
 
-        async def scenario():
-            async with _Harness([graph]).run_test() as pilot:
-                graph.build_from_workflow(["a"])
-                await pilot.pause()
-                for status in NODE_STATUS_ICONS:
-                    graph.set_status("a", status)
-                    await pilot.pause()
-                    assert graph.status_of_node("a") == status
-        run_async(scenario())
+    def test_build_empty_nodes_renders_placeholder(self):
+        """build([]) 渲染占位（不崩；用户空 workflow 看到提示）。"""
+        lst = AgentsList()
+        lst.build([])
+        assert lst.selected is None
+        content = lst.content if isinstance(lst.content, str) else str(lst.content)
+        assert "no agents" in content
 
-    def test_set_status_idempotent(self):
-        """SPEC §6.0 铁律 5：重放一致——多次同名同状态结果一致。"""
-        graph = DagGraph()
+    def test_update_node_status_running(self):
+        """update_node(status='running') 投影生效（用户看到 agent 进入 running 状态）。"""
+        lst = AgentsList()
+        lst.build(["analyzer"])
+        lst.update_node("analyzer", status="running", iter_n=1)
+        proj = lst.projection_of("analyzer")
+        assert proj is not None
+        assert proj.status == "running"
+        assert proj.iter_n == 1
+        # 渲染内容含 running icon ✽
+        content = lst.content if isinstance(lst.content, str) else str(lst.content)
+        assert "✽" in content
 
-        async def scenario():
-            async with _Harness([graph]).run_test() as pilot:
-                graph.build_from_workflow(["a"])
-                await pilot.pause()
-                graph.set_status("a", "running")
-                graph.set_status("a", "running")
-                graph.set_status("a", "running")
-                await pilot.pause()
-                assert graph.status_of_node("a") == "running"
-        run_async(scenario())
+    def test_update_node_done_with_elapsed_tokens(self):
+        """update_node(status='done', elapsed, tokens) 投影生效（用户看到完成耗时 + tok）。"""
+        lst = AgentsList()
+        lst.build(["analyzer"])
+        lst.update_node("analyzer", status="done", elapsed=14.0, tokens=1234)
+        proj = lst.projection_of("analyzer")
+        assert proj.status == "done"
+        assert proj.elapsed == 14.0
+        assert proj.tokens == 1234
+        # 渲染含 ✓ done icon + 14s + 1.2k
+        content = lst.content if isinstance(lst.content, str) else str(lst.content)
+        assert "✓" in content
+        assert "14s" in content
+        assert "1.2k" in content
 
-    def test_unknown_status_ignored(self):
-        graph = DagGraph()
+    def test_update_node_partial_field_update(self):
+        """update_node(elapsed=...) 不覆盖既有 status/tokens（部分字段更新语义）。"""
+        lst = AgentsList()
+        lst.build(["analyzer"])
+        lst.update_node("analyzer", status="running", iter_n=1, tokens=500)
+        lst.update_node("analyzer", elapsed=20.0)  # 部分更新
+        proj = lst.projection_of("analyzer")
+        assert proj.status == "running"  # 保留
+        assert proj.tokens == 500        # 保留
+        assert proj.iter_n == 1          # 保留
+        assert proj.elapsed == 20.0      # 新增
 
-        async def scenario():
-            async with _Harness([graph]).run_test() as pilot:
-                graph.build_from_workflow(["a"])
-                await pilot.pause()
-                graph.set_status("a", "bogus")  # 防御：未知状态不崩
-                await pilot.pause()
-                assert graph.status_of_node("a") == "pending"  # 原状态保持
-        run_async(scenario())
+    def test_update_node_unknown_name_ignored(self):
+        """未知 name 静默忽略（防御；与 AgentsList._projections.get(name) 同语义）。"""
+        lst = AgentsList()
+        lst.build(["analyzer"])
+        lst.update_node("nonexistent", status="running")  # 不抛
+        assert lst.projection_of("nonexistent") is None
+        # 已有节点不受影响
+        assert lst.projection_of("analyzer").status == "pending"
 
-    def test_parallel_group_progress(self):
-        """SPEC §4.1：parallel 组进度计数 (1/2)。"""
-        graph = DagGraph()
+    def test_update_node_unknown_status_ignored(self):
+        """未知 status 字符串忽略（防御；spec §11.5 item2 不引入新 enum，只接受 NODE_STATUS_ICONS keys）。"""
+        lst = AgentsList()
+        lst.build(["analyzer"])
+        lst.update_node("analyzer", status="bogus_state")
+        proj = lst.projection_of("analyzer")
+        # status 没改成 bogus，仍是 pending
+        assert proj.status == "pending"
 
-        async def scenario():
-            async with _Harness([graph]).run_test() as pilot:
-                graph.build_from_workflow(
-                    node_names=["start", "end"],
-                    parallel_groups=[("research", ["r_a", "r_b"])],
-                )
-                await pilot.pause()
-                # r_a done → 进度 1/2
-                graph.set_status("r_a", "done")
-                graph.set_group_progress("research", done=1, total=2)
-                await pilot.pause()
-                assert graph.status_of_node("r_a") == "done"
-                # 组完成 → 父图标 done
-                graph.set_status("r_b", "done")
-                graph.set_group_progress("research", done=2, total=2)
-                graph.set_group_status("research", "done")
-                await pilot.pause()
-        run_async(scenario())
+    def test_select_triggers_app_callback(self):
+        """select(name) 调 app._on_node_selected(name)（duck-typing；spec §3 切换语义）。"""
+        lst = AgentsList()
 
-    def test_blocked_status_for_gate(self):
-        """SPEC §4.1：blocked (⏸) 用于 gate 拦截的 node。"""
-        graph = DagGraph()
-
-        async def scenario():
-            async with _Harness([graph]).run_test() as pilot:
-                graph.build_from_workflow(["review"])
-                await pilot.pause()
-                graph.set_status("review", "blocked")
-                await pilot.pause()
-                assert graph.status_of_node("review") == "blocked"
-        run_async(scenario())
-
-    def test_select_sets_selected_and_notifies_app(self):
-        """SPEC §1.4：select() 设 _selected + 调 app._on_node_selected（pin）。"""
-
-        class _SpyApp(App):
-            selected_calls: list[str] = []
-
-            def __init__(self):
-                super().__init__()
-                self._graph = DagGraph()
-
-            def compose(self):
-                yield self._graph
-
+        class _MockApp:
+            def __init__(self) -> None:
+                self.selected_called_with: str | None = None
             def _on_node_selected(self, name: str) -> None:
-                self.selected_calls.append(name)
+                self.selected_called_with = name
 
-        async def scenario():
-            app = _SpyApp()
-            async with app.run_test() as pilot:
-                app._graph.build_from_workflow(["a", "b"])
-                await pilot.pause()
-                app._graph.select("b")
-                await pilot.pause()
-                assert app._graph.selected == "b"
-                assert app.selected_calls == ["b"]
-        run_async(scenario())
+        lst.build(["analyzer", "configurator"])
+        # textual widget.app 在未 mount 时返 None（不抛）；select 内用 getattr 兜底，
+        # 故未挂载时不会调 _on_node_selected。本测试通过 setattr 注入 mock app
+        #（绕过 textual 真起 app pilot；headless widget 单测同模式）。
+        mock_app = _MockApp()
+        type(lst).app = property(lambda _: mock_app)  # type: ignore[misc]
+        try:
+            lst.select("configurator")
+        finally:
+            # 还原（避免污染后续测试）
+            del type(lst).app
+        assert mock_app.selected_called_with == "configurator"
+        assert lst.selected == "configurator"
 
+    def test_j_k_navigation_wraps(self):
+        """j/k 在边界 wrap（最后一个 → 第一个；用户线性遍历不会卡死在边界）。"""
+        lst = AgentsList()
 
-# ── LogStream format_event（SPEC §4.3：HH:MM:SS [session] <desc>）─────────
+        class _MockApp:
+            def __init__(self) -> None:
+                self.history: list[str] = []
+            def _on_node_selected(self, name: str) -> None:
+                self.history.append(name)
 
+        mock_app = _MockApp()
+        type(lst).app = property(lambda _: mock_app)  # type: ignore[misc]
+        try:
+            lst.build(["a", "b", "c"])
+            assert lst.selected == "a"
+            lst.action_select_next()  # a → b
+            assert lst.selected == "b"
+            lst.action_select_next()  # b → c
+            assert lst.selected == "c"
+            lst.action_select_next()  # c → a (wrap)
+            assert lst.selected == "a"
+            lst.action_select_prev()  # a → c (wrap back)
+            assert lst.selected == "c"
+        finally:
+            del type(lst).app
 
-class TestLogStreamFormat:
-    """``format_event`` 纯函数：格式 + 各事件类型描述。"""
+    def test_select_unknown_name_ignored(self):
+        """select(unknown) 静默忽略（防御；不污染 _selected）。"""
+        lst = AgentsList()
+        lst.build(["a", "b"])
+        original = lst.selected
+        lst.select("nonexistent")
+        assert lst.selected == original  # 不变
 
-    FIXED_TS = time.mktime(time.strptime("14:02:11", "%H:%M:%S"))
+    def test_iter_n_display_when_loop_reentry(self):
+        """iter_n >= 2 时显示「iter N」（loop workflow 重入可视化；用户看 agent 跑第几轮）。"""
+        lst = AgentsList()
+        lst.build(["counter"])
+        lst.update_node("counter", status="running", iter_n=2, tokens=800)
+        content = lst.content if isinstance(lst.content, str) else str(lst.content)
+        assert "iter 2" in content
 
-    def test_basic_format(self):
-        line = format_event(
-            "agent_message", {"text": "hello"},
-            session_id="abcdef0123456789", timestamp=self.FIXED_TS,
+    def test_failed_status_shows_error_summary(self):
+        """failed 状态第二行显错误摘要前 30 字符（用户看到失败原因；spec §6.3 错误显示）。"""
+        lst = AgentsList()
+        lst.build(["runner"])
+        lst.update_node(
+            "runner",
+            status="failed",
+            error_msg="RuntimeError: cuda OOM at layer 47 in training loop",
         )
-        assert line == "14:02:11 [abcdef01] hello"
+        content = lst.content if isinstance(lst.content, str) else str(lst.content)
+        # 第二行错误标记 + 摘要（前 30 字符）
+        assert "!" in content
+        # 前 30 字符: "RuntimeError: cuda OOM at layer "[:30] == "RuntimeError: cuda OOM at la"
+        assert "RuntimeError" in content
+        # 完整原文（>30）不应全显（避免行宽爆炸，第二行只显前 30）
+        assert "training loop" not in content
 
-    def test_session_truncated_to_8_chars(self):
-        line = format_event(
-            "agent_message", {"text": "x"},
-            session_id="0123456789abcdef", timestamp=self.FIXED_TS,
+    def test_format_elapsed_helper(self):
+        """_format_elapsed 边界值（spec §2.2：< 60s 显 {n}s；>= 60s 显 {m}m{s}s）。"""
+        from orca.iface.cli.widgets.agents_list import _format_elapsed
+        assert _format_elapsed(0) == "0s"
+        assert _format_elapsed(14.0) == "14s"
+        assert _format_elapsed(59.9) == "60s"  # 59.9 → :.0f 取整 60
+        assert _format_elapsed(60.0) == "1m0s"
+        assert _format_elapsed(90.0) == "1m30s"
+        assert _format_elapsed(-5) == "0s"  # 负值兜底
+
+    def test_format_tokens_helper(self):
+        """_format_tokens 边界值（spec §2.2：< 1000 显原数；>= 1000 显 {k}k）。"""
+        from orca.iface.cli.widgets.agents_list import _format_tokens
+        assert _format_tokens(0) == "0"
+        assert _format_tokens(500) == "500"
+        assert _format_tokens(999) == "999"
+        assert _format_tokens(1000) == "1.0k"
+        assert _format_tokens(1234) == "1.2k"
+        assert _format_tokens(24000) == "24.0k"
+        assert _format_tokens(-1) == "0"  # 负值兜底
+
+
+class TestAgentHistory:
+    """phase-16 单流 inline AgentHistory widget 单元测试（spec §2.3 + §5.1 + §5.4 + phase-16 SPEC §5）。
+
+    INTENT（CLAUDE.md 铁律 9）：测试不是「set_node 不崩」，而是「用户能看到 agent
+    历史流 + last message 默认展开 + 切换 agent 时正确 reset + 工具配对成一条」——
+    断言 entries 内容、kind 派生、_expanded_seqs 状态、tool_call+result 配对 merged、
+    就地升级保持 seq/位置、乱序回放集合相等（reducer fold）、shallow copy 防御。
+
+    headless 测试策略（不真起 textual pilot）：直接实例化 AgentHistory 调
+    set_node / append_event，跳过 textual RichLog 渲染（_log is None 时各 path
+    防御 skip）；真渲染 + Enter 内联展开 E2E 留 tests/e2e_phase16/。
+    """
+
+    def _make_event(
+        self,
+        seq: int,
+        etype: str,
+        data: dict | None = None,
+        *,
+        node: str = "analyzer",
+        timestamp: float | None = None,
+    ):
+        """构造 canonical Event 测试 fixture。"""
+        from orca.schema import Event
+        return Event(
+            seq=seq,
+            type=etype,
+            timestamp=timestamp if timestamp is not None else 1000000.0 + seq,
+            node=node,
+            session_id="test-session",
+            data=data or {},
         )
-        assert "[01234567]" in line
 
-    def test_no_session_shows_dash(self):
-        line = format_event(
-            "agent_message", {"text": "x"}, session_id=None, timestamp=self.FIXED_TS,
-        )
-        assert "[-]" in line
+    def test_set_node_full_reflow(self):
+        """set_node([3 events]) → entries 含 3 条 + node_name 正确（spec §2.3 set_node）。"""
+        hist = AgentHistory()
+        events = [
+            self._make_event(1, "node_started", {"kind": "agent"}),
+            self._make_event(2, "agent_message", {"text": "hello"}),
+            self._make_event(3, "agent_tool_call",
+                             {"tool": "read", "args": {}, "tool_call_id": "tc1"}),
+        ]
+        hist.set_node("analyzer", events)
+        assert len(hist.entries) == 3
+        assert hist.node_name == "analyzer"
 
-    def test_node_prefix_when_node_given(self):
-        line = format_event(
-            "agent_message", {"text": "x"},
-            node="research", session_id="abcd1234", timestamp=self.FIXED_TS,
-        )
-        assert "14:02:11 [abcd1234] research · x" == line
+    def test_set_node_resets_expanded_to_last_message(self):
+        """set_node(A, [msg1]) → set_node(B, [msg10]) → 切回 A：expanded_seqs reset。
 
-    def test_agent_tool_call_described(self):
-        line = format_event(
-            "agent_tool_call", {"tool": "Bash", "args": {"command": "ls"}},
-            session_id="s1", timestamp=self.FIXED_TS,
-        )
-        assert "tool: Bash(" in line
-
-    def test_node_lifecycle_described(self):
-        assert "node started" in format_event(
-            "node_started", {"kind": "script"}, timestamp=self.FIXED_TS,
-        )
-        assert "node completed" in format_event(
-            "node_completed", {"elapsed": 1.2}, timestamp=self.FIXED_TS,
-        )
-        assert "node FAILED" in format_event(
-            "node_failed", {"message": "boom"}, timestamp=self.FIXED_TS,
-        )
-
-    def test_gate_events_described(self):
-        req = format_event(
-            "human_decision_requested", {"prompt": "批准 Bash？"},
-            timestamp=self.FIXED_TS,
-        )
-        assert "gate: 批准 Bash？" == req.split("] ", 1)[1]
-        res = format_event(
-            "human_decision_resolved",
-            {"resolved_by": "web", "answer": "allow"},
-            timestamp=self.FIXED_TS,
-        )
-        assert "gate resolved by web" in res
-
-    def test_long_text_truncated(self):
-        long_text = "x" * 200
-        line = format_event(
-            "agent_message", {"text": long_text}, timestamp=self.FIXED_TS,
-        )
-        # 描述截短到 60 + 1（…），不会占满终端宽度
-        desc = line.split("] ", 1)[1]
-        assert len(desc) <= 61
-        assert desc.endswith("…")
-
-    # ── phase 11 收官 sweep item8：每个 EventType 都有非泛型描述 ────────────────
-
-    # 各 EventType 的合理 payload（让 _describe 的 data.get(...) 拿到非空值，
-    # 避免「描述 = 截短的空串」误判为「有专属描述」）。
-    _PAYLOADS = {
-        "workflow_started": {"workflow_name": "wf"},
-        "workflow_completed": {"elapsed": 1.0},
-        "workflow_failed": {"error_type": "spawn_error", "message": "boom"},
-        "workflow_cancelled": {"reason": "user"},
-        "node_started": {"kind": "agent"},
-        "node_completed": {"elapsed": 1.0},
-        "node_failed": {"message": "boom", "error_type": "spawn_error"},
-        "node_skipped": {"reason": "user"},
-        "agent_message": {"text": "hi"},
-        "agent_thinking": {"text": "hmm"},
-        "agent_tool_call": {"tool": "Bash", "args": {"cmd": "ls"}},
-        "agent_tool_result": {"tool_call_id": "1", "result": "ok"},
-        "agent_usage": {"input_tokens": 1, "output_tokens": 2,
-                        "cache_tokens": 3, "cost_usd": 0.1},
-        "route_taken": {"from": "a", "to": "b"},
-        "foreach_started": {"item_count": 3, "max_concurrent": 2},
-        "foreach_item_started": {"index": 0, "item_key": "k"},
-        "foreach_item_completed": {"index": 0, "output": "x"},
-        "foreach_completed": {"count": 3, "succeeded": 3},
-        "human_decision_requested": {"gate_id": "g", "prompt": "approve?"},
-        "human_decision_resolved": {"gate_id": "g", "answer": "yes"},
-        "interrupt_requested": {"node": "a", "elapsed_at_request": 1.0},
-        "interrupt_resolved": {"action": "skip", "skip_target": "b"},
-        "prompt_rendered": {"preview": "..."},
-        "workflow_resumed": {"from_tape": "t.jsonl", "resumed_node": "a",
-                             "replayed_events": 5},
-        "retry_started": {"attempt": 1, "max_attempts": 3, "error_type": "spawn_error",
-                          "delay_seconds": 1.0},
-        "retry_succeeded": {"attempt_total": 2},
-        "retry_exhausted": {"attempts": 3, "last_error_type": "spawn_error"},
-        "wait_started": {"duration_seconds": 60.0, "reason": "rl"},
-        "wait_completed": {"elapsed_seconds": 60.0, "interrupted": False},
-        "validator_started": {"criteria_preview": "must be valid"},
-        "validator_passed": {},
-        "validator_failed": {"issues": ["bad"], "retrying": True},
-        "dialog_started": {"node": "a", "initial_prompt": "why?"},
-        "dialog_message": {"role": "user", "text": "hi", "turn": 1},
-        "dialog_ended": {"node": "a", "total_turns": 1},
-        "custom": {"kind": "chart"},
-        "error": {"error_type": "ValueError", "message": "boom"},
-    }
-
-    def test_every_event_type_has_non_generic_description(self):
-        """穷尽性守门：遍历 EventType Literal 全集，每个 type 的描述都不落入泛型 fallback。
-
-        INTENT（SPEC §10.2 item8 / final sweep）：LogStream 必须给**每个**新 EventType 一个
-        非泛型描述（``_describe`` 不落入末尾的 ``return event_type`` 兜底）。否则用户在 LogStream
-        看到的就是裸 type 名（如 ``retry_started``）而非人类可读描述，违反 item8。
-
-        与既有测试的区别：
-          - 既有 ad-hoc 测试（test_node_lifecycle_described / test_gate_events_described）只挑几个
-            type 断言，不遍历全集；新增 type 漏 ``_describe`` 分支时这些测试抓不到。
-          - 本测试遍历真 Literal 全集，新增 type 漏分支时立即可见（描述 == 裸 type 名）。
+        spec §2.3：set_node 强制 reset _expanded_seqs 到当前 agent last message，
+        避免上一个 agent 的 seq 残留污染。
         """
-        import typing
+        hist = AgentHistory()
+        events_a = [self._make_event(1, "agent_message", {"text": "A msg"})]
+        events_b = [self._make_event(10, "agent_message", {"text": "B msg"})]
+        hist.set_node("a", events_a)
+        assert hist.expanded_seqs == {1}
+        hist.set_node("b", events_b)
+        assert hist.expanded_seqs == {10}  # reset to B's last message
+        # 切回 A：expanded_seqs 应该是 A 的 last message（1），不是之前的 {10}
+        hist.set_node("a", events_a)
+        assert hist.expanded_seqs == {1}
+        assert 10 not in hist.expanded_seqs
 
-        from orca.schema import EventType
+    def test_set_node_defensive_copy(self):
+        """set_node 后修改传入 list → widget 内部不污染（reviewer P1-7 浅拷贝）。
 
-        types = typing.get_args(EventType)
-        assert len(types) > 0  # sanity：Literal 非空
+        浅拷贝防御：app 层后续 _node_events[node].append(event) 不应影响 widget
+        内部 _entries 列表。
+        """
+        hist = AgentHistory()
+        events = [self._make_event(1, "agent_message", {"text": "msg"})]
+        hist.set_node("analyzer", events)
+        # 调用方修改原 list
+        events.append(self._make_event(2, "agent_message", {"text": "extra"}))
+        # widget 内部 _entries 不应被污染（仍然是 1 条）
+        assert len(hist.entries) == 1
 
-        leaked = []
-        for t in types:
-            payload = self._PAYLOADS.get(t, {})
-            desc = format_event(t, payload, timestamp=self.FIXED_TS)
-            # 描述段 = 去掉时间戳 + session 前缀后的部分。
-            body = desc.split("] ", 1)[1] if "] " in desc else desc
-            # node 前缀（``node · desc``）也要剥掉，只看 _describe 产出。
-            if " · " in body:
-                body = body.split(" · ", 1)[1]
-            # 泛型 fallback：body 与裸 type 名相同（_describe 未匹配任何 if 分支）。
-            if body == t:
-                leaked.append(t)
-        assert leaked == [], (
-            f"以下 EventType 落入 format_event 泛型 fallback（_describe 漏分支，"
-            f"LogStream 会显示裸 type 名）：{leaked}"
+    def test_append_event_incremental(self):
+        """append 1 event → entry 数 +1（不全 reflow，spec §3 增量追加）。"""
+        hist = AgentHistory()
+        events = [self._make_event(1, "node_started", {"kind": "agent"})]
+        hist.set_node("analyzer", events)
+        assert len(hist.entries) == 1
+        hist.append_event(self._make_event(2, "agent_message", {"text": "msg"}))
+        assert len(hist.entries) == 2
+
+    def test_kind_derivation_per_event_type(self):
+        """每 event_type → 正确 EntryKind（phase-16 §3.2 _HistEntry.kind 派生）。
+
+        tool_call + tool_result 配对后归一类 ``"tool"``；message/thinking/other 各自分类。
+        """
+        hist = AgentHistory()
+        events = [
+            self._make_event(1, "agent_thinking", {"text": "..."}),
+            self._make_event(2, "agent_tool_call",
+                             {"tool": "read", "args": {}, "tool_call_id": "x"}),
+            self._make_event(3, "agent_tool_result",
+                             {"tool_call_id": "x", "result": "..."}),
+            self._make_event(4, "agent_message", {"text": "msg"}),
+            self._make_event(5, "human_decision_requested",
+                             {"gate_id": "g1", "prompt": "?", "source": "x"}),
+            self._make_event(6, "interrupt_requested", {"node": "analyzer"}),
+        ]
+        hist.set_node("analyzer", events)
+        # phase-16 §2.2：tool_call+result 配对成一条 → 总 entry 数 == 5（不是 6）
+        assert len(hist.entries) == 5
+        kinds = [e.kind for e in hist.entries]
+        assert kinds[0] == "thinking"
+        assert kinds[1] == "tool"        # 配对后的 tool entry
+        assert "tool" not in kinds[2:]   # 不再有第二条 tool entry
+        assert kinds[2] == "message"
+        assert kinds[3] == "other"       # gate
+        assert kinds[4] == "other"       # interrupt
+
+    def test_tool_pairing_in_place_upgrade_keeps_seq_and_position(self):
+        """phase-16 §2.2 核心：tool_result 到达时**就地升级**对应 call entry。
+
+        - call.seq 保持（merged.seq == call.seq）
+        - 列表位置保持（不 remove+append，避免 _selected_seq dangling）
+        - merged.tool_status == "completed"；merged.merged == True
+        - 配对后 _entries 数 == call 数（每对一条）
+        """
+        hist = AgentHistory()
+        events = [
+            self._make_event(1, "agent_tool_call",
+                             {"tool": "read", "args": {"filePath": "/a"}, "tool_call_id": "tc1"}),
+            self._make_event(2, "agent_tool_call",
+                             {"tool": "bash", "args": {"command": "ls"}, "tool_call_id": "tc2"}),
+            self._make_event(10, "agent_tool_result",
+                             {"tool_call_id": "tc1", "result": "A"}, timestamp=1000010.0),
+            self._make_event(11, "agent_tool_result",
+                             {"tool_call_id": "tc2", "result": "B"}, timestamp=1000011.0),
+        ]
+        hist.set_node("analyzer", events)
+        # 配对后 2 条 tool entry（不是 4）
+        tool_entries = [e for e in hist.entries if e.kind == "tool"]
+        assert len(tool_entries) == 2
+        # seq 保持 call 的 seq（1 / 2），位置在前面（不是 append 到末尾的 10/11）
+        assert tool_entries[0].seq == 1
+        assert tool_entries[1].seq == 2
+        assert tool_entries[0].merged is True
+        assert tool_entries[1].merged is True
+        assert tool_entries[0].tool_status == "completed"
+        # summary 含 result 派生的 elapsed（meta 行）
+        assert "0.0s" in tool_entries[0].meta or "s" in tool_entries[0].meta
+
+    def test_tool_pairing_no_unmatched_in_normal_replay(self):
+        """phase-16 §5.2 AC：正常 replay 后 ``merged==False`` tool entry 数 == 0。
+
+        所有 call 都应被 result 配对；降级即 fail loud（测试期语义，SPEC §0.2 #5）。
+        """
+        hist = AgentHistory()
+        events = [
+            self._make_event(1, "agent_tool_call",
+                             {"tool": "read", "args": {}, "tool_call_id": "tc1"}),
+            self._make_event(2, "agent_tool_result",
+                             {"tool_call_id": "tc1", "result": "x"}),
+        ]
+        hist.set_node("analyzer", events)
+        unmatched = [e for e in hist.entries if e.kind == "tool" and not e.merged]
+        assert unmatched == [], "正常配对不应有 unmatched tool entry（降级即 fail）"
+
+    def test_tool_result_without_call_buffered_in_pending(self):
+        """phase-16 §5.6 + §7：result 无 call 配对 → 暂存 _pending_results（不降级独立 entry）。
+
+        set_node 全量 fold 路径：乱序 result 不立即成 entry（保证 reducer fold 顺序无关）；
+        无 tcid 的异常 result 才降级独立 entry（merged=False）。
+        """
+        hist = AgentHistory()
+        # result 有 tcid 但无 call → 进 pending（不成独立 entry）
+        events = [
+            self._make_event(1, "agent_tool_result",
+                             {"tool_call_id": "orphan", "result": "no call"}),
+        ]
+        hist.set_node("analyzer", events)
+        # 不成独立 entry（暂存 pending，等 call）
+        assert len(hist.entries) == 0
+        assert "orphan" in hist._pending_results
+        # 无 tcid 的异常 result → 降级独立 entry（兜底）
+        hist2 = AgentHistory()
+        hist2.set_node("a", [
+            self._make_event(1, "agent_tool_result", {"result": "no tcid"}),
+        ])
+        assert len(hist2.entries) == 1
+        assert hist2.entries[0].kind == "tool"
+        assert hist2.entries[0].merged is False
+
+    def test_append_orphan_result_buffered_same_as_set_node(self):
+        """phase-16 §0.2 铁律 #5（单一 fold 路径）：append_event 与 set_node 对 orphan
+        result **同一行为**——都暂存 ``_pending_results`` 等配对，**不**降级独立 entry。
+
+        旧实现 ``buffer_orphans=True/False`` 分支（set_node 缓冲 / append 降级）是「多套
+        接口」违反铁律 #4，会导致同一事件流在 replay 与 live 下产出不同 entry。统一后
+        两路径共用 ``_apply_event``：orphan result（有 tcid 无 call）一律缓冲。
+        """
+        # append_event 路径
+        hist = AgentHistory()
+        hist.set_node("analyzer", [])
+        orphan = self._make_event(
+            1, "agent_tool_result",
+            {"tool_call_id": "lost", "result": "no call arrived"},
+        )
+        hist.append_event(orphan)
+        assert len(hist.entries) == 0  # 不降级独立 entry
+        assert "lost" in hist._pending_results  # 与 set_node 同：缓冲等配对
+        # set_node 路径同行为
+        hist2 = AgentHistory()
+        hist2.set_node("a", [orphan])
+        assert len(hist2.entries) == 0
+        assert "lost" in hist2._pending_results
+
+    def test_set_node_equals_append_event_loop(self):
+        """phase-16 §0.2 铁律 #5 构造性 AC：replay(set_node) == live(append_event loop)。
+
+        同一事件流，set_node 批量 fold 与逐条 append_event 必产**相同** ``_entries``
+        （seq/kind/summary/meta/merged/tool_status/tool_name）。这是「单一 fold 路径」的
+        **构造性**验证——不靠 reverse-replay 事后测，而是直接比两路径输出。若两路径
+        分叉（多套接口），此测试立即抓住。
+        """
+        events = [
+            self._make_event(1, "agent_thinking", {"text": "think..."}),
+            self._make_event(2, "agent_tool_call",
+                             {"tool": "read", "args": {"filePath": "/a"}, "tool_call_id": "tc1"}),
+            self._make_event(3, "agent_tool_result",
+                             {"tool_call_id": "tc1", "result": "A"}, timestamp=1000003.0),
+            self._make_event(4, "agent_tool_call",
+                             {"tool": "bash", "args": {"command": "ls"}, "tool_call_id": "tc2"}),
+            self._make_event(5, "agent_tool_result",
+                             {"tool_call_id": "tc2", "result": "B"}, timestamp=1000005.0),
+            self._make_event(6, "agent_message", {"text": "done"}),
+        ]
+        # path A: set_node（replay/batch，orquestrator replay / 切 agent 用）
+        a = AgentHistory()
+        a.set_node("analyzer", events)
+        # path B: append_event loop（live ``orca run`` 增量用）
+        b = AgentHistory()
+        b.set_node("analyzer", [])
+        for e in events:
+            b.append_event(e)
+
+        def key(e):
+            return (e.seq, e.kind, e.summary, e.meta, e.merged, e.tool_status, e.tool_name)
+        assert [key(e) for e in a.entries] == [key(e) for e in b.entries], (
+            "set_node 与 append_event loop 产出不同 _entries —— 单一 fold 路径被破坏"
         )
 
+    def test_message_summary_renders_bold_green_ansi(self):
+        """phase-16 §0.2 Rich 颜色规则 + §2.3：message summary 实际渲染出 bold + green ANSI。
 
-class TestLogStreamWidget:
-    """LogStream widget：append_event 写入文本。"""
+        用户实测「MSG 没突出」根因：旧 ``bold $success`` 中 ``$success`` 是 Textual token，
+        Rich ``Style.parse`` 不识别 → 整串丢弃 → 零 ANSI = 纯文本。锁定修复：message 样式
+        用 Rich 原生 ``green``，Console 实渲染含 ``\\x1b[1m``（bold）+ ``\\x1b[32m``（green）。
+        """
+        import io
+        from rich.console import Console
+        from rich.text import Text
+        hist = AgentHistory()
+        style = hist._style_for_kind("message")
+        # 无 Textual token（$ 会让 Rich 丢整串 style）
+        assert "$" not in style, f"message style 含 Textual token {style!r}（Rich 不识别）"
+        # 实渲染：bold + green ANSI 必须出现
+        buf = io.StringIO()
+        c = Console(file=buf, force_terminal=True, color_system="truecolor", width=80)
+        c.print(Text("MSG hi", style=style))
+        ansi = buf.getvalue()
+        # Rich 可能把 bold+green 合并成一个 SGR（``\x1b[1;32m``）或分两个（``\x1b[1m\x1b[32m``），
+        # 两种都接受。核心：bold code (1) + green code (32) 都在 ANSI 里。
+        assert ("\x1b[1;32m" in ansi) or ("\x1b[1m" in ansi and "\x1b[32m" in ansi), (
+            f"message 未渲染 bold+green（用户「MSG 没突出」复现），ansi={ansi!r}"
+        )
+        # thinking 仍 dim italic（Rich 原生，本来就工作）
+        assert "dim" in hist._style_for_kind("thinking")
 
-    def test_append_event_writes_line(self):
-        stream = LogStream()
+    def test_tool_result_error_marks_failed_status(self):
+        """phase-16 §2.3：result.error 或非零 exit_code → tool_status='failed'（✗ icon）。
 
-        async def scenario():
-            async with _Harness([stream]).run_test() as pilot:
-                stream.append_event(
-                    "agent_message", {"text": "hello"},
-                    session_id="abcdef0123", timestamp=TestLogStreamFormat.FIXED_TS,
-                )
-                await pilot.pause()
-                await pilot.pause()  # RichLog 异步渲染，双 pause 确保 flush
-                # RichLog.lines 是 Strip 列表（segment 组），flatten 成纯文本断言
-                text = _flatten_strips(stream.lines)
-                assert "hello" in text
-                assert "14:02:11" in text
-                assert "abcdef01" in text  # session 截短
-        run_async(scenario())
+        merged ToolEntry 的 tool_status 派生自 result.data：error 字段存在或 exit_code!=0
+        即 failed；用于 summary 行 status icon（✓/…/✗）。
+        """
+        hist = AgentHistory()
+        call = self._make_event(1, "agent_tool_call",
+                                {"tool": "bash", "args": {"command": "x"},
+                                 "tool_call_id": "tc1"})
+        # result 带 error → failed
+        result_err = self._make_event(2, "agent_tool_result",
+                                      {"tool_call_id": "tc1", "result": "",
+                                       "error": "command not found"})
+        hist.set_node("a", [call, result_err])
+        tool_entry = next(e for e in hist.entries if e.kind == "tool")
+        assert tool_entry.tool_status == "failed"
+        assert tool_entry.merged is True
+
+        # result 带 exit_code != 0 → failed
+        hist2 = AgentHistory()
+        call2 = self._make_event(1, "agent_tool_call",
+                                 {"tool": "bash", "args": {}, "tool_call_id": "tc2"})
+        result_exit = self._make_event(2, "agent_tool_result",
+                                       {"tool_call_id": "tc2", "result": "",
+                                        "exit_code": 127})
+        hist2.set_node("a", [call2, result_exit])
+        tool_entry2 = next(e for e in hist2.entries if e.kind == "tool")
+        assert tool_entry2.tool_status == "failed"
+
+        # 正常 result → completed
+        hist3 = AgentHistory()
+        call3 = self._make_event(1, "agent_tool_call",
+                                 {"tool": "bash", "args": {}, "tool_call_id": "tc3"})
+        result_ok = self._make_event(2, "agent_tool_result",
+                                     {"tool_call_id": "tc3", "result": "ok"})
+        hist3.set_node("a", [call3, result_ok])
+        tool_entry3 = next(e for e in hist3.entries if e.kind == "tool")
+        assert tool_entry3.tool_status == "completed"
+
+    def test_out_of_order_replay_set_equal(self):
+        """phase-16 §5.6 reducer fold：逆序回放 → (seq, kind, summary) 集合与正序相等。
+
+        配对/派生必须是 event list 的纯函数（顺序无关）。逆序时 result 早于 call，
+        但 _fold_event 暂存 pending result，call 到达时补配对——集合输出不变。
+        若不等 → 配对是顺序敏感的假 fold，铁律 #1 破。
+        """
+        call = self._make_event(5, "agent_tool_call",
+                                {"tool": "read", "args": {}, "tool_call_id": "tc1"})
+        result = self._make_event(6, "agent_tool_result",
+                                  {"tool_call_id": "tc1", "result": "x"})
+        msg = self._make_event(7, "agent_message", {"text": "done"})
+
+        # 正序
+        hist_fwd = AgentHistory()
+        hist_fwd.set_node("a", [call, result, msg])
+
+        # 逆序（result 早于 call）
+        hist_rev = AgentHistory()
+        hist_rev.set_node("a", [msg, result, call])
+
+        # 集合相等：(seq, kind) 多重集一致（summary 可能因 elapsed 微差，比对 seq+kind）
+        fwd_set = sorted((e.seq, e.kind) for e in hist_fwd.entries)
+        rev_set = sorted((e.seq, e.kind) for e in hist_rev.entries)
+        assert fwd_set == rev_set, (
+            f"reducer fold 顺序无关失败：正序 {fwd_set} 逆序 {rev_set}"
+        )
+        # 两边都应：1 条 tool (seq=5, merged) + 1 条 message (seq=7)
+        assert fwd_set == [(5, "tool"), (7, "message")]
+        # 两边的 tool entry 都已 merged（pending 补配对）
+        fwd_tool = next(e for e in hist_fwd.entries if e.kind == "tool")
+        rev_tool = next(e for e in hist_rev.entries if e.kind == "tool")
+        assert fwd_tool.merged is True
+        assert rev_tool.merged is True
+
+    def test_deterministic_replay_same_set(self):
+        """phase-16 §5.6：同一 tape 正序回放两次 → (seq, kind, summary) 四元组逐项相等。"""
+        events = [
+            self._make_event(1, "agent_tool_call",
+                             {"tool": "read", "args": {"filePath": "/x"}, "tool_call_id": "tc1"}),
+            self._make_event(2, "agent_tool_result",
+                             {"tool_call_id": "tc1", "result": "y"}, timestamp=1000002.0),
+            self._make_event(3, "agent_message", {"text": "done"}),
+        ]
+        hist1 = AgentHistory()
+        hist1.set_node("a", events)
+        hist2 = AgentHistory()
+        hist2.set_node("a", events)
+        assert [(e.seq, e.kind, e.summary, e.meta) for e in hist1.entries] == \
+               [(e.seq, e.kind, e.summary, e.meta) for e in hist2.entries]
+
+    def test_in_place_upgrade_keeps_selected_seq_valid(self):
+        """phase-16 §2.2：就地升级（不 remove+append）防止 _selected_seq dangling。
+
+        场景：用户 ↓ 选中 call entry（seq=5），随后 result 到达。若 remove+append，
+        _selected_seq=5 会指向已删 entry；就地升级保持 seq=5 → 选中仍有效。
+        """
+        hist = AgentHistory()
+        call = self._make_event(5, "agent_tool_call",
+                                {"tool": "read", "args": {}, "tool_call_id": "tc1"})
+        hist.set_node("analyzer", [call])
+        hist._selected_seq = 5  # 选中 call entry
+        # result 到达（增量 append）
+        result = self._make_event(6, "agent_tool_result",
+                                  {"tool_call_id": "tc1", "result": "x"})
+        hist.append_event(result)
+        # 配对后原 call 位 seq 仍为 5（不 dangling）
+        assert hist._selected_seq == 5
+        tool_entries = [e for e in hist.entries if e.kind == "tool"]
+        assert len(tool_entries) == 1
+        assert tool_entries[0].seq == 5  # 就地升级保持 seq
+        assert tool_entries[0].merged is True
+
+    def test_last_message_default_expanded(self):
+        """3 events 末尾 MSG → 默认展开（spec §2.3 + 用户核心需求）。"""
+        hist = AgentHistory()
+        events = [
+            self._make_event(1, "agent_thinking", {"text": "..."}),
+            self._make_event(2, "agent_tool_call",
+                             {"tool": "read", "args": {}, "tool_call_id": "x"}),
+            self._make_event(3, "agent_message", {"text": "final answer"}),
+        ]
+        hist.set_node("analyzer", events)
+        assert hist.expanded_seqs == {3}  # last message seq 默认展开
+
+    def test_new_message_replaces_expanded(self):
+        """append 新 MSG → 旧 MSG 收起，新 MSG 展开（spec §2.3 自动跟随）。"""
+        hist = AgentHistory()
+        events = [self._make_event(1, "agent_message", {"text": "msg1"})]
+        hist.set_node("analyzer", events)
+        assert hist.expanded_seqs == {1}
+        hist.append_event(self._make_event(2, "agent_message", {"text": "msg2"}))
+        assert hist.expanded_seqs == {2}  # 替换，不是 add
+        assert 1 not in hist.expanded_seqs
+
+    def test_tool_call_cache_derives_elapsed_on_merge(self):
+        """phase-16 §2.2：call + 2.5s 后 result → merged entry meta 含 elapsed（GAP-B/C）。
+
+        phase-16 变化：result 不再独立 entry；elapsed 派生在 merged ToolEntry 上。
+        """
+        hist = AgentHistory()
+        call_event = self._make_event(
+            1, "agent_tool_call",
+            {"tool": "read", "args": {"filePath": "/tmp/x.py"}, "tool_call_id": "tc1"},
+            timestamp=1000.0,
+        )
+        result_event = self._make_event(
+            2, "agent_tool_result",
+            {"tool_call_id": "tc1", "result": "file content"},
+            timestamp=1002.5,  # 2.5s 后
+        )
+        hist.set_node("analyzer", [call_event, result_event])
+        # 配对后唯一 tool entry 的 meta 应含 "2.5s"
+        tool_entry = next(e for e in hist.entries if e.kind == "tool")
+        assert "2.5s" in tool_entry.meta
+        assert tool_entry.merged is True
+
+    def test_folded_detail_uses_phase15(self):
+        """内联 detail 调 phase-15 render_tool / render_message（spec §5.5 复用契约）。"""
+        hist = AgentHistory()
+        hist.set_executor("claude")
+        events = [
+            self._make_event(
+                1, "agent_tool_call",
+                {"tool": "read", "args": {"filePath": "/tmp/x.py"}, "tool_call_id": "tc1"},
+            ),
+            self._make_event(2, "agent_message", {"text": "hello world"}),
+        ]
+        hist.set_node("analyzer", events)
+        # tool entry 应该有内联详情（render_tool 输出）
+        tool_entry = next(e for e in hist.entries if e.kind == "tool")
+        assert tool_entry.detail is not None
+        # message entry 也应该有内联详情（render_message 输出）
+        msg_entry = next(e for e in hist.entries if e.kind == "message")
+        assert msg_entry.detail is not None
+
+    def test_no_message_no_expanded(self):
+        """events 无 agent_message → expanded_seqs 为空（spec §2.3 默认展开规则）。"""
+        hist = AgentHistory()
+        events = [self._make_event(1, "agent_thinking", {"text": "..."})]
+        hist.set_node("analyzer", events)
+        assert hist.expanded_seqs == set()
+
+    def test_set_node_clears_tool_call_cache(self):
+        """set_node 切换 agent → _tool_call_cache 清空（per-node 隔离）。"""
+        hist = AgentHistory()
+        events = [
+            self._make_event(
+                1, "agent_tool_call",
+                {"tool": "read", "args": {}, "tool_call_id": "tc1"},
+            ),
+        ]
+        hist.set_node("a", events)
+        assert "tc1" in hist._tool_call_cache
+        # 切换到 agent b（无 events）
+        hist.set_node("b", [])
+        assert len(hist._tool_call_cache) == 0
+
+    def test_set_executor_changes_normalize_table(self):
+        """set_executor('opencode') → 后续 normalize_tool 用 opencode 后端。"""
+        hist = AgentHistory()
+        hist.set_executor("opencode")
+        assert hist._executor == "opencode"
+        # 默认 claude
+        hist2 = AgentHistory()
+        assert hist2._executor == "claude"
+
+    def test_action_toggle_expand(self):
+        """action_toggle_expand：Enter 键切换选中 entry 的展开状态（reviewer P0-6 Enter）。"""
+        hist = AgentHistory()
+        events = [
+            self._make_event(1, "agent_thinking", {"text": "..."}),
+            self._make_event(2, "agent_message", {"text": "msg"}),
+        ]
+        hist.set_node("analyzer", events)
+        # 初始：seq=2 (last msg) 展开，seq=1 折叠
+        assert hist.expanded_seqs == {2}
+        # 选中 seq=1（thinking），按 Enter 展开
+        hist._selected_seq = 1
+        hist.action_toggle_expand()
+        assert 1 in hist.expanded_seqs
+        assert 2 in hist.expanded_seqs  # last message 不被影响
+        # 再 Enter → 收起
+        hist.action_toggle_expand()
+        assert 1 not in hist.expanded_seqs
+        assert 2 in hist.expanded_seqs  # last message 保留展开
+
+    def test_action_cursor_down_up(self):
+        """j/k 导航：action_cursor_down/up 切换 _selected_seq。"""
+        hist = AgentHistory()
+        events = [
+            self._make_event(1, "agent_thinking", {"text": "..."}),
+            self._make_event(2, "agent_message", {"text": "msg"}),
+            self._make_event(3, "agent_tool_call",
+                             {"tool": "read", "args": {}, "tool_call_id": "x"}),
+        ]
+        hist.set_node("analyzer", events)
+        # 初始未选中
+        assert hist._selected_seq is None
+        # j → 选中第 1 条
+        hist.action_cursor_down()
+        assert hist._selected_seq == 1
+        # j → 第 2 条
+        hist.action_cursor_down()
+        assert hist._selected_seq == 2
+        # j → 第 3 条
+        hist.action_cursor_down()
+        assert hist._selected_seq == 3
+        # k → 回到第 2 条
+        hist.action_cursor_up()
+        assert hist._selected_seq == 2
+
+    def test_action_cursor_no_wrap_at_boundary(self):
+        """j 在末条不 wrap / k 在首条不 wrap（边界防御）。"""
+        hist = AgentHistory()
+        events = [
+            self._make_event(1, "agent_message", {"text": "first"}),
+            self._make_event(2, "agent_message", {"text": "last"}),
+        ]
+        hist.set_node("analyzer", events)
+        # 跳到末条
+        hist._selected_seq = 2
+        hist.action_cursor_down()  # 末条之后 → 不动（不 wrap 回首条）
+        assert hist._selected_seq == 2
+        # 跳回首条
+        hist._selected_seq = 1
+        hist.action_cursor_up()  # 首条之前 → 不动（不 wrap 到末条）
+        assert hist._selected_seq == 1
+
+    def test_action_cursor_empty_entries_noop(self):
+        """entries 为空时 j/k 不抛（headless 防御；spec §2.3 set_node(None, []) 路径）。"""
+        hist = AgentHistory()
+        hist.set_node(None, [])
+        # 空 entries：j/k 不抛、不改 _selected_seq
+        hist.action_cursor_down()
+        assert hist._selected_seq is None
+        hist.action_cursor_up()
+        assert hist._selected_seq is None
+
+    def test_action_toggle_expand_defaults_to_last(self):
+        """未选中 entry 时 Enter 默认作用于最后一条（修复「Enter 没反应」体感 bug）。
+
+        旧逻辑：``_selected_seq is None`` → 直接 return（用户必须先 ↓ 选中才能 Enter，
+        反直觉）。新逻辑：无选中时作用于最后一条 entry，直接按 Enter 即可收起/展开。
+        """
+        hist = AgentHistory()
+        events = [
+            self._make_event(1, "agent_thinking", {"text": "..."}),
+            self._make_event(2, "agent_message", {"text": "msg"}),
+        ]
+        hist.set_node("analyzer", events)
+        assert hist._selected_seq is None
+        assert hist.expanded_seqs == {2}  # last msg 默认展开
+        # Enter（无选中）→ 默认作用于最后一条 seq=2 → 收起
+        hist.action_toggle_expand()
+        assert hist.expanded_seqs == set()
+        # 再 Enter → 展开
+        hist.action_toggle_expand()
+        assert hist.expanded_seqs == {2}
+        # 光标未被移动（保持 None）
+        assert hist._selected_seq is None
+
+    def test_action_toggle_expand_empty_entries_noop(self):
+        """空 entries（set_node(None, [])）时 Enter 不抛、不改状态（headless 防御）。
+
+        锁定 action_toggle_expand 的空 entries 早 return 守卫为显式契约（A.1 改动了
+        该分支，从隐式覆盖升为显式断言）。
+        """
+        hist = AgentHistory()
+        hist.set_node(None, [])  # 空 entries
+        assert hist._entries == []
+        assert hist._selected_seq is None
+        # Enter 不抛、不改 expanded_seqs / _selected_seq
+        hist.action_toggle_expand()
+        assert hist.expanded_seqs == set()
+        assert hist._selected_seq is None
+
+    def test_tool_call_cache_lru_cap(self):
+        """tool_call_id cache 超 _TOOL_CALL_CACHE_CAP → 丢最旧（防爆内存）。"""
+        from orca.iface.cli.widgets.agent_history import _TOOL_CALL_CACHE_CAP
+        hist = AgentHistory()
+        # 填 _TOOL_CALL_CACHE_CAP + 1 条 call（无 result，全部 unmatched）
+        events = []
+        for i in range(_TOOL_CALL_CACHE_CAP + 1):
+            events.append(self._make_event(
+                i + 1, "agent_tool_call",
+                {"tool": "read", "args": {}, "tool_call_id": f"tc{i}"},
+            ))
+        hist.set_node("analyzer", events)
+        # cache 不超 cap
+        assert len(hist._tool_call_cache) <= _TOOL_CALL_CACHE_CAP
+        # 最旧的（tc0）应该被丢
+        assert "tc0" not in hist._tool_call_cache
+
+    def test_node_name_none_empties_entries(self):
+        """set_node(None, []) → 清空状态（spec §2.3）。"""
+        hist = AgentHistory()
+        events = [self._make_event(1, "agent_message", {"text": "msg"})]
+        hist.set_node("analyzer", events)
+        assert len(hist.entries) == 1
+        # 切换到 None agent
+        hist.set_node(None, [])
+        assert hist.node_name is None
+        assert len(hist.entries) == 0
+        assert hist.expanded_seqs == set()
+
+
+# spec v2 §2.4：LogStream ``format_event`` + widget 行为单测拆到独立文件
+# ``tests/iface/cli/test_log_stream.py``（Conductor Log View 风格 + EVENT_LEVEL 表派生）。
 
 
 # ── Header stats（SPEC §4.4）────────────────────────────────────────────────
@@ -837,3 +1369,58 @@ def _event_like_chart(*, node, label, title, ctype="line"):
         }},
         node=node, session_id=None, seq=0, timestamp=0.0,
     )
+
+
+# ── v2 _event_summary 共享纯函数（Step 1b 迁入；Step 3 AgentHistory / Step 4
+#    LogStream 单测填充时再补完整字段级断言；当前最小守门：6 函数能 import）。 ──────
+
+
+class TestEventSummaryImports:
+    """spec v2 §2.3 / §2.4：6 个共享事件派生纯函数 import 守门（Step 1b 占位）。
+
+    Step 3 AgentHistory 填充时补 set_node / append_event / last message 默认展开 等单测
+    （调 _build_summary_line / _build_meta_line / _build_detail_renderable 断言字段级输出）；
+    Step 4 LogStream 改造时同理补 EVENT_LEVEL 表派生单测。
+    """
+
+    def test_event_summary_imports(self):
+        """6 个共享函数能 import（Step 1b 占位守门，防迁移漏函数）。"""
+        from orca.iface.cli.widgets._event_summary import (
+            _arg_title,
+            _build_detail_renderable,
+            _build_meta_line,
+            _build_summary_line,
+            _format_elapsed_sec,
+            _truncate,
+        )
+        # sanity：所有函数都是 callable
+        for fn in (
+            _arg_title, _build_detail_renderable, _build_meta_line,
+            _build_summary_line, _format_elapsed_sec, _truncate,
+        ):
+            assert callable(fn)
+
+    def test_truncate_basic(self):
+        """spec §5.4：超长字符截断 + …。"""
+        from orca.iface.cli.widgets._event_summary import _truncate
+        assert _truncate("hello", 5) == "hello"
+        assert _truncate("hello world", 5) == "hell…"
+
+    def test_format_elapsed_sec_three_buckets(self):
+        """秒数格式化：< 10s 显 1 位小数（0.8s）；< 60s 整数（12s）；≥ 60s m+s。"""
+        from orca.iface.cli.widgets._event_summary import _format_elapsed_sec
+        assert _format_elapsed_sec(0.8) == "0.8s"
+        assert _format_elapsed_sec(12.0) == "12s"
+        assert _format_elapsed_sec(75.0) == "1m15s"
+
+    def test_arg_title_per_tool(self):
+        """per-tool 一句话标题：read 取 filePath / bash 取 command / glob 取 pattern。"""
+        from orca.iface.cli.widgets._event_summary import _arg_title
+        assert _arg_title("read", {"filePath": "/tmp/x.py"}) == "/tmp/x.py"
+        assert _arg_title("bash", {"command": "ls"}) == "ls"
+        assert _arg_title("glob", {"pattern": "**/*.py"}) == "**/*.py"
+
+    def test_build_summary_line_basic(self):
+        """node_started → "node started (kind=<kind>)"。"""
+        from orca.iface.cli.widgets._event_summary import _build_summary_line
+        assert _build_summary_line("node_started", {"kind": "agent"}) == "node started (kind=agent)"

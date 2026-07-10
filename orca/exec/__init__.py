@@ -22,8 +22,10 @@
 
 from orca.exec.context import RunContext
 from orca.exec.error import ExecError, phase_to_error_type
+from orca.exec.error_kinds import ErrorKind
 from orca.exec.factory import make_executor
 from orca.exec.interface import Executor
+from orca.exec.result import Error, Result
 
 # ClaudeExecutor / ScriptExecutor / SetExecutor 经 factory 惰性导入（避免 import 时
 # 拉起 claude 子包的 jinja2/jsonschema 依赖链；也切断 __init__ 对 claude 的硬依赖，
@@ -53,6 +55,9 @@ __all__ = [
     "RunContext",
     "ExecError",
     "phase_to_error_type",
+    "ErrorKind",
+    "Error",
+    "Result",
     "ClaudeExecutor",
     "ScriptExecutor",
     "SetExecutor",

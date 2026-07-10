@@ -1,133 +1,138 @@
-// components/pages/RunDetailPage.tsx —— `/runs/:runId` 详情（SPEC §6.2 + phase 9c 填充）。
+// components/pages/RunDetailPage.tsx —— 单 run 根：3 栏布局（SPEC §4）。
+//
+// web-shell-v2 §4 三栏：
+//   - 左 AgentsRail（agents 列表 + DAG 浮层挂点）
+//   - 中 tabs [会话 | 图表]（gate 模态浮于其上，§5.6）
+//   - 右 LogStream（常驻最右，虚拟化 live）
+// 顶 TopBar（status + elapsed + cost）。**无** Replay 控件（SPEC §3.1 / §8）。
+//
+// **D5 bundle split**：ConversationView（含 react-markdown 全家桶 ~2MB）/ ChartsView
+// （recharts ~400KB）/ WorkflowGraph（xyflow ~250KB）各自 ``React.lazy`` 拆独立 chunk。
+// 首屏（TopBar + AgentsRail + LogStream）只剩 ~200KB——conversation/charts/DAG 首次切
+// 到才拉对应 chunk。Suspense fallback 给极简骨架（不污染首屏 chunk）。
 //
 // 关键（铁律 1 + 5）：
-//   - useRunEvents(runId)：mount → 懒加载 GET /events；unmount → unloadRun（清派生态）
-//   - useWebSocket(runId)：mount → 全量重拉 + subscribe；unmount → 关 WS（无 leak）
-//
-// phase 9c 布局（SPEC §1-§4）：
-//   - 主区：WorkflowGraph（DAG 可视化）
-//   - 右侧：NodeDetail（选中节点详情）
-//   - 底部 tab：Log（流式日志，虚拟滚动）/ Output / Yaml
-//   - replayMode 时底部多一行 ReplayBar
-//   - run 完成（completed/failed）→ Header 出现「⏮ Replay」按钮（SPEC §2.5）
+//   - useRunEvents(runId)：mount → 懒加载 GET /events；unmount → unloadRun
+//   - useWebSocket(runId)：mount → subscribe；重连发 resume（D6）+ resume 失败 fallback
 
-import { useState } from "react";
+import { Suspense, lazy, useCallback, useState } from "react";
 import { useParams } from "react-router-dom";
+import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { useRunEvents } from "@/hooks/use-run-events";
 import { useWebSocket } from "@/hooks/use-websocket";
+import { useStreamingText } from "@/hooks/use-streaming-text";
+import { useElapsedTickActive } from "@/hooks/use-elapsed-tick";
 import { useWorkflowStore } from "@/stores/workflow-store";
-import { WorkflowGraph } from "@/components/graph/WorkflowGraph";
-import { NodeDetail } from "@/components/detail/NodeDetail";
+import { TopBar } from "@/components/layout/TopBar";
+import { AgentsRail } from "@/components/layout/AgentsRail";
 import { LogStream } from "@/components/detail/LogStream";
-import { ReplayBar } from "@/components/layout/ReplayBar";
-import { ChartRenderer } from "@/components/chart/ChartRenderer";
 
-type Tab = "dag" | "log" | "output" | "yaml";
+// D5：重依赖 view 懒挂——独立 chunk，首屏不加载。
+const ConversationView = lazy(() =>
+  import("@/components/views/ConversationView").then((m) => ({
+    default: m.ConversationView,
+  }))
+);
+const ChartsView = lazy(() =>
+  import("@/components/views/ChartsView").then((m) => ({ default: m.ChartsView }))
+);
 
-const TABS: Tab[] = ["dag", "log", "output", "yaml"];
+type Tab = "conversation" | "charts";
 
 export function RunDetailPage() {
   const { runId } = useParams<{ runId: string }>();
-  // 懒加载（铁律 1）+ WS 按需订阅（铁律 5）
   useRunEvents(runId);
-  useWebSocket(runId);
+  // Streaming hook mounted at page root（单 hook，N agent 不开 N timer）。
+  // resume 失败 fallback 时 dropBuffer（SPEC §3.3 / D6：丢弃 _textBuf）。
+  const streaming = useStreamingText();
+  const onResumeFallback = useCallback(() => {
+    streaming.dropBuffer();
+  }, [streaming]);
+  useWebSocket(runId, { onResumeFallback });
 
-  const [tab, setTab] = useState<Tab>("dag");
+  // SPEC §5.2 / §0 D5 单一 elapsed tick 在页根：running 时启 tick，完成 / 终态停。
+  // 所有 TopBar / AgentsRail 共用模块级 singleton timer（N agent = 1 timer）。
   const status = useWorkflowStore((s) => s.status);
-  const eventCount = useWorkflowStore((s) => s.events.length);
-  const replayMode = useWorkflowStore((s) => s.replayMode);
-  const workflowName = useWorkflowStore((s) => s.workflowName);
-  const enterReplay = useWorkflowStore((s) => s.enterReplay);
-  const exitReplay = useWorkflowStore((s) => s.exitReplay);
+  useElapsedTickActive(status === "running");
+
+  const [tab, setTab] = useState<Tab>("conversation");
+  const selectedNode = useWorkflowStore((s) => s.selectedNode);
 
   if (!runId) {
     return <p className="p-4 text-sm text-slate-500">缺少 runId</p>;
   }
 
-  const canReplay =
-    !replayMode && (status === "completed" || status === "failed") && eventCount > 0;
-
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center justify-between border-b border-slate-200 p-4">
-        <h1 className="text-lg font-semibold">
-          Run <span className="font-mono text-base">{runId.slice(0, 8)}</span>
-          {workflowName && (
-            <span className="ml-2 text-sm font-normal text-slate-500">
-              {workflowName}
-            </span>
-          )}
-        </h1>
-        <div className="flex items-center gap-3">
-          <span className="text-sm text-slate-500">
-            status: {status} · events: {eventCount}
-          </span>
-          {canReplay && (
-            <button
-              type="button"
-              onClick={enterReplay}
-              className="rounded border border-indigo-300 bg-indigo-50 px-3 py-1 text-sm text-indigo-700 hover:bg-indigo-100"
-              data-testid="enter-replay-btn"
-            >
-              ⏮ Replay
-            </button>
-          )}
-          {replayMode && (
-            <button
-              type="button"
-              onClick={exitReplay}
-              className="rounded border border-slate-300 bg-white px-3 py-1 text-sm hover:bg-slate-100"
-              data-testid="exit-replay-btn"
-            >
-              ⏹ Live
-            </button>
-          )}
-        </div>
-      </div>
-
-      <div className="flex flex-1 overflow-hidden">
-        {/* 主区：DAG / Output / Yaml */}
-        <div className="flex flex-1 flex-col overflow-hidden">
-          <div className="flex border-b border-slate-200 bg-slate-50">
-            {TABS.map((t) => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => setTab(t)}
-                className={`px-4 py-2 text-sm ${
-                  tab === t
-                    ? "border-b-2 border-slate-900 font-medium text-slate-900"
-                    : "text-slate-500 hover:text-slate-700"
-                }`}
-                data-testid={`tab-${t}`}
-              >
-                {t}
-              </button>
-            ))}
+      <TopBar runId={runId} />
+      <PanelGroup direction="horizontal" className="flex-1">
+        <Panel defaultSize={18} minSize={12} maxSize={30}>
+          <AgentsRail />
+        </Panel>
+        <PanelResizeHandle className="w-px bg-slate-200" />
+        <Panel defaultSize={56} minSize={30}>
+          <div className="flex h-full flex-col">
+            <div className="flex border-b border-slate-200 bg-slate-50">
+              {(
+                [
+                  ["conversation", "会话"],
+                  ["charts", "图表"],
+                ] as const
+              ).map(([t, label]) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => setTab(t)}
+                  className={`px-4 py-2 text-sm ${
+                    tab === t
+                      ? "border-b-2 border-slate-900 font-medium text-slate-900"
+                      : "text-slate-500 hover:text-slate-700"
+                  }`}
+                  data-testid={`tab-${t}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="flex-1 overflow-auto">
+              <Suspense fallback={<TabFallback label="加载会话…" />}>
+                {tab === "conversation" && (
+                  <ConversationView
+                    nodeId={selectedNode}
+                    onChartClick={() => setTab("charts")}
+                  />
+                )}
+                {tab === "charts" && <ChartsView />}
+              </Suspense>
+            </div>
           </div>
-          <div className="flex-1 overflow-auto">
-            {tab === "dag" && <WorkflowGraph />}
-            {tab === "log" && <LogStream />}
-            {tab === "output" && (
-              // phase 9d：Output 视图 = 所有节点的图表（nodeId undefined 取全部，SPEC §2.6 Output Panel）。
-              <ChartRenderer />
-            )}
-            {tab === "yaml" && (
-              <div className="p-4 text-sm text-slate-500">
-                Yaml 视图 —— phase 9d 实现。
-              </div>
-            )}
+        </Panel>
+        <PanelResizeHandle className="w-px bg-slate-200" />
+        <Panel defaultSize={26} minSize={15}>
+          <div
+            className="flex h-full flex-col border-l border-slate-200"
+            data-testid="log-panel"
+          >
+            <div className="border-b border-slate-200 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+              Log
+            </div>
+            <div className="flex-1 overflow-hidden">
+              <LogStream />
+            </div>
           </div>
-        </div>
+        </Panel>
+      </PanelGroup>
+    </div>
+  );
+}
 
-        {/* 右侧：节点详情 */}
-        <aside className="w-80 border-l border-slate-200 overflow-auto">
-          <NodeDetail />
-        </aside>
-      </div>
-
-      {/* replay 模式：底部 ReplayBar */}
-      {replayMode && <ReplayBar />}
+function TabFallback({ label }: { label: string }) {
+  return (
+    <div
+      className="flex h-full items-center justify-center text-sm text-slate-400"
+      data-testid="tab-fallback"
+    >
+      <span className="animate-pulse">{label}</span>
     </div>
   );
 }

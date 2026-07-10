@@ -1,0 +1,330 @@
+{
+  "_comment": "Canonical Event → 期望 RenderItem fixtures（render-layer-design-draft §10）。",
+  "_usage": "TUI pytest + Web vitest 共享；相同 Event 输入 → 相同 RenderItem JSON（防跨端漂移）。",
+  "_note": "raw 字段含原始 args/result（含绝对路径 / 时间戳），对比时只比 kind/status/title/subtitle/payload；spec §13 风险表已认视觉微差。",
+  "cases": [
+    {
+      "id": "claude_read_file",
+      "executor": "claude",
+      "tool_name": "Read",
+      "args": {
+        "file_path": "src/foo.py"
+      },
+      "result": "print('hi')\nprint('world')\n",
+      "status": "completed",
+      "expected": {
+        "kind": "file_read",
+        "status": "completed",
+        "title": "src/foo.py",
+        "subtitle": "",
+        "payload_keys": [
+          "path",
+          "is_dir",
+          "content",
+          "truncated"
+        ],
+        "payload_invariants": {
+          "path": "src/foo.py",
+          "is_dir": false,
+          "truncated": false,
+          "content_len": 2,
+          "content_first_line_n": 1,
+          "content_first_line_text": "print('hi')"
+        }
+      }
+    },
+    {
+      "id": "claude_bash",
+      "executor": "claude",
+      "tool_name": "Bash",
+      "args": {
+        "command": "ls -la"
+      },
+      "result": "total 0\ndrwxr-xr-x  2 user  staff   64 Jul  3 12:00 .\n",
+      "status": "completed",
+      "expected": {
+        "kind": "shell",
+        "status": "completed",
+        "title": "$ ls -la",
+        "subtitle": "",
+        "payload_keys": [
+          "command",
+          "output"
+        ],
+        "payload_invariants": {
+          "command": "ls -la"
+        }
+      }
+    },
+    {
+      "id": "claude_edit_basic",
+      "executor": "claude",
+      "tool_name": "Edit",
+      "args": {
+        "file_path": "src/foo.py",
+        "old_string": "print('hi')",
+        "new_string": "print('hello')"
+      },
+      "result": "",
+      "status": "completed",
+      "expected": {
+        "kind": "file_edit",
+        "status": "completed",
+        "title": "src/foo.py",
+        "subtitle": "+1 -1",
+        "payload_keys": [
+          "path",
+          "hunks",
+          "added",
+          "deleted"
+        ],
+        "payload_invariants": {
+          "path": "src/foo.py",
+          "added": 1,
+          "deleted": 1,
+          "hunks_len_min": 1
+        }
+      }
+    },
+    {
+      "id": "claude_glob",
+      "executor": "claude",
+      "tool_name": "Glob",
+      "args": {
+        "pattern": "*.py"
+      },
+      "result": "src/foo.py\nsrc/bar.py\nsrc/baz.py\n",
+      "status": "completed",
+      "expected": {
+        "kind": "glob",
+        "status": "completed",
+        "title": "pattern: *.py",
+        "subtitle": "3 matches",
+        "payload_keys": [
+          "pattern",
+          "matches"
+        ],
+        "payload_invariants": {
+          "pattern": "*.py",
+          "matches_len": 3,
+          "matches_first": "src/foo.py"
+        }
+      }
+    },
+    {
+      "id": "claude_grep_basic",
+      "executor": "claude",
+      "tool_name": "Grep",
+      "args": {
+        "pattern": "TODO"
+      },
+      "result": "src/foo.py:1:TODO fix\nsrc/bar.py:5:TODO refactor\n",
+      "status": "completed",
+      "expected": {
+        "kind": "grep",
+        "status": "completed",
+        "title": "pattern: TODO",
+        "subtitle": "",
+        "payload_keys": [
+          "pattern",
+          "matches"
+        ],
+        "payload_invariants": {
+          "pattern": "TODO",
+          "matches_len_min": 1,
+          "matches_first_path_in": [
+            "src/foo.py",
+            "src/bar.py"
+          ]
+        }
+      }
+    },
+    {
+      "id": "claude_unknown_tool",
+      "executor": "claude",
+      "tool_name": "WebFetch",
+      "args": {
+        "url": "https://example.com",
+        "method": "GET"
+      },
+      "result": "<html>...</html>",
+      "status": "completed",
+      "expected": {
+        "kind": "unknown",
+        "status": "completed",
+        "title": "WebFetch",
+        "subtitle": "",
+        "payload_keys": [
+          "tool_name",
+          "args_preview",
+          "result_preview"
+        ],
+        "payload_invariants": {
+          "tool_name": "",
+          "args_preview_contains": "url",
+          "result_preview_len_max": 500
+        }
+      }
+    },
+    {
+      "id": "opencode_read_directory_xml",
+      "executor": "opencode",
+      "tool_name": "read",
+      "args": {
+        "filePath": "/Users/x/project"
+      },
+      "result": "<path>/Users/x/project</path>\n<type>directory</type>\n<entries>\n.codegraph/\n.git/\nsrc/\ntests/\n(4 entries)\n</entries>",
+      "status": "completed",
+      "expected": {
+        "kind": "file_read",
+        "status": "completed",
+        "title": "/Users/x/project",
+        "subtitle": "4 entries",
+        "payload_keys": [
+          "path",
+          "is_dir",
+          "entries",
+          "truncated"
+        ],
+        "payload_invariants": {
+          "path": "/Users/x/project",
+          "is_dir": true,
+          "entries_len": 4,
+          "entries_first": ".codegraph/"
+        }
+      }
+    },
+    {
+      "id": "opencode_read_file_xml",
+      "executor": "opencode",
+      "tool_name": "read",
+      "args": {
+        "filePath": "/Users/mozzie/Desktop/Projects/Orca/pyproject.toml"
+      },
+      "result": "<path>/Users/mozzie/Desktop/Projects/Orca/pyproject.toml</path>\n<type>file</type>\n<content>\n1: [build-system]\n2: requires = [\"hatchling\"]\n3: build-backend = \"hatchling.build\"\n4: \n5: [project]\n6: name = \"orca\"\n(End of file - total 6 lines)\n</content>",
+      "status": "completed",
+      "expected": {
+        "kind": "file_read",
+        "status": "completed",
+        "title": "/Users/mozzie/Desktop/Projects/Orca/pyproject.toml",
+        "subtitle": "",
+        "payload_keys": [
+          "path",
+          "is_dir",
+          "content",
+          "truncated"
+        ],
+        "payload_invariants": {
+          "path": "/Users/mozzie/Desktop/Projects/Orca/pyproject.toml",
+          "is_dir": false,
+          "truncated": false,
+          "content_len": 6,
+          "content_first_line_n": 1,
+          "content_first_line_text": "[build-system]"
+        }
+      }
+    },
+    {
+      "id": "opencode_read_directory_xml_malformed_fallback",
+      "executor": "opencode",
+      "tool_name": "read",
+      "args": {
+        "filePath": "/bad/path"
+      },
+      "result": "<path>/bad/path</path>\n<type>directory</type>\n<entries>not<closed properly",
+      "status": "completed",
+      "expected": {
+        "kind": "file_read",
+        "status": "completed",
+        "title": "/bad/path",
+        "subtitle": "",
+        "payload_keys": [
+          "path",
+          "is_dir",
+          "content",
+          "truncated"
+        ],
+        "payload_invariants": {
+          "path": "/bad/path",
+          "is_dir": false,
+          "_note": "XML 解析失败时降级 is_dir=False 原样文本展示（spec §13 fail visible）"
+        }
+      }
+    },
+    {
+      "id": "opencode_bash",
+      "executor": "opencode",
+      "tool_name": "bash",
+      "args": {
+        "command": "echo hi"
+      },
+      "result": "hi\n",
+      "status": "completed",
+      "expected": {
+        "kind": "shell",
+        "status": "completed",
+        "title": "$ echo hi",
+        "subtitle": "",
+        "payload_keys": [
+          "command",
+          "output"
+        ],
+        "payload_invariants": {
+          "command": "echo hi",
+          "output": "hi\n"
+        }
+      }
+    },
+    {
+      "id": "claude_write_new_file",
+      "executor": "claude",
+      "tool_name": "Write",
+      "args": {
+        "file_path": "new.py",
+        "content": "import os\n\nprint(os.getcwd())\n"
+      },
+      "result": "",
+      "status": "completed",
+      "expected": {
+        "kind": "file_write",
+        "status": "completed",
+        "title": "new.py",
+        "subtitle": "new, 30B",
+        "payload_keys": [
+          "path",
+          "content",
+          "bytes"
+        ],
+        "payload_invariants": {
+          "path": "new.py",
+          "content_len": 3,
+          "bytes_min": 1
+        }
+      }
+    },
+    {
+      "id": "running_status_no_result",
+      "executor": "claude",
+      "tool_name": "Bash",
+      "args": {
+        "command": "long-running"
+      },
+      "result": null,
+      "status": "running",
+      "expected": {
+        "kind": "shell",
+        "status": "running",
+        "title": "$ long-running",
+        "subtitle": "",
+        "payload_keys": [
+          "command",
+          "output"
+        ],
+        "payload_invariants": {
+          "command": "long-running",
+          "output": ""
+        }
+      }
+    }
+  ]
+}

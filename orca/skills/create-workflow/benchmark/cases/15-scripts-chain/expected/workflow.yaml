@@ -1,0 +1,21 @@
+name: scripts_chain
+description: "散 script 串成 script 节点链：fetch→process→report"
+entry: fetch
+nodes:
+  - name: fetch
+    kind: script
+    command: "python fetch.py"
+    routes:
+      - to: process
+  - name: process
+    kind: script
+    command: "python process.py"
+    routes:
+      - to: report
+  - name: report
+    kind: script
+    command: "python report.py"
+    routes:
+      - to: $end
+outputs:
+  result: "{{ report.output.stdout }}"

@@ -6,8 +6,9 @@
 // 不清 store.gate / 不关弹窗。弹窗关闭只能由 backend emit human_decision_resolved（store.gate→null）触发。
 
 import { useState } from "react";
-import type { GateState } from "@/types/events";
+import type { GateState } from "@/types/store-types";
 import { postGateRespond } from "./post-gate-respond";
+import { GateObserveOnlyNotice, useGateWritable } from "./gate-writable";
 
 /** 工具权限 4 选项（对齐 hook 桥 allow/deny + 扩展 edit/skip）。 */
 type PermissionAnswer = "allow" | "deny" | "edit" | "skip";
@@ -23,6 +24,9 @@ export function PermissionGate({ gate }: { gate: GateState }) {
   // submitting 仅驱动按钮 disabled + 文案（UX 反馈），**不清 gate、不关弹窗**（SPEC §1.6）。
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // SPEC web-attach §8 AC11：attached run（``writable=false``）→ 模态显 observe-only，
+  // 禁用提交按钮（用户应在 run 自己的 shell 作答）。
+  const writable = useGateWritable();
 
   const tool = String(gate.context?.tool ?? "<unknown>");
   const toolInput = gate.context?.tool_input ?? {};
@@ -30,6 +34,7 @@ export function PermissionGate({ gate }: { gate: GateState }) {
 
   async function handleClick(answer: PermissionAnswer) {
     if (submitting) return; // 防重复点
+    if (!writable) return; // attached read-only：禁提交
     setSubmitting(true);
     setError(null);
     try {
@@ -75,13 +80,14 @@ export function PermissionGate({ gate }: { gate: GateState }) {
               提交失败：{error}
             </p>
           )}
+          <GateObserveOnlyNotice />
         </div>
         <div className="flex justify-end gap-2 border-t border-slate-200 px-5 py-3">
           {BUTTONS.map((b) => (
             <button
               key={b.answer}
               type="button"
-              disabled={submitting}
+              disabled={submitting || !writable}
               onClick={() => handleClick(b.answer)}
               className={`rounded px-3 py-1.5 text-sm disabled:opacity-50 ${b.className}`}
               data-testid={`gate-${b.answer}`}

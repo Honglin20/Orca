@@ -12,13 +12,25 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict
 
 # 单个 node 的状态（注意：用 "done"，与 RunState.status 的 "completed" 区分，SPEC §4.2 有意为之）。
-Status = Literal["pending", "running", "done", "failed", "skipped"]
+#
+# ``blocked``（ADR §4.3 / 接口收敛 v2 §4.3）：reducer fold 派生态，不入 tape。派生条件 =
+# 该 node 当前 ``running`` 且有未 resolved 的 ``human_decision_requested`` /
+# ``interrupt_requested`` 事件。``projections.node_status`` 与 ``apply_event`` 同源派生
+# （P4：消费层不许自造 blocked 字符串）。
+Status = Literal["pending", "running", "done", "failed", "skipped", "blocked"]
 
 
 class UsageSummary(BaseModel):
     """token / 成本用量汇总。
 
     node_breakdown 为每 node 的用量（递归自引用），支持按 node 下钻。
+
+    注意（web-v2 §3.2 B1）：``agent_usage`` 事件 data 已扩展 ``reasoning_tokens`` 字段
+    （translator 对 opencode ``step_finish.tokens.reasoning`` lossless capture），但本
+    ``UsageSummary`` **不聚合** ``reasoning_tokens``——B1 任务范围只覆盖 tape capture，
+    aggregation 进 TopBar/AgentsList 留给后续阶段（UsageSummary 加字段 + projections
+    读取 + TUI Header 显累加）。当前 reasoning_tokens 仅在 tape 里可查（前端可直接读
+    ``event.data.reasoning_tokens``，不依赖 UsageSummary）。
     """
 
     model_config = ConfigDict(extra="forbid")

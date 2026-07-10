@@ -241,12 +241,16 @@ def test_loop_terminates_at_condition(tmp_path):
 
 
 def test_max_iter_produces_workflow_failed(tmp_path):
-    """永不终止回环（n 永远 1）→ MaxIterations → workflow_failed（error_type 正确）。"""
+    """永不终止回环（n 永远 1）→ MaxIterations → workflow_failed{kind: business_config}。
+
+    phase-11 v2.1：``MaxIterationsError`` 是 ``ExecError`` 子类（kind=BUSINESS_CONFIG），
+    orchestrator ``_classify_error`` 透传 ``e.kind.value``。
+    """
     orch = _orch(_dead_loop_wf(), tmp_path)
     state = _orch_run(orch)
     assert state.status == "failed"
     failed_ev = [e for e in orch.bus.tape.replay() if e.type == "workflow_failed"][0]
-    assert failed_ev.data["error_type"] == "MaxIterations"
+    assert failed_ev.data["kind"] == "business_config"
 
 
 def test_max_iter_override_low(tmp_path):
@@ -280,7 +284,8 @@ def test_no_route_match_workflow_failed(tmp_path):
     state = _orch_run(orch)
     assert state.status == "failed"
     failed_ev = [e for e in orch.bus.tape.replay() if e.type == "workflow_failed"][0]
-    assert failed_ev.data["error_type"] == "NoRouteMatch"
+    # phase-11 v2.1：RouteError 是 ExecError 子类（kind=BUSINESS_CONFIG，phase=route_deadlock）。
+    assert failed_ev.data["kind"] == "business_config"
     assert failed_ev.data["node"] == "decide"
 
 
@@ -288,7 +293,11 @@ def test_no_route_match_workflow_failed(tmp_path):
 
 
 def test_executor_failure_workflow_failed(tmp_path, monkeypatch):
-    """executor node_failed → workflow_failed（透传 error_type + node 名，F1）。"""
+    """executor node_failed → workflow_failed（透传 kind + node 名，F1）。
+
+    phase-11 v2.1：``error_type`` 旧字面值（ExecTimeout）→ ``kind`` 值（transport_timeout），
+    ``ExecError.from_failed_data`` 读兼容期经 ``_LEGACY_ERROR_TYPE_TO_KIND`` 反向映射。
+    """
 
     def fake_make_executor(node, agent_tools_server=None, bus=None, **kwargs):
         return FakeExecutor.failing(
@@ -308,7 +317,8 @@ def test_executor_failure_workflow_failed(tmp_path, monkeypatch):
     state = _orch_run(orch)
     assert state.status == "failed"
     failed_ev = [e for e in orch.bus.tape.replay() if e.type == "workflow_failed"][0]
-    assert failed_ev.data["error_type"] == "ExecTimeout"
+    # kind=transport_timeout（TRANSPORT_TIMEOUT，由 from_failed_data 反向映射 ExecTimeout）
+    assert failed_ev.data["kind"] == "transport_timeout"
     # F1 修复：workflow_failed.data.node 含失败 node 名（SPEC §3.4）
     assert failed_ev.data["node"] == "a"
 
@@ -324,6 +334,45 @@ def test_workflow_outputs_evaluated(tmp_path):
     completed_ev = [e for e in orch.bus.tape.replay() if e.type == "workflow_completed"][0]
     assert "result" in completed_ev.data["outputs"]
     assert "step_c" in completed_ev.data["outputs"]["result"]
+
+
+# ── phase-10 技术债回填：setup_outputs 注入 runtime context ──────────────────
+
+
+def test_setup_outputs_injected_and_rendered(tmp_path):
+    """setup_outputs 透传 → ctx.setup → ``{{ setup.<agent>.output.<field> }}`` 可渲染。
+
+    MCP 壳主 session 替 setup agent 跑完收集的 outputs，经 orchestrator 包成
+    ``{agent: {"output": ...}}`` 存 ctx.setup，execute phase 节点能消费。
+    """
+    wf = Workflow(
+        name="setup_inject",
+        entry="a",
+        setup=[AgentNode(name="collector", prompt="collect the host")],
+        nodes=[
+            ScriptNode(
+                name="a",
+                command="echo {{ setup.collector.output.host }}",
+                routes=[Route(to="$end")],
+            ),
+        ],
+        outputs={"result": "{{ a.output.stdout }}"},
+    )
+    orch = _orch(
+        wf, tmp_path, setup_outputs={"collector": {"host": "orbittest"}}
+    )
+    state = _orch_run(orch)
+    assert state.status == "completed"
+    completed_ev = [e for e in orch.bus.tape.replay() if e.type == "workflow_completed"][0]
+    # setup_outputs 注入后 render 出 orbittest（非空、非原文字面量）
+    assert "orbittest" in completed_ev.data["outputs"]["result"]
+
+
+def test_setup_outputs_none_does_not_break_normal_workflow(tmp_path):
+    """无 setup_outputs（None）→ ctx.setup 空 dict，普通 workflow 照常跑（向后兼容）。"""
+    orch = _orch(_linear_wf(), tmp_path)  # 不传 setup_outputs
+    state = _orch_run(orch)
+    assert state.status == "completed"
 
 
 # ── task 注入 ─────────────────────────────────────────────────────────────────

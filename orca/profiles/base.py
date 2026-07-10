@@ -18,13 +18,20 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import shlex
 from dataclasses import dataclass, field
 from typing import Callable, Literal
 
 from orca.profiles.capabilities import ProviderCapabilities
 from orca.profiles.terminal import RESULT_LINE, TerminalContract
 from orca.schema import Event
+
+logger = logging.getLogger(__name__)
+
+# resolve_prompt_channel 合法值集（与 prompt_channel 字段 Literal 同步）。
+_VALID_PROMPT_CHANNELS: frozenset[str] = frozenset({"stdin", "argv"})
 
 # translator：stream-json 一行 → 一批 Event（phase 4 落真实现，phase 3 用 dummy）。
 # 入参含 session_id 上下文（translator 把流片段映射成带 session_id 的事件）。
@@ -67,6 +74,28 @@ class CliProfile:
     # events 模式（opencode）显式覆盖。默认值保既有调用零改动（向后兼容）。
     terminal: TerminalContract = field(default_factory=lambda: RESULT_LINE)
 
+    # ── flags override 通道（镜像 cli_path_env 的 env 注入机制）──
+    # 空串 = 无 override 通道（默认）：``resolve_flags()`` 直接返回 ``self.flags``。
+    # 非空 = env 变量名（如 ``ORCA_CLAUDE_FLAGS``）；``orca executor set --flags`` 写 config.json，
+    # 启动期 ``apply_config_env`` 把 config 注入此 env，``resolve_flags()`` 运行时读。
+    # 默认空保既有测试 fake 零改动（向后兼容）。
+    flags_env: str = ""
+
+    # ── prompt_channel override 通道（同构 flags_env，2026-07-07 executor CLI 扩展）──
+    # 空串 = 无 override 通道（默认）：``resolve_prompt_channel()`` 直接返回 ``self.prompt_channel``。
+    # 非空 = env 变量名（如 ``ORCA_OPENCODE_PROMPT_CHANNEL``）；``orca executor set --prompt-channel``
+    # 写 config.json，启动期 ``apply_config_env`` 注入此 env，``resolve_prompt_channel()`` 运行时读。
+    prompt_channel_env: str = ""
+
+    # ── reasoning flags 通道（web-shell-v2 §0 D-decisions + §11 step1 B2）──
+    # 空串 = 无 reasoning 通道（默认）：``resolve_reasoning_args()`` 返回 ``[]``。
+    # 非空 = env 变量名（如 ``ORCA_OPENCODE_REASONING_FLAGS``）；用户/配置可设为
+    # ``"--thinking"`` / ``"--variant deepseek-reasoner"`` / 任意 opencode reasoning flag 组合。
+    # ``resolve_reasoning_args()`` 运行时 shlex.split 读；空 env → ``[]``（opt-in，默认 off）。
+    # 与 ``flags_env`` 区别：``flags_env`` **替换** flags；``reasoning_flags_env`` **追加** 到 extra_args
+    # （reasoning 是可选增强，不替换基础 flags；与 ``--model`` extra_args 同路径）。
+    reasoning_flags_env: str = ""
+
     # ── prompt 形状 ──
     prompt_paradigm: Literal["minimal"] = "minimal"  # 暂只支持 minimal
 
@@ -79,3 +108,71 @@ class CliProfile:
         exec/ 层（phase 4）的职责，本层只解析路径选择。
         """
         return os.environ.get(self.cli_path_env, self.default_cli_path)
+
+    def resolve_flags(self) -> tuple[str, ...]:
+        """返回实际 flags：env > config > default，运行时读（与 ``resolve_cli_path`` 同构）。
+
+        三态（**逐字按 plan Part B 实现**）：
+          1. ``flags_env == ""``（无 override 通道，如 project profile 未设此字段）→ ``self.flags``。
+          2. ``flags_env`` 显式设（**含空串** = 显式清空 flags，如 ``ORCA_OPENCODE_FLAGS=``）→
+             ``tuple(shlex.split(env_value))``。``shlex.split('') == []`` round-trip 安全。
+          3. ``flags_env`` 未设（不在 ``os.environ``）→ ``self.flags``（default）。
+
+        优先级 shell env > config（启动期 ``apply_config_env`` 已 ``setdefault`` 进 env）>
+        profile default。三态区分「未设 / 显式置空 / 显式置值」。
+
+        依赖单向：只读 ``os.environ``（stdlib），**不** import iface.cli.config——profiles
+        是依赖底层，env 注入逻辑在 iface 层（合法 iface→profiles 方向）。
+        """
+        if not self.flags_env:
+            return self.flags
+        if self.flags_env in os.environ:
+            return tuple(shlex.split(os.environ[self.flags_env]))
+        return self.flags
+
+    def resolve_prompt_channel(self) -> Literal["stdin", "argv"]:
+        """返回实际 prompt 投递方式：env > config > default，运行时读（与 ``resolve_flags`` 同构）。
+
+        三态（同 ``resolve_flags``）：
+          1. ``prompt_channel_env == ""``（无 override 通道）→ ``self.prompt_channel``。
+          2. ``prompt_channel_env`` 显式设且 env 值合法（``stdin``/``argv``）→ 该值。
+          3. env 值非法（用户手填错）→ warn + 回落 ``self.prompt_channel``（fail loud 但可恢复，
+             不让一个坏值挂死整个 spawn）。
+
+        双层校验：``apply_config_env`` 注入前已校验一次；此处在 resolve 层再校验（防 shell 直接
+        ``export ORCA_OPENCODE_PROMPT_CHANNEL=garbage`` 绕过注入）。
+        """
+        if not self.prompt_channel_env:
+            return self.prompt_channel
+        if self.prompt_channel_env in os.environ:
+            val = os.environ[self.prompt_channel_env]
+            if val in _VALID_PROMPT_CHANNELS:
+                return val  # type: ignore[return-value]
+            logger.warning(
+                "profile %r 的 prompt_channel env %s=%r 非法（必须 stdin|argv），回落 default %r",
+                self.name, self.prompt_channel_env, val, self.prompt_channel,
+            )
+        return self.prompt_channel
+
+    def resolve_reasoning_args(self) -> list[str]:
+        """返回 reasoning extra_args（如 ``["--thinking"]`` 或 ``["--variant", "deepseek-reasoner"]``）。
+
+        web-shell-v2 §0 D-decisions + §11 step1 B2：opencode ``--thinking`` / ``--variant``
+        经此通道注入。**opt-in（默认 off）**：``reasoning_flags_env == ""`` 或 env 未设 → ``[]``
+        （不改 spawn argv，保既有行为）。
+
+        三态（同 ``resolve_flags`` / ``resolve_prompt_channel`` 的 env 注入机制）：
+          1. ``reasoning_flags_env == ""``（无 override 通道）→ ``[]``。
+          2. env 显式设（含空串 = 显式清空）→ ``shlex.split(env_value)``。``shlex.split('') == []``。
+          3. env 未设 → ``[]``（default，向后兼容）。
+
+        消费点：executor ``_build_spawn_config`` 把结果 append 到 extra_args（与 ``--model`` 同路径）。
+        与 ``resolve_flags`` 的关键区别：``resolve_flags`` **替换** profile.flags，本函数**只追加**
+        reasoning 专有 flag——理由：reasoning 是可选增强（不能替换 ``run --format json`` 等基础 flag），
+        且 opencode profile 的基础 flags 与 reasoning 正交（前者定协议格式，后者定模型行为）。
+        """
+        if not self.reasoning_flags_env:
+            return []
+        if self.reasoning_flags_env in os.environ:
+            return shlex.split(os.environ[self.reasoning_flags_env])
+        return []

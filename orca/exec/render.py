@@ -23,7 +23,6 @@ Jinja2 命名空间（SPEC §4.7）：
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from jinja2 import Environment, StrictUndefined, TemplateError
@@ -48,12 +47,17 @@ def _namespace(ctx: RunContext) -> dict[str, Any]:
     - 每个 node 的 output：以 node 名为 key 放顶层（``ctx.outputs`` 展开），
       支持 ``{{ optimizer.output.structure }}`` 这种点路径（``outputs["optimizer"]
       = {"output": {...}}``，故 ``{{ optimizer.output.structure }}`` 取得到）
+    - ``setup``：setup phase outputs（``{{ setup.<agent>.output.<field> }}``），
+      形状 ``{agent_name: {"output": {...}}}``（与 node outputs 同形）。无 setup phase → 空 dict。
     - ``locals``：foreach body 注入的局部变量（``{{ item }}`` / ``{{ _index }}``）
       摊到顶层；普通 node ``locals`` 为空 dict（无影响）。
     """
     ns: dict[str, Any] = {"inputs": dict(ctx.inputs)}
     # ctx.outputs 的 key（node 名）直接做顶层变量，value（{"output": raw} dict）原样暴露
     ns.update(ctx.outputs)
+    # setup phase outputs：暴露为 setup 根（{{ setup.<agent>.output.<field> }}）。
+    # 无 setup phase 时 ctx.setup 为空 dict，不影响现有模板。
+    ns["setup"] = ctx.setup
     # ctx.locals 摊顶层（foreach body 的 item / _index；普通 node 为空，update 无影响）
     ns.update(ctx.locals)
     return ns
@@ -80,47 +84,34 @@ def render_command(command: str, ctx: RunContext) -> str:
 
 
 def render_prompt(node, ctx: RunContext) -> str:
-    """组装 agent prompt（SPEC §4.6 / §7.9）。
+    """组装 agent prompt（SPEC §4.6 / §7.9 / phase-14）。
 
-    - ``node.prompt`` 非空 → 内联短 prompt，渲染后返回
-    - ``node.prompt is None`` → 从 ``agents/<node.name>.md`` 加载（与 compile 约定一致），
-      文件不存在 → ``ExecError(phase="render")``（fail loud）
+    phase-14：prompt 在 compile 期已由 ``AgentResolver`` 物化进 ``node.prompt``（agent 引用
+    ``agent: <name>`` 或旧约定 name-fallback），render 层**零文件 I/O**（删了旧的
+    ``_load_agent_md`` 双加载债——它用 cwd 相对路径，与 compile 期 yaml 父目录不一致）。
 
-    agents/<name>.md 的内容经 Jinja2 渲染（支持 ``{{ inputs.x }}`` 引用）。
+    ``node.prompt`` 为 None 或空串 → 防御性 fail loud（C7：空 prompt 给 claude 行为未定义；
+    也用于归因「绕过 load_workflow 直接构造 Workflow」的程序化构造误用）。
 
     phase 11 §4：渲染完 base prompt 后，若 ``ctx.user_guidance`` 非空，拼 ``[User Guidance]``
     段到末尾（``ctx.guidance_prompt_section()``）。这是用户 Ctrl+G + CONTINUE 注入纠偏话的
     落地点——重 spawn 的 agent 看到 prompt 末尾的 guidance 段。无 guidance 时返回 base 原样。
     """
-    if node.prompt is not None:
-        base = render_template(node.prompt, ctx)
-    else:
-        base = _load_agent_md(node, ctx)
+    # C7：None 或空串 "" 都防（空 prompt 给 claude 行为未定义）。
+    if not node.prompt:
+        raise ExecError(
+            phase="render",
+            message=(
+                f"agent {node.name!r} 的 prompt 未物化或为空（node.prompt={node.prompt!r}）。"
+                "是否绕过了 load_workflow 直接构造 Workflow？"
+                "agent 引用必须在 compile 期经 AgentResolver 解析物化进 node.prompt。"
+            ),
+        )
+    base = render_template(node.prompt, ctx)
 
     # phase 11 §4：拼 guidance section（无 guidance 时 section=None，原样返回）。
     guidance_section = ctx.guidance_prompt_section()
     if guidance_section:
         return base + guidance_section
     return base
-
-
-def _load_agent_md(node, ctx: RunContext) -> str:
-    """加载 agents/<node.name>.md 并 Jinja2 渲染（SPEC §4.6）。"""
-    md_path = Path("agents") / f"{node.name}.md"
-    if not md_path.is_file():
-        raise ExecError(
-            phase="render",
-            message=(
-                f"agent {node.name!r} 的 prompt 为空且找不到约定文件 {md_path}（cwd="
-                f"{Path.cwd()!s}）；要么在 node 里内联 prompt，要么提供该 md 文件"
-            ),
-        )
-    try:
-        md_text = md_path.read_text(encoding="utf-8")
-    except OSError as e:
-        raise ExecError(
-            phase="render",
-            message=f"读取 agent prompt 文件 {md_path} 失败：{e}",
-        ) from e
-    return render_template(md_text, ctx)
 

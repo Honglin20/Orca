@@ -55,7 +55,7 @@ def make_tape(tmp_path: Path, run_id: str = "r1", name: str = "events.jsonl") ->
 
 
 @contextlib.asynccontextmanager
-async def orca_mcp_subprocess(runs_dir: Path, *extra: str):
+async def orca_mcp_subprocess(runs_dir: Path, *extra: str, cwd: Path | None = None):
     """async context：spawn ``orca mcp`` + stdio_client 连接 → yield ClientSession。
 
     测试侧 ``run_async`` 内 ``async with orca_mcp_subprocess(tmp_path):`` 用。返回已
@@ -67,15 +67,13 @@ async def orca_mcp_subprocess(runs_dir: Path, *extra: str):
     用 ``uv run orca`` 拉 console_script（不用 ``python -m orca.iface.cli.commands`` ——
     ``orca.iface.cli.__init__`` 会拉 textual import，无必要且慢）。
 
+    phase-10 v4：``cwd`` 参数控制 subprocess 工作目录（v4 catalog 扫 ``<cwd>/workflows/``）。
+    默认 None = 项目根（兼容旧 E2E）；E2E 需 catalog 时设 ``cwd=runs_dir`` 并在
+    ``runs_dir/workflows/`` 放测试 YAML。
+
     phase-13 §7.7：``runs_dir`` 长度超 SOCK_PATH_MAX（90）时自动转 /tmp/orca-mcp-<hash>/
     短路径（macOS pytest tmp_path 在 /private/var/folders 触发 fail loud）。stderr 仍写到
     原 runs_dir（调用方期望）。
-
-    **注**：asyncio subprocess transport 在 Python 3.12 有 ``__del__`` GC 时机小毛病——
-    transport 对象在 ``asyncio.run`` 关 loop 后才被 GC，``__del__`` 调 ``call_soon`` raise
-    ``RuntimeError: Event loop is closed``（pytest 报 ``PytestUnraisableExceptionWarning``）。
-    这是 CPython + asyncio 的已知小毛病（非 Orca bug、非 mcp SDK bug），
-    ``pyproject.toml`` ``filterwarnings`` 静默此特定 warning（不影响 RuntimeWarning 检查）。
     """
     from mcp.client.session import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -89,13 +87,15 @@ async def orca_mcp_subprocess(runs_dir: Path, *extra: str):
         actual = runs_dir
     stderr_path = runs_dir / "server.stderr"  # stderr 仍写到原 tmp_path（调用方期望）
     runs_dir.mkdir(parents=True, exist_ok=True)
+    # v4：cwd 控制 catalog 扫描目录（默认项目根）
+    effective_cwd = cwd if cwd is not None else Path(__file__).resolve().parents[3]
     stderr_file = open(stderr_path, "w", encoding="utf-8")
     try:
         params = StdioServerParameters(
             command="uv",
             args=["run", "orca", "mcp", "--runs-dir", str(actual),
                   "--max-concurrent", "3", *extra],
-            cwd=str(Path(__file__).resolve().parents[3]),
+            cwd=str(effective_cwd),
             errlog=stderr_file,
         )
         async with stdio_client(params) as (read, write):

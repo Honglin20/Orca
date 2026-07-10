@@ -85,10 +85,11 @@ def test_terminate_success_emits_workflow_completed_with_terminate_outputs(tmp_p
 
 
 def test_terminate_failed_emits_workflow_failed_with_reason(tmp_path, monkeypatch):
-    """status=failed → workflow_failed{error_type=WorkflowTerminated, message=reason, node=t}。
+    """status=failed → workflow_failed{kind: business_agent, message=reason, node=t}。
 
     关键 INTENT：terminate failed **不是** executor 失败（executor 正常 node_completed），
-    是业务声明；error_type 是 WorkflowTerminated 而非 RenderError / ExecTimeout 等。
+    是业务声明；phase-11 v2.1 / ADR §4.1 决策 1.2：TerminateNode failed 路径翻译为
+    ``node_failed{kind=BUSINESS_AGENT}``，故 ``data.kind`` 是 ``business_agent``。
     """
     wf = Workflow(
         name="terminate_failed",
@@ -107,7 +108,7 @@ def test_terminate_failed_emits_workflow_failed_with_reason(tmp_path, monkeypatc
 
     assert state.status == "failed"
     failed_ev = [e for e in orch.bus.tape.replay() if e.type == "workflow_failed"][0]
-    assert failed_ev.data["error_type"] == "WorkflowTerminated"
+    assert failed_ev.data["kind"] == "business_agent"
     assert failed_ev.data["message"] == "rejected unknown"
     assert failed_ev.data["node"] == "reject"
 
@@ -182,7 +183,7 @@ def test_e2e_script_to_terminate_failed(tmp_path):
 
     assert state.status == "failed"
     failed_ev = [e for e in orch.bus.tape.replay() if e.type == "workflow_failed"][0]
-    assert failed_ev.data["error_type"] == "WorkflowTerminated"
+    assert failed_ev.data["kind"] == "business_agent"
     assert failed_ev.data["message"] == "rejected category unknown"
     assert failed_ev.data["node"] == "reject"
     # classifier 已执行（script 真 echo）

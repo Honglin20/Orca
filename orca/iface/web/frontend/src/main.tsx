@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./index.css";
+import "katex/dist/katex.min.css";
 import { useWorkflowStore } from "@/stores/workflow-store";
 
 // 调试入口（opt-in）：URL 带 ?debug=1 时把 store 挂在 window.__orcaStore，让 playwright

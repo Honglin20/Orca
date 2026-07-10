@@ -251,3 +251,70 @@ def test_shutdown_stops_gate_handlers(tmp_path, yaml_path):
         assert handle._task is not None and handle._task.done()
 
     run_async(go())
+
+
+# ── phase-10 技术债回填：setup_outputs 注入 + resume 边界 ────────────────────
+
+
+def _setup_workflow_yaml(tmp_path: Path) -> Path:
+    """带 setup phase 的 workflow（setup_outputs 注入路径用）。"""
+    p = tmp_path / "setup_wf.yaml"
+    p.write_text(
+        """
+name: setup_wf
+description: setup phase demo（测试用）
+setup:
+  - name: collector
+    kind: agent
+    prompt: "collect the host"
+entry: a
+nodes:
+  - name: a
+    kind: script
+    command: "echo {{ setup.collector.output.host }}"
+    routes:
+      - to: $end
+outputs:
+  result: "{{ a.output.stdout }}"
+""",
+        encoding="utf-8",
+    )
+    return p
+
+
+def test_start_run_injects_setup_outputs_to_completion(tmp_path):
+    """setup_outputs 透传 RunManager → orchestrator → render，跑到 completed。
+
+    端到端验证 phase-10 技术债回填：MCP 边界收集的 setup_outputs 真注入 runtime，
+    execute phase 能消费 ``{{ setup.* }}``。
+    """
+    yaml_path = _setup_workflow_yaml(tmp_path)
+    manager = make_manager(tmp_path)
+
+    async def go():
+        rid = await manager.start_run(
+            str(yaml_path), {}, None, None,
+            setup_outputs={"collector": {"host": "orbittest"}},
+        )
+        await manager.wait_done(rid, timeout=10.0)
+        handle = manager.get_handle(rid)
+        assert handle.status == "completed"
+        completed = [e for e in manager.get_run_events(rid)
+                     if e.type == "workflow_completed"][0]
+        assert "orbittest" in completed.data["outputs"]["result"]
+        await manager.shutdown()
+
+    run_async(go())
+
+
+def test_start_run_resume_with_setup_phase_fails_loud(tmp_path):
+    """resume + setup workflow → fail loud（setup_outputs 未持久化，边界声明）。"""
+    yaml_path = _setup_workflow_yaml(tmp_path)
+    manager = make_manager(tmp_path)
+
+    async def go():
+        with pytest.raises(ValueError, match="setup workflow 暂不支持 resume"):
+            await manager.start_run(str(yaml_path), {}, None, None, resume=True)
+        await manager.shutdown()
+
+    run_async(go())

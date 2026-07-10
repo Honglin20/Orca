@@ -1,14 +1,17 @@
-# mxint_analysis —— 迁移自 AgentHarness 的 mxint-analysis（保骨架换内容）
+# mxint_analysis —— 真实 bitx 量化分析 workflow（迁移自 AgentHarness mxint-analysis）
 # 5 agent 链路：analyzer → configurator → runner → diagnostic_saver → report_painter
-# 验证 Orca 的 agent DAG 推进 + 结构化输出 schema + 工具白名单 + tape 持久化。
+# 跑真 bitx（Session + 5 observers + StudyReport.save + diagnostic_pipeline），耗时 5-15 分钟。
+# 验证 Orca 的 agent DAG 推进 + 结构化输出 schema + 工具白名单 + tape 持久化 +
+# render_chart spawn-script 链路（report_painter 推真图表）。
 #
-# 跑：`orca run examples/mxint_analysis.yaml`
+# 跑：`teams run examples/mxint_analysis.yaml`
 name: mxint_analysis
 description: |
-  迁移自 AgentHarness mxint-analysis 的端到端测试 workflow（保骨架换内容）。
-  5 个 agent 顺序推进，每步带结构化输出 schema；目标项目用轻量 Python 替代
-  （无 torch / bitx 依赖），核心验证 Orca 框架的 DAG 推进 / schema 提取 /
-  工具白名单 / CLI 打印 / tape 持久化。
+  迁移自 AgentHarness mxint-analysis 的端到端量化分析 workflow（真实 bitx 版）。
+  5 个 agent 顺序推进：分析目标 PyTorch 项目 → 写 bitx adapter → 跑 MXInt8 量化分析 →
+  跑 diagnostic pipeline → 推真图表（orca.chart.render_chart）+ 写学术风格 REPORT.md。
+  目标项目用 sklearn digits + ConfigurableMLP（真实 PyTorch，~9K 参数），bitx 真跑
+  量化误差分析（per-layer QSNR + bottleneck + recovery strategies）。
 entry: analyzer
 
 inputs:
@@ -22,6 +25,9 @@ nodes:
   # ── agent 1/5：分析目标项目 ─────────────────────────────────────────
   - name: analyzer
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: analyzer              # phase-14 显式引用 examples/agents/analyzer.md
     tools: [Bash, Read, Grep, Glob, TodoWrite]
     output_schema:
       type: object
@@ -40,6 +46,9 @@ nodes:
   # ── agent 2/5：写 adapter + 拼 cli_command ──────────────────────────
   - name: configurator
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: configurator          # phase-14 显式引用 examples/agents/configurator.md
     tools: [Bash, Read, Write, Edit, Grep, Glob, TodoWrite]
     output_schema:
       type: object
@@ -56,7 +65,10 @@ nodes:
   # ── agent 3/5：跑诊断脚本，回收 output_dir + 精度/QSNR ─────────────
   - name: runner
     kind: agent
-    tools: [Bash, Read, Write]
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: runner                # phase-14 显式引用 examples/agents/runner.md
+    tools: [Bash, Read, Write, Edit]
     output_schema:
       type: object
       properties:
@@ -78,6 +90,9 @@ nodes:
   # ── agent 4/5：跑 diagnostic pipeline，落盘诊断 JSON ────────────────
   - name: diagnostic_saver
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: diagnostic_saver      # phase-14 显式引用 examples/agents/diagnostic_saver.md
     tools: [Bash]
     output_schema:
       type: object
@@ -92,10 +107,13 @@ nodes:
         to: report_painter
       - to: $end                       # diagnostic 失败 → 直接收工
 
-  # ── agent 5/5：综合诊断数据 → 写 REPORT.md（无 render_chart）────────
+  # ── agent 5/5：综合诊断数据 → 推真图表 + 写 REPORT.md（spawn-script render_chart）
   - name: report_painter
     kind: agent
-    tools: [Bash, Read]
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: report_painter        # phase-14 显式引用 examples/agents/report_painter.md
+    tools: [Bash, Read, Write]
     # 自由文本输出（无 output_schema）：报告 markdown 全文存进 output
     routes:
       - to: $end

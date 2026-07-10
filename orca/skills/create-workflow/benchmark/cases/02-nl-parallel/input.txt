@@ -1,0 +1,1 @@
+我要一个调研 workflow：一个 entry agent 把查询拆成两个可并行的子问题，两个 researcher 并行调研，完事一个 synthesizer 把两路结果直接拼接合并（纯数据汇聚，不需要再用 LLM 推理综合）。生成一个 Orca workflow。

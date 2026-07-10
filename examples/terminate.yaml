@@ -20,8 +20,9 @@ entry: classifier
 inputs:
   category:
     type: string
-    required: true
-    description: 模拟分类结果（A/B 走 handler，其它走 reject_terminate）
+    required: false
+    default: "A"
+    description: 模拟分类结果（A/B 走 handler，其它走 reject_terminate）；默认 A（演示 success 路径）
 nodes:
   - name: classifier
     kind: script

@@ -32,6 +32,8 @@ inputs:
 nodes:
   - name: fetch_api
     kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
     prompt: |
       调用以下 URL 拉取数据，返回 JSON：
       {{ inputs.url }}

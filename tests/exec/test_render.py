@@ -81,38 +81,37 @@ def test_render_prompt_inline_prompt_rendered():
     assert out == "Summarize: hi"
 
 
-def test_render_prompt_none_loads_agents_md(tmp_path, monkeypatch):
-    """node.prompt=None → 从 agents/<name>.md 加载（cwd 相对路径，SPEC §4.6）。"""
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "agents").mkdir()
-    (tmp_path / "agents" / "writer.md").write_text(
-        "You are {{ inputs.role }}.", encoding="utf-8"
-    )
-    node = AgentNode(name="writer", prompt=None)
+def test_render_prompt_materialized_agent_md_renders():
+    """phase-14：agent md 由 compile 期 AgentResolver 物化进 node.prompt（含 Jinja2）。
+
+    render 层只渲染已物化的字符串（删了旧 ``_load_agent_md`` 文件 I/O，消除双加载债）。
+    验证物化后的 agent prompt 渲染正确（md 加载本身的测试在 tests/compile/test_agents.py）。
+    """
+    # 模拟 compile 物化：node.prompt 已是 agent md 内容（含 {{ inputs.role }}）
+    node = AgentNode(name="writer", prompt="You are {{ inputs.role }}.")
     out = render_prompt(node, _ctx(inputs={"role": "a poet"}))
     assert out == "You are a poet."
 
 
-def test_render_prompt_none_missing_md_raises(tmp_path, monkeypatch):
-    """prompt=None 且 agents/<name>.md 不存在 → ExecError(phase=render)（fail loud）。"""
-    monkeypatch.chdir(tmp_path)
+def test_render_prompt_none_raises():
+    """phase-14：node.prompt=None → ExecError（防御性 fail loud）。
+
+    agent 引用必须在 compile 期经 AgentResolver 物化进 node.prompt；render 拿到 None
+    说明绕过了 load_workflow（程序化 ``Workflow(**raw)`` 构造），清晰归因提示。
+    """
     node = AgentNode(name="ghost", prompt=None)
     with pytest.raises(ExecError) as ei:
         render_prompt(node, _ctx())
     assert ei.value.phase == "render"
-    assert "agents/ghost.md" in ei.value.message
+    assert "未物化" in ei.value.message
 
 
-def test_render_prompt_none_md_with_jinja_render_error(tmp_path, monkeypatch):
-    """agents/<name>.md 存在但内部 Jinja2 引用未定义变量 → ExecError(phase=render)。"""
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "agents").mkdir()
-    (tmp_path / "agents" / "bad.md").write_text(
-        "uses {{ undefined_thing }}", encoding="utf-8"
-    )
-    node = AgentNode(name="bad", prompt=None)
-    with pytest.raises(ExecError, match="render"):
+def test_render_prompt_empty_raises():
+    """phase-14 C7：node.prompt=''（空串）→ ExecError（空 prompt 给 claude 行为未定义）。"""
+    node = AgentNode(name="empty", prompt="")
+    with pytest.raises(ExecError) as ei:
         render_prompt(node, _ctx())
+    assert ei.value.phase == "render"
 
 
 # ── locals 注入（foreach body 用，phase 5 扩展）───────────────────────────────
@@ -122,6 +121,29 @@ def test_render_template_resolves_locals_item():
     """{{ item }} 取 ctx.locals['item']（foreach body 裸引用，无 inputs. 前缀）。"""
     ctx = RunContext(inputs={}, outputs={}, run_id="r1", locals={"item": "apple"})
     assert render_template("process {{ item }}", ctx) == "process apple"
+
+
+# ── phase-10 技术债回填：setup phase outputs 渲染 ────────────────────────────
+
+
+def test_render_template_setup_output_via_dotted_path():
+    """{{ setup.<agent>.output.<field> }} 取 ctx.setup（MCP setup_outputs 注入路径）。"""
+    ctx = RunContext(
+        inputs={}, outputs={}, run_id="r1",
+        setup={"collector": {"output": {"host": "example.com"}}},
+    )
+    assert render_template("host={{ setup.collector.output.host }}", ctx) == (
+        "host=example.com"
+    )
+
+
+def test_render_template_setup_empty_when_no_setup_phase():
+    """无 setup phase → ctx.setup 空 dict，setup 根不污染现有模板（向后兼容）。"""
+    ctx = RunContext(inputs={"x": "1"}, outputs={}, run_id="r1")
+    # 现有模板照常渲染
+    assert render_template("x={{ inputs.x }}", ctx) == "x=1"
+    # setup 根存在但为空 dict（不 raise）
+    assert render_template("{% if setup %}has{% else %}none{% endif %}", ctx) == "none"
 
 
 # ── phase 11 §4：guidance section 拼接 ──────────────────────────────────────

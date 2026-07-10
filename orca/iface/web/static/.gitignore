@@ -1,5 +1,14 @@
-# phase 9b 前端构建产物（regenerable via `npm run build`）—— 只跟踪 .gitkeep 占位。
-# 这是 vite outDir，emptyOutDir=true 会清空；只保 .gitkeep 让目录存在。
-*
+# phase 9b 前端构建产物（vite outDir = ../static）。
+#
+# 2026-07-08：构建产物**提交进 git**（此前只保 .gitkeep 占位）。理由：``pip install -e .``
+# 用户（git clone 后直接 editable 装）服务器上常无 node/npm，不应被迫本地 build。
+# 提交产物后 clone 即得可用的 web UI（server.py 的 _STATIC_DIR 直接命中）。
+#
+# 重新 build 流程（开发者改前端后）：
+#   cd orca/iface/web/frontend && npm run build     # vite emptyOutDir=false，写入新 hash 资产
+#   git add orca/iface/web/static                   # 提交新 index.html + assets
+#   # 旧 hash 资产 vite 会保留（emptyOutDir=false）；如需彻底清理：rm -rf static/assets 后重 build
+#
+# 注意：vite ``emptyOutDir: false`` 不清空本目录（防物理删除被跟踪文件）。旧 hash 资产
+# 累积时手动清理 + 重 build；index.html 永远指向当前 hash，旧资产不影响服务。
 !.gitignore
-!.gitkeep

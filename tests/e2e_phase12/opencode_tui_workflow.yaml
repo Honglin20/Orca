@@ -2,7 +2,7 @@ name: opencode_tui_e2e
 description: |
   phase-12 S10 e2e：最小真 agent workflow（opencode 后端）+ script + 条件 route。
   拓扑：entry(script) → analyst(agent, opencode) → [route] → reporter(agent, opencode) → $end
-  目的：让 DagGraph 显示非平凡拓扑 + NodeDetail 流式（opencode agent_message 整块）+
+  目的：让 AgentsList 显示非平凡拓扑 + NodeDetail 流式（opencode agent_message 整块）+
   输出 tab + LogStream 真事件，再注入 chart 事件验证渲染。
 entry: entry
 nodes:

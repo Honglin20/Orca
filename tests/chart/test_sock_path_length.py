@@ -71,29 +71,46 @@ def test_render_chart_accepts_max_boundary_sock_path(monkeypatch):
 # ── RunManager 端（ingestor 启动前）─────────────────────────────────────────
 
 
-def test_run_manager_rejects_long_runs_dir(tmp_path):
-    """RunManager.start_run：resolved runs/<run_id>.sock > 90 → RuntimeError。
+def test_run_manager_accepts_deep_runs_dir(tmp_path):
+    """RunManager.start_run：深 runs_dir **不再** RuntimeError（2026-07-08 短路径化）。
 
-    意图：避免 ingestor ``start_unix_server`` crash + callback 无限重起。RunManager 在
-    创建 ingestor task 前 fail loud，提示用户改 ORCA_RUNS_DIR。
+    意图回归：socket 现走 ``<tmp>/orca-<hash>.sock``（``chart_sock_path``），与 runs 目录
+    解耦——曾经"深服务器 runs 目录 → sun_path 超限 → fail loud"的痛点（用户报的 NGA 98 字节
+    案例）已根治。tape/jsonl 仍在深 runs 目录，只有 socket 移到系统 temp 短路径。
+    故即便 runs_dir 极深，start_run 也不再因 socket 路径 raise。
     """
-    # 构造极深的 runs_dir（resolved 后 + run_id + .sock 必超 90）
-    # run_id 形如 ``demo-20260703-084621-c46d8b``，~30 字节；runs/<run_id>.sock 加 6 + .sock 5
-    # 故 runs_dir resolved > 90 - 41 = 49 字节即触发
     deep_dir = tmp_path / ("a" * 80) / ("b" * 30) / "runs"
     manager = RunManager(runs_dir=deep_dir)
 
-    # 需要一个 yaml（任意 demo）
     from tests.iface.web.conftest import demo_linear_yaml
     yaml = demo_linear_yaml(tmp_path)
 
     async def go():
-        with pytest.raises(RuntimeError, match="socket path 过长"):
-            await manager.start_run(str(yaml), {}, None, None)
+        # 不再 raise；run 正常起（socket 在 /tmp，长度恒短）。
+        run_id = await manager.start_run(str(yaml), {}, None, None)
+        assert run_id is not None
         await manager.shutdown()
 
     import asyncio
     asyncio.run(go())
+
+
+def test_chart_sock_path_short_and_deterministic():
+    """``chart_sock_path(run_id)``：短（< SOCK_PATH_MAX）+ 确定性（同 run_id 同路径）+
+    在系统 temp 目录下（与 runs 解耦）。两端（RunManager bind / executor env）同源。"""
+    from orca.chart._paths import chart_sock_path
+
+    p1 = chart_sock_path("demo_task-20260708-205425-6a9ea6")
+    p2 = chart_sock_path("demo_task-20260708-205425-6a9ea6")
+    p3 = chart_sock_path("another-run-id-20260708")
+    assert p1 == p2, "同 run_id 必须确定性同路径（两端寻址一致）"
+    assert p1 != p3, "不同 run_id 不同路径"
+    assert p1.parent == p1.parent, "在 temp 目录"
+    import tempfile
+    from pathlib import Path
+    assert p1.parent == Path(tempfile.gettempdir()), "socket 必在系统 temp 目录"
+    assert p1.name.startswith("orca-") and p1.suffix == ".sock"
+    assert len(str(p1)) < SOCK_PATH_MAX, "路径恒短（temp + 10 hex）"
 
 
 def test_sock_path_max_constant_is_90():

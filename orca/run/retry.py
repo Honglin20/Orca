@@ -199,7 +199,6 @@ async def execute_with_retry(
                     f"executor 执行 node {node.name!r} 未产出 "
                     "node_completed/node_failed（生命周期违约）"
                 ),
-                error_type="NodeLifecycleViolation",
                 node=node.name,
             )
 
@@ -224,14 +223,20 @@ async def execute_with_retry(
         # 还有 attempt 额度 → emit retry_started + sleep + continue。
         if attempt < policy.max_attempts:
             delay = _compute_delay(policy, attempt)
+            phase = err_data.get("phase") if isinstance(err_data, dict) else None
+            kind_value = _kind_from_error_type(error_type, phase).value
             await bus.emit(
                 "retry_started",
                 {
                     "attempt": attempt + 1,
                     "max_attempts": policy.max_attempts,
                     "error_type": error_type,
+                    "kind": kind_value,
                     "delay_seconds": delay,
                     "node": node.name,
+                    "layer": layer_for_kind_from_value(kind_value),
+                    "reason": str(err_data.get("message", "")),
+                    "next_retry_at": _next_retry_at(delay),
                 },
                 node=node.name,
             )
@@ -239,12 +244,16 @@ async def execute_with_retry(
             continue
 
         # 用完仍失败 → emit retry_exhausted + raise（让上层 orchestrator 走 workflow_failed）。
+        phase = err_data.get("phase") if isinstance(err_data, dict) else None
+        kind_value = _kind_from_error_type(error_type, phase).value
         await bus.emit(
             "retry_exhausted",
             {
                 "attempts": policy.max_attempts,
                 "last_error_type": error_type,
+                "last_kind": kind_value,
                 "node": node.name,
+                "layer": layer_for_kind_from_value(kind_value),
             },
             node=node.name,
         )
@@ -254,7 +263,6 @@ async def execute_with_retry(
     raise ExecError(
         phase="node_failed",
         message=f"retry loop 异常退出（node={node.name!r}, max_attempts={policy.max_attempts}）",
-        error_type="RetryLoopInvariant",
         node=node.name,
     )
 
@@ -267,6 +275,66 @@ def _exec_error_from_failed(err_data: dict[str, Any], node_name: str) -> ExecErr
     （命名达意「从 failed 事件构造 error」），不直接暴露 classmethod 调用。
     """
     return ExecError.from_failed_data(err_data, node=node_name)
+
+
+def _kind_from_error_type(error_type: str, phase: "str | None" = None) -> "ErrorKind":
+    """从 executor 旧 ``error_type`` 字符串反推 ErrorKind（retry emit 用，DRY）。
+
+    优先级（避免「retry_on 字面量当 error_type」场景误判为 UNKNOWN）：
+      1. ``phase`` 非空 → ``_DEFAULT_KIND_FOR_PHASE[phase]``（phase 是 executor 写的权威诊断）
+      2. ``error_type`` 在 ``_LEGACY_ERROR_TYPE_TO_KIND`` → 用之
+      3. ``error_type`` 是 retry_on 字面量（spawn_error / timeout / ...）→ 经
+         ``_RETRY_ON_TO_KINDS`` 反查（SPEC §4.5 retry_on → kind 子集映射）
+      4. 都无 → UNKNOWN
+    """
+    from orca.exec.error_kinds import (
+        _DEFAULT_KIND_FOR_PHASE,
+        _LEGACY_ERROR_TYPE_TO_KIND,
+        ErrorKind,
+    )
+    from orca.exec.retry import _RETRY_ON_TO_KINDS
+
+    if phase:
+        return _DEFAULT_KIND_FOR_PHASE.get(phase, ErrorKind.UNKNOWN)
+    if error_type in _LEGACY_ERROR_TYPE_TO_KIND:
+        return _LEGACY_ERROR_TYPE_TO_KIND[error_type]
+    # retry_on 字面量（如 "spawn_error"）当 error_type 写进 data 时，反查为单元素 set 取唯一值
+    for retry_key, kinds in _RETRY_ON_TO_KINDS.items():
+        if error_type == retry_key and kinds:
+            return next(iter(kinds))
+    return ErrorKind.UNKNOWN
+
+
+def _layer_for_error(error_type: str, phase: "str | None" = None) -> str:
+    """从 error_type 派生 layer（retry emit ``layer`` 字段用，ADR §4.5）。
+
+    **single source of truth**：layer 从 kind 派生（``Error.layer_from_kind`` 同款逻辑），
+    不再走 retry_on → layer 的并行映射表（避免 kind/layer 不一致，E2E 闭环审视 Defect B）。
+    """
+    from orca.exec.retry import layer_for_kind
+    return layer_for_kind(_kind_from_error_type(error_type, phase))
+
+
+def layer_for_kind_from_value(kind_value: str) -> str:
+    """kind 字符串值 → layer（DRY：与 ``Error.layer_from_kind`` 同款派生逻辑）。
+
+    复用 ``orca.exec.retry.layer_for_kind`` 但接受字符串值（retry emit 已 coerce
+    kind 为 .value 字符串，避免重复 coerce）。
+    """
+    from orca.exec.error_kinds import ErrorKind
+    from orca.exec.retry import layer_for_kind
+    try:
+        return layer_for_kind(ErrorKind(kind_value))
+    except ValueError:
+        return "business"  # unknown 默认 business（旧 tape 兼容）
+
+
+def _next_retry_at(delay_seconds: float) -> "str | None":
+    """计算 next_retry_at ISO 时间戳（ADR §4.5）；delay=0 → None。"""
+    if delay_seconds <= 0:
+        return None
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)).isoformat()
 
 
 def _compute_delay(policy: RetryPolicy, attempt: int) -> float:

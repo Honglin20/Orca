@@ -1,0 +1,43 @@
+name: research_parallel
+description: "entry 拆问题→两 researcher 并行→synthesizer 合并"
+entry: starter
+inputs:
+  query:
+    type: string
+    description: "查询"
+nodes:
+  - name: starter
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "把查询拆成两个可并行的子问题，分别给出：{{ inputs.query }}"
+    routes:
+      - to: fanout
+  - name: researcher_a
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "子问题 A 调研：{{ starter.output }}"
+    routes:
+      - to: $end
+  - name: researcher_b
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "子问题 B 调研：{{ starter.output }}"
+    routes:
+      - to: $end
+  - name: synthesizer
+    kind: set
+    values:
+      merged: "A={{ fanout.output.outputs.researcher_a }} || B={{ fanout.output.outputs.researcher_b }}"
+    routes:
+      - to: $end
+parallel:
+  - name: fanout
+    branches: [researcher_a, researcher_b]
+    failure_mode: continue_on_error
+    routes:
+      - to: synthesizer
+outputs:
+  result: "{{ synthesizer.output.merged }}"
