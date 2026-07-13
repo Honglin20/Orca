@@ -3,6 +3,22 @@
 > 新 session 开工前**必读**此文件 + `CLAUDE.md` + 对应阶段 SPEC。
 > 完成任务后清空本文件（移到 release note），**不积累**。
 
+## 🔥 当前任务（2026-07-13）：in-session 统一后端 Design Draft —— 已落草稿，待 spec-review
+
+> **新 session 必读**：本块 + [`docs/specs/in-session-unified-backend-draft.md`](../specs/in-session-unified-backend-draft.md)。
+
+**背景**：现状 in-session（`orca in-session` CLI 自管 tape + `advance_step`）与后端（`orca run` 走 `Orchestrator`）是**两套代码**，tape 要人工对齐（G2 问题）——违反「单一真相源」铁律。本 draft 收口为**同一后端 core + 两个入口壳**，顺带根治 LLM 误调后端 run。
+
+**已冻结决策**（draft §9）：① 同一后端 core，`teams`/`orca` 是壳（节点执行策略可替换：SubprocessExecutor / InSessionExecutor）；② `orca`=in-session（LLM 唯一可见）/ `teams`=后端，可见性隔离防误调，**不加兼容期直接断**；③ 载体=skill（非 command/agent，内联不丢上下文 + 单层子代理）；④ 匹配纯用 `Workflow.description`（不加字段）；⑤ inputs 模型代填（读 `InputDef.description`）；⑥ **删 setup phase**（inputs 代填 + 主 session 覆盖其职责）；⑦ 动态构建本期不做；⑧ CAC（=CC 后端）加 target 适配。
+
+**待定**：① 输出契约（draft §5.2，子代理过程如何进 tape——`--output-file` + 共享 translator + hook 兜底，待讨论定稿）；② `advance_step`↔`Orchestrator` 合并差异面；③ CAC skills 目录 spike；④ 删 setup 影响面清理。
+
+**落地顺序**：先收口**批 B**（opencode in-session 当前半成品、暂非功能态）→ 合并同一后端（最大动作，spec-review-adversarial）→ 命令分家 → skill 入口 + catalog 下沉 → 删 setup → CAC 适配 → 输出契约。
+
+**下一步**：用户确认输出契约方案后，draft 定稿 → `spec-review-adversarial` 审视 → 写实施计划。
+
+---
+
 ## ✅ 完成（2026-07-09）：in-session 三件打磨（outputs 求值 + inputs 从 tape 恢复 + prompt 收紧）
 
 model-driven advance 补丁（`4b3a4d6`）之上的 surgical polish，commit `f86df86`。① `_final_outputs`（step.py）fail-loud stub → `render_template` 求 `wf.outputs`（in-session 专用，不动正常 orca run）；② `advance_step`（step.py）改 `Orchestrator._inputs_from_tape` 恢复 inputs → 模型不必每步重传 `--inputs`（修非 entry 节点 `{{ inputs.* }}` 渲染隐患）；③ `run.md`/`_drive_protocol` 加「主 session 不许自己 Read 节点 .md，由子代理 Read」+ 修 stale「Orca 自动推进」+ `bootstrap --format prompt` 补驱动协议（遗留 #2）。COMMAND→MCP 不换。in_session 96 passed（+3 新增）；tests/run+iface 1007 passed 0 回归；code-reviewer PASS。详见 [release note](../releases/2026-07-09-in-session-outputs-inputs-prompt-polish.md)。follow-up：`end_route.output`（phase-14 per-route 变换）/ 批 B plugin 重写 + doctor.md / CC 路同步。
