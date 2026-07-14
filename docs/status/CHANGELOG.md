@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-14] in-session v5 §8 step 2b —— 入口切 skill + list inputs_schema + doctor skill_install + 删 start/cc_hooks/command + nudge hook
+
+实施 SPEC v5 §8 step 2b 全 7 项：in-session 入口统一切到 orca skill（三步指导：list→抽 inputs→<wf>+自调 next），删旧 command/start/cc_hooks 入口，nudge hook 提醒主 session 推进（**绝不自动推进**，B 路径铁律）。① 建 orca skill（CI 守门：三步指导 + 禁业务关键词 + 禁 teams 命令）。② `orca list` 返 `{workflows:[{name,description,inputs_schema}]}`（无 has_setup，无 describe）。③ doctor 加 skill_install 硬检查（A6）+ hook 心跳可选 + `hard` 字段定 ok。④ 禁用 orca.ts transform dispatch（early return，文件不整删——idle hook 保为 nudge 载体）。⑤ 删 4 个 command 模板。⑥ 删 start + cc_hooks（A 路径退场）。⑦ nudge（A5 修正入本步）：opencode idle hook 改提醒模式（listActiveRuns→节流→promptAsync 注入，不 spawn next）；CC 新 Stop hook（cc_nudge.sh，零反引号 decision:block）+ `teams install --target cc` 合并 settings.json。install 重构四前端（cc/opencode/cac/nga/all）装所有随包 skill，平台常量抽 skill_cmds 单一源（DRY/OCP）。208 affected passed 0 回归；code-reviewer 两轮（2 BLOCKER + 关键 MAJOR）全闭环。Commits: `e2bd989`（1-6）+ `4b90508`（7 nudge）。详见 [release note](../releases/2026-07-14-in-session-v5-step2b.md)。
+
 ## [2026-07-14] in-session v3 §8 step 1 —— orca 接口打包 + 14 命令归宿 + teams 变量化 + marker 精简
 
 实施 SPEC v3 §8 step 1：① `orca` 顶层 = in-session 7 命令（`list/<wf>/next/status/stop/open/doctor`），删 `in-session` 子命令层；`bootstrap` → `orca <wf>` 语法糖（单一实现，hidden bootstrap + rewrite，非双入口）。② 14 后端命令归 `teams` entry point（`run/serve/ps/...`），`list`/`open` 共享单一实现。③ `ORCA_BACKEND_CMD` env 变量化（默认 teams）。④ marker 精简到 `{run_id, model, no_output_count}`（删 desync 向量 tape_path/yaml/session_id/owner），`marker_path(rundir, run_id)` O(1) 直定位（删扫描），yaml 从 tape.workflow_started.data.yaml_path 派生（唯一真相源）。⑤ 重复 bootstrap 同 wf → fail loud（m12，well-known `.orca-bootstrap.lock` serialize 防 TOCTOU，review B1 闭环）。⑥ 保留字黑名单（§2.2 MS1，compile fail loud）。⑦ B1 同 commit 改全活调用点（cli.py 驱动协议 / orca.ts spawn+argv / cc_hooks / command 模板）。⑧ `_inputs_from_tape` 首调噪声修复。in-session 134 passed（+37 新增），CLI 后端 + compile + orchestrator 281 passed 0 回归；code-reviewer 1 BLOCKER（并发 TOCTOU）+ 4 MAJOR + 5 MINOR 全闭环。详见 [release note](../releases/2026-07-14-in-session-v3-step1.md)。Commit: `d14cde5`。
