@@ -1,24 +1,23 @@
-"""orca/iface/in_session/cli.py —— in-session shell 用户命令面（SPEC v7 / ADR v3 §6）。
+"""orca/iface/in_session/cli.py —— ``orca`` 顶层 CLI（in-session shell，SPEC v3 §2）。
 
 **薄 CLI = 唯一大脑 + 唯一 tape 写者**（D-v7-1）。宿主（opencode plugin / CC hook
-脚本）是**哑传输**：spawn CLI + 读 stdout JSON 顶层字段。Orca 业务逻辑（advance_step
-决策 / marker RMW / 合规计数 / 失败 taxonomy）全在此模块，可单测。
+脚本 / 主 session 自调）是**哑传输**：spawn CLI + 读 stdout JSON 顶层字段。Orca 业务
+逻辑（advance_step 决策 / marker RMW / 合规计数 / 失败 taxonomy）全在此模块，可单测。
 
-子命令（按 SPEC §13 迁移清单）：
-  - ``bootstrap <wf>`` —— 首 step：gen run_id + tape 路径 + 写激活 marker + per-call
-    flock emit_batch(workflow_started + node_started(entry)) → stdout entry prompt JSON。
-    **幂等**（N1）：同 owner + 同 ``realpath(yaml)`` → 复用 run_id 不重发。
-  - ``next --tape --run-id [--output] [--inputs]`` —— 推进一步：per-call flock
-    (LOCK_NB → busy) + ``--output`` 空串 normalize None（B2）+ advance_step + **单次
-    write 原子 ``emit_batch``**（B1）+ marker RMW 在 flock 临界区内（N2）+ 合规计数
-    (F11) + 失败 taxonomy (F6) → stdout JSON。
-  - ``status [<run_id>]`` —— 读 tape replay_state 报进度（沿用 v5）。
-  - ``stop <run_id>`` —— 清激活 marker + per-call flock emit ``workflow_cancelled``。
-  - ``start <wf>`` —— CC 路：生成 settings.json Stop/PostToolUse hook 片段 + 写 marker
-    + 打印接入指引。
-  - ``serve`` —— 无头 CI daemon 入口（I3.3a，主 UX 不用；保留 v5 自驱动循环）。
+v3 §2 接口定型（7 命令，删 ``in-session`` 子命令层）：
+  - ``orca list`` —— catalog（name+description，与 ``teams list`` 同源）。
+  - ``orca <wf> --inputs '{...}'`` —— bootstrap 语法糖：接 wf 名（或 yaml 路径）位置参数，
+    返 entry prompt + 驱动协议。**重复 bootstrap 同 wf → fail loud**（§7.3 m12，防孤儿）。
+  - ``orca next --run-id <id> [--output '<产出>']`` —— 推进一步（主 session 逐步自调）。
+  - ``orca status [<run_id>]`` —— 读 tape replay_state 报进度。
+  - ``orca stop <run_id>`` —— 清 marker + per-call flock emit ``workflow_cancelled``。
+  - ``orca open [<run_id>]`` —— 打开 web 监控（默认当前活跃 run，复用 web attach）。
+  - ``orca doctor`` —— 自检（skill 落点 + CLI imports；hook 心跳可选）。
 
-**铁律 1**：跨进程 sanctioned 写者（per-call CLI 形态，I3.3b）；每次 hook 触发短命
+marker v3 §7.2：只 ``{run_id, model, no_output_count}``；文件名固定 ``orca-<run_id>.json``，
+``next``/``stop`` 用 ``marker_path(rundir, run_id)`` O(1) 定位（删扫描）。
+
+**铁律 1**：跨进程 sanctioned 写者（per-call CLI 形态，I3.3b）；每次触发短命
 open(resume=True) → flock → emit_batch → close，flock 随进程退出释放（无孤儿锁反向）。
 """
 
@@ -36,13 +35,12 @@ from typing import Any
 
 import typer
 
-from orca.compile import load_workflow
+from orca.compile import ConfigurationError, load_workflow
 from orca.events.bus import EventBus
 from orca.events.tape import Tape
 from orca.iface.in_session.marker import (
     ActivationMarker,
     clear_marker,
-    find_marker_by_run_id,
     marker_path,
     read_marker,
     write_marker,
@@ -109,14 +107,17 @@ def _reply_prompt(result: Any) -> str | None:
 
 
 def _drive_protocol(run_id: str) -> str:
-    """model-driven advance 协议文本（补丁 2026-07-09）：附在每个节点 prompt 后。
+    """model-driven advance 协议文本（补丁 2026-07-09，v3 §1.2）：附在每个节点 prompt 后。
 
-    告诉主 session 模型如何**自己**推进 workflow——派子代理 → 调 ``orca in-session next
+    告诉主 session 模型如何**自己**推进 workflow——派子代理 → 调 ``orca next
     --output`` → 读返回 → 重复/停。取代 plugin idle 钩子的 REST 产出抽取（旧路径依赖
     opencode dev server REST，断链即 replay 死循环；见 plugin event 钩子注释）。
     **run_id 是唯一句柄**：tape 路径是 run_id 的纯函数（bootstrap 用 _default_tape_path 建），
     next 按 --run-id 自己定位 tape，模型只需传 run_id + 产出，不必背 tape 路径。
     合规计数器仍是兜底：模型连续 3 次不调 next/无 output → CLI emit workflow_failed（卡住可见）。
+
+    v3 §8 step 1（B1 闭环）：命令从 ``orca in-session next`` 上移为 ``orca next``——
+    与顶层接口定型同 commit 改全调用点（cli.py 驱动协议 / orca.ts spawn / command 模板）。
     """
     return (
         "\n【Orca 驱动协议】你（主 session）负责推进，不要等系统自动推进：\n"
@@ -124,11 +125,12 @@ def _drive_protocol(run_id: str) -> str:
         "做完；**你不许自己 Read 该文件**（会撑爆你的上下文）。\n"
         "2. 子代理返回后，把它的产出作为 --output，**原样**执行下面这条命令"
         "（--run-id 是唯一句柄，必须用下面给定的值；tape 由 Orca 自己按 run_id 定位，不要传）：\n"
-        f"   orca in-session next --run-id {run_id} --output '<子代理的产出>'\n"
+        f"   orca next --run-id {run_id} --output '<子代理的产出>'\n"
         "3. 读上面命令的 stdout（一段 JSON）：\n"
         "   - 若 done 为 true → workflow 已结束，停止推进，向用户总结结果。\n"
         "   - 否则 JSON 里的 prompt 字段就是下一个节点的指令 → 回到第 1 步继续。\n"
-        "要点：--output 用单引号包住整段产出；--run-id 必传；严格按 next 返回的 prompt 逐节点做。\n"
+        "要点：--output 用单引号包住整段产出；产出含撇号（it's / 影评）时用 `'\\''` 转义"
+        "（it's → it'\\''s）；--run-id 必传；严格按 next 返回的 prompt 逐节点做。\n"
     )
 
 
@@ -149,6 +151,85 @@ def _setup_logging(level: str = "INFO") -> None:
         stream=sys.stderr,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+
+# ── wf 名 / 路径解析（``orca <wf>`` 语法糖，§2.1 / §4.2）─────────────────────────
+
+
+def _resolve_wf_path(wf_arg: str) -> Path:
+    """``orca <wf>`` 的位置参数 → yaml 路径（SPEC §2.1）。
+
+    接受两种形态：
+      - **yaml 路径**（相对 / 绝对，文件存在）→ 直接用。
+      - **wf 名**（非路径）→ ``catalog.find_workflow_yaml_path`` 精确反查（按 ``wf.name``
+        字段，first-wins project-local）。未找到 → fail loud。
+
+    B3 闭环：不做模糊匹配 / 不从用户意图抽 inputs（那归 skill，§4.2）。仅精确名 → 路径。
+    """
+    p = Path(wf_arg)
+    if p.is_file():
+        return p
+    # 当 wf 名解析：延迟 import catalog（iface/mcp 子包，按依赖边界不顶层引入）。
+    from orca.iface.mcp.catalog import find_workflow_yaml_path
+    resolved = find_workflow_yaml_path(wf_arg)
+    if resolved is None:
+        raise typer.BadParameter(
+            f"找不到 workflow：{wf_arg!r} 既不是存在的 yaml 文件，也不在 catalog"
+            f"（./workflows + ~/.orca/workflows，按 wf.name 匹配）。"
+            f"用 `orca list` 查可用 workflow。"
+        )
+    return Path(resolved)
+
+
+def _read_workflow_name(tape_path: Path) -> str | None:
+    """读 tape 首条 ``workflow_started.data.workflow_name``（m12 重复 bootstrap 检测用）。
+
+    tape 不存在 / 无 workflow_started / 损坏 → None（调用方按「无信息」跳过，不崩）。
+    扫前 ``_TAPE_HEAD_SCAN_LIMIT`` 行找不到 workflow_started 即放弃（workflow_started
+    正常是首条事件；corrupt tape 截掉首行时不读整个大文件，review m5）。
+    """
+    if not tape_path.is_file():
+        return None
+    try:
+        with open(tape_path, encoding="utf-8") as f:
+            for _i, line in enumerate(f):
+                if _i >= _TAPE_HEAD_SCAN_LIMIT:
+                    return None
+                s = line.strip()
+                if not s:
+                    continue
+                obj = json.loads(s)
+                if obj.get("type") == "workflow_started":
+                    return obj.get("data", {}).get("workflow_name")
+    except (json.JSONDecodeError, OSError):
+        return None
+    return None
+
+
+# tape 头扫描行数上限（workflow_started 正常是首条；超此仍无即放弃，防读大文件）。
+_TAPE_HEAD_SCAN_LIMIT = 100
+
+
+def _find_active_run_for_wf(rundir: Path, wf_name: str) -> str | None:
+    """SPEC §7.3（m12）：扫活跃 marker，返同 wf.name 的在途 run_id（无则 None）。
+
+    marker 文件存在 ≡ run 活跃（终态时 clear_marker 清掉）。对每个活跃 marker，按其 run_id
+    读对应 tape 的 workflow_started.workflow_name，与目标 wf_name 比。tape 读失败 → 跳过
+    （不误判；crash 孤儿 marker 由 doctor 另行检测，§9#2）。
+
+    marker 只 3 字段（无 wf 名），故必须读 tape 的 workflow_started——这是「tape 唯一真相源」
+    铁律的体现：wf 归属信息从 tape 派生，不在 marker 复存（避免 desync，§7.2）。
+    """
+    if not rundir.exists():
+        return None
+    for mp in sorted(rundir.glob("orca-*.json")):
+        marker = read_marker(mp)
+        if marker is None:
+            continue
+        tape_path = Path(rundir) / f"{marker.run_id}.jsonl"
+        if _read_workflow_name(tape_path) == wf_name:
+            return marker.run_id
+    return None
 
 
 # ── 跨进程 flock helpers（I3.3b）─────────────────────────────────────────────
@@ -230,74 +311,105 @@ def _emits_to_event_datas(emits: list) -> list[dict]:
     ]
 
 
-# ── Typer app ────────────────────────────────────────────────────────────────
+# ── Typer app（orca 顶层，§2.1 七命令）───────────────────────────────────────
+
+
+class _OrcaTopLevelGroup(typer.core.TyperGroup):
+    """``orca <wf-name>`` 语法糖（SPEC §2.1）：未注册的首 token 当 wf 名 → 重写为 bootstrap。
+
+    保 ``orca list/next/status/stop/open/doctor``（注册命令）正常派发；``orca mywf --inputs ...``
+    重写为 ``orca bootstrap mywf --inputs ...``。保留字黑名单（compile 期 §2.2）保证无 wf
+    能取 ``status`` 等命令名 → 派发无歧义（ wf 取保留名在 load_workflow 期已 fail loud）。
+    """
+
+    def resolve_command(self, ctx, args):
+        if args and not args[0].startswith("-") and args[0] not in self.commands:
+            args = ["bootstrap", *args]
+        return super().resolve_command(ctx, args)
 
 
 app = typer.Typer(
-    name="in-session",
-    help="in-session shell：宿主主 session 执行 workflow，薄 CLI 独占 tape、确定性算下一步。",
+    name="orca",
+    help=(
+        "Orca in-session shell —— 主 session（CC/opencode/NGA/CAC）驱动 workflow。"
+        " 7 命令：list / <wf> / next / status / stop / open / doctor。"
+    ),
     no_args_is_help=True,
+    add_completion=False,
+    cls=_OrcaTopLevelGroup,
+    epilog=(
+        "语法糖：`orca <wf-name>` ≡ `orca bootstrap <wf-name>`"
+        "（wf 名取保留字如 list/next/status 会被 compile 拒）。"
+        " 后端/headless 命令在另一入口（见 `teams --help`）。"
+    ),
 )
 
 
-@app.command()
+@app.command(hidden=True)
 def bootstrap(
-    yaml: Path = typer.Argument(..., help="workflow YAML 路径", exists=True),
+    wf: str = typer.Argument(..., help="workflow 名（catalog 精确匹配）或 yaml 路径"),
     inputs: str = typer.Option("{}", "--inputs", help="workflow inputs（JSON）"),
-    owner: str = typer.Option(
-        None, "--owner", help="激活 marker 的 owner key（opencode=sessionID / CC=run_id）",
-    ),
     model: str = typer.Option(
         "deepseek/deepseek-v4-flash", "--model", help="provider/model（记入 marker）",
     ),
-    session_id: str = typer.Option(
-        None, "--session-id", help="主 session ID（记入 marker，opencode 子 session 过滤用）",
-    ),
     format: str = typer.Option(
         "json", "--format",
-        help="输出格式：json（默认，机器读）/ prompt（批 B prompt-command 入口用：只回 entry "
+        help="输出格式：json（默认，机器读）/ prompt（command 入口用：只回 entry "
              "prompt 纯文本，让主 session 直接据其派子代理）",
     ),
     log_level: str = typer.Option("INFO", "--log-level", help="INFO/DEBUG/WARN/ERROR"),
 ) -> None:
-    """起一个 in-session run 的首步（gen run_id + tape + marker + emit ws+ns → entry prompt）。"""
+    """起一个 in-session run 的首步（gen run_id + tape + marker + emit ws+ns → entry prompt）。
+
+    v3 §7.3（m12）：同 wf 已有活跃 marker（未终态）→ **fail loud**（不静默新建孤儿）。
+    提示续跑（`orca next --run-id <id>`）或先停（`orca stop <id>`）。
+    """
     _setup_logging(log_level)
-    wf = load_workflow(yaml)  # fail loud：非法 yaml 抛 ConfigurationError
+    yaml_path = _resolve_wf_path(wf)  # fail loud：名/路径都解析不到 → BadParameter
+    wf_obj = load_workflow(yaml_path)  # fail loud：非法 yaml 抛 ConfigurationError
     try:
         inp = json.loads(inputs) if inputs else {}
     except json.JSONDecodeError as e:
         raise typer.BadParameter(f"--inputs 不是合法 JSON：{e}") from e
 
-    run_id = gen_run_id(wf.name)
-    tape_path = _default_tape_path(run_id)
-    owner_key = owner or run_id   # 默认 CC 路用 run_id（无 sessionID 概念）
-    rundir = tape_path.parent
-    mpath = marker_path(rundir, owner_key)
-    yaml_real = os.path.realpath(yaml)
+    tape_path_probe = _default_tape_path("__probe__")
+    rundir = tape_path_probe.parent
 
-    # 幂等去重（N1/F14）：advisory lock marker 文件贯穿整个 bootstrap（check → emit →
-    # marker write），否则两并发 bootstrap 同 owner+yaml 会各自 gen run_id、emit 两次
-    # workflow_started。锁覆盖 check-write 整体。
+    # ── bootstrap serialize lock（well-known 路径，NOT per-run_id）──────────────
+    # 关键：锁文件名必须独立于 run_id。``gen_run_id`` 每次返新值，若锁文件用
+    # ``orca-<run_id>.json.flock``，两并发 bootstrap 同 wf 各 gen 不同 run_id → 各锁不同
+    # 文件 → 互不阻塞 → 都过 dupe check → 两个孤儿 run（TOCTOU，review B1）。
+    # 全局锁（单一 ``.orca-bootstrap.lock``）serialize 所有 bootstrap：同 wf 并发 →
+    # 第二个等第一个写完 marker 再跑 dupe check → 看到 marker → fail loud。bootstrap
+    # 是低频操作（每 run 一次），全局串行无性能影响。
     rundir.mkdir(parents=True, exist_ok=True)
-    mlock_fd = open(mpath.with_suffix(mpath.suffix + ".flock"), "w")
+    bootstrap_lock = rundir / ".orca-bootstrap.lock"
+    mlock_fd = open(bootstrap_lock, "w")
     try:
         fcntl.flock(mlock_fd.fileno(), fcntl.LOCK_EX)
-        existing = read_marker(mpath)
-        if (
-            existing is not None
-            and existing.owner == owner_key
-            and existing.yaml == yaml_real
-        ):
-            # 复用 run_id 不重发 workflow_started（N1）。
+
+        # dupe check（§7.3 m12）：扫活跃 marker + 读 tape workflow_name。
+        # 注：按 ``wf.name`` 匹配（SPEC §7.3 字面是 yaml realpath，但 marker 只 3 字段不存
+        # yaml；wf.name 经 compile 保唯一，是 realpath 的合理代理——两不同 yaml 同名 wf
+        # 视为同一 wf，符合「同 wf 不重复 bootstrap」语义）。
+        existing = _find_active_run_for_wf(rundir, wf_obj.name)
+        if existing is not None:
             typer.echo(json.dumps({
-                "run_id": existing.run_id,
-                "tape": existing.tape_path,
-                "done": False,
-                "node": None,
-                "prompt": None,
-                "reused": True,
+                "done": True,
+                "reason": "duplicate-active-run",
+                "run_id": existing,
+                "hint": (
+                    f"已有 run `{existing}` 在跑本 wf（{wf_obj.name}）。"
+                    f"用 `orca next --run-id {existing}` 续跑，"
+                    f"或 `orca stop {existing}` 后再建。"
+                ),
             }, ensure_ascii=False))
-            return
+            raise typer.Exit(1)
+
+        # gen run_id 在锁内（保两并发 bootstrap 同 wf 不各 gen 不同 id）。
+        run_id = gen_run_id(wf_obj.name)
+        tape_path = _default_tape_path(run_id)
+        mpath = marker_path(rundir, run_id)
 
         # 新 run：per-call flock tape → advance_step(无 output, bootstrap 分支) → emit_batch。
         tape = Tape(tape_path, run_id=run_id, resume=True)
@@ -309,9 +421,11 @@ def bootstrap(
             return
         fd, _ = acquired
         try:
-            result = asyncio.run(_advance_and_emit(bus, wf, tape, output=None, inputs=inp,
-                                                   run_id=run_id, elapsed=0.0,
-                                                   prompts_dir=_prompts_dir_for(tape_path, run_id)))
+            result = asyncio.run(_advance_and_emit(
+                bus, wf_obj, tape, output=None, inputs=inp, run_id=run_id, elapsed=0.0,
+                prompts_dir=_prompts_dir_for(tape_path, run_id),
+                yaml_path=os.path.realpath(yaml_path),
+            ))
         except InSessionError as e:
             # bootstrap 失败 = 配置坏（如 entry 不是 agent 节点），fail loud。
             asyncio.run(_emit_workflow_failed(
@@ -330,13 +444,7 @@ def bootstrap(
         # 不留「tape 有 ws+ns 但无 marker」的不可恢复态）。
         try:
             write_marker(mpath, ActivationMarker(
-                run_id=run_id,
-                tape_path=os.path.realpath(tape_path),
-                yaml=yaml_real,
-                owner=owner_key,
-                model=model,
-                session_id=session_id,
-                no_output_count=0,
+                run_id=run_id, model=model, no_output_count=0,
             ))
         except OSError as e:
             # marker 写失败（磁盘满 / 权限）→ tape 已 emit ws+ns 但 next 无 marker → 不可恢复。
@@ -370,10 +478,8 @@ def bootstrap(
         if result.prompt_file:
             reply["prompt_file"] = result.prompt_file
 
-        # 批 B（2026-07-08）：prompt-command 入口用 ``--format prompt`` —— 回 entry prompt
-        # 纯文本（pointer）**+ 驱动协议**（model-driven advance：模型据此自调 next --output）。
-        # 早期仅回 pointer 漏了驱动协议 → 模型拿到入口指令却不知如何推进（CURRENT 遗留 #2）；
-        # 本补丁补齐，与 JSON 路径（reply["prompt"] = prompt_text + 驱动协议）一致。
+        # command 入口用 ``--format prompt`` —— 回 entry prompt 纯文本（pointer）
+        # **+ 驱动协议**（model-driven advance：模型据此自调 next --output）。
         # 兜底：无 prompt（如非 agent entry / 异常）→ 仍回 JSON 让模型看到结构化信息。
         if format == "prompt" and prompt_text:
             typer.echo(prompt_text + _drive_protocol(run_id))
@@ -418,9 +524,9 @@ def next(
         return
     fd, _ = acquired
 
-    # 定位激活 marker（next 契约只含 --tape --run-id；按 run_id 扫描，N2 RMW 用）。
+    # 定位激活 marker（v3 §7.2：文件名固定 orca-<run_id>.json，O(1) 直定位，删扫描）。
     rundir = tape_path.parent
-    mpath = find_marker_by_run_id(rundir, run_id)
+    mpath = marker_path(rundir, run_id)
 
     # 在 flock 临界区内 open + advance + emit + marker RMW（N2：marker RMW 被 flock 串行化）。
     tape_obj = Tape(tape_path, run_id=run_id, resume=True)   # 半写恢复（I3.4）
@@ -435,8 +541,7 @@ def next(
         error_type = _classify_in_session_error(e)
         asyncio.run(_emit_workflow_failed(bus, error_type, str(e)))
         # 终态后清 marker（workflow_failed 已落 tape，marker 不再需要）。
-        if mpath is not None:
-            clear_marker(mpath)
+        clear_marker(mpath)
         typer.echo(json.dumps({"done": True, "reason": f"failed: {e}"}))
         raise typer.Exit(1)
     finally:
@@ -467,20 +572,81 @@ def next(
 async def _advance_and_emit(
     bus: EventBus, wf, tape: Tape, *, output: str | None,
     inputs: dict, run_id: str, elapsed: float, prompts_dir: Path | None = None,
+    yaml_path: str | None = None,
 ):
     """调 advance_step + emit_batch（单次 write 原子化，B1）。"""
     result = advance_step(
         tape, wf, output=output, inputs=inputs, run_id=run_id, elapsed=elapsed,
-        prompts_dir=prompts_dir,
+        prompts_dir=prompts_dir, yaml_path=yaml_path,
     )
     if result.emits:
         await bus.emit_batch(_emits_to_event_datas(result.emits))
     return result
 
 
+def _read_workflow_yaml_path(tape_path: Path) -> str | None:
+    """读 tape 首条 ``workflow_started.data.yaml_path``（v3 §7.2：yaml 从 tape 派生）。
+
+    无 yaml_path（老 tape / daemon 未传）→ None（调用方 fallback 到 catalog 名查）。
+    """
+    if not tape_path.is_file():
+        return None
+    try:
+        with open(tape_path, encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if not s:
+                    continue
+                obj = json.loads(s)
+                if obj.get("type") == "workflow_started":
+                    yp = obj.get("data", {}).get("yaml_path")
+                    if yp:
+                        return str(yp)
+                    return None
+    except (json.JSONDecodeError, OSError):
+        return None
+    return None
+
+
+def _load_wf_for_run(run_id: str, tape: Tape) -> "Workflow":
+    """从 tape 反查 wf（v3 §7.2：marker 不存 yaml，运行时从 tape 唯一真相源派生）。
+
+    优先读 ``workflow_started.data.yaml_path``（bootstrap 期记入，O(1) 精确定位）；
+    无 yaml_path（老 tape / daemon）→ fallback 按 ``workflow_name`` 查 catalog。
+    失败（无 workflow_started / yaml 坏 / catalog 找不到）→ raise InSessionError(state_corrupt)。
+    """
+    tape_path = Path(getattr(tape, "path", "") or "")
+    yp = _read_workflow_yaml_path(tape_path)
+    if yp:
+        try:
+            return load_workflow(yp)
+        except (ConfigurationError, FileNotFoundError) as e:
+            raise InSessionError(
+                f"run {run_id} 的 tape 指向 yaml {yp!r} 但加载失败：{e}",
+                error_kind="state_corrupt",
+            ) from e
+    # fallback：按名查 catalog（兼容老 tape / daemon 形态）。
+    from orca.iface.mcp.catalog import find_workflow
+    wname = _read_workflow_name(tape_path)
+    if wname is None:
+        raise InSessionError(
+            f"run {run_id} 的 tape 无 workflow_started，无法定位 workflow",
+            error_kind="state_corrupt",
+        )
+    found = find_workflow(wname)
+    if found is None:
+        raise InSessionError(
+            f"workflow {wname!r}（run {run_id}）在 tape 无 yaml_path 且 catalog 找不到"
+            f"（./workflows + ~/.orca/workflows）",
+            error_kind="state_corrupt",
+        )
+    wf_obj, _yaml = found
+    return wf_obj
+
+
 async def _next_in_critical_section(
     bus: EventBus, tape: Tape, run_id: str, output: str | None,
-    inputs: dict, start_ts: float, mpath: Path | None,
+    inputs: dict, start_ts: float, mpath: Path,
     prompts_dir: Path | None = None,
 ):
     """flock 临界区内的 next 主体：advance + emit_batch + marker RMW（N2）+ 合规计数 (F11)。
@@ -488,19 +654,15 @@ async def _next_in_critical_section(
     返回 ``(result, compliance_failed)``。``compliance_failed=True`` 时已 emit
     workflow_failed，调用方据 ``done=True`` 停注入。
     """
-    from orca.compile import load_workflow  # 局部，避免顶层依赖循环
-    # wf 从 marker 取 yaml 路径（next 不收 --yaml）。marker 缺 → 退化 fail loud。
-    if mpath is None:
-        # 无 marker：调用方未 bootstrap 或 marker 已清；幂等吞 + warn（不 raise）。
-        logger.warning("next 找不到 %s 的激活 marker，无法推进（需先 bootstrap）", run_id)
-        from orca.run.step import StepResult
-        return StepResult(done=False, reason="no-marker"), False
+    from orca.run.step import StepResult
+    # marker 缺 → 调用方未 bootstrap 或 marker 已清；幂等吞 + warn（不 raise）。
     marker = read_marker(mpath)
     if marker is None:
-        from orca.run.step import StepResult
+        logger.warning("next 找不到 %s 的激活 marker，无法推进（需先 bootstrap）", run_id)
         return StepResult(done=False, reason="no-marker"), False
 
-    wf = load_workflow(marker.yaml)
+    # wf 从 tape 反查（v3 §7.2：marker 不存 yaml）。
+    wf = _load_wf_for_run(run_id, tape)
     result = advance_step(
         tape, wf, output=output, inputs=inputs, run_id=run_id,
         elapsed=now_monotonic() - start_ts, prompts_dir=prompts_dir,
@@ -540,12 +702,7 @@ def status(
         help="输出 JSON（plugin messages.transform 入口用，SPEC §2.6.2 改写契约）",
     ),
 ) -> None:
-    """查看 in-session run 的 workflow 进度（读 tape replay_state）。
-
-    SPEC §2.6.2：当 plugin 入口（``/orca status`` → ``messages.transform``）调用时，
-    stdout 必须是 JSON ``{status, current_node, node_status, progress}``，plugin
-    据此提取顶层字段替换 user 消息文本。人类 UX 默认多行文本（v7 行为保留）。
-    """
+    """查看 in-session run 的 workflow 进度（读 tape replay_state）。"""
     from orca.events.replay import replay_state
 
     if run_id is None:
@@ -565,7 +722,7 @@ def status(
             return
         for tp in tapes:
             typer.echo(f"- {tp.stem}")
-        typer.echo("\n用 `orca in-session status <run_id>` 看详情。")
+        typer.echo("\n用 `orca status <run_id>` 看详情。")
         return
 
     tape_path = _default_tape_path(run_id)
@@ -596,48 +753,20 @@ def status(
 
 @app.command()
 def stop(
-    run_id: str = typer.Argument(
-        None, help="要停的 run id（省略时按 --owner 查激活 marker，SPEC §2.6.2 plugin 入口用）",
-    ),
-    owner: str = typer.Option(
-        None, "--owner", help="opencode sessionID（marker 文件名 key，省 run_id 时按此查 marker）",
-    ),
+    run_id: str = typer.Argument(..., help="要停的 run id"),
     log_level: str = typer.Option("INFO", "--log-level", help="INFO/DEBUG/WARN/ERROR"),
 ) -> None:
-    """停一个 run：清激活 marker + per-call flock emit ``workflow_cancelled``。
-
-    SPEC §2.6.2 plugin 入口契约：``/orca stop`` 不带 args → plugin 用 sessionID 作
-    ``--owner`` 查 marker 拿 run_id；CLI 据此 stop。两调用形态共用本子命令（单一接口）。
-    """
+    """停一个 run：清激活 marker + per-call flock emit ``workflow_cancelled``。"""
     _setup_logging(log_level)
-
-    # run_id 省略时按 --owner 查 marker（plugin transform 入口路径）。
-    if run_id is None and owner is not None:
-        mpath0 = marker_path(_default_rundir(), owner)
-        m = read_marker(mpath0)
-        if m is None:
-            typer.echo(json.dumps({
-                "ok": False, "run_id": None, "reason": "no-active-marker-for-owner",
-            }))
-            return
-        run_id = m.run_id
-
-    if run_id is None:
-        typer.echo(json.dumps({
-            "ok": False, "run_id": None,
-            "reason": "missing run_id (positional or --owner required)",
-        }))
-        raise typer.Exit(1)
 
     tape_path = _default_tape_path(run_id)
     rundir = tape_path.parent
-    mpath = find_marker_by_run_id(rundir, run_id)
+    mpath = marker_path(rundir, run_id)
 
     if not tape_path.exists():
         # 无 tape：仅清 marker（stop 幂等，允许「run 已清理但 marker 残留」）。
-        if mpath is not None:
-            clear_marker(mpath)
-        typer.echo(json.dumps({"run_id": run_id, "ok": True, "note": "no-tape"}))
+        clear_marker(mpath)
+        typer.echo(json.dumps({"run_id": run_id, "ok": True, "done": True, "note": "no-tape"}))
         return
 
     acquired = _try_acquire_flock(tape_path)
@@ -650,47 +779,51 @@ def stop(
     try:
         asyncio.run(bus.emit("workflow_cancelled", {"reason": "user_stop"}))
     finally:
+        # 嵌套 try/finally：bus.close() 异常不得跳过 clear_marker（否则孤儿 marker
+        # 让 dupe-check / open 误判此 run 仍活跃，review M4）。
         try:
             _release_flock(fd)
         finally:
-            bus.close()
-            if mpath is not None:
+            try:
+                bus.close()
+            finally:
                 clear_marker(mpath)
     typer.echo(json.dumps({"run_id": run_id, "ok": True, "done": True}))
 
 
-@app.command()
+@app.command(hidden=True)
 def start(
     yaml: Path = typer.Argument(..., help="workflow YAML 路径", exists=True),
     model: str = typer.Option(
         "deepseek/deepseek-v4-flash", "--model", help="provider/model（记入 marker）",
     ),
 ) -> None:
-    """**CC-only run bootstrap**：写 CC 激活 marker + 打印 ``settings.json`` hook 片段。
+    """**[DEPRECATED]** CC-only run bootstrap：写 CC 激活 marker + 打印 ``settings.json`` hook 片段。
 
-    一次性安装（plugin / command / ``opencode.json`` 声明）已移到 ``orca install``——本命令
-    **不再**落 opencode 模板。opencode 用户：``orca install`` 一次，然后 ``/orca run <wf>``
-    （运行时 ``bootstrap`` 子命令自举 marker，不需要本命令）。
+    v3 §8 step 1：标 deprecated（warn），**不删**——CC 路 B spike 通过后（step 2b）才删。
+    新入口统一走 ``orca <wf>``（语法糖 → bootstrap）+ 驱动协议（模型自调 next）。
 
-    CC 用户：CC 无 transform plugin，run 由 Stop/PostToolUse **hook** 驱动，而 hook 脚本
-    内嵌 tape_path/run_id（**per-run**），故每次起 run 都得跑本命令生成片段 + marker。把
-    stdout 片段贴进 ``.claude/settings.json``。
+    一次性安装（plugin / command / ``opencode.json`` 声明）在 ``teams install``
+    （operator 动作）。CC 用户 per-run 仍可用本命令生成 hook 片段 + marker（A 路径，
+    hook 驱动），但推荐迁到 B 路径（``orca <wf>`` + 模型自调 next）。
     """
+    typer.echo(typer.style(
+        "⚠️  `orca start` 已 deprecated（v3 §8 step 1）。推荐用 `orca <wf>`"
+        "（bootstrap 语法糖）+ 驱动协议（主 session 自调 next）。本命令 step 2b 删除。",
+        fg=typer.colors.YELLOW,
+    ), err=True)
     from orca.iface.in_session.templates import render_cc_settings_fragment
 
     wf = load_workflow(yaml)
     run_id = gen_run_id(wf.name)
     tape_path = _default_tape_path(run_id)
-    yaml_real = os.path.realpath(yaml)
     tape_real = os.path.realpath(tape_path)
+    yaml_real = os.path.realpath(yaml)
 
-    # 写 marker（owner = run_id，CC 路无 sessionID 概念）。
+    # 写 marker（v3 §7.2：只 3 字段；CC 路 A 的 hook 脚本经 --tape/--run-id 直接传，不依赖 marker yaml 字段）。
     rundir = tape_path.parent
     mpath = marker_path(rundir, run_id)
-    write_marker(mpath, ActivationMarker(
-        run_id=run_id, tape_path=tape_real, yaml=yaml_real,
-        owner=run_id, model=model, session_id=None, no_output_count=0,
-    ))
+    write_marker(mpath, ActivationMarker(run_id=run_id, model=model, no_output_count=0))
 
     fragment = render_cc_settings_fragment(
         run_id=run_id, tape_path=tape_real, yaml_path=yaml_real, model=model,
@@ -700,36 +833,25 @@ def start(
     typer.echo(f"tape:     {tape_real}")
     typer.echo(f"marker:   {mpath}")
     typer.echo("")
-    typer.echo(typer.style("把以下片段贴进 .claude/settings.json（CC 路）：", fg=typer.colors.CYAN, bold=True))
+    typer.echo(typer.style("把以下片段贴进 .claude/settings.json（CC 路 A）：", fg=typer.colors.CYAN, bold=True))
     typer.echo(json.dumps(fragment, indent=2, ensure_ascii=False))
     typer.echo("")
-    typer.echo(typer.style("然后：", fg=typer.colors.CYAN))
-    typer.echo("  1. 在 CC 里打开一个会话（Stop/PostToolUse hook 自动生效）。")
-    typer.echo("  2. 让主 session 派 Task subagent 执行节点（每节点一 turn）。")
-    typer.echo(f"  3. 跑完用 `orca in-session status {run_id}` 看结果。")
-    typer.echo("")
-    typer.echo(typer.style("opencode 用户不用本命令：", fg=typer.colors.GREEN))
-    typer.echo("  `orca install`（一次性，装 plugin/command/声明）→ 重启 → `/orca run <wf>`。")
+    typer.echo(typer.style(
+        "推荐改用 B 路径（v3）：`orca <wf>` + 主 session 自调 next（见驱动协议）。",
+        fg=typer.colors.GREEN,
+    ))
+    typer.echo(f"  跑完用 `orca status {run_id}` 看结果。")
 
 
 @app.command()
 def doctor(
     log_level: str = typer.Option("INFO", "--log-level", help="INFO/DEBUG/WARN/ERROR"),
 ) -> None:
-    """诊断 in-session 两钩子是否真 fire（2026-07-08 重设计：心跳作证，取代静态正则自检）。
+    """诊断 in-session 集成层（v3 §2.1：skill 落点 + CLI imports；hook 心跳可选）。
 
-    两钩子（plugin 侧）：
-      - **entry_hook**（``experimental.chat.messages.transform``）：每次 LLM 调用前触发。
-        ``ORCA_DIAGNOSE=1`` 时 plugin 在 transform 顶部写 ``runs/.orca-probe-entry.json``。
-      - **advance_hook**（``session.idle``）：session 空闲时触发，推进 workflow。心跳
-        ``runs/.orca-probe-advance.json``（marker 检查前写 = 仅「钩子接线」即有心跳）。
-
-    诊断开关 = 环境变量 ``ORCA_DIAGNOSE=1``（plugin 加载时读一次；未设/0 = 关，零 I/O）。
-    doctor 报告开关状态 + 两钩子真实 fire 证据（status: pass/unknown/fail + 时间戳/计数）。
-
-    **用途**：判定当前 opencode（含 NGA fork）是否接线两钩子，作为 transform 去留依据。
-    操作：``export ORCA_DIAGNOSE=1`` → 重启 opencode（plugin 读 env）→ session 内对话几句
-    → 跑本命令（``/orca doctor`` 或终端 ``orca in-session doctor``）。
+    v3：B 路径（主 session 自调 next）不依赖 hook 推进；doctor 主验 skill 落点 + CLI 依赖
+    可达。旧两钩子（transform / idle）的心跳检测保留为可选诊断（ORCA_DIAGNOSE=1 时 plugin
+    写心跳，doctor 读取作证）——hook 退居 nudge/诊断（§4.4），不再推进。
     """
     _setup_logging(log_level)
 
@@ -761,55 +883,43 @@ def doctor(
         ),
     })
 
-    # ② entry_hook（transform）：心跳存在 + 新鲜 = 钩子在 fire。
+    # ② entry_hook（transform）：心跳存在 + 新鲜 = 钩子在 fire（v3：可选诊断，非推进依赖）。
     if not diag_on:
         e_status, e_detail = "unknown", (
-            "诊断关，无心跳。设 ORCA_DIAGNOSE=1 并在 session 内对话几句（每次 LLM 调用触发 "
-            "transform 写心跳），再跑 doctor。"
+            "诊断关，无心跳。B 路径（主 session 自调 next）不依赖 hook 推进；"
+            "若需验 transform/idle 钩子接线，设 ORCA_DIAGNOSE=1 并在 session 内对话几句。"
         )
     elif entry is None:
-        # 诊断开 + 明明该有心跳却没有 = transform 钩子根本没被 opencode 调到。
         e_status, e_detail = "fail", (
             "FAIL：诊断开但无 transform 心跳 = experimental.chat.messages.transform 钩子"
-            "未触发。本 fork（如 NGA）大概率未接线该实验钩子 → /orca marker 入口瘫。"
-            "（推进钩子 idle 是否活，见下 advance_hook。）"
+            "未触发。B 路径不依赖它推进，但若入口走 marker 派发会瘫。"
         )
     else:
         age = now - int(entry.get("last_called_at", 0))
         disp = int(entry.get("dispatch_count", 0))
-        last_sub = entry.get("last_dispatch_sub")
-        sub_hint = f"，最近子命令={last_sub}" if last_sub else "，尚未 dispatch marker"
         if age <= _PROBE_FRESH_SEC:
             e_status = "pass"
-            e_detail = f"PASS：transform 正常 fire（{age}s 前被调，累计 dispatch {disp} 次{sub_hint}）。"
+            e_detail = f"PASS：transform 正常 fire（{age}s 前被调，累计 dispatch {disp} 次）。"
         else:
             e_status = "fail"
-            e_detail = (
-                f"STALE/FAIL：transform 曾 fire（{age}s 前）但近期未触发。"
-                "session 仍活跃却 stale → 钩子间歇失效或被卸载。"
-            )
+            e_detail = f"STALE/FAIL：transform 曾 fire（{age}s 前）但近期未触发。"
     checks.append({"name": "entry_hook", "status": e_status, "detail": e_detail})
 
-    # ③ advance_hook（idle）：心跳存在 = idle 在 fire（稳定钩子；缺心跳只算 unknown 非必 fail）。
+    # ③ advance_hook（idle）：心跳存在 = idle 在 fire（v3：nudge 用，非推进依赖）。
     if not diag_on:
         a_status, a_detail = "unknown", (
-            "诊断关，无心跳。设 ORCA_DIAGNOSE=1 并在 session 内发消息让其空闲（触发 idle），"
-            "再跑 doctor。"
+            "诊断关，无心跳。B 路径不依赖 idle 推进（主 session 自调 next）。"
         )
     elif advance is None:
         a_status, a_detail = "unknown", (
-            "UNKNOWN：诊断开但未观察到 session.idle。发条消息让 session 空闲再测。"
-            "idle 是稳定钩子；此态通常只是尚未触发，非必失败。"
+            "UNKNOWN：诊断开但未观察到 session.idle。B 路径不依赖它；仅 nudge 用。"
         )
     else:
         age = now - int(advance.get("last_idle_at", 0))
         idle_n = int(advance.get("idle_count", 0))
-        adv_n = int(advance.get("advance_count", 0))
-        last_rid = advance.get("last_advance_run_id")
-        rid_hint = f"（最近 run={last_rid}）" if last_rid else "（尚未推进活跃 run）"
         a_status = "pass" if age <= _PROBE_FRESH_SEC else "unknown"
         tag = "PASS" if a_status == "pass" else "STALE"
-        a_detail = f"{tag}：idle fire 过 {idle_n} 次（{age}s 前），其中推进 run {adv_n} 次{rid_hint}。"
+        a_detail = f"{tag}：idle fire 过 {idle_n} 次（{age}s 前）。"
     checks.append({"name": "advance_hook", "status": a_status, "detail": a_detail})
 
     # ④ cli_imports_ok：真检查（保留），CLI 后端可达。
@@ -839,14 +949,12 @@ def doctor(
     # ok = 无 fail（unknown 不算失败：只是证据不足）。
     ok = all(c["status"] != "fail" for c in checks)
 
-    lines = ["Orca in-session 钩子诊断（2026-07-08）", ""]
+    lines = ["Orca in-session 诊断（v3：B 路径，主 session 驱动）", ""]
     for c in checks:
         lines.append(f"[{c['status'].upper()}] {c['name']}: {c['detail']}")
     lines.append("")
-    lines.append("决策矩阵（据 entry_hook / advance_hook）：")
-    lines.append("  entry FAIL + advance PASS → fork 砍 transform、留 idle → 走 prompt-command（删 transform）。")
-    lines.append("  entry PASS + advance PASS → 两钩子都活 → 保留 transform（确定性拦截）。")
-    lines.append("  两 FAIL → fork 砍更多，另议。")
+    lines.append("v3 §1 执行模型：主 session 自调 `orca next` 推进，不依赖 hook。")
+    lines.append("hook（transform/idle）退居 nudge/诊断（只提醒，不推进）。")
     lines.append("")
     lines.append("心跳文件（仅 ORCA_DIAGNOSE=1 时 plugin 写）：")
     lines.append(f"  {rundir / PROBE_ENTRY_NAME}")
@@ -861,41 +969,89 @@ def doctor(
     }, ensure_ascii=False))
 
 
-@app.command()
-def serve(
-    yaml: Path = typer.Option(..., "--yaml", help="workflow YAML"),
-    tape: Path = typer.Option(..., "--tape", help="tape 文件路径（daemon 独占）"),
-    run_id: str = typer.Option(..., "--run-id", help="run id"),
-    inputs: str = typer.Option("{}", "--inputs", help="workflow inputs（JSON）"),
-    opencode_url: str = typer.Option(None, "--opencode-url", help="opencode serve 的 base_url（无头 CI 形态）"),
-    session: str = typer.Option(None, "--session", help="opencode session id"),
-    model: str = typer.Option("deepseek/deepseek-v4-flash", "--model", help="provider/model"),
-    opencode_auth: str = typer.Option(None, "--opencode-auth", help='opencode serve basic auth "user:password"'),
-    log_level: str = typer.Option("INFO", "--log-level", help="INFO/DEBUG/WARN/ERROR"),
-) -> None:
-    """**无头 CI / 长跑批处理** daemon 入口（ADR I3.3a）。
+@app.command(name="list")
+def list_workflows() -> None:
+    """列出可用 workflow（catalog，name+description；与 ``teams list`` 同源，单一逻辑）。
 
-    主 UX（交互 opencode / CC）不使用本命令——主 UX 走 ``bootstrap`` + ``next`` per-call
-    CLI。本命令保留 v5 自驱动 SSE 循环，供无人值守跑长 workflow（CI / 批处理）使用。
+    v3 §3.1：``orca list`` 与 ``teams list`` 共享同一实现——委托 ``commands.run_list``，
+    其底层调 ``catalog.list_workflows()``（单一 catalog，接口统一铁律）。skill/LLM 据此
+    选 wf，再调 ``orca <wf>``。
     """
-    _setup_logging(log_level)
-    from orca.iface.in_session.daemon import InSessionDaemon
+    from orca.iface.cli.commands import run_list
 
-    wf = load_workflow(yaml)
-    try:
-        inp = json.loads(inputs) if inputs else {}
-    except json.JSONDecodeError as e:
-        raise typer.BadParameter(f"--inputs 不是合法 JSON：{e}") from e
-    daemon = InSessionDaemon(wf, Path(tape), run_id, inp)
-    if opencode_url and session:
-        provider, _, mid = model.partition("/")
-        auth = None
-        if opencode_auth and ":" in opencode_auth:
-            u, _, p = opencode_auth.partition(":")
-            auth = (u, p)
-        daemon.run_opencode(opencode_url, session, {"providerID": provider, "modelID": mid}, auth=auth)
-    else:
-        raise typer.BadParameter(
-            "serve 为无头 CI 形态，需 --opencode-url + --session；"
-            "主 UX（交互 opencode / CC）请用 `orca in-session bootstrap/next`"
+    run_list()
+
+
+@app.command(name="open")
+def open_run(
+    run_id: str = typer.Argument(
+        None, help="要打开的 run_id（省略则用当前唯一活跃 run；多个活跃时需显式指定）",
+    ),
+    tape: Path | None = typer.Option(
+        None, "--tape",
+        help="显式 tape 路径（默认 ``runs/<run_id>.jsonl``）",
+    ),
+    host: str | None = typer.Option(
+        None, "--host",
+        help="web server 监听地址（默认 0.0.0.0 远程可访问；ORCA_WEB_HOST env 同效）",
+    ),
+    port: int | None = typer.Option(
+        None, "--port",
+        help="web server 端口（默认探测 7428：是 orca 则复用，否则起后台 serve）",
+    ),
+) -> None:
+    """打开 web 监控面板（SPEC §2.1，复用 web attach）。
+
+    ``run_id`` 省略时自动取**当前唯一活跃 run**（扫活跃 marker）；多个活跃 → fail loud
+    提示指定 run_id；无活跃 → fail loud 提示先 ``orca <wf>``。复用 ``teams open`` 同款
+    ``_open_run``（read-only attach + tail-follow）。
+    """
+    if run_id is None:
+        run_id = _default_active_run_id()
+    raise typer.Exit(_open_run_inproc(run_id, tape_path=tape, host=host, port=port))
+
+
+def _default_active_run_id() -> str:
+    """无 run_id 时取当前唯一活跃 run（扫 marker）。多个/无 → fail loud。"""
+    rundir = _default_rundir()
+    if not rundir.exists():
+        typer.echo("无活跃 run（先 `orca <wf>` 启动）", err=True)
+        raise typer.Exit(1)
+    actives = [read_marker(mp) for mp in sorted(rundir.glob("orca-*.json"))]
+    actives = [m for m in actives if m is not None]
+    if not actives:
+        typer.echo("无活跃 run（先 `orca <wf>` 启动）", err=True)
+        raise typer.Exit(1)
+    if len(actives) > 1:
+        typer.echo(
+            "多个活跃 run，请用 `orca open <run_id>` 指定："
+            + ", ".join(m.run_id for m in actives),
+            err=True,
         )
+        raise typer.Exit(1)
+    return actives[0].run_id
+
+
+def _open_run_inproc(
+    run_id: str, *, tape_path: Path | None, host: str | None, port: int | None
+) -> int:
+    """复用 ``teams open`` 的 ``_open_run``（read-only attach + browser）。延迟 import 防循环。"""
+    from orca.iface.cli.commands import _open_run
+
+    return _open_run(run_id, tape_path=tape_path, host=host, port=port)
+
+
+def main() -> None:
+    """console_scripts 入口（pyproject ``[project.scripts] orca``）。
+
+    函数内 import（保模块导入零副作用，对齐 commands.py 的 textual 延迟 import 纪律）：
+    把 ~/.orca/config.json 的 binary override 注入对应 env var，之后所有 orca run 生效。
+    """
+    from orca.iface.cli.config import bootstrap_config
+
+    bootstrap_config()
+    app()
+
+
+if __name__ == "__main__":
+    main()

@@ -98,7 +98,9 @@ const injecting: Set<string> = new Set()
 
 interface Marker {
   run_id: string
-  tape_path: string
+  // v3 §7.2：marker 精简到 3 字段（run_id/model/no_output_count）。tape_path/yaml/
+  // session_id/owner 已删——这里保 optional 仅向后兼容旧 marker 文件，新 marker 不含。
+  tape_path?: string
   owner?: string
   yaml?: string
   model?: string
@@ -116,15 +118,18 @@ interface CliReply {
 //
 // Fail loud（SPEC 鲁棒性底线）：检查 exitCode，非 0 时把 stderr 首 400 字符回显，
 // 不静默吞错（与 CLAUDE.md「报错处理：重试/失败原因必须用户可见」一致）。
+//
+// v3 §8 step 1（B1 闭环）：命令从 ``orca in-session <sub>`` 上移为 ``orca <sub>`` 顶层
+// （bootstrap/next/status/stop/doctor）。spawn 不再加 ``in-session`` namespace。
 function spawnCli(args: string[]): CliReply | null {
   let r: any
   try {
-    r = Bun.spawnSync(["orca", "in-session", ...args], {
+    r = Bun.spawnSync(["orca", ...args], {
       stdout: "pipe",
       stderr: "pipe",
     })
   } catch (e) {
-    console.error("[orca] spawn orca in-session failed:", e)
+    console.error("[orca] spawn orca failed:", e)
     return null
   }
   const stderr = (r.stderr && r.stderr.toString()) ?? ""
@@ -339,13 +344,12 @@ export const OrcaPlugin = async (ctx: any) => {
       const userModel = extractModel(messages, found.msgIdx)
 
       // 派发到对应 CLI 子命令（§2.6.2）。
-      // status/stop 若无 args 且有 sid → 查 marker 拿 run_id（plugin 透传，零业务逻辑）。
-      let markerRunId: string | null = null
-      if ((sub === "status" || sub === "stop") && !args && sid) {
-        const mk = await readMarker(sid)
-        markerRunId = mk?.run_id ?? null
-      }
-      const cliArgs = buildCliArgs(sub, args, sid, markerRunId, userModel)
+      // v3 §7.2：marker 文件名改为 ``orca-<run_id>.json``（旧 ``orca-<sessionID>.json`` 失效），
+      // plugin 无 sessionID→run_id 映射能力 → 删 readMarker 派发（status/stop 需用户显式给
+      // run_id，或 ``/orca status`` 列全部活跃 run）。A 路径（transform marker 派发）整体
+      // 在 step 2b 删（v3 §8），本段保 run/doctor/open 派发兼容，status/stop 无 args 时让
+      // buildCliArgs 返 null 引导用户给 run_id。
+      const cliArgs = buildCliArgs(sub, args, sid, null, userModel)
       if (cliArgs === null) {
         // 未知子命令 / 缺关键 argv → 标记错误回显（一次性消费：替换文本无 marker 字面）
         found.part.text = `[orca] cannot dispatch: ${sub} (args=${args || "<empty>"})`
@@ -493,31 +497,26 @@ function buildCliArgs(
   userModel: string | null,
 ): string[] | null {
   if (sub === "run") {
-    // bootstrap：wf 路径在 args（必填）；sid 作 --owner + --session-id（§2.6.2 B4 闭环）；
-    // 当前用户消息的 model 作 --model（Bug E 闭环：marker.model 来自用户当前 model，
-    // 不是 CLI 默认；idle 注入 promptAsync 用 marker.model 调对应 provider）。
+    // bootstrap：wf 路径/名在 args（必填）；
+    // 当前用户消息的 model 作 --model（Bug E 闭环：marker.model 来自用户当前 model）。
+    // v3 §7.2：bootstrap 删 --owner / --session-id（marker 精简，无 owner/session_id 字段）。
     const wf = args.trim()
     if (!wf) return null
     const out = ["bootstrap", wf]
     if (userModel) {
       out.push("--model", userModel)
     }
-    if (sid) {
-      out.push("--owner", sid, "--session-id", sid)
-    }
     return out
   }
   if (sub === "status") {
-    // status：有 marker run_id 则查特定 run，否则列全部 run
+    // status：有 run_id（markerRunId，v3 已废 sid 派发，恒 null）则查特定 run，否则列全部。
     // --json：plugin 改写契约要求 stdout 是 JSON（SPEC §2.6.2，MAJOR-1 闭环）
     if (markerRunId) return ["status", markerRunId, "--json"]
     return ["status", "--json"]
   }
   if (sub === "stop") {
-    // stop：marker 派发场景 plugin 无 args（用户只敲 /orca stop）→ 用 --owner <sid>
-    // 查 marker 拿 run_id（CLI 端解析，§2.6.2，MAJOR-2 闭环）
-    if (sid) return ["stop", "--owner", sid]
-    // 用户在 args 里直接给 run_id（slash 路径）
+    // v3 §7.2：stop 删 --owner（marker 无 owner，按 run_id 文件名 O(1) 定位）。
+    // 用户须在 args 里给 run_id（slash 路径）；无 args → null 引导用户先 `orca status` 查。
     if (args) return ["stop", args.trim()]
     return null
   }

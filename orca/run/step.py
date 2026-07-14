@@ -272,6 +272,7 @@ def advance_step(
     run_id: str | None = None,
     elapsed: float = 0.0,
     prompts_dir: Path | None = None,
+    yaml_path: str | None = None,
 ) -> StepResult:
     """单步推进（纯决策：读 tape 现状 → 决定 emits + 回复；不写 tape）。
 
@@ -315,7 +316,7 @@ def advance_step(
         entry = wf.entry
         _check_agent_node(nodes.get(entry), entry)
         logger.info("workflow 启动（%s，entry=%s）", rid, entry)
-        t, d = make_workflow_started(rid, wf, inputs)
+        t, d = make_workflow_started(rid, wf, inputs, yaml_path=yaml_path)
         emits.append(Emit(t, d))
         emits.append(Emit("node_started", {"node": entry}, node=entry))
         ctx = _build_ctx(wf, {}, inputs, rid)

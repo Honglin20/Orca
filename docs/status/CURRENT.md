@@ -3,19 +3,26 @@
 > 新 session 开工前**必读**此文件 + `CLAUDE.md` + 对应阶段 SPEC。
 > 完成任务后清空本文件（移到 release note），**不积累**。
 
-## 🔥 当前任务（2026-07-13）：in-session 统一后端 Design Draft —— 已落草稿，待 spec-review
+## 🔥 当前任务（2026-07-14）：in-session spec v3 §8 step 1 已完成，待 E2E + 进 step 2b
 
-> **新 session 必读**：本块 + [`docs/specs/in-session-unified-backend-draft.md`](../specs/in-session-unified-backend-draft.md)。
+> **新 session 必读**：本块 + [`docs/specs/in-session-entry-and-simplification.md`](../specs/in-session-entry-and-simplification.md) **v3** + [step 1 release note](../releases/2026-07-14-in-session-v3-step1.md)。
 
-**背景**：现状 in-session（`orca in-session` CLI 自管 tape + `advance_step`）与后端（`orca run` 走 `Orchestrator`）是**两套代码**，tape 要人工对齐（G2 问题）——违反「单一真相源」铁律。本 draft 收口为**同一后端 core + 两个入口壳**，顺带根治 LLM 误调后端 run。
+**step 1 已实现并 commit**（code-reviewer 1 BLOCKER + 4 MAJOR + 5 MINOR 全闭环；in-session 134 passed / CLI 后端 + compile + orchestrator 281 passed 0 回归）。核心交付：
+- orca 顶层 = in-session 7 命令（`list/<wf>/next/status/stop/open/doctor`），删 `in-session` 子命令层；`bootstrap` → `orca <wf>` 语法糖（hidden bootstrap + rewrite，单一入口）。
+- 14 后端命令归 `teams` entry point（`run/serve/ps/...`），`list`/`open` 共享单一实现；`ORCA_BACKEND_CMD` env 变量化（默认 teams）。
+- marker 精简 `{run_id, model, no_output_count}`（删 desync 向量），`marker_path(rundir, run_id)` O(1)，yaml 从 tape.workflow_started.data.yaml_path 派生。
+- 重复 bootstrap 同 wf → fail loud（well-known `.orca-bootstrap.lock` serialize 防 TOCTOU）。
+- 保留字黑名单（§2.2 MS1）+ B1 同 commit 改全活调用点（cli.py 驱动协议 / orca.ts spawn+argv / cc_hooks / command 模板）+ `_inputs_from_tape` 首调噪声修复。
 
-**已冻结决策**（draft §9）：① 同一后端 core，`teams`/`orca` 是壳（节点执行策略可替换：SubprocessExecutor / InSessionExecutor）；② `orca`=in-session（LLM 唯一可见）/ `teams`=后端，可见性隔离防误调，**不加兼容期直接断**；③ 载体=skill（非 command/agent，内联不丢上下文 + 单层子代理）；④ 匹配纯用 `Workflow.description`（不加字段）；⑤ inputs 模型代填（读 `InputDef.description`）；⑥ **删 setup phase**（inputs 代填 + 主 session 覆盖其职责）；⑦ 动态构建本期不做；⑧ CAC（=CC 后端）加 target 适配。
+**下一步（§8）**：
+- **②a opencode/CC 真 E2E**（test-agent 的活，非本 step）：验证主 session 自调 `orca next` 跑通 3 节点到 `workflow_completed`。本 step 不跑真 E2E。
+- **②b 删 cc_hooks A + 删 start + 建 orca skill + 删 command 模板**（CC 路 B spike 已过 2026-07-14，gate 解除）。
+- ③ skill 完善（catalog via `orca list` + inputs 代填）+ catalog 下沉 `orca/compile/`。
+- ④ opencode 收尾（删 orca.ts dead code + transform + MARKER_REGEX）。
+- ⑤ 删 setup 全栈 + daemon batch emit + 错误信封统一。
+- ⑥ NGA/CAC 适配（skill 落点真机验证，留用户侧）。
 
-**待定**：① 输出契约（draft §5.2，子代理过程如何进 tape——`--output-file` + 共享 translator + hook 兜底，待讨论定稿）；② `advance_step`↔`Orchestrator` 合并差异面；③ CAC skills 目录 spike；④ 删 setup 影响面清理。
-
-**落地顺序**：先收口**批 B**（opencode in-session 当前半成品、暂非功能态）→ 合并同一后端（最大动作，spec-review-adversarial）→ 命令分家 → skill 入口 + catalog 下沉 → 删 setup → CAC 适配 → 输出契约。
-
-**下一步**：用户确认输出契约方案后，draft 定稿 → `spec-review-adversarial` 审视 → 写实施计划。
+**已知 follow-up（step 1 遗留，非阻塞）**：catalog 物理位置未迁 `orca/compile/catalog.py`（单一实现已就位，两 app 都调它，迁址择期）；dupe-check 按 wf.name 而非 yaml realpath（marker 不存 yaml，wf.name 是 realpath 合理代理，注释已记录）；orca.ts dead code（readMarker/REST/promptAsync）step 4 删。
 
 ---
 

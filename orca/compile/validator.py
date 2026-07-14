@@ -48,6 +48,29 @@ from orca.schema import (
 _ENV = Environment()
 
 
+# ── 保留字黑名单（SPEC v3 §2.2，MS1 闭环）──────────────────────────────────────
+# ``orca <wf-name>`` 用 wf 名作裸顶层子命令；wf 名取了固定命令名（list/next/status/...）
+# 就会让 ``orca status`` 在「跑 status 命令」vs「bootstrap 名为 status 的 wf」间歧义。
+# compile 期硬拒（fail loud），保 ``orca <wf>`` 语法糖无冲突。
+# 名单 = orca 7 命令 + teams 后端命令名 + ORCA_BACKEND_CMD 默认值（teams）+ 内部命令。
+RESERVED_WF_NAMES: frozenset[str] = frozenset({
+    # orca 7 命令（SPEC §2.1）
+    "list", "next", "status", "stop", "open", "doctor",
+    # orca 内部 / deprecated（仍占顶层命令槽）
+    "bootstrap", "start", "serve",
+    # teams 后端命令（SPEC §3.1）——归 teams entry point 但保 wf 名不撞
+    "run", "ps", "logs", "wait", "resume", "install", "validate", "mcp",
+    "executor", "skill",
+    # ORCA_BACKEND_CMD 默认值（teams）；env 改名后 operator 应扩此集合（保守默认）
+    "teams",
+})
+
+
+def _is_reserved_wf_name(name: str) -> bool:
+    """wf 名是否撞保留字（小写比较，与 ``_slugify`` 无关——直接按字面拒）。"""
+    return name.lower() in RESERVED_WF_NAMES
+
+
 # ── errors / warnings 模型（SPEC §1）──────────────────────────────────────────
 
 
@@ -96,6 +119,7 @@ class ValidationResult:
 def validate_workflow(wf: Workflow) -> list[str]:
     """全部语义校验。返回 warnings；有 errors 抛 ConfigurationError（SPEC §4）。"""
     result = ValidationResult()
+    _check_workflow_name_reserved(wf, result)  # §2.2 保留字黑名单（先于一切）
     _check_names_unique(wf, result)            # ①（含 parallel 组名）
     _check_entry_exists(wf, result)            # ②
     _check_entry_is_node(wf, result)           # ⑬ entry 非 parallel 组
@@ -114,6 +138,23 @@ def validate_workflow(wf: Workflow) -> list[str]:
 
 
 # ── helpers：命名空间（node 名 + parallel 组名）──────────────────────────────
+
+
+def _check_workflow_name_reserved(wf: Workflow, result: ValidationResult) -> None:
+    """SPEC v3 §2.2（MS1）：wf.name 禁取保留字（orca/teams 命令名）。
+
+    ``orca <wf-name>`` 裸顶层语法糖要求 wf 名不与固定命令冲突；撞名 → compile fail loud，
+    保 ``orca <wf>`` 无歧义。不接受 ``list/next/status/.../teams`` 等。
+    """
+    if not wf.name:
+        # 空 name 由 schema 层/pydantic 拦；此处不重复报。
+        return
+    if _is_reserved_wf_name(wf.name):
+        result.add_error(
+            f"workflow name {wf.name!r} 是 Orca 保留字（命令名 / 后端变量名），"
+            f"请改名以保 `orca <wf>` 语法糖无冲突。保留字名单："
+            f"{sorted(RESERVED_WF_NAMES)}"
+        )
 
 
 def _top_level_names(wf: Workflow) -> list[str]:

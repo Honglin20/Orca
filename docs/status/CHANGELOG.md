@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-14] in-session v3 §8 step 1 —— orca 接口打包 + 14 命令归宿 + teams 变量化 + marker 精简
+
+实施 SPEC v3 §8 step 1：① `orca` 顶层 = in-session 7 命令（`list/<wf>/next/status/stop/open/doctor`），删 `in-session` 子命令层；`bootstrap` → `orca <wf>` 语法糖（单一实现，hidden bootstrap + rewrite，非双入口）。② 14 后端命令归 `teams` entry point（`run/serve/ps/...`），`list`/`open` 共享单一实现。③ `ORCA_BACKEND_CMD` env 变量化（默认 teams）。④ marker 精简到 `{run_id, model, no_output_count}`（删 desync 向量 tape_path/yaml/session_id/owner），`marker_path(rundir, run_id)` O(1) 直定位（删扫描），yaml 从 tape.workflow_started.data.yaml_path 派生（唯一真相源）。⑤ 重复 bootstrap 同 wf → fail loud（m12，well-known `.orca-bootstrap.lock` serialize 防 TOCTOU，review B1 闭环）。⑥ 保留字黑名单（§2.2 MS1，compile fail loud）。⑦ B1 同 commit 改全活调用点（cli.py 驱动协议 / orca.ts spawn+argv / cc_hooks / command 模板）。⑧ `_inputs_from_tape` 首调噪声修复。in-session 134 passed（+37 新增），CLI 后端 + compile + orchestrator 281 passed 0 回归；code-reviewer 1 BLOCKER（并发 TOCTOU）+ 4 MAJOR + 5 MINOR 全闭环。详见 [release note](../releases/2026-07-14-in-session-v3-step1.md)。
+
 ## [2026-07-09] in-session 三件打磨（outputs 求值 + inputs 从 tape 恢复 + prompt 收紧）
 
 model-driven advance 补丁（`4b3a4d6`）之上的 surgical polish：① `_final_outputs` fail-loud stub → `render_template` 求 `wf.outputs`（与 `Orchestrator._evaluate_outputs` 同源，渲染错 fail loud `ERR_RENDER_ERROR`，in-session 专用不动正常路径）；② `advance_step` 改 `Orchestrator._inputs_from_tape` 恢复 inputs（模型不必每步重传 `--inputs`，修非 entry 节点 `{{ inputs.* }}` 渲染隐患）；③ `run.md`/`_drive_protocol` 加「不许自己 Read 节点 .md」+ 修 stale 自动推进 + `bootstrap --format prompt` 补驱动协议（CURRENT 遗留 #2）。COMMAND→MCP 不换（解决不了实际失败模式 + 重复 phase-10）。in_session 96 passed（+3）；tests/run+iface 1007 passed 0 回归；code-reviewer PASS。Commit: `f86df86`。详见 [release note](../releases/2026-07-09-in-session-outputs-inputs-prompt-polish.md) + [计划](../plans/2026-07-09-in-session-outputs-inputs-prompt-polish.md)。

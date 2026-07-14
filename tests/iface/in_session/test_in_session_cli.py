@@ -107,14 +107,24 @@ def test_bootstrap_emits_ws_ns_and_writes_marker(cwd_tmp, wf_path):
     assert len(marker_files) == 1
 
 
-def test_bootstrap_idempotent_reuses_run_id(cwd_tmp, wf_path):
-    """同 owner + 同 realpath(yaml) 复用 run_id，不重发 ws（N1/F14）。"""
+def test_bootstrap_duplicate_same_wf_fails_loud(cwd_tmp, wf_path):
+    """v3 §7.3（m12）：同 wf 已有活跃 marker（未终态）再 bootstrap → fail loud。
+
+    取代旧 N1「同 owner+yaml 复用 run_id」——v3 改 fail loud 防孤儿（marker 只 3 字段，
+    无 owner；按 wf.name 经 tape workflow_started 匹配活跃 run）。
+    """
     runner = CliRunner()
-    r1 = _bootstrap(runner, wf_path, "--owner", "owner-x")
-    r2 = _bootstrap(runner, wf_path, "--owner", "owner-x")
-    assert r1["run_id"] == r2["run_id"]
-    assert r2.get("reused") is True
-    # tape 仍 2 行（没重发）
+    r1 = _bootstrap(runner, wf_path)
+    # 第二次 bootstrap 同 wf（同 wf.name，未终态）→ fail loud（exit 1）。
+    result = runner.invoke(app, ["bootstrap", str(wf_path)])
+    assert result.exit_code == 1
+    reply = json.loads(result.output.splitlines()[-1])
+    assert reply["reason"] == "duplicate-active-run"
+    assert reply["run_id"] == r1["run_id"]
+    assert "orca next" in reply["hint"]
+    assert "orca stop" in reply["hint"]
+
+    # tape 仍只 2 行（第二次未 emit；fail loud 在 emit 前）。
     tape_path = Path(r1["tape"])
     assert len(tape_path.read_text(encoding="utf-8").strip().split("\n")) == 2
 
@@ -604,7 +614,7 @@ def test_status_no_run_id_lists_runs_dir(cwd_tmp, wf_path):
     assert result.exit_code == 0
     # 输出含 tape 文件名（run_id stem）
     assert ".jsonl" not in result.output  # 只显示 stem
-    assert "用 `orca in-session status <run_id>`" in result.output
+    assert "用 `orca status <run_id>`" in result.output
 
 
 def test_status_with_run_id_shows_progress(cwd_tmp, wf_path):
@@ -666,9 +676,10 @@ def test_start_writes_marker_and_prints_settings_fragment(cwd_tmp, wf_path):
     # PostToolUse matcher 含 Task|Agent
     pu = hooks["PostToolUse"][0]
     assert pu["matcher"] == "Task|Agent"
-    # Stop 命令含 `orca in-session next`
+    # Stop 命令含 `orca next`（v3 §8 B1：命令上移顶层，去 in-session namespace）
     stop_cmd = hooks["Stop"][0]["hooks"][0]["command"]
-    assert "orca in-session next" in stop_cmd
+    assert "orca next" in stop_cmd
+    assert "orca in-session" not in stop_cmd  # 旧 namespace 全清
     # PostToolUse 用 jq flatten + trap 兜底清 tmp（B-7）
     pu_cmd = pu["hooks"][0]["command"]
     assert "jq" in pu_cmd

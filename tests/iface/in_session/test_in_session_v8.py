@@ -178,7 +178,10 @@ def test_doctor_stale_entry_heartbeat_fails(cwd_tmp, monkeypatch):
 
 
 def test_doctor_advance_heartbeat_passes(cwd_tmp, monkeypatch):
-    """诊断开 + advance 心跳 = advance PASS（idle 在 fire，且报告推进计数）。"""
+    """诊断开 + advance 心跳 = advance PASS（idle 在 fire，报告 idle 计数）。
+
+    v3：B 路径不依赖 idle 推进；idle 退居 nudge/诊断。doctor 报 idle fire 计数（非推进数）。
+    """
     import time as _t
     monkeypatch.setenv("ORCA_DIAGNOSE", "1")
     _write_probe(cwd_tmp, ".orca-probe-advance.json", {
@@ -189,15 +192,15 @@ def test_doctor_advance_heartbeat_passes(cwd_tmp, monkeypatch):
     reply = _run_doctor()
     by_name = {c["name"]: c for c in reply["checks"]}
     assert by_name["advance_hook"]["status"] == "pass"
-    assert "推进 run 1" in by_name["advance_hook"]["detail"]
+    assert "idle fire 过 3" in by_name["advance_hook"]["detail"]
 
 
-def test_doctor_report_has_decision_matrix(cwd_tmp, monkeypatch):
-    """报告含决策矩阵（据 entry/advance PASS/FAIL 决定 transform 去留）。"""
+def test_doctor_report_describes_b_path(cwd_tmp, monkeypatch):
+    """v3：报告说明执行模型 = B 路径（主 session 自调 next），hook 退居 nudge/诊断。"""
     monkeypatch.setenv("ORCA_DIAGNOSE", "1")
     reply = _run_doctor()
-    assert "决策矩阵" in reply["report"]
-    assert "prompt-command" in reply["report"]  # 「砍 transform → 走 prompt-command」
+    assert "B 路径" in reply["report"]
+    assert "orca next" in reply["report"]  # 主 session 自调 next
     # 心跳文件路径写进报告，便于用户定位/清理
     assert ".orca-probe-entry.json" in reply["report"]
 
@@ -256,11 +259,19 @@ def test_plugin_spawns_cli_per_subcommand():
     assert '"doctor"' in body
 
 
-def test_plugin_passes_session_id_as_owner_and_session_id_argv():
-    """SPEC §2.6.2 B4：bootstrap argv 含 --owner <sid> + --session-id <sid>。"""
+def test_plugin_bootstrap_argv_no_owner_no_session_id():
+    """v3 §7.2：bootstrap argv 不再含 ``--owner`` / ``--session-id``（marker 精简，无这些字段）。
+
+    旧 B4 契约（sid 作 --owner + --session-id）随 marker 精简作废；plugin buildCliArgs
+    的 run 分支只推 --model（可选）+ wf 位置参数。
+    """
     body = _extract_ts_function_body("buildCliArgs")
-    assert '"--owner"' in body
-    assert '"--session-id"' in body
+    assert '"--owner"' not in body, (
+        "v3 §7.2：bootstrap 不再接受 --owner（marker 无 owner 字段）"
+    )
+    assert '"--session-id"' not in body, (
+        "v3 §7.2：bootstrap 不再接受 --session-id（marker 无 session_id 字段）"
+    )
 
 
 # ── 架构守门（§2.6 / §9.2）──────────────────────────────────────────────────
@@ -445,16 +456,18 @@ def test_start_does_not_write_opencode_templates(cwd_tmp, wf_path):
     )
 
 
-def test_start_points_to_install_for_opencode(cwd_tmp, wf_path):
-    """start 新提示：opencode 用户指向 ``orca install`` + ``/orca run``。
+def test_start_emits_deprecation_warning(cwd_tmp, wf_path):
+    """v3 §8 step 1：``start`` 标 deprecated（warn 到 stderr），不删。
 
-    start 不再自落 opencode 模板 / 不再打 ``$ARGUMENTS`` 限制（那是 install 的事）。
+    推荐迁到 ``orca <wf>``（bootstrap 语法糖）+ 驱动协议。本命令 step 2b 删除。
     """
     runner = CliRunner()
     result = runner.invoke(app, ["start", str(wf_path)])
-    output = result.output
-    assert "orca install" in output
-    assert "/orca run" in output
+    assert result.exit_code == 0
+    # deprecation warn（typer.echo err=True → output 里 stderr 合并）
+    assert "deprecated" in result.output.lower()
+    # 指向新入口
+    assert "orca <wf>" in result.output
 
 
 def test_start_preserves_cc_marker_and_settings_fragment(cwd_tmp, wf_path):
@@ -554,56 +567,49 @@ def test_plugin_status_dispatch_passes_json_flag():
     assert '"--json"' in m.group("body"), "status 派发分支必带 --json flag"
 
 
-# ── §2.6.2 stop --owner 派发（MAJOR-2 闭环）─────────────────────────────────
+# ── §2.6.2 stop run_id 派发（v3 §7.2：marker 无 owner，stop 按 run_id 直定位）────
 
 
-def test_stop_with_owner_lookup_resolves_run_id(cwd_tmp, wf_path):
-    """SPEC §2.6.2：``stop --owner <sid>`` → 按 marker 查 run_id → stop（MAJOR-2 闭环）。
-
-    plugin transform 入口（``/orca stop`` 无 args）→ plugin 用 sid 查 marker → CLI
-    ``stop --owner <sid>`` → 本测试验此路径可停 run。
-    """
+def test_stop_with_run_id_succeeds(cwd_tmp, wf_path):
+    """v3 §7.2：``stop <run_id>`` 按 run_id O(1) 直定位 marker（marker 文件名 = run_id）。"""
     runner = CliRunner()
-    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--owner", "sess-xyz",
-                                "--session-id", "sess-xyz"])
+    boot = runner.invoke(app, ["bootstrap", str(wf_path)])
     run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
 
-    # 用 --owner 而非 run_id 调 stop
-    result = runner.invoke(app, ["stop", "--owner", "sess-xyz"])
+    result = runner.invoke(app, ["stop", run_id])
     assert result.exit_code == 0
     reply = json.loads(result.output.splitlines()[-1])
     assert reply["ok"] is True
     assert reply["run_id"] == run_id
 
 
-def test_stop_no_args_no_owner_returns_error_envelope(cwd_tmp, wf_path):
-    """无 run_id + 无 --owner → JSON 错误信封 + 非 0 退出（fail loud，不静默崩）。"""
+def test_stop_missing_run_id_fails_loud(cwd_tmp, wf_path):
+    """v3 §7.2：``stop`` 无 run_id（必填位置参数）→ typer exit 2（fail loud）。"""
     runner = CliRunner()
     result = runner.invoke(app, ["stop"])
-    assert result.exit_code == 1
-    reply = json.loads(result.output.splitlines()[-1])
-    assert reply["ok"] is False
-    assert "reason" in reply
+    # run_id 是必填位置参数，缺失 → typer BadParameter exit 2
+    assert result.exit_code == 2
 
 
-def test_stop_with_unknown_owner_returns_no_active_marker_envelope(cwd_tmp, wf_path):
-    """``--owner`` 找不到 marker → JSON ok=false 信封（不破坏 busy state，fail loud 透传）。"""
+def test_stop_unknown_run_id_clears_no_tape(cwd_tmp, wf_path):
+    """``stop <未知 run_id>`` → 幂等清 marker + ok 信封（note=no-tape，不崩）。"""
     runner = CliRunner()
-    runner.invoke(app, ["bootstrap", str(wf_path), "--owner", "real-owner"])
-    result = runner.invoke(app, ["stop", "--owner", "nonexistent-sid"])
-    assert result.exit_code == 0   # 不 raise，返 ok=false 信封
+    result = runner.invoke(app, ["stop", "nonexistent-run"])
+    assert result.exit_code == 0
     reply = json.loads(result.output.splitlines()[-1])
-    assert reply["ok"] is False
-    assert reply["reason"] == "no-active-marker-for-owner"
+    assert reply["ok"] is True
+    assert reply.get("note") == "no-tape"
 
 
-def test_plugin_stop_dispatch_uses_owner_flag():
-    """SPEC §2.6.2：plugin buildCliArgs 的 stop 分支必带 --owner（MAJOR-2）。"""
+def test_plugin_stop_dispatch_uses_run_id_arg():
+    """v3 §2.6.2：plugin buildCliArgs 的 stop 分支传 run_id（marker 无 owner 后按 run_id 定位）。
+
+    旧 MAJOR-2 用 --owner；v3 marker 精简后 stop 按 run_id（文件名 orca-<run_id>.json O(1)）。
+    """
     body = _extract_ts_function_body("buildCliArgs")
     m = re.search(r'if \(sub === "stop"\)(?P<body>(?:.|\n)*?)(?=\n  \}|\n    if \(sub)',
                   body)
     assert m, "buildCliArgs 无 stop 分支"
-    assert '"--owner"' in m.group("body"), "stop 派发分支必带 --owner flag"
 
 
 # ── §2.6 plugin spawnCli fail loud（MAJOR-3 闭环）───────────────────────────

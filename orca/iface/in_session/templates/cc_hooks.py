@@ -115,7 +115,7 @@ def _stop_script(*, tape_path: str, run_id: str, cache: str) -> str:
         'set -euo pipefail; '
         f'ARGS=(--tape {tape_path} --run-id {run_id}); '
         f'if [ -f {cache} ]; then ARGS+=(--output "$(cat {cache})"); fi; '
-        'OUT=$(orca in-session next "${ARGS[@]}"); '
+        'OUT=$(orca next "${ARGS[@]}"); '
         f'rm -f {cache}; '
         'DONE=$(echo "$OUT" | jq -r \'.done // false\'); '
         'if [ "$DONE" = "true" ]; then '

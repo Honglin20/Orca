@@ -545,20 +545,26 @@ class Orchestrator:
     def _inputs_from_tape(tape: Tape) -> dict[str, Any]:
         """从 Tape 的 ``workflow_started.data.inputs`` 取原始 inputs（render 用）。
 
-        取不到（罕见：workflow_started 残行被截断 / 异常 tape）→ 返空 dict + warning。
-        空 inputs 下 render ``{{ inputs.x }}`` 会 UndefinedError，warning 让归因可见
-        （review §鲁棒性 建议：不静默返 {}）。
+        两种「取不到」要分开（SPEC v3 §7.5，_inputs_from_tape 首调噪声修复）：
+          - **tape 无 workflow_started**（bootstrap 首调正常态：advance_step 在 emit ws
+            之前调本函数）→ **静默返 {}**，不 WARNING。调用方（``advance_step``）会 fallback
+            到 CLI 传入的 inputs，行为正确；旧实现的 WARNING 是首调噪声（误报「异常 tape」）。
+          - **tape 有 workflow_started 但 data.inputs 缺/坏**（真异常：残行截断 / 旧版 tape
+            / 手改坏）→ 返 {} + WARNING（render ``{{ inputs.* }}`` 可能 UndefinedError，归因可见）。
         """
         for event in tape.replay():
             if event.type == "workflow_started":
                 inputs = event.data.get("inputs")
                 if isinstance(inputs, dict):
                     return inputs
-        logger.warning(
-            "resume：Tape %s 未找到 workflow_started.data.inputs，回退空 inputs"
-            "（后续 render {{ inputs.* }} 可能 UndefinedError）",
-            getattr(tape, "path", "?"),
-        )
+                # workflow_started 存在但 inputs 缺/坏 → 真异常，WARNING。
+                logger.warning(
+                    "Tape %s 的 workflow_started.data.inputs 缺失或非 dict（实得 %r），"
+                    "回退空 inputs（后续 render {{ inputs.* }} 可能 UndefinedError）",
+                    getattr(tape, "path", "?"), type(inputs).__name__,
+                )
+                return {}
+        # 无 workflow_started（bootstrap 首调正常态）→ 静默返 {}。
         return {}
 
     @staticmethod

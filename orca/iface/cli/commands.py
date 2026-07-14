@@ -333,6 +333,19 @@ def list_workflows() -> None:
 
     匹配键是 ``wf.name`` 不是文件名：``my_setup.yaml`` 里 ``name: setup_demo``
     会以 ``setup_demo`` 列出。加载失败的 yaml 跳过（catalog 内部 log warning）。
+
+    v3 §3.1：``orca list`` 与 ``teams list`` 共享同一 catalog 逻辑（单一真相源）——
+    本函数是 catalog 的唯一 CLI 入口；``orca`` app 的 ``list`` 直接委托 ``run_list``。
+    """
+    run_list()
+
+
+def run_list() -> None:
+    """``list`` 命令的共享实现（orca list + teams list 都调它，单一逻辑）。
+
+    抽出来让两个 app 的 ``list`` 命令委托同一函数——避免两份 list 逻辑漂移
+    （coordinator 铁律：无多套事实源）。catalog 本身在 ``iface/mcp/catalog.py``
+    （单一实现）；本函数只做 CLI 展示。
     """
     # 延迟 import：catalog 属 iface/mcp 子包，按本模块依赖边界不在顶层引入；
     # 仅 ``list`` 命令需要，函数内取用（catalog 本身轻量，只依赖 compile+schema）。
@@ -369,21 +382,17 @@ app.add_typer(skill_app, name="skill", help="安装/管理随包 Orca skill（cr
 
 # ── install 子命令组（统一安装入口：skill + in-session，全局默认）────────────
 # sub-Typer：同 executor/skill 模式。收口此前碎片化的 skill install + in-session start
-# 两步安装为一条 `orca install`（详见 docs/plans/2026-07-08-unified-install.md）。
+# 两步安装为一条 `teams install`（详见 docs/plans/2026-07-08-unified-install.md）。
 from orca.iface.cli.install_cmds import app as install_app
 
 app.add_typer(install_app, name="install", help="统一安装 Orca 宿主集成（skill + in-session），全局默认")
 
 
-# ── in-session 子命令组（in-session shell v5：hook-driven）──────────────────
-# sub-Typer：同 executor/skill 模式。in_session.cli 顶层只 import typer + compile +
-# run.lifecycle（轻量），无循环；bg_runner 用 lazy import（见 cli._default_tape_path）。
-from orca.iface.in_session.cli import app as in_session_app
-
-app.add_typer(
-    in_session_app, name="in-session",
-    help="in-session shell：宿主主 session（opencode/CC）执行 workflow，daemon 独占 tape + hook 驱动推进",
-)
+# ── in-session 子命令已上移（v3 §2.1）────────────────────────────────────────
+# 旧 ``orca in-session bootstrap/next/...`` 子命令层已删：bootstrap→``orca <wf>`` 语法糖，
+# next/status/stop/doctor 上移 ``orca`` 顶层（见 orca/iface/in_session/cli.py 的 ``app``）。
+# 本模块（``app``）现在是 **teams / 后端 entry point**（SPEC v3 §3）：run/serve/ps/...
+# 14 命令归宿；不再挂 in-session namespace。
 
 
 # ── ps / logs / wait 子命令（phase 11 §8 P3.2 daemon）─────────────────────────
@@ -1572,7 +1581,12 @@ def _attach_and_get_error(
 
 
 def main() -> None:
-    """console_scripts 入口（pyproject ``[project.scripts] orca``）。"""
+    """console_scripts 入口（pyproject ``[project.scripts] teams``）。
+
+    本模块的 ``app`` 是 **teams / 后端 CLI**（SPEC v3 §3）：run/serve/ps/logs/wait/resume/
+    install/validate/mcp/executor/list/open。旧 ``orca`` 入口已迁到
+    ``orca.iface.in_session.cli:main``（in-session 7 命令，LLM-facing）。
+    """
     # 函数内 import（保模块导入零副作用，对齐 commands.py:17-18 的 textual 延迟 import 纪律）：
     # 把 ~/.orca/config.json 的 binary override 注入对应 env var，之后所有 orca run 生效。
     from orca.iface.cli.config import bootstrap_config
@@ -1580,6 +1594,27 @@ def main() -> None:
     bootstrap_config()
     # 子进程默认不 buffered，让 TUI 内的 print/echo 立即可见。
     app()
+
+
+# ── teams 命令名变量化（SPEC v3 §3.2，env ORCA_BACKEND_CMD）────────────────────
+#
+# ``teams`` 不硬编码命令名：env ``ORCA_BACKEND_CMD``（默认 ``teams``）控制**显示名**
+# （help 文本 / version 字符串里的自我引用），让 operator 改名（如 ``conductor`` /
+# ``orca-backend``）时只需重命名二进制 + 设 env，help 自适应。实现 = 单一 Python 入口
+# （本模块 ``main``），console_scripts 声明默认 ``teams``；operator 改名走 pip 重装 +
+# env，零代码改动（spec §9#6：「实现细节留 step 1」，此处最小可切换实现）。
+BACKEND_CMD_ENV = "ORCA_BACKEND_CMD"
+DEFAULT_BACKEND_CMD = "teams"
+
+
+def backend_cmd_name() -> str:
+    """当前后端命令名（读 env，默认 ``teams``）。用于 help / 诊断展示。"""
+    return os.environ.get(BACKEND_CMD_ENV) or DEFAULT_BACKEND_CMD
+
+
+# 语义别名：teams entry 用的 app = 本模块的 backend app（单一 app 对象，两个名字同指）。
+# 测试与文档可据语义选名（``commands.app`` 旧名保留向后兼容；``teams_app`` 新语义名）。
+teams_app = app
 
 
 if __name__ == "__main__":

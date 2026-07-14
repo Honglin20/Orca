@@ -56,15 +56,20 @@ def make_workflow_started(
     run_id: str,
     wf: Workflow,
     inputs: dict,
+    yaml_path: str | None = None,
 ) -> tuple[str, dict]:
     """构造 ``workflow_started`` 的 (type, data)（SPEC §3.4 data payload）。
 
-    data: ``{inputs, node_count, entry, workflow_name, topology}``。
+    data: ``{inputs, node_count, entry, workflow_name, topology, yaml_path?}``。
 
     ``topology``（phase 9c）：静态 DAG 拓扑摘要，让前端 DAG 在第一个事件即能布局
     （无需等 ``route_taken`` 增量拼边）。设计决策：拓扑进 tape（单一真相源），live 和
     历史 run replay 都从事件拿，无第二数据源 / 额外 endpoint。摘要含 node name+kind、
     routes（from→to）、parallel 组（name+branches）—— **非完整 yaml**，保持 payload 小。
+
+    ``yaml_path``（v3 §7.2）：bootstrap 期记入 tape（canonical realpath），让后续 per-call
+    CLI（``next``）能从 tape 反查 wf yaml——marker 不再存 yaml（desync 向量），tape 是唯一
+    真相源。daemon / 无 yaml 场景传 None（键省略）。
     """
     data = {
         "inputs": dict(inputs),
@@ -73,6 +78,8 @@ def make_workflow_started(
         "workflow_name": wf.name,
         "topology": _topology_summary(wf),
     }
+    if yaml_path:
+        data["yaml_path"] = str(yaml_path)
     return "workflow_started", data
 
 
