@@ -791,67 +791,49 @@ def stop(
     typer.echo(json.dumps({"run_id": run_id, "ok": True, "done": True}))
 
 
-@app.command(hidden=True)
-def start(
-    yaml: Path = typer.Argument(..., help="workflow YAML 路径", exists=True),
-    model: str = typer.Option(
-        "deepseek/deepseek-v4-flash", "--model", help="provider/model（记入 marker）",
-    ),
-) -> None:
-    """**[DEPRECATED]** CC-only run bootstrap：写 CC 激活 marker + 打印 ``settings.json`` hook 片段。
+def _scan_skill_install(
+    *, home: Path | None = None, cwd: Path | None = None,
+) -> dict[str, bool]:
+    """扫四前端 skill 目录，返 ``{platform: 是否装了 orca skill}``（v5 §4.3 / A6）。
 
-    v3 §8 step 1：标 deprecated（warn），**不删**——CC 路 B spike 通过后（step 2b）才删。
-    新入口统一走 ``orca <wf>``（语法糖 → bootstrap）+ 驱动协议（模型自调 next）。
+    每个平台查 user-scope + project-scope 两个可能落点（``<root>/skills/orca/SKILL.md``），
+    任一存在即该平台算已装。doctor 的 ``skill_install`` 检查据此 pass/fail。
 
-    一次性安装（plugin / command / ``opencode.json`` 声明）在 ``teams install``
-    （operator 动作）。CC 用户 per-run 仍可用本命令生成 hook 片段 + marker（A 路径，
-    hook 驱动），但推荐迁到 B 路径（``orca <wf>`` + 模型自调 next）。
+    ``home`` / ``cwd`` 可注入（对齐 ``resolve_roots`` 模式）——单测隔离真实 ``~/.claude``
+    等，否则装过 orca 的开发机上 ``fail_when_absent`` 测试会反向失败（review 🔴#2）。
     """
-    typer.echo(typer.style(
-        "⚠️  `orca start` 已 deprecated（v3 §8 step 1）。推荐用 `orca <wf>`"
-        "（bootstrap 语法糖）+ 驱动协议（主 session 自调 next）。本命令 step 2b 删除。",
-        fg=typer.colors.YELLOW,
-    ), err=True)
-    from orca.iface.in_session.templates import render_cc_settings_fragment
+    # 延迟 import：skill_cmds 属 iface.cli 子包，避免顶层循环；HOST_DOTDIR 单一真相源。
+    from orca.iface.cli.skill_cmds import HOST_DOTDIR, SKILL_HOSTS, opencode_global_root
 
-    wf = load_workflow(yaml)
-    run_id = gen_run_id(wf.name)
-    tape_path = _default_tape_path(run_id)
-    tape_real = os.path.realpath(tape_path)
-    yaml_real = os.path.realpath(yaml)
-
-    # 写 marker（v3 §7.2：只 3 字段；CC 路 A 的 hook 脚本经 --tape/--run-id 直接传，不依赖 marker yaml 字段）。
-    rundir = tape_path.parent
-    mpath = marker_path(rundir, run_id)
-    write_marker(mpath, ActivationMarker(run_id=run_id, model=model, no_output_count=0))
-
-    fragment = render_cc_settings_fragment(
-        run_id=run_id, tape_path=tape_real, yaml_path=yaml_real, model=model,
-    )
-    typer.echo(f"workflow: {wf.name}")
-    typer.echo(f"run_id:   {run_id}")
-    typer.echo(f"tape:     {tape_real}")
-    typer.echo(f"marker:   {mpath}")
-    typer.echo("")
-    typer.echo(typer.style("把以下片段贴进 .claude/settings.json（CC 路 A）：", fg=typer.colors.CYAN, bold=True))
-    typer.echo(json.dumps(fragment, indent=2, ensure_ascii=False))
-    typer.echo("")
-    typer.echo(typer.style(
-        "推荐改用 B 路径（v3）：`orca <wf>` + 主 session 自调 next（见驱动协议）。",
-        fg=typer.colors.GREEN,
-    ))
-    typer.echo(f"  跑完用 `orca status {run_id}` 看结果。")
+    home = home if home is not None else Path.home()
+    cwd = cwd if cwd is not None else Path.cwd()
+    # 各平台的候选根（user-scope + project-scope）。opencode user-scope 走全局 config 根。
+    candidates: dict[str, list[Path]] = {}
+    for host in SKILL_HOSTS:
+        if host == "opencode":
+            user_root = opencode_global_root(home)
+            proj_root = cwd / HOST_DOTDIR[host]
+        else:
+            user_root = home / HOST_DOTDIR[host]
+            proj_root = cwd / HOST_DOTDIR[host]
+        candidates[host] = [user_root, proj_root]
+    return {
+        platform: any((root / "skills" / "orca" / "SKILL.md").is_file() for root in roots)
+        for platform, roots in candidates.items()
+    }
 
 
 @app.command()
 def doctor(
     log_level: str = typer.Option("INFO", "--log-level", help="INFO/DEBUG/WARN/ERROR"),
 ) -> None:
-    """诊断 in-session 集成层（v3 §2.1：skill 落点 + CLI imports；hook 心跳可选）。
+    """诊断 in-session 集成层（v5 §2.1 / §4.4：skill 落点 + CLI imports 为准；hook 心跳可选）。
 
-    v3：B 路径（主 session 自调 next）不依赖 hook 推进；doctor 主验 skill 落点 + CLI 依赖
-    可达。旧两钩子（transform / idle）的心跳检测保留为可选诊断（ORCA_DIAGNOSE=1 时 plugin
-    写心跳，doctor 读取作证）——hook 退居 nudge/诊断（§4.4），不再推进。
+    v5：B 路径（主 session 自调 next）不依赖 hook 推进；``orca.ts`` transform 派发已禁用
+    （step 2b）。doctor 主验两件**硬**事——① ``skill_install``（四前端是否装了 orca skill）
+    + ② ``cli_imports_ok``（CLI 后端可达）。旧两钩子（transform / idle）的心跳退居**可选**
+    诊断（``ORCA_DIAGNOSE=1`` 时 plugin 写心跳，doctor 读取作证），**不计入 ok**——
+    hook 不再推进，缺心跳不是故障。
     """
     _setup_logging(log_level)
 
@@ -873,56 +855,23 @@ def doctor(
 
     checks: list[dict[str, Any]] = []
 
-    # ① diag_switch：开关状态 + 切换方法。
+    # 每条 check 带 ``hard``：True = 计入 ok（skill_install / cli_imports_ok）；
+    # False = 可选诊断（diag/hook），不计数。避免硬编码 name tuple（typo 静默丢失硬检查）。
+    # ① skill_install（A6，硬）：四前端是否装了 orca skill。
+    installed = _scan_skill_install()
+    where = [p for p, ok_flag in installed.items() if ok_flag]
     checks.append({
-        "name": "diag_switch",
-        "status": "pass" if diag_on else "unknown",
+        "name": "skill_install",
+        "hard": True,
+        "status": "pass" if where else "fail",
         "detail": (
-            f"ORCA_DIAGNOSE={'1 (诊断开，钩子写心跳)' if diag_on else '未设/0 (诊断关，零 I/O)'}。"
-            " 切换：export ORCA_DIAGNOSE=1 后重启 opencode（plugin 加载时读 env）。"
+            f"PASS：orca skill 已装于 {', '.join(where)}。" if where
+            else "FAIL：四前端（cc/opencode/cac/nga，user+project scope）均未找到 orca skill。"
+                 "跑 `teams install --target <platform>` 安装后重启前端。"
         ),
     })
 
-    # ② entry_hook（transform）：心跳存在 + 新鲜 = 钩子在 fire（v3：可选诊断，非推进依赖）。
-    if not diag_on:
-        e_status, e_detail = "unknown", (
-            "诊断关，无心跳。B 路径（主 session 自调 next）不依赖 hook 推进；"
-            "若需验 transform/idle 钩子接线，设 ORCA_DIAGNOSE=1 并在 session 内对话几句。"
-        )
-    elif entry is None:
-        e_status, e_detail = "fail", (
-            "FAIL：诊断开但无 transform 心跳 = experimental.chat.messages.transform 钩子"
-            "未触发。B 路径不依赖它推进，但若入口走 marker 派发会瘫。"
-        )
-    else:
-        age = now - int(entry.get("last_called_at", 0))
-        disp = int(entry.get("dispatch_count", 0))
-        if age <= _PROBE_FRESH_SEC:
-            e_status = "pass"
-            e_detail = f"PASS：transform 正常 fire（{age}s 前被调，累计 dispatch {disp} 次）。"
-        else:
-            e_status = "fail"
-            e_detail = f"STALE/FAIL：transform 曾 fire（{age}s 前）但近期未触发。"
-    checks.append({"name": "entry_hook", "status": e_status, "detail": e_detail})
-
-    # ③ advance_hook（idle）：心跳存在 = idle 在 fire（v3：nudge 用，非推进依赖）。
-    if not diag_on:
-        a_status, a_detail = "unknown", (
-            "诊断关，无心跳。B 路径不依赖 idle 推进（主 session 自调 next）。"
-        )
-    elif advance is None:
-        a_status, a_detail = "unknown", (
-            "UNKNOWN：诊断开但未观察到 session.idle。B 路径不依赖它；仅 nudge 用。"
-        )
-    else:
-        age = now - int(advance.get("last_idle_at", 0))
-        idle_n = int(advance.get("idle_count", 0))
-        a_status = "pass" if age <= _PROBE_FRESH_SEC else "unknown"
-        tag = "PASS" if a_status == "pass" else "STALE"
-        a_detail = f"{tag}：idle fire 过 {idle_n} 次（{age}s 前）。"
-    checks.append({"name": "advance_hook", "status": a_status, "detail": a_detail})
-
-    # ④ cli_imports_ok：真检查（保留），CLI 后端可达。
+    # ② cli_imports_ok（硬）：CLI 后端可达。
     import_errors: list[str] = []
     for mod in ("orca.compile", "orca.events.tape", "orca.run.step",
                 "orca.iface.in_session.marker"):
@@ -938,6 +887,7 @@ def doctor(
     cli_ok = not import_errors
     checks.append({
         "name": "cli_imports_ok",
+        "hard": True,
         "status": "pass" if cli_ok else "fail",
         "detail": (
             f"orca v{version}; imports ok (compile/tape/step/marker)"
@@ -946,17 +896,66 @@ def doctor(
         ),
     })
 
-    # ok = 无 fail（unknown 不算失败：只是证据不足）。
-    ok = all(c["status"] != "fail" for c in checks)
+    # ③ diag_switch（可选）：开关状态 + 切换方法。不计入 ok。
+    checks.append({
+        "name": "diag_switch",
+        "hard": False,
+        "status": "pass" if diag_on else "unknown",
+        "detail": (
+            f"ORCA_DIAGNOSE={'1 (诊断开，钩子写心跳)' if diag_on else '未设/0 (诊断关，零 I/O)'}。"
+            " 切换：export ORCA_DIAGNOSE=1 后重启 opencode（plugin 加载时读 env）。"
+            "（v5：hook 已退居可选诊断，不推进。）"
+        ),
+    })
 
-    lines = ["Orca in-session 诊断（v3：B 路径，主 session 驱动）", ""]
+    # ④ entry_hook（transform，可选）：v5 transform 派发已禁用（step 2b），心跳仅证明 plugin
+    #   加载/被调——非推进依赖，故只报 pass/unknown，**不 fail**。dispatch_count 在派发禁用后
+    #   生产恒为 0，不再展示（避免「累计 0 次」误导）。
+    if not diag_on:
+        e_status, e_detail = "unknown", (
+            "诊断关，无心跳。B 路径（主 session 自调 next）不依赖 transform；"
+            "若需验 plugin 加载，设 ORCA_DIAGNOSE=1 并在 session 内对话几句。"
+        )
+    elif entry is None:
+        e_status, e_detail = "unknown", (
+            "UNKNOWN：诊断开但无 transform 心跳（plugin 未加载或未触发）。"
+            "v5 transform 派发已禁用，这不影响推进（入口在 orca skill）。"
+        )
+    else:
+        age = now - int(entry.get("last_called_at", 0))
+        e_status = "pass" if age <= _PROBE_FRESH_SEC else "unknown"
+        tag = "PASS" if e_status == "pass" else "STALE"
+        e_detail = f"{tag}：transform 钩子被调（{age}s 前）= plugin 已加载。dispatch 已禁用，仅诊断。"
+    checks.append({"name": "entry_hook", "hard": False, "status": e_status, "detail": e_detail})
+
+    # ⑤ advance_hook（idle，可选）：nudge 载体（step 2b(7)），不 fail。
+    if not diag_on:
+        a_status, a_detail = "unknown", (
+            "诊断关，无心跳。B 路径不依赖 idle 推进（主 session 自调 next）。"
+        )
+    elif advance is None:
+        a_status, a_detail = "unknown", (
+            "UNKNOWN：诊断开但未观察到 session.idle。B 路径不依赖它；idle 仅 nudge 用。"
+        )
+    else:
+        age = now - int(advance.get("last_idle_at", 0))
+        idle_n = int(advance.get("idle_count", 0))
+        a_status = "pass" if age <= _PROBE_FRESH_SEC else "unknown"
+        tag = "PASS" if a_status == "pass" else "STALE"
+        a_detail = f"{tag}：idle fire 过 {idle_n} 次（{age}s 前）。仅 nudge，非推进依赖。"
+    checks.append({"name": "advance_hook", "hard": False, "status": a_status, "detail": a_detail})
+
+    # ok = 仅 ``hard=True`` 的检查无 fail。可选检查（diag/hook）不计数。
+    ok = all(c["status"] != "fail" for c in checks if c.get("hard"))
+
+    lines = ["Orca in-session 诊断（v5：B 路径，skill 驱动入口）", ""]
     for c in checks:
         lines.append(f"[{c['status'].upper()}] {c['name']}: {c['detail']}")
     lines.append("")
-    lines.append("v3 §1 执行模型：主 session 自调 `orca next` 推进，不依赖 hook。")
-    lines.append("hook（transform/idle）退居 nudge/诊断（只提醒，不推进）。")
+    lines.append("硬检查（skill_install + cli_imports_ok）决定 ok；其余为可选诊断。")
+    lines.append("v5 §1 执行模型：主 session 经 orca skill 自调 `orca next` 推进，不依赖 hook。")
     lines.append("")
-    lines.append("心跳文件（仅 ORCA_DIAGNOSE=1 时 plugin 写）：")
+    lines.append("心跳文件（仅 ORCA_DIAGNOSE=1 时 plugin 写，可选）：")
     lines.append(f"  {rundir / PROBE_ENTRY_NAME}")
     lines.append(f"  {rundir / PROBE_ADVANCE_NAME}")
     report = "\n".join(lines)
@@ -971,15 +970,30 @@ def doctor(
 
 @app.command(name="list")
 def list_workflows() -> None:
-    """列出可用 workflow（catalog，name+description；与 ``teams list`` 同源，单一逻辑）。
+    """列出可用 workflow（SPEC v5 §2.3，给 skill/LLM 选 wf + 抽 inputs 用）。
 
-    v3 §3.1：``orca list`` 与 ``teams list`` 共享同一实现——委托 ``commands.run_list``，
-    其底层调 ``catalog.list_workflows()``（单一 catalog，接口统一铁律）。skill/LLM 据此
-    选 wf，再调 ``orca <wf>``。
+    返 ``{workflows:[{name, description, inputs_schema:[{name,type,description}]}]}``——
+    一个命令给齐「选 wf（据 description）+ 知 inputs（据 inputs_schema）」，故无 describe
+    命令（v5 决策：冗余）。**无 has_setup**（B3）。
+
+    **单一 catalog 真相源**（coordinator 铁律）：本命令与 ``teams list``（commands.run_list，
+    人类可读，给运维）**调同一个** ``catalog.list_workflows()``——catalog 是唯一实现，
+    渲染层按消费者不同（skill 要 JSON / 运营要文本），非两套 list 逻辑。
     """
-    from orca.iface.cli.commands import run_list
+    from orca.iface.mcp.catalog import list_workflows as _catalog_list
 
-    run_list()
+    items = _catalog_list()
+    # 恰取 skill/LLM 需要的 3 字段（name/description/inputs_schema）；catalog item 的其余
+    # 字段（has_setup/entry/inputs_count）留给 MCP/teams 渲染，不暴露给 orca list（B3）。
+    workflows = [
+        {
+            "name": it["name"],
+            "description": it["description"],
+            "inputs_schema": it["inputs_schema"],
+        }
+        for it in items
+    ]
+    typer.echo(json.dumps({"workflows": workflows}, ensure_ascii=False))
 
 
 @app.command(name="open")

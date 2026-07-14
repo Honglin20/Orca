@@ -511,16 +511,6 @@ def test_plugin_template_has_no_orca_business_logic():
         assert kw not in text, f"plugin 模板含禁词 {kw!r}（违反 D-v7-1）"
 
 
-def test_cc_hook_template_has_no_orca_business_logic():
-    """CC hook 脚本只 spawn CLI + parse JSON 顶层字段，无 Orca 业务逻辑。"""
-    hook = Path(__file__).resolve().parents[3] / "orca/iface/in_session/templates/cc_hooks.py"
-    text = hook.read_text(encoding="utf-8")
-    forbidden = ["advance_step", "router.resolve", "replay_state", "tape.append",
-                 "EventBus", "drive_loop"]
-    for kw in forbidden:
-        assert kw not in text, f"CC hook 模板含禁词 {kw!r}"
-
-
 # ── G2 序列对齐（轻量版）────────────────────────────────────────────────────
 
 
@@ -642,70 +632,7 @@ def test_next_no_marker_returns_no_marker_reason(cwd_tmp, wf_path):
     assert reply["reason"] == "no-marker"
 
 
-# ── start 命令（CC 路）──────────────────────────────────────────────────────
-
-
-def _extract_json_block(text: str) -> dict:
-    """从 start 命令 stdout 提取第一个完整 JSON 对象（hooks 片段）。"""
-    import json as _json
-    decoder = _json.JSONDecoder()
-    idx = text.find("{\n")
-    assert idx >= 0, "未在 start stdout 找到 JSON 起始"
-    obj, _end = decoder.raw_decode(text[idx:])
-    return obj
-
-
-def test_start_writes_marker_and_prints_settings_fragment(cwd_tmp, wf_path):
-    """start <wf> → 写 marker + 打印 settings.json hooks 片段（含 Stop / PostToolUse）。"""
-    runner = CliRunner()
-    result = runner.invoke(app, ["start", str(wf_path)])
-    assert result.exit_code == 0
-    output = result.output
-
-    # 含 run_id / tape / marker 路径 + settings.json 片段
-    assert "run_id:" in output
-    assert "tape:" in output
-    assert "marker:" in output
-
-    fragment = _extract_json_block(output)
-    assert "hooks" in fragment
-    hooks = fragment["hooks"]
-    assert "Stop" in hooks
-    assert "PostToolUse" in hooks
-
-    # PostToolUse matcher 含 Task|Agent
-    pu = hooks["PostToolUse"][0]
-    assert pu["matcher"] == "Task|Agent"
-    # Stop 命令含 `orca next`（v3 §8 B1：命令上移顶层，去 in-session namespace）
-    stop_cmd = hooks["Stop"][0]["hooks"][0]["command"]
-    assert "orca next" in stop_cmd
-    assert "orca in-session" not in stop_cmd  # 旧 namespace 全清
-    # PostToolUse 用 jq flatten + trap 兜底清 tmp（B-7）
-    pu_cmd = pu["hooks"][0]["command"]
-    assert "jq" in pu_cmd
-    assert "trap" in pu_cmd
-
-    # marker 已写
-    markers = list(cwd_tmp.glob("runs/orca-*.json"))
-    assert len(markers) == 1
-
-
-def test_start_stop_script_uses_bash_array_safe_argv(cwd_tmp, wf_path):
-    """Stop 脚本用 bash 数组 ``ARGS=(...)`` + ``"${ARGS[@]}"`` 展开（B-1 闭环：避免 word-splitting）。
-
-    B-1 闭环：cache 含空格/换行（task subagent 文本输出常态）时，bash 数组 +
-    ``"${ARGS[@]}"`` 保证 argv 不被 word-splitting 破坏。
-    """
-    runner = CliRunner()
-    result = runner.invoke(app, ["start", str(wf_path)])
-    fragment = _extract_json_block(result.output)
-    stop_cmd = fragment["hooks"]["Stop"][0]["hooks"][0]["command"]
-
-    # bash 数组（B-1 闭环）
-    assert "ARGS=(" in stop_cmd
-    assert '"${ARGS[@]}"' in stop_cmd
-    # decision:block 经 jq -n --arg 构造（B-2 闭环）
-    assert 'jq -n --arg p "$PROMPT"' in stop_cmd
+# ── marker 终态清理（v5 step 2b：start 命令已删，相关 start/cc_hooks 测试随之移除）──
 
 
 def test_marker_files_cleaned_after_workflow_completes(cwd_tmp, wf_path):

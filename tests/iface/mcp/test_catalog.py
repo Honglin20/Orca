@@ -82,7 +82,7 @@ def test_list_workflows_empty_dir(catalog_dir):
 
 
 def test_list_workflows_returns_metadata(catalog_dir):
-    """list_workflows 返 name/description/has_setup/entry/inputs_count。"""
+    """list_workflows 返 name/description/has_setup/entry/inputs_count/inputs_schema。"""
     (catalog_dir / "simple.yaml").write_text(SIMPLE_WF, encoding="utf-8")
 
     result = list_workflows()
@@ -93,6 +93,8 @@ def test_list_workflows_returns_metadata(catalog_dir):
     assert result[0]["has_setup"] is False
     assert result[0]["entry"] == "a"
     assert result[0]["inputs_count"] == 0
+    # v5 §2.3：inputs_schema = [{name,type,description}]（空 inputs → []）
+    assert result[0]["inputs_schema"] == []
 
 
 def test_list_workflows_has_setup_true(catalog_dir):

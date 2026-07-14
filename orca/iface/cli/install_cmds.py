@@ -1,30 +1,27 @@
-"""install_cmds.py —— ``orca install`` 统一安装入口（全局默认）。
+"""install_cmds.py —— ``teams install`` 统一安装入口（v5 §4.3，全局默认）。
 
-回答「用户怎么把 Orca 的宿主集成一次性装好、且全局可用？」：``orca install`` 收口
-**skill + in-session** 两类集成，默认装到用户级（``~/.config/opencode/`` / ``~/.claude/``），
-一条命令替代此前碎片化的 ``orca skill install`` + ``orca in-session start``。
+回答「用户怎么把 Orca skill 装到各前端宿主？」：``teams install --target <platform>``
+把随包 skill（含 ``orca`` 入口 skill）拷到对应前端的 skill 目录。四前端统一一套 skill
+（SPEC v5 §4.1/§4.3：删 command、统一 skill，入口内联注入主 session）。
 
-替代关系：
-  - ``orca skill install`` → 降为弃用别名（warn + 委托本命令），见 ``skill_cmds``。
-  - ``orca in-session start`` 的 **opencode 模板落地职责** → 移到本命令。``start`` 收窄为
-    **CC-only run bootstrap**（opencode 路运行时由 ``/orca run`` → ``bootstrap`` 自举）。
+落点（§4.3，仅此不同）：
+  - ``cc``       → ``.claude/skills/``
+  - ``opencode`` → ``.opencode/skills/``（user scope: ``~/.config/opencode/skills/``）
+  - ``cac``      → ``.cac/skills/``
+  - ``nga``      → ``.nga/skills/``
+  - ``all``      → 上列四个都装
 
-设计（spike-verified 2026-07-08，详见 ``docs/plans/2026-07-08-unified-install.md``）：
-  - **opencode plugin 加载 = ``opencode.json`` ``"plugin": [<path>]`` 声明**。无目录自动发现
-    （光丢 ``.ts`` 不加载——spike 加声明前 0 marker，加声明后 ``loading plugin`` + marker 全现）。
-    故 install **必须合并** ``opencode.json``：
-      - 项目 scope：plugin 声明用相对路径 ``./.opencode/plugins/orca.ts``（相对 cwd）
-      - 用户 scope：plugin 声明用**绝对路径** ``<config_dir>/plugins/orca.ts``（全局 config 非项目相对）
-  - ``command/orca.md`` = ``/orca`` slash 命令来源（command 目录自动发现，同 skill 约定）。
-  - **CC in-session hooks 是 per-run**（``settings.json`` 片段内嵌 tape_path/run_id，无法全局
-    安装）→ 仍由 ``orca in-session start <wf>`` 每次生成。本命令对 CC 只装 skill。
+opencode 额外落 ``plugins/orca.ts`` + 合并 ``opencode.json`` 的 plugin 声明（plugin 加载需
+显式声明，spike-verified 2026-07-08）。v5 §8 step 2b：``orca.ts`` 的 transform marker 派发
+已 early-return 禁用（惰性），整个 plugin 文件 + 声明在 step 4 整删；此窗口期仍拷贝保声明
+不悬空。command 模板已删（step 2b(5)），不再拷 ``command/orca/``。
 
 **架构守门**（D-v7-1 同源）：本模块零 Orca 业务逻辑——只拷文件 + 合并 JSON 顶层字段。
 不调 advance/router/replay/tape 路径，不做状态机判断。CI grep 守门。
 
 依赖单向：stdlib + typer + ``orca.iface.cli.config`` + ``orca.iface.in_session.templates``
-（只读模板资产）+ ``orca.skills``（只读随包 skill）+ ``orca.iface.cli.skill_cmds``（SKILL_NAME
-常量，单一真相源）。**不**反向依赖 run/events/schema。
+（只读模板资产）+ ``orca.skills``（只读随包 skill）+ ``orca.iface.cli.skill_cmds``
+（``opencode_global_root`` 单一真相源）。**不**反向依赖 run/events/schema。
 """
 
 from __future__ import annotations
@@ -40,14 +37,21 @@ from typing import Any, Callable
 import typer
 
 from orca.iface.cli.config import bootstrap_config
-from orca.iface.cli.skill_cmds import SKILL_NAME, opencode_global_root
+from orca.iface.cli.skill_cmds import (
+    HOST_DOTDIR,
+    SKILL_HOSTS,
+    SKILL_NAME,
+    SKILL_TARGETS,
+    opencode_global_root,
+)
 
 app = typer.Typer(
     name="install",
-    help="统一安装 Orca 宿主集成（skill + in-session），全局默认。",
+    help="统一安装 Orca 宿主集成（skill），全局默认。",
 )
 
-VALID_TARGETS = ("claude", "opencode", "all")
+# v5 §4.3：四前端统一 skill 落点。常量从 skill_cmds import（单一真相源，避免副本漂移）。
+VALID_TARGETS = SKILL_TARGETS
 VALID_SCOPES = ("user", "project")
 
 
@@ -58,12 +62,12 @@ VALID_SCOPES = ("user", "project")
 class HostRoot:
     """一个宿主在某 scope 下的 config 根目录。
 
-    ``root`` 是该宿主的配置根：claude = ``.claude``，opencode = ``.opencode`` /
-    ``~/.config/opencode``。skill/plugin/command/declaration 都落在此根下（opencode.json
-    例外——项目 scope 落在 cwd 根，见 ``_opencode_json_path``）。
+    ``root`` 是该宿主的配置根：cc = ``.claude``、opencode = ``.opencode`` /
+    ``~/.config/opencode``、cac = ``.cac``、nga = ``.nga``。skill 都落 ``<root>/skills/``；
+    opencode 额外落 plugin + ``opencode.json`` 声明（plugin 惰性，step 4 整删）。
     """
 
-    host: str   # "claude" | "opencode"
+    host: str   # "cc" | "opencode" | "cac" | "nga"
     root: Path
     scope: str  # "user" | "project"
 
@@ -71,11 +75,14 @@ class HostRoot:
 def resolve_roots(
     target: str, scope: str, *, home: Path | None = None,
 ) -> list[HostRoot]:
-    """按 ``--target`` × ``--scope`` 解析宿主 config 根目录列表。
+    """按 ``--target`` × ``--scope`` 解析宿主 config 根目录列表（v5 §4.3 四平台）。
 
-    - claude：user → ``<home>/.claude``；project → ``<cwd>/.claude``
+    - cc：user → ``<home>/.claude``；project → ``<cwd>/.claude``
     - opencode：user → ``OPENCODE_CONFIG_DIR`` 或 ``<home>/.config/opencode``；
       project → ``<cwd>/.opencode``
+    - cac：user → ``<home>/.cac``；project → ``<cwd>/.cac``
+    - nga：user → ``<home>/.nga``；project → ``<cwd>/.nga``
+    - all → 上列四者都装
 
     未知 target / scope → ``typer.BadParameter``（fail loud）。
     """
@@ -90,19 +97,19 @@ def resolve_roots(
 
     home = home or Path.home()
     cwd = Path.cwd()
-    hosts = ["claude", "opencode"] if target == "all" else [target]
+    hosts = list(SKILL_HOSTS) if target == "all" else [target]
 
     roots: list[HostRoot] = []
     for host in hosts:
-        if host == "claude":
-            root = (home / ".claude") if scope == "user" else (cwd / ".claude")
-        else:  # opencode
-            if scope == "user":
-                # OPENCODE_CONFIG_DIR 覆盖；与 skill_cmds.install_targets 同源（单一真相源
-                # opencode_global_root，含 expanduser 兜底，review 🟡#1 闭环）。
-                root = opencode_global_root(home)
-            else:
-                root = cwd / ".opencode"
+        if host == "opencode" and scope == "user":
+            # OPENCODE_CONFIG_DIR 覆盖；与 skill_cmds.install_targets 同源（单一真相源
+            # opencode_global_root，含 expanduser 兜底，review 🟡#1 闭环）。
+            root = opencode_global_root(home)
+        elif host == "opencode":  # project scope
+            root = cwd / ".opencode"
+        else:  # cc / cac / nga
+            dotdir = HOST_DOTDIR[host]
+            root = (home / dotdir) if scope == "user" else (cwd / dotdir)
         roots.append(HostRoot(host=host, root=root, scope=scope))
     return roots
 
@@ -111,25 +118,19 @@ def resolve_roots(
 
 
 def _opencode_plugin_src() -> Path:
-    """随包 opencode plugin 模板（``orca.ts``）。"""
+    """随包 opencode plugin 模板（``orca.ts``，v5 step 2b transform 已禁用，step 4 整删）。"""
     return Path(str(files("orca.iface.in_session.templates"))) / "opencode" / "orca.ts"
 
 
-def _opencode_command_srcs() -> list[Path]:
-    """随包 opencode slash 命令模板（``command/orca/*.md`` 命名空间 → ``/orca run|status|stop|doctor``）。
+def _bundled_skill_sources() -> list[Path]:
+    """随包所有 skill 源目录（``orca/skills/*/``，以含 ``SKILL.md`` 判定）。
 
-    2026-07-08（批 B 入口重设计）：从单 ``command/orca.md``（marker + transform 派发）改为
-    ``command/orca/<sub>.md`` prompt-command 命名空间——每个命令是一段清晰指令（接口 + 示例 +
-    规则），模型照指令调 ``orca in-session`` CLI，**不再依赖 transform 钩子**。加命令 = 加一个
-    ``.md`` 文件，install 自动捡（按 ``templates/opencode/command/orca/`` 下 ``*.md`` 扫描）。
+    v5 §4.1/§4.3：入口统一切到 skill。随包目前两份：``orca``（in-session 入口三步指导）
+    + ``create-workflow``（authoring）。加 skill = 加目录，install 自动捡（OCP，无需改本函数）。
+    按 ``SKILL.md`` 存在过滤——排除 ``__pycache__`` 等非 skill 目录。
     """
-    ns = Path(str(files("orca.iface.in_session.templates"))) / "opencode" / "command" / "orca"
-    return sorted(ns.glob("*.md"))
-
-
-def _skill_src() -> Path:
-    """随包 create-workflow skill 源目录。"""
-    return Path(str(files("orca.skills"))) / SKILL_NAME
+    skills_dir = Path(str(files("orca.skills")))
+    return sorted(p for p in skills_dir.iterdir() if p.is_dir() and (p / "SKILL.md").is_file())
 
 
 # ── 落地原语：原子写（带 backup）+ JSON 合并 ──────────────────────────────────
@@ -188,20 +189,27 @@ def _merge_json_file(path: Path, mutator: Callable[[dict], None]) -> bool:
 # ── per-host 落地 ─────────────────────────────────────────────────────────────
 
 
-def _install_skill(root: Path) -> Path:
-    """拷 create-workflow skill → ``<root>/skills/<SKILL_NAME>/``。
+def _install_skill(root: Path) -> list[Path]:
+    """拷**所有**随包 skill → ``<root>/skills/<name>/``（v5 §4.1：入口统一 skill）。
 
     ``shutil.copytree(dirs_exist_ok=True)`` 幂等覆盖；排除 ``benchmark/``（评测资产，
-    含 expected 答案，不该进用户 skill 目录——与 ``skill_cmds.install`` 同策略）。
+    含 expected 答案，不该进用户 skill 目录）。返落地 skill 目录列表（按 name 升序）。
+    找不到随包 skill 源 → fail loud（exit 1，打包漏文件）。
     """
-    src = _skill_src()
-    if not src.is_dir():
-        typer.echo(f"找不到随包 skill 源目录：{src}（打包可能漏文件，检查 pyproject）", err=True)
+    srcs = _bundled_skill_sources()
+    if not srcs:
+        typer.echo(
+            "找不到随包 skill 源目录（orca/skills/*/），打包可能漏文件，检查 pyproject",
+            err=True,
+        )
         raise typer.Exit(1)
-    dst = root / "skills" / SKILL_NAME
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(src, dst, dirs_exist_ok=True, ignore=shutil.ignore_patterns("benchmark"))
-    return dst
+    dsts: list[Path] = []
+    for src in srcs:
+        dst = root / "skills" / src.name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src, dst, dirs_exist_ok=True, ignore=shutil.ignore_patterns("benchmark"))
+        dsts.append(dst)
+    return dsts
 
 
 def _opencode_json_path(hr: HostRoot) -> Path:
@@ -218,40 +226,39 @@ def _opencode_plugin_decl(hr: HostRoot, plugin_dst: Path) -> str:
     return str(plugin_dst.expanduser().resolve())
 
 
-def _install_opencode(hr: HostRoot) -> dict[str, Path]:
-    """opencode 全套：skill + plugins/orca.ts + command/orca/*.md 命名空间 + opencode.json 声明。
+def _install_opencode(hr: HostRoot) -> dict[str, Any]:
+    """opencode 全套：skill + plugins/orca.ts + opencode.json 声明。
 
-    返回 ``{组件: 落地路径}``（command 组件指向命名空间目录）。opencode.json 合并：
-    ``"plugin"`` 数组加 orca 声明（去重，保已有 plugin 条目与其他键）。
+    返回 ``{组件: 落地路径/列表}``。opencode.json 合并：``"plugin"`` 数组加 orca 声明
+    （去重，保已有 plugin 条目与其他键）。
 
-    2026-07-08（批 B）：command 从单 ``orca.md`` 改 ``orca/<sub>.md`` 命名空间（prompt-command
-    入口，去 transform）。旧 ``command/orca.md`` 残留 → 清理（避免与新命名空间并存导致
-    ``/orca`` 仍命中旧 marker 模板）。
+    v5 §8 step 2b：command 模板已删（入口切 skill），不再拷 ``command/orca/``。``orca.ts``
+    plugin 的 transform 派发已 early-return 禁用（惰性，step 4 整删文件 + 声明）；此窗口期
+    仍拷 plugin + 合并声明，保 ``opencode.json`` 指向的文件存在（不悬空）。
     """
-    written: dict[str, Path] = {}
+    written: dict[str, Any] = {}
 
-    # skill
-    written["skill"] = _install_skill(hr.root)
+    # skill（所有随包 skill）
+    written["skills"] = _install_skill(hr.root)
 
-    # plugin + command 命名空间（静态模板，run-agnostic）
+    # plugin（惰性：transform 已禁用，step 4 整删）
     plugin_dst = hr.root / "plugins" / "orca.ts"
     _atomic_write_with_backup(plugin_dst, _opencode_plugin_src().read_text(encoding="utf-8"))
     written["plugin"] = plugin_dst
 
-    cmd_ns_dst = hr.root / "command" / "orca"
-    for src in _opencode_command_srcs():
-        dst = cmd_ns_dst / src.name
-        _atomic_write_with_backup(dst, src.read_text(encoding="utf-8"))
-    written["command"] = cmd_ns_dst
-
-    # 清理旧单命令模板（批 B 前：command/orca.md 的 marker 派发）——与新命名空间并存会让
-    # ``/orca`` 仍命中旧 marker 模板（transform 已删，旧模板只剩裸 marker → 模型困惑）。删之。
-    legacy_cmd = hr.root / "command" / "orca.md"
-    if legacy_cmd.exists():
-        try:
-            legacy_cmd.unlink()
-        except OSError as e:  # noqa: BLE001
-            typer.echo(f"  ⚠ 无法清理旧命令模板 {legacy_cmd}：{e}", err=True)
+    # 清理旧命令模板（v5 step 2b：command 已删，入口切 skill）。
+    # - 旧单命令 ``command/orca.md``（批 B 前的 marker 派发）
+    # - 旧命令命名空间 ``command/orca/``（批 B 的 4 文件 run/status/stop/doctor）
+    # 两者都是已退场的入口，残留会让 ``/orca`` 命中死模板 → 模型困惑。幂等清理。
+    for legacy in (hr.root / "command" / "orca.md", hr.root / "command" / "orca"):
+        if legacy.exists():
+            try:
+                if legacy.is_dir():
+                    shutil.rmtree(legacy)
+                else:
+                    legacy.unlink()
+            except OSError as e:  # noqa: BLE001
+                typer.echo(f"  ⚠ 无法清理旧命令模板 {legacy}：{e}", err=True)
 
     # 迁移提示：旧 start 写的 singular plugin/ 目录（无 s）残留 → warn（不擅自删用户文件）
     legacy = hr.root / "plugin" / "orca.ts"
@@ -293,26 +300,25 @@ def _install_opencode(hr: HostRoot) -> dict[str, Path]:
 def install(
     target: str = typer.Option(
         "all", "--target", "-t",
-        help="装到哪边：claude / opencode / all（默认 all）",
+        help="装到哪个前端：cc / opencode / cac / nga / all（默认 all，四个都装）",
     ),
     scope: str = typer.Option(
         "user", "--scope", "-s",
         help="装到哪层：user（全局，默认）/ project（当前项目）",
     ),
 ) -> None:
-    """统一安装 Orca 宿主集成（skill + in-session），全局默认。
+    """统一安装 Orca skill 到前端宿主（v5 §4.3，全局默认）。
 
     \b
-    - opencode：skill + plugin + ``/orca`` 命令 + ``opencode.json`` plugin 声明
-    - claude：skill（in-session CC hooks 是 per-run，由 ``orca in-session start`` 生成）
+    - 四前端（cc/opencode/cac/nga）都装同一份随包 skill（含 orca 入口 skill）
+    - opencode 额外落 plugin + opencode.json 声明（plugin 惰性，step 4 整删）
 
     \b
-    幂等（重跑覆盖更新，内容相同跳过；JSON 配置读-改-写保已有键）。装完 opencode 重启
-    后敲 ``/orca doctor`` 自检入口链路。
+    幂等（重跑覆盖更新，内容相同跳过；JSON 配置读-改-写保已有键）。
 
     ``install`` 是单动词（同 ``run``/``serve``），故用 callback 而非 sub-Typer 子命令——
-    避免双层嵌套 ``orca install install``。``invoke_without_command=True`` 让裸 ``orca install``
-    以默认（target=all / scope=user）直接跑。
+    避免双层嵌套 ``teams install install``。``invoke_without_command=True`` 让裸
+    ``teams install`` 以默认（target=all / scope=user）直接跑。
     """
     failed = run_install(target, scope)
     if failed:
@@ -322,7 +328,7 @@ def install(
 def run_install(target: str, scope: str) -> list[str]:
     """install 核心逻辑（callback + ``skill install`` 弃用委托共用）。返回失败 host 列表。
 
-    抽出来让 ``orca skill install``（弃用别名）能直接委托，不走 subprocess。``bootstrap_config``
+    抽出来让 ``teams skill install``（弃用别名）能直接委托，不走 subprocess。``bootstrap_config``
     在此调用（skill_cmds 原也调，幂等）。
     """
     bootstrap_config()
@@ -339,9 +345,10 @@ def run_install(target: str, scope: str) -> list[str]:
                 written = _install_opencode(hr)
                 for comp, p in written.items():
                     typer.echo(f"  ✓ {comp}: {p}")
-            else:  # claude：只装 skill（CC hooks per-run，不走这）
-                p = _install_skill(hr.root)
-                typer.echo(f"  ✓ skill: {p}")
+            else:  # cc / cac / nga：只装 skill
+                dirs = _install_skill(hr.root)
+                for d in dirs:
+                    typer.echo(f"  ✓ skill: {d}")
         except OSError as e:
             typer.echo(f"  ✗ 失败：{e}", err=True)
             failed.append(hr.host)
@@ -350,7 +357,6 @@ def run_install(target: str, scope: str) -> list[str]:
         typer.echo(f"\n部分失败：{', '.join(failed)}", err=True)
     else:
         typer.echo(
-            "\n✓ 完成。opencode：重启后敲 `/orca doctor` 自检；"
-            "CC：跑 `orca in-session start <wf>` 生成 per-run hooks。"
+            "\n✓ 完成。前端重启后加载新 skill；用 `orca doctor` 自检（含 skill_install）。"
         )
     return failed

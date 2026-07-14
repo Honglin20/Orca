@@ -45,8 +45,10 @@ def _workflow_dirs() -> list[Path]:
 def list_workflows() -> list[dict[str, Any]]:
     """扫描 catalog 目录，返回 workflow 元信息列表（SPEC §5.6 / §2.2）。
 
-    每项字段：``{name, description, has_setup, entry, inputs_count}``。
+    每项字段：``{name, description, has_setup, entry, inputs_count, inputs_schema}``。
     ``has_setup`` 是三重杠杆 A（§2.8）：主 session 据此知道是否需调 get_agent_prompt。
+    ``inputs_schema``（v5 §2.3）= ``[{name, type, description}]``，给 ``orca list`` 的
+    skill/LLM 选 wf + 抽 inputs（无 describe 命令，一个命令给齐）。
 
     加载失败的 YAML 跳过（log warning，不中断列表）。
     """
@@ -74,6 +76,9 @@ def list_workflows() -> list[dict[str, Any]]:
                 "has_setup": bool(wf.setup),
                 "entry": wf.entry,
                 "inputs_count": len(wf.inputs),
+                # v5 §2.3：orca list 给 skill/LLM 选 wf + 抽 inputs 的全部信息——
+                # 一个命令搞定（无 describe）。每项 {name, type, description}，从 wf.inputs 派生。
+                "inputs_schema": _inputs_to_schema_list(wf),
             }
     return list(seen.values())
 
@@ -159,6 +164,24 @@ def _inputs_to_schema(wf: Workflow) -> dict[str, dict[str, Any]]:
         if idef.default is not None:
             out[key]["default"] = idef.default
     return out
+
+
+def _inputs_to_schema_list(wf: Workflow) -> list[dict[str, Any]]:
+    """wf.inputs → ``[{name, type, description}, ...]`` 列表（v5 §2.3）。
+
+    给 ``orca list`` 返回的 ``inputs_schema``：skill/LLM 据此从用户意图抽 inputs（一个
+    命令给齐「选 wf + 知 inputs」，故无 describe 命令）。与 ``_inputs_to_schema``（dict
+    形态，给 MCP describe_workflow 用）并存——两者面向不同消费者、形态不同（list 带 name
+    vs dict keyed），非重复逻辑。
+    """
+    return [
+        {
+            "name": key,
+            "type": idef.type,
+            "description": idef.description,
+        }
+        for key, idef in wf.inputs.items()
+    ]
 
 
 def _estimate_runtime(wf: Workflow) -> str:

@@ -7,11 +7,13 @@
     CLI stdout JSON。
   - **一次性消费**（§2.6.1）：替换文本无 `<!--orca:cmd` 字面。
   - **sessionID argv**：从 info.sessionID 取作 --owner + --session-id argv。
-  - **doctor CLI**（§2.7）：3 项 checks、JSON 结构、report 无完整 marker 字面、ok=and(pass)。
+  - **doctor CLI**（§2.7，v5 重设计）：5 项 checks（skill_install/cli_imports 硬 +
+    diag/hook 可选）、JSON 结构、report 描述 B 路径、ok=skill+cli 无 fail。
   - **架构守门**：plugin 模板无 `@opencode/core/client` / `command.execute.before` /
     `Bun.spawn(` + `stdout:"string"` / `advance_step` / `router.resolve` / `replay_state` /
     `tape.append` / `EventBus` / `Tape(` / `drive_loop` / `advance(`。
-  - **start 写入 opencode 模板**：start 命令把 orca.ts + orca.md 写入 .opencode/。
+  - v5 step 2b：``start`` 命令 + ``cc_hooks.py`` 已删（A 路径退场）；transform marker 派发
+    已禁用（early return），相关测试随之移除/改写。
 """
 from __future__ import annotations
 
@@ -94,7 +96,19 @@ def test_marker_regex_sub_must_be_word():
     assert re.match(MARKER_REGEX, "<!--orca:cmd RUN-->") is not None     # 大写 OK
 
 
-# ── doctor 钩子诊断（2026-07-08 重设计：心跳作证，取代静态正则自检）─────────────
+# ── doctor 诊断（v5 §4.4：skill_install + cli_imports 为硬检查；hook 心跳可选）────
+
+
+@pytest.fixture
+def doctor_iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """隔离 doctor 的 home + cwd：``Path.home`` → tmp_path + chdir tmp_path。
+
+    必须：doctor 的 ``_scan_skill_install`` 查 user-scope（``~/.claude`` 等）+ project-scope。
+    不隔离 home，则装过 orca 的开发机上 ``skill_install`` 恒 pass → fail-when-absent 测试反向失败。
+    """
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
 
 
 def _run_doctor() -> dict:
@@ -112,8 +126,28 @@ def _write_probe(cwd: Path, name: str, payload: dict) -> None:
     (runs / name).write_text(json.dumps(payload), encoding="utf-8")
 
 
-def test_doctor_json_structure(cwd_tmp, monkeypatch):
-    """doctor 输出 JSON {ok, diag, report, checks:[{name,status,detail}]} + 4 项 checks。"""
+_DOTDIR = {"cc": ".claude", "opencode": ".opencode", "cac": ".cac", "nga": ".nga"}
+
+
+def _install_fake_orca_skill(
+    root: Path, platform: str = "cc", *, under: str = "project",
+    home: Path | None = None,
+) -> Path:
+    """落一个占位 orca skill 让 doctor 扫到。
+
+    - ``under="project"``：落 ``<root>/<dotdir>/skills/orca/SKILL.md``（root 当 cwd）。
+    - ``under="user"``：落 ``<home>/<dotdir>/skills/orca/SKILL.md``（home 注入时用）。
+    """
+    dotdir = _DOTDIR[platform]
+    base = (home if under == "user" else root)
+    skill_md = base / dotdir / "skills" / "orca" / "SKILL.md"
+    skill_md.parent.mkdir(parents=True, exist_ok=True)
+    skill_md.write_text("---\nname: orca\n---\n# orca\n", encoding="utf-8")
+    return skill_md
+
+
+def test_doctor_json_structure(doctor_iso, monkeypatch):
+    """doctor 输出 JSON {ok, diag, report, checks} + 5 项 checks（v5 加 skill_install + hard 字段）。"""
     monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
     reply = _run_doctor()
     assert set(reply.keys()) >= {"ok", "diag", "report", "checks"}
@@ -121,70 +155,130 @@ def test_doctor_json_structure(cwd_tmp, monkeypatch):
     assert isinstance(reply["diag"], bool)
     assert isinstance(reply["report"], str) and len(reply["report"]) > 0
     assert isinstance(reply["checks"], list)
-    assert len(reply["checks"]) == 4
+    assert len(reply["checks"]) == 5
     names = [c["name"] for c in reply["checks"]]
-    assert names == ["diag_switch", "entry_hook", "advance_hook", "cli_imports_ok"]
+    # v5 顺序：skill_install / cli_imports_ok（硬）在前，diag_switch / hook（可选）在后。
+    assert names == ["skill_install", "cli_imports_ok", "diag_switch",
+                     "entry_hook", "advance_hook"]
+    # 每条 check 带 hard 字段（review 🟡#5：替代硬编码 name tuple 防 typo 静默丢失硬检查）
+    hard_expected = {"skill_install": True, "cli_imports_ok": True,
+                     "diag_switch": False, "entry_hook": False, "advance_hook": False}
     for c in reply["checks"]:
-        assert set(c.keys()) == {"name", "status", "detail"}
+        assert set(c.keys()) == {"name", "status", "detail", "hard"}, (
+            f"check {c['name']} 字段漂移：{set(c.keys())}"
+        )
         assert c["status"] in ("pass", "unknown", "fail")
+        assert c["hard"] is hard_expected[c["name"]]
 
 
-def test_doctor_diag_off_reports_unknown_and_ok(cwd_tmp, monkeypatch):
-    """诊断关：entry/advance 均 unknown（证据不足，非 fail）→ ok=True。"""
+def test_doctor_skill_install_pass_when_skill_present(doctor_iso, monkeypatch):
+    """A6：四前端任一装了 orca skill（project-scope）→ skill_install=pass + ok=True。"""
     monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    _install_fake_orca_skill(doctor_iso, "cc")
+    reply = _run_doctor()
+    by_name = {c["name"]: c for c in reply["checks"]}
+    assert by_name["skill_install"]["status"] == "pass"
+    assert "cc" in by_name["skill_install"]["detail"]
+    assert reply["ok"] is True  # skill + cli 都 pass
+
+
+def test_doctor_skill_install_detects_each_platform(doctor_iso, monkeypatch):
+    """A6：opencode / cac / nga project-scope 装 skill → 各自被扫到（覆盖 _scan_skill_install 分支）。"""
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    for platform in ("opencode", "cac", "nga"):
+        _install_fake_orca_skill(doctor_iso, platform)
+    reply = _run_doctor()
+    detail = {c["name"]: c["detail"] for c in reply["checks"]}["skill_install"]
+    assert reply["ok"] is True
+    for platform in ("opencode", "cac", "nga"):
+        assert platform in detail
+
+
+def test_doctor_skill_install_user_scope(doctor_iso, monkeypatch):
+    """A6：user-scope（``<home>/<dotdir>/skills/orca``）也能被扫到（doctor_iso 把 home 指到 tmp）。"""
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    _install_fake_orca_skill(doctor_iso, "cac", under="user", home=doctor_iso)
+    reply = _run_doctor()
+    by_name = {c["name"]: c for c in reply["checks"]}
+    assert by_name["skill_install"]["status"] == "pass"
+    assert "cac" in by_name["skill_install"]["detail"]
+
+
+def test_doctor_skill_install_fail_when_absent(doctor_iso, monkeypatch):
+    """A6：四前端都没装 orca skill → skill_install=fail + ok=False（doctor_iso 隔离 home + cwd 干净）。"""
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    reply = _run_doctor()
+    by_name = {c["name"]: c for c in reply["checks"]}
+    assert by_name["skill_install"]["status"] == "fail"
+    assert reply["ok"] is False  # skill_install fail → ok False（即便 cli ok）
+
+
+def test_doctor_diag_off_hook_checks_unknown_ok_unaffected(doctor_iso, monkeypatch):
+    """诊断关：hook 三项（diag/entry/advance）均 unknown；ok 只看 skill+cli（装了 skill → ok）。"""
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    _install_fake_orca_skill(doctor_iso, "cc")
     reply = _run_doctor()
     assert reply["diag"] is False
     by_name = {c["name"]: c for c in reply["checks"]}
     assert by_name["diag_switch"]["status"] == "unknown"
     assert by_name["entry_hook"]["status"] == "unknown"
     assert by_name["advance_hook"]["status"] == "unknown"
-    assert reply["ok"] is True  # unknown 不算失败
+    assert reply["ok"] is True  # hook unknown 不拉低 ok（skill+cli pass）
 
 
-def test_doctor_diag_on_no_heartbeat_entry_fails(cwd_tmp, monkeypatch):
-    """诊断开 + 无 transform 心跳 = entry FAIL（fork 未接 experimental transform 钩子）。"""
+def test_doctor_diag_on_no_heartbeat_entry_unknown(doctor_iso, monkeypatch):
+    """v5 §4.4：诊断开 + 无 transform 心跳 = entry **unknown**（非 fail）。
+
+    transform 派发已禁用（step 2b），心跳仅证明 plugin 加载——缺它不推进、不故障，故不 fail。
+    ok 仍由 skill+cli 决定（装了 skill → ok=True）。
+    """
     monkeypatch.setenv("ORCA_DIAGNOSE", "1")
+    _install_fake_orca_skill(doctor_iso, "cc")
     reply = _run_doctor()
     by_name = {c["name"]: c for c in reply["checks"]}
     assert by_name["diag_switch"]["status"] == "pass"
-    assert by_name["entry_hook"]["status"] == "fail"
-    assert reply["ok"] is False
+    assert by_name["entry_hook"]["status"] == "unknown"  # v5：不再 fail
+    assert reply["ok"] is True  # hook 不计数
 
 
-def test_doctor_fresh_entry_heartbeat_passes(cwd_tmp, monkeypatch):
-    """诊断开 + 新鲜 entry 心跳 = entry PASS（transform 在 fire）。"""
+def test_doctor_fresh_entry_heartbeat_passes(doctor_iso, monkeypatch):
+    """诊断开 + 新鲜 entry 心跳 = entry PASS（transform 钩子被调 = plugin 加载，仅诊断）。
+
+    v5：dispatch 已禁用，detail 不再展示 dispatch_count（生产恒 0 会误导）。
+    """
     import time as _t
     monkeypatch.setenv("ORCA_DIAGNOSE", "1")
-    _write_probe(cwd_tmp, ".orca-probe-entry.json", {
+    _install_fake_orca_skill(doctor_iso, "cc")
+    _write_probe(doctor_iso, ".orca-probe-entry.json", {
         "diag": True, "last_called_at": int(_t.time()),
         "dispatch_count": 2, "last_dispatch_sub": "run",
     })
     reply = _run_doctor()
     by_name = {c["name"]: c for c in reply["checks"]}
     assert by_name["entry_hook"]["status"] == "pass"
-    assert "dispatch 2" in by_name["entry_hook"]["detail"]
+    assert "plugin 已加载" in by_name["entry_hook"]["detail"]
+    assert "累计" not in by_name["entry_hook"]["detail"]  # dispatch_count 不再展示
 
 
-def test_doctor_stale_entry_heartbeat_fails(cwd_tmp, monkeypatch):
-    """诊断开 + entry 心跳过期（>5min）= FAIL/STALE（钩子间歇失效）。"""
+def test_doctor_stale_entry_heartbeat_unknown(doctor_iso, monkeypatch):
+    """v5 §4.4：诊断开 + entry 心跳过期 = **unknown**（非 fail）。transform 已禁用，stale 不故障。"""
     monkeypatch.setenv("ORCA_DIAGNOSE", "1")
-    _write_probe(cwd_tmp, ".orca-probe-entry.json", {
+    _install_fake_orca_skill(doctor_iso, "cc")
+    _write_probe(doctor_iso, ".orca-probe-entry.json", {
         "diag": True, "last_called_at": 0,  # 远古 → age 巨大
         "dispatch_count": 0, "last_dispatch_sub": None,
     })
     reply = _run_doctor()
     by_name = {c["name"]: c for c in reply["checks"]}
-    assert by_name["entry_hook"]["status"] == "fail"
+    assert by_name["entry_hook"]["status"] == "unknown"  # v5：stale 不再 fail
 
 
-def test_doctor_advance_heartbeat_passes(cwd_tmp, monkeypatch):
-    """诊断开 + advance 心跳 = advance PASS（idle 在 fire，报告 idle 计数）。
-
-    v3：B 路径不依赖 idle 推进；idle 退居 nudge/诊断。doctor 报 idle fire 计数（非推进数）。
-    """
+def test_doctor_advance_heartbeat_passes(doctor_iso, monkeypatch):
+    """诊断开 + advance 心跳 = advance PASS（idle 在 fire，报告 idle 计数，仅 nudge）。"""
     import time as _t
     monkeypatch.setenv("ORCA_DIAGNOSE", "1")
-    _write_probe(cwd_tmp, ".orca-probe-advance.json", {
+    _install_fake_orca_skill(doctor_iso, "cc")
+    _write_probe(doctor_iso, ".orca-probe-advance.json", {
         "diag": True, "last_idle_at": int(_t.time()),
         "idle_count": 3, "advance_count": 1, "last_advance_run_id": "r-1",
         "last_session_id": "s-1",
@@ -195,9 +289,10 @@ def test_doctor_advance_heartbeat_passes(cwd_tmp, monkeypatch):
     assert "idle fire 过 3" in by_name["advance_hook"]["detail"]
 
 
-def test_doctor_report_describes_b_path(cwd_tmp, monkeypatch):
-    """v3：报告说明执行模型 = B 路径（主 session 自调 next），hook 退居 nudge/诊断。"""
+def test_doctor_report_describes_b_path(doctor_iso, monkeypatch):
+    """v5：报告说明执行模型 = B 路径（主 session 自调 next），hook 退居可选诊断。"""
     monkeypatch.setenv("ORCA_DIAGNOSE", "1")
+    _install_fake_orca_skill(doctor_iso, "cc")
     reply = _run_doctor()
     assert "B 路径" in reply["report"]
     assert "orca next" in reply["report"]  # 主 session 自调 next
@@ -409,12 +504,12 @@ def test_plugin_embeds_canonical_marker_regex():
     )
 
 
-# ── start 命令 v8：写 opencode 模板文件 ─────────────────────────────────────
+# ── 共享 wf fixture（v5 step 2b：start 命令已删，fixture 供其余 v7/v8 测试复用）────
 
 
 AGENT_WF_YAML = """\
 name: start_test_wf
-description: 2-agent 线性 workflow（start v8 测试）。
+description: 2-agent 线性 workflow（fixture，供 v7/v8 测试复用）。
 entry: a
 nodes:
   - name: a
@@ -441,58 +536,11 @@ def wf_path(tmp_path: Path) -> Path:
     return p
 
 
-def test_start_does_not_write_opencode_templates(cwd_tmp, wf_path):
-    """start 收窄为 CC-only run bootstrap：不再写 ``.opencode/`` 模板（落地已移到 ``orca install``）。
-
-    opencode 模板落地（plugin / command / opencode.json 声明）的覆盖在
-    ``tests/iface/cli/test_install_cmds.py``。
-    """
-    runner = CliRunner()
-    result = runner.invoke(app, ["start", str(wf_path)])
-    assert result.exit_code == 0, result.output
-    # .opencode/ 不应被创建（start 只写 CC marker + 打印 settings 片段）
-    assert not (cwd_tmp / ".opencode").exists(), (
-        "start 不应再写 .opencode/（模板落地已移到 orca install）"
-    )
-
-
-def test_start_emits_deprecation_warning(cwd_tmp, wf_path):
-    """v3 §8 step 1：``start`` 标 deprecated（warn 到 stderr），不删。
-
-    推荐迁到 ``orca <wf>``（bootstrap 语法糖）+ 驱动协议。本命令 step 2b 删除。
-    """
-    runner = CliRunner()
-    result = runner.invoke(app, ["start", str(wf_path)])
-    assert result.exit_code == 0
-    # deprecation warn（typer.echo err=True → output 里 stderr 合并）
-    assert "deprecated" in result.output.lower()
-    # 指向新入口
-    assert "orca <wf>" in result.output
-
-
-def test_start_preserves_cc_marker_and_settings_fragment(cwd_tmp, wf_path):
-    """v7 行为保留：start 仍写 CC marker + 打印 settings.json 片段（CC 路无回归）。"""
-    runner = CliRunner()
-    result = runner.invoke(app, ["start", str(wf_path)])
-    assert result.exit_code == 0
-    output = result.output
-
-    # marker 写入
-    markers = list(cwd_tmp.glob("runs/orca-*.json"))
-    assert len(markers) == 1
-
-    # settings.json 片段
-    assert "把以下片段贴进 .claude/settings.json" in output
-    assert '"hooks"' in output
-    assert "Stop" in output
-    assert "PostToolUse" in output
-
-
 # ── v7 baseline 兼容性（CI 守门：v8 不破坏 v7 行为）─────────────────────────
 
 
 def test_v7_baseline_cli_commands_still_work_v8(cwd_tmp, wf_path):
-    """v7 CLI 大脑未动：bootstrap/next/stop/status/start/serve 全可用。"""
+    """v7 CLI 大脑未动：bootstrap/next/stop/status 仍可用（v5 删 start，v3 删 serve）。"""
     runner = CliRunner()
     boot = runner.invoke(app, ["bootstrap", str(wf_path)])
     assert boot.exit_code == 0

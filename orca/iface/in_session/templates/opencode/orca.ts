@@ -325,6 +325,21 @@ export const OrcaPlugin = async (ctx: any) => {
       // gated by ORCA_DIAGNOSE：关时零开销。放最前，确保即使后续 early-return 也有心跳。
       if (DIAGNOSE) writeEntryHeartbeat()
 
+      // ── v5 §8 step 2b（B1）：marker 派发已禁用 ──────────────────────────────
+      // 入口统一切到 orca skill（SKILL.md 三步：list → 抽 inputs → <wf> + 自调 next）。
+      // 本 transform 的 marker 派发是旧 A 路径第二入口——保留它会让 marker 绕过 skill
+      // 起第二入口，违反「单一接口」。此处 early-return 关闭整个派发链路。
+      //
+      // orca.ts 整体**不整删**（v5 修正）：``event`` (session.idle) hook 改 nudge 提醒模式
+      // （step 2b(7)）——保留 idle 载体。step 4 只删本 transform 入口段 + 死代码（REST /
+      // extractTaskOutput / 旧 promptAsync 推进），**保留 idle nudge hook**。
+      // ``_constants.py`` 的 MARKER_REGEX/LITERAL 在 transform 段删后（step 4）一并清。
+      //
+      // 下方派发逻辑因此成为 unreachable dead code（TS 编译器可能 warn unused——可接受，
+      // step 4 删 transform 段时消失）；保留以便 step 4 定位整删范围。
+      return input
+
+      // eslint-disable-next-line no-unreachable
       const realOut: any = out ?? input?.out ?? input
       const messages: any[] = realOut?.messages ?? []
       if (messages.length === 0) return input
@@ -344,11 +359,6 @@ export const OrcaPlugin = async (ctx: any) => {
       const userModel = extractModel(messages, found.msgIdx)
 
       // 派发到对应 CLI 子命令（§2.6.2）。
-      // v3 §7.2：marker 文件名改为 ``orca-<run_id>.json``（旧 ``orca-<sessionID>.json`` 失效），
-      // plugin 无 sessionID→run_id 映射能力 → 删 readMarker 派发（status/stop 需用户显式给
-      // run_id，或 ``/orca status`` 列全部活跃 run）。A 路径（transform marker 派发）整体
-      // 在 step 2b 删（v3 §8），本段保 run/doctor/open 派发兼容，status/stop 无 args 时让
-      // buildCliArgs 返 null 引导用户给 run_id。
       const cliArgs = buildCliArgs(sub, args, sid, null, userModel)
       if (cliArgs === null) {
         // 未知子命令 / 缺关键 argv → 标记错误回显（一次性消费：替换文本无 marker 字面）

@@ -161,6 +161,12 @@ def test_orca_help_lists_seven_commands_no_teams():
             f"--help 不应含 teams 命令 {teams_cmd!r}（§2.4 守门）"
         )
 
+    # v5 §8 step 2b：start 已删（不再出现作命令）；describe 命令从未存在（也守门）
+    for gone in ("start", "describe"):
+        assert f"\n{gone}" not in help_text and f"  {gone} " not in help_text, (
+            f"--help 不应含 {gone!r}（start 已删 / describe 不存在）"
+        )
+
 
 # ── §8 B1：驱动协议 + marker 3 字段 + catalog 单一 ────────────────────────────
 
@@ -197,17 +203,68 @@ def test_marker_module_has_no_find_scan():
     )
 
 
-def test_orca_list_delegates_to_single_catalog_impl(cwd_tmp, monkeypatch):
-    """§3.1 / coordinator 铁律：orca list 委托 commands.run_list（单一 list 逻辑）。"""
+def test_orca_list_returns_inputs_schema_json(cwd_tmp, monkeypatch):
+    """v5 §2.3：``orca list`` 返 ``{workflows:[{name, description, inputs_schema}]}``。
+
+    - inputs_schema = ``[{name, type, description}]``（从 wf.inputs 派生，skill 据此抽 inputs）。
+    - **无 has_setup**（B3）：orca list 给 skill/LLM，只暴露选 wf + 抽 inputs 所需的 3 字段。
+    - 单一 catalog 真相源：与 ``teams list``（commands.run_list，人类可读）调同一个
+      ``catalog.list_workflows()``，渲染层不同（skill 要 JSON / 运营要文本）——非两套 list。
+    """
+    wf_with_inputs = """\
+name: inputs_demo_wf
+description: 带 inputs 的 demo wf。
+entry: a
+inputs:
+  topic:
+    type: string
+    description: 要写的主题
+  count:
+    type: int
+    description: 产出条数
+    required: false
+    default: 3
+nodes:
+  - name: a
+    kind: agent
+    executor: opencode
+    model: deepseek/deepseek-v4-flash
+    prompt: "x"
+    routes:
+      - to: $end
+"""
     p = cwd_tmp / "workflows" / "w.yaml"
     p.parent.mkdir(parents=True)
-    p.write_text(SIMPLE_WF_YAML, encoding="utf-8")
+    p.write_text(wf_with_inputs, encoding="utf-8")
     runner = CliRunner()
-    with mock.patch("orca.iface.cli.commands.run_list") as m:
-        m.return_value = None
-        result = runner.invoke(app, ["list"])
-    assert result.exit_code == 0
-    m.assert_called_once()  # orca list 走 commands.run_list（单一实现）
+    result = runner.invoke(app, ["list"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.splitlines()[-1])
+
+    # 顶层契约
+    assert "workflows" in payload
+    assert len(payload["workflows"]) == 1
+    wf = payload["workflows"][0]
+
+    # 恰 3 字段（name/description/inputs_schema），无 has_setup/entry/inputs_count（B3）
+    assert set(wf.keys()) == {"name", "description", "inputs_schema"}, (
+        f"orca list 项字段漂移：实得 {set(wf.keys())}（应恰 name/description/inputs_schema）"
+    )
+    assert "has_setup" not in wf
+    assert wf["name"] == "inputs_demo_wf"
+
+    # inputs_schema = list of {name, type, description}，含两个 input
+    schema = wf["inputs_schema"]
+    assert isinstance(schema, list)
+    assert len(schema) == 2
+    by_name = {item["name"]: item for item in schema}
+    assert set(by_name.keys()) == {"topic", "count"}
+    # 每个 item 恰 3 字段（name/type/description）
+    for item in schema:
+        assert set(item.keys()) == {"name", "type", "description"}
+    assert by_name["topic"]["type"] == "string"
+    assert by_name["topic"]["description"] == "要写的主题"
+    assert by_name["count"]["type"] == "int"
 
 
 # ── §3.2 teams 命令名变量化（env ORCA_BACKEND_CMD）──────────────────────────
@@ -342,14 +399,15 @@ def test_load_wf_for_run_state_corrupt_on_missing_workflow_started(cwd_tmp, tmp_
     assert exc.value.error_kind == ERR_STATE_CORRUPT
 
 
-def test_start_deprecation_warning_to_stderr(cwd_tmp):
-    """review：``start`` 标 deprecated，warn 出现（v3 §8 step 1 不删，step 2b 删）。"""
-    p = cwd_tmp / "wf.yaml"
-    p.write_text(SIMPLE_WF_YAML, encoding="utf-8")
+def test_start_command_removed(cwd_tmp):
+    """v5 §8 step 2b(6)：``start`` 命令已删（CC 路 A 退场）。``orca start`` 不再是注册命令。
+
+    裸 token ``start`` 经 ``_OrcaTopLevelGroup.resolve_command`` 当 wf 名重写 → bootstrap
+    → ``_resolve_wf_path`` 找不到名/路径 → BadParameter exit 2（fail loud）。
+    """
     runner = CliRunner()
-    result = runner.invoke(app, ["start", str(p)])
-    assert result.exit_code == 0
-    assert "deprecated" in result.output.lower()
+    result = runner.invoke(app, ["start", "some_wf"])
+    assert result.exit_code == 2  # start 不是命令，重写为 bootstrap → 解析失败
 
 
 def test_bootstrap_bad_inputs_fails_loud(cwd_tmp):
@@ -366,4 +424,90 @@ def test_bootstrap_unresolvable_wf_name_fails_loud(cwd_tmp):
     runner = CliRunner()
     result = runner.invoke(app, ["bootstrap", "no_such_wf_anywhere_xyz"])
     assert result.exit_code == 2
+
+
+# ── §4.5 SKILL.md 守门（三步指导 + 禁业务逻辑关键词 + 禁 teams 命令）──────────────
+
+ORCA_SKILL_MD = (
+    Path(__file__).resolve().parents[3] / "orca" / "skills" / "orca" / "SKILL.md"
+)
+
+
+def test_orca_skill_md_contains_three_step_guide():
+    """§4.5：SKILL.md 必须含三步指导（list → 据 inputs_schema 抽 inputs → <wf> + next 循环）。"""
+    text = ORCA_SKILL_MD.read_text(encoding="utf-8")
+    # 第 1 步：orca list 选 wf
+    assert "orca list" in text
+    assert "inputs_schema" in text
+    # 第 2 步：抽 inputs
+    assert "--inputs" in text
+    # 第 3 步：启动 + 驱动循环（派子代理 + next --output）
+    assert "orca next" in text
+    assert "--run-id" in text
+    assert "--output" in text
+    # skill 绝不读 YAML（§4.2 铁律）
+    assert "不读" in text or "绝不" in text
+
+
+def test_orca_skill_md_has_no_business_logic_keywords():
+    """§4.5 / §7.6：SKILL.md 禁业务逻辑关键词（CI grep 守门）。
+
+    skill 是主 session 的入口指导，不是 Orca 内部——不得泄露 advance/router/tape/replay/
+    compile/load_workflow 等内部路径（否则 LLM 可能误调内部 API 而非走 7 命令接口）。
+    """
+    text = ORCA_SKILL_MD.read_text(encoding="utf-8")
+    forbidden = [
+        "advance_step", "Orchestrator", "router.resolve",
+        "Tape", "replay", "compile", "load_workflow",
+    ]
+    for kw in forbidden:
+        assert kw not in text, f"SKILL.md 含禁业务逻辑关键词 {kw!r}（§4.5 守门）"
+
+
+def test_orca_skill_md_has_no_teams_backend_commands():
+    """§2.4：skill 只教 orca 7 命令，禁出现 teams 后端命令名（防第二入口泄漏）。
+
+    注：``list`` 是 orca 与 teams 共享命令（``orca list`` 合法），不在禁词内。
+    """
+    text = ORCA_SKILL_MD.read_text(encoding="utf-8")
+    # teams-unique 后端命令（run/serve/ps/install/validate/mcp/executor/logs/wait/resume）
+    teams_only = ["serve", "validate", "executor", "resume",
+                  "teams run", "teams serve", "teams install", "orca install",
+                  "teams validate", "teams mcp", "teams executor"]
+    for kw in teams_only:
+        assert kw not in text, f"SKILL.md 不应含 teams 后端命令 {kw!r}（§2.4 单一接口守门）"
+
+
+# ── §3.1 单一 catalog 真相源契约（orca list + teams list 共享 catalog）──────────
+
+
+def test_orca_list_and_teams_list_share_single_catalog(cwd_tmp, monkeypatch):
+    """§3.1 / coordinator 铁律：``orca list`` 与 ``teams list`` 都调 ``catalog.list_workflows()``。
+
+    渲染层可不同（orca list 给 skill 出 JSON / teams list 给运营出文本），但**数据源唯一**——
+    非两套 list 实现。mock catalog 返 canned 数据并计数，验证双方调用点。
+    """
+    runner = CliRunner()
+    call_count = {"n": 0}
+
+    def _fake_list():
+        call_count["n"] += 1
+        # canned item（含或ca list 渲染所需 inputs_schema + teams list 渲染所需 has_setup）
+        return [{
+            "name": "w", "description": "d", "has_setup": False, "entry": "a",
+            "inputs_count": 0, "inputs_schema": [],
+        }]
+
+    with mock.patch("orca.iface.mcp.catalog.list_workflows", side_effect=_fake_list):
+        # orca list（出 JSON）
+        r1 = runner.invoke(app, ["list"])
+        assert r1.exit_code == 0, r1.output
+        # teams list（commands.app 的 list 命令委托 run_list → catalog，出文本）
+        from orca.iface.cli.commands import app as teams_app
+        r2 = runner.invoke(teams_app, ["list"])
+        assert r2.exit_code == 0, r2.output
+
+    assert call_count["n"] == 2, (
+        "orca list 与 teams list 应各调 catalog.list_workflows() 一次（单一真相源）"
+    )
 

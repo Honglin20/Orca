@@ -1,12 +1,12 @@
-"""test_install_cmds.py —— ``orca install`` 统一安装入口单测。
+"""test_install_cmds.py —— ``teams install`` 统一安装入口单测（v5 §4.3 四前端）。
 
-覆盖 spike-verified（2026-07-08，详见 ``docs/plans/2026-07-08-unified-install.md``）行为：
-  - ``resolve_roots``：target(all/claude/opencode) × scope(user/project) 矩阵 +
+覆盖：
+  - ``resolve_roots``：target(all/cc/opencode/cac/nga) × scope(user/project) 矩阵 +
     ``OPENCODE_CONFIG_DIR`` 覆盖 + 未知值 fail loud。
-  - opencode 全套落地：skill + ``plugins/orca.ts`` + ``command/orca.md`` + ``opencode.json`` 声明。
+  - opencode 落地：随包 skill（含 orca 入口 skill）+ ``plugins/orca.ts`` + ``opencode.json`` 声明。
   - ``opencode.json`` 合并：保已有键 / ``$schema`` / 其他 plugin 条目；去重；项目相对 vs 用户绝对。
   - 幂等：再跑不重复加声明。
-  - claude target：只装 skill（无 plugin/command——CC hooks 是 per-run）。
+  - cc / cac / nga target：只装随包 skill（无 plugin/command——那是 opencode 专属）。
   - project scope：``opencode.json`` 在 cwd 根 + 相对声明路径。
   - fail loud：copytree 失败 → exit 1（铁律 12）。
   - 守门：不拷 ``benchmark/``。
@@ -50,11 +50,26 @@ def isolated_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def test_resolve_roots_all_user(isolated_home: Path):
     roots = install_cmds.resolve_roots("all", "user", home=isolated_home)
-    assert sorted(r.host for r in roots) == ["claude", "opencode"]
+    # v5 §4.3：all → 四前端 cc/opencode/cac/nga
+    assert sorted(r.host for r in roots) == ["cac", "cc", "nga", "opencode"]
     oc = next(r for r in roots if r.host == "opencode")
     assert oc.root == isolated_home / ".config" / "opencode"
-    cc = next(r for r in roots if r.host == "claude")
+    cc = next(r for r in roots if r.host == "cc")
     assert cc.root == isolated_home / ".claude"
+    cac = next(r for r in roots if r.host == "cac")
+    assert cac.root == isolated_home / ".cac"
+    nga = next(r for r in roots if r.host == "nga")
+    assert nga.root == isolated_home / ".nga"
+
+
+def test_resolve_roots_project_scope_four_platforms(isolated_home: Path, isolated_cwd: Path):
+    """project scope：四前端都落 cwd 下对应 dotdir。"""
+    roots = install_cmds.resolve_roots("all", "project", home=isolated_home)
+    by_host = {r.host: r.root for r in roots}
+    assert by_host["cc"] == isolated_cwd / ".claude"
+    assert by_host["opencode"] == isolated_cwd / ".opencode"
+    assert by_host["cac"] == isolated_cwd / ".cac"
+    assert by_host["nga"] == isolated_cwd / ".nga"
 
 
 def test_resolve_roots_opencode_user_honors_OPENCODE_CONFIG_DIR(
@@ -89,13 +104,12 @@ def test_install_opencode_user_lands_all(isolated_home: Path):
     result = runner.invoke(app, ["--target", "opencode", "--scope", "user"])
     assert result.exit_code == 0, result.output
     oc = isolated_home / ".config" / "opencode"
+    # v5：所有随包 skill 都装（create-workflow + orca 入口 skill）
     assert (oc / "skills" / install_cmds.SKILL_NAME / "SKILL.md").is_file()
+    assert (oc / "skills" / "orca" / "SKILL.md").is_file()
     assert (oc / "plugins" / "orca.ts").is_file()
-    # 批 B：command 是 ``orca/`` 命名空间（run/status/stop/doctor），非单 orca.md
-    cmd_ns = oc / "command" / "orca"
-    assert cmd_ns.is_dir()
-    assert {p.name for p in cmd_ns.iterdir()} == {"run.md", "status.md", "stop.md", "doctor.md"}
-    # 旧单命令模板不应残留（install 清理）
+    # v5 step 2b(5)：command 模板已删，install 不再创建 command/orca/ 命名空间
+    assert not (oc / "command" / "orca").exists()
     assert not (oc / "command" / "orca.md").exists()
     cfg = json.loads((oc / "opencode.json").read_text())
     # 用户 scope：声明用绝对路径（spike：全局 config 非项目相对，必须绝对）
@@ -162,22 +176,35 @@ def test_install_project_scope_relative_declaration(
     assert "./.opencode/plugins/orca.ts" in cfg["plugin"]
 
 
-# ── claude target（只装 skill）────────────────────────────────────────────────
+# ── cc / cac / nga target（只装 skill）─────────────────────────────────────────
 
 
-def test_install_claude_only_skill(isolated_home: Path):
-    result = runner.invoke(app, ["--target", "claude", "--scope", "user"])
+def test_install_cc_only_skill(isolated_home: Path):
+    """cc target → 装随包 skill 到 .claude/skills/（含 orca 入口 skill）。"""
+    result = runner.invoke(app, ["--target", "cc", "--scope", "user"])
     assert result.exit_code == 0, result.output
     cc = isolated_home / ".claude"
     assert (cc / "skills" / install_cmds.SKILL_NAME / "SKILL.md").is_file()
-    # claude 不装 plugin / command（CC hooks per-run，由 in-session start 生成）
+    assert (cc / "skills" / "orca" / "SKILL.md").is_file()
+    # cc/cac/nga 不装 plugin / command（那是 opencode 专属）
     assert not (cc / "plugins").exists()
     assert not (cc / "command").exists()
 
 
+def test_install_cac_and_nga_targets(isolated_home: Path):
+    """cac / nga target → 各自 dotdir 下装随包 skill（v5 §4.3 四平台落点代码）。"""
+    for target, dotdir in (("cac", ".cac"), ("nga", ".nga")):
+        result = runner.invoke(app, ["--target", target, "--scope", "user"])
+        assert result.exit_code == 0, result.output
+        root = isolated_home / dotdir
+        assert (root / "skills" / install_cmds.SKILL_NAME / "SKILL.md").is_file()
+        assert (root / "skills" / "orca" / "SKILL.md").is_file()
+        assert not (root / "plugins").exists()
+
+
 def test_install_no_benchmark(isolated_home: Path):
     """守门：benchmark/（评测答案）绝不装到用户目录。"""
-    runner.invoke(app, ["--target", "claude", "--scope", "user"])
+    runner.invoke(app, ["--target", "cc", "--scope", "user"])
     skill = isolated_home / ".claude" / "skills" / install_cmds.SKILL_NAME
     assert not (skill / "benchmark").exists(), "install 不应拷 benchmark/"
 
@@ -192,22 +219,26 @@ def test_install_fail_loud(isolated_home: Path, monkeypatch: pytest.MonkeyPatch)
         raise OSError("permission denied (simulated)")
 
     monkeypatch.setattr(install_cmds.shutil, "copytree", _boom)
-    result = runner.invoke(app, ["--target", "claude", "--scope", "user"])
+    result = runner.invoke(app, ["--target", "cc", "--scope", "user"])
     assert result.exit_code == 1
     assert "simulated" in result.output or "失败" in result.output
 
 
-def test_install_template_content_matches_bundle(isolated_home: Path):
-    """落地 plugin/command 内容 = 随包模板（防 install 写错 / 漂移版本）。"""
+def test_install_plugin_content_matches_bundle(isolated_home: Path):
+    """落地 plugin 内容 = 随包模板（防 install 写错 / 漂移版本）。
+
+    v5 step 2b(5)：command 模板已删，不再比对 command 命名空间；只比对 plugin + skill。
+    """
     runner.invoke(app, ["--target", "opencode", "--scope", "user"])
     oc = isolated_home / ".config" / "opencode"
     assert (oc / "plugins" / "orca.ts").read_text() == install_cmds._opencode_plugin_src().read_text()
-    # 批 B：command 命名空间 4 个 .md，逐个比对随包模板
-    cmd_ns = oc / "command" / "orca"
-    bundled = {p.name: p.read_text() for p in install_cmds._opencode_command_srcs()}
-    assert set(bundled) == {"run.md", "status.md", "stop.md", "doctor.md"}
-    for name, content in bundled.items():
-        assert (cmd_ns / name).read_text() == content
+    # 随包所有 skill 都落地，内容 = 源
+    bundled = install_cmds._bundled_skill_sources()
+    assert bundled, "随包应至少有一个 skill 源"
+    for src in bundled:
+        dst = oc / "skills" / src.name
+        assert (dst / "SKILL.md").is_file()
+        assert (dst / "SKILL.md").read_text() == (src / "SKILL.md").read_text()
 
 
 def test_install_warns_on_legacy_singular_plugin_dir(isolated_home: Path):

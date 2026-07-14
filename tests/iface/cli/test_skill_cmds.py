@@ -1,10 +1,11 @@
-"""test_skill_cmds.py —— ``orca skill install`` 子命令 + ``install_targets`` 纯函数单测。
+"""test_skill_cmds.py —— ``teams skill install`` 弃用别名 + ``install_targets`` 纯函数单测（v5 §4.3）。
 
 覆盖：
-  - ``install_targets``：claude / opencode / all 三态 + ``OPENCODE_CONFIG_DIR`` 覆盖 + 未知 target 抛错
-  - ``skill install``：默认 all 两边都装、``--target claude`` 只装 CC、幂等重跑、fail loud（copytree
-    失败 → exit 1 + stderr 报路径）
-  - monkeypatch ``Path.home`` 到 tmp_path，不碰真实 ``~/.claude`` / ``~/.config/opencode``
+  - ``install_targets``：cc / opencode / cac / nga / all 五态 + ``OPENCODE_CONFIG_DIR`` 覆盖 +
+    未知 target 抛错；返 skill **base 目录**（随包所有 skill 落其下）。
+  - ``skill install``（弃用别名，委托 ``teams install``）：默认 all 四前端都装、``--target cc``
+    只装 cc、幂等重跑、fail loud（copytree 失败 → exit 1 + stderr 报路径）。
+  - monkeypatch ``Path.home`` 到 tmp_path，不碰真实 ``~/.claude`` / ``~/.config/opencode``。
 """
 
 from __future__ import annotations
@@ -21,34 +22,41 @@ from orca.iface.cli.commands import app
 runner = CliRunner()
 
 
-# ── install_targets 纯函数 ────────────────────────────────────────────────────
+# ── install_targets 纯函数（v5 §4.3：返 skill base 目录）──────────────────────
 
 
 def test_targets_all(tmp_path: Path):
     targets = skill_cmds.install_targets("all", home=tmp_path)
     labels = {label for label, _ in targets}
-    assert labels == {"claude", "opencode"}
+    assert labels == {"cc", "opencode", "cac", "nga"}
     for _, dst in targets:
-        assert dst.name == skill_cmds.SKILL_NAME
+        assert dst.name == "skills"  # base 目录，随包所有 skill 落其下
 
 
-def test_targets_claude_only(tmp_path: Path):
-    targets = skill_cmds.install_targets("claude", home=tmp_path)
-    assert [label for label, _ in targets] == ["claude"]
-    assert targets[0][1] == tmp_path / ".claude" / "skills" / skill_cmds.SKILL_NAME
+def test_targets_cc_only(tmp_path: Path):
+    targets = skill_cmds.install_targets("cc", home=tmp_path)
+    assert [label for label, _ in targets] == ["cc"]
+    assert targets[0][1] == tmp_path / ".claude" / "skills"
 
 
 def test_targets_opencode_only(tmp_path: Path):
     targets = skill_cmds.install_targets("opencode", home=tmp_path)
     assert [label for label, _ in targets] == ["opencode"]
-    assert targets[0][1] == tmp_path / ".config" / "opencode" / "skills" / skill_cmds.SKILL_NAME
+    assert targets[0][1] == tmp_path / ".config" / "opencode" / "skills"
 
 
 def test_targets_opencode_config_dir_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     custom = tmp_path / "custom-oc-config"
     monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(custom))
     targets = skill_cmds.install_targets("opencode", home=tmp_path)
-    assert targets[0][1] == custom / "skills" / skill_cmds.SKILL_NAME
+    assert targets[0][1] == custom / "skills"
+
+
+def test_targets_cac_and_nga(tmp_path: Path):
+    for platform, dotdir in (("cac", ".cac"), ("nga", ".nga")):
+        targets = skill_cmds.install_targets(platform, home=tmp_path)
+        assert [label for label, _ in targets] == [platform]
+        assert targets[0][1] == tmp_path / dotdir / "skills"
 
 
 def test_targets_unknown_raises(tmp_path: Path):
@@ -58,7 +66,7 @@ def test_targets_unknown_raises(tmp_path: Path):
         skill_cmds.install_targets("bogus", home=tmp_path)
 
 
-# ── skill install（CliRunner + monkeypatch home）──────────────────────────────
+# ── skill install（弃用别名，委托 teams install；CliRunner + monkeypatch home）──
 
 
 @pytest.fixture
@@ -73,14 +81,24 @@ def _skill_file(dst_root: Path) -> Path:
     return dst_root / ".claude" / "skills" / skill_cmds.SKILL_NAME / "SKILL.md"
 
 
+def _orca_skill_file(dst_root: Path) -> Path:
+    """v5 新增 orca 入口 skill 落地路径。"""
+    return dst_root / ".claude" / "skills" / "orca" / "SKILL.md"
+
+
 def test_install_both(_isolated_home: Path):
     result = runner.invoke(app, ["skill", "install"])
     assert result.exit_code == 0, result.output
     home = _isolated_home
-    # CC
-    assert (home / ".claude" / "skills" / skill_cmds.SKILL_NAME / "SKILL.md").is_file()
-    # opencode
+    # CC（create-workflow + orca 都装）
+    assert _skill_file(home).is_file()
+    assert _orca_skill_file(home).is_file()
+    # opencode（两 skill 都装）
     assert (home / ".config" / "opencode" / "skills" / skill_cmds.SKILL_NAME / "SKILL.md").is_file()
+    assert (home / ".config" / "opencode" / "skills" / "orca" / "SKILL.md").is_file()
+    # v5：cac / nga 也装（四前端）
+    for dotdir in (".cac", ".nga"):
+        assert (home / dotdir / "skills" / "orca" / "SKILL.md").is_file()
     # reference + examples 跟着 copy
     skill_dir = home / ".claude" / "skills" / skill_cmds.SKILL_NAME
     assert (skill_dir / "reference" / "orca-workflow-contract.md").is_file()
@@ -89,13 +107,15 @@ def test_install_both(_isolated_home: Path):
     assert not (skill_dir / "benchmark").exists(), "install 不应拷 benchmark/（会泄露评测答案）"
 
 
-def test_install_target_claude_only(_isolated_home: Path):
-    result = runner.invoke(app, ["skill", "install", "--target", "claude"])
+def test_install_target_cc_only(_isolated_home: Path):
+    result = runner.invoke(app, ["skill", "install", "--target", "cc"])
     assert result.exit_code == 0, result.output
     home = _isolated_home
     assert _skill_file(home).is_file()  # CC 装了
-    # opencode 没装
+    assert _orca_skill_file(home).is_file()
+    # opencode / cac / nga 没装
     assert not (home / ".config" / "opencode" / "skills" / skill_cmds.SKILL_NAME).exists()
+    assert not (home / ".cac" / "skills" / "orca").exists()
 
 
 def test_install_idempotent(_isolated_home: Path):
@@ -111,23 +131,18 @@ def test_install_idempotent(_isolated_home: Path):
 
 
 def test_skill_install_deprecated_warns_and_delegates(_isolated_home: Path):
-    """``orca skill install`` 已弃用：打印 ⚠ 警告 + 委托 ``run_install``（文件仍落地，向后兼容）。
-
-    行为升级：opencode target 现在额外装 plugin/command/opencode.json（不再是 skill-only）。
-    fail-loud 路径（copytree 失败）由 ``test_install_cmds.test_install_fail_loud`` 覆盖
-    （monkeypatch ``install_cmds.shutil``，因为 copytree 现在在 install_cmds 里）。
-    """
+    """``teams skill install`` 已弃用：打印 ⚠ 警告 + 委托 ``teams install``（文件仍落地）。"""
     result = runner.invoke(app, ["skill", "install"])
     assert result.exit_code == 0, result.output
     # 弃用警告打到 stderr（CliRunner 默认 mix 进 output）
     assert "已弃用" in result.output
-    # 委托执行：CC + opencode skill 仍落地（等价旧行为）
+    # 委托执行：CC + opencode skill 仍落地
     assert _skill_file(_isolated_home).is_file()
     oc_skill = (
         _isolated_home / ".config" / "opencode" / "skills" / skill_cmds.SKILL_NAME / "SKILL.md"
     )
     assert oc_skill.is_file()
-    # 行为升级：opencode 现在也装 in-session（plugin + 声明）
+    # opencode 仍装 plugin（惰性，step 4 整删）
     assert (_isolated_home / ".config" / "opencode" / "plugins" / "orca.ts").is_file()
 
 
