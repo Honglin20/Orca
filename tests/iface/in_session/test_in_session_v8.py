@@ -1,19 +1,21 @@
-"""tests/iface/in_session/test_in_session_v8.py —— v8 增量守门测试。
+"""tests/iface/in_session/test_in_session_v8.py —— v8 / v5 增量守门测试。
 
-覆盖 SPEC v8 §2.6 / §2.6.1 / §2.6.2 / §2.7 / §9.2：
-  - **Marker regex**（§2.6.1）：run/status/stop/doctor 命中；无 args / 含空格 wf 路径 / 含 `>` 拒绝；
-    无 marker 透传。
-  - **改写语义**（§2.6.2）：run→.prompt / doctor→.report / status→友好 / stop→ok+run_id；mock
-    CLI stdout JSON。
-  - **一次性消费**（§2.6.1）：替换文本无 `<!--orca:cmd` 字面。
-  - **sessionID argv**：从 info.sessionID 取作 --owner + --session-id argv。
+覆盖 SPEC v8 §2.7 + §9.2 + v5 §4.4 / §8 step 4：
   - **doctor CLI**（§2.7，v5 重设计）：5 项 checks（skill_install/cli_imports 硬 +
     diag/hook 可选）、JSON 结构、report 描述 B 路径、ok=skill+cli 无 fail。
+  - **v5 §4.4 idle nudge hook**：session.idle → 提醒主 session 调 next（**绝不 spawn next**，
+    B 路径铁律）。
   - **架构守门**：plugin 模板无 `@opencode/core/client` / `command.execute.before` /
-    `Bun.spawn(` + `stdout:"string"` / `advance_step` / `router.resolve` / `replay_state` /
-    `tape.append` / `EventBus` / `Tape(` / `drive_loop` / `advance(`。
-  - v5 step 2b：``start`` 命令 + ``cc_hooks.py`` 已删（A 路径退场）；transform marker 派发
-    已禁用（early return），相关测试随之移除/改写。
+    `advance_step` / `router.resolve` / `replay_state` / `tape.append` / `EventBus` /
+    `Tape(` / `drive_loop` / `advance(`。
+  - **CLI 行为契约**：bootstrap / next / status / stop（含 --json flag、compact prompt_file
+    指针、stop run_id 直定位）。
+
+v5 §8 step 4 收尾：transform marker 派发 + 死代码（extractTaskOutput / spawnCli / spawnTopLevelCli
+/ rewriteText / findLastUserTextPart / extractModel / buildCliArgs / MARKER_REGEX / MARKER_LITERAL）
+从 orca.ts 整删——相关守门测试（marker regex 同步 / 改写语义 / spawnCli fail loud / buildCliArgs
+分支 / transform 签名）随之删除。仅保留 idle nudge hook 守门 + 架构守门 + CLI 行为契约。
+``_constants.py`` 整删（MARKER_REGEX/LITERAL 仅被 transform 段引用，删后无消费者）。
 """
 from __future__ import annotations
 
@@ -25,7 +27,6 @@ import pytest
 from typer.testing import CliRunner
 
 from orca.iface.in_session.cli import app
-from orca.iface.in_session.templates import MARKER_REGEX
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -41,59 +42,6 @@ PLUGIN_TS = (
 def cwd_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.chdir(tmp_path)
     return tmp_path
-
-
-# ── §2.6.1 Marker regex ──────────────────────────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    "text,expected_sub,expected_args",
-    [
-        ("<!--orca:cmd run wf.yaml-->", "run", "wf.yaml"),
-        ("<!--orca:cmd status-->", "status", ""),
-        ("<!--orca:cmd stop-->", "stop", ""),
-        ("<!--orca:cmd doctor-->", "doctor", ""),
-        ("<!--orca:cmd run /abs/path/wf.yaml-->", "run", "/abs/path/wf.yaml"),
-        ("<!--orca:cmd   run   wf.yaml  -->", "run", "wf.yaml"),  # 多空格 + 尾空格
-        ("<!--orca:cmd run-->", "run", ""),                       # 无 args
-    ],
-)
-def test_marker_regex_matches(text, expected_sub, expected_args):
-    """SPEC §2.6.1：regex 行首/行尾锚定 + sub \\w+ + args 非贪婪 [^>]*?。"""
-    m = re.match(MARKER_REGEX, text)
-    assert m is not None, f"未命中 marker: {text!r}"
-    assert m.group(1) == expected_sub
-    assert (m.group(2) or "").strip() == expected_args
-
-
-@pytest.mark.parametrize("text", [
-    "not a marker",                                  # 无 marker
-    "  <!--orca:cmd run wf.yaml-->",                 # 行首空格（非行首锚定）
-    "<!--orca:cmd run wf.yaml--> trailing",          # 行尾非锚定
-    "<!--orca:cmd run wf>yaml-->",                   # args 含 >（明令禁止）
-    "<!--orca:cmd run wf\nyaml-->",                  # 换行（args 不得跨行）
-    "some text <!--orca:cmd run--> more text",       # 非整条文本
-    "<!--orca: cmd run-->",                          # orca: 后空格变 orca:cmd 不匹配
-])
-def test_marker_regex_rejects(text):
-    """SPEC §2.6.1：非 marker 文本不命中（行首/行尾锚定 + args 禁 `>` / 禁换行）。"""
-    assert re.match(MARKER_REGEX, text) is None, f"误命中：{text!r}"
-
-
-@pytest.mark.parametrize("text", [
-    "<!-- orca:cmd run -->",          # <!-- 后空格容许（regex \s*）
-    "<!--orca:cmd   run   wf.yaml-->",  # 多空格分隔
-])
-def test_marker_regex_tolerates_whitespace(text):
-    """SPEC §2.6.1：``<!--`` 后空格与多空格分隔容许（``\\s*`` / ``\\s+``）。"""
-    assert re.match(MARKER_REGEX, text) is not None
-
-
-def test_marker_regex_sub_must_be_word():
-    """子命令名 \\w+：含特殊字符不命中。"""
-    assert re.match(MARKER_REGEX, "<!--orca:cmd run-x-->") is None   # `-` 非 \w
-    assert re.match(MARKER_REGEX, "<!--orca:cmd 123run-->") is not None  # 数字 OK
-    assert re.match(MARKER_REGEX, "<!--orca:cmd RUN-->") is not None     # 大写 OK
 
 
 # ── doctor 诊断（v5 §4.4：skill_install + cli_imports 为硬检查；hook 心跳可选）────
@@ -274,13 +222,17 @@ def test_doctor_stale_entry_heartbeat_unknown(doctor_iso, monkeypatch):
 
 
 def test_doctor_advance_heartbeat_passes(doctor_iso, monkeypatch):
-    """诊断开 + advance 心跳 = advance PASS（idle 在 fire，报告 idle 计数，仅 nudge）。"""
+    """诊断开 + advance 心跳 = advance PASS（idle 在 fire，报告 idle 计数，仅 nudge）。
+
+    v5 §8 step 4 收尾：``advance_count`` / ``last_advance_run_id`` 字段从 fixture 删除
+    （plugin 不再写——A 路径退场后 idle hook 不 spawn next，doctor 也不读它们）。
+    """
     import time as _t
     monkeypatch.setenv("ORCA_DIAGNOSE", "1")
     _install_fake_orca_skill(doctor_iso, "cc")
     _write_probe(doctor_iso, ".orca-probe-advance.json", {
         "diag": True, "last_idle_at": int(_t.time()),
-        "idle_count": 3, "advance_count": 1, "last_advance_run_id": "r-1",
+        "idle_count": 3,
         "last_session_id": "s-1",
     })
     reply = _run_doctor()
@@ -304,10 +256,13 @@ def test_doctor_report_describes_b_path(doctor_iso, monkeypatch):
 
 
 def test_orca_ts_idle_hook_is_nudge_no_advance():
-    """v5 §4.4：``session.idle`` hook 是 nudge（提醒主 session 调 next），**绝不 spawn next**。
+    """v5 §4.4 + step 4：``session.idle`` hook 是 nudge（提醒主 session 调 next），**绝不 spawn next**。
 
     B 路径铁律：hook 自动调 next = 退化 A 路径。idle hook 应只扫 marker + promptAsync 注入
     提醒，不 spawnCli。提取 event hook 区段断言。
+
+    step 4 收尾后：transform 段已整删——本测试同时守门 transform 不得复活（防止 builder
+    把 transform 入口段加回来）。
     """
     text = PLUGIN_TS.read_text(encoding="utf-8")
     # 提取 event hook 区段（从 ``event: async`` 到其后第一个 `\n    },`）。
@@ -326,81 +281,34 @@ def test_orca_ts_idle_hook_is_nudge_no_advance():
         assert spawn_pat not in hook, (
             f"idle hook 不得 {spawn_pat}（B 路径：nudge 只提醒，绝不自动调 next）"
         )
-    # transform 派发已禁用（early return）——确认 transform hook 仍存在但首条即 return input
-    t_start = text.find('"experimental.chat.messages.transform"')
-    assert t_start >= 0
-    # early return 在 transform hook 前 ~20 行内
-    assert "return input" in text[t_start:t_start + 1200], (
-        "transform hook 应 early-return 禁用 marker 派发（step 2b(4)）"
-    )
 
 
-# ── §2.6.2 改写语义（plugin TS 字段提取契约）────────────────────────────────
+def test_orca_ts_has_no_transform_hook_step4():
+    """v5 §8 step 4 收尾守门：transform marker 派发入口段 + 死代码已整删。
 
-
-def _extract_ts_function_body(name: str) -> str:
-    """从 plugin TS 抽某函数体（用 brace counting，避免 reformat 断）。
-
-    NIT-4 闭环：从 ``function name(...) {`` 起按 ``{``/``}`` 平衡扫描到匹配闭 ``}``。
+    防止 builder 把 ``experimental.chat.messages.transform`` 入口加回来（旧 A 路径第二入口，
+    v5 入口统一切到 orca skill——transform 复活 = 第二入口绕过 skill，违反单一接口）。
+    同时守门 transform 相关死代码（spawnCli / rewriteText / buildCliArgs / MARKER_REGEX 等）
+    不得复活。
     """
     text = PLUGIN_TS.read_text(encoding="utf-8")
-    m = re.search(rf"function {name}\b\s*\(", text)
-    assert m, f"未找到函数 {name}"
-    # 从匹配处往后找第一个 `{`
-    start = text.find("{", m.end())
-    assert start >= 0, f"{name} 缺函数体起始 ``{{``"
-    depth = 0
-    i = start
-    while i < len(text):
-        c = text[i]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start + 1:i]
-        i += 1
-    raise AssertionError(f"{name} 函数体未闭合")
-
-
-def test_rewrite_text_field_extraction_contract():
-    """SPEC §2.6.2：plugin ``rewriteText`` 按子命令提取顶层字段（非整 JSON）。
-
-    通过逐子命令断言 plugin 源码包含对应字段名 + 子命令分支，守住提取契约。
-    """
-    body = _extract_ts_function_body("rewriteText")
-    # run → .prompt
-    assert "run" in body and "reply.prompt" in body
-    # doctor → .report
-    assert "doctor" in body and "reply.report" in body
-    # status → 友好串（status 字段）
-    assert "status" in body and "reply.status" in body
-    # stop → ok + run_id
-    assert "stop" in body and "reply.ok" in body and "reply.run_id" in body
-
-
-def test_plugin_spawns_cli_per_subcommand():
-    """SPEC §2.6.2：plugin 按 sub 派发到对应 CLI 子命令（buildCliArgs）。"""
-    body = _extract_ts_function_body("buildCliArgs")
-    assert '"bootstrap"' in body   # run → bootstrap
-    assert '"status"' in body
-    assert '"stop"' in body
-    assert '"doctor"' in body
-
-
-def test_plugin_bootstrap_argv_no_owner_no_session_id():
-    """v3 §7.2：bootstrap argv 不再含 ``--owner`` / ``--session-id``（marker 精简，无这些字段）。
-
-    旧 B4 契约（sid 作 --owner + --session-id）随 marker 精简作废；plugin buildCliArgs
-    的 run 分支只推 --model（可选）+ wf 位置参数。
-    """
-    body = _extract_ts_function_body("buildCliArgs")
-    assert '"--owner"' not in body, (
-        "v3 §7.2：bootstrap 不再接受 --owner（marker 无 owner 字段）"
+    code = _strip_ts_comments(text)
+    # transform 入口段已整删（查裸键——双引号 / 单引号 / 模板字符串任一形态都算复活）
+    assert "experimental.chat.messages.transform" not in code, (
+        "step 4：transform marker 派发入口段应整删（入口统一切到 orca skill）"
     )
-    assert '"--session-id"' not in body, (
-        "v3 §7.2：bootstrap 不再接受 --session-id（marker 无 session_id 字段）"
-    )
+    # transform 死代码同步守门（防复活）
+    dead_artifacts = [
+        "MARKER_REGEX", "MARKER_LITERAL",
+        "function spawnCli", "function spawnTopLevelCli",
+        "function rewriteText", "function buildCliArgs",
+        "function extractTaskOutput", "function findLastUserTextPart",
+        "function extractModel",
+    ]
+    for artifact in dead_artifacts:
+        assert artifact not in code, (
+            f"step 4：transform 死代码 {artifact!r} 应整删（无消费者）"
+        )
 
 
 # ── 架构守门（§2.6 / §9.2）──────────────────────────────────────────────────
@@ -436,17 +344,6 @@ def test_plugin_uses_ctx_client_not_npm_import():
     assert "ctx.client" in code, "plugin 应使用 ctx.client"
 
 
-def test_plugin_uses_spawn_sync_pipe_not_string():
-    """v8 spike 实证：``Bun.spawn({stdout:"string"})`` 非法，必须 ``Bun.spawnSync({stdout:"pipe"})``。"""
-    text = PLUGIN_TS.read_text(encoding="utf-8")
-    code = _strip_ts_comments(text)
-    assert 'Bun.spawnSync(' in code, "plugin 必须用 Bun.spawnSync"
-    assert 'stdout: "pipe"' in code, 'plugin 必须 stdout:"pipe"'
-    assert 'stdout: "string"' not in code, (
-        'plugin 不得用 stdout:"string"（opencode 内嵌 Bun runtime 非法）'
-    )
-
-
 def test_plugin_exports_flat_hooks_not_nested():
     """SPEC §13 v8：``export const OrcaPlugin = async (ctx) => ({ ...flat hooks })``。"""
     text = PLUGIN_TS.read_text(encoding="utf-8")
@@ -458,13 +355,6 @@ def test_plugin_exports_flat_hooks_not_nested():
     assert not re.search(r"\{\s*hooks:\s*\{", code), (
         "plugin 不得 nested hooks（spike 实证 flat hooks 才生效）"
     )
-
-
-def test_plugin_uses_messages_transform_entry():
-    """SPEC §2.6 D-v8-1：入口钩子是 ``experimental.chat.messages.transform``。"""
-    text = PLUGIN_TS.read_text(encoding="utf-8")
-    code = _strip_ts_comments(text)
-    assert '"experimental.chat.messages.transform"' in code
 
 
 def test_plugin_does_not_use_command_execute_before():
@@ -511,30 +401,6 @@ def test_plugin_no_count_state_for_doctor():
     # 不应有 count[self-type]++ 模式
     assert not re.search(r"count\[\s*[\"']\w+[\"']\s*\]\s*\+\+", text), (
         "plugin 不得维护 hook 触发计数（doctor 不依赖 plugin 自报状态）"
-    )
-
-
-def test_plugin_one_shot_consume_in_rewrite_path():
-    """SPEC §2.6.1：plugin rewrite 后若文本意外含 marker 字面，用反引号替换兜底。"""
-    text = PLUGIN_TS.read_text(encoding="utf-8")
-    assert "MARKER_LITERAL" in text
-    assert '`orca:cmd`' in text or "`orca:cmd`" in text  # split-join 兜底分支
-
-
-def test_plugin_embeds_canonical_marker_regex():
-    """SPEC §2.6.1：plugin TS 必须 embed 与 Python ``MARKER_REGEX`` 同字面 regex。
-
-    单一真相源：改 regex 必须两处同步（本测试守同步契约）。
-    """
-    text = PLUGIN_TS.read_text(encoding="utf-8")
-    # TS regex 字面：/^...$/ 形式
-    m = re.search(r"const MARKER_REGEX = /(.+?)/", text)
-    assert m, "plugin 未定义 MARKER_REGEX 常量"
-    ts_regex = m.group(1)
-    # Python MARKER_REGEX 去掉前缀 ^ 和后缀 $ 后的中间部分应等同 TS regex
-    py_body = MARKER_REGEX
-    assert py_body.lstrip("^").rstrip("$") == ts_regex.lstrip("^").rstrip("$"), (
-        f"plugin TS regex `{ts_regex}` 与 Python MARKER_REGEX `{py_body}` 不同步"
     )
 
 
@@ -639,16 +505,6 @@ def test_status_json_flag_no_run_id_lists_runs_json(cwd_tmp, wf_path):
     assert ".jsonl" not in reply["runs"][0]  # stem only
 
 
-def test_plugin_status_dispatch_passes_json_flag():
-    """SPEC §2.6.2：plugin buildCliArgs 的 status 分支必带 --json（MAJOR-1）。"""
-    body = _extract_ts_function_body("buildCliArgs")
-    # 在 buildCliArgs 函数体里 status 分支必须有 --json
-    m = re.search(r'if \(sub === "status"\)(?P<body>(?:.|\n)*?)(?=\n  \}|\n    if \(sub)',
-                  body)
-    assert m, "buildCliArgs 无 status 分支"
-    assert '"--json"' in m.group("body"), "status 派发分支必带 --json flag"
-
-
 # ── §2.6.2 stop run_id 派发（v3 §7.2：marker 无 owner，stop 按 run_id 直定位）────
 
 
@@ -683,104 +539,14 @@ def test_stop_unknown_run_id_clears_no_tape(cwd_tmp, wf_path):
     assert reply.get("note") == "no-tape"
 
 
-def test_plugin_stop_dispatch_uses_run_id_arg():
-    """v3 §2.6.2：plugin buildCliArgs 的 stop 分支传 run_id（marker 无 owner 后按 run_id 定位）。
-
-    旧 MAJOR-2 用 --owner；v3 marker 精简后 stop 按 run_id（文件名 orca-<run_id>.json O(1)）。
-    """
-    body = _extract_ts_function_body("buildCliArgs")
-    m = re.search(r'if \(sub === "stop"\)(?P<body>(?:.|\n)*?)(?=\n  \}|\n    if \(sub)',
-                  body)
-    assert m, "buildCliArgs 无 stop 分支"
-
-
-# ── §2.6 plugin spawnCli fail loud（MAJOR-3 闭环）───────────────────────────
-
-
-def test_plugin_spawncli_checks_exit_code_and_surfaces_stderr():
-    """SPEC 鲁棒性底线：spawnCli 检查 exitCode，非 0 时把 stderr 回显（MAJOR-3）。
-
-    守门对象是 spawnCli 函数体：必须含 ``exitCode`` 检查 + ``__orca_error`` 信封。
-    """
-    text = PLUGIN_TS.read_text(encoding="utf-8")
-    code = _strip_ts_comments(text)
-    # 抽 spawnCli 函数体（粗略）
-    m = re.search(r"function spawnCli\([^)]*\)[^{]*\{(?P<body>[\s\S]+?)\n\}", code)
-    assert m, "未找到 spawnCli 函数"
-    body = m.group("body")
-    assert "exitCode" in body, "spawnCli 必须检查 exitCode"
-    assert "__orca_error" in body, "spawnCli 失败时返 __orca_error 信封"
-    assert "stderr" in body, "spawnCli 必须读 stderr 并回显"
-
-
-def test_plugin_rewritetext_handles_error_envelope():
-    """SPEC §2.6.2：rewriteText 见 __orca_error 信封时返失败回显（fail loud）。"""
-    text = PLUGIN_TS.read_text(encoding="utf-8")
-    code = _strip_ts_comments(text)
-    m = re.search(r"function rewriteText\([^)]*\)[^{]*\{(?P<body>[\s\S]+?)\n\}", code)
-    assert m, "未找到 rewriteText 函数"
-    body = m.group("body")
-    assert "__orca_error" in body, "rewriteText 必须处理 __orca_error 信封"
-
-
-# ── §2.6.1 一次性消费兜底（plugin side）─────────────────────────────────────
-
-
-def test_plugin_unknown_subcommand_replaces_text_safely():
-    """SPEC §2.6.1：未知子命令 → 安全回显（替换文本无 marker 字面）。"""
-    text = PLUGIN_TS.read_text(encoding="utf-8")
-    code = _strip_ts_comments(text)
-    # transform hook 内 unknown 分支
-    assert "cannot dispatch" in code or "unknown subcommand" in code
-
-
-# ── §2.6.1 MARKER_LITERAL 同步契约（NIT-2）──────────────────────────────────
-
-
-def test_plugin_embeds_canonical_marker_literal():
-    """SPEC §2.6.1：plugin TS embed 与 Python ``MARKER_LITERAL`` 同字面。
-
-    单一真相源：改 literal 必须两处同步（regex literal 也要守同步）。
-    """
-    from orca.iface.in_session.templates import MARKER_LITERAL
-
-    text = PLUGIN_TS.read_text(encoding="utf-8")
-    code = _strip_ts_comments(text)
-    m = re.search(r'const MARKER_LITERAL = "([^"]+)"', code)
-    assert m, "plugin 未定义 MARKER_LITERAL 常量"
-    assert m.group(1) == MARKER_LITERAL, (
-        f"plugin MARKER_LITERAL `{m.group(1)}` 与 Python `{MARKER_LITERAL}` 不同步"
-    )
-
-
 # ── v8.1 签名契约测试（防 builder 回退，e2e /tmp/orca-e2e-v8/ 实证形态）─────────
 #
 # 教训（task 根因）：plugin TS 纯单测（marker regex / 字段提取）验不出运行时签名 bug
 # —— 52 单测全过却 shipped inert。hook 的调用签名（参数个数、payload 包装）只能由
-# 真 opencode runtime 决定，spike 已实证的形态是唯一真相源。以下 4 测试断言 shipped
-# 模板里 transform/event/message-fetch 三处的代码形态 == spike 实证形态 + bootstrap
-# 返的 prompt prepend Task-tool 指令。任何回退 → 测试红。
-
-
-def test_transform_hook_signature_is_two_param_async_input_out():
-    """Bug A 签名契约：transform hook 必须是 ``async (input, out)`` 两参形态。
-
-    spike ``/tmp/orca-xform/.opencode/plugins/xform.ts`` 实证：opencode 1.14.22
-    runtime 实调 ``(input, out)`` 两参，``input`` 空 ``{}``、messages 在 ``out`` 上。
-    shipped v8 曾回退为单参 ``async (input) => { const out = input.out ?? input }``
-    —— runtime 下 input 为空对象、input.out 永远 undefined → messages 永远 [] →
-    transform 静默 passthrough → 整个入口链路死。
-    """
-    text = PLUGIN_TS.read_text(encoding="utf-8")
-    # hook 注册行：必须形如 `"experimental.chat.messages.transform": async (input: any, out: any) =>`
-    m = re.search(
-        r'"experimental\.chat\.messages\.transform":\s*async\s*\(input:\s*any,\s*out:\s*any\)\s*=>',
-        text,
-    )
-    assert m, (
-        "transform hook 签名必须严格 `async (input: any, out: any) =>`（e2e /tmp/orca-xform "
-        f"实证两参形态）。实际：{text.split(chr(10))[next(i for i,l in enumerate(text.split(chr(10))) if 'messages.transform' in l)][:120]}"
-    )
+# 真 opencode runtime 决定，spike 已实证的形态是唯一真相源。
+#
+# **v5 §8 step 4**：transform 签名契约（Bug A）已随 transform 段整删下线——transform 入口
+# 不再注册，签名契约无承载对象。event hook 签名契约（Bug B）保留——idle nudge hook 仍存在。
 
 
 def test_event_hook_payload_unwrap_input_event_fallback_input():
@@ -862,18 +628,3 @@ def test_build_pointer_is_single_source():
     p2 = _build_pointer(r2)
     assert "/p/y.md" in p2 and "资源目录" not in p2
 
-
-def test_build_cli_args_run_branch_passes_user_model():
-    """Bug E 签名契约：buildCliArgs 的 run 分支必须把用户 model 作 --model argv。
-
-    shipped v8 曾不透传 → marker.model 永远 CLI 默认，idle 注入 promptAsync 调该
-    provider 失败（环境没配 deepseek 时尤甚）。
-    """
-    body = _extract_ts_function_body("buildCliArgs")
-    m = re.search(r'if \(sub === "run"\)(?P<body>(?:.|\n)*?)(?=\n  \}|\n    if \(sub)',
-                  body)
-    assert m, "buildCliArgs 无 run 分支"
-    run_body = m.group("body")
-    assert '"--model"' in run_body, (
-        "buildCliArgs run 分支必须含 --model 透传（Bug E：用户当前 model → marker.model）"
-    )

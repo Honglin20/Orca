@@ -753,7 +753,8 @@ def status(
     progress = f"{done}/{len(state.node_status)}"
 
     if json_output:
-        # SPEC §2.6.2 plugin 改写契约：顶层字段供 plugin rewriteText 提取。
+        # 顶层字段供主 session（经 orca skill）直接消费；step 4 后 plugin transform 段
+        # 已退场，--json 仍保留作 skill / LLM 友好的结构化出口（SPEC §2.3 单 run 详情契约）。
         typer.echo(json.dumps({
             "run_id": rid,
             "status": state.status,

@@ -218,7 +218,7 @@ CI 禁：`orca in-session` / `MARKER_REGEX` / `cc_hooks` 推进 / `extractTaskOu
 9. 前端集成 = skill（一套 SKILL.md，四平台落点）；hook = nudge 提醒（idle/Stop，不推进，§4.4，step 2b 做）+ 诊断可选。
 10. 输出统一 `--output` 字符串 + quoting 转义。
 11. marker 只 `{run_id, model, no_output_count}`；重复 bootstrap fail loud。
-12. 删整个 orca.ts plugin + _constants.py + 相关测试。
+12. 删 orca.ts 的 transform 入口段 + 死代码（**保留 idle nudge hook**，§4.4 / step 4）+ _constants.py + 相关测试。
 13. in-session parallel / 动态构建本期不做。
 
 ---
@@ -229,7 +229,7 @@ CI 禁：`orca in-session` / `MARKER_REGEX` / `cc_hooks` 推进 / `extractTaskOu
 - `orca list` 返 `{workflows:[{name, description, inputs_schema}]}`（**无 has_setup**）。
 - execute phase agent 配 ask_user → compile 仍 fail loud（A2 gate 校验保留）。
 - `orca doctor` 报 `skill_install=pass`（A6）。
-- `orca.ts` **transform 入口 + 死代码删除**（保留 idle nudge hook）+ grep `MARKER_REGEX` 全仓 = 0（B5/B6，step 4 后）。
+- `orca.ts` **transform 入口 + 死代码删除**（保留 idle nudge hook）+ grep `MARKER_REGEX` in code = 0（注释 / docstring 中的解释性提及 OK，B5/B6，step 4 后）。
 - nudge：opencode idle / CC Stop 有活跃 run 时提醒调 next（不推进，§4.4，step 2b 后）。
 - `teams install --target nga/cac` 生成对应目录 SKILL.md（B10）。
 - opencode 主 session **调 skill** 完成 3 节点 wf（demo 复制 workflows/）→ workflow_completed。

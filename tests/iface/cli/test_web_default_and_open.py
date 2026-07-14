@@ -909,113 +909,12 @@ class TestOrcaOpen:
 
 
 # ── /orca open slash command（signature-contract，AC7）─────────────────────
-
-
-PLUGIN_TS = (
-    Path(__file__).resolve().parents[3]
-    / "orca" / "iface" / "in_session" / "templates" / "opencode" / "orca.ts"
-)
-
-
-class TestOrcaOpenSlashContract:
-    """``/orca open <run_id>`` slash 命令在 plugin 端的契约守门（SPEC §5 / D-v7-1）。"""
-
-    def test_plugin_has_open_case_in_buildCliArgs(self):
-        """``buildCliArgs`` 含 ``open`` case（哑传输：args → argv）。"""
-        text = PLUGIN_TS.read_text(encoding="utf-8")
-        assert 'sub === "open"' in text, "buildCliArgs 未加 open case"
-
-    def test_plugin_has_open_case_in_rewriteText(self):
-        """``rewriteText`` 含 ``open`` case（ack 信封）。"""
-        text = PLUGIN_TS.read_text(encoding="utf-8")
-        assert 'sub === "open"' in text
-
-    def test_plugin_has_spawnTopLevelCli_for_open(self):
-        """``open`` 走 ``spawnTopLevelCli``（``orca open``，非 ``orca in-session open``）。
-
-        找 dispatch 处的 ``sub === "open" ? spawnTopLevelCli : spawnCli`` 字面序列
-        （M3 闭环：两个独立 grep 不足，需字面序列断言证明 routing）。
-        """
-        text = PLUGIN_TS.read_text(encoding="utf-8")
-        assert "spawnTopLevelCli" in text
-        # 找 dispatch 三元表达式（``sub === "open" ? spawnTopLevelCli``）。
-        # 注意有多个 ``sub === "open"``（buildCliArgs / rewriteText / dispatch），
-        # dispatch 形态是 ``sub === "open"\\n ? spawnTopLevelCli``。
-        assert 'sub === "open"' in text
-        assert "? spawnTopLevelCli" in text, (
-            "dispatch 处未找到 `sub === 'open' ? spawnTopLevelCli` 三元路由"
-        )
-
-    def test_plugin_open_dispatch_is_ternary_not_if_block(self):
-        """更严格的 routing 断言：``sub === "open" ? spawnTopLevelCli(cliArgs) : spawnCli(cliArgs)``
-        三元表达式（M3 闭环）。"""
-        text = PLUGIN_TS.read_text(encoding="utf-8")
-        # 找三元表达式特征序列。
-        # 实际形态（orca.ts:290-292）：
-        #   const reply = sub === "open"
-        #     ? spawnTopLevelCli(cliArgs)
-        #     : spawnCli(cliArgs)
-        assert (
-            'sub === "open"' in text and "? spawnTopLevelCli" in text
-        ), "open dispatch 必须是三元路由 ? spawnTopLevelCli，非 if 块"
-
-    def test_plugin_open_case_returns_null_on_empty_args(self):
-        """``buildCliArgs("open", "", ...)`` → null（缺 run_id 时 plugin 走 cannot dispatch 错误回显）。
-
-        M5 闭环：守护"缺关键 argv → fail loud"分支。
-        """
-        text = PLUGIN_TS.read_text(encoding="utf-8")
-        # 找 open case 区域。
-        idx = text.find('sub === "open"')
-        assert idx > 0
-        # 在 buildCliArgs 函数内的 open case 应有 `if (!rid) return null`。
-        build_args_idx = text.find("function buildCliArgs")
-        assert build_args_idx > 0
-        # buildCliArgs 区域从函数头到下一个 export default。
-        end_idx = text.find("export default", build_args_idx)
-        build_region = text[build_args_idx:end_idx]
-        # open case 在 build_region 内。
-        open_idx = build_region.find('sub === "open"')
-        assert open_idx > 0, "buildCliArgs 内无 open case"
-        # 取 open case 后 300 字符，断言含 if (!rid) return null。
-        region = build_region[open_idx:open_idx + 300]
-        assert "if (!rid) return null" in region, (
-            f"open case 缺 `if (!rid) return null` 守护（M5）：{region!r}"
-        )
-
-    def test_plugin_open_returns_argv_orca_open(self):
-        """``open`` case 返回 ``["open", run_id]``（非 ``in-session`` argv 前缀）。"""
-        text = PLUGIN_TS.read_text(encoding="utf-8")
-        # buildCliArgs 内 open case：return ["open", rid]
-        assert 'return ["open", rid]' in text
-
-    def test_plugin_open_no_business_logic(self):
-        """``open`` 分支零 Orca 业务逻辑（grep 禁词守门，D-v7-1 扩展到 open 子命令）。"""
-        text = PLUGIN_TS.read_text(encoding="utf-8")
-        # 取 open case 区域粗筛（不进 advance_step / router / tape.append / attach_run）。
-        # 整 plugin 已守禁词列表（既有 test_plugin_has_no_orca_business_logic 覆盖），
-        # 这里只断言 open case 不引入新违规：open case 区域无 attach_run / spawn_serve。
-        # 找 open case 起止。
-        idx = text.find('sub === "open"')
-        assert idx > 0
-        # 取该行向下 300 字符区域。
-        region = text[idx:idx + 500]
-        for forbidden in ["attach_run", "_spawn_background_serve", "resolve_tape_path"]:
-            assert forbidden not in region, (
-                f"open case 含禁词 {forbidden!r}（违反 D-v7-1：plugin 零业务逻辑）"
-            )
-
-    def test_plugin_no_in_session_prefix_for_open(self):
-        """``spawnTopLevelCli`` 用 ``["orca", ...args]``（不是 ``orca in-session``）。"""
-        text = PLUGIN_TS.read_text(encoding="utf-8")
-        # 找 spawnTopLevelCli 函数体。
-        idx = text.find("function spawnTopLevelCli")
-        assert idx > 0
-        region = text[idx:idx + 600]
-        assert '"orca"' in region or "'orca'" in region
-        # 不应出现 in-session argv 前缀
-        assert '"in-session"' not in region
-        assert "'in-session'" not in region
+#
+# **v5 §8 step 4**：``/orca open <run_id>`` 的 plugin 侧 marker 派发（transform →
+# spawnTopLevelCli(["open", rid])）随 transform 整删下线——入口统一切到 orca skill。
+# 旧的 ``TestOrcaOpenSlashContract``（plugin-side marker dispatch 守门）已无承载对象，
+# 整删。``orca open`` CLI 命令本身仍在（见 ``test_web_open_command_*`` + ``TestIronLaws``），
+# 由 CLI 行为契约覆盖（非 plugin TS 源码 grep）。
 
 
 # ── Iron laws（铁律守门，SPEC §1 / §8 AC12-13）──────────────────────────────
