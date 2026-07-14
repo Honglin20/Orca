@@ -15,6 +15,9 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -205,8 +208,12 @@ def test_install_cc_nudge_script_never_calls_next(isolated_home: Path):
     """
     runner.invoke(app, ["--target", "cc", "--scope", "user"])
     script = (isolated_home / ".claude" / "hooks" / "orca-nudge.sh").read_text()
-    # nudge 机制：emit decision:block
-    assert 'decision:"block"' in script
+    # nudge 机制：emit ``decision: "block"`` JSON。正则容许 jq 形 ``decision:"block"`` 与
+    # python 形 ``"decision": "block"`` 两种字面（review NIT#1：收紧——只匹配 JSON 字段形态，
+    # 不被注释 / 无关字符串里的 "decision" / "block" 字符满足）。
+    assert re.search(r'"decision"\s*:\s*"block"', script), (
+        "nudge 脚本必须 emit decision:block JSON（CC Stop hook 协议）"
+    )
     # 提醒文案教模型调 next（允许出现，纯文本）
     assert "orca next" in script
     # 守门：脚本不得 spawn 或ca CLI。REASON 是双引号字符串——**禁用反引号**（双引号内
@@ -217,6 +224,18 @@ def test_install_cc_nudge_script_never_calls_next(isolated_home: Path):
     exec_lines = [ln for ln in script.splitlines()
                   if ln.strip().startswith("orca ") and not ln.strip().startswith("#")]
     assert exec_lines == [], f"nudge 脚本不得直接执行 orca 命令: {exec_lines}"
+    # DEFECT-1：实现必须用 python3（跨环境可靠），不得用 jq（WSL conda orca 等环境可能无 jq）。
+    # 旧版 ``jq ... 2>/dev/null || true`` 在缺 jq 时静默失败 → nudge 永不触发且无报错（fail-loud 反例）。
+    assert "python3" in script, "nudge 脚本必须用 python3（DEFECT-1：jq 跨环境不可靠）"
+    # 守门只看**非注释行**——注释里可以提到 jq（说明为何不用），脚本执行体不得 spawn jq。
+    non_comment_lines = [
+        ln for ln in script.splitlines()
+        if not ln.lstrip().startswith("#")
+    ]
+    exec_body = "\n".join(non_comment_lines)
+    assert "jq " not in exec_body and "jq<" not in exec_body and "| jq" not in exec_body, (
+        "nudge 脚本执行体不得 spawn jq（DEFECT-1：缺 jq 时静默失败违反 fail-loud）"
+    )
 
 
 def test_install_cc_nudge_idempotent_no_duplicate(isolated_home: Path):
@@ -274,6 +293,134 @@ def test_install_cc_nudge_recovers_malformed_settings(isolated_home: Path):
     assert isinstance(cfg["hooks"], dict)
     stop_cmds = [h["command"] for entry in cfg["hooks"]["Stop"] for h in entry["hooks"]]
     assert any("orca-nudge.sh" in c for c in stop_cmds)
+
+
+# ── cc nudge 脚本行为（DEFECT-1：fail-loud + python3）─────────────────────────
+#
+# 旧版 cc_nudge.sh 用 ``jq ... 2>/dev/null || true`` 读 marker；缺 jq 时静默失败 → nudge 永
+# 不触发且无报错（违反 fail-loud）。DEFECT-1 改用 python3（orca 本就依赖 python，跨环境可靠）
+# + 非法 marker fail loud。下方测试用真子进程跑脚本，验证语义不变（block/pass/节流）+ fail loud。
+
+
+_BASH = shutil.which("bash")
+_PYTHON3 = shutil.which("python3")
+_NUDGE_BEHAVIOR_OK = bool(_BASH) and bool(_PYTHON3)
+pytestmark_nudge_behavior = pytest.mark.skipif(
+    not _NUDGE_BEHAVIOR_OK,
+    reason="跑 cc_nudge.sh 需要 bash + python3（Windows 原生缺；WSL / Linux / macOS 有）",
+)
+
+
+def _write_nudge_script(dst_dir: Path) -> Path:
+    """拷随包 cc_nudge.sh 到 dst_dir（行为测试跑的是真脚本，非 mock）。"""
+    src = install_cmds._cc_nudge_script_src()
+    dst = dst_dir / "orca-nudge.sh"
+    dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    return dst
+
+
+@pytestmark_nudge_behavior
+def test_cc_nudge_script_blocks_when_active_run(tmp_path: Path):
+    """有活跃 marker → emit ``decision: block`` JSON 到 stdout，exit 0（v5 §4.4 nudge 语义）。"""
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    (runs / "orca-run-abc.json").write_text(
+        json.dumps({"run_id": "abc", "model": "deepseek", "no_output_count": 0}),
+        encoding="utf-8",
+    )
+    script = _write_nudge_script(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        capture_output=True, text=True, timeout=10,
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout.strip())
+    assert payload["decision"] == "block"
+    assert "abc" in payload["reason"]
+    assert "orca next" in payload["reason"]
+
+
+@pytestmark_nudge_behavior
+def test_cc_nudge_script_passes_when_no_active_run(tmp_path: Path):
+    """无 marker → 静默放行（exit 0，无 stdout）——nudge 不该误报。"""
+    script = _write_nudge_script(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        capture_output=True, text=True, timeout=10,
+    )
+    assert proc.returncode == 0
+    assert proc.stdout.strip() == ""
+
+
+@pytestmark_nudge_behavior
+def test_cc_nudge_script_fails_loud_on_malformed_marker(tmp_path: Path):
+    """DEFECT-1 核心回归：marker 损坏（非合法 JSON）→ **fail loud**（stderr + exit 2）。
+
+    旧版 ``jq ... 2>/dev/null || true`` 在此场景静默失败 → nudge 永不触发；用户看不到任何
+    信号。新版必须把错误打到 stderr、exit 非零，让用户看到 orca 状态已乱。
+    """
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    (runs / "orca-run-broken.json").write_text("{not json", encoding="utf-8")
+    script = _write_nudge_script(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        capture_output=True, text=True, timeout=10,
+    )
+    assert proc.returncode != 0, "marker 损坏必须 fail loud（exit 非零），不得静默"
+    assert proc.stderr, "fail loud 必须把错误写到 stderr"
+    assert "marker" in proc.stderr or "JSON" in proc.stderr
+
+
+@pytestmark_nudge_behavior
+def test_cc_nudge_script_throttles_within_60s(tmp_path: Path):
+    """60s 内第二次 Stop → 放行（不重复 block，防刷屏）。节流时间戳由首次 block 写。"""
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    (runs / "orca-run-xyz.json").write_text(
+        json.dumps({"run_id": "xyz"}), encoding="utf-8",
+    )
+    state_file = runs / ".orca-nudge-cc"
+    script = _write_nudge_script(tmp_path)
+
+    first = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        capture_output=True, text=True, timeout=10,
+    )
+    assert first.returncode == 0
+    assert json.loads(first.stdout.strip())["decision"] == "block"
+    # review NIT#3：直接断言首次 block 写了节流时间戳（副作用锁死，不靠第二次隐式验证）。
+    assert state_file.is_file(), "首次 block 必须写节流时间戳文件"
+    assert state_file.read_text(encoding="utf-8").strip().isdigit(), (
+        "节流时间戳内容必须是整数（now epoch seconds）"
+    )
+
+    second = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        capture_output=True, text=True, timeout=10,
+    )
+    assert second.returncode == 0
+    assert second.stdout.strip() == "", "60s 窗口内第二次 Stop 应节流放行（无 block 输出）"
+
+
+@pytestmark_nudge_behavior
+def test_cc_nudge_script_passes_when_throttle_state_corrupt(tmp_path: Path):
+    """节流时间戳文件内容非整数（损坏）→ 视作可再次 block，不崩（与旧版 case 容错同款）。"""
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    (runs / "orca-run-q.json").write_text(
+        json.dumps({"run_id": "q"}), encoding="utf-8",
+    )
+    # 写一个非数字内容的时间戳文件（损坏态）
+    (runs / ".orca-nudge-cc").write_text("garbage", encoding="utf-8")
+    script = _write_nudge_script(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        capture_output=True, text=True, timeout=10,
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout.strip())
+    assert payload["decision"] == "block"
 
 
 def test_install_cac_and_nga_targets(isolated_home: Path):
