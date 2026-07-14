@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-15] in-session E2E defects 修复 + v5 §8 step 4（orca.ts transform 整删）
+
+E2E 跑发现 2 defect 各独立 commit 修复：① cc_nudge.sh 缺 jq 时静默失败（fail-loud 违规）改用 python3 + marker 损坏时 stderr/exit 2。② `orca status` 加 `--run-id` option（与 SKILL.md/spec 一致；位置参数保留兼容；异值冲突 fail loud）。随后做 v5 §8 step 4 opencode 收尾：删 orca.ts transform marker 派发入口 + 9 个死代码 helper + `_constants.py`，**保留 idle nudge hook**（§4.4，opencode nudge 载体）；review 捕获 BLOCKER（test_web_default_and_open 跨文件漏扫 8 测试）+ MAJOR（advanceCount/lastAdvanceRunId 死代码）全闭环。spec 决策 #12 + 验收标准措辞修正对齐。185 affected passed 0 回归。Commits: `2de50e3`（DEFECT-1）+ `e763e9e`（DEFECT-2）+ `52cc9f3`（step 4）。详见 [release note](../releases/2026-07-15-in-session-defects-and-step4.md)。
+
 ## [2026-07-14] in-session v5 §8 step 2b —— 入口切 skill + list inputs_schema + doctor skill_install + 删 start/cc_hooks/command + nudge hook
 
 实施 SPEC v5 §8 step 2b 全 7 项：in-session 入口统一切到 orca skill（三步指导：list→抽 inputs→<wf>+自调 next），删旧 command/start/cc_hooks 入口，nudge hook 提醒主 session 推进（**绝不自动推进**，B 路径铁律）。① 建 orca skill（CI 守门：三步指导 + 禁业务关键词 + 禁 teams 命令）。② `orca list` 返 `{workflows:[{name,description,inputs_schema}]}`（无 has_setup，无 describe）。③ doctor 加 skill_install 硬检查（A6）+ hook 心跳可选 + `hard` 字段定 ok。④ 禁用 orca.ts transform dispatch（early return，文件不整删——idle hook 保为 nudge 载体）。⑤ 删 4 个 command 模板。⑥ 删 start + cc_hooks（A 路径退场）。⑦ nudge（A5 修正入本步）：opencode idle hook 改提醒模式（listActiveRuns→节流→promptAsync 注入，不 spawn next）；CC 新 Stop hook（cc_nudge.sh，零反引号 decision:block）+ `teams install --target cc` 合并 settings.json。install 重构四前端（cc/opencode/cac/nga/all）装所有随包 skill，平台常量抽 skill_cmds 单一源（DRY/OCP）。208 affected passed 0 回归；code-reviewer 两轮（2 BLOCKER + 关键 MAJOR）全闭环。Commits: `e2bd989`（1-6）+ `4b90508`（7 nudge）。详见 [release note](../releases/2026-07-14-in-session-v5-step2b.md)。
