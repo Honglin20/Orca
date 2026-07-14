@@ -79,4 +79,4 @@
 
 ## Commit
 
-- `orca in-session v3 step 1` —— 见 `git log`（本 release note 对应的 commit）。
+- `d14cde5` —— `feat(in-session): v3 §8 step 1 —— orca 接口打包 + 14 命令归宿 + teams 变量化 + marker 精简`（branch `in-session-unified-backend`）。
