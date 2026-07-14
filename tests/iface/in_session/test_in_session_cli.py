@@ -604,7 +604,8 @@ def test_status_no_run_id_lists_runs_dir(cwd_tmp, wf_path):
     assert result.exit_code == 0
     # 输出含 tape 文件名（run_id stem）
     assert ".jsonl" not in result.output  # 只显示 stem
-    assert "用 `orca status <run_id>`" in result.output
+    # 提示文案统一用 --run-id 形态（spec §2.1 / DEFECT-2：SKILL.md/spec/CLI 三处一致）。
+    assert "用 `orca status --run-id <run_id>`" in result.output
 
 
 def test_status_with_run_id_shows_progress(cwd_tmp, wf_path):
@@ -617,6 +618,80 @@ def test_status_with_run_id_shows_progress(cwd_tmp, wf_path):
     assert "status:" in result.output
     assert "running" in result.output
     assert "node_status:" in result.output
+
+
+def test_status_run_id_option_mirrors_positional(cwd_tmp, wf_path):
+    """DEFECT-2：``status --run-id <id>`` 与位置参数 ``status <id>`` 等价（spec §2.1）。
+
+    SKILL.md / spec §2.1 都写 ``--run-id``；旧 CLI 只接位置参数 → 主 session 照文档跑报错。
+    现在两种形态都接受，输出一致。
+    """
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id = boot["run_id"]
+
+    positional = runner.invoke(app, ["status", run_id])
+    option = runner.invoke(app, ["status", "--run-id", run_id])
+    assert positional.exit_code == 0, positional.output
+    assert option.exit_code == 0, option.output
+    # 输出一致（同一 run 同一时刻 replay_state 相同）
+    assert "running" in option.output
+    assert "node_status:" in option.output
+    assert positional.output == option.output
+
+
+def test_status_run_id_option_with_json_flag(cwd_tmp, wf_path):
+    """DEFECT-2：``status --run-id <id> --json`` 走 JSON 出口（spec §2.3 单 run 详情契约）。"""
+    import json as _json
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id = boot["run_id"]
+
+    result = runner.invoke(app, ["status", "--run-id", run_id, "--json"])
+    assert result.exit_code == 0, result.output
+    payload = _json.loads(result.output.splitlines()[-1])
+    assert payload["run_id"] == run_id
+    assert payload["status"] == "running"
+
+
+def test_status_positional_and_option_same_value_ok(cwd_tmp, wf_path):
+    """DEFECT-2：位置参数与 --run-id 同传且**同值** → 视作一次（容错；用户复制粘贴常见）。"""
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id = boot["run_id"]
+    result = runner.invoke(app, ["status", run_id, "--run-id", run_id])
+    assert result.exit_code == 0, result.output
+    assert "running" in result.output
+
+
+def test_status_positional_and_option_conflict_fails_loud(cwd_tmp, wf_path):
+    """DEFECT-2：位置参数与 --run-id 同传且**不同值** → fail loud（BadParameter，铁律 12）。
+
+    不静默选其中一个——让用户看到两条路冲突，明确报错。
+    """
+    runner = CliRunner()
+    _bootstrap(runner, wf_path)
+    result = runner.invoke(app, ["status", "rid-a", "--run-id", "rid-b"])
+    assert result.exit_code != 0
+    # BadParameter 提示含两个值（让用户看到冲突来源）
+    assert "rid-a" in result.output
+    assert "rid-b" in result.output
+
+
+def test_status_run_id_option_nonexistent_fails_loud(cwd_tmp, wf_path):
+    """DEFECT-2 review MINOR#2：``--run-id <不存在>`` 走「无 tape」错误分支（与位置参数等价）。
+
+    锁住「双形态在错误路径也等价」——防归一逻辑（rid = ...）在错误分支意外分叉。
+    """
+    runner = CliRunner()
+    _bootstrap(runner, wf_path)  # 建 runs/ 但不创建 ghost-run 的 tape
+
+    positional = runner.invoke(app, ["status", "ghost-run"])
+    option = runner.invoke(app, ["status", "--run-id", "ghost-run"])
+    assert positional.exit_code == 1, "位置参数形态：无 tape 应 exit 1"
+    assert option.exit_code == 1, "--run-id 形态：无 tape 应 exit 1（与位置参数等价）"
+    assert "ghost-run" in positional.output
+    assert "ghost-run" in option.output
 
 
 def test_next_no_marker_returns_no_marker_reason(cwd_tmp, wf_path):

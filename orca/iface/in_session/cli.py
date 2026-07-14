@@ -9,7 +9,8 @@ v3 §2 接口定型（7 命令，删 ``in-session`` 子命令层）：
   - ``orca <wf> --inputs '{...}'`` —— bootstrap 语法糖：接 wf 名（或 yaml 路径）位置参数，
     返 entry prompt + 驱动协议。**重复 bootstrap 同 wf → fail loud**（§7.3 m12，防孤儿）。
   - ``orca next --run-id <id> [--output '<产出>']`` —— 推进一步（主 session 逐步自调）。
-  - ``orca status [<run_id>]`` —— 读 tape replay_state 报进度。
+  - ``orca status [--run-id <id>]`` —— 读 tape replay_state 报进度（spec §2.1：``--run-id``
+    形态与 ``next`` 统一；位置参数 ``[<run_id>]`` 兼容旧调用）。
   - ``orca stop <run_id>`` —— 清 marker + per-call flock emit ``workflow_cancelled``。
   - ``orca open [<run_id>]`` —— 打开 web 监控（默认当前活跃 run，复用 web attach）。
   - ``orca doctor`` —— 自检（skill 落点 + CLI imports；hook 心跳可选）。
@@ -696,16 +697,34 @@ async def _next_in_critical_section(
 
 @app.command(name="status")
 def status(
-    run_id: str = typer.Argument(None, help="run id（省略则列 runs/ 下全部 run tape）"),
+    run_id: str = typer.Argument(
+        None, help="run id（位置参数，省略则列 runs/ 下全部 run tape；与 --run-id 二选一）",
+    ),
+    run_id_opt: str = typer.Option(
+        None, "--run-id",
+        help="run id（spec §2.1 与 next 统一的 --run-id 形态；与位置参数二选一）",
+    ),
     json_output: bool = typer.Option(
         False, "--json",
         help="输出 JSON（plugin messages.transform 入口用，SPEC §2.6.2 改写契约）",
     ),
 ) -> None:
-    """查看 in-session run 的 workflow 进度（读 tape replay_state）。"""
+    """查看 in-session run 的 workflow 进度（读 tape replay_state）。
+
+    ``run_id`` 两种传法都接受（spec §2.1 统一 ``--run-id`` 形态，位置参数 ``[<run_id>]``
+    保留兼容旧调用 / 主 session 既有测试）：``orca status --run-id <id>`` 或 ``orca status <id>``。
+    两者同传且值不一致 → fail loud（BadParameter）。均省略 → 列全部活跃 run。
+    """
     from orca.events.replay import replay_state
 
-    if run_id is None:
+    # --run-id 与位置参数二选一（同传且不同值 → fail loud；同传同值 → 视作一次）。
+    if run_id is not None and run_id_opt is not None and run_id != run_id_opt:
+        raise typer.BadParameter(
+            f"位置参数 run_id={run_id!r} 与 --run-id={run_id_opt!r} 不一致，请二选一"
+        )
+    rid = run_id if run_id is not None else run_id_opt
+
+    if rid is None:
         runs_dir = Path("runs")
         if not runs_dir.exists():
             out = {"ok": False, "reason": "no runs/ directory"}
@@ -722,21 +741,21 @@ def status(
             return
         for tp in tapes:
             typer.echo(f"- {tp.stem}")
-        typer.echo("\n用 `orca status <run_id>` 看详情。")
+        typer.echo("\n用 `orca status --run-id <run_id>` 看详情。")
         return
 
-    tape_path = _default_tape_path(run_id)
+    tape_path = _default_tape_path(rid)
     if not tape_path.exists():
-        typer.echo(typer.style(f"run {run_id!r} 无 tape", fg=typer.colors.RED))
+        typer.echo(typer.style(f"run {rid!r} 无 tape", fg=typer.colors.RED))
         raise typer.Exit(1)
-    state = replay_state(Tape(tape_path, run_id=run_id))
+    state = replay_state(Tape(tape_path, run_id=rid))
     done = sum(1 for s in state.node_status.values() if s == "done")
     progress = f"{done}/{len(state.node_status)}"
 
     if json_output:
         # SPEC §2.6.2 plugin 改写契约：顶层字段供 plugin rewriteText 提取。
         typer.echo(json.dumps({
-            "run_id": run_id,
+            "run_id": rid,
             "status": state.status,
             "current_node": state.current_node,
             "node_status": dict(state.node_status),
@@ -744,7 +763,7 @@ def status(
         }, ensure_ascii=False))
         return
 
-    typer.echo(f"run {run_id}")
+    typer.echo(f"run {rid}")
     typer.echo(f"  status:      {state.status}")
     typer.echo(f"  current_node: {state.current_node}")
     typer.echo(f"  node_status: {dict(state.node_status)}")
