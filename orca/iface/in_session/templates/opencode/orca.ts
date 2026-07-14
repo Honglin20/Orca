@@ -27,13 +27,6 @@
 // 的 MARKER_REGEX 字面同步。行首/行尾锚定 + 子命令名 \w+ + args 非贪婪 [^>\n]*?。
 const MARKER_REGEX = /^<!--\s*orca:cmd\s+(\w+)(?:\s+([^>\n]*?))?\s*-->$/
 
-// opencode dev server base URL（REST 调用用，Bug F）。
-// 实证：opencode plugin ctx 暴露 `serverUrl`（形如 "http://127.0.0.1:<port>"）。
-// 兜底环境变量；若两者皆无 → ctx.serverUrl 缺失时 event hook 内显式 warn + return。
-const SERVER_BASE_URL_FALLBACK: string =
-  (typeof process !== "undefined" && process.env?.OPENCODE_SERVER_URL) ||
-  ""   // 空串 = 无兜底（运行时必须由 ctx.serverUrl 提供）
-
 // SPEC §2.6.1 一次性消费：替换文本不得含本字面。
 const MARKER_LITERAL = "<!--orca:cmd"
 
@@ -42,7 +35,7 @@ const MARKER_LITERAL = "<!--orca:cmd"
 // 写心跳文件，doctor 读取作证。开关 = 环境变量 ``ORCA_DIAGNOSE=1``；未设/0 = 关（零 I/O，
 // 生产态）。plugin 加载时读一次缓存，hook 内只查布尔值。doctor 也读同 env 报告状态。
 // 用途：判定 NGA fork 是否接线 experimental transform —— 定论后 unset 即零开销。
-import { mkdirSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
 
 const DIAGNOSE: boolean =
   (typeof process !== "undefined" && process.env?.ORCA_DIAGNOSE === "1") || false
@@ -93,7 +86,48 @@ function writeAdvanceHeartbeat(sessionID: string): void {
   })
 }
 
-// in-flight mutex（F5 闭环）：防 await promptAsync 期间下一 idle 重入并发 spawn 两 CLI 撞 flock。
+// ── nudge（v5 §4.4 / step 2b(7)）：idle 时提醒主 session 调 next，**绝不自动推进** ──
+// B 路径铁律：主 session 自调 ``orca next``；idle 钩子**不**调 next（那退化成 A 路径自动推进）。
+// marker 文件名固定 ``runs/orca-<run_id>.json``（v3 §7.2），扫该目录取活跃 run——不依赖
+// readMarker（它按 sessionID 查，sessionID≠run_id 已失效，step 4 删）。
+const NUDGE_FILE = "runs/.orca-nudge.json"
+const NUDGE_COOLDOWN_SEC = 60  // 全局 60s 节流（进程级单时间戳，跨 session 共享；防 idle 频繁触发刷屏）
+
+// 扫活跃 run（marker 存在 ≡ run 活跃；终态时 CLI 清 marker）。返 [{run_id, model}]。
+function listActiveRuns(): { run_id: string; model?: string }[] {
+  try {
+    const out: { run_id: string; model?: string }[] = []
+    for (const name of readdirSync("runs")) {
+      if (!name.startsWith("orca-") || !name.endsWith(".json")) continue
+      try {
+        const m = JSON.parse(readFileSync(`runs/${name}`, "utf-8")) as Marker
+        if (m && typeof m.run_id === "string") out.push({ run_id: m.run_id, model: m.model })
+      } catch { /* 单个 marker 坏 → 跳过（不阻断 nudge） */ }
+    }
+    return out
+  } catch {
+    return []  // runs/ 不存在 / 无权读 → 无活跃 run
+  }
+}
+
+// nudge 节流：距上次成功 nudge > COOLDOWN 才允许。**不**在此写时间戳——调用方成功注入后
+// 调 ``markNudged`` 写，注入失败不计入节流（下轮 idle 可重试）。
+function nudgeAllowed(): boolean {
+  try {
+    if (!existsSync(NUDGE_FILE)) return true
+    const data = JSON.parse(readFileSync(NUDGE_FILE, "utf-8")) as { last_nudged_at?: number }
+    const last = typeof data?.last_nudged_at === "number" ? data.last_nudged_at : 0
+    return (nowSec() - last) >= NUDGE_COOLDOWN_SEC
+  } catch {
+    return true  // 节流文件坏 → fail-open（宁多提醒不漏提醒）
+  }
+}
+
+function markNudged(): void {
+  writeHeartbeat(NUDGE_FILE, { last_nudged_at: nowSec() })
+}
+
+// in-flight mutex（F5 闭环）：防 await promptAsync 期间下一 idle 重入。
 const injecting: Set<string> = new Set()
 
 interface Marker {
@@ -170,21 +204,16 @@ function spawnTopLevelCli(args: string[]): CliReply | null {
   return { ok: true }
 }
 
-async function readMarker(sessionID: string): Promise<Marker | null> {
-  // marker 文件名 = runs/orca-<owner>.json；owner=sessionID for opencode（§5）。
-  const path = `runs/orca-${sessionID}.json`
-  try {
-    const text = await Bun.file(path).text()
-    return JSON.parse(text) as Marker
-  } catch {
-    return null
-  }
-}
+// readMarker（按 sessionID 查 runs/orca-<sessionID>.json）已删：v3 marker 文件名改
+// orca-<run_id>.json（sessionID≠run_id），本函数本就失效；idle hook 改 nudge 后（step
+// 2b(7)）用 listActiveRuns 扫目录，本函数再无调用方。step 4 删 transform 段时其余
+// 死代码（extractTaskOutput / spawnCli / buildCliArgs 等）一并清。
 
 // 从最后 assistant message 的 ToolPart(tool=task, state.status=completed).state.output
 // 提取（D-v7-4，§2.5 spec-review r2 F10 闭环）。剥 task_id: 首行 + 解 <task_result> 包装。
 // 守门：此处的「task output 提取」是宿主侧 payload 扁平化（SPEC §2.5 划为宿主侧职责），
 // 不是 Orca 业务逻辑（合规计数 / 状态机 / 路由判断）。
+// 【step 4 删】idle hook 改 nudge 后本函数无调用方（仅历史 transform/REST 推进用）。
 function extractTaskOutput(parts: any[]): string | null {
   for (let i = parts.length - 1; i >= 0; i--) {
     const p = parts[i]
@@ -305,11 +334,9 @@ function extractModel(messages: any[], userMsgIdx: number): string | null {
 
 export const OrcaPlugin = async (ctx: any) => {
   // client 从 ctx.client 取（spike `/tmp/orca-cmd` 实证；`@opencode/core/client` npm 不存在）。
+  // nudge 用 client.session.promptAsync 注入提醒（v5 §4.4）；不再 REST fetch 消息（旧推进
+  // 路径已删），故 ctx.serverUrl / SERVER_BASE_URL_FALLBACK 不再需要。
   const client = ctx.client
-  // server base URL（Bug F 闭环）：REST 拉消息绕过 SDK 的 message() 单条 API。
-  // ctx.serverUrl 由 opencode runtime 注入；env 兜底；两者皆无 → 空串，event hook 内
-  // 显式 warn + return（不连不存在的端口）。
-  const serverBaseUrl: string = ctx?.serverUrl ?? SERVER_BASE_URL_FALLBACK
 
   return {
     id: "orca",
@@ -396,11 +423,18 @@ export const OrcaPlugin = async (ctx: any) => {
       return input
     },
 
-    // 驱动钩子（§2.2 / §2.5 / §5）：session.idle 时推进 workflow。
+    // nudge 钩子（v5 §4.4 / step 2b(7)）：``session.idle`` 时提醒主 session 调 next。
+    //
+    // **绝不推进**（B 路径铁律）：idle 钩子**不**调 ``orca next``（那退化成 A 路径自动推进）。
+    // 判定**只看 marker 存在**（不用 tape 超时，会误报）：idle ≈ 主 session 空闲（子代理不在
+    // 工作——否则 session 不 idle）+ 有活跃 run（marker 存在）→ 提醒调 next。
+    //
+    // **已知限制**：v3 marker 文件名 = ``orca-<run_id>.json``（去 sessionID），nudge 扫所有
+    // 活跃 run 后注入**当前 idle 的 session**。多 session 共存时，非 Orca 主 session 空闲
+    // 也会收到提醒（跨渗）。单 workspace 单 session 约定下无影响；多 session 由后续 spec 收。
     //
     // **签名（Bug B 闭环，e2e `/tmp/orca-f4` 实证）**：opencode 1.14.22 runtime 实调外层
-    // 包一层 `{event}` —— `input.event.type` / `input.event.properties`。**不**是裸
-    // `event.type`（shipped 单参直访形态，runtime 下 event.type 永远 undefined）。
+    // 包一层 `{event}` —— `input.event.type` / `input.event.properties`。
     // 兼容解构与直传：`const event = input?.event ?? input`。
     event: async (input: any) => {
       const event: any = input?.event ?? input
@@ -409,90 +443,42 @@ export const OrcaPlugin = async (ctx: any) => {
       const sessionID = event.properties?.sessionID
       if (!sessionID) return
 
-      // 诊断心跳（session.idle 触达 = 推进钩子已接线；与「是否有活跃 run」无关）。
-      // gated by ORCA_DIAGNOSE。marker 检查前写，确保非激活 session 也有心跳。
+      // 诊断心跳（session.idle 触达 = idle 钩子已接线；与「是否 nudge」无关）。
       idleCount += 1
       if (DIAGNOSE) writeAdvanceHeartbeat(sessionID)
 
-      // 【patch 2026-07-09】model-driven advance：推进改由主 session 模型自己调
-      // `orca in-session next --output <产出>` 驱动（CLI 在每个节点 prompt 后附「驱动协议」）。
-      // idle 钩子不再 REST 抽产出 / 不再 spawn next / 不再 promptAsync —— 旧 REST 路径依赖
-      // opencode dev server，断链即 replay 死循环。下方 marker/REST/next/promptAsync 代码
-      // 已废弃（DEAD），保留待「整理」阶段一并删除。
-      return
-
-      // 子 session 过滤（D-v7-5）+ 主 session 绑定：marker 存在 = 本 session 有活跃 run。
-      const marker = await readMarker(sessionID)
-      if (!marker) return   // 非激活 session → passthrough
-
-      // in-flight mutex（F5）
+      // nudge：扫活跃 run → 节流 → 注入提醒（不 spawn next）。
       if (injecting.has(sessionID)) return
+      const active = listActiveRuns()
+      if (active.length === 0) return        // 无活跃 run → 无需 nudge
+      if (!nudgeAllowed()) return            // 节流窗口内 → 跳过（防刷屏）
+
       injecting.add(sessionID)
       try {
-        // Bug F 闭环：SDK 的 `client.session.message({id})` 是 get-one-message-by-id
-        // （要 messageID），把 sessionID 当字面占位符 → 返 `invalid_format prefix:"ses"`。
-        // **不是** list-messages。e2e 实证可用形态 = REST `GET /session/<sid>/message`
-        // （curl HTTP 200 + 完整消息数组）。此处属传输层（非 Orca 业务逻辑），守门允许，
-        // 但绕过 SDK 的原因在此注释说清。
-        if (!serverBaseUrl) {
-          // ctx.serverUrl 未注入 + env 兜底也为空（老版 opencode / 配置漏）：
-          // 显式 warn + return（不连不存在的端口）。下一轮 idle 重试。
-          console.warn("[orca] serverBaseUrl 为空：ctx.serverUrl 未注入且 OPENCODE_SERVER_URL env 未设；跳过本次 idle 推进")
-          return
-        }
-        let arr: any[] = []
-        try {
-          const resp = await fetch(
-            `${serverBaseUrl}/session/${encodeURIComponent(sessionID)}/message`,
-            { headers: { "Accept": "application/json" } },
-          )
-          if (!resp.ok) {
-            console.error(`[orca] REST /session/<sid>/message HTTP ${resp.status}: ${await resp.text().catch(() => "")}`)
-          } else {
-            const data: any = await resp.json()
-            arr = Array.isArray(data) ? data : (data?.data ?? [])
-          }
-        } catch (e) {
-          // 失败语义（非 fail loud）：transport 层错误打 console.error 日志；arr 留空 →
-          // extractTaskOutput null → next 无 --output → CLI branch 4 idempotent-replay
-          // → 合规计数器 +1（D-v7-6）→ 连续 3 次后 CLI emit workflow_failed 终态。
-          // 即真正的失败信号**延迟**经合规计数器 surfaced，非即时用户可见。
-          console.error("[orca] fetch /session/<sid>/message failed:", e)
-        }
-
-        let output: string | null = null
-        for (let i = arr.length - 1; i >= 0; i--) {
-          const m = arr[i]
-          if (m?.info?.role === "assistant" && Array.isArray(m.parts)) {
-            output = extractTaskOutput(m.parts)
-            if (output) break
-          }
-        }
-
-        // spawn next（哑传输；--output 省略 → CLI branch 4 + 合规计数，B2）
-        const args = ["next", "--tape", marker.tape_path, "--run-id", marker.run_id]
-        if (output) args.push("--output", output)
-        const reply = spawnCli(args)
-        if (!reply) return
-
-        if (reply.done) {
-          // 终态：不再注入（CLI 已清 marker）
-          return
-        }
-        if (reply.prompt) {
-          const [providerID, modelID] = (marker.model ?? "deepseek/deepseek-v4-flash").split("/")
-          await client.session.promptAsync({
-            path: { id: sessionID },
-            body: {
-              parts: [{ type: "text", text: reply.prompt }],
-              model: { providerID, modelID },
-            },
-          })
-          // 诊断：成功注入下一节点 prompt = idle 真推进了一个 run（区别于「仅触发」）。
-          advanceCount += 1
-          lastAdvanceRunId = marker.run_id
-          if (DIAGNOSE) writeAdvanceHeartbeat(sessionID)
-        }
+        const ids = active.map(r => r.run_id)
+        const reminder =
+          `【Orca nudge】你还有活跃的 Orca run：${ids.join(", ")}。\n` +
+          "若上一个节点的子代理已完成，请把它的产出作为 --output 调下面命令推进；" +
+          "若 workflow 已结束或要中止，先 `orca stop <run_id>`。\n" +
+          "（这是提醒，Orca 不会自动推进。）\n" +
+          `  orca next --run-id <run_id> --output '<子代理产出>'`
+        // model 解析：要求 "provider/name" 形态；marker.model 缺/无斜杠/空 → 回退默认
+        // （防空 providerID/modelID 产非法 model 对象）。
+        const rawModel = active[0].model
+        const modelStr = typeof rawModel === "string" && rawModel.includes("/")
+          ? rawModel : "deepseek/deepseek-v4-flash"
+        const [providerID, modelID] = modelStr.split("/")
+        await client.session.promptAsync({
+          path: { id: sessionID },
+          body: {
+            parts: [{ type: "text", text: reminder }],
+            model: { providerID, modelID },
+          },
+        })
+        markNudged()  // 成功注入才计入节流（失败下轮重试）
+      } catch (e) {
+        // 注入失败（client API 错 / session 不存在）→ console.error，不计节流，下轮 idle 重试。
+        console.error("[orca] nudge promptAsync failed:", e)
       } finally {
         injecting.delete(sessionID)
       }

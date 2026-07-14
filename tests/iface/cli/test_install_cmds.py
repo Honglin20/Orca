@@ -180,15 +180,100 @@ def test_install_project_scope_relative_declaration(
 
 
 def test_install_cc_only_skill(isolated_home: Path):
-    """cc target → 装随包 skill 到 .claude/skills/（含 orca 入口 skill）。"""
+    """cc target → 装随包 skill + nudge Stop-hook（v5 §4.4 step 2b(7)）。"""
     result = runner.invoke(app, ["--target", "cc", "--scope", "user"])
     assert result.exit_code == 0, result.output
     cc = isolated_home / ".claude"
     assert (cc / "skills" / install_cmds.SKILL_NAME / "SKILL.md").is_file()
     assert (cc / "skills" / "orca" / "SKILL.md").is_file()
+    # cc nudge：脚本 + settings.json Stop 声明
+    assert (cc / "hooks" / "orca-nudge.sh").is_file()
+    cfg = json.loads((cc / "settings.json").read_text())
+    stop = cfg["hooks"]["Stop"]
+    cmds = [h["command"] for entry in stop for h in entry["hooks"]]
+    assert any("orca-nudge.sh" in c for c in cmds)
     # cc/cac/nga 不装 plugin / command（那是 opencode 专属）
     assert not (cc / "plugins").exists()
     assert not (cc / "command").exists()
+
+
+def test_install_cc_nudge_script_never_calls_next(isolated_home: Path):
+    """v5 §4.4 铁律：nudge 脚本只 block 提醒，**绝不**执行 ``orca next``（防退化 A 路径）。
+
+    reminder 文案里提到 ``orca next`` 是允许的（教模型去调）；脚本自身不得 spawn 或ca CLI。
+    守门：脚本无 orca 子进程调用（``$(orca`` / 反引号 / 行首裸 ``orca`` 命令均不得有）。
+    """
+    runner.invoke(app, ["--target", "cc", "--scope", "user"])
+    script = (isolated_home / ".claude" / "hooks" / "orca-nudge.sh").read_text()
+    # nudge 机制：emit decision:block
+    assert 'decision:"block"' in script
+    # 提醒文案教模型调 next（允许出现，纯文本）
+    assert "orca next" in script
+    # 守门：脚本不得 spawn 或ca CLI。REASON 是双引号字符串——**禁用反引号**（双引号内
+    # 反引号 = bash 命令替换，会误执行 ``orca next`` 退化 A 路径）。脚本全篇零反引号。
+    assert "`" not in script, "nudge 脚本禁用反引号（双引号内 = 命令替换，可能误执行 orca）"
+    assert "$(orca" not in script, "nudge 脚本不得 $(orca ...) 调 CLI"
+    # 行首裸 ``orca`` 命令（执行 next/stop 等子命令）也禁
+    exec_lines = [ln for ln in script.splitlines()
+                  if ln.strip().startswith("orca ") and not ln.strip().startswith("#")]
+    assert exec_lines == [], f"nudge 脚本不得直接执行 orca 命令: {exec_lines}"
+
+
+def test_install_cc_nudge_idempotent_no_duplicate(isolated_home: Path):
+    """再跑：settings.json Stop 不重复加 orca nudge 声明。"""
+    for _ in range(2):
+        r = runner.invoke(app, ["--target", "cc", "--scope", "user"])
+        assert r.exit_code == 0, r.output
+    cfg = json.loads((isolated_home / ".claude" / "settings.json").read_text())
+    stop = cfg["hooks"]["Stop"]
+    orca_entries = [
+        entry for entry in stop
+        if isinstance(entry, dict)
+        and any("orca-nudge" in str(h.get("command", "")) for h in entry.get("hooks", []))
+    ]
+    assert len(orca_entries) == 1, f"orca nudge Stop 声明重复: {orca_entries}"
+
+
+def test_install_cc_nudge_preserves_existing_settings(isolated_home: Path):
+    """合并 settings.json：保已有 hooks / 其他键；只追加 orca nudge Stop。"""
+    cc = isolated_home / ".claude"
+    cc.mkdir(parents=True)
+    (cc / "settings.json").write_text(json.dumps({
+        "permissions": {"allow": ["Bash(*)"]},
+        "hooks": {
+            "Stop": [{"hooks": [{"type": "command", "command": "echo user-hook"}]}],
+            "PostToolUse": [{"matcher": "Write", "hooks": [{"type": "command", "command": "echo"}]}],
+        },
+    }))
+    result = runner.invoke(app, ["--target", "cc", "--scope", "user"])
+    assert result.exit_code == 0, result.output
+    cfg = json.loads((cc / "settings.json").read_text())
+    # 已有键保留
+    assert cfg["permissions"]["allow"] == ["Bash(*)"]
+    assert cfg["hooks"]["PostToolUse"][0]["matcher"] == "Write"
+    # 用户原有 Stop 保留 + orca nudge 追加
+    stop_cmds = [h["command"] for entry in cfg["hooks"]["Stop"] for h in entry["hooks"]]
+    assert "echo user-hook" in stop_cmds
+    assert any("orca-nudge.sh" in c for c in stop_cmds)
+
+
+def test_install_cc_nudge_recovers_malformed_settings(isolated_home: Path):
+    """settings.json 的 hooks / hooks.Stop 非法形态（非 object / 非 array）→ warn + 重置 +
+    加入 orca nudge（不静默吞，fail loud；与 _install_opencode 同款 recovery 对齐）。"""
+    cc = isolated_home / ".claude"
+    cc.mkdir(parents=True)
+    (cc / "settings.json").write_text(json.dumps({
+        "hooks": "not-an-object",   # 非法：hooks 应是 object
+    }))
+    result = runner.invoke(app, ["--target", "cc", "--scope", "user"])
+    assert result.exit_code == 0, result.output
+    # 非法形态 → warn 到 stderr（CliRunner mix 进 output）
+    assert "非 object" in result.output or "重置" in result.output
+    cfg = json.loads((cc / "settings.json").read_text())
+    # hooks 被重置为 object + orca nudge Stop 加入
+    assert isinstance(cfg["hooks"], dict)
+    stop_cmds = [h["command"] for entry in cfg["hooks"]["Stop"] for h in entry["hooks"]]
+    assert any("orca-nudge.sh" in c for c in stop_cmds)
 
 
 def test_install_cac_and_nga_targets(isolated_home: Path):

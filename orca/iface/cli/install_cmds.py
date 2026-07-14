@@ -133,6 +133,11 @@ def _bundled_skill_sources() -> list[Path]:
     return sorted(p for p in skills_dir.iterdir() if p.is_dir() and (p / "SKILL.md").is_file())
 
 
+def _cc_nudge_script_src() -> Path:
+    """随包 CC nudge Stop-hook 脚本（v5 §4.4 / step 2b(7)，提醒不推进）。"""
+    return Path(str(files("orca.iface.in_session.templates"))) / "cc_nudge.sh"
+
+
 # ── 落地原语：原子写（带 backup）+ JSON 合并 ──────────────────────────────────
 
 
@@ -293,6 +298,63 @@ def _install_opencode(hr: HostRoot) -> dict[str, Any]:
     return written
 
 
+def _install_cc_nudge(hr: HostRoot) -> dict[str, Path]:
+    """CC（Claude Code）nudge Stop-hook 落地（v5 §4.4 / step 2b(7)）。
+
+    - 拷 ``cc_nudge.sh`` → ``<root>/hooks/orca-nudge.sh``。
+    - 合并 ``<root>/settings.json`` 的 ``hooks.Stop``：加一条 ``command: bash <abs>/orca-nudge.sh``
+      （去重，保已有 hooks / 其他键）。
+
+    nudge = 提醒（``decision:block`` 注入「请调 orca next」），**绝不调 next**（B 路径铁律）。
+    脚本自含 60s 节流 + marker 扫描；settings.json 只声明引用，零业务逻辑（守门 D-v7-1）。
+    """
+    written: dict[str, Path] = {}
+    script_dst = hr.root / "hooks" / "orca-nudge.sh"
+    _atomic_write_with_backup(script_dst, _cc_nudge_script_src().read_text(encoding="utf-8"))
+    # 可执行位（best-effort：Windows FS 无效但无害；Linux/Mac 生效）。
+    try:
+        script_dst.chmod(0o755)
+    except OSError:
+        pass
+    written["nudge_script"] = script_dst
+
+    settings_path = hr.root / "settings.json"
+    # 命令用绝对路径（CC 在 cwd 跑，绝对路径不依赖 cwd；settings.json 全局/项目都适用）。
+    cmd = f"bash {script_dst.expanduser().resolve()}"
+
+    def _add_stop_hook(data: dict) -> None:
+        hooks = data.setdefault("hooks", {})
+        if not isinstance(hooks, dict):
+            # 非法形态（用户手填非 object）→ warn + 重置（review 🟡#2 同款：不静默吞）。
+            typer.echo(
+                f'  ⚠ settings.json 的 "hooks" 非 object（原值：{hooks!r}），已重置为 {{}} '
+                f"并加入 orca nudge Stop 声明。请检查原配置。",
+                err=True,
+            )
+            hooks = {}
+            data["hooks"] = hooks
+        stop_list = hooks.setdefault("Stop", [])
+        if not isinstance(stop_list, list):
+            typer.echo(
+                f'  ⚠ settings.json 的 "hooks.Stop" 非 array（原值：{stop_list!r}），已重置为 []。',
+                err=True,
+            )
+            stop_list = []
+            hooks["Stop"] = stop_list
+        # 去重：任一 Stop entry 的 command 含 ``orca-nudge`` 即视为已声明。
+        already = any(
+            "orca-nudge" in str(entry.get("hooks", []))
+            for entry in stop_list
+            if isinstance(entry, dict)
+        )
+        if not already:
+            stop_list.append({"hooks": [{"type": "command", "command": cmd}]})
+
+    _merge_json_file(settings_path, _add_stop_hook)
+    written["settings.json"] = settings_path
+    return written
+
+
 # ── 命令 ──────────────────────────────────────────────────────────────────────
 
 
@@ -311,7 +373,8 @@ def install(
 
     \b
     - 四前端（cc/opencode/cac/nga）都装同一份随包 skill（含 orca 入口 skill）
-    - opencode 额外落 plugin + opencode.json 声明（plugin 惰性，step 4 整删）
+    - opencode 额外落 plugin + opencode.json 声明（plugin 含 idle nudge；transform 已禁用）
+    - cc 额外落 nudge Stop-hook + .claude/settings.json 声明（提醒主 session 调 next，不自动推进）
 
     \b
     幂等（重跑覆盖更新，内容相同跳过；JSON 配置读-改-写保已有键）。
@@ -345,10 +408,15 @@ def run_install(target: str, scope: str) -> list[str]:
                 written = _install_opencode(hr)
                 for comp, p in written.items():
                     typer.echo(f"  ✓ {comp}: {p}")
-            else:  # cc / cac / nga：只装 skill
+            else:  # cc / cac / nga：装 skill
                 dirs = _install_skill(hr.root)
                 for d in dirs:
                     typer.echo(f"  ✓ skill: {d}")
+                # cc 额外装 nudge Stop-hook（v5 §4.4 / step 2b(7)）。cac/nga 的 nudge 机制
+                # 取决于其前端真机（step 6 验证），本期只装 skill。
+                if hr.host == "cc":
+                    for comp, p in _install_cc_nudge(hr).items():
+                        typer.echo(f"  ✓ {comp}: {p}")
         except OSError as e:
             typer.echo(f"  ✗ 失败：{e}", err=True)
             failed.append(hr.host)

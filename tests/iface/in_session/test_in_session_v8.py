@@ -300,6 +300,40 @@ def test_doctor_report_describes_b_path(doctor_iso, monkeypatch):
     assert ".orca-probe-entry.json" in reply["report"]
 
 
+# ── v5 §4.4 / step 2b(7)：orca.ts idle nudge（提醒，绝不推进）───────────────────
+
+
+def test_orca_ts_idle_hook_is_nudge_no_advance():
+    """v5 §4.4：``session.idle`` hook 是 nudge（提醒主 session 调 next），**绝不 spawn next**。
+
+    B 路径铁律：hook 自动调 next = 退化 A 路径。idle hook 应只扫 marker + promptAsync 注入
+    提醒，不 spawnCli。提取 event hook 区段断言。
+    """
+    text = PLUGIN_TS.read_text(encoding="utf-8")
+    # 提取 event hook 区段（从 ``event: async`` 到其后第一个 `\n    },`）。
+    start = text.find("event: async")
+    assert start >= 0, "未找到 event hook"
+    end = text.find("\n    },", start)
+    assert end >= 0, "event hook 区段未闭合"
+    hook = text[start:end]
+    # nudge 机制存在
+    assert "listActiveRuns" in text, "缺 listActiveRuns（nudge 扫活跃 run 的 helper）"
+    assert "Orca nudge" in hook, "idle hook 缺 nudge 提醒文案"
+    assert "promptAsync" in hook, "idle hook 应用 promptAsync 注入提醒"
+    # 铁律：idle hook 不得 spawn next（不出现任何 spawn 路径调用——spawnCli /
+    # spawnTopLevelCli / Bun.spawnSync / Bun.spawn 任一都算退化 A 路径自动推进）
+    for spawn_pat in ("spawnCli", "spawnTopLevelCli", "Bun.spawn"):
+        assert spawn_pat not in hook, (
+            f"idle hook 不得 {spawn_pat}（B 路径：nudge 只提醒，绝不自动调 next）"
+        )
+    # transform 派发已禁用（early return）——确认 transform hook 仍存在但首条即 return input
+    t_start = text.find('"experimental.chat.messages.transform"')
+    assert t_start >= 0
+    # early return 在 transform hook 前 ~20 行内
+    assert "return input" in text[t_start:t_start + 1200], (
+        "transform hook 应 early-return 禁用 marker 派发（step 2b(4)）"
+    )
+
 
 # ── §2.6.2 改写语义（plugin TS 字段提取契约）────────────────────────────────
 
@@ -765,27 +799,6 @@ def test_event_hook_payload_unwrap_input_event_fallback_input():
     # 必须有 unwrap + 兜底直传
     assert re.search(r'const\s+event:\s*any\s*=\s*input\?\.\s*event\s*\?\?\s*input', text), (
         "event hook 必须含严格形态 `const event: any = input?.event ?? input`（兼容包装+直传）"
-    )
-
-
-def test_message_fetch_uses_rest_fetch_not_sdk_client_session_message():
-    """Bug F 签名契约：拉消息必须用 REST ``fetch(`/session/<sid>/message`)``。
-
-    e2e ``/tmp/orca-e2e-v8/idle-debug.log`` + ``client-debug.log`` 实证：SDK
-    ``client.session.message({id})`` 是 get-one-message-by-id（要 messageID），
-    把 sessionID 当字面占位符返 ``invalid_format prefix:"ses"``。**不是** list-messages。
-    spike patch `/tmp/orca-e2e-v8/orca.ts.patched-with-fixes` 实证可用形态 = REST。
-    """
-    text = PLUGIN_TS.read_text(encoding="utf-8")
-    code = _strip_ts_comments(text)
-    # 必须用 fetch( 拉消息
-    assert "await fetch(" in code, (
-        "拉 session message 必须用 REST `await fetch(`${base}/session/<sid>/message`)`"
-    )
-    # 守门：不得在代码（非注释）里调 client.session.message( 作 list 用途
-    assert "client.session.message(" not in code, (
-        "禁用 SDK client.session.message({id})（runtime 实证：那是 get-one-by-id，"
-        "把 sessionID 当字面占位符返 invalid_format 错）—— 用 REST fetch 替代"
     )
 
 
