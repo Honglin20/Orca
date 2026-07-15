@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-15] in-session v5 §8 step 5b —— daemon batch emit + in-session 错误信封统一（×2）
+
+daemon `next()` 逐条 emit → `emit_batch`（注释「反例 A 消除」原为假，SIGTERM 落批内留半截 tape → resume state_corrupt，铁律 12）；in-session 失败信封统一（daemon + cli，MCP 出 scope：8 tool 全用 phase-11 ErrorKind 轴）：抽 `_step_io` helper（`apply_step_result` 吸收 `_emits_to_event_datas` + `fail_in_session`），daemon `_fail` 的 isinstance 塌缩消除，改读 `exc.error_kind`。信封加 `error_kind` 字段（tape `data.kind` 不变，两者同值——B4/B7 字段名陷阱）。新建 `test_daemon.py`（InSessionDaemon 零覆盖补齐 5 测试：成功路径 / batch emit spy / 畸形 output→kind+error_kind / 反向无 `in_session_error` / 终态+非终态幂等）；拆分误并入 malformed 的 render_error 测试。SPEC §7.5 ×3→×2 + MCP 排除；§2.3 信封加 error_kind。348 单测 0 回归；code-reviewer 两轮 0 BLOCKER（Round 1 M1 经 git show 核验非回归 disputed + m1/m2 fixed；Round 2 m1/m2 fixed + m3 登记）。跨阶段 debt：tape `workflow_failed.data.kind` 是 ErrorKind/error_kind 两值集共享字段，登记 CURRENT。test-agent 真机 E2E 待跑。Commit: `<本 commit，SHA 见 git log>`。详见 [release note](../releases/2026-07-15-in-session-step5b-daemon-error-envelope.md)。
+
 ## [2026-07-15] in-session FU-1 —— orca stop/open 加 --run-id option（命令族统一，套 DEFECT-2 e763e9e）
 
 `stop`/`open` 都只有位置参数、缺 `--run-id`，但 SKILL.md + SPEC §2.1 教 `--run-id` → 主 session 照跑报 `No such option: --run-id`（test-agent 真机复现）。修：抽 `_merge_run_id` helper（status/stop/open 三处合流 DRY，防漂移）；stop 位置参数必填→可选 + None 守卫（保 missing fail loud exit 2）；open 加 option（None=活跃 run 默认）；status 既有内联合流替换为调 helper。125 单测 passed 0 回归（+15 FU-1）；code-reviewer 两轮 0 BLOCKER / 0 MAJOR。test-agent 真机 E2E 待跑。顺带回填 step 5a 文档 SHA 占位符为 `bce29f8`。Commit: `<本 commit，SHA 见 git log>`。详见 [release note](../releases/2026-07-15-in-session-fu1-stop-open-runid.md)。

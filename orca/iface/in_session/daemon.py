@@ -32,7 +32,8 @@ import requests
 
 from orca.events.bus import EventBus
 from orca.events.tape import Tape
-from orca.run.lifecycle import make_workflow_failed, now_monotonic
+from orca.iface.in_session._step_io import apply_step_result, fail_in_session
+from orca.run.lifecycle import now_monotonic
 from orca.run.step import InSessionError, advance_step
 
 if TYPE_CHECKING:
@@ -114,9 +115,11 @@ class InSessionDaemon:
         return {"ok": True}
 
     async def next(self) -> dict[str, Any]:
-        """推进：委托 advance_step(output=cached) 一次原子决策 → 逐条 emit → 清缓存。
+        """推进：委托 advance_step(output=cached) 一次原子决策 → emit_batch 落整批 → 清缓存。
 
         advance_step 内部三分支（bootstrap/advance/idempotent-replay），见 SPEC §2.1。
+        emit 经 ``apply_step_result`` 单次 write 原子化（v5 §8 step 5b：反旧逐条 emit——SIGTERM
+        落批内 N 与 N+1 之间会留半截 tape → resume state_corrupt；铁律 12）。
         """
         output = self._pending_output
         self._pending_output = None
@@ -126,30 +129,11 @@ class InSessionDaemon:
                 inputs=self.inputs, run_id=self.run_id,
                 elapsed=now_monotonic() - self._start_ts,
             )
-            for emit in result.emits:                   # 原子批量 emit（反例 A 消除）
-                await self.bus.emit(emit.type, emit.data, node=emit.node)
         except InSessionError as e:
-            return await self._fail(e)
+            return await fail_in_session(self.bus, e)
+        reply = await apply_step_result(self.bus, result)
         self._host_alive_ts = now_monotonic()
-        reply: dict[str, Any] = {"done": result.done}
-        if result.node:
-            reply["node"] = result.node
-        if result.prompt:
-            reply["prompt"] = result.prompt
-        if result.reason:
-            reply["reason"] = result.reason
         return reply
-
-    async def _fail(self, exc: Exception) -> dict[str, Any]:
-        """fail loud：落 ``workflow_failed`` 终态到 tape（单真相源），再返错误信封。"""
-        error_type = "in_session_error" if isinstance(exc, InSessionError) else "internal_error"
-        logger.exception("next 推进失败，emit workflow_failed (run=%s)", self.run_id)
-        try:
-            t, d = make_workflow_failed(error_type, str(exc))
-            await self.bus.emit(t, d)
-        except Exception:
-            logger.exception("emit workflow_failed 也失败（tape 可能已坏）")
-        return {"done": True, "reason": f"failed: {exc}"}
 
     # ── opencode 前端：SSE 订阅自驱动（Demo 5 验证形态）───────────────────
     def run_opencode(

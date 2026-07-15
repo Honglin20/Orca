@@ -261,11 +261,16 @@ def test_failure_output_schema_mismatch(cwd_tmp, wf_path):
     reply = json.loads(result.output.splitlines()[-1])
     assert reply["done"] is True
     assert "failed" in reply["reason"]
+    # v5 §8 step 5b：信封加 error_kind（与 tape data.kind 同值，字段名不同——B4/B7）
+    assert reply["error_kind"] == "output_schema_mismatch"
+    # 反向守门：信封不得出现塌缩值 "in_session_error"（旧 isinstance 分流已消除）
+    assert "in_session_error" not in json.dumps(reply)
 
     lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
     last = json.loads(lines[-1])
     assert last["type"] == "workflow_failed"
     assert last["data"]["kind"] == "output_schema_mismatch"
+    assert "in_session_error" not in json.dumps(last["data"])
 
 
 def test_failure_unsupported_node_kind(cwd_tmp):
@@ -280,6 +285,11 @@ def test_failure_unsupported_node_kind(cwd_tmp):
     runner = CliRunner()
     result = runner.invoke(app, ["bootstrap", str(p)])
     assert result.exit_code == 1
+    # v5 §8 step 5b：bootstrap 失败信封加 error_kind（unsupported_node_kind）+ 反向无 in_session_error
+    reply = json.loads(result.output.splitlines()[-1])
+    assert reply["done"] is True
+    assert reply["error_kind"] == "unsupported_node_kind"
+    assert "in_session_error" not in json.dumps(reply)
 
 
 def test_failure_output_schema_field_violation(cwd_tmp):
@@ -308,6 +318,9 @@ def test_failure_output_schema_field_violation(cwd_tmp):
     reply = json.loads(result.output.splitlines()[-1])
     assert reply["done"] is True
     assert "failed" in reply["reason"]
+    # v5 §8 step 5b：信封 error_kind + 反向无 in_session_error
+    assert reply["error_kind"] == "output_schema_mismatch"
+    assert "in_session_error" not in json.dumps(reply)
     lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
     last = json.loads(lines[-1])
     assert last["type"] == "workflow_failed"
@@ -374,16 +387,26 @@ def test_failure_output_schema_malformed(cwd_tmp):
     reply = json.loads(result.output.splitlines()[-1])
     assert reply["done"] is True
     assert "failed" in reply["reason"]
+    # v5 §8 step 5b：信封 error_kind + 反向无 in_session_error
+    assert reply["error_kind"] == "output_schema_mismatch"
+    assert "in_session_error" not in json.dumps(reply)
     lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
     last = json.loads(lines[-1])
     assert last["type"] == "workflow_failed"
     # 归类 output_schema_mismatch（消息含 output_schema；语义为 schema 畸形见 message）
     assert last["data"]["kind"] == "output_schema_mismatch"
+
+
+def test_failure_render_error_clears_marker(cwd_tmp):
     """下游 prompt 引用上游缺失字段（无 schema）→ 干净 workflow_failed(render_error) + 清 marker。
 
     2026-07-08 bug 闭环：此前 render 抛 ``ExecError``（非 InSessionError）逃逸 cli.py 的
     ``except InSessionError`` → 脏崩溃（无 workflow_failed、不清 marker、tape 悬挂、下次卡死）。
     现 ``_render_or_fail`` 把 ExecError 包成 InSessionError("渲染节点…") → 走既有干净路径。
+
+    v5 §8 step 5b：从此前误并入 ``test_failure_output_schema_malformed`` 函数体（裸字符串
+    表达式分隔）拆出为独立测试（code-reviewer Round 2 m1）——两者 yaml/run/断言皆独立，
+    合并会误导诊断方向。
     """
     # node b 引用 a.output.nope（a 无 schema，output 是自由文本，无 nope 字段）
     yaml_text = AGENT_WF_YAML.replace(
@@ -404,6 +427,9 @@ def test_failure_output_schema_malformed(cwd_tmp):
     reply = json.loads(result.output.splitlines()[-1])
     assert reply["done"] is True
     assert "failed" in reply["reason"]
+    # v5 §8 step 5b：信封 error_kind(render_error) + 反向无 in_session_error
+    assert reply["error_kind"] == "render_error"
+    assert "in_session_error" not in json.dumps(reply)
 
     # 干净终态：tape 末条 workflow_failed(render_error)
     lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
@@ -558,8 +584,11 @@ def test_classify_in_session_error_uses_explicit_kind():
     分类由 step.py 各 raise 处传 ``error_kind=ERR_*`` 显式携带；本测试守门「显式字段」契约：
     每个常量经 classifier 直返同名；缺省 → ``internal_error`` 兜底。
     raise 文案改动**不应**再触发本测试（旧子串匹配已移除）。
+
+    v5 §8 step 5b：``_classify_in_session_error`` 抽到 ``_step_io`` helper（daemon/cli 共享，
+    ``fail_in_session`` 内部调用）。import 直接从 helper。
     """
-    from orca.iface.in_session.cli import _classify_in_session_error
+    from orca.iface.in_session._step_io import _classify_in_session_error
     from orca.run.step import (
         ERR_OUTPUT_SCHEMA_MISMATCH, ERR_RENDER_ERROR, ERR_UNSUPPORTED_NODE_KIND,
         ERR_STATE_CORRUPT, ERR_INTERNAL_ERROR, InSessionError,

@@ -49,7 +49,7 @@ wf name 禁取 `list/next/status/stop/open/doctor` + teams 命令名（`run/serv
 | 命令 | 返回 |
 |---|---|
 | `orca <wf>` | `{run_id, prompt, prompt_file, done:false}` |
-| `orca next` | `{done:bool, prompt?, prompt_file?, reason?}` |
+| `orca next` | 成功 `{done:bool, prompt?, prompt_file?, reason?}`；失败 `{done:true, error_kind, reason:"failed: ..."}`（`error_kind` = `InSessionError.error_kind` taxonomy，step 5b）|
 | `orca status` | `{runs:[{run_id, node, status, last_next_at, elapsed}]}` 或单 run 详情 |
 | `orca list` | `{workflows:[{name, description, inputs_schema:[{name,type,description}]}]}`（**无 has_setup**，B3） |
 | `orca stop` | `{run_id, ok, done}` |
@@ -157,7 +157,7 @@ SKILL.md **必须含三步指导**（§4.2）+ **禁业务逻辑关键词**（`a
 - **删 `orca.ts` 的 transform 入口 + 死代码**（B5/B9），**保留 idle nudge hook**（§4.4，opencode nudge 载体，step 2b 已改提醒模式）；同 commit 删 `_constants.py` Py 侧 `MARKER_REGEX`/`MARKER_LITERAL`（transform 删后无用）+ `test_marker_regex`/`test_plugin_embeds_canonical_marker_regex`（B6）。
 - `cc_hooks.py`（A 推进死代码，删；CC nudge 用新 Stop hook 片段，§4.4）。
 - `daemon.py` 逐条 emit → batch emit。
-- 错误信封×3 → 复用 `InSessionError.error_kind`，归 phase-11。
+- 错误信封 **×2（daemon + cli）** → 复用 `InSessionError.error_kind`（**MCP 出 scope**：8 tool 全用 phase-11 `ErrorKind` 轴、不产 `InSessionError`、不扫 in-session tape；见 step 5b spec-review Q2）。「归 phase-11」= 对齐「kind 唯一分类轴」原则，**非合并两套 taxonomy**；tape `workflow_failed.data.kind` 是 ErrorKind/error_kind 两值集的共享字段（跨阶段 debt，登记不改）。
 
 ### 7.6 守门 grep
 

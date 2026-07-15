@@ -40,6 +40,11 @@ import typer
 from orca.compile import ConfigurationError, load_workflow
 from orca.events.bus import EventBus
 from orca.events.tape import Tape
+from orca.iface.in_session._step_io import (
+    _emit_workflow_failed,
+    apply_step_result,
+    fail_in_session,
+)
 from orca.iface.in_session.marker import (
     ActivationMarker,
     clear_marker,
@@ -49,7 +54,6 @@ from orca.iface.in_session.marker import (
 )
 from orca.run.lifecycle import (
     gen_run_id,
-    make_workflow_failed,
     now_monotonic,
 )
 from orca.run.step import InSessionError, advance_step
@@ -275,42 +279,16 @@ def _release_flock(fd: Any) -> None:
 # 假设由 SPEC §0 明示（用户在 repo 根目录跑 ./runs/）。
 
 
-# ── 失败 taxonomy（SPEC §2.5 表，F6 闭环）─────────────────────────────────────
-
-
-def _classify_in_session_error(exc: InSessionError) -> str:
-    """读 ``exc.error_kind``（SPEC §2.5 ``error_type``），取代脆弱的消息子串匹配。
-
-    分类由 step.py 各 raise 处显式传 ``error_kind=ERR_*`` 携带（类型安全：加新 kind = 加
-    常量 + raise 处传，不必维护本函数的关键词表）。``error_kind`` 缺省 → ``internal_error``
-    （兜底，fail loud 不静默）。
-    """
-    return getattr(exc, "error_kind", None) or "internal_error"
-
-
-async def _emit_workflow_failed(
-    bus: EventBus, error_type: str, message: str, node: str | None = None,
-) -> None:
-    """落 ``workflow_failed`` 终态（单真相源），吞错仅 log（tape 可能已坏，仍要返信封）。"""
-    logger.exception("emit workflow_failed (error_type=%s)", error_type)
-    try:
-        t, d = make_workflow_failed(error_type, message, node=node)
-        await bus.emit(t, d, node=node)
-    except Exception:
-        logger.exception("emit workflow_failed 也失败（tape 可能已坏）")
-
-
-def _emits_to_event_datas(emits: list) -> list[dict]:
-    """``advance_step`` 返的 ``list[Emit]`` → ``emit_batch`` 入参形态。"""
-    return [
-        {
-            "type": e.type,
-            "data": e.data,
-            "node": e.node,
-            "timestamp": time.time(),
-        }
-        for e in emits
-    ]
+# ── 失败 taxonomy / 信封拼装（SPEC §2.5 表，F6 闭环）─────────────────────────
+#
+# ``_classify_in_session_error`` / ``_emit_workflow_failed`` / ``apply_step_result`` /
+# ``fail_in_session`` 已抽到 ``iface/in_session/_step_io.py``（v5 §8 step 5b：daemon + cli
+# 两路共享 IO 边界，单一分类轴 ``InSessionError.error_kind``）。本模块 import 复用：
+#   - ``apply_step_result``：成功路径 emit_batch + 基础信封（bootstrap/next 成功）。
+#   - ``fail_in_session``：失败路径 emit workflow_failed + 错误信封（bootstrap/next except）。
+#   - ``_emit_workflow_failed``：合规计数 / marker 写失败（字面 error_kind，非 InSessionError）。
+# 分类函数 ``_classify_in_session_error`` 是 helper 内部实现（``fail_in_session`` 调用），
+# 单测直接从 ``_step_io`` import 守门分类契约。
 
 
 # ── Typer app（orca 顶层，§2.1 七命令）───────────────────────────────────────
@@ -430,11 +408,11 @@ def bootstrap(
             ))
         except InSessionError as e:
             # bootstrap 失败 = 配置坏（如 entry 不是 agent 节点），fail loud。
-            asyncio.run(_emit_workflow_failed(
-                bus, _classify_in_session_error(e), str(e),
-            ))
+            # fail_in_session：emit workflow_failed（tape data.kind = error_kind）+ 返
+            # 含 ``error_kind`` 的错误信封（v5 §8 step 5b，SPEC §2.3 信封契约）。
+            reply = asyncio.run(fail_in_session(bus, e))
             bus.close()
-            typer.echo(json.dumps({"done": True, "reason": f"failed: {e}"}))
+            typer.echo(json.dumps(reply, ensure_ascii=False))
             raise typer.Exit(1)
         finally:
             try:
@@ -463,7 +441,10 @@ def bootstrap(
                     bus2.close()
             except Exception:
                 logger.exception("marker 失败后 workflow_failed 也失败")
-            typer.echo(json.dumps({"done": True, "reason": f"failed: write_marker: {e}"}))
+            typer.echo(json.dumps({
+                "done": True, "error_kind": "internal_error",
+                "reason": f"failed: write_marker: {e}",
+            }, ensure_ascii=False))
             raise typer.Exit(1)
 
         reply: dict[str, Any] = {
@@ -540,11 +521,12 @@ def next(
             _prompts_dir_for(tape_path, run_id),
         ))
     except InSessionError as e:
-        error_type = _classify_in_session_error(e)
-        asyncio.run(_emit_workflow_failed(bus, error_type, str(e)))
+        # fail_in_session：emit workflow_failed（tape data.kind = error_kind）+ 返含
+        # ``error_kind`` 的错误信封（v5 §8 step 5b，SPEC §2.3 信封契约）。
+        reply = asyncio.run(fail_in_session(bus, e))
         # 终态后清 marker（workflow_failed 已落 tape，marker 不再需要）。
         clear_marker(mpath)
-        typer.echo(json.dumps({"done": True, "reason": f"failed: {e}"}))
+        typer.echo(json.dumps(reply, ensure_ascii=False))
         raise typer.Exit(1)
     finally:
         try:
@@ -576,13 +558,16 @@ async def _advance_and_emit(
     inputs: dict, run_id: str, elapsed: float, prompts_dir: Path | None = None,
     yaml_path: str | None = None,
 ):
-    """调 advance_step + emit_batch（单次 write 原子化，B1）。"""
+    """调 advance_step + emit_batch（单次 write 原子化，B1）。
+
+    emit 经 ``apply_step_result``（共享 helper）；返 ``result`` 供 bootstrap 命令拼富信封
+    （run_id/tape/prompt_file/驱动协议）。helper 返的基础信封在此丢弃（bootstrap 自建）。
+    """
     result = advance_step(
         tape, wf, output=output, inputs=inputs, run_id=run_id, elapsed=elapsed,
         prompts_dir=prompts_dir, yaml_path=yaml_path,
     )
-    if result.emits:
-        await bus.emit_batch(_emits_to_event_datas(result.emits))
+    await apply_step_result(bus, result)   # emit_batch（基础信封丢弃，bootstrap 命令自建富信封）
     return result
 
 
@@ -669,9 +654,8 @@ async def _next_in_critical_section(
         tape, wf, output=output, inputs=inputs, run_id=run_id,
         elapsed=now_monotonic() - start_ts, prompts_dir=prompts_dir,
     )
-    if result.emits:
-        # B1 单次 write 原子化整批 [nc, rt, ns] / [nc, rt, workflow_completed]。
-        await bus.emit_batch(_emits_to_event_datas(result.emits))
+    # B1 单次 write 原子化整批 [nc, rt, ns] / [nc, rt, workflow_completed]（共享 helper）。
+    await apply_step_result(bus, result)   # emit_batch（基础信封丢弃，next 命令自建含驱动协议的信封）
 
     # 合规计数（D-v7-6 / F11）：无 output 且无 emits（branch 4 idempotent-replay）→ +1；
     # 有 output → 清零。≥3 → CLI 主动 emit workflow_failed(subagent_compliance)。
