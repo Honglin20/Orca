@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from unittest import mock
 
@@ -20,6 +21,7 @@ import pytest
 from typer.testing import CliRunner
 
 from orca.compile import ConfigurationError, load_workflow
+from orca.iface.cli.skill_cmds import ENTRY_SKILL_NAME
 from orca.iface.in_session import marker as marker_mod
 from orca.iface.in_session.cli import _drive_protocol, app
 
@@ -427,16 +429,34 @@ def test_bootstrap_unresolvable_wf_name_fails_loud(cwd_tmp):
 
 
 # ── §4.5 SKILL.md 守门（三步指导 + 禁业务逻辑关键词 + 禁 teams 命令）──────────────
+#
+# 入口 skill = TARS（用户面）；目录 ``orca/skills/<ENTRY_SKILL_NAME>/``。skill body 仍调 ``orca``
+# CLI 命令（引擎不改），故守门断言里的 ``orca list`` / ``orca next`` 字面不变——只目录名换了。
 
-ORCA_SKILL_MD = (
-    Path(__file__).resolve().parents[3] / "orca" / "skills" / "orca" / "SKILL.md"
+ENTRY_SKILL_MD = (
+    Path(__file__).resolve().parents[3]
+    / "orca" / "skills" / ENTRY_SKILL_NAME / "SKILL.md"
 )
 
 
-def test_orca_skill_md_contains_three_step_guide():
+def test_entry_skill_md_frontmatter_name_matches_dir():
+    """§4.5 契约锁：frontmatter ``name`` == 目录名 == ``ENTRY_SKILL_NAME`` 三者一致。
+
+    frontmatter ``name`` 是 slash 命令（``/tars``）的触发源；目录名是 install 落地点 +
+    doctor 扫描点。三者必须一致——任一漂移（如 builder 改 frontmatter name 却没改目录）
+    会导致 slash 触发名与落地目录静默分叉，doctor / install 测试都抓不住（它们只看目录）。
+    """
+    text = ENTRY_SKILL_MD.read_text(encoding="utf-8")
+    # frontmatter name 字段 == 常量值（slash 触发名 == 单一真相源）
+    assert re.search(rf"^name:\s*{re.escape(ENTRY_SKILL_NAME)}\s*$", text, re.MULTILINE), (
+        f"SKILL.md frontmatter name 应为 {ENTRY_SKILL_NAME!r}（与目录名 / ENTRY_SKILL_NAME 一致）"
+    )
+
+
+def test_entry_skill_md_contains_three_step_guide():
     """§4.5：SKILL.md 必须含三步指导（list → 据 inputs_schema 抽 inputs → <wf> + next 循环）。"""
-    text = ORCA_SKILL_MD.read_text(encoding="utf-8")
-    # 第 1 步：orca list 选 wf
+    text = ENTRY_SKILL_MD.read_text(encoding="utf-8")
+    # 第 1 步：orca list 选 wf（CLI 引擎名不变）
     assert "orca list" in text
     assert "inputs_schema" in text
     # 第 2 步：抽 inputs
@@ -449,13 +469,13 @@ def test_orca_skill_md_contains_three_step_guide():
     assert "不读" in text or "绝不" in text
 
 
-def test_orca_skill_md_has_no_business_logic_keywords():
+def test_entry_skill_md_has_no_business_logic_keywords():
     """§4.5 / §7.6：SKILL.md 禁业务逻辑关键词（CI grep 守门）。
 
     skill 是主 session 的入口指导，不是 Orca 内部——不得泄露 advance/router/tape/replay/
     compile/load_workflow 等内部路径（否则 LLM 可能误调内部 API 而非走 7 命令接口）。
     """
-    text = ORCA_SKILL_MD.read_text(encoding="utf-8")
+    text = ENTRY_SKILL_MD.read_text(encoding="utf-8")
     forbidden = [
         "advance_step", "Orchestrator", "router.resolve",
         "Tape", "replay", "compile", "load_workflow",
@@ -464,12 +484,12 @@ def test_orca_skill_md_has_no_business_logic_keywords():
         assert kw not in text, f"SKILL.md 含禁业务逻辑关键词 {kw!r}（§4.5 守门）"
 
 
-def test_orca_skill_md_has_no_teams_backend_commands():
+def test_entry_skill_md_has_no_teams_backend_commands():
     """§2.4：skill 只教 orca 7 命令，禁出现 teams 后端命令名（防第二入口泄漏）。
 
     注：``list`` 是 orca 与 teams 共享命令（``orca list`` 合法），不在禁词内。
     """
-    text = ORCA_SKILL_MD.read_text(encoding="utf-8")
+    text = ENTRY_SKILL_MD.read_text(encoding="utf-8")
     # teams-unique 后端命令（run/serve/ps/install/validate/mcp/executor/logs/wait/resume）
     teams_only = ["serve", "validate", "executor", "resume",
                   "teams run", "teams serve", "teams install", "orca install",

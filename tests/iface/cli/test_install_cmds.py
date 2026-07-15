@@ -107,9 +107,9 @@ def test_install_opencode_user_lands_all(isolated_home: Path):
     result = runner.invoke(app, ["--target", "opencode", "--scope", "user"])
     assert result.exit_code == 0, result.output
     oc = isolated_home / ".config" / "opencode"
-    # v5：所有随包 skill 都装（create-workflow + orca 入口 skill）
+    # v5：所有随包 skill 都装（create-workflow + tars 入口 skill）
     assert (oc / "skills" / install_cmds.SKILL_NAME / "SKILL.md").is_file()
-    assert (oc / "skills" / "orca" / "SKILL.md").is_file()
+    assert (oc / "skills" / install_cmds.ENTRY_SKILL_NAME / "SKILL.md").is_file()
     assert (oc / "plugins" / "orca.ts").is_file()
     # v5 step 2b(5)：command 模板已删，install 不再创建 command/orca/ 命名空间
     assert not (oc / "command" / "orca").exists()
@@ -188,7 +188,7 @@ def test_install_cc_family_full_set(isolated_home: Path):
     assert result.exit_code == 0, result.output
     cc = isolated_home / ".claude"
     assert (cc / "skills" / install_cmds.SKILL_NAME / "SKILL.md").is_file()
-    assert (cc / "skills" / "orca" / "SKILL.md").is_file()
+    assert (cc / "skills" / install_cmds.ENTRY_SKILL_NAME / "SKILL.md").is_file()
     # cc nudge：脚本 + settings.json Stop 声明
     assert (cc / "hooks" / "orca-nudge.sh").is_file()
     cfg = json.loads((cc / "settings.json").read_text())
@@ -434,7 +434,7 @@ def test_install_cac_family_full_set(isolated_home: Path):
     cac = isolated_home / ".cac"
     # skill
     assert (cac / "skills" / install_cmds.SKILL_NAME / "SKILL.md").is_file()
-    assert (cac / "skills" / "orca" / "SKILL.md").is_file()
+    assert (cac / "skills" / install_cmds.ENTRY_SKILL_NAME / "SKILL.md").is_file()
     # cc 家族 nudge：脚本 + settings.json Stop 声明
     assert (cac / "hooks" / "orca-nudge.sh").is_file()
     cfg = json.loads((cac / "settings.json").read_text())
@@ -458,7 +458,7 @@ def test_install_nga_family_full_set(isolated_home: Path):
     nga = isolated_home / ".nga"
     # skill
     assert (nga / "skills" / install_cmds.SKILL_NAME / "SKILL.md").is_file()
-    assert (nga / "skills" / "orca" / "SKILL.md").is_file()
+    assert (nga / "skills" / install_cmds.ENTRY_SKILL_NAME / "SKILL.md").is_file()
     # opencode 家族 plugin + json 声明
     assert (nga / "plugins" / "orca.ts").is_file()
     cfg = json.loads((nga / "opencode.json").read_text())

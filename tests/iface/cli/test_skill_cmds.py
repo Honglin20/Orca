@@ -81,24 +81,24 @@ def _skill_file(dst_root: Path) -> Path:
     return dst_root / ".claude" / "skills" / skill_cmds.SKILL_NAME / "SKILL.md"
 
 
-def _orca_skill_file(dst_root: Path) -> Path:
-    """v5 新增 orca 入口 skill 落地路径。"""
-    return dst_root / ".claude" / "skills" / "orca" / "SKILL.md"
+def _entry_skill_file(dst_root: Path) -> Path:
+    """v5 in-session 入口 skill（TARS 品牌）落地路径。目录名取 ``ENTRY_SKILL_NAME`` 单一真相源。"""
+    return dst_root / ".claude" / "skills" / skill_cmds.ENTRY_SKILL_NAME / "SKILL.md"
 
 
 def test_install_both(_isolated_home: Path):
     result = runner.invoke(app, ["skill", "install"])
     assert result.exit_code == 0, result.output
     home = _isolated_home
-    # CC（create-workflow + orca 都装）
+    # CC（create-workflow + tars 入口 skill 都装）
     assert _skill_file(home).is_file()
-    assert _orca_skill_file(home).is_file()
+    assert _entry_skill_file(home).is_file()
     # opencode（两 skill 都装）
     assert (home / ".config" / "opencode" / "skills" / skill_cmds.SKILL_NAME / "SKILL.md").is_file()
-    assert (home / ".config" / "opencode" / "skills" / "orca" / "SKILL.md").is_file()
+    assert (home / ".config" / "opencode" / "skills" / skill_cmds.ENTRY_SKILL_NAME / "SKILL.md").is_file()
     # v5：cac / nga 也装（四前端）
     for dotdir in (".cac", ".nga"):
-        assert (home / dotdir / "skills" / "orca" / "SKILL.md").is_file()
+        assert (home / dotdir / "skills" / skill_cmds.ENTRY_SKILL_NAME / "SKILL.md").is_file()
     # reference + examples 跟着 copy
     skill_dir = home / ".claude" / "skills" / skill_cmds.SKILL_NAME
     assert (skill_dir / "reference" / "orca-workflow-contract.md").is_file()
@@ -112,10 +112,10 @@ def test_install_target_cc_only(_isolated_home: Path):
     assert result.exit_code == 0, result.output
     home = _isolated_home
     assert _skill_file(home).is_file()  # CC 装了
-    assert _orca_skill_file(home).is_file()
+    assert _entry_skill_file(home).is_file()
     # opencode / cac / nga 没装
     assert not (home / ".config" / "opencode" / "skills" / skill_cmds.SKILL_NAME).exists()
-    assert not (home / ".cac" / "skills" / "orca").exists()
+    assert not (home / ".cac" / "skills" / skill_cmds.ENTRY_SKILL_NAME).exists()
 
 
 def test_install_idempotent(_isolated_home: Path):

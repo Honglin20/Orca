@@ -78,20 +78,23 @@ def _write_probe(cwd: Path, name: str, payload: dict) -> None:
 _DOTDIR = {"cc": ".claude", "opencode": ".opencode", "cac": ".cac", "nga": ".nga"}
 
 
-def _install_fake_orca_skill(
+def _install_fake_entry_skill(
     root: Path, platform: str = "cc", *, under: str = "project",
     home: Path | None = None,
 ) -> Path:
-    """落一个占位 orca skill 让 doctor 扫到。
+    """落一个占位入口 skill（TARS 品牌）让 doctor 扫到。
 
-    - ``under="project"``：落 ``<root>/<dotdir>/skills/orca/SKILL.md``（root 当 cwd）。
-    - ``under="user"``：落 ``<home>/<dotdir>/skills/orca/SKILL.md``（home 注入时用）。
+    目录名取 ``ENTRY_SKILL_NAME`` 单一真相源（现 = tars），与 ``_scan_skill_install`` 对齐。
+    - ``under="project"``：落 ``<root>/<dotdir>/skills/<ENTRY_SKILL_NAME>/SKILL.md``（root 当 cwd）。
+    - ``under="user"``：落 ``<home>/<dotdir>/skills/<ENTRY_SKILL_NAME>/SKILL.md``（home 注入时用）。
     """
+    from orca.iface.cli.skill_cmds import ENTRY_SKILL_NAME
+
     dotdir = _DOTDIR[platform]
     base = (home if under == "user" else root)
-    skill_md = base / dotdir / "skills" / "orca" / "SKILL.md"
+    skill_md = base / dotdir / "skills" / ENTRY_SKILL_NAME / "SKILL.md"
     skill_md.parent.mkdir(parents=True, exist_ok=True)
-    skill_md.write_text("---\nname: orca\n---\n# orca\n", encoding="utf-8")
+    skill_md.write_text(f"---\nname: {ENTRY_SKILL_NAME}\n---\n# {ENTRY_SKILL_NAME}\n", encoding="utf-8")
     return skill_md
 
 
@@ -122,9 +125,9 @@ def test_doctor_json_structure(doctor_iso, monkeypatch):
 
 
 def test_doctor_skill_install_pass_when_skill_present(doctor_iso, monkeypatch):
-    """A6：四前端任一装了 orca skill（project-scope）→ skill_install=pass + ok=True。"""
+    """A6：四前端任一装了入口 skill（project-scope）→ skill_install=pass + ok=True。"""
     monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
-    _install_fake_orca_skill(doctor_iso, "cc")
+    _install_fake_entry_skill(doctor_iso, "cc")
     reply = _run_doctor()
     by_name = {c["name"]: c for c in reply["checks"]}
     assert by_name["skill_install"]["status"] == "pass"
@@ -136,7 +139,7 @@ def test_doctor_skill_install_detects_each_platform(doctor_iso, monkeypatch):
     """A6：opencode / cac / nga project-scope 装 skill → 各自被扫到（覆盖 _scan_skill_install 分支）。"""
     monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
     for platform in ("opencode", "cac", "nga"):
-        _install_fake_orca_skill(doctor_iso, platform)
+        _install_fake_entry_skill(doctor_iso, platform)
     reply = _run_doctor()
     detail = {c["name"]: c["detail"] for c in reply["checks"]}["skill_install"]
     assert reply["ok"] is True
@@ -145,9 +148,9 @@ def test_doctor_skill_install_detects_each_platform(doctor_iso, monkeypatch):
 
 
 def test_doctor_skill_install_user_scope(doctor_iso, monkeypatch):
-    """A6：user-scope（``<home>/<dotdir>/skills/orca``）也能被扫到（doctor_iso 把 home 指到 tmp）。"""
+    """A6：user-scope（``<home>/<dotdir>/skills/<ENTRY_SKILL_NAME>``）也能被扫到（doctor_iso 把 home 指到 tmp）。"""
     monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
-    _install_fake_orca_skill(doctor_iso, "cac", under="user", home=doctor_iso)
+    _install_fake_entry_skill(doctor_iso, "cac", under="user", home=doctor_iso)
     reply = _run_doctor()
     by_name = {c["name"]: c for c in reply["checks"]}
     assert by_name["skill_install"]["status"] == "pass"
@@ -155,7 +158,7 @@ def test_doctor_skill_install_user_scope(doctor_iso, monkeypatch):
 
 
 def test_doctor_skill_install_fail_when_absent(doctor_iso, monkeypatch):
-    """A6：四前端都没装 orca skill → skill_install=fail + ok=False（doctor_iso 隔离 home + cwd 干净）。"""
+    """A6：四前端都没装入口 skill → skill_install=fail + ok=False（doctor_iso 隔离 home + cwd 干净）。"""
     monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
     reply = _run_doctor()
     by_name = {c["name"]: c for c in reply["checks"]}
@@ -169,7 +172,7 @@ def test_doctor_diag_off_hook_checks_unknown_ok_unaffected(doctor_iso, monkeypat
     FU-2：entry_hook check 已删（transform step 4 整删后 dead），不再断言。
     """
     monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
-    _install_fake_orca_skill(doctor_iso, "cc")
+    _install_fake_entry_skill(doctor_iso, "cc")
     reply = _run_doctor()
     assert reply["diag"] is False
     by_name = {c["name"]: c for c in reply["checks"]}
@@ -186,7 +189,7 @@ def test_doctor_advance_heartbeat_passes(doctor_iso, monkeypatch):
     """
     import time as _t
     monkeypatch.setenv("ORCA_DIAGNOSE", "1")
-    _install_fake_orca_skill(doctor_iso, "cc")
+    _install_fake_entry_skill(doctor_iso, "cc")
     _write_probe(doctor_iso, ".orca-probe-advance.json", {
         "diag": True, "last_idle_at": int(_t.time()),
         "idle_count": 3,
@@ -204,7 +207,7 @@ def test_doctor_report_describes_b_path(doctor_iso, monkeypatch):
     FU-2：entry probe 路径行已删，仅 advance probe 路径写进报告。
     """
     monkeypatch.setenv("ORCA_DIAGNOSE", "1")
-    _install_fake_orca_skill(doctor_iso, "cc")
+    _install_fake_entry_skill(doctor_iso, "cc")
     reply = _run_doctor()
     assert "B 路径" in reply["report"]
     assert "orca next" in reply["report"]  # 主 session 自调 next
@@ -248,7 +251,7 @@ def test_orca_ts_has_no_transform_hook_step4():
     """v5 §8 step 4 收尾守门：transform marker 派发入口段 + 死代码已整删。
 
     防止 builder 把 ``experimental.chat.messages.transform`` 入口加回来（旧 A 路径第二入口，
-    v5 入口统一切到 orca skill——transform 复活 = 第二入口绕过 skill，违反单一接口）。
+    v5 入口统一切到入口 skill（TARS）——transform 复活 = 第二入口绕过 skill，违反单一接口）。
     同时守门 transform 相关死代码（spawnCli / rewriteText / buildCliArgs / MARKER_REGEX 等）
     不得复活。
     """
@@ -256,7 +259,7 @@ def test_orca_ts_has_no_transform_hook_step4():
     code = _strip_ts_comments(text)
     # transform 入口段已整删（查裸键——双引号 / 单引号 / 模板字符串任一形态都算复活）
     assert "experimental.chat.messages.transform" not in code, (
-        "step 4：transform marker 派发入口段应整删（入口统一切到 orca skill）"
+        "step 4：transform marker 派发入口段应整删（入口统一切到入口 skill / TARS）"
     )
     # transform 死代码同步守门（防复活）
     dead_artifacts = [

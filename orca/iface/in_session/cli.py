@@ -851,16 +851,20 @@ def stop(
 def _scan_skill_install(
     *, home: Path | None = None, cwd: Path | None = None,
 ) -> dict[str, bool]:
-    """扫四前端 skill 目录，返 ``{platform: 是否装了 orca skill}``（v5 §4.3 / A6）。
+    """扫四前端 skill 目录，返 ``{platform: 是否装了入口 skill}``（v5 §4.3 / A6）。
 
-    每个平台查 user-scope + project-scope 两个可能落点（``<root>/skills/orca/SKILL.md``），
+    入口 skill 名取自 ``ENTRY_SKILL_NAME``（单一真相源，现 = tars）。每个平台查
+    user-scope + project-scope 两个可能落点（``<root>/skills/<ENTRY_SKILL_NAME>/SKILL.md``），
     任一存在即该平台算已装。doctor 的 ``skill_install`` 检查据此 pass/fail。
 
     ``home`` / ``cwd`` 可注入（对齐 ``resolve_roots`` 模式）——单测隔离真实 ``~/.claude``
     等，否则装过 orca 的开发机上 ``fail_when_absent`` 测试会反向失败（review 🔴#2）。
     """
     # 延迟 import：skill_cmds 属 iface.cli 子包，避免顶层循环；HOST_DOTDIR 单一真相源。
-    from orca.iface.cli.skill_cmds import HOST_DOTDIR, SKILL_HOSTS, opencode_global_root
+    # ENTRY_SKILL_NAME = 入口 skill 目录名（单一真相源，防 doctor check 与 install 目录漂移）。
+    from orca.iface.cli.skill_cmds import (
+        ENTRY_SKILL_NAME, HOST_DOTDIR, SKILL_HOSTS, opencode_global_root,
+    )
 
     home = home if home is not None else Path.home()
     cwd = cwd if cwd is not None else Path.cwd()
@@ -875,7 +879,10 @@ def _scan_skill_install(
             proj_root = cwd / HOST_DOTDIR[host]
         candidates[host] = [user_root, proj_root]
     return {
-        platform: any((root / "skills" / "orca" / "SKILL.md").is_file() for root in roots)
+        platform: any(
+            (root / "skills" / ENTRY_SKILL_NAME / "SKILL.md").is_file()
+            for root in roots
+        )
         for platform, roots in candidates.items()
     }
 
@@ -887,10 +894,10 @@ def doctor(
     """诊断 in-session 集成层（v5 §2.1 / §4.4：skill 落点 + CLI imports 为准；hook 心跳可选）。
 
     v5：B 路径（主 session 自调 next）不依赖 hook 推进；``orca.ts`` transform 派发已禁用
-    （step 2b）。doctor 主验两件**硬**事——① ``skill_install``（四前端是否装了 orca skill）
-    + ② ``cli_imports_ok``（CLI 后端可达）。旧两钩子（transform / idle）的心跳退居**可选**
-    诊断（``ORCA_DIAGNOSE=1`` 时 plugin 写心跳，doctor 读取作证），**不计入 ok**——
-    hook 不再推进，缺心跳不是故障。
+    （step 2b）。doctor 主验两件**硬**事——① ``skill_install``（四前端是否装了入口 skill，
+    TARS 品牌；底层 orca CLI 引擎）+ ② ``cli_imports_ok``（CLI 后端可达）。旧两钩子
+    （transform / idle）的心跳退居**可选**诊断（``ORCA_DIAGNOSE=1`` 时 plugin 写心跳，
+    doctor 读取作证），**不计入 ok**——hook 不再推进，缺心跳不是故障。
     """
     _setup_logging(log_level)
 
@@ -913,7 +920,7 @@ def doctor(
 
     # 每条 check 带 ``hard``：True = 计入 ok（skill_install / cli_imports_ok）；
     # False = 可选诊断（diag/hook），不计数。避免硬编码 name tuple（typo 静默丢失硬检查）。
-    # ① skill_install（A6，硬）：四前端是否装了 orca skill。
+    # ① skill_install（A6，硬）：四前端是否装了入口 skill（TARS 用户面；底层 orca CLI 引擎）。
     installed = _scan_skill_install()
     where = [p for p, ok_flag in installed.items() if ok_flag]
     checks.append({
@@ -921,8 +928,8 @@ def doctor(
         "hard": True,
         "status": "pass" if where else "fail",
         "detail": (
-            f"PASS：orca skill 已装于 {', '.join(where)}。" if where
-            else "FAIL：四前端（cc/opencode/cac/nga，user+project scope）均未找到 orca skill。"
+            f"PASS：TARS skill 已装于 {', '.join(where)}。" if where
+            else "FAIL：四前端（cc/opencode/cac/nga，user+project scope）均未找到 TARS skill。"
                  "跑 `teams install --target <platform>` 安装后重启前端。"
         ),
     })

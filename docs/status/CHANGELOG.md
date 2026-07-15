@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-15] TARS 品牌 rebrand —— skill 改名 orca→tars + TARS 描述（CLI 仍 orca）
+
+用户面 = TARS：skill 名 `orca`→`tars`（`/tars`、description TARS 语气——触发「用 TARS 帮我 X / 用 TARS 做 Y」→ `orca list` 语义匹配 description → 命中唯一启动 / 多个则问（≤2 问）→ 抽 inputs → 派子代理 → `orca next` 循环到 done）。CLI/命令仍 `orca`（TARS 用 orca 引擎；orca.ts/cc_nudge 不动）。抽 `ENTRY_SKILL_NAME = "tars"` 常量单一真相源（`skill_cmds.py`，doctor `_scan_skill_install` + install re-export + 三处测试全经它，防目录名与 check 漂移）；SKILL.md body 命令引用全保 `orca`（仅 frontmatter name + 标题 + `<purpose>` 身份是 TARS）。SPEC §4.1/§8 措辞同步。176 单测 0 回归（+1 frontmatter name gate）；code-reviewer 两轮 0 🔴（test 轮 2 🟡 已修：install 断言改用常量 DRY + 补 frontmatter name 锁）。test-agent 真机待主 session 派。Commit: `<本 commit，SHA 见 git log>`。详见 [release note](../releases/2026-07-15-tars-skill-rebrand.md)。
+
 ## [2026-07-15] in-session v5 §8 step 6 —— teams install nga/cac 全套（CAC≡cc / NGA≡opencode）【spec v5 §8 全 step 收尾】
 
 用户澄清 CAC ≡ Claude Code（`.claude`→`.cac`）、NGA ≡ opencode（`.opencode`→`.nga`），install 阶段两家族全套统一装（不只 skill）：cac 走 cc 家族（skill + nudge Stop-hook：`.cac/hooks/orca-nudge.sh` + `.cac/settings.json`）、nga 走 opencode 家族（skill + plugin `orca.ts` idle nudge + `opencode.json` 声明指 `.nga`）。`run_install` 按家族路由（opencode+nga / cc+cac，显式 `elif` + 末尾 fail-loud `AssertionError`），cc/opencode 零回归（byte-identical）；泛化 `_opencode_plugin_decl` project-scope 路径用 `hr.root.name`（去硬编码 `.opencode`，opencode 旧值不变）。SPEC §4.3/§4.4/§11/§9#1 同步升级为「家族全套」。164 单测 0 回归（+4 净增：cac/nga 全套 + nga project-scope 泛化闸门 + cac/nga 幂等）；code-reviewer 两轮 0 🔴（Rule 7 surface 一处镜像测试冗余）。真机加载（CAC/NGA 是否真读 `.cac`/`.nga` + nudge/plugin 生效）留 §9#1 跨平台用户侧。Commit: `<本 commit，SHA 见 git log>`。详见 [release note](../releases/2026-07-15-in-session-step6-nga-cac-install.md)。

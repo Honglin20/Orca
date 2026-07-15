@@ -21,9 +21,15 @@ from pathlib import Path
 import typer
 
 # 随包 skill 名（``orca/skills/<SKILL_NAME>/``）。create-workflow = authoring skill；
-# v5 新增 ``orca`` skill（in-session 入口），install 一并拷两个（见 install_cmds）。
-# 本常量保留给测试作 create-workflow 的稳定引用。
+# v5 新增 in-session 入口 skill（TARS 品牌：用户面 = TARS，底层 orca CLI 引擎），install
+# 一并拷两个（见 install_cmds）。本常量保留给测试作 create-workflow 的稳定引用。
 SKILL_NAME = "create-workflow"
+
+# in-session 入口 skill 名（用户面 = TARS；目录 ``orca/skills/tars/``）。
+# **单一真相源**：doctor 的 ``skill_install`` 检查（``in_session.cli._scan_skill_install``）
+# + install 落地目录 + 测试断言都据本常量，防目录名与 doctor check 漂移（rename 时改一处）。
+# 注意：skill 名是 tars，但 skill body 里调的命令仍是 ``orca``（CLI 引擎不改）。
+ENTRY_SKILL_NAME = "tars"
 
 app = typer.Typer(
     name="skill",

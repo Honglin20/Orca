@@ -46,6 +46,7 @@ import typer
 
 from orca.iface.cli.config import bootstrap_config
 from orca.iface.cli.skill_cmds import (
+    ENTRY_SKILL_NAME,
     HOST_DOTDIR,
     SKILL_HOSTS,
     SKILL_NAME,
