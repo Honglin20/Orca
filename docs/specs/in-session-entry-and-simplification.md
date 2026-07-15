@@ -89,21 +89,21 @@ SKILL.md 教主 session：
 
 ### 4.3 各平台 skill 落点（仅此不同）
 
-| 前端 | 后端 | skill 落点 |
-|---|---|---|
-| claude code | CAC | `.claude/skills/` |
-| opencode | NGA | `.opencode/skills/` |
-| CAC | — | `.cac/skills/` |
-| NGA | — | 同 opencode |
+| 前端 | 后端 | skill 落点 | 家族（step 6） |
+|---|---|---|---|
+| claude code | CAC | `.claude/skills/` | cc 家族（skill + nudge Stop-hook） |
+| opencode | NGA | `.opencode/skills/` | opencode 家族（skill + plugin orca.ts + opencode.json 声明） |
+| CAC | — | `.cac/skills/` | cc 家族（CAC≡cc，结构同 cc） |
+| NGA | — | `.nga/skills/` | opencode 家族（NGA≡opencode，结构同 opencode） |
 
-`teams install --target cc|opencode|cac|nga` 装同一份 SKILL.md 到对应目录。
+`teams install --target cc|opencode|cac|nga` 装同一份随包 skill 到对应目录；**step 6 用户澄清**（2026-07-15）：CAC ≡ Claude Code（`.claude`→`.cac`，其余同）、NGA ≡ opencode（`.opencode`→`.nga`，其余同）。install 阶段两家族**全套统一装**（不只 skill）：cc 家族（cc/cac）= skill + nudge Stop-hook（`hooks/orca-nudge.sh` + `settings.json` 声明）；opencode 家族（opencode/nga）= skill + plugin `orca.ts`（idle nudge 载体）+ `opencode.json` 声明（路径指各自 root——dotdir 或 opencode user scope 的 config 根）。
 
 ### 4.4 hook（B 不推进；nudge 提醒 step 2b 做，A5 修正）
 
 - **推进 hook 不用**（主 session 自调 next）。`cc_hooks.py` A 推进（Stop 调 next）退场删。
 - **nudge hook（A5，step 2b 做）**——node 完成 → 主 session 空闲 → 有活跃 run → 提醒调 next（**只提醒，不推进**）：
-  - **opencode**：`orca.ts` 的 `session.idle` event hook → 检查活跃 marker → `promptAsync` 注入「请调 `orca next --run-id <id>` 推进」（不调 next）。
-  - **CC**：settings.json 的 `Stop` hook（`teams install` 生成 nudge 片段）→ 检查活跃 marker → `decision:block` 注入「还有 run `<id>`，请调 `orca next`」（不调 next）。
+  - **opencode 家族**（opencode + nga，step 6）：`orca.ts` 的 `session.idle` event hook → 检查活跃 marker → `promptAsync` 注入「请调 `orca next --run-id <id>` 推进」（不调 next）。nga 走相同 `orca.ts`，仅落点 `.opencode`→`.nga`。
+  - **cc 家族**（cc + cac，step 6）：`settings.json` 的 `Stop` hook（`teams install` 生成 nudge 片段）→ 检查活跃 marker → `decision:block` 注入「还有 run `<id>`，请调 `orca next`」（不调 next）。cac 走相同 `cc_nudge.sh` + `settings.json`，仅落点 `.claude`→`.cac`。
   - **精确判定**：idle/Stop event 本身区分「子代理在工作」（主 session 在等，**不触发**）vs「卡住」（主 session 空闲没调 next，**触发**）。**不靠 tape 超时**（tape 看不到子代理状态，超时判定会误报）。用宿主事件精确判定。
   - **不推进**：nudge 只提醒，`next` 仍主 session 自调（B 路径不变；hook 自动调 next = 退化 A）。
 - **诊断 hook**（doctor 心跳）可选。
@@ -198,7 +198,7 @@ CI 禁：`orca in-session` / `MARKER_REGEX` / `cc_hooks` 推进 / `extractTaskOu
 
 | # | 项 |
 |---|---|
-| 1 | NGA/CAC skill 加载真机（留用户侧） |
+| 1 | NGA/CAC 全套集成（skill + cc 家族 nudge Stop-hook / opencode 家族 plugin + `opencode.json`）真机加载与生效（留用户侧，step 6 后风险面扩大） |
 | 2 | ~~nudge hook~~ 已改 **step 2b 做**（§4.4，A5 修正——不再 defer merge） |
 | 3 | 命令分家后两套决策核心共存（根治 merge spec） |
 | 4 | 主 session 全链路 E2E 部署（orca 装 WSL / opencode Windows；需 orca 装 Windows 或 opencode 装 WSL，非代码） |
@@ -231,7 +231,8 @@ CI 禁：`orca in-session` / `MARKER_REGEX` / `cc_hooks` 推进 / `extractTaskOu
 - `orca doctor` 报 `skill_install=pass`（A6）。
 - `orca.ts` **transform 入口 + 死代码删除**（保留 idle nudge hook）+ grep `MARKER_REGEX` in code = 0（注释 / docstring 中的解释性提及 OK，B5/B6，step 4 后）。
 - nudge：opencode idle / CC Stop 有活跃 run 时提醒调 next（不推进，§4.4，step 2b 后）。
-- `teams install --target nga/cac` 生成对应目录 SKILL.md（B10）。
+- `teams install --target cac` 装上 **cc 家族全套**（CAC≡cc）：skill + nudge Stop-hook（`.cac/hooks/orca-nudge.sh` + `.cac/settings.json` 声明）。
+- `teams install --target nga` 装上 **opencode 家族全套**（NGA≡opencode）：skill + plugin `orca.ts`（idle nudge）+ `opencode.json` 声明（路径指 `.nga`）。
 - opencode 主 session **调 skill** 完成 3 节点 wf（demo 复制 workflows/）→ workflow_completed。
 - CC 主 session 调 skill 完成 wf（复现）。
 - 重复 `orca <wf>` 同 wf → fail loud。

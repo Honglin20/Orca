@@ -3,27 +3,32 @@
 > 新 session 开工前**必读**此文件 + `CLAUDE.md` + 对应阶段 SPEC。
 > 完成任务后清空本文件（移到 release note），**不积累**。
 
-## 🔥 当前任务（2026-07-15）：in-session spec v5 —— 批量 FU-2+3a+FU-3 完成，待进 step 3a/6
+## 当前状态（2026-07-15）：in-session spec v5 §8 —— 全 step + follow-up 闭环，仅余用户侧真机
 
-> **新 session 必读**：本块 + [`docs/specs/in-session-entry-and-simplification.md`](../specs/in-session-entry-and-simplification.md) **v5** + [批量 FU release note](../releases/2026-07-15-in-session-batch-fu2-3a-fu3.md) + [`docs/specs/in-session-unified-backend-draft.md`](../specs/in-session-unified-backend-draft.md)（合并推迟 spec）。
+> **新 session 必读**：本块 + [`docs/specs/in-session-entry-and-simplification.md`](../specs/in-session-entry-and-simplification.md) **v5** + [step 6 release note](../releases/2026-07-15-in-session-step6-nga-cac-install.md)（spec v5 §8 全貌）。
 
-**2026-07-15 已完成**（code-reviewer 多轮全闭环，0 回归）：
-- step 3b / step 5a / FU-1 / step 5b / defects+step4：见 CHANGELOG 索引。
-- **批量 FU-2+3a+FU-3**（`<本 commit>`）：status 无参→活跃+结构化（时间取 `Event.timestamp`）/ doctor 删 entry_hook dead / SKILL.md 补 `error_kind`。详见 [release note](../releases/2026-07-15-in-session-batch-fu2-3a-fu3.md)。**test-agent 真机（纯 CLI）待跑**。
+**spec v5 §8 全 step 收尾**（step 1 / 2b / 3b / 4 / 5a / 5b / defects / FU-1 / 批量 FU-2+3a+FU-3 / **6**）。代码侧无待办 step；剩余全是跨平台真机验证 + 用户暂缓的 follow-up。
 
-### 待办（spec v5 §8，step 3a/6 + follow-up）
+### 2026-07-15 已完成（最新）
 
-- **③a** 重型准入门（留 sprint）。
-- **⑥** teams install nga/cac nudge 机制真机验证（留用户侧，无代码）。
-- **FU-2** m13 parser pre-scan friendly-error（defer，`extra=forbid` 已 fail loud）。
-- **推迟** 合并同一后端（`advance_step`↔`Orchestrator`），见 merge spec，等触发条件。
+- **step 6**（`<本 commit>`）：teams install nga/cac 全套——CAC≡cc（skill + nudge Stop-hook）、NGA≡opencode（skill + plugin + json）；家族路由 + `_opencode_plugin_decl` 泛化；SPEC §4.3/§4.4/§11/§9#1 同步。164 单测 0 回归；code-reviewer 两轮 0 🔴。详见 [release note](../releases/2026-07-15-in-session-step6-nga-cac-install.md)。
+- 批量 FU-2+3a+FU-3 / step 3b / step 5b / FU-1 / step 5a / defects+step4 / step 2b / step 1：见 CHANGELOG 索引。
 
-### follow-up / debt（预存，非阻塞）
+### 待办（用户侧真机，无代码；§9 跨平台）
 
-- `_load_wf_for_run` 的 `catalog.find_workflow` fallback 无测试触达（step 3b code-reviewer Round 2，预存）。
+- **§9#1 nga/cac 全套集成真机加载**：CAC/NGA 是否真读 `.cac`/`.nga`；cac Stop-hook / nga `opencode.json` plugin 是否真生效。
+- **§9#1 nga user-scope 路径**：现 `~/.nga`（step 2b resolve_roots），若 NGA≡opencode XDG 对称应 `~/.config/nga`——真机确认后改 resolve_roots。
+- **§9#1 NGA 配置文件名**：假设读 `opencode.json`（≡opencode）；真机若读 `nga.json`/别处则改 `_opencode_json_path`。
+- **③a 重型准入门**（留 sprint）。
+
+### follow-up / debt（用户暂缓 / 预存，非阻塞）
+
+- **MCP 移除**：用户暂不移除（spec v5 §8 留 MCP 8 tool 出 scope）。触发后再做。
+- **最小核心审计**：用户暂不做。
+- `_load_wf_for_run` 的 `catalog.find_workflow` fallback 无测试触达（step 3b 预存）。
 - `tool_describe_workflow` found 分支无 server 层测试（预存）。
 - tape `workflow_failed.data.kind` 是 `ErrorKind`/`error_kind` 两值集共享字段（跨阶段 debt，5b 登记）。
-- doctor 注释「crash 孤儿 marker 由 doctor 另行检测」与实现不一致（doctor 无孤儿 marker 检测项，pre-existing，可选 backlog）。
+- doctor 注释「crash 孤儿 marker」与实现不一致（pre-existing 可选 backlog）。
 
 ---
 
@@ -36,7 +41,7 @@
 - **phase-16 批 2**：本地包分发 + workspace-instruction。
 
 ## 必读文件（下一任务开工前按需）
+
 - [`docs/specs/in-session-entry-and-simplification.md`](../specs/in-session-entry-and-simplification.md) v5
-- [`docs/releases/2026-07-15-in-session-batch-fu2-3a-fu3.md`](../releases/2026-07-15-in-session-batch-fu2-3a-fu3.md)（上一任务全貌）
-- [`docs/specs/in-session-unified-backend-draft.md`](../specs/in-session-unified-backend-draft.md)（合并推迟 spec + 触发条件）
+- [step 6 release note](../releases/2026-07-15-in-session-step6-nga-cac-install.md)（spec v5 §8 收尾全貌）
 - [CHANGELOG](CHANGELOG.md)（历史完成项索引，各完成块详细在对应 release note）

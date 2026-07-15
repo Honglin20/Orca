@@ -6,7 +6,7 @@
   - opencode 落地：随包 skill（含 orca 入口 skill）+ ``plugins/orca.ts`` + ``opencode.json`` 声明。
   - ``opencode.json`` 合并：保已有键 / ``$schema`` / 其他 plugin 条目；去重；项目相对 vs 用户绝对。
   - 幂等：再跑不重复加声明。
-  - cc / cac / nga target：只装随包 skill（无 plugin/command——那是 opencode 专属）。
+  - cc / cac / nga target：cc 家族（cc/cac）skill + nudge Stop-hook；opencode 家族（opencode/nga）skill + plugin + json。
   - project scope：``opencode.json`` 在 cwd 根 + 相对声明路径。
   - fail loud：copytree 失败 → exit 1（铁律 12）。
   - 守门：不拷 ``benchmark/``。
@@ -179,11 +179,11 @@ def test_install_project_scope_relative_declaration(
     assert "./.opencode/plugins/orca.ts" in cfg["plugin"]
 
 
-# ── cc / cac / nga target（只装 skill）─────────────────────────────────────────
+# ── cc 家族 / opencode 家族 target（step 6：CAC≡cc / NGA≡opencode 全套装）──────
 
 
-def test_install_cc_only_skill(isolated_home: Path):
-    """cc target → 装随包 skill + nudge Stop-hook（v5 §4.4 step 2b(7)）。"""
+def test_install_cc_family_full_set(isolated_home: Path):
+    """cc target → cc 家族全套：skill + nudge Stop-hook（v5 §4.4 step 2b(7)）。"""
     result = runner.invoke(app, ["--target", "cc", "--scope", "user"])
     assert result.exit_code == 0, result.output
     cc = isolated_home / ".claude"
@@ -195,7 +195,7 @@ def test_install_cc_only_skill(isolated_home: Path):
     stop = cfg["hooks"]["Stop"]
     cmds = [h["command"] for entry in stop for h in entry["hooks"]]
     assert any("orca-nudge.sh" in c for c in cmds)
-    # cc/cac/nga 不装 plugin / command（那是 opencode 专属）
+    # cc 家族（cc/cac）不装 plugin / command（那是 opencode 家族专属）
     assert not (cc / "plugins").exists()
     assert not (cc / "command").exists()
 
@@ -423,15 +423,105 @@ def test_cc_nudge_script_passes_when_throttle_state_corrupt(tmp_path: Path):
     assert payload["decision"] == "block"
 
 
-def test_install_cac_and_nga_targets(isolated_home: Path):
-    """cac / nga target → 各自 dotdir 下装随包 skill（v5 §4.3 四平台落点代码）。"""
-    for target, dotdir in (("cac", ".cac"), ("nga", ".nga")):
-        result = runner.invoke(app, ["--target", target, "--scope", "user"])
-        assert result.exit_code == 0, result.output
-        root = isolated_home / dotdir
-        assert (root / "skills" / install_cmds.SKILL_NAME / "SKILL.md").is_file()
-        assert (root / "skills" / "orca" / "SKILL.md").is_file()
-        assert not (root / "plugins").exists()
+def test_install_cac_family_full_set(isolated_home: Path):
+    """cac target → cc 家族全套：skill + nudge Stop-hook（step 6：CAC≡cc，结构相同）。
+
+    step 6 前 cac 只装 skill（零 nudge 覆盖）；本步补：``.cac/hooks/orca-nudge.sh`` +
+    ``.cac/settings.json`` Stop hook 声明 + 无 plugins/command（opencode 家族专属）。
+    """
+    result = runner.invoke(app, ["--target", "cac", "--scope", "user"])
+    assert result.exit_code == 0, result.output
+    cac = isolated_home / ".cac"
+    # skill
+    assert (cac / "skills" / install_cmds.SKILL_NAME / "SKILL.md").is_file()
+    assert (cac / "skills" / "orca" / "SKILL.md").is_file()
+    # cc 家族 nudge：脚本 + settings.json Stop 声明
+    assert (cac / "hooks" / "orca-nudge.sh").is_file()
+    cfg = json.loads((cac / "settings.json").read_text())
+    stop = cfg["hooks"]["Stop"]
+    cmds = [h["command"] for entry in stop for h in entry["hooks"]]
+    assert any("orca-nudge.sh" in c for c in cmds)
+    # 意图断言：nudge 脚本落点在 .cac（CAC≡cc 落点对称，非 .claude）
+    assert str(cac) in next(c for c in cmds if "orca-nudge.sh" in c)
+    # cc 家族不装 plugin / command（opencode 家族专属）
+    assert not (cac / "plugins").exists()
+    assert not (cac / "command").exists()
+
+
+def test_install_nga_family_full_set(isolated_home: Path):
+    """nga target → opencode 家族全套：skill + plugin orca.ts + opencode.json 声明（step 6：NGA≡opencode）。
+
+    step 6 前 nga 只装 skill；本步补 plugin + json 声明（路径指 ``.nga``）。
+    """
+    result = runner.invoke(app, ["--target", "nga", "--scope", "user"])
+    assert result.exit_code == 0, result.output
+    nga = isolated_home / ".nga"
+    # skill
+    assert (nga / "skills" / install_cmds.SKILL_NAME / "SKILL.md").is_file()
+    assert (nga / "skills" / "orca" / "SKILL.md").is_file()
+    # opencode 家族 plugin + json 声明
+    assert (nga / "plugins" / "orca.ts").is_file()
+    cfg = json.loads((nga / "opencode.json").read_text())
+    # 用户 scope 声明用绝对路径（指向 .nga，非 .opencode）
+    orca_decls = [p for p in cfg["plugin"] if "orca.ts" in p]
+    assert len(orca_decls) == 1, f"nga 应恰好一条 orca 声明: {orca_decls}"
+    decl = orca_decls[0]
+    assert decl.startswith("/"), f"用户 scope 声明应为绝对路径: {decl}"
+    assert "/.nga/plugins/orca.ts" in decl, f"nga 声明应指向 .nga: {decl}"
+
+
+def test_install_nga_project_scope_uses_dotnga_relative(
+    isolated_home: Path, isolated_cwd: Path
+):
+    """nga ``--scope project``：cwd 根 ``opencode.json`` plugin 声明须含 ``./.nga/plugins/orca.ts``。
+
+    **step 6 泛化闸门**（spec-reviewer #1/#2 关键）：``_opencode_plugin_decl`` project scope
+    走 ``f"./{hr.root.name}/plugins/orca.ts"``，``hr.root.name`` 由 resolve_roots 派生。user scope
+    走绝对路径（本就 root-relative），**不改泛化也能过** → 必须 project scope 测才抓得住泛化 bug
+    （若泛化退回硬编码 ``.opencode``，本测试断言 ``./.nga/...`` 会 fail）。
+    """
+    result = runner.invoke(app, ["--target", "nga", "--scope", "project"])
+    assert result.exit_code == 0, result.output
+    assert (isolated_cwd / ".nga" / "plugins" / "orca.ts").is_file()
+    cfg_path = isolated_cwd / "opencode.json"
+    assert cfg_path.is_file(), "项目 scope opencode.json 应在 cwd 根"
+    cfg = json.loads(cfg_path.read_text())
+    assert "./.nga/plugins/orca.ts" in cfg["plugin"], (
+        f"nga project-scope 声明应为 ./.nga/plugins/orca.ts（_opencode_plugin_decl 泛化闸门），实际: {cfg['plugin']}"
+    )
+    # 同时确认旧硬编码 .opencode 路径不在声明里（防泛化漏改）
+    assert not any(".opencode" in p for p in cfg["plugin"]), (
+        f"nga 声明不应含 .opencode（_opencode_plugin_decl 泛化应去硬编码）: {cfg['plugin']}"
+    )
+
+
+def test_install_cac_nudge_idempotent_no_duplicate(isolated_home: Path):
+    """cac nudge 重跑：settings.json Stop 不重复加 orca nudge 声明（与 cc 同款幂等）。"""
+    for _ in range(2):
+        r = runner.invoke(app, ["--target", "cac", "--scope", "user"])
+        assert r.exit_code == 0, r.output
+    cfg = json.loads((isolated_home / ".cac" / "settings.json").read_text())
+    stop = cfg["hooks"]["Stop"]
+    orca_entries = [
+        entry for entry in stop
+        if isinstance(entry, dict)
+        and any("orca-nudge" in str(h.get("command", "")) for h in entry.get("hooks", []))
+    ]
+    assert len(orca_entries) == 1, f"cac nudge Stop 声明重复: {orca_entries}"
+
+
+def test_install_nga_idempotent_no_duplicate(isolated_home: Path):
+    """nga plugin 声明重跑：opencode.json 不重复加 orca 声明。
+
+    nga 的 plugin_decl 经 ``hr.root.name`` 派生（比 opencode 绝对路径多一层间接），
+    补此测试锁死该间接层的幂等性（与 opencode 同款 dedup 对称）。
+    """
+    for _ in range(2):
+        r = runner.invoke(app, ["--target", "nga", "--scope", "user"])
+        assert r.exit_code == 0, r.output
+    cfg = json.loads((isolated_home / ".nga" / "opencode.json").read_text())
+    orca_entries = [p for p in cfg["plugin"] if "orca.ts" in p]
+    assert len(orca_entries) == 1, f"nga orca 声明重复: {orca_entries}"
 
 
 def test_install_no_benchmark(isolated_home: Path):

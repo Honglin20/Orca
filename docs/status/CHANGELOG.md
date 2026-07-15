@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-15] in-session v5 §8 step 6 —— teams install nga/cac 全套（CAC≡cc / NGA≡opencode）【spec v5 §8 全 step 收尾】
+
+用户澄清 CAC ≡ Claude Code（`.claude`→`.cac`）、NGA ≡ opencode（`.opencode`→`.nga`），install 阶段两家族全套统一装（不只 skill）：cac 走 cc 家族（skill + nudge Stop-hook：`.cac/hooks/orca-nudge.sh` + `.cac/settings.json`）、nga 走 opencode 家族（skill + plugin `orca.ts` idle nudge + `opencode.json` 声明指 `.nga`）。`run_install` 按家族路由（opencode+nga / cc+cac，显式 `elif` + 末尾 fail-loud `AssertionError`），cc/opencode 零回归（byte-identical）；泛化 `_opencode_plugin_decl` project-scope 路径用 `hr.root.name`（去硬编码 `.opencode`，opencode 旧值不变）。SPEC §4.3/§4.4/§11/§9#1 同步升级为「家族全套」。164 单测 0 回归（+4 净增：cac/nga 全套 + nga project-scope 泛化闸门 + cac/nga 幂等）；code-reviewer 两轮 0 🔴（Rule 7 surface 一处镜像测试冗余）。真机加载（CAC/NGA 是否真读 `.cac`/`.nga` + nudge/plugin 生效）留 §9#1 跨平台用户侧。Commit: `<本 commit，SHA 见 git log>`。详见 [release note](../releases/2026-07-15-in-session-step6-nga-cac-install.md)。
+
 ## [2026-07-15] in-session 批量闭环 FU-2 + 3a + FU-3 —— status 活跃+结构化 / doctor 删 entry_hook dead / skill 补 error_kind
 
 三个独立低复杂度 follow-up 合并单 commit。FU-3：`orca status` 无参对齐 SPEC §2.1/§2.3——只列活跃 run（marker `runs/orca-*.json`）+ 结构化 `{run_id,node,status,last_next_at,elapsed}`（时间字段取 tape `Event.timestamp` 末事件，**非** RunState 零时间字段 / **非** marker mtime；`elapsed` 用 `time.time()` 同基非 monotonic，spec-reviewer 时间基纠正）。FU-2：doctor 删 entry_hook check（step 4 整删 transform 后 PROBE_ENTRY 心跳永不再写，dead）+ 连带死代码（`PROBE_ENTRY_NAME` 常量 / `_read_probe` 死变量 / 报告路径行）；5→4 checks，advance_hook 保留（idle hook 仍写）。3a：SKILL.md 失败处理补 `error_kind` 一句（5b 信封加字段后），同步已装副本。132 单测 0 回归；code-reviewer 两轮 0 🔴（时间基钉死 / marker skip 路径 / 非 empty 人类可读分支全补测试）。Commit: `<本 commit，SHA 见 git log>`。详见 [release note](../releases/2026-07-15-in-session-batch-fu2-3a-fu3.md)。

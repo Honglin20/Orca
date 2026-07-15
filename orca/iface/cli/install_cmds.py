@@ -16,6 +16,14 @@ opencode 额外落 ``plugins/orca.ts`` + 合并 ``opencode.json`` 的 plugin 声
 已 early-return 禁用（惰性），整个 plugin 文件 + 声明在 step 4 整删；此窗口期仍拷贝保声明
 不悬空。command 模板已删（step 2b(5)），不再拷 ``command/orca/``。
 
+**家族路由**（v5 §8 step 6：用户澄清 CAC≡cc / NGA≡opencode，install 阶段两家族全套统一装）：
+  - **opencode 家族**（``opencode`` + ``nga``）：skill + plugin ``orca.ts`` + ``opencode.json``
+    声明（idle nudge 载体）。nga 仅落点 ``.opencode``→``.nga``，其余同 opencode。
+  - **cc 家族**（``cc`` + ``cac``）：skill + nudge Stop-hook（``hooks/orca-nudge.sh`` +
+    ``settings.json`` 声明）。cac 仅落点 ``.claude``→``.cac``，其余同 cc。
+
+四 host 行为家族内对称（CAC/NGA 真机加载是否读 ``.cac``/``.nga`` 留 §9#1 跨平台用户侧验证）。
+
 **架构守门**（D-v7-1 同源）：本模块零 Orca 业务逻辑——只拷文件 + 合并 JSON 顶层字段。
 不调 advance/router/replay/tape 路径，不做状态机判断。CI grep 守门。
 
@@ -224,16 +232,21 @@ def _opencode_json_path(hr: HostRoot) -> Path:
 
 
 def _opencode_plugin_decl(hr: HostRoot, plugin_dst: Path) -> str:
-    """opencode.json ``"plugin"`` 声明里的 plugin 路径：
-    项目 scope 相对 cwd（``./.opencode/plugins/orca.ts``），用户 scope 绝对路径。"""
+    """opencode 家族（opencode + nga）``opencode.json`` ``"plugin"`` 声明里的 plugin 路径。
+
+    项目 scope 相对 cwd（``./<hr.root.name>/plugins/orca.ts``——``.opencode`` 或 ``.nga``）；
+    用户 scope 绝对路径。``hr.root.name`` 由 ``resolve_roots`` 按宿主派生（opencode→
+    ``.opencode``、nga→``.nga``），故同一段代码服务整个 opencode 家族（step 6 泛化）。
+    """
     if hr.scope == "project":
-        return "./.opencode/plugins/orca.ts"
+        return f"./{hr.root.name}/plugins/orca.ts"
     return str(plugin_dst.expanduser().resolve())
 
 
 def _install_opencode(hr: HostRoot) -> dict[str, Any]:
-    """opencode 全套：skill + plugins/orca.ts + opencode.json 声明。
+    """opencode 家族（opencode + nga）全套：skill + plugins/orca.ts + opencode.json 声明。
 
+    服务整个 opencode 家族（step 6：NGA≡opencode，落点 ``.opencode``→``.nga``，其余同）。
     返回 ``{组件: 落地路径/列表}``。opencode.json 合并：``"plugin"`` 数组加 orca 声明
     （去重，保已有 plugin 条目与其他键）。
 
@@ -299,8 +312,9 @@ def _install_opencode(hr: HostRoot) -> dict[str, Any]:
 
 
 def _install_cc_nudge(hr: HostRoot) -> dict[str, Path]:
-    """CC（Claude Code）nudge Stop-hook 落地（v5 §4.4 / step 2b(7)）。
+    """CC 家族（cc + cac）nudge Stop-hook 落地（v5 §4.4 / step 6：CAC≡cc，结构相同）。
 
+    服务整个 cc 家族（cc→``.claude``、cac→``.cac``），全路径 root-relative，无硬编码 dotdir：
     - 拷 ``cc_nudge.sh`` → ``<root>/hooks/orca-nudge.sh``。
     - 合并 ``<root>/settings.json`` 的 ``hooks.Stop``：加一条 ``command: bash <abs>/orca-nudge.sh``
       （去重，保已有 hooks / 其他键）。
@@ -373,8 +387,8 @@ def install(
 
     \b
     - 四前端（cc/opencode/cac/nga）都装同一份随包 skill（含 orca 入口 skill）
-    - opencode 额外落 plugin + opencode.json 声明（plugin 含 idle nudge；transform 已禁用）
-    - cc 额外落 nudge Stop-hook + .claude/settings.json 声明（提醒主 session 调 next，不自动推进）
+    - opencode 家族（opencode/nga）额外落 plugin + opencode.json 声明（plugin 含 idle nudge；transform 已禁用）
+    - cc 家族（cc/cac）额外落 nudge Stop-hook + settings.json 声明（提醒主 session 调 next，不自动推进）
 
     \b
     幂等（重跑覆盖更新，内容相同跳过；JSON 配置读-改-写保已有键）。
@@ -404,19 +418,19 @@ def run_install(target: str, scope: str) -> list[str]:
     for hr in roots:
         typer.echo(f"\n[{hr.host}] → {hr.root}")
         try:
-            if hr.host == "opencode":
+            if hr.host in ("opencode", "nga"):  # opencode 家族：skill + plugin + json 声明
                 written = _install_opencode(hr)
                 for comp, p in written.items():
                     typer.echo(f"  ✓ {comp}: {p}")
-            else:  # cc / cac / nga：装 skill
+            elif hr.host in ("cc", "cac"):  # cc 家族：装 skill + nudge Stop-hook
                 dirs = _install_skill(hr.root)
                 for d in dirs:
                     typer.echo(f"  ✓ skill: {d}")
-                # cc 额外装 nudge Stop-hook（v5 §4.4 / step 2b(7)）。cac/nga 的 nudge 机制
-                # 取决于其前端真机（step 6 验证），本期只装 skill。
-                if hr.host == "cc":
-                    for comp, p in _install_cc_nudge(hr).items():
-                        typer.echo(f"  ✓ {comp}: {p}")
+                # cc 家族都装 nudge Stop-hook（v5 §4.4 / step 6：CAC≡cc，结构与 cc 相同）。
+                for comp, p in _install_cc_nudge(hr).items():
+                    typer.echo(f"  ✓ {comp}: {p}")
+            else:  # 不可达：resolve_roots 已按 VALID_TARGETS 校验 target（fail loud 铁律 12）
+                raise AssertionError(f"unreachable: unexpected host {hr.host!r}")
         except OSError as e:
             typer.echo(f"  ✗ 失败：{e}", err=True)
             failed.append(hr.host)
