@@ -40,8 +40,8 @@ runs/
 .agents/
 skills-lock.json
 
-# 本地 workflow 运行态目录（orca catalog 扫描点；demo 规范副本在 examples/）
-workflows/
+# workflows/ = 内置 workflow 源（随包版本化；teams install 部署到 ~/.orca/workflows 全局可见）。
+# 项目级 workflow 放各自项目的 ./workflows（该项目自己的 gitignore 管）。
 
 # 本地 E2E scratch 脚本（test-agent 一次性验证，硬编码本机路径）
 e2e_check.sh

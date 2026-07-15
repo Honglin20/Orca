@@ -403,6 +403,37 @@ def install(
         raise typer.Exit(1)
 
 
+def _install_bundled_workflows() -> list[Path]:
+    """部署当前目录 ``workflows/*.yaml`` → ``~/.orca/workflows/``（全局内置，catalog 扫到）。
+
+    让 ``teams install`` 把仓库自带 workflow（如 ``nas-agent-pipeline``）装成**全局可见**——
+    任何项目的 ``orca list`` 都能扫到（``~/.orca/workflows`` 是 catalog 用户级扫描点），解决
+    「全新地方 ``orca list`` 空」问题。幂等：内容相同跳过，不同覆盖（install = refresh 内置）。
+    源（CWD/workflows）保留（**复制非移动**）。无 CWD/workflows 或无 *.yaml → no-op
+    （非仓库根跑 install 不报错）。
+    """
+    src_dir = Path.cwd() / "workflows"
+    if not src_dir.is_dir():
+        return []
+    yamls = sorted(src_dir.glob("*.yaml"))
+    if not yamls:
+        return []
+    dest_dir = Path.home() / ".orca" / "workflows"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    deployed: list[Path] = []
+    for src in yamls:
+        dst = dest_dir / src.name
+        try:
+            if dst.exists() and dst.read_text(encoding="utf-8") == src.read_text(encoding="utf-8"):
+                continue  # 内容同跳过（幂等）
+            shutil.copy2(src, dst)
+        except OSError as e:  # noqa: BLE001
+            typer.echo(f"  ⚠ 部署 workflow {src.name} 失败：{e}", err=True)
+            continue
+        deployed.append(dst)
+    return deployed
+
+
 def run_install(target: str, scope: str) -> list[str]:
     """install 核心逻辑（callback + ``skill install`` 弃用委托共用）。返回失败 host 列表。
 
@@ -435,6 +466,13 @@ def run_install(target: str, scope: str) -> list[str]:
         except OSError as e:
             typer.echo(f"  ✗ 失败：{e}", err=True)
             failed.append(hr.host)
+
+    # 部署内置 workflow（CWD/workflows → ~/.orca/workflows，全局可见；与 host 无关，跑一次）
+    deployed_wfs = _install_bundled_workflows()
+    if deployed_wfs:
+        typer.echo(f"\n[workflows] → ~/.orca/workflows（全局内置，orca list 可扫到）")
+        for w in deployed_wfs:
+            typer.echo(f"  ✓ {w.name}")
 
     if failed:
         typer.echo(f"\n部分失败：{', '.join(failed)}", err=True)

@@ -600,3 +600,41 @@ def test_install_cmds_has_no_orca_business_logic():
     ]
     for kw in forbidden:
         assert kw not in src, f"install_cmds 含禁词 {kw!r}（违反零业务逻辑守门）"
+
+
+def test_install_bundled_workflows_deploys_cwd_to_global(tmp_path, monkeypatch):
+    """``_install_bundled_workflows``：CWD/workflows/*.yaml → ~/.orca/workflows（全局内置）。
+
+    部署 + 内容一致 + 幂等（内容同跳过）+ 变更 refresh（覆盖）+ 无 CWD/workflows no-op。
+    解决「全新地方 ``orca list`` 空」——install 把仓库自带 workflow 装成全局可见。
+    """
+    cwd = tmp_path / "proj"
+    (cwd / "workflows").mkdir(parents=True)
+    wf_src = cwd / "workflows" / "demo-wf.yaml"
+    wf_src.write_text("name: demo-wf\ndescription: test\n", encoding="utf-8")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("HOME", str(fake_home))  # Path.home() 走 $HOME（POSIX）
+
+    # 首次部署
+    deployed = install_cmds._install_bundled_workflows()
+    assert [p.name for p in deployed] == ["demo-wf.yaml"]
+    dst = fake_home / ".orca" / "workflows" / "demo-wf.yaml"
+    assert dst.is_file()
+    assert dst.read_text(encoding="utf-8") == wf_src.read_text(encoding="utf-8")
+
+    # 幂等：内容同 → 跳过（返回空）
+    assert install_cmds._install_bundled_workflows() == []
+
+    # 变更 → refresh（覆盖）
+    wf_src.write_text("name: demo-wf\ndescription: changed\n", encoding="utf-8")
+    deployed3 = install_cmds._install_bundled_workflows()
+    assert [p.name for p in deployed3] == ["demo-wf.yaml"]
+    assert "changed" in dst.read_text(encoding="utf-8")
+
+    # 无 CWD/workflows → no-op
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+    assert install_cmds._install_bundled_workflows() == []
