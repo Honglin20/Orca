@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-15] in-session 批量闭环 FU-2 + 3a + FU-3 —— status 活跃+结构化 / doctor 删 entry_hook dead / skill 补 error_kind
+
+三个独立低复杂度 follow-up 合并单 commit。FU-3：`orca status` 无参对齐 SPEC §2.1/§2.3——只列活跃 run（marker `runs/orca-*.json`）+ 结构化 `{run_id,node,status,last_next_at,elapsed}`（时间字段取 tape `Event.timestamp` 末事件，**非** RunState 零时间字段 / **非** marker mtime；`elapsed` 用 `time.time()` 同基非 monotonic，spec-reviewer 时间基纠正）。FU-2：doctor 删 entry_hook check（step 4 整删 transform 后 PROBE_ENTRY 心跳永不再写，dead）+ 连带死代码（`PROBE_ENTRY_NAME` 常量 / `_read_probe` 死变量 / 报告路径行）；5→4 checks，advance_hook 保留（idle hook 仍写）。3a：SKILL.md 失败处理补 `error_kind` 一句（5b 信封加字段后），同步已装副本。132 单测 0 回归；code-reviewer 两轮 0 🔴（时间基钉死 / marker skip 路径 / 非 empty 人类可读分支全补测试）。Commit: `<本 commit，SHA 见 git log>`。详见 [release note](../releases/2026-07-15-in-session-batch-fu2-3a-fu3.md)。
+
 ## [2026-07-15] in-session v5 §8 step 3b —— catalog 物理迁 orca/compile/catalog.py（依赖铁律归位）
 
 catalog（workflow 发现/加载/描述）从 `iface/mcp/catalog.py` 物理迁到 `orca/compile/catalog.py`（`git mv`，内容字节不变）：它是 compile 层关注却坐在 iface = 依赖方向越位，迁入 compile 与 parser/validator 同层方向正。7 处 lazy import → 顶层 **module import** `from orca.compile import catalog` + `catalog.<fn>()`（偏离原计划裸函数 import 的正当修正：commands.py/in_session 各有同名 typer 命令 `list_workflows`，裸 import 触发 RecursionError；且 `mock.patch("...catalog.list_workflows")` 守门单一真相源契约需 module 属性动态查找才 bite——code-reviewer 两轮实证）。9 处 mock target 同步（test_catalog 2 + 跨文件 7）；守门 grep `iface/mcp/catalog` = 0；1123 passed 0 回归（7 failed 全 pre-existing env-blocked，stash 对比复现）。test-agent 真机三路 list 一致待跑。Commit: `<本 commit，SHA 见 git log>`。详见 [release note](../releases/2026-07-15-in-session-step3b-catalog-relocate.md)。

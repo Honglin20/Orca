@@ -68,7 +68,7 @@ _COMPLIANCE_LIMIT = 3
 # doctor 读取作证。未设/0 = 关（plugin 零 I/O）。env 名与 orca.ts 的 DIAGNOSE 字面同步。
 DIAGNOSE_ENV = "ORCA_DIAGNOSE"
 # 心跳文件名（plugin 作用域，落在 rundir = runs/；与 orca.ts PROBE_*_REL 字面同步）。
-PROBE_ENTRY_NAME = ".orca-probe-entry.json"
+# FU-2：``PROBE_ENTRY_NAME`` 已删——transform 派发 step 4 整删后入口心跳永不再写，dead。
 PROBE_ADVANCE_NAME = ".orca-probe-advance.json"
 _PROBE_FRESH_SEC = 300  # 心跳新鲜阈值：5 分钟内算 fresh
 
@@ -717,22 +717,50 @@ def status(
     rid = _merge_run_id(run_id, run_id_opt)
 
     if rid is None:
-        runs_dir = Path("runs")
-        if not runs_dir.exists():
-            out = {"ok": False, "reason": "no runs/ directory"}
-            typer.echo(json.dumps(out, ensure_ascii=False) if json_output else "(无 runs/ 目录)")
-            return
-        tapes = sorted(runs_dir.glob("*.jsonl"))
-        if not tapes:
-            out = {"ok": False, "reason": "no run tapes"}
-            typer.echo(json.dumps(out, ensure_ascii=False) if json_output else "(无 run tape)")
-            return
-        names = [tp.stem for tp in tapes]
+        # FU-3（SPEC §2.1/§2.3）：无参只列**活跃** run（marker 存在 ≡ 活跃，SPEC §7.2 完成
+        # 契约：bootstrap 写 / 终态清）。completed run 无 marker → 不列。输出结构化
+        # ``{runs:[{run_id,node,status,last_next_at,elapsed}]}``（非裸 stem）。
+        runs_dir = _default_rundir()
+        markers = sorted(runs_dir.glob("orca-*.json")) if runs_dir.exists() else []
+        # ``now`` 取在循环外：多 run 共享同一快照基准（elapsed 跨 run 一致，非各算各的）。
+        now = time.time()
+        runs: list[dict[str, Any]] = []
+        for mp in markers:
+            marker = read_marker(mp)
+            if marker is None:
+                # 损坏/孤儿 marker：跳过不崩（doctor 另行检测）。
+                continue
+            tape_path = _default_tape_path(marker.run_id)
+            if not tape_path.is_file():
+                # marker 残留但 tape 缺（不可恢复孤儿）：跳过。
+                continue
+            tape = Tape(tape_path, run_id=marker.run_id)
+            state = replay_state(tape)
+            # 时间字段取 tape 末事件 ``Event.timestamp``（epoch 秒，``time.time()`` 基）。
+            # RunState 零时间字段（schema/state.py），时间只能从 tape 事件派生（spec-reviewer #1）。
+            last_ts = 0.0
+            for ev in tape.replay():
+                last_ts = ev.timestamp
+            # elapsed 与 Event.timestamp 同基（time.time()）；混用 monotonic 会得无意义差值。
+            elapsed = (now - last_ts) if last_ts > 0 else None
+            runs.append({
+                "run_id": marker.run_id,
+                "node": state.current_node,
+                "status": state.status,
+                "last_next_at": last_ts if last_ts > 0 else None,
+                "elapsed": elapsed,
+            })
         if json_output:
-            typer.echo(json.dumps({"runs": names}, ensure_ascii=False))
+            # 空列表 shape 与非空一致（消费方恒读 reply["runs"]，spec-reviewer #5）。
+            typer.echo(json.dumps({"runs": runs}, ensure_ascii=False))
             return
-        for tp in tapes:
-            typer.echo(f"- {tp.stem}")
+        if not runs:
+            typer.echo("(无活跃 run)")
+            return
+        for r in runs:
+            typer.echo(
+                f"- {r['run_id']} [{r['status']}] node={r['node']} elapsed={r['elapsed']}"
+            )
         typer.echo("\n用 `orca status --run-id <run_id>` 看详情。")
         return
 
@@ -878,7 +906,6 @@ def doctor(
         except (json.JSONDecodeError, OSError):
             return None
 
-    entry = _read_probe(PROBE_ENTRY_NAME)
     advance = _read_probe(PROBE_ADVANCE_NAME)
     now = int(time.time())
 
@@ -937,27 +964,9 @@ def doctor(
         ),
     })
 
-    # ④ entry_hook（transform，可选）：v5 transform 派发已禁用（step 2b），心跳仅证明 plugin
-    #   加载/被调——非推进依赖，故只报 pass/unknown，**不 fail**。dispatch_count 在派发禁用后
-    #   生产恒为 0，不再展示（避免「累计 0 次」误导）。
-    if not diag_on:
-        e_status, e_detail = "unknown", (
-            "诊断关，无心跳。B 路径（主 session 自调 next）不依赖 transform；"
-            "若需验 plugin 加载，设 ORCA_DIAGNOSE=1 并在 session 内对话几句。"
-        )
-    elif entry is None:
-        e_status, e_detail = "unknown", (
-            "UNKNOWN：诊断开但无 transform 心跳（plugin 未加载或未触发）。"
-            "v5 transform 派发已禁用，这不影响推进（入口在 orca skill）。"
-        )
-    else:
-        age = now - int(entry.get("last_called_at", 0))
-        e_status = "pass" if age <= _PROBE_FRESH_SEC else "unknown"
-        tag = "PASS" if e_status == "pass" else "STALE"
-        e_detail = f"{tag}：transform 钩子被调（{age}s 前）= plugin 已加载。dispatch 已禁用，仅诊断。"
-    checks.append({"name": "entry_hook", "hard": False, "status": e_status, "detail": e_detail})
-
-    # ⑤ advance_hook（idle，可选）：nudge 载体（step 2b(7)），不 fail。
+    # ④ advance_hook（idle，可选）：nudge 载体（SPEC §4.4），不 fail。
+    # FU-2：entry_hook check 已删——transform 派发 step 4 整删 orca.ts transform 后，
+    # PROBE_ENTRY 心跳永不再写（dead check）。advance_hook 保留：idle hook 仍写 PROBE_ADVANCE。
     if not diag_on:
         a_status, a_detail = "unknown", (
             "诊断关，无心跳。B 路径不依赖 idle 推进（主 session 自调 next）。"
@@ -985,7 +994,6 @@ def doctor(
     lines.append("v5 §1 执行模型：主 session 经 orca skill 自调 `orca next` 推进，不依赖 hook。")
     lines.append("")
     lines.append("心跳文件（仅 ORCA_DIAGNOSE=1 时 plugin 写，可选）：")
-    lines.append(f"  {rundir / PROBE_ENTRY_NAME}")
     lines.append(f"  {rundir / PROBE_ADVANCE_NAME}")
     report = "\n".join(lines)
 

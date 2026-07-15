@@ -1,8 +1,9 @@
 """tests/iface/in_session/test_in_session_v8.py —— v8 / v5 增量守门测试。
 
 覆盖 SPEC v8 §2.7 + §9.2 + v5 §4.4 / §8 step 4：
-  - **doctor CLI**（§2.7，v5 重设计）：5 项 checks（skill_install/cli_imports 硬 +
-    diag/hook 可选）、JSON 结构、report 描述 B 路径、ok=skill+cli 无 fail。
+  - **doctor CLI**（§2.7，v5 重设计）：4 项 checks（skill_install/cli_imports 硬 +
+    diag_switch/advance_hook 可选；FU-2 删 entry_hook dead check）、JSON 结构、
+    report 描述 B 路径、ok=skill+cli 无 fail。
   - **v5 §4.4 idle nudge hook**：session.idle → 提醒主 session 调 next（**绝不 spawn next**，
     B 路径铁律）。
   - **架构守门**：plugin 模板无 `@opencode/core/client` / `command.execute.before` /
@@ -95,7 +96,7 @@ def _install_fake_orca_skill(
 
 
 def test_doctor_json_structure(doctor_iso, monkeypatch):
-    """doctor 输出 JSON {ok, diag, report, checks} + 5 项 checks（v5 加 skill_install + hard 字段）。"""
+    """doctor 输出 JSON {ok, diag, report, checks} + 4 项 checks（FU-2 删 entry_hook 后）。"""
     monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
     reply = _run_doctor()
     assert set(reply.keys()) >= {"ok", "diag", "report", "checks"}
@@ -103,14 +104,15 @@ def test_doctor_json_structure(doctor_iso, monkeypatch):
     assert isinstance(reply["diag"], bool)
     assert isinstance(reply["report"], str) and len(reply["report"]) > 0
     assert isinstance(reply["checks"], list)
-    assert len(reply["checks"]) == 5
+    assert len(reply["checks"]) == 4
     names = [c["name"] for c in reply["checks"]]
-    # v5 顺序：skill_install / cli_imports_ok（硬）在前，diag_switch / hook（可选）在后。
+    # FU-2：entry_hook 已删（transform step 4 整删后 PROBE_ENTRY 心跳永不再写，dead）。
+    # 顺序：skill_install / cli_imports_ok（硬）在前，diag_switch / advance_hook（可选）在后。
     assert names == ["skill_install", "cli_imports_ok", "diag_switch",
-                     "entry_hook", "advance_hook"]
+                     "advance_hook"]
     # 每条 check 带 hard 字段（review 🟡#5：替代硬编码 name tuple 防 typo 静默丢失硬检查）
     hard_expected = {"skill_install": True, "cli_imports_ok": True,
-                     "diag_switch": False, "entry_hook": False, "advance_hook": False}
+                     "diag_switch": False, "advance_hook": False}
     for c in reply["checks"]:
         assert set(c.keys()) == {"name", "status", "detail", "hard"}, (
             f"check {c['name']} 字段漂移：{set(c.keys())}"
@@ -162,63 +164,18 @@ def test_doctor_skill_install_fail_when_absent(doctor_iso, monkeypatch):
 
 
 def test_doctor_diag_off_hook_checks_unknown_ok_unaffected(doctor_iso, monkeypatch):
-    """诊断关：hook 三项（diag/entry/advance）均 unknown；ok 只看 skill+cli（装了 skill → ok）。"""
+    """诊断关：hook 两项（diag/advance）均 unknown；ok 只看 skill+cli（装了 skill → ok）。
+
+    FU-2：entry_hook check 已删（transform step 4 整删后 dead），不再断言。
+    """
     monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
     _install_fake_orca_skill(doctor_iso, "cc")
     reply = _run_doctor()
     assert reply["diag"] is False
     by_name = {c["name"]: c for c in reply["checks"]}
     assert by_name["diag_switch"]["status"] == "unknown"
-    assert by_name["entry_hook"]["status"] == "unknown"
     assert by_name["advance_hook"]["status"] == "unknown"
     assert reply["ok"] is True  # hook unknown 不拉低 ok（skill+cli pass）
-
-
-def test_doctor_diag_on_no_heartbeat_entry_unknown(doctor_iso, monkeypatch):
-    """v5 §4.4：诊断开 + 无 transform 心跳 = entry **unknown**（非 fail）。
-
-    transform 派发已禁用（step 2b），心跳仅证明 plugin 加载——缺它不推进、不故障，故不 fail。
-    ok 仍由 skill+cli 决定（装了 skill → ok=True）。
-    """
-    monkeypatch.setenv("ORCA_DIAGNOSE", "1")
-    _install_fake_orca_skill(doctor_iso, "cc")
-    reply = _run_doctor()
-    by_name = {c["name"]: c for c in reply["checks"]}
-    assert by_name["diag_switch"]["status"] == "pass"
-    assert by_name["entry_hook"]["status"] == "unknown"  # v5：不再 fail
-    assert reply["ok"] is True  # hook 不计数
-
-
-def test_doctor_fresh_entry_heartbeat_passes(doctor_iso, monkeypatch):
-    """诊断开 + 新鲜 entry 心跳 = entry PASS（transform 钩子被调 = plugin 加载，仅诊断）。
-
-    v5：dispatch 已禁用，detail 不再展示 dispatch_count（生产恒 0 会误导）。
-    """
-    import time as _t
-    monkeypatch.setenv("ORCA_DIAGNOSE", "1")
-    _install_fake_orca_skill(doctor_iso, "cc")
-    _write_probe(doctor_iso, ".orca-probe-entry.json", {
-        "diag": True, "last_called_at": int(_t.time()),
-        "dispatch_count": 2, "last_dispatch_sub": "run",
-    })
-    reply = _run_doctor()
-    by_name = {c["name"]: c for c in reply["checks"]}
-    assert by_name["entry_hook"]["status"] == "pass"
-    assert "plugin 已加载" in by_name["entry_hook"]["detail"]
-    assert "累计" not in by_name["entry_hook"]["detail"]  # dispatch_count 不再展示
-
-
-def test_doctor_stale_entry_heartbeat_unknown(doctor_iso, monkeypatch):
-    """v5 §4.4：诊断开 + entry 心跳过期 = **unknown**（非 fail）。transform 已禁用，stale 不故障。"""
-    monkeypatch.setenv("ORCA_DIAGNOSE", "1")
-    _install_fake_orca_skill(doctor_iso, "cc")
-    _write_probe(doctor_iso, ".orca-probe-entry.json", {
-        "diag": True, "last_called_at": 0,  # 远古 → age 巨大
-        "dispatch_count": 0, "last_dispatch_sub": None,
-    })
-    reply = _run_doctor()
-    by_name = {c["name"]: c for c in reply["checks"]}
-    assert by_name["entry_hook"]["status"] == "unknown"  # v5：stale 不再 fail
 
 
 def test_doctor_advance_heartbeat_passes(doctor_iso, monkeypatch):
@@ -242,14 +199,18 @@ def test_doctor_advance_heartbeat_passes(doctor_iso, monkeypatch):
 
 
 def test_doctor_report_describes_b_path(doctor_iso, monkeypatch):
-    """v5：报告说明执行模型 = B 路径（主 session 自调 next），hook 退居可选诊断。"""
+    """v5：报告说明执行模型 = B 路径（主 session 自调 next），hook 退居可选诊断。
+
+    FU-2：entry probe 路径行已删，仅 advance probe 路径写进报告。
+    """
     monkeypatch.setenv("ORCA_DIAGNOSE", "1")
     _install_fake_orca_skill(doctor_iso, "cc")
     reply = _run_doctor()
     assert "B 路径" in reply["report"]
     assert "orca next" in reply["report"]  # 主 session 自调 next
-    # 心跳文件路径写进报告，便于用户定位/清理
-    assert ".orca-probe-entry.json" in reply["report"]
+    # advance 心跳文件路径写进报告（entry 路径行 FU-2 删，不再断言）
+    assert ".orca-probe-advance.json" in reply["report"]
+    assert ".orca-probe-entry.json" not in reply["report"]  # FU-2 守门：entry 路径不再出现
 
 
 # ── v5 §4.4 / step 2b(7)：orca.ts idle nudge（提醒，绝不推进）───────────────────
@@ -493,16 +454,104 @@ def test_status_default_human_readable_unchanged(cwd_tmp, wf_path):
 
 
 def test_status_json_flag_no_run_id_lists_runs_json(cwd_tmp, wf_path):
-    """``status --json`` 无 run_id → JSON ``{runs: [...]}``（plugin 解析用）。"""
+    """FU-3（SPEC §2.1/§2.3）：``status --json`` 无 run_id → 只列活跃 run，结构化字典元素。
+
+    每元素是 dict（含 run_id/node/status/last_next_at/elapsed 五键），非裸 stem。
+    completed run（无 marker）不列；活跃 = marker 存在。
+    """
+    from orca.events.tape import Tape as _Tape
+
     runner = CliRunner()
-    runner.invoke(app, ["bootstrap", str(wf_path)])
+    boot = runner.invoke(app, ["bootstrap", str(wf_path)])
+    boot_reply = json.loads(boot.output.splitlines()[-1])
+    run_id = boot_reply["run_id"]
     result = runner.invoke(app, ["status", "--json"])
     assert result.exit_code == 0
     reply = json.loads(result.output.strip())
     assert "runs" in reply
     assert isinstance(reply["runs"], list)
-    assert len(reply["runs"]) >= 1
-    assert ".jsonl" not in reply["runs"][0]  # stem only
+    assert len(reply["runs"]) == 1  # 唯一活跃 run（bootstrap 后未终态）
+    entry = reply["runs"][0]
+    assert isinstance(entry, dict), "FU-3：runs 元素应为结构化 dict，非裸 stem"
+    # 精确键集守门（防字段静默漂移）
+    assert set(entry.keys()) == {"run_id", "node", "status", "last_next_at", "elapsed"}
+    assert entry["run_id"] == run_id
+    assert entry["status"] == "running"
+    assert entry["node"] is not None  # current_node（bootstrap 后指向 entry 节点）
+    # 时间字段钉死：last_next_at 必须等于 tape 末事件 Event.timestamp（spec-reviewer #1：
+    # RunState 零时间字段，时间只能从 tape 事件派生；防止回归到 monotonic / marker mtime）。
+    expected_last_ts = max(
+        ev.timestamp for ev in _Tape(Path(boot_reply["tape"]), run_id=run_id).replay()
+    )
+    assert entry["last_next_at"] == pytest.approx(expected_last_ts)
+    assert isinstance(entry["last_next_at"], (int, float))
+    assert entry["elapsed"] is not None
+    assert isinstance(entry["elapsed"], (int, float))
+
+
+def test_status_no_run_id_excludes_completed(cwd_tmp, wf_path):
+    """FU-3：completed run（marker 已清）不在活跃列表里。
+
+    bootstrap → next 推到 done（workflow_completed + clear_marker）→ status 无参不列它。
+    """
+    runner = CliRunner()
+    boot = runner.invoke(app, ["bootstrap", str(wf_path)])
+    run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
+    tape = json.loads(boot.output.splitlines()[-1])["tape"]
+    # 推进两步到 workflow_completed（a → b → $end），marker 清。
+    runner.invoke(app, ["next", "--tape", tape, "--run-id", run_id, "--output", "out_a"])
+    done = runner.invoke(app, ["next", "--tape", tape, "--run-id", run_id, "--output", "out_b"])
+    assert json.loads(done.output.splitlines()[-1])["done"] is True
+
+    result = runner.invoke(app, ["status", "--json"])
+    assert result.exit_code == 0
+    reply = json.loads(result.output.strip())
+    assert reply["runs"] == []  # completed run 无 marker → 不列
+
+
+def test_status_no_run_id_empty_human_readable(cwd_tmp):
+    """FU-3：无活跃 run → 人类可读 ``(无活跃 run)`` + exit 0（shape 一致）。"""
+    runner = CliRunner()
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert "无活跃 run" in result.output
+
+
+def test_status_no_run_id_non_empty_human_readable(cwd_tmp, wf_path):
+    """FU-3：有活跃 run + 人类可读（无 --json）→ 每行 ``- <run_id> [status] node=… elapsed=…``。"""
+    runner = CliRunner()
+    boot = runner.invoke(app, ["bootstrap", str(wf_path)])
+    run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert run_id in result.output
+    assert "[running]" in result.output
+    assert "node=" in result.output
+    assert "elapsed=" in result.output
+    assert "看详情" in result.output  # 尾行提示
+
+
+def test_status_no_run_id_skips_corrupt_and_orphan_markers(cwd_tmp, wf_path):
+    """FU-3：损坏 marker（非法 JSON）+ 孤儿 marker（marker 在、tape 缺）被跳过，真 run 仍列。
+
+    守护 cli.py 的两个显式 ``continue`` 失败路径（Rule 9：显式失败路径需测试）。
+    """
+    runner = CliRunner()
+    boot = runner.invoke(app, ["bootstrap", str(wf_path)])
+    run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
+    runs_dir = cwd_tmp / "runs"
+    # 损坏 marker（非法 JSON）
+    (runs_dir / "orca-corrupt.json").write_text("{not json", encoding="utf-8")
+    # 孤儿 marker（合法 JSON 但无对应 tape 文件）
+    (runs_dir / "orca-orphan.json").write_text(
+        json.dumps({"run_id": "orphan", "model": "x", "no_output_count": 0}),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["status", "--json"])
+    assert result.exit_code == 0  # 不崩（skip 不 fail）
+    reply = json.loads(result.output.strip())
+    run_ids = [r["run_id"] for r in reply["runs"]]
+    assert run_ids == [run_id]  # corrupt + orphan 被跳过，只留真 run
 
 
 # ── §2.6.2 stop run_id 派发（v3 §7.2：marker 无 owner，stop 按 run_id 直定位）────
