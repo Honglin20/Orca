@@ -106,7 +106,7 @@ nodes:
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        "orca.iface.mcp.catalog._workflow_dirs",
+        "orca.compile.catalog._workflow_dirs",
         lambda: [wf_dir],
     )
 
@@ -154,7 +154,7 @@ nodes:
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        "orca.iface.mcp.catalog._workflow_dirs",
+        "orca.compile.catalog._workflow_dirs",
         lambda: [wf_dir],
     )
 
@@ -173,7 +173,7 @@ nodes:
 def test_start_workflow_not_in_catalog(tmp_path, monkeypatch):
     """start_workflow 未知 name → business_config error。"""
     monkeypatch.setattr(
-        "orca.iface.mcp.catalog._workflow_dirs",
+        "orca.compile.catalog._workflow_dirs",
         lambda: [tmp_path / "nonexistent"],
     )
     server, mock_manager = _make_server_with_mock_manager()
@@ -206,7 +206,7 @@ nodes:
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        "orca.iface.mcp.catalog._workflow_dirs",
+        "orca.compile.catalog._workflow_dirs",
         lambda: [wf_dir],
     )
 

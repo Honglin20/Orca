@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 
 from orca.compile import ConfigurationError
-from orca.iface.mcp.catalog import (
+from orca.compile.catalog import (
     describe_workflow,
     find_workflow_by_name,
     find_workflow_yaml_path,
@@ -65,7 +65,7 @@ def catalog_dir(tmp_path, monkeypatch):
     wf_dir = tmp_path / "workflows"
     wf_dir.mkdir()
     monkeypatch.setattr(
-        "orca.iface.mcp.catalog._workflow_dirs",
+        "orca.compile.catalog._workflow_dirs",
         lambda: [wf_dir],
     )
     return wf_dir
@@ -138,7 +138,7 @@ def test_list_workflows_first_wins(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        "orca.iface.mcp.catalog._workflow_dirs",
+        "orca.compile.catalog._workflow_dirs",
         lambda: [dir1, dir2],
     )
 

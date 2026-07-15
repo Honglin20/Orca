@@ -498,7 +498,7 @@ def test_orca_list_and_teams_list_share_single_catalog(cwd_tmp, monkeypatch):
             "inputs_count": 0, "inputs_schema": [],
         }]
 
-    with mock.patch("orca.iface.mcp.catalog.list_workflows", side_effect=_fake_list):
+    with mock.patch("orca.compile.catalog.list_workflows", side_effect=_fake_list):
         # orca list（出 JSON）
         r1 = runner.invoke(app, ["list"])
         assert r1.exit_code == 0, r1.output

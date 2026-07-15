@@ -210,7 +210,7 @@ class TestListCommand:
         wf_dir.mkdir()
         (wf_dir / "simple.yaml").write_text(self.SIMPLE, encoding="utf-8")
         monkeypatch.setattr(
-            "orca.iface.mcp.catalog._workflow_dirs", lambda: [wf_dir]
+            "orca.compile.catalog._workflow_dirs", lambda: [wf_dir]
         )
 
         result = runner.invoke(app, ["list"])
@@ -225,7 +225,7 @@ class TestListCommand:
         wf_dir = tmp_path / "workflows"
         wf_dir.mkdir()
         monkeypatch.setattr(
-            "orca.iface.mcp.catalog._workflow_dirs", lambda: [wf_dir]
+            "orca.compile.catalog._workflow_dirs", lambda: [wf_dir]
         )
 
         result = runner.invoke(app, ["list"])

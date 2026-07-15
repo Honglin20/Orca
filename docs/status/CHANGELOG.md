@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-15] in-session v5 §8 step 3b —— catalog 物理迁 orca/compile/catalog.py（依赖铁律归位）
+
+catalog（workflow 发现/加载/描述）从 `iface/mcp/catalog.py` 物理迁到 `orca/compile/catalog.py`（`git mv`，内容字节不变）：它是 compile 层关注却坐在 iface = 依赖方向越位，迁入 compile 与 parser/validator 同层方向正。7 处 lazy import → 顶层 **module import** `from orca.compile import catalog` + `catalog.<fn>()`（偏离原计划裸函数 import 的正当修正：commands.py/in_session 各有同名 typer 命令 `list_workflows`，裸 import 触发 RecursionError；且 `mock.patch("...catalog.list_workflows")` 守门单一真相源契约需 module 属性动态查找才 bite——code-reviewer 两轮实证）。9 处 mock target 同步（test_catalog 2 + 跨文件 7）；守门 grep `iface/mcp/catalog` = 0；1123 passed 0 回归（7 failed 全 pre-existing env-blocked，stash 对比复现）。test-agent 真机三路 list 一致待跑。Commit: `<本 commit，SHA 见 git log>`。详见 [release note](../releases/2026-07-15-in-session-step3b-catalog-relocate.md)。
+
 ## [2026-07-15] in-session v5 §8 step 5b —— daemon batch emit + in-session 错误信封统一（×2）
 
 daemon `next()` 逐条 emit → `emit_batch`（注释「反例 A 消除」原为假，SIGTERM 落批内留半截 tape → resume state_corrupt，铁律 12）；in-session 失败信封统一（daemon + cli，MCP 出 scope：8 tool 全用 phase-11 ErrorKind 轴）：抽 `_step_io` helper（`apply_step_result` 吸收 `_emits_to_event_datas` + `fail_in_session`），daemon `_fail` 的 isinstance 塌缩消除，改读 `exc.error_kind`。信封加 `error_kind` 字段（tape `data.kind` 不变，两者同值——B4/B7 字段名陷阱）。新建 `test_daemon.py`（InSessionDaemon 零覆盖补齐 5 测试：成功路径 / batch emit spy / 畸形 output→kind+error_kind / 反向无 `in_session_error` / 终态+非终态幂等）；拆分误并入 malformed 的 render_error 测试。SPEC §7.5 ×3→×2 + MCP 排除；§2.3 信封加 error_kind。348 单测 0 回归；code-reviewer 两轮 0 BLOCKER（Round 1 M1 经 git show 核验非回归 disputed + m1/m2 fixed；Round 2 m1/m2 fixed + m3 登记）。跨阶段 debt：tape `workflow_failed.data.kind` 是 ErrorKind/error_kind 两值集共享字段，登记 CURRENT。test-agent 真机 E2E 待跑。Commit: `<本 commit，SHA 见 git log>`。详见 [release note](../releases/2026-07-15-in-session-step5b-daemon-error-envelope.md)。

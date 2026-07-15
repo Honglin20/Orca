@@ -31,7 +31,7 @@ from typing import Any
 
 import typer
 
-from orca.compile import ConfigurationError, load_workflow
+from orca.compile import ConfigurationError, catalog, load_workflow
 
 logger = logging.getLogger(__name__)
 
@@ -344,14 +344,10 @@ def run_list() -> None:
     """``list`` 命令的共享实现（orca list + teams list 都调它，单一逻辑）。
 
     抽出来让两个 app 的 ``list`` 命令委托同一函数——避免两份 list 逻辑漂移
-    （coordinator 铁律：无多套事实源）。catalog 本身在 ``iface/mcp/catalog.py``
+    （coordinator 铁律：无多套事实源）。catalog 本身在 ``orca/compile/catalog.py``
     （单一实现）；本函数只做 CLI 展示。
     """
-    # 延迟 import：catalog 属 iface/mcp 子包，按本模块依赖边界不在顶层引入；
-    # 仅 ``list`` 命令需要，函数内取用（catalog 本身轻量，只依赖 compile+schema）。
-    from orca.iface.mcp.catalog import list_workflows as _catalog_list
-
-    items = _catalog_list()
+    items = catalog.list_workflows()
     if not items:
         typer.echo("（无可用 workflow；扫描了 ./workflows + ~/.orca/workflows）")
         return

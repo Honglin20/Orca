@@ -30,7 +30,8 @@ v4 vs 旧 6-tool 设计（2026-07-07 重写）+ in-session v5 §6.2 精简：
     → run_stdio 返回后进 daemon 模式等 idle/signal（§1.3）。
 
 依赖单向：本模块依赖 ``orca.iface.web.run_manager``（RunManager）+
-``orca.iface.mcp.{transport, hints, catalog, tape_index}`` +
+``orca.iface.mcp.{transport, hints, tape_index}`` +
+``orca.compile.catalog``（workflow 发现/加载/描述）+
 ``orca.exec.result``（Result/Error/ErrorKind）+ mcp SDK（FastMCP / stdio_server）。
 不含编排/gate 决策逻辑——manager 才是托管入口。
 """
@@ -43,6 +44,7 @@ import inspect
 import logging
 from typing import TYPE_CHECKING, Any
 
+from orca.compile import catalog
 from orca.exec.error_kinds import ErrorKind
 from orca.exec.result import Error, Result
 from orca.iface.mcp.hints import (
@@ -155,9 +157,7 @@ class OrcaMcpServer:
         inputs in one command. Call ``describe_workflow(name=...)`` next for
         full input metadata.
         """
-        from orca.iface.mcp.catalog import list_workflows
-
-        workflows = list_workflows()
+        workflows = catalog.list_workflows()
         return _ok({"workflows": workflows}, hint=for_list_workflows())
 
     async def tool_describe_workflow(self, name: str) -> dict[str, Any]:
@@ -170,9 +170,7 @@ class OrcaMcpServer:
           - inputs complete → call start_workflow
           - inputs incomplete → ask user for missing fields, then start_workflow
         """
-        from orca.iface.mcp.catalog import describe_workflow, find_workflow_by_name
-
-        wf = find_workflow_by_name(name)
+        wf = catalog.find_workflow_by_name(name)
         if wf is None:
             return _err(
                 ErrorKind.BUSINESS_CONFIG,
@@ -180,7 +178,7 @@ class OrcaMcpServer:
                 "Call list_workflows to see available names.",
                 hint="Call list_workflows to discover available workflows.",
             )
-        detail = describe_workflow(wf)
+        detail = catalog.describe_workflow(wf)
         inputs_complete = _inputs_complete(wf)
         hint = for_describe_workflow(
             inputs_complete=inputs_complete,
@@ -255,10 +253,8 @@ class OrcaMcpServer:
             task: sugar for ``inputs.task``.
             max_iter: override max_iterations.
         """
-        from orca.iface.mcp.catalog import find_workflow
-
         # catalog 反查（DRY：单次扫描同时拿 Workflow + yaml_path）
-        found = find_workflow(name)
+        found = catalog.find_workflow(name)
         if found is None:
             return _err(
                 ErrorKind.BUSINESS_CONFIG,

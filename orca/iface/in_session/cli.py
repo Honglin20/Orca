@@ -37,7 +37,7 @@ from typing import Any
 
 import typer
 
-from orca.compile import ConfigurationError, load_workflow
+from orca.compile import ConfigurationError, catalog, load_workflow
 from orca.events.bus import EventBus
 from orca.events.tape import Tape
 from orca.iface.in_session._step_io import (
@@ -175,9 +175,8 @@ def _resolve_wf_path(wf_arg: str) -> Path:
     p = Path(wf_arg)
     if p.is_file():
         return p
-    # 当 wf 名解析：延迟 import catalog（iface/mcp 子包，按依赖边界不顶层引入）。
-    from orca.iface.mcp.catalog import find_workflow_yaml_path
-    resolved = find_workflow_yaml_path(wf_arg)
+    # 当 wf 名解析：catalog 按 ``wf.name`` 精确反查（compile 层，顶层 import）。
+    resolved = catalog.find_workflow_yaml_path(wf_arg)
     if resolved is None:
         raise typer.BadParameter(
             f"找不到 workflow：{wf_arg!r} 既不是存在的 yaml 文件，也不在 catalog"
@@ -613,14 +612,13 @@ def _load_wf_for_run(run_id: str, tape: Tape) -> "Workflow":
                 error_kind="state_corrupt",
             ) from e
     # fallback：按名查 catalog（兼容老 tape / daemon 形态）。
-    from orca.iface.mcp.catalog import find_workflow
     wname = _read_workflow_name(tape_path)
     if wname is None:
         raise InSessionError(
             f"run {run_id} 的 tape 无 workflow_started，无法定位 workflow",
             error_kind="state_corrupt",
         )
-    found = find_workflow(wname)
+    found = catalog.find_workflow(wname)
     if found is None:
         raise InSessionError(
             f"workflow {wname!r}（run {run_id}）在 tape 无 yaml_path 且 catalog 找不到"
@@ -1011,9 +1009,7 @@ def list_workflows() -> None:
     人类可读，给运维）**调同一个** ``catalog.list_workflows()``——catalog 是唯一实现，
     渲染层按消费者不同（skill 要 JSON / 运营要文本），非两套 list 逻辑。
     """
-    from orca.iface.mcp.catalog import list_workflows as _catalog_list
-
-    items = _catalog_list()
+    items = catalog.list_workflows()
     # 恰取 skill/LLM 需要的 3 字段（name/description/inputs_schema）；catalog item 的其余
     # 字段（entry/inputs_count）留给 MCP/teams 渲染，不暴露给 orca list（B3）。
     workflows = [
