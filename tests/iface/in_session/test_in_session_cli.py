@@ -694,6 +694,212 @@ def test_status_run_id_option_nonexistent_fails_loud(cwd_tmp, wf_path):
     assert "ghost-run" in option.output
 
 
+# ── FU-1：stop/open 加 --run-id option（spec §2.1 命令族统一，套 DEFECT-2 e763e9e）────
+#
+# stop 是**破坏性**（首次 stop 清 marker + emit cancelled），非只读——不能套 status 的
+# 「同 run 调两次 byte-equal」。改用「两独立 run 各停一次」证双形态同构 observable。
+# stop 无 --json；stop 的 nonexistent run 是**幂等 ok（exit 0）**非 fail-loud（exit 1）。
+
+
+def _stop_observable(result) -> dict:
+    """从 stop 结果抽取可比 observable：exit / ok / done / note。"""
+    obs = {"exit": result.exit_code}
+    if result.exit_code == 0:
+        obs.update(json.loads(result.output.splitlines()[-1]))
+    return obs
+
+
+def test_stop_run_id_option_mirrors_positional(cwd_tmp, wf_path):
+    """FU-1：``stop --run-id <id>`` 与位置参数 ``stop <id>`` 同构（spec §2.1）。
+
+    stop 是破坏性，故用**两个独立 run** 各停一次（一 positional 一 option），断言
+    observable（ok/done）一致 + 各自 marker 已清 + tape 末尾 workflow_cancelled。
+    """
+    runner = CliRunner()
+    # 两独立 run（各 bootstrap 一次），分别用两种形态停。
+    boot_a = _bootstrap(runner, wf_path)
+    rid_a = boot_a["run_id"]
+    pos = runner.invoke(app, ["stop", rid_a])
+    assert pos.exit_code == 0, pos.output
+
+    boot_b = _bootstrap(runner, wf_path)
+    rid_b = boot_b["run_id"]
+    opt = runner.invoke(app, ["stop", "--run-id", rid_b])
+    assert opt.exit_code == 0, opt.output
+
+    # 双形态 observable 同构（ok/done 一致；run_id 各自正确）
+    pos_reply = json.loads(pos.output.splitlines()[-1])
+    opt_reply = json.loads(opt.output.splitlines()[-1])
+    assert pos_reply["ok"] is True and pos_reply["done"] is True
+    assert opt_reply["ok"] is True and opt_reply["done"] is True
+    assert pos_reply["run_id"] == rid_a
+    assert opt_reply["run_id"] == rid_b
+
+    # 各自 tape 末尾 workflow_cancelled + marker 清（破坏性 observable 一致）
+    for boot in (boot_a, boot_b):
+        lines = Path(boot["tape"]).read_text(encoding="utf-8").strip().split("\n")
+        assert json.loads(lines[-1])["type"] == "workflow_cancelled"
+    assert list(cwd_tmp.glob("runs/orca-*.json")) == []
+
+
+def test_stop_positional_and_option_same_value_ok(cwd_tmp, wf_path):
+    """FU-1：``stop <id> --run-id <同 id>`` → 视作一次（容错；用户复制粘贴常见）。"""
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id = boot["run_id"]
+    result = runner.invoke(app, ["stop", run_id, "--run-id", run_id])
+    assert result.exit_code == 0, result.output
+    reply = json.loads(result.output.splitlines()[-1])
+    assert reply["ok"] is True and reply["run_id"] == run_id
+
+
+def test_stop_positional_and_option_conflict_fails_loud(cwd_tmp, wf_path):
+    """FU-1：``stop <a> --run-id <b>`` → fail loud（BadParameter，铁律 12）。
+
+    不静默选其一——让用户看到两条路冲突。三命令共用 ``_merge_run_id``，此处锁 stop 路径。
+    """
+    runner = CliRunner()
+    _bootstrap(runner, wf_path)
+    result = runner.invoke(app, ["stop", "rid-a", "--run-id", "rid-b"])
+    assert result.exit_code != 0
+    assert "rid-a" in result.output
+    assert "rid-b" in result.output
+
+
+def test_stop_missing_run_id_fails_loud(cwd_tmp, wf_path):
+    """FU-1：``stop`` 无 run_id（位置参数与 --run-id 都省略）→ exit 2（fail loud）。
+
+    stop 位置参数已从必填改为可选（让 ``stop --run-id X`` 不再因「缺位置参数」exit 2），
+    故 None 由**显式守卫**拦下（``raise BadParameter``）。stop 无 status 的「无参列全部」
+    模式——None 必须 fail loud（ISSUE-3，保 exit 2 回归）。
+    """
+    runner = CliRunner()
+    result = runner.invoke(app, ["stop"])
+    assert result.exit_code == 2
+
+
+def test_stop_run_id_option_nonexistent_is_idempotent_ok(cwd_tmp, wf_path):
+    """FU-1：``stop --run-id <不存在>`` → 幂等 ok（note=no-tape，exit 0），与位置参数等价。
+
+    stop 的 nonexistent run 走幂等清 marker 分支（非 fail-loud）——v8.py:535 的 option 变体。
+    锁住「双形态在 no-tape 路径也等价」。
+    """
+    runner = CliRunner()
+    _bootstrap(runner, wf_path)  # 建 runs/，但不创建 ghost-run 的 tape
+
+    positional = runner.invoke(app, ["stop", "nonexistent-run"])
+    option = runner.invoke(app, ["stop", "--run-id", "nonexistent-run"])
+    assert positional.exit_code == 0, "位置参数形态：no-tape 应幂等 ok exit 0"
+    assert option.exit_code == 0, "--run-id 形态：no-tape 应幂等 ok exit 0（与位置参数等价）"
+    assert _stop_observable(positional).get("note") == "no-tape"
+    assert _stop_observable(option).get("note") == "no-tape"
+
+
+def test_open_run_id_option_routes_to_open_run(cwd_tmp, wf_path):
+    """FU-1：``open --run-id <id>`` 把合流后的 run_id 传给 ``_open_run_inproc``（spec §2.1）。
+
+    mock ``_open_run_inproc`` 避免真起 web server；断言收到的 run_id 与退出码透传。
+    """
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id = boot["run_id"]
+
+    with mock.patch(
+        "orca.iface.in_session.cli._open_run_inproc", return_value=0
+    ) as m:
+        result = runner.invoke(app, ["open", "--run-id", run_id])
+    assert result.exit_code == 0, result.output
+    m.assert_called_once()
+    assert m.call_args.args[0] == run_id
+
+
+def test_open_positional_regression(cwd_tmp, wf_path):
+    """FU-1：``open <id>`` 位置参数仍可用（向后兼容）。mock 同上。"""
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id = boot["run_id"]
+
+    with mock.patch(
+        "orca.iface.in_session.cli._open_run_inproc", return_value=0
+    ) as m:
+        result = runner.invoke(app, ["open", run_id])
+    assert result.exit_code == 0, result.output
+    assert m.call_args.args[0] == run_id
+
+
+def test_open_positional_and_option_same_value_ok(cwd_tmp, wf_path):
+    """FU-1：``open <id> --run-id <同 id>`` → 视作一次（容错；与 stop 对称，命令面锁同值合流）。"""
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id = boot["run_id"]
+
+    with mock.patch(
+        "orca.iface.in_session.cli._open_run_inproc", return_value=0
+    ) as m:
+        result = runner.invoke(app, ["open", run_id, "--run-id", run_id])
+    assert result.exit_code == 0, result.output
+    assert m.call_args.args[0] == run_id
+
+
+def test_open_positional_and_option_conflict_fails_loud(cwd_tmp, wf_path):
+    """FU-1：``open <a> --run-id <b>`` → fail loud（BadParameter，共用 ``_merge_run_id``）。"""
+    runner = CliRunner()
+    _bootstrap(runner, wf_path)
+    result = runner.invoke(app, ["open", "rid-a", "--run-id", "rid-b"])
+    assert result.exit_code != 0
+    assert "rid-a" in result.output
+    assert "rid-b" in result.output
+
+
+def test_open_no_run_id_uses_active_default(cwd_tmp, wf_path):
+    """FU-1：``open`` 都省略 → 取活跃 run 默认（None 不 fail loud，与 stop 区分）。"""
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id = boot["run_id"]
+
+    with mock.patch(
+        "orca.iface.in_session.cli._open_run_inproc", return_value=0
+    ) as m:
+        result = runner.invoke(app, ["open"])
+    assert result.exit_code == 0, result.output
+    assert m.call_args.args[0] == run_id
+
+
+# ── _merge_run_id helper 单测（FU-1 ISSUE-5，DRY 防线）──────────────────────────
+
+
+def test_merge_run_id_both_none_returns_none():
+    """都省略 → None（调用方按命令语义处理：status 列全部 / stop fail loud / open 默认）。"""
+    from orca.iface.in_session.cli import _merge_run_id
+    assert _merge_run_id(None, None) is None
+
+
+def test_merge_run_id_positional_only():
+    """仅位置参数 → 透传。"""
+    from orca.iface.in_session.cli import _merge_run_id
+    assert _merge_run_id("rid", None) == "rid"
+
+
+def test_merge_run_id_option_only():
+    """仅 --run-id → 透传。"""
+    from orca.iface.in_session.cli import _merge_run_id
+    assert _merge_run_id(None, "rid") == "rid"
+
+
+def test_merge_run_id_same_value_tolerated():
+    """同值 → 容错返该值（用户复制粘贴常见）。"""
+    from orca.iface.in_session.cli import _merge_run_id
+    assert _merge_run_id("rid", "rid") == "rid"
+
+
+def test_merge_run_id_conflict_fails_loud():
+    """异值 → BadParameter（铁律 12，含两个冲突值）。"""
+    import typer
+    from orca.iface.in_session.cli import _merge_run_id
+    with pytest.raises(typer.BadParameter):
+        _merge_run_id("a", "b")
+
+
 def test_next_no_marker_returns_no_marker_reason(cwd_tmp, wf_path):
     """next 找不到 marker → {done:false, reason:no-marker}（幂等吞，不崩）。"""
     runner = CliRunner()

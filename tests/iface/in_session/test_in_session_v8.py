@@ -522,10 +522,14 @@ def test_stop_with_run_id_succeeds(cwd_tmp, wf_path):
 
 
 def test_stop_missing_run_id_fails_loud(cwd_tmp, wf_path):
-    """v3 §7.2：``stop`` 无 run_id（必填位置参数）→ typer exit 2（fail loud）。"""
+    """FU-1：``stop`` 无 run_id（位置参数与 --run-id 都省略）→ exit 2（fail loud）。
+
+    位置参数已从必填改为可选（让 ``stop --run-id X`` 不再因「缺位置参数」exit 2），
+    None 改由显式守卫 ``raise BadParameter`` 拦下（ISSUE-3，保 exit 2 回归）。
+    """
     runner = CliRunner()
     result = runner.invoke(app, ["stop"])
-    # run_id 是必填位置参数，缺失 → typer BadParameter exit 2
+    # 位置参数与 --run-id 都省略 → None 守卫 BadParameter exit 2
     assert result.exit_code == 2
 
 

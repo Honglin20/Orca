@@ -7,9 +7,10 @@
 
 > **新 session 必读**：本块 + [`docs/specs/in-session-entry-and-simplification.md`](../specs/in-session-entry-and-simplification.md) **v5** + [step 5a release note](../releases/2026-07-15-in-session-step5a-setup-removal.md) + [step 5b 计划](../plans/2026-07-15-in-session-step5b-daemon-error-envelope.md) + [`docs/specs/in-session-unified-backend-draft.md`](../specs/in-session-unified-backend-draft.md)（合并推迟 spec）。
 
-**2026-07-15 已完成**（4 commits，code-reviewer 多轮全闭环，0 回归）：
+**2026-07-15 已完成**（5 commits，code-reviewer 多轮全闭环，0 回归）：
 - **DEFECT-1**（`2de50e3`）/ **DEFECT-2**（`e763e9e`）/ **step 4**（`52cc9f3`）：见 [step 4 release note](../releases/2026-07-15-in-session-defects-and-step4.md)。
-- **step 5a**（`<本 commit>`）：删 setup phase 全栈 + MCP migration note（A2 gate 保留），详见 [release note](../releases/2026-07-15-in-session-step5a-setup-removal.md)。
+- **step 5a**（`bce29f8`）：删 setup phase 全栈 + MCP migration note（A2 gate 保留），详见 [release note](../releases/2026-07-15-in-session-step5a-setup-removal.md)。
+- **FU-1**（`<本 commit>`）：`stop`/`open` 加 `--run-id` option + 抽 `_merge_run_id` helper（命令族统一，套 e763e9e），详见 [release note](../releases/2026-07-15-in-session-fu1-stop-open-runid.md)。**test-agent 真机 E2E 待跑**。
 
 ### 待办（spec v5 §8，step 5b/3a/3b/6 + follow-up）
 
@@ -17,7 +18,7 @@
 - **③a** 重型准入门（留 sprint）。
 - **③b** catalog 物理迁（**已解锁**——前置 step 5a 完成）。
 - **⑥** teams install nga/cac nudge 机制真机验证（留用户侧，无代码）。
-- **FU-1** DEFECT-2 同型：`stop` / `open` 加 `--run-id` option（spec/SKILL.md 写 `--run-id`，CLI 用位置参数；每命令独立 commit）。
+- **FU-3** `status` 无参列表契约漂移（test-agent 观察，SPEC §2.3 写 `{runs:[{run_id,node,status,...}]}`，实跑 `{runs:[stem]}`），独立收。
 - **FU-2** m13 parser pre-scan friendly-error（defer，`extra=forbid` 已 fail loud，pre-scan 是 UX 优化）。
 - **推迟** 合并同一后端（`advance_step`↔`Orchestrator`），见 merge spec，等触发条件。
 

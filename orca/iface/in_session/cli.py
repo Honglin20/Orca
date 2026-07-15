@@ -11,8 +11,9 @@ v3 §2 接口定型（7 命令，删 ``in-session`` 子命令层）：
   - ``orca next --run-id <id> [--output '<产出>']`` —— 推进一步（主 session 逐步自调）。
   - ``orca status [--run-id <id>]`` —— 读 tape replay_state 报进度（spec §2.1：``--run-id``
     形态与 ``next`` 统一；位置参数 ``[<run_id>]`` 兼容旧调用）。
-  - ``orca stop <run_id>`` —— 清 marker + per-call flock emit ``workflow_cancelled``。
-  - ``orca open [<run_id>]`` —— 打开 web 监控（默认当前活跃 run，复用 web attach）。
+  - ``orca stop [--run-id <id>]`` —— 清 marker + per-call flock emit ``workflow_cancelled``
+    （spec §2.1：``--run-id`` 形态；位置参数 ``<run_id>`` 兼容旧调用；至少指定一个）。
+  - ``orca open [--run-id <id>]`` —— 打开 web 监控（默认当前活跃 run，复用 web attach）。
   - ``orca doctor`` —— 自检（skill 落点 + CLI imports；hook 心跳可选）。
 
 marker v3 §7.2：只 ``{run_id, model, no_output_count}``；文件名固定 ``orca-<run_id>.json``，
@@ -695,6 +696,20 @@ async def _next_in_critical_section(
     return result, compliance_failed
 
 
+def _merge_run_id(run_id: str | None, run_id_opt: str | None) -> str | None:
+    """位置参数与 ``--run-id`` option 合流：同值容错 / 异值 fail loud / 都空返 None。
+
+    status/stop/open 三命令共用（FU-1，DRY：防三处合流逻辑漂移）。都空返 None，
+    **None 的语义由调用方按命令分别处理**：status → 列全部活跃 run；stop → fail loud
+    （显式守卫）；open → 取活跃 run 默认。
+    """
+    if run_id is not None and run_id_opt is not None and run_id != run_id_opt:
+        raise typer.BadParameter(
+            f"位置参数 run_id={run_id!r} 与 --run-id={run_id_opt!r} 不一致，请二选一"
+        )
+    return run_id if run_id is not None else run_id_opt
+
+
 @app.command(name="status")
 def status(
     run_id: str = typer.Argument(
@@ -717,12 +732,7 @@ def status(
     """
     from orca.events.replay import replay_state
 
-    # --run-id 与位置参数二选一（同传且不同值 → fail loud；同传同值 → 视作一次）。
-    if run_id is not None and run_id_opt is not None and run_id != run_id_opt:
-        raise typer.BadParameter(
-            f"位置参数 run_id={run_id!r} 与 --run-id={run_id_opt!r} 不一致，请二选一"
-        )
-    rid = run_id if run_id is not None else run_id_opt
+    rid = _merge_run_id(run_id, run_id_opt)
 
     if rid is None:
         runs_dir = Path("runs")
@@ -773,20 +783,37 @@ def status(
 
 @app.command()
 def stop(
-    run_id: str = typer.Argument(..., help="要停的 run id"),
+    run_id: str = typer.Argument(
+        None, help="要停的 run id（位置参数，与 --run-id 二选一；至少指定一个）",
+    ),
+    run_id_opt: str = typer.Option(
+        None, "--run-id",
+        help="要停的 run id（spec §2.1 与 next/status 统一的 --run-id 形态；与位置参数二选一）",
+    ),
     log_level: str = typer.Option("INFO", "--log-level", help="INFO/DEBUG/WARN/ERROR"),
 ) -> None:
-    """停一个 run：清激活 marker + per-call flock emit ``workflow_cancelled``。"""
+    """停一个 run：清激活 marker + per-call flock emit ``workflow_cancelled``。
+
+    ``run_id`` 两种传法都接受（spec §2.1 统一 ``--run-id`` 形态，位置参数保留兼容旧调用 /
+    主 session 既有测试）：``orca stop --run-id <id>`` 或 ``orca stop <id>``。两者同传且值不
+    一致 → fail loud（BadParameter）。**都省略 → fail loud**（stop 无「列全部」模式，必须
+    显式指定停哪个 run）。
+    """
     _setup_logging(log_level)
 
-    tape_path = _default_tape_path(run_id)
+    rid = _merge_run_id(run_id, run_id_opt)
+    if rid is None:
+        # stop 无 status 的「无参列全部」模式：None 必须 fail loud（保 exit 2 回归）。
+        raise typer.BadParameter("stop 需指定 run_id：用 --run-id 或位置参数")
+
+    tape_path = _default_tape_path(rid)
     rundir = tape_path.parent
-    mpath = marker_path(rundir, run_id)
+    mpath = marker_path(rundir, rid)
 
     if not tape_path.exists():
         # 无 tape：仅清 marker（stop 幂等，允许「run 已清理但 marker 残留」）。
         clear_marker(mpath)
-        typer.echo(json.dumps({"run_id": run_id, "ok": True, "done": True, "note": "no-tape"}))
+        typer.echo(json.dumps({"run_id": rid, "ok": True, "done": True, "note": "no-tape"}))
         return
 
     acquired = _try_acquire_flock(tape_path)
@@ -794,7 +821,7 @@ def stop(
         typer.echo(json.dumps({"done": False, "reason": "busy"}))
         return
     fd, _ = acquired
-    tape_obj = Tape(tape_path, run_id=run_id, resume=True)
+    tape_obj = Tape(tape_path, run_id=rid, resume=True)
     bus = EventBus(tape_obj)
     try:
         asyncio.run(bus.emit("workflow_cancelled", {"reason": "user_stop"}))
@@ -808,7 +835,7 @@ def stop(
                 bus.close()
             finally:
                 clear_marker(mpath)
-    typer.echo(json.dumps({"run_id": run_id, "ok": True, "done": True}))
+    typer.echo(json.dumps({"run_id": rid, "ok": True, "done": True}))
 
 
 def _scan_skill_install(
@@ -1019,7 +1046,11 @@ def list_workflows() -> None:
 @app.command(name="open")
 def open_run(
     run_id: str = typer.Argument(
-        None, help="要打开的 run_id（省略则用当前唯一活跃 run；多个活跃时需显式指定）",
+        None, help="要打开的 run_id（位置参数，与 --run-id 二选一；省略则用当前唯一活跃 run）",
+    ),
+    run_id_opt: str = typer.Option(
+        None, "--run-id",
+        help="要打开的 run id（spec §2.1 与 next/status/stop 统一的 --run-id 形态；与位置参数二选一）",
     ),
     tape: Path | None = typer.Option(
         None, "--tape",
@@ -1036,13 +1067,15 @@ def open_run(
 ) -> None:
     """打开 web 监控面板（SPEC §2.1，复用 web attach）。
 
-    ``run_id`` 省略时自动取**当前唯一活跃 run**（扫活跃 marker）；多个活跃 → fail loud
-    提示指定 run_id；无活跃 → fail loud 提示先 ``orca <wf>``。复用 ``teams open`` 同款
-    ``_open_run``（read-only attach + tail-follow）。
+    ``run_id`` 两种传法都接受（spec §2.1 统一 ``--run-id`` 形态）：``orca open --run-id <id>``
+    或 ``orca open <id>``。两者同传且值不一致 → fail loud（BadParameter）。**都省略 → 取当前
+    唯一活跃 run**（多个活跃 → fail loud 提示指定 run_id；无活跃 → fail loud 提示先 ``orca <wf>``）。
+    复用 ``teams open`` 同款 ``_open_run``（read-only attach + tail-follow）。
     """
-    if run_id is None:
-        run_id = _default_active_run_id()
-    raise typer.Exit(_open_run_inproc(run_id, tape_path=tape, host=host, port=port))
+    rid = _merge_run_id(run_id, run_id_opt)
+    if rid is None:
+        rid = _default_active_run_id()
+    raise typer.Exit(_open_run_inproc(rid, tape_path=tape, host=host, port=port))
 
 
 def _default_active_run_id() -> str:

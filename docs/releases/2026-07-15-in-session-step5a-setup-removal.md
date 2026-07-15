@@ -4,7 +4,7 @@
 **Spec**: [`docs/specs/in-session-entry-and-simplification.md`](../specs/in-session-entry-and-simplification.md) v5 §6.1 / §6.2 / §8 step 5a
 **Plan**: [`docs/plans/2026-07-15-in-session-step5a-setup-removal.md`](../plans/2026-07-15-in-session-step5a-setup-removal.md)
 **Branch**: `in-session-unified-backend`
-**Commit**: `<本 commit，single-commit；SHA 见 git log / CHANGELOG>`
+**Commit**: `bce29f8`
 **前置**: step 1 / 2b / 4 已 DONE　|　**解锁**: step 3b（catalog 物理迁）
 
 ## 做了什么
