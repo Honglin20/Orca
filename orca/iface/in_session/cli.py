@@ -1004,7 +1004,7 @@ def list_workflows() -> None:
 
     items = _catalog_list()
     # 恰取 skill/LLM 需要的 3 字段（name/description/inputs_schema）；catalog item 的其余
-    # 字段（has_setup/entry/inputs_count）留给 MCP/teams 渲染，不暴露给 orca list（B3）。
+    # 字段（entry/inputs_count）留给 MCP/teams 渲染，不暴露给 orca list（B3）。
     workflows = [
         {
             "name": it["name"],

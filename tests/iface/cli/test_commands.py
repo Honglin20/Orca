@@ -204,21 +204,6 @@ class TestListCommand:
         "    routes:\n"
         "      - to: $end\n"
     )
-    SETUP = (
-        "name: setup_demo\n"
-        "description: 带 setup\n"
-        "setup:\n"
-        "  - name: collector\n"
-        "    kind: agent\n"
-        '    prompt: "collect"\n'
-        "entry: a\n"
-        "nodes:\n"
-        "  - name: a\n"
-        "    kind: script\n"
-        '    command: "echo hi"\n'
-        "    routes:\n"
-        "      - to: $end\n"
-    )
 
     def test_list_shows_workflow_names(self, tmp_path, monkeypatch):
         wf_dir = tmp_path / "workflows"
@@ -235,20 +220,6 @@ class TestListCommand:
         assert "简单 workflow" in result.stdout
         # 按 name 列出，不输出文件名
         assert "simple.yaml" not in result.stdout
-
-    def test_list_marks_has_setup(self, tmp_path, monkeypatch):
-        wf_dir = tmp_path / "workflows"
-        wf_dir.mkdir()
-        (wf_dir / "setup.yaml").write_text(self.SETUP, encoding="utf-8")
-        monkeypatch.setattr(
-            "orca.iface.mcp.catalog._workflow_dirs", lambda: [wf_dir]
-        )
-
-        result = runner.invoke(app, ["list"])
-
-        assert result.exit_code == EXIT_OK
-        assert "setup_demo" in result.stdout
-        assert "⚙setup" in result.stdout
 
     def test_list_empty_note(self, tmp_path, monkeypatch):
         wf_dir = tmp_path / "workflows"

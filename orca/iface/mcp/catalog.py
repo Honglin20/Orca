@@ -1,8 +1,7 @@
 """catalog.py —— workflow catalog（纯函数 + 文件系统，SPEC phase-10 §5.6）。
 
 回答「``list_workflows`` / ``describe_workflow`` 数据从哪来？」：扫项目级 + 用户级
-``workflows/`` 目录，用 ``compile.load_workflow`` 加载每个 YAML，提取元信息（含 v4
-``has_setup`` 标记 + setup phase 元信息）。
+``workflows/`` 目录，用 ``compile.load_workflow`` 加载每个 YAML，提取元信息。
 
 设计约束（§5.6 关键约束）：
   - 纯函数 + 文件系统，无 daemon 注册表、无 db。
@@ -10,8 +9,7 @@
   - ``find_workflow_by_name`` / ``find_workflow_yaml_path`` 给 ``start_workflow`` /
     ``describe_workflow`` 反查用（name → yaml_path）。
 
-三重杠杆 A（§2.8）：``list_workflows`` 返 ``has_setup`` 标记，主 session 选 workflow
-阶段就知道「这个 workflow 需要 setup」。
+in-session v5 §6.2：setup phase 全栈删除，catalog 不再返 ``has_setup`` / setup 元信息。
 
 依赖单向：本模块依赖 ``orca.compile``（load_workflow）+ ``orca.schema``（Workflow）。
 不依赖 run/exec/events。纯函数。
@@ -45,8 +43,7 @@ def _workflow_dirs() -> list[Path]:
 def list_workflows() -> list[dict[str, Any]]:
     """扫描 catalog 目录，返回 workflow 元信息列表（SPEC §5.6 / §2.2）。
 
-    每项字段：``{name, description, has_setup, entry, inputs_count, inputs_schema}``。
-    ``has_setup`` 是三重杠杆 A（§2.8）：主 session 据此知道是否需调 get_agent_prompt。
+    每项字段：``{name, description, entry, inputs_count, inputs_schema}``。
     ``inputs_schema``（v5 §2.3）= ``[{name, type, description}]``，给 ``orca list`` 的
     skill/LLM 选 wf + 抽 inputs（无 describe 命令，一个命令给齐）。
 
@@ -73,7 +70,6 @@ def list_workflows() -> list[dict[str, Any]]:
             seen[wf.name] = {
                 "name": wf.name,
                 "description": wf.description,
-                "has_setup": bool(wf.setup),
                 "entry": wf.entry,
                 "inputs_count": len(wf.inputs),
                 # v5 §2.3：orca list 给 skill/LLM 选 wf + 抽 inputs 的全部信息——
@@ -84,26 +80,15 @@ def list_workflows() -> list[dict[str, Any]]:
 
 
 def describe_workflow(wf: Workflow) -> dict[str, Any]:
-    """从已加载的 ``Workflow`` 提取详查字典（SPEC §2.2 / §2.7）。
+    """从已加载的 ``Workflow`` 提取详查字典（SPEC §2.2）。
 
-    返回字段：``{name, description, inputs_schema, setup, has_setup, estimated_runtime}``。
-    ``setup`` 字段（``has_setup=True`` 时非空）：setup phase agent 元信息列表，每项
-    ``{name, description, output_schema}``。主 session 据此判断「是否需 setup」。
+    返回字段：``{name, description, inputs_schema}``。``inputs_schema`` 是 dict
+    ``{key: {type, required, description}}``，给 MCP describe_workflow 工具展示用。
     """
     return {
         "name": wf.name,
         "description": wf.description,
         "inputs_schema": _inputs_to_schema(wf),
-        "setup": [
-            {
-                "name": a.name,
-                "description": a.prompt[:200] if a.prompt else "",
-                "output_schema": a.output_schema,
-            }
-            for a in (wf.setup or [])
-        ],
-        "has_setup": bool(wf.setup),
-        "estimated_runtime": _estimate_runtime(wf),
     }
 
 
@@ -182,19 +167,3 @@ def _inputs_to_schema_list(wf: Workflow) -> list[dict[str, Any]]:
         }
         for key, idef in wf.inputs.items()
     ]
-
-
-def _estimate_runtime(wf: Workflow) -> str:
-    """粗估 runtime（基于 node 数量，非精确——给主 session 参考用）。
-
-    他uristic：``len(nodes)`` 个 agent × 平均 30s/node（含 setup phase）。
-    仅用于 ``describe_workflow`` 展示，不参与调度决策。
-    """
-    agent_count = sum(
-        1 for n in wf.nodes if hasattr(n, "kind") and n.kind == "agent"
-    ) + len(wf.setup or [])
-    if agent_count == 0:
-        return "<10s（纯 script / set 节点）"
-    if agent_count <= 2:
-        return f"~{agent_count * 30}s（{agent_count} agent）"
-    return f"~{(agent_count * 30) // 60}m（{agent_count} agent）"

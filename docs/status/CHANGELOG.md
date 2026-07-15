@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-15] in-session v5 §8 step 5a —— 删 setup phase 全栈 + MCP migration note（A2 gate 保留）
+
+删 setup phase 全栈（路径 B 死代码）：schema `Workflow.setup` / compile `_check_setup_phase_constraints` + jinja valid_root 去 setup / exec `RunContext.setup` + render setup ns / run orchestrator setup_ns / iface(mcp/web/cli) 全层；MCP breaking：删 `tool_get_agent_prompt` + `tool_start_workflow` 去 `setup_outputs`（migration note 兜底旧客户端）。m13 fail loud 靠 pydantic `extra="forbid"`（零新代码）。**A2 铁律**：execute phase gate 校验（`_check_execute_phase_no_gate_tools` / `_INTERRUPT_TOOL_NAMES` / `_check_no_interrupt_tools`）保留不删，唯一覆盖测试从 `test_setup_phase.py` 搬迁到 `tests/compile/test_validator.py`（防丢）。契约 doc 同步（setup 删后旧陈述变假）。1526 单测 passed 0 回归（8 failed 全 pre-existing env-blocked，stash 对比复现）；test-agent 真机 E2E 全绿（--help/list 契约 / 3 节点 bootstrap→next→completed / setup YAML fail loud exit 1 / A2 gate fail loud / doctor ok / MCP 8 工具）；code-reviewer 两轮 0 BLOCKER / 0 MAJOR。Commit: `<本 commit，SHA 见 git log>`。详见 [release note](../releases/2026-07-15-in-session-step5a-setup-removal.md)。
+
 ## [2026-07-15] in-session E2E defects 修复 + v5 §8 step 4（orca.ts transform 整删）
 
 E2E 跑发现 2 defect 各独立 commit 修复：① cc_nudge.sh 缺 jq 时静默失败（fail-loud 违规）改用 python3 + marker 损坏时 stderr/exit 2。② `orca status` 加 `--run-id` option（与 SKILL.md/spec 一致；位置参数保留兼容；异值冲突 fail loud）。随后做 v5 §8 step 4 opencode 收尾：删 orca.ts transform marker 派发入口 + 9 个死代码 helper + `_constants.py`，**保留 idle nudge hook**（§4.4，opencode nudge 载体）；review 捕获 BLOCKER（test_web_default_and_open 跨文件漏扫 8 测试）+ MAJOR（advanceCount/lastAdvanceRunId 死代码）全闭环。spec 决策 #12 + 验收标准措辞修正对齐。185 affected passed 0 回归。Commits: `2de50e3`（DEFECT-1）+ `e763e9e`（DEFECT-2）+ `52cc9f3`（step 4）。详见 [release note](../releases/2026-07-15-in-session-defects-and-step4.md)。

@@ -357,9 +357,8 @@ def run_list() -> None:
         return
     typer.echo("可用 workflow（./workflows + ~/.orca/workflows）：")
     for it in items:
-        marker = " ⚙setup" if it.get("has_setup") else ""
         desc = it.get("description") or ""
-        typer.echo(f"  {it['name']}{marker}  {desc}".rstrip())
+        typer.echo(f"  {it['name']}  {desc}".rstrip())
 
 
 # ── executor 子命令组（后端二进制配置与健康检查）──────────────────────────────

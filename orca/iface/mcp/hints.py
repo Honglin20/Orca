@@ -3,10 +3,11 @@
 跨客户端通用引导：tool 返回值里的 ``_hint`` 字段是「傻瓜也能跟着调」的下一步指令。
 按 SPEC §2.5 表逐字实现。**running 显式建议 Claude 结束 turn**，规避 CC 循环检测（草稿 §5.5）。
 
-v4 变化（2026-07-07）：
+v4 变化（2026-07-07）+ in-session v5 §6.2 精简：
   - 删 ``needs_decision`` / ``after_resolve`` 分支（v4 删 resolve_gate，execute 永不中断）。
-  - 加 Discovery 组分支（list_workflows / describe_workflow / get_agent_prompt）。
-  - 加 setup_required / setup_outputs_mismatch 分支（三重杠杆 B）。
+  - Discovery 组分支（list_workflows / describe_workflow）。
+  - in-session v5 §6.2：删 setup_required / setup_outputs_mismatch / get_agent_prompt 分支
+    （setup phase 全栈删除）。
 
 为何把 hints 单独成模块（DRY）：tool 返回值在多个地方加 _hint，文案必须一致，
 集中一处避免漂移。
@@ -73,27 +74,21 @@ def unknown_task() -> str:
     )
 
 
-# ── Discovery 组（v4 新增）────────────────────────────────────────────────────
+# ── Discovery 组 ─────────────────────────────────────────────────────────────
 
 
 def for_list_workflows() -> str:
-    """list_workflows 返回的 _hint（三重杠杆 A 引导，SPEC §2.5）。"""
+    """list_workflows 返回的 _hint（SPEC §2.5）。"""
     return (
-        "Pick a workflow. **If has_setup=true, you must collect setup_outputs "
-        "before start.** Call describe_workflow(name=...) for details."
+        "Pick a workflow. Call describe_workflow(name=...) for full input "
+        "metadata, then ask the user for any missing inputs."
     )
 
 
 def for_describe_workflow(
-    *, has_setup: bool, inputs_complete: bool, name: str
+    *, inputs_complete: bool, name: str
 ) -> str:
-    """describe_workflow 返回的 _hint（按 has_setup × inputs 完整性分支，SPEC §2.5）。"""
-    if has_setup:
-        return (
-            "Setup required. For each setup agent, call "
-            f"get_agent_prompt(name=<agent_name>) and collect outputs per its "
-            "description. Then start_workflow with setup_outputs."
-        )
+    """describe_workflow 返回的 _hint（按 inputs 完整性分支，SPEC §2.5）。"""
     if inputs_complete:
         return f"Inputs complete. Call start_workflow(name={name!r}, inputs=...)."
     return (
@@ -102,53 +97,9 @@ def for_describe_workflow(
     )
 
 
-def for_get_agent_prompt(agent_name: str) -> str:
-    """get_agent_prompt 返回的 _hint（SPEC §2.5）。
-
-    引导主 session 用 prompt 作 operating context 收集 setup outputs。
-    """
-    return (
-        f"Use this prompt as your operating context. Ask the user questions "
-        f"per the prompt. The collected structured output goes into "
-        f"setup_outputs[{agent_name!r}] when calling start_workflow."
-    )
-
-
 def for_get_task_history() -> str:
     """get_task_history 返回的 _hint（SPEC §2.5）。"""
     return (
         "History shown (most recent events last). For current status, "
         "call get_task_status."
-    )
-
-
-# ── setup_required / setup_outputs_mismatch（三重杠杆 B）─────────────────────
-
-
-def for_setup_required(agent_names: list[str]) -> str:
-    """start_workflow 检测到 setup_required 时的 _hint（SPEC §2.5 / §2.8 杠杆 B）。
-
-    fail loud + 强引导「必须先 describe → get_agent_prompt」。
-    """
-    names_str = ", ".join(repr(n) for n in agent_names)
-    return (
-        f"Setup required but setup_outputs missing. Setup agents: [{names_str}]. "
-        "Call describe_workflow to see setup agents, then get_agent_prompt "
-        "to collect outputs for each."
-    )
-
-
-def for_setup_outputs_mismatch(expected: list[str], actual: list[str]) -> str:
-    """start_workflow 检测到 setup_outputs key 不匹配时的 _hint。"""
-    return (
-        f"setup_outputs keys must match workflow.setup agent names exactly. "
-        f"Expected: {expected}. Got: {actual}. Re-check describe_workflow output."
-    )
-
-
-def for_setup_outputs_invalid(agent_name: str, detail: str) -> str:
-    """start_workflow 检测到 setup_outputs schema 校验失败时的 _hint。"""
-    return (
-        f"setup_outputs[{agent_name!r}] failed schema validation: {detail}. "
-        "Re-check the output_schema in describe_workflow."
     )

@@ -112,7 +112,6 @@ class Orchestrator:
         interrupt_handler: InterruptHandler | None = None,
         agent_tools_server: AgentToolsMcpServer | None = None,
         registry: ProcessRegistry | None = None,
-        setup_outputs: dict[str, Any] | None = None,
     ):
         self.wf = wf
         self.bus = bus
@@ -153,21 +152,11 @@ class Orchestrator:
         # RunContext 构造（frozen，node 间构造新实例累加 outputs）
         from orca.exec.context import RunContext
 
-        # phase-10 技术债回填：setup_outputs（MCP 壳主 session 替 setup agent 收集的 outputs）
-        # 包成 ``{agent_name: {"output": raw}}`` 存入 ctx.setup，render 暴露为
-        # ``{{ setup.<agent>.output.<field> }}``（与 node outputs 同形约定）。
-        # 调用方传 ``{agent: {field: val}}``（裸 outputs，见 setup_phase.validate_setup_outputs）。
-        # None / 空 → 空 dict（无 setup phase，绝大多数 workflow 不受影响）。
-        setup_ns = {
-            agent: {"output": outputs}
-            for agent, outputs in (setup_outputs or {}).items()
-        }
         self.ctx = RunContext(
             inputs=merged_inputs,
             outputs={},
             run_id=self.run_id,
             task=task,
-            setup=setup_ns,
         )
         self.task = task
         # resolve_max_iter 在 __init__ 调用（run() 之前）：非法 iterations（如 "abc"）
@@ -849,8 +838,6 @@ class Orchestrator:
             run_id=self.run_id,
             task=self.task,
             user_guidance=tuple(self._guidance_acc),
-            # setup phase outputs 透传（不可变，来自 __init__ 注入；render 暴露 setup 根）
-            setup=self.ctx.setup,
         )
 
     async def _dispatch(self, current: str, ctx: RunContext) -> Any:

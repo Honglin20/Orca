@@ -1,19 +1,21 @@
-"""test_catalog.py —— workflow catalog 单元测试（SPEC phase-10 §5.6 / §2.2）。
+"""test_catalog.py —— workflow catalog 单元测试（SPEC phase-10 §5.6 / §2.2 + in-session v5 §6.2）。
 
 覆盖：
-  - ``list_workflows`` 扫目录 + 返 has_setup 标记（三重杠杆 A）
-  - ``describe_workflow`` 返 setup phase 元信息
+  - ``list_workflows`` 扫目录 + 返 inputs_schema（无 has_setup，setup 全栈删）
+  - ``describe_workflow`` 返 inputs_schema（无 setup 元信息）
   - ``find_workflow_by_name`` first-wins 优先级
   - ``find_workflow_yaml_path`` 反查路径
   - 加载失败的 YAML 跳过（log warning，不中断列表）
+  - YAML 含 ``setup:`` 段被 pydantic ``extra="forbid"`` 拒绝（fail loud，§6.2 m13）
 
-设计：monkeypatch ``_workflow_dirs`` 指向 tmp_path/workflows（隔离）。
+设计：monkeypatch ``_workflow_dirs`` 指向 tmp_path/workflows（隔离测试）。
 """
 
 from __future__ import annotations
 
 import pytest
 
+from orca.compile import ConfigurationError
 from orca.iface.mcp.catalog import (
     describe_workflow,
     find_workflow_by_name,
@@ -34,23 +36,19 @@ nodes:
       - to: $end
 """
 
-SETUP_WF = """
+# YAML 含 setup: 段 → pydantic extra="forbid" 拒绝（in-session v5 §6.2 m13 fail loud）
+SETUP_FORBIDDEN_YAML = """
 name: setup_demo
-description: has setup phase
+description: legacy setup phase workflow
 setup:
   - name: collector
     kind: agent
     prompt: "collect"
-    output_schema:
-      type: object
-      properties:
-        host: {type: string}
-      required: [host]
 entry: a
 nodes:
   - name: a
     kind: script
-    command: "echo {{ setup.collector.output.host }}"
+    command: "echo hi"
     routes:
       - to: $end
 """
@@ -82,7 +80,7 @@ def test_list_workflows_empty_dir(catalog_dir):
 
 
 def test_list_workflows_returns_metadata(catalog_dir):
-    """list_workflows 返 name/description/has_setup/entry/inputs_count/inputs_schema。"""
+    """list_workflows 返 name/description/entry/inputs_count/inputs_schema（无 has_setup）。"""
     (catalog_dir / "simple.yaml").write_text(SIMPLE_WF, encoding="utf-8")
 
     result = list_workflows()
@@ -90,21 +88,24 @@ def test_list_workflows_returns_metadata(catalog_dir):
     assert len(result) == 1
     assert result[0]["name"] == "simple"
     assert result[0]["description"] == "简单 workflow"
-    assert result[0]["has_setup"] is False
+    # in-session v5 §6.2：has_setup key 不再返回（setup 全栈删）
+    assert "has_setup" not in result[0]
     assert result[0]["entry"] == "a"
     assert result[0]["inputs_count"] == 0
     # v5 §2.3：inputs_schema = [{name,type,description}]（空 inputs → []）
     assert result[0]["inputs_schema"] == []
 
 
-def test_list_workflows_has_setup_true(catalog_dir):
-    """setup workflow → has_setup=True（三重杠杆 A）。"""
-    (catalog_dir / "setup.yaml").write_text(SETUP_WF, encoding="utf-8")
+def test_list_workflows_skips_setup_yaml(catalog_dir):
+    """YAML 含 setup: 段 → 加载失败（extra=forbid）→ catalog 跳过（log warning）。"""
+    (catalog_dir / "good.yaml").write_text(SIMPLE_WF, encoding="utf-8")
+    (catalog_dir / "legacy_setup.yaml").write_text(SETUP_FORBIDDEN_YAML, encoding="utf-8")
 
     result = list_workflows()
 
+    # 仅合法 simple workflow 进列表；legacy setup workflow 加载失败被跳过
     assert len(result) == 1
-    assert result[0]["has_setup"] is True
+    assert result[0]["name"] == "simple"
 
 
 def test_list_workflows_skips_bad_yaml(catalog_dir):
@@ -152,31 +153,21 @@ def test_list_workflows_first_wins(tmp_path, monkeypatch):
 # ── describe_workflow ────────────────────────────────────────────────────────
 
 
-def test_describe_workflow_returns_setup_metadata(catalog_dir):
-    """describe_workflow 返 setup phase 元信息（agent names + output_schema）。"""
-    (catalog_dir / "setup.yaml").write_text(SETUP_WF, encoding="utf-8")
-
-    wf = find_workflow_by_name("setup_demo")
-    assert wf is not None
-    detail = describe_workflow(wf)
-
-    assert detail["name"] == "setup_demo"
-    assert detail["has_setup"] is True
-    assert len(detail["setup"]) == 1
-    assert detail["setup"][0]["name"] == "collector"
-    assert detail["setup"][0]["output_schema"]["required"] == ["host"]
-
-
-def test_describe_workflow_no_setup(catalog_dir):
-    """describe_workflow 无 setup → setup 字段为空 list + has_setup=False。"""
+def test_describe_workflow_returns_inputs_schema_no_setup(catalog_dir):
+    """describe_workflow 返 name/description/inputs_schema（无 setup/has_setup 字段）。"""
     (catalog_dir / "simple.yaml").write_text(SIMPLE_WF, encoding="utf-8")
 
     wf = find_workflow_by_name("simple")
     assert wf is not None
     detail = describe_workflow(wf)
 
-    assert detail["has_setup"] is False
-    assert detail["setup"] == []
+    assert detail["name"] == "simple"
+    assert detail["description"] == "简单 workflow"
+    # in-session v5 §6.2：setup / has_setup key 不再返回
+    assert "has_setup" not in detail
+    assert "setup" not in detail
+    # inputs_schema 是 dict（{key: {type, required, description}}）
+    assert "inputs_schema" in detail
 
 
 # ── find_workflow_by_name / find_workflow_yaml_path ──────────────────────────
@@ -210,3 +201,21 @@ def test_find_workflow_yaml_path_found(catalog_dir):
 def test_find_workflow_yaml_path_not_found(catalog_dir):
     """按 name 反查 yaml_path 未找到 → None。"""
     assert find_workflow_yaml_path("ghost") is None
+
+
+# ── §6.2 m13：YAML setup 段被 pydantic extra=forbid 拒绝（fail loud）─────────────
+
+
+def test_setup_yaml_rejected_by_extra_forbid(catalog_dir):
+    """YAML 含 ``setup:`` 段 → pydantic ``extra="forbid"`` 拒绝（ConfigurationError）。"""
+    (catalog_dir / "legacy.yaml").write_text(SETUP_FORBIDDEN_YAML, encoding="utf-8")
+
+    # catalog 扫描时 load_workflow 抛 ConfigurationError → 跳过，find 返 None
+    assert find_workflow_by_name("setup_demo") is None
+
+    # 直接 load 也 fail loud（fail loud 铁律，§6.2 m13）
+    from orca.compile import load_workflow
+
+    legacy_path = catalog_dir / "legacy.yaml"
+    with pytest.raises(ConfigurationError):
+        load_workflow(legacy_path)

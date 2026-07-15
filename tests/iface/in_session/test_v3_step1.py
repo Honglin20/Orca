@@ -492,9 +492,9 @@ def test_orca_list_and_teams_list_share_single_catalog(cwd_tmp, monkeypatch):
 
     def _fake_list():
         call_count["n"] += 1
-        # canned item（含或ca list 渲染所需 inputs_schema + teams list 渲染所需 has_setup）
+        # canned item（in-session v5 §6.2：catalog 不再返 has_setup；保留 inputs_schema）
         return [{
-            "name": "w", "description": "d", "has_setup": False, "entry": "a",
+            "name": "w", "description": "d", "entry": "a",
             "inputs_count": 0, "inputs_schema": [],
         }]
 

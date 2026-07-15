@@ -276,17 +276,15 @@ class Workflow(BaseModel):
     所有结构合法性（entry 存在且非组、name 唯一含组名、routes 引用合法、parallel 组
     结构、死锁检测）由 compile/ 层校验。
 
-    phase-10 v4：``setup`` 是 setup phase（可选，空 list = 无 setup）。三壳消费范式不同
-    （TUI/Web 实跑 setup agent + ask_user/gate；MCP 主 session 替 setup agent 跑，结果
-    作为 ``setup_outputs`` 传给 ``start_workflow`` 跳过 setup phase 实际执行）。
-    execute phase（``nodes``）的 agent **不配 ask_user/gate 工具**（compile validator 强制）。
+    execute phase（``nodes``）的 agent **不配 ask_user/gate 工具**（compile validator 强制，
+    铁律 7：execute phase 永不中断）。setup phase 已在 in-session v5 §6.1 删除——主 session
+    经 ``orca next --output`` 直接产 output，旧 ``setup:`` 段由 ``extra="forbid"`` 拒绝（fail loud）。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     name: str
     description: str = ""
-    setup: list[AgentNode] = []  # 【phase-10 v4】setup phase（可选；空 list = 无 setup）
     entry: str  # 起始 node 名（显式，唯一入口；不能是 parallel 组）
     inputs: dict[str, InputDef] = {}  # 工作流输入声明（可选）
     nodes: list[AnnotatedNode]  # execute phase 节点（discriminated union）
