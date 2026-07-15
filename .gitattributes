@@ -12,6 +12,18 @@
 orcainstr      text eol=lf
 prompt.txt     text eol=lf
 
+# 前端 / 配置 / 资产：补全首次 CRLF 噪声暴露的扩展名（同源根治）。
+*.tsx          text eol=lf
+*.css          text eol=lf
+*.html         text eol=lf
+*.js           text eol=lf
+*.mjs          text eol=lf
+*.cjs          text eol=lf
+*.svg          text eol=lf
+*.toml         text eol=lf
+*.lock         text eol=lf
+*.txt          text eol=lf
+
 # 二进制资产不强制行尾转换。
 *.png          binary
 *.jpg          binary

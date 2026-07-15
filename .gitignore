@@ -35,3 +35,14 @@ references/
 
 # Runtime tape output (orca run/serve 写入)
 runs/
+
+# 本地第三方 skill 安装产物（如 fireworks-tech-graph），跨机器不可移植
+.agents/
+skills-lock.json
+
+# 本地 workflow 运行态目录（orca catalog 扫描点；demo 规范副本在 examples/）
+workflows/
+
+# 本地 E2E scratch 脚本（test-agent 一次性验证，硬编码本机路径）
+e2e_check.sh
+e2e_clean.sh
