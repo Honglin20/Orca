@@ -52,17 +52,17 @@ _ENV = Environment()
 # ``orca <wf-name>`` 用 wf 名作裸顶层子命令；wf 名取了固定命令名（list/next/status/...）
 # 就会让 ``orca status`` 在「跑 status 命令」vs「bootstrap 名为 status 的 wf」间歧义。
 # compile 期硬拒（fail loud），保 ``orca <wf>`` 语法糖无冲突。
-# 名单 = orca 7 命令 + teams 后端命令名 + ORCA_BACKEND_CMD 默认值（teams）+ 内部命令。
+# 名单 = orca 7 命令 + tars 后端命令名 + ORCA_BACKEND_CMD 默认值（tars）+ 内部命令。
 RESERVED_WF_NAMES: frozenset[str] = frozenset({
     # orca 7 命令（SPEC §2.1）
     "list", "next", "status", "stop", "open", "doctor",
     # orca 内部 / deprecated（仍占顶层命令槽）
     "bootstrap", "start", "serve",
-    # teams 后端命令（SPEC §3.1）——归 teams entry point 但保 wf 名不撞
+    # tars 后端命令（SPEC §3.1）——归 tars entry point 但保 wf 名不撞
     "run", "ps", "logs", "wait", "resume", "install", "validate", "mcp",
     "executor", "skill",
-    # ORCA_BACKEND_CMD 默认值（teams）；env 改名后 operator 应扩此集合（保守默认）
-    "teams",
+    # ORCA_BACKEND_CMD 默认值（tars）；env 改名后 operator 应扩此集合（保守默认）
+    "tars",
 })
 
 
@@ -140,10 +140,10 @@ def validate_workflow(wf: Workflow) -> list[str]:
 
 
 def _check_workflow_name_reserved(wf: Workflow, result: ValidationResult) -> None:
-    """SPEC v3 §2.2（MS1）：wf.name 禁取保留字（orca/teams 命令名）。
+    """SPEC v3 §2.2（MS1）：wf.name 禁取保留字（orca/tars 命令名）。
 
     ``orca <wf-name>`` 裸顶层语法糖要求 wf 名不与固定命令冲突；撞名 → compile fail loud，
-    保 ``orca <wf>`` 无歧义。不接受 ``list/next/status/.../teams`` 等。
+    保 ``orca <wf>`` 无歧义。不接受 ``list/next/status/.../tars`` 等。
     """
     if not wf.name:
         # 空 name 由 schema 层/pydantic 拦；此处不重复报。

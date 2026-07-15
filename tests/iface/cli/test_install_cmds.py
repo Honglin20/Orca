@@ -1,4 +1,4 @@
-"""test_install_cmds.py —— ``teams install`` 统一安装入口单测（v5 §4.3 四前端）。
+"""test_install_cmds.py —— ``tars install`` 统一安装入口单测（v5 §4.3 四前端）。
 
 覆盖：
   - ``resolve_roots``：target(all/cc/opencode/cac/nga) × scope(user/project) 矩阵 +

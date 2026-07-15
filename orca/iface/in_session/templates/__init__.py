@@ -3,7 +3,7 @@
 **架构守门**（D-v7-1）：模板里的宿主侧代码**零 Orca 业务逻辑**——只 spawn CLI 子进程
 + parse JSON 顶层字段 / 注入提醒文本。advance/router/replay/tape 路径一律禁止（CI grep 守门）。
 
-模板由 ``teams install --target <host>`` 落地，不在 Python 运行时加载：
+模板由 ``tars install --target <host>`` 落地，不在 Python 运行时加载：
 
 - ``opencode/orca.ts`` —— opencode plugin（v5 §4.4 idle nudge hook）。**v5 §8 step 4**：transform
   marker 派发入口段 + 全部死代码（extractTaskOutput / spawnCli / spawnTopLevelCli / rewriteText

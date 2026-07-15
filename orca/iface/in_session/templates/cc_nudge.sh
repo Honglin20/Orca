@@ -11,7 +11,7 @@
 # 节流：60s 内不重复 block（防 Stop 反复触发刷屏）。block 后写时间戳，窗口内再次 Stop 直
 # 接放行（让模型能停下来等用户/子代理）；窗口外再 block。
 #
-# 由 'teams install --target cc' 落到 <cc_root>/hooks/orca-nudge.sh 并在
+# 由 'tars install --target cc' 落到 <cc_root>/hooks/orca-nudge.sh 并在
 # .claude/settings.json 的 hooks.Stop 声明引用。
 #
 # 实现：python3（DEFECT-1 修复；orca 本就依赖 python，跨环境可靠——WSL conda orca 等环境

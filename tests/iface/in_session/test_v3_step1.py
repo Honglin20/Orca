@@ -1,14 +1,14 @@
 """tests/iface/in_session/test_v3_step1.py —— SPEC v3 §8 step 1 验收守门。
 
 覆盖 §11 验收相关项：
-  - **保留字黑名单**（§2.2 MS1）：wf 取 ``status``/``next``/``teams`` 等 → compile fail loud。
+  - **保留字黑名单**（§2.2 MS1）：wf 取 ``status``/``next``/``tars`` 等 → compile fail loud。
   - **``orca <wf>`` 语法糖**（§2.1）：未注册的首 token = wf 名 → bootstrap 派发。
   - **``orca --help``**（§2.4）：含 7 命令（list/next/status/stop/open/doctor + <wf> epilog），
-    不含 teams 命令名（run/serve/ps/...）。
+    不含 tars 命令名（run/serve/ps/...）。
   - **驱动协议 B1**（§8）：prompt 含 ``orca next``、不含 ``orca in-session``。
   - **marker 3 字段**（§7.2）：grep dataclass 无 tape_path/yaml/session_id/owner。
   - **catalog 单一实现**（§3.1 / coordinator 铁律）：orca list 委托 commands.run_list。
-  - **teams 命令名变量化**（§3.2）：ORCA_BACKEND_CMD env 控制 backend_cmd_name 显示。
+  - **tars 命令名变量化**（§3.2）：ORCA_BACKEND_CMD env 控制 backend_cmd_name 显示。
 """
 from __future__ import annotations
 
@@ -46,9 +46,9 @@ nodes:
 
 @pytest.mark.parametrize("reserved", [
     "status", "next", "list", "stop", "open", "doctor",  # orca 7 命令
-    "run", "serve", "ps", "logs", "wait", "resume",      # teams 后端命令
+    "run", "serve", "ps", "logs", "wait", "resume",      # tars 后端命令
     "install", "validate", "mcp", "executor",
-    "teams",  # ORCA_BACKEND_CMD 默认值
+    "tars",  # ORCA_BACKEND_CMD 默认值
     "bootstrap",
 ])
 def test_reserved_wf_name_rejected_at_compile(tmp_path, reserved):
@@ -138,11 +138,11 @@ def test_reserved_command_name_not_treated_as_wf(cwd_tmp):
     assert ".jsonl" not in result.output
 
 
-# ── §2.4 ``orca --help`` 含 7 命令、不含 teams ─────────────────────────────
+# ── §2.4 ``orca --help`` 含 7 命令、不含 tars ─────────────────────────────
 
 
-def test_orca_help_lists_seven_commands_no_teams():
-    """§2.4：--help 含 list/next/status/stop/open/doctor + <wf> epilog；不含 teams 命令名。"""
+def test_orca_help_lists_seven_commands_no_tars():
+    """§2.4：--help 含 list/next/status/stop/open/doctor + <wf> epilog；不含 tars 命令名。"""
     runner = CliRunner()
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
@@ -154,13 +154,13 @@ def test_orca_help_lists_seven_commands_no_teams():
     # <wf> 语法糖在 epilog 提及
     assert "wf" in help_text.lower()
 
-    # 不含 teams 后端命令名（§2.4 守门）
-    for teams_cmd in ("run", "serve", "ps", "logs", "wait", "resume",
-                       "install", "validate", "mcp", "executor"):
+    # 不含 tars 后端命令名（§2.4 守门）
+    for tars_cmd in ("run", "serve", "ps", "logs", "wait", "resume",
+                      "install", "validate", "mcp", "executor"):
         # 命令名作独立 token 出现（避免 substring 误判，如 "run" in "runtimes"）
         # typer help 列命令名缩进，用 "  run" / "\nrun" 作粗略独立行匹配
-        assert f"\n{teams_cmd}" not in help_text and f"  {teams_cmd} " not in help_text, (
-            f"--help 不应含 teams 命令 {teams_cmd!r}（§2.4 守门）"
+        assert f"\n{tars_cmd}" not in help_text and f"  {tars_cmd} " not in help_text, (
+            f"--help 不应含 tars 命令 {tars_cmd!r}（§2.4 守门）"
         )
 
     # v5 §8 step 2b：start 已删（不再出现作命令）；describe 命令从未存在（也守门）
@@ -210,7 +210,7 @@ def test_orca_list_returns_inputs_schema_json(cwd_tmp, monkeypatch):
 
     - inputs_schema = ``[{name, type, description}]``（从 wf.inputs 派生，skill 据此抽 inputs）。
     - **无 has_setup**（B3）：orca list 给 skill/LLM，只暴露选 wf + 抽 inputs 所需的 3 字段。
-    - 单一 catalog 真相源：与 ``teams list``（commands.run_list，人类可读）调同一个
+    - 单一 catalog 真相源：与 ``tars list``（commands.run_list，人类可读）调同一个
       ``catalog.list_workflows()``，渲染层不同（skill 要 JSON / 运营要文本）——非两套 list。
     """
     wf_with_inputs = """\
@@ -269,21 +269,21 @@ nodes:
     assert by_name["count"]["type"] == "int"
 
 
-# ── §3.2 teams 命令名变量化（env ORCA_BACKEND_CMD）──────────────────────────
+# ── §3.2 tars 命令名变量化（env ORCA_BACKEND_CMD）──────────────────────────
 
 
 def test_backend_cmd_name_reads_env():
-    """§3.2：``ORCA_BACKEND_CMD`` env 控制 backend 命令名（默认 teams）。"""
+    """§3.2：``ORCA_BACKEND_CMD`` env 控制 backend 命令名（默认 tars）。"""
     from orca.iface.cli.commands import DEFAULT_BACKEND_CMD, backend_cmd_name
 
-    assert DEFAULT_BACKEND_CMD == "teams"
+    assert DEFAULT_BACKEND_CMD == "tars"
     # 默认（env 未设）
     monkeypatch_env = {"ORCA_BACKEND_CMD": "conductor"}
     with mock.patch.dict("os.environ", monkeypatch_env, clear=False):
         assert backend_cmd_name() == "conductor"
-    # env 未设 → 默认 teams
+    # env 未设 → 默认 tars
     with mock.patch.dict("os.environ", {}, clear=True):
-        assert backend_cmd_name() == "teams"
+        assert backend_cmd_name() == "tars"
 
 
 # ── review 补缺：并发 bootstrap / yaml_path 恢复 / open 默认 / state_corrupt ─────
@@ -428,7 +428,7 @@ def test_bootstrap_unresolvable_wf_name_fails_loud(cwd_tmp):
     assert result.exit_code == 2
 
 
-# ── §4.5 SKILL.md 守门（三步指导 + 禁业务逻辑关键词 + 禁 teams 命令）──────────────
+# ── §4.5 SKILL.md 守门（三步指导 + 禁业务逻辑关键词 + 禁 tars 命令）──────────────
 #
 # 入口 skill = TARS（用户面）；目录 ``orca/skills/<ENTRY_SKILL_NAME>/``。skill body 仍调 ``orca``
 # CLI 命令（引擎不改），故守门断言里的 ``orca list`` / ``orca next`` 字面不变——只目录名换了。
@@ -484,27 +484,29 @@ def test_entry_skill_md_has_no_business_logic_keywords():
         assert kw not in text, f"SKILL.md 含禁业务逻辑关键词 {kw!r}（§4.5 守门）"
 
 
-def test_entry_skill_md_has_no_teams_backend_commands():
-    """§2.4：skill 只教 orca 7 命令，禁出现 teams 后端命令名（防第二入口泄漏）。
+def test_entry_skill_md_has_no_tars_backend_commands():
+    """§2.4：skill 只教 orca 7 命令，禁出现 tars 后端命令名（防第二入口泄漏）。
 
-    注：``list`` 是 orca 与 teams 共享命令（``orca list`` 合法），不在禁词内。
+    注：``list`` 是 orca 与 tars 共享命令（``orca list`` 合法），不在禁词内。
+    ``tars`` 同时是入口 skill 的 slash 名（``/tars``），故禁词用 ``tars <子命令>`` 整串
+    而非裸 ``tars``——避免误伤 skill 自我引用。
     """
     text = ENTRY_SKILL_MD.read_text(encoding="utf-8")
-    # teams-unique 后端命令（run/serve/ps/install/validate/mcp/executor/logs/wait/resume）
-    teams_only = ["serve", "validate", "executor", "resume",
-                  "teams run", "teams serve", "teams install", "orca install",
-                  "teams validate", "teams mcp", "teams executor"]
-    for kw in teams_only:
-        assert kw not in text, f"SKILL.md 不应含 teams 后端命令 {kw!r}（§2.4 单一接口守门）"
+    # tars-unique 后端命令（run/serve/ps/install/validate/mcp/executor/logs/wait/resume）
+    tars_only = ["serve", "validate", "executor", "resume",
+                 "tars run", "tars serve", "tars install", "orca install",
+                 "tars validate", "tars mcp", "tars executor"]
+    for kw in tars_only:
+        assert kw not in text, f"SKILL.md 不应含 tars 后端命令 {kw!r}（§2.4 单一接口守门）"
 
 
-# ── §3.1 单一 catalog 真相源契约（orca list + teams list 共享 catalog）──────────
+# ── §3.1 单一 catalog 真相源契约（orca list + tars list 共享 catalog）──────────
 
 
-def test_orca_list_and_teams_list_share_single_catalog(cwd_tmp, monkeypatch):
-    """§3.1 / coordinator 铁律：``orca list`` 与 ``teams list`` 都调 ``catalog.list_workflows()``。
+def test_orca_list_and_tars_list_share_single_catalog(cwd_tmp, monkeypatch):
+    """§3.1 / coordinator 铁律：``orca list`` 与 ``tars list`` 都调 ``catalog.list_workflows()``。
 
-    渲染层可不同（orca list 给 skill 出 JSON / teams list 给运营出文本），但**数据源唯一**——
+    渲染层可不同（orca list 给 skill 出 JSON / tars list 给运营出文本），但**数据源唯一**——
     非两套 list 实现。mock catalog 返 canned 数据并计数，验证双方调用点。
     """
     runner = CliRunner()
@@ -522,12 +524,12 @@ def test_orca_list_and_teams_list_share_single_catalog(cwd_tmp, monkeypatch):
         # orca list（出 JSON）
         r1 = runner.invoke(app, ["list"])
         assert r1.exit_code == 0, r1.output
-        # teams list（commands.app 的 list 命令委托 run_list → catalog，出文本）
-        from orca.iface.cli.commands import app as teams_app
-        r2 = runner.invoke(teams_app, ["list"])
+        # tars list（commands.app 的 list 命令委托 run_list → catalog，出文本）
+        from orca.iface.cli.commands import app as tars_app
+        r2 = runner.invoke(tars_app, ["list"])
         assert r2.exit_code == 0, r2.output
 
     assert call_count["n"] == 2, (
-        "orca list 与 teams list 应各调 catalog.list_workflows() 一次（单一真相源）"
+        "orca list 与 tars list 应各调 catalog.list_workflows() 一次（单一真相源）"
     )
 

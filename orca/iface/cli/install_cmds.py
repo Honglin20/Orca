@@ -1,6 +1,6 @@
-"""install_cmds.py —— ``teams install`` 统一安装入口（v5 §4.3，全局默认）。
+"""install_cmds.py —— ``tars install`` 统一安装入口（v5 §4.3，全局默认）。
 
-回答「用户怎么把 Orca skill 装到各前端宿主？」：``teams install --target <platform>``
+回答「用户怎么把 Orca skill 装到各前端宿主？」：``tars install --target <platform>``
 把随包 skill（含 ``orca`` 入口 skill）拷到对应前端的 skill 目录。四前端统一一套 skill
 （SPEC v5 §4.1/§4.3：删 command、统一 skill，入口内联注入主 session）。
 
@@ -395,8 +395,8 @@ def install(
     幂等（重跑覆盖更新，内容相同跳过；JSON 配置读-改-写保已有键）。
 
     ``install`` 是单动词（同 ``run``/``serve``），故用 callback 而非 sub-Typer 子命令——
-    避免双层嵌套 ``teams install install``。``invoke_without_command=True`` 让裸
-    ``teams install`` 以默认（target=all / scope=user）直接跑。
+    避免双层嵌套 ``tars install install``。``invoke_without_command=True`` 让裸
+    ``tars install`` 以默认（target=all / scope=user）直接跑。
     """
     failed = run_install(target, scope)
     if failed:
@@ -406,7 +406,7 @@ def install(
 def _install_bundled_workflows() -> list[Path]:
     """部署当前目录 ``workflows/*.yaml`` → ``~/.orca/workflows/``（全局内置，catalog 扫到）。
 
-    让 ``teams install`` 把仓库自带 workflow（如 ``nas-agent-pipeline``）装成**全局可见**——
+    让 ``tars install`` 把仓库自带 workflow（如 ``nas-agent-pipeline``）装成**全局可见**——
     任何项目的 ``orca list`` 都能扫到（``~/.orca/workflows`` 是 catalog 用户级扫描点），解决
     「全新地方 ``orca list`` 空」问题。幂等：内容相同跳过，不同覆盖（install = refresh 内置）。
     源（CWD/workflows）保留（**复制非移动**）。无 CWD/workflows 或无 *.yaml → no-op
@@ -437,7 +437,7 @@ def _install_bundled_workflows() -> list[Path]:
 def run_install(target: str, scope: str) -> list[str]:
     """install 核心逻辑（callback + ``skill install`` 弃用委托共用）。返回失败 host 列表。
 
-    抽出来让 ``teams skill install``（弃用别名）能直接委托，不走 subprocess。``bootstrap_config``
+    抽出来让 ``tars skill install``（弃用别名）能直接委托，不走 subprocess。``bootstrap_config``
     在此调用（skill_cmds 原也调，幂等）。
     """
     bootstrap_config()

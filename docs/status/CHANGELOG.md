@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-16] 后端命令 teams → tars 改名（品牌收口：skill=tars / 后端=tars / in-session=orca）
+
+后端/运维命令 `teams`（install/run/serve/ps/validate/mcp/executor/list/logs/wait/resume）→ `tars`，与上一步 TARS skill rebrand 对齐——三套命名收口。改 `pyproject [project.scripts]` 入口 + `DEFAULT_BACKEND_CMD` 默认 + `validator` 保留字（`teams`→`tars`，防 wf 名撞命令）+ `commands.py` help/docstring + `teams_app` deprecated 别名保留（向后兼容）+ 用户面消息（orca epilog/doctor/skill 弃用警告）+ shipped 产物（cc_nudge.sh / SKILL.md / templates）+ `examples/mxint_analysis.yaml` 注释 + 测试 + SPEC live 段。`orca` in-session 命令不动；`ORCA_BACKEND_CMD` env 名不变（只改默认值）。重装后 `tars` 上 PATH、`teams` 退场（验：`which tars`✓ / `tars --help` 显示 tars / `orca --help` 指 tars）。768 单测 0 回归（+2 净增：pyproject 入口锁 + teams_app 别名锁）；code-reviewer 两轮 0 🔴（R1 🟡 examples 注释漏改 / R2 🟡 测试名实不符 + 🟢 别名锁，全修）。真机 `tars install/--help/list` 待 test-agent 验。Commit: `<本 commit，SHA 见 git log>`。详见 [release note](../releases/2026-07-16-teams-to-tars-rename.md)。
+
 ## [2026-07-15] TARS 品牌 rebrand —— skill 改名 orca→tars + TARS 描述（CLI 仍 orca）
 
 用户面 = TARS：skill 名 `orca`→`tars`（`/tars`、description TARS 语气——触发「用 TARS 帮我 X / 用 TARS 做 Y」→ `orca list` 语义匹配 description → 命中唯一启动 / 多个则问（≤2 问）→ 抽 inputs → 派子代理 → `orca next` 循环到 done）。CLI/命令仍 `orca`（TARS 用 orca 引擎；orca.ts/cc_nudge 不动）。抽 `ENTRY_SKILL_NAME = "tars"` 常量单一真相源（`skill_cmds.py`，doctor `_scan_skill_install` + install re-export + 三处测试全经它，防目录名与 check 漂移）；SKILL.md body 命令引用全保 `orca`（仅 frontmatter name + 标题 + `<purpose>` 身份是 TARS）。SPEC §4.1/§8 措辞同步。176 单测 0 回归（+1 frontmatter name gate）；code-reviewer 两轮 0 🔴（test 轮 2 🟡 已修：install 断言改用常量 DRY + 补 frontmatter name 锁）。test-agent 真机待主 session 派。Commit: `<本 commit，SHA 见 git log>`。详见 [release note](../releases/2026-07-15-tars-skill-rebrand.md)。

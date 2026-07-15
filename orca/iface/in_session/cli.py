@@ -5,7 +5,7 @@
 逻辑（advance_step 决策 / marker RMW / 合规计数 / 失败 taxonomy）全在此模块，可单测。
 
 v3 §2 接口定型（7 命令，删 ``in-session`` 子命令层）：
-  - ``orca list`` —— catalog（name+description，与 ``teams list`` 同源）。
+  - ``orca list`` —— catalog（name+description，与 ``tars list`` 同源）。
   - ``orca <wf> --inputs '{...}'`` —— bootstrap 语法糖：接 wf 名（或 yaml 路径）位置参数，
     返 entry prompt + 驱动协议。**重复 bootstrap 同 wf → fail loud**（§7.3 m12，防孤儿）。
   - ``orca next --run-id <id> [--output '<产出>']`` —— 推进一步（主 session 逐步自调）。
@@ -319,7 +319,7 @@ app = typer.Typer(
     epilog=(
         "语法糖：`orca <wf-name>` ≡ `orca bootstrap <wf-name>`"
         "（wf 名取保留字如 list/next/status 会被 compile 拒）。"
-        " 后端/headless 命令在另一入口（见 `teams --help`）。"
+        " 后端/headless 命令在另一入口（见 `tars --help`）。"
     ),
 )
 
@@ -930,7 +930,7 @@ def doctor(
         "detail": (
             f"PASS：TARS skill 已装于 {', '.join(where)}。" if where
             else "FAIL：四前端（cc/opencode/cac/nga，user+project scope）均未找到 TARS skill。"
-                 "跑 `teams install --target <platform>` 安装后重启前端。"
+                 "跑 `tars install --target <platform>` 安装后重启前端。"
         ),
     })
 
@@ -1020,13 +1020,13 @@ def list_workflows() -> None:
     一个命令给齐「选 wf（据 description）+ 知 inputs（据 inputs_schema）」，故无 describe
     命令（v5 决策：冗余）。**无 has_setup**（B3）。
 
-    **单一 catalog 真相源**（coordinator 铁律）：本命令与 ``teams list``（commands.run_list，
+    **单一 catalog 真相源**（coordinator 铁律）：本命令与 ``tars list``（commands.run_list，
     人类可读，给运维）**调同一个** ``catalog.list_workflows()``——catalog 是唯一实现，
     渲染层按消费者不同（skill 要 JSON / 运营要文本），非两套 list 逻辑。
     """
     items = catalog.list_workflows()
     # 恰取 skill/LLM 需要的 3 字段（name/description/inputs_schema）；catalog item 的其余
-    # 字段（entry/inputs_count）留给 MCP/teams 渲染，不暴露给 orca list（B3）。
+    # 字段（entry/inputs_count）留给 MCP/tars 渲染，不暴露给 orca list（B3）。
     workflows = [
         {
             "name": it["name"],
@@ -1065,7 +1065,7 @@ def open_run(
     ``run_id`` 两种传法都接受（spec §2.1 统一 ``--run-id`` 形态）：``orca open --run-id <id>``
     或 ``orca open <id>``。两者同传且值不一致 → fail loud（BadParameter）。**都省略 → 取当前
     唯一活跃 run**（多个活跃 → fail loud 提示指定 run_id；无活跃 → fail loud 提示先 ``orca <wf>``）。
-    复用 ``teams open`` 同款 ``_open_run``（read-only attach + tail-follow）。
+    复用 ``tars open`` 同款 ``_open_run``（read-only attach + tail-follow）。
     """
     rid = _merge_run_id(run_id, run_id_opt)
     if rid is None:
@@ -1097,7 +1097,7 @@ def _default_active_run_id() -> str:
 def _open_run_inproc(
     run_id: str, *, tape_path: Path | None, host: str | None, port: int | None
 ) -> int:
-    """复用 ``teams open`` 的 ``_open_run``（read-only attach + browser）。延迟 import 防循环。"""
+    """复用 ``tars open`` 的 ``_open_run``（read-only attach + browser）。延迟 import 防循环。"""
     from orca.iface.cli.commands import _open_run
 
     return _open_run(run_id, tape_path=tape_path, host=host, port=port)

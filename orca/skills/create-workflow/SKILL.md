@@ -99,7 +99,7 @@ allowed-tools: Read, Write, Edit, Bash, Glob, Grep
    orca validate <最终yaml路径>
    ```
    - 退出码非 0 → 读 stderr，**自己改**，再验。循环直到 0 error。warnings 可接受但要跟用户提一句。
-   - 拿不到 `orca` 命令就退而用 `teams validate`（同入口）。
+   - 拿不到 `orca` 命令就退而用 `tars validate`（同入口）。
 4. **画草 DAG 报告给用户**（非阻塞，已落盘）：节点名 + 箭头，不美化。parallel 用括号组，`$end` 收尾。例：
    ```
    finder → [researcher_a | researcher_b] → merger → $end

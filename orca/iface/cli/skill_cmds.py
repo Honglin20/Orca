@@ -1,9 +1,9 @@
-"""skill_cmds.py —— ``teams skill`` 子命令组（**已弃用 → ``teams install``**）。
+"""skill_cmds.py —— ``tars skill`` 子命令组（**已弃用 → ``tars install``**）。
 
-历史职责：``teams skill install`` 把打包在 ``orca/skills/`` 下的 skill 拷到宿主 skill 目录。
+历史职责：``tars skill install`` 把打包在 ``orca/skills/`` 下的 skill 拷到宿主 skill 目录。
 
-**现状（v5 §4.3 统一安装）**：skill 安装已合并进 ``teams install``（``orca/iface/cli/install_cmds.py``），
-支持四前端（cc/opencode/cac/nga）。``teams skill install`` 降为**向后兼容的弃用别名**——
+**现状（v5 §4.3 统一安装）**：skill 安装已合并进 ``tars install``（``orca/iface/cli/install_cmds.py``），
+支持四前端（cc/opencode/cac/nga）。``tars skill install`` 降为**向后兼容的弃用别名**——
 打印 ``⚠`` 警告后委托 ``run_install(target, "user")`` 执行。
 
 **保留的纯函数**：``install_targets``（host 的 skill 目录解析）仍作为可测 seam 保留
@@ -102,15 +102,15 @@ def install(
         help="装到哪个前端：cc / opencode / cac / nga / all（默认 all）",
     ),
 ) -> None:
-    """[已弃用 → ``teams install``] 把随包 skill 装到前端宿主。
+    """[已弃用 → ``tars install``] 把随包 skill 装到前端宿主。
 
-    ``teams skill install`` 已被 ``teams install`` 收口。本命令保留为向后兼容的弃用别名：
-    打印 ``⚠`` 警告后委托 ``teams install --target <target> --scope user`` 执行。
+    ``tars skill install`` 已被 ``tars install`` 收口。本命令保留为向后兼容的弃用别名：
+    打印 ``⚠`` 警告后委托 ``tars install --target <target> --scope user`` 执行。
 
     幂等（由 ``run_install`` 保证）。
     """
     typer.echo(
-        "⚠ `teams skill install` 已弃用 → 改用 `teams install`（四前端统一 skill 落点）。"
+        "⚠ `tars skill install` 已弃用 → 改用 `tars install`（四前端统一 skill 落点）。"
         "本次按等价语义委托执行（全局 skill）。",
         err=True,
     )

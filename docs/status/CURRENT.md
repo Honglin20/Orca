@@ -3,34 +3,29 @@
 > 新 session 开工前**必读**此文件 + `CLAUDE.md` + 对应阶段 SPEC。
 > 完成任务后清空本文件（移到 release note），**不积累**。
 
-## 当前状态（2026-07-15）：spec v5 §8 全 step + TARS rebrand 闭环，仅余用户侧真机
+## 当前状态（2026-07-16）：teams→tars 后端命令改名完成（代码侧闭环），仅余真机
 
-> **新 session 必读**：本块 + [`docs/specs/in-session-entry-and-simplification.md`](../specs/in-session-entry-and-simplification.md) **v5** + [TARS release note](../releases/2026-07-15-tars-skill-rebrand.md) + [step 6 release note](../releases/2026-07-15-in-session-step6-nga-cac-install.md)。
+> **新 session 必读**：本块 + [`docs/specs/in-session-entry-and-simplification.md`](../specs/in-session-entry-and-simplification.md) **v5** + [teams→tars release note](../releases/2026-07-16-teams-to-tars-rename.md) + [TARS skill release note](../releases/2026-07-15-tars-skill-rebrand.md)。
 
-代码侧无待办 step；剩余全是跨平台真机验证 + 用户暂缓的 follow-up。
+后端命令 `teams` → `tars`（与 TARS skill 对齐）。三套命名收口：**skill = `tars` / 后端命令 = `tars` / in-session = `orca`**。代码 + 测试 + SPEC + shipped 产物全闭环；剩余跨平台真机验证。
 
-### 2026-07-15 已完成（最新）
+### 2026-07-16 已完成（最新）
 
-- **TARS rebrand**（`<本 commit>`）：用户面 skill 改名 `orca`→`tars`（`/tars` + TARS description：一句话意图 → `orca list` 语义匹配 → 多个则问 → 抽 inputs → 派子代理 → `orca next` 循环）。CLI/命令仍 `orca`（TARS 用 orca 引擎）。抽 `ENTRY_SKILL_NAME = "tars"` 常量（doctor + install + 测试三处单一真相源）。176 单测 0 回归；code-reviewer 两轮 0 🔴（2 🟡 已修）。详见 [release note](../releases/2026-07-15-tars-skill-rebrand.md)。
-- **step 6** / 批量 FU-2+3a+FU-3 / step 3b / step 5b / FU-1 / step 5a / defects+step4 / step 2b / step 1：见 CHANGELOG 索引。
-
-### TARS 配套（用户「先想知道」——备查）
-
-- **注册 workflow**：把 workflow YAML + agent prompt 放 `./workflows/` 或 `~/.orca/workflows/`（SPEC §2.1）。**匹配靠 `description` 字段**（skill 据 description 语义匹配用户意图）——description 写清 = 自动匹中；多个同类 → skill 问用哪个。
-- **生成方式**：`create-workflow` skill（一句话需求 → 合规 YAML + agent md + `orca validate`）。
+- **teams→tars 后端改名**（`<本 commit>`）：`pyproject` 入口 + `DEFAULT_BACKEND_CMD` + `validator` 保留字 + help/docstring + 用户面消息（orca epilog/doctor/skill 弃用警告）+ shipped 产物（cc_nudge.sh / create-workflow SKILL.md / templates / skills）+ `examples/mxint_analysis.yaml` 注释。`teams_app` deprecated 别名保留（向后兼容）；`orca` in-session 不动；`ORCA_BACKEND_CMD` env 名不变。重装后 `tars` 上 PATH / `teams` 退场。768 单测 0 回归；code-reviewer 两轮 0 🔴（全修）。详见 [release note](../releases/2026-07-16-teams-to-tars-rename.md)。
+- **TARS rebrand / step 6 / 批量 FU / step 5b / step 3b / step 5a / defects / step 4 / step 2b / step 1**：见 CHANGELOG 索引。
 
 ### 待办（用户侧真机，无代码；§9 跨平台）
 
-- **TARS 真机**：`teams install --target cc` → `.claude/skills/tars/SKILL.md` 真生成（name=tars、description TARS）；`orca doctor` skill_install pass；create-workflow 也在。
+- **tars 真机**：`tars install --target cc` → `.claude/skills/tars/SKILL.md` 真生成；`tars --help` / `tars list` / `tars validate` 真工作；`orca` 命令不受影响（`teams` 已退场）；`orca doctor` skill_install pass。**纯 CLI 禁 MCP**。
 - **§9#1 nga/cac 全套集成真机加载**：CAC/NGA 是否真读 `.cac`/`.nga`；cac Stop-hook / nga `opencode.json` plugin 是否真生效。
-- **§9#1 nga 两个假设**：user-scope 现用 `~/.nga`（XDG 对称应 `~/.config/nga`）+ 配置文件名假设 `opencode.json`——真机确认后改 resolve_roots / `_opencode_json_path`。
 
 ### follow-up / debt（用户暂缓 / 预存，非阻塞）
 
-- **MCP 移除**：用户暂不移除（spec v5 §8 留 MCP 8 tool 出 scope）。触发后再做。
-- **最小核心审计**：用户暂不做。
+- **既有测试隔离缺陷**（非本任务引入，code-reviewer R1 🟢 登记）：`test_orca_list_returns_inputs_schema_json` 未隔离 `~/.orca/workflows` user-level 扫描根，全局有 wf 时 `assert len==1` 失败。择机 monkeypatch `Path.home` 修。
+- **既有 `test_bg_run_ps_logs_wait_e2e` rot**：`orca run --background` 选项不存在（in-session CLI 无 run）。择机修或删。
+- **MCP 移除**：用户暂不移除（spec v5 §8 留 MCP 8 tool 出 scope）。
+- **`in-session-unified-backend-draft.md`**：推迟架构草稿，仍含 `teams` 残留（YAGNI，启用时再改）。
 - `_load_wf_for_run` 的 `catalog.find_workflow` fallback 无测试触达（step 3b 预存）。
-- `tool_describe_workflow` found 分支无 server 层测试（预存）。
 - tape `workflow_failed.data.kind` 是 `ErrorKind`/`error_kind` 两值集共享字段（跨阶段 debt，5b 登记）。
 
 ---
@@ -46,5 +41,5 @@
 ## 必读文件（下一任务开工前按需）
 
 - [`docs/specs/in-session-entry-and-simplification.md`](../specs/in-session-entry-and-simplification.md) v5
-- [TARS release note](../releases/2026-07-15-tars-skill-rebrand.md)
-- [CHANGELOG](CHANGELOG.md)（历史完成项索引，各完成块详细在对应 release note）
+- [teams→tars release note](../releases/2026-07-16-teams-to-tars-rename.md)
+- [CHANGELOG](CHANGELOG.md)
