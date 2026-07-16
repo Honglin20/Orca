@@ -3,7 +3,7 @@
 > 新 session 开工前**必读**此文件 + `CLAUDE.md` + 对应阶段 SPEC。
 > 完成任务后清空本文件（移到 release note），**不积累**。
 
-## 当前状态（2026-07-17）：任务2——子 agent 输出/过程推送 web（SPEC-B 已起草，待 spec-review → 实现）；任务1 host_session 串台已闭环交付（E2E 全 PASS，见下「已完成」+ [release note](../releases/2026-07-17-host-session-binding.md)）
+## 当前状态（2026-07-17）：B1（节点 output 推送 web）已闭环交付（真机 PASS）；B2（子 agent 过程推送）spec-reviewer fail、待用户决策 U1-U4（SoT 灰色）；任务1 host_session 串台已交付（[release](../releases/2026-07-17-host-session-binding.md)）。详见下「已完成」+ 两 release note
 
 > **新 session 必读**：本块 + [`docs/specs/in-session-entry-and-simplification.md`](../specs/in-session-entry-and-simplification.md) **v5** + [TARS skill release note](../releases/2026-07-15-tars-skill-rebrand.md) + [nas-hp-search 反伪造 release note](../releases/2026-07-16-nas-hp-search-enforce-and-tars-skill-cleanup.md)。teams→tars 改名 + nas-hp-search runner/select 反伪造均已闭环（见下「已完成」+ CHANGELOG）。
 

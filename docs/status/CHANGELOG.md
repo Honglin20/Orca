@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-17] B1 前端渲染 node_completed output（子 agent 输出推送 web）
+
+解 in-session web **不显示节点 output** 痛点：output 已在 tape `node_completed.data.output`，但前端 `entries.ts` 把 `node_completed` 归 `node-divider`（`NodeDivider` 不读 output）。**B1 纯前端零后端**：`entries.ts` 移 `node_completed` 出 `NODE_DIVIDER_TYPES` + 新增 `node-output` kind；`NodeOutputBlock.tsx`（新增）按 `typeof output` 分支（string→Markdown / object→`safeJson` JSON / null→dim）；`ConversationView` case + `estimateRowHeight:160`；删虚构 elapsed。spec-reviewer conditional-pass（修 dict BLOCKER + elapsed MAJOR）；4 commits；test-agent 真机 PASS（生产 build + 真 `tars serve` + attach 真 tape + `react-dom/server` 渲染 13 节点含 9 dict **零 `[object Object]`** + 17 单测）。Commits: `75116a0`…`8ebe45d`。详见 [release note](../releases/2026-07-17-subagent-output-b1.md)。**B2（过程推送）暂缓待用户决策**（spec-reviewer fail，5 设计洞 + U1-U4 + SoT 灰色）。
+
 ## [2026-07-17] host_session 绑定防串台（tape-only）
 
 修 nudge「串台」：run-id ↔ 宿主 session 绑定，nudge 只提醒本 session 的活跃 run。host_session 只存 tape `workflow_started.data`（同 yaml_path tape-only 先例，**marker.py 零改动**，无 desync）；env 优先级 `ORCA_HOST_SESSION_ID` > `CLAUDE_CODE_SESSION_ID` > None；nudge 读 tape 首行过滤 + per-session 限流；emit 真链 lifecycle←step←cli；opencode `shell.env` hook 注入 + fail-open 安全网（防 nudge 静默死）。spec-reviewer 对抗评审 13 挑战全闭环（tape-only 是用户铁律直接推论）；25 单测 + test-agent 真机 E2E 全 PASS（多 session 不串台 + Stop-hook env 实证 + opencode 端到端）。Commits: `70c2ac8`…`3dae964`（8 commits）。详见 [release note](../releases/2026-07-17-host-session-binding.md)。
