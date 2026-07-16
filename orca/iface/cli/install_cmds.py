@@ -134,7 +134,7 @@ def _opencode_plugin_src() -> Path:
 def _bundled_skill_sources() -> list[Path]:
     """随包所有 skill 源目录（``orca/skills/*/``，以含 ``SKILL.md`` 判定）。
 
-    v5 §4.1/§4.3：入口统一切到 skill。随包目前两份：``orca``（in-session 入口三步指导）
+    v5 §4.1/§4.3：入口统一切到 skill。随包目前两份：``tars``（in-session 入口三步指导）
     + ``create-workflow``（authoring）。加 skill = 加目录，install 自动捡（OCP，无需改本函数）。
     按 ``SKILL.md`` 存在过滤——排除 ``__pycache__`` 等非 skill 目录。
     """
@@ -223,6 +223,18 @@ def _install_skill(root: Path) -> list[Path]:
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(src, dst, dirs_exist_ok=True, ignore=shutil.ignore_patterns("benchmark"))
         dsts.append(dst)
+
+    # 改名迁移清理（v5 §4.1：入口 skill teams→orca→tars）。旧入口 skill 名残留会让宿主同时
+    # 加载新旧两份入口（如 .claude/skills/orca/ + tars/）→ 模型困惑该调哪个。旧名已不是随包源
+    # （源已改名 tars）→ 残留即陈旧，幂等清理（同 ``command/orca`` 清理同 pattern，fail-soft warn）。
+    installed_names = {p.name for p in srcs}
+    for legacy in (root / "skills" / "orca", root / "skills" / "teams"):
+        if legacy.is_dir() and legacy.name not in installed_names:
+            try:
+                shutil.rmtree(legacy)
+                typer.echo(f"  ↻ 清理旧入口 skill 残留：{legacy}（已改名 {ENTRY_SKILL_NAME}）")
+            except OSError as e:  # noqa: BLE001
+                typer.echo(f"  ⚠ 无法清理旧 skill 残留 {legacy}：{e}", err=True)
     return dsts
 
 
