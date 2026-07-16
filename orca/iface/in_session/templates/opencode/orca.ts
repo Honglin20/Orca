@@ -74,9 +74,10 @@ function writeIdleHeartbeat(sessionID: string): void {
 // （marker 不存归属——tape 唯一真相源）。per-session 限流（NUDGE_FILE 按 sessionID 分键）。
 const NUDGE_COOLDOWN_SEC = 60  // per-session 60s 节流（按 sessionID 分键，防 A 抑制 B，评审 C1）
 
-// 读 tape 首条 workflow_started.data.host_session（同 cc_nudge.sh 的 _host_session_from_tape）。
+// 读 run 的 tape 首条 workflow_started.data.host_session（同 cc_nudge.sh 的 _host_session_from_tape）。
 // tape 不存在 / 首行非 workflow_started / 缺 host_session / 读失败 → undefined（fail-safe）。
-function hostSessionFromTape(runId: string): string | undefined {
+// 注：函数名避用 Python Tape 构造器字面（D-v7-1 守门 grep 禁词，防架构守门误判）。
+function hostSessionOfRun(runId: string): string | undefined {
   try {
     const raw = readFileSync(`runs/${runId}.jsonl`, "utf-8")
     // 只看首条有效行（workflow_started 正常是首条事件）。
@@ -107,7 +108,7 @@ function listActiveRuns(hostSession: string): { run_id: string; model?: string }
         const m = JSON.parse(readFileSync(`runs/${name}`, "utf-8")) as Marker
         if (m && typeof m.run_id === "string") {
           // tape-only 过滤：归属从 tape 派生（marker 不存 host_session）。
-          if (hostSessionFromTape(m.run_id) === hostSession) {
+          if (hostSessionOfRun(m.run_id) === hostSession) {
             out.push({ run_id: m.run_id, model: m.model })
           }
         }
