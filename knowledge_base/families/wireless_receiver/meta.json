@@ -1,0 +1,113 @@
+{
+  "family": "wireless_receiver",
+  "directions": {
+    "D0": {
+      "name": "baseline_cnn_transformer",
+      "ascend": "conditional",
+      "latency_tier": "fusion",
+      "risk": "none",
+      "physics": false,
+      "attention": "yes",
+      "source": "本仓库 baseline_model.py"
+    },
+    "D1": {
+      "name": "deeprx_conv_only",
+      "ascend": "friendly",
+      "latency_tier": "arch",
+      "risk": "low",
+      "physics": true,
+      "attention": "no",
+      "source": "arXiv:2005.01494"
+    },
+    "D2": {
+      "name": "eqdeeprx_linear_front",
+      "ascend": "friendly",
+      "latency_tier": "structural",
+      "risk": "med",
+      "physics": true,
+      "attention": "no",
+      "source": "arXiv:2602.11834"
+    },
+    "D3": {
+      "name": "a_mmse_folded_linear",
+      "ascend": "friendly",
+      "latency_tier": "arch",
+      "risk": "med",
+      "physics": true,
+      "attention": "shallow",
+      "source": "arXiv:2506.00452"
+    },
+    "D4": {
+      "name": "fnet_fft_mix",
+      "ascend": "conditional",
+      "latency_tier": "structural",
+      "risk": "high",
+      "physics": true,
+      "attention": "no",
+      "source": "arXiv:2105.03824"
+    },
+    "D5": {
+      "name": "channelformer_attn_precoder",
+      "ascend": "friendly",
+      "latency_tier": "structural",
+      "risk": "low",
+      "physics": false,
+      "attention": "shallow",
+      "source": "arXiv:2302.04368"
+    },
+    "D6": {
+      "name": "nvidia_nrx_conv_gnn",
+      "ascend": "friendly",
+      "latency_tier": "arch",
+      "risk": "low",
+      "physics": true,
+      "attention": "no",
+      "source": "arXiv:2312.02601"
+    },
+    "D7": {
+      "name": "windowed_axial_attn",
+      "ascend": "friendly",
+      "latency_tier": "structural",
+      "risk": "med",
+      "physics": true,
+      "attention": "yes",
+      "source": "arXiv:2510.12941"
+    },
+    "D8": {
+      "name": "ista_lista_unfolded",
+      "ascend": "friendly",
+      "latency_tier": "structural",
+      "risk": "med",
+      "physics": true,
+      "attention": "no",
+      "source": "arXiv:2104.13656"
+    },
+    "D9": {
+      "name": "mamba_ssm_freq",
+      "ascend": "conditional",
+      "latency_tier": "structural",
+      "risk": "high",
+      "physics": true,
+      "attention": "no",
+      "source": "arXiv:2601.17108"
+    },
+    "D10": {
+      "name": "residual_around_lmmse",
+      "ascend": "friendly",
+      "latency_tier": "structural",
+      "risk": "low",
+      "physics": true,
+      "attention": "no",
+      "source": "arXiv:2009.01423"
+    },
+    "D11": {
+      "name": "kd_to_conv_student",
+      "ascend": "friendly",
+      "latency_tier": "arch",
+      "risk": "med",
+      "physics": false,
+      "attention": "no",
+      "source": "Zhu MDPI Sensors 2024"
+    }
+  }
+}
