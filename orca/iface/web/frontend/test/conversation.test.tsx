@@ -65,7 +65,7 @@ afterEach(() => {
 describe("buildEntries — 折叠 oracle (SPEC §5.3 / §9 AC1)", () => {
   beforeEach(() => resetStore());
 
-  it("prompt / thinking / message / chart-ref / unknown / status-line / step-marker / node-divider / node-error 全分类", () => {
+  it("prompt / thinking / message / chart-ref / unknown / status-line / step-marker / node-divider / node-output / node-error 全分类", () => {
     const events: WebEvent[] = [
       ev("node_started", { node: "n" }),
       ev("prompt_rendered", { node: "n", session_id: "s1", data: { preview: "hi" } }),
@@ -81,7 +81,8 @@ describe("buildEntries — 折叠 oracle (SPEC §5.3 / §9 AC1)", () => {
     ];
     const entries = buildEntries(events);
     const kinds = entries.map((e) => e.kind);
-    // step_marker 应附到 thinking 而非独立 entry
+    // step_marker 应附到 thinking 而非独立 entry；
+    // node_completed 升格为 node-output（B1：显示 output 文字），不再作 node-divider。
     expect(kinds).toEqual([
       "node-divider",
       "prompt",
@@ -92,7 +93,7 @@ describe("buildEntries — 折叠 oracle (SPEC §5.3 / §9 AC1)", () => {
       "custom-generic",
       "unknown",
       "node-error",
-      "node-divider",
+      "node-output",
     ]);
   });
 

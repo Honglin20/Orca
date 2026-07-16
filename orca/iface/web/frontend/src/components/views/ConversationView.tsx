@@ -28,6 +28,7 @@ import {
 import { PromptRow } from "@/components/conversation/PromptRow";
 import { ThinkingBlock } from "@/components/conversation/ThinkingBlock";
 import { MessageBlock } from "@/components/conversation/MessageBlock";
+import { NodeOutputBlock } from "@/components/conversation/NodeOutputBlock";
 import { ToolRow } from "@/components/conversation/ToolRow";
 import { ToolGroup } from "@/components/conversation/ToolGroup";
 import { ErrorBlock } from "@/components/conversation/ErrorBlock";
@@ -178,6 +179,8 @@ export function EntryRenderer({
       return <CustomRow event={entry.event} />;
     case "node-divider":
       return <NodeDivider event={entry.event} />;
+    case "node-output":
+      return <NodeOutputBlock event={entry.event} />;
     case "node-error":
       return <ErrorBlock event={entry.event} />;
     case "status-line":
@@ -223,6 +226,9 @@ function estimateRowHeight(entry: ConvEntry): number {
   switch (entry.kind) {
     case "message":
       // markdown 渲染高度变化大；保守给 160px（多数 message 单屏可见）。
+      return 160;
+    case "node-output":
+      // output 可能是 markdown（同 message）/ JSON pre，保守给 160px（同 message）。
       return 160;
     case "thinking":
     case "tool-single":
