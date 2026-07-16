@@ -30,13 +30,17 @@ import fcntl
 import json
 import logging
 import os
+import shlex
+import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 import typer
 
+from orca.chart._paths import chart_sock_path
 from orca.compile import ConfigurationError, catalog, load_workflow
 from orca.events.bus import EventBus
 from orca.events.tape import Tape
@@ -85,11 +89,31 @@ def _prompts_dir_for(tape_path: Path, run_id: str) -> Path:
     return Path(tape_path).parent / run_id / "prompts"
 
 
-def _build_pointer(result: Any) -> str:
+def _run_dir_for(tape_path: Path, run_id: str) -> Path:
+    """per-run 资源根目录：``<rundir>/<run_id>/``（prompts / orca_env.sh 都落此）。"""
+    return Path(tape_path).parent / run_id
+
+
+def _env_file_path(tape_path: Path, run_id: str) -> Path:
+    """``runs/<run_id>/orca_env.sh`` —— per-run env 文件，子代理 ``source`` 后获 ORCA_* 身份。
+
+    in-session 路径下节点子代理由宿主 session 派发、不经 ClaudeExecutor，env 没人注入；本文件
+    用字面值（按 run_id / 当前 node / 当前 session_id / sock / resources_root 算好）替代 executor
+    的 spawn overlay。子代理只需 ``source`` 一行（字面），不亲自 typing 任何 ORCA_* 值
+    （单调信息流：run_id → 派生值，agent 无法伪造或指向别 run）。
+    """
+    return _run_dir_for(tape_path, run_id) / "orca_env.sh"
+
+
+def _build_pointer(result: Any, *, env_file: Path | None = None) -> str:
     """把 StepResult(prompt_file, resources_root) 拼成 host-facing 指针文本。
 
     主 session 收到这句即知：派 task 子代理、读哪个文件、可选资源目录。子代理读文件执行，
     其输出即本节点输出（仍经 plugin 的 ToolPart.state.output 提取 → next --output）。
+
+    ``env_file`` 非空（in-session 生产路径恒传）→ 追加一行 ``source`` 指针：子代理照抄这一行
+    （字面 source，非 typing 值）后，shell 的 viz/训练脚本调 ``render_chart`` 时 env 齐备 → 连
+    **自己 run 的** socket → 守护写 tape；``$ORCA_AGENT_RESOURCES`` 也可被 folder-agent 引用。
     """
     lines = [
         "【Orca 节点执行】请用 task 工具派一个子代理执行本节点，不要自己直接回答。",
@@ -98,18 +122,142 @@ def _build_pointer(result: Any) -> str:
     ]
     if result.resources_root:
         lines.append(f"附资源目录（脚本/参考，按需 Read）：{result.resources_root}")
+    if env_file is not None:
+        lines.append(
+            f"运行任何脚本前先 `source {env_file}`（注入 ORCA_* 身份 + agent 资源路径，"
+            "子代理不要自己 export 这些变量）。"
+        )
     return "\n".join(lines) + "\n"
 
 
-def _reply_prompt(result: Any) -> str | None:
+def _reply_prompt(result: Any, *, env_file: Path | None = None) -> str | None:
     """compact：``prompt_file`` 给定 → 返指针；否则 inline 回退全量 ``prompt``。
 
     inline 回退仅在 advance_step 未传 prompts_dir 时出现（daemon 形态 / 直调单测）；
     生产路径（bootstrap/next）恒传 prompts_dir → 恒走指针。
+
+    ``env_file`` 透传 ``_build_pointer``（in-session 生产路径给值，附 ``source`` 行）。
     """
     if result.prompt_file:
-        return _build_pointer(result)
+        return _build_pointer(result, env_file=env_file)
     return result.prompt
+
+
+# ── in-session chart ingestor 守护 + env 文件（phase-13 §3 in-session 衔接）─────────
+#
+# 为什么这一层在 in_session：web/tars-run 路径下 ClaudeExecutor spawn 时一次性注入 env
+# + RunHandle 起 ingestor（同进程）；in-session 路径下子代理由宿主 session 派发，不经 executor
+# → env 没人注入 + ingestor 没人起。本层补缺口：bootstrap detach 起守护进程，next 写 per-node
+# env 文件。子代理 source env 文件后调 render_chart → socket → 守护 emit custom(chart) → tape。
+# 详细见 ``orca/iface/in_session/chart_daemon.py`` 模块 docstring。
+
+# bootstrap 等 socket bind 就绪的 poll 超时（脱离 bootstrap CLI 前给守护 bind 的时间）。
+# 5s 覆盖 python 解释器冷启 + 或 orca 包 import（含 pydantic schema 等）+ start_unix_server；
+# 高负载机器（CI 并发 / 重 fixtures）下 import 可达 2-3s。超时仅 warning（不 fail bootstrap），
+# 因为 host 派 subagent 还要数十秒，守护很可能在那期间就绪。
+_SOCK_READY_TIMEOUT = 5.0
+_SOCK_READY_POLL = 0.05
+
+
+def _spawn_chart_daemon(run_id: str, tape_path: Path) -> None:
+    """detach 起 in-session chart ingestor 守护进程（phase-13 §3 in-session 衔接）。
+
+    用 ``start_new_session=True`` 让守护脱离 bootstrap CLI 的 process group / controlling
+    terminal —— bootstrap 是一次性 CLI，退出后守护继续（节点执行发生在宿主 session 时间窗）。
+    参考 ``orca/exec/runner.py`` 的进程组隔离模式（同 ``spawn_kwargs_for_process_group`` 理念）。
+
+    日志：守护 stdout/stderr 落 ``<rundir>/<run_id>/chart_daemon.log`` 便于诊断（守护脱离
+    bootstrap 后无 tty，必须重定向；DEVNULL 会丢排查信息）。
+
+    不等待：``Popen`` 返回即视为派发完成；socket bind 就绪由 ``_wait_for_sock`` 兜底。
+    POSIX-only：项目已 fcntl.flock 前提 POSIX（CLAUDE.md / ADR I3.3）。
+    """
+    run_dir = _run_dir_for(tape_path, run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_path = run_dir / "chart_daemon.log"
+
+    cmd = [
+        sys.executable, "-m", "orca.iface.in_session.chart_daemon",
+        "--run-id", run_id,
+        "--tape", str(tape_path),
+    ]
+    # log_fd 在 Popen 后由 child dup；parent 即刻 close 自己的 fd（不持有）。
+    # ``close_fds=True`` 防 bootstrap 其它 fd（如 flock fd）泄漏进守护。
+    log_fd = open(log_path, "a", encoding="utf-8")
+    try:
+        subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=log_fd,
+            stderr=log_fd,
+            start_new_session=True,
+            close_fds=True,
+        )
+    finally:
+        log_fd.close()
+    logger.info("run %s: chart 守护已 detach spawn（log=%s）", run_id, log_path)
+
+
+def _wait_for_sock(sock_path: Path, *, timeout: float = _SOCK_READY_TIMEOUT) -> bool:
+    """poll ``sock_path.exists()`` 等守护 bind 完成；超时返 False（调用方仅 warn 不 fail）。
+
+    ``chart_ingestor`` 的 ``asyncio.start_unix_server`` bind 后 socket 文件才出现。Unix domain
+    socket 无 TCP 的 listen/accept race —— 文件存在即可连。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if sock_path.exists():
+            return True
+        time.sleep(_SOCK_READY_POLL)
+    return False
+
+
+def _write_orca_env(
+    env_path: Path,
+    *,
+    run_id: str,
+    node: str,
+    session_id: str,
+    sock_path: Path,
+    resources_root: str | None,
+) -> None:
+    """原子写 ``runs/<run_id>/orca_env.sh``（5 个变量，按当前节点身份）。
+
+    内容（**字面值**，子代理只 ``source`` 不 typing）::
+
+        export ORCA_RUN_ID=<run_id>
+        export ORCA_NODE=<当前节点名>
+        export ORCA_SESSION_ID=<本次 dispatch 的 uuid>
+        export ORCA_CHART_SOCK=<chart_sock_path(run_id)>
+        export ORCA_AGENT_RESOURCES=<folder-agent resources_root>   # 或 ``unset`` 清 stale
+
+    ``resources_root`` 非空（folder-agent）→ ``export``；为 None（inline-prompt 节点）→
+    ``unset ORCA_AGENT_RESOURCES`` 清潜在 stale（同一 shell 内前一次 source 的残留）。
+
+    原子写：tmp + ``os.replace``（与 marker / step.py ``_write_prompt_file`` 同模式）。OSError
+    → warn（不 fail next：env 文件是子代理侧便利，缺了也只让 chart/资源引用 fail loud 在子代理侧）。
+    """
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"export ORCA_RUN_ID={shlex.quote(run_id)}",
+        f"export ORCA_NODE={shlex.quote(node)}",
+        f"export ORCA_SESSION_ID={shlex.quote(session_id)}",
+        f"export ORCA_CHART_SOCK={shlex.quote(str(sock_path))}",
+    ]
+    if resources_root:
+        lines.append(f"export ORCA_AGENT_RESOURCES={shlex.quote(str(resources_root))}")
+    else:
+        lines.append("unset ORCA_AGENT_RESOURCES")
+    content = "\n".join(lines) + "\n"
+
+    tmp = env_path.with_name(f".{env_path.name}.tmp.{os.getpid()}")
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, env_path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        logger.warning("run %s: 写 env 文件 %s 失败（子代理 chart/资源可能受影响）",
+                       run_id, env_path, exc_info=True)
 
 
 def _drive_protocol(run_id: str) -> str:
@@ -446,6 +594,26 @@ def bootstrap(
             }, ensure_ascii=False))
             raise typer.Exit(1)
 
+        # ── in-session chart ingestor 守护 + env 文件（phase-13 §3 in-session 衔接）──────────
+        # bootstrap 后子代理执行发生在宿主 session 时间窗；detach 起守护让它跨 bootstrap CLI
+        # 退出存活，bind socket 收 chart。env 文件给 entry 节点身份（每次 next 重写下一节点）。
+        sock_path = chart_sock_path(run_id)
+        env_path = _env_file_path(tape_path, run_id)
+        _write_orca_env(
+            env_path,
+            run_id=run_id,
+            node=result.node or "",
+            session_id=uuid.uuid4().hex,
+            sock_path=sock_path,
+            resources_root=result.resources_root,
+        )
+        _spawn_chart_daemon(run_id, tape_path)
+        if not _wait_for_sock(sock_path):
+            logger.warning(
+                "run %s: chart 守护 socket %s 在 %.1fs 内未就绪（host 派 subagent 期间可能补上）",
+                run_id, sock_path, _SOCK_READY_TIMEOUT,
+            )
+
         reply: dict[str, Any] = {
             "run_id": run_id,
             "tape": str(tape_path),
@@ -453,7 +621,7 @@ def bootstrap(
         }
         if result.node:
             reply["node"] = result.node
-        prompt_text = _reply_prompt(result)
+        prompt_text = _reply_prompt(result, env_file=env_path)
         # model-driven advance 补丁：entry prompt 后附「驱动协议」，模型据此自调 next --output。
         if prompt_text:
             reply["prompt"] = prompt_text + _drive_protocol(run_id)
@@ -518,6 +686,7 @@ def next(
         result, compliance_failed = asyncio.run(_next_in_critical_section(
             bus, tape_obj, run_id, normalized_output, inp, start_ts, mpath,
             _prompts_dir_for(tape_path, run_id),
+            env_path=_env_file_path(tape_path, run_id),
         ))
     except InSessionError as e:
         # fail_in_session：emit workflow_failed（tape data.kind = error_kind）+ 返含
@@ -536,7 +705,7 @@ def next(
     reply: dict[str, Any] = {"done": result.done or compliance_failed}
     if result.node:
         reply["node"] = result.node
-    prompt_text = _reply_prompt(result)
+    prompt_text = _reply_prompt(result, env_file=_env_file_path(tape_path, run_id))
     # model-driven advance 补丁：每个 next 返回的 prompt 也附「驱动协议」，让模型继续自驱。
     if prompt_text:
         reply["prompt"] = prompt_text + _drive_protocol(run_id)
@@ -633,11 +802,17 @@ async def _next_in_critical_section(
     bus: EventBus, tape: Tape, run_id: str, output: str | None,
     inputs: dict, start_ts: float, mpath: Path,
     prompts_dir: Path | None = None,
+    env_path: Path | None = None,
 ):
-    """flock 临界区内的 next 主体：advance + emit_batch + marker RMW（N2）+ 合规计数 (F11)。
+    """flock 临界区内的 next 主体：advance + emit_batch + marker RMW（N2）+ 合规计数 (F11)
+    + per-node env 文件重写（in-session chart/资源 衔接）。
 
     返回 ``(result, compliance_failed)``。``compliance_failed=True`` 时已 emit
     workflow_failed，调用方据 ``done=True`` 停注入。
+
+    ``env_path`` 给定时（生产路径恒传）：在 ``apply_step_result`` 之后、按下一节点身份重写
+    ``runs/<run_id>/orca_env.sh``（ORCA_NODE / ORCA_SESSION_ID / ORCA_AGENT_RESOURCES 按新节点）。
+    终态（done/compliance_failed）不写 —— 无下一节点，env 文件保留前值（run 即将结束）。
     """
     from orca.run.step import StepResult
     # marker 缺 → 调用方未 bootstrap 或 marker 已清；幂等吞 + warn（不 raise）。
@@ -669,6 +844,18 @@ async def _next_in_critical_section(
                 node=result.node,
             )
             compliance_failed = True
+
+    # in-session chart/资源 env 文件：非终态 + 下一节点存在 → 按下一节点身份重写。
+    # 终态时不写（无下一节点；守护会由 tape 终态事件自退，env 文件不再被 source）。
+    if env_path is not None and not (result.done or compliance_failed) and result.node:
+        _write_orca_env(
+            env_path,
+            run_id=run_id,
+            node=result.node,
+            session_id=uuid.uuid4().hex,
+            sock_path=chart_sock_path(run_id),
+            resources_root=result.resources_root,
+        )
 
     # marker RMW（N2）：flock 临界区内回写。终态 → 清 marker（不复用）。
     if result.done or compliance_failed:

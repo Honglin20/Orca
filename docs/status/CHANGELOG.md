@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-16] in-session 路径接入 `orca.chart.render_chart`（per-run chart 守护 + run 级 env 文件 + 指针 source 行）
+
+补 in-session skill 驱动路径的 chart 缺口：web/tars-run 路径下 ClaudeExecutor spawn 时一次性注入 `ORCA_*` env + 起 per-run ingestor（同进程）；in-session 路径下节点子代理由宿主 session（opencode/CC）派发不经 executor → env 无 `ORCA_*` 也无人起 ingestor → `render_chart` raise。本任务三件套补缺：① bootstrap detach 起 `_FlockSafeTape` 守护（跨进程 flock + 增量 disk max-seq 刷新，复用 `chart_ingestor` 协议零改动）；② `runs/<run_id>/orca_env.sh` per-node env 文件（5 var：4 chart + `ORCA_AGENT_RESOURCES`，folder-agent 资源定位缺口同补）；③ 节点 prompt 指针加 `source <env>` 行。守护 `_watch_terminal` 监听终态事件自退 + 6h TTL 兜底；partial-line race 防护（`last_size` 仅推进到最后 `\n`）。24 新测试（19 守护单测 + 5 集成：chart 落 tape / 并行不串台 / folder-agent + `$ORCA_AGENT_RESOURCES`）；710 in-session+chart+events+exec 测试 0 新回归；code-reviewer 两轮 0 🔴（R1 1 🔴 partial-line race + 5 🟡 全修；R2 0 🔴 0 🟡）。Commit: `<本 commit，SHA 见 git log>`。详见 [release note](../releases/2026-07-16-in-session-chart.md)。
+
 ## [2026-07-16] 后端命令 teams → tars 改名（品牌收口：skill=tars / 后端=tars / in-session=orca）
 
 后端/运维命令 `teams`（install/run/serve/ps/validate/mcp/executor/list/logs/wait/resume）→ `tars`，与上一步 TARS skill rebrand 对齐——三套命名收口。改 `pyproject [project.scripts]` 入口 + `DEFAULT_BACKEND_CMD` 默认 + `validator` 保留字（`teams`→`tars`，防 wf 名撞命令）+ `commands.py` help/docstring + `teams_app` deprecated 别名保留（向后兼容）+ 用户面消息（orca epilog/doctor/skill 弃用警告）+ shipped 产物（cc_nudge.sh / SKILL.md / templates）+ `examples/mxint_analysis.yaml` 注释 + 测试 + SPEC live 段。`orca` in-session 命令不动；`ORCA_BACKEND_CMD` env 名不变（只改默认值）。重装后 `tars` 上 PATH、`teams` 退场（验：`which tars`✓ / `tars --help` 显示 tars / `orca --help` 指 tars）。768 单测 0 回归（+2 净增：pyproject 入口锁 + teams_app 别名锁）；code-reviewer 两轮 0 🔴（R1 🟡 examples 注释漏改 / R2 🟡 测试名实不符 + 🟢 别名锁，全修）。真机 `tars install/--help/list` 待 test-agent 验。Commit: `<本 commit，SHA 见 git log>`。详见 [release note](../releases/2026-07-16-teams-to-tars-rename.md)。

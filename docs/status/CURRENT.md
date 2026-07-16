@@ -11,6 +11,7 @@
 
 ### 2026-07-16 已完成（最新）
 
+- **in-session 路径接入 chart（render_chart）**（`<本 commit>`）：补 in-session skill 驱动路径的 chart 缺口。web/tars-run 路径下 ClaudeExecutor spawn 时注入 `ORCA_*` env + 起 per-run ingestor（同进程）；in-session 路径下节点子代理由宿主 session 派发不经 executor → env 缺、ingestor 没人起 → `render_chart` raise。三件套：① bootstrap detach 起守护进程 bind socket + 跑 `chart_ingestor`（复用零改动；`_FlockSafeTape` 子类加跨进程 flock + 增量 disk max-seq 刷新）；② `runs/<run_id>/orca_env.sh` per-node env 文件（5 var：4 chart + `ORCA_AGENT_RESOURCES`，folder-agent 资源定位缺口同补）；③ 节点 prompt 指针加 `source <env>` 行。守护 `_watch_terminal` 监听终态事件自退 + 6h TTL 兜底；partial-line race 防护（`last_size` 仅推进到最后 `\n`）。24 新测试；710 in-session+chart+events+exec 测试 0 新回归；code-reviewer 两轮 0 🔴（R1 1 🔴 partial-line race + 5 🟡 全修；R2 0 🔴 0 🟡）。详见 [release note](../releases/2026-07-16-in-session-chart.md)。
 - **teams→tars 后端改名**（`<本 commit>`）：`pyproject` 入口 + `DEFAULT_BACKEND_CMD` + `validator` 保留字 + help/docstring + 用户面消息（orca epilog/doctor/skill 弃用警告）+ shipped 产物（cc_nudge.sh / create-workflow SKILL.md / templates / skills）+ `examples/mxint_analysis.yaml` 注释。`teams_app` deprecated 别名保留（向后兼容）；`orca` in-session 不动；`ORCA_BACKEND_CMD` env 名不变。重装后 `tars` 上 PATH / `teams` 退场。768 单测 0 回归；code-reviewer 两轮 0 🔴（全修）。详见 [release note](../releases/2026-07-16-teams-to-tars-rename.md)。
 - **TARS rebrand / step 6 / 批量 FU / step 5b / step 3b / step 5a / defects / step 4 / step 2b / step 1**：见 CHANGELOG 索引。
 
@@ -22,6 +23,9 @@
 ### follow-up / debt（用户暂缓 / 预存，非阻塞）
 
 - **既有测试隔离缺陷**（非本任务引入，code-reviewer R1 🟢 登记）：`test_orca_list_returns_inputs_schema_json` 未隔离 `~/.orca/workflows` user-level 扫描根，全局有 wf 时 `assert len==1` 失败。择机 monkeypatch `Path.home` 修。
+- **既有 `orca/iface/in_session/daemon.py:105` 裸 `sys.exit(128 + signum)`**（违反 SPEC §3.3 grep 守门）：本任务 chart_daemon.py 已用 `loop.add_signal_handler + asyncio.Event` 避免同款违规，但老 daemon.py 仍裸 `sys.exit` 致 `test_no_bare_sys_exit_or_raise_system_exit_outside_allowed_paths` baseline 即失败。择机按 chart_daemon.py 同款 pattern 修。
+- **既有 `tests/e2e_phase13/test_e2e_1_basic_chart.py` + `test_e2e_2_multi_run_parallel.py` baseline 失败**：YAML 硬编码 `python3`，本机 `python3` 未装 orca → `render_chart` import 失败。CI 或装了 orca 的环境无此问题。择机把 e2e wf 的 `python3` 改为 `${ORCA_PYTHON:-python3}` 或测试 fixture 注入 `sys.executable`。
+- **既有 `tests/iface/mcp/test_*` baseline 失败**：环境缺 `uv` 二进制（FileNotFoundError）。非本任务引入。
 - **既有 `test_bg_run_ps_logs_wait_e2e` rot**：`orca run --background` 选项不存在（in-session CLI 无 run）。择机修或删。
 - **MCP 移除**：用户暂不移除（spec v5 §8 留 MCP 8 tool 出 scope）。
 - **`in-session-unified-backend-draft.md`**：推迟架构草稿，仍含 `teams` 残留（YAGNI，启用时再改）。
