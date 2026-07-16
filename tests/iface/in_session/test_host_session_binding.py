@@ -282,12 +282,25 @@ def _write_nudge(dst_dir: Path) -> Path:
 
 
 def _env(session: str | None) -> dict:
+    """subprocess env：默认只设 CLAUDE_CODE_SESSION_ID（模拟 CC Stop-hook）。
+
+    显式清 ORCA_HOST_SESSION_ID 防测试进程 env 泄漏（若 pytest 在 opencode shell.env
+    注入后跑，ORCA 会抢占 CLAUDE → current 漂移，🟡 review#4）。
+    """
     e = dict(os.environ)
+    # 恒清 ORCA_HOST_SESSION_ID：本组测试用 CLAUDE_CODE_SESSION_ID 模拟 CC session。
+    e.pop("ORCA_HOST_SESSION_ID", None)
     if session is not None:
         e["CLAUDE_CODE_SESSION_ID"] = session
     else:
         e.pop("CLAUDE_CODE_SESSION_ID", None)
-        e.pop("ORCA_HOST_SESSION_ID", None)
+    return e
+
+
+def _env_with_orca(orca_session: str, claude_session: str | None = None) -> dict:
+    """subprocess env：显式设 ORCA_HOST_SESSION_ID（测 cc_nudge.sh 的 ORCA > CLAUDE 优先级）。"""
+    e = _env(claude_session)
+    e["ORCA_HOST_SESSION_ID"] = orca_session
     return e
 
 
@@ -478,3 +491,104 @@ def test_cc_nudge_mixed_sessions_only_nudges_own(tmp_path: Path):
     assert payload["decision"] == "block"
     assert "r-a" in payload["reason"]
     assert "r-b" not in payload["reason"], "sess-A 的 nudge 不应提及 sess-B 的 run（防串台）"
+
+
+@_pytestmark_nudge
+def test_cc_nudge_orca_env_priority_over_claude(tmp_path: Path):
+    """cc_nudge.sh 的 _host_session_from_env：ORCA_HOST_SESSION_ID 优先于 CLAUDE_CODE_SESSION_ID。
+
+    两份 _host_session_from_env（cli.py / cc_nudge.sh）DRY 漂移闸门——改一忘另一会被此测抓
+    （🟡 coverage review#3）。
+    """
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    _write_marker(runs, "r-orca")
+    _write_tape(runs, "r-orca", host_session="orca-sess")
+    script = _write_nudge(tmp_path)
+    # 同时设 ORCA + CLAUDE，tape 钉 ORCA → 应 block（证明 cc_nudge.sh 取 ORCA 而非 CLAUDE）
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        capture_output=True, text=True, timeout=10,
+        env=_env_with_orca("orca-sess", claude_session="cc-sess"),
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout.strip())
+    assert payload["decision"] == "block", "cc_nudge.sh 应取 ORCA_HOST_SESSION_ID（高优先）"
+    assert "r-orca" in payload["reason"]
+
+
+@_pytestmark_nudge
+def test_cc_nudge_tape_first_line_corrupt_json(tmp_path: Path):
+    """tape 首行是损坏 JSON（非合法）→ _host_session_from_tape 的 except JSONDecodeError → None → 跳过。
+
+    区别于 test_cc_nudge_tape_first_line_not_workflow_started（首行合法 JSON 但 type 错，走 break）：
+    本测走 except 分支（🟢 coverage review#3 / impl review🟢#1）。
+    """
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    _write_marker(runs, "r-corrupt")
+    (runs / "r-corrupt.jsonl").write_text("{not valid json at all\n", encoding="utf-8")
+    script = _write_nudge(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        capture_output=True, text=True, timeout=10, env=_env("sess-A"),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "", "tape 首行损坏 JSON → host_session None → 跳过"
+
+
+# ── §5.6 作用域回归：next 不改写 host_session（coverage review 🟡#2）──────────
+
+
+def test_cli_next_does_not_rewrite_host_session(cwd_tmp, wf_path, monkeypatch):
+    """SPEC §5.6：next/status/open/stop 行为不变——host_session 仅作用 nudge，不改写。
+
+    bootstrap 写 host_session → 跑 next（带 output）→ tape 中 workflow_started 条数仍为 1，
+    且 host_session 值不变（next 路径不重发 ws，§4.1 emit 真链）。
+    锁「next 不传 host_session 给 advance_step」的代码结构契约（防有人误加参数）。
+    """
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "cc-scope-sess")
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id, tape = boot["run_id"], boot["tape"]
+
+    # 跑 next（推进到节点 b）
+    nxt = runner.invoke(app, ["next", "--run-id", run_id, "--output", "out_a"])
+    assert nxt.exit_code == 0, nxt.output
+
+    lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
+    ws_events = [json.loads(ln) for ln in lines if json.loads(ln)["type"] == "workflow_started"]
+    assert len(ws_events) == 1, "next 不应新增 workflow_started（host_session 只在 bootstrap 写一次）"
+    assert ws_events[0]["data"]["host_session"] == "cc-scope-sess", (
+        "next 路径不应改写 host_session（§5.6 作用域：host_session 仅作用 nudge）"
+    )
+
+
+# ── orca.ts 结构守门（coverage review 🟡#1：项目无 TS 测基础设施，结构 grep 兜底）──
+
+
+def test_orca_ts_has_host_session_binding_hooks():
+    """orca.ts 结构守门：host_session 绑定的关键元素存在（shell.env 注入 + tape 过滤 + per-session 限流）。
+
+    项目无 jest/vitest（纯 Python pytest），orca.ts 行为零测是 known gap（SPEC §5.8 非阻塞）。
+    本测只锁结构（grep 关键符号存在），防重构误删；行为正确性靠 cc_nudge.sh 同源逻辑的 21 测 +
+    test-agent E2E 兜底。
+    """
+    plugin = Path(__file__).resolve().parents[3] / "orca/iface/in_session/templates/opencode/orca.ts"
+    text = plugin.read_text(encoding="utf-8")
+    # shell.env 钩子注入 ORCA_HOST_SESSION_ID（§4.5 注入可行性）
+    assert '"shell.env"' in text, "shell.env 钩子必须存在（注入 ORCA_HOST_SESSION_ID）"
+    assert "ORCA_HOST_SESSION_ID" in text
+    # tape 首行读 host_session（§4.5 tape-only 派生）
+    assert "function hostSessionOfRun" in text
+    assert "workflow_started" in text
+    # listActiveRuns 按 hostSession 过滤 + fail-open 回退（C5 静默死防护）
+    assert "function listActiveRuns(hostSession: string)" in text
+    assert "fail-open" in text.lower() or "hasAnyReal" in text, "fail-open 回退逻辑必须存在（C5 防护）"
+    # per-session 限流分键（§2.4）
+    assert "function nudgeFile(sessionID: string)" in text
+    assert "${sessionID}" in text
+    # Marker interface 不加 host_session（tape-only 铁律，§4.5）
+    marker_block = text[text.index("interface Marker"):text.index("interface Marker") + 200]
+    assert "host_session" not in marker_block, "Marker interface 不应加 host_session（tape-only）"
