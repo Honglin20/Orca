@@ -1,0 +1,493 @@
+name: agent-struct-exploration
+description: "Agent 驱动的结构性探索（降时延、保精度）：family_detect(setup) → [hypothesizer→engineer→structure_gate→evaluator→analyst→curator→viz_round] 循环到 champion 达标 → finalize(champion 重训+导出ONNX+final_report) → viz_finalize。契约见 docs/specs/agent-structural-exploration-design-draft.md。"
+
+entry: family_detect
+
+inputs:
+  # ── 草稿 §10 业务输入（逐条）──
+  model_path:
+    type: string
+    description: "模型定义文件路径（只改它），如 examples/ViT/model.py"
+    required: true
+  project_root:
+    type: string
+    description: "用户 PyTorch 项目根目录，如 examples/ViT/"
+    required: true
+  build_fn:
+    type: string
+    description: "实例化入口函数名（导出 ONNX 用），如 build_model"
+    required: true
+  dummy_input:
+    type: string
+    description: "ONNX 导出的 dummy_input 描述，JSON 字符串如 '{\"shape\":[1,3,224,224],\"dtype\":\"float32\"}'"
+    required: true
+  train_command:
+    type: string
+    description: "训练命令原样 shell 执行（绝不改训练函数），如 'python train.py --epochs 30 --config base'"
+    required: true
+  test_command:
+    type: string
+    description: "pre-trained 模式：测试/eval 命令（load ckpt 测精度，不训练）。给定则 baseline 只测不训；为空则跑 train_command"
+    required: false
+    default: ""
+  pretrained_ckpt:
+    type: string
+    description: "baseline 预训练权重路径（可选，仅元信息；test_command 自行加载）"
+    required: false
+    default: ""
+  baseline_accuracy:
+    type: string
+    description: "基线精度（可选；不给则 baseline_measure 跑 train_command 测得）"
+    required: false
+    default: ""
+  target_latency_ms:
+    type: string
+    description: "目标时延(ms)；champion.latency ≤ 此值且精度达标即终止"
+    required: true
+  accuracy_target:
+    type: string
+    description: "精度下限；默认 = baseline−0.5%（微损）。无损则设为 baseline"
+    required: false
+    default: ""
+  latency_provider:
+    type: string
+    description: "可替换 cost model，格式 '/abs/path/my_cost_model.py::measure'。LLM 永不预测时延，只从此函数取（§5）。默认指向随 workflow 发布的 struct_scripts_dir/latency_onnxrt.py；自研 cost model 用绝对路径覆盖"
+    required: false
+    default: "workflows/agents/_struct_scripts/latency_onnxrt.py::measure"
+  struct_scripts_dir:
+    type: string
+    description: "确定性辅助脚本目录（绝对路径推荐；相对路径相对 cwd 解析）。随 workflow 发布在 workflows/agents/_struct_scripts/，含 latency_onnxrt.py / export_onnx.py / ast_diff.py / ledger_reducer.py。安装到 ~/.orca/workflows 时改为 '~/.orca/workflows/agents/_struct_scripts'"
+    required: false
+    default: "workflows/agents/_struct_scripts"
+  gpus:
+    type: string
+    description: "GPU 配置：'auto'（按需探测空闲卡）或 JSON 数组如 '[0,1,2,3]'（§8）"
+    required: false
+    default: "auto"
+  model_family:
+    type: string
+    description: "族覆盖：'auto'（LLM 判族）或显式 transformer/cnn/hybrid/...（§7）"
+    required: false
+    default: "auto"
+  knowledge_base:
+    type: string
+    description: "外挂 KB 根目录（按族 + agent_slices 索引切片加载）"
+    required: false
+    default: "knowledge_base/"
+  paths:
+    type: string
+    description: "并行路线数（§8 多 path）。注：当前 DAG 实现单 path/轮（多 path 见报告说明）"
+    required: false
+    default: "1"
+  max_rounds:
+    type: string
+    description: "最大探索轮数；耗尽即终止走 finalize（业务预算，由 curator 强制）"
+    required: false
+    default: "20"
+  structural_slot_ratio:
+    type: string
+    description: "每轮结构假设最低占比（默认 0.5；§9.2 软配额，curator 按 LLM 终判 tag 计数）"
+    required: false
+    default: "0.5"
+  reject_hyperparam_only:
+    type: string
+    description: "严格模式：true 时 hyperparam-only 候选被 reject（默认 false，§9.2）"
+    required: false
+    default: "false"
+  onnx_opset:
+    type: string
+    description: "ONNX 导出 opset 版本"
+    required: false
+    default: "17"
+  # ── Orca 编排参数（非草稿业务字段，DAG 循环所需）──
+  iterations:
+    type: string
+    description: "Orca 单 run 节点访问数硬上限（循环兜底）。每轮约 7 次访问；默认值 ≈ max_rounds×7 + 富余。超限 raise MaxIterationsError（fail loud）"
+    required: false
+    default: "500"
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════
+  # Setup（一次性）：LLM 判族 → 加载 KB 切片 → 建输出目录/账本/worktree
+  #                  → 实测 baseline_latency（cost model，§5）→ seed champions.jsonl
+  # ═══════════════════════════════════════════════════════════════
+  - name: family_detect
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    tools: [bash, read, write, glob, grep]
+    output_schema:
+      type: object
+      required: [output_dir, family, kb_cache_dir]
+      properties:
+        output_dir: {type: string}
+        family: {type: string, description: "命中的族名（可多族用 + 连，如 transformer+cnn）"}
+        kb_cache_dir: {type: string}
+    prompt: |
+      你是结构性探索 workflow 的 **Setup（一次性·轻量）**：建输出目录 + **浅层族检测** + 加载 KB 切片。
+      **不**做 ONNX 导出 / 测时延 / 训练（那些归下游 `baseline_measure` 节点，确定性脚本）。
+
+      ## 输入
+      - model_path: {{ inputs.model_path }}
+      - project_root: {{ inputs.project_root }}
+      - model_family（auto 则你浅层判族）: {{ inputs.model_family }}
+      - knowledge_base: {{ inputs.knowledge_base }}
+
+      ## 执行（确定性优先，fail loud）
+      1. **建输出目录（append-only 账本，§6）**：`llm_artifacts/<model_name>/runs/<run_id>/`，子目录
+         `snapshots/ champions.jsonl ledger.jsonl kb_cache/ viz/ .worktrees/`。`<run_id>` 用时间戳。
+         `<model_name>` = model_path 文件名 stem。**非 git 仓库**的 project_root → fallback per-path 目录拷贝（§6）。
+      2. **浅层族检测（§7.3，关键：只看表面）**：
+         - 若 `model_family != auto` → 直接用它，**不读 model.py**。
+         - 否则**只看 model.py 的最表面一层**：顶层 `import`、`nn.Module` 子类的**类名**、`__init__` 里**顶层**用到的模块类型
+           （如 `nn.Conv1d` / `nn.MultiheadAttention` / 自定义 attention 类 / `nn.Linear` / RNN）。**只判整体方向**——
+           例如"有 Conv + 自定义 attention → `cnn+transformer` 或 `wireless_receiver`"、"全 Conv → `cnn`"、"全 Linear+attention → `transformer`"。
+           **严禁**：读深入实现、读 forward 细节、读 RAW 示例。可多族取并集（`transformer+cnn`）。
+         - **不明确就按最接近的方向给一个最佳猜测**（不阻塞流程），并在输出注明"低置信"。族名优先用 KB 已注册的：
+           `transformer` / `cnn` / `wireless_receiver` / `hybrid`。
+         - **不用 AST 脚本判族**。
+      3. **加载 KB 切片进 kb_cache/**（§7.3 run 级缓存）：按 `{{ inputs.knowledge_base }}index.json`
+         的 `common.files` + 命中族的 `families.<族>.files`（**只 base 文件**：primitives / latency_moves / failures；
+         directions/raw 由下游 hypothesizer/engineer 按各自 slice 自取），把所需 md **每文件只读一次**拷/缓存到 `kb_cache/`。
+
+      ## 输出（**必须是合法 JSON 对象**，严格匹配上方 output_schema；orca 按 output_schema 校验，非 JSON → output_schema_mismatch fail loud）
+      ```json
+      {"output_dir": "<绝对路径>", "family": "<族名，可带低置信注>", "kb_cache_dir": "<kb_cache 绝对路径>"}
+      ```
+    routes:
+      - to: baseline_measure
+
+  # baseline_measure（新·确定性）：导出 baseline ONNX + cost_model 测时延 + 取 baseline accuracy
+  #（pre-trained → 只测不训 / 给定 / 训练）+ accuracy_target + seed champions。只跑脚本+解析，无 LLM 判断。
+  - name: baseline_measure
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    tools: [bash, read]
+    output_schema:
+      type: object
+      required: [output_dir, baseline_latency_ms, baseline_accuracy, accuracy_target]
+      properties:
+        output_dir: {type: string}
+        baseline_latency_ms: {type: number, description: "cost model 实测（LLM 永不预测，§5）"}
+        baseline_accuracy: {type: number}
+        accuracy_target: {type: number}
+        baseline_onnx: {type: string}
+        accuracy_mode: {type: string, description: "train|test|given"}
+    prompt: |
+      你是 `baseline_measure` 节点（**确定性**）：调脚本测 baseline 时延 + 取 baseline accuracy + seed champions。
+      **不做任何 LLM 判断**，只跑下面脚本 + 解析 stdout。
+
+      ## 执行（fail loud；不要自己手写 torch/onnxruntime）
+      ```bash
+      python3 "{{ inputs.struct_scripts_dir }}/measure_baseline.py" \
+        --output_dir "{{ family_detect.output.output_dir }}" \
+        --model_path "{{ inputs.model_path }}" \
+        --build_fn "{{ inputs.build_fn }}" \
+        --dummy_input '{{ inputs.dummy_input }}' \
+        --opset {{ inputs.onnx_opset }} \
+        --latency_provider "{{ inputs.latency_provider }}" \
+        --train_command "{{ inputs.train_command }}" \
+        --test_command "{{ inputs.test_command }}" \
+        --pretrained_ckpt "{{ inputs.pretrained_ckpt }}" \
+        --baseline_accuracy "{{ inputs.baseline_accuracy }}" \
+        --accuracy_target "{{ inputs.accuracy_target }}" \
+        --project_root "{{ inputs.project_root }}"
+      ```
+      从 stdout 的 `KEY: value` 解析：
+      - `BASELINE_LATENCY_MS:` → baseline_latency_ms
+      - `BASELINE_ACCURACY:` → baseline_accuracy
+      - `ACCURACY_TARGET:` → accuracy_target
+      - `ACCURACY_MODE:` → accuracy_mode（train | test | given）
+      - `ONNX_PATH:` → baseline_onnx
+      脚本非零退出 → **fail loud**（把 stderr 写进 fail_reason 并停）。
+
+      ## 输出（**必须是合法 JSON 对象**，严格匹配上方 output_schema；非 JSON → fail loud）
+      ```json
+      {"output_dir": "{{ family_detect.output.output_dir }}", "baseline_latency_ms": <数>, "baseline_accuracy": <数>, "accuracy_target": <数>, "baseline_onnx": "<ONNX 绝对路径>", "accuracy_mode": "train|test|given"}
+      ```
+    routes:
+      - to: hypothesizer
+
+  # ═══════════════════════════════════════════════════════════════
+  # 一轮（循环体）—— 循环回到 hypothesizer 由 viz_round 的 route 控制
+  # ═══════════════════════════════════════════════════════════════
+
+  # Step 1：Hypothesizer（LLM）—— 读 champion + KB 切片 + 时延缺口 → 提结构假设
+  - name: hypothesizer
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: struct-hypothesizer
+    output_schema:
+      type: object
+      required: [hypothesis_id, hypothesis, rationale_latency, rationale_novelty, structural_intent]
+      properties:
+        hypothesis_id: {type: string}
+        hypothesis: {type: string, description: "宏观结构假设（改什么、为什么降时延）"}
+        rationale_latency: {type: string}
+        rationale_novelty: {type: string}
+        structural_intent: {type: boolean, description: "是否为宏观结构方向（供 §9.2 配额计数）"}
+    routes:
+      - to: engineer
+
+  # Step 2：Engineer（LLM）—— 假设 → 写入 worktree 的 model.py（AST/schema 可编译校验）
+  - name: engineer
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: struct-engineer
+    output_schema:
+      type: object
+      required: [candidate_id, worktree, snapshot_path]
+      properties:
+        candidate_id: {type: string}
+        worktree: {type: string, description: "本 candidate 的 git worktree 绝对路径"}
+        snapshot_path: {type: string, description: "snapshots/<id>_model.py 绝对路径（不可变快照）"}
+        model_summary: {type: string}
+    routes:
+      - to: structure_gate
+
+  # Step 3：结构门（§9）—— AST diff 出事实摘要（确定性）→ LLM 终判 tag（不驳回，只打标）
+  - name: structure_gate
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    tools: [bash, read, write, glob, grep]
+    output_schema:
+      type: object
+      required: [tag, diff_summary]
+      properties:
+        tag: {type: string, enum: [structural, hyperparam, mixed]}
+        diff_summary: {type: string, description: "module-level AST diff 摘要（算子/拓扑是否变 / 哪些是纯数值改）"}
+    prompt: |
+      你是**结构变更门**（§9，放宽版 · 不硬驳回超参）。两步合一：确定性 AST 事实 + 语义终判。
+
+      ## 输入
+      - 父 model.py（champion 快照）+ 新 candidate 快照：从 `{{ family_detect.output.output_dir }}snapshots/`
+        读，本轮 candidate = `{{ engineer.output.snapshot_path }}`，父由 `ledger.jsonl` 最近 SUCCESS/parent 定。
+      - 候选 worktree：`{{ engineer.output.worktree }}`
+      - struct_scripts_dir: `{{ inputs.struct_scripts_dir }}`
+
+      ## 执行
+      1. **AST diff（确定性事实，§9.1）**：跑 `python3 {{ inputs.struct_scripts_dir }}/ast_diff.py --parent <父 model.py> --child <子 model.py> --format json`。
+         读 stdout JSON：`topology_changed` / `operator_changes` / `numeric_changes` / `added` / `removed` / `summary`。
+         客观列出算子类型/拓扑是否变、哪些是纯数值改（如 hidden_dim、num_layers、lr）。把摘要作为**参考输入**。
+         脚本失败（非零退出）→ 读 stderr，仍可在 prompt 内 inline python 跑 AST diff 兜底（不应阻塞主循环）。
+      2. **LLM 终判 tag** ∈ {`structural`, `hyperparam`, `mixed`}（§9.1 / §14 决策3）：在 AST 摘要 grounding 下
+         做语义判定（能处理 AST 判不出的边界，如 group conv groups 1→8 是数值改但语义算结构性）。
+         **AST 不是唯一判据、也不直接驳回**；它是防自凑配额的事实参考。
+      3. **不驳回**（§9.2 默认）：默认全部放行，tag 写输出（下游 curator 入账本）。
+
+      ## 输出（**必须是合法 JSON 对象**，严格匹配上方 output_schema；非 JSON → fail loud）
+      ```json
+      {"tag": "structural|hyperparam|mixed", "diff_summary": "<AST 事实摘要>"}
+      ```
+    routes:
+      - to: evaluator
+
+  # Step 4：Evaluator（确定性）—— 导出 ONNX → cost_model.measure → 时延门 → 按需抢卡跑 train_command → 取 accuracy
+  - name: evaluator
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: struct-evaluator
+    output_schema:
+      type: object
+      required: [status, latency_ms, met_latency, accuracy, met_accuracy]
+      properties:
+        status: {type: string, enum: [SUCCESS, FAIL_latency, FAIL_accuracy, FAIL_export]}
+        latency_ms: {type: number, description: "实测时延（cost model，不变量1）；FAIL_export 时为 -1"}
+        met_latency: {type: boolean, description: "latency < champion.latency（时延门，§3/§4）"}
+        accuracy: {type: number, description: "训练所得精度；未训练时为 -1"}
+        met_accuracy: {type: boolean}
+        onnx_path: {type: string}
+        snapshot_path: {type: string}
+        fail_reason: {type: string}
+    routes:
+      - to: analyst
+
+  # Step 6（§3）：Analyst（LLM）—— 归因成败 → 提炼结构原则 → 写回 KB（成功 & 失败都记）
+  - name: analyst
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: struct-analyst
+    output_schema:
+      type: object
+      required: [attribution, principle]
+      properties:
+        attribution: {type: string, description: "本 candidate 成/败归因（时延降/升、精度保持/掉的宏观结构原因）"}
+        principle: {type: string, description: "提炼的结构-性能原则（追加写 KB）"}
+        kb_writeback: {type: string, description: "写回的目标文件（failures.md / principles.md）"}
+    routes:
+      - to: curator
+
+  # Step 6-9（§3）：Curator（确定性 reducer）—— 账本 append / 结构门分类 / champion ratchet / explore-exploit 路由
+  - name: curator
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: struct-curator
+    output_schema:
+      type: object
+      required: [round, continue_loop, champion_id, champion_latency_ms, champion_accuracy, route_mode]
+      properties:
+        round: {type: integer}
+        continue_loop: {type: boolean, description: "true=未达标且未耗尽预算 → 继续循环；false=终止走 finalize"}
+        champion_id: {type: string}
+        champion_latency_ms: {type: number}
+        champion_accuracy: {type: number}
+        route_mode: {type: string, enum: [exploit, explore], description: "champion 改进→exploit；否则→explore（§3 step 8）"}
+        terminate_reason: {type: string, description: "continue_loop=false 时的原因（champion_met / max_rounds / budget）"}
+    routes:
+      - to: viz_round
+
+  # 刷新本轮可视化（静态 HTML；四图见 §12，脚本随 task #11 扩展）
+  - name: viz_round
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    tools: [bash, read, write, glob, grep]
+    prompt: |
+      你是结构性探索 workflow 的**轮内可视化**刷新（§12，静态 HTML，幂等重渲染）。
+
+      ## 输入（账本，只读）
+      - ledger: `{{ family_detect.output.output_dir }}ledger.jsonl`（每行一个 candidate）
+      - champions: `{{ family_detect.output.output_dir }}champions.jsonl`（冠军轨迹）
+      - 本轮：`{{ curator.output.round }}` / champion `{{ curator.output.champion_id }}`
+      - baseline: latency `{{ baseline_measure.output.baseline_latency_ms }}`ms / accuracy `{{ baseline_measure.output.baseline_accuracy }}`
+      - 目标: latency `{{ inputs.target_latency_ms }}`ms / accuracy `{{ baseline_measure.output.accuracy_target }}`
+      - struct_scripts_dir: `{{ inputs.struct_scripts_dir }}`
+      - 输出到: `{{ family_detect.output.output_dir }}viz/`
+
+      ## 执行（确定性脚本，无 LLM / 无内联兜底）
+      直接调 `viz_struct.py`（§12 四图全部由该脚本渲染，幂等覆盖到 `<output_dir>/viz/`）：
+      ```bash
+      python3 "{{ inputs.struct_scripts_dir }}/viz_struct.py" \
+        --ledger "{{ family_detect.output.output_dir }}ledger.jsonl" \
+        --champions "{{ family_detect.output.output_dir }}champions.jsonl" \
+        --baseline_latency_ms "{{ baseline_measure.output.baseline_latency_ms }}" \
+        --baseline_accuracy "{{ baseline_measure.output.baseline_accuracy }}" \
+        --target_latency_ms "{{ inputs.target_latency_ms }}" \
+        --accuracy_target "{{ baseline_measure.output.accuracy_target }}" \
+        --out_dir "{{ family_detect.output.output_dir }}"
+      ```
+      从 stdout JSON 读 `charts`：每图 `rendered: true/false` + `path`。数据不足 → 该图由脚本自动跳过（stderr WARN），
+      **不报错、不阻断主循环**。脚本异常（非零退出）→ 读 stderr 把关键行写进输出，仍 `|| true` 不阻断（viz 是 sidecar）。
+
+      ## 输出
+      ```
+      VIZ_ROUND: ok
+      CHARTS: <stdout JSON 的 charts 字段，或 stderr 摘要>
+      ```
+    routes:
+      # 循环机制：DAG 内 back-route（条件 cycle）。continue_loop=true → 回 hypothesizer 开下一轮；
+      # false → 出循环走 finalize。route 由 router 纯函数求值（确定性控制流，非 LLM 自驱）。
+      - when: "curator.output.continue_loop"
+        to: hypothesizer
+      - to: finalize
+
+  # ═══════════════════════════════════════════════════════════════
+  # 收尾（一次性）：champion 从头重训 + 导出 ONNX + final_report（§14 决策5）
+  # ═══════════════════════════════════════════════════════════════
+  - name: finalize
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    tools: [bash, read, write, glob, grep]
+    output_schema:
+      type: object
+      required: [final_model, final_onnx, final_latency_ms, final_accuracy, final_report]
+      properties:
+        final_model: {type: string, description: "champion model.py 快照绝对路径"}
+        final_onnx: {type: string}
+        final_latency_ms: {type: number}
+        final_accuracy: {type: number}
+        final_report: {type: string, description: "final_report.md 绝对路径"}
+    prompt: |
+      你是结构性探索 workflow 的 **收尾**（§14 决策5）：champion 从头重训 + 导出 ONNX + final_report。
+
+      ## 输入
+      - 账本/champion：`{{ family_detect.output.output_dir }}champions.jsonl`（最后一行 = 全局 champion）。
+      - curator 终态：`{{ curator.output.champion_id }}` / `terminate_reason: {{ curator.output.terminate_reason }}`。
+      - train_command（原样，绝不改）：`{{ inputs.train_command }}`
+      - latency_provider：`{{ inputs.latency_provider }}`
+      - build_fn / dummy_input / onnx_opset：`{{ inputs.build_fn }}` / `{{ inputs.dummy_input }}` / `{{ inputs.onnx_opset }}`
+      - struct_scripts_dir：`{{ inputs.struct_scripts_dir }}`
+
+      ## 执行（fail loud）
+      1. 从 `champions.jsonl` 最后一行取 champion snapshot 路径（`final_model`）。
+      2. 把 champion model.py 置入干净 worktree → **原样跑 `train_command`**（按需 `nvidia-smi` 探测空闲卡设
+         `CUDA_VISIBLE_DEVICES`，§8）从头重训（full epochs）→ 取 final_accuracy。
+         训练失败 → fail loud（读日志写进输出，不假装完成）。
+      3. 用确定性脚本导出 ONNX 并测时延（与 family_detect 一致）：
+         ```bash
+         python3 "{{ inputs.struct_scripts_dir }}/export_onnx.py" --model_path <final_model> \
+           --build_fn "{{ inputs.build_fn }}" --dummy_input '{{ inputs.dummy_input }}' \
+           --opset {{ inputs.onnx_opset }} --out <output_dir>/final.onnx
+         ```
+         再动态加载 `latency_provider`（`module_path::func_name` 切开、`importlib.util.spec_from_file_location`）→
+         调 `measure(final_onnx)` 得 `final_latency_ms`（不变量1，§5）。加载失败 fail loud。
+      4. 写 `final_report.md`：baseline vs champion（latency/accuracy 降幅）、terminate_reason、探索轮数、
+         结构图（从 ledger.jsonl 的 parent 链）、Pareto 摘要。
+
+      ## 输出（**必须是合法 JSON 对象**，严格匹配上方 output_schema；非 JSON → fail loud）
+      ```json
+      {"final_model": "<绝对路径>", "final_onnx": "<绝对路径>", "final_latency_ms": <数>, "final_accuracy": <数>, "final_report": "<final_report.md 绝对路径>"}
+      ```
+    routes:
+      - to: viz_finalize
+
+  # 终态可视化（静态 HTML；四图终态版见 §12）
+  - name: viz_finalize
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    tools: [bash, read, write, glob, grep]
+    prompt: |
+      你是结构性探索 workflow 的**终态可视化**（§12 四图终态版 + 收尾，幂等覆盖）。
+
+      ## 输入
+      - ledger: `{{ family_detect.output.output_dir }}ledger.jsonl`
+      - champions: `{{ family_detect.output.output_dir }}champions.jsonl`
+      - final: `{{ finalize.output.final_report }}` / latency `{{ finalize.output.final_latency_ms }}`ms / accuracy `{{ finalize.output.final_accuracy }}`
+      - baseline: `{{ baseline_measure.output.baseline_latency_ms }}`ms / `{{ baseline_measure.output.baseline_accuracy }}`
+      - 目标: `{{ inputs.target_latency_ms }}`ms / `{{ baseline_measure.output.accuracy_target }}`
+      - 终止原因: `{{ curator.output.terminate_reason }}`
+      - struct_scripts_dir: `{{ inputs.struct_scripts_dir }}`
+      - 输出到: `{{ family_detect.output.output_dir }}viz/`
+
+      ## 执行（确定性脚本，无 LLM / 无内联兜底）
+      1. 调 `viz_struct.py` 重渲染 §12 四图终态版（与 viz_round 同命令；幂等覆盖）：
+         ```bash
+         python3 "{{ inputs.struct_scripts_dir }}/viz_struct.py" \
+           --ledger "{{ family_detect.output.output_dir }}ledger.jsonl" \
+           --champions "{{ family_detect.output.output_dir }}champions.jsonl" \
+           --baseline_latency_ms "{{ baseline_measure.output.baseline_latency_ms }}" \
+           --baseline_accuracy "{{ baseline_measure.output.baseline_accuracy }}" \
+           --target_latency_ms "{{ inputs.target_latency_ms }}" \
+           --accuracy_target "{{ baseline_measure.output.accuracy_target }}" \
+           --out_dir "{{ family_detect.output.output_dir }}"
+         ```
+         从 stdout JSON 读 `charts`。数据不足由脚本自动跳过（不报错）。脚本异常 `|| true` 不阻断。
+      2. **额外**生成 `viz/summary.html`（内联 python+plotly，self-contained）：三柱状对比
+         baseline / champion / final 的 latency(ms)，并标注 accuracy、轮数（= ledger 最大 round）、
+         terminate_reason: `{{ curator.output.terminate_reason }}`。final 点用 `{{ finalize.output.final_latency_ms }}`
+         / `{{ finalize.output.final_accuracy }}`；champion 用 champions.jsonl 最后一行。
+
+      ## 输出
+      ```
+      VIZ_FINALIZE: ok
+      CHARTS: <stdout JSON 的 charts 字段 + summary.html>
+      ```
+    routes:
+      - to: $end
+
+outputs:
+  result: "{{ finalize.output }}"
+  champion: "{{ curator.output.champion_id }}"
+  final_latency_ms: "{{ finalize.output.final_latency_ms }}"
+  final_accuracy: "{{ finalize.output.final_accuracy }}"
+  final_report: "{{ finalize.output.final_report }}"
+  output_dir: "{{ family_detect.output.output_dir }}"
