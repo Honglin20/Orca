@@ -273,6 +273,7 @@ def advance_step(
     elapsed: float = 0.0,
     prompts_dir: Path | None = None,
     yaml_path: str | None = None,
+    host_session: str | None = None,
 ) -> StepResult:
     """单步推进（纯决策：读 tape 现状 → 决定 emits + 回复；不写 tape）。
 
@@ -293,6 +294,11 @@ def advance_step(
     ``elapsed`` 由 daemon 传真实 workflow 总耗时（M5：不撒谎）。
     ``prompts_dir`` 给定时走 compact 交付（渲染后 prompt 落盘、StepResult.prompt_file 指针）；
     None 时 inline 回退（StepResult.prompt 全文，单测决策逻辑用）。
+
+    ``host_session``（host-session-binding v2）：宿主 session id，**仅 ``state.status=="pending"``
+    首节点分支透传给 ``make_workflow_started``**（写入 tape 的归属字段，单一真相源）。next
+    路径（非 pending）**不传**——``workflow_started`` 在 bootstrap 已 emit，next 不重发
+    （emit 真链 §4.1：host_session 经 lifecycle←step←cli 三点穿，不在 cli.py emit）。
     """
     state = replay_state(tape)
     # tape 是 inputs 真相源（workflow_started.data.inputs）：next 不传 --inputs 时从 tape
@@ -316,7 +322,9 @@ def advance_step(
         entry = wf.entry
         _check_agent_node(nodes.get(entry), entry)
         logger.info("workflow 启动（%s，entry=%s）", rid, entry)
-        t, d = make_workflow_started(rid, wf, inputs, yaml_path=yaml_path)
+        # host_session 仅在此 bootstrap 分支透传（写 workflow_started.data，tape 唯一真相源）；
+        # next 路径（非 pending）不 emit workflow_started → 不需要传（SPEC §4.1 emit 真链）。
+        t, d = make_workflow_started(rid, wf, inputs, yaml_path=yaml_path, host_session=host_session)
         emits.append(Emit(t, d))
         emits.append(Emit("node_started", {"node": entry}, node=entry))
         ctx = _build_ctx(wf, {}, inputs, rid)
