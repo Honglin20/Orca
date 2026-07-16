@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-16] nas-hp-search：轻量 NAS 超参搜索流水线（slim 5 节点）
+
+新增 `workflows/nas-hp-search.yaml`（线性 `model_optimizer→train_script_gen→search_pipeline_gen→runner→select`）——重 7 节点 pipeline 的轻量版：① 新 slim folder-agent `elastic_optimizer`（只读 model + Elastic 速查 + 最小 supernet 模板，不展平/不读 optimize_rules，上下文从数十文件降到 3 文件）；② 新脚本化 `nas-select`（subprocess `nas-select-architecture` + 模板填空 `final_report.md` + 推 C5/C6，零 LLM，替代 22min evaluator）；③ 复用 `supernet-train-script` checklist 加 `[MAJOR] 28`（train_supernet.py 内联 `_push_chart()`，accumulate+全序列推、label/title 对齐 tail_metrics C3a/C3b 保 refresh-idempotent，无独立 viz 节点）；④ 复用 `nas-search-pipeline`/`nas-train-runner` 不改。节点名 `model_optimizer`（agent 指向 `elastic_optimizer`）对齐复用 agent body 的 `{{ model_optimizer.output }}` 硬契约（prompt+agent 互斥）。附带 `.gitignore` 修：`references/`→`/references/`（锚定根目录，避免误伤 folder-agent 的 skill 资源）。`tars validate` 0 error、5 agent 全 resolve；template 自测 diff=0；select_and_report 端到端 EXIT=0 SELECTED=3；code-reviewer impl+coverage 两轮 🔴 全修。Commit: `a5dd2cc`。详见 [release note](../releases/2026-07-16-nas-hp-search-slim.md)。
+
 ## [2026-07-16] in-session chart 守护 respawn —— `next` 路径补被杀后拉起
 
 补 [in-session chart 接入](../releases/2026-07-16-in-session-chart.md) 的缺口：chart 守护**只在 bootstrap spawn 一次**，run 中途被杀（如 `pkill opencode` 误伤 detached 守护）后 `orca next` 不 respawn → 后续节点 `render_chart` 连不上 socket、chart 全丢（实测一次 run 0 chart）。本补丁：① `_chart_daemon_alive` 确定性 socket connect 探测（不靠进程名 grep）；② `_ensure_chart_daemon` 在 `next` 的 tape flock 临界区内 probe + 复用 `_spawn_chart_daemon` respawn；③ `_wait_for_sock` 从 `exists()` 加强为 connect 探（修 respawn 路径上 stale socket 假阳性）；④ 调用点守卫与 env 写对齐（`result.node is not None`，终态/no-marker 不 respawn）；⑤ spawn 失败降级 warn 不崩 next。+7 测试（含 SIGKILL→respawn→chart 落 tape 的 intent 级 e2e + 两个负向守卫测试）；158 in-session 测试 0 新回归（1 既有 list 测试隔离缺陷）；code-reviewer impl+coverage 两轮 0 🔴（🟡 全修：守卫/docstring/spawn 降级/负向测试）。Commit: `<本 commit，SHA 见 git log>`。详见 [release note](../releases/2026-07-16-in-session-chart-respawn.md)。
