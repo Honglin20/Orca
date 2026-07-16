@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
-# Orca CC nudge —— Claude Code Stop hook（v5 §4.4 / step 2b(7)）。
+# Orca CC nudge —— Claude Code Stop hook（v5 §4.4 / step 2b(7) + host-session-binding v2）。
 #
-# 主 session 试图结束其 turn 时触发：若有活跃 Orca run（marker 存在）→ 发 decision:block
-# 注入「请调 orca next 推进」的提醒。**绝不调 orca next**（B 路径铁律：主 session
-# 自调 next；hook 自动调 next = 退化 A 路径）。
+# 主 session 试图结束其 turn 时触发：若有活跃 Orca run（marker 存在）**且归属当前 session**
+# → 发 decision:block 注入「请调 orca next 推进」的提醒。**绝不调 orca next**（B 路径铁律：
+# 主 session 自调 next；hook 自动调 next = 退化 A 路径）。
+#
+# host-session-binding v2（tape-only，§2.3/§4.4）：
+#   - current = ORCA_HOST_SESSION_ID ?? CLAUDE_CODE_SESSION_ID（CC 注入后者，零配置）。
+#   - glob marker 拿 run_id → 对每个 run 读 tape 首条 workflow_started.data.host_session
+#     → 仅收 == current 的（读 tape 派生，marker 不存归属，单一真相源铁律）。
+#   - per-session 限流：STATE 按 current 分键（防 A 的 nudge 抑制 B）。
+#   - 无 current 但有活跃 marker → stderr warn（区分「手 CLI」与「env 注入 bug」，评审 C10）。
 #
 # 判定只看 marker 存在（runs/orca-<run_id>.json）——不用 tape 超时（会误报）。marker
 # 在终态由 CLI 清掉，故「有 marker」≡「run 还活着」。
@@ -32,11 +39,40 @@ import os
 import sys
 import time
 
-STATE = "runs/.orca-nudge-cc"
 THROTTLE_SEC = 60
 
 
-def _read_throttle_timestamp() -> int:
+def _host_session_from_env() -> str | None:
+    """当前宿主 session id（优先级 ORCA_HOST_SESSION_ID > CLAUDE_CODE_SESSION_ID > None）。
+
+    与 orca/iface/in_session/cli.py 的 _host_session_from_env 同源（SPEC §4.2 公共 env 契约）。
+    CC 给所有 bash 子进程注入 CLAUDE_CODE_SESSION_ID（spike 实测），Stop-hook 同 env 链。
+    """
+    return os.environ.get("ORCA_HOST_SESSION_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+
+
+def _host_session_from_tape(run_id: str) -> str | None:
+    """读 runs/<run_id>.jsonl 首条 workflow_started.data.host_session（同 yaml_path 派生模式）。
+
+    tape-only 真相源：marker 不存归属，nudge 需要时读 tape 首行派生（§2.3）。
+    首行非 workflow_started / 读失败 / 缺 host_session → None（fail-safe，§2.5）。
+    """
+    try:
+        with open(f"runs/{run_id}.jsonl", encoding="utf-8") as f:
+            for line in f:                       # 首条即 workflow_started
+                s = line.strip()
+                if not s:
+                    continue
+                o = json.loads(s)
+                if o.get("type") == "workflow_started":
+                    return o.get("data", {}).get("host_session")
+                break                            # 只看首条有效行
+    except (OSError, json.JSONDecodeError):
+        return None                              # fail-safe
+    return None
+
+
+def _read_throttle_timestamp(state: str) -> int:
     """读上次 block 的时间戳。文件不存在 / 损坏 / 不可读 → 0（视作可再次 block）。
 
     throttle 是 hook 本地 best-effort 态（非 orca 真相源），任何读取异常都不该阻断
@@ -44,19 +80,20 @@ def _read_throttle_timestamp() -> int:
     marker 是 orca CLI 经 atomic_write_json 写出的真相源，损坏 = orca 状态已乱，必须报。
     """
     try:
-        with open(STATE, encoding="utf-8") as f:
+        with open(state, encoding="utf-8") as f:
             return int(f.read().strip())
     except (OSError, ValueError):
         return 0
 
 
-def _scan_active_run_ids() -> list[str]:
-    """扫 runs/orca-*.json 取 run_id。
+def _scan_my_active_run_ids(current: str) -> list[str]:
+    """扫 runs/orca-*.json 取**归属 current session**的活跃 run_id（SPEC §4.4）。
 
     marker 文件由 orca CLI 经 sidecar_io.atomic_write_json 写出，合法即合法 JSON。
     读失败 / JSON 非法 → **fail loud**（stderr + exit 2，详见脚本头注释 DEFECT-1 段）。
+    marker 只记 run_id（无归属），故读 tape 首行 host_session 派生 + 过滤 == current。
+    tape 读失败 → 跳过该 run（不误判；fail-safe）。
     """
-    # sorted：让 REASON 中 run_id 列举顺序确定，便于断言 / 复现（旧版 bash glob 顺序 FS 相关）。
     ids: list[str] = []
     for path in sorted(glob.glob("runs/orca-*.json")):
         try:
@@ -68,25 +105,39 @@ def _scan_active_run_ids() -> list[str]:
             )
             sys.exit(2)
         rid = data.get("run_id")
-        if rid:
+        if rid and _host_session_from_tape(str(rid)) == current:
             ids.append(str(rid))
     return ids
 
 
 def main() -> int:
     now = int(time.time())
-    # 节流：60s 窗口内放行（让模型能停下来等用户 / 子代理）。
-    if now - _read_throttle_timestamp() < THROTTLE_SEC:
+    current = _host_session_from_env()
+
+    # 无 host session env：放行（不 block），但若有活跃 marker → warn（评审 C10）。
+    # 区分「手 CLI 起 run（预期，无 env）」与「Stop-hook env 注入坏（bug，应有 CLAUDE_CODE_SESSION_ID）」。
+    # warn 走 stderr（不污染 stdout 的 decision JSON）；不 fail（手 CLI 是合法用法）。
+    if not current:
+        if glob.glob("runs/orca-*.json"):
+            sys.stderr.write(
+                "orca-nudge: 无 host session env 但有活跃 marker"
+                "（手动 CLI 起 run 或 env 注入异常）\n"
+            )
         return 0
 
-    ids = _scan_active_run_ids()
-    # 无活跃 run → 放行（不 block）。
+    # per-session 限流（§2.4）：STATE 按 session 分键，防 A 的 nudge 抑制 B。
+    state = f"runs/.orca-nudge-cc-{current}"
+    if now - _read_throttle_timestamp(state) < THROTTLE_SEC:
+        return 0
+
+    ids = _scan_my_active_run_ids(current)
+    # 无归属本 session 的活跃 run → 放行（不 block）。
     if not ids:
         return 0
 
     # 记节流时间戳 + 发 block 提醒。
     os.makedirs("runs", exist_ok=True)
-    with open(STATE, "w", encoding="utf-8") as f:
+    with open(state, "w", encoding="utf-8") as f:
         f.write(str(now))
 
     reason = (

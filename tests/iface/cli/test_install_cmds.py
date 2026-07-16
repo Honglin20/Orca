@@ -319,19 +319,50 @@ def _write_nudge_script(dst_dir: Path) -> Path:
     return dst
 
 
-@pytestmark_nudge_behavior
-def test_cc_nudge_script_blocks_when_active_run(tmp_path: Path):
-    """有活跃 marker → emit ``decision: block`` JSON 到 stdout，exit 0（v5 §4.4 nudge 语义）。"""
-    runs = tmp_path / "runs"
-    runs.mkdir()
-    (runs / "orca-run-abc.json").write_text(
-        json.dumps({"run_id": "abc", "model": "deepseek", "no_output_count": 0}),
+# host-session-binding v2：nudge 按 host_session 过滤。测试默认模拟「CC 注入了 session id」
+# 的真实 Stop-hook env（CLAUDE_CODE_SESSION_ID）。脚本读 env 拿 current，读 tape 首行拿归属。
+_NUDGE_TEST_SESSION = "cc-session-test-abc"
+
+
+def _nudge_env(session: str | None = _NUDGE_TEST_SESSION) -> dict:
+    """subprocess env：继承当前 + 注入 CLAUDE_CODE_SESSION_ID（模拟 CC Stop-hook 子进程）。"""
+    import os
+    env = dict(os.environ)
+    if session is not None:
+        env["CLAUDE_CODE_SESSION_ID"] = session
+    else:
+        env.pop("CLAUDE_CODE_SESSION_ID", None)
+        env.pop("ORCA_HOST_SESSION_ID", None)
+    return env
+
+
+def _write_active_marker_with_tape(
+    runs: Path, run_id: str, host_session: str | None = _NUDGE_TEST_SESSION,
+) -> None:
+    """建活跃 marker + 对应 tape（host_session-binding v2：nudge 读 tape 首行派生归属）。
+
+    marker 只 3 字段（无归属）；tape workflow_started.data.host_session 是单一真相源。
+    """
+    (runs / f"orca-{run_id}.json").write_text(
+        json.dumps({"run_id": run_id, "model": "deepseek", "no_output_count": 0}),
         encoding="utf-8",
     )
+    ws = {"type": "workflow_started", "data": {"host_session": host_session}}
+    (runs / f"{run_id}.jsonl").write_text(
+        json.dumps(ws) + "\n", encoding="utf-8",
+    )
+
+
+@pytestmark_nudge_behavior
+def test_cc_nudge_script_blocks_when_active_run(tmp_path: Path):
+    """有活跃 marker **且归属当前 session** → emit ``decision: block``（v5 §4.4 + binding v2）。"""
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    _write_active_marker_with_tape(runs, "abc", host_session=_NUDGE_TEST_SESSION)
     script = _write_nudge_script(tmp_path)
     proc = subprocess.run(
         ["bash", str(script)], cwd=tmp_path,
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=10, env=_nudge_env(),
     )
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout.strip())
@@ -346,7 +377,7 @@ def test_cc_nudge_script_passes_when_no_active_run(tmp_path: Path):
     script = _write_nudge_script(tmp_path)
     proc = subprocess.run(
         ["bash", str(script)], cwd=tmp_path,
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=10, env=_nudge_env(),
     )
     assert proc.returncode == 0
     assert proc.stdout.strip() == ""
@@ -356,6 +387,7 @@ def test_cc_nudge_script_passes_when_no_active_run(tmp_path: Path):
 def test_cc_nudge_script_fails_loud_on_malformed_marker(tmp_path: Path):
     """DEFECT-1 核心回归：marker 损坏（非合法 JSON）→ **fail loud**（stderr + exit 2）。
 
+    host_session-binding v2：需设 env 让脚本走到 scan marker 路径（current 已解析）。
     旧版 ``jq ... 2>/dev/null || true`` 在此场景静默失败 → nudge 永不触发；用户看不到任何
     信号。新版必须把错误打到 stderr、exit 非零，让用户看到 orca 状态已乱。
     """
@@ -365,7 +397,7 @@ def test_cc_nudge_script_fails_loud_on_malformed_marker(tmp_path: Path):
     script = _write_nudge_script(tmp_path)
     proc = subprocess.run(
         ["bash", str(script)], cwd=tmp_path,
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=10, env=_nudge_env(),
     )
     assert proc.returncode != 0, "marker 损坏必须 fail loud（exit 非零），不得静默"
     assert proc.stderr, "fail loud 必须把错误写到 stderr"
@@ -374,30 +406,31 @@ def test_cc_nudge_script_fails_loud_on_malformed_marker(tmp_path: Path):
 
 @pytestmark_nudge_behavior
 def test_cc_nudge_script_throttles_within_60s(tmp_path: Path):
-    """60s 内第二次 Stop → 放行（不重复 block，防刷屏）。节流时间戳由首次 block 写。"""
+    """60s 内第二次 Stop → 放行（不重复 block，防刷屏）。节流时间戳由首次 block 写。
+
+    host_session-binding v2：STATE 按 session 分键（``.orca-nudge-cc-<session>``）。
+    """
     runs = tmp_path / "runs"
     runs.mkdir()
-    (runs / "orca-run-xyz.json").write_text(
-        json.dumps({"run_id": "xyz"}), encoding="utf-8",
-    )
-    state_file = runs / ".orca-nudge-cc"
+    _write_active_marker_with_tape(runs, "xyz", host_session=_NUDGE_TEST_SESSION)
+    state_file = runs / f".orca-nudge-cc-{_NUDGE_TEST_SESSION}"
     script = _write_nudge_script(tmp_path)
 
     first = subprocess.run(
         ["bash", str(script)], cwd=tmp_path,
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=10, env=_nudge_env(),
     )
     assert first.returncode == 0
     assert json.loads(first.stdout.strip())["decision"] == "block"
     # review NIT#3：直接断言首次 block 写了节流时间戳（副作用锁死，不靠第二次隐式验证）。
-    assert state_file.is_file(), "首次 block 必须写节流时间戳文件"
+    assert state_file.is_file(), "首次 block 必须写节流时间戳文件（per-session 分键）"
     assert state_file.read_text(encoding="utf-8").strip().isdigit(), (
         "节流时间戳内容必须是整数（now epoch seconds）"
     )
 
     second = subprocess.run(
         ["bash", str(script)], cwd=tmp_path,
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=10, env=_nudge_env(),
     )
     assert second.returncode == 0
     assert second.stdout.strip() == "", "60s 窗口内第二次 Stop 应节流放行（无 block 输出）"
@@ -405,18 +438,19 @@ def test_cc_nudge_script_throttles_within_60s(tmp_path: Path):
 
 @pytestmark_nudge_behavior
 def test_cc_nudge_script_passes_when_throttle_state_corrupt(tmp_path: Path):
-    """节流时间戳文件内容非整数（损坏）→ 视作可再次 block，不崩（与旧版 case 容错同款）。"""
+    """节流时间戳文件内容非整数（损坏）→ 视作可再次 block，不崩（与旧版 case 容错同款）。
+
+    host_session-binding v2：STATE 文件名含 session 后缀。
+    """
     runs = tmp_path / "runs"
     runs.mkdir()
-    (runs / "orca-run-q.json").write_text(
-        json.dumps({"run_id": "q"}), encoding="utf-8",
-    )
-    # 写一个非数字内容的时间戳文件（损坏态）
-    (runs / ".orca-nudge-cc").write_text("garbage", encoding="utf-8")
+    _write_active_marker_with_tape(runs, "q", host_session=_NUDGE_TEST_SESSION)
+    # 写一个非数字内容的时间戳文件（损坏态；per-session 分键文件名）
+    (runs / f".orca-nudge-cc-{_NUDGE_TEST_SESSION}").write_text("garbage", encoding="utf-8")
     script = _write_nudge_script(tmp_path)
     proc = subprocess.run(
         ["bash", str(script)], cwd=tmp_path,
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=10, env=_nudge_env(),
     )
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout.strip())
