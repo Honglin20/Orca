@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-17] host_session 绑定防串台（tape-only）
+
+修 nudge「串台」：run-id ↔ 宿主 session 绑定，nudge 只提醒本 session 的活跃 run。host_session 只存 tape `workflow_started.data`（同 yaml_path tape-only 先例，**marker.py 零改动**，无 desync）；env 优先级 `ORCA_HOST_SESSION_ID` > `CLAUDE_CODE_SESSION_ID` > None；nudge 读 tape 首行过滤 + per-session 限流；emit 真链 lifecycle←step←cli；opencode `shell.env` hook 注入 + fail-open 安全网（防 nudge 静默死）。spec-reviewer 对抗评审 13 挑战全闭环（tape-only 是用户铁律直接推论）；25 单测 + test-agent 真机 E2E 全 PASS（多 session 不串台 + Stop-hook env 实证 + opencode 端到端）。Commits: `70c2ac8`…`3dae964`（8 commits）。详见 [release note](../releases/2026-07-17-host-session-binding.md)。
+
 ## [2026-07-16] nas-hp-search runner/select 反伪造 + output_schema 强制
 
 修「假执行」bug（tape 铁证：runner(3s)/select(19s)/train_script_gen(1s) 没跑脚本、只复述上游散文；search.jsonl 640 条是诊断时手动跑的）。根因 = prompt 诱骗（顶部上游散文的「已完成」语域诱骗 deepseek 顺着复述）+ 无强制（fake 还静默标 completed）。① `nas-train-runner/agent.md` 重写（执行置顶、删上游散文灌入改用 `{{ inputs.output_dir }}`、反伪造、末尾 python 从真 search.jsonl 计数输出自校验 JSON）；② `nas-select/agent.md` 同样去诱骗+反伪造；③ `nas-hp-search.yaml` runner 加 `output_schema`（`search_records≥1`，in-session `step.py:_parse_output` 确定性强制：散文/0 记录 → `output_schema_mismatch` → `node_failed`，不真跑过不了）。共享 agent 契约变更：须显式传 output_dir。验证脚手架（FAST/MOCK）剔除不进生产。E2E 两次通过（opencode+flash+脚手架绕 deepseek 慢）：runner JSON 过 output_schema、select 真选 top-3 + final_report。Commit: `<SHA 见 git log>`。详见 [release note](../releases/2026-07-16-nas-hp-search-enforce-and-tars-skill-cleanup.md)。

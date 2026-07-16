@@ -3,11 +3,33 @@
 > 新 session 开工前**必读**此文件 + `CLAUDE.md` + 对应阶段 SPEC。
 > 完成任务后清空本文件（移到 release note），**不积累**。
 
-## 当前状态（2026-07-16）：teams→tars 后端命令改名完成（代码侧闭环），仅余真机
+## 当前状态（2026-07-17）：任务2——子 agent 输出/过程推送 web（SPEC-B 已起草，待 spec-review → 实现）；任务1 host_session 串台已闭环交付（E2E 全 PASS，见下「已完成」+ [release note](../releases/2026-07-17-host-session-binding.md)）
 
-> **新 session 必读**：本块 + [`docs/specs/in-session-entry-and-simplification.md`](../specs/in-session-entry-and-simplification.md) **v5** + [teams→tars release note](../releases/2026-07-16-teams-to-tars-rename.md) + [TARS skill release note](../releases/2026-07-15-tars-skill-rebrand.md)。
+> **新 session 必读**：本块 + [`docs/specs/in-session-entry-and-simplification.md`](../specs/in-session-entry-and-simplification.md) **v5** + [TARS skill release note](../releases/2026-07-15-tars-skill-rebrand.md) + [nas-hp-search 反伪造 release note](../releases/2026-07-16-nas-hp-search-enforce-and-tars-skill-cleanup.md)。teams→tars 改名 + nas-hp-search runner/select 反伪造均已闭环（见下「已完成」+ CHANGELOG）。
 
-后端命令 `teams` → `tars`（与 TARS skill 对齐）。三套命名收口：**skill = `tars` / 后端命令 = `tars` / in-session = `orca`**。代码 + 测试 + SPEC + shipped 产物全闭环；剩余跨平台真机验证。
+**问题（已复现）**：nudge（CC `orca-nudge.sh` Stop-hook / opencode `orca.ts` `session.idle`）在 session idle 时扫活跃 run 提醒推进，但**不区分归属 session** → 任一 session idle 都被任一活跃 run 触发。实测：本 CC session 被 nudge 提醒用户**另一个 session** 的 `agent-struct-exploration` run（串台）。
+
+**目标**：run-id ↔ 启动它的**宿主 session**（CC `session_id` / opencode `session.id`）绑定；nudge 只对**当前 session 自己的**活跃 run 提醒。
+
+**待讨论（确认契约后开 SPEC）**：
+1. **归属记录**：`orca <wf> --inputs` 是宿主 bash 子进程、默认拿不到宿主 session id → 需宿主经 env 注入（`ORCA_HOST_SESSION_ID`：CC Stop-hook 输入的 session_id / opencode plugin `session.id`），CLI 写进 run marker + `workflow_started.data`。
+2. **nudge 过滤**：hook 取当前 session id，只 nudge `host_session == 当前` 的活跃 run。
+3. **跨壳一致**：CC（Stop-hook JSON 输入）vs opencode（plugin ctx）取 id 路径不同，分别接线 + 抽公共；⚠️ 现有 `ORCA_SESSION_ID` 是**每节点 executor uuid（非宿主 session）**，勿混。
+4. **边界**：marker 无 session 记录（旧 run / 手 CLI 起的 run）→ 兼容策略（默认 nudge 全部 or 忽略），不破单 session 现有用法。
+
+---
+
+### 下一步任务 2（待立项）：`orca list` 输出精简（catalog 增长后单命令 dump 过重）
+
+**问题**：`orca list` 单命令返全部 wf 的 full description + **全部** inputs_schema（实测 ~5KB，`agent-struct-exploration` 的 **19 个 input** 占大头）。TARS skill 据 description 匹配意图时，未选中 wf 的 inputs 全是噪声上下文。
+
+**v5 现决**：刻意**单命令无 describe**（"选 wf + 知 inputs" 一条命令搞定，避冗余；见 `orca list --help`）。
+
+**待讨论**：catalog 还会涨（struct 系列 + 未来 wf），单命令 dump 成本上行。选项：
+1. **反转 v5**：加 `orca describe <wf>`（单 wf 全 inputs_schema）+ `orca list` 瘦身（name + 短 desc，不带/少带 inputs_schema）。TARS：list 匹配 → describe 抽 inputs。**彻底**，代价：维护两命令 + 同步改 TARS skill 流程。
+2. **`orca list --short`**（name + 一行 desc，无 inputs，匹配用）/ 默认全量（抽 inputs 用）——不新增命令、不反转 v5，仅加 flag。**但只省"匹配"步骤噪声**：TARS 抽 inputs 仍需 full list（dump 全部 wf inputs），除非配 `describe`，故单独用不彻底。
+3. 保留单命令 + 截断（inputs desc 限长 / wf desc 限长）——简单但治标。
+**倾向**：要彻底省上下文 → 选项 1（describe）；想最小改动且接受"inputs 抽取仍全量" → 选项 2。
 
 ### 2026-07-16 已完成（最新）
 
