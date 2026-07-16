@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-16] in-session chart 守护 respawn —— `next` 路径补被杀后拉起
+
+补 [in-session chart 接入](../releases/2026-07-16-in-session-chart.md) 的缺口：chart 守护**只在 bootstrap spawn 一次**，run 中途被杀（如 `pkill opencode` 误伤 detached 守护）后 `orca next` 不 respawn → 后续节点 `render_chart` 连不上 socket、chart 全丢（实测一次 run 0 chart）。本补丁：① `_chart_daemon_alive` 确定性 socket connect 探测（不靠进程名 grep）；② `_ensure_chart_daemon` 在 `next` 的 tape flock 临界区内 probe + 复用 `_spawn_chart_daemon` respawn；③ `_wait_for_sock` 从 `exists()` 加强为 connect 探（修 respawn 路径上 stale socket 假阳性）；④ 调用点守卫与 env 写对齐（`result.node is not None`，终态/no-marker 不 respawn）；⑤ spawn 失败降级 warn 不崩 next。+7 测试（含 SIGKILL→respawn→chart 落 tape 的 intent 级 e2e + 两个负向守卫测试）；158 in-session 测试 0 新回归（1 既有 list 测试隔离缺陷）；code-reviewer impl+coverage 两轮 0 🔴（🟡 全修：守卫/docstring/spawn 降级/负向测试）。Commit: `<本 commit，SHA 见 git log>`。详见 [release note](../releases/2026-07-16-in-session-chart-respawn.md)。
+
 ## [2026-07-16] in-session 路径接入 `orca.chart.render_chart`（per-run chart 守护 + run 级 env 文件 + 指针 source 行）
 
 补 in-session skill 驱动路径的 chart 缺口：web/tars-run 路径下 ClaudeExecutor spawn 时一次性注入 `ORCA_*` env + 起 per-run ingestor（同进程）；in-session 路径下节点子代理由宿主 session（opencode/CC）派发不经 executor → env 无 `ORCA_*` 也无人起 ingestor → `render_chart` raise。本任务三件套补缺：① bootstrap detach 起 `_FlockSafeTape` 守护（跨进程 flock + 增量 disk max-seq 刷新，复用 `chart_ingestor` 协议零改动）；② `runs/<run_id>/orca_env.sh` per-node env 文件（5 var：4 chart + `ORCA_AGENT_RESOURCES`，folder-agent 资源定位缺口同补）；③ 节点 prompt 指针加 `source <env>` 行。守护 `_watch_terminal` 监听终态事件自退 + 6h TTL 兜底；partial-line race 防护（`last_size` 仅推进到最后 `\n`）。24 新测试（19 守护单测 + 5 集成：chart 落 tape / 并行不串台 / folder-agent + `$ORCA_AGENT_RESOURCES`）；710 in-session+chart+events+exec 测试 0 新回归；code-reviewer 两轮 0 🔴（R1 1 🔴 partial-line race + 5 🟡 全修；R2 0 🔴 0 🟡）。Commit: `<本 commit，SHA 见 git log>`。详见 [release note](../releases/2026-07-16-in-session-chart.md)。

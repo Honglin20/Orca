@@ -305,6 +305,132 @@ def test_read_max_seq_incremental_cache_handles_partial_trailing(tape_path, floc
     safe.close()
 
 
+# ── cli._chart_daemon_alive（确定性 socket 健康探，next respawn 判定基础）─────────
+
+
+def test_chart_daemon_alive_no_socket_file(tmp_path):
+    """socket 文件不存在 → False（守护未起 / 已 graceful 退出并 unlink）。"""
+    from orca.iface.in_session.cli import _chart_daemon_alive
+    assert _chart_daemon_alive(tmp_path / "nope.sock") is False
+
+
+def test_chart_daemon_alive_stale_socket_returns_false(tmp_path):
+    """stale socket（文件在但无监听者，守护被 SIGKILL 残留）→ False。
+
+    意图：SIGKILL 不跑 finally unlink → socket 文件残留但无 accept 者。connect 抛
+    ConnectionRefusedError → 探针判 dead → 触发 respawn。这是 next respawn 补丁的核心场景
+    （pkill opencode 误杀守护后 socket 残留）。
+
+    用 raw socket 忠实模拟：bind + listen + close fd（close 不会 unlink 路径名 —— Unix
+    domain socket 的经典 gotcha，路径必须显式 unlink）→ 文件残留但无监听者。
+    """
+    import socket as _rawsocket
+    from orca.iface.in_session.cli import _chart_daemon_alive
+    stale = tmp_path / "stale.sock"
+
+    raw = _rawsocket.socket(_rawsocket.AF_UNIX, _rawsocket.SOCK_STREAM)
+    raw.bind(str(stale))
+    raw.listen(8)
+    raw.close()  # close fd 不 unlink 路径 → stale socket 文件残留（无监听者）
+    assert stale.exists(), "前置：stale socket 文件确实残留"
+
+    assert _chart_daemon_alive(stale) is False, "stale socket（无监听者）应判 dead"
+    stale.unlink(missing_ok=True)
+
+
+def test_chart_daemon_alive_real_listener_returns_true(tmp_path):
+    """真有监听者 → True（connect 成功；对守护副作用 = 零：连上即 close，handler 读 EOF 静默）。"""
+    from orca.iface.in_session.cli import _chart_daemon_alive
+    sock = tmp_path / "live.sock"
+    server_ready = threading.Event()
+    stop_server = threading.Event()
+
+    def run_server():
+        # 子线程跑 asyncio server（chart_ingestor 的等价监听者）。
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        async def serve():
+            server = await asyncio.start_unix_server(
+                lambda r, w: w.close(), path=str(sock),
+            )
+            server_ready.set()
+            try:
+                while not stop_server.is_set():
+                    await asyncio.sleep(0.05)
+            finally:
+                server.close()
+                await server.wait_closed()
+
+        try:
+            loop.run_until_complete(serve())
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=run_server, daemon=True)
+    t.start()
+    try:
+        assert server_ready.wait(timeout=3.0), "server 线程未在 3s 内就绪"
+        assert _chart_daemon_alive(sock) is True, "活监听者应判 alive"
+    finally:
+        stop_server.set()
+        t.join(timeout=3.0)
+    sock.unlink(missing_ok=True)
+
+
+# ── cli._ensure_chart_daemon（alive 早返 / spawn 失败降级）─────────────────────
+
+
+def test_ensure_chart_daemon_no_spawn_when_alive(tmp_path, monkeypatch):
+    """守护活（真监听者）→ ``_ensure_chart_daemon`` 早返，不调 ``_spawn_chart_daemon``。
+
+    意图（防静默回归）：alive 早返是「每次 next 不多起一个守护」的关键。若被破坏（总 spawn），
+    第二守护 ``chart_ingestor`` 入口的 ``unlink`` + ``rebind`` 会孤立第一守护，但 chart 仍落
+    tape → 既有 e2e 测试全过、回归**静默**。本测试用真监听者（raw socket bind+listen+不关）
+    + monkeypatch 记录 spawn，显式断言「活时不 spawn」。
+    """
+    import socket as _rawsocket
+    from orca.iface.in_session import cli as cli_mod
+
+    sock = tmp_path / "live.sock"
+    raw = _rawsocket.socket(_rawsocket.AF_UNIX, _rawsocket.SOCK_STREAM)
+    try:
+        raw.bind(str(sock))
+        raw.listen(8)  # 真监听者 → _chart_daemon_alive connect 成功 → True
+
+        spawn_calls: list = []
+        monkeypatch.setattr(cli_mod, "_spawn_chart_daemon",
+                            lambda *a, **kw: spawn_calls.append((a, kw)))
+        monkeypatch.setattr(cli_mod, "chart_sock_path", lambda run_id: sock)
+
+        cli_mod._ensure_chart_daemon("r", tmp_path / "run.jsonl")
+        assert spawn_calls == [], "守护活时 _ensure_chart_daemon 不应调 _spawn_chart_daemon"
+    finally:
+        raw.close()
+        sock.unlink(missing_ok=True)
+
+
+def test_ensure_chart_daemon_warns_on_spawn_oserror(tmp_path, monkeypatch):
+    """守护死 + ``_spawn_chart_daemon`` 抛 OSError → 降级 warn、不抛（不崩 next）。
+
+    意图：spawn 失败（Popen OSError：资源限制 / fd 耗尽）不应以裸 traceback 崩出 ``next``
+    （``next`` 的 except 仅 catch ``InSessionError``）。chart 是便利层，缺了降级 warn。
+    """
+    from orca.iface.in_session import cli as cli_mod
+
+    def _boom(*a, **kw):
+        raise OSError("simulated resource limit (fd exhausted)")
+
+    monkeypatch.setattr(cli_mod, "_chart_daemon_alive", lambda sock: False)  # 判死 → 走 spawn
+    monkeypatch.setattr(cli_mod, "_spawn_chart_daemon", _boom)
+    # _wait_for_sock 不应被触达（spawn 已 return）；patch 成 fail 兜底
+    monkeypatch.setattr(cli_mod, "_wait_for_sock",
+                        lambda *a, **kw: pytest.fail("_wait_for_sock 不应在 spawn 失败后被调"))
+
+    # 不应抛
+    cli_mod._ensure_chart_daemon("r", tmp_path / "run.jsonl")
+
+
 # ── chart_daemon.main 端到端 smoke（spawn 真子进程）───────────────────────────
 
 

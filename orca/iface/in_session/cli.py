@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import shlex
+import socket
 import subprocess
 import sys
 import time
@@ -199,17 +200,127 @@ def _spawn_chart_daemon(run_id: str, tape_path: Path) -> None:
 
 
 def _wait_for_sock(sock_path: Path, *, timeout: float = _SOCK_READY_TIMEOUT) -> bool:
-    """poll ``sock_path.exists()`` 等守护 bind 完成；超时返 False（调用方仅 warn 不 fail）。
+    """poll **connect 探** 等守护 bind + listen 就绪；超时返 False（调用方仅 warn 不 fail）。
 
-    ``chart_ingestor`` 的 ``asyncio.start_unix_server`` bind 后 socket 文件才出现。Unix domain
-    socket 无 TCP 的 listen/accept race —— 文件存在即可连。
+    用 connect 探（``_chart_daemon_alive``）而非 ``exists()``：socket 文件存在 ≠ 有监听者。
+    SIGKILL 残留的 stale socket 文件会让 ``exists()`` 假阳性（误判 ready、实际无 listener）
+    → 在 respawn 路径上 subagent 紧接着连会 ``ConnectionRefused``。connect 成功才真有监听者。
+
+    ``chart_ingestor`` 的 ``asyncio.start_unix_server`` bind + listen 后 connect 才会成功
+    （文件出现早于 listen 就绪；connect 是更强的就绪判定）。connect 的副作用 = 零（连上即 close，
+    handler 读 EOF 静默；见 ``_chart_daemon_alive``）。bootstrap 首启路径同样适用：bind 前文件
+    不存在 → connect FileNotFoundError → 继续轮询；bind 后 connect 成功 → 返 True。
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if sock_path.exists():
+        if _chart_daemon_alive(sock_path):
             return True
         time.sleep(_SOCK_READY_POLL)
     return False
+
+
+# ``_chart_daemon_alive`` connect 探测超时。守护同机 Unix socket，正常 <10ms；500ms 仅
+# 是高负载下的保守上界。超时（活但 event loop 阻塞 >500ms，如大 tape 首次扫 / GC）→ 保守视
+# dead → 触发 respawn。假阴性比假阳性安全：最坏产生一个无害孤儿守护（新守护 unlink+rebind
+# 把 socket 路径指向自己，老守护监听的 inode 失去路径、收不到新连接，由终态/TTL 自清）。
+_DAEMON_PROBE_TIMEOUT = 0.5
+
+
+def _chart_daemon_alive(sock_path: Path) -> bool:
+    """探本 run 的 chart 守护 socket 是否有监听者（确定性健康探，**不靠进程名 grep**）。
+
+    回答「守护还活着吗」的三态问题，归一成 bool（活/不活）::
+
+        connect 成功          → 有监听者，守护活（True）
+        ConnectionRefusedError → socket 文件在但无监听者（stale，守护被 SIGKILL/SIGTERM 退）→ False
+        FileNotFoundError     → 无 socket 文件（守护未起 / 已 graceful 退出并 unlink）→ False
+        其它 OSError（超时等） → 视 dead（保守：触发 respawn；假阴性比假阳性安全 —— 最坏产生
+                               一个无害孤儿守护，由终态/TTL 自清；见 ``_ensure_chart_daemon``）
+
+    为什么 connect 而非 pgrep/pidfile：Unix socket 的 ``connect`` 是**协议级**判定 —— 文件
+    存在 ≠ 有人 listen（SIGKILL 不跑 finally unlink → stale 文件残留）。connect 才区分「监听者
+    在」与「孤儿 socket 文件」。进程名 grep 不可靠（同名进程 / 重命名 / 守护名变）；pidfile 要
+    做额外 liveness 检查（pid 活 ≠ 在跑这个守护）—— connect 一举覆盖。
+
+    **对守护的副作用 = 零**：connect 成功后立即 close（``with`` 管理语境）→ 守护 accept 一条短
+    连接，``readline`` 读到 EOF（空行）→ handler 走「client 提前 close」debug 分支静默返回，
+    不 emit、不写 tape（见 ``chart_ingestor._make_handler`` 的 ``if not line`` 分支）。
+
+    POSIX-only（与 ``_spawn_chart_daemon`` 同前提；项目 fcntl.flock 已锚定 POSIX）。
+    """
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(_DAEMON_PROBE_TIMEOUT)
+            s.connect(str(sock_path))
+    except OSError:
+        # ``ConnectionRefusedError``（stale socket，无监听者）/ ``FileNotFoundError``（无 socket
+        # 文件）/ 超时等 —— 均为 ``OSError`` 子类，一律视 dead（保守：触发 respawn，假阴性比
+        # 假阳性安全）。connect 成功 = 有监听者 = 守护活。
+        return False
+    return True
+
+
+def _ensure_chart_daemon(run_id: str, tape_path: Path) -> None:
+    """探 chart 守护是否存活，死了 respawn（``next`` 路径补 bootstrap 之后的缺口）。
+
+    **背景**：bootstrap spawn 守护**一次**即退出；run 中途守护被杀（如 ``pkill opencode`` 顺带
+    SIGTERM 了 detached 守护）后，``next`` 恢复 run 时**不 respawn** → 后续节点 subagent 的
+    ``render_chart`` 连不上 socket、chart 全丢。本 helper 补这个缺口：每次 ``next`` 推进到有
+    下一节点的状态后探一次，死了拉起。
+
+    **并发安全 / 不会双写**（三层兜底，按真实性排序，**不靠单一锁**）：
+      1. **宿主时序串行**：bootstrap 完整跑完 spawn + ``_wait_for_sock`` 才返回 → 宿主派 subagent
+         → 之后才调 ``next``。故 bootstrap 的 spawn 与 ``next`` 的 respawn 在时间上不重叠。
+         （注意：bootstrap 的 spawn 在释 tape flock **之后**跑 —— 见 bootstrap ``finally`` 释锁
+         vs ``_spawn_chart_daemon`` 的先后；tape flock 并**不** serialize bootstrap↔next。）
+      2. **next↔next 由 tape flock serialize**：并发 ``next``（同 run）由 ``LOCK_NB`` busy-exit
+         互斥（见 ``next`` ``acquired is None`` 分支）→ 同一时刻只有一个 ``next`` 进 respawn。
+      3. **unlink + rebind 孤立老 listener**：即便上述被打破（如 bootstrap 守护冷启 >5s、
+         ``_wait_for_sock`` 超时、``next`` 又探到 dead 而 respawn），``chart_ingestor`` 入口
+         ``if sock_path.exists(): unlink()`` 后 ``start_unix_server`` 重 bind → socket 路径指向
+         新守护，老守护监听的 inode 失去路径、收不到新连接，变无害孤儿，由 ``_watch_terminal``
+         终态事件或 6h TTL 自退。
+    故无需额外的 respawn 专用锁（KISS/YAGNI）：next↔next 已被 tape flock serialize；跨阶段
+    （bootstrap↔next）由时序 + unlink+rebind 兜底，最坏产生一个无害孤儿守护，绝不双写 tape
+    （单一写路径 + ``_FlockSafeTape`` 跨进程互斥仍守）。
+
+    **socket 路径不变**：``chart_sock_path(run_id)`` 按 run_id 确定性派生，respawn 复用同一路径
+    → ``orca_env.sh`` 里 ``ORCA_CHART_SOCK`` 仍正确，子代理无需任何改动。``next`` 已在
+    ``_next_in_critical_section`` 按下一节点身份重写了 env 文件，本 helper 不重复写。
+
+    **stale socket 自清**：守护若被 SIGKILL（不跑 finally unlink）会留 stale socket 文件；
+    本 helper 探到 ``ConnectionRefused``（stale）判 dead → respawn → 新守护的
+    ``chart_ingestor`` 在 ``start_unix_server`` 前 ``if sock_path.exists(): unlink()`` 清 stale
+    再 bind（已有逻辑，零改动）。
+
+    失败语义（同 bootstrap）：``_wait_for_sock`` 超时仅 warn 不 fail next —— 守护是 chart 便利
+    层，缺了只让 chart 连不上（fail loud 在 subagent 侧的 ``render_chart``），不阻塞 workflow
+    推进本身。
+    """
+    sock_path = chart_sock_path(run_id)
+    if _chart_daemon_alive(sock_path):
+        return
+    logger.info(
+        "run %s: chart 守护不在（socket %s 无监听者）—— next 路径 respawn",
+        run_id, sock_path,
+    )
+    # spawn 失败（Popen OSError：资源限制 / fd 耗尽 / 磁盘满开不了 log）降级为 warn —— 守护是
+    # chart 便利层，缺了只让 render_chart 在 subagent 侧 fail loud，不应以裸 traceback 崩 next
+    # （``next`` 的 except 仅 catch ``InSessionError``，不接 ``OSError``）。
+    try:
+        _spawn_chart_daemon(run_id, tape_path)
+    except OSError:
+        logger.warning(
+            "run %s: respawn chart 守护失败（socket %s，Popen OSError；chart 将不可用直到下次 next 重试）",
+            run_id, sock_path, exc_info=True,
+        )
+        return
+    if not _wait_for_sock(sock_path):
+        logger.warning(
+            "run %s: respawn 后 socket %s 在 %.1fs 内未就绪"
+            "（host 派 subagent 期间可能补上）",
+            run_id, sock_path, _SOCK_READY_TIMEOUT,
+        )
 
 
 def _write_orca_env(
@@ -688,6 +799,15 @@ def next(
             _prompts_dir_for(tape_path, run_id),
             env_path=_env_file_path(tape_path, run_id),
         ))
+        # in-session chart 守护存活检查 + respawn（phase-13 §3 in-session 衔接）：
+        # bootstrap 只 spawn 一次；run 中途守护被杀（pkill opencode 误伤等）后，next 必须拉起
+        # 否则后续节点 subagent 的 render_chart 连不上 socket、chart 全丢。仅在「有下一节点」
+        # （非终态 / 非合规失败 / 节点名非空）时探 —— 与下方 env 文件写守卫同条件。终态 run
+        # 守护会由 tape 终态事件自退；no-marker（node=None）无推进意义 —— 二者都不该 respawn。
+        # 在 tape flock 临界区内（finally 才释放）→ 同 run 并发 next 已被 LOCK_NB busy-exit
+        # 串行化，此处 probe+spawn 不会起多个守护（见 ``_ensure_chart_daemon`` 不变量）。
+        if result.node is not None and not (result.done or compliance_failed):
+            _ensure_chart_daemon(run_id, tape_path)
     except InSessionError as e:
         # fail_in_session：emit workflow_failed（tape data.kind = error_kind）+ 返含
         # ``error_kind`` 的错误信封（v5 §8 step 5b，SPEC §2.3 信封契约）。

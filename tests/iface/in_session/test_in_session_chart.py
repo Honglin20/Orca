@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import textwrap
@@ -441,6 +442,185 @@ def test_folder_agent_resources_accessible_via_env(
     assert charts[0].data["chart"]["chart_type"] == "bar"
     assert charts[0].data["chart"]["title"] == "bars"
     assert charts[0].node == "viz"
+
+    _wait_sock_gone(chart_sock_path(run_id), timeout=8.0)
+
+
+# ── 核心验收：run 中途守护被杀 → next respawn ─────────────────────────────────
+
+
+def _kill_chart_daemon_for_run(run_id: str) -> bool:
+    """SIGKILL 本 run 的 chart 守护（测试专用，模拟 ``pkill opencode`` 误杀 detached 守护）。
+
+    按 ``/proc/<pid>/cmdline`` 匹配 ``orca.iface.in_session.chart_daemon`` + 本 run_id
+    （``--run-id <run_id>`` 是 cmdline 里的唯一 arg）。SIGKILL 不跑 finally unlink → socket
+    文件残留（stale），正是 respawn 补丁要处理的场景。返是否杀了至少一个。
+
+    非 Linux（无 ``/proc``）→ skip 返 False（项目 POSIX-only，CI 必 Linux；本地跳过由测试
+    本身的 ``skipif`` 守）。
+    """
+    proc_dir = Path("/proc")
+    if not proc_dir.is_dir():
+        return False
+    run_id_b = run_id.encode("utf-8")
+    killed = False
+    for entry in proc_dir.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes()
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+        if b"orca.iface.in_session.chart_daemon" not in cmdline:
+            continue
+        if run_id_b not in cmdline:
+            continue
+        try:
+            os.kill(int(entry.name), signal.SIGKILL)
+            killed = True
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    return killed
+
+
+def test_next_respawns_killed_chart_daemon(
+    cwd_tmp, chart_push_script, cleanup_leftover_sockets,
+):
+    """守护在 run 中途被 SIGKILL → 下次 ``orca next`` 探到无监听者 → respawn → 后续 chart 落 tape。
+
+    意图（SPEC phase-13 §3 in-session 衔接 respawn 验收）：bootstrap spawn 守护**一次**即退出；
+    run 中途守护被杀（``pkill opencode`` 顺带 SIGTERM/SIGKILL 了 detached 守护）后，恢复 run 的
+    ``orca next`` 必须探到守护不在并 respawn，否则后续节点 subagent 的 ``render_chart`` 连不上
+    socket、chart 全丢（实测一次 run 0 chart）。
+
+    本测试用 SIGKILL（最严：不跑 finally unlink → stale socket 残留）验：
+      1. 杀前守护活（connect 探 True）；
+      2. 杀后守护死（connect 探 False，socket stale）；
+      3. ``orca next`` 推进 → 探到死 → respawn → 守护重新活（connect 探 True）；
+      4. respawn 后的守护真能收 chart（subagent push → tape 出 custom(chart)）。
+    """
+    if not Path("/proc").is_dir():
+        pytest.skip("respawn 测试依赖 /proc 扫描定位守护（CI Linux 必过，本地非 Linux 跳过）")
+
+    from orca.iface.in_session.cli import _chart_daemon_alive
+
+    # 2 节点 wf：worker → checker → $end（next 推进 worker 后还有 checker 节点 → 触发 respawn 守卫）。
+    wf = cwd_tmp / "wf.yaml"
+    wf.write_text(textwrap.dedent("""
+        name: respawn_wf
+        description: daemon respawn after kill
+        entry: worker
+        nodes:
+          - name: worker
+            kind: agent
+            executor: opencode
+            model: deepseek/deepseek-v4-flash
+            prompt: "做 W。"
+            routes:
+              - to: checker
+          - name: checker
+            kind: agent
+            executor: opencode
+            model: deepseek/deepseek-v4-flash
+            prompt: "做 C。"
+            routes:
+              - to: $end
+    """), encoding="utf-8")
+
+    runner = CliRunner()
+    reply = _bootstrap(runner, wf)
+    run_id = reply["run_id"]
+    env_path = cwd_tmp / "runs" / run_id / "orca_env.sh"
+    sock = chart_sock_path(run_id)
+
+    # 等守护 socket 就绪（CI 高负载下 bootstrap 的 5s 可能不够）
+    _wait_sock_ready(env_path)
+    assert _chart_daemon_alive(sock), "bootstrap 后守护应活"
+
+    # 模拟 run 中途守护被 SIGKILL（pkill opencode 误杀）
+    assert _kill_chart_daemon_for_run(run_id), "未找到本 run 的守护进程（/proc 扫描失败）"
+    # 等进程真退：SIGKILL 是异步的（os.kill 返回后 kernel 仍需调度回收 + 关 listening fd）。
+    # poll connect 探判死，而非等 ``sock.exists()``（SIGKILL 不跑 finally unlink → 文件残留 stale，
+    # exists() 一直 True）。connect 转 refused 才标志 listener fd 真被 kernel 收掉。
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if not _chart_daemon_alive(sock):
+            break
+        time.sleep(0.05)
+    # 关键断言 1：杀后 connect 探判 dead（socket 文件 stale 残留但无监听者）
+    assert not _chart_daemon_alive(sock), "SIGKILL 后守护应判 dead（connect refused）"
+
+    # orca next 推进 worker → checker：next 应探到守护死并 respawn
+    reply2 = _next(runner, run_id, "worker output")
+    assert reply2.get("node") == "checker", f"next 应推进到 checker；got {reply2}"
+    assert not reply2["done"], "workflow 不应结束（还有 checker）"
+
+    # 关键断言 2：respawn 后守护重新活（next 的 _ensure_chart_daemon 拉起）
+    _wait_sock_ready(env_path)
+    assert _chart_daemon_alive(sock), "next 后守护应被 respawn（connect 探 True）"
+
+    # 关键断言 3：respawn 的守护真能收 chart（下一节点 subagent push → tape）
+    res = _simulate_subagent(env_path, chart_push_script)
+    assert res.returncode == 0, (
+        f"respawn 后 subagent 推 chart 失败：stdout={res.stdout!r} stderr={res.stderr!r}"
+    )
+    assert "PUSHED" in res.stdout, "render_chart 应成功（守护已 respawn）"
+
+    # 推进到终态
+    _next(runner, run_id, "checker output")
+
+    # 断言 tape 含 custom(chart)（respawn 的守护真写了）
+    tape_path = cwd_tmp / "runs" / f"{run_id}.jsonl"
+    tape = Tape(tape_path, run_id=run_id)
+    charts = [e for e in tape.replay()
+              if e.type == "custom" and e.data.get("kind") == "chart"]
+    assert len(charts) == 1, f"respawn 后应 1 chart 落 tape；got {len(charts)}"
+    assert charts[0].node == "checker", "chart 路由到 checker 节点（env 文件按 checker 身份）"
+
+    _wait_sock_gone(sock, timeout=8.0)
+
+
+# ── 守卫生存检查的负向守卫（终态 / no-marker 不 respawn）──────────────────────
+
+
+def test_next_does_not_respawn_when_terminal(
+    cwd_tmp, cleanup_leftover_sockets, monkeypatch,
+):
+    """next 推到终态（done）时不调 ``_ensure_chart_daemon``（无下一节点；守护由终态事件自退）。
+
+    意图：调用点守卫 ``result.node is not None and not (result.done or compliance_failed)``。
+    终态 next（done=True）应跳过 respawn。monkeypatch 记录 ``_ensure_chart_daemon`` 调用，
+    断言终态 next 不触发 —— 固化「终态 / no-marker 不该 respawn」防回归（守护会叠进程）。
+    """
+    wf = cwd_tmp / "wf.yaml"
+    wf.write_text(textwrap.dedent("""
+        name: terminal_guard_wf
+        description: terminal next no respawn
+        entry: worker
+        nodes:
+          - name: worker
+            kind: agent
+            executor: opencode
+            model: deepseek/deepseek-v4-flash
+            prompt: "做 W。"
+            routes:
+              - to: $end
+    """), encoding="utf-8")
+
+    runner = CliRunner()
+    reply = _bootstrap(runner, wf)
+    run_id = reply["run_id"]
+    env_path = cwd_tmp / "runs" / run_id / "orca_env.sh"
+    _wait_sock_ready(env_path)
+
+    respawn_calls: list = []
+    import orca.iface.in_session.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "_ensure_chart_daemon",
+                        lambda *a, **kw: respawn_calls.append((a, kw)))
+
+    reply_done = _next(runner, run_id, "worker output")
+    assert reply_done["done"] is True, f"应终态；got {reply_done}"
+    assert respawn_calls == [], "终态 next 不应调 _ensure_chart_daemon（守护会由终态事件自退）"
 
     _wait_sock_gone(chart_sock_path(run_id), timeout=8.0)
 
