@@ -68,18 +68,49 @@ function writeIdleHeartbeat(sessionID: string): void {
 // ── nudge（v5 §4.4 / step 2b(7)）：idle 时提醒主 session 调 next，**绝不自动推进** ──
 // B 路径铁律：主 session 自调 ``orca next``；idle 钩子**不**调 next（那退化成 A 路径自动推进）。
 // marker 文件名固定 ``runs/orca-<run_id>.json``（v3 §7.2），扫该目录取活跃 run。
-const NUDGE_FILE = "runs/.orca-nudge.json"
-const NUDGE_COOLDOWN_SEC = 60  // 全局 60s 节流（进程级单时间戳，跨 session 共享；防 idle 频繁触发刷屏）
+//
+// host-session-binding v2（tape-only，§2.3/§4.5）：nudge 只对**当前 session 自己的**活跃 run
+// 提醒，杜绝跨 session 串台。归属从 tape 首条 workflow_started.data.host_session 派生
+// （marker 不存归属——tape 唯一真相源）。per-session 限流（NUDGE_FILE 按 sessionID 分键）。
+const NUDGE_COOLDOWN_SEC = 60  // per-session 60s 节流（按 sessionID 分键，防 A 抑制 B，评审 C1）
 
-// 扫活跃 run（marker 存在 ≡ run 活跃；终态时 CLI 清 marker）。返 [{run_id, model}]。
-function listActiveRuns(): { run_id: string; model?: string }[] {
+// 读 tape 首条 workflow_started.data.host_session（同 cc_nudge.sh 的 _host_session_from_tape）。
+// tape 不存在 / 首行非 workflow_started / 缺 host_session / 读失败 → undefined（fail-safe）。
+function hostSessionFromTape(runId: string): string | undefined {
+  try {
+    const raw = readFileSync(`runs/${runId}.jsonl`, "utf-8")
+    // 只看首条有效行（workflow_started 正常是首条事件）。
+    for (const line of raw.split("\n")) {
+      const s = line.trim()
+      if (!s) continue
+      const obj = JSON.parse(s) as { type?: string; data?: { host_session?: string } }
+      if (obj.type === "workflow_started") {
+        const hs = obj.data?.host_session
+        return typeof hs === "string" ? hs : undefined
+      }
+      return undefined  // 首条有效行非 workflow_started → 异常 tape，fail-safe
+    }
+  } catch {
+    return undefined  // 读失败 / 文件不存在 → fail-safe
+  }
+  return undefined
+}
+
+// 扫活跃 run 并按 hostSession 过滤（marker 存在 ≡ run 活跃；终态时 CLI 清 marker）。
+// 返归属 hostSession 的 [{run_id, model}]。tape 读失败 / host_session 不等 → 跳过（§2.5）。
+function listActiveRuns(hostSession: string): { run_id: string; model?: string }[] {
   try {
     const out: { run_id: string; model?: string }[] = []
     for (const name of readdirSync("runs")) {
       if (!name.startsWith("orca-") || !name.endsWith(".json")) continue
       try {
         const m = JSON.parse(readFileSync(`runs/${name}`, "utf-8")) as Marker
-        if (m && typeof m.run_id === "string") out.push({ run_id: m.run_id, model: m.model })
+        if (m && typeof m.run_id === "string") {
+          // tape-only 过滤：归属从 tape 派生（marker 不存 host_session）。
+          if (hostSessionFromTape(m.run_id) === hostSession) {
+            out.push({ run_id: m.run_id, model: m.model })
+          }
+        }
       } catch { /* 单个 marker 坏 → 跳过（不阻断 nudge） */ }
     }
     return out
@@ -88,12 +119,18 @@ function listActiveRuns(): { run_id: string; model?: string }[] {
   }
 }
 
+// per-session nudge 节流文件路径（按 sessionID 分键，防 A 的 nudge 抑制 B，评审 C1）。
+function nudgeFile(sessionID: string): string {
+  return `runs/.orca-nudge-${sessionID}.json`
+}
+
 // nudge 节流：距上次成功 nudge > COOLDOWN 才允许。**不**在此写时间戳——调用方成功注入后
 // 调 ``markNudged`` 写，注入失败不计入节流（下轮 idle 可重试）。
-function nudgeAllowed(): boolean {
+function nudgeAllowed(sessionID: string): boolean {
+  const file = nudgeFile(sessionID)
   try {
-    if (!existsSync(NUDGE_FILE)) return true
-    const data = JSON.parse(readFileSync(NUDGE_FILE, "utf-8")) as { last_nudged_at?: number }
+    if (!existsSync(file)) return true
+    const data = JSON.parse(readFileSync(file, "utf-8")) as { last_nudged_at?: number }
     const last = typeof data?.last_nudged_at === "number" ? data.last_nudged_at : 0
     return (nowSec() - last) >= NUDGE_COOLDOWN_SEC
   } catch {
@@ -101,8 +138,8 @@ function nudgeAllowed(): boolean {
   }
 }
 
-function markNudged(): void {
-  writeHeartbeat(NUDGE_FILE, { last_nudged_at: nowSec() })
+function markNudged(sessionID: string): void {
+  writeHeartbeat(nudgeFile(sessionID), { last_nudged_at: nowSec() })
 }
 
 // in-flight mutex（F5 闭环）：防 await promptAsync 期间下一 idle 重入。
@@ -137,9 +174,8 @@ export const OrcaPlugin = async (ctx: any) => {
     // 判定**只看 marker 存在**（不用 tape 超时，会误报）：idle ≈ 主 session 空闲（子代理不在
     // 工作——否则 session 不 idle）+ 有活跃 run（marker 存在）→ 提醒调 next。
     //
-    // **已知限制**：v3 marker 文件名 = ``orca-<run_id>.json``（去 sessionID），nudge 扫所有
-    // 活跃 run 后注入**当前 idle 的 session**。多 session 共存时，非 Orca 主 session 空闲
-    // 也会收到提醒（跨渗）。单 workspace 单 session 约定下无影响；多 session 由后续 spec 收。
+    // host-session-binding v2：只提醒**当前 session 自己的**活跃 run（读 tape 首行 host_session
+    // 过滤），杜绝跨 session 串台。per-session 节流（按 sessionID 分键）。
     //
     // **签名（Bug B 闭环，e2e `/tmp/orca-f4` 实证）**：opencode 1.14.22 runtime 实调外层
     // 包一层 `{event}` —— `input.event.type` / `input.event.properties`。
@@ -155,11 +191,11 @@ export const OrcaPlugin = async (ctx: any) => {
       idleCount += 1
       if (DIAGNOSE) writeIdleHeartbeat(sessionID)
 
-      // nudge：扫活跃 run → 节流 → 注入提醒（不 spawn next）。
+      // nudge：扫**本 session 的**活跃 run → 节流 → 注入提醒（不 spawn next）。
       if (injecting.has(sessionID)) return
-      const active = listActiveRuns()
-      if (active.length === 0) return        // 无活跃 run → 无需 nudge
-      if (!nudgeAllowed()) return            // 节流窗口内 → 跳过（防刷屏）
+      const active = listActiveRuns(sessionID)
+      if (active.length === 0) return        // 无本 session 的活跃 run → 无需 nudge
+      if (!nudgeAllowed(sessionID)) return   // per-session 节流窗口内 → 跳过（防刷屏）
 
       injecting.add(sessionID)
       try {
@@ -183,12 +219,28 @@ export const OrcaPlugin = async (ctx: any) => {
             model: { providerID, modelID },
           },
         })
-        markNudged()  // 成功注入才计入节流（失败下轮重试）
+        markNudged(sessionID)  // 成功注入才计入节流（失败下轮重试）
       } catch (e) {
         // 注入失败（client API 错 / session 不存在）→ console.error，不计节流，下轮 idle 重试。
         console.error("[orca] nudge promptAsync failed:", e)
       } finally {
         injecting.delete(sessionID)
+      }
+    },
+
+    // host-session-binding v2 §4.5：注入 ORCA_HOST_SESSION_ID 到所有 shell 子进程。
+    // opencode 的 bash tool spawn 子进程时，本钩子把当前 session id 注入 env → CLI bootstrap
+    // 的 _host_session_from_env() 命中 → 写入 tape workflow_started.data.host_session。
+    //
+    // **可行性**：``shell.env`` 钩子官方支持（@opencode-ai/plugin Hooks；spike 实证类型定义
+    // ``input: { cwd, sessionID?, callID? }, output: { env }``）。``sessionID`` 在 AI tool
+    // 上下文中存在；用户终端手敲 shell 时可能 absent → 不注入（手 CLI 起 run，host_session
+    // 为 null，nudge 跳过——fail-safe，§2.5）。
+    //
+    // **tape-only 铁律**：host_session 单路（env → bootstrap → tape），marker 不复存。
+    "shell.env": async (input: { sessionID?: string }, output: { env: Record<string, string> }) => {
+      if (input.sessionID) {
+        output.env.ORCA_HOST_SESSION_ID = input.sessionID
       }
     },
   }
