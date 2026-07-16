@@ -65,6 +65,18 @@ nodes:
     executor: opencode
     model: "deepseek/deepseek-v4-pro"
     agent: nas-train-runner
+    # 硬强制（防假执行）：runner 末尾用 python 从真 search.jsonl 计数输出 JSON。
+    # 散文复述/没真跑搜索(records=0) → output_schema_mismatch → node_failed（确定性）。
+    # search_records 来自真文件计数，伪造不出；手伪造正数则由下游 select 脚本读真文件失败兜底。
+    output_schema:
+      type: object
+      required: [output_dir, search_done, search_records, search_log]
+      properties:
+        output_dir: {type: string}
+        search_done: {type: boolean}
+        search_records: {type: integer, minimum: 1}
+        search_log: {type: string}
+      additionalProperties: false
     routes:
       - to: select
 

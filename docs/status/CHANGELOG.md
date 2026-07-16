@@ -5,6 +5,14 @@
 
 ---
 
+## [2026-07-16] nas-hp-search runner/select 反伪造 + output_schema 强制
+
+修「假执行」bug（tape 铁证：runner(3s)/select(19s)/train_script_gen(1s) 没跑脚本、只复述上游散文；search.jsonl 640 条是诊断时手动跑的）。根因 = prompt 诱骗（顶部上游散文的「已完成」语域诱骗 deepseek 顺着复述）+ 无强制（fake 还静默标 completed）。① `nas-train-runner/agent.md` 重写（执行置顶、删上游散文灌入改用 `{{ inputs.output_dir }}`、反伪造、末尾 python 从真 search.jsonl 计数输出自校验 JSON）；② `nas-select/agent.md` 同样去诱骗+反伪造；③ `nas-hp-search.yaml` runner 加 `output_schema`（`search_records≥1`，in-session `step.py:_parse_output` 确定性强制：散文/0 记录 → `output_schema_mismatch` → `node_failed`，不真跑过不了）。共享 agent 契约变更：须显式传 output_dir。验证脚手架（FAST/MOCK）剔除不进生产。E2E 两次通过（opencode+flash+脚手架绕 deepseek 慢）：runner JSON 过 output_schema、select 真选 top-3 + final_report。Commit: `<SHA 见 git log>`。详见 [release note](../releases/2026-07-16-nas-hp-search-enforce-and-tars-skill-cleanup.md)。
+
+## [2026-07-16] tars install skill 改名清理 + CLAUDE.md「TARS 是 SKILL」注记
+
+CC 装出的 skill 名是陈旧 `orca`（tars 改名前装的残留），与命名约定（skill=`tars`）不符；且 install 不清旧 skill 目录名。`install_cmds.py:_install_skill` 加改名迁移清理（install 自动清陈旧 `skills/orca/`、`skills/teams/`，同 `command/orca` 清理 pattern，fail-soft）+ 修陈旧 docstring；`CLAUDE.md` 加「TARS 是 SKILL 不是 CLI」注记（skill 编排、驱动 `orca` CLI、不存在 `tars <wf>`）。重装 CC → 正名 `tars`，`orca doctor` `skill_install: PASS(cc,opencode)`；改名清理造陈旧目录实测命中。Commit: `<SHA 见 git log>`。详见 [release note](../releases/2026-07-16-nas-hp-search-enforce-and-tars-skill-cleanup.md)。
+
 ## [2026-07-16] nas-hp-search：轻量 NAS 超参搜索流水线（slim 5 节点）
 
 新增 `workflows/nas-hp-search.yaml`（线性 `model_optimizer→train_script_gen→search_pipeline_gen→runner→select`）——重 7 节点 pipeline 的轻量版：① 新 slim folder-agent `elastic_optimizer`（只读 model + Elastic 速查 + 最小 supernet 模板，不展平/不读 optimize_rules，上下文从数十文件降到 3 文件）；② 新脚本化 `nas-select`（subprocess `nas-select-architecture` + 模板填空 `final_report.md` + 推 C5/C6，零 LLM，替代 22min evaluator）；③ 复用 `supernet-train-script` checklist 加 `[MAJOR] 28`（train_supernet.py 内联 `_push_chart()`，accumulate+全序列推、label/title 对齐 tail_metrics C3a/C3b 保 refresh-idempotent，无独立 viz 节点）；④ 复用 `nas-search-pipeline`/`nas-train-runner` 不改。节点名 `model_optimizer`（agent 指向 `elastic_optimizer`）对齐复用 agent body 的 `{{ model_optimizer.output }}` 硬契约（prompt+agent 互斥）。附带 `.gitignore` 修：`references/`→`/references/`（锚定根目录，避免误伤 folder-agent 的 skill 资源）。`tars validate` 0 error、5 agent 全 resolve；template 自测 diff=0；select_and_report 端到端 EXIT=0 SELECTED=3；code-reviewer impl+coverage 两轮 🔴 全修。Commit: `a5dd2cc`。详见 [release note](../releases/2026-07-16-nas-hp-search-slim.md)。
