@@ -27,8 +27,11 @@ htmlcov/
 .idea/
 .vscode/
 
-# External reference repos (read-only design references, not Orca code)
-references/
+# External reference repos (read-only design references, not Orca code).
+# 锚定根目录：只忽略 <repo-root>/references/（外部只读参考），不要误伤
+# workflows/agents/<agent>/references/（folder-agent 的 skill 资源——速查/模板/checklist，
+# 是 agent 的核心交付物，必须跟踪）。
+/references/
 
 # Codegraph local index
 .codegraph/

@@ -1,0 +1,84 @@
+name: nas-hp-search
+description: "轻量 NAS 超参搜索流水线（slim）：Elastic 超网生成 → 训练脚本(chart-inline) → 搜索脚本 → 训练/搜索执行 → 脚本化架构选择。无独立 viz 节点（chart 流入生成脚本/选择脚本，live 推图）。"
+entry: model_optimizer
+
+inputs:
+  model_path:
+    type: string
+    description: "用户 PyTorch 模型入口文件路径（如 demo_target/model.py）"
+    required: true
+  project_root:
+    type: string
+    description: "用户 PyTorch 项目根目录（如 demo_target/）"
+    required: true
+  output_dir:
+    type: string
+    description: "NAS 产物输出目录。留空则默认 llm_artifacts/<model_name>/"
+    required: false
+    default: ""
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════
+  # Agent 1: slim Elastic 超网生成（不展平 / 不读 optimize_rules）
+  # 节点名 `model_optimizer` 是下游复用 agent（supernet-train-script）
+  # 的硬契约：其 agent.md body 引用 {{ model_optimizer.output }}，
+  # 经 Jinja2 StrictUndefined 渲染——故此处节点名须与之一致。
+  # agent 指向新 slim folder-agent `elastic_optimizer`。
+  # ═══════════════════════════════════════════════════════════════
+  - name: model_optimizer
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-pro"
+    agent: elastic_optimizer
+    routes:
+      - to: train_script_gen
+
+  # ═══════════════════════════════════════════════════════════════
+  # Agent 2: 超网训练脚本生成（复用 supernet-train-script；checklist 加 chart-inline）
+  # 生成的 train_supernet.py 内联 _push_chart()——训练图 live 流，不需 tail/独立 viz 节点。
+  # ═══════════════════════════════════════════════════════════════
+  - name: train_script_gen
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-pro"
+    agent: supernet-train-script
+    routes:
+      - to: search_pipeline_gen
+
+  # ═══════════════════════════════════════════════════════════════
+  # Agent 3: 搜索流水线脚本生成（复用 nas-search-pipeline，不改）
+  # ═══════════════════════════════════════════════════════════════
+  - name: search_pipeline_gen
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-pro"
+    agent: nas-search-pipeline
+    routes:
+      - to: runner
+
+  # ═══════════════════════════════════════════════════════════════
+  # Agent 4: 训练与搜索执行（复用 nas-train-runner）
+  # 训练图由 train_supernet.py 内联 live 推；搜索图由 tail_metrics --mode search 推。
+  # ═══════════════════════════════════════════════════════════════
+  - name: runner
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-pro"
+    agent: nas-train-runner
+    routes:
+      - to: select
+
+  # ═══════════════════════════════════════════════════════════════
+  # Agent 5: 脚本化架构选择（新 nas-select，替代 LLM evaluator）
+  # nas-select-architecture + 模板填空 final_report.md + 推 C5/C6（无 LLM）。
+  # ═══════════════════════════════════════════════════════════════
+  - name: select
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-pro"
+    agent: nas-select
+    routes:
+      - to: $end
+
+outputs:
+  result: "{{ select.output }}"
