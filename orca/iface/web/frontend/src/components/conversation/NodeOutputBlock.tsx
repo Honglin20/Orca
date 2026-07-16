@@ -17,6 +17,7 @@
 
 import type { WebEvent } from "@/types/events";
 import { MarkdownText } from "./MarkdownText";
+import { safeJson } from "./_shared";
 
 interface NodeOutputBlockProps {
   event: WebEvent;
@@ -42,12 +43,14 @@ export function NodeOutputBlock({ event }: NodeOutputBlockProps) {
   } else {
     // object（dict / list）/ number / boolean 一律走 JSON 预览：
     // 避免 React 渲染 object 报错 / 显 [object Object]，并保原始类型信息。
+    // safeJson（_shared）：循环引用 / bigint 等裸 JSON.stringify 会 throw 的边缘
+    // 降级为 String()，与 ConversationView「保渲染稳定」哲学一致（review 🟡#1）。
     body = (
       <pre
         data-testid="node-output-json"
         className="overflow-x-auto rounded bg-slate-50 p-2 text-xs leading-snug text-slate-700 dark:bg-slate-900 dark:text-slate-200"
       >
-        {JSON.stringify(output, null, 2)}
+        {safeJson(output)}
       </pre>
     );
   }

@@ -1,6 +1,7 @@
 // components/conversation/NodeDivider.tsx —— 节点/dialog/step 细分隔符（SPEC §5.3）。
 //
-//   - node_started / node_completed / node_skipped → dim 细分隔
+//   - node_started / node_skipped → dim 细分隔
+//   - ``node_completed`` 已升格为 output block（B1），不再作 divider——见 NodeOutputBlock。
 //   - dialog_started / dialog_ended → ``── dialog ──``
 //   - 无后续 message/thinking 的 step_marker → dim ``· step`` 分隔
 
@@ -11,9 +12,6 @@ export function NodeDivider({ event }: { event: WebEvent }) {
   switch (event.type) {
     case "node_started":
       label = `▶ ${event.node ?? "node"} started`;
-      break;
-    case "node_completed":
-      label = `■ ${event.node ?? "node"} completed`;
       break;
     case "node_skipped":
       label = `⊘ ${event.node ?? "node"} skipped`;

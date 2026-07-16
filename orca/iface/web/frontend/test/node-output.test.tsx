@@ -157,6 +157,37 @@ describe("NodeOutputBlock — typeof data.output 分支", () => {
     expect(container.textContent).toContain("42");
   });
 
+  it("boolean output → <pre> JSON（防御性，不静默丢）", () => {
+    const event = ev("node_completed", {
+      node: "n",
+      data: { output: true },
+    });
+    const { container } = render(
+      React.createElement(NodeOutputBlock, { event })
+    );
+    expect(screen.getByTestId("node-output-json")).toBeTruthy();
+    expect(container.textContent).toContain("true");
+  });
+
+  it("循环引用 output → safeJson 降级 String，不 throw 不崩", () => {
+    // 裸 JSON.stringify 在循环引用上 throw TypeError——会炸整个 ConversationView
+    // 渲染循环。safeJson（_shared）兜底降级。后端正常路径不会产循环引用，但
+    // 防御性组件不应留 throw 缺口（code-reviewer 🟡#1）。
+    const cyclic: Record<string, unknown> = { a: 1 };
+    cyclic.self = cyclic;
+    const event = ev("node_completed", {
+      node: "n",
+      data: { output: cyclic },
+    });
+    const { container } = render(
+      React.createElement(NodeOutputBlock, { event })
+    );
+    expect(screen.getByTestId("node-output-json")).toBeTruthy();
+    // 降级路径产出非空字符串（String(cyclic) 含 [object Object] 字面也无妨——
+    // 关键是不 throw、渲染稳定）。
+    expect(container.textContent?.length).toBeGreaterThan(0);
+  });
+
   it("null output → dim 「（无 output）」", () => {
     const event = ev("node_completed", {
       node: "n",
