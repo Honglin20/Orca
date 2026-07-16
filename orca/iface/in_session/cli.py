@@ -90,6 +90,19 @@ def _prompts_dir_for(tape_path: Path, run_id: str) -> Path:
     return Path(tape_path).parent / run_id / "prompts"
 
 
+def _host_session_from_env() -> str | None:
+    """宿主 session id（host-session-binding v2 §4.2）：优先级 ORCA_HOST_SESSION_ID
+    > CLAUDE_CODE_SESSION_ID > None。
+
+    - **CC**：零配置（CC 给所有 bash 子进程注入 ``CLAUDE_CODE_SESSION_ID``，spike 实测）。
+    - **opencode**：需 plugin ``shell.env`` 钩子注入 ``ORCA_HOST_SESSION_ID``（v2 §4.5）；
+      未注入 → 返 None（fail-safe：该 run 的 host_session 落 tape 为 null，nudge 跳过）。
+
+    单一真相源铁律：host_session 单路采集（env → bootstrap → tape），marker 不复存（§2.2）。
+    """
+    return os.environ.get("ORCA_HOST_SESSION_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+
+
 def _run_dir_for(tape_path: Path, run_id: str) -> Path:
     """per-run 资源根目录：``<rundir>/<run_id>/``（prompts / orca_env.sh 都落此）。"""
     return Path(tape_path).parent / run_id
@@ -663,6 +676,7 @@ def bootstrap(
                 bus, wf_obj, tape, output=None, inputs=inp, run_id=run_id, elapsed=0.0,
                 prompts_dir=_prompts_dir_for(tape_path, run_id),
                 yaml_path=os.path.realpath(yaml_path),
+                host_session=_host_session_from_env(),
             ))
         except InSessionError as e:
             # bootstrap 失败 = 配置坏（如 entry 不是 agent 节点），fail loud。
@@ -845,15 +859,18 @@ async def _advance_and_emit(
     bus: EventBus, wf, tape: Tape, *, output: str | None,
     inputs: dict, run_id: str, elapsed: float, prompts_dir: Path | None = None,
     yaml_path: str | None = None,
+    host_session: str | None = None,
 ):
     """调 advance_step + emit_batch（单次 write 原子化，B1）。
 
     emit 经 ``apply_step_result``（共享 helper）；返 ``result`` 供 bootstrap 命令拼富信封
     （run_id/tape/prompt_file/驱动协议）。helper 返的基础信封在此丢弃（bootstrap 自建）。
+
+    ``host_session`` 透传给 advance_step（仅 pending 首节点分支写 tape，SPEC §4.1 emit 真链）。
     """
     result = advance_step(
         tape, wf, output=output, inputs=inputs, run_id=run_id, elapsed=elapsed,
-        prompts_dir=prompts_dir, yaml_path=yaml_path,
+        prompts_dir=prompts_dir, yaml_path=yaml_path, host_session=host_session,
     )
     await apply_step_result(bus, result)   # emit_batch（基础信封丢弃，bootstrap 命令自建富信封）
     return result
