@@ -148,25 +148,28 @@ class _FlockSafeTape(Tape):
             # 无新字节 → 返缓存（O(1)）。
             return self._scan_max_seq
 
-        # 读新字节（从 _scan_offset 到 EOF）。
+        # 读新字节（从 _scan_offset 到 EOF）。BINARY mode + byte offsets
+        # (B2-VRFY local patch): text-mode seek/read mixing causes UnicodeDecodeError
+        # on multi-byte UTF-8 tapes.
         try:
-            with open(self.path, "r", encoding="utf-8") as f:
+            with open(self.path, "rb") as f:
                 f.seek(self._scan_offset)
-                chunk = f.read(cur_size - self._scan_offset)
+                raw = f.read(cur_size - self._scan_offset)
         except OSError:
             logger.warning("chart 守护读 tape %s max_seq 失败（OSError）",
                            self.path, exc_info=True)
             return self._scan_max_seq
 
         # partial-line race 防护：仅推进到 chunk 中最后一个 \n 之后。
-        last_nl = chunk.rfind("\n")
+        last_nl = raw.rfind(b"\n")
         if last_nl < 0:
             # 整段 partial；不推进 offset，下次重读。
             return self._scan_max_seq
-        complete = chunk[: last_nl + 1]
+        complete_bytes = raw[: last_nl + 1]
         self._scan_offset = self._scan_offset + last_nl + 1
+        chunk = complete_bytes.decode("utf-8", errors="replace")
 
-        for line in complete.split("\n"):
+        for line in chunk.split("\n"):
             stripped = line.strip()
             if not stripped:
                 continue
@@ -223,25 +226,28 @@ async def _watch_terminal(
             # tape 被截断/重建（不应发生）→ 重跟。
             last_size = 0
         if cur_size > last_size:
+            # BINARY mode + byte offsets (B2-VRFY local patch): text-mode seek/read
+            # mixing causes UnicodeDecodeError on multi-byte UTF-8 tapes.
             try:
-                with open(tape_path, "r", encoding="utf-8") as f:
+                with open(tape_path, "rb") as f:
                     f.seek(last_size)
-                    chunk = f.read(cur_size - last_size)
+                    raw = f.read(cur_size - last_size)
             except OSError:
                 logger.debug("chart 守护 _watch_terminal 读 %s 失败（OSError，下个 poll 重试）",
                              tape_path, exc_info=True)
-                chunk = ""
+                raw = b""
 
             # partial-line race 防护：只解析到最后一行完整（含 \\n）；末尾 partial 字节
             # 保留在 last_size 之前，下次 poll 重读。
-            last_nl = chunk.rfind("\n")
+            last_nl = raw.rfind(b"\n")
             if last_nl < 0:
                 # chunk 内无换行 → 整段 partial；不推进 last_size，等下个 poll。
                 await asyncio.sleep(poll_interval)
                 continue
-            complete = chunk[: last_nl + 1]
+            complete_bytes = raw[: last_nl + 1]
             last_size = last_size + last_nl + 1
-            for line in complete.split("\n"):
+            chunk = complete_bytes.decode("utf-8", errors="replace")
+            for line in chunk.split("\n"):
                 stripped = line.strip()
                 if not stripped:
                     continue

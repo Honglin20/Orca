@@ -204,10 +204,14 @@ class SidechainIngestor:
         if cur_size == self._node_scan_offset:
             return self._current_node
 
+        # BINARY mode + byte offsets: text-mode seek(N) treats N as opaque cookie and
+        # f.read(N) as CHARS, mixing them misaligns offset on multi-byte UTF-8 content
+        # → seek lands mid-character → UnicodeDecodeError. Read bytes, decode, advance
+        # by BYTE index of last \n (B2-VRFY local patch; same fix needed upstream).
         try:
-            with open(self._tape_path, "r", encoding="utf-8") as f:
+            with open(self._tape_path, "rb") as f:
                 f.seek(self._node_scan_offset)
-                chunk = f.read(cur_size - self._node_scan_offset)
+                raw = f.read(cur_size - self._node_scan_offset)
         except OSError:
             logger.debug(
                 "sidechain ingestor derive node: 读 %s 失败（OSError，沿用缓存 node=%r）",
@@ -215,14 +219,15 @@ class SidechainIngestor:
             )
             return self._current_node
 
-        last_nl = chunk.rfind("\n")
+        last_nl = raw.rfind(b"\n")
         if last_nl < 0:
             # 整段 partial；不推进 offset，下次重读。
             return self._current_node
-        complete = chunk[: last_nl + 1]
+        complete_bytes = raw[: last_nl + 1]
         self._node_scan_offset = self._node_scan_offset + last_nl + 1
+        chunk = complete_bytes.decode("utf-8", errors="replace")
 
-        for line in complete.split("\n"):
+        for line in chunk.split("\n"):
             stripped = line.strip()
             if not stripped:
                 continue

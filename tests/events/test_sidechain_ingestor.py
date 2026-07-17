@@ -347,3 +347,44 @@ def test_ingest_payload_not_mutated(tmp_path):
         assert raw.payload == original_payload, "入参 payload 不应被修改"
     finally:
         bus.close()
+
+
+# ── B2-VRFY Bug #3 回归：多字节 UTF-8 tape ────────────────────────────────────
+
+
+def test_derive_current_node_handles_multibyte_utf8(tmp_path):
+    """多字节 UTF-8 tape 下 _derive_current_node 多轮增量扫不崩 + node 正确。
+
+    旧 text-mode ``seek(字节)/read(字符)`` 混算 → 多字节内容使 ``_node_scan_offset``
+    漂移到 UTF-8 continuation byte → 下次 ``f.read()`` 抛 ``UnicodeDecodeError``（ValueError
+    子类，非 OSError，未被兜住）→ 守护死。binary-mode 修复后多轮增量扫必过。
+
+    注：必须用 ``ensure_ascii=False`` 写 tape，否则中文被转义成 ASCII、byte==char、不触发。
+    """
+    bus, _, tape_path = _make_bus(tmp_path)
+    tape_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _append_utf8(obj: dict) -> None:
+        with open(tape_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+    try:
+        _append_utf8({"seq": 1, "type": "workflow_started", "timestamp": 0.0,
+                      "node": None, "session_id": None, "data": {}})
+        _append_utf8({"seq": 2, "type": "node_started", "timestamp": 0.0,
+                      "node": "节点一", "session_id": None, "data": {}})
+        ing = SidechainIngestor(bus, tape_path)
+        ing.rebuild_from_tape()
+        assert ing.current_node == "节点一"
+
+        # 多轮增量：每轮 append 大段多字节内容 + 新 node_started，再派生。
+        # 多字节使 byte/char 发散 → 旧代码第 2+ 轮 seek 落 continuation byte 必崩。
+        for i, node in enumerate(["节点二", "节点三", "节点四"], start=3):
+            _append_utf8({"seq": i * 10, "type": "agent_message", "timestamp": 0.0,
+                          "node": ing.current_node, "session_id": "c",
+                          "data": {"text": "审计中文多字节内容🚀" * 20, "source_id": f"c:{i}"}})
+            _append_utf8({"seq": i * 10 + 1, "type": "node_started", "timestamp": 0.0,
+                          "node": node, "session_id": None, "data": {}})
+            assert ing._derive_current_node() == node, f"增量轮 {i - 2} 应派生 {node}"
+    finally:
+        bus.close()

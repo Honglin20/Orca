@@ -5,7 +5,7 @@
   - discover_children fallback：session.parent_id 查询（主路径无 task tool 时）。
   - stream：event 表 seq 游标 → message.part.updated.1 行 → 按 part.type 映射。
   - 映射：reasoning / text / tool(running→call) / tool(completed→result) / step-start / step-finish skip。
-  - source_id 用 ``opc:<seq>``（保 tool running/completed 双 event 唯一）。
+  - source_id 用 ``opc:<child_id>:<seq>``（seq 是 per-session，含 child 才全局唯一）。
   - cursor：seq 游标续读。
   - scope：host_session 不匹配 → 空。
   - fail loud：host_session 空 → raise。
@@ -214,7 +214,7 @@ def test_stream_maps_reasoning(db_path):
     assert events[0].kind == "thinking"
     assert events[0].payload == {"text": "contemplating"}
     assert events[0].child_id == "child-1"
-    assert events[0].source_id == "opc:1"
+    assert events[0].source_id == "opc:child-1:1"
 
 
 def test_stream_maps_text(db_path):
@@ -247,7 +247,7 @@ def test_stream_maps_tool_running_to_tool_call(db_path):
     e = events[0]
     assert e.kind == "tool_call"
     assert e.payload == {"tool": "bash", "args": {"command": "ls"}, "tool_call_id": "c1"}
-    assert e.source_id == "opc:1"
+    assert e.source_id == "opc:child-1:1"
 
 
 def test_stream_maps_tool_completed_to_tool_result(db_path):
@@ -289,9 +289,9 @@ def test_stream_tool_running_then_completed_yields_call_then_result(db_path):
     events = [raw for raw, _ in a.stream("child-1", 0)]
     assert len(events) == 2
     assert events[0].kind == "tool_call"
-    assert events[0].source_id == "opc:1"
+    assert events[0].source_id == "opc:child-1:1"
     assert events[1].kind == "tool_result"
-    assert events[1].source_id == "opc:2"
+    assert events[1].source_id == "opc:child-1:2"
     # tool_call_id 配对（前端 pairToolEvents 用此）。
     assert events[0].payload["tool_call_id"] == events[1].payload["tool_call_id"]
 
@@ -444,3 +444,45 @@ def test_readonly_connection_rejects_writes(db_path):
             conn.execute("INSERT INTO event (aggregate_id, seq, type, data) VALUES ('x', 1, 't', '{}')")
     finally:
         conn.close()
+
+
+# ── B2-VRFY 回归（真机 E2E 暴露的 3 个 P0）──────────────────────────────────────
+
+
+def test_default_db_path_prefers_opencode_db(monkeypatch, tmp_path):
+    """B2-VRFY Bug #1 回归：真 opencode v1.18 写 ``opencode.db``（非 SPEC 假设的 session.db）。
+
+    ``opencode.db`` 存在 → 优先返它；仅当它不存在才回退 ``session.db``。原代码硬编
+    session.db → 真机路径不存在 → discover_children 静默返空 → daemon ingest 0 事件。
+    """
+    fake_home = tmp_path / "fakehome"
+    oc_dir = fake_home / ".local" / "share" / "opencode"
+    oc_dir.mkdir(parents=True)
+    (oc_dir / "opencode.db").write_bytes(b"")  # 模拟真机 opencode.db 存在
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.delenv("ORCA_OPENCODE_DB", raising=False)
+    a = OpencodeSqliteAdapter("h")
+    assert a.db_path == oc_dir / "opencode.db"
+
+
+def test_stream_source_ids_unique_across_children_sharing_seq(db_path):
+    """B2-VRFY Bug #2 回归：``seq`` 是 per-aggregate（per-session），多 child 复用同 seq。
+
+    event PK=(aggregate_id, seq) 允许 child-A 与 child-B 各有 seq=1。source_id 必须含
+    child_id 才全局唯一；旧 ``opc:{seq}`` 跨 child 撞 → ingestor dedup 静默丢事件
+    （真机实测 44% 撞车率）。
+    """
+    conn = sqlite3.connect(str(db_path))
+    _insert_event(conn, "child-A", 1, {"part": _part("text", text="from A")})
+    _insert_event(conn, "child-B", 1, {"part": _part("text", text="from B")})
+    _insert_event(conn, "child-A", 2, {"part": _part("text", text="A again")})
+    conn.commit()
+    conn.close()
+
+    a = OpencodeSqliteAdapter("host-1", db_path=db_path)
+    events = []
+    for child in ("child-A", "child-B"):
+        events += [raw for raw, _ in a.stream(child, 0)]
+    source_ids = [e.source_id for e in events]
+    assert len(source_ids) == len(set(source_ids)), "跨 child source_id 必须全局唯一"
+    assert set(source_ids) == {"opc:child-A:1", "opc:child-A:2", "opc:child-B:1"}

@@ -78,6 +78,11 @@ def _resolve_db_path(db_path: Path | None = None) -> Path:
     env_db = os.environ.get("ORCA_OPENCODE_DB")
     if env_db:
         return Path(env_db)
+    # B2-VRFY local patch: real opencode v1.18 writes to opencode.db (not session.db
+    # as SPEC §5 assumed). Try opencode.db first, fall back to session.db for compat.
+    default_opencode = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+    if default_opencode.is_file():
+        return default_opencode
     return Path.home() / ".local" / "share" / "opencode" / "session.db"
 
 
@@ -241,7 +246,9 @@ class OpencodeSqliteAdapter:
     ) -> Iterator[RawAgentEvent]:
         """单 part → RawAgentEvent（按 part.type 分派）。
 
-        seq 是 event 表行号（连续整数、INSERT/UPDATE 各占一行）；source_id 用 seq 保唯一。
+        seq 是 event 表 PER-AGGREGATE（per-session）行号；GLOBAL source_id 必须含 child
+        以免跨 child seq 撞车（B2-VRFY local patch：实证 event PK=(aggregate_id,seq)，
+        v1 实现误以为 seq 全局唯一）。
         """
         part_type = part.get("type")
         if part_type == "reasoning":
@@ -249,7 +256,7 @@ class OpencodeSqliteAdapter:
             if isinstance(text, str) and text:
                 yield RawAgentEvent(
                     child_id=child_id,
-                    source_id=f"opc:{seq}",
+                    source_id=f"opc:{child_id}:{seq}",
                     kind="thinking",
                     payload={"text": text},
                 )
@@ -258,7 +265,7 @@ class OpencodeSqliteAdapter:
             if isinstance(text, str) and text:
                 yield RawAgentEvent(
                     child_id=child_id,
-                    source_id=f"opc:{seq}",
+                    source_id=f"opc:{child_id}:{seq}",
                     kind="text",
                     payload={"text": text},
                 )
@@ -267,7 +274,7 @@ class OpencodeSqliteAdapter:
         elif part_type == "step-start":
             yield RawAgentEvent(
                 child_id=child_id,
-                source_id=f"opc:{seq}",
+                source_id=f"opc:{child_id}:{seq}",
                 kind="step_boundary",
                 payload={"phase": "start"},
             )
@@ -295,7 +302,7 @@ class OpencodeSqliteAdapter:
         if status == "running":
             yield RawAgentEvent(
                 child_id=child_id,
-                source_id=f"opc:{seq}",
+                source_id=f"opc:{child_id}:{seq}",
                 kind="tool_call",
                 payload={
                     "tool": tool_name,
@@ -310,7 +317,7 @@ class OpencodeSqliteAdapter:
                 result_text = result_text[:_TOOL_RESULT_MAX_CHARS] + "…[truncated]"
             yield RawAgentEvent(
                 child_id=child_id,
-                source_id=f"opc:{seq}",
+                source_id=f"opc:{child_id}:{seq}",
                 kind="tool_result",
                 payload={
                     "tool_call_id": call_id,

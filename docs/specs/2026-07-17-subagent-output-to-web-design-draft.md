@@ -12,7 +12,7 @@
 
 - 统一 IR `RawAgentEvent`（**payload 1:1 对齐 `EventType.data`**，R1）= 两 adapter 唯一共同产出。
 - ingestor **1:1 透传**（R2，零 rename）→ tape `agent_*` → 前端**零改**（Explore 坐实 `entries.ts` 已全支持 thinking/message/tool-single/tool-group）。
-- **grep 守门（U3=a，R5）**——查：`orca/events/` + `orca/iface/web/` + `orca/events/adapters/` + `orca/iface/in_session/cc_jsonl_adapter.py` + `orca/iface/in_session/opencode_sqlite_adapter.py`，**禁** backend 名条件分支；例外：`*_daemon.py` 内允许 backend-specific 路径 resolve / 启动参数。
+- **grep 守门（U3=a，R5）**——查：`orca/events/` + `orca/iface/web/` + `orca/events/adapters/`（adapter 物理位置 `cc_jsonl.py` / `opencode_sqlite.py`），**禁** backend 名条件分支；例外：`*_daemon.py` 内允许 backend-specific 路径 resolve / 启动参数。
 - **物理位置钉死**：IR `orca/events/raw_agent_event.py`；ingestor `orca/events/sidechain_ingestor.py`；adapter `orca/events/adapters/cc_jsonl.py` + `opencode_sqlite.py`；daemon `orca/iface/in_session/sidechain_daemon.py`。
 - **kind 集合（U2=a）**：`RawAgentEvent.kind` 是 backend **可能产出并集**；CC 产 `{thinking,tool_call,tool_result,text}`（sidechain 无 step，memory 坐实），opencode 额外产 `step_boundary`；前端对缺失 kind graceful 降级（`entries.ts:151-158` 就位）。**「接口同一性」= 相同代码路径消费相同 IR，非强制两后端产出相同 kind 集。**
 
@@ -141,8 +141,7 @@ host_session = 宿主身份，多消费者：nudge 防串台（SPEC-A）+ sidech
 5. **接口同一性 grep 守门**：
    ```
    grep -rnE 'if\s+backend\s*==|backend\s*(in|not in)|backend\s*=\s*["'"'"'](cc|claude|opencode)' \
-     orca/events/ orca/iface/web/ orca/events/adapters/ \
-     orca/iface/in_session/cc_jsonl_adapter.py orca/iface/in_session/opencode_sqlite_adapter.py
+     orca/events/ orca/iface/web/ orca/events/adapters/
    ```
    预期 **0 hit**（例外：`*_daemon.py` 路径 resolve / 启动参数）。
 6. **testid 断言**：`thinking` / `message` / `tool-single` / `tool-group` / `node-output` 各存在。
