@@ -66,7 +66,9 @@ def cwd_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _bootstrap(runner: CliRunner, wf_path: Path, *extra: str) -> dict:
-    result = runner.invoke(app, ["bootstrap", str(wf_path), *extra])
+    # 默认带 --inputs "{}" 真启动（bootstrap 不带 --inputs 只返 inputs_schema 不启动）。
+    # 调用方经 extra 传 --inputs 时 click last-wins 覆盖默认。
+    result = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}", *extra])
     assert result.exit_code == 0, f"bootstrap failed: {result.output}"
     return json.loads(result.output.splitlines()[-1])
 
@@ -116,7 +118,7 @@ def test_bootstrap_duplicate_same_wf_fails_loud(cwd_tmp, wf_path):
     runner = CliRunner()
     r1 = _bootstrap(runner, wf_path)
     # 第二次 bootstrap 同 wf（同 wf.name，未终态）→ fail loud（exit 1）。
-    result = runner.invoke(app, ["bootstrap", str(wf_path)])
+    result = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
     assert result.exit_code == 1
     reply = json.loads(result.output.splitlines()[-1])
     assert reply["reason"] == "duplicate-active-run"
@@ -283,7 +285,7 @@ def test_failure_unsupported_node_kind(cwd_tmp):
     p.write_text(yaml_text, encoding="utf-8")
 
     runner = CliRunner()
-    result = runner.invoke(app, ["bootstrap", str(p)])
+    result = runner.invoke(app, ["bootstrap", str(p), "--inputs", "{}"])
     assert result.exit_code == 1
     # v5 §8 step 5b：bootstrap 失败信封加 error_kind（unsupported_node_kind）+ 反向无 in_session_error
     reply = json.loads(result.output.splitlines()[-1])

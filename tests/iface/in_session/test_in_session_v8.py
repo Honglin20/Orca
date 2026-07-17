@@ -406,7 +406,7 @@ def wf_path(tmp_path: Path) -> Path:
 def test_v7_baseline_cli_commands_still_work_v8(cwd_tmp, wf_path):
     """v7 CLI 大脑未动：bootstrap/next/stop/status 仍可用（v5 删 start，v3 删 serve）。"""
     runner = CliRunner()
-    boot = runner.invoke(app, ["bootstrap", str(wf_path)])
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
     assert boot.exit_code == 0
     reply = json.loads(boot.output.splitlines()[-1])
     assert reply["done"] is False
@@ -429,7 +429,7 @@ def test_status_json_flag_outputs_json(cwd_tmp, wf_path):
     MAJOR-1 闭环：plugin 期望 status stdout 是 JSON 顶层字段（status/node_status/progress）。
     """
     runner = CliRunner()
-    boot = runner.invoke(app, ["bootstrap", str(wf_path)])
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
     run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
 
     result = runner.invoke(app, ["status", run_id, "--json"])
@@ -446,7 +446,7 @@ def test_status_json_flag_outputs_json(cwd_tmp, wf_path):
 def test_status_default_human_readable_unchanged(cwd_tmp, wf_path):
     """v7 行为：``status <run_id>`` 默认人类可读多行（无 --json 不变）。"""
     runner = CliRunner()
-    boot = runner.invoke(app, ["bootstrap", str(wf_path)])
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
     run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
 
     result = runner.invoke(app, ["status", run_id])
@@ -465,7 +465,7 @@ def test_status_json_flag_no_run_id_lists_runs_json(cwd_tmp, wf_path):
     from orca.events.tape import Tape as _Tape
 
     runner = CliRunner()
-    boot = runner.invoke(app, ["bootstrap", str(wf_path)])
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
     boot_reply = json.loads(boot.output.splitlines()[-1])
     run_id = boot_reply["run_id"]
     result = runner.invoke(app, ["status", "--json"])
@@ -498,7 +498,7 @@ def test_status_no_run_id_excludes_completed(cwd_tmp, wf_path):
     bootstrap → next 推到 done（workflow_completed + clear_marker）→ status 无参不列它。
     """
     runner = CliRunner()
-    boot = runner.invoke(app, ["bootstrap", str(wf_path)])
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
     run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
     tape = json.loads(boot.output.splitlines()[-1])["tape"]
     # 推进两步到 workflow_completed（a → b → $end），marker 清。
@@ -523,7 +523,7 @@ def test_status_no_run_id_empty_human_readable(cwd_tmp):
 def test_status_no_run_id_non_empty_human_readable(cwd_tmp, wf_path):
     """FU-3：有活跃 run + 人类可读（无 --json）→ 每行 ``- <run_id> [status] node=… elapsed=…``。"""
     runner = CliRunner()
-    boot = runner.invoke(app, ["bootstrap", str(wf_path)])
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
     run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0
@@ -540,7 +540,7 @@ def test_status_no_run_id_skips_corrupt_and_orphan_markers(cwd_tmp, wf_path):
     守护 cli.py 的两个显式 ``continue`` 失败路径（Rule 9：显式失败路径需测试）。
     """
     runner = CliRunner()
-    boot = runner.invoke(app, ["bootstrap", str(wf_path)])
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
     run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
     runs_dir = cwd_tmp / "runs"
     # 损坏 marker（非法 JSON）
@@ -563,7 +563,7 @@ def test_status_no_run_id_skips_corrupt_and_orphan_markers(cwd_tmp, wf_path):
 def test_stop_with_run_id_succeeds(cwd_tmp, wf_path):
     """v3 §7.2：``stop <run_id>`` 按 run_id O(1) 直定位 marker（marker 文件名 = run_id）。"""
     runner = CliRunner()
-    boot = runner.invoke(app, ["bootstrap", str(wf_path)])
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
     run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
 
     result = runner.invoke(app, ["stop", run_id])
@@ -635,7 +635,7 @@ def test_bootstrap_and_next_return_pointer_and_write_prompt_file(cwd_tmp, wf_pat
     runner = CliRunner()
 
     # bootstrap：entry 节点 → 指针 + 文件（含 entry prompt 全文）
-    boot = runner.invoke(app, ["bootstrap", str(wf_path)])
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
     assert boot.exit_code == 0
     boot_reply = json.loads(boot.output.splitlines()[-1])
     assert boot_reply.get("prompt_file"), "compact：bootstrap 必须返 .prompt_file"

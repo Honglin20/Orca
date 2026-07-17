@@ -19,17 +19,9 @@
 
 ---
 
-### 下一步任务 2（待立项）：`orca list` 输出精简（catalog 增长后单命令 dump 过重）
+### ~~下一步任务 2~~ ✅ 已完成（2026-07-17）：`orca list` 瘦身 + schema 移启动命令
 
-**问题**：`orca list` 单命令返全部 wf 的 full description + **全部** inputs_schema（实测 ~5KB，`agent-struct-exploration` 的 **19 个 input** 占大头）。TARS skill 据 description 匹配意图时，未选中 wf 的 inputs 全是噪声上下文。
-
-**v5 现决**：刻意**单命令无 describe**（"选 wf + 知 inputs" 一条命令搞定，避冗余；见 `orca list --help`）。
-
-**待讨论**：catalog 还会涨（struct 系列 + 未来 wf），单命令 dump 成本上行。选项：
-1. **反转 v5**：加 `orca describe <wf>`（单 wf 全 inputs_schema）+ `orca list` 瘦身（name + 短 desc，不带/少带 inputs_schema）。TARS：list 匹配 → describe 抽 inputs。**彻底**，代价：维护两命令 + 同步改 TARS skill 流程。
-2. **`orca list --short`**（name + 一行 desc，无 inputs，匹配用）/ 默认全量（抽 inputs 用）——不新增命令、不反转 v5，仅加 flag。**但只省"匹配"步骤噪声**：TARS 抽 inputs 仍需 full list（dump 全部 wf inputs），除非配 `describe`，故单独用不彻底。
-3. 保留单命令 + 截断（inputs desc 限长 / wf desc 限长）——简单但治标。
-**倾向**：要彻底省上下文 → 选项 1（describe）；想最小改动且接受"inputs 抽取仍全量" → 选项 2。
+见 CHANGELOG / [release note](../releases/2026-07-17-orca-list-slim-schema-via-start-cmd.md)。**实际方案 ≠ 原登记的选项 1（describe）**，用户拍板第 4 条：零新命令——`orca list` 砍 schema 只返 `{name,description}`，inputs_schema 改由 `orca <wf>` 不带 `--inputs` 按需带出。命令数 7 / 保留字 / CI 禁 describe 全不变。
 
 ### 2026-07-16 已完成（最新）
 
@@ -48,7 +40,7 @@
 
 ### follow-up / debt（用户暂缓 / 预存，非阻塞）
 
-- **既有测试隔离缺陷**（非本任务引入，code-reviewer R1 🟢 登记）：`test_orca_list_returns_inputs_schema_json` 未隔离 `~/.orca/workflows` user-level 扫描根，全局有 wf 时 `assert len==1` 失败。择机 monkeypatch `Path.home` 修。
+- ~~**既有测试隔离缺陷**~~ ✅ 已解（2026-07-17 orca list 瘦身）：原 `test_orca_list_returns_inputs_schema_json` 重写为 `test_orca_list_returns_name_and_description_only`，按名定位不再 `assert len==1`，`~/.orca/workflows` 全局 wf 不再干扰。
 - **既有 `orca/iface/in_session/daemon.py:105` 裸 `sys.exit(128 + signum)`**（违反 SPEC §3.3 grep 守门）：本任务 chart_daemon.py 已用 `loop.add_signal_handler + asyncio.Event` 避免同款违规，但老 daemon.py 仍裸 `sys.exit` 致 `test_no_bare_sys_exit_or_raise_system_exit_outside_allowed_paths` baseline 即失败。择机按 chart_daemon.py 同款 pattern 修。
 - **既有 `tests/e2e_phase13/test_e2e_1_basic_chart.py` + `test_e2e_2_multi_run_parallel.py` baseline 失败**：YAML 硬编码 `python3`，本机 `python3` 未装 orca → `render_chart` import 失败。CI 或装了 orca 的环境无此问题。择机把 e2e wf 的 `python3` 改为 `${ORCA_PYTHON:-python3}` 或测试 fixture 注入 `sys.executable`。
 - **既有 `tests/iface/mcp/test_*` baseline 失败**：环境缺 `uv` 二进制（FileNotFoundError）。非本任务引入。

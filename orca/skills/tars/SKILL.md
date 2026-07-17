@@ -4,10 +4,11 @@ description: >-
   TARS —— 在主 session 里把用户的一句话意图（「用 TARS 帮我 X」「用 TARS 做 Y」「TARS，
   优化模型结构」）自动匹配到已注册的 workflow 并驱动完成。当用户描述想做的事（而非直接给
   workflow 名）时使用：调 `orca list` 拿全部 workflow 的 `description` → 据用户意图语义匹配
-  → 命中唯一则启动；多个可能则简短问用户选哪个（≤2 问，不把列表丢回去）→ 据
-  `inputs_schema` 抽 inputs → `orca <wf> --inputs` 启动 → 派 Task 子代理逐节点执行 →
-  `orca next --run-id --output` 循环到 `done:true`。整个流程在主 session 内闭环，不依赖
-  系统自动推进；绝不自己 Read workflow YAML（全经 `orca list`）。底层用 orca CLI 引擎。
+  → 命中唯一则启动；多个可能则简短问用户选哪个（≤2 问，不把列表丢回去）→ 调
+  `orca <wf>`（不带 --inputs）拿 `inputs_schema` → 据此从用户意图抽 inputs →
+  `orca <wf> --inputs` 启动 → 派 Task 子代理逐节点执行 → `orca next --run-id --output`
+  循环到 `done:true`。整个流程在主 session 内闭环，不依赖系统自动推进；绝不自己 Read
+  workflow YAML（选 wf 经 `orca list`，inputs_schema 经 `orca <wf>`）。底层用 orca CLI 引擎。
 allowed-tools: Bash, Read, Write
 ---
 
@@ -27,7 +28,8 @@ allowed-tools: Bash, Read, Write
 ## 唯一接口：7 个命令（只调这些，不读任何 YAML）
 
 ```
-orca list                          # 列出可用 workflow（返 name + description + inputs_schema）
+orca list                          # 列出可用 workflow（只返 name + description，用来选 wf）
+orca <wf-name>                     # 不带 --inputs：返该 wf 的 inputs_schema（用来抽 inputs）
 orca <wf-name> --inputs '{...}'    # 启动一个 workflow（返 run_id + 首节点指令 + 驱动协议）
 orca next --run-id <id> --output '<产出>'   # 推进一步（把上一步子代理产出回传）
 orca status [--run-id <id>]        # 看进度
@@ -36,9 +38,9 @@ orca open [--run-id <id>]          # 打开 web 监控面板
 orca doctor                        # 自检集成层
 ```
 
-🔴 **铁律：绝不自己去 Read 任何 workflow 的 YAML 文件**。选 workflow、知道它要什么
-inputs，全部经 `orca list` 的返回值（description + inputs_schema）得到——这是单一信息源。
-YAML 是 Orca 内部契约，不是给你的。
+🔴 **铁律：绝不自己去 Read 任何 workflow 的 YAML 文件**。选 workflow 经 `orca list`（拿
+name + description），知道它要什么 inputs 经 `orca <wf>`（不带 `--inputs`，拿
+inputs_schema）——这是单一信息源。YAML 是 Orca 内部契约，不是给你的。
 
 ## 三步流程
 
@@ -55,11 +57,7 @@ orca list
 ```json
 {
   "name": "research_and_write",
-  "description": "先调研一个主题，再据调研结果写一篇文章。",
-  "inputs_schema": [
-    {"name": "topic", "type": "string", "description": "要调研的主题"},
-    {"name": "style", "type": "string", "description": "写作风格（可选）"}
-  ]
+  "description": "先调研一个主题，再据调研结果写一篇文章。"
 }
 ```
 
@@ -69,10 +67,32 @@ orca list
 - 如果有多个都可能、或用户意图模糊 → 用一两句话问用户关键区分点（最多 1-2 个问题），
   不要把整个列表丢回给用户让其选编号。
 
-### 第 2 步：从用户意图抽 inputs
+> `orca list` **只返回 name + description**，不含 inputs_schema（那是选 wf 阶段的噪音）。
+> 知道 wf 要什么 inputs 是下一步的事。
 
-据选中 workflow 的 **inputs_schema**（每个字段的 `name` + `type` + `description`），
-从用户刚才说的话里把 inputs 抽出来。
+### 第 2 步：拿 inputs_schema + 抽 inputs
+
+选定 wf 后，**不带 `--inputs`** 调一次，拿它的 inputs 清单（这一步只查询，不启动）：
+
+```bash
+orca <wf-name>
+```
+
+返回形如：
+
+```json
+{
+  "name": "research_and_write",
+  "description": "...",
+  "inputs_schema": [
+    {"name": "topic", "type": "string", "description": "要调研的主题"},
+    {"name": "style", "type": "string", "description": "写作风格（可选）"}
+  ]
+}
+```
+
+据 **inputs_schema**（每个字段的 `name` + `type` + `description`），从用户刚才说的话里把
+inputs 抽出来。
 
 - `description` 告诉你每个字段是什么 → 据语义匹配用户意图。
 - 用户没明说但能合理推断的字段 → 直接推断（别为每个字段都问一遍）。
@@ -80,6 +100,9 @@ orca list
 - 字段类型按 `type` 给（`string` 给字符串、`int` 给整数、`boolean` 给 true/false、`list` 给数组）。
 
 把抽好的 inputs 拼成一个 JSON 对象，例如 `{"topic": "量子计算现状", "style": "科普"}`。
+
+> 注意：不带 `--inputs` 调 `orca <wf>` **只返回 schema，不会启动**（也不产生 run）。真正
+> 启动在下一步——必须带 `--inputs`。
 
 ### 第 3 步：启动 + 逐节点驱动
 
@@ -145,13 +168,15 @@ orca next --run-id <run_id> --output 'it'\''s a good film'
 
 ## 常见错误（避免）
 
+- 🔴 抽 inputs 前先 `orca <wf>`（不带 `--inputs`）拿 inputs_schema；别凭空猜 inputs。
 - 🔴 别忘了每个 `orca next` 都带 `--run-id`（用启动时拿到的那个值，一字不改）。
 - 🔴 别自己 Read 节点指令文件 / workflow YAML——前者派子代理读，后者根本不读。
 - 🔴 别在 `done: true` 后还继续调 `orca next`（workflow 已结束）。
 - 🔴 别把 `--output` 的产出用双引号包（产出里的双引号 / `$` 会被 shell 解释）；统一单引号。
 
 <success_criteria>
-- [ ] 经 `orca list` 选定 workflow（不读 YAML）
+- [ ] 经 `orca list` 选定 workflow（只看 name + description，不读 YAML）
+- [ ] `orca <wf>`（不带 --inputs）拿 inputs_schema
 - [ ] 据 inputs_schema 抽 inputs（只问缺失且无法推断的）
 - [ ] `orca <wf> --inputs` 启动拿到 run_id
 - [ ] 每个节点：派 Task 子代理读指令执行 → 产出原样作 --output → `orca next --run-id`

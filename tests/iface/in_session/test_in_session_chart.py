@@ -79,7 +79,8 @@ def cleanup_leftover_sockets():
 
 
 def _bootstrap(runner: CliRunner, wf: Path) -> dict:
-    r = runner.invoke(app, ["bootstrap", str(wf)])
+    # 带 --inputs "{}" 真启动（bootstrap 不带 --inputs 只返 inputs_schema 不启动）。
+    r = runner.invoke(app, ["bootstrap", str(wf), "--inputs", "{}"])
     assert r.exit_code == 0, f"bootstrap exit {r.exit_code}: {r.output}"
     # r.output 可能含 logging 噪音（CliRunner 多 invoke 的 stderr 关闭 artifacts）；取首行 JSON。
     return json.loads(_first_json_line(r.output))

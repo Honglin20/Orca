@@ -99,13 +99,13 @@ def test_wf_sugar_dispatches_to_bootstrap(cwd_tmp):
     p.write_text(SIMPLE_WF_YAML, encoding="utf-8")
     runner = CliRunner()
 
-    # 裸 wf 路径（语法糖）
-    sugar = runner.invoke(app, [str(p)])
+    # 裸 wf 路径（语法糖）；带 --inputs 才真启动（不带只返 schema）
+    sugar = runner.invoke(app, [str(p), "--inputs", "{}"])
     assert sugar.exit_code == 0, sugar.output
     sugar_reply = json.loads(sugar.output.splitlines()[-1])
 
-    # 显式 bootstrap
-    explicit = runner.invoke(app, ["bootstrap", str(p)])
+    # 显式 bootstrap（带 --inputs 真启动 → 撞 sugar 的活跃 run → duplicate fail）
+    explicit = runner.invoke(app, ["bootstrap", str(p), "--inputs", "{}"])
     # 第二次 bootstrap 同 wf → duplicate-active-run fail loud（§7.3 m12）
     assert explicit.exit_code == 1
     dup = json.loads(explicit.output.splitlines()[-1])
@@ -130,7 +130,7 @@ def test_reserved_command_name_not_treated_as_wf(cwd_tmp):
     p = cwd_tmp / "wf.yaml"
     p.write_text(SIMPLE_WF_YAML, encoding="utf-8")
     runner = CliRunner()
-    runner.invoke(app, [str(p)])  # bootstrap 一个 run
+    runner.invoke(app, [str(p), "--inputs", "{}"])  # bootstrap 一个 run（带 --inputs 真启动）
     # status 是注册命令 → 走 status（列 run），不重写为 bootstrap
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0
@@ -205,13 +205,13 @@ def test_marker_module_has_no_find_scan():
     )
 
 
-def test_orca_list_returns_inputs_schema_json(cwd_tmp, monkeypatch):
-    """v5 §2.3：``orca list`` 返 ``{workflows:[{name, description, inputs_schema}]}``。
+def test_orca_list_returns_name_and_description_only(cwd_tmp):
+    """``orca list`` 只返 ``{workflows:[{name, description}]}``（选 wf 用）。
 
-    - inputs_schema = ``[{name, type, description}]``（从 wf.inputs 派生，skill 据此抽 inputs）。
-    - **无 has_setup**（B3）：orca list 给 skill/LLM，只暴露选 wf + 抽 inputs 所需的 3 字段。
-    - 单一 catalog 真相源：与 ``tars list``（commands.run_list，人类可读）调同一个
-      ``catalog.list_workflows()``，渲染层不同（skill 要 JSON / 运营要文本）——非两套 list。
+    - inputs_schema **不在此**（移至 ``orca <wf>`` 不带 --inputs 的返回，抽 inputs 用）——选 wf
+      阶段不需要全量 schema，塞进 list 是噪音。
+    - **无 has_setup / entry / inputs_count**（B3）：只暴露选 wf 所需的 2 字段。
+    - 单一 catalog 真相源：与 ``tars list`` 调同一个 ``catalog.list_workflows()``，渲染层不同。
     """
     wf_with_inputs = """\
 name: inputs_demo_wf
@@ -245,28 +245,64 @@ nodes:
 
     # 顶层契约
     assert "workflows" in payload
-    assert len(payload["workflows"]) == 1
-    wf = payload["workflows"][0]
+    # 不要求恰 1 个（~/.orca/workflows 的全局 wf 也会被 catalog 扫到，见 CURRENT.md 隔离缺陷）；
+    # 按名定位本测试建的 wf，校验其字段。
+    wfs = {w["name"]: w for w in payload["workflows"]}
+    assert "inputs_demo_wf" in wfs, f"未在 list 输出找到 inputs_demo_wf：{list(wfs)}"
+    wf = wfs["inputs_demo_wf"]
 
-    # 恰 3 字段（name/description/inputs_schema），无 has_setup/entry/inputs_count（B3）
-    assert set(wf.keys()) == {"name", "description", "inputs_schema"}, (
-        f"orca list 项字段漂移：实得 {set(wf.keys())}（应恰 name/description/inputs_schema）"
+    # 恰 2 字段（name/description），无 inputs_schema / has_setup / entry / inputs_count
+    assert set(wf.keys()) == {"name", "description"}, (
+        f"orca list 项字段漂移：实得 {set(wf.keys())}（应恰 name/description，"
+        f"inputs_schema 已移至 orca <wf>）"
     )
+    assert "inputs_schema" not in wf
     assert "has_setup" not in wf
-    assert wf["name"] == "inputs_demo_wf"
+    assert wf["description"] == "带 inputs 的 demo wf。"
 
-    # inputs_schema = list of {name, type, description}，含两个 input
-    schema = wf["inputs_schema"]
-    assert isinstance(schema, list)
-    assert len(schema) == 2
-    by_name = {item["name"]: item for item in schema}
-    assert set(by_name.keys()) == {"topic", "count"}
-    # 每个 item 恰 3 字段（name/type/description）
-    for item in schema:
-        assert set(item.keys()) == {"name", "type", "description"}
-    assert by_name["topic"]["type"] == "string"
-    assert by_name["topic"]["description"] == "要写的主题"
-    assert by_name["count"]["type"] == "int"
+
+def test_wf_without_inputs_flag_returns_schema_no_run(cwd_tmp):
+    """``orca <wf>`` 不带 ``--inputs`` → 只返 ``{name, description, inputs_schema}``，不启动。
+
+    schema 是「启动 wf 时」才需要的信息（抽 inputs 用），故不进 ``orca list``，改由启动命令
+    按需带出。本测试验证：不带 --inputs 返 schema 且**不产生 run/tape/marker**（纯只读）。
+    """
+    wf_yaml = """\
+name: schema_demo_wf
+description: 测 schema 返回。
+entry: a
+inputs:
+  topic:
+    type: string
+    description: 要写的主题
+nodes:
+  - name: a
+    kind: agent
+    executor: opencode
+    model: deepseek/deepseek-v4-flash
+    prompt: "x"
+    routes:
+      - to: $end
+"""
+    p = cwd_tmp / "workflows" / "w.yaml"
+    p.parent.mkdir(parents=True)
+    p.write_text(wf_yaml, encoding="utf-8")
+    runner = CliRunner()
+
+    # 不带 --inputs → 返 schema
+    result = runner.invoke(app, ["schema_demo_wf"])
+    assert result.exit_code == 0, result.output
+    reply = json.loads(result.output.splitlines()[-1])
+    assert set(reply.keys()) == {"name", "description", "inputs_schema"}
+    assert reply["name"] == "schema_demo_wf"
+    schema = reply["inputs_schema"]
+    assert isinstance(schema, list) and len(schema) == 1
+    assert set(schema[0].keys()) == {"name", "type", "description"}
+    assert schema[0] == {"name": "topic", "type": "string", "description": "要写的主题"}
+
+    # 不启动：cwd 下根本不应有 runs/（纯只读查询，无副作用）
+    runs_dir = cwd_tmp / "runs"
+    assert not runs_dir.exists(), "不带 --inputs 不应在 cwd 产生 runs/（纯只读，应无副作用）"
 
 
 # ── §3.2 tars 命令名变量化（env ORCA_BACKEND_CMD）──────────────────────────
@@ -299,7 +335,7 @@ def test_bootstrap_uses_well_known_serialize_lock(cwd_tmp):
     p = cwd_tmp / "wf.yaml"
     p.write_text(SIMPLE_WF_YAML, encoding="utf-8")
     runner = CliRunner()
-    result = runner.invoke(app, ["bootstrap", str(p)])
+    result = runner.invoke(app, ["bootstrap", str(p), "--inputs", "{}"])
     assert result.exit_code == 0, result.output
 
     # well-known bootstrap serialize lock 必须落盘（rundir = cwd/runs/）
@@ -324,7 +360,7 @@ def test_next_recovers_wf_from_tape_yaml_path(cwd_tmp, tmp_path):
     p = tmp_path / "wf.yaml"
     p.write_text(SIMPLE_WF_YAML, encoding="utf-8")
     runner = CliRunner()
-    boot = runner.invoke(app, ["bootstrap", str(p)])
+    boot = runner.invoke(app, ["bootstrap", str(p), "--inputs", "{}"])
     assert boot.exit_code == 0
     reply = json.loads(boot.output.splitlines()[-1])
     run_id, tape = reply["run_id"], reply["tape"]

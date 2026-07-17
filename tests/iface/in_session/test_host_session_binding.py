@@ -218,7 +218,7 @@ def _seed_tape(tape_path: Path, *, run_id: str, host_session: str | None) -> Non
 
 
 def _bootstrap(runner: CliRunner, wf_path: Path) -> dict:
-    result = runner.invoke(app, ["bootstrap", str(wf_path)])
+    result = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
     assert result.exit_code == 0, f"bootstrap failed: {result.output}"
     return json.loads(result.output.splitlines()[-1])
 

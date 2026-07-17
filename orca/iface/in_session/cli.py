@@ -599,7 +599,10 @@ app = typer.Typer(
 @app.command(hidden=True)
 def bootstrap(
     wf: str = typer.Argument(..., help="workflow 名（catalog 精确匹配）或 yaml 路径"),
-    inputs: str = typer.Option("{}", "--inputs", help="workflow inputs（JSON）"),
+    inputs: str = typer.Option(
+        None, "--inputs",
+        help="workflow inputs（JSON）。省略 → 不启动，只返 inputs_schema（给 skill 抽 inputs）",
+    ),
     model: str = typer.Option(
         "deepseek/deepseek-v4-flash", "--model", help="provider/model（记入 marker）",
     ),
@@ -612,14 +615,30 @@ def bootstrap(
 ) -> None:
     """起一个 in-session run 的首步（gen run_id + tape + marker + emit ws+ns → entry prompt）。
 
+    **不带 ``--inputs`` → 不启动，只返 ``{name, description, inputs_schema}``**（纯只读，
+    不建 run/tape/marker）：schema 是「启动 wf 时」才需要的信息，选 wf 已由 ``orca list`` 的
+    name+description 完成，这里按需给 skill 抽 inputs。带 ``--inputs``（含 ``{}``）→ 真启动。
+    ``--format`` 仅启动路径生效；schema 查询（不带 ``--inputs``）恒返 JSON。
+
     v3 §7.3（m12）：同 wf 已有活跃 marker（未终态）→ **fail loud**（不静默新建孤儿）。
     提示续跑（`orca next --run-id <id>`）或先停（`orca stop <id>`）。
     """
     _setup_logging(log_level)
     yaml_path = _resolve_wf_path(wf)  # fail loud：名/路径都解析不到 → BadParameter
     wf_obj = load_workflow(yaml_path)  # fail loud：非法 yaml 抛 ConfigurationError
+
+    # 不带 --inputs → 只返 inputs_schema，不启动（选 wf 已由 orca list 完成；schema 在此
+    # 按需给）。纯只读：不 gen run_id / 不建 tape / 不写 marker / 不 spawn 守护。
+    if inputs is None:
+        typer.echo(json.dumps({
+            "name": wf_obj.name,
+            "description": wf_obj.description,
+            "inputs_schema": catalog.inputs_schema_list(wf_obj),
+        }, ensure_ascii=False))
+        raise typer.Exit(0)
+
     try:
-        inp = json.loads(inputs) if inputs else {}
+        inp = json.loads(inputs)
     except json.JSONDecodeError as e:
         raise typer.BadParameter(f"--inputs 不是合法 JSON：{e}") from e
 
@@ -1338,25 +1357,24 @@ def doctor(
 
 @app.command(name="list")
 def list_workflows() -> None:
-    """列出可用 workflow（SPEC v5 §2.3，给 skill/LLM 选 wf + 抽 inputs 用）。
+    """列出可用 workflow（给 skill/LLM **选 wf** 用，只发现/选择）。
 
-    返 ``{workflows:[{name, description, inputs_schema:[{name,type,description}]}]}``——
-    一个命令给齐「选 wf（据 description）+ 知 inputs（据 inputs_schema）」，故无 describe
-    命令（v5 决策：冗余）。**无 has_setup**（B3）。
+    返 ``{workflows:[{name, description}]}``——选 wf 只需 description 做语义匹配。
+    **不返 inputs_schema**：它是「启动某 wf 之后」才需要的信息（用来抽 inputs），全量塞进
+    list 会让选 wf 阶段被 schema 噪音淹没（单个 wf 可达 20+ 字段）。inputs_schema 改由
+    启动命令 ``orca <wf>``（不带 ``--inputs``）按需带出——见 ``bootstrap`` 的 ``inputs is
+    None`` 分支。
 
     **单一 catalog 真相源**（coordinator 铁律）：本命令与 ``tars list``（commands.run_list，
     人类可读，给运维）**调同一个** ``catalog.list_workflows()``——catalog 是唯一实现，
-    渲染层按消费者不同（skill 要 JSON / 运营要文本），非两套 list 逻辑。
+    渲染层按消费者不同（orca list 要精简 / 运营要文本 / MCP 要全字段），非多套 list 逻辑。
+    catalog item 的 inputs_schema / entry / inputs_count 留给 ``orca <wf>`` / MCP / tars 按需取。
     """
     items = catalog.list_workflows()
-    # 恰取 skill/LLM 需要的 3 字段（name/description/inputs_schema）；catalog item 的其余
-    # 字段（entry/inputs_count）留给 MCP/tars 渲染，不暴露给 orca list（B3）。
+    # 只取选 wf 需要的 name/description；inputs_schema 移到 `orca <wf>` 启动命令（选 wf
+    # 阶段不需要，见 bootstrap 的 inputs is None 分支）。
     workflows = [
-        {
-            "name": it["name"],
-            "description": it["description"],
-            "inputs_schema": it["inputs_schema"],
-        }
+        {"name": it["name"], "description": it["description"]}
         for it in items
     ]
     typer.echo(json.dumps({"workflows": workflows}, ensure_ascii=False))
