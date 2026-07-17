@@ -49,7 +49,7 @@ from orca.iface.cli.skill_cmds import (
     ENTRY_SKILL_NAME,
     HOST_DOTDIR,
     SKILL_HOSTS,
-    SKILL_NAME,
+    SKILL_NAME,  # noqa: F401 —— re-export（tests 经 install_cmds.SKILL_NAME 引用）
     SKILL_TARGETS,
     opencode_global_root,
 )
@@ -416,13 +416,18 @@ def install(
 
 
 def _install_bundled_workflows() -> list[Path]:
-    """部署当前目录 ``workflows/*.yaml`` → ``~/.orca/workflows/``（全局内置，catalog 扫到）。
+    """部署当前目录 ``workflows/*.yaml`` + ``workflows/agents/`` → ``~/.orca/workflows/``。
 
     让 ``tars install`` 把仓库自带 workflow（如 ``nas-agent-pipeline``）装成**全局可见**——
     任何项目的 ``orca list`` 都能扫到（``~/.orca/workflows`` 是 catalog 用户级扫描点），解决
-    「全新地方 ``orca list`` 空」问题。幂等：内容相同跳过，不同覆盖（install = refresh 内置）。
-    源（CWD/workflows）保留（**复制非移动**）。无 CWD/workflows 或无 *.yaml → no-op
-    （非仓库根跑 install 不报错）。
+    「全新地方 ``orca list`` 空」问题。``workflows/agents/``（agent 池）必须随 yaml 同步：
+    agent 解析按 ``<workflow_dir>/agents/`` 找（``orca.compile.agents``），只拷 yaml 不拷
+    agents 会让全局 workflow 全部 resolve 失败（agent not found）。
+
+    幂等：yaml 内容相同跳过，不同覆盖；agents 树 ``copytree(dirs_exist_ok=True)`` 覆盖同步
+    （merge 语义：保用户自加的自定义 agent 共存；代价是随包已删的旧 agent 不清理——已知限制，
+    agents 目录每次 install 都计入返回值/输出）。源（CWD/workflows）保留（**复制非移动**）。
+    无 CWD/workflows 或无 *.yaml → no-op（非仓库根跑 install 不报错）。
     """
     src_dir = Path.cwd() / "workflows"
     if not src_dir.is_dir():
@@ -443,6 +448,19 @@ def _install_bundled_workflows() -> list[Path]:
             typer.echo(f"  ⚠ 部署 workflow {src.name} 失败：{e}", err=True)
             continue
         deployed.append(dst)
+
+    # agent 池同步（workflow yaml 的 agent 引用按 <workflow_dir>/agents/ 解析，必须一并拷）
+    agents_src = src_dir / "agents"
+    if agents_src.is_dir():
+        agents_dst = dest_dir / "agents"
+        try:
+            shutil.copytree(
+                agents_src, agents_dst, dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+            deployed.append(agents_dst)
+        except OSError as e:  # noqa: BLE001
+            typer.echo(f"  ⚠ 部署 agent 池 workflows/agents 失败：{e}", err=True)
     return deployed
 
 
@@ -482,7 +500,7 @@ def run_install(target: str, scope: str) -> list[str]:
     # 部署内置 workflow（CWD/workflows → ~/.orca/workflows，全局可见；与 host 无关，跑一次）
     deployed_wfs = _install_bundled_workflows()
     if deployed_wfs:
-        typer.echo(f"\n[workflows] → ~/.orca/workflows（全局内置，orca list 可扫到）")
+        typer.echo("\n[workflows] → ~/.orca/workflows（全局内置，orca list 可扫到）")
         for w in deployed_wfs:
             typer.echo(f"  ✓ {w.name}")
 

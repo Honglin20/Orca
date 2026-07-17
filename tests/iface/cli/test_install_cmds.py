@@ -637,34 +637,42 @@ def test_install_cmds_has_no_orca_business_logic():
 
 
 def test_install_bundled_workflows_deploys_cwd_to_global(tmp_path, monkeypatch):
-    """``_install_bundled_workflows``：CWD/workflows/*.yaml → ~/.orca/workflows（全局内置）。
+    """``_install_bundled_workflows``：CWD/workflows/*.yaml + agents/ → ~/.orca/workflows。
 
-    部署 + 内容一致 + 幂等（内容同跳过）+ 变更 refresh（覆盖）+ 无 CWD/workflows no-op。
-    解决「全新地方 ``orca list`` 空」——install 把仓库自带 workflow 装成全局可见。
+    部署 + 内容一致 + yaml 幂等（内容同跳过）+ 变更 refresh（覆盖）+ agents 池随 yaml 同步
+    （agent 解析按 <workflow_dir>/agents/ 找，不拷会 agent not found）+ 无 CWD/workflows no-op。
     """
     cwd = tmp_path / "proj"
     (cwd / "workflows").mkdir(parents=True)
     wf_src = cwd / "workflows" / "demo-wf.yaml"
     wf_src.write_text("name: demo-wf\ndescription: test\n", encoding="utf-8")
+    agent_src = cwd / "workflows" / "agents" / "demo-agent"
+    agent_src.mkdir(parents=True)
+    (agent_src / "agent.md").write_text("# demo-agent\n", encoding="utf-8")
+    (agent_src / "__pycache__").mkdir()
+    (agent_src / "__pycache__" / "x.pyc").write_text("junk", encoding="utf-8")
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.chdir(cwd)
     monkeypatch.setenv("HOME", str(fake_home))  # Path.home() 走 $HOME（POSIX）
 
-    # 首次部署
+    # 首次部署：yaml + agents 池都落地
     deployed = install_cmds._install_bundled_workflows()
-    assert [p.name for p in deployed] == ["demo-wf.yaml"]
+    assert [p.name for p in deployed] == ["demo-wf.yaml", "agents"]
     dst = fake_home / ".orca" / "workflows" / "demo-wf.yaml"
     assert dst.is_file()
     assert dst.read_text(encoding="utf-8") == wf_src.read_text(encoding="utf-8")
+    agents_dst = fake_home / ".orca" / "workflows" / "agents"
+    assert (agents_dst / "demo-agent" / "agent.md").is_file()
+    assert not (agents_dst / "demo-agent" / "__pycache__").exists()
 
-    # 幂等：内容同 → 跳过（返回空）
-    assert install_cmds._install_bundled_workflows() == []
+    # yaml 幂等：内容同 → 跳过（agents 树仍覆盖同步）
+    assert [p.name for p in install_cmds._install_bundled_workflows()] == ["agents"]
 
     # 变更 → refresh（覆盖）
     wf_src.write_text("name: demo-wf\ndescription: changed\n", encoding="utf-8")
     deployed3 = install_cmds._install_bundled_workflows()
-    assert [p.name for p in deployed3] == ["demo-wf.yaml"]
+    assert [p.name for p in deployed3] == ["demo-wf.yaml", "agents"]
     assert "changed" in dst.read_text(encoding="utf-8")
 
     # 无 CWD/workflows → no-op
