@@ -17,6 +17,7 @@ import {
   selectCharts,
   selectConversation,
   selectLog,
+  selectNodeSessions,
   setLogShowDebug,
   summarizeEvent,
   type LogLevel,
@@ -56,7 +57,9 @@ function resetStore() {
     workflowElapsed: null,
     reasoningTokens: 0,
     lastSeqSeen: 0,
+    nodesIndex: {},
     selectedNode: null,
+    selectedSession: null,
     activeRunId: null,
   });
 }
@@ -496,5 +499,112 @@ describe("selectors", () => {
     expect(a?.status).toBe("done");
     expect(a?.elapsed).toBeCloseTo(1.5, 5);
     expect(b?.status).toBe("running");
+  });
+});
+
+// ── P2：selectNodeSessions（nodesIndex 派生）+ selectConversation sessionId 维度 ──
+// SPEC web-presentation-refinement §P2。fixture = e3b8ad family_detect 缩影（main + 多 sub）。
+describe("selectors P2 — selectNodeSessions + selectConversation sessionId", () => {
+  beforeEach(() => resetStore());
+
+  /** 构造 family_detect 缩影 fixture：main(2) + subA(3) + subB(2)。sessionId 用 30 字符（仿真）。 */
+  function buildFamilyFixture() {
+    return [
+      ev("workflow_started", { data: { workflow_name: "w" } }),
+      ev("node_started", { node: "family_detect", session_id: null }),
+      ev("agent_message", { node: "family_detect", session_id: "ses_AAA111222333xxx", data: { text: "a1" } }),
+      ev("agent_thinking", { node: "family_detect", session_id: "ses_AAA111222333xxx", data: { text: "a2" } }),
+      ev("agent_tool_call", { node: "family_detect", session_id: "ses_AAA111222333xxx", data: { tool: "bash", tool_call_id: "ta" } }),
+      ev("agent_message", { node: "family_detect", session_id: "ses_BBB222333444yyy", data: { text: "b1" } }),
+      ev("agent_thinking", { node: "family_detect", session_id: "ses_BBB222333444yyy", data: { text: "b2" } }),
+      ev("node_completed", { node: "family_detect", session_id: null }),
+      // 另一 node（验证 selector 不混淆跨 node 索引）
+      ev("node_started", { node: "other", session_id: null }),
+      ev("agent_message", { node: "other", session_id: "ses_CCC", data: { text: "c1" } }),
+    ];
+  }
+
+  it("selectNodeSessions：从 nodesIndex 派生会话行（main + sub label/eventCount/firstTs）", () => {
+    useWorkflowStore.getState().loadFromEvents(buildFamilyFixture());
+    const rows = selectNodeSessions(useWorkflowStore.getState(), "family_detect");
+    // 3 session: main + subA + subB（按首事件 seq 升序）
+    expect(rows.map((r) => r.sessionId)).toEqual([
+      "main",
+      "ses_AAA111222333xxx",
+      "ses_BBB222333444yyy",
+    ]);
+    // label：main 显式；其他截断前 10 字符 + "…"（仿真 18 字符 sessionId）
+    expect(rows[0].label).toBe("main");
+    expect(rows[1].label).toBe("ses_AAA111…"); // 前 10 字符 + …
+    expect(rows[2].label).toBe("ses_BBB222…");
+    // eventCount
+    expect(rows[0].eventCount).toBe(2); // main: node_started + node_completed
+    expect(rows[1].eventCount).toBe(3); // subA
+    expect(rows[2].eventCount).toBe(2); // subB
+    // firstTs 单调（seq 升序 fold → 首事件 ts 升序）
+    expect(rows[0].firstTs).toBeLessThan(rows[1].firstTs);
+    expect(rows[1].firstTs).toBeLessThan(rows[2].firstTs);
+  });
+
+  it("selectNodeSessions：nodeId=null/无索引 → []（fail-safe，不 throw）", () => {
+    useWorkflowStore.getState().loadFromEvents(buildFamilyFixture());
+    expect(selectNodeSessions(useWorkflowStore.getState(), null)).toEqual([]);
+    expect(selectNodeSessions(useWorkflowStore.getState(), "no_such_node")).toEqual([]);
+  });
+
+  // ── selectConversation sessionId 维度（零回归 + 切 session）──
+  it("selectConversation 省略 sessionId → 全 node 聚合（旧行为零回归）", () => {
+    useWorkflowStore.getState().loadFromEvents(buildFamilyFixture());
+    const all = selectConversation(useWorkflowStore.getState(), "family_detect");
+    // 全 7 conversation 事件（main 2 + subA 3 + subB 2；不含 route_taken / workflow_started）
+    expect(all.events.length).toBe(7);
+    // 按 seq 升序
+    for (let i = 1; i < all.events.length; i++) {
+      expect(all.events[i].seq).toBeGreaterThan(all.events[i - 1].seq);
+    }
+  });
+
+  it("selectConversation sessionId='all' → 与省略等价（零回归）", () => {
+    useWorkflowStore.getState().loadFromEvents(buildFamilyFixture());
+    const omitted = selectConversation(useWorkflowStore.getState(), "family_detect");
+    const allKw = selectConversation(useWorkflowStore.getState(), "family_detect", "all");
+    expect(allKw.events.map((e) => e.seq)).toEqual(omitted.events.map((e) => e.seq));
+  });
+
+  it("selectConversation sessionId=具体 → 仅该 session 事件（症状 #2/#5 缓解：缩量）", () => {
+    useWorkflowStore.getState().loadFromEvents(buildFamilyFixture());
+    const subA = selectConversation(
+      useWorkflowStore.getState(),
+      "family_detect",
+      "ses_AAA111222333xxx"
+    );
+    // 仅 ses_A 的 3 事件
+    expect(subA.events.length).toBe(3);
+    expect(subA.events.every((e) => e.session_id === "ses_AAA111222333xxx")).toBe(true);
+
+    const main = selectConversation(
+      useWorkflowStore.getState(),
+      "family_detect",
+      "main"
+    );
+    // main = null session_id 的 lifecycle 事件（2 条）
+    expect(main.events.length).toBe(2);
+    expect(main.events.every((e) => e.session_id === null)).toBe(true);
+  });
+
+  it("selectConversation workflow_failed data.node 特例：跨 session 聚合仍含 wf_failed", () => {
+    // workflow_failed 的 top-level node=null，但 data.node=nodeId 应被 selectConversation 拾取。
+    useWorkflowStore.getState().loadFromEvents([
+      ev("workflow_started", { data: { workflow_name: "w" } }),
+      ev("node_started", { node: "n", session_id: null }),
+      ev("agent_message", { node: "n", session_id: "s1", data: { text: "x" } }),
+      ev("workflow_failed", { data: { node: "n", message: "boom" } }),
+    ]);
+    // sessionId="s1" 过滤下，workflow_failed（session_id=null 归 main）不应出现
+    const s1 = selectConversation(useWorkflowStore.getState(), "n", "s1");
+    expect(s1.events.map((e) => e.type)).not.toContain("workflow_failed");
+    // 全聚合（"all"）含 workflow_failed
+    const all = selectConversation(useWorkflowStore.getState(), "n", "all");
+    expect(all.events.map((e) => e.type)).toContain("workflow_failed");
   });
 });

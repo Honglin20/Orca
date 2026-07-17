@@ -20,12 +20,14 @@ import type { EventType, WebEvent } from "@/types/events";
 import type {
   GateState,
   LastResolved,
+  NodeSessionIndex,
   NodeState,
   RunMetaExtended,
   ServerOverview,
   WorkflowStatus,
 } from "@/types/store-types";
 import type { WorkflowTopology } from "@/types/topology";
+import { CONVERSATION_TYPES } from "@/conversation-types";
 
 // ── store state 形状（业务派生 + UI 交互态 + actions，SPEC §3.1）──────────────
 export interface WorkflowState {
@@ -55,9 +57,21 @@ export interface WorkflowState {
   reasoningTokens: number;
   /** 派生：最后已见 seq（D6 WS resume 用）。 */
   lastSeqSeen: number;
+  /**
+   * 派生：node × session 倒排索引（SPEC web-presentation-refinement §P2 / P0-6）。
+   * 四路径（refold / loadFromEvents / loadEarlierChunk / loadFull）+ in-order 增量 fold 路径
+   * 都维护，保一致（selectNodeSessions 直接读此索引渲染会话选择器，不全量 filter events）。
+   */
+  nodesIndex: Record<string, NodeSessionIndex>;
 
   // === UI 交互态（非业务真相，铁律 2）===
   selectedNode: string | null;
+  /**
+   * 当前选中会话（SPEC §P2 P1-3 联动）：``"all"`` = 聚合该 node 全 session（旧行为零回归）；
+   * 具体 sessionId = 仅该 session；``null`` = 未选（初始 / unloadRun）。
+   * ``setSelectedNode`` 同步设为该 node 第一个 sub session（无 sub → ``"all"``）。
+   */
+  selectedSession: string | "all" | null;
   /** 当前懒加载的 run（loadRun 设，unloadRun 清；null = 未持有任何 run）。 */
   activeRunId: string | null;
 
@@ -98,8 +112,13 @@ export interface WorkflowState {
   loadFull: (runId: string) => Promise<void>;
   /** 卸载当前 run 的派生态（懒加载红线：切走清，不累积）。 */
   unloadRun: () => void;
-  /** UI 交互态 setter（非业务真相）。 */
+  /**
+   * UI 交互态 setter（非业务真相）。SPEC §P2 P1-3：同步联动设 selectedSession = 该 node
+   * 第一个 sub session（依赖 nodesIndex；无 sub → ``"all"``；node=null → selectedSession=null）。
+   */
   setSelectedNode: (node: string | null) => void;
+  /** SPEC §P2：切当前 node 的会话（"all"=聚合；具体 sessionId=仅该 session）。 */
+  setSelectedSession: (sid: string | "all" | null) => void;
 }
 
 // ── eventHandlers 表（唯一状态计算路径，SPEC §3.1）──────────────────────────────
@@ -128,6 +147,8 @@ type FoldDraft = {
   workflowElapsed: number | null;
   reasoningTokens: number;
   lastSeqSeen: number;
+  // 注：nodesIndex 不在 FoldDraft —— 它由 indexConversationEvent 维护（refold /
+  // processEvent 调用），不进 handler 表（handlers 只算 nodes/gate/cost 等核心派生）。
 };
 
 // node-level helper：确保 node 槽存在并 merge patch（last-writer-wins 幂等）。
@@ -138,6 +159,53 @@ function patchNode(
 ): void {
   const cur = nodes[name];
   nodes[name] = cur ? { ...cur, ...patch } : { status: "pending", ...patch };
+}
+
+// ── nodesIndex 维护（SPEC §P2 / P0-6）──────────────────────────────────────────
+// 倒排索引：每 node → { sessions, sessionEventCounts, sessionFirstTs }。仅统计
+// CONVERSATION_TYPES 事件（与 selectConversation 输出集对齐；过程事件 count 一致）。
+//
+// **null session_id → "main"**（SPEC §P2 接口契约）。workflow_failed 特例：top-level
+// e.node 为 null，但 data.node 是责任 node → 索引到 data.node（与 selectConversation 一致）。
+const MAIN_SESSION = "main";
+
+/**
+ * 增量 patch nodesIndex：把单条 conversation 事件计入索引（refold / 增量 fold 共用）。
+ *
+ * 幂等性靠上层 seq 去重保证（同 seq 事件不会被 fold 两次）；本函数本身是「+1 计数」非幂等。
+ *
+ * @param index mutable nodesIndex（immer draft 或 fresh object）
+ * @param event 必须是 CONVERSATION_TYPES 事件；非此集合应跳过（调用方判断）
+ */
+function indexConversationEvent(
+  index: Record<string, NodeSessionIndex>,
+  event: WebEvent
+): void {
+  // 目标 node：优先 e.node；workflow_failed 以 data.node 关联（eventMatchesNode 同语义，
+  // 但此处需取出 targetNode 字符串做索引 key，不能直接用 boolean helper）
+  let targetNode = event.node;
+  if (!targetNode && event.type === "workflow_failed") {
+    const dn = event.data?.node;
+    if (typeof dn === "string") targetNode = dn;
+  }
+  if (!targetNode) return; // workflow 级无 node 事件不索引（不属于任何 agent）
+  const sid = event.session_id ?? MAIN_SESSION;
+  let entry = index[targetNode];
+  if (!entry) {
+    entry = {
+      sessions: [],
+      sessionEventCounts: {},
+      sessionFirstTs: {},
+    };
+    index[targetNode] = entry;
+  }
+  if (!(sid in entry.sessionEventCounts)) {
+    entry.sessions.push(sid);
+    entry.sessionEventCounts[sid] = 0;
+    entry.sessionFirstTs[sid] = event.timestamp;
+  }
+  entry.sessionEventCounts[sid] += 1;
+  // firstTs 保持首次写入（refold 按 seq 升序 fold → 首次 = 最早；增量 in-order 也最早）
 }
 
 const eventHandlers: Record<EventType, Handler> = {
@@ -352,10 +420,11 @@ function foldEvent(state: FoldDraft, event: WebEvent): void {
  * 故 out-of-order 到达时不能增量 fold——必须从 sorted events 全量重 fold。
  *
  * 性能：每次 processEvent 触发 refold → O(N) 派生 + O(N log N) sort（仅 out-of-order 时）。
- * 1000 事件下 ~10k ops/事件，可接受；更大规模可加 Set<seq> 索引 + 增量 patch（YAGNI）。
+ * 1000 事件下 ~10k ops/事件，可接受；P2 引入 in-order 增量 fold 后，WS 常态 in-order
+ * 到达的事件不再触发 refold（仅 out-of-order / loadEarlierChunk 触发）。
  */
 function refold(state: WorkflowState): void {
-  // 重置派生（保留 UI 交互态 selectedNode / activeRunId / events 数组本身）
+  // 重置派生（保留 UI 交互态 selectedNode / selectedSession / activeRunId / events 数组本身）
   state.nodes = {};
   state.gate = null;
   state.lastResolved = null;
@@ -367,10 +436,15 @@ function refold(state: WorkflowState): void {
   state.workflowElapsed = null;
   state.reasoningTokens = 0;
   state.lastSeqSeen = 0;
+  state.nodesIndex = {};
   // 在 draft 上逐条 fold（events 已 sort，故按数组顺序 apply 即 seq 升序）
   for (const e of state.events) {
     foldEvent(state, e);
     if (e.seq > state.lastSeqSeen) state.lastSeqSeen = e.seq;
+    // nodesIndex 维护（P0-6 四路径之一：refold 全量重建）
+    if (CONVERSATION_TYPES.has(e.type)) {
+      indexConversationEvent(state.nodesIndex, e);
+    }
   }
 }
 
@@ -387,6 +461,7 @@ function resetDerived(s: WorkflowState): void {
   s.workflowElapsed = null;
   s.reasoningTokens = 0;
   s.lastSeqSeen = 0;
+  s.nodesIndex = {};
 }
 
 /** 单 store（铁律 4：全前端唯一 create()）。 */
@@ -404,8 +479,10 @@ export const useWorkflowStore = create<WorkflowState>()(
     workflowElapsed: null,
     reasoningTokens: 0,
     lastSeqSeen: 0,
+    nodesIndex: {},
 
     selectedNode: null,
+    selectedSession: null,
     activeRunId: null,
 
     // huge-mode + writable（SPEC web-attach §3 / M3）
@@ -423,12 +500,29 @@ export const useWorkflowStore = create<WorkflowState>()(
           return;
         }
 
-        // D7 seq 升序 fold：插入后保持 events 按 seq 升序，然后 refold 全量派生。
-        // 不能增量 fold（handlers 必须在 seq 升序上跑，如 node_started 不能晚于
-        // node_completed）；故每次插入后 refold。性能可接受（见 refold 注释）。
-        state.events.push(event);
-        state.events.sort((a, b) => a.seq - b.seq);
-        refold(state);
+        // P0-5 轻量增量 fold（SPEC §P2 方案 3）：WS 常态 in-order 到达 → 只 fold 新事件，
+        // patch nodes/nodesIndex，不全量 refold。out-of-order（WS resume 重放乱序 /
+        // loadEarlierChunk prepend 历史）→ 既有全量 refold。
+        //
+        // D7 幂等不变：in-order 增量是 seq 升序 fold 的特例（handlers 在升序上 apply），
+        // 单测证等价（test/store.test.ts）。
+        //
+        // 注：``state.events`` 已是 seq 升序数组（refold/loadFromEvents 后保持）。
+        // 若 ``event.seq > lastSeqSeen`` → event 是新最大值 → push 到末尾仍保升序，无需 sort。
+        if (event.seq > state.lastSeqSeen) {
+          state.events.push(event);
+          foldEvent(state, event);
+          state.lastSeqSeen = event.seq;
+          // nodesIndex 增量 patch（P0-6 四路径之一：in-order 增量）
+          if (CONVERSATION_TYPES.has(event.type)) {
+            indexConversationEvent(state.nodesIndex, event);
+          }
+        } else {
+          // out-of-order：插入 + sort + 全量 refold（含 nodesIndex 重建）
+          state.events.push(event);
+          state.events.sort((a, b) => a.seq - b.seq);
+          refold(state);
+        }
       });
     },
 
@@ -585,6 +679,7 @@ export const useWorkflowStore = create<WorkflowState>()(
       set((state) => {
         state.activeRunId = null;
         state.selectedNode = null;
+        state.selectedSession = null;
         resetDerived(state);
         state.events = [];
         // huge-mode 状态清空（避免下一 run 残留）
@@ -600,6 +695,26 @@ export const useWorkflowStore = create<WorkflowState>()(
     setSelectedNode: (node) =>
       set((state) => {
         state.selectedNode = node;
+        // SPEC §P2 P1-3 联动：selectedSession = 该 node 第一个 sub session（依赖 nodesIndex）；
+        // 无 sub → "all"；node=null → null。让 ConversationView 默认显示单个 sub（症状 #3/#5
+        // 缓解：buildEntries 输入 ~208 而非 4224）。
+        if (node === null) {
+          state.selectedSession = null;
+          return;
+        }
+        const idx = state.nodesIndex[node];
+        if (!idx) {
+          state.selectedSession = "all";
+          return;
+        }
+        // sessions 已按首事件 seq 升序；跳过 "main"，第一个非 main 即最旧 sub（稳定默认）
+        const firstSub = idx.sessions.find((s) => s !== MAIN_SESSION);
+        state.selectedSession = firstSub ?? "all";
+      }),
+
+    setSelectedSession: (sid) =>
+      set((state) => {
+        state.selectedSession = sid;
       }),
   }))
 );

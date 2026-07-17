@@ -48,7 +48,9 @@ function resetStore() {
     workflowElapsed: null,
     reasoningTokens: 0,
     lastSeqSeen: 0,
+    nodesIndex: {},
     selectedNode: null,
+    selectedSession: null,
     activeRunId: null,
   });
 }

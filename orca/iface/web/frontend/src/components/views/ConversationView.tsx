@@ -3,11 +3,17 @@
 // Chunk B：完整渲染（per-EventType §5.3 全表 + 折叠规则 + ▎ 流式光标 + 工具展开 +
 // react-window 虚拟化 >500 条）。
 //
+// **P2（web-presentation-refinement §P2 方案 1）**：顶部子 agent 会话选择器
+// （``All(N) | main(M) | ses_090e(208) | …``）—— 切 session → setSelectedSession →
+// selectConversation(state, nodeId, selectedSession) 只 buildEntries 该 session 事件
+// （~208 vs 4224，缓解症状 #3/#5）。sessions 数据来源 = nodesIndex 倒排索引（O(sessions)）。
+//
 // 单一数据通道（铁律 1 + 5）：
-//   - selectConversation(state, nodeId) → 该 node 的 conversation 事件（seq 升序）
-//   - buildEntries(events) → 纯函数折叠为 ConvEntry[]（工具配对 / 成组 / step 附着）
+//   - selectNodeSessions(state, nodeId) → 会话行（从 nodesIndex 派生）
+//   - selectConversation(state, nodeId, selectedSession) → 该 (node, session) 事件
+//   - buildEntries(events) → 纯函数折叠为 ConvEntry[]
 //   - selectStreamingCursor(state, nodeId) → 是否显示 ▎
-//   - 用户交互（展开 / 切 charts tab）通过 callback 上传到 RunDetailPage
+//   - 用户交互（展开 / 切 session / 切 charts tab）通过 callback 上传
 //
 // 虚拟化：events.length > VIRTUALIZATION_THRESHOLD → react-window List（v2 rowHeight
 // 支持函数 → 按 entry kind 估高，比固定值精确）。
@@ -19,7 +25,11 @@
 import { useMemo } from "react";
 import { List, type RowComponentProps } from "react-window";
 import { useWorkflowStore } from "@/stores/workflow-store";
-import { selectConversation, selectStreamingCursor } from "@/selectors";
+import {
+  selectConversation,
+  selectNodeSessions,
+  selectStreamingCursor,
+} from "@/selectors";
 import type { WebEvent } from "@/types/events";
 import {
   buildEntries,
@@ -55,10 +65,26 @@ export function ConversationView({
   nodeId,
   onChartClick,
 }: ConversationViewProps) {
+  // 细粒度订阅（同 AgentsRail 哲学）：selectedSession / setSelectedSession 是 stable refs，
+  // 只在用户切 session 时变。整体 state 订阅保留——selector 输入字段多（events/nodesIndex/...），
+  // 已 useMemo 缓存重计算。
   const state = useWorkflowStore();
-  const group = useMemo(
-    () => selectConversation(state, nodeId),
+  const selectedSession = useWorkflowStore((s) => s.selectedSession);
+  const setSelectedSession = useWorkflowStore((s) => s.setSelectedSession);
+
+  const sessions = useMemo(
+    () => selectNodeSessions(state, nodeId),
     [state, nodeId]
+  );
+  // 总事件数 = 各 session count 之和（用于 "All(N)" 标签 DRY，不二次 filter events）
+  const totalEventCount = useMemo(
+    () => sessions.reduce((sum, s) => sum + s.eventCount, 0),
+    [sessions]
+  );
+
+  const group = useMemo(
+    () => selectConversation(state, nodeId, selectedSession ?? undefined),
+    [state, nodeId, selectedSession]
   );
   const cursorOn = useMemo(
     () => selectStreamingCursor(state, nodeId),
@@ -88,46 +114,142 @@ export function ConversationView({
       </div>
     );
   }
+
+  // P2 §方案 1：仅 ≥2 session 时显示会话选择器（1 session 等价 All，省 UI）
+  const showSessionTabs = sessions.length > 1;
+
   if (entries.length === 0) {
     return (
-      <div
-        className="p-4 text-sm text-slate-400"
-        data-testid="conversation-empty"
-      >
-        节点 {nodeId} 暂无会话事件。
+      <div className="h-full" data-testid="conversation-view">
+        {showSessionTabs && (
+          <SessionTabs
+            nodeId={nodeId}
+            sessions={sessions}
+            totalEventCount={totalEventCount}
+            selectedSession={selectedSession}
+            onSelect={setSelectedSession}
+          />
+        )}
+        <div
+          className="p-4 text-sm text-slate-400"
+          data-testid="conversation-empty"
+        >
+          节点 {nodeId}
+          {selectedSession && selectedSession !== "all"
+            ? ` session ${selectedSession}`
+            : ""}
+          {" "}暂无会话事件。
+        </div>
       </div>
     );
   }
 
   if (entries.length > VIRTUALIZATION_THRESHOLD) {
     return (
-      <div className="h-full" data-testid="conversation-view">
-        <List
-          rowCount={entries.length}
-          rowHeight={(i) => estimateRowHeight(entries[i])}
-          rowComponent={VirtualizedRow}
-          rowProps={{
-            entries,
-            lastStreamableIdx,
-            onChartClick,
-          }}
-          overscanCount={8}
-          defaultHeight={600}
-          className="h-full"
-        />
+      <div className="flex h-full flex-col" data-testid="conversation-view">
+        {showSessionTabs && (
+          <SessionTabs
+            nodeId={nodeId}
+            sessions={sessions}
+            totalEventCount={totalEventCount}
+            selectedSession={selectedSession}
+            onSelect={setSelectedSession}
+          />
+        )}
+        <div className="flex-1 overflow-hidden">
+          <List
+            rowCount={entries.length}
+            rowHeight={(i) => estimateRowHeight(entries[i])}
+            rowComponent={VirtualizedRow}
+            rowProps={{
+              entries,
+              lastStreamableIdx,
+              onChartClick,
+            }}
+            overscanCount={8}
+            defaultHeight={600}
+            className="h-full"
+          />
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="p-3 space-y-1.5" data-testid="conversation-view">
-      {entries.map((entry, i) => (
-        <EntryRenderer
-          key={entryKey(entry, i)}
-          entry={entry}
-          showCursor={i === lastStreamableIdx}
-          onChartClick={onChartClick}
+    <div className="flex h-full flex-col" data-testid="conversation-view">
+      {showSessionTabs && (
+        <SessionTabs
+          nodeId={nodeId}
+          sessions={sessions}
+          totalEventCount={totalEventCount}
+          selectedSession={selectedSession}
+          onSelect={setSelectedSession}
         />
+      )}
+      <div className="flex-1 overflow-auto p-3 space-y-1.5">
+        {entries.map((entry, i) => (
+          <EntryRenderer
+            key={entryKey(entry, i)}
+            entry={entry}
+            showCursor={i === lastStreamableIdx}
+            onChartClick={onChartClick}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── SessionTabs：子 agent 会话选择器（P2 §方案 1）──────────────────────────────
+// 渲染 ``All(N) | main(M) | ses_090e(208) | ses_09121e(199) | …``，点选切 selectedSession。
+// 顺序 = sessions 数组顺序（store.nodesIndex 维护 = 首事件 seq 升序，稳定）。
+// testid：``session-tab-all`` / ``session-tab-main`` / ``session-tab-<sessionId>``。
+interface SessionTabsProps {
+  nodeId: string;
+  sessions: { sessionId: string; label: string; eventCount: number }[];
+  totalEventCount: number;
+  selectedSession: string | "all" | null;
+  onSelect: (sid: string | "all" | null) => void;
+}
+
+function SessionTabs({
+  nodeId,
+  sessions,
+  totalEventCount,
+  selectedSession,
+  onSelect,
+}: SessionTabsProps) {
+  return (
+    <div
+      className="flex flex-wrap items-center gap-1 border-b border-slate-200 bg-slate-50 px-2 py-1.5"
+      data-testid={`session-tabs-${nodeId}`}
+    >
+      <button
+        type="button"
+        onClick={() => onSelect("all")}
+        data-testid="session-tab-all"
+        className={`rounded px-2 py-0.5 font-mono text-xs ${
+          selectedSession === "all"
+            ? "bg-slate-900 text-white"
+            : "text-slate-600 hover:bg-slate-200"
+        }`}
+      >
+        All({totalEventCount})
+      </button>
+      {sessions.map((s) => (
+        <button
+          key={s.sessionId}
+          type="button"
+          onClick={() => onSelect(s.sessionId)}
+          data-testid={`session-tab-${s.sessionId}`}
+          className={`rounded px-2 py-0.5 font-mono text-xs ${
+            selectedSession === s.sessionId
+              ? "bg-slate-900 text-white"
+              : "text-slate-600 hover:bg-slate-200"
+          }`}
+        >
+          {s.label}({s.eventCount})
+        </button>
       ))}
     </div>
   );

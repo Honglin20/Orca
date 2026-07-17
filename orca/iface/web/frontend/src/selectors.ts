@@ -12,6 +12,7 @@
 import type { WebEvent } from "@/types/events";
 import type { NodeState } from "@/types/store-types";
 import type { WorkflowState } from "@/stores/workflow-store";
+import { CONVERSATION_TYPES, eventMatchesNode } from "@/conversation-types";
 
 // ── selectAgents：DAG nodes → AgentsRail 行模型 ─────────────────────────────────
 export interface AgentRow {
@@ -220,9 +221,22 @@ export function selectStall(
   return { sinceMs, thinking: lastType === "agent_thinking" };
 }
 
-// ── selectConversation：events → per-node 对话模型（D2 按 node 分组）──────────────
-// 输出按 seq 升序的事件分组（每 node 一个数组）。retry/foreach 多 session_id 在同 node
-// 内合并（细分隔符是渲染层职责，本 selector 只输出按 (node, seq) 排序的事件流）。
+// ── selectConversation：events → per-node 对话模型（D2 按 node 分组；P2 加 session 维度）─
+// 输出按 seq 升序的事件分组（每 node 一个数组）。
+//
+// **P2 sessionId 参数**（SPEC web-presentation-refinement §P2 方案 1）：
+//   - 省略 / ``"all"`` → 全 node 聚合（旧行为，零回归；用于"All"标签）
+//   - 指定 sessionId → 仅该 session 事件（一次 buildEntries 处理 ~208 而非 4224，
+//     缓解症状 #3/#5）
+//
+// **null session_id → "main"**（与 nodesIndex 一致）。
+//
+// **SPEC §P2 AC#2 偏离说明**：AC#2 prose 写「selectConversation 不再全量 filter（读 nodesIndex）」，
+// 但同节接口契约 ``NodeSessionIndex`` 只存 count（无 sessionSeqs），且性能主因是 buildEntries
+// 输入缩量（4224→208）而非 selectConversation 自身。本实现遵循接口契约：selectConversation
+// 仍 filter state.events（O(N)，但 N=该 node 事件数，非全 tape），nodesIndex 只供
+// selectNodeSessions 渲染会话选择器（O(sessions)）。如真机测发现 ~208 事件 filter 仍是瓶颈，
+// 再扩 NodeSessionIndex 加 sessionSeqs（SPEC 方案 2 原始设计）。
 //
 // 「orphan tool_result」（无对应 call）在本 selector 不剔除——保留全部 conversation 相关
 // 事件供视图分类；orphan 判定 + 剔除在视图层 ``buildEntries`` 内做（warn + 跳过）。
@@ -231,10 +245,17 @@ export interface ConversationGroup {
   events: WebEvent[];
 }
 
-/** 选择所有应进 conversation 的事件，按 node 分组，每组按 seq 升序。 */
+/**
+ * 选择所有应进 conversation 的事件，按 node（+ 可选 session）过滤，按 seq 升序。
+ *
+ * @param state 含 events + nodesIndex（sessionId 指定时仅作过滤参数，不读 nodesIndex）
+ * @param nodeId 节点名（null/undefined → 空组）
+ * @param sessionId 省略 / ``"all"`` → 全 node 聚合（旧行为）；具体 sessionId → 仅该 session
+ */
 export function selectConversation(
   state: WorkflowState,
-  nodeId: string | null | undefined
+  nodeId: string | null | undefined,
+  sessionId?: string | "all" | null
 ): ConversationGroup {
   if (nodeId === undefined || nodeId === null) {
     return { node: "", events: [] };
@@ -247,16 +268,54 @@ export function selectConversation(
   // （top-level ``e.node`` 仍为 null，对齐 schema/event.py 注释）。SPEC §5.3 要求它进
   // conversation 红 block —— 故同时按 top-level ``e.node`` 或 ``data.node`` 匹配。
   // 这是 tape 字段的合法读取（不是视图层重派生），符合铁律 1。
+  const filterBySession = sessionId !== undefined && sessionId !== null && sessionId !== "all";
   const events = state.events.filter((e) => {
     if (!CONVERSATION_TYPES.has(e.type)) return false;
-    if (e.node === nodeId) return true;
-    if (e.type === "workflow_failed") {
-      const dn = e.data?.node;
-      return typeof dn === "string" && dn === nodeId;
-    }
-    return false;
+    // workflow_failed 可能以 data.node 关联（见上方注释 + eventMatchesNode 类型守门）
+    if (!eventMatchesNode(e, nodeId)) return false;
+    if (!filterBySession) return true;
+    const eSid = e.session_id ?? "main";
+    return eSid === sessionId;
   });
   return { node: nodeId, events };
+}
+
+// ── selectNodeSessions：从 nodesIndex 派生会话选择器行（SPEC §P2 / P0-6）──────────────
+// 读 state.nodesIndex（store 维护的倒排索引），**不全量 filter state.events**——这是 P2
+// 性能主入口之一（family_detect 4226 事件 → 65 session 索引查表 O(sessions)）。
+//
+// 输出按 sessions 数组顺序（= 首事件 seq 升序，store 维护此不变量）。
+// label：``main`` 显式；其他 sessionId 截断前 10 字符（``ses_090e74…``）。
+export interface NodeSessionRow {
+  sessionId: string;
+  /** 显示标签（main 或 ses_xxx 截断前 10 字符 + "…"）。 */
+  label: string;
+  /** 该 session 的 conversation 类事件数。 */
+  eventCount: number;
+  /** 该 session 首事件 timestamp（排序 / 调试用）。 */
+  firstTs: number;
+}
+
+/** sessionId → 显示 label（main 哨兵 / 截断前 10 字符）。DRY：selector + 测试共用。 */
+export function formatSessionLabel(sessionId: string): string {
+  if (sessionId === "main") return "main";
+  if (sessionId.length <= 10) return sessionId;
+  return sessionId.slice(0, 10) + "…";
+}
+
+export function selectNodeSessions(
+  state: WorkflowState,
+  nodeId: string | null | undefined
+): NodeSessionRow[] {
+  if (!nodeId) return [];
+  const idx = state.nodesIndex[nodeId];
+  if (!idx) return [];
+  return idx.sessions.map((sid) => ({
+    sessionId: sid,
+    label: formatSessionLabel(sid),
+    eventCount: idx.sessionEventCounts[sid] ?? 0,
+    firstTs: idx.sessionFirstTs[sid] ?? 0,
+  }));
 }
 
 /**
@@ -283,50 +342,16 @@ export function selectStreamingCursor(
   // 从末尾向前找该 node 的最后一条 conversation 事件（O(k)，k 通常小）
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
-    const matches =
-      e.node === nodeId ||
-      // workflow_failed 可能以 data.node 关联（见 selectConversation 注释）
-      (e.type === "workflow_failed" && e.data?.node === nodeId);
-    if (!matches) continue;
+    // workflow_failed 可能以 data.node 关联（eventMatchesNode 含类型守门，DRY）
+    if (!eventMatchesNode(e, nodeId)) continue;
     if (!CONVERSATION_TYPES.has(e.type)) continue;
     return e.type === "agent_message" || e.type === "agent_thinking";
   }
   return false;
 }
 
-/** 进 conversation 的事件集合（DRY：selectConversation / selectStreamingCursor 共用）。 */
-const CONVERSATION_TYPES = new Set<WebEvent["type"]>([
-  "prompt_rendered",
-  "agent_thinking",
-  "agent_message",
-  "agent_tool_call",
-  "agent_tool_result",
-  "agent_step_started",
-  "dialog_started",
-  "dialog_message",
-  "dialog_ended",
-  "node_started",
-  "node_completed",
-  "node_failed",
-  "node_skipped",
-  "retry_started",
-  "retry_succeeded",
-  "retry_exhausted",
-  "interrupt_requested",
-  "interrupt_resolved",
-  "validator_started",
-  "validator_passed",
-  "validator_failed",
-  "wait_started",
-  "wait_completed",
-  "foreach_started",
-  "foreach_item_started",
-  "foreach_item_completed",
-  "foreach_completed",
-  "custom",
-  "workflow_failed",
-  "unknown_event",
-]);
+/** 进 conversation 的事件集合（DRY：selectConversation / selectStreamingCursor / store nodesIndex 共用）。 */
+// CONVERSATION_TYPES 已移到 src/conversation-types.ts（P2：workflow-store 也需引用，避免 cycle）
 
 // ── selectCharts：custom(kind=chart) → ChartsView（D3 / D7）──────────────────────
 export interface ChartEntry {

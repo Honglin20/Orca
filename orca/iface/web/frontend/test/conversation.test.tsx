@@ -9,7 +9,7 @@
 //   6. markdown 渲染：table / LaTeX / code 在 DOM 出现
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 import * as React from "react";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import {
@@ -53,7 +53,9 @@ function resetStore() {
     workflowElapsed: null,
     reasoningTokens: 0,
     lastSeqSeen: 0,
+    nodesIndex: {},
     selectedNode: null,
+    selectedSession: null,
     activeRunId: null,
   });
 }
@@ -435,5 +437,105 @@ describe("selectConversation — 与 buildEntries 端到端", () => {
     );
     // store 内 sort 后顺序一致 → entries 一致
     expect(back).toEqual(fwd);
+  });
+});
+
+// ── P2：ConversationView session 选择器（子 agent 维度，SPEC §P2 方案 1）──────────────
+// 验收：family_detect 多 session 顶部出现 All/main/sub 选项；默认选第一个 sub；
+// 切 session → setSelectedSession；All = 旧行为零回归；单 session 不显选择器。
+describe("ConversationView P2 — 会话选择器", () => {
+  beforeEach(() => resetStore());
+
+  /** family_detect 缩影：main(2) + subA(2) + subB(1)。sessionId 仿真 18 字符。 */
+  function buildMultiSession(): WebEvent[] {
+    return [
+      ev("workflow_started", { data: { workflow_name: "w" } }),
+      ev("node_started", { node: "n", session_id: null }),
+      ev("agent_message", { node: "n", session_id: "ses_AAA111222333xxx", data: { text: "a1" } }),
+      ev("agent_thinking", { node: "n", session_id: "ses_AAA111222333xxx", data: { text: "a2" } }),
+      ev("agent_message", { node: "n", session_id: "ses_BBB222333444yyy", data: { text: "b1" } }),
+      ev("node_completed", { node: "n", session_id: null }),
+    ];
+  }
+
+  it("多 session → 顶部渲染 All / main / 各 sub 选择器（SPEC §P2 验收 1）", () => {
+    useWorkflowStore.getState().loadFromEvents(buildMultiSession());
+    // 模拟用户点 node：store setSelectedNode 联动设默认 session
+    useWorkflowStore.getState().setSelectedNode("n");
+
+    render(React.createElement(ConversationView, { nodeId: "n" }));
+
+    // All tab + main tab + 两个 sub tab
+    expect(screen.getByTestId("session-tab-all")).toBeTruthy();
+    expect(screen.getByTestId("session-tab-main")).toBeTruthy();
+    expect(screen.getByTestId("session-tab-ses_AAA111222333xxx")).toBeTruthy();
+    expect(screen.getByTestId("session-tab-ses_BBB222333444yyy")).toBeTruthy();
+    // All(N) 总数显示（main 2 + subA 2 + subB 1 = 5）
+    expect(screen.getByText("All(5)")).toBeTruthy();
+    expect(screen.getByText("main(2)")).toBeTruthy();
+    expect(screen.getByText(/ses_AAA111.*\(2\)/)).toBeTruthy();
+  });
+
+  it("setSelectedNode 联动默认选第一个 sub session → buildEntries 只该 session 事件（非全量）", () => {
+    useWorkflowStore.getState().loadFromEvents(buildMultiSession());
+    useWorkflowStore.getState().setSelectedNode("n");
+    // 默认 selectedSession = subA（第一个非 main）
+    expect(useWorkflowStore.getState().selectedSession).toBe("ses_AAA111222333xxx");
+
+    render(React.createElement(ConversationView, { nodeId: "n" }));
+    // 仅 subA 的 a1 message 渲染（subB 的 b1 不在）
+    const msgs = screen.getAllByTestId("message-block");
+    expect(msgs.length).toBe(1);
+  });
+
+  it("点击 sub tab → setSelectedSession → 切到该 session（testid 路径）", () => {
+    useWorkflowStore.getState().loadFromEvents(buildMultiSession());
+    useWorkflowStore.getState().setSelectedNode("n");
+
+    render(React.createElement(ConversationView, { nodeId: "n" }));
+    // 切 subB
+    fireEvent.click(screen.getByTestId("session-tab-ses_BBB222333444yyy"));
+    expect(useWorkflowStore.getState().selectedSession).toBe("ses_BBB222333444yyy");
+  });
+
+  it("点击 All → selectedSession='all' → 全聚合（零回归，与 P1 前行为一致）", () => {
+    useWorkflowStore.getState().loadFromEvents(buildMultiSession());
+    useWorkflowStore.getState().setSelectedNode("n");
+
+    render(React.createElement(ConversationView, { nodeId: "n" }));
+    // 切到 All
+    fireEvent.click(screen.getByTestId("session-tab-all"));
+    expect(useWorkflowStore.getState().selectedSession).toBe("all");
+    // 全量 message：subA 的 a1 + subB 的 b1 = 2 个
+    const msgs = screen.getAllByTestId("message-block");
+    expect(msgs.length).toBe(2);
+  });
+
+  it("单 session（无 sub） → 不渲染会话选择器（省 UI，YAGNI）", () => {
+    useWorkflowStore.getState().loadFromEvents([
+      ev("workflow_started", { data: { workflow_name: "w" } }),
+      ev("node_started", { node: "n", session_id: null }),
+      ev("agent_message", { node: "n", session_id: null, data: { text: "x" } }),
+    ]);
+    useWorkflowStore.getState().setSelectedNode("n");
+
+    render(React.createElement(ConversationView, { nodeId: "n" }));
+    // 仅 main session → 无 session tabs 容器
+    expect(screen.queryByTestId("session-tabs-n")).toBeNull();
+    expect(screen.queryByTestId("session-tab-all")).toBeNull();
+  });
+
+  it("setSelectedNode 切到另一 node → selectedSession 联动重置为新 node 第一个 sub", () => {
+    useWorkflowStore.getState().loadFromEvents([
+      ...buildMultiSession(),
+      // 把 ev 计数器推进，构造 second node
+      ev("node_started", { node: "n2", session_id: null }),
+      ev("agent_message", { node: "n2", session_id: "ses_N2_X_custom_id", data: { text: "x" } }),
+    ]);
+    useWorkflowStore.getState().setSelectedNode("n");
+    expect(useWorkflowStore.getState().selectedSession).toBe("ses_AAA111222333xxx");
+    // 切到 n2
+    useWorkflowStore.getState().setSelectedNode("n2");
+    expect(useWorkflowStore.getState().selectedSession).toBe("ses_N2_X_custom_id");
   });
 });
