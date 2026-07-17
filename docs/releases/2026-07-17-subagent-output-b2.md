@@ -57,3 +57,17 @@
 
 - B3：`agent_usage`（token/cost）独立立项（U4 deferred，避免子/主 usage 双计致前端聚合错乱）。
 - U1 升级路径：若 E2E 可见 node 错位（>0.5s trailing 窗口），升级 U1=(b) `node_completed.data.child_agents` + 前端 reducer 按 session_id 归位（race-free）。
+
+## 修：test-agent 真机 E2E 收尾（3 P0 + 5 回归）
+
+test-agent 真机 E2E（4435 真 CC `agent-*.jsonl` + 573 真 opencode `event` 表行 → 真 daemon subprocess → 真 tape → 真 `tars serve` HTTP → 真 react-dom 渲染）暴露原代码（`ed5cbeb`）3 个**单测盲区 P0**（79 单测全 PASS 但真机死），修复（`99efcde`）：
+
+1. **opencode DB 路径错**（`opencode_sqlite._resolve_db_path`）：代码找 `session.db`，真机 v1.18 写 `opencode.db` → `discover_children` 静默返空 → ingest 0 事件。修：优先 `opencode.db`，回退 `session.db`。
+2. **opencode `source_id` 跨 child 撞车**（5 处）：`opc:{seq}` 假设 seq 全局唯一，实际 event PK=`(aggregate_id, seq)`、seq **per-session** → 多 child 复用同 seq（真机 44% 撞）→ ingestor dedup 静默丢。修：`opc:{child_id}:{seq}`。
+3. **text-mode seek 在多字节 UTF-8 tape 崩**（`sidechain_ingestor._derive_current_node` + `chart_daemon._FlockSafeTape._read_max_seq_from_disk` + `_watch_terminal`）：`seek(字节)/read(字符)` 混算 → offset 漂移到 UTF-8 continuation byte → `UnicodeDecodeError`（ValueError 子类，**非 OSError** 未兜住）→ 守护死。chart 历史 payload ASCII 未触发；B2 引入中文/emoji agent_* 必崩（真机崩在 8 事件后卡死）。修：三处 binary-mode（byte seek + `rfind(b"\n")` + `decode(errors="replace")`）。
+
+**补 5 回归测试**：`test_adapters_opencode_sqlite` 加（opencode.db 路径优先 + 多 child source_id 唯一）；`test_sidechain_ingestor` 加（多字节 node 派生）；新 `test_chart_daemon_multibyte` ×2（多字节 max_seq）。fix 后 64（B2 events+回归）+ 7（chart）+ 20（daemon 集成）全 PASS；grep 守门 0 hit。
+
+**test-agent V1-V10 全链路真机 PASS**：CC 4435 / opencode 573 事件经真 daemon → tape → `tars serve` → react-dom testid（thinking/message/tool-single/tool-group 齐全，零 `[object Object]`），实时 ≤1.0s、SIGKILL→respawn 幂等（4435==4435）、无串台（错 host_session→0 事件）、终态自退。**goal 验收「CC+opencode 子 agent 输出实时推前端」真机闭环**。
+
+**降级声明**：未驱动真 `claude -p`/真 opencode 派真子 agent（用真实历史 CC jsonl + live opencode.db 替代，等同真实子 agent 输出，SPEC §9 AC7 允许）；无 headless 浏览器（react-dom/server + bundle testid 守门）。

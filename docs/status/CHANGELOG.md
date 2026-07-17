@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-17] B2 test-agent 真机 E2E 收尾：3 P0 bug 修复 + 5 回归测试
+
+test-agent 真机 E2E（4435 真 CC `agent-*.jsonl` + 573 真 opencode `event` 表行 → 真 daemon subprocess → 真 tape → 真 `tars serve` HTTP → 真 react-dom 渲染）暴露原代码（`ed5cbeb`）3 个**单测盲区 P0**（79 单测全 PASS 但真机死）：① opencode DB 路径错（代码找 `session.db`，真机 v1.18 写 `opencode.db` → discover 静默返空 → ingest 0 事件）② opencode `source_id=opc:{seq}` 跨 child 撞车（event PK=`(aggregate_id,seq)`、seq per-session 非 global，多 child 44% 撞 → dedup 静默丢）③ text-mode `seek(字节)/read(字符)` 混算在多字节 UTF-8 tape 崩（offset 漂移到 continuation byte → `UnicodeDecodeError` 非 OSError 未兜住；波及共享 `chart_daemon`，B2 引入中文 agent_* 必崩）。修复：`opencode.db` 优先 + `source_id=opc:{child}:{seq}` + 三处 binary-mode（byte seek + `rfind(b"\n")` + decode）。补 5 回归测试。fix 后 64（B2+回归）+ 7（chart）+ 20（daemon）全 PASS；grep 守门 0 hit；test-agent V1-V10 全链路真机 PASS（实时 ≤1.0s / 幂等 / 无串台）。Commit: `99efcde`。
+
 ## [2026-07-17] B2 子 agent 过程推送 web（双 adapter：CC jsonl + opencode sqlite）
 
 in-session 路径 detach 起 sidechain 守护，主动 tail CC sidechain jsonl / 查询 opencode sqlite event 表 → 经统一 IR `RawAgentEvent`（payload 1:1 = EventType.data，R1）→ `SidechainIngestor`（1:1 透传 R2 + source_id 查重 R3 + U1 读 tape 派生 node §6）→ `bus.emit` → `_FlockSafeTape`（复用 chart_daemon 七组件，零 DRY）→ follow_task → WS → 前端（**零改**，复用 B1 entries.ts agent_* 渲染）。SPEC-B **v4**（spec-reviewer conditional-pass，5 BLOCKER 全闭 R1-R7 + 4 决策 U1-U4）；接口同一性 grep 守门 0 hit；防御性 deviation 登记（CC source_id 扩 block_idx；opencode source_id 用 seq 而非 part.id，因单 part 双状态必撞）；code-reviewer 0 🔴 + 5 🟡 全修；79 新测试 + 352 events/in_session 回归全 PASS；e2e subprocess 测试覆盖实时 ≤2s / SIGKILL→respawn 幂等 / 终态自退。Commit: `ed5cbeb`。详见 [release note](../releases/2026-07-17-subagent-output-b2.md)。
