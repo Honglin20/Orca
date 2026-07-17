@@ -2,8 +2,9 @@
 //
 // 三约束（SPEC §5.5）：
 //   1. **虚拟滚动**（react-window v2 ``List`` + rowComponent）：1000+ 条不卡。
-//   2. **每事件一行**：行数 == tape 事件数；每行 ``{seq}·{type}·{一行摘要≤80字}``；
-//      **每个 EventType 均有 readable 摘要，无 no-op fallback**（selectLog/summarizeEvent 保证）。
+//   2. **降噪过滤**（SPEC web-presentation-refinement §P1）：行数 == 经 classifyLogLevel 过滤后的事件数
+//      （过程事件 agent_*/foreach_item_*/prompt_rendered/agent_usage/custom/dialog_message/
+//      unknown_event 归 ConversationView；route_taken 默认隐藏）；每行 ``{seq}·{type}·{摘要≤80}``。
 //   3. **auto-scroll 策略**（闭 review #36 / SPEC §0 D6）：用户上滚→暂停 auto-scroll +
 //      显示「跳最新」按钮；pinned-to-bottom→新事件到达 ``scrollToRow`` 到末 seq。
 //
@@ -23,11 +24,23 @@ import {
   type RowComponentProps,
 } from "react-window";
 import { useWorkflowStore } from "@/stores/workflow-store";
-import { selectLog, type LogLine } from "@/selectors";
+import { selectLog, type LogLevel, type LogLine } from "@/selectors";
 
 interface LogRowData {
   items: LogLine[];
 }
+
+/**
+ * LogLevel → tailwind 文字色（SPEC §P1：克制，与既有 ErrorBlock/AgentsRail 配色对齐）。
+ * Record<LogLevel,_> 编译期穷尽 5 级；新增 level → 编译失败。
+ */
+const LEVEL_TEXT_COLOR: Record<LogLevel, string> = {
+  error: "text-red-600",     // 与 ErrorBlock / AgentsRail failed 同色
+  success: "text-emerald-600", // 与 AgentsRail done / TopBar completed 同色
+  warning: "text-amber-600", // 与 AgentsRail blocked 同色
+  debug: "text-slate-400",   // 与 seq 数字同色（muted）
+  info: "text-slate-700",    // 默认正文色
+};
 
 function LogRow({
   index,
@@ -39,7 +52,7 @@ function LogRow({
     <div
       style={style}
       className={`flex items-center whitespace-nowrap px-2 font-mono text-xs ${
-        item.isError ? "text-red-600" : "text-slate-700"
+        LEVEL_TEXT_COLOR[item.level]
       }`}
       data-testid={`log-row-${index}`}
     >

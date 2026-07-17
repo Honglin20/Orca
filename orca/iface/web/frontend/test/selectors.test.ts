@@ -9,16 +9,20 @@
 //   3. **selectLog**：每事件一行；每 EventType 有 readable 摘要（无 no-op fallback）
 //   4. **selectConversation** D7 序无关同样成立
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import {
+  classifyLogLevel,
   selectAgents,
   selectCharts,
   selectConversation,
   selectLog,
+  setLogShowDebug,
   summarizeEvent,
+  type LogLevel,
 } from "@/selectors";
 import type { EventType, WebEvent } from "@/types/events";
+import { ALL_EVENT_TYPES } from "./_helpers";
 
 let _seq = 0;
 function ev(
@@ -192,7 +196,11 @@ function buildFixtureT(): WebEvent[] {
 }
 
 describe("selectors", () => {
-  beforeEach(() => resetStore());
+  beforeEach(() => {
+    resetStore();
+    // 测试隔离：debug 级恢复默认隐藏（防 setLogShowDebug(true) 跨用例泄漏）
+    setLogShowDebug(false);
+  });
 
   // ── 1. selectConversation：D2 按 node 分组 ──
   it("selectConversation 按 node 分组，只含 conversation-相关事件", () => {
@@ -291,70 +299,169 @@ describe("selectors", () => {
     expect(backwardIds).toEqual(forwardIds);
   });
 
-  // ── 4. selectLog：每事件一行，每 EventType 有 readable 摘要 ──
-  it("selectLog：行数 == tape 事件数；每行有 readable 摘要（无 no-op fallback）", () => {
+  // ── 4. selectLog：filter（classifyLogLevel 非 null）+ 默认隐藏 debug ──
+  it("selectLog：仅含生命周期/routing/gate/失败；过程事件不进 Log（SPEC §P1）", () => {
     const events = buildFixtureT();
     useWorkflowStore.getState().loadFromEvents(events);
     const lines = selectLog(useWorkflowStore.getState());
+    const lineTypes = lines.map((l) => l.type);
 
-    expect(lines.length).toBe(events.length);
-    // 每行 text 非空（无 no-op fallback）
+    // 过程事件不进 Log（零回归 ConversationView 仍含）
+    expect(lineTypes).not.toContain("agent_message");
+    expect(lineTypes).not.toContain("agent_thinking");
+    expect(lineTypes).not.toContain("agent_tool_call");
+    expect(lineTypes).not.toContain("agent_tool_result");
+    expect(lineTypes).not.toContain("agent_step_started");
+    expect(lineTypes).not.toContain("foreach_item_started");
+    expect(lineTypes).not.toContain("foreach_item_completed");
+    expect(lineTypes).not.toContain("prompt_rendered");
+    expect(lineTypes).not.toContain("custom");
+    expect(lineTypes).not.toContain("unknown_event");
+    // route_taken 默认隐藏（debug 级）
+    expect(lineTypes).not.toContain("route_taken");
+
+    // 生命周期事件进 Log（fixture 含的子集；无 node_completed/workflow_completed）
+    expect(lineTypes).toContain("workflow_started");
+    expect(lineTypes).toContain("node_started");
+    expect(lineTypes).toContain("node_failed");
+    expect(lineTypes).toContain("foreach_started");
+    expect(lineTypes).toContain("foreach_completed");
+    expect(lineTypes).toContain("retry_started");
+    expect(lineTypes).toContain("retry_succeeded");
+    expect(lineTypes).toContain("human_decision_requested");
+    expect(lineTypes).toContain("human_decision_resolved");
+
+    // 每行 text 非空（无 no-op fallback）+ level 已分级
     for (const line of lines) {
       expect(line.text.length).toBeGreaterThan(0);
       expect(line.text.length).toBeLessThanOrEqual(80);
+      expect(line.level).toBeDefined();
     }
-    // 错误事件标记 isError
+    // 错误事件 level === "error"（取代旧 isError）
     const failedLine = lines.find((l) => l.type === "node_failed");
-    expect(failedLine?.isError).toBe(true);
-    const wfFailLine = lines.find((l) => l.type === "workflow_failed");
-    // workflow_failed 不在 fixture（只有 node_failed），跳过
-    expect(wfFailLine).toBeUndefined();
+    expect(failedLine?.level).toBe("error");
+    // workflow_failed 不在 fixture（只有 node_failed）
+    expect(lines.find((l) => l.type === "workflow_failed")).toBeUndefined();
+  });
+
+  // ── 4b. classifyLogLevel：全 39 EventType oracle 表（TS never 编译期穷尽守门）──
+  it("classifyLogLevel：全 39 EventType oracle 表（缺一编译失败 + 运行时逐条对齐 SPEC §P1）", () => {
+    // Record<EventType,_> 强制全 39 key 写齐 —— 缺一个 type TS 编译失败（never 守门）
+    const ORACLE: Record<EventType, LogLevel | null> = {
+      // info：开始类生命周期
+      workflow_started: "info",
+      node_started: "info",
+      foreach_started: "info",
+      retry_started: "info",
+      validator_started: "info",
+      wait_started: "info",
+      human_decision_requested: "info",
+      interrupt_requested: "info",
+      dialog_started: "info",
+      // success：完成类生命周期
+      workflow_completed: "success",
+      workflow_resumed: "success",
+      node_completed: "success",
+      foreach_completed: "success",
+      retry_succeeded: "success",
+      validator_passed: "success",
+      wait_completed: "success",
+      human_decision_resolved: "success",
+      interrupt_resolved: "success",
+      dialog_ended: "success",
+      // error：失败类
+      workflow_failed: "error",
+      workflow_cancelled: "error",
+      node_failed: "error",
+      retry_exhausted: "error",
+      validator_failed: "error",
+      error: "error",
+      // warning：跳过
+      node_skipped: "warning",
+      // debug：路由（默认隐藏）
+      route_taken: "debug",
+      // null：过程事件归 ConversationView，不进 Log
+      agent_message: null,
+      agent_thinking: null,
+      agent_tool_call: null,
+      agent_tool_result: null,
+      agent_step_started: null,
+      foreach_item_started: null,
+      foreach_item_completed: null,
+      prompt_rendered: null,
+      agent_usage: null,
+      custom: null,
+      dialog_message: null,
+      unknown_event: null,
+    };
+
+    // 运行时逐条断言（与 compile-time Record 互补 —— 防运行时映射 drift）
+    for (const type of ALL_EVENT_TYPES) {
+      expect(
+        classifyLogLevel(type),
+        `classifyLogLevel(${type}) 应与 SPEC §P1 分级表一致`
+      ).toBe(ORACLE[type]);
+    }
+
+    // SPEC §P1 关键边界点单独钉一遍（防后续误改）
+    expect(classifyLogLevel("workflow_resumed")).toBe("success"); // P0-1 补
+    expect(classifyLogLevel("dialog_started")).toBe("info");
+    expect(classifyLogLevel("dialog_ended")).toBe("success");
+    expect(classifyLogLevel("dialog_message")).toBeNull(); // agent 级过程
+    expect(classifyLogLevel("route_taken")).toBe("debug"); // 默认隐藏
+    expect(classifyLogLevel("agent_tool_call")).toBeNull();
+    expect(classifyLogLevel("agent_thinking")).toBeNull();
+
+    // fail-loud 兜底：编译期 never 已封死合法路径，但运行时若有 unknown 值
+    // （e.g. 跨版本/脏数据），需 console.warn + 返 null（SPEC §全局约束 3）
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect(classifyLogLevel("__not_a_real_type__" as EventType)).toBeNull();
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0]?.[0]).toContain("unmapped event type");
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  // ── 4c. selectLog debug 开关：setLogShowDebug(true) → route_taken 进 Log ──
+  it("selectLog：setLogShowDebug(true) 展开后 route_taken 进 Log（默认隐藏可恢复）", () => {
+    useWorkflowStore.getState().loadFromEvents([
+      ev("workflow_started"),
+      ev("route_taken", { data: { from: "A", to: "B" } }),
+      ev("node_started", { node: "A" }),
+    ]);
+    try {
+      // 默认隐藏
+      let lines = selectLog(useWorkflowStore.getState());
+      expect(lines.map((l) => l.type)).not.toContain("route_taken");
+      expect(lines.map((l) => l.type)).toEqual([
+        "workflow_started",
+        "node_started",
+      ]);
+      // 展开 debug
+      setLogShowDebug(true);
+      lines = selectLog(useWorkflowStore.getState());
+      expect(lines.map((l) => l.type)).toEqual([
+        "workflow_started",
+        "route_taken",
+        "node_started",
+      ]);
+      const route = lines.find((l) => l.type === "route_taken");
+      expect(route?.level).toBe("debug");
+    } finally {
+      // 测试隔离：恢复默认
+      setLogShowDebug(false);
+    }
   });
 
   // ── 5. summarizeEvent 穷尽性：每个 EventType 都有分支（无 default fallthrough）──
   it("summarizeEvent：全部 39 个 EventType 都有 readable 摘要（穷尽）", () => {
-    const allTypes: EventType[] = [
-      "workflow_started",
-      "workflow_completed",
-      "workflow_failed",
-      "workflow_cancelled",
-      "node_started",
-      "node_completed",
-      "node_failed",
-      "node_skipped",
-      "agent_message",
-      "agent_thinking",
-      "agent_tool_call",
-      "agent_tool_result",
-      "agent_usage",
-      "agent_step_started",
-      "route_taken",
-      "foreach_started",
-      "foreach_item_started",
-      "foreach_item_completed",
-      "foreach_completed",
-      "human_decision_requested",
-      "human_decision_resolved",
-      "interrupt_requested",
-      "interrupt_resolved",
-      "prompt_rendered",
-      "workflow_resumed",
-      "retry_started",
-      "retry_succeeded",
-      "retry_exhausted",
-      "wait_started",
-      "wait_completed",
-      "validator_started",
-      "validator_passed",
-      "validator_failed",
-      "dialog_started",
-      "dialog_message",
-      "dialog_ended",
-      "custom",
-      "error",
-      "unknown_event",
-    ];
-    for (const type of allTypes) {
+    // 用 _helpers.ALL_EVENT_TYPES（与 codegen 同步），避免硬编码 list 与 events.ts drift。
+    // summarizeEvent 内部 switch 自带 never 编译期守门（缺 type → 编译失败）；
+    // 本测试再加运行时遍历断言每个 type 都产出非空 readable 行（防 drift 双保险）。
+    for (const type of ALL_EVENT_TYPES) {
       const e: WebEvent = {
         seq: 1,
         type,

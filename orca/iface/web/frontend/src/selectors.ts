@@ -419,12 +419,120 @@ export function selectCharts(state: WorkflowState): {
   return { groups: Array.from(groupMap.entries()).map(([group, entries]) => ({ group, entries })) };
 }
 
-// ── selectLog：events → LogStream 行模型（每事件一行 ≤80 字符）───────────────────
+// ── selectLog：events → LogStream 行模型（仅生命周期/routing/gate/失败进 Log）─────
+// SPEC web-presentation-refinement §P1：LogStream 装分级 classifier，过程事件（agent_*/
+// foreach_item_*/prompt_rendered/agent_usage/custom/dialog_message/unknown_event）归
+// ConversationView，不进 Log。debug 级（route_taken）默认隐藏，可用 setLogShowDebug(true) 展开。
+export type LogLevel = "info" | "success" | "error" | "warning" | "debug";
+
 export interface LogLine {
   seq: number;
   type: WebEvent["type"];
   text: string; // 单行摘要 ≤80 字符
-  isError: boolean;
+  level: LogLevel; // 取代旧 isError：分级粒度更细，配色按 level
+}
+
+/**
+ * 事件类型 → Log 级别分类器（纯函数，SPEC web-presentation-refinement §P1 分级表）。
+ *
+ * - 非 null：进 LogStream，按 level 配色（info/success/error/warning/debug）
+ * - null：不进 Log（过程事件归 ConversationView，零回归）
+ *
+ * **穷尽守门**：switch 覆盖全 39 EventType，default 分支靠 TS ``never`` 编译期
+ * 拦截（events.ts 加 type 没补这里 → 编译失败）；运行时兜底 console.warn + null
+ * （不应触达，防御 unknown 运行时值）。
+ *
+ * 分级表（逐字对齐 SPEC §P1）：
+ * | level    | EventType                                                                  |
+ * |----------|----------------------------------------------------------------------------|
+ * | info     | workflow_started / node_started / foreach_started / retry_started /         |
+ * |          | validator_started / wait_started / human_decision_requested /              |
+ * |          | interrupt_requested / dialog_started                                       |
+ * | success  | workflow_completed / workflow_resumed / node_completed / foreach_completed |
+ * |          | retry_succeeded / validator_passed / wait_completed /                      |
+ * |          | human_decision_resolved / interrupt_resolved / dialog_ended                |
+ * | error    | workflow_failed / workflow_cancelled / node_failed / retry_exhausted /     |
+ * |          | validator_failed / error                                                   |
+ * | warning  | node_skipped                                                               |
+ * | debug    | route_taken（默认隐藏，可 setLogShowDebug(true) 展开）                     |
+ * | null     | agent_message / agent_thinking / agent_tool_call / agent_tool_result /     |
+ * |          | agent_step_started / foreach_item_started / foreach_item_completed /       |
+ * |          | prompt_rendered / agent_usage / custom / dialog_message / unknown_event    |
+ */
+export function classifyLogLevel(type: WebEvent["type"]): LogLevel | null {
+  switch (type) {
+    // info：开始类生命周期
+    case "workflow_started":
+    case "node_started":
+    case "foreach_started":
+    case "retry_started":
+    case "validator_started":
+    case "wait_started":
+    case "human_decision_requested":
+    case "interrupt_requested":
+    case "dialog_started":
+      return "info";
+    // success：完成类生命周期
+    case "workflow_completed":
+    case "workflow_resumed":
+    case "node_completed":
+    case "foreach_completed":
+    case "retry_succeeded":
+    case "validator_passed":
+    case "wait_completed":
+    case "human_decision_resolved":
+    case "interrupt_resolved":
+    case "dialog_ended":
+      return "success";
+    // error：失败类
+    case "workflow_failed":
+    case "workflow_cancelled":
+    case "node_failed":
+    case "retry_exhausted":
+    case "validator_failed":
+    case "error":
+      return "error";
+    // warning：跳过
+    case "node_skipped":
+      return "warning";
+    // debug：路由（默认隐藏，SPEC 决策 3）
+    case "route_taken":
+      return "debug";
+    // null：过程事件归 ConversationView，不进 Log
+    case "agent_message":
+    case "agent_thinking":
+    case "agent_tool_call":
+    case "agent_tool_result":
+    case "agent_step_started":
+    case "foreach_item_started":
+    case "foreach_item_completed":
+    case "prompt_rendered":
+    case "agent_usage":
+    case "custom":
+    case "dialog_message":
+    case "unknown_event":
+      return null;
+    default: {
+      // TS 编译期穷尽守门：events.ts 加新 type 没补上面 case → 编译失败。
+      const _exhaustive: never = type;
+      // 运行时兜底（理论不可达；防御 unknown 运行时值）：fail loud，不静默吞。
+      console.warn(
+        `[orca] classifyLogLevel: unmapped event type ${String(_exhaustive)} → 降级为不进 Log`
+      );
+      return null;
+    }
+  }
+}
+
+/**
+ * debug 级（route_taken）是否在 LogStream 显示。模块级状态 + setter（SPEC §P1：
+ * 默认隐藏；保留可恢复开关，YAGNI 不接 UI，供未来调试/开关调用）。
+ */
+let showDebug = false;
+
+/** 切换 debug 级可见性（默认 false 隐藏 route_taken）。供未来 UI 开关或调试调用。 */
+export function setLogShowDebug(v: boolean): void {
+  showDebug = v;
 }
 
 /** 单行摘要：每个 EventType 均有 readable 摘要，无 no-op fallback（SPEC §5.5 / §9 AC3）。 */
@@ -538,20 +646,20 @@ function num(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-const ERROR_TYPES = new Set<WebEvent["type"]>([
-  "workflow_failed",
-  "node_failed",
-  "workflow_cancelled",
-  "error",
-  "validator_failed",
-  "retry_exhausted",
-]);
-
 export function selectLog(state: WorkflowState): LogLine[] {
-  return state.events.map((e: WebEvent) => ({
-    seq: e.seq,
-    type: e.type,
-    text: summarizeEvent(e),
-    isError: ERROR_TYPES.has(e.type),
-  }));
+  // SPEC §P1：filter（classifyLogLevel 非 null）+ 默认隐藏 debug 级（route_taken）。
+  // 一次遍历完成 filter + map，保留可恢复 debug 的能力（setLogShowDebug）。
+  const out: LogLine[] = [];
+  for (const e of state.events) {
+    const level = classifyLogLevel(e.type);
+    if (level === null) continue;
+    if (level === "debug" && !showDebug) continue;
+    out.push({
+      seq: e.seq,
+      type: e.type,
+      text: summarizeEvent(e),
+      level,
+    });
+  }
+  return out;
 }
