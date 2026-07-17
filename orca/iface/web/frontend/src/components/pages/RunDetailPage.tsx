@@ -4,7 +4,7 @@
 //   - 左 AgentsRail（agents 列表 + DAG 浮层挂点）
 //   - 中 tabs [会话 | 图表]（gate 模态浮于其上，§5.6）
 //   - 右 LogStream（常驻最右，虚拟化 live）
-// 顶 TopBar（status + elapsed + cost）。**无** Replay 控件（SPEC §3.1 / §8）。
+// 顶 TopBar（status + elapsed；P5a 已去 cost UI）。**无** Replay 控件（SPEC §3.1 / §8）。
 //
 // **D5 bundle split**：ConversationView（含 react-markdown 全家桶 ~2MB）/ ChartsView
 // （recharts ~400KB）/ WorkflowGraph（xyflow ~250KB）各自 ``React.lazy`` 拆独立 chunk。
@@ -59,7 +59,7 @@ export function RunDetailPage() {
   const selectedNode = useWorkflowStore((s) => s.selectedNode);
 
   if (!runId) {
-    return <p className="p-4 text-sm text-slate-500">缺少 runId</p>;
+    return <p className="orca-text-muted p-4 text-sm">缺少 runId</p>;
   }
 
   return (
@@ -69,10 +69,11 @@ export function RunDetailPage() {
         <Panel defaultSize={18} minSize={12} maxSize={30}>
           <AgentsRail />
         </Panel>
-        <PanelResizeHandle className="w-px bg-slate-200" />
+        {/* P5b：分隔条用 --border token（明暗自适应，替代硬编码 bg-slate-200）。 */}
+        <PanelResizeHandle className="orca-bg-surface-2 w-px" />
         <Panel defaultSize={56} minSize={30}>
           <div className="flex h-full flex-col">
-            <div className="flex border-b border-slate-200 bg-slate-50">
+            <div className="orca-bg-app orca-border flex border-b">
               {(
                 [
                   ["conversation", "会话"],
@@ -83,10 +84,11 @@ export function RunDetailPage() {
                   key={t}
                   type="button"
                   onClick={() => setTab(t)}
+                  // P5b：active tab 下划线 + 文字用 --accent（钢蓝品牌强调色）。
                   className={`px-4 py-2 text-sm ${
                     tab === t
-                      ? "border-b-2 border-slate-900 font-medium text-slate-900"
-                      : "text-slate-500 hover:text-slate-700"
+                      ? "orca-accent orca-border-accent border-b-2 font-medium"
+                      : "orca-text-muted hover:orca-text"
                   }`}
                   data-testid={`tab-${t}`}
                 >
@@ -107,13 +109,13 @@ export function RunDetailPage() {
             </div>
           </div>
         </Panel>
-        <PanelResizeHandle className="w-px bg-slate-200" />
+        <PanelResizeHandle className="orca-bg-surface-2 w-px" />
         <Panel defaultSize={26} minSize={15}>
           <div
-            className="flex h-full flex-col border-l border-slate-200"
+            className="orca-border flex h-full flex-col border-l"
             data-testid="log-panel"
           >
-            <div className="border-b border-slate-200 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+            <div className="orca-border orca-text-muted border-b px-3 py-2 text-xs font-semibold uppercase tracking-wide">
               Log
             </div>
             <div className="flex-1 overflow-hidden">
@@ -129,7 +131,7 @@ export function RunDetailPage() {
 function TabFallback({ label }: { label: string }) {
   return (
     <div
-      className="flex h-full items-center justify-center text-sm text-slate-400"
+      className="orca-text-faint flex h-full items-center justify-center text-sm"
       data-testid="tab-fallback"
     >
       <span className="animate-pulse">{label}</span>

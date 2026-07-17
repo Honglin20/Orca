@@ -22,8 +22,10 @@ import {
   LEGEND_STYLE,
   PALETTE,
   getAxisTick,
+  getCursor,
   getGridProps,
   getTooltipStyle,
+  getTooltipTextStyle,
 } from "../chartTheme";
 import { computeNiceTicks, extractNumericValues, formatTick } from "../axisUtils";
 
@@ -35,6 +37,9 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
   const gridProps = getGridProps();
   const axisTick = getAxisTick();
   const tooltipStyle = getTooltipStyle();
+  // P5a：Scatter cursor 统一为细虚竖线（原 strokeDasharray 单值缺 stroke/strokeWidth）。
+  const tooltipCursor = getCursor(true);
+  const tooltipTextStyle = getTooltipTextStyle();
 
   const allXValues = extractNumericValues(data, xKey);
   const allYValues = extractNumericValues(data, yKey);
@@ -68,7 +73,7 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
 
     return (
       <div data-testid="chart-widget">
-        <h4 className="mb-2 text-xs font-medium text-slate-700">{title}</h4>
+        <h4 className="orca-text-muted mb-2 text-xs font-medium">{title}</h4>
         <div className="aspect-[4/3] w-full">
           <ResponsiveContainer width="100%" height="100%" minHeight={200} minWidth={300}>
             <ScatterChart margin={CHART_MARGIN}>
@@ -92,7 +97,12 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
                 tickFormatter={formatTick}
               />
               <ZAxis dataKey={zAxisConfig.dataKey} range={zAxisConfig.range} />
-              <Tooltip contentStyle={tooltipStyle} cursor={{ strokeDasharray: "3 3" }} />
+              <Tooltip
+                contentStyle={tooltipStyle}
+                cursor={tooltipCursor}
+                labelStyle={tooltipTextStyle}
+                itemStyle={tooltipTextStyle}
+              />
               <Legend wrapperStyle={LEGEND_STYLE} />
               {hueValues.map((val, i) => (
                 <Scatter
@@ -116,7 +126,7 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
 
   return (
     <div data-testid="chart-widget">
-      <h4 className="mb-2 text-xs font-medium text-slate-700">{title}</h4>
+      <h4 className="orca-text-muted mb-2 text-xs font-medium">{title}</h4>
       <div className="aspect-[4/3] w-full">
         <ResponsiveContainer width="100%" height="100%" minHeight={200} minWidth={300}>
           <ScatterChart margin={CHART_MARGIN}>
@@ -140,7 +150,12 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
               tickFormatter={formatTick}
             />
             <ZAxis dataKey={zAxisConfig.dataKey} range={zAxisConfig.range} />
-            <Tooltip contentStyle={tooltipStyle} cursor={{ strokeDasharray: "3 3" }} />
+            <Tooltip
+              contentStyle={tooltipStyle}
+              cursor={tooltipCursor}
+              labelStyle={tooltipTextStyle}
+              itemStyle={tooltipTextStyle}
+            />
             <Scatter
               data={scatterData}
               fill={PALETTE[0]}

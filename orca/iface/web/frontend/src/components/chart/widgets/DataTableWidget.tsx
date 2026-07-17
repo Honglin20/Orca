@@ -13,7 +13,7 @@ export function DataTableWidget({ payload }: { payload: ChartPayload }) {
 
   return (
     <div data-testid="chart-widget">
-      {title && <h4 className="mb-2 text-xs font-medium text-slate-700">{title}</h4>}
+      {title && <h4 className="orca-text-muted mb-2 text-xs font-medium">{title}</h4>}
       <div className="overflow-auto rounded border border-slate-200">
         <table className="w-full text-xs" data-testid="data-table">
           <thead className="bg-slate-50">

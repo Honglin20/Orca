@@ -23,8 +23,10 @@ import {
   LEGEND_STYLE,
   PALETTE,
   getAxisTick,
+  getCursor,
   getGridProps,
   getTooltipStyle,
+  getTooltipTextStyle,
 } from "../chartTheme";
 import { computeNiceTicks, extractNumericValues, formatTick } from "../axisUtils";
 import { pivotByHue } from "../pivot";
@@ -36,6 +38,8 @@ export function AreaChartWidget({ payload }: { payload: ChartPayload }) {
   const gridProps = getGridProps();
   const axisTick = getAxisTick();
   const tooltipStyle = getTooltipStyle();
+  const tooltipCursor = getCursor(true);
+  const tooltipTextStyle = getTooltipTextStyle();
 
   if (hue) {
     // hue 多系列：长格式 → 宽格式 pivot（共享 helper，DRY）
@@ -47,7 +51,7 @@ export function AreaChartWidget({ payload }: { payload: ChartPayload }) {
 
     return (
       <div data-testid="chart-widget">
-        <h4 className="mb-2 text-xs font-medium text-slate-700">{title}</h4>
+        <h4 className="orca-text-muted mb-2 text-xs font-medium">{title}</h4>
         <div className="aspect-[4/3] w-full">
           <ResponsiveContainer width="100%" height="100%" minHeight={200} minWidth={300}>
             <AreaChart data={pivotedData} margin={{ ...CHART_MARGIN, right: 60 }}>
@@ -59,7 +63,12 @@ export function AreaChartWidget({ payload }: { payload: ChartPayload }) {
                 ticks={yConfig.ticks}
                 tickFormatter={formatTick}
               />
-              <Tooltip contentStyle={tooltipStyle} />
+              <Tooltip
+                contentStyle={tooltipStyle}
+                cursor={tooltipCursor}
+                labelStyle={tooltipTextStyle}
+                itemStyle={tooltipTextStyle}
+              />
               <Legend wrapperStyle={LEGEND_STYLE} />
               {hueValues.map((val, i) => {
                 const color = PALETTE[i % PALETTE.length];
@@ -87,7 +96,7 @@ export function AreaChartWidget({ payload }: { payload: ChartPayload }) {
 
   return (
     <div data-testid="chart-widget">
-      <h4 className="mb-2 text-xs font-medium text-slate-700">{title}</h4>
+      <h4 className="orca-text-muted mb-2 text-xs font-medium">{title}</h4>
       <div className="aspect-[4/3] w-full">
         <ResponsiveContainer width="100%" height="100%" minHeight={200} minWidth={300}>
           <AreaChart data={data} margin={CHART_MARGIN}>
@@ -99,7 +108,12 @@ export function AreaChartWidget({ payload }: { payload: ChartPayload }) {
               ticks={yConfig.ticks}
               tickFormatter={formatTick}
             />
-            <Tooltip contentStyle={tooltipStyle} />
+            <Tooltip
+              contentStyle={tooltipStyle}
+              cursor={tooltipCursor}
+              labelStyle={tooltipTextStyle}
+              itemStyle={tooltipTextStyle}
+            />
             <Area
               dataKey={yKey}
               stroke={PALETTE[0]}

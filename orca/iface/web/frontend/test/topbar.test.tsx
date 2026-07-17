@@ -4,7 +4,9 @@
 //   - status icon 5 档 + cancelled/blocked
 //   - D5 elapsed：running 时 live tick（now - workflowStartedAt）；
 //     completed 时 snap workflowElapsed（不再依赖 now）
-//   - cost = agent_usage fold 累加
+//
+// P5a：cost UI 已移除（``top-cost`` testid 删除，store.cost fold 保留不破坏 agent_usage
+// 累加测试）。原 cost 测试块同步删除——见 store.test.ts 对 cost fold 的覆盖。
 
 import { describe, expect, test, afterEach, beforeEach } from "vitest";
 import { act, cleanup, render, screen } from "@testing-library/react";
@@ -170,8 +172,8 @@ describe("TopBar —— D5 elapsed snap 语义（SPEC §0 D5）", () => {
   });
 });
 
-describe("TopBar —— cost 累计（agent_usage fold）", () => {
-  test("多个 agent_usage 累加 cost", () => {
+describe("TopBar —— cost UI 已移除（P5a）", () => {
+  test("agent_usage 仍累计 cost 到 store，但 TopBar 不再渲染 top-cost testid", () => {
     ev("workflow_started", { workflow_name: "wf" });
     ev("agent_usage", {
       cost_usd: 0.001,
@@ -186,8 +188,10 @@ describe("TopBar —— cost 累计（agent_usage fold）", () => {
       node: null,
     });
     render(<Root active={true} />);
-    // 0.001 + 0.002 = 0.003
-    expect(screen.getByTestId("top-cost").textContent).toContain("$0.0030");
+    // P5a：top-cost testid 不存在（UI 已删），store.cost 仍累加（fold 不变）。
+    expect(screen.queryByTestId("top-cost")).not.toBeInTheDocument();
+    // store fold 不受 UI 移除影响（agent_usage 累加 = 0.003，幂等铁律）。
+    expect(useWorkflowStore.getState().cost).toBeCloseTo(0.003, 5);
   });
 });
 

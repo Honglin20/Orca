@@ -17,7 +17,7 @@ import { useWorkflowStore } from "@/stores/workflow-store";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { ChartWidget } from "@/components/chart/ChartWidget";
 import { ChartGroup } from "@/components/chart/ChartGroup";
-import { PALETTE } from "@/components/chart/chartTheme";
+import { PALETTE, getAxisTick, getCursor } from "@/components/chart/chartTheme";
 import { selectCharts } from "@/selectors";
 import type { ChartPayload, ChartType } from "@/components/chart/types";
 import type { WebEvent } from "@/types/events";
@@ -172,6 +172,48 @@ describe("chartTheme —— PALETTE 迁移自 AgentHarness（铁律 5）", () =>
     expect(PALETTE[5]).toBe("#C9A843");
     expect(PALETTE[6]).toBe("#9A7BA8");
     expect(PALETTE[7]).toBe("#E08E9B");
+  });
+});
+
+// ── P5 R1 回归：getCSSVar 必须把 ``R G B`` token 包成合法 CSS 颜色 ────────────────
+// 事故回顾：原 ``hsl(${raw})`` 把 ``51 65 85`` 包成 ``hsl(51 65 85)`` —— CSS Color 4
+// 要求 ``hsl(H S L)`` 中 S/L 为百分比；裸数字被浏览器静默判非法 → SVG fill 退回默认黑
+// → P5 验收 #1「坐标轴 slate-700」实际未达成。修成 ``rgb(${raw})`` 后必须钉死。
+describe("chartTheme —— P5 R1 getCSSVar 返回合法 CSS 颜色（防 hsl 包 RGB 静默失败）", () => {
+  test("getAxisTick().fill 是被 CSS 接受的颜色（set on el.style.color 不被丢弃）", () => {
+    // 模拟 index.css 的 token 定义（RGB 三元组空格分隔）。
+    document.documentElement.style.setProperty("--axis-tick", "51 65 85");
+    try {
+      const { fill } = getAxisTick();
+      // 探针：把 fill 赋给 el.style.color，CSS 解析器拒绝则空串（fail loud）。
+      const probe = document.createElement("div");
+      probe.style.color = fill;
+      expect(probe.style.color).not.toBe("");
+      // 合法 ``rgb(51 65 85)`` 被 happy-dom 规范化。
+      expect(fill.startsWith("rgb")).toBe(true);
+    } finally {
+      document.documentElement.style.removeProperty("--axis-tick");
+    }
+  });
+
+  test("getCursor(true).stroke 是合法 CSS 颜色（cursor 不退回 SVG 默认黑）", () => {
+    document.documentElement.style.setProperty("--border", "226 232 240");
+    try {
+      const cursor = getCursor(true);
+      expect(cursor.stroke).toBeDefined();
+      const probe = document.createElement("div");
+      probe.style.color = cursor.stroke!;
+      expect(probe.style.color).not.toBe("");
+    } finally {
+      document.documentElement.style.removeProperty("--border");
+    }
+  });
+
+  test("token 未定义 → fallback #888（不静默 crash）", () => {
+    // 清掉所有可能残留的同名 token，确保 getCSSVar 走 fallback 路径。
+    document.documentElement.style.removeProperty("--nonexistent-token-xyz");
+    const { fill } = getAxisTick();
+    expect(fill).toBe("#888");
   });
 });
 
