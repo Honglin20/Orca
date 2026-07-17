@@ -15,6 +15,8 @@ import type { WorkflowState } from "@/stores/workflow-store";
 import { CONVERSATION_TYPES, eventMatchesNode } from "@/conversation-types";
 
 // ── selectAgents：DAG nodes → AgentsRail 行模型 ─────────────────────────────────
+// P3：sessionCount（子 agent session 数，不含 "main" 哨兵）+ iteration（Loop 组迭代号）
+// 依赖 P2 nodesIndex 倒排索引。见 selectAgentGroups。
 export interface AgentRow {
   node: string;
   status: NodeState["status"];
@@ -24,7 +26,14 @@ export interface AgentRow {
   inputTokens?: number;
   outputTokens?: number;
   reasoningTokens?: number;
+  /** P3：子 agent session 数（不含 "main"；依赖 nodesIndex）。> 1 → UI 折叠子 session。 */
+  sessionCount?: number;
+  /** P3：循环节点迭代号（= sessionCount；仅 Loop 组派生，selectAgentGroups 设）。 */
+  iteration?: number;
 }
+
+/** "main" session 哨兵字面量（与 workflow-store.MAIN_SESSION 同义；不跨层 import store 内部常量）。 */
+const MAIN_SESSION = "main";
 
 /**
  * 格式化 token 小字（ AgentsRail / TopBar 用，DRY）。
@@ -93,6 +102,13 @@ export function selectAgents(state: WorkflowState): AgentRow[] {
   }
   return orderedNames.map((node) => {
     const ns: NodeState | undefined = state.nodes[node];
+    // P3 方案 6：子 agent session 数（不含 "main" 哨兵）。> 1 → UI 折叠子 session 列表。
+    // `state.nodesIndex` 在 WorkflowState 必填，但本 selector 可被 partial-state cast 调用
+    // （AgentsRail / 测试），故 optional chaining 兜底，缺索引 → undefined（不显折叠）。
+    const idx = state.nodesIndex?.[node];
+    const subSessionCount = idx
+      ? idx.sessions.filter((s) => s !== MAIN_SESSION).length
+      : 0;
     return {
       node,
       status: ns?.status ?? "pending",
@@ -102,8 +118,99 @@ export function selectAgents(state: WorkflowState): AgentRow[] {
       inputTokens: ns?.inputTokens,
       outputTokens: ns?.outputTokens,
       reasoningTokens: ns?.reasoningTokens,
+      sessionCount: subSessionCount > 0 ? subSessionCount : undefined,
     };
   });
+}
+
+// ── selectAgentGroups：阶段分组（SPEC web-presentation-refinement §P3 方案 4 + P2-3）──
+// 遍历 workflowDef.nodes 声明顺序，按 back-route 切分 Setup / Loop / Finalize 三组。
+//
+// **算法**（P2-3 闭环）：
+//   - back-route = route 的 to 节点声明早于 from（to ∈ 已访问集 → 形成回边循环）。
+//   - 收集所有 back-route → loop 区间 [min(to idx) .. max(from idx)]（声明 index）。
+//   - Setup = nodes[0 .. loopStart-1]；Loop = nodes[loopStart .. loopEnd]；
+//     Finalize = nodes[loopEnd+1 ..]。
+//   - 无 back-route → 全平铺（单组 "Agents"，fallback 不破功能）。
+//
+// **e3b8ad oracle**（workflows/agent-struct-exploration.yaml）：
+//   唯一 back-route = viz_round → hypothesizer →
+//     Setup = [family_detect, baseline_measure]
+//     Loop  = [hypothesizer, engineer, structure_gate, evaluator, analyst, curator, viz_round]
+//     Finalize = [finalize, viz_finalize]
+//
+// **iteration**（P3 方案 5）：Loop 组 agent 设 iteration = sessionCount（UI 显示 R{N}，
+// 从 selectNodeSessions distinct session 数派生，依赖 P2 nodesIndex）。
+export interface AgentGroup {
+  /** "Setup" | "Loop" | "Finalize" | "Agents"（无 back-route fallback 单组）。 */
+  group: string;
+  agents: AgentRow[];
+}
+
+export function selectAgentGroups(state: WorkflowState): AgentGroup[] {
+  const agents = selectAgents(state);
+  if (agents.length === 0) return [];
+  const def = state.workflowDef;
+  // 无拓扑 / 空拓扑 → 单组平铺（fallback，DRY：不重复 selectAgents 的 orderedNames 逻辑）
+  if (!def || def.nodes.length === 0) {
+    return [{ group: "Agents", agents }];
+  }
+  // 声明顺序 node 名 → index（与 selectAgents.orderedNames 同构；去重 + 跳过空名）
+  const declIdx = new Map<string, number>();
+  let n = 0;
+  for (const node of def.nodes) {
+    const name = typeof node.name === "string" ? node.name : "";
+    if (!name || declIdx.has(name)) continue;
+    declIdx.set(name, n++);
+  }
+  // 找 back-route：route.to 声明 index < route.from 声明 index（to 先声明 = 已访问）。
+  // $end / 未知名不在 declIdx → 跳过（防御）。多个 back-route → 取最左 to / 最右 from 区间。
+  let loopStart = Infinity;
+  let loopEnd = -1;
+  for (const r of def.routes) {
+    const fi = declIdx.get(r.from);
+    const ti = declIdx.get(r.to);
+    if (fi === undefined || ti === undefined) continue;
+    if (ti < fi) {
+      if (ti < loopStart) loopStart = ti;
+      if (fi > loopEnd) loopEnd = fi;
+    }
+  }
+  // 无 back-route → 单组平铺（fallback）
+  if (loopEnd === -1) {
+    return [{ group: "Agents", agents }];
+  }
+  // 按声明 index 分桶（selectAgents 顺序 = 声明顺序 + nodes 兜底；兜底节点无 declIdx → Finalize 末尾）
+  const setup: AgentRow[] = [];
+  const loop: AgentRow[] = [];
+  const finalize: AgentRow[] = [];
+  for (const a of agents) {
+    const idx = declIdx.get(a.node);
+    if (idx === undefined) {
+      finalize.push(a);
+    } else if (idx < loopStart) {
+      setup.push(a);
+    } else if (idx <= loopEnd) {
+      loop.push(a);
+    } else {
+      finalize.push(a);
+    }
+  }
+  const groups: AgentGroup[] = [];
+  if (setup.length) groups.push({ group: "Setup", agents: setup });
+  if (loop.length) {
+    // P3 方案 5：Loop 组 agent 派生 iteration = sessionCount（UI 显示 R{N}）
+    groups.push({
+      group: "Loop",
+      agents: loop.map((a) =>
+        a.iteration === undefined && a.sessionCount
+          ? { ...a, iteration: a.sessionCount }
+          : a
+      ),
+    });
+  }
+  if (finalize.length) groups.push({ group: "Finalize", agents: finalize });
+  return groups;
 }
 
 // ── selectWorkflowElapsed / selectNodeElapsed / selectStall（SPEC §0 D5 / §6 D9）─
