@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-17] B2 子 agent 过程推送 web（双 adapter：CC jsonl + opencode sqlite）
+
+in-session 路径 detach 起 sidechain 守护，主动 tail CC sidechain jsonl / 查询 opencode sqlite event 表 → 经统一 IR `RawAgentEvent`（payload 1:1 = EventType.data，R1）→ `SidechainIngestor`（1:1 透传 R2 + source_id 查重 R3 + U1 读 tape 派生 node §6）→ `bus.emit` → `_FlockSafeTape`（复用 chart_daemon 七组件，零 DRY）→ follow_task → WS → 前端（**零改**，复用 B1 entries.ts agent_* 渲染）。SPEC-B **v4**（spec-reviewer conditional-pass，5 BLOCKER 全闭 R1-R7 + 4 决策 U1-U4）；接口同一性 grep 守门 0 hit；防御性 deviation 登记（CC source_id 扩 block_idx；opencode source_id 用 seq 而非 part.id，因单 part 双状态必撞）；code-reviewer 0 🔴 + 5 🟡 全修；79 新测试 + 352 events/in_session 回归全 PASS；e2e subprocess 测试覆盖实时 ≤2s / SIGKILL→respawn 幂等 / 终态自退。Commit: `ed5cbeb`。详见 [release note](../releases/2026-07-17-subagent-output-b2.md)。
+
 ## [2026-07-17] orca list 瘦身 + inputs_schema 移到启动命令
 
 砍 `orca list` 的 `inputs_schema`（选 wf 阶段 84% 字节噪音；`agent-struct-exploration` 单 wf 21 input 字段占该 wf 输出 90%）→ 只返 `{name, description}`；schema 改由启动命令 `orca <wf>` 不带 `--inputs` 按需带出（带则真启动），**零新命令**（命令数 7 / 保留字 / CI 禁 describe 全不变）。改动：`cli.py` `list_workflows` 砍字段 + `bootstrap` 加 `inputs is None` 纯只读分流（不建 run/tape/marker）+ `catalog._inputs_to_schema_list` 公开化为 `inputs_schema_list`；SKILL 三步重组（list 选 → `<wf>` 看 schema → `<wf> --inputs` 启动）；SPEC §2.1/§2.3/§4.2/决策5/§8/§11 同步；测试 list 断言重写（按名定位，**顺手解 `~/.orca/workflows` 隔离缺陷**）+ 新增 schema 返回测试 + ~15 处 bootstrap 补 `--inputs "{}"`（3 个 `_bootstrap` helper 一处覆盖）。list 字节 4010→636（降 84%）；268 + 185 测试全过；`tars validate` 3 wf 过；code-reviewer 0 🔴（🟡 SPEC stale + 🟢 优化全修）。Commit: `<SHA>`。详见 [release note](../releases/2026-07-17-orca-list-slim-schema-via-start-cmd.md)。

@@ -3,7 +3,7 @@
 > 新 session 开工前**必读**此文件 + `CLAUDE.md` + 对应阶段 SPEC。
 > 完成任务后清空本文件（移到 release note），**不积累**。
 
-## 当前状态（2026-07-17）：goal 两硬验收完成（①串台 ②B1 output 显示，均交付 + E2E PASS）；B2（过程推送）命门已解（spike A 路 = CC PostToolUse hook `agentId`），SPEC-B v2 修订完成待实现（工作量评估见对话）；**push 待用户手动**（WSL SSH 无 github key，publickey denied，本地领先 45 commits）。详见下「已完成」+ 三 release note
+## 当前状态（2026-07-17）：B2（子 agent 过程推送 web）已交付（commit `ed5cbeb`）；SPEC-B v4 全硬约束闭环；前端零改复用 B1。goal 两硬验收（①串台 ②B1 output 显示）+ B2 全交付。**push 待用户手动**（WSL SSH 无 github key，publickey denied，本地领先 46 commits）。详见下「已完成」+ B2 release note。
 
 > **新 session 必读**：本块 + [`docs/specs/in-session-entry-and-simplification.md`](../specs/in-session-entry-and-simplification.md) **v5** + [TARS skill release note](../releases/2026-07-15-tars-skill-rebrand.md) + [nas-hp-search 反伪造 release note](../releases/2026-07-16-nas-hp-search-enforce-and-tars-skill-cleanup.md)。teams→tars 改名 + nas-hp-search runner/select 反伪造均已闭环（见下「已完成」+ CHANGELOG）。
 
@@ -18,6 +18,10 @@
 4. **边界**：marker 无 session 记录（旧 run / 手 CLI 起的 run）→ 兼容策略（默认 nudge 全部 or 忽略），不破单 session 现有用法。
 
 ---
+
+### 2026-07-17 已完成（最新）
+
+- **B2 子 agent 过程推送 web（双 adapter）**（`ed5cbeb`）：SPEC-B **v4** spec-reviewer conditional-pass → 实现：统一 IR `RawAgentEvent`（payload 1:1 = EventType.data，R1）+ 双 read-adapter（CC sidechain jsonl `~/.claude/projects/<enc-cwd>/<host_session>/subagents/` / opencode sqlite event 表 seq 游标，纠 v3 part 表）+ `SidechainIngestor`（1:1 透传 R2 + source_id 进 data.source_id 内存 set 查重 R3 + U1 emit 前增量扫 tape 派生 node §6）+ `sidechain_daemon.py`（detach spawn，复用 `chart_daemon._FlockSafeTape` + `_watch_terminal` 七组件零 DRY；crash callback 重建 ingestor；pidfile + /proc/cmdline liveness probe）。cli.py surgical 接线：bootstrap `_spawn_sidechain_daemon` + next `_ensure_sidechain_daemon`，与 chart 守护并列。**前端零改**（复用 B1 entries.ts:145-201）。硬约束闭环：接口同一性 grep 0 hit + 唯一真相源（agent_* 只经 bus.emit→_FlockSafeTape）+ 无串台（host_session scope）+ U1 per-run ≤0.5s trailing + fail loud（CCAdapterError / OpencodeAdapterError）。防御性 deviation 登记（CC source_id 扩 block_idx；opencode source_id 用 seq 而非 part.id）。code-reviewer 0 🔴 + 5 🟡 全修。79 新测试 + 352 events/in_session 回归全 PASS；e2e subprocess 测试覆盖实时 ≤2s（实测 ~0.5s）/ SIGKILL→respawn 幂等 / 终态自退。**前端构建未跑**（前端零改）；**opencode 真机 spike 未跑**（任务约束，契约实现 + 单测 fixture 覆盖；P2 spike part.id immutability 待补）。详见 [release note](../releases/2026-07-17-subagent-output-b2.md)。
 
 ### ~~下一步任务 2~~ ✅ 已完成（2026-07-17）：`orca list` 瘦身 + schema 移启动命令
 
