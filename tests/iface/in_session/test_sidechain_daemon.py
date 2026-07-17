@@ -369,6 +369,47 @@ def test_make_adapter_unknown_raises():
         _make_adapter("vintage", "h")
 
 
+# ── _make_adapter family 透传（SPEC §P4）──────────────────────────────────────
+
+
+def test_make_adapter_cc_passes_family_to_adapter(monkeypatch, tmp_path):
+    """SPEC §P4：``_make_adapter("cc", h, family="cac")`` → CCJsonlAdapter 用 .cac dotdir。
+
+    守 family 透传链：daemon argv ``--family`` → ``_make_adapter`` → adapter ctor → resolver。
+    若有人误删 ``family=family`` 透传，adapter 会回退探测（默认 .claude）→ root 路径出错。
+    """
+    monkeypatch.delenv("ORCA_CC_SIDECHAIN_ROOT", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.chdir(tmp_path)
+    from orca.iface.in_session.sidechain_daemon import _make_adapter
+    adapter = _make_adapter("cc", "h-sid", family="cac")
+    # root 应指向 .cac（family=cac），非默认 .claude。
+    assert ".cac" in adapter.root.parts, (
+        f"family=cac 应让 adapter root 走 .cac dotdir，得 {adapter.root}"
+    )
+    assert ".claude" not in adapter.root.parts
+
+
+def test_make_adapter_opencode_passes_family_to_adapter(monkeypatch, tmp_path):
+    """SPEC §P4：``_make_adapter("opencode", h, family="nga")`` → adapter db 指向 .local/share/nga。"""
+    monkeypatch.delenv("ORCA_OPENCODE_DB", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    from orca.iface.in_session.sidechain_daemon import _make_adapter
+    adapter = _make_adapter("opencode", "h-sid", family="nga")
+    assert adapter.db_path == tmp_path / ".local" / "share" / "nga" / "opencode.db"
+
+
+def test_make_adapter_family_none_falls_back_to_probe(monkeypatch, tmp_path):
+    """family=None → adapter 走 resolver probe/default（不传 family，回归既有行为）。"""
+    monkeypatch.delenv("ORCA_CC_SIDECHAIN_ROOT", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.chdir(tmp_path)
+    from orca.iface.in_session.sidechain_daemon import _make_adapter
+    # family=None + 无任何 .claude/.cac 存在 → resolver default .claude。
+    adapter = _make_adapter("cc", "h-sid")
+    assert ".claude" in adapter.root.parts
+
+
 # ── _detect_backend_from_env（cli.py 启动参数检测）──────────────────────────
 
 
@@ -395,9 +436,12 @@ def test_detect_backend_none(monkeypatch):
 
 def _spawn_daemon_subprocess(
     run_id: str, tape_path: Path, backend: str, host_session: str,
-    *, ttl: int = 30, poll: float = 0.1,
+    *, ttl: int = 30, poll: float = 0.1, family: str | None = None,
 ) -> subprocess.Popen:
-    """detach spawn 一个真的 sidechain daemon subprocess（测试 e2e 用）。"""
+    """detach spawn 一个真的 sidechain daemon subprocess（测试 e2e 用）。
+
+    ``family`` 非空 → 加 ``--family`` argv（SPEC §P4 e2e 演练）。
+    """
     cmd = [
         sys.executable, "-m", "orca.iface.in_session.sidechain_daemon",
         "--run-id", run_id, "--tape", str(tape_path),
@@ -405,6 +449,8 @@ def _spawn_daemon_subprocess(
         "--ttl", str(ttl), "--poll-interval", str(poll),
         "--log-level", "DEBUG",
     ]
+    if family is not None:
+        cmd.extend(["--family", family])
     log_fd = open(tape_path.parent / f"{run_id}_daemon.log", "a", encoding="utf-8")
     return subprocess.Popen(
         cmd, stdin=subprocess.DEVNULL, stdout=log_fd, stderr=log_fd,
@@ -473,6 +519,82 @@ def test_e2e_daemon_ingests_cc_sidechain(tmp_path, monkeypatch):
         assert agent_event["session_id"] == "e2e-task-1"
         assert agent_event["node"] == "A", "U1 派生：node_started[A] 是最后一条 → agent_* 挂 A"
         assert elapsed <= 2.0, f"回合级实时 ≤2s；实际 {elapsed:.2f}s"
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        try: proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        _sidechain_pidfile_path(run_id).unlink(missing_ok=True)
+
+
+def test_e2e_daemon_with_family_argv_reads_cac_dotdir(tmp_path, monkeypatch):
+    """SPEC §P4：daemon argv ``--family cac`` → 读 ``~/.cac/projects/<enc>/<host>/subagents``。
+
+    不设 ``ORCA_CC_SIDECHAIN_ROOT`` env（让 family 决定路径），用 ``HOME`` env 隔离 ``Path.home``
+    到 tmp_path/home，构造 ``.cac/projects/.../subagents`` 路径，spawn daemon 传 ``--family cac``
+    → daemon 内 resolver 走 config 分支（source="config"）→ 读 .cac。
+
+    守 ``--family`` argv 解析 + 透传到 ``_make_adapter`` → adapter ctor → resolver 的端到端链。
+    """
+    run_id = "e2e-family-cac"
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    # subprocess 继承 HOME env → 其内 Path.home() 返 fake_home（subprocess 不受 monkeypatch 影响）。
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.delenv("ORCA_CC_SIDECHAIN_ROOT", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    encoded = str(tmp_path).replace("/", "-")  # _encode_cwd 等价
+    sidechain_root = (
+        fake_home / ".cac" / "projects" / encoded / "fam-host" / "subagents"
+    )
+    sidechain_root.mkdir(parents=True)
+
+    bus, tape, tape_path = _make_tape(tmp_path, run_id=run_id)
+    _append_event(tape_path, "workflow_started", seq=1,
+                  data={"host_session": "fam-host"})
+    _append_event(tape_path, "node_started", seq=2, node="A")
+    bus.close()
+
+    proc = _spawn_daemon_subprocess(
+        run_id, tape_path, "cc", "fam-host", family="cac",
+    )
+    try:
+        # 等 daemon 写 pidfile + 起来。
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if _sidechain_daemon_alive(run_id):
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("daemon 未在 5s 内 alive")
+
+        # 模拟 cac 写 sidechain jsonl。
+        _write_sidechain_line(sidechain_root, "fam-task-1", _assistant_text("from cac"))
+
+        # 等 tape 出现 agent_message（family=cac argv 失败 → 读不到 .cac → tape 无事件）。
+        deadline = time.monotonic() + 3.0
+        agent_event = None
+        while time.monotonic() < deadline:
+            with open(tape_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if obj.get("type") == "agent_message":
+                        agent_event = obj
+                        break
+            if agent_event:
+                break
+            time.sleep(0.05)
+
+        assert agent_event is not None, (
+            "daemon 未读到 .cac sidechain（--family cac argv 透传链失败）；log:\n"
+            + (tape_path.parent / f"{run_id}_daemon.log").read_text(encoding="utf-8", errors="replace")
+        )
+        assert agent_event["data"]["text"] == "from cac"
+        assert agent_event["session_id"] == "fam-task-1"
     finally:
         proc.send_signal(signal.SIGTERM)
         try: proc.wait(timeout=5)

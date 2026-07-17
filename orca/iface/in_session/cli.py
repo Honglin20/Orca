@@ -371,10 +371,15 @@ def _spawn_sidechain_daemon(run_id: str, tape_path: Path) -> None:
 
     镜像 ``_spawn_chart_daemon`` 的 detach pattern（``start_new_session=True`` 脱 bootstrap
     CLI 的 process group）。差异：
-      - 额外 argv ``--backend`` / ``--host-session``（启动参数，daemon 内选 adapter）。
+      - 额外 argv ``--backend`` / ``--host-session`` / ``--family``（启动参数，daemon 内选 adapter
+        + 家族 → dotdir 映射；SPEC §P4）。
       - 日志落 ``<rundir>/<run_id>/sidechain_daemon.log``。
       - 无 ``_wait_for_sock``（无 socket；liveness 走 pidfile + ``/proc`` 校验，由
         ``_sidechain_daemon_alive`` 实现，import 自 daemon 模块）。
+
+    family 来源（SPEC §P4）：``load_merged_config().get("sidechain", {}).get("family")``——
+    iface 层读 config 合法（events 层 resolver 不读 config，依赖铁律）。``sidechain`` 不入
+    ``CONFIG_FIELDS``（三 spawn 维度），独立读：sidechain 不是 spawn 参数维度，是路径解析维度。
 
     失败语义：``OSError``（Popen / log fd）→ 上抛给调用方（bootstrap/next 决定 warn 降级）。
     无 ``host_session`` / 无 ``backend`` → 静默 skip + warn（fail-open：B2 守护是便利层，
@@ -396,6 +401,9 @@ def _spawn_sidechain_daemon(run_id: str, tape_path: Path) -> None:
         )
         return
 
+    # SPEC §P4：family 从 config 透传给 daemon（events 层不读 config）。
+    family = _read_sidechain_family_from_config()
+
     run_dir = _run_dir_for(tape_path, run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     log_path = run_dir / "sidechain_daemon.log"
@@ -407,6 +415,8 @@ def _spawn_sidechain_daemon(run_id: str, tape_path: Path) -> None:
         "--backend", backend,
         "--host-session", host_session,
     ]
+    if family is not None:
+        cmd.extend(["--family", family])
     log_fd = open(log_path, "a", encoding="utf-8")
     try:
         subprocess.Popen(
@@ -420,9 +430,27 @@ def _spawn_sidechain_daemon(run_id: str, tape_path: Path) -> None:
     finally:
         log_fd.close()
     logger.info(
-        "run %s: sidechain 守护已 detach spawn（backend=%s, host=%s, log=%s）",
-        run_id, backend, host_session, log_path,
+        "run %s: sidechain 守护已 detach spawn（backend=%s, host=%s, family=%s, log=%s）",
+        run_id, backend, host_session, family, log_path,
     )
+
+
+def _read_sidechain_family_from_config() -> str | None:
+    """读 config ``sidechain.family``（SPEC §P4；iface 层读 config 合法）。
+
+    ``load_merged_config`` 已透传未知 key（``CONFIG_FIELDS`` 仅管 binaries/flags/prompt_channel
+    三 spawn 维度，``sidechain.*`` 是路径解析维度，独立读——不加进 ``CONFIG_FIELDS``）。
+
+    Returns:
+        family 字符串（"cc"/"cac"/"opencode"/"nga"，由用户填）或 None（未设）。**不做合法性
+        校验**——resolver 会 raise ValueError，doctor 会报 fail；本函数仅透传。
+    """
+    from orca.iface.cli.config import load_merged_config
+    sidechain = load_merged_config().get("sidechain")
+    if not isinstance(sidechain, dict):
+        return None
+    fam = sidechain.get("family")
+    return fam if isinstance(fam, str) else None
 
 
 def _ensure_sidechain_daemon(run_id: str, tape_path: Path) -> None:
@@ -1363,6 +1391,158 @@ def _scan_skill_install(
     }
 
 
+def _check_sidechain_backend() -> dict[str, Any]:
+    """SPEC §P4：构造 ``sidechain_backend`` check（hard=False）。
+
+    检测家族 + resolved root/DB + source + 存在性 + host_session 可用性 + 修复建议。
+    用户从 doctor 获取 resolved 路径（SPEC §P4 验收 #3）。
+
+    家族决策（env 主导 + config 覆盖 + 探测细分）：
+      - ``CLAUDE_CODE_SESSION_ID`` 存在 → CC 家族（cc/cac；config/probe 细分）
+      - ``ORCA_HOST_SESSION_ID`` 存在 → opencode 家族（opencode/nga）
+      - 都无 → status="unknown"（非 in-session 起 run，B2 不适用）
+
+    hint（SPEC §P4）：
+      - cc+cac 同存无 config → 提示设 sidechain.family
+      - root 不存在 → 提示 ``tars install --target cac``（或等 nga）
+      - host_session 缺 → fail-loud 提示（设 sidechain.host_session 或显式 --host-session）
+
+    Returns:
+        ``{name, hard, status, detail}``；status ∈ {"pass","unknown","fail"}。
+    """
+    # lazy import：events 层 adapter resolver（events → iface 单向依赖，合法方向）。
+    from orca.events.adapters._family import (
+        CC_FAMILY_DOTDIR,
+        OPENCODE_FAMILY_DOTDIR,
+        detect_cc_existing_roots,
+        detect_opencode_existing_dbs,
+        resolve_cc_sidechain_root,
+        resolve_opencode_db,
+    )
+
+    host_session = _host_session_from_env()
+    cfg_family = _read_sidechain_family_from_config()
+    has_cc_env = bool(os.environ.get("CLAUDE_CODE_SESSION_ID"))
+    has_opencode_env = bool(os.environ.get("ORCA_HOST_SESSION_ID"))
+
+    hints: list[str] = []
+
+    if has_cc_env:
+        # CC 家族：cc/cac。resolver 探测歧义默认 cc。
+        try:
+            root, src = resolve_cc_sidechain_root(
+                host_session or "", family=cfg_family, cwd=os.getcwd(),
+            )
+        except ValueError as e:
+            return {
+                "name": "sidechain_backend", "hard": False, "status": "fail",
+                "detail": f"CC 家族 backend 解析失败：{e}",
+            }
+        existing = detect_cc_existing_roots(host_session or "", cwd=os.getcwd())
+        root_exists = root.exists()
+        available = root_exists and bool(host_session)
+
+        # family effective（用于报告；resolver 内部已决策）：
+        # 注意：本模块顶层有 typer 命令 ``def next(...)`` 遮蔽 Python builtin ``next``，
+        # 故用 ``list(existing)[0]`` 取单元素（不能用 ``next(iter(...))``）。
+        if cfg_family in CC_FAMILY_DOTDIR:
+            fam_eff, fam_src = cfg_family, "config"
+        elif len(existing) == 1:
+            fam_eff, fam_src = list(existing)[0], "probe"
+        elif len(existing) == 2:
+            fam_eff, fam_src = "cc", "probe-ambig"
+        else:
+            fam_eff, fam_src = "cc", "default"
+
+        if len(existing) == 2 and cfg_family is None:
+            hints.append(
+                "探测到 .claude + .cac 两存歧义（默认 .claude）；"
+                "建议 config 设 sidechain.family 明确（'cc' 或 'cac'）。"
+            )
+        if not root_exists:
+            hints.append(
+                f"resolved root 不存在：{root}；"
+                "若用 cac，确认 `tars install --target cac` 已跑且 session 已派过子 agent。"
+            )
+        if not host_session:
+            hints.append(
+                "未检测到 host_session env（CLAUDE_CODE_SESSION_ID）；B2 子 agent 过程推送不可用。"
+                "in-session 路径下宿主 shell 必须有此 env（CC/cac 自动注入）；daemon 也接受显式"
+                " ``--host-session`` argv 作 fallback。"
+            )
+        status = "pass" if available else ("unknown" if not host_session else "fail")
+        return {
+            "name": "sidechain_backend", "hard": False, "status": status,
+            "detail": (
+                f"family={fam_eff}（source={fam_src}）；"
+                f"resolved_root={root}；root_source={src}；"
+                f"root_exists={root_exists}；host_session_set={bool(host_session)}；"
+                f"available={available}。"
+                f"hint: {' '.join(hints) if hints else '（无）'}"
+            ),
+        }
+
+    if has_opencode_env:
+        try:
+            db_path, src = resolve_opencode_db(family=cfg_family)
+        except ValueError as e:
+            return {
+                "name": "sidechain_backend", "hard": False, "status": "fail",
+                "detail": f"opencode 家族 DB 解析失败：{e}",
+            }
+        existing = detect_opencode_existing_dbs()
+        db_exists = db_path.is_file()
+        available = db_exists and bool(host_session)
+
+        if cfg_family in OPENCODE_FAMILY_DOTDIR:
+            fam_eff, fam_src = cfg_family, "config"
+        elif len(existing) == 1:
+            # ``list(existing)[0]`` 而非 ``next(iter(...))``——本模块 ``def next`` 遮蔽 builtin。
+            fam_eff, fam_src = list(existing)[0], "probe"
+        elif len(existing) == 2:
+            fam_eff, fam_src = "opencode", "probe-ambig"
+        else:
+            fam_eff, fam_src = "opencode", "default"
+
+        if len(existing) == 2 and cfg_family is None:
+            hints.append(
+                "探测到 .opencode + .nga 两存歧义（默认 opencode）；"
+                "建议 config 设 sidechain.family 明确。"
+            )
+        if not db_exists:
+            hints.append(
+                f"DB 不存在：{db_path}；若用 nga，确认 `tars install --target nga` 已跑"
+                "且 opencode/nga session 已活跃。"
+            )
+        if not host_session:
+            hints.append(
+                "未检测到 host_session env（ORCA_HOST_SESSION_ID）；B2 子 agent 过程推送不可用。"
+                "in-session 路径下需 opencode plugin ``shell.env`` hook 注入；daemon 也接受显式"
+                " ``--host-session`` argv 作 fallback。"
+            )
+        status = "pass" if available else ("unknown" if not host_session else "fail")
+        return {
+            "name": "sidechain_backend", "hard": False, "status": status,
+            "detail": (
+                f"family={fam_eff}（source={fam_src}）；"
+                f"resolved_db={db_path}；db_source={src}；"
+                f"db_exists={db_exists}；host_session_set={bool(host_session)}；"
+                f"available={available}。"
+                f"hint: {' '.join(hints) if hints else '（无）'}"
+            ),
+        }
+
+    # 都无 env：非 in-session 起 run（如纯 headless 或 CI 跑 doctor）。
+    return {
+        "name": "sidechain_backend", "hard": False, "status": "unknown",
+        "detail": (
+            "未检测到 CC/opencode env（CLAUDE_CODE_SESSION_ID / ORCA_HOST_SESSION_ID）；"
+            "sidechain 守护仅在 in-session run 中起作用（B2 子 agent 过程推送）。"
+            "如确在 in-session 跑，检查 plugin 是否注入了 host_session env。"
+        ),
+    }
+
+
 @app.command()
 def doctor(
     log_level: str = typer.Option("INFO", "--log-level", help="INFO/DEBUG/WARN/ERROR"),
@@ -1374,6 +1554,10 @@ def doctor(
     TARS 品牌；底层 orca CLI 引擎）+ ② ``cli_imports_ok``（CLI 后端可达）。旧两钩子
     （transform / idle）的心跳退居**可选**诊断（``ORCA_DIAGNOSE=1`` 时 plugin 写心跳，
     doctor 读取作证），**不计入 ok**——hook 不再推进，缺心跳不是故障。
+
+    SPEC §P4 新增 ``sidechain_backend`` 可选 check（hard=False）：检测家族（env+config+探测）
+    + 输出 resolved root/DB + source + 存在性 + host_session 可用性 + 修复建议（cac/nga 适配
+    诊断；用户从 doctor 获取 resolved 路径）。
     """
     _setup_logging(log_level)
 
@@ -1466,7 +1650,12 @@ def doctor(
         a_detail = f"{tag}：idle fire 过 {idle_n} 次（{age}s 前）。仅 nudge，非推进依赖。"
     checks.append({"name": "advance_hook", "hard": False, "status": a_status, "detail": a_detail})
 
-    # ok = 仅 ``hard=True`` 的检查无 fail。可选检查（diag/hook）不计数。
+    # ⑤ sidechain_backend（可选诊断，SPEC §P4）：B2 子 agent 过程推送依赖的路径解析情况。
+    # hard=False：doctor 不因此 fail；输出 resolved 路径 + source + 存在性 + hint 供用户排查
+    # cac/nga 适配（SPEC §P4 验收「从 doctor 获取 resolved 路径」）。
+    checks.append(_check_sidechain_backend())
+
+    # ok = 仅 ``hard=True`` 的检查无 fail。可选检查（diag/hook/sidechain）不计数。
     ok = all(c["status"] != "fail" for c in checks if c.get("hard"))
 
     lines = ["Orca in-session 诊断（v5：B 路径，skill 驱动入口）", ""]

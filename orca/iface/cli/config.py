@@ -23,10 +23,27 @@
     {
       "binaries":       {"opencode": "nga"},
       "flags":          {"opencode": "run --format json"},
-      "prompt_channel": {"opencode": "argv"}
+      "prompt_channel": {"opencode": "argv"},
+      "sidechain":      {"family": "cac"}
     }
 
-  三个 dict 均可缺省（缺 = 该维无 override，走 profile default）。
+  三个 spawn 维度 dict（``binaries`` / ``flags`` / ``prompt_channel``）均可缺省
+  （缺 = 该维无 override，走 profile default）。
+
+  ``sidechain``（SPEC §P4，**独立于 ``CONFIG_FIELDS`` 三 spawn 维度**）：
+  sidechain 是路径解析维度，不是 spawn 参数维度——由 iface 层（``cli._spawn_sidechain_daemon``
+  / ``doctor``）直接读 ``load_merged_config().get("sidechain")``，**不**经
+  ``CONFIG_FIELDS`` / ``apply_config_env`` / env 注入流程。``load_merged_config`` 透传未知
+  key（``dict(user)`` 起手），``sidechain`` 作为 user/project config 的未知 key 自动透传。
+  字段（均可缺省）：
+    - ``family`` (str): 家族覆盖，``"cc"`` / ``"cac"`` / ``"opencode"`` / ``"nga"``。
+      设置后 daemon 把 family 经 argv ``--family`` 透传给 adapter resolver，覆盖 dotdir 探测
+      （歧义默认 .claude / .opencode，SPEC §P4 验收 #2）。合法性由 resolver 校验，**此处不校验**。
+
+  注：host_session 仍只从 env 读（``_host_session_from_env`` 零改，SPEC §P4 P0-7 spike 前置）；
+  config 不提供 host_session fallback——避免文档化未实装的 hook（YAGNI：spike 确认 cac env 行为
+  后再加）。doctor hint 据此只指引 ``--host-session`` argv（真实可工作路径），不引导用户走不通的
+  config 字段。
 
 **shell env 快照**：首次 ``bootstrap_config()`` 前抓 ``ORCA_*`` env 快照，供 ``executor show`` 区分
 「shell export」与「config 注入」两层来源（注入后 os.environ 已被污染，无法事后区分）。快照只用于

@@ -53,6 +53,7 @@ import sqlite3
 from pathlib import Path
 from typing import Iterator
 
+from orca.events.adapters._family import resolve_opencode_db
 from orca.events.raw_agent_event import ChildRef, Cursor, RawAgentEvent
 
 logger = logging.getLogger(__name__)
@@ -65,25 +66,35 @@ class OpencodeAdapterError(RuntimeError):
     """opencode adapter 配置错误（fail loud；daemon catch 后 CRITICAL log + exit）。"""
 
 
-def _resolve_db_path(db_path: Path | None = None) -> Path:
-    """opencode session sqlite DB 路径。
+def _resolve_db_path(
+    db_path: Path | None = None, *, family: str | None = None,
+) -> Path:
+    """opencode sqlite DB 路径（SPEC §P4：委托 ``_family.resolve_opencode_db``）。
 
     解析顺序：
-      1. ``db_path`` 显式参数（测试用）。
-      2. ``ORCA_OPENCODE_DB`` env（测试覆盖）。
-      3. 默认：``~/.local/share/opencode/session.db``（opencode v1.14+ 实测）。
+      1. ``db_path`` 显式参数（测试用，最高优先级）。
+      2. ``ORCA_OPENCODE_DB`` env（source="env"）。
+      3. ``family`` 显式（"opencode"/"nga"，daemon 从 config 读透传）→ source="config"
+      4. 探测 ``.opencode`` / ``.nga`` 哪个 dotdir 有 opencode.db → source="probe"
+      5. 默认 ``opencode.db`` > ``session.db`` 回退（B2-VRFY Bug #1）→ source="default"
+
+    Args:
+        db_path: 显式 DB 路径（测试用；最高优先级，覆盖 env / family / 派生）。
+        family: 显式家族（"opencode"/"nga"），覆盖探测；None → 走探测。
+
+    Returns:
+        DB 文件 ``Path``（**不保证存在**；caller ``is_file`` 判定）。
+
+    Raises:
+        OpencodeAdapterError: ``family`` 非法。
     """
     if db_path is not None:
         return Path(db_path)
-    env_db = os.environ.get("ORCA_OPENCODE_DB")
-    if env_db:
-        return Path(env_db)
-    # B2-VRFY local patch: real opencode v1.18 writes to opencode.db (not session.db
-    # as SPEC §5 assumed). Try opencode.db first, fall back to session.db for compat.
-    default_opencode = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
-    if default_opencode.is_file():
-        return default_opencode
-    return Path.home() / ".local" / "share" / "opencode" / "session.db"
+    try:
+        resolved, _source = resolve_opencode_db(family=family)
+    except ValueError as e:
+        raise OpencodeAdapterError(str(e)) from e
+    return resolved
 
 
 class OpencodeSqliteAdapter:
@@ -106,10 +117,15 @@ class OpencodeSqliteAdapter:
         host_session: str,
         *,
         db_path: Path | None = None,
+        family: str | None = None,
     ) -> None:
         """Args:
             host_session: 宿主 opencode session id（必非空）。
-            db_path: opencode session sqlite 路径（测试用；覆盖 env / 默认）。
+            db_path: opencode session sqlite 路径（测试用；覆盖 env / family / 默认）。
+            family: 显式家族 ``"opencode"`` / ``"nga"``（SPEC §P4）。``db_path`` 给定时忽略；
+                否则透传给 ``resolve_opencode_db`` 覆盖探测（source="config"）。daemon 从
+                config ``sidechain.family`` 读入经 argv ``--family`` 透传；adapter 自身不读
+                config（events 层依赖铁律）。
         """
         if not host_session:
             raise OpencodeAdapterError(
@@ -117,7 +133,7 @@ class OpencodeSqliteAdapter:
                 "（需要 ORCA_HOST_SESSION_ID 或显式 --host-session）"
             )
         self._host_session = host_session
-        self._db_path = _resolve_db_path(db_path)
+        self._db_path = _resolve_db_path(db_path, family=family)
 
     @property
     def db_path(self) -> Path:

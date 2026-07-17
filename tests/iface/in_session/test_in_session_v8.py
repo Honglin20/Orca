@@ -99,7 +99,7 @@ def _install_fake_entry_skill(
 
 
 def test_doctor_json_structure(doctor_iso, monkeypatch):
-    """doctor 输出 JSON {ok, diag, report, checks} + 4 项 checks（FU-2 删 entry_hook 后）。"""
+    """doctor 输出 JSON {ok, diag, report, checks} + 5 项 checks（SPEC §P4 加 sidechain_backend）。"""
     monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
     reply = _run_doctor()
     assert set(reply.keys()) >= {"ok", "diag", "report", "checks"}
@@ -107,15 +107,17 @@ def test_doctor_json_structure(doctor_iso, monkeypatch):
     assert isinstance(reply["diag"], bool)
     assert isinstance(reply["report"], str) and len(reply["report"]) > 0
     assert isinstance(reply["checks"], list)
-    assert len(reply["checks"]) == 4
+    assert len(reply["checks"]) == 5
     names = [c["name"] for c in reply["checks"]]
     # FU-2：entry_hook 已删（transform step 4 整删后 PROBE_ENTRY 心跳永不再写，dead）。
-    # 顺序：skill_install / cli_imports_ok（硬）在前，diag_switch / advance_hook（可选）在后。
+    # 顺序：skill_install / cli_imports_ok（硬）在前，diag_switch / advance_hook / sidechain_backend
+    # （可选）在后。SPEC §P4 加 sidechain_backend（hard=False）：B2 子 agent 过程路径诊断。
     assert names == ["skill_install", "cli_imports_ok", "diag_switch",
-                     "advance_hook"]
+                     "advance_hook", "sidechain_backend"]
     # 每条 check 带 hard 字段（review 🟡#5：替代硬编码 name tuple 防 typo 静默丢失硬检查）
     hard_expected = {"skill_install": True, "cli_imports_ok": True,
-                     "diag_switch": False, "advance_hook": False}
+                     "diag_switch": False, "advance_hook": False,
+                     "sidechain_backend": False}
     for c in reply["checks"]:
         assert set(c.keys()) == {"name", "status", "detail", "hard"}, (
             f"check {c['name']} 字段漂移：{set(c.keys())}"
@@ -214,6 +216,177 @@ def test_doctor_report_describes_b_path(doctor_iso, monkeypatch):
     # advance 心跳文件路径写进报告（entry 路径行 FU-2 删，不再断言）
     assert ".orca-probe-advance.json" in reply["report"]
     assert ".orca-probe-entry.json" not in reply["report"]  # FU-2 守门：entry 路径不再出现
+
+
+# ── SPEC §P4：sidechain_backend check（cac/nga 路径诊断）─────────────────────
+
+
+def _sidechain_check(reply: dict) -> dict:
+    """从 doctor reply 抽 sidechain_backend check。"""
+    matches = [c for c in reply["checks"] if c["name"] == "sidechain_backend"]
+    assert len(matches) == 1, f"应有恰好 1 个 sidechain_backend check，得 {len(matches)}"
+    return matches[0]
+
+
+def test_doctor_sidechain_backend_no_env_reports_unknown(doctor_iso, monkeypatch):
+    """无 CC/opencode env → status=unknown（非 in-session run，B2 不适用）。"""
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    _install_fake_entry_skill(doctor_iso, "cc")
+    reply = _run_doctor()
+    check = _sidechain_check(reply)
+    assert check["hard"] is False
+    assert check["status"] == "unknown"
+    assert "未检测到" in check["detail"]
+    # hard=False → 不影响 ok（既有 skill+cli 硬检查主导）。
+    assert reply["ok"] is True
+
+
+def test_doctor_sidechain_backend_cc_default_when_no_dirs(doctor_iso, monkeypatch):
+    """有 CC env + 无 .claude/.cac 目录 → default .claude；root_exists=False。
+
+    SPEC §P4 验收「doctor 输出 resolved 路径 + source + 存在性」。
+    """
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "host-sid-123")
+    _install_fake_entry_skill(doctor_iso, "cc")
+    reply = _run_doctor()
+    check = _sidechain_check(reply)
+    assert check["hard"] is False
+    # 无目录存在 → root_exists=False → status=fail（hard=False 不影响 ok）。
+    assert check["status"] == "fail"
+    detail = check["detail"]
+    assert "family=cc" in detail
+    assert "resolved_root=" in detail
+    assert "root_source=default" in detail
+    assert "root_exists=False" in detail
+    assert "host_session_set=True" in detail
+    assert "available=False" in detail
+    assert "tars install --target cac" in detail  # 不存在时 hint
+
+
+def test_doctor_sidechain_backend_cc_ambiguity_hint(doctor_iso, monkeypatch):
+    """SPEC §P4 验收 #2：cc+cac 同装无 config → 默认 .claude + doctor 报告歧义 hint。"""
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "host-sid-amb")
+    _install_fake_entry_skill(doctor_iso, "cc")
+
+    # 在 doctor_iso（=tmp_path，也是 Path.home() 注入目标）下建 cc + cac 同 sid 的 subagents
+    # 目录，触发 detect_cc_existing_roots 返 {'cc','cac'}（歧义）。
+    encoded = str(doctor_iso).replace("/", "-")  # _encode_cwd 等价
+    for dotdir in (".claude", ".cac"):
+        root = doctor_iso / dotdir / "projects" / encoded / "host-sid-amb" / "subagents"
+        root.mkdir(parents=True)
+
+    reply = _run_doctor()
+    check = _sidechain_check(reply)
+    detail = check["detail"]
+    # 默认 .claude + family=cc。
+    assert "family=cc" in detail
+    assert "source=probe-ambig" in detail
+    # 歧义 hint（SPEC §P4 验收 #2）。
+    assert "歧义" in detail
+    assert "sidechain.family" in detail  # 建议设 config
+    # 两路径都存在 → root_exists=True → available。
+    assert "root_exists=True" in detail
+
+
+def test_doctor_sidechain_backend_cc_cac_only_probe(doctor_iso, monkeypatch):
+    """SPEC §P4 验收 #1 场景：仅 .cac 存在 → probe 胜指向 cac。
+
+    doctor 应报告 family=cac（source=probe）+ root_exists=True。
+    """
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "host-sid-cac")
+    _install_fake_entry_skill(doctor_iso, "cc")
+
+    encoded = str(doctor_iso).replace("/", "-")
+    cac_root = doctor_iso / ".cac" / "projects" / encoded / "host-sid-cac" / "subagents"
+    cac_root.mkdir(parents=True)
+
+    reply = _run_doctor()
+    check = _sidechain_check(reply)
+    detail = check["detail"]
+    assert "family=cac" in detail
+    assert "source=probe" in detail
+    assert "root_exists=True" in detail
+    assert "available=True" in detail
+    assert check["status"] == "pass"
+    # 单一存在无歧义 hint。
+    assert "歧义" not in detail
+
+
+def test_doctor_sidechain_backend_opencode_family(doctor_iso, monkeypatch):
+    """opencode 家族：有 ORCA_HOST_SESSION_ID + nga DB 存在 → probe 胜。"""
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.setenv("ORCA_HOST_SESSION_ID", "host-sid-opc")
+    _install_fake_entry_skill(doctor_iso, "cc")
+
+    # 建 ~/.local/share/nga/opencode.db（fake_home=doctor_iso）。
+    nga_db = doctor_iso / ".local" / "share" / "nga" / "opencode.db"
+    nga_db.parent.mkdir(parents=True)
+    nga_db.write_bytes(b"")
+
+    reply = _run_doctor()
+    check = _sidechain_check(reply)
+    detail = check["detail"]
+    assert "family=nga" in detail
+    assert "resolved_db=" in detail
+    assert "db_source=probe" in detail
+    assert "db_exists=True" in detail
+    assert "available=True" in detail
+    assert check["status"] == "pass"
+
+
+def test_doctor_sidechain_backend_config_family_override(doctor_iso, monkeypatch):
+    """config sidechain.family 覆盖探测：即便 .claude 存在，family=cac → resolved 指向 .cac。"""
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "host-sid-cfg")
+    _install_fake_entry_skill(doctor_iso, "cc")
+
+    # 建 .claude（probe 会选它），但 config 设 family=cac。
+    encoded = str(doctor_iso).replace("/", "-")
+    cc_root = doctor_iso / ".claude" / "projects" / encoded / "host-sid-cfg" / "subagents"
+    cc_root.mkdir(parents=True)
+
+    # 写 user-scope config（load_merged_config 读 ~/.orca/config.json）。
+    cfg = doctor_iso / ".orca" / "config.json"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text('{"sidechain": {"family": "cac"}}', encoding="utf-8")
+
+    reply = _run_doctor()
+    check = _sidechain_check(reply)
+    detail = check["detail"]
+    # config 胜：family=cac（source=config）。
+    assert "family=cac" in detail
+    assert "source=config" in detail
+    # resolved 指向 .cac（即便不存在，config 显式）。
+    assert ".cac" in detail
+    assert "root_source=config" in detail
+
+
+def test_doctor_sidechain_backend_hard_false_does_not_affect_ok(doctor_iso, monkeypatch):
+    """sidechain_backend hard=False → status=fail 不拉低 ok（hard 检查主导）。
+
+    守门 SPEC §P4：不破坏既有 hard check（skill_install/cli_imports_ok）的 ok 逻辑。
+    """
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "host-sid-noroot")
+    _install_fake_entry_skill(doctor_iso, "cc")
+    # 无目录 → sidechain_backend status=fail。
+    reply = _run_doctor()
+    check = _sidechain_check(reply)
+    assert check["hard"] is False
+    assert check["status"] == "fail"
+    # 但 skill + cli 硬检查 pass → ok=True。
+    assert reply["ok"] is True
 
 
 # ── v5 §4.4 / step 2b(7)：orca.ts idle nudge（提醒，绝不推进）───────────────────

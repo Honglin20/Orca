@@ -265,6 +265,7 @@ async def _run_sidechain_daemon(
     since_ts: int,
     *,
     poll_interval: float = _DEFAULT_POLL_SECONDS,
+    family: str | None = None,
 ) -> None:
     """守护主协程（与 ``chart_daemon._run_daemon`` 同款骨架，主体新写）。
 
@@ -287,7 +288,7 @@ async def _run_sidechain_daemon(
         run_id, len(ingestor.seen_source_ids), ingestor.current_node,
     )
 
-    adapter = _make_adapter(backend, host_session)
+    adapter = _make_adapter(backend, host_session, family=family)
 
     # driver factory：每次返新 driver + 新 ingestor（含 rebuild）。
     def make_driver() -> _SidechainDriver:
@@ -375,19 +376,29 @@ async def _run_sidechain_daemon(
 # ── backend adapter dispatch（SPEC §0：唯一 backend 分支，grep 守门豁免）─────
 
 
-def _make_adapter(backend: str, host_session: str) -> ReadAdapter:
+def _make_adapter(
+    backend: str, host_session: str, *, family: str | None = None,
+) -> ReadAdapter:
     """选 adapter（唯一 ``if backend ==`` 分支；``sidechain_daemon.py`` 内允许，grep 守门豁免）。
 
     SPEC §0：backend 差异**只许**在 ``*_adapter.py`` + ``*_daemon.py`` 启动参数。本函数 + argv
     ``--backend`` 是「启动参数」例外；ingestor / IR / 前端零 backend 感知。
+
+    Args:
+        backend: ``"cc"`` / ``"opencode"``（argv ``--backend``）。
+        host_session: 宿主 session id。
+        family: SPEC §P4 家族（``"cc"``/``"cac"``/``"opencode"``/``"nga"``），由 cli 从
+            config ``sidechain.family`` 读入经 argv ``--family`` 透传；None → adapter 走探测。
+            **与 backend 独立**：``family`` 决定路径 dotdir（cc vs cac），``backend`` 决定 adapter
+            类（CCJsonl vs OpencodeSqlite）。adapter 自身不读 config（events 层依赖铁律）。
     """
     # 用 ``backend ==`` 字面比较（grep 守门 pattern 不命中本文件 —— 本文件名是
     # ``sidechain_daemon.py``，不在 ``cc_jsonl_adapter.py`` / ``opencode_sqlite_adapter.py``
     # 通配范围；且 SPEC §0 明示 ``*_daemon.py`` 豁免）。
     if backend == "cc":
-        return CCJsonlAdapter(host_session)
+        return CCJsonlAdapter(host_session, family=family)
     if backend == "opencode":
-        return OpencodeSqliteAdapter(host_session)
+        return OpencodeSqliteAdapter(host_session, family=family)
     # fail loud：未知 backend 不静默回退。
     raise ValueError(
         f"unknown backend {backend!r}（预期 'cc' 或 'opencode'）"
@@ -454,6 +465,12 @@ def main() -> int:
         help="宿主 session id（CC CLAUDE_CODE_SESSION_ID / opencode ORCA_HOST_SESSION_ID）",
     )
     parser.add_argument(
+        "--family", default=None,
+        help="SPEC §P4 家族覆盖（cc/cac 对 backend=cc；opencode/nga 对 backend=opencode）；"
+             "省略 → resolver 探测（.claude/.cac / .opencode/.nga 哪个存在）。"
+             "cli 从 config sidechain.family 读入透传。",
+    )
+    parser.add_argument(
         "--ttl", type=int, default=_DEFAULT_TTL_SECONDS,
         help=f"守护 TTL 兜底秒数（默认 {_DEFAULT_TTL_SECONDS}s = 6h）",
     )
@@ -500,6 +517,7 @@ def main() -> int:
                 backend=args.backend,
                 since_ts=since_ts,
                 poll_interval=args.poll_interval,
+                family=args.family,
             )
         )
     except KeyboardInterrupt:

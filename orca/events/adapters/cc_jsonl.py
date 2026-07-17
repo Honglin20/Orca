@@ -50,6 +50,10 @@ import os
 from pathlib import Path
 from typing import Iterator
 
+from orca.events.adapters._family import (
+    _encode_cwd,  # re-export：既有 ``from cc_jsonl import _encode_cwd`` 零回归
+    resolve_cc_sidechain_root,
+)
 from orca.events.raw_agent_event import ChildRef, Cursor, RawAgentEvent
 
 logger = logging.getLogger(__name__)
@@ -62,42 +66,37 @@ class CCAdapterError(RuntimeError):
     """CC adapter 配置/路径错误（fail loud；daemon 主体 catch 后 CRITICAL log + exit）。"""
 
 
-def _encode_cwd(cwd: str) -> str:
-    """``<encoded-cwd>`` = cwd 的 ``/`` → ``-``（CC projects 目录约定，spike 实证）。
+def _resolve_sidechain_root(
+    host_session: str, *, cwd: str | None = None, family: str | None = None,
+) -> Path:
+    """解析 sidechain root（SPEC §P4：委托 ``_family.resolve_cc_sidechain_root``）。
 
-    e.g. ``/mnt/d/Projects/Orca`` → ``-mnt-d-Projects-Orca``。
-    """
-    return cwd.replace("/", "-")
-
-
-def _resolve_sidechain_root(host_session: str, *, cwd: str | None = None) -> Path:
-    """``~/.claude/projects/<encoded-cwd>/<host_session>/subagents/``。
-
-    解析顺序：
-      1. ``ORCA_CC_SIDECHAIN_ROOT`` env（测试覆盖；绝对路径，直接用）。
-      2. 默认派生：``~/.claude/projects/<encoded-cwd>/<host_session>/subagents/``。
+    解析顺序（resolver 内部，本函数仅丢弃 source 标记返路径）：
+      1. ``ORCA_CC_SIDECHAIN_ROOT`` env（测试覆盖；绝对路径，直接用）
+      2. ``family`` 显式（"cc"/"cac"，由 daemon argv ``--family`` 透传）→ source="config"
+      3. 探测 ``.cac`` / ``.claude``（歧义默认 .claude）→ source="probe"
+      4. 默认 ``.claude`` → source="default"
 
     Args:
-        host_session: 宿主 CC session id（必非空，否则 raise）。
+        host_session: 宿主 CC session id（env 路径下可空；其它路径下空 → raise）。
         cwd: 当前工作目录（默认 ``os.getcwd()``）；用于派生 ``<encoded-cwd>``。
+        family: 显式家族（"cc"/"cac"），覆盖探测；None → 走探测。daemon 从 config
+            ``sidechain.family`` 读入透传；adapter 自身不读 config（events 层依赖铁律）。
 
     Returns:
         sidechain root 目录 ``Path``（**不保证存在**；调用方 ``is_dir`` 判定）。
 
     Raises:
-        CCAdapterError: ``host_session`` 为空。
+        CCAdapterError: ``host_session`` 为空（非 env 路径下）；或 ``family`` 非法。
     """
-    env_root = os.environ.get("ORCA_CC_SIDECHAIN_ROOT")
-    if env_root:
-        return Path(env_root)
-    if not host_session:
-        raise CCAdapterError(
-            "CC sidechain root 解析失败：host_session 为空"
-            "（需要 CLAUDE_CODE_SESSION_ID 或显式 --host-session）"
+    try:
+        root, _source = resolve_cc_sidechain_root(
+            host_session, cwd=cwd, family=family,
         )
-    actual_cwd = cwd or os.getcwd()
-    encoded = _encode_cwd(actual_cwd)
-    return Path.home() / ".claude" / "projects" / encoded / host_session / "subagents"
+    except ValueError as e:
+        # 包装成 CCAdapterError（保留 fail loud 语义 + 既有 ``pytest.raises(CCAdapterError)`` 测试）。
+        raise CCAdapterError(str(e)) from e
+    return root
 
 
 class CCJsonlAdapter:
@@ -115,19 +114,25 @@ class CCJsonlAdapter:
         *,
         cwd: str | None = None,
         root: Path | None = None,
+        family: str | None = None,
     ) -> None:
         """Args:
             host_session: 宿主 CC session id（必非空，否则 ``stream``/``discover`` fail loud）。
             cwd: 当前工作目录（默认 ``os.getcwd()``）。``root`` 给定时忽略。
-            root: 显式 sidechain root（测试用；覆盖 env 与派生）。
+            root: 显式 sidechain root（测试用；覆盖 env / family / 派生）。
+            family: 显式家族 ``"cc"`` / ``"cac"``（SPEC §P4）。``root`` 给定时忽略；
+                否则透传给 ``resolve_cc_sidechain_root`` 覆盖探测（source="config"）。
+                daemon 从 config ``sidechain.family`` 读入经 argv ``--family`` 透传；
+                adapter 自身不读 config（events 层依赖铁律）。
         """
         self._host_session = host_session
         self._cwd = cwd
+        self._family = family
         if root is not None:
             self._root = Path(root)
         else:
-            # fail loud at construct：host_session 空 → raise（无意义继续）。
-            self._root = _resolve_sidechain_root(host_session, cwd=cwd)
+            # fail loud at construct：host_session 空 + 无 env → raise（无意义继续）。
+            self._root = _resolve_sidechain_root(host_session, cwd=cwd, family=family)
 
     @property
     def root(self) -> Path:
