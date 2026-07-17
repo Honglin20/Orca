@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-18] Web 前端呈现层完善（P1-P5：log 降噪 / 子 agent 维度 / 左栏重做 / cac-nga / 美化）
+
+B2 把子 agent 过程事件推 tape 后前端暴露 6 痛点（log 暴涨 / 对话异常长 / 执行完才显示 / 左栏割裂 / ITERATION 难观测 / cac-nga 不适用），根因同源于「子 agent 维度缺失 + 无事件分级」。5 阶段：**P1** LogStream 分级 classifier（e3b8ad 4779→19 行，过程事件归 ConversationView）/ **P2** 会话按 (node,session_id) 分段 + store in-order 增量 fold + nodesIndex（buildEntries 4226→~208）/ **P3** 左栏统一底色+根治 GAP(w-56→w-full)+NODE_STATUS_HEX 色条+Setup/Loop/Finalize 分组+R{iter}+子 agent 折叠 / **P4** cac/nga 家族路径解析（_family.py 零 iface import，env>config>probe>default）+ doctor sidechain_backend check / **P5** 图表可读(axis-tick slate-700)+统一 cursor 消 hover 黄+去 cost+9 token 明暗双套（reviewer 抓 R1 CSS hsl→rgb bug）。参考 microsoft/conductor 双 classifier 分流。spec-reviewer conditional-pass 全闭环（7 P0+5 P1+4 P2）；test-agent 真机（e3b8ad + react-dom/server）全 PASS 无 P0。事故：P2 stash 险丢并行 P4（已恢复零损失+memory 固化 git 禁令）。Commits: `0a4683d`(P1)/`b77422f`(P4)/`3a0f66e`(P2)/`7cc232e`(P3)/`f0cf695`(P5)/`2d416eb`(构建产物)。详见 [release note](../releases/2026-07-18-web-presentation-refinement.md)。
+
 ## [2026-07-17] B2 test-agent 真机 E2E 收尾：3 P0 bug 修复 + 5 回归测试
 
 test-agent 真机 E2E（4435 真 CC `agent-*.jsonl` + 573 真 opencode `event` 表行 → 真 daemon subprocess → 真 tape → 真 `tars serve` HTTP → 真 react-dom 渲染）暴露原代码（`ed5cbeb`）3 个**单测盲区 P0**（79 单测全 PASS 但真机死）：① opencode DB 路径错（代码找 `session.db`，真机 v1.18 写 `opencode.db` → discover 静默返空 → ingest 0 事件）② opencode `source_id=opc:{seq}` 跨 child 撞车（event PK=`(aggregate_id,seq)`、seq per-session 非 global，多 child 44% 撞 → dedup 静默丢）③ text-mode `seek(字节)/read(字符)` 混算在多字节 UTF-8 tape 崩（offset 漂移到 continuation byte → `UnicodeDecodeError` 非 OSError 未兜住；波及共享 `chart_daemon`，B2 引入中文 agent_* 必崩）。修复：`opencode.db` 优先 + `source_id=opc:{child}:{seq}` + 三处 binary-mode（byte seek + `rfind(b"\n")` + decode）。补 5 回归测试。fix 后 64（B2+回归）+ 7（chart）+ 20（daemon）全 PASS；grep 守门 0 hit；test-agent V1-V10 全链路真机 PASS（实时 ≤1.0s / 幂等 / 无串台）。Commit: `99efcde`。
