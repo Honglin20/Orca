@@ -1,5 +1,5 @@
 name: nas-agent-pipeline
-description: "端到端 NAS 自动化流水线：模型优化 → 超网生成 → 训练脚本 → 搜索脚本 → 训练执行 → 架构评估"
+description: "端到端 NAS 自动化流水线（含可视化）：模型优化 → 超网生成 → [描述图] → 训练脚本 → 搜索脚本 → 训练/搜索执行(曲线刷新) → 架构评估 → [帕累托/漏斗图]"
 entry: model_optimizer
 inputs:
   model_path:
@@ -23,57 +23,19 @@ nodes:
   - name: model_optimizer
     kind: agent
     executor: opencode
-    model: "deepseek/deepseek-v4-flash"
-    tools:
-      - bash
-      - read
-      - write
-      - edit
-      - glob
-      - grep
-      - task
-      - todowrite
-    prompt: |
-      你是 NAS 流水线的第一步：**PyTorch 模型优化与超网生成**。
+    model: "deepseek/deepseek-v4-pro"
+    agent: pytorch-model-optimizer
+    routes:
+      - to: viz_describe
 
-      ## 输入
-      - 模型文件: `{{ inputs.model_path }}`
-      - 项目根目录: `{{ inputs.project_root }}`
-      - 输出目录: `{{ inputs.output_dir }}`（空则自动推断为 `llm_artifacts/<model_name>/`）
-
-      ## 准备工作
-      1. 激活 Python 虚拟环境:
-         ```bash
-         source .venv/bin/activate
-         ```
-      2. 定位 nas-agent 项目根目录:
-         ```bash
-         python -c "from pathlib import Path; import nas_agent; print(Path(nas_agent.__file__).resolve().parent.parent)"
-         ```
-         记作 `<nas_agent_root>`。
-      3. 如果 `{{ inputs.output_dir }}` 为空，读取模型文件内容推断模型名，设定输出目录为 `llm_artifacts/<inferred_name>/`。
-
-      ## 执行流程
-
-      读取 `<nas_agent_root>/.agents/skills/pytorch-model-optimizer/SKILL.md` 获取完整工作流。
-      按照其中的 7 个步骤执行（使用 todowrite 跟踪进度）：
-
-      Step 1: 展平模型为独立可运行文件 `<base_name>_flat.py`
-      Step 2: 分析并推荐优化规则。**自动化模式**: 强制就绪规则自动应用，可选规则默认全部采纳（跳过交互确认）。
-      Step 3: 应用已批准的规则，输出 `<base_name>_llm-optimized.py`
-      Step 4: 对模型进行 NAS 架构分类
-      Step 5: 生成 `supernet.py`，启动 supernet-evaluator 子 agent 迭代验证
-      Step 6: 检查并优化 SearchSpace
-      Step 7: 输出 `supernet_summary.md`
-
-      ## 输出
-      任务完成后，输出以下信息的结构化摘要：
-      ```
-      OUTPUT_DIR: <绝对路径>
-      MODEL_TYPE: <cnn|hierarchical_transformer|isotropic_transformer>
-      ARTIFACTS: <生成文件列表>
-      OPTIMIZATION_APPLIED: <是/否>
-      ```
+  # ═══════════════════════════════════════════════════════════════
+  # Agent 1.5: 可视化——基线模型表 + 超网/搜索空间表（C1/C2）
+  # ═══════════════════════════════════════════════════════════════
+  - name: viz_describe
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-pro"
+    agent: nas-viz
     routes:
       - to: train_script_gen
 
@@ -83,55 +45,8 @@ nodes:
   - name: train_script_gen
     kind: agent
     executor: opencode
-    model: "deepseek/deepseek-v4-flash"
-    tools:
-      - bash
-      - read
-      - write
-      - edit
-      - glob
-      - grep
-      - task
-      - todowrite
-    prompt: |
-      你是 NAS 流水线的第二步：**超网训练脚本生成**。
-
-      ## 输入
-      - 上一步产物目录（从 model_optimizer 输出的 OUTPUT_DIR 获取）:
-        {{ model_optimizer.output }}
-      从输出中提取 `<output_dir>` 路径。
-
-      ## 准备工作
-      1. 激活 Python 虚拟环境:
-         ```bash
-         source .venv/bin/activate
-         ```
-      2. 定位 nas-agent 项目根目录:
-         ```bash
-         python -c "from pathlib import Path; import nas_agent; print(Path(nas_agent.__file__).resolve().parent.parent)"
-         ```
-      3. 进入输出目录:
-         ```bash
-         cd <output_dir>
-         ```
-
-      ## 执行流程
-
-      读取 `<nas_agent_root>/.agents/skills/supernet-train-script/SKILL.md` 获取完整工作流。
-      按照其中的 3 个步骤执行：
-
-      Step 1: 加载上下文 — 读取 `supernet_summary.md`、`supernet.py`、`inspect_supernet.py`，以及 `<project_root>` 下的训练代码。
-      Step 2: 判断超网训练可行性，如果可行则生成 `train_supernet.py` 和 `run_train_supernet.sh`。
-      Step 3: 完善 `supernet_summary.md`（追加训练可行性、评估范式、KD 决策等）。
-
-      ## 输出
-      任务完成后，输出结构化摘要：
-      ```
-      OUTPUT_DIR: <输出目录路径>
-      TRAINING_VIABLE: <Yes/No>
-      EVALUATION_PARADIGM: <validate|finetune|train_from_scratch>
-      GENERATED_SCRIPTS: <生成脚本列表>
-      ```
+    model: "deepseek/deepseek-v4-pro"
+    agent: supernet-train-script
     routes:
       - to: search_pipeline_gen
 
@@ -141,107 +56,19 @@ nodes:
   - name: search_pipeline_gen
     kind: agent
     executor: opencode
-    model: "deepseek/deepseek-v4-flash"
-    tools:
-      - bash
-      - read
-      - write
-      - edit
-      - glob
-      - grep
-      - task
-      - todowrite
-    prompt: |
-      你是 NAS 流水线的第三步：**搜索流水线脚本生成**。
-
-      ## 输入
-      - 上一步的输出:
-        {{ train_script_gen.output }}
-      从中提取 `<output_dir>`、`TRAINING_VIABLE`、`EVALUATION_PARADIGM`。
-
-      ## 准备工作
-      1. 激活 Python 虚拟环境:
-         ```bash
-         source .venv/bin/activate
-         ```
-      2. 定位 nas-agent 项目根目录:
-         ```bash
-         python -c "from pathlib import Path; import nas_agent; print(Path(nas_agent.__file__).resolve().parent.parent)"
-         ```
-      3. 进入输出目录:
-         ```bash
-         cd <output_dir>
-         ```
-
-      ## 执行流程
-
-      读取 `<nas_agent_root>/.agents/skills/nas-search-pipeline/SKILL.md` 获取完整工作流。
-      按照其中的 3 个步骤执行：
-
-      Step 1: 生成 `latency_estimator.py`（在线延迟估算器）
-      Step 2: 生成 `search_config.yaml`、`arch_codec.py`、`evaluator.py`、`run_search_supernet.sh`
-      Step 3: 生成 `AGENTS.md` scaffold（后续步骤的 AI 指导文件）
-
-      注意：搜索脚本生成不需要已训练好的 checkpoint 或预先计算的延迟数据，延迟在搜索时通过 `latency_estimator.py` 在线测量。
-
-      ## 输出
-      任务完成后，输出结构化摘要：
-      ```
-      OUTPUT_DIR: <输出目录路径>
-      TRAINING_VIABLE: <Yes/No>
-      EVALUATION_PARADIGM: <validate|finetune|train_from_scratch>
-      GENERATED_FILES: <所有生成文件列表>
-      ```
+    model: "deepseek/deepseek-v4-pro"
+    agent: nas-search-pipeline
     routes:
       - to: train_runner
 
   # ═══════════════════════════════════════════════════════════════
-  # Agent 4: 训练与搜索执行
+  # Agent 4: 训练与搜索执行（含训练/搜索/帕累托曲线实时刷新）
   # ═══════════════════════════════════════════════════════════════
   - name: train_runner
     kind: agent
     executor: opencode
-    model: "deepseek/deepseek-v4-flash"
-    tools:
-      - bash
-      - read
-      - glob
-      - grep
-    prompt: |
-      你是 NAS 流水线的第四步：**训练与搜索执行**。
-
-      ## 输入
-      - 上一步的输出:
-        {{ search_pipeline_gen.output }}
-      从中提取 `<output_dir>` 和 `TRAINING_VIABLE`。
-
-      ## 执行
-
-      1. 激活 Python 虚拟环境并进入输出目录:
-         ```bash
-         source .venv/bin/activate && cd <output_dir>
-         ```
-
-      2. 如果 `TRAINING_VIABLE=Yes` 且 `run_train_supernet.sh` 存在，先执行超网训练:
-         ```bash
-         bash run_train_supernet.sh
-         ```
-         训练时间可能很长，等待其完成。
-
-      3. 执行架构搜索:
-         ```bash
-         bash run_search_supernet.sh
-         ```
-         搜索过程会在线调用 `latency_estimator.py` 测量延迟，等待其完成。
-
-      ## 输出
-      完成后输出：
-      ```
-      OUTPUT_DIR: <输出目录路径>
-      TRAINING_DONE: <Yes/No/Skipped>
-      SEARCH_DONE: <Yes>
-      SEARCH_LOG: <搜索日志文件路径>
-      ```
+    model: "deepseek/deepseek-v4-pro"
+    agent: nas-train-runner
     routes:
       - to: evaluator
 
@@ -251,7 +78,7 @@ nodes:
   - name: evaluator
     kind: agent
     executor: opencode
-    model: "deepseek/deepseek-v4-flash"
+    model: "deepseek/deepseek-v4-pro"
     tools:
       - bash
       - read
@@ -262,7 +89,7 @@ nodes:
       - task
       - todowrite
     prompt: |
-      你是 NAS 流水线的第五步（最终步）：**架构评估与后处理**。
+      你是 NAS 流水线的第五步：**架构评估与后处理**。
 
       ## 输入
       - 上一步的输出:
@@ -282,6 +109,7 @@ nodes:
          c. 确保生成的脚本可以直接执行以获得最终模型权重
 
       3. 使用 `nas-select-architecture` CLI 工具（如果 AGENTS.md 中有指导）或直接分析搜索日志 `runs/search/search.jsonl` 进行架构选择。
+         **务必**让 `nas-select-architecture` 落盘 `selection_summary.json`（指定 `--arch_output_dir`，默认 `runs/retrain/selected/`），并把该路径写入输出——下游可视化（帕累托 selected 高亮 / 选择漏斗）依赖它。
 
       4. 生成以下产物:
          - `selected_architectures.json` — 选中的架构配置
@@ -293,9 +121,21 @@ nodes:
       ```
       OUTPUT_DIR: <输出目录路径>
       SELECTED_ARCHITECTURES: <选中架构数量>
+      SELECTION_SUMMARY: <selection_summary.json 绝对路径>
       FINAL_SCRIPTS: <生成的最终脚本列表>
       PIPELINE_STATUS: <所有步骤完成状态>
       ```
+    routes:
+      - to: viz_finalize
+
+  # ═══════════════════════════════════════════════════════════════
+  # Agent 5.5: 可视化——终态帕累托前沿（自算全局前沿 + selected 高亮）+ 选择漏斗（C5/C6）
+  # ═══════════════════════════════════════════════════════════════
+  - name: viz_finalize
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-pro"
+    agent: nas-viz
     routes:
       - to: $end
 

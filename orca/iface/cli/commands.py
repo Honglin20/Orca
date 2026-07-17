@@ -1428,7 +1428,7 @@ def open_run(
     ),
     port: int | None = typer.Option(
         None, "--port",
-        help="web server 端口（默认探测 7428：是 orca 则复用，否则起后台 ``orca serve``）",
+        help="web server 端口（默认探测 7428：是 orca 则复用，否则起后台 ``tars serve``）",
     ),
 ) -> None:
     """attach 一个既有 run（按 tape 路径），打开 web 观察窗（SPEC §5）。
@@ -1439,7 +1439,7 @@ def open_run(
 
     流程（SPEC §5）：
       1. 探测默认端口 7428（``GET /api/health``，本地 127.0.0.1）；是 orca → 复用；否/不可达
-         → 后台起 ``orca serve``（空闲端口或默认，bind host 同 --host）。
+         → 后台起 ``tars serve``（空闲端口或默认，bind host 同 --host）。
       2. 解析 tape 路径（``runs/<run_id>.jsonl`` 或 ``--tape``）。
       3. ``POST /api/runs/attach {tape_path, run_id}``。
       4. ``webbrowser.open(/runs/<run_id>)``（URL 用本机实际 IP）。
@@ -1483,16 +1483,16 @@ def _open_run(
             else _find_free_port(bind_host=bind_host)
         )
         if not _spawn_background_serve(bind_host, actual_port):
-            # orca 不在 PATH（FileNotFoundError）→ fail loud exit 1
+            # tars 不在 PATH（FileNotFoundError）→ fail loud exit 1
             typer.echo(
-                "无法起后台 ``orca serve``：可执行不在 $PATH",
+                "无法起后台 ``tars serve``：可执行不在 $PATH",
                 err=True,
             )
             return EXIT_RUN_FAILED
         # 等 serve 起来（health 探测重试）。
         if not _wait_for_health(probe_host, actual_port, timeout=10.0):
             typer.echo(
-                f"后台 orca serve 未在 {actual_port} 上 ready（超时 10s）",
+                f"后台 tars serve 未在 {actual_port} 上 ready（超时 10s）",
                 err=True,
             )
             return EXIT_RUN_FAILED
@@ -1510,16 +1510,18 @@ def _open_run(
 
 
 def _spawn_background_serve(host: str, port: int) -> bool:
-    """后台起 ``orca serve --port <port>``（detached，SPEC §5 step1）。
+    """后台起 ``tars serve --port <port>``（detached，SPEC §5 step1）。
 
-    返回 True 启动成功；False 表示 ``orca`` 可执行不在 PATH（fail loud，调用方 exit 1）。
+    ``serve`` 是后端命令，属 ``tars`` 入口（``orca`` 薄壳无 serve，pyproject：
+    ``orca = in_session.cli:main``、``tars = cli.commands:main``）——故 spawn ``tars`` 而非 ``orca``。
+    返回 True 启动成功；False 表示 ``tars`` 可执行不在 PATH（fail loud，调用方 exit 1）。
     detached + DEVNULL：用户经浏览器交互，不依赖 stdout。
     """
     import subprocess
 
     try:
         subprocess.Popen(
-            ["orca", "serve", "--host", host, "--port", str(port)],
+            ["tars", "serve", "--host", host, "--port", str(port)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
@@ -1527,7 +1529,7 @@ def _spawn_background_serve(host: str, port: int) -> bool:
         )
     except FileNotFoundError:
         logger.error(
-            "`orca` 可执行不在 $PATH（venv 未激活？pyproject 入口未安装？）；"
+            "`tars` 可执行不在 $PATH（venv 未激活？pyproject 入口未安装？）；"
             "无法起后台 serve",
         )
         return False
