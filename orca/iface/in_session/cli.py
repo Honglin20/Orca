@@ -336,6 +336,124 @@ def _ensure_chart_daemon(run_id: str, tape_path: Path) -> None:
         )
 
 
+# ── in-session sidechain 守护（SPEC-B v4 B2：子 agent 过程 → tape）──────────────
+#
+# 与 chart 守护同款「detach spawn + next respawn」pattern。差异：sidechain 守护无 socket
+# （主动 tail / 查询子 agent 事件源），liveness 探改用 pidfile + ``/proc/<pid>/cmdline``
+# （见 ``sidechain_daemon._sidechain_daemon_alive``）。backend 由 env 派生（CC vs opencode），
+# 作为 ``--backend`` 启动参数传 daemon —— 是 SPEC §0 grep 守门豁免的「启动参数」位置。
+#
+# 为什么 bootstrap + next 都要 spawn / ensure：与 chart 同款（见 ``_ensure_chart_daemon``
+# 并发安全三层兜底说明）。sidechain 守护是 B2 实时推送的脊梁，run 中途被杀 → 子 agent 过程
+# 在 web 不可见 → respawn 必要。
+
+
+def _detect_backend_from_env() -> str | None:
+    """从 env 推断宿主 backend（``cc`` / ``opencode``），spawn sidechain 守护用。
+
+    推断规则（SPEC-B v4 §0：backend 选择属 daemon 启动参数，grep 守门豁免）：
+      - ``CLAUDE_CODE_SESSION_ID`` 存在 → ``"cc"``（CC 自动注入所有 bash 子进程）。
+      - 否则 ``ORCA_HOST_SESSION_ID`` 存在 → ``"opencode"``（opencode plugin 显式注入）。
+      - 都无 → ``None``（非 in-session 起的 run，B2 守护无法启动）。
+
+    返 ``None`` 时调用方应 skip spawn + warn（fail-open：run 仍可推进，只是子 agent 过程
+    不进 web；与 SPEC §5 opencode host_session=None fail-open 语义一致）。
+    """
+    if os.environ.get("CLAUDE_CODE_SESSION_ID"):
+        return "cc"
+    if os.environ.get("ORCA_HOST_SESSION_ID"):
+        return "opencode"
+    return None
+
+
+def _spawn_sidechain_daemon(run_id: str, tape_path: Path) -> None:
+    """detach 起 sidechain 守护（SPEC-B v4 §4）。
+
+    镜像 ``_spawn_chart_daemon`` 的 detach pattern（``start_new_session=True`` 脱 bootstrap
+    CLI 的 process group）。差异：
+      - 额外 argv ``--backend`` / ``--host-session``（启动参数，daemon 内选 adapter）。
+      - 日志落 ``<rundir>/<run_id>/sidechain_daemon.log``。
+      - 无 ``_wait_for_sock``（无 socket；liveness 走 pidfile + ``/proc`` 校验，由
+        ``_sidechain_daemon_alive`` 实现，import 自 daemon 模块）。
+
+    失败语义：``OSError``（Popen / log fd）→ 上抛给调用方（bootstrap/next 决定 warn 降级）。
+    无 ``host_session`` / 无 ``backend`` → 静默 skip + warn（fail-open：B2 守护是便利层，
+    缺了只让子 agent 过程不进 web，不阻塞 workflow）。
+    """
+    host_session = _host_session_from_env()
+    if not host_session:
+        logger.info(
+            "run %s: 无 host_session env（CLAUDE_CODE_SESSION_ID / ORCA_HOST_SESSION_ID），"
+            "skip sidechain 守护（B2 子 agent 过程不进 web）",
+            run_id,
+        )
+        return
+    backend = _detect_backend_from_env()
+    if backend is None:
+        logger.info(
+            "run %s: 无法识别 backend（无 CC/opencode env），skip sidechain 守护",
+            run_id,
+        )
+        return
+
+    run_dir = _run_dir_for(tape_path, run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_path = run_dir / "sidechain_daemon.log"
+
+    cmd = [
+        sys.executable, "-m", "orca.iface.in_session.sidechain_daemon",
+        "--run-id", run_id,
+        "--tape", str(tape_path),
+        "--backend", backend,
+        "--host-session", host_session,
+    ]
+    log_fd = open(log_path, "a", encoding="utf-8")
+    try:
+        subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=log_fd,
+            stderr=log_fd,
+            start_new_session=True,
+            close_fds=True,
+        )
+    finally:
+        log_fd.close()
+    logger.info(
+        "run %s: sidechain 守护已 detach spawn（backend=%s, host=%s, log=%s）",
+        run_id, backend, host_session, log_path,
+    )
+
+
+def _ensure_sidechain_daemon(run_id: str, tape_path: Path) -> None:
+    """探 sidechain 守护是否存活，死了 respawn（``next`` 路径补 bootstrap 之后的缺口）。
+
+    与 ``_ensure_chart_daemon`` 同款「probe + spawn」pattern。差异：
+      - liveness 探改用 pidfile + ``/proc/<pid>/cmdline``（sidechain 无 socket）。
+      - 无 ``_wait_for_sock``（pidfile 由 daemon 自己写，spawn 后下次 next 探到 alive）。
+
+    并发安全：同 chart 守护（next↔next 由 tape flock serialize；跨阶段时序 + pidfile 兜底）。
+    失败语义：spawn 失败（Popen OSError）→ warn 不 fail next（守护是 B2 便利层）。
+    无 host_session / 无 backend → 静默 skip（与 ``_spawn_sidechain_daemon`` 一致）。
+    """
+    # lazy import 避开 cli 模块初始化期循环（sidechain_daemon 反向 import cli._flock_path）。
+    from orca.iface.in_session.sidechain_daemon import _sidechain_daemon_alive
+
+    if _sidechain_daemon_alive(run_id):
+        return
+    logger.info(
+        "run %s: sidechain 守护不在（pidfile + /proc 校验未过）—— next 路径 respawn",
+        run_id,
+    )
+    try:
+        _spawn_sidechain_daemon(run_id, tape_path)
+    except OSError:
+        logger.warning(
+            "run %s: respawn sidechain 守护失败（Popen OSError；B2 子 agent 过程将不可见直到下次 next 重试）",
+            run_id, exc_info=True,
+        )
+
+
 def _write_orca_env(
     env_path: Path,
     *,
@@ -757,6 +875,17 @@ def bootstrap(
                 "run %s: chart 守护 socket %s 在 %.1fs 内未就绪（host 派 subagent 期间可能补上）",
                 run_id, sock_path, _SOCK_READY_TIMEOUT,
             )
+        # ── in-session sidechain 守护（SPEC-B v4 B2：子 agent 过程 → tape）───────────
+        # 与 chart 守护并列 spawn：B2 实时推送子 agent msg/tool/thinking 到 web。失败语义同
+        # chart：OSError → warn 不 fail bootstrap（守护是便利层）。无 host_session / 无 backend
+        # → 静默 skip（fail-open）。
+        try:
+            _spawn_sidechain_daemon(run_id, tape_path)
+        except OSError:
+            logger.warning(
+                "run %s: spawn sidechain 守护失败（Popen OSError；B2 子 agent 过程将不进 web）",
+                run_id, exc_info=True,
+            )
 
         reply: dict[str, Any] = {
             "run_id": run_id,
@@ -841,6 +970,10 @@ def next(
         # 串行化，此处 probe+spawn 不会起多个守护（见 ``_ensure_chart_daemon`` 不变量）。
         if result.node is not None and not (result.done or compliance_failed):
             _ensure_chart_daemon(run_id, tape_path)
+            # ── in-session sidechain 守护 respawn（SPEC-B v4 B2）───────────────────
+            # 与 chart 守护同款：bootstrap spawn 一次，next respawn。B2 守护是实时推送脊梁，
+            # 死了 → 子 agent 过程不进 web → 必拉起。同 chart 的 fail-open 语义（warn 不 fail next）。
+            _ensure_sidechain_daemon(run_id, tape_path)
     except InSessionError as e:
         # fail_in_session：emit workflow_failed（tape data.kind = error_kind）+ 返含
         # ``error_kind`` 的错误信封（v5 §8 step 5b，SPEC §2.3 信封契约）。
