@@ -85,21 +85,49 @@ orca <wf-name>
   "name": "research_and_write",
   "description": "...",
   "inputs_schema": [
-    {"name": "topic", "type": "string", "description": "要调研的主题"},
-    {"name": "style", "type": "string", "description": "写作风格（可选）"}
+    {"name": "topic", "type": "string", "description": "[ask] 要调研的主题"},
+    {"name": "style", "type": "string", "description": "[default] 写作风格，留空走默认"},
+    {"name": "model_path", "type": "string", "description": "[infer] 模型文件路径，glob 即得"}
   ]
 }
 ```
 
-据 **inputs_schema**（每个字段的 `name` + `type` + `description`），从用户刚才说的话里把
-inputs 抽出来。
+### inputs 标签约定（读 description 开头的前缀方括号）
 
-- `description` 告诉你每个字段是什么 → 据语义匹配用户意图。
-- 用户没明说但能合理推断的字段 → 直接推断（别为每个字段都问一遍）。
-- 缺关键字段且无法推断 → 只问缺的那几个（最多 1-2 个），别问全表。
-- 字段类型按 `type` 给（`string` 给字符串、`int` 给整数、`boolean` 给 true/false、`list` 给数组）。
+每个字段 `description` 的**开头**可能带一个方括号标签 `[ask]` / `[infer]` / `[default]` /
+`[advanced]`，告诉你**这个字段该怎么处理**。这是 workflow 作者预先声明好的"处理契约"，**严格按标签
+行为**，不要自己发挥（作者已经替用户想好哪些该问、哪些该自己找）：
 
-把抽好的 inputs 拼成一个 JSON 对象，例如 `{"topic": "量子计算现状", "style": "科普"}`。
+| 标签 | 含义 | 你的行为 |
+|---|---|---|
+| `[ask]` | 业务决策，**必须由用户给** | 用户意图里有 → 用；**没有 → 必须问用户**（这是唯一需要主动问的类别） |
+| `[infer]` | 可从项目/文件系统推断 | **自己找**（glob、读目录、向上查项目根等），**别问用户**；确实找不到再退化为问 |
+| `[default]` | 有合理默认 | **从 inputs JSON 里省掉**这个字段（让 workflow 用它声明的 default），别问、别瞎填 |
+| `[advanced]` | 罕见 override，普通用户不该碰 | 同 `[default]`：**省掉**，别问 |
+| （无标签） | 老字段，无契约 | 走通用规则：用户给了用、能推就推、缺且推不出再问 |
+
+**关键原则：自然优先**——用户说了就用用户的，用户没说就按标签办。`[ask]` 是**唯一**需要打断用户
+提问的类别；`[infer]` 静默自己找；`[default]`/`[advanced]` 静默省略。这样用户面通常只剩 3-5 个真问题。
+
+### 抽取流程
+
+1. 扫一遍 `inputs_schema`，按每个字段 description 的开头标签分桶。
+2. **`[ask]` 桶**：逐个对照用户意图——用户给了的，抽出来；**没给的，攒一个集合**。
+3. 攒齐所有"用户没给的 `[ask]`"后，**集中问一轮**（一两句话把缺的几个一起问掉，**不要**一个个
+   问、**不要**把整个 schema 丢回去）。问完拿到答案。
+4. **`[infer]` 桶**：用 Bash 自己找（glob `**/model.py`、向上查含 `train.py` 的目录等），找到就填值；
+   找不到的退化为问用户（归并到上一步那轮一起问，别多开一轮）。
+5. **`[default]`/`[advanced]` 桶**：**一律不放进 inputs JSON**（省略 → workflow 走声明的 default）。
+6. 字段类型按 `type` 给（`string` 给字符串、`int` 给整数、`boolean` 给 true/false、`list` 给数组）。
+
+把抽好的 inputs 拼成一个 JSON 对象——**只含 `[ask]`（含用户答的）+ `[infer]`（找到的）+ 无标签
+（决定填的）**，省掉所有 `[default]`/`[advanced]`。例如：
+
+```json
+{"topic": "量子计算现状", "model_path": "examples/ViT/model.py"}
+```
+
+（`style` 是 `[default]` → 省略，workflow 自己走默认。）
 
 > 注意：不带 `--inputs` 调 `orca <wf>` **只返回 schema，不会启动**（也不产生 run）。真正
 > 启动在下一步——必须带 `--inputs`。
@@ -169,6 +197,8 @@ orca next --run-id <run_id> --output 'it'\''s a good film'
 ## 常见错误（避免）
 
 - 🔴 抽 inputs 前先 `orca <wf>`（不带 `--inputs`）拿 inputs_schema；别凭空猜 inputs。
+- 🔴 严格按 description 开头标签办：`[ask]` 才问、`[infer]` 自己找、`[default]`/`[advanced]` 省略——
+  别把 `[default]` 字段也拿来问用户，也别给 `[advanced]` 瞎填值。
 - 🔴 别忘了每个 `orca next` 都带 `--run-id`（用启动时拿到的那个值，一字不改）。
 - 🔴 别自己 Read 节点指令文件 / workflow YAML——前者派子代理读，后者根本不读。
 - 🔴 别在 `done: true` 后还继续调 `orca next`（workflow 已结束）。
@@ -177,7 +207,7 @@ orca next --run-id <run_id> --output 'it'\''s a good film'
 <success_criteria>
 - [ ] 经 `orca list` 选定 workflow（只看 name + description，不读 YAML）
 - [ ] `orca <wf>`（不带 --inputs）拿 inputs_schema
-- [ ] 据 inputs_schema 抽 inputs（只问缺失且无法推断的）
+- [ ] 据 inputs_schema 抽 inputs：按 description 开头标签分桶——`[ask]` 没给才问（集中一轮）、`[infer]` 自己找、`[default]`/`[advanced]` 省略走默认
 - [ ] `orca <wf> --inputs` 启动拿到 run_id
 - [ ] 每个节点：派 Task 子代理读指令执行 → 产出原样作 --output → `orca next --run-id`
 - [ ] 单引号产出正确转义（`'\''`）
