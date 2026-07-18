@@ -112,7 +112,7 @@ export function RunDetailPage() {
         <PanelResizeHandle className="orca-bg-surface-2 w-px" />
         <Panel defaultSize={26} minSize={15}>
           <div
-            className="orca-border flex h-full flex-col border-l"
+            className="flex h-full flex-col"
             data-testid="log-panel"
           >
             <div className="orca-border orca-text-muted border-b px-3 py-2 text-xs font-semibold uppercase tracking-wide">

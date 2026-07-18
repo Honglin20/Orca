@@ -108,9 +108,10 @@ export function AgentsRail() {
 
   return (
     <aside
-      // P3 方案 1/2：orca-bg-surface-2（底色统一，与中间 tab 栏一致）+ w-full h-full
-      // （去固定宽度 → 全弹性填满 Panel，react-resizable-panels 同款，根治 GAP）
-      className="flex h-full w-full flex-col border-r orca-border orca-bg-surface-2"
+      // P4：底色 orca-bg-app（三栏统一页面底，治「左灰中白割裂」）；agent li 卡片用
+      // orca-bg-surface 提供层次。不叠 border-r——栏间分隔交给 PanelResizeHandle（防双线）。
+      // w-full h-full：去固定宽度 → 全弹性填满 Panel（react-resizable-panels 同款，根治 GAP）。
+      className="flex h-full w-full flex-col orca-bg-app"
       data-testid="agents-rail"
     >
       <div className="flex items-center justify-between p-3">
