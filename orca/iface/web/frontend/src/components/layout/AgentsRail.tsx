@@ -150,9 +150,10 @@ export function AgentsRail() {
                       key={a.node}
                       className="relative overflow-hidden rounded border orca-border orca-bg-surface"
                     >
-                      {/* P3 方案 3：左竖状态色条（NODE_STATUS_HEX，与 DAG 浮层同源 DRY）替代文字 icon */}
+                      {/* P3 方案 3 / P2：左竖状态色条（NODE_STATUS_HEX，与 DAG 浮层同源 DRY）；
+                          selected 行色条加粗（3px→4px）作选中视觉反馈 */}
                       <div
-                        className="absolute inset-y-0 left-0 w-1"
+                        className={`absolute inset-y-0 left-0 ${selectedNode === a.node ? "w-[4px]" : "w-1"}`}
                         style={{ backgroundColor: color }}
                         data-testid={`agent-bar-${a.node}`}
                         data-status={status}
@@ -177,29 +178,40 @@ export function AgentsRail() {
                               R{a.iteration}
                             </span>
                           )}
+                          {/* P2：running 流式光标 ▎（与 ConversationView 同语义，节点活跃视觉反馈） */}
+                          {status === "running" && (
+                            <span className="orca-text-faint" aria-hidden>▎</span>
+                          )}
                         </span>
-                        <span
-                          className="text-[10px] orca-text-faint inline-flex items-center gap-0.5"
-                          data-testid={`agent-elapsed-${a.node}`}
-                        >
-                          {elapsed !== null
-                            ? (<><Timer size={11} strokeWidth={1.5} aria-hidden />{formatElapsed(elapsed, "seconds")}</>)
-                            : a.status === "running"
-                              ? "running"
+                        {/* P2：元信息单行（status · elapsed · tokens），嵌套 span 保留 agent-elapsed
+                            testid（永在，pending 空字串）+ 新增 agent-status / agent-tokens。
+                            flex-wrap 防窄行溢出；gap 替代 · 分隔（视觉一致、无文本噪声）。 */}
+                        <span className="flex w-full flex-wrap items-center gap-x-1.5 text-[10px] orca-text-faint">
+                          <span data-testid={`agent-status-${a.node}`}>{status}</span>
+                          <span
+                            className="inline-flex items-center gap-0.5"
+                            data-testid={`agent-elapsed-${a.node}`}
+                          >
+                            {elapsed !== null
+                              ? (<><Timer size={11} strokeWidth={1.5} aria-hidden />{formatElapsed(elapsed, "seconds")}</>)
                               : ""}
+                          </span>
+                          {tokens && (
+                            <span
+                              className="inline-flex items-center gap-0.5"
+                              data-testid={`agent-tokens-${a.node}`}
+                            >
+                              <Coins size={11} strokeWidth={1.5} aria-hidden />{tokens}
+                            </span>
+                          )}
                         </span>
                         {stall && (
                           <span
-                            className="text-[10px] text-orca-skipped inline-flex items-center gap-0.5"
+                            className="text-[10px] orca-text-faint inline-flex items-center gap-0.5"
                             data-testid={`agent-stall-${a.node}`}
                           >
                             {stall.thinking ? <Brain size={11} strokeWidth={1.5} aria-hidden /> : "思考中"}{" "}
                             {Math.floor(stall.sinceMs / 1000)}s
-                          </span>
-                        )}
-                        {tokens && (
-                          <span className="text-[10px] orca-text-faint inline-flex items-center gap-0.5">
-                            <Coins size={11} strokeWidth={1.5} aria-hidden /> {tokens}
                           </span>
                         )}
                         {a.progress && (
