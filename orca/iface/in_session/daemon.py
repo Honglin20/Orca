@@ -128,10 +128,14 @@ class InSessionDaemon:
                 self.tape, self.wf, output=output,
                 inputs=self.inputs, run_id=self.run_id,
                 elapsed=now_monotonic() - self._start_ts,
+                project_root=Path.cwd(),
             )
         except InSessionError as e:
             return await fail_in_session(self.bus, e)
-        reply = await apply_step_result(self.bus, result)
+        reply = await apply_step_result(
+            self.bus, result, wf=self.wf, run_id=self.run_id,
+            project_root=Path.cwd(),
+        )
         self._host_alive_ts = now_monotonic()
         return reply
 

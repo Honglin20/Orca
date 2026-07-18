@@ -138,6 +138,11 @@ class AgentNode(Node):
     output_schema: dict | None = None  # None=自由文本；{...}=结构化 JSON schema
     retry: RetryPolicy | None = None  # None=不重试（向后兼容）；见 RetryPolicy
     validator: ValidatorConfig | None = None  # None=不校验（向后兼容）；见 ValidatorConfig
+    # 【node-memory】True = 引擎在节点完成后把 output 覆盖写到
+    # ``<project_root>/.orca/memory/<wf.name>/<node.name>.md``，下次渲染 prompt 时
+    # 注入「上一轮记忆 + 复用协议」让 agent 自决复用/重跑。opt-in（默认 False）。
+    # 仅 in-session shell 路径生效（scope：SPEC §0.9）；派生缓存（tape 才是真相源）。
+    memory: bool = False
 
 
 class ScriptNode(Node):

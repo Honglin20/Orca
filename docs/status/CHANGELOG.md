@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-18] 节点记忆（Node Memory）—— AgentNode 跨 run 记忆（写确定性 / 读注入 agent 判断）
+
+in-session workflow 此前无跨 run 记忆（新 run_id 看不到旧 run 产出）。**否决确定性指纹缓存**（agent 非纯函数，收益薄改动大），改为把必然性与智能判断解耦：**写记忆 = 引擎确定性**（节点完成必然覆盖写 `<cwd>/.orca/memory/<wf.name>/<node.name>.md`，存上一轮 output 原文，不靠子 agent 自觉）+ **读+跳过 = agent**（prompt 注入「上一轮记忆+复用协议」，agent 自判复用/重跑，走正常推进路径，**引擎零 skip 分支**）。`AgentNode.memory: bool`（opt-in，仅 AgentNode）；新 `orca/run/memory.py`（write/read/inject helper，零 events/tape 依赖）；`_step_io.apply_step_result` emit_batch 后置写（cli/daemon 单一真相源）；`step._deliver` 注入；CLI `--no-memory`；best-effort 写失败不阻断（MD 是派生缓存，tape 才是真相）。覆盖式写 = 天然单份 + 过期清除。spec-reviewer conditional-pass（5 P0 + 3 决策全收敛，修正 2 处事实错误）；code-reviewer 2 🔴+6 🟡 全修；22 新测试 + 515 回归全 PASS；test-agent 真机 5 场景全过（首跑写/二跑注入/--no-memory 字节级不动/跨 cwd 隔离/写失败不阻断）。不碰 EventType/reducer/tape/advance_step 决策/Status 语义/render_prompt。Commit: `<SHA>`。详见 [release note](../releases/2026-07-18-node-memory.md)。
+
 ## [2026-07-18] Web 前端呈现层完善（P1-P5：log 降噪 / 子 agent 维度 / 左栏重做 / cac-nga / 美化）
 
 B2 把子 agent 过程事件推 tape 后前端暴露 6 痛点（log 暴涨 / 对话异常长 / 执行完才显示 / 左栏割裂 / ITERATION 难观测 / cac-nga 不适用），根因同源于「子 agent 维度缺失 + 无事件分级」。5 阶段：**P1** LogStream 分级 classifier（e3b8ad 4779→19 行，过程事件归 ConversationView）/ **P2** 会话按 (node,session_id) 分段 + store in-order 增量 fold + nodesIndex（buildEntries 4226→~208）/ **P3** 左栏统一底色+根治 GAP(w-56→w-full)+NODE_STATUS_HEX 色条+Setup/Loop/Finalize 分组+R{iter}+子 agent 折叠 / **P4** cac/nga 家族路径解析（_family.py 零 iface import，env>config>probe>default）+ doctor sidechain_backend check / **P5** 图表可读(axis-tick slate-700)+统一 cursor 消 hover 黄+去 cost+9 token 明暗双套（reviewer 抓 R1 CSS hsl→rgb bug）。参考 microsoft/conductor 双 classifier 分流。spec-reviewer conditional-pass 全闭环（7 P0+5 P1+4 P2）；test-agent 真机（e3b8ad + react-dom/server）全 PASS 无 P0。事故：P2 stash 险丢并行 P4（已恢复零损失+memory 固化 git 禁令）。Commits: `0a4683d`(P1)/`b77422f`(P4)/`3a0f66e`(P2)/`7cc232e`(P3)/`f0cf695`(P5)/`2d416eb`(构建产物)。详见 [release note](../releases/2026-07-18-web-presentation-refinement.md)。

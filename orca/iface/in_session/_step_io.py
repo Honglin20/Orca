@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 from orca.events.bus import EventBus
 from orca.run.lifecycle import make_workflow_failed
+from orca.run.memory import write_node_memory
 
 logger = logging.getLogger(__name__)
 
@@ -65,16 +67,34 @@ def _emits_to_event_datas(emits: list) -> list[dict]:
     ]
 
 
-async def apply_step_result(bus: EventBus, result: Any) -> dict[str, Any]:
+async def apply_step_result(
+    bus: EventBus, result: Any,
+    *,
+    wf: Any | None = None,
+    run_id: str | None = None,
+    no_memory: bool = False,
+    project_root: Path | None = None,
+) -> dict[str, Any]:
     """成功路径：``emit_batch(result.emits)`` + 构造回复信封 ``{done, node?, prompt?, reason?}``。
 
     - **emit**：整批一次 write（``emit_batch`` 原子化；``emits=[]`` 时 ``emit_batch`` no-op）。
     - **信封**：``{done}`` + 可选 ``node`` / ``prompt`` / ``reason``（取自 ``StepResult``）。
       调用方（cli）可在此基础上追加 ``prompt_file`` / 驱动协议等富字段。
 
-    副作用边界：只 emit + 返信封；marker / echo / exit 归调用方。
+    【node-memory】``wf`` / ``run_id`` / ``project_root`` 给定且 ``not no_memory`` 时,
+    emit_batch 成功后遍历 ``result.emits``,对每条 ``node_completed`` 事件按 ``e.node`` 名查
+    wf 中的 node 对象,``memory=True`` 则覆盖写 ``<project_root>/.orca/memory/<wf>/<node>.md``
+    (SPEC §3.2)。best-effort:写失败不阻断 run(``write_node_memory`` 内部 warn)。
+    调用方未传 wf(如 daemon 单测)→ 跳过记忆写入,行为与改动前一致(回归红线)。
+
+    副作用边界：只 emit + (可选)写记忆 + 返信封；marker / echo / exit 归调用方。
     """
     await bus.emit_batch(_emits_to_event_datas(result.emits))
+    # SPEC §3.2:写记忆仅在 node_completed 触发(node_failed/workflow_failed/workflow_cancelled
+    # 不触发;含 workflow_completed 出口前最后一条 node_completed)。``no_memory=True`` 整 run
+    # 跳过(测试隔离 / 用户显式禁)。
+    if wf is not None and not no_memory:
+        _write_memories_for_emits(wf, result.emits, run_id=run_id or "", project_root=project_root)
     reply: dict[str, Any] = {"done": result.done}
     if result.node:
         reply["node"] = result.node
@@ -83,6 +103,34 @@ async def apply_step_result(bus: EventBus, result: Any) -> dict[str, Any]:
     if result.reason:
         reply["reason"] = result.reason
     return reply
+
+
+def _write_memories_for_emits(
+    wf: Any, emits: list, *, run_id: str, project_root: Path | None,
+) -> None:
+    """SPEC §3.2 helper:遍历 emits,对 ``memory=True`` 的 node_completed 写记忆 MD。
+
+    抽出来是为复用单一真相源(避免 daemon / cli 两路各写一遍 —— SPEC §6 「daemon 同步」
+    守门)。node 对象按 ``e.node`` 名从 ``wf.nodes`` 查;查不到(并行组名 / orphan) → 跳过。
+    """
+    if project_root is None:
+        # in-session 路径下 CLI 恒传 Path.cwd();此处的 None 兜底只用于 daemon / 单测。
+        return
+    # name → node 索引(wf.nodes 内嵌 foreach body 无 name,顶层 nodes 均有名)。
+    nodes_by_name = {getattr(n, "name", ""): n for n in getattr(wf, "nodes", [])}
+    for e in emits:
+        if getattr(e, "type", None) != "node_completed":
+            continue
+        node_name = e.node
+        if not node_name:
+            continue
+        node_obj = nodes_by_name.get(node_name)
+        if node_obj is None:
+            continue
+        if not getattr(node_obj, "memory", False):
+            continue
+        output = (e.data or {}).get("output")
+        write_node_memory(wf, node_obj, output, run_id=run_id, project_root=project_root)
 
 
 async def _emit_workflow_failed(

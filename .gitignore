@@ -49,3 +49,7 @@ skills-lock.json
 # 本地 E2E scratch 脚本（test-agent 一次性验证，硬编码本机路径）
 e2e_check.sh
 e2e_clean.sh
+
+# 项目级 Orca 派生缓存（node-memory：.orca/memory/<wf>/<node>.md 是 tape 的派生缓存，
+# 跨机器不可移植；tape 在用户级 ~/.orca/runs 是真相源）。SPEC §0.4 / §2.1。
+.orca/

@@ -758,6 +758,11 @@ def bootstrap(
              "prompt 纯文本，让主 session 直接据其派子代理）",
     ),
     log_level: str = typer.Option("INFO", "--log-level", help="INFO/DEBUG/WARN/ERROR"),
+    no_memory: bool = typer.Option(
+        False, "--no-memory",
+        help="禁用节点记忆:整 run 不写 .orca/memory/、不注入「上一轮记忆」段"
+             "(测试隔离 / 显式禁用复用协议)",
+    ),
 ) -> None:
     """起一个 in-session run 的首步（gen run_id + tape + marker + emit ws+ns → entry prompt）。
 
@@ -842,6 +847,8 @@ def bootstrap(
                 prompts_dir=_prompts_dir_for(tape_path, run_id),
                 yaml_path=os.path.realpath(yaml_path),
                 host_session=_host_session_from_env(),
+                project_root=Path.cwd(),
+                no_memory=no_memory,
             ))
         except InSessionError as e:
             # bootstrap 失败 = 配置坏（如 entry 不是 agent 节点），fail loud。
@@ -953,6 +960,11 @@ def next(
     ),
     inputs: str = typer.Option("{}", "--inputs", help="workflow inputs（JSON）"),
     log_level: str = typer.Option("INFO", "--log-level", help="INFO/DEBUG/WARN/ERROR"),
+    no_memory: bool = typer.Option(
+        False, "--no-memory",
+        help="禁用节点记忆:整 run 不写 .orca/memory/、不注入「上一轮记忆」段"
+             "(测试隔离 / 显式禁用复用协议)",
+    ),
 ) -> None:
     """推进一步：flock + advance_step + emit_batch（B1 单次 write 原子）+ marker RMW (N2)。"""
     _setup_logging(log_level)
@@ -988,6 +1000,8 @@ def next(
             bus, tape_obj, run_id, normalized_output, inp, start_ts, mpath,
             _prompts_dir_for(tape_path, run_id),
             env_path=_env_file_path(tape_path, run_id),
+            project_root=Path.cwd(),
+            no_memory=no_memory,
         ))
         # in-session chart 守护存活检查 + respawn（phase-13 §3 in-session 衔接）：
         # bootstrap 只 spawn 一次；run 中途守护被杀（pkill opencode 误伤等）后，next 必须拉起
@@ -1040,6 +1054,8 @@ async def _advance_and_emit(
     inputs: dict, run_id: str, elapsed: float, prompts_dir: Path | None = None,
     yaml_path: str | None = None,
     host_session: str | None = None,
+    project_root: Path | None = None,
+    no_memory: bool = False,
 ):
     """调 advance_step + emit_batch（单次 write 原子化，B1）。
 
@@ -1047,12 +1063,16 @@ async def _advance_and_emit(
     （run_id/tape/prompt_file/驱动协议）。helper 返的基础信封在此丢弃（bootstrap 自建）。
 
     ``host_session`` 透传给 advance_step（仅 pending 首节点分支写 tape，SPEC §4.1 emit 真链）。
+    ``project_root`` / ``no_memory`` 透传 advance_step + apply_step_result(node-memory SPEC §5)。
     """
     result = advance_step(
         tape, wf, output=output, inputs=inputs, run_id=run_id, elapsed=elapsed,
         prompts_dir=prompts_dir, yaml_path=yaml_path, host_session=host_session,
+        project_root=project_root, no_memory=no_memory,
     )
-    await apply_step_result(bus, result)   # emit_batch（基础信封丢弃，bootstrap 命令自建富信封）
+    await apply_step_result(
+        bus, result, wf=wf, run_id=run_id, no_memory=no_memory, project_root=project_root,
+    )   # emit_batch + 记忆写入（基础信封丢弃，bootstrap 命令自建富信封）
     return result
 
 
@@ -1120,6 +1140,8 @@ async def _next_in_critical_section(
     inputs: dict, start_ts: float, mpath: Path,
     prompts_dir: Path | None = None,
     env_path: Path | None = None,
+    project_root: Path | None = None,
+    no_memory: bool = False,
 ):
     """flock 临界区内的 next 主体：advance + emit_batch + marker RMW（N2）+ 合规计数 (F11)
     + per-node env 文件重写（in-session chart/资源 衔接）。
@@ -1143,9 +1165,13 @@ async def _next_in_critical_section(
     result = advance_step(
         tape, wf, output=output, inputs=inputs, run_id=run_id,
         elapsed=now_monotonic() - start_ts, prompts_dir=prompts_dir,
+        project_root=project_root, no_memory=no_memory,
     )
     # B1 单次 write 原子化整批 [nc, rt, ns] / [nc, rt, workflow_completed]（共享 helper）。
-    await apply_step_result(bus, result)   # emit_batch（基础信封丢弃，next 命令自建含驱动协议的信封）
+    # apply_step_result 内部按 emits 写 node_completed 的记忆 MD(node-memory SPEC §3.2)。
+    await apply_step_result(
+        bus, result, wf=wf, run_id=run_id, no_memory=no_memory, project_root=project_root,
+    )
 
     # 合规计数（D-v7-6 / F11）：无 output 且无 emits（branch 4 idempotent-replay）→ +1；
     # 有 output → 清零。≥3 → CLI 主动 emit workflow_failed(subagent_compliance)。

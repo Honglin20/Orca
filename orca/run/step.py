@@ -40,6 +40,7 @@ from orca.run.lifecycle import (
     make_workflow_started,
     now_monotonic,
 )
+from orca.run.memory import inject_memory_prompt
 from orca.run.orchestrator import Orchestrator
 from orca.run.resume import _outputs_acc_from_state
 
@@ -206,13 +207,26 @@ def _write_prompt_file(prompts_dir: Path, node_name: str, rendered: str) -> Path
     return final
 
 
-def _deliver(node: Any, ctx: Any, prompts_dir: Path | None) -> tuple[str | None, str | None, str | None]:
+def _deliver(
+    node: Any, ctx: Any, prompts_dir: Path | None,
+    *,
+    wf: Any | None = None,
+    project_root: Path | None = None,
+    no_memory: bool = False,
+) -> tuple[str | None, str | None, str | None]:
     """渲染 prompt 并按交付模式产出 ``(prompt, prompt_file, resources_root)``。
 
     - ``prompts_dir`` 给定（compact，生产路径）：写文件，返 ``(None, <path>, resources_root)``。
     - ``prompts_dir=None``（inline 回退，单测决策逻辑用）：返 ``(rendered, None, None)``。
+
+    【node-memory】``wf`` / ``project_root`` / ``no_memory`` 给定且 ``node.memory=True`` 时,
+    在渲染后、写文件前调 ``inject_memory_prompt`` 把上一轮 MD body + 复用协议拼到 rendered
+    末尾(SPEC §4.1)。三 kwarg 默认值保 ``_deliver(node, ctx, prompts_dir)`` 旧调用形态不破
+    (单测 inline 路径 / 非记忆节点零行为变更)。
     """
     rendered = _render_or_fail(node, ctx)
+    if getattr(node, "memory", False) and not no_memory and wf is not None and project_root is not None:
+        rendered = inject_memory_prompt(node, wf, rendered, project_root=project_root)
     if prompts_dir is not None:
         path = _write_prompt_file(prompts_dir, node.name, rendered)
         return None, str(path), getattr(node, "resources_root", None)
@@ -274,6 +288,8 @@ def advance_step(
     prompts_dir: Path | None = None,
     yaml_path: str | None = None,
     host_session: str | None = None,
+    project_root: Path | None = None,
+    no_memory: bool = False,
 ) -> StepResult:
     """单步推进（纯决策：读 tape 现状 → 决定 emits + 回复；不写 tape）。
 
@@ -299,6 +315,10 @@ def advance_step(
     首节点分支透传给 ``make_workflow_started``**（写入 tape 的归属字段，单一真相源）。next
     路径（非 pending）**不传**——``workflow_started`` 在 bootstrap 已 emit，next 不重发
     （emit 真链 §4.1：host_session 经 lifecycle←step←cli 三点穿，不在 cli.py emit）。
+
+    【node-memory】``project_root`` / ``no_memory`` 透传 ``_deliver``:节点 ``memory=True`` 且
+    ``not no_memory`` 时,渲染后注入「上一轮记忆 + 复用协议」(SPEC §4.1)。``project_root=None``
+    时即使 ``memory=True`` 也不注入(回归旧形态,保单测 inline 路径不破)。
     """
     state = replay_state(tape)
     # tape 是 inputs 真相源（workflow_started.data.inputs）：next 不传 --inputs 时从 tape
@@ -328,7 +348,10 @@ def advance_step(
         emits.append(Emit(t, d))
         emits.append(Emit("node_started", {"node": entry}, node=entry))
         ctx = _build_ctx(wf, {}, inputs, rid)
-        prompt, prompt_file, rroot = _deliver(nodes[entry], ctx, prompts_dir)
+        prompt, prompt_file, rroot = _deliver(
+            nodes[entry], ctx, prompts_dir,
+            wf=wf, project_root=project_root, no_memory=no_memory,
+        )
         return StepResult(emits=emits, done=False, node=entry,
                           prompt=prompt, prompt_file=prompt_file, resources_root=rroot)
 
@@ -357,7 +380,10 @@ def advance_step(
         emits.append(Emit("route_taken", {"from": pending, "to": nxt}))
         emits.append(Emit("node_started", {"node": nxt}, node=nxt))
         ctx = _build_ctx(wf, outputs_acc, inputs, rid)
-        prompt, prompt_file, rroot = _deliver(nodes[nxt], ctx, prompts_dir)
+        prompt, prompt_file, rroot = _deliver(
+            nodes[nxt], ctx, prompts_dir,
+            wf=wf, project_root=project_root, no_memory=no_memory,
+        )
         return StepResult(emits=emits, done=False, node=nxt,
                           prompt=prompt, prompt_file=prompt_file, resources_root=rroot)
 
@@ -368,7 +394,10 @@ def advance_step(
             error_kind=ERR_STATE_CORRUPT,
         )
     ctx = _build_ctx(wf, _outputs_acc_from_state(state), inputs, rid)
-    prompt, prompt_file, rroot = _deliver(nodes[pending], ctx, prompts_dir)
+    prompt, prompt_file, rroot = _deliver(
+        nodes[pending], ctx, prompts_dir,
+        wf=wf, project_root=project_root, no_memory=no_memory,
+    )
     return StepResult(emits=[], done=False, node=pending,
                       prompt=prompt, prompt_file=prompt_file, resources_root=rroot)
 
