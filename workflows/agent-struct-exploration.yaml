@@ -1,5 +1,5 @@
 name: agent-struct-exploration
-description: "Agent 驱动的结构性探索（降时延、保精度）：family_detect(setup) → [hypothesizer→engineer→structure_gate→evaluator→analyst→curator→viz_round] 循环到 champion 达标 → finalize(champion 重训+导出ONNX+final_report) → viz_finalize。契约见 docs/specs/agent-structural-exploration-design-draft.md。"
+description: "LLM agent 驱动的模型结构搜索：迭代改写模型结构（AST 级）、实测时延与精度，循环逼近目标（降时延保精度）。不依赖超网，结构由 agent 直接改。契约见 docs/specs/agent-structural-exploration-design-draft.md。"
 
 entry: family_detect
 
@@ -301,14 +301,14 @@ nodes:
     routes:
       - to: viz_round
 
-  # 刷新本轮可视化（静态 HTML；四图见 §12，脚本随 task #11 扩展）
+  # 刷新本轮可视化（orca.chart render_chart 推送；四图见 §12）
   - name: viz_round
     kind: agent
     executor: opencode
     model: "deepseek/deepseek-v4-flash"
     tools: [bash, read, write, glob, grep]
     prompt: |
-      你是结构性探索 workflow 的**轮内可视化**刷新（§12，静态 HTML，幂等重渲染）。
+      你是结构性探索 workflow 的**轮内可视化**刷新（§12，orca.chart render_chart 推送，幂等刷新）。
 
       ## 输入（账本，只读）
       - ledger: `{{ family_detect.output.output_dir }}ledger.jsonl`（每行一个 candidate）
@@ -317,10 +317,9 @@ nodes:
       - baseline: latency `{{ baseline_measure.output.baseline_latency_ms }}`ms / accuracy `{{ baseline_measure.output.baseline_accuracy }}`
       - 目标: latency `{{ inputs.target_latency_ms }}`ms / accuracy `{{ baseline_measure.output.accuracy_target }}`
       - struct_scripts_dir: `{{ inputs.struct_scripts_dir }}`
-      - 输出到: `{{ family_detect.output.output_dir }}viz/`
 
       ## 执行（确定性脚本，无 LLM / 无内联兜底）
-      直接调 `viz_struct.py`（§12 四图全部由该脚本渲染，幂等覆盖到 `<output_dir>/viz/`）：
+      直接调 `viz_struct.py`（§12 四图全部由该脚本经 render_chart 推送到 Orca Web 面板）：
       ```bash
       python3 "{{ inputs.struct_scripts_dir }}/viz_struct.py" \
         --ledger "{{ family_detect.output.output_dir }}ledger.jsonl" \
@@ -328,10 +327,9 @@ nodes:
         --baseline_latency_ms "{{ baseline_measure.output.baseline_latency_ms }}" \
         --baseline_accuracy "{{ baseline_measure.output.baseline_accuracy }}" \
         --target_latency_ms "{{ inputs.target_latency_ms }}" \
-        --accuracy_target "{{ baseline_measure.output.accuracy_target }}" \
-        --out_dir "{{ family_detect.output.output_dir }}"
+        --accuracy_target "{{ baseline_measure.output.accuracy_target }}"
       ```
-      从 stdout JSON 读 `charts`：每图 `rendered: true/false` + `path`。数据不足 → 该图由脚本自动跳过（stderr WARN），
+      从 stdout JSON 读 `charts`：每图 `pushed: true/false`。数据不足 → 该图由脚本自动跳过（stderr WARN），
       **不报错、不阻断主循环**。脚本异常（非零退出）→ 读 stderr 把关键行写进输出，仍 `|| true` 不阻断（viz 是 sidecar）。
 
       ## 输出
@@ -398,14 +396,14 @@ nodes:
     routes:
       - to: viz_finalize
 
-  # 终态可视化（静态 HTML；四图终态版见 §12）
+  # 终态可视化（orca.chart render_chart 推送；四图终态版见 §12）
   - name: viz_finalize
     kind: agent
     executor: opencode
     model: "deepseek/deepseek-v4-flash"
     tools: [bash, read, write, glob, grep]
     prompt: |
-      你是结构性探索 workflow 的**终态可视化**（§12 四图终态版 + 收尾，幂等覆盖）。
+      你是结构性探索 workflow 的**终态可视化**（§12 四图终态版 + 收尾对比，幂等刷新）。
 
       ## 输入
       - ledger: `{{ family_detect.output.output_dir }}ledger.jsonl`
@@ -415,10 +413,9 @@ nodes:
       - 目标: `{{ inputs.target_latency_ms }}`ms / `{{ baseline_measure.output.accuracy_target }}`
       - 终止原因: `{{ curator.output.terminate_reason }}`
       - struct_scripts_dir: `{{ inputs.struct_scripts_dir }}`
-      - 输出到: `{{ family_detect.output.output_dir }}viz/`
 
-      ## 执行（确定性脚本，无 LLM / 无内联兜底）
-      1. 调 `viz_struct.py` 重渲染 §12 四图终态版（与 viz_round 同命令；幂等覆盖）：
+      ## 执行（确定性脚本，无 LLM / 无内联兜底；全程 render_chart，不产 HTML）
+      1. 调 `viz_struct.py` 重推 §12 四图终态版（与 viz_round 同命令；幂等刷新）：
          ```bash
          python3 "{{ inputs.struct_scripts_dir }}/viz_struct.py" \
            --ledger "{{ family_detect.output.output_dir }}ledger.jsonl" \
@@ -426,19 +423,24 @@ nodes:
            --baseline_latency_ms "{{ baseline_measure.output.baseline_latency_ms }}" \
            --baseline_accuracy "{{ baseline_measure.output.baseline_accuracy }}" \
            --target_latency_ms "{{ inputs.target_latency_ms }}" \
-           --accuracy_target "{{ baseline_measure.output.accuracy_target }}" \
-           --out_dir "{{ family_detect.output.output_dir }}"
+           --accuracy_target "{{ baseline_measure.output.accuracy_target }}"
          ```
          从 stdout JSON 读 `charts`。数据不足由脚本自动跳过（不报错）。脚本异常 `|| true` 不阻断。
-      2. **额外**生成 `viz/summary.html`（内联 python+plotly，self-contained）：三柱状对比
-         baseline / champion / final 的 latency(ms)，并标注 accuracy、轮数（= ledger 最大 round）、
-         terminate_reason: `{{ curator.output.terminate_reason }}`。final 点用 `{{ finalize.output.final_latency_ms }}`
-         / `{{ finalize.output.final_accuracy }}`；champion 用 champions.jsonl 最后一行。
+      2. **额外**经 render_chart 推一张终态对比 bar（label=`struct-explore`, title=`Baseline vs Champion vs Final`）：
+         三柱 baseline / champion / final 的 latency(ms)，accuracy 写进每行。
+         champion latency/accuracy 取 champions.jsonl 最后一行；final 用
+         `{{ finalize.output.final_latency_ms }}` / `{{ finalize.output.final_accuracy }}`；
+         baseline 用 `{{ baseline_measure.output.baseline_latency_ms }}` / `{{ baseline_measure.output.baseline_accuracy }}`。
+         ORCA_* env 沿链继承，直接内联 python 推（失败 `|| true` 不阻断）：
+         ```bash
+         python3 -c "from orca.chart import render_chart; render_chart(chart_type='bar', label='struct-explore', title='Baseline vs Champion vs Final', data=[{'stage':'baseline','latency_ms':<baseline_lat>,'accuracy':<baseline_acc>},{'stage':'champion','latency_ms':<champ_lat>,'accuracy':<champ_acc>},{'stage':'final','latency_ms':<final_lat>,'accuracy':<final_acc>}], x='stage', y='latency_ms', hue='stage')"
+         ```
+         （把 <...> 占位替换为真实数值；accuracy 缺失时省略该键。）
 
       ## 输出
       ```
       VIZ_FINALIZE: ok
-      CHARTS: <stdout JSON 的 charts 字段 + summary.html>
+      CHARTS: <stdout JSON 的 charts 字段 + 一张终态对比 bar 是否推成功>
       ```
     routes:
       - to: $end

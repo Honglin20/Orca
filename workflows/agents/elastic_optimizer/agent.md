@@ -1,5 +1,5 @@
 ---
-description: NAS slim 第一步——Elastic 超网生成（folder-agent）。只读 model + Elastic 原语速查 + 最小 supernet 模板，判 Elastic 参数并生成合法超网；不展平、不读 optimize_rules/supernet_specs/inspect_examples（上下文最小化 → 快）。末尾推 C1/C2 描述图。
+description: NAS slim 第一步——Elastic 超网生成（folder-agent）。只读 model + Elastic 原语速查 + 最小 supernet 模板，判 Elastic 参数并生成合法超网；不展平、不读 optimize_rules/supernet_specs/inspect_examples（上下文最小化 → 快）。末尾推 baseline→elastic 结构对比表。
 tools: [bash, read, write, edit, glob, grep, task, todowrite]
 ---
 # elastic_optimizer
@@ -12,7 +12,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 - `$ORCA_AGENT_RESOURCES`（orca spawn / per-node `orca_env.sh` 注入）= 本 agent 资源目录：
   - `references/elastic_cheatsheet.md` —— Elastic 原语 API 速查（必读）
   - `references/supernet_template.py` —— 最小合法 CNN supernet 模板（必读，结构基准）
-  - `scripts/push_describe.py` —— 末尾推 C1/C2 描述图（只跑，不改）
+  - `scripts/push_describe.py` —— 末尾推 baseline→elastic 结构对比表（只跑，不改）
 - `<nas_agent_root>` = `nas-agent` 包根，按一次 probe 解析（生成的 supernet.py 需从 `nas_agent.blocks` import 原语）：
 
   ```bash
@@ -62,12 +62,12 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
    - 搜索空间概述（stage / depth / kernel / channel 候选一览）
    - 产物清单（supernet.py 等）
 
-7. **末尾推 C1/C2 静态描述图**（best-effort，不阻断）：
+7. **末尾推 baseline→elastic 结构对比表**（best-effort，不阻断）：
    ```bash
    source "runs/${ORCA_RUN_ID}/orca_env.sh" 2>/dev/null
    python3 "$ORCA_AGENT_RESOURCES/scripts/push_describe.py" --output_dir <output_dir> || true
    ```
-   推 C1 基线模型表 + C2 超网/搜索空间表。`source ... 2>/dev/null` 在非 Orca 上下文（无 orca_env.sh）静默跳过；`|| true` 保 chart 失败不阻断主流程。
+   推单张结构对比表（行=baseline 层，列=name/替换前/替换后；AST 解析 `*_flat.py`、读 `supernet.py` 的 SearchSpace）。`source ... 2>/dev/null` 在非 Orca 上下文（无 orca_env.sh）静默跳过；`|| true` 保 chart 失败不阻断主流程。
 
 ## 监督要点（fail loud）
 

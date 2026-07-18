@@ -1,5 +1,5 @@
 name: nas-hp-search
-description: "轻量 NAS 超参搜索流水线（slim）：Elastic 超网生成 → 训练脚本(chart-inline) → 搜索脚本 → 训练/搜索执行 → 脚本化架构选择。无独立 viz 节点（chart 流入生成脚本/选择脚本，live 推图）。"
+description: "基于 Elastic 超网的轻量超参搜索（slim）：只搜宽度/深度等超参、不改 block 组件，跳过 LLM 评估，脚本化选架构。"
 entry: model_optimizer
 
 inputs:

@@ -1,5 +1,5 @@
 name: nas-agent-pipeline
-description: "端到端 NAS 自动化流水线（含可视化）：模型优化 → 超网生成 → [描述图] → 训练脚本 → 搜索脚本 → 训练/搜索执行(曲线刷新) → 架构评估 → [帕累托/漏斗图]"
+description: "基于 Elastic 超网的端到端 NAS：生成超网 → 训练 → 搜索架构 → 评估选择，同时优化超参（宽/深）与模型组件（block 类型）。"
 entry: model_optimizer
 inputs:
   model_path:

@@ -31,11 +31,11 @@ python3 "$ORCA_AGENT_RESOURCES/scripts/push_pareto_final.py"   --output_dir <out
 python3 "$ORCA_AGENT_RESOURCES/scripts/push_funnel.py"         --output_dir <output_dir> || true
 ```
 
-- `push_describe.py`：推 C1 基线模型表 + C2 超网/搜索空间表（supernet.py + supernet_summary.md 就绪即可）。
+- `push_describe.py`：推单张 baseline→elastic 结构对比表（行=baseline 层，列=name/替换前/替换后；`*_flat.py` + supernet.py 就绪即可）。
 - `push_pareto_final.py`：推 C5 终态帕累托前沿（需 `runs/search/search.jsonl`；自算全局非支配前沿）。
 - `push_funnel.py`：推 C6 选择漏斗（需 `runs/retrain/selected/selection_summary.json`）。
 
-各脚本 stdout 会打印推送摘要（如 `[push_describe] C1/C2 pushed`）。
+各脚本 stdout 会打印推送摘要（如 `[push_describe] pushed N rows`）。
 
 ## 输出
 
