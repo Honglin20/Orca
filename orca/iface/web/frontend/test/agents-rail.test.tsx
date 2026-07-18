@@ -166,6 +166,9 @@ describe("AgentsRail —— token 小字（agent_usage fold）", () => {
     // 1500 → 1.5k；800 → 800（< 1000 不缩写）；P1：🔤 emoji → lucide <Coins/>（svg，无文本）
     expect(row).toContain("1.5k");
     expect(row).toContain("800");
+    // P2：新增 agent-tokens / agent-status testid（元信息单行嵌套 span）
+    expect(screen.getByTestId("agent-tokens-n1").textContent ?? "").toContain("1.5k");
+    expect(screen.getByTestId("agent-status-n1")).toBeInTheDocument();
   });
 });
 

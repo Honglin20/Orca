@@ -8,10 +8,12 @@
 // P5a：cost UI 已移除（``top-cost`` testid 删除，store.cost fold 保留不破坏 agent_usage
 // 累加测试）。原 cost 测试块同步删除——见 store.test.ts 对 cost fold 的覆盖。
 
-import { describe, expect, test, afterEach, beforeEach } from "vitest";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { describe, expect, test, afterEach, beforeEach, vi } from "vitest";
+import { act, cleanup, render, screen, fireEvent } from "@testing-library/react";
 import { TopBar } from "@/components/layout/TopBar";
 import { useWorkflowStore } from "@/stores/workflow-store";
+import { useWsConnectionStore } from "@/hooks/ws-connection-store";
+import { setTheme } from "@/hooks/use-theme";
 import {
   useElapsedTickActive,
   __testReset,
@@ -215,5 +217,118 @@ describe("TopBar —— workflow 名 + runId 展示", () => {
     ev("workflow_started", { workflow_name: "wf" });
     render(<Root active={true} />);
     expect(screen.getByText("abc12345")).toBeInTheDocument();
+  });
+});
+
+describe("TopBar —— P3 runId 复制（fail loud）", () => {
+  test("点击复制触发 clipboard.writeText + Check 反馈", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      writable: true,
+      configurable: true,
+    });
+    ev("workflow_started", { workflow_name: "wf" });
+    render(<Root active={true} />);
+    const runBtn = screen.getByTestId("top-runid");
+    expect(runBtn.textContent).toContain("abc12345");
+    await act(async () => {
+      fireEvent.click(runBtn);
+    });
+    expect(writeText).toHaveBeenCalledWith("abc12345");
+    // Check 反馈（svg 存在）
+    expect(runBtn.querySelector("svg")).toBeInTheDocument();
+  });
+
+  test("clipboard reject → console.error，UI 不崩", async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error("denied"));
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      writable: true,
+      configurable: true,
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    ev("workflow_started", { workflow_name: "wf" });
+    render(<Root active={true} />);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("top-runid"));
+    });
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+});
+
+describe("TopBar —— P3 WS 连接指示点（四态）", () => {
+  function startWf() {
+    useWorkflowStore.getState().processEvent({
+      seq: 1, type: "workflow_started", timestamp: 100,
+      node: null, session_id: null, data: { workflow_name: "wf" },
+    });
+  }
+
+  test("connected → bg-orca-done", () => {
+    useWsConnectionStore.setState({ status: "connected" });
+    startWf();
+    render(<Root active={true} />);
+    const dot = screen.getByTestId("top-ws").querySelector("span");
+    expect(dot?.className).toContain("bg-orca-done");
+  });
+
+  test("connecting → bg-orca-skipped", () => {
+    useWsConnectionStore.setState({ status: "connecting" });
+    startWf();
+    render(<Root active={true} />);
+    const dot = screen.getByTestId("top-ws").querySelector("span");
+    expect(dot?.className).toContain("bg-orca-skipped");
+  });
+
+  test("reconnecting → bg-orca-skipped", () => {
+    useWsConnectionStore.setState({ status: "reconnecting" });
+    startWf();
+    render(<Root active={true} />);
+    const dot = screen.getByTestId("top-ws").querySelector("span");
+    expect(dot?.className).toContain("bg-orca-skipped");
+  });
+
+  test("disconnected → bg-orca-failed", () => {
+    useWsConnectionStore.setState({ status: "disconnected" });
+    startWf();
+    render(<Root active={true} />);
+    const dot = screen.getByTestId("top-ws").querySelector("span");
+    expect(dot?.className).toContain("bg-orca-failed");
+  });
+});
+
+describe("TopBar —— P3 主题三态 toggle（SPEC §7 双触发）", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    document.documentElement.classList.remove("dark", "light");
+  });
+
+  test("toggle 循环 system → dark → light → system，.dark/.light 互斥", () => {
+    useWorkflowStore.getState().processEvent({
+      seq: 1, type: "workflow_started", timestamp: 100,
+      node: null, session_id: null, data: { workflow_name: "wf" },
+    });
+    render(<Root active={true} />);
+    const btn = screen.getByTestId("theme-toggle");
+
+    // system → dark
+    fireEvent.click(btn);
+    expect(document.documentElement.classList.contains("dark")).toBe(true);
+    expect(document.documentElement.classList.contains("light")).toBe(false);
+    // dark → light
+    fireEvent.click(btn);
+    expect(document.documentElement.classList.contains("light")).toBe(true);
+    expect(document.documentElement.classList.contains("dark")).toBe(false);
+    // light → system（jsdom matchMedia 默认非 dark → .light class）
+    fireEvent.click(btn);
+    expect(document.documentElement.classList.contains("dark")).toBe(false);
+  });
+
+  test("setTheme 持久化 localStorage + apply <html>.dark", () => {
+    setTheme("dark");
+    expect(window.localStorage.getItem("orca-theme")).toBe("dark");
+    expect(document.documentElement.classList.contains("dark")).toBe(true);
   });
 });

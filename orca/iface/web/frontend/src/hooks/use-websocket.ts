@@ -131,10 +131,10 @@ export function useWebSocket(
 
     const open = () => {
       socket = createSocket(wsUrl);
-      // P3：transport-only 连接状态（ sanctioned exception，见 ws-connection-store.ts）。
-      useWsConnectionStore.getState().setReconnecting();
       const wasReconnect = everConnected;
       everConnected = true;
+      // P3/Y4：transport-only 连接状态（sanctioned exception）。首次 connecting、重连 reconnecting。
+      useWsConnectionStore.getState()[wasReconnect ? "setReconnecting" : "setConnecting"]();
 
       socket.onopen = () => {
         useWsConnectionStore.getState().setConnected();

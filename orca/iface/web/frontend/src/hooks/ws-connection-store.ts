@@ -9,11 +9,18 @@
 
 import { create } from "zustand";
 
-export type WsConnStatus = "connected" | "reconnecting" | "disconnected";
+// 四态（code-reviewer Y4）：disconnected（未连/已卸载）/ connecting（首次连接中）/
+// connected（已连）/ reconnecting（断后重连中）。区分首次与重连，避免首帧紫点「重连」误读。
+export type WsConnStatus =
+  | "disconnected"
+  | "connecting"
+  | "connected"
+  | "reconnecting";
 
 interface WsConnState {
   status: WsConnStatus;
   setConnected: () => void;
+  setConnecting: () => void;
   setReconnecting: () => void;
   setDisconnected: () => void;
 }
@@ -21,6 +28,7 @@ interface WsConnState {
 export const useWsConnectionStore = create<WsConnState>((set) => ({
   status: "disconnected",
   setConnected: () => set({ status: "connected" }),
+  setConnecting: () => set({ status: "connecting" }),
   setReconnecting: () => set({ status: "reconnecting" }),
   setDisconnected: () => set({ status: "disconnected" }),
 }));

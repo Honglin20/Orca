@@ -7,7 +7,7 @@
 // MessageBlock.tsx / AgentsRail.tsx）。
 //
 // StatusIcon 是 WorkflowStatus → 图标的 DRY 出口（与 status-style.ts statusColor 同源），
-// 供 TopBar / AgentsRail / DAG / 未任 minimap 复用。
+// 供 TopBar / AgentsRail / DAG / 未来 minimap 复用。
 
 import {
   Circle,

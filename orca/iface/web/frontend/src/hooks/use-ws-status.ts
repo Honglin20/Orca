@@ -2,7 +2,10 @@
 //
 // TopBar 用此 hook 显示连接指示点。详见 ws-connection-store.ts 的 SPEC sanctioned exception。
 
-import { useWsConnectionStore, type WsConnStatus } from "./ws-connection-store";
+import { useWsConnectionStore } from "./ws-connection-store";
+import type { WsConnStatus } from "./ws-connection-store";
+
+export type { WsConnStatus };
 
 export function useWsStatus(): WsConnStatus {
   return useWsConnectionStore((s) => s.status);

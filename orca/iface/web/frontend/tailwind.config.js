@@ -10,6 +10,11 @@
 // 暴露入口消费），是 status → 视觉色 DRY 真相源（与 ``NODE_STATUS_HEX`` 互补：前者 utility、
 // 后者 hex inline style）。
 export default {
+  // P3（code-reviewer Y2）：darkMode "class"——``dark:`` 变体看 ``<html>.dark`` class
+  // （配合 use-theme.ts applyTheme），而非 v3 默认的 ``prefers-color-scheme``。否则用户
+  // 显式 toggle dark/light 时 CSS 变量正确翻转，但 DiffView 等遗留 ``dark:*`` 变体不跟随
+  // （仍听系统偏好）。system 态由 use-theme 读 matchMedia 决定加不加 .dark，与 CSS @media 同步。
+  darkMode: "class",
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
     extend: {

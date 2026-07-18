@@ -17,15 +17,14 @@ import { useElapsedNow } from "@/hooks/use-elapsed-tick";
 import { selectWorkflowElapsed, formatElapsed } from "@/selectors";
 import { StatusIcon } from "@/components/icons";
 import { statusColor } from "./status-style";
-import { useWsStatus } from "@/hooks/use-ws-status";
+import { useWsStatus, type WsConnStatus } from "@/hooks/use-ws-status";
 import { currentTheme, nextTheme, setTheme, type Theme } from "@/hooks/use-theme";
-import type { WorkflowStatus } from "@/types/store-types";
 
-/** WS 连接态 → 圆点配色（绿/紫/红，与 status palette 同源）。 */
-function wsDotClass(status: "connected" | "reconnecting" | "disconnected"): string {
+/** WS 连接态 → 圆点配色（绿/紫/红；connecting/reconnecting 同紫，中间态）。 */
+function wsDotClass(status: WsConnStatus): string {
   if (status === "connected") return "bg-orca-done";
-  if (status === "reconnecting") return "bg-orca-skipped";
-  return "bg-orca-failed";
+  if (status === "disconnected") return "bg-orca-failed";
+  return "bg-orca-skipped"; // connecting / reconnecting
 }
 
 const THEME_ICON: Record<Theme, typeof Sun> = {
@@ -33,13 +32,6 @@ const THEME_ICON: Record<Theme, typeof Sun> = {
   dark: Moon,
   light: Sun,
 };
-
-/** WorkflowStatus → badge 描边/底色（rgb alpha，读 --accent 之外的语义色 RGB）。 */
-function statusBadgeClass(status: WorkflowStatus): string {
-  // 与 statusColor 同语义映射，badge 形态：淡底 + 描边 + 文字色。
-  const c = statusColor(status); // text-orca-{语义}
-  return c;
-}
 
 export function TopBar({ runId }: { runId?: string }) {
   const status = useWorkflowStore((s) => s.status);
@@ -99,7 +91,7 @@ export function TopBar({ runId }: { runId?: string }) {
         <span className="orca-text-faint text-sm">{workflowName}</span>
       )}
       <span
-        className={`inline-flex items-center gap-1 rounded border border-current px-1.5 py-0.5 text-xs ${statusBadgeClass(status)}`}
+        className={`inline-flex items-center gap-1 rounded border border-current px-1.5 py-0.5 text-xs ${statusColor(status)}`}
         data-testid="top-status"
       >
         <StatusIcon status={status} />

@@ -1,15 +1,28 @@
-// hooks/use-theme.ts —— 三态主题开关（P3，light / dark / system）。
+// hooks/use-theme.ts —— 三态主题开关（P3，light / dark / system）+ matchMedia 跟随。
 //
-// **SPEC §7 双触发机制**（web-shell-v2-spec.md）：暗色由 ``<html>.dark`` class 控制，
-// index.css 的 ``:root.dark`` 作用域定义在与 ``@media (prefers-color-scheme: dark)``
-// **之后**（同 specificity 后者胜），从而用户显式选择覆盖系统偏好。
+// **SPEC §7 双触发机制**（web-shell-v2-spec.md + amendment）：暗色由 ``<html>.dark`` class
+// 控制；tailwind.config ``darkMode: "class"`` 让 ``dark:`` 变体也看该 class（与 CSS 变量
+// 同源）。``<html>.light`` 强制亮（覆盖系统）。``index.css`` 的 ``:root.dark/.light``
+// specificity (0,2,0) > ``@media :root`` (0,1,0)，显式 class 总胜。
 //
-// 持久化 localStorage("orca-theme")；无存储 / 无 window（SSR 防御）→ fallback system。
-// system 态：移除 .dark class，跟随 ``@media prefers-color-scheme``（保留默认行为）。
+// **system 态**：读 ``matchMedia("(prefers-color-scheme: dark)")`` 决定加 ``.dark`` 还是
+// ``.light``，并注册 change listener 跟随系统切换（让 dark: 变体与 CSS @media 同步）。
+//
+// 持久化 localStorage("orca-theme")；无 window/document（SSR 防御）→ fallback system。
+//
+// **消费者契约**（code-reviewer Y5）：当前 theme React state 仅 TopBar 单消费者持有
+// （useState(currentTheme())）。若未来新增消费者，应改为 useSyncExternalStore 订阅
+// module-level getter，避免多组件 state 漂移。
 
 export type Theme = "light" | "dark" | "system";
 
 const STORAGE_KEY = "orca-theme";
+const MEDIA_DARK = "(prefers-color-scheme: dark)";
+
+function systemPrefersDark(): boolean {
+  if (typeof window === "undefined" || !window.matchMedia) return false;
+  return window.matchMedia(MEDIA_DARK).matches;
+}
 
 function readStored(): Theme {
   if (typeof window === "undefined") return "system";
@@ -25,18 +38,27 @@ function readStored(): Theme {
 
 function applyTheme(theme: Theme): void {
   if (typeof document === "undefined") return;
+  // darkMode: "class"：dark 态加 .dark；light 态加 .light；system 态读 matchMedia
+  // （让 dark: 变体与 CSS @media 一致）。.dark / .light 互斥（toggle 二选一）。
+  const dark = theme === "dark" || (theme === "system" && systemPrefersDark());
   const root = document.documentElement;
-  // 三态：dark → .dark class；light → .light class；system → 无 class（走 @media）。
-  // index.css 的 :root.dark / :root.light specificity (0,2,0) > @media :root (0,1,0)，
-  // 故用户显式选择覆盖系统偏好（无需依赖规则顺序）。
-  root.classList.remove("dark", "light");
-  if (theme === "dark") root.classList.add("dark");
-  else if (theme === "light") root.classList.add("light");
+  root.classList.toggle("dark", dark);
+  root.classList.toggle("light", !dark);
 }
 
-/** 初始化：模块加载时读 localStorage 并 apply（RunDetailPage / App 根调用一次）。 */
+let initialized = false;
+
+/** 初始化：apply 持久化主题 + 注册 system 态 matchMedia listener（幂等，App 根调用）。 */
 export function initTheme(): void {
+  if (initialized) return;
+  initialized = true;
   applyTheme(readStored());
+  if (typeof window === "undefined" || !window.matchMedia) return;
+  const mq = window.matchMedia(MEDIA_DARK);
+  mq.addEventListener("change", () => {
+    // 仅 system 态跟随系统偏好（显式 dark/light 不被系统覆盖）。
+    if (readStored() === "system") applyTheme("system");
+  });
 }
 
 /** 切主题：持久化 + apply + 返回新值。localStorage 写失败 → console.error，仍 apply（不阻断 UX）。 */
