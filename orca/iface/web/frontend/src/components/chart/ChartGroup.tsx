@@ -33,23 +33,23 @@ export function ChartGroup({
 
   return (
     <div
-      className="rounded border border-slate-200 bg-white"
+      className="rounded border orca-border orca-bg-surface"
       data-testid="chart-group"
       data-label={label}
     >
       <button
         type="button"
         onClick={() => setCollapsed((c) => !c)}
-        className="flex w-full items-center justify-between px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-50"
+        className="flex w-full items-center justify-between px-3 py-2 text-left text-sm font-medium orca-text-muted hover:orca-bg-surface-2"
         data-testid="chart-group-toggle"
       >
         <span>
           {collapsed ? "▶" : "▼"} {label}
         </span>
-        <span className="text-xs text-slate-400">{charts.length} 图</span>
+        <span className="text-xs orca-text-faint">{charts.length} 图</span>
       </button>
       {!collapsed && (
-        <div className="border-t border-slate-100 p-3" style={GRID_STYLE}>
+        <div className="border-t orca-border p-3" style={GRID_STYLE}>
           {charts.map((c, i) => (
             // 用 title 优先作 key（selectCharts identity 的稳定部分）；无 title 回退 index
             <LazyChartWidget

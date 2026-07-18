@@ -106,7 +106,7 @@ function MarkdownTextImpl({ children, className }: MarkdownTextProps) {
       }
       return (
         <code
-          className="rounded bg-slate-200/60 px-1 py-0.5 font-mono text-[12px] dark:bg-slate-700/60"
+          className="orca-bg-surface-2 rounded px-1 py-0.5 font-mono text-[12px]"
           {...rest}
         >
           {c}
@@ -114,7 +114,7 @@ function MarkdownTextImpl({ children, className }: MarkdownTextProps) {
       );
     },
     pre: ({ children }) => (
-      <pre className="my-2 overflow-x-auto rounded-md bg-slate-100 p-2 text-[12px] dark:bg-slate-800/80">
+      <pre className="orca-bg-surface-2 my-2 overflow-x-auto rounded-md p-2 text-[12px]">
         {children}
       </pre>
     ),
@@ -124,12 +124,12 @@ function MarkdownTextImpl({ children, className }: MarkdownTextProps) {
       </div>
     ),
     th: ({ children }) => (
-      <th className="border border-slate-300 bg-slate-100 px-2 py-1 text-left font-medium dark:border-slate-600 dark:bg-slate-700/60">
+      <th className="orca-border orca-bg-surface-2 border px-2 py-1 text-left font-medium">
         {children}
       </th>
     ),
     td: ({ children }) => (
-      <td className="border border-slate-300 px-2 py-1 dark:border-slate-600">
+      <td className="orca-border border px-2 py-1">
         {children}
       </td>
     ),
@@ -138,13 +138,13 @@ function MarkdownTextImpl({ children, className }: MarkdownTextProps) {
         href={href}
         target="_blank"
         rel="noreferrer"
-        className="text-blue-600 underline hover:text-blue-500 dark:text-blue-400"
+        className="orca-accent hover:orca-text underline"
       >
         {children}
       </a>
     ),
     blockquote: ({ children }) => (
-      <blockquote className="my-2 border-l-2 border-slate-300 pl-3 text-slate-600 dark:border-slate-600 dark:text-slate-300">
+      <blockquote className="orca-border orca-text-muted my-2 border-l-2 pl-3">
         {children}
       </blockquote>
     ),
@@ -166,7 +166,7 @@ function MarkdownTextImpl({ children, className }: MarkdownTextProps) {
 
   return (
     <div
-      className={`markdown-body text-sm leading-relaxed text-slate-800 dark:text-slate-100 ${
+      className={`markdown-body orca-text text-sm leading-relaxed ${
         className ?? ""
       }`}
     >

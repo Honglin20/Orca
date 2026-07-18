@@ -21,7 +21,7 @@ export function MessageBlock({ event, stepMarker, showCursor }: MessageBlockProp
   return (
     <div className="py-1" data-testid="message-block">
       {stepLabel && (
-        <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-400">
+        <div className="mb-1 text-[10px] uppercase tracking-wide orca-text-faint">
           · {stepLabel}
         </div>
       )}
@@ -29,7 +29,7 @@ export function MessageBlock({ event, stepMarker, showCursor }: MessageBlockProp
         <MarkdownText>{text}</MarkdownText>
         {showCursor && (
           <span
-            className="animate-pulse text-slate-700 dark:text-slate-200"
+            className="orca-text animate-pulse"
             data-testid="streaming-cursor"
           >
             ▎

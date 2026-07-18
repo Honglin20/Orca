@@ -88,7 +88,7 @@ function WorkflowGraphInner() {
 
   if (!workflowDef) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-slate-400">
+      <div className="flex h-full items-center justify-center text-sm orca-text-faint">
         等待 workflow_started 事件以获取拓扑…
       </div>
     );

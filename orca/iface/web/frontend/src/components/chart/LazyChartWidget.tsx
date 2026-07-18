@@ -49,7 +49,7 @@ export function LazyChartWidget({ payload }: LazyChartWidgetProps) {
     return (
       <div
         ref={ref}
-        className="aspect-[4/3] w-full animate-pulse rounded bg-slate-100"
+        className="aspect-[4/3] w-full animate-pulse rounded orca-bg-surface-2"
         data-testid="chart-skeleton"
       />
     );

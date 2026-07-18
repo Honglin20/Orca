@@ -19,21 +19,22 @@ export function ToolGroup({ pairs }: ToolGroupProps) {
 
   return (
     <div
-      className="ml-1 border-l-2 border-slate-200 pl-2 dark:border-slate-700"
+      className="ml-1 border-l-2 orca-border pl-2"
       data-testid="tool-group"
     >
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 rounded px-1 py-1 text-left text-xs hover:bg-slate-100/60 dark:hover:bg-slate-700/40"
+        className="hover:orca-bg-surface-2 flex w-full items-center gap-2 rounded px-1 py-1 text-left text-xs"
         aria-expanded={open}
       >
-        <span className="shrink-0 text-slate-500">{open ? "▼" : "▸"}</span>
-        <span className="font-medium text-slate-600 dark:text-slate-300">
+        <span className="shrink-0 orca-text-faint">{open ? "▼" : "▸"}</span>
+        <span className="orca-text-muted font-medium">
           {pairs.length} tools
         </span>
         {pendingCount > 0 && (
-          <span className="text-[10px] text-amber-500">
+          // P0：pending = running 语义（与 ToolRow spinner 同色），不再 amber。
+          <span className="text-[10px] text-orca-running">
             ({pendingCount} running)
           </span>
         )}

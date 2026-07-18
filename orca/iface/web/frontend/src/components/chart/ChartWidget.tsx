@@ -30,7 +30,7 @@ export function ChartWidget({ payload }: { payload: ChartPayload }) {
     default:
       // fail loud（未知类型不静默，显示提示让用户/开发者发现）
       return (
-        <div className="p-2 text-xs text-red-500" data-testid="chart-unknown">
+        <div className="p-2 text-xs text-orca-failed" data-testid="chart-unknown">
           未知的 chart_type: {String((payload as { chart_type?: string }).chart_type)}
         </div>
       );

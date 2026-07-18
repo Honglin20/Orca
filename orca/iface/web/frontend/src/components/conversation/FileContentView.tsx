@@ -13,21 +13,21 @@ export function FileContentView({ content, filePath }: FileContentViewProps) {
   const lines = content.split("\n");
   return (
     <div
-      className="rounded-md border border-slate-300 overflow-hidden text-xs font-mono dark:border-slate-600"
+      className="orca-border rounded-md border text-xs font-mono"
       data-testid="file-content-view"
     >
       {filePath && (
-        <div className="bg-slate-100 dark:bg-slate-700/60 px-2 py-1 text-xs font-medium text-slate-600 dark:text-slate-300 border-b border-slate-300 dark:border-slate-600 truncate">
+        <div className="orca-bg-surface-2 orca-border orca-text-muted border-b px-2 py-1 text-xs font-medium truncate">
           {filePath}
         </div>
       )}
       <div className="max-h-64 overflow-y-auto">
         {lines.map((line, i) => (
-          <div key={i} className="flex hover:bg-slate-100/60 dark:hover:bg-slate-700/40">
-            <span className="shrink-0 w-8 text-right pr-2 text-slate-400 select-none border-r border-slate-200 dark:border-slate-700 leading-[18px]">
+          <div key={i} className="hover:orca-bg-surface-2 flex">
+            <span className="orca-text-faint orca-border shrink-0 w-8 select-none border-r pr-2 text-right leading-[18px]">
               {i + 1}
             </span>
-            <code className="pl-2 whitespace-pre text-xs leading-[18px] flex-1 min-w-0 text-slate-800 dark:text-slate-200">
+            <code className="orca-text min-w-0 flex-1 whitespace-pre pl-2 text-xs leading-[18px]">
               {line || " "}
             </code>
           </div>

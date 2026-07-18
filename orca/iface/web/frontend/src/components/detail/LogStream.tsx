@@ -33,6 +33,10 @@ interface LogRowData {
 /**
  * LogLevel → tailwind 文字色（SPEC §P1：克制，与既有 ErrorBlock/AgentsRail 配色对齐）。
  * Record<LogLevel,_> 编译期穷尽 5 级；新增 level → 编译失败。
+ *
+ * P0b 白名单：LogLevel 与 NodeStatus 不是 1:1（info/warning 无对应 node status），
+ * 故保留为独立真相源（plan §P0b）；_inline chrome_（seq/type 数字、jump-latest 按钮、
+ * live badge）则走 token。
  */
 const LEVEL_TEXT_COLOR: Record<LogLevel, string> = {
   error: "text-red-600",     // 与 ErrorBlock / AgentsRail failed 同色
@@ -56,8 +60,8 @@ function LogRow({
       }`}
       data-testid={`log-row-${index}`}
     >
-      <span className="text-slate-400">{item.seq}</span>
-      <span className="ml-2 text-slate-500">{item.type}</span>
+      <span className="orca-text-faint">{item.seq}</span>
+      <span className="ml-2 orca-text-faint">{item.type}</span>
       <span className="ml-2">{item.text}</span>
     </div>
   );
@@ -111,7 +115,7 @@ export function LogStream() {
 
   if (lines.length === 0) {
     return (
-      <div className="p-4 text-sm text-slate-400" data-testid="log-empty">
+      <div className="p-4 text-sm orca-text-faint" data-testid="log-empty">
         暂无事件
       </div>
     );
@@ -137,7 +141,7 @@ export function LogStream() {
         <button
           type="button"
           onClick={jumpToLatest}
-          className="absolute bottom-3 right-3 rounded-full border border-slate-300 bg-white px-3 py-1 text-xs text-slate-700 shadow hover:bg-slate-100"
+          className="absolute bottom-3 right-3 rounded-full border orca-border orca-bg-surface px-3 py-1 text-xs orca-text-muted shadow hover:orca-bg-surface-2"
           data-testid="log-jump-latest"
         >
           ↓ 跳最新 ({pendingJump + 1})
@@ -145,6 +149,8 @@ export function LogStream() {
       )}
       {pinned && (
         <span
+          // P0b 白名单（intentional inverse）：live badge 是 white-on-dark 强对比浮层，
+          // 与 ResolvedToast/AgentsRail DAG overlay 同类，不属于 surface scale。
           className="pointer-events-none absolute bottom-3 right-3 rounded-full bg-slate-900/60 px-2 py-0.5 text-[10px] text-white"
           data-testid="log-pinned"
         >

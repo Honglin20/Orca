@@ -42,7 +42,7 @@ export default function App() {
 
 function NoRunPlaceholder() {
   return (
-    <div className="flex flex-1 items-center justify-center text-sm text-slate-400">
+    <div className="flex flex-1 items-center justify-center text-sm orca-text-faint">
       无活跃 run —— 请通过 ``/runs/:runId`` 打开具体 run。
     </div>
   );

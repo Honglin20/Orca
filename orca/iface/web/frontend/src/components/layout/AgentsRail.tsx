@@ -1,8 +1,8 @@
 // components/layout/AgentsRail.tsx —— 左栏 agents 列表（SPEC §5.2 / §4 三栏布局左 / §0 D5 / §6 D9）。
 //
 // P3（web-presentation-refinement §P3）：视觉重做——
-//   1. 底色 bg-slate-50（与中间 tab 栏 RunDetailPage.tsx 一致）；agent 行白卡片
-//      （bg-white + border + rounded + hover 浅灰）。
+//   1. 底色 orca-bg-surface-2（与中间 tab 栏 RunDetailPage.tsx 一致）；agent 行白卡片
+//      （orca-bg-surface + border + rounded + hover 浅灰）。
 //   2. 去固定宽度 → w-full h-full（react-resizable-panels 全弹性，根治 GAP）。
 //   3. 状态色条：左竖条 import NODE_STATUS_HEX（与 DAG 浮层同源 DRY）替代文字 icon。
 //   4. 阶段分组 selectAgentGroups：Setup/Loop/Finalize（无 back-route → 单组平铺）。
@@ -46,7 +46,7 @@ const STATUS_FALLBACK = NODE_STATUS_HEX.pending;
 function DagFallback() {
   return (
     <div
-      className="flex h-full items-center justify-center text-sm text-slate-400"
+      className="flex h-full items-center justify-center text-sm orca-text-faint"
       data-testid="dag-fallback"
     >
       <span className="animate-pulse">加载 DAG…</span>
@@ -100,29 +100,29 @@ export function AgentsRail() {
 
   return (
     <aside
-      // P3 方案 1/2：bg-slate-50（底色统一，与中间 tab 栏一致）+ w-full h-full
+      // P3 方案 1/2：orca-bg-surface-2（底色统一，与中间 tab 栏一致）+ w-full h-full
       // （去固定宽度 → 全弹性填满 Panel，react-resizable-panels 同款，根治 GAP）
-      className="flex h-full w-full flex-col border-r border-slate-200 bg-slate-50"
+      className="flex h-full w-full flex-col border-r orca-border orca-bg-surface-2"
       data-testid="agents-rail"
     >
       <div className="flex items-center justify-between p-3">
-        <h2 className="text-sm font-semibold text-slate-700">Agents</h2>
+        <h2 className="text-sm font-semibold orca-text-muted">Agents</h2>
         <button
           type="button"
           onClick={() => setShowDag((v) => !v)}
-          className="rounded border border-slate-300 px-2 py-0.5 text-xs text-slate-600 hover:bg-slate-100"
+          className="rounded border orca-border px-2 py-0.5 text-xs orca-text-muted hover:orca-bg-surface"
           data-testid="dag-toggle"
         >
           DAG
         </button>
       </div>
       {groups.length === 0 ? (
-        <p className="px-3 text-xs text-slate-400">暂无 agent</p>
+        <p className="px-3 text-xs orca-text-faint">暂无 agent</p>
       ) : (
         <div className="flex-1 space-y-3 overflow-y-auto p-2">
           {groups.map((g) => (
             <section key={g.group} data-testid={`agent-group-${g.group}`}>
-              <h3 className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+              <h3 className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wide orca-text-faint">
                 {g.group}
               </h3>
               <ul className="space-y-1">
@@ -140,7 +140,7 @@ export function AgentsRail() {
                   return (
                     <li
                       key={a.node}
-                      className="relative overflow-hidden rounded border border-slate-200 bg-white"
+                      className="relative overflow-hidden rounded border orca-border orca-bg-surface"
                     >
                       {/* P3 方案 3：左竖状态色条（NODE_STATUS_HEX，与 DAG 浮层同源 DRY）替代文字 icon */}
                       <div
@@ -153,17 +153,17 @@ export function AgentsRail() {
                         type="button"
                         onClick={() => setSelectedNode(a.node)}
                         data-testid={`agent-row-${a.node}`}
-                        className={`flex w-full flex-col items-start gap-0.5 py-2 pl-3 pr-2 text-left hover:bg-slate-50 ${
-                          selectedNode === a.node ? "bg-slate-100" : ""
+                        className={`flex w-full flex-col items-start gap-0.5 py-2 pl-3 pr-2 text-left hover:orca-bg-surface-2 ${
+                          selectedNode === a.node ? "orca-bg-surface-2" : ""
                         }`}
                       >
                         <span className="flex w-full items-center gap-2 text-sm">
-                          <span className="font-mono text-xs text-slate-800">
+                          <span className="font-mono text-xs orca-text">
                             {a.node}
                           </span>
                           {showIter && (
                             <span
-                              className="rounded bg-slate-100 px-1 text-[10px] font-medium text-slate-600"
+                              className="rounded orca-bg-surface-2 px-1 text-[10px] font-medium orca-text-muted"
                               data-testid={`agent-iter-${a.node}`}
                             >
                               R{a.iteration}
@@ -171,7 +171,7 @@ export function AgentsRail() {
                           )}
                         </span>
                         <span
-                          className="text-[10px] text-slate-400"
+                          className="text-[10px] orca-text-faint"
                           data-testid={`agent-elapsed-${a.node}`}
                         >
                           {elapsed !== null
@@ -182,7 +182,7 @@ export function AgentsRail() {
                         </span>
                         {stall && (
                           <span
-                            className="text-[10px] text-amber-600"
+                            className="text-[10px] text-orca-skipped"
                             data-testid={`agent-stall-${a.node}`}
                           >
                             {stall.thinking ? "💭" : "思考中"}{" "}
@@ -190,12 +190,12 @@ export function AgentsRail() {
                           </span>
                         )}
                         {tokens && (
-                          <span className="text-[10px] text-slate-400">
+                          <span className="text-[10px] orca-text-faint">
                             🔤 {tokens}
                           </span>
                         )}
                         {a.progress && (
-                          <span className="text-[10px] text-slate-400">
+                          <span className="text-[10px] orca-text-faint">
                             ⟳ {a.progress}
                           </span>
                         )}
@@ -206,7 +206,7 @@ export function AgentsRail() {
                           type="button"
                           onClick={() => toggleFold(a.node)}
                           data-testid={`agent-fold-${a.node}`}
-                          className="flex w-full items-center gap-1 px-3 pb-1.5 text-left text-[10px] text-slate-500 hover:text-slate-700"
+                          className="flex w-full items-center gap-1 px-3 pb-1.5 text-left text-[10px] orca-text-faint hover:orca-text-muted"
                         >
                           <span className="text-xs leading-none">
                             {isExpanded ? "▾" : "▸"}
@@ -217,7 +217,7 @@ export function AgentsRail() {
                       )}
                       {isExpanded && showFold && (
                         <ul
-                          className="border-t border-slate-100 px-2 py-1"
+                          className="border-t orca-border px-2 py-1"
                           data-testid={`agent-subs-${a.node}`}
                         >
                           {selectNodeSessions(state, a.node)
@@ -234,17 +234,17 @@ export function AgentsRail() {
                                     setSelectedSession(s.sessionId);
                                   }}
                                   data-testid={`agent-sub-${a.node}-${s.sessionId}`}
-                                  className={`flex w-full items-center justify-between gap-2 rounded px-2 py-1 text-left text-[10px] hover:bg-slate-100 ${
+                                  className={`flex w-full items-center justify-between gap-2 rounded px-2 py-1 text-left text-[10px] hover:orca-bg-surface-2 ${
                                     selectedNode === a.node &&
                                     selectedSession === s.sessionId
-                                      ? "bg-slate-100"
+                                      ? "orca-bg-surface-2"
                                       : ""
                                   }`}
                                 >
-                                  <span className="font-mono text-slate-700">
+                                  <span className="font-mono orca-text-muted">
                                     {s.label}
                                   </span>
-                                  <span className="text-slate-400">
+                                  <span className="orca-text-faint">
                                     {s.eventCount}
                                   </span>
                                 </button>
@@ -263,11 +263,14 @@ export function AgentsRail() {
       {showDag && (
         <div
           className="fixed inset-0 z-50 bg-slate-900/40"
+          // P0b 白名单（intentional inverse）：DAG overlay 是 dark backdrop + light panel
+          // 的强对比浮层，slate-900/40 不属于 surface scale（与 ResolvedToast/LogStream
+          // live badge 同类），P0 不替换；P3 暗色机制收口时统一处理。
           onClick={() => setShowDag(false)}
           data-testid="dag-overlay"
         >
           <div
-            className="absolute inset-8 rounded bg-white p-2 shadow"
+            className="absolute inset-8 rounded orca-bg-surface p-2 shadow"
             onClick={(e) => e.stopPropagation()}
           >
             {/* D2：懒挂——首次打开才下载 xyflow chunk */}

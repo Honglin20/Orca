@@ -107,7 +107,7 @@ export function ConversationView({
   if (!nodeId) {
     return (
       <div
-        className="p-4 text-sm text-slate-400"
+        className="p-4 text-sm orca-text-faint"
         data-testid="conversation-empty"
       >
         请在左栏选择一个 agent 查看会话。
@@ -131,7 +131,7 @@ export function ConversationView({
           />
         )}
         <div
-          className="p-4 text-sm text-slate-400"
+          className="p-4 text-sm orca-text-faint"
           data-testid="conversation-empty"
         >
           节点 {nodeId}
@@ -221,7 +221,7 @@ function SessionTabs({
 }: SessionTabsProps) {
   return (
     <div
-      className="flex flex-wrap items-center gap-1 border-b border-slate-200 bg-slate-50 px-2 py-1.5"
+      className="flex flex-wrap items-center gap-1 border-b orca-border orca-bg-surface-2 px-2 py-1.5"
       data-testid={`session-tabs-${nodeId}`}
     >
       <button
@@ -230,8 +230,10 @@ function SessionTabs({
         data-testid="session-tab-all"
         className={`rounded px-2 py-0.5 font-mono text-xs ${
           selectedSession === "all"
+            // P0b 白名单（intentional inverse）：selected tab 是 white-on-dark 强对比，
+            // 同 ResolvedToast/LogStream live badge；非 surface scale。
             ? "bg-slate-900 text-white"
-            : "text-slate-600 hover:bg-slate-200"
+            : "orca-text-muted hover:orca-bg-surface"
         }`}
       >
         All({totalEventCount})
@@ -245,7 +247,7 @@ function SessionTabs({
           className={`rounded px-2 py-0.5 font-mono text-xs ${
             selectedSession === s.sessionId
               ? "bg-slate-900 text-white"
-              : "text-slate-600 hover:bg-slate-200"
+              : "orca-text-muted hover:orca-bg-surface"
           }`}
         >
           {s.label}({s.eventCount})

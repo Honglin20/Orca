@@ -6,7 +6,9 @@
 // 状态语义保留（pending 中性 / running 钢蓝品牌 / done 绿 / failed 红 / skipped 紫），
 // 但 ``running`` 从 blue-500 #3b82f6 收敛到 ``--accent`` = PALETTE[0] #5B8DB8（品牌强调色
 // 与图表第一色一致），完成状态保留 emerald 语义、失败保留 red 语义——避免视觉歧义。
-// 注：该 palette 当前未被任何组件直接使用（grep 验证），仅作 design-token 入口暴露给未来扩展。
+// 注：该 palette 已启用（P0 token 收口后，组件经 text-orca-* / bg-orca-* / border-orca-*
+// 暴露入口消费），是 status → 视觉色 DRY 真相源（与 ``NODE_STATUS_HEX`` 互补：前者 utility、
+// 后者 hex inline style）。
 export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {

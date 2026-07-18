@@ -20,12 +20,12 @@ function ForeachGroupWidgetBase({ data }: NodeProps) {
   return (
     <NodeShell data={d} kindLabel={kindLabel}>
       {progress && (
-        <div className="mt-1 text-xs text-slate-500" data-testid={`node-${d.name}-progress`}>
+        <div className="mt-1 text-xs orca-text-faint" data-testid={`node-${d.name}-progress`}>
           {progress}
         </div>
       )}
       {branches && !progress && (
-        <div className="mt-1 text-xs text-slate-400">
+        <div className="mt-1 text-xs orca-text-faint">
           {branches.length} branches
         </div>
       )}

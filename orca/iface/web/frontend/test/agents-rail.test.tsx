@@ -363,12 +363,14 @@ describe("selectAgentGroups —— 阶段分组（P3 方案 4 + P2-3 算法）",
 // ── P3：视觉重做组件测试（色条 / 底色 / 分组 / 折叠 / 子 session 联动）──────────────
 
 describe("AgentsRail —— P3 视觉重做（色条 / 底色 / 分组 / 折叠）", () => {
-  test("底色统一：aside bg-slate-50（非 bg-white）；无 w-56 GAP；w-full h-full", () => {
+  test("底色统一：aside orca-bg-surface-2（非 orca-bg-surface）；无 w-56 GAP；w-full h-full", () => {
     emitWorkflowStarted();
     render(<RailRoot active={false} />);
     const rail = screen.getByTestId("agents-rail");
-    expect(rail.className).toContain("bg-slate-50");
-    expect(rail.className).not.toContain("bg-white");
+    // P0 token 收口：原 bg-slate-50 → orca-bg-surface-2（视觉相同，token 替换）。
+    // ``toMatch`` 用负向 lookahead 避免子串匹配 ``orca-bg-surface-2``。
+    expect(rail.className).toContain("orca-bg-surface-2");
+    expect(rail.className).not.toMatch(/\borca-bg-surface\b(?!-)/);
     expect(rail.className).not.toContain("w-56");
     expect(rail.className).toContain("w-full");
     expect(rail.className).toContain("h-full");

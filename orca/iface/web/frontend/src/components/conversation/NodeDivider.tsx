@@ -21,12 +21,12 @@ export function NodeDivider({ event }: { event: WebEvent }) {
   }
   return (
     <div
-      className="flex items-center gap-2 py-1 text-[10px] uppercase tracking-wide text-slate-300 dark:text-slate-600"
+      className="orca-text-faint flex items-center gap-2 py-1 text-[10px] uppercase tracking-wide"
       data-testid="node-divider"
     >
-      <span className="h-px flex-1 bg-slate-200 dark:bg-slate-700" />
+      <span className="orca-bg-border h-px flex-1" />
       <span>{label}</span>
-      <span className="h-px flex-1 bg-slate-200 dark:bg-slate-700" />
+      <span className="orca-bg-border h-px flex-1" />
     </div>
   );
 }
@@ -38,14 +38,14 @@ export function DialogDivider({ event }: { event: WebEvent }) {
       : "";
   return (
     <div
-      className="flex items-center gap-2 py-1 text-[10px] uppercase tracking-wide text-slate-400 dark:text-slate-500"
+      className="orca-text-faint flex items-center gap-2 py-1 text-[10px] uppercase tracking-wide"
       data-testid="dialog-divider"
     >
-      <span className="h-px flex-1 bg-slate-200 dark:bg-slate-700" />
+      <span className="orca-bg-border h-px flex-1" />
       <span>
         ── dialog{turns} ──
       </span>
-      <span className="h-px flex-1 bg-slate-200 dark:bg-slate-700" />
+      <span className="orca-bg-border h-px flex-1" />
     </div>
   );
 }
@@ -54,7 +54,7 @@ export function StepMarker({ event }: { event: WebEvent }) {
   const reason = String(event.data?.step_reason ?? "step");
   return (
     <div
-      className="py-0.5 text-[10px] italic text-slate-300 dark:text-slate-600"
+      className="orca-text-faint py-0.5 text-[10px] italic"
       data-testid="step-marker"
     >
       · {reason}

@@ -83,7 +83,7 @@ export function StatusLine({ event }: { event: WebEvent }) {
 
   return (
     <div
-      className="px-1 py-0.5 text-[11px] text-slate-400 dark:text-slate-500"
+      className="orca-text-faint px-1 py-0.5 text-[11px]"
       data-testid="status-line"
     >
       <div className="flex items-center gap-1.5">
@@ -96,7 +96,7 @@ export function StatusLine({ event }: { event: WebEvent }) {
             aria-expanded={open}
             aria-label={open ? "折叠状态详情" : "展开状态详情"}
             data-testid="status-line-toggle"
-            className="shrink-0 rounded px-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-700/40"
+            className="orca-text-faint hover:orca-bg-surface-2 hover:orca-text-muted shrink-0 rounded px-1"
           >
             {open ? "▼" : "▸"}
           </button>
@@ -104,7 +104,7 @@ export function StatusLine({ event }: { event: WebEvent }) {
       </div>
       {open && isExpandable && (
         <pre
-          className="mt-0.5 ml-5 max-h-32 overflow-auto rounded bg-slate-100 p-1 font-mono text-[10px] text-slate-600 dark:bg-slate-800/60 dark:text-slate-300"
+          className="orca-bg-surface-2 orca-text-muted mt-0.5 ml-5 max-h-32 overflow-auto rounded p-1 font-mono text-[10px]"
           data-testid="status-line-detail"
         >
           {JSON.stringify(event.data ?? {}, null, 2)}

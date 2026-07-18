@@ -33,7 +33,7 @@ export function NodeOutputBlock({ event }: NodeOutputBlockProps) {
     body = (
       <span
         data-testid="node-output-empty"
-        className="italic text-slate-400 dark:text-slate-500"
+        className="orca-text-faint italic"
       >
         （无 output）
       </span>
@@ -48,7 +48,7 @@ export function NodeOutputBlock({ event }: NodeOutputBlockProps) {
     body = (
       <pre
         data-testid="node-output-json"
-        className="overflow-x-auto rounded bg-slate-50 p-2 text-xs leading-snug text-slate-700 dark:bg-slate-900 dark:text-slate-200"
+        className="orca-bg-surface-2 orca-text-muted overflow-x-auto rounded p-2 text-xs leading-snug"
       >
         {safeJson(output)}
       </pre>
@@ -58,10 +58,10 @@ export function NodeOutputBlock({ event }: NodeOutputBlockProps) {
   return (
     <div className="py-1" data-testid="node-output">
       {/* 顶细线 + dim 标签：承担「节点产出」边界感（取代 node_completed 旧的 divider 角色） */}
-      <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-wide text-slate-400 dark:text-slate-500">
-        <span className="h-px flex-1 bg-slate-200 dark:bg-slate-700" />
+      <div className="orca-text-faint mb-1 flex items-center gap-2 text-[10px] uppercase tracking-wide">
+        <span className="orca-bg-border h-px flex-1" />
         <span>■ {nodeLabel} output</span>
-        <span className="h-px flex-1 bg-slate-200 dark:bg-slate-700" />
+        <span className="orca-bg-border h-px flex-1" />
       </div>
       <div className="min-w-0 text-sm">{body}</div>
     </div>

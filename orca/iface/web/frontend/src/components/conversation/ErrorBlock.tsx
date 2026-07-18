@@ -12,18 +12,18 @@ export function ErrorBlock({ event }: { event: WebEvent }) {
 
   return (
     <div
-      className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300"
+      className="text-orca-failed rounded-md border border-orca-failed/40 bg-orca-failed/10 px-3 py-2 text-xs"
       data-testid="error-block"
     >
       <div className="flex items-center gap-1.5 font-medium">
         <span>✗</span>
         <span>{kind}</span>
         {phase && (
-          <span className="text-[10px] text-red-500/80">@ {phase}</span>
+          <span className="text-[10px] text-orca-failed/80">@ {phase}</span>
         )}
       </div>
       {message && (
-        <p className="mt-0.5 break-words text-red-700/90 dark:text-red-200/90">
+        <p className="text-orca-failed/90 mt-0.5 break-words">
           {message}
         </p>
       )}

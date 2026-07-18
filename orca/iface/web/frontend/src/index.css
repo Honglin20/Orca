@@ -122,6 +122,9 @@ body {
   .orca-border {
     border-color: rgb(var(--border));
   }
+  .orca-bg-border {
+    background-color: rgb(var(--border));
+  }
   .orca-accent {
     color: rgb(var(--accent));
   }

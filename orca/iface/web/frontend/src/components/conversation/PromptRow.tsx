@@ -18,14 +18,14 @@ export function PromptRow({ event }: { event: WebEvent }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-100"
+        className="orca-text-muted hover:orca-text flex items-center gap-1.5 text-xs"
         aria-expanded={open}
       >
         <span className="shrink-0">{open ? "▼" : "▸"}</span>
         <span className="font-medium">user prompt</span>
       </button>
       {open && preview && (
-        <div className="mt-1 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/40 px-2 py-1.5 max-h-64 overflow-y-auto">
+        <div className="orca-border orca-bg-surface-2 mt-1 max-h-64 overflow-y-auto rounded-md border px-2 py-1.5">
           <MarkdownText>{preview}</MarkdownText>
         </div>
       )}

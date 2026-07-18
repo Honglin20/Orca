@@ -22,29 +22,33 @@ export function ThinkingBlock({ event, stepMarker, streaming }: ThinkingBlockPro
     : null;
 
   return (
+    // P0：thinking = running 的子状态，语义色走 ``orca-running``（= --accent 钢蓝）。
+    // 原 amber-500 系列（warning 语义）无对应 palette entry；plan §P0a 显式规定
+    // blocked→skipped（violet）替代 amber，此处同源沿用「替换 amber 为 palette 语义」。
+    // 视觉色相从 amber → 钢蓝有偏移，但语义一致性 > 严格保色（与 indigo→accent 同 spirit）。
     <div
-      className="rounded-md border border-amber-500/30 bg-amber-500/5"
+      className="rounded-md border border-orca-running/30 bg-orca-running/5"
       data-testid="thinking-block"
     >
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-1.5 px-2 py-1 text-xs text-amber-700 dark:text-amber-300 hover:text-amber-500"
+        className="text-orca-running hover:text-orca-accent flex w-full items-center gap-1.5 px-2 py-1 text-xs"
         aria-expanded={open}
       >
         <span className="shrink-0">{open ? "▼" : "▸"}</span>
         <span>💭 Thinking</span>
         {stepLabel && (
-          <span className="text-[10px] text-amber-500/80">· {stepLabel}</span>
+          <span className="text-[10px] text-orca-running/80">· {stepLabel}</span>
         )}
         {streaming && (
-          <span className="animate-pulse text-amber-400" data-testid="thinking-pulse">
+          <span className="animate-pulse text-orca-running" data-testid="thinking-pulse">
             …
           </span>
         )}
       </button>
       {open && (
-        <div className="border-t border-amber-500/20 px-2 py-1.5 max-h-64 overflow-y-auto">
+        <div className="border-t border-orca-running/20 px-2 py-1.5 max-h-64 overflow-y-auto">
           <MarkdownText>{text}</MarkdownText>
         </div>
       )}

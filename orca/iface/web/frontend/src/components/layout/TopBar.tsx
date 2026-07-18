@@ -18,26 +18,7 @@
 import { useWorkflowStore } from "@/stores/workflow-store";
 import { useElapsedNow } from "@/hooks/use-elapsed-tick";
 import { selectWorkflowElapsed, formatElapsed } from "@/selectors";
-import type { WorkflowStatus } from "@/types/store-types";
-
-const STATUS_ICON: Record<WorkflowStatus, string> = {
-  idle: "○",
-  queued: "○",
-  running: "●",
-  completed: "✓",
-  failed: "✗",
-  cancelled: "⊘",
-  blocked: "⏸",
-};
-
-function statusColor(status: WorkflowStatus): string {
-  if (status === "failed") return "text-red-600";
-  if (status === "running") return "text-emerald-600";
-  if (status === "completed") return "text-emerald-600";
-  if (status === "cancelled") return "text-slate-500";
-  if (status === "blocked") return "text-amber-600";
-  return "text-slate-600";
-}
+import { STATUS_ICON, statusColor } from "./status-style";
 
 export function TopBar({ runId }: { runId?: string }) {
   const status = useWorkflowStore((s) => s.status);

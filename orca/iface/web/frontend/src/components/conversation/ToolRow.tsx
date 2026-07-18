@@ -74,13 +74,13 @@ function renderToolResult(toolName: string, toolArgs: unknown, result: unknown) 
   // 通用 fallback
   if (!resultStr) {
     return (
-      <div className="text-xs text-slate-400 italic" data-testid="tool-no-output">
+      <div className="text-xs orca-text-faint italic" data-testid="tool-no-output">
         (no output)
       </div>
     );
   }
   return (
-    <pre className="overflow-x-auto whitespace-pre-wrap text-xs text-slate-700 dark:text-slate-200">
+    <pre className="orca-text-muted overflow-x-auto whitespace-pre-wrap text-xs">
       {resultStr}
     </pre>
   );
@@ -114,40 +114,42 @@ export function ToolRow({ pair, defaultOpen = false }: ToolRowProps) {
   const hideArgs = isFileTool || toolName === "render_chart";
 
   const Icon = status === "pending" ? "⟳" : "✓";
+  // P0：pending spinner = running 语义（orca-running）；done = orca-done。
+  // amber→running 与 ThinkingBlock 同决策（语义优先于色相）。
   const iconClass =
     status === "pending"
-      ? "text-amber-500 animate-spin-slow"
-      : "text-emerald-500";
+      ? "text-orca-running animate-spin-slow"
+      : "text-orca-done";
 
   return (
     <div
-      className="ml-2 border-l-2 border-slate-200 pl-2 dark:border-slate-700"
+      className="ml-2 border-l-2 orca-border pl-2"
       data-testid="tool-row"
     >
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 rounded px-1 py-1 text-left text-xs hover:bg-slate-100/60 dark:hover:bg-slate-700/40"
+        className="hover:orca-bg-surface-2 flex w-full items-center gap-2 rounded px-1 py-1 text-left text-xs"
         aria-expanded={open}
       >
         <span className={`shrink-0 font-mono ${iconClass}`}>{Icon}</span>
-        <span className="font-medium text-slate-600 dark:text-slate-300">
+        <span className="orca-text-muted font-medium">
           {toolName || "(tool)"}
         </span>
         {argPreview && (
-          <span className="min-w-0 truncate font-mono text-xs text-slate-500 dark:text-slate-400">
+          <span className="orca-text-faint min-w-0 truncate font-mono text-xs">
             {argPreview}
           </span>
         )}
-        <span className="ml-auto shrink-0 text-slate-400">
+        <span className="ml-auto shrink-0 orca-text-faint">
           {open ? "▲" : "▼"}
         </span>
       </button>
       {open && (
-        <div className="mt-1 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/40 p-2 text-xs max-h-80 overflow-y-auto">
+        <div className="orca-border orca-bg-surface-2 mt-1 max-h-80 overflow-y-auto rounded-md border p-2 text-xs">
           {args != null && !hideArgs && (
             <div className="mb-1.5">
-              <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+              <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide orca-text-faint">
                 Args
               </div>
               <pre className="overflow-x-auto whitespace-pre-wrap text-xs max-h-32 overflow-y-auto">
@@ -157,13 +159,13 @@ export function ToolRow({ pair, defaultOpen = false }: ToolRowProps) {
           )}
           {pair.result ? (
             <div>
-              <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+              <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide orca-text-faint">
                 Result
               </div>
               {renderToolResult(toolName, args, pair.result.data?.result)}
             </div>
           ) : (
-            <div className="italic text-slate-400">running…</div>
+            <div className="italic orca-text-faint">running…</div>
           )}
         </div>
       )}
