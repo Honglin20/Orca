@@ -2,7 +2,7 @@
 
 **日期**:2026-07-18
 **范围**:in-session shell 节点级记忆(写确定性 / 读注入 agent 判断)
-**commit**:`<SHA>`
+**commit**:`29c70b3`
 
 ---
 
