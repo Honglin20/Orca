@@ -3,6 +3,7 @@
 // 琥珀色折叠「💭 Thinking」+ markdown；流式时 `…` 脉动。默认折叠。
 
 import { useState } from "react";
+import { Brain, ChevronDown, ChevronRight } from "lucide-react";
 import type { WebEvent } from "@/types/events";
 import { MarkdownText } from "./MarkdownText";
 
@@ -36,8 +37,8 @@ export function ThinkingBlock({ event, stepMarker, streaming }: ThinkingBlockPro
         className="text-orca-running hover:text-orca-accent flex w-full items-center gap-1.5 px-2 py-1 text-xs"
         aria-expanded={open}
       >
-        <span className="shrink-0">{open ? "▼" : "▸"}</span>
-        <span>💭 Thinking</span>
+        <span className="shrink-0 inline-flex items-center">{open ? <ChevronDown size={12} strokeWidth={1.5} aria-hidden /> : <ChevronRight size={12} strokeWidth={1.5} aria-hidden />}</span>
+        <span className="inline-flex items-center gap-1"><Brain size={13} strokeWidth={1.5} aria-hidden /> Thinking</span>
         {stepLabel && (
           <span className="text-[10px] text-orca-running/80">· {stepLabel}</span>
         )}

@@ -2,6 +2,7 @@
 //
 // node_failed / workflow_failed：kind + message + phase 红块渲染。
 
+import { XCircle } from "lucide-react";
 import type { WebEvent } from "@/types/events";
 
 export function ErrorBlock({ event }: { event: WebEvent }) {
@@ -16,7 +17,7 @@ export function ErrorBlock({ event }: { event: WebEvent }) {
       data-testid="error-block"
     >
       <div className="flex items-center gap-1.5 font-medium">
-        <span>✗</span>
+        <span className="inline-flex items-center"><XCircle size={14} strokeWidth={1.5} aria-hidden /></span>
         <span>{kind}</span>
         {phase && (
           <span className="text-[10px] text-orca-failed/80">@ {phase}</span>

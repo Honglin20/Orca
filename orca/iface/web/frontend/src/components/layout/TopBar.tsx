@@ -1,7 +1,7 @@
 // components/layout/TopBar.tsx —— 顶栏：run + status + elapsed（SPEC §5.1 / §0 D5 / §P5）。
 //
 // 纯渲染（铁律 6）：所有值 = store fold 派生 + selector 派生。
-// - status icon：●running / ✓completed / ✗failed / cancelled / blocked
+// - status icon：``<StatusIcon/>``（lucide，P1 替换原 emoji ●/✓/✗/⊘/⏸）；配色继承父级 currentColor
 // - elapsed（D5）：running 时 wall-clock tick（``useElapsedNow`` 单一共享 tick，页根
 //   控制 active）；完成 snap ``workflow_completed.data.elapsed`` 停 tick（防 wall-clock
 //   成前端真相，铁律 1）。``selectWorkflowElapsed`` 实现这一语义。
@@ -15,10 +15,12 @@
 // 单一 timer 约束（SPEC §5.2）：本组件用 ``useElapsedNow()`` 订阅模块级 singleton
 // tick，自身不开 setInterval。tick 启停由 RunDetailPage 页根的 ``useElapsedTickActive`` 控制。
 
+import { Timer } from "lucide-react";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import { useElapsedNow } from "@/hooks/use-elapsed-tick";
 import { selectWorkflowElapsed, formatElapsed } from "@/selectors";
-import { STATUS_ICON, statusColor } from "./status-style";
+import { StatusIcon } from "@/components/icons";
+import { statusColor } from "./status-style";
 
 export function TopBar({ runId }: { runId?: string }) {
   const status = useWorkflowStore((s) => s.status);
@@ -46,16 +48,18 @@ export function TopBar({ runId }: { runId?: string }) {
         <span className="orca-text-faint text-sm">{workflowName}</span>
       )}
       <span
-        className={`text-sm ${statusColor(status)}`}
+        className={`text-sm inline-flex items-center gap-1 ${statusColor(status)}`}
         data-testid="top-status"
       >
-        {STATUS_ICON[status]} {status}
+        <StatusIcon status={status} />
+        {status}
       </span>
       <span
-        className="orca-text-faint text-sm"
+        className="orca-text-faint text-sm inline-flex items-center gap-1"
         data-testid="top-elapsed"
       >
-        ⏱ {workflowElapsed !== null ? formatElapsed(workflowElapsed, "tenths") : "—"}
+        <Timer size={14} strokeWidth={1.5} aria-hidden />
+        {workflowElapsed !== null ? formatElapsed(workflowElapsed, "tenths") : "—"}
       </span>
     </header>
   );

@@ -9,23 +9,34 @@
 // 失败信息用户高敏感 → **默认展开**（SPEC §5.3 闭 review #29 错误转录精神）。
 
 import { useState } from "react";
+import {
+  RotateCw,
+  PauseCircle,
+  Play,
+  Check,
+  X,
+  Timer,
+  ChevronsRight,
+  ChevronDown,
+  ChevronRight,
+  type LucideIcon,
+} from "lucide-react";
 import type { WebEvent } from "@/types/events";
 
-const ICONS: Partial<Record<WebEvent["type"], string>> = {
-  retry_started: "↻",
-  retry_succeeded: "↻",
-  retry_exhausted: "↻",
-  interrupt_requested: "⏸",
-  interrupt_resolved: "▶",
-  validator_started: "✓",
-  validator_passed: "✓",
-  validator_failed: "✗",
-  wait_started: "⏱",
-  wait_completed: "⏱",
-  foreach_started: "⏵",
-  foreach_item_started: "·",
-  foreach_item_completed: "·",
-  foreach_completed: "⏵",
+// P1：emoji → lucide 组件（统一细线条）。foreach_item_* 走 fallback "·"。
+const ICONS: Partial<Record<WebEvent["type"], LucideIcon>> = {
+  retry_started: RotateCw,
+  retry_succeeded: RotateCw,
+  retry_exhausted: RotateCw,
+  interrupt_requested: PauseCircle,
+  interrupt_resolved: Play,
+  validator_started: Check,
+  validator_passed: Check,
+  validator_failed: X,
+  wait_started: Timer,
+  wait_completed: Timer,
+  foreach_started: ChevronsRight,
+  foreach_completed: ChevronsRight,
 };
 
 function summarize(e: WebEvent): string {
@@ -76,7 +87,7 @@ function num(v: unknown): number | string {
 const DEFAULT_OPEN_TYPES = new Set<WebEvent["type"]>(["validator_failed"]);
 
 export function StatusLine({ event }: { event: WebEvent }) {
-  const icon = ICONS[event.type] ?? "·";
+  const IconCmp = ICONS[event.type];
   // SPEC §5.3 默认折叠；validator_failed 例外（错误信息高敏感，默认展开）。
   const [open, setOpen] = useState(DEFAULT_OPEN_TYPES.has(event.type));
   const isExpandable = event.data != null && Object.keys(event.data ?? {}).length > 0;
@@ -87,7 +98,9 @@ export function StatusLine({ event }: { event: WebEvent }) {
       data-testid="status-line"
     >
       <div className="flex items-center gap-1.5">
-        <span className="shrink-0">{icon}</span>
+        <span className="shrink-0 inline-flex items-center">
+          {IconCmp ? <IconCmp size={11} strokeWidth={1.5} aria-hidden /> : "·"}
+        </span>
         <span className="truncate flex-1">{summarize(event)}</span>
         {isExpandable && (
           <button
@@ -96,9 +109,9 @@ export function StatusLine({ event }: { event: WebEvent }) {
             aria-expanded={open}
             aria-label={open ? "折叠状态详情" : "展开状态详情"}
             data-testid="status-line-toggle"
-            className="orca-text-faint hover:orca-bg-surface-2 hover:orca-text-muted shrink-0 rounded px-1"
+            className="orca-text-faint hover:orca-bg-surface-2 hover:orca-text-muted shrink-0 rounded px-1 inline-flex items-center"
           >
-            {open ? "▼" : "▸"}
+            {open ? <ChevronDown size={11} strokeWidth={1.5} aria-hidden /> : <ChevronRight size={11} strokeWidth={1.5} aria-hidden />}
           </button>
         )}
       </div>

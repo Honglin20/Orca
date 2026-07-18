@@ -4,6 +4,7 @@
 // agent_thinking）→ ``▸ N tools``（默认折叠；展开看每个 ToolRow）。
 
 import { useState } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import type { ToolPair } from "./entries";
 import { ToolRow } from "./ToolRow";
 
@@ -28,7 +29,7 @@ export function ToolGroup({ pairs }: ToolGroupProps) {
         className="hover:orca-bg-surface-2 flex w-full items-center gap-2 rounded px-1 py-1 text-left text-xs"
         aria-expanded={open}
       >
-        <span className="shrink-0 orca-text-faint">{open ? "▼" : "▸"}</span>
+        <span className="shrink-0 orca-text-faint inline-flex items-center">{open ? <ChevronDown size={12} strokeWidth={1.5} aria-hidden /> : <ChevronRight size={12} strokeWidth={1.5} aria-hidden />}</span>
         <span className="orca-text-muted font-medium">
           {pairs.length} tools
         </span>

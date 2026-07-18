@@ -4,6 +4,7 @@
 //   - custom 非 chart → dim ``◆ custom(<kind>)`` 可展开看 raw
 
 import { useState } from "react";
+import { BarChart3, Diamond, ChevronDown, ChevronRight } from "lucide-react";
 import type { WebEvent } from "@/types/events";
 import { safeJson } from "./_shared";
 
@@ -25,7 +26,7 @@ export function CustomRow({ event, onChartClick }: CustomRowProps) {
         className="orca-text-muted hover:orca-accent flex items-center gap-1.5 px-1 py-0.5 text-xs hover:underline"
         data-testid="chart-ref-row"
       >
-        <span>📊</span>
+        <span className="inline-flex items-center"><BarChart3 size={12} strokeWidth={1.5} aria-hidden /></span>
         <span className="truncate">{title}</span>
       </button>
     );
@@ -42,8 +43,8 @@ export function CustomRow({ event, onChartClick }: CustomRowProps) {
         className="orca-text-faint hover:orca-text-muted flex items-center gap-1.5 px-1 py-0.5 text-[11px]"
         aria-expanded={open}
       >
-        <span className="shrink-0">{open ? "▼" : "▸"}</span>
-        <span className="shrink-0">◆</span>
+        <span className="shrink-0 inline-flex items-center">{open ? <ChevronDown size={11} strokeWidth={1.5} aria-hidden /> : <ChevronRight size={11} strokeWidth={1.5} aria-hidden />}</span>
+        <span className="shrink-0 inline-flex items-center"><Diamond size={11} strokeWidth={1.5} aria-hidden /></span>
         <span className="font-mono">custom({kind})</span>
       </button>
       {open && (

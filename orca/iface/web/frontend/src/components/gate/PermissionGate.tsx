@@ -6,6 +6,7 @@
 // 不清 store.gate / 不关弹窗。弹窗关闭只能由 backend emit human_decision_resolved（store.gate→null）触发。
 
 import { useState } from "react";
+import { Lock, Wrench } from "lucide-react";
 import type { GateState } from "@/types/store-types";
 import { postGateRespond } from "./post-gate-respond";
 import { GateObserveOnlyNotice, useGateWritable } from "./gate-writable";
@@ -59,7 +60,7 @@ export function PermissionGate({ gate }: { gate: GateState }) {
     >
       <div className="w-full max-w-2xl rounded-lg orca-bg-surface shadow-xl" data-testid="permission-gate">
         <div className="flex items-center justify-between border-b orca-border px-5 py-3">
-          <h2 className="text-base font-semibold orca-text">🔒 权限请求</h2>
+          <h2 className="text-base font-semibold orca-text inline-flex items-center gap-1.5"><Lock size={16} strokeWidth={1.5} aria-hidden /> 权限请求</h2>
         </div>
         <div className="px-5 py-4">
           <p className="mb-3 text-sm orca-text-muted">
@@ -67,8 +68,8 @@ export function PermissionGate({ gate }: { gate: GateState }) {
           </p>
           <div className="rounded border orca-border orca-bg-surface-2 p-3">
             <div className="mb-1 text-xs orca-text-faint">工具</div>
-            <div className="font-mono text-sm font-medium orca-text" data-testid="gate-tool">
-              🔧 {tool}
+            <div className="font-mono text-sm font-medium orca-text inline-flex items-center gap-1.5" data-testid="gate-tool">
+              <Wrench size={13} strokeWidth={1.5} aria-hidden /> {tool}
             </div>
             <div className="mt-2 mb-1 text-xs orca-text-faint">参数</div>
             <pre

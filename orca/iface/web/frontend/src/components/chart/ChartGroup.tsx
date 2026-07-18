@@ -12,6 +12,7 @@
 // 懒挂：每 chart 包 ``LazyChartWidget``（IntersectionObserver + 300px skeleton）。
 
 import { useState } from "react";
+import { ChevronRight, ChevronDown } from "lucide-react";
 import type { ChartPayload } from "./types";
 import { LazyChartWidget } from "./LazyChartWidget";
 
@@ -43,8 +44,8 @@ export function ChartGroup({
         className="flex w-full items-center justify-between px-3 py-2 text-left text-sm font-medium orca-text-muted hover:orca-bg-surface-2"
         data-testid="chart-group-toggle"
       >
-        <span>
-          {collapsed ? "▶" : "▼"} {label}
+        <span className="inline-flex items-center gap-1">
+          {collapsed ? <ChevronRight size={14} strokeWidth={1.5} aria-hidden /> : <ChevronDown size={14} strokeWidth={1.5} aria-hidden />} {label}
         </span>
         <span className="text-xs orca-text-faint">{charts.length} 图</span>
       </button>

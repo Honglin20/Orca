@@ -9,6 +9,7 @@
 // 调用方：ToolGroup 渲染每个 pair 时复用此组件。
 
 import { useEffect, useState } from "react";
+import { Loader2, Check, ChevronUp, ChevronDown } from "lucide-react";
 import {
   FILE_TOOLS,
   formatArgsBlock,
@@ -113,7 +114,7 @@ export function ToolRow({ pair, defaultOpen = false }: ToolRowProps) {
   const isFileTool = FILE_TOOLS.has(toolName);
   const hideArgs = isFileTool || toolName === "render_chart";
 
-  const Icon = status === "pending" ? "⟳" : "✓";
+  const IconCmp = status === "pending" ? Loader2 : Check;
   // P0：pending spinner = running 语义（orca-running）；done = orca-done。
   // amber→running 与 ThinkingBlock 同决策（语义优先于色相）。
   const iconClass =
@@ -132,7 +133,9 @@ export function ToolRow({ pair, defaultOpen = false }: ToolRowProps) {
         className="hover:orca-bg-surface-2 flex w-full items-center gap-2 rounded px-1 py-1 text-left text-xs"
         aria-expanded={open}
       >
-        <span className={`shrink-0 font-mono ${iconClass}`}>{Icon}</span>
+        <span className={`shrink-0 inline-flex items-center ${iconClass}`}>
+          <IconCmp size={12} strokeWidth={1.5} aria-hidden />
+        </span>
         <span className="orca-text-muted font-medium">
           {toolName || "(tool)"}
         </span>
@@ -141,8 +144,8 @@ export function ToolRow({ pair, defaultOpen = false }: ToolRowProps) {
             {argPreview}
           </span>
         )}
-        <span className="ml-auto shrink-0 orca-text-faint">
-          {open ? "▲" : "▼"}
+        <span className="ml-auto shrink-0 orca-text-faint inline-flex items-center">
+          {open ? <ChevronUp size={12} strokeWidth={1.5} aria-hidden /> : <ChevronDown size={12} strokeWidth={1.5} aria-hidden />}
         </span>
       </button>
       {open && (

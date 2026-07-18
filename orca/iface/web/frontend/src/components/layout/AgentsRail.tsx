@@ -17,6 +17,14 @@
 // D9 stall：``selectStall`` —— 当前 node 无新事件 > 5s → 琥珀「思考中 Ns」。
 
 import { Suspense, lazy, useState } from "react";
+import {
+  Timer,
+  Brain,
+  Coins,
+  Loader2,
+  ChevronRight,
+  ChevronDown,
+} from "lucide-react";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import {
   selectAgentGroups,
@@ -171,32 +179,32 @@ export function AgentsRail() {
                           )}
                         </span>
                         <span
-                          className="text-[10px] orca-text-faint"
+                          className="text-[10px] orca-text-faint inline-flex items-center gap-0.5"
                           data-testid={`agent-elapsed-${a.node}`}
                         >
                           {elapsed !== null
-                            ? `⏱${formatElapsed(elapsed, "seconds")}`
+                            ? (<><Timer size={11} strokeWidth={1.5} aria-hidden />{formatElapsed(elapsed, "seconds")}</>)
                             : a.status === "running"
                               ? "running"
                               : ""}
                         </span>
                         {stall && (
                           <span
-                            className="text-[10px] text-orca-skipped"
+                            className="text-[10px] text-orca-skipped inline-flex items-center gap-0.5"
                             data-testid={`agent-stall-${a.node}`}
                           >
-                            {stall.thinking ? "💭" : "思考中"}{" "}
+                            {stall.thinking ? <Brain size={11} strokeWidth={1.5} aria-hidden /> : "思考中"}{" "}
                             {Math.floor(stall.sinceMs / 1000)}s
                           </span>
                         )}
                         {tokens && (
-                          <span className="text-[10px] orca-text-faint">
-                            🔤 {tokens}
+                          <span className="text-[10px] orca-text-faint inline-flex items-center gap-0.5">
+                            <Coins size={11} strokeWidth={1.5} aria-hidden /> {tokens}
                           </span>
                         )}
                         {a.progress && (
-                          <span className="text-[10px] orca-text-faint">
-                            ⟳ {a.progress}
+                          <span className="text-[10px] orca-text-faint inline-flex items-center gap-0.5">
+                            <Loader2 size={11} strokeWidth={1.5} aria-hidden className="animate-spin-slow" /> {a.progress}
                           </span>
                         )}
                       </button>
@@ -208,8 +216,8 @@ export function AgentsRail() {
                           data-testid={`agent-fold-${a.node}`}
                           className="flex w-full items-center gap-1 px-3 pb-1.5 text-left text-[10px] orca-text-faint hover:orca-text-muted"
                         >
-                          <span className="text-xs leading-none">
-                            {isExpanded ? "▾" : "▸"}
+                          <span className="text-xs leading-none inline-flex items-center">
+                            {isExpanded ? <ChevronDown size={12} strokeWidth={1.5} aria-hidden /> : <ChevronRight size={12} strokeWidth={1.5} aria-hidden />}
                           </span>
                           <span>·</span>
                           <span>{sessionCount} subs</span>

@@ -102,9 +102,10 @@ describe("AgentsRail —— per-agent elapsed（D5 snap）", () => {
     emitWorkflowStarted();
     emitNodeStarted("n1", 110);
     render(<RailRoot active={true} />);
-    const elapsed = screen.getByTestId("agent-elapsed-n1").textContent ?? "";
-    // 显示 ⏱ + 数字 + s（live tick：now - 110）
-    expect(elapsed.startsWith("⏱")).toBe(true);
+    const elapsedEl = screen.getByTestId("agent-elapsed-n1");
+    const elapsed = elapsedEl.textContent ?? "";
+    // P1：⏱ emoji → lucide <Timer/>（svg）+ 数字 + s（live tick：now - 110）
+    expect(elapsedEl.querySelector("svg")).toBeInTheDocument();
     expect(elapsed).toContain("s");
   });
 
@@ -162,10 +163,9 @@ describe("AgentsRail —— token 小字（agent_usage fold）", () => {
     });
     render(<RailRoot active={false} />);
     const row = screen.getByTestId("agent-row-n1").textContent ?? "";
-    // 1500 → 1.5k；800 → 800（< 1000 不缩写）
+    // 1500 → 1.5k；800 → 800（< 1000 不缩写）；P1：🔤 emoji → lucide <Coins/>（svg，无文本）
     expect(row).toContain("1.5k");
     expect(row).toContain("800");
-    expect(row).toContain("🔤");
   });
 });
 

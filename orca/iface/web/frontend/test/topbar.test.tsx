@@ -58,34 +58,41 @@ describe("TopBar —— status icon 5 档（SPEC §5.1）", () => {
   test("running → ●", () => {
     ev("workflow_started", { workflow_name: "wf" });
     render(<Root active={true} />);
-    expect(screen.getByTestId("top-status").textContent).toContain("running");
-    expect(screen.getByTestId("top-status").textContent).toContain("●");
+    const status = screen.getByTestId("top-status");
+    expect(status.textContent).toContain("running");
+    // P1：emoji ● → lucide <StatusIcon/>（svg），配色 text-orca-running
+    expect(status.querySelector("svg")).toBeInTheDocument();
+    expect(status.className).toContain("text-orca-running");
   });
 
   test("completed → ✓", () => {
     ev("workflow_started", { workflow_name: "wf" });
     ev("workflow_completed", { elapsed: 30 });
     render(<Root active={false} />);
-    const t = screen.getByTestId("top-status").textContent ?? "";
-    expect(t).toContain("completed");
-    expect(t).toContain("✓");
+    const status = screen.getByTestId("top-status");
+    expect(status.textContent).toContain("completed");
+    expect(status.querySelector("svg")).toBeInTheDocument();
+    expect(status.className).toContain("text-orca-done");
   });
 
   test("failed → ✗", () => {
     ev("workflow_started", { workflow_name: "wf" });
     ev("workflow_failed", { message: "boom" });
     render(<Root active={false} />);
-    expect(screen.getByTestId("top-status").textContent).toContain("failed");
-    expect(screen.getByTestId("top-status").textContent).toContain("✗");
+    const status = screen.getByTestId("top-status");
+    expect(status.textContent).toContain("failed");
+    expect(status.querySelector("svg")).toBeInTheDocument();
+    expect(status.className).toContain("text-orca-failed");
   });
 
   test("cancelled → ⊘", () => {
     ev("workflow_started", { workflow_name: "wf" });
     ev("workflow_cancelled", { reason: "user" });
     render(<Root active={false} />);
-    const t = screen.getByTestId("top-status").textContent ?? "";
-    expect(t).toContain("cancelled");
-    expect(t).toContain("⊘");
+    const status = screen.getByTestId("top-status");
+    expect(status.textContent).toContain("cancelled");
+    expect(status.querySelector("svg")).toBeInTheDocument();
+    expect(status.className).toContain("text-orca-pending");
   });
 });
 
@@ -102,18 +109,20 @@ describe("TopBar —— D5 elapsed snap 语义（SPEC §0 D5）", () => {
     });
     render(<Root active={true} />);
     // 初次渲染：now = Date.now()/1000（远大于 100）→ elapsed 显示大数。
-    const beforeText = screen.getByTestId("top-elapsed").textContent ?? "";
-    expect(beforeText).toContain("⏱");
+    const beforeEl = screen.getByTestId("top-elapsed");
+    const beforeText = beforeEl.textContent ?? "";
+    // P1：⏱ emoji → lucide <Timer/>（svg）。断言图标存在 + 有数值（非 "—"）。
+    expect(beforeEl.querySelector("svg")).toBeInTheDocument();
     expect(beforeText).not.toContain("—");
     // 提取数值（如 "12345.6s"）
-    const beforeSec = parseFloat(beforeText.replace(/[⏱\s]/g, ""));
+    const beforeSec = parseFloat(beforeText.replace(/[\s]/g, ""));
     expect(beforeSec).toBeGreaterThan(0);
     // 触发 tick（绕过 setInterval）→ now 增长 → elapsed 数值更大
     act(() => {
       __testTick();
     });
     const afterText = screen.getByTestId("top-elapsed").textContent ?? "";
-    const afterSec = parseFloat(afterText.replace(/[⏱\s]/g, ""));
+    const afterSec = parseFloat(afterText.replace(/[\s]/g, ""));
     expect(afterSec).toBeGreaterThanOrEqual(beforeSec);
   });
 

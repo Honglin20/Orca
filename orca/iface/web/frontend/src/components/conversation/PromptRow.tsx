@@ -3,6 +3,7 @@
 // 默认折叠 ``▸ user prompt``；展开看 data.preview markdown 渲染。
 
 import { useState } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import type { WebEvent } from "@/types/events";
 import { MarkdownText } from "./MarkdownText";
 
@@ -21,7 +22,7 @@ export function PromptRow({ event }: { event: WebEvent }) {
         className="orca-text-muted hover:orca-text flex items-center gap-1.5 text-xs"
         aria-expanded={open}
       >
-        <span className="shrink-0">{open ? "▼" : "▸"}</span>
+        <span className="shrink-0 inline-flex items-center">{open ? <ChevronDown size={12} strokeWidth={1.5} aria-hidden /> : <ChevronRight size={12} strokeWidth={1.5} aria-hidden />}</span>
         <span className="font-medium">user prompt</span>
       </button>
       {open && preview && (

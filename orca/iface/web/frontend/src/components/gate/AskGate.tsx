@@ -9,6 +9,7 @@
 //   - gate.options 空 → textarea 自由文本（输入作为 answer）
 
 import { useEffect, useState } from "react";
+import { MessageSquare } from "lucide-react";
 import type { GateState } from "@/types/store-types";
 import { postGateRespond } from "./post-gate-respond";
 import { GateObserveOnlyNotice, useGateWritable } from "./gate-writable";
@@ -56,7 +57,7 @@ export function AskGate({ gate }: { gate: GateState }) {
     >
       <div className="w-full max-w-xl rounded-lg orca-bg-surface shadow-xl" data-testid="ask-gate">
         <div className="flex items-center justify-between border-b orca-border px-5 py-3">
-          <h2 className="text-base font-semibold orca-text">💬 Agent 提问</h2>
+          <h2 className="text-base font-semibold orca-text inline-flex items-center gap-1.5"><MessageSquare size={16} strokeWidth={1.5} aria-hidden /> Agent 提问</h2>
         </div>
         <div className="px-5 py-4">
           <p className="mb-3 text-sm orca-text-muted" data-testid="gate-prompt">
