@@ -3,6 +3,14 @@
 > 新 session 开工前**必读**此文件 + `CLAUDE.md` + 对应阶段 SPEC。
 > 完成任务后清空本文件（移到 release note），**不积累**。
 
+---
+
+## Side track（2026-07-19）：Web 界面视觉优化 P0–P4 —— ✅ 已完成
+
+纯前端美化（与 in-session 主线正交，不碰后端）。5 阶段全部落盘：P0 token 收口（`644cc4f`）/ P1 lucide 统一图标（`a8c6a3e`）/ P2 AgentsRail 增量增强（`a577367`）/ P3 TopBar+WS 指示+暗色开关（`13d0e1f`）/ P4 三栏 surface 统一（`617d991`）。318 test PASS（1 pre-existing flaky DAG lazy）。详见 [release note](../releases/2026-07-19-web-visual-refinement.md) + CHANGELOG。follow-up：DAG compact minimap（需先开 SPEC §5.7 amendment）。
+
+---
+
 ## 当前状态（2026-07-17）：B2 全闭环——coder-agent 交付（`ed5cbeb`）+ test-agent 真机 E2E 暴露 3 P0（opencode DB 路径 / source_id 跨 child 撞 / 多字节 UTF-8 seek 崩）已修 + 5 回归测试（`99efcde`）。**两后端真机全链路 PASS**（CC 4435 + opencode 573 真事件 → daemon → tape → `tars serve` → react-dom testid），实时 ≤1.0s / 幂等 / 无串台 / grep 0 hit。goal「CC+opencode 子 agent 输出实时推前端」达成。**push 待用户手动**（WSL SSH 无 github key，本地领先 47 commits）。详见下「已完成」+ B2 release note。
 
 > **新 session 必读**：本块 + [`docs/specs/in-session-entry-and-simplification.md`](../specs/in-session-entry-and-simplification.md) **v5** + [TARS skill release note](../releases/2026-07-15-tars-skill-rebrand.md) + [nas-hp-search 反伪造 release note](../releases/2026-07-16-nas-hp-search-enforce-and-tars-skill-cleanup.md)。teams→tars 改名 + nas-hp-search runner/select 反伪造均已闭环（见下「已完成」+ CHANGELOG）。

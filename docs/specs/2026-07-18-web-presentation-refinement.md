@@ -1,6 +1,8 @@
 # Web 前端呈现层完善 SPEC（B2 后续：log 降噪 / 子 agent 维度 / 左栏重做 / cac-nga 适配）
 
 > 2026-07-18。状态：**v3，spec-reviewer conditional-pass → 7 P0 + 6 P1 + 4 P2 已闭环（P1-6 经核实为误判，前端 test/ 基建已存在）**。待用户确认后启动 coder-agent。
+>
+> **2026-07-19 更新：partial-superseded by [`docs/plans/2026-07-18-web-visual-refinement.md`](../plans/2026-07-18-web-visual-refinement.md)**——本 SPEC 的 P5b（token 迁移）由新计划 P0 收口完成、P5（左白中灰割裂）由新计划 P4 收口；新计划的 P1（lucide）/ P3（TopBar+WS+暗色）为新增。本 SPEC 的 P1-P4（log 降噪 / 子 agent 维度 / 左栏结构 / cac-nga）仍权威，未涉及。
 > 动因：B2（`ed5cbeb`/`99efcde`）把子 agent 过程事件（`agent_tool_call/result/thinking/step_started`）实时推到 tape 后，前端呈现层暴露 4 组症状——根因同源于「子 agent 维度缺失 + 无事件分级」。本 SPEC 给出修复方案，按功能分 4 阶段。
 > 参考依据：`references/conductor/REFERENCE.md`（microsoft/conductor @ 32bf0b7）+ 真机 run `runs/agent-struct-exploration-…e3b8ad.jsonl`（4779 事件实证）。
 

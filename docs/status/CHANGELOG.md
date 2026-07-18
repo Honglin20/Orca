@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-19] Web 界面视觉优化（P0–P4：token 收口 / lucide / 左栏增强 / TopBar+WS+暗色 / 三栏统一）
+
+纯前端（后端零改、testid 与功能接口保留）。5 阶段：**P0** token 收口（179→26 hits 全白名单 NODE_STATUS_HEX/PALETTE/LEVEL_TEXT_COLOR/DiffView，status-style.ts DRY 出口）/ **P1** lucide 统一图标库（全量替换 emoji，保留 ▎ 流式光标，test oracle 迁移）/ **P2** AgentsRail 增量增强（元信息单行 + running ▎ + 色条加粗）/ **P3** TopBar（runId 复制 + status badge）+ WS 连接指示（ws-connection-store，SPEC §1.1 transport-only exception）+ 暗色三态开关（SPEC §7 双触发 `.dark/.light`）+ amendment 文档 / **P4** 三栏 surface 统一（orca-bg-app 治割裂，去双线 border）。spec-reviewer conditional-pass（3 决策 D1/D2/D3 全收敛）。318 test PASS（1 pre-existing flaky DAG lazy）。Commits: `644cc4f`(P0)/`a8c6a3e`(P1)/`a577367`(P2)/`13d0e1f`(P3)/`617d991`(P4)。详见 [release note](../releases/2026-07-19-web-visual-refinement.md)。
+
 ## [2026-07-18] 节点记忆（Node Memory）—— AgentNode 跨 run 记忆（写确定性 / 读注入 agent 判断）
 
 in-session workflow 此前无跨 run 记忆（新 run_id 看不到旧 run 产出）。**否决确定性指纹缓存**（agent 非纯函数，收益薄改动大），改为把必然性与智能判断解耦：**写记忆 = 引擎确定性**（节点完成必然覆盖写 `<cwd>/.orca/memory/<wf.name>/<node.name>.md`，存上一轮 output 原文，不靠子 agent 自觉）+ **读+跳过 = agent**（prompt 注入「上一轮记忆+复用协议」，agent 自判复用/重跑，走正常推进路径，**引擎零 skip 分支**）。`AgentNode.memory: bool`（opt-in，仅 AgentNode）；新 `orca/run/memory.py`（write/read/inject helper，零 events/tape 依赖）；`_step_io.apply_step_result` emit_batch 后置写（cli/daemon 单一真相源）；`step._deliver` 注入；CLI `--no-memory`；best-effort 写失败不阻断（MD 是派生缓存，tape 才是真相）。覆盖式写 = 天然单份 + 过期清除。spec-reviewer conditional-pass（5 P0 + 3 决策全收敛，修正 2 处事实错误）；code-reviewer 2 🔴+6 🟡 全修；22 新测试 + 515 回归全 PASS；test-agent 真机 5 场景全过（首跑写/二跑注入/--no-memory 字节级不动/跨 cwd 隔离/写失败不阻断）。不碰 EventType/reducer/tape/advance_step 决策/Status 语义/render_prompt。Commit: `29c70b3`。详见 [release note](../releases/2026-07-18-node-memory.md)。
