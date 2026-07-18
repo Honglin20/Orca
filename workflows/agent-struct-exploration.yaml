@@ -4,105 +4,55 @@ description: "Agent 驱动的结构性探索（降时延、保精度）：family
 entry: family_detect
 
 inputs:
-  # ── 草稿 §10 业务输入（逐条）──
+  # ── inputs 标签约定（description 前缀，供 in-session 编排器/tars skill 读取）──
+  #   [ask]      业务决策，用户意图未给则启动前集中询问（不单个问、不丢列表）
+  #   [infer]    可自动推断（glob/探测），不问用户；推断失败才回退 [ask]
+  #   [default]  有合理默认，不问；高级用户可直接覆盖
+  #   [advanced] 罕见 override，不问；改它需懂内部
+  # 工程内部常量（structural_slot_ratio / reject_hyperparam_only / paths / latency_provider /
+  # gpus / model_family / onnx_opset / knowledge_base）已固化进 agent md / 脚本，不再作为 input 暴露。
+  #
+  # 用户决策面（[ask]+[infer]，编排器只处理这批）= model_path / train_command /
+  # target_latency_ms / accuracy_target / max_rounds。
+  # project_root / build_fn / dummy_input 已下沉给 family_detect 节点运行时探测输出
+  # （它们是 model.py 内省任务，非用户决策）；pretrained_ckpt（死元信息）/ baseline_accuracy
+  # （默认就测）已移除。
+
   model_path:
     type: string
-    description: "模型定义文件路径（只改它），如 examples/ViT/model.py"
-    required: true
-  project_root:
-    type: string
-    description: "用户 PyTorch 项目根目录，如 examples/ViT/"
-    required: true
-  build_fn:
-    type: string
-    description: "实例化入口函数名（导出 ONNX 用），如 build_model"
-    required: true
-  dummy_input:
-    type: string
-    description: "ONNX 导出的 dummy_input 描述，JSON 字符串如 '{\"shape\":[1,3,224,224],\"dtype\":\"float32\"}'"
+    description: "[infer] 模型定义文件路径（只改它），如 examples/ViT/model.py。通常项目内仅一个 model.py，glob 即得；多候选回退 [ask]"
     required: true
   train_command:
     type: string
-    description: "训练命令原样 shell 执行（绝不改训练函数），如 'python train.py --epochs 30 --config base'"
+    description: "[ask] 训练命令原样 shell 执行（绝不改训练函数），如 'python train.py --epochs 30 --config base'。项目入口命令，必须用户确认"
     required: true
   test_command:
     type: string
-    description: "pre-trained 模式：测试/eval 命令（load ckpt 测精度，不训练）。给定则 baseline 只测不训；为空则跑 train_command"
-    required: false
-    default: ""
-  pretrained_ckpt:
-    type: string
-    description: "baseline 预训练权重路径（可选，仅元信息；test_command 自行加载）"
-    required: false
-    default: ""
-  baseline_accuracy:
-    type: string
-    description: "基线精度（可选；不给则 baseline_measure 跑 train_command 测得）"
+    description: "[default] pre-trained 模式测试/eval 命令（load ckpt 测精度，不训练）。给定则 baseline 只测不训；为空则跑 train_command"
     required: false
     default: ""
   target_latency_ms:
     type: string
-    description: "目标时延(ms)；champion.latency ≤ 此值且精度达标即终止"
+    description: "[ask] 目标时延(ms)；champion.latency ≤ 此值且精度达标即终止。核心业务 KPI，必须用户给"
     required: true
   accuracy_target:
     type: string
-    description: "精度下限；默认 = baseline−0.5%（微损）。无损则设为 baseline"
+    description: "[ask] 精度下限；留空 = baseline−0.5%（微损）。无损则设为 baseline。留空走默认，但默认语义建议向用户确认一次（微损 vs 无损）"
     required: false
     default: ""
-  latency_provider:
-    type: string
-    description: "可替换 cost model，格式 '/abs/path/my_cost_model.py::measure'。LLM 永不预测时延，只从此函数取（§5）。默认指向随 workflow 发布的 struct_scripts_dir/latency_onnxrt.py；自研 cost model 用绝对路径覆盖"
-    required: false
-    default: "workflows/agents/_struct_scripts/latency_onnxrt.py::measure"
-  struct_scripts_dir:
-    type: string
-    description: "确定性辅助脚本目录（绝对路径推荐；相对路径相对 cwd 解析）。随 workflow 发布在 workflows/agents/_struct_scripts/，含 latency_onnxrt.py / export_onnx.py / ast_diff.py / ledger_reducer.py。安装到 ~/.orca/workflows 时改为 '~/.orca/workflows/agents/_struct_scripts'"
-    required: false
-    default: "workflows/agents/_struct_scripts"
-  gpus:
-    type: string
-    description: "GPU 配置：'auto'（按需探测空闲卡）或 JSON 数组如 '[0,1,2,3]'（§8）"
-    required: false
-    default: "auto"
-  model_family:
-    type: string
-    description: "族覆盖：'auto'（LLM 判族）或显式 transformer/cnn/hybrid/...（§7）"
-    required: false
-    default: "auto"
-  knowledge_base:
-    type: string
-    description: "外挂 KB 根目录（按族 + agent_slices 索引切片加载）"
-    required: false
-    default: "knowledge_base/"
-  paths:
-    type: string
-    description: "并行路线数（§8 多 path）。注：当前 DAG 实现单 path/轮（多 path 见报告说明）"
-    required: false
-    default: "1"
   max_rounds:
     type: string
-    description: "最大探索轮数；耗尽即终止走 finalize（业务预算，由 curator 强制）"
+    description: "[ask] 最大探索轮数（寻优预算，决定跑多久/烧多少卡）；耗尽即终止走 finalize。默认 20，用户可调"
     required: false
     default: "20"
-  structural_slot_ratio:
+  struct_scripts_dir:
     type: string
-    description: "每轮结构假设最低占比（默认 0.5；§9.2 软配额，curator 按 LLM 终判 tag 计数）"
+    description: "[default] 确定性辅助脚本目录（latency/export/ast_diff/ledger_reducer）。随 workflow 发布在 workflows/agents/_struct_scripts/；orca install 到 ~/.orca/workflows 时需覆盖为该绝对路径"
     required: false
-    default: "0.5"
-  reject_hyperparam_only:
-    type: string
-    description: "严格模式：true 时 hyperparam-only 候选被 reject（默认 false，§9.2）"
-    required: false
-    default: "false"
-  onnx_opset:
-    type: string
-    description: "ONNX 导出 opset 版本"
-    required: false
-    default: "17"
-  # ── Orca 编排参数（非草稿业务字段，DAG 循环所需）──
+    default: "workflows/agents/_struct_scripts"
   iterations:
     type: string
-    description: "Orca 单 run 节点访问数硬上限（循环兜底）。每轮约 7 次访问；默认值 ≈ max_rounds×7 + 富余。超限 raise MaxIterationsError（fail loud）"
+    description: "[advanced] Orca 单 run 节点访问数硬上限（循环兜底，由 orca resolve_max_iter 消费）。每轮约 7 次访问；默认 ≈ max_rounds×7 + 富余。超限 raise MaxIterationsError（fail loud）"
     required: false
     default: "500"
 
@@ -118,41 +68,51 @@ nodes:
     tools: [bash, read, write, glob, grep]
     output_schema:
       type: object
-      required: [output_dir, family, kb_cache_dir]
+      required: [output_dir, family, kb_cache_dir, project_root, build_fn, dummy_input]
       properties:
         output_dir: {type: string}
         family: {type: string, description: "命中的族名（可多族用 + 连，如 transformer+cnn）"}
         kb_cache_dir: {type: string}
+        project_root: {type: string, description: "探测所得用户项目根绝对路径"}
+        build_fn: {type: string, description: "探测所得实例化入口函数名（导出 ONNX 用）"}
+        dummy_input: {type: string, description: "探测所得 dummy_input JSON 串，如 {\"shape\":[1,3,224,224],\"dtype\":\"float32\"}"}
     prompt: |
-      你是结构性探索 workflow 的 **Setup（一次性·轻量）**：建输出目录 + **浅层族检测** + 加载 KB 切片。
+      你是结构性探索 workflow 的 **Setup（一次性·轻量）**：建输出目录 + **浅层族检测** + 加载 KB 切片
+      + **探测 project_root / build_fn / dummy_input**（这三项原是用户 input，现下沉给你运行时内省 model.py 得到）。
       **不**做 ONNX 导出 / 测时延 / 训练（那些归下游 `baseline_measure` 节点，确定性脚本）。
 
       ## 输入
       - model_path: {{ inputs.model_path }}
-      - project_root: {{ inputs.project_root }}
-      - model_family（auto 则你浅层判族）: {{ inputs.model_family }}
-      - knowledge_base: {{ inputs.knowledge_base }}
+      - model_family：恒 `auto`（由你浅层判族，已从 inputs 固化）
+      - knowledge_base 根目录：`knowledge_base/`（已固化，不再作 input）
 
       ## 执行（确定性优先，fail loud）
       1. **建输出目录（append-only 账本，§6）**：`llm_artifacts/<model_name>/runs/<run_id>/`，子目录
          `snapshots/ champions.jsonl ledger.jsonl kb_cache/ viz/ .worktrees/`。`<run_id>` 用时间戳。
-         `<model_name>` = model_path 文件名 stem。**非 git 仓库**的 project_root → fallback per-path 目录拷贝（§6）。
-      2. **浅层族检测（§7.3，关键：只看表面）**：
-         - 若 `model_family != auto` → 直接用它，**不读 model.py**。
-         - 否则**只看 model.py 的最表面一层**：顶层 `import`、`nn.Module` 子类的**类名**、`__init__` 里**顶层**用到的模块类型
+         `<model_name>` = model_path 文件名 stem。
+      2. **探测 project_root**：从 model_path 所在目录向上走，取**第一个含 `train.py` 或 `pyproject.toml`
+         或 `.git` 的目录**作为项目根（绝对路径）。走到 / 仍找不到 → 取 model_path 的 dirname，并在输出注明"低置信"。
+      3. **探测 build_fn**：读 model.py **顶层** `def`，挑那个实例化并返回 `nn.Module` 的函数名
+         （常见名 `build_model` / `create_model` / `<X>Builder` / `get_model`）。多个/不明确 → 取最像的并在输出注明"低置信"。
+      4. **探测 dummy_input**：浅读 `forward()` 首参 + `__init__` 里出现的 shape 常量，推断导出 ONNX 用的输入。
+         输出 **JSON 串**如 `{"shape":[1,3,224,224],"dtype":"float32"}`。无法可靠推断 → 按族给常见默认
+         （transformer/cnn 视觉：`[1,3,224,224]`；无线接收信号：`[1,2,128]`）并注明"低置信"。**这是 downstream ONNX 导出的契约，错则 evaluator FAIL_export fail loud。**
+      5. **浅层族检测（§7.3，关键：只看表面）**：
+         - **只看 model.py 的最表面一层**：顶层 `import`、`nn.Module` 子类的**类名**、`__init__` 里**顶层**用到的模块类型
            （如 `nn.Conv1d` / `nn.MultiheadAttention` / 自定义 attention 类 / `nn.Linear` / RNN）。**只判整体方向**——
            例如"有 Conv + 自定义 attention → `cnn+transformer` 或 `wireless_receiver`"、"全 Conv → `cnn`"、"全 Linear+attention → `transformer`"。
            **严禁**：读深入实现、读 forward 细节、读 RAW 示例。可多族取并集（`transformer+cnn`）。
          - **不明确就按最接近的方向给一个最佳猜测**（不阻塞流程），并在输出注明"低置信"。族名优先用 KB 已注册的：
            `transformer` / `cnn` / `wireless_receiver` / `hybrid`。
          - **不用 AST 脚本判族**。
-      3. **加载 KB 切片进 kb_cache/**（§7.3 run 级缓存）：按 `{{ inputs.knowledge_base }}index.json`
+      6. **加载 KB 切片进 kb_cache/**（§7.3 run 级缓存）：按 `knowledge_base/index.json`
          的 `common.files` + 命中族的 `families.<族>.files`（**只 base 文件**：primitives / latency_moves / failures；
          directions/raw 由下游 hypothesizer/engineer 按各自 slice 自取），把所需 md **每文件只读一次**拷/缓存到 `kb_cache/`。
 
       ## 输出（**必须是合法 JSON 对象**，严格匹配上方 output_schema；orca 按 output_schema 校验，非 JSON → output_schema_mismatch fail loud）
       ```json
-      {"output_dir": "<绝对路径>", "family": "<族名，可带低置信注>", "kb_cache_dir": "<kb_cache 绝对路径>"}
+      {"output_dir": "<绝对路径>", "family": "<族名，可带低置信注>", "kb_cache_dir": "<kb_cache 绝对路径>",
+       "project_root": "<绝对路径>", "build_fn": "<函数名>", "dummy_input": "<JSON 串>"}
       ```
     routes:
       - to: baseline_measure
@@ -183,16 +143,14 @@ nodes:
       python3 "{{ inputs.struct_scripts_dir }}/measure_baseline.py" \
         --output_dir "{{ family_detect.output.output_dir }}" \
         --model_path "{{ inputs.model_path }}" \
-        --build_fn "{{ inputs.build_fn }}" \
-        --dummy_input '{{ inputs.dummy_input }}' \
-        --opset {{ inputs.onnx_opset }} \
-        --latency_provider "{{ inputs.latency_provider }}" \
+        --build_fn "{{ family_detect.output.build_fn }}" \
+        --dummy_input '{{ family_detect.output.dummy_input }}' \
+        --opset 17 \
+        --latency_provider "workflows/agents/_struct_scripts/latency_onnxrt.py::measure" \
         --train_command "{{ inputs.train_command }}" \
         --test_command "{{ inputs.test_command }}" \
-        --pretrained_ckpt "{{ inputs.pretrained_ckpt }}" \
-        --baseline_accuracy "{{ inputs.baseline_accuracy }}" \
         --accuracy_target "{{ inputs.accuracy_target }}" \
-        --project_root "{{ inputs.project_root }}"
+        --project_root "{{ family_detect.output.project_root }}"
       ```
       从 stdout 的 `KEY: value` 解析：
       - `BASELINE_LATENCY_MS:` → baseline_latency_ms
@@ -412,8 +370,8 @@ nodes:
       - 账本/champion：`{{ family_detect.output.output_dir }}champions.jsonl`（最后一行 = 全局 champion）。
       - curator 终态：`{{ curator.output.champion_id }}` / `terminate_reason: {{ curator.output.terminate_reason }}`。
       - train_command（原样，绝不改）：`{{ inputs.train_command }}`
-      - latency_provider：`{{ inputs.latency_provider }}`
-      - build_fn / dummy_input / onnx_opset：`{{ inputs.build_fn }}` / `{{ inputs.dummy_input }}` / `{{ inputs.onnx_opset }}`
+      - latency_provider（已固化）：`workflows/agents/_struct_scripts/latency_onnxrt.py::measure`
+      - build_fn / dummy_input：`{{ family_detect.output.build_fn }}` / `{{ family_detect.output.dummy_input }}`（onnx_opset 已固化为 17）
       - struct_scripts_dir：`{{ inputs.struct_scripts_dir }}`
 
       ## 执行（fail loud）
@@ -424,10 +382,11 @@ nodes:
       3. 用确定性脚本导出 ONNX 并测时延（与 family_detect 一致）：
          ```bash
          python3 "{{ inputs.struct_scripts_dir }}/export_onnx.py" --model_path <final_model> \
-           --build_fn "{{ inputs.build_fn }}" --dummy_input '{{ inputs.dummy_input }}' \
-           --opset {{ inputs.onnx_opset }} --out <output_dir>/final.onnx
+           --build_fn "{{ family_detect.output.build_fn }}" --dummy_input '{{ family_detect.output.dummy_input }}' \
+           --opset 17 --out <output_dir>/final.onnx
          ```
-         再动态加载 `latency_provider`（`module_path::func_name` 切开、`importlib.util.spec_from_file_location`）→
+         再动态加载固化路径 `workflows/agents/_struct_scripts/latency_onnxrt.py::measure`
+         （`module_path::func_name` 切开、`importlib.util.spec_from_file_location`）→
          调 `measure(final_onnx)` 得 `final_latency_ms`（不变量1，§5）。加载失败 fail loud。
       4. 写 `final_report.md`：baseline vs champion（latency/accuracy 降幅）、terminate_reason、探索轮数、
          结构图（从 ledger.jsonl 的 parent 链）、Pareto 摘要。

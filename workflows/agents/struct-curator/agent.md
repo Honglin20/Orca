@@ -20,8 +20,8 @@ tools: [bash, read, write, glob, grep]
   - analyst：`{{ analyst.output }}`
 - 账本：`{{ family_detect.output.output_dir }}ledger.jsonl` / `champions.jsonl`
 - 目标：`target_latency_ms={{ inputs.target_latency_ms }}` / `accuracy_target={{ baseline_measure.output.accuracy_target }}`
-- 预算：`max_rounds={{ inputs.max_rounds }}` / 配额 `structural_slot_ratio={{ inputs.structural_slot_ratio }}` /
-  `reject_hyperparam_only={{ inputs.reject_hyperparam_only }}`
+- 预算：`max_rounds={{ inputs.max_rounds }}` / 配额 `structural_slot_ratio=0.5`（已固化） /
+  `reject_hyperparam_only=false`（已固化）
 - baseline：`baseline_latency_ms={{ baseline_measure.output.baseline_latency_ms }}` / `baseline_accuracy={{ baseline_measure.output.baseline_accuracy }}`
 - struct_scripts_dir（确定性辅助脚本目录）：`{{ inputs.struct_scripts_dir }}`
 
@@ -68,8 +68,8 @@ python3 "{{ inputs.struct_scripts_dir }}/ledger_reducer.py" \
   --max_rounds {{ inputs.max_rounds }} \
   --baseline_latency_ms {{ baseline_measure.output.baseline_latency_ms }} \
   --baseline_accuracy {{ baseline_measure.output.baseline_accuracy }} \
-  --structural_slot_ratio {{ inputs.structural_slot_ratio }} \
-  --reject_hyperparam_only {{ inputs.reject_hyperparam_only }}
+  --structural_slot_ratio 0.5 \
+  --reject_hyperparam_only false
 ```
 
 脚本输出（stdout JSON，已 append ledger + 必要时 append champions）含 curator 所需**全部字段**：

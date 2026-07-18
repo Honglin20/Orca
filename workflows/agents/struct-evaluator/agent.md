@@ -13,9 +13,9 @@ tools: [bash, read, write, glob, grep]
 - 父/champion（时延门基准）：从 `{{ family_detect.output.output_dir }}champions.jsonl` 最后一行读 `latency_ms`。
 - accuracy_target：`{{ baseline_measure.output.accuracy_target }}`
 - train_command（原样 shell 执行，不变量2）：`{{ inputs.train_command }}`
-- latency_provider（可替换 cost model，不变量1）：`{{ inputs.latency_provider }}`
-- build_fn / dummy_input / onnx_opset：`{{ inputs.build_fn }}` / `{{ inputs.dummy_input }}` / `{{ inputs.onnx_opset }}`
-- gpus 配置：`{{ inputs.gpus }}`
+- latency_provider（已固化 cost model，不变量1）：`workflows/agents/_struct_scripts/latency_onnxrt.py::measure`
+- build_fn / dummy_input（family_detect 探测所得）：`{{ family_detect.output.build_fn }}` / `{{ family_detect.output.dummy_input }}`（onnx_opset 已固化为 17）
+- gpus 配置：`auto`（已固化，按需探测空闲卡）
 - struct_scripts_dir（确定性辅助脚本目录）：`{{ inputs.struct_scripts_dir }}`
 
 ## 职责（按序，fail loud）
@@ -25,19 +25,19 @@ tools: [bash, read, write, glob, grep]
   ```bash
   python3 "{{ inputs.struct_scripts_dir }}/export_onnx.py" \
     --model_path "{{ engineer.output.snapshot_path }}" \
-    --build_fn "{{ inputs.build_fn }}" \
-    --dummy_input '{{ inputs.dummy_input }}' \
-    --opset {{ inputs.onnx_opset }} \
+    --build_fn "{{ family_detect.output.build_fn }}" \
+    --dummy_input '{{ family_detect.output.dummy_input }}' \
+    --opset 17 \
     --out "{{ family_detect.output.output_dir }}snapshots/{{ engineer.output.candidate_id }}.onnx"
   ```
   从 stdout 解析 `ONNX: <path>`。
 - **exotic 结构导不出 → 记 `FAIL_export`**（§4），不训练，fail loud（把 stderr 完整异常写进 fail_reason）。
 
 ### 2. 实测时延（不变量1：LLM 永不预测时延，§5）
-- 动态加载 `latency_provider`（格式 `/abs/path/file.py::measure`）：
+- 动态加载固化的 `latency_provider`（`workflows/agents/_struct_scripts/latency_onnxrt.py::measure`）：
   ```python
   import importlib.util
-  path, func = "{{ inputs.latency_provider }}".split("::")
+  path, func = "workflows/agents/_struct_scripts/latency_onnxrt.py::measure".split("::")
   spec = importlib.util.spec_from_file_location("cost_model", path)
   mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
   measure = getattr(mod, func)

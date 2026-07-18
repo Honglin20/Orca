@@ -17,7 +17,7 @@ tools: [bash, read, glob, grep]
 - 时延缺口 = `{{ inputs.target_latency_ms }} − champion.latency_ms`。
 - 精度下限：`{{ baseline_measure.output.accuracy_target }}`。
 - 族：`{{ family_detect.output.family }}`。
-- 配额参数：`structural_slot_ratio={{ inputs.structural_slot_ratio }}`。
+- 配额参数：`structural_slot_ratio=0.5`（已固化）。
 - curator 上一轮的路由指示（exploit/explore + 是否需补结构配额）：
   ```bash
   tail -n 1 "{{ family_detect.output.output_dir }}ledger.jsonl"

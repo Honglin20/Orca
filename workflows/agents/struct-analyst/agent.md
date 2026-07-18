@@ -17,7 +17,7 @@ tools: [bash, read, write, edit, glob, grep]
 - 本轮结构分类（structure_gate）：`tag={{ structure_gate.output.tag }}` / `diff_summary={{ structure_gate.output.diff_summary }}`
 - 本轮假设（hypothesizer）：`{{ hypothesizer.output.hypothesis }}`
 - 父/champion：`{{ family_detect.output.output_dir }}champions.jsonl` 最后一行。
-- 族：`{{ family_detect.output.family }}`；KB 根：`{{ inputs.knowledge_base }}`；kb_cache：`{{ family_detect.output.kb_cache_dir }}`
+- 族：`{{ family_detect.output.family }}`；KB 根：`knowledge_base/`（已固化）；kb_cache：`{{ family_detect.output.kb_cache_dir }}`
 
 ## 引用的 KB 切片（index.json → agent_slices.analyst_read）
 
@@ -32,8 +32,8 @@ tools: [bash, read, write, edit, glob, grep]
    （不是超参原因——超参原因价值低）。例如："把第 3-5 层 MHA 换 GQA 后时延降但精度掉，因 group 太少削弱表达"。
 2. **提炼原则**：一句话结构-性能原则（可被未来 hypothesizer 复用）。
 3. **写回 KB（§7.3 Analyst 写回 / §11.3）**——**追加**（append），不删改历史：
-   - 失败结构 → `{{ inputs.knowledge_base }}families/<族>/failures.md`：append "结构指纹 → 失败原因（时延没降 / 精度掉 / 导不出）"。
-   - 跨族通用原则 → `{{ inputs.knowledge_base }}common/principles.md`：append（如"在浅层做下采样比深层省时延且精度损失小"）。
+   - 失败结构 → `knowledge_base/families/<族>/failures.md`：append "结构指纹 → 失败原因（时延没降 / 精度掉 / 导不出）"。
+   - 跨族通用原则 → `knowledge_base/common/principles.md`：append（如"在浅层做下采样比深层省时延且精度损失小"）。
    - 写回后**同步失效 kb_cache 中该单文件**并重载（§7.3 run 级缓存），让本轮之后 hypothesizer 能看到新原则。
 4. **仲裁写**：你是唯一写 KB 的 agent（多 path 场景下避免并发写冲突，§8.2）。
 

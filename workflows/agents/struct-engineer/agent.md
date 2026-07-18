@@ -16,8 +16,8 @@ tools: [bash, read, write, edit, glob, grep]
   （rationale / structural_intent 见 `{{ hypothesizer.output }}`）
 - 父 model.py（champion 快照路径）：从 `{{ family_detect.output.output_dir }}champions.jsonl` 最后一行 `snapshot` 取。
 - 输出目录：`{{ family_detect.output.output_dir }}`
-- project_root：`{{ inputs.project_root }}`（用于建 git worktree，§6）
-- build_fn：`{{ inputs.build_fn }}`（model.py 必须暴露它，导出 ONNX 用）
+- project_root（family_detect 探测所得）：`{{ family_detect.output.project_root }}`（用于建 git worktree，§6）
+- build_fn（family_detect 探测所得）：`{{ family_detect.output.build_fn }}`（model.py 必须暴露它，导出 ONNX 用）
 
 ## 引用的 KB 切片（index.json → agent_slices.engineer）
 
