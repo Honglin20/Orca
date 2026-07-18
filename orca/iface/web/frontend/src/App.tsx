@@ -9,6 +9,10 @@
 import { BrowserRouter, Route, Routes, Navigate } from "react-router-dom";
 import { RunDetailPage } from "@/components/pages/RunDetailPage";
 import { GateDialog } from "@/components/gate/GateDialog";
+import { initTheme } from "@/hooks/use-theme";
+
+// 模块加载即 apply 持久化主题（减少首帧 FOUC；initTheme 内部防御 SSR 无 document）。
+initTheme();
 
 function SingleRunRoot({ children }: { children: React.ReactNode }) {
   return (

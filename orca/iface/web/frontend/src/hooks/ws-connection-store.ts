@@ -1,0 +1,26 @@
+// hooks/ws-connection-store.ts —— WS 连接状态（transport-only，P3 D1=A）。
+//
+// **SPEC sanctioned exception**（web-shell-v2-spec.md §1.1）：WebSocket 连接状态是
+// transport-only（前端网络层派生），**非 tape 真相**。它独立于 workflow-store（铁律 1
+// 单一真相源 = tape 事件 fold），不参与 reducer / 不进 tape / 不影响幂等。
+//
+// use-websocket 在 onopen/onclose/onerror 回调里写本 store；TopBar ``useWsStatus()``
+// 订阅它显示连接指示点（绿/琥珀/红）。纯前端，后端 ws_handler.py 零改。
+
+import { create } from "zustand";
+
+export type WsConnStatus = "connected" | "reconnecting" | "disconnected";
+
+interface WsConnState {
+  status: WsConnStatus;
+  setConnected: () => void;
+  setReconnecting: () => void;
+  setDisconnected: () => void;
+}
+
+export const useWsConnectionStore = create<WsConnState>((set) => ({
+  status: "disconnected",
+  setConnected: () => set({ status: "connected" }),
+  setReconnecting: () => set({ status: "reconnecting" }),
+  setDisconnected: () => set({ status: "disconnected" }),
+}));
