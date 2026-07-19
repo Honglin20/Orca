@@ -146,6 +146,31 @@ def _load_adapter(path: str):
     return mod
 
 
+def _load_env_file(path: str) -> None:
+    """自加载 orca_env.sh（`export K=V` 行）到 os.environ——opencode bash 工具不跨调用保 env，
+    若子代理把 `source orca_env.sh` 和 `python3` 拆成两次调用，脚本运行的 shell 就没有
+    `ORCA_CHART_SOCK` → render_chart raise 被静默吞 → 图不推。本兜底从 `--env_file` 指定的
+    orca_env.sh 把缺失的 ORCA_* 补进 os.environ，使 render_chart 无论子代理怎么拆 bash 都能连上
+    chart daemon。已存在的 env 不覆盖（显式 env 优先）。
+    """
+    import re
+    if not path:
+        return
+    p = Path(path).expanduser()
+    if not p.is_file():
+        sys.stderr.write(f"[run_ptq_sweep] --env_file 不存在: {p}（跳过自加载）\n")
+        return
+    cnt = 0
+    for line in p.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line)
+        if not m:
+            continue
+        k, v = m.group(1), m.group(2).strip().strip('"').strip("'")
+        os.environ.setdefault(k, v)
+        cnt += 1
+    sys.stderr.write(f"[run_ptq_sweep] 自加载 {cnt} 个 env from {p}\n")
+
+
 def _autoround_available() -> bool:
     """auto-round 是否安装（README_SDK §9.4：autoround 需可选依赖 auto-round）。"""
     try:
@@ -661,7 +686,13 @@ def main() -> int:
     ap.add_argument("--recipes", required=True, help="路径/配方子集（可空串）")
     ap.add_argument("--output_dir", required=True)
     ap.add_argument("--bake", required=True, help="true / false")
+    ap.add_argument(
+        "--env_file",
+        default="",
+        help="本 run 的 orca_env.sh 路径；脚本启动自加载 ORCA_* env（兜底：opencode bash 拆调用会丢 env，致 render_chart 连不上 chart daemon）",
+    )
     args = ap.parse_args()
+    _load_env_file(args.env_file)  # 兜底：防 bash 拆调用丢 ORCA_CHART_SOCK → render_chart 静默失败
 
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
