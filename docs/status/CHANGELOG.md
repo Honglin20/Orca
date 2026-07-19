@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-20] quant-bit-curve（W3）+ quant-qat（W4）—— 量化路线图收尾 + insession/7 workflow 文档
+
+量化 pipeline W3/W4，类比 W1/W2（单 agent + folder-agent + `run_*.py` 确定性脚本 + adapter + render_chart + stdout JSON），全 mxint 基。**W3 `quant-bit-curve`**：与 W2 互补——精度约束下对比位宽/格式（INT8/W4A8/INT4/MX4/MX8），`search_mix_precision(strategy=m0_pareto, mode=explore)` 找 Pareto 前沿 + 格式分布可视化 + bake 最佳混合精度模型（`final.layer_configs`→`qconfig_dict`→`quantize_model`）。**W4 `quant-qat`**：对比 rtn/duquantpp 两训练态 fake-quant 方案，`prepare_trainable_fakequant_model` + `prepare_trainable_qat`(CAGE) + teacher-student label-free QAT，per-step 收敛 + 前/后恢复可视化 + bake 最佳 q_model。探针实证 W3（report/frontier/final 字段 + 格式→QConfig 表，因 candidate_format_space 只吃 QConfig 不吃字符串）+ W4（trainable API + duquantpp 两约束：显式 target_patterns + block_size 对齐）。验证：tars validate 0 error；ViT-Tiny 脚本级 smoke 双过（W3 cand_0002[INT8×26+INT4×24] bit 5.35 bake 21MB / W4 rtn+duquantpp 双方案 bake best）；in-session `orca <wf>` 返 schema。**文档**：`docs/in-session-usage.md`（安装+使用）+ `docs/workflows/` ×7（3 NAS + 4 量化，每篇激活→原理→结果+截图占位）+ README 索引。量化路线图完结。Commits: `e6646cf` + `da609ac`. 详见 [release note](../releases/2026-07-20-quant-w3-w4.md) + [计划](../plans/2026-07-20-quant-w3-w4.md)。
+
 ## [2026-07-19] quant-ptq-sweep workflow（W2 粗粒度 PTQ 扫描）
 
 量化 pipeline 第二级。单 agent 节点 + folder-agent + `run_ptq_sweep.py`（833 行确定性脚本），双 mode：lightweight=4 累积路径 ablation（S/Q/A/R 派，~11 unique 候选，line 累积曲线）；full=位宽×预变换×求解×后处理全枚举（按 SDK §9.4 拒绝表过滤 rtn+q2n → 45 候选，heatmap 矩阵）。默认 `build_teacher_student_eval_fn` mse 评估 + bake 最佳 state_dict。修正 W1 `w4a16` 预设语义错位（`a_elem_format=fp16` 在 method=int 下不生效 → 改 `a_quant_enabled=False`）。code-reviewer 一轮（impl+coverage 合并）：6 🟡 全修（bake 顺序 / ts_quant 顶层 import / bake 白名单 / forward_fn 校验 / recipes DRY / w4a16 语义）+ 5 🟢 修；0 测试按任务范围（3 文件）+ plan §验证 deferred 阶段 5。Commit: `d356979`. 详见 [release note](../releases/2026-07-19-quant-ptq-sweep-w2.md).
