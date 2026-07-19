@@ -152,17 +152,58 @@ def test_skill_md_mentions_seven_commands() -> None:
         )
 
 
-def test_spec_md_not_scanned() -> None:
-    """SPEC md 不应被 S2 守门扫描（防讨论性假命令假报）。
+def test_spec_md_not_scanned(tmp_path: Path, monkeypatch) -> None:
+    """SPEC md **不应**被 S2 守门扫描（防讨论性假命令假报）。
 
-    本测试 self-check：确认我们只读 ``orca/skills/tars/SKILL.md``，不读 ``docs/specs/*``。
-    用 fixture 注入一个临时 SPEC md 含假 flag，断言它**不**触发 guard。
+    code-reviewer test 🟡#1：注入一个**假 SKILL.md** + 一个**假 SPEC md**，断言：
+      - 假 SKILL.md 的 flag 被抽到（验证 parser 真在工作）。
+      - 假 SPEC md 的 flag **不**被抽到（验证排除语义）。
+    旧版只断言 SKILL.md 抽到 --run-id，未真验证排除（intent 空过）。
     """
-    # 反向：确认 _parse_skill_md_flags 只读 SKILL_MD 路径（不被 cwd / sys.path 影响）。
-    cmd_to_flags = _parse_skill_md_flags()
-    # 简单 sanity：SKILL.md 应至少抽到 ``--run-id``（出现在 next/status/stop 多处）。
-    all_flags = set().union(*cmd_to_flags.values()) if any(cmd_to_flags.values()) else set()
-    assert "--run-id" in all_flags, (
-        "SKILL.md 应在 fence 内提到 `--run-id`（next/status/stop/open 都有）—— "
-        "若失败说明 fence 解析坏了"
+    fake_skill = tmp_path / "SKILL.md"
+    fake_skill.write_text(
+        "```\norca next --run-id <id>\norca status --run-id <id>\n```\n",
+        encoding="utf-8",
     )
+    fake_spec = tmp_path / "docs" / "specs" / "fake.md"
+    fake_spec.parent.mkdir(parents=True)
+    fake_spec.write_text(
+        "# 假 SPEC\n讨论性命令示例：\n```\norca next --fake-flag-from-spec-md\n```\n",
+        encoding="utf-8",
+    )
+
+    # _parse_skill_md_flags 直接读模块常量 SKILL_MD，monkeypatch 替它
+    monkeypatch.setattr(
+        "tests.iface.in_session.test_skill_md_flags_guard.SKILL_MD", fake_skill,
+    )
+
+    cmd_to_flags = _parse_skill_md_flags()
+    # Sanity：假 SKILL.md 的 flag 被抽到
+    assert "--run-id" in cmd_to_flags["next"]
+    assert "--run-id" in cmd_to_flags["status"]
+
+    # 真验证排除：假 SPEC md 的 flag **不**被抽到（确认 S2 不扫 docs/specs/*）
+    all_flags = set().union(*cmd_to_flags.values()) if any(cmd_to_flags.values()) else set()
+    assert "--fake-flag-from-spec-md" not in all_flags, (
+        "SPEC md 不应被 S2 守门扫描（含讨论性假命令会假报）"
+    )
+
+
+def test_guard_fails_on_unknown_flag_in_skill_md(tmp_path: Path, monkeypatch) -> None:
+    """负面守门：SKILL.md 含 CLI 未声明的 flag → guard **fail**（不是静默 pass）。
+
+    code-reviewer test 🟡#2：现有 4 测全 happy path（真 SKILL.md 通过）。若 regex 解析有 bug
+    让真 SKILL.md 的 flag 抽不出来，guard 会静默 no-op。本测注入假 SKILL.md 含未知 flag，
+    断言 guard fail loud。
+    """
+    fake_skill = tmp_path / "SKILL.md"
+    fake_skill.write_text(
+        "```\norca next --run-id <id> --output <out>\norca next --nonexistent-fake-flag-xyz\n```\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "tests.iface.in_session.test_skill_md_flags_guard.SKILL_MD", fake_skill,
+    )
+
+    with pytest.raises(AssertionError, match="nonexistent-fake-flag-xyz"):
+        test_skill_md_flags_subset_of_cli_help()

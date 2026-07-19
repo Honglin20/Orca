@@ -23,7 +23,7 @@ from unittest import mock
 import pytest
 from typer.testing import CliRunner
 
-from orca.iface.in_session.cli import app
+from orca.iface.in_session.cli import app, _validate_inputs
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -447,6 +447,96 @@ def test_inputs_validation_error_registered_in_errors_module():
     # cli.py 也 import 同一常量（不字面重写）。
     from orca.iface.in_session.cli import INPUTS_VALIDATION_ERROR as cli_const
     assert cli_const is INPUTS_VALIDATION_ERROR
+
+
+# ── F3 TYPE_MAP 全 alias 直接单元测试（code-reviewer test 🔴#3）───────────────
+#
+# 直接调 `_validate_inputs` 覆盖 `_TYPE_MAP` 12 alias（避免 bootstrap CLI 间接路径漏覆盖）。
+# SPEC §4 F3 AC「错类型 → inputs_validation_error + 定位」要 TYPE_MAP 所有 alias 都正确判型。
+
+
+@pytest.mark.parametrize("type_str,value,should_pass", [
+    # int 严格（拒 bool）
+    ("int", 5, True),
+    ("int", 0, True),
+    ("int", -1, True),
+    ("int", 5.0, False),  # float 不是 int
+    ("int", True, False),  # bool 反陷阱（Python isinstance(True, int) is True）
+    ("int", "5", False),
+    ("integer", 5, True),
+    ("integer", True, False),
+    # number / float（接受 int 或 float，拒 bool）
+    ("float", 1.5, True),
+    ("float", 1, True),  # int 是 number
+    ("float", True, False),  # bool 反陷阱
+    ("float", "1.5", False),
+    ("number", 3.14, True),
+    ("number", 42, True),
+    ("number", False, False),
+    # string / str
+    ("string", "hello", True),
+    ("string", "", True),
+    ("string", 42, False),
+    ("string", None, False),
+    ("str", "x", True),
+    ("str", True, False),
+    # boolean / bool（拒 int 反向陷阱）
+    ("boolean", True, True),
+    ("boolean", False, True),
+    ("boolean", 1, False),  # int 不是 bool（反向陷阱）
+    ("boolean", 0, False),
+    ("boolean", "true", False),
+    ("bool", True, True),
+    ("bool", 1, False),
+    # list / array
+    ("list", [1, 2, 3], True),
+    ("list", [], True),
+    ("list", "not list", False),
+    ("list", (1, 2), False),  # tuple 不是 list
+    ("array", [1], True),
+    ("array", {"a": 1}, False),
+    # dict / object
+    ("dict", {"a": 1}, True),
+    ("dict", {}, True),
+    ("dict", [], False),
+    ("object", {"x": 1}, True),
+    ("object", "str", False),
+])
+def test_validate_inputs_type_map_all_aliases(type_str, value, should_pass):
+    """SPEC §4 F3：``_TYPE_MAP`` 全 12 alias 直接单元测试（含 bool/int 双向反陷阱）。
+
+    bool/int 隔离：Python ``isinstance(True, int) is True`` 是已知陷阱；本测试守住
+    bool 不被错收为 int（``count: int`` + ``True`` → fail）+ int 不被错收为 bool
+    （``flag: boolean`` + ``1`` → fail）。
+    """
+    schema = [{"name": "f", "type": type_str, "description": "test"}]
+    ok, err = _validate_inputs({"f": value}, schema)
+    assert ok is should_pass, (
+        f"type={type_str!r} value={value!r} ({type(value).__name__})："
+        f"预期 should_pass={should_pass}，实际 ok={ok}，err={err!r}"
+    )
+
+
+def test_validate_inputs_unknown_type_passthrough_for_any_value():
+    """SPEC §4 F3：未知 type → pass-through（任何 value 都不校验）。"""
+    schema = [{"name": "f", "type": "url", "description": "test"}]
+    # url 不在 TYPE_MAP → 任何 value 都应通过
+    for value in ["https://x", 42, True, None, [1], {"a": 1}]:
+        ok, _ = _validate_inputs({"f": value}, schema)
+        assert ok is True, f"未知 type + value={value!r} 应 pass-through"
+
+
+def test_validate_inputs_description_none_treated_as_required():
+    """description=None（无 description 字段）→ 视为 ""，非 [default]/[advanced] → required 触发。
+
+    code-reviewer 🟡#3 显式化：``inputs_schema_list`` 输出 description 可能为 None
+    （老 wf 未填）；本函数 ``desc = field_def.get("description") or ""`` 容错。
+    """
+    schema = [{"name": "f", "type": "int", "description": None}]
+    ok, err = _validate_inputs({}, schema)
+    assert ok is False
+    assert "missing required" in err
+    assert "f" in err
 
 
 # ── next 单次 write 原子化（B1）────────────────────────────────────────────────
@@ -873,8 +963,10 @@ def test_next_busy_when_lock_held(cwd_tmp, wf_path):
     """并发撞锁：另一进程持 tape flock → next 返 {done:false, reason:busy} 0 退出（F5）。
 
     SPEC §3 O4：busy 信封含 ``retry_after_ms``（500ms），主 session 据它等待重试。
+    SPEC §3 O4 AC：busy reply 不重发 prompt（reply 无 prompt / node 字段）。
     """
     import fcntl
+    from orca.iface.in_session.cli import _BUSY_RETRY_AFTER_MS
     runner = CliRunner()
     boot = _bootstrap(runner, wf_path)
     run_id, tape = boot["run_id"], boot["tape"]
@@ -888,7 +980,11 @@ def test_next_busy_when_lock_held(cwd_tmp, wf_path):
         assert reply["done"] is False
         assert reply["reason"] == "busy"
         # SPEC §3 O4：retry_after_ms 必出，主 session 据它等待重试同一 next（不重派子代理）。
-        assert reply["retry_after_ms"] == 500
+        # code-reviewer test 🔴#5：用常量替 hardcoded 500，防单点漂移。
+        assert reply["retry_after_ms"] == _BUSY_RETRY_AFTER_MS
+        # SPEC §3 O4 AC：busy reply **不含 prompt / node**（不重发 prompt / 不重派子代理）。
+        assert "prompt" not in reply, "busy reply 不应含 prompt（避免主 session 重派子代理）"
+        assert "node" not in reply, "busy reply 不应含 node（避免主 session 重派子代理）"
         # 0 退出（runner.invoke 的 exit_code == 0）
         # tape 未增加（被 busy 短路）
         lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
@@ -896,6 +992,42 @@ def test_next_busy_when_lock_held(cwd_tmp, wf_path):
     finally:
         fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
         fd.close()
+
+
+def test_drive_protocol_mentions_busy_retry_rule():
+    """SPEC §3 O4：``_drive_protocol`` 文本含 busy / retry_after_ms / 不重派子代理 指令。
+
+    code-reviewer test 🟡#5：守 SKILL 协议文本的 intent（不止 CLI 行为），防 SKILL 漂移后
+    主 session 不知如何处理 busy。
+    """
+    from orca.iface.in_session.cli import _drive_protocol
+    text = _drive_protocol("test-run-id")
+    assert "busy" in text
+    assert "retry_after_ms" in text
+    assert "不重派子代理" in text or "不要重派" in text
+    # 也含 next 命令模板（主 session 知道怎么调）
+    assert "orca next" in text
+
+
+def test_next_reply_has_no_compliance_fields(cwd_tmp, wf_path):
+    """SPEC §3 O3 AC：next reply 不加 compliance 字段（零回归）。
+
+    v4.1 简化：删了 next reply compliance_warning / stuck 语义（compliance 是 orca 自我保护，
+    主 session 调度固定不反应）。next reply 字段集应保持 v4.0 形态。
+    """
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id, tape = boot["run_id"], boot["tape"]
+
+    # 推进一步（无 output → compliance 计数 +1，但 reply 不透出）
+    result = runner.invoke(app, ["next", "--tape", tape, "--run-id", run_id, "--output", ""])
+    assert result.exit_code == 0, result.output
+    reply = json.loads(result.output.splitlines()[-1])
+    # 守门：compliance 字段不应在 next reply 出现（只在 status --run-id 透出）
+    for forbidden in ("compliance_warning", "stuck", "no_output_count"):
+        assert forbidden not in reply, (
+            f"next reply 不应含 {forbidden}（SPEC §3 O3 v4.1：主 session 不参与 compliance）"
+        )
 
 
 # ── N2：marker RMW 在 flock 临界区内 ─────────────────────────────────────────
@@ -1036,6 +1168,7 @@ def test_stop_busy_when_tape_flock_held(cwd_tmp, wf_path):
     SPEC §3 O4：busy 信封含 ``retry_after_ms``（与 next 路径一致）。
     """
     import fcntl
+    from orca.iface.in_session.cli import _BUSY_RETRY_AFTER_MS
     runner = CliRunner()
     boot = _bootstrap(runner, wf_path)
     run_id, tape = boot["run_id"], boot["tape"]
@@ -1048,7 +1181,7 @@ def test_stop_busy_when_tape_flock_held(cwd_tmp, wf_path):
         reply = json.loads(result.output.splitlines()[-1])
         assert reply["done"] is False
         assert reply["reason"] == "busy"
-        assert reply["retry_after_ms"] == 500  # SPEC §3 O4
+        assert reply["retry_after_ms"] == _BUSY_RETRY_AFTER_MS
     finally:
         fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
         fd.close()
@@ -1064,6 +1197,7 @@ def test_bootstrap_busy_when_tape_flock_held(cwd_tmp, wf_path, monkeypatch):
     gen run_id 后才调 ``_try_acquire_flock``（global dupe-check lock 释后），所以副作用
     仅在 bootstrap 内部，不污染其它测试。
     """
+    from orca.iface.in_session.cli import _BUSY_RETRY_AFTER_MS
     runner = CliRunner()
     from orca.iface.in_session import cli as cli_mod
 
@@ -1075,7 +1209,7 @@ def test_bootstrap_busy_when_tape_flock_held(cwd_tmp, wf_path, monkeypatch):
     reply = json.loads(result.output.splitlines()[-1])
     assert reply["done"] is False
     assert reply["reason"] == "busy"
-    assert reply["retry_after_ms"] == 500
+    assert reply["retry_after_ms"] == _BUSY_RETRY_AFTER_MS
 
 
 def test_status_no_run_id_lists_runs_dir(cwd_tmp, wf_path):

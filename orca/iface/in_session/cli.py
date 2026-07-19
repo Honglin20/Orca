@@ -632,6 +632,13 @@ def _validate_inputs(
         （SKILL 教主 session 省略此类字段，让 wf 用 default）。
       - 显式 ``type`` + 非标签字段 + 缺省 → ``inputs_validation_error``（fail loud + 字段名定位）。
       - 显式 ``type`` + 给值但类型不对 → ``inputs_validation_error``（fail loud + 类型对比）。
+
+    **与 ``InputDef.required`` 字段的关系**（设计约束，code-reviewer 🟡#2 显式化）：
+    ``inputs_schema_list``（``catalog.py:156-171``）**不透出** ``required`` 字段；本函数依赖
+    SKILL tag 契约（``SKILL.md:84-100``）——约定每个可选字段必须带 ``[default]``/``[advanced]``
+    标签。若 wf YAML 写 ``required: false`` 但 description 无标签，本函数仍判 missing required
+    （保守；防 SKILL 漏抽 + 与 ``InputDef.required=True`` 默认值对齐）。这是 SKILL 约定优先
+    于 schema 字段的明确选择（SPEC v4.1 闭环 v2-B3 / v2-M10）。
     """
     for field_def in schema:
         name = field_def.get("name")
@@ -1030,6 +1037,12 @@ def bootstrap(
     # 变量 run_id / tape_path / result 在锁内已赋值；非 early-exit 路径（return / raise Exit）
     # 才会到达此处，故变量必已初始化（dupe check / busy / InSessionError / write_marker 失败
     # 都已 early-exit，本块仅在「marker 已落 + workflow_started 已 emit」时跑）。
+    #
+    # code-reviewer 🟡#3：``assert`` 守门，防未来新增「锁内不 raise 的 return」漏赋变量
+    # 导致锁外 NameError（fail loud 在断言，而非 NameError 在 chart_sock_path(run_id)）。
+    assert run_id, "O2 invariant: post-lock code requires run_id set inside lock"
+    assert tape_path is not None, "O2 invariant: post-lock code requires tape_path set"
+    assert result is not None, "O2 invariant: post-lock code requires result set"
 
     # ── in-session chart ingestor 守护 + env 文件（phase-13 §3 in-session 衔接）──────────
     # bootstrap 后子代理执行发生在宿主 session 时间窗；detach 起守护让它跨 bootstrap CLI

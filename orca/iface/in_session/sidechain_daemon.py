@@ -52,6 +52,7 @@ from orca.events.adapters.opencode_sqlite import OpencodeSqliteAdapter
 from orca.events.bus import EventBus
 from orca.events.raw_agent_event import ReadAdapter, RawAgentEvent
 from orca.events.sidechain_ingestor import SidechainIngestor
+from orca.iface.in_session._daemon_liveness import pidfile_daemon_alive
 from orca.iface.in_session.chart_daemon import (  # R4 七组件复刻：逐字 import
     _DEFAULT_TTL_SECONDS,
     _FlockSafeTape,
@@ -62,6 +63,11 @@ logger = logging.getLogger(__name__)
 
 # SPEC §2 ≤~2s 上界：poll 0.5s（discover + stream + ingest 各 <100ms，加 WS tick ≤2s）。
 _DEFAULT_POLL_SECONDS = 0.5
+
+# 守护模块名（``/proc/<pid>/cmdline`` 匹配用；与 ``main`` 的 argv
+# ``-m orca.iface.in_session.sidechain_daemon`` 对齐）。SPEC §5 S9：``_sidechain_daemon_alive``
+# 薄 wrapper 经此常量调 ``pidfile_daemon_alive``。
+_SIDECHAIN_MODULE_NAME = "orca.iface.in_session.sidechain_daemon"
 
 
 if TYPE_CHECKING:
@@ -92,17 +98,11 @@ def _sidechain_daemon_alive(run_id: str) -> bool:
     实现语义 / pid 复用防御 / 异常策略详见 ``_daemon_liveness.pidfile_daemon_alive`` docstring
     （pidfile 不存在 / /proc 无对应 pid / cmdline 不含模块名+run_id → 一律 False 保守触发 respawn）。
     """
-    from orca.iface.in_session._daemon_liveness import pidfile_daemon_alive
-
     return pidfile_daemon_alive(
         _sidechain_pidfile_path(run_id),
-        module_name=_SIDEBAND_MODULE_NAME,
+        module_name=_SIDECHAIN_MODULE_NAME,
         run_id=run_id,
     )
-
-
-# 守护模块名（``/proc/<pid>/cmdline`` 匹配用；与 ``main`` 的 argv ``-m orca.iface.in_session.sidechain_daemon`` 对齐）。
-_SIDEBAND_MODULE_NAME = "orca.iface.in_session.sidechain_daemon"
 
 
 # ── driver（主循环：adapter → ingestor → bus.emit）────────────────────────────
