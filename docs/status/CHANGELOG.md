@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-19] quant-ptq-sweep workflow（W2 粗粒度 PTQ 扫描）
+
+量化 pipeline 第二级。单 agent 节点 + folder-agent + `run_ptq_sweep.py`（833 行确定性脚本），双 mode：lightweight=4 累积路径 ablation（S/Q/A/R 派，~11 unique 候选，line 累积曲线）；full=位宽×预变换×求解×后处理全枚举（按 SDK §9.4 拒绝表过滤 rtn+q2n → 45 候选，heatmap 矩阵）。默认 `build_teacher_student_eval_fn` mse 评估 + bake 最佳 state_dict。修正 W1 `w4a16` 预设语义错位（`a_elem_format=fp16` 在 method=int 下不生效 → 改 `a_quant_enabled=False`）。code-reviewer 一轮（impl+coverage 合并）：6 🟡 全修（bake 顺序 / ts_quant 顶层 import / bake 白名单 / forward_fn 校验 / recipes DRY / w4a16 语义）+ 5 🟢 修；0 测试按任务范围（3 文件）+ plan §验证 deferred 阶段 5。Commit: `d356979`. 详见 [release note](../releases/2026-07-19-quant-ptq-sweep-w2.md).
+
 ## [2026-07-19] chart 加第 8 种 chart_type `heatmap`（行×列矩阵 cell 着色）
 
 跨栈加 heatmap（量化实验对比矩阵：行=recipe，列=bitwidth，cell=accuracy）。**后端**（`_limits`/`_validate`/`_downsample`/`_render`）：加 `"heatmap"` 到共享 allowlist（两端同源）+ heatmap 必填 `x`/`y`/`value` fail loud + table 同款 top-N 降采样 + `render_chart` 加 `value` 参数。**前端**：`HeatmapChartWidget`（CSS Grid + 浅钢蓝→PALETTE[0] 钢蓝线性色阶，无新依赖）+ `ChartWidget` switch + `types.ts` 加 `value?: string`。**CLI**：修 CRITICAL DRY 违规（原 `chart_canvas.py` 复制 allowlist 漏更 heatmap → 改 import `_limits`）+ heatmap 终端 DataTable 降级。code-reviewer 两轮（C1/M1/M2/m1-m6 全闭环）：null/空串 cell 不 coerce 0 / 单值矩阵不除零 / 大数组 reduce 防 spread 栈溢出 / 色阶方向钉死 / 三端同源 contract test。78 后端 + 39 前端测试全过。Commit: `ec3d598`. 详见 [release note](../releases/2026-07-19-chart-heatmap-type.md)。

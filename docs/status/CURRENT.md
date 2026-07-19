@@ -6,35 +6,31 @@
 
 ## 状态（2026-07-19）
 
-- **无进行中主线**。in-session 加固与性能 SPEC **P5（F1 resume）**刚 commit（详见 CHANGELOG）：`orca status` 无参加 `resumable` + SKILL 续跑段 + 占位 spec 建立，**零 marker 字段改动**。
-- 近期完成（详见 CHANGELOG）：in-session **P5（F1 resume，7-19）** / P1（7-19）/ O1a tape fold（7-19，P3）/ Web 视觉优化 P0-P4（7-19）/ Node Memory（7-18）/ B2 子 agent 推 web（7-17）。
-- **push 待用户手动**：本地领先 origin **88 commits**（WSL SSH 无 github key）。
+- **当前主线：量化能力（PatchTST_Optimal / ts_quant）集成到 Orca 作为 workflow**。nas-agent 已有两示例（pipeline + hp-search）；量化进行中（W1+W2 完成，W3–W4 待做）。
+- ✅ **heatmap chart_type 已加**（commit `ec3d598`，第 8 种图）——W2 full 模式矩阵可视化依赖，已落地+review+测试 green。
+- ✅ **W2 quant-ptq-sweep 完成**（commit `d356979`）：粗粒度 PTQ 扫描+报告+bake，单节点双 mode（lightweight 4 累积路径 / full 全枚举）。修正 W1 `w4a16` 语义错位。E2E 冒烟 deferred 到 plan §验证 阶段 5。
+- ts_quant 已 editable 装入 conda orca env（实测可用）；待正式加进 orca pyproject 依赖。
+- 本地领先 origin 多 commit（push 待用户手动）。
 
-## 候选下一步（in-session SPEC P2/P4/P6，待用户选定）
+## 量化 workflow 路线图（W1–W4）
 
-依据 SPEC [`2026-07-19-in-session-hardening-and-perf.md`](../specs/2026-07-19-in-session-hardening-and-perf.md) v4.1 §6 串行顺序（都碰 cli.py → 串行 P2→P4；P6 独立可任意时点；P5 已完成）：
+- ✅ **W1 敏感层分析** `quant-sensitivity`（commit `ca6bb60`）：单 agent + `run_sensitivity.py`（`analyze_low_precision_sensitive_layers` + `render_chart` 可视化）。method 四选一（mse/layer_stats/ptq_binary_sensitivity/mix_precision_search），low_bits 默认 w4a4-mx 可配，按模型原始顺序排名。ViT-Tiny 端到端实测通过（50 层 / 5 敏感层 / bar+table 推 web）。
+- ✅ **W2 粗粒度 PTQ 扫描** `quant-ptq-sweep`（commit `d356979`）：单节点双 mode。lightweight=4 累积路径 ablation（11 unique 候选，line+bar+table）；full=位宽×算法组合全枚举（45 候选，heatmap+scatter+table）。默认 teacher-student mse eval + bake 最佳 state_dict。修正 W1 `w4a16` 语义错位。
+- ⬜ **W3 位宽-精度曲线**：`search_mix_precision(strategy=m0_pareto, mode=explore)` 产 `bit_trend.json` + `frontier.png`（x=平均位宽, y=最高精度），库里现成不用外循环。
+- ⬜ **W4 QAT**：`prepare_trainable_fakequant_model(scheme=rtn|duquantpp)` + `prepare_trainable_qat`（CAGE 后校正 `W←W−lr·λ·(W−Q(W))`）。需训练数据。
 
-1. **P2（D4 + D5 marker 三态 + doctor orphan）**：合并 commit。改 `marker.py` + doctor 加 orphan_markers check（glob 扫 + tail 50 行判 tape 状态）。SPEC §2 D4/D5。
-2. **P4（D1 + D2 失败路径统一）**：D1 stop emit 失败留孤儿 → best-effort 落终态；D2 `apply_step_result` 异常裸崩 → `_safe_apply_or_fail` helper（DRY daemon+cli 两路）。SPEC §2 D1/D2。依赖 P2 先合并（read_marker 契约）。
-3. **P6（S1 adapter contract-test 黄金集）**：独立，可任意时点。SPEC §5 S1。
+## 待确认（量化）
 
-**defer**（SPEC §8）：F2 retry / O1b wf 缓存 / O1c tape resume / O5 lock contention。
+- W2/W3/W4 的 input 契约 + 可视化形态（逐个讨论，仿 W1 流程）
+- ts_quant 正式进 orca pyproject 依赖（落实"装 orca 即装 ts_quant"）
+- W1 后两 method 实测（ptq_binary_sensitivity / mix_precision_search，需业务 eval_fn）
 
-## follow-up / debt（预存·暂缓，全量见 CHANGELOG）
+## 并行：in-session 加固（orca 引擎，可穿插）
 
-- `daemon.py:105` 裸 `sys.exit(128+signum)` 违 §3.3 grep 守门（baseline 即失败）
-- 测试 baseline 失败：e2e `python3` 硬编码 / mcp 缺 `uv` / `test_bg_run_ps_logs` rot
-- MCP 移除（用户暂缓）/ unified-backend 草稿推迟（含 teams 残留）/ catalog fallback 无测试 / `workflow_failed.data.kind` 字段 drift
-- DAG compact minimap（`web-shell-v2-spec.md` §5.7 amendment 待开）
-
-## 待办（用户侧真机，无代码）
-
-- `tars install --target cc` 真生成 skill + `tars list/validate` 真工作
-- §9#1 nga/cac 全套集成真机加载（Stop-hook / opencode.json plugin 是否真生效）
-- **P1 + P5 改了 SKILL.md（P1: O4 busy + F3 inputs_validation_error；P5: F1 resume 续跑段）**：装了旧 TARS skill 副本的用户需重跑 `tars install` 同步
+P5（F1 resume）done。候选 P2（marker 三态）/ P4（失败兜底）/ P6（contract-test），待用户选定。既有 debt/follow-up 全量见 CHANGELOG，SPEC `docs/specs/2026-07-19-in-session-hardening-and-perf.md` v4.1。
 
 ## 必读文件（开工前按需）
 
-- [`docs/specs/2026-07-19-in-session-hardening-and-perf.md`](../specs/2026-07-19-in-session-hardening-and-perf.md) v4.1
-- [`docs/specs/in-session-entry-and-simplification.md`](../specs/in-session-entry-and-simplification.md) v5
+- `workflows/quant-sensitivity.yaml` + `workflows/agents/sensitivity-analyzer/`（W1 范本）
+- `PatchTST_Optimal/README_TRAINING.md` §8（敏感层 4 method）+ `README_SDK.md`（PTQ/QAT API）
 - [CHANGELOG](CHANGELOG.md)
