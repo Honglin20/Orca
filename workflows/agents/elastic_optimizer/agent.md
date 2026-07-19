@@ -35,7 +35,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 
 1. **激活环境 + probe**：
    ```bash
-   source .venv/bin/activate
+   source .venv/bin/activate 2>/dev/null || true
    python -c "from pathlib import Path; import nas_agent; print(Path(nas_agent.__file__).resolve().parent.parent)"
    ```
    记住 `<nas_agent_root>` 绝对路径。若 `{{ inputs.output_dir }}` 为空，读模型推断模型名，设定 `<output_dir>=llm_artifacts/<name>/`。

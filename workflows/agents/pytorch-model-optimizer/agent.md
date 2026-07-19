@@ -28,7 +28,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 
 1. 激活 Python 虚拟环境:
    ```bash
-   source .venv/bin/activate
+   source .venv/bin/activate 2>/dev/null || true
    ```
 2. 按上文 probe 解析 `<nas_agent_root>` 并记住其绝对路径。
 3. 如果 `{{ inputs.output_dir }}` 为空，读取模型文件内容推断模型名，设定输出目录为 `llm_artifacts/<inferred_name>/`。
