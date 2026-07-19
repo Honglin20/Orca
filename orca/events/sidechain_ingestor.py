@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from orca.events.raw_agent_event import RawAgentEvent, RawKind
+from orca.events.tape import read_last_complete_lines
 from orca.schema import EventType
 
 if TYPE_CHECKING:
@@ -184,8 +185,8 @@ class SidechainIngestor:
         首次（``rebuild_from_tape`` 后）offset = EOF；后续每 emit 仅扫 delta（同
         ``_FlockSafeTape._read_max_seq_from_disk`` 模式）。
 
-        partial-line race 防护：仅解析到最后一个完整 ``\\n``；末尾 partial 字节下次重读
-        （POSIX ``write(2)`` 对普通文件不保证原子性，见 ``chart_daemon._watch_terminal`` 同防御）。
+        partial-line race 防护 + binary-mode 多字节安全由共享 helper
+        ``events.tape.read_last_complete_lines`` 守（SPEC §5 S7 DRY 抽出）。
 
         时序正确性：``bus.emit`` 之前调本方法 → 读到的是「cli ``next`` 最近一次 append 的状态」，
         跨进程 flock 互斥保证 cli append 与 daemon emit 不交错（SPEC §6 U1 闭环）。
@@ -204,30 +205,19 @@ class SidechainIngestor:
         if cur_size == self._node_scan_offset:
             return self._current_node
 
-        # BINARY mode + byte offsets: text-mode seek(N) treats N as opaque cookie and
-        # f.read(N) as CHARS, mixing them misaligns offset on multi-byte UTF-8 content
-        # → seek lands mid-character → UnicodeDecodeError. Read bytes, decode, advance
-        # by BYTE index of last \n (B2-VRFY local patch; same fix needed upstream).
-        try:
-            with open(self._tape_path, "rb") as f:
-                f.seek(self._node_scan_offset)
-                raw = f.read(cur_size - self._node_scan_offset)
-        except OSError:
+        lines, new_offset = read_last_complete_lines(
+            self._tape_path, self._node_scan_offset, cur_size,
+        )
+        if lines is None:
+            # 读失败 / 整段 partial → 沿用缓存 node（下次重读）。
             logger.debug(
-                "sidechain ingestor derive node: 读 %s 失败（OSError，沿用缓存 node=%r）",
+                "sidechain ingestor derive node: 读 %s 失败/partial（沿用缓存 node=%r）",
                 self._tape_path, self._current_node, exc_info=True,
             )
             return self._current_node
 
-        last_nl = raw.rfind(b"\n")
-        if last_nl < 0:
-            # 整段 partial；不推进 offset，下次重读。
-            return self._current_node
-        complete_bytes = raw[: last_nl + 1]
-        self._node_scan_offset = self._node_scan_offset + last_nl + 1
-        chunk = complete_bytes.decode("utf-8", errors="replace")
-
-        for line in chunk.split("\n"):
+        self._node_scan_offset = new_offset
+        for line in lines:
             stripped = line.strip()
             if not stripped:
                 continue
