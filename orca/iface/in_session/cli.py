@@ -1287,15 +1287,24 @@ def status(
     done = sum(1 for s in state.node_status.values() if s == "done")
     progress = f"{done}/{len(state.node_status)}"
 
+    # SPEC §3 O3：从激活 marker 读 ``no_output_count`` 透出（raw 观测用，主 session 不反应）。
+    # 无 marker（run 已终态 / 还未 bootstrap / 损坏）→ None（不阻塞 status）。
+    rundir = tape_path.parent
+    marker = read_marker(marker_path(rundir, rid))
+    no_output_count = marker.no_output_count if marker is not None else None
+
     if json_output:
         # 顶层字段供主 session（经 orca skill）直接消费；step 4 后 plugin transform 段
         # 已退场，--json 仍保留作 skill / LLM 友好的结构化出口（SPEC §2.3 单 run 详情契约）。
+        # SPEC §3 O3：加 ``no_output_count``（raw 透出，主 session 不据它改行为；compliance
+        # 是 orca 自我保护，到 _COMPLIANCE_LIMIT 自己 fail）。
         typer.echo(json.dumps({
             "run_id": rid,
             "status": state.status,
             "current_node": state.current_node,
             "node_status": dict(state.node_status),
             "progress": progress,
+            "no_output_count": no_output_count,
         }, ensure_ascii=False))
         return
 
@@ -1304,6 +1313,7 @@ def status(
     typer.echo(f"  current_node: {state.current_node}")
     typer.echo(f"  node_status: {dict(state.node_status)}")
     typer.echo(f"  progress:    {progress} done")
+    typer.echo(f"  no_output_count: {no_output_count}")
 
 
 @app.command()

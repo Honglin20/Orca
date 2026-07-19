@@ -754,6 +754,58 @@ def test_status_default_human_readable_unchanged(cwd_tmp, wf_path):
     assert "node_status:" in result.output
 
 
+def test_status_run_id_includes_no_output_count(cwd_tmp, wf_path):
+    """SPEC §3 O3：``status --run-id <id>`` 详情含 ``no_output_count``（raw 透出供观测）。
+
+    bootstrap 后立刻查 → 计数 0（首次写 marker）；next 无 output 后再查 → 计数 ≥1。
+    主 session 不据它改行为（compliance 是 orca 自我保护）—— 此处仅守字段透出契约。
+    """
+    runner = CliRunner()
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
+    run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
+
+    # 1. bootstrap 后：no_output_count = 0（marker 初始化）
+    result = runner.invoke(app, ["status", run_id, "--json"])
+    assert result.exit_code == 0, result.output
+    reply = json.loads(result.output.splitlines()[-1])
+    assert "no_output_count" in reply, "status --run-id 详情应含 no_output_count（O3）"
+    assert reply["no_output_count"] == 0
+
+    # 人类可读路径也含
+    result_hr = runner.invoke(app, ["status", run_id])
+    assert result_hr.exit_code == 0
+    assert "no_output_count" in result_hr.output
+
+    # 2. 调一次 next 无 output（compliance +1）
+    runner.invoke(app, ["next", "--run-id", run_id, "--output", ""])
+
+    result2 = runner.invoke(app, ["status", run_id, "--json"])
+    reply2 = json.loads(result2.output.splitlines()[-1])
+    assert reply2["no_output_count"] == 1, "一次无 output next 后计数应 = 1"
+
+
+def test_status_run_id_no_marker_reports_none_no_output_count(cwd_tmp, wf_path):
+    """SPEC §3 O3：``status --run-id <id>`` 无 marker（run 已终态 / 损坏）→ no_output_count=None。
+
+    守住「不阻塞 status」：marker 读失败时透出 None 供消费者识别，不 raise。
+    """
+    runner = CliRunner()
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
+    run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
+    tape_path = (cwd_tmp / "runs" / f"{run_id}.jsonl")
+
+    # 终态后清 marker（run 结束），status 仍可查 tape 但 marker 无 → None。
+    runner.invoke(app, ["next", "--run-id", run_id, "--output", "out_a"])
+    runner.invoke(app, ["next", "--run-id", run_id, "--output", "out_b"])
+    # workflow_completed 已落 tape，marker 被 next 清掉
+
+    result = runner.invoke(app, ["status", run_id, "--json"])
+    assert result.exit_code == 0, result.output
+    reply = json.loads(result.output.splitlines()[-1])
+    assert reply["status"] == "completed"
+    assert reply["no_output_count"] is None, "无 marker → None（不阻塞 status）"
+
+
 def test_status_json_flag_no_run_id_lists_runs_json(cwd_tmp, wf_path):
     """FU-3（SPEC §2.1/§2.3）：``status --json`` 无 run_id → 只列活跃 run，结构化字典元素。
 
