@@ -36,9 +36,11 @@ tools: [bash, read, write, edit, glob, grep]
    - `get_eval_fn() -> Callable[[nn.Module], dict[str, float]]`（**仅** `{{ inputs.eval_fn_ref }}` 非空时实现）：按 dotted-path import 业务评估函数返回；返回的函数签名是 `eval_fn(student_model) -> {"<metric>": float, ...}`。`{{ inputs.eval_fn_ref }}` 为空 → **不要**生成此函数（脚本会自动用 `build_teacher_student_eval_fn(teacher=fp_model, dataloader=eval_loader, forward_fn=forward_fn)`）。
    - `get_metric_spec() -> dict`（**仅**业务 eval_fn 路径需要）：返回 `{"primary_metric": "<key>", "higher_is_better": bool}`，告诉脚本怎么挑最佳。`{{ inputs.eval_fn_ref }}` 为空时同样不要生成（默认 teacher-student mse：`primary_metric="mse"`、`higher_is_better=False`）。
 
-3. **调脚本**（**必须单条 bash 调用**：`source orca_env.sh && python3 ...` 连写，内部完成 全扫→落盘 report→bake→render_chart 推图→stdout JSON）：
+3. **调脚本**（**整段照抄成一条 bash 调用**——`${ORCA_RUN_ID}` 由 orca spawn 注入，`source` 用它定位本 run 的 `orca_env.sh` 拿 `ORCA_CHART_SOCK` 等；内部完成 全扫→落盘 report→bake→render_chart 推图→stdout JSON）：
    ```bash
-   source "<节点指令给的 orca_env.sh 绝对路径>" && python3 "$ORCA_AGENT_RESOURCES/scripts/run_ptq_sweep.py" \
+   source .venv/bin/activate 2>/dev/null || true
+   source "runs/${ORCA_RUN_ID}/orca_env.sh" 2>/dev/null || true
+   python3 "$ORCA_AGENT_RESOURCES/scripts/run_ptq_sweep.py" \
      --adapter "<output_dir>/adapter.py" \
      --model_path "{{ inputs.model_path }}" \
      --project_root "{{ inputs.project_root }}" \
@@ -49,7 +51,7 @@ tools: [bash, read, write, edit, glob, grep]
      --recipes "{{ inputs.recipes }}" --output_dir "<output_dir>" \
      --bake "{{ inputs.bake }}"
    ```
-   ⚠️ **`source` 和 `python3` 必须在同一个 bash 调用里用 `&&` 连起来**——opencode 的 bash 工具不跨调用保持环境变量。若拆成两次（先单独 `source`、再单独 `python3`），或把 `$ORCA_AGENT_RESOURCES` 展开成字面路径后跳过 `source`，脚本运行的 shell 就没有 `ORCA_CHART_SOCK`/`ORCA_RUN_ID` 等 → `render_chart` raise 被脚本静默吞掉 → **图不推送**（report 仍正常产出，但可视化丢失）。
+   ⚠️ **必须整段作为一条 bash 调用原样照抄**（用 `${ORCA_RUN_ID}` 自定位 `orca_env.sh`，**不要**手填绝对路径、**不要**拆成多次调用、**不要**把 `$ORCA_AGENT_RESOURCES` 展开后跳过 source）。opencode 的 bash 工具不跨调用保 env——拆开会让 `render_chart` 缺 `ORCA_CHART_SOCK` 静默失败、图不推（report 仍正常）。这是 `nas-select`/`elastic_optimizer` 验证过的可用模式。
    脚本非 0 退出 → 把 stderr/stdout 原样上抛，**不要假装完成**。推图失败脚本会 stderr 提示但**不阻断**（`report.json` 是核心产出）。单个候选失败不阻断全局（脚本内 try/except 隔离 + 增量落盘 report）。
 
 4. **回显**：脚本 stdout 末尾输出一个 JSON（含 `output_dir`/`report_path`/`model_path`/`baked_model_path`/`best_config`/`best_metric`/`candidates_evaluated`/`mode`/`metric_kind`）。**原样**作为本节点产出（`output_schema` 校验）。
