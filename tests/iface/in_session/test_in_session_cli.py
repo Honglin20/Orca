@@ -131,6 +131,100 @@ def test_bootstrap_duplicate_same_wf_fails_loud(cwd_tmp, wf_path):
     assert len(tape_path.read_text(encoding="utf-8").strip().split("\n")) == 2
 
 
+def test_bootstrap_lock_released_before_spawn_daemons(cwd_tmp, wf_path, monkeypatch):
+    """SPEC §3 O2 AC：bootstrap_lock 释放在 spawn daemon 之前。
+
+    模拟：在 ``_spawn_chart_daemon`` 内尝试用 LOCK_NB 抢 bootstrap_lock —— 应成功（说明
+    锁已释放）。若失败说明 spawn 仍在锁内（O2 没生效）。
+
+    dupe-check 不变量不变：锁仍包 dupe check + gen run_id + advance + write_marker。
+    """
+    import fcntl
+    runner = CliRunner()
+    from orca.iface.in_session import cli as cli_mod
+
+    captured: dict[str, bool] = {"lock_available_at_spawn": False}
+
+    def _spy_spawn_chart_daemon(run_id, tape_path):
+        # 尝试 LOCK_NB 抢 bootstrap_lock —— 非阻塞，成功 = 锁已释放。
+        rundir = Path(tape_path).parent
+        bootstrap_lock = rundir / ".orca-bootstrap.lock"
+        fd = open(bootstrap_lock, "w")
+        try:
+            try:
+                fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                captured["lock_available_at_spawn"] = True
+                # 释放，免影响后续
+                fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+            except BlockingIOError:
+                captured["lock_available_at_spawn"] = False
+        finally:
+            fd.close()
+
+    monkeypatch.setattr(cli_mod, "_spawn_chart_daemon", _spy_spawn_chart_daemon)
+    # 也 patch _wait_for_sock 让其立刻返（保 spawn 路径走完）
+    monkeypatch.setattr(cli_mod, "_wait_for_sock", lambda sock_path, **kw: True)
+
+    _bootstrap(runner, wf_path)
+    assert captured["lock_available_at_spawn"] is True, (
+        "SPEC §3 O2：bootstrap_lock 应在 spawn_chart_daemon 之前释放"
+        "（dupe-check 不变量靠 dupe check + write_marker，不靠 spawn）"
+    )
+
+
+def test_bootstrap_dupe_check_invariant_preserved(cwd_tmp, wf_path, monkeypatch):
+    """SPEC §3 O2 AC：dupe-check 不变量仍成立（O2 缩小锁范围后回归守门）。
+
+    模拟两并发 bootstrap 时序：first bootstrap 跑到 write_marker 完成但**还在锁内**
+    （spawn 之前），second bootstrap 此时被阻塞；first 释放锁后 second 进 dupe check
+    应看到 first 的 marker → fail loud。
+
+    实现方式：mock _spawn_chart_daemon 让 first bootstrap 卡在 spawn 阶段（lock 已释放），
+    起一个 thread 跑 second bootstrap；second 应 fail loud（dupe）。
+    """
+    import threading
+    import time as _time
+    runner = CliRunner()
+    from orca.iface.in_session import cli as cli_mod
+
+    # 让 _spawn_chart_daemon 阻塞 0.5s（模拟「spawn 在锁外、耗时长」），给 second bootstrap
+    # 跑到 dupe check 的窗口。**关键**：first 此时已释 bootstrap_lock（O2 行为）；second
+    # 能进 dupe check → 看到 first 的 marker（write_marker 在锁内已完成）→ fail loud。
+    def _slow_spawn(run_id, tape_path):
+        _time.sleep(0.5)
+
+    monkeypatch.setattr(cli_mod, "_spawn_chart_daemon", _slow_spawn)
+    monkeypatch.setattr(cli_mod, "_wait_for_sock", lambda sock_path, **kw: True)
+
+    second_results: dict[str, Any] = {}
+
+    def _second_bootstrap():
+        # 等 first 进 spawn（即 first 释 bootstrap_lock）后跑 second
+        _time.sleep(0.2)
+        res = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
+        second_results["exit_code"] = res.exit_code
+        try:
+            second_results["reply"] = json.loads(res.output.splitlines()[-1])
+        except Exception as e:
+            second_results["error"] = str(e)
+
+    t = threading.Thread(target=_second_bootstrap, daemon=True)
+    t.start()
+
+    # first bootstrap（在主线程）
+    _bootstrap(runner, wf_path)
+    t.join(timeout=5.0)
+
+    # second bootstrap 应 fail loud（dupe-check 不变量；O2 缩锁范围后仍守）
+    assert second_results.get("exit_code") == 1, (
+        f"second bootstrap 应 fail loud（dupe），实际 exit={second_results.get('exit_code')}"
+    )
+    reply = second_results.get("reply", {})
+    assert reply.get("reason") == "duplicate-active-run", (
+        f"second bootstrap 应返 duplicate-active-run，实际 reply={reply}"
+    )
+
+
 # ── F3：bootstrap --inputs 校验（SPEC §4 F3）──────────────────────────────────
 
 

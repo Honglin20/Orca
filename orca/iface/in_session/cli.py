@@ -923,6 +923,13 @@ def bootstrap(
     # 全局锁（单一 ``.orca-bootstrap.lock``）serialize 所有 bootstrap：同 wf 并发 →
     # 第二个等第一个写完 marker 再跑 dupe check → 看到 marker → fail loud。bootstrap
     # 是低频操作（每 run 一次），全局串行无性能影响。
+    #
+    # SPEC §3 O2（v4.1）：锁临界区**只**包 dupe check + gen run_id + advance+emit +
+    # write_marker。``_write_orca_env`` + ``_spawn_*_daemon`` + ``_wait_for_sock`` 移锁外
+    # （run_id 派生路径，不参与 dupe 判定）。**dupe-check 不变量仍成立**：同 wf 并发
+    # bootstrap → 第二个等第一个写完 marker 再跑 dupe check → 看到 marker → fail loud。
+    # 收益：bootstrap 持锁时间从「spawn + 5s socket wait」降到「emit + write_marker」
+    # （典型 <100ms），消除 next 路径 / 第二个 bootstrap 等 socket 的时间税。
     rundir.mkdir(parents=True, exist_ok=True)
     bootstrap_lock = rundir / ".orca-bootstrap.lock"
     mlock_fd = open(bootstrap_lock, "w")
@@ -1010,64 +1017,72 @@ def bootstrap(
                 "reason": f"failed: write_marker: {e}",
             }, ensure_ascii=False))
             raise typer.Exit(1)
-
-        # ── in-session chart ingestor 守护 + env 文件（phase-13 §3 in-session 衔接）──────────
-        # bootstrap 后子代理执行发生在宿主 session 时间窗；detach 起守护让它跨 bootstrap CLI
-        # 退出存活，bind socket 收 chart。env 文件给 entry 节点身份（每次 next 重写下一节点）。
-        sock_path = chart_sock_path(run_id)
-        env_path = _env_file_path(tape_path, run_id)
-        _write_orca_env(
-            env_path,
-            run_id=run_id,
-            node=result.node or "",
-            session_id=uuid.uuid4().hex,
-            sock_path=sock_path,
-            resources_root=result.resources_root,
-        )
-        _spawn_chart_daemon(run_id, tape_path)
-        if not _wait_for_sock(sock_path):
-            logger.warning(
-                "run %s: chart 守护 socket %s 在 %.1fs 内未就绪（host 派 subagent 期间可能补上）",
-                run_id, sock_path, _SOCK_READY_TIMEOUT,
-            )
-        # ── in-session sidechain 守护（SPEC-B v4 B2：子 agent 过程 → tape）───────────
-        # 与 chart 守护并列 spawn：B2 实时推送子 agent msg/tool/thinking 到 web。失败语义同
-        # chart：OSError → warn 不 fail bootstrap（守护是便利层）。无 host_session / 无 backend
-        # → 静默 skip（fail-open）。
-        try:
-            _spawn_sidechain_daemon(run_id, tape_path)
-        except OSError:
-            logger.warning(
-                "run %s: spawn sidechain 守护失败（Popen OSError；B2 子 agent 过程将不进 web）",
-                run_id, exc_info=True,
-            )
-
-        reply: dict[str, Any] = {
-            "run_id": run_id,
-            "tape": str(tape_path),
-            "done": result.done,
-        }
-        if result.node:
-            reply["node"] = result.node
-        prompt_text = _reply_prompt(result, env_file=env_path)
-        # model-driven advance 补丁：entry prompt 后附「驱动协议」，模型据此自调 next --output。
-        if prompt_text:
-            reply["prompt"] = prompt_text + _drive_protocol(run_id)
-        if result.prompt_file:
-            reply["prompt_file"] = result.prompt_file
-
-        # command 入口用 ``--format prompt`` —— 回 entry prompt 纯文本（pointer）
-        # **+ 驱动协议**（model-driven advance：模型据此自调 next --output）。
-        # 兜底：无 prompt（如非 agent entry / 异常）→ 仍回 JSON 让模型看到结构化信息。
-        if format == "prompt" and prompt_text:
-            typer.echo(prompt_text + _drive_protocol(run_id))
-        else:
-            typer.echo(json.dumps(reply, ensure_ascii=False))
     finally:
+        # SPEC §3 O2：bootstrap_lock 释放在 write_marker 之后、spawn daemons 之前。
+        # 释放后第二个 bootstrap 能立刻进 dupe check（看到本 run 的 marker → fail loud），
+        # 不必等本 run spawn + socket wait。
         try:
             fcntl.flock(mlock_fd.fileno(), fcntl.LOCK_UN)
         finally:
             mlock_fd.close()
+
+    # ── 以下在 bootstrap_lock **外**（SPEC §3 O2）：run_id 派生路径，不参与 dupe 判定 ──
+    # 变量 run_id / tape_path / result 在锁内已赋值；非 early-exit 路径（return / raise Exit）
+    # 才会到达此处，故变量必已初始化（dupe check / busy / InSessionError / write_marker 失败
+    # 都已 early-exit，本块仅在「marker 已落 + workflow_started 已 emit」时跑）。
+
+    # ── in-session chart ingestor 守护 + env 文件（phase-13 §3 in-session 衔接）──────────
+    # bootstrap 后子代理执行发生在宿主 session 时间窗；detach 起守护让它跨 bootstrap CLI
+    # 退出存活，bind socket 收 chart。env 文件给 entry 节点身份（每次 next 重写下一节点）。
+    sock_path = chart_sock_path(run_id)
+    env_path = _env_file_path(tape_path, run_id)
+    _write_orca_env(
+        env_path,
+        run_id=run_id,
+        node=result.node or "",
+        session_id=uuid.uuid4().hex,
+        sock_path=sock_path,
+        resources_root=result.resources_root,
+    )
+    _spawn_chart_daemon(run_id, tape_path)
+    if not _wait_for_sock(sock_path):
+        logger.warning(
+            "run %s: chart 守护 socket %s 在 %.1fs 内未就绪（host 派 subagent 期间可能补上）",
+            run_id, sock_path, _SOCK_READY_TIMEOUT,
+        )
+    # ── in-session sidechain 守护（SPEC-B v4 B2：子 agent 过程 → tape）───────────
+    # 与 chart 守护并列 spawn：B2 实时推送子 agent msg/tool/thinking 到 web。失败语义同
+    # chart：OSError → warn 不 fail bootstrap（守护是便利层）。无 host_session / 无 backend
+    # → 静默 skip（fail-open）。
+    try:
+        _spawn_sidechain_daemon(run_id, tape_path)
+    except OSError:
+        logger.warning(
+            "run %s: spawn sidechain 守护失败（Popen OSError；B2 子 agent 过程将不进 web）",
+            run_id, exc_info=True,
+        )
+
+    reply: dict[str, Any] = {
+        "run_id": run_id,
+        "tape": str(tape_path),
+        "done": result.done,
+    }
+    if result.node:
+        reply["node"] = result.node
+    prompt_text = _reply_prompt(result, env_file=env_path)
+    # model-driven advance 补丁：entry prompt 后附「驱动协议」，模型据此自调 next --output。
+    if prompt_text:
+        reply["prompt"] = prompt_text + _drive_protocol(run_id)
+    if result.prompt_file:
+        reply["prompt_file"] = result.prompt_file
+
+    # command 入口用 ``--format prompt`` —— 回 entry prompt 纯文本（pointer）
+    # **+ 驱动协议**（model-driven advance：模型据此自调 next --output）。
+    # 兜底：无 prompt（如非 agent entry / 异常）→ 仍回 JSON 让模型看到结构化信息。
+    if format == "prompt" and prompt_text:
+        typer.echo(prompt_text + _drive_protocol(run_id))
+    else:
+        typer.echo(json.dumps(reply, ensure_ascii=False))
 
 
 @app.command()
