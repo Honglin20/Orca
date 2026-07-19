@@ -1,0 +1,113 @@
+name: quant-bit-curve
+description: "对 PyTorch 模型做混合精度 Pareto 位宽-精度曲线搜索：输入 FP 模型+校准/评估数据，在精度约束下对比位宽/格式选择（INT8/W4A8/INT4/MX4/MX8，全 mxint 基），输出 Pareto 前沿（最低平均位宽下最高精度）+ 格式分布可视化 + bake 最佳混合精度模型。与 quant-ptq-sweep（固定位宽对比 PTQ 算法）互补。底层调 ts_quant.search_mix_precision(strategy=m0_pareto)。"
+entry: bit_curve_searcher
+
+inputs:
+  model_path:
+    type: string
+    description: "[default] 用户 PyTorch 模型入口文件路径（可实例化 FP 模型，如 model.py）"
+    required: true
+  project_root:
+    type: string
+    description: "[default] 用户 PyTorch 项目根目录"
+    required: true
+  calib_data_ref:
+    type: string
+    description: "[advanced] 校准数据 loader 的 dotted-path（如 myproj.data:load_calib），返回 torch DataLoader；留空则 agent 用少量假随机数据。会被内化进生成的 adapter.py"
+    required: false
+    default: ""
+  eval_data_ref:
+    type: string
+    description: "[advanced] 评估数据 loader 的 dotted-path；留空则复用 calib_data。会被内化进 adapter.py"
+    required: false
+    default: ""
+  eval_fn_ref:
+    type: string
+    description: "[advanced] 业务评估函数的 dotted-path（如 myproj.eval:build_eval_fn），返回 EvalFn（接 student_model 返回 dict[str,float]）；留空则用 ts_quant.eval.build_teacher_student_eval_fn 默认 teacher-student mse。会被内化进 adapter.py"
+    required: false
+    default: ""
+  mode:
+    type: string
+    description: "[default] 搜索模式：explore（出完整 Pareto 前沿）/ constrained_select（约束下选点）/ minimize_bit_under_accuracy（满足精度容忍下选最低位宽）"
+    required: false
+    default: "explore"
+  candidate_format_space:
+    type: string
+    description: "[default] 候选格式集（逗号分隔，全 mxint/int 基）：INT8 / W4A8 / INT4 / MX4 / MX8。空则默认全集"
+    required: false
+    default: ""
+  bit_objective:
+    type: string
+    description: "[default] bit 成本口径（决定选择与绘图 x 轴）：weight_activation_proxy（推荐，区分 W4A8 与 INT4/MX4）/ weight_only"
+    required: false
+    default: "weight_activation_proxy"
+  accuracy_tolerance:
+    type: string
+    description: "[default] 相对搜索 baseline 的精度损失绝对容忍（如 0.01=mse 损失上界 0.01）"
+    required: false
+    default: "0.01"
+  avg_bit_budget:
+    type: string
+    description: "[advanced] 平均位宽硬上限；空则无硬约束（由精度容忍驱动选最低位宽）"
+    required: false
+    default: ""
+  max_evals:
+    type: string
+    description: "[default] 主搜索 candidate 预算（不含 sensitivity probe / diagnostic anchors / final eval）。32=smoke，128=真实模型推荐起步"
+    required: false
+    default: "32"
+  granularity:
+    type: string
+    description: "[default] 量化粒度：per_tensor / per_token / per_channel"
+    required: false
+    default: "per_tensor"
+  output_dir:
+    type: string
+    description: "[default] 产物输出目录。留空则默认 llm_artifacts/<model_name>/"
+    required: false
+    default: ""
+  bake:
+    type: string
+    description: "[default] 是否把选中最佳混合精度 assignment bake 成 best_mixed_model.pt（'true'/'false'）"
+    required: false
+    default: "true"
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════
+  # 单 agent：生成 adapter.py（适配异构模型 + eval_fn/eval_loader）
+  # → 调 run_bit_curve.py（ts_quant.search_mix_precision m0_pareto +
+  # render_chart 可视化 + bake 最佳）→ 回显 JSON 摘要。
+  # ═══════════════════════════════════════════════════════════════
+  - name: bit_curve_searcher
+    kind: agent
+    executor: claude
+    agent: bit-curve-searcher
+    output_schema:
+      type: object
+      required: [output_dir, report_path, model_path, best_config, best_metric, best_bit, candidates_evaluated, mode, metric_kind]
+      properties:
+        output_dir: {type: string}
+        report_path: {type: string}
+        model_path: {type: string}
+        baked_model_path: {type: string, description: "bake 出的最佳混合精度模型路径（best_mixed_model.pt）；bake=false 或失败时为空串"}
+        best_config: {type: string}
+        best_metric: {type: number}
+        best_bit: {type: number}
+        candidates_evaluated: {type: integer, minimum: 0}
+        mode: {type: string}
+        metric_kind: {type: string}
+      additionalProperties: false
+    routes:
+      - to: $end
+
+outputs:
+  output_dir: "{{ bit_curve_searcher.output.output_dir }}"
+  report_path: "{{ bit_curve_searcher.output.report_path }}"
+  model_path: "{{ bit_curve_searcher.output.model_path }}"
+  baked_model_path: "{{ bit_curve_searcher.output.baked_model_path }}"
+  best_config: "{{ bit_curve_searcher.output.best_config }}"
+  best_metric: "{{ bit_curve_searcher.output.best_metric }}"
+  best_bit: "{{ bit_curve_searcher.output.best_bit }}"
+  candidates_evaluated: "{{ bit_curve_searcher.output.candidates_evaluated }}"
+  mode: "{{ bit_curve_searcher.output.mode }}"
+  metric_kind: "{{ bit_curve_searcher.output.metric_kind }}"
