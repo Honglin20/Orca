@@ -842,6 +842,31 @@ def main() -> int:
         sys.exit(2)
 
     # 7. charts
+    # 7a. chart 探针（诊断"图不推"）：直接调一次 render_chart，把结果+异常全文写进 report。
+    #     opencode 日志不捕子进程 stderr，故把 chart 失败原因从 stderr 搬进 report 可见。
+    probe = {
+        "ok": False,
+        "error": None,
+        "orca_chart_sock": os.environ.get("ORCA_CHART_SOCK", ""),
+        "orca_run_id": os.environ.get("ORCA_RUN_ID", ""),
+        "env_file_arg": args.env_file,
+    }
+    try:
+        from orca.chart import render_chart as _probe_rc
+        _probe_rc(
+            chart_type="table",
+            data=[{"probe": "chart-push-diag"}],
+            label=CHART_LABEL,
+            title="PROBE chart-push diag",
+            columns=["probe"],
+        )
+        probe["ok"] = True
+    except Exception as e:
+        probe["error"] = f"{type(e).__name__}: {e}"
+    report["chart_probe"] = probe
+    _dump_report(report, report_path)
+    sys.stderr.write(f"[run_ptq_sweep] chart_probe: ok={probe['ok']} sock={probe['orca_chart_sock']!r} err={probe['error']!r}\n")
+
     _push_charts(mode, candidates, report, metric_kind, recipes_filter)
 
     # 显式释放 best q_model（caller 引用置 None，配合 _free_q_model 的 gc/cuda 回收）
