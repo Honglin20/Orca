@@ -95,7 +95,7 @@ return StepResult(emits=[], done=False, node=pending, prompt=prompt, prompt_file
 
 | SHA | 项 | 类型 |
 |---|---|---|
-| `<SHA 见 git log>` | F1 P5 | feat（status resumable + SKILL 续跑段 + 占位 spec + CURRENT 断链）|
+| `705009a` | F1 P5 | feat（status resumable + SKILL 续跑段 + 占位 spec + CURRENT 断链）|
 
 ## 文件改动
 
