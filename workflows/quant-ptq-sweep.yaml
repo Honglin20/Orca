@@ -69,6 +69,7 @@ nodes:
         output_dir: {type: string}
         report_path: {type: string}
         model_path: {type: string}
+        baked_model_path: {type: string, description: "bake 出的最佳量化模型路径（best_quant_model.pt）；bake=false 或失败时为空串"}
         best_config: {type: string}
         best_metric: {type: number}
         candidates_evaluated: {type: integer, minimum: 0}
@@ -82,6 +83,7 @@ outputs:
   output_dir: "{{ ptq_sweeper.output.output_dir }}"
   report_path: "{{ ptq_sweeper.output.report_path }}"
   model_path: "{{ ptq_sweeper.output.model_path }}"
+  baked_model_path: "{{ ptq_sweeper.output.baked_model_path }}"
   best_config: "{{ ptq_sweeper.output.best_config }}"
   best_metric: "{{ ptq_sweeper.output.best_metric }}"
   candidates_evaluated: "{{ ptq_sweeper.output.candidates_evaluated }}"

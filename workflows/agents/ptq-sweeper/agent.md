@@ -51,7 +51,7 @@ tools: [bash, read, write, edit, glob, grep]
    ```
    脚本非 0 退出 → 把 stderr/stdout 原样上抛，**不要假装完成**。推图失败脚本会 stderr 提示但**不阻断**（`report.json` 是核心产出）。单个候选失败不阻断全局（脚本内 try/except 隔离 + 增量落盘 report）。
 
-4. **回显**：脚本 stdout 末尾输出一个 JSON（含 `output_dir`/`report_path`/`model_path`/`best_config`/`best_metric`/`candidates_evaluated`/`mode`/`metric_kind`）。**原样**作为本节点产出（`output_schema` 校验）。
+4. **回显**：脚本 stdout 末尾输出一个 JSON（含 `output_dir`/`report_path`/`model_path`/`baked_model_path`/`best_config`/`best_metric`/`candidates_evaluated`/`mode`/`metric_kind`）。**原样**作为本节点产出（`output_schema` 校验）。
 
 ## 输出
 
@@ -60,7 +60,8 @@ tools: [bash, read, write, edit, glob, grep]
 {
   "output_dir": "<绝对路径>",
   "report_path": "<绝对路径>/report.json",
-  "model_path": "<原始模型入口路径>",
+  "model_path": "<原始模型入口路径（provenance）>",
+  "baked_model_path": "<绝对路径>/best_quant_model.pt（bake 交付物；bake=false 时为空串）",
   "best_config": "<最佳候选标签，如 'quarot+gptq+q2n@w4a4-mx' 或 'smooth+gptq+q2n@w4a4-mx'>",
   "best_metric": 0.0123,
   "candidates_evaluated": 12,

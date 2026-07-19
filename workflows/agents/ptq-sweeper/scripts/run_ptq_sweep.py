@@ -501,7 +501,11 @@ def _push_lw_charts(render_chart, candidates: list[dict[str, Any]],
     sel_paths = {p for p, _ in paths}
     metric_by_label = {r["config_label"]: r["metric"] for r in ok_results}
 
-    # line：每条 path 一条 series，x=step_label, y=metric, hue=path
+    # line：每条 path 一条 series，x=step_idx（共享累积步序 0,1,2,...），y=metric, hue=path。
+    # 用 step_idx 而非 step_label：step_label 是路径私有的（S 有 "smooth+gptq"、R 有 "gptq"），
+    # 4 条路径只在 baseline "rtn" 共享 x 位 → 画成散段不是累积曲线。step_idx 让所有路径
+    # 左→右按「累积了几项技术」对齐（0=baseline，1=加第一项，…），才是 ablation 对比语义。
+    # step_label 仍留在 record 里供 tooltip 展示具体技术名。
     line_data: list[dict[str, Any]] = []
     for path_label, steps in paths:
         for step_idx, (step_label, pre, solver, post) in enumerate(steps):
@@ -522,7 +526,7 @@ def _push_lw_charts(render_chart, candidates: list[dict[str, Any]],
                 data=line_data,
                 label=CHART_LABEL,
                 title=f"Cumulative PTQ Path Ablation ({metric_kind})",
-                x="step_label",
+                x="step_idx",
                 y="metric",
                 hue="path",
             )
@@ -819,6 +823,8 @@ def main() -> int:
         "output_dir": str(output_dir),
         "report_path": str(report_path),
         "model_path": args.model_path,
+        # bake 交付物路径（bake=false 或 bake 失败时为空串）。明指交付物，原先只埋在 report.json。
+        "baked_model_path": report.get("baked_model_path") or "",
         "best_config": best["label"],
         "best_metric": best["metric"],
         "candidates_evaluated": len(report["candidates"]),
