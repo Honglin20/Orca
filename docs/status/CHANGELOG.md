@@ -7,7 +7,7 @@
 
 ## [2026-07-19] chart 加第 8 种 chart_type `heatmap`（行×列矩阵 cell 着色）
 
-跨栈加 heatmap（量化实验对比矩阵：行=recipe，列=bitwidth，cell=accuracy）。**后端**（`_limits`/`_validate`/`_downsample`/`_render`）：加 `"heatmap"` 到共享 allowlist（两端同源）+ heatmap 必填 `x`/`y`/`value` fail loud + table 同款 top-N 降采样 + `render_chart` 加 `value` 参数。**前端**：`HeatmapChartWidget`（CSS Grid + 浅钢蓝→PALETTE[0] 钢蓝线性色阶，无新依赖）+ `ChartWidget` switch + `types.ts` 加 `value?: string`。**CLI**：修 CRITICAL DRY 违规（原 `chart_canvas.py` 复制 allowlist 漏更 heatmap → 改 import `_limits`）+ heatmap 终端 DataTable 降级。code-reviewer 两轮（C1/M1/M2/m1-m6 全闭环）：null/空串 cell 不 coerce 0 / 单值矩阵不除零 / 大数组 reduce 防 spread 栈溢出 / 色阶方向钉死 / 三端同源 contract test。78 后端 + 39 前端测试全过。Commit: `8a99e95`. 详见 [release note](../releases/2026-07-19-chart-heatmap-type.md)。
+跨栈加 heatmap（量化实验对比矩阵：行=recipe，列=bitwidth，cell=accuracy）。**后端**（`_limits`/`_validate`/`_downsample`/`_render`）：加 `"heatmap"` 到共享 allowlist（两端同源）+ heatmap 必填 `x`/`y`/`value` fail loud + table 同款 top-N 降采样 + `render_chart` 加 `value` 参数。**前端**：`HeatmapChartWidget`（CSS Grid + 浅钢蓝→PALETTE[0] 钢蓝线性色阶，无新依赖）+ `ChartWidget` switch + `types.ts` 加 `value?: string`。**CLI**：修 CRITICAL DRY 违规（原 `chart_canvas.py` 复制 allowlist 漏更 heatmap → 改 import `_limits`）+ heatmap 终端 DataTable 降级。code-reviewer 两轮（C1/M1/M2/m1-m6 全闭环）：null/空串 cell 不 coerce 0 / 单值矩阵不除零 / 大数组 reduce 防 spread 栈溢出 / 色阶方向钉死 / 三端同源 contract test。78 后端 + 39 前端测试全过。Commit: `ec3d598`. 详见 [release note](../releases/2026-07-19-chart-heatmap-type.md)。
 
 ## [2026-07-19] 量化能力集成启动：W1 敏感层分析 + nas/create-workflow 配套修复
 
@@ -58,7 +58,7 @@ in-session 路径 detach 起 sidechain 守护，主动 tail CC sidechain jsonl /
 
 ## [2026-07-17] orca list 瘦身 + inputs_schema 移到启动命令
 
-砍 `orca list` 的 `inputs_schema`（选 wf 阶段 84% 字节噪音；`agent-struct-exploration` 单 wf 21 input 字段占该 wf 输出 90%）→ 只返 `{name, description}`；schema 改由启动命令 `orca <wf>` 不带 `--inputs` 按需带出（带则真启动），**零新命令**（命令数 7 / 保留字 / CI 禁 describe 全不变）。改动：`cli.py` `list_workflows` 砍字段 + `bootstrap` 加 `inputs is None` 纯只读分流（不建 run/tape/marker）+ `catalog._inputs_to_schema_list` 公开化为 `inputs_schema_list`；SKILL 三步重组（list 选 → `<wf>` 看 schema → `<wf> --inputs` 启动）；SPEC §2.1/§2.3/§4.2/决策5/§8/§11 同步；测试 list 断言重写（按名定位，**顺手解 `~/.orca/workflows` 隔离缺陷**）+ 新增 schema 返回测试 + ~15 处 bootstrap 补 `--inputs "{}"`（3 个 `_bootstrap` helper 一处覆盖）。list 字节 4010→636（降 84%）；268 + 185 测试全过；`tars validate` 3 wf 过；code-reviewer 0 🔴（🟡 SPEC stale + 🟢 优化全修）。Commit: `8a99e95`。详见 [release note](../releases/2026-07-17-orca-list-slim-schema-via-start-cmd.md)。
+砍 `orca list` 的 `inputs_schema`（选 wf 阶段 84% 字节噪音；`agent-struct-exploration` 单 wf 21 input 字段占该 wf 输出 90%）→ 只返 `{name, description}`；schema 改由启动命令 `orca <wf>` 不带 `--inputs` 按需带出（带则真启动），**零新命令**（命令数 7 / 保留字 / CI 禁 describe 全不变）。改动：`cli.py` `list_workflows` 砍字段 + `bootstrap` 加 `inputs is None` 纯只读分流（不建 run/tape/marker）+ `catalog._inputs_to_schema_list` 公开化为 `inputs_schema_list`；SKILL 三步重组（list 选 → `<wf>` 看 schema → `<wf> --inputs` 启动）；SPEC §2.1/§2.3/§4.2/决策5/§8/§11 同步；测试 list 断言重写（按名定位，**顺手解 `~/.orca/workflows` 隔离缺陷**）+ 新增 schema 返回测试 + ~15 处 bootstrap 补 `--inputs "{}"`（3 个 `_bootstrap` helper 一处覆盖）。list 字节 4010→636（降 84%）；268 + 185 测试全过；`tars validate` 3 wf 过；code-reviewer 0 🔴（🟡 SPEC stale + 🟢 优化全修）。Commit: `ec3d598`。详见 [release note](../releases/2026-07-17-orca-list-slim-schema-via-start-cmd.md)。
 
 ## [2026-07-17] B1 前端渲染 node_completed output（子 agent 输出推送 web）
 
