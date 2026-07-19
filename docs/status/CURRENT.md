@@ -1,80 +1,42 @@
 # CURRENT —— 当前任务快照
 
-> 新 session 开工前**必读**此文件 + `CLAUDE.md` + 对应阶段 SPEC。
-> 完成任务后清空本文件（移到 release note），**不积累**。
+> 新 session 必读：本文件 + `CLAUDE.md`。任务完成移 CHANGELOG 并清空本文件，**不积累**。
 
 ---
 
-## Side track（2026-07-19）：Web 界面视觉优化 P0–P4 —— ✅ 已完成
+## 状态（2026-07-19）
 
-纯前端美化（与 in-session 主线正交，不碰后端）。5 阶段全部落盘：P0 token 收口（`644cc4f`）/ P1 lucide 统一图标（`a8c6a3e`）/ P2 AgentsRail 增量增强（`a577367`）/ P3 TopBar+WS 指示+暗色开关（`13d0e1f`）/ P4 三栏 surface 统一（`617d991`）。318 test PASS（1 pre-existing flaky DAG lazy）。详见 [release note](../releases/2026-07-19-web-visual-refinement.md) + CHANGELOG。follow-up：DAG compact minimap（需先开 SPEC §5.7 amendment）。
+- **无进行中主线**。in-session 加固与性能 SPEC P1（8 项小合集：S2/S7/S9 + O2/O3/O4 + D3/F3）刚 commit（`9100481`…`d3893b9`，9 commits），详见 CHANGELOG。
+- 近期完成（详见 CHANGELOG）：in-session P1（7-19）/ O1a tape fold（7-19，P3）/ Web 视觉优化 P0-P4（7-19）/ Node Memory（7-18）/ B2 子 agent 推 web（7-17）。
+- **push 待用户手动**：本地领先 origin **87 commits**（WSL SSH 无 github key）。
 
----
+## 候选下一步（in-session SPEC P2-P5，待用户选定）
 
-## 当前状态（2026-07-17）：B2 全闭环——coder-agent 交付（`ed5cbeb`）+ test-agent 真机 E2E 暴露 3 P0（opencode DB 路径 / source_id 跨 child 撞 / 多字节 UTF-8 seek 崩）已修 + 5 回归测试（`99efcde`）。**两后端真机全链路 PASS**（CC 4435 + opencode 573 真事件 → daemon → tape → `tars serve` → react-dom testid），实时 ≤1.0s / 幂等 / 无串台 / grep 0 hit。goal「CC+opencode 子 agent 输出实时推前端」达成。**push 待用户手动**（WSL SSH 无 github key，本地领先 47 commits）。详见下「已完成」+ B2 release note。
+依据 SPEC [`2026-07-19-in-session-hardening-and-perf.md`](../specs/2026-07-19-in-session-hardening-and-perf.md) v4.1 §6 串行顺序（都碰 cli.py → 串行 P2→P4→P5；P6 独立可任意时点）：
 
-> **新 session 必读**：本块 + [`docs/specs/in-session-entry-and-simplification.md`](../specs/in-session-entry-and-simplification.md) **v5** + [TARS skill release note](../releases/2026-07-15-tars-skill-rebrand.md) + [nas-hp-search 反伪造 release note](../releases/2026-07-16-nas-hp-search-enforce-and-tars-skill-cleanup.md)。teams→tars 改名 + nas-hp-search runner/select 反伪造均已闭环（见下「已完成」+ CHANGELOG）。
+1. **P2（D4 + D5 marker 三态 + doctor orphan）**：合并 commit。改 `marker.py` + doctor 加 orphan_markers check（glob 扫 + tail 50 行判 tape 状态）。SPEC §2 D4/D5。
+2. **P4（D1 + D2 失败路径统一）**：D1 stop emit 失败留孤儿 → best-effort 落终态；D2 `apply_step_result` 异常裸崩 → `_safe_apply_or_fail` helper（DRY daemon+cli 两路）。SPEC §2 D1/D2。依赖 P2 先合并（read_marker 契约）。
+3. **P5（F1 resume：status resumable + SKILL resume 段 + 占位 spec）**：零新字段、不破约束（marker 仍 3 字段）。SPEC §4 F1。需先补 `docs/specs/agent-interrupt-design-draft.md` 占位（F1 落地）。
+4. **P6（S1 adapter contract-test 黄金集）**：独立，可任意时点。SPEC §5 S1。
 
-**问题（已复现）**：nudge（CC `orca-nudge.sh` Stop-hook / opencode `orca.ts` `session.idle`）在 session idle 时扫活跃 run 提醒推进，但**不区分归属 session** → 任一 session idle 都被任一活跃 run 触发。实测：本 CC session 被 nudge 提醒用户**另一个 session** 的 `agent-struct-exploration` run（串台）。
+**defer**（SPEC §8）：F2 retry / O1b wf 缓存 / O1c tape resume / O5 lock contention。
 
-**目标**：run-id ↔ 启动它的**宿主 session**（CC `session_id` / opencode `session.id`）绑定；nudge 只对**当前 session 自己的**活跃 run 提醒。
+## follow-up / debt（预存·暂缓，全量见 CHANGELOG）
 
-**待讨论（确认契约后开 SPEC）**：
-1. **归属记录**：`orca <wf> --inputs` 是宿主 bash 子进程、默认拿不到宿主 session id → 需宿主经 env 注入（`ORCA_HOST_SESSION_ID`：CC Stop-hook 输入的 session_id / opencode plugin `session.id`），CLI 写进 run marker + `workflow_started.data`。
-2. **nudge 过滤**：hook 取当前 session id，只 nudge `host_session == 当前` 的活跃 run。
-3. **跨壳一致**：CC（Stop-hook JSON 输入）vs opencode（plugin ctx）取 id 路径不同，分别接线 + 抽公共；⚠️ 现有 `ORCA_SESSION_ID` 是**每节点 executor uuid（非宿主 session）**，勿混。
-4. **边界**：marker 无 session 记录（旧 run / 手 CLI 起的 run）→ 兼容策略（默认 nudge 全部 or 忽略），不破单 session 现有用法。
+- `daemon.py:105` 裸 `sys.exit(128+signum)` 违 §3.3 grep 守门（baseline 即失败）
+- 测试 baseline 失败：e2e `python3` 硬编码 / mcp 缺 `uv` / `test_bg_run_ps_logs` rot
+- MCP 移除（用户暂缓）/ unified-backend 草稿推迟（含 teams 残留）/ catalog fallback 无测试 / `workflow_failed.data.kind` 字段 drift
+- **文档断链**：`docs/specs/agent-interrupt-design-draft.md` 被当 in-session 中断恢复 spec 引用，但**不存在** —— P5（F1）将补
+- DAG compact minimap（`web-shell-v2-spec.md` §5.7 amendment 待开）
 
----
+## 待办（用户侧真机，无代码）
 
-### 2026-07-17 已完成（最新）
+- `tars install --target cc` 真生成 skill + `tars list/validate` 真工作
+- §9#1 nga/cac 全套集成真机加载（Stop-hook / opencode.json plugin 是否真生效）
+- **P1 改了 SKILL.md（O4 busy + F3 inputs_validation_error）**：装了旧 TARS skill 副本的用户需重跑 `tars install` 同步（与 F1 同款约束）
 
-- **B2 子 agent 过程推送 web（双 adapter）**（`ed5cbeb`）：SPEC-B **v4** spec-reviewer conditional-pass → 实现：统一 IR `RawAgentEvent`（payload 1:1 = EventType.data，R1）+ 双 read-adapter（CC sidechain jsonl `~/.claude/projects/<enc-cwd>/<host_session>/subagents/` / opencode sqlite event 表 seq 游标，纠 v3 part 表）+ `SidechainIngestor`（1:1 透传 R2 + source_id 进 data.source_id 内存 set 查重 R3 + U1 emit 前增量扫 tape 派生 node §6）+ `sidechain_daemon.py`（detach spawn，复用 `chart_daemon._FlockSafeTape` + `_watch_terminal` 七组件零 DRY；crash callback 重建 ingestor；pidfile + /proc/cmdline liveness probe）。cli.py surgical 接线：bootstrap `_spawn_sidechain_daemon` + next `_ensure_sidechain_daemon`，与 chart 守护并列。**前端零改**（复用 B1 entries.ts:145-201）。硬约束闭环：接口同一性 grep 0 hit + 唯一真相源（agent_* 只经 bus.emit→_FlockSafeTape）+ 无串台（host_session scope）+ U1 per-run ≤0.5s trailing + fail loud（CCAdapterError / OpencodeAdapterError）。防御性 deviation 登记（CC source_id 扩 block_idx；opencode source_id 经 test-agent E2E 收敛为 `opc:{child}:{seq}`——seq 是 per-session（PK=(aggregate_id,seq)）须含 child，原 `opc:{seq}` 跨 child 撞已修）。code-reviewer 0 🔴 + 5 🟡 全修。79 新测试 + 352 events/in_session 回归全 PASS；e2e subprocess 测试覆盖实时 ≤2s（实测 ~0.5s）/ SIGKILL→respawn 幂等 / 终态自退。**前端构建未跑**（前端零改）；**opencode 真机 spike 未跑**（任务约束，契约实现 + 单测 fixture 覆盖；P2 spike part.id immutability 待补）。详见 [release note](../releases/2026-07-17-subagent-output-b2.md)。
-- **B2 test-agent 真机 E2E 收尾（3 P0 修复 + 5 回归）**（`99efcde`）：test-agent 真机（4435 真 CC + 573 真 opencode 事件 → 真 daemon → tape → `tars serve` → react-dom testid）暴露原代码 3 个**单测盲区 P0** 并修：① opencode DB 路径（真机 `opencode.db` 非代码假设的 `session.db`）② opencode `source_id` 跨 child 撞（seq per-session，改 `opc:{child}:{seq}`）③ text-mode `seek(字节)/read(字符)` 在多字节 tape 崩（落 continuation byte，`UnicodeDecodeError` 非 OSError 未兜住；波及共享 `chart_daemon`，B2 引入中文 agent_* 必崩）→ 三处改 binary-mode。补 5 回归测试。fix 后 64（B2+回归）+ 7（chart）+ 20（daemon）全 PASS；grep 0 hit；test-agent V1-V10 全链路真机 PASS（实时 ≤1.0s / 幂等 / 无串台）。**opencode 真机实证首次达成**（goal 验收闭环）。详见 [release note](../releases/2026-07-17-subagent-output-b2.md)「修」节。
+## 必读文件（开工前按需）
 
-### ~~下一步任务 2~~ ✅ 已完成（2026-07-17）：`orca list` 瘦身 + schema 移启动命令
-
-见 CHANGELOG / [release note](../releases/2026-07-17-orca-list-slim-schema-via-start-cmd.md)。**实际方案 ≠ 原登记的选项 1（describe）**，用户拍板第 4 条：零新命令——`orca list` 砍 schema 只返 `{name,description}`，inputs_schema 改由 `orca <wf>` 不带 `--inputs` 按需带出。命令数 7 / 保留字 / CI 禁 describe 全不变。
-
-### 2026-07-16 已完成（最新）
-
-- **nas-hp-search runner/select 反伪造 + output_schema 强制**（`<SHA>`）：修「假执行」bug（tape 证 runner/select/train_script_gen 没跑脚本、只复述上游散文；根因 prompt 诱骗 + 无强制）。`nas-train-runner/agent.md` 重写（执行置顶 + 删上游散文改用 `{{ inputs.output_dir }}` + 反伪造 + 末尾 python 从真 search.jsonl 计数输出自校验 JSON）；`nas-select/agent.md` 去诱骗；`nas-hp-search.yaml` runner 加 `output_schema`（`search_records≥1`，in-session `_parse_output` 确定性强制：散文/0记录→`node_failed`，不真跑过不了）。共享 agent 契约：须显式传 output_dir。验证脚手架（FAST/MOCK）剔除不进生产。E2E 两次通过（opencode+flash+脚手架绕 deepseek 慢）。`search_pipeline_gen` 在 deepseek 慢时卡死是独立问题（nas-search-pipeline 重校验设计），非本次范围。详见 [release note](../releases/2026-07-16-nas-hp-search-enforce-and-tars-skill-cleanup.md)。
-- **tars install skill 改名清理 + CLAUDE.md「TARS 是 SKILL」**（`<SHA>`）：CC 装的 skill 名陈旧为 `orca`（改名前残留）→重装正名 `tars`；`install_cmds._install_skill` 加改名清理（install 自动清陈旧 `skills/orca|teams/`，同 command/orca pattern）+ docstring 修；`CLAUDE.md` 加「TARS 是 SKILL 不是 CLI」注记。`orca doctor` skill_install PASS(cc,opencode)。
-- **nas-hp-search 轻量 NAS 流水线（slim）**（`a5dd2cc`）：新增 5 节点 workflow `nas-hp-search.yaml`（model_optimizer→train_script_gen→search_pipeline_gen→runner→select）——重 pipeline 的轻量版。新 slim folder-agent `elastic_optimizer`（只读 model+速查+模板，不展平/不读 optimize_rules）+ 新脚本化 `nas-select`（零 LLM，替代 evaluator）+ 复用 `supernet-train-script` checklist 加 `[MAJOR] 28`（train_supernet.py 内联 `_push_chart()`，无独立 viz 节点）。节点名 `model_optimizer`（agent→`elastic_optimizer`）对齐复用 agent body 硬契约。附 `.gitignore` 修（`references/`→`/references/`，解 folder-agent skill 资源被误伤）。`tars validate` 0 error；template 自测过；端到端 EXIT=0 SELECTED=3。**与 in-session 工作流正交**（NAS 侧独立交付）。详见 [release note](../releases/2026-07-16-nas-hp-search-slim.md)。
-- **in-session chart 守护 respawn**（`<本 commit>`）：补 [chart 接入](../releases/2026-07-16-in-session-chart.md) 的缺口 —— 守护只在 bootstrap spawn 一次，run 中途被杀（`pkill opencode` 误伤）后 `orca next` 不 respawn → 后续 `render_chart` 连不上 socket、chart 全丢（实测一次 run 0 chart）。`next` 路径补 `_chart_daemon_alive`（确定性 socket connect 探测，不靠进程名 grep）+ `_ensure_chart_daemon`（tape flock 临界区内 probe + 复用 `_spawn_chart_daemon` respawn）；`_wait_for_sock` 从 `exists()` 加强为 connect 探（修 respawn 路径 stale socket 假阳性）；调用点守卫与 env 写对齐（`result.node is not None`）；spawn 失败降级 warn。+7 测试（SIGKILL→respawn→chart 落 tape e2e + 负向守卫）；158 in-session 测试 0 新回归；code-reviewer impl+coverage 两轮 0 🔴（🟡 全修）。详见 [release note](../releases/2026-07-16-in-session-chart-respawn.md)。
-- **in-session 路径接入 chart（render_chart）**（`<本 commit>`）：补 in-session skill 驱动路径的 chart 缺口。web/tars-run 路径下 ClaudeExecutor spawn 时注入 `ORCA_*` env + 起 per-run ingestor（同进程）；in-session 路径下节点子代理由宿主 session 派发不经 executor → env 缺、ingestor 没人起 → `render_chart` raise。三件套：① bootstrap detach 起守护进程 bind socket + 跑 `chart_ingestor`（复用零改动；`_FlockSafeTape` 子类加跨进程 flock + 增量 disk max-seq 刷新）；② `runs/<run_id>/orca_env.sh` per-node env 文件（5 var：4 chart + `ORCA_AGENT_RESOURCES`，folder-agent 资源定位缺口同补）；③ 节点 prompt 指针加 `source <env>` 行。守护 `_watch_terminal` 监听终态事件自退 + 6h TTL 兜底；partial-line race 防护（`last_size` 仅推进到最后 `\n`）。24 新测试；710 in-session+chart+events+exec 测试 0 新回归；code-reviewer 两轮 0 🔴（R1 1 🔴 partial-line race + 5 🟡 全修；R2 0 🔴 0 🟡）。详见 [release note](../releases/2026-07-16-in-session-chart.md)。
-- **teams→tars 后端改名**（`<本 commit>`）：`pyproject` 入口 + `DEFAULT_BACKEND_CMD` + `validator` 保留字 + help/docstring + 用户面消息（orca epilog/doctor/skill 弃用警告）+ shipped 产物（cc_nudge.sh / create-workflow SKILL.md / templates / skills）+ `examples/mxint_analysis.yaml` 注释。`teams_app` deprecated 别名保留（向后兼容）；`orca` in-session 不动；`ORCA_BACKEND_CMD` env 名不变。重装后 `tars` 上 PATH / `teams` 退场。768 单测 0 回归；code-reviewer 两轮 0 🔴（全修）。详见 [release note](../releases/2026-07-16-teams-to-tars-rename.md)。
-- **TARS rebrand / step 6 / 批量 FU / step 5b / step 3b / step 5a / defects / step 4 / step 2b / step 1**：见 CHANGELOG 索引。
-
-### 待办（用户侧真机，无代码；§9 跨平台）
-
-- **tars 真机**：`tars install --target cc` → `.claude/skills/tars/SKILL.md` 真生成；`tars --help` / `tars list` / `tars validate` 真工作；`orca` 命令不受影响（`teams` 已退场）；`orca doctor` skill_install pass。**纯 CLI 禁 MCP**。
-- **§9#1 nga/cac 全套集成真机加载**：CAC/NGA 是否真读 `.cac`/`.nga`；cac Stop-hook / nga `opencode.json` plugin 是否真生效。
-
-### follow-up / debt（用户暂缓 / 预存，非阻塞）
-
-- ~~**既有测试隔离缺陷**~~ ✅ 已解（2026-07-17 orca list 瘦身）：原 `test_orca_list_returns_inputs_schema_json` 重写为 `test_orca_list_returns_name_and_description_only`，按名定位不再 `assert len==1`，`~/.orca/workflows` 全局 wf 不再干扰。
-- **既有 `orca/iface/in_session/daemon.py:105` 裸 `sys.exit(128 + signum)`**（违反 SPEC §3.3 grep 守门）：本任务 chart_daemon.py 已用 `loop.add_signal_handler + asyncio.Event` 避免同款违规，但老 daemon.py 仍裸 `sys.exit` 致 `test_no_bare_sys_exit_or_raise_system_exit_outside_allowed_paths` baseline 即失败。择机按 chart_daemon.py 同款 pattern 修。
-- **既有 `tests/e2e_phase13/test_e2e_1_basic_chart.py` + `test_e2e_2_multi_run_parallel.py` baseline 失败**：YAML 硬编码 `python3`，本机 `python3` 未装 orca → `render_chart` import 失败。CI 或装了 orca 的环境无此问题。择机把 e2e wf 的 `python3` 改为 `${ORCA_PYTHON:-python3}` 或测试 fixture 注入 `sys.executable`。
-- **既有 `tests/iface/mcp/test_*` baseline 失败**：环境缺 `uv` 二进制（FileNotFoundError）。非本任务引入。
-- **既有 `test_bg_run_ps_logs_wait_e2e` rot**：`orca run --background` 选项不存在（in-session CLI 无 run）。择机修或删。
-- **MCP 移除**：用户暂不移除（spec v5 §8 留 MCP 8 tool 出 scope）。
-- **`in-session-unified-backend-draft.md`**：推迟架构草稿，仍含 `teams` 残留（YAGNI，启用时再改）。
-- `_load_wf_for_run` 的 `catalog.find_workflow` fallback 无测试触达（step 3b 预存）。
-- tape `workflow_failed.data.kind` 是 `ErrorKind`/`error_kind` 两值集共享字段（跨阶段 debt，5b 登记）。
-
----
-
-## 跨阶段其他待立项（与 in-session 正交，不影响当前）
-
-- **三壳统一 ADR**（[`2026-07-08-shell-unification-adr.md`](../specs/2026-07-08-shell-unification-adr.md)）：单一读路径 + 渲染契约 + 视觉，待 spec-review。
-- **agent interrupt**（[`agent-interrupt-design-draft.md`](../specs/agent-interrupt-design-draft.md)）：mid-stream cancel+resume，待立项 SPEC。
-- **render layer v1.5**（codex 接入）/ **v2**（Web TS 镜像 + 流式 shiki + diff 虚拟化）。
-- **TUI fold DRY**：fold 字段抽 `orca/run/projections.py`。
-- **phase-16 批 2**：本地包分发 + workspace-instruction。
-
-## 必读文件（下一任务开工前按需）
-
+- [`docs/specs/2026-07-19-in-session-hardening-and-perf.md`](../specs/2026-07-19-in-session-hardening-and-perf.md) v4.1
 - [`docs/specs/in-session-entry-and-simplification.md`](../specs/in-session-entry-and-simplification.md) v5
-- [teams→tars release note](../releases/2026-07-16-teams-to-tars-rename.md)
 - [CHANGELOG](CHANGELOG.md)
