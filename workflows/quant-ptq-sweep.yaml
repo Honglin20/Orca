@@ -1,0 +1,89 @@
+name: quant-ptq-sweep
+description: "对 PyTorch 模型做粗粒度 PTQ 扫描：lightweight 模式沿 4 条累积路径线性叠加技术（Smooth/QuaRot/AutoRound/纯求解派，~12 候选，line 累积曲线）；full 模式按 SDK 合法表全枚举位宽×预变换×求解×后处理组合（~45-75 候选，heatmap 矩阵）。默认 teacher-student mse 评估 + bake 最佳量化模型 state_dict。底层调 ts_quant.quantize_model + build_teacher_student_eval_fn + SmoothQuant/QuaRot 插件。"
+entry: ptq_sweeper
+
+inputs:
+  model_path:
+    type: string
+    description: "[default] 用户 PyTorch 模型入口文件路径（可实例化 FP 模型，如 model.py）"
+    required: true
+  project_root:
+    type: string
+    description: "[default] 用户 PyTorch 项目根目录"
+    required: true
+  calib_data_ref:
+    type: string
+    description: "[advanced] 校准数据 loader 的 dotted-path（如 myproj.data:load_calib），返回 torch DataLoader；留空则 agent 用少量假随机数据。会被内化进生成的 adapter.py"
+    required: false
+    default: ""
+  eval_data_ref:
+    type: string
+    description: "[advanced] 评估数据 loader 的 dotted-path；留空则复用 calib_data。会被内化进生成的 adapter.py"
+    required: false
+    default: ""
+  eval_fn_ref:
+    type: string
+    description: "[advanced] 业务评估函数的 dotted-path（如 myproj.eval:build_eval_fn），返回 EvalFn（接 student_model 返回 dict[str,float]）；留空则用 ts_quant.eval.build_teacher_student_eval_fn 默认 teacher-student mse。会被内化进 adapter.py"
+    required: false
+    default: ""
+  mode:
+    type: string
+    description: "[default] 扫描模式：lightweight（4 累积路径 ablation）/ full（全枚举位宽×算法组合）"
+    required: false
+    default: "lightweight"
+  bit_widths:
+    type: string
+    description: "[default] 逗号分隔位宽预设。空则 lightweight 默认 'w4a4-mx'；full 默认 'w4a4-mx,w4a8-mx,w8a8-mx'。支持 w4a4-mx / w4a8-mx / w8a8-mx / w8a8-int / w4a16"
+    required: false
+    default: ""
+  recipes:
+    type: string
+    description: "[advanced] lightweight 模式：路径子集（S/Q/A/R 任意组合，空则全部 4 条）。full 模式：'all' 或指定 pre/solver 子集（如 'smooth,gptq'）"
+    required: false
+    default: ""
+  output_dir:
+    type: string
+    description: "[default] 产物输出目录。留空则默认 llm_artifacts/<model_name>/"
+    required: false
+    default: ""
+  bake:
+    type: string
+    description: "[default] 是否 bake 最佳量化模型 state_dict 到 best_quant_model.pt（'true'/'false'）"
+    required: false
+    default: "true"
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════
+  # 单 agent：生成 adapter.py（适配异构模型 + eval_fn/eval_loader）
+  # → 调 run_ptq_sweep.py（ts_quant.quantize_model 双 mode 全扫 +
+  # render_chart 可视化 + bake 最佳）→ 回显 JSON 摘要。
+  # ═══════════════════════════════════════════════════════════════
+  - name: ptq_sweeper
+    kind: agent
+    executor: claude
+    agent: ptq-sweeper
+    output_schema:
+      type: object
+      required: [output_dir, report_path, model_path, best_config, best_metric, candidates_evaluated, mode, metric_kind]
+      properties:
+        output_dir: {type: string}
+        report_path: {type: string}
+        model_path: {type: string}
+        best_config: {type: string}
+        best_metric: {type: number}
+        candidates_evaluated: {type: integer, minimum: 0}
+        mode: {type: string}
+        metric_kind: {type: string}
+      additionalProperties: false
+    routes:
+      - to: $end
+
+outputs:
+  output_dir: "{{ ptq_sweeper.output.output_dir }}"
+  report_path: "{{ ptq_sweeper.output.report_path }}"
+  model_path: "{{ ptq_sweeper.output.model_path }}"
+  best_config: "{{ ptq_sweeper.output.best_config }}"
+  best_metric: "{{ ptq_sweeper.output.best_metric }}"
+  candidates_evaluated: "{{ ptq_sweeper.output.candidates_evaluated }}"
+  mode: "{{ ptq_sweeper.output.mode }}"
+  metric_kind: "{{ ptq_sweeper.output.metric_kind }}"
