@@ -192,10 +192,16 @@ orca next --run-id <run_id> --output 'it'\''s a good film'
   读 `reason` 里的错误信息告诉用户；**不要自己悄悄重跑** `orca <wf>` 重新启动（会因
   「同 workflow 已有活跃 run」被拒）。真要重来就先 `orca stop` 再启动。
 - 失败信封除 `reason` 还带 `error_kind` 字段（如 `output_schema_mismatch` / `state_corrupt` /
-  `unsupported_node_kind` / `subagent_compliance`），可据它给用户更精确的失败归类（增强，
-  `reason` 仍可用）。子代理产出不合节点要求（如该产 JSON 却给了散文）→ Orca 会以
-  `output_schema_mismatch` fail loud。把这个错误反馈给用户，由用户决定调整。
+  `unsupported_node_kind` / `subagent_compliance` / `inputs_validation_error`），可据它给用户
+  更精确的失败归类（增强，`reason` 仍可用）。子代理产出不合节点要求（如该产 JSON 却给了散文）
+  → Orca 会以 `output_schema_mismatch` fail loud。把这个错误反馈给用户，由用户决定调整。
 - 子代理连续多次没产出 → Orca 自己会以 `subagent_compliance` 终止 run（兜底），不用你操心。
+- **`inputs_validation_error`**（bootstrap 期）：你抽的 inputs 不符 wf 声明的 type / 缺必填
+  （仅对**显式声明 type** 字段校验；未声明 type 的旧 wf loose-typed 字段零校验）。`reason`
+  里会指出哪个字段、期望什么 type、实际给了什么。**修 inputs 重试**，不要绕开校验瞎填值。
+  常见原因：
+  - 类型给错（如声明 `int` 给了字符串、声明 `boolean` 给了 `"true"` 字符串而非 `true`）
+  - 缺必填且该字段 description **没**带 `[default]`/`[advanced]` 标签（带标签的允许省略）。
 
 ## 常见错误（避免）
 

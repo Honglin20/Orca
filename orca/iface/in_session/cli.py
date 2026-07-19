@@ -61,6 +61,7 @@ from orca.run.lifecycle import (
     gen_run_id,
     now_monotonic,
 )
+from orca.run._errors import INPUTS_VALIDATION_ERROR
 from orca.run.step import InSessionError, advance_step
 
 logger = logging.getLogger(__name__)
@@ -576,6 +577,103 @@ def _setup_logging(level: str = "INFO") -> None:
 # ── wf 名 / 路径解析（``orca <wf>`` 语法糖，§2.1 / §4.2）─────────────────────────
 
 
+# SPEC §4 F3：手写 TYPE_MAP（isinstance），**不引入 jsonschema 依赖**（与 step.py
+# ``_parse_output`` 用 jsonschema 区分：output_schema 是节点产物校验、有真 schema；
+# inputs 是 bootstrap 期轻量校验、用 wf.inputs 的 type 字符串 + Python type 即可）。
+#
+# type 字符串（来自 ``InputDef.type``，YAML 里写）→ Python isinstance 检查函数。
+# 不在白名单的 type（如自定义 ``FileType`` / ``Url`` 等）→ pass-through（YAGNI：旧 wf
+# loose-typed 零回归，调用方不校验）。
+#
+# bool/int 隔离：Python ``isinstance(True, int) is True`` —— 若用户传 ``True`` 给
+# ``count: int``，应判错（不是静默把 True 当 1）。故 ``int``/``float`` 检查排除 bool。
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_number(value: Any) -> bool:
+    # int 也接受为 number / float（数学上 int ⊂ real；YAGNI 不强求 float 字面）。
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+_TYPE_MAP: dict[str, Any] = {
+    "string": lambda v: isinstance(v, str),
+    "str": lambda v: isinstance(v, str),
+    "int": _is_int,
+    "integer": _is_int,
+    "float": _is_number,
+    "number": _is_number,
+    "boolean": lambda v: isinstance(v, bool),
+    "bool": lambda v: isinstance(v, bool),
+    "list": lambda v: isinstance(v, list),
+    "array": lambda v: isinstance(v, list),
+    "dict": lambda v: isinstance(v, dict),
+    "object": lambda v: isinstance(v, dict),
+}
+
+
+def _validate_inputs(
+    inputs: dict[str, Any], schema: list[dict[str, Any]],
+) -> tuple[bool, str]:
+    """SPEC §4 F3：bootstrap ``--inputs`` 校验（手写 TYPE_MAP，无 jsonschema 依赖）。
+
+    Args:
+        inputs: 用户传入的 inputs dict（已 ``json.loads``）。
+        schema: ``catalog.inputs_schema_list(wf)`` 输出（``[{name, type, description}]``）。
+
+    Returns:
+        ``(ok, error_message)``。``ok=False`` 时 ``error_message`` 描述首错（含字段名 + 期望
+        type + 实际 type，定位给用户）。``ok=True`` 时 ``error_message`` 为空串。
+
+    校验规则（SPEC AC）：
+      - 未声明 ``type``（旧 wf loose-typed）→ **pass-through**（零回归）。
+      - ``type`` 不在 ``_TYPE_MAP`` 白名单（自定义 type）→ **pass-through**（YAGNI 不校验）。
+      - ``description`` 开头是 ``[default]`` / ``[advanced]`` 标签 → 缺省时不触发 required
+        （SKILL 教主 session 省略此类字段，让 wf 用 default）。
+      - 显式 ``type`` + 非标签字段 + 缺省 → ``inputs_validation_error``（fail loud + 字段名定位）。
+      - 显式 ``type`` + 给值但类型不对 → ``inputs_validation_error``（fail loud + 类型对比）。
+    """
+    for field_def in schema:
+        name = field_def.get("name")
+        ftype = field_def.get("type")
+        desc = field_def.get("description") or ""
+
+        # 未声明 type → pass-through（旧 wf loose-typed 零回归）。
+        if not ftype:
+            continue
+        # type 不在白名单 → pass-through（YAGNI：自定义 type 不校验）。
+        check_fn = _TYPE_MAP.get(ftype)
+        if check_fn is None:
+            continue
+
+        # description 开头 [default] / [advanced] 标签 → SKILL 教省略（不触发 required）。
+        is_optional_tag = (
+            desc.startswith("[default]") or desc.startswith("[advanced]")
+        )
+
+        # required check（仅对显式 type + 非标签字段）。
+        if name not in inputs:
+            if is_optional_tag:
+                continue  # 省略合法（wf 用内置 default）
+            return False, (
+                f"missing required input {name!r} (type={ftype!r})."
+                f" 若想省略走默认，在 description 开头加 [default] 或 [advanced] 标签。"
+            )
+
+        # type check（value 存在）。
+        value = inputs[name]
+        if not check_fn(value):
+            return False, (
+                f"input {name!r} expected type {ftype!r}, "
+                f"got {type(value).__name__} (value={value!r:.80})"
+            )
+
+    return True, ""
+
+
+
+
+
 def _resolve_wf_path(wf_arg: str) -> Path:
     """``orca <wf>`` 的位置参数 → yaml 路径（SPEC §2.1）。
 
@@ -802,6 +900,18 @@ def bootstrap(
         inp = json.loads(inputs)
     except json.JSONDecodeError as e:
         raise typer.BadParameter(f"--inputs 不是合法 JSON：{e}") from e
+
+    # SPEC §4 F3：bootstrap 期 inputs 校验（手写 TYPE_MAP，无 jsonschema 依赖；fail loud
+    # ``inputs_validation_error``）。在 bootstrap_lock 之前（不触碰任何 state；与 dupe check
+    # 同属「fail fast 在 gen run_id 前」层）。不符 → reply 错误信封 + exit 1。
+    inputs_ok, inputs_err = _validate_inputs(inp, catalog.inputs_schema_list(wf_obj))
+    if not inputs_ok:
+        typer.echo(json.dumps({
+            "done": True,
+            "error_kind": INPUTS_VALIDATION_ERROR,
+            "reason": f"failed: inputs_validation_error: {inputs_err}",
+        }, ensure_ascii=False))
+        raise typer.Exit(1)
 
     tape_path_probe = _default_tape_path("__probe__")
     rundir = tape_path_probe.parent

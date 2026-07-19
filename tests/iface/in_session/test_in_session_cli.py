@@ -131,6 +131,230 @@ def test_bootstrap_duplicate_same_wf_fails_loud(cwd_tmp, wf_path):
     assert len(tape_path.read_text(encoding="utf-8").strip().split("\n")) == 2
 
 
+# ── F3：bootstrap --inputs 校验（SPEC §4 F3）──────────────────────────────────
+
+
+# 带显式 type 的 inputs wf（F3 校验对象）。
+INPUTS_TYPED_WF_YAML = """\
+name: cli_test_inputs_typed
+description: 测 F3 inputs 校验。
+entry: a
+inputs:
+  topic:
+    type: string
+    description: "[ask] 业务主题"
+    required: true
+  count:
+    type: int
+    description: "[ask] 数量"
+    required: true
+  verbose:
+    type: boolean
+    description: "[default] 详细日志（可省略走默认）"
+    required: true
+  tags:
+    type: list
+    description: "[advanced] 标签列表（可省略走默认）"
+    required: true
+nodes:
+  - name: a
+    kind: agent
+    executor: opencode
+    model: deepseek/deepseek-v4-flash
+    prompt: "工作。"
+    routes:
+      - to: $end
+"""
+
+
+@pytest.fixture
+def typed_wf_path(tmp_path: Path) -> Path:
+    p = tmp_path / "typed_wf.yaml"
+    p.write_text(INPUTS_TYPED_WF_YAML, encoding="utf-8")
+    return p
+
+
+def test_bootstrap_inputs_wrong_type_fails_loud(cwd_tmp, typed_wf_path):
+    """SPEC §4 F3 AC：错类型 → inputs_validation_error + 字段定位。
+
+    给 count 传字符串 → fail loud；reply 含 error_kind=inputs_validation_error + 字段名。
+    """
+    runner = CliRunner()
+    bad_inputs = json.dumps({"topic": "x", "count": "not_an_int"})
+    result = runner.invoke(app, ["bootstrap", str(typed_wf_path), "--inputs", bad_inputs])
+    assert result.exit_code == 1, result.output
+    reply = json.loads(result.output.splitlines()[-1])
+    assert reply["done"] is True
+    assert reply["error_kind"] == "inputs_validation_error"
+    # 字段定位：错误信息含 'count' + 期望 'int' + 实际 'str'
+    assert "count" in reply["reason"]
+    assert "int" in reply["reason"]
+    assert "str" in reply["reason"]
+
+
+def test_bootstrap_inputs_missing_required_fails_loud(cwd_tmp, typed_wf_path):
+    """SPEC §4 F3 AC：缺必填（显式 type）→ inputs_validation_error + 字段定位。
+
+    缺 topic（[ask] 必填，无 [default]/[advanced] 标签）→ fail loud。
+    """
+    runner = CliRunner()
+    bad_inputs = json.dumps({"count": 5})  # 缺 topic
+    result = runner.invoke(app, ["bootstrap", str(typed_wf_path), "--inputs", bad_inputs])
+    assert result.exit_code == 1, result.output
+    reply = json.loads(result.output.splitlines()[-1])
+    assert reply["error_kind"] == "inputs_validation_error"
+    assert "topic" in reply["reason"]
+    assert "missing required" in reply["reason"]
+
+
+def test_bootstrap_inputs_default_tag_omitted_ok(cwd_tmp, typed_wf_path):
+    """SPEC §4 F3 AC：[default] 标签字段省略不触发 required。
+
+    verbose / tags / extras 都省略；topic+count 给值 → ok 启动。
+    """
+    runner = CliRunner()
+    ok_inputs = json.dumps({"topic": "x", "count": 5})
+    result = runner.invoke(app, ["bootstrap", str(typed_wf_path), "--inputs", ok_inputs])
+    assert result.exit_code == 0, result.output
+    reply = json.loads(result.output.splitlines()[-1])
+    assert reply["done"] is False  # 启动成功
+    assert reply["node"] == "a"
+
+
+def test_bootstrap_inputs_advanced_tag_omitted_ok(cwd_tmp, typed_wf_path):
+    """SPEC §4 F3 AC：[advanced] 标签字段省略不触发 required。
+
+    只给 topic + count + verbose（[default] ok），省 tags（[advanced]）+ extras（无 type）→ ok。
+    """
+    runner = CliRunner()
+    ok_inputs = json.dumps({"topic": "x", "count": 5, "verbose": False})
+    result = runner.invoke(app, ["bootstrap", str(typed_wf_path), "--inputs", ok_inputs])
+    assert result.exit_code == 0, result.output
+
+
+def test_bootstrap_inputs_no_inputs_declared_passthrough(cwd_tmp, tmp_path):
+    """SPEC §4 F3 AC：旧 wf 无 inputs 声明（空 dict）→ 零校验零回归。
+
+    ``InputDef.type`` 在 schema 层是必填，故「无 type 字段」只能在「整个 inputs dict 为空」
+    时出现（schema 层 impossibility 防御）。本测试守空 inputs 的 pass-through。
+    """
+    wf_yaml = """\
+name: cli_test_no_inputs
+description: 测 F3 无 inputs 的 pass-through。
+entry: a
+nodes:
+  - name: a
+    kind: agent
+    executor: opencode
+    model: deepseek/deepseek-v4-flash
+    prompt: "工作。"
+    routes:
+      - to: $end
+"""
+    p = tmp_path / "no_inputs_wf.yaml"
+    p.write_text(wf_yaml, encoding="utf-8")
+
+    runner = CliRunner()
+    # 空 inputs 启动 → 校验 loop 不执行 → ok。
+    result = runner.invoke(app, ["bootstrap", str(p), "--inputs", "{}"])
+    assert result.exit_code == 0, result.output
+    reply = json.loads(result.output.splitlines()[-1])
+    assert reply["done"] is False
+
+
+def test_bootstrap_inputs_bool_not_accepted_as_int(cwd_tmp, tmp_path):
+    """SPEC §4 F3 实现细节：bool 不被接受为 int（Python ``isinstance(True, int) is True`` 的反陷阱）。
+
+    count: int + 给 True → 应判错（不让 True 假装 1 通过）。
+    """
+    wf_yaml = """\
+name: cli_test_int_strict
+description: 测 F3 int vs bool 隔离。
+entry: a
+inputs:
+  count:
+    type: int
+    description: "[ask] 数量"
+    required: true
+nodes:
+  - name: a
+    kind: agent
+    executor: opencode
+    model: deepseek/deepseek-v4-flash
+    prompt: "工作。"
+    routes:
+      - to: $end
+"""
+    p = tmp_path / "int_wf.yaml"
+    p.write_text(wf_yaml, encoding="utf-8")
+
+    runner = CliRunner()
+    bad_inputs = json.dumps({"count": True})  # bool 不是 int
+    result = runner.invoke(app, ["bootstrap", str(p), "--inputs", bad_inputs])
+    assert result.exit_code == 1, result.output
+    reply = json.loads(result.output.splitlines()[-1])
+    assert reply["error_kind"] == "inputs_validation_error"
+    assert "count" in reply["reason"]
+
+
+def test_bootstrap_inputs_unknown_type_passthrough(cwd_tmp, tmp_path):
+    """SPEC §4 F3 AC：type 不在白名单 → pass-through（YAGNI 自定义 type 不校验）。"""
+    wf_yaml = """\
+name: cli_test_custom_type
+description: 测 F3 自定义 type pass-through。
+entry: a
+inputs:
+  url:
+    type: url  # 不在 TYPE_MAP 白名单
+    description: "[ask] 一个 URL"
+    required: true
+nodes:
+  - name: a
+    kind: agent
+    executor: opencode
+    model: deepseek/deepseek-v4-flash
+    prompt: "工作。"
+    routes:
+      - to: $end
+"""
+    p = tmp_path / "custom_type_wf.yaml"
+    p.write_text(wf_yaml, encoding="utf-8")
+
+    runner = CliRunner()
+    ok_inputs = json.dumps({"url": "https://example.com"})  # url type 不校验
+    result = runner.invoke(app, ["bootstrap", str(p), "--inputs", ok_inputs])
+    assert result.exit_code == 0, result.output
+
+
+def test_bootstrap_inputs_validation_error_envelope_contract(cwd_tmp, typed_wf_path):
+    """SPEC §1 铁律 5.1：inputs_validation_error 信封字段契约。
+
+    done=True + error_kind=inputs_validation_error + reason 含 'failed:' 前缀（与既有
+    output_schema_mismatch 等错误信封一致；SPEC §2.3 信封契约）。
+    """
+    runner = CliRunner()
+    bad_inputs = json.dumps({"count": "wrong"})  # 缺 topic + count 错类型
+    result = runner.invoke(app, ["bootstrap", str(typed_wf_path), "--inputs", bad_inputs])
+    assert result.exit_code == 1, result.output
+    reply = json.loads(result.output.splitlines()[-1])
+    # 字段集守门（防漂移）
+    assert set(reply.keys()) >= {"done", "error_kind", "reason"}
+    assert reply["done"] is True
+    assert reply["error_kind"] == "inputs_validation_error"
+    assert reply["reason"].startswith("failed:")
+    # 首错定位（只报第一个错；topic 缺在前）
+    assert "topic" in reply["reason"]
+
+
+def test_inputs_validation_error_registered_in_errors_module():
+    """SPEC §1 铁律 5.1：新 error_kind 必须登记到共享 ``orca/run/_errors.py`` + 单一真相源。"""
+    from orca.run._errors import INPUTS_VALIDATION_ERROR
+    assert INPUTS_VALIDATION_ERROR == "inputs_validation_error"
+    # cli.py 也 import 同一常量（不字面重写）。
+    from orca.iface.in_session.cli import INPUTS_VALIDATION_ERROR as cli_const
+    assert cli_const is INPUTS_VALIDATION_ERROR
+
+
 # ── next 单次 write 原子化（B1）────────────────────────────────────────────────
 
 
