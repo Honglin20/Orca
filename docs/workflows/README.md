@@ -1,6 +1,6 @@
 # Orca Workflows 使用与原理文档
 
-每篇由浅入深：**in-session 如何激活 → 输入输出 → 算法原理 → 结果示例 + 计划截图**。
+每篇按统一学术结构：**实现概览（架构流程图 + 输入输出 + 激活）→ 定义 → 背景 → 方法（含公式推导）→ 实验 → 局限 → 附录库接口手册**。核心概念（弹性超网 / Pareto 前沿 / 零空间 Q2N / CAGE 校正 / champion ratchet）在「定义」与「方法」两节形式化给出，底层库（`ts_quant` / `nas_agent`）的用户自调接口集中于附录。
 
 > 怎么「激活」一个 workflow？本质是**命中 TARS skill + workflow 的 description**——跟主 session 说「用 TARS 做 X」，TARS 用 `orca list` 拿全部 workflow 的 description 做语义匹配。安装与通用用法见 [in-session 使用指南](../in-session-usage.md)。
 
@@ -16,7 +16,7 @@
 
 | workflow | 文档 | 一句话 | 对比轴 |
 |---|---|---|---|
-| `quant-sensitivity`（W1） | [doc](quant-sensitivity.md) | 敏感层分析：哪些层怕量化 | 4 种分析方法 |
+| `quant-sensitivity`（W1） | [doc](quant-sensitivity.md) | 低精度敏感层分析（逐层打分排序） | mse / layer_stats / binary / mix |
 | `quant-ptq-sweep`（W2） | [doc](quant-ptq-sweep.md) | 训练后量化算法扫描 | SmoothQuant/QuaRot/GPTQ/AutoRound/Q2N(零空间) |
 | `quant-bit-curve`（W3） | [doc](quant-bit-curve.md) | 混合精度 Pareto 位宽-精度曲线 | INT8/W4A8/INT4/MX4/MX8 格式 |
 | `quant-qat`（W4） | [doc](quant-qat.md) | 量化感知训练 + CAGE 后校正 | rtn / duquantpp 训练态方案 |
