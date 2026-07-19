@@ -8,7 +8,7 @@
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `name` | str | 是 | 全局唯一标识 |
-| `description` | str | 否 | 人类可读描述 |
+| `description` | str | 否 | 一两句话说清功能与目的；是 `orca list` 里 tars 选 wf 的语义依据，须与现有 workflow 有明确区别（无区别则问用户区分） |
 | `entry` | str | 是 | 入口**节点**名（不能是 parallel 组名） |
 | `inputs` | dict[str, InputDef] | 否 | 声明 workflow 输入 |
 | `nodes` | list[Node] | 是 | 执行阶段节点（按 `kind` 判别联合） |
