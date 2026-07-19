@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -99,7 +101,11 @@ def _install_fake_entry_skill(
 
 
 def test_doctor_json_structure(doctor_iso, monkeypatch):
-    """doctor 输出 JSON {ok, diag, report, checks} + 5 项 checks（SPEC §P4 加 sidechain_backend）。"""
+    """doctor 输出 JSON {ok, diag, report, checks} + 6 项 checks。
+
+    顺序：skill_install / cli_imports_ok（硬）在前，diag_switch / advance_hook /
+    sidechain_backend（SPEC §P4）/ sidechain_daemon（SPEC §5 D3）（可选）在后。
+    """
     monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
     reply = _run_doctor()
     assert set(reply.keys()) >= {"ok", "diag", "report", "checks"}
@@ -107,17 +113,18 @@ def test_doctor_json_structure(doctor_iso, monkeypatch):
     assert isinstance(reply["diag"], bool)
     assert isinstance(reply["report"], str) and len(reply["report"]) > 0
     assert isinstance(reply["checks"], list)
-    assert len(reply["checks"]) == 5
+    assert len(reply["checks"]) == 6
     names = [c["name"] for c in reply["checks"]]
     # FU-2：entry_hook 已删（transform step 4 整删后 PROBE_ENTRY 心跳永不再写，dead）。
-    # 顺序：skill_install / cli_imports_ok（硬）在前，diag_switch / advance_hook / sidechain_backend
-    # （可选）在后。SPEC §P4 加 sidechain_backend（hard=False）：B2 子 agent 过程路径诊断。
+    # SPEC §P4：sidechain_backend（hard=False，B2 路径诊断）。
+    # SPEC §5 D3：sidechain_daemon（hard=False，per-active-run liveness 探针；覆盖死亡，
+    # 不覆盖持续 iterate 失败 §8#4）。
     assert names == ["skill_install", "cli_imports_ok", "diag_switch",
-                     "advance_hook", "sidechain_backend"]
+                     "advance_hook", "sidechain_backend", "sidechain_daemon"]
     # 每条 check 带 hard 字段（review 🟡#5：替代硬编码 name tuple 防 typo 静默丢失硬检查）
     hard_expected = {"skill_install": True, "cli_imports_ok": True,
                      "diag_switch": False, "advance_hook": False,
-                     "sidechain_backend": False}
+                     "sidechain_backend": False, "sidechain_daemon": False}
     for c in reply["checks"]:
         assert set(c.keys()) == {"name", "status", "detail", "hard"}, (
             f"check {c['name']} 字段漂移：{set(c.keys())}"
@@ -387,6 +394,124 @@ def test_doctor_sidechain_backend_hard_false_does_not_affect_ok(doctor_iso, monk
     assert check["status"] == "fail"
     # 但 skill + cli 硬检查 pass → ok=True。
     assert reply["ok"] is True
+
+
+# ── SPEC §5 D3：sidechain_daemon liveness check（per-active-run 探针）─────────
+
+
+def _sidechain_daemon_check(reply: dict) -> dict:
+    """从 doctor reply 抽 sidechain_daemon check。"""
+    matches = [c for c in reply["checks"] if c["name"] == "sidechain_daemon"]
+    assert len(matches) == 1, f"应有恰好 1 个 sidechain_daemon check，得 {len(matches)}"
+    return matches[0]
+
+
+def test_doctor_sidechain_daemon_no_env_reports_unknown(doctor_iso, monkeypatch):
+    """无 host_session env → sidechain_daemon status=unknown（守护本就不该起）。"""
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    _install_fake_entry_skill(doctor_iso, "cc")
+    reply = _run_doctor()
+    check = _sidechain_daemon_check(reply)
+    assert check["hard"] is False
+    assert check["status"] == "unknown"
+    assert "未检测到 host_session env" in check["detail"]
+    # hard=False → 不影响 ok。
+    assert reply["ok"] is True
+
+
+def test_doctor_sidechain_daemon_env_but_no_active_run_unknown(doctor_iso, monkeypatch):
+    """有 CC env 但无活跃 run marker → unknown（守护仅在活跃 run 中起作用）。"""
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "host-sid-noactive")
+    _install_fake_entry_skill(doctor_iso, "cc")
+    # 无 marker（runs/ 可能不存在）
+    reply = _run_doctor()
+    check = _sidechain_daemon_check(reply)
+    assert check["hard"] is False
+    assert check["status"] == "unknown"
+    assert "无活跃 run marker" in check["detail"] or "无 runs/" in check["detail"]
+
+
+def test_doctor_sidechain_daemon_dead_for_active_run(doctor_iso, monkeypatch):
+    """有 CC env + 有活跃 marker + 无对应守护 pidfile → status=fail（degraded，hard=False）。
+
+    SPEC §5 D3 AC：守护死 → degraded + hint。覆盖「守护死亡」场景。
+    """
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "host-sid-daemon-dead")
+    _install_fake_entry_skill(doctor_iso, "cc")
+
+    # 造一个活跃 marker 但不 spawn 守护（模拟守护被杀 / 残留 marker）。
+    runs = doctor_iso / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    (runs / "orca-fake-run-zzz.json").write_text(
+        json.dumps({"run_id": "fake-run-zzz", "model": "any", "no_output_count": 0}),
+        encoding="utf-8",
+    )
+
+    reply = _run_doctor()
+    check = _sidechain_daemon_check(reply)
+    assert check["hard"] is False
+    assert check["status"] == "fail"
+    detail = check["detail"]
+    assert "fake-run-zzz=dead" in detail
+    # SPEC §5 D3 AC：degraded + hint（next 自动 respawn）。
+    assert "respawn" in detail or "next" in detail
+    # SPEC §5 D3 AC：明示不覆盖持续失败（§8#4）。
+    assert "§8#4" in detail or "iterate" in detail
+    # hard=False → 不影响 ok（skill+cli 仍主导）。
+    assert reply["ok"] is True
+
+
+def test_doctor_sidechain_daemon_alive_for_active_run(doctor_iso, monkeypatch):
+    """有 CC env + 活跃 marker + 守护真活（写 pidfile + 起一个轻量进程）→ status=pass。
+
+    SPEC §5 D3 AC：守护存活 → pass。
+    """
+    import os
+    import tempfile
+
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "host-sid-daemon-alive")
+    _install_fake_entry_skill(doctor_iso, "cc")
+
+    run_id = "fake-alive-run-xyz"
+    runs = doctor_iso / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    (runs / f"orca-{run_id}.json").write_text(
+        json.dumps({"run_id": run_id, "model": "any", "no_output_count": 0}),
+        encoding="utf-8",
+    )
+
+    # 起 sleeping 子进程 + 写 pidfile 指向它 + cmdline 伪装成 sidechain_daemon。
+    # ``pidfile_daemon_alive`` 读 /proc/<pid>/cmdline 校验含模块名 + --run-id + run_id；
+    # 这里用一个长存活子进程跑 ``sleep``，再 monkeypatch cmdline 校验（避免真起 daemon）。
+    proc = subprocess.Popen(
+        [sys.executable, "-c",
+         "import time; time.sleep(300)"],
+        # 伪装 argv：让 cmdline 解析出 module_name + --run-id + run_id。
+        # 直接 monkeypatch _sidechain_daemon_alive 更简洁（不依赖 /proc 真值）。
+    )
+    try:
+        # 直接 monkeypatch liveness 探为 True（守护存活语义），守 doctor 的 pass 分支。
+        from orca.iface.in_session import sidechain_daemon as sd_mod
+        monkeypatch.setattr(sd_mod, "_sidechain_daemon_alive", lambda rid: True)
+
+        reply = _run_doctor()
+        check = _sidechain_daemon_check(reply)
+        assert check["hard"] is False
+        assert check["status"] == "pass"
+        assert f"{run_id}=alive" in check["detail"]
+        # SPEC §5 D3 AC：明示不覆盖持续 iterate 失败（§8#4）。
+        assert "§8#4" in check["detail"] or "iterate" in check["detail"]
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
 
 
 # ── v5 §4.4 / step 2b(7)：orca.ts idle nudge（提醒，绝不推进）───────────────────

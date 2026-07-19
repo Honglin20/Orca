@@ -1554,6 +1554,84 @@ def _check_sidechain_backend() -> dict[str, Any]:
     }
 
 
+def _check_sidechain_daemon_liveness(rundir: Path) -> dict[str, Any]:
+    """SPEC §5 D3：构造 ``sidechain_daemon`` liveness check（hard=False）。
+
+    对每个活跃 run（marker 存在）的 sidechain 守护调 ``_sidechain_daemon_alive`` 探针。
+    **覆盖守护死亡**（pidfile 残 / pid 死 / cmdline 不匹配 → next 路径会 respawn，此处仅观测）；
+    **不覆盖守护存活但持续 iterate 失败**（§8#4：YAGNI 不做 socket 查询，靠 daemon log + 用户排查）。
+
+    状态语义：
+      - 无 host_session env / 无 rundir / 无活跃 marker → ``unknown``（守护本就不该起，
+        与 ``_check_sidechain_backend`` 的 unknown 等价）。
+      - 任意活跃 run 的守护死 → ``fail``（degraded；hard=False 不计 ok）。
+      - 全部存活 → ``pass``。
+
+    与 ``_check_sidechain_backend`` 的关系：后者查 **静态基础设施**（DB/dotdir 存在 +
+    host_session env 设）；本 check 查 **运行时守护存活**。前者 unknown（无 env）时
+    后者也 unknown（语义一致）；前者 pass 但后者 fail = 基础设施 OK 但 run 中守护被杀
+    （respawn 由 next 兜底，观测用）。
+    """
+    # lazy import：sidechain_daemon 反向 import cli._flock_path；避免顶层循环。
+    from orca.iface.in_session.sidechain_daemon import _sidechain_daemon_alive
+
+    # 无 host_session env → sidechain 守护本就不该起（与 _check_sidechain_backend 的 unknown 等价）。
+    if not _host_session_from_env():
+        return {
+            "name": "sidechain_daemon", "hard": False, "status": "unknown",
+            "detail": (
+                "未检测到 host_session env（CLAUDE_CODE_SESSION_ID / ORCA_HOST_SESSION_ID）；"
+                "sidechain 守护仅在 in-session run 中起作用，无 env 时不会启动。"
+                "（与 sidechain_backend check 的 unknown 同因。）"
+            ),
+        }
+
+    if not rundir.exists():
+        return {
+            "name": "sidechain_daemon", "hard": False, "status": "unknown",
+            "detail": "无 runs/ 目录（无活跃 run，sidechain 守护未起）。",
+        }
+
+    actives: list[str] = []
+    for mp in sorted(rundir.glob("orca-*.json")):
+        marker = read_marker(mp)
+        if marker is not None:
+            actives.append(marker.run_id)
+
+    if not actives:
+        return {
+            "name": "sidechain_daemon", "hard": False, "status": "unknown",
+            "detail": "无活跃 run marker（sidechain 守护仅在活跃 run 中起作用）。",
+        }
+
+    per_run: list[str] = []
+    any_dead = False
+    for rid in actives:
+        alive = _sidechain_daemon_alive(rid)
+        per_run.append(f"{rid}={'alive' if alive else 'dead'}")
+        if not alive:
+            any_dead = True
+
+    if any_dead:
+        return {
+            "name": "sidechain_daemon", "hard": False, "status": "fail",
+            "detail": (
+                f"活跃 run 守护状态：{', '.join(per_run)}。"
+                "dead 守护的 run 在下一次 `orca next` 时会自动 respawn（不阻塞推进）；"
+                "若需立即拉起，调一次 next 即可。"
+                "**本探针只覆盖守护死亡，不覆盖守护存活但持续 iterate 失败**（§8#4，"
+                "靠 daemon log + 用户排查）。"
+            ),
+        }
+    return {
+        "name": "sidechain_daemon", "hard": False, "status": "pass",
+        "detail": (
+            f"活跃 run 守护状态：{', '.join(per_run)}（全部存活）。"
+            "**本探针不覆盖守护存活但持续 iterate 失败**（§8#4）。"
+        ),
+    }
+
+
 @app.command()
 def doctor(
     log_level: str = typer.Option("INFO", "--log-level", help="INFO/DEBUG/WARN/ERROR"),
@@ -1569,6 +1647,10 @@ def doctor(
     SPEC §P4 新增 ``sidechain_backend`` 可选 check（hard=False）：检测家族（env+config+探测）
     + 输出 resolved root/DB + source + 存在性 + host_session 可用性 + 修复建议（cac/nga 适配
     诊断；用户从 doctor 获取 resolved 路径）。
+
+    SPEC §5 D3 新增 ``sidechain_daemon`` 可选 check（hard=False）：对每个活跃 run 调
+    ``_sidechain_daemon_alive`` 探针。**覆盖守护死亡**（pidfile 残 / pid 死 / cmdline 不匹配）；
+    **不覆盖守护存活但持续 iterate 失败**（§8#4：YAGNI 不做 socket 查询，靠 daemon log）。
     """
     _setup_logging(log_level)
 
@@ -1665,6 +1747,11 @@ def doctor(
     # hard=False：doctor 不因此 fail；输出 resolved 路径 + source + 存在性 + hint 供用户排查
     # cac/nga 适配（SPEC §P4 验收「从 doctor 获取 resolved 路径」）。
     checks.append(_check_sidechain_backend())
+
+    # ⑥ sidechain_daemon（可选诊断，SPEC §5 D3）：守护**存活探针**（per-active-run）。
+    # hard=False：守护死亡不阻塞 doctor（next 路径自动 respawn）；覆盖死亡，**不覆盖持续
+    # iterate 失败**（§8#4）。与 sidechain_backend 互补：前者查静态基础设施，本 check 查运行时存活。
+    checks.append(_check_sidechain_daemon_liveness(rundir))
 
     # ok = 仅 ``hard=True`` 的检查无 fail。可选检查（diag/hook/sidechain）不计数。
     ok = all(c["status"] != "fail" for c in checks if c.get("hard"))
