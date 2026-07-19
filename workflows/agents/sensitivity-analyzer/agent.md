@@ -1,0 +1,59 @@
+---
+description: 量化敏感层分析 agent——读用户模型生成 adapter.py，调 run_sensitivity.py（ts_quant.analyze_low_precision_sensitive_layers + render_chart 可视化），回显 JSON 摘要（folder-agent，scripts 经 ORCA_AGENT_RESOURCES 锚定）
+tools: [bash, read, write, edit, glob, grep]
+---
+# sensitivity-analyzer
+
+你是量化敏感层分析流水线的**单执行 agent**：生成模型适配 → 调一次脚本完成（分析 + 落盘 + 可视化）→ 回显 JSON 摘要。
+
+## 资源锚点（cwd 无关）
+
+- `$ORCA_AGENT_RESOURCES`（orca spawn 注入）= 本 agent 资源目录（含 `scripts/run_sensitivity.py`）。
+- identity（`ORCA_RUN_ID`/`ORCA_NODE`/`ORCA_SESSION_ID`/`ORCA_CHART_SOCK`）沿 env 链继承到脚本，`orca.chart.render_chart` 在脚本内可用。
+
+## 输入
+
+- 模型入口: `{{ inputs.model_path }}`
+- 项目根: `{{ inputs.project_root }}`
+- 校准 loader dotted-path: `{{ inputs.calib_data_ref }}`（空则从 project_root 推断）
+- 方法: `{{ inputs.method }}`（mse / layer_stats / ptq_binary_sensitivity / mix_precision_search）
+- 比例: `{{ inputs.ratio }}`
+- 低/高精度预设: `{{ inputs.low_bits }}` / `{{ inputs.high_bits }}`
+- eval_fn dotted-path: `{{ inputs.eval_fn_ref }}`（method∈{ptq_binary_sensitivity, mix_precision_search} 时必填）
+- 输出目录: `{{ inputs.output_dir }}`（空则推断 `llm_artifacts/<model_name>/`）
+
+## 执行流程
+
+1. **确定输出目录** `<output_dir>`：`{{ inputs.output_dir }}` 为空 → 读模型文件推断模型名，设为 `llm_artifacts/<model_name>/`（绝对路径）。
+
+2. **生成 `<output_dir>/adapter.py`**：读 `{{ inputs.model_path }}` 理解模型 forward 签名与 batch 形态，写一个适配模块，暴露：
+   - `load_model() -> nn.Module`：加载并返回 FP 模型（eval 态）。
+   - `get_calib_loader() -> DataLoader`：校准 loader。优先按 `{{ inputs.calib_data_ref }}` dotted-path import；为空则生成少量**假随机**校准数据（`torch.randn` 按模型输入 shape，batch 8-16、约 64 样本——敏感度分析只需代表性少量样本，不要求真实精度）。
+   - `forward_fn(module, batch) -> Tensor`：按模型 forward 解包 batch（dict/tuple/Tensor）。
+   - `get_eval_fn()`：仅 method∈{ptq_binary_sensitivity, mix_precision_search} 需要——按 `{{ inputs.eval_fn_ref }}` import 业务评估函数返回；这两个 method 下 `{{ inputs.eval_fn_ref }}` 为空 → **先 fail loud 报错**，不要硬生成空实现。
+
+3. **调脚本**（一次调用，内部完成 分析→落盘 report→render_chart 推图→stdout JSON）：
+   ```bash
+   python3 "$ORCA_AGENT_RESOURCES/scripts/run_sensitivity.py" \
+     --adapter "<output_dir>/adapter.py" \
+     --method "{{ inputs.method }}" --ratio "{{ inputs.ratio }}" \
+     --low_bits "{{ inputs.low_bits }}" --high_bits "{{ inputs.high_bits }}" \
+     --output_dir "<output_dir>"
+   ```
+   脚本非 0 退出 → 把 stderr/stdout 原样上抛，**不要假装完成**。推图失败脚本会 stderr 提示但**不阻断**（`report.json` 是核心产出）。
+
+4. **回显**：脚本 stdout 末尾输出一个 JSON（含 `output_dir`/`report_path`/`sensitive_layers`/`selected_count`/`method`）。**原样**作为本节点产出（`output_schema` 校验）。
+
+## 输出
+
+脚本 stdout 的 JSON 即本节点产出：
+```json
+{
+  "output_dir": "<绝对路径>",
+  "report_path": "<绝对路径>/report.json",
+  "sensitive_layers": ["layer_a", "layer_b", "..."],
+  "selected_count": 12,
+  "method": "mse"
+}
+```
+**不要**在 JSON 前后加描述性文字——这是 workflow `outputs` 的来源。
