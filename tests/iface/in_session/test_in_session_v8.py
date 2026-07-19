@@ -809,8 +809,9 @@ def test_status_run_id_no_marker_reports_none_no_output_count(cwd_tmp, wf_path):
 def test_status_json_flag_no_run_id_lists_runs_json(cwd_tmp, wf_path):
     """FU-3（SPEC §2.1/§2.3）：``status --json`` 无 run_id → 只列活跃 run，结构化字典元素。
 
-    每元素是 dict（含 run_id/node/status/last_next_at/elapsed 五键），非裸 stem。
-    completed run（无 marker）不列；活跃 = marker 存在。
+    每元素是 dict（含 run_id/node/status/last_next_at/elapsed/resumable 六键），非裸 stem。
+    completed run（无 marker）不列；活跃 = marker 存在。F1：``resumable: true`` 显式透出
+    （marker 在即 resumable；零 marker 字段改动）。
     """
     from orca.events.tape import Tape as _Tape
 
@@ -826,11 +827,13 @@ def test_status_json_flag_no_run_id_lists_runs_json(cwd_tmp, wf_path):
     assert len(reply["runs"]) == 1  # 唯一活跃 run（bootstrap 后未终态）
     entry = reply["runs"][0]
     assert isinstance(entry, dict), "FU-3：runs 元素应为结构化 dict，非裸 stem"
-    # 精确键集守门（防字段静默漂移）
-    assert set(entry.keys()) == {"run_id", "node", "status", "last_next_at", "elapsed"}
+    # 精确键集守门（防字段静默漂移）。F1：加 ``resumable``（SPEC §4 —— marker 在即 resumable）。
+    assert set(entry.keys()) == {"run_id", "node", "status", "last_next_at", "elapsed", "resumable"}
     assert entry["run_id"] == run_id
     assert entry["status"] == "running"
     assert entry["node"] is not None  # current_node（bootstrap 后指向 entry 节点）
+    # F1：resumable 透出（marker 在即 resumable）—— 主 session / SKILL 据此识别可续跑 run。
+    assert entry["resumable"] is True
     # 时间字段钉死：last_next_at 必须等于 tape 末事件 Event.timestamp（spec-reviewer #1：
     # RunState 零时间字段，时间只能从 tape 事件派生；防止回归到 monotonic / marker mtime）。
     expected_last_ts = max(
@@ -871,7 +874,7 @@ def test_status_no_run_id_empty_human_readable(cwd_tmp):
 
 
 def test_status_no_run_id_non_empty_human_readable(cwd_tmp, wf_path):
-    """FU-3：有活跃 run + 人类可读（无 --json）→ 每行 ``- <run_id> [status] node=… elapsed=…``。"""
+    """FU-3：有活跃 run + 人类可读（无 --json）→ 每行 ``- <run_id> [status] node=… elapsed=… resumable=true``。"""
     runner = CliRunner()
     boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
     run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
@@ -881,7 +884,11 @@ def test_status_no_run_id_non_empty_human_readable(cwd_tmp, wf_path):
     assert "[running]" in result.output
     assert "node=" in result.output
     assert "elapsed=" in result.output
+    # F1：resumable=true 透出在每行尾（人类可读形态；marker 在即 resumable）。
+    assert "resumable=true" in result.output
     assert "看详情" in result.output  # 尾行提示
+    # F1：尾行提示续跑命令（新 session 据 status 找到 run_id 后知道怎么续）。
+    assert "orca next --run-id" in result.output
 
 
 def test_status_no_run_id_skips_corrupt_and_orphan_markers(cwd_tmp, wf_path):
@@ -905,6 +912,98 @@ def test_status_no_run_id_skips_corrupt_and_orphan_markers(cwd_tmp, wf_path):
     reply = json.loads(result.output.strip())
     run_ids = [r["run_id"] for r in reply["runs"]]
     assert run_ids == [run_id]  # corrupt + orphan 被跳过，只留真 run
+
+
+# ── F1（SPEC §4）：TARS resume —— status resumable + next 无 output idempotent 重发 ──
+
+
+def test_f1_resume_flow_status_resumable_then_next_no_output_resends_prompt(
+    cwd_tmp, wf_path,
+):
+    """F1（SPEC §4）：新 session 续跑契约 —— status 透出 ``resumable: true`` +
+    ``current_node``，``orca next --run-id X``（无 output）idempotent 重发 current_node
+    的 prompt（复用 advance_step branch 4，零新字段）。
+
+    端到端验证 SKILL.md「续跑」段的四步：
+      1. ``status --json`` 无参 → runs[*] 含 ``resumable: true`` + ``node``（current_node）。
+      2. ``next --run-id X``（不带 ``--output``）→ 重发 current_node 的 prompt（idempotent）。
+      3. 重发的 prompt 与 bootstrap 时首发的 prompt **逐字相等**（同一节点同 prompt）。
+      4. 之后 ``next --run-id X --output '<产出>'`` 正常推进到下一节点（resume 主路径绕过
+         compliance —— 带输出，``no_output_count`` 不增）。
+    """
+    runner = CliRunner()
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
+    boot_reply = json.loads(boot.output.splitlines()[-1])
+    run_id = boot_reply["run_id"]
+    tape = boot_reply["tape"]
+    boot_prompt = boot_reply["prompt"]
+    assert boot_prompt is not None  # bootstrap 必须首发 prompt
+
+    # 1. status 无参 → resumable: true + node（current_node = "a"，首节点）。
+    status_reply = runner.invoke(app, ["status", "--json"])
+    assert status_reply.exit_code == 0
+    status_json = json.loads(status_reply.output.strip())
+    assert len(status_json["runs"]) == 1
+    entry = status_json["runs"][0]
+    assert entry["run_id"] == run_id
+    assert entry["resumable"] is True  # F1 核心字段
+    assert entry["node"] == "a"  # current_node（SKILL 据此知道续跑从哪起）
+
+    # 2. next --run-id X（无 output）→ idempotent 重发 current_node=a 的 prompt。
+    #    advance_step branch 4：无 output 且进行中 → 重发 pending prompt（零 emits）。
+    #    否定契约：tape **未增加**（emits=[]）；兄弟测 test_in_session_cli.py:604-617 +
+    #    test_daemon.py:270-294 都守这同一 AC，唯独 F1 resume 路径不能漏。
+    #    **不传 ``--tape``**：SKILL 教的形式是裸 ``orca next --run-id X``，依赖
+    #    ``_default_tape_path(run_id)`` 解析（cli.py:1129）—— 真验证生产路径，不走捷径。
+    tape_lines_before = len(Path(tape).read_text(encoding="utf-8").strip().split("\n"))
+    resume_reply = runner.invoke(app, ["next", "--run-id", run_id])
+    assert resume_reply.exit_code == 0, resume_reply.output
+    resume_json = json.loads(resume_reply.output.splitlines()[-1])
+    assert resume_json["done"] is False
+    assert resume_json["node"] == "a"  # 仍 a，未推进（idempotent 重发）
+    tape_lines_after = len(Path(tape).read_text(encoding="utf-8").strip().split("\n"))
+    assert tape_lines_after == tape_lines_before, (
+        "F1：next 无 output idempotent 重发必须零 emits（advance_step branch 4 emits=[]），"
+        "tape 行数不应增加"
+    )
+
+    # 3. 重发的 prompt 与 bootstrap prompt 逐字相等（同节点同 prompt，advance_step
+    #    idempotent-replay 不改 prompt 内容）。
+    assert resume_json["prompt"] == boot_prompt, (
+        "F1：next 无 output 重发的 prompt 必须与 bootstrap 首发 prompt 逐字相等"
+        "（idempotent replay，复用 advance_step branch 4）"
+    )
+
+    # 步骤 2 后 compliance 计数 +1（无 output next 的偏窄语义，§8#5）：钉死增量语义，
+    # 防回归（如有人误把 idempotent 重发排除在 +1 之外）。
+    from orca.iface.in_session.marker import read_marker, marker_path
+    rundir = Path(tape).parent
+    m_after_step2 = read_marker(marker_path(rundir, run_id))
+    assert m_after_step2 is not None
+    assert m_after_step2.no_output_count == 1, (
+        "步骤 2 的无 output next 应让 no_output_count +1（compliance 偏窄语义，§8#5）"
+    )
+
+    # 4. next --run-id X --output '<产出>'（带 output）→ 正常推进到下一节点 b。
+    #    resume 主路径绕过 compliance：带 output → ``no_output_count`` 重置为 0
+    #    （cli.py:1327-1328：``if output is not None: marker.no_output_count = 0``）。
+    #    同样不传 ``--tape``：SKILL 教的形式是 ``orca next --run-id X --output '...'``。
+    advance_reply = runner.invoke(app, [
+        "next", "--run-id", run_id, "--output", "out_a",
+    ])
+    assert advance_reply.exit_code == 0, advance_reply.output
+    advance_json = json.loads(advance_reply.output.splitlines()[-1])
+    assert advance_json["done"] is False
+    assert advance_json["node"] == "b"  # 推进到下一节点 b
+
+    # 步骤 4 后 compliance 计数 = 0（带 output 重置；cli.py:1327-1328 契约）。
+    # 钉死主路径绕过：带 output 的 next 不只「不增」，而是「清零」（防 reset 逻辑回归）。
+    m_after_step4 = read_marker(marker_path(rundir, run_id))
+    assert m_after_step4 is not None
+    assert m_after_step4.no_output_count == 0, (
+        "步骤 4 的带 output next 应重置 no_output_count = 0（cli.py:1327-1328 契约；"
+        "resume 主路径绕过 compliance）"
+    )
 
 
 # ── §2.6.2 stop run_id 派发（v3 §7.2：marker 无 owner，stop 按 run_id 直定位）────

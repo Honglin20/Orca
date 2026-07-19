@@ -1397,7 +1397,7 @@ def status(
     if rid is None:
         # FU-3（SPEC §2.1/§2.3）：无参只列**活跃** run（marker 存在 ≡ 活跃，SPEC §7.2 完成
         # 契约：bootstrap 写 / 终态清）。completed run 无 marker → 不列。输出结构化
-        # ``{runs:[{run_id,node,status,last_next_at,elapsed}]}``（非裸 stem）。
+        # ``{runs:[{run_id,node,status,last_next_at,elapsed,resumable}]}``（非裸 stem）。
         runs_dir = _default_rundir()
         markers = sorted(runs_dir.glob("orca-*.json")) if runs_dir.exists() else []
         # ``now`` 取在循环外：多 run 共享同一快照基准（elapsed 跨 run 一致，非各算各的）。
@@ -1421,12 +1421,18 @@ def status(
                 last_ts = ev.timestamp
             # elapsed 与 Event.timestamp 同基（time.time()）；混用 monotonic 会得无意义差值。
             elapsed = (now - last_ts) if last_ts > 0 else None
+            # F1（SPEC §4）：``resumable`` 透出 —— marker 在即 resumable。本循环已通过
+            # ``read_marker != None`` + ``tape_path.is_file()`` 两层守门，列出的 run 都可经
+            # ``orca next --run-id X``（无 output，idempotent 重发 current_node prompt）续跑。
+            # 不读 marker 新字段（marker 仍 3 字段，零契约改动）；纯派生标志，供主 session /
+            # SKILL 一眼识别可续跑的 run（无需推断 marker 存在 ≡ resumable）。
             runs.append({
                 "run_id": marker.run_id,
                 "node": state.current_node,
                 "status": state.status,
                 "last_next_at": last_ts if last_ts > 0 else None,
                 "elapsed": elapsed,
+                "resumable": True,
             })
         if json_output:
             # 空列表 shape 与非空一致（消费方恒读 reply["runs"]，spec-reviewer #5）。
@@ -1438,8 +1444,9 @@ def status(
         for r in runs:
             typer.echo(
                 f"- {r['run_id']} [{r['status']}] node={r['node']} elapsed={r['elapsed']}"
+                f" resumable=true"
             )
-        typer.echo("\n用 `orca status --run-id <run_id>` 看详情。")
+        typer.echo("\n用 `orca status --run-id <run_id>` 看详情，或 `orca next --run-id <run_id>` 续跑。")
         return
 
     tape_path = _default_tape_path(rid)

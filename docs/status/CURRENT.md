@@ -6,18 +6,17 @@
 
 ## 状态（2026-07-19）
 
-- **无进行中主线**。in-session 加固与性能 SPEC P1（8 项小合集：S2/S7/S9 + O2/O3/O4 + D3/F3）刚 commit（`9100481`…`d3893b9`，9 commits），详见 CHANGELOG。
-- 近期完成（详见 CHANGELOG）：in-session P1（7-19）/ O1a tape fold（7-19，P3）/ Web 视觉优化 P0-P4（7-19）/ Node Memory（7-18）/ B2 子 agent 推 web（7-17）。
-- **push 待用户手动**：本地领先 origin **87 commits**（WSL SSH 无 github key）。
+- **无进行中主线**。in-session 加固与性能 SPEC **P5（F1 resume）**刚 commit（详见 CHANGELOG）：`orca status` 无参加 `resumable` + SKILL 续跑段 + 占位 spec 建立，**零 marker 字段改动**。
+- 近期完成（详见 CHANGELOG）：in-session **P5（F1 resume，7-19）** / P1（7-19）/ O1a tape fold（7-19，P3）/ Web 视觉优化 P0-P4（7-19）/ Node Memory（7-18）/ B2 子 agent 推 web（7-17）。
+- **push 待用户手动**：本地领先 origin **88 commits**（WSL SSH 无 github key）。
 
-## 候选下一步（in-session SPEC P2-P5，待用户选定）
+## 候选下一步（in-session SPEC P2/P4/P6，待用户选定）
 
-依据 SPEC [`2026-07-19-in-session-hardening-and-perf.md`](../specs/2026-07-19-in-session-hardening-and-perf.md) v4.1 §6 串行顺序（都碰 cli.py → 串行 P2→P4→P5；P6 独立可任意时点）：
+依据 SPEC [`2026-07-19-in-session-hardening-and-perf.md`](../specs/2026-07-19-in-session-hardening-and-perf.md) v4.1 §6 串行顺序（都碰 cli.py → 串行 P2→P4；P6 独立可任意时点；P5 已完成）：
 
 1. **P2（D4 + D5 marker 三态 + doctor orphan）**：合并 commit。改 `marker.py` + doctor 加 orphan_markers check（glob 扫 + tail 50 行判 tape 状态）。SPEC §2 D4/D5。
 2. **P4（D1 + D2 失败路径统一）**：D1 stop emit 失败留孤儿 → best-effort 落终态；D2 `apply_step_result` 异常裸崩 → `_safe_apply_or_fail` helper（DRY daemon+cli 两路）。SPEC §2 D1/D2。依赖 P2 先合并（read_marker 契约）。
-3. **P5（F1 resume：status resumable + SKILL resume 段 + 占位 spec）**：零新字段、不破约束（marker 仍 3 字段）。SPEC §4 F1。需先补 `docs/specs/agent-interrupt-design-draft.md` 占位（F1 落地）。
-4. **P6（S1 adapter contract-test 黄金集）**：独立，可任意时点。SPEC §5 S1。
+3. **P6（S1 adapter contract-test 黄金集）**：独立，可任意时点。SPEC §5 S1。
 
 **defer**（SPEC §8）：F2 retry / O1b wf 缓存 / O1c tape resume / O5 lock contention。
 
@@ -26,14 +25,13 @@
 - `daemon.py:105` 裸 `sys.exit(128+signum)` 违 §3.3 grep 守门（baseline 即失败）
 - 测试 baseline 失败：e2e `python3` 硬编码 / mcp 缺 `uv` / `test_bg_run_ps_logs` rot
 - MCP 移除（用户暂缓）/ unified-backend 草稿推迟（含 teams 残留）/ catalog fallback 无测试 / `workflow_failed.data.kind` 字段 drift
-- **文档断链**：`docs/specs/agent-interrupt-design-draft.md` 被当 in-session 中断恢复 spec 引用，但**不存在** —— P5（F1）将补
 - DAG compact minimap（`web-shell-v2-spec.md` §5.7 amendment 待开）
 
 ## 待办（用户侧真机，无代码）
 
 - `tars install --target cc` 真生成 skill + `tars list/validate` 真工作
 - §9#1 nga/cac 全套集成真机加载（Stop-hook / opencode.json plugin 是否真生效）
-- **P1 改了 SKILL.md（O4 busy + F3 inputs_validation_error）**：装了旧 TARS skill 副本的用户需重跑 `tars install` 同步（与 F1 同款约束）
+- **P1 + P5 改了 SKILL.md（P1: O4 busy + F3 inputs_validation_error；P5: F1 resume 续跑段）**：装了旧 TARS skill 副本的用户需重跑 `tars install` 同步
 
 ## 必读文件（开工前按需）
 

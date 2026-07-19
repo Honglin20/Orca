@@ -180,6 +180,67 @@ orca next --run-id <run_id> --output 'it'\''s a good film'
 
 含换行的产出：单引号本身就能跨行，直接把多行产出放在 `--output '...'` 里即可。
 
+## 续跑 —— 新 session 接手半完成的 run
+
+如果上一个 session 中途断开（用户关掉终端、网络掉、crash、被动 stop 等），后台 tape +
+marker 仍保留着半完成的 run。**新 session 启动时**先扫一眼有没有这种 run，**让用户决定**
+是续跑旧 run 还是开新工作（**别自作主张**直接续跑或直接开新工作）。
+
+### 续跑判定流程
+
+1. 新 session 一开始（或用户说"继续上次"/"接着干"/"上次那个做完了吗"时），调一次无参
+   status 拿全部活跃 run：
+
+   ```bash
+   orca status --json
+   ```
+
+2. 读返回 JSON 的 `runs` 数组。每个元素是一个活跃 run，含：
+   - `run_id`：续跑句柄。
+   - `node`：当前停在的节点（续跑从这里起）。
+   - `status`：通常是 `"running"`（未终态）。
+   - `resumable: true`：**显式可续跑标志**（marker 在即可续；只要它是 `true` 就能续）。
+
+3. 据返回结果决定：
+   - `runs: []`（空）→ 没有半完成的 run，走三步流程开新工作。
+   - 有 `resumable: true` 的 run → **先问用户**（一两句，列出每个 `run_id` + `node` 让用户
+     认领）。用户说续跑某个 `X`，记下它的 `node = Y`，进下一步；用户说开新工作，走三步流程。
+
+### 续跑驱动（复用第 3 步驱动循环）
+
+续跑与正常驱动的唯一区别：**先无 output 调一次 next 重发当前节点的 prompt**（Orca 幂等重发，
+不会重复推进）。之后完全等同于第 3 步的驱动循环。
+
+1. 无 output 重发当前节点 Y 的 prompt（idempotent 重发；Orca 据 tape 已知当前停在 Y）：
+
+   ```bash
+   orca next --run-id X
+   ```
+
+   🔴 注意：**不带 `--output`**。返回 JSON 的 `prompt` 字段就是节点 Y 的指令 + 驱动协议
+   （与当初 bootstrap/上一次 next 派发时逐字相等）。
+
+2. 拿到 `prompt` 后，按【第 3 步驱动循环】照常：派 Task 子代理读指令文件执行 → 产出原样作
+   `--output` → `orca next --run-id X --output '<产出>'` → 读返回 → 循环到 `done: true`。
+
+> **idempotent 重发不会推进 workflow**：tape 里 Y 仍是当前未完成节点，重发只重发 prompt，
+> 不会让 Y "执行两次"。Orca 据 tape 已知下一动作是「重发 Y 的 prompt」，主 session 拿到
+> prompt 即派子代理，**子代理产出经 `--output` 回传才真正推进**。
+
+### 续跑主路径不触发 compliance
+
+- 带输出的 next（`--output '<产出>'`）→ 正常推进，合规计数 `no_output_count` 不增。
+- 仅"无 output 重发 prompt"那一次会让计数 +1（合规语义偏窄，留独立 issue）；单次续跑**不会**
+  因计数 fail —— Orca 的 compliance 兜底要连续 3 次无 output 才终止 run（极少见：反复断连
+  且每次断在派子代理前）。
+- 不用主动盯 `no_output_count`；让 Orca 自我兜底，你只管把产出带回来。
+
+### 续跑 vs 途中查看
+
+- **续跑**（本节）：**新 session** 接手旧 run。先 `orca status` 找 run，再 `orca next --run-id X`
+  无 output 重发 prompt，然后正常驱动循环。
+- **途中查看 / 中断**（下一节）：**同一 session 内**主动看进度 / 主动停。
+
 ## 途中查看 / 中断
 
 - 看进度：`orca status --run-id <run_id>`（或 `orca status` 列所有活跃 run）。
@@ -222,4 +283,5 @@ orca next --run-id <run_id> --output 'it'\''s a good film'
 - [ ] 单引号产出正确转义（`'\''`）
 - [ ] 循环到 `done: true` 后停止并向用户总结
 - [ ] 失败时读 reason 告知用户，不静默重启
+- [ ] 新 session 启动时先 `orca status` 看有无 `resumable: true` 的 run；有则问用户是否续跑，确认后 `orca next --run-id X`（无 output）重发 prompt → 子代理 → `--output` 推进
 </success_criteria>

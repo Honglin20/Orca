@@ -526,13 +526,25 @@ def test_entry_skill_md_has_no_tars_backend_commands():
     注：``list`` 是 orca 与 tars 共享命令（``orca list`` 合法），不在禁词内。
     ``tars`` 同时是入口 skill 的 slash 名（``/tars``），故禁词用 ``tars <子命令>`` 整串
     而非裸 ``tars``——避免误伤 skill 自我引用。
+
+    F1（SPEC §4）：``orca status`` JSON 字段 ``resumable`` 含子串 ``resume``，但它是 orca
+    7-命令接口的合法输出字段（非 tars 后端命令）。单词项用 word-boundary 匹配（``\\bresume\\b``）
+    防 ``resumable`` 假报；多字短语（``tars serve`` 等）仍用 substring（短语本身已隔离）。
     """
+    import re
+
     text = ENTRY_SKILL_MD.read_text(encoding="utf-8")
     # tars-unique 后端命令（run/serve/ps/install/validate/mcp/executor/logs/wait/resume）
-    tars_only = ["serve", "validate", "executor", "resume",
-                 "tars run", "tars serve", "tars install", "orca install",
-                 "tars validate", "tars mcp", "tars executor"]
-    for kw in tars_only:
+    # 单词项用 word-boundary 防 resumable / observe 等合法复合词假报
+    single_word = ["serve", "validate", "executor", "resume"]
+    multi_word = ["tars run", "tars serve", "tars install", "orca install",
+                  "tars validate", "tars mcp", "tars executor"]
+    for kw in single_word:
+        assert not re.search(rf"\b{re.escape(kw)}\b", text), (
+            f"SKILL.md 不应含 tars 后端命令 {kw!r}（§2.4 单一接口守门；word-boundary 防"
+            f" resumable / observe 等合法复合词假报）"
+        )
+    for kw in multi_word:
         assert kw not in text, f"SKILL.md 不应含 tars 后端命令 {kw!r}（§2.4 单一接口守门）"
 
 

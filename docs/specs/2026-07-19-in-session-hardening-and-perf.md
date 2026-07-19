@@ -2,7 +2,7 @@
 
 > **状态**：Draft v4.1（2026-07-19）。**架构原则（用户定）**：orca 是管理者（状态/决策/compliance/route 全归它），主 session 只调度（派子代理/传 output）—— 不过度设计、不跨层耦合。v4.1 据此简化：O3（主 session 不反应 compliance，仅 status 可观测）、F1（复用 next 重发，删 prompt_file 零新字段）、D2（helper 简单 try/except）、D4（next 一处判断，删三态辅助）。P1–P6 全可开工。
 > **v2→v3 变化**：
-> - **F1 grace 重设计**（闭环 v2-B1/B2/B4）：删时间阈值（`last_next_at`/`RESUME_GRACE_S`），改用 **host_session 信号**（review 推荐 B）—— marker 加 `last_host_session`，跨 session = resume 豁免，同 session 连续无 output = 摸鱼照计。无阈值 trade-off。
+> - **F1 grace 重设计**（闭环 v2-B1/B2/B4）：删时间阈值（`last_next_at`/`RESUME_GRACE_S`），改用 **host_session 信号**（review 推荐 B）—— marker 加 `last_host_session`，跨 session = resume 豁免，同 session 连续无 output = 摸鱼照计。无阈值 trade-off。**〔v4.1 已弃用此方向〕**：用户铁律裁决 resume 是 run 级别的事（与 host_session 无关），v4.1 改复用 `advance_step` 现成 idempotent-replay（无 output next 重发 prompt）+ SKILL 教续跑流程，零 marker 字段改动、零 host_session、零 prompt_file。详见 §4 F1。
 > - **铁律 5.1 修正**（闭环 v2-B3）：error_kind 登记到 **raise 发生层** 的 ERR_*（`step.py` for advance_step / `cli.py` for bootstrap），非假设全在 step.py。F3 `inputs_validation_error` 登记到 cli.py 层。
 > - D3 措辞修正（v2-M3 虚假闭环）：明示"覆盖守护死亡，不覆盖存活但持续失败（留 §8#4）"。
 > - D4 API 形态 pick（v2-M2）：`read_marker` 仍返 `ActivationMarker | None`（4 调用点零改动）+ 新增 `read_marker_status(path)` 三态辅助。
@@ -189,13 +189,13 @@
 - **O2**：连续 3 bootstrap 耗时下降；dupe-check 不变量成立。
 - **O3**：status --run-id 含 no_output_count；next reply 不加 compliance 字段（零回归）。
 - **O4**：busy reply 含 retry_after_ms；不重发 prompt。
-- **F1**：marker 4 字段（last_host_session）；同 session 无 output next → count==1；resume（新 host_session）第一次 → count==0 + last_host_session 更新；resume 后同 session 连续 → 照计；status resumable；SKILL resume 段；占位 spec；v5 决策 11 修订。
+- **F1**（v4.1）：status 无参列 `resumable`（marker 在即 resumable，零 marker 字段改动）；SKILL 含续跑段（status → `next --run-id X` 无 output idempotent 重发 → 子代理 → `next --run-id X --output` 推进）；占位 spec 建立；CURRENT 断链修复；**marker 仍 3 字段、零新字段（无 host_session / 无 prompt_file）、v5 决策 11 不动**。
 - **F3**：错类型/缺必填（显式 type）→ inputs_validation_error + 定位；旧 wf 零回归；无新依赖。
 - **S1**：adapter 对真 fixture 跑通；fixture schema drift fail loud。
 - **S2**：SKILL.md flag ⊆ --help；SPEC md 不扫。
 - **S7**：三处替换为 helper，B2 回归全过。
 - **S9**：两守护复用 helper，respawn 零回归。
-- **铁律 AC**：无新裸 sys.exit/宽 except pass/2>/dev/null||true；advance_step emit snapshot 不变（O1a 结果等价）；**无未登记 error_kind**（F3 inputs_validation_error 登记 cli.py 层）；7 命令不变；marker 字段=4（F1 后）；tape 仍唯一真相源。
+- **铁律 AC**：无新裸 sys.exit/宽 except pass/2>/dev/null||true；advance_step emit snapshot 不变（O1a 结果等价）；**无未登记 error_kind**（F3 inputs_validation_error 登记 cli.py 层）；7 命令不变；**marker 字段=3（F1 v4.1：零新字段，无 host_session / 无 prompt_file）**；tape 仍唯一真相源。
 
 ---
 

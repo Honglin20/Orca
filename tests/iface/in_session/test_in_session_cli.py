@@ -1221,7 +1221,9 @@ def test_status_no_run_id_lists_runs_dir(cwd_tmp, wf_path):
     # 输出含 tape 文件名（run_id stem）
     assert ".jsonl" not in result.output  # 只显示 stem
     # 提示文案统一用 --run-id 形态（spec §2.1 / DEFECT-2：SKILL.md/spec/CLI 三处一致）。
+    # F1：尾行同时提示续跑命令（resumable run 用 ``orca next --run-id`` 接续）。
     assert "用 `orca status --run-id <run_id>`" in result.output
+    assert "resumable=true" in result.output  # F1：resumable 标志透出
 
 
 def test_status_with_run_id_shows_progress(cwd_tmp, wf_path):
