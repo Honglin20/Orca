@@ -5,6 +5,17 @@
 
 ---
 
+## [2026-07-19] in-session 加固与性能（SPEC v4.1 整体交付：P3 + P1 + P5）
+
+SPEC [`2026-07-19-in-session-hardening-and-perf.md`](../specs/2026-07-19-in-session-hardening-and-perf.md) v4.1 驱动的 in-session 路径加固与性能优化。**架构铁律（用户）**：orca 管所有状态/决策/compliance，主 session 只调度（派子代理/传 output），不过度设计、不跨层耦合。经 3 轮 spec-reviewer + 用户原则简化（弃 host_session 豁免 / on_emit_success 回调 / 三态枚举 / prompt_file / compliance_warning 让主 session 反应）。
+
+**已交付 3 包**（各自 code-reviewer 两轮 0 🔴 + 测试全绿，详见下三条 + 各 release note）：
+- **P3 O1a**（性能）：`advance_step` 两次 tape 遍历合一次，`next` 性能税减半（`256a843`）
+- **P1**（8 项小合集）：S7 tape helper / S9 daemon liveness / S2 SKILL flag CI 守门 / D3 sidechain 探针 / O2 bootstrap 锁缩小 / O3 status 透 compliance / O4 busy retry_after_ms / F3 inputs 校验 + `_errors.py`（9 commits）
+- **P5 F1**（resume，最高价值）：session 断了续跑半完成 run —— status resumable + SKILL 续跑段 + 占位 spec；零 marker 改动、复用 `advance_step` idempotent-replay（`705009a`）
+
+**暂停**（用户决策，不阻塞 workflow）：P2 D4+D5（marker 损坏/孤儿，低）/ P4 D1+D2（失败兜底，中）/ P6 S1（contract-test，低）。累计 ~900+ 测试 0 回归。
+
 ## [2026-07-19] in-session 加固与性能 P5（F1 TARS resume v4.1 简化版）
 
 SPEC [`2026-07-19-in-session-hardening-and-perf.md`](../specs/2026-07-19-in-session-hardening-and-perf.md) v4.1 §4 F1 落地。**架构铁律（用户）**：resume 是 run 级别的事（用 run_id 管，**与 host_session 无关**），复用 `advance_step` 现成 idempotent-replay（branch 4：`orca next --run-id X` 无 output 重发 prompt）+ SKILL 教续跑流程，**零 marker 字段改动、零 host_session、零 prompt_file**。改动：`cli.py status` 无参加 `resumable: True`（marker 在即 resumable，纯派生标志）+ 文本输出 + 尾行续跑提示；`SKILL.md` 加「续跑」段（status → next 无 output 重发 → 子代理 → next output 推进）；新建 `docs/specs/agent-interrupt-design-draft.md` 占位（in-session resume = F1 落地；engine-level interrupt = TBD）；修 `CURRENT.md` 断链。SPEC §7 F1 AC + §1 铁律 AC + v2→v3 changelog 闭环 stale（原写 host_session v3 语义，与 v4.1 矛盾）。守门双修：SKILL.md 用 `\bresume\b` word-boundary 守 tars 后端命令（允 `resumable` JSON 字段，禁孤立 `resume`）+ 去 `replay_state` 内部名。code-reviewer impl+coverage 两轮 0 🔴（🟡 全修：F1 测加 tape-not-added 否定断言 + 拆 `no_output_count` 为 `==1`/`==0` 精确断言 + 去掉 `--tape` 走默认路径解析真验生产形态）；196 in_session 测试全过。Commit: `705009a`。详见 [release note](../releases/2026-07-19-in-session-p5-f1-resume.md)。
@@ -15,7 +26,7 @@ SPEC [`2026-07-19-in-session-hardening-and-perf.md`](../specs/2026-07-19-in-sess
 
 ## [2026-07-19] O1a —— `advance_step` 内合并两次 tape 全遍历为一次（in-session 性能 SPEC v3.1 §3 O1a，包 P3）
 
-`advance_step` 此前两次全 tape 遍历（`replay_state(tape)` + `Orchestrator._inputs_from_tape(tape)`），合并为单次 `_replay_state_and_inputs(tape) -> (RunState, dict)`（落 `events/replay.py`，与 reducer 同文件，单次遍历既 fold state 又抽首条 ws.data.inputs）。`advance_step` 单次调用 tape 迭代 2→1；`_inputs_from_tape` 改薄封装保留对外 API（`from_tape`/`_bare_instance` 调用方零回归）；`replay_state` 对外 API 不变。pure refactor（state+inputs 逐字相等，决策三分支/emit 序列零改）。SPEC §1 铁律 + §7 O1a AC 逐条达成；code-reviewer impl+coverage 两轮 0 🔴/0 🟡（5 🟢 全修：砍 `since_seq` 防 footgun / snapshot 改固定值去自证 / 加 first-ws-bad 测试 / wrapper parity 参数化 / AST grep 守门 AC3）；654 测试全过（events+run+iface/in_session，+13 新测试）。Commit: `<SHA 见 git log>`。详见 [release note](../releases/2026-07-19-o1a-tape-traversal-fold.md)。
+`advance_step` 此前两次全 tape 遍历（`replay_state(tape)` + `Orchestrator._inputs_from_tape(tape)`），合并为单次 `_replay_state_and_inputs(tape) -> (RunState, dict)`（落 `events/replay.py`，与 reducer 同文件，单次遍历既 fold state 又抽首条 ws.data.inputs）。`advance_step` 单次调用 tape 迭代 2→1；`_inputs_from_tape` 改薄封装保留对外 API（`from_tape`/`_bare_instance` 调用方零回归）；`replay_state` 对外 API 不变。pure refactor（state+inputs 逐字相等，决策三分支/emit 序列零改）。SPEC §1 铁律 + §7 O1a AC 逐条达成；code-reviewer impl+coverage 两轮 0 🔴/0 🟡（5 🟢 全修：砍 `since_seq` 防 footgun / snapshot 改固定值去自证 / 加 first-ws-bad 测试 / wrapper parity 参数化 / AST grep 守门 AC3）；654 测试全过（events+run+iface/in_session，+13 新测试）。Commit: `256a843`。详见 [release note](../releases/2026-07-19-o1a-tape-traversal-fold.md)。
 
 ## [2026-07-19] Web 界面视觉优化（P0–P4：token 收口 / lucide / 左栏增强 / TopBar+WS+暗色 / 三栏统一）
 
