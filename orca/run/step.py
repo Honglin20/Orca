@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 import jsonschema
 
-from orca.events.replay import replay_state
+from orca.events.replay import _replay_state_and_inputs
 from orca.exec.error import ExecError
 from orca.exec.render import render_prompt, render_template
 from orca.run.lifecycle import (
@@ -320,12 +320,13 @@ def advance_step(
     ``not no_memory`` 时,渲染后注入「上一轮记忆 + 复用协议」(SPEC §4.1)。``project_root=None``
     时即使 ``memory=True`` 也不注入(回归旧形态,保单测 inline 路径不破)。
     """
-    state = replay_state(tape)
-    # tape 是 inputs 真相源（workflow_started.data.inputs）：next 不传 --inputs 时从 tape
-    # 恢复（deterministic —— 模型不必每步重传，且修掉非 entry 节点 {{ inputs.* }} 依赖 CLI
-    # 重传的隐患）。bootstrap 首调时 tape 无 workflow_started → _inputs_from_tape 返 {} →
-    # 自然 fallback 到 CLI 传入的 inputs。与 Orchestrator resume（_inputs_from_tape）同源。
-    tape_inputs = Orchestrator._inputs_from_tape(tape)
+    # SPEC §3 O1a（包 P3）：单次遍历 tape 既 fold RunState 又抽 workflow_started.data.inputs
+    # （reducer 只存 workflow_name、不存 inputs → 必须在同一次遍历里顺手抽）。
+    # tape 是 inputs 真相源：next 不传 --inputs 时从 tape 恢复（deterministic —— 模型不必
+    # 每步重传，且修掉非 entry 节点 {{ inputs.* }} 依赖 CLI 重传的隐患）。bootstrap 首调时
+    # tape 无 workflow_started → inputs 返 {} → 自然 fallback 到 CLI 传入的 inputs。
+    # 与 Orchestrator resume（_inputs_from_tape）同源（后者现为薄封装调同一 reducer 路径）。
+    state, tape_inputs = _replay_state_and_inputs(tape)
     merged = {**tape_inputs, **(inputs or {})}  # CLI override 罕见但保留兼容
     inputs = _resolve_inputs(wf, merged)
     rid = run_id or getattr(tape, "run_id", "") or ""

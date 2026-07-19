@@ -18,8 +18,13 @@ from pathlib import Path
 
 import pytest
 
-from orca.events.replay import apply_event, replay_state
+from orca.events.replay import (
+    _replay_state_and_inputs,
+    apply_event,
+    replay_state,
+)
 from orca.events.tape import Tape
+from orca.run.orchestrator import Orchestrator
 from orca.schema import Event, RunState
 
 
@@ -610,3 +615,366 @@ def test_replay_tape_rich_with_all_phase11_event_types_no_crash(tmp_path):
     assert state1.node_status.get("c") == "skipped"
     # context：a 的最终 output 是 s2 的（last-writer-wins，retry 后的正确输出）。
     assert state1.context.get("a") == {"result": "ok-a"}
+
+
+# ── SPEC §3 O1a：_replay_state_and_inputs 单次遍历合并 ──────────────────────
+
+
+def _write_tape(path: Path, events: list[dict]) -> Tape:
+    """构造 tape：依次 append 事件（payload 形态，自动补 seq）。测试 helper。"""
+    tape = Tape(path, run_id="r1")
+    try:
+        for ev in events:
+            _run(tape.append(ev))
+    finally:
+        tape.close()
+    return tape
+
+
+def test_replay_state_and_inputs_empty_tape(tmp_path):
+    """空 tape（文件不存在 / 无事件）→ 初始 state + 空 inputs（不 WARN）。"""
+    path = tmp_path / "empty.jsonl"
+    # 不创建文件 → replay() yield 不到任何事件。
+    tape = Tape(path, run_id="r1")
+    try:
+        state, inputs = _replay_state_and_inputs(tape)
+    finally:
+        tape.close()
+
+    # state ≡ replay_state(tape)（初始 pending，空字段）
+    assert state == RunState(run_id="r1", workflow_name="", status="pending")
+    # inputs 静默返 {}（无 workflow_started = bootstrap 首调正常态）
+    assert inputs == {}
+
+
+def test_replay_state_and_inputs_no_workflow_started(tmp_path, caplog):
+    """tape 有事件但无 workflow_started → 静默返 {}（不 WARN，bootstrap 噪声修复）。"""
+    path = tmp_path / "no_ws.jsonl"
+    _write_tape(path, [
+        {"type": "node_started", "timestamp": 1.0, "node": "a",
+         "session_id": "s1", "data": {}},
+    ])
+    tape = Tape(path, run_id="r1")
+    try:
+        with caplog.at_level("WARNING"):
+            state, inputs = _replay_state_and_inputs(tape)
+    finally:
+        tape.close()
+
+    # state 部分：node a → running（reducer fold 正确）
+    assert state.node_status == {"a": "running"}
+    assert state.status == "pending"  # 无 workflow_started → 不转 running
+    # inputs 静默返 {} + 无 WARNING（无 ws = bootstrap 首调正常态，非异常）
+    assert inputs == {}
+    assert not any("workflow_started.data.inputs" in rec.message for rec in caplog.records), (
+        "无 workflow_started 时不应 WARN（bootstrap 首调噪声修复）"
+    )
+
+
+def test_replay_state_and_inputs_dict_inputs(tmp_path):
+    """workflow_started.data.inputs 为 dict → 返回该 dict（与 _inputs_from_tape 等价）。"""
+    path = tmp_path / "ws_inputs.jsonl"
+    _write_tape(path, [
+        {"type": "workflow_started", "timestamp": 1.0, "node": None,
+         "session_id": None,
+         "data": {"workflow_name": "wf_a", "inputs": {"x": 1, "y": "foo"}}},
+        {"type": "node_started", "timestamp": 2.0, "node": "a",
+         "session_id": "s1", "data": {}},
+    ])
+    tape = Tape(path, run_id="r1")
+    try:
+        state, inputs = _replay_state_and_inputs(tape)
+    finally:
+        tape.close()
+
+    # state ≡ replay_state(tape)（workflow_name 设 + status=running）
+    assert state.workflow_name == "wf_a"
+    assert state.status == "running"
+    assert state.node_status == {"a": "running"}
+    # inputs ≡ Orchestrator._inputs_from_tape(tape)（首条 ws 的 data.inputs）
+    assert inputs == {"x": 1, "y": "foo"}
+
+
+def test_replay_state_and_inputs_non_dict_inputs_warns(tmp_path, caplog):
+    """workflow_started.data.inputs 非 dict（真异常）→ 返 {} + WARN（不静默吞）。"""
+    path = tmp_path / "ws_bad_inputs.jsonl"
+    _write_tape(path, [
+        {"type": "workflow_started", "timestamp": 1.0, "node": None,
+         "session_id": None,
+         "data": {"workflow_name": "wf_a", "inputs": "not-a-dict-string"}},
+    ])
+    tape = Tape(path, run_id="r1")
+    try:
+        with caplog.at_level("WARNING"):
+            state, inputs = _replay_state_and_inputs(tape)
+    finally:
+        tape.close()
+
+    # state 部分：reducer 仍 fold workflow_started（status=running, workflow_name 设）
+    assert state.status == "running"
+    assert state.workflow_name == "wf_a"
+    # inputs：坏 → 返 {}（与 _inputs_from_tape 一致）
+    assert inputs == {}
+    # WARN 触发（真异常，归因可见）
+    assert any("workflow_started.data.inputs" in rec.message for rec in caplog.records), (
+        "workflow_started 存在但 inputs 非 dict 应 WARN（真异常归因）"
+    )
+
+
+def test_replay_state_and_inputs_missing_inputs_key_warns(tmp_path, caplog):
+    """workflow_started 存在但 data 完全缺 inputs 字段 → 返 {} + WARN（与 _inputs_from_tape 一致）。"""
+    path = tmp_path / "ws_no_inputs_key.jsonl"
+    _write_tape(path, [
+        {"type": "workflow_started", "timestamp": 1.0, "node": None,
+         "session_id": None,
+         "data": {"workflow_name": "wf_a"}},  # 无 inputs 键
+    ])
+    tape = Tape(path, run_id="r1")
+    try:
+        with caplog.at_level("WARNING"):
+            _, inputs = _replay_state_and_inputs(tape)
+    finally:
+        tape.close()
+
+    # inputs 缺失 → dict.get 返 None → 非 dict → WARN + {}
+    assert inputs == {}
+    assert any("workflow_started.data.inputs" in rec.message for rec in caplog.records)
+
+
+def test_replay_state_and_inputs_only_first_workflow_started_inputs(tmp_path):
+    """多条 workflow_started（罕见 retry 场景）→ 取首条 inputs（mirror _inputs_from_tape 早返）。"""
+    path = tmp_path / "multi_ws.jsonl"
+    _write_tape(path, [
+        {"type": "workflow_started", "timestamp": 1.0, "node": None,
+         "session_id": None,
+         "data": {"workflow_name": "wf_a", "inputs": {"first": True}}},
+        {"type": "workflow_started", "timestamp": 2.0, "node": None,
+         "session_id": None,
+         "data": {"workflow_name": "wf_a", "inputs": {"second": True}}},
+    ])
+    tape = Tape(path, run_id="r1")
+    try:
+        _, inputs = _replay_state_and_inputs(tape)
+    finally:
+        tape.close()
+
+    # 取首条 ws 的 inputs（与 _inputs_from_tape 在首条 ws 即 return 等价）
+    assert inputs == {"first": True}
+
+
+def test_replay_state_and_inputs_snapshot_equivalence(tmp_path):
+    """SPEC §3 O1a 核心 AC：单次遍历 (state, inputs) 与拆分调用**逐字相等**（pure refactor）。
+
+    构造富 tape（含 workflow_started + inputs + node 生命周期 + route），断言：
+      - ``state`` 部分 ≡ ``replay_state(tape)``（旧路径 reducer fold，未受本 PR 影响）
+      - ``inputs`` 部分 = 固定 expected dict（不通过 wrapper 计算，避免循环自证）
+    """
+    path = tmp_path / "snapshot.jsonl"
+    expected_inputs = {"task": "demo", "count": 3}
+    _write_tape(path, [
+        {"type": "workflow_started", "timestamp": 1.0, "node": None,
+         "session_id": None,
+         "data": {"workflow_name": "snap_wf", "entry": "a",
+                  "inputs": expected_inputs}},
+        {"type": "node_started", "timestamp": 2.0, "node": "a",
+         "session_id": "s1", "data": {"kind": "agent"}},
+        {"type": "node_completed", "timestamp": 3.0, "node": "a",
+         "session_id": "s1",
+         "data": {"output": {"result": "ok"}, "elapsed": 1.0}},
+        {"type": "route_taken", "timestamp": 4.0, "node": None,
+         "session_id": None, "data": {"from": "a", "to": "$end"}},
+        {"type": "workflow_completed", "timestamp": 5.0, "node": None,
+         "session_id": None,
+         "data": {"elapsed": 3.0, "outputs": {"final": "ok"}}},
+    ])
+
+    # state 旧路径：replay_state（未受本 PR 影响，独立 reducer fold）
+    tape_old = Tape(path, run_id="r1")
+    try:
+        expected_state = replay_state(tape_old)
+    finally:
+        tape_old.close()
+
+    # 合并调用（新路径）
+    tape_new = Tape(path, run_id="r1")
+    try:
+        actual_state, actual_inputs = _replay_state_and_inputs(tape_new)
+    finally:
+        tape_new.close()
+
+    # state 逐字相等（state 半侧的 pure refactor 守门；replay_state 是独立函数，
+    # 不调用 _replay_state_and_inputs，故对比有意义）
+    assert actual_state == expected_state, (
+        f"state 部分 mismatch：\nactual={actual_state}\nexpected={expected_state}"
+    )
+    # inputs 用固定 expected 值（不通过 Orchestrator._inputs_from_tape 计算 —— 后者现已
+    # 是 _replay_state_and_inputs 的薄封装，对比会循环自证）。固定值守门确保 inputs
+    # 抽取的"首条 ws.data.inputs"语义不被回归。
+    assert actual_inputs == expected_inputs, (
+        f"inputs 部分 mismatch：\nactual={actual_inputs}\nexpected={expected_inputs}"
+    )
+
+    # 终态断言（确认 snapshot 不是 trivially 空）
+    assert actual_state.status == "completed"
+    assert actual_state.workflow_name == "snap_wf"
+    assert actual_state.node_status == {"a": "done"}
+
+
+def test_replay_state_and_inputs_idempotent(tmp_path):
+    """重放两次结果相同（reducer 纯函数幂等，SPEC §6.0 铁律 2）。"""
+    path = tmp_path / "idem.jsonl"
+    _write_tape(path, [
+        {"type": "workflow_started", "timestamp": 1.0, "node": None,
+         "session_id": None,
+         "data": {"workflow_name": "idem_wf", "inputs": {"k": "v"}}},
+        {"type": "node_started", "timestamp": 2.0, "node": "a",
+         "session_id": "s1", "data": {}},
+    ])
+    t1 = Tape(path, run_id="r1")
+    t2 = Tape(path, run_id="r1")
+    try:
+        s1, i1 = _replay_state_and_inputs(t1)
+        s2, i2 = _replay_state_and_inputs(t2)
+    finally:
+        t1.close()
+        t2.close()
+
+    assert (s1, i1) == (s2, i2)  # 重放两次完全一致
+
+
+def test_replay_state_and_inputs_first_ws_bad_second_ws_good(tmp_path, caplog):
+    """首条 ws inputs 坏 + 后续 ws inputs 好 → 返 {}（mirror _inputs_from_tape 早返语义）。
+
+    ``_inputs_from_tape`` 原实现：首条 ws 坏即早返 {}，看不到后续 ws。
+    ``_replay_state_and_inputs``：``ws_seen`` flag 在首条 ws 即锁定，后续 ws 不再读 inputs。
+    两者语义一致 —— 此测试锁住该 invariant，防 ``ws_seen`` flag 写错（如忘记加 not）。
+    """
+    path = tmp_path / "ws_first_bad.jsonl"
+    _write_tape(path, [
+        {"type": "workflow_started", "timestamp": 1.0, "node": None,
+         "session_id": None,
+         "data": {"workflow_name": "wf_a", "inputs": "first-bad-string"}},
+        {"type": "workflow_started", "timestamp": 2.0, "node": None,
+         "session_id": None,
+         "data": {"workflow_name": "wf_a", "inputs": {"second": "good"}}},
+    ])
+    tape = Tape(path, run_id="r1")
+    try:
+        with caplog.at_level("WARNING"):
+            _, inputs = _replay_state_and_inputs(tape)
+    finally:
+        tape.close()
+
+    # 首条 ws 坏 → 返 {}（即使后续 ws 有 dict inputs；mirror _inputs_from_tape 早返）
+    assert inputs == {}
+    # 首条 ws 的 WARN 触发一次（不应因后续 ws 再次 WARN）
+    ws_warns = [r for r in caplog.records if "workflow_started.data.inputs" in r.message]
+    assert len(ws_warns) == 1, (
+        f"首条 ws 坏应 WARN 一次（ws_seen 锁定后续不再判），实得 {len(ws_warns)} 次"
+    )
+
+
+# ── Orchestrator._inputs_from_tape wrapper parity（SPEC §3 O1a 薄封装契约）────
+
+
+def test_inputs_from_tape_wrapper_parity_with_replay_helper(tmp_path):
+    """SPEC §3 O1a：``Orchestrator._inputs_from_tape`` 薄封装返 ``_replay_state_and_inputs[1]``。
+
+    参数化覆盖三种 edge case（非 dict / 缺 key / 多 ws first-wins），锁住 wrapper
+    不会偏离 helper 行为。若有人误改 wrapper（如直接读最后一行 ws 而非首条），本测试会失败。
+    """
+    cases: list[tuple[str, list[dict], dict]] = [
+        (
+            "non_dict_inputs",
+            [{"type": "workflow_started", "timestamp": 1.0, "node": None,
+              "session_id": None,
+              "data": {"workflow_name": "wf", "inputs": "bad-string"}}],
+            {},
+        ),
+        (
+            "missing_inputs_key",
+            [{"type": "workflow_started", "timestamp": 1.0, "node": None,
+              "session_id": None,
+              "data": {"workflow_name": "wf"}}],
+            {},
+        ),
+        (
+            "multiple_ws_first_wins",
+            [
+                {"type": "workflow_started", "timestamp": 1.0, "node": None,
+                 "session_id": None,
+                 "data": {"workflow_name": "wf", "inputs": {"first": True}}},
+                {"type": "workflow_started", "timestamp": 2.0, "node": None,
+                 "session_id": None,
+                 "data": {"workflow_name": "wf", "inputs": {"second": True}}},
+            ],
+            {"first": True},
+        ),
+        (
+            "no_workflow_started",
+            [{"type": "node_started", "timestamp": 1.0, "node": "a",
+              "session_id": "s1", "data": {}}],
+            {},
+        ),
+    ]
+
+    for name, events, expected in cases:
+        path = tmp_path / f"{name}.jsonl"
+        _write_tape(path, events)
+        tape = Tape(path, run_id="r1")
+        try:
+            wrapper_inputs = Orchestrator._inputs_from_tape(tape)
+        finally:
+            tape.close()
+
+        tape2 = Tape(path, run_id="r1")
+        try:
+            helper_inputs = _replay_state_and_inputs(tape2)[1]
+        finally:
+            tape2.close()
+
+        assert wrapper_inputs == expected, (
+            f"[{name}] wrapper 返 {wrapper_inputs}，期望 {expected}"
+        )
+        assert wrapper_inputs == helper_inputs, (
+            f"[{name}] wrapper 与 helper 结果不一致：{wrapper_inputs} vs {helper_inputs}"
+        )
+
+
+# ── SPEC §7 O1a AC3：_inputs_from_tape 调用方 grep 守门 ─────────────────────
+
+
+def test_inputs_from_tape_callers_are_bounded():
+    """SPEC §7 O1a AC3 自动化守门：``_inputs_from_tape`` 生产调用点 ≤ 1（仅 ``_bare_instance``）。
+
+    ``advance_step`` 已直调 ``_replay_state_and_inputs`` 不再走 wrapper；wrapper 仅供
+    ``Orchestrator.from_tape`` 经 ``_bare_instance`` 使用。若未来 orca/ 内出现新调用点，
+    本测试 fail loud，提示 reviewer 确认是否：(a) 改直调 ``_replay_state_and_inputs``
+    合并遍历；或 (b) 显式接受新调用点（更新本测试上限）。
+
+    范围：仅扫 ``orca/`` 生产代码（tests/ 不计；spec-reviewer S2 同款 AST grep 守门模式）。
+    """
+    import ast
+    from pathlib import Path
+
+    orca_root = Path(__file__).resolve().parents[2] / "orca"
+    callers: list[str] = []
+    for py in orca_root.rglob("*.py"):
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            # 捕获两种形态：Orchestrator._inputs_from_tape(...) / cls._inputs_from_tape(...)
+            # / self._inputs_from_tape(...) —— 任何 ``X._inputs_from_tape`` attribute call。
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "_inputs_from_tape"):
+                callers.append(f"{py.name}:{node.lineno}")
+
+    # 上限 = 1（``_bare_instance`` 的 ``Orchestrator._inputs_from_tape(bus.tape)``）。
+    # ``advance_step`` 应直调 ``_replay_state_and_inputs``，**不**经 wrapper。
+    assert len(callers) <= 1, (
+        f"`_inputs_from_tape` 生产调用点应为 ≤1（仅 _bare_instance），实得 {callers}。"
+        f"新调用点应直调 `_replay_state_and_inputs` 合并遍历，或显式更新本测试上限。"
+    )

@@ -21,6 +21,7 @@ session_id 与 RunState（SPEC §3.4）：
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from orca.schema import Event, RunState
 
@@ -38,6 +39,59 @@ def replay_state(tape: Tape, since_seq: int = 0) -> RunState:
     for event in tape.replay(since_seq):
         state = apply_event(state, event)
     return state
+
+
+def _replay_state_and_inputs(
+    tape: Tape,
+) -> tuple[RunState, dict[str, Any]]:
+    """单次遍历 tape：既 fold ``RunState`` 又抽 ``workflow_started.data.inputs``。
+
+    性能（SPEC §3 O1a，包 P3）：合并 ``advance_step`` 内部两次全 tape 遍历
+    （``replay_state(tape)`` + ``Orchestrator._inputs_from_tape(tape)``）为一次。
+    ``apply_event`` reducer 只存 ``workflow_name``（**不存 inputs**）→ inputs 必须
+    在本函数里顺手抽（不能从 RunState 取）。
+
+    结果与拆分调用**逐字相等**（pure refactor，零行为变化）：
+      - ``state`` 部分 ≡ ``replay_state(tape)``（同一 reducer fold）。
+      - ``inputs`` 部分 ≡ ``Orchestrator._inputs_from_tape(tape)`` 语义：
+        * tape 无 ``workflow_started``（bootstrap 首调正常态）→ 静默返 {}，**不** WARN；
+        * tape 有 ``workflow_started`` 但 ``data.inputs`` 缺/非 dict → 返 {} + WARN
+          （真异常：残行截断 / 旧版 tape / 手改坏）；
+        * 正常 → 返**首条** ``workflow_started.data.inputs``（与 ``_inputs_from_tape``
+          在首条 ws 即 return 一致；后续 ws 不覆盖，罕见 retry 场景兼容）。
+
+    幂等：与 ``replay_state`` 同（reducer 纯函数 fold，重放两次结果相同）。
+
+    注 1：``_inputs_from_tape`` 改为薄封装调本函数取 inputs 部分（SPEC §3 O1a）。
+    注 2：**不接受 ``since_seq`` 参数**（与 ``replay_state`` 的差异）：state 部分天然
+    支持增量重放，但 inputs 必须**从 tape 起始**全扫才能找到 ``workflow_started``
+    （若 ``since_seq > seq(ws)`` 会静默错过 ws → inputs 返 {}，与 state 的增量语义
+    矛盾）。当前所有调用方（``advance_step`` / ``_inputs_from_tape``）都需全扫，
+    故砍 ``since_seq`` 防 footgun（YAGNI）。
+    """
+    state = RunState(run_id=tape.run_id, workflow_name="", status="pending")
+    inputs: dict[str, Any] = {}
+    ws_seen = False
+    for event in tape.replay():
+        state = apply_event(state, event)
+        # inputs 仅从首条 workflow_started 抽（mirror _inputs_from_tape 早返语义）；
+        # 后续 ws（罕见，retry 场景）忽略 —— 与 _inputs_from_tape 在首条 ws 即 return
+        # 行为等价。
+        if event.type == "workflow_started" and not ws_seen:
+            ws_seen = True
+            raw = event.data.get("inputs")
+            if isinstance(raw, dict):
+                inputs = raw
+            else:
+                # workflow_started 存在但 inputs 缺/坏 → 真异常，WARNING（mirror
+                # _inputs_from_tape：保持两种「取不到」的可观测区分，bootstrap 首调
+                # 的「无 ws」则不 WARN）。
+                logger.warning(
+                    "Tape %s 的 workflow_started.data.inputs 缺失或非 dict（实得 %r），"
+                    "回退空 inputs（后续 render {{ inputs.* }} 可能 UndefinedError）",
+                    getattr(tape, "path", "?"), type(raw).__name__,
+                )
+    return state, inputs
 
 
 def apply_event(state: RunState, event: Event) -> RunState:

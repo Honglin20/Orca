@@ -364,6 +364,106 @@ def test_advance_step_inline_fallback_vs_compact(tmp_path):
     )
 
 
+def _spy_tape_replay(tape) -> tuple[callable, list[int]]:
+    """spy ``tape.replay``：返回 ``(patched_replay, calls)``，calls 收集每次调用的 since_seq。
+
+    用 list 而非 nonlocal int：调用方拿到引用即可读取最终计数，避免闭包陷阱。
+    保 lazy 生成器：返回 ``original_replay(*args, **kwargs)`` 不消费迭代器。
+    """
+    calls: list[int] = []
+    original_replay = tape.replay
+
+    def counting_replay(since_seq: int = 0):
+        calls.append(since_seq)
+        return original_replay(since_seq)
+
+    tape.replay = counting_replay  # type: ignore[method-assign]
+    return counting_replay, calls
+
+
+def test_advance_step_bootstrap_traverses_tape_once(tmp_path):
+    """SPEC §3 O1a AC：``advance_step`` bootstrap 分支（pending）单次调用 tape 遍历 2→1。
+
+    重构前：``replay_state(tape)`` + ``Orchestrator._inputs_from_tape(tape)`` = 2 次遍历。
+    重构后：``_replay_state_and_inputs(tape)`` = 1 次遍历。
+    """
+    from orca.compile import load_workflow
+    from orca.events.tape import Tape
+    from orca.run.step import advance_step
+
+    wf_path = tmp_path / "wf.yaml"
+    wf_path.write_text(AGENT_WF_YAML, encoding="utf-8")
+    wf = load_workflow(wf_path)
+
+    # bootstrap 场景：空 tape（pending 分支）
+    tape = Tape(tmp_path / "tape_boot.jsonl", run_id="r1", resume=True)
+    _, calls = _spy_tape_replay(tape)
+
+    res = advance_step(tape, wf, run_id="r1", prompts_dir=None)
+    assert res.node == "a", "bootstrap 应推到 entry 节点 a"
+    # StepResult 形状断言：bootstrap 应 emit workflow_started + node_started(a) 两条
+    # （若 advance_step 在 _replay_state_and_inputs 之前 short-circuit 返回，emits 会空，
+    # 配合下方 calls==1 双锁，加速回归定位）。
+    assert len(res.emits) == 2, (
+        f"bootstrap 应 emit [workflow_started, node_started] 两条，实得 {len(res.emits)} 条"
+    )
+
+    assert len(calls) == 1, (
+        f"advance_step (bootstrap) 应只遍历 tape 一次（SPEC §3 O1a），实得 {len(calls)} 次"
+    )
+
+
+def test_advance_step_next_traverses_tape_once(tmp_path):
+    """SPEC §3 O1a AC：``advance_step`` advance 分支（output 给出）单次调用 tape 遍历 2→1。
+
+    next 路径有 output 推进：重构前同样 2 次遍历（replay_state + _inputs_from_tape），
+    重构后 1 次。两分支独立断言（pending/advance 各自走 merged call site）。
+    """
+    import asyncio
+
+    from orca.compile import load_workflow
+    from orca.events.tape import Tape
+    from orca.run.step import advance_step
+
+    wf_path = tmp_path / "wf.yaml"
+    wf_path.write_text(AGENT_WF_YAML, encoding="utf-8")
+    wf = load_workflow(wf_path)
+
+    # 预填 tape：workflow_started + node_started(a) → 推进 a 时 advance 分支
+    pre_tape = Tape(tmp_path / "tape_next.jsonl", run_id="r1")
+    try:
+        asyncio.run(pre_tape.append({
+            "type": "workflow_started", "timestamp": 1.0, "node": None,
+            "session_id": None,
+            "data": {"workflow_name": "cli_test_wf", "entry": "a",
+                     "inputs": {"task": "demo"}, "yaml_path": str(wf_path)},
+        }))
+        asyncio.run(pre_tape.append({
+            "type": "node_started", "timestamp": 2.0, "node": "a",
+            "session_id": "s1", "data": {"kind": "agent"},
+        }))
+    finally:
+        pre_tape.close()
+
+    # 重开只读 tape + spy
+    tape = Tape(tmp_path / "tape_next.jsonl", run_id="r1", resume=True)
+    _, calls = _spy_tape_replay(tape)
+
+    res = advance_step(tape, wf, run_id="r1", prompts_dir=None, output="out_from_a")
+    assert res.done is False, "a → b 推进，workflow 未完"
+    assert res.node == "b", "a 完成后应推到 b"
+    # StepResult 形状断言：advance 应 emit [node_completed(a), route_taken, node_started(b)]
+    # 三条（同上，配合 calls==1 双锁，加速回归定位）。
+    assert len(res.emits) == 3, (
+        f"advance 应 emit [node_completed, route_taken, node_started] 三条，"
+        f"实得 {len(res.emits)} 条"
+    )
+
+    assert len(calls) == 1, (
+        f"advance_step (advance/output) 应只遍历 tape 一次（SPEC §3 O1a），实得 {len(calls)} 次"
+    )
+
+
 def test_failure_output_schema_malformed(cwd_tmp):
     """output_schema 自身畸形（YAML 写错）→ 干净 workflow_failed（review 🔴，D-v8.x-2）。
 
