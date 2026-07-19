@@ -1,6 +1,6 @@
 // components/chart/ChartWidget.tsx —— 按 chart_type 分派（SPEC §2.4）。
 //
-// 7 种 chart_type：line/bar/area/scatter/pareto/radar/table。未知类型 fail loud（显示提示，不静默崩）。
+// 8 种 chart_type：line/bar/area/scatter/pareto/radar/table/heatmap。未知类型 fail loud（显示提示，不静默崩）。
 
 import type { ChartPayload } from "./types";
 import { LineChartWidget } from "./widgets/LineChartWidget";
@@ -10,6 +10,7 @@ import { ScatterChartWidget } from "./widgets/ScatterChartWidget";
 import { ParetoChartWidget } from "./widgets/ParetoChartWidget";
 import { RadarChartWidget } from "./widgets/RadarChartWidget";
 import { DataTableWidget } from "./widgets/DataTableWidget";
+import { HeatmapChartWidget } from "./widgets/HeatmapChartWidget";
 
 export function ChartWidget({ payload }: { payload: ChartPayload }) {
   switch (payload.chart_type) {
@@ -27,6 +28,8 @@ export function ChartWidget({ payload }: { payload: ChartPayload }) {
       return <RadarChartWidget payload={payload} />;
     case "table":
       return <DataTableWidget payload={payload} />;
+    case "heatmap":
+      return <HeatmapChartWidget payload={payload} />;
     default:
       // fail loud（未知类型不静默，显示提示让用户/开发者发现）
       return (

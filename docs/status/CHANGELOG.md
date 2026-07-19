@@ -5,6 +5,14 @@
 
 ---
 
+## [2026-07-19] chart 加第 8 种 chart_type `heatmap`（行×列矩阵 cell 着色）
+
+跨栈加 heatmap（量化实验对比矩阵：行=recipe，列=bitwidth，cell=accuracy）。**后端**（`_limits`/`_validate`/`_downsample`/`_render`）：加 `"heatmap"` 到共享 allowlist（两端同源）+ heatmap 必填 `x`/`y`/`value` fail loud + table 同款 top-N 降采样 + `render_chart` 加 `value` 参数。**前端**：`HeatmapChartWidget`（CSS Grid + 浅钢蓝→PALETTE[0] 钢蓝线性色阶，无新依赖）+ `ChartWidget` switch + `types.ts` 加 `value?: string`。**CLI**：修 CRITICAL DRY 违规（原 `chart_canvas.py` 复制 allowlist 漏更 heatmap → 改 import `_limits`）+ heatmap 终端 DataTable 降级。code-reviewer 两轮（C1/M1/M2/m1-m6 全闭环）：null/空串 cell 不 coerce 0 / 单值矩阵不除零 / 大数组 reduce 防 spread 栈溢出 / 色阶方向钉死 / 三端同源 contract test。78 后端 + 39 前端测试全过。Commit: `8a99e95`. 详见 [release note](../releases/2026-07-19-chart-heatmap-type.md)。
+
+## [2026-07-19] 量化能力集成启动：W1 敏感层分析 + nas/create-workflow 配套修复
+
+把 PatchTST_Optimal（ts_quant）量化能力集成成 Orca workflow 的第一块。**W1 `quant-sensitivity`**（`ca6bb60`）：单 agent + `run_sensitivity.py`（`analyze_low_precision_sensitive_layers` + `render_chart`），method 四选一、low_bits 默认 w4a4-mx 可配、按模型原始顺序可视化；ViT-Tiny 端到端实测通过（50 Linear 层 / 5 敏感层 / bar+table 推 web tape / done:completed）。实测修复 5 处：executor opencode→claude（当前环境 cc available）/ optional input 须 `[default]`/`[advanced]` 标签才能省略 / `module_types` 支持（CNN 需加 Conv）/ `ranked_layers` 真实字段名 `name` / `tars run --background` 的 `-i` 透传 bug → 改用 in-session `orca <wf> --inputs '{json}'`。配套：nas 4 agent 补 `.venv` activate fallback（`ce2158c`）；create-workflow 加 H8（description 须与 `orca list` 现有 wf 可区分，tars 选 wf 语义依据，`5e1f8f9`）；create-workflow validate 命令 orca→tars（in-session shell 无 validate 子命令，`7ee6276`）。ts_quant 已 editable 装入 conda orca env。路线图 W2（PTQ）/ W3（位宽曲线）/ W4（QAT）见 CURRENT。
+
 ## [2026-07-19] in-session 加固与性能（SPEC v4.1 整体交付：P3 + P1 + P5）
 
 SPEC [`2026-07-19-in-session-hardening-and-perf.md`](../specs/2026-07-19-in-session-hardening-and-perf.md) v4.1 驱动的 in-session 路径加固与性能优化。**架构铁律（用户）**：orca 管所有状态/决策/compliance，主 session 只调度（派子代理/传 output），不过度设计、不跨层耦合。经 3 轮 spec-reviewer + 用户原则简化（弃 host_session 豁免 / on_emit_success 回调 / 三态枚举 / prompt_file / compliance_warning 让主 session 反应）。
@@ -50,7 +58,7 @@ in-session 路径 detach 起 sidechain 守护，主动 tail CC sidechain jsonl /
 
 ## [2026-07-17] orca list 瘦身 + inputs_schema 移到启动命令
 
-砍 `orca list` 的 `inputs_schema`（选 wf 阶段 84% 字节噪音；`agent-struct-exploration` 单 wf 21 input 字段占该 wf 输出 90%）→ 只返 `{name, description}`；schema 改由启动命令 `orca <wf>` 不带 `--inputs` 按需带出（带则真启动），**零新命令**（命令数 7 / 保留字 / CI 禁 describe 全不变）。改动：`cli.py` `list_workflows` 砍字段 + `bootstrap` 加 `inputs is None` 纯只读分流（不建 run/tape/marker）+ `catalog._inputs_to_schema_list` 公开化为 `inputs_schema_list`；SKILL 三步重组（list 选 → `<wf>` 看 schema → `<wf> --inputs` 启动）；SPEC §2.1/§2.3/§4.2/决策5/§8/§11 同步；测试 list 断言重写（按名定位，**顺手解 `~/.orca/workflows` 隔离缺陷**）+ 新增 schema 返回测试 + ~15 处 bootstrap 补 `--inputs "{}"`（3 个 `_bootstrap` helper 一处覆盖）。list 字节 4010→636（降 84%）；268 + 185 测试全过；`tars validate` 3 wf 过；code-reviewer 0 🔴（🟡 SPEC stale + 🟢 优化全修）。Commit: `<SHA>`。详见 [release note](../releases/2026-07-17-orca-list-slim-schema-via-start-cmd.md)。
+砍 `orca list` 的 `inputs_schema`（选 wf 阶段 84% 字节噪音；`agent-struct-exploration` 单 wf 21 input 字段占该 wf 输出 90%）→ 只返 `{name, description}`；schema 改由启动命令 `orca <wf>` 不带 `--inputs` 按需带出（带则真启动），**零新命令**（命令数 7 / 保留字 / CI 禁 describe 全不变）。改动：`cli.py` `list_workflows` 砍字段 + `bootstrap` 加 `inputs is None` 纯只读分流（不建 run/tape/marker）+ `catalog._inputs_to_schema_list` 公开化为 `inputs_schema_list`；SKILL 三步重组（list 选 → `<wf>` 看 schema → `<wf> --inputs` 启动）；SPEC §2.1/§2.3/§4.2/决策5/§8/§11 同步；测试 list 断言重写（按名定位，**顺手解 `~/.orca/workflows` 隔离缺陷**）+ 新增 schema 返回测试 + ~15 处 bootstrap 补 `--inputs "{}"`（3 个 `_bootstrap` helper 一处覆盖）。list 字节 4010→636（降 84%）；268 + 185 测试全过；`tars validate` 3 wf 过；code-reviewer 0 🔴（🟡 SPEC stale + 🟢 优化全修）。Commit: `8a99e95`。详见 [release note](../releases/2026-07-17-orca-list-slim-schema-via-start-cmd.md)。
 
 ## [2026-07-17] B1 前端渲染 node_completed output（子 agent 输出推送 web）
 

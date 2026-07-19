@@ -1,13 +1,14 @@
 """tests/chart/test_validate.py —— ChartPayload 校验（phase-13 SPEC §7.2）。
 
 覆盖意图（非仅行为）：
-  - 合法 payload 通过（line/bar/area/scatter/pareto/radar/table 7 种各 1 例）
+  - 合法 payload 通过（line/bar/area/scatter/pareto/radar/table/heatmap 8 种各 1 例）
   - chart_type 未知 → raise（防 client 拼错字 → 落 tape 脏数据）
   - data 非 list → raise（防传 dict / 单行）
   - label/title 空或非 str → raise（dedup 维度）
   - pareto_direction 非 max/min → raise（types.ts 契约）
   - columns 非 list[str] → raise
   - x/y/hue 非法类型 → raise
+  - heatmap 缺 value / value 非法类型 → raise（fail loud）
 """
 
 from __future__ import annotations
@@ -27,14 +28,26 @@ def test_validate_line_minimal_passes():
     })
 
 
-def test_validate_all_seven_chart_types_pass():
-    """7 种 chart_type 各 1 例都通过（types.ts ChartType 覆盖）。"""
-    for ct in ("line", "bar", "area", "scatter", "pareto", "radar", "table"):
+def test_validate_all_eight_chart_types_pass():
+    """8 种 chart_type 各 1 例都通过（types.ts ChartType 覆盖）。"""
+    # heatmap 必带 x/y/value（chart_type 特有校验，见下 test_validate_heatmap_*）。
+    cases = {
+        "line": {},
+        "bar": {},
+        "area": {},
+        "scatter": {},
+        "pareto": {},
+        "radar": {},
+        "table": {},
+        "heatmap": {"x": "col", "y": "row", "value": "v"},
+    }
+    for ct, extra in cases.items():
         validate_payload({
             "chart_type": ct,
             "data": [{"x": 1, "y": 2}],
             "label": "g1",
             "title": f"t-{ct}",
+            **extra,
         })
 
 
@@ -42,7 +55,7 @@ def test_validate_unknown_chart_type_raises():
     """未知 chart_type → raise（防 client 拼错字 → 落 tape 脏数据）。"""
     with pytest.raises(ValueError, match="未知 chart_type"):
         validate_payload({
-            "chart_type": "heatmap",  # 不在 7 种
+            "chart_type": "bubble",  # 不在 8 种
             "data": [],
             "label": "g",
             "title": "t",
@@ -144,3 +157,110 @@ def test_validate_x_y_hue_wrong_type_raises():
                 "title": "t",
                 field: 123,
             })
+
+
+# ── heatmap value / x / y（chart_type 特有校验，fail loud）──
+
+
+def test_validate_heatmap_without_value_raises():
+    """heatmap 缺 value 字段 → raise（cell 着色字段名必填，防 agent 误调）。"""
+    with pytest.raises(ValueError, match="heatmap.*value"):
+        validate_payload({
+            "chart_type": "heatmap",
+            "data": [{"r": "a", "b": "w4", "v": 0.9}],
+            "label": "g",
+            "title": "t",
+            "x": "b",
+            "y": "r",
+            # value 故意缺
+        })
+
+
+def test_validate_heatmap_without_x_raises():
+    """heatmap 缺 x → raise（列轴字段名必填，防 pivot 退化 1×1）。"""
+    with pytest.raises(ValueError, match="heatmap.*x"):
+        validate_payload({
+            "chart_type": "heatmap",
+            "data": [{"r": "a", "b": "w4", "v": 0.9}],
+            "label": "g",
+            "title": "t",
+            "y": "r",
+            "value": "v",
+            # x 故意缺
+        })
+
+
+def test_validate_heatmap_without_y_raises():
+    """heatmap 缺 y → raise（行轴字段名必填，防 pivot 退化 1×1）。"""
+    with pytest.raises(ValueError, match="heatmap.*y"):
+        validate_payload({
+            "chart_type": "heatmap",
+            "data": [{"r": "a", "b": "w4", "v": 0.9}],
+            "label": "g",
+            "title": "t",
+            "x": "b",
+            "value": "v",
+            # y 故意缺
+        })
+
+
+def test_validate_heatmap_empty_value_raises():
+    """heatmap + value='' → raise（显式空串等同未传）。"""
+    with pytest.raises(ValueError, match="heatmap.*value"):
+        validate_payload({
+            "chart_type": "heatmap",
+            "data": [],
+            "label": "g",
+            "title": "t",
+            "x": "b",
+            "y": "r",
+            "value": "",
+        })
+
+
+def test_validate_heatmap_value_non_str_raises():
+    """heatmap + value 非法类型（int）→ raise（type 校验）。"""
+    with pytest.raises(ValueError, match="value 必须为 str"):
+        validate_payload({
+            "chart_type": "heatmap",
+            "data": [],
+            "label": "g",
+            "title": "t",
+            "x": "b",
+            "y": "r",
+            "value": 123,
+        })
+
+
+def test_validate_heatmap_with_value_passes():
+    """heatmap + value/x/y 非空 str → 通过（happy path）。"""
+    validate_payload({
+        "chart_type": "heatmap",
+        "data": [
+            {"recipe": "smooth", "bitwidth": "w4a4", "accuracy": 0.92},
+        ],
+        "label": "g",
+        "title": "t",
+        "x": "bitwidth",
+        "y": "recipe",
+        "value": "accuracy",
+    })
+
+
+def test_validate_value_optional_for_non_heatmap():
+    """非 heatmap chart_type + 不传 value → 通过（value 仅 heatmap 必填）。"""
+    # line + 完全不传 value（应通过）
+    validate_payload({
+        "chart_type": "line",
+        "data": [{"x": 1, "y": 2}],
+        "label": "g",
+        "title": "t",
+    })
+    # scatter + value=''（空串允许，scatter 不消费此字段）
+    validate_payload({
+        "chart_type": "scatter",
+        "data": [{"x": 1, "y": 2}],
+        "label": "g",
+        "title": "t",
+        "value": "",
+    })

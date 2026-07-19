@@ -1,7 +1,7 @@
 """chart_canvas.py —— 单个 ChartPayload 渲染器（phase-12 SPEC §1.2 §6.4）。
 
 按 ``chart_type`` 分派：line/bar/area/scatter/pareto → plotext braille；table →
-Textual ``DataTable``；radar → DataTable 降级 +「见 Web」提示；未知 ``chart_type``
+Textual ``DataTable``；radar / heatmap → DataTable 降级 +「见 Web」提示；未知 ``chart_type``
 → fail loud（对齐 web ``ChartWidget.tsx:30``）。
 
 设计原则：
@@ -9,8 +9,10 @@ Textual ``DataTable``；radar → DataTable 降级 +「见 Web」提示；未知
     line/bar/area/scatter/pareto **必须 braille 渲染**（SPEC §6.1）。缺包仅开发期
     monkeypatch 测试降级（SPEC §6.4），生产路径不降级。
   - **壳无真相**：``render_payload(payload)`` 只渲染传入的 dict；不订阅、不读 tape。
-  - **依赖单向**：仅 import textual + plotext（探测式）+ stdlib；**不** import
-    ``orca.exec`` / ``orca.run`` / ``orca.iface.mcp`` / chart-producer（SPEC §0.3）。
+  - **依赖单向**：仅 import textual + plotext（探测式）+ stdlib + ``orca.chart._limits``
+    纯常量层（允许：_limits 零依赖、是 chart 包常量真相源，与 events/chart_ingestor 同模式）；
+    **不** import ``orca.exec`` / ``orca.run`` / ``orca.iface.mcp`` / chart-producer 渲染逻辑
+    （SPEC §0.3）。
 """
 
 from __future__ import annotations
@@ -19,6 +21,8 @@ import logging
 from typing import Any
 
 from textual.widgets import Static
+
+from orca.chart._limits import ALLOWED_CHART_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +41,10 @@ except Exception:  # noqa: BLE001 —— 缺包是开发期降级路径，生产
         "生产 install 含 textual-plotext，不应缺包。",
     )
 
-# 7 种合法 chart_type（逐字复用 web ``types.ts`` ChartType，SPEC §2.1 DRY）。
-_CHART_TYPES = {"line", "bar", "area", "scatter", "pareto", "radar", "table"}
-# 走 plotext braille 渲染的类型（SPEC §1.2 决策）。
+# chart_type 集合来自 ``_limits.ALLOWED_CHART_TYPES``（单一来源，与 web/backend/events/ingestor
+# 同源；防三端 drift）。复制 allowlist 是项目硬规则明确禁止（_limits.py docstring）。
+_CHART_TYPES = ALLOWED_CHART_TYPES
+# 走 plotext braille 渲染的类型（SPEC §1.2 决策；radar/heatmap/table 不在其中）。
 _PLOTEXT_TYPES = {"line", "bar", "area", "scatter", "pareto"}
 
 
@@ -93,6 +98,13 @@ class ChartCanvas(Static):
             # 终端性价比低 → DataTable 降级 +「见 Web」提示（SPEC §1.2 决策）。
             self._render_table(
                 data, payload.get("columns"), title, hint="（radar 终端降级，完整图见 Web）",
+            )
+        elif ctype == "heatmap":
+            # 热力图终端性价比低（行×列色阶在文本态不可读）→ DataTable 降级 +「见 Web」
+            # 提示（与 radar 同策略，SPEC §1.2 决策）。完整色阶渲染见 Web 面板。
+            self._render_table(
+                data, payload.get("columns"), title,
+                hint="（heatmap 终端降级，完整色阶矩阵见 Web）",
             )
         elif ctype in _PLOTEXT_TYPES:
             if _PLOTEXT_OK:

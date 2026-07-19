@@ -1,7 +1,7 @@
-"""_downsample.py —— 6 种 chart_type 的降采样策略（phase-13 SPEC §5.1）。
+"""_downsample.py —— 8 种 chart_type 的降采样策略（phase-13 SPEC §5.1）。
 
 回答「data 行数 > max_points 时怎么降采样才不破坏语义？」：每种 chart_type 各自的策略，
-line/area/scatter 按 hue 分组、bar/pareto 按 x 聚合、table 取前 N、radar 不降采样。
+line/area/scatter 按 hue 分组、bar/pareto 按 x 聚合、table/heatmap 取前 N、radar 不降采样。
 
 策略表（SPEC §5.1）：
   - **line / area**：按 hue 分组各自降采样 → 每组 ≤ ``max_points // hue_cardinality``；
@@ -9,7 +9,8 @@ line/area/scatter 按 hue 分组、bar/pareto 按 x 聚合、table 取前 N、ra
   - **scatter**：按 hue 分组各自均匀随机抽样（保分布）。
   - **bar / pareto**：按 x 分组聚合（sum），取 top ``max_points`` 个 x。hue 存在时按 (x, hue)
     聚合。
-  - **table**：取前 ``max_points`` 行（top-N 语义，不取 head+tail 以免破坏用户排序）。
+  - **table / heatmap**：取前 ``max_points`` 行（top-N 语义，不取 head+tail 以免破坏用户
+    排序；heatmap 长格式 record 通常远小于 max_points，cap 仅防极端）。
   - **radar**：不降采样（数据点本质少）。
 
 **透明降采样**：不 raise，仅由 ``_render.render_chart`` 写 stderr warning（原数据保留在 script）。
@@ -22,7 +23,9 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from orca.chart._limits import ALLOWED_CHART_TYPES
+# 注：不 import ``ALLOWED_CHART_TYPES`` —— 分派按 chart_type 字面量（chart_type 集合稳定，
+# 8 种；如未来新增需扩展策略表，单点改本文件）。常量真相源在 ``_limits``，与 downsample
+# 分派解耦（避免「import 了但不用」误导，下次加 chart_type 时给人「已接好」的错觉）。
 
 
 def downsample(
@@ -34,8 +37,9 @@ def downsample(
     """按 SPEC §5.1 策略表降采样。
 
     Args:
-        chart_type: ``line`` / ``bar`` / ``area`` / ``scatter`` / ``pareto`` / ``radar`` / ``table``。
-            未知 chart_type 不降采样（``validate_payload`` 已先行 raise，此处兜底防误调）。
+        chart_type: ``line`` / ``bar`` / ``area`` / ``scatter`` / ``pareto`` / ``radar`` / ``table``
+            / ``heatmap``。未知 chart_type 不降采样（``validate_payload`` 已先行 raise，此处兜底
+            防误调）。
         data: 原始行列表。
         max_points: 目标上限。若 ``len(data) <= max_points`` 直接返回原 data。
         hue: hue 字段名（line/area/scatter 多系列着色用）。空串视为单系列。
@@ -51,7 +55,9 @@ def downsample(
         return _by_hue_groups(chart_type, data, max_points, hue, _uniform_sample)
     if chart_type in ("bar", "pareto"):
         return _aggregate_by_x(data, max_points, hue)
-    if chart_type == "table":
+    if chart_type in ("table", "heatmap"):
+        # table 与 heatmap 都是扁平 record array，top-N 截断保用户排序 / 矩阵完整性。
+        # heatmap 长格式通常远 < max_points（行×列单元格数），cap 仅防极端输入。
         return data[:max_points]
     if chart_type == "radar":
         return data

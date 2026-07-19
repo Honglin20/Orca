@@ -118,6 +118,35 @@ def test_downsample_table_takes_first_n_preserve_user_order():
     assert out[-1]["i"] == 1999  # 前 2000 行，不是 head+tail
 
 
+# ── heatmap：取前 N（与 table 同策略，长格式 cell record）────────────────────
+
+
+def test_downsample_heatmap_takes_first_n_like_table():
+    """heatmap 取前 max_points 行（与 table 同策略，SPEC §5.1）。
+
+    意图：heatmap 是长格式扁平 record（每行一个 cell），矩阵通常远 < max_points；
+    极端输入时 top-N 截断保用户排序（与 table 一致）。
+    """
+    data = [
+        {"recipe": f"r-{i}", "bitwidth": "w4", "accuracy": float(i) * 0.01}
+        for i in range(5000)
+    ]
+    out = downsample("heatmap", data, max_points=2000)
+    assert len(out) == 2000
+    assert out[0]["recipe"] == "r-0"
+    assert out[-1]["recipe"] == "r-1999"
+
+
+def test_downsample_heatmap_small_data_returns_original():
+    """heatmap data ≤ max_points → 返回原 data（不裁剪，常见场景）。"""
+    data = [
+        {"recipe": "smooth", "bitwidth": "w4a4", "accuracy": 0.92},
+        {"recipe": "smooth", "bitwidth": "w8a8", "accuracy": 0.95},
+    ]
+    out = downsample("heatmap", data, max_points=2000)
+    assert out == data
+
+
 # ── radar：不降采样 ──────────────────────────────────────────────────────────
 
 

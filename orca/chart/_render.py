@@ -46,6 +46,7 @@ def render_chart(
     pareto_direction: str = "",
     pareto_x_direction: str = "",
     pareto_y_direction: str = "",
+    value: str = "",
     max_points: int = DEFAULT_MAX_POINTS,
 ) -> int:
     """向当前 Orca run 推送一张图（SPEC §4.1 / §4.2）。返回分配的 seq。
@@ -56,14 +57,19 @@ def render_chart(
     同 ``label + title`` 的后续调用 → 旧图被前端替换（实时更新语义，phase-9d §2.7 dedup）。
 
     Args:
-        chart_type: ``line`` / ``bar`` / ``area`` / ``scatter`` / ``pareto`` / ``radar`` / ``table``。
+        chart_type: ``line`` / ``bar`` / ``area`` / ``scatter`` / ``pareto`` / ``radar`` / ``table``
+            / ``heatmap``。
         data: 扁平 record array。
         label: 分组键（dedup 维度 1）。
         title: 图标题（dedup 维度 2，同 label 下唯一）。
         x / y / hue: 坐标轴 / 着色字段名。
+            heatmap：``x`` = 列轴字段（如 bitwidth）、``y`` = 行轴字段（如 recipe），均**必填**
+            （``validate_payload`` fail loud 拒收空 x/y）。
         columns: table 列名（派生用）。
         pareto_direction / pareto_x_direction / pareto_y_direction: pareto 前沿方向
             （``max`` / ``min`` / 空）。
+        value: heatmap cell 着色字段名（如 accuracy）。**chart_type='heatmap' 时必填**——
+            ``validate_payload`` fail loud 拒收空 value。其它 chart_type 忽略此参数。
         max_points: 自动降采样阈值（默认 2000）。
 
     Returns:
@@ -110,6 +116,7 @@ def render_chart(
         "x": x,
         "y": y,
         "hue": hue,
+        "value": value,
     }
     if columns is not None:
         payload["columns"] = columns

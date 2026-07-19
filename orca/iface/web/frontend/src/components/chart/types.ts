@@ -1,7 +1,7 @@
 // components/chart/types.ts —— ChartPayload 契约（SPEC §2.2，迁移自 AgentHarness 扁平 record-array spec）。
 //
 // claude 调 render_chart MCP 工具（phase 10）→ executor emit custom 事件 → tape。
-// 9d 范围 7 种 chart_type：line/bar/area/scatter/pareto/radar/table。
+// 9d 范围 8 种 chart_type：line/bar/area/scatter/pareto/radar/table/heatmap。
 
 export type ChartType =
   | "line"
@@ -10,7 +10,8 @@ export type ChartType =
   | "scatter"
   | "pareto"
   | "radar"
-  | "table";
+  | "table"
+  | "heatmap";
 
 export interface ChartPayload {
   chart_type: ChartType;
@@ -28,6 +29,12 @@ export interface ChartPayload {
   hue?: string;
   /** 散点大小（scatter 类型作气泡图；ZAxis dataKey 映射，SPEC §5.4 / §0 D3） */
   size?: string;
+  /**
+   * heatmap cell 着色字段名（长格式 record 一个 cell：``{recipe, bitwidth, accuracy}``）。
+   * 渲染器按 (y, x) pivot 成网格，按 value 做色阶（color scale）。chart_type='heatmap' 时必填
+   * （后端 ``_validate`` fail loud 拒收空 value）。参考 scatter ``size`` 的字段名映射模式。
+   */
+  value?: string;
   /**
    * 多系列列名（备用扩展位，SPEC §5.4 列入契约但当前 7 widget 均用 ``hue`` 表达多系列，
    * 无 widget 消费 ``series``）。保留字段：未来若引入双轴 / 复合 chart（如 AH

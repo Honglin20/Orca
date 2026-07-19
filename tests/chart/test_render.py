@@ -177,7 +177,7 @@ def test_render_sock_path_too_long_raises(orca_env, monkeypatch):
 def test_render_unknown_chart_type_raises_validation_error(orca_env):
     """未知 chart_type → ValueError（validate_payload fail loud）。"""
     with pytest.raises(ValueError, match="未知 chart_type"):
-        render_chart(chart_type="heatmap", data=[], label="g", title="t")
+        render_chart(chart_type="bubble", data=[], label="g", title="t")
 
 
 def test_render_empty_label_raises_validation_error(orca_env):
@@ -328,3 +328,182 @@ def test_render_max_message_bytes_is_2mb():
 def test_render_sock_path_max_is_90():
     """SPEC §7.7 SOCK_PATH_MAX = 90。"""
     assert SOCK_PATH_MAX == 90
+
+
+# ── heatmap（第 8 种 chart_type）─────────────────────────────────────────────
+
+
+def test_render_heatmap_success_passes_value_field(orca_env):
+    """heatmap + value 非空 → 正常 emit，payload 含 value 字段 + 完整 cell records。
+
+    意图：happy path 验证 heatmap 数据契约（长格式 record + value 着色字段名透传）。
+    """
+    sock_mock, _ = _make_socket_mock(b'{"ok": true, "seq": 7}\n')
+    cells = [
+        {"recipe": "smooth+gptq", "bitwidth": "w4a4-mx", "accuracy": 0.92},
+        {"recipe": "smooth+gptq", "bitwidth": "w8a8", "accuracy": 0.95},
+        {"recipe": "rtn", "bitwidth": "w4a4-mx", "accuracy": 0.81},
+    ]
+    with patch("orca.chart._render.socket.socket", return_value=sock_mock):
+        seq = render_chart(
+            chart_type="heatmap",
+            data=cells,
+            label="quant",
+            title="acc-matrix",
+            x="bitwidth",
+            y="recipe",
+            value="accuracy",
+        )
+    assert seq == 7
+    sent = json.loads(sock_mock.sendall.call_args[0][0].decode("utf-8"))
+    payload = sent["payload"]
+    assert payload["chart_type"] == "heatmap"
+    assert payload["value"] == "accuracy"
+    assert payload["x"] == "bitwidth"
+    assert payload["y"] == "recipe"
+    assert payload["data"] == cells
+
+
+def test_render_heatmap_without_value_raises(orca_env):
+    """heatmap 缺 value → ValueError（fail loud：heatmap 必有着色字段）。
+
+    意图：agent 误调（忘传 value）→ 立即报错可见可修，不静默丢。
+    """
+    with pytest.raises(ValueError, match="heatmap.*value"):
+        render_chart(
+            chart_type="heatmap",
+            data=[{"recipe": "a", "bitwidth": "w4", "accuracy": 0.9}],
+            label="g",
+            title="t",
+            x="bitwidth",
+            y="recipe",
+            # 故意不传 value
+        )
+
+
+def test_render_heatmap_without_x_raises(orca_env):
+    """heatmap 缺 x → ValueError（fail loud：列轴字段必填，防 pivot 退化 1×1）。"""
+    with pytest.raises(ValueError, match="heatmap.*x"):
+        render_chart(
+            chart_type="heatmap",
+            data=[{"r": "a", "b": "w4", "v": 0.9}],
+            label="g",
+            title="t",
+            y="r",
+            value="v",
+            # 故意不传 x
+        )
+
+
+def test_render_heatmap_without_y_raises(orca_env):
+    """heatmap 缺 y → ValueError（fail loud：行轴字段必填，防 pivot 退化 1×1）。"""
+    with pytest.raises(ValueError, match="heatmap.*y"):
+        render_chart(
+            chart_type="heatmap",
+            data=[{"r": "a", "b": "w4", "v": 0.9}],
+            label="g",
+            title="t",
+            x="b",
+            value="v",
+            # 故意不传 y
+        )
+
+
+def test_render_heatmap_empty_value_raises(orca_env):
+    """heatmap + value='' → ValueError（显式空串等同未传，fail loud）。"""
+    with pytest.raises(ValueError, match="heatmap.*value"):
+        render_chart(
+            chart_type="heatmap",
+            data=[{"a": 1}],
+            label="g",
+            title="t",
+            x="b",
+            y="r",
+            value="",
+        )
+
+
+def test_render_heatmap_value_non_str_raises(orca_env):
+    """heatmap + value 非法类型（int）→ ValueError（type 校验 fail loud）。"""
+    with pytest.raises(ValueError, match="value 必须为 str"):
+        render_chart(
+            chart_type="heatmap",
+            data=[{"a": 1}],
+            label="g",
+            title="t",
+            x="b",
+            y="r",
+            value=123,  # type: ignore[arg-type]  # 故意传错类型
+        )
+
+
+def test_render_heatmap_downsample_caps_top_n(orca_env):
+    """heatmap data 行数 > max_points → top-N 截断（与 table 同策略，SPEC §5.1）。"""
+    cells = [
+        {"r": f"recipe-{i}", "b": "w4", "v": float(i)}
+        for i in range(100)
+    ]
+    sock_mock, _ = _make_socket_mock(b'{"ok": true, "seq": 1}\n')
+    with patch("orca.chart._render.socket.socket", return_value=sock_mock):
+        render_chart(
+            chart_type="heatmap",
+            data=cells,
+            label="g",
+            title="t",
+            x="b",
+            y="r",
+            value="v",
+            max_points=10,
+        )
+    sent = json.loads(sock_mock.sendall.call_args[0][0].decode("utf-8"))
+    # top-N 截断：data 行数 ≤ 10
+    assert len(sent["payload"]["data"]) <= 10
+
+
+# ── 两端同源：ALLOWED_CHART_TYPES 一致性（防 drift）────────────────────────────
+
+
+def test_allowed_chart_types_contains_all_8_types():
+    """ALLOWED_CHART_TYPES 含全部 8 种 chart_type（含 heatmap）。
+
+    意图：两端同源铁律的 contract test——client lib 与 server ingestor 都 import 同一
+    ``_limits.ALLOWED_CHART_TYPES``，此 test 把契约钉死：加新 type 必更新常量。
+    """
+    from orca.chart._limits import ALLOWED_CHART_TYPES
+    expected = {"line", "bar", "area", "scatter", "pareto", "radar", "table", "heatmap"}
+    assert set(ALLOWED_CHART_TYPES) == expected
+    # 8 种（防误删 / 误加）
+    assert len(ALLOWED_CHART_TYPES) == 8
+
+
+def test_chart_ingestor_and_render_share_MAX_MESSAGE_BYTES_constant():
+    """ingestor (server) 与 _render (client) 共享同一 MAX_MESSAGE_BYTES 对象（防 drift）。
+
+    意图：钉死两端同源常量——ingestor ``from orca.chart._limits import MAX_MESSAGE_BYTES``
+    与 _render 也 import 同一常量。本 test 防有人复制到 events/ 下造成 drift。
+    名实相符：本 test 只断 MAX_MESSAGE_BYTES（ingestor 不 import ALLOWED_CHART_TYPES，
+    因它不校验 chart_type）。
+    """
+    from orca.events import chart_ingestor
+    from orca.chart import _limits
+    from orca.chart import _render
+    assert chart_ingestor.MAX_MESSAGE_BYTES is _limits.MAX_MESSAGE_BYTES
+    assert _render.MAX_MESSAGE_BYTES is _limits.MAX_MESSAGE_BYTES
+
+
+def test_cli_chart_canvas_uses_shared_allowlist():
+    """CLI chart_canvas 必须从 ``_limits`` 复用 ALLOWED_CHART_TYPES，不许复制（防三端 drift）。
+
+    意图：钉死三端同源——CLI / web / events 都从 ``orca.chart._limits`` 取 chart_type 集合。
+    本 test 是回归守门：防止「图省事复制 allowlist」的硬规则违规重演（原 ``chart_canvas.py``
+    持有 ``_CHART_TYPES = {...}`` 字面量，与 ``_limits`` 复制 → 加 heatmap 时漏更 → CLI 把
+    heatmap 误报「未知 chart_type」）。
+    """
+    from orca.iface.cli.widgets import chart_canvas
+    from orca.chart import _limits
+    # CLI ``_CHART_TYPES`` 必须是 ``_limits.ALLOWED_CHART_TYPES`` 的引用（同对象）。
+    # 允许 ``is``（强）或 ``==``（弱，复制但同步）；首选 ``is`` 钉死零复制。
+    assert chart_canvas._CHART_TYPES is _limits.ALLOWED_CHART_TYPES, (
+        "CLI _CHART_TYPES 必须直接引用 _limits.ALLOWED_CHART_TYPES（禁止复制 allowlist）。"
+        f"got: {chart_canvas._CHART_TYPES!r}"
+    )

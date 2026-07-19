@@ -6,7 +6,7 @@
     （spec §2.4 Conductor Log View 风格 + EVENT_LEVEL 表派生）
   - Header stats 渲染（done/total/awaiting）
   - ChartPanel：同 label+title 幂等替换 / label 分组 / all_charts / 确定性 fold
-  - ChartCanvas：7 chart_type 分派 / braille / 降级 / fail loud
+  - ChartCanvas：8 chart_type 分派 / braille / 降级 / fail loud
   - NodeDetail：6 kind 永不空白 / ● 徽标 / executor-agnostic 流式
 """
 
@@ -1066,11 +1066,11 @@ class TestChartPanel:
         run_async(scenario())
 
 
-# ── ChartCanvas（分派 / braille / 降级 / fail loud）SPEC §1.2 §6.1 §6.4 ─────
+# ── ChartCanvas（分派 / braille / 降级 / fail loud；8 chart_type）SPEC §1.2 §6.1 §6.4 ─────
 
 
 class TestChartCanvas:
-    """ChartCanvas：7 chart_type 分派 + braille + 降级 + fail loud。"""
+    """ChartCanvas：8 chart_type 分派 + braille + 降级 + fail loud。"""
 
     @pytest.mark.parametrize("ctype", ["line", "bar", "area", "scatter", "pareto"])
     def test_plotext_types_render_braille(self, ctype):
@@ -1125,6 +1125,28 @@ class TestChartCanvas:
                 await pilot.pause()
                 text = getattr(canvas, "_Static__content", "")
                 assert "见 Web" in text or "radar" in text.lower()
+        run_async(scenario())
+
+    def test_heatmap_degrades_to_table_with_hint(self):
+        """heatmap → DataTable 降级 +「见 Web」提示（终端色阶矩阵不可读，与 radar 同策略）。"""
+        canvas = ChartCanvas()
+
+        async def scenario():
+            async with _Harness([canvas]).run_test() as pilot:
+                canvas.render_payload({
+                    "chart_type": "heatmap", "label": "L", "title": "T",
+                    "x": "bitwidth", "y": "recipe", "value": "accuracy",
+                    "data": [
+                        {"recipe": "smooth", "bitwidth": "w4", "accuracy": 0.92},
+                    ],
+                })
+                await pilot.pause()
+                await pilot.pause()
+                text = getattr(canvas, "_Static__content", "")
+                # 提示含 heatmap + 见 Web；DataTable 渲染了 cell value
+                assert "heatmap" in text.lower()
+                assert "见 Web" in text
+                assert "0.92" in text or "0.920" in text
         run_async(scenario())
 
     def test_unknown_chart_type_fail_loud(self):
