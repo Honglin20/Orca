@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-19] O1a —— `advance_step` 内合并两次 tape 全遍历为一次（in-session 性能 SPEC v3.1 §3 O1a，包 P3）
+
+`advance_step` 此前两次全 tape 遍历（`replay_state(tape)` + `Orchestrator._inputs_from_tape(tape)`），合并为单次 `_replay_state_and_inputs(tape) -> (RunState, dict)`（落 `events/replay.py`，与 reducer 同文件，单次遍历既 fold state 又抽首条 ws.data.inputs）。`advance_step` 单次调用 tape 迭代 2→1；`_inputs_from_tape` 改薄封装保留对外 API（`from_tape`/`_bare_instance` 调用方零回归）；`replay_state` 对外 API 不变。pure refactor（state+inputs 逐字相等，决策三分支/emit 序列零改）。SPEC §1 铁律 + §7 O1a AC 逐条达成；code-reviewer impl+coverage 两轮 0 🔴/0 🟡（5 🟢 全修：砍 `since_seq` 防 footgun / snapshot 改固定值去自证 / 加 first-ws-bad 测试 / wrapper parity 参数化 / AST grep 守门 AC3）；654 测试全过（events+run+iface/in_session，+13 新测试）。Commit: `<SHA 见 git log>`。详见 [release note](../releases/2026-07-19-o1a-tape-traversal-fold.md)。
+
 ## [2026-07-19] Web 界面视觉优化（P0–P4：token 收口 / lucide / 左栏增强 / TopBar+WS+暗色 / 三栏统一）
 
 纯前端（后端零改、testid 与功能接口保留）。5 阶段：**P0** token 收口（179→26 hits 全白名单 NODE_STATUS_HEX/PALETTE/LEVEL_TEXT_COLOR/DiffView，status-style.ts DRY 出口）/ **P1** lucide 统一图标库（全量替换 emoji，保留 ▎ 流式光标，test oracle 迁移）/ **P2** AgentsRail 增量增强（元信息单行 + running ▎ + 色条加粗）/ **P3** TopBar（runId 复制 + status badge）+ WS 连接指示（ws-connection-store，SPEC §1.1 transport-only exception）+ 暗色三态开关（SPEC §7 双触发 `.dark/.light`）+ amendment 文档 / **P4** 三栏 surface 统一（orca-bg-app 治割裂，去双线 border）。spec-reviewer conditional-pass（3 决策 D1/D2/D3 全收敛）。318 test PASS（1 pre-existing flaky DAG lazy）。Commits: `644cc4f`(P0)/`a8c6a3e`(P1)/`a577367`(P2)/`13d0e1f`(P3)/`617d991`(P4)。详见 [release note](../releases/2026-07-19-web-visual-refinement.md)。
