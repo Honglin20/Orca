@@ -7,7 +7,7 @@
 ## 状态（2026-07-20）
 
 - ✅ **量化 workflow 路线图 W1–W4 全部完结**（本日 W3+W4 落地，commit `e6646cf`+`da609ac`）。4 个量化 workflow 全部 in-session 可用，全 mxint 基。
-- ✅ **文档交付**：`docs/in-session-usage.md`（安装+使用简述）+ `docs/workflows/` ×7（3 NAS + 4 量化，每篇由浅入深：激活→原理→结果+截图占位）+ README 索引。
+- ✅ **文档交付**：`docs/in-session-usage.md` + `docs/workflows/` ×7（4 量化 + 3 NAS，学术结构：实现概览→定义→背景→方法[公式推导]→实验→局限→附录库接口手册；核心方法形式化——零空间 Q2N / CAGE / m0_pareto / champion ratchet，照库源码还原）+ README 索引。重构 commits `e94c45a`…`02e2225`，见 CHANGELOG 顶部。
 - ts_quant 已 editable 装入 conda orca env（实测可用）；待正式加进 orca pyproject 依赖。
 - 本地领先 origin 多 commit（push 待用户手动）。
 

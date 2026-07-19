@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-20] workflows 文档学术化重构（7 篇 + README）
+
+按统一学术模板重写 `docs/workflows/` ×7（4 量化 + 3 NAS）+ README 索引：每篇**实现概览前置**（架构流程图 + 输入输出 + 激活）→ 定义 → 背景（含相关工作与引用）→ 方法（含公式推导）→ 实验 → 局限 → **附录库接口手册**（`ts_quant` / `nas_agent` 用户自调用法）。核心方法形式化并照库源码还原：PTQ 零空间 Q2N（Hessian 谱分解 + 能量骤降划零空间 + 子空间混合 + 行级闭式标量缩放 + 再量化回退）、W1 四种敏感度分析（mse / layer_stats 分布压力打分 / binary / mix）、W3 m0_pareto 三段（sensitivity probe → layer_policy 剪枝 → 主搜索）+ Pareto 支配关系、W4 CAGE 后校正（$W\!\leftarrow\!W-\eta\lambda_t(W-Q(W))$，不动点 $W^*\!=\!Q(W^*)$）、NAS 弹性超网 + NSGA-II 整数编码三算子 + 高权衡 Pareto 选择、struct-exploration 四不变量 + champion ratchet 单调下探。去除原版口语比喻，改学术风。Commits: `e94c45a`(PTQ) `66a9257`(W1) `3401212`(W3) `001ca77`(W4) `bd0da01`(hp-search) `78ca485`(agent-pipeline) `0c56995`(struct-exploration) `02e2225`(README).
+
 ## [2026-07-20] quant-bit-curve（W3）+ quant-qat（W4）—— 量化路线图收尾 + insession/7 workflow 文档
 
 量化 pipeline W3/W4，类比 W1/W2（单 agent + folder-agent + `run_*.py` 确定性脚本 + adapter + render_chart + stdout JSON），全 mxint 基。**W3 `quant-bit-curve`**：与 W2 互补——精度约束下对比位宽/格式（INT8/W4A8/INT4/MX4/MX8），`search_mix_precision(strategy=m0_pareto, mode=explore)` 找 Pareto 前沿 + 格式分布可视化 + bake 最佳混合精度模型（`final.layer_configs`→`qconfig_dict`→`quantize_model`）。**W4 `quant-qat`**：对比 rtn/duquantpp 两训练态 fake-quant 方案，`prepare_trainable_fakequant_model` + `prepare_trainable_qat`(CAGE) + teacher-student label-free QAT，per-step 收敛 + 前/后恢复可视化 + bake 最佳 q_model。探针实证 W3（report/frontier/final 字段 + 格式→QConfig 表，因 candidate_format_space 只吃 QConfig 不吃字符串）+ W4（trainable API + duquantpp 两约束：显式 target_patterns + block_size 对齐）。验证：tars validate 0 error；ViT-Tiny 脚本级 smoke 双过（W3 cand_0002[INT8×26+INT4×24] bit 5.35 bake 21MB / W4 rtn+duquantpp 双方案 bake best）；in-session `orca <wf>` 返 schema。**文档**：`docs/in-session-usage.md`（安装+使用）+ `docs/workflows/` ×7（3 NAS + 4 量化，每篇激活→原理→结果+截图占位）+ README 索引。量化路线图完结。Commits: `e6646cf` + `da609ac`. 详见 [release note](../releases/2026-07-20-quant-w3-w4.md) + [计划](../plans/2026-07-20-quant-w3-w4.md)。
