@@ -160,6 +160,9 @@ orca <wf-name> --inputs '<inputs 的 JSON>'
 
 3. 读这条命令 stdout 的 JSON：
    - `"done": true` → workflow 已完成，停。把最终结果总结给用户。
+   - `"reason": "busy"`（撞锁，罕见；信封含 `retry_after_ms`）→ **不要重派子代理、不要重发
+     prompt**；等返回的 `retry_after_ms` 毫秒后**原样重试同一条 `orca next` 命令**（参数一字不改）。
+     busy 只表示另一 CLI 在持 tape flock（短命 open/emit/close），等一下就好。
    - 否则 JSON 里的 `prompt` 就是**下一个节点**的指令 + 驱动协议 → 回到第 1 步继续派子代理。
 
 一直循环到 `done: true`。

@@ -68,6 +68,12 @@ logger = logging.getLogger(__name__)
 # subagent 合规超限阈值（D-v7-6：连续 N 次 next 无 output → workflow_failed）。
 _COMPLIANCE_LIMIT = 3
 
+# SPEC §3 O4：busy 信封固定 retry_after_ms（毫秒）。撞 tape flock 时让主 session 等待
+# 重试**同一 next 命令本身**（不重派子代理 / 不重发 prompt —— 避免 advance_step 不持锁
+# 调用契约冲突）。500ms 是保守上界：flock 通常 <100ms 释放（CLI 短命 open/emit/close），
+# 500ms 避免紧密轮询撞锁 + 给 tape 终态 emit 留余量。
+_BUSY_RETRY_AFTER_MS = 500
+
 # 诊断开关（2026-07-08）：doctor 探两钩子（transform 入口 / idle 推进）是否真 fire。
 # 开关 = 环境变量 ORCA_DIAGNOSE=1；plugin（TS）读同 env，开启时写心跳文件（见下），
 # doctor 读取作证。未设/0 = 关（plugin 零 I/O）。env 名与 orca.ts 的 DIAGNOSE 字面同步。
@@ -527,6 +533,9 @@ def _drive_protocol(run_id: str) -> str:
 
     v3 §8 step 1（B1 闭环）：命令从 ``orca in-session next`` 上移为 ``orca next``——
     与顶层接口定型同 commit 改全调用点（cli.py 驱动协议 / orca.ts spawn / command 模板）。
+
+    SPEC §3 O4：协议补 ``reason=busy`` 重试规则 —— 主 session 等 ``retry_after_ms`` 后重试
+    **同一 next 命令本身**（不重派子代理 / 不重发 prompt；避免 advance_step 不持锁调用契约冲突）。
     """
     return (
         "\n【Orca 驱动协议】你（主 session）负责推进，不要等系统自动推进：\n"
@@ -537,6 +546,8 @@ def _drive_protocol(run_id: str) -> str:
         f"   orca next --run-id {run_id} --output '<子代理的产出>'\n"
         "3. 读上面命令的 stdout（一段 JSON）：\n"
         "   - 若 done 为 true → workflow 已结束，停止推进，向用户总结结果。\n"
+        "   - 若 reason 为 busy（撞锁，罕见）→ **不要重派子代理、不要重发 prompt**；"
+        "等返回的 retry_after_ms 毫秒后**重试同一条 next 命令**（参数一字不改）。\n"
         "   - 否则 JSON 里的 prompt 字段就是下一个节点的指令 → 回到第 1 步继续。\n"
         "要点：--output 用单引号包住整段产出；产出含撇号（it's / 影评）时用 `'\\''` 转义"
         "（it's → it'\\''s）；--run-id 必传；严格按 next 返回的 prompt 逐节点做。\n"
@@ -674,6 +685,20 @@ def _release_flock(fd: Any) -> None:
         fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
     finally:
         fd.close()
+
+
+def _echo_busy_reply() -> None:
+    """撞锁 busy 0 退出信封（SPEC §3 O4：含 ``retry_after_ms`` 让主 session 等待重试）。
+
+    bootstrap / next / stop 三命令在 ``_try_acquire_flock`` 返 None（LOCK_NB 撞锁）时调本
+    helper 统一信封形态：``{done: False, reason: "busy", retry_after_ms: 500}``。主 session
+    据 ``retry_after_ms`` 等待后**重试同一 next**（不重派子代理 / 不重发 prompt）。
+    """
+    typer.echo(json.dumps({
+        "done": False,
+        "reason": "busy",
+        "retry_after_ms": _BUSY_RETRY_AFTER_MS,
+    }))
 
 
 # 注：ADR I3.3「仅本地 FS」不在 CLI 启动期主动检测——``fcntl.flock`` 在 NFS / 网络盘
@@ -823,7 +848,7 @@ def bootstrap(
         acquired = _try_acquire_flock(tape_path)
         if acquired is None:
             # bootstrap 撞锁：同 run 已有 in-flight CLI（罕见，bootstrap 通常首调）。
-            typer.echo(json.dumps({"done": False, "reason": "busy"}))
+            _echo_busy_reply()
             return
         fd, _ = acquired
         try:
@@ -968,7 +993,7 @@ def next(
     # per-call flock（LOCK_NB → busy 0 退出，F5）。
     acquired = _try_acquire_flock(tape_path)
     if acquired is None:
-        typer.echo(json.dumps({"done": False, "reason": "busy"}))
+        _echo_busy_reply()
         return
     fd, _ = acquired
 
@@ -1353,7 +1378,7 @@ def stop(
 
     acquired = _try_acquire_flock(tape_path)
     if acquired is None:
-        typer.echo(json.dumps({"done": False, "reason": "busy"}))
+        _echo_busy_reply()
         return
     fd, _ = acquired
     tape_obj = Tape(tape_path, run_id=rid, resume=True)

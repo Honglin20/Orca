@@ -552,7 +552,10 @@ def test_failure_render_error_clears_marker(cwd_tmp):
 
 
 def test_next_busy_when_lock_held(cwd_tmp, wf_path):
-    """并发撞锁：另一进程持 tape flock → next 返 {done:false, reason:busy} 0 退出（F5）。"""
+    """并发撞锁：另一进程持 tape flock → next 返 {done:false, reason:busy} 0 退出（F5）。
+
+    SPEC §3 O4：busy 信封含 ``retry_after_ms``（500ms），主 session 据它等待重试。
+    """
     import fcntl
     runner = CliRunner()
     boot = _bootstrap(runner, wf_path)
@@ -566,6 +569,8 @@ def test_next_busy_when_lock_held(cwd_tmp, wf_path):
         reply = _next(runner, tape, run_id, "--output", "out_a")
         assert reply["done"] is False
         assert reply["reason"] == "busy"
+        # SPEC §3 O4：retry_after_ms 必出，主 session 据它等待重试同一 next（不重派子代理）。
+        assert reply["retry_after_ms"] == 500
         # 0 退出（runner.invoke 的 exit_code == 0）
         # tape 未增加（被 busy 短路）
         lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
@@ -708,7 +713,10 @@ def test_classify_in_session_error_uses_explicit_kind():
 
 
 def test_stop_busy_when_tape_flock_held(cwd_tmp, wf_path):
-    """stop 撞 tape flock → {done:false, reason:busy}（busy 语义在 stop 路径一致）。"""
+    """stop 撞 tape flock → {done:false, reason:busy}（busy 语义在 stop 路径一致）。
+
+    SPEC §3 O4：busy 信封含 ``retry_after_ms``（与 next 路径一致）。
+    """
     import fcntl
     runner = CliRunner()
     boot = _bootstrap(runner, wf_path)
@@ -722,9 +730,34 @@ def test_stop_busy_when_tape_flock_held(cwd_tmp, wf_path):
         reply = json.loads(result.output.splitlines()[-1])
         assert reply["done"] is False
         assert reply["reason"] == "busy"
+        assert reply["retry_after_ms"] == 500  # SPEC §3 O4
     finally:
         fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
         fd.close()
+
+
+def test_bootstrap_busy_when_tape_flock_held(cwd_tmp, wf_path, monkeypatch):
+    """bootstrap 撞 tape flock → {done:false, reason:busy, retry_after_ms:500}（SPEC §3 O4）。
+
+    bootstrap 撞锁罕见（通常首调），但路径要一致：3 处 busy 信封（bootstrap/next/stop）
+    统一形态，主 session 据 retry_after_ms 等待重试。
+
+    模拟方式：monkeypatch ``_try_acquire_flock`` 在 bootstrap 路径返 None。bootstrap 在
+    gen run_id 后才调 ``_try_acquire_flock``（global dupe-check lock 释后），所以副作用
+    仅在 bootstrap 内部，不污染其它测试。
+    """
+    runner = CliRunner()
+    from orca.iface.in_session import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "_try_acquire_flock", lambda tape_path: None)
+
+    result = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
+    # bootstrap 撞锁返 busy，exit_code 0（与 next 一致；非 fail loud）
+    assert result.exit_code == 0, result.output
+    reply = json.loads(result.output.splitlines()[-1])
+    assert reply["done"] is False
+    assert reply["reason"] == "busy"
+    assert reply["retry_after_ms"] == 500
 
 
 def test_status_no_run_id_lists_runs_dir(cwd_tmp, wf_path):
