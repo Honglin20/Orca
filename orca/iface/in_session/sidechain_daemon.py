@@ -85,36 +85,24 @@ def _sidechain_pidfile_path(run_id: str) -> Path:
 def _sidechain_daemon_alive(run_id: str) -> bool:
     """探 sidechain 守护是否存活（pidfile + ``/proc/<pid>/cmdline`` 校验）。
 
-    与 ``cli._chart_daemon_alive`` 的「connect socket 探」对应 —— sidechain 无 socket（无 ingress），
-    改用 pidfile。pid 复用防御：读 ``/proc/<pid>/cmdline`` 必须**同时**含 ``sidechain_daemon`` 模块名
-    和 ``--run-id <run_id>`` 参数（``/proc/<pid>/cmdline`` 是 ``\\x00`` 分隔的 argv，split 后逐项比）。
+    SPEC §5 S9：实现抽到 ``_daemon_liveness.pidfile_daemon_alive``（与 chart 守护的
+    socket connect-probe 共享 helper，DRY）。本函数为薄 wrapper，保旧测试 import +
+    ``cli._ensure_sidechain_daemon`` 调用点不改。
 
-    非可逆：
-      - pidfile 不存在 → False（守护未起 / 已 graceful 退）。
-      - pidfile 存在但 ``/proc`` 无对应 pid → False（守护被 SIGKILL，pidfile 残留）。
-      - pidfile 存在 + pid 活但 cmdline 不匹配 → False（pid 复用为其它进程）。
+    实现语义 / pid 复用防御 / 异常策略详见 ``_daemon_liveness.pidfile_daemon_alive`` docstring
+    （pidfile 不存在 / /proc 无对应 pid / cmdline 不含模块名+run_id → 一律 False 保守触发 respawn）。
     """
-    pidfile = _sidechain_pidfile_path(run_id)
-    if not pidfile.is_file():
-        return False
-    try:
-        pid_str = pidfile.read_text(encoding="utf-8").strip()
-        pid = int(pid_str)
-    except (ValueError, OSError):
-        return False
-    # /proc 校验（防 pid 复用）。非 Linux：/proc 不存在 → 保守判 dead（触发 respawn）。
-    cmdline_path = Path("/proc") / str(pid) / "cmdline"
-    try:
-        cmdline_bytes = cmdline_path.read_bytes()
-    except (FileNotFoundError, PermissionError, OSError):
-        return False
-    # /proc/<pid>/cmdline 是 \x00 分隔的 argv；split 后逐项比（防跨参数误匹配）。
-    argv = cmdline_bytes.decode("utf-8", "replace").split("\x00")
-    return (
-        any("orca.iface.in_session.sidechain_daemon" in a for a in argv)
-        and "--run-id" in argv
-        and run_id in argv
+    from orca.iface.in_session._daemon_liveness import pidfile_daemon_alive
+
+    return pidfile_daemon_alive(
+        _sidechain_pidfile_path(run_id),
+        module_name=_SIDEBAND_MODULE_NAME,
+        run_id=run_id,
     )
+
+
+# 守护模块名（``/proc/<pid>/cmdline`` 匹配用；与 ``main`` 的 argv ``-m orca.iface.in_session.sidechain_daemon`` 对齐）。
+_SIDEBAND_MODULE_NAME = "orca.iface.in_session.sidechain_daemon"
 
 
 # ── driver（主循环：adapter → ingestor → bus.emit）────────────────────────────

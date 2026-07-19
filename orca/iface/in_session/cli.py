@@ -236,41 +236,26 @@ def _wait_for_sock(sock_path: Path, *, timeout: float = _SOCK_READY_TIMEOUT) -> 
 # 是高负载下的保守上界。超时（活但 event loop 阻塞 >500ms，如大 tape 首次扫 / GC）→ 保守视
 # dead → 触发 respawn。假阴性比假阳性安全：最坏产生一个无害孤儿守护（新守护 unlink+rebind
 # 把 socket 路径指向自己，老守护监听的 inode 失去路径、收不到新连接，由终态/TTL 自清）。
-_DAEMON_PROBE_TIMEOUT = 0.5
+#
+# SPEC §5 S9：实现已抽到 ``iface/in_session/_daemon_liveness.py``（socket connect-probe +
+# pidfile+/proc/cmdline 两类守护共享）。本模块保留薄 wrapper 兼容旧测试 import + 内部调用点。
+from orca.iface.in_session._daemon_liveness import (  # noqa: E402
+    _DEFAULT_PROBE_TIMEOUT as _DAEMON_PROBE_TIMEOUT,
+    socket_daemon_alive,
+)
 
 
 def _chart_daemon_alive(sock_path: Path) -> bool:
     """探本 run 的 chart 守护 socket 是否有监听者（确定性健康探，**不靠进程名 grep**）。
 
-    回答「守护还活着吗」的三态问题，归一成 bool（活/不活）::
+    SPEC §5 S9：实现抽到 ``_daemon_liveness.socket_daemon_alive``（与 sidechain 守护的
+    pidfile 探共享 helper，DRY）。本函数为薄 wrapper，保旧测试 import +
+    ``cli._wait_for_sock`` / ``_ensure_chart_daemon`` 调用点不改。
 
-        connect 成功          → 有监听者，守护活（True）
-        ConnectionRefusedError → socket 文件在但无监听者（stale，守护被 SIGKILL/SIGTERM 退）→ False
-        FileNotFoundError     → 无 socket 文件（守护未起 / 已 graceful 退出并 unlink）→ False
-        其它 OSError（超时等） → 视 dead（保守：触发 respawn；假阴性比假阳性安全 —— 最坏产生
-                               一个无害孤儿守护，由终态/TTL 自清；见 ``_ensure_chart_daemon``）
-
-    为什么 connect 而非 pgrep/pidfile：Unix socket 的 ``connect`` 是**协议级**判定 —— 文件
-    存在 ≠ 有人 listen（SIGKILL 不跑 finally unlink → stale 文件残留）。connect 才区分「监听者
-    在」与「孤儿 socket 文件」。进程名 grep 不可靠（同名进程 / 重命名 / 守护名变）；pidfile 要
-    做额外 liveness 检查（pid 活 ≠ 在跑这个守护）—— connect 一举覆盖。
-
-    **对守护的副作用 = 零**：connect 成功后立即 close（``with`` 管理语境）→ 守护 accept 一条短
-    连接，``readline`` 读到 EOF（空行）→ handler 走「client 提前 close」debug 分支静默返回，
-    不 emit、不写 tape（见 ``chart_ingestor._make_handler`` 的 ``if not line`` 分支）。
-
-    POSIX-only（与 ``_spawn_chart_daemon`` 同前提；项目 fcntl.flock 已锚定 POSIX）。
+    实现语义 / 副作用 / 异常策略详见 ``_daemon_liveness.socket_daemon_alive`` docstring
+    （connect 成功 = 有监听者 = 守护活；所有 OSError → False，保守触发 respawn）。
     """
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-            s.settimeout(_DAEMON_PROBE_TIMEOUT)
-            s.connect(str(sock_path))
-    except OSError:
-        # ``ConnectionRefusedError``（stale socket，无监听者）/ ``FileNotFoundError``（无 socket
-        # 文件）/ 超时等 —— 均为 ``OSError`` 子类，一律视 dead（保守：触发 respawn，假阴性比
-        # 假阳性安全）。connect 成功 = 有监听者 = 守护活。
-        return False
-    return True
+    return socket_daemon_alive(sock_path)
 
 
 def _ensure_chart_daemon(run_id: str, tape_path: Path) -> None:
