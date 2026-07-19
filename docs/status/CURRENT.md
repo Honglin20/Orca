@@ -8,7 +8,7 @@
 
 - **当前主线：量化能力（PatchTST_Optimal / ts_quant）集成到 Orca 作为 workflow**。nas-agent 已有两示例（pipeline + hp-search）；量化进行中（W1+W2 完成，W3–W4 待做）。
 - ✅ **heatmap chart_type 已加**（commit `ec3d598`，第 8 种图）——W2 full 模式矩阵可视化依赖，已落地+review+测试 green。
-- ✅ **W2 quant-ptq-sweep 完成**（commit `d356979`）：粗粒度 PTQ 扫描+报告+bake，单节点双 mode（lightweight 4 累积路径 / full 全枚举）。修正 W1 `w4a16` 语义错位。E2E 冒烟 deferred 到 plan §验证 阶段 5。
+- ✅ **W2 quant-ptq-sweep 完成 + E2E 验证通过**（commit `d356979` + fixes）：粗粒度 PTQ 扫描+报告+bake，单节点双 mode（lightweight 4 累积路径 / full 全枚举）。修正 W1 `w4a16` 语义错位。**E2E 经 opencode headless + tars 在 ViT-Tiny 跑通**：11 候选/best smooth+gptq(mse 0.0089)/bake 出 best_quant_model.pt/line+bar+table 三图推 web（demo_target/vit_tiny_cifar100 作永久 fixture）。fixes：baked_model_path 入 output、line 按 step_idx 对齐、agent.md 用 nas-select 自洽块 + `--env_file` 自加载 env 兜底。
 - ts_quant 已 editable 装入 conda orca env（实测可用）；待正式加进 orca pyproject 依赖。
 - 本地领先 origin 多 commit（push 待用户手动）。
 
