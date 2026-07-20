@@ -26,6 +26,7 @@ open(resume=True) → flock → emit_batch → close，flock 随进程退出释�
 from __future__ import annotations
 
 import asyncio
+import builtins
 import fcntl
 import json
 import logging
@@ -117,7 +118,7 @@ def _cac_session_id_from_pid() -> str | None:
     for _ in range(20):
         try:
             status = Path(f"/proc/{pid}/status").read_text()
-            ppid_line = next(
+            ppid_line = builtins.next(
                 (l for l in status.splitlines() if l.startswith("PPid:")), None
             )
             if not ppid_line:
