@@ -6,6 +6,7 @@
 
 ## 状态（2026-07-20）
 
+- ✅ **sidechain cac 优先 + `orca sidechain family` 命令**（`129fff8`）：CC sidechain resolver 探测改 cac 优先（`.cac` 存在即走 cac，含两存）；新增 `orca sidechain family` sub-Typer（set/show/unset）；修 import 回归（`__init__` PEP 562 lazy，config import 4.4s→0.08s，daemon e2e 全恢复）。code-reviewer 自检 pass + 2 minor。详见 [release note](../releases/2026-07-20-sidechain-cac-priority.md)。
 - ✅ **量化 workflow 路线图 W1–W4 全部完结**（本日 W3+W4 落地，commit `e6646cf`+`da609ac`）。4 个量化 workflow 全部 in-session 可用，全 mxint 基。
 - ✅ **文档交付**：`docs/in-session-usage.md` + `docs/workflows/` ×7（4 量化 + 3 NAS，学术结构：实现概览→定义→背景→方法[公式推导]→实验→局限→附录库接口手册；核心方法形式化——零空间 Q2N / CAGE / m0_pareto / champion ratchet，照库源码还原）+ README 索引。重构 commits `e94c45a`…`02e2225`，见 CHANGELOG 顶部。
 - ts_quant 已 editable 装入 conda orca env（实测可用）；待正式加进 orca pyproject 依赖。

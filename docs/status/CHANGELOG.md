@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-20] sidechain cac 优先 + `orca sidechain family` 命令 + import 性能修复
+
+CC sidechain resolver 探测改 **cac 优先**（`orca/events/adapters/_family.py::resolve_cc_sidechain_root`：`.cac` 存在即走 cac，含两存；原两存歧义默认 .claude）+ 新 `orca sidechain family` sub-Typer（set/show/unset，`--scope project|user`，照搬 `executor_cmds.set`）。配套：doctor fam_eff/hint 同步；`config.sidechain_family` helper（cli + sidechain_cmds 共享，DRY）；`load_merged_config` 合并 sidechain（修 project 级 `sidechain.family` 不生效既有 bug）。**import 性能回归修复**：`orca/iface/cli/__init__.py` eager import Textual TUI 壳 → 新命令 import config 拖慢 cli import（3.7s→5.9s）→ daemon pidfile 迟写 → 5 个 daemon e2e fail；改 PEP 562 `__getattr__` lazy + config profiles lazy 后 config import `4.4s→0.08s`，daemon e2e 全恢复。code-reviewer 核心检查全 pass（依赖单向/lazy/merge 边界/star import），修 2 minor（死 import / unset 空 dict 残留）。177 passed（含 5 daemon e2e）+ 86 非 daemon。Commit: `129fff8`. 详见 [release note](../releases/2026-07-20-sidechain-cac-priority.md).
+
 ## [2026-07-20] workflows 文档学术化重构（7 篇 + README）
 
 按统一学术模板重写 `docs/workflows/` ×7（4 量化 + 3 NAS）+ README 索引：每篇**实现概览前置**（架构流程图 + 输入输出 + 激活）→ 定义 → 背景（含相关工作与引用）→ 方法（含公式推导）→ 实验 → 局限 → **附录库接口手册**（`ts_quant` / `nas_agent` 用户自调用法）。核心方法形式化并照库源码还原：PTQ 零空间 Q2N（Hessian 谱分解 + 能量骤降划零空间 + 子空间混合 + 行级闭式标量缩放 + 再量化回退）、W1 四种敏感度分析（mse / layer_stats 分布压力打分 / binary / mix）、W3 m0_pareto 三段（sensitivity probe → layer_policy 剪枝 → 主搜索）+ Pareto 支配关系、W4 CAGE 后校正（$W\!\leftarrow\!W-\eta\lambda_t(W-Q(W))$，不动点 $W^*\!=\!Q(W^*)$）、NAS 弹性超网 + NSGA-II 整数编码三算子 + 高权衡 Pareto 选择、struct-exploration 四不变量 + champion ratchet 单调下探。去除原版口语比喻，改学术风。Commits: `e94c45a`(PTQ) `66a9257`(W1) `3401212`(W3) `001ca77`(W4) `bd0da01`(hp-search) `78ca485`(agent-pipeline) `0c56995`(struct-exploration) `02e2225`(README).
