@@ -1,0 +1,450 @@
+name: kd-nas
+description: "以知识蒸馏（KD）为核心的神经架构搜索：固定 teacher（基线 model8 放大到 6 层，从头训）→ 短训搜索 student 架构（先扫固定模板，再 agent 发挥）→ finalize 全量裁定（达标退出 / 未达标回循环）。用 soft-MSE-vs-teacher 作短训排序代理，真实 dB gap 推迟到 finalize。契约见 workflows/agents/_kd_scripts/CONTRACTS.md。"
+
+entry: teacher_setup
+
+inputs:
+  # 用户决策面（[ask]+[infer]）
+  teacher_model_path:
+    type: string
+    description: "[infer] teacher 基线模型定义文件（即 model8 的 SignalProcessingTransformer model.py）。glob 即得；多候选回退 [ask]"
+    required: true
+  teacher_train_command:
+    type: string
+    description: "[ask] teacher 从头训练命令原样 shell 执行（绝不改训练函数/loss），如 'python train.py --epochs 50'。teacher 用 6 层放大版"
+    required: true
+  test_command:
+    type: string
+    description: "[ask] eval/测试命令（finalize 全量裁定时测真实精度，原样执行）。用户的 eval 脚本须读环境变量 STUDENT_CKPT/STUDENT_MODEL_PATH 加载本轮 student。产出须含可解析精度指标（NMSE/BER/MSE）"
+    required: true
+  eval_dataset:
+    type: string
+    description: "[default] 自包含 eval 数据集 .pt 文件（含 {'x':tensor,'y':tensor}）。给定则 measure_student 内部算 MSE，无需 eval_command 读 env（推荐用于测试/无 eval_command 时）。留空走 test_command"
+    required: false
+    default: ""
+  proxy_dataset_spec:
+    type: string
+    description: "[advanced] teacher hook 缓存的 proxy 数据规格 JSON；空则 teacher_setup.py 用随机正态"
+    required: false
+    default: ""
+  target_latency_ms:
+    type: string
+    description: "[ask] 目标时延(ms)；student.latency ≤ 此值 且精度达标即终止"
+    required: true
+  accuracy_gap_db:
+    type: string
+    description: "[default] 精度损失上限(dB SNR 等价)，默认 0.5。student vs teacher 的 dB gap ≤ 此值才算达标"
+    required: false
+    default: "0.5"
+  max_rounds:
+    type: string
+    description: "[ask] 最大短训搜索轮数（预算）；耗尽仍未达标 → fail loud + best-effort 报告"
+    required: false
+    default: "20"
+  # 工程内部常量
+  teacher_layers:
+    type: string
+    description: "[default] teacher 放大层数，默认 6（把 baseline 的 4 个 transformer block 改成 6 个）"
+    required: false
+    default: "6"
+  short_epochs:
+    type: string
+    description: "[default] 短训 epoch 数（循环内每候选），默认 10。够排优劣即可"
+    required: false
+    default: "10"
+  full_epochs:
+    type: string
+    description: "[default] finalize 全量训练 epoch 数，默认 50。仅对 champion 跑一次"
+    required: false
+    default: "50"
+  struct_scripts_dir:
+    type: string
+    description: "[default] 复用的确定性脚本目录（export_onnx/latency_onnxrt/ast_diff/ledger_reducer/viz_struct）"
+    required: false
+    default: "workflows/agents/_struct_scripts"
+  kd_scripts_dir:
+    type: string
+    description: "[default] kd-nas 专属脚本目录（profile_onnx/teacher_setup/measure_student/pick_student + kd/ + students/）"
+    required: false
+    default: "workflows/agents/_kd_scripts"
+  iterations:
+    type: string
+    description: "[advanced] Orca 单 run 节点访问数硬上限（循环兜底）。每轮约 8 次访问；默认 ≈ max_rounds×8 + 富余"
+    required: false
+    default: "500"
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════
+  # Setup（一次性）：teacher 放大到 6 层 + 从头训 + 冻结缓存
+  #                    → ONNX profile（喂 hypothesizer）
+  # ═══════════════════════════════════════════════════════════════
+  - name: teacher_setup
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: kd-teacher-setup
+    output_schema:
+      type: object
+      required: [output_dir, project_root, teacher_model_path, build_fn, dummy_input, teacher_cache, teacher_meta]
+      properties:
+        output_dir: {type: string}
+        project_root: {type: string}
+        teacher_model_path: {type: string, description: "6 层放大版 teacher model.py 绝对路径"}
+        build_fn: {type: string}
+        dummy_input: {type: string, description: "JSON 串"}
+        teacher_cache: {type: string, description: "teacher_cache.pt 绝对路径"}
+        teacher_meta: {type: string, description: "teacher_meta.json 绝对路径（含 latency/accuracy/db_baseline/onnx）"}
+    routes:
+      - to: profile_gate
+
+  - name: profile_gate
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    tools: [bash, read]
+    output_schema:
+      type: object
+      required: [profile_report]
+      properties:
+        profile_report: {type: string, description: "profile_report.json 绝对路径"}
+    prompt: |
+      你是 `profile_gate`（**确定性**）：对 teacher ONNX 跑逐算子 profile，喂给 hypothesizer 当 grounding。**不做任何 LLM 判断**。
+      ## 执行（fail loud）
+      ```bash
+      python3 "{{ inputs.kd_scripts_dir }}/profile_onnx.py" \
+        --onnx "<从 {{ teacher_setup.output.teacher_meta }} 读 teacher_onnx 字段>" \
+        --out "{{ teacher_setup.output.output_dir }}profile_report.json" --topk 5
+      ```
+      脚本非零退出 → fail loud（stderr 写进 fail_reason 停）。
+      ## 输出（合法 JSON）
+      ```json
+      {"profile_report": "{{ teacher_setup.output.output_dir }}profile_report.json"}
+      ```
+    routes:
+      - to: kd_train_script_gen
+
+  # 一次性生成 train_kd.py adapter（复用用户 train+loss，加 KD 包裹）
+  - name: kd_train_script_gen
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: kd-train-script
+    output_schema:
+      type: object
+      required: [train_kd_path]
+      properties:
+        train_kd_path: {type: string, description: "生成的 train_kd.py 绝对路径（固定 CLI 见 CONTRACTS §5）"}
+    routes:
+      - to: hypothesizer
+
+  # ═══════════════════════════════════════════════════════════════
+  # 循环体 —— 回环由 curator/viz_round 控制
+  # ═══════════════════════════════════════════════════════════════
+
+  # Step 1：Hypothesizer —— Phase1 调 pick_student.py（确定性）/ Phase2 出 SelectionSpec
+  - name: hypothesizer
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: kd-hypothesizer
+    output_schema:
+      type: object
+      required: [selection_spec_path, family, phase, candidate_id]
+      properties:
+        selection_spec_path: {type: string, description: "SelectionSpec JSON 绝对路径（CONTRACTS §2）"}
+        family: {type: string}
+        phase: {type: integer, description: "1=确定性扫模板 / 2=agent 发挥"}
+        candidate_id: {type: string}
+        rationale: {type: string}
+    routes:
+      - to: engineer
+
+  # Step 2：Engineer —— 按 SelectionSpec 实例化 student model.py（零结构自由）
+  - name: engineer
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: kd-engineer
+    output_schema:
+      type: object
+      required: [candidate_id, student_model_path, snapshot_path]
+      properties:
+        candidate_id: {type: string}
+        student_model_path: {type: string, description: "本候选 student model.py 绝对路径"}
+        snapshot_path: {type: string}
+        model_summary: {type: string}
+    routes:
+      - to: structure_gate
+
+  # Step 3：结构门（确定性 AST diff，复用 ast_diff.py）
+  - name: structure_gate
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    tools: [bash, read, write, glob, grep]
+    output_schema:
+      type: object
+      required: [tag, diff_summary]
+      properties:
+        tag: {type: string, enum: [structural, hyperparam, mixed]}
+        diff_summary: {type: string}
+    prompt: |
+      你是**结构变更门**（确定性 AST diff + 语义 tag）。student vs teacher 的 AST diff。
+      ## 执行
+      ```bash
+      python3 "{{ inputs.struct_scripts_dir }}/ast_diff.py" \
+        --parent "<teacher_model_path: {{ teacher_setup.output.teacher_model_path }}>" \
+        --child "<student_model_path: {{ engineer.output.student_model_path }}>" --format json
+      ```
+      读 stdout JSON（topology_changed/operator_changes/...）作参考。
+      tag ∈ {structural, hyperparam, mixed}。student 必然是 structural（整族替换）。
+      ## 输出
+      ```json
+      {"tag": "structural|hyperparam|mixed", "diff_summary": "<AST 事实摘要>"}
+      ```
+    routes:
+      - to: kd_trainer
+
+  # Step 4：kd_trainer（确定性）—— 跑 train_kd.py 短训（teacher 冻结）
+  - name: kd_trainer
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    tools: [bash, read]
+    output_schema:
+      type: object
+      required: [student_ckpt, proxy_mse, kd_loss_final]
+      properties:
+        student_ckpt: {type: string}
+        proxy_mse: {type: number, description: "soft-MSE-vs-teacher（短训排序代理；越小越好）"}
+        kd_loss_final: {type: number}
+        train_status: {type: string, enum: [SUCCESS, FAIL_OOM, FAIL_NAN]}
+    prompt: |
+      你是 `kd_trainer`（**确定性**）：跑 `train_kd.py` 短训 student（teacher 冻结）。**不做 LLM 判断**，只跑脚本 + 解析 stdout。
+      ## 执行（fail loud；OOM/NAN 不静默降 batch）
+      ```bash
+      cd "{{ teacher_setup.output.project_root }}"
+      ORCA_KD_SCRIPTS_DIR="{{ inputs.kd_scripts_dir }}" ORCA_PROJECT_ROOT="{{ teacher_setup.output.project_root }}" python3 "{{ kd_train_script_gen.output.train_kd_path }}" \
+        --student_family "{{ hypothesizer.output.family }}" \
+        --project_root "{{ teacher_setup.output.project_root }}" \
+        --student_cfg "$(cat {{ hypothesizer.output.selection_spec_path }} | jq -r .build_cfg)" \
+        --kd_config "$(cat {{ hypothesizer.output.selection_spec_path }} | jq -r .kd_config)" \
+        --teacher_cache "{{ teacher_setup.output.teacher_cache }}" \
+        --student_model_path "{{ engineer.output.student_model_path }}" \
+        --build_fn "{{ teacher_setup.output.build_fn }}" \
+        --epochs "{{ inputs.short_epochs }}" \
+        --out_ckpt "{{ teacher_setup.output.output_dir }}ckpts/{{ engineer.output.candidate_id }}.pt"
+      ```
+      从 stdout 解析：`STUDENT_CKPT:` → student_ckpt；`KD_PROXY_MSE:` → proxy_mse；`KD_LOSS_FINAL:` → kd_loss_final。
+      脚本非零退出 → fail loud。
+      ## 输出（合法 JSON）
+      ```json
+      {"student_ckpt": "<绝对路径>", "proxy_mse": <数>, "kd_loss_final": <数>, "train_status": "SUCCESS"}
+      ```
+    routes:
+      - to: measure_student
+
+  # Step 5：measure_student（确定性）—— 导 ONNX 测时延 + 跑 eval 算 dB gap
+  - name: measure_student
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    tools: [bash, read]
+    output_schema:
+      type: object
+      required: [latency_ms, db_gap, met_accuracy, met_latency]
+      properties:
+        latency_ms: {type: number}
+        db_gap: {type: number, description: "student vs teacher 的精度 dB gap（越小越好）"}
+        met_accuracy: {type: boolean, description: "db_gap ≤ accuracy_gap_db"}
+        met_latency: {type: boolean, description: "latency_ms ≤ target_latency_ms"}
+        student_onnx: {type: string}
+    prompt: |
+      你是 `measure_student`（**确定性**）：导 student ONNX 测时延 + 跑 eval_command 算 dB gap。**不做 LLM 判断**。
+      ## 执行
+      ```bash
+      python3 "{{ inputs.kd_scripts_dir }}/measure_student.py" \
+        --student_model_path "{{ engineer.output.student_model_path }}" \
+        --student_ckpt "{{ kd_trainer.output.student_ckpt }}" \
+        --build_fn "{{ teacher_setup.output.build_fn }}" \
+        --dummy_input '{{ teacher_setup.output.dummy_input }}' \
+        --teacher_meta "{{ teacher_setup.output.teacher_meta }}" \
+        --output_dir "{{ teacher_setup.output.output_dir }}" --opset 17 \
+        --latency_provider "{{ inputs.struct_scripts_dir }}/latency_onnxrt.py::measure"
+      ```
+      **短训阶段不跑 eval**（真实 dB gap 推迟到 finalize 全量裁定）：本节点不传 --eval_command / --eval_dataset，measure_student 只测 latency（db_gap/met_accuracy 为占位，curator 在 loop 里**不用**它们，只看 proxy_mse + latency）。
+      ```
+      从 stdout 解析：`STUDENT_LATENCY_MS:`/`STUDENT_DB_GAP:`/`MET_ACCURACY:`/`MET_LATENCY:`/`STUDENT_ONNX:`。
+      脚本非零退出 → fail loud。
+      ## 输出（合法 JSON）
+      ```json
+      {"latency_ms": <数>, "db_gap": <数>, "met_accuracy": <bool>, "met_latency": <bool>, "student_onnx": "<路径>"}
+      ```
+    routes:
+      - to: analyst
+
+  # Step 6：Analyst —— 归因成败 + 写回 KD recipe
+  - name: analyst
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: kd-analyst
+    output_schema:
+      type: object
+      required: [attribution, principle]
+      properties:
+        attribution: {type: string}
+        principle: {type: string}
+        kb_writeback: {type: string}
+        kd_recipe_writeback: {type: string}
+    routes:
+      - to: curator
+
+  # Step 7：Curator —— champion ratchet + phase/finalize 路由
+  - name: curator
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: kd-curator
+    output_schema:
+      type: object
+      required: [round, phase, continue_loop, route_finalize, exhausted, champion_id, champion_latency_ms, champion_db_gap]
+      properties:
+        round: {type: integer}
+        phase: {type: integer}
+        continue_loop: {type: boolean}
+        route_finalize: {type: boolean, description: "champion 短训达标(proxy≤阈值 ∧ latency达标) → true，送 finalize 全量裁定"}
+        exhausted: {type: boolean, description: "max_rounds 耗尽仍未达标 → true（best-effort 终态）"}
+        champion_id: {type: string}
+        champion_latency_ms: {type: number}
+        champion_db_gap: {type: number}
+        terminate_reason: {type: string}
+    routes:
+      - to: viz_round
+
+  - name: viz_round
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    tools: [bash, read, write, glob, grep]
+    prompt: |
+      你是 kd-nas 的**轮内可视化**（确定性，幂等刷新）。调 KD 专属 `viz_kd.py`
+      （**不复用 viz_struct.py**——KD ledger schema 与 viz_struct 要求的 id/parent/path/status/accuracy
+      不匹配，会导致每行被剔除→0 图）。
+      ## 执行
+      ```bash
+      python3 "{{ inputs.kd_scripts_dir }}/viz_kd.py" --mode round \
+        --ledger "{{ teacher_setup.output.output_dir }}ledger.jsonl" \
+        --champions "{{ teacher_setup.output.output_dir }}champions.jsonl" \
+        --teacher_meta "{{ teacher_setup.output.teacher_meta }}" || true
+      ```
+      脚本异常 `|| true` 不阻断（viz 是 sidecar；不在 Orca 子进程 → import orca.chart 失败 → 脚本自 WARN exit 0）。
+      ## 输出
+      ```
+      VIZ_ROUND: ok
+      CHARTS: <stdout 摘要>
+      ```
+    routes:
+      - when: "curator.output.route_finalize"
+        to: finalize
+      - when: "curator.output.exhausted"
+        to: finalize
+      - to: hypothesizer
+
+  # ═══════════════════════════════════════════════════════════════
+  # finalize（全量裁定）：champion 全量 KD 训练 + 真实 dB gap 门
+  #   met_target=true → viz_finalize → $end
+  #   met_target=false & not exhausted → 回 hypothesizer（换方向）
+  #   met_target=false & exhausted → viz_finalize（best-effort 终态）
+  # ═══════════════════════════════════════════════════════════════
+  - name: finalize
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    tools: [bash, read, write, glob, grep]
+    output_schema:
+      type: object
+      required: [final_ckpt, final_db_gap, final_latency_ms, met_target, loop_back]
+      properties:
+        final_ckpt: {type: string}
+        final_db_gap: {type: number, description: "全量训练后的真实 dB gap（裁定指标）"}
+        final_latency_ms: {type: number}
+        met_target: {type: boolean, description: "final_db_gap ≤ accuracy_gap_db ∧ final_latency_ms ≤ target"}
+        loop_back: {type: boolean, description: "not met_target 且 not exhausted → true（回循环换方向）"}
+        final_report: {type: string}
+    prompt: |
+      你是 `finalize`（**全量裁定**）：把 champion 用 full_epochs 全量 KD 训练 → 测真实 dB gap → 裁定。
+      ## 输入
+      - champion：`{{ curator.output.champion_id }}`（snapshot/ckpt 从 ledger/champions 读）
+      - exhausted：`{{ curator.output.exhausted }}`
+      - train_kd：`{{ kd_train_script_gen.output.train_kd_path }}`
+      ## 执行（fail loud）
+      1. 全量 KD 训练 champion（teacher 冻结，full_epochs）：
+         ```bash
+         ORCA_KD_SCRIPTS_DIR="{{ inputs.kd_scripts_dir }}" ORCA_PROJECT_ROOT="{{ teacher_setup.output.project_root }}" python3 "{{ kd_train_script_gen.output.train_kd_path }}" \
+           --student_family "<champion family>" --student_cfg "<champion cfg>" --kd_config "<champion kd_config>" \
+           --project_root "{{ teacher_setup.output.project_root }}" \
+           --teacher_cache "{{ teacher_setup.output.teacher_cache }}" \
+           --student_model_path "<champion model.py>" --build_fn "{{ teacher_setup.output.build_fn }}" \
+           --epochs "{{ inputs.full_epochs }}" --out_ckpt "<output_dir>/final_<champion>.pt"
+         ```
+      2. 测真实 dB gap：
+         ```bash
+         python3 "{{ inputs.kd_scripts_dir }}/measure_student.py" \
+           --student_model_path "<champion model.py>" --student_ckpt "<final ckpt>" \
+           --build_fn "{{ teacher_setup.output.build_fn }}" --dummy_input '{{ teacher_setup.output.dummy_input }}' \
+           --eval_dataset "{{ inputs.eval_dataset }}" --eval_command "{{ inputs.test_command }}" \
+           --teacher_meta "{{ teacher_setup.output.teacher_meta }}" \
+           --output_dir "{{ teacher_setup.output.output_dir }}" --opset 17 \
+           --latency_provider "{{ inputs.struct_scripts_dir }}/latency_onnxrt.py::measure"
+         ```
+      3. 裁定：
+         - `met_target = (final_db_gap ≤ {{ inputs.accuracy_gap_db }}) ∧ (final_latency_ms ≤ {{ inputs.target_latency_ms }})`
+         - `loop_back = (not met_target) ∧ (not {{ curator.output.exhausted }})`
+      4. 写 `final_report.md`（teacher vs champion latency/db_gap、proxy↔真实 dB 关系、探索轮数）。
+      ## 输出（合法 JSON）
+      ```json
+      {"final_ckpt":"<path>","final_db_gap":<数>,"final_latency_ms":<数>,"met_target":<bool>,"loop_back":<bool>,"final_report":"<path>"}
+      ```
+    routes:
+      - when: "finalize.output.met_target"
+        to: viz_finalize
+      - when: "finalize.output.loop_back"
+        to: hypothesizer
+      - to: viz_finalize
+
+  - name: viz_finalize
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    tools: [bash, read, write, glob, grep]
+    prompt: |
+      你是 kd-nas 的**终态可视化**（幂等刷新）。调 KD 专属 `viz_kd.py --mode finalize`
+      （**不复用 viz_struct.py**）：除 round 阶段三张共享图（候选轨迹 / 帕累托 / 汇总表，
+      用全量 ledger 重画一次作为终态快照）外，再推终态对比 bar
+      （teacher vs champion vs final 的 latency + db_gap）。
+      ## 执行
+      ```bash
+      python3 "{{ inputs.kd_scripts_dir }}/viz_kd.py" --mode finalize \
+        --ledger "{{ teacher_setup.output.output_dir }}ledger.jsonl" \
+        --champions "{{ teacher_setup.output.output_dir }}champions.jsonl" \
+        --teacher_meta "{{ teacher_setup.output.teacher_meta }}" \
+        --final_latency_ms "{{ finalize.output.final_latency_ms }}" \
+        --final_db_gap "{{ finalize.output.final_db_gap }}" || true
+      ```
+      脚本异常 `|| true` 不阻断（viz 是 sidecar；不在 Orca 子进程 → 脚本自 WARN exit 0）。
+      ## 输出
+      ```
+      VIZ_FINALIZE: ok
+      MET_TARGET: {{ finalize.output.met_target }}
+      ```
+    routes:
+      - to: $end
+
+outputs:
+  result: "{{ finalize.output }}"
+  champion: "{{ curator.output.champion_id }}"
+  final_latency_ms: "{{ finalize.output.final_latency_ms }}"
+  final_db_gap: "{{ finalize.output.final_db_gap }}"
+  met_target: "{{ finalize.output.met_target }}"
+  output_dir: "{{ teacher_setup.output.output_dir }}"
