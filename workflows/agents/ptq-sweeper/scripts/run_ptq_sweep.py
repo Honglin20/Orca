@@ -515,9 +515,14 @@ def _push_table(render_chart, rows: list[dict[str, Any]], title: str) -> None:
 
 
 def _push_lw_charts(render_chart, candidates: list[dict[str, Any]],
+                     all_results: list[dict[str, Any]],
                      ok_results: list[dict[str, Any]], metric_kind: str,
                      recipes_filter: list[str]) -> None:
-    """lightweight 模式：line（累积曲线）+ bar（终点对比）+ table（全部步）。"""
+    """lightweight 模式：line（累积曲线）+ bar（终点对比）+ table（全部步）。
+
+    table 用 all_results（含 failed/skipped）便于诊断「哪些 recipe 因依赖缺失被跳过」；
+    line/bar 仍用 ok_results（无 metric 的失败候选画不进 y 轴）。
+    """
     # 反查表：(pre, solver, post) → unique 候选 label（line + bar 共用，避免双构造）
     by_key: dict[tuple[str, str, str], str] = {
         (c["pre"], c["solver"], c["post"]): c["label"] for c in candidates
@@ -575,7 +580,9 @@ def _push_lw_charts(render_chart, candidates: list[dict[str, Any]],
                     "metric": metric_by_label[label],
                     "final_config": label,
                 }
-    # 按 _LW_PATHS 原序（S→Q→A→R）而非字母序（A→Q→R→S）
+    # 按 _LW_PATHS 原序（S→Q→A→R）而非字母序（A→Q→R→S）。单 series——曾用 hue="final_config"
+    # 但每 path 独一份 final_config → 每 x 单独着色 + 一堆无意义图例（同 sensitivity hue 反模式）。
+    # final_config 字段保留在 record 里供 tooltip 展示具体技术组合。
     bar_data = sorted(final_by_path.values(), key=lambda x: _LW_PATH_ORDER.get(x["path"], 99))
     try:
         if bar_data:
@@ -586,28 +593,37 @@ def _push_lw_charts(render_chart, candidates: list[dict[str, Any]],
                 title=f"Final-step Comparison by Path ({metric_kind})",
                 x="path",
                 y="metric",
-                hue="final_config",
             )
             sys.stderr.write(f"[run_ptq_sweep] pushed bar: {len(bar_data)} paths\n")
     except Exception as e:
         sys.stderr.write(f"[run_ptq_sweep] bar 推送失败（不阻断）: {e}\n")
 
-    # table：全步明细（含失败候选由 ok_results 过滤掉）
-    table_rows = sorted(ok_results, key=lambda r: r["config_label"])
+    # table：全候选明细（含 failed/skipped）。原仅展示 ok_results 致诊断时看不出
+    # 「哪些 recipe 因依赖缺失（如 auto-round 未装）被跳过」—— 改用 all_results。
+    table_rows = sorted(all_results, key=lambda r: r["config_label"])
     _push_table(render_chart, [
         {"config": r["config_label"], "pre": r["pre_transform"],
          "solver": r["weight_solver"], "post": r["post_correction"],
-         "metric": r["metric"], "elapsed_s": r["elapsed_seconds"]}
+         "metric": r["metric"], "elapsed_s": r["elapsed_seconds"],
+         "status": r["status"], "error": r["error"] or ""}
         for r in table_rows
-    ], "Lightweight Sweep — Successful Steps")
+    ], "Lightweight Sweep — All Steps (incl. failed/skipped)")
 
 
-def _push_full_charts(render_chart, ok_results: list[dict[str, Any]],
-                       metric_kind: str) -> None:
-    """full 模式：heatmap（recipe×bitwidth）+ scatter（bitwidth→metric）+ table。"""
-    # heatmap / scatter 公共数据 shape：{recipe, bitwidth, metric}
+def _push_full_charts(render_chart, all_results: list[dict[str, Any]],
+                       ok_results: list[dict[str, Any]], metric_kind: str,
+                       best_label: str | None) -> None:
+    """full 模式：heatmap（recipe×bitwidth）+ scatter（best 高亮）+ table（全部候选）。
+
+    heatmap/scatter 需数值 metric，仍用 ok_results；table 用 all_results 含失败/跳过。
+    scatter 用 per-row ``color`` 高亮 best 候选——``_render`` 契约：hue 非空时 color 被
+    忽略，故 best 高亮时必须去 ``hue=recipe`` 改 ``color="color"``（heatmap 已表达 recipe 维度）。
+    """
+    # heatmap / scatter 公共数据 shape：{recipe, bitwidth, metric, config_label}
+    # config_label 仅供 scatter 匹配 best 行；heatmap 不消费该字段（只看 x/y/value）。
     matrix_data: list[dict[str, Any]] = [
-        {"recipe": _recipe_label(r), "bitwidth": r["bit_width"], "metric": r["metric"]}
+        {"recipe": _recipe_label(r), "bitwidth": r["bit_width"],
+         "metric": r["metric"], "config_label": r["config_label"]}
         for r in ok_results
     ]
     try:
@@ -625,28 +641,35 @@ def _push_full_charts(render_chart, ok_results: list[dict[str, Any]],
     except Exception as e:
         sys.stderr.write(f"[run_ptq_sweep] heatmap 推送失败（不阻断）: {e}\n")
 
+    # scatter：统一单 series + per-row color。best 点珊瑚色，其余钢蓝色。
+    _BEST_COLOR = "#D4605A"
+    _DEFAULT_COLOR = "#5B8DB8"
+    for row in matrix_data:
+        row["color"] = _BEST_COLOR if row["config_label"] == best_label else _DEFAULT_COLOR
     try:
         if matrix_data:
             render_chart(
                 chart_type="scatter",
                 data=matrix_data,
                 label=CHART_LABEL,
-                title=f"PTQ Metric by Bitwidth ({metric_kind}, hue=recipe)",
+                title=f"PTQ Metric by Bitwidth ({metric_kind}, coral=best)",
                 x="bitwidth",
                 y="metric",
-                hue="recipe",
+                color="color",
             )
             sys.stderr.write(f"[run_ptq_sweep] pushed scatter: {len(matrix_data)} points\n")
     except Exception as e:
         sys.stderr.write(f"[run_ptq_sweep] scatter 推送失败（不阻断）: {e}\n")
 
-    table_rows = sorted(ok_results, key=lambda r: (r["bit_width"], _recipe_label(r)))
+    # table：全候选（含 failed/skipped），与 lightweight table 同理。
+    table_rows = sorted(all_results, key=lambda r: (r["bit_width"], _recipe_label(r)))
     _push_table(render_chart, [
         {"bitwidth": r["bit_width"], "recipe": _recipe_label(r),
          "config": r["config_label"], "metric": r["metric"],
-         "elapsed_s": r["elapsed_seconds"]}
+         "elapsed_s": r["elapsed_seconds"],
+         "status": r["status"], "error": r["error"] or ""}
         for r in table_rows
-    ], "Full Sweep — Successful Combos")
+    ], "Full Sweep — All Combos (incl. failed/skipped)")
 
 
 def _push_charts(mode: str, candidates: list[dict[str, Any]],
@@ -658,15 +681,22 @@ def _push_charts(mode: str, candidates: list[dict[str, Any]],
         sys.stderr.write(f"[run_ptq_sweep] 无法 import orca.chart（跳过推图）: {e}\n")
         return
 
-    ok_results = [c for c in report["candidates"] if c.get("status") == "ok"]
+    all_results = report["candidates"]
+    ok_results = [c for c in all_results if c.get("status") == "ok"]
     if not ok_results:
         sys.stderr.write("[run_ptq_sweep] 无成功候选 → 不推图\n")
         return
 
+    # best_label：full scatter 高亮用（main 已按 higher_is_better 选好，这里直接读不重算）。
+    best = report.get("best") or {}
+    best_label = best.get("config_label")
+
     if mode == "lightweight":
-        _push_lw_charts(render_chart, candidates, ok_results, metric_kind, recipes_filter)
+        _push_lw_charts(render_chart, candidates, all_results, ok_results,
+                        metric_kind, recipes_filter)
     else:
-        _push_full_charts(render_chart, ok_results, metric_kind)
+        _push_full_charts(render_chart, all_results, ok_results, metric_kind,
+                          best_label)
 
 
 # ─────────────────────────────────────────────────────────────────
