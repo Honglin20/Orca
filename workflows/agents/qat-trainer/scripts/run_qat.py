@@ -256,6 +256,11 @@ def _run_scheme(
         optimizer.step()
         qat.step()
         if step % period == 0 or step == total_steps:
+            # 训练 loss 已算（teacher-student mse），零成本采样做训练曲线
+            # （独立于 eval try/except：eval 失败不丢 loss 点）
+            result.setdefault("loss_curve", []).append(
+                {"step": step, "loss": float(loss.item())}
+            )
             try:
                 m = _eval_metric(eval_fn, q_model, metric_kind)
                 result["curve"].append({"step": step, "metric": m})
@@ -289,8 +294,13 @@ def _push_table(render_chart, rows: list[dict[str, Any]], title: str) -> None:
         sys.stderr.write(f"[run_qat] table 推送失败（不阻断）: {e}\n")
 
 
-def _push_charts(render_chart, ok_results: list[dict[str, Any]], metric_kind: str) -> None:
-    # line：per-step 收敛曲线（每 scheme 一条 series）
+def _push_charts(
+    render_chart,
+    ok_results: list[dict[str, Any]],
+    all_results: list[dict[str, Any]],
+    metric_kind: str,
+) -> None:
+    # line：per-step 收敛曲线（每 scheme 一条 series；失败 scheme 无 curve，不参与）
     line_data: list[dict[str, Any]] = []
     for r in ok_results:
         for pt in r.get("curve", []):
@@ -314,6 +324,30 @@ def _push_charts(render_chart, ok_results: list[dict[str, Any]], metric_kind: st
     except Exception as e:
         sys.stderr.write(f"[run_qat] line 推送失败（不阻断）: {e}\n")
 
+    # loss line：per-step 训练 loss（teacher-student mse，越小越好；失败 scheme 无 loss_curve）
+    loss_line_data: list[dict[str, Any]] = []
+    for r in ok_results:
+        for pt in r.get("loss_curve", []):
+            loss_line_data.append({
+                "scheme": r["scheme"],
+                "step": pt["step"],
+                "loss": pt["loss"],
+            })
+    try:
+        if loss_line_data:
+            render_chart(
+                chart_type="line",
+                data=loss_line_data,
+                label=CHART_LABEL,
+                title="QAT Training Loss",
+                x="step",
+                y="loss",
+                hue="scheme",
+            )
+            sys.stderr.write(f"[run_qat] pushed loss line: {len(loss_line_data)} points\n")
+    except Exception as e:
+        sys.stderr.write(f"[run_qat] loss line 推送失败（不阻断）: {e}\n")
+
     # bar：每 scheme before/after（ melted 成两行每 scheme，hue=phase）
     bar_data: list[dict[str, Any]] = []
     for r in ok_results:
@@ -334,28 +368,59 @@ def _push_charts(render_chart, ok_results: list[dict[str, Any]], metric_kind: st
     except Exception as e:
         sys.stderr.write(f"[run_qat] bar 推送失败（不阻断）: {e}\n")
 
-    # table
+    # recovery bar：recovery = after − before（QAT 最核心指标，原只在 table；失败 scheme 无数值）
+    recovery_bar_data: list[dict[str, Any]] = [
+        {"scheme": r["scheme"], "recovery": r["recovery"]}
+        for r in ok_results
+        if r.get("recovery") is not None
+    ]
+    try:
+        if recovery_bar_data:
+            render_chart(
+                chart_type="bar",
+                data=recovery_bar_data,
+                label=CHART_LABEL,
+                title=f"QAT Recovery (after−before, {metric_kind})",
+                x="scheme",
+                y="recovery",
+            )
+            sys.stderr.write(
+                f"[run_qat] pushed recovery bar: {len(recovery_bar_data)} schemes\n"
+            )
+    except Exception as e:
+        sys.stderr.write(f"[run_qat] recovery bar 推送失败（不阻断）: {e}\n")
+
+    # table：全集（含失败 scheme），失败行 before/after/recovery 填 "—"
+    def _num(v, nd=6):
+        return "—" if v is None else round(float(v), nd)
+
     rows = [
         {
             "scheme": r["scheme"],
-            "before": round(r["before"], 6),
-            "after": round(r["after"], 6),
-            "recovery": r["recovery"],
+            "before": _num(r.get("before")),
+            "after": _num(r.get("after")),
+            "recovery": _num(r.get("recovery")),
             "steps": r["steps"],
             "cage": r["cage"],
+            "status": r.get("status") or "—",
+            "error": r.get("error") or "",
         }
-        for r in ok_results
+        for r in all_results
     ]
-    _push_table(render_chart, rows, "QAT Scheme Comparison")
+    _push_table(render_chart, rows, "QAT Scheme Comparison (all schemes)")
 
 
-def _render_charts(ok_results: list[dict[str, Any]], metric_kind: str) -> None:
+def _render_charts(
+    ok_results: list[dict[str, Any]],
+    all_results: list[dict[str, Any]],
+    metric_kind: str,
+) -> None:
     try:
         from orca.chart import render_chart
     except Exception as e:
         sys.stderr.write(f"[run_qat] orca.chart 不可用（不阻断）: {e}\n")
         return
-    _push_charts(render_chart, ok_results, metric_kind)
+    _push_charts(render_chart, ok_results, all_results, metric_kind)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -533,8 +598,8 @@ def main() -> int:
     _free_model(best["_q_model"])
     best["_q_model"] = None
 
-    # charts
-    _render_charts(ok_results, metric_kind)
+    # charts（table 用全集含失败 scheme；line/bar/loss/recovery 用 ok_results）
+    _render_charts(ok_results, results, metric_kind)
 
     # stdout JSON 摘要
     summary = {
