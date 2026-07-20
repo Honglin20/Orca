@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-20] sidechain family 由 env 身份决定（修 dotdir 误判回归）
+
+`129fff8`（cac 优先）的回归修复：真 CC + `~/.cac` 存在（`orca install` 装 hook/skill 副作用）→ dotdir 探测误判 cac → daemon tail 空 `.cac` → 子 agent 消息进不了 web。根因：family 决策用 dotdir 存在性而非 env/进程身份。新增 `orca/iface/in_session/_hostenv.py`（stdlib-only）收敛 env 探测（提取 cli.py/sidechain_cmds.py 的 `_cac_session_id_from_pid`/`_host_session_from_env`/`_detect_backend_from_env` 副本 + 新增 `detect_family_from_env`：`CLAUDE_CODE_SESSION_ID`→cc / `CODEAGENT`+PID 回溯→cac）。三个 caller（`_spawn_sidechain_daemon` / doctor `_check_sidechain_backend` / `sidechain_cmds._print_effective`）统一 `detect_family_from_env() or config`，优先级 **env > config > dotdir 探测（兜底）**；events 层 `_family.py` 保留 probe 兜底不改。**builtins.next**：函数搬到 `_hostenv`（无 `def next` 遮蔽）后用普通 `next`（`__globals__` 绑定定义模块，CC/CAC 均安全）。code-reviewer 发现 3 处测试回归（test_sidechain_cmds / host_session_binding / sidechain_daemon 的 monkeypatch 路径 + config 断言）+ 2 stale docstring，全修。验证：doctor（真 CC+.cac）family=cc/resolved=.claude/available=True（修前 cac/fail）；daemon spawn family=cc（修前 None）；tape 34 个 agent_ 事件（修前 0）→ web 子 agent 可见。149 passed。Commit: `2f9be37`. 详见 [release note](../releases/2026-07-20-sidechain-family-env-identity.md).
+
 ## [2026-07-20] CAC session id PID 回溯替代 env 注入
 
 撤回 `config.py` 的 `_normalize_cac_session_env()`（将 `CODEAGENG3_SESSION_ID` 注入 `CLAUDE_CODE_SESSION_ID`，仅在 Python 内存有效，子进程继承不到）。改用 **PID 链回溯**：`_cac_session_id_from_pid()` 沿 PID 链找 `codeagentcli` 父进程 → 读 `~/.cac/sessions/<pid>.json` 取 `sessionId`。`_host_session_from_env()` 加第三优先级（PID 回溯）、`_detect_backend_from_env()` 加 CAC 检测（`CODEAGENT=1` + session 可用 → `"cc"`）。同步更新 `cc_nudge.sh` / `sidechain_cmds.py` 两处副本。删除 `tests/iface/cli/test_config.py`（旧 `_normalize_cac_session_env` 测试），新增 CAC PID 回溯单元测试 ×4。
