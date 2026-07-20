@@ -96,12 +96,19 @@ def _push_charts(auto_sensitive: list[str], ranked: list[dict[str, Any]],
 
     sensitive_set = set(auto_sensitive)
     score_by_name = {_row_name(r): _row_score(r) for r in ranked if _row_name(r)}
+    # rank：仅入选敏感层有 1..N，非入选留空（前端 DataTableWidget String() 渲染）
+    rank_map = {name: i + 1 for i, name in enumerate(auto_sensitive)}
 
-    # bar：按模型原始程序顺序（module_order），缺则退化为 ranked 顺序
+    # bar：按模型原始程序顺序（module_order），缺则退化为 ranked 顺序。
+    # 用 per-row color（非 hue）——hue 会把每根 bar 在 x 轴上分裂成 sensitive/normal 两半。
+    # 钢蓝 PALETTE[0]=#5B8DB8 / 珊瑚 NEGATIVE=#D4605A（与前端 title "coral=selected" 释义一致）。
     order = module_order or [_row_name(r) for r in ranked]
     bar_data = [
-        {"layer": name, "score": score_by_name.get(name, 0.0),
-         "status": "sensitive" if name in sensitive_set else "normal"}
+        {
+            "layer": name,
+            "score": score_by_name.get(name, 0.0),
+            "color": "#D4605A" if name in sensitive_set else "#5B8DB8",
+        }
         for name in order if name
     ]
     try:
@@ -110,19 +117,24 @@ def _push_charts(auto_sensitive: list[str], ranked: list[dict[str, Any]],
                 chart_type="bar",
                 data=bar_data,
                 label="quant/sensitivity",
-                title="Layer Sensitivity (by model order)",
+                title="Layer Sensitivity by model order (coral=selected)",
                 x="layer",
                 y="score",
-                hue="status",
+                color="color",
             )
             sys.stderr.write(f"[run_sensitivity] pushed bar: {len(bar_data)} layers\n")
     except Exception as e:
         sys.stderr.write(f"[run_sensitivity] bar 推送失败（不阻断）: {e}\n")
 
-    # table：入选敏感层明细（层名/分数/rank）
+    # table：全部层，与 bar 同源（都用 order = module_order 带 ranked 兜底），保证层集一致。
     table_rows = [
-        {"layer": name, "score": score_by_name.get(name, 0.0), "rank": i}
-        for i, name in enumerate(auto_sensitive, 1)
+        {
+            "layer": name,
+            "score": score_by_name.get(name, 0.0),
+            "selected": name in sensitive_set,
+            "rank": rank_map.get(name, ""),
+        }
+        for name in order if name
     ]
     try:
         if table_rows:
@@ -130,11 +142,12 @@ def _push_charts(auto_sensitive: list[str], ranked: list[dict[str, Any]],
                 chart_type="table",
                 data=table_rows,
                 label="quant/sensitivity",
-                title="Selected Sensitive Layers",
-                columns=["layer", "score", "rank"],
+                title="All Layers (selected ranked)",
+                columns=["layer", "score", "selected", "rank"],
             )
             sys.stderr.write(
-                f"[run_sensitivity] pushed table: {len(table_rows)} selected\n"
+                f"[run_sensitivity] pushed table: {len(table_rows)} layers "
+                f"({len(auto_sensitive)} selected)\n"
             )
     except Exception as e:
         sys.stderr.write(f"[run_sensitivity] table 推送失败（不阻断）: {e}\n")
