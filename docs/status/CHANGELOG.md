@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-21] Workflow 可视化全量优化（sensitivity bar/table + KD 0 图 bug + 横向优化）
+
+7 个改动点（每点独立 agent 实现 + 逐 diff 验收）：前端 ChartPayload 加 `color` 字段（per-row 着色，hue 优先；BarChartWidget + ScatterChartWidget，`b820ef1`+`e1272e8`）；sensitivity bar 去 hue 改 color、table 改全层（`235ba98`）；**KD 0 图 bug 修复**——viz_round 复用 viz_struct 但 schema 不匹配致每行被剔→0 图，新建 viz_kd.py（4 图）+ 改 yaml 两节点（`f516223`）；struct 新增逐候选表（`0910c87`）；bit-curve 假 pareto 改真 pareto + 全候选 scatter（`70bb4ff`）；ptq-sweep 删无意义 hue + table 补失败行（`d154d1d`）；qat 补训练 loss 曲线（`f361171`）。KD 用真实账本 mock 捕获证实 5 图正确（修前 0 图）。详见 [release note](../releases/2026-07-21-workflow-viz-overhaul.md).
+
 ## [2026-07-20] sidechain family 由 env 身份决定（修 dotdir 误判回归）
 
 `129fff8`（cac 优先）的回归修复：真 CC + `~/.cac` 存在（`orca install` 装 hook/skill 副作用）→ dotdir 探测误判 cac → daemon tail 空 `.cac` → 子 agent 消息进不了 web。根因：family 决策用 dotdir 存在性而非 env/进程身份。新增 `orca/iface/in_session/_hostenv.py`（stdlib-only）收敛 env 探测（提取 cli.py/sidechain_cmds.py 的 `_cac_session_id_from_pid`/`_host_session_from_env`/`_detect_backend_from_env` 副本 + 新增 `detect_family_from_env`：`CLAUDE_CODE_SESSION_ID`→cc / `CODEAGENT`+PID 回溯→cac）。三个 caller（`_spawn_sidechain_daemon` / doctor `_check_sidechain_backend` / `sidechain_cmds._print_effective`）统一 `detect_family_from_env() or config`，优先级 **env > config > dotdir 探测（兜底）**；events 层 `_family.py` 保留 probe 兜底不改。**builtins.next**：函数搬到 `_hostenv`（无 `def next` 遮蔽）后用普通 `next`（`__globals__` 绑定定义模块，CC/CAC 均安全）。code-reviewer 发现 3 处测试回归（test_sidechain_cmds / host_session_binding / sidechain_daemon 的 monkeypatch 路径 + config 断言）+ 2 stale docstring，全修。验证：doctor（真 CC+.cac）family=cc/resolved=.claude/available=True（修前 cac/fail）；daemon spawn family=cc（修前 None）；tape 34 个 agent_ 事件（修前 0）→ web 子 agent 可见。149 passed。Commit: `2f9be37`. 详见 [release note](../releases/2026-07-20-sidechain-family-env-identity.md).
