@@ -1,11 +1,12 @@
-"""viz_struct.py —— 草稿 §12 四张图，经 orca.chart render_chart 推送（无 HTML 产物）。
+"""viz_struct.py —— 草稿 §12 五张图，经 orca.chart render_chart 推送（无 HTML 产物）。
 
 契约（docs/specs/agent-structural-exploration-design-draft.md §12 / §11）：
-  读 ledger.jsonl + champions.jsonl，把四张图的数据推送到 Orca Web 面板：
+  读 ledger.jsonl + champions.jsonl，把五张图的数据推送到 Orca Web 面板：
     1. Champion Trace      —— line（候选灰点 + champion 轨迹，hue=series）
     2. Latency-Accuracy Pareto —— pareto（hue=status，min/max 方向）
     3. Exploration Tree    —— scatter（x=round, y=path, hue=status）
     4. Round Ledger        —— table（每轮汇总 + champion 时延/Δbaseline）
+    5. Candidate Ledger    —— table（逐候选：改了什么/accuracy/时延/status）
 
 纪律：
   - 仅用 ``orca.chart.render_chart``；**不输出任何 HTML 文件**（用户共识 2026-07-18：
@@ -45,7 +46,7 @@ except ImportError:
 # 数据不足的下限：ledger 少于这么多**有效行** → 该图跳过（§12 纪律）。
 _MIN_ROWS = 2
 
-# 同一群组 label：四张图共用，title 区分；同 title 再推 = 刷新。
+# 同一群组 label：五张图共用，title 区分；同 title 再推 = 刷新。
 _LABEL = "struct-explore"
 
 # ledger.jsonl 每行必备字段（缺则该行从可视化剔除，仅 WARN）。
@@ -104,7 +105,7 @@ def _clean_ledger(ledger: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return clean
 
 
-# ── 四张图 → render_chart ────────────────────────────────────────────────────
+# ── 五张图 → render_chart ────────────────────────────────────────────────────
 
 
 def _push_champion_trace(
@@ -284,6 +285,42 @@ def _push_ledger_table(
     return True
 
 
+def _push_candidate_table(ledger: list[dict[str, Any]]) -> bool:
+    """图5：逐候选明细表。列 = round/id/hypothesis/accuracy/latency_ms/status/tag。
+
+    补 Round Ledger 表缺失的「每候选改了什么 + accuracy + 时延」维度。
+    字段全部来自 ledger 现有字段（hypothesis 缺则退到 diff_summary）。
+    """
+    if len(ledger) < _MIN_ROWS:
+        print(f"[viz_struct] WARN: 跳过 candidate_table：ledger 行数 {len(ledger)} < {_MIN_ROWS}", file=sys.stderr)
+        return False
+
+    rows: list[dict[str, Any]] = []
+    for e in ledger:
+        rnd = e.get("round")
+        if not isinstance(rnd, int):
+            rnd = 0
+        rows.append({
+            "round": rnd,
+            "id": str(e.get("id", "?")),
+            "hypothesis": str(e.get("hypothesis", e.get("diff_summary", ""))),
+            "accuracy": _to_float(e.get("accuracy")),
+            "latency_ms": _to_float(e.get("latency_ms")),
+            "status": str(e.get("status", "?")),
+            "tag": str(e.get("tag", "")),
+        })
+    rows.sort(key=lambda r: r["round"])
+
+    _orca_render_chart(
+        chart_type="table",
+        data=rows,
+        label=_LABEL,
+        title="Candidate Ledger (per change)",
+        columns=["round", "id", "hypothesis", "accuracy", "latency_ms", "status", "tag"],
+    )
+    return True
+
+
 # ── 主入口 ─────────────────────────────────────────────────────────────────
 
 
@@ -296,7 +333,7 @@ def render_all(
     target_latency_ms: float,
     accuracy_target: float,
 ) -> dict[str, Any]:
-    """推四张图到 Orca Web 面板。返回 {chart: pushed_bool}。无 HTML 产物。"""
+    """推五张图到 Orca Web 面板。返回 {chart: pushed_bool}。无 HTML 产物。"""
     if _orca_render_chart is None:
         print("[viz_struct] WARN: orca.chart 不可用，跳过全部 web push（非 Orca 子进程？）", file=sys.stderr)
 
@@ -317,6 +354,7 @@ def render_all(
         ("pareto", lambda: _push_pareto(ledger, baseline_latency_ms, baseline_accuracy, accuracy_target)),
         ("exploration_tree", lambda: _push_exploration_tree(ledger)),
         ("ledger_table", lambda: _push_ledger_table(ledger, champions, baseline_latency_ms)),
+        ("candidate_table", lambda: _push_candidate_table(ledger)),
     ]
     for name, fn in pushers:
         try:
@@ -332,7 +370,7 @@ def render_all(
 
 def _main() -> int:
     parser = argparse.ArgumentParser(
-        description="草稿 §12 四张图（orca.chart render_chart 推送，无 HTML 产物）。"
+        description="草稿 §12 五张图（orca.chart render_chart 推送，无 HTML 产物）。"
     )
     parser.add_argument("--ledger", required=True, help="ledger.jsonl 路径")
     parser.add_argument("--champions", required=True, help="champions.jsonl 路径")
