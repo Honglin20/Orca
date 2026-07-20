@@ -241,37 +241,105 @@ def _push_table(render_chart, rows: list[dict[str, Any]], title: str) -> None:
         sys.stderr.write(f"[run_bit_curve] table 推送失败（不阻断）: {e}\n")
 
 
+def _infer_pareto_y_direction(
+    report_frontier: Any, higher_is_better: bool, metric_kind: str
+) -> str:
+    """chart1 pareto 的 y 方向：``max``（higher-is-better）/``min``（lower-is-better）。
+
+    优先读 ``report.frontier.metric_spec.higher_is_better``（SDK 回显，权威）；
+    缺失 → 用 ``_resolve_eval`` 的本地 ``higher_is_better``（同一 MetricSpec，二者一致）；
+    若两者都不可用（不应发生）→ 按 ``metric_kind`` 名字推断：mse/loss/error/nll → min，其余 → max。
+    """
+    if isinstance(report_frontier, dict):
+        ms = report_frontier.get("metric_spec")
+        if isinstance(ms, dict) and isinstance(ms.get("higher_is_better"), bool):
+            return "max" if ms["higher_is_better"] else "min"
+    if isinstance(higher_is_better, bool):
+        return "max" if higher_is_better else "min"
+    kind_lower = (metric_kind or "").lower()
+    # 最后防线：mse/loss/error 类显式判 min（lower-is-better），其余默认 max。
+    if any(t in kind_lower for t in ("mse", "loss", "error", "nll")):
+        return "min"
+    return "max"
+
+
 def _push_charts(
     render_chart,
     frontier_points: list[dict[str, Any]],
     selected_id: str | None,
     metric_kind: str,
     selected_format_counts: dict[str, Any] | None,
+    pareto_y_direction: str,
+    archive_records: list[dict[str, Any]] | None,
 ) -> None:
-    # line：Pareto 位宽-精度曲线（x=bit, y=metric；selected 点单独成 series 高亮）
-    line_data: list[dict[str, Any]] = []
+    # chart 1：真 Pareto 前沿（chart_type=pareto；x=bit 恒 min 越小越好，y=metric 按方向）。
+    # 用 frontier_points，去掉旧的 hue="series"——pareto 前端自动绘前沿线，
+    # 选中点的标识走 scatter（coral 高亮）+ table，这里不重复编码。
     pts_sorted = sorted(frontier_points, key=_point_bit)
-    for p in pts_sorted:
-        cid = str(p.get("candidate_id", ""))
-        line_data.append({
-            "bit": round(_point_bit(p), 4),
-            "metric": _point_metric(p),
-            "series": "selected" if cid and cid == selected_id else "frontier",
-        })
+    pareto_data: list[dict[str, Any]] = [
+        {"bit": round(_point_bit(p), 4), "metric": _point_metric(p)}
+        for p in pts_sorted
+    ]
     try:
-        if line_data:
+        if pareto_data:
             render_chart(
-                chart_type="line",
-                data=line_data,
+                chart_type="pareto",
+                data=pareto_data,
                 label=CHART_LABEL,
                 title=f"Bit-Width vs Accuracy Pareto Frontier ({metric_kind})",
                 x="bit",
                 y="metric",
-                hue="series",
+                pareto_x_direction="min",  # bit 越小越好
+                pareto_y_direction=pareto_y_direction,
             )
-            sys.stderr.write(f"[run_bit_curve] pushed line: {len(line_data)} points\n")
+            sys.stderr.write(
+                f"[run_bit_curve] pushed pareto: {len(pareto_data)} points "
+                f"(y_direction={pareto_y_direction})\n"
+            )
     except Exception as e:
-        sys.stderr.write(f"[run_bit_curve] line 推送失败（不阻断）: {e}\n")
+        sys.stderr.write(f"[run_bit_curve] pareto 推送失败（不阻断）: {e}\n")
+
+    # chart 1.5：全候选 scatter（coral=前沿/选中，钢蓝=其余）。
+    # 数据来自 report["archive"]["records"]——非仅 frontier，含所有 evaluated 候选，
+    # 看「前沿 vs 噪声点」分布。color 字段驱动 scatter per-row fill（hue 会拆 series，不用）。
+    if archive_records:
+        highlight_ids = {
+            str(p.get("candidate_id", ""))
+            for p in frontier_points
+            if p.get("candidate_id")
+        }
+        if selected_id:
+            highlight_ids.add(str(selected_id))
+        scatter_data: list[dict[str, Any]] = [
+            {
+                "bit": round(_point_bit(rec), 4),
+                "metric": _point_metric(rec),
+                "color": "#D4605A"
+                if str(rec.get("candidate_id", "")) in highlight_ids
+                else "#5B8DB8",
+            }
+            for rec in archive_records
+        ]
+        try:
+            render_chart(
+                chart_type="scatter",
+                data=scatter_data,
+                label=CHART_LABEL,
+                title="All Evaluated Candidates (coral=frontier)",
+                x="bit",
+                y="metric",
+                color="color",
+            )
+            sys.stderr.write(
+                f"[run_bit_curve] pushed scatter: {len(scatter_data)} candidates "
+                f"({len(highlight_ids)} highlighted)\n"
+            )
+        except Exception as e:
+            sys.stderr.write(f"[run_bit_curve] scatter 推送失败（不阻断）: {e}\n")
+    else:
+        sys.stderr.write(
+            "[run_bit_curve] report.archive.records 缺失 → skip all-candidates scatter\n"
+        )
 
     # bar：选中候选的格式分布（mxint 混合）
     if isinstance(selected_format_counts, dict) and selected_format_counts:
@@ -316,6 +384,8 @@ def _render_charts(
     selected_id: str | None,
     metric_kind: str,
     selected_format_counts: dict[str, Any] | None,
+    pareto_y_direction: str,
+    archive_records: list[dict[str, Any]] | None,
 ) -> None:
     try:
         from orca.chart import render_chart
@@ -323,7 +393,13 @@ def _render_charts(
         sys.stderr.write(f"[run_bit_curve] orca.chart 不可用（不阻断）: {e}\n")
         return
     _push_charts(
-        render_chart, frontier_points, selected_id, metric_kind, selected_format_counts
+        render_chart,
+        frontier_points,
+        selected_id,
+        metric_kind,
+        selected_format_counts,
+        pareto_y_direction,
+        archive_records,
     )
 
 
@@ -527,6 +603,18 @@ def main() -> int:
     eval_calls = report.get("eval_calls")
     final_status = final.get("status")
 
+    # 全候选（非仅 frontier）：从 report.archive.records 取，供 scatter 用。
+    archive = report.get("archive") if isinstance(report.get("archive"), dict) else {}
+    archive_records_raw = archive.get("records")
+    archive_records: list[dict[str, Any]] | None = (
+        archive_records_raw if isinstance(archive_records_raw, list) else None
+    )
+    # chart1 pareto y 方向：按 report.frontier.metric_spec.higher_is_better（权威），
+    # fallback 到 _resolve_eval 本地值（同 MetricSpec）。
+    pareto_y_direction = _infer_pareto_y_direction(
+        frontier, higher_is_better, metric_kind
+    )
+
     best_config_label = (
         f"{selected_id} [{_format_counts_summary(selected_format_counts)}]"
         if selected_id
@@ -590,7 +678,14 @@ def main() -> int:
         sys.exit(2)
 
     # charts
-    _render_charts(frontier_points, selected_id, metric_kind, selected_format_counts)
+    _render_charts(
+        frontier_points,
+        selected_id,
+        metric_kind,
+        selected_format_counts,
+        pareto_y_direction,
+        archive_records,
+    )
 
     # stdout JSON 摘要（agent 原样回显）
     out = {
