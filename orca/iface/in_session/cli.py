@@ -97,17 +97,68 @@ def _prompts_dir_for(tape_path: Path, run_id: str) -> Path:
     return Path(tape_path).parent / run_id / "prompts"
 
 
+def _cac_session_id_from_pid() -> str | None:
+    """沿 PID 链向上找 CAC 主进程（cmdline 含 ``codeagentcli``），
+    从 ``~/.cac/sessions/<cac_pid>.json`` 读 ``sessionId``。
+
+    解决 CAC 未将 session id 写入 ``process.env`` 的问题，
+    bash 子进程看不到 session id，但可通过 PID 反查获取。
+    并行安全：每个 bash 进程的 PID 链只指向自己的 CAC 父进程。
+    """
+    sessions_dir = Path.home() / ".cac" / "sessions"
+    if not sessions_dir.is_dir():
+        return None
+
+    pid = os.getpid()
+    for _ in range(20):
+        try:
+            status = Path(f"/proc/{pid}/status").read_text()
+            ppid_line = next(
+                (l for l in status.splitlines() if l.startswith("PPid:")), None
+            )
+            if not ppid_line:
+                break
+            ppid = int(ppid_line.split()[1])
+        except (FileNotFoundError, PermissionError, ValueError, IndexError):
+            break
+
+        try:
+            cmdline = Path(f"/proc/{ppid}/cmdline").read_bytes().decode("utf-8", errors="replace")
+        except (FileNotFoundError, PermissionError):
+            pid = ppid
+            continue
+
+        if "codeagentcli" in cmdline:
+            session_file = sessions_dir / f"{ppid}.json"
+            if session_file.exists():
+                try:
+                    return json.loads(session_file.read_text()).get("sessionId")
+                except (json.JSONDecodeError, KeyError):
+                    pass
+            break
+
+        pid = ppid
+        if pid <= 1:
+            break
+
+    return None
+
+
 def _host_session_from_env() -> str | None:
-    """宿主 session id（host-session-binding v2 §4.2）：优先级 ORCA_HOST_SESSION_ID
-    > CLAUDE_CODE_SESSION_ID > None。
+    """宿主 session id：优先级 ORCA_HOST_SESSION_ID > CLAUDE_CODE_SESSION_ID > CAC PID 回溯 > None。
 
     - **CC**：零配置（CC 给所有 bash 子进程注入 ``CLAUDE_CODE_SESSION_ID``，spike 实测）。
     - **opencode**：需 plugin ``shell.env`` 钩子注入 ``ORCA_HOST_SESSION_ID``（v2 §4.5）；
       未注入 → 返 None（fail-safe：该 run 的 host_session 落 tape 为 null，nudge 跳过）。
+    - **CAC**：CAC 未将 session id 写入 env → PID 链回溯 ``codeagentcli`` 父进程，
+      读 ``~/.cac/sessions/<pid>.json`` 获取 ``sessionId``（并行安全：每个 bash 的 PID 链只指向自己的 CAC 父进程）。
 
     单一真相源铁律：host_session 单路采集（env → bootstrap → tape），marker 不复存（§2.2）。
     """
-    return os.environ.get("ORCA_HOST_SESSION_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    sid = os.environ.get("ORCA_HOST_SESSION_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if sid:
+        return sid
+    return _cac_session_id_from_pid()
 
 
 def _run_dir_for(tape_path: Path, run_id: str) -> Path:
@@ -346,6 +397,8 @@ def _detect_backend_from_env() -> str | None:
     推断规则（SPEC-B v4 §0：backend 选择属 daemon 启动参数，grep 守门豁免）：
       - ``CLAUDE_CODE_SESSION_ID`` 存在 → ``"cc"``（CC 自动注入所有 bash 子进程）。
       - 否则 ``ORCA_HOST_SESSION_ID`` 存在 → ``"opencode"``（opencode plugin 显式注入）。
+      - 否则 ``CODEAGENT=1`` + ``_host_session_from_env()`` 可用（PID 回溯命中） → ``"cc"``
+        （CAC 是 CC 换皮，但不注入 ``CLAUDE_CODE_SESSION_ID``；PID 回溯反查 session id）。
       - 都无 → ``None``（非 in-session 起的 run，B2 守护无法启动）。
 
     返 ``None`` 时调用方应 skip spawn + warn（fail-open：run 仍可推进，只是子 agent 过程
@@ -355,6 +408,8 @@ def _detect_backend_from_env() -> str | None:
         return "cc"
     if os.environ.get("ORCA_HOST_SESSION_ID"):
         return "opencode"
+    if os.environ.get("CODEAGENT") and _host_session_from_env():
+        return "cc"
     return None
 
 
@@ -1631,7 +1686,7 @@ def _check_sidechain_backend() -> dict[str, Any]:
                 "name": "sidechain_backend", "hard": False, "status": "fail",
                 "detail": f"CC 家族 backend 解析失败：{e}",
             }
-        existing = detect_cc_existing_roots(host_session or "", cwd=os.getcwd())
+        existing = detect_cc_existing_roots()
         root_exists = root.exists()
         available = root_exists and bool(host_session)
 

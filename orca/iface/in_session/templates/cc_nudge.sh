@@ -38,17 +38,64 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 
 THROTTLE_SEC = 60
 
 
+def _cac_session_id_from_pid() -> str | None:
+    """沿 PID 链向上找 CAC 主进程（cmdline 含 ``codeagentcli``），
+    从 ``~/.cac/sessions/<cac_pid>.json`` 读 ``sessionId``。
+    """
+    sessions_dir = Path.home() / ".cac" / "sessions"
+    if not sessions_dir.is_dir():
+        return None
+
+    pid = os.getpid()
+    for _ in range(20):
+        try:
+            status = Path(f"/proc/{pid}/status").read_text()
+            ppid_line = next(
+                (l for l in status.splitlines() if l.startswith("PPid:")), None
+            )
+            if not ppid_line:
+                break
+            ppid = int(ppid_line.split()[1])
+        except (FileNotFoundError, PermissionError, ValueError, IndexError):
+            break
+
+        try:
+            cmdline = Path(f"/proc/{ppid}/cmdline").read_bytes().decode("utf-8", errors="replace")
+        except (FileNotFoundError, PermissionError):
+            pid = ppid
+            continue
+
+        if "codeagentcli" in cmdline:
+            session_file = sessions_dir / f"{ppid}.json"
+            if session_file.exists():
+                try:
+                    return json.loads(session_file.read_text()).get("sessionId")
+                except (json.JSONDecodeError, KeyError):
+                    pass
+            break
+
+        pid = ppid
+        if pid <= 1:
+            break
+
+    return None
+
+
 def _host_session_from_env() -> str | None:
-    """当前宿主 session id（优先级 ORCA_HOST_SESSION_ID > CLAUDE_CODE_SESSION_ID > None）。
+    """当前宿主 session id（优先级 ORCA_HOST_SESSION_ID > CLAUDE_CODE_SESSION_ID > CAC PID 回溯 > None）。
 
     与 orca/iface/in_session/cli.py 的 _host_session_from_env 同源（SPEC §4.2 公共 env 契约）。
     CC 给所有 bash 子进程注入 CLAUDE_CODE_SESSION_ID（spike 实测），Stop-hook 同 env 链。
     """
-    return os.environ.get("ORCA_HOST_SESSION_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    sid = os.environ.get("ORCA_HOST_SESSION_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if sid:
+        return sid
+    return _cac_session_id_from_pid()
 
 
 def _host_session_from_tape(run_id: str) -> str | None:

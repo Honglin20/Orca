@@ -99,10 +99,15 @@ cac 派子 agent ──①──> sidechain jsonl（数据源）
 
 ## 4. cac 特别注意
 
-- **「cac 后端」≠「.cac 目录(family)」**:cac 是 CC 换皮。"用 cac 后端" = exec 走 cac binary;但你观察到"目录与 claude 一致" = sidechain 写 `~/.claude`(family=**cc**)。
-  → **你的 family 应保持默认 cc,不要设 `orca sidechain family cac`**(那是给 cac 真的换目录到 `~/.cac` 的情况)。之前讨论的"切 cac"不适用于你这种"目录同 claude"的 cac。
-- **env 名**:若 cac 沿用 `CLAUDE_CODE_SESSION_ID`,daemon 自动识别(backend=cc + host_session)。
-  若 cac 改了 env 名 → daemon 漏检 host_session → **需要适配**(把 cac 的 env 名告诉我,我在 `_host_session_from_env` 加识别,或在 cac 会话内临时 `export CLAUDE_CODE_SESSION_ID=<cac 的 session id>` 验证)。
+- **cac =「backend=cc + family=cac」组合**(backend 与 family 是两个独立轴,别混):
+  - **backend = cc**:cac 是 CC 换皮,子 agent 过程是 stream-json **jsonl**(同 CC 协议)→ `CCJsonlAdapter` 解析。
+  - **family = cac**:cac 把数据写到 `~/.cac`(**结构同 claude,但根目录是 `.cac`**)。
+  - → **family 应设 `cac`**(`orca sidechain family cac`),让 daemon 读 `~/.cac/projects/<enc>/<host>/subagents/`。
+  - (本节早期版本误判 cac 用 `~/.claude` → 写"family 应 cc",已纠正——cac 实际用 `~/.cac`。)
+- **env 名（已解决）**:cac 注入的是 **`CODEAGENG3_SESSION_ID`**，不设 `CLAUDE_CODE_SESSION_ID`。
+  orca 通过 **PID 链回溯**解决：沿 PID 链向上找 ``codeagentcli`` 进程，读 ``~/.cac/sessions/<pid>.json``
+  取 ``sessionId``。此逻辑在 ``_host_session_from_env()`` / ``_detect_backend_from_env()`` 中统一（优先级 3），
+  ``cc_nudge.sh`` / ``sidechain_cmds.py`` 同步。无需手动 export env 变量。
 
 ---
 

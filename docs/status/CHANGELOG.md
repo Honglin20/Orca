@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-20] CAC session id PID 回溯替代 env 注入
+
+撤回 `config.py` 的 `_normalize_cac_session_env()`（将 `CODEAGENG3_SESSION_ID` 注入 `CLAUDE_CODE_SESSION_ID`，仅在 Python 内存有效，子进程继承不到）。改用 **PID 链回溯**：`_cac_session_id_from_pid()` 沿 PID 链找 `codeagentcli` 父进程 → 读 `~/.cac/sessions/<pid>.json` 取 `sessionId`。`_host_session_from_env()` 加第三优先级（PID 回溯）、`_detect_backend_from_env()` 加 CAC 检测（`CODEAGENT=1` + session 可用 → `"cc"`）。同步更新 `cc_nudge.sh` / `sidechain_cmds.py` 两处副本。删除 `tests/iface/cli/test_config.py`（旧 `_normalize_cac_session_env` 测试），新增 CAC PID 回溯单元测试 ×4。
+
 ## [2026-07-20] sidechain cac 优先 + `orca sidechain family` 命令 + import 性能修复
 
 CC sidechain resolver 探测改 **cac 优先**（`orca/events/adapters/_family.py::resolve_cc_sidechain_root`：`.cac` 存在即走 cac，含两存；原两存歧义默认 .claude）+ 新 `orca sidechain family` sub-Typer（set/show/unset，`--scope project|user`，照搬 `executor_cmds.set`）。配套：doctor fam_eff/hint 同步；`config.sidechain_family` helper（cli + sidechain_cmds 共享，DRY）；`load_merged_config` 合并 sidechain（修 project 级 `sidechain.family` 不生效既有 bug）。**import 性能回归修复**：`orca/iface/cli/__init__.py` eager import Textual TUI 壳 → 新命令 import config 拖慢 cli import（3.7s→5.9s）→ daemon pidfile 迟写 → 5 个 daemon e2e fail；改 PEP 562 `__getattr__` lazy + config profiles lazy 后 config import `4.4s→0.08s`，daemon e2e 全恢复。code-reviewer 核心检查全 pass（依赖单向/lazy/merge 边界/star import），修 2 minor（死 import / unset 空 dict 残留）。177 passed（含 5 daemon e2e）+ 86 非 daemon。Commit: `129fff8`. 详见 [release note](../releases/2026-07-20-sidechain-cac-priority.md).

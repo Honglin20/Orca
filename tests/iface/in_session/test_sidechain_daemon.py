@@ -431,6 +431,30 @@ def test_detect_backend_none(monkeypatch):
     assert _detect_backend_from_env() is None
 
 
+def test_detect_backend_cac(monkeypatch):
+    """CODEAGENT + PID 回溯命中 → backend=cc（CAC 是 CC 换皮）。"""
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.setenv("CODEAGENT", "1")
+    monkeypatch.setattr(
+        "orca.iface.in_session.cli._cac_session_id_from_pid",
+        lambda: "cac-sid-123",
+    )
+    assert _detect_backend_from_env() == "cc"
+
+
+def test_detect_backend_cac_no_session(monkeypatch):
+    """CODEAGENT 已设但 PID 回溯无结果 → backend=None（CAC 未就绪）。"""
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.setenv("CODEAGENT", "1")
+    monkeypatch.setattr(
+        "orca.iface.in_session.cli._cac_session_id_from_pid",
+        lambda: None,
+    )
+    assert _detect_backend_from_env() is None
+
+
 # ── 端到端：subprocess daemon 实时推送 ─────────────────────────────────────
 
 

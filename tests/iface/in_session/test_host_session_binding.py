@@ -117,6 +117,17 @@ def test_host_session_env_empty_orca_falls_through():
         assert _host_session_from_env() == "cc-sess-3"
 
 
+def test_host_session_env_cac_pid_backtrack(monkeypatch):
+    """无 ORCA / CC env → CAC PID 回溯命中 → 返回 session id。"""
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.setattr(
+        "orca.iface.in_session.cli._cac_session_id_from_pid",
+        lambda: "cac-pid-sid-42",
+    )
+    assert _host_session_from_env() == "cac-pid-sid-42"
+
+
 # ── make_workflow_started 写入 host_session（SPEC §4.1 tape 钉值）─────────────
 
 

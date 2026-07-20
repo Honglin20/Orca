@@ -26,7 +26,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
 
 import typer
 
@@ -53,17 +55,62 @@ app = typer.Typer(
 _VALID_FAMILIES: set[str] = set(CC_FAMILY_DOTDIR) | set(OPENCODE_FAMILY_DOTDIR)
 
 
+def _cac_session_id_from_pid() -> str | None:
+    """沿 PID 链向上找 CAC 主进程（cmdline 含 ``codeagentcli``），
+    从 ``~/.cac/sessions/<cac_pid>.json`` 读 ``sessionId``。
+    """
+    sessions_dir = Path.home() / ".cac" / "sessions"
+    if not sessions_dir.is_dir():
+        return None
+
+    pid = os.getpid()
+    for _ in range(20):
+        try:
+            status = Path(f"/proc/{pid}/status").read_text()
+            ppid_line = next(
+                (l for l in status.splitlines() if l.startswith("PPid:")), None
+            )
+            if not ppid_line:
+                break
+            ppid = int(ppid_line.split()[1])
+        except (FileNotFoundError, PermissionError, ValueError, IndexError):
+            break
+
+        try:
+            cmdline = Path(f"/proc/{ppid}/cmdline").read_bytes().decode("utf-8", errors="replace")
+        except (FileNotFoundError, PermissionError):
+            pid = ppid
+            continue
+
+        if "codeagentcli" in cmdline:
+            session_file = sessions_dir / f"{ppid}.json"
+            if session_file.exists():
+                try:
+                    return json.loads(session_file.read_text()).get("sessionId")
+                except (json.JSONDecodeError, KeyError):
+                    pass
+            break
+
+        pid = ppid
+        if pid <= 1:
+            break
+
+    return None
+
+
 def _host_session_from_env() -> str:
     """读宿主 session id（仅 ``_print_effective`` 展示用；与 ``cli._host_session_from_env`` 同语义）。
 
-    本地内联不共享：cli 那份挂在 ``cli`` 模块（import 即成环），而此处仅需展示诊断，3 行复制
-    低于 DRY 阈值。CC ``CLAUDE_CODE_SESSION_ID`` 开箱注入；opencode 经 plugin 注入 ``ORCA_HOST_SESSION_ID``。
+    本地内联不共享：cli 那份挂在 ``cli`` 模块（import 即成环），而此处仅需展示诊断。
+    优先级：CLAUDE_CODE_SESSION_ID > ORCA_HOST_SESSION_ID > CAC PID 回溯 > ""。
     """
-    return (
+    sid = (
         os.environ.get("CLAUDE_CODE_SESSION_ID")
         or os.environ.get("ORCA_HOST_SESSION_ID")
-        or ""
     )
+    if sid:
+        return sid
+    return _cac_session_id_from_pid() or ""
 
 
 def _print_effective() -> None:
