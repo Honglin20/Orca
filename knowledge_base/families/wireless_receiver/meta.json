@@ -108,6 +108,96 @@
       "physics": false,
       "attention": "no",
       "source": "Zhu MDPI Sensors 2024"
+    },
+    "D12": {
+      "name": "kd_relational_rkd_sp",
+      "ascend": "friendly",
+      "latency_tier": "arch",
+      "risk": "med",
+      "physics": false,
+      "attention": "no",
+      "source": "Park CVPR19 / Tung ICCV19 / Peng ICCV19"
+    },
+    "D13": {
+      "name": "kd_feature_ofd_fitnets",
+      "ascend": "friendly",
+      "latency_tier": "arch",
+      "risk": "med",
+      "physics": false,
+      "attention": "no",
+      "source": "Romero ICLR15 / Heo ICCV19 / Chen CVPR21 / Yang ECCV22"
+    },
+    "D14": {
+      "name": "kd_teacher_assistant_takd",
+      "ascend": "friendly",
+      "latency_tier": "arch",
+      "risk": "med",
+      "physics": false,
+      "attention": "no",
+      "source": "Mirzadeh 2020 arXiv:1902.03393"
+    },
+    "D15": {
+      "name": "kd_mean_teacher_ema",
+      "ascend": "friendly",
+      "latency_tier": "arch",
+      "risk": "low",
+      "physics": true,
+      "attention": "no",
+      "source": "Tarvainen NeurIPS17 arXiv:1703.01780"
+    },
+    "D16": {
+      "name": "kd_not_applicable",
+      "ascend": "hostile",
+      "latency_tier": "arch",
+      "risk": "high",
+      "physics": false,
+      "attention": "n/a",
+      "source": "negative list — Hinton/DKD/AT/Born-Again exclusion rationale"
+    },
+    "D17": {
+      "name": "kd_failure_modes",
+      "ascend": "hostile",
+      "latency_tier": "arch",
+      "risk": "high",
+      "physics": false,
+      "attention": "n/a",
+      "source": "Cho&Hariharan 2019 / Stanton 2021 arXiv:2106.05945"
+    },
+    "D18": {
+      "name": "student_convnext_pointwise",
+      "ascend": "friendly",
+      "latency_tier": "arch",
+      "risk": "low",
+      "physics": false,
+      "attention": "no",
+      "source": "Liu CVPR22 arXiv:2201.03545"
+    },
+    "D19": {
+      "name": "student_mlp_mixer",
+      "ascend": "friendly",
+      "latency_tier": "arch",
+      "risk": "med",
+      "physics": false,
+      "attention": "no",
+      "source": "Tolstikhin NeurIPS21 arXiv:2105.01601"
+    },
+    "D20": {
+      "name": "student_large_kernel",
+      "ascend": "friendly",
+      "latency_tier": "arch",
+      "risk": "med",
+      "physics": true,
+      "attention": "no",
+      "source": "RepLKNet arXiv:2203.06717"
+    },
+    "D21": {
+      "name": "kd_nas_workflow",
+      "ascend": "friendly",
+      "latency_tier": "arch",
+      "risk": "low",
+      "physics": false,
+      "attention": "n/a",
+      "source": "DisWOT CVPR23 / KD-NAS 2023 / Orca CONTRACTS"
     }
   }
 }
