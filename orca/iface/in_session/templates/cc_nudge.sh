@@ -65,12 +65,13 @@ def _cac_session_id_from_pid() -> str | None:
             break
 
         try:
-            cmdline = Path(f"/proc/{ppid}/cmdline").read_bytes().decode("utf-8", errors="replace")
+            raw = Path(f"/proc/{ppid}/cmdline").read_bytes()
         except (FileNotFoundError, PermissionError):
             pid = ppid
             continue
 
-        if "codeagentcli" in cmdline:
+        exe = raw.split(b"\x00", 1)[0].decode("utf-8", errors="replace")
+        if exe.endswith("/codeagentcli") or exe == "codeagentcli":
             session_file = sessions_dir / f"{ppid}.json"
             if session_file.exists():
                 try:

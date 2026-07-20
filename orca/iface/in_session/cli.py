@@ -101,9 +101,13 @@ def _cac_session_id_from_pid() -> str | None:
     """沿 PID 链向上找 CAC 主进程（cmdline 含 ``codeagentcli``），
     从 ``~/.cac/sessions/<cac_pid>.json`` 读 ``sessionId``。
 
-    解决 CAC 未将 session id 写入 ``process.env`` 的问题，
-    bash 子进程看不到 session id，但可通过 PID 反查获取。
-    并行安全：每个 bash 进程的 PID 链只指向自己的 CAC 父进程。
+    解决 CAC 未将 ``CODEAGENT3_SESSION_ID`` 写入 ``process.env`` 的问题——
+    CAC 把 sessionId 存在内存变量 ``eZ.sessionId`` 中，``subprocessEnv()``
+    传递的是 ``process.env``，故 bash 子进程继承不到 session id。
+    本函数通过 ``/proc`` 回溯找到 CAC 父进程 PID，再从 sessions 目录查 sessionId。
+
+    并行安全：每个 bash 进程沿自己的 PID 链回溯，只指向自己的 CAC 父进程，
+    不会错混到同一项目下其他并行 session。
     """
     sessions_dir = Path.home() / ".cac" / "sessions"
     if not sessions_dir.is_dir():
@@ -123,12 +127,15 @@ def _cac_session_id_from_pid() -> str | None:
             break
 
         try:
-            cmdline = Path(f"/proc/{ppid}/cmdline").read_bytes().decode("utf-8", errors="replace")
+            raw = Path(f"/proc/{ppid}/cmdline").read_bytes()
         except (FileNotFoundError, PermissionError):
             pid = ppid
             continue
 
-        if "codeagentcli" in cmdline:
+        # 第一个 \\0 之前是 exe 路径；精确匹配可执行文件名，
+        # 避免 bash snapshot 等子进程的 cmdline 参数中包含 "codeagentcli" 字样而误匹配
+        exe = raw.split(b"\x00", 1)[0].decode("utf-8", errors="replace")
+        if exe.endswith("/codeagentcli") or exe == "codeagentcli":
             session_file = sessions_dir / f"{ppid}.json"
             if session_file.exists():
                 try:
