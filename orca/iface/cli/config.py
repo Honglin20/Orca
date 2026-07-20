@@ -62,12 +62,6 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from orca.profiles.registry import (
-    get_profile,
-    load_builtin_profiles,
-    load_project_profiles,
-)
-
 logger = logging.getLogger(__name__)
 
 # config.json 里 per-profile 管理的三个 spawn 参数维度（key 名）。
@@ -147,8 +141,9 @@ def load_merged_config() -> dict[str, Any]:
     """合并用户级 + 项目级 config：**per-field project 覆盖 user**（非整份替换）。
 
     仅对 ``CONFIG_FIELDS`` 三个 dict key 做 per-profile 合并（project 的 ``opencode`` 覆盖 user
-    的 ``opencode``，但 user 的 ``claude`` 保留）。其余 key（未知）从 user 透传，project 的未知
-    key 忽略（保守：只认已知 spawn 字段）。
+    的 ``opencode``，但 user 的 ``claude`` 保留）。``sidechain`` 同样 project 覆盖 user 合并
+    （路径解析维度，需两层都生效——否则写 project 级 ``sidechain.family`` 不生效）。其余未知
+    key 只从 user 透传，project 的未知 key 忽略（保守：只认已知字段）。
 
     缺失/损坏的文件降级为 ``{}``（见 ``_load_config_file``），不阻断合并。
     """
@@ -161,7 +156,33 @@ def load_merged_config() -> dict[str, Any]:
         u_dict = u if isinstance(u, dict) else {}
         p_dict = p if isinstance(p, dict) else {}
         merged[field] = {**u_dict, **p_dict}  # project per-profile 覆盖 user
+    # sidechain：project 覆盖 user（与 spawn 维度同语义；sidechain.family 写 project 级也生效）。
+    sc_u = user.get("sidechain")
+    sc_p = project.get("sidechain")
+    if isinstance(sc_u, dict) or isinstance(sc_p, dict):
+        merged["sidechain"] = {
+            **(sc_u if isinstance(sc_u, dict) else {}),
+            **(sc_p if isinstance(sc_p, dict) else {}),
+        }
     return merged
+
+
+def sidechain_family(cfg: dict[str, Any]) -> str | None:
+    """从（merged）config 读 ``sidechain.family``（SPEC §P4；纯函数，零副作用）。
+
+    ``load_merged_config`` 已透传未知 key；``sidechain`` 是路径解析维度，独立于 ``CONFIG_FIELDS``
+    三 spawn 维度。两处 caller 共享本函数避免漂移：``in_session.cli._read_sidechain_family_from_config``
+    与 ``in_session.sidechain_cmds``（``orca sidechain family`` 命令）。
+
+    Returns:
+        family 字符串（"cc"/"cac"/"opencode"/"nga"，由用户填）或 None（未设）。**不做合法性
+        校验**——resolver 会 raise ValueError，doctor 会报 fail；caller 仅透传。
+    """
+    sidechain = cfg.get("sidechain")
+    if not isinstance(sidechain, dict):
+        return None
+    fam = sidechain.get("family")
+    return fam if isinstance(fam, str) else None
 
 
 def _normalize_flags_to_str(
@@ -220,6 +241,12 @@ def apply_config_env(cfg: dict[str, Any]) -> None:
         _shell_env_snapshot = {
             k: v for k, v in os.environ.items() if k.startswith("ORCA_")
         }
+    # lazy import：避免 ``import orca.iface.cli.config`` 触发 profiles.registry 加载（~1s，
+    # 拖慢所有 import config 的模块——含 sidechain 守护启动，致 pidfile 迟写 / liveness 误判）。
+    # profiles 三符号仅本函数用，移入函数内安全。
+    from orca.profiles.registry import (
+        get_profile, load_builtin_profiles, load_project_profiles,
+    )
     load_builtin_profiles()
     load_project_profiles(Path.cwd())
 

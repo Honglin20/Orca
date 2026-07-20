@@ -430,19 +430,10 @@ def _spawn_sidechain_daemon(run_id: str, tape_path: Path) -> None:
 def _read_sidechain_family_from_config() -> str | None:
     """读 config ``sidechain.family``（SPEC §P4；iface 层读 config 合法）。
 
-    ``load_merged_config`` 已透传未知 key（``CONFIG_FIELDS`` 仅管 binaries/flags/prompt_channel
-    三 spawn 维度，``sidechain.*`` 是路径解析维度，独立读——不加进 ``CONFIG_FIELDS``）。
-
-    Returns:
-        family 字符串（"cc"/"cac"/"opencode"/"nga"，由用户填）或 None（未设）。**不做合法性
-        校验**——resolver 会 raise ValueError，doctor 会报 fail；本函数仅透传。
+    薄包装：委托 ``config.sidechain_family``（与 ``sidechain_cmds`` 共享单一读逻辑，DRY）。
     """
-    from orca.iface.cli.config import load_merged_config
-    sidechain = load_merged_config().get("sidechain")
-    if not isinstance(sidechain, dict):
-        return None
-    fam = sidechain.get("family")
-    return fam if isinstance(fam, str) else None
+    from orca.iface.cli.config import load_merged_config, sidechain_family
+    return sidechain_family(load_merged_config())
 
 
 def _ensure_sidechain_daemon(run_id: str, tape_path: Path) -> None:
@@ -854,6 +845,17 @@ app = typer.Typer(
         "（wf 名取保留字如 list/next/status 会被 compile 拒）。"
         " 后端/headless 命令在另一入口（见 `tars --help`）。"
     ),
+)
+
+
+# ── sidechain 子命令组（sidechain.family 配置：cc/cac/opencode/nga dotdir 选择）────────
+# sub-Typer：与 commands.py 的 executor/skill/install 同模式。sidechain_cmds 只依赖
+# iface.cli.config + events.adapters._family（不反向 import 本模块），故模块级 add_typer 无环。
+from orca.iface.in_session.sidechain_cmds import app as sidechain_app  # noqa: E402
+
+app.add_typer(
+    sidechain_app, name="sidechain",
+    help="sidechain.family 配置（子 agent 过程读取的 dotdir：cc | cac | opencode | nga）",
 )
 
 
@@ -1619,7 +1621,7 @@ def _check_sidechain_backend() -> dict[str, Any]:
     hints: list[str] = []
 
     if has_cc_env:
-        # CC 家族：cc/cac。resolver 探测歧义默认 cc。
+        # CC 家族：cc/cac。resolver 探测 cac 优先（.cac 存在即 cac）。
         try:
             root, src = resolve_cc_sidechain_root(
                 host_session or "", family=cfg_family, cwd=os.getcwd(),
@@ -1638,17 +1640,18 @@ def _check_sidechain_backend() -> dict[str, Any]:
         # 故用 ``list(existing)[0]`` 取单元素（不能用 ``next(iter(...))``）。
         if cfg_family in CC_FAMILY_DOTDIR:
             fam_eff, fam_src = cfg_family, "config"
-        elif len(existing) == 1:
-            fam_eff, fam_src = list(existing)[0], "probe"
-        elif len(existing) == 2:
-            fam_eff, fam_src = "cc", "probe-ambig"
+        elif "cac" in existing:
+            # cac 优先（与 resolver 对齐）：.cac 存在即 cac，含两存情形。
+            fam_eff, fam_src = "cac", "probe"
+        elif "cc" in existing:
+            fam_eff, fam_src = "cc", "probe"
         else:
             fam_eff, fam_src = "cc", "default"
 
         if len(existing) == 2 and cfg_family is None:
             hints.append(
-                "探测到 .claude + .cac 两存歧义（默认 .claude）；"
-                "建议 config 设 sidechain.family 明确（'cc' 或 'cac'）。"
+                "检测到 .claude + .cac 两存（cac 优先 → 默认 cac）；"
+                "如需 .claude：`orca sidechain family cc`。"
             )
         if not root_exists:
             hints.append(

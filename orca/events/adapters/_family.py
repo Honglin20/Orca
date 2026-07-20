@@ -20,8 +20,9 @@ cli.py 与 events 层 adapters 是单向依赖（iface → events），反向 im
   2. ``family`` 参数显式（caller 从 config 读传入，resolver 自己不读 config）→ source="config"
   3. 探测两个 dotdir 哪个路径存在：
      - 单一存在 → source="probe"
-     - 两存歧义 → 默认 cc/opencode（保守，不破坏存量用户）；source="probe"（caller 用
-       ``detect_cc_existing_roots`` / ``detect_opencode_existing_dbs`` 报告歧义）
+     - 两存歧义：CC 家族 **cac 优先**（.cac 存在即选 cac）；opencode 家族默认 opencode。
+       source="probe"（caller 用 ``detect_cc_existing_roots`` / ``detect_opencode_existing_dbs``
+       报告两存）
   4. 默认 cc/opencode → source="default"
 
 **caller 责任**：
@@ -91,8 +92,8 @@ def detect_cc_existing_roots(
 ) -> set[str]:
     """探测 ``.cac`` 与 ``.claude`` 哪个 sidechain root 存在，返存在的家族集合。
 
-    纯文件系统检测，不依赖 env / config。doctor 用本函数报告歧义（``len() >= 2`` 即歧义）。
-    ``host_session`` 为空 → 返空集（无法定位目录；caller fail loud）。
+    纯文件系统检测，不依赖 env / config。doctor 用本函数报告两存（``len() >= 2``；CC 家族 cac
+    优先消解，两存不再视作歧义）。``host_session`` 为空 → 返空集（无法定位目录；caller fail loud）。
     """
     if not host_session:
         return set()
@@ -111,10 +112,10 @@ def resolve_cc_sidechain_root(
 
       1. ``ORCA_CC_SIDECHAIN_ROOT`` env（整体覆盖，**不依赖 host_session**）→ source="env"
       2. ``family`` 参数显式（"cc" 或 "cac"）→ ``~/.<dotdir[family]>/projects/...`` → source="config"
-      3. 探测 ``.cac`` / ``.claude`` 哪个路径存在：
-         - 单一存在 → source="probe"
-         - **两存歧义 → 默认 ``cc`` / ``.claude``（保守，不破坏存量 cc 用户）** → source="probe"
-           （caller/doctor 可调 ``detect_cc_existing_roots`` 报告歧义提示设 config）
+      3. 探测 ``.cac`` / ``.claude`` 哪个路径存在（**cac 优先**）：
+         - ``.cac`` 存在（无论 .claude 是否存在）→ ``~/.cac/...`` → source="probe"
+         - 仅 ``.claude`` 存在 → ``~/.claude/...`` → source="probe"
+         （caller/doctor 可调 ``detect_cc_existing_roots`` 报告两存；如需 .claude 显式设 family=cc）
       4. 默认 ``cc`` / ``.claude``（两路径都不存在）→ source="default"
 
     Args:
@@ -154,10 +155,11 @@ def resolve_cc_sidechain_root(
         )
 
     existing = detect_cc_existing_roots(host_session, cwd=cwd)
-    if len(existing) == 1:
-        return _cc_sidechain_path(next(iter(existing)), host_session, cwd=cwd), "probe"
-    if len(existing) == 2:
-        # 歧义：保守默认 cc / .claude。caller 可用 detect_cc_existing_roots 报告歧义。
+    # cac 优先：.cac 存在即走 cac（无论 .claude 是否存在）；仅 .claude 存在才走 cc。
+    # doctor 用 detect_cc_existing_roots 报告两存（提示如需 .claude 显式设 family=cc）。
+    if "cac" in existing:
+        return _cc_sidechain_path("cac", host_session, cwd=cwd), "probe"
+    if "cc" in existing:
         return _cc_sidechain_path("cc", host_session, cwd=cwd), "probe"
 
     return _cc_sidechain_path("cc", host_session, cwd=cwd), "default"

@@ -274,15 +274,15 @@ def test_doctor_sidechain_backend_cc_default_when_no_dirs(doctor_iso, monkeypatc
     assert "tars install --target cac" in detail  # 不存在时 hint
 
 
-def test_doctor_sidechain_backend_cc_ambiguity_hint(doctor_iso, monkeypatch):
-    """SPEC §P4 验收 #2：cc+cac 同装无 config → 默认 .claude + doctor 报告歧义 hint。"""
+def test_doctor_sidechain_backend_cc_both_cac_preferred(doctor_iso, monkeypatch):
+    """SPEC §P4 验收 #2（cac 优先演进）：cc+cac 同存无 config → cac 优先，默认 cac + 两存提示。"""
     monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
     monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "host-sid-amb")
     _install_fake_entry_skill(doctor_iso, "cc")
 
     # 在 doctor_iso（=tmp_path，也是 Path.home() 注入目标）下建 cc + cac 同 sid 的 subagents
-    # 目录，触发 detect_cc_existing_roots 返 {'cc','cac'}（歧义）。
+    # 目录，触发 detect_cc_existing_roots 返 {'cc','cac'}（两存）。
     encoded = str(doctor_iso).replace("/", "-")  # _encode_cwd 等价
     for dotdir in (".claude", ".cac"):
         root = doctor_iso / dotdir / "projects" / encoded / "host-sid-amb" / "subagents"
@@ -291,12 +291,14 @@ def test_doctor_sidechain_backend_cc_ambiguity_hint(doctor_iso, monkeypatch):
     reply = _run_doctor()
     check = _sidechain_check(reply)
     detail = check["detail"]
-    # 默认 .claude + family=cc。
-    assert "family=cc" in detail
-    assert "source=probe-ambig" in detail
-    # 歧义 hint（SPEC §P4 验收 #2）。
-    assert "歧义" in detail
-    assert "sidechain.family" in detail  # 建议设 config
+    # cac 优先 → family=cac + source=probe（不再是 probe-ambig）。
+    assert "family=cac" in detail
+    assert "source=probe" in detail
+    assert "probe-ambig" not in detail
+    # 两存提示（cac 优先，非"歧义"）；指引切回 .claude 的命令。
+    assert "两存" in detail
+    assert "cac 优先" in detail
+    assert "orca sidechain family cc" in detail
     # 两路径都存在 → root_exists=True → available。
     assert "root_exists=True" in detail
 

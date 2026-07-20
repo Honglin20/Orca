@@ -2,7 +2,7 @@
 
 覆盖意图（contract 锁，纯函数 + tmp_path 文件系统隔离）：
   - resolver 4 优先级 oracle：env > config(family) > probe > default。
-  - 探测歧义：cc + cac 同存 → 默认 .claude（保守），source="probe"。
+  - 探测两存：cc + cac 同存 → cac 优先（选 cac），source="probe"。
   - opencode 探测：.opencode / .nga DB 存在性 → probe vs default。
   - opencode 默认 fallback：opencode.db > session.db（B2-VRFY Bug #1 回归）。
   - 同源 HOST_DOTDIR 一致性：``CC_FAMILY_DOTDIR`` / ``OPENCODE_FAMILY_DOTDIR`` 与
@@ -151,10 +151,10 @@ def test_cc_priority_probe_single_cc(fake_home, fixed_cwd):
     assert src == "probe"
 
 
-def test_cc_priority_probe_ambiguity_defaults_to_claude(fake_home, fixed_cwd):
-    """优先级 #3 歧义：cc + cac 同存无 config → 默认 .claude（保守，不破坏 cc 用户）。
+def test_cc_priority_probe_both_defaults_to_cac(fake_home, fixed_cwd):
+    """优先级 #3 两存：cc + cac 同存无 config → cac 优先（选 cac），source="probe"。
 
-    SPEC §P4 验收 #2：cc+cac 同装无 config → 默认 .claude + doctor 报告歧义 hint。
+    SPEC §P4 验收 #2（cac 优先演进）：cc+cac 同装无 config → 默认 cac + doctor 报告两存提示。
     """
     encoded = _encode_cwd(fixed_cwd)
     cc_root = fake_home / ".claude" / "projects" / encoded / "h-session" / "subagents"
@@ -163,9 +163,9 @@ def test_cc_priority_probe_ambiguity_defaults_to_claude(fake_home, fixed_cwd):
     cac_root.mkdir(parents=True)
 
     root, src = resolve_cc_sidechain_root("h-session", cwd=fixed_cwd)
-    assert root == cc_root, "歧义默认 .claude（cc 用户不受影响）"
+    assert root == cac_root, "两存 cac 优先（.cac 存在即选 cac）"
     assert src == "probe"
-    # doctor 可用 detect_cc_existing_roots 报告歧义（len=2）。
+    # doctor 可用 detect_cc_existing_roots 报告两存（len=2；cac 优先已消解）。
     assert detect_cc_existing_roots("h-session", cwd=fixed_cwd) == {"cc", "cac"}
 
 
