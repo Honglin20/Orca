@@ -1,0 +1,101 @@
+[
+  {
+    "family": "lmmse_front",
+    "build_cfg": {"num_blocks": 2, "kernel": 3, "embed_dim": 16, "use_lmmse": true},
+    "kd_config": {
+      "kd_losses": ["mse", "rkd", "ofd"],
+      "weights":   {"mse": 1.0, "rkd": 0.1, "ofd": 0.3},
+      "ema": true,
+      "scheduler": {"target_weights": {"mse": 1.0}, "start": 0, "warmup_length": 3}
+    },
+    "rationale": "Lowest accuracy risk: LMMSE baseline floor guarantees graceful degradation; tiny conv learns delta. Phase1 anchor."
+  },
+  {
+    "family": "lmmse_front",
+    "build_cfg": {"num_blocks": 3, "kernel": 3, "embed_dim": 32, "use_lmmse": true},
+    "kd_config": {
+      "kd_losses": ["mse", "rkd", "ofd"],
+      "weights":   {"mse": 1.0, "rkd": 0.1, "ofd": 0.3},
+      "ema": true,
+      "scheduler": {"target_weights": {"mse": 1.0}, "start": 0, "warmup_length": 3}
+    },
+    "rationale": "LMMSE-front capacity sweep: deeper conv delta + wider channel to probe headroom."
+  },
+  {
+    "family": "eqdeeprx_shared",
+    "build_cfg": {"shared_detector": true, "embed_dim": 16, "num_blocks": 2},
+    "kd_config": {
+      "kd_losses": ["mse", "rkd", "ofd"],
+      "weights":   {"mse": 1.0, "rkd": 0.1, "ofd": 0.3},
+      "ema": true,
+      "scheduler": {"target_weights": {"mse": 1.0}, "start": 0, "warmup_length": 3}
+    },
+    "rationale": "Pointwise detector + multi-front-end diversity: zero im2col, all GEMM. Fastest detector path on Ascend."
+  },
+  {
+    "family": "deeprx_dilated",
+    "build_cfg": {"num_blocks": 3, "embed_dim": 16, "dilation_pattern": [1, 2, 4, 8]},
+    "kd_config": {
+      "kd_losses": ["mse", "rkd", "ofd"],
+      "weights":   {"mse": 1.0, "rkd": 0.1, "ofd": 0.3},
+      "ema": true,
+      "scheduler": {"target_weights": {"mse": 1.0}, "start": 0, "warmup_length": 3}
+    },
+    "rationale": "Geometric dilation stack reaches full-band RF without attention; k=3 standard conv stays Ascend-friendly."
+  },
+  {
+    "family": "deeprx_dilated",
+    "build_cfg": {"num_blocks": 4, "embed_dim": 32, "dilation_pattern": [1, 2, 4, 8]},
+    "kd_config": {
+      "kd_losses": ["mse", "rkd", "ofd"],
+      "weights":   {"mse": 1.0, "rkd": 0.1, "ofd": 0.3},
+      "ema": true,
+      "scheduler": {"target_weights": {"mse": 1.0}, "start": 0, "warmup_length": 3}
+    },
+    "rationale": "Dilated sweep at higher capacity — tests whether deeper dilation better matches teacher RF."
+  },
+  {
+    "family": "convnext_pointwise",
+    "build_cfg": {"num_blocks": 3, "embed_dim": 16, "expand_ratio": 4},
+    "kd_config": {
+      "kd_losses": ["mse", "rkd", "ofd"],
+      "weights":   {"mse": 1.0, "rkd": 0.1, "ofd": 0.3},
+      "ema": true,
+      "scheduler": {"target_weights": {"mse": 1.0}, "start": 0, "warmup_length": 3}
+    },
+    "rationale": "Inverted bottleneck with pointwise-only body: pure GEMM, BN-foldable, no im2col. Strong if teacher richness lives in channel mixing."
+  },
+  {
+    "family": "mlp_mixer",
+    "build_cfg": {"num_blocks": 2, "embed_dim": 16, "mlp_ratio": 2, "mixer_axis": "subcarrier"},
+    "kd_config": {
+      "kd_losses": ["mse", "rkd", "ofd"],
+      "weights":   {"mse": 1.0, "rkd": 0.1, "ofd": 0.3},
+      "ema": true,
+      "scheduler": {"target_weights": {"mse": 1.0}, "start": 0, "warmup_length": 3}
+    },
+    "rationale": "Token mixing via fixed Linear (no QK^T). Tests whether subcarrier-axis MLP alone matches teacher attention."
+  },
+  {
+    "family": "large_kernel",
+    "build_cfg": {"kernel": 15, "dilation": 2, "num_blocks": 2, "embed_dim": 16},
+    "kd_config": {
+      "kd_losses": ["mse", "rkd", "ofd"],
+      "weights":   {"mse": 1.0, "rkd": 0.1, "ofd": 0.3},
+      "ema": true,
+      "scheduler": {"target_weights": {"mse": 1.0}, "start": 0, "warmup_length": 3}
+    },
+    "rationale": "Large-kernel conv substitutes attention's global RF with explicit smoothness prior; single big kernel covers ~half of 48-subcarrier band."
+  },
+  {
+    "family": "ista_lista",
+    "build_cfg": {"unfold_steps": 3, "embed_dim": 16, "use_fft": false, "learnable_tau": true},
+    "kd_config": {
+      "kd_losses": ["mse", "rkd", "ofd"],
+      "weights":   {"mse": 1.0, "rkd": 0.1, "ofd": 0.3},
+      "ema": true,
+      "scheduler": {"target_weights": {"mse": 1.0}, "start": 0, "warmup_length": 3}
+    },
+    "rationale": "Unfolded sparse estimator: closest inductive prior to OFDM channel (sparse multipath). Default no-FFT path keeps ONNX/Ascend safe."
+  }
+]
