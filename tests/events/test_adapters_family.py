@@ -166,7 +166,7 @@ def test_cc_priority_probe_both_defaults_to_cac(fake_home, fixed_cwd):
     assert root == cac_root, "两存 cac 优先（.cac 存在即选 cac）"
     assert src == "probe"
     # doctor 可用 detect_cc_existing_roots 报告两存（len=2；cac 优先已消解）。
-    assert detect_cc_existing_roots("h-session", cwd=fixed_cwd) == {"cc", "cac"}
+    assert detect_cc_existing_roots() == {"cc", "cac"}
 
 
 def test_cc_priority_default_when_nothing_exists(fake_home, fixed_cwd):
@@ -223,23 +223,22 @@ def test_cc_resolve_family_with_empty_host_session_raises(fake_home, fixed_cwd):
 # ── detect_cc_existing_roots ─────────────────────────────────────────────────
 
 
-def test_detect_cc_existing_roots_empty_for_no_host_session(fake_home, fixed_cwd):
-    """host_session 空 → 返空集（无法定位目录）。"""
-    assert detect_cc_existing_roots("", cwd=fixed_cwd) == set()
+def test_detect_cc_empty_when_no_dotdirs(fake_home):
+    """无 ~/.claude / ~/.cac → 返空集（机器级：两个换皮都没装）。"""
+    assert detect_cc_existing_roots() == set()
 
 
-def test_detect_cc_existing_roots_empty_when_no_dirs(fake_home, fixed_cwd):
-    """无 .claude / .cac 目录 → 返空集。"""
-    assert detect_cc_existing_roots("h", cwd=fixed_cwd) == set()
+def test_detect_cc_finds_single_cac(fake_home):
+    """仅 ~/.cac 存在 → 返 {'cac'}（机器级探测顶层 dotdir，不依赖 host_session）。"""
+    (fake_home / ".cac").mkdir()
+    assert detect_cc_existing_roots() == {"cac"}
 
 
-def test_detect_cc_existing_roots_finds_both(fake_home, fixed_cwd):
-    """cc + cac 都存在 → 返 {'cc', 'cac'}。"""
-    encoded = _encode_cwd(fixed_cwd)
-    for fam in CC_FAMILY_DOTDIR:
-        dotdir = CC_FAMILY_DOTDIR[fam]
-        (fake_home / dotdir / "projects" / encoded / "h" / "subagents").mkdir(parents=True)
-    assert detect_cc_existing_roots("h", cwd=fixed_cwd) == {"cc", "cac"}
+def test_detect_cc_finds_both(fake_home):
+    """~/.claude + ~/.cac 都存在 → 返 {'cc', 'cac'}。"""
+    (fake_home / ".claude").mkdir()
+    (fake_home / ".cac").mkdir()
+    assert detect_cc_existing_roots() == {"cc", "cac"}
 
 
 # ── opencode resolver：4 优先级 oracle ───────────────────────────────────────

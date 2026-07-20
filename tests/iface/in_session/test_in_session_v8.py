@@ -250,10 +250,11 @@ def test_doctor_sidechain_backend_no_env_reports_unknown(doctor_iso, monkeypatch
     assert reply["ok"] is True
 
 
-def test_doctor_sidechain_backend_cc_default_when_no_dirs(doctor_iso, monkeypatch):
-    """有 CC env + 无 .claude/.cac 目录 → default .claude；root_exists=False。
+def test_doctor_sidechain_backend_cc_env_family_when_no_per_session_root(doctor_iso, monkeypatch):
+    """真 CC env + skill 装 .claude 但 per-session sidechain root 未建 → env family=cc、root 不存在。
 
-    SPEC §P4 验收「doctor 输出 resolved 路径 + source + 存在性」。
+    env 身份（CLAUDE_CODE_SESSION_ID）→ family=cc（source=env），resolver 收 family="cc" 走
+    source=config（跳过 dotdir probe）；但该 session 还没派过子 agent → root 不存在 → fail。
     """
     monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
     monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
@@ -262,28 +263,30 @@ def test_doctor_sidechain_backend_cc_default_when_no_dirs(doctor_iso, monkeypatc
     reply = _run_doctor()
     check = _sidechain_check(reply)
     assert check["hard"] is False
-    # 无目录存在 → root_exists=False → status=fail（hard=False 不影响 ok）。
+    # per-session root 未建 → root_exists=False → status=fail（hard=False 不影响 ok）。
     assert check["status"] == "fail"
     detail = check["detail"]
     assert "family=cc" in detail
-    assert "resolved_root=" in detail
-    assert "root_source=default" in detail
+    assert "source=env" in detail          # env 身份胜
+    assert "root_source=config" in detail  # family 非 None → resolver 走 config（非 probe）
     assert "root_exists=False" in detail
     assert "host_session_set=True" in detail
     assert "available=False" in detail
-    assert "tars install --target cac" in detail  # 不存在时 hint
 
 
-def test_doctor_sidechain_backend_cc_both_cac_preferred(doctor_iso, monkeypatch):
-    """SPEC §P4 验收 #2（cac 优先演进）：cc+cac 同存无 config → cac 优先，默认 cac + 两存提示。"""
+def test_doctor_sidechain_backend_env_family_cc_when_cac_dotdir_installed(doctor_iso, monkeypatch):
+    """【bug 回归锚】真 CC env + .claude/.cac 两存（.cac 是 install 副作用）→ env family=cc 胜，读 .claude。
+
+    修前：dotdir 探测 cac 优先 → 误读空的 .cac → daemon ingest 0 条 → 子 agent 消息进不了 web。
+    修后：env 身份（CLAUDE_CODE_SESSION_ID）权威 → family=cc（source=env）→ resolved 指向 .claude。
+    """
     monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
     monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "host-sid-amb")
     _install_fake_entry_skill(doctor_iso, "cc")
 
-    # 在 doctor_iso（=tmp_path，也是 Path.home() 注入目标）下建 cc + cac 同 sid 的 subagents
-    # 目录，触发 detect_cc_existing_roots 返 {'cc','cac'}（两存）。
-    encoded = str(doctor_iso).replace("/", "-")  # _encode_cwd 等价
+    # 两存：.claude（真 CC 数据）+ .cac（install 副作用），都建 per-session root。
+    encoded = str(doctor_iso).replace("/", "-")
     for dotdir in (".claude", ".cac"):
         root = doctor_iso / dotdir / "projects" / encoded / "host-sid-amb" / "subagents"
         root.mkdir(parents=True)
@@ -291,26 +294,32 @@ def test_doctor_sidechain_backend_cc_both_cac_preferred(doctor_iso, monkeypatch)
     reply = _run_doctor()
     check = _sidechain_check(reply)
     detail = check["detail"]
-    # cac 优先 → family=cac + source=probe（不再是 probe-ambig）。
-    assert "family=cac" in detail
-    assert "source=probe" in detail
-    assert "probe-ambig" not in detail
-    # 两存提示（cac 优先，非"歧义"）；指引切回 .claude 的命令。
-    assert "两存" in detail
-    assert "cac 优先" in detail
-    assert "orca sidechain family cc" in detail
-    # 两路径都存在 → root_exists=True → available。
+    # env 身份胜：family=cc（source=env），resolved 指向 .claude（非 .cac）。
+    assert "family=cc" in detail
+    assert "source=env" in detail
+    resolved = detail.split("resolved_root=")[1].split("；")[0]
+    assert "/.claude/" in resolved, f"resolved 应指向 .claude，得 {resolved}"
+    assert "/.cac/" not in resolved
+    # .claude root 存在 → available。
     assert "root_exists=True" in detail
+    assert "available=True" in detail
+    assert check["status"] == "pass"
 
 
-def test_doctor_sidechain_backend_cc_cac_only_probe(doctor_iso, monkeypatch):
-    """SPEC §P4 验收 #1 场景：仅 .cac 存在 → probe 胜指向 cac。
+def test_doctor_sidechain_backend_cac_env_family(doctor_iso, monkeypatch):
+    """CAC（CC 换皮）：CODEAGENT=1 + PID 回溯命中 → env family=cac，读 .cac。
 
-    doctor 应报告 family=cac（source=probe）+ root_exists=True。
+    CAC 不注入 CLAUDE_CODE_SESSION_ID；env 身份经 PID 回溯 codeagentcli 拿 session id。
+    monkeypatch cac_session_id_from_pid 模拟回溯命中（真机由 /proc 自动回溯）。
     """
     monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
-    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "host-sid-cac")
+    monkeypatch.setenv("CODEAGENT", "1")
+    monkeypatch.setattr(
+        "orca.iface.in_session._hostenv.cac_session_id_from_pid",
+        lambda: "host-sid-cac",
+    )
     _install_fake_entry_skill(doctor_iso, "cc")
 
     encoded = str(doctor_iso).replace("/", "-")
@@ -321,12 +330,12 @@ def test_doctor_sidechain_backend_cc_cac_only_probe(doctor_iso, monkeypatch):
     check = _sidechain_check(reply)
     detail = check["detail"]
     assert "family=cac" in detail
-    assert "source=probe" in detail
+    assert "source=env" in detail
+    resolved = detail.split("resolved_root=")[1].split("；")[0]
+    assert "/.cac/" in resolved
     assert "root_exists=True" in detail
     assert "available=True" in detail
     assert check["status"] == "pass"
-    # 单一存在无歧义 hint。
-    assert "歧义" not in detail
 
 
 def test_doctor_sidechain_backend_opencode_family(doctor_iso, monkeypatch):
@@ -352,19 +361,20 @@ def test_doctor_sidechain_backend_opencode_family(doctor_iso, monkeypatch):
     assert check["status"] == "pass"
 
 
-def test_doctor_sidechain_backend_config_family_override(doctor_iso, monkeypatch):
-    """config sidechain.family 覆盖探测：即便 .claude 存在，family=cac → resolved 指向 .cac。"""
+def test_doctor_sidechain_backend_env_family_beats_config(doctor_iso, monkeypatch):
+    """env 身份优先于 config：真 CC env（→cc）即便 config 设 cac → family=cc、读 .claude。
+
+    优先级 env > config > probe（修复核心：env 是权威身份源，config 仅在无 env 信号时兜底）。
+    """
     monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
     monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "host-sid-cfg")
     _install_fake_entry_skill(doctor_iso, "cc")
 
-    # 建 .claude（probe 会选它），但 config 设 family=cac。
+    # 建 .claude per-session root；config 设 family=cac（应被 env 覆盖）。
     encoded = str(doctor_iso).replace("/", "-")
     cc_root = doctor_iso / ".claude" / "projects" / encoded / "host-sid-cfg" / "subagents"
     cc_root.mkdir(parents=True)
-
-    # 写 user-scope config（load_merged_config 读 ~/.orca/config.json）。
     cfg = doctor_iso / ".orca" / "config.json"
     cfg.parent.mkdir(parents=True)
     cfg.write_text('{"sidechain": {"family": "cac"}}', encoding="utf-8")
@@ -372,11 +382,11 @@ def test_doctor_sidechain_backend_config_family_override(doctor_iso, monkeypatch
     reply = _run_doctor()
     check = _sidechain_check(reply)
     detail = check["detail"]
-    # config 胜：family=cac（source=config）。
-    assert "family=cac" in detail
-    assert "source=config" in detail
-    # resolved 指向 .cac（即便不存在，config 显式）。
-    assert ".cac" in detail
+    # env 胜：family=cc（source=env），resolved 指向 .claude（非 config 的 cac）。
+    assert "family=cc" in detail
+    assert "source=env" in detail
+    resolved = detail.split("resolved_root=")[1].split("；")[0]
+    assert "/.claude/" in resolved
     assert "root_source=config" in detail
 
 

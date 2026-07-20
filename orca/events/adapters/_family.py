@@ -87,19 +87,16 @@ def _cc_sidechain_path(
     return Path.home() / dotdir / "projects" / encoded / host_session / "subagents"
 
 
-def detect_cc_existing_roots(
-    host_session: str, *, cwd: str | None = None,
-) -> set[str]:
-    """探测 ``.cac`` 与 ``.claude`` 哪个 sidechain root 存在，返存在的家族集合。
+def detect_cc_existing_roots() -> set[str]:
+    """探测 ``~/.cac`` 与 ``~/.claude`` 哪个 dotdir 存在（机器级：装了哪个 CC 换皮），返家族集合。
 
-    纯文件系统检测，不依赖 env / config。doctor 用本函数报告两存（``len() >= 2``；CC 家族 cac
-    优先消解，两存不再视作歧义）。``host_session`` 为空 → 返空集（无法定位目录；caller fail loud）。
+    机器级决策（这台机用 cac 还是 cc），**不依赖 host_session / per-session subagents 目录**——
+    family 不该看某 session 派没派过子 agent（避免 daemon 启动早于首次派子 agent、目录未建时的
+    时序坑）。doctor 用本函数报告两存（``len() >= 2``；CC 家族 cac 优先消解，两存不再视作歧义）。
     """
-    if not host_session:
-        return set()
     return {
         fam for fam in CC_FAMILY_DOTDIR
-        if _cc_sidechain_path(fam, host_session, cwd=cwd).exists()
+        if (Path.home() / CC_FAMILY_DOTDIR[fam]).is_dir()
     }
 
 
@@ -112,9 +109,9 @@ def resolve_cc_sidechain_root(
 
       1. ``ORCA_CC_SIDECHAIN_ROOT`` env（整体覆盖，**不依赖 host_session**）→ source="env"
       2. ``family`` 参数显式（"cc" 或 "cac"）→ ``~/.<dotdir[family]>/projects/...`` → source="config"
-      3. 探测 ``.cac`` / ``.claude`` 哪个路径存在（**cac 优先**）：
-         - ``.cac`` 存在（无论 .claude 是否存在）→ ``~/.cac/...`` → source="probe"
-         - 仅 ``.claude`` 存在 → ``~/.claude/...`` → source="probe"
+      3. 探测 ``~/.cac`` / ``~/.claude`` 哪个 dotdir 存在（机器级，**cac 优先**）：
+         - ``~/.cac`` 存在（无论 .claude）→ ``~/.cac/...`` → source="probe"
+         - 仅 ``~/.claude`` 存在 → ``~/.claude/...`` → source="probe"
          （caller/doctor 可调 ``detect_cc_existing_roots`` 报告两存；如需 .claude 显式设 family=cc）
       4. 默认 ``cc`` / ``.claude``（两路径都不存在）→ source="default"
 
@@ -154,7 +151,7 @@ def resolve_cc_sidechain_root(
             "（需要 CLAUDE_CODE_SESSION_ID 或显式 --host-session）"
         )
 
-    existing = detect_cc_existing_roots(host_session, cwd=cwd)
+    existing = detect_cc_existing_roots()
     # cac 优先：.cac 存在即走 cac（无论 .claude 是否存在）；仅 .claude 存在才走 cc。
     # doctor 用 detect_cc_existing_roots 报告两存（提示如需 .claude 显式设 family=cc）。
     if "cac" in existing:

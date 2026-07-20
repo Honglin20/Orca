@@ -16,19 +16,18 @@
 回打生效值。合法家族值取 ``CC_FAMILY_DOTDIR | OPENCODE_FAMILY_DOTDIR`` 的 keys（加新前端自动同步）。
 
 **依赖方向（无环）**：只 import ``orca.iface.cli.config``（iface→iface）+
-``orca.events.adapters._family``（events→iface，与 ``_check_sidechain_backend`` 同方向）+ stdlib。
+``orca.events.adapters._family``（events→iface，与 ``_check_sidechain_backend`` 同方向）+
+``orca.iface.in_session._hostenv``（iface 同层，宿主身份 env 探测单一来源）+ stdlib。
 **严禁** import ``orca.iface.in_session.cli``——本模块的 ``app`` 被 cli 模块级 ``add_typer`` 挂载，
 反向 import 会成环。读 family 用 ``config.sidechain_family``（与 ``cli._read_sidechain_family_from_config``
-共享，DRY）；读 host_session env 本地内联（仅展示用，3 行，不值得跨层共享）。
+共享，DRY）；读 host_session / backend / family env 身份用 ``_hostenv``（与 cli 共享，消除既有副本）。
 
-依赖单向：iface 层（依赖 iface.cli.config + events.adapters._family + stdlib）。
+依赖单向：iface 层（依赖 iface.cli.config + events.adapters._family + iface.in_session._hostenv + stdlib）。
 """
 
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
 
 import typer
 
@@ -44,6 +43,11 @@ from orca.events.adapters._family import (
     resolve_cc_sidechain_root,
     resolve_opencode_db,
 )
+from orca.iface.in_session._hostenv import (
+    detect_backend_from_env,
+    detect_family_from_env,
+    host_session_from_env,
+)
 
 app = typer.Typer(
     name="sidechain",
@@ -55,88 +59,35 @@ app = typer.Typer(
 _VALID_FAMILIES: set[str] = set(CC_FAMILY_DOTDIR) | set(OPENCODE_FAMILY_DOTDIR)
 
 
-def _cac_session_id_from_pid() -> str | None:
-    """沿 PID 链向上找 CAC 主进程（cmdline 含 ``codeagentcli``），
-    从 ``~/.cac/sessions/<cac_pid>.json`` 读 ``sessionId``。
-    """
-    sessions_dir = Path.home() / ".cac" / "sessions"
-    if not sessions_dir.is_dir():
-        return None
-
-    pid = os.getpid()
-    for _ in range(20):
-        try:
-            status = Path(f"/proc/{pid}/status").read_text()
-            ppid_line = next(
-                (l for l in status.splitlines() if l.startswith("PPid:")), None
-            )
-            if not ppid_line:
-                break
-            ppid = int(ppid_line.split()[1])
-        except (FileNotFoundError, PermissionError, ValueError, IndexError):
-            break
-
-        try:
-            raw = Path(f"/proc/{ppid}/cmdline").read_bytes()
-        except (FileNotFoundError, PermissionError):
-            pid = ppid
-            continue
-
-        exe = raw.split(b"\x00", 1)[0].decode("utf-8", errors="replace")
-        if exe.endswith("/codeagentcli") or exe == "codeagentcli":
-            session_file = sessions_dir / f"{ppid}.json"
-            if session_file.exists():
-                try:
-                    return json.loads(session_file.read_text()).get("sessionId")
-                except (json.JSONDecodeError, KeyError):
-                    pass
-            break
-
-        pid = ppid
-        if pid <= 1:
-            break
-
-    return None
-
-
-def _host_session_from_env() -> str:
-    """读宿主 session id（仅 ``_print_effective`` 展示用；与 ``cli._host_session_from_env`` 同语义）。
-
-    本地内联不共享：cli 那份挂在 ``cli`` 模块（import 即成环），而此处仅需展示诊断。
-    优先级：CLAUDE_CODE_SESSION_ID > ORCA_HOST_SESSION_ID > CAC PID 回溯 > ""。
-    """
-    sid = (
-        os.environ.get("CLAUDE_CODE_SESSION_ID")
-        or os.environ.get("ORCA_HOST_SESSION_ID")
-    )
-    if sid:
-        return sid
-    return _cac_session_id_from_pid() or ""
-
-
 def _print_effective() -> None:
     """回显当前生效 ``sidechain.family`` + resolved 路径/DB + source（``family`` 查看/unset 后调）。
 
-    家族选择据 env（与 ``_check_sidechain_backend`` 同源）：有 ``CLAUDE_CODE_SESSION_ID`` → CC 家族
-    （``resolve_cc_sidechain_root``）；有 ``ORCA_HOST_SESSION_ID`` → opencode 家族
-    （``resolve_opencode_db``）；都无 → 只显示 config 值（非 in-session，无法 resolve）。
+    family 优先级 env 身份 > config（与 ``_spawn_sidechain_daemon`` / ``_check_sidechain_backend``
+    同源；见 ``_hostenv``）。家族判定走 ``detect_backend_from_env``（认 cac：CODEAGENT+PID 回溯
+    也算 CC 家族）→ CC 家族（``resolve_cc_sidechain_root``）/ opencode 家族（``resolve_opencode_db``）；
+    都无 → 只显示 config 值（非 in-session，无法 resolve）。
     """
     from orca.iface.cli.config import load_merged_config
 
-    fam = sidechain_family(load_merged_config())
+    # family 优先级 env 身份 > config（与 _spawn_sidechain_daemon / doctor 同源；见 _hostenv）。
+    env_fam = detect_family_from_env()
+    fam = env_fam or sidechain_family(load_merged_config())
     fam_disp = fam if fam is not None else "(未设 → 探测)"
+    fam_src = "env" if env_fam is not None else ("config" if fam is not None else "探测")
 
-    has_cc = bool(os.environ.get("CLAUDE_CODE_SESSION_ID"))
-    has_opc = bool(os.environ.get("ORCA_HOST_SESSION_ID"))
+    # CC/opencode 家族判定走 env（认 cac：CODEAGENT+PID 回溯也算 CC 家族）。
+    backend = detect_backend_from_env()
+    has_cc = backend == "cc"
+    has_opc = backend == "opencode"
 
     if has_cc:
-        host = os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+        host = host_session_from_env() or ""
         try:
             root, src = resolve_cc_sidechain_root(host, family=fam, cwd=os.getcwd())
         except ValueError as e:
             typer.echo(f"  family={fam_disp}；CC 家族解析失败：{e}", err=True)
             return
-        typer.echo(f"  family={fam_disp}（source={src}）")
+        typer.echo(f"  family={fam_disp}（选择来源={fam_src}；resolver source={src}）")
         typer.echo(f"  resolved_root={root}")
         typer.echo(f"  root_exists={root.exists()}")
     elif has_opc:
@@ -145,7 +96,7 @@ def _print_effective() -> None:
         except ValueError as e:
             typer.echo(f"  family={fam_disp}；opencode 家族解析失败：{e}", err=True)
             return
-        typer.echo(f"  family={fam_disp}（source={src}）")
+        typer.echo(f"  family={fam_disp}（选择来源={fam_src}；resolver source={src}）")
         typer.echo(f"  resolved_db={db}")
         typer.echo(f"  db_exists={db.is_file()}")
     else:

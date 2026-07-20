@@ -122,7 +122,7 @@ def test_host_session_env_cac_pid_backtrack(monkeypatch):
     monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     monkeypatch.setattr(
-        "orca.iface.in_session.cli._cac_session_id_from_pid",
+        "orca.iface.in_session._hostenv.cac_session_id_from_pid",
         lambda: "cac-pid-sid-42",
     )
     assert _host_session_from_env() == "cac-pid-sid-42"

@@ -69,13 +69,16 @@ def test_family_show_no_env(iso: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_family_show_with_env_resolves_root(iso: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``family``（有 CLAUDE_CODE_SESSION_ID + 已设 cac）→ 回显 source=config + resolved_root。"""
+    """``family``（有 CLAUDE_CODE_SESSION_ID）→ env family=cc 胜 config，source=env + resolved_root。
+
+    即便 config 设 cac，env 身份（真 CC）优先（与 _spawn_sidechain_daemon / doctor 同源）。
+    """
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "host-xyz")
-    runner.invoke(app, ["sidechain", "family", "cac"])
+    runner.invoke(app, ["sidechain", "family", "cac"])  # config 设 cac，应被 env 覆盖
     result = runner.invoke(app, ["sidechain", "family"])
     assert result.exit_code == 0, result.output
-    assert "family=cac" in result.output
-    assert "source=config" in result.output
+    assert "family=cc" in result.output        # env 胜（非 config 的 cac）
+    assert "选择来源=env" in result.output      # _print_effective 显示选择来源
     assert "resolved_root=" in result.output
 
 

@@ -6,6 +6,7 @@
 
 ## 状态（2026-07-20）
 
+- ✅ **sidechain family 由 env 身份决定**（修 `129fff8` 回归）：真 CC + `~/.cac` 存在（install 副作用）→ dotdir 误判 cac → 子 agent 消息进不了 web。新增 `_hostenv.py` 收敛 env 探测（+ `detect_family_from_env`），三个 caller 统一 env > config > probe；events 层 `_family.py` 兜底不改。验证：daemon family=cc、tape 34 个 agent_ 事件（修前 0）、web 子 agent 可见、149 passed。详见 [release note](../releases/2026-07-20-sidechain-family-env-identity.md)。
 - ✅ **sidechain cac 优先 + `orca sidechain family` 命令**（`129fff8`）：CC sidechain resolver 探测改 cac 优先（`.cac` 存在即走 cac，含两存）；新增 `orca sidechain family` sub-Typer（set/show/unset）；修 import 回归（`__init__` PEP 562 lazy，config import 4.4s→0.08s，daemon e2e 全恢复）。code-reviewer 自检 pass + 2 minor。详见 [release note](../releases/2026-07-20-sidechain-cac-priority.md)。
 - ✅ **量化 workflow 路线图 W1–W4 全部完结**（本日 W3+W4 落地，commit `e6646cf`+`da609ac`）。4 个量化 workflow 全部 in-session 可用，全 mxint 基。
 - ✅ **文档交付**：`docs/in-session-usage.md` + `docs/workflows/` ×7（4 量化 + 3 NAS，学术结构：实现概览→定义→背景→方法[公式推导]→实验→局限→附录库接口手册；核心方法形式化——零空间 Q2N / CAGE / m0_pareto / champion ratchet，照库源码还原）+ README 索引。重构 commits `e94c45a`…`02e2225`，见 CHANGELOG 顶部。

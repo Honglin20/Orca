@@ -437,7 +437,7 @@ def test_detect_backend_cac(monkeypatch):
     monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
     monkeypatch.setenv("CODEAGENT", "1")
     monkeypatch.setattr(
-        "orca.iface.in_session.cli._cac_session_id_from_pid",
+        "orca.iface.in_session._hostenv.cac_session_id_from_pid",
         lambda: "cac-sid-123",
     )
     assert _detect_backend_from_env() == "cc"
@@ -449,7 +449,7 @@ def test_detect_backend_cac_no_session(monkeypatch):
     monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
     monkeypatch.setenv("CODEAGENT", "1")
     monkeypatch.setattr(
-        "orca.iface.in_session.cli._cac_session_id_from_pid",
+        "orca.iface.in_session._hostenv.cac_session_id_from_pid",
         lambda: None,
     )
     assert _detect_backend_from_env() is None
