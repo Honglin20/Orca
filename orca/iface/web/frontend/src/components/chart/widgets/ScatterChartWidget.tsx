@@ -5,6 +5,7 @@
 
 import {
   CartesianGrid,
+  Cell,
   Legend,
   ResponsiveContainer,
   Scatter,
@@ -30,7 +31,7 @@ import {
 import { computeNiceTicks, extractNumericValues, formatTick } from "../axisUtils";
 
 export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
-  const { data, x, y, hue, size, title } = payload;
+  const { data, x, y, hue, color, size, title } = payload;
   const xKey = x ?? "x";
   const yKey = y ?? "y";
   const sizeKey = size; // undefined → 等径散点
@@ -162,7 +163,17 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
               fillOpacity={sizeKey ? BOX_FILL_OPACITY : undefined}
               stroke={PALETTE[0]}
               strokeWidth={BOX_STROKE_WIDTH}
-            />
+            >
+              {/* color：per-point 着色（hue 优先，hue 块已 return；此处仅单 series 生效）。
+                  每行 color 字段值是合法 CSS 色串，缺席回退 PALETTE[0]。color 空 → 无 Cell 子节点，
+                  走上方 fill={PALETTE[0]} 统一色（零回归）。 */}
+              {color
+                ? data.map((d, i) => {
+                    const c = String(d[color] ?? PALETTE[0]);
+                    return <Cell key={i} fill={c} stroke={c} />;
+                  })
+                : null}
+            </Scatter>
           </ScatterChart>
         </ResponsiveContainer>
       </div>
