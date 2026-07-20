@@ -13,6 +13,7 @@
   - ``value``（heatmap cell 着色字段）：chart_type=="heatmap" 时必非空 str；其它类型可省略/空
   - ``x`` / ``y``：heatmap 时必非空 str（列轴/行轴字段名）；其它类型可省略/空
   - ``hue``：可选 str（如存在则必须 str）
+  - ``color``：可选 str（per-row 着色字段名；hue 优先，hue 缺席时生效，与 hue 互斥语义）
 
 依赖单向：仅依赖 ``_limits``（常量），不依赖 schema/events 等 Orca runtime。
 """
@@ -81,8 +82,9 @@ def validate_payload(payload: dict[str, Any]) -> None:
                 f"columns 必须为 list[str]，got {columns!r}"
             )
 
-    # x / y / hue：可选 str（如存在则必须 str）。types.ts 三者均 ``string | undefined``。
-    for key in ("x", "y", "hue"):
+    # x / y / hue / color：可选 str（如存在则必须 str）。types.ts 四者均 ``string | undefined``。
+    # color 与 hue 互斥语义由前端消费（hue 优先）；此处仅做类型校验。
+    for key in ("x", "y", "hue", "color"):
         v = payload.get(key)
         if v is not None and not isinstance(v, str):
             raise ValueError(

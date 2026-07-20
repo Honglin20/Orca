@@ -4,6 +4,7 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  Cell,
   Legend,
   ResponsiveContainer,
   Tooltip,
@@ -28,7 +29,7 @@ import { computeNiceTicks, extractNumericValues, formatTick } from "../axisUtils
 import { pivotByHue } from "../pivot";
 
 export function BarChartWidget({ payload }: { payload: ChartPayload }) {
-  const { data, x, y, hue, title } = payload;
+  const { data, x, y, hue, color, title } = payload;
   const xKey = x ?? "x";
   const yKey = y ?? "y";
   const gridProps = getGridProps();
@@ -77,6 +78,52 @@ export function BarChartWidget({ payload }: { payload: ChartPayload }) {
                   radius={[BOX_RADIUS, BOX_RADIUS, 0, 0]}
                 />
               ))}
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+    );
+  }
+
+  // color 分支：per-row 着色（单 series 内逐行上色，调用方每行写合法 CSS 色串）。
+  // 与 hue 互斥：hue 优先（上面 hue 分支已 return），color 仅在 hue 缺席时生效。
+  // 不渲染 Legend（per-row 着色无意义系列图例；含义靠 title 文案表达，如 "(coral=selected)"）。
+  if (color) {
+    const allYValues = extractNumericValues(data, yKey);
+    const yConfig = computeNiceTicks(allYValues);
+    return (
+      <div data-testid="chart-widget">
+        <h4 className="orca-text-muted mb-2 text-xs font-medium">{title}</h4>
+        <div className="aspect-[4/3] w-full">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={data} margin={CHART_MARGIN}>
+              <CartesianGrid {...gridProps} />
+              <XAxis dataKey={xKey} tick={axisTick} />
+              <YAxis
+                tick={axisTick}
+                domain={yConfig.domain}
+                ticks={yConfig.ticks}
+                tickFormatter={formatTick}
+              />
+              <Tooltip
+                contentStyle={tooltipStyle}
+                cursor={tooltipCursor}
+                labelStyle={tooltipTextStyle}
+                itemStyle={tooltipTextStyle}
+              />
+              <Bar
+                dataKey={yKey}
+                fillOpacity={BOX_FILL_OPACITY}
+                strokeWidth={BOX_STROKE_WIDTH}
+                radius={[BOX_RADIUS, BOX_RADIUS, 0, 0]}
+              >
+                {data.map((row, i) => {
+                  // 每行的 color 字段值是合法 CSS 色串（如 "#D4605A"）；缺席回退 PALETTE[0]
+                  // 防 NaN/undefined 渲染异常（fail-soft 但可见：默认色一眼能看出未着色行）。
+                  const c = String(row[color] ?? PALETTE[0]);
+                  return <Cell key={i} fill={c} stroke={c} />;
+                })}
+              </Bar>
             </BarChart>
           </ResponsiveContainer>
         </div>

@@ -27,6 +27,9 @@ export interface ChartPayload {
   title: string;
   /** hue 分组（line/bar/area/scatter/radar 多系列着色） */
   hue?: string;
+  /** per-row fill 颜色字段名（bar/scatter）：每行该字段值为合法 CSS 色串，渲染时每根柱/点按行着色。
+   *  与 hue 互斥语义：hue 缺席时生效（hue 优先 → 分组并排）。着色逻辑在调用脚本，前端 dumb 渲染。 */
+  color?: string;
   /** 散点大小（scatter 类型作气泡图；ZAxis dataKey 映射，SPEC §5.4 / §0 D3） */
   size?: string;
   /**

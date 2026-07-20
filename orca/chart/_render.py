@@ -42,6 +42,7 @@ def render_chart(
     x: str = "",
     y: str = "",
     hue: str = "",
+    color: str = "",
     columns: list[str] | None = None,
     pareto_direction: str = "",
     pareto_x_direction: str = "",
@@ -65,6 +66,9 @@ def render_chart(
         x / y / hue: 坐标轴 / 着色字段名。
             heatmap：``x`` = 列轴字段（如 bitwidth）、``y`` = 行轴字段（如 recipe），均**必填**
             （``validate_payload`` fail loud 拒收空 x/y）。
+        color: per-row fill 颜色字段名（bar/scatter 每行该字段值为合法 CSS 色串，渲染时逐行着色）。
+            **hue 优先**：hue 非空时 color 被忽略（hue → 分组并排，color → 单 series 内逐行着色）。
+            着色逻辑在调用脚本（每行写死合法 CSS 色串），前端 dumb 渲染。
         columns: table 列名（派生用）。
         pareto_direction / pareto_x_direction / pareto_y_direction: pareto 前沿方向
             （``max`` / ``min`` / 空）。
@@ -116,6 +120,7 @@ def render_chart(
         "x": x,
         "y": y,
         "hue": hue,
+        "color": color,
         "value": value,
     }
     if columns is not None:
