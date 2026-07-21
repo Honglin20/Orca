@@ -85,15 +85,21 @@ nodes:
     agent: kd-teacher-setup
     output_schema:
       type: object
-      required: [output_dir, project_root, teacher_model_path, build_fn, dummy_input, teacher_cache, teacher_meta]
+      required: [output_dir, project_root, teacher_model_path, build_fn, dummy_input, teacher_cache, teacher_meta, snapshots_dir, worktree_root, ckpts_dir, ledger_path, champions_path, profile_report_path]
       properties:
-        output_dir: {type: string}
+        output_dir: {type: string, description: "run 根目录绝对路径（末尾必须带 /，下游拼接依赖此约定）"}
         project_root: {type: string}
         teacher_model_path: {type: string, description: "6 层放大版 teacher model.py 绝对路径"}
         build_fn: {type: string}
         dummy_input: {type: string, description: "JSON 串"}
         teacher_cache: {type: string, description: "teacher_cache.pt 绝对路径"}
         teacher_meta: {type: string, description: "teacher_meta.json 绝对路径（含 latency/accuracy/db_baseline/onnx）"}
+        snapshots_dir: {type: string, description: "<output_dir>/snapshots/ 绝对路径（末尾带 /）。下游只 append `<candidate_id>_model.py`"}
+        worktree_root: {type: string, description: "<output_dir>/.worktrees/ 绝对路径（末尾带 /）。下游只 append `<candidate_id>/`"}
+        ckpts_dir: {type: string, description: "<output_dir>/ckpts/ 绝对路径（末尾带 /）。下游只 append `<candidate_id>.pt`"}
+        ledger_path: {type: string, description: "<output_dir>/ledger.jsonl 绝对路径（账本单一真相源，下游只读此字段不拼接）"}
+        champions_path: {type: string, description: "<output_dir>/champions.jsonl 绝对路径（champion 轨迹，下游只读此字段不拼接）"}
+        profile_report_path: {type: string, description: "<output_dir>/profile_report.json 绝对路径（profile_gate 写、hypothesizer 读，单一真相源）"}
     routes:
       - to: profile_gate
 
@@ -113,12 +119,12 @@ nodes:
       ```bash
       python3 "{{ inputs.kd_scripts_dir }}/profile_onnx.py" \
         --onnx "<从 {{ teacher_setup.output.teacher_meta }} 读 teacher_onnx 字段>" \
-        --out "{{ teacher_setup.output.output_dir }}profile_report.json" --topk 5
+        --out "{{ teacher_setup.output.profile_report_path }}" --topk 5
       ```
       脚本非零退出 → fail loud（stderr 写进 fail_reason 停）。
       ## 输出（合法 JSON）
       ```json
-      {"profile_report": "{{ teacher_setup.output.output_dir }}profile_report.json"}
+      {"profile_report": "{{ teacher_setup.output.profile_report_path }}"}
       ```
     routes:
       - to: kd_train_script_gen
@@ -233,7 +239,7 @@ nodes:
         --student_model_path "{{ engineer.output.student_model_path }}" \
         --build_fn "{{ teacher_setup.output.build_fn }}" \
         --epochs "{{ inputs.short_epochs }}" \
-        --out_ckpt "{{ teacher_setup.output.output_dir }}ckpts/{{ engineer.output.candidate_id }}.pt"
+        --out_ckpt "{{ teacher_setup.output.ckpts_dir }}{{ engineer.output.candidate_id }}.pt"
       ```
       从 stdout 解析：`STUDENT_CKPT:` → student_ckpt；`KD_PROXY_MSE:` → proxy_mse；`KD_LOSS_FINAL:` → kd_loss_final。
       脚本非零退出 → fail loud。
@@ -334,8 +340,8 @@ nodes:
       ## 执行
       ```bash
       python3 "{{ inputs.kd_scripts_dir }}/viz_kd.py" --mode round \
-        --ledger "{{ teacher_setup.output.output_dir }}ledger.jsonl" \
-        --champions "{{ teacher_setup.output.output_dir }}champions.jsonl" \
+        --ledger "{{ teacher_setup.output.ledger_path }}" \
+        --champions "{{ teacher_setup.output.champions_path }}" \
         --teacher_meta "{{ teacher_setup.output.teacher_meta }}" || true
       ```
       脚本异常 `|| true` 不阻断（viz 是 sidecar；不在 Orca 子进程 → import orca.chart 失败 → 脚本自 WARN exit 0）。
@@ -426,8 +432,8 @@ nodes:
       ## 执行
       ```bash
       python3 "{{ inputs.kd_scripts_dir }}/viz_kd.py" --mode finalize \
-        --ledger "{{ teacher_setup.output.output_dir }}ledger.jsonl" \
-        --champions "{{ teacher_setup.output.output_dir }}champions.jsonl" \
+        --ledger "{{ teacher_setup.output.ledger_path }}" \
+        --champions "{{ teacher_setup.output.champions_path }}" \
         --teacher_meta "{{ teacher_setup.output.teacher_meta }}" \
         --final_latency_ms "{{ finalize.output.final_latency_ms }}" \
         --final_db_gap "{{ finalize.output.final_db_gap }}" || true

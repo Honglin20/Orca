@@ -14,8 +14,10 @@ tools: [bash, read, write, edit, glob, grep]
   {{ hypothesizer.output.hypothesis }}
   ```
   （rationale / structural_intent 见 `{{ hypothesizer.output }}`）
-- 父 model.py（champion 快照路径）：从 `{{ family_detect.output.output_dir }}champions.jsonl` 最后一行 `snapshot` 取。
+- 父 model.py（champion 快照路径）：从 `{{ family_detect.output.champions_path }}` 最后一行 `snapshot` 取。
 - 输出目录：`{{ family_detect.output.output_dir }}`
+- snapshots 目录（带尾斜杠，下游只 append `<candidate_id>_model.py`）：`{{ family_detect.output.snapshots_dir }}`
+- worktree 根目录（带尾斜杠，下游只 append `<candidate_id>/`）：`{{ family_detect.output.worktree_root }}`
 - project_root（family_detect 探测所得）：`{{ family_detect.output.project_root }}`（用于建 git worktree，§6）
 - build_fn（family_detect 探测所得）：`{{ family_detect.output.build_fn }}`（model.py 必须暴露它，导出 ONNX 用）
 
@@ -28,13 +30,13 @@ tools: [bash, read, write, edit, glob, grep]
 
 ## 职责
 
-1. **建/复用 git worktree（§6）**：在 `{{ family_detect.output.output_dir }}.worktrees/<candidate_id>/` 建 git worktree
+1. **建/复用 git worktree（§6）**：在 `{{ family_detect.output.worktree_root }}<candidate_id>/` 建 git worktree
    （`git worktree add`；**非 git 仓库** → fallback per-path 目录拷贝）。worktree 内 `train.py` 原样、`model.py` 待写。
 2. 把父 model.py 复制进 worktree，按假设**只改 model.py**（不变量2：**绝不碰 train.py / 训练函数**）。
 3. **可编译性校验**（NNGPT 式）：`python -c "import ast; ast.parse(open('model.py').read())"` 至少过 AST；
    尽量 `python -c "from model import <build_fn>; m = <build_fn>(); print(m)"` 实例化通过。失败 → 修到过或 fail loud。
 4. **写不可变快照（§6 / §11.1）**：把新 model.py 复制到
-   `{{ family_detect.output.output_dir }}snapshots/<candidate_id>_model.py`（账本历史真相，永不改）。
+   `{{ family_detect.output.snapshots_dir }}<candidate_id>_model.py`（账本历史真相，永不改）。
 5. candidate_id 命名 `r<round>_c<seq>`（与 hypothesizer 的 hypothesis_id 对齐）。
 
 ## 与账本的交互

@@ -68,14 +68,19 @@ nodes:
     tools: [bash, read, write, glob, grep]
     output_schema:
       type: object
-      required: [output_dir, family, kb_cache_dir, project_root, build_fn, dummy_input]
+      required: [output_dir, family, kb_cache_dir, project_root, build_fn, dummy_input, snapshots_dir, worktree_root, viz_dir, ledger_path, champions_path]
       properties:
-        output_dir: {type: string}
+        output_dir: {type: string, description: "run 根目录绝对路径（末尾必须带 /，下游拼接依赖此约定）"}
         family: {type: string, description: "命中的族名（可多族用 + 连，如 transformer+cnn）"}
         kb_cache_dir: {type: string}
         project_root: {type: string, description: "探测所得用户项目根绝对路径"}
         build_fn: {type: string, description: "探测所得实例化入口函数名（导出 ONNX 用）"}
         dummy_input: {type: string, description: "探测所得 dummy_input JSON 串，如 {\"shape\":[1,3,224,224],\"dtype\":\"float32\"}"}
+        snapshots_dir: {type: string, description: "<output_dir>/snapshots/ 绝对路径（末尾带 /）。下游只 append `<candidate_id>_model.py`，禁止自己拼根"}
+        worktree_root: {type: string, description: "<output_dir>/.worktrees/ 绝对路径（末尾带 /）。下游只 append `<candidate_id>/`"}
+        viz_dir: {type: string, description: "<output_dir>/viz/ 绝对路径（末尾带 /）"}
+        ledger_path: {type: string, description: "<output_dir>/ledger.jsonl 绝对路径（账本单一真相源，下游只读此字段不拼接）"}
+        champions_path: {type: string, description: "<output_dir>/champions.jsonl 绝对路径（champion 轨迹，下游只读此字段不拼接）"}
     prompt: |
       你是结构性探索 workflow 的 **Setup（一次性·轻量）**：建输出目录 + **浅层族检测** + 加载 KB 切片
       + **探测 project_root / build_fn / dummy_input**（这三项原是用户 input，现下沉给你运行时内省 model.py 得到）。
@@ -87,9 +92,36 @@ nodes:
       - knowledge_base 根目录：`knowledge_base/`（已固化，不再作 input）
 
       ## 执行（确定性优先，fail loud）
-      1. **建输出目录（append-only 账本，§6）**：`llm_artifacts/<model_name>/runs/<run_id>/`，子目录
-         `snapshots/ champions.jsonl ledger.jsonl kb_cache/ viz/ .worktrees/`。`<run_id>` 用时间戳。
-         `<model_name>` = model_path 文件名 stem。
+      1. **建输出目录（append-only 账本，§6）+ 一次性计算所有下游专用路径字段（单一真相源）**：
+         **output_dir 必须用 `os.path.abspath` + 末尾 `+ "/"` 计算一次**（杜绝手写路径字符串、杜绝 LLM 自由发挥尾斜杠；
+         否则下游拼接会产 `<run>snapshots/`、`<run>.worktrees/` 兄弟孤儿目录）。`<model_name>` = model_path 文件名 stem；`<run_id>` = 时间戳。
+         ```bash
+         OUTPUT_DIR=$(python3 -c "
+         import os, time, pathlib
+         model_name = pathlib.Path('{{ inputs.model_path }}').stem
+         run_id = time.strftime('%Y%m%d_%H%M%S')
+         print(os.path.abspath(os.path.join('llm_artifacts', model_name, 'runs', run_id)) + '/')
+         ")
+         # OUTPUT_DIR 末尾已带 /，下面 ${OUTPUT_DIR}<suffix> 是安全拼接（单一真相源在 setup 节点内部）
+         SNAPSHOTS_DIR="${OUTPUT_DIR}snapshots/"
+         WORKTREE_ROOT="${OUTPUT_DIR}.worktrees/"
+         VIZ_DIR="${OUTPUT_DIR}viz/"
+         KB_CACHE_DIR="${OUTPUT_DIR}kb_cache/"
+         LEDGER_PATH="${OUTPUT_DIR}ledger.jsonl"
+         CHAMPIONS_PATH="${OUTPUT_DIR}champions.jsonl"
+         mkdir -p "$SNAPSHOTS_DIR" "$WORKTREE_ROOT" "$VIZ_DIR" "$KB_CACHE_DIR"
+         : > "$CHAMPIONS_PATH"; : > "$LEDGER_PATH"
+         export OUTPUT_DIR SNAPSHOTS_DIR WORKTREE_ROOT VIZ_DIR KB_CACHE_DIR LEDGER_PATH CHAMPIONS_PATH
+         echo "OUTPUT_DIR=$OUTPUT_DIR"
+         echo "SNAPSHOTS_DIR=$SNAPSHOTS_DIR"
+         echo "WORKTREE_ROOT=$WORKTREE_ROOT"
+         echo "VIZ_DIR=$VIZ_DIR"
+         echo "KB_CACHE_DIR=$KB_CACHE_DIR"
+         echo "LEDGER_PATH=$LEDGER_PATH"
+         echo "CHAMPIONS_PATH=$CHAMPIONS_PATH"
+         ```
+         **把 stdout 的 7 个 `KEY=value` 原样填进输出 JSON**（每个目录字段末尾必须带 `/`，文件字段是完整路径）。
+         下游节点（engineer / structure_gate / viz_*）直接读这些 JSON 字段、**不**自己拼根——若你漏字段或忘尾斜杠，孤儿目录就回来了。
       2. **探测 project_root**：从 model_path 所在目录向上走，取**第一个含 `train.py` 或 `pyproject.toml`
          或 `.git` 的目录**作为项目根（绝对路径）。走到 / 仍找不到 → 取 model_path 的 dirname，并在输出注明"低置信"。
       3. **探测 build_fn**：读 model.py **顶层** `def`，挑那个实例化并返回 `nn.Module` 的函数名
@@ -111,8 +143,10 @@ nodes:
 
       ## 输出（**必须是合法 JSON 对象**，严格匹配上方 output_schema；orca 按 output_schema 校验，非 JSON → output_schema_mismatch fail loud）
       ```json
-      {"output_dir": "<绝对路径>", "family": "<族名，可带低置信注>", "kb_cache_dir": "<kb_cache 绝对路径>",
-       "project_root": "<绝对路径>", "build_fn": "<函数名>", "dummy_input": "<JSON 串>"}
+      {"output_dir": "<OUTPUT_DIR，末尾带 />", "family": "<族名，可带低置信注>", "kb_cache_dir": "<KB_CACHE_DIR，末尾带 />",
+       "project_root": "<绝对路径>", "build_fn": "<函数名>", "dummy_input": "<JSON 串>",
+       "snapshots_dir": "<SNAPSHOTS_DIR，末尾带 />", "worktree_root": "<WORKTREE_ROOT，末尾带 />",
+       "viz_dir": "<VIZ_DIR，末尾带 />", "ledger_path": "<LEDGER_PATH>", "champions_path": "<CHAMPIONS_PATH>"}
       ```
     routes:
       - to: baseline_measure
@@ -222,7 +256,7 @@ nodes:
       你是**结构变更门**（§9，放宽版 · 不硬驳回超参）。两步合一：确定性 AST 事实 + 语义终判。
 
       ## 输入
-      - 父 model.py（champion 快照）+ 新 candidate 快照：从 `{{ family_detect.output.output_dir }}snapshots/`
+      - 父 model.py（champion 快照）+ 新 candidate 快照：从 `{{ family_detect.output.snapshots_dir }}`
         读，本轮 candidate = `{{ engineer.output.snapshot_path }}`，父由 `ledger.jsonl` 最近 SUCCESS/parent 定。
       - 候选 worktree：`{{ engineer.output.worktree }}`
       - struct_scripts_dir: `{{ inputs.struct_scripts_dir }}`
@@ -311,8 +345,8 @@ nodes:
       你是结构性探索 workflow 的**轮内可视化**刷新（§12，orca.chart render_chart 推送，幂等刷新）。
 
       ## 输入（账本，只读）
-      - ledger: `{{ family_detect.output.output_dir }}ledger.jsonl`（每行一个 candidate）
-      - champions: `{{ family_detect.output.output_dir }}champions.jsonl`（冠军轨迹）
+      - ledger: `{{ family_detect.output.ledger_path }}`（每行一个 candidate）
+      - champions: `{{ family_detect.output.champions_path }}`（冠军轨迹）
       - 本轮：`{{ curator.output.round }}` / champion `{{ curator.output.champion_id }}`
       - baseline: latency `{{ baseline_measure.output.baseline_latency_ms }}`ms / accuracy `{{ baseline_measure.output.baseline_accuracy }}`
       - 目标: latency `{{ inputs.target_latency_ms }}`ms / accuracy `{{ baseline_measure.output.accuracy_target }}`
@@ -322,8 +356,8 @@ nodes:
       直接调 `viz_struct.py`（§12 四图全部由该脚本经 render_chart 推送到 Orca Web 面板）：
       ```bash
       python3 "{{ inputs.struct_scripts_dir }}/viz_struct.py" \
-        --ledger "{{ family_detect.output.output_dir }}ledger.jsonl" \
-        --champions "{{ family_detect.output.output_dir }}champions.jsonl" \
+        --ledger "{{ family_detect.output.ledger_path }}" \
+        --champions "{{ family_detect.output.champions_path }}" \
         --baseline_latency_ms "{{ baseline_measure.output.baseline_latency_ms }}" \
         --baseline_accuracy "{{ baseline_measure.output.baseline_accuracy }}" \
         --target_latency_ms "{{ inputs.target_latency_ms }}" \
@@ -365,7 +399,7 @@ nodes:
       你是结构性探索 workflow 的 **收尾**（§14 决策5）：champion 从头重训 + 导出 ONNX + final_report。
 
       ## 输入
-      - 账本/champion：`{{ family_detect.output.output_dir }}champions.jsonl`（最后一行 = 全局 champion）。
+      - 账本/champion：`{{ family_detect.output.champions_path }}`（最后一行 = 全局 champion）。
       - curator 终态：`{{ curator.output.champion_id }}` / `terminate_reason: {{ curator.output.terminate_reason }}`。
       - train_command（原样，绝不改）：`{{ inputs.train_command }}`
       - latency_provider（已固化）：`workflows/agents/_struct_scripts/latency_onnxrt.py::measure`
@@ -406,8 +440,8 @@ nodes:
       你是结构性探索 workflow 的**终态可视化**（§12 四图终态版 + 收尾对比，幂等刷新）。
 
       ## 输入
-      - ledger: `{{ family_detect.output.output_dir }}ledger.jsonl`
-      - champions: `{{ family_detect.output.output_dir }}champions.jsonl`
+      - ledger: `{{ family_detect.output.ledger_path }}`
+      - champions: `{{ family_detect.output.champions_path }}`
       - final: `{{ finalize.output.final_report }}` / latency `{{ finalize.output.final_latency_ms }}`ms / accuracy `{{ finalize.output.final_accuracy }}`
       - baseline: `{{ baseline_measure.output.baseline_latency_ms }}`ms / `{{ baseline_measure.output.baseline_accuracy }}`
       - 目标: `{{ inputs.target_latency_ms }}`ms / `{{ baseline_measure.output.accuracy_target }}`
@@ -418,8 +452,8 @@ nodes:
       1. 调 `viz_struct.py` 重推 §12 四图终态版（与 viz_round 同命令；幂等刷新）：
          ```bash
          python3 "{{ inputs.struct_scripts_dir }}/viz_struct.py" \
-           --ledger "{{ family_detect.output.output_dir }}ledger.jsonl" \
-           --champions "{{ family_detect.output.output_dir }}champions.jsonl" \
+           --ledger "{{ family_detect.output.ledger_path }}" \
+           --champions "{{ family_detect.output.champions_path }}" \
            --baseline_latency_ms "{{ baseline_measure.output.baseline_latency_ms }}" \
            --baseline_accuracy "{{ baseline_measure.output.baseline_accuracy }}" \
            --target_latency_ms "{{ inputs.target_latency_ms }}" \

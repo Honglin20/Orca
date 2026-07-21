@@ -38,13 +38,41 @@ tools: [bash, read, write, edit, glob, grep]
 - `grep -E '^def [a-zA-Z_][a-zA-Z0-9_]*'` 找顶层 build 函数 → `build_fn`（多个则报错让用户指定）。
 - 浅读 build_fn + forward 推 `dummy_input` JSON（默认 `{"shape":[1,4,48,64,1],"dtype":"float32"}`）；推不出 → 报错。
 
-### 2. 自建 output_dir + {{ inputs.teacher_layers }} 层 hint 编辑
+### 2. 自建 output_dir + 计算所有下游专用路径字段（单一真相源） + {{ inputs.teacher_layers }} 层 hint 编辑
+
+**output_dir 必须用 `os.path.abspath` + 末尾 `+ "/"` 计算一次**（杜绝手写路径字符串、杜绝 LLM 自由发挥尾斜杠；
+否则下游拼接会产 `<run>snapshots/`、`<run>.worktrees/` 兄弟孤儿目录）。后续步骤沿用此 shell 变量。
 ```bash
-OUTPUT_DIR="llm_artifacts/<stem>/kd_nas_run_$(date +%Y%m%d_%H%M%S)/"   # 末尾必须带 /
-mkdir -p "$OUTPUT_DIR"{snapshots,ckpts,kb_cache}
-: > "$OUTPUT_DIR/champions.jsonl"; : > "$OUTPUT_DIR/ledger.jsonl"
-cp {{ inputs.teacher_model_path }} "$OUTPUT_DIR/teacher_model.py"
+OUTPUT_DIR=$(python3 -c "
+import os, time, pathlib
+stem = pathlib.Path('{{ inputs.teacher_model_path }}').stem
+ts = time.strftime('%Y%m%d_%H%M%S')
+print(os.path.abspath(os.path.join('llm_artifacts', stem, f'kd_nas_run_{ts}')) + '/')
+")
+# OUTPUT_DIR 末尾已带 /，下面 ${OUTPUT_DIR}<suffix> 是安全拼接（单一真相源在 setup 节点内部）
+SNAPSHOTS_DIR="${OUTPUT_DIR}snapshots/"
+WORKTREE_ROOT="${OUTPUT_DIR}.worktrees/"
+CKPTS_DIR="${OUTPUT_DIR}ckpts/"
+KB_CACHE_DIR="${OUTPUT_DIR}kb_cache/"
+LEDGER_PATH="${OUTPUT_DIR}ledger.jsonl"
+CHAMPIONS_PATH="${OUTPUT_DIR}champions.jsonl"
+PROFILE_REPORT_PATH="${OUTPUT_DIR}profile_report.json"
+mkdir -p "$SNAPSHOTS_DIR" "$WORKTREE_ROOT" "$CKPTS_DIR" "$KB_CACHE_DIR"
+: > "$CHAMPIONS_PATH"; : > "$LEDGER_PATH"
+cp "{{ inputs.teacher_model_path }}" "${OUTPUT_DIR}teacher_model.py"
+export OUTPUT_DIR SNAPSHOTS_DIR WORKTREE_ROOT CKPTS_DIR KB_CACHE_DIR LEDGER_PATH CHAMPIONS_PATH PROFILE_REPORT_PATH
+echo "OUTPUT_DIR=$OUTPUT_DIR"
+echo "SNAPSHOTS_DIR=$SNAPSHOTS_DIR"
+echo "WORKTREE_ROOT=$WORKTREE_ROOT"
+echo "CKPTS_DIR=$CKPTS_DIR"
+echo "LEDGER_PATH=$LEDGER_PATH"
+echo "CHAMPIONS_PATH=$CHAMPIONS_PATH"
+echo "PROFILE_REPORT_PATH=$PROFILE_REPORT_PATH"
 ```
+**把 stdout 的 7 个 `KEY=value` 原样填进输出 JSON**（目录字段末尾必须带 `/`，文件字段是完整路径）。
+下游节点（kd-engineer / profile_gate / kd_trainer / viz_*）只读 JSON 字段、**不**自己拼根——
+若你漏字段或忘尾斜杠，孤儿目录就回来了。
+
 在 `teacher_model.py` 里把 `self.main = nn.Sequential(...)` 中**恰好 4 个** `SignalTransformerBlock(...)` 改成**恰好 {{ inputs.teacher_layers }} 个**（参数同模、顺序照抄，其余逐字不变）。
 AST 校验 + 实例化校验：`python3 -c "import ast; ast.parse(open('$OUTPUT_DIR/teacher_model.py').read())"`；`python3 -c "import sys;sys.path.insert(0,'$OUTPUT_DIR');from teacher_model import <build_fn>;<build_fn>()"`。不过且原因非层数维度 → fail loud。
 
@@ -69,12 +97,18 @@ python3 "{{ inputs.kd_scripts_dir }}/teacher_setup.py" \
 
 ```json
 {
-  "output_dir": "<自建的 OUTPUT_DIR 绝对路径，末尾带 />",
+  "output_dir": "<OUTPUT_DIR 绝对路径，末尾带 />",
   "project_root": "<探测出的 project_root 绝对路径>",
   "teacher_model_path": "<$OUTPUT_DIR/teacher_model.py 绝对路径>",
   "build_fn": "<探测出的 build_fn>",
   "dummy_input": "<探测出的 dummy_input JSON 字符串>",
   "teacher_cache": "<TEACHER_CACHE 绝对路径>",
-  "teacher_meta": "<TEACHER_META 绝对路径（teacher_meta.json，含 latency/accuracy/onnx 等）>"
+  "teacher_meta": "<TEACHER_META 绝对路径（teacher_meta.json，含 latency/accuracy/onnx 等）>",
+  "snapshots_dir": "<SNAPSHOTS_DIR，末尾带 />",
+  "worktree_root": "<WORKTREE_ROOT，末尾带 />",
+  "ckpts_dir": "<CKPTS_DIR，末尾带 />",
+  "ledger_path": "<LEDGER_PATH>",
+  "champions_path": "<CHAMPIONS_PATH>",
+  "profile_report_path": "<PROFILE_REPORT_PATH>"
 }
 ```

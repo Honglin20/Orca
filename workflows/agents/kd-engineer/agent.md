@@ -29,7 +29,9 @@ tools: [bash, read, write, edit, glob, grep]
 - SelectionSpec：`{{ hypothesizer.output.selection_spec_path }}`（JSON 文件，CONTRACTS §2 schema）。读出 `candidate_id` / `phase` / `family` / `build_cfg` / `kd_config`。
 - family 实现目录：`{{ inputs.kd_scripts_dir }}/students/<family>.py`（每个 family 一个文件，契约 §1）。
 - project_root（teacher_setup 探测所得）：`{{ teacher_setup.output.project_root }}`（用于 git worktree；非 git 仓库 → fallback 目录拷贝）。
-- output_dir：`{{ teacher_setup.output.output_dir }}`（snapshots/ 在其下）。
+- output_dir：`{{ teacher_setup.output.output_dir }}`（run 根目录）。
+- snapshots 目录（带尾斜杠，下游只 append `<candidate_id>_model.py`）：`{{ teacher_setup.output.snapshots_dir }}`。
+- worktree 根目录（带尾斜杠，下游只 append `<candidate_id>/`）：`{{ teacher_setup.output.worktree_root }}`。
 - build_fn（契约 §1 固化为 `build_model`）。
 
 ## 职责（按序，fail loud）
@@ -71,14 +73,14 @@ print('OK', type(m).__name__)
 
 ### 4. 建/复用 git worktree
 
-- `git -C {{ teacher_setup.output.project_root }} worktree add "{{ teacher_setup.output.output_dir }}.worktrees/{{ hypothesizer.output.candidate_id }}" -b "kd/{{ hypothesizer.output.candidate_id }}" 2>/dev/null || mkdir -p "{{ teacher_setup.output.output_dir }}.worktrees/{{ hypothesizer.output.candidate_id }}"`（非 git 仓库 → fallback 目录拷贝；CONTRACTS 不强制 git）。
-- worktree 路径 = `<output_dir>.worktrees/<candidate_id>/`。
+- `git -C {{ teacher_setup.output.project_root }} worktree add "{{ teacher_setup.output.worktree_root }}{{ hypothesizer.output.candidate_id }}" -b "kd/{{ hypothesizer.output.candidate_id }}" 2>/dev/null || mkdir -p "{{ teacher_setup.output.worktree_root }}{{ hypothesizer.output.candidate_id }}"`（非 git 仓库 → fallback 目录拷贝；CONTRACTS 不强制 git）。
+- worktree 路径 = `{{ teacher_setup.output.worktree_root }}<candidate_id>/`（worktree_root 末尾已带 `/`，**禁止**再自己拼 `.worktrees`）。
 
 ### 5. 落 model.py（family 脚本原样复制进 worktree）
 
 ```bash
 cp "{{ inputs.kd_scripts_dir }}/students/{{ hypothesizer.output.family }}.py" \
-   "{{ teacher_setup.output.output_dir }}.worktrees/{{ hypothesizer.output.candidate_id }}/model.py"
+   "{{ teacher_setup.output.worktree_root }}{{ hypothesizer.output.candidate_id }}/model.py"
 ```
 
 **不改一行**。family 脚本本身就是 model.py 的真相源。
@@ -86,8 +88,8 @@ cp "{{ inputs.kd_scripts_dir }}/students/{{ hypothesizer.output.family }}.py" \
 ### 6. 落不可变快照
 
 ```bash
-cp "{{ teacher_setup.output.output_dir }}.worktrees/{{ hypothesizer.output.candidate_id }}/model.py" \
-   "{{ teacher_setup.output.output_dir }}snapshots/{{ hypothesizer.output.candidate_id }}_model.py"
+cp "{{ teacher_setup.output.worktree_root }}{{ hypothesizer.output.candidate_id }}/model.py" \
+   "{{ teacher_setup.output.snapshots_dir }}{{ hypothesizer.output.candidate_id }}_model.py"
 ```
 
 snapshots/ 下文件永不改（账本历史真相）。
