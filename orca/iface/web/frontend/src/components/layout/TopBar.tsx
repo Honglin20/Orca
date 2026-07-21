@@ -70,7 +70,7 @@ export function TopBar({ runId }: { runId?: string }) {
       className="orca-bg-surface orca-border orca-text flex h-12 items-center gap-4 border-b px-4"
       data-testid="top-bar"
     >
-      <span className="orca-accent text-lg font-semibold">Orca</span>
+      <span className="orca-accent text-lg font-semibold tracking-wider">TARS</span>
       {runId && (
         <button
           type="button"

@@ -17,6 +17,7 @@
 
 import { Suspense, lazy, useCallback, useState } from "react";
 import { useParams } from "react-router-dom";
+import { Loader2 } from "lucide-react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { useRunEvents } from "@/hooks/use-run-events";
 import { useWebSocket } from "@/hooks/use-websocket";
@@ -69,8 +70,10 @@ export function RunDetailPage() {
         <Panel defaultSize={18} minSize={12} maxSize={30}>
           <AgentsRail />
         </Panel>
-        {/* P5b：分隔条用 --border token（明暗自适应，替代硬编码 bg-slate-200）。 */}
-        <PanelResizeHandle className="orca-bg-surface-2 w-px" />
+        {/* 分隔条：8px 透明 hit 区 + 1px surface-2 中线，hover 强调色（替代原 w-px surface-2 不可见不可拽）。 */}
+        <PanelResizeHandle className="group relative w-2 cursor-col-resize">
+          <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-[rgb(var(--surface-2))] transition-colors group-hover:bg-[rgb(var(--accent))]" />
+        </PanelResizeHandle>
         <Panel defaultSize={56} minSize={30}>
           <div className="flex h-full flex-col">
             <div className="orca-bg-app orca-border flex border-b">
@@ -87,7 +90,7 @@ export function RunDetailPage() {
                   // P5b：active tab 下划线 + 文字用 --accent（钢蓝品牌强调色）。
                   className={`px-4 py-2 text-sm ${
                     tab === t
-                      ? "orca-accent orca-border-accent border-b-2 font-medium"
+                      ? "orca-bg-surface orca-accent orca-border-accent border-b-2 font-medium"
                       : "orca-text-muted hover:orca-text"
                   }`}
                   data-testid={`tab-${t}`}
@@ -109,7 +112,9 @@ export function RunDetailPage() {
             </div>
           </div>
         </Panel>
-        <PanelResizeHandle className="orca-bg-surface-2 w-px" />
+        <PanelResizeHandle className="group relative w-2 cursor-col-resize">
+          <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-[rgb(var(--surface-2))] transition-colors group-hover:bg-[rgb(var(--accent))]" />
+        </PanelResizeHandle>
         <Panel defaultSize={26} minSize={15}>
           <div
             className="flex h-full flex-col"
@@ -131,10 +136,11 @@ export function RunDetailPage() {
 function TabFallback({ label }: { label: string }) {
   return (
     <div
-      className="orca-text-faint flex h-full items-center justify-center text-sm"
+      className="orca-text-faint flex h-full items-center justify-center gap-2 text-sm"
       data-testid="tab-fallback"
     >
-      <span className="animate-pulse">{label}</span>
+      <Loader2 size={14} strokeWidth={1.5} className="animate-spin" aria-hidden />
+      <span>{label}</span>
     </div>
   );
 }

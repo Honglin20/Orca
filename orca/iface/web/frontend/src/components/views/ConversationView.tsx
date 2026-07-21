@@ -230,9 +230,9 @@ function SessionTabs({
         data-testid="session-tab-all"
         className={`rounded px-2 py-0.5 font-mono text-xs ${
           selectedSession === "all"
-            // P0b 白名单（intentional inverse）：selected tab 是 white-on-dark 强对比，
-            // 同 ResolvedToast/LogStream live badge；非 surface scale。
-            ? "bg-slate-900 text-white"
+            // 选中态：accent 实色填充 + 白字（明暗 token 都成立；
+            // 原 bg-slate-900 在暗模式 ≈ app-bg，选中与未选中几乎无区分）。
+            ? "orca-bg-accent text-white"
             : "orca-text-muted hover:orca-bg-surface"
         }`}
       >
@@ -246,7 +246,7 @@ function SessionTabs({
           data-testid={`session-tab-${s.sessionId}`}
           className={`rounded px-2 py-0.5 font-mono text-xs ${
             selectedSession === s.sessionId
-              ? "bg-slate-900 text-white"
+              ? "orca-bg-accent text-white"
               : "orca-text-muted hover:orca-bg-surface"
           }`}
         >

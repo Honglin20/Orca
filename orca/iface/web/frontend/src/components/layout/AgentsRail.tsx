@@ -54,10 +54,11 @@ const STATUS_FALLBACK = NODE_STATUS_HEX.pending;
 function DagFallback() {
   return (
     <div
-      className="flex h-full items-center justify-center text-sm orca-text-faint"
+      className="flex h-full items-center justify-center gap-2 text-sm orca-text-faint"
       data-testid="dag-fallback"
     >
-      <span className="animate-pulse">加载 DAG…</span>
+      <Loader2 size={14} strokeWidth={1.5} className="animate-spin" aria-hidden />
+      <span>加载 DAG…</span>
     </div>
   );
 }
@@ -149,7 +150,7 @@ export function AgentsRail() {
                   return (
                     <li
                       key={a.node}
-                      className="relative overflow-hidden rounded border orca-border orca-bg-surface"
+                      className="relative overflow-hidden rounded border orca-border orca-bg-surface shadow-sm"
                     >
                       {/* P3 方案 3 / P2：左竖状态色条（NODE_STATUS_HEX，与 DAG 浮层同源 DRY）；
                           selected 行色条加粗（3px→4px）作选中视觉反馈 */}
