@@ -534,6 +534,57 @@ def _default_rundir() -> Path:
     return _default_tape_path("__probe__").parent
 
 
+def _bootstrap_open_web_enabled(flag: bool | None) -> bool:
+    """解析 bootstrap 自动开 web 的有效设置（**flag > env > 默认开**）。
+
+    ``--open-web`` / ``--no-open-web`` 显式优先；否则看 ``ORCA_BOOTSTRAP_OPEN_WEB`` env；
+    都不给 → 默认**开**。CI / headless / 循环测试场景设 ``ORCA_BOOTSTRAP_OPEN_WEB=0`` 粘性关。
+    """
+    if flag is not None:
+        return flag
+    env = os.environ.get("ORCA_BOOTSTRAP_OPEN_WEB")
+    if env is not None:
+        return env.strip().lower() not in ("0", "false", "no", "off")
+    return True
+
+
+def _spawn_open_web(run_id: str) -> None:
+    """bootstrap 后台自动开 web（detached，soft-fail；工作流 B）。
+
+    detach spawn ``python -m orca.iface.in_session.cli open <run_id>``——与 chart/sidechain
+    守护同款 detach pattern（``start_new_session=True`` + ``close_fds=True`` + 日志重定向）。
+    用 ``sys.executable -m`` 而非 bare ``orca`` 入口：与 ``_spawn_chart_daemon`` 一致，免 PATH
+    依赖 + 用同一解释器保 import 可用。子进程继承 CWD → runs_dir 与 bootstrap 同项目 → 走
+    ``orca open`` 的跨项目复用逻辑（probe→ensure server→attach tail-follow→开浏览器→退出）。
+
+    **契约安全**：子进程 stdio 重定向到日志文件 → bootstrap 的 stdout JSON 契约**零污染**；
+    detach + close_fds → 不阻塞 / 不拖垮 bootstrap。失败一律 soft warn——自动开 web 是便利层，
+    **绝不** fail bootstrap（与 chart/sidechain 守护的 fail-open 语义一致）。
+    """
+    try:
+        rundir = _default_rundir()
+        rundir.mkdir(parents=True, exist_ok=True)
+        log_path = rundir / f".orca-open-{run_id}.log"
+        cmd = [sys.executable, "-m", "orca.iface.in_session.cli", "open", run_id]
+        # log_fd 在 Popen 后由 child dup；parent 即刻 close（与 _spawn_chart_daemon 同）。
+        log_fd = open(log_path, "a", encoding="utf-8")
+        try:
+            subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=log_fd,
+                stderr=log_fd,
+                start_new_session=True,
+                close_fds=True,
+            )
+        finally:
+            log_fd.close()
+        logger.info("run %s: 自动开 web 已 detach spawn（log=%s）", run_id, log_path)
+    except OSError as e:
+        # mkdir / open / Popen 任一 OSError → soft warn，绝不 fail bootstrap。
+        logger.warning("run %s: 自动开 web spawn 失败（%s；soft-fail，不阻断 bootstrap）", run_id, e)
+
+
 def _setup_logging(level: str = "INFO") -> None:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
@@ -857,6 +908,11 @@ def bootstrap(
         help="禁用节点记忆:整 run 不写 .orca/memory/、不注入「上一轮记忆」段"
              "(测试隔离 / 显式禁用复用协议)",
     ),
+    open_web: bool | None = typer.Option(
+        None, "--open-web/--no-open-web",
+        help="启动后后台自动开 web 观察（默认开；ORCA_BOOTSTRAP_OPEN_WEB=0 粘性关；"
+             "复用 `orca open` 的跨项目复用逻辑）",
+    ),
 ) -> None:
     """起一个 in-session run 的首步（gen run_id + tape + marker + emit ws+ns → entry prompt）。
 
@@ -1053,6 +1109,12 @@ def bootstrap(
             "run %s: spawn sidechain 守护失败（Popen OSError；B2 子 agent 过程将不进 web）",
             run_id, exc_info=True,
         )
+
+    # ── 自动开 web（工作流 B）：detached 起 `orca open`，后台 probe→attach→开浏览器 ──
+    # 仅真启动路径到此（schema-only 早退 / dupe / busy / 失败均已 early-exit）；soft-fail，
+    # 不阻断 bootstrap、不污染 stdout 契约。默认开；--no-open-web / ORCA_BOOTSTRAP_OPEN_WEB=0 关。
+    if _bootstrap_open_web_enabled(open_web):
+        _spawn_open_web(run_id)
 
     reply: dict[str, Any] = {
         "run_id": run_id,
