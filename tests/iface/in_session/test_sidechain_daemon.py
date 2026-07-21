@@ -71,6 +71,11 @@ def _write_sidechain_line(root: Path, task_id: str, obj: dict) -> None:
     root.mkdir(parents=True, exist_ok=True)
     with open(root / f"agent-{task_id}.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(obj) + "\n")
+    # 配套 meta.json：discover 只收伴 meta.json 的子代理（主 session 显式 spawn 判据，
+    # 见 cc_jsonl.CCJsonlAdapter.discover_children）。首次写时建一次。
+    meta = root / f"agent-{task_id}.meta.json"
+    if not meta.is_file():
+        meta.write_text("{}", encoding="utf-8")
 
 
 def _assistant_text(text: str) -> dict:

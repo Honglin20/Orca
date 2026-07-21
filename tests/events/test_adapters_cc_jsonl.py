@@ -8,6 +8,7 @@
   - source_id 唯一：一行多 content block → 每个 block 独立 source_id。
   - discover_children scope：host_session 不匹配 → 空迭代器。
   - since_ts 过滤：mtime 旧于 since_ts → skip。
+  - discover_children 显式 spawn 过滤：无 meta.json 的系统子代理 → skip。
   - fail loud：host_session 空 → raise CCAdapterError。
   - ORCA_CC_SIDECHAIN_ROOT env 覆盖（硬约束 #5）。
   - root 不存在 → discover 返空（不抛；subagent 尚未起）。
@@ -54,6 +55,12 @@ def _write_subagent_line(root: Path, task_id: str, obj: dict) -> None:
     path = root / f"agent-{task_id}.jsonl"
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj) + "\n")
+
+
+def _write_meta(root: Path, task_id: str, *, payload: dict | None = None) -> None:
+    """写 ``agent-<task_id>.meta.json``（标记主 session Agent tool 显式 spawn 的子代理）。"""
+    path = root / f"agent-{task_id}.meta.json"
+    path.write_text(json.dumps(payload or {}), encoding="utf-8")
 
 
 def _assistant(content: list, *, parent_id: str | None = None) -> dict:
@@ -123,9 +130,11 @@ def test_discover_children_empty_when_root_missing(tmp_path):
 
 
 def test_discover_children_yields_task_ids(sidechain_root, adapter):
-    """glob agent-*.jsonl → yield task_id（去 ``agent-`` 前缀）。"""
+    """glob agent-*.jsonl + 伴 meta.json → yield task_id（去 ``agent-`` 前缀）。"""
     _write_subagent_line(sidechain_root, "task-aaa", {"type": "system"})
+    _write_meta(sidechain_root, "task-aaa")
     _write_subagent_line(sidechain_root, "task-bbb", {"type": "system"})
+    _write_meta(sidechain_root, "task-bbb")
     # 非 agent- 前缀文件应被忽略。
     (sidechain_root / "other.log").write_text("noise")
 
@@ -144,6 +153,7 @@ def test_discover_children_scope_to_host_session(sidechain_root):
 def test_discover_children_since_ts_filters_old(sidechain_root, adapter):
     """since_ts 用 mtime 过滤旧文件。"""
     _write_subagent_line(sidechain_root, "old-task", {"type": "system"})
+    _write_meta(sidechain_root, "old-task")
     old_path = sidechain_root / "agent-old-task.jsonl"
     # 设 mtime 为 1 小时前。
     old_time = time.time() - 3600
@@ -155,6 +165,23 @@ def test_discover_children_since_ts_filters_old(sidechain_root, adapter):
 
     # since_ts = 0 → 不过滤，看到 old-task。
     assert list(adapter.discover_children("host-session-xyz", 0)) == ["old-task"]
+
+
+def test_discover_children_skips_child_without_meta(sidechain_root, adapter):
+    """无 meta.json 的子代理（宿主后台系统代理，如 CAC asession_memory）→ 跳过。
+
+    意图：discover 只收主 session Agent tool 显式 spawn 的子代理（伴 meta.json），
+    防止系统 memory helper 污染 workflow 节点 tape。远程已实证修复（asession_memory-*
+    事件不再进 tape）。
+    """
+    # 任务子代理：jsonl + meta.json → yield。
+    _write_subagent_line(sidechain_root, "task-real", {"type": "system"})
+    _write_meta(sidechain_root, "task-real")
+    # 系统子代理：仅 jsonl，无 meta.json → 跳过。
+    _write_subagent_line(sidechain_root, "asession_memory-abc", {"type": "system"})
+
+    children = list(adapter.discover_children("host-session-xyz", 0))
+    assert children == ["task-real"]
 
 
 # ── stream: 行映射 ────────────────────────────────────────────────────────────
