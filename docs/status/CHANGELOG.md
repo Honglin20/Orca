@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-21] workflow 产物路径拼接漏斜杠 BUG 修复（Phase 4-B / P2）
+
+struct family_detect / kd teacher_setup 的 output_schema 新增显式带尾斜杠字段（snapshots_dir / worktree_root / viz_dir / ledger_path / champions_path + kd-only ckpts_dir / profile_report_path），setup prompt 强制 `OUTPUT_DIR=$(python3 -c "...os.path.abspath + '/'")` 一次计算；下游 struct-engineer / kd-engineer / kd-teacher-setup agent.md + yaml inline prompts（structure_gate / viz_* / profile_gate / kd_trainer）改读字段而非 `{{ output_dir }}<suffix>` 字符串拼根——从源头杜绝 `<run>snapshots/`、`<run>.worktrees/` 兄弟孤儿目录。code-reviewer 抓到 kb_cache/ 局部回归（m1）已修。范围外 7 个下游 agent.md（struct-evaluator / curator / analyst + kd-curator / analyst / hypothesizer / train-script）的同款拼接按计划留给 Phase 3 P7；CONTRACTS.md 节点 I/O 表 stale 同期处理。Commit: `e41974f`。详见 [release note](../releases/2026-07-21-workflow-path-concat-fix.md) + [计划](../plans/2026-07-21-workflow-redesign.md) §4-B。
+
 ## [2026-07-21] `orca open` 跨项目端口占用修复 + `bootstrap` 默认自动开 web
 
 **A（`7d9b7eb`）**：7428 被别项目 orca 占用时不再静默挂错 tape。根因：`_open_run` 把相对 tape 路径跨进程 POST + 「7428 有 orca 就无脑复用」。修：`_identity.py`（新，`runs_dir_fingerprint=sha1(resolve)[:12]`，stdlib-only）+ health 加 `runs_dir_fp`（指纹非明文防 0.0.0.0 泄漏）+ `web_registry.py`（新，per-project 端口登记，探测权威 registry 仅 hint）+ `_open_run` 重写（绝对路径化 + 项目感知复用：本项目→registry→起新 server）+ SPEC §5a 同步。**B（`9677c1e`）**：`bootstrap` 默认开 web——post-lock 块 detach spawn `orca open`（与 chart/sidechain 守护同款 detach + soft-fail），stdout JSON 契约零污染；`--no-open-web`/`ORCA_BOOTSTRAP_OPEN_WEB=0` 关；schema-only 不触发。spec-reviewer 两轮 conditional-pass（6 blocker+5 HIGH 全闭环，B5 flock 降级为已知限制）+ code-reviewer 需修后合（3 🟡 测试缺口全补）。987 passed；2 既有失败（bg_integration/install nudge）git stash 证伪为基线既有。详见 [release note](../releases/2026-07-21-orca-open-cross-project-and-bootstrap-auto-open.md) + [计划](../plans/2026-07-21-orca-open-cross-project.md).
