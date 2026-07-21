@@ -27,12 +27,15 @@ import {
   getGridProps,
   getTooltipStyle,
   getTooltipTextStyle,
+  getXAxisLabelProp,
+  getYAxisLabelProp,
 } from "../chartTheme";
 import { computeNiceTicks, extractNumericValues, formatTick } from "../axisUtils";
 import { pivotByHue } from "../pivot";
+import { ChartCaption } from "../ChartCaption";
 
 export function AreaChartWidget({ payload }: { payload: ChartPayload }) {
-  const { data, x, y, hue, title } = payload;
+  const { data, x, y, hue, title, caption } = payload;
   const xKey = x ?? "x";
   const yKey = y ?? "y";
   const gridProps = getGridProps();
@@ -40,6 +43,9 @@ export function AreaChartWidget({ payload }: { payload: ChartPayload }) {
   const tooltipStyle = getTooltipStyle();
   const tooltipCursor = getCursor(true);
   const tooltipTextStyle = getTooltipTextStyle();
+  // 轴标签：x_label/y_label 优先，空回退字段名。
+  const xAxisLabel = getXAxisLabelProp(payload);
+  const yAxisLabel = getYAxisLabelProp(payload);
 
   if (hue) {
     // hue 多系列：长格式 → 宽格式 pivot（共享 helper，DRY）
@@ -56,12 +62,13 @@ export function AreaChartWidget({ payload }: { payload: ChartPayload }) {
           <ResponsiveContainer width="100%" height="100%" minHeight={200} minWidth={300}>
             <AreaChart data={pivotedData} margin={{ ...CHART_MARGIN, right: 60 }}>
               <CartesianGrid {...gridProps} />
-              <XAxis dataKey={xKey} tick={axisTick} />
+              <XAxis dataKey={xKey} tick={axisTick} label={xAxisLabel} />
               <YAxis
                 tick={axisTick}
                 domain={yConfig.domain}
                 ticks={yConfig.ticks}
                 tickFormatter={formatTick}
+                label={yAxisLabel}
               />
               <Tooltip
                 contentStyle={tooltipStyle}
@@ -87,6 +94,7 @@ export function AreaChartWidget({ payload }: { payload: ChartPayload }) {
             </AreaChart>
           </ResponsiveContainer>
         </div>
+        {caption && <ChartCaption text={caption} />}
       </div>
     );
   }
@@ -101,12 +109,13 @@ export function AreaChartWidget({ payload }: { payload: ChartPayload }) {
         <ResponsiveContainer width="100%" height="100%" minHeight={200} minWidth={300}>
           <AreaChart data={data} margin={CHART_MARGIN}>
             <CartesianGrid {...gridProps} />
-            <XAxis dataKey={xKey} tick={axisTick} />
+            <XAxis dataKey={xKey} tick={axisTick} label={xAxisLabel} />
             <YAxis
               tick={axisTick}
               domain={yConfig.domain}
               ticks={yConfig.ticks}
               tickFormatter={formatTick}
+              label={yAxisLabel}
             />
             <Tooltip
               contentStyle={tooltipStyle}
@@ -125,6 +134,7 @@ export function AreaChartWidget({ payload }: { payload: ChartPayload }) {
           </AreaChart>
         </ResponsiveContainer>
       </div>
+      {caption && <ChartCaption text={caption} />}
     </div>
   );
 }

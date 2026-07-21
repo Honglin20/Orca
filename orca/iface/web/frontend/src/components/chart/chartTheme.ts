@@ -8,6 +8,8 @@
 // 迁移自 AgentHarness frontend/src/components/output/charts/chartTheme.ts —— 仅去掉 React
 // 顶层 import（getTooltipStyle 改返回纯对象，CSS vars 由 index.css 提供），PALETTE 数值零改动。
 
+import type { ChartPayload } from "./types";
+
 // 8-color categorical palette — low saturation, Nature/IEEE style（迁移自 AgentHarness）
 export const PALETTE = [
   "#5B8DB8", // muted steel blue
@@ -100,3 +102,39 @@ export const CHART_MARGIN = { top: 8, right: 24, bottom: 8, left: 0 };
 export const BOX_FILL_OPACITY = 0.2;
 export const BOX_STROKE_WIDTH = 1.5;
 export const BOX_RADIUS = 3;
+
+// ── 轴标签辅助（DRY：5 个 widget 共用 XAxis/YAxis label 属性）──────────────────
+//
+// 解「图表看不懂」根因 C（render_chart 无轴标签）：``x``/``y`` 是数据字段名（dataKey），
+// 前端原样显示为轴标签等于把 schema 名当人话。新增 ``x_label``/``y_label`` 覆盖；空时回退到
+// 字段名（``x``/``y``），保证旧 tape（无 x_label/y_label）渲染一致。
+//
+// 返回 recharts ``XAxis.label`` / ``YAxis.label`` 接受的对象形态，统一样式（position / angle）。
+
+/** X 轴标签文案：``payload.x_label`` 优先，空回退字段名 ``payload.x``，再空回 undefined。 */
+export function getXAxisLabelValue(payload: ChartPayload): string | undefined {
+  return payload.x_label || payload.x || undefined;
+}
+
+/** Y 轴标签文案：``payload.y_label`` 优先，空回退字段名 ``payload.y``，再空回 undefined。 */
+export function getYAxisLabelValue(payload: ChartPayload): string | undefined {
+  return payload.y_label || payload.y || undefined;
+}
+
+/** recharts XAxis ``label`` prop（位置 insideBottom，离轴 -2px 防 tick 重叠）。 */
+export function getXAxisLabelProp(payload: ChartPayload):
+  | { value: string; position: "insideBottom"; offset: number; fill: string; fontSize: number }
+  | undefined {
+  const v = getXAxisLabelValue(payload);
+  if (!v) return undefined;
+  return { value: v, position: "insideBottom", offset: -2, fill: getCSSVar("--axis-tick"), fontSize: 11 };
+}
+
+/** recharts YAxis ``label`` prop（逆时针 90°，insideLeft，perpendicular）。 */
+export function getYAxisLabelProp(payload: ChartPayload):
+  | { value: string; angle: number; position: "insideLeft"; fill: string; fontSize: number }
+  | undefined {
+  const v = getYAxisLabelValue(payload);
+  if (!v) return undefined;
+  return { value: v, angle: -90, position: "insideLeft", fill: getCSSVar("--axis-tick"), fontSize: 11 };
+}

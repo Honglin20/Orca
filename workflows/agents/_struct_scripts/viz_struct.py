@@ -162,6 +162,9 @@ def _push_champion_trace(
         x="index",
         y="latency",
         hue="series",
+        x_label="候选序号(账本行)",
+        y_label="时延 (ms)",
+        caption="每轮 champion 的实测时延变化；★=达标",
     )
     return True
 

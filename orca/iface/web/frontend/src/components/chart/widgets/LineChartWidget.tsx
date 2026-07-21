@@ -25,12 +25,15 @@ import {
   getGridProps,
   getTooltipStyle,
   getTooltipTextStyle,
+  getXAxisLabelProp,
+  getYAxisLabelProp,
 } from "../chartTheme";
 import { computeNiceTicks, extractNumericValues, formatTick } from "../axisUtils";
 import { pivotByHue } from "../pivot";
+import { ChartCaption } from "../ChartCaption";
 
 export function LineChartWidget({ payload }: { payload: ChartPayload }) {
-  const { data, x, y, hue, title } = payload;
+  const { data, x, y, hue, title, caption } = payload;
   const xKey = x ?? "x";
   const yKey = y ?? "y";
   const gridProps = getGridProps();
@@ -39,6 +42,9 @@ export function LineChartWidget({ payload }: { payload: ChartPayload }) {
   // P5a：line=true → 细虚竖线 cursor + 中性 labelStyle/itemStyle 防 recharts 默认黄。
   const tooltipCursor = getCursor(true);
   const tooltipTextStyle = getTooltipTextStyle();
+  // 轴标签：x_label/y_label 优先（人话），空回退字段名（schema 名作 label）。
+  const xAxisLabel = getXAxisLabelProp(payload);
+  const yAxisLabel = getYAxisLabelProp(payload);
 
   if (hue) {
     // hue 多系列：长格式 → 宽格式 pivot（共享 helper，DRY）
@@ -55,12 +61,13 @@ export function LineChartWidget({ payload }: { payload: ChartPayload }) {
           <ResponsiveContainer width="100%" height="100%" minHeight={200} minWidth={300}>
             <LineChart data={pivotedData} margin={{ ...CHART_MARGIN, right: 60 }}>
               <CartesianGrid {...gridProps} />
-              <XAxis dataKey={xKey} tick={axisTick} />
+              <XAxis dataKey={xKey} tick={axisTick} label={xAxisLabel} />
               <YAxis
                 tick={axisTick}
                 domain={yConfig.domain}
                 ticks={yConfig.ticks}
                 tickFormatter={formatTick}
+                label={yAxisLabel}
               />
               <Tooltip
                 contentStyle={tooltipStyle}
@@ -85,6 +92,7 @@ export function LineChartWidget({ payload }: { payload: ChartPayload }) {
             </LineChart>
           </ResponsiveContainer>
         </div>
+        {caption && <ChartCaption text={caption} />}
       </div>
     );
   }
@@ -99,12 +107,13 @@ export function LineChartWidget({ payload }: { payload: ChartPayload }) {
         <ResponsiveContainer width="100%" height="100%" minHeight={200} minWidth={300}>
           <LineChart data={data} margin={CHART_MARGIN}>
             <CartesianGrid {...gridProps} />
-            <XAxis dataKey={xKey} tick={axisTick} />
+            <XAxis dataKey={xKey} tick={axisTick} label={xAxisLabel} />
             <YAxis
               tick={axisTick}
               domain={yConfig.domain}
               ticks={yConfig.ticks}
               tickFormatter={formatTick}
+              label={yAxisLabel}
             />
             <Tooltip
               contentStyle={tooltipStyle}
@@ -122,6 +131,7 @@ export function LineChartWidget({ payload }: { payload: ChartPayload }) {
           </LineChart>
         </ResponsiveContainer>
       </div>
+      {caption && <ChartCaption text={caption} />}
     </div>
   );
 }

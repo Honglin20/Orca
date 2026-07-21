@@ -460,6 +460,93 @@ def test_render_heatmap_downsample_caps_top_n(orca_env):
     assert len(sent["payload"]["data"]) <= 10
 
 
+# ── 轴标签 / caption（解「图表看不懂」根因 C，2026-07-21）──────────────────────────
+
+
+def test_render_axis_labels_passed_to_payload(orca_env):
+    """x_label/y_label/caption 非空 → payload 含这三字段（前端/TUI 读它们渲染轴标签/图下说明）。
+
+    意图：钉死轴标签透传链路——调用方传人话 x_label，payload 必含它（而非让前端用字段名）。
+    """
+    sock_mock, _ = _make_socket_mock(b'{"ok": true, "seq": 9}\n')
+    with patch("orca.chart._render.socket.socket", return_value=sock_mock):
+        render_chart(
+            chart_type="line",
+            data=[{"x": 1, "y": 2.0}],
+            label="g",
+            title="t",
+            x="index",
+            y="latency",
+            x_label="候选序号(账本行)",
+            y_label="时延 (ms)",
+            caption="每轮 champion 的实测时延变化；★=达标",
+        )
+    sent = json.loads(sock_mock.sendall.call_args[0][0].decode("utf-8"))
+    payload = sent["payload"]
+    assert payload["x_label"] == "候选序号(账本行)"
+    assert payload["y_label"] == "时延 (ms)"
+    assert payload["caption"] == "每轮 champion 的实测时延变化；★=达标"
+
+
+def test_render_axis_labels_empty_omitted_from_payload(orca_env):
+    """x_label/y_label/caption 空串 → payload **不含**这三字段（保 ChartPayload 干净，
+    旧 tape 反序列化也不带空键）。
+
+    意图：与 pareto_direction 同款「仅在非空时塞 payload」契约，防止 payload 充斥空键。
+    向后兼容铁律：旧 workflow 不传新字段 = 旧 payload 形态 = 旧前端行为。
+    """
+    sock_mock, _ = _make_socket_mock(b'{"ok": true, "seq": 1}\n')
+    with patch("orca.chart._render.socket.socket", return_value=sock_mock):
+        render_chart(
+            chart_type="line",
+            data=[{"x": 1, "y": 2.0}],
+            label="g",
+            title="t",
+        )
+    sent = json.loads(sock_mock.sendall.call_args[0][0].decode("utf-8"))
+    payload = sent["payload"]
+    # 三字段均不出现在 payload（「只在非空时塞」契约）
+    assert "x_label" not in payload
+    assert "y_label" not in payload
+    assert "caption" not in payload
+
+
+def test_render_axis_labels_non_str_raises(orca_env):
+    """x_label 非法类型（int）→ ValueError（validate_payload fail loud，防 agent 误传 dict/list）。"""
+    with pytest.raises(ValueError, match="x_label 必须为 str"):
+        render_chart(
+            chart_type="line",
+            data=[],
+            label="g",
+            title="t",
+            x_label=123,  # type: ignore[arg-type]  # 故意传错类型
+        )
+
+
+def test_render_y_label_non_str_raises(orca_env):
+    """y_label 非法类型（dict）→ ValueError（fail loud；与 x_label 对称钉死 loop 内每个字段）。"""
+    with pytest.raises(ValueError, match="y_label 必须为 str"):
+        render_chart(
+            chart_type="line",
+            data=[],
+            label="g",
+            title="t",
+            y_label={"k": "v"},  # type: ignore[arg-type]  # 故意传错类型
+        )
+
+
+def test_render_caption_non_str_raises(orca_env):
+    """caption 非法类型（list）→ ValueError（fail loud）。"""
+    with pytest.raises(ValueError, match="caption 必须为 str"):
+        render_chart(
+            chart_type="bar",
+            data=[],
+            label="g",
+            title="t",
+            caption=["a", "b"],  # type: ignore[arg-type]  # 故意传错类型
+        )
+
+
 # ── 两端同源：ALLOWED_CHART_TYPES 一致性（防 drift）────────────────────────────
 
 

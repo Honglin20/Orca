@@ -24,12 +24,15 @@ import {
   getGridProps,
   getTooltipStyle,
   getTooltipTextStyle,
+  getXAxisLabelProp,
+  getYAxisLabelProp,
 } from "../chartTheme";
 import { computeNiceTicks, extractNumericValues, formatTick } from "../axisUtils";
 import { pivotByHue } from "../pivot";
+import { ChartCaption } from "../ChartCaption";
 
 export function BarChartWidget({ payload }: { payload: ChartPayload }) {
-  const { data, x, y, hue, color, title } = payload;
+  const { data, x, y, hue, color, title, caption } = payload;
   const xKey = x ?? "x";
   const yKey = y ?? "y";
   const gridProps = getGridProps();
@@ -38,6 +41,9 @@ export function BarChartWidget({ payload }: { payload: ChartPayload }) {
   // P5a：Bar/Pareto → cursor={fill:rgba(0,0,0,0.04)} 极淡灰高亮（原硬编码迁移到 getCursor）。
   const tooltipCursor = getCursor(false);
   const tooltipTextStyle = getTooltipTextStyle();
+  // 轴标签：x_label/y_label 优先，空回退字段名。
+  const xAxisLabel = getXAxisLabelProp(payload);
+  const yAxisLabel = getYAxisLabelProp(payload);
 
   if (hue) {
     const { pivoted: pivotedData, hueValues } = pivotByHue(data, xKey, hue, yKey);
@@ -53,12 +59,13 @@ export function BarChartWidget({ payload }: { payload: ChartPayload }) {
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={pivotedData} margin={CHART_MARGIN}>
               <CartesianGrid {...gridProps} />
-              <XAxis dataKey={xKey} tick={axisTick} />
+              <XAxis dataKey={xKey} tick={axisTick} label={xAxisLabel} />
               <YAxis
                 tick={axisTick}
                 domain={yConfig.domain}
                 ticks={yConfig.ticks}
                 tickFormatter={formatTick}
+                label={yAxisLabel}
               />
               <Tooltip
                 contentStyle={tooltipStyle}
@@ -81,6 +88,7 @@ export function BarChartWidget({ payload }: { payload: ChartPayload }) {
             </BarChart>
           </ResponsiveContainer>
         </div>
+        {caption && <ChartCaption text={caption} />}
       </div>
     );
   }
@@ -98,12 +106,13 @@ export function BarChartWidget({ payload }: { payload: ChartPayload }) {
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={data} margin={CHART_MARGIN}>
               <CartesianGrid {...gridProps} />
-              <XAxis dataKey={xKey} tick={axisTick} />
+              <XAxis dataKey={xKey} tick={axisTick} label={xAxisLabel} />
               <YAxis
                 tick={axisTick}
                 domain={yConfig.domain}
                 ticks={yConfig.ticks}
                 tickFormatter={formatTick}
+                label={yAxisLabel}
               />
               <Tooltip
                 contentStyle={tooltipStyle}
@@ -127,6 +136,7 @@ export function BarChartWidget({ payload }: { payload: ChartPayload }) {
             </BarChart>
           </ResponsiveContainer>
         </div>
+        {caption && <ChartCaption text={caption} />}
       </div>
     );
   }
@@ -141,12 +151,13 @@ export function BarChartWidget({ payload }: { payload: ChartPayload }) {
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={data} margin={CHART_MARGIN}>
               <CartesianGrid {...gridProps} />
-              <XAxis dataKey={xKey} tick={axisTick} />
+              <XAxis dataKey={xKey} tick={axisTick} label={xAxisLabel} />
               <YAxis
                 tick={axisTick}
                 domain={yConfig.domain}
                 ticks={yConfig.ticks}
                 tickFormatter={formatTick}
+                label={yAxisLabel}
               />
               <Tooltip
                 contentStyle={tooltipStyle}
@@ -165,6 +176,7 @@ export function BarChartWidget({ payload }: { payload: ChartPayload }) {
             </BarChart>
           </ResponsiveContainer>
       </div>
+      {caption && <ChartCaption text={caption} />}
     </div>
   );
 }

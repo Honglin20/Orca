@@ -28,8 +28,13 @@ import {
   getGridProps,
   getTooltipStyle,
   getTooltipTextStyle,
+  getXAxisLabelProp,
+  getXAxisLabelValue,
+  getYAxisLabelProp,
+  getYAxisLabelValue,
 } from "../chartTheme";
 import { computeNiceTicks, formatTick } from "../axisUtils";
+import { ChartCaption } from "../ChartCaption";
 
 /** 计算非支配前沿（Pareto front）。迁移自 AgentHarness，逐字保留。 */
 function findParetoFront(
@@ -61,7 +66,7 @@ function findParetoFront(
 }
 
 export function ParetoChartWidget({ payload }: { payload: ChartPayload }) {
-  const { data, x, y, title, pareto_direction, pareto_x_direction, pareto_y_direction } =
+  const { data, x, y, title, caption, pareto_direction, pareto_x_direction, pareto_y_direction } =
     payload;
   const xKey = x ?? "x";
   const yKey = y ?? "y";
@@ -74,6 +79,11 @@ export function ParetoChartWidget({ payload }: { payload: ChartPayload }) {
   // 用统一 getCursor(false) 极淡灰填充替代原 strokeDasharray（避免与散点 stroke 视觉冲突）。
   const tooltipCursor = getCursor(false);
   const tooltipTextStyle = getTooltipTextStyle();
+  // 轴标签：x_label/y_label 优先，空回退字段名。
+  const xAxisLabel = getXAxisLabelProp(payload);
+  const yAxisLabel = getYAxisLabelProp(payload);
+  const xAxisName = getXAxisLabelValue(payload);
+  const yAxisName = getYAxisLabelValue(payload);
 
   const points = data.map((d) => ({
     x: Number(d[xKey]),
@@ -105,20 +115,22 @@ export function ParetoChartWidget({ payload }: { payload: ChartPayload }) {
             <XAxis
               dataKey="x"
               tick={axisTick}
-              name={xKey}
+              name={xAxisName}
               type="number"
               domain={xConfig.domain}
               ticks={xConfig.ticks}
               tickFormatter={formatTick}
+              label={xAxisLabel}
             />
             <YAxis
               dataKey="y"
               tick={axisTick}
-              name={yKey}
+              name={yAxisName}
               type="number"
               domain={yConfig.domain}
               ticks={yConfig.ticks}
               tickFormatter={formatTick}
+              label={yAxisLabel}
             />
             <ZAxis range={[40, 200]} />
             <Tooltip
@@ -145,6 +157,7 @@ export function ParetoChartWidget({ payload }: { payload: ChartPayload }) {
           </ComposedChart>
         </ResponsiveContainer>
       </div>
+      {caption && <ChartCaption text={caption} />}
     </div>
   );
 }

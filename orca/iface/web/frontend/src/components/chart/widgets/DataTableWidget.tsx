@@ -4,9 +4,10 @@
 // 保留列序（payload.columns 优先，否则取 data[0] keys）+ 数据行数 == payload.data 长度。
 
 import type { ChartPayload } from "../types";
+import { ChartCaption } from "../ChartCaption";
 
 export function DataTableWidget({ payload }: { payload: ChartPayload }) {
-  const { data, title, columns } = payload;
+  const { data, title, columns, caption } = payload;
 
   // 列序：优先 payload.columns；否则从首行 keys 派生
   const cols = columns && columns.length > 0 ? columns : data[0] ? Object.keys(data[0]) : [];
@@ -41,6 +42,7 @@ export function DataTableWidget({ payload }: { payload: ChartPayload }) {
           </tbody>
         </table>
       </div>
+      {caption && <ChartCaption text={caption} />}
     </div>
   );
 }

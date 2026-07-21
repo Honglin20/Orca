@@ -16,6 +16,7 @@ import { Fragment } from "react";
 import type { ChartPayload } from "../types";
 import { PALETTE } from "../chartTheme";
 import { formatTick } from "../axisUtils";
+import { ChartCaption } from "../ChartCaption";
 
 // 色阶端点：极浅 → PALETTE[0]（钢蓝 #5B8DB8 = rgb(91,141,184)）。
 const SCALE_LIGHT: readonly [number, number, number] = [245, 248, 251];
@@ -44,7 +45,7 @@ function toNumberOrNull(raw: unknown): number | null {
 }
 
 export function HeatmapChartWidget({ payload }: { payload: ChartPayload }) {
-  const { data, x, y, value, title } = payload;
+  const { data, x, y, value, title, x_label, y_label, caption } = payload;
   // 后端 _validate 已强制 heatmap 必非空 value/x/y（fail loud）。前端不做 fallback
   // （fallback 会掩盖问题）——若 value/x/y 缺，显示 fail loud 提示（兼容历史 tape 或未走
   // _render 的 custom 事件）。
@@ -61,6 +62,7 @@ export function HeatmapChartWidget({ payload }: { payload: ChartPayload }) {
         <p className="p-2 text-xs orca-text-faint" data-testid="heatmap-empty">
           暂无数据
         </p>
+        {caption && <ChartCaption text={caption} />}
       </div>
     );
   }
@@ -79,6 +81,7 @@ export function HeatmapChartWidget({ payload }: { payload: ChartPayload }) {
         <p className="p-2 text-xs text-orca-failed" data-testid="heatmap-no-value">
           heatmap 缺必填字段：{missing.join("、")}
         </p>
+        {caption && <ChartCaption text={caption} />}
       </div>
     );
   }
@@ -218,6 +221,14 @@ export function HeatmapChartWidget({ payload }: { payload: ChartPayload }) {
         <span>{formatTick(max)}</span>
         <span className="orca-text-faint">({valueKey})</span>
       </div>
+      {/* 轴标题（x_label=列轴语义，y_label=行轴语义；空 span 不渲染避免占位）。 */}
+      {(x_label || y_label) && (
+        <div className="mt-1 flex justify-between text-[10px] orca-text-faint">
+          {y_label && <span>{y_label}</span>}
+          {x_label && <span>{x_label}</span>}
+        </div>
+      )}
+      {caption && <ChartCaption text={caption} />}
     </div>
   );
 }

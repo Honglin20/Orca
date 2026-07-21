@@ -27,11 +27,16 @@ import {
   getGridProps,
   getTooltipStyle,
   getTooltipTextStyle,
+  getXAxisLabelProp,
+  getXAxisLabelValue,
+  getYAxisLabelProp,
+  getYAxisLabelValue,
 } from "../chartTheme";
 import { computeNiceTicks, extractNumericValues, formatTick } from "../axisUtils";
+import { ChartCaption } from "../ChartCaption";
 
 export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
-  const { data, x, y, hue, color, size, title } = payload;
+  const { data, x, y, hue, color, size, title, caption } = payload;
   const xKey = x ?? "x";
   const yKey = y ?? "y";
   const sizeKey = size; // undefined → 等径散点
@@ -41,6 +46,11 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
   // P5a：Scatter cursor 统一为细虚竖线（原 strokeDasharray 单值缺 stroke/strokeWidth）。
   const tooltipCursor = getCursor(true);
   const tooltipTextStyle = getTooltipTextStyle();
+  // 轴标签：x_label/y_label 优先，空回退字段名（与 XAxis/YAxis name 同源 → tooltip label 也用之）。
+  const xAxisLabel = getXAxisLabelProp(payload);
+  const yAxisLabel = getYAxisLabelProp(payload);
+  const xAxisName = getXAxisLabelValue(payload);
+  const yAxisName = getYAxisLabelValue(payload);
 
   const allXValues = extractNumericValues(data, xKey);
   const allYValues = extractNumericValues(data, yKey);
@@ -82,20 +92,22 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
               <XAxis
                 dataKey={xKey}
                 tick={axisTick}
-                name={xKey}
+                name={xAxisName}
                 type="number"
                 domain={xConfig.domain}
                 ticks={xConfig.ticks}
                 tickFormatter={formatTick}
+                label={xAxisLabel}
               />
               <YAxis
                 dataKey={yKey}
                 tick={axisTick}
-                name={yKey}
+                name={yAxisName}
                 type="number"
                 domain={yConfig.domain}
                 ticks={yConfig.ticks}
                 tickFormatter={formatTick}
+                label={yAxisLabel}
               />
               <ZAxis dataKey={zAxisConfig.dataKey} range={zAxisConfig.range} />
               <Tooltip
@@ -119,6 +131,7 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
             </ScatterChart>
           </ResponsiveContainer>
         </div>
+        {caption && <ChartCaption text={caption} />}
       </div>
     );
   }
@@ -135,20 +148,22 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
             <XAxis
               dataKey={xKey}
               tick={axisTick}
-              name={xKey}
+              name={xAxisName}
               type="number"
               domain={xConfig.domain}
               ticks={xConfig.ticks}
               tickFormatter={formatTick}
+              label={xAxisLabel}
             />
             <YAxis
               dataKey={yKey}
               tick={axisTick}
-              name={yKey}
+              name={yAxisName}
               type="number"
               domain={yConfig.domain}
               ticks={yConfig.ticks}
               tickFormatter={formatTick}
+              label={yAxisLabel}
             />
             <ZAxis dataKey={zAxisConfig.dataKey} range={zAxisConfig.range} />
             <Tooltip
@@ -177,6 +192,7 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
           </ScatterChart>
         </ResponsiveContainer>
       </div>
+      {caption && <ChartCaption text={caption} />}
     </div>
   );
 }

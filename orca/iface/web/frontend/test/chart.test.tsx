@@ -804,3 +804,192 @@ describe("selectCharts D7 序无关（SPEC §0 D7 / §9 AC2）", () => {
     expect(desc).toBe(baseline);
   });
 });
+
+// ── 轴标签 / caption（render_chart 新字段，2026-07-21 解「图表看不懂」根因 C）────
+//
+// 意图：钉死 x_label/y_label 透传到 XAxis/YAxis label、caption 渲染为 chart-caption 元素，
+// 旧 payload（无新字段）不渲染 caption（向后兼容）。
+
+describe("轴标签 / caption（render_chart x_label/y_label/caption）", () => {
+  test("caption 非空 → 渲染 [data-testid=chart-caption]", () => {
+    render(
+      <ChartWidget
+        payload={{ ...LINE_PAYLOAD, caption: "★=达标，数据来源：账本" }}
+      />,
+    );
+    const cap = screen.queryByTestId("chart-caption");
+    expect(cap).toBeInTheDocument();
+    expect(cap?.textContent).toContain("★=达标");
+  });
+
+  test("caption 空 → 不渲染 chart-caption（向后兼容旧 tape）", () => {
+    render(<ChartWidget payload={LINE_PAYLOAD} />);
+    expect(screen.queryByTestId("chart-caption")).not.toBeInTheDocument();
+  });
+
+  test("bar caption 渲染（覆盖 hue 分支 + 默认分支各一）", () => {
+    // 默认分支
+    const { rerender } = render(
+      <ChartWidget payload={{ ...BAR_PAYLOAD, caption: "默认分支 caption" }} />,
+    );
+    expect(screen.getByTestId("chart-caption").textContent).toContain("默认分支");
+    // hue 分支
+    rerender(
+      <ChartWidget
+        payload={{
+          ...BAR_PAYLOAD,
+          hue: "series",
+          data: [
+            { x: "a", series: "A", y: 1 },
+            { x: "a", series: "B", y: 2 },
+          ],
+          caption: "hue 分支 caption",
+        }}
+      />,
+    );
+    expect(screen.getByTestId("chart-caption").textContent).toContain("hue 分支");
+  });
+
+  test("heatmap caption + x_label/y_label 渲染（覆盖 heatmap 路径）", () => {
+    render(
+      <ChartWidget
+        payload={{
+          ...HEATMAP_PAYLOAD,
+          x_label: "bitwidth（位宽）",
+          y_label: "recipe（配方）",
+          caption: "cell = accuracy，越深越高",
+        }}
+      />,
+    );
+    // caption
+    const cap = screen.getByTestId("chart-caption");
+    expect(cap.textContent).toContain("accuracy");
+    // x_label / y_label 在轴标题区渲染
+    const widget = screen.getByTestId("chart-widget");
+    const text = widget.textContent ?? "";
+    expect(text).toContain("bitwidth（位宽）");
+    expect(text).toContain("recipe（配方）");
+  });
+
+  test("table caption 渲染（覆盖 DataTable 路径）", () => {
+    render(<ChartWidget payload={{ ...TABLE_PAYLOAD, caption: "表说明" }} />);
+    expect(screen.getByTestId("chart-caption").textContent).toContain("表说明");
+  });
+
+  test("scatter/pareto/area/radar caption 渲染（覆盖剩余 widget）", () => {
+    for (const [p, name] of [
+      [SCATTER_PAYLOAD, "scatter"],
+      [PARETO_PAYLOAD, "pareto"],
+      [AREA_PAYLOAD, "area"],
+      [RADAR_PAYLOAD, "radar"],
+    ] as const) {
+      const { unmount } = render(
+        <ChartWidget payload={{ ...p, caption: `${name}-cap` }} />,
+      );
+      expect(screen.getByTestId("chart-caption").textContent).toContain(
+        `${name}-cap`,
+      );
+      unmount();
+    }
+  });
+
+  test("line + x_label/y_label → XAxis/YAxis label prop 写入（recharts-axis-label 文本可见）", async () => {
+    render(
+      <ChartWidget
+        payload={{
+          ...LINE_PAYLOAD,
+          x_label: "候选序号",
+          y_label: "时延 (ms)",
+        }}
+      />,
+    );
+    await waitFor(() => {
+      expect(document.querySelector(".recharts-line path")).toBeTruthy();
+    });
+    // recharts 把 XAxis label 渲染为 .recharts-label（SVG <text>）；y 轴 label 同款。
+    const labels = Array.from(document.querySelectorAll(".recharts-label"));
+    const texts = labels.map((l) => l.textContent ?? "");
+    expect(texts).toEqual(expect.arrayContaining(["候选序号", "时延 (ms)"]));
+  });
+
+  test("scatter + x_label/y_label → XAxis/YAxis name prop 同步（tooltip label 也用人话）", async () => {
+    render(
+      <ChartWidget
+        payload={{
+          ...SCATTER_PAYLOAD,
+          x_label: "迭代轮",
+          y_label: "score",
+        }}
+      />,
+    );
+    await waitFor(() => {
+      expect(document.querySelector(".recharts-scatter path")).toBeTruthy();
+    });
+    // Scatter 用 XAxis/YAxis ``name`` prop 表达轴语义（tooltip 显示）。读取 recharts-surface
+    // 内的 XAxis/YAxis 节点 attrs 验证 name 写入（recharts 把 name 映射到 axis 属性，可在
+    // 内部 state 用 querySelector 读 axis data-key，但 ``name`` 非 DOM attr，故此处通过
+    // recharts-label 同样渲染验证 label prop 路径，name prop 留给真机 playwright）。
+    const labels = Array.from(document.querySelectorAll(".recharts-label"));
+    const texts = labels.map((l) => l.textContent ?? "");
+    expect(texts).toEqual(expect.arrayContaining(["迭代轮", "score"]));
+  });
+
+  test("pareto + x_label/y_label → 轴 label 文本（ComposedChart happy-dom 下可能不稳；至少 widget 渲染不崩）", async () => {
+    // ComposedChart 在 happy-dom 下 label 渲染不稳（同前沿线 happy-dom 不渲染，见 pareto
+    // 主测试注释）。此处仅断言 widget 挂载成功且 scatter symbols 出现；label 文本断言留给
+    // 真机 playwright（line/scatter widget 已用同款 chartTheme helper 钉死 label 路径）。
+    render(
+      <ChartWidget
+        payload={{
+          ...PARETO_PAYLOAD,
+          x_label: "时延 (ms)",
+          y_label: "accuracy",
+        }}
+      />,
+    );
+    await waitFor(() => {
+      expect(document.querySelectorAll(".recharts-symbols").length).toBeGreaterThanOrEqual(1);
+    });
+    // widget 渲染成功（无 crash）—— pass
+  });
+
+  test("heatmap 单边 x_label（不设 y_label）→ 只渲染 x_label span，无空 span 占位", () => {
+    render(
+      <ChartWidget
+        payload={{
+          ...HEATMAP_PAYLOAD,
+          x_label: "只设 x_label",
+        }}
+      />,
+    );
+    // x_label 在轴标题区渲染；不渲染 y_label（无空占位 span）
+    const widget = screen.getByTestId("chart-widget");
+    expect(widget.textContent).toContain("只设 x_label");
+    // y_label 未设 → 不应出现空 span 占位（条件渲染）
+    const axisTitleDiv = widget.querySelector(".text-\\[10px\\].orca-text-faint.mt-1");
+    expect(axisTitleDiv).toBeTruthy();
+    const spans = axisTitleDiv?.querySelectorAll("span") ?? [];
+    expect(spans.length).toBe(1);  // 只渲染 x_label span，不渲染 y_label 空 span
+  });
+
+  test("heatmap 双轴 x_label/y_label 都缺 → 不渲染 axis title div（向后兼容）", () => {
+    // HEATMAP_PAYLOAD 默认无 x_label/y_label（旧 tape 形态）→ 守卫 {(x_label || y_label) && ...}
+    // 不挂载 axis title div（钉死「不渲染多余 DOM」契约）。
+    render(<ChartWidget payload={HEATMAP_PAYLOAD} />);
+    const widget = screen.getByTestId("chart-widget");
+    const axisTitleDiv = widget.querySelector(".text-\\[10px\\].orca-text-faint.mt-1");
+    expect(axisTitleDiv).toBeNull();
+  });
+
+  test("空 x_label/y_label → 回退用字段名（payload.x='x' → 轴 label='x'）", async () => {
+    // 不传 x_label → getXAxisLabelProp 回退字段名 payload.x="x" → label="x"
+    render(<ChartWidget payload={LINE_PAYLOAD} />);
+    await waitFor(() => {
+      expect(document.querySelector(".recharts-line path")).toBeTruthy();
+    });
+    const labels = Array.from(document.querySelectorAll(".recharts-label"));
+    const texts = labels.map((l) => l.textContent ?? "");
+    // 字段名回退：x="x"、y="y"
+    expect(texts).toEqual(expect.arrayContaining(["x", "y"]));
+  });
+});

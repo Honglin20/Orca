@@ -33,9 +33,10 @@ import {
 } from "../chartTheme";
 import { computeNiceTicks, extractNumericValues } from "../axisUtils";
 import { pivotByHue } from "../pivot";
+import { ChartCaption } from "../ChartCaption";
 
 export function RadarChartWidget({ payload }: { payload: ChartPayload }) {
-  const { data, x, y, hue, title } = payload;
+  const { data, x, y, hue, title, caption } = payload;
   // 默认维度列 dimension、值列 value（与 AgentHarness 雷达图惯例一致）
   const xKey = x ?? "dimension";
   const yKey = y ?? "value";
@@ -94,6 +95,7 @@ export function RadarChartWidget({ payload }: { payload: ChartPayload }) {
             </RadarChart>
           </ResponsiveContainer>
         </div>
+        {caption && <ChartCaption text={caption} />}
       </div>
     );
   }
@@ -133,6 +135,7 @@ export function RadarChartWidget({ payload }: { payload: ChartPayload }) {
           </RadarChart>
         </ResponsiveContainer>
       </div>
+      {caption && <ChartCaption text={caption} />}
     </div>
   );
 }

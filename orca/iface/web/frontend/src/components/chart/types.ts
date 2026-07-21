@@ -32,6 +32,11 @@ export interface ChartPayload {
   color?: string;
   /** 散点大小（scatter 类型作气泡图；ZAxis dataKey 映射，SPEC §5.4 / §0 D3） */
   size?: string;
+  /** 轴标签文案（覆盖字段名显示）。空或省略 → 前端回退用字段名（``x``/``y``）作轴标签。 */
+  x_label?: string;
+  y_label?: string;
+  /** 图下小字说明（可选，空=无）。用例：解释数据来源/单位/★含义等。 */
+  caption?: string;
   /**
    * heatmap cell 着色字段名（长格式 record 一个 cell：``{recipe, bitwidth, accuracy}``）。
    * 渲染器按 (y, x) pivot 成网格，按 value 做色阶（color scale）。chart_type='heatmap' 时必填

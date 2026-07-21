@@ -14,6 +14,7 @@
   - ``x`` / ``y``：heatmap 时必非空 str（列轴/行轴字段名）；其它类型可省略/空
   - ``hue``：可选 str（如存在则必须 str）
   - ``color``：可选 str（per-row 着色字段名；hue 优先，hue 缺席时生效，与 hue 互斥语义）
+  - ``x_label`` / ``y_label`` / ``caption``：可选 str（轴标签文案 / 图下说明；空或省略=回退）
 
 依赖单向：仅依赖 ``_limits``（常量），不依赖 schema/events 等 Orca runtime。
 """
@@ -85,6 +86,15 @@ def validate_payload(payload: dict[str, Any]) -> None:
     # x / y / hue / color：可选 str（如存在则必须 str）。types.ts 四者均 ``string | undefined``。
     # color 与 hue 互斥语义由前端消费（hue 优先）；此处仅做类型校验。
     for key in ("x", "y", "hue", "color"):
+        v = payload.get(key)
+        if v is not None and not isinstance(v, str):
+            raise ValueError(
+                f"{key} 必须为 str 或省略，got {type(v).__name__}"
+            )
+
+    # x_label / y_label / caption：可选 str（轴标签文案 / 图下说明）。空或省略 = OK（向后兼容）。
+    # types.ts 三者均 ``string | undefined``；非 str 类型 fail loud（防 agent 误传 dict/list）。
+    for key in ("x_label", "y_label", "caption"):
         v = payload.get(key)
         if v is not None and not isinstance(v, str):
             raise ValueError(

@@ -48,6 +48,9 @@ def render_chart(
     pareto_x_direction: str = "",
     pareto_y_direction: str = "",
     value: str = "",
+    x_label: str = "",
+    y_label: str = "",
+    caption: str = "",
     max_points: int = DEFAULT_MAX_POINTS,
 ) -> int:
     """向当前 Orca run 推送一张图（SPEC §4.1 / §4.2）。返回分配的 seq。
@@ -74,6 +77,9 @@ def render_chart(
             （``max`` / ``min`` / 空）。
         value: heatmap cell 着色字段名（如 accuracy）。**chart_type='heatmap' 时必填**——
             ``validate_payload`` fail loud 拒收空 value。其它 chart_type 忽略此参数。
+        x_label / y_label: 轴标签文案（可选）。空串 → 前端/TUI 回退用字段名（``x``/``y``）。
+            用例：``x="index"`` + ``x_label="候选序号(账本行)"`` → 横轴显示人话而非字段名。
+        caption: 图下小字说明（可选，空串=无）。用例：解释数据来源/单位/★含义等。
         max_points: 自动降采样阈值（默认 2000）。
 
     Returns:
@@ -131,6 +137,11 @@ def render_chart(
         ("pareto_x_direction", pareto_x_direction),
         ("pareto_y_direction", pareto_y_direction),
     ):
+        if v:
+            payload[k] = v
+    # 轴标签 / caption：仅在非空时塞进 payload（旧 tape 不含这三字段 → 反序列化默认空串，
+    # 前端/TUI 走字段名回退，向后兼容）。
+    for k, v in (("x_label", x_label), ("y_label", y_label), ("caption", caption)):
         if v:
             payload[k] = v
     validate_payload(payload)  # fail loud：缺字段 / 类型错 / 未知 chart_type → raise
