@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-21] chart 加 x_label/y_label/caption 轴标签与图下说明能力（P1 workflow 重设计 Phase 0-a）
+
+解「图表看不懂」根因 C：`render_chart` 签名加 `x_label/y_label/caption` 三参数（默认空串，仅在非空时塞 payload，与 `pareto_direction` 同款契约），单一真相源 = ChartPayload（backend `_render.py`/`_validate.py` + frontend `types.ts` 两端同源）。前端 `chartTheme.ts` 加 4 个 label helper（DRY，5 widget 共用）+ 新 `ChartCaption.tsx` 共享小组件，8 widget 全部接入（Line/Bar/Area/Scatter/Pareto 加 XAxis/YAxis label；Heatmap 加 caption + 矩阵下轴标题；Radar/Table 加 caption）。TUI `chart_canvas.py` plotext `xlabel`/`ylabel` + 空数据/非空数据两路径都保留 caption；heatmap 降级把 axis 拼进 hint 保语义。viz_struct `_push_champion_trace` 落地作证（候选序号 / 时延 / ★=达标）。**向后兼容**：旧 tape 无新字段 → 默认空串 → 三端回退旧行为；color（b820ef1）+ heatmap chart_type（ec3d598）零回归。code-reviewer 两轮闭环（一审删 Python 类 shadow 重复测试 + 修空数据 caption 丢 + 修 plotext reload cleanup 生效顺序；二审补 TUI 空数据 / heatmap 降级 / frontend 双轴缺省三个覆盖 🔴）。174 chart 相关测试 + 51 frontend chart 测试全绿；新增 27 测试。Commit: `a7de596`. 详见 [release note](../releases/2026-07-21-chart-axis-labels.md).
+
 ## [2026-07-21] workflow 产物路径拼接漏斜杠 BUG 修复（Phase 4-B / P2）
 
 struct family_detect / kd teacher_setup 的 output_schema 新增显式带尾斜杠字段（snapshots_dir / worktree_root / viz_dir / ledger_path / champions_path + kd-only ckpts_dir / profile_report_path），setup prompt 强制 `OUTPUT_DIR=$(python3 -c "...os.path.abspath + '/'")` 一次计算；下游 struct-engineer / kd-engineer / kd-teacher-setup agent.md + yaml inline prompts（structure_gate / viz_* / profile_gate / kd_trainer）改读字段而非 `{{ output_dir }}<suffix>` 字符串拼根——从源头杜绝 `<run>snapshots/`、`<run>.worktrees/` 兄弟孤儿目录。code-reviewer 抓到 kb_cache/ 局部回归（m1）已修。范围外 7 个下游 agent.md（struct-evaluator / curator / analyst + kd-curator / analyst / hypothesizer / train-script）的同款拼接按计划留给 Phase 3 P7；CONTRACTS.md 节点 I/O 表 stale 同期处理。Commit: `e41974f`。详见 [release note](../releases/2026-07-21-workflow-path-concat-fix.md) + [计划](../plans/2026-07-21-workflow-redesign.md) §4-B。
