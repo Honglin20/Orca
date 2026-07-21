@@ -53,3 +53,10 @@ e2e_clean.sh
 # 项目级 Orca 派生缓存（node-memory：.orca/memory/<wf>/<node>.md 是 tape 的派生缓存，
 # 跨机器不可移植；tape 在用户级 ~/.orca/runs 是真相源）。SPEC §0.4 / §2.1。
 .orca/
+
+# NAS / KD 实验工件（kd-nas workflow 运行产物：带时间戳、含 .onnx/.pt ckpt、可重生成，不入库）。
+# 只忽略运行产物目录；源码（nas-agent/）与 docs/plans、docs/releases 仍跟踪。
+demo_run/
+demo_target/
+llm_artifacts/
+quant_params/
