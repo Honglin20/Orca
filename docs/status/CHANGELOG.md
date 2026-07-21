@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-21] `orca open` 跨项目端口占用修复 + `bootstrap` 默认自动开 web
+
+**A（`7d9b7eb`）**：7428 被别项目 orca 占用时不再静默挂错 tape。根因：`_open_run` 把相对 tape 路径跨进程 POST + 「7428 有 orca 就无脑复用」。修：`_identity.py`（新，`runs_dir_fingerprint=sha1(resolve)[:12]`，stdlib-only）+ health 加 `runs_dir_fp`（指纹非明文防 0.0.0.0 泄漏）+ `web_registry.py`（新，per-project 端口登记，探测权威 registry 仅 hint）+ `_open_run` 重写（绝对路径化 + 项目感知复用：本项目→registry→起新 server）+ SPEC §5a 同步。**B（`9677c1e`）**：`bootstrap` 默认开 web——post-lock 块 detach spawn `orca open`（与 chart/sidechain 守护同款 detach + soft-fail），stdout JSON 契约零污染；`--no-open-web`/`ORCA_BOOTSTRAP_OPEN_WEB=0` 关；schema-only 不触发。spec-reviewer 两轮 conditional-pass（6 blocker+5 HIGH 全闭环，B5 flock 降级为已知限制）+ code-reviewer 需修后合（3 🟡 测试缺口全补）。987 passed；2 既有失败（bg_integration/install nudge）git stash 证伪为基线既有。详见 [release note](../releases/2026-07-21-orca-open-cross-project-and-bootstrap-auto-open.md) + [计划](../plans/2026-07-21-orca-open-cross-project.md).
+
 ## [2026-07-21] Workflow 可视化全量优化（sensitivity bar/table + KD 0 图 bug + 横向优化）
 
 7 个改动点（每点独立 agent 实现 + 逐 diff 验收）：前端 ChartPayload 加 `color` 字段（per-row 着色，hue 优先；BarChartWidget + ScatterChartWidget，`b820ef1`+`e1272e8`）；sensitivity bar 去 hue 改 color、table 改全层（`235ba98`）；**KD 0 图 bug 修复**——viz_round 复用 viz_struct 但 schema 不匹配致每行被剔→0 图，新建 viz_kd.py（4 图）+ 改 yaml 两节点（`f516223`）；struct 新增逐候选表（`0910c87`）；bit-curve 假 pareto 改真 pareto + 全候选 scatter（`70bb4ff`）；ptq-sweep 删无意义 hue + table 补失败行（`d154d1d`）；qat 补训练 loss 曲线（`f361171`）。KD 用真实账本 mock 捕获证实 5 图正确（修前 0 图）。详见 [release note](../releases/2026-07-21-workflow-viz-overhaul.md).

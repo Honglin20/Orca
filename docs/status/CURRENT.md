@@ -6,6 +6,7 @@
 
 ## 状态（2026-07-21）
 
+- ✅ **`orca open` 跨项目端口占用修复 + `bootstrap` 默认自动开 web**（commit `7d9b7eb` + `9677c1e`）：A 修「7428 被别项目 orca 占 → 静默挂错 tape」（项目指纹复用 + registry + 绝对路径）；B 让 bootstrap 启动即自动开 web（detach `orca open`，stdout 契约零污染，默认开）。spec-review 两轮 + code-reviewer 全闭环；987 passed。详见 [release note](../releases/2026-07-21-orca-open-cross-project-and-bootstrap-auto-open.md) + [CHANGELOG](CHANGELOG.md)。Follow-up：`orca run` reuse 同类隐患（R4）/ `tars serve --runs-dir`（R8）/ 指纹隐私（H5）。
 - ✅ **Workflow 可视化全量优化**（7 点，每点独立 agent + 逐 diff 验收，commit `b820ef1`…`f516223`）：前端加 `color` 字段（hue 优先的 per-row 着色）；sensitivity bar 去 hue 改 color、table 改全层；**修 KD 0 图 bug**（viz_round 复用 viz_struct 但 schema 不匹配致 0 图 → 新建 viz_kd.py 4 图 + 改 yaml）；struct 加逐候选表；bit-curve 假 pareto 改真 pareto + 全候选 scatter；ptq-sweep 删无意义 hue + table 补失败行；qat 补训练 loss 曲线。KD 用真实账本 mock 捕获证实修前 0 图→修后 5 图。详见 [release note](../releases/2026-07-21-workflow-viz-overhaul.md)。
 - ts_quant 已 editable 装入 conda orca env（实测可用）；待正式加进 orca pyproject 依赖。
 - 本地领先 origin 多 commit（push 待用户手动）。
