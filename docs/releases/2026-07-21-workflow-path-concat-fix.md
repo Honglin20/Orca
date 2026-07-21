@@ -100,7 +100,7 @@
 ## Commit
 
 - `e41974f` `fix(workflows): 修 struct/kd 路径拼接漏斜杠——setup 节点 output_schema 显式带尾斜杠字段`
-- `<docs-commit-sha>` `docs(workflows): P2 release note + CHANGELOG + CURRENT`
+- `93aee8f` `docs(workflows): P2 release note + CHANGELOG + CURRENT`（本 release note 自带）
 
 ## 相关文件（绝对路径）
 
