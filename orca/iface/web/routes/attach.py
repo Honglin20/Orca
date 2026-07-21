@@ -5,8 +5,8 @@
     ``manager.attach_run`` → ``{run_id, status}``。安全 / 碰撞 / 幂等失败映射到 HTTP：
     ``PermissionError`` → 403；``FileNotFoundError`` → 404；``ValueError(run_id_collision)``
     → 409；其它 → 500 fail loud。
-  - ``GET /api/health`` → ``{app:"orca", version, pid}``。``orca open`` / 端口探测用它判定
-    「既有 server 是 orca」。
+  - ``GET /api/health`` → ``{app:"orca", version, pid, runs_dir_fp}``。``orca open`` / 端口探测
+    用它判定「既有 server 是 orca」+ ``runs_dir_fp`` 判定是否**同项目**（spec-review B1/B3）。
 
 依赖单向：本模块依赖 ``orca.iface.web.run_manager`` + ``orca.__init__.__version__`` +
 fastapi，不含编排逻辑（attach_run 才是注册入口）。
@@ -21,6 +21,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 import orca
+from orca.iface.web._identity import runs_dir_fingerprint
 
 if TYPE_CHECKING:
     from orca.iface.web.run_manager import RunManager
@@ -74,15 +75,22 @@ def build_router(manager: RunManager) -> APIRouter:
 
     @router.get("/health")
     async def health() -> dict[str, Any]:
-        """health 探测（SPEC §5）：``{app:"orca", version, pid}``。
+        """health 探测（SPEC §5）：``{app:"orca", version, pid, runs_dir_fp}``。
 
         ``orca open`` / 端口探测用它判定「同 port 既有 server 是 orca」（否/不可达 → 起新
-        serve）。返回 ``app`` 永远是 ``"orca"``（唯一身份），其它 server 不会返此形状。
+        serve）。``app`` 永远是 ``"orca"``（唯一身份），其它 server 不会返此形状。
+
+        ``runs_dir_fp``（spec-review B1/B3，SPEC web-attach §5a）：``sha1(resolve(runs_dir))[:12]``。
+        client（``orca open``）据此判定 server 是否**同项目**——匹配则复用，否则视为 foreign 改起
+        本项目自己的 server。用指纹非明文路径（health 默认 bind ``0.0.0.0`` 网络可达，明文目录是
+        信息泄漏；详见 ``orca.iface.web._identity``）。**旧 server 缺此字段** → client 视为 foreign
+        → 安全降级到 spawn（升级窗口期可能留孤儿，用户感知后手动 ``pkill -f 'tars serve'``）。
         """
         return {
             "app": "orca",
             "version": orca.__version__,
             "pid": os.getpid(),
+            "runs_dir_fp": runs_dir_fingerprint(manager.runs_dir),
         }
 
     return router

@@ -1449,6 +1449,72 @@ def open_run(
     raise typer.Exit(_open_run(run_id, tape_path=tape, host=host, port=port))
 
 
+def _default_runs_dir() -> Path:
+    """client 视角 runs_dir（与 tape 落盘约定同源）。
+
+    spec-review B2：从 ``bg_runner.default_tape_path`` 派生（单一真相源），不字面 ``"runs"``
+    （避免与 ``RunManager`` 默认 ``runs_dir="runs"`` 两处字面漂移）。跨层不能共享常量
+    （web 禁 import cli），故加 ``test_default_runs_dir_single_source`` 守门防漂移。
+    """
+    from orca.iface.cli.bg_runner import default_tape_path
+
+    return default_tape_path("__probe__").parent
+
+
+def _runs_dir_fp(runs_dir: Path) -> str:
+    """本项目 runs_dir 指纹（与 server health ``runs_dir_fp`` 同算法）。
+
+    lazy import 无依赖模块（spec-review B3：不拉 ``run_manager`` 重依赖图——``_identity`` 仅 stdlib）。
+    """
+    from orca.iface.web._identity import runs_dir_fingerprint
+
+    return runs_dir_fingerprint(runs_dir)
+
+
+def _health_is_my_project(health: dict | None, my_fp: str) -> bool:
+    """health 是否本项目 server：``runs_dir_fp`` 匹配。
+
+    缺指纹（旧版 server / 非 orca）→ ``False``（视为 foreign，安全降级到 spawn）。
+    """
+    return bool(health) and health.get("runs_dir_fp") == my_fp
+
+
+def _lookup_my_registered_port(
+    my_runs_dir: Path, my_fp: str, probe_host: str,
+) -> int | None:
+    """查 per-project 登记找本项目 server 端口。
+
+    **探测权威**（spec-review）：读登记拿 port 后**仍** probe + 指纹校验；陈旧 / 不匹配 / 损坏
+    → ``None``。pid 不 gate（H1：registry 不存 pid）。
+    """
+    from orca.iface.cli.web_registry import read_registry
+
+    reg = read_registry(my_runs_dir)
+    port = reg.get("port") if reg else None
+    if not isinstance(port, int):
+        return None
+    return port if _health_is_my_project(_probe_orca_server(probe_host, port), my_fp) else None
+
+
+def _register_my_port(my_runs_dir: Path, *, port: int, fp: str) -> None:
+    """写 per-project 登记供下次 ``orca open`` 复用。
+
+    spec-review B4：写失败不能 silent——server 已起（detached）却没登记 → 下次找不到 → 重复
+    spawn → 泄漏。**loud 可操作 warn**：本次 open 仍继续 attach（不阻断），但显式 stderr 告知
+    port + kill 提示（可见 = fail loud 精神，又不破坏本次 open）。
+    """
+    from orca.iface.cli.web_registry import write_registry
+
+    try:
+        write_registry(my_runs_dir, port=port, runs_dir_fp=fp)
+    except OSError as e:
+        typer.echo(
+            f"⚠ web registry 写失败（{e}）；server 已起 port={port} 但下次 `orca open` 会重复"
+            f" spawn。可 `lsof -ti tcp:{port} | xargs kill` 或忽略（下次成功写覆盖）。",
+            err=True,
+        )
+
+
 def _open_run(
     run_id: str, *, tape_path: Path | None, host: str | None, port: int | None
 ) -> int:
@@ -1456,49 +1522,64 @@ def _open_run(
 
     host/port 经 ``resolve_web_endpoint`` 统一解析（与 serve/run 同源）：bind ``bind_host``
     （默认 0.0.0.0），URL 用 ``display_host``（本机实际 IP）。HTTP 复用探测始终本地 127.0.0.1。
+
+    **项目感知复用**（spec-review B1/B2/B3，SPEC web-attach §5a）：探测 target port 上的 orca
+    server，仅当 ``runs_dir_fp`` 匹配本项目才复用；否则（foreign orca / 非 orca / 空闲）按
+    per-project 登记文件 ``<runs_dir>/.orca-web.json`` 找本项目 server，无则空闲端口起新 server
+    并登记。tape 路径以**绝对路径** POST（跨进程不能相对——server CWD 可能不同；与
+    ``_post_run_to_existing`` 同硬化）。
     """
     bind_host, display_host, target_port = resolve_web_endpoint(host=host, port=port)
     probe_host = "127.0.0.1"  # 复用 / attach 探测始终本地
 
-    # 1) 解析 tape 路径。
+    # 1) 解析 tape 路径 + 绝对路径化（跨进程 POST：server CWD 可能不同，相对路径会被错误解析）。
     tape = tape_path if tape_path is not None else _resolve_tape_path(run_id)
     if not tape.is_file():
         typer.echo(f"Tape 不存在：{tape}（用 --tape <path> 显式指定）", err=True)
         return EXIT_ARG_OR_VALIDATE
+    tape_abs = str(tape.resolve())
 
-    # 2) 端口探测：target port 是 orca → 复用；否 → 起后台 serve。
+    # 2) 选端口：本项目 server 复用 → registry → 起新 server。
+    my_runs_dir = _default_runs_dir()
+    my_fp = _runs_dir_fp(my_runs_dir)
     health = _probe_orca_server(probe_host, target_port)
-    if health is not None:
+    if _health_is_my_project(health, my_fp):
+        # 2a. target port 上就是本项目 server → 复用。
         actual_port = target_port
     else:
-        # 显式 --port 且被非 orca 占 → fail loud；否则挑端口 + 起后台 serve。
-        if port is not None and not _is_port_free(bind_host, target_port):
-            typer.echo(
-                f"--port {target_port} 被非 orca server 占用",
-                err=True,
-            )
-            return EXIT_ARG_OR_VALIDATE
+        # 2b. target 是 foreign orca / 非 orca / 空闲。显式 --port 不查 registry（用户钉了端口）；
+        #     否则查 per-project 登记找本项目 server。
         actual_port = (
-            target_port if _is_port_free(bind_host, target_port)
-            else _find_free_port(bind_host=bind_host)
+            None if port is not None
+            else _lookup_my_registered_port(my_runs_dir, my_fp, probe_host)
         )
-        if not _spawn_background_serve(bind_host, actual_port):
-            # tars 不在 PATH（FileNotFoundError）→ fail loud exit 1
-            typer.echo(
-                "无法起后台 ``tars serve``：可执行不在 $PATH",
-                err=True,
+        if actual_port is None:
+            # 2c. 起新 server。显式 --port 被占 → fail loud；否则挑空闲端口（target 优先）。
+            if port is not None and not _is_port_free(bind_host, target_port):
+                typer.echo(
+                    f"--port {target_port} 被占用（非本项目 orca 或其它进程）",
+                    err=True,
+                )
+                return EXIT_ARG_OR_VALIDATE
+            actual_port = (
+                target_port if _is_port_free(bind_host, target_port)
+                else _find_free_port(bind_host=bind_host)
             )
-            return EXIT_RUN_FAILED
-        # 等 serve 起来（health 探测重试）。
-        if not _wait_for_health(probe_host, actual_port, timeout=10.0):
-            typer.echo(
-                f"后台 tars serve 未在 {actual_port} 上 ready（超时 10s）",
-                err=True,
-            )
-            return EXIT_RUN_FAILED
+            if not _spawn_background_serve(bind_host, actual_port):
+                # tars 不在 PATH（FileNotFoundError）→ fail loud exit 1
+                typer.echo("无法起后台 ``tars serve``：可执行不在 $PATH", err=True)
+                return EXIT_RUN_FAILED
+            # 等 serve 起来（health 探测重试）。
+            if not _wait_for_health(probe_host, actual_port, timeout=10.0):
+                typer.echo(
+                    f"后台 tars serve 未在 {actual_port} 上 ready（超时 10s）",
+                    err=True,
+                )
+                return EXIT_RUN_FAILED
+            _register_my_port(my_runs_dir, port=actual_port, fp=my_fp)
 
-    # 3) POST /api/runs/attach。
-    attach_error_code = _attach_and_get_error(probe_host, actual_port, str(tape), run_id)
+    # 3) POST /api/runs/attach（绝对路径）。
+    attach_error_code = _attach_and_get_error(probe_host, actual_port, tape_abs, run_id)
     if attach_error_code is not None:
         return attach_error_code
 
