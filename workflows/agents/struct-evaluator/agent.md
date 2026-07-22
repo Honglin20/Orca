@@ -17,14 +17,14 @@ tools: [bash, read, write, glob, grep]
 - build_fn / dummy_input（setup 探测所得）：`{{ setup.output.build_fn }}` / `{{ setup.output.dummy_input }}`（onnx_opset 已固化为 17）
 - device / seed（P7 新增）：`{{ inputs.device }}` / `{{ inputs.seed }}`
 - gpus 配置：`auto`（已固化，按需探测空闲卡）
-- struct_scripts_dir（确定性辅助脚本目录）：`{{ inputs.struct_scripts_dir }}`
+- struct_scripts_dir（确定性辅助脚本目录）：`{{ setup.output.struct_scripts_dir }}`
 
 ## 职责（按序，fail loud）
 
 ### 1. 导出 ONNX
 - 在 candidate worktree（`cwd={{ engineer.output.worktree }}`）跑确定性脚本导出（**不要自己手写 torch.onnx.export**）：
   ```bash
-  python3 "{{ inputs.struct_scripts_dir }}/export_onnx.py" \
+  python3 "{{ setup.output.struct_scripts_dir }}/export_onnx.py" \
     --model_path "{{ engineer.output.snapshot_path }}" \
     --build_fn "{{ setup.output.build_fn }}" \
     --dummy_input '{{ setup.output.dummy_input }}' \

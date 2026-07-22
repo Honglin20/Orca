@@ -30,11 +30,11 @@ tools: [bash, read, write, glob, grep]
   # ROUND 必须只数候选评估行（控制标记行无 round 字段，数进去会让 phase 推导偏移）。
   ROUND=$(grep -v '"type":"finalized_failed_mark"' "{{ setup.output.ledger_path }}" 2>/dev/null | wc -l | tr -d ' ')
   [ -z "$ROUND" ] && ROUND=0
-  REG_LEN=$(python3 -c "import json;print(len(json.load(open('{{ inputs.kd_scripts_dir }}/students/registry.json'))))")
+  REG_LEN=$(python3 -c "import json;print(len(json.load(open('{{ setup.output.kd_scripts_dir }}/students/registry.json'))))")
   if [ "$ROUND" -lt "$REG_LEN" ]; then PHASE=1; else PHASE=2; fi
   ```
   （首轮 ledger 空 → ROUND=0 → PHASE=1；registry 扫完 → PHASE=2。）
-- `kd_scripts_dir = {{ inputs.kd_scripts_dir }}`（契约 §4 脚本根，含 `students/registry.json`）。
+- `kd_scripts_dir = {{ setup.output.kd_scripts_dir }}`（契约 §4 脚本根，含 `students/registry.json`）。
 - `profile_report`（setup 合并 profile_gate 后直接读绝对路径，CONTRACTS §4 schema）：`{{ setup.output.profile_report_path }}`。
 - teacher baseline（时延 / 精度参照）：`{{ setup.output.teacher_meta }}`。
 - 当前 champion（读账本，**只读 setup 提供的绝对路径字段**）：
@@ -53,8 +53,8 @@ tools: [bash, read, write, glob, grep]
    ```bash
    # selection_spec 用 setup 提供的 output_dir 拼接（setup 是单一真相源；尾斜杠已保证）
    SELECTION_SPEC="{{ setup.output.output_dir }}selection_spec_r${ROUND}.json"
-   python3 "{{ inputs.kd_scripts_dir }}/pick_student.py" \
-     --registry "{{ inputs.kd_scripts_dir }}/students/registry.json" \
+   python3 "{{ setup.output.kd_scripts_dir }}/pick_student.py" \
+     --registry "{{ setup.output.kd_scripts_dir }}/students/registry.json" \
      --round "$ROUND" \
      --out "$SELECTION_SPEC"
    ```

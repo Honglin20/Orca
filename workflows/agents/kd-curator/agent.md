@@ -30,9 +30,9 @@ tools: [bash, read, write, edit, glob, grep]
   - champions：`{{ setup.output.champions_path }}`
   - kd_recipe：`{{ setup.output.kd_recipe_path }}`（P7 新字段；原 output_dir+kd_recipe.md 拼接根因）
 - 目标 / 预算：`target_latency_ms={{ inputs.target_latency_ms }}` / `max_rounds={{ inputs.max_rounds }}`
-- registry 长度（phase 判别）：`{{ inputs.kd_scripts_dir }}/students/registry.json`
+- registry 长度（phase 判别）：`{{ setup.output.kd_scripts_dir }}/students/registry.json`
 - teacher_meta（看 teacher_accuracy_known）：`{{ setup.output.teacher_meta }}`
-- struct_scripts_dir / kd_scripts_dir：`{{ inputs.struct_scripts_dir }}` / `{{ inputs.kd_scripts_dir }}`
+- struct_scripts_dir / kd_scripts_dir：`{{ setup.output.struct_scripts_dir }}` / `{{ setup.output.kd_scripts_dir }}`
 
 ## 职责（按序，fail loud）
 
@@ -82,7 +82,7 @@ R=$((LAST_ROUND + 1))
 
 ### 3. phase 计算
 
-- `registry_len = python3 -c "import json;print(len(json.load(open('{{ inputs.kd_scripts_dir }}/students/registry.json'))))"`
+- `registry_len = python3 -c "import json;print(len(json.load(open('{{ setup.output.kd_scripts_dir }}/students/registry.json'))))"`
 - `round < registry_len` → `phase=1`；`round ≥ registry_len` → `phase=2`。
 - ledger 里 `finalized_failed_mark` 标记的 family → hypothesizer 在 phase=2 避开。
 
@@ -118,7 +118,7 @@ finalize 失败回标由 finalize 节点 append `{"type":"finalized_failed_mark"
 
 账本 append 后立即推图：
 ```bash
-python3 "{{ inputs.kd_scripts_dir }}/viz_kd.py" --mode round \
+python3 "{{ setup.output.kd_scripts_dir }}/viz_kd.py" --mode round \
   --ledger "{{ setup.output.ledger_path }}" \
   --champions "{{ setup.output.champions_path }}" \
   --teacher_meta "{{ setup.output.teacher_meta }}" || true

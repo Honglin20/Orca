@@ -27,7 +27,7 @@ tools: [bash, read, write, edit, glob, grep]
 ## 输入
 
 - SelectionSpec：`{{ hypothesizer.output.selection_spec_path }}`（JSON 文件，CONTRACTS §2 schema）。读出 `candidate_id` / `phase` / `family` / `build_cfg` / `kd_config`。
-- family 实现目录：`{{ inputs.kd_scripts_dir }}/students/<family>.py`（每个 family 一个文件，契约 §1）。
+- family 实现目录：`{{ setup.output.kd_scripts_dir }}/students/<family>.py`（每个 family 一个文件，契约 §1）。
 - project_root（setup 探测所得）：`{{ setup.output.project_root }}`（用于 git worktree；非 git 仓库 → fallback 目录拷贝）。
 - output_dir：`{{ setup.output.output_dir }}`（run 根目录）。
 - snapshots 目录（带尾斜杠，下游只 append `<candidate_id>_model.py`）：`{{ setup.output.snapshots_dir }}`。
@@ -49,8 +49,8 @@ python3 -c "import json; s=json.load(open('{{ hypothesizer.output.selection_spec
 ### 2. 校验 family 脚本存在 + 契约 §1 合规
 
 ```bash
-test -f "{{ inputs.kd_scripts_dir }}/students/{{ hypothesizer.output.family }}.py" || { echo "family 脚本缺失" >&2; exit 1; }
-grep -E '^def build_model|^BUILD_FN|^DUMMY_INPUT' "{{ inputs.kd_scripts_dir }}/students/{{ hypothesizer.output.family }}.py"
+test -f "{{ setup.output.kd_scripts_dir }}/students/{{ hypothesizer.output.family }}.py" || { echo "family 脚本缺失" >&2; exit 1; }
+grep -E '^def build_model|^BUILD_FN|^DUMMY_INPUT' "{{ setup.output.kd_scripts_dir }}/students/{{ hypothesizer.output.family }}.py"
 ```
 
 - 缺 `build_model` / `BUILD_FN="build_model"` / `DUMMY_INPUT` 任一 → fail loud（family 脚本本身违反契约 §1）。
@@ -59,9 +59,9 @@ grep -E '^def build_model|^BUILD_FN|^DUMMY_INPUT' "{{ inputs.kd_scripts_dir }}/s
 
 ```bash
 python3 -c "
-import sys; sys.path.insert(0, '{{ inputs.kd_scripts_dir }}/students')
+import sys; sys.path.insert(0, '{{ setup.output.kd_scripts_dir }}/students')
 import importlib.util, json
-spec = importlib.util.spec_from_file_location('student_family', '{{ inputs.kd_scripts_dir }}/students/{{ hypothesizer.output.family }}.py')
+spec = importlib.util.spec_from_file_location('student_family', '{{ setup.output.kd_scripts_dir }}/students/{{ hypothesizer.output.family }}.py')
 mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
 cfg = json.loads('<build_cfg JSON 字符串化>')
 m = mod.build_model(**cfg)
@@ -79,7 +79,7 @@ print('OK', type(m).__name__)
 ### 5. 落 model.py（family 脚本原样复制进 worktree）
 
 ```bash
-cp "{{ inputs.kd_scripts_dir }}/students/{{ hypothesizer.output.family }}.py" \
+cp "{{ setup.output.kd_scripts_dir }}/students/{{ hypothesizer.output.family }}.py" \
    "{{ setup.output.worktree_root }}{{ hypothesizer.output.candidate_id }}/model.py"
 ```
 

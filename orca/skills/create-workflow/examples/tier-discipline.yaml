@@ -1,0 +1,88 @@
+# 抄作业用：input 三档原则示范（docs/specs/workflow-input-design-principle.md）。
+# 一个虚构的「模型量化校准」workflow，演示：
+#   - Tier A [ask]：2 个业务决策 input（model_path / target_hardware）+ 1 个 [advanced]（seed，默认 0）
+#   - Tier B [infer]：calib_loader dotted-path 下沉为 setup 节点 output_schema 字段
+#     （agent.md 读代码推断；缺失走 ask-user 哨兵，绝不造假）
+#   - Tier C [default] / [advanced]：算法开关固化默认（mode / recipes / bake）
+#   - output_dir 走引擎注入的 $ORCA_ARTIFACTS_DIR（不作 input）
+#   - iterations 不作 input（引擎兜底 100；长 run 用 --max-iter 覆盖）
+#
+# 对照生成模板时检查：每个 input description 以 [ask]/[infer]/[default]/[advanced] 标签起头；
+# setup output_schema 承接 Tier B；agent.md 有「读代码→哨兵→fail loud」段（此处略，真实 workflow 必加）。
+name: tier-discipline
+description: "input 三档原则示范 workflow（虚构量化校准）：Tier A [ask] 3 项 + Tier B [infer] 下沉 setup + Tier C 固化"
+entry: setup
+inputs:
+  model_path:
+    type: string
+    description: "[ask] 模型定义文件路径（如 examples/ViT/model.py）。用户资产锚 + 内省起点，必须用户给"
+    required: true
+  target_hardware:
+    type: string
+    description: "[ask] 部署目标硬件：cuda / npu / cpu。决定 calibration 算子选择，必须用户给"
+    required: true
+  seed:
+    type: string
+    description: "[advanced] 复现种子（默认 0）。全部 workflow 必须有"
+    required: false
+    default: "0"
+
+nodes:
+  - name: setup
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    tools: [bash, read, write, glob, grep]
+    output_schema:
+      # Tier B 项下沉为 setup output_schema 字段（infer-once + propagate）
+      type: object
+      required: [output_dir, project_root, calib_loader]
+      properties:
+        output_dir: {type: string, description: "P9b 起优先 = $ORCA_ARTIFACTS_DIR（引擎注入）；setup 内 OUTPUT_DIR=\"${ORCA_ARTIFACTS_DIR:-<fallback>}/\""}
+        project_root: {type: string, description: "Tier B 推断：从 model_path 向上找 .git/pyproject.toml；低置信 fallback=dirname(model_path)"}
+        calib_loader: {type: string, description: "Tier B 推断：用户代码里返回 DataLoader 的 callable dotted-path（如 myproj.data:load_calib）；缺失走 ask-user 哨兵"}
+    prompt: |
+      你是 setup（一次性）。**P9b 三档原则**示范：建 output_dir（$ORCA_ARTIFACTS_DIR 优先）+ Tier B 推断。
+
+      ## 执行
+      1. 建输出目录：`OUTPUT_DIR="${ORCA_ARTIFACTS_DIR:-$(pwd)/llm_artifacts/run_$(date +%s)}/"`（P8 引擎注入优先）。
+      2. 探测 `project_root`：从 `{{ inputs.model_path }}` 向上找 `.git` / `pyproject.toml`；找不到 → 取 dirname(model_path)，低置信标注（dirname 是合理 fallback，**不走哨兵**）。
+      3. 探测 `calib_loader`（Tier B）：`grep -rnE 'def \w+.*DataLoader' {{ inputs.model_path }}` 找返回 DataLoader 的 callable。
+         - 唯一明确 → 用 dotted-path（`module:func`）。
+         - 多个候选 / 推不出 → **不要**造假（`torch.randn` / 静默空 loader），**返回 ask-user 哨兵**：
+           ```json
+           {"_orca_ask_user": "calib loader 在你项目的 dotted-path 是什么？",
+            "options": ["myproj.data:load_calib", "myproj.dataset:make_loader"],
+            "context": "已 grep <model_path> 同目录 **/*.py 的 DataLoader，project_root 未给/无匹配",
+            "_sentinel": "orca_ask_user_v1"}
+           ```
+           （TARS skill strict 识别魔键 → 问用户 → SendMessage/Task(task_id) 恢复同一子 agent → MAX_ASK=3 兜底；哨兵不进 orca next。）
+      4. **缺失必填输入时（严禁造假）—— ask-user 哨兵**：见 Step 3 的 calib_loader 路径。用户也答不出 → `{"_status":"fail_loud","reason":"..."}`。
+
+      ## 输出（合法 JSON）
+      ```json
+      {"output_dir": "<OUTPUT_DIR 末尾带 />", "project_root": "<绝对路径>",
+       "calib_loader": "<dotted-path，如 myproj.data:load_calib>"}
+      ```
+    routes:
+      - to: calibrate
+
+  - name: calibrate
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: |
+      跑量化校准（用 setup 推断的 calib_loader，Tier B 经 setup output 向后传）。
+      - model_path: {{ inputs.model_path }}（Tier A）
+      - target_hardware: {{ inputs.target_hardware }}（Tier A）
+      - calib_loader: {{ setup.output.calib_loader }}（Tier B，从 setup 取，绝不自己重找）
+      - output_dir: {{ setup.output.output_dir }}（走 $ORCA_ARTIFACTS_DIR）
+      - mode=calib_only / recipes=default / bake=false（**Tier C 固化**，不作 input）
+      输出一段总结。
+    routes:
+      - to: $end
+
+outputs:
+  result: "{{ calibrate.output }}"
+  calib_loader: "{{ setup.output.calib_loader }}"
+  output_dir: "{{ setup.output.output_dir }}"

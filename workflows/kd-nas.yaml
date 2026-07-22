@@ -4,10 +4,24 @@ description: "以知识蒸馏（KD）为核心的神经架构搜索：固定 tea
 entry: setup
 
 inputs:
-  # 用户决策面（[ask]+[infer]）
+  # ── inputs 标签约定（description 前缀，供 in-session 编排器/tars skill 读取；详 docs/specs/workflow-input-design-principle.md）──
+  #   [ask]      Tier A：业务决策（意图/预算/KPI/硬件/模型入口/业务命令），用户意图未给则启动前集中询问
+  #   [infer]    Tier B：可读代码推断（不是 input，是 setup 节点 output 字段；缺失走 ask-user 哨兵）
+  #   [default]  Tier C：工程默认（固化，不问）
+  #   [advanced] Tier C 子集：罕见 override，固化默认，文档可见但不暴露为主 input
+  #
+  # P9b（按 input 三档原则）：6 个 [ask] 主 input + 3 个 [advanced] 固化默认（device/latency_provider/seed）。
+  # Tier B 下沉：project_root / build_fn / dummy_input → setup 节点 output_schema（缺失走哨兵，见 kd-setup agent.md）。
+  # Tier C 固化（移出 input）：
+  #   - struct_scripts_dir / kd_scripts_dir → setup.output.{struct,kd}_scripts_dir（默认 workflows/agents/_{struct,kd}_scripts）
+  #   - teacher_layers=6 / short_epochs=10 / full_epochs=50 → 直接固化进 kd-setup / candidate_eval / finalize prompt
+  #   - eval_dataset="" / proxy_dataset_spec="" → 固化空串默认（缺失走 test_command / 随机正态+seed）
+  #   - iterations → 移除（引擎兜底 100；长 run 用 `--max-iter` CLI 覆盖）
+  #   - output_dir → $ORCA_ARTIFACTS_DIR（P8 引擎注入）
+
   teacher_model_path:
     type: string
-    description: "[infer] teacher 基线模型定义文件（即 model8 的 SignalProcessingTransformer model.py）。glob 即得；多候选回退 [ask]"
+    description: "[ask] teacher 基线模型定义文件（即 model8 的 SignalProcessingTransformer model.py）。glob 即得；多候选启动前集中问用户"
     required: true
   teacher_train_command:
     type: string
@@ -17,61 +31,20 @@ inputs:
     type: string
     description: "[ask] eval/测试命令（finalize 全量裁定时测真实精度，原样执行）。用户的 eval 脚本须读环境变量 STUDENT_CKPT/STUDENT_MODEL_PATH 加载本轮 student。产出须含可解析精度指标（NMSE/BER/MSE）"
     required: true
-  eval_dataset:
-    type: string
-    description: "[default] 自包含 eval 数据集 .pt 文件（含 {'x':tensor,'y':tensor}）。给定则 finalize 内部算 MSE，无需 eval_command 读 env（推荐用于测试/无 eval_command 时）。留空走 test_command"
-    required: false
-    default: ""
-  proxy_dataset_spec:
-    type: string
-    description: "[advanced] teacher hook 缓存的 proxy 数据规格 JSON；空则 teacher_setup.py 用随机正态（seed 固定）"
-    required: false
-    default: ""
   target_latency_ms:
     type: string
     description: "[ask] 目标时延(ms)；student.latency ≤ 此值 且精度达标即终止"
     required: true
   accuracy_gap_db:
     type: string
-    description: "[default] 精度损失上限(dB SNR 等价)，默认 0.5。student vs teacher 的 dB gap ≤ 此值才算达标"
+    description: "[ask] 精度损失上限(dB SNR 等价)，默认 0.5。student vs teacher 的 dB gap ≤ 此值才算达标"
     required: false
     default: "0.5"
   max_rounds:
     type: string
-    description: "[ask] 最大短训搜索轮数（预算）；耗尽仍未达标 → fail loud + best-effort 报告"
+    description: "[ask] 最大短训搜索轮数（预算）；耗尽仍未达标 → fail loud + best-effort 报告。**注意**：iterations 已移除（P9b），引擎兜底节点访问上限 100；kd 每轮 4 节点访问 + setup/finalize 2 = max_rounds×4+2，故 max_rounds > 24 时须配合 `--max-iter <max_rounds*4+10>` CLI 覆盖，否则 MaxIterationsError 会在 finalize 前终止（champion 报告丢失）"
     required: false
     default: "20"
-  # 工程内部常量
-  teacher_layers:
-    type: string
-    description: "[default] teacher 放大层数，默认 6（把 baseline 的 4 个 transformer block 改成 6 个）"
-    required: false
-    default: "6"
-  short_epochs:
-    type: string
-    description: "[default] 短训 epoch 数（循环内每候选），默认 10。够排优劣即可"
-    required: false
-    default: "10"
-  full_epochs:
-    type: string
-    description: "[default] finalize 全量训练 epoch 数，默认 50。仅对 champion 跑一次"
-    required: false
-    default: "50"
-  struct_scripts_dir:
-    type: string
-    description: "[default] 复用的确定性脚本目录（export_onnx/latency_onnxrt/ast_diff/ledger_reducer/viz_struct）"
-    required: false
-    default: "workflows/agents/_struct_scripts"
-  kd_scripts_dir:
-    type: string
-    description: "[default] kd-nas 专属脚本目录（profile_onnx/teacher_setup/measure_student/pick_student + kd/ + students/）"
-    required: false
-    default: "workflows/agents/_kd_scripts"
-  iterations:
-    type: string
-    description: "[advanced] Orca 单 run 节点访问数硬上限（循环兜底）。每轮约 5 次访问（P7 精简后）；默认 ≈ max_rounds×5 + 富余"
-    required: false
-    default: "300"
   device:
     type: string
     description: "[advanced] ONNX 导出 + latency 测量设备：auto（默认，cuda→npu→cpu 探测）/ cuda / npu (Ascend CANN) / cpu。与 teacher_train_command / test_command 的实际训练/eval device 解耦"
@@ -102,13 +75,15 @@ nodes:
     agent: kd-setup
     output_schema:
       type: object
-      required: [output_dir, project_root, teacher_model_path, build_fn, dummy_input, teacher_cache, teacher_meta, snapshots_dir, worktree_root, ckpts_dir, ledger_path, champions_path, kb_cache_dir, profile_report_path, train_kd_path, kd_recipe_path]
+      required: [output_dir, project_root, teacher_model_path, build_fn, dummy_input, struct_scripts_dir, kd_scripts_dir, teacher_cache, teacher_meta, snapshots_dir, worktree_root, ckpts_dir, ledger_path, champions_path, kb_cache_dir, profile_report_path, train_kd_path, kd_recipe_path]
       properties:
-        output_dir: {type: string, description: "run 根目录绝对路径（末尾必须带 /，下游拼接依赖此约定）"}
+        output_dir: {type: string, description: "run 根目录绝对路径（末尾必须带 /，下游拼接依赖此约定）；P9b 起优先 = $ORCA_ARTIFACTS_DIR（引擎注入）"}
         project_root: {type: string}
         teacher_model_path: {type: string, description: "6 层放大版 teacher model.py 绝对路径"}
         build_fn: {type: string}
         dummy_input: {type: string, description: "JSON 串"}
+        struct_scripts_dir: {type: string, description: "P9b 固化（原 input）：复用的 struct 确定性脚本目录，默认 workflows/agents/_struct_scripts"}
+        kd_scripts_dir: {type: string, description: "P9b 固化（原 input）：kd-nas 专属脚本目录，默认 workflows/agents/_kd_scripts"}
         teacher_cache: {type: string, description: "teacher_cache.pt 绝对路径"}
         teacher_meta: {type: string, description: "teacher_meta.json 绝对路径（含 latency/accuracy/db_baseline/onnx/accuracy_known）"}
         snapshots_dir: {type: string, description: "<output_dir>/snapshots/ 绝对路径（末尾带 /）。下游只 append `<candidate_id>_model.py`"}
@@ -210,15 +185,15 @@ nodes:
       - project_root：`{{ setup.output.project_root }}`
       - train_kd_path：`{{ setup.output.train_kd_path }}`
       - target_latency_ms：`{{ inputs.target_latency_ms }}`
-      - short_epochs：`{{ inputs.short_epochs }}`
-      - struct_scripts_dir / kd_scripts_dir：`{{ inputs.struct_scripts_dir }}` / `{{ inputs.kd_scripts_dir }}`
+      - short_epochs：`10`（P9b 固化默认，原 inputs 已下沉；够排优劣即可）
+      - struct_scripts_dir / kd_scripts_dir：`{{ setup.output.struct_scripts_dir }}` / `{{ setup.output.kd_scripts_dir }}`（P9b：从 setup output 取，原 inputs 已下沉）
       - device / latency_provider / seed：`{{ inputs.device }}` / `{{ inputs.latency_provider }}` / `{{ inputs.seed }}`
 
       ## 执行（按序，fail loud）
 
       ### Step A：导 student ONNX（默认权重，确定性，**不训练**）
       ```bash
-      python3 "{{ inputs.kd_scripts_dir }}/measure_student.py" \
+      python3 "{{ setup.output.kd_scripts_dir }}/measure_student.py" \
         --student_model_path "{{ engineer.output.student_model_path }}" \
         --student_ckpt "" \
         --build_fn "{{ setup.output.build_fn }}" \
@@ -243,7 +218,7 @@ nodes:
       ### Step C：短训 student（仅时延门通过才跑，teacher 冻结）
       ```bash
       cd "{{ setup.output.project_root }}"
-      ORCA_KD_SCRIPTS_DIR="{{ inputs.kd_scripts_dir }}" ORCA_PROJECT_ROOT="{{ setup.output.project_root }}" \
+      ORCA_KD_SCRIPTS_DIR="{{ setup.output.kd_scripts_dir }}" ORCA_PROJECT_ROOT="{{ setup.output.project_root }}" \
       python3 "{{ setup.output.train_kd_path }}" \
         --student_family "{{ hypothesizer.output.family }}" \
         --project_root "{{ setup.output.project_root }}" \
@@ -252,7 +227,7 @@ nodes:
         --teacher_cache "{{ setup.output.teacher_cache }}" \
         --student_model_path "{{ engineer.output.student_model_path }}" \
         --build_fn "{{ setup.output.build_fn }}" \
-        --epochs "{{ inputs.short_epochs }}" \
+        --epochs 10 \
         --out_ckpt "{{ setup.output.ckpts_dir }}{{ engineer.output.candidate_id }}.pt"
       ```
       从 stdout 解析：`STUDENT_CKPT:` → student_ckpt；`KD_PROXY_MSE:` → proxy_mse；`KD_LOSS_FINAL:` → kd_loss_final。
@@ -330,28 +305,28 @@ nodes:
       - project_root / output_dir：`{{ setup.output.project_root }}` / `{{ setup.output.output_dir }}`
       - build_fn / dummy_input：`{{ setup.output.build_fn }}` / `{{ setup.output.dummy_input }}`
       - target_latency_ms / accuracy_gap_db：`{{ inputs.target_latency_ms }}` / `{{ inputs.accuracy_gap_db }}`
-      - test_command / eval_dataset：`{{ inputs.test_command }}` / `{{ inputs.eval_dataset }}`
-      - full_epochs：`{{ inputs.full_epochs }}`
-      - struct_scripts_dir / kd_scripts_dir：`{{ inputs.struct_scripts_dir }}` / `{{ inputs.kd_scripts_dir }}`
+      - test_command：`{{ inputs.test_command }}`（eval_dataset P9b 固化为空串，finalize 走 test_command）
+      - full_epochs：`50`（P9b 固化默认，原 inputs 已下沉；仅对 champion 跑一次）
+      - struct_scripts_dir / kd_scripts_dir：`{{ setup.output.struct_scripts_dir }}` / `{{ setup.output.kd_scripts_dir }}`（P9b：从 setup output 取）
       - device / latency_provider / seed：`{{ inputs.device }}` / `{{ inputs.latency_provider }}` / `{{ inputs.seed }}`
 
       ## 执行（fail loud）
-      1. 全量 KD 训练 champion（teacher 冻结，full_epochs）：
+      1. 全量 KD 训练 champion（teacher 冻结，full_epochs=50 P9b 固化）：
          ```bash
-         ORCA_KD_SCRIPTS_DIR="{{ inputs.kd_scripts_dir }}" ORCA_PROJECT_ROOT="{{ setup.output.project_root }}" \
+         ORCA_KD_SCRIPTS_DIR="{{ setup.output.kd_scripts_dir }}" ORCA_PROJECT_ROOT="{{ setup.output.project_root }}" \
          python3 "{{ setup.output.train_kd_path }}" \
            --student_family "<champion family>" --student_cfg "<champion cfg>" --kd_config "<champion kd_config>" \
            --project_root "{{ setup.output.project_root }}" \
            --teacher_cache "{{ setup.output.teacher_cache }}" \
            --student_model_path "<champion model.py>" --build_fn "{{ setup.output.build_fn }}" \
-           --epochs "{{ inputs.full_epochs }}" --out_ckpt "{{ setup.output.output_dir }}final_<champion>.pt"
+           --epochs 50 --out_ckpt "{{ setup.output.output_dir }}final_<champion>.pt"
          ```
-      2. 测真实 dB gap（与 candidate_eval 不同：跑 eval_command / eval_dataset 拿真实精度）：
+      2. 测真实 dB gap（与 candidate_eval 不同：跑 eval_command 拿真实精度；eval_dataset P9b 固化为空串）：
          ```bash
-         python3 "{{ inputs.kd_scripts_dir }}/measure_student.py" \
+         python3 "{{ setup.output.kd_scripts_dir }}/measure_student.py" \
            --student_model_path "<champion model.py>" --student_ckpt "<final ckpt>" \
            --build_fn "{{ setup.output.build_fn }}" --dummy_input '{{ setup.output.dummy_input }}' \
-           --eval_dataset "{{ inputs.eval_dataset }}" --eval_command "{{ inputs.test_command }}" \
+           --eval_dataset "" --eval_command "{{ inputs.test_command }}" \
            --teacher_meta "{{ setup.output.teacher_meta }}" \
            --output_dir "{{ setup.output.output_dir }}" --opset 17 \
            --latency_provider "{{ inputs.latency_provider }}" \
@@ -369,7 +344,7 @@ nodes:
          若 teacher_accuracy_known=false 显著标注 "dB gap 不可信"）。
       5. **终态可视化（P7 内联 viz_finalize）**：
          ```bash
-         python3 "{{ inputs.kd_scripts_dir }}/viz_kd.py" --mode finalize \
+         python3 "{{ setup.output.kd_scripts_dir }}/viz_kd.py" --mode finalize \
            --ledger "{{ setup.output.ledger_path }}" \
            --champions "{{ setup.output.champions_path }}" \
            --teacher_meta "{{ setup.output.teacher_meta }}" \

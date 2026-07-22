@@ -34,7 +34,7 @@ tools: [bash, read, write, edit, glob, grep]
 - 预算：`max_rounds={{ inputs.max_rounds }}` / 配额 `structural_slot_ratio=0.5`（已固化） /
   `reject_hyperparam_only=false`（已固化）
 - baseline：`baseline_latency_ms={{ setup.output.baseline_latency_ms }}` / `baseline_accuracy={{ setup.output.baseline_accuracy }}`
-- struct_scripts_dir：`{{ inputs.struct_scripts_dir }}`
+- struct_scripts_dir：`{{ setup.output.struct_scripts_dir }}`（P9b：从 setup output 取，原 inputs 已下沉）
 
 ## 职责（按序，fail loud）
 
@@ -42,7 +42,7 @@ tools: [bash, read, write, edit, glob, grep]
 
 跑确定性 AST diff（无 LLM 语义判断）：
 ```bash
-python3 "{{ inputs.struct_scripts_dir }}/ast_diff.py" \
+python3 "{{ setup.output.struct_scripts_dir }}/ast_diff.py" \
   --parent "<父 model.py = champions.jsonl 最后一行 snapshot>" \
   --child "{{ engineer.output.snapshot_path }}" --format json
 ```
@@ -88,7 +88,7 @@ python3 "{{ inputs.struct_scripts_dir }}/ast_diff.py" \
 
 跑 reducer 脚本（fail loud）：
 ```bash
-python3 "{{ inputs.struct_scripts_dir }}/ledger_reducer.py" \
+python3 "{{ setup.output.struct_scripts_dir }}/ledger_reducer.py" \
   --ledger "{{ setup.output.ledger_path }}" \
   --champions "{{ setup.output.champions_path }}" \
   --candidate '<上面组装的 candidate JSON>' \
@@ -123,7 +123,7 @@ python3 "{{ inputs.struct_scripts_dir }}/ledger_reducer.py" \
 
 账本 append 后立即推图（实时刷新语义）：
 ```bash
-python3 "{{ inputs.struct_scripts_dir }}/viz_struct.py" \
+python3 "{{ setup.output.struct_scripts_dir }}/viz_struct.py" \
   --ledger "{{ setup.output.ledger_path }}" \
   --champions "{{ setup.output.champions_path }}" \
   --baseline_latency_ms "{{ setup.output.baseline_latency_ms }}" \

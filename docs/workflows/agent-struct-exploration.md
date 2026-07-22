@@ -45,18 +45,22 @@
 
 ### 1.3 输入 / 输出
 
-**输入**：
+**输入**（P9b 按三档原则精简；详 `docs/specs/workflow-input-design-principle.md`）：
 
-| 参数 | 类型 | 默认 | 说明 |
-|---|---|---|---|
-| `model_path` | string | 推断 | 模型入口 |
-| `train_command` | string | — | 训练命令（原样 shell 执行，agent 不改训练逻辑） |
-| `test_command` | string | 可选 | 评估命令 |
-| `target_latency_ms` | float | — | 时延目标上界 |
-| `accuracy_target` | float | baseline−0.5% | 精度下界 |
-| `max_rounds` | int | 20 | 最大探索轮数 |
-| `iterations` | int | 500 | 训练迭代数 |
-| `struct_scripts_dir` | path | `_struct_scripts` | 结构脚本目录 |
+| 参数 | Tier | 标签 | 默认 | 说明 |
+|---|---|---|---|---|
+| `model_path` | A | `[ask]` | — | 模型入口（glob 推断，多候选启动前问用户） |
+| `train_command` | A | `[ask]` | — | 训练命令（原样 shell 执行，agent 不改训练逻辑） |
+| `test_command` | A | `[ask]` | "" | 评估命令（pre-trained 模式只测不训；空则跑 train_command） |
+| `target_latency_ms` | A | `[ask]` | — | 时延目标上界（业务 KPI） |
+| `accuracy_target` | A | `[ask]` | "" | 精度下界（空=baseline−0.5%） |
+| `max_rounds` | A | `[ask]` | 20 | 最大探索轮数（预算闸门） |
+| `device` | C | `[advanced]` | auto | ONNX 导出+latency 测量设备（auto/cuda/npu/cpu） |
+| `latency_provider` | C | `[advanced]` | struct 自带 latency_onnxrt.py::measure | `path::func` latency 脚本引用 |
+| `seed` | C | `[advanced]` | 0 | 复现种子 |
+
+**Tier B 下沉**（setup 节点 output_schema 字段，缺失走 ask-user 哨兵）：`project_root` / `build_fn` / `dummy_input` / `struct_scripts_dir`。
+**Tier C 固化**：`iterations`（移除，引擎兜底 100，长 run 用 `--max-iter` CLI 覆盖）、`output_dir`（走引擎注入 `$ORCA_ARTIFACTS_DIR`）。
 
 **输出**：`champion`（满足目标的最佳模型快照）+ `champions.jsonl`（冠军轨迹）+ `ledger.jsonl`（全候选账本）+ `final_report.md` + 可视化（时延-精度下探曲线、轮次账本表）。workflow 产出含 `result`、`champion`、`final_latency_ms`、`final_accuracy`。
 

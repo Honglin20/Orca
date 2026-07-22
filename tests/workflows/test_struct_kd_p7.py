@@ -459,22 +459,28 @@ def test_kd_candidate_eval_is_latency_first():
 
 
 def test_kd_setup_node_exposes_all_path_fields():
-    """P7：合并后的 setup 节点 output_schema 必须暴露所有下游需要的路径字段（杜绝 output_dir 拼接）。"""
+    """P7：合并后的 setup 节点 output_schema 必须暴露所有下游需要的路径字段（杜绝 output_dir 拼接）。
+    P9b：新增 struct_scripts_dir / kd_scripts_dir（原 input 下沉为 setup output，infer-once + propagate）。"""
     yaml_text = (REPO / "workflows" / "kd-nas.yaml").read_text(encoding="utf-8")
     required_fields = [
         "output_dir:", "snapshots_dir:", "worktree_root:", "ckpts_dir:",
         "ledger_path:", "champions_path:", "kb_cache_dir:",
         "profile_report_path:", "train_kd_path:", "kd_recipe_path:",
+        # P9b 新增（原 inputs.{struct,kd}_scripts_dir 下沉）
+        "struct_scripts_dir:", "kd_scripts_dir:",
     ]
     for field in required_fields:
         assert field in yaml_text, f"kd setup output_schema missing {field}"
 
 
 def test_struct_setup_node_exposes_path_fields():
+    """P9b：新增 struct_scripts_dir（原 input 下沉为 setup output）。"""
     yaml_text = (REPO / "workflows" / "agent-struct-exploration.yaml").read_text(encoding="utf-8")
     required_fields = [
         "output_dir:", "snapshots_dir:", "worktree_root:",
         "ledger_path:", "champions_path:",
+        # P9b 新增（原 inputs.struct_scripts_dir 下沉）
+        "struct_scripts_dir:",
     ]
     for field in required_fields:
         assert field in yaml_text, f"struct setup output_schema missing {field}"
@@ -500,3 +506,44 @@ def test_no_string_concat_output_dir_in_agent_md():
             text = agent_md.read_text(encoding="utf-8")
             matches = pattern.findall(text)
             assert not matches, f"{agent_md.name}: found output_dir concat pattern {matches}"
+
+
+# P9b：production workflow inputs slim 后的契约守门。
+# 现有 compile validator 对「未声明 inputs.X 引用」只 warn 不 error（设计如此），
+# 故 `load_workflow` 不会捕获「移除 input 漏改 agent.md Jinja」。本测试用正则扫所有
+# production workflow + struct/kd agent.md 的 `{{ inputs.X }}` 引用，断言 X 在 declared inputs 内——
+# 未来同类 slim 改动漏改 Jinja 时，本测试当场红（render 期 StrictUndefined 才崩太晚）。
+@pytest.mark.parametrize(
+    "wf_path",
+    sorted((REPO / "workflows").glob("*.yaml")),
+    ids=lambda p: p.name,
+)
+def test_no_jinja_ref_to_undeclared_input(wf_path):
+    """每个 workflow 的 yaml + 关联 agent.md 的 `{{ inputs.X }}` 必须只引用 declared inputs。"""
+    import re
+    import yaml
+    from orca.compile.parser import load_workflow
+
+    wf = load_workflow(wf_path)  # schema + parse + Jinja2 syntax 校验（抛错即红）
+    declared = set(wf.inputs.keys())
+
+    # 收集 yaml 内 + 各 agent.md 内的 `{{ inputs.X }}` 引用
+    ref_pattern = re.compile(r"\{\{\s*inputs\.(\w+)")
+    refs = set(ref_pattern.findall(wf_path.read_text(encoding="utf-8")))
+
+    # 关联 agent.md（workflows/agents/<wf-relevant>/*.md）；保守起见扫所有 agent.md
+    # 中的「同 workflow input 引用」——按 yaml 的 agent: <name> 字段定位更准但成本高，
+    # 此处采用「扫所有 struct/kd/quant/nas agent.md，过滤掉 declared 不在当前 wf 的」。
+    agent_dir = REPO / "workflows" / "agents"
+    for agent_md in agent_dir.rglob("agent.md"):
+        text = agent_md.read_text(encoding="utf-8")
+        for ref in ref_pattern.findall(text):
+            # 只关心本 workflow declared 的 input key（其它 workflow 的同名 input 不算违规）
+            if ref in declared:
+                refs.add(ref)
+
+    undeclared = refs - declared
+    assert not undeclared, (
+        f"{wf_path.name}: `{{{{ inputs.X }}}}` 引用了未声明的 input {sorted(undeclared)}；"
+        f"declared = {sorted(declared)}"
+    )
