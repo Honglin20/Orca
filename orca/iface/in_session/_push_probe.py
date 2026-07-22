@@ -719,7 +719,11 @@ def _hop_h4_daemon_progress(ctx: ProbeContext) -> dict[str, Any]:
             "fix_hint": _fix_hint(H4_DAEMON_PROGRESS),
         }
 
-    # fail：disk 有事件但 tape 0 / gap>0 且 run_age>30s（持续 iterate 失败 / 漏推）。
+    # fail：disk 有 raw 行但 tape agent_events==0 且 run_age>30s（持续 iterate 失败 / cursor 卡）。
+    # **不用 gap 门控**（review 🔴#1）：gap = disk_jsonl_lines(raw 行数) - agent_events(派生事件数)
+    # 量纲不可比——cc_jsonl 一行 content 多 block 一对多映射（cc_jsonl.py:283），1 raw line 常产
+    # K>1 事件 → gap 恒负；又有 system/result 行产 0 事件 → gap 正。gap 无法可靠判漏推。
+    # 真正的漏推信号是「disk 有数据但 tape 0 条 agent_* 事件」（daemon 根本没 ingest）。
     if run_age_s is not None and run_age_s > _H4_RUN_AGE_THRESHOLD_S:
         if agent_events == 0:
             return {
@@ -732,24 +736,11 @@ def _hop_h4_daemon_progress(ctx: ProbeContext) -> dict[str, Any]:
                 ),
                 "fix_hint": _fix_hint(H4_DAEMON_PROGRESS),
             }
-        if gap > 0:
-            return {
-                "hop": H4_DAEMON_PROGRESS,
-                "status": "fail",
-                "evidence": evidence,
-                "reason": (
-                    f"gap={gap}>0（disk 比 tape 多 {gap} 行）且 run_age={run_age_s}s>30s"
-                    "——漏推（cursor 未推进 / ingestor 抛错）"
-                ),
-                "fix_hint": _fix_hint(H4_DAEMON_PROGRESS),
-            }
 
-    # pass：SPEC §4 H4 严格契约——daemon_alive AND agent_events>0 AND gap==0 AND
-    # last_agent_event_age_s<30 AND 无 iteration 异常。``last_agent_event_age_s is None``
-    # 走兜底 unknown（不应发生——agent 事件必有 timestamp；若发生是 tape 损坏，需保守判）。
+    # pass：daemon_alive（上面已确认）+ agent_events>0 + 最近事件新鲜（<30s）+ 无 iter 异常
+    # （上面已确认）。freshness 是「daemon 在推进」的可靠信号——不依赖 gap。
     if (
         agent_events > 0
-        and gap == 0
         and last_agent_event_age_s is not None
         and last_agent_event_age_s < _H4_FRESHNESS_THRESHOLD_S
     ):
@@ -761,15 +752,26 @@ def _hop_h4_daemon_progress(ctx: ProbeContext) -> dict[str, Any]:
             "fix_hint": _fix_hint(H4_DAEMON_PROGRESS),
         }
 
-    # 兜底：daemon 活、disk 有、age 小但 agent_events==0（刚起 / 正在写第一行）→ 保守 unknown。
+    # 兜底 unknown：agent_events>0 但事件陈旧（>30s，子 agent 可能在长思考 / daemon 停滞，
+    # 跨进程无法区分）/ agent_events==0 且 run_age<=30s（刚 spawn 还没 ingest）。
+    if agent_events > 0:
+        stale = (
+            last_agent_event_age_s if last_agent_event_age_s is not None else "?"
+        )
+        reason = (
+            f"daemon 存活 + tape 有 {agent_events} 条 agent_* 事件，但最近一条在 {stale}s 前"
+            "（>30s）——子 agent 可能长思考 idle / daemon 停滞，跨进程无法区分"
+        )
+    else:
+        reason = (
+            "disk 有 jsonl 但 tape agent_events=0 且 run_age<=30s"
+            "——子 agent 刚 spawn，daemon 可能还未 ingest"
+        )
     return {
         "hop": H4_DAEMON_PROGRESS,
         "status": "unknown",
         "evidence": evidence,
-        "reason": (
-            "disk 有 jsonl 但 tape agent_events=0 且 run_age<=30s"
-            "——子 agent 刚 spawn，daemon 可能还未 ingest"
-        ),
+        "reason": reason,
         "fix_hint": _fix_hint(H4_DAEMON_PROGRESS),
     }
 
@@ -881,12 +883,22 @@ def _compute_run_age(rundir: Path, run_id: str) -> float | None:
 def _hop_h5_bus_flow(ctx: ProbeContext) -> dict[str, Any]:
     """H5：bus 订阅者队列有没有溢出丢事件？
 
-    复用：读 daemon log grep ``订阅者队列满`` warning 计数（SPEC §4 H5 同源文案契约；
-    文案在 ``bus.py:77``，**修改该文案必须同步本 hop grep pattern + SPEC**）。
+    **结构性限制**（review 🔴#2）：``订阅者队列满`` warning（``bus.py:77``，``Subscription._enqueue``
+    遇 ``QueueFull``）只在**有订阅者**的进程触发。订阅者 = WS pump，运行在 **web server 进程**
+    （``run_manager.py`` 的 ``bus.subscribe``）；sidechain daemon 进程的 bus **无订阅者**
+    （``sidechain_daemon.py`` 不调 ``bus.subscribe``，tape 经 ``emit`` 同步写不经 ``_enqueue``）。
+    故 doctor 读的 ``<rundir>/<run_id>/sidechain_daemon.log`` **结构上永远不含该 warning**。
+
+    因此本 hop **不能跨进程自动判定** web server 的队列溢出。doctor 是独立进程，拿不到 web
+    server 进程的内存队列状态。诊断价值在 **H4↔H6 对比 + 手动取证**：
+      - H4=pass（tape 有事件）但 H6=fail/unknown（前端收不到）→ 嫌疑 web server 队列溢出 / pump 断。
+      - 手动确认：``grep 订阅者队列满 <web server stdout/log>``。
+
+    仍 grep daemon log 防御性兜底（若未来 daemon 进程加了订阅者会命中），但生产常态返 unknown。
 
     status：
-      - ``fail``：log 命中 ≥1 次队列满 warning。
-      - ``unknown``：无证据（log 不在 / 无 warning / 无 run_id）——不单独 fail，与 H6 联合判读。
+      - ``fail``：daemon log 命中 ≥1 次（罕见 / 未来变更）。
+      - ``unknown``：无命中（生产常态）——reason 给 H4↔H6 对比 + 手动 grep 指引。
     """
     # 无 run_id → H5 不适用（无 daemon log 可读）。
     if not ctx.run_id:
@@ -904,7 +916,7 @@ def _hop_h5_bus_flow(ctx: ProbeContext) -> dict[str, Any]:
 
     evidence = (
         f"log={log_path}, queue_full_warnings={queue_full}"
-        f"（grep pattern={_H5_QUEUE_FULL_PATTERN!r}, bus.py:77 同源文案契约）"
+        f"（grep pattern={_H5_QUEUE_FULL_PATTERN!r}, bus.py:77）"
     )
 
     if queue_full > 0:
@@ -914,7 +926,7 @@ def _hop_h5_bus_flow(ctx: ProbeContext) -> dict[str, Any]:
             "evidence": evidence,
             "reason": (
                 f"daemon log 有 {queue_full} 次订阅者队列满 warning"
-                "——bus 订阅者（WS pump）消费过慢，丢老事件（replay 可补）"
+                "——罕见（daemon 通常无订阅者）；若命中说明 daemon 进程加了订阅者且消费过慢"
             ),
             "fix_hint": _fix_hint(H5_BUS_FLOW),
         }
@@ -923,7 +935,12 @@ def _hop_h5_bus_flow(ctx: ProbeContext) -> dict[str, Any]:
         "hop": H5_BUS_FLOW,
         "status": "unknown",
         "evidence": evidence,
-        "reason": "无队列满 warning（bus 未溢出 / pump 消费跟得上）",
+        "reason": (
+            "daemon log 无队列满 warning（结构上常态：daemon bus 无订阅者，该 warning 只在"
+            " web server 进程发）。**bus 队列溢出跨进程不可自动判定**——若 H4=pass 但 H6=fail/"
+            "unknown，嫌疑 web server 队列溢出/pump 断；手动确认：grep 订阅者队列满 <web server"
+            " stdout/log>"
+        ),
         "fix_hint": _fix_hint(H5_BUS_FLOW),
     }
 

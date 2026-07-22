@@ -39,7 +39,7 @@
 | **H2** cac_pid_walk | CAC PID 链能否回溯到 codeagentcli + session json 在不在？ | `cac_session_id_from_pid()`（`_hostenv.py:42`）+ 直接读 `CODEAGENT` env / `/proc` 中间态 | PID 链被 setsid 孤儿化断 / session json 命名变 |
 | **H3** adapter_discovery | adapter 能 discover 到子进程？root/meta.json 齐不齐？ | `_make_adapter(backend, host_session, family=)`（`sidechain_daemon.py:367`）+ `CCJsonlAdapter.discover_children`（`cc_jsonl.py:146`）+ `.root` 属性 | root 不存在 / 无 meta.json 被全跳过 |
 | **H4** daemon_progress | daemon 存活且真在推进（tape 有 agent_* 事件）？有没有 iteration 异常？ | `_sidechain_daemon_alive(run_id)`（daemon 模块）+ `read_last_complete_lines`（`events/tape.py:57`）读 tape + 读 daemon log `<rundir>/<run_id>/sidechain_daemon.log` | daemon 存活但持续吞异常 / cursor 卡 |
-| **H5** bus_flow | bus 订阅者队列有没有溢出丢事件？ | 读 daemon log grep `订阅者队列满` warning 计数（`bus.py:63` 的 warning 文案） | pump 消费过慢 → 队列溢出 |
+| **H5** bus_flow | bus 订阅者队列有没有溢出丢事件？（**结构性受限**，见 §4 H5） | 读 daemon log grep `订阅者队列满` warning 计数（`bus.py:77`）——但该 warning 只在 web server 进程发，daemon log 结构上不会有 | **跨进程不可自动判定**；靠 H4↔H6 对比 + 手动 grep web server stdout |
 | **H6** ws_delivery | bus→WS pump 链路通吗？合成事件能秒级到 WS？ | self-spawn：`create_app(RunManager)`（`iface/web/server.py`）+ `EventBus.emit`/`subscribe`（`events/bus.py`）+ WS `/ws`（`ws_handler.py`）+ `websockets` client | pump 异常静默退出 / WS 未订阅 |
 
 **链路顺序敏感**：H1 断 → H2/H3 必然跟着无意义（adapter 选错）。诊断输出 `first_break` = 链路顺序首个非 pass 的跳，主 session 聚焦它即可（见 §3）。
@@ -154,16 +154,20 @@ doctor 的 `fix_hint` 字段 = 一行摘要 + ``详见 docs/troubleshooting/push
 ### H4 · daemon_progress（补 §8#4 覆盖；仅 `--run-id` 给定时跑）
 - `_sidechain_daemon_alive(run_id)` → pidfile/cmdline 活探（复用）。
 - 读 `<rundir>/<run_id>.jsonl` tape 末尾 200 行（`read_last_complete_lines`），统计 `agent_*` 事件数 + 最新一条 timestamp → `last_agent_event_age_s`。
-- 统计磁盘上 child jsonl 行数 `disk_jsonl_lines`（adapter.discover_children 拿到的 child × `agent-<child>.jsonl` 行数和）；`gap = disk_jsonl_lines - agent_events_in_tape`。
+- 统计磁盘上 child jsonl 完整行数 `disk_jsonl_lines`（adapter.discover_children 拿到的 child × `agent-<child>.jsonl` 行数和）；`gap = disk_jsonl_lines - agent_events`（**仅展示指标，不作门控**，见下）。
 - 读 `<rundir>/<run_id>/sidechain_daemon.log`（daemon 已在此落日志，`cli.py:381/398`），grep iteration 异常计数 + 队列满 warning 计数。
 - `run_age_s` 来源钉死：run marker `orca-<run_id>.json` 的 started_at；fallback = run_dir ctime。
-- **pass**：`daemon_alive 且 agent_events>0 且 gap==0 且 last_agent_event_age_s<30 且 log 无 iteration 异常`。
-- **fail**：`daemon_dead`；或 `disk_jsonl_lines>0 且 (agent_events==0 或 gap>0) 且 run_age_s>30`（持续 iterate 失败 / 漏推）；或 `log iteration 异常计数>0`。
-- **unknown**：`disk_jsonl_lines==0`（子 agent 尚未派，非故障——避免刚 bootstrap 还没派子 agent 时误报）。
+- **pass**：`daemon_alive 且 agent_events>0 且 last_agent_event_age_s<30 且 log 无 iteration 异常`。
+- **fail**：`daemon_dead`；或 `disk_jsonl_lines>0 且 agent_events==0 且 run_age_s>30`（持续 iterate 失败 / 根本没 ingest）；或 `log iteration 异常计数>0`。
+- **unknown**：`disk_jsonl_lines==0`（子 agent 尚未派，非故障）；或 `agent_events>0 但 last_agent_event_age_s≥30`（子 agent 长 idle / daemon 停滞，跨进程无法区分）。
 
-### H5 · bus_flow
-- 读 daemon log grep `订阅者队列满` warning 计数（`bus.py:77` 的 warning 文案；H4 同源日志）。命中 → fail；未命中 → unknown（不单独 fail，与 H6 联合判读）。
-- **文案即契约**：`bus.py:77` 的 warning 文案 `订阅者队列满` 是 H5 诊断契约的一部分。修改该文案必须同步 H5 grep pattern 与本 SPEC（不要求改 `bus.py` 暴露结构化计数器——那破零副作用铁律）。
+> **gap 不作门控**（review 🔴#1 修正）：`gap = disk_jsonl_lines(raw 行数) - agent_events(派生事件数)` 量纲不可比——`cc_jsonl.py:283` 一行 content 遍历多 block 一对多映射，1 raw line 常产 K>1 事件（gap 恒负），system/result 行产 0 事件（gap 正）。用 gap 判漏推会误报。真正的漏推信号是「disk 有数据但 tape 0 条 agent_* 事件」（daemon 根本没 ingest），由 `agent_events==0` 捕获。gap 保留在 evidence 作展示指标。
+
+### H5 · bus_flow（**结构性受限**——review 🔴#2 修正）
+- **跨进程不可自动判定**：`订阅者队列满` warning（`bus.py:77`，`Subscription._enqueue` 遇 `QueueFull`）只在**有订阅者**的进程触发；订阅者 = WS pump，运行在 **web server 进程**。sidechain daemon 进程的 bus **无订阅者**（不调 `bus.subscribe`，tape 经 `emit` 同步写不经 `_enqueue`），故 doctor 读的 daemon log **结构上永远不含该 warning**。doctor 是独立进程，拿不到 web server 内存队列状态。
+- 仍 grep daemon log 防御性兜底（daemon log 命中 → fail，罕见 / 未来 daemon 加订阅者时生效）；生产常态 → **unknown**，reason 给 H4↔H6 对比 + 手动 grep 指引。
+- **真正的诊断路径**：H4=pass（tape 有事件）但 H6=fail/unknown（前端收不到）→ 嫌疑 web server 队列溢出 / pump 断。手动确认：`grep 订阅者队列满 <web server stdout/log>`。
+- **文案即契约**：`bus.py:77` 的 warning 文案 `订阅者队列满` 是手动 grep 的 pattern。修改该文案必须同步 H5 grep pattern 与本 SPEC（不要求改 `bus.py` 暴露结构化计数器——那破零副作用铁律）。
 
 ### H6 · ws_delivery（端到端活探）
 - **默认 self-spawn 模式**（B2 决议：走 `start_run` + MockSubagentBackend，测真 start_run→bus→pump→WS 链路，不写 attached tape）：

@@ -542,19 +542,18 @@ def test_h4_fail_when_run_age_old_and_tape_empty(monkeypatch, tmp_path):
     assert "持续 iterate 失败" in h4["reason"]
 
 
-def test_h4_pass_when_daemon_alive_and_gap_zero(monkeypatch, tmp_path):
-    """SPEC §4 H4 happy：daemon_alive + agent_events>0 + gap==0 + age<30 + 无异常 → pass。
+def test_h4_pass_when_daemon_alive_and_fresh_events(monkeypatch, tmp_path):
+    """SPEC §4 H4 happy（review 🔴#1 修正后）：daemon_alive + agent_events>0 + freshness<30
+    + 无 iter 异常 → pass。**不再要求 gap==0**（gap 量纲不可比，见 _push_probe H4 注释）。
 
-    构造：写 child jsonl + 写 tape 含 agent_message 事件（disk_jsonl_lines==agent_events）。
+    构造：disk 1 行（system，产 0 事件）+ tape 1 条新鲜 agent_message → freshness 判 pass。
     """
     run_id = "r-h4-pass"
     sidechain_root, _run_dir = _setup_cc_with_run(monkeypatch, tmp_path, run_id)
-    # child jsonl 1 行。
     (sidechain_root / "agent-task-1.jsonl").write_text(
         '{"type":"system"}\n', encoding="utf-8",
     )
     (sidechain_root / "agent-task-1.meta.json").write_text("{}", encoding="utf-8")
-    # tape 含 1 个 agent_message 事件（agent_events=1, gap=0）。
     tape_path = tmp_path / f"{run_id}.jsonl"
     tape_path.write_text(
         json.dumps({"type": "agent_message", "timestamp": __import__("time").time(),
@@ -568,40 +567,36 @@ def test_h4_pass_when_daemon_alive_and_gap_zero(monkeypatch, tmp_path):
     h4 = _hop_by_name(result, H4_DAEMON_PROGRESS)
     assert h4["status"] == "pass", h4
     assert "agent_events=1" in h4["evidence"]
-    assert "gap=0" in h4["evidence"]
 
 
-def test_h4_fail_when_gap_positive_and_run_age_old(monkeypatch, tmp_path):
-    """SPEC §4 H4 / §7-4 fail：disk 比 tape 多 + run_age>30s → 漏推。
+def test_h4_pass_when_gap_negative_real_cc_multiblock(monkeypatch, tmp_path):
+    """SPEC §4 H4 / review 🔴#1：真实 CC 行情——1 raw assistant line 多 content block →
+    tape 多条 agent_* 事件 → gap<0。pass 不受 gap 门控（gap 降级为展示指标）。
 
-    构造：disk 2 行（child jsonl）+ tape 1 行（agent_message）→ gap=1 + run_age>30。
-    review 🟡#2 补的分支测试。
+    构造：disk 1 raw 行 + tape 2 条 agent_message（模拟 1 行 → 2 block → 2 事件，gap=-1）
+    + freshness<30 → pass。证明「healthy run 被 gap==0 误报 unknown」的回归门。
     """
-    run_id = "r-h4-gap"
+    run_id = "r-h4-neg-gap"
     sidechain_root, _run_dir = _setup_cc_with_run(monkeypatch, tmp_path, run_id)
-    # child jsonl 2 行。
     (sidechain_root / "agent-task-1.jsonl").write_text(
-        '{"type":"system"}\n{"type":"system"}\n', encoding="utf-8",
+        '{"type":"assistant","message":{"content":[{"type":"thinking"},{"type":"text"}]}}\n',
+        encoding="utf-8",
     )
     (sidechain_root / "agent-task-1.meta.json").write_text("{}", encoding="utf-8")
-    # tape 含 1 个 agent_message（gap = 2-1 = 1）。
+    now = __import__("time").time()
     tape_path = tmp_path / f"{run_id}.jsonl"
     tape_path.write_text(
-        json.dumps({"type": "agent_message", "timestamp": __import__("time").time(),
-                    "data": {"text": "hi"}}) + "\n",
+        json.dumps({"type": "agent_message", "timestamp": now, "data": {"text": "a"}}) + "\n"
+        + json.dumps({"type": "agent_thinking", "timestamp": now, "data": {}}) + "\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(
         "orca.iface.in_session.sidechain_daemon._sidechain_daemon_alive", lambda rid: True,
     )
-    monkeypatch.setattr(
-        "orca.iface.in_session._push_probe._compute_run_age", lambda rundir, rid: 90.0,
-    )
     result = run_push_probe(run_id=run_id, rundir=tmp_path)
     h4 = _hop_by_name(result, H4_DAEMON_PROGRESS)
-    assert h4["status"] == "fail"
-    assert "gap=1" in h4["evidence"]
-    assert "漏推" in h4["reason"]
+    assert h4["status"] == "pass", h4  # gap=-1（disk=1, events=2）但仍 pass
+    assert "gap=-1" in h4["evidence"]  # gap 仍展示，只是不门控
 
 
 # ── H5 bus_flow（SPEC §4 H5；S2 实现）────────────────────────────────────────

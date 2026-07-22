@@ -129,35 +129,43 @@ meta 逻辑故障），daemon 全跳过 → 子 agent 消息进不了 web。
 
 ### 症状
 
-doctor 输出 H4 `status=fail`，evidence 含 `daemon_alive=true/false`、`agent_events_in_tape=N`、
-`disk_jsonl_lines=N`、`gap=N`、`last_agent_event_age_s=N`、`iteration_exceptions=N`。
+doctor 输出 H4 `status=fail`，evidence 含 `daemon_alive=true/false`、`agent_events=N`、
+`disk_jsonl_lines=N`、`gap=N`（展示指标，不作判据）、`last_agent_event_age_s=N`、
+`iteration_exceptions=N`。
 
 常见 fail 形态：
 - `daemon_dead`：守护死了（pidfile 残 / pid 死 / cmdline 不匹配）。
 - `disk_jsonl_lines>0 且 agent_events==0 且 run_age>30s`：子 agent 在产但 daemon 一条没
-  ingest（持续 iterate 失败 / cursor 卡）。
-- `gap>0 且 run_age>30s`：disk 比 tape 多——漏推。
+  ingest（持续 iterate 失败 / cursor 卡）——这是真正的「漏推」信号。
 - `iteration_exceptions>0`：daemon log 有 `sidechain driver iteration 异常` warning。
+
+> **gap 不作判据**：`gap=disk_jsonl_lines-agent_events` 量纲不可比（1 raw line 常产 K>1 事件，
+> gap 恒负；system 行产 0 事件，gap 正）。负 gap 是真实 CC 常态，**不是故障**。
+
+`status=unknown`：`disk_jsonl_lines==0`（子 agent 还没派）；或 `agent_events>0 但
+last_agent_event_age_s≥30`（子 agent 长 idle / daemon 停滞，跨进程难区分——若子 agent 确在
+产事件却 stale，查 daemon log iteration 异常）。
 
 ### 根因
 
 daemon 存活 ≠ 在推进。SPEC §8#4 的盲区：守护存活但持续 iterate 失败（adapter/ingestor 抛
-异常被 `except Exception` 吞，每次 sleep 后重试，cursor 不推进）。H4 通过读 tape agent_*
-事件数 + 磁盘 jsonl 行数算 gap，+ 读 daemon log grep iteration 异常，覆盖该盲区。
+异常被 `except Exception` 吞，cursor 不推进）。H4 通过「tape 有 agent_* 事件 + 最近事件新鲜
+（<30s）」判 daemon 真在推进，+ 读 daemon log grep iteration 异常覆盖该盲区。
 
 ### 修复动作
 
 - **daemon_dead**：下次 `orca next` 会自动 respawn；或显式调一次 next 拉起。
-- **gap>0 / agent_events==0**：查 daemon log `<rundir>/<run_id>/sidechain_daemon.log` 的
+- **agent_events==0 且 disk>0**：查 daemon log `<rundir>/<run_id>/sidechain_daemon.log` 的
   iteration 异常 traceback；常见是 adapter stream 解析失败 / ingestor schema 不匹配。
   按 traceback 修源 bug 后 `orca next` 触发 respawn。
-- **iteration_exceptions>0 但 gap==0**：transient 错误已自愈（重试成功）；观察不增即可。
-- **last_agent_event_age_s>30**：子 agent 卡住不产事件；查子 agent 进程而非 daemon。
+- **iteration_exceptions>0 但 agent_events>0**：transient 错误已自愈（重试成功）；观察不增即可。
+- **last_agent_event_age_s>30（unknown）**：若子 agent 确在产事件——查 daemon iteration 异常；
+  若子 agent 本身 idle（长思考）——正常，无需修。
 
 ### 验证
 
-重跑 `orca doctor --probe-push --run-id <id>`，确认 H4 `status=pass`（gap==0 且
-agent_events>0 且 age<30 且 iteration_exceptions==0）。
+重跑 `orca doctor --probe-push --run-id <id>`，确认 H4 `status=pass`（agent_events>0 且
+last_agent_event_age_s<30 且 iteration_exceptions==0）。
 
 ---
 
@@ -165,24 +173,32 @@ agent_events>0 且 age<30 且 iteration_exceptions==0）。
 
 ### 症状
 
-doctor 输出 H5 `status=fail`，evidence 含 `queue_full_warnings=N`（从 daemon log grep
-`订阅者队列满` warning 计数）。`status=unknown` 表示 log 中无该 warning（无证据）。
+doctor 输出 H5 `status=unknown`（**生产常态**），reason 含「daemon log 无队列满 warning
+（结构上常态）」。`status=fail` 仅当 daemon log 命中该 warning（罕见）。
 
-### 根因
+### 根因（结构性限制）
 
-慢订阅者（WS pump）消费速度跟不上 emitter → bus 队列满 → 丢老事件腾位（实时性优先，订阅者
-靠 replay 补全）。短期偶发可接受；持续溢出 = pump 链路严重卡（如 WS 客户端断开但 pump
-未退出 / 网络反压）。
+`订阅者队列满` warning（`bus.py:77`）只在**有订阅者**的进程触发；订阅者 = WS pump，运行在
+**web server 进程**。sidechain daemon 进程的 bus 无订阅者，故 doctor 读的 daemon log 结构上
+永远不含该 warning。**doctor 跨进程无法观测 web server 的内存队列状态**——这是架构边界，非 bug。
+
+### 真正的诊断路径
+
+H5 自动判定受限，靠 **H4↔H6 对比** + 手动取证：
+- **H4=pass（tape 有事件）但 H6=fail/unknown（前端收不到）** → 嫌疑 web server 队列溢出 / pump 断。
+- 手动确认：`grep 订阅者队列满 <web server stdout/log>`（web server 的输出，不是 daemon log）。
 
 ### 修复动作
 
-- **偶发（<10/min）**：通常无害（订阅者 replay 补全）；可忽略。
-- **持续**：查 WS 客户端连接状态——浏览器是否在 sleep / 网络反压；重启前端。
-- **pump 异常**：结合 H6（H6 fail 会暴露 pump 异常路径）。
+- **确认溢出**（手动 grep 命中）：WS pump 消费过慢——查浏览器连接是否 sleep / 网络反压；重启前端。
+  丢的老事件在 tape 完好（emit 先写 tape 后 fan-out），前端可经 resume 补全。
+- **持续溢出**：调大 `bus.subscribe(queue_max)`（`ws_handler.py`，默认 1024）。
+- **pump 异常**：结合 H6（H6 self-spawn fail 会暴露 pump 异常路径）。
 
 ### 验证
 
-重跑 `orca doctor --probe-push`，确认 H5 `status=unknown`（无新 warning）或不再增长。
+H5 本身无自动 pass（结构性 unknown）。验证靠 H6：`orca doctor --probe-push` 的 H6=pass
+（self-spawn）或在子 agent 产事件时 `--ws-url` passive = pass。
 
 ---
 
