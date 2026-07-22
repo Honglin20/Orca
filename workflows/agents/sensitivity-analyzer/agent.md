@@ -9,39 +9,38 @@ tools: [bash, read, write, edit, glob, grep]
 ## 资源锚点（cwd 无关）
 
 - `$ORCA_AGENT_RESOURCES`（orca spawn 注入）= 本 agent 资源目录（含 `scripts/run_sensitivity.py`）。
+- `$ORCA_ARTIFACTS_DIR`（orca spawn 注入，P8 接口）= 本 run 权威产物目录（见下「确定输出目录」）。
 - identity（`ORCA_RUN_ID`/`ORCA_NODE`/`ORCA_SESSION_ID`/`ORCA_CHART_SOCK`）沿 env 链继承到脚本，`orca.chart.render_chart` 在脚本内可用。
 
-## 输入
+## 输入（workflow inputs，仅 Tier A）
 
 - 模型入口: `{{ inputs.model_path }}`
-- 项目根: `{{ inputs.project_root }}`
-- 校准 loader dotted-path: `{{ inputs.calib_data_ref }}`（**Tier B 契约**：agent 读用户代码找 loader，如 `grep -rn "def load_calib" {{ inputs.project_root }}`；找不到 → **返回 ask-user 哨兵**（见下文「缺失必填输入时」段），**绝不** `torch.randn` 造假）
-- 方法: `{{ inputs.method }}`（mse / layer_stats / ptq_binary_sensitivity / mix_precision_search）
-- 比例: `{{ inputs.ratio }}`
-- 低/高精度预设: `{{ inputs.low_bits }}` / `{{ inputs.high_bits }}`
-- eval_fn dotted-path: `{{ inputs.eval_fn_ref }}`（method∈{ptq_binary_sensitivity, mix_precision_search} 时必填；这两个 method 下空 → **返回 ask-user 哨兵**，见下文「缺失必填输入时」段）
-- 输出目录: `{{ inputs.output_dir }}`（空则推断 `llm_artifacts/<model_name>/sensitivity/`）
 - 目标硬件: `{{ inputs.target_hardware }}`（cuda / npu / cpu；空 → 脚本 `resolve_device` 自动探测）
 - 随机种子: `{{ inputs.seed }}`（默认 0；贯穿 torch / numpy / random）
 
+**已下沉（非 input，见 SPEC §5）**：
+- `project_root` / `calib_data_ref` / `eval_fn_ref` → **Tier B**：你在下面读用户代码推断（loader/eval_fn 找不到走哨兵；project_root 从 model_path 向上走 infer-once）。
+- `method` / `ratio` / `low_bits` / `high_bits` → **Tier C**：脚本 argparse 默认（method=mse、ratio=0.1、low_bits=w4a4-mx、high_bits=w8a8），固化不当 input。
+- `output_dir` → **Tier C**：引擎注入 `$ORCA_ARTIFACTS_DIR`（下面第 1 步取值）。
+
 ## 执行流程
 
-1. **确定输出目录** `<output_dir>`：`{{ inputs.output_dir }}` 为空 → 读模型文件推断模型名，设为 `llm_artifacts/<model_name>/sensitivity/`（绝对路径，**含 `sensitivity/` 子目录防同模型串跑互覆**）。
+1. **推断 project_root（Tier B infer-once）+ 确定 output_dir**：
+   - **project_root**：从 `{{ inputs.model_path }}` 所在目录起，向上逐级找**第一个含 `train.py` 或 `pyproject.toml` 或 `.git` 的目录**（绝对路径）作为项目根。走到 `/` 仍找不到 → 取 `{{ inputs.model_path }}` 的 dirname，并 stderr 标注 `low-confidence: no train.py/pyproject.toml/.git ancestor`。记住为 `<project_root>`，下面 grep loader 全用它。**不许**用 `pwd` / `git rev-parse` / 留空 / 编造。
+   - **output_dir**：优先用引擎注入的 `$ORCA_ARTIFACTS_DIR`（`echo "$ORCA_ARTIFACTS_DIR"` 取值，P8 run scope 权威产物目录）；为空（非 orca 编排上下文）→ fallback `llm_artifacts/<model_name>/sensitivity/`（绝对路径，**含 `sensitivity/` 子目录防同模型串跑互覆**）。记住为 `<output_dir>`。
 
 2. **生成 `<output_dir>/adapter.py`**：读 `{{ inputs.model_path }}` 理解模型 forward 签名与 batch 形态，写一个适配模块，暴露：
    - `load_model() -> nn.Module`：加载并返回 FP 模型（eval 态）。**不**在此处 `.to(device)`——脚本顶层统一 `resolve_device` 后搬移。
-   - `get_calib_loader() -> DataLoader`：校准 loader。**Tier B 获取三步**：①读用户代码（`grep -rn "def load_calib\|def get_calib\|DataLoader" {{ inputs.project_root }}`）找 loader 的 dotted-path → import 调用；②歧义/找不到 → **不写 adapter / 不调脚本**，以最终消息返回 ask-user 哨兵（见下文「缺失必填输入时」段；**不**让 adapter raise、**不** exit 非 0）；③**绝不 `torch.randn` 造假**。
+   - `get_calib_loader() -> DataLoader`：校准 loader。**Tier B 获取三步**：①读用户代码（`grep -rn "def load_calib\|def get_calib\|DataLoader" <project_root>`）找 loader 的 dotted-path → import 调用；②歧义/找不到 → **不写 adapter / 不调脚本**，以最终消息返回 ask-user 哨兵（见下文「缺失必填输入时」段；**不**让 adapter raise、**不** exit 非 0）；③**绝不 `torch.randn` 造假**。
    - `forward_fn(module, batch) -> Tensor`：按模型 forward 解包 batch（dict/tuple/Tensor）。脚本会包装一层把 batch 搬到 device，adapter 不需要懂 device。
-   - `get_eval_fn()`：仅 method∈{ptq_binary_sensitivity, mix_precision_search} 需要——按 `{{ inputs.eval_fn_ref }}` import 业务评估函数返回；这两个 method 下 `{{ inputs.eval_fn_ref }}` 为空 → **不要硬生成空实现**，以最终消息返回 ask-user 哨兵（见下文「缺失必填输入时」段）。
+   - `get_eval_fn()`：仅 method∈{ptq_binary_sensitivity, mix_precision_search} 需要——你在用户代码里找到业务 eval_fn 时按 dotted-path import 返回。这两个 method 下读代码找不到业务 eval_fn → **不要硬生成空实现**，以最终消息返回 ask-user 哨兵（见下文「缺失必填输入时」段）。
 
-3. **调脚本**（**整段照抄成一条 bash 调用**——`${ORCA_RUN_ID}` 由 orca spawn 注入，`source` 用它定位本 run 的 `orca_env.sh` 拿 `ORCA_CHART_SOCK`；与 PTQ 同 env 模式，否则 opencode bash 拆调用丢 env→推图静默失败）：
+3. **调脚本**（**整段照抄成一条 bash 调用**——method/ratio/low_bits/high_bits 走脚本默认（Tier C 固化），不在此传）：
    ```bash
    source .venv/bin/activate 2>/dev/null || true
    source "runs/${ORCA_RUN_ID}/orca_env.sh" 2>/dev/null || true
    python3 "$ORCA_AGENT_RESOURCES/scripts/run_sensitivity.py" \
      --adapter "<output_dir>/adapter.py" \
-     --method "{{ inputs.method }}" --ratio "{{ inputs.ratio }}" \
-     --low_bits "{{ inputs.low_bits }}" --high_bits "{{ inputs.high_bits }}" \
      --output_dir "<output_dir>" \
      --device "{{ inputs.target_hardware }}" --seed "{{ inputs.seed }}" \
      --env_file "<节点指令里 orca_env.sh 的绝对路径，如 runs/<run_id>/orca_env.sh>"
@@ -63,8 +62,8 @@ tools: [bash, read, write, edit, glob, grep]
 - **eval_fn**（业务评估函数 dotted-path）——**仅** `method ∈ {ptq_binary_sensitivity, mix_precision_search}`
   时是 Tier B 必填；其余 method（mse / layer_stats）不需要 eval_fn。
 
-读用户代码（校准 loader：`grep -rn "def load_calib\|def get_calib\|DataLoader" {{ inputs.project_root }}`；
-eval_fn：`grep -rn "def .*eval\|def .*accuracy\|metric" {{ inputs.project_root }}`）：
+读用户代码（校准 loader：`grep -rn "def load_calib\|def get_calib\|DataLoader" <project_root>`；
+eval_fn：`grep -rn "def .*eval\|def .*accuracy\|metric" <project_root>`）：
 
 - **找到** → 写进 adapter.py（`from <mod> import <fn>; def get_calib_loader(): return <fn>()`；
   eval_fn 同理 `def get_eval_fn(): return <fn>`）。

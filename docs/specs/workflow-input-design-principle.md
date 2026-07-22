@@ -80,8 +80,8 @@ agent 读用户代码能得到的事实。**不是 workflow input**,是某个 se
 |---|---|---|---|
 | agent-struct-exploration | 8 | 6 | 已近模板;补 seed;下沉 struct_scripts_dir/iterations |
 | kd-nas | 14 | 6 | 下沉 9 项(eval_dataset→infer、teacher_layers/short/full_epochs→default/infer、scripts_dir/iterations) |
-| nas-agent-pipeline | 3 | 4 | 补 target_hardware/latency_constraint/max_rounds/seed;下沉 project_root/output_dir |
-| nas-hp-search | 3 | 4 | 同上 |
+| nas-agent-pipeline | 6 | 5 | P6 已补 target_hardware/latency_constraint/max_rounds/seed + 下沉 project_root；P9a 下沉 output_dir（→$ORCA_ARTIFACTS_DIR）|
+| nas-hp-search | 6 | 5 | 同上 |
 | quant-ptq-sweep | 10 | 3 | calib/eval 走 [infer];mode/bit_widths/recipes/bake→default;补 target_hardware/seed |
 | quant-sensitivity | 9 | 3 | 同上 |
 | quant-qat | 13 | 3 | lr/total_steps→[infer];cage/scheme/bit_width/bake→default;补 target_hardware/seed |

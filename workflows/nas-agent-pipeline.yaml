@@ -7,17 +7,12 @@ inputs:
   #   [ask]      业务决策 / KPI / 硬件 / 预算，用户意图未给则启动前集中询问
   #   [default]  有合理默认，不问；高级用户可直接覆盖
   # project_root 已下沉给 model_optimizer 节点运行时推断（从 model_path 向上走）；
-  # output_dir 暂留 input（Phase 4-A 将 sink 到 $ORCA_ARTIFACTS_DIR）。
+  # output_dir 已下沉到引擎注入的 $ORCA_ARTIFACTS_DIR（P8 接口；agent 读 env，缺则 fallback 旧路径）。
   # heavy 对齐 slim（nas-hp-search）的输入契约 + 确定性护栏。
   model_path:
     type: string
     description: "[ask] 用户 PyTorch 模型入口文件路径（如 examples/ViT_Imageclassfication/model.py）。项目内唯一锚点，必须用户给"
     required: true
-  output_dir:
-    type: string
-    description: "[default] NAS 产物输出目录。留空则默认 llm_artifacts/<model_name>/"
-    required: false
-    default: ""
   target_hardware:
     type: string
     description: "[ask] 目标硬件 cuda|npu|cpu。NAS 搜出的架构要在该硬件上达时延目标，必须用户给（无目标=瞎搜）"

@@ -24,7 +24,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 ## 输入
 
 - 模型文件: `{{ inputs.model_path }}`
-- 输出目录: `{{ inputs.output_dir }}`（空则自动推断为 `llm_artifacts/<model_name>/`）
+- 输出目录: 引擎注入的 `$ORCA_ARTIFACTS_DIR`（P8 接口，run scope 权威产物目录；缺则 fallback `llm_artifacts/<model_name>/`，见下「准备工作」）
 - 目标硬件: `{{ inputs.target_hardware }}`（cuda|npu|cpu；写入 supernet_summary.md 备查，搜索/训练脚本沿用既有 `--device auto` 路径，不破坏 device 处理）
 - 目标时延(ms): `{{ inputs.latency_constraint }}`（空=无硬约束；写入 supernet_summary.md，下游 search_pipeline_gen 透传到 search_config.yaml）
 - 搜索预算-代数: `{{ inputs.max_rounds }}`（写入 supernet_summary.md，下游 search_pipeline_gen 透传到 search_config.yaml 的 num_generations）
@@ -44,7 +44,11 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
    走到 `/` 仍找不到 → 取 `{{ inputs.model_path }}` 的 dirname，并在输出里 `project_root` 字段
    后追加 `" (low-confidence: no train.py/pyproject.toml/.git ancestor)"`（不阻塞，但必须显式标注）。
    **不许**用 `pwd` / `git rev-parse` / 最近编辑文件推断；**不许**留空或编造。
-4. 如果 `{{ inputs.output_dir }}` 为空，读取模型文件内容推断模型名，设定输出目录为 `llm_artifacts/<inferred_name>/`。
+4. **确定输出目录**（单一真相源，Tier C）：优先用引擎注入的 `$ORCA_ARTIFACTS_DIR`
+   （`echo "$ORCA_ARTIFACTS_DIR"` 取值，P8 run scope 权威产物目录）；为空（非 orca 编排上下文）
+   → 读取模型文件内容推断模型名，fallback `llm_artifacts/<inferred_name>/`。记住为 `<output_dir>`，
+   下面所有产物写进它，输出 JSON 的 `output_dir` 字段填它（下游 supernet-train-script /
+   nas-search-pipeline / nas-train-runner / nas-select 都从本节点 JSON 读 `output_dir`）。
 
 ## 执行流程
 

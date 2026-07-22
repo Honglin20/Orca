@@ -5,47 +5,8 @@ entry: ptq_sweeper
 inputs:
   model_path:
     type: string
-    description: "[default] 用户 PyTorch 模型入口文件路径（可实例化 FP 模型，如 model.py）"
+    description: "[ask] 用户 PyTorch 模型入口文件路径（可实例化 FP 模型，如 model.py）"
     required: true
-  project_root:
-    type: string
-    description: "[default] 用户 PyTorch 项目根目录"
-    required: true
-  calib_data_ref:
-    type: string
-    description: "[infer] 校准数据 loader 的 dotted-path（如 myproj.data:load_calib），返回 torch DataLoader。agent 读用户代码找 loader；**找不到 fail loud（绝不造假 torch.randn）**。会被内化进生成的 adapter.py"
-    required: false
-    default: ""
-  eval_data_ref:
-    type: string
-    description: "[infer] 评估数据 loader 的 dotted-path。agent 读用户代码找 loader；找不到 fail loud（绝不「复用 calib 当 eval」——会让 best_metric 选错候选）。会被内化进 adapter.py"
-    required: false
-    default: ""
-  eval_fn_ref:
-    type: string
-    description: "[infer] 业务评估函数的 dotted-path（如 myproj.eval:build_eval_fn），返回 EvalFn（接 student_model 返回 dict[str,float]）。未提供则脚本 stderr 打 WARN：用 teacher-student mse，**精度仅自洽性参考**（不静默退回）。会被内化进 adapter.py"
-    required: false
-    default: ""
-  mode:
-    type: string
-    description: "[default] 扫描模式：lightweight（4 累积路径 ablation）/ full（全枚举位宽×算法组合）"
-    required: false
-    default: "lightweight"
-  bit_widths:
-    type: string
-    description: "[default] 逗号分隔位宽预设。空则 lightweight 默认 'w4a4-mx'；full 默认 'w4a4-mx,w4a8-mx,w8a8-mx'。支持 w4a4-mx / w4a8-mx / w8a8-mx / w8a8-int / w4a16"
-    required: false
-    default: ""
-  recipes:
-    type: string
-    description: "[advanced] lightweight 模式：路径子集（S/Q/A/R 任意组合，空则全部 4 条）。full 模式：'all' 或指定 pre/solver 子集（如 'smooth,gptq'）"
-    required: false
-    default: ""
-  output_dir:
-    type: string
-    description: "[default] 产物输出目录。留空则默认 llm_artifacts/<model_name>/ptq-sweep/"
-    required: false
-    default: ""
   target_hardware:
     type: string
     description: "[ask] 目标硬件：cuda / npu / cpu。空→脚本 resolve_device 自动探测（cuda 优先，npu 次之，cpu 兜底）"
@@ -56,11 +17,12 @@ inputs:
     description: "[default] 随机种子（贯穿 torch / numpy / random，复现性底座）"
     required: false
     default: "0"
-  bake:
-    type: string
-    description: "[default] 是否 bake 最佳量化模型 state_dict 到 best_quant_model.pt（'true'/'false'）"
-    required: false
-    default: "true"
+
+# ── 已下沉（不再 input，见 docs/specs/workflow-input-design-principle.md §5）──
+#   project_root / calib_data_ref / eval_data_ref / eval_fn_ref → Tier B（agent 读用户代码
+#     推断 + 哨兵，P4b/P5 已落地；project_root 从 model_path 向上走 infer-once）
+#   mode / bit_widths / recipes / bake → Tier C（脚本 argparse 默认，固化）
+#   output_dir → Tier C（引擎注入 $ORCA_ARTIFACTS_DIR，P8 接口）
 
 nodes:
   # ═══════════════════════════════════════════════════════════════

@@ -744,15 +744,12 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--adapter", required=True, help="adapter.py 路径")
     ap.add_argument("--model_path", required=True, help="原始模型入口路径（仅用于回显摘要）")
-    ap.add_argument("--project_root", required=True, help="用户 PyTorch 项目根目录")
-    ap.add_argument("--calib_data_ref", required=True, help="校准 loader dotted-path（可空串）")
-    ap.add_argument("--eval_data_ref", required=True, help="评估 loader dotted-path（可空串）")
-    ap.add_argument("--eval_fn_ref", required=True, help="业务 eval_fn dotted-path（可空串）")
-    ap.add_argument("--mode", required=True, help="lightweight / full")
-    ap.add_argument("--bit_widths", required=True, help="逗号分隔位宽预设（可空串）")
-    ap.add_argument("--recipes", required=True, help="路径/配方子集（可空串）")
     ap.add_argument("--output_dir", required=True)
-    ap.add_argument("--bake", required=True, help="true / false")
+    # Tier C 固化默认（P9a：自 workflow inputs 下沉，SPEC §5；agent 不再透传，改默认即改全局）：
+    ap.add_argument("--mode", default="lightweight", help="lightweight / full（默认 lightweight）")
+    ap.add_argument("--bit_widths", default="", help="逗号分隔位宽预设（空→lightweight=w4a4-mx / full=w4a4-mx,w4a8-mx,w8a8-mx）")
+    ap.add_argument("--recipes", default="", help="路径/配方子集（空→lightweight 全 4 条 / full='all'）")
+    ap.add_argument("--bake", default="true", help="true / false（默认 true）")
     add_device_seed_args(ap)
     ap.add_argument(
         "--env_file",

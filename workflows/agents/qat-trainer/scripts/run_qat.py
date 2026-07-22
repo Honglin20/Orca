@@ -473,18 +473,15 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--adapter", required=True)
     ap.add_argument("--model_path", required=True, help="原始模型入口路径（回显用）")
-    ap.add_argument("--project_root", required=True)
-    ap.add_argument("--calib_data_ref", required=True, help="校准 loader dotted-path（duquantpp 需要；可空串）")
-    ap.add_argument("--train_data_ref", required=True, help="训练 loader dotted-path（空→fail loud：QAT 需真实训练数据，复用 calib 是数据泄漏）")
-    ap.add_argument("--eval_data_ref", required=True, help="评估 loader dotted-path（空→fail loud：复用 train 是数据泄漏口径）")
-    ap.add_argument("--eval_fn_ref", required=True, help="业务 eval_fn dotted-path（可空串）")
-    ap.add_argument("--scheme", required=True, help="rtn / duquantpp / both")
-    ap.add_argument("--bit_width", required=True, help="w4a4-mx / w4a8-mx / w8a8-mx / w8a8-int / w4a16")
-    ap.add_argument("--cage", required=True, help="auto / true / false")
-    ap.add_argument("--total_steps", required=True, help="QAT 训练步数（int 字符串）")
-    ap.add_argument("--lr", required=True, help="Adam 学习率（float 字符串）")
     ap.add_argument("--output_dir", required=True)
-    ap.add_argument("--bake", required=True, help="true / false")
+    # Tier C 固化默认（P9a：自 workflow inputs 下沉，SPEC §5；agent 不再透传，改默认即改全局）：
+    ap.add_argument("--scheme", default="both", help="rtn / duquantpp / both（默认 both）")
+    ap.add_argument("--bit_width", default="w8a8-mx", help="QAT fake-quant 位宽预设（默认 w8a8-mx，高位宽起步更稳）")
+    ap.add_argument("--cage", default="auto", help="CAGE 后校正开关 auto/true/false（默认 auto）")
+    ap.add_argument("--bake", default="true", help="true / false（默认 true）")
+    # Tier B best-effort 推断（P9a / SPEC §5：agent 读用户 train.py/config 拿真值；找不到传空→smoke 兜底）：
+    ap.add_argument("--lr", default="", help="Adam 学习率（float 字符串；空→脚本 smoke 兜底 1e-4）")
+    ap.add_argument("--total_steps", default="", help="QAT 训练步数（int 字符串；空→脚本 smoke 兜底 64）")
     add_device_seed_args(ap)
     ap.add_argument("--env_file", default="", help="本 run 的 orca_env.sh 路径（env 兜底）")
     args = ap.parse_args()
@@ -522,14 +519,29 @@ def main() -> int:
         sys.exit(2)
 
     try:
-        total_steps = int(args.total_steps or "64")
+        # Tier B best-effort（P9a / SPEC §5）：agent 读用户 train.py/config 拿真值；找不到传空。
+        # 空→smoke 兜底必须可见（SPEC §0「绝不静默产出错误交付物」+ Rule 12 fail loud）：
+        # smoke 不是生产精度，用户须看到降级信号，否则会把 64 步 1e-4 的短训当正式 QAT 结果。
+        _ts_provided = (args.total_steps or "").strip()
+        total_steps = int(_ts_provided or "64")
         if total_steps <= 0:
             raise ValueError
+        if not _ts_provided:
+            sys.stderr.write(
+                "[run_qat] WARN: total_steps 未提供（agent 未在用户代码找到）→ smoke 兜底 64。"
+                "短训恢复用，非生产精度。真实 QAT 请显式传更大值。\n"
+            )
     except ValueError:
         sys.stderr.write(f"[run_qat] total_steps 非法 '{args.total_steps}'\n")
         sys.exit(2)
     try:
-        lr = float(args.lr or "1e-4")
+        _lr_provided = (args.lr or "").strip()
+        lr = float(_lr_provided or "1e-4")
+        if not _lr_provided:
+            sys.stderr.write(
+                "[run_qat] WARN: lr 未提供（agent 未在用户代码找到）→ smoke 兜底 1e-4。"
+                "非生产精度。真实 QAT 请显式传训练用 lr。\n"
+            )
     except ValueError:
         sys.stderr.write(f"[run_qat] lr 非法 '{args.lr}'\n")
         sys.exit(2)

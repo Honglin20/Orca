@@ -5,47 +5,8 @@ entry: sensitivity_analyzer
 inputs:
   model_path:
     type: string
-    description: "用户 PyTorch 模型入口文件路径（可实例化 FP 模型，如 model.py）"
+    description: "[ask] 用户 PyTorch 模型入口文件路径（可实例化 FP 模型，如 model.py）"
     required: true
-  project_root:
-    type: string
-    description: "用户 PyTorch 项目根目录"
-    required: true
-  calib_data_ref:
-    type: string
-    description: "[infer] 校准数据 loader 的 dotted-path（如 myproj.data:load_calib），返回 torch DataLoader。agent 读用户代码找 loader；**找不到 fail loud（绝不造假 torch.randn）**。会被内化进生成的 adapter.py"
-    required: false
-    default: ""
-  method:
-    type: string
-    description: "[default] 敏感层分析方法，四选一：mse / layer_stats / ptq_binary_sensitivity / mix_precision_search"
-    required: false
-    default: "mse"
-  ratio:
-    type: string
-    description: "[default] 敏感层选取比例（0~1 浮点字符串，如 0.1 表示 top 10%）"
-    required: false
-    default: "0.1"
-  low_bits:
-    type: string
-    description: "[default] 低精度预设：w4a4-mx / int4 / w4a16"
-    required: false
-    default: "w4a4-mx"
-  high_bits:
-    type: string
-    description: "[advanced] 高精度预设（method 为 ptq_binary_sensitivity/mix_precision_search 时的 high_precision_qconfig）：w8a8"
-    required: false
-    default: "w8a8"
-  eval_fn_ref:
-    type: string
-    description: "[infer] 业务评估函数的 dotted-path（如 myproj.eval:build_eval_fn）；method 为 ptq_binary_sensitivity/mix_precision_search 时必填。会被内化进生成的 adapter.py"
-    required: false
-    default: ""
-  output_dir:
-    type: string
-    description: "[default] 产物输出目录。留空则默认 llm_artifacts/<model_name>/sensitivity/"
-    required: false
-    default: ""
   target_hardware:
     type: string
     description: "[ask] 目标硬件：cuda / npu / cpu。空→脚本 resolve_device 自动探测（cuda 优先，npu 次之，cpu 兜底）"
@@ -56,6 +17,12 @@ inputs:
     description: "[default] 随机种子（贯穿 torch / numpy / random，复现性底座）"
     required: false
     default: "0"
+
+# ── 已下沉（不再 input，见 docs/specs/workflow-input-design-principle.md §5）──
+#   project_root / calib_data_ref / eval_fn_ref → Tier B（agent 读用户代码推断 + 哨兵，
+#     P4b/P5 已落地；project_root 从 model_path 向上走 infer-once）
+#   method / ratio / low_bits / high_bits → Tier C（脚本 argparse 默认，固化）
+#   output_dir → Tier C（引擎注入 $ORCA_ARTIFACTS_DIR，P8 接口）
 
 nodes:
   # ═══════════════════════════════════════════════════════════════

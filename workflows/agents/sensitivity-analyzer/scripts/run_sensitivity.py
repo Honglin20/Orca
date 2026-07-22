@@ -197,11 +197,12 @@ def _push_charts(auto_sensitive: list[str], ranked: list[dict[str, Any]],
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--adapter", required=True, help="adapter.py 路径")
-    ap.add_argument("--method", required=True)
-    ap.add_argument("--ratio", required=True, help="0~1 浮点字符串")
-    ap.add_argument("--low_bits", required=True)
-    ap.add_argument("--high_bits", required=True)
     ap.add_argument("--output_dir", required=True)
+    # Tier C 固化默认（P9a：自 workflow inputs 下沉，SPEC §5；agent 不再透传，改默认即改全局）：
+    ap.add_argument("--method", default="mse", help="mse / layer_stats / ptq_binary_sensitivity / mix_precision_search（默认 mse）")
+    ap.add_argument("--ratio", default="0.1", help="敏感层选取比例 0~1（默认 0.1=top10%）")
+    ap.add_argument("--low_bits", default="w4a4-mx", help="低精度预设（默认 w4a4-mx）")
+    ap.add_argument("--high_bits", default="w8a8", help="高精度预设（默认 w8a8；method=ptq_binary_sensitivity/mix_precision_search 用）")
     add_device_seed_args(ap)
     ap.add_argument(
         "--env_file",

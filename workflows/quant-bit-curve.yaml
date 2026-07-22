@@ -5,67 +5,8 @@ entry: bit_curve_searcher
 inputs:
   model_path:
     type: string
-    description: "[default] 用户 PyTorch 模型入口文件路径（可实例化 FP 模型，如 model.py）"
+    description: "[ask] 用户 PyTorch 模型入口文件路径（可实例化 FP 模型，如 model.py）"
     required: true
-  project_root:
-    type: string
-    description: "[default] 用户 PyTorch 项目根目录"
-    required: true
-  calib_data_ref:
-    type: string
-    description: "[infer] 校准数据 loader 的 dotted-path（如 myproj.data:load_calib），返回 torch DataLoader。agent 读用户代码找 loader；**找不到 fail loud（绝不造假 torch.randn）**。会被内化进生成的 adapter.py"
-    required: false
-    default: ""
-  eval_data_ref:
-    type: string
-    description: "[infer] 评估数据 loader 的 dotted-path。agent 读用户代码找 loader；找不到 fail loud（绝不「复用 calib 当 eval」——Pareto 搜索依赖业务 eval 分布选最低位宽，复用 calib 会让前沿选错）。会被内化进 adapter.py"
-    required: false
-    default: ""
-  eval_fn_ref:
-    type: string
-    description: "[infer] 业务评估函数的 dotted-path（如 myproj.eval:build_eval_fn），返回 EvalFn（接 student_model 返回 dict[str,float]）。未提供则脚本 stderr 打 WARN：用 teacher-student mse，**精度仅自洽性参考**（不静默退回）。会被内化进 adapter.py"
-    required: false
-    default: ""
-  mode:
-    type: string
-    description: "[default] 搜索模式：explore（出完整 Pareto 前沿）/ constrained_select（约束下选点）/ minimize_bit_under_accuracy（满足精度容忍下选最低位宽）"
-    required: false
-    default: "explore"
-  candidate_format_space:
-    type: string
-    description: "[default] 候选格式集（逗号分隔，全 mxint/int 基）：INT8 / W4A8 / INT4 / MX4 / MX8。空则默认全集"
-    required: false
-    default: ""
-  bit_objective:
-    type: string
-    description: "[default] bit 成本口径（决定选择与绘图 x 轴）：weight_activation_proxy（推荐，区分 W4A8 与 INT4/MX4）/ weight_only"
-    required: false
-    default: "weight_activation_proxy"
-  accuracy_tolerance:
-    type: string
-    description: "[default] 相对搜索 baseline 的精度损失绝对容忍（如 0.01=mse 损失上界 0.01）"
-    required: false
-    default: "0.01"
-  avg_bit_budget:
-    type: string
-    description: "[advanced] 平均位宽硬上限；空则无硬约束（由精度容忍驱动选最低位宽）"
-    required: false
-    default: ""
-  max_evals:
-    type: string
-    description: "[default] 主搜索 candidate 预算（不含 sensitivity probe / diagnostic anchors / final eval）。32=smoke，128=真实模型推荐起步"
-    required: false
-    default: "32"
-  granularity:
-    type: string
-    description: "[default] 量化粒度：per_tensor / per_token / per_channel"
-    required: false
-    default: "per_tensor"
-  output_dir:
-    type: string
-    description: "[default] 产物输出目录。留空则默认 llm_artifacts/<model_name>/bit-curve/"
-    required: false
-    default: ""
   target_hardware:
     type: string
     description: "[ask] 目标硬件：cuda / npu / cpu。空→脚本 resolve_device 自动探测（cuda 优先，npu 次之，cpu 兜底）"
@@ -76,11 +17,27 @@ inputs:
     description: "[default] 随机种子（贯穿 torch / numpy / random，复现性底座）"
     required: false
     default: "0"
-  bake:
+  accuracy_tolerance:
     type: string
-    description: "[default] 是否把选中最佳混合精度 assignment bake 成 best_mixed_model.pt（'true'/'false'）"
+    description: "[ask] 相对搜索 baseline 的精度损失绝对容忍（如 0.01=mse 损失上界 0.01）。Pareto 选点 / minimize_bit 模式的精度闸门"
     required: false
-    default: "true"
+    default: "0.01"
+  avg_bit_budget:
+    type: string
+    description: "[ask] 平均位宽硬上限；空则无硬约束（由精度容忍驱动选最低位宽）"
+    required: false
+    default: ""
+  max_evals:
+    type: string
+    description: "[ask] 主搜索 candidate 预算（不含 sensitivity probe / diagnostic anchors / final eval）。32=smoke，128=真实模型推荐起步"
+    required: false
+    default: "32"
+
+# ── 已下沉（不再 input，见 docs/specs/workflow-input-design-principle.md §5）──
+#   project_root / calib_data_ref / eval_data_ref / eval_fn_ref → Tier B（agent 读用户代码
+#     推断 + 哨兵，P4b/P5 已落地；project_root 从 model_path 向上走 infer-once）
+#   mode / candidate_format_space / bit_objective / granularity / bake → Tier C（脚本 argparse 默认，固化）
+#   output_dir → Tier C（引擎注入 $ORCA_ARTIFACTS_DIR，P8 接口）
 
 nodes:
   # ═══════════════════════════════════════════════════════════════

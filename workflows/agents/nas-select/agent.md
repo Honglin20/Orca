@@ -25,13 +25,13 @@ tools: [bash, read]
 
 ## 目录
 
-`{{ inputs.output_dir }}`（run 启动时显式传入）——脚本从这里读 `runs/search/search.jsonl` 与
+`{{ model_optimizer.output.output_dir }}`（由 setup 节点 model_optimizer 从 `$ORCA_ARTIFACTS_DIR` 确定、向后传）——脚本从这里读 `runs/search/search.jsonl` 与
 `search_config.yaml`，选择结果写 `runs/retrain/selected/`。
 
 ## 执行（跑这一条命令，然后把 stdout 原样作为你的回复）
 
 ```bash
-OUTPUT_DIR="{{ inputs.output_dir }}"
+OUTPUT_DIR="{{ model_optimizer.output.output_dir }}"
 source .venv/bin/activate 2>/dev/null || true
 source "runs/${ORCA_RUN_ID}/orca_env.sh" 2>/dev/null || true
 python3 "$ORCA_AGENT_RESOURCES/scripts/select_and_report.py" --output_dir "$OUTPUT_DIR"

@@ -7,7 +7,7 @@ tools: [bash, read, glob, grep]
 ## ⚠ 你的唯一任务（先读这段，最重要）
 
 上游已**生成好**脚本（`run_search_supernet.sh` / 可选 `run_train_supernet.sh`），在
-`{{ inputs.output_dir }}` 里。**你的工作：运行它们、监控到真正完成、回显 bash 的真实 JSON 输出。**
+`{{ model_optimizer.output.output_dir }}` 里（由 setup 节点 model_optimizer 从 `$ORCA_ARTIFACTS_DIR` 确定、向后传）。**你的工作：运行它们、监控到真正完成、回显 bash 的真实 JSON 输出。**
 
 你**不是**在描述/总结上游。上游描述对你无用——你只看目录里的脚本，**跑它**。
 
@@ -26,7 +26,7 @@ identity（ORCA_RUN_ID/NODE/SESSION_ID/CHART_SOCK）沿 env 链继承，`orca.ch
 
 ```bash
 set +e
-export OUTPUT_DIR="{{ inputs.output_dir }}"
+export OUTPUT_DIR="{{ model_optimizer.output.output_dir }}"
 cd "$OUTPUT_DIR" || exit 1
 source .venv/bin/activate >/dev/null 2>&1 || true
 

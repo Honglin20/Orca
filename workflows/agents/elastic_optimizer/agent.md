@@ -22,7 +22,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 ## 输入
 
 - 模型文件: `{{ inputs.model_path }}`
-- 输出目录: `{{ inputs.output_dir }}`（空则推断为 `llm_artifacts/<model_name>/`）
+- 输出目录: 引擎注入的 `$ORCA_ARTIFACTS_DIR`（P8 接口，run scope 权威产物目录；缺则 fallback `llm_artifacts/<model_name>/`，见下「执行」Step 1）
 - 目标硬件: `{{ inputs.target_hardware }}`（cuda|npu|cpu；写入 supernet_summary.md 备查，搜索/训练脚本沿用既有 `--device auto` 路径，不破坏 device 处理）
 - 目标时延(ms): `{{ inputs.latency_constraint }}`（空=无硬约束；写入 supernet_summary.md，下游 search_pipeline_gen 透传到 search_config.yaml）
 - 搜索预算-代数: `{{ inputs.max_rounds }}`（写入 supernet_summary.md，下游 search_pipeline_gen 透传到 search_config.yaml 的 num_generations）
@@ -43,7 +43,10 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
    source .venv/bin/activate 2>/dev/null || true
    python -c "from pathlib import Path; import nas_agent; print(Path(nas_agent.__file__).resolve().parent.parent)"
    ```
-   记住 `<nas_agent_root>` 绝对路径。若 `{{ inputs.output_dir }}` 为空，读模型推断模型名，设定 `<output_dir>=llm_artifacts/<name>/`。
+   记住 `<nas_agent_root>` 绝对路径。**确定输出目录**（单一真相源，Tier C）：优先用引擎注入的
+   `$ORCA_ARTIFACTS_DIR`（`echo "$ORCA_ARTIFACTS_DIR"` 取值，P8 run scope 权威产物目录）；为空
+   （非 orca 编排上下文）→ 读模型推断模型名，fallback `<output_dir>=llm_artifacts/<name>/`。记住 `<output_dir>`，
+   所有产物写进它，输出 JSON 的 `output_dir` 字段填它（下游节点从本节点 JSON 读 `output_dir`）。
    **推断 project_root**：从 `{{ inputs.model_path }}` 所在目录起，向上逐级找**第一个含 `train.py` 或
    `pyproject.toml` 或 `.git` 的目录**作为项目根（绝对路径）。走到 `/` 仍找不到 → 取 `{{ inputs.model_path }}`
    的 dirname，并在输出 `project_root` 字段后追加 `" (low-confidence: no train.py/pyproject.toml/.git ancestor)"`。
