@@ -9,19 +9,25 @@
 - **哨兵在 TARS skill 层拦截,绝不喂给 `orca next`**:TARS 派子 agent → 子 agent 返回哨兵 → TARS **在调 `orca next` 之前**检测哨兵 → 问用户 → 恢复同一子 agent → 子 agent 返回**真实 output** → TARS 才 `orca next --output '<真实 output>'`。
 - 因此引擎的 `output_schema` 校验(`orca/run/step.py:132-163`,`additionalProperties:false`)**只作用在真实 output 上,哨兵永远不触发 schema mismatch**。→ **`orca/` 引擎代码零改动**(0-b 的改动全在 TARS skill + agent.md + 本 SPEC)。
 
+## 0.1 定位澄清:这是「跑在 SendMessage 之上的提问协议」,不是新通信通道
+
+- **主→子(恢复、保上下文)** 用 CC 原生 `SendMessage(agentId, msg)` / opencode 原生 `Task(task_id=ses_xxx)`。**本机制不重新发明这条通道**,生产路径就是裸 SendMessage/Task(task_id)。
+- **子→主/用户(子 agent 发起提问)** 没有原生通道(子 agent 无 `AskUserQuestion`,SendMessage 是主→子方向);子 agent 唯一可靠上行通道是**它的返回值**。sentinel 就是把「请帮我问用户 X」**编码进返回值**的薄约定。
+- 合起来是半双工:子→主靠 sentinel 返回,主→子靠 SendMessage 恢复。**sentinel 补的是「提问信号」方向,不与 SendMessage 重复。**
+- **sentinel 价值不在通信,在**:① TARS 对返回做**确定性 `is_sentinel()` 识别**(非 LLM 读自然语言),避免把提问误喂 `orca next` 撞 schema;② `MAX_ASK` 硬兜底防死循环;③ 可单测。
+- **`tests/spike_ask_user/` 里的 `SubagentBackend`/mock/claude-cli backend 抽象是 test-only 脚手架**(为可单测 + 跨后端 mock),**不进生产路径**。生产 = 裸 SendMessage/Task(task_id) + 轻哨兵。
+
 ## 1. 哨兵 schema(子 agent 返回)
 
-子 agent 缺 Tier B 必填项、且读代码无果时,以其**最终消息**返回**严格**如下 JSON(且仅此):
+子 agent 缺 Tier B 必填项、且读代码无果时,以其**最终消息**返回如下 JSON(且仅此;**轻量**——只有两个必填键):
 
 ```json
 {"_orca_ask_user": "<一句话问题,如 'calib loader 在你项目哪个 dotted-path?'>",
- "options": ["<候选1,如 'myproj.data:load_calib'>", "<候选2>"],
- "context": "<agent 已查过哪里、看到了什么、为什么歧义>",
  "_sentinel": "orca_ask_user_v1"}
 ```
 
-- `_sentinel: "orca_ask_user_v1"` 是版本化魔键,TARS 用它做 **strict 识别**(不是 substring match,避免 agent 合法输出碰巧含 `_orca_ask_user` 的 false positive)。
-- `options`: `list[str]`(自由文本候选;opencode 无原生 AskUserQuestion,结构化由 TARS prompt 强制)。
+- **必填**:`_orca_ask_user`(问题串)+ `_sentinel: "orca_ask_user_v1"`(版本化魔键,TARS 用它做 **strict 识别**,非 substring match,避免合法输出碰巧含 `_orca_ask_user` 的 false positive)。
+- **可选**:`options: list[str]`(候选答案,有就给用户做选项;opencode 无原生 AskUserQuestion,结构化由 TARS prompt 强制)、`context: str`(agent 已查过哪里/为何歧义,帮用户回答)。两者缺省时 TARS 用自由文本问。
 - 一个节点可连续返回多次哨兵(先问 calib 再问 eval),但有**重入上限**(§4)。
 
 ## 2. TARS skill 行为(跨后端)
