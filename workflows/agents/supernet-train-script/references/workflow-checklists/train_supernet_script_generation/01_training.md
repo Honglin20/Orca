@@ -250,9 +250,9 @@ Each item below is a verifiable requirement extracted from the companion workflo
 - **Orca-agnostic import guard**: `try: from orca.chart import render_chart\nexcept Exception: render_chart = None`. When `render_chart is None` (running standalone, outside Orca) the helper is a **no-op** — the artifact stays runnable with no Orca dependency. No top-level `import orca`.
 - **Rank-0 only**: every push guarded by `if is_main_process() and render_chart is not None:` (same single-writer discipline as item 6/27).
 - **Accumulate + full-series push**: the helper keeps in-process accumulators (`list`s) of all points seen so far; each call **appends** the new point then pushes the **FULL accumulated series** with a fixed `label`+`title`. (Because `render_chart` with the same `label`+`title` **replaces** the chart, pushing a single point would erase history. Re-reading the jsonl each call is also acceptable but accumulating in memory is preferred — same process throughout training.)
-- **Exact chart contracts** (label/title MUST match `tail_metrics.py` C3a/C3b so inline and tail are refresh-idempotent):
-  - **C3a — Training Loss**: `render_chart(chart_type="line", data=<full loss series>, label="nas/training", title="Training Loss", x="global_step", y="loss", hue="phase")`. Each row `{"global_step": int, "loss": float, "phase": "train"|"val"}`. Pushed every `args.log_interval` steps (train rows) and every eval (val loss rows, `phase="val"`).
-  - **C3b — Validation Metric**: `render_chart(chart_type="line", data=<full val series>, label="nas/training", title="Validation Metric", x="global_step", y="metric")`. Each row `{"global_step": int, "metric": float}`. Pushed every evaluation cycle (val subset only).
+- **Exact chart contracts** (label/title MUST match `tail_metrics.py` C3a/C3b so inline and tail are refresh-idempotent). The `x_label`/`y_label`/`caption` kws MUST also be passed — dedup key is `label+title`, so the **last writer wins**: if the inline pusher omits them it replaces `tail_metrics`' labeled chart with an unlabeled one (labels flicker off whenever training pushes between tail polls). Keep them byte-aligned with `tail_metrics.py` C3a/C3b:
+  - **C3a — Training Loss**: `render_chart(chart_type="line", data=<full loss series>, label="nas/training", title="Training Loss", x="global_step", y="loss", hue="phase", x_label="全局训练步（global_step）", y_label="loss（越低越好）", caption="每 log_interval 步采样的训练 loss；hue=phase 区分 train/val。")`. Each row `{"global_step": int, "loss": float, "phase": "train"|"val"}`. Pushed every `args.log_interval` steps (train rows) and every eval (val loss rows, `phase="val"`).
+  - **C3b — Validation Metric**: `render_chart(chart_type="line", data=<full val series>, label="nas/training", title="Validation Metric", x="global_step", y="metric", x_label="全局训练步（global_step）", y_label="metric（验证集指标）", caption="验证集指标；每 eval 周期一个点。")`. Each row `{"global_step": int, "metric": float}`. Pushed every evaluation cycle (val subset only).
 - **Frequency**: C3a train-row push every `log_interval`; C3a val-row + C3b push at each evaluation. Push failures must NOT crash training (wrap push in `try/except` → stderr loud, continue — chart is best-effort sidecar).
 **Verify**: grep for `_push_chart` (or equivalent helper) + `from orca.chart import render_chart` under a `try/except`; confirm the helper pushes the full accumulated series (not a single point); confirm the two fixed `label="nas/training"` / `title="Training Loss"` / `title="Validation Metric"` contracts; confirm push is `is_main_process()`-guarded and wrapped so failure can't abort training; confirm no top-level `import orca` (guarded import only).
 **Anti-pattern**: pushing a single latest point each call (erases history — same label+title replaces); hardcoding `import orca` so the script dies outside Orca; pushing from all ranks; label/title that differ from `tail_metrics.py` (produces duplicate charts instead of refreshing); letting a `render_chart` exception kill the training loop.
@@ -278,16 +278,22 @@ def _push_chart(global_step, *, loss=None, phase="train", val_metric=None, is_ma
             _loss_rows.append({"global_step": int(global_step), "loss": float(loss), "phase": phase})
             render_chart(chart_type="line", data=list(_loss_rows),
                          label="nas/training", title="Training Loss",
-                         x="global_step", y="loss", hue="phase")
+                         x="global_step", y="loss", hue="phase",
+                         x_label="全局训练步（global_step）", y_label="loss（越低越好）",
+                         caption="每 log_interval 步采样的训练 loss；hue=phase 区分 train/val。")
         if val_metric is not None:  # eval 周期
             _loss_rows.append({"global_step": int(global_step), "loss": float(loss) if loss is not None else None, "phase": "val"})  # C3a 的 val loss 点
             render_chart(chart_type="line", data=list(_loss_rows),
                          label="nas/training", title="Training Loss",
-                         x="global_step", y="loss", hue="phase")
+                         x="global_step", y="loss", hue="phase",
+                         x_label="全局训练步（global_step）", y_label="loss（越低越好）",
+                         caption="每 log_interval 步采样的训练 loss；hue=phase 区分 train/val。")
             _val_rows.append({"global_step": int(global_step), "metric": float(val_metric)})
             render_chart(chart_type="line", data=list(_val_rows),
                          label="nas/training", title="Validation Metric",
-                         x="global_step", y="metric")
+                         x="global_step", y="metric",
+                         x_label="全局训练步（global_step）", y_label="metric（验证集指标）",
+                         caption="验证集指标；每 eval 周期一个点。")
     except Exception as e:  # sidecar：stderr loud 但不抛
         print(f"[chart] push failed (ignored): {type(e).__name__}: {e}")
 ```
