@@ -137,8 +137,12 @@ def _mode_train(output_dir: Path) -> None:
                 x="global_step",
                 y="metric",
                 x_label="全局训练步（global_step）",
-                y_label=metric_key,
-                caption=f"验证集指标（字段={metric_key}）；每 eval 周期一个点。",
+                # y_label/caption 与 01_training.md checklist C3b byte 对齐：inline 推图
+                # （train_supernet.py 按 checklist 生成）与 tail 共享 label+title，dedup 替换
+                # 下 last-writer-wins，y_label/caption 不一致会在两次 tail 轮询间闪烁。
+                # 字段名（val_acc/acc/...）仍由 metric_key 决定数据读取，不进显示串。
+                y_label="metric（验证集指标）",
+                caption="验证集指标；每 eval 周期一个点。",
             )
 
 
@@ -283,7 +287,8 @@ def _mode_search(output_dir: Path) -> None:
                 y_label=f"{y_obj}（越大越好{'+，质量类已取负显示' if obj_kind[y_obj] == 'quality' else ''}）",
                 caption=(
                     "当前 per-generation pareto 子集；finalize 全局前沿见 Pareto Front (final)。"
-                    "x=成本类（越小越好），y=质量类（取负后越大越好）。"
+                    f"x={x_obj}（{'成本类，越小越好' if obj_kind[x_obj] == 'cost' else '质量类，取负后越大越好'}），"
+                    f"y={y_obj}（{'成本类，越小越好' if obj_kind[y_obj] == 'cost' else '质量类，取负后越大越好'}）。"
                 ),
             )
 
