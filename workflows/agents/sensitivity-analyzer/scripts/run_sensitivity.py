@@ -19,9 +19,22 @@ import argparse
 import importlib
 import importlib.util
 import json
+import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Callable
+
+# 共享 device / seed 逻辑（plan §P5 硬约束：单一真相源）。
+_HERE = Path(__file__).resolve()
+_QUANT_SCRIPTS = _HERE.parent.parent.parent / "_quant_scripts"
+if str(_QUANT_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_QUANT_SCRIPTS))
+from _device import (  # noqa: E402
+    add_device_seed_args,
+    resolve_device_and_seed,
+    wrap_forward_with_device,
+)
 
 COMPLEX_METHODS = {"ptq_binary_sensitivity", "mix_precision_search"}
 
@@ -37,6 +50,27 @@ def _load_adapter(path: str):
     assert spec.loader is not None
     spec.loader.exec_module(mod)
     return mod
+
+
+def _load_env_file(path: str) -> None:
+    """自加载 orca_env.sh 到 os.environ——与 PTQ 同 env 兜底模式
+   （plan §P5：opencode bash 拆调用丢 ORCA_CHART_SOCK → render_chart 静默失败 → 图不推）。
+    """
+    if not path:
+        return
+    p = Path(path).expanduser()
+    if not p.is_file():
+        sys.stderr.write(f"[run_sensitivity] --env_file 不存在: {p}（跳过自加载）\n")
+        return
+    cnt = 0
+    for line in p.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line)
+        if not m:
+            continue
+        k, v = m.group(1), m.group(2).strip().strip('"').strip("'")
+        os.environ.setdefault(k, v)
+        cnt += 1
+    sys.stderr.write(f"[run_sensitivity] 自加载 {cnt} 个 env from {p}\n")
 
 
 def _qconfig(preset: str):
@@ -161,7 +195,14 @@ def main() -> int:
     ap.add_argument("--low_bits", required=True)
     ap.add_argument("--high_bits", required=True)
     ap.add_argument("--output_dir", required=True)
+    add_device_seed_args(ap)
+    ap.add_argument(
+        "--env_file",
+        default="",
+        help="本 run 的 orca_env.sh 路径；与 PTQ 同 env 兜底模式（防 opencode bash 拆调用丢 env）",
+    )
     args = ap.parse_args()
+    _load_env_file(args.env_file)
 
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -173,11 +214,19 @@ def main() -> int:
         sys.stderr.write(f"[run_sensitivity] --ratio 非浮点: {args.ratio!r}\n")
         sys.exit(2)
 
+    # device + seed 解析（单一真相源：_device.resolve_device_and_seed）
+    device, seed = resolve_device_and_seed(
+        args.device, args.seed, log_prefix="[run_sensitivity] "
+    )
+
     # 1. adapter
     adapter = _load_adapter(args.adapter)
     model = adapter.load_model()
+    # device 搬移
+    model = model.to(device)
     calib_loader = adapter.get_calib_loader()
-    forward_fn: Callable | None = getattr(adapter, "forward_fn", None)
+    raw_forward_fn: Callable | None = getattr(adapter, "forward_fn", None)
+    forward_fn = wrap_forward_with_device(raw_forward_fn, device)
     get_eval_fn = getattr(adapter, "get_eval_fn", None)
 
     low_qconfig = _qconfig(args.low_bits)

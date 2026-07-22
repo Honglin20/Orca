@@ -37,6 +37,19 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+# 共享 device / seed 逻辑（plan §P5 硬约束：单一真相源，避免 4 份复制）。
+# 路径锚定：本脚本在 workflows/agents/ptq-sweeper/scripts/，_quant_scripts 在
+# workflows/agents/_quant_scripts/（两级 up + 一级 down）。
+_HERE = Path(__file__).resolve()
+_QUANT_SCRIPTS = _HERE.parent.parent.parent / "_quant_scripts"
+if str(_QUANT_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_QUANT_SCRIPTS))
+from _device import (  # noqa: E402
+    add_device_seed_args,
+    resolve_device_and_seed,
+    wrap_forward_with_device,
+)
+
 # 一次性 import ts_quant 关键依赖：缺包/未配置 → fail loud exit 2（环境错），
 # 而非走 _eval_candidate try 内 → 全候选失败 exit 3（业务错，根因被埋）。
 try:
@@ -387,6 +400,11 @@ def _resolve_eval(adapter, fp_model, eval_loader, forward_fn) -> tuple[Callable,
             "（按模型 forward 解包 batch）—— 异构 batch 会让 SDK fallback 误算\n"
         )
         sys.exit(2)
+    # WARN 不静默（plan §P5）：未提供业务 eval_fn → 退 teacher-student mse，精度仅自洽性参考。
+    sys.stderr.write(
+        "[run_ptq_sweep] WARN: 未提供业务 eval_fn（eval_fn_ref 空）→ 退 teacher-student mse。"
+        "该指标仅自洽性参考（量化模型 vs FP teacher 的 mse），不代表业务精度。\n"
+    )
     eval_fn = build_teacher_student_eval_fn(
         teacher_model=fp_model,
         dataloader=eval_loader,
@@ -716,6 +734,7 @@ def main() -> int:
     ap.add_argument("--recipes", required=True, help="路径/配方子集（可空串）")
     ap.add_argument("--output_dir", required=True)
     ap.add_argument("--bake", required=True, help="true / false")
+    add_device_seed_args(ap)
     ap.add_argument(
         "--env_file",
         default="",
@@ -735,6 +754,11 @@ def main() -> int:
         )
         sys.exit(2)
 
+    # device + seed 解析（单一真相源：_device.resolve_device_and_seed）
+    device, seed = resolve_device_and_seed(
+        args.device, args.seed, log_prefix="[run_ptq_sweep] "
+    )
+
     mode = (args.mode or "lightweight").strip().lower()
     bit_widths = _parse_csv(args.bit_widths, fallback=[])
     recipes_filter = _parse_csv(args.recipes, fallback=[])
@@ -748,14 +772,28 @@ def main() -> int:
     # 1. adapter → fp teacher + calib + eval + forward
     adapter = _load_adapter(args.adapter)
     fp_model = adapter.load_model()
+    # device 搬移（plan §P5）：adapter.load_model() 返回 CPU 模型，脚本统一搬到 device。
+    fp_model = fp_model.to(device)
     calib_loader = adapter.get_calib_loader()
-    forward_fn = getattr(adapter, "forward_fn", None)
+    raw_forward_fn = getattr(adapter, "forward_fn", None)
+    # 包一层：batch 搬到 device 再喂给 adapter forward_fn（adapter 不感知 device）
+    forward_fn = wrap_forward_with_device(raw_forward_fn, device)
 
     get_eval_loader = getattr(adapter, "get_eval_loader", None)
     if callable(get_eval_loader):
         eval_loader = get_eval_loader()
     else:
-        eval_loader = calib_loader  # plan：eval_data_ref 空则复用 calib
+        # fail loud（plan §P5 + user brief「复用 calib 当 eval」是禁掉的造假口径）：
+        # eval 缺数据时复用 calib 是数据口径污染（calib 是代表性少量样本，eval 需完整分布），
+        # 会让 best_metric 选错的候选。P4 哨兵到位后可退「问用户」，当前直接 exit 2。
+        sys.stderr.write(
+            "[run_ptq_sweep] FAIL LOUD: adapter 未实现 get_eval_loader（eval_data_ref 空）"
+            "→ 缺评估数据。复用 calib_loader 做 eval 是禁掉的造假口径（plan §P5："
+            "「复用 calib 当 eval」）——会让 best_metric 选错候选。请在用户代码里找 "
+            "eval loader（如 `def load_eval` / `def get_eval_loader`），或在 workflow "
+            "inputs 显式提供 eval_data_ref。\n"
+        )
+        sys.exit(2)
 
     eval_fn, metric_kind, higher_is_better = _resolve_eval(
         adapter, fp_model, eval_loader, forward_fn

@@ -13,17 +13,17 @@ inputs:
     required: true
   calib_data_ref:
     type: string
-    description: "[advanced] 校准数据 loader 的 dotted-path（如 myproj.data:load_calib），返回 torch DataLoader；留空则 agent 用少量假随机数据。会被内化进生成的 adapter.py"
+    description: "[infer] 校准数据 loader 的 dotted-path（如 myproj.data:load_calib），返回 torch DataLoader。agent 读用户代码找 loader；**找不到 fail loud（绝不造假 torch.randn）**。会被内化进生成的 adapter.py"
     required: false
     default: ""
   eval_data_ref:
     type: string
-    description: "[advanced] 评估数据 loader 的 dotted-path；留空则复用 calib_data。会被内化进生成的 adapter.py"
+    description: "[infer] 评估数据 loader 的 dotted-path。agent 读用户代码找 loader；找不到 fail loud（绝不「复用 calib 当 eval」——会让 best_metric 选错候选）。会被内化进 adapter.py"
     required: false
     default: ""
   eval_fn_ref:
     type: string
-    description: "[advanced] 业务评估函数的 dotted-path（如 myproj.eval:build_eval_fn），返回 EvalFn（接 student_model 返回 dict[str,float]）；留空则用 ts_quant.eval.build_teacher_student_eval_fn 默认 teacher-student mse。会被内化进 adapter.py"
+    description: "[infer] 业务评估函数的 dotted-path（如 myproj.eval:build_eval_fn），返回 EvalFn（接 student_model 返回 dict[str,float]）。未提供则脚本 stderr 打 WARN：用 teacher-student mse，**精度仅自洽性参考**（不静默退回）。会被内化进 adapter.py"
     required: false
     default: ""
   mode:
@@ -43,9 +43,19 @@ inputs:
     default: ""
   output_dir:
     type: string
-    description: "[default] 产物输出目录。留空则默认 llm_artifacts/<model_name>/"
+    description: "[default] 产物输出目录。留空则默认 llm_artifacts/<model_name>/ptq-sweep/"
     required: false
     default: ""
+  target_hardware:
+    type: string
+    description: "[ask] 目标硬件：cuda / npu / cpu。空→脚本 resolve_device 自动探测（cuda 优先，npu 次之，cpu 兜底）"
+    required: false
+    default: ""
+  seed:
+    type: string
+    description: "[default] 随机种子（贯穿 torch / numpy / random，复现性底座）"
+    required: false
+    default: "0"
   bake:
     type: string
     description: "[default] 是否 bake 最佳量化模型 state_dict 到 best_quant_model.pt（'true'/'false'）"

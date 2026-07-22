@@ -15,26 +15,28 @@ tools: [bash, read, write, edit, glob, grep]
 
 - 模型入口: `{{ inputs.model_path }}`
 - 项目根: `{{ inputs.project_root }}`
-- 校准 loader dotted-path: `{{ inputs.calib_data_ref }}`（空则从 project_root 推断，最后兜底假随机）
-- 评估 loader dotted-path: `{{ inputs.eval_data_ref }}`（空则复用 calib_data）
-- eval_fn dotted-path: `{{ inputs.eval_fn_ref }}`（空则脚本用默认 teacher-student mse via `build_teacher_student_eval_fn`）
+- 校准 loader dotted-path: `{{ inputs.calib_data_ref }}`（**Tier B 契约**：agent 读用户代码找 loader，如 `grep -rn "def load_calib" {{ inputs.project_root }}`；找不到 → **fail loud**，绝不 `torch.randn` 造假）
+- 评估 loader dotted-path: `{{ inputs.eval_data_ref }}`（**Tier B 契约**：agent 读用户代码找 loader；找不到 → **fail loud**，绝不「复用 calib 当 eval」——calib 是代表性少量样本，eval 需完整分布，复用会让 best_metric 选错候选）
+- eval_fn dotted-path: `{{ inputs.eval_fn_ref }}`（**Tier B 契约**：agent 读用户代码找业务 eval；找不到 → 不生成 `get_eval_fn`，脚本 stderr 打 WARN「用 teacher-student mse，精度仅自洽性参考」并继续——teacher-student mse 是 SDK 合法默认，有自洽性诊断价值，非造假）
 - 扫描模式: `{{ inputs.mode }}`（lightweight / full）
 - 位宽预设（逗号串）: `{{ inputs.bit_widths }}`（空则 lightweight=`w4a4-mx`、full=`w4a4-mx,w4a8-mx,w8a8-mx`）
 - 路径/配方: `{{ inputs.recipes }}`（lightweight=S/Q/A/R 子集，空则全 4 条；full=`all` 或 pre/solver 子集）
-- 输出目录: `{{ inputs.output_dir }}`（空则推断 `llm_artifacts/<model_name>/`）
+- 输出目录: `{{ inputs.output_dir }}`（空则推断 `llm_artifacts/<model_name>/ptq-sweep/`）
+- 目标硬件: `{{ inputs.target_hardware }}`（cuda / npu / cpu；空 → 脚本 `resolve_device` 自动探测）
+- 随机种子: `{{ inputs.seed }}`（默认 0；贯穿 torch / numpy / random）
 - bake 开关: `{{ inputs.bake }}`（`true`/`false`，默认 `true`）
 
 ## 执行流程
 
-1. **确定输出目录** `<output_dir>`：`{{ inputs.output_dir }}` 为空 → 读模型文件推断模型名，设为 `llm_artifacts/<model_name>/`（绝对路径）。
+1. **确定输出目录** `<output_dir>`：`{{ inputs.output_dir }}` 为空 → 读模型文件推断模型名，设为 `llm_artifacts/<model_name>/ptq-sweep/`（绝对路径，**含 `ptq-sweep/` 子目录防同模型串跑互覆**）。
 
 2. **生成 `<output_dir>/adapter.py`**：读 `{{ inputs.model_path }}` 理解模型 forward 签名与 batch 形态，写一个适配模块，暴露：
-   - `load_model() -> nn.Module`：加载并返回 FP 模型（eval 态，作为 teacher）。
-   - `get_calib_loader() -> DataLoader`：校准 loader。优先按 `{{ inputs.calib_data_ref }}` dotted-path import；为空则生成少量**假随机**校准数据（`torch.randn` 按模型输入 shape，batch 8-16、约 64 样本——PTQ 校准用代表性少量样本）。
-   - `get_eval_loader() -> DataLoader`：评估 loader。优先按 `{{ inputs.eval_data_ref }}` dotted-path import；为空则**复用 `get_calib_loader()`** 的产物（同一个 DataLoader 实例或等价构造）。
-   - `forward_fn(module, batch) -> Tensor`：按模型 forward 解包 batch（dict/tuple/Tensor）。
-   - `get_eval_fn() -> Callable[[nn.Module], dict[str, float]]`（**仅** `{{ inputs.eval_fn_ref }}` 非空时实现）：按 dotted-path import 业务评估函数返回；返回的函数签名是 `eval_fn(student_model) -> {"<metric>": float, ...}`。`{{ inputs.eval_fn_ref }}` 为空 → **不要**生成此函数（脚本会自动用 `build_teacher_student_eval_fn(teacher=fp_model, dataloader=eval_loader, forward_fn=forward_fn)`）。
-   - `get_metric_spec() -> dict`（**仅**业务 eval_fn 路径需要）：返回 `{"primary_metric": "<key>", "higher_is_better": bool}`，告诉脚本怎么挑最佳。`{{ inputs.eval_fn_ref }}` 为空时同样不要生成（默认 teacher-student mse：`primary_metric="mse"`、`higher_is_better=False`）。
+   - `load_model() -> nn.Module`：加载并返回 FP 模型（eval 态，作为 teacher）。**不**在此处 `.to(device)`——脚本顶层统一 `resolve_device` 后搬移（device 由 `--device` 传入，单一真相源）。
+   - `get_calib_loader() -> DataLoader`：校准 loader。**Tier B 获取三步**：①读用户代码（`grep -rn "def load_calib\|def get_calib\|DataLoader" {{ inputs.project_root }}`）找 loader 的 dotted-path（如 `myproj.data:load_calib`）→ import 调用；②歧义/找不到 → 暂未接哨兵，**fail loud**（adapter 直接 raise，脚本退出非 0 + stderr 明确报缺什么）；③**绝不通勤 `torch.randn` 造假数据**。
+   - `get_eval_loader() -> DataLoader`（**必实现**）：评估 loader。读用户代码（`grep -rn "def load_eval\|def get_eval_loader\|DataLoader" {{ inputs.project_root }}`）找 loader 的 dotted-path → import 调用。**找不到 → fail loud**（adapter 直接 raise 或不实现该函数，脚本会 exit 2 + stderr 明确报缺什么）。**绝不复用 `get_calib_loader()` 的产物当 eval**——calib 是代表性少量样本，eval 需完整业务分布，复用会让 best_metric 选错候选（plan §P5：禁掉的「复用 calib 当 eval」造假口径）。
+   - `forward_fn(module, batch) -> Tensor`：按模型 forward 解包 batch（dict/tuple/Tensor）。脚本会包装一层把 batch 搬到 device，adapter 不需要懂 device。
+   - `get_eval_fn() -> Callable[[nn.Module], dict[str, float]]`（**仅** `{{ inputs.eval_fn_ref }}` 非空时实现）：按 dotted-path import 业务评估函数返回；返回的函数签名是 `eval_fn(student_model) -> {"<metric>": float, ...}`。`{{ inputs.eval_fn_ref }}` 为空 → **不要**生成此函数（脚本会 stderr 打 WARN「未提供业务 eval_fn，用 teacher-student mse，精度仅自洽性参考」并自动用 `build_teacher_student_eval_fn`）。
+   - `get_metric_spec() -> dict`（**仅**业务 eval_fn 路径需要）：返回 `{"primary_metric": "<key>", "higher_is_better": bool}`。`{{ inputs.eval_fn_ref }}` 为空时同样不要生成（默认 teacher-student mse：`primary_metric="mse"`、`higher_is_better=False`）。
 
 3. **调脚本**（**整段照抄成一条 bash 调用**——`${ORCA_RUN_ID}` 由 orca spawn 注入，`source` 用它定位本 run 的 `orca_env.sh` 拿 `ORCA_CHART_SOCK` 等；内部完成 全扫→落盘 report→bake→render_chart 推图→stdout JSON）：
    ```bash
@@ -50,6 +52,7 @@ tools: [bash, read, write, edit, glob, grep]
      --mode "{{ inputs.mode }}" --bit_widths "{{ inputs.bit_widths }}" \
      --recipes "{{ inputs.recipes }}" --output_dir "<output_dir>" \
      --bake "{{ inputs.bake }}" \
+     --device "{{ inputs.target_hardware }}" --seed "{{ inputs.seed }}" \
      --env_file "<节点指令里 orca_env.sh 的绝对路径，如 runs/<run_id>/orca_env.sh>"
    ```
    ℹ️ `--env_file` 是图表推送的**关键兜底**：脚本启动时自加载 `ORCA_CHART_SOCK` 等到自身进程 env。opencode 的 bash 工具不跨调用保 env——若上面的 `source` 和 `python3` 被拆成两次 bash 调用（deepseek 常见行为），`python3` 那次 shell 没有 `ORCA_CHART_SOCK`，**但只要 `--env_file` 路径传对，脚本自己补齐 env**，`render_chart` 就能连上 chart daemon 把图推到 web。所以 **`--env_file` 必须传**（路径从节点指令里抄，是个普通参数，比让 LLM 合并多行 bash 可靠）。

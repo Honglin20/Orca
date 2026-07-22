@@ -41,6 +41,17 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+# 共享 device / seed 逻辑（plan §P5 硬约束：单一真相源）。
+_HERE = Path(__file__).resolve()
+_QUANT_SCRIPTS = _HERE.parent.parent.parent / "_quant_scripts"
+if str(_QUANT_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_QUANT_SCRIPTS))
+from _device import (  # noqa: E402
+    add_device_seed_args,
+    resolve_device_and_seed,
+    wrap_forward_with_device,
+)
+
 # 一次性 import ts_quant 关键依赖：缺包/未配置 → fail loud exit 2（环境错）。
 try:
     import torch
@@ -138,6 +149,11 @@ def _resolve_eval(adapter, fp_model, eval_loader, forward_fn) -> tuple[Callable,
             "[run_qat] 默认 teacher-student eval 路径需要 adapter.forward_fn\n"
         )
         sys.exit(2)
+    # WARN 不静默（plan §P5）：未提供业务 eval_fn → 退 teacher-student mse，精度仅自洽性参考。
+    sys.stderr.write(
+        "[run_qat] WARN: 未提供业务 eval_fn（eval_fn_ref 空）→ 退 teacher-student mse。"
+        "该指标仅自洽性参考（q_model vs FP teacher 的 mse），不代表业务精度。\n"
+    )
     eval_fn = build_teacher_student_eval_fn(
         teacher_model=fp_model, dataloader=eval_loader, forward_fn=forward_fn
     )
@@ -319,6 +335,8 @@ def _push_charts(
                 x="step",
                 y="metric",
                 hue="scheme",
+                x_label="QAT training step",
+                y_label=f"{metric_kind} (lower is better)" if metric_kind == "mse" else metric_kind,
             )
             sys.stderr.write(f"[run_qat] pushed line: {len(line_data)} points\n")
     except Exception as e:
@@ -368,7 +386,8 @@ def _push_charts(
     except Exception as e:
         sys.stderr.write(f"[run_qat] bar 推送失败（不阻断）: {e}\n")
 
-    # recovery bar：recovery = after − before（QAT 最核心指标，原只在 table；失败 scheme 无数值）
+    # recovery bar：recovery = after − before（QAT 最核心指标，原只在 table；失败 scheme 无数值）。
+    # mse 口径下负值=改善（after<before）。caption 显式标注方向，避免读图者误以为正=好。
     recovery_bar_data: list[dict[str, Any]] = [
         {"scheme": r["scheme"], "recovery": r["recovery"]}
         for r in ok_results
@@ -383,6 +402,12 @@ def _push_charts(
                 title=f"QAT Recovery (after−before, {metric_kind})",
                 x="scheme",
                 y="recovery",
+                y_label=f"after − before ({metric_kind})",
+                caption=(
+                    f"recovery = after − before；{metric_kind} 口径下负值=改善（QAT 把 metric 降下来了）。"
+                    if metric_kind == "mse"
+                    else f"recovery = after − before；正值={metric_kind} 提升。"
+                ),
             )
             sys.stderr.write(
                 f"[run_qat] pushed recovery bar: {len(recovery_bar_data)} schemes\n"
@@ -432,8 +457,8 @@ def main() -> int:
     ap.add_argument("--model_path", required=True, help="原始模型入口路径（回显用）")
     ap.add_argument("--project_root", required=True)
     ap.add_argument("--calib_data_ref", required=True, help="校准 loader dotted-path（duquantpp 需要；可空串）")
-    ap.add_argument("--train_data_ref", required=True, help="训练 loader dotted-path（可空串→复用 calib）")
-    ap.add_argument("--eval_data_ref", required=True, help="评估 loader dotted-path（可空串→复用 train）")
+    ap.add_argument("--train_data_ref", required=True, help="训练 loader dotted-path（空→fail loud：QAT 需真实训练数据，复用 calib 是数据泄漏）")
+    ap.add_argument("--eval_data_ref", required=True, help="评估 loader dotted-path（空→fail loud：复用 train 是数据泄漏口径）")
     ap.add_argument("--eval_fn_ref", required=True, help="业务 eval_fn dotted-path（可空串）")
     ap.add_argument("--scheme", required=True, help="rtn / duquantpp / both")
     ap.add_argument("--bit_width", required=True, help="w4a4-mx / w4a8-mx / w8a8-mx / w8a8-int / w4a16")
@@ -442,6 +467,7 @@ def main() -> int:
     ap.add_argument("--lr", required=True, help="Adam 学习率（float 字符串）")
     ap.add_argument("--output_dir", required=True)
     ap.add_argument("--bake", required=True, help="true / false")
+    add_device_seed_args(ap)
     ap.add_argument("--env_file", default="", help="本 run 的 orca_env.sh 路径（env 兜底）")
     args = ap.parse_args()
     _load_env_file(args.env_file)
@@ -455,6 +481,11 @@ def main() -> int:
             f"[run_qat] ts_quant import 失败（环境错，exit 2）: {_TS_QUANT_IMPORT_ERROR}\n"
         )
         sys.exit(2)
+
+    # device + seed 解析（单一真相源：_device.resolve_device_and_seed）
+    device, seed = resolve_device_and_seed(
+        args.device, args.seed, log_prefix="[run_qat] "
+    )
 
     scheme_arg = (args.scheme or "both").strip().lower()
     if scheme_arg == "both":
@@ -490,17 +521,39 @@ def main() -> int:
     # adapter → fp teacher + loaders + forward
     adapter = _load_adapter(args.adapter)
     fp_model = adapter.load_model()
+    # device 搬移（plan §P5）：adapter.load_model() 返回 CPU 模型，脚本统一搬到 device。
+    fp_model = fp_model.to(device)
     calib_loader = adapter.get_calib_loader()
-    forward_fn = getattr(adapter, "forward_fn", None)
+    raw_forward_fn = getattr(adapter, "forward_fn", None)
+    forward_fn = wrap_forward_with_device(raw_forward_fn, device)
 
+    # 训练 loader：QAT 没真实训练数据 = 烧算力跑无意义短训 → fail loud（plan §P5）。
+    # 老版本「复用 calib_loader 做最小 smoke QAT」是数据泄漏 + 误指标，已删除。
     get_train_loader = getattr(adapter, "get_train_loader", None)
-    train_loader = get_train_loader() if callable(get_train_loader) else calib_loader
+    if callable(get_train_loader):
+        train_loader = get_train_loader()
+    else:
+        sys.stderr.write(
+            "[run_qat] adapter 未实现 get_train_loader（train_data_ref 空）→ fail loud。"
+            "QAT 需真实训练数据：复用 calib 是数据泄漏 + 烧算力跑无意义短训。\n"
+        )
+        sys.exit(2)
 
+    # eval loader：未提供 → fail loud（plan §1-c + plan §P5）。
+    # eval=train 是数据泄漏口径（train loss != eval metric，短训后必然 overfit train），
+    # 复用会让 best_scheme 选到 overfit 候选。P4 哨兵到位后可退「问用户」，当前 exit 2。
     get_eval_loader = getattr(adapter, "get_eval_loader", None)
     if callable(get_eval_loader):
         eval_loader = get_eval_loader()
     else:
-        eval_loader = train_loader
+        sys.stderr.write(
+            "[run_qat] FAIL LOUD: adapter 未实现 get_eval_loader（eval_data_ref 空）"
+            "→ 缺评估数据。复用 train_loader 做 eval 是禁掉的造假口径（plan §1-c + §P5："
+            "「复用 train 当 eval」）——train=eval 是数据泄漏口径，会让 best_scheme 选到 "
+            "overfit 候选。请在用户代码里找 eval loader，或在 workflow inputs 显式提供 "
+            "eval_data_ref。\n"
+        )
+        sys.exit(2)
 
     eval_fn, metric_kind, higher_is_better = _resolve_eval(
         adapter, fp_model, eval_loader, forward_fn

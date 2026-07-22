@@ -19,9 +19,9 @@ tools: [bash, read, write, edit, glob, grep]
 
 - 模型入口: `{{ inputs.model_path }}`
 - 项目根: `{{ inputs.project_root }}`
-- 校准 loader dotted-path: `{{ inputs.calib_data_ref }}`（空则从 project_root 推断，最后兜底假随机）
-- 评估 loader dotted-path: `{{ inputs.eval_data_ref }}`（空则复用 calib_data）
-- eval_fn dotted-path: `{{ inputs.eval_fn_ref }}`（空则脚本用默认 teacher-student mse via `build_teacher_student_eval_fn`）
+- 校准 loader dotted-path: `{{ inputs.calib_data_ref }}`（**Tier B 契约**：agent 读用户代码找 loader，如 `grep -rn "def load_calib" {{ inputs.project_root }}`；找不到 → **fail loud**，绝不 `torch.randn` 造假）
+- 评估 loader dotted-path: `{{ inputs.eval_data_ref }}`（**Tier B 契约**：agent 读用户代码找 loader；找不到 → **fail loud**，绝不「复用 calib 当 eval」——Pareto 搜索依赖业务 eval 分布选最低位宽，calib 是代表性少量样本，复用会让 Pareto 前沿选错）
+- eval_fn dotted-path: `{{ inputs.eval_fn_ref }}`（**Tier B 契约**：agent 读用户代码找业务 eval；找不到 → 不生成 `get_eval_fn`，脚本 stderr 打 WARN「用 teacher-student mse，精度仅自洽性参考」并继续——teacher-student mse 是 SDK 合法默认，有自洽性诊断价值，非造假）
 - 搜索模式: `{{ inputs.mode }}`（explore / constrained_select / minimize_bit_under_accuracy）
 - 候选格式集: `{{ inputs.candidate_format_space }}`（逗号串，空则默认 `INT8,W4A8,INT4,MX4,MX8`）
 - bit 成本口径: `{{ inputs.bit_objective }}`（weight_activation_proxy / weight_only）
@@ -29,19 +29,21 @@ tools: [bash, read, write, edit, glob, grep]
 - 硬 bit 上限: `{{ inputs.avg_bit_budget }}`（空则 null，无硬约束）
 - 搜索预算: `{{ inputs.max_evals }}`（主搜索 candidate 数）
 - 量化粒度: `{{ inputs.granularity }}`（per_tensor / per_token / per_channel）
-- 输出目录: `{{ inputs.output_dir }}`（空则推断 `llm_artifacts/<model_name>/`）
+- 输出目录: `{{ inputs.output_dir }}`（空则推断 `llm_artifacts/<model_name>/bit-curve/`）
+- 目标硬件: `{{ inputs.target_hardware }}`（cuda / npu / cpu；空 → 脚本 `resolve_device` 自动探测）
+- 随机种子: `{{ inputs.seed }}`（默认 0；贯穿 torch / numpy / random）
 - bake 开关: `{{ inputs.bake }}`（`true`/`false`，默认 `true`）
 
 ## 执行流程
 
-1. **确定输出目录** `<output_dir>`：`{{ inputs.output_dir }}` 为空 → 读模型文件推断模型名，设为 `llm_artifacts/<model_name>/`（绝对路径）。
+1. **确定输出目录** `<output_dir>`：`{{ inputs.output_dir }}` 为空 → 读模型文件推断模型名，设为 `llm_artifacts/<model_name>/bit-curve/`（绝对路径，**含 `bit-curve/` 子目录防同模型串跑互覆**）。
 
 2. **生成 `<output_dir>/adapter.py`**：读 `{{ inputs.model_path }}` 理解模型 forward 签名与 batch 形态，写一个适配模块，暴露：
-   - `load_model() -> nn.Module`：加载并返回 FP 模型（eval 态，作为 teacher）。
-   - `get_calib_loader() -> DataLoader`：校准 loader。优先按 `{{ inputs.calib_data_ref }}` dotted-path import；为空则生成少量**假随机**校准数据（`torch.randn` 按模型输入 shape，batch 8-16、约 64 样本）。
-   - `get_eval_loader() -> DataLoader`：评估 loader。优先按 `{{ inputs.eval_data_ref }}` import；为空则**复用 `get_calib_loader()`**。
-   - `forward_fn(module, batch) -> Tensor`：按模型 forward 解包 batch（dict/tuple/Tensor）。
-   - `get_eval_fn() -> Callable[[nn.Module], dict[str, float]]`（**仅** `{{ inputs.eval_fn_ref }}` 非空时实现）：按 dotted-path import 业务评估函数；签名 `eval_fn(student_model) -> {"<metric>": float, ...}`。空则不生成（脚本自动用 teacher-student mse）。
+   - `load_model() -> nn.Module`：加载并返回 FP 模型（eval 态，作为 teacher）。**不**在此处 `.to(device)`——脚本顶层统一 `resolve_device` 后搬移。
+   - `get_calib_loader() -> DataLoader`：校准 loader。**Tier B 获取三步**：①读用户代码（`grep -rn "def load_calib\|def get_calib\|DataLoader" {{ inputs.project_root }}`）找 loader 的 dotted-path → import 调用；②歧义/找不到 → **fail loud**（adapter 直接 raise）；③**绝不通勤 `torch.randn` 造假数据**。
+   - `get_eval_loader() -> DataLoader`（**必实现**）：评估 loader。读用户代码（`grep -rn "def load_eval\|def get_eval_loader\|DataLoader" {{ inputs.project_root }}`）找 loader → import。**找不到 → fail loud**（adapter 直接 raise 或不实现该函数，脚本 exit 2 + stderr 明确报缺什么）。**绝不复用 calib_loader 当 eval**——calib 是代表性少量样本，eval 需完整业务分布，复用会让 Pareto 前沿在错的 metric 上选最低位宽（plan §P5：禁掉的「复用 calib 当 eval」造假口径）。
+   - `forward_fn(module, batch) -> Tensor`：按模型 forward 解包 batch（dict/tuple/Tensor）。脚本会包装一层把 batch 搬到 device，adapter 不需要懂 device。
+   - `get_eval_fn() -> Callable[[nn.Module], dict[str, float]]`（**仅** `{{ inputs.eval_fn_ref }}` 非空时实现）：按 dotted-path import 业务评估函数；签名 `eval_fn(student_model) -> {"<metric>": float, ...}`。空则不生成（脚本 stderr 打 WARN「未提供业务 eval_fn，用 teacher-student mse，精度仅自洽性参考」并自动用 `build_teacher_student_eval_fn`）。
    - `get_metric_spec() -> dict`（**仅**业务 eval_fn 路径需要）：返回 `{"primary_metric": "<key>", "higher_is_better": bool}`。空则不生成（默认 mse / lower-is-better）。
 
 3. **调脚本**（**整段照抄成一条 bash 调用**——`${ORCA_RUN_ID}` 由 orca spawn 注入，`source` 用它定位本 run 的 `orca_env.sh` 拿 `ORCA_CHART_SOCK` 等；内部完成 搜索→落盘→bake→render_chart 推图→stdout JSON）：
@@ -64,6 +66,7 @@ tools: [bash, read, write, edit, glob, grep]
      --granularity "{{ inputs.granularity }}" \
      --output_dir "<output_dir>" \
      --bake "{{ inputs.bake }}" \
+     --device "{{ inputs.target_hardware }}" --seed "{{ inputs.seed }}" \
      --env_file "<节点指令里 orca_env.sh 的绝对路径，如 runs/<run_id>/orca_env.sh>"
    ```
    ⚠️ **必须整段作为一条 bash 调用原样照抄**（用 `${ORCA_RUN_ID}` 自定位 `orca_env.sh`，**不要**手填绝对路径、**不要**拆成多次调用）。opencode 的 bash 工具不跨调用保 env——拆开会让 `render_chart` 缺 `ORCA_CHART_SOCK` 静默失败、图不推（report 仍正常）。`--env_file` 是图表推送的关键兜底，**必须传**。

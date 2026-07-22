@@ -37,6 +37,17 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+# 共享 device / seed 逻辑（plan §P5 硬约束：单一真相源）。
+_HERE = Path(__file__).resolve()
+_QUANT_SCRIPTS = _HERE.parent.parent.parent / "_quant_scripts"
+if str(_QUANT_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_QUANT_SCRIPTS))
+from _device import (  # noqa: E402
+    add_device_seed_args,
+    resolve_device_and_seed,
+    wrap_forward_with_device,
+)
+
 # 一次性 import ts_quant 关键依赖：缺包/未配置 → fail loud exit 2（环境错），
 # 而非走搜索 try 内 → exit 3（业务错，根因被埋）。
 try:
@@ -159,6 +170,11 @@ def _resolve_eval(adapter, fp_model, eval_loader, forward_fn) -> tuple[Callable,
             "（按模型 forward 解包 batch）—— 异构 batch 会让 SDK fallback 误算\n"
         )
         sys.exit(2)
+    # WARN 不静默（plan §P5）：未提供业务 eval_fn → 退 teacher-student mse，精度仅自洽性参考。
+    sys.stderr.write(
+        "[run_bit_curve] WARN: 未提供业务 eval_fn（eval_fn_ref 空）→ 退 teacher-student mse。"
+        "该指标仅自洽性参考（量化模型 vs FP teacher 的 mse），不代表业务精度。\n"
+    )
     eval_fn = build_teacher_student_eval_fn(
         teacher_model=fp_model,
         dataloader=eval_loader,
@@ -275,6 +291,7 @@ def _push_charts(
     # chart 1：真 Pareto 前沿（chart_type=pareto；x=bit 恒 min 越小越好，y=metric 按方向）。
     # 用 frontier_points，去掉旧的 hue="series"——pareto 前端自动绘前沿线，
     # 选中点的标识走 scatter（coral 高亮）+ table，这里不重复编码。
+    # 标题用 metric_kind 而非「Accuracy」（原写死 Accuracy 但 y 轴常是 mse，名实不符）。
     pts_sorted = sorted(frontier_points, key=_point_bit)
     pareto_data: list[dict[str, Any]] = [
         {"bit": round(_point_bit(p), 4), "metric": _point_metric(p)}
@@ -286,9 +303,15 @@ def _push_charts(
                 chart_type="pareto",
                 data=pareto_data,
                 label=CHART_LABEL,
-                title=f"Bit-Width vs Accuracy Pareto Frontier ({metric_kind})",
+                title=f"Bit-Width vs {metric_kind} Pareto Frontier",
                 x="bit",
                 y="metric",
+                x_label="avg bit-width (lower is better)",
+                y_label=f"{metric_kind} (direction: {pareto_y_direction})",
+                caption=(
+                    f"x=avg bit-width（越小越好）；y={metric_kind}，方向={pareto_y_direction}"
+                    f"（mse 口径下低=好，业务 accuracy 口径下高=好）。coral 点=前沿。"
+                ),
                 pareto_x_direction="min",  # bit 越小越好
                 pareto_y_direction=pareto_y_direction,
             )
@@ -403,9 +426,31 @@ def _render_charts(
     )
 
 
-# ─────────────────────────────────────────────────────────────────
-# bake：final.layer_configs → quantize_model(qconfig_dict=...) → best_mixed_model.pt
-# ─────────────────────────────────────────────────────────────────
+# bake 后对账容差（plan §P5 N7：相对 1e-4；baked 重 eval metric 与 search final.score 对比）。
+_BAKE_METRIC_REL_TOL = 1e-4
+_BAKE_METRIC_ABS_FLOOR = 1e-12  # 防 |final|=0 时除零
+
+
+def _compute_bake_metric_relative_diff(
+    reeval_metric: float | None,
+    search_final_score: float | None,
+) -> float | None:
+    """bake 重 eval metric 与 search final.score 的相对差（pure math，无 torch 依赖）。
+
+    返回 None 表示无法对账（任一为 None / 类型错 / 解析失败）；
+    否则返回 ``|reev - final| / max(|final|, _BAKE_METRIC_ABS_FLOOR)``。
+    抽成独立函数便于单测（Rule 9：关键 fail-loud 防线必须有测试钉死）。
+    """
+    if reeval_metric is None or search_final_score is None:
+        return None
+    try:
+        diff = abs(float(reeval_metric) - float(search_final_score))
+        denom = max(abs(float(search_final_score)), _BAKE_METRIC_ABS_FLOOR)
+        return diff / denom
+    except (TypeError, ValueError):
+        return None
+
+
 def _bake_selected(
     fp_model,
     layer_configs: dict[str, Any],
@@ -413,8 +458,18 @@ def _bake_selected(
     calib_loader,
     forward_fn,
     baked_path: Path,
-) -> str:
-    """把选中候选的 per-layer 格式 assignment 烤成可部署 state_dict。失败返空串 + stderr。"""
+    eval_fn: Callable,
+    metric_kind: str,
+) -> tuple[str, float | None]:
+    """把选中候选的 per-layer 格式 assignment 烤成可部署 state_dict。
+
+    改动生效（plan §P5 核心修复）：bake 后**reload baked state_dict + 重 eval**，
+    返回 ``(path, reeval_metric)``。失败返 ``("", None)``——曲线产出不受阻断
+    （spec-review N7：bake 失败跳过对账、不阻断）。
+
+    reload 路径：再 deepcopy fp_model → quantize_model 出同拓扑空壳 → load_state_dict
+    （从落盘的 best_mixed_model.pt）→ eval。最贴近「用户拿到 .pt 后会看到的精度」。
+    """
     import torch  # noqa: F401
 
     try:
@@ -426,7 +481,7 @@ def _bake_selected(
             sys.stderr.write(
                 "[run_bit_curve] bake: layer_configs 为空 → skip bake\n"
             )
-            return ""
+            return "", None
         model_copy = copy.deepcopy(fp_model)
         q_model = quantize_model(
             model=model_copy,
@@ -437,15 +492,84 @@ def _bake_selected(
             inplace=True,
         )
         torch.save(q_model.state_dict(), baked_path)
+
+        # 改动生效（plan §P5 核心修复）：reload 落盘 state_dict 到同拓扑空壳，重 eval。
+        # 这才反映「用户拿到 best_mixed_model.pt 后会看到的真实精度」——search 内部
+        # final.score 用的是搜索时的 in-memory eval，与 bake artifact 可能因 state_dict
+        # 序列化丢 observer/calib buffer 而漂移。
+        # strict=True（code-reviewer 🔴）：键失配必须 fail loud——丢 observer state
+        # 是 bake 真坏了的信号，不该静默。
+        reeval_metric: float | None = None
+        try:
+            reload_q_model = quantize_model(
+                model=copy.deepcopy(fp_model),
+                qconfig=base_qconfig,
+                qconfig_dict=qconfig_dict,
+                calib_data=calib_loader,
+                forward_fn=forward_fn,
+                inplace=True,
+            )
+            reload_q_model.load_state_dict(
+                torch.load(baked_path, map_location="cpu"), strict=True
+            )
+            metrics = eval_fn(reload_q_model)
+            if isinstance(metrics, dict) and metric_kind in metrics:
+                reeval_metric = float(metrics[metric_kind])
+            _free_model(reload_q_model)
+        except Exception as ree:
+            sys.stderr.write(
+                f"[run_bit_curve] bake 后 reload + 重 eval 失败"
+                f"（不阻断 bake，但 reeval_metric=None，对账将跳过）: "
+                f"{type(ree).__name__}: {ree}\n"
+            )
+            reeval_metric = None
+
         _free_model(q_model)
-        sys.stderr.write(f"[run_bit_curve] baked selected → {baked_path}\n")
-        return str(baked_path)
+        sys.stderr.write(
+            f"[run_bit_curve] baked selected → {baked_path} (reeval_metric={reeval_metric})\n"
+        )
+        return str(baked_path), reeval_metric
     except Exception as e:
         sys.stderr.write(
             f"[run_bit_curve] bake 失败（不阻断，曲线是核心产出）: "
             f"{type(e).__name__}: {e}\n"
         )
-        return ""
+        return "", None
+
+
+def _check_bake_metric_consistency(
+    reeval_metric: float | None,
+    search_final_score: float | None,
+    metric_kind: str,
+) -> None:
+    """bake 后重 eval metric 与 search 内部 final.score 对账（副作用层：stderr + exit）。
+
+    plan §P5 N7：``|baked - final| / max(|final|, abs_floor) > rel_tol(1e-4)`` → fail loud。
+    任一为 None / 解析失败 → 跳过对账（不阻断，打 WARN）。
+    spec-review N7：bake 失败不阻断曲线产出。
+
+    数学部分抽到 ``_compute_bake_metric_relative_diff`` 便于单测（无副作用层）。
+    """
+    rel = _compute_bake_metric_relative_diff(reeval_metric, search_final_score)
+    if rel is None:
+        sys.stderr.write(
+            f"[run_bit_curve] WARN: bake 对账跳过（reeval={reeval_metric}, "
+            f"final_score={search_final_score}）—— bake 重 eval 或 search final.score 不可用"
+            f" 或类型不可解析。\n"
+        )
+        return
+    sys.stderr.write(
+        f"[run_bit_curve] bake 对账: reeval={reeval_metric:.8f} final_score={search_final_score:.8f}"
+        f" rel_diff={rel:.2e} (tol={_BAKE_METRIC_REL_TOL:.0e})\n"
+    )
+    if rel > _BAKE_METRIC_REL_TOL:
+        sys.stderr.write(
+            f"[run_bit_curve] FAIL LOUD: baked metric 与 search final.score 对账超 tol"
+            f"（rel_diff={rel:.2e} > tol={_BAKE_METRIC_REL_TOL:.0e}, metric_kind={metric_kind}）。"
+            f"这意味着 bake 出的 best_mixed_model.pt 实际 eval ≠ 报告 metric，用户拿到的是错的交付物。"
+            f"请检查 quantize_model 的 bake 路径是否漏掉 observer / calib state。\n"
+        )
+        sys.exit(3)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -468,6 +592,7 @@ def main() -> int:
     ap.add_argument("--granularity", required=True, help="per_tensor / per_token / per_channel")
     ap.add_argument("--output_dir", required=True)
     ap.add_argument("--bake", required=True, help="true / false")
+    add_device_seed_args(ap)
     ap.add_argument(
         "--env_file",
         default="",
@@ -487,6 +612,11 @@ def main() -> int:
             f"[run_bit_curve] ts_quant import 失败（环境错，exit 2）: {_TS_QUANT_IMPORT_ERROR}\n"
         )
         sys.exit(2)
+
+    # device + seed 解析（单一真相源：_device.resolve_device_and_seed）
+    device, seed = resolve_device_and_seed(
+        args.device, args.seed, log_prefix="[run_bit_curve] "
+    )
 
     mode = (args.mode or "explore").strip().lower()
     if mode not in {"explore", "constrained_select", "minimize_bit_under_accuracy"}:
@@ -526,10 +656,27 @@ def main() -> int:
     # adapter → fp teacher + calib + eval + forward
     adapter = _load_adapter(args.adapter)
     fp_model = adapter.load_model()
+    # device 搬移（plan §P5）：adapter.load_model() 返回 CPU 模型，脚本统一搬到 device。
+    # 必须在 TSQuantizer / search_mix_precision 之前，让 search 内部 eval 走 GPU。
+    fp_model = fp_model.to(device)
     calib_loader = adapter.get_calib_loader()
-    forward_fn = getattr(adapter, "forward_fn", None)
+    raw_forward_fn = getattr(adapter, "forward_fn", None)
+    forward_fn = wrap_forward_with_device(raw_forward_fn, device)
     get_eval_loader = getattr(adapter, "get_eval_loader", None)
-    eval_loader = get_eval_loader() if callable(get_eval_loader) else calib_loader
+    if callable(get_eval_loader):
+        eval_loader = get_eval_loader()
+    else:
+        # fail loud（plan §P5 + user brief「复用 calib 当 eval」是禁掉的造假口径）：
+        # Pareto 搜索依赖业务 eval 分布选最低位宽；用 calib（代表性少量样本）会让 Pareto
+        # 前沿选错。P4 哨兵到位后可退「问用户」，当前直接 exit 2。
+        sys.stderr.write(
+            "[run_bit_curve] FAIL LOUD: adapter 未实现 get_eval_loader（eval_data_ref 空）"
+            "→ 缺评估数据。复用 calib_loader 做 eval 是禁掉的造假口径（plan §P5："
+            "「复用 calib 当 eval」）——会让 Pareto 前沿在错的 metric 上选最低位宽，"
+            "交付物 bit 分配有偏差。请在用户代码里找 eval loader，或在 workflow inputs "
+            "显式提供 eval_data_ref。\n"
+        )
+        sys.exit(2)
 
     eval_fn, metric_kind, higher_is_better = _resolve_eval(
         adapter, fp_model, eval_loader, forward_fn
@@ -650,32 +797,68 @@ def main() -> int:
     }
     _dump_json(summary, summary_path)
 
-    # bake
+    # bake + 改动生效对账（plan §P5 核心修复）。
+    # bake 成功 → reload + 重 eval → best_metric 取 baked 实测值（非 search final.score）。
+    # bake 失败/跳过 → 不阻断曲线产出（spec-review N7），best_metric 仍报 search final.score。
+    # 持久化顺序（code-reviewer 🔴）：先 summary.dump(含 baked_model_path) 再对账，
+    # 保证对账 fail loud exit(3) 时磁盘上 best_mixed_model.pt 与 summary 一致，
+    # 不留「summary=None 但 .pt 已落盘」的孤儿态。
     baked_path_str = ""
+    baked_reeval_metric: float | None = None
     bake_token = (args.bake or "").strip().lower()
     if bake_token in _TRUE_TOKENS:
         if layer_configs:
-            baked_path_str = _bake_selected(
+            baked_path_str, baked_reeval_metric = _bake_selected(
                 fp_model,
                 layer_configs,
                 base_qconfig,
                 calib_loader,
                 forward_fn,
                 output_dir / "best_mixed_model.pt",
+                eval_fn,
+                metric_kind,
             )
+            # 持久化：bake 完成立即写 summary（含 baked_model_path + reeval_metric），
+            # 再做对账。对账失败 exit(3) 时 summary 已反映磁盘真相。
+            summary["baked_model_path"] = baked_path_str or None
+            summary["baked_reeval_metric"] = baked_reeval_metric
+            _dump_json(summary, summary_path)
+            # 改动生效对账（plan §P5）：bake 成功才对账，超 tol fail loud；失败/None 跳过不阻断。
+            if baked_path_str:
+                _check_bake_metric_consistency(
+                    baked_reeval_metric, best_metric, metric_kind
+                )
         else:
             sys.stderr.write(
                 "[run_bit_curve] bake: final.layer_configs 缺失 → skip bake\n"
             )
-        summary["baked_model_path"] = baked_path_str or None
-        _dump_json(summary, summary_path)
+            summary["baked_model_path"] = None
+            summary["baked_reeval_metric"] = None
+            _dump_json(summary, summary_path)
     elif bake_token in _FALSE_TOKENS:
         sys.stderr.write("[run_bit_curve] bake=false → skip bake\n")
+        summary["baked_model_path"] = None
+        summary["baked_reeval_metric"] = None
+        _dump_json(summary, summary_path)
     else:
         sys.stderr.write(
             f"[run_bit_curve] --bake='{args.bake}' 非法（期望 true/false/1/0/yes/no）\n"
         )
         sys.exit(2)
+
+    # best_metric 取值优先级（plan §P5）：bake 成功且 reeval 可用 → 取 baked 实测值；
+    # 否则取 search 内部 final.score（bake=false 或 bake 重 eval 失败）。
+    reported_best_metric: float | None
+    if baked_path_str and baked_reeval_metric is not None:
+        reported_best_metric = baked_reeval_metric
+        sys.stderr.write(
+            f"[run_bit_curve] best_metric 取 baked 重 eval 实测值: {reported_best_metric:.8f}"
+            f"（非 search final.score={best_metric}）\n"
+        )
+    else:
+        reported_best_metric = (
+            float(best_metric) if isinstance(best_metric, (int, float)) else None
+        )
 
     # charts
     _render_charts(
@@ -694,7 +877,7 @@ def main() -> int:
         "model_path": args.model_path,
         "baked_model_path": baked_path_str,
         "best_config": best_config_label,
-        "best_metric": float(best_metric) if isinstance(best_metric, (int, float)) else 0.0,
+        "best_metric": reported_best_metric if reported_best_metric is not None else 0.0,
         "best_bit": float(best_bit) if isinstance(best_bit, (int, float)) else 0.0,
         "candidates_evaluated": int(eval_calls) if isinstance(eval_calls, (int, float)) else 0,
         "mode": mode,

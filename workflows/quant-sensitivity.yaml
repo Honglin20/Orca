@@ -13,7 +13,7 @@ inputs:
     required: true
   calib_data_ref:
     type: string
-    description: "[advanced] 校准数据 loader 的 dotted-path（如 myproj.data:load_calib），返回 torch DataLoader；留空则 agent 用少量假随机数据。会被内化进生成的 adapter.py"
+    description: "[infer] 校准数据 loader 的 dotted-path（如 myproj.data:load_calib），返回 torch DataLoader。agent 读用户代码找 loader；**找不到 fail loud（绝不造假 torch.randn）**。会被内化进生成的 adapter.py"
     required: false
     default: ""
   method:
@@ -38,14 +38,24 @@ inputs:
     default: "w8a8"
   eval_fn_ref:
     type: string
-    description: "[advanced] 业务评估函数的 dotted-path（如 myproj.eval:build_eval_fn）；method 为 ptq_binary_sensitivity/mix_precision_search 时必填。会被内化进生成的 adapter.py"
+    description: "[infer] 业务评估函数的 dotted-path（如 myproj.eval:build_eval_fn）；method 为 ptq_binary_sensitivity/mix_precision_search 时必填。会被内化进生成的 adapter.py"
     required: false
     default: ""
   output_dir:
     type: string
-    description: "[default] 产物输出目录。留空则默认 llm_artifacts/<model_name>/"
+    description: "[default] 产物输出目录。留空则默认 llm_artifacts/<model_name>/sensitivity/"
     required: false
     default: ""
+  target_hardware:
+    type: string
+    description: "[ask] 目标硬件：cuda / npu / cpu。空→脚本 resolve_device 自动探测（cuda 优先，npu 次之，cpu 兜底）"
+    required: false
+    default: ""
+  seed:
+    type: string
+    description: "[default] 随机种子（贯穿 torch / numpy / random，复现性底座）"
+    required: false
+    default: "0"
 
 nodes:
   # ═══════════════════════════════════════════════════════════════

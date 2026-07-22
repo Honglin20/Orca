@@ -15,31 +15,38 @@ tools: [bash, read, write, edit, glob, grep]
 
 - 模型入口: `{{ inputs.model_path }}`
 - 项目根: `{{ inputs.project_root }}`
-- 校准 loader dotted-path: `{{ inputs.calib_data_ref }}`（空则从 project_root 推断）
+- 校准 loader dotted-path: `{{ inputs.calib_data_ref }}`（**Tier B 契约**：agent 读用户代码找 loader，如 `grep -rn "def load_calib" {{ inputs.project_root }}`；找不到 → **fail loud**，绝不 `torch.randn` 造假）
 - 方法: `{{ inputs.method }}`（mse / layer_stats / ptq_binary_sensitivity / mix_precision_search）
 - 比例: `{{ inputs.ratio }}`
 - 低/高精度预设: `{{ inputs.low_bits }}` / `{{ inputs.high_bits }}`
 - eval_fn dotted-path: `{{ inputs.eval_fn_ref }}`（method∈{ptq_binary_sensitivity, mix_precision_search} 时必填）
-- 输出目录: `{{ inputs.output_dir }}`（空则推断 `llm_artifacts/<model_name>/`）
+- 输出目录: `{{ inputs.output_dir }}`（空则推断 `llm_artifacts/<model_name>/sensitivity/`）
+- 目标硬件: `{{ inputs.target_hardware }}`（cuda / npu / cpu；空 → 脚本 `resolve_device` 自动探测）
+- 随机种子: `{{ inputs.seed }}`（默认 0；贯穿 torch / numpy / random）
 
 ## 执行流程
 
-1. **确定输出目录** `<output_dir>`：`{{ inputs.output_dir }}` 为空 → 读模型文件推断模型名，设为 `llm_artifacts/<model_name>/`（绝对路径）。
+1. **确定输出目录** `<output_dir>`：`{{ inputs.output_dir }}` 为空 → 读模型文件推断模型名，设为 `llm_artifacts/<model_name>/sensitivity/`（绝对路径，**含 `sensitivity/` 子目录防同模型串跑互覆**）。
 
 2. **生成 `<output_dir>/adapter.py`**：读 `{{ inputs.model_path }}` 理解模型 forward 签名与 batch 形态，写一个适配模块，暴露：
-   - `load_model() -> nn.Module`：加载并返回 FP 模型（eval 态）。
-   - `get_calib_loader() -> DataLoader`：校准 loader。优先按 `{{ inputs.calib_data_ref }}` dotted-path import；为空则生成少量**假随机**校准数据（`torch.randn` 按模型输入 shape，batch 8-16、约 64 样本——敏感度分析只需代表性少量样本，不要求真实精度）。
-   - `forward_fn(module, batch) -> Tensor`：按模型 forward 解包 batch（dict/tuple/Tensor）。
+   - `load_model() -> nn.Module`：加载并返回 FP 模型（eval 态）。**不**在此处 `.to(device)`——脚本顶层统一 `resolve_device` 后搬移。
+   - `get_calib_loader() -> DataLoader`：校准 loader。**Tier B 获取三步**：①读用户代码（`grep -rn "def load_calib\|def get_calib\|DataLoader" {{ inputs.project_root }}`）找 loader 的 dotted-path → import 调用；②歧义/找不到 → **fail loud**（adapter 直接 raise）；③**绝不 `torch.randn` 造假**。
+   - `forward_fn(module, batch) -> Tensor`：按模型 forward 解包 batch（dict/tuple/Tensor）。脚本会包装一层把 batch 搬到 device，adapter 不需要懂 device。
    - `get_eval_fn()`：仅 method∈{ptq_binary_sensitivity, mix_precision_search} 需要——按 `{{ inputs.eval_fn_ref }}` import 业务评估函数返回；这两个 method 下 `{{ inputs.eval_fn_ref }}` 为空 → **先 fail loud 报错**，不要硬生成空实现。
 
-3. **调脚本**（一次调用，内部完成 分析→落盘 report→render_chart 推图→stdout JSON）：
+3. **调脚本**（**整段照抄成一条 bash 调用**——`${ORCA_RUN_ID}` 由 orca spawn 注入，`source` 用它定位本 run 的 `orca_env.sh` 拿 `ORCA_CHART_SOCK`；与 PTQ 同 env 模式，否则 opencode bash 拆调用丢 env→推图静默失败）：
    ```bash
+   source .venv/bin/activate 2>/dev/null || true
+   source "runs/${ORCA_RUN_ID}/orca_env.sh" 2>/dev/null || true
    python3 "$ORCA_AGENT_RESOURCES/scripts/run_sensitivity.py" \
      --adapter "<output_dir>/adapter.py" \
      --method "{{ inputs.method }}" --ratio "{{ inputs.ratio }}" \
      --low_bits "{{ inputs.low_bits }}" --high_bits "{{ inputs.high_bits }}" \
-     --output_dir "<output_dir>"
+     --output_dir "<output_dir>" \
+     --device "{{ inputs.target_hardware }}" --seed "{{ inputs.seed }}" \
+     --env_file "<节点指令里 orca_env.sh 的绝对路径，如 runs/<run_id>/orca_env.sh>"
    ```
+   ⚠️ **必须整段作为一条 bash 调用原样照抄**（用 `${ORCA_RUN_ID}` 自定位 `orca_env.sh`）。`--env_file` 是图表推送的关键兜底，**必须传**——与 PTQ/bit-curve 已踩过的坑对齐。
    脚本非 0 退出 → 把 stderr/stdout 原样上抛，**不要假装完成**。推图失败脚本会 stderr 提示但**不阻断**（`report.json` 是核心产出）。
 
 4. **回显**：脚本 stdout 末尾输出一个 JSON（含 `output_dir`/`report_path`/`sensitive_layers`/`selected_count`/`method`）。**原样**作为本节点产出（`output_schema` 校验）。

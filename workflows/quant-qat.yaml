@@ -13,22 +13,22 @@ inputs:
     required: true
   calib_data_ref:
     type: string
-    description: "[advanced] 校准数据 loader 的 dotted-path（duquantpp scheme 校准用）；留空则 agent 用少量假随机数据。会被内化进生成的 adapter.py"
+    description: "[infer] 校准数据 loader 的 dotted-path（duquantpp scheme 校准用）。agent 读用户代码找 loader；scheme=duquantpp 时找不到 fail loud（绝不造假）。会被内化进生成的 adapter.py"
     required: false
     default: ""
   train_data_ref:
     type: string
-    description: "[advanced] 训练数据 loader 的 dotted-path；留空则复用 calib 做最小 smoke QAT（真实精度恢复需真实训练数据）。会被内化进 adapter.py"
+    description: "[infer] 训练数据 loader 的 dotted-path。agent 读用户代码找 loader；找不到 fail loud（绝不造假；QAT 没真实训练数据 = 烧算力跑无意义短训）。会被内化进 adapter.py"
     required: false
     default: ""
   eval_data_ref:
     type: string
-    description: "[advanced] 评估数据 loader 的 dotted-path；留空则复用 train。会被内化进 adapter.py"
+    description: "[infer] 评估数据 loader 的 dotted-path。agent 读用户代码找 loader；找不到 fail loud（绝不「复用 train 当 eval」——train=eval 是数据泄漏口径，会让 best_scheme 选 overfit 候选）。会被内化进 adapter.py"
     required: false
     default: ""
   eval_fn_ref:
     type: string
-    description: "[advanced] 业务评估函数的 dotted-path；留空则用 ts_quant.eval.build_teacher_student_eval_fn 默认 teacher-student mse（训练 loss 始终用 teacher-student mse，label-free）。会被内化进 adapter.py"
+    description: "[infer] 业务评估函数的 dotted-path；未提供则脚本 stderr 打 WARN：用 teacher-student mse，**精度仅自洽性参考**（训练 loss 始终用 teacher-student mse，label-free distillation-style QAT）。会被内化进 adapter.py"
     required: false
     default: ""
   scheme:
@@ -58,9 +58,19 @@ inputs:
     default: "1e-4"
   output_dir:
     type: string
-    description: "[default] 产物输出目录。留空则默认 llm_artifacts/<model_name>/"
+    description: "[default] 产物输出目录。留空则默认 llm_artifacts/<model_name>/qat/"
     required: false
     default: ""
+  target_hardware:
+    type: string
+    description: "[ask] 目标硬件：cuda / npu / cpu。空→脚本 resolve_device 自动探测（cuda 优先，npu 次之，cpu 兜底）"
+    required: false
+    default: ""
+  seed:
+    type: string
+    description: "[default] 随机种子（贯穿 torch / numpy / random，复现性底座）"
+    required: false
+    default: "0"
   bake:
     type: string
     description: "[default] 是否 bake 最佳 q_model state_dict 到 best_qat_model.pt（'true'/'false'）"
