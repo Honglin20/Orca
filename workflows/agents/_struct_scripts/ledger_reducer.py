@@ -305,6 +305,11 @@ def reduce_ledger(
         "hypothesis": candidate["hypothesis"],
         "timestamp": None,  # §11.1 注：由调度器写，脚本内禁用 Date.now
     }
+    # plan sprightly-questing-donut §2.2：direction_id 可选透传（hypothesizer 声明的 KB direction，
+    # 供 direction_coverage.py 算 tried/untried）。不在 _LEDGER_REQUIRED（旧 ledger 向后兼容）。
+    did = candidate.get("direction_id")
+    if isinstance(did, str) and did.strip():
+        ledger_entry["direction_id"] = did.strip()
 
     # ── 模拟 append 后的 ledger（用于全局 champion 计算；dry_run 时不真写）──────
     ledger_after = ledger + [ledger_entry]

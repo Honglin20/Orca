@@ -76,9 +76,12 @@ python3 "{{ setup.output.struct_scripts_dir }}/ast_diff.py" \
   "snapshot":   "{{ engineer.output.snapshot_path }}",
   "onnx":       "{{ evaluator.output.onnx_path }}",
   "diff_summary": "<step1 summary>",
-  "hypothesis": "{{ hypothesizer.output.hypothesis }}"
+  "hypothesis": "{{ hypothesizer.output.hypothesis }}",
+  "direction_id": "{{ hypothesizer.output.direction_id }}"
 }
 ```
+- **direction_id**（plan §2.2）：透传 hypothesizer 输出的方向标识（`Dx` / `hyperparam` / `off_catalog:指纹`）。
+  ledger_reducer 据此写进 ledger，供下轮 hypothesizer 的 direction_coverage.py 算 tried/untried。
 - 父 id：baseline 首轮 → `"baseline"`；否则取 ledger.jsonl **最后一行候选评估行**的 `id`（血脉父）。
 - **path 字段（P7 M7 修复，deterministic）**：从 `{{ setup.output.family }}` 派生，**不**让 LLM 自由发挥。
   首轮 `path = "<family>/baseline"`；后续 `path = "<family>/<parent_path>"`（或简单 = family 本身）。
@@ -113,11 +116,11 @@ python3 "{{ setup.output.struct_scripts_dir }}/ledger_reducer.py" \
      判定本轮失败的**宏观结构原因**（不是超参原因——超参原因价值低）。例如："把第 3-5 层 MHA 换 GQA 后时延降但精度掉，因 group 太少削弱表达"。
   2. **提炼原则**：一句话结构-性能原则（可被未来 hypothesizer 复用）。
   3. **写回 KB（§7.3 Analyst 写回 / §11.3）**——**追加**（append），不删改历史：
-     - 失败结构 → `knowledge_base/families/<族>/failures.md`：append "结构指纹 → 失败原因（时延没降 / 精度掉 / 导不出）"。
-     - 跨族通用原则 → `knowledge_base/common/principles.md`：append。
+     - 失败结构 → `${ORCA_KB_DIR}/families/<族>/failures.md`：append "结构指纹 → 失败原因（时延没降 / 精度掉 / 导不出）"。
+     - 跨族通用原则 → `${ORCA_KB_DIR}/common/principles.md`：append。
      - 写回后同步失效 kb_cache 中该单文件并重载（§7.3 run 级缓存），让下轮 hypothesizer 看到新原则。
   4. 你是**唯一写 KB**的 agent（多 path 场景下避免并发写冲突，§8.2）。
-  族名从 `{{ setup.output.family }}` 读；KB 根：`knowledge_base/`（已固化）。
+  族名从 `{{ setup.output.family }}` 读；KB 根：`${ORCA_KB_DIR}`（plan §1.2：run 启动预检已确保非空，换项目可移植）。
 
 ### Step 4：跑 viz_struct 三图（P7 合并 viz_round，幂等刷新）
 
