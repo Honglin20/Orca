@@ -663,6 +663,7 @@ def test_h6_pass_self_spawn(monkeypatch, tmp_path):
     assert h6["status"] == "pass", h6
     assert "received agent_message within 3s" in h6["evidence"]
     assert "__probe__" in h6["evidence"]  # probe run_id 前缀
+    assert "mode=self-spawn" in h6["evidence"]  # 统一 schema：self-spawn 与 passive 共用 mode= 前缀
 
 
 def test_h6_fail_when_pump_raises(monkeypatch, tmp_path):

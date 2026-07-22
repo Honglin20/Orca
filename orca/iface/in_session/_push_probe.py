@@ -1014,25 +1014,19 @@ async def _hop_h6_ws_delivery_passive_async(ctx: ProbeContext) -> dict[str, Any]
     ws_url = ctx.ws_url
     run_id = ctx.run_id
     if not run_id:
-        return {
-            "hop": H6_WS_DELIVERY,
-            "status": "fail",
-            "evidence": f"mode=passive, ws_url={ws_url}",
-            "reason": "passive 模式（--ws-url）需要 --run-id 指定 subscribe 目标",
-            "fix_hint": _fix_hint(H6_WS_DELIVERY),
-        }
+        return _h6_response(
+            status="fail", mode="passive", run_id=run_id, ws_url=ws_url,
+            reason="passive 模式（--ws-url）需要 --run-id 指定 subscribe 目标",
+        )
 
     # 连既存 web server（3s 连接超时；拒绝/超时 → fail：web 没起 / URL 错）。
     try:
         ws_client = await asyncio.wait_for(websockets.connect(ws_url), timeout=3.0)
     except Exception as e:  # noqa: BLE001 — TimeoutError / OSError / InvalidURI 等
-        return {
-            "hop": H6_WS_DELIVERY,
-            "status": "fail",
-            "evidence": f"mode=passive, ws_url={ws_url}",
-            "reason": f"WS 连接失败（web server 没起 / 端口错 / URL 错）：{type(e).__name__}: {e}",
-            "fix_hint": _fix_hint(H6_WS_DELIVERY),
-        }
+        return _h6_response(
+            status="fail", mode="passive", run_id=run_id, ws_url=ws_url,
+            reason=f"WS 连接失败（web server 没起 / 端口错 / URL 错）：{type(e).__name__}: {e}",
+        )
 
     try:
         await ws_client.send(json.dumps({"type": "subscribe", "run_id": run_id}))
@@ -1059,32 +1053,23 @@ async def _hop_h6_ws_delivery_passive_async(ctx: ProbeContext) -> dict[str, Any]
                 received = payload
                 break
         if received is not None:
-            return {
-                "hop": H6_WS_DELIVERY,
-                "status": "pass",
-                "evidence": (
-                    f"mode=passive, ws_url={ws_url}, run_id={run_id}, "
+            return _h6_response(
+                status="pass", mode="passive", run_id=run_id, ws_url=ws_url, reason="",
+                extra=(
                     f"received {received.get('type')} within {_H6_PASSIVE_LISTEN_SECONDS}s"
                     "（真实事件 bus→pump→WS 链路通）"
                 ),
-                "reason": "",
-                "fix_hint": _fix_hint(H6_WS_DELIVERY),
-            }
+            )
         # subscribe 成功但窗口内无事件 → unknown（被动模式无法注入，不强判 fail）。
-        return {
-            "hop": H6_WS_DELIVERY,
-            "status": "unknown",
-            "evidence": (
-                f"mode=passive, ws_url={ws_url}, run_id={run_id}, "
-                f"no event in {_H6_PASSIVE_LISTEN_SECONDS}s"
-            ),
-            "reason": (
+        return _h6_response(
+            status="unknown", mode="passive", run_id=run_id, ws_url=ws_url,
+            extra=f"no event in {_H6_PASSIVE_LISTEN_SECONDS}s",
+            reason=(
                 f"subscribe 后 {_H6_PASSIVE_LISTEN_SECONDS}s 内未收到 {run_id} 的事件。"
                 "可能该 run 无新事件（passive 无法注入合成事件判定）；若你确定子 agent 正在"
                 "产事件却收不到 → pump 断（self-spawn 模式可复现确认）。"
             ),
-            "fix_hint": _fix_hint(H6_WS_DELIVERY),
-        }
+        )
     finally:
         try:
             await ws_client.close()
@@ -1164,7 +1149,10 @@ async def _hop_h6_ws_delivery_async(ctx: ProbeContext) -> dict[str, Any]:
         await _wait_server_listening(server, timeout=3.0)
         port = _get_server_port(server)
         if port is None:
-            return _h6_fail(probe_run_id, "uvicorn 起 server 后未拿到监听端口")
+            return _h6_response(
+                status="fail", mode="self-spawn", run_id=probe_run_id,
+                reason="uvicorn 起 server 后未拿到监听端口",
+            )
 
         # WS connect + subscribe。
         import websockets
@@ -1180,7 +1168,10 @@ async def _hop_h6_ws_delivery_async(ctx: ProbeContext) -> dict[str, Any]:
         # 注入合成 agent_message 事件（SPEC §4 H6 degradation：复用 EventBus.emit 公开 API）。
         handle = manager.get_handle(probe_run_id)
         if handle is None:
-            return _h6_fail(probe_run_id, f"manager 找不到刚 start_run 的 probe run {probe_run_id}")
+            return _h6_response(
+                status="fail", mode="self-spawn", run_id=probe_run_id,
+                reason=f"manager 找不到刚 start_run 的 probe run {probe_run_id}",
+            )
         await handle.bus.emit(
             "agent_message",
             data={"text": "__probe__ synthetic event for H6 ws_delivery"},
@@ -1192,39 +1183,32 @@ async def _hop_h6_ws_delivery_async(ctx: ProbeContext) -> dict[str, Any]:
         try:
             raw = await asyncio.wait_for(ws_client.recv(), timeout=3.0)
         except asyncio.TimeoutError:
-            return _h6_fail(
-                probe_run_id,
-                f"3s 内未收到事件（bus→pump→WS 链路不通；pump 异常静默退出 / WS 未订阅）",
-                ws_url=ws_url,
+            return _h6_response(
+                status="fail", mode="self-spawn", run_id=probe_run_id, ws_url=ws_url,
+                reason="3s 内未收到事件（bus→pump→WS 链路不通；pump 异常静默退出 / WS 未订阅）",
             )
 
         # 验证收到的 event type（pump send_json 整个 event model_dump）。
         try:
             payload = json.loads(raw)
         except (json.JSONDecodeError, TypeError) as e:
-            return _h6_fail(
-                probe_run_id,
-                f"WS 收到非 JSON 数据：{raw!r}, 解析错：{e}",
-                ws_url=ws_url,
+            return _h6_response(
+                status="fail", mode="self-spawn", run_id=probe_run_id, ws_url=ws_url,
+                reason=f"WS 收到非 JSON 数据：{raw!r}, 解析错：{e}",
             )
         if payload.get("type") != "agent_message" or payload.get("run_id") != probe_run_id:
-            return _h6_fail(
-                probe_run_id,
-                f"WS 收到事件但非目标 agent_message（got type={payload.get('type')!r}, "
-                f"run_id={payload.get('run_id')!r}）",
-                ws_url=ws_url,
+            return _h6_response(
+                status="fail", mode="self-spawn", run_id=probe_run_id, ws_url=ws_url,
+                reason=(
+                    f"WS 收到事件但非目标 agent_message（got type={payload.get('type')!r}, "
+                    f"run_id={payload.get('run_id')!r}）"
+                ),
             )
 
-        return {
-            "hop": H6_WS_DELIVERY,
-            "status": "pass",
-            "evidence": (
-                f"probe_run_id={probe_run_id}, ws_url={ws_url}, "
-                f"received agent_message within 3s（bus→pump→WS 链路通）"
-            ),
-            "reason": "",
-            "fix_hint": _fix_hint(H6_WS_DELIVERY),
-        }
+        return _h6_response(
+            status="pass", mode="self-spawn", run_id=probe_run_id, ws_url=ws_url, reason="",
+            extra="received agent_message within 3s（bus→pump→WS 链路通）",
+        )
 
     finally:
         # 严格清理（SPEC §4 H6 隔离 + §7-5c 无残留）。
@@ -1290,15 +1274,27 @@ async def _wait_subscribe_ready(web_server: Any, ws_client: Any, *, timeout: flo
     await asyncio.sleep(0.1)
 
 
-def _h6_fail(run_id: str | None, reason: str, *, ws_url: str | None = None) -> dict[str, Any]:
-    """H6 fail 响应构造（统一 evidence 字段格式）。"""
-    evidence_parts = [f"probe_run_id={run_id}"]
+def _h6_response(
+    *, status: str, mode: str, run_id: str | None, reason: str,
+    ws_url: str | None = None, extra: str = "",
+) -> dict[str, Any]:
+    """H6 统一响应构造（self-spawn + passive 共用，evidence schema 一致——review 🟡#3）。
+
+    evidence 格式恒定：``mode=<self-spawn|passive>, run_id=<id>, ws_url=<url>[, <extra>]``。
+    消费方（主 session LLM）只写一套解析，不必按模式分叉。``extra`` 承载 mode 无关的细节
+    （self-spawn「received within 3s」/ passive「received within N s」/「no event in N s」）。
+    """
+    parts = [f"mode={mode}"]
+    if run_id is not None:
+        parts.append(f"run_id={run_id}")
     if ws_url is not None:
-        evidence_parts.append(f"ws_url={ws_url}")
+        parts.append(f"ws_url={ws_url}")
+    if extra:
+        parts.append(extra)
     return {
         "hop": H6_WS_DELIVERY,
-        "status": "fail",
-        "evidence": ", ".join(evidence_parts),
+        "status": status,
+        "evidence": ", ".join(parts),
         "reason": reason,
         "fix_hint": _fix_hint(H6_WS_DELIVERY),
     }
