@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-22] P9b struct/kd 按 input 三档原则精简 + 切 $ORCA_ARTIFACTS_DIR + setup 哨兵化 + create-workflow-skill 编码三档
+
+struct 11→9 / kd 17→9 inputs（6 [ask] 主 + 3 [advanced] 固化）；Tier C 下沉（struct/kd_scripts_dir → setup.output.X infer-once+propagate；iterations 完全移除，引擎兜底 100 + `--max-iter` CLI 覆盖；teacher_layers=6/short_epochs=10/full_epochs=50/eval_dataset=""/proxy_dataset_spec="" 固化进 prompt）；setup 节点切 P8 `$ORCA_ARTIFACTS_DIR`（env 优先 + llm_artifacts 回退 + 尾斜杠补齐）；**P4b 遗留收口**——struct setup（yaml 内联）+ kd-setup Step 1 的 build_fn/dummy_input 缺失走 ask-user 哨兵（原「低置信猜测」/「报错」是潜在造假）；create-workflow-skill 编码三档（SKILL.md 新增专节 + reference §6 + 新 demo `tier-discipline.yaml`）。code-reviewer impl+coverage 两 review 闭环：0 🔴，4 🟡 + 7 🟢 全修或登记；新增 `test_no_jinja_ref_to_undeclared_input`（8 wf parametrize，填补 compile validator 只 warn 不 error 的契约守门空白）。`tars validate` 0 error；compile+workflows 196 passed。Commit: `8a1e5f0`。详见 [release note](../releases/2026-07-22-p9b-struct-kd-input-slim-and-skill.md)。登记后续：三档标签 lint / tier-discipline benchmark case / 生产 agent 哨兵 E2E（批 3）/ SPEC seed Tier A vs [advanced] 张力澄清 / SPEC device↔target_hardware 命名加注。
+
 ## [2026-07-22] Stage4 viz 执行：producer 侧 ~15 张图补 x_label/y_label/caption + 方向标注
 
 应用 [viz 优化方案](../plans/2026-07-22-workflow-viz-optimization.md) 6 批 checklist：~15 张缺标签图（quant/NAS/kd/struct 推图脚本）全补人话轴标签 + caption + metric 方向（↓lower is better）；NAS 终态帕累托 scatter→pareto 恢复前沿连线。**dedup 键 label+title 冻结**：全范围零 label=/title= 值改动 → 无重复图风险；`higher_is_better` 设 required（错默认会反向 caption，违 Rule 12）。code-reviewer 零 🔴 + 2 🟡 全修；24 viz 测试无回归。Commits: `e05ad2d`/`81facb9`/`3b01a5f`/`4559f65`/`22b2392`/`250e4a7`/`23361af`。详见 [release note](../releases/2026-07-22-viz-labels-producer-side.md)。遗留：`nas-viz/scripts/` 死代码（零 yaml 引用）待 DRY 清理。

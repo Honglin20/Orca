@@ -3,7 +3,7 @@
 **日期**: 2026-07-22
 **SPEC**: [`docs/specs/workflow-input-design-principle.md`](../specs/workflow-input-design-principle.md)（三档原则）+ [`docs/specs/agent-ask-user-sentinel.md`](../specs/agent-ask-user-sentinel.md) §3（agent.md 哨兵契约）+ [`docs/releases/2026-07-22-p8-engine-artifacts-dir-and-gc.md`](2026-07-22-p8-engine-artifacts-dir-and-gc.md)（`$ORCA_ARTIFACTS_DIR` 接口）
 **范围**: struct/kd 两 workflow yaml + 6 agent.md + create-workflow-skill（SKILL.md + reference + 新增 demo example）+ struct workflow doc 输入表。零 `orca/` 引擎改动、零脚本本体改动、零 quant/nas（P9a 范围）。
-**Commit**: `<待填 — 闭环后填入>`
+**Commit**: `8a1e5f0`
 
 ---
 
