@@ -9,9 +9,10 @@
 > **用法**：拿到 `first_break=H<N>_<slug>` → 下表找对应节 → 按「修复动作」执行 → 重跑
 > `orca doctor --probe-push` 验证。
 >
-> **当前实现阶段**：S1 已落地 H1/H2/H3（家族识别 + PID 回溯 + adapter 发现）；H4/H5/H6
-> 为占位（`status=unknown, evidence=not_implemented`），由 S2/S3 接入。当前阶段
-> `first_break=H4_daemon_progress` 是预期（占位），不代表链路真断——H1-H3 pass 即算成功。
+> **当前实现阶段**：S1 + S2 已落地 H1/H2/H3/H4/H5（家族识别 + PID 回溯 + adapter 发现
+> + daemon 推进 + bus 队列）；H6 为占位（`status=unknown, evidence=not_implemented`），
+> 由 S3 接入。当前阶段 `first_break=H6_ws_delivery` 是预期（占位），不代表链路真断——
+> H1-H5 pass 即算成功。
 
 | 跳 | 锚点 | 问的问题 |
 |---|---|---|

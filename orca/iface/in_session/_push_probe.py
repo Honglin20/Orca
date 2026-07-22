@@ -562,27 +562,364 @@ def _adapter_root(adapter: Any) -> Path | None:
         return None
 
 
-# ── H4-H6 placeholder（S2/S3 接入；S1 占位返 not_implemented status=unknown）────
+# ── H4 · daemon_progress（SPEC §4 H4 + §8#4 覆盖；S2 实现）─────────────────────
+
+# SPEC §4 H4 / §9 B3：run_age 阈值 30s（子 agent 首事件 3-15s 常见，留余量）。
+_H4_RUN_AGE_THRESHOLD_S = 30
+# SPEC §4 H4 freshness：last_agent_event_age_s 阈值同 run_age 一致（30s 内有事件）。
+_H4_FRESHNESS_THRESHOLD_S = 30
+# SPEC §4 H4：tape 末尾读 200 行（避免读全量 tape）。
+_H4_TAPE_TAIL_LINES = 200
+
+# SPEC §4 H4：daemon iteration 异常 grep pattern（与 sidechain_daemon.py:168-169 文案同源）。
+_H4_ITERATION_EXC_PATTERN = "sidechain driver iteration 异常"
+# SPEC §4 H5：bus 队列满 warning grep pattern（与 bus.py:77 文案同源）。
+_H5_QUEUE_FULL_PATTERN = "订阅者队列满"
 
 
 def _hop_h4_daemon_progress(ctx: ProbeContext) -> dict[str, Any]:
-    """H4：daemon 存活且真在推进（tape 有 agent_* 事件）？（SPEC §4 H4；S2 实现）"""
+    """H4：daemon 存活且真在推进（tape 有 agent_* 事件）？有没有 iteration 异常？
+
+    复用（SPEC §4 H4 / §1）：
+      - ``_sidechain_daemon_alive(run_id)``（pidfile + cmdline 活探）。
+      - ``events.tape.read_last_complete_lines`` 读 ``<rundir>/<run_id>.jsonl`` 末尾 200 行。
+      - 读 ``<rundir>/<run_id>/sidechain_daemon.log`` grep iteration 异常计数（同源文案契约）。
+
+    计算：``gap = disk_jsonl_lines - agent_events_in_tape``、``last_agent_event_age_s``、
+    ``run_age_s``（started_at ← marker 的 ``run_id`` 注册时间 fallback run_dir ctime）。
+
+    status（SPEC §4 H4，B3 决议）：
+      - ``unknown``：``disk_jsonl_lines==0``（子 agent 尚未派，不误报刚 bootstrap）。
+      - ``pass``：daemon_alive AND agent_events>0 AND gap==0 AND
+        last_agent_event_age_s<30 AND iteration_exceptions==0。
+      - ``fail``：daemon_dead；或 disk_jsonl_lines>0 且（agent_events==0 或 gap>0）且
+        run_age_s>30（持续 iterate 失败/漏推）；或 iteration_exceptions>0。
+      - 其它（daemon 活、disk 有、age 小但 agent_events==0）→ 保守 unknown（刚起）。
+    """
+    from orca.iface.in_session.cli import _read_sidechain_family_from_config
+    from orca.iface.in_session._hostenv import (
+        detect_backend_from_env, detect_family_from_env, host_session_from_env,
+    )
+    from orca.iface.in_session.sidechain_daemon import (
+        _make_adapter, _sidechain_daemon_alive,
+    )
+
+    # 无 run_id → H4 不适用（SPEC §4 H4 仅 --run-id 给定时跑）。
+    if not ctx.run_id:
+        return {
+            "hop": H4_DAEMON_PROGRESS,
+            "status": "unknown",
+            "evidence": "run_id 未给（H4 仅 --run-id 给定时跑）",
+            "reason": "doctor --probe-push 未带 --run-id，H4 无目标 run 可探",
+            "fix_hint": _fix_hint(H4_DAEMON_PROGRESS),
+        }
+
+    backend = detect_backend_from_env()
+    if backend is None:
+        return {
+            "hop": H4_DAEMON_PROGRESS,
+            "status": "unknown",
+            "evidence": "backend=None（非 in-session，H4 不适用）",
+            "reason": "未检测到 in-session env，daemon 本就不该起",
+            "fix_hint": _fix_hint(H4_DAEMON_PROGRESS),
+        }
+
+    run_id = ctx.run_id
+    tape_path = ctx.rundir / f"{run_id}.jsonl"
+    run_dir = ctx.rundir / run_id
+    log_path = run_dir / "sidechain_daemon.log"
+
+    daemon_alive = _sidechain_daemon_alive(run_id)
+
+    # 读 daemon log（H4 + H5 同源文案契约）。
+    log_text = _read_text_safe(log_path)
+    iteration_exceptions = log_text.count(_H4_ITERATION_EXC_PATTERN)
+    queue_full_warnings = log_text.count(_H5_QUEUE_FULL_PATTERN)
+
+    # 算 disk_jsonl_lines（adapter.discover_children 拿到的 child × agent-<child>.jsonl 行数和）。
+    host_session = host_session_from_env() or ""
+    env_family = detect_family_from_env()
+    cfg_family = env_family or _read_sidechain_family_from_config()
+    disk_jsonl_lines = 0
+    adapter_root: Path | None = None
+    try:
+        adapter = _make_adapter(backend, host_session, family=cfg_family)
+        adapter_root = _adapter_root(adapter)
+        if adapter_root is not None and adapter_root.is_dir():
+            for child in adapter.discover_children(host_session, 0):
+                child_jsonl = adapter_root / f"agent-{child}.jsonl"
+                disk_jsonl_lines += _count_lines(child_jsonl)
+    except Exception as e:  # noqa: BLE001 — adapter 失败不阻塞 H4（disk_jsonl_lines 留 0）
+        logger.warning(
+            "H4 disk_jsonl 统计失败（视为 0 继续）：%s", e, exc_info=True,
+        )
+
+    # 读 tape 末尾 N 行，统计 agent_* 事件 + 最新 timestamp。
+    agent_events, last_agent_event_ts = _stat_tape_agents(tape_path, _H4_TAPE_TAIL_LINES)
+    import time as _time
+    now = _time.time()
+    last_agent_event_age_s = (
+        now - last_agent_event_ts if last_agent_event_ts > 0 else None
+    )
+
+    # run_age_s：SPEC §4 H4「run marker orca-<run_id>.json started_at；fallback run_dir ctime」。
+    # marker 只 3 字段（run_id/model/no_output_count），无 started_at——回退 run_dir ctime。
+    run_age_s = _compute_run_age(ctx.rundir, run_id)
+
+    gap = disk_jsonl_lines - agent_events
+
+    evidence_parts = [
+        f"run_id={run_id}",
+        f"daemon_alive={'true' if daemon_alive else 'false'}",
+        f"disk_jsonl_lines={disk_jsonl_lines}",
+        f"agent_events={agent_events}",
+        f"gap={gap}",
+        f"last_agent_event_age_s={last_agent_event_age_s}",
+        f"run_age_s={run_age_s}",
+        f"iteration_exceptions={iteration_exceptions}",
+        f"queue_full_warnings={queue_full_warnings}",
+        f"adapter_root={adapter_root}",
+    ]
+    evidence = ", ".join(evidence_parts)
+
+    # SPEC §4 H4 B3 决议：disk_jsonl_lines==0 → unknown（刚 bootstrap）。
+    if disk_jsonl_lines == 0:
+        return {
+            "hop": H4_DAEMON_PROGRESS,
+            "status": "unknown",
+            "evidence": evidence,
+            "reason": "disk_jsonl_lines==0（子 agent 尚未派/无产出，不误报刚 bootstrap）",
+            "fix_hint": _fix_hint(H4_DAEMON_PROGRESS),
+        }
+
+    # fail：iteration 异常计数>0（daemon 在持续吞错）。
+    if iteration_exceptions > 0:
+        return {
+            "hop": H4_DAEMON_PROGRESS,
+            "status": "fail",
+            "evidence": evidence,
+            "reason": (
+                f"daemon log 有 {iteration_exceptions} 次 iteration 异常"
+                "——adapter/ingestor 持续抛错被 except Exception 吞"
+            ),
+            "fix_hint": _fix_hint(H4_DAEMON_PROGRESS),
+        }
+
+    # fail：daemon_dead（守护死亡）。
+    if not daemon_alive:
+        return {
+            "hop": H4_DAEMON_PROGRESS,
+            "status": "fail",
+            "evidence": evidence,
+            "reason": "daemon_dead（pidfile 残 / pid 死 / cmdline 不匹配；next 路径会 respawn）",
+            "fix_hint": _fix_hint(H4_DAEMON_PROGRESS),
+        }
+
+    # fail：disk 有事件但 tape 0 / gap>0 且 run_age>30s（持续 iterate 失败 / 漏推）。
+    if run_age_s is not None and run_age_s > _H4_RUN_AGE_THRESHOLD_S:
+        if agent_events == 0:
+            return {
+                "hop": H4_DAEMON_PROGRESS,
+                "status": "fail",
+                "evidence": evidence,
+                "reason": (
+                    f"disk_jsonl_lines={disk_jsonl_lines}>0 但 tape agent_events=0 且"
+                    f" run_age={run_age_s}s>30s——daemon 存活但持续 iterate 失败 / cursor 卡"
+                ),
+                "fix_hint": _fix_hint(H4_DAEMON_PROGRESS),
+            }
+        if gap > 0:
+            return {
+                "hop": H4_DAEMON_PROGRESS,
+                "status": "fail",
+                "evidence": evidence,
+                "reason": (
+                    f"gap={gap}>0（disk 比 tape 多 {gap} 行）且 run_age={run_age_s}s>30s"
+                    "——漏推（cursor 未推进 / ingestor 抛错）"
+                ),
+                "fix_hint": _fix_hint(H4_DAEMON_PROGRESS),
+            }
+
+    # pass：SPEC §4 H4 严格契约——daemon_alive AND agent_events>0 AND gap==0 AND
+    # last_agent_event_age_s<30 AND 无 iteration 异常。``last_agent_event_age_s is None``
+    # 走兜底 unknown（不应发生——agent 事件必有 timestamp；若发生是 tape 损坏，需保守判）。
+    if (
+        agent_events > 0
+        and gap == 0
+        and last_agent_event_age_s is not None
+        and last_agent_event_age_s < _H4_FRESHNESS_THRESHOLD_S
+    ):
+        return {
+            "hop": H4_DAEMON_PROGRESS,
+            "status": "pass",
+            "evidence": evidence,
+            "reason": "",
+            "fix_hint": _fix_hint(H4_DAEMON_PROGRESS),
+        }
+
+    # 兜底：daemon 活、disk 有、age 小但 agent_events==0（刚起 / 正在写第一行）→ 保守 unknown。
     return {
         "hop": H4_DAEMON_PROGRESS,
         "status": "unknown",
-        "evidence": "not_implemented(placeholder for S2)",
-        "reason": "H4 daemon_progress 由 S2 接入（SPEC §8 落地拆分）",
+        "evidence": evidence,
+        "reason": (
+            "disk 有 jsonl 但 tape agent_events=0 且 run_age<=30s"
+            "——子 agent 刚 spawn，daemon 可能还未 ingest"
+        ),
         "fix_hint": _fix_hint(H4_DAEMON_PROGRESS),
     }
 
 
+def _read_text_safe(path: Path) -> str:
+    """安全读文本文件：不存在 / 读失败 → 空串（不抛，H4/H5 兜底）。"""
+    try:
+        if not path.is_file():
+            return ""
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _count_lines(path: Path) -> int:
+    """数文本文件的**完整行数**（不抛；不存在 → 0）。
+
+    口径与 ``_stat_tape_agents`` 对齐：只数以 ``\\n`` 结尾的完整行——partial 末行（daemon
+    正在写）不算。避免 disk_jsonl_lines 与 agent_events_in_tape 因 partial 行口径不一致
+    导致假阳性 ``gap>0``（review 🟡#1）。
+    """
+    try:
+        if not path.is_file():
+            return 0
+        with open(path, "rb") as f:
+            data = f.read()
+        if not data:
+            return 0
+        # 只数完整行（\n 个数）；末行无 \n 是 partial 不算（与 read_last_complete_lines 对齐）。
+        return data.count(b"\n")
+    except OSError:
+        return 0
+
+
+def _stat_tape_agents(tape_path: Path, tail_lines: int) -> tuple[int, float]:
+    """读 tape 末尾 tail_lines 行，统计 agent_* 事件数 + 最新 timestamp。
+
+    返 ``(agent_count, last_ts)``；无 tape / 读失败 → ``(0, 0.0)``。
+
+    用 ``read_last_complete_lines`` 保 partial-line race 不丢行（SPEC §4 H4 明示）。
+    lazy import 避免顶层拉环（events.tape 是 iface 下游，单向依赖合法；保延迟加载习惯）。
+    """
+    from orca.events.tape import read_last_complete_lines
+
+    if not tape_path.is_file():
+        return 0, 0.0
+    try:
+        end_offset = tape_path.stat().st_size
+    except OSError:
+        return 0, 0.0
+    if end_offset <= 0:
+        return 0, 0.0
+
+    lines, _new_offset = read_last_complete_lines(tape_path, 0, end_offset)
+    if not lines:
+        return 0, 0.0
+    # 取末尾 N 行（read_last_complete_lines 返全量；切片避免巨大 tape 拖慢 H4）。
+    tail = lines[-tail_lines:] if len(lines) > tail_lines else lines
+
+    import json as _json
+    agent_count = 0
+    last_ts = 0.0
+    for line in tail:
+        s = line.strip()
+        if not s:
+            continue
+        try:
+            obj = _json.loads(s)
+        except _json.JSONDecodeError:
+            continue
+        etype = obj.get("type") or ""
+        if isinstance(etype, str) and etype.startswith("agent_"):
+            agent_count += 1
+            ts = obj.get("timestamp") or 0
+            try:
+                ts_f = float(ts)
+            except (TypeError, ValueError):
+                continue
+            if ts_f > last_ts:
+                last_ts = ts_f
+    return agent_count, last_ts
+
+
+def _compute_run_age(rundir: Path, run_id: str) -> float | None:
+    """算 run_age_s（SPEC §4 H4：started_at ← marker，fallback run_dir ctime）。
+
+    marker v3 §7.2 只 3 字段（无 started_at）→ 回退 run_dir ctime（``<rundir>/<run_id>/``）。
+    run_dir 不存在 → 回退 marker 文件 ctime；都不在 → None。
+    """
+    import time as _time
+    run_dir = rundir / run_id
+    if run_dir.is_dir():
+        try:
+            return _time.time() - run_dir.stat().st_ctime
+        except OSError:
+            pass
+    marker_path = rundir / f"orca-{run_id}.json"
+    if marker_path.is_file():
+        try:
+            return _time.time() - marker_path.stat().st_ctime
+        except OSError:
+            pass
+    return None
+
+
+# ── H5 · bus_flow（SPEC §4 H5；S2 实现）──────────────────────────────────────
+
+
 def _hop_h5_bus_flow(ctx: ProbeContext) -> dict[str, Any]:
-    """H5：bus 订阅者队列有没有溢出丢事件？（SPEC §4 H5；S2 实现）"""
+    """H5：bus 订阅者队列有没有溢出丢事件？
+
+    复用：读 daemon log grep ``订阅者队列满`` warning 计数（SPEC §4 H5 同源文案契约；
+    文案在 ``bus.py:77``，**修改该文案必须同步本 hop grep pattern + SPEC**）。
+
+    status：
+      - ``fail``：log 命中 ≥1 次队列满 warning。
+      - ``unknown``：无证据（log 不在 / 无 warning / 无 run_id）——不单独 fail，与 H6 联合判读。
+    """
+    # 无 run_id → H5 不适用（无 daemon log 可读）。
+    if not ctx.run_id:
+        return {
+            "hop": H5_BUS_FLOW,
+            "status": "unknown",
+            "evidence": "run_id 未给（H5 同 H4，需 --run-id 读 daemon log）",
+            "reason": "doctor --probe-push 未带 --run-id，H5 无 log 可读",
+            "fix_hint": _fix_hint(H5_BUS_FLOW),
+        }
+
+    log_path = ctx.rundir / ctx.run_id / "sidechain_daemon.log"
+    log_text = _read_text_safe(log_path)
+    queue_full = log_text.count(_H5_QUEUE_FULL_PATTERN)
+
+    evidence = (
+        f"log={log_path}, queue_full_warnings={queue_full}"
+        f"（grep pattern={_H5_QUEUE_FULL_PATTERN!r}, bus.py:77 同源文案契约）"
+    )
+
+    if queue_full > 0:
+        return {
+            "hop": H5_BUS_FLOW,
+            "status": "fail",
+            "evidence": evidence,
+            "reason": (
+                f"daemon log 有 {queue_full} 次订阅者队列满 warning"
+                "——bus 订阅者（WS pump）消费过慢，丢老事件（replay 可补）"
+            ),
+            "fix_hint": _fix_hint(H5_BUS_FLOW),
+        }
+
     return {
         "hop": H5_BUS_FLOW,
         "status": "unknown",
-        "evidence": "not_implemented(placeholder for S2)",
-        "reason": "H5 bus_flow 由 S2 接入（SPEC §8 落地拆分）",
+        "evidence": evidence,
+        "reason": "无队列满 warning（bus 未溢出 / pump 消费跟得上）",
         "fix_hint": _fix_hint(H5_BUS_FLOW),
     }
 

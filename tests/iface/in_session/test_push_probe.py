@@ -27,6 +27,8 @@ from orca.iface.in_session._push_probe import (
     H1_FAMILY_DETECT,
     H2_CAC_PID_WALK,
     H3_ADAPTER_DISCOVERY,
+    H4_DAEMON_PROGRESS,
+    H5_BUS_FLOW,
     RUNBOOK_PATH,
     _recompute_pid_walk_intermediate,
     _recompute_session_file_state,
@@ -430,6 +432,223 @@ def test_h2_intermediate_self_consistent_when_authority_returns_none_pid_miss(
     assert h2["status"] == "fail"
     assert "pid_walk_hit=false" in h2["evidence"]
     assert "authority_session_id=None" in h2["evidence"]
+
+
+# ── H4 daemon_progress（SPEC §4 H4 / §8#4 覆盖；S2 实现）─────────────────────
+
+
+def _setup_cc_with_run(monkeypatch, tmp_path, run_id="r-abc"):
+    """CC env + tmp sidechain root + 写一个 run marker + run_dir。
+
+    返 ``(sidechain_root, run_dir)``。H4 测试基线：daemon_alive 走 mock，disk/tape/log
+    手动构造。
+    """
+    sidechain_root = _setup_cc_with_sidechain_root(monkeypatch, tmp_path)
+    run_dir = tmp_path / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    # 写 marker 让 _sidechain_daemon_alive / _compute_run_age 能定位 run。
+    marker_path = tmp_path / f"orca-{run_id}.json"
+    marker_path.write_text(
+        json.dumps({"run_id": run_id, "model": "m", "no_output_count": 0}),
+        encoding="utf-8",
+    )
+    return sidechain_root, run_dir
+
+
+def test_h4_unknown_when_no_run_id(monkeypatch, tmp_path):
+    """SPEC §4 H4：无 --run-id → unknown（不适用）。"""
+    _clear_in_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid")
+    result = run_push_probe(rundir=tmp_path)  # run_id=None
+    h4 = _hop_by_name(result, H4_DAEMON_PROGRESS)
+    assert h4["status"] == "unknown"
+    assert "run_id 未给" in h4["evidence"]
+
+
+def test_h4_unknown_when_disk_jsonl_zero(monkeypatch, tmp_path):
+    """SPEC §7-4：disk_jsonl_lines==0 → unknown（不误报刚 bootstrap）。"""
+    run_id = "r-h4-unknown"
+    _setup_cc_with_run(monkeypatch, tmp_path, run_id)
+    # sidechain root 空（无 agent-*.jsonl）→ disk_jsonl_lines=0。
+    result = run_push_probe(run_id=run_id, rundir=tmp_path)
+    h4 = _hop_by_name(result, H4_DAEMON_PROGRESS)
+    assert h4["status"] == "unknown"
+    assert "disk_jsonl_lines=0" in h4["evidence"]
+
+
+def test_h4_fail_when_iteration_exceptions_in_log(monkeypatch, tmp_path):
+    """SPEC §4 H4 fail：log 含 iteration 异常 warning → fail（无论 daemon_alive）。"""
+    run_id = "r-h4-iter"
+    sidechain_root, run_dir = _setup_cc_with_run(monkeypatch, tmp_path, run_id)
+    # 写一个 child jsonl 让 disk_jsonl_lines>0。
+    (sidechain_root / "agent-task-1.jsonl").write_text(
+        '{"type":"system"}\n', encoding="utf-8",
+    )
+    (sidechain_root / "agent-task-1.meta.json").write_text("{}", encoding="utf-8")
+    # daemon log 含 iteration 异常。
+    (run_dir / "sidechain_daemon.log").write_text(
+        "WARNING sidechain driver iteration 异常（将 sleep 后重试）\n", encoding="utf-8",
+    )
+    result = run_push_probe(run_id=run_id, rundir=tmp_path)
+    h4 = _hop_by_name(result, H4_DAEMON_PROGRESS)
+    assert h4["status"] == "fail"
+    assert "iteration_exceptions=1" in h4["evidence"]
+
+
+def test_h4_fail_when_daemon_dead_and_disk_has_events(monkeypatch, tmp_path):
+    """SPEC §4 H4 fail：daemon_dead → fail。"""
+    run_id = "r-h4-dead"
+    sidechain_root, _run_dir = _setup_cc_with_run(monkeypatch, tmp_path, run_id)
+    (sidechain_root / "agent-task-1.jsonl").write_text(
+        '{"type":"system"}\n', encoding="utf-8",
+    )
+    (sidechain_root / "agent-task-1.meta.json").write_text("{}", encoding="utf-8")
+    # mock daemon_dead。
+    monkeypatch.setattr(
+        "orca.iface.in_session.sidechain_daemon._sidechain_daemon_alive", lambda rid: False,
+    )
+    result = run_push_probe(run_id=run_id, rundir=tmp_path)
+    h4 = _hop_by_name(result, H4_DAEMON_PROGRESS)
+    assert h4["status"] == "fail"
+    assert "daemon_alive=false" in h4["evidence"]
+
+
+def test_h4_fail_when_run_age_old_and_tape_empty(monkeypatch, tmp_path):
+    """SPEC §7-4 / §4 H4 fail：disk_jsonl>0 + tape agent_events=0 + run_age>30s → fail。
+
+    构造：disk_jsonl_lines>0 + tape 不存在 + mock daemon_alive=True + mock run_age>30s。
+    """
+    run_id = "r-h4-stuck"
+    sidechain_root, _run_dir = _setup_cc_with_run(monkeypatch, tmp_path, run_id)
+    (sidechain_root / "agent-task-1.jsonl").write_text(
+        '{"type":"system"}\n{"type":"system"}\n', encoding="utf-8",
+    )
+    (sidechain_root / "agent-task-1.meta.json").write_text("{}", encoding="utf-8")
+    # mock daemon_alive=True（让 fail 决策不走 daemon_dead 分支）。
+    monkeypatch.setattr(
+        "orca.iface.in_session.sidechain_daemon._sidechain_daemon_alive", lambda rid: True,
+    )
+    # mock run_age > 30s（run_dir ctime 默认是刚创建的 now，需 patch _compute_run_age）。
+    monkeypatch.setattr(
+        "orca.iface.in_session._push_probe._compute_run_age", lambda rundir, rid: 120.0,
+    )
+    # 不写 tape 文件 → agent_events=0。
+    result = run_push_probe(run_id=run_id, rundir=tmp_path)
+    h4 = _hop_by_name(result, H4_DAEMON_PROGRESS)
+    assert h4["status"] == "fail"
+    assert "agent_events=0" in h4["evidence"]
+    assert "run_age_s=120.0" in h4["evidence"]
+    assert "持续 iterate 失败" in h4["reason"]
+
+
+def test_h4_pass_when_daemon_alive_and_gap_zero(monkeypatch, tmp_path):
+    """SPEC §4 H4 happy：daemon_alive + agent_events>0 + gap==0 + age<30 + 无异常 → pass。
+
+    构造：写 child jsonl + 写 tape 含 agent_message 事件（disk_jsonl_lines==agent_events）。
+    """
+    run_id = "r-h4-pass"
+    sidechain_root, _run_dir = _setup_cc_with_run(monkeypatch, tmp_path, run_id)
+    # child jsonl 1 行。
+    (sidechain_root / "agent-task-1.jsonl").write_text(
+        '{"type":"system"}\n', encoding="utf-8",
+    )
+    (sidechain_root / "agent-task-1.meta.json").write_text("{}", encoding="utf-8")
+    # tape 含 1 个 agent_message 事件（agent_events=1, gap=0）。
+    tape_path = tmp_path / f"{run_id}.jsonl"
+    tape_path.write_text(
+        json.dumps({"type": "agent_message", "timestamp": __import__("time").time(),
+                    "data": {"text": "hi"}}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "orca.iface.in_session.sidechain_daemon._sidechain_daemon_alive", lambda rid: True,
+    )
+    result = run_push_probe(run_id=run_id, rundir=tmp_path)
+    h4 = _hop_by_name(result, H4_DAEMON_PROGRESS)
+    assert h4["status"] == "pass", h4
+    assert "agent_events=1" in h4["evidence"]
+    assert "gap=0" in h4["evidence"]
+
+
+def test_h4_fail_when_gap_positive_and_run_age_old(monkeypatch, tmp_path):
+    """SPEC §4 H4 / §7-4 fail：disk 比 tape 多 + run_age>30s → 漏推。
+
+    构造：disk 2 行（child jsonl）+ tape 1 行（agent_message）→ gap=1 + run_age>30。
+    review 🟡#2 补的分支测试。
+    """
+    run_id = "r-h4-gap"
+    sidechain_root, _run_dir = _setup_cc_with_run(monkeypatch, tmp_path, run_id)
+    # child jsonl 2 行。
+    (sidechain_root / "agent-task-1.jsonl").write_text(
+        '{"type":"system"}\n{"type":"system"}\n', encoding="utf-8",
+    )
+    (sidechain_root / "agent-task-1.meta.json").write_text("{}", encoding="utf-8")
+    # tape 含 1 个 agent_message（gap = 2-1 = 1）。
+    tape_path = tmp_path / f"{run_id}.jsonl"
+    tape_path.write_text(
+        json.dumps({"type": "agent_message", "timestamp": __import__("time").time(),
+                    "data": {"text": "hi"}}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "orca.iface.in_session.sidechain_daemon._sidechain_daemon_alive", lambda rid: True,
+    )
+    monkeypatch.setattr(
+        "orca.iface.in_session._push_probe._compute_run_age", lambda rundir, rid: 90.0,
+    )
+    result = run_push_probe(run_id=run_id, rundir=tmp_path)
+    h4 = _hop_by_name(result, H4_DAEMON_PROGRESS)
+    assert h4["status"] == "fail"
+    assert "gap=1" in h4["evidence"]
+    assert "漏推" in h4["reason"]
+
+
+# ── H5 bus_flow（SPEC §4 H5；S2 实现）────────────────────────────────────────
+
+
+def test_h5_unknown_when_no_run_id(monkeypatch, tmp_path):
+    """SPEC §4 H5：无 --run-id → unknown。"""
+    _clear_in_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid")
+    result = run_push_probe(rundir=tmp_path)
+    h5 = _hop_by_name(result, H5_BUS_FLOW)
+    assert h5["status"] == "unknown"
+
+
+def test_h5_fail_when_queue_full_warning_in_log(monkeypatch, tmp_path):
+    """SPEC §4 H5 fail：log 含 ``订阅者队列满`` warning → fail。"""
+    run_id = "r-h5-fail"
+    _sidechain_root, run_dir = _setup_cc_with_run(monkeypatch, tmp_path, run_id)
+    (run_dir / "sidechain_daemon.log").write_text(
+        "WARNING 订阅者队列满，丢弃旧事件 seq=42（type=agent_message，订阅者可经 replay 补全）\n",
+        encoding="utf-8",
+    )
+    result = run_push_probe(run_id=run_id, rundir=tmp_path)
+    h5 = _hop_by_name(result, H5_BUS_FLOW)
+    assert h5["status"] == "fail"
+    assert "queue_full_warnings=1" in h5["evidence"]
+
+
+def test_h5_unknown_when_log_has_no_warning(monkeypatch, tmp_path):
+    """SPEC §4 H5 unknown：log 在但无队列满 warning。"""
+    run_id = "r-h5-ok"
+    _sidechain_root, run_dir = _setup_cc_with_run(monkeypatch, tmp_path, run_id)
+    (run_dir / "sidechain_daemon.log").write_text(
+        "INFO sidechain driver 启动\n", encoding="utf-8",
+    )
+    result = run_push_probe(run_id=run_id, rundir=tmp_path)
+    h5 = _hop_by_name(result, H5_BUS_FLOW)
+    assert h5["status"] == "unknown"
+    assert "queue_full_warnings=0" in h5["evidence"]
+
+
+def test_h5_unknown_when_log_missing(monkeypatch, tmp_path):
+    """SPEC §4 H5 unknown：daemon log 不在（无证据）。"""
+    run_id = "r-h5-nolog"
+    _setup_cc_with_run(monkeypatch, tmp_path, run_id)
+    result = run_push_probe(run_id=run_id, rundir=tmp_path)
+    h5 = _hop_by_name(result, H5_BUS_FLOW)
+    assert h5["status"] == "unknown"
 
 
 # ── runbook 锚点 + fix_hint 指针 守门（SPEC §5 测试 1/2；S4 完整三组守门）────
