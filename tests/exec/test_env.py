@@ -126,3 +126,73 @@ def test_build_env_overlay_empty_string_kwarg_not_injected():
     assert "ORCA_NODE" not in overlay
     assert "ORCA_SESSION_ID" not in overlay
     assert "ORCA_CHART_SOCK" not in overlay
+
+
+# ── P8（plan 2026-07-21 §Phase 4-A）：ORCA_ARTIFACTS_DIR 注入 ────────────────
+
+
+def test_build_env_overlay_injects_artifacts_dir():
+    """``artifacts_dir`` 非空 → overlay 含 ``ORCA_ARTIFACTS_DIR``（绝对路径透传）。
+
+    意图：workflow 脚本据 ``$ORCA_ARTIFACTS_DIR`` 写产物（替代 workflow 自建
+    ``llm_artifacts/<model>/...``）。ClaudeExecutor / ScriptExecutor spawn 时显式传入，
+    沿 env 链继承到 script。
+    """
+    overlay = build_env_overlay(
+        (),
+        artifacts_dir="/abs/path/runs/r-1/artifacts",
+    )
+    assert overlay["ORCA_ARTIFACTS_DIR"] == "/abs/path/runs/r-1/artifacts"
+
+
+def test_build_env_overlay_artifacts_dir_default_not_injected():
+    """``artifacts_dir`` 缺省 → 不注 ``ORCA_ARTIFACTS_DIR``（向后兼容，旧调用方零回归）。
+
+    意图：P8 引入此 keyword 前，既有调用方（validator / dialog / executor 旧测试）不传
+    此参 → env overlay 必须不含 ``ORCA_ARTIFACTS_DIR``（不破坏现有 spawn 契约）。
+    """
+    overlay = build_env_overlay(("ANTHROPIC_",))
+    assert "ORCA_ARTIFACTS_DIR" not in overlay
+
+
+def test_build_env_overlay_empty_artifacts_dir_not_injected():
+    """显式传 ``artifacts_dir=""`` → 等价于缺省（不注），与 chart_sock 空串语义一致。
+
+    意图：执行器在 ``runs_dir is None`` 路径下显式传空串（见 ``_resolve_artifacts_dir``），
+    应等价于缺省——而非注入空值（空值会让 workflow 脚本读到 ``$ORCA_ARTIFACTS_DIR=""``
+    误以为是当前目录）。
+    """
+    overlay = build_env_overlay(
+        (),
+        run_id="r-1",
+        artifacts_dir="",
+    )
+    assert overlay["ORCA_RUN_ID"] == "r-1"
+    assert "ORCA_ARTIFACTS_DIR" not in overlay
+
+
+def test_build_env_overlay_artifacts_dir_coexists_with_chart_vars(monkeypatch):
+    """``artifacts_dir`` + chart 路由 4 件套同时注入（ClaudeExecutor 生产路径）。
+
+    意图：ClaudeExecutor spawn 时同时传 ``run_id`` / ``node`` / ``session_id`` / ``chart_sock``
+    / ``agent_resources`` / ``artifacts_dir`` 6 个 keyword → 6 个 ORCA_* 共存于 overlay，
+    不互相覆盖。
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-1")
+    overlay = build_env_overlay(
+        ("ANTHROPIC_",),
+        run_id="r-1",
+        node="train",
+        session_id="s-1",
+        chart_sock="/tmp/orca-abc.sock",
+        agent_resources="/abs/agents/worker",
+        artifacts_dir="/abs/runs/r-1/artifacts",
+    )
+    assert overlay["ORCA_RUN_ID"] == "r-1"
+    assert overlay["ORCA_NODE"] == "train"
+    assert overlay["ORCA_SESSION_ID"] == "s-1"
+    assert overlay["ORCA_CHART_SOCK"] == "/tmp/orca-abc.sock"
+    assert overlay["ORCA_AGENT_RESOURCES"] == "/abs/agents/worker"
+    assert overlay["ORCA_ARTIFACTS_DIR"] == "/abs/runs/r-1/artifacts"
+    # prefix 透传仍工作
+    assert overlay["ANTHROPIC_API_KEY"] == "sk-1"

@@ -30,10 +30,12 @@ import fcntl
 import json
 import logging
 import os
+import re
 import shlex
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -41,7 +43,7 @@ from typing import Any
 
 import typer
 
-from orca.chart._paths import chart_sock_path
+from orca.chart._paths import artifacts_dir_for_run, chart_sock_path
 from orca.compile import ConfigurationError, catalog, load_workflow
 from orca.events.bus import EventBus
 from orca.events.tape import Tape
@@ -450,8 +452,9 @@ def _write_orca_env(
     session_id: str,
     sock_path: Path,
     resources_root: str | None,
+    artifacts_dir: Path,
 ) -> None:
-    """原子写 ``runs/<run_id>/orca_env.sh``（5 个变量，按当前节点身份）。
+    """原子写 ``runs/<run_id>/orca_env.sh``（6 个变量，按当前节点身份 + per-run 产物目录）。
 
     内容（**字面值**，子代理只 ``source`` 不 typing）::
 
@@ -460,9 +463,13 @@ def _write_orca_env(
         export ORCA_SESSION_ID=<本次 dispatch 的 uuid>
         export ORCA_CHART_SOCK=<chart_sock_path(run_id)>
         export ORCA_AGENT_RESOURCES=<folder-agent resources_root>   # 或 ``unset`` 清 stale
+        export ORCA_ARTIFACTS_DIR=<runs/<run_id>/artifacts/>        # P8 权威产物目录
 
     ``resources_root`` 非空（folder-agent）→ ``export``；为 None（inline-prompt 节点）→
     ``unset ORCA_AGENT_RESOURCES`` 清潜在 stale（同一 shell 内前一次 source 的残留）。
+
+    ``artifacts_dir``（P8）per-run 常量（与节点无关）：bootstrap ``mkdir -p`` 后恒存在，
+    每次 next 重写 env 文件时透传同一路径（不随节点变化）。
 
     原子写：tmp + ``os.replace``（与 marker / step.py ``_write_prompt_file`` 同模式）。OSError
     → warn（不 fail next：env 文件是子代理侧便利，缺了也只让 chart/资源引用 fail loud 在子代理侧）。
@@ -478,6 +485,8 @@ def _write_orca_env(
         lines.append(f"export ORCA_AGENT_RESOURCES={shlex.quote(str(resources_root))}")
     else:
         lines.append("unset ORCA_AGENT_RESOURCES")
+    # P8：产物权威目录（绝对路径，resolve 后 subagent 切目录仍正确）。
+    lines.append(f"export ORCA_ARTIFACTS_DIR={shlex.quote(str(artifacts_dir))}")
     content = "\n".join(lines) + "\n"
 
     tmp = env_path.with_name(f".{env_path.name}.tmp.{os.getpid()}")
@@ -863,7 +872,7 @@ app = typer.Typer(
     name="orca",
     help=(
         "Orca in-session shell —— 主 session（CC/opencode/NGA/CAC）驱动 workflow。"
-        " 7 命令：list / <wf> / next / status / stop / open / doctor。"
+        " 8 命令：list / <wf> / next / status / stop / open / doctor / gc。"
     ),
     no_args_is_help=True,
     add_completion=False,
@@ -1084,6 +1093,22 @@ def bootstrap(
     # 退出存活，bind socket 收 chart。env 文件给 entry 节点身份（每次 next 重写下一节点）。
     sock_path = chart_sock_path(run_id)
     env_path = _env_file_path(tape_path, run_id)
+    # P8（plan 2026-07-21 §Phase 4-A）：算产物权威目录 + ``mkdir -p``。
+    # 单一真相源：``artifacts_dir_for_run(runs_dir, run_id)``。绝对路径 → subagent 切目录仍正确。
+    # bootstrap 是 run 生命周期起点（marker + tape 已就绪），此处 mkdir 安全（不存在 race）：
+    # 同 wf dupe check 已在 bootstrap_lock 内 fail loud；不同 wf 各自 run_id 唯一 → artifacts
+    # 目录互不冲突。next 路径复用同一目录（per-run 常量，不重 mkdir）。
+    # ``artifacts_dir_for_run`` 来自 ``orca.chart._paths``（单一真相源，顶部已 import）。
+    artifacts_dir = artifacts_dir_for_run(tape_path.parent, run_id).resolve()
+    try:
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # mkdir 失败（磁盘满 / 权限）→ warn 不 fail bootstrap（与 env 文件写失败同 fail-open
+        # 语义：ORCA_ARTIFACTS_DIR 仍注 env，workflow 脚本写产物时自己 fail loud）。
+        logger.warning(
+            "run %s: artifacts 目录 %s mkdir 失败（workflow 写产物时自 fail loud）",
+            run_id, artifacts_dir, exc_info=True,
+        )
     _write_orca_env(
         env_path,
         run_id=run_id,
@@ -1091,6 +1116,7 @@ def bootstrap(
         session_id=uuid.uuid4().hex,
         sock_path=sock_path,
         resources_root=result.resources_root,
+        artifacts_dir=artifacts_dir,
     )
     _spawn_chart_daemon(run_id, tape_path)
     if not _wait_for_sock(sock_path):
@@ -1191,6 +1217,8 @@ def next(
             env_path=_env_file_path(tape_path, run_id),
             project_root=Path.cwd(),
             no_memory=no_memory,
+            # P8：artifacts_dir per-run 常量，next 路径透传给 env 文件重写。
+            artifacts_dir=_derive_artifacts_dir(tape_obj, run_id),
         ))
         # in-session chart 守护存活检查 + respawn（phase-13 §3 in-session 衔接）：
         # bootstrap 只 spawn 一次；run 中途守护被杀（pkill opencode 误伤等）后，next 必须拉起
@@ -1324,6 +1352,15 @@ def _load_wf_for_run(run_id: str, tape: Tape) -> "Workflow":
     return wf_obj
 
 
+def _derive_artifacts_dir(tape: Tape, run_id: str) -> Path:
+    """P8：从 tape.path + run_id 派生 artifacts_dir（next 路径用，与 bootstrap 同源）。
+
+    单一真相源：``orca.chart._paths.artifacts_dir_for_run``（顶部已 import）。``resolve()``
+    返绝对路径（与 ``ORCA_CHART_SOCK`` / ``ORCA_AGENT_RESOURCES`` 同 resolve 契约）。
+    """
+    return artifacts_dir_for_run(Path(tape.path).parent, run_id).resolve()
+
+
 async def _next_in_critical_section(
     bus: EventBus, tape: Tape, run_id: str, output: str | None,
     inputs: dict, start_ts: float, mpath: Path,
@@ -1331,9 +1368,10 @@ async def _next_in_critical_section(
     env_path: Path | None = None,
     project_root: Path | None = None,
     no_memory: bool = False,
+    artifacts_dir: Path | None = None,
 ):
     """flock 临界区内的 next 主体：advance + emit_batch + marker RMW（N2）+ 合规计数 (F11)
-    + per-node env 文件重写（in-session chart/资源 衔接）。
+    + per-node env 文件重写（in-session chart/资源/产物 衔接）。
 
     返回 ``(result, compliance_failed)``。``compliance_failed=True`` 时已 emit
     workflow_failed，调用方据 ``done=True`` 停注入。
@@ -1341,6 +1379,9 @@ async def _next_in_critical_section(
     ``env_path`` 给定时（生产路径恒传）：在 ``apply_step_result`` 之后、按下一节点身份重写
     ``runs/<run_id>/orca_env.sh``（ORCA_NODE / ORCA_SESSION_ID / ORCA_AGENT_RESOURCES 按新节点）。
     终态（done/compliance_failed）不写 —— 无下一节点，env 文件保留前值（run 即将结束）。
+
+    ``artifacts_dir``（P8）per-run 常量：与 ``env_path`` 同条件透传给 ``_write_orca_env``
+    （非终态 + 下一节点存在才写）。next 路径不重 mkdir（bootstrap 已建）。
     """
     from orca.run.step import StepResult
     # marker 缺 → 调用方未 bootstrap 或 marker 已清；幂等吞 + warn（不 raise）。
@@ -1387,6 +1428,9 @@ async def _next_in_critical_section(
             session_id=uuid.uuid4().hex,
             sock_path=chart_sock_path(run_id),
             resources_root=result.resources_root,
+            # P8：artifacts_dir per-run 常量（bootstrap 已 mkdir）；next 不重 mkdir。
+            # 调用方（next CLI）恒传非 None（派生自 tape_path + run_id）。
+            artifacts_dir=artifacts_dir or _derive_artifacts_dir(tape, run_id),
         )
 
     # marker RMW（N2）：flock 临界区内回写。终态 → 清 marker（不复用）。
@@ -2093,6 +2137,473 @@ def _open_run_inproc(
     from orca.iface.cli.commands import _open_run
 
     return _open_run(run_id, tape_path=tape_path, host=host, port=port)
+
+
+# ── orca gc（P8 / plan 2026-07-21 §Phase 4-C）───────────────────────────────────
+#
+# 回答「老 run + 孤儿 socket/marker 残留怎么清？」：扫 ``runs/`` 下 ``<run_id>.jsonl`` 按 mtime
+# 判老，删 per-run 资源树（含 ``artifacts/``）+ tape/lock/marker。**fail loud**：正在跑的 run
+# （marker 存在 / tape flock 持有）不删；只删 ``runs/`` 下、绝对 ``resolve()`` 守门防逃逸；
+# ``--dry-run`` 默认先列不删。
+#
+# 单一真相源：``<runs_dir>/<run_id>/`` + ``<runs_dir>/<run_id>.jsonl{,.lock}`` +
+# ``<runs_dir>/orca-<run_id>.json`` —— 与 bootstrap 写入路径 / marker 文件名约定同源
+# （``marker_path`` / ``default_tape_path``）。chart socket（``<tmp>/orca-<sha1>.sock``）按
+# ``chart_sock_path(run_id)`` 派生清理，不复刻路径字面。
+
+
+# 受 gc 管理的 run_id 文件名合法字符（与 ``gen_run_id`` 输出一致：小写字母数字 + ``-``）。
+# 兜底防御：扫到的目录/文件名含异常字符（如 ``..`` / symlink 逃逸）→ 拒绝（fail loud）。
+_GC_RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _is_tape_flock_held(tape_path: Path) -> bool:
+    """探 tape flock 是否真持有（``LOCK_NB`` 试探）。
+
+    flock 文件存在 ≠ 锁持有（终态后残留）。本 helper 用 ``LOCK_NB`` 试探真持有者：
+      - ``BlockingIOError`` → 有人持锁 → True
+      - 成功 acquire + 释放 → 锁未被持 → False
+      - 其他 OSError（NFS / 权限）→ 保守 True（不删，fail loud 精神）
+
+    抽出为独立 helper：``_is_run_active``（stale-run 路径）+ orphan-dir 路径共用（DRY）。
+    orphan-dir 不调 ``_is_run_active`` 的 marker check（code-reviewer 🟡#1：marker 在 orphan
+    场景必 stale，不应 gate），但**仍**需 flock check（防 race window 内有进程活跃）。
+    """
+    lock_path = _flock_path(tape_path)
+    if not lock_path.exists():
+        return False
+    try:
+        fd = open(lock_path, "w")
+        try:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+        finally:
+            fd.close()
+    except BlockingIOError:
+        return True
+    except OSError:
+        # flock 异常（如 NFS）→ 保守当 active（不删）。
+        return True
+    return False
+
+
+def _is_run_active(
+    run_id: str, rundir: Path, tape_path: Path,
+) -> tuple[bool, str]:
+    """探 ``run_id`` 是否正在跑（marker 存在 / tape flock 持有）。
+
+    Returns:
+        ``(active, reason)``。``active=True`` 时 ``reason`` 描述为什么不能删；
+        ``active=False`` 时 ``reason`` 空串。
+
+    判定（**保守**：宁可漏删（保留），不可误删正在跑的 run）：
+      1. marker 文件 ``runs/orca-<run_id>.json`` 存在 → active（bootstrap 写、终态/stop 清）。
+      2. tape flock ``LOCK_NB`` 拿不到（``BlockingIOError``）→ 有 next/stop 持锁 → active。
+      3. 都不命中 → inactive。
+    """
+    mpath = marker_path(rundir, run_id)
+    if mpath.exists():
+        return True, f"marker exists ({mpath.name})"
+    if _is_tape_flock_held(tape_path):
+        return True, f"tape flock held ({_flock_path(tape_path).name})"
+    return False, ""
+
+
+def _collect_gc_candidates(
+    rundir: Path, *, max_age_seconds: float | None, keep: int | None,
+) -> list[dict[str, Any]]:
+    """扫 ``runs/`` 收集 gc 候选（tape-based + 孤儿），按 mtime 排序（新→老）。
+
+    一个候选是一个 dict：``{run_id?, kind, paths: [Path,...], reason, mtime?}``：
+      - ``kind`` ∈ ``{"stale-run", "orphan-dir", "orphan-marker", "orphan-lock"}``
+      - ``stale-run``：有 ``.jsonl`` + 不 active + mtime 过 cutoff；``paths`` 含整树。
+      - ``orphan-dir``：``runs/<dir>/`` 存在但无对应 ``.jsonl``（abort/crash 残留）。
+      - ``orphan-marker``：``runs/orca-*.json`` 存在但无对应 ``.jsonl``（marker 未清）。
+      - ``orphan-lock``：``runs/*.jsonl.lock`` 存在但 ``.jsonl`` 不在（极端 race 残留）。
+
+    **keep N 优先于 max_age**：先按 keep 留最新 N 个 active=False 的 run，其余进入 max_age 过滤。
+    """
+    import time as _time
+
+    candidates: list[dict[str, Any]] = []
+    seen_run_ids: set[str] = set()
+
+    # 1. tape-based：扫 ``<run_id>.jsonl`` 文件。
+    tapes: list[tuple[float, str, Path]] = []
+    for tape_path in sorted(rundir.glob("*.jsonl")):
+        name = tape_path.name
+        if not name.endswith(".jsonl"):
+            continue
+        run_id = name[: -len(".jsonl")]
+        if not _GC_RUN_ID_PATTERN.match(run_id):
+            continue  # 异常文件名（非 run tape）跳过
+        try:
+            mtime = tape_path.stat().st_mtime
+        except OSError:
+            continue
+        tapes.append((mtime, run_id, tape_path))
+        seen_run_ids.add(run_id)
+
+    # 排序：新→老（mtime 降序）。
+    tapes.sort(key=lambda t: t[0], reverse=True)
+
+    # keep N：保留最新 N 个 inactive run（不进删除候选）。
+    skipped_for_keep = 0
+    keep_limit = keep if keep is not None and keep > 0 else 0
+
+    for mtime, run_id, tape_path in tapes:
+        active, active_reason = _is_run_active(run_id, rundir, tape_path)
+        if active:
+            continue  # 正在跑，永不删
+        if skipped_for_keep < keep_limit:
+            skipped_for_keep += 1
+            continue  # 在最新 N 内，保留
+        if max_age_seconds is not None:
+            age = _time.time() - mtime
+            if age < max_age_seconds:
+                continue  # 太新，跳过
+        # worktree MANIFEST 守卫（code-reviewer 🔴#1）：若 artifacts/.worktrees/MANIFEST.json
+        # 存在 → 跳过本候选。否则 _collect_run_paths 会整树删 run_dir（含 MANIFEST），销毁 P9
+        # 闭环所需的 worktree 列表（已实测确认）。跳过 = 保留 run + MANIFEST，等 P9 写完
+        # ``git worktree remove`` 闭环后再清。worktree_notes 仍会列（提示用户该 run 需手工处理）。
+        manifest = rundir / run_id / "artifacts" / ".worktrees" / "MANIFEST.json"
+        if manifest.exists():
+            continue  # P9 闭环前保留
+        # 命中：收候选（整树 + tape + lock + marker）。
+        candidates.append({
+            "run_id": run_id,
+            "kind": "stale-run",
+            "paths": _collect_run_paths(run_id, rundir, tape_path),
+            "reason": f"age={int(_time.time() - mtime)}s",
+            "mtime": mtime,
+        })
+
+    # 2. 孤儿目录：``runs/<dir>/`` 无对应 ``.jsonl``（abort/crash 残留 per-run 资源树）。
+    # **orphan-dir 跳过 marker active check**（code-reviewer 🟡#1）：orphan 的定义就是「无 tape」，
+    # 此时 marker（若残留）必然 stale（无 tape 可写）。若调 ``_is_run_active`` 会因 marker 残留
+    # 误判 active → 永久孤儿（实测确认）。仅检查 tape flock：若 flock 真持有说明有进程在跑
+    # 该 run_id（虽无 tape，race 窗口），保守跳过；否则视为 orphan，可清。
+    for child in sorted(rundir.iterdir()):
+        if not child.is_dir():
+            continue
+        run_id = child.name
+        if not _GC_RUN_ID_PATTERN.match(run_id):
+            continue
+        if run_id in seen_run_ids:
+            continue  # 有对应 tape，已被上面处理
+        tape_path = rundir / f"{run_id}.jsonl"
+        if _is_tape_flock_held(tape_path):
+            # flock 持有 = 有进程活跃（虽无 tape，race）→ 保守跳过。
+            continue
+        candidates.append({
+            "run_id": run_id,
+            "kind": "orphan-dir",
+            "paths": _collect_run_paths(run_id, rundir, tape_path),
+            "reason": "directory without .jsonl",
+            "mtime": child.stat().st_mtime if child.exists() else None,
+        })
+
+    # 3. 孤儿 marker：``runs/orca-<run_id>.json`` 无对应 ``.jsonl``。
+    for mpath in sorted(rundir.glob("orca-*.json")):
+        # 剥 ``orca-`` 前缀 + ``.json`` 后缀 → run_id（与 ``marker_path`` 反演）。
+        name = mpath.name
+        prefix, suffix = "orca-", ".json"
+        if not (name.startswith(prefix) and name.endswith(suffix)):
+            continue
+        run_id = name[len(prefix): -len(suffix)]
+        if not _GC_RUN_ID_PATTERN.match(run_id):
+            continue
+        if run_id in seen_run_ids:
+            continue  # 对应 run 还在（不该清 marker，留给 stop/终态）
+        candidates.append({
+            "run_id": run_id,
+            "kind": "orphan-marker",
+            "paths": [mpath],
+            "reason": "marker without .jsonl",
+            "mtime": mpath.stat().st_mtime if mpath.exists() else None,
+        })
+
+    # 4. 孤儿 lock：``runs/<run_id>.jsonl.lock`` 无对应 ``.jsonl``。
+    for lock_path in sorted(rundir.glob("*.jsonl.lock")):
+        name = lock_path.name
+        if not name.endswith(".jsonl.lock"):
+            continue
+        run_id = name[: -len(".jsonl.lock")]
+        if not _GC_RUN_ID_PATTERN.match(run_id):
+            continue
+        if run_id in seen_run_ids:
+            continue  # 对应 tape 存在，由 stale-run 路径收
+        candidates.append({
+            "run_id": run_id,
+            "kind": "orphan-lock",
+            "paths": [lock_path],
+            "reason": "lock without .jsonl",
+            "mtime": lock_path.stat().st_mtime if lock_path.exists() else None,
+        })
+
+    return candidates
+
+
+def _collect_run_paths(run_id: str, rundir: Path, tape_path: Path) -> list[Path]:
+    """收集单个 run_id 的所有 gc-able 路径：per-run 目录树 + tape + lock + marker + chart socket。
+
+    含 chart socket（``<tmp>/orca-<sha1(run_id)[:10]>.sock``）：run 已 inactive 时，daemon 应
+    已自退 + unlink socket；但崩溃路径（SIGKILL）残留 stale socket → 此处 best-effort 清理。
+    """
+    paths: list[Path] = []
+    # per-run 整树（含 artifacts/、prompts/、orca_env.sh、chart_daemon.log 等）。
+    run_dir = rundir / run_id
+    if run_dir.exists():
+        paths.append(run_dir)
+    # tape + lock
+    paths.append(tape_path)
+    lock_path = _flock_path(tape_path)
+    if lock_path.exists():
+        paths.append(lock_path)
+    # marker
+    mpath = marker_path(rundir, run_id)
+    if mpath.exists():
+        paths.append(mpath)
+    # chart socket（best-effort：daemon 通常自退；SIGKILL 残留时清）
+    sock_path = chart_sock_path(run_id)
+    if sock_path.exists():
+        paths.append(sock_path)
+    return paths
+
+
+def _delete_candidate(candidate: dict[str, Any], *, rundir: Path) -> dict[str, Any]:
+    """删一个候选的所有路径。返 ``{ok, deleted: [...], errors: [...]}``。
+
+    **安全（fail loud）**：
+      - 每个路径必须 ``resolve()`` 后在 ``rundir.resolve()`` 之下（防 ``..`` / symlink 逃逸）；
+        chart socket 在 ``/tmp`` 下是**例外**（不在 rundir 下，单独白名单）。
+      - 删目录用 ``shutil.rmtree``；文件用 ``unlink``。
+      - OSError 不静默吞：记入 ``errors`` 让用户看到（如权限不足）。
+    """
+    import shutil
+
+    rundir_resolved = rundir.resolve()
+    sock_resolved_chart_root = Path(tempfile.gettempdir()).resolve()
+    deleted: list[str] = []
+    errors: list[dict[str, str]] = []
+
+    for p in candidate["paths"]:
+        try:
+            resolved = p.resolve()
+        except OSError as e:
+            errors.append({"path": str(p), "error": f"resolve failed: {e}"})
+            continue
+        # 安全守门：路径必须在 rundir 下 OR 在 chart socket temp 根下（白名单）。
+        # ``Path.is_relative_to`` 3.9+；本项目 Python 3.10+（pyproject）。
+        in_rundir = _is_relative_to(resolved, rundir_resolved)
+        in_temp_sock = (
+            resolved.parent == sock_resolved_chart_root
+            and resolved.name.startswith("orca-")
+            and resolved.name.endswith(".sock")
+        )
+        if not (in_rundir or in_temp_sock):
+            errors.append({
+                "path": str(p),
+                "error": f"path escapes rundir ({rundir_resolved}) and is not a chart socket",
+            })
+            continue
+        if not p.exists() and not p.is_symlink():
+            deleted.append(str(p))  # 幂等：已删算成功
+            continue
+        try:
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(p)
+            else:
+                p.unlink()
+            deleted.append(str(p))
+        except OSError as e:
+            errors.append({"path": str(p), "error": str(e)})
+
+    return {"ok": not errors, "deleted": deleted, "errors": errors}
+
+
+def _is_relative_to(p: Path, other: Path) -> bool:
+    """``Path.is_relative_to`` 兼容包装（保留为独立 helper 便于单测 monkeypatch 边界判定）。"""
+    # Python 3.10+ 原生支持（pyproject 声明）；本函数薄 wrapper 仅保留可注入 seam。
+    return p.is_relative_to(other)
+
+
+@app.command(name="gc")
+def gc(
+    max_age: str = typer.Option(
+        None, "--max-age",
+        help=(
+            "按 tape mtime 删老 run；支持 ``14d`` / ``12h`` / ``30m`` / ``3600`` (秒)。"
+            " 与 ``--keep`` 可组合（先留最新 N，再按 age 过滤余下）"
+        ),
+    ),
+    keep: int = typer.Option(
+        None, "--keep",
+        help="保留最新 N 个 inactive run（按 tape mtime 降序）；其余进入 ``--max-age`` 过滤",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="只列要删的路径，不真删（默认 false；首次跑建议先 --dry-run 看清单）",
+    ),
+    runs_dir: Path = typer.Option(
+        None, "--runs-dir",
+        help="显式 runs 目录（默认 ``./runs``，与 ``default_tape_path`` 同源）",
+    ),
+    log_level: str = typer.Option("WARN", "--log-level", help="INFO/DEBUG/WARN/ERROR"),
+) -> None:
+    """清老 run + 孤儿 socket/marker 残留（P8 / plan 2026-07-21 §Phase 4-C）。
+
+    安全（fail loud）：
+      - 只删 ``runs/`` 下（或显式 ``--runs-dir`` 下）+ chart socket temp 根下的 ``orca-*.sock``；
+      - 正在跑的 run（marker 存在 / tape flock 持有）**永不删**；
+      - ``--dry-run`` 列路径不真删；首次运行建议先 dry-run 看清单。
+
+    候选种类：
+      - ``stale-run``：有 ``.jsonl`` + 不 active + mtime 过 cutoff；
+      - ``orphan-dir``：``runs/<id>/`` 存在但无 ``.jsonl``（abort/crash 残留）；
+      - ``orphan-marker``：``runs/orca-<id>.json`` 无对应 ``.jsonl``；
+      - ``orphan-lock``：``runs/<id>.jsonl.lock`` 无对应 ``.jsonl``。
+
+    worktree 回收：若 ``runs/<id>/artifacts/.worktrees/MANIFEST.json`` 存在，本命令仅**列出**
+    worktree 路径（best-effort），不执行 ``git worktree remove``——MANIFEST 由 P9 workflow 写入，
+    本任务先支持「列出不删」，P9 补 ``git worktree remove`` 闭环。
+
+    输出 JSON：``{candidates: [...], dry_run: bool, deleted_count, error_count}``。
+    """
+    import time as _time
+
+    from orca.exec.wait import parse_duration
+
+    _setup_logging(log_level)
+
+    # 参数校验：--max-age 和 --keep 都不给 → 报错（防「全删」误操作）。
+    if max_age is None and keep is None:
+        raise typer.BadParameter(
+            "gc 需指定 --max-age 和/或 --keep（不给则什么都不删，等同 dry-run 但无意义）"
+        )
+
+    # 解析 max_age（parse_duration 复用 ``orca.exec.wait`` 单一真相源）。
+    max_age_seconds: float | None = None
+    if max_age is not None:
+        try:
+            max_age_seconds = parse_duration(max_age)
+        except ValueError as e:
+            raise typer.BadParameter(f"--max-age {max_age!r} 解析失败：{e}") from e
+        if max_age_seconds <= 0:
+            raise typer.BadParameter(f"--max-age 必须为正：{max_age!r}")
+
+    if keep is not None and keep < 0:
+        raise typer.BadParameter(f"--keep 必须 >= 0：{keep}")
+
+    rundir = Path(runs_dir) if runs_dir is not None else _default_rundir()
+    if not rundir.exists():
+        # runs/ 不存在 → 无东西可清，返空候选（非错误；新项目首次跑 gc）。
+        typer.echo(json.dumps({
+            "candidates": [], "dry_run": dry_run,
+            "deleted_count": 0, "error_count": 0,
+            "note": f"runs dir not found: {rundir}",
+        }, ensure_ascii=False))
+        return
+
+    # code-reviewer 🟡#2（gc ↔ bootstrap race）：gc 持 ``.orca-gc.lock`` advisory lock，
+    # 与 ``bootstrap`` 的 ``.orca-bootstrap.lock`` 各自独立但**都是 ``runs/`` 作用域**。
+    # 关键不变量：bootstrap 在锁内写 marker（step 7），锁外 mkdir artifacts（step 9）。
+    # gc 持锁期间，bootstrap 仍能进入（锁不同），但 gc 的 active-check（marker + flock）
+    # 会在「marker 写入之后」看到 marker → 跳过；在「marker 写入之前」看到无 marker +
+    # 无 flock → 仍可能命中。故 gc 锁本身**不消除** race window，而是 serialize 多个 gc
+    # （防两个 gc 并发删同一批）。真正的 race 兜底是 ``max_age_seconds`` 过滤（新鲜 tape
+    # 被滤掉）+ bootstrap 短窗口（< 100ms）。gc 锁是便宜的最佳实践，本任务先 ship。
+    gc_lock_path = rundir / ".orca-gc.lock"
+    gc_lock_fd = open(gc_lock_path, "w")
+    try:
+        fcntl.flock(gc_lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError) as e:
+        # 另一个 gc 在跑 → 0 退出（同 next busy 语义，但不返 busy 信封，gc 是运维命令）。
+        typer.echo(json.dumps({
+            "candidates": [], "dry_run": dry_run,
+            "deleted_count": 0, "error_count": 0,
+            "note": f"another gc is running (lock held: {gc_lock_path.name}): {e}",
+        }, ensure_ascii=False))
+        gc_lock_fd.close()
+        return
+
+    try:
+        candidates = _collect_gc_candidates(
+            rundir, max_age_seconds=max_age_seconds, keep=keep,
+        )
+
+        # worktree MANIFEST 列示（code-reviewer 🔴#1 修复后的语义）：
+        # stale-run 候选**不含** MANIFEST 持有者（``_collect_gc_candidates`` 已 skip）。
+        # 本扫描走 ``tapes`` 全量（不依赖 candidates）：覆盖「因 MANIFEST 被跳过」的 run，
+        # 提示用户「该 run 有 worktree，gc 推迟到 P9，需手工处理或等 P9 闭环」。
+        worktree_notes: list[dict[str, Any]] = []
+        for tape_path in sorted(rundir.glob("*.jsonl")):
+            run_id = tape_path.stem
+            if not _GC_RUN_ID_PATTERN.match(run_id):
+                continue
+            manifest = rundir / run_id / "artifacts" / ".worktrees" / "MANIFEST.json"
+            if not manifest.exists():
+                continue
+            try:
+                entries = json.loads(manifest.read_text(encoding="utf-8"))
+                worktree_notes.append({
+                    "run_id": run_id,
+                    "manifest": str(manifest),
+                    "worktrees": [
+                        e.get("path") if isinstance(e, dict) else str(e)
+                        for e in (entries if isinstance(entries, list) else [])
+                    ],
+                    "note": (
+                        "MANIFEST present: gc SKIPPED this run (preserves MANIFEST for P9 "
+                        "`git worktree remove`); worktrees NOT removed. Handle manually or wait for P9."
+                    ),
+                })
+            except (json.JSONDecodeError, OSError) as e:
+                worktree_notes.append({
+                    "run_id": run_id,
+                    "manifest": str(manifest),
+                    "error": f"failed to read MANIFEST: {e}",
+                })
+
+        # dry-run 或无候选 → 只输出清单。
+        if dry_run or not candidates:
+            typer.echo(json.dumps({
+                "candidates": candidates,
+                "worktree_notes": worktree_notes,
+                "dry_run": dry_run,
+                "deleted_count": 0,
+                "error_count": 0,
+            }, ensure_ascii=False, default=str))
+            return
+
+        # 真删：逐候选删除，收结果。
+        deleted_total = 0
+        error_total = 0
+        results: list[dict[str, Any]] = []
+        for cand in candidates:
+            result = _delete_candidate(cand, rundir=rundir)
+            deleted_total += len(result["deleted"])
+            error_total += len(result["errors"])
+            results.append({
+                "run_id": cand.get("run_id"),
+                "kind": cand["kind"],
+                "reason": cand["reason"],
+                **result,
+            })
+
+        typer.echo(json.dumps({
+            "candidates": results,
+            "worktree_notes": worktree_notes,
+            "dry_run": False,
+            "deleted_count": deleted_total,
+            "error_count": error_total,
+        }, ensure_ascii=False, default=str))
+    finally:
+        # 释放 gc advisory lock（同 bootstrap lock 释模式：LOCK_UN + close）。
+        try:
+            fcntl.flock(gc_lock_fd.fileno(), fcntl.LOCK_UN)
+        finally:
+            gc_lock_fd.close()
 
 
 def main() -> None:

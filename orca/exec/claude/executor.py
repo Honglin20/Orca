@@ -48,7 +48,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from orca.chart._paths import chart_sock_path
+from orca.chart._paths import artifacts_dir_for_run, chart_sock_path
 from orca.exec.claude.accumulator import RunAccumulator
 from orca.exec.claude.result_extractor import extract_and_validate
 from orca.exec.context import RunContext
@@ -138,10 +138,14 @@ class ClaudeExecutor(Executor):
             # phase-13 §2：若 ``self._runs_dir`` 已注入，算 chart sock path（agent 子进程
             # 经 env 继承传到 script 子进程，render_chart 据此连 ingestor）。
             chart_sock = _resolve_chart_sock_path(self._runs_dir, ctx.run_id)
+            # P8（plan 2026-07-21 §Phase 4-A）：注入产物权威目录，agent spawn 的 Bash 工具
+            # 会再 spawn script，沿 env 链继承 → workflow 脚本据 ``$ORCA_ARTIFACTS_DIR`` 写产物。
+            artifacts_dir = _resolve_artifacts_dir(self._runs_dir, ctx.run_id)
             cfg = _build_spawn_config(
                 node, self.profile, prompt, self._agent_tools_server,
                 run_id=ctx.run_id, session_id=session_id, chart_sock=chart_sock,
                 agent_resources=node.resources_root or "",
+                artifacts_dir=artifacts_dir,
             )
 
             # phase 11 §5.5（review B2）：register debt —— spawn 前（写 mcp-config 之后）
@@ -282,6 +286,7 @@ def _build_spawn_config(
     session_id: str = "",
     chart_sock: str = "",
     agent_resources: str = "",
+    artifacts_dir: str = "",
 ) -> SpawnConfig:
     """按 SPEC §2.1 拼动态 argv + env overlay + 可选 --mcp-config（phase 11 §5.4）+ chart 路由（phase-13 §2）。
 
@@ -348,6 +353,7 @@ def _build_spawn_config(
 
     # phase-13 §2：env overlay 加 4 个 ORCA_* keyword（缺省空串 → 不注，向后兼容）。
     # chart_sock 由 ClaudeExecutor.exec 经 ``_resolve_chart_sock_path`` 算出。
+    # P8：artifacts_dir 同款（缺省空串 → 不注，向后兼容）。
     env_overlay = build_env_overlay(
         profile.env_overlay_prefixes,
         run_id=run_id,
@@ -355,6 +361,7 @@ def _build_spawn_config(
         session_id=session_id,
         chart_sock=chart_sock,
         agent_resources=agent_resources,
+        artifacts_dir=artifacts_dir,
     )
     cli_path = profile.resolve_cli_path()  # env > default，运行时读（SPEC §2.6）
 
@@ -408,6 +415,29 @@ def _resolve_chart_sock_path(runs_dir: Path | None, run_id: str) -> str:
     if runs_dir is None:
         return ""
     return str(chart_sock_path(run_id).resolve())
+
+
+def _resolve_artifacts_dir(runs_dir: Path | None, run_id: str) -> str:
+    """P8（plan 2026-07-21 §Phase 4-A）：算 workflow 产物权威目录绝对路径。
+
+    与 ``orca.exec.script._resolve_artifacts_dir`` 逐字同语义（SPEC §11 #9 两 executor 对称，
+    DRY 函数级 mirror）。
+
+    目录走 ``<runs_dir>/<run_id>/artifacts/``（``orca.chart._paths.artifacts_dir_for_run`` 派生），
+    与 ``runs/<run_id>/`` per-run 资源根同源（``orca_env.sh`` / ``prompts/`` 等兄弟）。bootstrap
+    ``mkdir -p`` 创建；workflow 脚本据 ``$ORCA_ARTIFACTS_DIR`` 写产物（替代 ``llm_artifacts/``）。
+
+    - ``runs_dir is None`` → 返回空串（不注 ``ORCA_ARTIFACTS_DIR`` env，向后兼容）。
+    - 非空 → ``resolve()`` 返绝对路径（与 ``ORCA_CHART_SOCK`` / ``ORCA_AGENT_RESOURCES`` 同
+      resolve 契约）。
+
+    返回的路径用于：
+      1. ``build_env_overlay(artifacts_dir=...)`` → 子进程 ``ORCA_ARTIFACTS_DIR``
+      2. agent spawn 的 Bash 工具再 spawn script，沿 env 链继承 → workflow 脚本据 env 写产物
+    """
+    if runs_dir is None:
+        return ""
+    return str(artifacts_dir_for_run(runs_dir, run_id).resolve())
 
 
 def _append_ask_user_instruction(prompt: str, run_id: str, node: str) -> str:

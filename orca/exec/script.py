@@ -35,7 +35,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from orca.chart._paths import chart_sock_path
+from orca.chart._paths import artifacts_dir_for_run, chart_sock_path
 from orca.exec.context import RunContext
 from orca.exec.env import build_env_overlay
 from orca.exec.error import ExecError
@@ -98,7 +98,12 @@ class ScriptExecutor(Executor):
             # phase-11-process §1（铁律 1）+ §2.1（铁律 2）：spawn 必须经 registry.acquire
             # 登记 + 进程组隔离（start_new_session=True），cancel 时整组杀防孤儿。
             chart_sock = _resolve_chart_sock_path(self._runs_dir, ctx.run_id)
-            spawn_env = _build_spawn_env(node.name, ctx.run_id, session_id, chart_sock)
+            # P8（plan 2026-07-21 §Phase 4-A）：注入产物权威目录，script 内 workflow 脚本据
+            # ``$ORCA_ARTIFACTS_DIR`` 写产物（替代 workflow 自建 ``llm_artifacts/``）。
+            artifacts_dir = _resolve_artifacts_dir(self._runs_dir, ctx.run_id)
+            spawn_env = _build_spawn_env(
+                node.name, ctx.run_id, session_id, chart_sock, artifacts_dir,
+            )
             registry = self._registry
             try:
                 proc = await asyncio.create_subprocess_shell(
@@ -216,14 +221,36 @@ def _resolve_chart_sock_path(runs_dir: Path | None, run_id: str) -> str:
     return str(chart_sock_path(run_id).resolve())
 
 
-def _build_spawn_env(
-    node: str, run_id: str, session_id: str, chart_sock: str
-) -> dict[str, str]:
-    """phase-13 §2：构造 spawn 子进程 env（``os.environ`` + chart 路由 4 件套 overlay）。
+def _resolve_artifacts_dir(runs_dir: Path | None, run_id: str) -> str:
+    """P8（plan 2026-07-21 §Phase 4-A）：算 workflow 产物权威目录绝对路径。
 
-    - 4 个 ORCA_* 全注：script 子进程内 ``orca.chart.render_chart`` 从 env 读身份路由。
+    与 ``orca.exec.claude.executor._resolve_artifacts_dir`` 逐字同语义（SPEC §11 #9 两 executor
+    对称，DRY 函数级 mirror）。
+
+    目录走 ``<runs_dir>/<run_id>/artifacts/``（``orca.chart._paths.artifacts_dir_for_run`` 派生），
+    与 ``runs/<run_id>/`` per-run 资源根同源（``orca_env.sh`` / ``prompts/`` 等兄弟）。bootstrap
+    ``mkdir -p`` 创建；workflow 脚本据 ``$ORCA_ARTIFACTS_DIR`` 写产物（替代 ``llm_artifacts/``）。
+
+    - ``runs_dir is None`` → 返回空串（不注 ``ORCA_ARTIFACTS_DIR`` env，向后兼容；workflow
+      脚本读 env 时自处理缺省）。
+    - 非空 → ``resolve()`` 返绝对路径（与 ``ORCA_CHART_SOCK`` / ``ORCA_AGENT_RESOURCES`` 同
+      resolve 契约：subagent 切目录后绝对路径仍正确）。
+    """
+    if runs_dir is None:
+        return ""
+    return str(artifacts_dir_for_run(runs_dir, run_id).resolve())
+
+
+def _build_spawn_env(
+    node: str, run_id: str, session_id: str, chart_sock: str, artifacts_dir: str = "",
+) -> dict[str, str]:
+    """phase-13 §2 + P8：构造 spawn 子进程 env（``os.environ`` + chart 路由 + 产物目录 overlay）。
+
+    - 4 个 ORCA_* chart 路由全注：script 子进程内 ``orca.chart.render_chart`` 从 env 读身份路由。
     - chart_sock 空（runs_dir 缺 / sock path 过长）→ 仍注 run_id / node / session_id
       （其余 3 个非路径信息，script 端 §7.1 fail loud 提示缺 ``ORCA_CHART_SOCK``）。
+    - artifacts_dir 空（runs_dir 缺）→ 不注 ``ORCA_ARTIFACTS_DIR``（向后兼容；workflow 脚本
+      读 env 时需自处理缺省）。非空 → 注绝对路径（P8：workflow 据此写产物，替代自建目录）。
     - 空 prefix 元组（script executor 不绑特定 backend，不透传 ANTHROPIC_/CLAUDE_）：
       保持子进程继承 ``os.environ``（除 ORCA_* overlay 外），让 script 看到正常 shell env。
     """
@@ -233,5 +260,6 @@ def _build_spawn_env(
         node=node,
         session_id=session_id,
         chart_sock=chart_sock,
+        artifacts_dir=artifacts_dir,
     )
     return {**os.environ, **overlay}
