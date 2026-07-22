@@ -1974,6 +1974,20 @@ def _check_sidechain_daemon_liveness(rundir: Path) -> dict[str, Any]:
 @app.command()
 def doctor(
     log_level: str = typer.Option("INFO", "--log-level", help="INFO/DEBUG/WARN/ERROR"),
+    probe_push: bool = typer.Option(
+        False, "--probe-push",
+        help="跑推送链路 6 跳诊断（SPEC：push-chain-diagnostic）。加性追加 push_chain_probe 区块，"
+             "不计入 ok。需 H4 时给 --run-id；需 H6 passive 时给 --ws-url。",
+    ),
+    run_id: str | None = typer.Option(
+        None, "--run-id",
+        help="--probe-push 时 H4 daemon_progress 探测的目标 run_id（读 tape + daemon log）。",
+    ),
+    ws_url: str | None = typer.Option(
+        None, "--ws-url",
+        help="--probe-push 时 H6 ws_delivery 的 passive 模式 WS URL（如 ws://127.0.0.1:7428/ws）；"
+             "不给则走 self-spawn（S3 实现）。",
+    ),
 ) -> None:
     """诊断 in-session 集成层（v5 §2.1 / §4.4：skill 落点 + CLI imports 为准；hook 心跳可选）。
 
@@ -2111,7 +2125,21 @@ def doctor(
         "diag": diag_on,
         "report": report,
         "checks": checks,
+        **({"push_chain_probe": _run_push_probe(run_id, ws_url, rundir)} if probe_push else {}),
     }, ensure_ascii=False))
+
+
+def _run_push_probe(
+    run_id: str | None, ws_url: str | None, rundir: Path,
+) -> dict[str, Any]:
+    """lazy wrapper：避免顶层 import 拉环（SPEC §2.1 iface.web↔in_session 潜在环）。
+
+    ``_push_probe`` 是叶子消费方，只 ``doctor --probe-push`` 时被加载——零副作用铁律：
+    不跑时与基线 commit 输出完全一致。``rundir`` 显式透传：doctor 已在上方调过一次
+    ``_default_rundir()``，复用同一值（避免 H4 读 tape 时 rundir 二次解析漂移到不同 cwd/env）。
+    """
+    from orca.iface.in_session._push_probe import run_push_probe
+    return run_push_probe(run_id=run_id, ws_url=ws_url, rundir=rundir)
 
 
 @app.command(name="list")
