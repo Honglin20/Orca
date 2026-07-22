@@ -535,7 +535,7 @@ def _push_table(render_chart, rows: list[dict[str, Any]], title: str) -> None:
 def _push_lw_charts(render_chart, candidates: list[dict[str, Any]],
                      all_results: list[dict[str, Any]],
                      ok_results: list[dict[str, Any]], metric_kind: str,
-                     recipes_filter: list[str]) -> None:
+                     recipes_filter: list[str], higher_is_better: bool) -> None:
     """lightweight 模式：line（累积曲线）+ bar（终点对比）+ table（全部步）。
 
     table 用 all_results（含 failed/skipped）便于诊断「哪些 recipe 因依赖缺失被跳过」；
@@ -577,6 +577,12 @@ def _push_lw_charts(render_chart, candidates: list[dict[str, Any]],
                 x="step_idx",
                 y="metric",
                 hue="path",
+                x_label="累积技术数（0=baseline RTN，每 +1=叠加一项技术）",
+                y_label=f"{metric_kind}（{'越低越好' if not higher_is_better else '越高越好'}）",
+                caption=(
+                    "4 条 ablation 路径(S=Smooth/Q=QuaRot/A=AutoRound/R=纯求解)的累积收益。"
+                    "step_idx 非训练步，是叠加技术计数。"
+                ),
             )
             sys.stderr.write(f"[run_ptq_sweep] pushed line: {len(line_data)} points\n")
     except Exception as e:
@@ -611,6 +617,9 @@ def _push_lw_charts(render_chart, candidates: list[dict[str, Any]],
                 title=f"Final-step Comparison by Path ({metric_kind})",
                 x="path",
                 y="metric",
+                x_label="路径（S/Q/A/R）",
+                y_label=metric_kind,
+                caption="每路径终点（叠加全部技术后）的 metric 横向对比。",
             )
             sys.stderr.write(f"[run_ptq_sweep] pushed bar: {len(bar_data)} paths\n")
     except Exception as e:
@@ -630,7 +639,7 @@ def _push_lw_charts(render_chart, candidates: list[dict[str, Any]],
 
 def _push_full_charts(render_chart, all_results: list[dict[str, Any]],
                        ok_results: list[dict[str, Any]], metric_kind: str,
-                       best_label: str | None) -> None:
+                       best_label: str | None, higher_is_better: bool) -> None:
     """full 模式：heatmap（recipe×bitwidth）+ scatter（best 高亮）+ table（全部候选）。
 
     heatmap/scatter 需数值 metric，仍用 ok_results；table 用 all_results 含失败/跳过。
@@ -654,6 +663,13 @@ def _push_full_charts(render_chart, all_results: list[dict[str, Any]],
                 x="bitwidth",
                 y="recipe",
                 value="metric",
+                x_label="位宽预设",
+                y_label="recipe（预处理+求解器+后处理）",
+                caption=(
+                    f"cell 色 = {metric_kind}（"
+                    f"{'深色=高=差' if not higher_is_better else '深色=高=好'}）。"
+                    "coral 高亮见 scatter。"
+                ),
             )
             sys.stderr.write(f"[run_ptq_sweep] pushed heatmap: {len(matrix_data)} cells\n")
     except Exception as e:
@@ -674,6 +690,9 @@ def _push_full_charts(render_chart, all_results: list[dict[str, Any]],
                 x="bitwidth",
                 y="metric",
                 color="color",
+                x_label="位宽预设",
+                y_label=metric_kind,
+                caption=f"每候选一个点；珊瑚=best（{best_label}）。",
             )
             sys.stderr.write(f"[run_ptq_sweep] pushed scatter: {len(matrix_data)} points\n")
     except Exception as e:
@@ -692,7 +711,7 @@ def _push_full_charts(render_chart, all_results: list[dict[str, Any]],
 
 def _push_charts(mode: str, candidates: list[dict[str, Any]],
                   report: dict[str, Any], metric_kind: str,
-                  recipes_filter: list[str]) -> None:
+                  recipes_filter: list[str], higher_is_better: bool) -> None:
     try:
         from orca.chart import render_chart
     except Exception as e:
@@ -711,10 +730,10 @@ def _push_charts(mode: str, candidates: list[dict[str, Any]],
 
     if mode == "lightweight":
         _push_lw_charts(render_chart, candidates, all_results, ok_results,
-                        metric_kind, recipes_filter)
+                        metric_kind, recipes_filter, higher_is_better)
     else:
         _push_full_charts(render_chart, all_results, ok_results, metric_kind,
-                          best_label)
+                          best_label, higher_is_better)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -910,7 +929,7 @@ def main() -> int:
         sys.exit(2)
 
     # 7. charts
-    _push_charts(mode, candidates, report, metric_kind, recipes_filter)
+    _push_charts(mode, candidates, report, metric_kind, recipes_filter, higher_is_better)
 
     # 显式释放 best q_model（caller 引用置 None，配合 _free_q_model 的 gc/cuda 回收）
     best_q = best["q_model"]

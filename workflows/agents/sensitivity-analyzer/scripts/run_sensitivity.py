@@ -155,6 +155,12 @@ def _push_charts(auto_sensitive: list[str], ranked: list[dict[str, Any]],
                 x="layer",
                 y="score",
                 color="color",
+                x_label="模型层（原始程序顺序）",
+                y_label="敏感度 score（越高=越不能低位宽）",
+                caption=(
+                    "珊瑚=入选敏感层（保持高精度）。按设定 ratio 选出的敏感层（珊瑚）留高精度，"
+                    "其余低位宽。"
+                ),
             )
             sys.stderr.write(f"[run_sensitivity] pushed bar: {len(bar_data)} layers\n")
     except Exception as e:
@@ -178,6 +184,7 @@ def _push_charts(auto_sensitive: list[str], ranked: list[dict[str, Any]],
                 label="quant/sensitivity",
                 title="All Layers (selected ranked)",
                 columns=["layer", "score", "selected", "rank"],
+                caption="全部候选层；selected=true 的进入高精度白名单，rank=白名单内序号（越前=越敏感）。",
             )
             sys.stderr.write(
                 f"[run_sensitivity] pushed table: {len(table_rows)} layers "
