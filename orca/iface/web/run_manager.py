@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Literal
 
 from orca.compile import ConfigurationError, load_workflow
+from orca.iface.cli.config import apply_kb_requirement
 from orca.chart._limits import SOCK_PATH_MAX
 from orca.chart._paths import chart_sock_path
 from orca.events.bus import EventBus
@@ -278,6 +279,9 @@ class RunManager:
                 （SPEC §3.1 YAGNI：script 调 render_chart 会因 socket 不存在 fail loud）。
         """
         wf = load_workflow(Path(yaml_path))
+        # plan sprightly-questing-donut §1.4：requires knowledge_base 时预检 KB（web/MCP 生产路径，
+        # 与 orca run / in_session bootstrap 同款；缺 KB → ConfigurationError 由 web 层转 HTTP 错误）。
+        apply_kb_requirement(wf)
         run_id = gen_run_id(wf.name)
         tape_path = self._runs_dir / f"{run_id}.jsonl"
         tape = Tape(tape_path, run_id=run_id, resume=resume)

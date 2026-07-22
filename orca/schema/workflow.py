@@ -15,7 +15,7 @@
 
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class InputDef(BaseModel):
@@ -298,3 +298,17 @@ class Workflow(BaseModel):
     requires: list[str] = []  # 运行时依赖声明（plan sprightly-questing-donut §1.4）。含
     # ``"knowledge_base"`` → run 启动预检 KB 存在（``resolve_kb_dir`` 非空），缺则 fail-loud
     # （清晰指引 + searched 路径），不进 setup agent。默认空 = 无外部依赖。
+
+    @field_validator("requires")
+    @classmethod
+    def _requires_whitelist(cls, v: list[str]) -> list[str]:
+        """plan §1.4：requires 白名单校验。typo（如 ``knowlegde_base``）会被 pydantic 默默接受、
+        precheck 永不触发——fail-loud 承诺被静默禁用。未知 token → 校验失败（fail loud）。
+        """
+        known = {"knowledge_base"}
+        unknown = [t for t in v if t not in known]
+        if unknown:
+            raise ValueError(
+                f"requires 含未知 token {unknown}；已知：{sorted(known)}（typo 会让预检静默失效）"
+            )
+        return v

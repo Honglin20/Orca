@@ -762,3 +762,27 @@ def test_compile_allows_tools_none_in_execute_phase():
     """compile validator 允许 execute phase agent tools=None（默认全开，runtime 把关）。"""
     wf = _wf([_agent("a", prompt="do", tools=None)])
     validate_workflow(wf)  # 不 raise
+
+
+# ── plan sprightly-questing-donut §1.4：requires 白名单 ──
+
+def test_requires_known_token_accepted():
+    """requires:[knowledge_base]（已知 token）→ Workflow 构造成功（field_validator 放行）。"""
+    wf = Workflow(
+        name="w", entry="a",
+        nodes=[_agent("a", routes=[{"to": "$end"}])],
+        requires=["knowledge_base"],
+    )
+    assert wf.requires == ["knowledge_base"]
+
+
+def test_requires_unknown_token_rejected():
+    """requires 含 typo（如 knowlegde_base）→ field_validator fail loud（防预检静默失效）。"""
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError) as ei:
+        Workflow(
+            name="w", entry="a",
+            nodes=[_agent("a", routes=[{"to": "$end"}])],
+            requires=["knowlegde_base"],  # typo
+        )
+    assert "knowledge_base" in str(ei.value)  # 错误信息含已知 token 提示

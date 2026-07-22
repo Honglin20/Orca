@@ -707,6 +707,7 @@ def _resume_workflow(tape_or_run_id: str, yaml_override: Path | None) -> int:
         return EXIT_ARG_OR_VALIDATE
     try:
         wf = load_workflow(resolved_yaml)
+        apply_kb_requirement(wf)  # plan §1.4：requires knowledge_base 时预检 KB（resume 路径同款 fail loud）
     except ConfigurationError as e:
         typer.echo(str(e), err=True)
         return EXIT_ARG_OR_VALIDATE

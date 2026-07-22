@@ -196,3 +196,28 @@ def test_build_env_overlay_artifacts_dir_coexists_with_chart_vars(monkeypatch):
     assert overlay["ORCA_ARTIFACTS_DIR"] == "/abs/runs/r-1/artifacts"
     # prefix 透传仍工作
     assert overlay["ANTHROPIC_API_KEY"] == "sk-1"
+
+
+# ── plan sprightly-questing-donut §1.2：kb_dir（KB 根，同 artifacts_dir 形态）──
+
+def test_build_env_overlay_injects_kb_dir():
+    """``kb_dir`` 非空 → overlay 含 ``ORCA_KB_DIR``（KB 根透传，executor/script spawn 注入）。"""
+    overlay = build_env_overlay((), kb_dir="/abs/knowledge_base")
+    assert overlay["ORCA_KB_DIR"] == "/abs/knowledge_base"
+
+
+def test_build_env_overlay_kb_dir_default_not_injected():
+    """``kb_dir`` 缺省 → 不注 ``ORCA_KB_DIR``（向后兼容，不碰 KB 的 workflow 零回归）。"""
+    overlay = build_env_overlay(("ANTHROPIC_",))
+    assert "ORCA_KB_DIR" not in overlay
+
+
+def test_build_env_overlay_kb_dir_coexists_with_artifacts():
+    """kb_dir 与 artifacts_dir 同注（spawn 一次性透传两个权威目录），互不覆盖。"""
+    overlay = build_env_overlay(
+        (),
+        artifacts_dir="/abs/runs/r-1/artifacts",
+        kb_dir="/abs/knowledge_base",
+    )
+    assert overlay["ORCA_ARTIFACTS_DIR"] == "/abs/runs/r-1/artifacts"
+    assert overlay["ORCA_KB_DIR"] == "/abs/knowledge_base"

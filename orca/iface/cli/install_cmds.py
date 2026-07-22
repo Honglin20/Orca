@@ -483,14 +483,12 @@ def _install_bundled_knowledge_base() -> list[Path]:
         return []
     dest_dir = Path.home() / ".orca" / "knowledge_base"
     dest_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        shutil.copytree(
-            src_dir, dest_dir, dirs_exist_ok=True,
-            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-        )
-    except OSError as e:  # noqa: BLE001
-        typer.echo(f"  ⚠ 部署 knowledge_base 失败：{e}", err=True)
-        return []
+    # copytree 整体失败 → 让 OSError 上抛（run_install 捕获并计入 failed，install 期 fail loud，
+    # 不延迟到 run 期）。与 _install_bundled_workflows 的 per-file fail-soft 不同：KB 是整树原子语义。
+    shutil.copytree(
+        src_dir, dest_dir, dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
     return [dest_dir]
 
 
@@ -536,7 +534,12 @@ def run_install(target: str, scope: str) -> list[str]:
 
     # 部署内置 KB（CWD/knowledge_base → ~/.orca/knowledge_base，全局可见；与 host 无关，跑一次）
     # plan sprightly-questing-donut §1.1：让 struct-exploration 换项目跑也能 resolve 到 KB。
-    deployed_kb = _install_bundled_knowledge_base()
+    try:
+        deployed_kb = _install_bundled_knowledge_base()
+    except OSError as e:  # KB copytree 整体失败 → 计入 failed（install 期 fail loud，不延迟到 run 期）
+        typer.echo(f"  ⚠ 部署 knowledge_base 失败：{e}", err=True)
+        deployed_kb = []
+        failed.append("knowledge_base")
     if deployed_kb:
         typer.echo("\n[knowledge_base] → ~/.orca/knowledge_base（全局内置，struct-exploration 可移植发现）")
         for k in deployed_kb:

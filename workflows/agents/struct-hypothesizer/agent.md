@@ -34,7 +34,7 @@ tools: [bash, read, glob, grep]
 ```bash
 python3 "{{ setup.output.struct_scripts_dir }}/direction_coverage.py" \
   --ledger "{{ setup.output.ledger_path }}" \
-  --kb-dir "${ORCA_KB_DIR:-knowledge_base}" \
+  --kb-dir "$ORCA_KB_DIR" \
   --family "{{ setup.output.family }}" \
   --target-latency-ms "{{ inputs.target_latency_ms }}"
 ```
