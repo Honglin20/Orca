@@ -59,6 +59,10 @@ _HOP_ORDER = (
 
 RUNBOOK_PATH = "docs/troubleshooting/push-chain.md"
 
+# H6 passive 模式监听窗口（S5，SPEC §4 H6）：真实事件可能稀疏，比 self-spawn 的 3s 长。
+# doctor 是一次性命令，8s 在「快速诊断」与「给真实事件足够到达时间」间平衡。
+_H6_PASSIVE_LISTEN_SECONDS = 8.0
+
 
 # ── ProbeContext ──────────────────────────────────────────────────────────────
 
@@ -944,14 +948,22 @@ def _hop_h6_ws_delivery(ctx: ProbeContext) -> dict[str, Any]:
     用独立 tmp runs_dir + ``__probe__`` 前缀 run_id 隔离，防污染用户 run（SPEC §4 H6 隔离
     要求 + §7-5c 反例连续两次跑无残留）。
 
+    **passive 模式**（S5，SPEC §4 H6 + §7-9）：``ctx.ws_url`` 给定时走被动监听——连用户在跑
+    的 web server，subscribe ``ctx.run_id``，等收**真实**事件（不自己起 web、不注入合成事件，
+    外部进程拿不到该 run 的 bus 句柄）。回答「我这个 run 的事件到没到前端」——比 self-spawn
+    的「orca 推送代码本身通不通」更贴近真实排障。需 ``--run-id``；缺 → fail + hint。
+
     status：
-      - ``pass``：3s 内 WS 收到合成 agent_message 事件。
-      - ``fail``：超时 / WS 连接拒绝 / pump 异常（monkeypatch 反例模拟）。
+      - ``pass``：self-spawn 3s / passive N s 内 WS 收到目标事件。
+      - ``fail``：超时（self-spawn）/ WS 连接拒绝 / subscribe 缺 run_id / pump 异常。
+      - ``unknown``：passive subscribe 成功但 N s 无事件（可能该 run 无新事件，passive 无法注入）。
       - ``error``：probe 自身异常（uvicorn / manager 抛错）。
     """
     import asyncio
 
     try:
+        if ctx.ws_url:
+            return asyncio.run(_hop_h6_ws_delivery_passive_async(ctx))
         return asyncio.run(_hop_h6_ws_delivery_async(ctx))
     except Exception as e:  # noqa: BLE001 — outer guard：asyncio.run / setup 抛错不传染
         logger.warning("H6 ws_delivery probe 抛异常", exc_info=True)
@@ -959,9 +971,108 @@ def _hop_h6_ws_delivery(ctx: ProbeContext) -> dict[str, Any]:
             "hop": H6_WS_DELIVERY,
             "status": "error",
             "evidence": "",
-            "reason": f"H6 self-spawn setup 抛异常：{type(e).__name__}: {e}",
+            "reason": f"H6 ws_delivery setup 抛异常：{type(e).__name__}: {e}",
             "fix_hint": _fix_hint(H6_WS_DELIVERY),
         }
+
+
+async def _hop_h6_ws_delivery_passive_async(ctx: ProbeContext) -> dict[str, Any]:
+    """H6 passive 模式（S5，SPEC §4 H6 + §7-9）：连用户在跑的 web，被动监听真实 run 事件。
+
+    与 self-spawn 区别：不自己起 web / 不注入合成事件（外部进程拿不到该 run 的 bus 句柄）；
+    只连既存 ``ctx.ws_url`` 的 ``/ws``，subscribe ``ctx.run_id``，被动等收真实事件。回答
+    「我这个 run 的事件到没到前端」——比 self-spawn 的「orca 推送代码通不通」更贴近真实排障。
+
+    需 ``ctx.run_id``（subscribe 目标）；缺 → fail + hint「passive 模式需 --run-id」。
+
+    status：
+      - ``pass``：``_H6_PASSIVE_LISTEN_SECONDS`` 内收到该 run 的事件（真实链路通）。
+      - ``fail``：WS 连接拒绝 / subscribe 缺 run_id。
+      - ``unknown``：subscribe 成功但监听窗口无事件（可能该 run 无新事件；passive 无法注入
+        合成事件到别人的 bus，不能强判）。
+    """
+    import asyncio
+    import websockets
+
+    ws_url = ctx.ws_url
+    run_id = ctx.run_id
+    if not run_id:
+        return {
+            "hop": H6_WS_DELIVERY,
+            "status": "fail",
+            "evidence": f"mode=passive, ws_url={ws_url}",
+            "reason": "passive 模式（--ws-url）需要 --run-id 指定 subscribe 目标",
+            "fix_hint": _fix_hint(H6_WS_DELIVERY),
+        }
+
+    # 连既存 web server（3s 连接超时；拒绝/超时 → fail：web 没起 / URL 错）。
+    try:
+        ws_client = await asyncio.wait_for(websockets.connect(ws_url), timeout=3.0)
+    except Exception as e:  # noqa: BLE001 — TimeoutError / OSError / InvalidURI 等
+        return {
+            "hop": H6_WS_DELIVERY,
+            "status": "fail",
+            "evidence": f"mode=passive, ws_url={ws_url}",
+            "reason": f"WS 连接失败（web server 没起 / 端口错 / URL 错）：{type(e).__name__}: {e}",
+            "fix_hint": _fix_hint(H6_WS_DELIVERY),
+        }
+
+    try:
+        await ws_client.send(json.dumps({"type": "subscribe", "run_id": run_id}))
+        # 给 server 端 _handle_subscribe 起 pump task 一点时间。
+        await asyncio.sleep(0.3)
+        deadline = asyncio.get_running_loop().time() + _H6_PASSIVE_LISTEN_SECONDS
+        received: dict[str, Any] | None = None
+        while asyncio.get_running_loop().time() < deadline:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+            try:
+                raw = await asyncio.wait_for(
+                    ws_client.recv(), timeout=min(1.0, remaining),
+                )
+            except asyncio.TimeoutError:
+                continue
+            try:
+                payload = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            # 收到该 run 的任一事件即判 pass（pump 把 event.model_dump + run_id 标签发出）。
+            if payload.get("run_id") == run_id:
+                received = payload
+                break
+        if received is not None:
+            return {
+                "hop": H6_WS_DELIVERY,
+                "status": "pass",
+                "evidence": (
+                    f"mode=passive, ws_url={ws_url}, run_id={run_id}, "
+                    f"received {received.get('type')} within {_H6_PASSIVE_LISTEN_SECONDS}s"
+                    "（真实事件 bus→pump→WS 链路通）"
+                ),
+                "reason": "",
+                "fix_hint": _fix_hint(H6_WS_DELIVERY),
+            }
+        # subscribe 成功但窗口内无事件 → unknown（被动模式无法注入，不强判 fail）。
+        return {
+            "hop": H6_WS_DELIVERY,
+            "status": "unknown",
+            "evidence": (
+                f"mode=passive, ws_url={ws_url}, run_id={run_id}, "
+                f"no event in {_H6_PASSIVE_LISTEN_SECONDS}s"
+            ),
+            "reason": (
+                f"subscribe 后 {_H6_PASSIVE_LISTEN_SECONDS}s 内未收到 {run_id} 的事件。"
+                "可能该 run 无新事件（passive 无法注入合成事件判定）；若你确定子 agent 正在"
+                "产事件却收不到 → pump 断（self-spawn 模式可复现确认）。"
+            ),
+            "fix_hint": _fix_hint(H6_WS_DELIVERY),
+        }
+    finally:
+        try:
+            await ws_client.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 async def _hop_h6_ws_delivery_async(ctx: ProbeContext) -> dict[str, Any]:

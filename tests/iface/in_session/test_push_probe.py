@@ -825,3 +825,223 @@ def doctor_iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.chdir(tmp_path)
     return tmp_path
+
+
+# ── H6 passive 模式（S5，SPEC §4 H6 + §7-9）──────────────────────────────────
+
+
+def test_h6_passive_fail_without_run_id(monkeypatch, tmp_path):
+    """S5：passive 模式（--ws-url）缺 --run-id → fail（subscribe 需目标）。
+
+    构造：``run_push_probe(ws_url=..., run_id=None)``——passive 分支应 fail + hint。
+    """
+    _clear_in_session_env(monkeypatch)
+    result = run_push_probe(
+        ws_url="ws://127.0.0.1:9999/ws", run_id=None, rundir=tmp_path,
+    )
+    h6 = _hop_by_name(result, H6_WS_DELIVERY)
+    assert h6["status"] == "fail", h6
+    assert "passive" in h6["evidence"]
+    assert "--run-id" in h6["reason"]
+
+
+def test_h6_passive_fail_connection_refused(monkeypatch, tmp_path):
+    """S5：passive 连不存在的 web（死端口）→ fail「WS 连接失败」。
+
+    构造：``ws_url`` 指向一个没人监听的端口 → websockets.connect 抛 ConnectionRefused → fail。
+    """
+    _clear_in_session_env(monkeypatch)
+    result = run_push_probe(
+        ws_url="ws://127.0.0.1:1/ws",  # port 1：特权端口，正常无人监听 → 连接拒绝
+        run_id="some-run",
+        rundir=tmp_path,
+    )
+    h6 = _hop_by_name(result, H6_WS_DELIVERY)
+    assert h6["status"] == "fail", h6
+    assert "WS 连接失败" in h6["reason"]
+
+
+class _PassiveTarget:
+    """ephemeral web server 跑在后台线程，供 passive 模式 H6 测试连接。
+
+    起 RunManager + create_app + uvicorn（ephemeral port）+ attach_run 一个手写 tape。
+    暴露 ``ws_url`` / ``run_id`` 供 probe 连；``emit()`` 往该 run 的 bus 注入真实事件
+    （走后台 loop → pump → WS → probe 的 client，跨线程靠 TCP socket）。
+    """
+
+    def __init__(self, tmp_path: Path) -> None:
+        import asyncio
+        import threading
+
+        self.tmp_path = tmp_path
+        self.loop = asyncio.new_event_loop()
+        self._ready = threading.Event()
+        self._stop_evt: asyncio.Event | None = None
+        self.ws_url: str | None = None
+        self.run_id = "passive-target-run"
+        self._manager = None
+        self._handle = None
+        self._server = None
+        self._server_task = None
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        assert self._ready.wait(timeout=8.0), "passive target web server 未就绪"
+
+    def _run(self) -> None:
+        import asyncio
+        asyncio.set_event_loop(self.loop)
+        try:
+            self.loop.run_until_complete(self._startup())
+            # 显式 cancel 残留 task（uvicorn 内部 callback）并 drain，防「Event loop is closed」噪音。
+            pending = [t for t in asyncio.all_tasks(self.loop) if not t.done()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                self.loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True),
+                )
+            self.loop.run_until_complete(self.loop.shutdown_asyncgens())
+        except Exception:  # noqa: BLE001 — 后台 helper，teardown 异常不影响测试结论
+            pass
+        finally:
+            self.loop.close()
+
+    async def _startup(self) -> None:
+        import asyncio
+        import time
+        from orca.iface.web.run_manager import RunManager
+        from orca.iface.web.server import create_app
+        import uvicorn
+
+        runs_dir = self.tmp_path / "target-runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        tape_path = runs_dir / f"{self.run_id}.jsonl"
+        # 手写 workflow_started + node_started（attach_run 首行需 workflow_started）。
+        with open(tape_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "seq": 1, "type": "workflow_started", "timestamp": time.time(),
+                "node": None, "session_id": None,
+                "data": {"run_id": self.run_id, "workflow_name": "target"},
+            }) + "\n")
+            f.write(json.dumps({
+                "seq": 2, "type": "node_started", "timestamp": time.time(),
+                "node": "N1", "session_id": None, "data": {},
+            }) + "\n")
+
+        self._manager = RunManager(runs_dir=runs_dir, max_concurrent=1)
+        await self._manager.attach_run(str(tape_path), run_id=self.run_id)
+        self._handle = self._manager.get_handle(self.run_id)
+
+        app = create_app(self._manager)
+        config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning")
+        self._server = uvicorn.Server(config)
+        self._server.force_exit = True
+        self._server_task = self.loop.create_task(self._server.serve())
+
+        # 等端口就绪。
+        deadline = self.loop.time() + 5.0
+        port = None
+        while self.loop.time() < deadline:
+            for srv in getattr(self._server, "servers", None) or []:
+                for sock in (list(srv.sockets) if hasattr(srv, "sockets") else []):
+                    try:
+                        port = int(sock.getsockname()[1])
+                        break
+                    except (OSError, TypeError, IndexError):
+                        continue
+                if port:
+                    break
+            if port:
+                break
+            await asyncio.sleep(0.05)
+        assert port is not None, "target uvicorn 未起端口"
+        self.ws_url = f"ws://127.0.0.1:{port}/ws"
+        self._stop_evt = asyncio.Event()
+        self._ready.set()
+        await self._stop_evt.wait()
+        # 优雅关闭（在 loop 仍活时跑完 server/manager teardown，防「Event loop is closed」噪音）。
+        self._server.should_exit = True
+        if self._server_task is not None:
+            try:
+                await asyncio.wait_for(self._server_task, timeout=3.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):  # noqa: BLE001
+                self._server_task.cancel()
+        try:
+            await self._manager.shutdown(timeout=2.0)
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+
+    def emit(self) -> None:
+        """往 target run 的 tape 文件追加一条 agent_message（follow task poll→parse→relay）。
+
+        attached run 的 bus 是 read-only（AttachedTape.append raise），正确做法是写 tape
+        文件让 follow task（0.3s 轮询 mtime/size）拾取 → ``Event(**line)`` → ``bus.relay`` →
+        pump → WS。这正复刻真实 daemon 写 tape → 前端收的链路。
+        """
+        import time
+        tape_path = self.tmp_path / "target-runs" / f"{self.run_id}.jsonl"
+        with open(tape_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "seq": 99, "type": "agent_message", "timestamp": time.time(),
+                "node": "N1", "session_id": "target-session",
+                "data": {"text": "real event from passive target"},
+            }) + "\n")
+
+    def stop(self) -> None:
+        """触发后台 _startup 的优雅关闭分支（server + manager teardown 在 loop 内完成）。"""
+        if self._stop_evt is not None:
+            self._stop_evt.set()
+        try:
+            self.thread.join(timeout=8.0)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def test_h6_passive_pass_receives_real_event(monkeypatch, tmp_path):
+    """S5 happy：passive 连真实 web + 后台 emit 一条事件 → probe 监听窗口内收到 → pass。
+
+    构造：后台线程起 ephemeral web + attach_run；主线程跑 run_push_probe(ws_url, run_id)
+    （阻塞 ≤8s 监听）；主线程 sleep 1.5s 后 emit → pump → WS → probe 收到 → pass。
+    """
+    import threading
+    import time
+
+    _clear_in_session_env(monkeypatch)
+    target = _PassiveTarget(tmp_path)
+
+    holder: dict = {}
+
+    def _probe():
+        holder["r"] = run_push_probe(
+            ws_url=target.ws_url, run_id=target.run_id, rundir=tmp_path,
+        )
+
+    t = threading.Thread(target=_probe)
+    t.start()
+    time.sleep(1.5)  # 等 probe connect + subscribe + pump 起。
+    target.emit()    # 注入真实事件 → bus → pump → WS → probe client。
+    t.join(timeout=15.0)
+    target.stop()
+
+    assert "r" in holder, "probe 线程未返回结果"
+    h6 = _hop_by_name(holder["r"], H6_WS_DELIVERY)
+    assert h6["status"] == "pass", h6
+    assert "mode=passive" in h6["evidence"]
+    assert "received" in h6["evidence"]
+
+
+def test_h6_passive_unknown_when_no_event(monkeypatch, tmp_path):
+    """S5：passive subscribe 成功但监听窗口无事件 → unknown（被动模式无法注入，不强判 fail）。
+
+    构造：后台起 ephemeral web + attach_run 但**不 emit** → probe 8s 监听无事件 → unknown。
+    """
+    _clear_in_session_env(monkeypatch)
+    target = _PassiveTarget(tmp_path)
+    result = run_push_probe(
+        ws_url=target.ws_url, run_id=target.run_id, rundir=tmp_path,
+    )
+    target.stop()
+    h6 = _hop_by_name(result, H6_WS_DELIVERY)
+    assert h6["status"] == "unknown", h6
+    assert "mode=passive" in h6["evidence"]
+    assert "no event" in h6["evidence"]

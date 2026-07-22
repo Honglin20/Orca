@@ -195,6 +195,12 @@ doctor 输出 H6 `status=fail`：
 - self-spawn 模式（默认）：3s 内未收到合成 `agent_message` 事件。
 - passive 模式（`--ws-url` 给定）：连既存 `/ws` passive listen N 秒未收到真事件。
 
+> **passive 模式 status=unknown 不是 fail**：subscribe 成功但监听窗口（8s）内无事件 →
+> `unknown`。被动模式无法向别人的 bus 注入合成事件，不能区分「链路断」与「run 无新事件」。
+> **判读**：若你确定子 agent 正在产事件（tape 在增长 / daemon log 有 ingest）但 passive
+> 8s 收不到 → pump 断（用 self-spawn 模式 `orca doctor --probe-push` 不带 `--ws-url` 复现确认）；
+> 若 run 静止（无子 agent 活动）→ unknown 是正常的。
+
 ### 根因
 
 bus → pump → WS 链路中任一环故障：
@@ -202,19 +208,26 @@ bus → pump → WS 链路中任一环故障：
 - WS 未订阅（subscribe 消息未发 / run_id 不匹配）。
 - bus 订阅者注册失败（罕见）。
 
-H6 通过 self-spawn 一个临时 run + 注入合成事件 + WS subscribe 等收，端到端验证链路。
+H6 两种模式：
+- **self-spawn（默认）**：临时起 run + 注入合成事件 + WS subscribe 等收——验证「orca 推送代码通不通」。
+- **passive（`--ws-url ws://host:port/ws --run-id <id>`）**：连你**真实在跑**的 web，subscribe 你的 run，等收**真实**事件——验证「我这个 run 的事件到没到前端」，更贴近真实排障。
 
 ### 修复动作
 
 - **pump 异常**：查 `<rundir>/<run_id>/sidechain_daemon.log` 或 web server stdout 的
   `ws pump（run=...）异常退出` warning；按 traceback 修源 bug。
 - **WS 未订阅**：前端确认 `subscribe(run_id)` 消息发出且 run_id 正确。
+- **passive 连接拒绝（`WS 连接失败`）**：web server 没起 / 端口错 / URL 错——确认
+  `orca run --web` 或 `tars serve` 在跑，端口对（默认 7428），URL 形如 `ws://127.0.0.1:7428/ws`。
+- **passive 缺 run_id（`需要 --run-id`）**：passive 必须 `--run-id` 指定 subscribe 目标。
 - **端口残留**：连续两次 doctor self-spawn 第二次 fail——查 `__probe__` 前缀 run / 临时
   runs_dir 是否清理（doctor 用独立 tmp runs_dir 隔离，不应残留；若残留是 doctor bug）。
 
 ### 验证
 
-重跑 `orca doctor --probe-push`，确认 H6 `status=pass`（self-spawn 3s 收到事件）。
+- self-spawn：重跑 `orca doctor --probe-push`，确认 H6 `status=pass`（3s 收到合成事件）。
+- passive：`orca doctor --probe-push --ws-url ws://<host>:<port>/ws --run-id <活跃run_id>`，在
+  子 agent 正产事件时跑 → `status=pass`（收到真实事件）。
 
 ---
 
