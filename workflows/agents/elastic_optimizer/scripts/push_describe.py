@@ -201,6 +201,7 @@ def _err(msg: str) -> None:
         label="nas/structure",
         title="⚠ Baseline → Elastic",
         columns=["key", "value"],
+        caption="诊断/error 兜底：baseline 结构解析失败或对比表为空；详见 value 列。",
     )
 
 

@@ -70,6 +70,10 @@ def _push_error(label: str, title: str, expected: list[str], actual: list[str], 
         label=label,
         title=f"⚠ {title} schema error",
         columns=["key", "value"],
+        caption=(
+            "训练指标 schema 校验失败（F1 可见诊断，不静默）。"
+            "expected/actual 列对照见上；sample 为日志首行截断。"
+        ),
     )
 
 

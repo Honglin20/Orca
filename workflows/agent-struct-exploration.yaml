@@ -101,7 +101,7 @@ nodes:
       - knowledge_base 根目录：`knowledge_base/`（已固化，不再作 input）
       - train_command / test_command / accuracy_target：透传给 measure_baseline.py
       - device / latency_provider / seed（P7 新增）：透传给 measure_baseline.py
-      - **struct_scripts_dir（P9b 固化默认）**：`workflows/agents/_struct_scripts`（原 [default] input，下沉为 setup output 字段，下游 `{{ setup.output.struct_scripts_dir }}` 取）
+      - **struct_scripts_dir（P9b 固化默认）**：`workflows/agents/_struct_scripts`（原 [default] input，下沉为 setup output 字段，下游 `{% raw %}{{ setup.output.struct_scripts_dir }}{% endraw %}` 取）
 
       ## 执行（确定性优先，fail loud）
 

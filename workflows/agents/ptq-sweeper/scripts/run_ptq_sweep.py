@@ -518,7 +518,8 @@ def _recipe_label(r: dict[str, Any]) -> str:
     return "+".join(parts)
 
 
-def _push_table(render_chart, rows: list[dict[str, Any]], title: str) -> None:
+def _push_table(render_chart, rows: list[dict[str, Any]], title: str,
+                caption: str = "") -> None:
     try:
         render_chart(
             chart_type="table",
@@ -526,6 +527,7 @@ def _push_table(render_chart, rows: list[dict[str, Any]], title: str) -> None:
             label=CHART_LABEL,
             title=title,
             columns=list(rows[0].keys()) if rows else [],
+            caption=caption,
         )
         sys.stderr.write(f"[run_ptq_sweep] pushed table: {len(rows)} rows\n")
     except Exception as e:
@@ -634,7 +636,11 @@ def _push_lw_charts(render_chart, candidates: list[dict[str, Any]],
          "metric": r["metric"], "elapsed_s": r["elapsed_seconds"],
          "status": r["status"], "error": r["error"] or ""}
         for r in table_rows
-    ], "Lightweight Sweep — All Steps (incl. failed/skipped)")
+    ], "Lightweight Sweep — All Steps (incl. failed/skipped)",
+        caption=(
+            "每候选一行（含 failed/skipped 便于诊断依赖缺失）。"
+            "metric 为 teacher-student mse 口径（越低越好），status 标 ok/failed/skipped。"
+        ))
 
 
 def _push_full_charts(render_chart, all_results: list[dict[str, Any]],
@@ -706,7 +712,11 @@ def _push_full_charts(render_chart, all_results: list[dict[str, Any]],
          "elapsed_s": r["elapsed_seconds"],
          "status": r["status"], "error": r["error"] or ""}
         for r in table_rows
-    ], "Full Sweep — All Combos (incl. failed/skipped)")
+    ], "Full Sweep — All Combos (incl. failed/skipped)",
+        caption=(
+            "全枚举矩阵每组合一行（bit_width × recipe × 求解/后处理），含 failed/skipped。"
+            "metric 口径同 lightweight；elapsed_s 便于定位慢组合。"
+        ))
 
 
 def _push_charts(mode: str, candidates: list[dict[str, Any]],

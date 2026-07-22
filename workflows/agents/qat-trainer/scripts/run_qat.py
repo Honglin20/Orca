@@ -417,6 +417,7 @@ def _push_charts(
                 title=f"QAT Recovery (after−before, {metric_kind})",
                 x="scheme",
                 y="recovery",
+                x_label="QAT 方案（scheme）",
                 y_label=f"after − before ({metric_kind})",
                 caption=(
                     f"recovery = after − before；{metric_kind} 口径下负值=改善（QAT 把 metric 降下来了）。"
