@@ -261,5 +261,9 @@ def _build_spawn_env(
         session_id=session_id,
         chart_sock=chart_sock,
         artifacts_dir=artifacts_dir,
+        # plan sprightly-questing-donut §1.2：KB 根经 os.environ transport（iface.resolve_kb_dir
+        # 在 run 启动期写入）→ 显式 overlay（spawn_env 已 **os.environ，此处显式注保持与
+        # artifacts_dir 一致的确定性 overlay 契约）。
+        kb_dir=os.environ.get("ORCA_KB_DIR", ""),
     )
     return {**os.environ, **overlay}

@@ -295,3 +295,6 @@ class Workflow(BaseModel):
     nodes: list[AnnotatedNode]  # execute phase 节点（discriminated union）
     parallel: list[ParallelGroup] = []  # 静态并行组（顶层独立列表）
     outputs: dict[str, str] = {}  # 最终输出映射 {key: "{{ node.output.field }}"}
+    requires: list[str] = []  # 运行时依赖声明（plan sprightly-questing-donut §1.4）。含
+    # ``"knowledge_base"`` → run 启动预检 KB 存在（``resolve_kb_dir`` 非空），缺则 fail-loud
+    # （清晰指引 + searched 路径），不进 setup agent。默认空 = 无外部依赖。

@@ -45,6 +45,11 @@
   后再加）。doctor hint 据此只指引 ``--host-session`` argv（真实可工作路径），不引导用户走不通的
   config 字段。
 
+  ``knowledge_base_dir``（plan sprightly-questing-donut §1.3，**独立于 ``CONFIG_FIELDS``**）：
+  KB 根目录自定义路径（字符串标量），同 ``sidechain`` 是路径解析维度，project 覆盖 user。由
+  ``resolve_kb_dir`` 读取（env > config > ``~/.orca/knowledge_base`` > ``cwd/knowledge_base``），
+  解析结果作 exec spawn 的 ``ORCA_KB_DIR`` transport。
+
 **shell env 快照**：首次 ``bootstrap_config()`` 前抓 ``ORCA_*`` env 快照，供 ``executor show`` 区分
 「shell export」与「config 注入」两层来源（注入后 os.environ 已被污染，无法事后区分）。快照只用于
 展示，不影响 spawn。
@@ -164,6 +169,11 @@ def load_merged_config() -> dict[str, Any]:
             **(sc_u if isinstance(sc_u, dict) else {}),
             **(sc_p if isinstance(sc_p, dict) else {}),
         }
+    # knowledge_base_dir：路径解析维度（字符串标量，同 sidechain 独立于 CONFIG_FIELDS），
+    # project 覆盖 user。KB 根目录自定义路径，供 ``resolve_kb_dir`` 读取（KB 可移植发现）。
+    kbd_p = project.get("knowledge_base_dir")
+    if isinstance(kbd_p, str) and kbd_p.strip():
+        merged["knowledge_base_dir"] = kbd_p.strip()
     return merged
 
 
@@ -183,6 +193,83 @@ def sidechain_family(cfg: dict[str, Any]) -> str | None:
         return None
     fam = sidechain.get("family")
     return fam if isinstance(fam, str) else None
+
+
+def resolve_kb_dir() -> str:
+    """解析 workflow 知识库（KB）根目录绝对路径（KB 可移植发现，plan sprightly-questing-donut §1.2）。
+
+    回答「换项目跑 struct-exploration 时，``knowledge_base/`` 裸相对路径找不到怎么办」：KB 根
+    不再靠 workflow 里的裸相对串（由 LLM agent 按 CWD 解析），而是由本函数确定性解析为绝对路径，
+    caller（``orca run`` 预检 / in_session ``_write_env_script``）写入 ``os.environ["ORCA_KB_DIR"]``
+    或 ``orca_env.sh``，作 exec 层 spawn 的 transport——exec 不 import iface（依赖单向），经 env 取值。
+
+    优先级（**first-existing**）::
+
+        shell env ORCA_KB_DIR  >  config knowledge_base_dir(project>user)  >
+        ~/.orca/knowledge_base（``orca install`` 部署点）  >  <cwd>/knowledge_base（仓库根 fallback）
+
+    - **显式来源（env / config）权威**：设了就用；指向的目录**不存在 → 返回 ""**（不静默回退到
+      隐式来源——让 run 启动预检 fail-loud 暴露「用户配了错路径」，而非悄悄用错 KB）。
+    - **隐式来源（install 部署点 / 仓库根）**：best-effort first-existing，全 miss → ""。
+    - 全 miss → 返回 ""，由 caller（workflow 声明 ``requires:[knowledge_base]`` 时）fail-loud。
+
+    路径解析维度（同 ``sidechain``）：**不进** ``CONFIG_FIELDS`` / ``apply_config_env`` / env 注入；
+    本函数是唯一解析点（DRY），caller 直读。
+    """
+    # 1. 显式：shell env ORCA_KB_DIR（用户 export / 上层 orca 进程注入）
+    env_kb = os.environ.get("ORCA_KB_DIR", "").strip()
+    if env_kb:
+        p = Path(env_kb)
+        return str(p.resolve()) if p.is_dir() else ""
+    # 2. 显式：config knowledge_base_dir（project > user，load_merged_config 已合并）
+    cfg_kb = load_merged_config().get("knowledge_base_dir")
+    if isinstance(cfg_kb, str) and cfg_kb.strip():
+        p = Path(cfg_kb.strip())
+        return str(p.resolve()) if p.is_dir() else ""
+    # 3-4. 隐式：install 部署点 > 仓库根（best-effort first-existing）
+    for candidate in (Path.home() / ".orca" / "knowledge_base", Path.cwd() / "knowledge_base"):
+        if candidate.is_dir():
+            return str(candidate.resolve())
+    return ""
+
+
+def apply_kb_requirement(wf) -> None:
+    """plan sprightly-questing-donut §1.4：workflow 声明 ``requires:[knowledge_base]`` 时预检 KB。
+
+    回答「KB 找不到时为何不能静默继续优化」：KB 是结构搜索的知识来源（latency_moves/directions），
+    缺了 hypothesizer 只能凭参数化知识（甚至幻觉）改超参——故缺 KB 必须 fail loud 明确告知用户，
+    而非像旧版 setup agent 静默继续。
+
+    - 无 ``knowledge_base`` 依赖 → no-op（绝大多数 workflow 不碰 KB，零回归）。
+    - 有依赖 + ``resolve_kb_dir`` 解析到 → 写 ``os.environ["ORCA_KB_DIR"]`` 作 exec spawn transport
+      （executor/script 读 os.environ，不经构造参数穿透，避免 exec→iface 反向依赖）。
+    - 有依赖 + 解析不到 → ``ConfigurationError``（fail loud，含 searched 路径 + 修复指引）。
+
+    raise ``ConfigurationError`` 而非 ask-user 哨兵：KB 缺失是环境/安装缺口（用户该去装/配），不是
+    「agent 缺一个用户知道的项目事实」（那是哨兵场景，见 docs/specs/agent-ask-user-sentinel.md）。
+
+    被 ``orca run`` 各路径（``orca/iface/cli/commands.py``）与 in_session bootstrap
+    （``orca/iface/in_session/cli.py``）共用——KB 预检单一真相源（DRY）。
+    """
+    if "knowledge_base" not in getattr(wf, "requires", []):
+        return
+    kb = resolve_kb_dir()
+    if not kb:
+        # lazy import：避免 config import 期拉 orca.compile 全树（config 被 bootstrap 早期加载）。
+        from orca.compile import ConfigurationError
+        raise ConfigurationError(
+            errors=[
+                "知识库（knowledge_base）未找到：本 workflow 声明 requires:[knowledge_base]，"
+                "但 KB 根目录解析失败，无法继续。\n"
+                "  搜索顺序：env ORCA_KB_DIR > config knowledge_base_dir(project>user) > "
+                "~/.orca/knowledge_base > <cwd>/knowledge_base\n"
+                "  修复任一：① 跑 `orca install`（部署内置 KB 到 ~/.orca/knowledge_base）；"
+                "② 在 ~/.orca/config.json 设 \"knowledge_base_dir\": \"<KB 绝对路径>\"；"
+                "③ export ORCA_KB_DIR=<KB 绝对路径>。"
+            ],
+            warnings=[],
+        )
+    os.environ["ORCA_KB_DIR"] = kb  # exec spawn transport（ClaudeExecutor/ScriptExecutor 读 os.environ）
 
 
 def _normalize_flags_to_str(

@@ -44,6 +44,7 @@ from typing import Any
 import typer
 
 from orca.chart._paths import artifacts_dir_for_run, chart_sock_path
+from orca.iface.cli.config import apply_kb_requirement, resolve_kb_dir
 from orca.compile import ConfigurationError, catalog, load_workflow
 from orca.events.bus import EventBus
 from orca.events.tape import Tape
@@ -453,8 +454,9 @@ def _write_orca_env(
     sock_path: Path,
     resources_root: str | None,
     artifacts_dir: Path,
+    kb_dir: str = "",
 ) -> None:
-    """原子写 ``runs/<run_id>/orca_env.sh``（6 个变量，按当前节点身份 + per-run 产物目录）。
+    """原子写 ``runs/<run_id>/orca_env.sh``（6-7 个变量，按当前节点身份 + per-run 产物目录 + KB 根）。
 
     内容（**字面值**，子代理只 ``source`` 不 typing）::
 
@@ -464,12 +466,17 @@ def _write_orca_env(
         export ORCA_CHART_SOCK=<chart_sock_path(run_id)>
         export ORCA_AGENT_RESOURCES=<folder-agent resources_root>   # 或 ``unset`` 清 stale
         export ORCA_ARTIFACTS_DIR=<runs/<run_id>/artifacts/>        # P8 权威产物目录
+        export ORCA_KB_DIR=<resolve_kb_dir()>                       # plan §1.2 KB 根（空则不注）
 
     ``resources_root`` 非空（folder-agent）→ ``export``；为 None（inline-prompt 节点）→
     ``unset ORCA_AGENT_RESOURCES`` 清潜在 stale（同一 shell 内前一次 source 的残留）。
 
     ``artifacts_dir``（P8）per-run 常量（与节点无关）：bootstrap ``mkdir -p`` 后恒存在，
     每次 next 重写 env 文件时透传同一路径（不随节点变化）。
+
+    ``kb_dir``（plan sprightly-questing-donut §1.2）KB 根绝对路径：空串 → 不注（workflow 不需 KB
+    或未解析到，由 run 启动预检对 ``requires:[knowledge_base]`` 的 workflow fail-loud）；非空 →
+    子代理 ``source`` 后 ``$ORCA_KB_DIR`` 定位 KB（替代裸相对 ``knowledge_base/``）。
 
     原子写：tmp + ``os.replace``（与 marker / step.py ``_write_prompt_file`` 同模式）。OSError
     → warn（不 fail next：env 文件是子代理侧便利，缺了也只让 chart/资源引用 fail loud 在子代理侧）。
@@ -487,6 +494,9 @@ def _write_orca_env(
         lines.append("unset ORCA_AGENT_RESOURCES")
     # P8：产物权威目录（绝对路径，resolve 后 subagent 切目录仍正确）。
     lines.append(f"export ORCA_ARTIFACTS_DIR={shlex.quote(str(artifacts_dir))}")
+    # plan sprightly-questing-donut §1.2：KB 根（空串 → 不注；requires workflow 已在 run 启动预检 fail-loud）。
+    if kb_dir:
+        lines.append(f"export ORCA_KB_DIR={shlex.quote(kb_dir)}")
     content = "\n".join(lines) + "\n"
 
     tmp = env_path.with_name(f".{env_path.name}.tmp.{os.getpid()}")
@@ -964,6 +974,19 @@ def bootstrap(
         }, ensure_ascii=False))
         raise typer.Exit(1)
 
+    # plan sprightly-questing-donut §1.4：requires knowledge_base 时预检 KB（fail fast，gen run_id 前；
+    # 与 inputs 校验同属「fail fast 在建 tape/marker 前」层）。缺 KB → 结构化错误信封 + exit 1
+    # （TARS skill 见 error_kind=kb_requirement_failed；reason 含 searched 路径 + 修复指引）。
+    try:
+        apply_kb_requirement(wf_obj)
+    except ConfigurationError as e:
+        typer.echo(json.dumps({
+            "done": True,
+            "error_kind": "kb_requirement_failed",
+            "reason": str(e),
+        }, ensure_ascii=False))
+        raise typer.Exit(1)
+
     tape_path_probe = _default_tape_path("__probe__")
     rundir = tape_path_probe.parent
 
@@ -1117,6 +1140,7 @@ def bootstrap(
         sock_path=sock_path,
         resources_root=result.resources_root,
         artifacts_dir=artifacts_dir,
+        kb_dir=resolve_kb_dir(),
     )
     _spawn_chart_daemon(run_id, tape_path)
     if not _wait_for_sock(sock_path):
@@ -1431,6 +1455,7 @@ async def _next_in_critical_section(
             # P8：artifacts_dir per-run 常量（bootstrap 已 mkdir）；next 不重 mkdir。
             # 调用方（next CLI）恒传非 None（派生自 tape_path + run_id）。
             artifacts_dir=artifacts_dir or _derive_artifacts_dir(tape, run_id),
+            kb_dir=resolve_kb_dir(),
         )
 
     # marker RMW（N2）：flock 临界区内回写。终态 → 清 marker（不复用）。

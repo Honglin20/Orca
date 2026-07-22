@@ -32,6 +32,7 @@ from typing import Any
 import typer
 
 from orca.compile import ConfigurationError, catalog, load_workflow
+from orca.iface.cli.config import apply_kb_requirement, resolve_kb_dir
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +262,7 @@ def _start_background(
     # 校验前置（fork 前就发现 yaml 错，避免子进程起不来还看不到错）。
     try:
         wf = load_workflow(yaml)
+        apply_kb_requirement(wf)  # plan §1.4：requires knowledge_base 时预检 KB（fork 前 fail loud）
     except ConfigurationError as e:
         typer.echo(str(e), err=True)
         return EXIT_ARG_OR_VALIDATE
@@ -854,6 +856,7 @@ def _run_workflow(config: RunConfig) -> int:
     # 校验前置（启动 TUI 前，避免 TUI 起来才发现 yaml 错）。
     try:
         wf = load_workflow(config.yaml_path)
+        apply_kb_requirement(wf)  # plan §1.4：requires knowledge_base 时预检 KB（fail loud）
     except ConfigurationError as e:
         typer.echo(str(e), err=True)
         return EXIT_ARG_OR_VALIDATE
@@ -1043,7 +1046,9 @@ def _web_autoexit_seconds() -> float:
 def _load_wf_or_exit(yaml_path: Path):
     """共享前置校验：yaml 不存在 / ConfigurationError → exit 2（fail loud）。"""
     try:
-        return load_workflow(yaml_path)
+        wf = load_workflow(yaml_path)
+        apply_kb_requirement(wf)  # plan §1.4：requires knowledge_base 时预检 KB（fail loud）
+        return wf
     except ConfigurationError as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(code=EXIT_ARG_OR_VALIDATE)

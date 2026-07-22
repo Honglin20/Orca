@@ -36,6 +36,7 @@ def build_env_overlay(
     chart_sock: str = "",
     agent_resources: str = "",
     artifacts_dir: str = "",
+    kb_dir: str = "",
 ) -> dict[str, str]:
     """从 ``os.environ`` 取前缀匹配的 env 变量，作为子进程 overlay（SPEC phase-4 §2.6）。
 
@@ -54,6 +55,11 @@ def build_env_overlay(
             （``<runs_dir>/<run_id>/artifacts/``，``orca.chart._paths.artifacts_dir_for_run`` 派生）。
             空串 → 不注（向后兼容）；非空 → 子进程 ``ORCA_ARTIFACTS_DIR``，workflow 脚本据此
             ``os.environ["ORCA_ARTIFACTS_DIR"]`` 写产物，替代 workflow 自建 ``llm_artifacts/``。
+        kb_dir: plan sprightly-questing-donut §1.2 workflow 知识库根目录绝对路径（由
+            ``orca.iface.cli.config.resolve_kb_dir`` 解析：env > config > ``~/.orca/knowledge_base``
+            > ``cwd/knowledge_base``）。空串 → 不注（workflow 不需要 KB / 未解析到）；非空 → 子进程
+            ``ORCA_KB_DIR``，workflow 脚本 + agent prompt 据 ``$ORCA_KB_DIR`` 定位 KB（替代裸相对
+            ``knowledge_base/``，解决换项目跑找不到 KB 的可移植性问题）。
 
     Returns:
         ``{key: value}`` dict，传入 ``SpawnConfig.env_overlay``。子进程继承这些变量（如
@@ -83,4 +89,7 @@ def build_env_overlay(
     # P8：workflow 产物权威目录，workflow 脚本据 $ORCA_ARTIFACTS_DIR 写产物（替代 llm_artifacts/）。
     if artifacts_dir:
         overlay["ORCA_ARTIFACTS_DIR"] = artifacts_dir
+    # plan sprightly-questing-donut §1.2：KB 根目录，workflow 脚本/agent 据 $ORCA_KB_DIR 定位 KB。
+    if kb_dir:
+        overlay["ORCA_KB_DIR"] = kb_dir
     return overlay

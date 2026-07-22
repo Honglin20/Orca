@@ -42,6 +42,7 @@ argv 构造（SPEC §2.1，重写不迁移）：
 from __future__ import annotations
 
 import logging
+import os
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -354,6 +355,8 @@ def _build_spawn_config(
     # phase-13 §2：env overlay 加 4 个 ORCA_* keyword（缺省空串 → 不注，向后兼容）。
     # chart_sock 由 ClaudeExecutor.exec 经 ``_resolve_chart_sock_path`` 算出。
     # P8：artifacts_dir 同款（缺省空串 → 不注，向后兼容）。
+    # plan sprightly-questing-donut §1.2：kb_dir 经 os.environ transport（iface.resolve_kb_dir
+    # 在 run 启动期写入）→ 显式 overlay 注入子进程（不依赖 prefix 透传，与 artifacts_dir 同款）。
     env_overlay = build_env_overlay(
         profile.env_overlay_prefixes,
         run_id=run_id,
@@ -362,6 +365,7 @@ def _build_spawn_config(
         chart_sock=chart_sock,
         agent_resources=agent_resources,
         artifacts_dir=artifacts_dir,
+        kb_dir=os.environ.get("ORCA_KB_DIR", ""),
     )
     cli_path = profile.resolve_cli_path()  # env > default，运行时读（SPEC §2.6）
 

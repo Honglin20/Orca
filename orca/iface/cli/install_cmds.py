@@ -464,6 +464,36 @@ def _install_bundled_workflows() -> list[Path]:
     return deployed
 
 
+def _install_bundled_knowledge_base() -> list[Path]:
+    """部署当前目录 ``knowledge_base/`` → ``~/.orca/knowledge_base/``（plan sprightly-questing-donut §1.1）。
+
+    让 ``tars install`` 把仓库自带 KB（结构搜索知识库：``index.json`` + ``common/`` + ``families/``）
+    装成**全局可见**——任何项目跑 ``agent-struct-exploration`` 都能被
+    ``orca.iface.cli.config.resolve_kb_dir`` 解析到（``~/.orca/knowledge_base`` 是隐式发现点之一），
+    解决「换项目跑 → ``knowledge_base/`` 裸相对路径找不到 → setup agent 静默继续 → kb_cache 空」
+    的可移植性缺口。
+
+    与 ``_install_bundled_workflows`` 的差别：KB 是多文件 + 子目录树（非 yaml-per-entity），故不逐文件
+    ``copy2``，直接 ``copytree(dirs_exist_ok=True)`` —— 与 agents 池同步（L457-460）完全同款 merge
+    语义（保用户/项目自加的 family 切片共存；代价是随包已删的旧切片不清理——已知限制）。源（CWD/
+    knowledge_base）保留（**复制非移动**）。无 CWD/knowledge_base → no-op（非仓库根跑 install 不报错）。
+    """
+    src_dir = Path.cwd() / "knowledge_base"
+    if not src_dir.is_dir():
+        return []
+    dest_dir = Path.home() / ".orca" / "knowledge_base"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copytree(
+            src_dir, dest_dir, dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+    except OSError as e:  # noqa: BLE001
+        typer.echo(f"  ⚠ 部署 knowledge_base 失败：{e}", err=True)
+        return []
+    return [dest_dir]
+
+
 def run_install(target: str, scope: str) -> list[str]:
     """install 核心逻辑（callback + ``skill install`` 弃用委托共用）。返回失败 host 列表。
 
@@ -503,6 +533,14 @@ def run_install(target: str, scope: str) -> list[str]:
         typer.echo("\n[workflows] → ~/.orca/workflows（全局内置，orca list 可扫到）")
         for w in deployed_wfs:
             typer.echo(f"  ✓ {w.name}")
+
+    # 部署内置 KB（CWD/knowledge_base → ~/.orca/knowledge_base，全局可见；与 host 无关，跑一次）
+    # plan sprightly-questing-donut §1.1：让 struct-exploration 换项目跑也能 resolve 到 KB。
+    deployed_kb = _install_bundled_knowledge_base()
+    if deployed_kb:
+        typer.echo("\n[knowledge_base] → ~/.orca/knowledge_base（全局内置，struct-exploration 可移植发现）")
+        for k in deployed_kb:
+            typer.echo(f"  ✓ {k.name}")
 
     if failed:
         typer.echo(f"\n部分失败：{', '.join(failed)}", err=True)
