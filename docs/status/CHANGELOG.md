@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-22] P4 TARS skill 哨兵处理全量（子 agent 缺必填项时问用户而非造假）
+
+TARS skill（`orca/skills/tars/SKILL.md`）驱动循环第 2 步加哨兵分支 + 新增「### 哨兵处理」段：派子 agent → 子 agent 缺必填项返回哨兵 JSON → TARS 在调 `orca next` **之前** strict 识别（括号配平抽最外层 JSON + `_sentinel:"orca_ask_user_v1"` 魔键，非 substring）→ 捕获 task_id（CC `agentId`/opencode `ses_xxx`）→ 问用户（CC `AskUserQuestion`/opencode 聊天问）→ 恢复**同一**子 agent（CC `SendMessage`/opencode `Task(task_id=)`）→ MAX_ASK=3 兜底 fail loud → 真实产出才喂 `orca next`（**哨兵绝不进 `orca next`**，引擎零改动）。是 P3 spike `drive_node` 的 skill 指令投影（6 步控制流逐字翻译）。只改 SKILL.md，零引擎/workflow/agent.md 改动。spike 38 测试基线保持绿。code-reviewer 两轮闭环（design + spike-equivalence 并行，无 🔴，2 🟡 + 6 🟢 全修）。CC 主路径先 ship，opencode 标 experimental。Commit: `774aa46`。详见 [release note](../releases/2026-07-22-tars-skill-ask-user-sentinel.md).
+
 ## [2026-07-21] P3:0-b ask-user 哨兵闭环 spike（de-risk TARS 全量改造前的 ask-user 路径）
 
 建独立最小 harness（`tests/spike_ask_user/`，2 节点 workflow + driver + 38 测试 + 2 真 claude integration）证明：子 agent 缺 Tier B 必填项 → 严格 JSON 哨兵（`_sentinel:"orca_ask_user_v1"`）→ driver strict 识别（非 substring）→ 捕获 task_id → SendMessage/Task/`claude --resume` **恢复同一子 agent**（task_id 复用断言）→ 拿真实 output → 喂 `orca next`（哨兵不进引擎，零引擎改动）；重入 3 次 fail loud（MAX_ASK）；造假检测（`torch.randn` 等）兜底。产出可复用 `SubagentBackend` ABC + `MockSubagentBackend`（scenario 全局时序）+ `ClaudeCliBackend`（`claude -p --session-id` + `--resume`，等价 CC SendMessage 的 headless 形态）+ `tars_loop.drive_node/drive_workflow`（SPEC §2 Python 投影）。code-reviewer 两轮闭环（impl+coverage 合并：1 🔴 哨兵泄漏断言空操作修复 + 5 SHOULD-FIX DRY/diagnose ABC 抽取/dead code 清理 + 8 新测试覆盖 OrcaBusyError/orca_cli 5 raises/nested JSON/node B sentinel 等）。**Spike pass**，可开 P4（TARS skill 全量改造）。详见 [release note](../releases/2026-07-21-spike-ask-user-sentinel.md).
