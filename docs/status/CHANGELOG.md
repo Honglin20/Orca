@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-21] P3:0-b ask-user 哨兵闭环 spike（de-risk TARS 全量改造前的 ask-user 路径）
+
+建独立最小 harness（`tests/spike_ask_user/`，2 节点 workflow + driver + 38 测试 + 2 真 claude integration）证明：子 agent 缺 Tier B 必填项 → 严格 JSON 哨兵（`_sentinel:"orca_ask_user_v1"`）→ driver strict 识别（非 substring）→ 捕获 task_id → SendMessage/Task/`claude --resume` **恢复同一子 agent**（task_id 复用断言）→ 拿真实 output → 喂 `orca next`（哨兵不进引擎，零引擎改动）；重入 3 次 fail loud（MAX_ASK）；造假检测（`torch.randn` 等）兜底。产出可复用 `SubagentBackend` ABC + `MockSubagentBackend`（scenario 全局时序）+ `ClaudeCliBackend`（`claude -p --session-id` + `--resume`，等价 CC SendMessage 的 headless 形态）+ `tars_loop.drive_node/drive_workflow`（SPEC §2 Python 投影）。code-reviewer 两轮闭环（impl+coverage 合并：1 🔴 哨兵泄漏断言空操作修复 + 5 SHOULD-FIX DRY/diagnose ABC 抽取/dead code 清理 + 8 新测试覆盖 OrcaBusyError/orca_cli 5 raises/nested JSON/node B sentinel 等）。**Spike pass**，可开 P4（TARS skill 全量改造）。详见 [release note](../releases/2026-07-21-spike-ask-user-sentinel.md).
+
 ## [2026-07-21] chart 加 x_label/y_label/caption 轴标签与图下说明能力（P1 workflow 重设计 Phase 0-a）
 
 解「图表看不懂」根因 C：`render_chart` 签名加 `x_label/y_label/caption` 三参数（默认空串，仅在非空时塞 payload，与 `pareto_direction` 同款契约），单一真相源 = ChartPayload（backend `_render.py`/`_validate.py` + frontend `types.ts` 两端同源）。前端 `chartTheme.ts` 加 4 个 label helper（DRY，5 widget 共用）+ 新 `ChartCaption.tsx` 共享小组件，8 widget 全部接入（Line/Bar/Area/Scatter/Pareto 加 XAxis/YAxis label；Heatmap 加 caption + 矩阵下轴标题；Radar/Table 加 caption）。TUI `chart_canvas.py` plotext `xlabel`/`ylabel` + 空数据/非空数据两路径都保留 caption；heatmap 降级把 axis 拼进 hint 保语义。viz_struct `_push_champion_trace` 落地作证（候选序号 / 时延 / ★=达标）。**向后兼容**：旧 tape 无新字段 → 默认空串 → 三端回退旧行为；color（b820ef1）+ heatmap chart_type（ec3d598）零回归。code-reviewer 两轮闭环（一审删 Python 类 shadow 重复测试 + 修空数据 caption 丢 + 修 plotext reload cleanup 生效顺序；二审补 TUI 空数据 / heatmap 降级 / frontend 双轴缺省三个覆盖 🔴）。174 chart 相关测试 + 51 frontend chart 测试全绿；新增 27 测试。Commit: `a7de596`. 详见 [release note](../releases/2026-07-21-chart-axis-labels.md).
