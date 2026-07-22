@@ -296,7 +296,8 @@ def _run_scheme(
 # ─────────────────────────────────────────────────────────────────
 # 可视化（容错不阻断）
 # ─────────────────────────────────────────────────────────────────
-def _push_table(render_chart, rows: list[dict[str, Any]], title: str) -> None:
+def _push_table(render_chart, rows: list[dict[str, Any]], title: str,
+                caption: str = "") -> None:
     try:
         render_chart(
             chart_type="table",
@@ -304,6 +305,7 @@ def _push_table(render_chart, rows: list[dict[str, Any]], title: str) -> None:
             label=CHART_LABEL,
             title=title,
             columns=list(rows[0].keys()) if rows else [],
+            caption=caption,
         )
         sys.stderr.write(f"[run_qat] pushed table: {len(rows)} rows\n")
     except Exception as e:
@@ -337,6 +339,10 @@ def _push_charts(
                 hue="scheme",
                 x_label="QAT training step",
                 y_label=f"{metric_kind} (lower is better)" if metric_kind == "mse" else metric_kind,
+                caption=(
+                    f"每 scheme 的 eval metric 收敛（每约 16 等分步采样）。"
+                    f"{'mse 口径下下行=改善。' if metric_kind == 'mse' else ''}"
+                ),
             )
             sys.stderr.write(f"[run_qat] pushed line: {len(line_data)} points\n")
     except Exception as e:
@@ -361,6 +367,9 @@ def _push_charts(
                 x="step",
                 y="loss",
                 hue="scheme",
+                x_label="QAT 训练步",
+                y_label="teacher-student MSE loss（越低越好）",
+                caption="label-free 蒸馏 loss（student 拟合 teacher 输出），与 eval metric 同向但不等价。",
             )
             sys.stderr.write(f"[run_qat] pushed loss line: {len(loss_line_data)} points\n")
     except Exception as e:
@@ -381,6 +390,12 @@ def _push_charts(
                 x="scheme",
                 y="metric",
                 hue="phase",
+                x_label="QAT scheme",
+                y_label=metric_kind,
+                caption=(
+                    f"每 scheme 训练前后 metric 对比。"
+                    f"{'mse 口径下 after<before=QAT 有效（见 Recovery 图的方向感知版本）。' if metric_kind == 'mse' else ''}"
+                ),
             )
             sys.stderr.write(f"[run_qat] pushed bar: {len(ok_results)} schemes\n")
     except Exception as e:
@@ -432,7 +447,10 @@ def _push_charts(
         }
         for r in all_results
     ]
-    _push_table(render_chart, rows, "QAT Scheme Comparison (all schemes)")
+    _push_table(
+        render_chart, rows, "QAT Scheme Comparison (all schemes)",
+        caption="全集含失败 scheme；recovery=after−before（mse 下负=改善）。",
+    )
 
 
 def _render_charts(

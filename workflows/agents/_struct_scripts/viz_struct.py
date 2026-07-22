@@ -174,7 +174,7 @@ def _push_champion_trace(
         y_label="时延 (ms)",
         caption=(
             f"每轮候选的实测时延（灰点）与 champion 轨迹（彩线，running min）。"
-            f" 目标时延 {target_latency_ms} ms；★=达标。"
+            f" 目标时延 {target_latency_ms} ms（champion 轨迹越靠近/低于此线越达标）。"
         ),
     )
     return True

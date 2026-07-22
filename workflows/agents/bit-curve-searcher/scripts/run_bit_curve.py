@@ -243,7 +243,8 @@ def _point_metric(point: dict[str, Any]) -> float:
 # ─────────────────────────────────────────────────────────────────
 # 可视化（容错不阻断，复用 W2 render_chart 调用形态）
 # ─────────────────────────────────────────────────────────────────
-def _push_table(render_chart, rows: list[dict[str, Any]], title: str) -> None:
+def _push_table(render_chart, rows: list[dict[str, Any]], title: str,
+                caption: str = "") -> None:
     try:
         render_chart(
             chart_type="table",
@@ -251,6 +252,7 @@ def _push_table(render_chart, rows: list[dict[str, Any]], title: str) -> None:
             label=CHART_LABEL,
             title=title,
             columns=list(rows[0].keys()) if rows else [],
+            caption=caption,
         )
         sys.stderr.write(f"[run_bit_curve] pushed table: {len(rows)} rows\n")
     except Exception as e:
@@ -352,6 +354,9 @@ def _push_charts(
                 x="bit",
                 y="metric",
                 color="color",
+                x_label="avg bit-width（越低越好）",
+                y_label=f"{metric_kind}（方向 {pareto_y_direction}）",
+                caption="全部 evaluated 候选云；珊瑚=前沿/选中（与上图 Pareto Frontier 同前沿，此图加噪声点背景）。",
             )
             sys.stderr.write(
                 f"[run_bit_curve] pushed scatter: {len(scatter_data)} candidates "
@@ -381,6 +386,9 @@ def _push_charts(
                     title="Selected Candidate — Format Mix (mxint base)",
                     x="format",
                     y="layers",
+                    x_label="量化格式",
+                    y_label="该格式的层数",
+                    caption="选中候选的混合精度构成（mxint 基）：INT8/MX8=高精度档，INT4/MX4=低位宽档。",
                 )
                 sys.stderr.write(
                     f"[run_bit_curve] pushed bar: {len(bar_data)} formats\n"
@@ -399,7 +407,10 @@ def _push_charts(
         }
         for p in pts_sorted
     ]
-    _push_table(render_chart, rows, "Pareto Frontier Candidates")
+    _push_table(
+        render_chart, rows, "Pareto Frontier Candidates",
+        caption="前沿候选明细；accuracy_loss=相对 FP baseline 的损失。",
+    )
 
 
 def _render_charts(
