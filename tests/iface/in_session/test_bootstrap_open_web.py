@@ -156,10 +156,16 @@ def test_bootstrap_format_prompt_also_triggers(cwd_tmp, wf_path, monkeypatch):
 
 
 def test_bootstrap_stdout_contract_clean(cwd_tmp, wf_path, monkeypatch):
-    """H4：自动开 web 后 bootstrap stdout 仍是合法 JSON 契约，无 web 文本污染。
+    """H4（演进）：自动开 web 后 bootstrap stdout 仍是合法 JSON 契约，且**显式带 web_url**。
 
-    oracle 精确化：(a) ``json.loads`` 成功；(b) schema ``{run_id:str, tape:str, done:bool}``；
-    (c) regex 负向断言 stdout 不含 ``http://`` / ``webbrowser`` / ``Orca Web UI``。
+    旧版 H4 断言 stdout 不含 ``http://``（detached 子进程的 echo 进日志，不进 stdout）。
+    2026-07-22 演进：detached ``orca open`` 的 URL echo 进日志文件、用户终端看不到 → bootstrap
+    自身启动当下即算出 URL，显式塞进 (1) JSON ``web_url`` 字段 + (2) stderr ``Orca Web UI`` 行。
+    **不进 prompt**：prompt 须与 next idempotent 重发逐字相等（见 test_f1_resume_flow）。
+
+    oracle：(a) ``json.loads`` 成功；(b) schema ``{run_id:str, tape:str, done:bool, web_url:str}``；
+    (c) ``web_url`` 指向 ``/runs/<run_id>``；(d) stderr 出 ``Orca Web UI`` 行；(e) 无 ``webbrowser``
+    泄漏（bootstrap 自身不开浏览器，开浏览器是 detached ``orca open`` 的职责）。
     """
     _stub_daemons(monkeypatch)
     monkeypatch.setattr(cli_mod, "_spawn_open_web", lambda run_id: None)
@@ -171,10 +177,54 @@ def test_bootstrap_stdout_contract_clean(cwd_tmp, wf_path, monkeypatch):
     assert isinstance(body["run_id"], str)   # (b) schema
     assert isinstance(body["tape"], str)
     assert isinstance(body["done"], bool)
-    # (c) 无 web 文本污染（detached 子进程 stdio 重定向到日志，不进 bootstrap stdout）
-    assert "http://" not in last
-    assert "webbrowser" not in last
-    assert "Orca Web UI" not in last
+    assert isinstance(body["web_url"], str) and body["web_url"].startswith("http://")
+    assert f"/runs/{body['run_id']}" in body["web_url"]  # (c) URL 指向本 run
+    assert "Orca Web UI" in result.output    # (d) stderr echo（CliRunner 默认 mix_stderr）
+    assert "webbrowser" not in last          # (e) bootstrap 自身不开浏览器
+
+
+def test_bootstrap_no_open_web_omits_web_url(cwd_tmp, wf_path, monkeypatch):
+    """``--no-open-web`` → 不算 web_url：JSON 无 ``web_url`` 字段，stderr 无 ``Orca Web UI`` 行。
+
+    反向契约钉住：web_url 的出现严格跟「自动开 web 是否启用」绑定，避免 disabled 路径漏吐
+    一个指不到活跃 server 的链接误导用户。
+    """
+    _stub_daemons(monkeypatch)
+    monkeypatch.setattr(cli_mod, "_spawn_open_web", lambda run_id: None)
+    runner = CliRunner()
+    result = runner.invoke(
+        app, ["bootstrap", str(wf_path), "--inputs", "{}", "--no-open-web"],
+    )
+    assert result.exit_code == 0, result.output
+    body = json.loads(result.output.splitlines()[-1])
+    assert "web_url" not in body
+    assert "Orca Web UI" not in result.output
+
+
+def test_bootstrap_resolve_web_url_failure_is_soft(cwd_tmp, wf_path, monkeypatch):
+    """``_resolve_web_url`` 内部异常（``resolve_web_endpoint`` 抛错）→ soft warn，bootstrap 仍
+    exit 0 + JSON 无 ``web_url`` + stderr 无 ``Orca Web UI`` 行。
+
+    钉住 soft-fail 契约：URL 解析是便利层，失败绝不阻断 bootstrap、也不漏吐死链接。
+    monkeypatch ``orca.iface.cli.commands.resolve_web_endpoint``（``_resolve_web_url`` 函数内
+    lazy import 的真源），走**真实** ``_resolve_web_url`` 的 except 分支（不 mock helper 本身）。
+    """
+    import orca.iface.cli.commands as commands_mod
+
+    _stub_daemons(monkeypatch)
+    monkeypatch.setattr(cli_mod, "_spawn_open_web", lambda run_id: None)
+
+    def _boom(*a, **kw):
+        raise RuntimeError("simulated resolve_web_endpoint failure")
+
+    monkeypatch.setattr(commands_mod, "resolve_web_endpoint", _boom)
+    runner = CliRunner()
+    result = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
+    assert result.exit_code == 0, result.output  # soft：不 fail bootstrap
+    body = json.loads(result.output.splitlines()[-1])
+    assert "run_id" in body
+    assert "web_url" not in body              # 解析失败 → 不漏吐 URL
+    assert "Orca Web UI" not in result.output
 
 
 def test_bootstrap_spawn_open_web_failure_is_soft(cwd_tmp, wf_path, monkeypatch):

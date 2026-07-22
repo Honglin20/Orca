@@ -604,6 +604,35 @@ def _spawn_open_web(run_id: str) -> None:
         logger.warning("run %s: 自动开 web spawn 失败（%s；soft-fail，不阻断 bootstrap）", run_id, e)
 
 
+def _resolve_web_url(run_id: str) -> str | None:
+    """bootstrap 启动当下即算出 web URL（**单一真相源** ``resolve_web_endpoint``），fail-soft。
+
+    回答「detached ``orca open`` 子进程的 URL echo 进了日志文件、用户终端看不到」——这里在
+    bootstrap 自身进程内把 URL 算出来，交给调用方塞进 stderr + JSON ``web_url`` 字段，确保
+    链接反馈给用户（不靠 detached 子进程、不靠模型自觉）。
+
+    **不进 ``prompt`` 字段**：``prompt`` 是 ``(node, run_id)`` 的纯函数，bootstrap 与 next
+    idempotent 重发必须逐字相等（见 test_f1_resume_flow）；web 链接是 bootstrap 时刻的旁路
+    通知，不属于节点 prompt，故只走 stderr + JSON 字段两路。
+
+    ``resolve_web_endpoint`` 在 ``orca.iface.cli.commands``，**函数内 lazy import** 避开
+    ``orca.iface.cli`` 包初始化期的循环 import（与同文件 ``_default_tape_path`` / in-session
+    ``open`` 委托同款 pattern）。任一异常 → soft-fail 返 None，绝不阻断 bootstrap。
+
+    **已知 limitation**：URL 基于 config（host/port）解析，**不探活端口归属**。若默认端口 7428
+    被非-orca 进程占用，detached ``orca open`` 会 probe 后另选端口，而此处吐给用户的 URL 仍指向
+    7428 → 用户可能点开别人家的服务。概率低；与 soft-fail 语义一致，不在此处引入端口探活
+    （bootstrap 路径须保持轻量，端口探活是 ``orca open`` 自身 probe 的职责）。
+    """
+    try:
+        from orca.iface.cli.commands import resolve_web_endpoint
+        _, display_host, port = resolve_web_endpoint(host=None, port=None)
+        return f"http://{display_host}:{port}/runs/{run_id}"
+    except Exception:  # noqa: BLE001 — 解析失败不阻断 bootstrap（soft-fail，与 _spawn_open_web 一致）
+        logger.warning("run %s: 解析 web URL 失败（soft-fail，链接需手动 orca open）", run_id, exc_info=True)
+        return None
+
+
 def _setup_logging(level: str = "INFO") -> None:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
@@ -1163,8 +1192,17 @@ def bootstrap(
     # ── 自动开 web（工作流 B）：detached 起 `orca open`，后台 probe→attach→开浏览器 ──
     # 仅真启动路径到此（schema-only 早退 / dupe / busy / 失败均已 early-exit）；soft-fail，
     # 不阻断 bootstrap、不污染 stdout 契约。默认开；--no-open-web / ORCA_BOOTSTRAP_OPEN_WEB=0 关。
+    #
+    # 启动当下即算出 web URL 显式吐给用户：detached ``orca open`` 子进程的 URL echo 进了
+    # ``.orca-open-<run_id>.log``（见 _spawn_open_web），用户终端看不到 → 这里在 bootstrap 自身
+    # 把链接塞进 stderr（直接终端用户可见）+ JSON ``web_url`` 字段（模型驱动路径拿得到），
+    # 不靠 detached 子进程、不靠模型自觉。**不进 prompt**：prompt 须与 next 重发逐字相等。
+    web_url: str | None = None
     if _bootstrap_open_web_enabled(open_web):
         _spawn_open_web(run_id)
+        web_url = _resolve_web_url(run_id)
+        if web_url:
+            typer.echo(f"Orca Web UI → {web_url}", err=True)
 
     reply: dict[str, Any] = {
         "run_id": run_id,
@@ -1173,6 +1211,8 @@ def bootstrap(
     }
     if result.node:
         reply["node"] = result.node
+    if web_url:
+        reply["web_url"] = web_url
     prompt_text = _reply_prompt(result, env_file=env_path)
     # model-driven advance 补丁：entry prompt 后附「驱动协议」，模型据此自调 next --output。
     if prompt_text:

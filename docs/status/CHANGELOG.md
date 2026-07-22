@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-22] bootstrap 启动即把 web 链接反馈给用户
+
+补 `9677c1e`（bootstrap 默认自动开 web）的遗漏环：detached `orca open` 子进程的 URL echo 进了日志文件、用户终端看不到 → bootstrap 自身启动当下即算出 URL（单一真相源 `resolve_web_endpoint`，新增 helper `_resolve_web_url`，lazy import 避循环 + soft-fail），分两路显式吐给用户：①JSON `reply["web_url"]`（模型驱动路径拿得到）②stderr `Orca Web UI → <url>`（直接终端可见，不污染 stdout 契约）。**不进 `prompt`**：prompt 须与 `next` idempotent 重发逐字相等（`test_f1_resume_flow` 不变量）。已知 limitation：不探活端口归属（与 soft-fail 一致，端口探活是 `orca open` probe 的职责）。code-reviewer 一轮闭环（0 🔴，2 🟡 全修）；25 passed。详见 [release note](../releases/2026-07-22-bootstrap-surface-web-url.md)。
+
 ## [2026-07-22] KB 可移植 + struct-exploration 结构优先（direction 覆盖软闸）
 
 解决「struct-exploration 只改超参不碰结构」两个根因。**Part 1（KB 可移植）**：`orca install` 部署 `knowledge_base/` → `~/.orca/knowledge_base/`；`config.resolve_kb_dir()` 确定性解析 KB 根（env>config>~/.orca>cwd，first-existing，显式来源权威不静默回退）；`ORCA_KB_DIR` 经 `build_env_overlay` 注入（env 作 transport，exec 不 import iface）；`apply_kb_requirement` 对 `requires:[knowledge_base]` 的 workflow 在 run 启动/in_session bootstrap 预检 KB，缺失 → ConfigurationError fail-loud（含 searched 路径+指引），不进 setup agent。**Part 2（结构优先软闸）**：新增确定性 `direction_coverage.py`（KB meta.json 枚举本族 direction 目录 D0-D21 + 读 ledger tried direction_id → untried/all_exhausted/near_target）；hypothesizer 每轮跑之 → 软闸优先选未试结构方向（all_exhausted/near_target 才允许 hyperparam）+ 补读 directions 切片 + 输出 direction_id；curator 记 direction_id 进 ledger；yaml 加 requires + setup 缓存 directions + KB 根改 $ORCA_KB_DIR。kd-nas defer。commit `6e0f167` + `0be8c6d`。详见 [release note](../releases/2026-07-22-kb-portability-struct-direction-gate.md)。
