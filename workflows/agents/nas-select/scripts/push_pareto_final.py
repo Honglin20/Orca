@@ -5,7 +5,9 @@ P2 共识：finalize **sidecar 自算全局非支配前沿**（读全部 evaluat
 后者是 per-population，gen1 点会被 gen10 支配），规避前端 _aggregate_by_x 在 >2000 点时
 「按 x 求和 y」破坏前沿的陷阱。确定性优先于前端/模型判断（rule 5）。
 
-产出一张 scatter：全部评估点（dominated 过多则降采样保留分布）+ 前沿 + selected 高亮，hue=status。
+产出一张 chart_type=pareto（plan §4.3 方案 A，2026-07-22 由 scatter 升级）：全部前沿点 +
+降采样 dominated 背景云，前端据 pareto_x/y_direction 自绘前沿连线。selected 高亮牺牲
+（已在 Selection Funnel 体现）。
 """
 
 from __future__ import annotations
@@ -130,7 +132,11 @@ def main() -> int:
     coords = [(p[0], p[1]) for p in pts_raw]
     front_idx = {i for i in range(len(pts_raw)) if not _is_dominated(i, coords)}
 
-    # 组数据：前沿全留 + selected 全留；dominated 过多则均匀降采样
+    # 方案 A（plan §4.3）：切 chart_type=pareto——前端自绘前沿连线 + 消费
+    # pareto_x/y_direction。data 只留 {x, y} 两列（去 status/hue）：
+    # ① 全部前沿点必须保留（前端据 direction 重算前沿，丢真前沿点会出错）；
+    # ② dominated 仅作背景云，过多则降采样控 payload。selected 高亮牺牲
+    #   （终态图里 selected 已在 Selection Funnel 体现）。
     front_pts = [pts_raw[i] for i in front_idx]
     sel_pts = [p for p in pts_raw if p[2] in selected_genes]
     dom_pts = [pts_raw[i] for i in range(len(pts_raw)) if i not in front_idx]
@@ -141,18 +147,23 @@ def main() -> int:
     x_title = x_obj + (" (ms)" if "lat" in x_obj.lower() else "")
     y_title = y_obj
 
-    def _rows(items, status):
-        return [{x_title: p[0], y_title: p[1], "status": status} for p in items]
-
-    data = _rows(dom_pts, "dominated") + _rows(front_pts, "pareto front") + _rows(sel_pts, "selected")
+    chart_pts = front_pts + dom_pts
+    data = [{x_title: p[0], y_title: p[1]} for p in chart_pts]
     render_chart(
-        chart_type="scatter",
+        chart_type="pareto",
         data=data,
         label="nas/search",
         title="Pareto Front (final)",
         x=x_title,
         y=y_title,
-        hue="status",
+        pareto_x_direction="min",
+        pareto_y_direction="max",
+        x_label=f"{x_obj}（↓better{'+，已取负显示' if obj_kind[x_obj] == 'quality' else ''}）",
+        y_label=f"{y_obj}（↑better{'+，已取负显示' if obj_kind[y_obj] == 'quality' else ''}）",
+        caption=(
+            "全局非支配前沿（sidecar 据 cost/quality 符号自算，非 per-gen 标志）。"
+            "x=成本类（越小越好），y=质量类（取负后越大越好）；selected 见 Selection Funnel。"
+        ),
     )
     n_sel = len({p[2] for p in sel_pts})
     print(

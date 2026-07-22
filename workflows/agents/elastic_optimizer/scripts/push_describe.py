@@ -251,6 +251,10 @@ def main() -> int:
         label="nas/structure",
         title="Baseline → Elastic（per baseline layer）",
         columns=["name", "替换前", "替换后"],
+        caption=(
+            "每个 baseline 结构层对应的 elastic 替换。"
+            "stem=固定不可变；depth∈{...}=深度候选；「—」=非常量无法静态推断（不编造）。"
+        ),
     )
     print(f"[push_describe] pushed {len(rows)} rows", flush=True)
     return 0
