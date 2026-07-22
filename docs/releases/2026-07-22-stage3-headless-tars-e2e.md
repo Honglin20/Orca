@@ -78,7 +78,7 @@ schema 链破 / input 残留引用」全部卡死在 CI 层。
 
 ## Commit
 
-- Stage 3 harness + 契约闸 + label bug fix + agent-struct 自引用 fix：<SHA>
+- Stage 3 harness + 契约闸 + label bug fix + agent-struct 自引用 fix：`89d30ee`
 
 ## 遗留 / Follow-up
 
