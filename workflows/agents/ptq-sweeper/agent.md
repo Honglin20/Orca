@@ -15,8 +15,8 @@ tools: [bash, read, write, edit, glob, grep]
 
 - 模型入口: `{{ inputs.model_path }}`
 - 项目根: `{{ inputs.project_root }}`
-- 校准 loader dotted-path: `{{ inputs.calib_data_ref }}`（**Tier B 契约**：agent 读用户代码找 loader，如 `grep -rn "def load_calib" {{ inputs.project_root }}`；找不到 → **fail loud**，绝不 `torch.randn` 造假）
-- 评估 loader dotted-path: `{{ inputs.eval_data_ref }}`（**Tier B 契约**：agent 读用户代码找 loader；找不到 → **fail loud**，绝不「复用 calib 当 eval」——calib 是代表性少量样本，eval 需完整分布，复用会让 best_metric 选错候选）
+- 校准 loader dotted-path: `{{ inputs.calib_data_ref }}`（**Tier B 契约**：agent 读用户代码找 loader，如 `grep -rn "def load_calib" {{ inputs.project_root }}`；找不到 → **返回 ask-user 哨兵**（见下文「缺失必填输入时」段），**绝不** `torch.randn` 造假）
+- 评估 loader dotted-path: `{{ inputs.eval_data_ref }}`（**Tier B 契约**：agent 读用户代码找 loader；找不到 → **返回 ask-user 哨兵**；**绝不**「复用 calib 当 eval」——calib 是代表性少量样本，eval 需完整分布，复用会让 best_metric 选错候选）
 - eval_fn dotted-path: `{{ inputs.eval_fn_ref }}`（**Tier B 契约**：agent 读用户代码找业务 eval；找不到 → 不生成 `get_eval_fn`，脚本 stderr 打 WARN「用 teacher-student mse，精度仅自洽性参考」并继续——teacher-student mse 是 SDK 合法默认，有自洽性诊断价值，非造假）
 - 扫描模式: `{{ inputs.mode }}`（lightweight / full）
 - 位宽预设（逗号串）: `{{ inputs.bit_widths }}`（空则 lightweight=`w4a4-mx`、full=`w4a4-mx,w4a8-mx,w8a8-mx`）
@@ -32,8 +32,8 @@ tools: [bash, read, write, edit, glob, grep]
 
 2. **生成 `<output_dir>/adapter.py`**：读 `{{ inputs.model_path }}` 理解模型 forward 签名与 batch 形态，写一个适配模块，暴露：
    - `load_model() -> nn.Module`：加载并返回 FP 模型（eval 态，作为 teacher）。**不**在此处 `.to(device)`——脚本顶层统一 `resolve_device` 后搬移（device 由 `--device` 传入，单一真相源）。
-   - `get_calib_loader() -> DataLoader`：校准 loader。**Tier B 获取三步**：①读用户代码（`grep -rn "def load_calib\|def get_calib\|DataLoader" {{ inputs.project_root }}`）找 loader 的 dotted-path（如 `myproj.data:load_calib`）→ import 调用；②歧义/找不到 → 暂未接哨兵，**fail loud**（adapter 直接 raise，脚本退出非 0 + stderr 明确报缺什么）；③**绝不通勤 `torch.randn` 造假数据**。
-   - `get_eval_loader() -> DataLoader`（**必实现**）：评估 loader。读用户代码（`grep -rn "def load_eval\|def get_eval_loader\|DataLoader" {{ inputs.project_root }}`）找 loader 的 dotted-path → import 调用。**找不到 → fail loud**（adapter 直接 raise 或不实现该函数，脚本会 exit 2 + stderr 明确报缺什么）。**绝不复用 `get_calib_loader()` 的产物当 eval**——calib 是代表性少量样本，eval 需完整业务分布，复用会让 best_metric 选错候选（plan §P5：禁掉的「复用 calib 当 eval」造假口径）。
+   - `get_calib_loader() -> DataLoader`：校准 loader。**Tier B 获取三步**：①读用户代码（`grep -rn "def load_calib\|def get_calib\|DataLoader" {{ inputs.project_root }}`）找 loader 的 dotted-path（如 `myproj.data:load_calib`）→ import 调用；②歧义/找不到 → **不写 adapter / 不调脚本**，以最终消息返回 ask-user 哨兵（见下文「缺失必填输入时」段；**不**让 adapter raise、**不** exit 非 0）；③**绝不通过 `torch.randn` 造假数据**。
+   - `get_eval_loader() -> DataLoader`（**必实现**）：评估 loader。读用户代码（`grep -rn "def load_eval\|def get_eval_loader\|DataLoader" {{ inputs.project_root }}`）找 loader 的 dotted-path → import 调用。**找不到 → 返回 ask-user 哨兵**（见下文「缺失必填输入时」段；**不**让 adapter raise、**不** exit 非 0）。**绝不复用 `get_calib_loader()` 的产物当 eval**——calib 是代表性少量样本，eval 需完整业务分布，复用会让 best_metric 选错候选（plan §P5：禁掉的「复用 calib 当 eval」造假口径）。
    - `forward_fn(module, batch) -> Tensor`：按模型 forward 解包 batch（dict/tuple/Tensor）。脚本会包装一层把 batch 搬到 device，adapter 不需要懂 device。
    - `get_eval_fn() -> Callable[[nn.Module], dict[str, float]]`（**仅** `{{ inputs.eval_fn_ref }}` 非空时实现）：按 dotted-path import 业务评估函数返回；返回的函数签名是 `eval_fn(student_model) -> {"<metric>": float, ...}`。`{{ inputs.eval_fn_ref }}` 为空 → **不要**生成此函数（脚本会 stderr 打 WARN「未提供业务 eval_fn，用 teacher-student mse，精度仅自洽性参考」并自动用 `build_teacher_student_eval_fn`）。
    - `get_metric_spec() -> dict`（**仅**业务 eval_fn 路径需要）：返回 `{"primary_metric": "<key>", "higher_is_better": bool}`。`{{ inputs.eval_fn_ref }}` 为空时同样不要生成（默认 teacher-student mse：`primary_metric="mse"`、`higher_is_better=False`）。
@@ -60,6 +60,39 @@ tools: [bash, read, write, edit, glob, grep]
    脚本非 0 退出 → 把 stderr/stdout 原样上抛，**不要假装完成**。推图失败脚本会 stderr 提示但**不阻断**（`report.json` 是核心产出）。单个候选失败不阻断全局（脚本内 try/except 隔离 + 增量落盘 report）。
 
 4. **回显**：脚本 stdout 末尾输出一个 JSON（含 `output_dir`/`report_path`/`model_path`/`baked_model_path`/`best_config`/`best_metric`/`candidates_evaluated`/`mode`/`metric_kind`）。**原样**作为本节点产出（`output_schema` 校验）。
+
+## 缺失必填输入时（严禁造假）—— ask-user 哨兵
+
+> 契约：`docs/specs/agent-ask-user-sentinel.md` §3。TARS skill strict 识别 `_sentinel:"orca_ask_user_v1"` 魔键
+> → 问用户 → SendMessage / Task(task_id) 恢复**同一**子 agent（上下文不丢）→ MAX_ASK=3 兜底；
+> 哨兵**不进 `orca next`**（output_schema `additionalProperties:false` 会拒，引擎零改动）。
+
+本节点 Tier B 项（"读用户代码可得"的 dotted-path，缺失走哨兵而非造假）：
+
+- **校准 loader**（`get_calib_loader` 的 dotted-path，如 `myproj.data:load_calib`）
+- **评估 loader**（`get_eval_loader` 的 dotted-path）
+
+读用户代码（`grep -rn "def load_calib\|def load_eval\|def get_eval_loader\|DataLoader" {{ inputs.project_root }}`）找上述 dotted-path：
+
+- **找到** → 写进 adapter.py（`from <mod> import <fn>; def get_<X>_loader(): return <fn>()`）。
+- **读代码无果**（找不到 / 多候选歧义） → **不要**造假（`torch.randn` / 复用 calib 当 eval / 静默默认空 loader），
+  以**最终消息**返回轻量哨兵 JSON（且仅此）：
+
+  ```json
+  {"_orca_ask_user": "<一句话问题，如 'calib loader 在你项目的 dotted-path 是什么？'>",
+   "options": ["<候选 1>", "<候选 2>"],
+   "context": "<已 grep 过哪里、为何歧义>",
+   "_sentinel": "orca_ask_user_v1"}
+  ```
+
+  （**两键必填**：`_orca_ask_user` + `_sentinel:"orca_ask_user_v1"`；`options` / `context` 可选。）
+
+- 你**会被恢复**（不是重跑）——主 session 收到哨兵会用 SendMessage / Task(task_id) 把用户答案追加给你。
+  收到答案后**继续**，不要重做已完成的工作（adapter.py 其他部分、load_model、forward_fn 等）。
+- 用户也答不出（连续多次「不知道」） → 返回 `{"_status":"fail_loud","reason":"<缺什么>"}`。
+
+> eval_fn（`{{ inputs.eval_fn_ref }}`）**不在**本哨兵范围：缺失时脚本自动 fallback 到 teacher-student mse
+> （SDK 合法默认，有自洽性诊断价值，**非造假**），stderr 打 WARN 并继续。
 
 ## 输出
 

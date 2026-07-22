@@ -1,5 +1,5 @@
 ---
-description: NAS 流水线第三步：搜索流水线脚本生成（文件夹化 agent，SKILL.md + references + assets 作为资源，经 ORCA_AGENT_RESOURCES 锚定，cwd 无关）。KPI（latency_constraint / max_rounds）透传到 search_config.yaml；dataset 路径读不到用户代码 fail loud（绝不留 <dataset_root> 占位）。
+description: NAS 流水线第三步：搜索流水线脚本生成（文件夹化 agent，SKILL.md + references + assets 作为资源，经 ORCA_AGENT_RESOURCES 锚定，cwd 无关）。KPI（latency_constraint / max_rounds）透传到 search_config.yaml；dataset 路径读不到用户代码 → 返回 ask-user 哨兵（绝不留 <dataset_root> 占位、绝不 torch.randn 造假）。
 tools: [bash, read, write, edit, glob, grep, task, todowrite]
 ---
 # nas-search-pipeline
@@ -63,20 +63,48 @@ Step 3: 生成 `AGENTS.md` scaffold（后续步骤的 AI 指导文件）
 实现：在生成 search_config.yaml 时用上述值替换模板里的默认（`latency_constraint: null` / `num_generations: 20`）。
 若 `{{ inputs.latency_constraint }}` 为空串，写 YAML 字面 `null`；若 `{{ inputs.max_rounds }}` 为空串，写默认 `20`。
 
-### Dataset fail loud（Step 2 强制，绝不造假）
+### Dataset 哨兵（Step 2 强制，绝不造假）
 
 `search_config.yaml` 的 `evaluator_cfg.data_dir` 与生成的 `evaluator.py` 数据路径必须**从用户项目代码读到**
 （在 `<user_project_root>` 下 grep `data_dir` / `DataLoader` / `ArgumentParser(... --data` / `root=` 等模式，得到真实绝对路径）。
-**读不到 → fail loud**：
+**读不到 → 返回 ask-user 哨兵**（见下文「缺失必填输入时」段）：
 
 - **绝不**留 `<dataset_root>` / `/path/to/dataset` / `./data` 等占位字符串假装配置完成。
 - **绝不**用 `torch.randn` 造一个假 DataLoader 蒙混（搜索 evaluator 会拿它当真，跑出无意义的 acc 排序）。
 - **绝不**静默默认 `./data` 或任何猜测路径。
-- 读不到的正确动作：把 `data_dir` 字段写为字面 `null`，并在 stdout/stderr 显式写错误
-  `[nas-search-pipeline] FAIL: dataset path not found in <user_project_root>; grep data_dir/DataLoader/--data/root= 并把真实路径填入 search_config.yaml::evaluator_cfg.data_dir`，
-  然后非零退出（让上游看到失败、要么用户补路径要么 workflow node_failed）。
+- 读不到的正确动作：**不写 search_config.yaml、不非零退出**，以**最终消息**返回 ask-user 哨兵 JSON
+  （见下文「缺失必填输入时」段；driver 收到哨兵会问用户、恢复同一子 agent 续做）。
+- 用户也答不出 → 返回 `{"_status":"fail_loud","reason":"dataset path not found in <user_project_root>"}`。
 
-（注：本阶段不接 ask-user 哨兵——哨兵机制 Phase 0-b 全量落地后，此处改为「读不到→哨兵问用户」。当前先 fail loud。）
+## 缺失必填输入时（严禁造假）—— ask-user 哨兵
+
+> 契约：`docs/specs/agent-ask-user-sentinel.md` §3。TARS skill strict 识别 `_sentinel:"orca_ask_user_v1"` 魔键
+> → 问用户 → SendMessage / Task(task_id) 恢复**同一**子 agent（上下文不丢）→ MAX_ASK=3 兜底；
+> 哨兵**不进 `orca next`**（output_schema `additionalProperties:false` 会拒，引擎零改动）。
+
+本节点 Tier B 项（"读用户代码可得"，缺失走哨兵而非造假）：
+
+- **dataset 路径**（`evaluator_cfg.data_dir` 的真实绝对路径）——grep 用户项目代码可得
+
+在 `<user_project_root>` 下 grep（`data_dir` / `DataLoader` / `ArgumentParser(... --data` / `root=`）：
+
+- **找到** → 写进 `search_config.yaml::evaluator_cfg.data_dir`，继续 Step 3+。
+- **读代码无果**（找不到真实路径） → **不要**造假（`<dataset_root>` 占位 / `torch.randn` 假 DataLoader / 静默默认 `./data`），
+  以**最终消息**返回轻量哨兵 JSON（且仅此）：
+
+  ```json
+  {"_orca_ask_user": "<一句话问题，如 '你项目的训练/评估数据集根目录绝对路径是什么？'>",
+   "options": ["<候选 1，如 '/home/user/proj/data/train'>", "<候选 2>"],
+   "context": "<已 grep 过哪些模式、看到了哪些疑似但未确认的路径>",
+   "_sentinel": "orca_ask_user_v1"}
+  ```
+
+  （**两键必填**：`_orca_ask_user` + `_sentinel:"orca_ask_user_v1"`；`options` / `context` 可选。）
+
+- 你**会被恢复**（不是重跑）——主 session 收到哨兵会用 SendMessage / Task(task_id) 把用户答案追加给你。
+  收到答案后**继续**，不要重做已完成的工作（Step 1 的 supernet.py 等已落盘的产物保留，只续做 Step 2 的
+  search_config.yaml + evaluator.py 生成）。
+- 用户也答不出（连续多次「不知道」） → 返回 `{"_status":"fail_loud","reason":"dataset path not found in <user_project_root>"}`。
 
 ## 输出
 
