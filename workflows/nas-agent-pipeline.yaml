@@ -1,46 +1,80 @@
 name: nas-agent-pipeline
 description: "基于 Elastic 超网的端到端 NAS：生成超网 → 训练 → 搜索架构 → 评估选择，同时优化超参（宽/深）与模型组件（block 类型）。"
 entry: model_optimizer
+
 inputs:
+  # ── inputs 标签约定（description 前缀，供 in-session 编排器 / tars skill 读取）──
+  #   [ask]      业务决策 / KPI / 硬件 / 预算，用户意图未给则启动前集中询问
+  #   [default]  有合理默认，不问；高级用户可直接覆盖
+  # project_root 已下沉给 model_optimizer 节点运行时推断（从 model_path 向上走）；
+  # output_dir 暂留 input（Phase 4-A 将 sink 到 $ORCA_ARTIFACTS_DIR）。
+  # heavy 对齐 slim（nas-hp-search）的输入契约 + 确定性护栏。
   model_path:
     type: string
-    description: "用户 PyTorch 模型入口文件路径（如 examples/ViT_Imageclassfication/model.py）"
-    required: true
-  project_root:
-    type: string
-    description: "用户 PyTorch 项目根目录（如 examples/ViT_Imageclassfication/）"
+    description: "[ask] 用户 PyTorch 模型入口文件路径（如 examples/ViT_Imageclassfication/model.py）。项目内唯一锚点，必须用户给"
     required: true
   output_dir:
     type: string
-    description: "NAS 产物输出目录。留空则默认 llm_artifacts/<model_name>/"
+    description: "[default] NAS 产物输出目录。留空则默认 llm_artifacts/<model_name>/"
     required: false
     default: ""
+  target_hardware:
+    type: string
+    description: "[ask] 目标硬件 cuda|npu|cpu。NAS 搜出的架构要在该硬件上达时延目标，必须用户给（无目标=瞎搜）"
+    required: true
+  latency_constraint:
+    type: string
+    description: "[ask] 目标时延(ms)，下传到 search_config.yaml 的 latency_constraint 字段（NSGA-II 据此剪枝过时延候选）。留空=无硬约束（不推荐，NAS 无目标=瞎搜）"
+    required: false
+    default: ""
+  max_rounds:
+    type: string
+    description: "[ask] 搜索预算闸门——NSGA-II 代数（num_generations）。代数越多搜得越透但越贵。默认 20"
+    required: false
+    default: "20"
+  seed:
+    type: string
+    description: "[ask] 复现性种子（全 workflow 必填，默认 0）。下传到训练/搜索脚本 --seed"
+    required: false
+    default: "0"
 
 nodes:
   # ═══════════════════════════════════════════════════════════════
-  # Agent 1: 模型优化与超网生成
+  # Agent 1: 模型优化与超网生成（heavy：展平 + optimize_rules + supernet 迭代）
+  # 节点名 `model_optimizer` 是下游复用 agent（supernet-train-script）的硬契约：
+  # 其 agent.md body 引用 {{ model_optimizer.output }}，经 Jinja2 StrictUndefined
+  # 渲染——故此处节点名须与之一致。
+  # output_schema 强制 JSON 输出 + project_root infer-once（从 model_path 向上走）
+  # + KPI 向后传（target_hardware/latency_constraint/max_rounds/seed）。
+  # viz_describe 已删——push_describe 内联进 agent.md（对齐 slim）。
   # ═══════════════════════════════════════════════════════════════
   - name: model_optimizer
     kind: agent
     executor: opencode
     model: "deepseek/deepseek-v4-pro"
     agent: pytorch-model-optimizer
+    output_schema:
+      type: object
+      required: [output_dir, project_root, model_type, target_hardware, latency_constraint, max_rounds, seed]
+      properties:
+        output_dir: {type: string, description: "NAS 产物根目录绝对路径"}
+        project_root: {type: string, description: "从 model_path 向上走推断的用户项目根绝对路径（第一个含 train.py/pyproject.toml/.git 的祖先目录）"}
+        model_type: {type: string, enum: [cnn, hierarchical_transformer, isotropic_transformer, unsupported], description: "命中的 NAS 架构标签。unsupported = SKILL Step 4 判不可分类 / supernet 自测不过 → 路由短路到 $end（不进 train_script_gen）"}
+        target_hardware: {type: string, description: "cuda|npu|cpu（echo input）"}
+        latency_constraint: {type: string, description: "目标时延(ms)，空串=无硬约束（echo input）"}
+        max_rounds: {type: string, description: "搜索预算-代数（echo input）"}
+        seed: {type: string, description: "复现性种子（echo input）"}
+        artifacts: {type: array, items: {type: string}, description: "生成的产物文件列表（绝对/相对路径）"}
+      additionalProperties: false
     routes:
-      - to: viz_describe
+      # model_type == "unsupported"（Step 4 判不可分类 / supernet 自测不过）→ 短路 $end，不烧后续训练/搜索算力
+      - when: "model_optimizer.output.model_type != 'unsupported'"
+        to: train_script_gen
+      - to: $end
 
   # ═══════════════════════════════════════════════════════════════
-  # Agent 1.5: 可视化——基线模型表 + 超网/搜索空间表（C1/C2）
-  # ═══════════════════════════════════════════════════════════════
-  - name: viz_describe
-    kind: agent
-    executor: opencode
-    model: "deepseek/deepseek-v4-pro"
-    agent: nas-viz
-    routes:
-      - to: train_script_gen
-
-  # ═══════════════════════════════════════════════════════════════
-  # Agent 2: 超网训练脚本生成
+  # Agent 2: 超网训练脚本生成（复用 supernet-train-script；checklist 加 chart-inline）
+  # 生成的 train_supernet.py 内联 _push_chart()——训练图 live 流，不需 tail/独立 viz 节点。
   # ═══════════════════════════════════════════════════════════════
   - name: train_script_gen
     kind: agent
@@ -51,7 +85,7 @@ nodes:
       - to: search_pipeline_gen
 
   # ═══════════════════════════════════════════════════════════════
-  # Agent 3: 搜索流水线脚本生成
+  # Agent 3: 搜索流水线脚本生成（复用 nas-search-pipeline，KPI 透传 search_config.yaml）
   # ═══════════════════════════════════════════════════════════════
   - name: search_pipeline_gen
     kind: agent
@@ -62,82 +96,38 @@ nodes:
       - to: train_runner
 
   # ═══════════════════════════════════════════════════════════════
-  # Agent 4: 训练与搜索执行（含训练/搜索/帕累托曲线实时刷新）
+  # Agent 4: 训练与搜索执行（复用 nas-train-runner，含训练/搜索实时图）
+  # output_schema 强制（防假执行）：runner 末尾用 python 从真 search.jsonl 计数输出 JSON。
+  # 散文复述/没真跑搜索(records=0) → output_schema_mismatch → node_failed（确定性）。
   # ═══════════════════════════════════════════════════════════════
   - name: train_runner
     kind: agent
     executor: opencode
     model: "deepseek/deepseek-v4-pro"
     agent: nas-train-runner
+    output_schema:
+      type: object
+      required: [output_dir, search_done, search_records, search_log]
+      properties:
+        output_dir: {type: string}
+        search_done: {type: boolean}
+        search_records: {type: integer, minimum: 1}
+        search_log: {type: string}
+      additionalProperties: false
     routes:
-      - to: evaluator
+      - to: select
 
   # ═══════════════════════════════════════════════════════════════
-  # Agent 5: 架构评估与最终脚本生成
+  # Agent 5: 脚本化架构选择（复用 slim nas-select，替代 LLM evaluator + viz_finalize）
+  # nas-select-architecture + 模板填空 final_report.md + 推 C5/C6（无 LLM）。
   # ═══════════════════════════════════════════════════════════════
-  - name: evaluator
+  - name: select
     kind: agent
     executor: opencode
     model: "deepseek/deepseek-v4-pro"
-    tools:
-      - bash
-      - read
-      - write
-      - edit
-      - glob
-      - grep
-      - task
-      - todowrite
-    prompt: |
-      你是 NAS 流水线的第五步：**架构评估与后处理**。
-
-      ## 输入
-      - 上一步的输出:
-        {{ train_runner.output }}
-      从中提取 `<output_dir>`。
-
-      ## 执行
-
-      1. 进入输出目录，读取 `AGENTS.md`（这是之前生成的 AI 指导文件）:
-         ```bash
-         cd <output_dir>
-         ```
-
-      2. 按照 `AGENTS.md` 中的指导完成以下任务:
-         a. 从搜索结果的 Pareto 前沿中选择最优架构
-         b. 为选中的架构生成重训练（retrain）或微调（finetune）脚本
-         c. 确保生成的脚本可以直接执行以获得最终模型权重
-
-      3. 使用 `nas-select-architecture` CLI 工具（如果 AGENTS.md 中有指导）或直接分析搜索日志 `runs/search/search.jsonl` 进行架构选择。
-         **务必**让 `nas-select-architecture` 落盘 `selection_summary.json`（指定 `--arch_output_dir`，默认 `runs/retrain/selected/`），并把该路径写入输出——下游可视化（帕累托 selected 高亮 / 选择漏斗）依赖它。
-
-      4. 生成以下产物:
-         - `selected_architectures.json` — 选中的架构配置
-         - `retrain.sh` / `finetune.sh` — 最终训练启动脚本
-         - `final_report.md` — NAS 流水线总结报告
-
-      ## 输出
-      完成后输出最终摘要：
-      ```
-      OUTPUT_DIR: <输出目录路径>
-      SELECTED_ARCHITECTURES: <选中架构数量>
-      SELECTION_SUMMARY: <selection_summary.json 绝对路径>
-      FINAL_SCRIPTS: <生成的最终脚本列表>
-      PIPELINE_STATUS: <所有步骤完成状态>
-      ```
-    routes:
-      - to: viz_finalize
-
-  # ═══════════════════════════════════════════════════════════════
-  # Agent 5.5: 可视化——终态帕累托前沿（自算全局前沿 + selected 高亮）+ 选择漏斗（C5/C6）
-  # ═══════════════════════════════════════════════════════════════
-  - name: viz_finalize
-    kind: agent
-    executor: opencode
-    model: "deepseek/deepseek-v4-pro"
-    agent: nas-viz
+    agent: nas-select
     routes:
       - to: $end
 
 outputs:
-  result: "{{ evaluator.output }}"
+  result: "{{ select.output }}"

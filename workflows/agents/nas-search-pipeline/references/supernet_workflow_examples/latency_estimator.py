@@ -19,8 +19,10 @@ class LatencyEstimator:
         self,
         search_space: SearchSpace,
         latency_cfg,
-        device: str | torch.device = "cpu",
+        device: str | torch.device,
     ) -> None:
+        # device 无默认值：强制由调用方（搜索 worker / 框架）显式注入——
+        # 默认 "cpu" 是隐患（NAS 的 latency_measurement 在错设备上测得无意义数）。
         self.search_space = search_space
         self.latency_cfg = latency_cfg
         self.device = torch.device(device)

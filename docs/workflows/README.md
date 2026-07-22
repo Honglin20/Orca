@@ -132,7 +132,7 @@ orca open          # 浏览器打开 web 面板，实时查看进度和图表
 | `quant-bit-curve` | 量化 | 混合精度 Pareto 位宽-精度曲线：INT8 / W4A8 / INT4 / MX4 / MX8，找最优精度-位宽折中 |
 | `quant-qat` | 量化 | 量化感知训练 + CAGE 后校正：rtn / duquantpp 两方案，QAT 恢复低比特精度 |
 | `nas-hp-search` | NAS | 轻量超参搜索：Elastic 超网只搜宽度/深度，脚本化挑 top-K |
-| `nas-agent-pipeline` | NAS | 端到端 NAS：超参 + block 组件全搜，LLM 评估选择 |
+| `nas-agent-pipeline` | NAS | 端到端 NAS：超参 + block 组件全搜，脚本化 select 选 top-N（P6 后对齐 slim 5 节点 + 确定性护栏，无 LLM 评估） |
 | `agent-struct-exploration` | NAS | LLM agent 驱动结构探索：AST 级改模型结构，实测时延+精度，迭代逼近目标 |
 
 每个 workflow 的详细文档（算法原理、输入输出、公式推导）见本目录下同名 `.md` 文件。

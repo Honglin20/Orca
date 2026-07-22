@@ -34,13 +34,16 @@
 
 ### 1.3 输入 / 输出
 
-**输入**（极简 3 个）：
+**输入**（6 个；project_root 已下沉给 `model_optimizer` 节点从 model_path 推断，output_dir 暂留 [default]，Phase 4-A 将 sink 到 `$ORCA_ARTIFACTS_DIR`）：
 
 | 参数 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `model_path` | string | — | 模型入口（如 `model.py`） |
-| `project_root` | string | — | 项目根目录 |
-| `output_dir` | path | 推断 | 留空→`llm_artifacts/<model_name>/` |
+| `model_path` | string | — | [ask] 模型入口（如 `model.py`） |
+| `output_dir` | path | 推断 | [default] 留空→`llm_artifacts/<model_name>/` |
+| `target_hardware` | string | — | [ask] cuda\|npu\|cpu，目标硬件（无目标=瞎搜） |
+| `latency_constraint` | string | `""` | [ask] 目标时延(ms)，透传 search_config.yaml 剪枝过时延候选；空=无硬约束 |
+| `max_rounds` | string | `20` | [ask] NSGA-II 代数预算闸门（透传 num_generations） |
+| `seed` | string | `0` | [ask] 复现性种子，全 workflow 必填 |
 
 **输出**：`final_report.md`（top-K 架构的 width×depth×params×acc×latency 对比）+ 超网训练曲线图 + 搜索 Pareto 散点/选择图。workflow 产出为 `select` 节点的 `result`。
 
@@ -56,10 +59,14 @@ TARS，跑个轻量 NAS，挑几个又小又准的子网
 ```bash
 orca nas-hp-search --inputs '{
   "model_path": "demo_target/model.py",
-  "project_root": "demo_target/",
-  "output_dir": "llm_artifacts/mymodel/"
+  "output_dir": "llm_artifacts/mymodel/",
+  "target_hardware": "cuda",
+  "latency_constraint": "10.0",
+  "max_rounds": "20",
+  "seed": "0"
 }'
 ```
+（`project_root` 不是 input——agent 从 `model_path` 向上走自动推断。）
 
 ---
 
