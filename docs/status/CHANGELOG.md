@@ -8,6 +8,7 @@
 ## [2026-07-22] doctor --probe-push 推送链路诊断（H1-H6 全 6 跳）
 
 `orca doctor --probe-push`：一次跑完推送链路 6 跳（family_detect / cac_pid_walk / adapter_discovery / daemon_progress / bus_flow / ws_delivery），精确指出哪一跳断（不止「daemon 活着」）+ 输出 first_break + fix_hint 指针指向 runbook。新增唯一模块 `_push_probe.py`（叶子消费方，复用 _hostenv/sidechain_daemon/events.adapters 现有真相源，零新增接口）+ runbook `docs/troubleshooting/push-chain.md` + cli.py 加 3 typer Option（零副作用：无 --probe-push 时输出与基线一致）。H6 self-spawn 走 B2 决议 degradation（RunManager.start_run + monkey-patch Orchestrator.run + bus.emit 合成事件 + WS 3s 等收）。40 测试全绿（含 SPEC §5 三组守门 + fast e2e 冒烟 happy/负向 + H2 中间态自洽双向）。Commits: `275838b` (S1) → `af97ac1` (S2) → `a3f10a1` (S3) → `284b389` (S4)。详见 [release note](../releases/2026-07-22-push-chain-diagnostic.md)。
+- **+ S5（`5b68629`）**：H6 passive `--ws-url` 模式生效——连用户真实在跑的 web，subscribe `--run-id`，8s 窗口被动等收真实事件（pass/fail/unknown 三态），回答「我这个 run 的事件到没到前端」。新增 `_hop_h6_ws_delivery_passive_async`；4 passive 测试，44 push_chain 全绿。
 
 ## [2026-07-22] bootstrap 启动即把 web 链接反馈给用户
 
