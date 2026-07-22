@@ -221,6 +221,12 @@ def _push_candidate_trace(
         x="round",
         y="proxy_mse",
         hue="series",
+        x_label="搜索轮次（round）",
+        y_label="proxy_mse（短训代理，越低越好）",
+        caption=(
+            "proxy_mse = student vs teacher 的 soft-MSE，是短训精度代理，"
+            "非真实精度（真实 dB gap 推迟 finalize）。champion 轨迹=每轮 ratchet 最优。"
+        ),
     )
     return True
 
@@ -260,6 +266,12 @@ def _push_pareto(ledger: list[dict[str, Any]]) -> bool:
         hue="met_latency",
         pareto_x_direction="min",
         pareto_y_direction="min",
+        x_label="时延 ms（越低越好）",
+        y_label="proxy_mse（短训代理，越低越好）",
+        caption=(
+            "双 min 帕累托：左下=又快又贴近 teacher。hue=met_latency 标时延达标与否。"
+            "proxy_mse 非真实精度，仅短训排序用。"
+        ),
     )
     return True
 
