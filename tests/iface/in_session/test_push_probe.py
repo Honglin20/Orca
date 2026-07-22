@@ -29,6 +29,7 @@ from orca.iface.in_session._push_probe import (
     H3_ADAPTER_DISCOVERY,
     H4_DAEMON_PROGRESS,
     H5_BUS_FLOW,
+    H6_WS_DELIVERY,
     RUNBOOK_PATH,
     _recompute_pid_walk_intermediate,
     _recompute_session_file_state,
@@ -649,6 +650,118 @@ def test_h5_unknown_when_log_missing(monkeypatch, tmp_path):
     result = run_push_probe(run_id=run_id, rundir=tmp_path)
     h5 = _hop_by_name(result, H5_BUS_FLOW)
     assert h5["status"] == "unknown"
+
+
+# ── H6 ws_delivery（SPEC §4 H6 + B2 决议 degradation；S3 实现）───────────────
+
+
+def test_h6_pass_self_spawn(monkeypatch, tmp_path):
+    """SPEC §7-5a：H6 self-spawn happy path——3s 内收到合成 agent_message → pass。
+
+    构造：RunManager + monkey-patch Orchestrator.run（probe 内部已 patch，无需测试侧介入）
+    + ephemeral web + WS subscribe + bus.emit 合成事件。
+    """
+    _clear_in_session_env(monkeypatch)
+    # H6 self-spawn 不依赖 in-session env（它自己起 RunManager）。
+    result = run_push_probe(rundir=tmp_path)
+    h6 = _hop_by_name(result, H6_WS_DELIVERY)
+    assert h6["status"] == "pass", h6
+    assert "received agent_message within 3s" in h6["evidence"]
+    assert "__probe__" in h6["evidence"]  # probe run_id 前缀
+
+
+def test_h6_fail_when_pump_raises(monkeypatch, tmp_path):
+    """SPEC §7-5b 反例：patch ``ws_handler._pump`` 抛 RuntimeError → H6=fail。
+
+    构造：monkey-patch WebServer._pump 抛非 Disconnect 异常 → 合成事件无法到达 WS →
+    3s 超时 → fail。
+    """
+    _clear_in_session_env(monkeypatch)
+
+    async def _boom_pump(self, ws, sub, run_id):
+        raise RuntimeError("injected pump failure for H6 test")
+
+    monkeypatch.setattr(
+        "orca.iface.web.ws_handler.WebServer._pump", _boom_pump,
+    )
+    result = run_push_probe(rundir=tmp_path)
+    h6 = _hop_by_name(result, H6_WS_DELIVERY)
+    assert h6["status"] == "fail", h6
+    assert "3s 内未收到事件" in h6["reason"]
+    assert "pump" in h6["reason"] or "WS 未订阅" in h6["reason"]
+
+
+def test_h6_no_residual_after_two_runs(monkeypatch, tmp_path):
+    """SPEC §7-5c：连续两次 doctor --probe-push，第二次不因 __probe__ 残留 / EADDRINUSE 而 fail。
+
+    构造：串行跑两遍 run_push_probe，断言两次都 pass（独立 tmp runs_dir + ephemeral port
+    隔离生效，无残留）。
+    """
+    _clear_in_session_env(monkeypatch)
+    result1 = run_push_probe(rundir=tmp_path)
+    h6_1 = _hop_by_name(result1, H6_WS_DELIVERY)
+    assert h6_1["status"] == "pass", h6_1
+
+    result2 = run_push_probe(rundir=tmp_path)
+    h6_2 = _hop_by_name(result2, H6_WS_DELIVERY)
+    assert h6_2["status"] == "pass", h6_2
+
+    # 验证两次 probe run_id 不同（独立 mkdtemp + 独立 gen_run_id）。
+    assert h6_1["evidence"] != h6_2["evidence"]
+
+
+def test_h6_fail_when_wrong_event_type(monkeypatch, tmp_path):
+    """SPEC §4 H6 守门：WS 收到非 target agent_message → fail（防 pump 串流误判 pass）。
+
+    构造：monkey-patch WebServer._pump 让它改发 ``workflow_started`` 而非 agent_message。
+    review T-1 补的负向测试（SPEC §4 H6 明示「防 pump 串流其它事件误判 pass」契约）。
+    """
+    _clear_in_session_env(monkeypatch)
+    import asyncio
+
+    async def _wrong_event_pump(self, ws, sub, run_id):
+        """串流非 agent_message 事件（模拟 pump 误发 / 历史残留事件）。"""
+        try:
+            # 直接发一条 workflow_started（pump 不会这么干，但 mock 模拟串流）。
+            await ws.send_json({
+                "type": "workflow_started",
+                "run_id": run_id,
+                "data": {"fake": "pump 串流"},
+            })
+        except Exception:  # noqa: BLE001
+            pass
+        # hang 住不让 _pump 自然退出（避免 ws_handler 把连接清理掉）。
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        "orca.iface.web.ws_handler.WebServer._pump", _wrong_event_pump,
+    )
+    result = run_push_probe(rundir=tmp_path)
+    h6 = _hop_by_name(result, H6_WS_DELIVERY)
+    assert h6["status"] == "fail", h6
+    assert "非目标 agent_message" in h6["reason"]
+    assert "workflow_started" in h6["reason"]
+
+
+def test_h6_error_when_setup_raises(monkeypatch, tmp_path):
+    """SPEC §0 fail loud：H6 self-spawn setup 抛异常 → status=error（不是 fail）。
+
+    构造：mock ``_hop_h6_ws_delivery_async`` 抛 RuntimeError → 外层 try/except 兜底为
+    status=error + reason 含异常类型名。review T-2 补的分支测试。
+    """
+    _clear_in_session_env(monkeypatch)
+
+    async def _boom_async(ctx):
+        raise RuntimeError("injected setup failure for H6 test")
+
+    monkeypatch.setattr(
+        "orca.iface.in_session._push_probe._hop_h6_ws_delivery_async", _boom_async,
+    )
+    result = run_push_probe(rundir=tmp_path)
+    h6 = _hop_by_name(result, H6_WS_DELIVERY)
+    assert h6["status"] == "error"
+    assert "RuntimeError" in h6["reason"]
+    assert "injected setup failure" in h6["reason"]
 
 
 # ── runbook 锚点 + fix_hint 指针 守门（SPEC §5 测试 1/2；S4 完整三组守门）────

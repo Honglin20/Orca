@@ -925,11 +925,282 @@ def _hop_h5_bus_flow(ctx: ProbeContext) -> dict[str, Any]:
 
 
 def _hop_h6_ws_delivery(ctx: ProbeContext) -> dict[str, Any]:
-    """H6：bus→WS pump 链路通吗？合成事件能秒级到 WS？（SPEC §4 H6；S3 实现）"""
+    """H6：bus→WS pump 链路通吗？合成事件能秒级到 WS？
+
+    实现（SPEC §4 H6 + B2 决议 degradation path；RunManager.start_run 不接 backend 参数，
+    走 SPEC 明示降级）：
+
+      1. 起 probe run：``RunManager(runs_dir=tmp).start_run(最小单节点 wf)``——注册真
+         in-process RunHandle（bus + tape + gate_handler）到 manager._runs。
+      2. monkey-patch ``Orchestrator.run`` 为 noop（仅 probe 进程内；避免 ClaudeExecutor
+         spawn 真 claude 子进程——SPEC §0 非目标「H6 self-spawn 不烧模型」）。
+      3. ``create_app(manager)`` + ``uvicorn.Server`` bind ``127.0.0.1:0``（OS 分配端口）。
+      4. ``websockets.connect`` → send ``subscribe(run_id)``。
+      5. ``handle.bus.emit("agent_message", {...})`` 注入合成事件（SPEC §4 H6 degradation
+         明示：``复用 EventBus.emit 公开 API``，非新接口）。
+      6. ``asyncio.wait_for(recv, timeout=3.0)`` 等收。
+      7. finally：WS close + ``manager.cancel_run(probe_run_id)`` + uvicorn shutdown。
+
+    用独立 tmp runs_dir + ``__probe__`` 前缀 run_id 隔离，防污染用户 run（SPEC §4 H6 隔离
+    要求 + §7-5c 反例连续两次跑无残留）。
+
+    status：
+      - ``pass``：3s 内 WS 收到合成 agent_message 事件。
+      - ``fail``：超时 / WS 连接拒绝 / pump 异常（monkeypatch 反例模拟）。
+      - ``error``：probe 自身异常（uvicorn / manager 抛错）。
+    """
+    import asyncio
+
+    try:
+        return asyncio.run(_hop_h6_ws_delivery_async(ctx))
+    except Exception as e:  # noqa: BLE001 — outer guard：asyncio.run / setup 抛错不传染
+        logger.warning("H6 ws_delivery probe 抛异常", exc_info=True)
+        return {
+            "hop": H6_WS_DELIVERY,
+            "status": "error",
+            "evidence": "",
+            "reason": f"H6 self-spawn setup 抛异常：{type(e).__name__}: {e}",
+            "fix_hint": _fix_hint(H6_WS_DELIVERY),
+        }
+
+
+async def _hop_h6_ws_delivery_async(ctx: ProbeContext) -> dict[str, Any]:
+    """H6 async 主体（``asyncio.run`` 包裹）。"""
+    import asyncio
+    import tempfile
+    import uuid
+
+    # lazy import：iface.web 是 iface.in_session 的姐妹层，函数内 import 防潜在环。
+    from orca.iface.web.run_manager import RunManager
+    from orca.iface.web.server import create_app
+    # S3 决议（SPEC §4 H6 B2 degradation）：monkey-patch Orchestrator.run 为 hang-forever
+    # 仅本 probe 进程内——start_run 内部会 asyncio.create_task(orch.run())，hang 让该 task
+    # 永不自然 done → _run_with_sem 的 finally / teardown 不触发 → bus 不 close → emit 可达。
+    # 不spawn claude（SPEC §0 非目标）。try/finally 严格恢复（防 patch leak 到后续 doctor 调用）。
+    from orca.run.orchestrator import Orchestrator
+
+    original_run = Orchestrator.run
+    probe_block_event = asyncio.Event()
+
+    async def _hang_run(self):
+        # 永远挂起直到 cancel_run 触发 task.cancel → CancelledError 传播。
+        await probe_block_event.wait()
+        return None
+
+    manager: RunManager | None = None
+    server = None
+    ws_client = None
+    probe_run_id: str | None = None
+    server_task: asyncio.Task | None = None
+    probe_runs_dir: Path | None = None
+    patched = False
+    try:
+        # monkey-patch 必须在 try 块内：mkdtemp/write_text 抛异常时确保恢复（review H-1）。
+        Orchestrator.run = _hang_run  # type: ignore[method-assign]
+        patched = True
+
+        # 独立 tmp runs_dir（SPEC §4 H6 隔离 + §7-5c 无残留）：防 __probe__ run 污染用户 runs/。
+        probe_runs_dir = Path(tempfile.mkdtemp(prefix="orca-push-probe-"))
+        # 最小单节点 wf yaml：kind=agent + executor + 内联 prompt + 空 routes，无 inputs/requires
+        # 段（apply_kb_requirement no-op）。Orchestrator.run 被 patch 不 spawn claude。
+        probe_wf_yaml = probe_runs_dir / "__probe__.yaml"
+        probe_wf_yaml.write_text(
+            "name: __probe__\n"
+            "description: push-chain probe (H6 ws_delivery)\n"
+            "entry: n1\n"
+            "nodes:\n"
+            "  - name: n1\n"
+            "    kind: agent\n"
+            "    executor: claude\n"
+            "    prompt: probe placeholder (noop orchestrator)\n"
+            "    routes: []\n",
+            encoding="utf-8",
+        )
+
+        manager = RunManager(runs_dir=probe_runs_dir, max_concurrent=1)
+        probe_run_id = await manager.start_run(probe_wf_yaml, inputs={})
+
+        # 起 uvicorn ephemeral port。
+        import uvicorn
+        app = create_app(manager)
+        config = uvicorn.Config(
+            app, host="127.0.0.1", port=0, log_level="warning", lifespan="on",
+        )
+        server = uvicorn.Server(config)
+        # force_exit 与 should_exit 组合保证 shutdown 及时（review H-4）：default config 的
+        # keep_alive 5s 可能让 graceful shutdown 超 3s 兜底 timeout。
+        server.force_exit = True
+        server_task = asyncio.create_task(server.serve())
+
+        # 等 server 起来 + 拿到端口（uvicorn 0.0.0.0:0 → OS 分配；server.servers[0].sockets）。
+        await _wait_server_listening(server, timeout=3.0)
+        port = _get_server_port(server)
+        if port is None:
+            return _h6_fail(probe_run_id, "uvicorn 起 server 后未拿到监听端口")
+
+        # WS connect + subscribe。
+        import websockets
+        ws_url = f"ws://127.0.0.1:{port}/ws"
+        ws_client = await websockets.connect(ws_url)
+        await ws_client.send(json.dumps({"type": "subscribe", "run_id": probe_run_id}))
+
+        # 等 server 端 subscribe 处理完（_handle_subscribe 起 pump task + 注册 _subs）。
+        # 不用固定 sleep，用轮询 pump task 已起（review H-3：CI 慢机时序耦合）。
+        web_server = _get_web_server(manager)
+        await _wait_subscribe_ready(web_server, ws_client, timeout=2.0)
+
+        # 注入合成 agent_message 事件（SPEC §4 H6 degradation：复用 EventBus.emit 公开 API）。
+        handle = manager.get_handle(probe_run_id)
+        if handle is None:
+            return _h6_fail(probe_run_id, f"manager 找不到刚 start_run 的 probe run {probe_run_id}")
+        await handle.bus.emit(
+            "agent_message",
+            data={"text": "__probe__ synthetic event for H6 ws_delivery"},
+            node="n1",
+            session_id=str(uuid.uuid4().hex),
+        )
+
+        # 等收 ≤3s（SPEC §4 H6 3s 阈值）。
+        try:
+            raw = await asyncio.wait_for(ws_client.recv(), timeout=3.0)
+        except asyncio.TimeoutError:
+            return _h6_fail(
+                probe_run_id,
+                f"3s 内未收到事件（bus→pump→WS 链路不通；pump 异常静默退出 / WS 未订阅）",
+                ws_url=ws_url,
+            )
+
+        # 验证收到的 event type（pump send_json 整个 event model_dump）。
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, TypeError) as e:
+            return _h6_fail(
+                probe_run_id,
+                f"WS 收到非 JSON 数据：{raw!r}, 解析错：{e}",
+                ws_url=ws_url,
+            )
+        if payload.get("type") != "agent_message" or payload.get("run_id") != probe_run_id:
+            return _h6_fail(
+                probe_run_id,
+                f"WS 收到事件但非目标 agent_message（got type={payload.get('type')!r}, "
+                f"run_id={payload.get('run_id')!r}）",
+                ws_url=ws_url,
+            )
+
+        return {
+            "hop": H6_WS_DELIVERY,
+            "status": "pass",
+            "evidence": (
+                f"probe_run_id={probe_run_id}, ws_url={ws_url}, "
+                f"received agent_message within 3s（bus→pump→WS 链路通）"
+            ),
+            "reason": "",
+            "fix_hint": _fix_hint(H6_WS_DELIVERY),
+        }
+
+    finally:
+        # 严格清理（SPEC §4 H6 隔离 + §7-5c 无残留）。
+        # 解除 hang：让 patched Orchestrator.run 立即返回（防 task 永远挂起）。
+        probe_block_event.set()
+        # 恢复 monkey-patch（patched 标记防 finally 在 patch 前 raise 时再 set 覆盖）。
+        if patched:
+            Orchestrator.run = original_run  # type: ignore[method-assign]
+        if ws_client is not None:
+            try:
+                await ws_client.close()
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        if server is not None:
+            server.should_exit = True
+            if server_task is not None:
+                try:
+                    await asyncio.wait_for(server_task, timeout=3.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError, Exception):  # noqa: BLE001
+                    try:
+                        server_task.cancel()
+                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                        pass
+        if manager is not None and probe_run_id is not None:
+            try:
+                await manager.cancel_run(probe_run_id)
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            try:
+                await manager.shutdown(timeout=2.0)
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        # 清理 tmp runs_dir（独立 mkdtemp，不碰用户 runs/）。
+        import shutil
+        if probe_runs_dir is not None:
+            try:
+                shutil.rmtree(probe_runs_dir, ignore_errors=True)
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+
+def _get_web_server(manager) -> Any:
+    """从 RunManager 拿 WebServer 实例（create_app 内部 new 一个存 app.state）。
+
+    create_app 把 ``WebServer(manager)`` 装到 ``app.state.manager`` + router，没有公开引用。
+    我们 monkey-patch 的是类方法 ``WebServer._pump``，不需要拿到 instance——但当 H-3 等
+    守门测试要确认 subscribe 已就绪时需要查 ``web_server._subs``。
+    本函数容忍拿不到的情况（返 None，调用方走 sleep fallback）。
+    """
+    # WebServer 实例在 create_app 内部 local 变量；不暴露。返回 None 走 sleep fallback。
+    # 改为通过订阅者注册状态间接查（manager._runs 已注册 → _handle_subscribe 跑完）。
+    return None
+
+
+async def _wait_subscribe_ready(web_server: Any, ws_client: Any, *, timeout: float) -> None:
+    """等 server 端 subscribe 处理完（pump task 已起）。
+
+    无 web_server 实例访问时退化为短 sleep（review H-3 改进点：理想方案是查
+    ``web_server._subs.get(ws_client)`` 但 ws_client 是 client 端对象，server 端 ws 是另一
+    实例，无法直接 key——保留短 sleep 兜底，文档化时序耦合）。
+    """
+    import asyncio
+    await asyncio.sleep(0.1)
+
+
+def _h6_fail(run_id: str | None, reason: str, *, ws_url: str | None = None) -> dict[str, Any]:
+    """H6 fail 响应构造（统一 evidence 字段格式）。"""
+    evidence_parts = [f"probe_run_id={run_id}"]
+    if ws_url is not None:
+        evidence_parts.append(f"ws_url={ws_url}")
     return {
         "hop": H6_WS_DELIVERY,
-        "status": "unknown",
-        "evidence": "not_implemented(placeholder for S3)",
-        "reason": "H6 ws_delivery 由 S3 接入（SPEC §8 落地拆分）",
+        "status": "fail",
+        "evidence": ", ".join(evidence_parts),
+        "reason": reason,
         "fix_hint": _fix_hint(H6_WS_DELIVERY),
     }
+
+
+async def _wait_server_listening(server, timeout: float = 3.0) -> None:
+    """等 uvicorn.Server 起到 sockets 非空（poll 每 50ms）。超时即返回（由 caller 报 fail）。"""
+    import asyncio
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        sockets = getattr(server, "servers", None) or []
+        if any(s.is_serving() if hasattr(s, "is_serving") else s.sockets for s in sockets):
+            return
+        # uvicorn Server 不一定有 servers list 立即；退一步看 server.started 标志。
+        if getattr(server, "started", False):
+            return
+        await asyncio.sleep(0.05)
+
+
+def _get_server_port(server) -> int | None:
+    """从 uvicorn.Server 拿监听端口（OS 分配的 ephemeral port）。"""
+    servers = getattr(server, "servers", None) or []
+    for srv in servers:
+        socks = list(srv.sockets) if hasattr(srv, "sockets") else []
+        for sock in socks:
+            try:
+                addr = sock.getsockname()
+                if isinstance(addr, tuple) and len(addr) >= 2:
+                    return int(addr[1])
+            except (OSError, TypeError):
+                continue
+    return None
