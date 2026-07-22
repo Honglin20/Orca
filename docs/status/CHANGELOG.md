@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-22] doctor --probe-push 推送链路诊断（H1-H6 全 6 跳）
+
+`orca doctor --probe-push`：一次跑完推送链路 6 跳（family_detect / cac_pid_walk / adapter_discovery / daemon_progress / bus_flow / ws_delivery），精确指出哪一跳断（不止「daemon 活着」）+ 输出 first_break + fix_hint 指针指向 runbook。新增唯一模块 `_push_probe.py`（叶子消费方，复用 _hostenv/sidechain_daemon/events.adapters 现有真相源，零新增接口）+ runbook `docs/troubleshooting/push-chain.md` + cli.py 加 3 typer Option（零副作用：无 --probe-push 时输出与基线一致）。H6 self-spawn 走 B2 决议 degradation（RunManager.start_run + monkey-patch Orchestrator.run + bus.emit 合成事件 + WS 3s 等收）。40 测试全绿（含 SPEC §5 三组守门 + fast e2e 冒烟 happy/负向 + H2 中间态自洽双向）。Commits: `275838b` (S1) → `af97ac1` (S2) → `a3f10a1` (S3) → `284b389` (S4)。详见 [release note](../releases/2026-07-22-push-chain-diagnostic.md)。
+
 ## [2026-07-22] bootstrap 启动即把 web 链接反馈给用户
 
 补 `9677c1e`（bootstrap 默认自动开 web）的遗漏环：detached `orca open` 子进程的 URL echo 进了日志文件、用户终端看不到 → bootstrap 自身启动当下即算出 URL（单一真相源 `resolve_web_endpoint`，新增 helper `_resolve_web_url`，lazy import 避循环 + soft-fail），分两路显式吐给用户：①JSON `reply["web_url"]`（模型驱动路径拿得到）②stderr `Orca Web UI → <url>`（直接终端可见，不污染 stdout 契约）。**不进 `prompt`**：prompt 须与 `next` idempotent 重发逐字相等（`test_f1_resume_flow` 不变量）。已知 limitation：不探活端口归属（与 soft-fail 一致，端口探活是 `orca open` probe 的职责）。code-reviewer 一轮闭环（0 🔴，2 🟡 全修）；25 passed。详见 [release note](../releases/2026-07-22-bootstrap-surface-web-url.md)。
