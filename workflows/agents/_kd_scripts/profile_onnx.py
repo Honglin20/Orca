@@ -14,7 +14,10 @@
 
 CLI（契约 §4）::
 
-    python3 profile_onnx.py --onnx <teacher.onnx> --out <profile_report.json> --topk 5
+    python3 profile_onnx.py --onnx <teacher.onnx> --out <profile_report.json> --topk 5 [--device cpu]
+
+device（P7 新增）：默认 "cpu"（profiling 看算子耗时，CPU 确定性最好，与 latency_onnxrt 的
+实测 device 解耦）；可用 --device cuda/npu 在硬件真 profile（Ascend NPU=CANNExecutionProvider）。
 
 stdout（结构化 key=value，供 agent 节点 grep）::
 
@@ -118,13 +121,23 @@ def _build_hints(
 
 
 def profile_onnx(onnx_path: str, out: str, topk: int = 5,
-                 runs: int = 10, warmup: int = 3) -> dict[str, Any]:
+                 runs: int = 10, warmup: int = 3,
+                 device: str = "cpu", seed: int = 0) -> dict[str, Any]:
     """跑 profiling 并聚合报告。返回 dict（同时写入 --out）。"""
     onnx_path = os.path.abspath(onnx_path)
     if not os.path.isfile(onnx_path):
         raise FileNotFoundError(f"ONNX 文件不存在: {onnx_path}")
 
+    import numpy as np
     import onnxruntime as ort
+
+    # P7：device 默认 cpu（profiling 确定性最好），但允许 cuda/npu 真硬件 profile。
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from _device import ort_providers  # type: ignore
+
+    providers = ort_providers(device)
 
     sess_opts = ort.SessionOptions()
     # profiling 前缀放到临时目录，避免污染 cwd
@@ -136,15 +149,21 @@ def profile_onnx(onnx_path: str, out: str, topk: int = 5,
     sess = ort.InferenceSession(
         onnx_path,
         sess_options=sess_opts,
-        providers=["CPUExecutionProvider"],  # profiling 只看算子耗时，CPU 确定性最好
+        providers=providers,
+    )
+    print(
+        f"[profile_onnx] device_arg={device!r} providers={providers} "
+        f"actual={sess.get_providers()}",
+        file=sys.stderr,
     )
 
+    rng = np.random.default_rng(seed)
+
     # 构造 dummy 输入（动态维度 → 1）
-    import numpy as np
     inp: dict[str, Any] = {}
     for i in sess.get_inputs():
         shape = [d if isinstance(d, int) else 1 for d in i.shape]
-        inp[i.name] = np.random.randn(*shape).astype(np.float32)
+        inp[i.name] = rng.standard_normal(*shape).astype(np.float32)
 
     for _ in range(warmup):
         sess.run(None, inp)
@@ -191,6 +210,8 @@ def profile_onnx(onnx_path: str, out: str, topk: int = 5,
         "onnx": onnx_path,
         "runs": runs,
         "warmup": warmup,
+        "device": device,
+        "providers": providers,
         "op_histogram": op_histogram,
         "hotspots": hotspots,
         "transpose_count": transpose_count,
@@ -215,6 +236,18 @@ def _main() -> int:
     p.add_argument("--topk", type=int, default=5, help="hotspots 取前 K（默认 5）")
     p.add_argument("--runs", type=int, default=10, help="正式计时跑次数")
     p.add_argument("--warmup", type=int, default=3, help="预热次数")
+    p.add_argument(
+        "--device",
+        default="cpu",
+        choices=["auto", "cuda", "npu", "cpu"],
+        help="profiling 设备（默认 cpu：算子耗时确定性最好；NPU=CANN）",
+    )
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="dummy 输入随机种子（默认 0，保复现）",
+    )
     args = p.parse_args()
 
     try:
@@ -224,6 +257,8 @@ def _main() -> int:
             topk=args.topk,
             runs=args.runs,
             warmup=args.warmup,
+            device=args.device,
+            seed=args.seed,
         )
     except Exception as e:
         print(f"[profile_onnx] FAIL: {type(e).__name__}: {e}", file=sys.stderr)

@@ -26,22 +26,23 @@ tools: [bash, read, write, glob, grep]
 
 - **round / phase 用 bash 从账本推导**（**不**引用 curator 节点的 output——首轮 curator 未跑，Jinja 取不到；与 struct-hypothesizer 同款，从文件读）：
   ```bash
-  OUT="{{ teacher_setup.output.output_dir }}"
-  ROUND=$(wc -l < "$OUT/ledger.jsonl" 2>/dev/null | tr -d ' ')
+  # 关键（P7 R2 修复）：ledger 是候选评估行 + finalized_failed_mark 控制标记行混存。
+  # ROUND 必须只数候选评估行（控制标记行无 round 字段，数进去会让 phase 推导偏移）。
+  ROUND=$(grep -v '"type":"finalized_failed_mark"' "{{ setup.output.ledger_path }}" 2>/dev/null | wc -l | tr -d ' ')
   [ -z "$ROUND" ] && ROUND=0
   REG_LEN=$(python3 -c "import json;print(len(json.load(open('{{ inputs.kd_scripts_dir }}/students/registry.json'))))")
   if [ "$ROUND" -lt "$REG_LEN" ]; then PHASE=1; else PHASE=2; fi
   ```
   （首轮 ledger 空 → ROUND=0 → PHASE=1；registry 扫完 → PHASE=2。）
 - `kd_scripts_dir = {{ inputs.kd_scripts_dir }}`（契约 §4 脚本根，含 `students/registry.json`）。
-- `profile_report`（profile_gate 产出，CONTRACTS §4 schema）：`{{ profile_gate.output.profile_report }}`。
-- teacher baseline（时延 / 精度参照）：`{{ teacher_setup.output.teacher_meta }}`。
-- 当前 champion（读账本）：
+- `profile_report`（setup 合并 profile_gate 后直接读绝对路径，CONTRACTS §4 schema）：`{{ setup.output.profile_report_path }}`。
+- teacher baseline（时延 / 精度参照）：`{{ setup.output.teacher_meta }}`。
+- 当前 champion（读账本，**只读 setup 提供的绝对路径字段**）：
   ```bash
-  tail -n 1 "{{ teacher_setup.output.output_dir }}champions.jsonl"
+  tail -n 1 "{{ setup.output.champions_path }}"
   ```
   从最近一行取 `family` / `build_cfg` / `latency_ms` / `proxy_mse`（无 champion → phase=1 起点）。
-- 历史原则（可选读）：`{{ teacher_setup.output.output_dir }}kd_recipe.md`（analyst 累积的 KD flag × family 心得）。
+- 历史原则（可选读）：`{{ setup.output.kd_recipe_path }}`（curator 累积的 KD flag × family 心得）。
 - 目标：`target_latency_ms={{ inputs.target_latency_ms }}`（proxy_mse 只用于 curator 排序，hypothesizer 不设 proxy 阈值）。
 
 ## 职责（按 phase 分支）
@@ -50,10 +51,12 @@ tools: [bash, read, write, glob, grep]
 
 1. 监督跑（fail loud，round/phase 来自上方 bash 推导，**不**用 Jinja 取 curator）：
    ```bash
+   # selection_spec 用 setup 提供的 output_dir 拼接（setup 是单一真相源；尾斜杠已保证）
+   SELECTION_SPEC="{{ setup.output.output_dir }}selection_spec_r${ROUND}.json"
    python3 "{{ inputs.kd_scripts_dir }}/pick_student.py" \
      --registry "{{ inputs.kd_scripts_dir }}/students/registry.json" \
      --round "$ROUND" \
-     --out "{{ teacher_setup.output.output_dir }}selection_spec_r${ROUND}.json"
+     --out "$SELECTION_SPEC"
    ```
 2. **退出码判别**：
    - `exit 0` → 从 stdout 解析 `SELECTION_SPEC: <path>` + `PHASE1_EXHAUSTED: false`，透传该路径为 `selection_spec_path`，`phase=1`，`family=<spec 里读>`，`candidate_id=<spec.candidate_id>`。
@@ -69,17 +72,18 @@ tools: [bash, read, write, glob, grep]
 4. **一次只变异 1-2 维**：相对 champion 或相对上轮同 family 的 spec，只动 1-2 个 `build_cfg` key（或换 family，但换 family 算 1 维）。
 5. 组 `kd_config`（`kd_losses` / `weights` / `ema` / `scheduler` —— 见 CONTRACTS §2 / §3；权重 scheduler 用 `KDWeightScheduler` 的三段 anneal schema）。
 6. **rationale 强制引用 hotspot**（不引用 → output_schema_mismatch fail loud）：如"hotspot=Softmax 占 28%，选 ista_lista 避免注意力；变异维度：family"。
-7. 落盘：
+7. 落盘（**用 setup 提供的 output_dir 字段，selection_spec 文件名按 round 命名**）：
    ```bash
    # candidate_id 命名 r<round>_<family>_v<seq>
-   <写到> "{{ teacher_setup.output.output_dir }}selection_spec_r<round>.json"
+   SELECTION_SPEC="{{ setup.output.output_dir }}selection_spec_r<round>.json"
+   # <写 SelectionSpec JSON 到 $SELECTION_SPEC>
    ```
    schema 严格对齐 CONTRACTS §2（candidate_id / phase=2 / family / build_cfg / kd_config / rationale）。
 8. AST/JSON 合法性自校（`python3 -c "import json; json.load(open('<path>'))"`），否则 fail loud。
 
 ## 与账本的交互
 
-- **只读**：`champions.jsonl` / `ledger.jsonl`（理解已试空间）+ `kd_recipe.md`（analyst 心得）。
+- **只读**：`champions.jsonl` / `ledger.jsonl`（理解已试空间）+ `kd_recipe.md`（curator 心得）。
 - **写文件**：`selection_spec_r<round>.json`（本轮 SelectionSpec 落盘）。
 - **不写** `ledger.jsonl` / `champions.jsonl`（curator 写）。
 
@@ -91,6 +95,6 @@ tools: [bash, read, write, glob, grep]
   "family": "<spec.family，必须 ∈ registry>",
   "phase": <1 或 2，按本轮分支：Phase1 sweep=1 / Phase2 发挥=2>,
   "candidate_id": "<spec.candidate_id>",
-  "rationale_summary": "<一句话总结；Phase2 必含 hotspot 引用，Phase1 可填 'registry sweep round=N'>"
+  "rationale": "<一句话总结；Phase2 必含 hotspot 引用，Phase1 可填 'registry sweep round=N'>"
 }
 ```

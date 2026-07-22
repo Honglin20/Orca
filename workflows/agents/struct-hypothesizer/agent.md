@@ -9,27 +9,27 @@ tools: [bash, read, glob, grep]
 
 ## 输入
 
-- 本轮 champion（从账本读）：
+- 本轮 champion（从 setup seed 的账本读，**只读 setup 提供的绝对路径字段**，不字符串拼接）：
   ```bash
-  tail -n 1 "{{ family_detect.output.output_dir }}champions.jsonl"
+  tail -n 1 "{{ setup.output.champions_path }}"
   ```
   从最近一行取 `latency_ms` / `accuracy` / `snapshot`（= 父 model.py）。
 - 时延缺口 = `{{ inputs.target_latency_ms }} − champion.latency_ms`。
-- 精度下限：`{{ baseline_measure.output.accuracy_target }}`。
-- 族：`{{ family_detect.output.family }}`。
+- 精度下限：`{{ setup.output.accuracy_target }}`。
+- 族：`{{ setup.output.family }}`。
 - 配额参数：`structural_slot_ratio=0.5`（已固化）。
 - curator 上一轮的路由指示（exploit/explore + 是否需补结构配额）：
   ```bash
-  tail -n 1 "{{ family_detect.output.output_dir }}ledger.jsonl"
+  tail -n 1 "{{ setup.output.ledger_path }}"
   ```
 
 ## 引用的 KB 切片（index.json → agent_slices.hypothesizer，只读这些、不读 failures.md）
 
 按草稿 §7.2 / index.json `agent_slices.hypothesizer`：
-- `common.principles` → `{{ family_detect.output.kb_cache_dir }}/common/principles.md`
-- `common.latency_heuristics` → `{{ family_detect.output.kb_cache_dir }}/common/latency_heuristics.md`
-- `<family>.primitives` → `{{ family_detect.output.kb_cache_dir }}/families/<族>/primitives.md`
-- `<family>.latency_moves` → `{{ family_detect.output.kb_cache_dir }}/families/<族>/latency_moves.md`（**本 workflow 核心**）
+- `common.principles` → `{{ setup.output.kb_cache_dir }}/common/principles.md`
+- `common.latency_heuristics` → `{{ setup.output.kb_cache_dir }}/common/latency_heuristics.md`
+- `<family>.primitives` → `{{ setup.output.kb_cache_dir }}/families/<族>/primitives.md`
+- `<family>.latency_moves` → `{{ setup.output.kb_cache_dir }}/families/<族>/latency_moves.md`（**本 workflow 核心**）
 
 多族（如 transformer+cnn）取并集。**未命中族的文件不读**（§7.3 族级过滤）。
 

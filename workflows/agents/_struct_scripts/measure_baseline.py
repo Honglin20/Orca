@@ -25,8 +25,11 @@ from pathlib import Path
 
 
 # ── 复用同目录的 export_onnx + 动态加载 latency_provider ──────────────────────
-def _export_onnx(model_path, build_fn, dummy_input, opset, out):
-    """复用 export_onnx.export_onnx（同目录 import）。"""
+def _export_onnx(model_path, build_fn, dummy_input, opset, out, device: str = "auto", seed: int = 0):
+    """复用 export_onnx.export_onnx（同目录 import）。
+
+    P7：解开原硬编码 device="cpu"，透传 device + seed。
+    """
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
@@ -38,7 +41,8 @@ def _export_onnx(model_path, build_fn, dummy_input, opset, out):
         dummy_input=dummy_input,
         opset=opset,
         out=out,
-        device="cpu",
+        device=device,
+        seed=seed,
     )
 
 
@@ -109,15 +113,23 @@ def measure_baseline(args) -> dict:
     champions_path = os.path.join(out_dir, "champions.jsonl")
     ledger_path = os.path.join(out_dir, "ledger.jsonl")
 
-    # 1. 导出 baseline ONNX
+    # 1. 导出 baseline ONNX（P7：seed 透传给 export_onnx，dummy 输入复现）
     onnx_path = _export_onnx(
         args.model_path, args.build_fn, args.dummy_input, args.opset,
         out=os.path.join(snapshots, "baseline.onnx"),
+        device=getattr(args, "device", "auto"),
+        seed=getattr(args, "seed", 0),
     )
 
     # 2. 实测时延（cost model，LLM 永不预测）
     measure = _load_measure(args.latency_provider)
-    latency_ms = float(measure(onnx_path))
+    # device 透传给 latency_provider；旧式 measure 无 device kwarg → 用 inspect 检测后 fallback。
+    import inspect
+    device = getattr(args, "device", "auto")
+    if "device" in inspect.signature(measure).parameters:
+        latency_ms = float(measure(onnx_path, device=device))
+    else:
+        latency_ms = float(measure(onnx_path))
 
     # 3. baseline accuracy（pre-trained 只测 / 给定 / 训练）
     if args.test_command and args.test_command.strip():
@@ -177,6 +189,18 @@ def _main() -> int:
     p.add_argument("--baseline_accuracy", default="", help="给定则跳过 train/test")
     p.add_argument("--accuracy_target", default="")
     p.add_argument("--project_root", default=".", help="train/test 命令的 cwd")
+    p.add_argument(
+        "--device",
+        default="auto",
+        choices=["auto", "cuda", "npu", "cpu"],
+        help="ONNX 导出 + latency 测量设备（P7；默认 auto，cuda→npu→cpu 探测）",
+    )
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="复现种子（默认 0）",
+    )
     args = p.parse_args()
 
     try:

@@ -131,7 +131,7 @@ Phase 4（产物目录）─────────┘  B→A→C
 
 ## Phase 3：agent-struct + kd-nas 精简、device、latency_provider
 
-### 3-a agent-struct-exploration（11→7 节点）
+### 3-a agent-struct-exploration（11→6 节点，P7 实现：headline 原写 7，bullet 算下是 6，以 6 为准）
 - **删 `structure_gate`**（line 210-244）：零判决力，tag 只喂软配额告警。
 - **合并 `family_detect`+`baseline_measure`→`setup`**。
 - **合并 `analyst`+`curator`+`viz_round`→`curator`**：先 reducer 脚本 deterministic 决策 → 条件性 LLM 归因（失败候选才分析）→ 跑 viz。
@@ -148,7 +148,7 @@ Phase 4（产物目录）─────────┘  B→A→C
 - **清理**：删 family_detect prompt 第 91 行死目录 `viz/`；删死代码 `run_candidates.py`。
 - **device 统一**：struct/kd 抄 NAS `resolve_device`。
 
-### 3-b kd-nas（13→7 节点）
+### 3-b kd-nas（13→6 节点，P7 实现：headline 原写 7，bullet 算下是 6，以 6 为准）
 - **删 `structure_gate`**（line 180-206，节点自认 student 必然 structural）。
 - **合并 `teacher_setup`+`profile_gate`+`kd_train_script_gen`→`setup`**。
 - **[核心] 合并 `kd_trainer`+`measure_student`→`candidate_eval`，改 latency-first**：先 `build_model()` 默认权重导 ONNX 测 latency → 不达标 FAIL_latency**不训练** → 通过才短训 + 测 proxy_mse。（当前训练在时延测量之前，违反哲学 #2，烧短训算力。latency 是结构属性，不需训练权重。）
@@ -159,7 +159,7 @@ Phase 4（产物目录）─────────┘  B→A→C
 - **device / latency_provider / ONNX**：同 3-a（measure_student.py、teacher_setup.py 透传 device；latency_provider 暴露；export 加 no-.data）。
 - **隐性假数据**：`teacher_setup.py:271` teacher_accuracy 解析失败写 `0.0 + confidence=low` 当 baseline → confidence=low 时 fail loud 或图表显式标「teacher_accuracy 未知，dB gap 不可信」。
 
-**Phase 3 验收**：两 workflow 各压到 7 节点；kd 的 candidate_eval 严格 latency-first（时延不达标不训练）；图表无 y=0/无标签/无意义表；`--device npu` 有路径；用户提供 latency 脚本时被采用；ONNX 导出可控不伴 `.data`。
+**Phase 3 验收**：两 workflow 各压到 6 节点（headline 原写 7 是 off-by-one，以 bullet 合并算式为准：struct 11−1(structure_gate)−1(family_detect+baseline_measure→setup)−2(analyst+curator+viz_round→curator)−1(viz_finalize→finalize)=6；kd 同款再 −1(kd_trainer+measure_student→candidate_eval)=6）；kd 的 candidate_eval 严格 latency-first（时延不达标不训练）；图表无 y=0/无标签/无意义表；`--device npu` 有路径；用户提供 latency 脚本时被采用；ONNX 导出可控不伴 `.data`。
 
 ---
 
@@ -226,7 +226,7 @@ spec-review + input 辩论 + opencode 验证后冻结（覆盖上文任何模糊
 | **P4** | 0-b 全量（TARS skill 哨兵分支 + 跨后端 task_id 捕获/恢复 + agent.md 契约 snippet） | P3 pass | 批2 |
 | **P5** | quant 系四合一（删造假 + Tier B 哨兵 + device 共享模块 + bit-curve re-eval + output_dir 子目录 + qat 数字修正） | P1(图表)/P4(哨兵) | 批3 |
 | **P6** | NAS 系（补 KPI inputs + sink project_root + heavy 7→5 + train_runner output_schema） | P1/P4 | 批3 |
-| **P7** | struct/kd（11→7 / 13→7 含 latency-first + latency_provider input + device + ONNX no-.data + 图表根因） | P1/P4 | 批3 |
+| **P7** | struct/kd（11→6 / 13→6 含 latency-first + latency_provider input + device + ONNX no-.data + 图表根因） | P1/P4 | 批3 |
 | **P8** | Phase 4-A 引擎注入 `$ORCA_ARTIFACTS_DIR` + 4-C `orca gc` | 无 | 批3 |
 | **P9** | input 精简全员（按 input 原则收口各 workflow inputs + 更新 create-workflow-skill） | P5/P6/P7 | 批4 |
 

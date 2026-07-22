@@ -1,7 +1,7 @@
 name: agent-struct-exploration
 description: "LLM agent 驱动的模型结构搜索：迭代改写模型结构（AST 级）、实测时延与精度，循环逼近目标（降时延保精度）。不依赖超网，结构由 agent 直接改。契约见 docs/specs/agent-structural-exploration-design-draft.md。"
 
-entry: family_detect
+entry: setup
 
 inputs:
   # ── inputs 标签约定（description 前缀，供 in-session 编排器/tars skill 读取）──
@@ -9,14 +9,13 @@ inputs:
   #   [infer]    可自动推断（glob/探测），不问用户；推断失败才回退 [ask]
   #   [default]  有合理默认，不问；高级用户可直接覆盖
   #   [advanced] 罕见 override，不问；改它需懂内部
-  # 工程内部常量（structural_slot_ratio / reject_hyperparam_only / paths / latency_provider /
+  # 工程内部常量（structural_slot_ratio / reject_hyperparam_only / paths /
   # gpus / model_family / onnx_opset / knowledge_base）已固化进 agent md / 脚本，不再作为 input 暴露。
   #
   # 用户决策面（[ask]+[infer]，编排器只处理这批）= model_path / train_command /
   # target_latency_ms / accuracy_target / max_rounds。
-  # project_root / build_fn / dummy_input 已下沉给 family_detect 节点运行时探测输出
-  # （它们是 model.py 内省任务，非用户决策）；pretrained_ckpt（死元信息）/ baseline_accuracy
-  # （默认就测）已移除。
+  # project_root / build_fn / dummy_input 已下沉给 setup 节点运行时探测输出
+  # （它们是 model.py 内省任务，非用户决策）。
 
   model_path:
     type: string
@@ -47,28 +46,45 @@ inputs:
     default: "20"
   struct_scripts_dir:
     type: string
-    description: "[default] 确定性辅助脚本目录（latency/export/ast_diff/ledger_reducer）。随 workflow 发布在 workflows/agents/_struct_scripts/；orca install 到 ~/.orca/workflows 时需覆盖为该绝对路径"
+    description: "[default] 确定性辅助脚本目录（latency/export/ast_diff/ledger_reducer/viz）。随 workflow 发布在 workflows/agents/_struct_scripts/；orca install 到 ~/.orca/workflows 时需覆盖为该绝对路径"
     required: false
     default: "workflows/agents/_struct_scripts"
   iterations:
     type: string
-    description: "[advanced] Orca 单 run 节点访问数硬上限（循环兜底，由 orca resolve_max_iter 消费）。每轮约 7 次访问；默认 ≈ max_rounds×7 + 富余。超限 raise MaxIterationsError（fail loud）"
+    description: "[advanced] Orca 单 run 节点访问数硬上限（循环兜底，由 orca resolve_max_iter 消费）。每轮约 5 次访问（P7 精简后）；默认 ≈ max_rounds×5 + 富余。超限 raise MaxIterationsError（fail loud）"
     required: false
-    default: "500"
+    default: "300"
+  device:
+    type: string
+    description: "[advanced] ONNX 导出 + latency 测量设备：auto（默认，cuda→npu→cpu 探测）/ cuda / npu (Ascend CANN) / cpu。与 train_command 的实际训练 device 解耦"
+    required: false
+    default: "auto"
+  latency_provider:
+    type: string
+    description: "[advanced] latency cost model 的 `path::func` 引用；默认 struct 自带 latency_onnxrt.py::measure。用户自有 latency 脚本（部署目标硬件真测）优先——给定则所有 latency 测量必用此脚本，不退回默认"
+    required: false
+    default: "workflows/agents/_struct_scripts/latency_onnxrt.py::measure"
+  seed:
+    type: string
+    description: "[advanced] 复现种子（默认 0）。ONNX dummy 输入随机性等 deterministic 路径全固定此 seed"
+    required: false
+    default: "0"
 
 nodes:
   # ═══════════════════════════════════════════════════════════════
-  # Setup（一次性）：LLM 判族 → 加载 KB 切片 → 建输出目录/账本/worktree
-  #                  → 实测 baseline_latency（cost model，§5）→ seed champions.jsonl
+  # Setup（一次性，P7 合并 family_detect + baseline_measure）：
+  #   建输出目录 + 浅层族检测 + 加载 KB 切片
+  #   + 探测 project_root / build_fn / dummy_input（这三项原是用户 input，下沉运行时内省）
+  #   + 导出 baseline ONNX + cost_model 测时延 + 取 baseline accuracy + seed champions
   # ═══════════════════════════════════════════════════════════════
-  - name: family_detect
+  - name: setup
     kind: agent
     executor: opencode
     model: "deepseek/deepseek-v4-flash"
     tools: [bash, read, write, glob, grep]
     output_schema:
       type: object
-      required: [output_dir, family, kb_cache_dir, project_root, build_fn, dummy_input, snapshots_dir, worktree_root, viz_dir, ledger_path, champions_path]
+      required: [output_dir, family, kb_cache_dir, project_root, build_fn, dummy_input, snapshots_dir, worktree_root, ledger_path, champions_path, baseline_latency_ms, baseline_accuracy, accuracy_target, accuracy_mode, baseline_onnx]
       properties:
         output_dir: {type: string, description: "run 根目录绝对路径（末尾必须带 /，下游拼接依赖此约定）"}
         family: {type: string, description: "命中的族名（可多族用 + 连，如 transformer+cnn）"}
@@ -78,20 +94,29 @@ nodes:
         dummy_input: {type: string, description: "探测所得 dummy_input JSON 串，如 {\"shape\":[1,3,224,224],\"dtype\":\"float32\"}"}
         snapshots_dir: {type: string, description: "<output_dir>/snapshots/ 绝对路径（末尾带 /）。下游只 append `<candidate_id>_model.py`，禁止自己拼根"}
         worktree_root: {type: string, description: "<output_dir>/.worktrees/ 绝对路径（末尾带 /）。下游只 append `<candidate_id>/`"}
-        viz_dir: {type: string, description: "<output_dir>/viz/ 绝对路径（末尾带 /）"}
         ledger_path: {type: string, description: "<output_dir>/ledger.jsonl 绝对路径（账本单一真相源，下游只读此字段不拼接）"}
         champions_path: {type: string, description: "<output_dir>/champions.jsonl 绝对路径（champion 轨迹，下游只读此字段不拼接）"}
+        baseline_latency_ms: {type: number, description: "cost model 实测（LLM 永不预测，§5）"}
+        baseline_accuracy: {type: number}
+        accuracy_target: {type: number}
+        accuracy_mode: {type: string, description: "train|test|given"}
+        baseline_onnx: {type: string}
     prompt: |
-      你是结构性探索 workflow 的 **Setup（一次性·轻量）**：建输出目录 + **浅层族检测** + 加载 KB 切片
-      + **探测 project_root / build_fn / dummy_input**（这三项原是用户 input，现下沉给你运行时内省 model.py 得到）。
-      **不**做 ONNX 导出 / 测时延 / 训练（那些归下游 `baseline_measure` 节点，确定性脚本）。
+      你是结构性探索 workflow 的 **Setup（一次性）**（P7 合并 family_detect + baseline_measure）：
+      建输出目录 + **浅层族检测** + 加载 KB 切片 + 探测 project_root / build_fn / dummy_input
+      + 调脚本测 baseline 时延 + 取 baseline accuracy + seed champions。**不**做训练外的自由发挥。
 
       ## 输入
       - model_path: {{ inputs.model_path }}
       - model_family：恒 `auto`（由你浅层判族，已从 inputs 固化）
       - knowledge_base 根目录：`knowledge_base/`（已固化，不再作 input）
+      - train_command / test_command / accuracy_target：透传给 measure_baseline.py
+      - device / latency_provider / seed（P7 新增）：透传给 measure_baseline.py
 
       ## 执行（确定性优先，fail loud）
+
+      **Phase A：建输出目录 + 浅层族检测 + 探测路径 + KB 切片**（原 family_detect 职责）
+
       1. **建输出目录（append-only 账本，§6）+ 一次性计算所有下游专用路径字段（单一真相源）**：
          **output_dir 必须用 `os.path.abspath` + 末尾 `+ "/"` 计算一次**（杜绝手写路径字符串、杜绝 LLM 自由发挥尾斜杠；
          否则下游拼接会产 `<run>snapshots/`、`<run>.worktrees/` 兄弟孤儿目录）。`<model_name>` = model_path 文件名 stem；`<run_id>` = 时间戳。
@@ -105,23 +130,22 @@ nodes:
          # OUTPUT_DIR 末尾已带 /，下面 ${OUTPUT_DIR}<suffix> 是安全拼接（单一真相源在 setup 节点内部）
          SNAPSHOTS_DIR="${OUTPUT_DIR}snapshots/"
          WORKTREE_ROOT="${OUTPUT_DIR}.worktrees/"
-         VIZ_DIR="${OUTPUT_DIR}viz/"
          KB_CACHE_DIR="${OUTPUT_DIR}kb_cache/"
          LEDGER_PATH="${OUTPUT_DIR}ledger.jsonl"
          CHAMPIONS_PATH="${OUTPUT_DIR}champions.jsonl"
-         mkdir -p "$SNAPSHOTS_DIR" "$WORKTREE_ROOT" "$VIZ_DIR" "$KB_CACHE_DIR"
+         mkdir -p "$SNAPSHOTS_DIR" "$WORKTREE_ROOT" "$KB_CACHE_DIR"
          : > "$CHAMPIONS_PATH"; : > "$LEDGER_PATH"
-         export OUTPUT_DIR SNAPSHOTS_DIR WORKTREE_ROOT VIZ_DIR KB_CACHE_DIR LEDGER_PATH CHAMPIONS_PATH
+         export OUTPUT_DIR SNAPSHOTS_DIR WORKTREE_ROOT KB_CACHE_DIR LEDGER_PATH CHAMPIONS_PATH
          echo "OUTPUT_DIR=$OUTPUT_DIR"
          echo "SNAPSHOTS_DIR=$SNAPSHOTS_DIR"
          echo "WORKTREE_ROOT=$WORKTREE_ROOT"
-         echo "VIZ_DIR=$VIZ_DIR"
          echo "KB_CACHE_DIR=$KB_CACHE_DIR"
          echo "LEDGER_PATH=$LEDGER_PATH"
          echo "CHAMPIONS_PATH=$CHAMPIONS_PATH"
          ```
-         **把 stdout 的 7 个 `KEY=value` 原样填进输出 JSON**（每个目录字段末尾必须带 `/`，文件字段是完整路径）。
-         下游节点（engineer / structure_gate / viz_*）直接读这些 JSON 字段、**不**自己拼根——若你漏字段或忘尾斜杠，孤儿目录就回来了。
+         **注意（P7）**：不再建死目录 `viz/`（可视化全走 render_chart，无 HTML 产物；viz_dir 字段已从 output_schema 删除）。
+         **把 stdout 的 6 个 `KEY=value` 原样填进输出 JSON**（每个目录字段末尾必须带 `/`，文件字段是完整路径）。
+         下游节点直接读这些 JSON 字段、**不**自己拼根——若你漏字段或忘尾斜杠，孤儿目录就回来了。
       2. **探测 project_root**：从 model_path 所在目录向上走，取**第一个含 `train.py` 或 `pyproject.toml`
          或 `.git` 的目录**作为项目根（绝对路径）。走到 / 仍找不到 → 取 model_path 的 dirname，并在输出注明"低置信"。
       3. **探测 build_fn**：读 model.py **顶层** `def`，挑那个实例化并返回 `nn.Module` 的函数名
@@ -141,68 +165,46 @@ nodes:
          的 `common.files` + 命中族的 `families.<族>.files`（**只 base 文件**：primitives / latency_moves / failures；
          directions/raw 由下游 hypothesizer/engineer 按各自 slice 自取），把所需 md **每文件只读一次**拷/缓存到 `kb_cache/`。
 
+      **Phase B：测 baseline 时延 + accuracy + seed champions**（原 baseline_measure 职责）
+
+      7. 调 `measure_baseline.py`（确定性后端，fail loud）：
+         ```bash
+         python3 "{{ inputs.struct_scripts_dir }}/measure_baseline.py" \
+           --output_dir "$OUTPUT_DIR" \
+           --model_path "{{ inputs.model_path }}" \
+           --build_fn "<step3 build_fn>" \
+           --dummy_input '<step4 dummy_input JSON>' \
+           --opset 17 \
+           --latency_provider "{{ inputs.latency_provider }}" \
+           --train_command "{{ inputs.train_command }}" \
+           --test_command "{{ inputs.test_command }}" \
+           --accuracy_target "{{ inputs.accuracy_target }}" \
+           --project_root "<step2 project_root>" \
+           --device "{{ inputs.device }}" \
+           --seed "{{ inputs.seed }}"
+         ```
+         从 stdout 的 `KEY: value` 解析：
+         - `BASELINE_LATENCY_MS:` → baseline_latency_ms
+         - `BASELINE_ACCURACY:` → baseline_accuracy
+         - `ACCURACY_TARGET:` → accuracy_target
+         - `ACCURACY_MODE:` → accuracy_mode（train | test | given）
+         - `ONNX_PATH:` → baseline_onnx
+         脚本非零退出 → **fail loud**（把 stderr 写进输出 JSON 的最后一行并停）。
+
       ## 输出（**必须是合法 JSON 对象**，严格匹配上方 output_schema；orca 按 output_schema 校验，非 JSON → output_schema_mismatch fail loud）
       ```json
       {"output_dir": "<OUTPUT_DIR，末尾带 />", "family": "<族名，可带低置信注>", "kb_cache_dir": "<KB_CACHE_DIR，末尾带 />",
        "project_root": "<绝对路径>", "build_fn": "<函数名>", "dummy_input": "<JSON 串>",
        "snapshots_dir": "<SNAPSHOTS_DIR，末尾带 />", "worktree_root": "<WORKTREE_ROOT，末尾带 />",
-       "viz_dir": "<VIZ_DIR，末尾带 />", "ledger_path": "<LEDGER_PATH>", "champions_path": "<CHAMPIONS_PATH>"}
-      ```
-    routes:
-      - to: baseline_measure
-
-  # baseline_measure（新·确定性）：导出 baseline ONNX + cost_model 测时延 + 取 baseline accuracy
-  #（pre-trained → 只测不训 / 给定 / 训练）+ accuracy_target + seed champions。只跑脚本+解析，无 LLM 判断。
-  - name: baseline_measure
-    kind: agent
-    executor: opencode
-    model: "deepseek/deepseek-v4-flash"
-    tools: [bash, read]
-    output_schema:
-      type: object
-      required: [output_dir, baseline_latency_ms, baseline_accuracy, accuracy_target]
-      properties:
-        output_dir: {type: string}
-        baseline_latency_ms: {type: number, description: "cost model 实测（LLM 永不预测，§5）"}
-        baseline_accuracy: {type: number}
-        accuracy_target: {type: number}
-        baseline_onnx: {type: string}
-        accuracy_mode: {type: string, description: "train|test|given"}
-    prompt: |
-      你是 `baseline_measure` 节点（**确定性**）：调脚本测 baseline 时延 + 取 baseline accuracy + seed champions。
-      **不做任何 LLM 判断**，只跑下面脚本 + 解析 stdout。
-
-      ## 执行（fail loud；不要自己手写 torch/onnxruntime）
-      ```bash
-      python3 "{{ inputs.struct_scripts_dir }}/measure_baseline.py" \
-        --output_dir "{{ family_detect.output.output_dir }}" \
-        --model_path "{{ inputs.model_path }}" \
-        --build_fn "{{ family_detect.output.build_fn }}" \
-        --dummy_input '{{ family_detect.output.dummy_input }}' \
-        --opset 17 \
-        --latency_provider "workflows/agents/_struct_scripts/latency_onnxrt.py::measure" \
-        --train_command "{{ inputs.train_command }}" \
-        --test_command "{{ inputs.test_command }}" \
-        --accuracy_target "{{ inputs.accuracy_target }}" \
-        --project_root "{{ family_detect.output.project_root }}"
-      ```
-      从 stdout 的 `KEY: value` 解析：
-      - `BASELINE_LATENCY_MS:` → baseline_latency_ms
-      - `BASELINE_ACCURACY:` → baseline_accuracy
-      - `ACCURACY_TARGET:` → accuracy_target
-      - `ACCURACY_MODE:` → accuracy_mode（train | test | given）
-      - `ONNX_PATH:` → baseline_onnx
-      脚本非零退出 → **fail loud**（把 stderr 写进 fail_reason 并停）。
-
-      ## 输出（**必须是合法 JSON 对象**，严格匹配上方 output_schema；非 JSON → fail loud）
-      ```json
-      {"output_dir": "{{ family_detect.output.output_dir }}", "baseline_latency_ms": <数>, "baseline_accuracy": <数>, "accuracy_target": <数>, "baseline_onnx": "<ONNX 绝对路径>", "accuracy_mode": "train|test|given"}
+       "ledger_path": "<LEDGER_PATH>", "champions_path": "<CHAMPIONS_PATH>",
+       "baseline_latency_ms": <数>, "baseline_accuracy": <数>, "accuracy_target": <数>,
+       "accuracy_mode": "train|test|given", "baseline_onnx": "<ONNX 绝对路径>"}
       ```
     routes:
       - to: hypothesizer
 
   # ═══════════════════════════════════════════════════════════════
-  # 一轮（循环体）—— 循环回到 hypothesizer 由 viz_round 的 route 控制
+  # 一轮（循环体）—— 循环回到 hypothesizer 由 curator 的 route 控制
   # ═══════════════════════════════════════════════════════════════
 
   # Step 1：Hypothesizer（LLM）—— 读 champion + KB 切片 + 时延缺口 → 提结构假设
@@ -238,47 +240,11 @@ nodes:
         snapshot_path: {type: string, description: "snapshots/<id>_model.py 绝对路径（不可变快照）"}
         model_summary: {type: string}
     routes:
-      - to: structure_gate
-
-  # Step 3：结构门（§9）—— AST diff 出事实摘要（确定性）→ LLM 终判 tag（不驳回，只打标）
-  - name: structure_gate
-    kind: agent
-    executor: opencode
-    model: "deepseek/deepseek-v4-flash"
-    tools: [bash, read, write, glob, grep]
-    output_schema:
-      type: object
-      required: [tag, diff_summary]
-      properties:
-        tag: {type: string, enum: [structural, hyperparam, mixed]}
-        diff_summary: {type: string, description: "module-level AST diff 摘要（算子/拓扑是否变 / 哪些是纯数值改）"}
-    prompt: |
-      你是**结构变更门**（§9，放宽版 · 不硬驳回超参）。两步合一：确定性 AST 事实 + 语义终判。
-
-      ## 输入
-      - 父 model.py（champion 快照）+ 新 candidate 快照：从 `{{ family_detect.output.snapshots_dir }}`
-        读，本轮 candidate = `{{ engineer.output.snapshot_path }}`，父由 `ledger.jsonl` 最近 SUCCESS/parent 定。
-      - 候选 worktree：`{{ engineer.output.worktree }}`
-      - struct_scripts_dir: `{{ inputs.struct_scripts_dir }}`
-
-      ## 执行
-      1. **AST diff（确定性事实，§9.1）**：跑 `python3 {{ inputs.struct_scripts_dir }}/ast_diff.py --parent <父 model.py> --child <子 model.py> --format json`。
-         读 stdout JSON：`topology_changed` / `operator_changes` / `numeric_changes` / `added` / `removed` / `summary`。
-         客观列出算子类型/拓扑是否变、哪些是纯数值改（如 hidden_dim、num_layers、lr）。把摘要作为**参考输入**。
-         脚本失败（非零退出）→ 读 stderr，仍可在 prompt 内 inline python 跑 AST diff 兜底（不应阻塞主循环）。
-      2. **LLM 终判 tag** ∈ {`structural`, `hyperparam`, `mixed`}（§9.1 / §14 决策3）：在 AST 摘要 grounding 下
-         做语义判定（能处理 AST 判不出的边界，如 group conv groups 1→8 是数值改但语义算结构性）。
-         **AST 不是唯一判据、也不直接驳回**；它是防自凑配额的事实参考。
-      3. **不驳回**（§9.2 默认）：默认全部放行，tag 写输出（下游 curator 入账本）。
-
-      ## 输出（**必须是合法 JSON 对象**，严格匹配上方 output_schema；非 JSON → fail loud）
-      ```json
-      {"tag": "structural|hyperparam|mixed", "diff_summary": "<AST 事实摘要>"}
-      ```
-    routes:
       - to: evaluator
 
-  # Step 4：Evaluator（确定性）—— 导出 ONNX → cost_model.measure → 时延门 → 按需抢卡跑 train_command → 取 accuracy
+  # Step 3：Evaluator（确定性）—— P7 删除 structure_gate 后直连。
+  #   导出 ONNX → cost_model.measure → 时延门 → 按需抢卡跑 train_command → 取 accuracy
+  #   （已是「时延门→训练→判决」三合一，§4；P7 保留不动）。
   - name: evaluator
     kind: agent
     executor: opencode
@@ -297,25 +263,11 @@ nodes:
         snapshot_path: {type: string}
         fail_reason: {type: string}
     routes:
-      - to: analyst
-
-  # Step 6（§3）：Analyst（LLM）—— 归因成败 → 提炼结构原则 → 写回 KB（成功 & 失败都记）
-  - name: analyst
-    kind: agent
-    executor: opencode
-    model: "deepseek/deepseek-v4-flash"
-    agent: struct-analyst
-    output_schema:
-      type: object
-      required: [attribution, principle]
-      properties:
-        attribution: {type: string, description: "本 candidate 成/败归因（时延降/升、精度保持/掉的宏观结构原因）"}
-        principle: {type: string, description: "提炼的结构-性能原则（追加写 KB）"}
-        kb_writeback: {type: string, description: "写回的目标文件（failures.md / principles.md）"}
-    routes:
       - to: curator
 
-  # Step 6-9（§3）：Curator（确定性 reducer）—— 账本 append / 结构门分类 / champion ratchet / explore-exploit 路由
+  # Step 4（P7 合并 analyst + curator + viz_round）：
+  #   Curator（先确定性 reducer → 失败候选才 LLM 归因 → 跑 viz）。
+  #   原结构门的 tag/diff_summary 现由本节点内联跑 ast_diff.py deterministic 推导（零判决力 LLM 删除）。
   - name: curator
     kind: agent
     executor: opencode
@@ -333,45 +285,6 @@ nodes:
         route_mode: {type: string, enum: [exploit, explore], description: "champion 改进→exploit；否则→explore（§3 step 8）"}
         terminate_reason: {type: string, description: "continue_loop=false 时的原因（champion_met / max_rounds / budget）"}
     routes:
-      - to: viz_round
-
-  # 刷新本轮可视化（orca.chart render_chart 推送；四图见 §12）
-  - name: viz_round
-    kind: agent
-    executor: opencode
-    model: "deepseek/deepseek-v4-flash"
-    tools: [bash, read, write, glob, grep]
-    prompt: |
-      你是结构性探索 workflow 的**轮内可视化**刷新（§12，orca.chart render_chart 推送，幂等刷新）。
-
-      ## 输入（账本，只读）
-      - ledger: `{{ family_detect.output.ledger_path }}`（每行一个 candidate）
-      - champions: `{{ family_detect.output.champions_path }}`（冠军轨迹）
-      - 本轮：`{{ curator.output.round }}` / champion `{{ curator.output.champion_id }}`
-      - baseline: latency `{{ baseline_measure.output.baseline_latency_ms }}`ms / accuracy `{{ baseline_measure.output.baseline_accuracy }}`
-      - 目标: latency `{{ inputs.target_latency_ms }}`ms / accuracy `{{ baseline_measure.output.accuracy_target }}`
-      - struct_scripts_dir: `{{ inputs.struct_scripts_dir }}`
-
-      ## 执行（确定性脚本，无 LLM / 无内联兜底）
-      直接调 `viz_struct.py`（§12 四图全部由该脚本经 render_chart 推送到 Orca Web 面板）：
-      ```bash
-      python3 "{{ inputs.struct_scripts_dir }}/viz_struct.py" \
-        --ledger "{{ family_detect.output.ledger_path }}" \
-        --champions "{{ family_detect.output.champions_path }}" \
-        --baseline_latency_ms "{{ baseline_measure.output.baseline_latency_ms }}" \
-        --baseline_accuracy "{{ baseline_measure.output.baseline_accuracy }}" \
-        --target_latency_ms "{{ inputs.target_latency_ms }}" \
-        --accuracy_target "{{ baseline_measure.output.accuracy_target }}"
-      ```
-      从 stdout JSON 读 `charts`：每图 `pushed: true/false`。数据不足 → 该图由脚本自动跳过（stderr WARN），
-      **不报错、不阻断主循环**。脚本异常（非零退出）→ 读 stderr 把关键行写进输出，仍 `|| true` 不阻断（viz 是 sidecar）。
-
-      ## 输出
-      ```
-      VIZ_ROUND: ok
-      CHARTS: <stdout JSON 的 charts 字段，或 stderr 摘要>
-      ```
-    routes:
       # 循环机制：DAG 内 back-route（条件 cycle）。continue_loop=true → 回 hypothesizer 开下一轮；
       # false → 出循环走 finalize。route 由 router 纯函数求值（确定性控制流，非 LLM 自驱）。
       - when: "curator.output.continue_loop"
@@ -379,7 +292,7 @@ nodes:
       - to: finalize
 
   # ═══════════════════════════════════════════════════════════════
-  # 收尾（一次性）：champion 从头重训 + 导出 ONNX + final_report（§14 决策5）
+  # 收尾（一次性，P7 内联 viz_finalize）：champion 从头重训 + 导出 ONNX + final_report + 终态可视化
   # ═══════════════════════════════════════════════════════════════
   - name: finalize
     kind: agent
@@ -396,85 +309,79 @@ nodes:
         final_accuracy: {type: number}
         final_report: {type: string, description: "final_report.md 绝对路径"}
     prompt: |
-      你是结构性探索 workflow 的 **收尾**（§14 决策5）：champion 从头重训 + 导出 ONNX + final_report。
+      你是结构性探索 workflow 的 **收尾 + 终态可视化**（P7 合并 viz_finalize，§14 决策5）：
+      champion 从头重训 + 导出 ONNX + final_report + 推送终态图表。
 
       ## 输入
-      - 账本/champion：`{{ family_detect.output.champions_path }}`（最后一行 = 全局 champion）。
+      - 账本/champion：`{{ setup.output.champions_path }}`（最后一行 = 全局 champion）。
       - curator 终态：`{{ curator.output.champion_id }}` / `terminate_reason: {{ curator.output.terminate_reason }}`。
       - train_command（原样，绝不改）：`{{ inputs.train_command }}`
-      - latency_provider（已固化）：`workflows/agents/_struct_scripts/latency_onnxrt.py::measure`
-      - build_fn / dummy_input：`{{ family_detect.output.build_fn }}` / `{{ family_detect.output.dummy_input }}`（onnx_opset 已固化为 17）
+      - latency_provider（用户脚本优先）：`{{ inputs.latency_provider }}`
+      - build_fn / dummy_input：`{{ setup.output.build_fn }}` / `{{ setup.output.dummy_input }}`（onnx_opset 已固化为 17）
+      - baseline：latency `{{ setup.output.baseline_latency_ms }}`ms / accuracy `{{ setup.output.baseline_accuracy }}`
+      - 目标: latency `{{ inputs.target_latency_ms }}`ms / accuracy `{{ setup.output.accuracy_target }}`
       - struct_scripts_dir：`{{ inputs.struct_scripts_dir }}`
+      - device / seed：`{{ inputs.device }}` / `{{ inputs.seed }}`
 
       ## 执行（fail loud）
       1. 从 `champions.jsonl` 最后一行取 champion snapshot 路径（`final_model`）。
       2. 把 champion model.py 置入干净 worktree → **原样跑 `train_command`**（按需 `nvidia-smi` 探测空闲卡设
          `CUDA_VISIBLE_DEVICES`，§8）从头重训（full epochs）→ 取 final_accuracy。
          训练失败 → fail loud（读日志写进输出，不假装完成）。
-      3. 用确定性脚本导出 ONNX 并测时延（与 family_detect 一致）：
+      3. 用确定性脚本导出 ONNX 并测时延（与 setup 一致，device / latency_provider 沿 inputs）：
          ```bash
          python3 "{{ inputs.struct_scripts_dir }}/export_onnx.py" --model_path <final_model> \
-           --build_fn "{{ family_detect.output.build_fn }}" --dummy_input '{{ family_detect.output.dummy_input }}' \
-           --opset 17 --out <output_dir>/final.onnx
+           --build_fn "{{ setup.output.build_fn }}" --dummy_input '{{ setup.output.dummy_input }}' \
+           --opset 17 --out "{{ setup.output.output_dir }}final.onnx" \
+           --device "{{ inputs.device }}" --seed "{{ inputs.seed }}"
          ```
-         再动态加载固化路径 `workflows/agents/_struct_scripts/latency_onnxrt.py::measure`
+         再动态加载 `{{ inputs.latency_provider }}`
          （`module_path::func_name` 切开、`importlib.util.spec_from_file_location`）→
-         调 `measure(final_onnx)` 得 `final_latency_ms`（不变量1，§5）。加载失败 fail loud。
+         调 `measure(final_onnx, device="{{ inputs.device }}")` 得 `final_latency_ms`（不变量1，§5；
+         用 `inspect.signature(measure).parameters` 检测 device 形参；旧式 measure 无 device kwarg → fallback `measure(final_onnx)`）。加载失败 fail loud。
       4. 写 `final_report.md`：baseline vs champion（latency/accuracy 降幅）、terminate_reason、探索轮数、
          结构图（从 ledger.jsonl 的 parent 链）、Pareto 摘要。
+      5. **终态可视化（P7 内联 viz_finalize）**——调 `viz_struct.py` 重推三图终态版（幂等刷新）：
+         ```bash
+         python3 "{{ inputs.struct_scripts_dir }}/viz_struct.py" \
+           --ledger "{{ setup.output.ledger_path }}" \
+           --champions "{{ setup.output.champions_path }}" \
+           --baseline_latency_ms "{{ setup.output.baseline_latency_ms }}" \
+           --baseline_accuracy "{{ setup.output.baseline_accuracy }}" \
+           --target_latency_ms "{{ inputs.target_latency_ms }}" \
+           --accuracy_target "{{ setup.output.accuracy_target }}" || true
+         ```
+         脚本异常 `|| true` 不阻断（viz 是 sidecar；不在 Orca 子进程 → import orca.chart 失败 → 脚本自 WARN exit 0）。
+      6. **额外**经 render_chart 推一张终态对比 bar（label=`struct-explore`, title=`Baseline vs Champion vs Final`）：
+         三柱 baseline / champion / final 的 latency(ms)，accuracy 写进每行。
+         champion latency/accuracy 取 champions.jsonl 最后一行；final 用本节点 step 3/2 实测；
+         baseline 用 `{{ setup.output.baseline_latency_ms }}` / `{{ setup.output.baseline_accuracy }}`。
+         ORCA_* env 沿链继承，**所有数值用 Jinja 取自 setup.output / champions / 本节点实测，无 <...> 占位**：
+         ```bash
+         python3 -c "
+         import json
+         from orca.chart import render_chart
+         champs = [json.loads(l) for l in open('{{ setup.output.champions_path }}') if l.strip()]
+         last_champ = champs[-1] if champs else {}
+         champ_lat = last_champ.get('latency_ms', 0)
+         champ_acc = last_champ.get('accuracy')
+         rows = [
+           {'stage':'baseline','latency_ms':{{ setup.output.baseline_latency_ms }},'accuracy':{{ setup.output.baseline_accuracy }}},
+           {'stage':'champion','latency_ms':champ_lat,'accuracy':champ_acc},
+           {'stage':'final','latency_ms':<step3 final_latency_ms>,'accuracy':<step2 final_accuracy>},
+         ]
+         render_chart(chart_type='bar', label='struct-explore', title='Baseline vs Champion vs Final',
+                      data=rows, x='stage', y='latency_ms', hue='stage',
+                      x_label='阶段', y_label='时延 (ms)',
+                      caption='baseline → champion（搜索中 running min）→ final（从头重训后）的时延对比')
+         " || true
+         ```
+         （仅 `<step3 final_latency_ms>` / `<step2 final_accuracy>` 两处需用本节点实测值替换；
+         baseline 字段全 Jinja 取，**accuracy 缺失时省略该键**。）
 
       ## 输出（**必须是合法 JSON 对象**，严格匹配上方 output_schema；非 JSON → fail loud）
       ```json
       {"final_model": "<绝对路径>", "final_onnx": "<绝对路径>", "final_latency_ms": <数>, "final_accuracy": <数>, "final_report": "<final_report.md 绝对路径>"}
-      ```
-    routes:
-      - to: viz_finalize
-
-  # 终态可视化（orca.chart render_chart 推送；四图终态版见 §12）
-  - name: viz_finalize
-    kind: agent
-    executor: opencode
-    model: "deepseek/deepseek-v4-flash"
-    tools: [bash, read, write, glob, grep]
-    prompt: |
-      你是结构性探索 workflow 的**终态可视化**（§12 四图终态版 + 收尾对比，幂等刷新）。
-
-      ## 输入
-      - ledger: `{{ family_detect.output.ledger_path }}`
-      - champions: `{{ family_detect.output.champions_path }}`
-      - final: `{{ finalize.output.final_report }}` / latency `{{ finalize.output.final_latency_ms }}`ms / accuracy `{{ finalize.output.final_accuracy }}`
-      - baseline: `{{ baseline_measure.output.baseline_latency_ms }}`ms / `{{ baseline_measure.output.baseline_accuracy }}`
-      - 目标: `{{ inputs.target_latency_ms }}`ms / `{{ baseline_measure.output.accuracy_target }}`
-      - 终止原因: `{{ curator.output.terminate_reason }}`
-      - struct_scripts_dir: `{{ inputs.struct_scripts_dir }}`
-
-      ## 执行（确定性脚本，无 LLM / 无内联兜底；全程 render_chart，不产 HTML）
-      1. 调 `viz_struct.py` 重推 §12 四图终态版（与 viz_round 同命令；幂等刷新）：
-         ```bash
-         python3 "{{ inputs.struct_scripts_dir }}/viz_struct.py" \
-           --ledger "{{ family_detect.output.ledger_path }}" \
-           --champions "{{ family_detect.output.champions_path }}" \
-           --baseline_latency_ms "{{ baseline_measure.output.baseline_latency_ms }}" \
-           --baseline_accuracy "{{ baseline_measure.output.baseline_accuracy }}" \
-           --target_latency_ms "{{ inputs.target_latency_ms }}" \
-           --accuracy_target "{{ baseline_measure.output.accuracy_target }}"
-         ```
-         从 stdout JSON 读 `charts`。数据不足由脚本自动跳过（不报错）。脚本异常 `|| true` 不阻断。
-      2. **额外**经 render_chart 推一张终态对比 bar（label=`struct-explore`, title=`Baseline vs Champion vs Final`）：
-         三柱 baseline / champion / final 的 latency(ms)，accuracy 写进每行。
-         champion latency/accuracy 取 champions.jsonl 最后一行；final 用
-         `{{ finalize.output.final_latency_ms }}` / `{{ finalize.output.final_accuracy }}`；
-         baseline 用 `{{ baseline_measure.output.baseline_latency_ms }}` / `{{ baseline_measure.output.baseline_accuracy }}`。
-         ORCA_* env 沿链继承，直接内联 python 推（失败 `|| true` 不阻断）：
-         ```bash
-         python3 -c "from orca.chart import render_chart; render_chart(chart_type='bar', label='struct-explore', title='Baseline vs Champion vs Final', data=[{'stage':'baseline','latency_ms':<baseline_lat>,'accuracy':<baseline_acc>},{'stage':'champion','latency_ms':<champ_lat>,'accuracy':<champ_acc>},{'stage':'final','latency_ms':<final_lat>,'accuracy':<final_acc>}], x='stage', y='latency_ms', hue='stage')"
-         ```
-         （把 <...> 占位替换为真实数值；accuracy 缺失时省略该键。）
-
-      ## 输出
-      ```
-      VIZ_FINALIZE: ok
-      CHARTS: <stdout JSON 的 charts 字段 + 一张终态对比 bar 是否推成功>
       ```
     routes:
       - to: $end
@@ -485,4 +392,4 @@ outputs:
   final_latency_ms: "{{ finalize.output.final_latency_ms }}"
   final_accuracy: "{{ finalize.output.final_accuracy }}"
   final_report: "{{ finalize.output.final_report }}"
-  output_dir: "{{ family_detect.output.output_dir }}"
+  output_dir: "{{ setup.output.output_dir }}"

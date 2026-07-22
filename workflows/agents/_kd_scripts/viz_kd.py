@@ -267,8 +267,11 @@ def _push_pareto(ledger: list[dict[str, Any]]) -> bool:
 def _push_ledger_table(ledger: list[dict[str, Any]]) -> bool:
     """图3：逐轮汇总表。每个 ledger 条目一行（含失败行，-1 原样显示）。
 
-    列 = [round, family, change, proxy_mse, db_gap, latency_ms, met_lat, met_acc, phase]。
+    P7：短训阶段 db_gap / met_acc 为占位（curator 不消费，真实精度推迟到 finalize）→
+    从默认列移除，避免前端展示误导（deferred 语义：真实值仅在 finalize 行有意义）。
+    列 = [round, family, change, proxy_mse, latency_ms, met_lat, phase]。
     ``change`` = family + build_cfg 摘要；``proxy_mse`` 是短训精度代理（非真实精度）。
+    db_gap / met_acc 仍在 row data 里（保留 hover / 后续若需可还原），但不进默认 columns。
     """
     if not ledger:
         print("[viz_kd] WARN: 跳过 ledger_table：ledger 为空", file=sys.stderr)
@@ -290,11 +293,14 @@ def _push_ledger_table(ledger: list[dict[str, Any]]) -> bool:
             "family": str(e.get("family", "")),
             "change": _build_cfg_summary(e.get("build_cfg"), str(e.get("family", ""))),
             "proxy_mse": _to_float(e.get("proxy_mse")),
-            "db_gap": _to_float(e.get("db_gap")),
             "latency_ms": _to_float(e.get("latency_ms")),
             "met_lat": str(bool(e.get("met_latency"))),
-            "met_acc": str(bool(e.get("met_accuracy"))),
             "phase": _to_int(e.get("phase")),
+            # 短训占位字段（deferred）——保留在 row data 供 hover / finalize 行还原，
+            # 但不进默认 columns（P7 root-cause 清理）。
+            "db_gap": _to_float(e.get("db_gap")),
+            "met_acc": str(bool(e.get("met_accuracy"))),
+            "candidate_id": str(e.get("candidate_id", "?")),
         })
 
     if not rows:
@@ -313,12 +319,15 @@ def _push_ledger_table(ledger: list[dict[str, Any]]) -> bool:
             "family",
             "change",
             "proxy_mse",
-            "db_gap",
             "latency_ms",
             "met_lat",
-            "met_acc",
             "phase",
         ],
+        caption=(
+            "短训阶段：proxy_mse 是 soft-MSE-vs-teacher 精度代理（非真实精度）。"
+            " 真实 dB gap 推迟到 finalize 全量裁定（db_gap/met_acc 已从默认列移除，"
+            "短训行为占位；hover 可查看原值）。"
+        ),
     )
     return True
 
@@ -333,31 +342,40 @@ def _push_final_compare(
 
     stage ∈ {teacher, champion, final}。teacher 的 db_gap = 0.0（baseline）。
     final 缺席（--final_* 未提供）→ 只画 teacher + champion。
+
+    P7 根因修复（R4 + L7）：
+    - **champion 短训阶段无真实 dB gap**（latency-first 哲学：真实精度推迟 finalize）→ champion 行
+      不写 db_gap（viz_kd 之前 silently 漏掉 champion，让标题误导 "teacher vs champion vs final"
+      实际只画 teacher+final）。现在显式：champion 不进 db_gap bar，title + caption 标明。
+    - **teacher_accuracy_known=false**（teacher_setup.py 解析失败）→ teacher 的 dB gap=0.0 也是占位
+      （teacher accuracy 本身未知），整个 db_gap bar 不可信 → caption 加警告。
     """
     # 真实 teacher_meta.json schema（teacher_setup.py 写盘）：字段名带 ``teacher_`` 前缀。
     teacher_lat = _to_float(teacher_meta.get("teacher_latency_ms"))
     teacher_acc = _to_float(teacher_meta.get("teacher_accuracy"))
+    teacher_acc_known = teacher_meta.get("teacher_accuracy_known", True)
+    if isinstance(teacher_acc_known, str):
+        teacher_acc_known = teacher_acc_known.lower() == "true"
+    teacher_acc_known = bool(teacher_acc_known)
 
     # 最后一个 champion（champions.jsonl 是追加写，末尾 = 最新 ratchet）。
+    # P7：champion 行 schema 不含 db_gap（短训阶段未跑 eval）。
     last_ch = champions[-1] if champions else {}
     ch_lat = _to_float(last_ch.get("latency_ms"))
-    ch_db_gap = _to_float(last_ch.get("db_gap"))
 
     latency_rows: list[dict[str, Any]] = []
     db_rows: list[dict[str, Any]] = []
 
     if teacher_lat is not None:
         latency_rows.append({"stage": "teacher", "latency_ms": teacher_lat})
-    # teacher 是精度 baseline → dB gap = 0.0（永远入表，作为零点参考）。
-    db_rows.append({"stage": "teacher", "db_gap": 0.0})
-
     if ch_lat is not None:
         latency_rows.append({"stage": "champion", "latency_ms": ch_lat})
-    if ch_db_gap is not None:
-        db_rows.append({"stage": "champion", "db_gap": ch_db_gap})
-
     if final_latency_ms is not None:
         latency_rows.append({"stage": "final", "latency_ms": final_latency_ms})
+
+    # db_gap：teacher(=0 baseline) + final（champion 短训阶段无真实 dB gap，**不进图**）。
+    # teacher_accuracy_known=false 时 teacher 自己的 0.0 也是占位 → 整图不可信。
+    db_rows.append({"stage": "teacher", "db_gap": 0.0})
     if final_db_gap is not None:
         db_rows.append({"stage": "final", "db_gap": final_db_gap})
 
@@ -371,6 +389,9 @@ def _push_final_compare(
             title="Final Latency Compare (teacher vs champion vs final)",
             x="stage",
             y="latency_ms",
+            x_label="阶段",
+            y_label="时延 (ms)",
+            caption="teacher / champion（搜索中 ratchet）/ final（全量训练后）的实测时延。",
         )
         pushed_any = True
     else:
@@ -380,13 +401,29 @@ def _push_final_compare(
         )
 
     if len(db_rows) >= _MIN_ROWS:
+        db_caption = (
+            "teacher=0 baseline（teacher 是精度基准）；final=全量训练后真实 dB gap。"
+            " champion 不进图（短训阶段无真实 dB gap，推迟 finalize）。"
+        )
+        if not teacher_acc_known:
+            db_caption = (
+                "⚠ teacher_accuracy 未知（teacher_setup 解析失败），dB gap 不可信。"
+                + db_caption
+            )
+            print(
+                "[viz_kd] WARN: teacher_accuracy_known=false，dB gap bar 不可信（caption 已标）",
+                file=sys.stderr,
+            )
         _orca_render_chart(
             chart_type="bar",
             data=db_rows,
             label=_LABEL,
-            title="Final dB Gap Compare (teacher=0 baseline)",
+            title="Final dB Gap Compare (teacher=0 baseline; champion deferred)",
             x="stage",
             y="db_gap",
+            x_label="阶段",
+            y_label="dB gap（越低越好）",
+            caption=db_caption,
         )
         pushed_any = True
     else:

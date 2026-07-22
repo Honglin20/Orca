@@ -9,18 +9,18 @@
 workflows/
   kd-nas.yaml                              # workflow DAG（本 workflow 入口）
   agents/
-    kd-teacher-setup/agent.md              # 新（teacher 从头训 + 6 层 hint + 冻结缓存编排）
-    kd-hypothesizer/agent.md               # 新（Phase1 调 pick_student / Phase2 出 SelectionSpec）
-    kd-engineer/agent.md                   # 新（按 SelectionSpec 实现，零结构自由）
-    kd-analyst/agent.md                    # 新（归因 + 写回 kd_recipe.md）
-    kd-curator/agent.md                    # 新（champion ratchet + phase/finalize 路由）
-    kd-train-script/agent.md               # 新（生成 train_kd.py adapter，复用用户 train+loss）
+    kd-setup/agent.md                      # P7 合并（teacher_setup + profile_gate + kd_train_script_gen）
+    kd-hypothesizer/agent.md               # Phase1 调 pick_student / Phase2 出 SelectionSpec
+    kd-engineer/agent.md                   # 按 SelectionSpec 实现，零结构自由
+    kd-curator/agent.md                    # P7 合并（analyst + curator + viz_round）
     _kd_scripts/                           # 确定性脚本 + KD 库 + student 模板
       CONTRACTS.md                         # 本文件
-      profile_onnx.py
-      teacher_setup.py
-      measure_student.py
+      _device.py                           # P7：resolve_device + ort_providers（inline 自 NAS）
+      profile_onnx.py                      # P7：加 --device / --seed CLI
+      teacher_setup.py                     # P7：加 --device / --seed / --strict-accuracy CLI；confidence=low 时标 teacher_accuracy_known=false
+      measure_student.py                   # P7：解开 device="cpu" 硬编码，透传 --device
       pick_student.py
+      viz_kd.py                            # P7：round 模式 db_gap/met_acc 移出默认列（短训占位）
       kd/
         losses.py
         wrapper.py
@@ -36,10 +36,13 @@ workflows/
         large_kernel.py
         ista_lista.py
         registry.json
-      train_adapter_template.py            # kd-train-script 生成 train_kd.py 的模板
+      train_adapter_template.py            # kd-setup agent 生成 train_kd.py 的模板
 ```
 
-**不修改** `struct-*` 系列 agent md（它们被 `agent-struct-exploration` 复用）。kd-nas 全部用 `kd-*` 新 agent。
+**P7 节点合并**：原 `kd-teacher-setup` + `profile_gate` + `kd_train_script_gen` → `kd-setup`（一次性）；
+原 `kd_trainer` + `measure_student` → `candidate_eval`（**latency-first**：先默认权重导 ONNX 测 latency，
+不达标 FAIL_latency **不训练** → 通过才短训测 proxy_mse）；原 `analyst` + `viz_round` 折进 `curator`。
+**不修改** `struct-*` 系列 agent md（它们被 `agent-struct-exploration` 复用）。
 
 ## 1. Student I/O 契约（所有 students 必须遵守）
 
@@ -141,13 +144,16 @@ class MeanTeacherEMA:
 
 ### `profile_onnx.py`
 ```
-python3 profile_onnx.py --onnx <teacher.onnx> --out <profile_report.json> --topk 5
+python3 profile_onnx.py --onnx <teacher.onnx> --out <profile_report.json> --topk 5 \
+  [--device cpu] [--seed 0]
 ```
+（P7：`--device` 默认 cpu——profiling 看算子耗时，CPU 确定性最好；NPU=Ascend 走 CANNExecutionProvider。）
 → `profile_report.json = {op_histogram: {Conv:.., MatMul:.., Transpose:.., Softmax:..},
-                          hotspots: [{node, op_type, dur_us}], transpose_count, conv1d_count, ascend_hints:[...]}`
+                          hotspots: [{node, op_type, dur_us}], transpose_count, conv1d_count, ascend_hints:[...],
+                          device, providers}`
 stdout: `PROFILE_REPORT: <path>`
 
-### `teacher_setup.py`（确定性部分；6 层编辑 + 训练由 teacher_setup agent 节点先做）
+### `teacher_setup.py`（确定性部分；6 层编辑 + 训练由 kd-setup agent 节点先做）
 ```
 python3 teacher_setup.py \
   --teacher_model_path <6层 model.py 绝对路径> \
@@ -155,10 +161,13 @@ python3 teacher_setup.py \
   --eval_command "<用户的 test/eval cmd，测 teacher 精度>" \
   --proxy_dataset_spec '<json: 用来跑 teacher 缓存的 proxy 数据规格>' \
   --output_dir <dir> --opset 17 \
-  --latency_provider "workflows/agents/_struct_scripts/latency_onnxrt.py::measure"
+  --latency_provider "workflows/agents/_struct_scripts/latency_onnxrt.py::measure" \
+  --device auto --seed 0 [--strict-accuracy]
 ```
+（P7：加 `--device` / `--seed` / `--strict-accuracy`。teacher_accuracy 解析失败 → 默认 stderr WARN +
+`teacher_accuracy_known=false`（下游 dB gap 不可信，图表须标）；`--strict-accuracy` 时 fail loud。）
 → load ckpt（冻结）→ 注册 hook → 跑 proxy 集 → `teacher_cache.pt`；导 ONNX → 测 latency；跑 eval_command → accuracy。
-stdout: `TEACHER_LATENCY_MS:`, `TEACHER_ACCURACY:`, `TEACHER_DB_BASELINE:`, `TEACHER_ONNX:`, `TEACHER_CACHE:`, `TEACHER_META:`
+stdout: `TEACHER_LATENCY_MS:`, `TEACHER_ACCURACY:`, `TEACHER_ACCURACY_KNOWN:` (P7), `TEACHER_DB_BASELINE:`, `TEACHER_ONNX:`, `TEACHER_CACHE:`, `TEACHER_META:`
 
 ### `measure_student.py`
 ```
@@ -166,10 +175,16 @@ python3 measure_student.py \
   --student_model_path <path> --student_ckpt <ckpt> --build_fn <fn> --dummy_input '<json>' \
   --eval_command "<用户的 eval cmd>" --teacher_meta <teacher_meta.json> \
   --output_dir <dir> --opset 17 \
-  --latency_provider "workflows/agents/_struct_scripts/latency_onnxrt.py::measure"
+  --latency_provider "workflows/agents/_struct_scripts/latency_onnxrt.py::measure" \
+  --device auto --seed 0
 ```
+（P7：解开 `device="cpu"` 硬编码，`--device` 透传给 export_onnx + latency_provider；`--seed` 加复现种子。）
 → 导 student ONNX → 测 latency；跑 eval_command → accuracy；算 dB gap vs teacher。
 stdout: `STUDENT_LATENCY_MS:`, `STUDENT_ACCURACY:`, `STUDENT_DB_GAP:`, `MET_ACCURACY:`(gap≤0.5), `MET_LATENCY:`(lat≤target), `STUDENT_ONNX:`
+
+**candidate_eval 节点（P7）短训阶段**：不传 `--eval_command` / `--eval_dataset`，measure_student 只测 latency
+（db_gap/met_accuracy 为占位，curator 在 loop 里**不用**它们，只看 proxy_mse + latency）。candidate_eval
+自己根据 latency_ms 与 target 比较判 FAIL_latency（不训练），通过才跑 train_kd.py 短训 → proxy_mse。
 
 ### `pick_student.py`（Phase1 确定性选 student）
 ```
@@ -178,7 +193,7 @@ python3 pick_student.py --registry students/registry.json --round <N> --out <spe
 → 取 `registry[round]`（**线性 sweep，不取模**），吐 SelectionSpec（phase=1，kd_config 用 registry 默认）。
 stdout: `SELECTION_SPEC: <path>`。`round ≥ len(registry)` → 退出码 1 + stderr `PHASE1_EXHAUSTED`（告诉 hypothesizer 进 Phase2）。
 
-## 5. train_kd.py adapter 契约（kd-train-script agent 生成，每个项目一份）
+## 5. train_kd.py adapter 契约（kd-setup agent 生成，每个项目一份）
 
 读用户的 `train.py` → 生成 `train_kd.py`，**复用**用户 train 里的 loss/optimizer/scheduler/dataloader/train-loop，**只加** KD 包裹。固定 CLI：
 ```
@@ -192,38 +207,32 @@ python3 train_kd.py \
 → 短训 student（teacher 冻结、teacher forward 走 TeacherCache）→ `out_ckpt`。
 stdout: `STUDENT_CKPT:`, `KD_LOSS_FINAL:`, `KD_PROXY_MSE:`（soft-MSE-vs-teacher，当短训代理指标）
 
-模板见 `train_adapter_template.py`。kd-train-script agent 读用户 train.py 后把 import 路径/loss 名/dataloader 构造填进模板。
+模板见 `train_adapter_template.py`。kd-setup agent 读用户 train.py 后把 import 路径/loss 名/dataloader 构造填进模板。
 
-## 6. 节点 I/O（workflow 层）
+## 6. 节点 I/O（workflow 层，P7 精简后 6 节点）
 
 | 节点 | kind | 关键输出字段 |
 |---|---|---|
-| teacher_setup | agent | teacher_cache, teacher_meta{latency,accuracy,db_baseline,onnx} |
-| profile_gate | agent(确定性) | profile_report |
-| kd_train_script_gen | agent | train_kd_path（一次性，首轮生成） |
-| hypothesizer | agent | selection_spec(SelectionSpec json) |
-| engineer | agent | student_model_path, snapshot_path |
-| structure_gate | agent(确定性) | tag, diff_summary |
-| kd_trainer | agent(确定性) | student_ckpt, proxy_mse |
-| measure_student | agent(确定性) | latency_ms, db_gap, met_accuracy, met_latency |
-| analyst | agent | attribution, principle |
-| curator | agent | round, phase, continue_loop, champion, route_finalize |
-| viz_round | agent(确定性) | charts |
-| finalize | agent | final_ckpt, final_db_gap, met_target, loop_back(bool) |
-| viz_finalize | agent | charts |
+| setup | agent | output_dir / project_root / build_fn / dummy_input / teacher_cache / teacher_meta{latency,accuracy,accuracy_known,db_baseline,onnx} / snapshots_dir / worktree_root / ckpts_dir / ledger_path / champions_path / kb_cache_dir / profile_report_path / train_kd_path / kd_recipe_path |
+| hypothesizer | agent | selection_spec(SelectionSpec json), family, phase, candidate_id, rationale |
+| engineer | agent | candidate_id, student_model_path, snapshot_path |
+| candidate_eval | agent | status (SUCCESS/FAIL_latency/FAIL_train/FAIL_export), latency_ms, met_latency, proxy_mse, kd_loss_final, student_ckpt, student_onnx |
+| curator | agent | round, phase, continue_loop, route_finalize, exhausted, champion_id, champion_latency_ms, champion_db_gap |
+| finalize | agent | final_ckpt, final_db_gap, final_latency_ms, met_target, loop_back(bool), final_report |
 
 **回环路由**（curator）—— **简化门**：proxy_mse 只用于 champion ratchet 排序，**不参与 finalize 门**（真实精度门推迟到 finalize 全量训练）：
 ```
-route_finalize = new_champion_this_round ∧ champion.met_latency
+route_finalize = new_champion_this_round ∧ champion.met_latency ∧ (phase == 2)
 exhausted      = (round ≥ max_rounds) ∧ (not route_finalize)
 continue_loop  = (not route_finalize) ∧ (not exhausted)
 ```
-- 每当诞生新的、时延达标的 champion → 送 finalize 全量裁定
+- **P7 phase==2 门**：Phase1（registry sweep）只 ratchet champion、不送 finalize（先把固定 student 全扫一遍拿最优 Phase1 champion），进 Phase2 后才送 finalize 全量裁定，避免 round 0 烧 50 epochs。
+- 每当诞生新的、时延达标的 champion（且 phase=2）→ 送 finalize 全量裁定
 - `continue_loop=true` → 回 hypothesizer（phase 由 round vs registry 长度决定：1=sweep，2=发挥）
-- finalize `met_target=true` → viz_finalize → $end
-- finalize `met_target=false`（loop_back=true）→ curator append `finalized_failed_mark` → 该 champion 不再触发 finalize → `continue_loop=true, phase=2` → hypothesizer 换方向
+- finalize `met_target=true` → $end
+- finalize `met_target=false`（loop_back=true）→ finalize 节点 append `finalized_failed_mark` → 该 champion 不再触发 finalize → curator `continue_loop=true, phase=2` → hypothesizer 换方向
 - `max_rounds` 耗尽仍未达标 → `exhausted=true` → fail loud + best-effort 报告
 
 ## 7. Teacher 6 层 hint
 
-teacher_setup 节点提示：复制 `baseline_model.py`（model8 的 `SignalProcessingTransformer`）→ 把 `self.main = nn.Sequential(...)` 里 4 个 `SignalTransformerBlock` 改成 6 个（其余不动）→ 得 teacher model.py → 跑用户 train_command 从头训。这是一行结构改动，engineer 在 agent 节点内完成，不另开 workflow 节点。
+kd-setup 节点提示：复制 `baseline_model.py`（model8 的 `SignalProcessingTransformer`）→ 把 `self.main = nn.Sequential(...)` 里 4 个 `SignalTransformerBlock` 改成 6 个（其余不动）→ 得 teacher model.py → 跑用户 teacher_train_command 从头训。这是一行结构改动，agent 在 setup 节点内完成，不另开 workflow 节点。

@@ -21,17 +21,17 @@ tools: [bash, read, write, edit, glob, grep]
 - **不**改 family（spec 说 lmmse_front 就 lmmse_front，不许换）。
 - **不**加 spec 外的 `build_cfg` key（`build_cfg` 缺 key 导致实例化失败 → fail loud 回 hypothesizer，**不**自己补）。
 - **不**改 `students/<family>.py` 任何一行（它是契约 §1 的 I/O 合法实现，原样落盘）。
-- **不**写 train / loss / optimizer（那是 kd-train-script 的活）。
+- **不**写 train / loss / optimizer（那是 setup 里生成 train_kd.py 的活，P7 合并）。
 - **不**碰 teacher（teacher 已冻结）。
 
 ## 输入
 
 - SelectionSpec：`{{ hypothesizer.output.selection_spec_path }}`（JSON 文件，CONTRACTS §2 schema）。读出 `candidate_id` / `phase` / `family` / `build_cfg` / `kd_config`。
 - family 实现目录：`{{ inputs.kd_scripts_dir }}/students/<family>.py`（每个 family 一个文件，契约 §1）。
-- project_root（teacher_setup 探测所得）：`{{ teacher_setup.output.project_root }}`（用于 git worktree；非 git 仓库 → fallback 目录拷贝）。
-- output_dir：`{{ teacher_setup.output.output_dir }}`（run 根目录）。
-- snapshots 目录（带尾斜杠，下游只 append `<candidate_id>_model.py`）：`{{ teacher_setup.output.snapshots_dir }}`。
-- worktree 根目录（带尾斜杠，下游只 append `<candidate_id>/`）：`{{ teacher_setup.output.worktree_root }}`。
+- project_root（setup 探测所得）：`{{ setup.output.project_root }}`（用于 git worktree；非 git 仓库 → fallback 目录拷贝）。
+- output_dir：`{{ setup.output.output_dir }}`（run 根目录）。
+- snapshots 目录（带尾斜杠，下游只 append `<candidate_id>_model.py`）：`{{ setup.output.snapshots_dir }}`。
+- worktree 根目录（带尾斜杠，下游只 append `<candidate_id>/`）：`{{ setup.output.worktree_root }}`。
 - build_fn（契约 §1 固化为 `build_model`）。
 
 ## 职责（按序，fail loud）
@@ -73,14 +73,14 @@ print('OK', type(m).__name__)
 
 ### 4. 建/复用 git worktree
 
-- `git -C {{ teacher_setup.output.project_root }} worktree add "{{ teacher_setup.output.worktree_root }}{{ hypothesizer.output.candidate_id }}" -b "kd/{{ hypothesizer.output.candidate_id }}" 2>/dev/null || mkdir -p "{{ teacher_setup.output.worktree_root }}{{ hypothesizer.output.candidate_id }}"`（非 git 仓库 → fallback 目录拷贝；CONTRACTS 不强制 git）。
-- worktree 路径 = `{{ teacher_setup.output.worktree_root }}<candidate_id>/`（worktree_root 末尾已带 `/`，**禁止**再自己拼 `.worktrees`）。
+- `git -C {{ setup.output.project_root }} worktree add "{{ setup.output.worktree_root }}{{ hypothesizer.output.candidate_id }}" -b "kd/{{ hypothesizer.output.candidate_id }}" 2>/dev/null || mkdir -p "{{ setup.output.worktree_root }}{{ hypothesizer.output.candidate_id }}"`（非 git 仓库 → fallback 目录拷贝；CONTRACTS 不强制 git）。
+- worktree 路径 = `{{ setup.output.worktree_root }}<candidate_id>/`（worktree_root 末尾已带 `/`，**禁止**再自己拼 `.worktrees`）。
 
 ### 5. 落 model.py（family 脚本原样复制进 worktree）
 
 ```bash
 cp "{{ inputs.kd_scripts_dir }}/students/{{ hypothesizer.output.family }}.py" \
-   "{{ teacher_setup.output.worktree_root }}{{ hypothesizer.output.candidate_id }}/model.py"
+   "{{ setup.output.worktree_root }}{{ hypothesizer.output.candidate_id }}/model.py"
 ```
 
 **不改一行**。family 脚本本身就是 model.py 的真相源。
@@ -88,8 +88,8 @@ cp "{{ inputs.kd_scripts_dir }}/students/{{ hypothesizer.output.family }}.py" \
 ### 6. 落不可变快照
 
 ```bash
-cp "{{ teacher_setup.output.worktree_root }}{{ hypothesizer.output.candidate_id }}/model.py" \
-   "{{ teacher_setup.output.snapshots_dir }}{{ hypothesizer.output.candidate_id }}_model.py"
+cp "{{ setup.output.worktree_root }}{{ hypothesizer.output.candidate_id }}/model.py" \
+   "{{ setup.output.snapshots_dir }}{{ hypothesizer.output.candidate_id }}_model.py"
 ```
 
 snapshots/ 下文件永不改（账本历史真相）。
@@ -103,7 +103,7 @@ snapshots/ 下文件永不改（账本历史真相）。
 - **只读**：SelectionSpec（本轮 hypothesizer 产出）。
 - **写文件**：worktree 的 `model.py`（可变，训练用）+ `snapshots/<candidate_id>_model.py`（不可变快照）。
 - **不写** `ledger.jsonl` / `champions.jsonl`（curator 写）。
-- worktree 路径 + snapshot 路径 + candidate_id 经 output 交给下游 kd_trainer / measure_student / curator。
+- worktree 路径 + snapshot 路径 + candidate_id 经 output 交给下游 candidate_eval / curator。
 
 ## 输出（**必须输出合法 JSON 对象**，匹配 output_schema；非 JSON → fail loud）
 

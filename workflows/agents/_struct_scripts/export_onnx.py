@@ -9,7 +9,12 @@ Evaluator / family_detect / finalize 用本脚本统一导出 ONNX，再交 cost
     --dummy_input  : JSON 字符串或文件路径，形如 {"shape":[1,3,224,224],"dtype":"float32"}
     --opset        : ONNX opset 版本（默认 17）
     --out          : 输出 .onnx 绝对路径（缺失则派生为 model_path 同名 .onnx）
-    --device       : 导出设备（默认 cpu；导出确定性，与训练/实测解耦）
+    --device       : 导出设备（默认 auto：cuda→npu→cpu；导出确定性与实测 device 解耦）
+    --no-external-data / --allow-external-data :
+                     外部 .data 伴生文件策略（P7 新增）。默认 --no-external-data：导出后
+                     断言无 `<out>.data` 伴生（model 权重 inline 进 protobuf）。
+                     --allow-external-data 显式允许伴生（超大模型 >2GB 时必开）。
+    --seed         : 随机种子（dummy 输入用；默认 0，保复现）
 
 出参（stdout，结构化 key=value）：
     ONNX: <绝对路径>
@@ -17,8 +22,9 @@ Evaluator / family_detect / finalize 用本脚本统一导出 ONNX，再交 cost
     STATUS: ok
 
 fail loud（草稿 §4 "exotic 结构导不出 → 记 FAIL_export"）：
-    任何异常（import 失败 / build_fn 报错 / torch.onnx.export 失败）→ 非零退出 +
-    stderr 完整 traceback。本脚本不写 ledger，由 curator reducer 入账。
+    任何异常（import 失败 / build_fn 报错 / torch.onnx.export 失败 /
+    --no-external-data 模式下意外产出 .data）→ 非零退出 + stderr 完整 traceback。
+    本脚本不写 ledger，由 curator reducer 入账。
 """
 
 from __future__ import annotations
@@ -143,10 +149,14 @@ def export_onnx(
     dummy_input: str,
     opset: int = 17,
     out: str | None = None,
-    device: str = "cpu",
+    device: str = "auto",
+    no_external_data: bool = True,
+    seed: int = 0,
 ) -> str:
     """导出 ONNX，返回绝对路径。任何失败 raise（caller fail loud）。"""
     import torch
+
+    torch.manual_seed(seed)
 
     model_path = os.path.abspath(model_path)
     if not os.path.isfile(model_path):
@@ -180,9 +190,16 @@ def export_onnx(
         raise TypeError(
             f"{build_fn}() 返回 {type(model).__name__}，期望 torch.nn.Module"
         )
-    model = model.to(device).eval()
+    # device 解析：auto → cuda→npu→cpu（NAS resolve_device）；显式串原样用。
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from _device import resolve_device  # type: ignore
+
+    torch_device = resolve_device(device)
+    model = model.to(torch_device).eval()
     dummy_spec = _load_dummy_input(dummy_input)
-    dummy = _materialize_dummy(dummy_spec, device=device)
+    dummy = _materialize_dummy(dummy_spec, device=str(torch_device))
 
     # 输出路径。
     if out is None or not out:
@@ -210,6 +227,15 @@ def export_onnx(
             opset_version=opset,
             dynamo=False,
         )
+
+    # --no-external-data 守门（P7）：默认断言无 .data 伴生（model 权重 inline）。
+    if no_external_data:
+        data_companion = out + ".data"
+        if os.path.isfile(data_companion):
+            raise RuntimeError(
+                f"导出产生 .data 伴生文件 ({data_companion})，但 --no-external-data 模式禁止。"
+                " 模型权重可能 >2GB protobuf 上限；如需外部数据，显式传 --allow-external-data。"
+            )
     return out
 
 
@@ -231,7 +257,30 @@ def _main() -> int:
         "--out", default="", help="输出 .onnx 路径（空 → model_path 同名 .onnx）"
     )
     parser.add_argument(
-        "--device", default="cpu", help="导出设备（默认 cpu；与训练/实测解耦）"
+        "--device",
+        default="auto",
+        choices=["auto", "cuda", "npu", "cpu"],
+        help="导出设备（默认 auto：cuda→npu→cpu 探测；与实测 device 解耦）",
+    )
+    # 外部 .data 伴生文件策略（P7）：默认无 .data；--allow-external-data 显式开禁。
+    parser.add_argument(
+        "--no-external-data",
+        dest="no_external_data",
+        action="store_true",
+        default=True,
+        help="(默认 True) 导出后断言无 .data 伴生文件；违例 fail loud",
+    )
+    parser.add_argument(
+        "--allow-external-data",
+        dest="no_external_data",
+        action="store_false",
+        help="显式允许 .data 伴生文件（超大模型 >2GB 时必开）",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="dummy 输入随机种子（默认 0，保复现）",
     )
     args = parser.parse_args()
 
@@ -243,6 +292,8 @@ def _main() -> int:
             opset=args.opset,
             out=args.out or None,
             device=args.device,
+            no_external_data=args.no_external_data,
+            seed=args.seed,
         )
     except Exception as e:
         print(f"[export_onnx] FAIL: {type(e).__name__}: {e}", file=sys.stderr)
@@ -251,6 +302,8 @@ def _main() -> int:
     print(f"STATUS: ok")
     print(f"ONNX: {onnx_path}")
     print(f"OPSET: {args.opset}")
+    print(f"DEVICE: {args.device}")
+    print(f"NO_EXTERNAL_DATA: {args.no_external_data}")
     return 0
 
 

@@ -43,7 +43,12 @@ from typing import Any
 
 
 # ── 复用 _struct_scripts/export_onnx.export_onnx ───────────────────────────────
-def _export_onnx(model_path, build_fn, dummy_input, opset, out):
+def _export_onnx(model_path, build_fn, dummy_input, opset, out, device: str = "auto"):
+    """复用 _struct_scripts/export_onnx.export_onnx（同 struct 测时延的导出路径）。
+
+    device 透传给 export_onnx（默认 auto：cuda→npu→cpu 探测，与 latency_onnxrt 一致；
+    P7 解开原硬编码 device="cpu"，让导出能上 GPU/NPU）。
+    """
     here_struct = os.path.abspath(
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "_struct_scripts")
     )
@@ -53,7 +58,7 @@ def _export_onnx(model_path, build_fn, dummy_input, opset, out):
 
     return export_onnx(
         model_path=model_path, build_fn=build_fn, dummy_input=dummy_input,
-        opset=opset, out=out, device="cpu",
+        opset=opset, out=out, device=device,
     )
 
 
@@ -195,7 +200,11 @@ def _eval_dataset_mse(model_path: str, build_fn: str, ckpt_path: str, dataset_pa
     if ckpt_path and os.path.isfile(ckpt_path):
         ck = torch.load(ckpt_path, map_location="cpu")
         sd = ck.get("state_dict", ck) if isinstance(ck, dict) else ck
-        student.load_state_dict(sd, strict=False)
+        missing, unexpected = student.load_state_dict(sd, strict=False)
+        if missing:
+            print(f"[measure_student] WARN missing keys (top5): {list(missing)[:5]}", file=sys.stderr)
+        if unexpected:
+            print(f"[measure_student] WARN unexpected keys (top5): {list(unexpected)[:5]}", file=sys.stderr)
 
     with torch.no_grad():
         out = student(x)
@@ -221,16 +230,28 @@ def measure_student(args) -> dict:
     student_onnx = os.path.join(out_dir, "student.onnx")
     _export_onnx(
         args.student_model_path, args.build_fn, args.dummy_input,
-        args.opset, student_onnx,
+        args.opset, student_onnx, device=args.device,
     )
 
-    # 2. 测 latency
+    # 2. 测 latency（device 透传给 latency_provider：auto/cuda/npu/cpu）
     measure = _load_measure(args.latency_provider)
-    latency_ms = float(measure(student_onnx))
+    # latency_provider 是 `path::func`；measure 接受 device kwarg（latency_onnxrt.py 默认）。
+    # 用 inspect 检测形参（裸 try/except TypeError 会误吞用户脚本内部的 TypeError）。
+    import inspect
+    if "device" in inspect.signature(measure).parameters:
+        latency_ms = float(measure(student_onnx, device=args.device))
+    else:
+        latency_ms = float(measure(student_onnx))
 
     # 3. student accuracy
     #    优先用 --eval_dataset（.pt 含 {x, y}）内部算 MSE（自包含，便于测试/无 eval_command 时）；
     #    否则跑 --eval_command（用户 eval 脚本，自行加载 ckpt）。
+    #    P7 M3：candidate_eval 短训阶段既不给 eval_command 也不给 eval_dataset → **跳过 db_gap 计算**
+    #    （之前白算一个垃圾 0.0/unknown db_gap 写进 measure_report 误导 debug）。
+    eval_provided = (
+        (args.eval_dataset and args.eval_dataset.strip())
+        or (args.eval_command and args.eval_command.strip())
+    )
     if args.eval_dataset and args.eval_dataset.strip():
         student_acc, student_kind = _eval_dataset_mse(
             args.student_model_path, args.build_fn, args.student_ckpt,
@@ -245,6 +266,13 @@ def measure_student(args) -> dict:
         raw = _run(args.eval_command, args.project_root, env=_env)
         student_acc, student_kind, _ = _parse_accuracy(raw)
     else:
+        # 短训阶段（latency-first candidate_eval）：不跑 eval → accuracy 未知。
+        # 不算 db_gap（避免占位 0.0/unknown 写盘误导）；stdout 仍打 MET_ACCURACY: false。
+        print(
+            "[measure_student] neither --eval_dataset nor --eval_command given; "
+            "skipping accuracy + dB gap computation (latency-only mode for short-train phase).",
+            file=sys.stderr,
+        )
         student_acc, student_kind = 0.0, "unknown"
 
     # 4. 读 teacher_meta
@@ -256,11 +284,15 @@ def measure_student(args) -> dict:
     teacher_acc = float(teacher_meta.get("teacher_accuracy", 0.0))
     teacher_kind = str(teacher_meta.get("teacher_accuracy_kind", "unknown"))
 
-    # 5. dB gap
+    # 5. dB gap（仅当 eval 已跑；短训阶段 latency-only → 全 sentinel）
     accuracy_gap_db = float(args.accuracy_gap_db) if args.accuracy_gap_db is not None else 0.5
-    db_gap, gap_conf, met_acc = _compute_db_gap(
-        teacher_acc, teacher_kind, student_acc, student_kind, accuracy_gap_db,
-    )
+    if eval_provided:
+        db_gap, gap_conf, met_acc = _compute_db_gap(
+            teacher_acc, teacher_kind, student_acc, student_kind, accuracy_gap_db,
+        )
+    else:
+        # latency-only 模式（candidate_eval 短训）：dB gap 未知，恒 sentinel。
+        db_gap, gap_conf, met_acc = -1.0, "deferred", False
 
     # 6. latency target
     if args.target_latency_ms is not None:
@@ -283,6 +315,7 @@ def measure_student(args) -> dict:
         "teacher_accuracy_kind": teacher_kind,
         "db_gap": db_gap,
         "db_gap_confidence": gap_conf,
+        "db_gap_deferred": not eval_provided,  # P7：短训 latency-only 模式标 deferred
         "accuracy_gap_db_threshold": accuracy_gap_db,
         "target_latency_ms": target_lat,
         "met_accuracy": met_acc,
@@ -327,6 +360,18 @@ def _main() -> int:
     p.add_argument("--target_latency_ms", type=float, default=None,
                    help="latency 目标；缺省用 teacher_latency_ms")
     p.add_argument("--project_root", default=".", help="eval_command 的 cwd")
+    p.add_argument(
+        "--device",
+        default="auto",
+        choices=["auto", "cuda", "npu", "cpu"],
+        help="ONNX 导出 + latency 测量设备（P7；默认 auto，与 latency_onnxrt 一致）",
+    )
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="复现种子（默认 0）",
+    )
     args = p.parse_args()
 
     try:
