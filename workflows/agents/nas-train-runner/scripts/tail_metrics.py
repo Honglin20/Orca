@@ -109,6 +109,9 @@ def _mode_train(output_dir: Path) -> None:
             x="global_step",
             y="loss",
             hue="phase",
+            x_label="全局训练步（global_step）",
+            y_label="loss（越低越好）",
+            caption="每 log_interval 步采样的训练 loss；hue=phase 区分 train/val。",
         )
 
     # C3b：验证指标（val 子集；acc/metric 字段名宽松：取 acc / val_acc / metric）
@@ -133,6 +136,9 @@ def _mode_train(output_dir: Path) -> None:
                 title="Validation Metric",
                 x="global_step",
                 y="metric",
+                x_label="全局训练步（global_step）",
+                y_label=metric_key,
+                caption=f"验证集指标（字段={metric_key}）；每 eval 周期一个点。",
             )
 
 
@@ -214,6 +220,13 @@ def _mode_search(output_dir: Path) -> None:
                 x="generation",
                 y="value",
                 hue="stat",
+                x_label="进化代数（generation）",
+                y_label=f"{k}（{'显示 -原值，越大越好' if kind == 'quality' else '越小越好'}）",
+                caption=(
+                    f"每代 best/mean。"
+                    f"{'质量目标已取负显示（-v），故全轴越大越好；' if kind == 'quality' else ''}"
+                    "best=该代最优，mean=该代均值。"
+                ),
             )
 
     # C4b：每代种群/缓存/帕累托计数
@@ -235,6 +248,9 @@ def _mode_search(output_dir: Path) -> None:
             x="generation",
             y="count",
             hue="kind",
+            x_label="代数",
+            y_label="个体数",
+            caption="每代 evaluated（实算）/cached（命中缓存免算）/pareto（入当前前沿）三者计数。",
         )
 
     # C5-live：帕累托前沿散点（取当前 pareto=true 子集；finalize 由 push_pareto_final 自算全局）
@@ -263,6 +279,12 @@ def _mode_search(output_dir: Path) -> None:
                 y=y_obj,
                 pareto_x_direction="min",
                 pareto_y_direction="max",
+                x_label=f"{x_obj}（越小越好{'+，质量类已取负显示' if obj_kind[x_obj] == 'quality' else ''}）",
+                y_label=f"{y_obj}（越大越好{'+，质量类已取负显示' if obj_kind[y_obj] == 'quality' else ''}）",
+                caption=(
+                    "当前 per-generation pareto 子集；finalize 全局前沿见 Pareto Front (final)。"
+                    "x=成本类（越小越好），y=质量类（取负后越大越好）。"
+                ),
             )
 
 

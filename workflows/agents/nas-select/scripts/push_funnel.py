@@ -55,6 +55,13 @@ def main() -> int:
         title="Selection Funnel",
         x="stage",
         y="count",
+        x_label="筛选阶段",
+        y_label="架构数（对数级递减）",
+        caption=(
+            "百万评估 → 最终 N 架构的收敛证据："
+            "input→pareto(非支配)→unique(去重)→feasible(满足约束)"
+            "→feasible_pareto→selected(入选再训)。"
+        ),
     )
     print(f"[push_funnel] C6 pushed: {' → '.join(f'{n}={c}' for n, c in stages)}", flush=True)
     return 0
