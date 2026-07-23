@@ -4,8 +4,8 @@
   - bootstrap → emit ws+ns、写 marker、stdout JSON
   - next --output → 单次 write 原子 emit_batch [nc, rt, ns]（B1）
   - next --output ""` ≡ 省略 --output（B2 normalize None）
-  - 合规计数：3 次无 output → workflow_failed(subagent_compliance)（F11）
-  - 失败 taxonomy：output_schema_mismatch / unsupported_node_kind / state_corrupt（F6）
+  - 合规计数：≥3 次 warn（run 存活）/ ≥10 次 hard workflow_failed(subagent_compliance)（SPEC 2026-07-23 §3）
+  - 失败 taxonomy：output_schema_mismatch（recoverable）/ unsupported_node_kind / state_corrupt（F6）
   - busy：LOCK_NB 撞锁 → {done:false, reason:busy} 0 退出（F5）
   - stop → workflow_cancelled + 清 marker
   - marker RMW 在 flock 临界区内（N2）：两并发 next → no_output_count 不丢
@@ -622,24 +622,58 @@ def test_next_output_empty_string_normalized_to_none(cwd_tmp, wf_path):
     assert m["no_output_count"] == 1
 
 
-# ── F11：合规计数 fail loud ───────────────────────────────────────────────────
+# ── SPEC 2026-07-23 §3：合规计数 WARN=3（run 存活）/ HARD=10（终态）────────────
 
 
-def test_subagent_compliance_3x_no_output_emits_workflow_failed(cwd_tmp, wf_path):
-    """连续 3 次 next 无 output → workflow_failed(subagent_compliance)（F11）。"""
+def test_subagent_compliance_3x_no_output_warn_envelope(cwd_tmp, wf_path):
+    """连续 3 次 next 无 output → warn 信封（run 存活，不 emit workflow_failed）。
+
+    SPEC §4.1(b)：``done:false, warn:true, error_kind:subagent_compliance, no_output_count:3,
+    warn_threshold:3, hard_limit:10``。0 退出（run 存活）。
+    """
     runner = CliRunner()
     boot = _bootstrap(runner, wf_path)
     run_id, tape = boot["run_id"], boot["tape"]
 
     r1 = _next(runner, tape, run_id, "--output", "")
     r2 = _next(runner, tape, run_id, "--output", "")
-    # 第 3 次 → workflow_failed(subagent_compliance) + 非 0 退出（与其他失败 taxonomy 对齐）
-    r3 = _next(runner, tape, run_id, "--output", "", expect_exit=1)
+    # 第 3 次 → warn 信封（≥WARN=3 但 <HARD=10），0 退出，run 存活
+    r3 = _next(runner, tape, run_id, "--output", "")
 
     assert r1["done"] is False and r2["done"] is False
-    assert r3["done"] is True  # 第 3 次触发终止
+    # code-reviewer 🟢#7：显式反向断言 count<WARN 不 warn（防 _COMPLIANCE_WARN 误改为 1/2
+    # 时 r3 仍 warn → 测试假过关）。
+    assert "warn" not in r1, "count=1 不应 warn（<WARN=3）"
+    assert "warn" not in r2, "count=2 不应 warn（<WARN=3）"
+    assert r3["done"] is False              # run 存活（不终态）
+    assert r3["warn"] is True
+    assert r3["error_kind"] == "subagent_compliance"
+    assert r3["no_output_count"] == 3
+    assert r3["warn_threshold"] == 3
+    assert r3["hard_limit"] == 10
 
-    # tape 末尾是 workflow_failed(subagent_compliance)
+    # tape **不**含 workflow_failed（warn 不 emit 任何 tape 事件）
+    lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
+    for line in lines:
+        ev = json.loads(line)
+        assert ev["type"] != "workflow_failed", "warn 不应 emit workflow_failed"
+
+
+def test_subagent_compliance_hard_limit_10x_emits_workflow_failed(cwd_tmp, wf_path):
+    """连续 10 次 next 无 output → 撞 HARD 上限 → workflow_failed(subagent_compliance) + exit 1。"""
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id, tape = boot["run_id"], boot["tape"]
+
+    # 前 9 次：warn 区间（run 存活，0 退出）
+    for i in range(9):
+        r = _next(runner, tape, run_id, "--output", "")
+        assert r["done"] is False, f"第 {i+1} 次（warn 区间）run 应存活"
+    # 第 10 次 → 撞 HARD → workflow_failed + exit 1
+    r10 = _next(runner, tape, run_id, "--output", "", expect_exit=1)
+    assert r10["done"] is True
+    assert r10["error_kind"] == "subagent_compliance"
+
     lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
     last = json.loads(lines[-1])
     assert last["type"] == "workflow_failed"
@@ -650,7 +684,12 @@ def test_subagent_compliance_3x_no_output_emits_workflow_failed(cwd_tmp, wf_path
 
 
 def test_failure_output_schema_mismatch(cwd_tmp, wf_path):
-    """节点声明 output_schema 但 output 非 JSON → workflow_failed(output_schema_mismatch)。"""
+    """节点声明 output_schema 但 output 非 JSON → recoverable 信封（SPEC 2026-07-23 §3）。
+
+    run 存活：``done:false, recoverable:true, error_kind:output_schema_mismatch,
+    retry_count:1, retry_budget:2``；0 退出；tape 末尾是 [node_failed, node_started]
+    （无 workflow_failed）；marker 不清。
+    """
     # 改 wf：a 节点加 output_schema
     yaml_text = AGENT_WF_YAML.replace(
         'prompt: "产出 step A 的输出。"',
@@ -666,21 +705,30 @@ def test_failure_output_schema_mismatch(cwd_tmp, wf_path):
     result = runner.invoke(app, [
         "next", "--tape", tape, "--run-id", run_id, "--output", "NOT_JSON",
     ])
-    # exit_code 1（fail loud）
-    assert result.exit_code == 1
+    # recoverable → 0 退出（run 存活，不 fail loud）
+    assert result.exit_code == 0
     reply = json.loads(result.output.splitlines()[-1])
-    assert reply["done"] is True
-    assert "failed" in reply["reason"]
-    # v5 §8 step 5b：信封加 error_kind（与 tape data.kind 同值，字段名不同——B4/B7）
+    assert reply["done"] is False                  # run 存活
+    assert reply["recoverable"] is True
     assert reply["error_kind"] == "output_schema_mismatch"
-    # 反向守门：信封不得出现塌缩值 "in_session_error"（旧 isinstance 分流已消除）
+    assert reply["retry_count"] == 1
+    assert reply["retry_budget"] == 2
+    assert reply["node"] == "a"                    # 重 arm 同节点
+    assert "output_schema" in reply["reason"] or "非 JSON" in reply["reason"]
     assert "in_session_error" not in json.dumps(reply)
 
+    # tape 末尾是 node_started（[nf, ns]，无 workflow_failed）
     lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
     last = json.loads(lines[-1])
-    assert last["type"] == "workflow_failed"
-    assert last["data"]["kind"] == "output_schema_mismatch"
-    assert "in_session_error" not in json.dumps(last["data"])
+    assert last["type"] == "node_started"
+    # 倒数第二条是 node_failed
+    prev = json.loads(lines[-2])
+    assert prev["type"] == "node_failed"
+    assert prev["data"]["kind"] == "output_schema_mismatch"
+
+    # marker 未清（run 存活）
+    markers = list(cwd_tmp.glob("runs/orca-*.json"))
+    assert markers, "recoverable 不应清 marker（run 存活）"
 
 
 def test_failure_unsupported_node_kind(cwd_tmp):
@@ -703,11 +751,10 @@ def test_failure_unsupported_node_kind(cwd_tmp):
 
 
 def test_failure_output_schema_field_violation(cwd_tmp):
-    """output_schema 声明 + output 是合法 JSON 但缺 required 字段 → output_schema_mismatch。
+    """output_schema 声明 + output 是合法 JSON 但缺 required 字段 → recoverable（SPEC 2026-07-23）。
 
-    2026-07-08：``_parse_output`` 加 jsonschema 字段校验。缺字段在 parse 期被抓（早于
-    下游 render 的 UndefinedError），归类 output_schema_mismatch，干净 workflow_failed。
-    （此前仅 json.loads，缺字段漏到 render → 脏崩溃。）
+    缺字段在 parse 期被抓（早于下游 render 的 UndefinedError），归类 output_schema_mismatch
+    但现 recoverable：run 存活，重 arm 同节点，主 session 反馈子代理修正。
     """
     yaml_text = AGENT_WF_YAML.replace(
         'prompt: "产出 step A 的输出。"',
@@ -720,21 +767,182 @@ def test_failure_output_schema_field_violation(cwd_tmp):
     boot = _bootstrap(runner, p)
     run_id, tape = boot["run_id"], boot["tape"]
 
-    # 合法 JSON 但缺 required 字段 k
+    # 合法 JSON 但缺 required 字段 k → recoverable
     result = runner.invoke(app, [
         "next", "--tape", tape, "--run-id", run_id, "--output", '{"x": 1}',
     ])
-    assert result.exit_code == 1
+    assert result.exit_code == 0                  # recoverable → 0 退出
+    reply = json.loads(result.output.splitlines()[-1])
+    assert reply["done"] is False
+    assert reply["recoverable"] is True
+    assert reply["error_kind"] == "output_schema_mismatch"
+    assert reply["retry_count"] == 1
+    assert "in_session_error" not in json.dumps(reply)
+    lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
+    # tape 末尾 node_started（[nf, ns]，无 workflow_failed）
+    assert json.loads(lines[-1])["type"] == "node_started"
+    assert json.loads(lines[-2])["type"] == "node_failed"
+
+
+# ── SPEC 2026-07-23 §7 AC2/AC3/AC4 补强（code-reviewer 🔴/🟡）───────────────────
+
+
+def _schema_wf_path(cwd_tmp: Path) -> Path:
+    """单节点 wf，a 声明 output_schema {k: string}（AC2/AC4 补强测试共用）。
+
+    单节点（a → $end）：确保 recoverable 后给正解 output 能直接到 ``$end``（``done:true``），
+    避免 2 节点 wf 在 recoverable 后还要再跑一节点才能 complete（让 AC4 续跑测更直接）。
+    """
+    yaml_text = """\
+name: cli_test_schema_wf
+description: 单节点带 output_schema 的 wf（AC2/AC4 守门测试用）。
+entry: a
+nodes:
+  - name: a
+    kind: agent
+    executor: opencode
+    model: deepseek/deepseek-v4-flash
+    prompt: "产出 step A 的输出。"
+    output_schema:
+      type: object
+      required: [k]
+      properties:
+        k: {type: string}
+    routes:
+      - to: $end
+"""
+    p = cwd_tmp / "wf_schema.yaml"
+    p.write_text(yaml_text, encoding="utf-8")
+    return p
+
+
+def test_cli_recoverable_escalation_3x_exits_1(cwd_tmp):
+    """AC2 CLI（code-reviewer 🟡#5）：连续 3 次坏 output → exit 1 + workflow_failed + 清 marker。
+
+    advance_step 层升格虽已测（test_error_management.py），但 CLI 衔接
+    （``merge_recoverable_envelope`` 不触发 + ``result.done + result.error_kind`` 触发 exit 1）
+    无守门。本测试补 CLI 层升格回归。
+    """
+    p = _schema_wf_path(cwd_tmp)
+    runner = CliRunner()
+    boot = _bootstrap(runner, p)
+    run_id, tape = boot["run_id"], boot["tape"]
+
+    # 1st bad → recoverable（exit 0）
+    r1 = _next(runner, tape, run_id, "--output", "BAD1")
+    assert r1["done"] is False and r1["recoverable"] is True and r1["retry_count"] == 1
+    # 2nd bad → recoverable（exit 0）
+    r2 = _next(runner, tape, run_id, "--output", "BAD2")
+    assert r2["done"] is False and r2["recoverable"] is True and r2["retry_count"] == 2
+
+    # 3rd bad → 升格 → exit 1 + done:true + error_kind:output_schema_mismatch
+    r3 = _next(runner, tape, run_id, "--output", "BAD3", expect_exit=1)
+    assert r3["done"] is True
+    assert r3["error_kind"] == "output_schema_mismatch"
+    assert "exhausted" in r3["reason"]
+
+    # tape 末条 workflow_failed（E8：3 条 nf + 1 条 wf；末尾 wf）
+    lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
+    nf_count = sum(1 for ln in lines if json.loads(ln)["type"] == "node_failed")
+    assert nf_count == 3, f"升格应 emit 3 条 node_failed，实得 {nf_count}"
+    assert json.loads(lines[-1])["type"] == "workflow_failed"
+    assert json.loads(lines[-1])["data"]["kind"] == "output_schema_mismatch"
+
+    # marker 已清（升格终态）
+    assert list(cwd_tmp.glob("runs/orca-*.json")) == [], "升格终态应清 marker"
+
+
+def test_recoverable_then_new_session_resumes_with_correct_output(cwd_tmp):
+    """AC4（code-reviewer 🔴#1）：recoverable 后新 session（新 CLI invoke 模拟）能续跑。
+
+    场景：session1 bootstrap → next 坏 output → recoverable 信封；session1 退出（模拟断连）；
+    orca status --run-id X --json 见 resumable:true + status:running；session2（新 runner）调
+    next 带正确 output → 推进到 $end（done:true）。
+
+    守住 recoverable 化的全部业务价值：跨 session 续跑（marker 保活 + tape-derived count 跨
+    进程一致 + reducer 重放 1 次 recoverable tape 仍 running）。
+    """
+    p = _schema_wf_path(cwd_tmp)
+    # session1：bootstrap + 1 次 bad → recoverable
+    runner1 = CliRunner()
+    boot = _bootstrap(runner1, p)
+    run_id, tape = boot["run_id"], boot["tape"]
+    r1 = _next(runner1, tape, run_id, "--output", "BAD")
+    assert r1["recoverable"] is True
+    # session1 退出（runner1 丢弃，模拟 session 断连）
+
+    # session1 后查 status：status:running（recoverable 未终态 → run 可续跑）
+    # 注：单 run ``--json`` 不透出 ``resumable`` 字段（该字段仅在无参 list 形态透出）；
+    # ``status:running`` + marker 仍在 = 可续跑的观测信号。
+    status_res = runner1.invoke(app, ["status", "--run-id", run_id, "--json"])
+    assert status_res.exit_code == 0, status_res.output
+    status_payload = json.loads(status_res.output.splitlines()[-1])
+    assert status_payload["status"] == "running", (
+        f"recoverable 后 status 应为 running（resumable），实得 {status_payload.get('status')!r}"
+    )
+
+    # marker 仍在（保活）—— marker 存在 ≡ resumable（SPEC §7.2 完成：bootstrap 写 / 终态清）
+    assert list(cwd_tmp.glob("runs/orca-*.json")), "recoverable 后 marker 应仍存在"
+
+    # session2（新 runner = 新 CLI 进程模拟）：带正确 output 推进 → done:true completed
+    runner2 = CliRunner()
+    r2 = _next(runner2, tape, run_id, "--output", '{"k": "v"}')
+    assert r2["done"] is True, (
+        f"新 session 带正确 output 应推进到 $end（done:true），实得 {r2}"
+    )
+
+    # tape 末条 workflow_completed
+    lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
+    assert json.loads(lines[-1])["type"] == "workflow_completed"
+    # marker 已清（workflow 完成终态）
+    assert list(cwd_tmp.glob("runs/orca-*.json")) == [], "workflow 完成后 marker 应清"
+
+
+def test_failure_internal_error_remains_irrecoverable(cwd_tmp, wf_path, monkeypatch):
+    """AC3（code-reviewer 🟡#6）：``internal_error``（如写 prompt 时 ``os.replace`` OSError）仍走
+    ``workflow_failed`` 终态（非 recoverable）。
+
+    recoverable 化的副作用是把 ``output_schema_mismatch`` 从原 ``workflow_failed`` 路径抽走。
+    若分类逻辑误把 ``internal_error`` 也当 recoverable（如 ``RecoverableInSessionError`` 误用），
+    现有测试不会 fail loud。
+
+    实现细节：直接 mock ``step_mod.os.replace`` 抛 OSError（**不是** mock ``_write_prompt_file``
+    本身——那样会绕过其 try/except，OSError 会逃逸成脏崩溃而非 InSessionError）。让真实
+    ``_write_prompt_file`` 的 except 捕获 mock 出的 OSError → 转抛 ``InSessionError(internal_error)``
+    → cli ``except InSessionError`` → ``fail_in_session`` → ``workflow_failed(internal_error)``。
+    """
+    from orca.run import step as step_mod
+
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id, tape = boot["run_id"], boot["tape"]
+
+    def _raise_oserror(*a, **kw):
+        raise OSError("mock os.replace failure（disk full / 权限）")
+
+    # ``step.py`` 用 ``import os`` + ``os.replace``；mock ``step_mod.os.replace`` 让真实
+    # ``_write_prompt_file`` 的 except 捕获 → 转 InSessionError(internal_error)。
+    monkeypatch.setattr(step_mod.os, "replace", _raise_oserror)
+
+    # next 推进到 b（触发 b 的 prompt 写盘 → os.replace OSError → internal_error → workflow_failed）
+    result = runner.invoke(app, [
+        "next", "--tape", tape, "--run-id", run_id, "--output", "out_a",
+    ])
+    assert result.exit_code == 1, (
+        f"internal_error 应 fail loud exit 1，实得 {result.exit_code}: {result.output}"
+    )
     reply = json.loads(result.output.splitlines()[-1])
     assert reply["done"] is True
-    assert "failed" in reply["reason"]
-    # v5 §8 step 5b：信封 error_kind + 反向无 in_session_error
-    assert reply["error_kind"] == "output_schema_mismatch"
-    assert "in_session_error" not in json.dumps(reply)
+    assert reply["error_kind"] == "internal_error", (
+        f"OSError 应归类 internal_error，实得 {reply.get('error_kind')!r}"
+    )
+    assert "recoverable" not in reply, "internal_error 不应是 recoverable"
+
+    # tape 末条 workflow_failed(internal_error)
     lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
     last = json.loads(lines[-1])
     assert last["type"] == "workflow_failed"
-    assert last["data"]["kind"] == "output_schema_mismatch"
+    assert last["data"]["kind"] == "internal_error"
 
 
 def test_advance_step_inline_fallback_vs_compact(tmp_path):
@@ -873,10 +1081,11 @@ def test_advance_step_next_traverses_tape_once(tmp_path):
 
 
 def test_failure_output_schema_malformed(cwd_tmp):
-    """output_schema 自身畸形（YAML 写错）→ 干净 workflow_failed（review 🔴，D-v8.x-2）。
+    """output_schema 自身畸形（YAML 写错）→ recoverable（SPEC 2026-07-23 §3 归 output_schema_mismatch）。
 
     ``jsonschema.validate`` 对畸形 schema 抛 ``SchemaError``（非 ``ValidationError`` 子类）。
-    只 catch ValidationError 会逃逸成脏崩溃。``_parse_output`` 必须 catch 两者。
+    ``_parse_output`` 必须 catch 两者（D-v8.x-2）。SPEC v2 把三处 schema-mismatch 都归
+    recoverable（畸形 schema 由主 session 发现后可 ``orca stop``，引擎不擅自判死）。
     """
     # required 元素非字符串 → SchemaError
     yaml_text = AGENT_WF_YAML.replace(
@@ -893,18 +1102,18 @@ def test_failure_output_schema_malformed(cwd_tmp):
     result = runner.invoke(app, [
         "next", "--tape", tape, "--run-id", run_id, "--output", '{"k": "v"}',
     ])
-    assert result.exit_code == 1, f"malformed schema 应 fail loud，实得 exit 0: {result.output}"
+    # recoverable → 0 退出（run 存活；畸形 schema 主 session 可后续 stop）
+    assert result.exit_code == 0, f"malformed schema 现 recoverable，应 exit 0: {result.output}"
     reply = json.loads(result.output.splitlines()[-1])
-    assert reply["done"] is True
-    assert "failed" in reply["reason"]
-    # v5 §8 step 5b：信封 error_kind + 反向无 in_session_error
+    assert reply["done"] is False
+    assert reply["recoverable"] is True
     assert reply["error_kind"] == "output_schema_mismatch"
     assert "in_session_error" not in json.dumps(reply)
     lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
-    last = json.loads(lines[-1])
-    assert last["type"] == "workflow_failed"
-    # 归类 output_schema_mismatch（消息含 output_schema；语义为 schema 畸形见 message）
-    assert last["data"]["kind"] == "output_schema_mismatch"
+    # tape 末尾 node_started（[nf, ns]，无 workflow_failed）
+    assert json.loads(lines[-1])["type"] == "node_started"
+    assert json.loads(lines[-2])["type"] == "node_failed"
+    assert json.loads(lines[-2])["data"]["kind"] == "output_schema_mismatch"
 
 
 def test_failure_render_error_clears_marker(cwd_tmp):

@@ -172,18 +172,20 @@ def test_daemon_success_uses_emit_batch_not_per_emit(wf_plain, tmp_path):
         daemon.cleanup()
 
 
-# ── 失败路径：错误信封统一 + 字段名 kind/error_kind（spec-reviewer issue1/2 + B4/B7）──
+# ── recoverable 路径：output_schema_mismatch 不判死 run（SPEC 2026-07-23 §3）────
+# daemon 路径经 advance_step 自动复用 recoverable（SPEC §6 / 计划 S6）：
+# advance_step 自捕 RecoverableInSessionError → 返 StepResult(recoverable=True)（不外抛）
+# → daemon.next 的 except InSessionError 不触发 → apply_step_result 返 recoverable 信封。
 
 
-def test_daemon_failure_envelope_carries_error_kind(wf_with_schema, tmp_path):
-    """daemon 失败路径：output 畸形 → ``output_schema_mismatch``。
+def test_daemon_recoverable_envelope_carries_error_kind(wf_with_schema, tmp_path):
+    """daemon recoverable 路径：output 畸形 → run 存活 + ``output_schema_mismatch`` 信封。
 
-    断言（字段名陷阱 B4/B7）：
-      (a) tape 末条 ``workflow_failed.data["kind"]`` == ``"output_schema_mismatch"``
-          （tape 字段名 ``kind``，``lifecycle.make_workflow_failed`` 写，**不变**）。
-      (b) 回复信封 ``reply["error_kind"]`` == ``"output_schema_mismatch"``（信封新字段）。
-      (c) ``reply`` 与末条 ``data`` 中**均不得出现** ``"in_session_error"`` 字面量
-          （反向断言：旧 isinstance 塌缩值消除，spec-reviewer issue1）。
+    SPEC 2026-07-23 §3：output_schema_mismatch 不再判死。断言（字段名陷阱 B4/B7）：
+      (a) tape ``node_failed.data["kind"]`` == ``"output_schema_mismatch"``（字段名 ``kind``）。
+      (b) 回复信封 ``reply["error_kind"]`` == ``"output_schema_mismatch"``（信封字段 ``error_kind``）。
+      (c) ``reply`` / ``data`` 中**均不得出现** ``"in_session_error"`` 字面量（塌缩消除）。
+      (d) ``reply["done"]`` is False（run 存活）；``reply["recoverable"]`` is True。
     """
     daemon = _make_daemon(wf_with_schema, tmp_path)
     try:
@@ -192,30 +194,104 @@ def test_daemon_failure_envelope_carries_error_kind(wf_with_schema, tmp_path):
         assert reply0["done"] is False
         assert reply0["node"] == "a"
 
-        # observe 畸形 output（非 JSON）→ next 触发 _parse_output → InSessionError(output_schema_mismatch)
+        # observe 畸形 output（非 JSON）→ advance_step 自捕 RecoverableInSessionError → recoverable 信封
         daemon.observe("NOT_JSON")
         reply = _next(daemon)
 
-        # 信封契约
-        assert reply["done"] is True
-        # (b) 信封 error_kind 字段（新）携带具体分类
+        # (d) run 存活（不终态）
+        assert reply["done"] is False
+        assert reply["recoverable"] is True
+        assert reply["retry_count"] == 1
+        # (b) 信封 error_kind 字段携带具体分类
         assert reply["error_kind"] == "output_schema_mismatch", (
             f"信封 error_kind 应为 output_schema_mismatch，实得 {reply.get('error_kind')!r}"
         )
-        assert "failed" in reply["reason"]
+        assert "output_schema" in reply["reason"] or "非 JSON" in reply["reason"]
 
         # (c) 反向断言：信封不得出现塌缩值 "in_session_error"
-        _assert_no_in_session_error(reply, "失败信封 reply")
+        _assert_no_in_session_error(reply, "recoverable 信封 reply")
 
-        # (a) tape 末条 workflow_failed.data.kind（字段名 kind，不变）
+        # (a) tape 末两条 = [node_failed, node_started]（重 arm；无 workflow_failed）
         events = _tape_events(daemon.tape_path)
-        assert events[-1]["type"] == "workflow_failed"
-        data = events[-1]["data"]
+        assert events[-1]["type"] == "node_started"
+        assert events[-2]["type"] == "node_failed"
+        data = events[-2]["data"]
         assert data["kind"] == "output_schema_mismatch", (
-            f"tape data.kind 应为 output_schema_mismatch，实得 {data.get('kind')!r}"
+            f"tape node_failed.data.kind 应为 output_schema_mismatch，实得 {data.get('kind')!r}"
         )
         # (c) 反向断言：tape data 不得出现塌缩值
-        _assert_no_in_session_error(data, "tape workflow_failed.data")
+        _assert_no_in_session_error(data, "tape node_failed.data")
+    finally:
+        daemon.cleanup()
+
+
+def test_daemon_recoverable_then_correct_output_completes(wf_with_schema, tmp_path):
+    """AC1 daemon 闭环（code-reviewer 🟡#3）：坏 → 正解 → workflow 完成。
+
+    守 ``daemon.next()`` 缓存清理（``self._pending_output = None``）+ advance_step 重 arm 后
+    接正解 output 的衔接 —— 防缓存未清导致死循环 / 防重 arm 后接 output 不能推进的回归。
+    """
+    daemon = _make_daemon(wf_with_schema, tmp_path)
+    try:
+        _next(daemon)  # bootstrap 起 entry a
+        # 1st bad → recoverable（缓存清）
+        daemon.observe("NOT_JSON")
+        r1 = _next(daemon)
+        assert r1["recoverable"] is True
+        assert r1["retry_count"] == 1
+
+        # 2nd: 正解 output（满足 schema {k: string}）→ 完成
+        daemon.observe('{"k": "v"}')
+        r2 = _next(daemon)
+        assert r2["done"] is True, f"正解 output 后应推进到 $end，实得 {r2}"
+
+        # tape 序列：ws + ns + nf + ns + nc + rt + workflow_completed
+        events = _tape_events(daemon.tape_path)
+        types = [e["type"] for e in events]
+        assert types == [
+            "workflow_started", "node_started",
+            "node_failed", "node_started",                # 1st bad 重 arm
+            "node_completed", "route_taken", "workflow_completed",
+        ]
+    finally:
+        daemon.cleanup()
+
+
+def test_daemon_recoverable_escalation_3x_surfaces_error_kind(wf_with_schema, tmp_path):
+    """AC2 daemon 升格（code-reviewer 🟡#1+#2，配 ``_step_io`` parity 修复）：
+
+    连续 3 次 recoverable 失败 → daemon.next 返 ``{done:true, error_kind:output_schema_mismatch}``。
+    守住 ``apply_step_result`` 在 ``result.done + result.error_kind`` 时 surface error_kind
+    （修复前 daemon 升格终态信封丢 error_kind，cli/daemon parity bug）。
+    """
+    daemon = _make_daemon(wf_with_schema, tmp_path)
+    try:
+        _next(daemon)  # bootstrap
+
+        # 1st + 2nd bad → recoverable（run 存活）
+        daemon.observe("BAD1")
+        r1 = _next(daemon)
+        assert r1["recoverable"] is True and r1["retry_count"] == 1
+        daemon.observe("BAD2")
+        r2 = _next(daemon)
+        assert r2["recoverable"] is True and r2["retry_count"] == 2
+
+        # 3rd bad → 升格 → done:true + error_kind:output_schema_mismatch
+        daemon.observe("BAD3")
+        r3 = _next(daemon)
+        assert r3["done"] is True, f"3 次失败应升格 done:true，实得 {r3}"
+        assert r3.get("error_kind") == "output_schema_mismatch", (
+            f"daemon 升格信封必须 surface error_kind（cli/daemon parity），实得 {r3.get('error_kind')!r}"
+        )
+        assert "exhausted" in (r3.get("reason") or "")
+
+        # tape 含 3 条 node_failed + 1 条 workflow_failed（E8：nf→ns→workflow_failed 末轮）
+        events = _tape_events(daemon.tape_path)
+        nf_count = sum(1 for e in events if e["type"] == "node_failed")
+        assert nf_count == 3, f"升格应 emit 3 条 node_failed，实得 {nf_count}"
+        last = events[-1]
+        assert last["type"] == "workflow_failed"
+        assert last["data"]["kind"] == "output_schema_mismatch"
     finally:
         daemon.cleanup()
 
