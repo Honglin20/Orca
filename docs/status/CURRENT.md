@@ -6,9 +6,9 @@
 
 ## 当前任务（2026-07-24）
 
-### ✅ 单端口 + 多 Run 监控（Phase A + B' + C 生产 + 单测）
+### ✅ 单端口 + 多 Run 监控（Phase A + B' + C 生产 + 单测）—— 已提交
 
-**状态**：实现 + 单测 + code-reviewer 审查中，待 commit。
+**状态**：commit `1788cea`。code-reviewer 2 blocker + 4 major + 3 minor 全闭环。
 
 **完成项**：
 - Phase A：`orca_home_fingerprint` + 端口登记上移 `~/.orca/.orca-web.json` + `exclusive_port_decision` 临界区（B-6）。
@@ -16,12 +16,7 @@
 - Phase C：`GET /api/runs?scope=all` discovery + `ensure_attached` + `DELETE`（M-3 四态）+ WS 控制帧（B-4 queue+writer）+ AuthMiddleware no-op（M-1）+ 前端 RunListPage + run-list-store。
 - 单测：runtime（20）+ multi-run-phase-c（15）+ phase-a-registry-auth（10）= 45 新测；既有套件全绿（1 pre-existing apply_kb_requirement import 非 §13 引入）。
 
-**待办**：
-- [ ] 等 code-reviewer 反馈闭环
-- [ ] commit
-- [ ] CHANGELOG 顶部加索引
-
-**遗留（非阻塞）**：
+**遗留（非阻塞，待后续 PR）**：
 - 前端 `out/` 未构建（WSL/Win 混合环境 rollup native binary 缺失，需 Windows-native shell `npm run build`）。
 - `_scan_meta_overview` contract test（AC14）未补。
 - 持久层 `.orca-meta-cache.json`（P0）未实现。

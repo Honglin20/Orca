@@ -77,7 +77,8 @@
 合计：**~243 passed / 1 pre-existing failed**。
 
 ## Commits
-（待提交）
+
+- `1788cea` —— feat(web): 单端口 + 多 Run 监控（Phase A + B' + C，SPEC §13 v4）
 
 ## 守门（grep-able）
 - `runListStore` 不 import `workflow-store`（AC11）：见 `run-list-store.ts` 顶部 import 块。
