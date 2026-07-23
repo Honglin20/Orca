@@ -321,7 +321,7 @@ nodes:
     agent: struct-curator
     output_schema:
       type: object
-      required: [round, continue_loop, champion_id, champion_latency_ms, champion_accuracy, route_mode]
+      required: [round, continue_loop, champion_id, champion_latency_ms, champion_accuracy, route_mode, viz_status]
       properties:
         round: {type: integer}
         continue_loop: {type: boolean, description: "true=未达标且未耗尽预算 → 继续循环；false=终止走 finalize"}
@@ -330,6 +330,23 @@ nodes:
         champion_accuracy: {type: number}
         route_mode: {type: string, enum: [exploit, explore], description: "champion 改进→exploit；否则→explore（§3 step 8）"}
         terminate_reason: {type: string, description: "continue_loop=false 时的原因（champion_met / max_rounds / budget）"}
+        viz_status:
+          type: object
+          required: [env_status, charts]
+          additionalProperties: false
+          description: "本轮可视化产出状态（SPEC 2026-07-23 §3.3）。失败值（env_missing/generic 等）合法产出；缺字段=节点 fail（agent 未遵守契约）。viz 为 sidecar：失败值不影响 continue_loop。"
+          properties:
+            env_status: {type: string, enum: [ok, env_loaded_from_file, env_missing, import_failed, generic]}
+            charts:
+              type: object
+              description: "{图名: {pushed: bool, reason: str}}；全 pushed=true 即成功。"
+              additionalProperties:
+                type: object
+                required: [pushed, reason]
+                additionalProperties: false
+                properties:
+                  pushed: {type: boolean}
+                  reason: {type: string}
     routes:
       # 循环机制：DAG 内 back-route（条件 cycle）。continue_loop=true → 回 hypothesizer 开下一轮；
       # false → 出循环走 finalize。route 由 router 纯函数求值（确定性控制流，非 LLM 自驱）。
@@ -347,13 +364,30 @@ nodes:
     tools: [bash, read, write, glob, grep]
     output_schema:
       type: object
-      required: [final_model, final_onnx, final_latency_ms, final_accuracy, final_report]
+      required: [final_model, final_onnx, final_latency_ms, final_accuracy, final_report, viz_status]
       properties:
         final_model: {type: string, description: "champion model.py 快照绝对路径"}
         final_onnx: {type: string}
         final_latency_ms: {type: number}
         final_accuracy: {type: number}
         final_report: {type: string, description: "final_report.md 绝对路径"}
+        viz_status:
+          type: object
+          required: [env_status, charts]
+          additionalProperties: false
+          description: "终态可视化产出状态（三图刷新 + 对比 bar 合并；SPEC 2026-07-23 §3.3）。失败值（env_missing/generic 等）合法产出；缺字段=节点 fail。viz 为 sidecar：失败值不阻断 finalize。"
+          properties:
+            env_status: {type: string, enum: [ok, env_loaded_from_file, env_missing, import_failed, generic]}
+            charts:
+              type: object
+              description: "{图名: {pushed: bool, reason: str}}；全 pushed=true 即成功。"
+              additionalProperties:
+                type: object
+                required: [pushed, reason]
+                additionalProperties: false
+                properties:
+                  pushed: {type: boolean}
+                  reason: {type: string}
     prompt: |
       你是结构性探索 workflow 的 **收尾 + 终态可视化**（P7 合并 viz_finalize，§14 决策5）：
       champion 从头重训 + 导出 ONNX + final_report + 推送终态图表。
@@ -386,48 +420,62 @@ nodes:
          调 `measure(final_onnx, device="{{ inputs.device }}")` 得 `final_latency_ms`（不变量1，§5；
          用 `inspect.signature(measure).parameters` 检测 device 形参；旧式 measure 无 device kwarg → fallback `measure(final_onnx)`）。加载失败 fail loud。
       4. 写 `final_report.md`：baseline vs champion（latency/accuracy 降幅）、terminate_reason、探索轮数、
-         结构图（从 ledger.jsonl 的 parent 链）、Pareto 摘要。
-      5. **终态可视化（P7 内联 viz_finalize）**——调 `viz_struct.py` 重推三图终态版（幂等刷新）：
+         结构图（从 ledger.jsonl 的 parent 链）、Pareto 摘要。**顶部加 `## 可视化产出` 段**（SPEC 2026-07-23 §3.3）：
+         全成功 → 列出推送的图（label/title）；任一失败 → `⚠️ 可视化未生成：<失败图 + reason 汇总>`，
+         附修复指引（检查 `runs/<run_id>/chart_daemon.log`；in-session 下图依赖 `orca_env.sh`，已由脚本自加载）。
+      5. **终态可视化 step A（P7 内联 viz_finalize，三图刷新）**——调 `viz_struct.py`（默认模式）重推三图终态版：
          ```bash
-         python3 "{{ setup.output.struct_scripts_dir }}/viz_struct.py" \
+         # 不要 `|| true` 盲吞：stdout 必含合法 JSON（_main 兜底，SPEC §3.2 B1）。
+         # 仅 exit 2 时容忍（进程级失败；stdout 已含 generic fallback JSON）。
+         VIZ_THREE_STDOUT=$(python3 "{{ setup.output.struct_scripts_dir }}/viz_struct.py" \
            --ledger "{{ setup.output.ledger_path }}" \
            --champions "{{ setup.output.champions_path }}" \
            --baseline_latency_ms "{{ setup.output.baseline_latency_ms }}" \
            --baseline_accuracy "{{ setup.output.baseline_accuracy }}" \
            --target_latency_ms "{{ inputs.target_latency_ms }}" \
-           --accuracy_target "{{ setup.output.accuracy_target }}" || true
+           --accuracy_target "{{ setup.output.accuracy_target }}" \
+           || true)
          ```
-         脚本异常 `|| true` 不阻断（viz 是 sidecar；不在 Orca 子进程 → import orca.chart 失败 → 脚本自 WARN exit 0）。
-      6. **额外**经 render_chart 推一张终态对比 bar（label=`struct-explore`, title=`Baseline vs Champion vs Final`）：
-         三柱 baseline / champion / final 的 latency(ms)，accuracy 写进每行。
-         champion latency/accuracy 取 champions.jsonl 最后一行；final 用本节点 step 3/2 实测；
-         baseline 用 `{{ setup.output.baseline_latency_ms }}` / `{{ setup.output.baseline_accuracy }}`。
-         ORCA_* env 沿链继承，**所有数值用 Jinja 取自 setup.output / champions / 本节点实测，无 <...> 占位**：
+      6. **终态可视化 step B（对比 bar，SPEC §3.4 D1=b）**——调 `viz_struct.py --mode compare` 推
+         baseline / champion / final 三柱 latency bar（替代原 inline `python3 -c` 块）：
+         ```bash
+         VIZ_CMP_STDOUT=$(python3 "{{ setup.output.struct_scripts_dir }}/viz_struct.py" \
+           --mode compare \
+           --champions "{{ setup.output.champions_path }}" \
+           --baseline_latency_ms "{{ setup.output.baseline_latency_ms }}" \
+           --baseline_accuracy "{{ setup.output.baseline_accuracy }}" \
+           --final_latency_ms "<step3 final_latency_ms>" \
+           --final_accuracy "<step2 final_accuracy>" \
+           || true)
+         ```
+         final 两值由本节点 step 2/3 实测算出后作 CLI 参数传入（**不再替换 inline 占位**）。
+         champion latency/accuracy 由脚本内部从 champions.jsonl 最后一行读取。
+      7. **合并 viz_status（dumb copy stdout JSON，零合成零解读）**——把 step A/B 两个 stdout JSON 合并成
+         `output.viz_status`（**必填字段**，缺 → output_schema 校验 fail loud）：
          ```bash
          python3 -c "
          import json
-         from orca.chart import render_chart
-         champs = [json.loads(l) for l in open('{{ setup.output.champions_path }}') if l.strip()]
-         last_champ = champs[-1] if champs else {}
-         champ_lat = last_champ.get('latency_ms', 0)
-         champ_acc = last_champ.get('accuracy')
-         rows = [
-           {'stage':'baseline','latency_ms':{{ setup.output.baseline_latency_ms }},'accuracy':{{ setup.output.baseline_accuracy }}},
-           {'stage':'champion','latency_ms':champ_lat,'accuracy':champ_acc},
-           {'stage':'final','latency_ms':<step3 final_latency_ms>,'accuracy':<step2 final_accuracy>},
-         ]
-         render_chart(chart_type='bar', label='struct-explore', title='Baseline vs Champion vs Final',
-                      data=rows, x='stage', y='latency_ms', hue='stage',
-                      x_label='阶段', y_label='时延 (ms)',
-                      caption='baseline → champion（搜索中 running min）→ final（从头重训后）的时延对比')
-         " || true
+         a = json.loads(__import__('sys').argv[1])
+         b = json.loads(__import__('sys').argv[2])
+         # env_status 取两边最坏值（任一非 ok 即报非 ok；防 step A/B 因 env 异步出现状态分歧）
+         ae, be = a.get('viz_env_status', 'generic'), b.get('viz_env_status', 'generic')
+         env_status = ae if ae != 'ok' else be
+         merged = {
+           'env_status': env_status,
+           'charts': {**a.get('charts', {}), **b.get('charts', {})},
+         }
+         print(json.dumps(merged, ensure_ascii=False))
+         " "$VIZ_THREE_STDOUT" "$VIZ_CMP_STDOUT"
          ```
-         （仅 `<step3 final_latency_ms>` / `<step2 final_accuracy>` 两处需用本节点实测值替换；
-         baseline 字段全 Jinja 取，**accuracy 缺失时省略该键**。）
+         把 stdout 原样作为 `viz_status` 字段填进输出 JSON。**失败值（env_missing/generic 等）合法产出**，
+         不阻断 finalize（viz 是 sidecar）；step 4 的 `final_report.md` 顶部 `## 可视化产出` 段据 `viz_status`
+         标注成功 / ⚠️ 失败原因。
 
       ## 输出（**必须是合法 JSON 对象**，严格匹配上方 output_schema；非 JSON → fail loud）
       ```json
-      {"final_model": "<绝对路径>", "final_onnx": "<绝对路径>", "final_latency_ms": <数>, "final_accuracy": <数>, "final_report": "<final_report.md 绝对路径>"}
+      {"final_model": "<绝对路径>", "final_onnx": "<绝对路径>", "final_latency_ms": <数>, "final_accuracy": <数>, "final_report": "<final_report.md 绝对路径>",
+       "viz_status": {"env_status": "<ok|env_loaded_from_file|env_missing|import_failed|generic>",
+                      "charts": {"<图名>": {"pushed": <bool>, "reason": "<str>"}, ...}}}
       ```
     routes:
       - to: $end

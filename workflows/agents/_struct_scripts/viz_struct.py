@@ -13,27 +13,52 @@ P7 重设计（2026-07-22）：
     - Round Ledger（每轮 1 候选无聚合价值，混淆 candidate 维度）
     - Exploration Tree（scatter 充数；path 恒 p1，零信息量）
 
+鲁棒出图 + 失败告知 agent（2026-07-23 SPEC §3.2/§3.4）：
+  - **自加载 env**：in-session 下子代理 bash 不一定有 ORCA_* env（opencode bash 不跨调用保 env）。
+    render_all 开头从 ledger 路径向上找 ``orca_env.sh``，补 4 个身份键进 ``os.environ``——
+    让 ``render_chart`` core 零改动（铁律 #2 不破）。
+  - **stdout JSON 升级**：顶层加 ``viz_env_status``（ok/env_loaded_from_file/env_missing/
+    import_failed/generic），``charts[name]`` 从 ``{pushed}`` → ``{pushed, reason}``。
+    reason 分类（env_missing / socket_unreachable / ack_failed / data_insufficient /
+    import_failed / generic:<Type>:<msg>）让 agent dumb copy 后「知道」失败原因。
+  - **``--mode compare``**：仅推终态 Baseline vs Champion vs Final bar（替代 inline ``python3 -c``
+    块；final 两值经 CLI 参数传入，不再替换 inline 占位）。两模式共享 stdout schema + 自加载
+    + ``_main`` 兜底 + import try/except。
+  - **``_main`` 兜底（B1 命门）**：进程级异常被 catch 后，先构造 fallback result（generic +
+    charts 全 ``{pushed:false, reason:"generic:<Type>:<msg>"}``），先 ``print+flush`` 再
+    ``return 2``——stdout 永远有合法 JSON，agent dumb copy 不依赖 LLM 合成。
+
 纪律：
   - 仅用 ``orca.chart.render_chart``；**不输出任何 HTML 文件**（用户共识 2026-07-18：
     workflow 不产 HTML，所有可视化走 orca 原生 render_chart）。
   - 数据不足（ledger < 2 行 / 必备字段缺失 / 无有效数据点）→ **该图跳过**（stderr WARN，
-    不报错、不阻断）。
+    reason=data_insufficient，不报错、不阻断）。
   - 同 label="struct-explore" 下每图用唯一 title；同 title 再推 = 刷新（实时更新语义）。
-  - 不在 Orca 子进程内（无 ORCA_* env → import orca.chart 失败）→ 整体跳过，stderr 提示。
+  - 不在 Orca 子进程内（无 ORCA_* env → import orca.chart 失败）→ 整体跳过，viz_env_status=
+    import_failed，所有图 reason=import_failed。
   - 确定性脚本：无 LLM、无网络、不读时钟、不读随机。
-  - fail loud：仅 I/O 或参数硬错时非零退出；数据问题永远 exit 0。
+  - fail loud：仅 I/O 或参数硬错时非零退出（exit 2）；数据问题永远 exit 0。exit 2 时 stdout
+    **必有合法 JSON**（``_main`` 兜底，B1 命门）。
 
 CLI：
+    # 默认模式（三图）
     viz_struct.py \\
       --ledger <path> --champions <path> \\
       --baseline_latency_ms <f> --baseline_accuracy <f> \\
       --target_latency_ms <f> --accuracy_target <f>
+
+    # compare 模式（仅终态对比 bar）
+    viz_struct.py --mode compare \\
+      --champions <path> \\
+      --baseline_latency_ms <f> --baseline_accuracy <f> \\
+      --final_latency_ms <f> --final_accuracy <f>
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -44,6 +69,13 @@ try:
     from orca.chart import render_chart as _orca_render_chart
 except ImportError:
     _orca_render_chart = None
+
+# orca.chart._env：确定性 env 自加载（SPEC 2026-07-23 §3.1）。与 ``orca.chart`` 同包，
+# 同包可 import 时本 import 也会成功；不可用时（headless / 自定义环境）降级走 import_failed。
+try:
+    from orca.chart._env import load_run_env_from_artifacts as _load_run_env
+except ImportError:
+    _load_run_env = None
 
 
 # ── 常量 ─────────────────────────────────────────────────────────────────────
@@ -110,6 +142,57 @@ def _clean_ledger(ledger: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return clean
 
 
+# ── env 自加载 + reason 分类（SPEC 2026-07-23 §3.1/§3.2）──────────────────────
+
+
+def _classify_exc(e: Exception) -> str:
+    """把 ``render_chart`` 抛的异常映射到稳定的 reason 字符串（SPEC §3.2）。
+
+    ``_render.py`` 把底层 socket 错误包成 ``RuntimeError``，viz_struct 这层按**消息内容**
+    分类（类型已统一成 RuntimeError / ValueError）：
+
+    - ``无法连接 Orca chart socket``（``_render.py:173-182`` 转自 FileNotFoundError /
+      ConnectionRefusedError）→ ``socket_unreachable``。
+    - ack 类（``_render.py:183-211``：ack 超时 / socket 关闭无 ack / ack 非 JSON / 拒收 /
+      缺 seq）→ ``ack_failed``。
+    - half-injection 兜底：SOCK 已注但其他 3 键缺时，``_render.py:97-101`` 抛
+      ``缺 ORCA_* env`` → ``env_missing``（更精确归因；SPEC §3.1 KISS 决策只在
+      ``_resolve_env_status`` 看 SOCK 单键，归类精度在此兜底）。
+    - 其余（payload 校验 / 大小超限 / sock path 过长 / 未知）→ ``generic:<Type>:<msg>``。
+    """
+    msg = str(e)
+    if "无法连接" in msg:
+        return "socket_unreachable"
+    # ack 类：消息含 ``ack``（超时/未收到/非 JSON/缺 seq）或 ``拒收``（ok=False）。
+    if "ack" in msg.lower() or "拒收" in msg:
+        return "ack_failed"
+    # half-injection 兜底：SOCK 在但其他 3 键缺（_render.py:97-101 raise 内容）。
+    if "缺 ORCA_* env" in msg or "不在 Orca run 上下文中" in msg:
+        return "env_missing"
+    return f"generic:{type(e).__name__}:{msg}"
+
+
+def _resolve_env_status(anchor_path: Path) -> str:
+    """求 ``viz_env_status``（SPEC §3.2）：ok / env_loaded_from_file / env_missing / import_failed。
+
+    - ``orca.chart`` 不可用（``_orca_render_chart is None``）或自加载 helper 不可用 → import_failed。
+    - ``ORCA_CHART_SOCK`` 已在 env（真 orca-run / ClaudeExecutor spawn 路径）→ ok。
+    - 否则从 anchor_path 向上找 ``orca_env.sh`` 自加载；加载后 env 出现 SOCK → env_loaded_from_file；
+      找不到 / 文件无 SOCK 行 → env_missing。
+
+    本函数不改 env 副作用语义——``load_run_env_from_artifacts`` 把键写进 ``os.environ``，
+    调用方此后照常 ``render_chart`` 从 env 读。
+    """
+    if _orca_render_chart is None or _load_run_env is None:
+        return "import_failed"
+    if os.environ.get("ORCA_CHART_SOCK"):
+        return "ok"
+    _load_run_env(anchor_path)
+    if os.environ.get("ORCA_CHART_SOCK"):
+        return "env_loaded_from_file"
+    return "env_missing"
+
+
 # ── 三张图 → render_chart ────────────────────────────────────────────────────
 
 
@@ -117,14 +200,17 @@ def _push_champion_trace(
     ledger: list[dict[str, Any]],
     champions: list[dict[str, Any]],
     target_latency_ms: float,
-) -> bool:
+) -> tuple[bool, str]:
     """图1：候选灰点 + champion 轨迹（running min）。x=ledger 行序, y=latency_ms, hue=series。
 
     P1 已加 x_label/y_label/caption（候选序号 / 时延 ms / 图下说明）。
+
+    返回 ``(pushed, reason)``（SPEC §3.2）：成功 ``(True, "")``；数据不足
+    ``(False, "data_insufficient")``；``render_chart`` 异常 ``(False, _classify_exc(e))``。
     """
     if len(ledger) < _MIN_ROWS:
         print(f"[viz_struct] WARN: 跳过 champion_trace：ledger 行数 {len(ledger)} < {_MIN_ROWS}", file=sys.stderr)
-        return False
+        return False, "data_insufficient"
 
     data: list[dict[str, Any]] = []
     for i, e in enumerate(ledger):
@@ -160,24 +246,28 @@ def _push_champion_trace(
 
     if not data:
         print("[viz_struct] WARN: 跳过 champion_trace：无有效 latency 数据点", file=sys.stderr)
-        return False
+        return False, "data_insufficient"
 
-    _orca_render_chart(
-        chart_type="line",
-        data=data,
-        label=_LABEL,
-        title="Champion Trace",
-        x="index",
-        y="latency_ms",
-        hue="series",
-        x_label="候选序号（账本行）",
-        y_label="时延 (ms)",
-        caption=(
-            f"每轮候选的实测时延（灰点）与 champion 轨迹（彩线，running min）。"
-            f" 目标时延 {target_latency_ms} ms（champion 轨迹越靠近/低于此线越达标）。"
-        ),
-    )
-    return True
+    try:
+        _orca_render_chart(
+            chart_type="line",
+            data=data,
+            label=_LABEL,
+            title="Champion Trace",
+            x="index",
+            y="latency_ms",
+            hue="series",
+            x_label="候选序号（账本行）",
+            y_label="时延 (ms)",
+            caption=(
+                f"每轮候选的实测时延（灰点）与 champion 轨迹（彩线，running min）。"
+                f" 目标时延 {target_latency_ms} ms（champion 轨迹越靠近/低于此线越达标）。"
+            ),
+        )
+    except Exception as e:
+        print(f"[viz_struct] WARN: champion_trace 推送异常：{type(e).__name__}: {e}", file=sys.stderr)
+        return False, _classify_exc(e)
+    return True, ""
 
 
 def _push_pareto(
@@ -185,15 +275,17 @@ def _push_pareto(
     baseline_latency_ms: float,
     baseline_accuracy: float,
     accuracy_target: float,
-) -> bool:
+) -> tuple[bool, str]:
     """图2：latency(x) vs accuracy(y)，hue=status。pareto_x=min, pareto_y=max。
 
     P7 修复 y=0 根因：过滤 accuracy is None 行（FAIL_latency 候选 accuracy=-1 → None，
     之前被前端渲染成 0 导致 y=0）。FAIL_export 的 latency=-1 已在 lat<0 过滤剔除。
+
+    返回 ``(pushed, reason)``（SPEC §3.2，与 ``_push_champion_trace`` 同款契约）。
     """
     if len(ledger) < _MIN_ROWS:
         print(f"[viz_struct] WARN: 跳过 pareto：ledger 行数 {len(ledger)} < {_MIN_ROWS}", file=sys.stderr)
-        return False
+        return False, "data_insufficient"
 
     data: list[dict[str, Any]] = []
     none_acc_skipped = 0
@@ -220,40 +312,46 @@ def _push_pareto(
         )
     if not data:
         print("[viz_struct] WARN: 跳过 pareto：无有效 (latency, accuracy) 数据点", file=sys.stderr)
-        return False
+        return False, "data_insufficient"
 
-    _orca_render_chart(
-        chart_type="pareto",
-        data=data,
-        label=_LABEL,
-        title="Latency-Accuracy Pareto",
-        x="latency_ms",
-        y="accuracy",
-        hue="status",
-        pareto_x_direction="min",
-        pareto_y_direction="max",
-        x_label="时延 (ms，越低越好)",
-        y_label="精度 (越高越好)",
-        caption=(
-            f"每候选实测 latency vs accuracy；Pareto 前沿（双最优）。"
-            f" baseline={baseline_latency_ms} ms / acc={baseline_accuracy}；"
-            f" 目标 acc≥{accuracy_target}。"
-        ),
-    )
-    return True
+    try:
+        _orca_render_chart(
+            chart_type="pareto",
+            data=data,
+            label=_LABEL,
+            title="Latency-Accuracy Pareto",
+            x="latency_ms",
+            y="accuracy",
+            hue="status",
+            pareto_x_direction="min",
+            pareto_y_direction="max",
+            x_label="时延 (ms，越低越好)",
+            y_label="精度 (越高越好)",
+            caption=(
+                f"每候选实测 latency vs accuracy；Pareto 前沿（双最优）。"
+                f" baseline={baseline_latency_ms} ms / acc={baseline_accuracy}；"
+                f" 目标 acc≥{accuracy_target}。"
+            ),
+        )
+    except Exception as e:
+        print(f"[viz_struct] WARN: pareto 推送异常：{type(e).__name__}: {e}", file=sys.stderr)
+        return False, _classify_exc(e)
+    return True, ""
 
 
-def _push_candidate_table(ledger: list[dict[str, Any]]) -> bool:
+def _push_candidate_table(ledger: list[dict[str, Any]]) -> tuple[bool, str]:
     """图3：逐候选明细表（P7 精简）。
 
     列 = round / id / tag / latency_ms / accuracy / status / one_line_summary。
     - **短字段** 留 table 列；长 hypothesis 不直接展（前端 wrap 难读），放 hover 字段
       ``hypothesis``（前端 tooltip）。
     - one_line_summary = 取 hypothesis / diff_summary 首行 / 截断前 80 字符。
+
+    返回 ``(pushed, reason)``（SPEC §3.2，与 ``_push_champion_trace`` 同款契约）。
     """
     if len(ledger) < _MIN_ROWS:
         print(f"[viz_struct] WARN: 跳过 candidate_table：ledger 行数 {len(ledger)} < {_MIN_ROWS}", file=sys.stderr)
-        return False
+        return False, "data_insufficient"
 
     def _one_line(s: str, n: int = 80) -> str:
         s = (s or "").strip()
@@ -282,18 +380,73 @@ def _push_candidate_table(ledger: list[dict[str, Any]]) -> bool:
         })
     rows.sort(key=lambda r: r["round"])
 
-    _orca_render_chart(
-        chart_type="table",
-        data=rows,
-        label=_LABEL,
-        title="Candidate Ledger (per change)",
-        columns=["round", "id", "tag", "latency_ms", "accuracy", "status", "one_line_summary"],
-        caption=(
-            "每候选一行（短字段）。hypothesis 完整文本在 hover 字段；"
-            "accuracy 为 None/-1 = 未训练（FAIL_latency/FAIL_export）。"
-        ),
-    )
-    return True
+    try:
+        _orca_render_chart(
+            chart_type="table",
+            data=rows,
+            label=_LABEL,
+            title="Candidate Ledger (per change)",
+            columns=["round", "id", "tag", "latency_ms", "accuracy", "status", "one_line_summary"],
+            caption=(
+                "每候选一行（短字段）。hypothesis 完整文本在 hover 字段；"
+                "accuracy 为 None/-1 = 未训练（FAIL_latency/FAIL_export）。"
+            ),
+        )
+    except Exception as e:
+        print(f"[viz_struct] WARN: candidate_table 推送异常：{type(e).__name__}: {e}", file=sys.stderr)
+        return False, _classify_exc(e)
+    return True, ""
+
+
+# ── 终态对比 bar（--mode compare，SPEC §3.4）────────────────────────────────
+
+
+def _push_compare_bar(
+    champions: list[dict[str, Any]],
+    baseline_latency_ms: float,
+    baseline_accuracy: float,
+    final_latency_ms: float,
+    final_accuracy: float,
+) -> tuple[bool, str]:
+    """终态对比 bar：baseline / champion / final 的 latency，accuracy 写进每行。
+
+    取代 finalize step6 的 inline ``python3 -c`` 块（SPEC §3.4 D1=b）：
+    - champion latency/accuracy 取 ``champions.jsonl`` 最后一行。
+    - baseline 经 CLI 传（Jinja 取自 ``setup.output.baseline_*``）。
+    - final 经 CLI 传（本节点 step 2/3 算出，**不再替换 inline 占位**）。
+
+    返回 ``(pushed, reason)``（SPEC §3.2，与三图 pusher 同款契约）。空 champions
+    （全失败的 run）→ ``data_insufficient``（与三图空数据同款语义，不推误导性占位图）。
+    """
+    if not champions:
+        print("[viz_struct] WARN: 跳过 compare_bar：champions.jsonl 为空（全失败 run）", file=sys.stderr)
+        return False, "data_insufficient"
+    last_champ = champions[-1]
+    champ_lat = _to_float(last_champ.get("latency_ms"))
+    champ_acc = _to_float(last_champ.get("accuracy"))
+    rows = [
+        {"stage": "baseline", "latency_ms": baseline_latency_ms, "accuracy": baseline_accuracy},
+        # champion latency/accuracy 缺失时 None（前端 tooltip 自洽，不写 0 误导成「不可能的优秀值」）。
+        {"stage": "champion", "latency_ms": champ_lat, "accuracy": champ_acc},
+        {"stage": "final", "latency_ms": final_latency_ms, "accuracy": final_accuracy},
+    ]
+    try:
+        _orca_render_chart(
+            chart_type="bar",
+            label=_LABEL,
+            title="Baseline vs Champion vs Final",
+            data=rows,
+            x="stage",
+            y="latency_ms",
+            hue="stage",
+            x_label="阶段",
+            y_label="时延 (ms)",
+            caption="baseline → champion（搜索中 running min）→ final（从头重训后）的时延对比",
+        )
+    except Exception as e:
+        print(f"[viz_struct] WARN: compare_bar 推送异常：{type(e).__name__}: {e}", file=sys.stderr)
+        return False, _classify_exc(e)
+    return True, ""
 
 
 # ── 主入口 ─────────────────────────────────────────────────────────────────
@@ -308,20 +461,39 @@ def render_all(
     target_latency_ms: float,
     accuracy_target: float,
 ) -> dict[str, Any]:
-    """推三张图到 Orca Web 面板。返回 {chart: pushed_bool}。无 HTML 产物。"""
-    if _orca_render_chart is None:
-        print("[viz_struct] WARN: orca.chart 不可用，跳过全部 web push（非 Orca 子进程？）", file=sys.stderr)
+    """推三张图到 Orca Web 面板。返回 stdout JSON schema（SPEC §3.2 升级）。
+
+    返回结构（agent dumb copy 写进 ``output.viz_status``，零合成）::
+
+        {
+          "viz_env_status": "ok|env_loaded_from_file|env_missing|import_failed",
+          "ledger_rows": int, "champion_rows": int,
+          "charts": {<name>: {"pushed": bool, "reason": str}, ...}
+        }
+
+    - ``viz_env_status`` 由 ``_resolve_env_status`` 算（env 已注=ok；自加载成功=
+      env_loaded_from_file；自加载后仍缺=env_missing；orca.chart 不可用=import_failed）。
+    - env_missing / import_failed 时所有图 reason 对应 ``env_missing`` / ``import_failed``，
+      不调 ``render_chart``（sidecar 不阻断）。
+    - 数据不足（ledger 空 / 无有效点）→ reason=data_insufficient。
+    """
+    viz_env_status = _resolve_env_status(Path(ledger_path))
 
     ledger = _clean_ledger(_read_jsonl(ledger_path, kind="ledger"))
     champions = _read_jsonl(champions_path, kind="champions")
 
     results: dict[str, Any] = {
+        "viz_env_status": viz_env_status,
         "ledger_rows": len(ledger),
         "champion_rows": len(champions),
         "charts": {},
     }
 
-    if _orca_render_chart is None or not ledger:
+    # import_failed：orca.chart 不可用 → 三图均跳过，reason=import_failed。
+    if viz_env_status == "import_failed":
+        print("[viz_struct] WARN: orca.chart 不可用，跳过全部 web push（非 Orca 子进程？）", file=sys.stderr)
+        for name in ("champion_trace", "pareto", "candidate_table"):
+            results["charts"][name] = {"pushed": False, "reason": "import_failed"}
         return results
 
     pushers = [
@@ -330,51 +502,154 @@ def render_all(
         ("candidate_table", lambda: _push_candidate_table(ledger)),
     ]
     for name, fn in pushers:
-        try:
-            ok = fn()
-        except Exception as e:  # 单图异常不影响其他图（sidecar 不阻断主循环）。
-            print(f"[viz_struct] WARN: 推送 {name} 异常，跳过：{type(e).__name__}: {e}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-            ok = False
-        results["charts"][name] = {"pushed": bool(ok)}
+        # env_missing：自加载后 env 仍缺 ORCA_CHART_SOCK → 不调 render_chart，直接 env_missing。
+        # 数据空（ledger=0）→ pusher 内部判 data_insufficient（不调 render_chart）。
+        if viz_env_status == "env_missing":
+            results["charts"][name] = {"pushed": False, "reason": "env_missing"}
+            continue
+        pushed, reason = fn()
+        results["charts"][name] = {"pushed": pushed, "reason": reason}
 
     return results
 
 
+def render_compare(
+    *,
+    champions_path: str,
+    baseline_latency_ms: float,
+    baseline_accuracy: float,
+    final_latency_ms: float,
+    final_accuracy: float,
+) -> dict[str, Any]:
+    """``--mode compare``：仅推终态 Baseline vs Champion vs Final bar（SPEC §3.4）。
+
+    共享 stdout JSON schema（``viz_env_status`` + ``charts.<name>.{pushed,reason}``），
+    共享 ``_resolve_env_status`` 自加载 + ``_main`` 兜底 + import try/except。
+    锚点用 ``champions_path``（compare 模式无 ledger 入参， champions 是本模式唯一产物路径）。
+    """
+    viz_env_status = _resolve_env_status(Path(champions_path))
+    champions = _read_jsonl(champions_path, kind="champions")
+
+    results: dict[str, Any] = {
+        "viz_env_status": viz_env_status,
+        "champion_rows": len(champions),
+        "charts": {},
+    }
+
+    if viz_env_status == "import_failed":
+        print("[viz_struct] WARN: orca.chart 不可用，跳过 compare_bar（非 Orca 子进程？）", file=sys.stderr)
+        results["charts"]["compare_bar"] = {"pushed": False, "reason": "import_failed"}
+        return results
+    if viz_env_status == "env_missing":
+        results["charts"]["compare_bar"] = {"pushed": False, "reason": "env_missing"}
+        return results
+
+    pushed, reason = _push_compare_bar(
+        champions,
+        baseline_latency_ms=baseline_latency_ms,
+        baseline_accuracy=baseline_accuracy,
+        final_latency_ms=final_latency_ms,
+        final_accuracy=final_accuracy,
+    )
+    results["charts"]["compare_bar"] = {"pushed": pushed, "reason": reason}
+    return results
+
+
+def _build_main_fallback(exc: Exception, *, compare_mode: bool) -> dict[str, Any]:
+    """``_main`` 异常兜底（B1 命门）：构造 deterministic stdout JSON 让 agent dumb copy。
+
+    SPEC §3.2 B1：进程级异常路径下 stdout **必有合法 JSON**——``viz_env_status="generic"`` +
+    所有图 ``{pushed:false, reason:"generic:<Type>:<msg>"}``。default 模式填三图，compare 模式
+    填 ``compare_bar``。退出码仍返 2（进程级失败信号保留），但 agent 已能 dumb copy。
+    """
+    err_reason = f"generic:{type(exc).__name__}:{exc}"
+    if compare_mode:
+        charts = {"compare_bar": {"pushed": False, "reason": err_reason}}
+    else:
+        charts = {
+            name: {"pushed": False, "reason": err_reason}
+            for name in ("champion_trace", "pareto", "candidate_table")
+        }
+    return {"viz_env_status": "generic", "charts": charts}
+
+
 def _main() -> int:
     parser = argparse.ArgumentParser(
-        description="草稿 §12 三张图（P7 精简自原五张；orca.chart render_chart 推送，无 HTML 产物）。"
+        description=(
+            "草稿 §12 三张图（P7 精简自原五张；orca.chart render_chart 推送，无 HTML 产物）。"
+            " 2026-07-23 SPEC §3.2/§3.4：加 viz_env_status / charts.reason / --mode compare / _main 兜底。"
+        )
     )
-    parser.add_argument("--ledger", required=True, help="ledger.jsonl 路径")
+    parser.add_argument(
+        "--mode", choices=["default", "compare"], default="default",
+        help="default=三图（Champion Trace / Pareto / Candidate Ledger）；compare=仅终态对比 bar。",
+    )
+    parser.add_argument("--ledger", required=False, help="ledger.jsonl 路径（default 模式必填）")
     parser.add_argument("--champions", required=True, help="champions.jsonl 路径")
     parser.add_argument("--baseline_latency_ms", type=float, required=True)
     parser.add_argument("--baseline_accuracy", type=float, required=True)
-    parser.add_argument("--target_latency_ms", type=float, required=True)
-    parser.add_argument("--accuracy_target", type=float, required=True)
-    parser.add_argument(
-        "--out_dir",
-        required=False,
-        default=None,
-        help="(已废弃) 历史遗留参数，不再写 HTML；保留以兼容旧调用。",
-    )
+    # default 模式必填（target_latency_ms / accuracy_target）。
+    parser.add_argument("--target_latency_ms", type=float, required=False)
+    parser.add_argument("--accuracy_target", type=float, required=False)
+    # compare 模式必填（final 实测两值，SPEC §3.4：经 CLI 参数传入，不替换 inline 占位）。
+    parser.add_argument("--final_latency_ms", type=float, required=False)
+    parser.add_argument("--final_accuracy", type=float, required=False)
     args = parser.parse_args()
 
+    compare_mode = args.mode == "compare"
+
+    # 模式专属必填参数校验（argparse 无法跨参数表达「mode=A 时 X 必填」→ 手动 fail loud）。
+    if compare_mode:
+        missing = [
+            n for n, v in (
+                ("--final_latency_ms", args.final_latency_ms),
+                ("--final_accuracy", args.final_accuracy),
+            ) if v is None
+        ]
+        if missing:
+            parser.error(f"--mode compare 必填：{', '.join(missing)}")
+    else:
+        missing = [
+            n for n, v in (
+                ("--ledger", args.ledger),
+                ("--target_latency_ms", args.target_latency_ms),
+                ("--accuracy_target", args.accuracy_target),
+            ) if v is None
+        ]
+        if missing:
+            parser.error(f"--mode default 必填：{', '.join(missing)}")
+
     try:
-        result = render_all(
-            ledger_path=args.ledger,
-            champions_path=args.champions,
-            baseline_latency_ms=args.baseline_latency_ms,
-            baseline_accuracy=args.baseline_accuracy,
-            target_latency_ms=args.target_latency_ms,
-            accuracy_target=args.accuracy_target,
-        )
+        if compare_mode:
+            result = render_compare(
+                champions_path=args.champions,
+                baseline_latency_ms=args.baseline_latency_ms,
+                baseline_accuracy=args.baseline_accuracy,
+                final_latency_ms=args.final_latency_ms,
+                final_accuracy=args.final_accuracy,
+            )
+        else:
+            result = render_all(
+                ledger_path=args.ledger,
+                champions_path=args.champions,
+                baseline_latency_ms=args.baseline_latency_ms,
+                baseline_accuracy=args.baseline_accuracy,
+                target_latency_ms=args.target_latency_ms,
+                accuracy_target=args.accuracy_target,
+            )
     except Exception as e:
-        # 仅 I/O / 参数硬错 → 非零退出（fail loud）。数据不足已在内部 WARN 兜底。
+        # _main 兜底（B1 命门，SPEC §3.2）：stdout 必有合法 JSON → agent dumb copy。
+        # 退出码保留 2（进程级失败信号）；先 print+flush 再 return（防被后续异常截断）。
         print(f"[viz_struct] FAIL: {type(e).__name__}: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
+        fallback = _build_main_fallback(e, compare_mode=compare_mode)
+        print(json.dumps(fallback, ensure_ascii=False, indent=2))
+        sys.stdout.flush()
         return 2
 
+    # 成功路径也 flush（与 fallback 对称；防父进程 pipe 早关 / SIGKILL 截断）。
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    sys.stdout.flush()
     return 0
 
 

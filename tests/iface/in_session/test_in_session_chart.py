@@ -626,6 +626,90 @@ def test_next_does_not_respawn_when_terminal(
     _wait_sock_gone(chart_sock_path(run_id), timeout=8.0)
 
 
+# ── AC9（SPEC 2026-07-23 §6）：ORCA_NODE 漂移 invariant ──────────────────────
+
+
+def test_next_rewrites_env_file_with_next_node_name(cwd_tmp, cleanup_leftover_sockets):
+    """AC9：``orca next`` 推进后，env 文件 ``ORCA_NODE`` 行 == 返回的下一节点名。
+
+    SPEC §5 E4「host 串行契约」：subagent 完成（output 落 tape）后 host 才调 ``orca next``，
+    env 文件无并发读。``cli.py:1488`` next 路径按下一节点身份重写 ``orca_env.sh``（含 ORCA_NODE），
+    但写入发生在 subagent 已退出之后，子代理不会读到错节点身份的 env。本测试钉死该不变量。
+
+    防回归场景：next 写 env 时取错字段（如本节点名而非下一节点名）/ 忘写 / 在终态误写。
+    """
+    wf = cwd_tmp / "wf.yaml"
+    wf.write_text(textwrap.dedent("""
+        name: ac9_wf
+        description: ORCA_NODE rewrite invariant
+        entry: starter
+        nodes:
+          - name: starter
+            kind: agent
+            executor: opencode
+            model: deepseek/deepseek-v4-flash
+            prompt: "做 S。"
+            routes:
+              - to: middle
+          - name: middle
+            kind: agent
+            executor: opencode
+            model: deepseek/deepseek-v4-flash
+            prompt: "做 M。"
+            routes:
+              - to: finisher
+          - name: finisher
+            kind: agent
+            executor: opencode
+            model: deepseek/deepseek-v4-flash
+            prompt: "做 F。"
+            routes:
+              - to: $end
+    """), encoding="utf-8")
+
+    runner = CliRunner()
+    reply = _bootstrap(runner, wf)
+    run_id = reply["run_id"]
+    env_path = cwd_tmp / "runs" / run_id / "orca_env.sh"
+    assert env_path.is_file(), f"env 文件未写出：{env_path}"
+
+    # 断言 1：bootstrap 后 env 文件 ORCA_NODE = entry 节点（starter）
+    env_content = env_path.read_text(encoding="utf-8")
+    assert "ORCA_NODE=starter" in env_content, f"bootstrap 后 ORCA_NODE 应=starter：\n{env_content}"
+
+    # 推进 starter → middle：env 文件应重写为 ORCA_NODE=middle
+    reply2 = _next(runner, run_id, "starter output")
+    assert reply2.get("node") == "middle", f"next 应推进到 middle；got {reply2}"
+    env_content = env_path.read_text(encoding="utf-8")
+    assert "ORCA_NODE=middle" in env_content, (
+        f"next 推进到 middle 后 env 文件 ORCA_NODE 应=middle（host 串行契约 E4）：\n{env_content}"
+    )
+    # ORCA_RUN_ID / SOCK 应保持不变（per-run 常量，不随节点漂移）
+    assert f"ORCA_RUN_ID={run_id}" in env_content
+    expected_sock = str(chart_sock_path(run_id))
+    assert f"ORCA_CHART_SOCK={expected_sock}" in env_content or f"ORCA_CHART_SOCK='{expected_sock}'" in env_content, (
+        f"ORCA_CHART_sock 应保持 per-run 常量：\n{env_content}"
+    )
+
+    # 推进 middle → finisher：env 文件应重写为 ORCA_NODE=finisher
+    reply3 = _next(runner, run_id, "middle output")
+    assert reply3.get("node") == "finisher", f"next 应推进到 finisher；got {reply3}"
+    env_content = env_path.read_text(encoding="utf-8")
+    assert "ORCA_NODE=finisher" in env_content, (
+        f"next 推进到 finisher 后 env 文件 ORCA_NODE 应=finisher：\n{env_content}"
+    )
+
+    # 推进 finisher → $end（终态）：env 文件不应再被重写（无下一节点）
+    reply4 = _next(runner, run_id, "finisher output")
+    assert reply4.get("done") is True, f"应终态；got {reply4}"
+    env_after_terminal = env_path.read_text(encoding="utf-8")
+    assert "ORCA_NODE=finisher" in env_after_terminal, (
+        f"终态 next 不应重写 env 文件（无下一节点）：\n{env_after_terminal}"
+    )
+
+    _wait_sock_gone(chart_sock_path(run_id), timeout=8.0)
+
+
 # ── 守护自退 + socket 清理 ────────────────────────────────────────────────────
 
 

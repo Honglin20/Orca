@@ -131,12 +131,32 @@ class TestVizStructP7:
         # 备份 sys.modules 中 orca 相关模块（mock 后必须还原，否则污染同 session 后续测试）
         self._saved_orca = sys.modules.get("orca")
         self._saved_orca_chart = sys.modules.get("orca.chart")
+        self._saved_orca_chart_env = sys.modules.get("orca.chart._env")
+        # 备份 ORCA_* env（2026-07-23 鲁棒出图后 viz_struct 走 _resolve_env_status；
+        # 不设 env 会进入 env_missing 路径不调 render_chart → 老 P7 测试全 fail）
+        self._saved_env = {k: v for k, v in os.environ.items() if k.startswith("ORCA_")}
+        for k in list(os.environ):
+            if k.startswith("ORCA_"):
+                del os.environ[k]
+        # preset env 让 _resolve_env_status 返 ok（mock 路径下不真连 socket）
+        os.environ["ORCA_RUN_ID"] = "test-run"
+        os.environ["ORCA_NODE"] = "test-node"
+        os.environ["ORCA_SESSION_ID"] = "test-sess"
+        os.environ["ORCA_CHART_SOCK"] = "/tmp/test-orca-p7.sock"
         # Mock orca.chart.render_chart to capture calls
         self.calls = []
         mock_chart = types.ModuleType("orca.chart")
         mock_chart.render_chart = lambda **kw: self.calls.append(kw)
+        # 保留真 orca.chart._env（2026-07-23 SPEC 后 viz_struct 还 lazy-import 它；
+        # 不注册会让 from orca.chart._env import 失败 → _load_run_env=None → import_failed）
+        try:
+            import orca.chart._env as real_env  # noqa: F401
+        except ImportError:
+            real_env = None
         sys.modules["orca"] = types.ModuleType("orca")
         sys.modules["orca.chart"] = mock_chart
+        if real_env is not None:
+            sys.modules["orca.chart._env"] = real_env
         sys.path.insert(0, str(STRUCT_SCRIPTS))
         # Force reload
         for mod_name in [m for m in sys.modules if m == "viz_struct"]:
@@ -156,6 +176,15 @@ class TestVizStructP7:
             sys.modules["orca.chart"] = self._saved_orca_chart
         elif "orca.chart" in sys.modules:
             del sys.modules["orca.chart"]
+        if self._saved_orca_chart_env is not None:
+            sys.modules["orca.chart._env"] = self._saved_orca_chart_env
+        elif "orca.chart._env" in sys.modules:
+            del sys.modules["orca.chart._env"]
+        # 还原 ORCA_* env（防 preset 泄漏到后续测试）
+        for k in list(os.environ):
+            if k.startswith("ORCA_"):
+                del os.environ[k]
+        os.environ.update(self._saved_env)
 
     def _write_ledger(self, tmp_path, rows, champions=None):
         ledger = tmp_path / "ledger.jsonl"

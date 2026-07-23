@@ -122,20 +122,33 @@ python3 "{{ setup.output.struct_scripts_dir }}/ledger_reducer.py" \
   4. 你是**唯一写 KB**的 agent（多 path 场景下避免并发写冲突，§8.2）。
   族名从 `{{ setup.output.family }}` 读；KB 根：`${ORCA_KB_DIR}`（plan §1.2：run 启动预检已确保非空，换项目可移植）。
 
-### Step 4：跑 viz_struct 三图（P7 合并 viz_round，幂等刷新）
+### Step 4：跑 viz_struct 三图（P7 合并 viz_round，幂等刷新 + SPEC 2026-07-23 失败告知）
 
-账本 append 后立即推图（实时刷新语义）：
+账本 append 后立即推图（实时刷新语义）。**dumb copy stdout JSON** 写进 `output.viz_status`
+（SPEC §3.2/§3.4：脚本 stdout 永远含合法 JSON——`_main` 兜底保证；零合成零解读）：
 ```bash
-python3 "{{ setup.output.struct_scripts_dir }}/viz_struct.py" \
+# 不要 `|| true` 盲吞：stdout 必含合法 JSON（_main 兜底）。
+# 仅 exit 2 时容忍（进程级失败；stdout 已含 generic fallback JSON → 仍能 dumb copy）。
+VIZ_STDOUT=$(python3 "{{ setup.output.struct_scripts_dir }}/viz_struct.py" \
   --ledger "{{ setup.output.ledger_path }}" \
   --champions "{{ setup.output.champions_path }}" \
   --baseline_latency_ms "{{ setup.output.baseline_latency_ms }}" \
   --baseline_accuracy "{{ setup.output.baseline_accuracy }}" \
   --target_latency_ms "{{ inputs.target_latency_ms }}" \
-  --accuracy_target "{{ setup.output.accuracy_target }}" || true
+  --accuracy_target "{{ setup.output.accuracy_target }}" \
+  || true)
+# Dumb copy：viz_env_status → env_status（rename），charts 原样透传。零合成零解读。
+VIZ_STATUS=$(python3 -c "
+import json, sys
+o = json.loads(sys.argv[1])
+print(json.dumps({'env_status': o.get('viz_env_status', 'generic'), 'charts': o.get('charts', {})}))
+" "$VIZ_STDOUT")
 ```
-从 stdout JSON 读 `charts`：每图 `pushed: true/false`。数据不足 → 该图由脚本自动跳过（stderr WARN），
-**不报错、不阻断主循环**。脚本异常（非零退出）→ 读 stderr 把关键行写进输出，仍 `|| true` 不阻断（viz 是 sidecar）。
+从 stdout JSON 读 `viz_env_status`（ok/env_loaded_from_file/env_missing/import_failed/generic）
++ `charts`：每图 `{pushed: bool, reason: str}`。失败 reason 分类（env_missing / socket_unreachable /
+ack_failed / data_insufficient / import_failed / generic:<Type>:<msg>）告知「图出没出 + 为啥」。
+**失败值合法产出**（viz 是 sidecar，不影响 continue_loop）；缺 `viz_status` 字段 → output_schema
+校验 fail loud（agent 未遵守契约）。
 
 ## 与账本的交互
 
@@ -147,5 +160,8 @@ python3 "{{ setup.output.struct_scripts_dir }}/viz_struct.py" \
 ## 输出（**必须输出合法 JSON 对象**，匹配 output_schema；continue_loop 驱动 route；非 JSON → fail loud）
 
 ```json
-{"round": <本轮轮次>, "continue_loop": true|false, "champion_id": "<当前全局 champion id>", "champion_latency_ms": <数>, "champion_accuracy": <数>, "route_mode": "exploit|explore", "terminate_reason": "champion_met|max_rounds|budget|空"}
+{"round": <本轮轮次>, "continue_loop": true|false, "champion_id": "<当前全局 champion id>", "champion_latency_ms": <数>, "champion_accuracy": <数>, "route_mode": "exploit|explore", "terminate_reason": "champion_met|max_rounds|budget|空",
+ "viz_status": {"env_status": "<ok|env_loaded_from_file|env_missing|import_failed|generic>",
+                "charts": {"<图名>": {"pushed": <bool>, "reason": "<str>"}, ...}}}
 ```
+`viz_status` 由 Step 4 dumb copy 而来（**必填**；失败值合法，不影响 continue_loop）。
