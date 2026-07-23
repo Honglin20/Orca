@@ -715,11 +715,17 @@ def test_h6_fail_when_wrong_event_type(monkeypatch, tmp_path):
     _clear_in_session_env(monkeypatch)
     import asyncio
 
-    async def _wrong_event_pump(self, ws, sub, run_id):
-        """串流非 agent_message 事件（模拟 pump 误发 / 历史残留事件）。"""
+    async def _wrong_event_pump(self, conn, sub, run_id):
+        """串流非 agent_message 事件（模拟 pump 误发 / 历史残留事件）。
+
+        B-4 后 ``_pump(self, conn, sub, run_id)`` 经 ``conn.queue`` 出站（writer task 串行化
+        ``send_json``）；mock 同样 ``put_nowait`` 入 queue，与新 ``_pump`` 出站路径一致——
+        旧签名 ``(self, ws, ...)`` + ``ws.send_json`` 会因 ``conn`` 无 ``send_json`` 被吞，writer
+        永远收不到事件。
+        """
         try:
-            # 直接发一条 workflow_started（pump 不会这么干，但 mock 模拟串流）。
-            await ws.send_json({
+            # 串流一条 workflow_started（pump 不会这么干，mock 模拟误发）。
+            conn.queue.put_nowait({
                 "type": "workflow_started",
                 "run_id": run_id,
                 "data": {"fake": "pump 串流"},
