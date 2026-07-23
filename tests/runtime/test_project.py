@@ -24,8 +24,10 @@ from orca.runtime import (
     detect_project_root,
     is_registered_runs_dir,
     list_registered,
+    list_stale_projects,
     orca_home,
     project_id,
+    rebuild_registry,
     register_project,
 )
 
@@ -269,3 +271,116 @@ def test_concurrent_register_no_corruption(tmp_path):
     registered = list_registered()
     assert project_id(p1) in registered
     assert project_id(p2) in registered
+
+
+# ── rebuild_registry（SPEC §13.3 P1） ────────────────────────────────────────
+
+
+def test_rebuild_recovers_from_corrupt_registry(tmp_path, monkeypatch):
+    """人为损坏 projects.json → rebuild 重建成功（SPEC §13.3 P1 / §8）。"""
+    proj = _make_project(tmp_path, "rebuild_proj")
+    register_project(proj)
+    # 损坏主文件 + .bak
+    reg_path = orca_home() / REGISTRY_FILE
+    reg_path.write_text("{CORRUPT", encoding="utf-8")
+    bak = reg_path.with_name(REGISTRY_FILE + ".bak")
+    bak.write_text("{ALSO_CORRUPT", encoding="utf-8")
+    # rebuild 应能救活注册表（不 raise），把 proj 重新注册进去。
+    monkeypatch.chdir(proj)
+    monkeypatch.setenv("ORCA_PROJECT_ROOT", str(proj))
+    result = rebuild_registry()
+    assert result["registered"] >= 1
+    registered = list_registered()
+    assert project_id(proj) in registered
+
+
+def test_rebuild_clears_stale_entries(tmp_path, monkeypatch):
+    """rebuild 剔除失效 path（旧注册表里有但 path 不存在/marker 丢失）。"""
+    live = _make_project(tmp_path, "live")
+    register_project(live)
+    # 加一个假 path 进注册表
+    fake = _make_project(tmp_path, "fake")
+    register_project(fake)
+    # 删 fake 的 workflows → marker 失效
+    import shutil as _sh
+    _sh.rmtree(fake / "workflows")
+
+    monkeypatch.chdir(live)
+    monkeypatch.setenv("ORCA_PROJECT_ROOT", str(live))
+    result = rebuild_registry()
+    # live 应重新注册，fake 应 skip
+    assert project_id(live) in list_registered()
+    assert project_id(fake) not in list_registered()
+
+
+def test_rebuild_with_extra_paths(tmp_path, monkeypatch):
+    """显式传 extra_paths 也能注册。"""
+    proj = _make_project(tmp_path, "extra_proj")
+    other_cwd = tmp_path / "cwd"
+    other_cwd.mkdir()
+    monkeypatch.chdir(other_cwd)
+    monkeypatch.delenv("ORCA_PROJECT_ROOT", raising=False)
+    result = rebuild_registry(extra_paths=[proj])
+    assert project_id(proj) in list_registered()
+    assert result["registered"] >= 1
+
+
+def test_rebuild_all_fail_rolls_back_to_old_registry(tmp_path, monkeypatch):
+    """SPEC §13.3 P1 数据安全：所有候选均失败 → 回滚到 rebuild 前 registry（不清空）。
+
+    场景：旧 registry 有一个曾有效项目，rebuild 前删除其 marker（workflows/）→ 候选无效；
+    cwd / detect / extra 全失败 → 旧 registry 应被保留（rolled_back: True）。
+    """
+    live = _make_project(tmp_path, "keep_me")
+    register_project(live)
+    # 删 marker 让候选失效（register 会拒）。
+    import shutil as _sh
+    _sh.rmtree(live / "workflows")
+    # cwd 切到一个无 marker 目录；ORCA_PROJECT_ROOT 也指向同一目录（detect 也失败）。
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    monkeypatch.chdir(bare)
+    monkeypatch.setenv("ORCA_PROJECT_ROOT", str(bare))
+
+    result = rebuild_registry(extra_paths=[bare])  # 全失败（bare 无 marker；live 也丢 marker）
+    assert result.get("rolled_back") is True
+    assert result["registered"] == 0
+    # 旧 registry 保留：live 的 entry 仍在注册表里（即使 path 已 stale）。
+    assert project_id(live) in list_registered()
+    # pre-rebuild 快照落地
+    pre_bak = orca_home() / (REGISTRY_FILE + ".pre-rebuild.bak")
+    assert pre_bak.is_file()
+
+
+# ── list_stale_projects（SPEC §13.3 P3） ─────────────────────────────────────
+
+
+def test_list_stale_projects_marks_missing_path(tmp_path):
+    """path 不存在的注册项 → stale。"""
+    proj = _make_project(tmp_path, "ok")
+    register_project(proj)
+    # 直接写一个 path 不存在的 entry（绕过 register_project 校验）。
+    from orca.runtime import _project as _p
+    with _p._with_lock():
+        data = _p._read_registry_unlocked()
+        data["projects"]["deadbeefdeadbeef"] = {
+            "path": str(tmp_path / "nonexistent"),
+            "name": "ghost",
+            "first_seen": 0.0,
+            "last_seen": 0.0,
+        }
+        _p._atomic_write_registry(data)
+    stale = list_stale_projects()
+    stale_ids = [s["project_id"] for s in stale]
+    assert "deadbeefdeadbeef" in stale_ids
+    assert project_id(proj) not in stale_ids
+
+
+def test_list_stale_projects_marks_missing_marker(tmp_path):
+    """path 存在但 marker 丢失 → stale。"""
+    proj = _make_project(tmp_path, "wasproj")
+    register_project(proj)
+    import shutil as _sh
+    _sh.rmtree(proj / "workflows")
+    stale = list_stale_projects()
+    assert any(s["project_id"] == project_id(proj) for s in stale)

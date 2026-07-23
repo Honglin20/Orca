@@ -1692,6 +1692,67 @@ def test_open_no_run_id_uses_active_default(cwd_tmp, wf_path):
     assert m.call_args.args[0] == run_id
 
 
+# ── SPEC §13 D13 统一 open 列表语义（--list flag + 无活跃 run 回落列表页） ──────
+
+
+def test_open_list_flag_forces_run_list(cwd_tmp, wf_path):
+    """``orca open --list`` → 强制列表页（即使有活跃 run 也不打开详情）。"""
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    assert boot["run_id"]
+
+    with (
+        mock.patch(
+            "orca.iface.in_session.cli._open_run_inproc", return_value=0
+        ) as m_open,
+        mock.patch(
+            "orca.iface.in_session.cli._open_run_list_inproc", return_value=0
+        ) as m_list,
+    ):
+        result = runner.invoke(app, ["open", "--list"])
+    assert result.exit_code == 0, result.output
+    # 列表页路径被调用，详情路径不被调
+    assert m_list.called
+    assert not m_open.called
+
+
+def test_open_no_active_run_falls_back_to_list(cwd_tmp, wf_path):
+    """``orca open`` 无参 + 无活跃 run → 回落列表页（D13 统一语义，旧版 fail loud 已废）。"""
+    runner = CliRunner()
+    # 不 bootstrap → 无活跃 run
+    with (
+        mock.patch(
+            "orca.iface.in_session.cli._open_run_inproc", return_value=0
+        ) as m_open,
+        mock.patch(
+            "orca.iface.in_session.cli._open_run_list_inproc", return_value=0
+        ) as m_list,
+    ):
+        result = runner.invoke(app, ["open"])
+    assert result.exit_code == 0, result.output
+    assert m_list.called
+    assert not m_open.called
+
+
+def test_open_with_active_run_still_opens_detail(cwd_tmp, wf_path):
+    """有活跃 run 时无参 open 仍打开活跃 run 详情（保持 bootstrap 后直达体验）。"""
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id = boot["run_id"]
+    with (
+        mock.patch(
+            "orca.iface.in_session.cli._open_run_inproc", return_value=0
+        ) as m_open,
+        mock.patch(
+            "orca.iface.in_session.cli._open_run_list_inproc", return_value=0
+        ) as m_list,
+    ):
+        result = runner.invoke(app, ["open"])
+    assert result.exit_code == 0, result.output
+    assert m_open.called and m_open.call_args.args[0] == run_id
+    assert not m_list.called
+
+
 # ── _merge_run_id helper 单测（FU-1 ISSUE-5，DRY 防线）──────────────────────────
 
 

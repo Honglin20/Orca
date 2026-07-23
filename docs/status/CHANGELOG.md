@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-24] feat(web): 单端口 + 多 Run 监控「遗留清项」（SPEC §13 v4 carry-over）
+
+清掉 SPEC §13 v4 遗留清单全部七项：AC14 contract test（EventType 双档自动派生 + 守门）、P0 持久派生缓存 `<runs_dir>/.orca-meta-cache.json`（cache 非 index）、`tars project rebuild`（pre-rebuild 快照 + 全失败回滚）+ `tars project list`（含 stale）、P3 Stale projects 折叠区（`GET /api/projects/stale` + 前端组件）、统一 `orca open` 列表语义（`--list` flag + 无活跃 run 回落列表）、`scripts_e2e_driver.py` 归位到 `scripts/`、2 个 pre-existing fail quick fix（SKILL.md 禁词 / cc_nudge.sh 反引号）。第 3 个 pre-existing（`test_web_does_not_import_cli`，`apply_kb_requirement` web→cli 反向依赖）属架构问题**不动**，登记 release note。前端 `out/` 已重建。code-reviewer 3 🟡 全闭环 + 3 🟢 采纳（持久 cache flock 跨进程那项不采纳：cache 正确性不依赖跨进程一致，加锁引入死锁面）。27 新测 + 463 passed / 1 pre-existing fail。Commit: `<见 git log>`。详见 [release note](../releases/2026-07-24-single-port-multi-run-cleanup.md)。
+
 ## [2026-07-24] feat(web): 单端口 + 多 Run 监控（Phase A + B' + C，SPEC §13 v4）
 
 身份解耦 `sha1(ORCA_HOME)[:12]` → 同用户所有项目共享指纹 → 单端口复用；端口登记上移 `~/.orca/.orca-web.json` 在 exclusive flock 临界区内 spawn+bind+ready+写回（B-6）。中立层 `orca/runtime/_project.py` 注册表（path 指针非 run 数据，R1）+ `start_run(*, project_path=None)` kwarg + `POST /api/run` body 必填 project_path（B-1）。`GET /api/runs?scope=all` 跨项目 discovery + `manager.ensure_attached(run_id)` 懒挂载（触发面 /meta /events /assets WS subscribe）+ `DELETE /api/runs/<id>` 四态响应（200/404/409 M-3）+ WS 控制帧基础设施（B-4 每 WS queue+writer task，解决并发 send RuntimeError）+ AuthMiddleware no-op stub（M-1）+ 前端 RunListPage 与 workflow-store 物理隔离（R3）。注册表原子写+.bak+损坏 fail loud（P1），并发 register flock 串行化；`_write_orca_home_registry_unlocked`/`_lookup_orca_home_port_unlocked` 内部变体避免嵌套 flock 死锁。45 新单测 + 既有 web/cli 套件全绿（1 pre-existing apply_kb_requirement 非 §13 引入）。**遗留**：前端 out/ 未构建（WSL/Win 环境限制）、AC14 contract test、P0 持久层缓存、`orca project rebuild`。Commit: `1788cea`。详见 [release note](../releases/2026-07-24-single-port-multi-run-monitoring.md)。

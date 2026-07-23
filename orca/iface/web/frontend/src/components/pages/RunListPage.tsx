@@ -31,6 +31,8 @@ import {
   Coins,
   Timer,
   Activity,
+  AlertTriangle,
+  FolderX,
 } from "lucide-react";
 
 import {
@@ -38,6 +40,7 @@ import {
   stopPolling,
   useRunListStore,
   type RunSummary,
+  type StaleProject,
 } from "@/stores/run-list-store";
 import {
   StatusBadge,
@@ -428,9 +431,68 @@ function ListTopBar({
 
 // ── 页根 ───────────────────────────────────────────────────────────────────
 
+function StaleProjectsSection({ items }: { items: StaleProject[] }) {
+  // SPEC §13.3 P3：「Stale projects」只读折叠区——显示注册表里 path 已失效的项目 +
+  // ``tars gc`` 提示。默认折叠（仅当 stale > 0 时渲染）。
+  const [open, setOpen] = useState(false);
+  if (items.length === 0) return null;
+  return (
+    <section className="orca-border orca-bg-surface rounded border border-dashed p-3">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 text-left"
+      >
+        {open ? (
+          <ChevronDown size={14} strokeWidth={1.5} aria-hidden className="orca-text-faint" />
+        ) : (
+          <ChevronRight size={14} strokeWidth={1.5} aria-hidden className="orca-text-faint" />
+        )}
+        <AlertTriangle
+          size={14}
+          strokeWidth={1.5}
+          aria-hidden
+          className="text-orca-failed/70"
+        />
+        <span className="orca-text text-sm font-medium">Stale projects</span>
+        <span className="orca-text-faint text-[11px]">· {items.length} 个失效注册项</span>
+      </button>
+      {open && (
+        <div className="mt-2 space-y-1.5">
+          <p className="orca-text-faint text-xs">
+            这些注册项的 path 已失效（目录被删 / 重命名 / marker 丢失）。运行
+            <code className="orca-text-muted mx-1 font-mono">tars project rebuild</code>
+            重建或
+            <code className="orca-text-muted mx-1 font-mono">tars gc</code>
+            清理。
+          </p>
+          {items.map((s) => (
+            <div
+              key={s.project_id}
+              className="orca-bg-app orca-border flex items-center gap-2 rounded border px-3 py-1.5"
+            >
+              <FolderX
+                size={13}
+                strokeWidth={1.5}
+                aria-hidden
+                className="orca-text-faint shrink-0"
+              />
+              <span className="orca-text-muted text-sm font-medium">{s.name}</span>
+              <span className="orca-text-faint truncate font-mono text-[11px]">
+                {s.path}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function RunListPage() {
   const navigate = useNavigate();
-  const { runs, loading, refresh, deleteRun, onRunChanged, reset } = useRunListStore();
+  const { runs, staleProjects, loading, refresh, deleteRun, onRunChanged, reset } =
+    useRunListStore();
   const [q, setQ] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
   const [groupBy, setGroupBy] = useState(true);
@@ -573,6 +635,9 @@ export function RunListPage() {
               ))}
             </div>
           )}
+
+          {/* Stale projects 折叠区（仅当有 stale 时显示；不参与主列表过滤） */}
+          <StaleProjectsSection items={staleProjects} />
         </div>
       </main>
 

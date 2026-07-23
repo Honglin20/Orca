@@ -1267,7 +1267,12 @@ class TestIronLaws:
         )
         text = rm_path.read_text(encoding="utf-8")
         # 单 _runs dict 声明（无新增并行 dict）。
+        # 允许例外：``_persistent_cache_by_runs_dir``（SPEC §13.3 P0 派生缓存，cache 非 index，
+        # 不违反「单一 registry」铁律）。
         declarations = re.findall(r"self\._\w*runs\w*\s*:\s*dict", text)
+        declarations = [
+            d for d in declarations if "_persistent_cache_by_runs_dir" not in d
+        ]
         assert len(declarations) <= 1, f"发现多个 runs dict 声明：{declarations}"
 
     def test_attacher_no_tape_resume_true(self):

@@ -44,8 +44,8 @@ THROTTLE_SEC = 60
 
 
 def _cac_session_id_from_pid() -> str | None:
-    """沿 PID 链向上找 CAC 主进程（cmdline 含 ``codeagentcli``），
-    从 ``~/.cac/sessions/<cac_pid>.json`` 读 ``sessionId``。
+    """沿 PID 链向上找 CAC 主进程（cmdline 含 codeagentcli），
+    从 ~/.cac/sessions/<cac_pid>.json 读 sessionId。
     """
     sessions_dir = Path.home() / ".cac" / "sessions"
     if not sessions_dir.is_dir():

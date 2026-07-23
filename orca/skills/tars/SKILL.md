@@ -176,7 +176,7 @@ orca <wf-name> --inputs '<inputs 的 JSON>'
 > 契约来源：agent-ask-user-sentinel SPEC §2（仓库内 `docs/specs/`，安装到 `~/.config/opencode/skills/`
 > 后不可达，仅供维护者溯源）。机制已经独立 spike 验证（40 测试含 2 真 claude integration）；本段是
 > spike driver `drive_node` 的 skill 指令投影。**哨兵在 TARS 层拦截，绝不喂 `orca next`，引擎零改动**
->（compile validator 铁律 7 不触发）。
+>（workflow validator 铁律 7 不触发）。
 
 **何时触发**：你派的子 agent 读用户代码找某必填项无果时，会以**最终消息**返回一个 ask-user 哨兵
 （严格 JSON）向你求助，而不是造假（`torch.randn` / 复用 train 当 eval / 静默默认空值）。你的职责：

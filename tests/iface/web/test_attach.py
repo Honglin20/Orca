@@ -607,8 +607,11 @@ def test_single_runs_registry():
     other_regs = re.findall(r"self\.(_\w*runs?\w*)\s*:\s*dict", src)
     # 允许 ``_runs`` + ``_run_path_index``（SPEC §13.2 M-12 discovery per-process 索引，
     # 是 tape 路径缓存非 run 数据真相源，不违反「单一 registry」铁律）
+    # + ``_persistent_cache_by_runs_dir``（SPEC §13.3 P0 派生缓存，cache 非 index）。
     dict_regs = [
-        name for name in other_regs if name not in ("_runs", "_run_path_index")
+        name
+        for name in other_regs
+        if name not in ("_runs", "_run_path_index", "_persistent_cache_by_runs_dir")
     ]
     assert not dict_regs, f"发现并行 registry dict: {dict_regs}"
 

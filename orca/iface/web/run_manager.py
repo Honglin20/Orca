@@ -235,6 +235,10 @@ class RunManager:
         # newest, overview_data)。hit 时 O(1)；mtime/size 变则失效。客户端高频轮询 /meta
         # 不重算 fold。无上限（typical: 单 digit run 数 × 1 entry = 几条），YAGNI 不加 LRU。
         self._meta_cache: dict[tuple[str, float, int], tuple[int, int, int, dict | None]] = {}
+        # SPEC §13.3 P0：持久派生缓存（cache 非 index，可删可重建，不违 R1/§9）。
+        # 按runs_dir（每个注册项目）懒加载到内存；miss/hit 写回单条 entry。损坏 → warn + 重建。
+        # 结构：``{runs_dir: {"version":1, "entries": {<tape_name>: {mtime,size,count,oldest,newest,overview}}}}``。
+        self._persistent_cache_by_runs_dir: dict[Path, dict] = {}
         # SPEC §13.2 M-12：run_id → (project_id, tape_path, project_name) per-process 索引，
         # 每次 ``GET /api/runs?scope=all`` discovery 重建。``resolve_run_path`` miss 时查此索引。
         self._run_path_index: dict[str, tuple[str | None, Path, str | None]] = {}
@@ -930,7 +934,7 @@ class RunManager:
                 event_count, oldest_seq, newest_seq, overview_data = cached
             else:
                 event_count, oldest_seq, newest_seq, overview_data = (
-                    _scan_meta_overview(tape_path)
+                    self._scan_meta_overview_cached(tape_path)
                 )
                 self._meta_cache[cache_key] = (
                     event_count,
@@ -1459,6 +1463,130 @@ class RunManager:
                     continue
         return None, None
 
+    def _scan_meta_overview_cached(self, tape_path: Path) -> tuple[int, int, int, dict | None]:
+        """SPEC §8.4a + §13.3 P0：三层派生缓存（in-memory → persistent → 重算）。
+
+        查询顺序：
+          1. **in-memory** ``_meta_cache``：key=(path, mtime, size)，hit O(1)。
+          2. **persistent** ``<runs_dir>/.orca-meta-cache.json``：跨进程跨重启复用，
+             key=tape filename + (mtime, size) 校验；失配重扫 + 原子写回。
+          3. **recompute**：``_scan_meta_overview``，结果回填两层缓存。
+
+        持久层语义（P0）：
+          - **cache 非 index**：删了能完全重建，不违 R1（tape 唯一真相源）/ §9（无 run DB）。
+          - 损坏 JSON → warn + 视为空（不 raise；下次 miss 自然重建）。
+          - 写回失败 → warn 不阻断（缓存是 perf 优化，非正确性来源）。
+        """
+        try:
+            stat = tape_path.stat()
+        except OSError:
+            # 文件不在 / 不可 stat → 返零空（调用方决定 skip）。
+            return (0, 0, 0, None)
+        mtime = stat.st_mtime
+        size = stat.st_size
+        cache_key = (str(tape_path), mtime, size)
+        # 1. in-memory hit
+        cached_mem = self._meta_cache.get(cache_key)
+        if cached_mem is not None:
+            return cached_mem
+        # 2. persistent hit（同 mtime/size）
+        cached_disk = self._persistent_cache_lookup(tape_path, mtime, size)
+        if cached_disk is not None:
+            # 回填 in-memory（下次直接内存命中）
+            self._meta_cache[cache_key] = cached_disk
+            return cached_disk
+        # 3. recompute + 双写
+        result = _scan_meta_overview(tape_path)
+        self._meta_cache[cache_key] = result
+        self._persistent_cache_writeback(tape_path, mtime, size, result)
+        return result
+
+    def _persistent_cache_path(self, tape_path: Path) -> Path:
+        """持久缓存文件路径：``<runs_dir>/.orca-meta-cache.json``。"""
+        return tape_path.parent / ".orca-meta-cache.json"
+
+    def _persistent_cache_lookup(
+        self, tape_path: Path, mtime: float, size: int
+    ) -> tuple[int, int, int, dict | None] | None:
+        """读持久缓存 entry（match mtime+size）。miss / 损坏 / 失配 → None。"""
+        runs_dir = tape_path.parent
+        data = self._persistent_cache_loaded(runs_dir)
+        entry = data.get("entries", {}).get(tape_path.name)
+        if not isinstance(entry, dict):
+            return None
+        if entry.get("mtime") != mtime or entry.get("size") != size:
+            return None  # mtime/size 变 → 失配
+        try:
+            return (
+                int(entry.get("count", 0)),
+                int(entry.get("oldest", 0)),
+                int(entry.get("newest", 0)),
+                entry.get("overview"),
+            )
+        except (TypeError, ValueError):
+            return None
+
+    def _persistent_cache_loaded(self, runs_dir: Path) -> dict:
+        """加载（懒）runs_dir 对应的持久缓存。损坏 → 空 + warn。"""
+        if runs_dir in self._persistent_cache_by_runs_dir:
+            return self._persistent_cache_by_runs_dir[runs_dir]
+        cache_path = runs_dir / ".orca-meta-cache.json"
+        data: dict = {"version": 1, "entries": {}}
+        if cache_path.is_file():
+            try:
+                raw = json.loads(cache_path.read_text(encoding="utf-8"))
+                if (
+                    isinstance(raw, dict)
+                    and isinstance(raw.get("entries"), dict)
+                ):
+                    data = raw
+                else:
+                    logger.warning(
+                        "持久 meta cache 结构非法，视为空重建：%s", cache_path
+                    )
+            except (OSError, json.JSONDecodeError) as e:
+                # 损坏 → warn + 空（cache 非 index，可重建，R1/§9）。
+                logger.warning(
+                    "持久 meta cache 读失败（%s），视为空重建：%s", e, cache_path
+                )
+                # 删除损坏文件避免每次新进程重复 warn。
+                try:
+                    cache_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        self._persistent_cache_by_runs_dir[runs_dir] = data
+        return data
+
+    def _persistent_cache_writeback(
+        self,
+        tape_path: Path,
+        mtime: float,
+        size: int,
+        result: tuple[int, int, int, dict | None],
+    ) -> None:
+        """单条 entry 原子写回（tmp + os.replace）。失败 → warn 不阻断。"""
+        runs_dir = tape_path.parent
+        data = self._persistent_cache_loaded(runs_dir)
+        entries = data.setdefault("entries", {})
+        entries[tape_path.name] = {
+            "mtime": mtime,
+            "size": size,
+            "count": result[0],
+            "oldest": result[1],
+            "newest": result[2],
+            "overview": result[3],
+        }
+        cache_path = runs_dir / ".orca-meta-cache.json"
+        tmp = cache_path.with_name(cache_path.name + ".tmp")
+        try:
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, cache_path)
+        except OSError as e:
+            # 写失败不阻断 scan 结果（cache 是 perf 优化）。
+            logger.warning(
+                "持久 meta cache 写失败（%s）：%s", e, cache_path
+            )
+
     def _summary_from_tape(
         self,
         tape_path: Path,
@@ -1477,7 +1605,7 @@ class RunManager:
         workflow_started.timestamp 到终态事件 timestamp（或 now）算（code-reviewer M-3）。
         """
         try:
-            count, _, _, overview_data = _scan_meta_overview(tape_path)
+            count, _, _, overview_data = self._scan_meta_overview_cached(tape_path)
         except Exception:  # noqa: BLE001
             return None
         if count == 0:
@@ -2045,6 +2173,36 @@ def _handle_tape_path(handle: RunView) -> Path | None:
     return None
 
 
+# ── EventType 分类（SPEC §13.4 M-17 / AC14 contract test 守门）─────────────────
+#
+# ``_scan_meta_overview`` 把每个 EventType 归入两档之一：
+#   1. **overview-affecting**：进 full json.loads + fold，影响 ``agents/charts/cost_usd/
+#      run_status`` 之一（列入 ``OVERVIEW_AFFECTING_EVENT_TYPES``）。
+#   2. **bulk**：只取 seq 计 count/bounds（substring fast-path），不 fold overview
+#      （列入 ``BULK_EVENT_TYPES``）。
+#
+# **契约（AC14）**：``EventType`` 的全集必须被这两档**完全划分**。新增 EventType 必须显式
+# 归入其中一档——否则 ``tests/iface/web/test_scan_meta_overview_contract.py`` 失败，
+# 守门防漏（reviewer I-9）。
+#
+# 自动派生关系：``status-affecting subset`` = ``EventType 全集`` − ``BULK_EVENT_TYPES``，
+# 必须 == ``OVERVIEW_AFFECTING_EVENT_TYPES``。等价于"白名单（bulk）之外都算 status-affecting"。
+
+OVERVIEW_AFFECTING_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "workflow_started",
+        "workflow_completed",
+        "workflow_failed",
+        "workflow_cancelled",
+        "node_started",
+        "node_completed",
+        "node_failed",
+        "node_skipped",
+        "agent_usage",
+        "custom",
+    }
+)
+
 # Bulk event types that don't affect meta/overview (skip in fast-path).
 # Pre-compiled markers for substring check (cheaper than full json.loads).
 _META_BULK_MARKERS = (
@@ -2076,6 +2234,13 @@ _META_BULK_MARKERS = (
     '"human_decision_requested"',
     '"human_decision_resolved"',
     '"workflow_resumed"',
+    # ``error`` 事件不影响 overview 派生（agents/charts/cost/run_status），只计 count/seq，
+    # 显式归入 bulk 档（AC14 完备性：必须归入一档，避免契约 test 失败）。
+    '"error"',
+)
+# 等价 set（contract test 用）：所有 bulk type 字面值。
+BULK_EVENT_TYPES: frozenset[str] = frozenset(
+    m.strip('"') for m in _META_BULK_MARKERS
 )
 _META_SEQ_RE = __import__("re").compile(r'"seq":\s*(\d+)')
 

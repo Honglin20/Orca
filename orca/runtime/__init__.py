@@ -13,8 +13,10 @@ from orca.runtime._project import (
     detect_project_root,
     is_registered_runs_dir,
     list_registered,
+    list_stale_projects,
     orca_home,
     project_id,
+    rebuild_registry,
     register_project,
 )
 
@@ -24,7 +26,9 @@ __all__ = [
     "detect_project_root",
     "is_registered_runs_dir",
     "list_registered",
+    "list_stale_projects",
     "orca_home",
     "project_id",
+    "rebuild_registry",
     "register_project",
 ]

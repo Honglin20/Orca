@@ -27,8 +27,18 @@ export interface RunSummary {
   source?: string;
 }
 
+// SPEC §13.3 P3：注册表里 path 失效的项目（只读折叠区显示）。
+export interface StaleProject {
+  project_id: string;
+  path: string;
+  name: string;
+  first_seen?: number;
+  last_seen?: number;
+}
+
 interface RunListState {
   runs: RunSummary[];
+  staleProjects: StaleProject[];
   loading: boolean;
   error: string | null;
   lastFetch: number;
@@ -47,6 +57,7 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 export const useRunListStore = create<RunListState>((set, get) => ({
   runs: [],
+  staleProjects: [],
   loading: false,
   error: null,
   lastFetch: 0,
@@ -59,13 +70,26 @@ export const useRunListStore = create<RunListState>((set, get) => ({
     }
     set({ loading: true, error: null });
     try {
-      const r = await fetch("/api/runs?scope=all");
-      if (!r.ok) {
-        throw new Error(`HTTP ${r.status}`);
+      // 并发拉 runs 与 stale projects（stale 失败不阻断列表，SPEC §13.3 P3 fail-soft）。
+      const [runsR, staleR] = await Promise.allSettled([
+        fetch("/api/runs?scope=all"),
+        fetch("/api/projects/stale"),
+      ]);
+      if (runsR.status !== "fulfilled" || !runsR.value.ok) {
+        throw new Error(
+          runsR.status === "fulfilled"
+            ? `HTTP ${runsR.value.status}`
+            : "runs fetch rejected",
+        );
       }
-      const data = (await r.json()) as RunSummary[];
+      const data = (await runsR.value.json()) as RunSummary[];
+      const stale =
+        staleR.status === "fulfilled" && staleR.value.ok
+          ? ((await staleR.value.json()) as StaleProject[])
+          : [];
       set({
         runs: data,
+        staleProjects: stale,
         loading: false,
         lastFetch: Date.now(),
       });
@@ -112,7 +136,7 @@ export const useRunListStore = create<RunListState>((set, get) => ({
   reset: () => {
     // unmount 调用（reviewer I-14：清 runs=[]）。
     stopPolling();
-    set({ runs: [], loading: false, error: null, lastFetch: 0 });
+    set({ runs: [], staleProjects: [], loading: false, error: null, lastFetch: 0 });
   },
 }));
 

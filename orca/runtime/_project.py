@@ -28,12 +28,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
+
+_log = logging.getLogger(__name__)
 
 # ── 常量 ──────────────────────────────────────────────────────────────────────
 
@@ -414,3 +417,142 @@ def is_registered_runs_dir(path: Path | str) -> bool:
         except ValueError:
             continue
     return False
+
+
+def list_stale_projects() -> list[dict]:
+    """SPEC §13.3 P3：列注册表中 ``path`` 已失效的项目（前端「Stale projects」折叠区用）。
+
+    返回 ``[{project_id, path, name, first_seen, last_seen}]``。**stale** 定义：
+    ``entry.path`` 目录不存在 OR 不再含 project marker（``workflows/`` / ``.orca/config.json``）。
+    注册表读失败 → warn + 空 list（fail-soft：前端折叠区不崩，但日志可见提示运维）。
+    """
+    try:
+        registered = list_registered()
+    except Exception:  # noqa: BLE001 — corrupt → 前端不崩，但 warn（fail loud 精神）
+        # 不静默吞：与 CLI ``tars project list`` 显式 raise 语义对齐——HTTP 路径无 exit，
+        # 但日志至少留痕，运维 grep 能发现。
+        _log.warning(
+            "list_stale_projects: 注册表读失败，返空 list（前端 stale 折叠区空）",
+            exc_info=True,
+        )
+        return []
+    stale: list[dict] = []
+    for pid, meta in registered.items():
+        path_str = meta.get("path")
+        if not isinstance(path_str, str):
+            continue
+        try:
+            root = Path(path_str)
+        except (OSError, ValueError):
+            stale.append({"project_id": pid, **meta})
+            continue
+        if not root.is_dir() or not _has_project_marker(root):
+            stale.append({"project_id": pid, **meta})
+    return stale
+
+
+def rebuild_registry(extra_paths: list[Path | str] | None = None) -> dict:
+    """SPEC §13.3 P1 / §8：``tars project rebuild`` 核心。
+
+    注册表损坏 / 部分丢失时重建——扫已知项目目录、重新 ``register_project``。
+    返回 ``{scanned, registered, skipped, rolled_back?}``：
+
+      - **scanned**：候选项目路径数（旧注册表残留 path + extra_paths + 当前 detect_project_root()）。
+      - **registered**：实际成功 register 的项目数。
+      - **skipped**：候选中失效（不存在 / 无 marker / 是顶层 / =ORCA_HOME）的数量。
+      - **rolled_back**（仅当回滚时出现）：True——step 4 全失败 → 回滚到 step 1 读到的旧 registry，
+        避免清空用户数据（数据安全：rebuild 是救坏注册表，不是清空注册表）。
+
+    流程（SPEC §13.3 P1）：
+      1. 尽力读旧注册表（corrupt → 空；不 raise——rebuild 使命就是救坏注册表）。
+      2. 收集候选路径：旧 entries 的 path + ``extra_paths`` + 当前 cwd 检测到的 project root。
+      3. **pre-rebuild 快照**：把旧 data 落 ``projects.json.pre-rebuild.bak``（一次性，已存在则覆盖）。
+      4. **重置注册表为空**（``tmp + os.replace`` 写空 + .bak 刷）。
+      5. 对每个候选调 ``register_project``（成功 / 跳过统计）。
+      6. **全失败回滚**：registered == 0 且旧 data 非空 → 写回旧 data + 返 ``rolled_back:True``。
+
+    **不嵌套锁**（P1）：步骤 4/5/6 串行；每步独立 ``_with_lock`` 临界区。
+    **瞬态可见性**：step 4 重置到 step 5 完成期间，并发 ``list_registered`` 读者会读到空 registry——
+    SPEC §13.3 P1 主动接受（rebuild 是运维操作，非高频路径；运维窗口期由调用方保证）。
+    """
+    # 1. 尽力收旧 entries
+    candidate_paths: list[str] = []
+    try:
+        with _with_lock():
+            data = _read_registry_unlocked()
+    except Exception:  # noqa: BLE001 — 严重坏 → 空
+        data = {"version": _REGISTRY_VERSION, "projects": {}}
+    old_projects = data.get("projects", {}) or {}
+    for meta in old_projects.values():
+        path_str = meta.get("path")
+        if isinstance(path_str, str) and path_str:
+            candidate_paths.append(path_str)
+
+    # 2. extra_paths + 当前 cwd 的 project root
+    if extra_paths:
+        for p in extra_paths:
+            if p is not None:
+                candidate_paths.append(str(p))
+    try:
+        candidate_paths.append(str(detect_project_root()))
+    except Exception:  # noqa: BLE001 — detect 失败不阻断 rebuild
+        pass
+
+    # 去重（保序）
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for p in candidate_paths:
+        if p not in seen:
+            seen.add(p)
+            deduped.append(p)
+
+    # 3. pre-rebuild 快照（仅当旧 data 非空时；防 step 4 全失败丢用户数据）。
+    pre_bak = _registry_path().with_name(REGISTRY_FILE + ".pre-rebuild.bak")
+    if old_projects:
+        try:
+            pre_bak.write_text(
+                json.dumps(data, ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError as e:
+            _log.warning(
+                "rebuild_registry: pre-rebuild 快照写失败（%s）：%s", e, pre_bak
+            )
+
+    # 4. 重置注册表为空（独立锁）
+    with _with_lock():
+        _atomic_write_registry({"version": _REGISTRY_VERSION, "projects": {}})
+
+    # 5. 逐个 register（每个独立锁；register_project 内自带 _with_lock）
+    registered = 0
+    skipped = 0
+    for path_str in deduped:
+        try:
+            register_project(path_str)
+            registered += 1
+        except (ValueError, OSError, RuntimeError):
+            skipped += 1
+
+    # 6. 全失败回滚：registered == 0 且旧 data 非空 → 写回旧 data。
+    # 数据安全：rebuild 使命是救坏注册表，不是清空。全失败说明候选都坏——保留旧 registry
+    # 让用户手动处理（旧 registry 至少能列出来，好过空注册表）。
+    result: dict = {
+        "scanned": len(deduped),
+        "registered": registered,
+        "skipped": skipped,
+    }
+    if registered == 0 and old_projects:
+        try:
+            with _with_lock():
+                _atomic_write_registry(data)
+            result["rolled_back"] = True
+            _log.warning(
+                "rebuild_registry: 所有 %d 候选均失败 → 回滚到 rebuild 前 registry（%d 项）",
+                len(deduped),
+                len(old_projects),
+            )
+        except OSError as e:
+            _log.error(
+                "rebuild_registry: 回滚失败（%s）；pre-rebuild 快照保留在 %s",
+                e, pre_bak,
+            )
+    return result

@@ -2221,7 +2221,7 @@ def list_workflows() -> None:
 @app.command(name="open")
 def open_run(
     run_id: str = typer.Argument(
-        None, help="要打开的 run_id（位置参数，与 --run-id 二选一；省略则用当前唯一活跃 run）",
+        None, help="要打开的 run_id（位置参数，与 --run-id 二选一；省略则用当前唯一活跃 run 或回落列表页）",
     ),
     run_id_opt: str = typer.Option(
         None, "--run-id",
@@ -2239,39 +2239,79 @@ def open_run(
         None, "--port",
         help="web server 端口（默认探测 7428：是 orca 则复用，否则起后台 serve）",
     ),
+    list_flag: bool = typer.Option(
+        False, "--list",
+        help="强制打开多 run 列表页（忽略活跃 run；SPEC §13 D13 统一 open 语义）",
+    ),
 ) -> None:
-    """打开 web 监控面板（SPEC §2.1，复用 web attach）。
+    """打开 web 监控面板（SPEC §2.1 + §13 D13 统一 open 语义）。
 
     ``run_id`` 两种传法都接受（spec §2.1 统一 ``--run-id`` 形态）：``orca open --run-id <id>``
-    或 ``orca open <id>``。两者同传且值不一致 → fail loud（BadParameter）。**都省略 → 取当前
-    唯一活跃 run**（多个活跃 → fail loud 提示指定 run_id；无活跃 → fail loud 提示先 ``orca <wf>``）。
-    复用 ``tars open`` 同款 ``_open_run``（read-only attach + tail-follow）。
+    或 ``orca open <id>``。两者同传且值不一致 → fail loud（BadParameter）。
+
+    **统一 open 列表语义**（SPEC §13 D13 / AC18）：
+      - ``--list`` → 强制列表页 ``/``。
+      - 无参 + 有唯一活跃 run → 活跃 run 详情（bootstrap 后直达）。
+      - 无参 + **无活跃 run** → **回落列表页**（旧版 fail loud 提示，新版直达列表——
+        让首次 install 后 ``orca open`` 不空跑）。
+      - 多活跃 run → fail loud 提示指定 run_id 或用 ``--list``。
     """
     rid = _merge_run_id(run_id, run_id_opt)
+    if list_flag and rid is None:
+        # --list 强制列表（忽略活跃 run）。
+        raise typer.Exit(_open_run_list_inproc(host=host, port=port))
     if rid is None:
-        rid = _default_active_run_id()
+        rid = _default_active_run_id_or_none()
+    if rid is None:
+        # 无活跃 run → 回落列表页（D13 统一语义）。
+        raise typer.Exit(_open_run_list_inproc(host=host, port=port))
     raise typer.Exit(_open_run_inproc(rid, tape_path=tape, host=host, port=port))
 
 
-def _default_active_run_id() -> str:
-    """无 run_id 时取当前唯一活跃 run（扫 marker）。多个/无 → fail loud。"""
+def _default_active_run_id_or_none() -> str | None:
+    """无 run_id 时取当前唯一活跃 run（扫 marker）。
+
+    - 无 marker 目录 / 无活跃 → None（无 echo；调用方决定回落策略）。
+    - 多个活跃 → fail loud echo + exit（无法自动选）。
+    """
     rundir = _default_rundir()
     if not rundir.exists():
-        typer.echo("无活跃 run（先 `orca <wf>` 启动）", err=True)
-        raise typer.Exit(1)
+        return None
     actives = [read_marker(mp) for mp in sorted(rundir.glob("orca-*.json"))]
     actives = [m for m in actives if m is not None]
     if not actives:
-        typer.echo("无活跃 run（先 `orca <wf>` 启动）", err=True)
-        raise typer.Exit(1)
+        return None
     if len(actives) > 1:
         typer.echo(
-            "多个活跃 run，请用 `orca open <run_id>` 指定："
+            "多个活跃 run，请用 `orca open <run_id>` 指定，或用 `orca open --list` 打开列表："
             + ", ".join(m.run_id for m in actives),
             err=True,
         )
         raise typer.Exit(1)
     return actives[0].run_id
+
+
+def _default_active_run_id() -> str:
+    """无 run_id 时取当前唯一活跃 run（扫 marker）。多个/无 → fail loud（保留旧错误信息）。
+
+    DRY 复用 ``_default_active_run_id_or_none``；本 helper 用于明确要活跃 run 的场景
+    （旧版行为：无活跃 → echo + exit 1，**不回落**——``stop`` / ``status`` 等命令靠此
+    保证语义不漂移；只有 ``open`` 走 D13 回落语义）。
+    """
+    rid = _default_active_run_id_or_none()
+    if rid is None:
+        typer.echo("无活跃 run（先 `orca <wf>` 启动）", err=True)
+        raise typer.Exit(1)
+    return rid
+
+
+def _open_run_list_inproc(*, host: str | None, port: int | None) -> int:
+    """SPEC §13 D13：``orca open --list`` / 无活跃 run 回落——委托 ``tars open`` 的
+    ``_open_run_list``。延迟 import 防环（cli 模块在启动期 import 会拉起重链）。
+    """
+    from orca.iface.cli.commands import _open_run_list
+
+    return _open_run_list(host=host, port=port)
 
 
 def _open_run_inproc(

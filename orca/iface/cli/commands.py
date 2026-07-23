@@ -385,6 +385,14 @@ from orca.iface.cli.install_cmds import app as install_app
 app.add_typer(install_app, name="install", help="统一安装 Orca 宿主集成（skill + in-session），全局默认")
 
 
+# ── project 子命令组（注册表运维，SPEC §13.3 P1/P3）──────────────────────────
+# sub-Typer：``tars project rebuild``（注册表损坏重建）+ ``tars project list``（含 stale）。
+# 依赖 ``orca.runtime``（中立层），不反向 import web。
+from orca.iface.cli.project_cmds import app as project_app
+
+app.add_typer(project_app, name="project", help="注册表运维（rebuild/list），SPEC §13.3 P1/P3")
+
+
 # ── in-session 子命令已上移（v3 §2.1）────────────────────────────────────────
 # 旧 ``orca in-session bootstrap/next/...`` 子命令层已删：bootstrap→``orca <wf>`` 语法糖，
 # next/status/stop/doctor 上移 ``orca`` 顶层（见 orca/iface/in_session/cli.py 的 ``app``）。
