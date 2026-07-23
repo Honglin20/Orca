@@ -43,6 +43,7 @@ cli.py 与 events 层 adapters 是单向依赖（iface → events），反向 im
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 # 家族 → dotdir 映射。
@@ -59,15 +60,29 @@ _OPENCODE_DB_FALLBACK = "session.db"
 
 
 def _encode_cwd(cwd: str) -> str:
-    """``<encoded-cwd>`` = cwd 的 ``/`` → ``-``（CC projects 目录约定，spike 实证）。
+    """``<encoded-cwd>`` = cwd 中**非字母数字**字符逐个 → ``-``（CC projects 目录约定）。
 
-    e.g. ``/mnt/d/Projects/Orca`` → ``-mnt-d-Projects-Orca``。
+    CC 逐字符归一：凡 ``[^a-zA-Z0-9]`` —— ``/`` ``.`` ``_`` 空格 ``\\`` …… —— 一律变 ``-``，
+    大小写与数字保留。e.g. ``/mnt/d/Projects/Orca`` → ``-mnt-d-Projects-Orca``；
+    ``/home/u/my_app.v2`` → ``-home-u-my-app-v2``。
+
+    **实证来源**：在含 ``_`` / ``.`` / 空格 的目录跑 headless CC（``claude -p``）观察其生成的
+    ``~/.claude/projects/`` 目录名——CC 把这三种字符都编码成 ``-``。旧实现仅换 ``/``，在含特殊
+    字符的 cwd 下算出的 sidechain root 与 CC 实际写入目录不符，daemon discover 不到子 agent
+    jsonl（子 agent 消息进不了 web；doctor H3 误报 root 不存在）。
+
+    **实证范围**：仅 Linux/macOS（POSIX 路径）。Windows 盘符（``C:``）与 Unicode（CJK/emoji）
+    cwd 的 CC 实际编码**未实测**——若遇此场景，先 headless ``claude -p`` 实测确认再依赖。
+
+    **fail loud**：空 cwd raise（CC projects 目录需要非空 cwd；与 ``host_session`` 空校验对称）。
 
     从 ``cc_jsonl.py`` 移入并复用（DRY：CC sidechain root 派生 + doctor 探测目录都需此）。
     ``cc_jsonl`` 通过 ``from orca.events.adapters._family import _encode_cwd`` 再导出，保既有
     import（``from cc_jsonl import _encode_cwd``）零回归。
     """
-    return cwd.replace("/", "-")
+    if not cwd:
+        raise ValueError("cwd 为空，无法派生 <encoded-cwd>（CC projects 目录需要非空 cwd）")
+    return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
 
 
 # ── CC sidechain root ─────────────────────────────────────────────────────────

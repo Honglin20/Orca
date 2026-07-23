@@ -86,11 +86,25 @@ def test_opencode_family_dotdir_matches_skill_cmds_host_dotdir():
 # ── _encode_cwd（从 cc_jsonl.py 移入；cc_jsonl re-export 零回归由该文件测试守）──
 
 
-def test_encode_cwd_replaces_slashes():
-    """``/`` → ``-``（CC projects 目录约定）。"""
+def test_encode_cwd_non_alphanumeric_to_dash():
+    """非字母数字字符逐个 → ``-``（CC projects 目录约定）。
+
+    实证（在含特殊字符的目录跑 headless CC 观察 projects 目录名）：CC 把 ``/`` ``.`` ``_`` 空格
+    等都编码成 ``-``，大小写/数字保留。旧实现仅换 ``/`` → 含特殊字符的 cwd 下 sidechain root
+    与 CC 实际目录不符（本用例即该回归的守门）。
+    """
     assert _encode_cwd("/mnt/d/Projects/Orca") == "-mnt-d-Projects-Orca"
     assert _encode_cwd("/") == "-"
     assert _encode_cwd("relative") == "relative"
+    # 下划线 / 点 / 空格 → -（旧实现仅换 / 时的漏网项）
+    assert _encode_cwd("/home/u/my_app") == "-home-u-my-app"
+    assert _encode_cwd("/srv/app.v2") == "-srv-app-v2"
+    assert _encode_cwd("/tmp/orca space dir") == "-tmp-orca-space-dir"
+    # 大小写 + 数字保留；连续特殊字符逐个归一不合并
+    assert _encode_cwd("/x/Orca.Test_1") == "-x-Orca-Test-1"
+    # 连续特殊字符逐个 → -，不 collapse（钉死 docstring 声明，防未来 strip/collapse 回归）
+    assert _encode_cwd("/a//b") == "-a--b"
+    assert _encode_cwd("/a..b") == "-a--b"
 
 
 # ── CC resolver：4 优先级 oracle ──────────────────────────────────────────────

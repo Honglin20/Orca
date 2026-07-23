@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from orca.events.adapters.cc_jsonl import CCJsonlAdapter
+from orca.events.adapters.cc_jsonl import CCJsonlAdapter, _encode_cwd
 from orca.events.bus import EventBus
 from orca.events.raw_agent_event import RawAgentEvent
 from orca.events.sidechain_ingestor import SidechainIngestor
@@ -573,7 +573,7 @@ def test_e2e_daemon_with_family_argv_reads_cac_dotdir(tmp_path, monkeypatch):
     monkeypatch.delenv("ORCA_CC_SIDECHAIN_ROOT", raising=False)
     monkeypatch.chdir(tmp_path)
 
-    encoded = str(tmp_path).replace("/", "-")  # _encode_cwd 等价
+    encoded = _encode_cwd(str(tmp_path))  # 与 daemon subprocess 同一编码（防 cwd 含 _ . 空格 时不一致）
     sidechain_root = (
         fake_home / ".cac" / "projects" / encoded / "fam-host" / "subagents"
     )

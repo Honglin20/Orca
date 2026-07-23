@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from orca.events.adapters._family import _encode_cwd
 from orca.iface.in_session.cli import app
 
 
@@ -286,7 +287,7 @@ def test_doctor_sidechain_backend_env_family_cc_when_cac_dotdir_installed(doctor
     _install_fake_entry_skill(doctor_iso, "cc")
 
     # 两存：.claude（真 CC 数据）+ .cac（install 副作用），都建 per-session root。
-    encoded = str(doctor_iso).replace("/", "-")
+    encoded = _encode_cwd(str(doctor_iso))  # 与 doctor 同一编码（doctor_iso=tmp_path 含下划线，须用 _encode_cwd 非 replace）
     for dotdir in (".claude", ".cac"):
         root = doctor_iso / dotdir / "projects" / encoded / "host-sid-amb" / "subagents"
         root.mkdir(parents=True)
@@ -322,7 +323,7 @@ def test_doctor_sidechain_backend_cac_env_family(doctor_iso, monkeypatch):
     )
     _install_fake_entry_skill(doctor_iso, "cc")
 
-    encoded = str(doctor_iso).replace("/", "-")
+    encoded = _encode_cwd(str(doctor_iso))  # 与 doctor 同一编码（doctor_iso=tmp_path 含下划线，须用 _encode_cwd 非 replace）
     cac_root = doctor_iso / ".cac" / "projects" / encoded / "host-sid-cac" / "subagents"
     cac_root.mkdir(parents=True)
 
@@ -372,7 +373,7 @@ def test_doctor_sidechain_backend_env_family_beats_config(doctor_iso, monkeypatc
     _install_fake_entry_skill(doctor_iso, "cc")
 
     # 建 .claude per-session root；config 设 family=cac（应被 env 覆盖）。
-    encoded = str(doctor_iso).replace("/", "-")
+    encoded = _encode_cwd(str(doctor_iso))  # 与 doctor 同一编码（doctor_iso=tmp_path 含下划线，须用 _encode_cwd 非 replace）
     cc_root = doctor_iso / ".claude" / "projects" / encoded / "host-sid-cfg" / "subagents"
     cc_root.mkdir(parents=True)
     cfg = doctor_iso / ".orca" / "config.json"
@@ -388,6 +389,8 @@ def test_doctor_sidechain_backend_env_family_beats_config(doctor_iso, monkeypatc
     resolved = detail.split("resolved_root=")[1].split("；")[0]
     assert "/.claude/" in resolved
     assert "root_source=config" in detail
+    # encoded 一致 → 测试建的 .claude root 命中 → root_exists=True（钉死：旧手算 replace 编码下此断言假绿）
+    assert "root_exists=True" in detail
 
 
 def test_doctor_sidechain_backend_hard_false_does_not_affect_ok(doctor_iso, monkeypatch):

@@ -85,11 +85,15 @@ def _user_tool_result(tool_use_id: str, content) -> dict:
 # ── _encode_cwd ───────────────────────────────────────────────────────────────
 
 
-def test_encode_cwd_replaces_slashes():
-    """cwd 的 ``/`` → ``-``（CC projects 目录约定）。"""
+def test_encode_cwd_non_alphanumeric_to_dash():
+    """cwd 的非字母数字字符逐个 → ``-``（CC projects 目录约定；与 ``_family._encode_cwd`` 同源）。"""
     assert _encode_cwd("/mnt/d/Projects/Orca") == "-mnt-d-Projects-Orca"
     assert _encode_cwd("/") == "-"
     assert _encode_cwd("relative") == "relative"
+    # 下划线 / 点 / 空格 → -（CC 实证；旧实现仅换 / 时的漏网项）
+    assert _encode_cwd("/home/u/my_app") == "-home-u-my-app"
+    assert _encode_cwd("/srv/app.v2") == "-srv-app-v2"
+    assert _encode_cwd("/tmp/orca space dir") == "-tmp-orca-space-dir"
 
 
 # ── fail loud ─────────────────────────────────────────────────────────────────
