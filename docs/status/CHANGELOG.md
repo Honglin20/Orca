@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-23] fix(in-session): _encode_cwd 匹配 CC 真实编码（非字母数字全归一为 -）
+
+CC 实测（headless `claude -p` 在含 `_`/`.`/空格 的目录跑，看其生成的 `~/.claude/projects/` 目录名）把**所有非字母数字字符**逐个归一为 `-`，大小写/数字保留。旧 `_encode_cwd` 仅 `replace("/", "-")`，含特殊字符的 cwd 下 Orca 算的 sidechain root ≠ CC 实际写入目录 → daemon discover 不到子 agent jsonl → 子 agent 消息进不了 web、doctor H3 误报 root 不存在。修：`_family._encode_cwd` 改 `re.sub(r"[^a-zA-Z0-9]", "-", cwd)` + 空 cwd fail-loud 守门 + docstring 标注 Linux/macOS 实证（Windows 盘符/Unicode 待验）。测试同步：4 处手写 `replace("/", "-")` 切真实 `_encode_cwd`（sidechain_daemon 1 + in_session_v8 3；pytest tmp_path 含下划线，旧编码下 v8 **2 红 1 假绿**）；两处 `test_encode_cwd` 扩 `_`/`.`/空格 + 连续字符不 collapse；v8 假绿用例补 `root_exists` 断言钉死。code-reviewer 两轮闭环（编码规则/fail-loud/DRY/依赖铁律）；events + in_session 全量 **641 passed**（1 pre-existing failure 与本修复无关：`test_entry_skill_md_has_no_business_logic_keywords`——SKILL.md 文案含禁词 `compile` 误伤 grep 守门）。Commit: `cd21c8a`。
+
 ## [2026-07-22] doctor --probe-push 推送链路诊断（H1-H6 全 6 跳）
 
 `orca doctor --probe-push`：一次跑完推送链路 6 跳（family_detect / cac_pid_walk / adapter_discovery / daemon_progress / bus_flow / ws_delivery），精确指出哪一跳断（不止「daemon 活着」）+ 输出 first_break + fix_hint 指针指向 runbook。新增唯一模块 `_push_probe.py`（叶子消费方，复用 _hostenv/sidechain_daemon/events.adapters 现有真相源，零新增接口）+ runbook `docs/troubleshooting/push-chain.md` + cli.py 加 3 typer Option（零副作用：无 --probe-push 时输出与基线一致）。H6 self-spawn 走 B2 决议 degradation（RunManager.start_run + monkey-patch Orchestrator.run + bus.emit 合成事件 + WS 3s 等收）。40 测试全绿（含 SPEC §5 三组守门 + fast e2e 冒烟 happy/负向 + H2 中间态自洽双向）。Commits: `275838b` (S1) → `af97ac1` (S2) → `a3f10a1` (S3) → `284b389` (S4)。详见 [release note](../releases/2026-07-22-push-chain-diagnostic.md)。
