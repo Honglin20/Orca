@@ -7,7 +7,7 @@
 
 ## [2026-07-24] feat(web): 单端口 + 多 Run 监控「遗留清项」（SPEC §13 v4 carry-over）
 
-清掉 SPEC §13 v4 遗留清单全部七项：AC14 contract test（EventType 双档自动派生 + 守门）、P0 持久派生缓存 `<runs_dir>/.orca-meta-cache.json`（cache 非 index）、`tars project rebuild`（pre-rebuild 快照 + 全失败回滚）+ `tars project list`（含 stale）、P3 Stale projects 折叠区（`GET /api/projects/stale` + 前端组件）、统一 `orca open` 列表语义（`--list` flag + 无活跃 run 回落列表）、`scripts_e2e_driver.py` 归位到 `scripts/`、2 个 pre-existing fail quick fix（SKILL.md 禁词 / cc_nudge.sh 反引号）。第 3 个 pre-existing（`test_web_does_not_import_cli`，`apply_kb_requirement` web→cli 反向依赖）属架构问题**不动**，登记 release note。前端 `out/` 已重建。code-reviewer 3 🟡 全闭环 + 3 🟢 采纳（持久 cache flock 跨进程那项不采纳：cache 正确性不依赖跨进程一致，加锁引入死锁面）。27 新测 + 463 passed / 1 pre-existing fail。Commit: `<见 git log>`。详见 [release note](../releases/2026-07-24-single-port-multi-run-cleanup.md)。
+清掉 SPEC §13 v4 遗留清单全部七项：AC14 contract test（EventType 双档自动派生 + 守门）、P0 持久派生缓存 `<runs_dir>/.orca-meta-cache.json`（cache 非 index）、`tars project rebuild`（pre-rebuild 快照 + 全失败回滚）+ `tars project list`（含 stale）、P3 Stale projects 折叠区（`GET /api/projects/stale` + 前端组件）、统一 `orca open` 列表语义（`--list` flag + 无活跃 run 回落列表）、`scripts_e2e_driver.py` 归位到 `scripts/`、2 个 pre-existing fail quick fix（SKILL.md 禁词 / cc_nudge.sh 反引号）。第 3 个 pre-existing（`test_web_does_not_import_cli`，`apply_kb_requirement` web→cli 反向依赖）属架构问题**不动**，登记 release note。前端 `out/` 已重建。code-reviewer 3 🟡 全闭环 + 3 🟢 采纳（持久 cache flock 跨进程那项不采纳：cache 正确性不依赖跨进程一致，加锁引入死锁面）。27 新测 + 463 passed / 1 pre-existing fail。Commit: `449f851`。详见 [release note](../releases/2026-07-24-single-port-multi-run-cleanup.md)。
 
 ## [2026-07-24] feat(web): 单端口 + 多 Run 监控（Phase A + B' + C，SPEC §13 v4）
 

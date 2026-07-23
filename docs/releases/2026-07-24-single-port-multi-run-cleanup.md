@@ -93,4 +93,4 @@ rebuild 全失败测试。1 项（持久 cache 加跨进程 flock）不采纳：
 
 ## Commit
 
-见 CHANGELOG 顶部索引（本次单 commit 合入）。
+`449f851` —— feat(web): 单端口+多Run监控遗留清项（SPEC §13 v4 carry-over）。
