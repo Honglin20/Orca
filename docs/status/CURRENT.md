@@ -8,7 +8,7 @@
 
 ### ✅ 单端口 + 多 Run 监控（Phase A + B' + C 生产 + 单测）—— 已提交
 
-**状态**：commit `1788cea`。code-reviewer 2 blocker + 4 major + 3 minor 全闭环。
+**状态**：commit `1788cea`（实现）+ `c5cf298`（E2E 回归修复）。code-reviewer 2 blocker + 4 major + 3 minor 全闭环。**test-agent 真机 E2E：AC1/3/5/8/16/17/18 七项功能契约全 PASS**（单端口复用 / 跨项目 discovery / 懒挂载 / DELETE 四态 / WS 控制帧同步 / open 深链复用）；AC20 零回归——E2E 抓到 1 个 1788cea 引入的回归（push_probe H6 mock 未跟 B-4 `_pump` 签名变更），`c5cf298` 修复，三套件 1129 passed / 仅 3 pre-existing 失败（均与 §13 无关）。
 
 **完成项**：
 - Phase A：`orca_home_fingerprint` + 端口登记上移 `~/.orca/.orca-web.json` + `exclusive_port_decision` 临界区（B-6）。
