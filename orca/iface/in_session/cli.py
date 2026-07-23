@@ -52,6 +52,7 @@ from orca.iface.in_session._step_io import (
     _emit_workflow_failed,
     apply_step_result,
     fail_in_session,
+    merge_recoverable_envelope,
 )
 from orca.iface.in_session._hostenv import (
     cac_session_id_from_pid as _cac_session_id_from_pid,
@@ -75,8 +76,11 @@ from orca.run.step import InSessionError, advance_step
 
 logger = logging.getLogger(__name__)
 
-# subagent 合规超限阈值（D-v7-6：连续 N 次 next 无 output → workflow_failed）。
-_COMPLIANCE_LIMIT = 3
+# subagent 合规计数阈值（SPEC 2026-07-23-in-session-error-management §3 / §4.1(b)）。
+# ≥ WARN 不判死，回 warn 信封（run 存活，主 session 决策继续/stop）；≥ HARD 才 emit
+# workflow_failed（防主 session 完全失能的真卡死；CC 受 8-block Stop 上限 HARD 实际不可达）。
+_COMPLIANCE_WARN = 3
+_COMPLIANCE_HARD = 10
 
 # SPEC §3 O4：busy 信封固定 retry_after_ms（毫秒）。撞 tape flock 时让主 session 等待
 # 重试**同一 next 命令本身**（不重派子代理 / 不重发 prompt —— 避免 advance_step 不持锁
@@ -1285,7 +1289,7 @@ def next(
     bus = EventBus(tape_obj)
     start_ts = now_monotonic()
     try:
-        result, compliance_failed = asyncio.run(_next_in_critical_section(
+        result, compliance_failed, warn_count = asyncio.run(_next_in_critical_section(
             bus, tape_obj, run_id, normalized_output, inp, start_ts, mpath,
             _prompts_dir_for(tape_path, run_id),
             env_path=_env_file_path(tape_path, run_id),
@@ -1301,6 +1305,7 @@ def next(
         # 守护会由 tape 终态事件自退；no-marker（node=None）无推进意义 —— 二者都不该 respawn。
         # 在 tape flock 临界区内（finally 才释放）→ 同 run 并发 next 已被 LOCK_NB busy-exit
         # 串行化，此处 probe+spawn 不会起多个守护（见 ``_ensure_chart_daemon`` 不变量）。
+        # recoverable 重 arm：result.node=pending（非 None）+ 非终态 → 仍 respawn（同节点重派）。
         if result.node is not None and not (result.done or compliance_failed):
             _ensure_chart_daemon(run_id, tape_path)
             # ── in-session sidechain 守护 respawn（SPEC-B v4 B2）───────────────────
@@ -1310,6 +1315,9 @@ def next(
     except InSessionError as e:
         # fail_in_session：emit workflow_failed（tape data.kind = error_kind）+ 返含
         # ``error_kind`` 的错误信封（v5 §8 step 5b，SPEC §2.3 信封契约）。
+        # **仅 plain InSessionError 触发**（irrecoverable：state_corrupt / render_error /
+        # unsupported_node_kind / internal_error）。recoverable（output_schema_mismatch）在
+        # advance_step 内自捕（返 StepResult），不外抛 → 不进此分支（SPEC 2026-07-23 R2）。
         reply = asyncio.run(fail_in_session(bus, e))
         # 终态后清 marker（workflow_failed 已落 tape，marker 不再需要）。
         clear_marker(mpath)
@@ -1332,11 +1340,34 @@ def next(
         reply["prompt_file"] = result.prompt_file
     if result.reason:
         reply["reason"] = result.reason
+    # SPEC 2026-07-23 §4.1(a)：recoverable 信封字段（与 daemon 共用 helper，DRY）。
+    # recoverable（未升格）→ done:false + recoverable:true + retry_*. 主 session 据此不 stop、
+    # 反馈 reason 给子代理重派。不 clear_marker（已在 _next_in_critical_section 保活）。
+    merge_recoverable_envelope(reply, result)
+    # compliance-warn 信封（SPEC §4.1(b)，cli 层 marker 注解；daemon 无 compliance）。
+    if warn_count is not None:
+        reply["warn"] = True
+        reply["error_kind"] = "subagent_compliance"
+        reply["no_output_count"] = warn_count
+        reply["warn_threshold"] = _COMPLIANCE_WARN
+        reply["hard_limit"] = _COMPLIANCE_HARD
+        reply["reason"] = f"subagent 连续 {warn_count} 次未派 Task/产出 output"
+        reply["hint"] = "主 session 连续 N 次未派活；请决策（继续推进派 Task / orca stop 放弃）"
+    # compliance hard 上限（终态）：surface error_kind + 失败 reason（_emit_workflow_failed 已落 tape）。
+    elif compliance_failed:
+        reply["error_kind"] = "subagent_compliance"
+        if not reply.get("reason"):
+            reply["reason"] = "failed: subagent 合规超限（连续未派 Task/产出 output，撞 hard 上限）"
+    # 升格（连续 recoverable 撞上限）：result.done=True + error_kind → 终态失败，surface error_kind。
+    elif result.done and result.error_kind and "error_kind" not in reply:
+        reply["error_kind"] = result.error_kind
     typer.echo(json.dumps(reply, ensure_ascii=False))
-    # 合规超限与其他失败 taxonomy 对齐（fail loud 非 0 退出；SPEC §2.5 失败统一语义）。
-    # 其他失败（output_schema_mismatch / unsupported_node_kind / state_corrupt）经
-    # InSessionError 路径走 typer.Exit(1)；compliance_failed 经 marker 计数路径也走 exit 1。
-    if compliance_failed:
+    # 终态失败统一非 0 退出（SPEC §2.5 失败语义）：
+    #   - compliance_failed：撞 HARD 上限（marker 计数路径）。
+    #   - 升格：result.done=True 且 error_kind 非 None（advance_step recoverable 升格 workflow_failed）。
+    # plain InSessionError（irrecoverable）经上方 except 走 typer.Exit(1)；正常 workflow_completed
+    # 走 exit 0（done=True 但 error_kind None）。
+    if compliance_failed or (result.done and result.error_kind):
         raise typer.Exit(1)
 
 
@@ -1447,8 +1478,10 @@ async def _next_in_critical_section(
     """flock 临界区内的 next 主体：advance + emit_batch + marker RMW（N2）+ 合规计数 (F11)
     + per-node env 文件重写（in-session chart/资源/产物 衔接）。
 
-    返回 ``(result, compliance_failed)``。``compliance_failed=True`` 时已 emit
-    workflow_failed，调用方据 ``done=True`` 停注入。
+    返回 ``(result, compliance_failed, warn_no_output_count)``：
+      - ``compliance_failed=True``：撞 ``_COMPLIANCE_HARD``，已 emit workflow_failed（终态）。
+      - ``warn_no_output_count`` 非 None：达 ``_COMPLIANCE_WARN`` 但未到 HARD，回 warn 信封
+        （run 存活；SPEC §4.1(b)），供 ``next`` 命令拼 warn 信封字段。
 
     ``env_path`` 给定时（生产路径恒传）：在 ``apply_step_result`` 之后、按下一节点身份重写
     ``runs/<run_id>/orca_env.sh``（ORCA_NODE / ORCA_SESSION_ID / ORCA_AGENT_RESOURCES 按新节点）。
@@ -1462,7 +1495,7 @@ async def _next_in_critical_section(
     marker = read_marker(mpath)
     if marker is None:
         logger.warning("next 找不到 %s 的激活 marker，无法推进（需先 bootstrap）", run_id)
-        return StepResult(done=False, reason="no-marker"), False
+        return StepResult(done=False, reason="no-marker"), False, None
 
     # wf 从 tape 反查（v3 §7.2：marker 不存 yaml）。
     wf = _load_wf_for_run(run_id, tape)
@@ -1473,27 +1506,34 @@ async def _next_in_critical_section(
     )
     # B1 单次 write 原子化整批 [nc, rt, ns] / [nc, rt, workflow_completed]（共享 helper）。
     # apply_step_result 内部按 emits 写 node_completed 的记忆 MD(node-memory SPEC §3.2)。
+    # recoverable 路径的 emits = [nf, ns]（升格时含 workflow_failed）也经此批量原子写。
     await apply_step_result(
         bus, result, wf=wf, run_id=run_id, no_memory=no_memory, project_root=project_root,
     )
 
-    # 合规计数（D-v7-6 / F11）：无 output 且无 emits（branch 4 idempotent-replay）→ +1；
-    # 有 output → 清零。≥3 → CLI 主动 emit workflow_failed(subagent_compliance)。
+    # 合规计数（D-v7-6 / F11 / SPEC 2026-07-23 §3）：无 output 且无 emits（branch 4
+    # idempotent-replay）→ +1；有 output → 清零（含 recoverable：output 给了只是坏，非没派活）。
+    # ≥ HARD → emit workflow_failed（终态）；≥ WARN 但 < HARD → warn 信封（run 存活，不 emit）。
     compliance_failed = False
+    warn_no_output_count: int | None = None
     if output is not None:
         marker.no_output_count = 0
     elif result.emits == [] and not result.done and result.node is not None:
         marker.no_output_count += 1
-        if marker.no_output_count >= _COMPLIANCE_LIMIT:
+        if marker.no_output_count >= _COMPLIANCE_HARD:
             await _emit_workflow_failed(
                 bus, "subagent_compliance",
-                f"subagent 连续 {marker.no_output_count} 次未派 Task/产出 output",
+                f"subagent 连续 {marker.no_output_count} 次未派 Task/产出 output（撞 hard 上限）",
                 node=result.node,
             )
             compliance_failed = True
+        elif marker.no_output_count >= _COMPLIANCE_WARN:
+            # SPEC §4.1(b)：warn 不 emit 任何 tape 事件；marker.no_output_count 仍按 RMW 累加。
+            warn_no_output_count = marker.no_output_count
 
     # in-session chart/资源 env 文件：非终态 + 下一节点存在 → 按下一节点身份重写。
     # 终态时不写（无下一节点；守护会由 tape 终态事件自退，env 文件不再被 source）。
+    # recoverable 重 arm 时 result.node=pending（非 None）+ 非终态 → 按（同）节点重写 env（新 session_id）。
     if env_path is not None and not (result.done or compliance_failed) and result.node:
         _write_orca_env(
             env_path,
@@ -1509,11 +1549,12 @@ async def _next_in_critical_section(
         )
 
     # marker RMW（N2）：flock 临界区内回写。终态 → 清 marker（不复用）。
+    # recoverable（未升格）非终态 → write_marker 保活；升格（result.done=True）→ clear_marker。
     if result.done or compliance_failed:
         clear_marker(mpath)
     else:
         write_marker(mpath, marker)
-    return result, compliance_failed
+    return result, compliance_failed, warn_no_output_count
 
 
 def _merge_run_id(run_id: str | None, run_id_opt: str | None) -> str | None:
@@ -1627,7 +1668,7 @@ def status(
         # 顶层字段供主 session（经 orca skill）直接消费；step 4 后 plugin transform 段
         # 已退场，--json 仍保留作 skill / LLM 友好的结构化出口（SPEC §2.3 单 run 详情契约）。
         # SPEC §3 O3：加 ``no_output_count``（raw 透出，主 session 不据它改行为；compliance
-        # 是 orca 自我保护，到 _COMPLIANCE_LIMIT 自己 fail）。
+        # 是 orca 自我保护，≥_COMPLIANCE_WARN 回 warn / ≥_COMPLIANCE_HARD 才 fail，SPEC 2026-07-23）。
         typer.echo(json.dumps({
             "run_id": rid,
             "status": state.status,

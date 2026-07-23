@@ -120,6 +120,15 @@ class InSessionDaemon:
         advance_step 内部三分支（bootstrap/advance/idempotent-replay），见 SPEC §2.1。
         emit 经 ``apply_step_result`` 单次 write 原子化（v5 §8 step 5b：反旧逐条 emit——SIGTERM
         落批内 N 与 N+1 之间会留半截 tape → resume state_corrupt；铁律 12）。
+
+        SPEC 2026-07-23-in-session-error-management §6（计划 S6/E5）：
+          - **recoverable（output_schema_mismatch）自动复用**：advance_step 自捕
+            RecoverableInSessionError → 返 StepResult(recoverable=True)（不外抛）→ 本方法的
+            ``except InSessionError`` **不触发** recoverable；apply_step_result 返 recoverable 信封。
+            故 daemon 路径零改即支持 recoverable 重 arm（与 cli 同源 advance_step）。
+          - **compliance 不降级**：daemon 无 marker / 无 no_output_count 计数器（compliance 是
+            cli 层 marker RMW 注解），daemon 的死循环风险由 ``_host_stale(idle_timeout_s)`` 兜底
+            （已知接受，非回归——daemon 从未有过 compliance 计数）。
         """
         output = self._pending_output
         self._pending_output = None

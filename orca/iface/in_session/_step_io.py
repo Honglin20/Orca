@@ -67,6 +67,30 @@ def _emits_to_event_datas(emits: list) -> list[dict]:
     ]
 
 
+def merge_recoverable_envelope(reply: dict[str, Any], result: Any) -> None:
+    """SPEC 2026-07-23 §4.1(a)：``result.recoverable`` → 把 recoverable 信封字段合并进 reply（in-place）。
+
+    单一真相源：cli ``next``（自建 reply + 加 prompt 指针 + 驱动协议）与 daemon ``next``
+    （直接返 ``apply_step_result`` 的 reply）两路共用，避免字段名/字段集漂移（DRY）。
+    字段：``recoverable:true, error_kind, retry_count, retry_budget, hint``（``reason`` 由调用方
+    按既有逻辑已加；``done:false`` 由 ``result.done`` 决定，不在本 helper 范围）。
+
+    compliance-warn（``result.warn``）**不**经此 helper —— warn 是 cli 层 marker 计数注解
+    （SPEC §4.1(b)），daemon 无 marker / 无 compliance，warn 信封由 cli ``next`` 单独拼。
+    """
+    if not getattr(result, "recoverable", False):
+        return
+    reply["recoverable"] = True
+    if getattr(result, "error_kind", None) is not None:
+        reply["error_kind"] = result.error_kind
+    if getattr(result, "retry_count", None) is not None:
+        reply["retry_count"] = result.retry_count
+    if getattr(result, "retry_budget", None) is not None:
+        reply["retry_budget"] = result.retry_budget
+    if getattr(result, "hint", None):
+        reply["hint"] = result.hint
+
+
 async def apply_step_result(
     bus: EventBus, result: Any,
     *,
@@ -102,6 +126,15 @@ async def apply_step_result(
         reply["prompt"] = result.prompt
     if result.reason:
         reply["reason"] = result.reason
+    # SPEC 2026-07-23 §4.1(a)：recoverable 信封字段（daemon.next 直接返此 reply → 自动复用）。
+    merge_recoverable_envelope(reply, result)
+    # SPEC 2026-07-23 §4.2：升格终态（``result.done=True`` + ``result.error_kind``，连续 recoverable
+    # 撞上限 emit workflow_failed）→ surface ``error_kind`` 给信封消费方。cli 在自家 next 命令
+    # 显式补（``cli.py`` 末段 ``elif result.done and result.error_kind``）；daemon 直接返此 reply，
+    # 若不在此补，daemon 升格终态信封会丢 ``error_kind``（cli/daemon parity bug，code-reviewer
+    # 🟡#1）。``setdefault`` 不覆盖调用方已显式赋的值（防御性，与 cli 路径重叠时无副作用）。
+    if getattr(result, "done", False) and getattr(result, "error_kind", None) is not None:
+        reply.setdefault("error_kind", result.error_kind)
     return reply
 
 
