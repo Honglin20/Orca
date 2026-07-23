@@ -4,6 +4,10 @@
 
 ---
 
+## 状态（2026-07-23）
+
+- ✅ **In-Session Chart 鲁棒出图 + 失败告知 agent**（commit `003acc3`，[release note](../releases/2026-07-23-in-session-chart-robustness.md)）：根治 in-session 路径下 `agent-struct-exploration` 可视化静默失败。新增 `orca/chart/_env.py`（stdlib only，从 ledger/champions anchor 向上找 `orca_env.sh` 且内容含 `^export ORCA_CHART_SOCK=` 行，仅补 4 个身份键）；改 `viz_struct.py`（自加载 + reason 分类 env_missing/socket_unreachable/ack_failed/data_insufficient/import_failed/generic + `--mode compare` + `_main` 兜底保证 stdout 永远有合法 JSON）；yaml curator/finalize output_schema 加必填 `viz_status`（严化 additionalProperties）+ agent.md dumb copy；finalize step6 inline `python3 -c` → `viz_struct.py --mode compare` CLI。**铁律守恒**：`_render.py`/`chart_daemon`/`cli.py` 零改动。code-reviewer 两轮闭环（impl + coverage 并行）：0 🔴 + 4 🟡（R1-R4）+ 5 🟡（AC4 ack 5/5 / AC1a render_chart mock / data_insufficient 无有效点 / monkeypatch isolation / `_main` compare happy path）+ 6 🟢 全修。245 chart/workflows/in-session + 249 compile/e2e_redesign passed（2 skipped kd-nas 与本改动无关）；`tars validate` 0 error。**范围外**：AC5b/AC8（agent 转写 + e2e fake daemon）需 stage3 fake chart_daemon，登记后续；bit-curve/viz_kd 迁移到 `load_run_env_from_artifacts`（DRY 统一）留 SPEC §7。
+
 ## 状态（2026-07-22）
 
 - ✅ **KB 可移植 + struct-exploration 结构优先**（commit `6e0f167` + `0be8c6d`，[release note](../releases/2026-07-22-kb-portability-struct-direction-gate.md)）：解决「struct-exploration 只改超参不碰结构」两根因。①KB 不可移植+缺失静默 → `orca install` 部署 KB 到 `~/.orca/knowledge_base` + `resolve_kb_dir` 确定性解析（env>config>~/.orca>cwd）+ `ORCA_KB_DIR` 注入 + `apply_kb_requirement` 对 `requires:[knowledge_base]` workflow 缺失 fail-loud（run 启动即停，不进 setup agent）。②探索零方向感 → 新增确定性 `direction_coverage.py`（KB direction 目录 D0-D21 枚举 + ledger tried → untried）+ hypothesizer 软闸优先未试结构方向（all_exhausted/near_target 才允许超参）+ direction_id 全链。**kd-nas defer**（用户拍板）；硬闸 defer（软闸先验证）。

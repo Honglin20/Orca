@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-23] feat(chart): in-session 鲁棒出图 + 失败告知 agent（SPEC 2026-07-23）
+
+根治「agent-struct-exploration in-session 路径下可视化静默失败」：子代理 bash 不经 ClaudeExecutor，`ORCA_*` env 不自动注入 → `render_chart` 缺 env raise 被三层吞（脚本 except → bash `|| true` → workflow done 假成功、前端零图）。方案 = 确定性自加载 env（从 `--ledger`/`--champions` anchor 向上找 `orca_env.sh` 且内容含 `^export ORCA_CHART_SOCK=` 行，仅补 4 个身份键）+ 失败可见回流（stdout 加 `viz_env_status`/`charts.reason`，agent dumb copy 写 `output.viz_status`，`_main` 兜底保证 stdout 永远有合法 JSON）+ `--mode compare` 替代 finalize step6 inline `python3 -c` 块。新增 `orca/chart/_env.py`（stdlib only，light-touch）+ 改 `viz_struct.py`（自加载 + reason 分类 env_missing/socket_unreachable/ack_failed/data_insufficient/import_failed/generic + `_main` 兜底 + `--mode compare`）+ yaml curator/finalize output_schema 加必填 `viz_status`（严化 additionalProperties）+ agent.md Step 4 dumb copy。**铁律守恒**：`_render.py` 零改动（env 只从 env 读），`chart_daemon`/`cli.py` 零改动（daemon 已就绪），依赖方向不破。code-reviewer 两轮闭环（impl + coverage 并行）：0 🔴 + R1-R4 + 5 🟡 + 6 🟢 全修或登记。245 chart/workflows/in-session + 249 compile/e2e_redesign passed（2 skipped kd-nas 与本改动无关）；`tars validate` 0 error。Commit: `003acc3`。详见 [release note](../releases/2026-07-23-in-session-chart-robustness.md)。
+
 ## [2026-07-23] fix(in-session): _encode_cwd 匹配 CC 真实编码（非字母数字全归一为 -）
 
 CC 实测（headless `claude -p` 在含 `_`/`.`/空格 的目录跑，看其生成的 `~/.claude/projects/` 目录名）把**所有非字母数字字符**逐个归一为 `-`，大小写/数字保留。旧 `_encode_cwd` 仅 `replace("/", "-")`，含特殊字符的 cwd 下 Orca 算的 sidechain root ≠ CC 实际写入目录 → daemon discover 不到子 agent jsonl → 子 agent 消息进不了 web、doctor H3 误报 root 不存在。修：`_family._encode_cwd` 改 `re.sub(r"[^a-zA-Z0-9]", "-", cwd)` + 空 cwd fail-loud 守门 + docstring 标注 Linux/macOS 实证（Windows 盘符/Unicode 待验）。测试同步：4 处手写 `replace("/", "-")` 切真实 `_encode_cwd`（sidechain_daemon 1 + in_session_v8 3；pytest tmp_path 含下划线，旧编码下 v8 **2 红 1 假绿**）；两处 `test_encode_cwd` 扩 `_`/`.`/空格 + 连续字符不 collapse；v8 假绿用例补 `root_exists` 断言钉死。code-reviewer 两轮闭环（编码规则/fail-loud/DRY/依赖铁律）；events + in_session 全量 **641 passed**（1 pre-existing failure 与本修复无关：`test_entry_skill_md_has_no_business_logic_keywords`——SKILL.md 文案含禁词 `compile` 误伤 grep 守门）。Commit: `cd21c8a`。
