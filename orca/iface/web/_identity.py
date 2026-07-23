@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 
@@ -36,3 +37,20 @@ def runs_dir_fingerprint(runs_dir: Path | str) -> str:
     except (OSError, RuntimeError):
         resolved = str(runs_dir)
     return hashlib.sha1(resolved.encode("utf-8")).hexdigest()[:12]
+
+
+def orca_home_fingerprint() -> str:
+    """身份指纹 = ``sha1(ORCA_HOME)[:12]``（SPEC §13 D1 / U-2 / B-6）。
+
+    **身份与存储路径解耦**：同用户（同 ``ORCA_HOME``）所有项目共享同一指纹 → 单端口。
+    旧 ``runs_dir_fingerprint`` 把身份与 ``<project>/runs`` 耦合，不同项目不同指纹 → 永不复用。
+
+    - 默认 ``ORCA_HOME = ~/.orca``；env ``ORCA_HOME`` 覆盖。
+    - 与 ``runs_dir_fingerprint`` 同 sha1-truncate 算法，仅输入不同。
+
+    SPEC §13.1 U-2：health 兼容期**同发** ``runs_dir_fp``（值=本函数结果）+ ``orca_home_fp``
+    两字段；下个版本去旧名。client（``commands.py::_runs_dir_fp``）用本函数的值。
+    """
+    env = os.environ.get("ORCA_HOME")
+    home = Path(env).expanduser() if env else Path.home() / ".orca"
+    return runs_dir_fingerprint(home)

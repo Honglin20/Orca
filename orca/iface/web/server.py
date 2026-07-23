@@ -32,6 +32,7 @@ from orca.iface.web.routes import (
     build_run_router,
     build_runs_router,
 )
+from orca.iface.web._auth import install_auth_middleware
 from orca.iface.web.ws_handler import WebServer
 
 if TYPE_CHECKING:
@@ -64,6 +65,8 @@ def create_app(manager: RunManager) -> FastAPI:
 
     app = FastAPI(title="orca-web", lifespan=lifespan)
     app.state.manager = manager
+    # SPEC §13.1 M-1 / AC19：全局 no-op auth middleware（多用户接口预留，当前不校验）。
+    install_auth_middleware(app)
 
     # 懒加载 REST + gate（多 run 分发）+ attach（X — read-only tail-follow）+ health。
     app.include_router(build_runs_router(manager))

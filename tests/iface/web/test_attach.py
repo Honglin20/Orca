@@ -605,8 +605,11 @@ def test_single_runs_registry():
 
     # 反向断言：不存在第二个 ``_runs``-like 字段（如 ``_attached_runs`` / ``_run_views``）
     other_regs = re.findall(r"self\.(_\w*runs?\w*)\s*:\s*dict", src)
-    # 允许 ``_runs`` 一个；其它形态（``_runs_dir`` 不是 dict，跳过）
-    dict_regs = [name for name in other_regs if name != "_runs"]
+    # 允许 ``_runs`` + ``_run_path_index``（SPEC §13.2 M-12 discovery per-process 索引，
+    # 是 tape 路径缓存非 run 数据真相源，不违反「单一 registry」铁律）
+    dict_regs = [
+        name for name in other_regs if name not in ("_runs", "_run_path_index")
+    ]
     assert not dict_regs, f"发现并行 registry dict: {dict_regs}"
 
 
@@ -690,15 +693,16 @@ def test_perf_fixture_gen_and_meta(tmp_path):
 
 
 def test_health_endpoint_exposes_runs_dir_fp(tmp_path):
-    """``GET /api/health`` 真返回 ``runs_dir_fp``（与 manager.runs_dir 同算法），且不泄漏明文路径。
+    """``GET /api/health`` 返回 ``orca_home_fp``（权威）+ ``runs_dir_fp``（兼容期同值）。
 
+    SPEC §13.1 U-2：兼容期同发两字段，值 = ``orca_home_fingerprint()``。
     用 FastAPI TestClient（真 ASGI，非 mock）打到真实 health handler——验证 ``_identity`` →
     ``attach.health`` 真链路（mock 测试无法验证指纹真流过端点）。
     """
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from orca.iface.web._identity import runs_dir_fingerprint
+    from orca.iface.web._identity import orca_home_fingerprint
     from orca.iface.web.routes import build_attach_router
 
     runs_dir = tmp_path / "runs"
@@ -713,10 +717,12 @@ def test_health_endpoint_exposes_runs_dir_fp(tmp_path):
     body = r.json()
     assert body["app"] == "orca"
     assert body["pid"] == os.getpid()
-    # runs_dir_fp 存在、12 hex、与 manager.runs_dir 同算法
-    assert body["runs_dir_fp"] == runs_dir_fingerprint(manager.runs_dir)
-    assert len(body["runs_dir_fp"]) == 12
-    # 无明文项目目录泄漏（health 默认 bind 0.0.0.0 网络可达）
+    expected_fp = orca_home_fingerprint()
+    # orca_home_fp（新权威）+ runs_dir_fp（兼容期同值）
+    assert body["orca_home_fp"] == expected_fp
+    assert body["runs_dir_fp"] == expected_fp
+    assert len(body["orca_home_fp"]) == 12
+    # 无明文项目目录泄漏
     assert str(runs_dir.resolve()) not in r.text
 
 

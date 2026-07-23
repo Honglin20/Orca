@@ -21,7 +21,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 import orca
-from orca.iface.web._identity import runs_dir_fingerprint
+from orca.iface.web._identity import orca_home_fingerprint
 
 if TYPE_CHECKING:
     from orca.iface.web.run_manager import RunManager
@@ -75,22 +75,23 @@ def build_router(manager: RunManager) -> APIRouter:
 
     @router.get("/health")
     async def health() -> dict[str, Any]:
-        """health 探测（SPEC §5）：``{app:"orca", version, pid, runs_dir_fp}``。
+        """health 探测（SPEC §5 + §13.1 U-2）。
 
-        ``orca open`` / 端口探测用它判定「同 port 既有 server 是 orca」（否/不可达 → 起新
-        serve）。``app`` 永远是 ``"orca"``（唯一身份），其它 server 不会返此形状。
+        身份指纹 = ``sha1(ORCA_HOME)[:12]``（D1 / U-2，身份与存储路径解耦）。
+        **兼容期同发**两字段：
+          - ``orca_home_fp``（新权威）：``sha1(ORCA_HOME)[:12]``。
+          - ``runs_dir_fp``（兼容）：值 = ``orca_home_fp``（旧 client 比对此字段，下版本删）。
 
-        ``runs_dir_fp``（spec-review B1/B3，SPEC web-attach §5a）：``sha1(resolve(runs_dir))[:12]``。
-        client（``orca open``）据此判定 server 是否**同项目**——匹配则复用，否则视为 foreign 改起
-        本项目自己的 server。用指纹非明文路径（health 默认 bind ``0.0.0.0`` 网络可达，明文目录是
-        信息泄漏；详见 ``orca.iface.web._identity``）。**旧 server 缺此字段** → client 视为 foreign
-        → 安全降级到 spawn（升级窗口期可能留孤儿，用户感知后手动 ``pkill -f 'tars serve'``）。
+        client（``commands.py::_runs_dir_fp``）迁移到 ``orca_home_fp`` 后，同用户所有项目
+        共享指纹 → 单端口复用（D13）。
         """
+        fp = orca_home_fingerprint()
         return {
             "app": "orca",
             "version": orca.__version__,
             "pid": os.getpid(),
-            "runs_dir_fp": runs_dir_fingerprint(manager.runs_dir),
+            "orca_home_fp": fp,
+            "runs_dir_fp": fp,  # 兼容期：旧 client 比对此字段（值=orca_home_fp）
         }
 
     return router

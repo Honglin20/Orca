@@ -1131,12 +1131,20 @@ def _post_run_to_existing(
     路径会在 server 端被错误解析（fail loud ConfigurationError，但语义错位）。
     """
     import httpx
+    from orca.runtime import detect_project_root
 
+    # SPEC §13.2 B-1：POST /api/run body 必填 project_path。复用既有 server 时也须传
+    # （server 端据此决定 tape 写入哪个项目根）。detect_project_root 失败 → 让 server 400。
+    try:
+        project_path = str(detect_project_root())
+    except Exception:  # noqa: BLE001
+        raise RuntimeError("detect_project_root 失败：无法复用既有 server（POST /api/run 缺 project_path）")
     body = {
         "yaml_path": str(Path(config.yaml_path).resolve()),
         "inputs": config.inputs,
         "task": config.task,
         "max_iter": config.max_iter,
+        "project_path": project_path,
     }
     try:
         r = httpx.post(
@@ -1423,7 +1431,10 @@ async def _wait_ws_autoexit(web_server, autoexit_seconds: float) -> None:
 
 @app.command(name="open")
 def open_run(
-    run_id: str = typer.Argument(..., help="要打开的 run_id（或 ``--tape`` 显式指定 tape 路径）"),
+    run_id: str | None = typer.Argument(
+        None,
+        help="要打开的 run_id（或 ``--tape`` 显式指定 tape 路径）。**无参 → 打开多 run 列表页**（SPEC §13 D13）",
+    ),
     tape: Path | None = typer.Option(
         None, "--tape",
         help="显式 tape 路径（默认 ``runs/<run_id>.jsonl``）",
@@ -1437,11 +1448,14 @@ def open_run(
         help="web server 端口（默认探测 7428：是 orca 则复用，否则起后台 ``tars serve``）",
     ),
 ) -> None:
-    """attach 一个既有 run（按 tape 路径），打开 web 观察窗（SPEC §5）。
+    """attach 一个既有 run（按 tape 路径），打开 web 观察窗（SPEC §5 + §13 D13）。
 
     典型场景：``orca run --background`` 后用 ``orca open <id>`` 看 live 进度；或
     in-session shell 跑到一半想看完整 DAG。attached run 是 **read-only**（前端 gate
     禁提交，meta.writable=false）。
+
+    **无参形态**（SPEC §13 D13 / AC18）：``orca open``（无参）→ 打开
+    ``http://<host>:<port>/``（多 run 列表页），永不 spawn 新端口（复用既有 user server）。
 
     流程（SPEC §5）：
       1. 探测默认端口 7428（``GET /api/health``，本地 127.0.0.1）；是 orca → 复用；否/不可达
@@ -1452,7 +1466,71 @@ def open_run(
 
     失败：tape 不存在 → exit 2；attach 403/404/409 → exit 1（fail loud）。
     """
+    if run_id is None:
+        # 无参形态（D13）：直接打开列表页。
+        raise typer.Exit(_open_run_list(host=host, port=port))
     raise typer.Exit(_open_run(run_id, tape_path=tape, host=host, port=port))
+
+
+def _open_run_list(*, host: str | None, port: int | None) -> int:
+    """SPEC §13 D13 / AC18：``orca open``（无参）→ 复用 user server + 打开列表页。
+
+    永不 spawn 新端口（除非用户完全无活 server 时 bootstrap 一次）。流程：
+      1. probe 默认端口 / 查 ~/.orca 登记找本用户 server。
+      2. 找到 → ``webbrowser.open("/")``。
+      3. 未找到 → spawn 一次 + 登记 + 打开。
+    """
+    bind_host, display_host, target_port = resolve_web_endpoint(host=host, port=port)
+    probe_host = "127.0.0.1"
+    my_runs_dir = _default_runs_dir()
+    my_fp = _runs_dir_fp(my_runs_dir)
+    health = _probe_orca_server(probe_host, target_port)
+    if _health_is_my_project(health, my_fp):
+        actual_port = target_port
+    else:
+        actual_port = (
+            None if port is not None
+            else _lookup_my_registered_port(my_runs_dir, my_fp, probe_host)
+        )
+        if actual_port is None:
+            from orca.iface.cli.web_registry import exclusive_port_decision
+
+            with exclusive_port_decision() as write_back:
+                actual_port = (
+                    None if port is not None
+                    else _lookup_my_registered_port_unlocked(my_fp, probe_host)
+                )
+                if actual_port is None:
+                    if port is not None and not _is_port_free(bind_host, target_port):
+                        typer.echo(
+                            f"--port {target_port} 被占用（非本项目 orca 或其它进程）",
+                            err=True,
+                        )
+                        return EXIT_ARG_OR_VALIDATE
+                    actual_port = (
+                        target_port if _is_port_free(bind_host, target_port)
+                        else _find_free_port(bind_host=bind_host)
+                    )
+                    if not _spawn_background_serve(bind_host, actual_port):
+                        typer.echo("无法起后台 ``tars serve``：可执行不在 $PATH", err=True)
+                        return EXIT_RUN_FAILED
+                    if not _wait_for_health(probe_host, actual_port, timeout=10.0):
+                        typer.echo(
+                            f"后台 tars serve 未在 {actual_port} 上 ready（超时 10s）",
+                            err=True,
+                        )
+                        return EXIT_RUN_FAILED
+                    try:
+                        write_back(port=actual_port, runs_dir_fp=my_fp)
+                    except OSError as e:
+                        typer.echo(
+                            f"⚠ web registry 写失败（{e}）；server 已起 port={actual_port}",
+                            err=True,
+                        )
+    url = f"http://{display_host}:{actual_port}/"
+    _open_browser_or_print(url)
+    typer.echo(f"Orca Web UI（列表页）→ {url}  (browser tab 可关闭；server 后台运行)")
+    return EXIT_OK
 
 
 def _default_runs_dir() -> Path:
@@ -1468,51 +1546,80 @@ def _default_runs_dir() -> Path:
 
 
 def _runs_dir_fp(runs_dir: Path) -> str:
-    """本项目 runs_dir 指纹（与 server health ``runs_dir_fp`` 同算法）。
+    """用户身份指纹（SPEC §13 D1 / U-2，迁移自 runs_dir → ORCA_HOME）。
 
-    lazy import 无依赖模块（spec-review B3：不拉 ``run_manager`` 重依赖图——``_identity`` 仅 stdlib）。
+    身份与存储路径解耦：指纹 = ``sha1(ORCA_HOME)[:12]``，同用户所有项目共享 → 单端口复用。
+    保留旧函数名（``_runs_dir_fp``）以最小化改动面；参数 ``runs_dir`` 忽略（兼容签名）。
+
+    lazy import 无依赖模块（spec-review B3：``_identity`` 仅 stdlib）。
     """
-    from orca.iface.web._identity import runs_dir_fingerprint
+    from orca.iface.web._identity import orca_home_fingerprint
 
-    return runs_dir_fingerprint(runs_dir)
+    return orca_home_fingerprint()
 
 
 def _health_is_my_project(health: dict | None, my_fp: str) -> bool:
-    """health 是否本项目 server：``runs_dir_fp`` 匹配。
+    """health 是否本用户 server：``orca_home_fp``（新权威）/ ``runs_dir_fp``（兼容）任一匹配。
 
     缺指纹（旧版 server / 非 orca）→ ``False``（视为 foreign，安全降级到 spawn）。
+    SPEC §13.1 U-2 兼容期：旧 server 只发 ``runs_dir_fp``，新 server 同发两字段。
     """
-    return bool(health) and health.get("runs_dir_fp") == my_fp
+    if not health:
+        return False
+    return health.get("orca_home_fp") == my_fp or health.get("runs_dir_fp") == my_fp
 
 
 def _lookup_my_registered_port(
     my_runs_dir: Path, my_fp: str, probe_host: str,
 ) -> int | None:
-    """查 per-project 登记找本项目 server 端口。
+    """查**用户级**登记找本用户 server 端口（SPEC §13 D6 / M-7）。
 
-    **探测权威**（spec-review）：读登记拿 port 后**仍** probe + 指纹校验；陈旧 / 不匹配 / 损坏
-    → ``None``。pid 不 gate（H1：registry 不存 pid）。
+    端口登记上移到 ``~/.orca/.orca-web.json``（一用户一 server）；读时 fallback 旧
+    ``<runs_dir>/.orca-web.json`` 静默迁移（不破坏既有）。
+
+    **探测权威**：读登记拿 port 后**仍** probe + 指纹校验；陈旧 / 不匹配 / 损坏 → ``None``。
+    pid 不 gate（H1：registry 不存 pid）。
+
+    本函数**自带锁**（``lookup_orca_home_port`` 内部 ``_registry_lock``）；禁止在
+    ``exclusive_port_decision`` 临界区内调用（嵌套 flock 死锁，P1）。临界区内用
+    ``_lookup_my_registered_port_unlocked``。
     """
-    from orca.iface.cli.web_registry import read_registry
+    from orca.iface.cli.web_registry import (
+        lookup_orca_home_port,
+        migrate_legacy_registry,
+    )
 
-    reg = read_registry(my_runs_dir)
-    port = reg.get("port") if reg else None
+    migrate_legacy_registry(my_runs_dir)  # 静默迁移旧 per-project 登记到 ~/.orca/
+    port = lookup_orca_home_port()
+    if not isinstance(port, int):
+        return None
+    return port if _health_is_my_project(_probe_orca_server(probe_host, port), my_fp) else None
+
+
+def _lookup_my_registered_port_unlocked(
+    my_fp: str, probe_host: str,
+) -> int | None:
+    """同上但**不加锁**——供 ``exclusive_port_decision`` 临界区内重读用（P1）。
+
+    不调 ``migrate_legacy_registry``（临界区外已调过）；直接读 unlocked 变体。
+    """
+    from orca.iface.cli.web_registry import _lookup_orca_home_port_unlocked
+
+    port = _lookup_orca_home_port_unlocked()
     if not isinstance(port, int):
         return None
     return port if _health_is_my_project(_probe_orca_server(probe_host, port), my_fp) else None
 
 
 def _register_my_port(my_runs_dir: Path, *, port: int, fp: str) -> None:
-    """写 per-project 登记供下次 ``orca open`` 复用。
+    """写**用户级**登记供下次 ``orca open`` 复用（SPEC §13 D6）。
 
-    spec-review B4：写失败不能 silent——server 已起（detached）却没登记 → 下次找不到 → 重复
-    spawn → 泄漏。**loud 可操作 warn**：本次 open 仍继续 attach（不阻断），但显式 stderr 告知
-    port + kill 提示（可见 = fail loud 精神，又不破坏本次 open）。
+    写到 ``~/.orca/.orca-web.json``。spec-review B4：写失败 loud warn（不阻断本次 open）。
     """
-    from orca.iface.cli.web_registry import write_registry
+    from orca.iface.cli.web_registry import write_orca_home_registry
 
     try:
-        write_registry(my_runs_dir, port=port, runs_dir_fp=fp)
+        write_orca_home_registry(port=port, runs_dir_fp=fp)
     except OSError as e:
         typer.echo(
             f"⚠ web registry 写失败（{e}）；server 已起 port={port} 但下次 `orca open` 会重复"
@@ -1577,29 +1684,54 @@ def _open_run(
             else _lookup_my_registered_port(my_runs_dir, my_fp, probe_host)
         )
         if actual_port is None:
-            # 2c. 起新 server。显式 --port 被占 → fail loud；否则挑空闲端口（target 优先）。
-            if port is not None and not _is_port_free(bind_host, target_port):
-                typer.echo(
-                    f"--port {target_port} 被占用（非本项目 orca 或其它进程）",
-                    err=True,
+            # 2c. 起新 server（SPEC §13.2 B-6：整个「决策+spawn+bind+socket-ready+写回」
+            # 在 exclusive flock 临界区内，让两并发 open 的 loser 读到 winner 的 port）。
+            from orca.iface.cli.web_registry import exclusive_port_decision
+
+            with exclusive_port_decision() as write_back:
+                # 持锁后再读一次：winner 可能刚写好登记（避免重复 spawn）。
+                # P1：必须用 unlocked 变体（同进程 flock 嵌套会死锁）。
+                actual_port = (
+                    None if port is not None
+                    else _lookup_my_registered_port_unlocked(my_fp, probe_host)
                 )
-                return EXIT_ARG_OR_VALIDATE
-            actual_port = (
-                target_port if _is_port_free(bind_host, target_port)
-                else _find_free_port(bind_host=bind_host)
-            )
-            if not _spawn_background_serve(bind_host, actual_port):
-                # tars 不在 PATH（FileNotFoundError）→ fail loud exit 1
-                typer.echo("无法起后台 ``tars serve``：可执行不在 $PATH", err=True)
-                return EXIT_RUN_FAILED
-            # 等 serve 起来（health 探测重试）。
-            if not _wait_for_health(probe_host, actual_port, timeout=10.0):
-                typer.echo(
-                    f"后台 tars serve 未在 {actual_port} 上 ready（超时 10s）",
-                    err=True,
-                )
-                return EXIT_RUN_FAILED
-            _register_my_port(my_runs_dir, port=actual_port, fp=my_fp)
+                if actual_port is not None:
+                    # loser 路径：winner 已 spawn+登记，复用之。
+                    pass
+                else:
+                    # 显式 --port 被占 → fail loud；否则挑空闲端口（target 优先）。
+                    if port is not None and not _is_port_free(bind_host, target_port):
+                        typer.echo(
+                            f"--port {target_port} 被占用（非本项目 orca 或其它进程）",
+                            err=True,
+                        )
+                        return EXIT_ARG_OR_VALIDATE
+                    actual_port = (
+                        target_port if _is_port_free(bind_host, target_port)
+                        else _find_free_port(bind_host=bind_host)
+                    )
+                    if not _spawn_background_serve(bind_host, actual_port):
+                        # tars 不在 PATH（FileNotFoundError）→ fail loud exit 1
+                        typer.echo("无法起后台 ``tars serve``：可执行不在 $PATH", err=True)
+                        return EXIT_RUN_FAILED
+                    # 等 serve 起来（health 探测重试）。持锁期间阻塞 socket-ready
+                    # （B-6：临界区覆盖 bind→ready→写回；loser 醒来时读到登记复用）。
+                    if not _wait_for_health(probe_host, actual_port, timeout=10.0):
+                        typer.echo(
+                            f"后台 tars serve 未在 {actual_port} 上 ready（超时 10s）",
+                            err=True,
+                        )
+                        return EXIT_RUN_FAILED
+                    # 写回登记（unlocked 变体，避免嵌套 flock 死锁；P1）。
+                    # 失败 loud warn（不阻断本次 open；spec-review B4）。
+                    try:
+                        write_back(port=actual_port, runs_dir_fp=my_fp)
+                    except OSError as e:
+                        typer.echo(
+                            f"⚠ web registry 写失败（{e}）；server 已起 port={actual_port} 但下次 `orca open` 会重复"
+                            f" spawn。可 `lsof -ti tcp:{actual_port} | xargs kill` 或忽略（下次成功写覆盖）。",
+                            err=True,
+                        )
 
     # 3) POST /api/runs/attach（绝对路径）。
     attach_error_code = _attach_and_get_error(probe_host, actual_port, tape_abs, run_id)

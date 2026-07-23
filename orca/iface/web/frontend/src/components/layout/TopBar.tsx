@@ -11,7 +11,7 @@
 // 单一 timer 约束（SPEC §5.2）：``useElapsedNow()`` 订阅模块级 singleton tick，自身不开 setInterval。
 
 import { useState } from "react";
-import { Timer, Copy, Check, Sun, Moon, Monitor } from "lucide-react";
+import { Timer, Copy, Check, Sun, Moon, Monitor, ArrowLeft } from "lucide-react";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import { useElapsedNow } from "@/hooks/use-elapsed-tick";
 import { selectWorkflowElapsed, formatElapsed } from "@/selectors";
@@ -70,6 +70,18 @@ export function TopBar({ runId }: { runId?: string }) {
       className="orca-bg-surface orca-border orca-text flex h-12 items-center gap-4 border-b px-4"
       data-testid="top-bar"
     >
+      {/* 返回列表页（SPEC §13 §6.1：TopBar 加「← 返回」） */}
+      <button
+        type="button"
+        onClick={() => {
+          window.location.href = "/";
+        }}
+        title="返回 run 列表"
+        className="orca-text-faint hover:orca-text inline-flex items-center rounded border orca-border px-2 py-1"
+        aria-label="返回 run 列表"
+      >
+        <ArrowLeft size={14} strokeWidth={1.5} aria-hidden />
+      </button>
       <span className="orca-accent text-lg font-semibold tracking-wider">TARS</span>
       {runId && (
         <button

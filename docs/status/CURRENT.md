@@ -4,48 +4,51 @@
 
 ---
 
-## 状态（2026-07-23）
+## 当前任务（2026-07-24）
 
-- ✅ **In-Session Chart 鲁棒出图 + 失败告知 agent**（commit `003acc3`，[release note](../releases/2026-07-23-in-session-chart-robustness.md)）：根治 in-session 路径下 `agent-struct-exploration` 可视化静默失败。新增 `orca/chart/_env.py`（stdlib only，从 ledger/champions anchor 向上找 `orca_env.sh` 且内容含 `^export ORCA_CHART_SOCK=` 行，仅补 4 个身份键）；改 `viz_struct.py`（自加载 + reason 分类 env_missing/socket_unreachable/ack_failed/data_insufficient/import_failed/generic + `--mode compare` + `_main` 兜底保证 stdout 永远有合法 JSON）；yaml curator/finalize output_schema 加必填 `viz_status`（严化 additionalProperties）+ agent.md dumb copy；finalize step6 inline `python3 -c` → `viz_struct.py --mode compare` CLI。**铁律守恒**：`_render.py`/`chart_daemon`/`cli.py` 零改动。code-reviewer 两轮闭环（impl + coverage 并行）：0 🔴 + 4 🟡（R1-R4）+ 5 🟡（AC4 ack 5/5 / AC1a render_chart mock / data_insufficient 无有效点 / monkeypatch isolation / `_main` compare happy path）+ 6 🟢 全修。245 chart/workflows/in-session + 249 compile/e2e_redesign passed（2 skipped kd-nas 与本改动无关）；`tars validate` 0 error。**范围外**：AC5b/AC8（agent 转写 + e2e fake daemon）需 stage3 fake chart_daemon，登记后续；bit-curve/viz_kd 迁移到 `load_run_env_from_artifacts`（DRY 统一）留 SPEC §7。
+### ✅ 单端口 + 多 Run 监控（Phase A + B' + C 生产 + 单测）
 
-## 状态（2026-07-22）
+**状态**：实现 + 单测 + code-reviewer 审查中，待 commit。
 
-- ✅ **KB 可移植 + struct-exploration 结构优先**（commit `6e0f167` + `0be8c6d`，[release note](../releases/2026-07-22-kb-portability-struct-direction-gate.md)）：解决「struct-exploration 只改超参不碰结构」两根因。①KB 不可移植+缺失静默 → `orca install` 部署 KB 到 `~/.orca/knowledge_base` + `resolve_kb_dir` 确定性解析（env>config>~/.orca>cwd）+ `ORCA_KB_DIR` 注入 + `apply_kb_requirement` 对 `requires:[knowledge_base]` workflow 缺失 fail-loud（run 启动即停，不进 setup agent）。②探索零方向感 → 新增确定性 `direction_coverage.py`（KB direction 目录 D0-D21 枚举 + ledger tried → untried）+ hypothesizer 软闸优先未试结构方向（all_exhausted/near_target 才允许超参）+ direction_id 全链。**kd-nas defer**（用户拍板）；硬闸 defer（软闸先验证）。
-- 🔄 **Workflow 全面重设计**（进行中，[计划](../plans/2026-07-21-workflow-redesign.md)）：8 workflow 审计 → 三根因（A 造假数据/B IN-SESSION 无法问用户/C render_chart 无轴标签）+ DAG 过度拆分 + 产物目录混乱。已冻结：[input 三档原则](../specs/workflow-input-design-principle.md) + [ask-user 哨兵契约 Arch 1](../specs/agent-ask-user-sentinel.md)（TARS 层拦截，引擎零改动，opencode task_id 恢复已验证）。 coder 拆解 9 包（P1-P9），批1 = P1(render_chart 轴标签)+P2(修路径拼接)+P3(0-b spike)。
-  - ✅ **P1 完成**（`a7de596`）：`render_chart` 加 `x_label/y_label/caption` 三参数（单一真相源 ChartPayload，backend/frontend 两端同源）；前端 chartTheme 加 4 个 label helper + 新 `ChartCaption.tsx` 共享小组件，8 widget 全接入；TUI plotext `xlabel`/`ylabel` + 空数据/非空数据两路径保 caption；heatmap 降级把 axis 拼进 hint。向后兼容（旧 tape 无新字段 → 旧行为，color/heatmap 零回归）。code-reviewer 两轮闭环。详见 [release note](../releases/2026-07-21-chart-axis-labels.md)。
-  - ✅ **P2 完成**（`e41974f`）：struct/kd setup 节点 output_schema 加显式带尾斜杠字段（snapshots_dir / worktree_root / 等），下游改读字段而非 `{{ output_dir }}<suffix>` 拼接——从源头杜绝兄弟孤儿目录。详见 [release note](../releases/2026-07-21-workflow-path-concat-fix.md)。范围外 7 个 agent.md 同款拼接 + CONTRACTS.md stale 登记给 Phase 3 P7。**注意**：本分支 viz 大修（b820ef1…f516223）已完成 color 字段/KD viz_kd/bit-curve 真 pareto 等，**render_chart 轴标签根因 C 已由 P1 解；剩余 champion-trace 横轴（已加 label 落地作证）/ pareto y=0 / exploration-tree / round-leader 等图表内容根因登记给 Phase 3 P7**。
-  - ✅ **P3:0-b 完成**（spike pass）：`tests/spike_ask_user/` 独立 harness（2 节点 workflow + driver + 40 测试含 2 真 claude integration）证明 ask-user 哨兵闭环：strict 识别 → task_id 捕获 → 恢复同一子 agent → 真实 output → `orca next`（哨兵不进引擎，零引擎改动）；MAX_ASK=3 fail loud + 造假检测。产出可复用 `SubagentBackend` ABC + `MockSubagentBackend` + `ClaudeCliBackend`（`claude -p --session-id` + `--resume`，等价 CC SendMessage 的 headless 形态）+ `tars_loop.drive_node/drive_workflow`。code-reviewer 两轮闭环。详见 [release note](../releases/2026-07-21-spike-ask-user-sentinel.md)。
-  - ✅ **P4 完成**（`774aa46`）：TARS skill（`orca/skills/tars/SKILL.md`）全量接入哨兵闭环——驱动循环第 2 步加哨兵分支 + 新增「### 哨兵处理」段（SPEC §2 skill 指令投影，spike `drive_node` 6 步控制流逐字翻译）：strict 识别（括号配平 + 魔键，非 substring）→ 捕获 task_id（CC `agentId`/opencode `ses_xxx`）→ 问用户（CC `AskUserQuestion`/opencode 聊天问）→ 恢复**同一**子 agent（CC `SendMessage`/opencode `Task(task_id=)`）→ MAX_ASK=3 fail loud → 真实产出才喂 `orca next`（**哨兵绝不进引擎**，compile validator 铁律 7 不触发，零引擎/workflow/agent.md 改动）。CC 主路径先 ship，opencode 标 experimental。spike 38 测试基线保持绿。code-reviewer 两轮闭环（design + spike-equivalence，无 🔴，2 🟡 + 6 🟢 全修）。详见 [release note](../releases/2026-07-22-tars-skill-ask-user-sentinel.md)。**根因 B（IN-SESSION 无法问用户）的 skill 侧已解；agent.md 哨兵段落（P5/P6/P7）+ opencode in-session E2E 待续**。
-  - ✅ **P5 完成**：quant 四 workflow（ptq-sweep / sensitivity / qat / bit-curve）正确性修复。①**删造假**——agent.md 模板「torch.randn 兜底 / 复用 calib 当 eval / 复用 train 当 eval」全删，改 Tier B 契约（读代码找 loader dotted-path → 找不到 fail loud，stderr 明确 + exit 2）；脚本 grep 0 个 `torch.randn`。②**device**——新共享 `_quant_scripts/_device.py`（`resolve_device`/`is_npu_available`/`set_seed`/`move_batch_to_device`/`wrap_forward_with_device`/`add_device_seed_args`/`resolve_device_and_seed`，inline 自 nas-agent 不引跨包依赖）；4 yaml 加 `target_hardware`(Tier A [ask]) + `seed`(默认 0) input；4 脚本加 `--device`/`--seed`、`fp_model.to(device)` + `wrap_forward_with_device`（batch 搬 device 自动做）；NPU 经 `torch.npu.is_available()` 有路径。③**bit-curve bake 改动生效**——`_bake_selected` reload 落盘 state_dict + 重 eval（strict=True 键失配 fail loud），返 `(path, reeval_metric)`；`_check_bake_metric_consistency` 超 tol（相对 1e-4）exit 3；持久化顺序保证 exit(3) 时 summary 与 .pt 一致；bake 失败不阻断曲线产出（N7）。④`output_dir` 默认加 `/<wf-name>/` 子目录防撞；⑤qat 示例数字修正（recovery=after−before，mse 口径负=改善）；⑥sensitivity 补 `--env_file` 对齐 PTQ env 兜底；⑦qat recovery bar / bit-curve pareto 用 P1 轴标签，pareto 标题用 `metric_kind` 替代写死 "Accuracy"。eval_fn_ref 空 → WARN「用 teacher-student mse，精度仅自洽性参考」（SDK 合法默认，非造假）；eval_loader 缺 → fail loud（复用 calib/train 是禁掉的造假口径，code-reviewer Rule 7 surface）。code-reviewer 两轮闭环（impl + coverage 并行）：5 🔴 + 6 🟡 + 8 🟢 全处理（既有 7 类 helper 复制 + 死 required 参数登记给 P9 input slim 同期）。37 新测试 + 110 既有测试无回归；`tars validate` 0 error。详见 [release note](../releases/2026-07-22-quant-workflow-correctness-fix.md)。
-  - ✅ **P6 完成**：NAS 系两 workflow 重设计。两 yaml（`nas-agent-pipeline` heavy / `nas-hp-search` slim）补 4 个 [ask] KPI input（target_hardware / latency_constraint / max_rounds / seed）+ `project_root` 下沉给 setup 节点 infer-once（从 model_path 向上走）+ output_schema 向后传（抄 agent-struct family_detect）；heavy **7→5 节点**对齐 slim 确定性护栏（删 viz_describe / LLM evaluator / viz_finalize，viz 内联进 setup、选架构复用 slim `nas-select`）；`train_runner` 加 output_schema `search_records minimum:1` 防假执行；`latency_estimator.py` 构造函数 device 无默认（forcing function）；dataset 缺失 fail loud。code-reviewer 一轮提 1 🔴（output_schema vs SKILL Step4 早退契约断裂）+ 3 🟡 全闭环：两 yaml `model_type` 加 `enum: [..., unsupported]` + 条件路由（`when: model_type != 'unsupported'` → train_script_gen；兜底 → $end）短路不烧算力 + 两 setup agent.md 加早退 JSON 分支。`tars validate` 0 error；6 NAS agent.md Jinja2 StrictUndefined 渲染全 OK。详见 [release note](../releases/2026-07-22-nas-workflow-redesign.md)。
-  - ✅ **P7 完成**（`66f74ea`）：struct/kd 精简（**11→6 / 13→6**，plan headline 原写"→7"是 off-by-one，以 bullet 合并算式为准已订正）+ **latency-first candidate_eval**（合并 kd_trainer+measure_student；先默认权重导 ONNX 测 latency → 不达标 FAIL_latency 不训练 → 通过才短训测 proxy_mse；measure_student 加 latency-only 模式 db_gap=-1 sentinel）+ 图表根因（viz_struct Pareto 过滤 accuracy=None 修 y=0 伪点 + 删 Round Ledger / Exploration Tree + Candidate Ledger 短字段拆分；viz_kd round 模式 db_gap/met_acc 移出默认列 + finalize compare caption 标 champion deferred / teacher_accuracy_known=false 警告）+ device（`_device.py` inline NAS resolve_device + ort_providers，struct/kd 各一份同内容；6 脚本加 `--device/--seed`；`export_onnx --no-external-data` 默认断言；`latency_provider` / `seed` 升 input；解开 export / measure_student / teacher_setup 原 `device="cpu"` 硬编码）+ P2 遗留收口（7 agent.md 拼接切 setup 专用字段 + CONTRACTS.md 6-节点 I/O 表同步 + kd-hypothesizer `rationale_summary`→`rationale` + kd-curator 路由门加 `phase==2` + `champion_db_gap` 短训恒 -1 sentinel 不造假 + kd-setup 不硬编码 `teacher_accuracy_known=true`）。code-reviewer 一轮闭环 R1-R4 必修 + M1-M7 中等 + L1-L7 轻微；新增 24 smoke test。`tars validate` 0 error；319 测试无回归。详见 [release note](../releases/2026-07-22-p7-struct-kd-restructure.md)。
-  - ✅ **P4b 完成**（`530b580`）：6 个含 Tier B 必填项的 agent.md（ptq/sensitivity/qat/bit-curve/nas-search-pipeline/kd-setup）「缺数据 fail loud」升级为轻量哨兵返回（2 必填键，与 SPEC + spike `is_sentinel` 对齐），接通 ask-user 最后一段。详见 [release note](../releases/2026-07-22-p4b-agent-md-ask-user-sentinel.md)。范围外：struct setup 哨兵化（yaml 内联，留后续）。
-  - ✅ **P8 完成**（`b1eaf43`）：引擎注入 `$ORCA_ARTIFACTS_DIR`（`artifacts_dir_for_run` 落 `orca/chart/_paths.py` 单一真相源 + bootstrap mkdir + orca_env.sh 注入）+ `orca gc --max-age/--keep/--dry-run`（4 类候选 + active run 不删/路径逃逸拒/advisory lock）。67 新测试 + 664 回归 passed。详见 [release note](../releases/2026-07-22-p8-engine-artifacts-dir-and-gc.md)。给了 P9 接口约定。
-  - ✅ **Stage4 viz 执行完成**（`e05ad2d`…`23361af`）：~15 张缺标签图补 x_label/y_label/caption + metric 方向标注；NAS 终态 scatter→pareto；dedup 键冻结无重复图风险。详见 [release note](../releases/2026-07-22-viz-labels-producer-side.md)。遗留 `nas-viz/scripts/` 死代码待 DRY。
-  - ✅ **P9b 完成**（`8a1e5f0`）：struct/kd 按三档原则 inputs slim（**11→9 / 17→9**，6 [ask] 主 + 3 [advanced] 固化）+ Tier C 下沉（struct/kd_scripts_dir → setup.output.X infer-once+propagate；iterations 完全移除；teacher_layers=6 / short_epochs=10 / full_epochs=50 / eval_dataset="" / proxy_dataset_spec="" 固化进 prompt）+ setup 切 P8 `$ORCA_ARTIFACTS_DIR` + **P4b 遗留收口**（struct setup yaml 内联 + kd-setup Step 1 的 build_fn/dummy_input 缺失走 ask-user 哨兵）+ create-workflow-skill 编码三档（SKILL.md 新增「input 定义准则」节 + reference §6 + 新 demo `tier-discipline.yaml`）。code-reviewer 两 review 闭环（0 🔴 + 4 🟡 + 7 🟢 全修或登记）；新增 `test_no_jinja_ref_to_undeclared_input`（8 wf parametrize 契约守门）。`tars validate` 0 error；compile+workflows 196 passed。详见 [release note](../releases/2026-07-22-p9b-struct-kd-input-slim-and-skill.md)。登记后续：三档标签 lint / tier-discipline benchmark case / 生产 agent 哨兵 E2E（批 3）/ SPEC seed Tier A vs [advanced] 张力澄清 / SPEC device↔target_hardware 命名加注。
-  - ✅ **P9a 完成**（`64c5c11`）：quant(4)+NAS(2) 按三档原则 inputs slim（ptq-sweep 12→3 / sensitivity 11→3 / qat 15→3 / bit-curve 16→6 保留 accuracy_tolerance/avg_bit_budget/max_evals / nas 两 wf 6→5）+ Tier C 固化脚本默认 + Tier B infer-once+哨兵（project_root 从 model_path 向上走对齐 NAS P6 + loader/eval_fn ref）+ output_dir 切 P8 `$ORCA_ARTIFACTS_DIR`（NAS infer-once+propagate，下游读 `model_optimizer.output.output_dir`）+ 清理 P5 遗留 dead required 参数（4 脚本）。裁决策：qat lr/total_steps 走 smoke 兜底不走哨兵（脚本 stderr WARN 非静默）。code-reviewer 一轮闭环（0 🔴 + 2 🟡 + 4 🟢）；新增 `test_p9a_input_contract.py`。`tars validate` 0 error；Jinja StrictUndefined 16 节点 OK；250 passed。详见 [release note](../releases/2026-07-22-p9a-quant-nas-input-slim.md)。**P9 全段（a+b）input slim 落地完成**。
-  - ✅ **Stage 3 完成**：统一 headless TARS-SKILL E2E harness（`tests/e2e_redesign/`，禁 CLI 驱动）。三层验证：静态契约闸（8 wf × 7 check = 64 parametrized）+ headless DAG walk（schema_faker 合成喂 next，单节点 quant×4 到 done:true、多节点 bootstrap+首跳）+ 哨兵路径 E2E（ptq-sweeper 闭环）。契约闸就地修了 6 处 chart label 缺失 + 1 个 P9b 真 bug（agent-struct setup prompt 自引用 `{{ setup.output.struct_scripts_dir }}` 渲染崩 → `{% raw %}` 转义）。code-reviewer 两轮闭环（0 🔴，5 🟡 全修）+ 新增 4 函数边界单测模块闭合 Rule 9 盲区。120 passed, 2 skipped（kd-nas 受用户活跃 run 阻塞）。详见 [release note](../releases/2026-07-22-stage3-headless-tars-e2e.md)。**全量真模型 run 不可行（无 GPU/数据集）**——留用户手动测；批 2 workflow 重设计至此全段 ✅。
-  - 待办：批 3 真机 in-session E2E（opencode+deepseek，需真模型）+ `orca open` 截真图替换文档 📊 占位 + 各 viz 截图。
+**完成项**：
+- Phase A：`orca_home_fingerprint` + 端口登记上移 `~/.orca/.orca-web.json` + `exclusive_port_decision` 临界区（B-6）。
+- Phase B'：`orca/runtime/_project.py` 注册表 + `start_run(project_path=)` + `POST /api/run` body 必填 + allowlist。
+- Phase C：`GET /api/runs?scope=all` discovery + `ensure_attached` + `DELETE`（M-3 四态）+ WS 控制帧（B-4 queue+writer）+ AuthMiddleware no-op（M-1）+ 前端 RunListPage + run-list-store。
+- 单测：runtime（20）+ multi-run-phase-c（15）+ phase-a-registry-auth（10）= 45 新测；既有套件全绿（1 pre-existing apply_kb_requirement import 非 §13 引入）。
 
-- ✅ **`orca open` 跨项目端口占用修复 + `bootstrap` 默认自动开 web**（commit `7d9b7eb` + `9677c1e`）：A 修「7428 被别项目 orca 占 → 静默挂错 tape」（项目指纹复用 + registry + 绝对路径）；B 让 bootstrap 启动即自动开 web（detach `orca open`，stdout 契约零污染，默认开）。spec-review 两轮 + code-reviewer 全闭环；987 passed。详见 [release note](../releases/2026-07-21-orca-open-cross-project-and-bootstrap-auto-open.md) + [CHANGELOG](CHANGELOG.md)。Follow-up：`orca run` reuse 同类隐患（R4）/ `tars serve --runs-dir`（R8）/ 指纹隐私（H5）。
-  - ✅ **补丁（2026-07-22）**：B 的 detached `orca open` URL echo 进日志文件、用户终端看不到 → bootstrap 自身算出 URL 走 stderr + JSON `web_url` 双路显式吐给用户（不进 prompt，保 idempotent 重发不变量）。25 passed。详见 [release note](../releases/2026-07-22-bootstrap-surface-web-url.md)。
-- ✅ **Workflow 可视化全量优化**（7 点，每点独立 agent + 逐 diff 验收，commit `b820ef1`…`f516223`）：前端加 `color` 字段（hue 优先的 per-row 着色）；sensitivity bar 去 hue 改 color、table 改全层；**修 KD 0 图 bug**（viz_round 复用 viz_struct 但 schema 不匹配致 0 图 → 新建 viz_kd.py 4 图 + 改 yaml）；struct 加逐候选表；bit-curve 假 pareto 改真 pareto + 全候选 scatter；ptq-sweep 删无意义 hue + table 补失败行；qat 补训练 loss 曲线。KD 用真实账本 mock 捕获证实修前 0 图→修后 5 图。详见 [release note](../releases/2026-07-21-workflow-viz-overhaul.md)。
-- ts_quant 已 editable 装入 conda orca env（实测可用）；待正式加进 orca pyproject 依赖。
-- 本地领先 origin 多 commit（push 待用户手动）。
+**待办**：
+- [ ] 等 code-reviewer 反馈闭环
+- [ ] commit
+- [ ] CHANGELOG 顶部加索引
+
+**遗留（非阻塞）**：
+- 前端 `out/` 未构建（WSL/Win 混合环境 rollup native binary 缺失，需 Windows-native shell `npm run build`）。
+- `_scan_meta_overview` contract test（AC14）未补。
+- 持久层 `.orca-meta-cache.json`（P0）未实现。
+- `orca project rebuild` 命令未实现。
+- pre-existing `apply_kb_requirement` web→cli import（非 §13 引入）。
+
+详见 release note：[2026-07-24-single-port-multi-run-monitoring.md](../releases/2026-07-24-single-port-multi-run-monitoring.md)
+
+---
+
+## 历史状态（已完成，详见 CHANGELOG）
+
+- ✅ **In-Session Chart 鲁棒出图**（commit `003acc3`）
+- ✅ **KB 可移植 + struct-exploration**（commit `6e0f167` + `0be8c6d`）
+- ✅ **Workflow 全面重设计 P1-P9 + P4b + Stage3/4**（系列 commits，2026-07-21~22）
+- ✅ **`orca open` 跨项目端口占用修复**（commit `7d9b7eb` + `9677c1e`）
+- ✅ **Workflow 可视化全量优化**（commits `b820ef1`…`f516223`）
+- ✅ **P8 引擎 artifacts dir + `orca gc`**（commit `b1eaf43`）
 
 ## 待确认（收尾，非阻塞）
 
-- ts_quant 正式进 orca pyproject 依赖（落实"装 orca 即装 ts_quant"）
-- 各 workflow 真机 in-session E2E + `orca open` 截真图替换文档 📊 占位（含本次新可视化：sensitivity 统一色 bar / KD 4 图 / qat loss 曲线等）
-- 量化 workflow sidecar 脚本是否统一补永久单测（本次按既定惯例未补，用 py_compile/tsc/真实账本 mock 捕获验证；详见 release note「测试策略说明」）
-
-## 并行：in-session 加固（orca 引擎，可穿插）
-
-P5（F1 resume）done。候选 P2（marker 三态）/ P4（失败兜底）/ P6（contract-test），待用户选定。既有 debt/follow-up 全量见 CHANGELOG，SPEC `docs/specs/2026-07-19-in-session-hardening-and-perf.md` v4.1。
+- ts_quant 正式进 orca pyproject 依赖
+- 各 workflow 真机 in-session E2E + 截真图替换文档占位
+- 量化 workflow sidecar 脚本永久单测
 
 ## 必读文件（开工前按需）
 
+- [SPEC §13：单端口 + 多 Run 监控 v4 修订](../specs/2026-07-23-single-port-multi-run-monitoring.md)
 - [CHANGELOG](CHANGELOG.md)
-- `docs/workflows/README.md`（workflow 索引 + 量化 pipeline 顺序）
-- `docs/in-session-usage.md`（in-session 安装与使用）
-- 可视化契约：`orca/chart/_render.py`（render_chart，含 color + x_label/y_label/caption 字段）+ `orca/iface/web/frontend/src/components/chart/`（8 widget + ChartCaption 共享组件 + chartTheme label helpers）
+- [shells-design-draft.md](../specs/shells-design-draft.md)（Phase 6.3 三通道竞速，已在定稿）

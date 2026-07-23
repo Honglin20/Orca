@@ -1,11 +1,16 @@
-"""runs.py —— 懒加载 REST 路由（SPEC §3 / §0 D10 assets）。
+"""runs.py —— 懒加载 REST 路由（SPEC §3 / §0 D10 assets + §13 Phase C）。
 
 回答「前端怎么拿 run 列表 / 全量事件 / 单 run 状态 / agent 产出的图片资源？」：
-  - ``GET /api/runs`` → ``list[RunMeta]``，**绝不返回事件**（懒加载红线，§0.1 铁律 2）。
-  - ``GET /api/runs/<id>/events`` → ``list[Event]``（懒加载，唯一来源 ``tape.replay``）。
+  - ``GET /api/runs`` → ``list[RunMeta]`` 或 ``?scope=all`` → ``list[RunSummary]``（跨项目 discovery）。
+    **绝不返回事件**（懒加载红线，§0.1 铁律 2）。
   - ``GET /api/runs/<id>`` → ``{meta, state}``（元数据 + RunState 快照，**不含全量事件**）。
-  - ``GET /api/runs/<id>/assets/<path>`` → 图片资源字节流（SPEC §0 D10；markdown 内相对
-    / file:// 路径前端重写到此处）。
+  - ``GET /api/runs/<id>/events`` → ``list[Event]``（懒加载，唯一来源 ``tape.replay``）。
+  - ``GET /api/runs/<id>/meta`` → 扩展 meta（含 huge/overview）。
+  - ``GET /api/runs/<id>/assets/<path>`` → 图片资源字节流（SPEC §0 D10）。
+  - ``DELETE /api/runs/<id>`` → 删 tape + run 目录（SPEC §13 D10/B-5/M-3）。
+
+懒挂载触发面（SPEC §13.2 I-3）：``{/meta, /events, /assets/<path>}`` 任一遇 unknown run_id
+先 ``manager.ensure_attached``（WS subscribe 在 ws_handler 内 ensure_attached）。
 
 依赖单向：本模块依赖 ``orca.iface.web.run_manager``（同层）+ fastapi，不含编排逻辑。
 """
@@ -16,9 +21,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from orca.events.replay import replay_state
+from orca.iface.web.run_manager import RunSummary
 
 if TYPE_CHECKING:
     from orca.iface.web.run_manager import RunManager
@@ -32,11 +38,48 @@ def build_router(manager: RunManager) -> APIRouter:
     router = APIRouter(prefix="/api/runs", tags=["runs"])
 
     @router.get("")
-    async def list_runs() -> list[dict[str, Any]]:
-        """run 列表（元数据，**无事件**）。SPEC §3.1 / §0.1 铁律 2。
+    async def list_runs(
+        scope: str | None = None,
+        project: str | None = None,
+        status: str | None = None,
+        q: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """run 列表（元数据，**无事件**）。SPEC §3.1 / §0.1 铁律 2 / §13 §5.2 D5。
 
-        返回 ``list[RunMeta.dict]``——dataclass 转 dict（fastapi 序列化）。
+        - ``?scope=all`` → 跨项目 discovery（``list[RunSummary]``，M-5 白名单）。
+        - 否则 → 内存 live run（向后兼容：``list[RunMeta]``）。
+
+        过滤参数（仅 ``scope=all`` 生效）：``project`` / ``status`` / ``q`` / ``limit`` / ``offset``。
         """
+        if scope == "all":
+            summaries = manager.discover_runs()
+            # 过滤
+            if project is not None:
+                summaries = [s for s in summaries if s.project_id == project]
+            if status is not None:
+                summaries = [s for s in summaries if s.status == status]
+            if q is not None:
+                ql = q.strip().lower()
+                if ql:
+                    summaries = [
+                        s for s in summaries
+                        if ql in s.run_id.lower()
+                        or ql in (s.workflow_name or "").lower()
+                    ]
+            # offset/limit
+            start = offset or 0
+            if start:
+                summaries = summaries[start:]
+            if limit is not None:
+                summaries = summaries[:limit]
+            # response_model_exclude_unset=True（M-5）：让 legacy run 省略 project_id 等未设字段。
+            return [
+                s.model_dump(exclude_unset=True, exclude_none=False)
+                for s in summaries
+            ]
+        # 默认（向后兼容）：内存 live run。
         return [_meta_to_dict(m) for m in manager.list_runs()]
 
     @router.get("/{run_id}")
@@ -45,6 +88,7 @@ def build_router(manager: RunManager) -> APIRouter:
 
         未知 run_id → 404。用 ``get_run_meta``（单 run replay，避免 N+1）。
         """
+        await _ensure_attached(manager, run_id)
         handle = manager.get_handle(run_id)
         if handle is None:
             raise HTTPException(status_code=404, detail=f"unknown run_id: {run_id}")
@@ -63,15 +107,10 @@ def build_router(manager: RunManager) -> APIRouter:
     ) -> list[dict[str, Any]]:
         """某 run 事件（懒加载，唯一来源 ``tape.replay``，§0.1 铁律 1）。
 
-        向后兼容扩展（SPEC web-attach §3）：
-          - 无参 = 全量（``tape.replay()``）
-          - ``?since=N`` = ``seq > N``
-          - ``?since=N&limit=M`` = ``[N+1, N+M]``
-          - ``?tail=M`` = 最后 M 条
-
         **M1**：本端点是 pure tape read——不 emit bus / 不 relay（bus 写入路径只在
         follow task）。前端 huge 模式经此拉 tail + 增量窗口；client-fold。
         """
+        await _ensure_attached(manager, run_id)
         try:
             events = manager.get_run_events_window(
                 run_id, since=since, limit=limit, tail=tail
@@ -89,12 +128,9 @@ def build_router(manager: RunManager) -> APIRouter:
         返回 ``{run_id, status, source, event_count, byte_size, oldest_seq, newest_seq,
         writable, huge, overview?}``。
 
-        - ``writable``：in-process=True / attached=False（前端 gate 模态据此禁提交）。
-        - ``huge``：``event_count > 50000`` OR ``byte_size > 5MB``（兜底阈值）。
-        - ``overview``：**仅 huge 模式返**——服务端 fold 同一 tape 派生（M4）。
-
         未知 run_id → 404。
         """
+        await _ensure_attached(manager, run_id)
         meta = manager.get_run_extended_meta(run_id)
         if meta is None:
             raise HTTPException(status_code=404, detail=f"unknown run_id: {run_id}")
@@ -111,20 +147,56 @@ def build_router(manager: RunManager) -> APIRouter:
         - 未知 run_id → 404
         - 路径越界（``..`` / 绝对路径）→ 404（fail loud，不暴露 fs）
         - 文件不存在 → 404
-
-        解析 + 越界守卫委托 ``manager.resolve_asset_path``（SRP：路径解析在 manager，
-        IO 字节流在 routes）。
         """
+        await _ensure_attached(manager, run_id)
         candidate = manager.resolve_asset_path(run_id, asset_path)
         if candidate is None:
-            # 不区分 unknown run / path escape / file missing——统一 404（不暴露 fs 细节）。
             raise HTTPException(
                 status_code=404,
                 detail=f"asset not found: {asset_path}",
             )
         return FileResponse(str(candidate))
 
+    @router.delete("/{run_id}")
+    async def delete_run(run_id: str) -> JSONResponse:
+        """删 run（SPEC §13 §5.7 D10 / B-5 / M-3）。
+
+        响应：
+          - 200 ``{ok:true, run_id, existed_before:true}``
+          - 404 ``{ok:false, never_existed:true, run_id}``
+          - 409 ``{ok:false, live:true, run_id, pid}`` （attached live / Windows file-locked）
+        """
+        result = await manager.delete_run(run_id)
+        if result.get("never_existed"):
+            return JSONResponse(result, status_code=404)
+        if result.get("live"):
+            return JSONResponse(result, status_code=409)
+        if result.get("ok"):
+            return JSONResponse(result, status_code=200)
+        # 兜底：未识别错误 → 500
+        return JSONResponse(result, status_code=500)
+
     return router
+
+
+async def _ensure_attached(manager: "RunManager", run_id: str) -> None:
+    """懒挂载 helper（SPEC §13.2 I-3）：unknown run_id 先 ensure_attached。
+
+    - 已在内存 → no-op。
+    - 0 命中 → 404。
+    - 多命中 → 500（fail loud）。
+    - PermissionError → 403。
+    """
+    if manager.get_handle(run_id) is not None:
+        return
+    try:
+        await manager.ensure_attached(run_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
 
 
 def _meta_to_dict(meta: Any) -> dict[str, Any]:

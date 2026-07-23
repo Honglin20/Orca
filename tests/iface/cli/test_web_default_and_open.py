@@ -946,6 +946,14 @@ def _write_min_tape(runs_dir: Path, run_id: str) -> Path:
 class TestOpenProjectAwareReuse:
     """``orca open`` 跨项目端口占用：项目指纹复用 + registry + 绝对路径（SPEC §5a）。"""
 
+    @pytest.fixture(autouse=True)
+    def _isolated_orca_home(self, tmp_path, monkeypatch):
+        """SPEC §13 D6/M-7：端口登记上移到 ``~/.orca/.orca-web.json``，需隔离 ORCA_HOME
+        以免污染真实用户全局登记。"""
+        home = tmp_path / "orca-home"
+        home.mkdir(parents=True)
+        monkeypatch.setenv("ORCA_HOME", str(home))
+
     def test_health_is_my_project_logic(self):
         """``_health_is_my_project``：fp 匹配→True；缺 fp（旧 server）/ 非 orca → False。"""
         from orca.iface.cli.commands import _health_is_my_project
@@ -1133,7 +1141,12 @@ class TestOpenProjectAwareReuse:
         def _raise(*a, **kw):
             raise OSError("disk full")
 
-        # _register_my_port lazy-import write_registry → patch 模块属性即生效。
+        # SPEC §13.2 B-6：spawn 路径的写回走 ``_write_orca_home_registry_unlocked``
+        # （exclusive_port_decision 临界区内调用，避免嵌套 flock 死锁）。
+        monkeypatch.setattr(
+            "orca.iface.cli.web_registry._write_orca_home_registry_unlocked", _raise,
+        )
+        # 旧 write_registry 也 patch（兼容 / 外部 API 路径）。
         monkeypatch.setattr("orca.iface.cli.web_registry.write_registry", _raise)
         monkeypatch.setattr(
             "orca.iface.cli.commands._attach_and_get_error",
@@ -1199,12 +1212,16 @@ class TestOpenProjectAwareReuse:
 
 
 def test_fingerprint_single_point_consistency():
-    """``commands._runs_dir_fp`` 与 ``_identity.runs_dir_fingerprint`` 同算法（DRY 单点）。"""
+    """SPEC §13 D1 / U-2：``commands._runs_dir_fp`` 现在用 ``orca_home_fingerprint``
+    （身份解耦：同用户所有项目共享指纹 → 单端口）。函数名保留（``_runs_dir_fp``）以最小化
+    改动面；参数被忽略（兼容签名）。
+    """
     from orca.iface.cli.commands import _runs_dir_fp
-    from orca.iface.web._identity import runs_dir_fingerprint
+    from orca.iface.web._identity import orca_home_fingerprint
 
+    expected = orca_home_fingerprint()
     for rd in [Path("runs"), Path("/some/abs/path/runs"), Path("../other/runs")]:
-        assert _runs_dir_fp(rd) == runs_dir_fingerprint(rd)
+        assert _runs_dir_fp(rd) == expected
 
 
 def test_default_runs_dir_single_source():

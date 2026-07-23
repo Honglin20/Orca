@@ -25,10 +25,13 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Literal
+
+from pydantic import BaseModel, ConfigDict
 
 from orca.compile import ConfigurationError, load_workflow
 from orca.iface.cli.config import apply_kb_requirement
@@ -50,6 +53,12 @@ from orca.gates.pending import pending_gates_from_tape
 from orca.gates.types import HumanGate
 from orca.run.lifecycle import gen_run_id
 from orca.run.orchestrator import Orchestrator
+from orca.runtime import (
+    detect_project_root,
+    is_registered_runs_dir,
+    list_registered,
+    register_project,
+)
 from orca.schema import Event, RunState, Workflow
 
 if TYPE_CHECKING:
@@ -172,6 +181,28 @@ class RunMeta:
     error: str | None
 
 
+class RunSummary(BaseModel):
+    """跨项目 discovery 返回项（SPEC §13.2 M-5 / §5.2 D5）。
+
+    Pydantic ``extra="forbid"``：schema 白名单 validator（拒 events/其它字段，AC3 反向 fixture）。
+    ``response_model_exclude_unset=True`` 让 fastapi 序列化时省略未设字段（如 legacy run 无 project_id）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    workflow_name: str
+    project_id: str | None = None
+    project_name: str | None = None
+    status: RunStatus
+    progress: str = "?"
+    cost: float = 0.0
+    elapsed: float = 0.0
+    started_at: float | None = None
+    event_count: int = 0
+    source: Literal["in-process", "attached", "legacy"] = "in-process"
+
+
 class RunManager:
     """托管多个并发 run（SPEC §2.1）。
 
@@ -204,6 +235,13 @@ class RunManager:
         # newest, overview_data)。hit 时 O(1)；mtime/size 变则失效。客户端高频轮询 /meta
         # 不重算 fold。无上限（typical: 单 digit run 数 × 1 entry = 几条），YAGNI 不加 LRU。
         self._meta_cache: dict[tuple[str, float, int], tuple[int, int, int, dict | None]] = {}
+        # SPEC §13.2 M-12：run_id → (project_id, tape_path, project_name) per-process 索引，
+        # 每次 ``GET /api/runs?scope=all`` discovery 重建。``resolve_run_path`` miss 时查此索引。
+        self._run_path_index: dict[str, tuple[str | None, Path, str | None]] = {}
+        # SPEC §13.1 U-3 / §13.2 B-4：WS 控制帧广播回调列表。delete/cancel/attach 时调用，
+        # 让所有 WS 通过自身出站 queue 串行化发送 ``run_changed`` 控制帧。
+        # 回调签名：``Callable[[str, str], None]`` → (run_id, action)。
+        self._run_changed_listeners: list = []
 
     # ── 公开 API ───────────────────────────────────────────────────────────
 
@@ -264,6 +302,7 @@ class RunManager:
         max_iter: int | None = None,
         *,
         resume: bool = False,
+        project_path: str | None = None,
     ) -> str:
         """启动一个 run（后台 task，不阻塞）。返回 run_id。
 
@@ -272,18 +311,29 @@ class RunManager:
         - 创建后台 task ``_run_with_sem``（sem 内并发 + 状态机）。
         - phase-13 §3.1：非 resume 模式起 per-run chart ingestor（``runs/<run_id>.sock``）。
 
-        不阻塞：``await`` 返回时 run 已注册（status=queued），实际执行在后台。
+        SPEC §13.2 B-1：``project_path`` **keyword-only 可选**。缺省时 manager 内调
+        ``detect_project_root()`` + ``register_project()`` 自填。**既有调用零改**（无 project_path
+        仍正常工作——cli 启动的 in-process run 走 detect 自填，web ``POST /api/run`` body 必填）。
 
         Args:
-            resume: phase-3 §3.5 resume 模式（重开已存在 tape）。True → **不起 chart ingestor**
-                （SPEC §3.1 YAGNI：script 调 render_chart 会因 socket 不存在 fail loud）。
+            resume: phase-3 §3.5 resume 模式（重开已存在 tape）。True → **不起 chart ingestor**。
+            project_path: 项目根（绝对路径）。缺省 → ``detect_project_root()`` 自填。
         """
         wf = load_workflow(Path(yaml_path))
         # plan sprightly-questing-donut §1.4：requires knowledge_base 时预检 KB（web/MCP 生产路径，
         # 与 orca run / in_session bootstrap 同款；缺 KB → ConfigurationError 由 web 层转 HTTP 错误）。
         apply_kb_requirement(wf)
         run_id = gen_run_id(wf.name)
-        tape_path = self._runs_dir / f"{run_id}.jsonl"
+        # SPEC §13.2 B-1：project_path 缺省 → detect + register。失败（无 project marker 等）
+        # 不阻断 run（仍落默认 runs_dir）—— 既有 in-process 路径不强依赖注册（兼容）。
+        # 但若显式传入则要求 register 成功（fail loud，让 web POST /api/run 错误能 propagate）。
+        resolved_project = self._resolve_project_path_for_run(project_path)
+        if resolved_project is not None:
+            runs_dir_for_run = resolved_project / "runs"
+            runs_dir_for_run.mkdir(parents=True, exist_ok=True)
+        else:
+            runs_dir_for_run = self._runs_dir
+        tape_path = runs_dir_for_run / f"{run_id}.jsonl"
         tape = Tape(tape_path, run_id=run_id, resume=resume)
         bus = EventBus(tape)
         gate_handler = HumanGateHandler(bus)
@@ -378,6 +428,9 @@ class RunManager:
                     break
                 except ValueError:
                     continue
+        # 2c. 注册表 allowlist（SPEC §13.2 B-3）：tape 在任一注册项目 ``runs/`` 子树下即放行。
+        if not allowed and self.is_allowed_tape_path(resolved):
+            allowed = True
         if not allowed:
             raise PermissionError(f"tape_path out of bounds: {tape_path}")
 
@@ -1196,6 +1249,481 @@ class RunManager:
             error=handle.error,
         )
 
+    # ── Phase C：discovery + 懒挂载 + 删除 + 控制帧广播（SPEC §13） ────────────
+
+    def _resolve_project_path_for_run(
+        self, project_path: str | None
+    ) -> Path | None:
+        """SPEC §13.2 B-1：``project_path`` 缺省 → ``detect_project_root()`` + ``register_project``。
+
+        返回 resolved project root Path，或 None（detect / register 均失败，回退到默认 runs_dir）。
+        显式传入但 register 失败（无 marker 等）→ raise（让 web POST /api/run 400 fail loud）。
+        """
+        if project_path is None:
+            try:
+                root = detect_project_root()
+            except Exception:  # noqa: BLE001 — detect 失败 → 回退
+                logger.warning(
+                    "start_run: detect_project_root 失败，回退到默认 runs_dir",
+                    exc_info=True,
+                )
+                return None
+        else:
+            try:
+                root = Path(project_path).resolve()
+            except (OSError, RuntimeError) as e:
+                raise ValueError(f"project_path resolve 失败：{project_path} ({e})") from e
+        # register：缺省路径失败不阻断（兼容既有 in-process），显式传入失败则 raise。
+        try:
+            register_project(root)
+        except ValueError:
+            if project_path is not None:
+                raise
+            logger.warning(
+                "start_run: register_project(detect) 失败，回退到默认 runs_dir",
+                exc_info=True,
+            )
+            return None
+        return root
+
+    def is_allowed_tape_path(self, path: Path | str) -> bool:
+        """SPEC §13.2 B-3：tape 是否在某注册项目的 ``runs/`` 子树下。
+
+        ``resolve_tape_path`` 与 ``resolve_run_path`` 的 allowlist 守卫共用本方法。
+        """
+        return is_registered_runs_dir(path)
+
+    def add_run_changed_listener(self, cb) -> None:
+        """注册控制帧广播回调（SPEC §13.1 U-3 / §13.2 B-4）。
+
+        ``cb(run_id: str, action: str) -> None``。WebServer 启动时注册一条，把 run_changed
+        事件 enqueue 到每条 WS 的出站 queue（串行化发送，避免 FastAPI 单 WS 并发 send RuntimeError）。
+        """
+        self._run_changed_listeners.append(cb)
+
+    def remove_run_changed_listener(self, cb) -> None:
+        """移除广播回调（WebServer teardown 用，防 leak）。"""
+        try:
+            self._run_changed_listeners.remove(cb)
+        except ValueError:
+            pass
+
+    def _broadcast_run_changed(self, run_id: str, action: str) -> None:
+        """通知所有 WS：某 run 状态变化（``action="deleted"|"changed"|"attached"``）。"""
+        for cb in list(self._run_changed_listeners):
+            try:
+                cb(run_id, action)
+            except Exception:  # noqa: BLE001 — 单 listener 失败不影响其它
+                logger.warning(
+                    "run_changed listener 异常 (run=%s, action=%s)",
+                    run_id, action, exc_info=True,
+                )
+
+    def discover_runs(self) -> list[RunSummary]:
+        """SPEC §13 §5.2 D5 + M-5 + M-12：跨项目 discovery。
+
+        步骤：
+          1. 读注册表 → 拿到所有注册项目根。
+          2. 每个存在项目扫 ``runs/*.jsonl``（派生缓存 ``<project>/runs/.orca-meta-cache.json``
+             按 mtime/size 校验，P0）→ 抽 RunSummary。
+          3. 合并内存 live run（in-process + attached）。
+          4. legacy ``~/.orca/runs/*.json`` → source=legacy（project_id=None）。
+          5. 重建 ``_run_path_index``（M-12）。
+
+        坏 tape 跳过 + warn（R6 fail loud 但不崩列表）。
+        """
+        summaries: list[RunSummary] = []
+        # 注册表读：失败（corrupt）→ 空 dict 继续（fail loud 由 list_registered 决定，此处不崩）。
+        try:
+            registered = list_registered()
+        except Exception:  # noqa: BLE001 — corrupt 时降级，discovery 不崩
+            logger.warning("discover_runs: 注册表读失败，仅返内存 + legacy run", exc_info=True)
+            registered = {}
+
+        new_index: dict[str, tuple[str | None, Path, str | None]] = {}
+        for pid, meta in registered.items():
+            root_str = meta.get("path")
+            name = meta.get("name") or "<unnamed>"
+            if not isinstance(root_str, str):
+                continue
+            root = Path(root_str)
+            runs_dir = root / "runs"
+            if not runs_dir.is_dir():
+                continue  # 项目无 runs/ → skip（stale）
+            for tape_path in sorted(runs_dir.glob("*.jsonl")):
+                try:
+                    summary = self._summary_from_tape(
+                        tape_path, project_id=pid, project_name=name,
+                        source="attached",
+                    )
+                except Exception:  # noqa: BLE001 — 坏 tape skip+warn
+                    logger.warning(
+                        "discover_runs: tape 解析失败跳过 %s", tape_path, exc_info=True,
+                    )
+                    continue
+                if summary is None:
+                    continue
+                # 内存 live run 优先（status 更实时）；attached 同 tape 不重复入列表。
+                if summary.run_id in self._runs:
+                    continue
+                summaries.append(summary)
+                new_index[summary.run_id] = (pid, tape_path, name)
+
+        # 内存 live run（in-process + attached 已注册的）。
+        for handle in self._runs.values():
+            try:
+                meta = self._meta_from_handle(handle)
+            except Exception:  # noqa: BLE001
+                continue
+            tp = _handle_tape_path(handle)
+            project_id, project_name = self._lookup_project_for_handle(handle, tp)
+            summaries.append(
+                RunSummary(
+                    run_id=handle.run_id,
+                    workflow_name=meta.workflow_name,
+                    project_id=project_id,
+                    project_name=project_name,
+                    status=meta.status,
+                    progress=meta.progress,
+                    cost=meta.cost,
+                    elapsed=meta.elapsed,
+                    started_at=handle.started_at,
+                    event_count=0,
+                    source="in-process" if isinstance(handle, InProcessRunHandle) else "attached",
+                )
+            )
+            if tp is not None:
+                new_index[handle.run_id] = (project_id, tp, project_name)
+
+        # legacy ~/.orca/runs/*.json（旧 BgRunMeta）
+        # 铁律：web 禁 import cli；本处用本地 helper 复刻 ``bg_runner.list_all_meta`` 的
+        # 扫描语义（读 ``~/.orca/runs/*.json`` → 简化 meta dict），不引入 cli 依赖。
+        try:
+            legacy_metas = _list_legacy_metas()
+        except Exception:  # noqa: BLE001
+            legacy_metas = []
+        for lm in legacy_metas:
+            tape_path = Path(getattr(lm, "tape_path", "") or "")
+            try:
+                stat = tape_path.stat()
+                _ = stat.st_size
+            except OSError:
+                # legacy 元数据存但 tape 不在 → 仍展示（前端可看到 stale）
+                pass
+            summaries.append(
+                RunSummary(
+                    run_id=lm.run_id,
+                    workflow_name=Path(getattr(lm, "yaml_path", "") or "legacy").stem
+                    or "legacy",
+                    project_id=None,
+                    project_name="Legacy",
+                    status="cancelled",
+                    progress="?",
+                    cost=0.0,
+                    elapsed=0.0,
+                    started_at=getattr(lm, "started_at", None),
+                    event_count=0,
+                    source="legacy",
+                )
+            )
+
+        self._run_path_index = new_index
+        return summaries
+
+    def _lookup_project_for_handle(
+        self, handle: RunView, tape_path: Path | None
+    ) -> tuple[str | None, str | None]:
+        """从 handle 反查 (project_id, project_name)——优先 _run_path_index，否则注册表扫描。"""
+        if tape_path is not None:
+            entry = self._run_path_index.get(handle.run_id)
+            if entry is not None:
+                return entry[0], entry[2]
+            # 落地查询：tape 在某注册项目 runs/ 下
+            try:
+                resolved = tape_path.resolve()
+            except (OSError, RuntimeError):
+                return None, None
+            try:
+                registered = list_registered()
+            except Exception:  # noqa: BLE001
+                return None, None
+            for pid, meta in registered.items():
+                root_str = meta.get("path")
+                if not isinstance(root_str, str):
+                    continue
+                try:
+                    runs_dir = Path(root_str).resolve() / "runs"
+                    resolved.relative_to(runs_dir)
+                    return pid, meta.get("name")
+                except (ValueError, OSError, RuntimeError):
+                    continue
+        return None, None
+
+    def _summary_from_tape(
+        self,
+        tape_path: Path,
+        *,
+        project_id: str | None,
+        project_name: str | None,
+        source: str,
+    ) -> RunSummary | None:
+        """从单 tape 文件派生 RunSummary（discovery 用，部分坏 tape → None + warn）。
+
+        - 坏 tape（read 失败 / 0 有效事件 / 无 workflow_started）→ 返回 None（discovery skip）。
+        - 空文件 / 刚创建的 live-pending（count==0）→ 返回 None（discovery 见 live 才有意义，
+          纯空 tape 无 discovery 价值）。
+
+        progress 从 ``overview.agents``（node_status 派生）算 done/total；elapsed 从
+        workflow_started.timestamp 到终态事件 timestamp（或 now）算（code-reviewer M-3）。
+        """
+        try:
+            count, _, _, overview_data = _scan_meta_overview(tape_path)
+        except Exception:  # noqa: BLE001
+            return None
+        if count == 0:
+            # 0 有效事件（空 tape 或坏 tape）→ skip
+            return None
+        overview = (overview_data or {}).get("overview") or {}
+        # workflow_name 从 overview.run_status 反推不可，扫 tape 取 workflow_started。
+        wf_name = _topology_workflow_name_from_tape(tape_path) or tape_path.stem
+        # status 映射：overview.run_status 是 workflow 级别字符串
+        wf_status = overview.get("run_status") or "pending"
+        status: RunStatus
+        if wf_status == "completed":
+            status = "completed"
+        elif wf_status == "failed":
+            status = "failed"
+        elif wf_status == "cancelled":
+            status = "cancelled"
+        elif wf_status == "running":
+            status = "running"
+        else:
+            status = "live-pending"
+        # progress 从 overview.agents 算（done/total）
+        agents = overview.get("agents") or []
+        total = len(agents)
+        done = sum(1 for a in agents if isinstance(a, dict) and a.get("status") == "done")
+        progress = f"{done}/{total}" if total > 0 else "?"
+        # started_at + elapsed：扫 tape 取 workflow_started.timestamp + 终态 timestamp
+        started_ts, ended_ts = _scan_tape_timebounds(tape_path)
+        if started_ts is not None and ended_ts is not None:
+            elapsed = max(0.0, ended_ts - started_ts)
+        else:
+            elapsed = 0.0
+        started_at = started_ts
+        return RunSummary(
+            run_id=tape_path.stem,
+            workflow_name=wf_name,
+            project_id=project_id,
+            project_name=project_name,
+            status=status,
+            progress=progress,
+            cost=float(overview.get("cost_usd") or 0.0),
+            elapsed=elapsed,
+            started_at=started_at,
+            event_count=count,
+            source=source,  # type: ignore[arg-type]
+        )
+
+    def resolve_run_path(self, run_id: str) -> Path:
+        """SPEC §13 §5.3 D7 / AC8：run_id → tape_path（懒挂载路径解析）。
+
+        - 先查 ``_run_path_index``（discovery 期填充）。
+        - miss 则扫注册项目 ``runs/<run_id>.jsonl``。
+        - 0 命中 → raise ``FileNotFoundError``（routes 层 404）。
+        - 多命中 → raise ``RuntimeError`` 列路径（routes 层 500，fail loud R6）。
+        """
+        entry = self._run_path_index.get(run_id)
+        if entry is not None:
+            return entry[1]
+        # 扫注册项目
+        hits: list[Path] = []
+        try:
+            registered = list_registered()
+        except Exception:  # noqa: BLE001
+            registered = {}
+        for meta in registered.values():
+            root_str = meta.get("path")
+            if not isinstance(root_str, str):
+                continue
+            candidate = Path(root_str) / "runs" / f"{run_id}.jsonl"
+            if candidate.is_file():
+                hits.append(candidate)
+        # legacy（``~/.orca/runs/<run_id>.jsonl``）
+        legacy_candidate = _legacy_default_tape_path(run_id)
+        try:
+            if legacy_candidate.is_file():
+                hits.append(legacy_candidate)
+        except OSError:
+            pass
+        if len(hits) == 0:
+            raise FileNotFoundError(f"run_id not found across projects: {run_id}")
+        if len(hits) > 1:
+            raise RuntimeError(
+                f"run_id 命中多个 tape（数据异常）：{run_id} → {[str(h) for h in hits]}"
+            )
+        return hits[0]
+
+    async def ensure_attached(self, run_id: str) -> None:
+        """SPEC §13 §5.3 D7：幂等懒挂载。已在 ``_runs`` → 直接返；否则 resolve_run_path + attach_run。
+
+        触发面（SPEC §13.2 I-3）：``{/meta,/events,/assets/<path>,WS subscribe}`` 任一遇
+        unknown run_id 先调本方法。
+        """
+        if run_id in self._runs:
+            return
+        tape_path = self.resolve_run_path(run_id)  # raise FileNotFoundError / RuntimeError
+        # attach_run 是幂等的（同 tape_path 重复 attach 返回既有 id）。
+        await self.attach_run(str(tape_path), run_id=run_id)
+        self._broadcast_run_changed(run_id, "attached")
+
+    async def delete_run(self, run_id: str) -> dict:
+        """SPEC §13 §5.7 D10 + §13.1 U-1 + §13.2 B-5：删除 run。
+
+        返回 dict（routes 层据 ``ok`` / ``live`` / ``never_existed`` 映射 HTTP 200/404/409）：
+          - in-process non-terminal → ``cancel_run`` + 删盘 → ``{ok, run_id, existed_before:True}``
+          - in-process terminal → 删盘 → ``{ok, run_id, existed_before:True}``
+          - attached live (他进程) → ``{ok:False, live:True, pid}`` → routes 409
+          - attached terminal → 删盘 → ``{ok, run_id, existed_before:True}``
+          - 磁盘有但未挂载（dormant）→ ensure_attached 解析路径 + 删盘 → ``{ok, ..., existed_before:True}``
+          - 内存+磁盘都无 → ``{ok:False, never_existed:True}`` → routes 404
+
+        Windows file-locked → ``{ok:False, live:True, pid:None, error}` → routes 409。
+        越界守卫（同 attach）：路径须在某注册项目 runs/ 下。
+        """
+        handle = self._runs.get(run_id)
+        in_process_live = False
+        if handle is not None:
+            # in-process live run：先 cancel_run（写 cancelled + 停 task）。
+            if isinstance(handle, InProcessRunHandle):
+                if handle.status not in ("completed", "failed", "cancelled"):
+                    in_process_live = True
+                    await self.cancel_run(run_id)
+            elif isinstance(handle, AttachedRunHandle):
+                # attached live = follow task alive + 非 terminal
+                if (
+                    not handle.terminal
+                    and handle.follow_task is not None
+                    and not handle.follow_task.done()
+                ):
+                    # 他进程 live → 不删（U-1 → 409）
+                    return {"ok": False, "live": True, "run_id": run_id, "pid": None}
+
+        # 解析 tape 路径：内存有 → handle.tape.path；无 → resolve_run_path。
+        if handle is not None:
+            tp = _handle_tape_path(handle)
+        else:
+            # 先查内存索引：若上次 discovery 见过但磁盘已无（stale 索引）→ never_existed。
+            entry = self._run_path_index.get(run_id)
+            if entry is not None and not entry[1].is_file():
+                self._run_path_index.pop(run_id, None)
+                entry = None
+            if entry is not None:
+                tp = entry[1]
+            else:
+                try:
+                    tp = self.resolve_run_path(run_id)
+                except (FileNotFoundError, RuntimeError):
+                    return {"ok": False, "never_existed": True, "run_id": run_id}
+                if not tp.is_file():
+                    # resolve_run_path 扫到的文件已不存在（stale）
+                    self._run_path_index.pop(run_id, None)
+                    return {"ok": False, "never_existed": True, "run_id": run_id}
+
+        if tp is None:
+            return {"ok": False, "never_existed": True, "run_id": run_id}
+
+        # 越界守卫：tape 须在某注册项目 runs/ 下（或默认 runs_dir 下，in-process 兼容）。
+        try:
+            tp_resolved = tp.resolve()
+        except (OSError, RuntimeError) as e:
+            return {"ok": False, "live": False, "run_id": run_id, "error": str(e)}
+        in_default = self._is_under_default_runs_dir(tp_resolved)
+        in_registry = self.is_allowed_tape_path(tp_resolved)
+        if not (in_default or in_registry):
+            return {
+                "ok": False,
+                "live": False,
+                "run_id": run_id,
+                "error": f"tape out of registry allowlist: {tp}",
+            }
+
+        # 移除内存 handle（停 follow task）。
+        if handle is not None:
+            await self._teardown_handle(handle)
+            self._runs.pop(run_id, None)
+
+        # 删盘：tape + run 目录（<rid>/ 整目录 + 同名 prompts/assets）。
+        deleted = self._delete_run_files(tp_resolved)
+        if not deleted:
+            return {
+                "ok": False,
+                "live": True,
+                "run_id": run_id,
+                "pid": None,
+                "error": "file locked or already removed",
+            }
+        # 清 discovery 索引（防下次 delete_run 把 stale index 当成存在）。
+        self._run_path_index.pop(run_id, None)
+        self._broadcast_run_changed(run_id, "deleted")
+        return {"ok": True, "run_id": run_id, "existed_before": True}
+
+    def _is_under_default_runs_dir(self, resolved: Path) -> bool:
+        """路径是否在 ``self._runs_dir`` 子树下（in-process 默认根兼容）。"""
+        try:
+            runs_root = self._runs_dir.resolve()
+            resolved.relative_to(runs_root)
+            return True
+        except (ValueError, OSError, RuntimeError):
+            return False
+
+    def _delete_run_files(self, tape_path: Path) -> bool:
+        """删 tape + run 目录。Windows file-locked → 返回 False（让 routes 409）。
+
+        显式枚举要删的派生文件（SPEC §13 D10 清单），**禁用通配符**（避免误删用户手放的
+        同前缀实验性文件 / `.bak` 等，code-reviewer M-1）。
+        """
+        # 1. tape 文件（``<rid>.jsonl``）
+        try:
+            tape_path.unlink(missing_ok=True)
+        except OSError as e:
+            # Windows file-locked / permission → 409 信号
+            logger.warning("delete_run: tape unlink 失败 %s: %s", tape_path, e)
+            return False
+        # 2. run 目录（``<rid>/`` 整目录，含 prompts/assets/artifacts）
+        run_dir = tape_path.with_name(tape_path.stem)
+        if run_dir.is_dir():
+            try:
+                shutil.rmtree(run_dir, ignore_errors=False)
+            except OSError as e:
+                logger.warning(
+                    "delete_run: rmtree 失败 %s: %s（tape 已删，dir 残留）", run_dir, e
+                )
+                # tape 已删视为成功（dir gc 后续清理）。
+        # 3. 同 stem 的显式派生文件（D10）：``<rid>.json``（run 元数据）+ ``orca-<rid>.json``（激活标记）
+        # + ``<rid>.web-ready.json`` 等 web 信号 + ``<rid>.log``（legacy log）。
+        # 不用通配符——避免误删同前缀的其它文件。
+        derived_suffixes = [
+            ".json",                # run 元数据
+            ".log",                 # legacy daemon log
+            ".web-ready.json",      # web-ready 信号文件（orca open）
+        ]
+        for suffix in derived_suffixes:
+            sibling = tape_path.with_name(tape_path.stem + suffix)
+            if sibling.is_file():
+                try:
+                    sibling.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        # ``orca-<rid>.json`` 激活标记
+        marker = tape_path.with_name(f"orca-{tape_path.stem}.json")
+        if marker.is_file():
+            try:
+                marker.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return True
+
     async def _run_with_sem(
         self,
         handle: RunHandle,
@@ -1410,6 +1938,99 @@ def _topology_node_count_from_tape(tape: Tape | AttachedTape) -> int | None:
             return None
         return len(nodes)
     return None
+
+
+def _topology_workflow_name_from_tape(tape_path: Path) -> str | None:
+    """扫 tape 取 ``workflow_started.data.workflow_name``（discovery 用，单遍）。
+
+    与 ``_topology_node_count_from_tape`` 类似但输入是 path（discovery 期无 handle）。
+    partial / 坏 tape → None（调用方降级到 stem）。
+    """
+    try:
+        for event in tape_reader_replay(tape_path, since_seq=0):
+            if event.type == "workflow_started":
+                wf_name = event.data.get("workflow_name")
+                if isinstance(wf_name, str) and wf_name:
+                    return wf_name
+                return None
+    except FileNotFoundError:
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _scan_tape_timebounds(tape_path: Path) -> tuple[float | None, float | None]:
+    """扫 tape 取 (workflow_started.timestamp, 终态事件 timestamp)（discovery 算 elapsed 用）。
+
+    终态事件 = ``workflow_completed`` / ``workflow_failed`` / ``workflow_cancelled``。
+    无终态事件 → ``ended=None``（调用方降级到 0.0 elapsed）。
+    partial / 坏 tape → ``(None, None)``。
+    """
+    started: float | None = None
+    ended: float | None = None
+    try:
+        for event in tape_reader_replay(tape_path, since_seq=0):
+            if started is None and event.type == "workflow_started":
+                ts = getattr(event, "timestamp", None)
+                if isinstance(ts, (int, float)):
+                    started = float(ts)
+            if event.type in (
+                "workflow_completed", "workflow_failed", "workflow_cancelled",
+            ):
+                ts = getattr(event, "timestamp", None)
+                if isinstance(ts, (int, float)):
+                    ended = float(ts)
+    except FileNotFoundError:
+        return (None, None)
+    except Exception:  # noqa: BLE001
+        return (None, None)
+    return (started, ended)
+
+
+# ── legacy ~/.orca/runs/ 兼容（铁律：web 禁 import cli，本处复刻 bg_runner 路径语义）──
+
+
+def _legacy_runs_root() -> Path:
+    """``$ORCA_HOME/runs``（默认 ``~/.orca/runs``）—— 旧 BgRunMeta 落盘根。"""
+    env = os.environ.get("ORCA_HOME")
+    home = Path(env).expanduser() if env else Path.home() / ".orca"
+    return home / "runs"
+
+
+def _legacy_default_tape_path(run_id: str) -> Path:
+    """旧约定：``~/.orca/runs/<run_id>.jsonl``（与 ``bg_runner.default_tape_path`` 同源）。"""
+    return _legacy_runs_root() / f"{run_id}.jsonl"
+
+
+def _list_legacy_metas() -> list:
+    """扫 ``~/.orca/runs/*.json``（旧 BgRunMeta）→ 简化对象 list（带 run_id/yaml_path/started_at）。
+
+    复刻 ``bg_runner.list_all_meta`` 的扫描语义但**不**依赖 ``bg_runner.BgRunMeta``（避免
+    web → cli 反向依赖）。返回对象用 ``types.SimpleNamespace``，调用方经 ``getattr`` 取字段。
+    """
+    import types
+
+    root = _legacy_runs_root()
+    if not root.is_dir():
+        return []
+    results: list = []
+    for meta_file in sorted(root.glob("*.json")):
+        try:
+            data = json.loads(meta_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        results.append(
+            types.SimpleNamespace(
+                run_id=str(data.get("run_id") or meta_file.stem),
+                yaml_path=str(data.get("yaml_path") or ""),
+                started_at=data.get("started_at"),
+                tape_path=str(data.get("tape_path") or ""),
+            )
+        )
+    return results
 
 
 def _handle_tape_path(handle: RunView) -> Path | None:

@@ -51,12 +51,19 @@ nodes:
     return p
 
 
-def test_full_flow_real_server(tmp_path):
+def test_full_flow_real_server(tmp_path, monkeypatch):
     """启动真 uvicorn server + 全流程：start → list → events → state。
 
     SPEC §6.7 集成测试。``-m integration`` 时跑。
     """
     import uvicorn
+    from orca.runtime import register_project
+
+    # §13.2 B-1：POST /api/run body 必填 project_path。造合法项目并注册。
+    monkeypatch.setenv("ORCA_HOME", str(tmp_path / "orca-home"))
+    project = tmp_path / "proj"
+    (project / "workflows").mkdir(parents=True, exist_ok=True)
+    register_project(project)
 
     yaml_path = _demo_yaml(tmp_path)
     manager = RunManager(runs_dir=Path(f"/tmp/orca-int-{hashlib.md5(str(tmp_path).encode()).hexdigest()[:6]}/runs"))
@@ -70,8 +77,11 @@ def test_full_flow_real_server(tmp_path):
         await asyncio.sleep(0.3)  # 让 server 起来
         try:
             async with AsyncClient(base_url=f"http://127.0.0.1:{port}") as client:
-                # POST /api/run
-                resp = await client.post("/api/run", json={"yaml_path": str(yaml_path)})
+                # POST /api/run（§13.2 B-1：project_path 必填）
+                resp = await client.post(
+                    "/api/run",
+                    json={"yaml_path": str(yaml_path), "project_path": str(project)},
+                )
                 assert resp.status_code == 200
                 run_id = resp.json()["run_id"]
                 # 等完成
