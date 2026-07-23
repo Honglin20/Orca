@@ -1521,6 +1521,23 @@ def _register_my_port(my_runs_dir: Path, *, port: int, fp: str) -> None:
         )
 
 
+def _signal_web_ready(run_id: str, url: str) -> None:
+    """写 web-ready 信号文件供 bootstrap ``_resolve_web_url`` 轮询。
+
+    detached ``orca open`` 子进程的 URL echo 进日志文件、用户终端看不到；此处把真实 URL
+    落盘为信号文件（``runs/<run_id>.web-ready.json``），bootstrap 侧轮询读取 → 打印
+    **已协商完成的真实端口**，杜绝端口不匹配（默认 7428 被 foreign orca 占用后漂移）。
+    """
+    signal_path = _default_runs_dir() / f".orca-web-ready-{run_id}.json"
+    tmp = signal_path.with_name(signal_path.name + ".tmp")
+    try:
+        signal_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps({"url": url}), encoding="utf-8")
+        os.replace(tmp, signal_path)
+    except OSError as e:
+        logger.warning("web-ready 信号文件写失败（%s；soft-fail，不阻断 open）", e)
+
+
 def _open_run(
     run_id: str, *, tape_path: Path | None, host: str | None, port: int | None
 ) -> int:
@@ -1591,6 +1608,7 @@ def _open_run(
 
     # 4) 浏览器打开（URL 用 display_host，远程可点击）。
     url = f"http://{display_host}:{actual_port}/runs/{run_id}"
+    _signal_web_ready(run_id, url)
     _open_browser_or_print(url)
     typer.echo(f"Orca Web UI（attached）→ {url}  (browser tab 可关闭；server 后台运行)")
     return EXIT_OK

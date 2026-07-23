@@ -604,31 +604,41 @@ def _spawn_open_web(run_id: str) -> None:
         logger.warning("run %s: 自动开 web spawn 失败（%s；soft-fail，不阻断 bootstrap）", run_id, e)
 
 
+_WEB_READY_TIMEOUT = 3.0  # seconds — 测试可 monkeypatch 为 0.01 跳过轮询延迟
+
+
 def _resolve_web_url(run_id: str) -> str | None:
-    """bootstrap 启动当下即算出 web URL（**单一真相源** ``resolve_web_endpoint``），fail-soft。
+    """bootstrap 自动开 web 后获取真实 URL（轮询 detached 进程写入的信号文件）。
 
-    回答「detached ``orca open`` 子进程的 URL echo 进了日志文件、用户终端看不到」——这里在
-    bootstrap 自身进程内把 URL 算出来，交给调用方塞进 stderr + JSON ``web_url`` 字段，确保
-    链接反馈给用户（不靠 detached 子进程、不靠模型自觉）。
+    ``_spawn_open_web`` spawn 的 detached ``orca open`` 进程独立做端口协商（可能绕过默认
+    7428——foreign orca 占用、registry 已有其它端口等），协商完成后写信号文件
+    ``runs/<run_id>.web-ready.json``。此处轮询该文件获取**已协商完成的真实端口**，杜绝
+    端口不匹配（默认 7428 被 foreign orca 占用时这里吐出错误端口→用户点开一片白）。
 
-    **不进 ``prompt`` 字段**：``prompt`` 是 ``(node, run_id)`` 的纯函数，bootstrap 与 next
-    idempotent 重发必须逐字相等（见 test_f1_resume_flow）；web 链接是 bootstrap 时刻的旁路
-    通知，不属于节点 prompt，故只走 stderr + JSON 字段两路。
-
-    ``resolve_web_endpoint`` 在 ``orca.iface.cli.commands``，**函数内 lazy import** 避开
-    ``orca.iface.cli`` 包初始化期的循环 import（与同文件 ``_default_tape_path`` / in-session
-    ``open`` 委托同款 pattern）。任一异常 → soft-fail 返 None，绝不阻断 bootstrap。
-
-    **已知 limitation**：URL 基于 config（host/port）解析，**不探活端口归属**。若默认端口 7428
-    被非-orca 进程占用，detached ``orca open`` 会 probe 后另选端口，而此处吐给用户的 URL 仍指向
-    7428 → 用户可能点开别人家的服务。概率低；与 soft-fail 语义一致，不在此处引入端口探活
-    （bootstrap 路径须保持轻量，端口探活是 ``orca open`` 自身 probe 的职责）。
+    轮询窗口：``_WEB_READY_TIMEOUT``（默认 3s，足够 detached 进程 probe+serve+attach，
+    实测通常 1-2s 内完成）。超时 / 异常 → 回退静态计算（``resolve_web_endpoint`` 算默认
+    端口 7428，与旧行为兼容）。**不进 prompt**：prompt 字段须与 next idempotent 重发
+    逐字相等。
     """
     try:
+        rundir = _default_rundir()
+        signal_path = rundir / f".orca-web-ready-{run_id}.json"
+        deadline = time.monotonic() + _WEB_READY_TIMEOUT
+        while time.monotonic() < deadline:
+            try:
+                data = json.loads(signal_path.read_text(encoding="utf-8"))
+                url = data.get("url")
+                if url and isinstance(url, str):
+                    return url
+            except (OSError, json.JSONDecodeError):
+                pass
+            time.sleep(0.15)
+        # 超时：detached 进程未完成 → 回退静态计算（旧行为，链接可能指错端口）。
+        logger.warning("run %s: web-ready signal timeout (%.1fs), using static URL", run_id, _WEB_READY_TIMEOUT)
         from orca.iface.cli.commands import resolve_web_endpoint
         _, display_host, port = resolve_web_endpoint(host=None, port=None)
         return f"http://{display_host}:{port}/runs/{run_id}"
-    except Exception:  # noqa: BLE001 — 解析失败不阻断 bootstrap（soft-fail，与 _spawn_open_web 一致）
+    except Exception:  # noqa: BLE001 — 解析失败不阻断 bootstrap（soft-fail 契约）
         logger.warning("run %s: 解析 web URL 失败（soft-fail，链接需手动 orca open）", run_id, exc_info=True)
         return None
 
