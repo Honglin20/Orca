@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-24] test(in-session): 解析 CLI 输出前去 ANSI（修复 2 个 pre-existing 测试假报）
+
+typer/Rich 即使在 CliRunner（非 tty）下也给 `--help` 与 BadParameter 错误输出上 ANSI 色，并把 flag token 拆碎（`--run-id` 跨 span 成 `--`+`run`+`-id`），导致 `test_skill_md_flags_subset_of_cli_help`（`_help_flags` regex 全 miss → SKILL.md 真实 flag 全被判「未声明」）和 `test_cli_gc_max_age_zero_rejected`（`--max-age 必须为正` 里 flag 被高亮拆碎、子串断言失配）两个 pre-existing 假报。均为测试断言未去 ANSI、与生产无关（gc 正确 exit 2；各命令 flag 都真实存在）。修法：加 `_strip_ansi` helper，`_help_flags` 与 gc 两个 CLI 错误断言去色后再匹配。`test_gc.py + test_skill_md_flags_guard.py`：33 passed（原 31 + 2 failed）。Commit: `df5380a`。详见 [release note](../releases/2026-07-24-strip-ansi-cli-test-parsing.md)。
+
 ## [2026-07-24] fix(in-session): bootstrap 注册项目（修复 TARS run 在 web 列表/详情不可见）
 
 §13「单端口+多 Run 监控」把 web 发现（`discover_runs`）与详情懒挂载（`resolve_run_path`）改成全依赖注册表 `~/.orca/projects.json`，但 in-session `bootstrap`（TARS 入口）漏调 `register_project` → TARS 启动的 run 项目永不在注册表 → 列表空 + 详情 404 + 远程 `projects.json` 不生成（用户 `tars project rebuild` 后恢复坐实根因）。修复：`orca/iface/in_session/cli.py` 加 `_register_current_project()` helper（`detect_project_root` → `register_project`，broad `try/except` fail-open + warn，与 daemon spawn 同降级语义），在 `bootstrap` post-lock 段（lock 释放后、SPEC §3 O2 临界区外）调用。依赖 `iface/in_session → orca/runtime` 合法向下。2 新测（真端到端 bootstrap 断言注册 + 落盘 / fail-open 不阻断）。`tests/iface/in_session/ + tests/runtime/test_project.py` **494 passed / 2 pre-existing fail**（`test_cli_gc_max_age_zero_rejected`、`test_skill_md_flags_subset_of_cli_help`，stash 验证无关）。code-reviewer 0 🔴 / 1 🟡（broad catch 注释显式化，已采纳）/ 2 🟢（保持）。Commit: `12d5279`。详见 [release note](../releases/2026-07-24-in-session-bootstrap-register-project.md)。
