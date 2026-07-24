@@ -7,7 +7,7 @@
 
 ## [2026-07-24] fix(workflow): 可视化审计修复（P1×5 + P2×7，0 🔴 / 2 🟡 / 5 🟢 全修）
 
-两轮审计 12 项全部闭环：P1-1 超时候选 death-penalty 保留 latency 实测（`_infeasible_result` 纯函数）/ P1-2 C5-live 轴方向动态化（`_axis_direction`）/ P1-3 bit-curve 逐层位宽图（`_load_bit_trend_layer_bits` 多形态 fail-soft）/ P1-4 cumulative-best 寻优过程图（`_cumulative_best`）/ P1-5 QAT 收敛曲线改 live 推（每 scheme 一张图）/ P2-1 struct accuracy champion trace / P2-2 kd latency candidate trace / P2-3 struct x 轴 index→round / P2-4 删除孤儿 nas-viz 目录（grep 确认零引用）/ P2-5 quant 4 脚本共享 helper 下沉到 `_common.py`（字节等价，仅 log_prefix 参数化）/ P2-6 sensitivity 业务异常 fail loud exit 3 / P2-7 candidates_evaluated 改用 len(archive_records)（字段名不变）。43 新单测（AST 切片钉真源码非手抄）+ 既有 2 测试断言更新（3→4 图）。159 workflows passed / 654 跨目录 passed。Commit: `<待填>`。详见 [release note](../releases/2026-07-24-workflow-viz-audit-fixes.md)。
+两轮审计 12 项全部闭环：P1-1 超时候选 death-penalty 保留 latency 实测（`_infeasible_result` 纯函数）/ P1-2 C5-live 轴方向动态化（`_axis_direction`）/ P1-3 bit-curve 逐层位宽图（`_load_bit_trend_layer_bits` 多形态 fail-soft）/ P1-4 cumulative-best 寻优过程图（`_cumulative_best`）/ P1-5 QAT 收敛曲线改 live 推（每 scheme 一张图）/ P2-1 struct accuracy champion trace / P2-2 kd latency candidate trace / P2-3 struct x 轴 index→round / P2-4 删除孤儿 nas-viz 目录（grep 确认零引用）/ P2-5 quant 4 脚本共享 helper 下沉到 `_common.py`（字节等价，仅 log_prefix 参数化）/ P2-6 sensitivity 业务异常 fail loud exit 3 / P2-7 candidates_evaluated 改用 len(archive_records)（字段名不变）。43 新单测（AST 切片钉真源码非手抄）+ 既有 2 测试断言更新（3→4 图）。159 workflows passed / 654 跨目录 passed。Commit: `eb78c52`。详见 [release note](../releases/2026-07-24-workflow-viz-audit-fixes.md)。
 
 ## [2026-07-24] feat(web): 单端口 + 多 Run 监控「遗留清项」（SPEC §13 v4 carry-over）
 

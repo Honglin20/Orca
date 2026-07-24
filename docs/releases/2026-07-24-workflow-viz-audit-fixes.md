@@ -160,4 +160,4 @@ tail_metrics.py 改 helper 逻辑测试自动跟随（Rule 9）。
 
 ## Commit SHA
 
-`<填入 commit 后>`
+`eb78c52`
