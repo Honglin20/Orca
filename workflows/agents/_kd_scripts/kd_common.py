@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 from typing import Any
 
 # BLK-1：KNOBS leverage 缩容优先级（高→低）。禁止字母序（"low"<"medium"<"high" 反了）。
@@ -112,6 +113,38 @@ def read_ledger(path: str) -> list[dict[str, Any]]:
             if isinstance(obj, dict):
                 out.append(obj)
     return out
+
+
+# ── ledger 增量写 + 子进程辅助（gate_all / train_pool 共享，契约级逻辑勿复制）──────
+# 演进历史：v2 抽出（code-reviewer 🟢-1）。原本 gate_all.py / train_pool.py 各有一份
+# byte-identical 副本，``_append_ledger_row`` 的「主线程持 orca.lock + 逐行 write+flush」
+# 是 crash-safety 契约——分散两处会让契约演进时漏改一处。
+
+
+def append_ledger_row(ledger_path: str, row: dict[str, Any]) -> None:
+    """增量 append 一行到 ledger（主线程持 orca.lock，逐行 write+flush，crash-safe）。
+
+    契约：调用方必须先 ``acquire_run_lock`` 拿到单写者锁（BLK-13）。JSONL append-only
+    逐行原子；kill 不丢已完成行（v2：替换原 train_variants_parallel 末尾的 bulk append）。
+    """
+    os.makedirs(os.path.dirname(os.path.abspath(ledger_path)) or ".", exist_ok=True)
+    with open(ledger_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        f.flush()
+
+
+def run_subproc(argv: list[str]) -> tuple[int, str, str]:
+    """跑子进程，返 (rc, stdout, stderr)。"""
+    p = subprocess.run(argv, capture_output=True, text=True)
+    return p.returncode, p.stdout, p.stderr
+
+
+def parse_key(stdout: str, key: str) -> str | None:
+    """从确定性脚本的 ``KEY: value`` stdout 行取值（首个匹配）。"""
+    for line in stdout.splitlines():
+        if line.startswith(key + ":"):
+            return line.split(":", 1)[1].strip()
+    return None
 
 
 def is_variant_done(

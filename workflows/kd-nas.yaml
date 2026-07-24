@@ -1,5 +1,5 @@
 name: kd-nas
-description: "KD-NAS 蒸馏 sweep（重构版）：receiver KB 的 model8 .py 变体 → 确定性遍历。setup 测 baseline 时延 + 幂等训 teacher(10层 t1/t2 交替，KD 软标签源) + 适配 train_kd；selector 取下一未蒸馏变体 + 最小缩量 latency 调参；distill 完整蒸馏训练（非 proxy，每-epoch render_chart 实时图）+ 测精度对比用户绝对基线；recorder 记账 + 推图。跨 run 复用（稳定 kd_artifacts_dir + 哈希校验 + ledger-driven 跳过）。无 finalize / 无 proxy_mse / 无 search。精度基线 + latency_provider(用户真硬件脚本) 均用户必填。契约见 workflows/agents/_kd_scripts/CONTRACTS.md。"
+description: "KD-NAS 蒸馏 sweep（重构版）：receiver KB 的 model8 .py 变体 → 确定性遍历。setup 测 baseline 时延 + 幂等训 teacher(10层 t1/t2 交替，KD 软标签源) + GPU 预检定并发；gate 一个节点内串行遍历全部变体（校验 + tune_latency 最小缩量 + distill_dispatch gate），FAIL_latency 当场落账、ACCEPTED 进 manifest；train 吃 manifest 做有界并发蒸馏（VRAM 再校验 + round-robin 绑卡 + 增量账本）+ 末尾 viz 推 sweep 散点。跨 run 复用（稳定 kd_artifacts_dir + 哈希校验 + ledger-driven 跳过）。无 finalize / 无 proxy_mse / 无 search。精度基线 + latency_provider(用户真硬件脚本) 均用户必填。契约见 workflows/agents/_kd_scripts/CONTRACTS.md。"
 
 entry: setup
 
@@ -32,7 +32,7 @@ inputs:
     required: true
   baseline_model_path:
     type: string
-    description: "[ask] 原始 baseline 模型文件（4 层，时延参考）。须是契约文件（暴露 build_model + DUMMY_INPUT），setup 测其 latency 作参考线"
+    description: "[ask] 原始 baseline 模型文件（4 层，时延参考 + gpu_probe representative）。须是契约文件（暴露 build_model + DUMMY_INPUT），setup 测其 latency 作参考线"
     required: true
   latency_provider:
     type: string
@@ -40,17 +40,17 @@ inputs:
     required: true
   device:
     type: string
-    description: "[advanced] ONNX 导出 + latency 测量设备：auto（默认 cuda→npu→cpu）/ cuda / npu / cpu"
+    description: "[advanced] ONNX 导出 + latency 测量 + 训练设备：auto（默认 cuda→npu→cpu）/ cuda / npu / cpu"
     required: false
     default: "auto"
   seed:
     type: string
-    description: "[advanced] 复现种子（默认 0）。权重 init / dummy / tune 全固定此 seed（HI-2）"
+    description: "[advanced] 复现种子（默认 0）。权重 init / dummy / tune / train 全固定此 seed（HI-2）"
     required: false
     default: "0"
   kd_artifacts_dir:
     type: string
-    description: "[advanced] 跨 run 稳定 artifact 根（teacher_cache/ledger/ckpts/...）。空→默认 <repo>/kd-nas-artifacts/（U-1）"
+    description: "[advanced] 跨 run 稳定 artifact 根（teacher_cache/ledger/ckpts/gate_manifest/...）。空→默认 <repo>/kd-nas-artifacts/（U-1）"
     required: false
     default: ""
   accuracy_baseline_kind:
@@ -76,8 +76,9 @@ inputs:
 
 nodes:
   # ═══════════════════════════════════════════════════════════════
-  # setup（一次性·幂等）：测 baseline 时延 + 校验/训 teacher + 适配 train_kd + 预检变体。
+  # setup（一次性·幂等）：测 baseline 时延 + 校验/训 teacher + 适配 train_kd + 预检变体 + GPU 预检定并发。
   # 跨 run 复用：teacher_cache 存在 ∧ teacher_model_hash 匹配 ∧ teacher_ckpt_sha256 匹配 → 跳过 teacher 训练。
+  # setup 是「并发数唯一权威」（CONTRACTS §6）：gpu_probe.py 算 concurrency/device_plan/per_variant_vram_bytes。
   # ═══════════════════════════════════════════════════════════════
   - name: setup
     kind: agent
@@ -86,10 +87,10 @@ nodes:
     agent: kd-setup
     output_schema:
       type: object
-      required: [kd_artifacts_dir, per_run_artifacts_dir, project_root, teacher_model_path, teacher_cache, teacher_meta, teacher_ckpt, ledger_path, ckpts_dir, baseline_latency_ms, kd_scripts_dir]
+      required: [kd_artifacts_dir, per_run_artifacts_dir, project_root, teacher_model_path, teacher_cache, teacher_meta, teacher_ckpt, ledger_path, ckpts_dir, baseline_latency_ms, kd_scripts_dir, concurrency, device_plan, per_variant_vram_bytes]
       properties:
         kd_artifacts_dir: {type: string, description: "稳定 artifact 根绝对路径（末尾带 /）。跨 run 持久"}
-        per_run_artifacts_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR（per-run，orca_env.sh 祖先；train_kd env_anchor / viz env_anchor 用）"}
+        per_run_artifacts_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR（per-run，orca_env.sh 祖先；train env_anchor / viz env_anchor 用）"}
         project_root: {type: string}
         teacher_model_path: {type: string, description: "repo 内 teacher_model.py 绝对路径（10 层 t1/t2）"}
         teacher_cache: {type: string, description: "teacher_cache.pt 绝对路径"}
@@ -99,91 +100,71 @@ nodes:
         ckpts_dir: {type: string, description: "<kd_artifacts_dir>ckpts/ 绝对路径（末尾带 /）"}
         baseline_latency_ms: {type: number, description: "原始 baseline(4层) 实测 latency 中位数（参考线）"}
         kd_scripts_dir: {type: string, description: "_kd_scripts 绝对路径"}
-        user_train_import: {type: string, description: "用户 train 模块 dotted-path（BLK-7 持久化；空则 distill 走哨兵）"}
+        user_train_import: {type: string, description: "用户 train 模块 dotted-path（BLK-7 持久化；空则哨兵）"}
         user_loss_fn: {type: string, description: "用户 loss callable 名（BLK-7）"}
         variants_count: {type: integer, description: "KB receiver 变体数（BLK-14 预检 ≥1）"}
+        concurrency: {type: integer, description: "并发数（setup gpu_probe 算，唯一权威；fail-soft 最低 1）"}
+        device_plan: {type: string, description: "JSON 串：round-robin 设备列表（如 [\"cuda:0\",\"cuda:1\"]；无 CUDA 时 [\"\"]）"}
+        per_variant_vram_bytes: {type: integer, description: "per-variant 训练显存占用 bytes（train VRAM 再校验用；无 CUDA 时 0）"}
+        gpu_report: {type: string, description: "GPU 探测人类可读摘要（含 WARN 时原因）"}
     routes:
-      - to: selector
+      - to: gate
 
   # ═══════════════════════════════════════════════════════════════
-  # selector（gatekeeper）：pick_variant 取下一未蒸馏变体（无→all_done→$end）→
-  # tune_latency 最小缩量找 accepted_cfg（或 FAIL_latency）。
+  # gate（确定性 latency gate）：一个节点内 gate_all.py 串行遍历全部变体——校验 + tune_latency
+  # 最小缩量 + distill_dispatch。FAIL_latency / FAIL_train 当场增量落账；ACCEPTED 写 manifest。
+  # 路由：n_accepted==0（全 FAIL_latency）→ $end 跳过 train；否则 → train。
   # ═══════════════════════════════════════════════════════════════
-  - name: selector
+  - name: gate
     kind: agent
     executor: opencode
     model: "deepseek/deepseek-v4-flash"
-    agent: kd-selector
+    agent: kd-gate
     output_schema:
       type: object
-      required: [all_done, tune_status, variant_id]
+      required: [accepted_manifest_path, n_accepted, n_fail_latency, all_variants_count, all_processed]
       properties:
-        all_done: {type: boolean, description: "true=无未蒸馏变体，路由 $end（首条 when）"}
-        tune_status: {type: string, enum: [ACCEPTED, FAIL_latency], description: "ACCEPTED=latency 达标有 accepted_cfg；FAIL_latency=预算耗尽仍超 target"}
-        variant_id: {type: string, description: "变体 id（.py stem）；all_done 时空"}
-        variant_path: {type: string}
-        variant_sha256: {type: string}
-        accepted_cfg: {type: string, description: "JSON 串：tune 接受的 build_cfg（FAIL_latency 时为 best_effort_cfg）"}
-        latency_ms_median: {type: number, description: "tune 测得 latency 中位数（HI-13）"}
-        latency_ms_std: {type: number}
-        build_fn: {type: string}
-        dummy_input: {type: string, description: "JSON 串（变体 DUMMY_INPUT）"}
-        knobs: {type: string, description: "JSON 串（变体 KNOBS）"}
-        measurements: {type: integer}
+        accepted_manifest_path: {type: string, description: "<kd_artifacts_dir>gate_manifest.json 绝对路径（ACCEPTED 变体列表）"}
+        n_accepted: {type: integer, description: "ACCEPTED 变体数（路由 $end iff ==0）"}
+        n_fail_latency: {type: integer, description: "FAIL_latency 落账数"}
+        all_variants_count: {type: integer, description: "KB 变体总数"}
+        all_processed: {type: boolean, description: "全部变体都走完 gate（无未捕获异常）"}
     routes:
-      - when: "selector.output.all_done"
+      - when: "gate.output.n_accepted | int == 0"
         to: $end
-      - to: distill
+      - to: train
 
   # ═══════════════════════════════════════════════════════════════
-  # distill：distill_dispatch gate（noop|train）。FAIL_latency→不训练出 FAIL_latency；
-  # ACCEPTED→复用 selector latency（HI-1）+ 完整蒸馏训练（实时图）+ measure_student 测精度（绝对基线）。
+  # train（有界并发蒸馏池）：train_pool.py 吃 gate manifest + setup 并发参数 → VRAM 再校验 →
+  # ThreadPoolExecutor round-robin 绑卡 → 每 worker train_adapter + measure --skip_latency →
+  # as_completed 主线程逐行增量 append ledger → 末尾 viz_kd 推 sweep 散点。
   # ═══════════════════════════════════════════════════════════════
-  - name: distill
+  - name: train
     kind: agent
     executor: opencode
     model: "deepseek/deepseek-v4-flash"
-    agent: kd-distill
+    agent: kd-train
     output_schema:
       type: object
-      required: [variant_id, status, met_latency, met_accuracy]
+      required: [variants_done, variants_total, sweep_status]
       properties:
-        variant_id: {type: string}
-        status: {type: string, enum: [SUCCESS, FAIL_latency, FAIL_accuracy, FAIL_train, FAIL_export], description: "BLK-17：须与 selector.tune_status 一致（recorder 断言）"}
-        latency_ms_median: {type: number, description: "复用自 selector（HI-1）；FAIL_export 时 -1"}
-        latency_ms_std: {type: number}
-        accuracy: {type: number, description: "measure_student 测得；未测时 0.0"}
-        accuracy_kind: {type: string}
-        met_latency: {type: boolean}
-        met_accuracy: {type: boolean, description: "对比用户 accuracy_baseline（方向由 kind）"}
-        ckpt: {type: string, description: "蒸馏 ckpt 绝对路径；未训练时空"}
-        fail_reason: {type: string}
+        variants_done: {type: integer, description: "ledger 总行数（已完成变体数，跨 run 累计）"}
+        variants_total: {type: integer, description: "KB 变体总数"}
+        sweep_status: {type: string, enum: [SUCCESS, FAIL], description: "全批跑完无异常 = SUCCESS"}
+        fail_reason: {type: string, description: "SWEEP_STATUS=FAIL 时的原因（VRAM 不足 / worker 异常等）；SUCCESS 时空"}
     routes:
-      - to: recorder
-
-  # ═══════════════════════════════════════════════════════════════
-  # recorder：断言 tune_status↔distill.status 一致（BLK-17）→ 写 ckpt 验存在 → append ledger → 推图 → 回 selector。
-  # ═══════════════════════════════════════════════════════════════
-  - name: recorder
-    kind: agent
-    executor: opencode
-    model: "deepseek/deepseek-v4-flash"
-    agent: kd-recorder
-    output_schema:
-      type: object
-      required: [recorded, variants_done, variants_total]
-      properties:
-        recorded: {type: boolean, description: "true=账本已 append（含失败行）"}
-        variants_done: {type: integer, description: "已完成变体数（读 ledger）"}
-        variants_total: {type: integer}
-        coherence_ok: {type: boolean, description: "BLK-17 一致性断言通过"}
-    routes:
-      - to: selector
+      - to: $end
 
 outputs:
   result: "{{ setup.output.ledger_path }}"
   ledger_path: "{{ setup.output.ledger_path }}"
   kd_artifacts_dir: "{{ setup.output.kd_artifacts_dir }}"
   baseline_latency_ms: "{{ setup.output.baseline_latency_ms }}"
-  # HI-4：不引 recorder.output（终态 transition 是 selector(all_done)→$end，recorder 不在此次跑）。
-  # 变体完成数读 ledger.jsonl（稳定真相源），不在 workflow outputs 暴露。
+  concurrency: "{{ setup.output.concurrency }}"
+  device_plan: "{{ setup.output.device_plan }}"
+  # gate 恒跑（setup→gate），其计数在所有路径（含 n_accepted==0 路由 $end）都可得。
+  n_accepted: "{{ gate.output.n_accepted }}"
+  n_fail_latency: "{{ gate.output.n_fail_latency }}"
+  # 注：train 可能被跳过（gate.n_accepted==0 → $end），故 outputs 不引 train.output.X
+  # （skipped node output=None，render 会 ExecError）。train 的 variants_done/sweep_status
+  # 由 train agent stdout 打印 + ledger.jsonl 真相源暴露，不在 workflow outputs 模板化。

@@ -394,7 +394,9 @@ class TestTeacherSetupParse:
     ("_kd_scripts/tune_latency.py", [], ["--device", "--seed", "--max_measurements"]),
     ("_kd_scripts/distill_dispatch.py", [], ["--tune_status"]),
     ("_kd_scripts/viz_kd.py", [], ["--baseline_latency_ms", "--target_latency_ms", "--env_anchor"]),
-    ("_kd_scripts/train_variants_parallel.py", [], ["--concurrency", "--teacher_cache", "--ledger"]),
+    ("_kd_scripts/gate_all.py", [], ["--ledger", "--target_latency_ms", "--latency_provider", "--manifest_out"]),
+    ("_kd_scripts/gpu_probe.py", [], ["--teacher_cache", "--representative_variant", "--variants_count", "--device"]),
+    ("_kd_scripts/train_pool.py", [], ["--manifest", "--ledger", "--concurrency", "--device_plan", "--per_variant_vram_bytes"]),
 ])
 def test_cli_flags_exposed(script_rel, args, required_flags):
     """P7：所有脚本 CLI 暴露 --device / --seed（+ export 的 external-data / teacher_setup 的 strict-accuracy）。"""
@@ -418,10 +420,10 @@ def test_struct_workflow_has_six_nodes():
     assert nodes == expected, f"struct nodes mismatch: {nodes}"
 
 
-def test_kd_workflow_has_four_nodes():
-    """重构：kd workflow 4 节点 setup→selector→distill→recorder（无 finalize/engineer/hypothesizer/curator）。"""
+def test_kd_workflow_has_three_nodes():
+    """v2 重构：kd workflow 3 节点 setup→gate→train（确定性 gate + 有界并发池；删 selector/distill/recorder）。"""
     nodes = _yaml_nodes(REPO / "workflows" / "kd-nas.yaml")
-    expected = ["setup", "selector", "distill", "recorder"]
+    expected = ["setup", "gate", "train"]
     assert nodes == expected, f"kd nodes mismatch: {nodes}"
 
 

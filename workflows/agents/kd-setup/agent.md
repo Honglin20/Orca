@@ -153,7 +153,31 @@ python3 "$KD_SCRIPTS_DIR/pick_variant.py" --receiver_dir "${ORCA_KB_DIR}/familie
   --ledger "$LEDGER_PATH" --target_latency_ms "{{ inputs.target_latency_ms }}" \
   --latency_provider "{{ inputs.latency_provider }}" --out "${KD_ARTIFACTS_DIR}_first_variant.json"
 # exit 0/0(ALL_DONE)/3(NO_VARIANTS)。NO_VARIANTS(exit 3) → fail loud（KB 无变体）。
+VARIANTS_COUNT=$(ls "${ORCA_KB_DIR}/families/receiver/"*.py 2>/dev/null | grep -v '/_' | wc -l)
 ```
+
+### 8. GPU 预检（定并发数 + 多卡 device_plan；setup 是并发数唯一权威）
+```bash
+# teacher_cache 已在 step 5 就绪；representative_variant 用 baseline_model_path。
+GPU_OUT="$(python3 "$KD_SCRIPTS_DIR/gpu_probe.py" \
+  --teacher_cache "$TEACHER_CACHE" \
+  --representative_variant "$BASELINE" \
+  --variants_count "$VARIANTS_COUNT" --device "{{ inputs.device }}" \
+  --safety 0.8 --max_concurrency 8 --seed "{{ inputs.seed }}" 2>&1)"
+GPU_RC=$?
+# gpu_probe.py 仅在输入契约不符时非零退出（无 CUDA/NPU / 探测异常都 fail-soft 退 0）。
+[ $GPU_RC -ne 0 ] && { echo "$GPU_OUT" >&2; exit 2; }
+CONCURRENCY="$(echo "$GPU_OUT" | grep '^CONCURRENCY:' | awk '{print $2}')"
+DEVICE_PLAN="$(echo "$GPU_OUT" | grep '^DEVICE_PLAN:' | cut -d' ' -f2-)"
+PER_VARIANT_VRAM_BYTES="$(echo "$GPU_OUT" | grep '^PER_VARIANT_VRAM_BYTES:' | awk '{print $2}')"
+GPU_REPORT="$(echo "$GPU_OUT" | grep '^GPU_REPORT:' | cut -d' ' -f2-)"
+# 兜底：grep 取不到（不应发生，gpu_probe 必 emit）→ 单卡串行
+[ -z "$CONCURRENCY" ] && { CONCURRENCY=1; DEVICE_PLAN='[""]'; PER_VARIANT_VRAM_BYTES=0; GPU_REPORT='WARN grep miss -> serial'; }
+echo "CONCURRENCY=$CONCURRENCY DEVICE_PLAN=$DEVICE_PLAN PER_VARIANT_VRAM_BYTES=$PER_VARIANT_VRAM_BYTES"
+```
+> setup 是「并发数唯一权威」（见 CONTRACTS §6）：gpu_probe.py 测 per-variant 训练显存 + 各卡 free VRAM
+> → 公式 `max(1, floor(free×0.8/per_variant))` cap 到 `min(variants_count, max_concurrency)` → 多卡
+> round-robin device_plan。fail-soft：无 CUDA/NPU → concurrency=1 + WARN（仍可跑）。
 
 ## 输出（合法 JSON，严格匹配 output_schema）
 ```json
@@ -171,6 +195,10 @@ python3 "$KD_SCRIPTS_DIR/pick_variant.py" --receiver_dir "${ORCA_KB_DIR}/familie
   "kd_scripts_dir":"<KD_SCRIPTS_DIR>",
   "user_train_import":"<step6 import 或空>",
   "user_loss_fn":"<step6 loss 或空>",
-  "variants_count":<KB 变体数>
+  "variants_count":<KB 变体数>,
+  "concurrency":<step8 CONCURRENCY int>,
+  "device_plan":"<step8 DEVICE_PLAN JSON 串>",
+  "per_variant_vram_bytes":<step8 PER_VARIANT_VRAM_BYTES int>,
+  "gpu_report":"<step8 GPU_REPORT 串>"
 }
 ```
