@@ -48,9 +48,12 @@ def build_model(**cfg) -> nn.Module: ...   # 零参用 KNOBS.default；cfg 覆�
 - `spt_puretf.py` —— 全 Transformer · 选择性 pointwise（p_lyr/proj k=1、cv1/cv2 保 k=3、M9 soft-threshold 补偿）。
 - `spt_unet.py` —— U-Net 多尺度（subcarrier 轴 MaxPool↓/ConvTranspose↑ + skip concat）。
 - `spt_2d.py` —— 2D 时频 axial attention（symbol 轴 + subcarrier 轴 MHA 分解）。
+- `spt_largekernel.py` —— 全 CNN · 大核标准 conv（k∈{7..15}，局部密集大核，物理对应 PDP）。
+- `spt_channelformer.py` —— 浅 attn precoder + CNN 主干（1 层全局上下文 + conv 重活）。
+- `spt_gnn.py` —— Conv + GNN 交替（num_ports 全连接图层间消息传递，MIMO 干扰建模）。
 
-> 全 CNN 三极：`spt_cnn_dilated`（局部稀疏）/ `spt_cnn_pointwise`（全局 pointwise）/ 基础 block 的
-> 局部密集（D20 大核，待加）。U-Net 与 flat 结构 cost-accuracy 曲线不同，给 sweep 补多尺度维度。
+> 全 CNN 三极：`spt_cnn_dilated`（局部稀疏）/ `spt_cnn_pointwise`（全局 pointwise）/
+> `spt_largekernel`（局部密集大核）。U-Net 补多尺度维度；GNN 是唯一显式建模 MIMO 层间关系的变体。
 
 用户后续往本目录加变体 `.py` 即可，workflow 自动纳入 sweep（无需改 workflow / 索引）。
 

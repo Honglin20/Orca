@@ -18,10 +18,11 @@ REPO = Path(__file__).resolve().parents[2]
 KD = REPO / "workflows" / "agents" / "_kd_scripts"
 KBDIR = REPO / "knowledge_base" / "families" / "receiver"
 
-# 全部 7 个变体（2 旧 + 5 新），回归覆盖整池。
+# 全部 10 个变体（2 旧 + 5 新 + 3 新），回归覆盖整池。
 VARIANTS = [
     "spt_t1", "spt_alt",
     "spt_cnn_dilated", "spt_cnn_pointwise", "spt_puretf", "spt_unet", "spt_2d",
+    "spt_largekernel", "spt_channelformer", "spt_gnn",
 ]
 
 
@@ -141,3 +142,41 @@ def test_spt_2d_embed_dim_not_divisible_raises():
     mod = _load_variant("spt_2d")
     with pytest.raises(ValueError, match="整除"):
         mod.build_model(embed_dim=10)
+
+
+def test_spt_largekernel_kernel_shrinkable():
+    """spt_largekernel kernel_size 可缩（KNOBS 主轴），缩到 min=7 仍 forward + cv1 核=7。"""
+    import torch
+    mod = _load_variant("spt_largekernel")
+    m = mod.build_model(kernel_size=7)
+    m.eval()
+    x = torch.randn(1, 4, 48, 64, 1)
+    with torch.no_grad():
+        out = m(x)
+    assert out.shape == x.shape
+    assert m.main[0].cv1.kernel_size[0] == 7
+
+
+def test_spt_largekernel_even_kernel_raises():
+    """spt_largekernel kernel_size 偶数时 fail loud（build_model 守门）。"""
+    mod = _load_variant("spt_largekernel")
+    with pytest.raises(ValueError, match="奇数"):
+        mod.build_model(kernel_size=8)
+
+
+def test_spt_channelformer_precoder_then_cnn():
+    """spt_channelformer: 1 层 attn precoder + CNN 主干，feature_hook=[precoder, main]。"""
+    mod = _load_variant("spt_channelformer")
+    m = mod.build_model(num_blocks=1)
+    assert hasattr(m, "precoder") and hasattr(m, "main")
+    assert len(m.precoder) == 1            # 浅 attn（固定 1 层）
+    assert m.feature_hook_names() == ["precoder", "main"]
+
+
+def test_spt_gnn_5d_layout():
+    """spt_gnn: GNN block 含 gnn + conv 子步，num_ports=4 全连接图。"""
+    mod = _load_variant("spt_gnn")
+    m = mod.build_model(num_blocks=1)
+    blk = m.main[0]
+    assert hasattr(blk, "gnn") and hasattr(blk, "conv")
+    assert blk.gnn.num_ports == 4
