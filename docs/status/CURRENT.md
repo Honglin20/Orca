@@ -6,64 +6,29 @@
 
 ## 当前任务（2026-07-24）
 
-### ✅ `tars close` 命令（关闭本地 orca web server，与 `tars open` 对称）—— 已提交
+### 🚧 KD-NAS 重构：Receiver KB 驱动的确定性蒸馏 sweep —— 实现完成，待 review + 真机 E2E
 
-**状态**：补齐 `tars open` 的对称命令。机制：`POST /api/shutdown`（loopback-only，跨平台优雅，触发 uvicorn lifespan）为主 + PID 兜底（POSIX SIGTERM→SIGKILL / Windows taskkill /F）为辅。spec-review 4 blocker（B1 双 wire / B2 指纹过滤 / B3 不清 registry / B4 PID re-probe）全闭环。Windows PID 兜底恒 force-kill（无 SIGTERM），kill 前 stderr warn tape 可能未 flush。31 新测绿（web 8 + cli 23 + 1 win32 skip）+ 相邻 143 passed / 1 pre-existing fail（`run_manager.py:37` 预存 web→cli 违反，独立 issue，本任务不恶化）。code-reviewer：Implementation **pass** / Test coverage **conditional-pass → 已转 pass**（4 🟡 全修，3 🟢 修 1 跳 2）。详见 [release note](../releases/2026-07-24-tars-close-command.md)。
+**状态**：实现全完成（5 阶段）。DAG `setup → selector → distill → recorder → … → $end`（无 finalize）。新脚本 `pick_variant/tune_latency/distill_dispatch/kd_common/teacher_model` + 改 `measure_student/teacher_setup/train_kd/viz_kd/export_onnx` + 4 agent.md + CONTRACTS + KB 改造（receiver 变体仓）+ 测试。spec-review 17 blocker + HIGH/SR/MED findings 全 fold。
 
----
+**验证**：✅ compile+workflows(kd)+e2e contract **199 passed / 0 failed**；✅ `tars validate` 等价（4 节点/路由/Jinja/latency_provider required）；✅ code-reviewer 4 个 🔴 + 关键 🟡 全修 + 回归守门补齐。⏳ 真机 E2E（opencode+deepseek-v4-flash，GPU 机）待用户执行。未提交（待用户确认后 commit）。
 
-### ✅ in-session bootstrap 注册项目（修复 TARS run 在 web 不可见）—— 已提交
+**关键决策**：稳定 `kd_artifacts_dir`（+可覆盖）；`latency_provider` 必填无默认；dummy_input 用户指定（禁硬编码 shape）；FAIL_latency 走 `distill_dispatch` 确定性门；实时图每变体一张；force_rerun 仅 variants；精度基线 = 用户绝对值。
 
-**状态**：根因 = §13 注册表化后 in-session `bootstrap` 漏调 `register_project`（`orca run`/`web start_run`/`tars project rebuild` 都有，独 in-session 漏）→ TARS run 在 web 列表/详情不可见 + 远程 `~/.orca/projects.json` 不生成。修复：`orca/iface/in_session/cli.py` 加 `_register_current_project()` helper（detect+register，broad try/except fail-open+warn），在 bootstrap post-lock 段调用。2 新测绿；`tests/iface/in_session/ + tests/runtime/test_project.py` 494 passed / 2 pre-existing fail（无关）。code-reviewer 0 🔴 / 1 🟡采纳 / 2 🟢保持。详见 [release note](../releases/2026-07-24-in-session-bootstrap-register-project.md)。
-
----
-
-### ✅ Workflow 可视化审计修复（P1×5 + P2×7）—— 已提交
-
-**状态**：两轮审计 12 项全闭环。P1（death-penalty latency 保留 / C5-live 方向动态化 /
-bit-curve 逐层位宽 + cumulative-best 图 / QAT live 推）+ P2（struct accuracy champion trace /
-kd latency trace / struct x→round / 删除孤儿 nas-viz / quant 4 脚本 helper 下沉到 `_common.py` /
-sensitivity fail loud / candidates_evaluated 改语义不改字段名）。43 新测 + 2 既有测试断言
-更新。159 workflows + 654 跨目录 passed。code-reviewer：0 🔴 + 2 🟡（AST 切片钉真源码）+ 5 🟢
-全修或登记。详见 release note：
-[2026-07-24-workflow-viz-audit-fixes.md](../releases/2026-07-24-workflow-viz-audit-fixes.md)。
+详见 [release note](../releases/2026-07-24-kd-nas-distill-redesign.md) + [计划](../plans/2026-07-24-kd-nas-distill-redesign.md)。
 
 ---
-
-### 历史任务（已完成，详见 CHANGELOG）
-
-#### ✅ 单端口 + 多 Run 监控「遗留清项」（SPEC §13 v4 carry-over）—— 已提交
-
-**状态**：SPEC §13 v4「遗留（非阻塞）」清单七项全清（AC14 contract test / P0 持久缓存 /
-`tars project rebuild` / Stale projects 折叠区 / 统一 open 列表语义 / scripts 归位 /
-2 pre-existing quick fix）。27 新测全绿；463 passed / 1 pre-existing fail
-（`test_web_does_not_import_cli`，架构问题 `apply_kb_requirement` web→cli 反向依赖，
-**不动**留后续 PR）。code-reviewer 3 🟡 全闭环 + 3 🟢 采纳。详见 release note：
-[2026-07-24-single-port-multi-run-cleanup.md](../releases/2026-07-24-single-port-multi-run-cleanup.md)。
-
-### ✅ 单端口 + 多 Run 监控（Phase A + B' + C 生产 + 单测）—— 已提交
-
-**状态**：commit `1788cea`（实现）+ `c5cf298`（E2E 回归修复）。code-reviewer 2 blocker + 4 major + 3 minor 全闭环。**test-agent 真机 E2E：AC1/3/5/8/16/17/18 七项功能契约全 PASS**。详见 release note：[2026-07-24-single-port-multi-run-monitoring.md](../releases/2026-07-24-single-port-multi-run-monitoring.md)。
-
----
-
-## 历史状态（已完成，详见 CHANGELOG）
-
-- ✅ **In-Session Chart 鲁棒出图**（commit `003acc3`）
-- ✅ **KB 可移植 + struct-exploration**（commit `6e0f167` + `0be8c6d`）
-- ✅ **Workflow 全面重设计 P1-P9 + P4b + Stage3/4**（系列 commits，2026-07-21~22）
-- ✅ **`orca open` 跨项目端口占用修复**（commit `7d9b7eb` + `9677c1e`）
-- ✅ **Workflow 可视化全量优化**（commits `b820ef1`…`f516223`）
-- ✅ **P8 引擎 artifacts dir + `orca gc`**（commit `b1eaf43`）
-
-## 待确认（收尾，非阻塞）
-
-- ts_quant 正式进 orca pyproject 依赖
-- 各 workflow 真机 in-session E2E + 截真图替换文档占位
-- 量化 workflow sidecar 脚本永久单测
 
 ## 必读文件（开工前按需）
 
-- [SPEC §13：单端口 + 多 Run 监控 v4 修订](../specs/2026-07-23-single-port-multi-run-monitoring.md)
+- [重构计划](../plans/2026-07-24-kd-nas-distill-redesign.md) —— 权威实施计划（含 spec-review 全部修复）
+- [CONTRACTS.md](../../workflows/agents/_kd_scripts/CONTRACTS.md) —— 重写后的 kd 契约
 - [CHANGELOG](CHANGELOG.md)
-- [shells-design-draft.md](../specs/shells-design-draft.md)（Phase 6.3 三通道竞速，已在定稿）
+
+---
+
+## 近期已完成（详见 CHANGELOG）
+
+- ✅ `tars close` 命令（commit `59d73dd`）
+- ✅ in-session bootstrap 注册项目
+- ✅ Workflow 可视化审计修复（P1×5 + P2×7）
+- ✅ 单端口 + 多 Run 监控（Phase A+B'+C）

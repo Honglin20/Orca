@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import importlib.util
 import json
 import os
 import sys
@@ -120,20 +121,64 @@ def _load_user_loss() -> tuple[Callable, Callable]:
 
 
 # ---------------------------------------------------------------------------
-# Student build — mirrors students/<family>.py's build_model convention.
+# Student build — load variant .py **by path**（KD-NAS 变体在 KB / worktree，不再 import
+# students/<family>）。变体可 ``from _model8_blocks import ...``，故加其目录到 sys.path。
 # ---------------------------------------------------------------------------
-def _build_student(family: str, build_fn: str, cfg: dict) -> nn.Module:
-    try:
-        module = importlib.import_module(family)
-    except ImportError as exc:
-        raise ImportError(
-            f"cannot import student family '{family}' from {_STUDENTS_DIR}: {exc}"
-        ) from exc
-    if not hasattr(module, build_fn):
+def _build_student(student_model_path: str, build_fn: str, cfg: dict) -> nn.Module:
+    student_model_path = os.path.abspath(student_model_path)
+    if not os.path.isfile(student_model_path):
+        raise FileNotFoundError(f"student_model_path 不存在: {student_model_path}")
+    model_dir = os.path.dirname(student_model_path)
+    if model_dir not in sys.path:
+        sys.path.insert(0, model_dir)
+    module_name = Path(student_model_path).stem
+    spec = importlib.util.spec_from_file_location(module_name, student_model_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法为 {student_model_path} 构造 import spec")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = mod
+    spec.loader.exec_module(mod)
+    if not hasattr(mod, build_fn):
         raise AttributeError(
-            f"student family module '{family}' has no build fn '{build_fn}'"
+            f"{student_model_path} 无 build fn {build_fn!r}；可用: "
+            f"{[n for n in dir(mod) if not n.startswith('_')]}"
         )
-    return getattr(module, build_fn)(**cfg)
+    return getattr(mod, build_fn)(**cfg)
+
+
+def _make_live_push(variant_id: str):
+    """每-epoch 把累积 loss 曲线推 web（U-4：每变体一张图，label kd-distill-<variant_id>）。
+
+    镜像 ``run_qat.py:127-176``：lazy import ``orca.chart``，不可用→no-op；每次 try/except
+    stderr-only，**永不让推图失败杀掉训练循环**。同 label+title 再推 = 刷新（dedup 语义）。
+    """
+    try:
+        from orca.chart import render_chart  # type: ignore
+    except Exception:
+        render_chart = None  # type: ignore
+    label = f"kd-distill-{variant_id}"
+    title = f"KD loss — {variant_id}"
+
+    def push(curve: list[dict]) -> None:
+        if render_chart is None:
+            return
+        try:
+            render_chart(
+                chart_type="line",
+                data=curve,
+                label=label,
+                title=title,
+                x="epoch",
+                y="loss",
+                x_label="epoch",
+                y_label="KD loss（越低越好）",
+                caption=f"蒸馏训练每-epoch loss（实时刷新；variant={variant_id}）",
+            )
+        except Exception as e:  # 推图异常不阻断训练
+            print(f"[train_kd] WARN: render_chart 失败（不阻断训练）：{type(e).__name__}: {e}",
+                  file=sys.stderr)
+
+    return push
 
 
 # ---------------------------------------------------------------------------
@@ -141,8 +186,6 @@ def _build_student(family: str, build_fn: str, cfg: dict) -> nn.Module:
 # ---------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="KD adapter training script")
-    p.add_argument("--student_family", required=True,
-                   help="family name in students/registry.json")
     p.add_argument("--student_cfg", required=True,
                    help="JSON build_cfg dict passed to build_model(**cfg)")
     p.add_argument("--kd_config", required=True,
@@ -150,9 +193,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--teacher_cache", required=True,
                    help="path to teacher_cache.pt produced by teacher_setup.py")
     p.add_argument("--student_model_path", required=True,
-                   help="path to the student family's model .py (for registry audit)")
+                   help="变体 model .py 绝对路径（按路径 import 加载）")
     p.add_argument("--build_fn", default="build_model",
                    help="build function name in the student module")
+    p.add_argument("--variant_id", default="student",
+                   help="变体 id（实时图 label/title 参数化，U-4）")
     p.add_argument("--epochs", type=int, default=3,
                    help="number of short-training epochs (distillation is short)")
     p.add_argument("--out_ckpt", required=True,
@@ -169,6 +214,10 @@ def parse_args() -> argparse.Namespace:
                    help="cuda / cpu (auto-detected if omitted)")
     p.add_argument("--project_root", default=None,
                    help="用户项目根（含 train.py/model.py）；注入 sys.path 使 from model import ... 生效")
+    p.add_argument("--env_anchor", default="",
+                   help="BLK-5：自举 ORCA env 的锚点路径（per-run $ORCA_ARTIFACTS_DIR，orca_env.sh 祖先）")
+    p.add_argument("--seed", type=int, default=0,
+                   help="HI-2：复现种子（训练起始 + 权重 init）")
     return p.parse_args()
 
 
@@ -177,6 +226,18 @@ def parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 def main() -> int:
     args = parse_args()
+
+    # BLK-5：自举 ORCA env（防 agent 拆 bash 丢 ORCA_CHART_SOCK → render_chart 推不上）。
+    # env_anchor 指向 per-run $ORCA_ARTIFACTS_DIR（orca_env.sh 的祖先）。
+    if args.env_anchor:
+        try:
+            from orca.chart._env import load_run_env_from_artifacts  # type: ignore
+            load_run_env_from_artifacts(args.env_anchor)
+        except Exception as e:
+            print(f"[train_kd] WARN: env 自举失败（实时图可能推不上）：{type(e).__name__}: {e}",
+                  file=sys.stderr)
+    # HI-2：复现种子（训练起始 + build_model 权重 init）。
+    torch.manual_seed(args.seed)
 
     student_cfg = json.loads(args.student_cfg)
     kd_config = json.loads(args.kd_config)
@@ -195,7 +256,7 @@ def main() -> int:
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
     # --- student ------------------------------------------------------------
-    student = _build_student(args.student_family, args.build_fn, student_cfg)
+    student = _build_student(args.student_model_path, args.build_fn, student_cfg)
     hook_fn = getattr(student, "feature_hook_names", None)
     hook_names = list(hook_fn()) if callable(hook_fn) else []
     wrapper = KDStudentWrapper(student, hook_names).to(device)
@@ -263,13 +324,15 @@ def main() -> int:
     # smoke-testable before the agent specialises it.
     # =======================================================================
     last_avg = float("nan")
+    live_push = _make_live_push(args.variant_id)
+    loss_curve: list[dict] = []
     for epoch in range(args.epochs):
         wrapper.train()
         epoch_loss = 0.0
         n_batches = 0
-        for batch_idx, (x, y) in enumerate(
-            _chain_iterators(dl_iter, _placeholder_user_dataloader(batch_size=args.batch_size))
-        ):
+        # BLK-4：不复用 placeholder dataloader（其硬编码 shape 会污染真实训练）。
+        # 每 epoch 重新迭代用户 dataloader（可重复迭代的 DataLoader）；空则停（不续假数据）。
+        for batch_idx, (x, y) in enumerate(iter(dl)):
             x = x.to(device)
             y = y.to(device)
 
@@ -290,8 +353,14 @@ def main() -> int:
             epoch_loss += float(loss.detach())
             n_batches += 1
 
+        if n_batches == 0:
+            print(f"[train_kd] epoch={epoch}: dataloader 空（用户提供可重复迭代的 loader），停止",
+                  file=sys.stderr)
+            break
         last_avg = epoch_loss / max(n_batches, 1)
         print(f"[train_kd] epoch={epoch} kd_loss_avg={last_avg:.6f}", flush=True)
+        loss_curve.append({"epoch": epoch, "loss": last_avg})
+        live_push(loss_curve)
 
     # --- proxy MSE (soft-MSE vs teacher on a few final batches) ------------
     proxy_mse = _compute_proxy_mse(wrapper, teacher, dl, device)
@@ -302,7 +371,7 @@ def main() -> int:
     torch.save(
         {
             "student_state_dict": wrapper.student.state_dict(),
-            "student_family": args.student_family,
+            "variant_id": args.variant_id,
             "student_cfg": student_cfg,
             "kd_config": kd_config,
             "epochs": args.epochs,

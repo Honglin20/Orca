@@ -1,30 +1,31 @@
-"""measure_student.py —— measure_student 节点确定性后端（契约 §4）。
+"""measure_student.py —— KD-NAS student 精度/时延测量（确定性后端）。
 
-对齐 `workflows/agents/_kd_scripts/CONTRACTS.md` §4 `measure_student`。
+新设计（KD-NAS 重构后）职责：
+  - **精度测量**（distill 节点主用）：跑 ``--eval_command``（或 ``--eval_dataset``）→ 解析 student
+    accuracy → 对比**用户提供的绝对精度基线** ``--accuracy_baseline``（方向由 kind 决定）。
+    teacher 不再是精度参考（teacher 只当 KD 软标签源），故 ``--teacher_meta`` 改可选、
+    teacher-relative dB-gap 路径降级为 legacy。
+  - **时延测量**（可选）：导 ONNX + ``--latency_provider`` 实测。distill 节点按 HI-1 **复用**
+    selector 的 latency（不在真硬件上重测），故传 ``--skip_latency`` 跳过（latency_ms=-1）。
 
-步骤：
-    1. 动态 import student + load ckpt（eval）；
-    2. 导 ONNX → 实测 latency（load `--latency_provider module::func`）；
-    3. 跑 `--eval_command` → 解析 student accuracy；
-    4. 从 `--teacher_meta` 读 teacher accuracy，算 dB gap：
-       - MSE/NMSE: db_gap = 10*log10(student_mse / teacher_mse)
-       - SNR    : db_gap = teacher_snr − student_snr （SNR 高更好）
-       - BER    : 用 MSE 比值 dB fallback，标 confidence=low
-       - 解析失败: db_gap 用 |student-teacher| 占比，confidence=low
-    5. met_accuracy = db_gap ≤ threshold（默认 0.5 dB，或 --accuracy_gap_db）
-    6. met_latency = latency_ms ≤ target（teacher_meta.teacher_latency_ms 或 --target_latency_ms）
+方向语义（绝对基线对比，SR3）：
+  - kind ∈ {mse, nmse, ber}（误差型，越低越好）→ ``met = student ≤ baseline``
+  - kind ∈ {snr, acc}（越高越好）              → ``met = student ≥ baseline``
+  - kind unknown                                → ``met = false`` + confidence=low + 大声 WARN
+  - ``--accuracy_baseline_kind`` override：给则锁方向 + 校验自动检测一致（不符 WARN，用 override）。
 
 stdout::
 
-    STUDENT_LATENCY_MS: <float>
-    STUDENT_ACCURACY: <float>
-    STUDENT_DB_GAP: <float>
-    MET_ACCURACY: <bool>
-    MET_LATENCY: <bool>
-    STUDENT_ONNX: <path>
+    STUDENT_LATENCY_MS: <float>      # --skip_latency 时 -1
+    STUDENT_ACCURACY:   <float>
+    STUDENT_ACCURACY_KIND: <kind>
+    MET_ACCURACY:       <bool>
+    MET_LATENCY:        <bool>       # --skip_latency 时 false
+    STUDENT_ONNX:       <path>       # --skip_latency 时空串
+    ACCURACY_CONFIDENCE: high|low
 
-fail loud：import / ckpt / ONNX / latency 失败 → 非零退出 + stderr。
-eval_command 非零退出 → fail loud；解析不出精度 → fallback + confidence=low（不致命）。
+fail loud：eval_command 非零退出 / latency_provider 加载失败 / export 失败 → 非零退出。
+精度解析不出 → fallback + confidence=low（不致命，但 met_accuracy=false）。
 """
 
 from __future__ import annotations
@@ -32,7 +33,6 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
-import math
 import os
 import re
 import subprocess
@@ -43,12 +43,9 @@ from typing import Any
 
 
 # ── 复用 _struct_scripts/export_onnx.export_onnx ───────────────────────────────
-def _export_onnx(model_path, build_fn, dummy_input, opset, out, device: str = "auto"):
-    """复用 _struct_scripts/export_onnx.export_onnx（同 struct 测时延的导出路径）。
-
-    device 透传给 export_onnx（默认 auto：cuda→npu→cpu 探测，与 latency_onnxrt 一致；
-    P7 解开原硬编码 device="cpu"，让导出能上 GPU/NPU）。
-    """
+def _export_onnx(model_path, build_fn, dummy_input, opset, out, device: str = "auto",
+                 build_kwargs: dict[str, Any] | None = None, seed: int = 0):
+    """复用 _struct_scripts/export_onnx.export_onnx（build_kwargs 透传给 build_fn，KD 调参用）。"""
     here_struct = os.path.abspath(
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "_struct_scripts")
     )
@@ -58,7 +55,7 @@ def _export_onnx(model_path, build_fn, dummy_input, opset, out, device: str = "a
 
     return export_onnx(
         model_path=model_path, build_fn=build_fn, dummy_input=dummy_input,
-        opset=opset, out=out, device=device,
+        opset=opset, out=out, device=device, seed=seed, build_kwargs=build_kwargs,
     )
 
 
@@ -86,6 +83,10 @@ _ACC_PATTERNS = [
     (re.compile(r"\bSNR[_-]?dB\s*[:=]\s*([-+]?[0-9]*\.?[0-9]+)", re.I), "snr"),
     (re.compile(r"\bSNR\s*[:=]\s*([-+]?[0-9]*\.?[0-9]+)", re.I), "snr"),
 ]
+
+# kind → 方向：True = 越高越好（student ≥ baseline 才达标），False = 越低越好。
+_HIGHER_BETTER = {"snr", "acc"}
+_LOWER_BETTER = {"mse", "nmse", "ber"}
 
 
 def _parse_accuracy(stdout: str) -> tuple[float, str, str]:
@@ -118,61 +119,42 @@ def _run(cmd: str, cwd: str, env: dict | None = None) -> str:
     return proc.stdout
 
 
-# ── dB gap 计算 ────────────────────────────────────────────────────────────────
-def _compute_db_gap(
-    teacher_acc: float, teacher_kind: str,
-    student_acc: float, student_kind: str,
-    accuracy_gap_db: float,
-) -> tuple[float, str, bool]:
-    """返回 (db_gap, confidence, met_accuracy)。
+def _compute_met_accuracy_absolute(
+    student_acc: float, detected_kind: str, baseline: float, kind_override: str,
+) -> tuple[bool, str, str]:
+    """绝对精度基线对比（SR3）。返回 (met_accuracy, used_kind, confidence)。
 
-    kind 优先用 teacher_kind（teacher_meta 里记录）；student 没解析出来则用 teacher_kind 比值。
+    kind_override 非空 → 锁方向；若与 detected_kind 不符 → WARN（用 override）。
+    kind unknown → met=false, confidence=low（绝不静默 pass）。
     """
-    # 决定统一 kind：以 teacher 为准（teacher_meta 有记录）
-    kind = teacher_kind if teacher_kind != "unknown" else student_kind
-
-    confidence = "high" if (teacher_kind != "unknown" and student_kind != "unknown") else "low"
-
-    try:
-        if kind in ("mse", "nmse"):
-            # 误差型，越小越好；teacher=0 时退化
-            t = max(teacher_acc, 1e-12)
-            s = max(student_acc, 1e-12)
-            gap = 10.0 * math.log10(s / t)
-        elif kind == "snr":
-            # SNR 越高越好：db_gap = teacher − student（正=student 差）
-            gap = teacher_acc - student_acc
-        elif kind == "ber":
-            # BER 越小越好；用 log 比值近似 dB
-            t = max(teacher_acc, 1e-12)
-            s = max(student_acc, 1e-12)
-            gap = 10.0 * math.log10(s / t)
-            confidence = "low"  # BER→dB 仅近似
-        elif kind == "acc":
-            # 分类 accuracy：越高越好；gap 用 (teacher - student) 占比放大
-            # 近似 dB：10*log10((1-student)/(1-teacher))（error rate 比值）
-            t_err = max(1.0 - teacher_acc, 1e-6)
-            s_err = max(1.0 - student_acc, 1e-6)
-            gap = 10.0 * math.log10(s_err / t_err)
-        else:
-            # 完全未知：占位
-            gap = abs(student_acc - teacher_acc)
-            confidence = "low"
-    except (ValueError, ZeroDivisionError) as e:
-        gap = float("inf")
+    used = (kind_override or "").strip().lower() or detected_kind
+    confidence = "high"
+    if kind_override and detected_kind != "unknown" and detected_kind != used:
+        print(
+            f"[measure_student] WARN: 自动检测 kind={detected_kind!r} 与 "
+            f"--accuracy_baseline_kind={used!r} 不符；按 override {used!r} 判定。",
+            file=sys.stderr,
+        )
+    if used in _HIGHER_BETTER:
+        met = bool(student_acc >= baseline)
+    elif used in _LOWER_BETTER:
+        met = bool(student_acc <= baseline)
+    else:
+        # unknown：无法判方向 → 不达标 + 低置信 + 大声 WARN（绝不静默 pass）。
+        met = False
         confidence = "low"
-        print(f"[measure_student] dB gap 计算异常: {e}", file=sys.stderr)
-
-    met = bool(gap <= accuracy_gap_db)
-    return float(gap), confidence, met
+        print(
+            f"[measure_student] WARN: accuracy kind 未知（detected={detected_kind!r}, "
+            f"override={kind_override!r}）；无法判方向 → met_accuracy=false, confidence=low。",
+            file=sys.stderr,
+        )
+    return met, used, confidence
 
 
 # ── 内部 MSE 评测（自包含，无 eval_command 时用，便于测试）─────────────────────
-def _eval_dataset_mse(model_path: str, build_fn: str, ckpt_path: str, dataset_path: str) -> tuple[float, str]:
-    """load student + ckpt → 在 eval_dataset（.pt 含 {x, y}）上算 MSE。
-
-    返回 (mse_value, "mse")。fail loud：模型/dataset 加载失败。
-    """
+def _eval_dataset_mse(model_path: str, build_fn: str, ckpt_path: str, dataset_path: str,
+                      build_kwargs: dict[str, Any] | None = None) -> tuple[float, str]:
+    """load student + ckpt → 在 eval_dataset（.pt 含 {x, y}）上算 MSE。返回 (mse_value, "mse")。"""
     import torch
 
     if not os.path.isfile(dataset_path):
@@ -182,7 +164,6 @@ def _eval_dataset_mse(model_path: str, build_fn: str, ckpt_path: str, dataset_pa
         raise ValueError(f"eval_dataset 需含 {'x','y'} 键，得到 keys={list(data.keys()) if isinstance(data, dict) else type(data)}")
     x, y = data["x"], data["y"]
 
-    # 动态 import student model（与 teacher_setup.py 同款 importlib）
     model_dir = os.path.dirname(os.path.abspath(model_path))
     module_name = Path(model_path).stem
     if model_dir not in sys.path:
@@ -194,7 +175,7 @@ def _eval_dataset_mse(model_path: str, build_fn: str, ckpt_path: str, dataset_pa
     factory = getattr(mod, build_fn, None)
     if not callable(factory):
         raise AttributeError(f"{module_name} 无 callable {build_fn}")
-    student = factory()
+    student = factory(**build_kwargs) if build_kwargs else factory()
     student.eval()
 
     if ckpt_path and os.path.isfile(ckpt_path):
@@ -208,7 +189,6 @@ def _eval_dataset_mse(model_path: str, build_fn: str, ckpt_path: str, dataset_pa
 
     with torch.no_grad():
         out = student(x)
-        # 对齐 shape（student/teacher 输出 [B,4,48,64,1]；y 可能同形或 squeeze 过）
         if out.shape != y.shape:
             try:
                 y = y.view_as(out)
@@ -223,31 +203,40 @@ def measure_student(args) -> dict:
     out_dir = os.path.abspath(args.output_dir)
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
-    # 1. 导 ONNX（export_onnx 内部会 import + build；我们不持有 ckpt state，
-    #    因为 export 只需结构。但 latency 由 ONNX 决定，不需要 ckpt 权重）。
-    #    ckpt 仅在 student 需要量化权重时才 load；这里 ONNX 路径用 build_model 默认权重，
-    #    若用户要量化后的 latency，让 engineer 在 export 前把 ckpt 烧进 model.py。
-    student_onnx = os.path.join(out_dir, "student.onnx")
-    _export_onnx(
-        args.student_model_path, args.build_fn, args.dummy_input,
-        args.opset, student_onnx, device=args.device,
-    )
+    build_kwargs = None
+    if args.build_cfg and args.build_cfg.strip():
+        build_kwargs = json.loads(args.build_cfg)
+        if not isinstance(build_kwargs, dict):
+            raise ValueError("--build_cfg 必须是 JSON object")
 
-    # 2. 测 latency（device 透传给 latency_provider：auto/cuda/npu/cpu）
-    measure = _load_measure(args.latency_provider)
-    # latency_provider 是 `path::func`；measure 接受 device kwarg（latency_onnxrt.py 默认）。
-    # 用 inspect 检测形参（裸 try/except TypeError 会误吞用户脚本内部的 TypeError）。
-    import inspect
-    if "device" in inspect.signature(measure).parameters:
-        latency_ms = float(measure(student_onnx, device=args.device))
+    skip_latency = bool(args.skip_latency)
+
+    # 1-2. 时延（可选；--skip_latency 跳过，distill 复用 selector latency）。
+    if skip_latency:
+        student_onnx = ""
+        latency_ms = -1.0
+        met_lat = False
     else:
-        latency_ms = float(measure(student_onnx))
+        if not (args.dummy_input and args.dummy_input.strip()):
+            raise ValueError("非 --skip_latency 模式需要 --dummy_input（用户指定 I/O 维度）")
+        student_onnx = os.path.join(out_dir, "student.onnx")
+        _export_onnx(
+            args.student_model_path, args.build_fn, args.dummy_input,
+            args.opset, student_onnx, device=args.device,
+            build_kwargs=build_kwargs, seed=args.seed,
+        )
+        measure = _load_measure(args.latency_provider)
+        import inspect
+        if "device" in inspect.signature(measure).parameters:
+            latency_ms = float(measure(student_onnx, device=args.device))
+        else:
+            latency_ms = float(measure(student_onnx))
+        if args.target_latency_ms is not None:
+            met_lat = bool(latency_ms <= float(args.target_latency_ms))
+        else:
+            met_lat = True  # 未给 target：不卡时延门（distill 不用此路径判门）
 
-    # 3. student accuracy
-    #    优先用 --eval_dataset（.pt 含 {x, y}）内部算 MSE（自包含，便于测试/无 eval_command 时）；
-    #    否则跑 --eval_command（用户 eval 脚本，自行加载 ckpt）。
-    #    P7 M3：candidate_eval 短训阶段既不给 eval_command 也不给 eval_dataset → **跳过 db_gap 计算**
-    #    （之前白算一个垃圾 0.0/unknown db_gap 写进 measure_report 误导 debug）。
+    # 3. student accuracy（eval_command 或 eval_dataset；都没有 → unknown）。
     eval_provided = (
         (args.eval_dataset and args.eval_dataset.strip())
         or (args.eval_command and args.eval_command.strip())
@@ -255,69 +244,49 @@ def measure_student(args) -> dict:
     if args.eval_dataset and args.eval_dataset.strip():
         student_acc, student_kind = _eval_dataset_mse(
             args.student_model_path, args.build_fn, args.student_ckpt,
-            args.eval_dataset,
+            args.eval_dataset, build_kwargs=build_kwargs,
         )
     elif args.eval_command and args.eval_command.strip():
-        import os as _os
-        _env = dict(_os.environ)
+        _env = dict(os.environ)
         _env["STUDENT_CKPT"] = os.path.abspath(args.student_ckpt) if args.student_ckpt else ""
         _env["STUDENT_MODEL_PATH"] = os.path.abspath(args.student_model_path)
         _env["STUDENT_OUTPUT_DIR"] = out_dir
         raw = _run(args.eval_command, args.project_root, env=_env)
         student_acc, student_kind, _ = _parse_accuracy(raw)
     else:
-        # 短训阶段（latency-first candidate_eval）：不跑 eval → accuracy 未知。
-        # 不算 db_gap（避免占位 0.0/unknown 写盘误导）；stdout 仍打 MET_ACCURACY: false。
-        print(
-            "[measure_student] neither --eval_dataset nor --eval_command given; "
-            "skipping accuracy + dB gap computation (latency-only mode for short-train phase).",
-            file=sys.stderr,
-        )
         student_acc, student_kind = 0.0, "unknown"
 
-    # 4. 读 teacher_meta
-    if not os.path.isfile(args.teacher_meta):
-        raise FileNotFoundError(f"teacher_meta 不存在: {args.teacher_meta}")
-    teacher_meta = json.loads(
-        Path(args.teacher_meta).read_text(encoding="utf-8")
-    )
-    teacher_acc = float(teacher_meta.get("teacher_accuracy", 0.0))
-    teacher_kind = str(teacher_meta.get("teacher_accuracy_kind", "unknown"))
-
-    # 5. dB gap（仅当 eval 已跑；短训阶段 latency-only → 全 sentinel）
-    accuracy_gap_db = float(args.accuracy_gap_db) if args.accuracy_gap_db is not None else 0.5
-    if eval_provided:
-        db_gap, gap_conf, met_acc = _compute_db_gap(
-            teacher_acc, teacher_kind, student_acc, student_kind, accuracy_gap_db,
+    # 4. 精度判定：绝对基线（新设计唯一路径，HI-8：已删 teacher-relative dB gap legacy）。
+    if args.accuracy_baseline is not None:
+        met_acc, used_kind, acc_conf = _compute_met_accuracy_absolute(
+            student_acc, student_kind, float(args.accuracy_baseline),
+            args.accuracy_baseline_kind or "",
         )
     else:
-        # latency-only 模式（candidate_eval 短训）：dB gap 未知，恒 sentinel。
-        db_gap, gap_conf, met_acc = -1.0, "deferred", False
+        met_acc = False
+        acc_conf = "low"
+        used_kind = student_kind
+        if not eval_provided:
+            print("[measure_student] 无 eval + 无 accuracy_baseline → met_accuracy=false (low)",
+                  file=sys.stderr)
+        elif eval_provided:
+            print("[measure_student] WARN: 有 eval 但未给 --accuracy_baseline → met_accuracy=false "
+                  "(low)；新设计须显式给绝对基线。", file=sys.stderr)
 
-    # 6. latency target
-    if args.target_latency_ms is not None:
-        target_lat = float(args.target_latency_ms)
-    elif "teacher_latency_ms" in teacher_meta:
-        target_lat = float(teacher_meta["teacher_latency_ms"])
-    else:
-        target_lat = float("inf")
-    met_lat = bool(latency_ms <= target_lat)
-
-    # 7. 写 measure_report.json（非契约强制，但便于 agent 节点 debug）
+    # 5. 写 measure_report.json（debug 用）。
     report = {
         "student_onnx": student_onnx,
         "student_model_path": os.path.abspath(args.student_model_path),
         "student_ckpt": os.path.abspath(args.student_ckpt) if args.student_ckpt else "",
+        "build_cfg": build_kwargs,
         "latency_ms": latency_ms,
+        "latency_skipped": skip_latency,
         "student_accuracy": student_acc,
         "student_accuracy_kind": student_kind,
-        "teacher_accuracy": teacher_acc,
-        "teacher_accuracy_kind": teacher_kind,
-        "db_gap": db_gap,
-        "db_gap_confidence": gap_conf,
-        "db_gap_deferred": not eval_provided,  # P7：短训 latency-only 模式标 deferred
-        "accuracy_gap_db_threshold": accuracy_gap_db,
-        "target_latency_ms": target_lat,
+        "accuracy_kind_used": used_kind,
+        "accuracy_baseline": args.accuracy_baseline,
+        "accuracy_confidence": acc_conf,
+        "target_latency_ms": args.target_latency_ms,
         "met_accuracy": met_acc,
         "met_latency": met_lat,
     }
@@ -331,47 +300,45 @@ def measure_student(args) -> dict:
         "measure_report": report_path,
         "latency_ms": latency_ms,
         "student_accuracy": student_acc,
-        "db_gap": db_gap,
-        "db_gap_confidence": gap_conf,
+        "student_accuracy_kind": used_kind,
+        "accuracy_confidence": acc_conf,
         "met_accuracy": met_acc,
         "met_latency": met_lat,
     }
 
 
-def _main() -> int:
-    p = argparse.ArgumentParser(
-        description="measure_student 确定性后端（契约 §4）"
+def _compute_db_gap(*args, **kwargs):  # noqa: D401
+    """已删（HI-8）：teacher-relative dB gap legacy 路径移除。新设计用绝对精度基线。"""
+    raise NotImplementedError(
+        "teacher-relative dB gap 已移除（HI-8）；新设计用 --accuracy_baseline 绝对基线对比"
     )
+
+
+def _main() -> int:
+    p = argparse.ArgumentParser(description="KD-NAS student 精度/时延测量（确定性后端）")
     p.add_argument("--student_model_path", required=True)
-    p.add_argument("--student_ckpt", default="", help="可选（latency 由 ONNX 决定）")
+    p.add_argument("--student_ckpt", default="", help="可选；eval_command 自行加载")
     p.add_argument("--build_fn", required=True)
-    p.add_argument("--dummy_input", required=True)
-    p.add_argument("--eval_command", default="",
-                   help="可选：用户 eval 脚本 shell 命令（自行加载 ckpt）；空则用 --eval_dataset")
+    p.add_argument("--build_cfg", default="", help="JSON：传给 build_fn 的 kwargs（调参后 cfg）")
+    p.add_argument("--dummy_input", default="",
+                   help="JSON I/O 维度（用户指定）；--skip_latency 时可省")
+    p.add_argument("--eval_command", default="", help="用户 eval 脚本 shell 命令")
     p.add_argument("--eval_dataset", default="",
-                   help="可选：.pt 文件含 {'x':tensor,'y':tensor}，内部算 MSE（自包含，推荐用于测试/无 eval_command 时）")
-    p.add_argument("--teacher_meta", required=True, help="teacher_meta.json 路径")
+                   help=".pt 含 {'x','y'}，内部算 MSE（测试/无 eval_command 时）")
+    p.add_argument("--accuracy_baseline", type=float, default=None,
+                   help="用户提供的绝对精度基线（新设计主路径）")
+    p.add_argument("--accuracy_baseline_kind", default="",
+                   help="锁方向 + 校验：nmse/mse/ber(越低越好) | snr/acc(越高越好)")
     p.add_argument("--output_dir", required=True)
     p.add_argument("--opset", type=int, default=17)
-    p.add_argument("--latency_provider", required=True,
-                   help="path::func，如 .../latency_onnxrt.py::measure")
-    p.add_argument("--accuracy_gap_db", type=float, default=None,
-                   help="判定 met_accuracy 的 dB 阈值（默认 0.5）")
-    p.add_argument("--target_latency_ms", type=float, default=None,
-                   help="latency 目标；缺省用 teacher_latency_ms")
+    p.add_argument("--latency_provider", default="",
+                   help="path::func；--skip_latency 时可省")
+    p.add_argument("--target_latency_ms", type=float, default=None, help="latency 目标")
     p.add_argument("--project_root", default=".", help="eval_command 的 cwd")
-    p.add_argument(
-        "--device",
-        default="auto",
-        choices=["auto", "cuda", "npu", "cpu"],
-        help="ONNX 导出 + latency 测量设备（P7；默认 auto，与 latency_onnxrt 一致）",
-    )
-    p.add_argument(
-        "--seed",
-        type=int,
-        default=0,
-        help="复现种子（默认 0）",
-    )
+    p.add_argument("--skip_latency", action="store_true",
+                   help="跳过 ONNX 导出 + latency 测量（distill 复用 selector latency 时用）")
+    p.add_argument("--device", default="auto", choices=["auto", "cuda", "npu", "cpu"])
+    p.add_argument("--seed", type=int, default=0, help="复现种子（ONNX 导出用）")
     args = p.parse_args()
 
     try:
@@ -383,10 +350,11 @@ def _main() -> int:
 
     print(f"STUDENT_LATENCY_MS: {r['latency_ms']:.4f}")
     print(f"STUDENT_ACCURACY: {r['student_accuracy']}")
-    print(f"STUDENT_DB_GAP: {r['db_gap']}")
+    print(f"STUDENT_ACCURACY_KIND: {r['student_accuracy_kind']}")
     print(f"MET_ACCURACY: {str(r['met_accuracy']).lower()}")
     print(f"MET_LATENCY: {str(r['met_latency']).lower()}")
     print(f"STUDENT_ONNX: {r['student_onnx']}")
+    print(f"ACCURACY_CONFIDENCE: {r['accuracy_confidence']}")
     return 0
 
 

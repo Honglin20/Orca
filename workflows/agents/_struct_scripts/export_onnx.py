@@ -152,8 +152,14 @@ def export_onnx(
     device: str = "auto",
     no_external_data: bool = True,
     seed: int = 0,
+    build_kwargs: dict[str, Any] | None = None,
 ) -> str:
-    """导出 ONNX，返回绝对路径。任何失败 raise（caller fail loud）。"""
+    """导出 ONNX，返回绝对路径。任何失败 raise（caller fail loud）。
+
+    ``build_kwargs``：传给 ``build_fn`` 的关键字参数（KD-NAS latency 调参时用非默认 cfg
+    实例化模型）。``None``/空 → ``factory()``（零参，向后兼容 struct 路径）。
+    dummy_input 维度由调用方透传（用户指定），本函数**不**回退任何硬编码 shape。
+    """
     import torch
 
     torch.manual_seed(seed)
@@ -185,7 +191,7 @@ def export_onnx(
         raise TypeError(f"{module_name}.{build_fn} 不可调用（{type(factory)}）")
 
     # 实例化模型 + 物化 dummy 输入。
-    model = factory()
+    model = factory(**build_kwargs) if build_kwargs else factory()
     if not isinstance(model, torch.nn.Module):
         raise TypeError(
             f"{build_fn}() 返回 {type(model).__name__}，期望 torch.nn.Module"
@@ -282,7 +288,24 @@ def _main() -> int:
         default=0,
         help="dummy 输入随机种子（默认 0，保复现）",
     )
+    parser.add_argument(
+        "--build_cfg",
+        default="",
+        help='JSON 字符串：传给 build_fn 的关键字参数（KD-NAS latency 调参用非默认 cfg）；空 → 零参',
+    )
     args = parser.parse_args()
+
+    build_cfg_raw = (args.build_cfg or "").strip()
+    build_kwargs: dict[str, Any] | None = None
+    if build_cfg_raw:
+        try:
+            build_kwargs = json.loads(build_cfg_raw)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"--build_cfg 非合法 JSON：{e}") from e
+        if not isinstance(build_kwargs, dict):
+            raise ValueError(
+                f"--build_cfg 必须是 JSON object（得到 {type(build_kwargs).__name__}）"
+            )
 
     try:
         onnx_path = export_onnx(
@@ -294,6 +317,7 @@ def _main() -> int:
             device=args.device,
             no_external_data=args.no_external_data,
             seed=args.seed,
+            build_kwargs=build_kwargs,
         )
     except Exception as e:
         print(f"[export_onnx] FAIL: {type(e).__name__}: {e}", file=sys.stderr)

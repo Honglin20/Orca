@@ -223,20 +223,33 @@ def _build_proxy_batch(spec_raw: str, dummy_input_raw: str):
 
 
 def _dummy_shape(dummy_input_raw: str) -> list[int]:
-    """从 dummy_input JSON 抽 shape（fallback [1,4,48,64,1]）。"""
+    """从 dummy_input JSON 抽 shape。**禁硬编码回退**（BLK-4）：缺失/非法 → raise。
+
+    dummy_input 维度由用户指定（真实模型 I/O）；硬编码 [1,4,48,64,1] 回退会让导出/测量
+    基于错误 shape 静默进行。缺失或无合法 shape → fail loud。
+    """
     if not dummy_input_raw or not dummy_input_raw.strip():
-        return [1, 4, 48, 64, 1]
+        raise ValueError("dummy_input 缺失（禁硬编码 shape 回退；用户须声明真实 I/O 维度）")
     if os.path.isfile(dummy_input_raw):
         text = Path(dummy_input_raw).read_text(encoding="utf-8")
     else:
         text = dummy_input_raw
     try:
         d = json.loads(text)
-        if isinstance(d, dict) and isinstance(d.get("shape"), list):
+        if isinstance(d, dict) and isinstance(d.get("shape"), list) and d["shape"]:
             return list(d["shape"])
     except json.JSONDecodeError:
         pass
-    return [1, 4, 48, 64, 1]
+    raise ValueError(f"dummy_input 无合法 shape（禁硬编码回退）；原文：{text[:200]!r}")
+
+
+def _sha256_file(path: str) -> str:
+    """文件字节 sha256（teacher_model / teacher_ckpt 身份校验，HI-3）。"""
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        h.update(f.read())
+    return h.hexdigest()
 
 
 # ── eval_command accuracy 解析 ─────────────────────────────────────────────────
@@ -387,6 +400,11 @@ def teacher_setup(args) -> dict:
             )
 
     # 7. teacher_cache.pt：state_dict + hook_names + 重建路径 + 元数据
+    # HI-3：身份哈希（setup 幂等护栏用：teacher_model.py 改了 / ckpt 换了 → 重训，不静默复用）。
+    teacher_model_hash = _sha256_file(os.path.abspath(args.teacher_model_path))
+    ckpt_abs = os.path.abspath(args.teacher_ckpt) if args.teacher_ckpt else ""
+    teacher_ckpt_sha256 = _sha256_file(ckpt_abs) if (ckpt_abs and os.path.isfile(ckpt_abs)) else ""
+
     teacher_cache_path = os.path.join(out_dir, "teacher_cache.pt")
     cache_payload = {
         # TeacherCache.load 契约键（wrapper.py 读取）
@@ -403,6 +421,8 @@ def teacher_setup(args) -> dict:
         "accuracy": accuracy,
         "accuracy_kind": kind,
         "accuracy_confidence": confidence,
+        "teacher_model_hash": teacher_model_hash,
+        "teacher_ckpt_sha256": teacher_ckpt_sha256,
         "_format_note": "TeacherCache.load 读 state_dict+dummy_input_shape+teacher_model_path+hook_names 重建 teacher",
     }
     torch.save(cache_payload, teacher_cache_path)
@@ -423,6 +443,8 @@ def teacher_setup(args) -> dict:
         "build_fn": args.build_fn,
         "teacher_model_path": os.path.abspath(args.teacher_model_path),
         "teacher_ckpt": os.path.abspath(args.teacher_ckpt) if args.teacher_ckpt else "",
+        "teacher_model_hash": teacher_model_hash,
+        "teacher_ckpt_sha256": teacher_ckpt_sha256,
         "opset": args.opset,
         "device": args.device,
         "proxy_dataset_spec_used": spec_used,
@@ -454,8 +476,8 @@ def _main() -> int:
     p.add_argument("--build_fn", required=True, help="model.py 内 build 函数名")
     p.add_argument("--dummy_input", required=True,
                    help='JSON 或文件：{"shape":[B,4,48,64,1],"dtype":"float32"}')
-    p.add_argument("--eval_command", required=True,
-                   help="测 teacher 精度的 shell 命令")
+    p.add_argument("--eval_command", default="",
+                   help="可选：测 teacher 精度的 shell 命令（新设计 teacher 仅 KD 源，精度基线用户另给）")
     p.add_argument("--proxy_dataset_spec", default="",
                    help="JSON：proxy 数据规格；空→随机正态")
     p.add_argument("--output_dir", required=True)

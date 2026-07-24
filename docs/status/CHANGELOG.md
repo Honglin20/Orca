@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-24] feat(workflow): KD-NAS 重构为 Receiver KB 驱动的确定性蒸馏 sweep
+
+把 `kd-nas` 从「搜索」workflow（Phase1 sweep + Phase2 LLM 变异 + finalize + proxy_mse）改成**确定性蒸馏 sweep**：DAG `setup→selector→distill→recorder→…→$end`（砍 5 节点）；model8 `.py` 变体放 `knowledge_base/families/receiver/`，确定性遍历；teacher(10层 t1/t2) 写死 repo 仅作 KD 软标签源；精度基线 = 用户绝对值（`accuracy_baseline`）；时延超阈→`tune_latency` 最小缩量调参（刚跨 target 即停）；完整训练（非 proxy）+ 每-epoch `render_chart` 实时图；跨 run 复用（稳定 `kd_artifacts_dir` + 哈希校验 + ledger-driven 跳过，无引擎 `--reuse`）。新脚本 `pick_variant/tune_latency/distill_dispatch/kd_common` + `teacher_model`；改 `measure_student`(绝对基线)/`teacher_setup`(瘦身+hash)/`train_adapter_template`(路径加载+实时图)/`viz_kd`(新 schema)/`export_onnx`(`build_kwargs`)；`export_onnx.build_kwargs` 是所有 latency 调优的前提。spec-review 17 blocker + HIGH/SR/MED findings 全 fold（BLK-1/2/3/4/5/6/7/8/9/10/11/12/13/14/16/17 + HI-1..15 + SR1/2/3）。`latency_provider` 必填无默认 + dummy_input 用户指定（禁硬编码 shape）+ FAIL_latency 确定性门 + 单写者锁。测试：`test_struct_kd_p7` kd 部分重写 + 新 `test_kd_redesign`（BLK-8 最小缩量 / done 谓词边沿 / HI-11 field∈schema）；compile+workflows+e2e 195 全绿。Commit: *未提交*（待 code-reviewer 回填 + 用户确认）。详见 [release note](../releases/2026-07-24-kd-nas-distill-redesign.md) + [计划](../plans/2026-07-24-kd-nas-distill-redesign.md)。
+
 ## [2026-07-24] feat(cli): `tars close` 命令（关闭本地 orca web server，与 `tars open` 对称）
 
 补齐 `tars open` 的对称命令：`POST /api/shutdown`（loopback-only，跨平台优雅，触发 uvicorn lifespan）为主，PID 兜底（POSIX SIGTERM→SIGKILL / Windows taskkill /F）为辅（仅 404 老版无端点 server）。B1 双 wire（`run_server` + `_serve_and_run_inprocess` 两处都暴露 uvicorn 句柄）；B2 `--all` 用指纹过滤不误杀别用户 server；B3 不清 registry 靠 stale 自愈；B4 PID 兜底返 False 后必 re-probe（并发 winner 语义）。Windows PID 兜底恒 force-kill（无 SIGTERM），kill 前 stderr warn tape 可能未 flush。31 新测（web 8 + cli 23，win32-only warn 1 skip）+ 相邻回归 143 passed / 1 pre-existing fail（`run_manager.py:37` 预存 web→cli 违反，独立 issue）。code-reviewer：Implementation **pass** / Test coverage **conditional-pass → 已转 pass**（4 🟡 全修：Windows 空 parse fail loud + 平台文案 + AC5 registry 守门 + AC1 tape 直接验证；3 🟢 修 1 跳 2）。Commit: `59d73dd`。详见 [release note](../releases/2026-07-24-tars-close-command.md)。

@@ -60,3 +60,6 @@ demo_run/
 demo_target/
 llm_artifacts/
 quant_params/
+
+# KD-NAS 蒸馏 sweep 跨 run 稳定 artifact 根（teacher_cache/ledger/ckpts/...，可重生成，不入库）。
+kd-nas-artifacts/

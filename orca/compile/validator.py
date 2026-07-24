@@ -120,6 +120,7 @@ def validate_workflow(wf: Workflow) -> list[str]:
     """全部语义校验。返回 warnings；有 errors 抛 ConfigurationError（SPEC §4）。"""
     result = ValidationResult()
     _check_workflow_name_reserved(wf, result)  # §2.2 保留字黑名单（先于一切）
+    _check_required_inputs_no_default(wf, result)  # 必填 input 不得带 default（KD-NAS latency_provider 铁律）
     _check_names_unique(wf, result)            # ①（含 parallel 组名）
     _check_entry_exists(wf, result)            # ②
     _check_entry_is_node(wf, result)           # ⑬ entry 非 parallel 组
@@ -154,6 +155,24 @@ def _check_workflow_name_reserved(wf: Workflow, result: ValidationResult) -> Non
             f"请改名以保 `orca <wf>` 语法糖无冲突。保留字名单："
             f"{sorted(RESERVED_WF_NAMES)}"
         )
+
+
+def _check_required_inputs_no_default(wf: Workflow, result: ValidationResult) -> None:
+    """必填 input 不应同时带 default（逻辑矛盾 + 静默失效风险）—— warning（非 error）。
+
+    ``InputDef.required`` 默认 True，故「带 default 但省略 required」的常见可选 input 也会
+    落入此模式；为避免误伤生态里大量此类 input，本检查降为 **warning**（``tars validate`` 可见，
+    不阻断）。铁律性必填 input（如 KD-NAS 的 ``latency_provider``）的真正护栏是：
+      (a) YAML 显式 ``required: true`` 且**不给 default``（KD-NAS 已如此）；
+      (b) 运行时 ``orchestrator.py`` 必填缺失 + 无 default → fail loud。
+    本 warning 只为在编译期暴露「required 却给了 default」的配置异味（BLK-10 可见性目标）。
+    """
+    for name, idef in wf.inputs.items():
+        if idef.required and idef.default is not None:
+            result.add_warning(
+                f"input '{name}' 同时声明了 required: true 与 default（矛盾：default 会使 "
+                f"required 失效；铁律性必填 input 不要给 default）"
+            )
 
 
 def _top_level_names(wf: Workflow) -> list[str]:
