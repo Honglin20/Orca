@@ -6,21 +6,19 @@
 
 ## 当前任务（2026-07-25）
 
-### 🚧 KD-NAS v2 重构：setup → gate → train DAG —— 实现完成，待真机 E2E
+### ✅ KD-NAS E2E 真 bug 修复 + reviewer findings 全闭环 —— 完成
 
-**状态**：DAG 重构全完成。`setup`（扩展 step 8 GPU 预检）→ `gate`（新 `gate_all.py` 串行遍历全部变体，FAIL_latency 当场增量落账，ACCEPTED 写 `gate_manifest.json`）→ `train`（新 `train_pool.py` 吃 manifest 做有界并发蒸馏：VRAM 再校验 + round-robin 绑卡 + `as_completed` 增量账本）→ `$end`。删 `kd-selector`/`kd-distill`/`kd-recorder` agent 目录（脚本全保留被复用）。`train_variants_parallel.py` → `train_pool.py`（只做训练阶段）。
+**状态**：E2E 真跑 `tars run workflows/kd-nas.yaml --background`（demo inputs）暴露的真 bug 与 reviewer 6 项 finding 全修复。🔴BUG-2 `bg_runner` 用错 binary（`orca`→`tars`）+ 🔴BUG-1 三个 agent.md 被 deepseek-v4-flash 当 spec 审查不执行（重写：强执行指令 + ❌ 红线 + JSON schema 前置 + bash 标「执行：」）+ 🟡BUG-3 `VARIANTS_TOTAL:0`（ORCA_KB_DIR 重置 → setup 探测 `receiver_dir` 经 output 传给 gate/train）+ 🟡R4 setup step5/6 LLM grep 违反 rule 5（新增 `setup_helpers.py` 确定性后端）+ 🟡R1 NPU VRAM 沉默估算（改 fail-soft 不估算）+ 🟡R2 viz_kd rc!=0 沉默（改 stderr WARN）+ 🟡R3 空 KB 沉默（改 stderr WARN）。测试 +24 个，全 139 passed。
 
-**验证**：✅ `tars validate` 过；✅ `pytest tests/workflows/` **258 passed**（含 v2 gate_all/train_pool/gpu_probe 单测 + wf.outputs 在 gate→$end 路径渲染回归 + worker exception handler 字段齐全）；✅ code-reviewer 🔴（outputs 渲染崩）+ 关键 🟡（CONTRACTS cfg_hash / gpu_probe teacher_cache 政策 / worker handler 测试 / DRY 抽 helper）全修。✅ **E2E 靶子已就绪**：`examples/kd-nas-demo/`（commit `02b927b`）逐字满足 inputs 契约，setup/gate/train 三节点确定性后端脚本（teacher_setup / tune_latency / train_adapter[OFD+EMA] / gpu_probe / measure_student）已单跑通。⏳ 真机 orca E2E（opencode+deepseek-v4-flash，GPU 机）待后续 test-agent 用此 demo 执行。
+**E2E 判据（BUG-1 关键）**：4/4 变体 SUCCESS（demo_tiny_alt/cnn_dil/cnn_pw/tf，latency 0.35~1.11ms < 5ms target，NMSE 1.07~1.20 < 1.5 baseline），9m40s 完成。**agent 真执行 bash + emit 合法 JSON**（不再写验证报告）；step2 偶发 nested-quote copy 错时自纠正切 heredoc。
 
-**关键决策**：setup = 并发数唯一权威（gpu_probe 算）；确定性 gate 不加 LLM adjust 循环；时延测量必串行（gate 串行，train `--skip_latency` 复用 HI-1）；`outputs:` 不引 `train.output.X`（in-session step.py 不支持 per-route output，gate→$end 时 train 跳过 → outputs 只暴露 setup+gate 字段）。
-
-详见 [release note](../releases/2026-07-25-kd-nas-gate-train-dag.md) + [计划](../plans/2026-07-25-kd-nas-parallel-agent-driven.md)。
+详见 [release note](../releases/2026-07-25-kd-nas-e2e-bug-fixes.md) + [CHANGELOG](CHANGELOG.md)。Commit: `902457d`。
 
 ---
 
 ## 必读文件（开工前按需）
 
-- [v2 release note](../releases/2026-07-25-kd-nas-gate-train-dag.md) —— setup→gate→train 完整改动
+- [E2E bug fixes release note](../releases/2026-07-25-kd-nas-e2e-bug-fixes.md)
 - [CONTRACTS.md](../../workflows/agents/_kd_scripts/CONTRACTS.md) —— v2 契约（含 gate/train I/O + ledger §5）
 - [CHANGELOG](CHANGELOG.md)
 
