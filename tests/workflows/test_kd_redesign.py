@@ -54,6 +54,30 @@ def test_teacher_ten_blocks_alternating():
     assert t.feature_hook_names()  # KD feature 对齐
 
 
+# ── 回归：student feature_hook_names 恒与 teacher 等长 ─────────────────────────
+# _model8_blocks.feature_hook_names 在 num_blocks=1 时曾返回 1 个 hook，与固定
+# 2-hook 的 teacher 长度不等 → compose.prepare 对 OFD/FitNets/RKD raise length-mismatch。
+# 修复后 student 恒返回 2 个（n=1 时第二个重复 main.0，单 block 无中间层）。
+
+def test_student_feature_hooks_match_teacher_length():
+    for m in [n for n in sys.modules if n in ("_model8_blocks", "spt_t1", "teacher_model")]:
+        del sys.modules[m]
+    sys.path.insert(0, str(KD))
+    sys.path.insert(0, str(KBDIR))
+    from teacher_model import build_model as build_teacher
+    from spt_t1 import build_model as build_student
+
+    t_hooks = build_teacher().feature_hook_names()
+    for n_blocks in (1, 2, 3):
+        s = build_student(num_blocks=n_blocks)
+        hooks = s.feature_hook_names()
+        assert len(hooks) == len(t_hooks), (
+            f"num_blocks={n_blocks}: student {len(hooks)} hooks ≠ teacher {len(t_hooks)}; "
+            f"OFD/FitNets/RKD 的 prepare 会 raise length-mismatch"
+        )
+        assert "main.0" in hooks
+
+
 # ── BLK-17：distill_dispatch gate ──────────────────────────────────────────────
 
 

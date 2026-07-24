@@ -38,8 +38,19 @@ def build_model(**cfg) -> nn.Module: ...   # 零参用 KNOBS.default；cfg 覆�
 
 ## seed 变体
 
-- `spt_t1.py` —— 全 t1（symbol 轴 attention）。
+按 mixer / 空间结构维度分布（**昇腾导向**：禁 DW separable，见 KB `wireless_receiver/failures.md` #1；
+全 CNN / U-Net 用标准 conv 或 pointwise，全 Transformer 边界层 pointwise 砍 TransData）：
+
+- `spt_t1.py` —— 全 t1（symbol 轴 attention）。基础 Transformer 变体。
 - `spt_alt.py` —— t1/t2 交替（symbol/subcarrier 轴 attention 轮换）。
+- `spt_cnn_dilated.py` —— 全 CNN · DeepRx 风格 dilated 标准 conv（hourglass {1,2,4,8}，局部稀疏极）。
+- `spt_cnn_pointwise.py` —— 全 CNN · ConvNeXt pointwise inverted-bottleneck（全局 pointwise 极）。
+- `spt_puretf.py` —— 全 Transformer · 选择性 pointwise（p_lyr/proj k=1、cv1/cv2 保 k=3、M9 soft-threshold 补偿）。
+- `spt_unet.py` —— U-Net 多尺度（subcarrier 轴 MaxPool↓/ConvTranspose↑ + skip concat）。
+- `spt_2d.py` —— 2D 时频 axial attention（symbol 轴 + subcarrier 轴 MHA 分解）。
+
+> 全 CNN 三极：`spt_cnn_dilated`（局部稀疏）/ `spt_cnn_pointwise`（全局 pointwise）/ 基础 block 的
+> 局部密集（D20 大核，待加）。U-Net 与 flat 结构 cost-accuracy 曲线不同，给 sweep 补多尺度维度。
 
 用户后续往本目录加变体 `.py` 即可，workflow 自动纳入 sweep（无需改 workflow / 索引）。
 

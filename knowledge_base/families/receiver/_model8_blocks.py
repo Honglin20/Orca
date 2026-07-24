@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class SignalAttention1D(nn.Module):
@@ -132,10 +133,16 @@ class SignalProcessingTransformer(nn.Module):
                                kernel_size=3, padding=1, bias=bias_flag)
 
     def feature_hook_names(self) -> list[str]:
-        """OFD/FitNets 特征对齐 hook 名（≥1）。取首层与中间层 block。"""
+        """OFD/FitNets 特征对齐 hook 名（**恒为 2 个**，与 teacher 等长）。
+
+        取首层 + 中间层 block。``num_blocks=1`` 时无中间层，第二个 hook 重复
+        ``main.0``——保持与 teacher（固定 2 hook）等长，否则 ``kd.compose.prepare``
+        会因 student/teacher 特征数不等 raise（OFD/FitNets/RKD 要求等长）。
+        """
         n = len(self.block_mtypes)
         mid = max(1, n // 2) if n > 1 else 0
-        return ["main.0", f"main.{mid}"] if n > 1 else ["main.0"]
+        second = f"main.{mid}" if n > 1 else "main.0"
+        return ["main.0", second]
 
     def forward(self, inp: torch.Tensor):
         if inp.dim() == 5 and inp.shape[-1] == 1:
@@ -155,3 +162,66 @@ class SignalProcessingTransformer(nn.Module):
         x = x * alpha
         x = torch.unsqueeze(x, dim=-1)
         return x
+
+
+class DilatedResBlock(nn.Module):
+    """DeepRx 风格 dilated conv 残差块（**标准 Conv1d，禁 DW**——DW 在昇腾饿死 Cube）。
+
+    hourglass dilation {1,2,4,8} 串联、kernel=3，等效感受野 RF=31（覆盖 ~64% 子载波），
+    参数量与单层 3-tap 相同。输入输出同形 ``[B, num_symbols, embed_dim, num_subcarriers]``，
+    内部 reshape 到 ``[B*num_symbols, embed_dim, num_subcarriers]`` 走 Conv1d。
+    padding=d 保长度不变，残差可直接加。``num_symbols``/``num_subcarriers`` 仅 introspection
+    用，forward 靠输入张量 shape 推断（故 U-Net bottleneck 可在 ``F//2`` 上复用本块）。
+    """
+
+    def __init__(self, embed_dim, num_symbols, num_subcarriers, dilations=(1, 2, 4, 8)):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_symbols = num_symbols
+        self.num_subcarriers = num_subcarriers
+        self.layers = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv1d(embed_dim, embed_dim, kernel_size=3, padding=d, dilation=d, bias=False),
+                nn.BatchNorm1d(embed_dim),
+                nn.ReLU(inplace=True),
+            )
+            for d in dilations
+        ])
+
+    def forward(self, x):
+        # x: [B, num_symbols, embed_dim, num_subcarriers]
+        B, S, C, F_ = x.shape
+        h = x.reshape(B * S, C, F_)
+        for layer in self.layers:
+            h = layer(h)
+        h = h.reshape(B, S, C, F_)
+        return h + x
+
+
+class DelayDomainSoftThreshold(nn.Module):
+    """沿频率轴 FFT → soft-threshold(τ) → IFFT，补 pointwise 化丢失的频率选择性。
+
+    物理先验：多径信道在 delay 域稀疏（ℓ1），soft-threshold 显式压小径噪声、保大径相位。
+    ``τ→0`` 时早退 identity（fail-forward：训练起步不扰动、部署可关、不增推理开销）。
+    输入输出 ``[B, num_symbols, embed_dim, num_subcarriers]``。
+
+    ⚠️ 硬件：``τ≠0`` 时走 ``torch.fft`` 路径——GPU 训练 OK；若训练迁昇腾且 ``torch_npu``
+    不支持 FFT（complex dtype 可能落慢路径），应冻结 ``tau.requires_grad_(False)`` 使 ``τ≡0``
+    恒走 identity。部署测 latency 时 ``τ`` 收敛≈0 也不跑 FFT。
+    """
+
+    def __init__(self, embed_dim, init_tau=0.0):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.tau = nn.Parameter(torch.tensor(float(init_tau)))
+
+    def forward(self, x):
+        if self.tau.abs() < 1e-8:
+            return x
+        x_f = torch.fft.rfft(x.float(), dim=-1)
+        mag = torch.abs(x_f)
+        phase = torch.angle(x_f)
+        mag_thr = F.relu(mag - self.tau)
+        x_f_thr = mag_thr * torch.exp(1j * phase)
+        x_t = torch.fft.irfft(x_f_thr, n=x.shape[-1], dim=-1)
+        return x_t.to(x.dtype)
