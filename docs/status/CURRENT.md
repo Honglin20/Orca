@@ -6,6 +6,12 @@
 
 ## 当前任务（2026-07-24）
 
+### ✅ in-session bootstrap 注册项目（修复 TARS run 在 web 不可见）—— 已提交
+
+**状态**：根因 = §13 注册表化后 in-session `bootstrap` 漏调 `register_project`（`orca run`/`web start_run`/`tars project rebuild` 都有，独 in-session 漏）→ TARS run 在 web 列表/详情不可见 + 远程 `~/.orca/projects.json` 不生成。修复：`orca/iface/in_session/cli.py` 加 `_register_current_project()` helper（detect+register，broad try/except fail-open+warn），在 bootstrap post-lock 段调用。2 新测绿；`tests/iface/in_session/ + tests/runtime/test_project.py` 494 passed / 2 pre-existing fail（无关）。code-reviewer 0 🔴 / 1 🟡采纳 / 2 🟢保持。详见 [release note](../releases/2026-07-24-in-session-bootstrap-register-project.md)。
+
+---
+
 ### ✅ Workflow 可视化审计修复（P1×5 + P2×7）—— 已提交
 
 **状态**：两轮审计 12 项全闭环。P1（death-penalty latency 保留 / C5-live 方向动态化 /

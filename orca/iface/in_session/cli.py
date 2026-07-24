@@ -557,6 +557,38 @@ def _default_rundir() -> Path:
     return _default_tape_path("__probe__").parent
 
 
+def _register_current_project() -> None:
+    """SPEC §13 D4：in-session run 注册所属项目到 ``~/.orca/projects.json``。
+
+    discovery（列表 ``GET /api/runs?scope=all``）+ 懒挂载（详情 ``ensure_attached``）
+    都依赖注册表；in-session bootstrap 此前漏注册 → TARS 启动的 run 在 web 列表/详情
+    不可见（项目永不在注册表 → discovery 扫不到 + resolve_run_path 0 命中 404）。
+    与 ``orca run``（commands.py POST project_path → server start_run register）/
+    ``tars project rebuild`` 同语义（``detect_project_root`` → ``register_project``）。
+
+    依赖方向合法：``iface/in_session → orca/runtime``（中立层，仅 stdlib + schema）。
+
+    fail-open：注册失败（项目根无 ``workflows/`` / ``.orca/config.json`` 等）只 warn 不
+    阻断 bootstrap——run 照常，仅 web 可见性退化（用户可 ``tars project rebuild`` 手动
+    补登记）。与既有 daemon spawn / artifacts mkdir 失败同 fail-open 语义（web 可见性是
+    便利层，注册失败不应让 run 跑不起来）。
+    """
+    try:
+        from orca.runtime import detect_project_root, register_project
+
+        register_project(detect_project_root())
+    except Exception:  # noqa: BLE001 — 故意 broad：register_project 可抛
+        # ValueError（无 workflows/ marker，M-16）/ RegistryCorruptError（继承
+        # RuntimeError，注册表坏）/ OSError / ModuleNotFoundError，**任一**都不应阻断
+        # run——web 可见性是便利层，注册失败只降级（用户可 ``tars project rebuild`` 补登记）。
+        # 与 daemon spawn 的 ``except OSError`` 相比本处覆盖面更广，因 register 的失败面更广。
+        logger.warning(
+            "bootstrap: 注册项目失败，run 仍可跑但 web 列表/详情不可见"
+            "（可 `tars project rebuild` 手动补登记）",
+            exc_info=True,
+        )
+
+
 def _bootstrap_open_web_enabled(flag: bool | None) -> bool:
     """解析 bootstrap 自动开 web 的有效设置（**flag > env > 默认开**）。
 
@@ -1153,6 +1185,10 @@ def bootstrap(
     assert run_id, "O2 invariant: post-lock code requires run_id set inside lock"
     assert tape_path is not None, "O2 invariant: post-lock code requires tape_path set"
     assert result is not None, "O2 invariant: post-lock code requires result set"
+
+    # SPEC §13 D4：注册本项目到 ~/.orca/projects.json——web 列表 discovery + 详情懒挂载
+    # 都依赖注册表，in-session run 不注册则在 web 不可见。fail-open（见 helper docstring）。
+    _register_current_project()
 
     # ── in-session chart ingestor 守护 + env 文件（phase-13 §3 in-session 衔接）──────────
     # bootstrap 后子代理执行发生在宿主 session 时间窗；detach 起守护让它跨 bootstrap CLI

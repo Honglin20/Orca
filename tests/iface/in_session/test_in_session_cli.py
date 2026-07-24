@@ -109,6 +109,54 @@ def test_bootstrap_emits_ws_ns_and_writes_marker(cwd_tmp, wf_path):
     assert len(marker_files) == 1
 
 
+def test_bootstrap_registers_project_for_web_discovery(cwd_tmp, wf_path, monkeypatch):
+    """SPEC §13 D4：in-session bootstrap 注册所属项目 → web discovery/懒挂载可见。
+
+    回归守门：bootstrap 此前漏 ``register_project`` → TARS 启动的 run 在 web 列表/详情
+    不可见（远程 ``~/.orca/projects.json`` 根本不生成）。
+    """
+    from orca.runtime import list_registered
+
+    # 隔离 ORCA_HOME（不污染真实 ~/.orca/projects.json）+ 禁 auto-open-web（避免游离子进程）。
+    orca_home = cwd_tmp / ".orca_home"
+    monkeypatch.setenv("ORCA_HOME", str(orca_home))
+    monkeypatch.setenv("ORCA_BOOTSTRAP_OPEN_WEB", "0")
+    # register_project M-16 要求项目根含 workflows/ 或 .orca/config.json；
+    # ORCA_PROJECT_ROOT 钉死 detect_project_root 到 cwd_tmp（否则向上走 git root）。
+    (cwd_tmp / "workflows").mkdir()
+    monkeypatch.setenv("ORCA_PROJECT_ROOT", str(cwd_tmp))
+
+    runner = CliRunner()
+    _bootstrap(runner, wf_path)
+
+    expected = str(cwd_tmp.resolve())
+    registered = list_registered()
+    assert any(meta.get("path") == expected for meta in registered.values()), (
+        f"bootstrap 未注册项目 {expected}：{registered}"
+    )
+    # 注册表文件已落盘到隔离 ORCA_HOME（web discovery 读此文件枚举 run）。
+    assert (orca_home / "projects.json").is_file()
+
+
+def test_register_current_project_fail_open(tmp_path, monkeypatch):
+    """注册失败（项目根无 workflows/ marker）只 warn 不抛——run 照常（web 可见性退化）。
+
+    与 daemon spawn / artifacts mkdir 失败同 fail-open 语义。
+    """
+    from orca.iface.in_session.cli import _register_current_project
+    from orca.runtime import list_registered
+
+    monkeypatch.setenv("ORCA_HOME", str(tmp_path / ".orca_home"))
+    # ORCA_PROJECT_ROOT 指向无 marker 的空目录 → register_project M-16 raise ValueError。
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    monkeypatch.setenv("ORCA_PROJECT_ROOT", str(bare))
+
+    _register_current_project()  # 不应 raise（fail-open）
+
+    assert list_registered() == {}  # 注册失败 → 注册表仍空
+
+
 def test_bootstrap_duplicate_same_wf_fails_loud(cwd_tmp, wf_path):
     """v3 §7.3（m12）：同 wf 已有活跃 marker（未终态）再 bootstrap → fail loud。
 

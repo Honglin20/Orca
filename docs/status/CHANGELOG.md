@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-24] fix(in-session): bootstrap 注册项目（修复 TARS run 在 web 列表/详情不可见）
+
+§13「单端口+多 Run 监控」把 web 发现（`discover_runs`）与详情懒挂载（`resolve_run_path`）改成全依赖注册表 `~/.orca/projects.json`，但 in-session `bootstrap`（TARS 入口）漏调 `register_project` → TARS 启动的 run 项目永不在注册表 → 列表空 + 详情 404 + 远程 `projects.json` 不生成（用户 `tars project rebuild` 后恢复坐实根因）。修复：`orca/iface/in_session/cli.py` 加 `_register_current_project()` helper（`detect_project_root` → `register_project`，broad `try/except` fail-open + warn，与 daemon spawn 同降级语义），在 `bootstrap` post-lock 段（lock 释放后、SPEC §3 O2 临界区外）调用。依赖 `iface/in_session → orca/runtime` 合法向下。2 新测（真端到端 bootstrap 断言注册 + 落盘 / fail-open 不阻断）。`tests/iface/in_session/ + tests/runtime/test_project.py` **494 passed / 2 pre-existing fail**（`test_cli_gc_max_age_zero_rejected`、`test_skill_md_flags_subset_of_cli_help`，stash 验证无关）。code-reviewer 0 🔴 / 1 🟡（broad catch 注释显式化，已采纳）/ 2 🟢（保持）。Commit: `<填>`。详见 [release note](../releases/2026-07-24-in-session-bootstrap-register-project.md)。
+
 ## [2026-07-24] fix(workflow): 可视化审计修复（P1×5 + P2×7，0 🔴 / 2 🟡 / 5 🟢 全修）
 
 两轮审计 12 项全部闭环：P1-1 超时候选 death-penalty 保留 latency 实测（`_infeasible_result` 纯函数）/ P1-2 C5-live 轴方向动态化（`_axis_direction`）/ P1-3 bit-curve 逐层位宽图（`_load_bit_trend_layer_bits` 多形态 fail-soft）/ P1-4 cumulative-best 寻优过程图（`_cumulative_best`）/ P1-5 QAT 收敛曲线改 live 推（每 scheme 一张图）/ P2-1 struct accuracy champion trace / P2-2 kd latency candidate trace / P2-3 struct x 轴 index→round / P2-4 删除孤儿 nas-viz 目录（grep 确认零引用）/ P2-5 quant 4 脚本共享 helper 下沉到 `_common.py`（字节等价，仅 log_prefix 参数化）/ P2-6 sensitivity 业务异常 fail loud exit 3 / P2-7 candidates_evaluated 改用 len(archive_records)（字段名不变）。43 新单测（AST 切片钉真源码非手抄）+ 既有 2 测试断言更新（3→4 图）。159 workflows passed / 654 跨目录 passed。Commit: `eb78c52`。详见 [release note](../releases/2026-07-24-workflow-viz-audit-fixes.md)。
