@@ -103,7 +103,18 @@ def _help_flags(*args: str) -> set[str]:
     assert result.exit_code == 0, (
         f"`orca {' '.join(args)} --help` 异常 exit={result.exit_code}: {result.output}"
     )
-    return set(re.findall(r"--[a-zA-Z][a-zA-Z0-9_-]*", result.output))
+    # 去 ANSI：typer/Rich 即使在 CliRunner（非 tty）下也给 --help 上色并把 flag token
+    # 拆碎（``--run-id`` 跨 span 成 ``--`` + ``run`` + ``-id``），regex 直接抽会全 miss →
+    # guard 把 SKILL.md 所有真实 flag 误判为「未声明」。去色后 flag 名连续可匹配。
+    return set(re.findall(r"--[a-zA-Z][a-zA-Z0-9_-]*", _strip_ansi(result.output)))
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(s: str) -> str:
+    """去 ANSI 颜色码（typer/Rich 给 CLI 输出上色，拆碎 flag token 让 regex/子串断言失配）。"""
+    return _ANSI_RE.sub("", s)
 
 
 def test_skill_md_exists() -> None:

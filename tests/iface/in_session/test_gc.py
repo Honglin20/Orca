@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import textwrap
 import time
@@ -90,6 +91,15 @@ def _first_json_line(s: str) -> str:
         if line.startswith("{"):
             return line
     raise AssertionError(f"未找到 JSON 行：{s!r}")
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(s: str) -> str:
+    """去 ANSI 颜色码（typer/Rich 给 CLI 错误输出上色，把 ``--max-age`` 拆碎成跨 span 的
+    ``-``/``-max``/``-age``，子串断言失配；去色后连续可匹配）。"""
+    return _ANSI_RE.sub("", s)
 
 
 # ── env 注入：bootstrap 创建 artifacts/ + env 文件含 ORCA_ARTIFACTS_DIR ─────
@@ -331,7 +341,8 @@ def test_cli_gc_requires_max_age_or_keep(cwd_tmp):
     runner = CliRunner()
     r = runner.invoke(app, ["gc"])
     assert r.exit_code != 0
-    assert "max-age" in r.output or "keep" in r.output
+    out = _strip_ansi(r.output)
+    assert "max-age" in out or "keep" in out
 
 
 def test_cli_gc_invalid_max_age_unit(cwd_tmp):
@@ -423,7 +434,8 @@ def test_cli_gc_max_age_zero_rejected(cwd_tmp):
     runner = CliRunner()
     r = runner.invoke(app, ["gc", "--max-age", "0"])
     assert r.exit_code != 0
-    assert "max-age" in r.output.lower() or "positive" in r.output.lower()
+    out = _strip_ansi(r.output).lower()
+    assert "max-age" in out or "positive" in out
 
 
 # ── worktree MANIFEST 列示（best-effort，P9 闭环前不删 worktree）────────────
