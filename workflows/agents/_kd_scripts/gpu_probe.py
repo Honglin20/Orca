@@ -307,8 +307,19 @@ def _main() -> int:
 
     total_free = sum(free_per_card)
     if per_variant <= 0:
-        # max_memory_allocated 测不到（某些 NPU 后端）→ 用 free 的 1/4 作保守估
-        per_variant = max(1, total_free // 4) if total_free > 0 else 1
+        # max_memory_allocated 测不到（某些 NPU 后端 / API 缺失）→ fail-soft 但**不静默估算**：
+        # 原实现 ``per_variant = total_free // 4`` 是沉默估算驱动并发（code-reviewer R1，
+        # 破坏 fail-loud；昇腾部署相关）。改回 cpu 同款 fail-soft：PER_VARIANT_VRAM_BYTES=0 +
+        # CONCURRENCY=1 + GPU_REPORT 标 ``[probe failed]``，不估算驱动并发。
+        print(
+            "[gpu_probe] WARN: per-variant VRAM 探测失败（max_memory_allocated 返 0 / NPU 后端"
+            "不支持）→ fail-soft：PER_VARIANT_VRAM_BYTES=0 + CONCURRENCY=1，不估算驱动并发。",
+            file=sys.stderr,
+        )
+        return _emit_fail_soft(
+            "per-variant VRAM probe failed (max_memory_allocated unavailable on this backend)",
+            device_arg=args.device,
+        )
 
     concurrency = compute_concurrency(
         total_free_bytes=total_free, per_variant_bytes=per_variant,

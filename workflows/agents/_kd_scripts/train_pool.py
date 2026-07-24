@@ -326,11 +326,24 @@ def _main() -> int:
             "--env_anchor", args.per_run_artifacts_dir,
         ]
         try:
-            subprocess.run(viz_argv, capture_output=True, text=True, check=False)
+            viz_proc = subprocess.run(viz_argv, capture_output=True, text=True, check=False)
         except Exception as e:
             print(f"[train_pool] WARN: viz_kd 异常（不阻断）：{type(e).__name__}: {e}", file=sys.stderr)
+        else:
+            # viz 失败不阻断 sweep（viz 是 sidecar），但**不静默吞**（code-reviewer R2）：
+            # 把 stderr 尾部 300 字打出来让用户能定位「图为什么没推」。
+            if viz_proc.returncode != 0:
+                print(
+                    f"[train_pool] WARN: viz_kd rc={viz_proc.returncode}（不阻断）："
+                    f"{viz_proc.stderr[-300:].strip()}",
+                    file=sys.stderr,
+                )
 
     # ── 统计 + emit ─────────────────────────────────────────────────────────────
+    # variants_total 优先用 --receiver_dir（setup 探测经 output 传下来，cwd 无关）。
+    # 旧实现仅 fallback $ORCA_KB_DIR——但 ORCA_KB_DIR 在 in-session ``orca next`` 链里被
+    # 重置成默认 ``~/.orca/knowledge_base``（不存在）→ glob 0（BUG-3）。
+    # 三级 fallback：--receiver_dir → $ORCA_KB_DIR/families/receiver → ledger+manifest 推断。
     receiver_dir = args.receiver_dir or os.path.join(
         os.environ.get("ORCA_KB_DIR", ""), "families", "receiver")
     variants_total = 0
@@ -340,6 +353,19 @@ def _main() -> int:
                                   if n.endswith(".py") and not n.startswith("_")])
     except OSError:
         pass
+    if variants_total == 0:
+        # receiver_dir 不可用（in-session ORCA_KB_DIR 重置 / setup 未传）→ 用 ledger +
+        # manifest 推断：「已接触过的变体数下界」（ledger 行数含历史 FAIL_*，本批 ACCEPTED 是 manifest 大小）。
+        # 注：跨 run 累积下可能 > KB 真实变体数，仅作诊断字段（不卡门），优于静默 0（BUG-3）。
+        ledger_n = len(read_ledger(args.ledger))
+        inferred = ledger_n + n_accepted
+        if inferred > 0:
+            print(
+                f"[train_pool] WARN: receiver_dir={receiver_dir} 无变体或不可访问"
+                f"（ORCA_KB_DIR 重置？），variants_total fallback 到 ledger+n_accepted={inferred}",
+                file=sys.stderr,
+            )
+            variants_total = inferred
 
     rows = read_ledger(args.ledger)
     variants_done = len(rows)

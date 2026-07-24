@@ -87,7 +87,7 @@ nodes:
     agent: kd-setup
     output_schema:
       type: object
-      required: [kd_artifacts_dir, per_run_artifacts_dir, project_root, teacher_model_path, teacher_cache, teacher_meta, teacher_ckpt, ledger_path, ckpts_dir, baseline_latency_ms, kd_scripts_dir, concurrency, device_plan, per_variant_vram_bytes]
+      required: [kd_artifacts_dir, per_run_artifacts_dir, project_root, teacher_model_path, teacher_cache, teacher_meta, teacher_ckpt, ledger_path, ckpts_dir, baseline_latency_ms, kd_scripts_dir, receiver_dir, concurrency, device_plan, per_variant_vram_bytes]
       properties:
         kd_artifacts_dir: {type: string, description: "稳定 artifact 根绝对路径（末尾带 /）。跨 run 持久"}
         per_run_artifacts_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR（per-run，orca_env.sh 祖先；train env_anchor / viz env_anchor 用）"}
@@ -100,6 +100,7 @@ nodes:
         ckpts_dir: {type: string, description: "<kd_artifacts_dir>ckpts/ 绝对路径（末尾带 /）"}
         baseline_latency_ms: {type: number, description: "原始 baseline(4层) 实测 latency 中位数（参考线）"}
         kd_scripts_dir: {type: string, description: "_kd_scripts 绝对路径"}
+        receiver_dir: {type: string, description: "KB receiver 绝对路径（setup 探测 $ORCA_KB_DIR/families/receiver；train_pool 算 variants_total 用，避免 ORCA_KB_DIR 在 in-session next 链里被重置）"}
         user_train_import: {type: string, description: "用户 train 模块 dotted-path（BLK-7 持久化；空则哨兵）"}
         user_loss_fn: {type: string, description: "用户 loss callable 名（BLK-7）"}
         variants_count: {type: integer, description: "KB receiver 变体数（BLK-14 预检 ≥1）"}

@@ -186,7 +186,7 @@ def run(
     ),
     background: bool = typer.Option(
         False, "--background", "-b",
-        help="后台跑（fork detached，立即返回 run_id，不占终端；用 ``orca ps/logs/wait`` 管理）",
+        help="后台跑（fork detached，立即返回 run_id，不占终端；用 ``tars ps/logs/wait`` 管理）",
     ),
     tui: bool = typer.Option(
         False, "--tui",
@@ -216,8 +216,8 @@ def run(
       - ``--background``：fork detached 子进程跑（立即返回 run_id + pid）。
 
     ``--background``：fork 出脱离终端的子进程跑 workflow，父进程立即返回 run_id + pid
-    （SPEC §8 P3.2 daemon）。配合 ``orca ps`` / ``orca logs <id>`` / ``orca wait <id>``。
-    子进程跑的就是普通 foreground ``orca run``，只是 parentless + stdio 落
+    （SPEC §8 P3.2 daemon）。配合 ``tars ps`` / ``tars logs <id>`` / ``tars wait <id>``。
+    子进程跑的就是普通 foreground ``tars run``，只是 parentless + stdio 落
     ``~/.orca/runs/<run_id>/log``。读 ``ORCA_BG_RUN_ID`` env 复用父进程生成的 run_id
     （保 tape / metadata 三者一致）。
     """

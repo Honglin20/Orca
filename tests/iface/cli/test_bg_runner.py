@@ -12,7 +12,7 @@
     - metadata roundtrip：``write_meta`` → ``read_meta`` 字段全保留。
     - run_id 传播：detached child 经 ``ENV_BG_RUN_ID`` 拿同一 run_id（确定性）。
     - dead pid 检测：``effective_status`` 把 status=running + pid 死 → crashed（fail loud）。
-    - argv 构造：``build_child_argv`` 重 exec ``python -m orca run <yaml>``（不带 --background）。
+    - argv 构造：``build_child_argv`` 重 exec ``tars run <yaml>`` / ``python -m orca.iface.cli.commands run``（不带 --background）。
     - 非 Unix 拒绝：无 ``os.fork`` → RuntimeError。
 """
 
@@ -292,17 +292,42 @@ class TestBuildChildArgv:
         assert "--background" not in argv
         assert "-b" not in argv
 
-    def test_argv_prefers_orca_script_when_installed(self, monkeypatch):
-        """``orca`` 在 PATH → 用 ``orca`` console script（真安装态入口）。"""
+    def test_argv_prefers_tars_script_when_installed(self, monkeypatch):
+        """``tars`` 在 PATH → 用 ``tars`` console script（workflow 启动 CLI，有 ``run`` 子命令）。
+
+        回归 BUG-2：旧实现 ``shutil.which("orca")`` 拿到的是 in-session CLI（无 ``run``），
+        ``run`` 被当 wf-name → bootstrap → ``No such option: -i`` 崩。
+        """
         import shutil
 
-        monkeypatch.setattr(shutil, "which", lambda name: "/fake/bin/orca")
+        # ``shutil.which("tars")`` 命中 → 用 tars 脚本；非 ``orca`` in-session CLI。
+        def _which(name):
+            return "/fake/bin/tars" if name == "tars" else None
+        monkeypatch.setattr(shutil, "which", _which)
         argv = build_child_argv(Path("x.yaml"), [])
-        assert argv[0] == "/fake/bin/orca"
+        assert argv[0] == "/fake/bin/tars"
         assert argv[1] == "run"
 
-    def test_argv_falls_back_to_python_module_when_orca_missing(self, monkeypatch):
-        """``orca`` 不在 PATH → fallback ``python -m orca.iface.cli.commands``。"""
+    def test_argv_does_not_use_orca_in_session_cli(self, monkeypatch):
+        """即便 ``orca`` 在 PATH 也不用它（它是 in-session CLI 无 ``run`` 子命令，BUG-2 回归）。
+
+        构造 ``orca`` 在 PATH 但 ``tars`` 不在的场景：build_child_argv 应**跳过** ``orca``，
+        fallback 到 ``python -m orca.iface.cli.commands``（有 ``run`` 子命令）。
+        """
+        import shutil
+
+        def _which(name):
+            # 故意让 orca 命中、tars 不命中（模拟只装了 in-session CLI 的环境）
+            return "/fake/bin/orca" if name == "orca" else None
+        monkeypatch.setattr(shutil, "which", _which)
+        argv = build_child_argv(Path("x.yaml"), [])
+        # 关键：argv[0] 不是 /fake/bin/orca（那会走 bootstrap 崩），是 python -m fallback
+        assert argv[0] != "/fake/bin/orca"
+        assert argv[0] == sys.executable
+        assert argv[1:4] == ["-m", "orca.iface.cli.commands", "run"]
+
+    def test_argv_falls_back_to_python_module_when_tars_missing(self, monkeypatch):
+        """``tars`` 不在 PATH → fallback ``python -m orca.iface.cli.commands``。"""
         import shutil
 
         monkeypatch.setattr(shutil, "which", lambda name: None)

@@ -247,6 +247,14 @@ def _main() -> int:
     all_processed = True
 
     print(f"[gate] {len(all_variants)} 变体，串行 gate 开始", file=sys.stderr)
+    if len(all_variants) == 0:
+        # 空 KB 静默 SUCCESS 是隐藏 bug（code-reviewer R3）：用户 99% 是 ORCA_KB_DIR 指错 /
+        # families/receiver/ 无 .py。stderr WARN 让用户能定位，不静默「N_ACCEPTED:0」误以为 workflow 健康。
+        print(
+            f"[gate] WARN: receiver_dir={receiver_dir} 下无 .py 变体（ORCA_KB_DIR 指错？"
+            f"families/receiver/ 为空？）→ N_ACCEPTED:0，workflow 将路由 $end 跳过 train。",
+            file=sys.stderr,
+        )
     for variant_path in all_variants:
         vid = os.path.splitext(os.path.basename(variant_path))[0]
         try:

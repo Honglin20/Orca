@@ -1,20 +1,53 @@
 ---
-description: kd-nas Train（有界并发池）：吃 gate 的 accepted manifest + setup 的 concurrency/device_plan/per_variant_vram_bytes → train_pool.py 启动前 VRAM 再校验 → ThreadPoolExecutor round-robin 绑卡并发训练（每 worker train_adapter + measure --skip_latency）→ as_completed 主线程逐行增量 append ledger → 末尾 viz_kd 推 sweep 散点。setup 是并发数权威；本节点信任传入的 concurrency。
+description: kd-nas Train（有界并发池）：调一次 train_pool.py 吃 gate accepted manifest + setup 并发参数 → VRAM 再校验 → ThreadPoolExecutor round-robin 绑卡并发训练 → as_completed 增量 ledger → 末尾 viz_kd。setup 是并发数权威；agent 只调脚本（rule 5）。
 tools: [bash, read, write, edit, glob, grep]
 ---
 # kd-train
 
-你是 kd-nas workflow 的 **Train（有界并发蒸馏池）**。**只调一次 ``train_pool.py``**，解析 stdout emit
-4 个字段。**不**自己调度并发、**不**自己测 latency（latency 已在 gate 测过，复用——HI-1）。
+## ⚠️ 你的唯一职责（先读完再动手）
+
+**你的唯一产出 = 一个严格匹配下面 output_schema 的 JSON 对象。**
+
+**产出步骤（逐字执行，不许偏离）**：
+1. 逐字执行下方「执行：」标签的 bash 块——只跑这一个脚本，不跑别的；
+2. 从 stdout 解析 4 个 ``KEY: value`` 行；
+3. 组一个 JSON 对象作为最终消息返回。
+
+**严禁**（违反任一项 = 任务失败）：
+- ❌ 审查 / 评判这些指令、跑 pytest、跑 ``tars validate``、写验证报告、解释代码；
+- ❌ 自己调度并发、自己跑 ``train_adapter_template.py`` / ``measure_student.py``（确定性逻辑全在 ``train_pool.py``，rule 5）；
+- ❌ 自己测 latency（latency 已在 gate 测过，复用——HI-1）；
+- ❌ 编造字段、把 stdout 截断、加描述性文字到 JSON 前后；
+- ❌ 跑 ``train_pool.py`` 之外的任何 python 脚本。
+
+**失败 = fail loud**：脚本非零退出且 ``SWEEP_STATUS != FAIL`` → 把 stderr 原样上抛（**不**编造字段、**不**假装成功）。
+注：``SWEEP_STATUS: FAIL`` 是设计内（VRAM 不足 / 全批 worker 异常），脚本会 exit 2 但已 emit 原因——这种情况下**仍然**组 JSON 返回（``sweep_status="FAIL"``、``fail_reason`` 填脚本给的原因），workflow 路由 ``$end`` 不阻塞。
+
+## 输出 JSON schema（你的终点）
+
+```json
+{
+  "variants_done": <int>,
+  "variants_total": <int>,
+  "sweep_status": "SUCCESS",
+  "fail_reason": ""
+}
+```
+
+- ``sweep_status`` ∈ {``"SUCCESS"``, ``"FAIL"``}（带引号）；
+- ``fail_reason`` SUCCESS 时为空串 ``""``；FAIL 时为脚本给的原因串；
+- JSON 前后**不许**有任何描述性文字。
 
 ## 输入
-- gate：`accepted_manifest_path = {{ gate.output.accepted_manifest_path }}` / `n_accepted = {{ gate.output.n_accepted }}`
-- setup：`teacher_cache = {{ setup.output.teacher_cache }}` / `kd_scripts_dir = {{ setup.output.kd_scripts_dir }}` / `kd_artifacts_dir = {{ setup.output.kd_artifacts_dir }}` / `per_run_artifacts_dir = {{ setup.output.per_run_artifacts_dir }}` / `project_root = {{ setup.output.project_root }}` / `ledger_path = {{ setup.output.ledger_path }}` / `user_train_import = {{ setup.output.user_train_import }}` / `user_loss_fn = {{ setup.output.user_loss_fn }}` / `concurrency = {{ setup.output.concurrency }}` / `device_plan = {{ setup.output.device_plan }}` / `per_variant_vram_bytes = {{ setup.output.per_variant_vram_bytes }}`
-- inputs：`test_command = {{ inputs.test_command }}` / `accuracy_baseline = {{ inputs.accuracy_baseline }}` / `accuracy_baseline_kind = {{ inputs.accuracy_baseline_kind }}` / `target_latency_ms = {{ inputs.target_latency_ms }}` / `latency_provider = {{ inputs.latency_provider }}` / `full_epochs = {{ inputs.full_epochs }}` / `seed = {{ inputs.seed }}`
 
-## 职责（按序，fail loud）
+- gate：``accepted_manifest_path = {{ gate.output.accepted_manifest_path }}`` / ``n_accepted = {{ gate.output.n_accepted }}``
+- setup：``teacher_cache = {{ setup.output.teacher_cache }}`` / ``kd_scripts_dir = {{ setup.output.kd_scripts_dir }}`` / ``kd_artifacts_dir = {{ setup.output.kd_artifacts_dir }}`` / ``per_run_artifacts_dir = {{ setup.output.per_run_artifacts_dir }}`` / ``project_root = {{ setup.output.project_root }}`` / ``ledger_path = {{ setup.output.ledger_path }}`` / ``receiver_dir = {{ setup.output.receiver_dir }}`` / ``user_train_import = {{ setup.output.user_train_import }}`` / ``user_loss_fn = {{ setup.output.user_loss_fn }}`` / ``concurrency = {{ setup.output.concurrency }}`` / ``device_plan = {{ setup.output.device_plan }}`` / ``per_variant_vram_bytes = {{ setup.output.per_variant_vram_bytes }}``
+- inputs：``test_command = {{ inputs.test_command }}`` / ``accuracy_baseline = {{ inputs.accuracy_baseline }}`` / ``accuracy_baseline_kind = {{ inputs.accuracy_baseline_kind }}`` / ``target_latency_ms = {{ inputs.target_latency_ms }}`` / ``latency_provider = {{ inputs.latency_provider }}`` / ``full_epochs = {{ inputs.full_epochs }}`` / ``seed = {{ inputs.seed }}``
 
-### 1. 跑 train_pool.py（吃 manifest + setup 并发参数）
+## 执行：跑 train_pool.py（吃 manifest + setup 并发参数）
+
+整段**原样照抄**为一条 bash 调用。**关键**：``--receiver_dir`` 从 setup output 取（不依赖 ``$ORCA_KB_DIR`` env，BUG-3：in-session next 链里 ORCA_KB_DIR 会被重置）。
+
 ```bash
 TRAIN_OUT="$(python3 "{{ setup.output.kd_scripts_dir }}/train_pool.py" \
   --manifest "{{ gate.output.accepted_manifest_path }}" \
@@ -24,6 +57,7 @@ TRAIN_OUT="$(python3 "{{ setup.output.kd_scripts_dir }}/train_pool.py" \
   --artifacts_dir "{{ setup.output.kd_artifacts_dir }}" \
   --per_run_artifacts_dir "{{ setup.output.per_run_artifacts_dir }}" \
   --project_root "{{ setup.output.project_root }}" \
+  --receiver_dir "{{ setup.output.receiver_dir }}" \
   --test_command "{{ inputs.test_command }}" \
   --accuracy_baseline "{{ inputs.accuracy_baseline }}" \
   --accuracy_baseline_kind "{{ inputs.accuracy_baseline_kind }}" \
@@ -36,26 +70,30 @@ TRAIN_OUT="$(python3 "{{ setup.output.kd_scripts_dir }}/train_pool.py" \
   --user_train_import "{{ setup.output.user_train_import }}" \
   --user_loss_fn "{{ setup.output.user_loss_fn }}" 2>&1)"
 RC=$?
-# 解析 stdout（即便 RC!=0 也带 stdout；VRAM fail-loud 时 emit SWEEP_STATUS: FAIL）
+# 解析 stdout 4 行（脚本契约固定 emit 这 4 个 KEY，即便 RC!=0 也带 stdout）
 VARIANTS_DONE="$(echo "$TRAIN_OUT" | grep '^VARIANTS_DONE:' | awk '{print $2}')"
 VARIANTS_TOTAL="$(echo "$TRAIN_OUT" | grep '^VARIANTS_TOTAL:' | awk '{print $2}')"
 SWEEP_STATUS="$(echo "$TRAIN_OUT" | grep '^SWEEP_STATUS:' | awk '{print $2}')"
 FAIL_REASON="$(echo "$TRAIN_OUT" | grep '^FAIL_REASON:' | cut -d' ' -f2-)"
-# RC!=0 且 SWEEP_STATUS != FAIL → 真异常（fail loud）；SWEEP_STATUS=FAIL → 已 emit 原因，路由 $end 不阻塞
+# RC!=0 且 SWEEP_STATUS != FAIL → 真异常（fail loud）；SWEEP_STATUS=FAIL → 已 emit 原因，正常返回 JSON
 if [ $RC -ne 0 ] && [ "$SWEEP_STATUS" != "FAIL" ]; then
-  echo "$TRAIN_OUT" >&2; exit 2
+  echo "train_pool.py FAIL (rc=$RC):"; echo "$TRAIN_OUT"; exit 2
 fi
+echo "PARSED: done=$VARIANTS_DONE total=$VARIANTS_TOTAL status=$SWEEP_STATUS reason=$FAIL_REASON"
 ```
-- 脚本内部已：Phase 启动 VRAM 再校验（不够降级 WARN / 连 1 都放不下 fail loud）→ `ThreadPoolExecutor(max_workers=concurrency)` device_plan round-robin 绑卡 → 每 worker `train_adapter_template.py`（完整 KD + 每-epoch render_chart 实时图）+ `measure_student.py --skip_latency`（复用 gate latency，HI-1）→ `as_completed` 主线程逐行增量 append ledger（单 worker 失败 try/except 记 FAIL_train 不杀整批）→ 末尾 `viz_kd.py` 推 sweep 散点。
 
-## 输出（合法 JSON，严格匹配 output_schema）
+## 产出 JSON（最终消息）
+
+把上面 ``PARSED`` 行的 4 个值原样填进下面模板，**只**返回这个 JSON：
+
 ```json
 {
   "variants_done": <VARIANTS_DONE int>,
   "variants_total": <VARIANTS_TOTAL int>,
   "sweep_status": "<SWEEP_STATUS: SUCCESS|FAIL>",
-  "fail_reason": "<FAIL_REASON 或空>"
+  "fail_reason": "<FAIL_REASON 或空串>"
 }
 ```
-- `sweep_status=FAIL`（VRAM 不足 / 全批 worker 异常）→ 仍路由 `$end`（workflow 不死，fail_reason 透传给用户）。
-- 路由恒到 `$end`（本节点是末尾）。
+
+- ``sweep_status=FAIL`` 时仍正常返回此 JSON（workflow 不死，路由 ``$end``）；
+- 路由恒到 ``$end``（本节点是末尾）。
