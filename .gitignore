@@ -63,3 +63,6 @@ quant_params/
 
 # KD-NAS 蒸馏 sweep 跨 run 稳定 artifact 根（teacher_cache/ledger/ckpts/...，可重生成，不入库）。
 kd-nas-artifacts/
+
+# kd-nas-demo E2E test artifacts (test-agent 产物，可重生成，不入库)
+kd-nas-demo-artifacts/

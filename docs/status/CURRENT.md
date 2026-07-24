@@ -6,13 +6,19 @@
 
 ## 当前任务（2026-07-25）
 
-### ✅ KD-NAS E2E 真 bug 修复 + reviewer findings 全闭环 —— 完成
+### ✅ KD-NAS 并行 workflow 全流程完成（setup→gate→train + E2E + SOTA students）
 
-**状态**：E2E 真跑 `tars run workflows/kd-nas.yaml --background`（demo inputs）暴露的真 bug 与 reviewer 6 项 finding 全修复。🔴BUG-2 `bg_runner` 用错 binary（`orca`→`tars`）+ 🔴BUG-1 三个 agent.md 被 deepseek-v4-flash 当 spec 审查不执行（重写：强执行指令 + ❌ 红线 + JSON schema 前置 + bash 标「执行：」）+ 🟡BUG-3 `VARIANTS_TOTAL:0`（ORCA_KB_DIR 重置 → setup 探测 `receiver_dir` 经 output 传给 gate/train）+ 🟡R4 setup step5/6 LLM grep 违反 rule 5（新增 `setup_helpers.py` 确定性后端）+ 🟡R1 NPU VRAM 沉默估算（改 fail-soft 不估算）+ 🟡R2 viz_kd rc!=0 沉默（改 stderr WARN）+ 🟡R3 空 KB 沉默（改 stderr WARN）。测试 +24 个，全 139 passed。
+**4 个 commit 全链路**：
+1. `e14f775` —— workflow 重构为 `setup→gate→train→$end`（确定性 gate + 有界并发池 + setup GPU 探测定并发）
+2. `02b927b` —— `examples/kd-nas-demo/` E2E 靶子（MODEL8 基线 + 随机数据真实测量）
+3. `902457d` —— E2E 真 bug 修复（🔴BUG-1 agent.md 执行指令重写 / 🔴BUG-2 bg_runner binary / 🟡BUG-3 + reviewer R1-R4）+ 139 测试
+4. `ee44b4b` —— SOTA 调研驱动加 4 昇腾友好 student（inception/resnext/se/dualpath），receiver 11→15
 
-**E2E 判据（BUG-1 关键）**：4/4 变体 SUCCESS（demo_tiny_alt/cnn_dil/cnn_pw/tf，latency 0.35~1.11ms < 5ms target，NMSE 1.07~1.20 < 1.5 baseline），9m40s 完成。**agent 真执行 bash + emit 合法 JSON**（不再写验证报告）；step2 偶发 nested-quote copy 错时自纠正切 heredoc。
+**E2E 判据（agent 驱动，非手动）**：`tars run` 真驱动 setup→gate→train，agent 真执行 bash + emit JSON（BUG-1 命门过），4/4 变体 SUCCESS 真蒸馏（latency 0.35~1.11ms < 5ms target，NMSE 1.07~1.20 < 1.5）。并行验证 concurrency=3 同毫秒 3 worker + 增量账本 + fail 隔离。**绝无伪造**（跨 run 对比：latency 真测有噪声、accuracy 真算可复现、ckpt 字节跨 run 一致）。无阻断 bug，code-reviewer verdict 可发布。已 push。
 
-详见 [release note](../releases/2026-07-25-kd-nas-e2e-bug-fixes.md) + [CHANGELOG](CHANGELOG.md)。Commit: `902457d`。
+**GPU**：测试全程用 CPU（5 点全验到），未启/用/关任何实例；NAS benchmark 实例 `pro-7839ed6e9f69` 查为 shutdown 态，无干扰。
+
+详见 [CHANGELOG](CHANGELOG.md)（4 条 2026-07-25 索引）+ 各 release note。
 
 ---
 
