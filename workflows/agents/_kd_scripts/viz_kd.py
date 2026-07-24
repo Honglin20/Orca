@@ -231,6 +231,54 @@ def _push_candidate_trace(
     return True
 
 
+def _push_candidate_latency_trace(ledger: list[dict[str, Any]]) -> bool:
+    """图1b（P2-2 新增）：latency 维度候选演进。x=round, y=latency_ms, hue=met_latency。
+
+    对齐 KD「latency-first」哲学：原 candidate_trace 只画 proxy_mse（短训精度代理），
+    latency 维度只在静态 pareto 散点里出现，看不到「逐轮时延是否在下降」。本图补一张
+    latency 随 round 的演进，hue=met_latency 区分达标/未达标（与 pareto 同 hue 语义）。
+    FAIL_export 行 latency_ms=-1 → 剔除（与 _is_valid_point 一致）。
+    """
+    data: list[dict[str, Any]] = []
+    for e in ledger:
+        rnd = _to_int(e.get("round"))
+        lat = _to_float(e.get("latency_ms"))
+        if rnd is None or lat is None or lat < 0:
+            continue
+        data.append({
+            "round": rnd,
+            "latency_ms": lat,
+            "met_latency": str(bool(e.get("met_latency"))),
+            "id": str(e.get("candidate_id", "?")),
+            "family": str(e.get("family", "")),
+        })
+
+    if len(data) < _MIN_ROWS:
+        print(
+            f"[viz_kd] WARN: 跳过 candidate_latency_trace：有效点数 {len(data)} < {_MIN_ROWS}",
+            file=sys.stderr,
+        )
+        return False
+
+    _orca_render_chart(
+        chart_type="line",
+        data=data,
+        label=_LABEL,
+        title="Candidate Latency Trace (latency-first, lower is better)",
+        x="round",
+        y="latency_ms",
+        hue="met_latency",
+        x_label="搜索轮次（round）",
+        y_label="时延 ms（越低越好）",
+        caption=(
+            "每轮候选实测 ONNX 时延的演进（KD latency-first 哲学：时延是主轴）。"
+            "hue=met_latency 区分达标/未达标，与 Latency–Proxy Pareto 同款配色。"
+            "proxy_mse 维度见 Candidate Trace（另一张）。"
+        ),
+    )
+    return True
+
+
 def _push_pareto(ledger: list[dict[str, Any]]) -> bool:
     """图2：latency(x) vs proxy_mse(y) 帕累托。双 min（时延低 & 短训精度代理低）。
 
@@ -498,9 +546,10 @@ def render_all(
     if _orca_render_chart is None:
         return results
 
-    # round + finalize 共享的三张图。
+    # round + finalize 共享的四张图。
     pushers: list[tuple[str, Any]] = [
         ("candidate_trace", lambda: _push_candidate_trace(ledger, champions)),
+        ("candidate_latency_trace", lambda: _push_candidate_latency_trace(ledger)),
         ("pareto", lambda: _push_pareto(ledger)),
         ("ledger_table", lambda: _push_ledger_table(ledger)),
     ]

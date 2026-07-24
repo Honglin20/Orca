@@ -264,6 +264,10 @@ def _mode_search(output_dir: Path) -> None:
     # C5-live：帕累托前沿散点（取当前 pareto=true 子集；finalize 由 push_pareto_final 自算全局）
     x_obj, y_obj = _pick_pareto_axes(obj_keys, obj_kind)
     if x_obj and y_obj:
+        # 两轴方向按 obj_kind 动态决定（cost→min，quality→max），与 push_pareto_final.py
+        # 「无 quality 轴跳过 C5」口径对齐——退化分支（两 cost）两向均 min，避免硬编码 y=max。
+        x_dir = _axis_direction(obj_kind[x_obj])
+        y_dir = _axis_direction(obj_kind[y_obj])
         pts: list[dict[str, float]] = []
         for r in recs:
             if not r.get("pareto"):
@@ -285,14 +289,14 @@ def _mode_search(output_dir: Path) -> None:
                 title="Pareto Front (live)",
                 x=x_obj,
                 y=y_obj,
-                pareto_x_direction="min",
-                pareto_y_direction="max",
-                x_label=f"{x_obj}（越小越好{'+，质量类已取负显示' if obj_kind[x_obj] == 'quality' else ''}）",
-                y_label=f"{y_obj}（越大越好{'+，质量类已取负显示' if obj_kind[y_obj] == 'quality' else ''}）",
+                pareto_x_direction=x_dir,
+                pareto_y_direction=y_dir,
+                x_label=f"{x_obj}（{'越小越好' if x_dir == 'min' else '越大越好'}{'+，质量类已取负显示' if obj_kind[x_obj] == 'quality' else ''}）",
+                y_label=f"{y_obj}（{'越小越好' if y_dir == 'min' else '越大越好'}{'+，质量类已取负显示' if obj_kind[y_obj] == 'quality' else ''}）",
                 caption=(
                     "当前 per-generation pareto 子集；finalize 全局前沿见 Pareto Front (final)。"
-                    f"x={x_obj}（{'成本类，越小越好' if obj_kind[x_obj] == 'cost' else '质量类，取负后越大越好'}），"
-                    f"y={y_obj}（{'成本类，越小越好' if obj_kind[y_obj] == 'cost' else '质量类，取负后越大越好'}）。"
+                    f"x={x_obj}（方向 {x_dir}，{'成本类越小越好' if obj_kind[x_obj] == 'cost' else '质量类取负后越大越好'}），"
+                    f"y={y_obj}（方向 {y_dir}，{'成本类越小越好' if obj_kind[y_obj] == 'cost' else '质量类取负后越大越好'}）。"
                 ),
             )
 
@@ -309,6 +313,16 @@ def _pick_pareto_axes(obj_keys: list[str], obj_kind: dict[str, str]) -> tuple[st
     if len(obj_keys) >= 2:
         return obj_keys[0], obj_keys[1]
     return None, None
+
+
+def _axis_direction(kind: str) -> str:
+    """单个目标的 pareto 轴方向：cost → 'min'（越小越好），quality → 'max'（取负后越大越好）。
+
+    抽成独立纯函数（Rule 9）便于单测，并与 ``push_pareto_final.py`` 的退化分支口径对齐：
+    final 路径无 quality 轴时直接跳过 C5，本 live 路径退化到两 cost 轴时两向都 'min'
+    （之前硬编码 'y=max' 与 final 口径不一致）。
+    """
+    return "max" if kind == "quality" else "min"
 
 
 def main() -> int:

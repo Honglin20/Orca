@@ -226,7 +226,7 @@ class TestVizStructP7:
         assert ids == ["c1"], f"Pareto should only keep valid-accuracy row; got {ids}"
 
     def test_only_three_charts_no_round_ledger_or_exploration_tree(self, tmp_path):
-        """P7 根因清理：删 Round Ledger + Exploration Tree，只剩 3 图。"""
+        """P7 根因清理：删 Round Ledger + Exploration Tree。2026-07-24 P2-1 加 accuracy 维度 → 4 图。"""
         rows = [
             {"id": f"c{i}", "parent": "baseline", "path": "p1", "round": i,
              "status": "SUCCESS", "tag": "structural", "latency_ms": 10.0 - i,
@@ -248,8 +248,9 @@ class TestVizStructP7:
         assert titles == [
             "Candidate Ledger (per change)",
             "Champion Trace",
+            "Champion Trace — Accuracy",
             "Latency-Accuracy Pareto",
-        ], f"P7 should push 3 charts; got {titles}"
+        ], f"should push 4 charts (P7 三张 + P2-1 accuracy 维度); got {titles}"
 
 
 # ───────────────────────── viz_kd.py ─────────────────────────

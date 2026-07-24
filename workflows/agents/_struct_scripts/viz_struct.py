@@ -217,8 +217,12 @@ def _push_champion_trace(
         lat = _to_float(e.get("latency_ms"))
         if lat is None or lat < 0:
             continue
+        rnd = e.get("round")
+        if not isinstance(rnd, int):
+            # round 缺失 → 用 ledger 行序兜底（保数；前端 x 轴仍单调）。
+            rnd = i
         data.append({
-            "index": i,
+            "round": rnd,
             "latency_ms": lat,
             "series": "candidate",
             "candidate_id": str(e.get("id", "?")),
@@ -234,14 +238,16 @@ def _push_champion_trace(
         if lat is None:
             continue
         acc = _to_float(ch.get("accuracy"))
+        rnd = ch.get("round")
+        if not isinstance(rnd, int):
+            rnd = id_to_idx.get(cid, -1)
         data.append({
-            "index": id_to_idx.get(cid, -1),
+            "round": rnd,
             "latency_ms": lat,
             "series": "champion",
             "candidate_id": str(cid),
             "status": "champion",
             "accuracy": acc,
-            "round": ch.get("round"),
         })
 
     if not data:
@@ -254,10 +260,10 @@ def _push_champion_trace(
             data=data,
             label=_LABEL,
             title="Champion Trace",
-            x="index",
+            x="round",
             y="latency_ms",
             hue="series",
-            x_label="候选序号（账本行）",
+            x_label="搜索轮次（round）",
             y_label="时延 (ms)",
             caption=(
                 f"每轮候选的实测时延（灰点）与 champion 轨迹（彩线，running min）。"
@@ -266,6 +272,89 @@ def _push_champion_trace(
         )
     except Exception as e:
         print(f"[viz_struct] WARN: champion_trace 推送异常：{type(e).__name__}: {e}", file=sys.stderr)
+        return False, _classify_exc(e)
+    return True, ""
+
+
+def _push_champion_accuracy_trace(
+    ledger: list[dict[str, Any]],
+    champions: list[dict[str, Any]],
+    accuracy_target: float,
+) -> tuple[bool, str]:
+    """图1b（P2-1 新增）：accuracy 维度的 champion 轨迹。x=round, y=accuracy, hue=series。
+
+    对齐「降时延保精度」语义：单纯 latency 轨迹看不到精度是否被牺牲。本图复用 champion
+    轨迹数据模式，但 y=accuracy（每轮候选灰点 + champion 彩线，running max）。
+    FAIL_latency/FAIL_export 行 accuracy 缺失/负数 → 剔除（与 _push_pareto 同款过滤）。
+    """
+    if len(ledger) < _MIN_ROWS:
+        print(
+            f"[viz_struct] WARN: 跳过 champion_accuracy_trace：ledger 行数 {len(ledger)} < {_MIN_ROWS}",
+            file=sys.stderr,
+        )
+        return False, "data_insufficient"
+
+    data: list[dict[str, Any]] = []
+    for i, e in enumerate(ledger):
+        acc = _to_float(e.get("accuracy"))
+        if acc is None or acc < 0:
+            continue
+        rnd = e.get("round")
+        if not isinstance(rnd, int):
+            rnd = i
+        data.append({
+            "round": rnd,
+            "accuracy": acc,
+            "series": "candidate",
+            "candidate_id": str(e.get("id", "?")),
+            "status": str(e.get("status", "?")),
+        })
+
+    for ch in champions:
+        cid = ch.get("id")
+        acc = _to_float(ch.get("accuracy"))
+        if cid is None or acc is None or acc < 0:
+            continue
+        rnd = ch.get("round")
+        if not isinstance(rnd, int):
+            rnd = -1
+        data.append({
+            "round": rnd,
+            "accuracy": acc,
+            "series": "champion",
+            "candidate_id": str(cid),
+            "status": "champion",
+        })
+
+    if not data:
+        print(
+            "[viz_struct] WARN: 跳过 champion_accuracy_trace：无有效 accuracy 数据点",
+            file=sys.stderr,
+        )
+        return False, "data_insufficient"
+
+    try:
+        _orca_render_chart(
+            chart_type="line",
+            data=data,
+            label=_LABEL,
+            title="Champion Trace — Accuracy",
+            x="round",
+            y="accuracy",
+            hue="series",
+            x_label="搜索轮次（round）",
+            y_label="精度（越高越好）",
+            caption=(
+                f"每轮候选的实测精度（灰点）与 champion 轨迹（彩线，running max）。"
+                f" 目标精度 {accuracy_target}（champion 轨迹越高于此线越达标）。"
+                "对齐「降时延保精度」——须与 latency champion trace 对照阅读。"
+            ),
+        )
+    except Exception as e:
+        print(
+            f"[viz_struct] WARN: champion_accuracy_trace 推送异常：{type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
         return False, _classify_exc(e)
     return True, ""
 
@@ -489,15 +578,19 @@ def render_all(
         "charts": {},
     }
 
-    # import_failed：orca.chart 不可用 → 三图均跳过，reason=import_failed。
+    # import_failed：orca.chart 不可用 → 四图均跳过，reason=import_failed。
     if viz_env_status == "import_failed":
         print("[viz_struct] WARN: orca.chart 不可用，跳过全部 web push（非 Orca 子进程？）", file=sys.stderr)
-        for name in ("champion_trace", "pareto", "candidate_table"):
+        for name in ("champion_trace", "champion_accuracy_trace", "pareto", "candidate_table"):
             results["charts"][name] = {"pushed": False, "reason": "import_failed"}
         return results
 
     pushers = [
         ("champion_trace", lambda: _push_champion_trace(ledger, champions, target_latency_ms)),
+        (
+            "champion_accuracy_trace",
+            lambda: _push_champion_accuracy_trace(ledger, champions, accuracy_target),
+        ),
         ("pareto", lambda: _push_pareto(ledger, baseline_latency_ms, baseline_accuracy, accuracy_target)),
         ("candidate_table", lambda: _push_candidate_table(ledger)),
     ]
@@ -568,7 +661,7 @@ def _build_main_fallback(exc: Exception, *, compare_mode: bool) -> dict[str, Any
     else:
         charts = {
             name: {"pushed": False, "reason": err_reason}
-            for name in ("champion_trace", "pareto", "candidate_table")
+            for name in ("champion_trace", "champion_accuracy_trace", "pareto", "candidate_table")
         }
     return {"viz_env_status": "generic", "charts": charts}
 
@@ -576,7 +669,7 @@ def _build_main_fallback(exc: Exception, *, compare_mode: bool) -> dict[str, Any
 def _main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "草稿 §12 三张图（P7 精简自原五张；orca.chart render_chart 推送，无 HTML 产物）。"
+            "草稿 §12 四张图（P7 精简 + P2-1 加 accuracy champion trace；orca.chart render_chart 推送，无 HTML 产物）。"
             " 2026-07-23 SPEC §3.2/§3.4：加 viz_env_status / charts.reason / --mode compare / _main 兜底。"
         )
     )

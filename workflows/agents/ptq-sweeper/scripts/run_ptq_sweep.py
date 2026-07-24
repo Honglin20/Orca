@@ -28,10 +28,7 @@ from __future__ import annotations
 
 import argparse
 import copy
-import gc
-import importlib.util
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -49,12 +46,40 @@ from _device import (  # noqa: E402
     resolve_device_and_seed,
     wrap_forward_with_device,
 )
+from _common import (  # noqa: E402
+    BITWIDTH_PRESETS as _BITWIDTH_PRESETS,
+    dump_json as _dump_report_base,
+    free_model as _free_model_base,
+    is_better as _is_better,
+    load_adapter as _load_adapter_base,
+    load_env_file as _load_env_file_base,
+    resolve_eval as _resolve_eval_base,
+)
+
+_LOG_PREFIX = "[run_ptq_sweep] "
+
+
+def _load_env_file(path: str) -> None:
+    _load_env_file_base(path, log_prefix=_LOG_PREFIX)
+
+
+def _load_adapter(path: str):
+    return _load_adapter_base(path, "ts_quant_ptq_sweep_adapter", log_prefix=_LOG_PREFIX)
+
+
+def _resolve_eval(adapter, fp_model, eval_loader, forward_fn) -> tuple[Callable, str, bool]:
+    return _resolve_eval_base(
+        adapter, fp_model, eval_loader, forward_fn, log_prefix=_LOG_PREFIX
+    )
+
+
+def _dump_report(report: dict[str, Any], path: Path) -> None:
+    _dump_report_base(report, path)
 
 # 一次性 import ts_quant 关键依赖：缺包/未配置 → fail loud exit 2（环境错），
 # 而非走 _eval_candidate try 内 → 全候选失败 exit 3（业务错，根因被埋）。
 try:
     from ts_quant import QConfig, quantize_model  # noqa: F401
-    from ts_quant.eval import build_teacher_student_eval_fn  # noqa: F401
     from ts_quant.plugins import QuaRotPlugin, SmoothQuantPlugin  # noqa: F401
     _TS_QUANT_OK = True
     _TS_QUANT_IMPORT_ERROR: str | None = None
@@ -103,86 +128,14 @@ _VALID_SOLVERS = {"rtn", "gptq", "autoround"}
 _VALID_POSTS = {"none", "q2n"}
 
 # bit_width 预设 → QConfig 构造字段（不含 weight_solver/post_correction/granularity，
-# 这些由 _make_qconfig 按候选动态填）。复用并扩展 W1 _qconfig 的语义。
-_BITWIDTH_PRESETS: dict[str, dict[str, Any]] = {
-    "w4a4-mx": {
-        "method": "mx",
-        "w_elem_format": "fp4_e2m1",
-        "a_elem_format": "fp4_e2m1",
-        "block_size": 16,
-    },
-    "w4a8-mx": {
-        "method": "mx",
-        "w_n_bits": 4,
-        "a_n_bits": 8,
-        "w_elem_format": "fp4_e2m1",
-        "a_elem_format": "fp8_e4m3",
-        "block_size": 16,
-    },
-    "w8a8-mx": {
-        "method": "mx",
-        "w_elem_format": "fp8_e4m3",
-        "a_elem_format": "fp8_e4m3",
-        "block_size": 16,
-    },
-    "w8a8-int": {
-        "method": "int",
-        "n_bits": 8,
-    },
-    # w4a16 真正语义：weight-only INT4 + 激活保持 FP16（a_quant_enabled=False）。
-    # W1 的 w4a16 写 `a_elem_format="fp16"` 但 method=int 的 a_elem_format 不被消费
-    # （to_act_quant_specs 仅看 effective_a_n_bits），实际行为退化成 w4a4。
-    # 这里修正为 a_quant_enabled=False 让激活 bypass fake-quant，名副其实。
-    "w4a16": {
-        "method": "int",
-        "n_bits": 4,
-        "w_n_bits": 4,
-        "a_quant_enabled": False,
-    },
-}
+# 这些由 _make_qconfig 按候选动态填）。复用 _common.BITWIDTH_PRESETS（与 bit-curve/qat 共享），
+# 保持「三脚本位宽语义同源」铁律。
+# 历史注释：w4a16 a_quant_enabled=False 修正见 _common.BITWIDTH_PRESETS 文档。
 
 
 # ─────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────
-
-def _load_adapter(path: str):
-    """按文件路径动态 import adapter 模块。"""
-    p = Path(path).resolve()
-    if not p.is_file():
-        sys.stderr.write(f"[run_ptq_sweep] adapter 不存在: {p}\n")
-        sys.exit(2)
-    spec = importlib.util.spec_from_file_location("ts_quant_ptq_sweep_adapter", p)
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def _load_env_file(path: str) -> None:
-    """自加载 orca_env.sh（`export K=V` 行）到 os.environ——opencode bash 工具不跨调用保 env，
-    若子代理把 `source orca_env.sh` 和 `python3` 拆成两次调用，脚本运行的 shell 就没有
-    `ORCA_CHART_SOCK` → render_chart raise 被静默吞 → 图不推。本兜底从 `--env_file` 指定的
-    orca_env.sh 把缺失的 ORCA_* 补进 os.environ，使 render_chart 无论子代理怎么拆 bash 都能连上
-    chart daemon。已存在的 env 不覆盖（显式 env 优先）。
-    """
-    import re
-    if not path:
-        return
-    p = Path(path).expanduser()
-    if not p.is_file():
-        sys.stderr.write(f"[run_ptq_sweep] --env_file 不存在: {p}（跳过自加载）\n")
-        return
-    cnt = 0
-    for line in p.read_text(encoding="utf-8").splitlines():
-        m = re.match(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line)
-        if not m:
-            continue
-        k, v = m.group(1), m.group(2).strip().strip('"').strip("'")
-        os.environ.setdefault(k, v)
-        cnt += 1
-    sys.stderr.write(f"[run_ptq_sweep] 自加载 {cnt} 个 env from {p}\n")
-
 
 def _autoround_available() -> bool:
     """auto-round 是否安装（README_SDK §9.4：autoround 需可选依赖 auto-round）。"""
@@ -364,60 +317,8 @@ def _build_candidates(mode: str, bit_widths: list[str], recipes_filter: list[str
 
 
 # ─────────────────────────────────────────────────────────────────
-# Eval 流水
+# Eval 流水（_resolve_eval / _is_better 已下沉到 _common）
 # ─────────────────────────────────────────────────────────────────
-
-def _resolve_eval(adapter, fp_model, eval_loader, forward_fn) -> tuple[Callable, str, bool]:
-    """返回 (eval_fn, metric_kind, higher_is_better)。
-
-    - adapter.get_eval_fn() 存在且返回非 None → 业务路径，需 adapter.get_metric_spec() 告知
-      metric/direction
-    - 否则 → 默认 teacher-student mse（lower is better）；forward_fn 必填（否则 SDK 用
-      build_auto_forward_fn 对异构 batch dict/tuple 静默误算）→ fail loud
-    """
-    get_eval_fn = getattr(adapter, "get_eval_fn", None)
-    business_fn = get_eval_fn() if callable(get_eval_fn) else None
-    if business_fn is not None:
-        get_metric_spec = getattr(adapter, "get_metric_spec", None)
-        if not callable(get_metric_spec):
-            sys.stderr.write(
-                "[run_ptq_sweep] 业务 eval_fn 路径需要 adapter.get_metric_spec() "
-                "返回 {primary_metric: str, higher_is_better: bool}\n"
-            )
-            sys.exit(2)
-        spec = get_metric_spec() or {}
-        metric_kind = spec.get("primary_metric")
-        if not metric_kind:
-            sys.stderr.write(
-                f"[run_ptq_sweep] get_metric_spec() 缺 primary_metric: {spec}\n"
-            )
-            sys.exit(2)
-        return business_fn, str(metric_kind), bool(spec.get("higher_is_better", False))
-
-    if forward_fn is None:
-        sys.stderr.write(
-            "[run_ptq_sweep] 默认 teacher-student eval 路径需要 adapter.forward_fn "
-            "（按模型 forward 解包 batch）—— 异构 batch 会让 SDK fallback 误算\n"
-        )
-        sys.exit(2)
-    # WARN 不静默（plan §P5）：未提供业务 eval_fn → 退 teacher-student mse，精度仅自洽性参考。
-    sys.stderr.write(
-        "[run_ptq_sweep] WARN: 未提供业务 eval_fn（eval_fn_ref 空）→ 退 teacher-student mse。"
-        "该指标仅自洽性参考（量化模型 vs FP teacher 的 mse），不代表业务精度。\n"
-    )
-    eval_fn = build_teacher_student_eval_fn(
-        teacher_model=fp_model,
-        dataloader=eval_loader,
-        forward_fn=forward_fn,
-    )
-    return eval_fn, "mse", False
-
-
-def _is_better(new_metric: float, cur_metric: float, higher_is_better: bool) -> bool:
-    if higher_is_better:
-        return new_metric > cur_metric
-    return new_metric < cur_metric
-
 
 def _eval_candidate(
     fp_model,
@@ -479,28 +380,8 @@ def _eval_candidate(
 
 
 def _free_q_model(q_model) -> None:
-    """显式释放 quantized model，触发 Python GC + CUDA cache 回收。"""
-    if q_model is None:
-        return
-    try:
-        del q_model
-    except Exception:
-        pass
-    gc.collect()
-    try:
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:
-        pass
-
-
-def _dump_report(report: dict[str, Any], path: Path) -> None:
-    """原子落盘 report.json（写 tmp → os.replace，中断不留半个 JSON；plan §6 核心产出）。"""
-    payload = json.dumps(report, ensure_ascii=False, indent=2, default=str)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(payload, encoding="utf-8")
-    os.replace(tmp, path)
+    """显式释放 quantized model（委托给 _common.free_model，保留本脚本原命名以最小化 caller diff）。"""
+    _free_model_base(q_model)
 
 
 # ─────────────────────────────────────────────────────────────────

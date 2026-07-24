@@ -6,7 +6,21 @@
 
 ## 当前任务（2026-07-24）
 
-### ✅ 单端口 + 多 Run 监控「遗留清项」（SPEC §13 v4 carry-over）—— 已提交
+### ✅ Workflow 可视化审计修复（P1×5 + P2×7）—— 已提交
+
+**状态**：两轮审计 12 项全闭环。P1（death-penalty latency 保留 / C5-live 方向动态化 /
+bit-curve 逐层位宽 + cumulative-best 图 / QAT live 推）+ P2（struct accuracy champion trace /
+kd latency trace / struct x→round / 删除孤儿 nas-viz / quant 4 脚本 helper 下沉到 `_common.py` /
+sensitivity fail loud / candidates_evaluated 改语义不改字段名）。43 新测 + 2 既有测试断言
+更新。159 workflows + 654 跨目录 passed。code-reviewer：0 🔴 + 2 🟡（AST 切片钉真源码）+ 5 🟢
+全修或登记。详见 release note：
+[2026-07-24-workflow-viz-audit-fixes.md](../releases/2026-07-24-workflow-viz-audit-fixes.md)。
+
+---
+
+### 历史任务（已完成，详见 CHANGELOG）
+
+#### ✅ 单端口 + 多 Run 监控「遗留清项」（SPEC §13 v4 carry-over）—— 已提交
 
 **状态**：SPEC §13 v4「遗留（非阻塞）」清单七项全清（AC14 contract test / P0 持久缓存 /
 `tars project rebuild` / Stale projects 折叠区 / 统一 open 列表语义 / scripts 归位 /

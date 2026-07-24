@@ -16,11 +16,7 @@ README_TRAINING.md §8 与源码 sensitivity.py 的签名组织；若 ts_quant A
 from __future__ import annotations
 
 import argparse
-import importlib
-import importlib.util
 import json
-import os
-import re
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -35,42 +31,24 @@ from _device import (  # noqa: E402
     resolve_device_and_seed,
     wrap_forward_with_device,
 )
+from _common import (  # noqa: E402
+    dump_json as _dump_json,
+    load_adapter as _load_adapter_base,
+    load_env_file as _load_env_file_base,
+)
 
-COMPLEX_METHODS = {"ptq_binary_sensitivity", "mix_precision_search"}
-
-
-def _load_adapter(path: str):
-    """按文件路径动态 import adapter 模块。"""
-    p = Path(path).resolve()
-    if not p.is_file():
-        sys.stderr.write(f"[run_sensitivity] adapter 不存在: {p}\n")
-        sys.exit(2)
-    spec = importlib.util.spec_from_file_location("ts_quant_adapter", p)
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
+_LOG_PREFIX = "[run_sensitivity] "
 
 
 def _load_env_file(path: str) -> None:
-    """自加载 orca_env.sh 到 os.environ——与 PTQ 同 env 兜底模式
-   （plan §P5：opencode bash 拆调用丢 ORCA_CHART_SOCK → render_chart 静默失败 → 图不推）。
-    """
-    if not path:
-        return
-    p = Path(path).expanduser()
-    if not p.is_file():
-        sys.stderr.write(f"[run_sensitivity] --env_file 不存在: {p}（跳过自加载）\n")
-        return
-    cnt = 0
-    for line in p.read_text(encoding="utf-8").splitlines():
-        m = re.match(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line)
-        if not m:
-            continue
-        k, v = m.group(1), m.group(2).strip().strip('"').strip("'")
-        os.environ.setdefault(k, v)
-        cnt += 1
-    sys.stderr.write(f"[run_sensitivity] 自加载 {cnt} 个 env from {p}\n")
+    _load_env_file_base(path, log_prefix=_LOG_PREFIX)
+
+
+def _load_adapter(path: str):
+    return _load_adapter_base(path, "ts_quant_adapter", log_prefix=_LOG_PREFIX)
+
+
+COMPLEX_METHODS = {"ptq_binary_sensitivity", "mix_precision_search"}
 
 
 def _qconfig(preset: str):
@@ -263,7 +241,16 @@ def main() -> int:
         if forward_fn is not None:
             kwargs["forward_fn"] = forward_fn
 
-    analysis = analyze_low_precision_sensitive_layers(**kwargs)
+    # P2-6：业务异常 fail loud（与 bit-curve/ptq-sweep/qat 三脚本「业务错 exit 3」约定一致）。
+    # 之前直接调 raise → SDK 异常以 exit 1 + traceback 退出，根因埋在栈里、退出码与其它脚本漂移。
+    try:
+        analysis = analyze_low_precision_sensitive_layers(**kwargs)
+    except Exception as e:
+        sys.stderr.write(
+            f"[run_sensitivity] analyze_low_precision_sensitive_layers 失败"
+            f"（业务错 exit 3）: {type(e).__name__}: {e}\n"
+        )
+        sys.exit(3)
 
     # 3. 模型原始层序 + 落盘 report
     ranked = list(getattr(analysis, "ranked_layers", []) or [])
@@ -281,10 +268,9 @@ def main() -> int:
         "module_order": module_order,
     }
     report_path = output_dir / "report.json"
-    # default=str：兜底 metric_spec 等可能不可直接序列化的对象
-    report_path.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
-    )
+    # P2-5：原子落盘（原为非原子 write_text，中断会留半个文件）。委托给 _common.dump_json，
+    # 行为等价（default=str 兜底 metric_spec 等不可序列化对象）。
+    _dump_json(report, report_path)
 
     # 4. 推图（容错，不阻断）
     _push_charts(auto_sensitive, ranked, module_order)

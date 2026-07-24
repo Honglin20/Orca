@@ -31,11 +31,8 @@ from __future__ import annotations
 
 import argparse
 import copy
-import gc
-import importlib.util
 import itertools
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -51,6 +48,31 @@ from _device import (  # noqa: E402
     resolve_device_and_seed,
     wrap_forward_with_device,
 )
+from _common import (  # noqa: E402
+    BITWIDTH_PRESETS as _BITWIDTH_PRESETS,
+    dump_json as _dump_json,
+    free_model as _free_model,
+    is_better as _is_better,
+    load_adapter as _load_adapter_base,
+    load_env_file as _load_env_file_base,
+    resolve_eval as _resolve_eval_base,
+)
+
+_LOG_PREFIX = "[run_qat] "
+
+
+def _load_env_file(path: str) -> None:
+    _load_env_file_base(path, log_prefix=_LOG_PREFIX)
+
+
+def _load_adapter(path: str):
+    return _load_adapter_base(path, "ts_quant_qat_adapter", log_prefix=_LOG_PREFIX)
+
+
+def _resolve_eval(adapter, fp_model, eval_loader, forward_fn) -> tuple[Callable, str, bool]:
+    return _resolve_eval_base(
+        adapter, fp_model, eval_loader, forward_fn, log_prefix=_LOG_PREFIX
+    )
 
 # 一次性 import ts_quant 关键依赖：缺包/未配置 → fail loud exit 2（环境错）。
 try:
@@ -58,7 +80,6 @@ try:
     import torch.nn as nn
     from ts_quant import QConfig
     from ts_quant.duquantpp import DuQuantPPConfig
-    from ts_quant.eval import build_teacher_student_eval_fn
     from ts_quant.trainable import prepare_trainable_fakequant_model
     from ts_quant.trainable.qat import prepare_trainable_qat
     _TS_QUANT_OK = True
@@ -71,16 +92,6 @@ CHART_LABEL = "quant/qat"
 _TRUE_TOKENS = {"true", "1", "yes", "y", "on"}
 _FALSE_TOKENS = {"false", "0", "no", "n", "off"}
 
-# bit_width 预设 → QConfig 构造字段（与 W2 _BITWIDTH_PRESETS 同源语义；QAT 默认 w8a8-mx）。
-_BITWIDTH_PRESETS: dict[str, dict[str, Any]] = {
-    "w4a4-mx": {"method": "mx", "w_elem_format": "fp4_e2m1", "a_elem_format": "fp4_e2m1", "block_size": 16},
-    "w4a8-mx": {"method": "mx", "w_n_bits": 4, "a_n_bits": 8,
-                "w_elem_format": "fp4_e2m1", "a_elem_format": "fp8_e4m3", "block_size": 16},
-    "w8a8-mx": {"method": "mx", "w_elem_format": "fp8_e4m3", "a_elem_format": "fp8_e4m3", "block_size": 16},
-    "w8a8-int": {"method": "int", "n_bits": 8},
-    "w4a16": {"method": "int", "n_bits": 4, "w_n_bits": 4, "a_quant_enabled": False},
-}
-
 
 def _make_qconfig(bit_width: str):
     preset = _BITWIDTH_PRESETS.get(bit_width)
@@ -90,102 +101,6 @@ def _make_qconfig(bit_width: str):
         )
         sys.exit(2)
     return QConfig(**preset)
-
-
-def _load_adapter(path: str):
-    p = Path(path).resolve()
-    if not p.is_file():
-        sys.stderr.write(f"[run_qat] adapter 不存在: {p}\n")
-        sys.exit(2)
-    spec = importlib.util.spec_from_file_location("ts_quant_qat_adapter", p)
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def _load_env_file(path: str) -> None:
-    """自加载 orca_env.sh 到 os.environ（兜底 opencode bash 拆调用丢 ORCA_CHART_SOCK）。"""
-    import re
-
-    if not path:
-        return
-    p = Path(path).expanduser()
-    if not p.is_file():
-        sys.stderr.write(f"[run_qat] --env_file 不存在: {p}（跳过自加载）\n")
-        return
-    cnt = 0
-    for line in p.read_text(encoding="utf-8").splitlines():
-        m = re.match(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line)
-        if not m:
-            continue
-        k, v = m.group(1), m.group(2).strip().strip('"').strip("'")
-        os.environ.setdefault(k, v)
-        cnt += 1
-    sys.stderr.write(f"[run_qat] 自加载 {cnt} 个 env from {p}\n")
-
-
-def _resolve_eval(adapter, fp_model, eval_loader, forward_fn) -> tuple[Callable, str, bool]:
-    """返回 (eval_fn, metric_kind, higher_is_better)。契约同 W2/W3。"""
-    get_eval_fn = getattr(adapter, "get_eval_fn", None)
-    business_fn = get_eval_fn() if callable(get_eval_fn) else None
-    if business_fn is not None:
-        get_metric_spec = getattr(adapter, "get_metric_spec", None)
-        if not callable(get_metric_spec):
-            sys.stderr.write(
-                "[run_qat] 业务 eval_fn 路径需要 adapter.get_metric_spec() "
-                "返回 {primary_metric: str, higher_is_better: bool}\n"
-            )
-            sys.exit(2)
-        spec = get_metric_spec() or {}
-        metric_kind = spec.get("primary_metric")
-        if not metric_kind:
-            sys.stderr.write(f"[run_qat] get_metric_spec() 缺 primary_metric: {spec}\n")
-            sys.exit(2)
-        return business_fn, str(metric_kind), bool(spec.get("higher_is_better", False))
-
-    if forward_fn is None:
-        sys.stderr.write(
-            "[run_qat] 默认 teacher-student eval 路径需要 adapter.forward_fn\n"
-        )
-        sys.exit(2)
-    # WARN 不静默（plan §P5）：未提供业务 eval_fn → 退 teacher-student mse，精度仅自洽性参考。
-    sys.stderr.write(
-        "[run_qat] WARN: 未提供业务 eval_fn（eval_fn_ref 空）→ 退 teacher-student mse。"
-        "该指标仅自洽性参考（q_model vs FP teacher 的 mse），不代表业务精度。\n"
-    )
-    eval_fn = build_teacher_student_eval_fn(
-        teacher_model=fp_model, dataloader=eval_loader, forward_fn=forward_fn
-    )
-    return eval_fn, "mse", False
-
-
-def _dump_json(obj: dict[str, Any], path: Path) -> None:
-    payload = json.dumps(obj, ensure_ascii=False, indent=2, default=str)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(payload, encoding="utf-8")
-    os.replace(tmp, path)
-
-
-def _free_model(q_model) -> None:
-    if q_model is None:
-        return
-    try:
-        del q_model
-    except Exception:
-        pass
-    gc.collect()
-    try:
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:
-        pass
-
-
-def _is_better(new_metric: float, cur_metric: float, higher_is_better: bool) -> bool:
-    if higher_is_better:
-        return new_metric > cur_metric
-    return new_metric < cur_metric
 
 
 def _eval_metric(eval_fn, q_model, metric_kind: str) -> float:
@@ -207,6 +122,63 @@ def _train_cycle(loader):
 # ─────────────────────────────────────────────────────────────────
 # 单 scheme QAT
 # ─────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
+# Live 推图（P1-5：QAT 收敛曲线改 live 推）
+# ─────────────────────────────────────────────────────────────────
+def _make_live_push_fn(metric_kind: str) -> Callable[[str, list[dict[str, Any]]], None]:
+    """返回 ``live_push_fn(scheme, curve)``：在 _run_scheme 训练 loop 内增量推 line。
+
+    同 label="quant/qat" + 同 title（含 scheme 名）= 刷新语义，不新建图。
+    图表 ``orca.chart`` 不可用时静默（render_chart import 失败已被 _render_charts 覆盖；
+    本函数在 loop 内被频繁调用，import 缓存到闭包避免每步重 import）。
+    """
+    try:
+        from orca.chart import render_chart
+    except Exception as e:  # orca.chart 不可用（非 Orca run 上下文）→ 退化为 no-op。
+        sys.stderr.write(
+            f"[run_qat] live push 已禁用（orca.chart 不可用）: {e}"
+            "——不影响训练，终态收敛/对比图仍会在训练结束后推送。\n"
+        )
+        return lambda _scheme, _curve: None
+
+    def _push(scheme: str, curve: list[dict[str, Any]]) -> None:
+        if not curve:
+            return
+        data = [
+            {"scheme": scheme, "step": int(pt["step"]), "metric": float(pt["metric"])}
+            for pt in curve
+        ]
+        try:
+            render_chart(
+                chart_type="line",
+                data=data,
+                label=CHART_LABEL,
+                title=f"QAT Convergence — {scheme} ({metric_kind}, live)",
+                x="step",
+                y="metric",
+                hue="scheme",
+                x_label="QAT training step",
+                y_label=(
+                    f"{metric_kind} (lower is better)" if metric_kind == "mse" else metric_kind
+                ),
+                caption=(
+                    f"{scheme} 的 eval metric 实时收敛（每 period 步采样 + 终态）。"
+                    "每 scheme 一张图（title 带 scheme 名，避免多 scheme 串行时互相覆盖）；"
+                    "cross-scheme 对比见训练结束后的 'QAT Convergence (per scheme)' 终态图。"
+                ),
+            )
+        except Exception as e:
+            # live push 失败仅 stderr loud（不阻断训练主循环；report.json + 终态图是核心产出）。
+            sys.stderr.write(
+                f"[run_qat] live line 推送失败（不阻断训练）: {type(e).__name__}: {e}\n"
+            )
+
+    return _push
+
+
+# ─────────────────────────────────────────────────────────────────
+# 单 scheme QAT
+# ─────────────────────────────────────────────────────────────────
 def _run_scheme(
     scheme: str,
     fp_model,
@@ -219,6 +191,7 @@ def _run_scheme(
     total_steps: int,
     lr: float,
     cage_mode: str,
+    live_push_fn: Callable[[str, list[dict[str, Any]]], None] | None = None,
 ) -> dict[str, Any]:
     """跑一个 scheme 的 prepare → before → train → after。失败 raise（caller 隔离）。"""
     result: dict[str, Any] = {
@@ -280,6 +253,12 @@ def _run_scheme(
             try:
                 m = _eval_metric(eval_fn, q_model, metric_kind)
                 result["curve"].append({"step": step, "metric": m})
+                # P1-5：每 period 步增量推 live line（同 label="quant/qat" + 同 title =
+                # 刷新语义）。多 scheme 串行：title 带 scheme 名 → 每 scheme 一张图，
+                # 避免同 title 刷新覆盖先跑完的 scheme。终态对比图（cross-scheme）仍由
+                # _push_charts 在 main 末尾推一次（hue=scheme 合一对比）。
+                if live_push_fn is not None:
+                    live_push_fn(scheme, list(result["curve"]))
             except Exception as e:
                 sys.stderr.write(
                     f"[run_qat] {scheme} step={step} eval 失败（曲线跳过该点）: {e}\n"
@@ -611,12 +590,14 @@ def main() -> int:
     _dump_json(report, report_path)
 
     results: list[dict[str, Any]] = []
+    live_push_fn = _make_live_push_fn(metric_kind)
     for scheme in schemes:
         t0 = time.time()
         try:
             r = _run_scheme(
                 scheme, fp_model, qconfig, calib_loader, train_loader,
                 forward_fn, eval_fn, metric_kind, total_steps, lr, cage_mode,
+                live_push_fn=live_push_fn,
             )
             r["elapsed_seconds"] = round(time.time() - t0, 3)
             sys.stderr.write(

@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-24] fix(workflow): 可视化审计修复（P1×5 + P2×7，0 🔴 / 2 🟡 / 5 🟢 全修）
+
+两轮审计 12 项全部闭环：P1-1 超时候选 death-penalty 保留 latency 实测（`_infeasible_result` 纯函数）/ P1-2 C5-live 轴方向动态化（`_axis_direction`）/ P1-3 bit-curve 逐层位宽图（`_load_bit_trend_layer_bits` 多形态 fail-soft）/ P1-4 cumulative-best 寻优过程图（`_cumulative_best`）/ P1-5 QAT 收敛曲线改 live 推（每 scheme 一张图）/ P2-1 struct accuracy champion trace / P2-2 kd latency candidate trace / P2-3 struct x 轴 index→round / P2-4 删除孤儿 nas-viz 目录（grep 确认零引用）/ P2-5 quant 4 脚本共享 helper 下沉到 `_common.py`（字节等价，仅 log_prefix 参数化）/ P2-6 sensitivity 业务异常 fail loud exit 3 / P2-7 candidates_evaluated 改用 len(archive_records)（字段名不变）。43 新单测（AST 切片钉真源码非手抄）+ 既有 2 测试断言更新（3→4 图）。159 workflows passed / 654 跨目录 passed。Commit: `<待填>`。详见 [release note](../releases/2026-07-24-workflow-viz-audit-fixes.md)。
+
 ## [2026-07-24] feat(web): 单端口 + 多 Run 监控「遗留清项」（SPEC §13 v4 carry-over）
 
 清掉 SPEC §13 v4 遗留清单全部七项：AC14 contract test（EventType 双档自动派生 + 守门）、P0 持久派生缓存 `<runs_dir>/.orca-meta-cache.json`（cache 非 index）、`tars project rebuild`（pre-rebuild 快照 + 全失败回滚）+ `tars project list`（含 stale）、P3 Stale projects 折叠区（`GET /api/projects/stale` + 前端组件）、统一 `orca open` 列表语义（`--list` flag + 无活跃 run 回落列表）、`scripts_e2e_driver.py` 归位到 `scripts/`、2 个 pre-existing fail quick fix（SKILL.md 禁词 / cc_nudge.sh 反引号）。第 3 个 pre-existing（`test_web_does_not_import_cli`，`apply_kb_requirement` web→cli 反向依赖）属架构问题**不动**，登记 release note。前端 `out/` 已重建。code-reviewer 3 🟡 全闭环 + 3 🟢 采纳（持久 cache flock 跨进程那项不采纳：cache 正确性不依赖跨进程一致，加锁引入死锁面）。27 新测 + 463 passed / 1 pre-existing fail。Commit: `449f851`。详见 [release note](../releases/2026-07-24-single-port-multi-run-cleanup.md)。

@@ -28,10 +28,7 @@ from __future__ import annotations
 
 import argparse
 import copy
-import gc
-import importlib.util
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -47,6 +44,31 @@ from _device import (  # noqa: E402
     resolve_device_and_seed,
     wrap_forward_with_device,
 )
+from _common import (  # noqa: E402
+    BITWIDTH_PRESETS as _BITWIDTH_PRESETS,
+    dump_json as _dump_json,
+    free_model as _free_model,
+    is_better as _is_better,
+    load_adapter as _load_adapter_base,
+    load_env_file as _load_env_file_base,
+    resolve_eval as _resolve_eval_base,
+)
+
+_LOG_PREFIX = "[run_bit_curve] "
+
+
+def _load_env_file(path: str) -> None:
+    _load_env_file_base(path, log_prefix=_LOG_PREFIX)
+
+
+def _load_adapter(path: str):
+    return _load_adapter_base(path, "ts_quant_bit_curve_adapter", log_prefix=_LOG_PREFIX)
+
+
+def _resolve_eval(adapter, fp_model, eval_loader, forward_fn) -> tuple[Callable, str, bool]:
+    return _resolve_eval_base(
+        adapter, fp_model, eval_loader, forward_fn, log_prefix=_LOG_PREFIX
+    )
 
 # 一次性 import ts_quant 关键依赖：缺包/未配置 → fail loud exit 2（环境错），
 # 而非走搜索 try 内 → exit 3（业务错，根因被埋）。
@@ -59,7 +81,6 @@ try:
         quantize_model,
         search_mix_precision,
     )
-    from ts_quant.eval import build_teacher_student_eval_fn  # noqa: F401
     _TS_QUANT_OK = True
     _TS_QUANT_IMPORT_ERROR: str | None = None
 except Exception as _e:  # ImportError / 二次依赖（torch 等）失败都兜住
@@ -91,122 +112,11 @@ def _format_qconfigs(granularity: str) -> dict[str, Any]:
     }
 
 
-def _load_adapter(path: str):
-    """按文件路径动态 import adapter 模块。"""
-    p = Path(path).resolve()
-    if not p.is_file():
-        sys.stderr.write(f"[run_bit_curve] adapter 不存在: {p}\n")
-        sys.exit(2)
-    spec = importlib.util.spec_from_file_location("ts_quant_bit_curve_adapter", p)
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def _load_env_file(path: str) -> None:
-    """自加载 orca_env.sh（`export K=V` 行）到 os.environ——opencode bash 工具不跨调用保 env，
-    若子代理把 `source orca_env.sh` 和 `python3` 拆成两次调用，脚本运行的 shell 就没有
-    `ORCA_CHART_SOCK` → render_chart raise 被静默吞 → 图不推。已存在的 env 不覆盖（显式 env 优先）。
-    """
-    import re
-
-    if not path:
-        return
-    p = Path(path).expanduser()
-    if not p.is_file():
-        sys.stderr.write(f"[run_bit_curve] --env_file 不存在: {p}（跳过自加载）\n")
-        return
-    cnt = 0
-    for line in p.read_text(encoding="utf-8").splitlines():
-        m = re.match(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line)
-        if not m:
-            continue
-        k, v = m.group(1), m.group(2).strip().strip('"').strip("'")
-        os.environ.setdefault(k, v)
-        cnt += 1
-    sys.stderr.write(f"[run_bit_curve] 自加载 {cnt} 个 env from {p}\n")
-
-
 def _parse_csv(raw: str, fallback: list[str]) -> list[str]:
     raw = (raw or "").strip()
     if not raw:
         return list(fallback)
     return [tok.strip() for tok in raw.split(",") if tok.strip()]
-
-
-# ─────────────────────────────────────────────────────────────────
-# Eval 流水（与 W2 run_ptq_sweep._resolve_eval 同源契约）
-# ─────────────────────────────────────────────────────────────────
-def _resolve_eval(adapter, fp_model, eval_loader, forward_fn) -> tuple[Callable, str, bool]:
-    """返回 (eval_fn, metric_kind, higher_is_better)。
-
-    - adapter.get_eval_fn() 存在且返回非 None → 业务路径，需 adapter.get_metric_spec() 告知
-      metric/direction
-    - 否则 → 默认 teacher-student mse（lower is better）；forward_fn 必填 → fail loud
-    """
-    get_eval_fn = getattr(adapter, "get_eval_fn", None)
-    business_fn = get_eval_fn() if callable(get_eval_fn) else None
-    if business_fn is not None:
-        get_metric_spec = getattr(adapter, "get_metric_spec", None)
-        if not callable(get_metric_spec):
-            sys.stderr.write(
-                "[run_bit_curve] 业务 eval_fn 路径需要 adapter.get_metric_spec() "
-                "返回 {primary_metric: str, higher_is_better: bool}\n"
-            )
-            sys.exit(2)
-        spec = get_metric_spec() or {}
-        metric_kind = spec.get("primary_metric")
-        if not metric_kind:
-            sys.stderr.write(
-                f"[run_bit_curve] get_metric_spec() 缺 primary_metric: {spec}\n"
-            )
-            sys.exit(2)
-        return business_fn, str(metric_kind), bool(spec.get("higher_is_better", False))
-
-    if forward_fn is None:
-        sys.stderr.write(
-            "[run_bit_curve] 默认 teacher-student eval 路径需要 adapter.forward_fn "
-            "（按模型 forward 解包 batch）—— 异构 batch 会让 SDK fallback 误算\n"
-        )
-        sys.exit(2)
-    # WARN 不静默（plan §P5）：未提供业务 eval_fn → 退 teacher-student mse，精度仅自洽性参考。
-    sys.stderr.write(
-        "[run_bit_curve] WARN: 未提供业务 eval_fn（eval_fn_ref 空）→ 退 teacher-student mse。"
-        "该指标仅自洽性参考（量化模型 vs FP teacher 的 mse），不代表业务精度。\n"
-    )
-    eval_fn = build_teacher_student_eval_fn(
-        teacher_model=fp_model,
-        dataloader=eval_loader,
-        forward_fn=forward_fn,
-    )
-    return eval_fn, "mse", False
-
-
-def _dump_json(obj: dict[str, Any], path: Path) -> None:
-    """原子落盘 JSON（写 tmp → os.replace，中断不留半个文件）。"""
-    payload = json.dumps(obj, ensure_ascii=False, indent=2, default=str)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(payload, encoding="utf-8")
-    os.replace(tmp, path)
-
-
-def _free_model(q_model) -> None:
-    """显式释放量化模型，触发 Python GC + CUDA cache 回收。"""
-    if q_model is None:
-        return
-    try:
-        del q_model
-    except Exception:
-        pass
-    gc.collect()
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:
-        pass
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -238,6 +148,161 @@ def _point_metric(point: dict[str, Any]) -> float:
         if isinstance(v, (int, float)):
             return float(v)
     return 0.0
+
+
+# ─────────────────────────────────────────────────────────────────
+# bit_trend.json 解析（P1-3：逐层位宽热力图）
+# ─────────────────────────────────────────────────────────────────
+# bit_trend.json 是 SDK 自落盘到 search_dir 的逐层位宽趋势文件。**schema 未公开稳定**
+# （ts_quant 源不在本仓可探针处），本解析器按「合理兜底结构」多形态 fail-soft 解析：
+#   - {layer_name: bit_number}                    → 直接用
+#   - {layer_name: {"n_bits": N, ...}}            → 取 n_bits
+#   - {layer_name: {"w_n_bits": N, ...}}          → 取 w_n_bits（weight-only 量化）
+#   - [{"layer": name, "bit": N}, ...]            → list-of-records
+#   - {"layers": [{"name": name, "bit": N}, ...]} → 嵌套 list-of-records
+#   - {"records": [{...with layer_configs...}]}   → 退化取首个候选的 layer_configs
+# 任一形态匹配失败 → 返回 None + stderr warn（容错不阻断：bit_trend 非核心产出，
+# bit_curve_summary.json + frontier 表才是）。
+def _bit_from_value(v: Any) -> int | None:
+    """从 layer 的值字段抽 bit 数（支持标量 / dict{n_bits|w_n_bits|a_n_bits}）。
+
+    抽成 module-level 纯函数：``_load_bit_trend_layer_bits`` 与 ``_extract_records``
+    共用，便于单测直接调用。
+    """
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        iv = int(v)
+        return iv if iv > 0 else None
+    if isinstance(v, dict):
+        for k in ("n_bits", "w_n_bits", "a_n_bits", "bit", "bits"):
+            bv = v.get(k)
+            if isinstance(bv, (int, float)) and not isinstance(bv, bool):
+                iv = int(bv)
+                if iv > 0:
+                    return iv
+    return None
+
+
+def _load_bit_trend_layer_bits(bit_trend_path: Path) -> list[tuple[str, int]] | None:
+    """读 bit_trend.json → [(layer_name, n_bits), ...]，按 SDK 落盘原序。
+
+    找不到文件 / 解析失败 → None（caller 跳过本图并 stderr warn，不阻断主流程）。
+    """
+    if not bit_trend_path.is_file():
+        sys.stderr.write(f"[run_bit_curve] bit_trend.json 不存在：{bit_trend_path}（跳过 heatmap）\n")
+        return None
+    try:
+        raw = json.loads(bit_trend_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        sys.stderr.write(
+            f"[run_bit_curve] bit_trend.json 解析失败（跳过 heatmap）: {type(e).__name__}: {e}\n"
+        )
+        return None
+
+    pairs: list[tuple[str, int]] = []
+
+    # 形态 1/2：dict[layer_name, bit | dict]
+    if isinstance(raw, dict) and all(isinstance(k, str) for k in raw.keys()):
+        for name, v in raw.items():
+            b = _bit_from_value(v)
+            if b is not None:
+                pairs.append((name, b))
+        if pairs:
+            return pairs
+        # 形态 5：dict {"layers": [...]} 或 {"records": [...]}
+        for container_key in ("layers", "records", "trend"):
+            container = raw.get(container_key)
+            if isinstance(container, list):
+                extracted = _extract_records(container)
+                if extracted:
+                    return extracted
+
+    # 形态 4：list[{layer|name, bit|n_bits}]
+    if isinstance(raw, list):
+        extracted = _extract_records(raw)
+        if extracted:
+            return extracted
+
+    sys.stderr.write(
+        f"[run_bit_curve] bit_trend.json schema 未匹配任何已知形态（跳过 heatmap）；"
+        f"顶层类型={type(raw).__name__}，keys={list(raw.keys()) if isinstance(raw, dict) else 'list'}\n"
+    )
+    return None
+
+
+def _extract_records(records: list[Any]) -> list[tuple[str, int]]:
+    """从 list-of-records 抽 (layer, bit)。记录形态：{layer|name, bit|n_bits|w_n_bits}。
+
+    也兜底「records[0].layer_configs」的 dict[layer, QConfig-dict] 形态——某些 SDK 版本
+    把逐层配置嵌在单个 candidate record 里而非展平。
+    """
+    pairs: list[tuple[str, int]] = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        name = rec.get("layer") or rec.get("name") or rec.get("layer_name")
+        bit = (
+            _bit_from_value(rec.get("bit"))
+            or _bit_from_value(rec.get("n_bits"))
+            or _bit_from_value(rec.get("w_n_bits"))
+            or _bit_from_value(rec.get("a_n_bits"))
+        )
+        if isinstance(name, str) and name and bit is not None:
+            pairs.append((name, bit))
+    if pairs:
+        return pairs
+
+    # 兜底：首个记录的 layer_configs（dict[layer, QConfig dict]）
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        lc = rec.get("layer_configs")
+        if isinstance(lc, dict):
+            for name, v in lc.items():
+                b = _bit_from_value(v)
+                if isinstance(name, str) and name and b is not None:
+                    pairs.append((name, b))
+            if pairs:
+                return pairs
+    return pairs
+
+
+# ─────────────────────────────────────────────────────────────────
+# 寻优过程状态图（P1-4：cumulative best over evaluation order）
+# ─────────────────────────────────────────────────────────────────
+def _cumulative_best(
+    records: list[dict[str, Any]], y_direction: str
+) -> list[dict[str, float]]:
+    """从 archive records（按评估序）派生 ``[{order, best}]``，best = 累计最优。
+
+    - ``y_direction='max'`` → running max（higher-is-better，如业务 accuracy）
+    - ``y_direction='min'`` → running min（lower-is-better，如 mse）
+
+    空记录 / 无可解析 metric → 返回 []（caller 跳过本图 + stderr warn）。
+
+    抽成纯函数便于单测（Rule 9）：钉死累计最优的计算口径与边界（空 / 单点 / 全 NaN）。
+    注意：m0_pareto 是 report 一次性无代际推进，本图是「评估过程的累计最优近似」
+    ——caption 必须标注（避免误读成代际收敛曲线）。
+    """
+    if not records:
+        return []
+    is_max = y_direction == "max"
+    cur: float | None = None
+    out: list[dict[str, float]] = []
+    for i, rec in enumerate(records):
+        m = _point_metric(rec)
+        # 过滤 WORST_FITNESS 哨兵（infeasible/失败候选）——避免拉低 min 轴。
+        # _point_metric 的兜底 0.0 对 max 方向是噪声，但 archive 记录是真实评估，一般含
+        # primary_metric 真值；这里保守地接受任何数值（含 0）作为评估序的一个观测。
+        if cur is None:
+            cur = m
+        elif is_max and m > cur:
+            cur = m
+        elif not is_max and m < cur:
+            cur = m
+        out.append({"order": float(i), "best": float(cur)})
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -289,6 +354,7 @@ def _push_charts(
     selected_format_counts: dict[str, Any] | None,
     pareto_y_direction: str,
     archive_records: list[dict[str, Any]] | None,
+    bit_trend_path: Path | None,
 ) -> None:
     # chart 1：真 Pareto 前沿（chart_type=pareto；x=bit 恒 min 越小越好，y=metric 按方向）。
     # 用 frontier_points，去掉旧的 hue="series"——pareto 前端自动绘前沿线，
@@ -412,6 +478,82 @@ def _push_charts(
         caption="前沿候选明细；accuracy_loss=相对 FP baseline 的损失。",
     )
 
+    # P1-3 chart：逐层位宽分配（bar：x=layer, y=bit, per-row color 区分 format family）。
+    # 数据来自 SDK 自落盘 bit_trend.json（search_dir/bit_trend.json）。
+    # bit_trend schema 未稳定 → 多形态 fail-soft 解析；解析失败/文件缺失 → stderr warn 跳过。
+    if bit_trend_path is not None:
+        layer_bits = _load_bit_trend_layer_bits(bit_trend_path)
+        if layer_bits:
+            # 按层名出现序排（保持模型原始顺序，便于按结构读图）。
+            bar_rows = [
+                {
+                    "layer": name,
+                    "bit": bits,
+                    # 4/8 档用不同色阶直观区分低位宽/高位宽混合。
+                    "color": "#D4605A" if bits <= 4 else "#5B8DB8",
+                }
+                for name, bits in layer_bits
+            ]
+            try:
+                render_chart(
+                    chart_type="bar",
+                    data=bar_rows,
+                    label=CHART_LABEL,
+                    title="Per-layer Bit-width Assignment (selected)",
+                    x="layer",
+                    y="bit",
+                    color="color",
+                    x_label="模型层（SDK 原序）",
+                    y_label="位宽（bit）",
+                    caption=(
+                        "选中候选（或 bit_trend 代表候选）的逐层位宽分配。"
+                        "珊瑚=低位宽（≤4，int4/mx4），钢蓝=高位宽（>4，int8/mx8）。"
+                        "源自 search_artifacts/bit_trend.json；schema 未稳定时按多形态兜底解析。"
+                    ),
+                )
+                sys.stderr.write(
+                    f"[run_bit_curve] pushed per-layer bit bar: {len(bar_rows)} layers\n"
+                )
+            except Exception as e:
+                sys.stderr.write(
+                    f"[run_bit_curve] per-layer bit bar 推送失败（不阻断）: {e}\n"
+                )
+
+    # P1-4 chart：寻优过程状态图（cumulative best over evaluation order）。
+    # m0_pareto 是一次性 report 无代际推进，但从 archive records（按评估序）可派生
+    # 「评估过程的累计最优近似」。非代际收敛曲线——caption 显式标注。
+    if archive_records:
+        prog_rows = _cumulative_best(archive_records, pareto_y_direction)
+        if prog_rows:
+            try:
+                render_chart(
+                    chart_type="line",
+                    data=prog_rows,
+                    label=CHART_LABEL,
+                    title="Search Progress — cumulative best",
+                    x="order",
+                    y="best",
+                    x_label="评估序号（archive.records 原序）",
+                    y_label=f"累计最优 {metric_kind}（方向 {pareto_y_direction}）",
+                    caption=(
+                        f"非代际推进曲线；m0_pareto 是一次性 report。本图按 archive records 的评估序累加"
+                        f"当前最优 {metric_kind}（方向 {pareto_y_direction}：max=越高越好，min=越低越好），"
+                        "作为「寻优过程状态」的近似可视化。"
+                    ),
+                )
+                sys.stderr.write(
+                    f"[run_bit_curve] pushed cumulative-best line: {len(prog_rows)} points "
+                    f"(direction={pareto_y_direction})\n"
+                )
+            except Exception as e:
+                sys.stderr.write(
+                    f"[run_bit_curve] cumulative-best line 推送失败（不阻断）: {e}\n"
+                )
+        else:
+            sys.stderr.write(
+                "[run_bit_curve] archive_records 非空但 _cumulative_best 返回空 → 跳过 progress 图\n"
+            )
+
 
 def _render_charts(
     frontier_points: list[dict[str, Any]],
@@ -420,6 +562,7 @@ def _render_charts(
     selected_format_counts: dict[str, Any] | None,
     pareto_y_direction: str,
     archive_records: list[dict[str, Any]] | None,
+    bit_trend_path: Path | None,
 ) -> None:
     try:
         from orca.chart import render_chart
@@ -434,6 +577,7 @@ def _render_charts(
         selected_format_counts,
         pareto_y_direction,
         archive_records,
+        bit_trend_path,
     )
 
 
@@ -870,6 +1014,9 @@ def main() -> int:
         )
 
     # charts
+    # bit_trend.json 由 SDK 自落盘到 search_dir；不存在时传 None → _push_charts 跳过本图
+    # （与 _load_bit_trend_layer_bits 内部 is_file 判定双保险，少一次 file open）。
+    bit_trend_path = search_dir / "bit_trend.json"
     _render_charts(
         frontier_points,
         selected_id,
@@ -877,9 +1024,16 @@ def main() -> int:
         selected_format_counts,
         pareto_y_direction,
         archive_records,
+        bit_trend_path if bit_trend_path.is_file() else None,
     )
 
     # stdout JSON 摘要（agent 原样回显）
+    # P2-7：candidates_evaluated 语义=候选数，优先 len(archive_records)（真实评估的候选），
+    # 回退 report.eval_calls（含诊断锚点等非候选评估，字段名相同但语义偏大）。
+    candidates_evaluated = (
+        len(archive_records) if archive_records
+        else (int(eval_calls) if isinstance(eval_calls, (int, float)) else 0)
+    )
     out = {
         "output_dir": str(output_dir),
         "report_path": str(summary_path),
@@ -888,7 +1042,7 @@ def main() -> int:
         "best_config": best_config_label,
         "best_metric": reported_best_metric if reported_best_metric is not None else 0.0,
         "best_bit": float(best_bit) if isinstance(best_bit, (int, float)) else 0.0,
-        "candidates_evaluated": int(eval_calls) if isinstance(eval_calls, (int, float)) else 0,
+        "candidates_evaluated": candidates_evaluated,
         "mode": mode,
         "metric_kind": metric_kind,
     }

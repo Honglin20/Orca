@@ -182,12 +182,12 @@ def test_ac5a_happy_path_emits_viz_env_status_and_empty_reasons(tmp_path, viz_ha
         target_latency_ms=10.0, accuracy_target=0.87,
     )
     assert result["viz_env_status"] == "ok"
-    assert set(result["charts"].keys()) == {"champion_trace", "pareto", "candidate_table"}
+    assert set(result["charts"].keys()) == {"champion_trace", "champion_accuracy_trace", "pareto", "candidate_table"}
     for name, info in result["charts"].items():
         assert info["pushed"] is True, f"{name} not pushed"
         assert info["reason"] == "", f"{name} reason should be empty"
-    # 三张图都真调了 render_chart
-    assert len(viz_harness.calls) == 3
+    # 四张图都真调了 render_chart（P7 三张 + 2026-07-24 P2-1 accuracy champion trace）
+    assert len(viz_harness.calls) == 4
 
 
 def test_ac5a_env_missing_when_no_env_file(tmp_path, viz_harness, clean_orca_env):
@@ -406,7 +406,7 @@ def test_ac5a_main_fallback_emits_generic_json_on_exception(tmp_path, viz_harnes
     for name, info in out["charts"].items():
         assert info["pushed"] is False
         assert info["reason"].startswith("generic:OSError:disk full"), f"{name}: {info}"
-    assert set(out["charts"].keys()) == {"champion_trace", "pareto", "candidate_table"}
+    assert set(out["charts"].keys()) == {"champion_trace", "champion_accuracy_trace", "pareto", "candidate_table"}
 
 
 def test_main_fallback_compare_mode_emits_compare_bar_generic(tmp_path, viz_harness, clean_orca_env, capsys):
@@ -449,7 +449,7 @@ def test_main_happy_path_default_mode_exits_zero(tmp_path, viz_harness, clean_or
     assert exit_code == 0
     out = json.loads(captured.out)
     assert out["viz_env_status"] == "env_loaded_from_file"
-    assert set(out["charts"].keys()) == {"champion_trace", "pareto", "candidate_table"}
+    assert set(out["charts"].keys()) == {"champion_trace", "champion_accuracy_trace", "pareto", "candidate_table"}
 
 
 def test_main_requires_ledger_in_default_mode(capsys, tmp_path, viz_harness, clean_orca_env):
