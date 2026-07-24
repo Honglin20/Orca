@@ -10,7 +10,7 @@
 
 **状态**：DAG 重构全完成。`setup`（扩展 step 8 GPU 预检）→ `gate`（新 `gate_all.py` 串行遍历全部变体，FAIL_latency 当场增量落账，ACCEPTED 写 `gate_manifest.json`）→ `train`（新 `train_pool.py` 吃 manifest 做有界并发蒸馏：VRAM 再校验 + round-robin 绑卡 + `as_completed` 增量账本）→ `$end`。删 `kd-selector`/`kd-distill`/`kd-recorder` agent 目录（脚本全保留被复用）。`train_variants_parallel.py` → `train_pool.py`（只做训练阶段）。
 
-**验证**：✅ `tars validate` 过；✅ `pytest tests/workflows/` **258 passed**（含 v2 gate_all/train_pool/gpu_probe 单测 + wf.outputs 在 gate→$end 路径渲染回归 + worker exception handler 字段齐全）；✅ code-reviewer 🔴（outputs 渲染崩）+ 关键 🟡（CONTRACTS cfg_hash / gpu_probe teacher_cache 政策 / worker handler 测试 / DRY 抽 helper）全修。⏳ 真机 E2E（opencode+deepseek-v4-flash，GPU 机）待后续 agent 执行。
+**验证**：✅ `tars validate` 过；✅ `pytest tests/workflows/` **258 passed**（含 v2 gate_all/train_pool/gpu_probe 单测 + wf.outputs 在 gate→$end 路径渲染回归 + worker exception handler 字段齐全）；✅ code-reviewer 🔴（outputs 渲染崩）+ 关键 🟡（CONTRACTS cfg_hash / gpu_probe teacher_cache 政策 / worker handler 测试 / DRY 抽 helper）全修。✅ **E2E 靶子已就绪**：`examples/kd-nas-demo/`（commit `02b927b`）逐字满足 inputs 契约，setup/gate/train 三节点确定性后端脚本（teacher_setup / tune_latency / train_adapter[OFD+EMA] / gpu_probe / measure_student）已单跑通。⏳ 真机 orca E2E（opencode+deepseek-v4-flash，GPU 机）待后续 test-agent 用此 demo 执行。
 
 **关键决策**：setup = 并发数唯一权威（gpu_probe 算）；确定性 gate 不加 LLM adjust 循环；时延测量必串行（gate 串行，train `--skip_latency` 复用 HI-1）；`outputs:` 不引 `train.output.X`（in-session step.py 不支持 per-route output，gate→$end 时 train 跳过 → outputs 只暴露 setup+gate 字段）。
 
@@ -29,6 +29,7 @@
 ## 近期已完成（详见 CHANGELOG）
 
 - ✅ KD-NAS v2 setup→gate→train DAG 重构
+- ✅ kd-nas-demo E2E 测试靶子（commit `02b927b`；setup/gate/train 契约对齐 + 集成脚本单跑通）
 - ✅ `tars close` 命令（commit `59d73dd`）
 - ✅ in-session bootstrap 注册项目
 - ✅ Workflow 可视化审计修复（P1×5 + P2×7）
