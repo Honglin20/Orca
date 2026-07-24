@@ -1,17 +1,14 @@
-"""test_unit_tools.py —— MCP v4 9 工具单元测试（SPEC phase-10 §2 / §2.4b v2）。
+"""test_unit_tools.py —— MCP v4 8 工具单元测试（SPEC phase-10 §2 / §2.4b v2 + in-session v5 §6.2）。
 
-覆盖 9 工具（Discovery 4 + Lifecycle 3 + History 2）的核心 intent：
+覆盖 8 工具（Discovery 3 + Lifecycle 3 + History 2）的核心 intent：
 
 **Discovery 组**：
-  - list_workflows 返 has_setup 标记
-  - describe_workflow 返 setup phase 元信息
-  - get_agent_prompt 借 prompt 文本（from workflow.setup / pool）
+  - list_workflows 返 inputs_schema（无 has_setup，in-session v5 §6.2 删 setup 全栈）
+  - describe_workflow 返 inputs_schema
   - list_agents 扫 agent 池
 
 **Lifecycle 组**：
-  - start_workflow v4 签名（name-based + setup_outputs）+ Result 信封
-  - start_workflow setup_required → kind=business_config + 引导 _hint（三重杠杆 B）
-  - start_workflow setup_outputs_mismatch → kind=business_config
+  - start_workflow name-based 签名 + Result 信封
   - start_workflow 不阻塞（HandleId pattern）
   - get_task_status 4 status（无 needs_decision）+ Result 信封
   - cancel_task Result 信封
@@ -23,7 +20,6 @@
 **信封 / kind 铁律**：
   - 所有 tool 返 ``{ok, data?, error?, _hint?}``
   - error.kind 是 ErrorKind 值（无 layer）
-  - setup_required/setup_outputs_mismatch → kind=business_config（SPEC §2.4b）
 """
 
 from __future__ import annotations
@@ -87,10 +83,11 @@ def test_result_to_dict_err_with_kind_no_layer():
 # ── Discovery 组 ─────────────────────────────────────────────────────────────
 
 
-def test_list_workflows_returns_has_setup_flag(tmp_path, monkeypatch):
-    """list_workflows 返 has_setup 标记（三重杠杆 A）。
+def test_list_workflows_returns_inputs_schema_no_has_setup(tmp_path, monkeypatch):
+    """list_workflows 返 inputs_schema（无 has_setup，in-session v5 §6.2）。
 
-    合成 workflows/demo.yaml（无 setup）→ has_setup=False。monkeypatch catalog 目录。
+    合成 workflows/demo.yaml（无 setup）。monkeypatch catalog 目录。setup phase 删除后
+    ``has_setup`` key 不再出现在 list_workflows 返回值（B3 守门，方向一致）。
     """
     wf_dir = tmp_path / "workflows"
     wf_dir.mkdir()
@@ -109,7 +106,7 @@ nodes:
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        "orca.iface.mcp.catalog._workflow_dirs",
+        "orca.compile.catalog._workflow_dirs",
         lambda: [wf_dir],
     )
 
@@ -120,49 +117,10 @@ nodes:
     workflows = result["data"]["workflows"]
     assert len(workflows) == 1
     assert workflows[0]["name"] == "demo"
-    assert workflows[0]["has_setup"] is False
-    assert "has_setup" in result["_hint"]  # 三重杠杆 A hint
-
-
-def test_list_workflows_has_setup_true(tmp_path, monkeypatch):
-    """合成 setup workflow → has_setup=True。"""
-    wf_dir = tmp_path / "workflows"
-    wf_dir.mkdir()
-    (wf_dir / "setup_wf.yaml").write_text(
-        """
-name: setup_wf
-description: has setup
-setup:
-  - name: collector
-    kind: agent
-    prompt: "collect info"
-    output_schema:
-      type: object
-      properties:
-        host: {type: string}
-      required: [host]
-entry: deploy
-nodes:
-  - name: deploy
-    kind: script
-    command: "echo deploy"
-    routes:
-      - to: $end
-""",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        "orca.iface.mcp.catalog._workflow_dirs",
-        lambda: [wf_dir],
-    )
-
-    server, _ = _make_server_with_mock_manager()
-    result = run_async(server.tool_list_workflows())
-
-    assert result["ok"] is True
-    workflows = result["data"]["workflows"]
-    assert len(workflows) == 1
-    assert workflows[0]["has_setup"] is True
+    # in-session v5 §6.2：has_setup key 不存在（setup 全栈删）
+    assert "has_setup" not in workflows[0]
+    # inputs_schema 仍是 list（v5 §2.3 选 wf + 抽 inputs）
+    assert "inputs_schema" in workflows[0]
 
 
 def test_describe_workflow_not_found_returns_business_config():
@@ -174,165 +132,7 @@ def test_describe_workflow_not_found_returns_business_config():
     assert "list_workflows" in result["_hint"]
 
 
-def test_describe_workflow_returns_setup_metadata(tmp_path, monkeypatch):
-    """describe_workflow 返 setup phase 元信息（agent names + output_schema）。"""
-    wf_dir = tmp_path / "workflows"
-    wf_dir.mkdir()
-    (wf_dir / "setup_wf.yaml").write_text(
-        """
-name: setup_wf
-description: has setup
-setup:
-  - name: collector
-    kind: agent
-    prompt: "collect info"
-    output_schema:
-      type: object
-      properties:
-        host: {type: string}
-      required: [host]
-entry: deploy
-nodes:
-  - name: deploy
-    kind: script
-    command: "echo {{ setup.collector.output.host }}"
-    routes:
-      - to: $end
-""",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        "orca.iface.mcp.catalog._workflow_dirs",
-        lambda: [wf_dir],
-    )
-
-    server, _ = _make_server_with_mock_manager()
-    result = run_async(server.tool_describe_workflow(name="setup_wf"))
-
-    assert result["ok"] is True
-    data = result["data"]
-    assert data["has_setup"] is True
-    assert len(data["setup"]) == 1
-    assert data["setup"][0]["name"] == "collector"
-    assert data["setup"][0]["output_schema"]["properties"]["host"]["type"] == "string"
-    # hint 引导 setup 流程
-    assert "get_agent_prompt" in result["_hint"]
-
-
-def test_get_agent_prompt_from_workflow_setup(tmp_path, monkeypatch):
-    """get_agent_prompt(workflow=...) 借 setup agent prompt 文本。"""
-    wf_dir = tmp_path / "workflows"
-    wf_dir.mkdir()
-    (wf_dir / "setup_wf.yaml").write_text(
-        """
-name: setup_wf
-description: has setup
-setup:
-  - name: collector
-    kind: agent
-    prompt: "Ask user for NAS host and backup strategy."
-    output_schema:
-      type: object
-      properties:
-        host: {type: string}
-      required: [host]
-entry: deploy
-nodes:
-  - name: deploy
-    kind: script
-    command: "echo deploy"
-    routes:
-      - to: $end
-""",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        "orca.iface.mcp.catalog._workflow_dirs",
-        lambda: [wf_dir],
-    )
-
-    server, _ = _make_server_with_mock_manager()
-    result = run_async(
-        server.tool_get_agent_prompt(name="collector", workflow="setup_wf")
-    )
-
-    assert result["ok"] is True
-    data = result["data"]
-    assert data["name"] == "collector"
-    assert "NAS host" in data["prompt"]
-    # hint 引导 setup_outputs
-    assert "setup_outputs" in result["_hint"]
-
-
-def test_get_agent_prompt_setup_agent_not_in_workflow(tmp_path, monkeypatch):
-    """workflow 存在但 setup agent name 不匹配 → business_config error。"""
-    wf_dir = tmp_path / "workflows"
-    wf_dir.mkdir()
-    (wf_dir / "setup_wf.yaml").write_text(
-        """
-name: setup_wf
-description: has setup
-setup:
-  - name: collector
-    kind: agent
-    prompt: "collect"
-entry: deploy
-nodes:
-  - name: deploy
-    kind: script
-    command: "echo deploy"
-    routes:
-      - to: $end
-""",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        "orca.iface.mcp.catalog._workflow_dirs",
-        lambda: [wf_dir],
-    )
-
-    server, _ = _make_server_with_mock_manager()
-    result = run_async(
-        server.tool_get_agent_prompt(name="wrong_name", workflow="setup_wf")
-    )
-    assert result["ok"] is False
-    assert result["error"]["kind"] == "business_config"
-
-
 # ── Lifecycle 组 ─────────────────────────────────────────────────────────────
-
-
-def _setup_workflow_yaml(tmp_path, monkeypatch):
-    """在 tmp_path/workflows/ 放合成 setup workflow（三重杠杆 E2E 共用）。"""
-    wf_dir = tmp_path / "workflows"
-    wf_dir.mkdir()
-    (wf_dir / "setup_wf.yaml").write_text(
-        """
-name: setup_wf
-description: has setup
-setup:
-  - name: collector
-    kind: agent
-    prompt: "collect info"
-    output_schema:
-      type: object
-      properties:
-        host: {type: string}
-      required: [host]
-entry: deploy
-nodes:
-  - name: deploy
-    kind: script
-    command: "echo {{ setup.collector.output.host }}"
-    routes:
-      - to: $end
-""",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        "orca.iface.mcp.catalog._workflow_dirs",
-        lambda: [wf_dir],
-    )
 
 
 def test_start_workflow_no_setup_completes(tmp_path, monkeypatch):
@@ -354,7 +154,7 @@ nodes:
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        "orca.iface.mcp.catalog._workflow_dirs",
+        "orca.compile.catalog._workflow_dirs",
         lambda: [wf_dir],
     )
 
@@ -370,88 +170,10 @@ nodes:
     mock_manager.start_run.assert_awaited_once()
 
 
-def test_start_workflow_setup_required_three_lever_b(tmp_path, monkeypatch):
-    """三重杠杆 B：start_workflow has_setup=true + setup_outputs=None → business_config。"""
-    _setup_workflow_yaml(tmp_path, monkeypatch)
-    server, mock_manager = _make_server_with_mock_manager()
-    mock_manager.start_run = AsyncMock(return_value="should_not_be_called")
-
-    result = run_async(
-        server.tool_start_workflow(name="setup_wf", setup_outputs=None)
-    )
-
-    assert result["ok"] is False
-    assert result["error"]["kind"] == "business_config"
-    assert "setup" in result["error"]["message"].lower()
-    # 引导性 _hint（杠杆 B 核心）
-    assert "describe_workflow" in result["_hint"]
-    assert "get_agent_prompt" in result["_hint"]
-    # start_run 不应被调（fail loud 在 manager 之前）
-    mock_manager.start_run.assert_not_awaited()
-
-
-def test_start_workflow_setup_outputs_mismatch(tmp_path, monkeypatch):
-    """setup_outputs key 不匹配 → kind=business_config + mismatch hint。"""
-    _setup_workflow_yaml(tmp_path, monkeypatch)
-    server, mock_manager = _make_server_with_mock_manager()
-    mock_manager.start_run = AsyncMock(return_value="should_not_be_called")
-
-    result = run_async(
-        server.tool_start_workflow(
-            name="setup_wf",
-            setup_outputs={"wrong_agent": {"host": "x"}},
-        )
-    )
-
-    assert result["ok"] is False
-    assert result["error"]["kind"] == "business_config"
-    assert "mismatch" in result["error"]["message"].lower()
-    # mismatch hint 引导
-    assert "keys must match" in result["_hint"]
-    mock_manager.start_run.assert_not_awaited()
-
-
-def test_start_workflow_setup_outputs_schema_invalid(tmp_path, monkeypatch):
-    """setup_outputs schema 校验失败（缺 required 字段）→ kind=business_config。"""
-    _setup_workflow_yaml(tmp_path, monkeypatch)
-    server, mock_manager = _make_server_with_mock_manager()
-    mock_manager.start_run = AsyncMock(return_value="should_not_be_called")
-
-    result = run_async(
-        server.tool_start_workflow(
-            name="setup_wf",
-            setup_outputs={"collector": {}},  # 缺 required host
-        )
-    )
-
-    assert result["ok"] is False
-    assert result["error"]["kind"] == "business_config"
-    assert "collector" in result["error"]["message"]
-    mock_manager.start_run.assert_not_awaited()
-
-
-def test_start_workflow_setup_outputs_valid_passes(tmp_path, monkeypatch):
-    """setup_outputs 校验通过 → 启动成功（start_run 被调）。"""
-    _setup_workflow_yaml(tmp_path, monkeypatch)
-    server, mock_manager = _make_server_with_mock_manager()
-    mock_manager.start_run = AsyncMock(return_value="run_ok")
-
-    result = run_async(
-        server.tool_start_workflow(
-            name="setup_wf",
-            setup_outputs={"collector": {"host": "nas1.example.com"}},
-        )
-    )
-
-    assert result["ok"] is True
-    assert result["data"]["task_id"] == "run_ok"
-    mock_manager.start_run.assert_awaited_once()
-
-
 def test_start_workflow_not_in_catalog(tmp_path, monkeypatch):
     """start_workflow 未知 name → business_config error。"""
     monkeypatch.setattr(
-        "orca.iface.mcp.catalog._workflow_dirs",
+        "orca.compile.catalog._workflow_dirs",
         lambda: [tmp_path / "nonexistent"],
     )
     server, mock_manager = _make_server_with_mock_manager()
@@ -484,7 +206,7 @@ nodes:
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        "orca.iface.mcp.catalog._workflow_dirs",
+        "orca.compile.catalog._workflow_dirs",
         lambda: [wf_dir],
     )
 
@@ -493,7 +215,7 @@ nodes:
     short_runs.parent.mkdir(parents=True, exist_ok=True)
     manager = RunManager(runs_dir=short_runs)
 
-    async def slow_run_with_sem(handle, inputs, task, max_iter, setup_outputs=None):
+    async def slow_run_with_sem(handle, inputs, task, max_iter):
         await asyncio.sleep(5)
         handle.status = "completed"
 
@@ -674,11 +396,11 @@ def test_get_agent_returns_prompt_preview(tmp_path, monkeypatch):
     assert "Do the thing" in result["data"]["prompt_preview"]
 
 
-# ── FastMCP 注册 9 工具 ──────────────────────────────────────────────────────
+# ── FastMCP 注册 8 工具（in-session v5 §6.2 删 get_agent_prompt）─────────────────
 
 
-def test_fastmcp_lists_nine_tools():
-    """FastMCP 注册 9 工具（v4 SPEC §2.1）。"""
+def test_fastmcp_lists_eight_tools():
+    """FastMCP 注册 8 工具（v4 SPEC §2.1 + in-session v5 §6.2 删 get_agent_prompt）。"""
     m = RunManager()
     server = OrcaMcpServer(m)
     tools = server._mcp._tool_manager._tools
@@ -687,7 +409,6 @@ def test_fastmcp_lists_nine_tools():
         "list_workflows",
         "describe_workflow",
         "list_agents",
-        "get_agent_prompt",
         "start_workflow",
         "get_task_status",
         "cancel_task",
@@ -705,11 +426,20 @@ def test_no_resolve_gate_in_v4():
     assert "resolve_gate" not in tools
 
 
+def test_no_get_agent_prompt_after_setup_removal():
+    """in-session v5 §6.2 删 get_agent_prompt（setup phase 全栈删）。"""
+    m = RunManager()
+    server = OrcaMcpServer(m)
+    assert not hasattr(server, "tool_get_agent_prompt")
+    tools = server._mcp._tool_manager._tools
+    assert "get_agent_prompt" not in tools
+
+
 def test_tool_docstrings_contain_chain_instruction():
     """每个 tool 的 docstring 必须含显式 chain 调指令（SPEC §2.6 杠杆 C）。"""
     m = RunManager()
     server = OrcaMcpServer(m)
-    # start_workflow docstring 含 setup 引导
+    # start_workflow docstring 含 describe_workflow 引导
     assert "describe_workflow" in server.tool_start_workflow.__doc__
     # get_task_status docstring 含 poll 引导
     assert "get_task_status" in server.tool_start_workflow.__doc__

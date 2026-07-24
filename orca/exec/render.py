@@ -47,17 +47,12 @@ def _namespace(ctx: RunContext) -> dict[str, Any]:
     - 每个 node 的 output：以 node 名为 key 放顶层（``ctx.outputs`` 展开），
       支持 ``{{ optimizer.output.structure }}`` 这种点路径（``outputs["optimizer"]
       = {"output": {...}}``，故 ``{{ optimizer.output.structure }}`` 取得到）
-    - ``setup``：setup phase outputs（``{{ setup.<agent>.output.<field> }}``），
-      形状 ``{agent_name: {"output": {...}}}``（与 node outputs 同形）。无 setup phase → 空 dict。
     - ``locals``：foreach body 注入的局部变量（``{{ item }}`` / ``{{ _index }}``）
       摊到顶层；普通 node ``locals`` 为空 dict（无影响）。
     """
     ns: dict[str, Any] = {"inputs": dict(ctx.inputs)}
     # ctx.outputs 的 key（node 名）直接做顶层变量，value（{"output": raw} dict）原样暴露
     ns.update(ctx.outputs)
-    # setup phase outputs：暴露为 setup 根（{{ setup.<agent>.output.<field> }}）。
-    # 无 setup phase 时 ctx.setup 为空 dict，不影响现有模板。
-    ns["setup"] = ctx.setup
     # ctx.locals 摊顶层（foreach body 的 item / _index；普通 node 为空，update 无影响）
     ns.update(ctx.locals)
     return ns

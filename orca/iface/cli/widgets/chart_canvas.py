@@ -1,7 +1,7 @@
 """chart_canvas.py —— 单个 ChartPayload 渲染器（phase-12 SPEC §1.2 §6.4）。
 
 按 ``chart_type`` 分派：line/bar/area/scatter/pareto → plotext braille；table →
-Textual ``DataTable``；radar → DataTable 降级 +「见 Web」提示；未知 ``chart_type``
+Textual ``DataTable``；radar / heatmap → DataTable 降级 +「见 Web」提示；未知 ``chart_type``
 → fail loud（对齐 web ``ChartWidget.tsx:30``）。
 
 设计原则：
@@ -9,8 +9,10 @@ Textual ``DataTable``；radar → DataTable 降级 +「见 Web」提示；未知
     line/bar/area/scatter/pareto **必须 braille 渲染**（SPEC §6.1）。缺包仅开发期
     monkeypatch 测试降级（SPEC §6.4），生产路径不降级。
   - **壳无真相**：``render_payload(payload)`` 只渲染传入的 dict；不订阅、不读 tape。
-  - **依赖单向**：仅 import textual + plotext（探测式）+ stdlib；**不** import
-    ``orca.exec`` / ``orca.run`` / ``orca.iface.mcp`` / chart-producer（SPEC §0.3）。
+  - **依赖单向**：仅 import textual + plotext（探测式）+ stdlib + ``orca.chart._limits``
+    纯常量层（允许：_limits 零依赖、是 chart 包常量真相源，与 events/chart_ingestor 同模式）；
+    **不** import ``orca.exec`` / ``orca.run`` / ``orca.iface.mcp`` / chart-producer 渲染逻辑
+    （SPEC §0.3）。
 """
 
 from __future__ import annotations
@@ -19,6 +21,8 @@ import logging
 from typing import Any
 
 from textual.widgets import Static
+
+from orca.chart._limits import ALLOWED_CHART_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +41,10 @@ except Exception:  # noqa: BLE001 —— 缺包是开发期降级路径，生产
         "生产 install 含 textual-plotext，不应缺包。",
     )
 
-# 7 种合法 chart_type（逐字复用 web ``types.ts`` ChartType，SPEC §2.1 DRY）。
-_CHART_TYPES = {"line", "bar", "area", "scatter", "pareto", "radar", "table"}
-# 走 plotext braille 渲染的类型（SPEC §1.2 决策）。
+# chart_type 集合来自 ``_limits.ALLOWED_CHART_TYPES``（单一来源，与 web/backend/events/ingestor
+# 同源；防三端 drift）。复制 allowlist 是项目硬规则明确禁止（_limits.py docstring）。
+_CHART_TYPES = ALLOWED_CHART_TYPES
+# 走 plotext braille 渲染的类型（SPEC §1.2 决策；radar/heatmap/table 不在其中）。
 _PLOTEXT_TYPES = {"line", "bar", "area", "scatter", "pareto"}
 
 
@@ -86,13 +91,30 @@ class ChartCanvas(Static):
         data = payload.get("data", [])
         title = payload.get("title", "")
         label = payload.get("label", "")
+        caption = payload.get("caption", "")
 
         if ctype == "table":
-            self._render_table(data, payload.get("columns"), title)
+            self._render_table(data, payload.get("columns"), title, caption=caption)
         elif ctype == "radar":
             # 终端性价比低 → DataTable 降级 +「见 Web」提示（SPEC §1.2 决策）。
             self._render_table(
-                data, payload.get("columns"), title, hint="（radar 终端降级，完整图见 Web）",
+                data, payload.get("columns"), title,
+                hint="（radar 终端降级，完整图见 Web）",
+                caption=caption,
+            )
+        elif ctype == "heatmap":
+            # 热力图终端性价比低（行×列色阶在文本态不可读）→ DataTable 降级 +「见 Web」
+            # 提示（与 radar 同策略，SPEC §1.2 决策）。完整色阶渲染见 Web 面板。
+            # x_label/y_label 拼进 hint（TUI 降级无轴标题位，但语义要保留，不静默丢）。
+            x_label = payload.get("x_label") or ""
+            y_label = payload.get("y_label") or ""
+            axis_hint = (
+                f"（轴：{y_label} × {x_label}）" if (x_label or y_label) else ""
+            )
+            self._render_table(
+                data, payload.get("columns"), title,
+                hint=f"（heatmap 终端降级，完整色阶矩阵见 Web）{axis_hint}",
+                caption=caption,
             )
         elif ctype in _PLOTEXT_TYPES:
             if _PLOTEXT_OK:
@@ -102,6 +124,7 @@ class ChartCanvas(Static):
                 self._render_table(
                     data, payload.get("columns"), title,
                     hint=f"（{ctype} plotext 缺包，已降级 DataTable）",
+                    caption=caption,
                 )
         else:  # 不可达（_CHART_TYPES 已穷尽），防御 fail loud。
             self._set_text(f"未知 chart_type: {ctype!r}")
@@ -131,9 +154,17 @@ class ChartCanvas(Static):
         x_key = payload.get("x")
         y_key = payload.get("y")
         hue = payload.get("hue")
+        # 轴标签：x_label/y_label 优先（人话），空回退字段名（x/y）。
+        # 解「图表看不懂」根因 C：原仅显示字段名（schema 名作 label），加显式 label 覆盖。
+        x_label = payload.get("x_label") or (x_key or "")
+        y_label = payload.get("y_label") or (y_key or "")
+        caption = payload.get("caption") or ""
 
         if not isinstance(data, list) or not data:
-            self._set_text(f"[{label}] {title}\n（无数据）")
+            empty_text = f"[{label}] {title}\n（无数据）"
+            if caption:
+                empty_text += f"\n  {caption}"
+            self._set_text(empty_text)
             return
 
         # 按 hue 分系列（若指定）；否则单系列。
@@ -189,6 +220,12 @@ class ChartCanvas(Static):
 
         if title:
             _plt.title(title)
+        # 轴标签：plotext xlabel/ylabel（空值不调用，保 plotext 默认行为）。
+        # x_label/y_label 优先（人话），空回退字段名（让用户至少看到 schema 名）。
+        if x_label:
+            _plt.xlabel(x_label)
+        if y_label:
+            _plt.ylabel(y_label)
         # 限定 canvas 大小（让 build 输出可控宽度）。
         try:
             _plt.plotsize(None, 20)
@@ -196,7 +233,9 @@ class ChartCanvas(Static):
             pass
         rendered = _plt.build()
         prefix = f"[{label}] " if label else ""
-        self._set_text(prefix + rendered)
+        # caption：图下小字说明（缩进 2 与 chart_panel 焦点图缩进一致）。
+        suffix = f"\n  {caption}" if caption else ""
+        self._set_text(prefix + rendered + suffix)
 
     # ── DataTable 降级 / table 类型 ─────────────────────────────────────────
 
@@ -206,6 +245,7 @@ class ChartCanvas(Static):
         columns: list[str] | None,
         title: str,
         hint: str = "",
+        caption: str = "",
     ) -> None:
         """渲染为文本表格（table 类型 / 降级路径）。
 
@@ -213,7 +253,9 @@ class ChartCanvas(Static):
         对齐表格写入 Static——足够 NodeDetail 图表 tab 的可读性，且 headless 测试简单。
         """
         if not isinstance(data, list) or not data:
-            self._set_text(f"{title}\n（无数据）{hint}".strip())
+            # 空数据分支也追加 caption（与 _render_plotext 一致，防 caption 静默丢）。
+            parts = [p for p in (title, "（无数据）", hint, caption) if p]
+            self._set_text("\n".join(parts))
             return
         # 推导列。
         if columns:
@@ -234,7 +276,12 @@ class ChartCanvas(Static):
                 rows.append(_truncate(rec))
         body = "\n".join([header, sep, *rows])
         head = f"{title}\n" if title else ""
-        tail = f"\n{hint}" if hint else ""
+        tail_parts = []
+        if hint:
+            tail_parts.append(hint)
+        if caption:
+            tail_parts.append(caption)
+        tail = ("\n" + "\n".join(tail_parts)) if tail_parts else ""
         self._set_text(head + body + tail)
 
     @property

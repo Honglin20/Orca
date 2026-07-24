@@ -2,27 +2,215 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Skeleton global styling; phase 9c/9d will flesh out the design system. */
+/* ── Global layout ────────────────────────────────────────────────────────────
+ * Skeleton global styling; phase 9c/9d will flesh out the design system.
+ */
 html,
 body,
 #root {
   height: 100%;
 }
 
-/* ── Chart theme CSS vars（chartTheme.getCSSVar 读，phase 9d 迁移自 AgentHarness）──
- * 学术配色需主题感知（明暗自适应）；此处提供 chartTheme 读取的 CSS 变量（空格 HSL，对齐
- * Tailwind 设计 token）。未定义时 chartTheme 有 fallback（getCSSVar 返回 #888）。 */
+/* ── Design tokens（SPEC §P5b 接口契约表）────────────────────────────────────
+ * 明暗双套 token（RGB 三元组空格分隔，Tailwind v3 rgb(var(--x) / <alpha>) 兼容）。
+ * 4 级文字层次：--text / --text-muted / --text-faint + title（无 token，靠字号区分）；
+ * 3 级表面：--app-bg（页面）/ --surface（卡片）/ --surface-2（hover/嵌套）；
+ * 1 强调色：--accent（钢蓝 = PALETTE[0]，品牌与图表第一色一致，active/选中专用）；
+ * 图表坐标轴专用：--axis-tick（比 --text-muted 更深一档，对比度足以读数）；
+ * --border：分隔线/卡片描边。--background/--foreground 保留作 tooltip 中性色（向后兼容）。
+ *
+ * 暗色模式跟随系统（prefers-color-scheme）。token 是 P5b 渐进迁移起点：新组件强制 token；
+ * 旧组件散落的 slate-* 暂不一次性重写（SPEC §P5b 方案 8：避免大爆炸 diff）。
+ */
 :root {
-  --border: 214 229 236;
-  --muted-foreground: 100 116 139;
+  /* 表面（3 级） */
+  --app-bg: 248 250 252; /* slate-50 — 三栏统一底色 */
+  --surface: 255 255 255; /* white — 卡片 */
+  --surface-2: 241 245 249; /* slate-100 — hover/嵌套 */
+
+  /* 描边 */
+  --border: 226 232 240; /* slate-200 */
+
+  /* 文字（4 级：text / text-muted / text-faint + title） */
+  --text: 15 23 42; /* slate-900 */
+  --text-muted: 71 85 105; /* slate-700 — 比旧 --muted-foreground 深，主体副文 */
+  --text-faint: 148 163 184; /* slate-400 — 占位/辅助 */
+
+  /* 图表坐标轴（P5a：解 "坐标轴太暗"）— slate-700 亮 / slate-300 暗 */
+  --axis-tick: 51 65 85; /* slate-700 */
+
+  /* 强调色（钢蓝 = PALETTE[0]，品牌与图表第一色一致） */
+  --accent: 91 141 184; /* #5B8DB8 */
+
+  /* 向后兼容（chartTheme.getTooltipStyle 仍读 --background/--foreground） */
+  --muted-foreground: 100 116 139; /* slate-500 — 保留以防旧组件引用 */
   --background: 255 255 255;
   --foreground: 15 23 42;
 }
+
 @media (prefers-color-scheme: dark) {
   :root {
-    --border: 51 65 85;
+    --app-bg: 15 23 42; /* slate-900 */
+    --surface: 30 41 59; /* slate-800 */
+    --surface-2: 51 65 85; /* slate-700 */
+
+    --border: 51 65 85; /* slate-700 */
+
+    --text: 226 232 240; /* slate-200 */
+    --text-muted: 148 163 184; /* slate-400 */
+    --text-faint: 100 116 139; /* slate-500 */
+
+    --axis-tick: 203 213 225; /* slate-300 */
+
+    /* 强调色暗模式略亮（保持对比度） */
+    --accent: 122 165 200;
+
     --muted-foreground: 148 163 184;
     --background: 15 23 42;
     --foreground: 226 232 240;
   }
+}
+
+/* ── P3 手动主题开关（SPEC §7 双触发）──────────────────────────────────────────
+ * 用户显式选择覆盖系统偏好：``<html>.dark`` 强制暗 / ``<html>.light`` 强制亮 / 无 class
+ * 跟随系统（上方 ``@media``）。specificity ``:root.dark`` / ``:root.light`` = (0,2,0)
+ * 高于 ``@media :root`` = (0,1,0)，故无论规则顺序，显式 class 总是胜出。
+ */
+:root.light {
+  --app-bg: 248 250 252;
+  --surface: 255 255 255;
+  --surface-2: 241 245 249;
+  --border: 226 232 240;
+  --text: 15 23 42;
+  --text-muted: 71 85 105;
+  --text-faint: 148 163 184;
+  --axis-tick: 51 65 85;
+  --accent: 91 141 184;
+  --muted-foreground: 100 116 139;
+  --background: 255 255 255;
+  --foreground: 15 23 42;
+}
+
+:root.dark {
+  --app-bg: 15 23 42;
+  --surface: 30 41 59;
+  --surface-2: 51 65 85;
+  --border: 51 65 85;
+  --text: 226 232 240;
+  --text-muted: 148 163 184;
+  --text-faint: 100 116 139;
+  --axis-tick: 203 213 225;
+  --accent: 122 165 200;
+  --muted-foreground: 148 163 184;
+  --background: 15 23 42;
+  --foreground: 226 232 240;
+}
+
+/* ── Body 全局（P5b 方案 6：系统字体栈 + tabular-nums）──────────────────────
+ * tabular-nums：坐标轴/表格/LogStream 数字等宽对齐（不抖动）。
+ * 字体栈：系统 UI 默认（不引外部字体，零网络开销，与原生观感一致）。
+ * bg/text 走 token：暗模式自动切换。
+ */
+body {
+  background-color: rgb(var(--app-bg));
+  color: rgb(var(--text));
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    "Helvetica Neue",
+    Arial,
+    "Noto Sans",
+    sans-serif,
+    "Apple Color Emoji",
+    "Segoe UI Emoji";
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Token-backed 语义 utility（P5b 渐进迁移用）────────────────────────────
+ * 比 Tailwind arbitrary value `text-[rgb(var(--text-muted))]` 更短、可读；
+ * 新组件用这些类替代散落的 slate-*，旧组件按需迁移（不一次性重写）。
+ * 命名空间 `orca-*`：与 tailwind.config.js `orca` palette 同源语义（design-token 入口）。
+ */
+@layer utilities {
+  .orca-bg-app {
+    background-color: rgb(var(--app-bg));
+  }
+  .orca-bg-surface {
+    background-color: rgb(var(--surface));
+  }
+  .orca-bg-surface-2 {
+    background-color: rgb(var(--surface-2));
+  }
+  .orca-text {
+    color: rgb(var(--text));
+  }
+  .orca-text-muted {
+    color: rgb(var(--text-muted));
+  }
+  .orca-text-faint {
+    color: rgb(var(--text-faint));
+  }
+  .orca-border {
+    border-color: rgb(var(--border));
+  }
+  .orca-bg-border {
+    background-color: rgb(var(--border));
+  }
+  .orca-accent {
+    color: rgb(var(--accent));
+  }
+  .orca-bg-accent {
+    background-color: rgb(var(--accent));
+  }
+  .orca-border-accent {
+    border-color: rgb(var(--accent));
+  }
+}
+
+/* ── 主题化滚动条（替代系统默认灰色，跟随 --text-faint / --text-muted token）──────
+ * Firefox：scrollbar-color(thumb track) + scrollbar-width thin。
+ * WebKit/Chromium：::-webkit-scrollbar 全套。track 透明融入 surface；thumb = --text-faint
+ * 半透明 + 圆角 + 2px 透明 border（background-clip: content-box 让 thumb 内缩不贴边）；
+ * hover 加深到 --text-muted。明暗自动随 token 翻转，零组件改动（全局 * 覆盖所有 overflow 容器）。
+ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--text-faint) / 0.45) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background-color: rgb(var(--text-faint) / 0.5);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: rgb(var(--text-muted) / 0.7);
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ── 交互元素颜色过渡（让 hover/active 切色不生硬）──────────────────────────────
+ * 只过渡 background-color / color / border-color（不碰 transform/width/all），
+ * 避免影响 panel resize、虚拟列表滚动等布局动画。PanelResizeHandle 是 div 不在此列，
+ * 其 transition 在组件层单独声明。
+ */
+button,
+a,
+[role="button"] {
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease;
 }

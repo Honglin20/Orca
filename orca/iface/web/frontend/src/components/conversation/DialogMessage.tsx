@@ -13,13 +13,12 @@ export function DialogMessage({ event }: { event: WebEvent }) {
   return (
     <div
       className={`ml-2 border-l-2 pl-2 ${
-        isAgent
-          ? "border-blue-300 dark:border-blue-700"
-          : "border-slate-300 dark:border-slate-600"
+        // P0：agent turn = accent 强调色边；user turn = 中性 border token。
+        isAgent ? "orca-border-accent" : "orca-border"
       }`}
       data-testid="dialog-message"
     >
-      <div className="mb-0.5 text-[10px] uppercase tracking-wide text-slate-400">
+      <div className="mb-0.5 text-[10px] uppercase tracking-wide orca-text-faint">
         {role}
       </div>
       <MarkdownText>{text}</MarkdownText>

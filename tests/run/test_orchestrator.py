@@ -336,45 +336,6 @@ def test_workflow_outputs_evaluated(tmp_path):
     assert "step_c" in completed_ev.data["outputs"]["result"]
 
 
-# ── phase-10 技术债回填：setup_outputs 注入 runtime context ──────────────────
-
-
-def test_setup_outputs_injected_and_rendered(tmp_path):
-    """setup_outputs 透传 → ctx.setup → ``{{ setup.<agent>.output.<field> }}`` 可渲染。
-
-    MCP 壳主 session 替 setup agent 跑完收集的 outputs，经 orchestrator 包成
-    ``{agent: {"output": ...}}`` 存 ctx.setup，execute phase 节点能消费。
-    """
-    wf = Workflow(
-        name="setup_inject",
-        entry="a",
-        setup=[AgentNode(name="collector", prompt="collect the host")],
-        nodes=[
-            ScriptNode(
-                name="a",
-                command="echo {{ setup.collector.output.host }}",
-                routes=[Route(to="$end")],
-            ),
-        ],
-        outputs={"result": "{{ a.output.stdout }}"},
-    )
-    orch = _orch(
-        wf, tmp_path, setup_outputs={"collector": {"host": "orbittest"}}
-    )
-    state = _orch_run(orch)
-    assert state.status == "completed"
-    completed_ev = [e for e in orch.bus.tape.replay() if e.type == "workflow_completed"][0]
-    # setup_outputs 注入后 render 出 orbittest（非空、非原文字面量）
-    assert "orbittest" in completed_ev.data["outputs"]["result"]
-
-
-def test_setup_outputs_none_does_not_break_normal_workflow(tmp_path):
-    """无 setup_outputs（None）→ ctx.setup 空 dict，普通 workflow 照常跑（向后兼容）。"""
-    orch = _orch(_linear_wf(), tmp_path)  # 不传 setup_outputs
-    state = _orch_run(orch)
-    assert state.status == "completed"
-
-
 # ── task 注入 ─────────────────────────────────────────────────────────────────
 
 

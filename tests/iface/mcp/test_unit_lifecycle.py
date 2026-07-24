@@ -80,22 +80,21 @@ def test_cancel_task_passes_none_reason():
     mock_manager.cancel_run.assert_awaited_once_with("r1", None)
 
 
-def test_fastmcp_lists_nine_tools_v4():
-    """v4：FastMCP 注册 9 工具（Discovery 4 + Lifecycle 3 + History 2）。
+def test_fastmcp_lists_eight_tools():
+    """FastMCP 注册 8 工具（Discovery 3 + Lifecycle 3 + History 2）。
 
-    v4 删 ``resolve_gate``（execute phase 永不中断），加 4 新工具：
-    list_workflows / describe_workflow / get_agent_prompt / get_task_history。
+    v4 删 ``resolve_gate``（execute phase 永不中断）；in-session v5 §6.2 删
+    ``get_agent_prompt``（setup phase 全栈删除）。
     """
     m = RunManager()
     server = OrcaMcpServer(m)
     tools = server._mcp._tool_manager._tools
     names = set(tools.keys())
     assert names == {
-        # Discovery 4
+        # Discovery 3
         "list_workflows",
         "describe_workflow",
         "list_agents",
-        "get_agent_prompt",
         # Lifecycle 3
         "start_workflow",
         "get_task_status",
@@ -104,6 +103,8 @@ def test_fastmcp_lists_nine_tools_v4():
         "get_task_history",
         "get_agent",
     }
+    # in-session v5 §6.2：get_agent_prompt 已删
+    assert "get_agent_prompt" not in names
 
 
 # ── orca mcp --help（SPEC §5.5）───────────────────────────────────────────────

@@ -1,0 +1,845 @@
+#!/usr/bin/env python3
+"""run_ptq_sweep.py —— 粗粒度 PTQ 扫描 + bake + 可视化（ptq_sweeper 节点调用）。
+
+流程（plan §run_ptq_sweep.py 八步）：
+1. import adapter → FP teacher + calib + eval loaders + eval_fn（默认 teacher-student mse）
+2. 候选网格（mode 分支）：
+   - lightweight：4 条累积路径（S/Q/A/R）按 (pre, solver, post) 去重 → ~11 unique 候选
+   - full：(None/Smooth/QuaRot) × (RTN/GPTQ/AutoRound) × (none/q2n) 全枚举，按 SDK §9.4
+     拒绝表过滤 rtn+q2n；每个 bit_width 一份（默认 3 个）→ ~45 候选
+3. 每候选 try/except 隔离：quantize_model → eval_fn → 记录 (label, bw, pre, solver, post, metric)
+4. 选 best（metric_kind↓ 或 业务↑，higher_is_better 由 eval_fn 路径决定）
+5. bake：torch.save(best.state_dict(), output_dir/best_quant_model.pt)
+6. report.json（全候选 + best）每候选评完增量落盘
+7. render_chart（容错不阻断）：lightweight=line+bar+table，full=heatmap+scatter+table
+8. stdout JSON 摘要（agent 原样回显，对齐 output_schema）
+
+铁律：
+- 单候选失败不拖垮全扫（try/except 隔离 + stderr 提示 + report 增量落盘）
+- 全部候选失败 → fail loud（exit 3）
+- 推图失败 → stderr 提示但不阻断（report.json 是核心产出）
+- AutoRound 缺 auto-round 包 → 跳过该候选 + stderr 提示，不阻断
+
+注：QConfig 字段、granularity 约束、SmoothQuant 两遍校准按 ts_quant/README_SDK.md §9.4 +
+源码 qconfig.py 组织；若 ts_quant API 调整，相应核对。
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import sys
+import time
+from pathlib import Path
+from typing import Any, Callable
+
+# 共享 device / seed 逻辑（plan §P5 硬约束：单一真相源，避免 4 份复制）。
+# 路径锚定：本脚本在 workflows/agents/ptq-sweeper/scripts/，_quant_scripts 在
+# workflows/agents/_quant_scripts/（两级 up + 一级 down）。
+_HERE = Path(__file__).resolve()
+_QUANT_SCRIPTS = _HERE.parent.parent.parent / "_quant_scripts"
+if str(_QUANT_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_QUANT_SCRIPTS))
+from _device import (  # noqa: E402
+    add_device_seed_args,
+    resolve_device_and_seed,
+    wrap_forward_with_device,
+)
+from _common import (  # noqa: E402
+    BITWIDTH_PRESETS as _BITWIDTH_PRESETS,
+    dump_json as _dump_report_base,
+    free_model as _free_model_base,
+    is_better as _is_better,
+    load_adapter as _load_adapter_base,
+    load_env_file as _load_env_file_base,
+    resolve_eval as _resolve_eval_base,
+)
+
+_LOG_PREFIX = "[run_ptq_sweep] "
+
+
+def _load_env_file(path: str) -> None:
+    _load_env_file_base(path, log_prefix=_LOG_PREFIX)
+
+
+def _load_adapter(path: str):
+    return _load_adapter_base(path, "ts_quant_ptq_sweep_adapter", log_prefix=_LOG_PREFIX)
+
+
+def _resolve_eval(adapter, fp_model, eval_loader, forward_fn) -> tuple[Callable, str, bool]:
+    return _resolve_eval_base(
+        adapter, fp_model, eval_loader, forward_fn, log_prefix=_LOG_PREFIX
+    )
+
+
+def _dump_report(report: dict[str, Any], path: Path) -> None:
+    _dump_report_base(report, path)
+
+# 一次性 import ts_quant 关键依赖：缺包/未配置 → fail loud exit 2（环境错），
+# 而非走 _eval_candidate try 内 → 全候选失败 exit 3（业务错，根因被埋）。
+try:
+    from ts_quant import QConfig, quantize_model  # noqa: F401
+    from ts_quant.plugins import QuaRotPlugin, SmoothQuantPlugin  # noqa: F401
+    _TS_QUANT_OK = True
+    _TS_QUANT_IMPORT_ERROR: str | None = None
+except Exception as _e:  # ImportError / 二次依赖（torch 等）失败都兜住
+    _TS_QUANT_OK = False
+    _TS_QUANT_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
+
+CHART_LABEL = "quant/ptq-sweep"
+DEFAULT_MAX_STEPS = 64  # plan §run_ptq_sweep.py：Smooth 组合两遍校准兜底；其它路径同样限制无害
+_TRUE_TOKENS = {"true", "1", "yes", "y", "on"}
+_FALSE_TOKENS = {"false", "0", "no", "n", "off"}
+
+# ─────────────────────────────────────────────────────────────────
+# lightweight 4 累积路径（plan §run_ptq_sweep.py §2）
+# 每条目：(step_label, pre, solver, post)
+#   pre ∈ {"none","smooth","quarot"} —— 逻辑标签，等于对应 plugin
+#   solver/post 对应 QConfig.weight_solver / post_correction
+# ─────────────────────────────────────────────────────────────────
+_LW_PATHS: list[tuple[str, list[tuple[str, str, str, str]]]] = [
+    ("S", [  # Smooth 派
+        ("rtn",             "none",   "rtn", "none"),
+        ("rtn+smooth",      "smooth", "rtn", "none"),
+        ("smooth+gptq",     "smooth", "gptq", "none"),
+        ("smooth+gptq+q2n", "smooth", "gptq", "q2n"),
+    ]),
+    ("Q", [  # QuaRot 派
+        ("rtn",              "none",   "rtn",  "none"),
+        ("rtn+quarot",       "quarot", "rtn",  "none"),
+        ("quarot+gptq",      "quarot", "gptq", "none"),
+        ("quarot+gptq+q2n",  "quarot", "gptq", "q2n"),
+    ]),
+    ("A", [  # AutoRound 派
+        ("rtn",           "none", "rtn",      "none"),
+        ("autoround",     "none", "autoround", "none"),
+        ("autoround+q2n", "none", "autoround", "q2n"),
+    ]),
+    ("R", [  # 纯求解派
+        ("rtn",      "none", "rtn",  "none"),
+        ("gptq",     "none", "gptq", "none"),
+        ("gptq+q2n", "none", "gptq", "q2n"),
+    ]),
+]
+
+_VALID_PRES = {"none", "smooth", "quarot"}
+_VALID_SOLVERS = {"rtn", "gptq", "autoround"}
+_VALID_POSTS = {"none", "q2n"}
+
+# bit_width 预设 → QConfig 构造字段（不含 weight_solver/post_correction/granularity，
+# 这些由 _make_qconfig 按候选动态填）。复用 _common.BITWIDTH_PRESETS（与 bit-curve/qat 共享），
+# 保持「三脚本位宽语义同源」铁律。
+# 历史注释：w4a16 a_quant_enabled=False 修正见 _common.BITWIDTH_PRESETS 文档。
+
+
+# ─────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────
+
+def _autoround_available() -> bool:
+    """auto-round 是否安装（README_SDK §9.4：autoround 需可选依赖 auto-round）。"""
+    try:
+        import auto_round  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _make_qconfig(bit_width: str, solver: str, post: str):
+    """bit_width 预设 + solver + post → ts_quant.QConfig。
+
+    SDK §9.4 合法性约束（qconfig.py __post_init__）：
+      - INT + gptq → granularity∈{per_token, per_channel}（默认 per_tensor 会被拒）
+      - INT + autoround → granularity=per_token（默认 per_tensor 会被拒）
+      - MX 三 solver 默认 per_tensor 都合法（MX 有自己的 block 方案）
+      - post=q2n 只接 gptq/autoround（rtn+q2n 不会到这里——候选构建已过滤）
+    """
+    from ts_quant import QConfig
+
+    preset = _BITWIDTH_PRESETS.get(bit_width)
+    if preset is None:
+        sys.stderr.write(
+            f"[run_ptq_sweep] 未知位宽预设 '{bit_width}'"
+            f"（支持：{sorted(_BITWIDTH_PRESETS)}）\n"
+        )
+        sys.exit(2)
+
+    fields = dict(preset)
+    fields["weight_solver"] = solver
+    fields["post_correction"] = post
+    # INT + 非 rtn solver 必须改 granularity（否则 QConfig raise，candidate 整个失败）
+    if fields.get("method") == "int" and solver in ("gptq", "autoround"):
+        fields["granularity"] = "per_token"
+    return QConfig(**fields)
+
+
+def _select_lw_paths(recipes_filter: list[str]) -> list[tuple[str, list[tuple[str, str, str, str]]]]:
+    """lightweight 路径过滤：recipes_filter 空或无匹配 → 全 4 条；否则按 S/Q/A/R 子集。
+
+    build_candidate 与 push_chart 共用，避免双写不一致。
+    """
+    if not recipes_filter:
+        return list(_LW_PATHS)
+    sel = set(recipes_filter) & {p for p, _ in _LW_PATHS}
+    if not sel:
+        sys.stderr.write(
+            f"[run_ptq_sweep] recipes 过滤无匹配路径 {recipes_filter} → fallback 全 4 条\n"
+        )
+        return list(_LW_PATHS)
+    return [(p, s) for p, s in _LW_PATHS if p in sel]
+
+
+# LW_PATHS 原序（A/Q/R/S 字母序不自然，按定义序 S→Q→A→R 用于图例/柱状排序）
+_LW_PATH_ORDER = {p: i for i, (p, _) in enumerate(_LW_PATHS)}
+
+
+def _build_plugins(pre: str) -> list[Any]:
+    """pre 标签 → plugins 列表（SmoothQuant / QuaRot；none → 空）。"""
+    if pre == "smooth":
+        return [SmoothQuantPlugin()]
+    if pre == "quarot":
+        return [QuaRotPlugin()]
+    if pre == "none":
+        return []
+    sys.stderr.write(f"[run_ptq_sweep] 未知 pre='{pre}'（支持 none/smooth/quarot）\n")
+    sys.exit(2)
+
+
+# ─────────────────────────────────────────────────────────────────
+# 候选构建
+# ─────────────────────────────────────────────────────────────────
+
+def _parse_csv(raw: str, fallback: list[str]) -> list[str]:
+    raw = (raw or "").strip()
+    if not raw:
+        return list(fallback)
+    return [tok.strip() for tok in raw.split(",") if tok.strip()]
+
+
+def _build_lw_candidates(bit_widths: list[str], recipes_filter: list[str]) -> list[dict[str, Any]]:
+    """Lightweight 4 路径候选，按 (pre, solver, post) 去重。
+
+    rtn 在 4 条 path 都出现 → 全局只跑一次；line 图数据点由 path_step 反查映射。
+    """
+    if not bit_widths:
+        bit_widths = ["w4a4-mx"]
+    bw = bit_widths[0]
+    if len(bit_widths) > 1:
+        sys.stderr.write(
+            f"[run_ptq_sweep] lightweight 模式只用首个位宽 '{bw}'，忽略 {bit_widths[1:]}\n"
+        )
+
+    paths = _select_lw_paths(recipes_filter)
+
+    unique: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for _, steps in paths:
+        for step_label, pre, solver, post in steps:
+            key = (pre, solver, post)
+            if key in unique:
+                continue
+            unique[key] = {
+                "label": f"{step_label}@{bw}",
+                "bit_width": bw,
+                "pre": pre,
+                "solver": solver,
+                "post": post,
+            }
+    return list(unique.values())
+
+
+def _build_full_candidates(bit_widths: list[str], recipes_filter: list[str]) -> list[dict[str, Any]]:
+    """Full 全枚举：(None/Smooth/QuaRot) × (RTN/GPTQ/AutoRound) × (none/q2n)。
+
+    SDK §9.4 拒绝表过滤：rtn + q2n（后处理只接 gptq/autoround）。
+    AutoRound 与 GPTQ 互斥是同一 QConfig 字段的取值，这里单选不会撞。
+    FP8/SMX 不在本 workflow 范围（只做 MX/INT）。
+    """
+    if not bit_widths:
+        bit_widths = ["w4a4-mx", "w4a8-mx", "w8a8-mx"]
+
+    # recipes_filter 解析：'all' 或空 → 全集；否则按 pre/solver 子集过滤
+    filter_pres: set[str] | None = None
+    filter_solvers: set[str] | None = None
+    if recipes_filter and recipes_filter != ["all"]:
+        filter_pres = set()
+        filter_solvers = set()
+        for tok in recipes_filter:
+            if tok in _VALID_PRES:
+                filter_pres.add(tok)
+            elif tok in _VALID_SOLVERS:
+                filter_solvers.add(tok)
+            else:
+                sys.stderr.write(
+                    f"[run_ptq_sweep] recipes token '{tok}' 无法识别（忽略）\n"
+                )
+        if not filter_pres:
+            filter_pres = None
+        if not filter_solvers:
+            filter_solvers = None
+
+    candidates: list[dict[str, Any]] = []
+    for bw in bit_widths:
+        for pre in ("none", "smooth", "quarot"):
+            if filter_pres is not None and pre not in filter_pres:
+                continue
+            for solver in ("rtn", "gptq", "autoround"):
+                if filter_solvers is not None and solver not in filter_solvers:
+                    continue
+                for post in ("none", "q2n"):
+                    if solver == "rtn" and post == "q2n":
+                        continue  # SDK 拒绝：RTN 后处理仅支持 none
+                    parts = []
+                    if pre != "none":
+                        parts.append(pre)
+                    parts.append(solver)
+                    if post == "q2n":
+                        parts.append(post)
+                    candidates.append({
+                        "label": "+".join(parts) + f"@{bw}",
+                        "bit_width": bw,
+                        "pre": pre,
+                        "solver": solver,
+                        "post": post,
+                    })
+    return candidates
+
+
+def _build_candidates(mode: str, bit_widths: list[str], recipes_filter: list[str]) -> list[dict[str, Any]]:
+    if mode == "lightweight":
+        return _build_lw_candidates(bit_widths, recipes_filter)
+    if mode == "full":
+        return _build_full_candidates(bit_widths, recipes_filter)
+    sys.stderr.write(
+        f"[run_ptq_sweep] mode 非法 '{mode}'（支持 lightweight / full）\n"
+    )
+    sys.exit(2)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Eval 流水（_resolve_eval / _is_better 已下沉到 _common）
+# ─────────────────────────────────────────────────────────────────
+
+def _eval_candidate(
+    fp_model,
+    cand: dict[str, Any],
+    calib_loader,
+    forward_fn,
+    eval_fn,
+    metric_kind: str,
+) -> dict[str, Any]:
+    """单候选 quantize_model + eval。返回结果 dict（含 _q_model 内部字段，dump 前剥离）。"""
+    import torch  # noqa: F401  —— eval_fn 内部依赖 torch；早 import 利于 ImportError 显式失败
+
+    label = cand["label"]
+    t0 = time.time()
+    result: dict[str, Any] = {
+        "config_label": label,
+        "bit_width": cand["bit_width"],
+        "pre_transform": cand["pre"],
+        "weight_solver": cand["solver"],
+        "post_correction": cand["post"],
+        "metric": None,
+        "metric_kind": metric_kind,
+        "status": "error",
+        "error": None,
+        "elapsed_seconds": 0.0,
+    }
+
+    q_model = None
+    try:
+        qconfig = _make_qconfig(cand["bit_width"], cand["solver"], cand["post"])
+        plugins = _build_plugins(cand["pre"])
+        # deepcopy：quantize_model(inplace=True) 会改模型，跨候选必须从干净 FP 开始
+        model_copy = copy.deepcopy(fp_model)
+        q_model = quantize_model(
+            model=model_copy,
+            qconfig=qconfig,
+            calib_data=calib_loader,
+            forward_fn=forward_fn,
+            plugins=plugins,
+            max_steps=DEFAULT_MAX_STEPS,  # smooth 两遍校准兜底；其它路径无害
+            inplace=True,
+        )
+        metrics = eval_fn(q_model)
+        if not isinstance(metrics, dict) or metric_kind not in metrics:
+            raise KeyError(
+                f"eval_fn 返回的 metrics 缺 '{metric_kind}' 键（得到 "
+                f"{sorted(metrics.keys()) if isinstance(metrics, dict) else type(metrics).__name__}）"
+            )
+        result["metric"] = float(metrics[metric_kind])
+        result["status"] = "ok"
+    except Exception as e:
+        result["error"] = f"{type(e).__name__}: {e}"
+        sys.stderr.write(f"[run_ptq_sweep] candidate {label} failed: {result['error']}\n")
+        q_model = None  # 失败 → 释放，不留句柄
+
+    result["elapsed_seconds"] = round(time.time() - t0, 3)
+    result["_q_model"] = q_model  # 内部字段（dump 前剥离）
+    return result
+
+
+def _free_q_model(q_model) -> None:
+    """显式释放 quantized model（委托给 _common.free_model，保留本脚本原命名以最小化 caller diff）。"""
+    _free_model_base(q_model)
+
+
+# ─────────────────────────────────────────────────────────────────
+# 可视化
+# ─────────────────────────────────────────────────────────────────
+
+def _recipe_label(r: dict[str, Any]) -> str:
+    """full 模式：把 pre/solver/post 合成 recipe 标签（去 bit_width）。"""
+    parts = []
+    if r["pre_transform"] != "none":
+        parts.append(r["pre_transform"])
+    parts.append(r["weight_solver"])
+    if r["post_correction"] == "q2n":
+        parts.append(r["post_correction"])
+    return "+".join(parts)
+
+
+def _push_table(render_chart, rows: list[dict[str, Any]], title: str,
+                caption: str = "") -> None:
+    try:
+        render_chart(
+            chart_type="table",
+            data=rows,
+            label=CHART_LABEL,
+            title=title,
+            columns=list(rows[0].keys()) if rows else [],
+            caption=caption,
+        )
+        sys.stderr.write(f"[run_ptq_sweep] pushed table: {len(rows)} rows\n")
+    except Exception as e:
+        sys.stderr.write(f"[run_ptq_sweep] table 推送失败（不阻断）: {e}\n")
+
+
+def _push_lw_charts(render_chart, candidates: list[dict[str, Any]],
+                     all_results: list[dict[str, Any]],
+                     ok_results: list[dict[str, Any]], metric_kind: str,
+                     recipes_filter: list[str], higher_is_better: bool) -> None:
+    """lightweight 模式：line（累积曲线）+ bar（终点对比）+ table（全部步）。
+
+    table 用 all_results（含 failed/skipped）便于诊断「哪些 recipe 因依赖缺失被跳过」；
+    line/bar 仍用 ok_results（无 metric 的失败候选画不进 y 轴）。
+    """
+    # 反查表：(pre, solver, post) → unique 候选 label（line + bar 共用，避免双构造）
+    by_key: dict[tuple[str, str, str], str] = {
+        (c["pre"], c["solver"], c["post"]): c["label"] for c in candidates
+    }
+    paths = _select_lw_paths(recipes_filter)
+    sel_paths = {p for p, _ in paths}
+    metric_by_label = {r["config_label"]: r["metric"] for r in ok_results}
+
+    # line：每条 path 一条 series，x=step_idx（共享累积步序 0,1,2,...），y=metric, hue=path。
+    # 用 step_idx 而非 step_label：step_label 是路径私有的（S 有 "smooth+gptq"、R 有 "gptq"），
+    # 4 条路径只在 baseline "rtn" 共享 x 位 → 画成散段不是累积曲线。step_idx 让所有路径
+    # 左→右按「累积了几项技术」对齐（0=baseline，1=加第一项，…），才是 ablation 对比语义。
+    # step_label 仍留在 record 里供 tooltip 展示具体技术名。
+    line_data: list[dict[str, Any]] = []
+    for path_label, steps in paths:
+        for step_idx, (step_label, pre, solver, post) in enumerate(steps):
+            key = (pre, solver, post)
+            label = by_key.get(key)
+            if label is None or label not in metric_by_label:
+                continue  # 该步被过滤或对应候选失败 → 跳过该点
+            line_data.append({
+                "path": path_label,
+                "step_idx": step_idx,
+                "step_label": step_label,
+                "metric": metric_by_label[label],
+            })
+    try:
+        if line_data:
+            render_chart(
+                chart_type="line",
+                data=line_data,
+                label=CHART_LABEL,
+                title=f"Cumulative PTQ Path Ablation ({metric_kind})",
+                x="step_idx",
+                y="metric",
+                hue="path",
+                x_label="累积技术数（0=baseline RTN，每 +1=叠加一项技术）",
+                y_label=f"{metric_kind}（{'越低越好' if not higher_is_better else '越高越好'}）",
+                caption=(
+                    "4 条 ablation 路径(S=Smooth/Q=QuaRot/A=AutoRound/R=纯求解)的累积收益。"
+                    "step_idx 非训练步，是叠加技术计数。"
+                ),
+            )
+            sys.stderr.write(f"[run_ptq_sweep] pushed line: {len(line_data)} points\n")
+    except Exception as e:
+        sys.stderr.write(f"[run_ptq_sweep] line 推送失败（不阻断）: {e}\n")
+
+    # bar：每条 path 终点（step_idx 最大）metric 对比
+    final_by_path: dict[str, dict[str, Any]] = {}
+    for path_label, steps in paths:
+        for step_idx, (step_label, pre, solver, post) in enumerate(steps):
+            key = (pre, solver, post)
+            label = by_key.get(key)
+            if label is None or label not in metric_by_label:
+                continue
+            cur = final_by_path.get(path_label)
+            if cur is None or step_idx > cur["step_idx"]:
+                final_by_path[path_label] = {
+                    "step_idx": step_idx,
+                    "path": path_label,
+                    "metric": metric_by_label[label],
+                    "final_config": label,
+                }
+    # 按 _LW_PATHS 原序（S→Q→A→R）而非字母序（A→Q→R→S）。单 series——曾用 hue="final_config"
+    # 但每 path 独一份 final_config → 每 x 单独着色 + 一堆无意义图例（同 sensitivity hue 反模式）。
+    # final_config 字段保留在 record 里供 tooltip 展示具体技术组合。
+    bar_data = sorted(final_by_path.values(), key=lambda x: _LW_PATH_ORDER.get(x["path"], 99))
+    try:
+        if bar_data:
+            render_chart(
+                chart_type="bar",
+                data=bar_data,
+                label=CHART_LABEL,
+                title=f"Final-step Comparison by Path ({metric_kind})",
+                x="path",
+                y="metric",
+                x_label="路径（S/Q/A/R）",
+                y_label=metric_kind,
+                caption="每路径终点（叠加全部技术后）的 metric 横向对比。",
+            )
+            sys.stderr.write(f"[run_ptq_sweep] pushed bar: {len(bar_data)} paths\n")
+    except Exception as e:
+        sys.stderr.write(f"[run_ptq_sweep] bar 推送失败（不阻断）: {e}\n")
+
+    # table：全候选明细（含 failed/skipped）。原仅展示 ok_results 致诊断时看不出
+    # 「哪些 recipe 因依赖缺失（如 auto-round 未装）被跳过」—— 改用 all_results。
+    table_rows = sorted(all_results, key=lambda r: r["config_label"])
+    _push_table(render_chart, [
+        {"config": r["config_label"], "pre": r["pre_transform"],
+         "solver": r["weight_solver"], "post": r["post_correction"],
+         "metric": r["metric"], "elapsed_s": r["elapsed_seconds"],
+         "status": r["status"], "error": r["error"] or ""}
+        for r in table_rows
+    ], "Lightweight Sweep — All Steps (incl. failed/skipped)",
+        caption=(
+            "每候选一行（含 failed/skipped 便于诊断依赖缺失）。"
+            "metric 为 teacher-student mse 口径（越低越好），status 标 ok/failed/skipped。"
+        ))
+
+
+def _push_full_charts(render_chart, all_results: list[dict[str, Any]],
+                       ok_results: list[dict[str, Any]], metric_kind: str,
+                       best_label: str | None, higher_is_better: bool) -> None:
+    """full 模式：heatmap（recipe×bitwidth）+ scatter（best 高亮）+ table（全部候选）。
+
+    heatmap/scatter 需数值 metric，仍用 ok_results；table 用 all_results 含失败/跳过。
+    scatter 用 per-row ``color`` 高亮 best 候选——``_render`` 契约：hue 非空时 color 被
+    忽略，故 best 高亮时必须去 ``hue=recipe`` 改 ``color="color"``（heatmap 已表达 recipe 维度）。
+    """
+    # heatmap / scatter 公共数据 shape：{recipe, bitwidth, metric, config_label}
+    # config_label 仅供 scatter 匹配 best 行；heatmap 不消费该字段（只看 x/y/value）。
+    matrix_data: list[dict[str, Any]] = [
+        {"recipe": _recipe_label(r), "bitwidth": r["bit_width"],
+         "metric": r["metric"], "config_label": r["config_label"]}
+        for r in ok_results
+    ]
+    try:
+        if matrix_data:
+            render_chart(
+                chart_type="heatmap",
+                data=matrix_data,
+                label=CHART_LABEL,
+                title=f"PTQ Recipe × Bitwidth Matrix ({metric_kind})",
+                x="bitwidth",
+                y="recipe",
+                value="metric",
+                x_label="位宽预设",
+                y_label="recipe（预处理+求解器+后处理）",
+                caption=(
+                    f"cell 色 = {metric_kind}（"
+                    f"{'深色=高=差' if not higher_is_better else '深色=高=好'}）。"
+                    "coral 高亮见 scatter。"
+                ),
+            )
+            sys.stderr.write(f"[run_ptq_sweep] pushed heatmap: {len(matrix_data)} cells\n")
+    except Exception as e:
+        sys.stderr.write(f"[run_ptq_sweep] heatmap 推送失败（不阻断）: {e}\n")
+
+    # scatter：统一单 series + per-row color。best 点珊瑚色，其余钢蓝色。
+    _BEST_COLOR = "#D4605A"
+    _DEFAULT_COLOR = "#5B8DB8"
+    for row in matrix_data:
+        row["color"] = _BEST_COLOR if row["config_label"] == best_label else _DEFAULT_COLOR
+    try:
+        if matrix_data:
+            render_chart(
+                chart_type="scatter",
+                data=matrix_data,
+                label=CHART_LABEL,
+                title=f"PTQ Metric by Bitwidth ({metric_kind}, coral=best)",
+                x="bitwidth",
+                y="metric",
+                color="color",
+                x_label="位宽预设",
+                y_label=metric_kind,
+                caption=f"每候选一个点；珊瑚=best（{best_label}）。",
+            )
+            sys.stderr.write(f"[run_ptq_sweep] pushed scatter: {len(matrix_data)} points\n")
+    except Exception as e:
+        sys.stderr.write(f"[run_ptq_sweep] scatter 推送失败（不阻断）: {e}\n")
+
+    # table：全候选（含 failed/skipped），与 lightweight table 同理。
+    table_rows = sorted(all_results, key=lambda r: (r["bit_width"], _recipe_label(r)))
+    _push_table(render_chart, [
+        {"bitwidth": r["bit_width"], "recipe": _recipe_label(r),
+         "config": r["config_label"], "metric": r["metric"],
+         "elapsed_s": r["elapsed_seconds"],
+         "status": r["status"], "error": r["error"] or ""}
+        for r in table_rows
+    ], "Full Sweep — All Combos (incl. failed/skipped)",
+        caption=(
+            "全枚举矩阵每组合一行（bit_width × recipe × 求解/后处理），含 failed/skipped。"
+            "metric 口径同 lightweight；elapsed_s 便于定位慢组合。"
+        ))
+
+
+def _push_charts(mode: str, candidates: list[dict[str, Any]],
+                  report: dict[str, Any], metric_kind: str,
+                  recipes_filter: list[str], higher_is_better: bool) -> None:
+    try:
+        from orca.chart import render_chart
+    except Exception as e:
+        sys.stderr.write(f"[run_ptq_sweep] 无法 import orca.chart（跳过推图）: {e}\n")
+        return
+
+    all_results = report["candidates"]
+    ok_results = [c for c in all_results if c.get("status") == "ok"]
+    if not ok_results:
+        sys.stderr.write("[run_ptq_sweep] 无成功候选 → 不推图\n")
+        return
+
+    # best_label：full scatter 高亮用（main 已按 higher_is_better 选好，这里直接读不重算）。
+    best = report.get("best") or {}
+    best_label = best.get("config_label")
+
+    if mode == "lightweight":
+        _push_lw_charts(render_chart, candidates, all_results, ok_results,
+                        metric_kind, recipes_filter, higher_is_better)
+    else:
+        _push_full_charts(render_chart, all_results, ok_results, metric_kind,
+                          best_label, higher_is_better)
+
+
+# ─────────────────────────────────────────────────────────────────
+# main
+# ─────────────────────────────────────────────────────────────────
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--adapter", required=True, help="adapter.py 路径")
+    ap.add_argument("--model_path", required=True, help="原始模型入口路径（仅用于回显摘要）")
+    ap.add_argument("--output_dir", required=True)
+    # Tier C 固化默认（P9a：自 workflow inputs 下沉，SPEC §5；agent 不再透传，改默认即改全局）：
+    ap.add_argument("--mode", default="lightweight", help="lightweight / full（默认 lightweight）")
+    ap.add_argument("--bit_widths", default="", help="逗号分隔位宽预设（空→lightweight=w4a4-mx / full=w4a4-mx,w4a8-mx,w8a8-mx）")
+    ap.add_argument("--recipes", default="", help="路径/配方子集（空→lightweight 全 4 条 / full='all'）")
+    ap.add_argument("--bake", default="true", help="true / false（默认 true）")
+    add_device_seed_args(ap)
+    ap.add_argument(
+        "--env_file",
+        default="",
+        help="本 run 的 orca_env.sh 路径；脚本启动自加载 ORCA_* env（兜底：opencode bash 拆调用会丢 env，致 render_chart 连不上 chart daemon）",
+    )
+    args = ap.parse_args()
+    _load_env_file(args.env_file)  # 兜底：防 bash 拆调用丢 ORCA_CHART_SOCK → render_chart 静默失败
+
+    output_dir = Path(args.output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = output_dir / "report.json"
+
+    # 顶层校验：ts_quant 缺包 → exit 2（环境错）而非走到候选 try 内 → exit 3（业务错）
+    if not _TS_QUANT_OK:
+        sys.stderr.write(
+            f"[run_ptq_sweep] ts_quant import 失败（环境错，exit 2）: {_TS_QUANT_IMPORT_ERROR}\n"
+        )
+        sys.exit(2)
+
+    # device + seed 解析（单一真相源：_device.resolve_device_and_seed）
+    device, seed = resolve_device_and_seed(
+        args.device, args.seed, log_prefix="[run_ptq_sweep] "
+    )
+
+    mode = (args.mode or "lightweight").strip().lower()
+    bit_widths = _parse_csv(args.bit_widths, fallback=[])
+    recipes_filter = _parse_csv(args.recipes, fallback=[])
+    candidates = _build_candidates(mode, bit_widths, recipes_filter)
+    if not candidates:
+        sys.stderr.write(
+            f"[run_ptq_sweep] 候选网格为空（mode={mode} bw={bit_widths} recipes={recipes_filter}）\n"
+        )
+        sys.exit(2)
+
+    # 1. adapter → fp teacher + calib + eval + forward
+    adapter = _load_adapter(args.adapter)
+    fp_model = adapter.load_model()
+    # device 搬移（plan §P5）：adapter.load_model() 返回 CPU 模型，脚本统一搬到 device。
+    fp_model = fp_model.to(device)
+    calib_loader = adapter.get_calib_loader()
+    raw_forward_fn = getattr(adapter, "forward_fn", None)
+    # 包一层：batch 搬到 device 再喂给 adapter forward_fn（adapter 不感知 device）
+    forward_fn = wrap_forward_with_device(raw_forward_fn, device)
+
+    get_eval_loader = getattr(adapter, "get_eval_loader", None)
+    if callable(get_eval_loader):
+        eval_loader = get_eval_loader()
+    else:
+        # fail loud（plan §P5 + user brief「复用 calib 当 eval」是禁掉的造假口径）：
+        # eval 缺数据时复用 calib 是数据口径污染（calib 是代表性少量样本，eval 需完整分布），
+        # 会让 best_metric 选错的候选。P4 哨兵到位后可退「问用户」，当前直接 exit 2。
+        sys.stderr.write(
+            "[run_ptq_sweep] FAIL LOUD: adapter 未实现 get_eval_loader（eval_data_ref 空）"
+            "→ 缺评估数据。复用 calib_loader 做 eval 是禁掉的造假口径（plan §P5："
+            "「复用 calib 当 eval」）——会让 best_metric 选错候选。请在用户代码里找 "
+            "eval loader（如 `def load_eval` / `def get_eval_loader`），或在 workflow "
+            "inputs 显式提供 eval_data_ref。\n"
+        )
+        sys.exit(2)
+
+    eval_fn, metric_kind, higher_is_better = _resolve_eval(
+        adapter, fp_model, eval_loader, forward_fn
+    )
+
+    sys.stderr.write(
+        f"[run_ptq_sweep] mode={mode} candidates={len(candidates)} "
+        f"metric_kind={metric_kind} higher_is_better={higher_is_better}\n"
+    )
+
+    autoround_ok = _autoround_available()
+    if not autoround_ok:
+        sys.stderr.write(
+            "[run_ptq_sweep] auto-round 未安装 → 含 autoround 的候选将被跳过（stderr 提示）\n"
+        )
+
+    # 3-4. 候选扫描 + best 选择（增量 dump）
+    report: dict[str, Any] = {
+        "mode": mode,
+        "metric_kind": metric_kind,
+        "higher_is_better": higher_is_better,
+        "bit_widths": sorted({c["bit_width"] for c in candidates}),
+        "recipes_filter": recipes_filter,
+        "model_path": args.model_path,
+        "candidates": [],
+        "best": None,
+        "baked_model_path": None,
+    }
+    _dump_report(report, report_path)
+
+    best: dict[str, Any] | None = None  # {label, metric, q_model, candidate}
+    for cand in candidates:
+        # AutoRound 缺包 → 标记 skipped 不入量化
+        if cand["solver"] == "autoround" and not autoround_ok:
+            skipped = {
+                "config_label": cand["label"],
+                "bit_width": cand["bit_width"],
+                "pre_transform": cand["pre"],
+                "weight_solver": cand["solver"],
+                "post_correction": cand["post"],
+                "metric": None,
+                "metric_kind": metric_kind,
+                "status": "skipped",
+                "error": "auto-round package not installed",
+                "elapsed_seconds": 0.0,
+            }
+            report["candidates"].append(skipped)
+            _dump_report(report, report_path)
+            sys.stderr.write(
+                f"[run_ptq_sweep] skipped {cand['label']} (auto-round 未安装)\n"
+            )
+            continue
+
+        result = _eval_candidate(
+            fp_model, cand, calib_loader, forward_fn, eval_fn, metric_kind
+        )
+        q_model = result.pop("_q_model", None)
+        report["candidates"].append(result)
+        _dump_report(report, report_path)  # 增量落盘：崩了能看到已扫部分
+
+        if result["status"] == "ok":
+            if best is None or _is_better(result["metric"], best["metric"], higher_is_better):
+                old_q = best["q_model"] if best else None
+                best = {
+                    "label": result["config_label"],
+                    "metric": result["metric"],
+                    "q_model": q_model,
+                    "candidate": dict(result),
+                }
+                q_model = None  # 转交 best
+                if old_q is not None:
+                    _free_q_model(old_q)
+                sys.stderr.write(
+                    f"[run_ptq_sweep] new best: {best['label']} → {best['metric']:.6f}\n"
+                )
+            else:
+                _free_q_model(q_model)
+        else:
+            # 失败候选：显式释放
+            _free_q_model(q_model)
+
+    if best is None:
+        sys.stderr.write(
+            "[run_ptq_sweep] 无成功候选（全部失败/跳过）→ fail loud (exit 3)\n"
+        )
+        _dump_report(report, report_path)
+        sys.exit(3)
+
+    # 6. report best 字段先写入 + dump（即使 bake 失败 report 仍完整）
+    report["best"] = {
+        "config_label": best["label"],
+        "metric": best["metric"],
+        **{k: v for k, v in best["candidate"].items()},
+    }
+    _dump_report(report, report_path)
+
+    # 5. bake（在 best 字段落盘之后，失败不丢 report）
+    baked_path_str: str | None = None
+    bake_token = (args.bake or "").strip().lower()
+    if bake_token in _TRUE_TOKENS:
+        import torch
+        baked_path = output_dir / "best_quant_model.pt"
+        torch.save(best["q_model"].state_dict(), baked_path)
+        baked_path_str = str(baked_path)
+        report["baked_model_path"] = baked_path_str
+        _dump_report(report, report_path)
+        sys.stderr.write(f"[run_ptq_sweep] baked best → {baked_path_str}\n")
+    elif bake_token in _FALSE_TOKENS:
+        sys.stderr.write("[run_ptq_sweep] bake=false → skip bake\n")
+    else:
+        sys.stderr.write(
+            f"[run_ptq_sweep] --bake='{args.bake}' 非法（期望 true/false/1/0/yes/no）\n"
+        )
+        sys.exit(2)
+
+    # 7. charts
+    _push_charts(mode, candidates, report, metric_kind, recipes_filter, higher_is_better)
+
+    # 显式释放 best q_model（caller 引用置 None，配合 _free_q_model 的 gc/cuda 回收）
+    best_q = best["q_model"]
+    best["q_model"] = None
+    _free_q_model(best_q)
+
+    # 8. stdout JSON 摘要（agent 原样回显）
+    summary = {
+        "output_dir": str(output_dir),
+        "report_path": str(report_path),
+        "model_path": args.model_path,
+        # bake 交付物路径（bake=false 或 bake 失败时为空串）。明指交付物，原先只埋在 report.json。
+        "baked_model_path": report.get("baked_model_path") or "",
+        "best_config": best["label"],
+        "best_metric": best["metric"],
+        "candidates_evaluated": len(report["candidates"]),
+        "mode": mode,
+        "metric_kind": metric_kind,
+    }
+    print(json.dumps(summary, ensure_ascii=False), flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

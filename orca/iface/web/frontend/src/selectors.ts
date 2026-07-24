@@ -12,8 +12,11 @@
 import type { WebEvent } from "@/types/events";
 import type { NodeState } from "@/types/store-types";
 import type { WorkflowState } from "@/stores/workflow-store";
+import { CONVERSATION_TYPES, eventMatchesNode } from "@/conversation-types";
 
 // ── selectAgents：DAG nodes → AgentsRail 行模型 ─────────────────────────────────
+// P3：sessionCount（子 agent session 数，不含 "main" 哨兵）+ iteration（Loop 组迭代号）
+// 依赖 P2 nodesIndex 倒排索引。见 selectAgentGroups。
 export interface AgentRow {
   node: string;
   status: NodeState["status"];
@@ -23,7 +26,14 @@ export interface AgentRow {
   inputTokens?: number;
   outputTokens?: number;
   reasoningTokens?: number;
+  /** P3：子 agent session 数（不含 "main"；依赖 nodesIndex）。> 1 → UI 折叠子 session。 */
+  sessionCount?: number;
+  /** P3：循环节点迭代号（= sessionCount；仅 Loop 组派生，selectAgentGroups 设）。 */
+  iteration?: number;
 }
+
+/** "main" session 哨兵字面量（与 workflow-store.MAIN_SESSION 同义；不跨层 import store 内部常量）。 */
+const MAIN_SESSION = "main";
 
 /**
  * 格式化 token 小字（ AgentsRail / TopBar 用，DRY）。
@@ -92,6 +102,13 @@ export function selectAgents(state: WorkflowState): AgentRow[] {
   }
   return orderedNames.map((node) => {
     const ns: NodeState | undefined = state.nodes[node];
+    // P3 方案 6：子 agent session 数（不含 "main" 哨兵）。> 1 → UI 折叠子 session 列表。
+    // `state.nodesIndex` 在 WorkflowState 必填，但本 selector 可被 partial-state cast 调用
+    // （AgentsRail / 测试），故 optional chaining 兜底，缺索引 → undefined（不显折叠）。
+    const idx = state.nodesIndex?.[node];
+    const subSessionCount = idx
+      ? idx.sessions.filter((s) => s !== MAIN_SESSION).length
+      : 0;
     return {
       node,
       status: ns?.status ?? "pending",
@@ -101,8 +118,99 @@ export function selectAgents(state: WorkflowState): AgentRow[] {
       inputTokens: ns?.inputTokens,
       outputTokens: ns?.outputTokens,
       reasoningTokens: ns?.reasoningTokens,
+      sessionCount: subSessionCount > 0 ? subSessionCount : undefined,
     };
   });
+}
+
+// ── selectAgentGroups：阶段分组（SPEC web-presentation-refinement §P3 方案 4 + P2-3）──
+// 遍历 workflowDef.nodes 声明顺序，按 back-route 切分 Setup / Loop / Finalize 三组。
+//
+// **算法**（P2-3 闭环）：
+//   - back-route = route 的 to 节点声明早于 from（to ∈ 已访问集 → 形成回边循环）。
+//   - 收集所有 back-route → loop 区间 [min(to idx) .. max(from idx)]（声明 index）。
+//   - Setup = nodes[0 .. loopStart-1]；Loop = nodes[loopStart .. loopEnd]；
+//     Finalize = nodes[loopEnd+1 ..]。
+//   - 无 back-route → 全平铺（单组 "Agents"，fallback 不破功能）。
+//
+// **e3b8ad oracle**（workflows/agent-struct-exploration.yaml）：
+//   唯一 back-route = viz_round → hypothesizer →
+//     Setup = [family_detect, baseline_measure]
+//     Loop  = [hypothesizer, engineer, structure_gate, evaluator, analyst, curator, viz_round]
+//     Finalize = [finalize, viz_finalize]
+//
+// **iteration**（P3 方案 5）：Loop 组 agent 设 iteration = sessionCount（UI 显示 R{N}，
+// 从 selectNodeSessions distinct session 数派生，依赖 P2 nodesIndex）。
+export interface AgentGroup {
+  /** "Setup" | "Loop" | "Finalize" | "Agents"（无 back-route fallback 单组）。 */
+  group: string;
+  agents: AgentRow[];
+}
+
+export function selectAgentGroups(state: WorkflowState): AgentGroup[] {
+  const agents = selectAgents(state);
+  if (agents.length === 0) return [];
+  const def = state.workflowDef;
+  // 无拓扑 / 空拓扑 → 单组平铺（fallback，DRY：不重复 selectAgents 的 orderedNames 逻辑）
+  if (!def || def.nodes.length === 0) {
+    return [{ group: "Agents", agents }];
+  }
+  // 声明顺序 node 名 → index（与 selectAgents.orderedNames 同构；去重 + 跳过空名）
+  const declIdx = new Map<string, number>();
+  let n = 0;
+  for (const node of def.nodes) {
+    const name = typeof node.name === "string" ? node.name : "";
+    if (!name || declIdx.has(name)) continue;
+    declIdx.set(name, n++);
+  }
+  // 找 back-route：route.to 声明 index < route.from 声明 index（to 先声明 = 已访问）。
+  // $end / 未知名不在 declIdx → 跳过（防御）。多个 back-route → 取最左 to / 最右 from 区间。
+  let loopStart = Infinity;
+  let loopEnd = -1;
+  for (const r of def.routes) {
+    const fi = declIdx.get(r.from);
+    const ti = declIdx.get(r.to);
+    if (fi === undefined || ti === undefined) continue;
+    if (ti < fi) {
+      if (ti < loopStart) loopStart = ti;
+      if (fi > loopEnd) loopEnd = fi;
+    }
+  }
+  // 无 back-route → 单组平铺（fallback）
+  if (loopEnd === -1) {
+    return [{ group: "Agents", agents }];
+  }
+  // 按声明 index 分桶（selectAgents 顺序 = 声明顺序 + nodes 兜底；兜底节点无 declIdx → Finalize 末尾）
+  const setup: AgentRow[] = [];
+  const loop: AgentRow[] = [];
+  const finalize: AgentRow[] = [];
+  for (const a of agents) {
+    const idx = declIdx.get(a.node);
+    if (idx === undefined) {
+      finalize.push(a);
+    } else if (idx < loopStart) {
+      setup.push(a);
+    } else if (idx <= loopEnd) {
+      loop.push(a);
+    } else {
+      finalize.push(a);
+    }
+  }
+  const groups: AgentGroup[] = [];
+  if (setup.length) groups.push({ group: "Setup", agents: setup });
+  if (loop.length) {
+    // P3 方案 5：Loop 组 agent 派生 iteration = sessionCount（UI 显示 R{N}）
+    groups.push({
+      group: "Loop",
+      agents: loop.map((a) =>
+        a.iteration === undefined && a.sessionCount
+          ? { ...a, iteration: a.sessionCount }
+          : a
+      ),
+    });
+  }
+  if (finalize.length) groups.push({ group: "Finalize", agents: finalize });
+  return groups;
 }
 
 // ── selectWorkflowElapsed / selectNodeElapsed / selectStall（SPEC §0 D5 / §6 D9）─
@@ -220,9 +328,22 @@ export function selectStall(
   return { sinceMs, thinking: lastType === "agent_thinking" };
 }
 
-// ── selectConversation：events → per-node 对话模型（D2 按 node 分组）──────────────
-// 输出按 seq 升序的事件分组（每 node 一个数组）。retry/foreach 多 session_id 在同 node
-// 内合并（细分隔符是渲染层职责，本 selector 只输出按 (node, seq) 排序的事件流）。
+// ── selectConversation：events → per-node 对话模型（D2 按 node 分组；P2 加 session 维度）─
+// 输出按 seq 升序的事件分组（每 node 一个数组）。
+//
+// **P2 sessionId 参数**（SPEC web-presentation-refinement §P2 方案 1）：
+//   - 省略 / ``"all"`` → 全 node 聚合（旧行为，零回归；用于"All"标签）
+//   - 指定 sessionId → 仅该 session 事件（一次 buildEntries 处理 ~208 而非 4224，
+//     缓解症状 #3/#5）
+//
+// **null session_id → "main"**（与 nodesIndex 一致）。
+//
+// **SPEC §P2 AC#2 偏离说明**：AC#2 prose 写「selectConversation 不再全量 filter（读 nodesIndex）」，
+// 但同节接口契约 ``NodeSessionIndex`` 只存 count（无 sessionSeqs），且性能主因是 buildEntries
+// 输入缩量（4224→208）而非 selectConversation 自身。本实现遵循接口契约：selectConversation
+// 仍 filter state.events（O(N)，但 N=该 node 事件数，非全 tape），nodesIndex 只供
+// selectNodeSessions 渲染会话选择器（O(sessions)）。如真机测发现 ~208 事件 filter 仍是瓶颈，
+// 再扩 NodeSessionIndex 加 sessionSeqs（SPEC 方案 2 原始设计）。
 //
 // 「orphan tool_result」（无对应 call）在本 selector 不剔除——保留全部 conversation 相关
 // 事件供视图分类；orphan 判定 + 剔除在视图层 ``buildEntries`` 内做（warn + 跳过）。
@@ -231,10 +352,17 @@ export interface ConversationGroup {
   events: WebEvent[];
 }
 
-/** 选择所有应进 conversation 的事件，按 node 分组，每组按 seq 升序。 */
+/**
+ * 选择所有应进 conversation 的事件，按 node（+ 可选 session）过滤，按 seq 升序。
+ *
+ * @param state 含 events + nodesIndex（sessionId 指定时仅作过滤参数，不读 nodesIndex）
+ * @param nodeId 节点名（null/undefined → 空组）
+ * @param sessionId 省略 / ``"all"`` → 全 node 聚合（旧行为）；具体 sessionId → 仅该 session
+ */
 export function selectConversation(
   state: WorkflowState,
-  nodeId: string | null | undefined
+  nodeId: string | null | undefined,
+  sessionId?: string | "all" | null
 ): ConversationGroup {
   if (nodeId === undefined || nodeId === null) {
     return { node: "", events: [] };
@@ -247,16 +375,54 @@ export function selectConversation(
   // （top-level ``e.node`` 仍为 null，对齐 schema/event.py 注释）。SPEC §5.3 要求它进
   // conversation 红 block —— 故同时按 top-level ``e.node`` 或 ``data.node`` 匹配。
   // 这是 tape 字段的合法读取（不是视图层重派生），符合铁律 1。
+  const filterBySession = sessionId !== undefined && sessionId !== null && sessionId !== "all";
   const events = state.events.filter((e) => {
     if (!CONVERSATION_TYPES.has(e.type)) return false;
-    if (e.node === nodeId) return true;
-    if (e.type === "workflow_failed") {
-      const dn = e.data?.node;
-      return typeof dn === "string" && dn === nodeId;
-    }
-    return false;
+    // workflow_failed 可能以 data.node 关联（见上方注释 + eventMatchesNode 类型守门）
+    if (!eventMatchesNode(e, nodeId)) return false;
+    if (!filterBySession) return true;
+    const eSid = e.session_id ?? "main";
+    return eSid === sessionId;
   });
   return { node: nodeId, events };
+}
+
+// ── selectNodeSessions：从 nodesIndex 派生会话选择器行（SPEC §P2 / P0-6）──────────────
+// 读 state.nodesIndex（store 维护的倒排索引），**不全量 filter state.events**——这是 P2
+// 性能主入口之一（family_detect 4226 事件 → 65 session 索引查表 O(sessions)）。
+//
+// 输出按 sessions 数组顺序（= 首事件 seq 升序，store 维护此不变量）。
+// label：``main`` 显式；其他 sessionId 截断前 10 字符（``ses_090e74…``）。
+export interface NodeSessionRow {
+  sessionId: string;
+  /** 显示标签（main 或 ses_xxx 截断前 10 字符 + "…"）。 */
+  label: string;
+  /** 该 session 的 conversation 类事件数。 */
+  eventCount: number;
+  /** 该 session 首事件 timestamp（排序 / 调试用）。 */
+  firstTs: number;
+}
+
+/** sessionId → 显示 label（main 哨兵 / 截断前 10 字符）。DRY：selector + 测试共用。 */
+export function formatSessionLabel(sessionId: string): string {
+  if (sessionId === "main") return "main";
+  if (sessionId.length <= 10) return sessionId;
+  return sessionId.slice(0, 10) + "…";
+}
+
+export function selectNodeSessions(
+  state: WorkflowState,
+  nodeId: string | null | undefined
+): NodeSessionRow[] {
+  if (!nodeId) return [];
+  const idx = state.nodesIndex[nodeId];
+  if (!idx) return [];
+  return idx.sessions.map((sid) => ({
+    sessionId: sid,
+    label: formatSessionLabel(sid),
+    eventCount: idx.sessionEventCounts[sid] ?? 0,
+    firstTs: idx.sessionFirstTs[sid] ?? 0,
+  }));
 }
 
 /**
@@ -283,50 +449,16 @@ export function selectStreamingCursor(
   // 从末尾向前找该 node 的最后一条 conversation 事件（O(k)，k 通常小）
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
-    const matches =
-      e.node === nodeId ||
-      // workflow_failed 可能以 data.node 关联（见 selectConversation 注释）
-      (e.type === "workflow_failed" && e.data?.node === nodeId);
-    if (!matches) continue;
+    // workflow_failed 可能以 data.node 关联（eventMatchesNode 含类型守门，DRY）
+    if (!eventMatchesNode(e, nodeId)) continue;
     if (!CONVERSATION_TYPES.has(e.type)) continue;
     return e.type === "agent_message" || e.type === "agent_thinking";
   }
   return false;
 }
 
-/** 进 conversation 的事件集合（DRY：selectConversation / selectStreamingCursor 共用）。 */
-const CONVERSATION_TYPES = new Set<WebEvent["type"]>([
-  "prompt_rendered",
-  "agent_thinking",
-  "agent_message",
-  "agent_tool_call",
-  "agent_tool_result",
-  "agent_step_started",
-  "dialog_started",
-  "dialog_message",
-  "dialog_ended",
-  "node_started",
-  "node_completed",
-  "node_failed",
-  "node_skipped",
-  "retry_started",
-  "retry_succeeded",
-  "retry_exhausted",
-  "interrupt_requested",
-  "interrupt_resolved",
-  "validator_started",
-  "validator_passed",
-  "validator_failed",
-  "wait_started",
-  "wait_completed",
-  "foreach_started",
-  "foreach_item_started",
-  "foreach_item_completed",
-  "foreach_completed",
-  "custom",
-  "workflow_failed",
-  "unknown_event",
-]);
+/** 进 conversation 的事件集合（DRY：selectConversation / selectStreamingCursor / store nodesIndex 共用）。 */
+// CONVERSATION_TYPES 已移到 src/conversation-types.ts（P2：workflow-store 也需引用，避免 cycle）
 
 // ── selectCharts：custom(kind=chart) → ChartsView（D3 / D7）──────────────────────
 export interface ChartEntry {
@@ -419,12 +551,120 @@ export function selectCharts(state: WorkflowState): {
   return { groups: Array.from(groupMap.entries()).map(([group, entries]) => ({ group, entries })) };
 }
 
-// ── selectLog：events → LogStream 行模型（每事件一行 ≤80 字符）───────────────────
+// ── selectLog：events → LogStream 行模型（仅生命周期/routing/gate/失败进 Log）─────
+// SPEC web-presentation-refinement §P1：LogStream 装分级 classifier，过程事件（agent_*/
+// foreach_item_*/prompt_rendered/agent_usage/custom/dialog_message/unknown_event）归
+// ConversationView，不进 Log。debug 级（route_taken）默认隐藏，可用 setLogShowDebug(true) 展开。
+export type LogLevel = "info" | "success" | "error" | "warning" | "debug";
+
 export interface LogLine {
   seq: number;
   type: WebEvent["type"];
   text: string; // 单行摘要 ≤80 字符
-  isError: boolean;
+  level: LogLevel; // 取代旧 isError：分级粒度更细，配色按 level
+}
+
+/**
+ * 事件类型 → Log 级别分类器（纯函数，SPEC web-presentation-refinement §P1 分级表）。
+ *
+ * - 非 null：进 LogStream，按 level 配色（info/success/error/warning/debug）
+ * - null：不进 Log（过程事件归 ConversationView，零回归）
+ *
+ * **穷尽守门**：switch 覆盖全 39 EventType，default 分支靠 TS ``never`` 编译期
+ * 拦截（events.ts 加 type 没补这里 → 编译失败）；运行时兜底 console.warn + null
+ * （不应触达，防御 unknown 运行时值）。
+ *
+ * 分级表（逐字对齐 SPEC §P1）：
+ * | level    | EventType                                                                  |
+ * |----------|----------------------------------------------------------------------------|
+ * | info     | workflow_started / node_started / foreach_started / retry_started /         |
+ * |          | validator_started / wait_started / human_decision_requested /              |
+ * |          | interrupt_requested / dialog_started                                       |
+ * | success  | workflow_completed / workflow_resumed / node_completed / foreach_completed |
+ * |          | retry_succeeded / validator_passed / wait_completed /                      |
+ * |          | human_decision_resolved / interrupt_resolved / dialog_ended                |
+ * | error    | workflow_failed / workflow_cancelled / node_failed / retry_exhausted /     |
+ * |          | validator_failed / error                                                   |
+ * | warning  | node_skipped                                                               |
+ * | debug    | route_taken（默认隐藏，可 setLogShowDebug(true) 展开）                     |
+ * | null     | agent_message / agent_thinking / agent_tool_call / agent_tool_result /     |
+ * |          | agent_step_started / foreach_item_started / foreach_item_completed /       |
+ * |          | prompt_rendered / agent_usage / custom / dialog_message / unknown_event    |
+ */
+export function classifyLogLevel(type: WebEvent["type"]): LogLevel | null {
+  switch (type) {
+    // info：开始类生命周期
+    case "workflow_started":
+    case "node_started":
+    case "foreach_started":
+    case "retry_started":
+    case "validator_started":
+    case "wait_started":
+    case "human_decision_requested":
+    case "interrupt_requested":
+    case "dialog_started":
+      return "info";
+    // success：完成类生命周期
+    case "workflow_completed":
+    case "workflow_resumed":
+    case "node_completed":
+    case "foreach_completed":
+    case "retry_succeeded":
+    case "validator_passed":
+    case "wait_completed":
+    case "human_decision_resolved":
+    case "interrupt_resolved":
+    case "dialog_ended":
+      return "success";
+    // error：失败类
+    case "workflow_failed":
+    case "workflow_cancelled":
+    case "node_failed":
+    case "retry_exhausted":
+    case "validator_failed":
+    case "error":
+      return "error";
+    // warning：跳过
+    case "node_skipped":
+      return "warning";
+    // debug：路由（默认隐藏，SPEC 决策 3）
+    case "route_taken":
+      return "debug";
+    // null：过程事件归 ConversationView，不进 Log
+    case "agent_message":
+    case "agent_thinking":
+    case "agent_tool_call":
+    case "agent_tool_result":
+    case "agent_step_started":
+    case "foreach_item_started":
+    case "foreach_item_completed":
+    case "prompt_rendered":
+    case "agent_usage":
+    case "custom":
+    case "dialog_message":
+    case "unknown_event":
+      return null;
+    default: {
+      // TS 编译期穷尽守门：events.ts 加新 type 没补上面 case → 编译失败。
+      const _exhaustive: never = type;
+      // 运行时兜底（理论不可达；防御 unknown 运行时值）：fail loud，不静默吞。
+      console.warn(
+        `[orca] classifyLogLevel: unmapped event type ${String(_exhaustive)} → 降级为不进 Log`
+      );
+      return null;
+    }
+  }
+}
+
+/**
+ * debug 级（route_taken）是否在 LogStream 显示。模块级状态 + setter（SPEC §P1：
+ * 默认隐藏；保留可恢复开关，YAGNI 不接 UI，供未来调试/开关调用）。
+ */
+let showDebug = false;
+
+/** 切换 debug 级可见性（默认 false 隐藏 route_taken）。供未来 UI 开关或调试调用。 */
+export function setLogShowDebug(v: boolean): void {
+  showDebug = v;
 }
 
 /** 单行摘要：每个 EventType 均有 readable 摘要，无 no-op fallback（SPEC §5.5 / §9 AC3）。 */
@@ -538,20 +778,20 @@ function num(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-const ERROR_TYPES = new Set<WebEvent["type"]>([
-  "workflow_failed",
-  "node_failed",
-  "workflow_cancelled",
-  "error",
-  "validator_failed",
-  "retry_exhausted",
-]);
-
 export function selectLog(state: WorkflowState): LogLine[] {
-  return state.events.map((e: WebEvent) => ({
-    seq: e.seq,
-    type: e.type,
-    text: summarizeEvent(e),
-    isError: ERROR_TYPES.has(e.type),
-  }));
+  // SPEC §P1：filter（classifyLogLevel 非 null）+ 默认隐藏 debug 级（route_taken）。
+  // 一次遍历完成 filter + map，保留可恢复 debug 的能力（setLogShowDebug）。
+  const out: LogLine[] = [];
+  for (const e of state.events) {
+    const level = classifyLogLevel(e.type);
+    if (level === null) continue;
+    if (level === "debug" && !showDebug) continue;
+    out.push({
+      seq: e.seq,
+      type: e.type,
+      text: summarizeEvent(e),
+      level,
+    });
+  }
+  return out;
 }

@@ -1,29 +1,36 @@
-"""tests/iface/in_session/test_in_session_v8.py —— v8 增量守门测试。
+"""tests/iface/in_session/test_in_session_v8.py —— v8 / v5 增量守门测试。
 
-覆盖 SPEC v8 §2.6 / §2.6.1 / §2.6.2 / §2.7 / §9.2：
-  - **Marker regex**（§2.6.1）：run/status/stop/doctor 命中；无 args / 含空格 wf 路径 / 含 `>` 拒绝；
-    无 marker 透传。
-  - **改写语义**（§2.6.2）：run→.prompt / doctor→.report / status→友好 / stop→ok+run_id；mock
-    CLI stdout JSON。
-  - **一次性消费**（§2.6.1）：替换文本无 `<!--orca:cmd` 字面。
-  - **sessionID argv**：从 info.sessionID 取作 --owner + --session-id argv。
-  - **doctor CLI**（§2.7）：3 项 checks、JSON 结构、report 无完整 marker 字面、ok=and(pass)。
+覆盖 SPEC v8 §2.7 + §9.2 + v5 §4.4 / §8 step 4：
+  - **doctor CLI**（§2.7，v5 重设计）：4 项 checks（skill_install/cli_imports 硬 +
+    diag_switch/advance_hook 可选；FU-2 删 entry_hook dead check）、JSON 结构、
+    report 描述 B 路径、ok=skill+cli 无 fail。
+  - **v5 §4.4 idle nudge hook**：session.idle → 提醒主 session 调 next（**绝不 spawn next**，
+    B 路径铁律）。
   - **架构守门**：plugin 模板无 `@opencode/core/client` / `command.execute.before` /
-    `Bun.spawn(` + `stdout:"string"` / `advance_step` / `router.resolve` / `replay_state` /
-    `tape.append` / `EventBus` / `Tape(` / `drive_loop` / `advance(`。
-  - **start 写入 opencode 模板**：start 命令把 orca.ts + orca.md 写入 .opencode/。
+    `advance_step` / `router.resolve` / `replay_state` / `tape.append` / `EventBus` /
+    `Tape(` / `drive_loop` / `advance(`。
+  - **CLI 行为契约**：bootstrap / next / status / stop（含 --json flag、compact prompt_file
+    指针、stop run_id 直定位）。
+
+v5 §8 step 4 收尾：transform marker 派发 + 死代码（extractTaskOutput / spawnCli / spawnTopLevelCli
+/ rewriteText / findLastUserTextPart / extractModel / buildCliArgs / MARKER_REGEX / MARKER_LITERAL）
+从 orca.ts 整删——相关守门测试（marker regex 同步 / 改写语义 / spawnCli fail loud / buildCliArgs
+分支 / transform 签名）随之删除。仅保留 idle nudge hook 守门 + 架构守门 + CLI 行为契约。
+``_constants.py`` 整删（MARKER_REGEX/LITERAL 仅被 transform 段引用，删后无消费者）。
 """
 from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
+from orca.events.adapters._family import _encode_cwd
 from orca.iface.in_session.cli import app
-from orca.iface.in_session.templates import MARKER_REGEX
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -41,60 +48,19 @@ def cwd_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-# ── §2.6.1 Marker regex ──────────────────────────────────────────────────────
+# ── doctor 诊断（v5 §4.4：skill_install + cli_imports 为硬检查；hook 心跳可选）────
 
 
-@pytest.mark.parametrize(
-    "text,expected_sub,expected_args",
-    [
-        ("<!--orca:cmd run wf.yaml-->", "run", "wf.yaml"),
-        ("<!--orca:cmd status-->", "status", ""),
-        ("<!--orca:cmd stop-->", "stop", ""),
-        ("<!--orca:cmd doctor-->", "doctor", ""),
-        ("<!--orca:cmd run /abs/path/wf.yaml-->", "run", "/abs/path/wf.yaml"),
-        ("<!--orca:cmd   run   wf.yaml  -->", "run", "wf.yaml"),  # 多空格 + 尾空格
-        ("<!--orca:cmd run-->", "run", ""),                       # 无 args
-    ],
-)
-def test_marker_regex_matches(text, expected_sub, expected_args):
-    """SPEC §2.6.1：regex 行首/行尾锚定 + sub \\w+ + args 非贪婪 [^>]*?。"""
-    m = re.match(MARKER_REGEX, text)
-    assert m is not None, f"未命中 marker: {text!r}"
-    assert m.group(1) == expected_sub
-    assert (m.group(2) or "").strip() == expected_args
+@pytest.fixture
+def doctor_iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """隔离 doctor 的 home + cwd：``Path.home`` → tmp_path + chdir tmp_path。
 
-
-@pytest.mark.parametrize("text", [
-    "not a marker",                                  # 无 marker
-    "  <!--orca:cmd run wf.yaml-->",                 # 行首空格（非行首锚定）
-    "<!--orca:cmd run wf.yaml--> trailing",          # 行尾非锚定
-    "<!--orca:cmd run wf>yaml-->",                   # args 含 >（明令禁止）
-    "<!--orca:cmd run wf\nyaml-->",                  # 换行（args 不得跨行）
-    "some text <!--orca:cmd run--> more text",       # 非整条文本
-    "<!--orca: cmd run-->",                          # orca: 后空格变 orca:cmd 不匹配
-])
-def test_marker_regex_rejects(text):
-    """SPEC §2.6.1：非 marker 文本不命中（行首/行尾锚定 + args 禁 `>` / 禁换行）。"""
-    assert re.match(MARKER_REGEX, text) is None, f"误命中：{text!r}"
-
-
-@pytest.mark.parametrize("text", [
-    "<!-- orca:cmd run -->",          # <!-- 后空格容许（regex \s*）
-    "<!--orca:cmd   run   wf.yaml-->",  # 多空格分隔
-])
-def test_marker_regex_tolerates_whitespace(text):
-    """SPEC §2.6.1：``<!--`` 后空格与多空格分隔容许（``\\s*`` / ``\\s+``）。"""
-    assert re.match(MARKER_REGEX, text) is not None
-
-
-def test_marker_regex_sub_must_be_word():
-    """子命令名 \\w+：含特殊字符不命中。"""
-    assert re.match(MARKER_REGEX, "<!--orca:cmd run-x-->") is None   # `-` 非 \w
-    assert re.match(MARKER_REGEX, "<!--orca:cmd 123run-->") is not None  # 数字 OK
-    assert re.match(MARKER_REGEX, "<!--orca:cmd RUN-->") is not None     # 大写 OK
-
-
-# ── doctor 钩子诊断（2026-07-08 重设计：心跳作证，取代静态正则自检）─────────────
+    必须：doctor 的 ``_scan_skill_install`` 查 user-scope（``~/.claude`` 等）+ project-scope。
+    不隔离 home，则装过 orca 的开发机上 ``skill_install`` 恒 pass → fail-when-absent 测试反向失败。
+    """
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
 
 
 def _run_doctor() -> dict:
@@ -112,8 +78,35 @@ def _write_probe(cwd: Path, name: str, payload: dict) -> None:
     (runs / name).write_text(json.dumps(payload), encoding="utf-8")
 
 
-def test_doctor_json_structure(cwd_tmp, monkeypatch):
-    """doctor 输出 JSON {ok, diag, report, checks:[{name,status,detail}]} + 4 项 checks。"""
+_DOTDIR = {"cc": ".claude", "opencode": ".opencode", "cac": ".cac", "nga": ".nga"}
+
+
+def _install_fake_entry_skill(
+    root: Path, platform: str = "cc", *, under: str = "project",
+    home: Path | None = None,
+) -> Path:
+    """落一个占位入口 skill（TARS 品牌）让 doctor 扫到。
+
+    目录名取 ``ENTRY_SKILL_NAME`` 单一真相源（现 = tars），与 ``_scan_skill_install`` 对齐。
+    - ``under="project"``：落 ``<root>/<dotdir>/skills/<ENTRY_SKILL_NAME>/SKILL.md``（root 当 cwd）。
+    - ``under="user"``：落 ``<home>/<dotdir>/skills/<ENTRY_SKILL_NAME>/SKILL.md``（home 注入时用）。
+    """
+    from orca.iface.cli.skill_cmds import ENTRY_SKILL_NAME
+
+    dotdir = _DOTDIR[platform]
+    base = (home if under == "user" else root)
+    skill_md = base / dotdir / "skills" / ENTRY_SKILL_NAME / "SKILL.md"
+    skill_md.parent.mkdir(parents=True, exist_ok=True)
+    skill_md.write_text(f"---\nname: {ENTRY_SKILL_NAME}\n---\n# {ENTRY_SKILL_NAME}\n", encoding="utf-8")
+    return skill_md
+
+
+def test_doctor_json_structure(doctor_iso, monkeypatch):
+    """doctor 输出 JSON {ok, diag, report, checks} + 6 项 checks。
+
+    顺序：skill_install / cli_imports_ok（硬）在前，diag_switch / advance_hook /
+    sidechain_backend（SPEC §P4）/ sidechain_daemon（SPEC §5 D3）（可选）在后。
+    """
     monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
     reply = _run_doctor()
     assert set(reply.keys()) >= {"ok", "diag", "report", "checks"}
@@ -121,146 +114,478 @@ def test_doctor_json_structure(cwd_tmp, monkeypatch):
     assert isinstance(reply["diag"], bool)
     assert isinstance(reply["report"], str) and len(reply["report"]) > 0
     assert isinstance(reply["checks"], list)
-    assert len(reply["checks"]) == 4
+    assert len(reply["checks"]) == 6
     names = [c["name"] for c in reply["checks"]]
-    assert names == ["diag_switch", "entry_hook", "advance_hook", "cli_imports_ok"]
+    # FU-2：entry_hook 已删（transform step 4 整删后 PROBE_ENTRY 心跳永不再写，dead）。
+    # SPEC §P4：sidechain_backend（hard=False，B2 路径诊断）。
+    # SPEC §5 D3：sidechain_daemon（hard=False，per-active-run liveness 探针；覆盖死亡，
+    # 不覆盖持续 iterate 失败 §8#4）。
+    assert names == ["skill_install", "cli_imports_ok", "diag_switch",
+                     "advance_hook", "sidechain_backend", "sidechain_daemon"]
+    # 每条 check 带 hard 字段（review 🟡#5：替代硬编码 name tuple 防 typo 静默丢失硬检查）
+    hard_expected = {"skill_install": True, "cli_imports_ok": True,
+                     "diag_switch": False, "advance_hook": False,
+                     "sidechain_backend": False, "sidechain_daemon": False}
     for c in reply["checks"]:
-        assert set(c.keys()) == {"name", "status", "detail"}
+        assert set(c.keys()) == {"name", "status", "detail", "hard"}, (
+            f"check {c['name']} 字段漂移：{set(c.keys())}"
+        )
         assert c["status"] in ("pass", "unknown", "fail")
+        assert c["hard"] is hard_expected[c["name"]]
 
 
-def test_doctor_diag_off_reports_unknown_and_ok(cwd_tmp, monkeypatch):
-    """诊断关：entry/advance 均 unknown（证据不足，非 fail）→ ok=True。"""
+def test_doctor_skill_install_pass_when_skill_present(doctor_iso, monkeypatch):
+    """A6：四前端任一装了入口 skill（project-scope）→ skill_install=pass + ok=True。"""
     monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    _install_fake_entry_skill(doctor_iso, "cc")
+    reply = _run_doctor()
+    by_name = {c["name"]: c for c in reply["checks"]}
+    assert by_name["skill_install"]["status"] == "pass"
+    assert "cc" in by_name["skill_install"]["detail"]
+    assert reply["ok"] is True  # skill + cli 都 pass
+
+
+def test_doctor_skill_install_detects_each_platform(doctor_iso, monkeypatch):
+    """A6：opencode / cac / nga project-scope 装 skill → 各自被扫到（覆盖 _scan_skill_install 分支）。"""
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    for platform in ("opencode", "cac", "nga"):
+        _install_fake_entry_skill(doctor_iso, platform)
+    reply = _run_doctor()
+    detail = {c["name"]: c["detail"] for c in reply["checks"]}["skill_install"]
+    assert reply["ok"] is True
+    for platform in ("opencode", "cac", "nga"):
+        assert platform in detail
+
+
+def test_doctor_skill_install_user_scope(doctor_iso, monkeypatch):
+    """A6：user-scope（``<home>/<dotdir>/skills/<ENTRY_SKILL_NAME>``）也能被扫到（doctor_iso 把 home 指到 tmp）。"""
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    _install_fake_entry_skill(doctor_iso, "cac", under="user", home=doctor_iso)
+    reply = _run_doctor()
+    by_name = {c["name"]: c for c in reply["checks"]}
+    assert by_name["skill_install"]["status"] == "pass"
+    assert "cac" in by_name["skill_install"]["detail"]
+
+
+def test_doctor_skill_install_fail_when_absent(doctor_iso, monkeypatch):
+    """A6：四前端都没装入口 skill → skill_install=fail + ok=False（doctor_iso 隔离 home + cwd 干净）。"""
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    reply = _run_doctor()
+    by_name = {c["name"]: c for c in reply["checks"]}
+    assert by_name["skill_install"]["status"] == "fail"
+    assert reply["ok"] is False  # skill_install fail → ok False（即便 cli ok）
+
+
+def test_doctor_diag_off_hook_checks_unknown_ok_unaffected(doctor_iso, monkeypatch):
+    """诊断关：hook 两项（diag/advance）均 unknown；ok 只看 skill+cli（装了 skill → ok）。
+
+    FU-2：entry_hook check 已删（transform step 4 整删后 dead），不再断言。
+    """
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    _install_fake_entry_skill(doctor_iso, "cc")
     reply = _run_doctor()
     assert reply["diag"] is False
     by_name = {c["name"]: c for c in reply["checks"]}
     assert by_name["diag_switch"]["status"] == "unknown"
-    assert by_name["entry_hook"]["status"] == "unknown"
     assert by_name["advance_hook"]["status"] == "unknown"
-    assert reply["ok"] is True  # unknown 不算失败
+    assert reply["ok"] is True  # hook unknown 不拉低 ok（skill+cli pass）
 
 
-def test_doctor_diag_on_no_heartbeat_entry_fails(cwd_tmp, monkeypatch):
-    """诊断开 + 无 transform 心跳 = entry FAIL（fork 未接 experimental transform 钩子）。"""
-    monkeypatch.setenv("ORCA_DIAGNOSE", "1")
-    reply = _run_doctor()
-    by_name = {c["name"]: c for c in reply["checks"]}
-    assert by_name["diag_switch"]["status"] == "pass"
-    assert by_name["entry_hook"]["status"] == "fail"
-    assert reply["ok"] is False
+def test_doctor_advance_heartbeat_passes(doctor_iso, monkeypatch):
+    """诊断开 + advance 心跳 = advance PASS（idle 在 fire，报告 idle 计数，仅 nudge）。
 
-
-def test_doctor_fresh_entry_heartbeat_passes(cwd_tmp, monkeypatch):
-    """诊断开 + 新鲜 entry 心跳 = entry PASS（transform 在 fire）。"""
+    v5 §8 step 4 收尾：``advance_count`` / ``last_advance_run_id`` 字段从 fixture 删除
+    （plugin 不再写——A 路径退场后 idle hook 不 spawn next，doctor 也不读它们）。
+    """
     import time as _t
     monkeypatch.setenv("ORCA_DIAGNOSE", "1")
-    _write_probe(cwd_tmp, ".orca-probe-entry.json", {
-        "diag": True, "last_called_at": int(_t.time()),
-        "dispatch_count": 2, "last_dispatch_sub": "run",
-    })
-    reply = _run_doctor()
-    by_name = {c["name"]: c for c in reply["checks"]}
-    assert by_name["entry_hook"]["status"] == "pass"
-    assert "dispatch 2" in by_name["entry_hook"]["detail"]
-
-
-def test_doctor_stale_entry_heartbeat_fails(cwd_tmp, monkeypatch):
-    """诊断开 + entry 心跳过期（>5min）= FAIL/STALE（钩子间歇失效）。"""
-    monkeypatch.setenv("ORCA_DIAGNOSE", "1")
-    _write_probe(cwd_tmp, ".orca-probe-entry.json", {
-        "diag": True, "last_called_at": 0,  # 远古 → age 巨大
-        "dispatch_count": 0, "last_dispatch_sub": None,
-    })
-    reply = _run_doctor()
-    by_name = {c["name"]: c for c in reply["checks"]}
-    assert by_name["entry_hook"]["status"] == "fail"
-
-
-def test_doctor_advance_heartbeat_passes(cwd_tmp, monkeypatch):
-    """诊断开 + advance 心跳 = advance PASS（idle 在 fire，且报告推进计数）。"""
-    import time as _t
-    monkeypatch.setenv("ORCA_DIAGNOSE", "1")
-    _write_probe(cwd_tmp, ".orca-probe-advance.json", {
+    _install_fake_entry_skill(doctor_iso, "cc")
+    _write_probe(doctor_iso, ".orca-probe-advance.json", {
         "diag": True, "last_idle_at": int(_t.time()),
-        "idle_count": 3, "advance_count": 1, "last_advance_run_id": "r-1",
+        "idle_count": 3,
         "last_session_id": "s-1",
     })
     reply = _run_doctor()
     by_name = {c["name"]: c for c in reply["checks"]}
     assert by_name["advance_hook"]["status"] == "pass"
-    assert "推进 run 1" in by_name["advance_hook"]["detail"]
+    assert "idle fire 过 3" in by_name["advance_hook"]["detail"]
 
 
-def test_doctor_report_has_decision_matrix(cwd_tmp, monkeypatch):
-    """报告含决策矩阵（据 entry/advance PASS/FAIL 决定 transform 去留）。"""
+def test_doctor_report_describes_b_path(doctor_iso, monkeypatch):
+    """v5：报告说明执行模型 = B 路径（主 session 自调 next），hook 退居可选诊断。
+
+    FU-2：entry probe 路径行已删，仅 advance probe 路径写进报告。
+    """
     monkeypatch.setenv("ORCA_DIAGNOSE", "1")
+    _install_fake_entry_skill(doctor_iso, "cc")
     reply = _run_doctor()
-    assert "决策矩阵" in reply["report"]
-    assert "prompt-command" in reply["report"]  # 「砍 transform → 走 prompt-command」
-    # 心跳文件路径写进报告，便于用户定位/清理
-    assert ".orca-probe-entry.json" in reply["report"]
+    assert "B 路径" in reply["report"]
+    assert "orca next" in reply["report"]  # 主 session 自调 next
+    # advance 心跳文件路径写进报告（entry 路径行 FU-2 删，不再断言）
+    assert ".orca-probe-advance.json" in reply["report"]
+    assert ".orca-probe-entry.json" not in reply["report"]  # FU-2 守门：entry 路径不再出现
 
 
+# ── SPEC §P4：sidechain_backend check（cac/nga 路径诊断）─────────────────────
 
-# ── §2.6.2 改写语义（plugin TS 字段提取契约）────────────────────────────────
+
+def _sidechain_check(reply: dict) -> dict:
+    """从 doctor reply 抽 sidechain_backend check。"""
+    matches = [c for c in reply["checks"] if c["name"] == "sidechain_backend"]
+    assert len(matches) == 1, f"应有恰好 1 个 sidechain_backend check，得 {len(matches)}"
+    return matches[0]
 
 
-def _extract_ts_function_body(name: str) -> str:
-    """从 plugin TS 抽某函数体（用 brace counting，避免 reformat 断）。
+def test_doctor_sidechain_backend_no_env_reports_unknown(doctor_iso, monkeypatch):
+    """无 CC/opencode env → status=unknown（非 in-session run，B2 不适用）。"""
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    _install_fake_entry_skill(doctor_iso, "cc")
+    reply = _run_doctor()
+    check = _sidechain_check(reply)
+    assert check["hard"] is False
+    assert check["status"] == "unknown"
+    assert "未检测到" in check["detail"]
+    # hard=False → 不影响 ok（既有 skill+cli 硬检查主导）。
+    assert reply["ok"] is True
 
-    NIT-4 闭环：从 ``function name(...) {`` 起按 ``{``/``}`` 平衡扫描到匹配闭 ``}``。
+
+def test_doctor_sidechain_backend_cc_env_family_when_no_per_session_root(doctor_iso, monkeypatch):
+    """真 CC env + skill 装 .claude 但 per-session sidechain root 未建 → env family=cc、root 不存在。
+
+    env 身份（CLAUDE_CODE_SESSION_ID）→ family=cc（source=env），resolver 收 family="cc" 走
+    source=config（跳过 dotdir probe）；但该 session 还没派过子 agent → root 不存在 → fail。
+    """
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "host-sid-123")
+    _install_fake_entry_skill(doctor_iso, "cc")
+    reply = _run_doctor()
+    check = _sidechain_check(reply)
+    assert check["hard"] is False
+    # per-session root 未建 → root_exists=False → status=fail（hard=False 不影响 ok）。
+    assert check["status"] == "fail"
+    detail = check["detail"]
+    assert "family=cc" in detail
+    assert "source=env" in detail          # env 身份胜
+    assert "root_source=config" in detail  # family 非 None → resolver 走 config（非 probe）
+    assert "root_exists=False" in detail
+    assert "host_session_set=True" in detail
+    assert "available=False" in detail
+
+
+def test_doctor_sidechain_backend_env_family_cc_when_cac_dotdir_installed(doctor_iso, monkeypatch):
+    """【bug 回归锚】真 CC env + .claude/.cac 两存（.cac 是 install 副作用）→ env family=cc 胜，读 .claude。
+
+    修前：dotdir 探测 cac 优先 → 误读空的 .cac → daemon ingest 0 条 → 子 agent 消息进不了 web。
+    修后：env 身份（CLAUDE_CODE_SESSION_ID）权威 → family=cc（source=env）→ resolved 指向 .claude。
+    """
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "host-sid-amb")
+    _install_fake_entry_skill(doctor_iso, "cc")
+
+    # 两存：.claude（真 CC 数据）+ .cac（install 副作用），都建 per-session root。
+    encoded = _encode_cwd(str(doctor_iso))  # 与 doctor 同一编码（doctor_iso=tmp_path 含下划线，须用 _encode_cwd 非 replace）
+    for dotdir in (".claude", ".cac"):
+        root = doctor_iso / dotdir / "projects" / encoded / "host-sid-amb" / "subagents"
+        root.mkdir(parents=True)
+
+    reply = _run_doctor()
+    check = _sidechain_check(reply)
+    detail = check["detail"]
+    # env 身份胜：family=cc（source=env），resolved 指向 .claude（非 .cac）。
+    assert "family=cc" in detail
+    assert "source=env" in detail
+    resolved = detail.split("resolved_root=")[1].split("；")[0]
+    assert "/.claude/" in resolved, f"resolved 应指向 .claude，得 {resolved}"
+    assert "/.cac/" not in resolved
+    # .claude root 存在 → available。
+    assert "root_exists=True" in detail
+    assert "available=True" in detail
+    assert check["status"] == "pass"
+
+
+def test_doctor_sidechain_backend_cac_env_family(doctor_iso, monkeypatch):
+    """CAC（CC 换皮）：CODEAGENT=1 + PID 回溯命中 → env family=cac，读 .cac。
+
+    CAC 不注入 CLAUDE_CODE_SESSION_ID；env 身份经 PID 回溯 codeagentcli 拿 session id。
+    monkeypatch cac_session_id_from_pid 模拟回溯命中（真机由 /proc 自动回溯）。
+    """
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.setenv("CODEAGENT", "1")
+    monkeypatch.setattr(
+        "orca.iface.in_session._hostenv.cac_session_id_from_pid",
+        lambda: "host-sid-cac",
+    )
+    _install_fake_entry_skill(doctor_iso, "cc")
+
+    encoded = _encode_cwd(str(doctor_iso))  # 与 doctor 同一编码（doctor_iso=tmp_path 含下划线，须用 _encode_cwd 非 replace）
+    cac_root = doctor_iso / ".cac" / "projects" / encoded / "host-sid-cac" / "subagents"
+    cac_root.mkdir(parents=True)
+
+    reply = _run_doctor()
+    check = _sidechain_check(reply)
+    detail = check["detail"]
+    assert "family=cac" in detail
+    assert "source=env" in detail
+    resolved = detail.split("resolved_root=")[1].split("；")[0]
+    assert "/.cac/" in resolved
+    assert "root_exists=True" in detail
+    assert "available=True" in detail
+    assert check["status"] == "pass"
+
+
+def test_doctor_sidechain_backend_opencode_family(doctor_iso, monkeypatch):
+    """opencode 家族：有 ORCA_HOST_SESSION_ID + nga DB 存在 → probe 胜。"""
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.setenv("ORCA_HOST_SESSION_ID", "host-sid-opc")
+    _install_fake_entry_skill(doctor_iso, "cc")
+
+    # 建 ~/.local/share/nga/opencode.db（fake_home=doctor_iso）。
+    nga_db = doctor_iso / ".local" / "share" / "nga" / "opencode.db"
+    nga_db.parent.mkdir(parents=True)
+    nga_db.write_bytes(b"")
+
+    reply = _run_doctor()
+    check = _sidechain_check(reply)
+    detail = check["detail"]
+    assert "family=nga" in detail
+    assert "resolved_db=" in detail
+    assert "db_source=probe" in detail
+    assert "db_exists=True" in detail
+    assert "available=True" in detail
+    assert check["status"] == "pass"
+
+
+def test_doctor_sidechain_backend_env_family_beats_config(doctor_iso, monkeypatch):
+    """env 身份优先于 config：真 CC env（→cc）即便 config 设 cac → family=cc、读 .claude。
+
+    优先级 env > config > probe（修复核心：env 是权威身份源，config 仅在无 env 信号时兜底）。
+    """
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "host-sid-cfg")
+    _install_fake_entry_skill(doctor_iso, "cc")
+
+    # 建 .claude per-session root；config 设 family=cac（应被 env 覆盖）。
+    encoded = _encode_cwd(str(doctor_iso))  # 与 doctor 同一编码（doctor_iso=tmp_path 含下划线，须用 _encode_cwd 非 replace）
+    cc_root = doctor_iso / ".claude" / "projects" / encoded / "host-sid-cfg" / "subagents"
+    cc_root.mkdir(parents=True)
+    cfg = doctor_iso / ".orca" / "config.json"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text('{"sidechain": {"family": "cac"}}', encoding="utf-8")
+
+    reply = _run_doctor()
+    check = _sidechain_check(reply)
+    detail = check["detail"]
+    # env 胜：family=cc（source=env），resolved 指向 .claude（非 config 的 cac）。
+    assert "family=cc" in detail
+    assert "source=env" in detail
+    resolved = detail.split("resolved_root=")[1].split("；")[0]
+    assert "/.claude/" in resolved
+    assert "root_source=config" in detail
+    # encoded 一致 → 测试建的 .claude root 命中 → root_exists=True（钉死：旧手算 replace 编码下此断言假绿）
+    assert "root_exists=True" in detail
+
+
+def test_doctor_sidechain_backend_hard_false_does_not_affect_ok(doctor_iso, monkeypatch):
+    """sidechain_backend hard=False → status=fail 不拉低 ok（hard 检查主导）。
+
+    守门 SPEC §P4：不破坏既有 hard check（skill_install/cli_imports_ok）的 ok 逻辑。
+    """
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "host-sid-noroot")
+    _install_fake_entry_skill(doctor_iso, "cc")
+    # 无目录 → sidechain_backend status=fail。
+    reply = _run_doctor()
+    check = _sidechain_check(reply)
+    assert check["hard"] is False
+    assert check["status"] == "fail"
+    # 但 skill + cli 硬检查 pass → ok=True。
+    assert reply["ok"] is True
+
+
+# ── SPEC §5 D3：sidechain_daemon liveness check（per-active-run 探针）─────────
+
+
+def _sidechain_daemon_check(reply: dict) -> dict:
+    """从 doctor reply 抽 sidechain_daemon check。"""
+    matches = [c for c in reply["checks"] if c["name"] == "sidechain_daemon"]
+    assert len(matches) == 1, f"应有恰好 1 个 sidechain_daemon check，得 {len(matches)}"
+    return matches[0]
+
+
+def test_doctor_sidechain_daemon_no_env_reports_unknown(doctor_iso, monkeypatch):
+    """无 host_session env → sidechain_daemon status=unknown（守护本就不该起）。"""
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    _install_fake_entry_skill(doctor_iso, "cc")
+    reply = _run_doctor()
+    check = _sidechain_daemon_check(reply)
+    assert check["hard"] is False
+    assert check["status"] == "unknown"
+    assert "未检测到 host_session env" in check["detail"]
+    # hard=False → 不影响 ok。
+    assert reply["ok"] is True
+
+
+def test_doctor_sidechain_daemon_env_but_no_active_run_unknown(doctor_iso, monkeypatch):
+    """有 CC env 但无活跃 run marker → unknown（守护仅在活跃 run 中起作用）。"""
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "host-sid-noactive")
+    _install_fake_entry_skill(doctor_iso, "cc")
+    # 无 marker（runs/ 可能不存在）
+    reply = _run_doctor()
+    check = _sidechain_daemon_check(reply)
+    assert check["hard"] is False
+    assert check["status"] == "unknown"
+    assert "无活跃 run marker" in check["detail"] or "无 runs/" in check["detail"]
+
+
+def test_doctor_sidechain_daemon_dead_for_active_run(doctor_iso, monkeypatch):
+    """有 CC env + 有活跃 marker + 无对应守护 pidfile → status=fail（degraded，hard=False）。
+
+    SPEC §5 D3 AC：守护死 → degraded + hint。覆盖「守护死亡」场景。
+    """
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "host-sid-daemon-dead")
+    _install_fake_entry_skill(doctor_iso, "cc")
+
+    # 造一个活跃 marker 但不 spawn 守护（模拟守护被杀 / 残留 marker）。
+    runs = doctor_iso / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    (runs / "orca-fake-run-zzz.json").write_text(
+        json.dumps({"run_id": "fake-run-zzz", "model": "any", "no_output_count": 0}),
+        encoding="utf-8",
+    )
+
+    reply = _run_doctor()
+    check = _sidechain_daemon_check(reply)
+    assert check["hard"] is False
+    assert check["status"] == "fail"
+    detail = check["detail"]
+    assert "fake-run-zzz=dead" in detail
+    # SPEC §5 D3 AC：degraded + hint（next 自动 respawn）。
+    assert "respawn" in detail or "next" in detail
+    # SPEC §5 D3 AC：明示不覆盖持续失败（§8#4）。
+    assert "§8#4" in detail or "iterate" in detail
+    # hard=False → 不影响 ok（skill+cli 仍主导）。
+    assert reply["ok"] is True
+
+
+def test_doctor_sidechain_daemon_alive_for_active_run(doctor_iso, monkeypatch):
+    """有 CC env + 活跃 marker + 守护真活（写 pidfile + 起一个轻量进程）→ status=pass。
+
+    SPEC §5 D3 AC：守护存活 → pass。
+    """
+    import os
+    import tempfile
+
+    monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "host-sid-daemon-alive")
+    _install_fake_entry_skill(doctor_iso, "cc")
+
+    run_id = "fake-alive-run-xyz"
+    runs = doctor_iso / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    (runs / f"orca-{run_id}.json").write_text(
+        json.dumps({"run_id": run_id, "model": "any", "no_output_count": 0}),
+        encoding="utf-8",
+    )
+
+    # 起 sleeping 子进程 + 写 pidfile 指向它 + cmdline 伪装成 sidechain_daemon。
+    # ``pidfile_daemon_alive`` 读 /proc/<pid>/cmdline 校验含模块名 + --run-id + run_id；
+    # 这里用一个长存活子进程跑 ``sleep``，再 monkeypatch cmdline 校验（避免真起 daemon）。
+    proc = subprocess.Popen(
+        [sys.executable, "-c",
+         "import time; time.sleep(300)"],
+        # 伪装 argv：让 cmdline 解析出 module_name + --run-id + run_id。
+        # 直接 monkeypatch _sidechain_daemon_alive 更简洁（不依赖 /proc 真值）。
+    )
+    try:
+        # 直接 monkeypatch liveness 探为 True（守护存活语义），守 doctor 的 pass 分支。
+        from orca.iface.in_session import sidechain_daemon as sd_mod
+        monkeypatch.setattr(sd_mod, "_sidechain_daemon_alive", lambda rid: True)
+
+        reply = _run_doctor()
+        check = _sidechain_daemon_check(reply)
+        assert check["hard"] is False
+        assert check["status"] == "pass"
+        assert f"{run_id}=alive" in check["detail"]
+        # SPEC §5 D3 AC：明示不覆盖持续 iterate 失败（§8#4）。
+        assert "§8#4" in check["detail"] or "iterate" in check["detail"]
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+# ── v5 §4.4 / step 2b(7)：orca.ts idle nudge（提醒，绝不推进）───────────────────
+
+
+def test_orca_ts_idle_hook_is_nudge_no_advance():
+    """v5 §4.4 + step 4：``session.idle`` hook 是 nudge（提醒主 session 调 next），**绝不 spawn next**。
+
+    B 路径铁律：hook 自动调 next = 退化 A 路径。idle hook 应只扫 marker + promptAsync 注入
+    提醒，不 spawnCli。提取 event hook 区段断言。
+
+    step 4 收尾后：transform 段已整删——本测试同时守门 transform 不得复活（防止 builder
+    把 transform 入口段加回来）。
     """
     text = PLUGIN_TS.read_text(encoding="utf-8")
-    m = re.search(rf"function {name}\b\s*\(", text)
-    assert m, f"未找到函数 {name}"
-    # 从匹配处往后找第一个 `{`
-    start = text.find("{", m.end())
-    assert start >= 0, f"{name} 缺函数体起始 ``{{``"
-    depth = 0
-    i = start
-    while i < len(text):
-        c = text[i]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start + 1:i]
-        i += 1
-    raise AssertionError(f"{name} 函数体未闭合")
+    # 提取 event hook 区段（从 ``event: async`` 到其后第一个 `\n    },`）。
+    start = text.find("event: async")
+    assert start >= 0, "未找到 event hook"
+    end = text.find("\n    },", start)
+    assert end >= 0, "event hook 区段未闭合"
+    hook = text[start:end]
+    # nudge 机制存在
+    assert "listActiveRuns" in text, "缺 listActiveRuns（nudge 扫活跃 run 的 helper）"
+    assert "Orca nudge" in hook, "idle hook 缺 nudge 提醒文案"
+    assert "promptAsync" in hook, "idle hook 应用 promptAsync 注入提醒"
+    # 铁律：idle hook 不得 spawn next（不出现任何 spawn 路径调用——spawnCli /
+    # spawnTopLevelCli / Bun.spawnSync / Bun.spawn 任一都算退化 A 路径自动推进）
+    for spawn_pat in ("spawnCli", "spawnTopLevelCli", "Bun.spawn"):
+        assert spawn_pat not in hook, (
+            f"idle hook 不得 {spawn_pat}（B 路径：nudge 只提醒，绝不自动调 next）"
+        )
 
 
-def test_rewrite_text_field_extraction_contract():
-    """SPEC §2.6.2：plugin ``rewriteText`` 按子命令提取顶层字段（非整 JSON）。
+def test_orca_ts_has_no_transform_hook_step4():
+    """v5 §8 step 4 收尾守门：transform marker 派发入口段 + 死代码已整删。
 
-    通过逐子命令断言 plugin 源码包含对应字段名 + 子命令分支，守住提取契约。
+    防止 builder 把 ``experimental.chat.messages.transform`` 入口加回来（旧 A 路径第二入口，
+    v5 入口统一切到入口 skill（TARS）——transform 复活 = 第二入口绕过 skill，违反单一接口）。
+    同时守门 transform 相关死代码（spawnCli / rewriteText / buildCliArgs / MARKER_REGEX 等）
+    不得复活。
     """
-    body = _extract_ts_function_body("rewriteText")
-    # run → .prompt
-    assert "run" in body and "reply.prompt" in body
-    # doctor → .report
-    assert "doctor" in body and "reply.report" in body
-    # status → 友好串（status 字段）
-    assert "status" in body and "reply.status" in body
-    # stop → ok + run_id
-    assert "stop" in body and "reply.ok" in body and "reply.run_id" in body
-
-
-def test_plugin_spawns_cli_per_subcommand():
-    """SPEC §2.6.2：plugin 按 sub 派发到对应 CLI 子命令（buildCliArgs）。"""
-    body = _extract_ts_function_body("buildCliArgs")
-    assert '"bootstrap"' in body   # run → bootstrap
-    assert '"status"' in body
-    assert '"stop"' in body
-    assert '"doctor"' in body
-
-
-def test_plugin_passes_session_id_as_owner_and_session_id_argv():
-    """SPEC §2.6.2 B4：bootstrap argv 含 --owner <sid> + --session-id <sid>。"""
-    body = _extract_ts_function_body("buildCliArgs")
-    assert '"--owner"' in body
-    assert '"--session-id"' in body
+    text = PLUGIN_TS.read_text(encoding="utf-8")
+    code = _strip_ts_comments(text)
+    # transform 入口段已整删（查裸键——双引号 / 单引号 / 模板字符串任一形态都算复活）
+    assert "experimental.chat.messages.transform" not in code, (
+        "step 4：transform marker 派发入口段应整删（入口统一切到入口 skill / TARS）"
+    )
+    # transform 死代码同步守门（防复活）
+    dead_artifacts = [
+        "MARKER_REGEX", "MARKER_LITERAL",
+        "function spawnCli", "function spawnTopLevelCli",
+        "function rewriteText", "function buildCliArgs",
+        "function extractTaskOutput", "function findLastUserTextPart",
+        "function extractModel",
+    ]
+    for artifact in dead_artifacts:
+        assert artifact not in code, (
+            f"step 4：transform 死代码 {artifact!r} 应整删（无消费者）"
+        )
 
 
 # ── 架构守门（§2.6 / §9.2）──────────────────────────────────────────────────
@@ -296,17 +621,6 @@ def test_plugin_uses_ctx_client_not_npm_import():
     assert "ctx.client" in code, "plugin 应使用 ctx.client"
 
 
-def test_plugin_uses_spawn_sync_pipe_not_string():
-    """v8 spike 实证：``Bun.spawn({stdout:"string"})`` 非法，必须 ``Bun.spawnSync({stdout:"pipe"})``。"""
-    text = PLUGIN_TS.read_text(encoding="utf-8")
-    code = _strip_ts_comments(text)
-    assert 'Bun.spawnSync(' in code, "plugin 必须用 Bun.spawnSync"
-    assert 'stdout: "pipe"' in code, 'plugin 必须 stdout:"pipe"'
-    assert 'stdout: "string"' not in code, (
-        'plugin 不得用 stdout:"string"（opencode 内嵌 Bun runtime 非法）'
-    )
-
-
 def test_plugin_exports_flat_hooks_not_nested():
     """SPEC §13 v8：``export const OrcaPlugin = async (ctx) => ({ ...flat hooks })``。"""
     text = PLUGIN_TS.read_text(encoding="utf-8")
@@ -318,13 +632,6 @@ def test_plugin_exports_flat_hooks_not_nested():
     assert not re.search(r"\{\s*hooks:\s*\{", code), (
         "plugin 不得 nested hooks（spike 实证 flat hooks 才生效）"
     )
-
-
-def test_plugin_uses_messages_transform_entry():
-    """SPEC §2.6 D-v8-1：入口钩子是 ``experimental.chat.messages.transform``。"""
-    text = PLUGIN_TS.read_text(encoding="utf-8")
-    code = _strip_ts_comments(text)
-    assert '"experimental.chat.messages.transform"' in code
 
 
 def test_plugin_does_not_use_command_execute_before():
@@ -374,36 +681,12 @@ def test_plugin_no_count_state_for_doctor():
     )
 
 
-def test_plugin_one_shot_consume_in_rewrite_path():
-    """SPEC §2.6.1：plugin rewrite 后若文本意外含 marker 字面，用反引号替换兜底。"""
-    text = PLUGIN_TS.read_text(encoding="utf-8")
-    assert "MARKER_LITERAL" in text
-    assert '`orca:cmd`' in text or "`orca:cmd`" in text  # split-join 兜底分支
-
-
-def test_plugin_embeds_canonical_marker_regex():
-    """SPEC §2.6.1：plugin TS 必须 embed 与 Python ``MARKER_REGEX`` 同字面 regex。
-
-    单一真相源：改 regex 必须两处同步（本测试守同步契约）。
-    """
-    text = PLUGIN_TS.read_text(encoding="utf-8")
-    # TS regex 字面：/^...$/ 形式
-    m = re.search(r"const MARKER_REGEX = /(.+?)/", text)
-    assert m, "plugin 未定义 MARKER_REGEX 常量"
-    ts_regex = m.group(1)
-    # Python MARKER_REGEX 去掉前缀 ^ 和后缀 $ 后的中间部分应等同 TS regex
-    py_body = MARKER_REGEX
-    assert py_body.lstrip("^").rstrip("$") == ts_regex.lstrip("^").rstrip("$"), (
-        f"plugin TS regex `{ts_regex}` 与 Python MARKER_REGEX `{py_body}` 不同步"
-    )
-
-
-# ── start 命令 v8：写 opencode 模板文件 ─────────────────────────────────────
+# ── 共享 wf fixture（v5 step 2b：start 命令已删，fixture 供其余 v7/v8 测试复用）────
 
 
 AGENT_WF_YAML = """\
 name: start_test_wf
-description: 2-agent 线性 workflow（start v8 测试）。
+description: 2-agent 线性 workflow（fixture，供 v7/v8 测试复用）。
 entry: a
 nodes:
   - name: a
@@ -430,58 +713,13 @@ def wf_path(tmp_path: Path) -> Path:
     return p
 
 
-def test_start_does_not_write_opencode_templates(cwd_tmp, wf_path):
-    """start 收窄为 CC-only run bootstrap：不再写 ``.opencode/`` 模板（落地已移到 ``orca install``）。
-
-    opencode 模板落地（plugin / command / opencode.json 声明）的覆盖在
-    ``tests/iface/cli/test_install_cmds.py``。
-    """
-    runner = CliRunner()
-    result = runner.invoke(app, ["start", str(wf_path)])
-    assert result.exit_code == 0, result.output
-    # .opencode/ 不应被创建（start 只写 CC marker + 打印 settings 片段）
-    assert not (cwd_tmp / ".opencode").exists(), (
-        "start 不应再写 .opencode/（模板落地已移到 orca install）"
-    )
-
-
-def test_start_points_to_install_for_opencode(cwd_tmp, wf_path):
-    """start 新提示：opencode 用户指向 ``orca install`` + ``/orca run``。
-
-    start 不再自落 opencode 模板 / 不再打 ``$ARGUMENTS`` 限制（那是 install 的事）。
-    """
-    runner = CliRunner()
-    result = runner.invoke(app, ["start", str(wf_path)])
-    output = result.output
-    assert "orca install" in output
-    assert "/orca run" in output
-
-
-def test_start_preserves_cc_marker_and_settings_fragment(cwd_tmp, wf_path):
-    """v7 行为保留：start 仍写 CC marker + 打印 settings.json 片段（CC 路无回归）。"""
-    runner = CliRunner()
-    result = runner.invoke(app, ["start", str(wf_path)])
-    assert result.exit_code == 0
-    output = result.output
-
-    # marker 写入
-    markers = list(cwd_tmp.glob("runs/orca-*.json"))
-    assert len(markers) == 1
-
-    # settings.json 片段
-    assert "把以下片段贴进 .claude/settings.json" in output
-    assert '"hooks"' in output
-    assert "Stop" in output
-    assert "PostToolUse" in output
-
-
 # ── v7 baseline 兼容性（CI 守门：v8 不破坏 v7 行为）─────────────────────────
 
 
 def test_v7_baseline_cli_commands_still_work_v8(cwd_tmp, wf_path):
-    """v7 CLI 大脑未动：bootstrap/next/stop/status/start/serve 全可用。"""
+    """v7 CLI 大脑未动：bootstrap/next/stop/status 仍可用（v5 删 start，v3 删 serve）。"""
     runner = CliRunner()
-    boot = runner.invoke(app, ["bootstrap", str(wf_path)])
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
     assert boot.exit_code == 0
     reply = json.loads(boot.output.splitlines()[-1])
     assert reply["done"] is False
@@ -504,7 +742,7 @@ def test_status_json_flag_outputs_json(cwd_tmp, wf_path):
     MAJOR-1 闭环：plugin 期望 status stdout 是 JSON 顶层字段（status/node_status/progress）。
     """
     runner = CliRunner()
-    boot = runner.invoke(app, ["bootstrap", str(wf_path)])
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
     run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
 
     result = runner.invoke(app, ["status", run_id, "--json"])
@@ -521,7 +759,7 @@ def test_status_json_flag_outputs_json(cwd_tmp, wf_path):
 def test_status_default_human_readable_unchanged(cwd_tmp, wf_path):
     """v7 行为：``status <run_id>`` 默认人类可读多行（无 --json 不变）。"""
     runner = CliRunner()
-    boot = runner.invoke(app, ["bootstrap", str(wf_path)])
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
     run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
 
     result = runner.invoke(app, ["status", run_id])
@@ -531,168 +769,304 @@ def test_status_default_human_readable_unchanged(cwd_tmp, wf_path):
     assert "node_status:" in result.output
 
 
-def test_status_json_flag_no_run_id_lists_runs_json(cwd_tmp, wf_path):
-    """``status --json`` 无 run_id → JSON ``{runs: [...]}``（plugin 解析用）。"""
+def test_status_run_id_includes_no_output_count(cwd_tmp, wf_path):
+    """SPEC §3 O3：``status --run-id <id>`` 详情含 ``no_output_count``（raw 透出供观测）。
+
+    bootstrap 后立刻查 → 计数 0（首次写 marker）；next 无 output 后再查 → 计数 ≥1。
+    主 session 不据它改行为（compliance 是 orca 自我保护）—— 此处仅守字段透出契约。
+    """
     runner = CliRunner()
-    runner.invoke(app, ["bootstrap", str(wf_path)])
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
+    run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
+
+    # 1. bootstrap 后：no_output_count = 0（marker 初始化）
+    result = runner.invoke(app, ["status", run_id, "--json"])
+    assert result.exit_code == 0, result.output
+    reply = json.loads(result.output.splitlines()[-1])
+    assert "no_output_count" in reply, "status --run-id 详情应含 no_output_count（O3）"
+    assert reply["no_output_count"] == 0
+
+    # 人类可读路径也含
+    result_hr = runner.invoke(app, ["status", run_id])
+    assert result_hr.exit_code == 0
+    assert "no_output_count" in result_hr.output
+
+    # 2. 调一次 next 无 output（compliance +1）
+    runner.invoke(app, ["next", "--run-id", run_id, "--output", ""])
+
+    result2 = runner.invoke(app, ["status", run_id, "--json"])
+    reply2 = json.loads(result2.output.splitlines()[-1])
+    assert reply2["no_output_count"] == 1, "一次无 output next 后计数应 = 1"
+
+
+def test_status_run_id_no_marker_reports_none_no_output_count(cwd_tmp, wf_path):
+    """SPEC §3 O3：``status --run-id <id>`` 无 marker（run 已终态 / 损坏）→ no_output_count=None。
+
+    守住「不阻塞 status」：marker 读失败时透出 None 供消费者识别，不 raise。
+    """
+    runner = CliRunner()
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
+    run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
+    tape_path = (cwd_tmp / "runs" / f"{run_id}.jsonl")
+
+    # 终态后清 marker（run 结束），status 仍可查 tape 但 marker 无 → None。
+    runner.invoke(app, ["next", "--run-id", run_id, "--output", "out_a"])
+    runner.invoke(app, ["next", "--run-id", run_id, "--output", "out_b"])
+    # workflow_completed 已落 tape，marker 被 next 清掉
+
+    result = runner.invoke(app, ["status", run_id, "--json"])
+    assert result.exit_code == 0, result.output
+    reply = json.loads(result.output.splitlines()[-1])
+    assert reply["status"] == "completed"
+    assert reply["no_output_count"] is None, "无 marker → None（不阻塞 status）"
+
+
+def test_status_json_flag_no_run_id_lists_runs_json(cwd_tmp, wf_path):
+    """FU-3（SPEC §2.1/§2.3）：``status --json`` 无 run_id → 只列活跃 run，结构化字典元素。
+
+    每元素是 dict（含 run_id/node/status/last_next_at/elapsed/resumable 六键），非裸 stem。
+    completed run（无 marker）不列；活跃 = marker 存在。F1：``resumable: true`` 显式透出
+    （marker 在即 resumable；零 marker 字段改动）。
+    """
+    from orca.events.tape import Tape as _Tape
+
+    runner = CliRunner()
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
+    boot_reply = json.loads(boot.output.splitlines()[-1])
+    run_id = boot_reply["run_id"]
     result = runner.invoke(app, ["status", "--json"])
     assert result.exit_code == 0
     reply = json.loads(result.output.strip())
     assert "runs" in reply
     assert isinstance(reply["runs"], list)
-    assert len(reply["runs"]) >= 1
-    assert ".jsonl" not in reply["runs"][0]  # stem only
+    assert len(reply["runs"]) == 1  # 唯一活跃 run（bootstrap 后未终态）
+    entry = reply["runs"][0]
+    assert isinstance(entry, dict), "FU-3：runs 元素应为结构化 dict，非裸 stem"
+    # 精确键集守门（防字段静默漂移）。F1：加 ``resumable``（SPEC §4 —— marker 在即 resumable）。
+    assert set(entry.keys()) == {"run_id", "node", "status", "last_next_at", "elapsed", "resumable"}
+    assert entry["run_id"] == run_id
+    assert entry["status"] == "running"
+    assert entry["node"] is not None  # current_node（bootstrap 后指向 entry 节点）
+    # F1：resumable 透出（marker 在即 resumable）—— 主 session / SKILL 据此识别可续跑 run。
+    assert entry["resumable"] is True
+    # 时间字段钉死：last_next_at 必须等于 tape 末事件 Event.timestamp（spec-reviewer #1：
+    # RunState 零时间字段，时间只能从 tape 事件派生；防止回归到 monotonic / marker mtime）。
+    expected_last_ts = max(
+        ev.timestamp for ev in _Tape(Path(boot_reply["tape"]), run_id=run_id).replay()
+    )
+    assert entry["last_next_at"] == pytest.approx(expected_last_ts)
+    assert isinstance(entry["last_next_at"], (int, float))
+    assert entry["elapsed"] is not None
+    assert isinstance(entry["elapsed"], (int, float))
 
 
-def test_plugin_status_dispatch_passes_json_flag():
-    """SPEC §2.6.2：plugin buildCliArgs 的 status 分支必带 --json（MAJOR-1）。"""
-    body = _extract_ts_function_body("buildCliArgs")
-    # 在 buildCliArgs 函数体里 status 分支必须有 --json
-    m = re.search(r'if \(sub === "status"\)(?P<body>(?:.|\n)*?)(?=\n  \}|\n    if \(sub)',
-                  body)
-    assert m, "buildCliArgs 无 status 分支"
-    assert '"--json"' in m.group("body"), "status 派发分支必带 --json flag"
+def test_status_no_run_id_excludes_completed(cwd_tmp, wf_path):
+    """FU-3：completed run（marker 已清）不在活跃列表里。
 
-
-# ── §2.6.2 stop --owner 派发（MAJOR-2 闭环）─────────────────────────────────
-
-
-def test_stop_with_owner_lookup_resolves_run_id(cwd_tmp, wf_path):
-    """SPEC §2.6.2：``stop --owner <sid>`` → 按 marker 查 run_id → stop（MAJOR-2 闭环）。
-
-    plugin transform 入口（``/orca stop`` 无 args）→ plugin 用 sid 查 marker → CLI
-    ``stop --owner <sid>`` → 本测试验此路径可停 run。
+    bootstrap → next 推到 done（workflow_completed + clear_marker）→ status 无参不列它。
     """
     runner = CliRunner()
-    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--owner", "sess-xyz",
-                                "--session-id", "sess-xyz"])
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
+    run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
+    tape = json.loads(boot.output.splitlines()[-1])["tape"]
+    # 推进两步到 workflow_completed（a → b → $end），marker 清。
+    runner.invoke(app, ["next", "--tape", tape, "--run-id", run_id, "--output", "out_a"])
+    done = runner.invoke(app, ["next", "--tape", tape, "--run-id", run_id, "--output", "out_b"])
+    assert json.loads(done.output.splitlines()[-1])["done"] is True
+
+    result = runner.invoke(app, ["status", "--json"])
+    assert result.exit_code == 0
+    reply = json.loads(result.output.strip())
+    assert reply["runs"] == []  # completed run 无 marker → 不列
+
+
+def test_status_no_run_id_empty_human_readable(cwd_tmp):
+    """FU-3：无活跃 run → 人类可读 ``(无活跃 run)`` + exit 0（shape 一致）。"""
+    runner = CliRunner()
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert "无活跃 run" in result.output
+
+
+def test_status_no_run_id_non_empty_human_readable(cwd_tmp, wf_path):
+    """FU-3：有活跃 run + 人类可读（无 --json）→ 每行 ``- <run_id> [status] node=… elapsed=… resumable=true``。"""
+    runner = CliRunner()
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
+    run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert run_id in result.output
+    assert "[running]" in result.output
+    assert "node=" in result.output
+    assert "elapsed=" in result.output
+    # F1：resumable=true 透出在每行尾（人类可读形态；marker 在即 resumable）。
+    assert "resumable=true" in result.output
+    assert "看详情" in result.output  # 尾行提示
+    # F1：尾行提示续跑命令（新 session 据 status 找到 run_id 后知道怎么续）。
+    assert "orca next --run-id" in result.output
+
+
+def test_status_no_run_id_skips_corrupt_and_orphan_markers(cwd_tmp, wf_path):
+    """FU-3：损坏 marker（非法 JSON）+ 孤儿 marker（marker 在、tape 缺）被跳过，真 run 仍列。
+
+    守护 cli.py 的两个显式 ``continue`` 失败路径（Rule 9：显式失败路径需测试）。
+    """
+    runner = CliRunner()
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
+    run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
+    runs_dir = cwd_tmp / "runs"
+    # 损坏 marker（非法 JSON）
+    (runs_dir / "orca-corrupt.json").write_text("{not json", encoding="utf-8")
+    # 孤儿 marker（合法 JSON 但无对应 tape 文件）
+    (runs_dir / "orca-orphan.json").write_text(
+        json.dumps({"run_id": "orphan", "model": "x", "no_output_count": 0}),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["status", "--json"])
+    assert result.exit_code == 0  # 不崩（skip 不 fail）
+    reply = json.loads(result.output.strip())
+    run_ids = [r["run_id"] for r in reply["runs"]]
+    assert run_ids == [run_id]  # corrupt + orphan 被跳过，只留真 run
+
+
+# ── F1（SPEC §4）：TARS resume —— status resumable + next 无 output idempotent 重发 ──
+
+
+def test_f1_resume_flow_status_resumable_then_next_no_output_resends_prompt(
+    cwd_tmp, wf_path,
+):
+    """F1（SPEC §4）：新 session 续跑契约 —— status 透出 ``resumable: true`` +
+    ``current_node``，``orca next --run-id X``（无 output）idempotent 重发 current_node
+    的 prompt（复用 advance_step branch 4，零新字段）。
+
+    端到端验证 SKILL.md「续跑」段的四步：
+      1. ``status --json`` 无参 → runs[*] 含 ``resumable: true`` + ``node``（current_node）。
+      2. ``next --run-id X``（不带 ``--output``）→ 重发 current_node 的 prompt（idempotent）。
+      3. 重发的 prompt 与 bootstrap 时首发的 prompt **逐字相等**（同一节点同 prompt）。
+      4. 之后 ``next --run-id X --output '<产出>'`` 正常推进到下一节点（resume 主路径绕过
+         compliance —— 带输出，``no_output_count`` 不增）。
+    """
+    runner = CliRunner()
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
+    boot_reply = json.loads(boot.output.splitlines()[-1])
+    run_id = boot_reply["run_id"]
+    tape = boot_reply["tape"]
+    boot_prompt = boot_reply["prompt"]
+    assert boot_prompt is not None  # bootstrap 必须首发 prompt
+
+    # 1. status 无参 → resumable: true + node（current_node = "a"，首节点）。
+    status_reply = runner.invoke(app, ["status", "--json"])
+    assert status_reply.exit_code == 0
+    status_json = json.loads(status_reply.output.strip())
+    assert len(status_json["runs"]) == 1
+    entry = status_json["runs"][0]
+    assert entry["run_id"] == run_id
+    assert entry["resumable"] is True  # F1 核心字段
+    assert entry["node"] == "a"  # current_node（SKILL 据此知道续跑从哪起）
+
+    # 2. next --run-id X（无 output）→ idempotent 重发 current_node=a 的 prompt。
+    #    advance_step branch 4：无 output 且进行中 → 重发 pending prompt（零 emits）。
+    #    否定契约：tape **未增加**（emits=[]）；兄弟测 test_in_session_cli.py:604-617 +
+    #    test_daemon.py:270-294 都守这同一 AC，唯独 F1 resume 路径不能漏。
+    #    **不传 ``--tape``**：SKILL 教的形式是裸 ``orca next --run-id X``，依赖
+    #    ``_default_tape_path(run_id)`` 解析（cli.py:1129）—— 真验证生产路径，不走捷径。
+    tape_lines_before = len(Path(tape).read_text(encoding="utf-8").strip().split("\n"))
+    resume_reply = runner.invoke(app, ["next", "--run-id", run_id])
+    assert resume_reply.exit_code == 0, resume_reply.output
+    resume_json = json.loads(resume_reply.output.splitlines()[-1])
+    assert resume_json["done"] is False
+    assert resume_json["node"] == "a"  # 仍 a，未推进（idempotent 重发）
+    tape_lines_after = len(Path(tape).read_text(encoding="utf-8").strip().split("\n"))
+    assert tape_lines_after == tape_lines_before, (
+        "F1：next 无 output idempotent 重发必须零 emits（advance_step branch 4 emits=[]），"
+        "tape 行数不应增加"
+    )
+
+    # 3. 重发的 prompt 与 bootstrap prompt 逐字相等（同节点同 prompt，advance_step
+    #    idempotent-replay 不改 prompt 内容）。
+    assert resume_json["prompt"] == boot_prompt, (
+        "F1：next 无 output 重发的 prompt 必须与 bootstrap 首发 prompt 逐字相等"
+        "（idempotent replay，复用 advance_step branch 4）"
+    )
+
+    # 步骤 2 后 compliance 计数 +1（无 output next 的偏窄语义，§8#5）：钉死增量语义，
+    # 防回归（如有人误把 idempotent 重发排除在 +1 之外）。
+    from orca.iface.in_session.marker import read_marker, marker_path
+    rundir = Path(tape).parent
+    m_after_step2 = read_marker(marker_path(rundir, run_id))
+    assert m_after_step2 is not None
+    assert m_after_step2.no_output_count == 1, (
+        "步骤 2 的无 output next 应让 no_output_count +1（compliance 偏窄语义，§8#5）"
+    )
+
+    # 4. next --run-id X --output '<产出>'（带 output）→ 正常推进到下一节点 b。
+    #    resume 主路径绕过 compliance：带 output → ``no_output_count`` 重置为 0
+    #    （cli.py:1327-1328：``if output is not None: marker.no_output_count = 0``）。
+    #    同样不传 ``--tape``：SKILL 教的形式是 ``orca next --run-id X --output '...'``。
+    advance_reply = runner.invoke(app, [
+        "next", "--run-id", run_id, "--output", "out_a",
+    ])
+    assert advance_reply.exit_code == 0, advance_reply.output
+    advance_json = json.loads(advance_reply.output.splitlines()[-1])
+    assert advance_json["done"] is False
+    assert advance_json["node"] == "b"  # 推进到下一节点 b
+
+    # 步骤 4 后 compliance 计数 = 0（带 output 重置；cli.py:1327-1328 契约）。
+    # 钉死主路径绕过：带 output 的 next 不只「不增」，而是「清零」（防 reset 逻辑回归）。
+    m_after_step4 = read_marker(marker_path(rundir, run_id))
+    assert m_after_step4 is not None
+    assert m_after_step4.no_output_count == 0, (
+        "步骤 4 的带 output next 应重置 no_output_count = 0（cli.py:1327-1328 契约；"
+        "resume 主路径绕过 compliance）"
+    )
+
+
+# ── §2.6.2 stop run_id 派发（v3 §7.2：marker 无 owner，stop 按 run_id 直定位）────
+
+
+def test_stop_with_run_id_succeeds(cwd_tmp, wf_path):
+    """v3 §7.2：``stop <run_id>`` 按 run_id O(1) 直定位 marker（marker 文件名 = run_id）。"""
+    runner = CliRunner()
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
     run_id = json.loads(boot.output.splitlines()[-1])["run_id"]
 
-    # 用 --owner 而非 run_id 调 stop
-    result = runner.invoke(app, ["stop", "--owner", "sess-xyz"])
+    result = runner.invoke(app, ["stop", run_id])
     assert result.exit_code == 0
     reply = json.loads(result.output.splitlines()[-1])
     assert reply["ok"] is True
     assert reply["run_id"] == run_id
 
 
-def test_stop_no_args_no_owner_returns_error_envelope(cwd_tmp, wf_path):
-    """无 run_id + 无 --owner → JSON 错误信封 + 非 0 退出（fail loud，不静默崩）。"""
+def test_stop_missing_run_id_fails_loud(cwd_tmp, wf_path):
+    """FU-1：``stop`` 无 run_id（位置参数与 --run-id 都省略）→ exit 2（fail loud）。
+
+    位置参数已从必填改为可选（让 ``stop --run-id X`` 不再因「缺位置参数」exit 2），
+    None 改由显式守卫 ``raise BadParameter`` 拦下（ISSUE-3，保 exit 2 回归）。
+    """
     runner = CliRunner()
     result = runner.invoke(app, ["stop"])
-    assert result.exit_code == 1
-    reply = json.loads(result.output.splitlines()[-1])
-    assert reply["ok"] is False
-    assert "reason" in reply
+    # 位置参数与 --run-id 都省略 → None 守卫 BadParameter exit 2
+    assert result.exit_code == 2
 
 
-def test_stop_with_unknown_owner_returns_no_active_marker_envelope(cwd_tmp, wf_path):
-    """``--owner`` 找不到 marker → JSON ok=false 信封（不破坏 busy state，fail loud 透传）。"""
+def test_stop_unknown_run_id_clears_no_tape(cwd_tmp, wf_path):
+    """``stop <未知 run_id>`` → 幂等清 marker + ok 信封（note=no-tape，不崩）。"""
     runner = CliRunner()
-    runner.invoke(app, ["bootstrap", str(wf_path), "--owner", "real-owner"])
-    result = runner.invoke(app, ["stop", "--owner", "nonexistent-sid"])
-    assert result.exit_code == 0   # 不 raise，返 ok=false 信封
+    result = runner.invoke(app, ["stop", "nonexistent-run"])
+    assert result.exit_code == 0
     reply = json.loads(result.output.splitlines()[-1])
-    assert reply["ok"] is False
-    assert reply["reason"] == "no-active-marker-for-owner"
-
-
-def test_plugin_stop_dispatch_uses_owner_flag():
-    """SPEC §2.6.2：plugin buildCliArgs 的 stop 分支必带 --owner（MAJOR-2）。"""
-    body = _extract_ts_function_body("buildCliArgs")
-    m = re.search(r'if \(sub === "stop"\)(?P<body>(?:.|\n)*?)(?=\n  \}|\n    if \(sub)',
-                  body)
-    assert m, "buildCliArgs 无 stop 分支"
-    assert '"--owner"' in m.group("body"), "stop 派发分支必带 --owner flag"
-
-
-# ── §2.6 plugin spawnCli fail loud（MAJOR-3 闭环）───────────────────────────
-
-
-def test_plugin_spawncli_checks_exit_code_and_surfaces_stderr():
-    """SPEC 鲁棒性底线：spawnCli 检查 exitCode，非 0 时把 stderr 回显（MAJOR-3）。
-
-    守门对象是 spawnCli 函数体：必须含 ``exitCode`` 检查 + ``__orca_error`` 信封。
-    """
-    text = PLUGIN_TS.read_text(encoding="utf-8")
-    code = _strip_ts_comments(text)
-    # 抽 spawnCli 函数体（粗略）
-    m = re.search(r"function spawnCli\([^)]*\)[^{]*\{(?P<body>[\s\S]+?)\n\}", code)
-    assert m, "未找到 spawnCli 函数"
-    body = m.group("body")
-    assert "exitCode" in body, "spawnCli 必须检查 exitCode"
-    assert "__orca_error" in body, "spawnCli 失败时返 __orca_error 信封"
-    assert "stderr" in body, "spawnCli 必须读 stderr 并回显"
-
-
-def test_plugin_rewritetext_handles_error_envelope():
-    """SPEC §2.6.2：rewriteText 见 __orca_error 信封时返失败回显（fail loud）。"""
-    text = PLUGIN_TS.read_text(encoding="utf-8")
-    code = _strip_ts_comments(text)
-    m = re.search(r"function rewriteText\([^)]*\)[^{]*\{(?P<body>[\s\S]+?)\n\}", code)
-    assert m, "未找到 rewriteText 函数"
-    body = m.group("body")
-    assert "__orca_error" in body, "rewriteText 必须处理 __orca_error 信封"
-
-
-# ── §2.6.1 一次性消费兜底（plugin side）─────────────────────────────────────
-
-
-def test_plugin_unknown_subcommand_replaces_text_safely():
-    """SPEC §2.6.1：未知子命令 → 安全回显（替换文本无 marker 字面）。"""
-    text = PLUGIN_TS.read_text(encoding="utf-8")
-    code = _strip_ts_comments(text)
-    # transform hook 内 unknown 分支
-    assert "cannot dispatch" in code or "unknown subcommand" in code
-
-
-# ── §2.6.1 MARKER_LITERAL 同步契约（NIT-2）──────────────────────────────────
-
-
-def test_plugin_embeds_canonical_marker_literal():
-    """SPEC §2.6.1：plugin TS embed 与 Python ``MARKER_LITERAL`` 同字面。
-
-    单一真相源：改 literal 必须两处同步（regex literal 也要守同步）。
-    """
-    from orca.iface.in_session.templates import MARKER_LITERAL
-
-    text = PLUGIN_TS.read_text(encoding="utf-8")
-    code = _strip_ts_comments(text)
-    m = re.search(r'const MARKER_LITERAL = "([^"]+)"', code)
-    assert m, "plugin 未定义 MARKER_LITERAL 常量"
-    assert m.group(1) == MARKER_LITERAL, (
-        f"plugin MARKER_LITERAL `{m.group(1)}` 与 Python `{MARKER_LITERAL}` 不同步"
-    )
+    assert reply["ok"] is True
+    assert reply.get("note") == "no-tape"
 
 
 # ── v8.1 签名契约测试（防 builder 回退，e2e /tmp/orca-e2e-v8/ 实证形态）─────────
 #
 # 教训（task 根因）：plugin TS 纯单测（marker regex / 字段提取）验不出运行时签名 bug
 # —— 52 单测全过却 shipped inert。hook 的调用签名（参数个数、payload 包装）只能由
-# 真 opencode runtime 决定，spike 已实证的形态是唯一真相源。以下 4 测试断言 shipped
-# 模板里 transform/event/message-fetch 三处的代码形态 == spike 实证形态 + bootstrap
-# 返的 prompt prepend Task-tool 指令。任何回退 → 测试红。
-
-
-def test_transform_hook_signature_is_two_param_async_input_out():
-    """Bug A 签名契约：transform hook 必须是 ``async (input, out)`` 两参形态。
-
-    spike ``/tmp/orca-xform/.opencode/plugins/xform.ts`` 实证：opencode 1.14.22
-    runtime 实调 ``(input, out)`` 两参，``input`` 空 ``{}``、messages 在 ``out`` 上。
-    shipped v8 曾回退为单参 ``async (input) => { const out = input.out ?? input }``
-    —— runtime 下 input 为空对象、input.out 永远 undefined → messages 永远 [] →
-    transform 静默 passthrough → 整个入口链路死。
-    """
-    text = PLUGIN_TS.read_text(encoding="utf-8")
-    # hook 注册行：必须形如 `"experimental.chat.messages.transform": async (input: any, out: any) =>`
-    m = re.search(
-        r'"experimental\.chat\.messages\.transform":\s*async\s*\(input:\s*any,\s*out:\s*any\)\s*=>',
-        text,
-    )
-    assert m, (
-        "transform hook 签名必须严格 `async (input: any, out: any) =>`（e2e /tmp/orca-xform "
-        f"实证两参形态）。实际：{text.split(chr(10))[next(i for i,l in enumerate(text.split(chr(10))) if 'messages.transform' in l)][:120]}"
-    )
+# 真 opencode runtime 决定，spike 已实证的形态是唯一真相源。
+#
+# **v5 §8 step 4**：transform 签名契约（Bug A）已随 transform 段整删下线——transform 入口
+# 不再注册，签名契约无承载对象。event hook 签名契约（Bug B）保留——idle nudge hook 仍存在。
 
 
 def test_event_hook_payload_unwrap_input_event_fallback_input():
@@ -714,27 +1088,6 @@ def test_event_hook_payload_unwrap_input_event_fallback_input():
     )
 
 
-def test_message_fetch_uses_rest_fetch_not_sdk_client_session_message():
-    """Bug F 签名契约：拉消息必须用 REST ``fetch(`/session/<sid>/message`)``。
-
-    e2e ``/tmp/orca-e2e-v8/idle-debug.log`` + ``client-debug.log`` 实证：SDK
-    ``client.session.message({id})`` 是 get-one-message-by-id（要 messageID），
-    把 sessionID 当字面占位符返 ``invalid_format prefix:"ses"``。**不是** list-messages。
-    spike patch `/tmp/orca-e2e-v8/orca.ts.patched-with-fixes` 实证可用形态 = REST。
-    """
-    text = PLUGIN_TS.read_text(encoding="utf-8")
-    code = _strip_ts_comments(text)
-    # 必须用 fetch( 拉消息
-    assert "await fetch(" in code, (
-        "拉 session message 必须用 REST `await fetch(`${base}/session/<sid>/message`)`"
-    )
-    # 守门：不得在代码（非注释）里调 client.session.message( 作 list 用途
-    assert "client.session.message(" not in code, (
-        "禁用 SDK client.session.message({id})（runtime 实证：那是 get-one-by-id，"
-        "把 sessionID 当字面占位符返 invalid_format 错）—— 用 REST fetch 替代"
-    )
-
-
 def test_bootstrap_and_next_return_pointer_and_write_prompt_file(cwd_tmp, wf_path):
     """compact 交付契约（2026-07-08，替代 Bug G 的 prepend 形态）。
 
@@ -746,7 +1099,7 @@ def test_bootstrap_and_next_return_pointer_and_write_prompt_file(cwd_tmp, wf_pat
     runner = CliRunner()
 
     # bootstrap：entry 节点 → 指针 + 文件（含 entry prompt 全文）
-    boot = runner.invoke(app, ["bootstrap", str(wf_path)])
+    boot = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
     assert boot.exit_code == 0
     boot_reply = json.loads(boot.output.splitlines()[-1])
     assert boot_reply.get("prompt_file"), "compact：bootstrap 必须返 .prompt_file"
@@ -795,18 +1148,3 @@ def test_build_pointer_is_single_source():
     p2 = _build_pointer(r2)
     assert "/p/y.md" in p2 and "资源目录" not in p2
 
-
-def test_build_cli_args_run_branch_passes_user_model():
-    """Bug E 签名契约：buildCliArgs 的 run 分支必须把用户 model 作 --model argv。
-
-    shipped v8 曾不透传 → marker.model 永远 CLI 默认，idle 注入 promptAsync 调该
-    provider 失败（环境没配 deepseek 时尤甚）。
-    """
-    body = _extract_ts_function_body("buildCliArgs")
-    m = re.search(r'if \(sub === "run"\)(?P<body>(?:.|\n)*?)(?=\n  \}|\n    if \(sub)',
-                  body)
-    assert m, "buildCliArgs 无 run 分支"
-    run_body = m.group("body")
-    assert '"--model"' in run_body, (
-        "buildCliArgs run 分支必须含 --model 透传（Bug E：用户当前 model → marker.model）"
-    )

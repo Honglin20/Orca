@@ -1,0 +1,55 @@
+name: quant-sensitivity
+description: "对 PyTorch 模型做低精度敏感层分析：输入 FP 模型+校准数据，四选一方法（mse/layer_stats/ptq_binary_sensitivity/mix_precision_search）输出敏感层排名与可视化，供下游 PTQ/混精决策。底层调 ts_quant.analyze_low_precision_sensitive_layers。"
+entry: sensitivity_analyzer
+
+inputs:
+  model_path:
+    type: string
+    description: "[ask] 用户 PyTorch 模型入口文件路径（可实例化 FP 模型，如 model.py）"
+    required: true
+  target_hardware:
+    type: string
+    description: "[ask] 目标硬件：cuda / npu / cpu。空→脚本 resolve_device 自动探测（cuda 优先，npu 次之，cpu 兜底）"
+    required: false
+    default: ""
+  seed:
+    type: string
+    description: "[default] 随机种子（贯穿 torch / numpy / random，复现性底座）"
+    required: false
+    default: "0"
+
+# ── 已下沉（不再 input，见 docs/specs/workflow-input-design-principle.md §5）──
+#   project_root / calib_data_ref / eval_fn_ref → Tier B（agent 读用户代码推断 + 哨兵，
+#     P4b/P5 已落地；project_root 从 model_path 向上走 infer-once）
+#   method / ratio / low_bits / high_bits → Tier C（脚本 argparse 默认，固化）
+#   output_dir → Tier C（引擎注入 $ORCA_ARTIFACTS_DIR，P8 接口）
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════
+  # 单 agent：生成 adapter.py（适配异构模型）→ 调 run_sensitivity.py
+  # （ts_quant.analyze_low_precision_sensitive_layers + render_chart 可视化）
+  # → 回显 JSON 摘要。无需独立 env 节点（ts_quant 是 orca 依赖，运行环境已含）。
+  # ═══════════════════════════════════════════════════════════════
+  - name: sensitivity_analyzer
+    kind: agent
+    executor: claude
+    agent: sensitivity-analyzer
+    output_schema:
+      type: object
+      required: [output_dir, report_path, sensitive_layers, selected_count, method]
+      properties:
+        output_dir: {type: string}
+        report_path: {type: string}
+        sensitive_layers:
+          type: array
+          items: {type: string}
+        selected_count: {type: integer, minimum: 0}
+        method: {type: string}
+      additionalProperties: false
+    routes:
+      - to: $end
+
+outputs:
+  sensitive_layers: "{{ sensitivity_analyzer.output.sensitive_layers }}"
+  report_path: "{{ sensitivity_analyzer.output.report_path }}"
+  output_dir: "{{ sensitivity_analyzer.output.output_dir }}"

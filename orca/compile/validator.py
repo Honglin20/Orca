@@ -48,6 +48,29 @@ from orca.schema import (
 _ENV = Environment()
 
 
+# ── 保留字黑名单（SPEC v3 §2.2，MS1 闭环）──────────────────────────────────────
+# ``orca <wf-name>`` 用 wf 名作裸顶层子命令；wf 名取了固定命令名（list/next/status/...）
+# 就会让 ``orca status`` 在「跑 status 命令」vs「bootstrap 名为 status 的 wf」间歧义。
+# compile 期硬拒（fail loud），保 ``orca <wf>`` 语法糖无冲突。
+# 名单 = orca 7 命令 + tars 后端命令名 + ORCA_BACKEND_CMD 默认值（tars）+ 内部命令。
+RESERVED_WF_NAMES: frozenset[str] = frozenset({
+    # orca 7 命令（SPEC §2.1）
+    "list", "next", "status", "stop", "open", "doctor",
+    # orca 内部 / deprecated（仍占顶层命令槽）
+    "bootstrap", "start", "serve",
+    # tars 后端命令（SPEC §3.1）——归 tars entry point 但保 wf 名不撞
+    "run", "ps", "logs", "wait", "resume", "install", "validate", "mcp",
+    "executor", "skill",
+    # ORCA_BACKEND_CMD 默认值（tars）；env 改名后 operator 应扩此集合（保守默认）
+    "tars",
+})
+
+
+def _is_reserved_wf_name(name: str) -> bool:
+    """wf 名是否撞保留字（小写比较，与 ``_slugify`` 无关——直接按字面拒）。"""
+    return name.lower() in RESERVED_WF_NAMES
+
+
 # ── errors / warnings 模型（SPEC §1）──────────────────────────────────────────
 
 
@@ -96,6 +119,7 @@ class ValidationResult:
 def validate_workflow(wf: Workflow) -> list[str]:
     """全部语义校验。返回 warnings；有 errors 抛 ConfigurationError（SPEC §4）。"""
     result = ValidationResult()
+    _check_workflow_name_reserved(wf, result)  # §2.2 保留字黑名单（先于一切）
     _check_names_unique(wf, result)            # ①（含 parallel 组名）
     _check_entry_exists(wf, result)            # ②
     _check_entry_is_node(wf, result)           # ⑬ entry 非 parallel 组
@@ -107,13 +131,29 @@ def validate_workflow(wf: Workflow) -> list[str]:
     _check_jinja2_refs(wf, result)             # ⑦
     _check_foreach_source(wf, result)          # ⑧
     _check_terminate_constraints(wf, result)   # terminate step 约束（routes 空 / 非entry / 非parallel branch / 非foreach body）
-    _check_execute_phase_no_gate_tools(wf, result)  # phase-10 v4：execute phase 永不中断
-    _check_setup_phase_constraints(wf, result)  # phase-10 v4：setup phase 结构约束
+    _check_execute_phase_no_gate_tools(wf, result)  # 铁律 7：execute phase 永不中断
     _check_profiles(wf, result)                # ⑨ capability 校验（profiles/validate）
     return result.raise_if_errors()
 
 
 # ── helpers：命名空间（node 名 + parallel 组名）──────────────────────────────
+
+
+def _check_workflow_name_reserved(wf: Workflow, result: ValidationResult) -> None:
+    """SPEC v3 §2.2（MS1）：wf.name 禁取保留字（orca/tars 命令名）。
+
+    ``orca <wf-name>`` 裸顶层语法糖要求 wf 名不与固定命令冲突；撞名 → compile fail loud，
+    保 ``orca <wf>`` 无歧义。不接受 ``list/next/status/.../tars`` 等。
+    """
+    if not wf.name:
+        # 空 name 由 schema 层/pydantic 拦；此处不重复报。
+        return
+    if _is_reserved_wf_name(wf.name):
+        result.add_error(
+            f"workflow name {wf.name!r} 是 Orca 保留字（命令名 / 后端变量名），"
+            f"请改名以保 `orca <wf>` 语法糖无冲突。保留字名单："
+            f"{sorted(RESERVED_WF_NAMES)}"
+        )
 
 
 def _top_level_names(wf: Workflow) -> list[str]:
@@ -577,9 +617,6 @@ def _check_jinja2_refs(wf: Workflow, result: ValidationResult) -> None:
     ``inputs`` 是 render 层 ``_namespace`` 暴露的顶层变量（``{{ inputs.x }}``，
     见 orca/exec/render.py），与 ``workflow.input.X`` 等价 —— 两种写法都允许，
     X 未在 ``wf.inputs`` 声明 → warning（非致命，允许运行时注入未声明的 key）。
-
-    phase-10 v4：``setup`` 是合法 root（``{{ setup.<agent_name>.output.<field> }}``，
-    SPEC §2.7）。setup_outputs 校验在 MCP/iface 层做，compile 层只确认引用语法合法。
     """
     names = _jinja_root_set(wf)
     for location, text, is_expr, extras in _iter_templates(wf):
@@ -587,8 +624,8 @@ def _check_jinja2_refs(wf: Workflow, result: ValidationResult) -> None:
         if err is not None:
             result.add_error(f"{location}：{err}")
             continue
-        # inputs / setup 是 render 层合法顶层变量
-        valid_roots = names | {"workflow", "inputs", "setup"} | extras
+        # inputs 是 render 层合法顶层变量（{{ inputs.x }}）
+        valid_roots = names | {"workflow", "inputs"} | extras
         for var in sorted(find_undeclared_variables(ast)):
             if var not in valid_roots:
                 result.add_error(
@@ -679,26 +716,25 @@ def _check_terminate_constraints(wf: Workflow, result: ValidationResult) -> None
             )
 
 
-# ── phase-10 v4：execute phase 永不中断（setup/execute 分相铁律 7）──────────────
+# ── 铁律 7：execute phase 永不中断 ─────────────────────────────────────────────
 
 
-# execute phase 禁配的「中断类」工具名（ask_user / gate）。这些工具在 TUI/Web 模式下
-# 自动注入 setup phase agent（wf.setup），execute phase agent 显式配置 → 编译期 fail loud。
+# execute phase 禁配的「中断类」工具名（ask_user / gate）。显式配置 → 编译期 fail loud。
 _INTERRUPT_TOOL_NAMES = {"ask_user", "gate"}
 
 
 def _check_execute_phase_no_gate_tools(
     wf: Workflow, result: ValidationResult
 ) -> None:
-    """phase-10 v4 §0.1 铁律 7：execute phase（``wf.nodes``）的 AgentNode 不配 ask_user/gate。
+    """§0.1 铁律 7：execute phase（``wf.nodes``）的 AgentNode 不配 ask_user/gate。
 
     ``AgentNode.tools`` 语义：``None`` = 全开（默认，由 orchestrator 据壳决定实际注入）；
     ``[...]`` = 显式白名单。本检查只对**显式白名单**拦截——若用户显式列了 ask_user/gate，
     说明意图让 execute agent 中断，与铁律 7 冲突 → fail loud。
 
     ``None``（全开）不拦截：实际是否注入 ask_user/gate 由 orchestrator + 壳模式决定
-    （MCP 壳不注入 gate；TUI/Web 壳只给 setup phase 注入）。compile 层无法静态判定壳模式，
-    故 None 留给 runtime 把关。与 phase-12 capability 校验正交（不依赖 CapabilitySet）。
+    （MCP 壳不注入 gate）。compile 层无法静态判定壳模式，故 None 留给 runtime 把关。
+    与 phase-12 capability 校验正交（不依赖 CapabilitySet）。
 
     同时校验 foreach body agent（body 也在 execute phase，同理不可配中断工具）。
     """
@@ -723,59 +759,8 @@ def _check_no_interrupt_tools(
     if bad:
         result.add_error(
             f"{location} 配了中断类工具 {sorted(bad)}"
-            f"（铁律 7：execute phase 永不中断；"
-            f"ask_user/gate 仅限 setup phase agent 使用）"
+            f"（铁律 7：execute phase 永不中断）"
         )
-
-
-# ── phase-10 v4：setup phase 结构约束（name 唯一 / routes 空）────────────────
-
-
-def _check_setup_phase_constraints(wf: Workflow, result: ValidationResult) -> None:
-    """phase-10 v4 §2.7：setup phase AgentNode 的结构约束。
-
-    校验项：
-      1. setup agent name 非空 + 不与 execute phase node 名冲突（避免 jinja2 引用歧义）
-      2. setup agent ``routes`` 必须空（setup phase 无控制流——agent 跑完即止，
-         不评估路由；routes 在 setup phase 是死代码 + 语义冲突）
-
-    setup agent 的 prompt jinja2 引用由 ``_check_jinja2_refs`` 校验（``_iter_templates``
-    不迭代 ``wf.setup``，因为 setup agent 的 prompt 已被 compile 期物化或内联，
-    其 jinja2 引用合法集是 ``inputs`` + ``workflow``，不含 ``setup`` 自引用）。
-
-    setup agent 的 ``output_schema`` 不在此校验（jsonschema 校验在 setup_phase.py
-    的 ``validate_setup_outputs`` 中做，编译期不做）。
-    """
-    if not wf.setup:
-        return
-
-    execute_names = _name_set(wf)
-    setup_names: set[str] = set()
-    for agent in wf.setup:
-        if not isinstance(agent, AgentNode):
-            continue
-        # 1. name 非空
-        if not agent.name:
-            result.add_error("setup phase agent 缺少 name（setup agent 必须命名）")
-            continue
-        # 2. name 不与 execute phase 冲突
-        if agent.name in execute_names:
-            result.add_error(
-                f"setup agent '{agent.name}' 与 execute phase node 名冲突"
-                f"（setup / execute phase 命名空间不可重叠）"
-            )
-        # 3. name 在 setup phase 内唯一
-        if agent.name in setup_names:
-            result.add_error(
-                f"setup agent '{agent.name}' 在 setup phase 内重名"
-            )
-        setup_names.add(agent.name)
-        # 4. routes 必须空（setup phase 无控制流）
-        if agent.routes:
-            result.add_error(
-                f"setup agent '{agent.name}' 的 routes 必须为空"
-                f"（setup phase 无控制流；当前 {len(agent.routes)} 条 routes 是死代码）"
-            )
 
 
 # ── ⑨ capability 校验（profiles/validate 产出 issue → 汇入 result）──────────────

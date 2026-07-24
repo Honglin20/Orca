@@ -1,0 +1,36 @@
+name: demo_insession
+description: |
+  in-session spike demo（3 agent 线性：writer→reviewer→summarizer）。
+  验证 next 推进 3 次 + 节点间输出传递（{{ writer.output }} / {{ reviewer.output }}）+ workflow_completed。
+  运行（opencode in-session）：在 opencode session 里调
+  `orca demo_insession --inputs '{"topic":"秋天"}'`（语法糖 ≡ `orca bootstrap examples/demo_insession.yaml`），
+  主 session 据返回的驱动协议自调 `orca next` 推进。
+entry: writer
+inputs:
+  topic:
+    type: string
+    description: "要写标语的主题"
+nodes:
+  - name: writer
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "围绕主题「{{ inputs.topic }}」写一句不超过 20 字的中文标语。只输出标语本身，不要多余解释。"
+    routes:
+      - to: reviewer
+  - name: reviewer
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "审阅这条标语：「{{ writer.output }}」。给一个 1-10 的评分和一句不超过 15 字的改进建议。格式：评分=N；建议=..."
+    routes:
+      - to: summarizer
+  - name: summarizer
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    prompt: "原标语：「{{ writer.output }}」。审查：「{{ reviewer.output }}」。用一句话总结这个结果（不超过 30 字）。"
+    routes:
+      - to: $end
+outputs:
+  final: "{{ summarizer.output }}"

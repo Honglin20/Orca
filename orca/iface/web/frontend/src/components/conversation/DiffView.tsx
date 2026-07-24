@@ -23,11 +23,11 @@ export function DiffView({ oldText, newText, fileName, mode }: DiffViewProps) {
     const lines = newText.split("\n");
     return (
       <div
-        className="rounded-md border border-slate-300 overflow-hidden text-xs font-mono dark:border-slate-600"
+        className="rounded-md border orca-border overflow-hidden text-xs font-mono"
         data-testid="diff-view"
       >
         {fileName && (
-          <div className="bg-emerald-500/10 px-2 py-1 text-xs font-medium text-emerald-700 dark:text-emerald-300 border-b border-slate-300 dark:border-slate-600">
+          <div className="bg-emerald-500/10 px-2 py-1 text-xs font-medium text-emerald-700 dark:text-emerald-300 border-b orca-border">
             + {fileName}
           </div>
         )}
@@ -37,7 +37,7 @@ export function DiffView({ oldText, newText, fileName, mode }: DiffViewProps) {
               key={i}
               className="flex hover:bg-emerald-500/5"
             >
-              <span className="shrink-0 w-8 text-right pr-2 text-slate-400 select-none border-r border-slate-200 dark:border-slate-700">
+              <span className="shrink-0 w-8 text-right pr-2 orca-text-faint select-none border-r orca-border">
                 {lineNum(i + 1)}
               </span>
               <span className="pl-2 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200 whitespace-pre">
@@ -56,11 +56,11 @@ export function DiffView({ oldText, newText, fileName, mode }: DiffViewProps) {
 
   return (
     <div
-      className="rounded-md border border-slate-300 overflow-hidden text-xs font-mono dark:border-slate-600"
+      className="rounded-md border orca-border overflow-hidden text-xs font-mono"
       data-testid="diff-view"
     >
       {fileName && (
-        <div className="bg-blue-500/10 px-2 py-1 text-xs font-medium text-blue-700 dark:text-blue-300 border-b border-slate-300 dark:border-slate-600">
+        <div className="bg-blue-500/10 px-2 py-1 text-xs font-medium text-blue-700 dark:text-blue-300 border-b orca-border">
           ~ {fileName}
         </div>
       )}
@@ -77,7 +77,7 @@ export function DiffView({ oldText, newText, fileName, mode }: DiffViewProps) {
             return (
               <div key={i}>
                 <div className="flex bg-red-500/10">
-                  <span className="shrink-0 w-8 text-right pr-2 text-slate-400 select-none border-r border-slate-200 dark:border-slate-700">
+                  <span className="shrink-0 w-8 text-right pr-2 orca-text-faint select-none border-r orca-border">
                     {lineNum(i + 1)}
                   </span>
                   <span className="pl-2 text-red-800 dark:text-red-200 whitespace-pre">
@@ -85,7 +85,7 @@ export function DiffView({ oldText, newText, fileName, mode }: DiffViewProps) {
                   </span>
                 </div>
                 <div className="flex bg-emerald-500/10">
-                  <span className="shrink-0 w-8 text-right pr-2 text-slate-400 select-none border-r border-slate-200 dark:border-slate-700">
+                  <span className="shrink-0 w-8 text-right pr-2 orca-text-faint select-none border-r orca-border">
                     {lineNum(i + 1)}
                   </span>
                   <span className="pl-2 text-emerald-800 dark:text-emerald-200 whitespace-pre">
@@ -98,7 +98,7 @@ export function DiffView({ oldText, newText, fileName, mode }: DiffViewProps) {
           if (isRemoved) {
             return (
               <div key={i} className="flex bg-red-500/10">
-                <span className="shrink-0 w-8 text-right pr-2 text-slate-400 select-none border-r border-slate-200 dark:border-slate-700">
+                <span className="shrink-0 w-8 text-right pr-2 orca-text-faint select-none border-r orca-border">
                   {lineNum(i + 1)}
                 </span>
                 <span className="pl-2 text-red-800 dark:text-red-200 whitespace-pre">
@@ -110,7 +110,7 @@ export function DiffView({ oldText, newText, fileName, mode }: DiffViewProps) {
           if (isAdded) {
             return (
               <div key={i} className="flex bg-emerald-500/10">
-                <span className="shrink-0 w-8 text-right pr-2 text-slate-400 select-none border-r border-slate-200 dark:border-slate-700">
+                <span className="shrink-0 w-8 text-right pr-2 orca-text-faint select-none border-r orca-border">
                   {lineNum(i + 1)}
                 </span>
                 <span className="pl-2 text-emerald-800 dark:text-emerald-200 whitespace-pre">
@@ -121,10 +121,10 @@ export function DiffView({ oldText, newText, fileName, mode }: DiffViewProps) {
           }
           return (
             <div key={i} className="flex">
-              <span className="shrink-0 w-8 text-right pr-2 text-slate-400 select-none border-r border-slate-200 dark:border-slate-700">
+              <span className="shrink-0 w-8 text-right pr-2 orca-text-faint select-none border-r orca-border">
                 {lineNum(i + 1)}
               </span>
-              <span className="pl-2 whitespace-pre text-slate-700 dark:text-slate-300">
+              <span className="pl-2 whitespace-pre orca-text-muted">
                 {"  "}{oldLine || " "}
               </span>
             </div>

@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""run_sensitivity.py —— 量化敏感层分析 + 可视化（sensitivity_analyzer 节点调用）。
+
+流程：import adapter → 按 method 组装参数 → 调
+ts_quant.trainable.analyze_low_precision_sensitive_layers → 落盘 report.json（含模型原始层序）
+→ orca.chart.render_chart 推 bar+table（按模型原始程序顺序/原始层名）→ stdout 输出 JSON 摘要。
+
+铁律：
+- method∈{ptq_binary_sensitivity, mix_precision_search} 必须有 adapter.get_eval_fn()，否则 fail loud。
+- 推图 try/except 容错：report.json 是核心产出，图失败仅 stderr 提示、不阻断、不影响退出码。
+
+注：QConfig 预设字段、后两 method 的 eval_fn/high_precision_qconfig 参数按 ts_quant
+README_TRAINING.md §8 与源码 sensitivity.py 的签名组织；若 ts_quant API 调整，相应核对。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any, Callable
+
+# 共享 device / seed 逻辑（plan §P5 硬约束：单一真相源）。
+_HERE = Path(__file__).resolve()
+_QUANT_SCRIPTS = _HERE.parent.parent.parent / "_quant_scripts"
+if str(_QUANT_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_QUANT_SCRIPTS))
+from _device import (  # noqa: E402
+    add_device_seed_args,
+    resolve_device_and_seed,
+    wrap_forward_with_device,
+)
+from _common import (  # noqa: E402
+    dump_json as _dump_json,
+    load_adapter as _load_adapter_base,
+    load_env_file as _load_env_file_base,
+)
+
+_LOG_PREFIX = "[run_sensitivity] "
+
+
+def _load_env_file(path: str) -> None:
+    _load_env_file_base(path, log_prefix=_LOG_PREFIX)
+
+
+def _load_adapter(path: str):
+    return _load_adapter_base(path, "ts_quant_adapter", log_prefix=_LOG_PREFIX)
+
+
+COMPLEX_METHODS = {"ptq_binary_sensitivity", "mix_precision_search"}
+
+
+def _qconfig(preset: str):
+    """低/高精度预设字符串 → ts_quant.QConfig。"""
+    from ts_quant import QConfig
+
+    preset = (preset or "").strip().lower()
+    if preset in ("w4a4-mx", "w4a4mx"):
+        # 见 README_TRAINING.md §8 示例（MX-W4A4）
+        return QConfig(
+            method="mx",
+            w_elem_format="fp4_e2m1",
+            a_elem_format="fp4_e2m1",
+            block_size=16,
+            weight_solver="rtn",
+            post_correction="none",
+        )
+    if preset == "int4":
+        return QConfig(method="int", n_bits=4, weight_solver="rtn", post_correction="none")
+    if preset == "w4a16":
+        return QConfig(method="int", n_bits=4, a_elem_format="fp16",
+                       weight_solver="rtn", post_correction="none")
+    if preset == "w8a8":
+        return QConfig(method="int", n_bits=8, weight_solver="rtn", post_correction="none")
+    sys.stderr.write(
+        f"[run_sensitivity] 未知预设 '{preset}'（支持 w4a4-mx / int4 / w4a16 / w8a8）\n"
+    )
+    sys.exit(2)
+
+
+def _row_score(r: dict[str, Any]) -> float:
+    """ranked_layers 每条记录的敏感度分数（多键兜底，字段名依 ts_quant 实际）。"""
+    for k in ("score", "baseline_score", "sensitivity", "mse", "metric"):
+        v = r.get(k)
+        if isinstance(v, (int, float)):
+            return float(v)
+    return 0.0
+
+
+def _row_name(r: dict[str, Any]) -> str | None:
+    # 实测：ranked_layers 每条字段名为 "name"（sensitivity.py 实际产出）
+    for k in ("name", "layer_name", "module", "layer"):
+        v = r.get(k)
+        if isinstance(v, str) and v:
+            return v
+    return None
+
+
+def _push_charts(auto_sensitive: list[str], ranked: list[dict[str, Any]],
+                 module_order: list[str]) -> None:
+    """render_chart 推 bar（按模型原始顺序）+ table（入选层明细）。全程容错。"""
+    try:
+        from orca.chart import render_chart
+    except Exception as e:  # orca 未装 / 不在 run 上下文
+        sys.stderr.write(f"[run_sensitivity] 无法 import orca.chart（跳过推图）: {e}\n")
+        return
+
+    sensitive_set = set(auto_sensitive)
+    score_by_name = {_row_name(r): _row_score(r) for r in ranked if _row_name(r)}
+    # rank：仅入选敏感层有 1..N，非入选留空（前端 DataTableWidget String() 渲染）
+    rank_map = {name: i + 1 for i, name in enumerate(auto_sensitive)}
+
+    # bar：按模型原始程序顺序（module_order），缺则退化为 ranked 顺序。
+    # 用 per-row color（非 hue）——hue 会把每根 bar 在 x 轴上分裂成 sensitive/normal 两半。
+    # 钢蓝 PALETTE[0]=#5B8DB8 / 珊瑚 NEGATIVE=#D4605A（与前端 title "coral=selected" 释义一致）。
+    order = module_order or [_row_name(r) for r in ranked]
+    bar_data = [
+        {
+            "layer": name,
+            "score": score_by_name.get(name, 0.0),
+            "color": "#D4605A" if name in sensitive_set else "#5B8DB8",
+        }
+        for name in order if name
+    ]
+    try:
+        if bar_data:
+            render_chart(
+                chart_type="bar",
+                data=bar_data,
+                label="quant/sensitivity",
+                title="Layer Sensitivity by model order (coral=selected)",
+                x="layer",
+                y="score",
+                color="color",
+                x_label="模型层（原始程序顺序）",
+                y_label="敏感度 score（越高=越不能低位宽）",
+                caption=(
+                    "珊瑚=入选敏感层（保持高精度）。按设定 ratio 选出的敏感层（珊瑚）留高精度，"
+                    "其余低位宽。"
+                ),
+            )
+            sys.stderr.write(f"[run_sensitivity] pushed bar: {len(bar_data)} layers\n")
+    except Exception as e:
+        sys.stderr.write(f"[run_sensitivity] bar 推送失败（不阻断）: {e}\n")
+
+    # table：全部层，与 bar 同源（都用 order = module_order 带 ranked 兜底），保证层集一致。
+    table_rows = [
+        {
+            "layer": name,
+            "score": score_by_name.get(name, 0.0),
+            "selected": name in sensitive_set,
+            "rank": rank_map.get(name, ""),
+        }
+        for name in order if name
+    ]
+    try:
+        if table_rows:
+            render_chart(
+                chart_type="table",
+                data=table_rows,
+                label="quant/sensitivity",
+                title="All Layers (selected ranked)",
+                columns=["layer", "score", "selected", "rank"],
+                caption="全部候选层；selected=true 的进入高精度白名单，rank=白名单内序号（越前=越敏感）。",
+            )
+            sys.stderr.write(
+                f"[run_sensitivity] pushed table: {len(table_rows)} layers "
+                f"({len(auto_sensitive)} selected)\n"
+            )
+    except Exception as e:
+        sys.stderr.write(f"[run_sensitivity] table 推送失败（不阻断）: {e}\n")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--adapter", required=True, help="adapter.py 路径")
+    ap.add_argument("--output_dir", required=True)
+    # Tier C 固化默认（P9a：自 workflow inputs 下沉，SPEC §5；agent 不再透传，改默认即改全局）：
+    ap.add_argument("--method", default="mse", help="mse / layer_stats / ptq_binary_sensitivity / mix_precision_search（默认 mse）")
+    ap.add_argument("--ratio", default="0.1", help="敏感层选取比例 0~1（默认 0.1=top10%）")
+    ap.add_argument("--low_bits", default="w4a4-mx", help="低精度预设（默认 w4a4-mx）")
+    ap.add_argument("--high_bits", default="w8a8", help="高精度预设（默认 w8a8；method=ptq_binary_sensitivity/mix_precision_search 用）")
+    add_device_seed_args(ap)
+    ap.add_argument(
+        "--env_file",
+        default="",
+        help="本 run 的 orca_env.sh 路径；与 PTQ 同 env 兜底模式（防 opencode bash 拆调用丢 env）",
+    )
+    args = ap.parse_args()
+    _load_env_file(args.env_file)
+
+    output_dir = Path(args.output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    method = (args.method or "").strip()
+    try:
+        ratio = float(args.ratio)
+    except (TypeError, ValueError):
+        sys.stderr.write(f"[run_sensitivity] --ratio 非浮点: {args.ratio!r}\n")
+        sys.exit(2)
+
+    # device + seed 解析（单一真相源：_device.resolve_device_and_seed）
+    device, seed = resolve_device_and_seed(
+        args.device, args.seed, log_prefix="[run_sensitivity] "
+    )
+
+    # 1. adapter
+    adapter = _load_adapter(args.adapter)
+    model = adapter.load_model()
+    # device 搬移
+    model = model.to(device)
+    calib_loader = adapter.get_calib_loader()
+    raw_forward_fn: Callable | None = getattr(adapter, "forward_fn", None)
+    forward_fn = wrap_forward_with_device(raw_forward_fn, device)
+    get_eval_fn = getattr(adapter, "get_eval_fn", None)
+
+    low_qconfig = _qconfig(args.low_bits)
+
+    # adapter 可选：覆盖默认分析的模块类型（默认仅 Linear；CNN/Transformer 常需加 Conv）
+    get_module_types = getattr(adapter, "get_module_types", None)
+    module_types = get_module_types() if callable(get_module_types) else None
+
+    # 2. 组装参数（method 分支）
+    from ts_quant.trainable import analyze_low_precision_sensitive_layers
+
+    kwargs: dict[str, Any] = dict(model=model, low_qconfig=low_qconfig, ratio=ratio, method=method)
+    if module_types:
+        kwargs["module_types"] = module_types
+    if method in COMPLEX_METHODS:
+        eval_fn = get_eval_fn() if callable(get_eval_fn) else None
+        if eval_fn is None:
+            sys.stderr.write(
+                f"[run_sensitivity] method={method} 需要 adapter.get_eval_fn() 返回业务评估函数\n"
+            )
+            sys.exit(2)
+        kwargs["eval_fn"] = eval_fn
+        kwargs["high_precision_qconfig"] = _qconfig(args.high_bits)
+    else:
+        kwargs["calib_data"] = calib_loader
+        if forward_fn is not None:
+            kwargs["forward_fn"] = forward_fn
+
+    # P2-6：业务异常 fail loud（与 bit-curve/ptq-sweep/qat 三脚本「业务错 exit 3」约定一致）。
+    # 之前直接调 raise → SDK 异常以 exit 1 + traceback 退出，根因埋在栈里、退出码与其它脚本漂移。
+    try:
+        analysis = analyze_low_precision_sensitive_layers(**kwargs)
+    except Exception as e:
+        sys.stderr.write(
+            f"[run_sensitivity] analyze_low_precision_sensitive_layers 失败"
+            f"（业务错 exit 3）: {type(e).__name__}: {e}\n"
+        )
+        sys.exit(3)
+
+    # 3. 模型原始层序 + 落盘 report
+    ranked = list(getattr(analysis, "ranked_layers", []) or [])
+    auto_sensitive = list(getattr(analysis, "auto_sensitive_layers", []) or [])
+    candidate_set = {_row_name(r) for r in ranked if _row_name(r)}
+    module_order = [n for n, _ in model.named_modules() if n in candidate_set]
+
+    report = {
+        "method": method,
+        "ratio": ratio,
+        "selected_count": getattr(analysis, "selected_count", len(auto_sensitive)),
+        "num_candidate_layers": getattr(analysis, "num_candidate_layers", len(ranked)),
+        "auto_sensitive_layers": auto_sensitive,
+        "ranked_layers": ranked,
+        "module_order": module_order,
+    }
+    report_path = output_dir / "report.json"
+    # P2-5：原子落盘（原为非原子 write_text，中断会留半个文件）。委托给 _common.dump_json，
+    # 行为等价（default=str 兜底 metric_spec 等不可序列化对象）。
+    _dump_json(report, report_path)
+
+    # 4. 推图（容错，不阻断）
+    _push_charts(auto_sensitive, ranked, module_order)
+
+    # 5. stdout JSON 摘要（agent 原样回显）
+    summary = {
+        "output_dir": str(output_dir),
+        "report_path": str(report_path),
+        "sensitive_layers": auto_sensitive,
+        "selected_count": report["selected_count"],
+        "method": method,
+    }
+    print(json.dumps(summary, ensure_ascii=False), flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

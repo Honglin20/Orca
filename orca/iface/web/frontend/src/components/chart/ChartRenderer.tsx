@@ -42,7 +42,7 @@ export function ChartRenderer({ nodeId }: ChartRendererProps) {
 
   if (filtered.length === 0) {
     return (
-      <p className="p-4 text-xs text-slate-400" data-testid="chart-empty">
+      <p className="p-4 text-xs orca-text-faint" data-testid="chart-empty">
         暂无图表
       </p>
     );

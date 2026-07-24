@@ -48,6 +48,23 @@ class _RunSubscription:
     pump: asyncio.Task
 
 
+@dataclass
+class _WSConnection:
+    """单条 WS 的出站 queue + writer task（SPEC §13.1 U-3 / §13.2 B-4）。
+
+    解决 FastAPI 单 WS 不支持并发 send 的 ``RuntimeError``：所有出站帧（bus 事件 pump +
+    控制帧广播）经 ``queue`` 串行化，由单 writer task ``send_json``。
+
+    控制帧（``run_changed``）与 bus 事件经同一 queue 出站，前端 ``processEvent`` 见
+    ``kind==="control"`` 即拒（不进 reducer）。
+    """
+
+    ws: WebSocket
+    queue: asyncio.Queue
+    writer: asyncio.Task | None = None
+    subscription: _RunSubscription | None = None
+
+
 class WebServer:
     """WS 单通道端点 + 按 run 订阅管理（SPEC §4.1）。
 
@@ -61,6 +78,9 @@ class WebServer:
         self._manager = manager
         # WS → 当前订阅。一个 WS 同时只订阅一个 run（subscribe 切换覆盖旧订阅）。
         self._subs: dict[WebSocket, _RunSubscription] = {}
+        # SPEC §13.2 B-4 WS connection registry：独立于 ``_subs``（控制帧广播遍历此 registry）。
+        # 控制帧 ``run_changed`` 要广播给**所有 WS**（即便未订阅某 run），故单独持表。
+        self._connections: dict[WebSocket, _WSConnection] = {}
         # D4 WS 事件驱动 auto-exit：任一 WS connect/disconnect 重置计时；
         # ``now - last_ws_activity_at > N AND run.terminal AND 无活跃 WS`` → 进程退出
         # （``orca run`` web 默认路径用，SPEC §0 D4 / §4 step4 / §8 AC5 负向）。
@@ -70,6 +90,31 @@ class WebServer:
         # 仅当 ``active_ws_count == 0`` 时 auto-exit 计时窗口才生效——长存活 WS 不会因为
         # 「connect 时刻已超过 N 秒」被误判为可退（修复旧版只 touch 不计数的缺陷）。
         self.active_ws_count: int = 0
+        # SPEC §13.2 B-4：注册 run_changed 广播回调（manager delete/cancel/attach 时调）。
+        self._run_changed_cb = self._on_run_changed
+        self._manager.add_run_changed_listener(self._run_changed_cb)
+
+    def _on_run_changed(self, run_id: str, action: str) -> None:
+        """``manager`` 触发 run_changed → enqueue 到每条 WS 的出站 queue（控制帧广播）。
+
+        SPEC §13.4 M-8：帧 ``{kind:"control", type:"run_changed", run_id, action}``；
+        前端 ``processEvent`` 见 ``kind==="control"`` 即拒（不进 reducer）。
+
+        本回调由 manager 在 delete/cancel/attach 后**同步**调用——直接 put_nowait 入各 WS
+        queue（writer task 异步消费）。queue 满或 WS 已断 → 静默丢（best-effort，轮询兜底）。
+        """
+        frame = {
+            "kind": "control",
+            "type": "run_changed",
+            "run_id": run_id,
+            "action": action,
+        }
+        for conn in list(self._connections.values()):
+            try:
+                conn.queue.put_nowait(frame)
+            except asyncio.QueueFull:
+                # 队列满 → 静默丢（前端轮询兜底，SPEC D9 / §13.1 U-3）
+                pass
 
     def _touch_ws_activity(self) -> None:
         """重置 WS 活动计时（connect/disconnect 调用）。"""
@@ -79,13 +124,19 @@ class WebServer:
         """单通道 WS 端点：accept → 循环 receive → 分派 subscribe/unsubscribe/gate_response。
 
         断开（WebSocketDisconnect / 异常）→ 清理当前订阅（cancel pump），无 leaked task。
+
+        SPEC §13.2 B-4：每条 WS 起独立 queue + writer task 串行化出站帧（bus 事件 + 控制帧）。
         """
         await ws.accept()
+        # 建 connection（queue + writer task）—— 控制帧广播也走此 queue。
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1024)
+        conn = _WSConnection(ws=ws, queue=queue)
+        conn.writer = asyncio.create_task(
+            self._writer_loop(ws, queue), name="orca-web-ws-writer",
+        )
+        self._connections[ws] = conn
         try:
             # connect → 计数 +1 + 重置 auto-exit 计时（D4 / §8 AC5 负向：active WS → no exit）。
-            # increment 在 try 内：accept 成功后到此处无 await，asyncio cancel 不会插队；
-            # 但放进 try 确保「increment 与 decrement 经同一 try/finally 配对」不变量显式
-            # （任何退出路径 finally 都能见到计数并 -1，不靠 try 外的副作用）。
             self.active_ws_count += 1
             self._touch_ws_activity()
             while True:
@@ -97,12 +148,30 @@ class WebServer:
             logger.warning("ws_endpoint 异常，连接将清理", exc_info=True)
         finally:
             await self._cleanup(ws)
-            # disconnect → 计数 -1 + 重置 auto-exit 计时（D4）。无论是否曾经订阅都 touch——
-            # 任何 WS 来过又走都算"客户端活跃过"，给浏览器重连窗口。计数 clamp 至 0
-            # （防御性：异常路径下双 decrement 不应变负）。
+            # disconnect → 计数 -1 + 重置 auto-exit 计时（D4）。
             if self.active_ws_count > 0:
                 self.active_ws_count -= 1
             self._touch_ws_activity()
+
+    async def _writer_loop(self, ws: WebSocket, queue: asyncio.Queue) -> None:
+        """SPEC §13.2 B-4：单 writer task 串行化 ``ws.send_json``（解决并发 send RuntimeError）。
+
+        从 queue 取帧 → ``send_json``。``queue.put(None)`` 哨兵 / WebSocketDisconnect → 退出。
+        """
+        try:
+            while True:
+                frame = await queue.get()
+                if frame is None:
+                    return
+                try:
+                    await ws.send_json(frame)
+                except WebSocketDisconnect:
+                    return
+                except Exception:  # noqa: BLE001
+                    logger.warning("ws writer send_json 失败", exc_info=True)
+                    return
+        except asyncio.CancelledError:
+            raise
 
     async def _dispatch(self, ws: WebSocket, msg: dict) -> None:
         """分派一条客户端消息。未知 type 记 warning（fail loud），不崩连接。"""
@@ -147,13 +216,21 @@ class WebServer:
             return
         last_seq = 0
         replayed_ok = False
+        conn = self._connections.get(ws)
         try:
             if since_seq is not None:
                 # 按 seq 升序重放历史（Tape.replay(since_seq) 已保证 seq>since 升序）。
                 for event in handle.tape.replay(since_seq=since_seq):
                     payload = event.model_dump()
                     payload["run_id"] = run_id
-                    await ws.send_json(payload)
+                    if conn is not None:
+                        try:
+                            conn.queue.put_nowait(payload)
+                        except asyncio.QueueFull:
+                            logger.warning(
+                                "ws resume queue full run_id=%s — dropping replay event",
+                                run_id,
+                            )
                     if event.seq > last_seq:
                         last_seq = event.seq
                 replayed_ok = True
@@ -170,26 +247,49 @@ class WebServer:
         # resume_ok。invalid since / unknown run 等回退 subscribe 路径不发——避免误升级 client
         # 状态。type 故意不进 EventType（控制平面帧，不进 tape）；前端 onmessage 见
         # type="resume_ok" 即清 watchdog（不 processEvent）。
-        if replayed_ok:
+        if replayed_ok and conn is not None:
             try:
-                await ws.send_json(
-                    {"type": "resume_ok", "run_id": run_id, "last_seq": last_seq}
+                # §13.4 M-8：控制帧统一带 ``kind:"control"``（``run_changed`` 已有；``resume_ok`` 补齐）。
+                conn.queue.put_nowait(
+                    {
+                        "kind": "control",
+                        "type": "resume_ok",
+                        "run_id": run_id,
+                        "last_seq": last_seq,
+                    }
                 )
-            except Exception:  # noqa: BLE001 — WS 已断 / send 失败 → 不阻塞 dispatch
+            except asyncio.QueueFull:  # noqa: BLE001 — queue 满 → client 会经 onclose 重连
                 logger.warning(
-                    "ws resume_ok send 失败 run_id=%s（client 会经 onclose 重连）",
-                    run_id,
-                    exc_info=True,
+                    "ws resume_ok enqueue 失败 run_id=%s（queue full）", run_id,
                 )
 
     async def _handle_subscribe(self, ws: WebSocket, run_id: object | None) -> None:
-        """订阅某 run：cancel 旧订阅 → 订阅 handle.bus → 起 pump task。
+        """订阅某 run：ensure_attached → cancel 旧订阅 → 订阅 handle.bus → 起 pump task。
 
-        未知 run_id → 不订阅（fail loud 记 warning），保留旧订阅语义清晰起见也 cancel。
+        SPEC §13 §5.3 D7 / §13.2 I-3：未知 run_id 先 ``manager.ensure_attached``（懒挂载
+        discovery 出来的 tape）。ensure_attached 失败（FileNotFoundError / RuntimeError /
+        PermissionError）→ 记 warning 不崩，前端收不到该 run 事件但 WS 仍可用。
         """
         if not isinstance(run_id, str):
             logger.warning("ws subscribe 缺 run_id（忽略）")
             return
+        # 懒挂载：unknown run_id 先尝试 ensure_attached。
+        if self._manager.get_handle(run_id) is None:
+            try:
+                await self._manager.ensure_attached(run_id)
+            except FileNotFoundError:
+                logger.warning("ws subscribe ensure_attached 0 命中 run_id=%s", run_id)
+                return
+            except RuntimeError as e:
+                logger.warning(
+                    "ws subscribe ensure_attached 多命中 run_id=%s: %s", run_id, e
+                )
+                return
+            except PermissionError as e:
+                logger.warning(
+                    "ws subscribe ensure_attached 拒绝 run_id=%s: %s", run_id, e
+                )
+                return
         handle = self._manager.get_handle(run_id)
         if handle is None:
             logger.warning("ws subscribe 未知 run_id=%s（忽略）", run_id)
@@ -197,11 +297,15 @@ class WebServer:
         # 切 run：先 cancel 旧订阅（无论新旧是否同 run，语义统一）。
         await self._cancel_sub(ws)
         sub = handle.bus.subscribe()
+        conn = self._connections.get(ws)
         pump = asyncio.create_task(
-            self._pump(ws, sub, run_id),
+            self._pump(conn, sub, run_id),
             name=f"orca-web-ws-pump-{run_id}",
         )
-        self._subs[ws] = _RunSubscription(handle=handle, sub=sub, pump=pump)
+        run_sub = _RunSubscription(handle=handle, sub=sub, pump=pump)
+        self._subs[ws] = run_sub
+        if conn is not None:
+            conn.subscription = run_sub
 
     async def _handle_gate_response(self, ws: WebSocket, msg: dict) -> None:
         """反向通道：gate_response → 当前订阅 run 的 gate_handler.resolve。
@@ -230,17 +334,28 @@ class WebServer:
             return
         gate_handler.resolve(str(gate_id), str(answer), "web")
 
-    async def _pump(self, ws: WebSocket, sub: Subscription, run_id: str) -> None:
-        """把某 run 的 bus 事件推给 WS（带 run_id 标签）。
+    async def _pump(
+        self, conn: _WSConnection | None, sub: Subscription, run_id: str
+    ) -> None:
+        """把某 run 的 bus 事件 enqueue 出站（SPEC §13.2 B-4 经 queue 串行化）。
 
-        正常退出：bus close（sub.events 收到 None 哨兵）或 WS 断开（send 抛）。
-        任何异常都不该 leak —— 调用方（_cleanup）保证 cancel。
+        正常退出：bus close（sub.events 收到 None 哨兵）或 queue writer 已停。
+        不直接 ``ws.send_json``——所有出站经 queue，由 ``_writer_loop`` 串行化发送，
+        解决 FastAPI 单 WS 并发 send RuntimeError。
         """
         try:
             async for event in sub.events():
                 payload = event.model_dump()
                 payload["run_id"] = run_id  # 标签：让前端区分来源 run
-                await ws.send_json(payload)
+                if conn is None:
+                    return
+                try:
+                    conn.queue.put_nowait(payload)
+                except asyncio.QueueFull:
+                    # 慢消费者 → drop（前端 resume 机制兜底，SPEC D6）
+                    logger.warning(
+                        "ws pump queue full (run=%s) — dropping event", run_id,
+                    )
         except WebSocketDisconnect:
             pass  # WS 断开，正常退出
         except Exception:  # noqa: BLE001 — pump 异常 fail loud 记 warning，不 crash server
@@ -260,5 +375,20 @@ class WebServer:
                 pass
 
     async def _cleanup(self, ws: WebSocket) -> None:
-        """WS 断开时的清理：cancel pump + 移出 _subs。幂等。"""
+        """WS 断开时的清理：cancel pump + 停 writer task + 移出 _subs/_connections。幂等。"""
         await self._cancel_sub(ws)
+        conn = self._connections.pop(ws, None)
+        if conn is not None:
+            # 停 writer task：put None 哨兵 + cancel 兜底。
+            try:
+                conn.queue.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
+            if conn.writer is not None and not conn.writer.done():
+                conn.writer.cancel()
+                try:
+                    await conn.writer
+                except asyncio.CancelledError:
+                    pass
+                except Exception:  # noqa: BLE001
+                    pass

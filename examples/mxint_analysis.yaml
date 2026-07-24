@@ -4,7 +4,7 @@
 # 验证 Orca 的 agent DAG 推进 + 结构化输出 schema + 工具白名单 + tape 持久化 +
 # render_chart spawn-script 链路（report_painter 推真图表）。
 #
-# 跑：`teams run examples/mxint_analysis.yaml`
+# 跑：`tars run examples/mxint_analysis.yaml`
 name: mxint_analysis
 description: |
   迁移自 AgentHarness mxint-analysis 的端到端量化分析 workflow（真实 bitx 版）。

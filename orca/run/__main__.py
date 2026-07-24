@@ -73,11 +73,18 @@ def main(argv: list[str] | None = None) -> int:
 
     # 惰性导入：CLI 启动时不拉起整个 orca 链（仅真正运行时才加载）
     from orca.compile.parser import load_workflow
+    from orca.compile import ConfigurationError
     from orca.exec.registry import get_default_registry
+    from orca.iface.cli.config import apply_kb_requirement
     from orca.iface.exit_codes import ExitCode, exit_for_terminal_status
     from orca.run import run_workflow
 
-    wf = load_workflow(Path(args.yaml))
+    try:
+        wf = load_workflow(Path(args.yaml))
+        apply_kb_requirement(wf)  # plan §1.4：requires knowledge_base 时预检 KB（fail loud）
+    except ConfigurationError as e:
+        print(str(e), file=sys.stderr)
+        return int(ExitCode.CONFIG_ERROR)
 
     inputs: dict = {}
     for item in args.input:

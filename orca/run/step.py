@@ -32,14 +32,16 @@ from typing import TYPE_CHECKING, Any
 
 import jsonschema
 
-from orca.events.replay import replay_state
+from orca.events.replay import _replay_state_and_inputs
 from orca.exec.error import ExecError
 from orca.exec.render import render_prompt, render_template
 from orca.run.lifecycle import (
     make_workflow_completed,
+    make_workflow_failed,
     make_workflow_started,
     now_monotonic,
 )
+from orca.run.memory import inject_memory_prompt
 from orca.run.orchestrator import Orchestrator
 from orca.run.resume import _outputs_acc_from_state
 
@@ -62,6 +64,10 @@ ERR_UNSUPPORTED_NODE_KIND = "unsupported_node_kind"
 ERR_STATE_CORRUPT = "state_corrupt"
 ERR_INTERNAL_ERROR = "internal_error"
 
+# SPEC 2026-07-23-in-session-error-management §2 P4：同节点连续 recoverable 失败上限。
+# 撞上限 → 升格 workflow_failed（防死循环）。对齐哨兵 MAX_ASK=3，不可配（YAGNI）。
+_RECOVERABLE_ESCALATE_AT = 3
+
 
 class InSessionError(Exception):
     """in-session 推进中的非法状态（fail loud）：状态腐败 / 不支持的节点类型等。
@@ -73,6 +79,25 @@ class InSessionError(Exception):
     def __init__(self, message: str, *, error_kind: str = ERR_INTERNAL_ERROR):
         super().__init__(message)
         self.error_kind = error_kind
+
+
+class RecoverableInSessionError(InSessionError):
+    """可恢复的节点产出错误（SPEC 2026-07-23 §3：v1 仅 ``output_schema_mismatch``）。
+
+    与 plain ``InSessionError`` 的区别：``advance_step`` 在 ``output is not None`` 分支
+    **自捕** 此子类 —— 不 re-raise，而是 emit ``[node_failed, node_started]`` 重 arm 同节点、
+    返 ``StepResult(recoverable=True)``（run 存活，决策权交主 session）。连续 N 次未通过才
+    升格 ``workflow_failed``（终态）。
+
+    ``error_kind`` 恒为 ``output_schema_mismatch``（仅此 kind 可恢复；render_error / state_corrupt /
+    unsupported_node_kind / internal_error 仍 plain ``InSessionError`` = irrecoverable）。
+
+    因属 ``InSessionError`` 子类，``cli.next`` 的 ``except InSessionError`` 仍能兜底捕获（防御：
+    正常路径 advance_step 自捕不外抛，但若未来调用方直接调 ``_parse_output`` 仍走旧 fail 路径）。
+    """
+
+    def __init__(self, message: str):
+        super().__init__(message, error_kind=ERR_OUTPUT_SCHEMA_MISMATCH)
 
 
 @dataclass
@@ -95,6 +120,15 @@ class StepResult:
     prompt_file: str | None = None   # compact：渲染后 prompt 落盘路径（指针交付，主 session 只过指针）
     resources_root: str | None = None  # compact：agent 资源目录绝对路径（指针里附给子代理按需 Read）
     reason: str | None = None        # done=True 时的终止原因 / 错误说明
+    # SPEC 2026-07-23-in-session-error-management §4.1：recoverable / warn 信封字段。
+    # recoverable=True → 节点产出不合 schema 但 run 存活（重 arm 同节点，主 session 反馈重派）；
+    # warn=True → compliance 计数达 warn 阈值（cli 层注解，advance_step 本身不置位）。
+    recoverable: bool = False
+    warn: bool = False
+    retry_count: int | None = None     # 本次是第几次重试（1-based）
+    retry_budget: int | None = None    # 剩余重试次数（N - retry_count）
+    error_kind: str | None = None      # recoverable/warn 的 error_kind（output_schema_mismatch / subagent_compliance）
+    hint: str | None = None            # 给主 session 的恢复指引
 
 
 def _running_node(state: Any) -> str | None:
@@ -113,6 +147,29 @@ def _running_node(state: Any) -> str | None:
 
 def _node_by_name(wf: Workflow) -> dict[str, Any]:
     return {n.name: n for n in wf.nodes}
+
+
+def consecutive_fail_count(tape: Tape, node: str) -> int:
+    """当前节点在 tape 末尾的**连续** recoverable 失败次数（SPEC §4.3，AC9）。
+
+    派生谓词（E1 钉死）：计 ``node_failed(node)``；遇 ``node_completed(任意节点)`` 即重置为 0。
+    v1 顺序单 running 节点下「任意节点 nc」与「当前节点 nc」等价（DAG 前向），谓词显式写
+    「任意节点」以备未来并行。
+
+    实现选**正向扫描 + reset-on-nc**（与 SPEC §4.3 描述的「从末尾向前扫」数学等价）：
+    正向遍历遇 nc(any) 把计数归零、遇 nf(node) 累加，遍历结束时的计数 = 末尾连续 streak 长度。
+    正向单次遍历无需物化 ``reversed(list(...))``，O(n) 常量空间，结果与反向扫到首个 nc 停止一致。
+
+    不进 reducer fold（``events/replay.py`` 零改边界）；``advance_step`` 在 recoverable 决策点
+    调它。不入 marker（避免 desync，与「marker 只 3 字段」铁律一致）—— SSOT 在 tape。
+    """
+    count = 0
+    for event in tape.replay():
+        if event.type == "node_completed":
+            count = 0
+        elif event.type == "node_failed" and event.node == node:
+            count += 1
+    return count
 
 
 def _build_ctx(wf: Workflow, outputs_acc: dict[str, Any], inputs: dict[str, Any],
@@ -141,28 +198,27 @@ def _parse_output(raw: str, node: Any) -> Any:
     try:
         parsed = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
-        # 结构化预期但拿到非 JSON —— fail loud（route 求值会缺字段，不如早炸）。
-        raise InSessionError(
+        # 结构化预期但拿到非 JSON —— recoverable（SPEC 2026-07-23 §3）：advance_step
+        # 自捕 RecoverableInSessionError → 重 arm 同节点 + 回反馈信封，主 session 重派。
+        raise RecoverableInSessionError(
             f"节点 {node.name!r} 声明了 output_schema 但宿主输出非 JSON：{raw[:80]!r}",
-            error_kind=ERR_OUTPUT_SCHEMA_MISMATCH,
         )
     # 字段校验：jsonschema>=4.0（pyproject 已声明，exec/ result_extractor 同款用法）。
     # 必须同时 catch SchemaError：compile 层不校验 output_schema 形状，用户 YAML 写错
     # （如 required 非字符串、type 拼错）会让 validate 抛 SchemaError（非 ValidationError
     # 子类）——只 catch ValidationError 会逃逸成脏崩溃（review 🔴，D-v8.x-2 初衷）。
+    # 三处均 recoverable（SPEC §3）：产出不合 schema 由主 session 反馈子代理重派修正。
     try:
         jsonschema.validate(parsed, schema)
     except jsonschema.ValidationError as e:
         path = ".".join(str(p) for p in e.absolute_path) or "<root>"
-        raise InSessionError(
+        raise RecoverableInSessionError(
             f"节点 {node.name!r} 输出不满足 output_schema：{e.message}（路径 {path}）",
-            error_kind=ERR_OUTPUT_SCHEMA_MISMATCH,
         )
     except jsonschema.SchemaError as e:
-        # schema 自身畸形 → fail loud（归类 output_schema_mismatch，消息区分语义）。
-        raise InSessionError(
+        # schema 自身畸形 → 同归 recoverable（error_kind=output_schema_mismatch，消息区分语义）。
+        raise RecoverableInSessionError(
             f"节点 {node.name!r} 的 output_schema 自身畸形：{e.message}",
-            error_kind=ERR_OUTPUT_SCHEMA_MISMATCH,
         )
     return parsed
 
@@ -206,13 +262,26 @@ def _write_prompt_file(prompts_dir: Path, node_name: str, rendered: str) -> Path
     return final
 
 
-def _deliver(node: Any, ctx: Any, prompts_dir: Path | None) -> tuple[str | None, str | None, str | None]:
+def _deliver(
+    node: Any, ctx: Any, prompts_dir: Path | None,
+    *,
+    wf: Any | None = None,
+    project_root: Path | None = None,
+    no_memory: bool = False,
+) -> tuple[str | None, str | None, str | None]:
     """渲染 prompt 并按交付模式产出 ``(prompt, prompt_file, resources_root)``。
 
     - ``prompts_dir`` 给定（compact，生产路径）：写文件，返 ``(None, <path>, resources_root)``。
     - ``prompts_dir=None``（inline 回退，单测决策逻辑用）：返 ``(rendered, None, None)``。
+
+    【node-memory】``wf`` / ``project_root`` / ``no_memory`` 给定且 ``node.memory=True`` 时,
+    在渲染后、写文件前调 ``inject_memory_prompt`` 把上一轮 MD body + 复用协议拼到 rendered
+    末尾(SPEC §4.1)。三 kwarg 默认值保 ``_deliver(node, ctx, prompts_dir)`` 旧调用形态不破
+    (单测 inline 路径 / 非记忆节点零行为变更)。
     """
     rendered = _render_or_fail(node, ctx)
+    if getattr(node, "memory", False) and not no_memory and wf is not None and project_root is not None:
+        rendered = inject_memory_prompt(node, wf, rendered, project_root=project_root)
     if prompts_dir is not None:
         path = _write_prompt_file(prompts_dir, node.name, rendered)
         return None, str(path), getattr(node, "resources_root", None)
@@ -263,6 +332,93 @@ def _resolve_inputs(wf: Workflow, inputs: dict[str, Any] | None) -> dict[str, An
     return resolved
 
 
+def _node_failed_data(exc: RecoverableInSessionError) -> dict[str, Any]:
+    """构造 ``node_failed`` 的 4-字段 data（SPEC §4.2 E6，inline，不加 lifecycle helper）。
+
+    复用 executor 形态 ``{kind, error_type, message, phase}``（``exec/interface.py:15``），
+    但 ``kind`` 值是 in-session 专属字符串（``output_schema_mismatch``），**故意不**是
+    ``ErrorKind`` 枚举成员 —— 失败本体不同（in-session 是宿主协同错误，executor 是后端协议
+    错误），不强求共享枚举。reducer 对 node_failed 只置 ``node_status[node]=failed``，不读
+    这些字段（纯可观测）。
+    """
+    return {
+        "kind": ERR_OUTPUT_SCHEMA_MISMATCH,
+        "error_type": ERR_OUTPUT_SCHEMA_MISMATCH,
+        "message": str(exc),
+        "phase": "output_validation",
+    }
+
+
+def _recover_step_result(
+    tape: Tape, wf: Workflow, exc: RecoverableInSessionError, pending: str,
+    state: Any, inputs: dict[str, Any], rid: str,
+    prompts_dir: Path | None, project_root: Path | None, no_memory: bool,
+) -> StepResult:
+    """recoverable 自恢复（SPEC §4.2）：emit ``[node_failed, node_started]`` 重 arm 同节点；
+    连续 ``_RECOVERABLE_ESCALATE_AT`` 次未通过 → 升格 ``workflow_failed``。
+
+    计数语义（SPEC §4.3）：``count = consecutive_fail_count(tape, pending)`` 是**本次失败
+    落 tape 前**的前序连续失败数；本次是第 ``count+1`` 次（1-based ``retry_count``）。
+      - ``count+1 < N``：emit ``[nf, ns]`` + 重渲染 prompt + 返 ``StepResult(recoverable=True,
+        retry_count=count+1, retry_budget=N-(count+1))``（run 存活，marker 不清）。
+      - ``count+1 >= N``：升格——emit 顺序 ``nf → ns → workflow_failed``（E8 钉死：第 N 次失败
+        真实记录后再终态，保 ``count 重建 = retry_count`` 不变量）；返 ``done=True``。
+
+    重渲染用 ``_outputs_acc_from_state(state)``：pending 未 completed（emit 的是 nf 而非 nc），
+    其坏 output 不进 context → 上下文与首次 arm 一致（确定性把手，P3）。
+
+    Corner case（code-reviewer 🟢）：``count+1 < N`` 分支调 ``_deliver`` 重渲染 prompt 时，
+    若节点 prompt 自身有 Jinja 错 / 引用上游缺字段（render_error），``_render_or_fail`` 抛
+    ``InSessionError(render_error)`` —— 已构的 ``[nf, ns]`` emits 被丢弃，异常透传到 cli
+    ``except InSessionError`` → ``fail_in_session`` emit ``workflow_failed(render_error)``。
+    即「合法升格被 render_error 短路为 irrecoverable fail loud」（render_error 本质 wf-author
+    bug，重跑也修不了；SPEC §3 明示 render_error 全 irrecoverable）。此场景下本次 nf 未落 tape，
+    count 不变量不成立 —— 可接受，因 render_error 永远进 irrecoverable 终态、不再循环。
+    """
+    nodes = _node_by_name(wf)
+    count = consecutive_fail_count(tape, pending)
+    this_attempt = count + 1
+    emits: list[Emit] = [
+        Emit("node_failed", _node_failed_data(exc), node=pending),
+        Emit("node_started", {"node": pending}, node=pending),
+    ]
+
+    if this_attempt >= _RECOVERABLE_ESCALATE_AT:
+        # 升格（E8）：先 emit 本次 [nf, ns]，再追加 workflow_failed（tape 记录第 N 次真实失败）。
+        reason = (f"consecutive recoverable exhausted: 节点 {pending!r} 连续 "
+                  f"{this_attempt} 次产出不合 schema")
+        t, d = make_workflow_failed(ERR_OUTPUT_SCHEMA_MISMATCH, reason, node=pending)
+        emits.append(Emit(t, d))
+        logger.warning(
+            "节点 %s 连续 %d 次 recoverable 失败，升格 workflow_failed（run=%s）",
+            pending, this_attempt, rid,
+        )
+        return StepResult(emits=emits, done=True, reason=reason,
+                          error_kind=ERR_OUTPUT_SCHEMA_MISMATCH)
+
+    # 未升格 → 重 arm：重渲染 prompt（与正常 next 同形交付，compact/inline 由 prompts_dir 决定）。
+    ctx = _build_ctx(wf, _outputs_acc_from_state(state), inputs, rid)
+    prompt, prompt_file, rroot = _deliver(
+        nodes[pending], ctx, prompts_dir,
+        wf=wf, project_root=project_root, no_memory=no_memory,
+    )
+    retry_budget = _RECOVERABLE_ESCALATE_AT - this_attempt
+    hint = (
+        f"把上面的 reason 反馈给执行本节点的子代理，重派它产出修正后的 output，"
+        f"再 orca next --output（剩余 {retry_budget} 次重试机会）"
+    )
+    logger.info(
+        "节点 %s recoverable 失败（第 %d/%d 次），重 arm（run=%s）",
+        pending, this_attempt, _RECOVERABLE_ESCALATE_AT, rid,
+    )
+    return StepResult(
+        emits=emits, done=False, node=pending,
+        prompt=prompt, prompt_file=prompt_file, resources_root=rroot,
+        recoverable=True, retry_count=this_attempt, retry_budget=retry_budget,
+        error_kind=ERR_OUTPUT_SCHEMA_MISMATCH, reason=str(exc), hint=hint,
+    )
+
+
 def advance_step(
     tape: Tape,
     wf: Workflow,
@@ -272,8 +428,13 @@ def advance_step(
     run_id: str | None = None,
     elapsed: float = 0.0,
     prompts_dir: Path | None = None,
+    yaml_path: str | None = None,
+    host_session: str | None = None,
+    project_root: Path | None = None,
+    no_memory: bool = False,
 ) -> StepResult:
-    """单步推进（纯决策：读 tape 现状 → 决定 emits + 回复；不写 tape）。
+    """单步推进（决策 + recoverable 自恢复；emit-only——不写 tape，但走既有 ``_deliver``
+    写 prompt 文件，与 pre-SPEC 行为一致，非新副作用）。
 
     调用契约（宿主侧）：
       - 首次：``advance_step()`` 无 output → 返回 entry 节点 prompt（emit
@@ -292,13 +453,23 @@ def advance_step(
     ``elapsed`` 由 daemon 传真实 workflow 总耗时（M5：不撒谎）。
     ``prompts_dir`` 给定时走 compact 交付（渲染后 prompt 落盘、StepResult.prompt_file 指针）；
     None 时 inline 回退（StepResult.prompt 全文，单测决策逻辑用）。
+
+    ``host_session``（host-session-binding v2）：宿主 session id，**仅 ``state.status=="pending"``
+    首节点分支透传给 ``make_workflow_started``**（写入 tape 的归属字段，单一真相源）。next
+    路径（非 pending）**不传**——``workflow_started`` 在 bootstrap 已 emit，next 不重发
+    （emit 真链 §4.1：host_session 经 lifecycle←step←cli 三点穿，不在 cli.py emit）。
+
+    【node-memory】``project_root`` / ``no_memory`` 透传 ``_deliver``:节点 ``memory=True`` 且
+    ``not no_memory`` 时,渲染后注入「上一轮记忆 + 复用协议」(SPEC §4.1)。``project_root=None``
+    时即使 ``memory=True`` 也不注入(回归旧形态,保单测 inline 路径不破)。
     """
-    state = replay_state(tape)
-    # tape 是 inputs 真相源（workflow_started.data.inputs）：next 不传 --inputs 时从 tape
-    # 恢复（deterministic —— 模型不必每步重传，且修掉非 entry 节点 {{ inputs.* }} 依赖 CLI
-    # 重传的隐患）。bootstrap 首调时 tape 无 workflow_started → _inputs_from_tape 返 {} →
-    # 自然 fallback 到 CLI 传入的 inputs。与 Orchestrator resume（_inputs_from_tape）同源。
-    tape_inputs = Orchestrator._inputs_from_tape(tape)
+    # SPEC §3 O1a（包 P3）：单次遍历 tape 既 fold RunState 又抽 workflow_started.data.inputs
+    # （reducer 只存 workflow_name、不存 inputs → 必须在同一次遍历里顺手抽）。
+    # tape 是 inputs 真相源：next 不传 --inputs 时从 tape 恢复（deterministic —— 模型不必
+    # 每步重传，且修掉非 entry 节点 {{ inputs.* }} 依赖 CLI 重传的隐患）。bootstrap 首调时
+    # tape 无 workflow_started → inputs 返 {} → 自然 fallback 到 CLI 传入的 inputs。
+    # 与 Orchestrator resume（_inputs_from_tape）同源（后者现为薄封装调同一 reducer 路径）。
+    state, tape_inputs = _replay_state_and_inputs(tape)
     merged = {**tape_inputs, **(inputs or {})}  # CLI override 罕见但保留兼容
     inputs = _resolve_inputs(wf, merged)
     rid = run_id or getattr(tape, "run_id", "") or ""
@@ -315,11 +486,16 @@ def advance_step(
         entry = wf.entry
         _check_agent_node(nodes.get(entry), entry)
         logger.info("workflow 启动（%s，entry=%s）", rid, entry)
-        t, d = make_workflow_started(rid, wf, inputs)
+        # host_session 仅在此 bootstrap 分支透传（写 workflow_started.data，tape 唯一真相源）；
+        # next 路径（非 pending）不 emit workflow_started → 不需要传（SPEC §4.1 emit 真链）。
+        t, d = make_workflow_started(rid, wf, inputs, yaml_path=yaml_path, host_session=host_session)
         emits.append(Emit(t, d))
         emits.append(Emit("node_started", {"node": entry}, node=entry))
         ctx = _build_ctx(wf, {}, inputs, rid)
-        prompt, prompt_file, rroot = _deliver(nodes[entry], ctx, prompts_dir)
+        prompt, prompt_file, rroot = _deliver(
+            nodes[entry], ctx, prompts_dir,
+            wf=wf, project_root=project_root, no_memory=no_memory,
+        )
         return StepResult(emits=emits, done=False, node=entry,
                           prompt=prompt, prompt_file=prompt_file, resources_root=rroot)
 
@@ -332,7 +508,16 @@ def advance_step(
                 "advance(output=...) 但 tape 中无 running 节点（状态腐败 / 重复完成）",
                 error_kind=ERR_STATE_CORRUPT,
             )
-        parsed = _parse_output(output, nodes[pending])
+        try:
+            parsed = _parse_output(output, nodes[pending])
+        except RecoverableInSessionError as e:
+            # SPEC 2026-07-23 §4.2：自捕 recoverable（不 re-raise）→ 重 arm 同节点，
+            # 返 StepResult(recoverable=True)（run 存活）。连续 N 次升格 workflow_failed。
+            # 不外抛 → cli 的 except InSessionError 不触发 recoverable；cli 走正常 result 路径。
+            return _recover_step_result(
+                tape, wf, e, pending, state, inputs, rid,
+                prompts_dir, project_root, no_memory,
+            )
         emits.append(Emit("node_completed", {"output": parsed}, node=pending))
         # 用「历史 outputs + 本次 output」求下一 node（同 _next_node_for_resume 的入参形态）。
         outputs_acc = _outputs_acc_from_state(state)
@@ -348,7 +533,10 @@ def advance_step(
         emits.append(Emit("route_taken", {"from": pending, "to": nxt}))
         emits.append(Emit("node_started", {"node": nxt}, node=nxt))
         ctx = _build_ctx(wf, outputs_acc, inputs, rid)
-        prompt, prompt_file, rroot = _deliver(nodes[nxt], ctx, prompts_dir)
+        prompt, prompt_file, rroot = _deliver(
+            nodes[nxt], ctx, prompts_dir,
+            wf=wf, project_root=project_root, no_memory=no_memory,
+        )
         return StepResult(emits=emits, done=False, node=nxt,
                           prompt=prompt, prompt_file=prompt_file, resources_root=rroot)
 
@@ -359,7 +547,10 @@ def advance_step(
             error_kind=ERR_STATE_CORRUPT,
         )
     ctx = _build_ctx(wf, _outputs_acc_from_state(state), inputs, rid)
-    prompt, prompt_file, rroot = _deliver(nodes[pending], ctx, prompts_dir)
+    prompt, prompt_file, rroot = _deliver(
+        nodes[pending], ctx, prompts_dir,
+        wf=wf, project_root=project_root, no_memory=no_memory,
+    )
     return StepResult(emits=[], done=False, node=pending,
                       prompt=prompt, prompt_file=prompt_file, resources_root=rroot)
 

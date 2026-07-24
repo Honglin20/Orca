@@ -1,78 +1,140 @@
-// components/layout/TopBar.tsx —— 顶栏：run + status + elapsed + cost（SPEC §5.1 / §0 D5）。
+// components/layout/TopBar.tsx —— 顶栏：run + status + elapsed + WS 指示 + 主题开关（SPEC §5.1 / §0 D5 / §P5）。
 //
-// 纯渲染（铁律 6）：所有值 = store fold 派生 + selector 派生。
-// - status icon：●running / ✓completed / ✗failed / cancelled / blocked
-// - elapsed（D5）：running 时 wall-clock tick（``useElapsedNow`` 单一共享 tick，页根
-//   控制 active）；完成 snap ``workflow_completed.data.elapsed`` 停 tick（防 wall-clock
-//   成前端真相，铁律 1）。``selectWorkflowElapsed`` 实现这一语义。
-// - cost：累计 cost_usd（agent_usage fold）
+// 纯渲染（铁律 6）：所有值 = store fold 派生 + selector 派生。WS 连接态与主题态是
+// transport / UI 派生（非 tape 真相，SPEC §1.1 sanctioned exception + §7 双触发）。
+// - status icon：``<StatusIcon/>``（lucide，P1 替换原 emoji ●/✓/✗/⊘/⏸）；P3 改 badge
+// - elapsed（D5）：running wall-clock tick；完成 snap（铁律 1）
+// - P3 runId 复制（hover <Copy/>，成功 <Check/> 1.5s 反馈）
+// - P3 WS 连接点（useWsStatus：绿 connected / 紫 reconnecting / 红 disconnected）
+// - P3 主题三态 toggle（system/dark/light，use-theme 持久化）
 //
-// 单一 timer 约束（SPEC §5.2）：本组件用 ``useElapsedNow()`` 订阅模块级 singleton
-// tick，自身不开 setInterval。tick 启停由 RunDetailPage 页根的 ``useElapsedTickActive`` 控制。
+// 单一 timer 约束（SPEC §5.2）：``useElapsedNow()`` 订阅模块级 singleton tick，自身不开 setInterval。
 
+import { useState } from "react";
+import { Timer, Copy, Check, Sun, Moon, Monitor, ArrowLeft } from "lucide-react";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import { useElapsedNow } from "@/hooks/use-elapsed-tick";
 import { selectWorkflowElapsed, formatElapsed } from "@/selectors";
-import type { WorkflowStatus } from "@/types/store-types";
+import { StatusIcon } from "@/components/icons";
+import { statusColor } from "./status-style";
+import { useWsStatus, type WsConnStatus } from "@/hooks/use-ws-status";
+import { currentTheme, nextTheme, setTheme, type Theme } from "@/hooks/use-theme";
 
-const STATUS_ICON: Record<WorkflowStatus, string> = {
-  idle: "○",
-  queued: "○",
-  running: "●",
-  completed: "✓",
-  failed: "✗",
-  cancelled: "⊘",
-  blocked: "⏸",
-};
-
-function statusColor(status: WorkflowStatus): string {
-  if (status === "failed") return "text-red-600";
-  if (status === "running") return "text-emerald-600";
-  if (status === "completed") return "text-emerald-600";
-  if (status === "cancelled") return "text-slate-500";
-  if (status === "blocked") return "text-amber-600";
-  return "text-slate-600";
+/** WS 连接态 → 圆点配色（绿/紫/红；connecting/reconnecting 同紫，中间态）。 */
+function wsDotClass(status: WsConnStatus): string {
+  if (status === "connected") return "bg-orca-done";
+  if (status === "disconnected") return "bg-orca-failed";
+  return "bg-orca-skipped"; // connecting / reconnecting
 }
 
-/** 把秒数格式化为 ``Ns`` / ``Nm Ns``（DRY：用共享 formatElapsed）。 */
+const THEME_ICON: Record<Theme, typeof Sun> = {
+  system: Monitor,
+  dark: Moon,
+  light: Sun,
+};
 
 export function TopBar({ runId }: { runId?: string }) {
   const status = useWorkflowStore((s) => s.status);
   const workflowName = useWorkflowStore((s) => s.workflowName);
-  const cost = useWorkflowStore((s) => s.cost);
+  const wsStatus = useWsStatus();
 
-  // 单一共享 tick：所有 TopBar / AgentsRail 共用。completed 时 selector snap → 停 tick
-  // 后值固定（useElapsedNow 仍可调用，但页根 active=false 后不再刷新）。
   const now = useElapsedNow();
-  // 注意：workflowElapsed/status/workflowStartedAt 都在同一 store 上派生；分别订阅
-  // 避免无关字段变更触发不必要的 re-render。
   const workflowElapsed = useWorkflowStore((s) =>
     selectWorkflowElapsed(s, now)
   );
 
+  const [copied, setCopied] = useState(false);
+  const [theme, setThemeState] = useState<Theme>(currentTheme());
+
+  const handleCopyRunId = async () => {
+    if (!runId) return;
+    try {
+      await navigator.clipboard.writeText(runId);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (err) {
+      console.error("[orca] runId 复制失败", err);
+    }
+  };
+
+  const handleToggleTheme = () => {
+    const t = nextTheme(theme);
+    setTheme(t);
+    setThemeState(t);
+  };
+
+  const ThemeIcon = THEME_ICON[theme];
+
   return (
     <header
-      className="flex h-12 items-center gap-6 border-b border-slate-200 bg-white px-4"
+      className="orca-bg-surface orca-border orca-text flex h-12 items-center gap-4 border-b px-4"
       data-testid="top-bar"
     >
-      <span className="text-lg font-semibold text-slate-900">Orca</span>
-      <span className="font-mono text-sm text-slate-700">
-        {runId ? runId.slice(0, 8) : "—"}
-      </span>
+      {/* 返回列表页（SPEC §13 §6.1：TopBar 加「← 返回」） */}
+      <button
+        type="button"
+        onClick={() => {
+          window.location.href = "/";
+        }}
+        title="返回 run 列表"
+        className="orca-text-faint hover:orca-text inline-flex items-center rounded border orca-border px-2 py-1"
+        aria-label="返回 run 列表"
+      >
+        <ArrowLeft size={14} strokeWidth={1.5} aria-hidden />
+      </button>
+      <span className="orca-accent text-lg font-semibold tracking-wider">TARS</span>
+      {runId && (
+        <button
+          type="button"
+          onClick={handleCopyRunId}
+          title="复制 runId"
+          data-testid="top-runid"
+          className="orca-text-muted hover:orca-text inline-flex items-center gap-1 font-mono text-sm"
+        >
+          {runId.slice(0, 8)}
+          {copied ? (
+            <Check size={12} strokeWidth={1.5} aria-hidden className="text-orca-done" />
+          ) : (
+            <Copy size={12} strokeWidth={1.5} aria-hidden />
+          )}
+        </button>
+      )}
       {workflowName && (
-        <span className="text-sm text-slate-500">{workflowName}</span>
+        <span className="orca-text-faint text-sm">{workflowName}</span>
       )}
       <span
-        className={`text-sm ${statusColor(status)}`}
+        className={`inline-flex items-center gap-1 rounded border border-current px-1.5 py-0.5 text-xs ${statusColor(status)}`}
         data-testid="top-status"
       >
-        {STATUS_ICON[status]} {status}
+        <StatusIcon status={status} />
+        {status}
       </span>
-      <span className="text-sm text-slate-500" data-testid="top-elapsed">
-        ⏱ {workflowElapsed !== null ? formatElapsed(workflowElapsed, "tenths") : "—"}
+      <span
+        className="orca-text-faint inline-flex items-center gap-1 text-sm"
+        data-testid="top-elapsed"
+      >
+        <Timer size={14} strokeWidth={1.5} aria-hidden />
+        {workflowElapsed !== null ? formatElapsed(workflowElapsed, "tenths") : "—"}
       </span>
-      <span className="text-sm text-slate-500" data-testid="top-cost">
-        🪙 ${cost.toFixed(4)}
+      {/* 右侧：spacer + WS 指示 + 主题开关 */}
+      <span className="ml-auto flex items-center gap-3">
+        <span
+          className="inline-flex items-center gap-1"
+          data-testid="top-ws"
+          title={`WS: ${wsStatus}`}
+        >
+          <span className={`h-2 w-2 rounded-full ${wsDotClass(wsStatus)}`} />
+        </span>
+        <button
+          type="button"
+          onClick={handleToggleTheme}
+          title={`主题：${theme}（切换）`}
+          data-testid="theme-toggle"
+          className="orca-text-faint hover:orca-text inline-flex items-center"
+          aria-label="切换主题"
+        >
+          <ThemeIcon size={15} strokeWidth={1.5} aria-hidden />
+        </button>
       </span>
     </header>
   );

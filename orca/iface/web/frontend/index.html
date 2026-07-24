@@ -5,7 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Orca</title>
   </head>
-  <body class="bg-slate-50 text-slate-900">
+  <!-- P5b：body 配色全权交给 index.css（orca-bg-app / orca-text token，明暗自适应）。
+       不再用 Tailwind ``bg-slate-50 text-slate-900``——避免暗模式下 FOUC（Tailwind utility
+       不随 prefers-color-scheme 切换，CSS 加载前会闪一下亮色底）。 -->
+  <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

@@ -19,7 +19,19 @@ Textual TUI（DAG 进度 / 日志流 / gate ModalScreen）。
 
 from __future__ import annotations
 
-from orca.iface.cli.app import OrcaApp
-from orca.iface.cli.commands import main
-
+# **__init__ 故意轻量（PEP 562 ``__getattr__`` lazy）**：``app.py``（OrcaApp，Textual TUI）
+# + ``commands.py`` 是重依赖，eager import 会使任何 ``import orca.iface.cli.<子模块>``（如
+# config / executor_cmds）被迫加载整个 TUI 壳（~1s+，拖慢 sidechain 守护等 import 链 → pidfile
+# 迟写 / liveness 误判）。console_scripts 直指 ``commands:main`` / ``in_session.cli:main``，不经本 __init__。
 __all__ = ["main", "OrcaApp"]
+
+
+def __getattr__(name: str):
+    """``main`` / ``OrcaApp`` 按需加载（无人经包顶层引用，见上方说明）。"""
+    if name == "main":
+        from orca.iface.cli.commands import main
+        return main
+    if name == "OrcaApp":
+        from orca.iface.cli.app import OrcaApp
+        return OrcaApp
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

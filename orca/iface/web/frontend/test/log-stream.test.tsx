@@ -1,9 +1,11 @@
-// test/log-stream.test.tsx —— LogStream auto-scroll（SPEC §5.5 / §0 D6）。
+// test/log-stream.test.tsx —— LogStream 行渲染 + auto-scroll + §P1 降噪 classifier。
 //
-// 覆盖 SPEC §5.5 三约束 + auto-scroll 策略：
-//   1. 每事件一行：行数 == tape 事件数
-//   2. 每个 EventType 都有 readable 摘要（selectLog/summarizeEvent 已穷尽 —— 这里只验行不为空）
-//   3. auto-scroll：pinned-to-bottom → 新事件到达自动滚到末；
+// 覆盖 SPEC §5.5 三约束 + auto-scroll 策略 + SPEC web-presentation-refinement §P1：
+//   1. 降噪过滤：行数 == classifyLogLevel 过滤后事件数（过程事件不进 Log）
+//   2. 每个进 Log 的事件都有 readable 摘要（selectLog/summarizeEvent 已穷尽）
+//   3. §P1 降噪 classifier：agent_tool_call/thinking 不进 Log；route_taken 默认隐藏；
+//      level===error 行红色 className；setLogShowDebug(true) 可展开 debug
+//   4. auto-scroll：pinned-to-bottom → 新事件到达自动滚到末；
 //      用户上滚 → 取消 pinned + 「跳最新」按钮；点按钮 → pinned + 滚到末。
 //
 // 注：react-window v2 ``scrollToRow`` 在 happy-dom 下不实际滚动 scrollTop，但会把
@@ -13,31 +15,49 @@ import { describe, expect, test, afterEach, beforeEach, vi } from "vitest";
 import { act, cleanup, render, screen, fireEvent } from "@testing-library/react";
 import { LogStream } from "@/components/detail/LogStream";
 import { useWorkflowStore } from "@/stores/workflow-store";
+import { setLogShowDebug } from "@/selectors";
+import type { EventType } from "@/types/events";
 import { ALL_EVENT_TYPES, makeEvent } from "./_helpers";
 
 beforeEach(() => {
   useWorkflowStore.getState().unloadRun();
+  // 测试隔离：每个用例前确保 debug 级恢复默认隐藏
+  setLogShowDebug(false);
 });
 
 afterEach(() => {
   cleanup();
   useWorkflowStore.getState().unloadRun();
+  setLogShowDebug(false);
   vi.restoreAllMocks();
 });
 
 describe("LogStream —— 行渲染（SPEC §5.5）", () => {
-  test("行数 == tape 事件数", () => {
-    const events = ALL_EVENT_TYPES.slice(0, 10).map((t, i) =>
+  test("行数 == classifyLogLevel 过滤后事件数（SPEC §P1 降噪）", () => {
+    // 显式构造 10 事件：8 个进 Log（生命周期）+ 2 个被过滤（过程事件）
+    // 不依赖 ALL_EVENT_TYPES 顺序（codegen 重排不影响此测试）
+    const types: EventType[] = [
+      "workflow_started",
+      "workflow_completed",
+      "workflow_failed",
+      "workflow_cancelled",
+      "node_started",
+      "node_completed",
+      "node_failed",
+      "node_skipped", // 8 个进 Log
+      "agent_message",
+      "agent_thinking", // 2 个被过滤
+    ];
+    const events = types.map((t, i) =>
       makeEvent(t, { seq: i + 1, data: { text: "x" } })
     );
     useWorkflowStore.getState().loadFromEvents(events);
     render(<LogStream />);
-    // 10 行（react-window 全部 mount 在 happy-dom 下 overscanCount=5）
     const rows = screen.getAllByTestId(/^log-row-/);
-    expect(rows.length).toBeGreaterThanOrEqual(10);
+    expect(rows.length).toBe(8);
   });
 
-  test("每个 EventType 都有 readable 摘要（行 text 非空）", () => {
+  test("每个进 Log 的事件都有 readable 摘要（行 text 非空）", () => {
     const events = ALL_EVENT_TYPES.map((t, i) =>
       makeEvent(t, { seq: i + 1, data: { text: "x", message: "m" } })
     );
@@ -47,7 +67,7 @@ describe("LogStream —— 行渲染（SPEC §5.5）", () => {
     // 每行都包含 seq + type + 文本（不为空）
     for (const row of rows) {
       const text = row.textContent ?? "";
-      // 至少含 type（穷尽：每个 EventType 都被 summarizeEvent 处理）
+      // 至少含 type（穷尽：每个进 Log 的 EventType 都被 summarizeEvent 处理）
       expect(text.length).toBeGreaterThan(0);
     }
   });
@@ -55,6 +75,107 @@ describe("LogStream —— 行渲染（SPEC §5.5）", () => {
   test("empty events → 暂无事件占位", () => {
     render(<LogStream />);
     expect(screen.getByTestId("log-empty")).toBeInTheDocument();
+  });
+});
+
+// ── SPEC web-presentation-refinement §P1：LogStream 降噪 classifier（过程事件不进 Log）──
+describe("LogStream —— §P1 降噪 classifier", () => {
+  test("agent_tool_call / agent_thinking 不进 Log", () => {
+    useWorkflowStore.getState().loadFromEvents([
+      makeEvent("workflow_started", { seq: 1 }),
+      makeEvent("agent_tool_call", {
+        seq: 2,
+        node: "n",
+        data: { tool: "bash" },
+      }),
+      makeEvent("agent_thinking", {
+        seq: 3,
+        node: "n",
+        data: { text: "thinking..." },
+      }),
+      makeEvent("agent_message", {
+        seq: 4,
+        node: "n",
+        data: { text: "msg" },
+      }),
+      makeEvent("node_started", { seq: 5, node: "n" }),
+    ]);
+    render(<LogStream />);
+    const rows = screen.getAllByTestId(/^log-row-/);
+    const typesInDom = rows.map((r) => r.textContent ?? "");
+    // workflow_started / node_started 进 Log（2 行）
+    expect(rows.length).toBe(2);
+    expect(typesInDom.some((t) => t.includes("workflow_started"))).toBe(true);
+    expect(typesInDom.some((t) => t.includes("node_started"))).toBe(true);
+    // 过程事件绝不渲染
+    expect(typesInDom.some((t) => t.includes("agent_tool_call"))).toBe(false);
+    expect(typesInDom.some((t) => t.includes("agent_thinking"))).toBe(false);
+    expect(typesInDom.some((t) => t.includes("agent_message"))).toBe(false);
+  });
+
+  test("route_taken 默认不显示（debug 级，SPEC §P1 决策 3）", () => {
+    useWorkflowStore.getState().loadFromEvents([
+      makeEvent("workflow_started", { seq: 1 }),
+      makeEvent("route_taken", { seq: 2, data: { from: "A", to: "B" } }),
+      makeEvent("node_started", { seq: 3, node: "A" }),
+    ]);
+    render(<LogStream />);
+    const rows = screen.getAllByTestId(/^log-row-/);
+    expect(rows.length).toBe(2); // route_taken 被过滤
+    expect(
+      rows.some((r) => (r.textContent ?? "").includes("route_taken"))
+    ).toBe(false);
+  });
+
+  test("setLogShowDebug(true) → route_taken 进 Log（默认隐藏可恢复）", () => {
+    useWorkflowStore.getState().loadFromEvents([
+      makeEvent("workflow_started", { seq: 1 }),
+      makeEvent("route_taken", { seq: 2, data: { from: "A", to: "B" } }),
+    ]);
+    setLogShowDebug(true);
+    render(<LogStream />);
+    const rows = screen.getAllByTestId(/^log-row-/);
+    expect(rows.length).toBe(2);
+    expect(
+      rows.some((r) => (r.textContent ?? "").includes("route_taken"))
+    ).toBe(true);
+  });
+
+  test('level==="error" 行含红色 className text-red-600（取代 isError）', () => {
+    useWorkflowStore.getState().loadFromEvents([
+      makeEvent("workflow_started", { seq: 1 }),
+      makeEvent("node_failed", {
+        seq: 2,
+        node: "n",
+        data: { message: "boom" },
+      }),
+    ]);
+    render(<LogStream />);
+    // row-0 = workflow_started (info)，row-1 = node_failed (error)
+    const errorRow = screen.getByTestId("log-row-1");
+    expect(errorRow.className).toContain("text-red-600");
+    // info 行不带红
+    const infoRow = screen.getByTestId("log-row-0");
+    expect(infoRow.className).not.toContain("text-red-600");
+  });
+
+  test("success 行含 text-emerald-600；warning 行含 text-amber-600（level 配色）", () => {
+    useWorkflowStore.getState().loadFromEvents([
+      makeEvent("node_skipped", { seq: 1, node: "n", data: { reason: "dep" } }),
+      makeEvent("node_completed", {
+        seq: 2,
+        node: "n2",
+        data: { elapsed: 1 },
+      }),
+    ]);
+    render(<LogStream />);
+    // row-0 = node_skipped (warning)，row-1 = node_completed (success)
+    expect(screen.getByTestId("log-row-0").className).toContain(
+      "text-amber-600"
+    );
+    expect(screen.getByTestId("log-row-1").className).toContain(
+      "text-emerald-600"
+    );
   });
 });
 
@@ -77,9 +198,10 @@ describe("LogStream —— auto-scroll 策略（SPEC §5.5 闭 review #36）", (
     expect(screen.queryByTestId("log-pinned")).not.toBeInTheDocument();
     expect(screen.queryByTestId("log-jump-latest")).not.toBeInTheDocument();
     // pinned=false 但 pendingJump 要等下一个新事件到达才出现
+    // 注：用 node_started（info level，进 Log，真机高频）；agent_message 已被 §P1 过滤
     act(() => {
       useWorkflowStore.getState().processEvent(
-        makeEvent("agent_message", { seq: 2 })
+        makeEvent("node_started", { seq: 2, node: "n" })
       );
     });
     expect(screen.getByTestId("log-jump-latest")).toBeInTheDocument();
@@ -92,10 +214,10 @@ describe("LogStream —— auto-scroll 策略（SPEC §5.5 闭 review #36）", (
     render(<LogStream />);
     // 上滚 → 取消 pinned
     fireEvent.wheel(screen.getByTestId("log-stream"), { deltaY: -10 });
-    // 新事件到达 → 出现按钮
+    // 新事件到达 → 出现按钮（node_started 进 Log；agent_message 已被 §P1 过滤）
     act(() => {
       useWorkflowStore.getState().processEvent(
-        makeEvent("agent_message", { seq: 2 })
+        makeEvent("node_started", { seq: 2, node: "n" })
       );
     });
     const btn = screen.getByTestId("log-jump-latest");
@@ -117,15 +239,15 @@ describe("LogStream —— auto-scroll 策略（SPEC §5.5 闭 review #36）", (
     render(<LogStream />);
     // pinned 状态保持
     expect(screen.getByTestId("log-pinned")).toBeInTheDocument();
-    // 新事件到达
+    // 新事件到达（node_started 进 Log；agent_message 已被 §P1 过滤）
     act(() => {
       useWorkflowStore.getState().processEvent(
-        makeEvent("agent_message", { seq: 5 }),
+        makeEvent("node_started", { seq: 5, node: "n" })
       );
     });
     // pinned → 不出现 jump 按钮（auto-scroll 生效）
     expect(screen.queryByTestId("log-jump-latest")).not.toBeInTheDocument();
-    // 末行被渲染（react-window overscanCount=5，5 个事件全在视口）
+    // 末行被渲染（react-window overscanCount=5，全部进视口）
     const rows = screen.getAllByTestId(/^log-row-/);
     expect(rows.length).toBeGreaterThanOrEqual(2);
   });
@@ -133,8 +255,9 @@ describe("LogStream —— auto-scroll 策略（SPEC §5.5 闭 review #36）", (
   test("pinned 状态显式通过「跳最新」按钮恢复（无自动恢复 magic）", () => {
     // 设计意图：predictable over magic —— 不用 onRowsRendered 自动恢复（在事件少、全部
     // 可见的常见场景下 stopIndex 总是末行，自动恢复会让 wheel 上滚立即被覆盖）。
+    // 用 node_started（进 Log，真机高频）；agent_message 已被 §P1 过滤，会触发 log-empty。
     const events = Array.from({ length: 8 }, (_, i) =>
-      makeEvent("agent_message", { seq: i + 1, data: { text: "x" } }),
+      makeEvent("node_started", { seq: i + 1, node: `n${i}` })
     );
     useWorkflowStore.getState().loadFromEvents(events);
     render(<LogStream />);
@@ -143,7 +266,7 @@ describe("LogStream —— auto-scroll 策略（SPEC §5.5 闭 review #36）", (
     // 新事件到达 → jump 按钮出现（pinned=false 通道）
     act(() => {
       useWorkflowStore.getState().processEvent(
-        makeEvent("agent_message", { seq: 100, data: { text: "new" } }),
+        makeEvent("node_started", { seq: 100, node: "nNew" }),
       );
     });
     expect(screen.getByTestId("log-jump-latest")).toBeInTheDocument();

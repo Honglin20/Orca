@@ -112,7 +112,6 @@ class Orchestrator:
         interrupt_handler: InterruptHandler | None = None,
         agent_tools_server: AgentToolsMcpServer | None = None,
         registry: ProcessRegistry | None = None,
-        setup_outputs: dict[str, Any] | None = None,
     ):
         self.wf = wf
         self.bus = bus
@@ -153,21 +152,11 @@ class Orchestrator:
         # RunContext 构造（frozen，node 间构造新实例累加 outputs）
         from orca.exec.context import RunContext
 
-        # phase-10 技术债回填：setup_outputs（MCP 壳主 session 替 setup agent 收集的 outputs）
-        # 包成 ``{agent_name: {"output": raw}}`` 存入 ctx.setup，render 暴露为
-        # ``{{ setup.<agent>.output.<field> }}``（与 node outputs 同形约定）。
-        # 调用方传 ``{agent: {field: val}}``（裸 outputs，见 setup_phase.validate_setup_outputs）。
-        # None / 空 → 空 dict（无 setup phase，绝大多数 workflow 不受影响）。
-        setup_ns = {
-            agent: {"output": outputs}
-            for agent, outputs in (setup_outputs or {}).items()
-        }
         self.ctx = RunContext(
             inputs=merged_inputs,
             outputs={},
             run_id=self.run_id,
             task=task,
-            setup=setup_ns,
         )
         self.task = task
         # resolve_max_iter 在 __init__ 调用（run() 之前）：非法 iterations（如 "abc"）
@@ -545,21 +534,30 @@ class Orchestrator:
     def _inputs_from_tape(tape: Tape) -> dict[str, Any]:
         """从 Tape 的 ``workflow_started.data.inputs`` 取原始 inputs（render 用）。
 
-        取不到（罕见：workflow_started 残行被截断 / 异常 tape）→ 返空 dict + warning。
-        空 inputs 下 render ``{{ inputs.x }}`` 会 UndefinedError，warning 让归因可见
-        （review §鲁棒性 建议：不静默返 {}）。
+        SPEC §3 O1a（包 P3）：薄封装 ``_replay_state_and_inputs`` 取 inputs 部分
+        （单一算法源——inputs 抽取逻辑只在 ``events/replay.py`` 一处）。``advance_step``
+        直接调 ``_replay_state_and_inputs`` 拿 ``(state, inputs)`` 单次遍历；本方法仅供
+        其他只需 inputs 的调用方（如 ``Orchestrator.from_tape`` 经 ``_bare_instance``）
+        使用，**保留对外 API 不变**。
+
+        两种「取不到」语义（与 ``_replay_state_and_inputs`` 一致，SPEC v3 §7.5）：
+          - **tape 无 workflow_started**（bootstrap 首调正常态）→ **静默返 {}**，不 WARNING。
+          - **tape 有 workflow_started 但 data.inputs 缺/坏**（真异常）→ 返 {} + WARNING
+            （render ``{{ inputs.* }}`` 可能 UndefinedError，归因可见）。
+
+        性能 trade-off（本封装副作用，**不在 O1a 范围**）：``from_tape`` 路径既调
+        ``replay_state(tape)`` 又调本封装，封装内部又做一次全 tape fold。典型 tape
+        （ws 在首位）下 ``from_tape`` 读事件量从 OLD 的 ``N + 1``（早返）变为 ``2N``
+        （两次 full fold）。``from_tape`` 仅 crash resume 调用（非热路径），trade-off
+        可接受；若 resume 成热路径，可重新引入 short-circuit 实现（DRY 轻微违反换性能）。
+
+        另一副作用：退化 tape（含未知 EventType）下，``from_tape`` 路径的 reducer
+        ``WARNING`` 会触发两次（``replay_state`` 一次 + 本封装 fold 一次）。仅 log 噪声，
+        非 correctness 问题（同一事件应用 N 次的 reducer 幂等不变）。
         """
-        for event in tape.replay():
-            if event.type == "workflow_started":
-                inputs = event.data.get("inputs")
-                if isinstance(inputs, dict):
-                    return inputs
-        logger.warning(
-            "resume：Tape %s 未找到 workflow_started.data.inputs，回退空 inputs"
-            "（后续 render {{ inputs.* }} 可能 UndefinedError）",
-            getattr(tape, "path", "?"),
-        )
-        return {}
+        from orca.events.replay import _replay_state_and_inputs
+
+        return _replay_state_and_inputs(tape)[1]
 
     @staticmethod
     def _find_last_done_node_name(tape: Tape, done_nodes: list[str]) -> str | None:
@@ -843,8 +841,6 @@ class Orchestrator:
             run_id=self.run_id,
             task=self.task,
             user_guidance=tuple(self._guidance_acc),
-            # setup phase outputs 透传（不可变，来自 __init__ 注入；render 暴露 setup 根）
-            setup=self.ctx.setup,
         )
 
     async def _dispatch(self, current: str, ctx: RunContext) -> Any:

@@ -1,0 +1,63 @@
+name: quant-ptq-sweep
+description: "对 PyTorch 模型做粗粒度 PTQ 扫描：lightweight 模式沿 4 条累积路径线性叠加技术（Smooth/QuaRot/AutoRound/纯求解派，~12 候选，line 累积曲线）；full 模式按 SDK 合法表全枚举位宽×预变换×求解×后处理组合（~45-75 候选，heatmap 矩阵）。默认 teacher-student mse 评估 + bake 最佳量化模型 state_dict。底层调 ts_quant.quantize_model + build_teacher_student_eval_fn + SmoothQuant/QuaRot 插件。"
+entry: ptq_sweeper
+
+inputs:
+  model_path:
+    type: string
+    description: "[ask] 用户 PyTorch 模型入口文件路径（可实例化 FP 模型，如 model.py）"
+    required: true
+  target_hardware:
+    type: string
+    description: "[ask] 目标硬件：cuda / npu / cpu。空→脚本 resolve_device 自动探测（cuda 优先，npu 次之，cpu 兜底）"
+    required: false
+    default: ""
+  seed:
+    type: string
+    description: "[default] 随机种子（贯穿 torch / numpy / random，复现性底座）"
+    required: false
+    default: "0"
+
+# ── 已下沉（不再 input，见 docs/specs/workflow-input-design-principle.md §5）──
+#   project_root / calib_data_ref / eval_data_ref / eval_fn_ref → Tier B（agent 读用户代码
+#     推断 + 哨兵，P4b/P5 已落地；project_root 从 model_path 向上走 infer-once）
+#   mode / bit_widths / recipes / bake → Tier C（脚本 argparse 默认，固化）
+#   output_dir → Tier C（引擎注入 $ORCA_ARTIFACTS_DIR，P8 接口）
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════
+  # 单 agent：生成 adapter.py（适配异构模型 + eval_fn/eval_loader）
+  # → 调 run_ptq_sweep.py（ts_quant.quantize_model 双 mode 全扫 +
+  # render_chart 可视化 + bake 最佳）→ 回显 JSON 摘要。
+  # ═══════════════════════════════════════════════════════════════
+  - name: ptq_sweeper
+    kind: agent
+    executor: claude
+    agent: ptq-sweeper
+    output_schema:
+      type: object
+      required: [output_dir, report_path, model_path, best_config, best_metric, candidates_evaluated, mode, metric_kind]
+      properties:
+        output_dir: {type: string}
+        report_path: {type: string}
+        model_path: {type: string}
+        baked_model_path: {type: string, description: "bake 出的最佳量化模型路径（best_quant_model.pt）；bake=false 或失败时为空串"}
+        best_config: {type: string}
+        best_metric: {type: number}
+        candidates_evaluated: {type: integer, minimum: 0}
+        mode: {type: string}
+        metric_kind: {type: string}
+      additionalProperties: false
+    routes:
+      - to: $end
+
+outputs:
+  output_dir: "{{ ptq_sweeper.output.output_dir }}"
+  report_path: "{{ ptq_sweeper.output.report_path }}"
+  model_path: "{{ ptq_sweeper.output.model_path }}"
+  baked_model_path: "{{ ptq_sweeper.output.baked_model_path }}"
+  best_config: "{{ ptq_sweeper.output.best_config }}"
+  best_metric: "{{ ptq_sweeper.output.best_metric }}"
+  candidates_evaluated: "{{ ptq_sweeper.output.candidates_evaluated }}"
+  mode: "{{ ptq_sweeper.output.mode }}"
+  metric_kind: "{{ ptq_sweeper.output.metric_kind }}"

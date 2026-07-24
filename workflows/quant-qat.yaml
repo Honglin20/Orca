@@ -1,0 +1,72 @@
+name: quant-qat
+description: "对 PyTorch 模型做量化感知训练（QAT）+ CAGE 后校正：输入 FP 模型+训练/校准数据，对比 rtn / duquantpp 两种训练态 fake-quant 方案，fake-quant 后短训恢复精度（teacher-student distillation-style QAT，可选 CAGE 后校正 W←W−lr·λ·(W−Q(W))），输出每方案训练前/后精度恢复 + 收敛曲线 + bake 最佳 q_model。与 quant-ptq-sweep（训练后量化）互补。底层调 ts_quant.prepare_trainable_fakequant_model + prepare_trainable_qat。"
+entry: qat_trainer
+
+inputs:
+  model_path:
+    type: string
+    description: "[ask] 用户 PyTorch 模型入口文件路径（可实例化 FP 模型，如 model.py）"
+    required: true
+  target_hardware:
+    type: string
+    description: "[ask] 目标硬件：cuda / npu / cpu。空→脚本 resolve_device 自动探测（cuda 优先，npu 次之，cpu 兜底）"
+    required: false
+    default: ""
+  seed:
+    type: string
+    description: "[default] 随机种子（贯穿 torch / numpy / random，复现性底座）"
+    required: false
+    default: "0"
+
+# ── 已下沉（不再 input，见 docs/specs/workflow-input-design-principle.md §5）──
+#   project_root / calib_data_ref / train_data_ref / eval_data_ref / eval_fn_ref
+#     → Tier B（agent 读用户代码推断 + 哨兵，P4b/P5 已落地；project_root 从 model_path 向上走 infer-once）
+#   lr / total_steps → Tier B（agent 读用户 train.py/config best-effort 推断；找不到脚本用 smoke 默认兜底）
+#   scheme / bit_width / cage / bake → Tier C（脚本 argparse 默认，固化）
+#   output_dir → Tier C（引擎注入 $ORCA_ARTIFACTS_DIR，P8 接口）
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════
+  # 单 agent：生成 adapter.py（适配异构模型 + train/eval loader + eval_fn）
+  # → 调 run_qat.py（ts_quant.prepare_trainable_fakequant_model 双方案 +
+  # prepare_trainable_qat + CAGE + render_chart 可视化 + bake 最佳）→ 回显 JSON 摘要。
+  # ═══════════════════════════════════════════════════════════════
+  - name: qat_trainer
+    kind: agent
+    executor: claude
+    agent: qat-trainer
+    output_schema:
+      type: object
+      required: [output_dir, report_path, model_path, best_scheme, best_metric, best_metric_before, recovery, schemes_evaluated, total_steps, cage, metric_kind]
+      properties:
+        output_dir: {type: string}
+        report_path: {type: string}
+        model_path: {type: string}
+        baked_model_path: {type: string, description: "bake 出的最佳 q_model 路径（best_qat_model.pt）；bake=false 或失败时为空串"}
+        best_scheme: {type: string}
+        best_metric: {type: number}
+        best_metric_before: {type: number}
+        recovery: {type: number}
+        schemes_evaluated:
+          type: array
+          items: {type: string}
+        total_steps: {type: integer, minimum: 0}
+        cage: {type: string}
+        metric_kind: {type: string}
+      additionalProperties: false
+    routes:
+      - to: $end
+
+outputs:
+  output_dir: "{{ qat_trainer.output.output_dir }}"
+  report_path: "{{ qat_trainer.output.report_path }}"
+  model_path: "{{ qat_trainer.output.model_path }}"
+  baked_model_path: "{{ qat_trainer.output.baked_model_path }}"
+  best_scheme: "{{ qat_trainer.output.best_scheme }}"
+  best_metric: "{{ qat_trainer.output.best_metric }}"
+  best_metric_before: "{{ qat_trainer.output.best_metric_before }}"
+  recovery: "{{ qat_trainer.output.recovery }}"
+  schemes_evaluated: "{{ qat_trainer.output.schemes_evaluated }}"
+  total_steps: "{{ qat_trainer.output.total_steps }}"
+  cage: "{{ qat_trainer.output.cage }}"
+  metric_kind: "{{ qat_trainer.output.metric_kind }}"

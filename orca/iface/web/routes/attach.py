@@ -5,8 +5,8 @@
     ``manager.attach_run`` → ``{run_id, status}``。安全 / 碰撞 / 幂等失败映射到 HTTP：
     ``PermissionError`` → 403；``FileNotFoundError`` → 404；``ValueError(run_id_collision)``
     → 409；其它 → 500 fail loud。
-  - ``GET /api/health`` → ``{app:"orca", version, pid}``。``orca open`` / 端口探测用它判定
-    「既有 server 是 orca」。
+  - ``GET /api/health`` → ``{app:"orca", version, pid, runs_dir_fp}``。``orca open`` / 端口探测
+    用它判定「既有 server 是 orca」+ ``runs_dir_fp`` 判定是否**同项目**（spec-review B1/B3）。
 
 依赖单向：本模块依赖 ``orca.iface.web.run_manager`` + ``orca.__init__.__version__`` +
 fastapi，不含编排逻辑（attach_run 才是注册入口）。
@@ -21,6 +21,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 import orca
+from orca.iface.web._identity import orca_home_fingerprint
 
 if TYPE_CHECKING:
     from orca.iface.web.run_manager import RunManager
@@ -74,15 +75,23 @@ def build_router(manager: RunManager) -> APIRouter:
 
     @router.get("/health")
     async def health() -> dict[str, Any]:
-        """health 探测（SPEC §5）：``{app:"orca", version, pid}``。
+        """health 探测（SPEC §5 + §13.1 U-2）。
 
-        ``orca open`` / 端口探测用它判定「同 port 既有 server 是 orca」（否/不可达 → 起新
-        serve）。返回 ``app`` 永远是 ``"orca"``（唯一身份），其它 server 不会返此形状。
+        身份指纹 = ``sha1(ORCA_HOME)[:12]``（D1 / U-2，身份与存储路径解耦）。
+        **兼容期同发**两字段：
+          - ``orca_home_fp``（新权威）：``sha1(ORCA_HOME)[:12]``。
+          - ``runs_dir_fp``（兼容）：值 = ``orca_home_fp``（旧 client 比对此字段，下版本删）。
+
+        client（``commands.py::_runs_dir_fp``）迁移到 ``orca_home_fp`` 后，同用户所有项目
+        共享指纹 → 单端口复用（D13）。
         """
+        fp = orca_home_fingerprint()
         return {
             "app": "orca",
             "version": orca.__version__,
             "pid": os.getpid(),
+            "orca_home_fp": fp,
+            "runs_dir_fp": fp,  # 兼容期：旧 client 比对此字段（值=orca_home_fp）
         }
 
     return router

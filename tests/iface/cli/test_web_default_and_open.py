@@ -776,8 +776,14 @@ class TestOrcaOpen:
         calls = {"spawn": 0, "attach": 0, "browser_url": None}
 
         monkeypatch.setattr(
+            "orca.iface.cli.commands._runs_dir_fp",
+            lambda rd: "MYFP",
+        )
+        monkeypatch.setattr(
             "orca.iface.cli.commands._probe_orca_server",
-            lambda host, port, timeout=0.5: {"app": "orca", "version": "x", "pid": 1},
+            lambda host, port, timeout=0.5: {
+                "app": "orca", "version": "x", "pid": 1, "runs_dir_fp": "MYFP",
+            },
         )
         monkeypatch.setattr(
             "orca.iface.cli.commands._spawn_background_serve",
@@ -855,8 +861,14 @@ class TestOrcaOpen:
         monkeypatch.chdir(tmp_path)
 
         monkeypatch.setattr(
+            "orca.iface.cli.commands._runs_dir_fp",
+            lambda rd: "MYFP",
+        )
+        monkeypatch.setattr(
             "orca.iface.cli.commands._probe_orca_server",
-            lambda host, port, timeout=0.5: {"app": "orca", "version": "x", "pid": 1},
+            lambda host, port, timeout=0.5: {
+                "app": "orca", "version": "x", "pid": 1, "runs_dir_fp": "MYFP",
+            },
         )
         monkeypatch.setattr(
             "orca.iface.cli.commands._attach_and_get_error",
@@ -892,8 +904,14 @@ class TestOrcaOpen:
         monkeypatch.chdir(tmp_path)
 
         monkeypatch.setattr(
+            "orca.iface.cli.commands._runs_dir_fp",
+            lambda rd: "MYFP",
+        )
+        monkeypatch.setattr(
             "orca.iface.cli.commands._probe_orca_server",
-            lambda host, port, timeout=0.5: {"app": "orca", "version": "x", "pid": 1},
+            lambda host, port, timeout=0.5: {
+                "app": "orca", "version": "x", "pid": 1, "runs_dir_fp": "MYFP",
+            },
         )
         monkeypatch.setattr(
             "orca.iface.cli.commands._attach_and_get_error",
@@ -908,114 +926,321 @@ class TestOrcaOpen:
         assert rc == EXIT_OK
 
 
+# ── orca open 项目感知复用（spec-review B1/B2/B3，SPEC web-attach §5a）─────────
+
+
+def _write_min_tape(runs_dir: Path, run_id: str) -> Path:
+    """写最小合法 tape（与 TestOrcaOpen._write_tape 同形态，供项目感知测试用）。"""
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    path = runs_dir / f"{run_id}.jsonl"
+    path.write_text(
+        '{"seq":1,"type":"workflow_started","timestamp":1.0,"data":'
+        '{"run_id":"RID","workflow_name":"wf","inputs":{},'
+        '"topology":{"a":{"to":["$end"]}}}}\n'
+        '{"seq":2,"type":"workflow_completed","timestamp":2.0,"data":{}}\n',
+        encoding="utf-8",
+    )
+    return path
+
+
+class TestOpenProjectAwareReuse:
+    """``orca open`` 跨项目端口占用：项目指纹复用 + registry + 绝对路径（SPEC §5a）。"""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_orca_home(self, tmp_path, monkeypatch):
+        """SPEC §13 D6/M-7：端口登记上移到 ``~/.orca/.orca-web.json``，需隔离 ORCA_HOME
+        以免污染真实用户全局登记。"""
+        home = tmp_path / "orca-home"
+        home.mkdir(parents=True)
+        monkeypatch.setenv("ORCA_HOME", str(home))
+
+    def test_health_is_my_project_logic(self):
+        """``_health_is_my_project``：fp 匹配→True；缺 fp（旧 server）/ 非 orca → False。"""
+        from orca.iface.cli.commands import _health_is_my_project
+
+        assert _health_is_my_project(
+            {"app": "orca", "version": "x", "pid": 1, "runs_dir_fp": "MYFP"}, "MYFP",
+        ) is True
+        # 缺 runs_dir_fp（旧 server）→ foreign
+        assert _health_is_my_project(
+            {"app": "orca", "version": "x", "pid": 1}, "MYFP",
+        ) is False
+        # fp 不匹配 → foreign
+        assert _health_is_my_project(
+            {"app": "orca", "version": "x", "pid": 1, "runs_dir_fp": "OTHER"}, "MYFP",
+        ) is False
+        # 非 orca / None → foreign
+        assert _health_is_my_project(None, "MYFP") is False
+
+    def test_open_foreign_project_server_spawns_new(self, tmp_path, monkeypatch):
+        """7428 是别项目 orca（fp 不匹配）→ 不复用；空闲端口起新 server + 登记 + attach 绝对路径。"""
+        runs_dir = tmp_path / "runs"
+        tape = _write_min_tape(runs_dir, "run-foreign")
+        monkeypatch.chdir(tmp_path)
+
+        captured = {"spawn_port": None, "attach_tape": None, "attach_port": None}
+        monkeypatch.setattr("orca.iface.cli.commands._runs_dir_fp", lambda rd: "MYFP")
+        # 7428 上是别项目 server
+        monkeypatch.setattr(
+            "orca.iface.cli.commands._probe_orca_server",
+            lambda host, port, timeout=0.5: {
+                "app": "orca", "version": "x", "pid": 1, "runs_dir_fp": "OTHER",
+            },
+        )
+        monkeypatch.setattr("orca.iface.cli.commands._is_port_free", lambda host, port: False)
+        monkeypatch.setattr(
+            "orca.iface.cli.commands._find_free_port",
+            lambda preferred=None, bind_host="127.0.0.1": 12345,
+        )
+
+        def _spawn(host, port):
+            captured["spawn_port"] = port
+            return True  # bool（H1：_spawn_background_serve 仍返 bool）
+
+        monkeypatch.setattr("orca.iface.cli.commands._spawn_background_serve", _spawn)
+        monkeypatch.setattr("orca.iface.cli.commands._wait_for_health", lambda host, port, *, timeout: True)
+
+        def _attach(host, port, tape_arg, run_id):
+            captured["attach_tape"] = tape_arg
+            captured["attach_port"] = port
+            return None
+
+        monkeypatch.setattr("orca.iface.cli.commands._attach_and_get_error", _attach)
+        monkeypatch.setattr("orca.iface.cli.commands._open_browser_or_print", lambda url: None)
+
+        rc = runner.invoke(app, ["open", "run-foreign"]).exit_code
+        assert rc == EXIT_OK
+        assert captured["spawn_port"] == 12345          # 起新 server
+        assert captured["attach_port"] == 12345
+        # 绝对路径化（回归①）：attach 收到的是 resolved 绝对路径
+        assert captured["attach_tape"] == str(tape.resolve())
+        assert Path(captured["attach_tape"]).is_absolute()
+
+    def test_open_reuses_registry_port_when_default_foreign(self, tmp_path, monkeypatch):
+        """7428 foreign + registry 登记本项目端口 → 复用该端口，不 spawn。"""
+        from orca.iface.cli.web_registry import write_registry
+
+        runs_dir = tmp_path / "runs"
+        _write_min_tape(runs_dir, "run-reg")
+        monkeypatch.chdir(tmp_path)
+        # 预写登记：本项目 server 在 5555
+        write_registry(runs_dir, port=5555, runs_dir_fp="MYFP")
+
+        captured = {"spawn": 0, "attach_port": None}
+        monkeypatch.setattr("orca.iface.cli.commands._runs_dir_fp", lambda rd: "MYFP")
+
+        # probe 按端口分流：默认端口→别项目；5555→本项目
+        def _probe(host, port, timeout=0.5):
+            if port == 5555:
+                return {"app": "orca", "version": "x", "pid": 1, "runs_dir_fp": "MYFP"}
+            return {"app": "orca", "version": "x", "pid": 1, "runs_dir_fp": "OTHER"}
+
+        monkeypatch.setattr("orca.iface.cli.commands._probe_orca_server", _probe)
+        monkeypatch.setattr(
+            "orca.iface.cli.commands._spawn_background_serve",
+            lambda host, port: captured.__setitem__("spawn", captured["spawn"] + 1),
+        )
+
+        def _attach(host, port, tape_arg, run_id):
+            captured["attach_port"] = port
+            return None
+
+        monkeypatch.setattr("orca.iface.cli.commands._attach_and_get_error", _attach)
+        monkeypatch.setattr("orca.iface.cli.commands._open_browser_or_print", lambda url: None)
+
+        rc = runner.invoke(app, ["open", "run-reg"]).exit_code
+        assert rc == EXIT_OK
+        assert captured["spawn"] == 0                 # 复用 registry 端口，不起 server
+        assert captured["attach_port"] == 5555
+
+    def test_open_sends_absolute_tape_path_on_reuse(self, tmp_path, monkeypatch):
+        """回归①（独立断言）：复用分支 attach 收到的 tape 是 resolved 绝对路径。"""
+        runs_dir = tmp_path / "runs"
+        tape = _write_min_tape(runs_dir, "run-abs")
+        monkeypatch.chdir(tmp_path)
+
+        captured = {"tape": None}
+        monkeypatch.setattr("orca.iface.cli.commands._runs_dir_fp", lambda rd: "MYFP")
+        monkeypatch.setattr(
+            "orca.iface.cli.commands._probe_orca_server",
+            lambda host, port, timeout=0.5: {
+                "app": "orca", "version": "x", "pid": 1, "runs_dir_fp": "MYFP",
+            },
+        )
+
+        def _attach(host, port, tape_arg, run_id):
+            captured["tape"] = tape_arg
+            return None
+
+        monkeypatch.setattr("orca.iface.cli.commands._attach_and_get_error", _attach)
+        monkeypatch.setattr("orca.iface.cli.commands._open_browser_or_print", lambda url: None)
+
+        rc = runner.invoke(app, ["open", "run-abs"]).exit_code
+        assert rc == EXIT_OK
+        assert captured["tape"] == str(tape.resolve())
+        assert Path(captured["tape"]).is_absolute()
+
+    def test_open_explicit_port_foreign_orca_exits_two(self, tmp_path, monkeypatch):
+        """显式 --port 被别项目 orca 占 → exit 2，不 attach / 不 spawn。"""
+        runs_dir = tmp_path / "runs"
+        _write_min_tape(runs_dir, "run-x")
+        monkeypatch.chdir(tmp_path)
+
+        calls = {"attach": 0, "spawn": 0}
+        monkeypatch.setattr("orca.iface.cli.commands._runs_dir_fp", lambda rd: "MYFP")
+        monkeypatch.setattr(
+            "orca.iface.cli.commands._probe_orca_server",
+            lambda host, port, timeout=0.5: {
+                "app": "orca", "version": "x", "pid": 1, "runs_dir_fp": "OTHER",
+            },
+        )
+        monkeypatch.setattr("orca.iface.cli.commands._is_port_free", lambda host, port: False)
+        monkeypatch.setattr(
+            "orca.iface.cli.commands._spawn_background_serve",
+            lambda host, port: calls.__setitem__("spawn", calls["spawn"] + 1) or True,
+        )
+        monkeypatch.setattr(
+            "orca.iface.cli.commands._attach_and_get_error",
+            lambda host, port, tape, run_id: calls.__setitem__("attach", calls["attach"] + 1),
+        )
+        rc = runner.invoke(app, ["open", "run-x", "--port", "9999"]).exit_code
+        assert rc == EXIT_ARG_OR_VALIDATE
+        assert calls["attach"] == 0
+        assert calls["spawn"] == 0
+
+    def test_open_register_failure_loud_warn_does_not_block(
+        self, tmp_path, monkeypatch,
+    ):
+        """spec-review B4：registry 写失败 → loud stderr warn（含 port），但本次 open 仍 attach 成功。
+
+        守护「server 已起 + 登记写失败 → 下次重复 spawn」的关键防御：warn 必须**可见**（fail loud
+        精神）且**不阻断**本次 open（attach 仍跑、exit 0）。回归破坏会静默 → 进程泄漏。
+        """
+        runs_dir = tmp_path / "runs"
+        _write_min_tape(runs_dir, "run-regfail")
+        monkeypatch.chdir(tmp_path)
+
+        attach_calls = {"n": 0}
+        monkeypatch.setattr("orca.iface.cli.commands._runs_dir_fp", lambda rd: "MYFP")
+        monkeypatch.setattr(
+            "orca.iface.cli.commands._probe_orca_server",
+            lambda host, port, timeout=0.5: {
+                "app": "orca", "version": "x", "pid": 1, "runs_dir_fp": "OTHER",
+            },
+        )
+        monkeypatch.setattr("orca.iface.cli.commands._is_port_free", lambda host, port: False)
+        monkeypatch.setattr(
+            "orca.iface.cli.commands._find_free_port",
+            lambda preferred=None, bind_host="127.0.0.1": 12345,
+        )
+        monkeypatch.setattr("orca.iface.cli.commands._spawn_background_serve", lambda host, port: True)
+        monkeypatch.setattr(
+            "orca.iface.cli.commands._wait_for_health", lambda host, port, *, timeout: True,
+        )
+
+        def _raise(*a, **kw):
+            raise OSError("disk full")
+
+        # SPEC §13.2 B-6：spawn 路径的写回走 ``_write_orca_home_registry_unlocked``
+        # （exclusive_port_decision 临界区内调用，避免嵌套 flock 死锁）。
+        monkeypatch.setattr(
+            "orca.iface.cli.web_registry._write_orca_home_registry_unlocked", _raise,
+        )
+        # 旧 write_registry 也 patch（兼容 / 外部 API 路径）。
+        monkeypatch.setattr("orca.iface.cli.web_registry.write_registry", _raise)
+        monkeypatch.setattr(
+            "orca.iface.cli.commands._attach_and_get_error",
+            lambda host, port, tape, run_id: attach_calls.__setitem__("n", attach_calls["n"] + 1) or None,
+        )
+        monkeypatch.setattr("orca.iface.cli.commands._open_browser_or_print", lambda url: None)
+
+        # CliRunner 默认 mix_stderr=True → typer.echo(err=True) 进 result.output。
+        result = runner.invoke(app, ["open", "run-regfail"])
+        assert result.exit_code == EXIT_OK         # 不阻断
+        assert attach_calls["n"] == 1              # attach 仍成功
+        assert "registry 写失败" in result.output  # loud warn 可见
+        assert "12345" in result.output            # 含 port + kill 提示
+
+    def test_open_stale_registry_falls_through_to_spawn(self, tmp_path, monkeypatch):
+        """registry 登记端口但 probe 在其上返 foreign（陈旧）→ 不复用，落 2c spawn 新端口。
+
+        守护「探测权威、registry 仅 hint」的自愈契约：陈旧 registry 不污染复用判定，否则会
+        复用一个 foreign / 死掉的 server → attach 失败或挂错。
+        """
+        from orca.iface.cli.web_registry import write_registry
+
+        runs_dir = tmp_path / "runs"
+        _write_min_tape(runs_dir, "run-stale")
+        monkeypatch.chdir(tmp_path)
+        write_registry(runs_dir, port=5555, runs_dir_fp="MYFP")  # 登记了，但 5555 实为 foreign
+
+        captured = {"spawn_port": None, "attach_port": None}
+        monkeypatch.setattr("orca.iface.cli.commands._runs_dir_fp", lambda rd: "MYFP")
+
+        # 所有端口（含登记的 5555）都返 foreign → registry 陈旧
+        monkeypatch.setattr(
+            "orca.iface.cli.commands._probe_orca_server",
+            lambda host, port, timeout=0.5: {
+                "app": "orca", "version": "x", "pid": 1, "runs_dir_fp": "OTHER",
+            },
+        )
+        monkeypatch.setattr("orca.iface.cli.commands._is_port_free", lambda host, port: False)
+        monkeypatch.setattr(
+            "orca.iface.cli.commands._find_free_port",
+            lambda preferred=None, bind_host="127.0.0.1": 12345,
+        )
+        monkeypatch.setattr(
+            "orca.iface.cli.commands._spawn_background_serve",
+            lambda host, port: captured.__setitem__("spawn_port", port) or True,
+        )
+        monkeypatch.setattr(
+            "orca.iface.cli.commands._wait_for_health", lambda host, port, *, timeout: True,
+        )
+        monkeypatch.setattr(
+            "orca.iface.cli.commands._attach_and_get_error",
+            lambda host, port, tape, run_id: captured.__setitem__("attach_port", port) or None,
+        )
+        monkeypatch.setattr("orca.iface.cli.commands._open_browser_or_print", lambda url: None)
+
+        rc = runner.invoke(app, ["open", "run-stale"]).exit_code
+        assert rc == EXIT_OK
+        assert captured["spawn_port"] == 12345     # 陈旧 registry 未被复用 → 落 spawn
+        assert captured["attach_port"] == 12345
+
+
+# ── 项目身份单点一致性 + runs_dir 单源守门（spec-review B2/B3）────────────────
+
+
+def test_fingerprint_single_point_consistency():
+    """SPEC §13 D1 / U-2：``commands._runs_dir_fp`` 现在用 ``orca_home_fingerprint``
+    （身份解耦：同用户所有项目共享指纹 → 单端口）。函数名保留（``_runs_dir_fp``）以最小化
+    改动面；参数被忽略（兼容签名）。
+    """
+    from orca.iface.cli.commands import _runs_dir_fp
+    from orca.iface.web._identity import orca_home_fingerprint
+
+    expected = orca_home_fingerprint()
+    for rd in [Path("runs"), Path("/some/abs/path/runs"), Path("../other/runs")]:
+        assert _runs_dir_fp(rd) == expected
+
+
+def test_default_runs_dir_single_source():
+    """spec-review B2：client ``_default_runs_dir()`` 与 ``RunManager`` 默认 runs_dir 同源（防漂移）。"""
+    from orca.iface.cli.commands import _default_runs_dir
+    from orca.iface.web.run_manager import RunManager
+
+    client_runs_dir = _default_runs_dir()
+    manager_runs_dir = RunManager()._runs_dir
+    assert client_runs_dir.name == manager_runs_dir.name == "runs"
+
+
 # ── /orca open slash command（signature-contract，AC7）─────────────────────
-
-
-PLUGIN_TS = (
-    Path(__file__).resolve().parents[3]
-    / "orca" / "iface" / "in_session" / "templates" / "opencode" / "orca.ts"
-)
-
-
-class TestOrcaOpenSlashContract:
-    """``/orca open <run_id>`` slash 命令在 plugin 端的契约守门（SPEC §5 / D-v7-1）。"""
-
-    def test_plugin_has_open_case_in_buildCliArgs(self):
-        """``buildCliArgs`` 含 ``open`` case（哑传输：args → argv）。"""
-        text = PLUGIN_TS.read_text(encoding="utf-8")
-        assert 'sub === "open"' in text, "buildCliArgs 未加 open case"
-
-    def test_plugin_has_open_case_in_rewriteText(self):
-        """``rewriteText`` 含 ``open`` case（ack 信封）。"""
-        text = PLUGIN_TS.read_text(encoding="utf-8")
-        assert 'sub === "open"' in text
-
-    def test_plugin_has_spawnTopLevelCli_for_open(self):
-        """``open`` 走 ``spawnTopLevelCli``（``orca open``，非 ``orca in-session open``）。
-
-        找 dispatch 处的 ``sub === "open" ? spawnTopLevelCli : spawnCli`` 字面序列
-        （M3 闭环：两个独立 grep 不足，需字面序列断言证明 routing）。
-        """
-        text = PLUGIN_TS.read_text(encoding="utf-8")
-        assert "spawnTopLevelCli" in text
-        # 找 dispatch 三元表达式（``sub === "open" ? spawnTopLevelCli``）。
-        # 注意有多个 ``sub === "open"``（buildCliArgs / rewriteText / dispatch），
-        # dispatch 形态是 ``sub === "open"\\n ? spawnTopLevelCli``。
-        assert 'sub === "open"' in text
-        assert "? spawnTopLevelCli" in text, (
-            "dispatch 处未找到 `sub === 'open' ? spawnTopLevelCli` 三元路由"
-        )
-
-    def test_plugin_open_dispatch_is_ternary_not_if_block(self):
-        """更严格的 routing 断言：``sub === "open" ? spawnTopLevelCli(cliArgs) : spawnCli(cliArgs)``
-        三元表达式（M3 闭环）。"""
-        text = PLUGIN_TS.read_text(encoding="utf-8")
-        # 找三元表达式特征序列。
-        # 实际形态（orca.ts:290-292）：
-        #   const reply = sub === "open"
-        #     ? spawnTopLevelCli(cliArgs)
-        #     : spawnCli(cliArgs)
-        assert (
-            'sub === "open"' in text and "? spawnTopLevelCli" in text
-        ), "open dispatch 必须是三元路由 ? spawnTopLevelCli，非 if 块"
-
-    def test_plugin_open_case_returns_null_on_empty_args(self):
-        """``buildCliArgs("open", "", ...)`` → null（缺 run_id 时 plugin 走 cannot dispatch 错误回显）。
-
-        M5 闭环：守护"缺关键 argv → fail loud"分支。
-        """
-        text = PLUGIN_TS.read_text(encoding="utf-8")
-        # 找 open case 区域。
-        idx = text.find('sub === "open"')
-        assert idx > 0
-        # 在 buildCliArgs 函数内的 open case 应有 `if (!rid) return null`。
-        build_args_idx = text.find("function buildCliArgs")
-        assert build_args_idx > 0
-        # buildCliArgs 区域从函数头到下一个 export default。
-        end_idx = text.find("export default", build_args_idx)
-        build_region = text[build_args_idx:end_idx]
-        # open case 在 build_region 内。
-        open_idx = build_region.find('sub === "open"')
-        assert open_idx > 0, "buildCliArgs 内无 open case"
-        # 取 open case 后 300 字符，断言含 if (!rid) return null。
-        region = build_region[open_idx:open_idx + 300]
-        assert "if (!rid) return null" in region, (
-            f"open case 缺 `if (!rid) return null` 守护（M5）：{region!r}"
-        )
-
-    def test_plugin_open_returns_argv_orca_open(self):
-        """``open`` case 返回 ``["open", run_id]``（非 ``in-session`` argv 前缀）。"""
-        text = PLUGIN_TS.read_text(encoding="utf-8")
-        # buildCliArgs 内 open case：return ["open", rid]
-        assert 'return ["open", rid]' in text
-
-    def test_plugin_open_no_business_logic(self):
-        """``open`` 分支零 Orca 业务逻辑（grep 禁词守门，D-v7-1 扩展到 open 子命令）。"""
-        text = PLUGIN_TS.read_text(encoding="utf-8")
-        # 取 open case 区域粗筛（不进 advance_step / router / tape.append / attach_run）。
-        # 整 plugin 已守禁词列表（既有 test_plugin_has_no_orca_business_logic 覆盖），
-        # 这里只断言 open case 不引入新违规：open case 区域无 attach_run / spawn_serve。
-        # 找 open case 起止。
-        idx = text.find('sub === "open"')
-        assert idx > 0
-        # 取该行向下 300 字符区域。
-        region = text[idx:idx + 500]
-        for forbidden in ["attach_run", "_spawn_background_serve", "resolve_tape_path"]:
-            assert forbidden not in region, (
-                f"open case 含禁词 {forbidden!r}（违反 D-v7-1：plugin 零业务逻辑）"
-            )
-
-    def test_plugin_no_in_session_prefix_for_open(self):
-        """``spawnTopLevelCli`` 用 ``["orca", ...args]``（不是 ``orca in-session``）。"""
-        text = PLUGIN_TS.read_text(encoding="utf-8")
-        # 找 spawnTopLevelCli 函数体。
-        idx = text.find("function spawnTopLevelCli")
-        assert idx > 0
-        region = text[idx:idx + 600]
-        assert '"orca"' in region or "'orca'" in region
-        # 不应出现 in-session argv 前缀
-        assert '"in-session"' not in region
-        assert "'in-session'" not in region
+#
+# **v5 §8 step 4**：``/orca open <run_id>`` 的 plugin 侧 marker 派发（transform →
+# spawnTopLevelCli(["open", rid])）随 transform 整删下线——入口统一切到 orca skill。
+# 旧的 ``TestOrcaOpenSlashContract``（plugin-side marker dispatch 守门）已无承载对象，
+# 整删。``orca open`` CLI 命令本身仍在（见 ``test_web_open_command_*`` + ``TestIronLaws``），
+# 由 CLI 行为契约覆盖（非 plugin TS 源码 grep）。
 
 
 # ── Iron laws（铁律守门，SPEC §1 / §8 AC12-13）──────────────────────────────
@@ -1042,7 +1267,12 @@ class TestIronLaws:
         )
         text = rm_path.read_text(encoding="utf-8")
         # 单 _runs dict 声明（无新增并行 dict）。
+        # 允许例外：``_persistent_cache_by_runs_dir``（SPEC §13.3 P0 派生缓存，cache 非 index，
+        # 不违反「单一 registry」铁律）。
         declarations = re.findall(r"self\._\w*runs\w*\s*:\s*dict", text)
+        declarations = [
+            d for d in declarations if "_persistent_cache_by_runs_dir" not in d
+        ]
         assert len(declarations) <= 1, f"发现多个 runs dict 声明：{declarations}"
 
     def test_attacher_no_tape_resume_true(self):
@@ -1072,3 +1302,24 @@ class TestIronLaws:
         assert not re.search(r"Tape\([^)]*resume\s*=\s*True", code_text), (
             "tape_reader 实际调用 Tape(resume=True) 违反 read-only 铁律 6"
         )
+
+    def test_web_does_not_import_cli(self):
+        """spec-review F10：``iface.web`` 不得反向 import ``iface.cli``（依赖单向铁律 5）。
+
+        ``orca/iface/web/_identity.py`` 是 stdlib-only 共享模块——**cli lazy import 它**
+        （commands.py 的 ``_runs_dir_fp``），不是 web import cli。本守门防未来有人把 cli 依赖
+        偷偷塞进 web 层（会破 schema/run/exec/events/iface 单向依赖）。
+        """
+        from pathlib import Path
+
+        web_dir = (
+            Path(__file__).resolve().parents[3] / "orca" / "iface" / "web"
+        )
+        violations: list[str] = []
+        for py in web_dir.rglob("*.py"):
+            for ln in py.read_text(encoding="utf-8").splitlines():
+                s = ln.lstrip()
+                # 只查实际 import 语句（排除 docstring / 注释里的 prose 提及）。
+                if (s.startswith("import ") or s.startswith("from ")) and "orca.iface.cli" in s:
+                    violations.append(f"{py.relative_to(web_dir)}: {s}")
+        assert not violations, f"web 反向 import cli（违依赖单向）：{violations}"

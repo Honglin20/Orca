@@ -15,7 +15,7 @@
 
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class InputDef(BaseModel):
@@ -138,6 +138,11 @@ class AgentNode(Node):
     output_schema: dict | None = None  # None=自由文本；{...}=结构化 JSON schema
     retry: RetryPolicy | None = None  # None=不重试（向后兼容）；见 RetryPolicy
     validator: ValidatorConfig | None = None  # None=不校验（向后兼容）；见 ValidatorConfig
+    # 【node-memory】True = 引擎在节点完成后把 output 覆盖写到
+    # ``<project_root>/.orca/memory/<wf.name>/<node.name>.md``，下次渲染 prompt 时
+    # 注入「上一轮记忆 + 复用协议」让 agent 自决复用/重跑。opt-in（默认 False）。
+    # 仅 in-session shell 路径生效（scope：SPEC §0.9）；派生缓存（tape 才是真相源）。
+    memory: bool = False
 
 
 class ScriptNode(Node):
@@ -276,19 +281,34 @@ class Workflow(BaseModel):
     所有结构合法性（entry 存在且非组、name 唯一含组名、routes 引用合法、parallel 组
     结构、死锁检测）由 compile/ 层校验。
 
-    phase-10 v4：``setup`` 是 setup phase（可选，空 list = 无 setup）。三壳消费范式不同
-    （TUI/Web 实跑 setup agent + ask_user/gate；MCP 主 session 替 setup agent 跑，结果
-    作为 ``setup_outputs`` 传给 ``start_workflow`` 跳过 setup phase 实际执行）。
-    execute phase（``nodes``）的 agent **不配 ask_user/gate 工具**（compile validator 强制）。
+    execute phase（``nodes``）的 agent **不配 ask_user/gate 工具**（compile validator 强制，
+    铁律 7：execute phase 永不中断）。setup phase 已在 in-session v5 §6.1 删除——主 session
+    经 ``orca next --output`` 直接产 output，旧 ``setup:`` 段由 ``extra="forbid"`` 拒绝（fail loud）。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     name: str
     description: str = ""
-    setup: list[AgentNode] = []  # 【phase-10 v4】setup phase（可选；空 list = 无 setup）
     entry: str  # 起始 node 名（显式，唯一入口；不能是 parallel 组）
     inputs: dict[str, InputDef] = {}  # 工作流输入声明（可选）
     nodes: list[AnnotatedNode]  # execute phase 节点（discriminated union）
     parallel: list[ParallelGroup] = []  # 静态并行组（顶层独立列表）
     outputs: dict[str, str] = {}  # 最终输出映射 {key: "{{ node.output.field }}"}
+    requires: list[str] = []  # 运行时依赖声明（plan sprightly-questing-donut §1.4）。含
+    # ``"knowledge_base"`` → run 启动预检 KB 存在（``resolve_kb_dir`` 非空），缺则 fail-loud
+    # （清晰指引 + searched 路径），不进 setup agent。默认空 = 无外部依赖。
+
+    @field_validator("requires")
+    @classmethod
+    def _requires_whitelist(cls, v: list[str]) -> list[str]:
+        """plan §1.4：requires 白名单校验。typo（如 ``knowlegde_base``）会被 pydantic 默默接受、
+        precheck 永不触发——fail-loud 承诺被静默禁用。未知 token → 校验失败（fail loud）。
+        """
+        known = {"knowledge_base"}
+        unknown = [t for t in v if t not in known]
+        if unknown:
+            raise ValueError(
+                f"requires 含未知 token {unknown}；已知：{sorted(known)}（typo 会让预检静默失效）"
+            )
+        return v

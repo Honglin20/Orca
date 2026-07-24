@@ -6,7 +6,7 @@
     （spec §2.4 Conductor Log View 风格 + EVENT_LEVEL 表派生）
   - Header stats 渲染（done/total/awaiting）
   - ChartPanel：同 label+title 幂等替换 / label 分组 / all_charts / 确定性 fold
-  - ChartCanvas：7 chart_type 分派 / braille / 降级 / fail loud
+  - ChartCanvas：8 chart_type 分派 / braille / 降级 / fail loud
   - NodeDetail：6 kind 永不空白 / ● 徽标 / executor-agnostic 流式
 """
 
@@ -1066,11 +1066,11 @@ class TestChartPanel:
         run_async(scenario())
 
 
-# ── ChartCanvas（分派 / braille / 降级 / fail loud）SPEC §1.2 §6.1 §6.4 ─────
+# ── ChartCanvas（分派 / braille / 降级 / fail loud；8 chart_type）SPEC §1.2 §6.1 §6.4 ─────
 
 
 class TestChartCanvas:
-    """ChartCanvas：7 chart_type 分派 + braille + 降级 + fail loud。"""
+    """ChartCanvas：8 chart_type 分派 + braille + 降级 + fail loud。"""
 
     @pytest.mark.parametrize("ctype", ["line", "bar", "area", "scatter", "pareto"])
     def test_plotext_types_render_braille(self, ctype):
@@ -1127,6 +1127,28 @@ class TestChartCanvas:
                 assert "见 Web" in text or "radar" in text.lower()
         run_async(scenario())
 
+    def test_heatmap_degrades_to_table_with_hint(self):
+        """heatmap → DataTable 降级 +「见 Web」提示（终端色阶矩阵不可读，与 radar 同策略）。"""
+        canvas = ChartCanvas()
+
+        async def scenario():
+            async with _Harness([canvas]).run_test() as pilot:
+                canvas.render_payload({
+                    "chart_type": "heatmap", "label": "L", "title": "T",
+                    "x": "bitwidth", "y": "recipe", "value": "accuracy",
+                    "data": [
+                        {"recipe": "smooth", "bitwidth": "w4", "accuracy": 0.92},
+                    ],
+                })
+                await pilot.pause()
+                await pilot.pause()
+                text = getattr(canvas, "_Static__content", "")
+                # 提示含 heatmap + 见 Web；DataTable 渲染了 cell value
+                assert "heatmap" in text.lower()
+                assert "见 Web" in text
+                assert "0.92" in text or "0.920" in text
+        run_async(scenario())
+
     def test_unknown_chart_type_fail_loud(self):
         """SPEC §1.2 / 铁律 12：未知 chart_type → fail loud（不静默崩）。"""
         canvas = ChartCanvas()
@@ -1140,8 +1162,189 @@ class TestChartCanvas:
                 assert "未知 chart_type" in text
         run_async(scenario())
 
+
+# ── ChartCanvas 轴标签 / caption（render_chart 新字段，2026-07-21）────────────
+
+
+class TestChartCanvasAxisLabels:
+    """ChartCanvas 轴标签 / caption：x_label/y_label → plotext xlabel/ylabel；caption → 图下小字。"""
+
+    def test_plotext_xlabel_ylabel_from_explicit_labels(self):
+        """x_label/y_label 非空 → rendered text 含 x_label/y_label 文案（plotext xlabel/ychannel）。
+
+        意图：钉死轴标签透传——agent 传人话 ``x_label`` 后终端渲染应见该文案而非字段名。
+        """
+        canvas = ChartCanvas()
+
+        async def scenario():
+            async with _Harness([canvas]).run_test() as pilot:
+                canvas.render_payload({
+                    "chart_type": "line", "label": "L", "title": "T",
+                    "x": "index", "y": "latency",
+                    "x_label": "候选序号(账本行)",
+                    "y_label": "时延 (ms)",
+                    "data": [{"index": i, "latency": (i - 3) ** 2} for i in range(8)],
+                })
+                await pilot.pause()
+                await pilot.pause()
+                text = canvas.last_rendered
+                # plotext 把 xlabel 渲染在底部、ylabel 渲染在左侧（旋转）。
+                assert "候选序号(账本行)" in text
+                assert "时延 (ms)" in text
+        run_async(scenario())
+
+    def test_plotext_falls_back_to_field_name_when_label_absent(self):
+        """x_label/y_label 空 → rendered text 含字段名（``x``/``y``），向后兼容。"""
+        canvas = ChartCanvas()
+
+        async def scenario():
+            async with _Harness([canvas]).run_test() as pilot:
+                canvas.render_payload({
+                    "chart_type": "line", "label": "L", "title": "T",
+                    "x": "index", "y": "latency",
+                    # 不传 x_label/y_label
+                    "data": [{"index": i, "latency": (i - 3) ** 2} for i in range(8)],
+                })
+                await pilot.pause()
+                await pilot.pause()
+                text = canvas.last_rendered
+                # 回退到字段名
+                assert "index" in text
+                assert "latency" in text
+        run_async(scenario())
+
+    def test_plotext_caption_rendered_below_chart(self):
+        """caption 非空 → rendered text 含 caption 文案（图下小字说明）。"""
+        canvas = ChartCanvas()
+
+        async def scenario():
+            async with _Harness([canvas]).run_test() as pilot:
+                canvas.render_payload({
+                    "chart_type": "bar", "label": "L", "title": "T",
+                    "x": "x", "y": "y",
+                    "caption": "每轮 champion 的实测时延变化；★=达标",
+                    "data": [{"x": i, "y": (i - 3) ** 2} for i in range(8)],
+                })
+                await pilot.pause()
+                await pilot.pause()
+                text = canvas.last_rendered
+                assert "★=达标" in text
+        run_async(scenario())
+
+    def test_plotext_caption_absent_omitted_from_text(self):
+        """caption 不传 → rendered text 不含图下说明（向后兼容旧 tape）。"""
+        canvas = ChartCanvas()
+
+        async def scenario():
+            async with _Harness([canvas]).run_test() as pilot:
+                canvas.render_payload({
+                    "chart_type": "line", "label": "L", "title": "T",
+                    "x": "x", "y": "y",
+                    "data": [{"x": i, "y": (i - 3) ** 2} for i in range(8)],
+                })
+                await pilot.pause()
+                await pilot.pause()
+                text = canvas.last_rendered
+                # 不含 caption 标记（无额外缩进行）
+                assert "★" not in text
+        run_async(scenario())
+
+    def test_table_caption_appended(self):
+        """table + caption → 文本表格后追加 caption 行。"""
+        canvas = ChartCanvas()
+
+        async def scenario():
+            async with _Harness([canvas]).run_test() as pilot:
+                canvas.render_payload({
+                    "chart_type": "table", "label": "L", "title": "T",
+                    "columns": ["a", "b"],
+                    "caption": "table caption 说明",
+                    "data": [{"a": 1, "b": 2}],
+                })
+                await pilot.pause()
+                await pilot.pause()
+                text = getattr(canvas, "_Static__content", "")
+                assert "table caption 说明" in text
+        run_async(scenario())
+
+    def test_table_empty_data_caption_appended(self):
+        """table + 空 data + caption → 「（无数据）」提示 + caption 都渲染（防 caption 静默丢）。
+
+        意图：钉死 ``_render_table`` 空数据分支也保留 caption（与 plotext 路径一致，
+        review 二审 🔴 必修）。
+        """
+        canvas = ChartCanvas()
+
+        async def scenario():
+            async with _Harness([canvas]).run_test() as pilot:
+                canvas.render_payload({
+                    "chart_type": "table", "label": "L", "title": "T",
+                    "columns": ["a", "b"],
+                    "caption": "空数据时也保留 caption",
+                    "data": [],
+                })
+                await pilot.pause()
+                await pilot.pause()
+                text = getattr(canvas, "_Static__content", "")
+                assert "（无数据）" in text
+                assert "空数据时也保留 caption" in text
+        run_async(scenario())
+
+    def test_plotext_empty_data_caption_appended(self):
+        """line + 空 data + caption → 「（无数据）」+ caption 都渲染（plotext 路径同样保留 caption）。"""
+        canvas = ChartCanvas()
+
+        async def scenario():
+            async with _Harness([canvas]).run_test() as pilot:
+                canvas.render_payload({
+                    "chart_type": "line", "label": "L", "title": "T",
+                    "x": "x", "y": "y",
+                    "caption": "空数据 caption 保留",
+                    "data": [],
+                })
+                await pilot.pause()
+                await pilot.pause()
+                text = canvas.last_rendered
+                assert "（无数据）" in text
+                assert "空数据 caption 保留" in text
+        run_async(scenario())
+
+    def test_heatmap_degraded_preserves_axis_labels_in_hint(self):
+        """heatmap + x_label/y_label → 终端降级 hint 含轴语义（防 axis 标签静默丢）。
+
+        意图：TUI heatmap 走 DataTable 降级（色阶矩阵在文本态不可读），x_label/y_label
+        无独立渲染位 → 拼进 hint 保语义（review 二审 🔴 必修）。
+        """
+        canvas = ChartCanvas()
+
+        async def scenario():
+            async with _Harness([canvas]).run_test() as pilot:
+                canvas.render_payload({
+                    "chart_type": "heatmap", "label": "L", "title": "T",
+                    "x": "bitwidth", "y": "recipe", "value": "accuracy",
+                    "x_label": "位宽",
+                    "y_label": "配方",
+                    "data": [
+                        {"recipe": "smooth", "bitwidth": "w4", "accuracy": 0.92},
+                    ],
+                })
+                await pilot.pause()
+                await pilot.pause()
+                text = getattr(canvas, "_Static__content", "")
+                # axis_hint 在「见 Web」提示后追加：``（轴：配方 × 位宽）``
+                assert "轴：配方 × 位宽" in text
+        run_async(scenario())
+
     def test_missing_plotext_degrades_gracefully(self, monkeypatch):
-        """SPEC §6.4 开发期降级测试：缺包 → DataTable + 提示（生产不缺包，仅 monkeypatch）。"""
+        """SPEC §6.4 开发期降级测试：缺包 → DataTable + 提示（生产不缺包，仅 monkeypatch）。
+
+        注意：``importlib.reload(cc_mod)`` 会永久改变 ``orca.iface.cli.widgets.chart_canvas``
+        模块的 ``_PLOTEXT_OK`` 状态。为防污染后续测试，本 test 必须在结束时 reload 回原状。
+        关键：``monkeypatch.setitem`` 的 teardown 时机是 **test 函数返回之后**，而 ``finally``
+        是 **test 函数返回之前**——故 finally 内若直接 reload，``sys.modules['plotext']`` 仍为
+        None → reload 出来的 cc_mod 仍误判 plotext 缺失。必须先 ``monkeypatch.undo()``
+        （手动恢复 sys.modules）再 reload。
+        """
         # 模拟 plotext 缺失：把 sys.modules['plotext'] 置 None + 重载 chart_canvas。
         monkeypatch.setitem(sys.modules, "plotext", None)
         import importlib
@@ -1161,7 +1364,14 @@ class TestChartCanvas:
                 text = getattr(canvas, "_Static__content", "")
                 # 降级：DataTable 文本（有数据行）+ 提示。
                 assert "降级" in text or "x" in text.lower()
-        run_async(scenario())
+        try:
+            run_async(scenario())
+        finally:
+            # 清理：先 monkeypatch.undo() 让 sys.modules['plotext'] 恢复真实模块，
+            # 再 reload cc_mod 重读 plotext 真实可用状态。否则后续 chart_canvas 测试会
+            # 看到 _PLOTEXT_OK=False 的 stale 模块（间歇性失败）。
+            monkeypatch.undo()
+            importlib.reload(cc_mod)
 
 
 # ── NodeDetail（6 kind 永不空白 / ● 徽标 / executor-agnostic）SPEC §6.3 ────

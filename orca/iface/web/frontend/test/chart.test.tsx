@@ -17,7 +17,7 @@ import { useWorkflowStore } from "@/stores/workflow-store";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { ChartWidget } from "@/components/chart/ChartWidget";
 import { ChartGroup } from "@/components/chart/ChartGroup";
-import { PALETTE } from "@/components/chart/chartTheme";
+import { PALETTE, getAxisTick, getCursor } from "@/components/chart/chartTheme";
 import { selectCharts } from "@/selectors";
 import type { ChartPayload, ChartType } from "@/components/chart/types";
 import type { WebEvent } from "@/types/events";
@@ -155,6 +155,22 @@ const TABLE_PAYLOAD: ChartPayload = {
   title: "table-t",
 };
 
+// heatmap（第 8 种 chart_type）：长格式 record（每行一个 cell），value=着色字段。
+const HEATMAP_PAYLOAD: ChartPayload = {
+  chart_type: "heatmap",
+  data: [
+    { recipe: "smooth+gptq", bitwidth: "w4a4-mx", accuracy: 0.92 },
+    { recipe: "smooth+gptq", bitwidth: "w8a8", accuracy: 0.95 },
+    { recipe: "rtn", bitwidth: "w4a4-mx", accuracy: 0.81 },
+    { recipe: "rtn", bitwidth: "w8a8", accuracy: 0.88 },
+  ],
+  x: "bitwidth",
+  y: "recipe",
+  value: "accuracy",
+  label: "quant",
+  title: "acc-matrix",
+};
+
 afterEach(() => {
   cleanup();
   useWorkflowStore.getState().unloadRun();
@@ -175,7 +191,49 @@ describe("chartTheme —— PALETTE 迁移自 AgentHarness（铁律 5）", () =>
   });
 });
 
-describe("7 种 widget 各渲染对应 recharts class（SPEC §3.2）", () => {
+// ── P5 R1 回归：getCSSVar 必须把 ``R G B`` token 包成合法 CSS 颜色 ────────────────
+// 事故回顾：原 ``hsl(${raw})`` 把 ``51 65 85`` 包成 ``hsl(51 65 85)`` —— CSS Color 4
+// 要求 ``hsl(H S L)`` 中 S/L 为百分比；裸数字被浏览器静默判非法 → SVG fill 退回默认黑
+// → P5 验收 #1「坐标轴 slate-700」实际未达成。修成 ``rgb(${raw})`` 后必须钉死。
+describe("chartTheme —— P5 R1 getCSSVar 返回合法 CSS 颜色（防 hsl 包 RGB 静默失败）", () => {
+  test("getAxisTick().fill 是被 CSS 接受的颜色（set on el.style.color 不被丢弃）", () => {
+    // 模拟 index.css 的 token 定义（RGB 三元组空格分隔）。
+    document.documentElement.style.setProperty("--axis-tick", "51 65 85");
+    try {
+      const { fill } = getAxisTick();
+      // 探针：把 fill 赋给 el.style.color，CSS 解析器拒绝则空串（fail loud）。
+      const probe = document.createElement("div");
+      probe.style.color = fill;
+      expect(probe.style.color).not.toBe("");
+      // 合法 ``rgb(51 65 85)`` 被 happy-dom 规范化。
+      expect(fill.startsWith("rgb")).toBe(true);
+    } finally {
+      document.documentElement.style.removeProperty("--axis-tick");
+    }
+  });
+
+  test("getCursor(true).stroke 是合法 CSS 颜色（cursor 不退回 SVG 默认黑）", () => {
+    document.documentElement.style.setProperty("--border", "226 232 240");
+    try {
+      const cursor = getCursor(true);
+      expect(cursor.stroke).toBeDefined();
+      const probe = document.createElement("div");
+      probe.style.color = cursor.stroke!;
+      expect(probe.style.color).not.toBe("");
+    } finally {
+      document.documentElement.style.removeProperty("--border");
+    }
+  });
+
+  test("token 未定义 → fallback #888（不静默 crash）", () => {
+    // 清掉所有可能残留的同名 token，确保 getCSSVar 走 fallback 路径。
+    document.documentElement.style.removeProperty("--nonexistent-token-xyz");
+    const { fill } = getAxisTick();
+    expect(fill).toBe("#888");
+  });
+});
+
+describe("8 种 widget 各渲染对应 recharts class（SPEC §3.2）", () => {
   test("line → .recharts-line path 存在", async () => {
     render(<ChartWidget payload={LINE_PAYLOAD} />);
     await waitFor(() => {
@@ -271,6 +329,168 @@ describe("7 种 widget 各渲染对应 recharts class（SPEC §3.2）", () => {
     expect(rows.length).toBe(TABLE_PAYLOAD.data.length);
     const headers = document.querySelectorAll('[data-testid="data-table"] thead th');
     expect(headers.length).toBe(2);
+  });
+
+  test("heatmap → cell 数 = 行×列，色阶 + 数值渲染", () => {
+    render(<ChartWidget payload={HEATMAP_PAYLOAD} />);
+    // 2 recipe × 2 bitwidth = 4 cell
+    const cells = document.querySelectorAll('[data-testid="heatmap-cell"]');
+    expect(cells.length).toBe(4);
+    // 每个 cell 含数值（formatTick 把 0.92 格式化为 "0.920"，toPrecision(3)）。
+    const values = Array.from(cells).map((c) => c.textContent ?? "");
+    expect(values).toEqual(expect.arrayContaining(["0.920", "0.950", "0.810", "0.880"]));
+    // legend 渲染（色阶条存在）
+    expect(document.querySelector('[data-testid="heatmap-legend"]')).toBeTruthy();
+  });
+
+  test("heatmap → cell backgroundColor 随值单调（min 浅 / max 深，钉死色阶方向）", () => {
+    render(<ChartWidget payload={HEATMAP_PAYLOAD} />);
+    const cells = document.querySelectorAll('[data-testid="heatmap-cell"]');
+    // HEATMAP_PAYLOAD: max=0.95（smooth+gptq×w8a8），min=0.81（rtn×w4a4-mx）
+    const byValue: Record<string, string> = {};
+    Array.from(cells).forEach((c) => {
+      const el = c as HTMLElement;
+      const v = el.getAttribute("data-value") ?? "";
+      byValue[v] = el.style.backgroundColor;
+    });
+    // max cell (0.95) 与 min cell (0.81) 都有 backgroundColor（rgb 三元组）
+    expect(byValue["0.95"]).toBeTruthy();
+    expect(byValue["0.81"]).toBeTruthy();
+    // 解析 rgb 分量，断言 max 比 min 更接近 PALETTE[0] 钢蓝（91,141,184）：
+    // max 的蓝分量应更大（更接近 184），min 更小（更接近 251）。
+    function parseRGB(s: string): [number, number, number] | null {
+      const m = s.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+      return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+    }
+    const maxRGB = parseRGB(byValue["0.95"]);
+    const minRGB = parseRGB(byValue["0.81"]);
+    expect(maxRGB).not.toBeNull();
+    expect(minRGB).not.toBeNull();
+    // 色阶方向：max cell 的蓝分量（b）应小于 min cell 的蓝分量（浅色蓝更大，因
+    // SCALE_LIGHT=(245,248,251) 蓝分量 251，SCALE_DARK=(91,141,184) 蓝分量 184）。
+    expect(maxRGB![2]).toBeLessThan(minRGB![2]);
+  });
+
+  test("heatmap → 单值矩阵 max==min 不除零（全非空 cell 同色，normalize 兜底返回 1）", () => {
+    const single: ChartPayload = {
+      chart_type: "heatmap",
+      data: [
+        { a: "r1", b: "c1", v: 0.5 },
+        { a: "r1", b: "c2", v: 0.5 },
+        { a: "r2", b: "c1", v: 0.5 },
+        // (r2, c2) 缺失 → 单值矩阵不除零的兜底只影响非空 cell
+      ],
+      x: "b",
+      y: "a",
+      value: "v",
+      label: "g",
+      title: "t",
+    };
+    render(<ChartWidget payload={single} />);
+    const cells = document.querySelectorAll('[data-testid="heatmap-cell"]');
+    // 网格 2×2 = 4 cell（3 个有值 + 1 个缺失）
+    expect(cells.length).toBe(4);
+    // 非空 cell 全同色（normalize max==min 兜底返回 1，全用深色端）
+    const colored = Array.from(cells).filter(
+      (c) => (c as HTMLElement).style.backgroundColor !== "",
+    );
+    expect(colored.length).toBe(3);
+    const bgs = new Set(colored.map((c) => (c as HTMLElement).style.backgroundColor));
+    expect(bgs.size).toBe(1);
+  });
+
+  test("heatmap → 稀疏矩阵（缺失 cell）显示空位（不全 coerce 成 0）", () => {
+    // 2×2 但只有 3 个 cell，缺 (r2, c2)。
+    const sparse: ChartPayload = {
+      chart_type: "heatmap",
+      data: [
+        { a: "r1", b: "c1", v: 0.1 },
+        { a: "r1", b: "c2", v: 0.9 },
+        { a: "r2", b: "c1", v: 0.5 },
+        // (r2, c2) 缺
+      ],
+      x: "b",
+      y: "a",
+      value: "v",
+      label: "g",
+      title: "t",
+    };
+    render(<ChartWidget payload={sparse} />);
+    const cells = document.querySelectorAll('[data-testid="heatmap-cell"]');
+    expect(cells.length).toBe(4); // 2×2 网格仍渲染 4 个 cell（缺失位留空）
+    // 缺失 cell (r2, c2) 无 backgroundColor（标记为缺失，不 coerce 成 0）
+    const missing = Array.from(cells).find(
+      (c) =>
+        (c as HTMLElement).getAttribute("data-y") === "r2" &&
+        (c as HTMLElement).getAttribute("data-x") === "c2",
+    ) as HTMLElement | undefined;
+    expect(missing).toBeTruthy();
+    expect(missing!.style.backgroundColor).toBe("");
+    expect((missing!.getAttribute("data-value") ?? "") === "").toBe(true);
+  });
+
+  test("heatmap → 非数值 cell（null / 空串 / 布尔 / 字符串）显示为空位（不 coerce 成 0）", () => {
+    const dirty: ChartPayload = {
+      chart_type: "heatmap",
+      data: [
+        { a: "r1", b: "c1", v: null },
+        { a: "r1", b: "c2", v: "" },
+        { a: "r2", b: "c1", v: "not a number" },
+        { a: "r2", b: "c2", v: true },
+      ],
+      x: "b",
+      y: "a",
+      value: "v",
+      label: "g",
+      title: "t",
+    };
+    render(<ChartWidget payload={dirty} />);
+    const cells = document.querySelectorAll('[data-testid="heatmap-cell"]');
+    // 全 4 cell 都被视为缺失（无 backgroundColor / 无 value）
+    cells.forEach((c) => {
+      const el = c as HTMLElement;
+      expect(el.style.backgroundColor).toBe("");
+    });
+  });
+
+  test("heatmap → 空 data 显示 heatmap-empty 提示（不崩）", () => {
+    const empty: ChartPayload = {
+      chart_type: "heatmap",
+      data: [],
+      x: "b",
+      y: "a",
+      value: "v",
+      label: "g",
+      title: "t",
+    };
+    render(<ChartWidget payload={empty} />);
+    expect(screen.getByTestId("heatmap-empty")).toBeInTheDocument();
+  });
+
+  test("heatmap → 行/列标签存在（recipe / bitwidth 值）", () => {
+    render(<ChartWidget payload={HEATMAP_PAYLOAD} />);
+    const grid = document.querySelector('[data-testid="heatmap-grid"]');
+    expect(grid).toBeTruthy();
+    const text = grid?.textContent ?? "";
+    // 行标签（recipe 值）+ 列标签（bitwidth 值）都在 DOM 中
+    expect(text).toContain("smooth+gptq");
+    expect(text).toContain("rtn");
+    expect(text).toContain("w4a4-mx");
+    expect(text).toContain("w8a8");
+  });
+
+  test("heatmap → 缺 value 字段 → fail loud 提示（防御性，后端 _validate 已挡）", () => {
+    const noValue: ChartPayload = {
+      chart_type: "heatmap",
+      data: [{ a: 1, b: 2, c: 3 }],
+      x: "b",
+      y: "a",
+      label: "g",
+      title: "t",
+      // value 故意缺
+    };
+    render(<ChartWidget payload={noValue} />);
+    expect(screen.getByTestId("heatmap-no-value")).toBeInTheDocument();
   });
 
   test("未知 chart_type → fail loud（显示提示）", () => {
@@ -582,5 +802,194 @@ describe("selectCharts D7 序无关（SPEC §0 D7 / §9 AC2）", () => {
 
     expect(asc).toBe(baseline);
     expect(desc).toBe(baseline);
+  });
+});
+
+// ── 轴标签 / caption（render_chart 新字段，2026-07-21 解「图表看不懂」根因 C）────
+//
+// 意图：钉死 x_label/y_label 透传到 XAxis/YAxis label、caption 渲染为 chart-caption 元素，
+// 旧 payload（无新字段）不渲染 caption（向后兼容）。
+
+describe("轴标签 / caption（render_chart x_label/y_label/caption）", () => {
+  test("caption 非空 → 渲染 [data-testid=chart-caption]", () => {
+    render(
+      <ChartWidget
+        payload={{ ...LINE_PAYLOAD, caption: "★=达标，数据来源：账本" }}
+      />,
+    );
+    const cap = screen.queryByTestId("chart-caption");
+    expect(cap).toBeInTheDocument();
+    expect(cap?.textContent).toContain("★=达标");
+  });
+
+  test("caption 空 → 不渲染 chart-caption（向后兼容旧 tape）", () => {
+    render(<ChartWidget payload={LINE_PAYLOAD} />);
+    expect(screen.queryByTestId("chart-caption")).not.toBeInTheDocument();
+  });
+
+  test("bar caption 渲染（覆盖 hue 分支 + 默认分支各一）", () => {
+    // 默认分支
+    const { rerender } = render(
+      <ChartWidget payload={{ ...BAR_PAYLOAD, caption: "默认分支 caption" }} />,
+    );
+    expect(screen.getByTestId("chart-caption").textContent).toContain("默认分支");
+    // hue 分支
+    rerender(
+      <ChartWidget
+        payload={{
+          ...BAR_PAYLOAD,
+          hue: "series",
+          data: [
+            { x: "a", series: "A", y: 1 },
+            { x: "a", series: "B", y: 2 },
+          ],
+          caption: "hue 分支 caption",
+        }}
+      />,
+    );
+    expect(screen.getByTestId("chart-caption").textContent).toContain("hue 分支");
+  });
+
+  test("heatmap caption + x_label/y_label 渲染（覆盖 heatmap 路径）", () => {
+    render(
+      <ChartWidget
+        payload={{
+          ...HEATMAP_PAYLOAD,
+          x_label: "bitwidth（位宽）",
+          y_label: "recipe（配方）",
+          caption: "cell = accuracy，越深越高",
+        }}
+      />,
+    );
+    // caption
+    const cap = screen.getByTestId("chart-caption");
+    expect(cap.textContent).toContain("accuracy");
+    // x_label / y_label 在轴标题区渲染
+    const widget = screen.getByTestId("chart-widget");
+    const text = widget.textContent ?? "";
+    expect(text).toContain("bitwidth（位宽）");
+    expect(text).toContain("recipe（配方）");
+  });
+
+  test("table caption 渲染（覆盖 DataTable 路径）", () => {
+    render(<ChartWidget payload={{ ...TABLE_PAYLOAD, caption: "表说明" }} />);
+    expect(screen.getByTestId("chart-caption").textContent).toContain("表说明");
+  });
+
+  test("scatter/pareto/area/radar caption 渲染（覆盖剩余 widget）", () => {
+    for (const [p, name] of [
+      [SCATTER_PAYLOAD, "scatter"],
+      [PARETO_PAYLOAD, "pareto"],
+      [AREA_PAYLOAD, "area"],
+      [RADAR_PAYLOAD, "radar"],
+    ] as const) {
+      const { unmount } = render(
+        <ChartWidget payload={{ ...p, caption: `${name}-cap` }} />,
+      );
+      expect(screen.getByTestId("chart-caption").textContent).toContain(
+        `${name}-cap`,
+      );
+      unmount();
+    }
+  });
+
+  test("line + x_label/y_label → XAxis/YAxis label prop 写入（recharts-axis-label 文本可见）", async () => {
+    render(
+      <ChartWidget
+        payload={{
+          ...LINE_PAYLOAD,
+          x_label: "候选序号",
+          y_label: "时延 (ms)",
+        }}
+      />,
+    );
+    await waitFor(() => {
+      expect(document.querySelector(".recharts-line path")).toBeTruthy();
+    });
+    // recharts 把 XAxis label 渲染为 .recharts-label（SVG <text>）；y 轴 label 同款。
+    const labels = Array.from(document.querySelectorAll(".recharts-label"));
+    const texts = labels.map((l) => l.textContent ?? "");
+    expect(texts).toEqual(expect.arrayContaining(["候选序号", "时延 (ms)"]));
+  });
+
+  test("scatter + x_label/y_label → XAxis/YAxis name prop 同步（tooltip label 也用人话）", async () => {
+    render(
+      <ChartWidget
+        payload={{
+          ...SCATTER_PAYLOAD,
+          x_label: "迭代轮",
+          y_label: "score",
+        }}
+      />,
+    );
+    await waitFor(() => {
+      expect(document.querySelector(".recharts-scatter path")).toBeTruthy();
+    });
+    // Scatter 用 XAxis/YAxis ``name`` prop 表达轴语义（tooltip 显示）。读取 recharts-surface
+    // 内的 XAxis/YAxis 节点 attrs 验证 name 写入（recharts 把 name 映射到 axis 属性，可在
+    // 内部 state 用 querySelector 读 axis data-key，但 ``name`` 非 DOM attr，故此处通过
+    // recharts-label 同样渲染验证 label prop 路径，name prop 留给真机 playwright）。
+    const labels = Array.from(document.querySelectorAll(".recharts-label"));
+    const texts = labels.map((l) => l.textContent ?? "");
+    expect(texts).toEqual(expect.arrayContaining(["迭代轮", "score"]));
+  });
+
+  test("pareto + x_label/y_label → 轴 label 文本（ComposedChart happy-dom 下可能不稳；至少 widget 渲染不崩）", async () => {
+    // ComposedChart 在 happy-dom 下 label 渲染不稳（同前沿线 happy-dom 不渲染，见 pareto
+    // 主测试注释）。此处仅断言 widget 挂载成功且 scatter symbols 出现；label 文本断言留给
+    // 真机 playwright（line/scatter widget 已用同款 chartTheme helper 钉死 label 路径）。
+    render(
+      <ChartWidget
+        payload={{
+          ...PARETO_PAYLOAD,
+          x_label: "时延 (ms)",
+          y_label: "accuracy",
+        }}
+      />,
+    );
+    await waitFor(() => {
+      expect(document.querySelectorAll(".recharts-symbols").length).toBeGreaterThanOrEqual(1);
+    });
+    // widget 渲染成功（无 crash）—— pass
+  });
+
+  test("heatmap 单边 x_label（不设 y_label）→ 只渲染 x_label span，无空 span 占位", () => {
+    render(
+      <ChartWidget
+        payload={{
+          ...HEATMAP_PAYLOAD,
+          x_label: "只设 x_label",
+        }}
+      />,
+    );
+    // x_label 在轴标题区渲染；不渲染 y_label（无空占位 span）
+    const widget = screen.getByTestId("chart-widget");
+    expect(widget.textContent).toContain("只设 x_label");
+    // y_label 未设 → 不应出现空 span 占位（条件渲染）
+    const axisTitleDiv = widget.querySelector(".text-\\[10px\\].orca-text-faint.mt-1");
+    expect(axisTitleDiv).toBeTruthy();
+    const spans = axisTitleDiv?.querySelectorAll("span") ?? [];
+    expect(spans.length).toBe(1);  // 只渲染 x_label span，不渲染 y_label 空 span
+  });
+
+  test("heatmap 双轴 x_label/y_label 都缺 → 不渲染 axis title div（向后兼容）", () => {
+    // HEATMAP_PAYLOAD 默认无 x_label/y_label（旧 tape 形态）→ 守卫 {(x_label || y_label) && ...}
+    // 不挂载 axis title div（钉死「不渲染多余 DOM」契约）。
+    render(<ChartWidget payload={HEATMAP_PAYLOAD} />);
+    const widget = screen.getByTestId("chart-widget");
+    const axisTitleDiv = widget.querySelector(".text-\\[10px\\].orca-text-faint.mt-1");
+    expect(axisTitleDiv).toBeNull();
+  });
+
+  test("空 x_label/y_label → 回退用字段名（payload.x='x' → 轴 label='x'）", async () => {
+    // 不传 x_label → getXAxisLabelProp 回退字段名 payload.x="x" → label="x"
+    render(<ChartWidget payload={LINE_PAYLOAD} />);
+    await waitFor(() => {
+      expect(document.querySelector(".recharts-line path")).toBeTruthy();
+    });
+    const labels = Array.from(document.querySelectorAll(".recharts-label"));
+    const texts = labels.map((l) => l.textContent ?? "");
+    // 字段名回退：x="x"、y="y"
+    expect(texts).toEqual(expect.arrayContaining(["x", "y"]));
   });
 });

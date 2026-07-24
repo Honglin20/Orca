@@ -333,6 +333,178 @@ describe("workflow-store", () => {
     expect(state.nodes).toEqual({});
     expect(state.gate).toBeNull();
     expect(state.activeRunId).toBeNull();
+    expect(state.nodesIndex).toEqual({});
+    expect(state.selectedNode).toBeNull();
+    expect(state.selectedSession).toBeNull();
     vi.unstubAllGlobals();
+  });
+});
+
+// ── P2：nodesIndex 四路径维护 + in-order 增量 fold vs refold 等价（D7）──────────────
+// SPEC web-presentation-refinement §P2 / P0-5 / P0-6。
+//
+// 断言意图（Rule 9）：
+//   1. **nodesIndex 一致性**：四路径（refold / loadFromEvents / loadEarlierChunk /
+//      loadFull）+ in-order 增量 都维护 nodesIndex（P0-6 闭环）。
+//   2. **D7 幂等不破**：in-order 增量 fold 是 seq 升序 fold 的特例 → 终态等价于
+//      全量 refold（P0-5 闭环）。
+//   3. **null session_id → "main"** 哨兵（SPEC §P2 接口契约）。
+//   4. **setSelectedNode 联动**：设 selectedSession = 该 node 第一个 sub session（P1-3）。
+describe("workflow-store P2 — nodesIndex 四路径 + 增量 fold D7", () => {
+  beforeEach(() => resetStore());
+
+  // 构造 family_detect 风格 fixture：1 main（null session）+ 2 sub sessions。
+  // eventCount：main=2（node_started/completed lifecycle）；subA=3；subB=2。
+  // 注：timestamp 显式设为递增值（makeEvent 默认 Date.now()/1000 秒级，连续事件可能同秒）。
+  function buildFamilyFixture(): WebEvent[] {
+    const events: WebEvent[] = [
+      // main session（null → "main"）：lifecycle
+      makeEvent("node_started", { seq: 1, node: "family_detect", session_id: null }),
+      // sub A: 3 conversation events
+      makeEvent("agent_message", { seq: 2, node: "family_detect", session_id: "ses_A", data: { text: "a1" } }),
+      makeEvent("agent_thinking", { seq: 3, node: "family_detect", session_id: "ses_A", data: { text: "a2" } }),
+      makeEvent("agent_tool_call", { seq: 4, node: "family_detect", session_id: "ses_A", data: { tool: "bash", tool_call_id: "ta" } }),
+      // sub B: 2 conversation events
+      makeEvent("agent_message", { seq: 5, node: "family_detect", session_id: "ses_B", data: { text: "b1" } }),
+      makeEvent("agent_thinking", { seq: 6, node: "family_detect", session_id: "ses_B", data: { text: "b2" } }),
+      // main 收尾
+      makeEvent("node_completed", { seq: 7, node: "family_detect", session_id: null }),
+      // 另一 node 的事件，验证索引不混淆
+      makeEvent("node_started", { seq: 8, node: "other_node", session_id: null }),
+      makeEvent("agent_message", { seq: 9, node: "other_node", session_id: "ses_C", data: { text: "c1" } }),
+      // workflow 级（无 node）事件：不应进任何 node 的索引
+      makeEvent("route_taken", { seq: 10, data: { from: "A", to: "B" } }),
+    ];
+    // 显式覆盖 timestamp 为 seq-based 单调递增（避免同秒冲突）
+    events.forEach((e, i) => { e.timestamp = 1700000000 + i; });
+    return events;
+  }
+
+  // ── 1. loadFromEvents（refold）维护 nodesIndex ──
+  it("loadFromEvents → refold 维护 nodesIndex（main + 多 sub + 跨 node 隔离）", () => {
+    useWorkflowStore.getState().loadFromEvents(buildFamilyFixture());
+    const idx = useWorkflowStore.getState().nodesIndex;
+
+    // family_detect: 3 sessions (main + ses_A + ses_B)，按首事件 seq 升序
+    const fd = idx.family_detect;
+    expect(fd).toBeDefined();
+    expect(fd.sessions).toEqual(["main", "ses_A", "ses_B"]);
+    expect(fd.sessionEventCounts).toEqual({
+      main: 2, // node_started + node_completed
+      ses_A: 3,
+      ses_B: 2,
+    });
+    // firstTs：sessions 按首事件时序，main 最旧（seq=1 ts 最早）
+    expect(fd.sessionFirstTs.main).toBeLessThan(fd.sessionFirstTs.ses_A);
+    expect(fd.sessionFirstTs.ses_A).toBeLessThan(fd.sessionFirstTs.ses_B);
+
+    // other_node: 2 sessions（main + ses_C）
+    expect(idx.other_node.sessions).toEqual(["main", "ses_C"]);
+    expect(idx.other_node.sessionEventCounts).toEqual({ main: 1, ses_C: 1 });
+  });
+
+  // ── 2. processEvent in-order 增量 patch nodesIndex ──
+  it("processEvent in-order 到达 → 增量 patch nodesIndex（不全量 refold）", () => {
+    const events = buildFamilyFixture();
+    // 按 seq 升序逐条 processEvent（每条都 > lastSeqSeen → 走增量分支）
+    for (const e of events) useWorkflowStore.getState().processEvent(e);
+
+    const idx = useWorkflowStore.getState().nodesIndex;
+    const fd = idx.family_detect;
+    expect(fd.sessions).toEqual(["main", "ses_A", "ses_B"]);
+    expect(fd.sessionEventCounts).toEqual({ main: 2, ses_A: 3, ses_B: 2 });
+    expect(fd.sessionFirstTs.main).toBeLessThan(fd.sessionFirstTs.ses_A);
+  });
+
+  // ── 3. D7 等价：in-order 增量 vs 全量 refold ──（P0-5 闭环核心）
+  it("D7: in-order 增量 fold 终态 == 全量 refold（nodes/nodesIndex/lastSeqSeen/cost）", () => {
+    const events = buildFamilyFixture();
+
+    // Path A：in-order 增量（processEvent 逐条，全部 > lastSeqSeen）
+    resetStore();
+    for (const e of events) useWorkflowStore.getState().processEvent(e);
+    const incremental = {
+      nodes: JSON.parse(JSON.stringify(useWorkflowStore.getState().nodes)),
+      nodesIndex: JSON.parse(JSON.stringify(useWorkflowStore.getState().nodesIndex)),
+      cost: useWorkflowStore.getState().cost,
+      lastSeqSeen: useWorkflowStore.getState().lastSeqSeen,
+      status: useWorkflowStore.getState().status,
+    };
+
+    // Path B：全量 refold（loadFromEvents 内部 sort + refold）
+    resetStore();
+    useWorkflowStore.getState().loadFromEvents(events);
+    const refoldSnap = {
+      nodes: JSON.parse(JSON.stringify(useWorkflowStore.getState().nodes)),
+      nodesIndex: JSON.parse(JSON.stringify(useWorkflowStore.getState().nodesIndex)),
+      cost: useWorkflowStore.getState().cost,
+      lastSeqSeen: useWorkflowStore.getState().lastSeqSeen,
+      status: useWorkflowStore.getState().status,
+    };
+
+    // 核心断言：两路径终态等价（D7 幂等 / 序无关）
+    expect(incremental.nodes).toEqual(refoldSnap.nodes);
+    expect(incremental.nodesIndex).toEqual(refoldSnap.nodesIndex);
+    expect(incremental.cost).toBeCloseTo(refoldSnap.cost, 5);
+    expect(incremental.lastSeqSeen).toEqual(refoldSnap.lastSeqSeen);
+    expect(incremental.status).toEqual(refoldSnap.status);
+  });
+
+  // ── 4. out-of-order 到达 → refold（nodesIndex 重建正确） ──
+  it("processEvent out-of-order（seq < lastSeqSeen）→ 全量 refold 重建 nodesIndex", () => {
+    // 先 in-order 喂两条大 seq 事件（lastSeqSeen=8）
+    useWorkflowStore.getState().processEvent(
+      makeEvent("agent_message", { seq: 5, node: "n", session_id: "s1", data: { text: "x" } })
+    );
+    useWorkflowStore.getState().processEvent(
+      makeEvent("agent_message", { seq: 8, node: "n", session_id: "s2", data: { text: "y" } })
+    );
+    // 喂 seq=3（out-of-order：3 < lastSeqSeen=8）→ 触发 refold，nodesIndex 全量重建
+    useWorkflowStore.getState().processEvent(
+      makeEvent("agent_thinking", { seq: 3, node: "n", session_id: "s1", data: { text: "z" } })
+    );
+    const idx = useWorkflowStore.getState().nodesIndex.n;
+    expect(idx.sessionEventCounts.s1).toBe(2); // seq 5 + 3
+    expect(idx.sessionEventCounts.s2).toBe(1);
+    // sessions 顺序按首事件 seq 升序：s1(seq=3) 在 s2(seq=5) 之前
+    expect(idx.sessions).toEqual(["s1", "s2"]);
+  });
+
+  // ── 5. setSelectedNode 联动：设第一个 sub session（P1-3） ──
+  it("setSelectedNode：同步设 selectedSession = 该 node 第一个 sub session（无 main 偏好）", () => {
+    useWorkflowStore.getState().loadFromEvents(buildFamilyFixture());
+    useWorkflowStore.getState().setSelectedNode("family_detect");
+    // 第一个 sub = ses_A（sessions=[main, ses_A, ses_B]，跳 main 后第一个）
+    expect(useWorkflowStore.getState().selectedNode).toBe("family_detect");
+    expect(useWorkflowStore.getState().selectedSession).toBe("ses_A");
+
+    // 切到 only-main node → "all"（无 sub 可选）
+    useWorkflowStore.getState().setSelectedNode("other_node");
+    // other_node sessions = [main, ses_C]，第一个 sub = ses_C
+    expect(useWorkflowStore.getState().selectedSession).toBe("ses_C");
+  });
+
+  it("setSelectedNode：无 sub session 的 node → selectedSession='all'", () => {
+    useWorkflowStore.getState().loadFromEvents([
+      makeEvent("node_started", { seq: 1, node: "solo", session_id: null }),
+      makeEvent("node_completed", { seq: 2, node: "solo", session_id: null }),
+    ]);
+    useWorkflowStore.getState().setSelectedNode("solo");
+    expect(useWorkflowStore.getState().selectedSession).toBe("all");
+  });
+
+  it("setSelectedNode(null) → selectedSession=null；setSelectedSession 可独立切", () => {
+    useWorkflowStore.getState().loadFromEvents(buildFamilyFixture());
+    useWorkflowStore.getState().setSelectedNode("family_detect");
+    expect(useWorkflowStore.getState().selectedSession).toBe("ses_A");
+
+    useWorkflowStore.getState().setSelectedSession("ses_B");
+    expect(useWorkflowStore.getState().selectedSession).toBe("ses_B");
+
+    useWorkflowStore.getState().setSelectedSession("all");
+    expect(useWorkflowStore.getState().selectedSession).toBe("all");
+
+    useWorkflowStore.getState().setSelectedNode(null);
+    expect(useWorkflowStore.getState().selectedSession).toBeNull();
   });
 });

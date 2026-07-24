@@ -732,3 +732,57 @@ def test_terminate_success_with_outputs_valid():
         _terminate("done", status="success", outputs={"cat": "{{ classifier.output.x }}"}),
     ], entry="classifier")
     validate_workflow(wf)  # 不抛
+
+
+# ── 铁律 7：execute phase 永不中断（gate 校验，从 tests/iface/mcp/test_setup_phase.py 搬迁）──
+# 这 3 个测试是 ``_check_execute_phase_no_gate_tools`` 的唯一覆盖。setup phase 删除（in-session
+# v5 §6.1 step 5a）后从 setup_phase 测试文件搬迁到此（compile 层归属），去 setup 专属上下文
+# 使其 compile 自洽。``_check_execute_phase_no_gate_tools`` / ``_INTERRUPT_TOOL_NAMES`` /
+# ``_check_no_interrupt_tools`` 保留（A2 铁律：与 setup 正交）。
+
+
+def test_compile_rejects_ask_user_in_execute_phase():
+    """compile validator 拒绝 execute phase agent 配 ask_user（铁律 7）。"""
+    wf = _wf([_agent("a", prompt="do", tools=["ask_user"])])
+    with pytest.raises(ConfigurationError) as exc_info:
+        validate_workflow(wf)
+    assert "ask_user" in str(exc_info.value)
+    assert "execute phase" in str(exc_info.value).lower() or "铁律 7" in str(exc_info.value)
+
+
+def test_compile_rejects_gate_in_execute_phase():
+    """compile validator 拒绝 execute phase agent 配 gate（铁律 7）。"""
+    wf = _wf([_agent("a", prompt="do", tools=["Bash", "gate"])])
+    with pytest.raises(ConfigurationError) as exc_info:
+        validate_workflow(wf)
+    assert "gate" in str(exc_info.value)
+
+
+def test_compile_allows_tools_none_in_execute_phase():
+    """compile validator 允许 execute phase agent tools=None（默认全开，runtime 把关）。"""
+    wf = _wf([_agent("a", prompt="do", tools=None)])
+    validate_workflow(wf)  # 不 raise
+
+
+# ── plan sprightly-questing-donut §1.4：requires 白名单 ──
+
+def test_requires_known_token_accepted():
+    """requires:[knowledge_base]（已知 token）→ Workflow 构造成功（field_validator 放行）。"""
+    wf = Workflow(
+        name="w", entry="a",
+        nodes=[_agent("a", routes=[{"to": "$end"}])],
+        requires=["knowledge_base"],
+    )
+    assert wf.requires == ["knowledge_base"]
+
+
+def test_requires_unknown_token_rejected():
+    """requires 含 typo（如 knowlegde_base）→ field_validator fail loud（防预检静默失效）。"""
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError) as ei:
+        Workflow(
+            name="w", entry="a",
+            nodes=[_agent("a", routes=[{"to": "$end"}])],
+            requires=["knowlegde_base"],  # typo
+        )
+    assert "knowledge_base" in str(ei.value)  # 错误信息含已知 token 提示

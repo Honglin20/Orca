@@ -31,7 +31,8 @@ from typing import Any
 
 import typer
 
-from orca.compile import ConfigurationError, load_workflow
+from orca.compile import ConfigurationError, catalog, load_workflow
+from orca.iface.cli.config import apply_kb_requirement, resolve_kb_dir
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +262,7 @@ def _start_background(
     # 校验前置（fork 前就发现 yaml 错，避免子进程起不来还看不到错）。
     try:
         wf = load_workflow(yaml)
+        apply_kb_requirement(wf)  # plan §1.4：requires knowledge_base 时预检 KB（fork 前 fail loud）
     except ConfigurationError as e:
         typer.echo(str(e), err=True)
         return EXIT_ARG_OR_VALIDATE
@@ -333,20 +335,28 @@ def list_workflows() -> None:
 
     匹配键是 ``wf.name`` 不是文件名：``my_setup.yaml`` 里 ``name: setup_demo``
     会以 ``setup_demo`` 列出。加载失败的 yaml 跳过（catalog 内部 log warning）。
-    """
-    # 延迟 import：catalog 属 iface/mcp 子包，按本模块依赖边界不在顶层引入；
-    # 仅 ``list`` 命令需要，函数内取用（catalog 本身轻量，只依赖 compile+schema）。
-    from orca.iface.mcp.catalog import list_workflows as _catalog_list
 
-    items = _catalog_list()
+    v3 §3.1：``orca list`` 与 ``tars list`` 共享同一 catalog 逻辑（单一真相源）——
+    本函数是 catalog 的唯一 CLI 入口；``orca`` app 的 ``list`` 直接委托 ``run_list``。
+    """
+    run_list()
+
+
+def run_list() -> None:
+    """``list`` 命令的共享实现（orca list + tars list 都调它，单一逻辑）。
+
+    抽出来让两个 app 的 ``list`` 命令委托同一函数——避免两份 list 逻辑漂移
+    （coordinator 铁律：无多套事实源）。catalog 本身在 ``orca/compile/catalog.py``
+    （单一实现）；本函数只做 CLI 展示。
+    """
+    items = catalog.list_workflows()
     if not items:
         typer.echo("（无可用 workflow；扫描了 ./workflows + ~/.orca/workflows）")
         return
     typer.echo("可用 workflow（./workflows + ~/.orca/workflows）：")
     for it in items:
-        marker = " ⚙setup" if it.get("has_setup") else ""
         desc = it.get("description") or ""
-        typer.echo(f"  {it['name']}{marker}  {desc}".rstrip())
+        typer.echo(f"  {it['name']}  {desc}".rstrip())
 
 
 # ── executor 子命令组（后端二进制配置与健康检查）──────────────────────────────
@@ -369,21 +379,25 @@ app.add_typer(skill_app, name="skill", help="安装/管理随包 Orca skill（cr
 
 # ── install 子命令组（统一安装入口：skill + in-session，全局默认）────────────
 # sub-Typer：同 executor/skill 模式。收口此前碎片化的 skill install + in-session start
-# 两步安装为一条 `orca install`（详见 docs/plans/2026-07-08-unified-install.md）。
+# 两步安装为一条 `tars install`（详见 docs/plans/2026-07-08-unified-install.md）。
 from orca.iface.cli.install_cmds import app as install_app
 
 app.add_typer(install_app, name="install", help="统一安装 Orca 宿主集成（skill + in-session），全局默认")
 
 
-# ── in-session 子命令组（in-session shell v5：hook-driven）──────────────────
-# sub-Typer：同 executor/skill 模式。in_session.cli 顶层只 import typer + compile +
-# run.lifecycle（轻量），无循环；bg_runner 用 lazy import（见 cli._default_tape_path）。
-from orca.iface.in_session.cli import app as in_session_app
+# ── project 子命令组（注册表运维，SPEC §13.3 P1/P3）──────────────────────────
+# sub-Typer：``tars project rebuild``（注册表损坏重建）+ ``tars project list``（含 stale）。
+# 依赖 ``orca.runtime``（中立层），不反向 import web。
+from orca.iface.cli.project_cmds import app as project_app
 
-app.add_typer(
-    in_session_app, name="in-session",
-    help="in-session shell：宿主主 session（opencode/CC）执行 workflow，daemon 独占 tape + hook 驱动推进",
-)
+app.add_typer(project_app, name="project", help="注册表运维（rebuild/list），SPEC §13.3 P1/P3")
+
+
+# ── in-session 子命令已上移（v3 §2.1）────────────────────────────────────────
+# 旧 ``orca in-session bootstrap/next/...`` 子命令层已删：bootstrap→``orca <wf>`` 语法糖，
+# next/status/stop/doctor 上移 ``orca`` 顶层（见 orca/iface/in_session/cli.py 的 ``app``）。
+# 本模块（``app``）现在是 **tars / 后端 entry point**（SPEC v3 §3）：run/serve/ps/...
+# 14 命令归宿；不再挂 in-session namespace。
 
 
 # ── ps / logs / wait 子命令（phase 11 §8 P3.2 daemon）─────────────────────────
@@ -701,6 +715,7 @@ def _resume_workflow(tape_or_run_id: str, yaml_override: Path | None) -> int:
         return EXIT_ARG_OR_VALIDATE
     try:
         wf = load_workflow(resolved_yaml)
+        apply_kb_requirement(wf)  # plan §1.4：requires knowledge_base 时预检 KB（resume 路径同款 fail loud）
     except ConfigurationError as e:
         typer.echo(str(e), err=True)
         return EXIT_ARG_OR_VALIDATE
@@ -850,6 +865,7 @@ def _run_workflow(config: RunConfig) -> int:
     # 校验前置（启动 TUI 前，避免 TUI 起来才发现 yaml 错）。
     try:
         wf = load_workflow(config.yaml_path)
+        apply_kb_requirement(wf)  # plan §1.4：requires knowledge_base 时预检 KB（fail loud）
     except ConfigurationError as e:
         typer.echo(str(e), err=True)
         return EXIT_ARG_OR_VALIDATE
@@ -1039,7 +1055,9 @@ def _web_autoexit_seconds() -> float:
 def _load_wf_or_exit(yaml_path: Path):
     """共享前置校验：yaml 不存在 / ConfigurationError → exit 2（fail loud）。"""
     try:
-        return load_workflow(yaml_path)
+        wf = load_workflow(yaml_path)
+        apply_kb_requirement(wf)  # plan §1.4：requires knowledge_base 时预检 KB（fail loud）
+        return wf
     except ConfigurationError as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(code=EXIT_ARG_OR_VALIDATE)
@@ -1121,12 +1139,20 @@ def _post_run_to_existing(
     路径会在 server 端被错误解析（fail loud ConfigurationError，但语义错位）。
     """
     import httpx
+    from orca.runtime import detect_project_root
 
+    # SPEC §13.2 B-1：POST /api/run body 必填 project_path。复用既有 server 时也须传
+    # （server 端据此决定 tape 写入哪个项目根）。detect_project_root 失败 → 让 server 400。
+    try:
+        project_path = str(detect_project_root())
+    except Exception:  # noqa: BLE001
+        raise RuntimeError("detect_project_root 失败：无法复用既有 server（POST /api/run 缺 project_path）")
     body = {
         "yaml_path": str(Path(config.yaml_path).resolve()),
         "inputs": config.inputs,
         "task": config.task,
         "max_iter": config.max_iter,
+        "project_path": project_path,
     }
     try:
         r = httpx.post(
@@ -1413,7 +1439,10 @@ async def _wait_ws_autoexit(web_server, autoexit_seconds: float) -> None:
 
 @app.command(name="open")
 def open_run(
-    run_id: str = typer.Argument(..., help="要打开的 run_id（或 ``--tape`` 显式指定 tape 路径）"),
+    run_id: str | None = typer.Argument(
+        None,
+        help="要打开的 run_id（或 ``--tape`` 显式指定 tape 路径）。**无参 → 打开多 run 列表页**（SPEC §13 D13）",
+    ),
     tape: Path | None = typer.Option(
         None, "--tape",
         help="显式 tape 路径（默认 ``runs/<run_id>.jsonl``）",
@@ -1424,25 +1453,204 @@ def open_run(
     ),
     port: int | None = typer.Option(
         None, "--port",
-        help="web server 端口（默认探测 7428：是 orca 则复用，否则起后台 ``orca serve``）",
+        help="web server 端口（默认探测 7428：是 orca 则复用，否则起后台 ``tars serve``）",
     ),
 ) -> None:
-    """attach 一个既有 run（按 tape 路径），打开 web 观察窗（SPEC §5）。
+    """attach 一个既有 run（按 tape 路径），打开 web 观察窗（SPEC §5 + §13 D13）。
 
     典型场景：``orca run --background`` 后用 ``orca open <id>`` 看 live 进度；或
     in-session shell 跑到一半想看完整 DAG。attached run 是 **read-only**（前端 gate
     禁提交，meta.writable=false）。
 
+    **无参形态**（SPEC §13 D13 / AC18）：``orca open``（无参）→ 打开
+    ``http://<host>:<port>/``（多 run 列表页），永不 spawn 新端口（复用既有 user server）。
+
     流程（SPEC §5）：
       1. 探测默认端口 7428（``GET /api/health``，本地 127.0.0.1）；是 orca → 复用；否/不可达
-         → 后台起 ``orca serve``（空闲端口或默认，bind host 同 --host）。
+         → 后台起 ``tars serve``（空闲端口或默认，bind host 同 --host）。
       2. 解析 tape 路径（``runs/<run_id>.jsonl`` 或 ``--tape``）。
       3. ``POST /api/runs/attach {tape_path, run_id}``。
       4. ``webbrowser.open(/runs/<run_id>)``（URL 用本机实际 IP）。
 
     失败：tape 不存在 → exit 2；attach 403/404/409 → exit 1（fail loud）。
     """
+    if run_id is None:
+        # 无参形态（D13）：直接打开列表页。
+        raise typer.Exit(_open_run_list(host=host, port=port))
     raise typer.Exit(_open_run(run_id, tape_path=tape, host=host, port=port))
+
+
+def _open_run_list(*, host: str | None, port: int | None) -> int:
+    """SPEC §13 D13 / AC18：``orca open``（无参）→ 复用 user server + 打开列表页。
+
+    永不 spawn 新端口（除非用户完全无活 server 时 bootstrap 一次）。流程：
+      1. probe 默认端口 / 查 ~/.orca 登记找本用户 server。
+      2. 找到 → ``webbrowser.open("/")``。
+      3. 未找到 → spawn 一次 + 登记 + 打开。
+    """
+    bind_host, display_host, target_port = resolve_web_endpoint(host=host, port=port)
+    probe_host = "127.0.0.1"
+    my_runs_dir = _default_runs_dir()
+    my_fp = _runs_dir_fp(my_runs_dir)
+    health = _probe_orca_server(probe_host, target_port)
+    if _health_is_my_project(health, my_fp):
+        actual_port = target_port
+    else:
+        actual_port = (
+            None if port is not None
+            else _lookup_my_registered_port(my_runs_dir, my_fp, probe_host)
+        )
+        if actual_port is None:
+            from orca.iface.cli.web_registry import exclusive_port_decision
+
+            with exclusive_port_decision() as write_back:
+                actual_port = (
+                    None if port is not None
+                    else _lookup_my_registered_port_unlocked(my_fp, probe_host)
+                )
+                if actual_port is None:
+                    if port is not None and not _is_port_free(bind_host, target_port):
+                        typer.echo(
+                            f"--port {target_port} 被占用（非本项目 orca 或其它进程）",
+                            err=True,
+                        )
+                        return EXIT_ARG_OR_VALIDATE
+                    actual_port = (
+                        target_port if _is_port_free(bind_host, target_port)
+                        else _find_free_port(bind_host=bind_host)
+                    )
+                    if not _spawn_background_serve(bind_host, actual_port):
+                        typer.echo("无法起后台 ``tars serve``：可执行不在 $PATH", err=True)
+                        return EXIT_RUN_FAILED
+                    if not _wait_for_health(probe_host, actual_port, timeout=10.0):
+                        typer.echo(
+                            f"后台 tars serve 未在 {actual_port} 上 ready（超时 10s）",
+                            err=True,
+                        )
+                        return EXIT_RUN_FAILED
+                    try:
+                        write_back(port=actual_port, runs_dir_fp=my_fp)
+                    except OSError as e:
+                        typer.echo(
+                            f"⚠ web registry 写失败（{e}）；server 已起 port={actual_port}",
+                            err=True,
+                        )
+    url = f"http://{display_host}:{actual_port}/"
+    _open_browser_or_print(url)
+    typer.echo(f"Orca Web UI（列表页）→ {url}  (browser tab 可关闭；server 后台运行)")
+    return EXIT_OK
+
+
+def _default_runs_dir() -> Path:
+    """client 视角 runs_dir（与 tape 落盘约定同源）。
+
+    spec-review B2：从 ``bg_runner.default_tape_path`` 派生（单一真相源），不字面 ``"runs"``
+    （避免与 ``RunManager`` 默认 ``runs_dir="runs"`` 两处字面漂移）。跨层不能共享常量
+    （web 禁 import cli），故加 ``test_default_runs_dir_single_source`` 守门防漂移。
+    """
+    from orca.iface.cli.bg_runner import default_tape_path
+
+    return default_tape_path("__probe__").parent
+
+
+def _runs_dir_fp(runs_dir: Path) -> str:
+    """用户身份指纹（SPEC §13 D1 / U-2，迁移自 runs_dir → ORCA_HOME）。
+
+    身份与存储路径解耦：指纹 = ``sha1(ORCA_HOME)[:12]``，同用户所有项目共享 → 单端口复用。
+    保留旧函数名（``_runs_dir_fp``）以最小化改动面；参数 ``runs_dir`` 忽略（兼容签名）。
+
+    lazy import 无依赖模块（spec-review B3：``_identity`` 仅 stdlib）。
+    """
+    from orca.iface.web._identity import orca_home_fingerprint
+
+    return orca_home_fingerprint()
+
+
+def _health_is_my_project(health: dict | None, my_fp: str) -> bool:
+    """health 是否本用户 server：``orca_home_fp``（新权威）/ ``runs_dir_fp``（兼容）任一匹配。
+
+    缺指纹（旧版 server / 非 orca）→ ``False``（视为 foreign，安全降级到 spawn）。
+    SPEC §13.1 U-2 兼容期：旧 server 只发 ``runs_dir_fp``，新 server 同发两字段。
+    """
+    if not health:
+        return False
+    return health.get("orca_home_fp") == my_fp or health.get("runs_dir_fp") == my_fp
+
+
+def _lookup_my_registered_port(
+    my_runs_dir: Path, my_fp: str, probe_host: str,
+) -> int | None:
+    """查**用户级**登记找本用户 server 端口（SPEC §13 D6 / M-7）。
+
+    端口登记上移到 ``~/.orca/.orca-web.json``（一用户一 server）；读时 fallback 旧
+    ``<runs_dir>/.orca-web.json`` 静默迁移（不破坏既有）。
+
+    **探测权威**：读登记拿 port 后**仍** probe + 指纹校验；陈旧 / 不匹配 / 损坏 → ``None``。
+    pid 不 gate（H1：registry 不存 pid）。
+
+    本函数**自带锁**（``lookup_orca_home_port`` 内部 ``_registry_lock``）；禁止在
+    ``exclusive_port_decision`` 临界区内调用（嵌套 flock 死锁，P1）。临界区内用
+    ``_lookup_my_registered_port_unlocked``。
+    """
+    from orca.iface.cli.web_registry import (
+        lookup_orca_home_port,
+        migrate_legacy_registry,
+    )
+
+    migrate_legacy_registry(my_runs_dir)  # 静默迁移旧 per-project 登记到 ~/.orca/
+    port = lookup_orca_home_port()
+    if not isinstance(port, int):
+        return None
+    return port if _health_is_my_project(_probe_orca_server(probe_host, port), my_fp) else None
+
+
+def _lookup_my_registered_port_unlocked(
+    my_fp: str, probe_host: str,
+) -> int | None:
+    """同上但**不加锁**——供 ``exclusive_port_decision`` 临界区内重读用（P1）。
+
+    不调 ``migrate_legacy_registry``（临界区外已调过）；直接读 unlocked 变体。
+    """
+    from orca.iface.cli.web_registry import _lookup_orca_home_port_unlocked
+
+    port = _lookup_orca_home_port_unlocked()
+    if not isinstance(port, int):
+        return None
+    return port if _health_is_my_project(_probe_orca_server(probe_host, port), my_fp) else None
+
+
+def _register_my_port(my_runs_dir: Path, *, port: int, fp: str) -> None:
+    """写**用户级**登记供下次 ``orca open`` 复用（SPEC §13 D6）。
+
+    写到 ``~/.orca/.orca-web.json``。spec-review B4：写失败 loud warn（不阻断本次 open）。
+    """
+    from orca.iface.cli.web_registry import write_orca_home_registry
+
+    try:
+        write_orca_home_registry(port=port, runs_dir_fp=fp)
+    except OSError as e:
+        typer.echo(
+            f"⚠ web registry 写失败（{e}）；server 已起 port={port} 但下次 `orca open` 会重复"
+            f" spawn。可 `lsof -ti tcp:{port} | xargs kill` 或忽略（下次成功写覆盖）。",
+            err=True,
+        )
+
+
+def _signal_web_ready(run_id: str, url: str) -> None:
+    """写 web-ready 信号文件供 bootstrap ``_resolve_web_url`` 轮询。
+
+    detached ``orca open`` 子进程的 URL echo 进日志文件、用户终端看不到；此处把真实 URL
+    落盘为信号文件（``runs/<run_id>.web-ready.json``），bootstrap 侧轮询读取 → 打印
+    **已协商完成的真实端口**，杜绝端口不匹配（默认 7428 被 foreign orca 占用后漂移）。
+    """
+    signal_path = _default_runs_dir() / f".orca-web-ready-{run_id}.json"
+    tmp = signal_path.with_name(signal_path.name + ".tmp")
+    try:
+        signal_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps({"url": url}), encoding="utf-8")
+        os.replace(tmp, signal_path)
+    except OSError as e:
+        logger.warning("web-ready 信号文件写失败（%s；soft-fail，不阻断 open）", e)
 
 
 def _open_run(
@@ -1452,70 +1660,113 @@ def _open_run(
 
     host/port 经 ``resolve_web_endpoint`` 统一解析（与 serve/run 同源）：bind ``bind_host``
     （默认 0.0.0.0），URL 用 ``display_host``（本机实际 IP）。HTTP 复用探测始终本地 127.0.0.1。
+
+    **项目感知复用**（spec-review B1/B2/B3，SPEC web-attach §5a）：探测 target port 上的 orca
+    server，仅当 ``runs_dir_fp`` 匹配本项目才复用；否则（foreign orca / 非 orca / 空闲）按
+    per-project 登记文件 ``<runs_dir>/.orca-web.json`` 找本项目 server，无则空闲端口起新 server
+    并登记。tape 路径以**绝对路径** POST（跨进程不能相对——server CWD 可能不同；与
+    ``_post_run_to_existing`` 同硬化）。
     """
     bind_host, display_host, target_port = resolve_web_endpoint(host=host, port=port)
     probe_host = "127.0.0.1"  # 复用 / attach 探测始终本地
 
-    # 1) 解析 tape 路径。
+    # 1) 解析 tape 路径 + 绝对路径化（跨进程 POST：server CWD 可能不同，相对路径会被错误解析）。
     tape = tape_path if tape_path is not None else _resolve_tape_path(run_id)
     if not tape.is_file():
         typer.echo(f"Tape 不存在：{tape}（用 --tape <path> 显式指定）", err=True)
         return EXIT_ARG_OR_VALIDATE
+    tape_abs = str(tape.resolve())
 
-    # 2) 端口探测：target port 是 orca → 复用；否 → 起后台 serve。
+    # 2) 选端口：本项目 server 复用 → registry → 起新 server。
+    my_runs_dir = _default_runs_dir()
+    my_fp = _runs_dir_fp(my_runs_dir)
     health = _probe_orca_server(probe_host, target_port)
-    if health is not None:
+    if _health_is_my_project(health, my_fp):
+        # 2a. target port 上就是本项目 server → 复用。
         actual_port = target_port
     else:
-        # 显式 --port 且被非 orca 占 → fail loud；否则挑端口 + 起后台 serve。
-        if port is not None and not _is_port_free(bind_host, target_port):
-            typer.echo(
-                f"--port {target_port} 被非 orca server 占用",
-                err=True,
-            )
-            return EXIT_ARG_OR_VALIDATE
+        # 2b. target 是 foreign orca / 非 orca / 空闲。显式 --port 不查 registry（用户钉了端口）；
+        #     否则查 per-project 登记找本项目 server。
         actual_port = (
-            target_port if _is_port_free(bind_host, target_port)
-            else _find_free_port(bind_host=bind_host)
+            None if port is not None
+            else _lookup_my_registered_port(my_runs_dir, my_fp, probe_host)
         )
-        if not _spawn_background_serve(bind_host, actual_port):
-            # orca 不在 PATH（FileNotFoundError）→ fail loud exit 1
-            typer.echo(
-                "无法起后台 ``orca serve``：可执行不在 $PATH",
-                err=True,
-            )
-            return EXIT_RUN_FAILED
-        # 等 serve 起来（health 探测重试）。
-        if not _wait_for_health(probe_host, actual_port, timeout=10.0):
-            typer.echo(
-                f"后台 orca serve 未在 {actual_port} 上 ready（超时 10s）",
-                err=True,
-            )
-            return EXIT_RUN_FAILED
+        if actual_port is None:
+            # 2c. 起新 server（SPEC §13.2 B-6：整个「决策+spawn+bind+socket-ready+写回」
+            # 在 exclusive flock 临界区内，让两并发 open 的 loser 读到 winner 的 port）。
+            from orca.iface.cli.web_registry import exclusive_port_decision
 
-    # 3) POST /api/runs/attach。
-    attach_error_code = _attach_and_get_error(probe_host, actual_port, str(tape), run_id)
+            with exclusive_port_decision() as write_back:
+                # 持锁后再读一次：winner 可能刚写好登记（避免重复 spawn）。
+                # P1：必须用 unlocked 变体（同进程 flock 嵌套会死锁）。
+                actual_port = (
+                    None if port is not None
+                    else _lookup_my_registered_port_unlocked(my_fp, probe_host)
+                )
+                if actual_port is not None:
+                    # loser 路径：winner 已 spawn+登记，复用之。
+                    pass
+                else:
+                    # 显式 --port 被占 → fail loud；否则挑空闲端口（target 优先）。
+                    if port is not None and not _is_port_free(bind_host, target_port):
+                        typer.echo(
+                            f"--port {target_port} 被占用（非本项目 orca 或其它进程）",
+                            err=True,
+                        )
+                        return EXIT_ARG_OR_VALIDATE
+                    actual_port = (
+                        target_port if _is_port_free(bind_host, target_port)
+                        else _find_free_port(bind_host=bind_host)
+                    )
+                    if not _spawn_background_serve(bind_host, actual_port):
+                        # tars 不在 PATH（FileNotFoundError）→ fail loud exit 1
+                        typer.echo("无法起后台 ``tars serve``：可执行不在 $PATH", err=True)
+                        return EXIT_RUN_FAILED
+                    # 等 serve 起来（health 探测重试）。持锁期间阻塞 socket-ready
+                    # （B-6：临界区覆盖 bind→ready→写回；loser 醒来时读到登记复用）。
+                    if not _wait_for_health(probe_host, actual_port, timeout=10.0):
+                        typer.echo(
+                            f"后台 tars serve 未在 {actual_port} 上 ready（超时 10s）",
+                            err=True,
+                        )
+                        return EXIT_RUN_FAILED
+                    # 写回登记（unlocked 变体，避免嵌套 flock 死锁；P1）。
+                    # 失败 loud warn（不阻断本次 open；spec-review B4）。
+                    try:
+                        write_back(port=actual_port, runs_dir_fp=my_fp)
+                    except OSError as e:
+                        typer.echo(
+                            f"⚠ web registry 写失败（{e}）；server 已起 port={actual_port} 但下次 `orca open` 会重复"
+                            f" spawn。可 `lsof -ti tcp:{actual_port} | xargs kill` 或忽略（下次成功写覆盖）。",
+                            err=True,
+                        )
+
+    # 3) POST /api/runs/attach（绝对路径）。
+    attach_error_code = _attach_and_get_error(probe_host, actual_port, tape_abs, run_id)
     if attach_error_code is not None:
         return attach_error_code
 
     # 4) 浏览器打开（URL 用 display_host，远程可点击）。
     url = f"http://{display_host}:{actual_port}/runs/{run_id}"
+    _signal_web_ready(run_id, url)
     _open_browser_or_print(url)
     typer.echo(f"Orca Web UI（attached）→ {url}  (browser tab 可关闭；server 后台运行)")
     return EXIT_OK
 
 
 def _spawn_background_serve(host: str, port: int) -> bool:
-    """后台起 ``orca serve --port <port>``（detached，SPEC §5 step1）。
+    """后台起 ``tars serve --port <port>``（detached，SPEC §5 step1）。
 
-    返回 True 启动成功；False 表示 ``orca`` 可执行不在 PATH（fail loud，调用方 exit 1）。
+    ``serve`` 是后端命令，属 ``tars`` 入口（``orca`` 薄壳无 serve，pyproject：
+    ``orca = in_session.cli:main``、``tars = cli.commands:main``）——故 spawn ``tars`` 而非 ``orca``。
+    返回 True 启动成功；False 表示 ``tars`` 可执行不在 PATH（fail loud，调用方 exit 1）。
     detached + DEVNULL：用户经浏览器交互，不依赖 stdout。
     """
     import subprocess
 
     try:
         subprocess.Popen(
-            ["orca", "serve", "--host", host, "--port", str(port)],
+            ["tars", "serve", "--host", host, "--port", str(port)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
@@ -1523,7 +1774,7 @@ def _spawn_background_serve(host: str, port: int) -> bool:
         )
     except FileNotFoundError:
         logger.error(
-            "`orca` 可执行不在 $PATH（venv 未激活？pyproject 入口未安装？）；"
+            "`tars` 可执行不在 $PATH（venv 未激活？pyproject 入口未安装？）；"
             "无法起后台 serve",
         )
         return False
@@ -1572,7 +1823,12 @@ def _attach_and_get_error(
 
 
 def main() -> None:
-    """console_scripts 入口（pyproject ``[project.scripts] orca``）。"""
+    """console_scripts 入口（pyproject ``[project.scripts] tars``）。
+
+    本模块的 ``app`` 是 **tars / 后端 CLI**（SPEC v3 §3）：run/serve/ps/logs/wait/resume/
+    install/validate/mcp/executor/list/open。旧 ``orca`` 入口已迁到
+    ``orca.iface.in_session.cli:main``（in-session 7 命令，LLM-facing）。
+    """
     # 函数内 import（保模块导入零副作用，对齐 commands.py:17-18 的 textual 延迟 import 纪律）：
     # 把 ~/.orca/config.json 的 binary override 注入对应 env var，之后所有 orca run 生效。
     from orca.iface.cli.config import bootstrap_config
@@ -1580,6 +1836,31 @@ def main() -> None:
     bootstrap_config()
     # 子进程默认不 buffered，让 TUI 内的 print/echo 立即可见。
     app()
+
+
+# ── tars 命令名变量化（SPEC v3 §3.2，env ORCA_BACKEND_CMD）────────────────────
+#
+# ``tars`` 不硬编码命令名：env ``ORCA_BACKEND_CMD``（默认 ``tars``）控制**显示名**
+# （help 文本 / version 字符串里的自我引用），让 operator 改名（如 ``conductor`` /
+# ``orca-backend``）时只需重命名二进制 + 设 env，help 自适应。实现 = 单一 Python 入口
+# （本模块 ``main``），console_scripts 声明默认 ``tars``；operator 改名走 pip 重装 +
+# env，零代码改动（spec §9#6：「实现细节留 step 1」，此处最小可切换实现）。
+BACKEND_CMD_ENV = "ORCA_BACKEND_CMD"
+DEFAULT_BACKEND_CMD = "tars"
+
+
+def backend_cmd_name() -> str:
+    """当前后端命令名（读 env，默认 ``tars``）。用于 help / 诊断展示。"""
+    return os.environ.get(BACKEND_CMD_ENV) or DEFAULT_BACKEND_CMD
+
+
+# 语义别名：tars entry 用的 app = 本模块的 backend app（单一 app 对象，两个名字同指）。
+# 测试与文档可据语义选名（``commands.app`` 旧名保留向后兼容；``tars_app`` 新语义名）。
+tars_app = app
+# Deprecated：``teams_app`` 是改名（2026-07-16 teams→tars）前的旧别名，保留向后兼容，
+# 任何外部代码 / notebook 仍 ``from orca.iface.cli.commands import teams_app`` 可用。
+# 新代码请用 ``tars_app``。随版本演进确认无引用后可删。
+teams_app = app
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@
 
 import { useEffect } from "react";
 import { useWorkflowStore } from "@/stores/workflow-store";
+import { useWsConnectionStore } from "./ws-connection-store";
 import type { WebEvent } from "@/types/events";
 import type { WsClientMessage } from "@/types/store-types";
 
@@ -132,8 +133,11 @@ export function useWebSocket(
       socket = createSocket(wsUrl);
       const wasReconnect = everConnected;
       everConnected = true;
+      // P3/Y4：transport-only 连接状态（sanctioned exception）。首次 connecting、重连 reconnecting。
+      useWsConnectionStore.getState()[wasReconnect ? "setReconnecting" : "setConnecting"]();
 
       socket.onopen = () => {
+        useWsConnectionStore.getState().setConnected();
         backoff = INITIAL_BACKOFF_MS;
         if (wasReconnect) {
           // 重连：发 resume（server 重放 seq>since）。同时启 watchdog——若 RESUME_WATCHDOG_MS
@@ -174,7 +178,11 @@ export function useWebSocket(
       socket.onclose = () => {
         // 重连前清 watchdog（避免重连间隙触发误 fallback）
         clearResumeWatchdog();
-        if (closedByUs) return;
+        if (closedByUs) {
+          useWsConnectionStore.getState().setDisconnected();
+          return;
+        }
+        useWsConnectionStore.getState().setReconnecting();
         reconnectTimer = setTimeout(() => {
           backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
           open();
@@ -182,6 +190,8 @@ export function useWebSocket(
       };
 
       socket.onerror = () => {
+        // P3：transport-only 状态（出错 → 重连中，见 onclose）。
+        useWsConnectionStore.getState().setReconnecting();
         /* 见 onclose */
       };
     };
