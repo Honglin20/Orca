@@ -57,4 +57,4 @@
 - ⏳ 真机 E2E（opencode + deepseek-v4-flash，GPU 机）—— 由后续 agent 执行
 
 ## Commit
-- `<待 code-reviewer 反馈处理后填>`
+- `e14f775` —— feat(workflow): KD-NAS v2 重构为 setup→gate→train DAG（确定性 gate + 有界并发池）
