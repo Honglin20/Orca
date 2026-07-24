@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-24] feat(cli): `tars close` 命令（关闭本地 orca web server，与 `tars open` 对称）
+
+补齐 `tars open` 的对称命令：`POST /api/shutdown`（loopback-only，跨平台优雅，触发 uvicorn lifespan）为主，PID 兜底（POSIX SIGTERM→SIGKILL / Windows taskkill /F）为辅（仅 404 老版无端点 server）。B1 双 wire（`run_server` + `_serve_and_run_inprocess` 两处都暴露 uvicorn 句柄）；B2 `--all` 用指纹过滤不误杀别用户 server；B3 不清 registry 靠 stale 自愈；B4 PID 兜底返 False 后必 re-probe（并发 winner 语义）。Windows PID 兜底恒 force-kill（无 SIGTERM），kill 前 stderr warn tape 可能未 flush。31 新测（web 8 + cli 23，win32-only warn 1 skip）+ 相邻回归 143 passed / 1 pre-existing fail（`run_manager.py:37` 预存 web→cli 违反，独立 issue）。code-reviewer：Implementation **pass** / Test coverage **conditional-pass → 已转 pass**（4 🟡 全修：Windows 空 parse fail loud + 平台文案 + AC5 registry 守门 + AC1 tape 直接验证；3 🟢 修 1 跳 2）。Commit: `<填入>`。详见 [release note](../releases/2026-07-24-tars-close-command.md)。
+
 ## [2026-07-24] test(in-session): 解析 CLI 输出前去 ANSI（修复 2 个 pre-existing 测试假报）
 
 typer/Rich 即使在 CliRunner（非 tty）下也给 `--help` 与 BadParameter 错误输出上 ANSI 色，并把 flag token 拆碎（`--run-id` 跨 span 成 `--`+`run`+`-id`），导致 `test_skill_md_flags_subset_of_cli_help`（`_help_flags` regex 全 miss → SKILL.md 真实 flag 全被判「未声明」）和 `test_cli_gc_max_age_zero_rejected`（`--max-age 必须为正` 里 flag 被高亮拆碎、子串断言失配）两个 pre-existing 假报。均为测试断言未去 ANSI、与生产无关（gc 正确 exit 2；各命令 flag 都真实存在）。修法：加 `_strip_ansi` helper，`_help_flags` 与 gc 两个 CLI 错误断言去色后再匹配。`test_gc.py + test_skill_md_flags_guard.py`：33 passed（原 31 + 2 failed）。Commit: `df5380a`。详见 [release note](../releases/2026-07-24-strip-ansi-cli-test-parsing.md)。

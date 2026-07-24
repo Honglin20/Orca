@@ -66,6 +66,10 @@ def create_app(manager: RunManager) -> FastAPI:
 
     app = FastAPI(title="orca-web", lifespan=lifespan)
     app.state.manager = manager
+    # ``tars close`` 的 ``/api/shutdown`` 端点经此句柄触发 ``should_exit``；run_server /
+    # _serve_and_run_inprocess 创建 uvicorn.Server 后覆写为真实句柄。None = 未 wire（端点
+    # 取不到时返 500 fail loud，见 attach.py::shutdown）。
+    app.state.uvicorn_server = None
     # SPEC §13.1 M-1 / AC19：全局 no-op auth middleware（多用户接口预留，当前不校验）。
     install_auth_middleware(app)
 
@@ -125,4 +129,6 @@ async def run_server(
     app = create_app(manager)
     config = uvicorn.Config(app, host=host, port=port, log_level="info")
     server = uvicorn.Server(config)
+    # 暴露 uvicorn 句柄给 ``/api/shutdown`` 端点（B1：与 _serve_and_run_inprocess 两处都 wire）。
+    app.state.uvicorn_server = server
     await server.serve()

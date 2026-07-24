@@ -6,6 +6,12 @@
 
 ## 当前任务（2026-07-24）
 
+### ✅ `tars close` 命令（关闭本地 orca web server，与 `tars open` 对称）—— 已提交
+
+**状态**：补齐 `tars open` 的对称命令。机制：`POST /api/shutdown`（loopback-only，跨平台优雅，触发 uvicorn lifespan）为主 + PID 兜底（POSIX SIGTERM→SIGKILL / Windows taskkill /F）为辅。spec-review 4 blocker（B1 双 wire / B2 指纹过滤 / B3 不清 registry / B4 PID re-probe）全闭环。Windows PID 兜底恒 force-kill（无 SIGTERM），kill 前 stderr warn tape 可能未 flush。31 新测绿（web 8 + cli 23 + 1 win32 skip）+ 相邻 143 passed / 1 pre-existing fail（`run_manager.py:37` 预存 web→cli 违反，独立 issue，本任务不恶化）。code-reviewer：Implementation **pass** / Test coverage **conditional-pass → 已转 pass**（4 🟡 全修，3 🟢 修 1 跳 2）。详见 [release note](../releases/2026-07-24-tars-close-command.md)。
+
+---
+
 ### ✅ in-session bootstrap 注册项目（修复 TARS run 在 web 不可见）—— 已提交
 
 **状态**：根因 = §13 注册表化后 in-session `bootstrap` 漏调 `register_project`（`orca run`/`web start_run`/`tars project rebuild` 都有，独 in-session 漏）→ TARS run 在 web 列表/详情不可见 + 远程 `~/.orca/projects.json` 不生成。修复：`orca/iface/in_session/cli.py` 加 `_register_current_project()` helper（detect+register，broad try/except fail-open+warn），在 bootstrap post-lock 段调用。2 新测绿；`tests/iface/in_session/ + tests/runtime/test_project.py` 494 passed / 2 pre-existing fail（无关）。code-reviewer 0 🔴 / 1 🟡采纳 / 2 🟢保持。详见 [release note](../releases/2026-07-24-in-session-bootstrap-register-project.md)。

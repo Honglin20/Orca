@@ -24,6 +24,8 @@ import asyncio
 import json
 import logging
 import os
+import signal
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1325,6 +1327,9 @@ async def _serve_and_run_inprocess(
         app, host=bind_host, port=port, log_level="warning",
     )
     server = uvicorn.Server(uvicorn_config)
+    # B1：暴露 uvicorn 句柄给 ``/api/shutdown``（与 server.py::run_server 两处都 wire）。
+    # `tars close` 在 ``orca run`` web 默认路径下也能优雅关闭（否则 /api/shutdown 恒 500）。
+    app.state.uvicorn_server = server
     serve_task = asyncio.create_task(
         server.serve(), name="orca-web-default-serve",
     )
@@ -1820,6 +1825,460 @@ def _attach_and_get_error(
         err=True,
     )
     return EXIT_RUN_FAILED
+
+
+# ── tars close（SPEC tars-close，与 ``tars open`` 对称）──────────────────────────
+
+
+@app.command(name="close")
+def close_run(
+    host: str | None = typer.Option(
+        None, "--host",
+        help="web server 监听地址（默认与 open/run 同源解析；通常无需显式）",
+    ),
+    port: int | None = typer.Option(
+        None, "--port",
+        help="指定单端口关闭（默认覆盖默认端口 + 登记端口去重）",
+    ),
+    all_servers: bool = typer.Option(
+        False, "--all",
+        help="扫描本地所有 LISTEN 端口，关闭所有**本项目指纹匹配**的 orca server",
+    ),
+) -> None:
+    """关闭本地 orca web server（与 ``tars open`` 对称，SPEC tars-close）。
+
+    默认覆盖：默认端口 7428 + ``~/.orca`` 登记端口（去重，登记端口 None 则略）。
+    ``--all``：扫描本地所有 LISTEN 端口 → 并发 probe → 仅关**本项目指纹匹配**的 orca server
+    （B2：别用户的 orca 不误杀）。
+
+    机制（优先顺序）：
+      1. ``POST /api/shutdown``（loopback，跨平台优雅，触发 uvicorn lifespan）；
+      2. PID 兜底（404 老版 server 无端点）：POSIX ``SIGTERM``→grace→``SIGKILL``；
+         Windows ``taskkill /F``（**恒 force-kill、跳过 lifespan、tape 可能未 flush**，
+         kill 前 stderr warn）。
+
+    退出码：0 全部关闭 / 无事可做；1 任一候选 fail loud。
+    """
+    raise typer.Exit(
+        _close_servers(host=host, port=port, all_servers=all_servers)
+    )
+
+
+def _close_servers(*, host: str | None, port: int | None, all_servers: bool) -> int:
+    """``tars close`` 核心：解析端点 → 选候选端口 → 关闭 → 汇总。返回 exit code。
+
+    host/port 解析复用 ``resolve_web_endpoint``（与 open/run/serve 同源），但 HTTP 探测
+    **始终走 127.0.0.1**（只关本机 server，不跨机；与 _open_run 一致）。
+    """
+    _, _, target_port = resolve_web_endpoint(host=host, port=port)
+    probe_host = "127.0.0.1"
+    my_runs_dir = _default_runs_dir()
+    my_fp = _runs_dir_fp(my_runs_dir)
+    registry_port = _safe_lookup_registry_port(my_runs_dir, my_fp, probe_host)
+
+    if all_servers:
+        try:
+            scanned = _local_listening_ports()
+        except RuntimeError as e:
+            # fail loud（计划 §4）：端口扫描不可用 → 用户手 ``pkill`` / ``taskkill``。
+            typer.echo(str(e), err=True)
+            return EXIT_RUN_FAILED
+        priority = {p for p in (target_port, registry_port) if p is not None}
+        candidates = _dedup_keep_order(
+            list(priority) + [p for p in scanned if p not in priority]
+        )
+        results = _close_all_concurrent(
+            probe_host, candidates, my_fp, priority=priority,
+        )
+    else:
+        candidates = _dedup_keep_order(
+            [p for p in (target_port, registry_port) if p is not None]
+        )
+        results = [
+            (p, _shutdown_server_on_port(probe_host, p, my_fp)) for p in candidates
+        ]
+
+    closed = [(p, r) for p, r in results if r in ("endpoint", "pid")]
+    failed = [(p, r) for p, r in results if r == "fail"]
+
+    if not closed and not failed:
+        typer.echo("no orca server found")
+        return EXIT_OK
+    if closed:
+        parts = [f"{p}({r})" for p, r in closed]
+        typer.echo(f"closed {len(closed)} orca server(s): [{', '.join(parts)}]")
+    if failed:
+        ports_str = ", ".join(str(p) for p, _ in failed)
+        typer.echo(
+            f"⚠ failed to close {len(failed)} server(s): [{ports_str}]"
+            "（可手 `pkill -f 'tars serve'` 或 `taskkill /PID <pid> /F`）",
+            err=True,
+        )
+        return EXIT_RUN_FAILED
+    return EXIT_OK
+
+
+def _safe_lookup_registry_port(
+    my_runs_dir: Path, my_fp: str, probe_host: str,
+) -> int | None:
+    """读登记端口（包装 _lookup_my_registered_port，容错；OSError/ValueError → None）。
+
+    ``tars close`` 不应因登记读失败而 fail（登记只是 hint；stale 自愈）。仅捕获预期的
+    fs/JSON 错误（OSError = lock/file，ValueError = JSON/端口解析），其它真 bug 仍抛。
+    """
+    try:
+        return _lookup_my_registered_port(my_runs_dir, my_fp, probe_host)
+    except (OSError, ValueError) as e:
+        logger.warning("lookup registry port 失败（忽略，继续按默认端口+扫描）：%s", e)
+        return None
+
+
+def _dedup_keep_order(items: list[int]) -> list[int]:
+    """去重保序（对端口列表；比 dict.fromkeys 显式表达意图）。"""
+    seen: set[int] = set()
+    out: list[int] = []
+    for x in items:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+def _shutdown_server_on_port(probe_host: str, port: int, my_fp: str) -> str:
+    """关闭端口上的 orca server。返 ``"endpoint"|"pid"|"fail"|"none"``（计划 §4）。
+
+    流程（B2/B4 闭环）：
+      1. probe ``/api/health``：非 orca 或 foreign 指纹 → ``"none"``（B2：--all 不误杀
+         别用户 server）。
+      2. ``POST /api/shutdown``：
+         - 200 → 短轮询（≤3s）确认 health 已消失 → ``"endpoint"``；
+         - 404 → 老版无端点，走 PID 兜底（步骤 3）；
+         - 其它（5xx / 网络错）→ ``"fail"``。
+      3. PID 兜底 ``_kill_pid_on_port``：
+         - True → ``"pid"``；
+         - False → **re-probe**（B4）：端口空（并发 winner 已关）→ ``"none"``；仍占 → ``"fail"``。
+    """
+    import httpx
+
+    health = _probe_orca_server(probe_host, port)
+    if not _health_is_my_project(health, my_fp):
+        return "none"  # B2：非本项目（含 foreign orca / 非 orca / 不可达）→ 跳过
+
+    try:
+        r = httpx.post(f"http://{probe_host}:{port}/api/shutdown", timeout=3.0)
+    except Exception as e:  # noqa: BLE001 — 网络异常 fail loud
+        logger.warning("POST /api/shutdown port=%s 网络异常：%s", port, e)
+        return "fail"
+
+    if r.status_code == 200:
+        # 短轮询确认 health 消失（≤3s）。shutdown 信号已发，此处只是确认。
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if _probe_orca_server(probe_host, port) is None:
+                return "endpoint"
+            time.sleep(0.2)
+        logger.warning(
+            "POST /api/shutdown port=%s 返 200 但 health 3s 后仍在（lifespan 可能仍在收尾）",
+            port,
+        )
+        return "fail"
+
+    if r.status_code == 404:
+        # 老版 server 无 ``/api/shutdown`` → PID 兜底（B7：Windows kill 前 stderr warn）。
+        if sys.platform == "win32":
+            typer.echo(
+                f"⚠ port {port}：legacy server 无 /api/shutdown，Windows PID 兜底恒 "
+                "force-kill（taskkill /F），跳过 lifespan，tape 可能未 flush",
+                err=True,
+            )
+        if _kill_pid_on_port(port):
+            return "pid"
+        # B4：False 不直接 = fail；re-probe 区分 none vs fail。
+        if _probe_orca_server(probe_host, port) is None:
+            return "none"  # 端口已空（并发 close 的 winner 已关 / PID 自然退出）
+        return "fail"
+
+    logger.warning(
+        "POST /api/shutdown port=%s HTTP %s: %s",
+        port, r.status_code, r.text[:200],
+    )
+    return "fail"
+
+
+def _close_all_concurrent(
+    probe_host: str, ports: list[int], my_fp: str, *, priority: set[int],
+) -> list[tuple[int, str]]:
+    """``--all`` 路径：并发 probe → 过滤本项目指纹 → 顺序关闭（SPEC tars-close §4 / AC8）。
+
+    Phase 1（probe）：``asyncio.gather`` + ``Semaphore(16)`` + 总 deadline 5s。
+    priority 端口（默认 7428 + 登记端口）short-circuit 优先 probe（用户最常关的）。
+    Phase 2（close）：顺序调 ``_shutdown_server_on_port``（每端口独立 fail loud）。
+    """
+    candidates = asyncio.run(
+        _probe_my_orca_ports_async(probe_host, ports, my_fp, priority=priority),
+    )
+    return [
+        (p, _shutdown_server_on_port(probe_host, p, my_fp)) for p in candidates
+    ]
+
+
+async def _probe_my_orca_ports_async(
+    probe_host: str, ports: list[int], my_fp: str, *, priority: set[int],
+) -> list[int]:
+    """并发 probe 端口列表 → 返**本项目指纹匹配**的 orca 端口（B2 过滤）。
+
+    priority 端口优先 probe（用户最常关 7428 + 登记端口）；``Semaphore(16)`` 限制并发
+    避免 fd 耗尽；总 deadline 5s 防 200+ 端口主机超时（AC8）。
+
+    **经 ``_probe_orca_server``（sync）**：单一 probe 真相源（与 _shutdown_server_on_port
+    一致）+ 测试可 mock（不直连 httpx.AsyncClient）。``asyncio.to_thread`` 包 sync 调用，
+    让并发仍生效。
+    """
+    ordered = sorted(set(ports), key=lambda p: (0 if p in priority else 1, p))
+    sem = asyncio.Semaphore(16)
+    deadline = time.monotonic() + 5.0
+
+    async def probe_one(port: int) -> int | None:
+        if time.monotonic() > deadline:
+            return None
+        async with sem:
+            # to_thread 包 sync _probe_orca_server（mockable + 不阻塞 event loop）。
+            health = await asyncio.to_thread(_probe_orca_server, probe_host, port)
+            # B2：只留本项目指纹（别用户 / foreign 不关）。
+            return port if _health_is_my_project(health, my_fp) else None
+
+    tasks = [asyncio.create_task(probe_one(p)) for p in ordered]
+    try:
+        done, pending = await asyncio.wait(tasks, timeout=5.0)
+    finally:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+    result: list[int] = []
+    for t in done:
+        try:
+            r = t.result()
+        except Exception:  # noqa: BLE001 — 单个 probe 异常不影响其它端口
+            continue
+        if r is not None:
+            result.append(r)
+    return result
+
+
+def _local_listening_ports() -> list[int]:
+    """枚举本机所有 LISTEN 端口（SPEC tars-close §4）。
+
+    POSIX：``ss -tlnH``（解析 ``*:PORT`` / ``0.0.0.0:PORT`` / ``[::]:PORT``）；
+    fallback ``netstat -tln``（macOS / 无 ss 的环境）。
+    Windows：``netstat -ano``（``TCP ... LISTENING`` 取本地端口列）。
+
+    全失败 / 输出空 → ``raise RuntimeError``（fail loud，提示平台对应手 kill 命令）。
+    """
+    import subprocess
+
+    if sys.platform == "win32":
+        try:
+            out = subprocess.run(
+                ["netstat", "-ano"], capture_output=True, text=True, timeout=3.0,
+                check=False,
+            ).stdout
+        except (OSError, subprocess.SubprocessError) as e:
+            raise RuntimeError(
+                f"netstat 调用失败（{e}）；"
+                f"可手 `taskkill /PID <pid> /F` 或 `Stop-Process -Name orca*`"
+            ) from e
+        ports = _parse_netstat_windows_ports(out)
+        if ports:
+            return ports
+        # netstat 成功执行但解析得空（locale/格式异常等）→ fail loud（与 POSIX 路径对齐）。
+        raise RuntimeError(
+            "netstat 执行成功但未解析到 LISTEN 端口（输出异常/locale 不兼容？）；"
+            "可手 `taskkill /PID <pid> /F` 或 `Stop-Process -Name orca*`"
+        )
+
+    # POSIX：ss 优先（Linux 常见，解析稳）；fallback netstat -tln（macOS/BSD）。
+    for cmd in (["ss", "-tlnH"], ["netstat", "-tln"]):
+        try:
+            out = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=3.0, check=False,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        ports = _parse_posix_listen_stdout(out)
+        if ports:
+            return ports
+    raise RuntimeError(
+        "无法枚举本地 LISTEN 端口（ss / netstat 都失败或无输出）；"
+        "可手 `pkill -f 'tars serve'` 或 `lsof -ti tcp:PORT | xargs kill`"
+    )
+
+
+def _parse_posix_listen_stdout(stdout: str) -> list[int]:
+    """POSIX ``ss -tlnH`` / ``netstat -tln`` 输出解析：取 LISTEN 行的 ``host:port`` 尾段。
+
+    Liberal 扫描所有 token；LISTEN 行的 Peer 通常是 ``0.0.0.0:*`` / ``[::]:*``
+    （``*`` int 解析失败，自动排除），故不会误收 remote port。
+    """
+    ports: set[int] = set()
+    for line in stdout.splitlines():
+        if "LISTEN" not in line.upper():
+            continue
+        for tok in line.split():
+            if ":" not in tok:
+                continue
+            tail = tok.rsplit(":", 1)[-1]
+            try:
+                p = int(tail)
+            except ValueError:
+                continue
+            if 0 < p < 65536:
+                ports.add(p)
+    return sorted(ports)
+
+
+def _parse_netstat_windows_ports(stdout: str) -> list[int]:
+    """``netstat -ano`` 输出解析：``TCP <local>:PORT <remote>:* LISTENING <pid>``。"""
+    ports: set[int] = set()
+    for line in stdout.splitlines():
+        if "LISTENING" not in line:
+            continue
+        parts = line.split()
+        # 形如 ``TCP    127.0.0.1:7428    0.0.0.0:0    LISTENING    1234``
+        if len(parts) < 2:
+            continue
+        local = parts[1]
+        if ":" not in local:
+            continue
+        tail = local.rsplit(":", 1)[-1]
+        try:
+            p = int(tail)
+        except ValueError:
+            continue
+        if 0 < p < 65536:
+            ports.add(p)
+    return sorted(ports)
+
+
+def _kill_pid_on_port(port: int) -> bool:
+    """杀监听 ``port`` 的 PID；True = 信号已发；False = PID 未找到 / 发送失败。
+
+    **POSIX**：``SIGTERM``（uvicorn catch → 优雅 lifespan）→ 5s grace → ``SIGKILL`` 兜底。
+    **Windows**：无 SIGTERM → ``taskkill /PID <pid> /F``（**恒 force-kill、跳过 lifespan**，
+    tape 可能未 flush）—— 调用方必先 stderr warn（见 ``_shutdown_server_on_port``）。
+
+    返回 False 后调用方必 re-probe（B4）：端口已空（被并发 winner 关了 / 自然退出）→ ``none``；
+    仍占用 → ``fail``。
+    """
+    import subprocess
+
+    pids = _resolve_pids_on_port(port)
+    if not pids:
+        return False
+
+    if sys.platform == "win32":
+        # Windows 无 SIGTERM：恒 force-kill（调用方已在更上层 stderr warn）。
+        for pid in pids:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/F"],
+                    capture_output=True, timeout=3.0, check=False,
+                )
+            except (OSError, subprocess.SubprocessError) as e:
+                logger.warning("taskkill /PID %s 失败：%s", pid, e)
+                return False
+        return True
+
+    # POSIX：SIGTERM → 5s grace → SIGKILL。
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError) as e:
+            logger.warning("SIGTERM pid=%s（port=%s）失败：%s", pid, port, e)
+            return False
+    # grace 期轮询退出（复用 bg_reader.pid_alive，DRY）。
+    from orca.iface.cli.bg_runner import pid_alive
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if all(not pid_alive(p) for p in pids):
+            return True
+        time.sleep(0.2)
+    logger.warning("SIGTERM grace 5s 超时（port=%s pids=%s），SIGKILL 兜底", port, pids)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass  # race：grace 内已退出
+    return True
+
+
+def _resolve_pids_on_port(port: int) -> list[int]:
+    """解析监听 ``port`` 的 PID 列表（POSIX lsof→ss fallback / Windows netstat -ano）。
+
+    失败 / 无匹配 → ``[]``。lsof 首选（macOS/Linux 都常见，输出稳定为 PID 列）；
+    ss 备选（解析 ``users:(("proc",pid=1234,...))`` 段）。
+    """
+    import subprocess
+
+    if sys.platform == "win32":
+        try:
+            out = subprocess.run(
+                ["netstat", "-ano"], capture_output=True, text=True, timeout=3.0,
+                check=False,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            return []
+        pids: list[int] = []
+        for line in out.splitlines():
+            if "LISTENING" not in line:
+                continue
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            local = parts[1]
+            if ":" not in local:
+                continue
+            try:
+                if int(local.rsplit(":", 1)[-1]) != port:
+                    continue
+            except ValueError:
+                continue
+            try:
+                pids.append(int(parts[-1]))
+            except ValueError:
+                continue
+        return pids
+
+    # POSIX: lsof -ti tcp:PORT → 直接 PID 列。
+    try:
+        out = subprocess.run(
+            ["lsof", "-ti", f"tcp:{port}"],
+            capture_output=True, text=True, timeout=3.0, check=False,
+        ).stdout
+        pids = [int(x) for x in out.split() if x.strip().lstrip("-").isdigit()]
+        if pids:
+            return pids
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    # ss -tlnp fallback：解析 ``pid=NNNN``。
+    import re
+
+    try:
+        out = subprocess.run(
+            ["ss", "-tlnp"], capture_output=True, text=True, timeout=3.0, check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    pids: list[int] = []
+    port_str = str(port)
+    for line in out.splitlines():
+        # 只处理含本端口的 LISTEN 行（任意 token 尾段等于 :PORT 即匹配 Local Address）。
+        if not any(tok.rsplit(":", 1)[-1] == port_str for tok in line.split()):
+            continue
+        for m in re.finditer(r"pid=(\d+)", line):
+            pids.append(int(m.group(1)))
+    return pids
 
 
 def main() -> None:
