@@ -51,6 +51,7 @@ def build_model(**cfg) -> nn.Module: ...   # 零参用 KNOBS.default；cfg 覆�
 - `spt_largekernel.py` —— 全 CNN · 大核标准 conv（k∈{7..15}，局部密集大核，物理对应 PDP）。
 - `spt_channelformer.py` —— 浅 attn precoder + CNN 主干（1 层全局上下文 + conv 重活）。
 - `spt_gnn.py` —— Conv + GNN 交替（num_ports 全连接图层间消息传递，MIMO 干扰建模）。
+- `spt_lmmse.py` —— 线性前置（近似 LMMSE 均衡）+ NN 残差（D10 简化版，信号重建口径，无 pilot）。
 
 > 全 CNN 三极：`spt_cnn_dilated`（局部稀疏）/ `spt_cnn_pointwise`（全局 pointwise）/
 > `spt_largekernel`（局部密集大核）。U-Net 补多尺度维度；GNN 是唯一显式建模 MIMO 层间关系的变体。

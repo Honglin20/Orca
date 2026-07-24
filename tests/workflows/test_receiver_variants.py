@@ -18,11 +18,11 @@ REPO = Path(__file__).resolve().parents[2]
 KD = REPO / "workflows" / "agents" / "_kd_scripts"
 KBDIR = REPO / "knowledge_base" / "families" / "receiver"
 
-# 全部 10 个变体（2 旧 + 5 新 + 3 新），回归覆盖整池。
+# 全部 11 个变体（2 旧 + 5 新 + 3 新 + 1 线性残差），回归覆盖整池。
 VARIANTS = [
     "spt_t1", "spt_alt",
     "spt_cnn_dilated", "spt_cnn_pointwise", "spt_puretf", "spt_unet", "spt_2d",
-    "spt_largekernel", "spt_channelformer", "spt_gnn",
+    "spt_largekernel", "spt_channelformer", "spt_gnn", "spt_lmmse",
 ]
 
 
@@ -180,3 +180,13 @@ def test_spt_gnn_5d_layout():
     blk = m.main[0]
     assert hasattr(blk, "gnn") and hasattr(blk, "conv")
     assert blk.gnn.num_ports == 4
+
+
+def test_spt_lmmse_linear_front_and_beta():
+    """spt_lmmse: 线性前置 lin_front（1×1）+ 可学残差混合 beta（D10 简化版）。"""
+    import torch
+    mod = _load_variant("spt_lmmse")
+    m = mod.build_model(num_blocks=1)
+    assert isinstance(m.lin_front, torch.nn.Conv1d)
+    assert m.lin_front.kernel_size[0] == 1          # per-subcarrier 1×1 线性均衡
+    assert isinstance(m.beta, torch.nn.Parameter)
