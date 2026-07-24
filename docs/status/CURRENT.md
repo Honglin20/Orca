@@ -10,7 +10,7 @@
 
 **状态**：实现全完成（5 阶段）。DAG `setup → selector → distill → recorder → … → $end`（无 finalize）。新脚本 `pick_variant/tune_latency/distill_dispatch/kd_common/teacher_model` + 改 `measure_student/teacher_setup/train_kd/viz_kd/export_onnx` + 4 agent.md + CONTRACTS + KB 改造（receiver 变体仓）+ 测试。spec-review 17 blocker + HIGH/SR/MED findings 全 fold。
 
-**验证**：✅ compile+workflows(kd)+e2e contract **199 passed / 0 failed**；✅ `tars validate` 等价（4 节点/路由/Jinja/latency_provider required）；✅ code-reviewer 4 个 🔴 + 关键 🟡 全修 + 回归守门补齐。⏳ 真机 E2E（opencode+deepseek-v4-flash，GPU 机）待用户执行。未提交（待用户确认后 commit）。
+**验证**：✅ compile+workflows(kd)+e2e contract **199 passed / 0 failed**；✅ `tars validate` 等价（4 节点/路由/Jinja/latency_provider required）；✅ code-reviewer 4 个 🔴 + 关键 🟡 全修 + 回归守门补齐。已提交 `855531c`。⏳ 真机 E2E（opencode+deepseek-v4-flash，GPU 机）待用户执行。
 
 **关键决策**：稳定 `kd_artifacts_dir`（+可覆盖）；`latency_provider` 必填无默认；dummy_input 用户指定（禁硬编码 shape）；FAIL_latency 走 `distill_dispatch` 确定性门；实时图每变体一张；force_rerun 仅 variants；精度基线 = 用户绝对值。
 
