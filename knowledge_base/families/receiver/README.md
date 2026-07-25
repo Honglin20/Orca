@@ -50,7 +50,6 @@ def build_model(**cfg) -> nn.Module: ...   # 零参用 KNOBS.default；cfg 覆�
 - `spt_2d.py` —— 2D 时频 axial attention（symbol 轴 + subcarrier 轴 MHA 分解）。
 - `spt_largekernel.py` —— 全 CNN · 大核标准 conv（k∈{7..15}，局部密集大核，物理对应 PDP）。
 - `spt_channelformer.py` —— 浅 attn precoder + CNN 主干（1 层全局上下文 + conv 重活）。
-- `spt_gnn.py` —— Conv + GNN 交替（num_ports 全连接图层间消息传递，MIMO 干扰建模）。
 - `spt_lmmse.py` —— 线性前置（近似 LMMSE 均衡）+ NN 残差（D10 简化版，信号重建口径，无 pilot）。
 - `spt_inception.py` —— 全 CNN · Inception 多尺度并行（3 支路 k∈{3,5,7} 并行求和，零 MATMUL；InceptionNeXt 极简版）。
 - `spt_resnext.py` —— 全 CNN · ResNeXt 分组卷积（Conv1d groups=4 cardinality，零 1×1 bottleneck；昇腾 GroupedConv 友好）。
@@ -58,7 +57,7 @@ def build_model(**cfg) -> nn.Module: ...   # 零参用 KNOBS.default；cfg 覆�
 - `spt_dualpath.py` —— 全 CNN · 时频双路并行卷积（F 轴 + S 轴 conv 双路求和；DPCRN 极简版，零 attention）。
 
 > 全 CNN 三极：`spt_cnn_dilated`（局部稀疏）/ `spt_cnn_pointwise`（全局 pointwise）/
-> `spt_largekernel`（局部密集大核）。U-Net 补多尺度维度；GNN 是唯一显式建模 MIMO 层间关系的变体。
+> `spt_largekernel`（局部密集大核）。U-Net 补多尺度维度。
 > 新增 4 极（2026-07-25 SOTA 调研后）：`spt_inception`（并行多尺度密集）/ `spt_resnext`（分组 cardinality）/
 > `spt_se`（轻量 channel 门控注意力）/ `spt_dualpath`（双轴并行 conv，无 attention）——
 > 均为昇腾友好（k>1 标准 conv + IMG2COL 进 Cube，零 MATMUL 或仅 SE 的微 1×1）。

@@ -18,11 +18,11 @@ REPO = Path(__file__).resolve().parents[2]
 KD = REPO / "workflows" / "agents" / "_kd_scripts"
 KBDIR = REPO / "knowledge_base" / "families" / "receiver"
 
-# 全部 11 个变体（2 旧 + 5 新 + 3 新 + 1 线性残差），回归覆盖整池。
+# 全部 10 个变体，回归覆盖整池（不含第二批 inception/resnext/se/dualpath）。
 VARIANTS = [
     "spt_t1", "spt_alt",
     "spt_cnn_dilated", "spt_cnn_pointwise", "spt_puretf", "spt_unet", "spt_2d",
-    "spt_largekernel", "spt_channelformer", "spt_gnn", "spt_lmmse",
+    "spt_largekernel", "spt_channelformer", "spt_lmmse",
 ]
 
 
@@ -171,15 +171,6 @@ def test_spt_channelformer_precoder_then_cnn():
     assert hasattr(m, "precoder") and hasattr(m, "main")
     assert len(m.precoder) == 1            # 浅 attn（固定 1 层）
     assert m.feature_hook_names() == ["precoder", "main"]
-
-
-def test_spt_gnn_5d_layout():
-    """spt_gnn: GNN block 含 gnn + conv 子步，num_ports=4 全连接图。"""
-    mod = _load_variant("spt_gnn")
-    m = mod.build_model(num_blocks=1)
-    blk = m.main[0]
-    assert hasattr(blk, "gnn") and hasattr(blk, "conv")
-    assert blk.gnn.num_ports == 4
 
 
 def test_spt_lmmse_linear_front_and_beta():
