@@ -4,37 +4,31 @@
 
 ---
 
-## 当前任务（2026-07-25）
+## 当前任务（2026-07-27）：五议题方案设计 —— 辩论 workflow 已出方案，待用户拍板
 
-### ✅ KD-NAS 并行 workflow 全流程完成（setup→gate→train + E2E + SOTA students）
+5 议题经 24-agent 辩论 workflow（议题1 走 4 策略×3 评委 judge panel；其余各 2 视角审视）→ 5 份综合 spec → 5 路 spec-reviewer 对抗审视。方案 + review **全 conditional-pass**（无 fail、无纯 pass，每份都被抓到实施前必修 blocker）。**待拍板 4 个 P0 后进入修订 + 实现**。
 
-**4 个 commit 全链路**：
-1. `e14f775` —— workflow 重构为 `setup→gate→train→$end`（确定性 gate + 有界并发池 + setup GPU 探测定并发）
-2. `02b927b` —— `examples/kd-nas-demo/` E2E 靶子（MODEL8 基线 + 随机数据真实测量）
-3. `902457d` —— E2E 真 bug 修复（🔴BUG-1 agent.md 执行指令重写 / 🔴BUG-2 bg_runner binary / 🟡BUG-3 + reviewer R1-R4）+ 139 测试
-4. `ee44b4b` —— SOTA 调研驱动加 4 昇腾友好 student（inception/resnext/se/dualpath），receiver 11→15
+> ⚠️ spec 当前在**临时 job 目录**（session 级，job 清理后失效）：`/home/mozzie/.claude/jobs/305ff919/tmp/specs/`。落地时建议迁入 `docs/specs/<topic>-design-draft.md`。
 
-**E2E 判据（agent 驱动，非手动）**：`tars run` 真驱动 setup→gate→train，agent 真执行 bash + emit JSON（BUG-1 命门过），4/4 变体 SUCCESS 真蒸馏（latency 0.35~1.11ms < 5ms target，NMSE 1.07~1.20 < 1.5）。并行验证 concurrency=3 同毫秒 3 worker + 增量账本 + fail 隔离。**绝无伪造**（跨 run 对比：latency 真测有噪声、accuracy 真算可复现、ckpt 字节跨 run 一致）。无阻断 bug，code-reviewer verdict 可发布。已 push。
+| # | 议题 | 推荐方案 | spec |
+|---|---|---|---|
+| 1 | workflow 被主 session 误停 | **S1 goal-gate 硬 Stop hook**（goal≡run 终态，零引擎/schema 改动，演进 cc_nudge.sh） | `stop/spec.md` |
+| 2 | NAS 超网可视化 | Mode A（recharts 原生通道覆盖 V5/V6/V7）→ Mode B（`custom(kind=supernet)` + 第三 tab） | `supernet-viz/spec.md` |
+| 3 | workflow 文档可视化 | ASCII/mermaid 分治，10 gap 排 P0–P7 | `doc-viz/spec.md` |
+| 4 | workflow 普适性 | 定位 B：通用编排引擎 + DL-first 模板 + 新 vertical 按需 | `generalizability/spec.md` |
+| 5 | 前端 web 优化 | Tier1 红线（ws 谎报 caught-up / viz 静默）→ Tier2 性能 → Tier3 超网 tab | `web/spec.md` |
 
-**GPU**：测试全程用 CPU（5 点全验到），未启/用/关任何实例；NAS benchmark 实例 `pro-7839ed6e9f69` 查为 shutdown 态，无干扰。
+汇总：`specs/SUMMARY.md`（完整 verdict/blocker/拍板清单）+ `specs/scout/`（4 份事实基线）。
 
-详见 [CHANGELOG](CHANGELOG.md)（4 条 2026-07-25 索引）+ 各 release note。
+**待用户拍板 P0**：① stop scope 是否追加 S3 无人值守自动化 ② gen 定位 B 须产品层 ratify ③ supernet Mode A 确认砍 Plotly 走纯 recharts ④ supernet Mode B ingestor P1 参数化 vs P2 并行新 ingestor。
 
 ---
 
 ## 必读文件（开工前按需）
 
-- [E2E bug fixes release note](../releases/2026-07-25-kd-nas-e2e-bug-fixes.md)
-- [CONTRACTS.md](../../workflows/agents/_kd_scripts/CONTRACTS.md) —— v2 契约（含 gate/train I/O + ledger §5）
+- `specs/SUMMARY.md`（临时路径见上⚠️）
 - [CHANGELOG](CHANGELOG.md)
 
 ---
 
-## 近期已完成（详见 CHANGELOG）
-
-- ✅ KD-NAS v2 setup→gate→train DAG 重构
-- ✅ kd-nas-demo E2E 测试靶子（commit `02b927b`；setup/gate/train 契约对齐 + 集成脚本单跑通）
-- ✅ `tars close` 命令（commit `59d73dd`）
-- ✅ in-session bootstrap 注册项目
-- ✅ Workflow 可视化审计修复（P1×5 + P2×7）
-- ✅ 单端口 + 多 Run 监控（Phase A+B'+C）
+> 上一任务「KD-NAS 并行 workflow 全流程」已完成（commits `e14f775`/`02b927b`/`902457d`/`ee44b4b`，CHANGELOG 2026-07-25 四条索引），已从本文件清理。

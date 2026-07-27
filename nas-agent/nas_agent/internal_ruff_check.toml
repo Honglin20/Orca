@@ -1,0 +1,9 @@
+[lint]
+select = [
+    "F401", # unused import — may indicate forgotten usage
+    "F811", # redefinition of unused name — common in LLM-generated code
+    "F821", # undefined name — often caused by missing imports
+    "F822", # undefined name in __all__
+    "F823", # local variable referenced before assignment
+    "F841", # local variable assigned but never used — may indicate forgotten logic
+]
