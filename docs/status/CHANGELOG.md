@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-29] fix(visibility): in-session run 可见性根治——marker-free 自注册 tape 所在目录
+
+SPEC v3 Bug A：任意目录（含无 `workflows/`）下 in-session 起 workflow → web 列表/详情/子 agent 推送不可见。根因是 tape 落点（cwd/runs）、注册根（detect 祖先）、discovery 扫描（注册根/runs）三处独立计算 + M-16 门槛太死。修法（逐字对齐 §4.1 A-E）：`register_project` 加 `*, require_marker: bool = True`（仅门控 M-16，M-15/P2 始终守）；bootstrap 改注册 tape 物理位置（cwd）`require_marker=False`；`rebuild_registry` 旧 entry 信任（`not in old_paths`，D-rebuild=A，不擦除 marker-free 旧 entry）；抽 `RUNS_DIRNAME` 到 runtime 中立层单源。测试 AC1-AC5c 全覆盖（C1 布尔方向守门经 mutation 验证非空泛）；runtime/web/in_session/exec 注册相关 147 passed。Commit: `cfcad05`。详见 [release note](../releases/2026-07-29-run-visibility-marker-free.md)。
+
 ## [2026-07-25] feat(kb/receiver): SOTA 调研驱动加 4 个昇腾友好 student 变体
 
 Web 调研三轴（无线接收机 SOTA / transformer 昇腾提速特性 / 高效 transformer 结构，引 arXiv 来源）后，给 `knowledge_base/families/receiver/` 加 4 个**昇腾友好 + 未被现有 11 变体覆盖**的新 student：`spt_inception`（InceptionNeXt arXiv:2303.16900，3 分路 k∈{3,5,7} 标准 Conv1d 并行，零 MATMUL/零 DW/零 attention → IMG2COL cube）、`spt_resnext`（ResNeXt CVPR2017，grouped conv groups=4 走 CANN GroupedConv，零 1×1 bottleneck 避 MATMUL）、`spt_se`（SENet Hu2018/2020，DilatedResBlock 主体 + per-channel 门控，与 channelformer 空间注意力正交）、`spt_dualpath`（DPRNN/DPCRN Interspeech2021，F+S 双轴卷积替代双轴 attention）。**依用户硬约束排除**：FFT/MLP-MIXER（硬件不行）、可变形/MSDA（昇腾 vector-core bound，arXiv:2505.14022）、Mamba/SSM（选择性扫描顺序累加，cube 利用率低）、Linformer（短序列 48/64 低秩投影反拖慢）、复值 conv（I/O 契约实值）、新 U-Net（已覆盖且需去 MATMUL）。receiver 变体 11→15，全契约合规 + ONNX 导出 onnxruntime 对齐 max_delta=0.00；`tars validate` 0 error。Commit: `ee44b4b`。

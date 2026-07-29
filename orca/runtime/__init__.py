@@ -9,6 +9,7 @@
 
 from orca.runtime._project import (
     REGISTRY_FILE,
+    RUNS_DIRNAME,
     RegistryCorruptError,
     detect_project_root,
     is_registered_runs_dir,
@@ -22,6 +23,7 @@ from orca.runtime._project import (
 
 __all__ = [
     "REGISTRY_FILE",
+    "RUNS_DIRNAME",
     "RegistryCorruptError",
     "detect_project_root",
     "is_registered_runs_dir",

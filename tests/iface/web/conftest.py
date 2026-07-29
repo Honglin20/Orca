@@ -1,7 +1,7 @@
 """tests/iface/web/conftest.py —— web 后端测试共享 fixtures + helpers。
 
 约定（同 tests/run/conftest.py）：本仓库不用 pytest-asyncio，异步统一 ``asyncio.run``。
-``run_async`` / ``make_manager`` / ``demo_yaml`` 在本文件定义，被同包测试引用。
+``run_async`` / ``make_manager`` / ``demo_linear_yaml`` / ``FakeWebSocket`` 在本文件定义，被同包测试引用。
 """
 
 from __future__ import annotations
@@ -18,6 +18,47 @@ import pytest
 
 from orca.iface.web.run_manager import RunManager
 from orca.iface.web.server import create_app
+
+
+class FakeWebSocket:
+    """模拟 WebSocket（``asyncio.Queue`` 桥）——server ``send_json`` 入 client 队列。
+
+    codebase 约定（SPEC web §6.4）：单 loop 驱动 ``ws_endpoint``，避免 starlette ``TestClient``
+    跨线程 + 真事件的复杂时序（intent-first）。被 ``test_ws.py`` / ``test_run_manager.py`` 共用。
+    """
+
+    def __init__(self):
+        self._sent: asyncio.Queue[dict] = asyncio.Queue()  # server → client
+        self._recv: asyncio.Queue[dict | Exception] = asyncio.Queue()  # client → server
+        self.accepted = False
+        self.closed = False
+
+    async def accept(self):
+        self.accepted = True
+
+    async def send_json(self, data: dict) -> None:
+        if self.closed:
+            from fastapi import WebSocketDisconnect
+            raise WebSocketDisconnect()
+        await self._sent.put(data)
+
+    async def receive_json(self) -> dict:
+        item = await self._recv.get()
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    # client-side helpers（测试驱动用）
+    def feed(self, msg: dict) -> None:
+        """client 发消息给 server。"""
+        self._recv.put_nowait(msg)
+
+    def feed_disconnect(self) -> None:
+        from fastapi import WebSocketDisconnect
+        self._recv.put_nowait(WebSocketDisconnect())
+
+    async def client_recv(self, timeout: float = 1.0) -> dict:
+        return await asyncio.wait_for(self._sent.get(), timeout=timeout)
 
 
 def run_async(coro):

@@ -558,30 +558,35 @@ def _default_rundir() -> Path:
 
 
 def _register_current_project() -> None:
-    """SPEC §13 D4：in-session run 注册所属项目到 ``~/.orca/projects.json``。
+    """SPEC §13 D4 + run-visibility §4.1 B：in-session run 注册 tape 物理所在目录到注册表。
 
-    discovery（列表 ``GET /api/runs?scope=all``）+ 懒挂载（详情 ``ensure_attached``）
-    都依赖注册表；in-session bootstrap 此前漏注册 → TARS 启动的 run 在 web 列表/详情
-    不可见（项目永不在注册表 → discovery 扫不到 + resolve_run_path 0 命中 404）。
-    与 ``orca run``（commands.py POST project_path → server start_run register）/
-    ``tars project rebuild`` 同语义（``detect_project_root`` → ``register_project``）。
+    注册 ``_default_rundir().resolve().parent``（=含 tape 的 ``runs/`` 目录父级 = cwd），
+    ``require_marker=False``（marker-free 可信自注册）。**不再用** ``detect_project_root()``
+    （旧逻辑可能跳到 cwd 祖先，与 tape 落点 ``cwd/runs`` 脱节 → discovery 扫祖先 ``runs/``
+    看不到 cwd 下的 tape，run-visibility §2 根因 ①≠②③）。
 
-    依赖方向合法：``iface/in_session → orca/runtime``（中立层，仅 stdlib + schema）。
+    对齐原理：tape 落点 = ``cwd/runs/<id>.jsonl``（``bg_runner.default_tape_path``）→ 注册
+    ``cwd`` → discovery 扫 ``<注册根>/runs`` = ``cwd/runs`` → 命中。三处经 ``RUNS_DIRNAME``
+    共享常量同源（run-visibility §4.1 E / G4）。
 
-    fail-open：注册失败（项目根无 ``workflows/`` / ``.orca/config.json`` 等）只 warn 不
-    阻断 bootstrap——run 照常，仅 web 可见性退化（用户可 ``tars project rebuild`` 手动
-    补登记）。与既有 daemon spawn / artifacts mkdir 失败同 fail-open 语义（web 可见性是
-    便利层，注册失败不应让 run 跑不起来）。
+    依赖方向合法：``iface/in_session → orca/runtime``（中立层，仅 stdlib）。
+
+    fail-open：注册失败（M-15 拒顶层 / P2 拒 ORCA_HOME / ``RegistryCorruptError`` / ``OSError``）
+    只 warn 不阻断 bootstrap——run 照常，仅 web 可见性退化（用户可 ``tars project rebuild``
+    补登记）。与既有 daemon spawn / artifacts mkdir 失败同 fail-open 语义。
     """
     try:
-        from orca.runtime import detect_project_root, register_project
+        from orca.runtime import register_project
 
-        register_project(detect_project_root())
+        # 注册 tape 物理位置（runs 目录的父级），与 discovery 的 <root>/runs 天然对齐。
+        # ``_default_rundir()`` 返相对 ``runs/`` → ``.resolve().parent`` = cwd（非 strict
+        # lexical 规范化，不抛——见 ``Path.resolve`` 默认行为）。
+        rundir_parent = _default_rundir().resolve().parent
+        register_project(rundir_parent, require_marker=False)
     except Exception:  # noqa: BLE001 — 故意 broad：register_project 可抛
-        # ValueError（无 workflows/ marker，M-16）/ RegistryCorruptError（继承
+        # ValueError（M-15 顶层 / P2 == ORCA_HOME）/ RegistryCorruptError（继承
         # RuntimeError，注册表坏）/ OSError / ModuleNotFoundError，**任一**都不应阻断
         # run——web 可见性是便利层，注册失败只降级（用户可 ``tars project rebuild`` 补登记）。
-        # 与 daemon spawn 的 ``except OSError`` 相比本处覆盖面更广，因 register 的失败面更广。
         logger.warning(
             "bootstrap: 注册项目失败，run 仍可跑但 web 列表/详情不可见"
             "（可 `tars project rebuild` 手动补登记）",

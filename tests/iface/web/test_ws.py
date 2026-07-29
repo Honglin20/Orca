@@ -28,48 +28,7 @@ from orca.gates.types import HumanGate
 from orca.iface.web.run_manager import RunHandle, RunManager
 from orca.iface.web.ws_handler import WebServer
 
-from tests.iface.web.conftest import run_async
-
-
-class FakeWebSocket:
-    """模拟 WebSocket：accept/send_json/receive_json/disconnect。
-
-    用 ``asyncio.Queue`` 桥：server ``send_json`` 入 client 队列（client 读收到的事件）；
-    client ``receive_json``（经 ``feed``）入 server 队列。断开 = raise WebSocketDisconnect。
-    """
-
-    def __init__(self):
-        self._sent: asyncio.Queue[dict] = asyncio.Queue()  # server → client
-        self._recv: asyncio.Queue[dict | Exception] = asyncio.Queue()  # client → server
-        self.accepted = False
-        self.closed = False
-
-    async def accept(self):
-        self.accepted = True
-
-    async def send_json(self, data: dict) -> None:
-        if self.closed:
-            from fastapi import WebSocketDisconnect
-            raise WebSocketDisconnect()
-        await self._sent.put(data)
-
-    async def receive_json(self) -> dict:
-        item = await self._recv.get()
-        if isinstance(item, Exception):
-            raise item
-        return item
-
-    # client-side helpers（测试驱动用）
-    def feed(self, msg: dict) -> None:
-        """client 发消息给 server。"""
-        self._recv.put_nowait(msg)
-
-    def feed_disconnect(self) -> None:
-        from fastapi import WebSocketDisconnect
-        self._recv.put_nowait(WebSocketDisconnect())
-
-    async def client_recv(self, timeout: float = 1.0) -> dict:
-        return await asyncio.wait_for(self._sent.get(), timeout=timeout)
+from tests.iface.web.conftest import FakeWebSocket, run_async
 
 
 def _make_handle(tmp_path, run_id: str) -> RunHandle:

@@ -54,6 +54,7 @@ from orca.gates.types import HumanGate
 from orca.run.lifecycle import gen_run_id
 from orca.run.orchestrator import Orchestrator
 from orca.runtime import (
+    RUNS_DIRNAME,
     detect_project_root,
     is_registered_runs_dir,
     list_registered,
@@ -219,7 +220,7 @@ class RunManager:
         self,
         max_concurrent: int = 3,
         *,
-        runs_dir: Path | str = "runs",
+        runs_dir: Path | str = RUNS_DIRNAME,
         registry: SessionContextRegistry | None = None,
     ):
         self._max_concurrent = max_concurrent
@@ -333,7 +334,7 @@ class RunManager:
         # 但若显式传入则要求 register 成功（fail loud，让 web POST /api/run 错误能 propagate）。
         resolved_project = self._resolve_project_path_for_run(project_path)
         if resolved_project is not None:
-            runs_dir_for_run = resolved_project / "runs"
+            runs_dir_for_run = resolved_project / RUNS_DIRNAME
             runs_dir_for_run.mkdir(parents=True, exist_ok=True)
         else:
             runs_dir_for_run = self._runs_dir
@@ -1278,8 +1279,10 @@ class RunManager:
             except (OSError, RuntimeError) as e:
                 raise ValueError(f"project_path resolve 失败：{project_path} ({e})") from e
         # register：缺省路径失败不阻断（兼容既有 in-process），显式传入失败则 raise。
+        # run-visibility §4.1 C（D1=是）：marker-free 自注册——start_run 已把 tape 写到
+        # ``resolved_project/runs``，注册同一根使 discovery 自洽。无 marker 项目也能注册。
         try:
-            register_project(root)
+            register_project(root, require_marker=False)
         except ValueError:
             if project_path is not None:
                 raise
@@ -1351,7 +1354,7 @@ class RunManager:
             if not isinstance(root_str, str):
                 continue
             root = Path(root_str)
-            runs_dir = root / "runs"
+            runs_dir = root / RUNS_DIRNAME
             if not runs_dir.is_dir():
                 continue  # 项目无 runs/ → skip（stale）
             for tape_path in sorted(runs_dir.glob("*.jsonl")):
@@ -1456,7 +1459,7 @@ class RunManager:
                 if not isinstance(root_str, str):
                     continue
                 try:
-                    runs_dir = Path(root_str).resolve() / "runs"
+                    runs_dir = Path(root_str).resolve() / RUNS_DIRNAME
                     resolved.relative_to(runs_dir)
                     return pid, meta.get("name")
                 except (ValueError, OSError, RuntimeError):
@@ -1674,7 +1677,7 @@ class RunManager:
             root_str = meta.get("path")
             if not isinstance(root_str, str):
                 continue
-            candidate = Path(root_str) / "runs" / f"{run_id}.jsonl"
+            candidate = Path(root_str) / RUNS_DIRNAME / f"{run_id}.jsonl"
             if candidate.is_file():
                 hits.append(candidate)
         # legacy（``~/.orca/runs/<run_id>.jsonl``）

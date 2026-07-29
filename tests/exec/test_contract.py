@@ -188,14 +188,25 @@ def _walk_py(root: Path):
 
 
 def test_dependency_no_run_no_compile():
-    """铁律 1：exec/ 不 import orca.run / orca.compile。"""
-    banned = ("from orca.run", "import orca.run", "from orca.compile", "import orca.compile")
+    """铁律 1：exec/ 不 import orca.run / orca.compile。
+
+    ``orca.runtime``（中立层，项目身份/注册表）**不在此列**——exec→runtime 合法
+    （run-visibility §4.1 E：``RUNS_DIRNAME`` 常量放 runtime，exec 可向下 import）。
+    故模式须精确匹配 import 边界（``orca.run`` 后跟 ``.``/空格/换行），不误匹配 ``orca.runtime``
+    （后跟 ``t``）；也不误匹配注释/docstring 中的提及。
+    """
+    # ``from orca.run`` 后跟 import 边界字符（``.`` 子模块 / 空格 / 换行 bare import）。
+    banned = (
+        "from orca.run.", "from orca.run ", "from orca.run\n",
+        "import orca.run.", "import orca.run ", "import orca.run\n",
+        "from orca.compile", "import orca.compile",
+    )
     hits = []
     for p in _walk_py(EXEC_DIR):
         text = p.read_text(encoding="utf-8")
         for b in banned:
             if b in text:
-                hits.append(f"{p.relative_to(EXEC_DIR.parent.parent)}: {b}")
+                hits.append(f"{p.relative_to(EXEC_DIR.parent.parent)}: {b.strip()}")
     assert not hits, f"exec/ 反向依赖 run/compile：\n{chr(10).join(hits)}"
 
 

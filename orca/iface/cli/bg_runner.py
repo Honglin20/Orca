@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 from orca.run.lifecycle import gen_run_id
+from orca.runtime import RUNS_DIRNAME
 
 logger = __import__("logging").getLogger(__name__)
 
@@ -148,10 +149,12 @@ def log_path(run_id: str) -> Path:
 def default_tape_path(run_id: str) -> Path:
     """默认 tape 路径（与 OrcaApp / commands._resolve_tape_path 约定一致）。
 
-    返回 ``runs/<run_id>.jsonl``（CWD 相对，production 用户在 repo 根跑，写到 ./runs/）。
+    返回 ``<RUNS_DIRNAME>/<run_id>.jsonl``（CWD 相对，production 用户在 repo 根跑，写到
+    ``./runs/``）。``RUNS_DIRNAME`` 与 discovery 扫描根（``run_manager.discover_runs``）、
+    MCP artifacts 输出目录（``mcp_tools.server``）共享单一真相源（run-visibility §4.1 E / G4）。
     child process 经 env 拿同一 run_id，OrcaApp 看到 env 用同一 tape_path —— 三处一致。
     """
-    return Path("runs") / f"{run_id}.jsonl"
+    return Path(RUNS_DIRNAME) / f"{run_id}.jsonl"
 
 
 # ── metadata 原子读写 ─────────────────────────────────────────────────────────
