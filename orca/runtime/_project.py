@@ -45,6 +45,11 @@ _REGISTRY_VERSION = 1
 _LOCK_FILE = ".projects.lock"
 _BAK_FILE = REGISTRY_FILE + ".bak"
 
+# 项目本地的 tape/资源目录名（SPEC run-visibility §4.1 E：tape 落点 = discovery 扫描根的共享常量）。
+# 放中立层 runtime：``iface/cli`` / ``iface/web`` / ``exec`` 均可合法向下 import（依赖单向），
+# 推翻 ``commands.py`` 旧「跨层不能共享常量」workaround——单一真相源，不再两处独立字面。
+RUNS_DIRNAME = "runs"
+
 # OS 顶层目录黑名单（M-15）：绝对路径 normalize 后比对。覆盖 POSIX + Windows 常见顶层。
 # ``/home`` / ``/Users`` 也拒（在 home 下应建专门的项目子目录，而非把整个 home 当项目）。
 _TOPLEVEL_DIRS: frozenset[str] = frozenset(
@@ -339,18 +344,28 @@ def _is_valid_registry_file(path: Path) -> bool:
     )
 
 
-def register_project(project_root: Path | str) -> str:
-    """注册一个项目（SPEC §13 D4 / M-15 / M-16）。
+def register_project(
+    project_root: Path | str, *, require_marker: bool = True
+) -> str:
+    """注册一个项目（SPEC §13 D4 / M-15 / M-16 + run-visibility §4.1 A）。
 
     步骤：
-      1. resolve + 拒绝 OS 顶层目录（M-15）。
-      2. 要求 path 含 ``workflows/`` 或 ``.orca/config.json``（M-16）。
-      3. 拒绝 ``project_root == orca_home()``（P2 防锚定）。
+      1. resolve + 拒绝 OS 顶层目录（M-15，**始终保留**）。
+      2. 拒绝 ``project_root == orca_home()``（P2 防锚定，**始终保留**）。
+      3. ``require_marker=True`` 时要求 path 含 ``workflows/`` 或 ``.orca/config.json``
+         （M-16，仅外部注册强制）。
       4. upsert 注册表（更新 path/name/last_seen；新项目记 first_seen）。
+
+    Args:
+      require_marker: 是否强制 M-16 marker 检查。默认 ``True``——外部注册
+        （``tars project add`` / ``rebuild_registry`` 新候选）走严格 M-16。``False`` 仅用于
+        **可信自注册路径**（in-session bootstrap / ``start_run`` / ``rebuild_registry`` 旧 entry）
+        ——"orca 正往这写 tape / 曾注册"比"有 workflows/ 文件夹"是更强的有效上下文证据
+        （SPEC run-visibility §5）。M-15（拒顶层）+ P2（拒 ORCA_HOME）两道闸**不受此开关影响**。
 
     返回 ``project_id``（即使已注册也返回同 id，幂等）。
 
-    fail loud：顶层目录 → ``ValueError``；无 project marker → ``ValueError``；
+    fail loud：顶层目录 → ``ValueError``；``require_marker`` 且无 marker → ``ValueError``；
     注册表 corrupt → ``RegistryCorruptError``。
     """
     resolved = _resolve_strict(project_root)
@@ -363,7 +378,7 @@ def register_project(project_root: Path | str) -> str:
         raise ValueError(
             f"拒绝注册 ORCA_HOME 自身为项目根：{resolved}（P2 防锚定）。"
         )
-    if not _has_project_marker(resolved):
+    if require_marker and not _has_project_marker(resolved):
         raise ValueError(
             f"项目根需含 ``workflows/`` 或 ``.orca/config.json`` 之一：{resolved}（M-16）。"
         )
@@ -410,7 +425,7 @@ def is_registered_runs_dir(path: Path | str) -> bool:
             root = _resolve_strict(root_str)
         except ValueError:
             continue
-        runs_dir = root / "runs"
+        runs_dir = root / RUNS_DIRNAME
         try:
             resolved.relative_to(runs_dir)
             return True
@@ -488,6 +503,15 @@ def rebuild_registry(extra_paths: list[Path | str] | None = None) -> dict:
         if isinstance(path_str, str) and path_str:
             candidate_paths.append(path_str)
 
+    # SPEC run-visibility §4.1 D（D-rebuild=A）：旧注册表 path 原文集合——rebuild 须信任既有
+    # entry（marker-free 自注册的旧 entry 不被 M-16 擦除，G2）。**不二次 resolve**：候选
+    # ``path_str`` 与注册表 ``meta["path"]`` 同源字面比对（extra 未规范化的字面也能命中）。
+    old_paths: set[str] = {
+        meta["path"]
+        for meta in old_projects.values()
+        if isinstance(meta.get("path"), str)
+    }
+
     # 2. extra_paths + 当前 cwd 的 project root
     if extra_paths:
         for p in extra_paths:
@@ -523,11 +547,15 @@ def rebuild_registry(extra_paths: list[Path | str] | None = None) -> dict:
         _atomic_write_registry({"version": _REGISTRY_VERSION, "projects": {}})
 
     # 5. 逐个 register（每个独立锁；register_project 内自带 _with_lock）
+    # SPEC run-visibility §4.1 D：旧 entry（``path_str in old_paths``）→ ``require_marker=False``
+    # （信任先前可信注册，防 marker-free entry 被 M-16 擦除，G2/AC5b）；新候选（extra_paths /
+    # detect）→ ``True``（严格 M-16，G3）。⚠️ 布尔方向（round-2 C1）：``not in old_paths``。
     registered = 0
     skipped = 0
     for path_str in deduped:
+        require_marker = path_str not in old_paths
         try:
-            register_project(path_str)
+            register_project(path_str, require_marker=require_marker)
             registered += 1
         except (ValueError, OSError, RuntimeError):
             skipped += 1

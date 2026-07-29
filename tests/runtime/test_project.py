@@ -166,6 +166,48 @@ def test_register_project_accepts_orca_config_marker(tmp_path):
     assert pid
 
 
+# ── require_marker 双向（run-visibility §4.1 A / AC1 / AC2 / AC5a） ─────────────
+
+
+def test_register_project_require_marker_false_accepts_no_marker(tmp_path):
+    """AC1：``require_marker=False`` 对无 marker 的非顶层目录成功注册（返 pid，进注册表）。
+
+    默认（True）对同目录仍 raise——两头双向，可信自注册放宽、外部注册严格。
+    """
+    bare = tmp_path / "bare"
+    bare.mkdir()  # 无 workflows/ / .orca/config.json
+    # 默认 True → M-16 拒。
+    with pytest.raises(ValueError, match="project marker|workflows"):
+        register_project(bare)
+    # require_marker=False → 成功。
+    pid = register_project(bare, require_marker=False)
+    assert pid == project_id(bare)
+    registered = list_registered()
+    assert pid in registered
+    assert registered[pid]["path"] == str(bare.resolve())
+
+
+@pytest.mark.parametrize("toplevel", ["/", "/etc", "/home", "/tmp", "/usr"])
+def test_register_project_require_marker_false_still_rejects_toplevel(toplevel):
+    """AC2：``require_marker=False`` 对 OS 顶层仍 raise（M-15 不被绕过）。
+
+    含 ``/home`` / ``/tmp``（非 ``parent==self``，只靠 ``_TOPLEVEL_DIRS`` 黑名单——防实现
+    清空黑名单漏网）。Windows ``C:\\`` 跳过（CI Linux 无盘符根）。
+    """
+    with pytest.raises(ValueError, match="顶层"):
+        register_project(toplevel, require_marker=False)
+
+
+def test_register_project_require_marker_false_still_rejects_orca_home(
+    _isolated_orca_home,
+):
+    """AC2：``require_marker=False`` 对 ORCA_HOME 自身仍 raise（P2 不被绕过）。"""
+    home = _isolated_orca_home
+    (home / "workflows").mkdir()  # 伪装 marker 也不应绕过 P2
+    with pytest.raises(ValueError, match="ORCA_HOME"):
+        register_project(home, require_marker=False)
+
+
 # ── 鲁棒（P1：原子写 + .bak + 损坏 fail loud） ────────────────────────────────
 
 
@@ -294,23 +336,42 @@ def test_rebuild_recovers_from_corrupt_registry(tmp_path, monkeypatch):
     assert project_id(proj) in registered
 
 
-def test_rebuild_clears_stale_entries(tmp_path, monkeypatch):
-    """rebuild 剔除失效 path（旧注册表里有但 path 不存在/marker 丢失）。"""
+def test_rebuild_trusts_old_entries_but_gates_new_candidates(tmp_path, monkeypatch):
+    """run-visibility §4.1 D（D-rebuild=A）：rebuild = reconcile，**不是 re-gate**。
+
+    旧 entry（marker 丢失）→ 信任（``require_marker=False``）→ 仍注册；stale 由
+    ``list_stale_projects`` 报（N4 配套清理，非 blocker）。新候选（``extra_paths``，
+    无 marker）→ 严格 M-16（``require_marker=True``）→ skip。两头布尔方向正确（C1 守门）。
+    """
     live = _make_project(tmp_path, "live")
     register_project(live)
-    # 加一个假 path 进注册表
-    fake = _make_project(tmp_path, "fake")
-    register_project(fake)
-    # 删 fake 的 workflows → marker 失效
+    # 旧 entry：曾注册、后删 marker（模拟 marker-free 自注册后 marker 消失）。
+    wasmarker = _make_project(tmp_path, "wasmarker")
+    register_project(wasmarker)
     import shutil as _sh
-    _sh.rmtree(fake / "workflows")
+    _sh.rmtree(wasmarker / "workflows")
+    # 新候选（无 marker）经 extra_paths 传入——不应被注册。
+    bare_extra = tmp_path / "bare_extra"
+    bare_extra.mkdir()
 
     monkeypatch.chdir(live)
     monkeypatch.setenv("ORCA_PROJECT_ROOT", str(live))
-    result = rebuild_registry()
-    # live 应重新注册，fake 应 skip
-    assert project_id(live) in list_registered()
-    assert project_id(fake) not in list_registered()
+    rebuild_registry(extra_paths=[bare_extra])
+
+    registered = list_registered()
+    # live（有 marker 旧 entry）→ 注册。
+    assert project_id(live) in registered
+    # wasmarker（marker 丢失的旧 entry）→ 仍注册（信任，D-rebuild=A / AC5b）。
+    assert project_id(wasmarker) in registered, (
+        "marker 丢失的旧 entry 被 rebuild 擦除（D-rebuild=A 回归？）"
+    )
+    # bare_extra（新候选无 marker）→ skip（require_marker=True）。
+    assert project_id(bare_extra) not in registered, (
+        "新候选无 marker 被 rebuild 放过（C1 布尔反号，G3 安全边界破？）"
+    )
+    # wasmarker 虽仍注册，但 marker 丢失 → list_stale_projects 报 stale（N4）。
+    stale_ids = [s["project_id"] for s in list_stale_projects()]
+    assert project_id(wasmarker) in stale_ids
 
 
 def test_rebuild_with_extra_paths(tmp_path, monkeypatch):
@@ -325,28 +386,78 @@ def test_rebuild_with_extra_paths(tmp_path, monkeypatch):
     assert result["registered"] >= 1
 
 
+def test_rebuild_marker_project_zero_regression(tmp_path, monkeypatch):
+    """AC5a：既有 marker 项目经 rebuild 注册不变（零回归）。
+
+    run-visibility §4.1 D：旧 entry 走 ``require_marker=False``（信任），有 marker 的项目
+    无论走哪条路都应注册成功 + project_id 不变。
+    """
+    proj = _make_project(tmp_path, "marker_proj")
+    pid_before = register_project(proj)
+    monkeypatch.chdir(proj)
+    monkeypatch.setenv("ORCA_PROJECT_ROOT", str(proj))
+    rebuild_registry()
+    registered = list_registered()
+    assert pid_before in registered, "marker 项目经 rebuild 丢失（零回归破）"
+    assert registered[pid_before]["path"] == str(proj.resolve())
+
+
+def test_rebuild_preserves_marker_free_old_entry(tmp_path, monkeypatch):
+    """AC5b（D-rebuild=A 联动）：marker-free 注册的旧 entry 经 rebuild 仍存在。
+
+    **关键守门**：防 round-2 C1 布尔反号回归（``path_str in old_paths`` 会让旧 entry 被算成
+    ``require_marker=True`` → M-16 擦除，摧毁 G2）。正确方向是 ``not in old_paths``：旧 entry
+    → False（信任）。
+    """
+    bare = tmp_path / "bare"
+    bare.mkdir()  # 无 marker
+    # marker-free 可信自注册（如 in-session bootstrap / start_run）。
+    register_project(bare, require_marker=False)
+    assert project_id(bare) in list_registered()
+
+    # rebuild：cwd / detect 不指向 bare（bare 不是新候选）。
+    other = _make_project(tmp_path, "other")
+    monkeypatch.chdir(other)
+    monkeypatch.setenv("ORCA_PROJECT_ROOT", str(other))
+    rebuild_registry()
+
+    registered = list_registered()
+    assert project_id(bare) in registered, (
+        "marker-free 旧 entry 经 rebuild 被擦除（C1 布尔反号回归？G2 破）"
+    )
+
+
 def test_rebuild_all_fail_rolls_back_to_old_registry(tmp_path, monkeypatch):
     """SPEC §13.3 P1 数据安全：所有候选均失败 → 回滚到 rebuild 前 registry（不清空）。
 
-    场景：旧 registry 有一个曾有效项目，rebuild 前删除其 marker（workflows/）→ 候选无效；
-    cwd / detect / extra 全失败 → 旧 registry 应被保留（rolled_back: True）。
+    run-visibility §4.1 D 后旧 entry 走 ``require_marker=False``（信任），故「marker 丢失」
+    不再让旧 entry 失败。构造「全失败」场景：直接注入一个顶层 path 作旧 entry（M-15 始终拒，
+    即便 ``require_marker=False``），cwd/detect 也指向无 marker 目录（新候选走严格 M-16 被拒）。
+    全失败 + 旧 registry 非空 → 应回滚（``rolled_back: True``），旧 registry 保留。
     """
-    live = _make_project(tmp_path, "keep_me")
-    register_project(live)
-    # 删 marker 让候选失效（register 会拒）。
-    import shutil as _sh
-    _sh.rmtree(live / "workflows")
-    # cwd 切到一个无 marker 目录；ORCA_PROJECT_ROOT 也指向同一目录（detect 也失败）。
+    # 直接注入顶层 path 进注册表（绕过 register_project 的 M-15 校验——模拟 legacy 坏数据）。
+    from orca.runtime import _project as _p
+    with _p._with_lock():
+        data = _p._read_registry_unlocked()
+        data["projects"]["ffffffffffffffff"] = {
+            "path": "/",
+            "name": "bogus-toplevel",
+            "first_seen": 0.0,
+            "last_seen": 0.0,
+        }
+        _p._atomic_write_registry(data)
+
+    # cwd / detect 指向无 marker 目录（新候选 require_marker=True 会被 M-16 拒）。
     bare = tmp_path / "bare"
     bare.mkdir()
     monkeypatch.chdir(bare)
     monkeypatch.setenv("ORCA_PROJECT_ROOT", str(bare))
 
-    result = rebuild_registry(extra_paths=[bare])  # 全失败（bare 无 marker；live 也丢 marker）
+    result = rebuild_registry(extra_paths=[bare])  # 全失败（"/" M-15 拒；bare 无 marker 拒）
     assert result.get("rolled_back") is True
     assert result["registered"] == 0
-    # 旧 registry 保留：live 的 entry 仍在注册表里（即使 path 已 stale）。
-    assert project_id(live) in list_registered()
+    # 旧 registry 保留：注入的 bogus entry 仍在（数据安全：rebuild 不清空）。
+    assert "ffffffffffffffff" in list_registered()
     # pre-rebuild 快照落地
     pre_bak = orca_home() / (REGISTRY_FILE + ".pre-rebuild.bak")
     assert pre_bak.is_file()

@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING
 from mcp.server.fastmcp import FastMCP
 
 from orca.gates import ask_user as gates_ask_user
+from orca.runtime import RUNS_DIRNAME
 
 if TYPE_CHECKING:
     from orca.gates.context_registry import SessionContextRegistry
@@ -59,7 +60,8 @@ logger = logging.getLogger(__name__)
 # 的 ``mcpServers`` key 一致——claude ``--allowed-tools mcp__orca-agent-tools__ask_user`` 授权。
 _SERVER_NAME = "orca-agent-tools"
 # 默认 runs 目录（与 RunManager 默认一致；构造时可覆盖，测试用 tmp_path）。
-_DEFAULT_RUNS_DIR = "runs"
+# ``RUNS_DIRNAME`` 与 RunManager / bg_runner / discovery 共享单一真相源（run-visibility §4.1 E）。
+_DEFAULT_RUNS_DIR = RUNS_DIRNAME
 
 
 class AgentToolsMcpServer:

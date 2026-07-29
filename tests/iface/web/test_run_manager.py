@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -23,7 +24,12 @@ from orca.events.replay import replay_state
 from orca.iface.web.run_manager import RunHandle, RunManager, RunMeta
 from orca.run.orchestrator import Orchestrator
 
-from tests.iface.web.conftest import make_manager, run_async
+from tests.iface.web.conftest import (
+    FakeWebSocket,
+    demo_linear_yaml,
+    make_manager,
+    run_async,
+)
 
 
 # ── 真并发（SPEC §6.2 / §0.1 铁律 4）─────────────────────────────────────
@@ -249,6 +255,167 @@ def test_shutdown_stops_gate_handlers(tmp_path, yaml_path):
         assert handle._gate_started is False
         # task 已 done
         assert handle._task is not None and handle._task.done()
+
+    run_async(go())
+
+
+# ── run-visibility：marker-free 注册 → discovery/attach/WS 可见（AC4a/AC4b/AC5c） ──
+
+
+def _write_tape_event(path: Path, seq: int, etype: str, data: dict) -> None:
+    """追加一行 JSON 到 tape（合成事件，测试用）。"""
+    import time as _time
+    payload = {
+        "seq": seq,
+        "type": etype,
+        "timestamp": _time.time(),
+        "node": None,
+        "session_id": None,
+        "data": data,
+    }
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def test_ensure_attached_marker_free_project(tmp_path, monkeypatch):
+    """AC4a：marker-free 注册项目 → ensure_attached 成功 + get_run_events 非空。
+
+    run-visibility §4.1 A/C：无 marker 项目经可信自注册（``require_marker=False``）后，
+    discovery 的 tape 在 attach allowlist（``is_registered_runs_dir``）内 → ``ensure_attached``
+    不抛 + ``get_run_events`` 返回非空。
+    """
+    from orca.runtime import register_project
+
+    monkeypatch.setenv("ORCA_HOME", str(tmp_path / ".orca_home"))
+    proj = tmp_path / "proj"
+    proj.mkdir()  # 无 workflows/ / .orca/config.json
+    register_project(proj, require_marker=False)
+    runs_dir = proj / "runs"
+    runs_dir.mkdir()
+
+    # 合成 terminal tape（workflow_started + workflow_completed → 无 follow task，确定性）。
+    run_id = "demo-ac4a"
+    tape_path = runs_dir / f"{run_id}.jsonl"
+    _write_tape_event(tape_path, 1, "workflow_started", {"workflow_name": "demo"})
+    _write_tape_event(tape_path, 2, "workflow_completed", {})
+
+    manager = make_manager(tmp_path)
+
+    async def go():
+        await manager.ensure_attached(run_id)  # 不抛（marker-free 注册命中 allowlist）
+        handle = manager.get_handle(run_id)
+        assert handle is not None
+        events = manager.get_run_events(run_id)
+        assert len(events) >= 2  # ws + wc
+        assert [e.type for e in events][:2] == ["workflow_started", "workflow_completed"]
+        await manager.shutdown()
+
+    run_async(go())
+
+
+def test_bus_emit_reaches_ws_subscriber_marker_free(tmp_path, yaml_path, monkeypatch):
+    """AC4b：marker-free 注册项目的 run → handle.bus.emit 经 WS pump 确定性收到。
+
+    run-visibility §4.1 C：``start_run`` 切 ``require_marker=False`` → 无 marker 项目也能注册 →
+    handle 存在 → WS ``_handle_subscribe`` 成功订阅 → ``bus.emit`` fan-out → pump → WS client 收到。
+    用 ``EventBus.emit``（非 publish）；emit 第一动作 ``tape.append``（非绕过 tape，只是不经
+    文件轮询 pump）。``FakeWebSocket``（conftest 共享）单 loop 驱动（确定性，codebase 约定见
+    ``test_ws.py``）。
+    """
+    from orca.iface.web.ws_handler import WebServer
+    from orca.runtime import list_registered
+
+    monkeypatch.setenv("ORCA_HOME", str(tmp_path / ".orca_home"))
+    proj = tmp_path / "proj"
+    proj.mkdir()  # 无 marker
+
+    manager = make_manager(tmp_path)
+    hold = asyncio.Event()
+
+    async def slow_run(self):
+        await hold.wait()  # 阻住 run，让 handle 存在 + bus 活着
+
+    async def go():
+        with patch.object(Orchestrator, "run", slow_run):
+            run_id = await manager.start_run(
+                str(yaml_path), {}, None, None, project_path=str(proj),
+            )
+            await asyncio.sleep(0.05)  # 让 task 进 sem + running
+        handle = manager.get_handle(run_id)
+        assert handle is not None, "start_run 后 handle 应存在"
+        # marker-free 注册命中（_resolve_project_path_for_run require_marker=False）
+        registered = list_registered()
+        assert any(
+            Path(meta["path"]) == proj.resolve() for meta in registered.values()
+        ), f"marker-free 项目未注册：{registered}"
+
+        # WS subscribe → emit → 收到（完整 push chain）
+        server = WebServer(manager)
+        ws = FakeWebSocket()
+        endpoint_task = asyncio.create_task(server.ws_endpoint(ws))
+        await asyncio.sleep(0.01)  # let accept
+        ws.feed({"type": "subscribe", "run_id": run_id})
+        await asyncio.sleep(0.02)  # let subscribe + pump start
+        await handle.bus.emit("node_started", {"node": "a"}, node="a")
+        msg = await ws.client_recv(timeout=1.0)
+        assert msg["type"] == "node_started"
+        assert msg["run_id"] == run_id  # 带 run_id 标签
+
+        # 清理
+        ws.feed_disconnect()
+        await asyncio.sleep(0.02)
+        await server._cleanup(ws)
+        endpoint_task.cancel()
+        try:
+            await endpoint_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        hold.set()  # 放行 run
+        await manager.shutdown()
+
+    run_async(go())
+
+
+def test_start_run_detect_ancestor_tape_lands_detect_root(tmp_path, monkeypatch):
+    """AC5c：detect 跳祖先时 tape 落 detect_root/runs + 注册 detect_root + discovery 命中。
+
+    run-visibility §4.2 第 5 行契约：cwd=``<proj>/sub`` + ``<proj>/workflows/`` →
+    ``detect_project_root`` 跳到 ``<proj>`` → tape 落 ``<proj>/runs``（非 ``<proj>/sub/runs``）
+    → 注册 ``<proj>`` → discovery 扫 ``<proj>/runs`` 命中。scrub ``ORCA_PROJECT_ROOT``
+    （与 AC3 口径一致，不靠 env 钉 detect）。
+    """
+    from orca.runtime import list_registered
+
+    monkeypatch.setenv("ORCA_HOME", str(tmp_path / ".orca_home"))
+    monkeypatch.delenv("ORCA_PROJECT_ROOT", raising=False)
+
+    proj = tmp_path / "proj"
+    (proj / "workflows").mkdir(parents=True)  # marker 在 proj 级
+    sub = proj / "sub"
+    sub.mkdir()
+    monkeypatch.chdir(sub)  # cwd=<proj>/sub → detect 跳祖先 <proj>
+
+    yaml_path = demo_linear_yaml(tmp_path)
+    manager = make_manager(tmp_path)
+
+    async def go():
+        run_id = await manager.start_run(str(yaml_path), {}, None, None)  # project_path=None → detect
+        await manager.wait_done(run_id, timeout=10.0)
+
+        # 注册 detect_root（<proj>，非 <proj>/sub）。
+        registered = list_registered()
+        assert any(
+            Path(meta["path"]) == proj.resolve() for meta in registered.values()
+        ), f"未注册 detect_root {proj}：{registered}"
+        # tape 落 detect_root/runs（非 sub/runs）。
+        tape_path = proj / "runs" / f"{run_id}.jsonl"
+        assert tape_path.is_file(), f"tape 未落 detect_root/runs：{tape_path}"
+        assert not (sub / "runs").exists(), "tape 不应落 sub/runs"
+        # discovery 命中（扫 <proj>/runs）。
+        summaries = manager.discover_runs()
+        discovered_ids = [s.run_id for s in summaries]
+        assert run_id in discovered_ids, f"discovery 未命中 {run_id}：{discovered_ids}"
+        await manager.shutdown()
 
     run_async(go())
 

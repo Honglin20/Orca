@@ -110,21 +110,21 @@ def test_bootstrap_emits_ws_ns_and_writes_marker(cwd_tmp, wf_path):
 
 
 def test_bootstrap_registers_project_for_web_discovery(cwd_tmp, wf_path, monkeypatch):
-    """SPEC §13 D4：in-session bootstrap 注册所属项目 → web discovery/懒挂载可见。
+    """SPEC §13 D4 + run-visibility §4.1 B：bootstrap marker-free 注册 cwd → web discovery 可见。
 
-    回归守门：bootstrap 此前漏 ``register_project`` → TARS 启动的 run 在 web 列表/详情
-    不可见（远程 ``~/.orca/projects.json`` 根本不生成）。
+    回归守门：bootstrap 此前漏 register_project / 注册 detect 祖先 → TARS 启动的 run 在 web
+    不可见。改后注册 tape 物理位置（cwd），``require_marker=False``，**不依赖** ``workflows/``
+    marker 或 ``ORCA_PROJECT_ROOT`` env（round-2 H3：旧测试靠 env+workflows 钉 detect，须重写）。
     """
     from orca.runtime import list_registered
 
-    # 隔离 ORCA_HOME（不污染真实 ~/.orca/projects.json）+ 禁 auto-open-web（避免游离子进程）。
+    # 隔离 ORCA_HOME + 禁 auto-open-web（避免游离子进程）。
     orca_home = cwd_tmp / ".orca_home"
     monkeypatch.setenv("ORCA_HOME", str(orca_home))
     monkeypatch.setenv("ORCA_BOOTSTRAP_OPEN_WEB", "0")
-    # register_project M-16 要求项目根含 workflows/ 或 .orca/config.json；
-    # ORCA_PROJECT_ROOT 钉死 detect_project_root 到 cwd_tmp（否则向上走 git root）。
-    (cwd_tmp / "workflows").mkdir()
-    monkeypatch.setenv("ORCA_PROJECT_ROOT", str(cwd_tmp))
+    # run-visibility §4.1 B：scrub ORCA_PROJECT_ROOT，不建 workflows/——测 marker-free 注册。
+    monkeypatch.delenv("ORCA_PROJECT_ROOT", raising=False)
+    assert not (cwd_tmp / "workflows").exists()
 
     runner = CliRunner()
     _bootstrap(runner, wf_path)
@@ -132,29 +132,72 @@ def test_bootstrap_registers_project_for_web_discovery(cwd_tmp, wf_path, monkeyp
     expected = str(cwd_tmp.resolve())
     registered = list_registered()
     assert any(meta.get("path") == expected for meta in registered.values()), (
-        f"bootstrap 未注册项目 {expected}：{registered}"
+        f"bootstrap 未 marker-free 注册 cwd {expected}：{registered}"
     )
     # 注册表文件已落盘到隔离 ORCA_HOME（web discovery 读此文件枚举 run）。
     assert (orca_home / "projects.json").is_file()
 
 
 def test_register_current_project_fail_open(tmp_path, monkeypatch):
-    """注册失败（项目根无 workflows/ marker）只 warn 不抛——run 照常（web 可见性退化）。
+    """注册失败（M-15 拒顶层）只 warn 不抛——run 照常（web 可见性退化）。
 
-    与 daemon spawn / artifacts mkdir 失败同 fail-open 语义。
+    run-visibility §4.1 B 后 ``_register_current_project`` 用 ``require_marker=False`` 注册
+    ``_default_rundir().resolve().parent``。fail-open 触发（round-2 H4 撤回旧"无 marker → fail"
+    假设）：monkeypatch ``_default_rundir`` 返顶层路径（``Path("/")``）→
+    ``.resolve().parent == "/"`` → ``register_project`` M-15 拒（即便 ``require_marker=False``
+    也守 M-15）→ warn + 注册表空。
     """
-    from orca.iface.in_session.cli import _register_current_project
+    from orca.iface.in_session import cli as cli_mod
     from orca.runtime import list_registered
 
     monkeypatch.setenv("ORCA_HOME", str(tmp_path / ".orca_home"))
-    # ORCA_PROJECT_ROOT 指向无 marker 的空目录 → register_project M-16 raise ValueError。
-    bare = tmp_path / "bare"
-    bare.mkdir()
-    monkeypatch.setenv("ORCA_PROJECT_ROOT", str(bare))
+    # 让 _default_rundir().resolve().parent = "/" → M-15 拒（require_marker=False 也守 M-15）。
+    monkeypatch.setattr(cli_mod, "_default_rundir", lambda: Path("/"))
 
-    _register_current_project()  # 不应 raise（fail-open）
+    cli_mod._register_current_project()  # 不应 raise（fail-open）
 
-    assert list_registered() == {}  # 注册失败 → 注册表仍空
+    assert list_registered() == {}  # M-15 拒 → 注册表仍空
+
+
+def test_bootstrap_marker_free_run_visible_in_web_discovery(cwd_tmp, wf_path, monkeypatch):
+    """AC3：无 workflows/ 的目录起 in-session run → 注册命中 cwd + discovery + resolve_run_path 可见。
+
+    run-visibility §4.1 B / §7 AC3：marker-free 自注册 tape 物理位置（cwd），discovery 扫
+    ``cwd/runs`` 命中该 tape。用 ``CliRunner`` cwd 钉 ``cwd_tmp``（``cwd_tmp`` fixture 已 chdir），
+    scrub ``ORCA_PROJECT_ROOT``，不依赖任何 env / workflows marker。
+    """
+    from orca.iface.web.run_manager import RunManager
+    from orca.runtime import is_registered_runs_dir, list_registered
+
+    orca_home = cwd_tmp / ".orca_home"
+    monkeypatch.setenv("ORCA_HOME", str(orca_home))
+    monkeypatch.setenv("ORCA_BOOTSTRAP_OPEN_WEB", "0")
+    monkeypatch.delenv("ORCA_PROJECT_ROOT", raising=False)
+    assert not (cwd_tmp / "workflows").exists()  # 确无 marker
+
+    runner = CliRunner()
+    reply = _bootstrap(runner, wf_path)
+    run_id = reply["run_id"]
+    tape_path = Path(reply["tape"]).resolve()  # reply["tape"] 是相对 runs/<id>.jsonl
+    expected_cwd = cwd_tmp.resolve()
+
+    # ① marker-free 注册命中 cwd（tape 物理位置的父级）。
+    registered = list_registered()
+    assert any(meta.get("path") == str(expected_cwd) for meta in registered.values()), (
+        f"未 marker-free 注册 cwd {expected_cwd}：{registered}"
+    )
+    # ② tape 落 cwd/runs（与注册根 cwd 自洽：discovery 扫 cwd/runs）。
+    assert tape_path.parent == expected_cwd / "runs"
+    assert is_registered_runs_dir(tape_path)  # attach allowlist 命中
+    # ③ discovery 命中该 run（source=attached）+ resolve_run_path 定位到 tape。
+    # 注：``discover_runs`` 只扫注册项目（读注册表），不读 ``runs_dir`` 参数——此处显式传仅为
+    # 显式化 tape 所在目录，不影响 discovery 命中（命中经注册表的 cwd entry）。
+    manager = RunManager(runs_dir=cwd_tmp / "runs")
+    summaries = manager.discover_runs()
+    assert any(
+        s.run_id == run_id and s.source == "attached" for s in summaries
+    ), f"discovery 未命中 marker-free run {run_id}（source=attached）：{[s.run_id for s in summaries]}"
+    assert manager.resolve_run_path(run_id).resolve() == tape_path
 
 
 def test_bootstrap_duplicate_same_wf_fails_loud(cwd_tmp, wf_path):

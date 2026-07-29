@@ -24,6 +24,12 @@
 
 ---
 
+## 待修复 bug（已定位根因，待排期）
+
+- **Bug2 web：同 session 第二次 workflow 前端空白**。根因=二次 run 首次 `/events` 拉取失败时前端零重试零报错（`workflow-store.ts:537-552` `loadRun` 非 200 仅 `console.error`+return，详情页无轮询）→ 永久空白；后端触发=`orca run` 默认路径的 `_wait_ws_autoexit`（`commands.py:1430`）只感知首个 run，R1 终态+WS 空窗即自杀、误杀复用的 R2。修向：前端 `loadRun` 加退避重试+错误态；auto-exit 感知非终态 run。动手前须确认二次 run 启动方式（持久 serve vs 每次 in-process）。（Bug A run-visibility 已于 2026-07-29 修复合并，见 CHANGELOG。）
+
+---
+
 ## 必读文件（开工前按需）
 
 - `specs/SUMMARY.md`（临时路径见上⚠️）
