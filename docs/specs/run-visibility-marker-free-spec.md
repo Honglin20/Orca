@@ -1,7 +1,8 @@
 # SPEC：in-session run 可见性根治 —— 解耦 `workflows/` marker，注册 tape 实际所在目录
 
-> **v2（2026-07-29）**：经 round-1 spec-reviewer 对抗审视（Conditional Pass）+ 用户拍板后修订。
-> 决策已锁定：**D-rebuild=A / D1=是 / D2=否 / D3=接受**。待 round-2 spec-reviewer 稳态确认后实现。
+> **v3（2026-07-29）**：经 round-1 + round-2 spec-reviewer 对抗审视后修订。
+> 决策已锁定：**D-rebuild=A / D1=是 / D2=否 / D3=接受**。
+> **v3 修复 round-2 抓出的 1 critical + 3 high**：C1（§4.1 D 布尔反号 `not`）、H2（AC4b 用 `bus.emit` 非 `publish` + `ensure_attached` 前置）、H3（§8 补 `:112` 改写）、H4（§8 撤回 `:141` "不破"承诺 + monkeypatch 改写手段）；+ M5a/M5b/L6。
 > **实施 base 分支：`in-session-unified-backend`（HEAD `3a73675`）**——非 `master`；`master` 在 `98d7c67`（PR#4），
 > 不含注册表机制。SPEC 所有 file:line 已在该分支实测命中。
 > 相关前作：`docs/plans/2026-07-24-in-session-bootstrap-register-project.md`（surgical 补丁，本 SPEC 是其根治续作，
@@ -26,7 +27,7 @@ web discovery（`run_manager.py:1326` `discover_runs`）+ 详情 attach（`run_m
 |---|---|---|---|
 | ① | tape 落点 = `cwd/runs/<id>.jsonl`（相对 CWD） | `orca/iface/cli/bg_runner.py:148` `default_tape_path`（`Path("runs")/...`） | 跟启动 CWD 走 |
 | ② | 注册根 = `detect_project_root()`（向上找 `workflows/`/`.git`，可能 ≠ cwd） | `in_session/cli.py:560` `_register_current_project`；`run_manager.py:1258` `_resolve_project_path_for_run` | 可能跳到 cwd 祖先 |
-| ③ | discovery 扫描 = `<注册根>/runs`（字面 `"runs"`） | `run_manager.py:1355`；`resolve_run_path:1677` | 只扫已注册项目 |
+| ③ | discovery 扫描 = `<注册根>/runs`（字面 `"runs"`） | `run_manager.py:1354`；`resolve_run_path:1677` | 只扫已注册项目 |
 
 - **①≠②③**：bootstrap 把 tape 写 `cwd/runs`，却注册 `detect_project_root()`（祖先）→ discovery 扫 `<祖先>/runs` 看不到 `cwd/runs` 的 tape。即便注册成功也 miss。
 - **M-16 门槛太死**（`_project.py:366`）：注册根无 `workflows/`/`.orca/config.json` → `ValueError` → `_register_current_project` fail-open 只 warn（`cli.py:585`）→ 永不进注册表 → 全 miss。
@@ -86,7 +87,7 @@ def _register_current_project() -> None:
         logger.warning("bootstrap: 注册项目失败…（可 `tars project rebuild` 补登记）", exc_info=True)
 ```
 - `_default_rundir()`=`Path("runs")`（相对）→ `.resolve().parent`=`cwd`。tape 在 `cwd/runs/<id>` → 注册 `cwd` → discovery 扫 `cwd/runs` → 命中。①②③ 对齐。
-- `_default_rundir().resolve()` 失败（cwd 异常）→ fail-open warn（既有语义）。
+- `_default_rundir().resolve()` 为**非 strict**（lexical 规范化，不抛——round-2 L6 修正：旧措辞"resolve 失败→fail-open"不准）。try/except 仍兜 `register_project` 的 `ValueError`（M-15 顶层）/`RegistryCorruptError`/`OSError` → fail-open warn。若注册了一个不存在的 cwd path，discovery 后续 `runs_dir.is_dir()` skip（无害）。
 - **不再读 `ORCA_PROJECT_ROOT`/`detect_project_root`**（注册侧）；该 env 仅影响别处（如 `default_tape_path` 未来演进），与注册解耦。
 
 **C. `orca/iface/web/run_manager.py::_resolve_project_path_for_run`（D1=是，切 marker-free）**
@@ -100,11 +101,14 @@ register_project(root, require_marker=False)   # 原：register_project(root)
 **D. `orca/runtime/_project.py::rebuild_registry`（D-rebuild=A，不擦除旧 marker-free entry）**
 ```python
 # step2 收候选时记来源：old_projects（旧注册表）vs extra_paths/detect（新候选）
-old_paths: set[str] = { ... 来自 old_projects.values() 的 path ... }
+# old_paths 用注册表 path 原文（与 candidate 同源，不二次 resolve——否则 extra 未规范化字面失配）
+old_paths: set[str] = { meta["path"] for meta in old_projects.values() if isinstance(meta.get("path"), str) }
 ...
 # step5 逐个 register：旧 entry 视为"先前可信注册"→ require_marker=False；新候选走默认 True
+# ⚠️ 布尔方向（round-2 C1 修复）：require_marker=True → M-16 强制（拒无 marker）。
+#    故旧 entry 要 False（信任），新候选要 True（严格）→ `path_str not in old_paths`。
 for path_str in deduped:
-    require_marker = path_str in old_paths   # 旧 entry 信任，新候选严格 M-16
+    require_marker = path_str not in old_paths   # 旧 entry→False(信任), 新候选→True(严格 M-16)
     try:
         register_project(path_str, require_marker=require_marker)
         registered += 1
@@ -112,12 +116,15 @@ for path_str in deduped:
         skipped += 1
 ```
 - **语义**：rebuild = reconcile（对齐注册表 vs 现实），**不是 re-gate**。"曾在注册表"= 先前可信注册的证据。新候选（extra_paths / detect）仍走严格 M-16（安全）。
-- 修复 round-1 issue #2：marker-free 旧 entry 不再被默认 M-16 擦除；G2 成立。
+- **round-2 C1**：旧版伪代码 `path_str in old_paths` 布尔反号——旧 entry 算出 True→被 M-16 擦除（摧毁 G2）、新候选算出 False→绕 M-16（摧毁 G3）。改 `not in` 后两头正确。
+- 修复 round-1 issue #2：marker-free 旧 entry 不再被默认 M-16 擦除；G2 成立。AC5b 守门。
 
-**E. 抽 `RUNS_DIRNAME` 常量（round-1 challenge A）**
-- `orca/runtime/_project.py` 顶部加 `RUNS_DIRNAME = "runs"`（中立层，iface 合法向下 import）。
-- `_project.py`（`is_registered_runs_dir` 的 `root/"runs"`）、`run_manager.py`（`discover_runs` `root/"runs"`、`resolve_run_path` `Path(root_str)/"runs"/...`）、`bg_runner.py`（`default_tape_path` `Path("runs")/...`）三处字面统一改引 `RUNS_DIRNAME`。
-- 消除 ①③ 隐藏耦合；未来改 runs 目录名只动一处。
+**E. 抽 `RUNS_DIRNAME` 常量（round-1 challenge A；round-2 M5b 收紧范围）**
+- `orca/runtime/_project.py` 顶部加 `RUNS_DIRNAME = "runs"`（中立层，iface/exec 均合法向下 import）。
+- **本 SPEC 必纳（零跨层成本）**：`run_manager.py` 同文件多处（`runs_dir` 默认、`start_run` tape 落点 `:336`、`discover_runs`、`_lookup_project_for_handle`、`resolve_run_path`）；`_project.py` `is_registered_runs_dir` 的 `root/"runs"`；`bg_runner.py` `default_tape_path` `Path("runs")/...`。
+- **显式纳入 MCP 同族**：`orca/exec/mcp_tools/server.py:62` `_DEFAULT_RUNS_DIR="runs"`（MCP artifacts 输出目录同族，exec→runtime 合法）。**本 SPEC 推翻 `commands.py:1553`「跨层不能共享常量」旧 workaround**——常量放中立层 runtime，web/cli/exec 均可合法向下 import，旧注释失效；实现期评估既有 `test_default_runs_dir_single_source` 是否冗余。
+- **划界（不扩面）**：跨层 tape 族（`app.py:421/441`、`run/__init__.py`、`run/__main__.py`）显式标记"已知同语义、本 SPEC 不扩面、留待后续 DRY/全局目录 SPEC"，避免范围爆炸。
+- **G4 措辞降级**（round-2）：从"未来改 runs 目录名只动一处"降为"tape/discovery 主干单源；跨层 tape 族与 MCP artifacts 显式跟踪（非全单源）"。
 
 ### 4.2 覆盖矩阵（按入口拆，round-1 issue #3）
 
@@ -152,19 +159,20 @@ for path_str in deduped:
 - **AC1**：`register_project(path, require_marker=False)` 对无 marker 的非顶层目录**成功注册**（返 project_id，进 `projects.json`）；`require_marker=True`（默认）对同目录仍 raise `ValueError`。
 - **AC2**：`register_project(path, require_marker=False)` 对 OS 顶层仍 raise——**必测**：`/`、`/etc`、`/home`、`/tmp`、`/usr`、`C:\`（round-1 补 `/home`/`/tmp`：非 `parent==self`，只靠 `_TOPLEVEL_DIRS` 黑名单，防实现清空黑名单漏网）。
 - **AC3**：in-session bootstrap 在**无 `workflows/` 的 tmp 目录**起 run → `list_registered()` 含该 cwd → `discover_runs()` 返回该 run（source=attached）→ `resolve_run_path(run_id)` 命中。**用 `CliRunner` cwd 钉 `cwd_tmp` fixture，不依赖任何 env**（round-1：前作靠 `ORCA_PROJECT_ROOT` 钉 detect 的测试须重写）。
-- **AC4a**（round-1 拆，确定性）：上述 run `ensure_attached(run_id)` → `resolve_run_path` 不抛 + `get_run_events(run_id)` 返回非空（合成 tape 落盘后读，不涉 WS 时序）。
-- **AC4b**（round-1 拆，确定性）：in-process `bus.publish(agent_event)` → starlette `TestClient` websocket `receive_text()` 收到该事件（绕过 tape 文件 flush 时序，内存队列同步可断言）。**废弃**"落 tape 后 WS subscribe 收到"形态（依赖 flush + pump 轮询，不可确定性验证）。
+- **AC4a**（确定性）：**前置**——`ensure_attached(run_id)` 成功（注册命中，marker-free cwd 已进注册表）；合成 tape 落盘后 `resolve_run_path(run_id)` 不抛 + `get_run_events(run_id)` 返回非空（不涉 WS 时序）。
+- **AC4b**（确定性，round-2 H2 修正）：**前置**——先 `start_run`/`ensure_attached(run_id)` 使 handle 存在且 WS `_handle_subscribe` 成功订阅（否则仅 warn 后 return、不订阅，emit 无人收）；然后在 `handle.bus` 上 `await handle.bus.emit(type, data)`（`EventBus.emit`，`events/bus.py:128`；emit 第一动作 `await self.tape.append`——**非绕过 tape**，只是不经文件轮询 pump）→ starlette `TestClient` websocket `receive_text()` 收到该事件（经 bus 订阅 → WS pump queue，确定性可断言）。**废弃**"落 tape 后 WS subscribe 收到"形态（依赖 flush + pump 轮询，不可确定性验证）。
 - **AC5a**：既有 marker 项目经 `register_project`（默认）/`rebuild_registry` 注册**不变**（零回归）。
 - **AC5b**（D-rebuild=A 联动）：marker-free 注册的旧 entry 经 `rebuild_registry` 后**仍存在**（不被默认 M-16 擦除）。
-- **AC5c**：start_run 在 detect≠cwd 时 tape 落 `detect_root/runs`、注册 `detect_root`、discovery 命中（§4.2 第 5 行契约）。
+- **AC5c**：**scrub `ORCA_PROJECT_ROOT`**（与 AC3 口径一致），靠 cwd=`<proj>/sub` + `<proj>/workflows/` 构造 detect 跳祖先；断言 start_run tape 落 `detect_root/runs`、注册 `detect_root`、discovery 命中（§4.2 第 5 行契约）。
 - **AC6**：`orca doctor --probe-push`（H6 **self-spawn**，合成事件 3s 确定性 pass）对 in-session 无-marker run 通过。passive 模式仅真实排障用，**不作 AC**（round-1：passive 8s 等真实事件，无活跃子 agent 时 `unknown` → CI 假阴性）。
 
 ## 8. 测试计划（Rule 9：测意图）
 
 - `tests/runtime/test_project.py`：AC1/AC2（`require_marker` 双向 + M-15/P2 不被绕过，含 `/home`/`/tmp`）。
 - `tests/runtime/test_project.py`（rebuild）：AC5b（marker-free 旧 entry 经 rebuild 仍存在）+ AC5a（marker 项目零回归）。
-- `tests/iface/in_session/test_in_session_cli.py`：AC3（`ORCA_HOME=tmp`、`cwd_tmp` 无 workflows/、CliRunner cwd 钉死、不设 env，断言注册 + discovery 可见）。
-  - **改写既有 `test_register_current_project_fail_open`（`:141`）**：原"无 marker 目录 fail-open"用例改写为**顶层目录场景**（仍由 M-15 拒，fail-open 不抛仍成立；`:157 assert list_registered()=={}` 不破）。
+- `tests/iface/in_session/test_in_session_cli.py`：AC3（`ORCA_HOME=tmp`、`cwd_tmp` 无 workflows/、CliRunner cwd 钉死、不设 env，断言 marker-free 注册命中 cwd + discovery 可见）。
+  - **改写 `test_bootstrap_registers_project_for_web_discovery`（`:112`，round-2 H3）**：原建 `workflows/`（`:126`）+ 设 `ORCA_PROJECT_ROOT`（`:127`）测旧 detect 机制；改后 `_register_current_project` 不读 env、不要 marker，须移除 env + workflows/ 依赖，用 `cwd_tmp` 钉 cwd，显式断言 marker-free 注册命中 cwd（Rule 9：测意图，否则"因 cwd 巧合通过但测错意图"）。
+  - **改写 `test_register_current_project_fail_open`（`:141`，round-2 H4）**：该用例**未 chdir/未用 cwd_tmp**，改后 `_default_rundir().resolve().parent`=pytest 进程 cwd、`require_marker=False` 会**成功注册**→`list_registered()` 非空→`:157 assert == {}` **会破**（旧 SPEC"不破"承诺错，撤回）。改写手段：`monkeypatch` `_default_rundir` 返回顶层路径（如 `Path("/")`）让 M-15 拒（fail-open 不抛 + 注册表仍空），保持原 fail-open + 注册表空语义。
 - `tests/iface/web/test_run_manager.py`：AC4a（attach + events 非空）、AC4b（bus→WS TestClient）、AC5c（start_run detect≠cwd 落点）。
 - 回归：既有 runtime/in_session/web 注册相关测试全绿。
 
