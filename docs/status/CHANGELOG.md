@@ -7,7 +7,7 @@
 
 ## [2026-07-29] fix(visibility): in-session run 可见性根治——marker-free 自注册 tape 所在目录
 
-SPEC v3 Bug A：任意目录（含无 `workflows/`）下 in-session 起 workflow → web 列表/详情/子 agent 推送不可见。根因是 tape 落点（cwd/runs）、注册根（detect 祖先）、discovery 扫描（注册根/runs）三处独立计算 + M-16 门槛太死。修法（逐字对齐 §4.1 A-E）：`register_project` 加 `*, require_marker: bool = True`（仅门控 M-16，M-15/P2 始终守）；bootstrap 改注册 tape 物理位置（cwd）`require_marker=False`；`rebuild_registry` 旧 entry 信任（`not in old_paths`，D-rebuild=A，不擦除 marker-free 旧 entry）；抽 `RUNS_DIRNAME` 到 runtime 中立层单源。测试 AC1-AC5c 全覆盖（C1 布尔方向守门经 mutation 验证非空泛）；runtime/web/in_session/exec 注册相关 147 passed。Commit: `cfcad05`。详见 [release note](../releases/2026-07-29-run-visibility-marker-free.md)。
+SPEC v3 Bug A：任意目录（含无 `workflows/`）下 in-session 起 workflow → web 列表/详情/子 agent 推送不可见。根因是 tape 落点（cwd/runs）、注册根（detect 祖先）、discovery 扫描（注册根/runs）三处独立计算 + M-16 门槛太死。修法（逐字对齐 §4.1 A-E）：`register_project` 加 `*, require_marker: bool = True`（仅门控 M-16，M-15/P2 始终守）；bootstrap 改注册 tape 物理位置（cwd）`require_marker=False`；`rebuild_registry` 旧 entry 信任（`not in old_paths`，D-rebuild=A，不擦除 marker-free 旧 entry）；抽 `RUNS_DIRNAME` 到 runtime 中立层单源。测试 AC1-AC5c 全覆盖（C1 布尔方向守门经 mutation 验证非空泛）；runtime/web/in_session/exec 注册相关 147 passed。Commit: `b83d81d`。详见 [release note](../releases/2026-07-29-run-visibility-marker-free.md)。
 
 ## [2026-07-25] feat(kb/receiver): SOTA 调研驱动加 4 个昇腾友好 student 变体
 
