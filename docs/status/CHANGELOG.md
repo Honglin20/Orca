@@ -5,6 +5,18 @@
 
 ---
 
+## [2026-07-31] fix(kd-nas): review #6 可视化 + #5 思路 pass 修复（latency baseline 透传 / accuracy_compare baseline 行 / 进度图 0 保留 / min 方向取负显示 / is_measured_row 单测）
+
+修 review #6（可视化 conditional-pass）4 必修 + review #5（思路 pass）1 建议，范围严格限定列出 5 项：① `train_pool.py` 加 `--baseline_latency_ms` + 透传 viz_kd（latency bar 缺 baseline 参考线）+ `kd-train/agent.md` bash 块补 `{{ setup.output.baseline_latency_ms }}`；② `viz_kd._push_accuracy_compare` 把 baseline 作为 data 行（`met_accuracy="ref"`，前端画得出，对齐 latency_bar）；③ `_push_progress` 去掉固定 status 项的 0 过滤（注释承诺「一眼全貌」）；④ **min 方向 kind（db/nmse/mse/ber）取负显示**（`acc_disp=-acc`，`_acc_display` helper，display 变换对齐 tail_metrics）使「轴上越大越好」统一——防 bar 图 -20dB 高于 -22dB 视觉误导（goal 硬要求；Rule 7 选数据层消除歧义最强），未知 kind 三图齐跳（取负需已知方向，不 auto 猜）；⑤ 新增 `is_measured_row` 7 边界直接单测。两路 code-reviewer 自检无 BLOCKER：补 latency_bar baseline 端到端值级断言（闭合 #6-1 intent）+ progress 固定显示序 / 杂项 status 正路径 / variants_total 未知 / status:null 归一测试 + agent.md baseline flag 守门 + docstring 精确化（tail_metrics display 对齐但 kind 检测相反）。测试 +23 / 更新 1；WSL `tests/workflows`+`tests/compile`+`tests/schema` 634 passed + kd-nas contract 79 passed 无回归。Commit: `<待补>`。详见 [release note](../releases/2026-07-31-kd-nas-review-fixes.md)。
+
+## [2026-07-31] feat(kd-nas): finalize——select 节点 + 指标方向显式化 + 训练监控 + 防假 + 修 no-fabrication 误报
+
+KD-NAS 最后一公里：① 新增 ``kd-select`` folder-agent（零 LLM ``select_and_report.py``：读 ledger → 按 ``accuracy_baseline_kind`` 显式方向挑最优 student + 帕累托前沿 + ``final_report.md``），DAG 升 7 节点 ``… → train → select → $end``；② ``accuracy_baseline_kind`` 加回 inputs + ``kd_common.accuracy_direction`` 单一真相源（measure/viz/select 三处同源，含 db；防 -20dB 误判优于 -22dB 的方向反转）；③ viz_kd 加 progress/pareto/accuracy_compare 三图 + 方向感知轴标；④ ``train_pool.classify_final_sweep`` 0-SUCCESS→FAIL 防假；⑤ 修 ``test_no_fabrication[kd-nas]`` 误报（gpu_probe docstring + teacher_model ``_smoke()`` 抽出）。两路 code-reviewer 审查发现 critical C1（FAIL_latency 哨兵 ``acc=0``+真测 lat 污染帕累托前沿）已修（``kd_common.is_measured_row`` 按 status+accuracy_kind 判真测，select/viz 同步）+ 9 条测试加固。Commit: `<待补>`。详见 [release note](../releases/2026-07-31-kd-nas-finalize.md)。
+
+## [2026-07-31] feat(kd-nas): v4 嵌入——teacher-gen + train-script-gen 串进 DAG（4→6 节点）
+
+把 teacher-gen + train-script-gen 两 folder-agent 从独立阶段嵌入 kd-nas workflow DAG（``flatten → teacher_gen → train_script_gen → setup → gate → train``）；setup teacher 训练改调 ``train_pipeline.py --mode teacher``（固定 ``--out_ckpt``，删 setup_helpers find-teacher-ckpt）+ teacher_setup latency 透传自 teacher-gen（不再自测）；setup 删 step6 grep-user-train（loss 适配下沉 train-script-gen）；train_pool worker 改调 ``train_pipeline.py --mode distill``；``train_adapter_template.py`` 退役到 ``_deprecated/``；input ``teacher_train_command`` 改名 ``user_train_script``。teacher-gen/kd-train-script agent.md 最小接口调整（Jinja 输入 + JSON 输出，SKILL/scripts 未动——Rule 7 偏离说明见 release note）。两路 code-reviewer 审查（0 BLOCKER / 3 MAJOR + 5 MINOR / 2🔴 + 3🟡）全修；单测 230 passed + 脚本级 E2E（teacher 训 + distill + measure）跑通。Commit: `<待补>`。详见 [release note](../releases/2026-07-31-kd-nas-embed.md)。
+
 ## [2026-07-31] fix(nas): push_describe 实测 + review 两轮收口（不臆造 / fail-soft 闭环 / 矛盾暴露）
 
 实测 + code-reviewer 审查 4d55c2b 后三处 honesty/fail-soft 收口：① 非 head Linear（MLP fc1 / transformer embed）原用 baseline 维度冒充「超网维度(后)」——SearchSpace 只标准化 head，改显 `—`（不臆造）；② `_build_rows` 原在 `main()` 的 try 之外，SearchSpace 字段异常会绕过 `_err` ERROR 兜底表——并入 try/except 补齐 fail-soft 闭环；③ head `super_in` 原静默取末级 stage 宽度、掩盖 baseline `in_feat` 与之冲突——`in_feat` 已解析且 ≠ 末级宽度时显 `?(baseline=X,last_stage=Y)` 暴露矛盾。两份副本同步；测试 4→10（+ 非 head 臆造 / 非常量 fail-loud / `__main__` kwargs 优先级 override / transformer `stage_emb_dims` 标签 + head 冲突 / 两副本 `filecmp` 同步性 / 无 `*_flat.py` 的 `_err` 兜底表，全绿）。Commits: `22e0762`（实测）+ `54cf33a`（review）。详见 [release note](../releases/2026-07-31-nas-push-describe-enrich.md#实测后修正2026-07-31)。

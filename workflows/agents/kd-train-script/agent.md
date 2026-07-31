@@ -10,9 +10,9 @@ teacher/student 模型契约（`build_model` + `DUMMY_INPUT` + `KNOBS`）变成
 
 ## 唯一职责
 
-**生成** `train_pipeline.py` + 必要 helper 文件，**不嵌入** workflow yaml、
-不退役 `train_adapter_template.py`（留到统一阶段）、不改 KD 库
-（`kd.compose` / `kd.wrapper` / `kd.ema` 只读消费）。
+**生成** `train_pipeline.py` + 必要 helper 文件（自包含搬用户 loss/dataloader/optimizer，
+按路径 import 模型），不改 KD 库（`kd.compose` / `kd.wrapper` / `kd.ema` 只读消费）。
+v4 已嵌入 kd-nas workflow（``train_script_gen`` 节点，``flatten → teacher_gen → train_script_gen → setup``）。
 
 ## 资源锚点（cwd 无关）
 
@@ -26,21 +26,14 @@ teacher/student 模型契约（`build_model` + `DUMMY_INPUT` + `KNOBS`）变成
 
 ## 输入
 
-从上游（kd-setup / 调用方）获取：
+workflow 节点经 Jinja 渲染注入（flatten + teacher-gen 上游 output + inputs）：
 
-```
-output_dir:          <生成物落盘目录>
-user_project_root:   <用户项目根，含 train.py>
-teacher_model_path:  <teacher .py 路径，如 workflows/agents/_kd_scripts/teacher_model.py>
-student_model_path:  <student 变体 .py 路径，如 knowledge_base/families/receiver/spt_alt.py>
-kd_scripts_dir:      <workflows/agents/_kd_scripts/ 绝对路径>
-user_train_import:   <用户 train.py 路径，如 examples/kd-nas-demo/train.py>
-user_loss_fn:        <用户 loss 函数名，默认 compute_loss>
-```
-
-可选：
-- `teacher_cache_path`：若上游已生成 teacher_cache.pt，distill 模式 smoke
-  可真跑；否则 distill smoke 标记 `Skipped`。
+- baseline 契约路径: `{{ flatten.output.baseline_contract_path }}`（flatten 产出的 `.py`，含 build_model + DUMMY_INPUT + KNOBS；读它对齐 student 模型契约 I/O）
+- teacher 模型路径: `{{ teacher_gen.output.teacher_model_path }}`（teacher-gen 派生的 teacher wrapper .py；teacher 模式 smoke + 契约参考用）
+- 用户 train.py: `{{ inputs.user_train_script }}`（用户原 train.py 绝对路径，含 `compute_loss` + `build_dataloader`；生成时搬其 loss/dataloader/optimizer 进 train_pipeline.py，自包含拷贝不 import 用户项目）
+- 设备: `{{ inputs.device }}`（advanced，默认 auto；smoke 校验用）
+- latency_provider: `{{ inputs.latency_provider }}`（用户真硬件 latency 脚本 `path::func`；teacher smoke __main__ latency 用）
+- 引擎注入 `$ORCA_ARTIFACTS_DIR`（per-run 权威产物目录；train_pipeline.py 落盘到此目录）+ `$ORCA_AGENT_RESOURCES`（本 agent 资源目录，SKILL.md / references 所在）。
 
 ## 准备工作
 
@@ -48,24 +41,35 @@ user_loss_fn:        <用户 loss 函数名，默认 compute_loss>
    ```bash
    source .venv/bin/activate 2>/dev/null || true
    ```
-2. 创建输出目录并进入：
+2. **解析路径**（KD_SCRIPTS_DIR + OUTPUT_DIR + USER_TRAIN_SCRIPT）：
    ```bash
-   mkdir -p <output_dir> && cd <output_dir>
+   # KD_SCRIPTS_DIR：从仓库结构找 _kd_scripts（kd.compose/wrapper/ema 所在；生成物 runtime 需在 sys.path）
+   KD_SCRIPTS_DIR="$(dirname "$(find workflows/agents/_kd_scripts -name kd_common.py -print -quit)")"
+   KD_SCRIPTS_DIR="$(python3 -c "import os,sys;print(os.path.abspath(sys.argv[1]))" "$KD_SCRIPTS_DIR")"
+   # OUTPUT_DIR：优先 $ORCA_ARTIFACTS_DIR（per-run），缺则 fallback llm_artifacts/kd_train_script/
+   OUTPUT_DIR="${ORCA_ARTIFACTS_DIR:-$(python3 -c 'import os;print(os.path.abspath("llm_artifacts/kd_train_script"))')}"
+   mkdir -p "$OUTPUT_DIR"
+   # USER_TRAIN_SCRIPT / TEACHER_MODEL_PATH / BASELINEContract 经 Jinja 渲染后是绝对路径串
+   echo "PARSED: KD_SCRIPTS_DIR=$KD_SCRIPTS_DIR OUTPUT_DIR=$OUTPUT_DIR"
    ```
 
 ## 执行流程
 
 读取 `$ORCA_AGENT_RESOURCES/SKILL.md` 获取完整工作流（`<skill_dir>` =
-`$ORCA_AGENT_RESOURCES`）。按其中 3 步执行：
+`$ORCA_AGENT_RESOURCES`，`<output_dir>` = 上面 OUTPUT_DIR，`<kd_scripts_dir>` = 上面 KD_SCRIPTS_DIR，
+`<baseline_contract_path>` = `{{ flatten.output.baseline_contract_path }}`，
+`<teacher_model_path>` = `{{ teacher_gen.output.teacher_model_path }}`，
+`<user_train_import>` = `{{ inputs.user_train_script }}`）。按其中 3 步执行：
 
-**Step 1 — Load Context**：读用户 `train.py` + teacher/student 模型契约 +
+**Step 1 — Load Context**：读用户 `train.py`（`{{ inputs.user_train_script }}`）+ teacher 模型契约
+（`{{ teacher_gen.output.teacher_model_path }}`）+ student 模型契约（`{{ flatten.output.baseline_contract_path }}`）+
 KD 库 surface（`kd/compose.py` / `kd/wrapper.py` / `kd/ema.py` 只读） +
 参考模板 `$ORCA_AGENT_RESOURCES/references/templates/train_pipeline.py`。
 
 **Step 2 — Generate**：读
 `$ORCA_AGENT_RESOURCES/references/workflows/train_pipeline_script_generation.md`，
 按规则把参考模板特化为项目特定 `train_pipeline.py`：
-- 拷贝模板到 `<output_dir>/train_pipeline.py`
+- 拷贝模板到 `$OUTPUT_DIR/train_pipeline.py`
 - 搬用户 loss / dataloader / optimizer / scheduler（自包含，绝不 import
   用户项目模块）
 - 按 §7 选 KD 项（保守默认：纯 task_loss）
@@ -73,35 +77,34 @@ KD 库 surface（`kd/compose.py` / `kd/wrapper.py` / `kd/ema.py` 只读） +
 
 **Step 3 — Validate**（3 层）：
 1. 静态：`py_compile` + `--help` + CLI 一致性
-2. 功能 smoke（小预算 CPU）：teacher 模式必跑；distill 模式仅当
-   `teacher_cache_path` 可用才跑，否则标 `Skipped`
+2. 功能 smoke（小预算 CPU）：teacher 模式必跑（`--user_train_import {{ inputs.user_train_script }}`）；
+   distill 模式在 train-script-gen 阶段**无 teacher_cache**（teacher_cache 由 setup 后续产）→ 标 `Skipped`
 3. **workflow-verifier 子 agent**：用 SKILL.md 的 prompt 模板调用，核查
    生成脚本忠实度 + 契约合规
 
 ## 红线（违反即架构问题）
 
-- ❌ 嵌入 workflow yaml（留到统一阶段）
 - ❌ 引入 DDP / torchrun / sandwich 采样 / `set_sample_config`
 - ❌ 用 `nas_agent.train.distillation` —— 只能用 `kd.compose` /
   `kd.wrapper` / `kd.ema`
 - ❌ 生成脚本 `import` 用户项目模块（必须自包含拷贝逻辑）
 - ❌ 硬编码 shape 回退（BLK-4：必须读用户 `DUMMY_INPUT`）
 - ❌ 静默吞错（fail loud：CLI 不符、契约违约直接非零退出 + stderr 报因）
-- ❌ 退役 `train_adapter_template.py`（统一阶段处理）
 - ❌ 改 KD 库（只读消费）
 
-## 输出
+## 输出 JSON schema（你的终点）
 
-任务完成后，按 SKILL.md 的 Output section 输出结构化摘要（stdout `KEY:
-value` 行，供编排 agent 解析）：
+**你的唯一产出 = 一个严格匹配下面 output_schema 的 JSON 对象。**
 
+```json
+{
+  "train_pipeline_path": "<OUTPUT_DIR>/train_pipeline.py 绝对路径"
+}
 ```
-OUTPUT_DIR: <输出目录路径>
-GENERATED_SCRIPT: train_pipeline.py
-HELPER_FILES: <list 或 none>
-MODES_SUPPORTED: teacher,distill
-KD_TERMS_ENABLED: <list 或 empty>
-TEACHER_MODE_SMOKED: Yes
-DISTILL_MODE_SMOKED: Yes|Skipped (no teacher_cache available)
-VERIFIER_VERDICT: all-pass
-```
+
+- JSON 前后**不许**有任何描述性文字（workflow `outputs` / 下游 setup+train_pool 直接取这个 JSON）；
+- `train_pipeline_path` 必须是 py_compile 通过 + teacher 模式 smoke PASS 的同一文件绝对路径；
+- workflow-verifier 未 all-pass → 不返 JSON（读 verifier findings 修脚本重跑）。
+
+生成过程 stdout 可打 `KEY: value` 调试行（OUTPUT_DIR / GENERATED_SCRIPT / MODES_SUPPORTED /
+TEACHER_MODE_SMOKED / VERIFIER_VERDICT 等），但**最终消息**只许是上面那个 JSON。

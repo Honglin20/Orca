@@ -41,6 +41,11 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+from kd_common import accuracy_direction  # noqa: E402
+
 
 # ── 复用 _struct_scripts/export_onnx.export_onnx ───────────────────────────────
 def _export_onnx(model_path, build_fn, dummy_input, opset, out, device: str = "auto",
@@ -84,9 +89,8 @@ _ACC_PATTERNS = [
     (re.compile(r"\bSNR\s*[:=]\s*([-+]?[0-9]*\.?[0-9]+)", re.I), "snr"),
 ]
 
-# kind → 方向：True = 越高越好（student ≥ baseline 才达标），False = 越低越好。
-_HIGHER_BETTER = {"snr", "acc"}
-_LOWER_BETTER = {"mse", "nmse", "ber"}
+# kind → best 方向的单一真相源在 kd_common.accuracy_direction（HIGHER_BETTER_KINDS /
+# LOWER_BETTER_KINDS，含 db）。本模块不再维护本地方向表（防三处漂移）。
 
 
 def _parse_accuracy(stdout: str) -> tuple[float, str, str]:
@@ -135,9 +139,10 @@ def _compute_met_accuracy_absolute(
             f"--accuracy_baseline_kind={used!r} 不符；按 override {used!r} 判定。",
             file=sys.stderr,
         )
-    if used in _HIGHER_BETTER:
+    direction = accuracy_direction(used)
+    if direction == "max":
         met = bool(student_acc >= baseline)
-    elif used in _LOWER_BETTER:
+    elif direction == "min":
         met = bool(student_acc <= baseline)
     else:
         # unknown：无法判方向 → 不达标 + 低置信 + 大声 WARN（绝不静默 pass）。

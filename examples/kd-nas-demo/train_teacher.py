@@ -1,10 +1,14 @@
 """train_teacher.py —— 训 10 层 teacher（teacher_model.py 的架构），随机数据，存 ckpt。
 
+[RETIRED v4] 本脚本在 v4 嵌入（2026-07-31）前是 kd-nas workflow 的 ``teacher_train_command``
+（setup 节点 ``cd $PROJECT_ROOT && <本命令>`` 原样执行）。v4 起 teacher 训练改由 train-script-gen
+产出的 ``train_pipeline.py --mode teacher`` 驱动（固定 ``--out_ckpt``，自包含搬用户 loss/dataloader），
+本脚本不再是 workflow 入口。保留作历史参考 + teacher_model.py 架构的独立训练 demo。
+
 命令形态::
 
     python train_teacher.py --out <ckpt_path> [--epochs N] [--batch-size N] [--n-batches N] [--seed N]
 
-这是 kd-nas workflow 的 ``teacher_train_command``（setup 节点 ``cd $PROJECT_ROOT && <本命令>`` 原样执行）。
 teacher 只作 KD 软标签源（精度基线用户另给），故**随机数据 + 1 epoch** 即可——目的是产出一个能被
 ``teacher_model.build_model()`` 加载的 ckpt，让 teacher_setup 生成 teacher_cache.pt。
 

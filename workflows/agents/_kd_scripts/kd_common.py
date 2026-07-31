@@ -22,6 +22,60 @@ RANK: dict[str, int] = {"high": 0, "medium": 1, "low": 2}
 VALID_LEVERAGE = set(RANK)
 LEVERAGE_DEFAULT = "medium"
 
+# ── accuracy_baseline_kind → best 方向（单一真相源，KD-NAS finalize 2026-07-31）────────
+# 三处消费：measure_student / viz_kd / kd-select.select_and_report 都 import 本表，
+# 防止「-20dB 误判比 -22dB 好」式的方向反转（符号判定不可靠，必须显式 kind）。
+# 越高越好（best=max）：snr / acc；越低越好（best=min）：mse / nmse / ber / db。
+HIGHER_BETTER_KINDS = {"snr", "acc"}
+LOWER_BETTER_KINDS = {"mse", "nmse", "ber", "db"}
+
+
+def accuracy_direction(kind: str) -> str:
+    """accuracy kind → best 方向：``"max"``（越高越好）/ ``"min"``（越低越好）/ ``""``（未知）。
+
+    单一真相源（DRY）：measure_student 判 met_accuracy、viz_kd 标轴方向、kd-select 选最优
+    student 全部经此函数。未知 kind → 空串（caller 须 fail loud / 低置信，**不** auto 猜方向）。
+    """
+    k = (kind or "").strip().lower()
+    if k in HIGHER_BETTER_KINDS:
+        return "max"
+    if k in LOWER_BETTER_KINDS:
+        return "min"
+    return ""
+
+
+def to_float(v: Any) -> float | None:
+    """宽松转 float（坐标图过滤用）：``None`` / bool / NaN / 非数值 → ``None``。
+
+    单一真相源（DRY）：viz_kd 与 select_and_report 共用，防两份字节级副本漂移。
+    """
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        f = float(v)
+        return None if f != f else f  # NaN → None
+    return None
+
+
+def is_measured_row(row: dict[str, Any]) -> bool:
+    """该 ledger 行是否携带**真实** accuracy 测量（非 ``accuracy=0`` 哨兵）。
+
+    哨兵行（须剔除，否则在 min 方向 kind 下会以 ``accuracy=0`` 虚假占据帕累托前沿）：
+      - ``FAIL_latency``：变体未进训练池（gate 阶段落账，latency 是真测的、accuracy=0 哨兵）。
+      - ``FAIL_train``：训练崩 / 无 ckpt（accuracy 未测）。
+      - ``FAIL_accuracy`` 且 ``accuracy_kind`` 为空：measure_student 子进程失败（rc!=0），
+        ``accuracy=0`` 是哨兵；只有 ``accuracy_kind`` 非空才是 measure rc==0 的真测值
+        （measure emit ``STUDENT_ACCURACY_KIND`` 才说明真跑到了解析阶段，真值可能恰为 0.0）。
+
+    真测行（保留）：``status ∈ {SUCCESS, FAIL_accuracy}`` 且 ``accuracy_kind`` 非空。
+    """
+    status = row.get("status")
+    if status not in ("SUCCESS", "FAIL_accuracy"):
+        return False
+    if not str(row.get("accuracy_kind") or "").strip():
+        return False
+    return True
+
 # 终态：训练已发生过（不再重训，跨 run 跳过）。
 TRAIN_DONE_STATUSES = {"SUCCESS", "FAIL_accuracy", "FAIL_train"}
 # 全部终态。

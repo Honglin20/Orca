@@ -1,5 +1,5 @@
 name: kd-nas
-description: "KD-NAS 蒸馏 sweep（重构版）：flatten 任意模型入口成 KD 变体契约 → setup 测 baseline 时延 + 幂等训 teacher(10层 t1/t2 交替，KD 软标签源) + GPU 预检定并发 → gate 一个节点内串行遍历全部 KB 变体（校验 + tune_latency 最小缩量 + distill_dispatch gate），FAIL_latency 当场落账、ACCEPTED 进 manifest → train 吃 manifest 做有界并发蒸馏（VRAM 再校验 + round-robin 绑卡 + 增量账本）+ 末尾 viz 推 sweep 散点。跨 run 复用（稳定 kd_artifacts_dir + 哈希校验 + ledger-driven 跳过）。无 finalize / 无 proxy_mse / 无 search。精度基线 + latency_provider(用户真硬件脚本) 均用户必填。契约见 workflows/agents/_kd_scripts/CONTRACTS.md。"
+description: "KD-NAS 蒸馏 sweep（重构版）：flatten 任意模型入口成 KD 变体契约 → teacher-gen 纯调参派生 teacher（深度×3/宽度×2，自带 latency） → train-script-gen 生成统一 train_pipeline.py（teacher+distill 两模式，自包含搬用户 loss/dataloader） → setup 跑 teacher 训 + teacher_cache + GPU 预检定并发 → gate 一个节点内串行遍历全部 KB 变体（校验 + tune_latency 最小缩量 + distill_dispatch gate），FAIL_latency 当场落账、ACCEPTED 进 manifest → train 吃 manifest 做有界并发蒸馏（VRAM 再校验 + round-robin 绑卡 + 增量账本）+ 末尾 viz 推 sweep 散点。跨 run 复用（稳定 kd_artifacts_dir + 哈希校验 + ledger-driven 跳过）。无 finalize / 无 proxy_mse / 无 search。精度基线 + latency_provider(用户真硬件脚本) 均用户必填。契约见 workflows/agents/_kd_scripts/CONTRACTS.md。"
 
 entry: flatten
 
@@ -14,9 +14,9 @@ inputs:
   # 铁律（spec-review BLK-3/10）：latency_provider 必填无默认（编译期 validator 强制 required⇒无default），
   # 用户必须给真部署硬件的 latency 脚本——ONNXRT-CPU 测对 NPU 部署是误导。
 
-  teacher_train_command:
+  user_train_script:
     type: string
-    description: "[ask] teacher 从头训练命令（10 层 model8，无 KD），原样 shell 执行（绝不改训练函数/loss）。teacher 只作 KD 软标签源"
+    description: "[ask] 用户原 train.py 路径（含 compute_loss + build_dataloader），给 train-script-gen 读、生成 train_pipeline.py 时搬 loss/dataloader/optimizer（自包含拷贝，不 import 用户项目）"
     required: true
   test_command:
     type: string
@@ -29,6 +29,10 @@ inputs:
   accuracy_baseline:
     type: string
     description: "[ask] 精度基线（用户提供的绝对值，如 NMSE=0.02 / SNR=20）。student 精度须达此基线（方向由 kind 决定）"
+    required: true
+  accuracy_baseline_kind:
+    type: string
+    description: "[ask] 精度方向（用户一开始声明，绝不靠符号 auto 猜——防 dB 反向错误）：nmse/mse/ber/db（越低越好，best=min）| snr/acc（越高越好，best=max）。measure_student / viz_kd / kd-select 三处同源判定（kd_common.accuracy_direction）"
     required: true
   baseline_model_path:
     type: string
@@ -54,7 +58,7 @@ nodes:
   # flatten（入口·LLM + 脚本混合）：把用户任意 PyTorch 模型入口展平成 KD 变体契约 .py
   # （build_model + DUMMY_INPUT + KNOBS）。LLM 做展平 + KNOBS 识别（判断），脚本做硬校验（确定性，rule 5）。
   # __main__ 跑「正确性 + latency」统一契约 → 产出 baseline_contract_path + baseline_latency_ms；
-  # setup step2 读 baseline_latency_ms（不再重测）+ setup_helpers grep-user-train anchor。
+  # setup step2 读 baseline_latency_ms（不再重测）。
   # 不经过 KB receiver（KB 里 spt_*.py 已是契约，gate 直消费）。
   # ═══════════════════════════════════════════════════════════════
   - name: flatten
@@ -72,13 +76,56 @@ nodes:
         flat_artifacts_dir: {type: string, description: "<output_dir> 绝对路径（含 <base_name>_flat.py）"}
         baseline_latency_ms: {type: number, description: "flatten __main__ 测出的默认 cfg latency 中位数（用 inputs.latency_provider 实测；setup step2 读作 baseline 参考线，不再重测）"}
     routes:
+      - to: teacher_gen
+
+  # ═══════════════════════════════════════════════════════════════
+  # teacher-gen（纯调参派生）：读 flatten 产出的 baseline 契约 + latency_provider，纯调大 cfg
+  # （深度轴 ×3 / 宽度轴 ×2）派生 teacher 结构文件（wrapper 委托 baseline.build_model，不改架构）。
+  # teacher 文件 __main__ 跑「正确性 + latency」统一契约 → 产出 teacher_model_path + teacher_latency_ms。
+  # teacher latency 在此阶段测掉，setup 不再自己测（避免重复测量）。
+  # ═══════════════════════════════════════════════════════════════
+  - name: teacher_gen
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: teacher-gen
+    output_schema:
+      type: object
+      required: [teacher_model_path, teacher_latency_ms, project_root, depth_axis, width_axis]
+      properties:
+        teacher_model_path: {type: string, description: "teacher-gen 产出的 teacher .py 绝对路径（wrapper 委托 baseline.build_model；经 validate_contract.py + validate_teacher.py 双重 PASS）"}
+        teacher_latency_ms: {type: number, description: "teacher 文件 __main__ 测出的默认 cfg latency 中位数（用 inputs.latency_provider 实测；setup teacher_setup 透传进 teacher_cache/meta，不再重测）"}
+        project_root: {type: string, description: "从 baseline 契约推断的 project_root 绝对路径（透传 flatten.output.project_root 语义）"}
+        depth_axis: {type: string, description: "识别出的深度轴 knob 名（可审计；空串=baseline 无深度轴）"}
+        width_axis: {type: string, description: "识别出的宽度轴 knob 名（可审计；空串=baseline 无宽度轴）"}
+    routes:
+      - to: train_script_gen
+
+  # ═══════════════════════════════════════════════════════════════
+  # train-script-gen（脚本生成）：读 flatten 产出的 baseline 契约 + teacher-gen 产出的 teacher 路径
+  # + 用户原 train.py（inputs.user_train_script），生成自包含 train_pipeline.py（teacher+distill 两模式，
+  # 搬用户 loss/dataloader/optimizer，按路径 import 模型，不 import 用户项目）。setup step5 用 --mode teacher
+  # 训 teacher、train train_pool 用 --mode distill 蒸馏 student。
+  # ═══════════════════════════════════════════════════════════════
+  - name: train_script_gen
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: kd-train-script
+    output_schema:
+      type: object
+      required: [train_pipeline_path]
+      properties:
+        train_pipeline_path: {type: string, description: "生成的 train_pipeline.py 绝对路径（自包含 teacher+distill 两模式；setup step5 调 --mode teacher、train_pool 调 --mode distill）"}
+    routes:
       - to: setup
 
   # ═══════════════════════════════════════════════════════════════
-  # setup（一次性·幂等）：测 baseline 时延 + 校验/训 teacher + 适配 train_kd + 预检变体 + GPU 预检定并发。
+  # setup（一次性·幂等）：跑 teacher 训练（train_pipeline.py --mode teacher）+ teacher_setup 产 cache +
+  # 预检变体 + GPU 预检定并发。teacher_model_path 透传 teacher-gen.output（不再 repo 写死）；
+  # teacher latency 透传 teacher-gen.output（teacher_setup 不再自测）。
   # 跨 run 复用：teacher_cache 存在 ∧ teacher_model_hash 匹配 ∧ teacher_ckpt_sha256 匹配 → 跳过 teacher 训练。
   # setup 是「并发数唯一权威」（CONTRACTS §6）：gpu_probe.py 算 concurrency/device_plan/per_variant_vram_bytes。
-  # baseline 来源从 inputs.baseline_model_path 改为 flatten.output.baseline_contract_path（flatten 已保证契约）。
   # ═══════════════════════════════════════════════════════════════
   - name: setup
     kind: agent
@@ -92,17 +139,15 @@ nodes:
         kd_artifacts_dir: {type: string, description: "稳定 artifact 根绝对路径（末尾带 /）。跨 run 持久"}
         per_run_artifacts_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR（per-run，orca_env.sh 祖先；train env_anchor / viz env_anchor 用）"}
         project_root: {type: string}
-        teacher_model_path: {type: string, description: "repo 内 teacher_model.py 绝对路径（10 层 t1/t2）"}
+        teacher_model_path: {type: string, description: "teacher-gen.output.teacher_model_path 透传（teacher-gen 派生的 wrapper .py；不再 repo 写死 _kd_scripts/teacher_model.py）"}
         teacher_cache: {type: string, description: "teacher_cache.pt 绝对路径"}
-        teacher_meta: {type: string, description: "teacher_meta.json 绝对路径（含 teacher_model_hash/teacher_ckpt_sha256）"}
+        teacher_meta: {type: string, description: "teacher_meta.json 绝对路径（含 teacher_model_hash/teacher_ckpt_sha256 + teacher_latency_ms 透传自 teacher-gen）"}
         teacher_ckpt: {type: string}
         ledger_path: {type: string, description: "ledger.jsonl 绝对路径（跨 run 真相源）"}
         ckpts_dir: {type: string, description: "<kd_artifacts_dir>ckpts/ 绝对路径（末尾带 /）"}
         baseline_latency_ms: {type: number, description: "从 flatten.output.baseline_latency_ms 透传（flatten __main__ 实测的默认 cfg latency 中位数；setup step2 不再重测）"}
         kd_scripts_dir: {type: string, description: "_kd_scripts 绝对路径"}
         receiver_dir: {type: string, description: "KB receiver 绝对路径（setup 探测 $ORCA_KB_DIR/families/receiver；train_pool 算 variants_total 用，避免 ORCA_KB_DIR 在 in-session next 链里被重置）"}
-        user_train_import: {type: string, description: "用户 train 模块 dotted-path（BLK-7 持久化；空则哨兵）"}
-        user_loss_fn: {type: string, description: "用户 loss callable 名（BLK-7）"}
         variants_count: {type: integer, description: "KB receiver 变体数（BLK-14 预检 ≥1）"}
         concurrency: {type: integer, description: "并发数（setup gpu_probe 算，唯一权威；fail-soft 最低 1）"}
         device_plan: {type: string, description: "JSON 串：round-robin 设备列表（如 [\"cuda:0\",\"cuda:1\"]；无 CUDA 时 [\"\"]）"}
@@ -137,8 +182,8 @@ nodes:
 
   # ═══════════════════════════════════════════════════════════════
   # train（有界并发蒸馏池）：train_pool.py 吃 gate manifest + setup 并发参数 → VRAM 再校验 →
-  # ThreadPoolExecutor round-robin 绑卡 → 每 worker train_adapter + measure --skip_latency →
-  # as_completed 主线程逐行增量 append ledger → 末尾 viz_kd 推 sweep 散点。
+  # ThreadPoolExecutor round-robin 绑卡 → 每 worker 调 train_pipeline.py --mode distill +
+  # measure_student --skip_latency → as_completed 主线程逐行增量 append ledger → 末尾 viz_kd 推 sweep 散点。
   # ═══════════════════════════════════════════════════════════════
   - name: train
     kind: agent
@@ -154,6 +199,32 @@ nodes:
         sweep_status: {type: string, enum: [SUCCESS, FAIL], description: "全批跑完无异常 = SUCCESS"}
         fail_reason: {type: string, description: "SWEEP_STATUS=FAIL 时的原因（VRAM 不足 / worker 异常等）；SUCCESS 时空"}
     routes:
+      - to: select
+
+  # ═══════════════════════════════════════════════════════════════
+  # select（脚本化最终选择·零 LLM）：调 select_and_report.py 读 ledger.jsonl → 按
+  # accuracy_baseline_kind 显式方向（kd_common.accuracy_direction 单一真相源）挑最优 student +
+  # 列 latency-accuracy 帕累托前沿 + 模板填空 final_report.md + 推终态帕累托图。
+  # 绝不伪造：无达标 student → 报告标「无 student 达标」（n_selected=0），不假装选出。
+  # 硬校验：ledger 空/坏 / kind 未知方向 → fail loud（非零退出 + 原因写报告 + 透传 fail_reason）。
+  # ═══════════════════════════════════════════════════════════════
+  - name: select
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: kd-select
+    output_schema:
+      type: object
+      required: [n_selected, all_variants_count, best_variant, final_report_path, selection_ok]
+      properties:
+        n_selected: {type: integer, description: "达标（met_latency ∧ met_accuracy）student 数；0 = 无达标（不假装选出）"}
+        all_variants_count: {type: integer, description: "ledger 记录的变体总数（所有 status）"}
+        best_variant: {type: string, description: "达标项里精度最优 student 的 variant_id（方向按 accuracy_baseline_kind）；无达标时空串"}
+        final_report_path: {type: string, description: "<kd_artifacts_dir>final_report.md 绝对路径（teacher vs students + 选择依据 + 帕累托前沿）"}
+        pareto_front_size: {type: integer, description: "latency-accuracy 非支配前沿点数"}
+        selection_ok: {type: boolean, description: "n_selected ≥ 1（有达标 student）"}
+        fail_reason: {type: string, description: "脚本 fail loud 时的原因（ledger 空/坏 / kind 未知）；正常时空"}
+    routes:
       - to: $end
 
 outputs:
@@ -161,11 +232,13 @@ outputs:
   ledger_path: "{{ setup.output.ledger_path }}"
   kd_artifacts_dir: "{{ setup.output.kd_artifacts_dir }}"
   baseline_latency_ms: "{{ setup.output.baseline_latency_ms }}"
+  teacher_model_path: "{{ setup.output.teacher_model_path }}"
   concurrency: "{{ setup.output.concurrency }}"
   device_plan: "{{ setup.output.device_plan }}"
   # gate 恒跑（setup→gate），其计数在所有路径（含 n_accepted==0 路由 $end）都可得。
   n_accepted: "{{ gate.output.n_accepted }}"
   n_fail_latency: "{{ gate.output.n_fail_latency }}"
-  # 注：train 可能被跳过（gate.n_accepted==0 → $end），故 outputs 不引 train.output.X
-  # （skipped node output=None，render 会 ExecError）。train 的 variants_done/sweep_status
-  # 由 train agent stdout 打印 + ledger.jsonl 真相源暴露，不在 workflow outputs 模板化。
+  # 注：train / select 可能被跳过（gate.n_accepted==0 → $end 跳过 train+select），故 outputs
+  # 不引 train.output.X / select.output.X（skipped node output=None，render 会 ExecError）。
+  # train 的 variants_done/sweep_status + select 的 n_selected/best_variant 由各自 agent stdout
+  # 打印 + ledger.jsonl / final_report.md 真相源暴露，不在 workflow outputs 模板化。

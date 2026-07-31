@@ -112,6 +112,9 @@ def _probe_per_variant_vram(
 ) -> tuple[int, str, int, list[int]]:
     """探测 per-variant 训练显存（bytes）。
 
+    Builds a dummy input batch (``torch.randn`` from the variant's ``DUMMY_INPUT.shape``)
+    to run one fwd/bwd/step and read ``max_memory_allocated`` peak —— this is a dummy
+    input for VRAM probing (smoke-style capacity probe), not a production data path.
     返回 (per_variant_bytes, resolved_device_str, n_gpus, free_per_card_bytes_list)。
     仅 CUDA / NPU 路径调得通；其它由 caller 走 fail-soft。
     """

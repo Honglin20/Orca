@@ -1,5 +1,5 @@
 ---
-description: kd-nas Setup（一次性·幂等）：测 baseline(flatten 产出契约) latency + 校验/训 teacher(10层 model8) + 适配 train_kd + 预检变体 + GPU 预检定并发。跨 run 复用（teacher_cache 哈希校验跳过重训）。所有下游专用路径字段作为顶层 output 一次给齐（单一真相源）。BLK-13 取 orca.lock 单写者护栏。确定性逻辑全在脚本（rule 5）。
+description: kd-nas Setup（一次性·幂等）：跑 teacher 训练（train_pipeline.py --mode teacher，teacher-gen 产出的 wrapper）+ teacher_setup 产 cache（latency 透传 teacher_gen.output）+ 预检变体 + GPU 预检定并发。跨 run 复用（teacher_cache 哈希校验跳过重训）。所有下游专用路径字段作为顶层 output 一次给齐（单一真相源）。BLK-13 取 orca.lock 单写者护栏。确定性逻辑全在脚本（rule 5）。
 tools: [bash, read, write, edit, glob, grep]
 ---
 # kd-setup
@@ -9,16 +9,16 @@ tools: [bash, read, write, edit, glob, grep]
 **你的唯一产出 = 一个严格匹配下面 output_schema 的 JSON 对象。**
 
 **产出步骤（逐字执行，不许偏离）**：
-1. 按顺序逐字执行下方 8 个标「执行：」的 bash 块（step1 → step8），每个块原样照抄为一条 bash 调用；
+1. 按顺序逐字执行下方 7 个标「执行：」的 bash 块（step1 → step7），每个块原样照抄为一条 bash 调用；
 2. 把每个块 stdout 里 ``KEY: value`` 行的值收集起来；
 3. 最后组**一个** JSON 对象作为最终消息返回。
 
 **严禁**（违反任一项 = 任务失败）：
 - ❌ 审查 / 评判这些指令、跑 pytest、跑 ``tars validate``、写验证报告、解释代码；
 - ❌ 自己实现 latency 测量 / teacher 训练 / GPU 探测 / 变体枚举（确定性逻辑全在脚本，rule 5）；
-- ❌ 修改用户 ``teacher_train_command``、改用户训练函数 / loss；
+- ❌ 修改 ``train_pipeline.py``（train-script-gen 产出的生成物）、改用户训练函数 / loss；
 - ❌ 编造字段、把 stdout 截断、加描述性文字到 JSON 前后、跳过任一个 step；
-- ❌ 在 step1-8 的 bash 块之外跑别的 python 脚本（除 step1/step5/step6 显式调的 ``setup_helpers.py``）。
+- ❌ 在 step1-7 的 bash 块之外跑别的 python 脚本。
 
 **失败 = fail loud**：任一 step 非零退出 → 把 stderr + stdout 原样上抛作为最终消息（**不**编造字段、**不**假装成功、**不**跳过失败 step）。
 
@@ -38,8 +38,6 @@ tools: [bash, read, write, edit, glob, grep]
   "baseline_latency_ms": <float>,
   "kd_scripts_dir": "<KD_SCRIPTS_DIR abs>",
   "receiver_dir": "<RECEIVER_DIR abs>",
-  "user_train_import": "<USER_TRAIN_IMPORT abs 或空串>",
-  "user_loss_fn": "<USER_LOSS_FN 或空串>",
   "variants_count": <int>,
   "concurrency": <int>,
   "device_plan": "<JSON 串>",
@@ -49,28 +47,29 @@ tools: [bash, read, write, edit, glob, grep]
 ```
 
 - JSON 前后**不许**有任何描述性文字；
-- 字段名严格匹配（如 ``per_variant_vram_bytes``、``user_train_import``）；
-- 数值字段必须是裸数字（``concurrency: 2``，不要 ``"2"``）；
-- ``user_train_import`` / ``user_loss_fn`` 抽不到时填空串 ``""``（**不**编造）；
-- 若 step6 emit 了 ask-user 哨兵 JSON（``USER_TRAIN_SENTINEL`` 非空），**停止后续 step**，把哨兵 JSON 原样作为最终消息返回（不组上面的 output JSON）。
+- 字段名严格匹配（如 ``per_variant_vram_bytes``）；
+- 数值字段必须是裸数字（``concurrency: 2``，不要 ``"2"``）。
 
 ## 输入
 
-- ``teacher_train_command = {{ inputs.teacher_train_command }}``（10 层 teacher 从头训，无 KD；原样 shell 执行）
+- ``teacher_model_path = {{ teacher_gen.output.teacher_model_path }}``（teacher-gen 派生的 teacher wrapper .py，纯调参放大 baseline；经 validate_contract.py + validate_teacher.py 双重 PASS。setup 透传作 teacher_model_path output）
+- ``teacher_latency_ms = {{ teacher_gen.output.teacher_latency_ms }}``（teacher-gen __main__ 实测的 latency；teacher_setup 透传进 teacher_cache/meta，不再自测）
+- ``train_pipeline_path = {{ train_script_gen.output.train_pipeline_path }}``（train-script-gen 生成的统一 train_pipeline.py；step5 调 ``--mode teacher`` 训 teacher）
 - ``baseline_contract_path = {{ flatten.output.baseline_contract_path }}``（flatten 节点产出的 KD 变体契约 .py，已保证 ``build_model`` + ``DUMMY_INPUT.shape`` + ``KNOBS``，经 ``validate_contract.py`` PASS）
-- ``project_root = {{ flatten.output.project_root }}``（flatten 推断的 project_root；step1 fallback 用，step6 grep-user-train anchor 用）
+- ``project_root = {{ flatten.output.project_root }}``（flatten 推断的 project_root；step1 fallback 用）
 - ``latency_provider = {{ inputs.latency_provider }}``（用户真硬件 latency 脚本 ``path::func``，必填）
 - ``device = {{ inputs.device }}``
 - ``target_latency_ms = {{ inputs.target_latency_ms }}``（step7 pick_variant 用）
 - 引擎已注入 ``$ORCA_ARTIFACTS_DIR``（per-run 产物目录）+ ``$ORCA_KB_DIR``（KB 根目录）。
 - **已下沉**：``seed``（默认 0）/ ``kd_artifacts_dir``（默认 ``<repo>/kd-nas-artifacts/``）从 inputs 移除——下面 step 用常量默认；如需 override 改 agent.md 常量。
+- **user train.py 适配已下沉到 train-script-gen**：setup 不再 grep-user-train（旧 step6 删除）；loss/dataloader/optimizer 已由 train-script-gen 生成 train_pipeline.py 时搬入。
 
 ---
 
 ## step 1 执行：解析路径 + 单写者锁（BLK-13）
 
 ```bash
-KD_SCRIPTS_DIR="$(dirname "$(find workflows/agents/_kd_scripts -name teacher_model.py -print -quit)")"
+KD_SCRIPTS_DIR="$(dirname "$(find workflows/agents/_kd_scripts -name kd_common.py -print -quit)")"
 KD_SCRIPTS_DIR="$(python3 -c "import os,sys;print(os.path.abspath(sys.argv[1]))" "$KD_SCRIPTS_DIR")"
 PER_RUN_ARTIFACTS_DIR="${ORCA_ARTIFACTS_DIR:-}"
 [ -z "$PER_RUN_ARTIFACTS_DIR" ] && { echo "FAIL: \$ORCA_ARTIFACTS_DIR 未注入（非 orca run 上下文）" >&2; exit 2; }
@@ -143,22 +142,27 @@ print('BASELINE_LATENCY_OK:', v)
 echo "PARSED step2: BASELINE_LATENCY_MS=$BASELINE_LATENCY_MS (source: flatten.output)"
 ```
 
-## step 3 执行：校验 teacher_model.py（repo 写死，10 层 t1/t2 交替）
+## step 3 执行：校验 teacher-gen 产出的 teacher wrapper（透传 teacher_gen.output）
+
+> teacher_model_path 来源从「repo 写死 ``_kd_scripts/teacher_model.py``」改为「``teacher_gen.output.teacher_model_path``」
+> （teacher-gen 纯调参派生的 wrapper，已过 validate_contract + validate_teacher 双重硬校验）。
+> 这里只做 fail-loud 复核：文件存在 + 可 import + 有 build_model + DUMMY_INPUT。
 
 ```bash
-TEACHER_MODEL_PATH="$KD_SCRIPTS_DIR/teacher_model.py"
+TEACHER_MODEL_PATH="{{ teacher_gen.output.teacher_model_path }}"
+[ -f "$TEACHER_MODEL_PATH" ] || { echo "FAIL: teacher-gen 产物不存在：$TEACHER_MODEL_PATH（teacher-gen 节点是否 PASS？）" >&2; exit 2; }
 python3 -c "import ast; ast.parse(open('$TEACHER_MODEL_PATH').read())"
 python3 -c "
-import sys; sys.path.insert(0,'$KD_SCRIPTS_DIR')
-from teacher_model import build_model
-import torch
-t=build_model(); blocks=list(t.main)
-assert len(blocks)==10, f'块数!=10: {len(blocks)}'
-mt=[b.m_a.m_type for b in blocks]; assert mt==['t1','t2']*5, f'非 t1/t2 交替: {mt}'
-o=t(torch.randn(1,4,48,64,1)); assert o.shape==torch.Size([1,4,48,64,1]), o.shape
+import importlib.util, sys, os
+p='$TEACHER_MODEL_PATH'; d=os.path.dirname(p)
+if d not in sys.path: sys.path.insert(0,d)
+spec=importlib.util.spec_from_file_location('_tchk',p)
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+assert callable(getattr(m,'build_model',None)), 'teacher wrapper 缺 build_model'
+assert isinstance(getattr(m,'DUMMY_INPUT',None),dict) and m.DUMMY_INPUT.get('shape'), 'teacher wrapper 缺 DUMMY_INPUT.shape'
 print('TEACHER_OK')
 "
-echo "PARSED step3: TEACHER_MODEL_PATH=$TEACHER_MODEL_PATH"
+echo "PARSED step3: TEACHER_MODEL_PATH=$TEACHER_MODEL_PATH (source: teacher_gen.output)"
 ```
 
 ## step 4 执行：幂等护栏（teacher_cache 存在 + 哈希匹配 → 跳过 teacher 训练，HI-3）
@@ -181,60 +185,48 @@ fi
 echo "PARSED step4: TEACHER_CACHE=$TEACHER_CACHE TEACHER_META=$TEACHER_META TEACHER_CKPT=$TEACHER_CKPT NEED_TRAIN=$NEED_TRAIN"
 ```
 
-## step 5 执行：若 NEED_TRAIN=1，从头训 teacher + teacher_setup 产 cache
+## step 5 执行：若 NEED_TRAIN=1，跑 train_pipeline.py --mode teacher + teacher_setup 产 cache
 
-确定性 teacher_ckpt 解析下沉到 ``setup_helpers.py find-teacher-ckpt``（R4：原实现把 ckpt 路径留给 LLM grep / 字符串拼，违反 rule 5）。
+> teacher 训练从「原样跑 ``teacher_train_command`` + ``setup_helpers find-teacher-ckpt`` 解析产物」改为
+> 「调 ``train_script_gen.output.train_pipeline_path`` 的 ``--mode teacher``，固定 ``--out_ckpt`` 路径」。
+> train_pipeline 直接存固定 out_ckpt 路径，setup 知道路径 → 不再需要 find-teacher-ckpt grep。
+> teacher_setup latency 从 ``teacher_gen.output.teacher_latency_ms`` 透传（不再 teacher_setup 自己测——
+> latency 已在 teacher-gen ``__main__`` 测掉，避免重复测量）。
 
 ```bash
+TRAIN_PIPELINE_PATH="{{ train_script_gen.output.train_pipeline_path }}"
+[ -f "$TRAIN_PIPELINE_PATH" ] || { echo "FAIL: train-script-gen 产物不存在：$TRAIN_PIPELINE_PATH（train-script-gen 节点是否 PASS？）" >&2; exit 2; }
+# DUMMY_INPUT 从 baseline 契约读（与 teacher wrapper 一致；不硬编码 shape——BLK-4）
+TEACHER_DUMMY="$(python3 -c "
+import importlib.util, json, sys, os
+p='$BASELINE'; d=os.path.dirname(p)
+if d not in sys.path: sys.path.insert(0,d)
+spec=importlib.util.spec_from_file_location('_bd',p); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print(json.dumps(m.DUMMY_INPUT))
+")"
 if [ "$NEED_TRAIN" = "1" ]; then
-  # 5a) 原样跑 teacher_train_command（不改用户脚本）；wait 阻塞
-  ( cd "$PROJECT_ROOT" && {{ inputs.teacher_train_command }} )
-  # 5b) 确定性解析 teacher_train_command 产物 → 拷到 $TEACHER_CKPT（setup_helpers.find-teacher-ckpt）
-  python3 "$KD_SCRIPTS_DIR/setup_helpers.py" find-teacher-ckpt \
-    --project_root "$PROJECT_ROOT" \
-    --train_command "{{ inputs.teacher_train_command }}" \
-    --target "$TEACHER_CKPT"
-  # 5c) teacher_setup 产 cache + meta + ONNX + latency
+  # 5a) 跑 train_pipeline.py --mode teacher（train-script-gen 产物；固定 --out_ckpt）
+  ORCA_KD_SCRIPTS_DIR="$KD_SCRIPTS_DIR" python3 "$TRAIN_PIPELINE_PATH" \
+    --mode teacher --model_path "$TEACHER_MODEL_PATH" \
+    --build_fn build_model --build_cfg '{}' \
+    --epochs 1 --batch_size 2 --device "{{ inputs.device }}" \
+    --variant_id teacher --out_ckpt "$TEACHER_CKPT"
+  TP_RC=$?
+  [ $TP_RC -eq 0 ] || { echo "FAIL: train_pipeline.py --mode teacher rc=$TP_RC（读 stderr 修脚本 / 检查 teacher_model_path / user_train 适配）" >&2; exit 2; }
+  [ -f "$TEACHER_CKPT" ] || { echo "FAIL: train_pipeline.py --mode teacher 未产出 ckpt：$TEACHER_CKPT" >&2; exit 2; }
+  # 5b) teacher_setup 产 cache + meta + ONNX（latency 从 teacher_gen.output 透传，不再自测）
   python3 "$KD_SCRIPTS_DIR/teacher_setup.py" \
     --teacher_model_path "$TEACHER_MODEL_PATH" --teacher_ckpt "$TEACHER_CKPT" \
-    --build_fn build_model --dummy_input '{"shape":[1,4,48,64,1],"dtype":"float32"}' \
+    --build_fn build_model --dummy_input "$TEACHER_DUMMY" \
     --output_dir "$KD_ARTIFACTS_DIR" --opset 17 \
-    --latency_provider "{{ inputs.latency_provider }}" --device "{{ inputs.device }}"
+    --teacher_latency_ms "{{ teacher_gen.output.teacher_latency_ms }}" \
+    --device "{{ inputs.device }}"
 fi
 [ -f "$TEACHER_CACHE" ] && [ -f "$TEACHER_META" ] || { echo "FAIL: teacher_cache/meta 未生成"; exit 2; }
 echo "PARSED step5: TEACHER_CACHE=$TEACHER_CACHE TEACHER_META=$TEACHER_META TEACHER_CKPT=$TEACHER_CKPT"
 ```
 
-## step 6 执行：适配 train_kd（确定性 grep user train.py loss/dataloader，BLK-7）
-
-确定性 AST 解析下沉到 ``setup_helpers.py grep-user-train``（R4：原实现留给 LLM grep / ask-user 决策，违反 rule 5）。抽不到 → ``USER_TRAIN_SENTINEL`` 非空 → **停止后续 step**，把哨兵 JSON 原样作为最终消息返回。
-
-```bash
-GREP_OUT="$(python3 "$KD_SCRIPTS_DIR/setup_helpers.py" grep-user-train \
-  --project_root "$PROJECT_ROOT" \
-  --train_command "{{ inputs.teacher_train_command }}" \
-  --baseline_model_path "$BASELINE")"
-USER_TRAIN_IMPORT="$(echo "$GREP_OUT" | grep '^USER_TRAIN_IMPORT:' | cut -d' ' -f2-)"
-USER_LOSS_FN="$(echo "$GREP_OUT" | grep '^USER_LOSS_FN:' | cut -d' ' -f2-)"
-USER_TRAIN_SENTINEL="$(echo "$GREP_OUT" | grep '^USER_TRAIN_SENTINEL:' | cut -d' ' -f2-)"
-# 持久化到 user_train.json（distill 读，CLI --user_train_import/--user_loss_fn 注入 train_kd）
-python3 -c "
-import json,os
-out={'user_train_import': os.environ.get('KD_USER_TRAIN_IMPORT','$USER_TRAIN_IMPORT'),
-     'user_loss_fn':       os.environ.get('KD_USER_LOSS_FN','$USER_LOSS_FN')}
-json.dump(out, open('${KD_ARTIFACTS_DIR}user_train.json','w'), indent=2)
-print('USER_TRAIN:', json.dumps(out))
-"
-echo "PARSED step6: USER_TRAIN_IMPORT=$USER_TRAIN_IMPORT USER_LOSS_FN=$USER_LOSS_FN SENTINEL=$USER_TRAIN_SENTINEL"
-# 抽不到 loss fn → 哨兵非空 → 立即停止后续 step，把哨兵 JSON 作为最终消息返回（不编造字段）
-if [ -n "$USER_TRAIN_SENTINEL" ]; then
-  echo "ASK_USER_SENTINEL: $USER_TRAIN_SENTINEL"
-fi
-```
-
-> 若 ``ASK_USER_SENTINEL:`` 行出现（``USER_TRAIN_SENTINEL`` 非空），**立即停止**，把那个 JSON 作为最终消息返回——主 session 会问用户后用 SendMessage 把答案追加给你，你**继续**从 step 6 重跑（用户答案填到 ``$USER_TRAIN_IMPORT`` / ``$USER_LOSS_FN``），不要重做 step1-5。
-
-## step 7 执行：预检 KB 变体 ≥1（BLK-14）
+## step 6 执行：预检 KB 变体 ≥1（BLK-14）
 
 ```bash
 python3 "$KD_SCRIPTS_DIR/pick_variant.py" --receiver_dir "$RECEIVER_DIR" \
@@ -243,10 +235,10 @@ python3 "$KD_SCRIPTS_DIR/pick_variant.py" --receiver_dir "$RECEIVER_DIR" \
 # exit 0/0(ALL_DONE)/3(NO_VARIANTS)。NO_VARIANTS(exit 3) → fail loud（KB 无变体）。
 VARIANTS_COUNT=$(ls "$RECEIVER_DIR"/*.py 2>/dev/null | grep -v '/_' | wc -l)
 [ "$VARIANTS_COUNT" -gt 0 ] || { echo "FAIL: KB receiver_dir=$RECEIVER_DIR 无变体（.py）"; exit 2; }
-echo "PARSED step7: VARIANTS_COUNT=$VARIANTS_COUNT RECEIVER_DIR=$RECEIVER_DIR"
+echo "PARSED step6: VARIANTS_COUNT=$VARIANTS_COUNT RECEIVER_DIR=$RECEIVER_DIR"
 ```
 
-## step 8 执行：GPU 预检（定并发数 + 多卡 device_plan；setup 是并发数唯一权威）
+## step 7 执行：GPU 预检（定并发数 + 多卡 device_plan；setup 是并发数唯一权威）
 
 ```bash
 GPU_OUT="$(python3 "$KD_SCRIPTS_DIR/gpu_probe.py" \
@@ -262,12 +254,12 @@ PER_VARIANT_VRAM_BYTES="$(echo "$GPU_OUT" | grep '^PER_VARIANT_VRAM_BYTES:' | aw
 GPU_REPORT="$(echo "$GPU_OUT" | grep '^GPU_REPORT:' | cut -d' ' -f2-)"
 # 兜底：grep 取不到（不应发生，gpu_probe 必 emit）→ 单卡串行
 [ -z "$CONCURRENCY" ] && { CONCURRENCY=1; DEVICE_PLAN='[""]'; PER_VARIANT_VRAM_BYTES=0; GPU_REPORT='WARN grep miss -> serial'; }
-echo "PARSED step8: CONCURRENCY=$CONCURRENCY DEVICE_PLAN=$DEVICE_PLAN PER_VARIANT_VRAM_BYTES=$PER_VARIANT_VRAM_BYTES GPU_REPORT=$GPU_REPORT"
+echo "PARSED step7: CONCURRENCY=$CONCURRENCY DEVICE_PLAN=$DEVICE_PLAN PER_VARIANT_VRAM_BYTES=$PER_VARIANT_VRAM_BYTES GPU_REPORT=$GPU_REPORT"
 ```
 
 ## 产出 JSON（最终消息）
 
-把上面 8 个 ``PARSED stepN:`` 行里的值原样填进下面模板，**只**返回这个 JSON：
+把上面 7 个 ``PARSED stepN:`` 行里的值原样填进下面模板，**只**返回这个 JSON：
 
 ```json
 {
@@ -283,8 +275,6 @@ echo "PARSED step8: CONCURRENCY=$CONCURRENCY DEVICE_PLAN=$DEVICE_PLAN PER_VARIAN
   "baseline_latency_ms": <BASELINE_LATENCY_MS float>,
   "kd_scripts_dir": "<KD_SCRIPTS_DIR>",
   "receiver_dir": "<RECEIVER_DIR>",
-  "user_train_import": "<USER_TRAIN_IMPORT 或空串>",
-  "user_loss_fn": "<USER_LOSS_FN 或空串>",
   "variants_count": <VARIANTS_COUNT int>,
   "concurrency": <CONCURRENCY int>,
   "device_plan": "<DEVICE_PLAN JSON 串>",
@@ -292,5 +282,3 @@ echo "PARSED step8: CONCURRENCY=$CONCURRENCY DEVICE_PLAN=$DEVICE_PLAN PER_VARIAN
   "gpu_report": "<GPU_REPORT 串>"
 }
 ```
-
-> step6 若返回 ask-user 哨兵，则**不**返回此 output JSON；返回哨兵 JSON。收到用户答案后从 step6 续跑。

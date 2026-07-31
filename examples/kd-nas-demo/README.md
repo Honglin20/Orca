@@ -1,7 +1,8 @@
 # kd-nas-demo —— kd-nas workflow 的真实 E2E 测试靶子
 
-一个**最小可跑**的 kd-nas demo 项目，严格满足 `workflows/kd-nas.yaml`（DAG：`setup → gate → train → $end`）
-的 inputs 契约。用**随机数据**+ **tiny 模型**让真实 workflow 在 CPU 上分钟级跑通。
+一个**最小可跑**的 kd-nas demo 项目，严格满足 `workflows/kd-nas.yaml`（v4 DAG：
+`flatten → teacher_gen → train_script_gen → setup → gate → train → $end`）的 inputs 契约。
+用**随机数据**+ **tiny 模型**让真实 workflow 在 CPU 上分钟级跑通。
 
 **铁律遵守**：
 - **数据可随机，测量必须真实**：训练/评测用随机数据；**latency 用 onnxruntime 实跑取中位数**，
@@ -60,17 +61,19 @@ I/O 契约与真实 model8 完全一致（`[B,4,48,64,1]` + alpha 功率归一 +
 
 | input | 值 | 说明 |
 |---|---|---|
-| `teacher_train_command` | `python examples/kd-nas-demo/train_teacher.py --out kd-nas-artifacts/teacher_ckpt.pt --epochs 1` | 训 teacher（setup 从 PROJECT_ROOT 执行） |
+| `user_train_script` | `<REPO>/examples/kd-nas-demo/train.py` | 用户原 train.py（含 `compute_loss` + `build_dataloader`）；train-script-gen 读它生成 train_pipeline.py（自包含搬 loss/dataloader） |
 | `test_command` | `python examples/kd-nas-demo/test_student.py` | measure_student 经 env 注入 STUDENT_CKPT 后执行 |
 | `latency_provider` | `<REPO>/examples/kd-nas-demo/latency_provider.py::measure` | 绝对路径 `::func`（必填无默认） |
-| `baseline_model_path` | `<REPO>/examples/kd-nas-demo/baseline_model.py` | 绝对路径（契约文件） |
+| `baseline_model_path` | `<REPO>/examples/kd-nas-demo/baseline_model.py` | 绝对路径（flatten 展平成 KD 变体契约） |
 | `target_latency_ms` | `5.0` | 宽松门：student 变体 CPU 实测 0.2~1.1ms，均通过；baseline 6.6ms（不卡门） |
 | `accuracy_baseline` | `1.5` | NMSE 基线（越低越好）。随机数据下变体 NMSE ~1.0~1.2，故 1.5 让多数通过 |
-| `accuracy_baseline_kind` | `nmse` | 锁方向 + 与 test_student 输出 kind 一致，免 WARN |
 | `device` | `cpu` | demo CPU 可跑（GPU 路径后续测试）；device=cpu 时 gpu_probe 自动 fail-soft 到 concurrency=1 |
 | `full_epochs` | `1` | 每变体蒸馏 1 epoch（demo 求快） |
-| `seed` | `0` | 复现种子 |
-| `kd_artifacts_dir` | `kd-nas-artifacts` | 跨 run 稳定 artifact 根（默认 `<repo>/kd-nas-artifacts/`） |
+
+> v4 变更（2026-07-31）：input `teacher_train_command` 改名 `user_train_script`（用户原 train.py 路径，
+> 给 train-script-gen 读）。teacher 训练改由 train-script-gen 产出的 `train_pipeline.py --mode teacher`
+> 驱动（不再原样跑用户命令）；`train_teacher.py` 退役作历史参考（teacher_model.py 架构的独立训练脚本，
+> 不再是 workflow 入口）。`accuracy_baseline_kind` / `seed` / `kd_artifacts_dir` 已下沉到下游 CLI 默认。
 
 > `<REPO>` = Orca 仓库根的绝对路径（例 `/mnt/d/Projects/Orca`）。`latency_provider` /
 > `baseline_model_path` 用绝对路径最稳（也可相对 PROJECT_ROOT，但 gate/train 节点 cwd 可能变）。

@@ -567,13 +567,14 @@ def test_validate_contract_fail_min_breaks_forward(tmp_path):
 
 
 def test_kd_nas_entry_is_flatten():
-    """kd-nas.yaml entry 是 flatten（不再是 setup）；flatten routes to setup。"""
+    """kd-nas.yaml entry 是 flatten（不再是 setup）；v4 DAG flatten routes to teacher_gen。"""
     from orca.compile.parser import load_workflow
     wf = load_workflow(REPO / "workflows" / "kd-nas.yaml")
     assert wf.entry == "flatten"
     flatten = next(n for n in wf.nodes if n.name == "flatten")
     assert flatten.agent == "model-flatten"
-    assert [r.to for r in flatten.routes] == ["setup"]
+    # v4：flatten → teacher_gen（不再直连 setup）
+    assert [r.to for r in flatten.routes] == ["teacher_gen"]
 
 
 def test_kd_nas_baseline_model_path_description_updated():

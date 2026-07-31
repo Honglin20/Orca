@@ -788,21 +788,29 @@ def test_teacher_gen_agent_md_output_schema_before_bash():
     )
 
 
-def test_teacher_gen_agent_md_consumes_baseline_contract_path_input():
-    """teacher-gen 必须消费 ``{{ inputs.baseline_contract_path }}``（它的入口 input）。"""
+def test_teacher_gen_agent_md_consumes_flatten_baseline_contract():
+    """v4：teacher-gen 嵌入 workflow，从 flatten.output 取 baseline 契约路径
+    （不再用 inputs.baseline_contract_path——那是独立阶段的写法）。"""
     text = (TEACHER_GEN_DIR / "agent.md").read_text(encoding="utf-8")
-    assert "{{ inputs.baseline_contract_path }}" in text
+    assert "{{ flatten.output.baseline_contract_path }}" in text, (
+        "teacher-gen/agent.md 应从 flatten.output.baseline_contract_path 取 baseline（v4 嵌入后）"
+    )
+    # 反向：不应再用 inputs.baseline_contract_path（独立阶段写法已退役）
+    assert "{{ inputs.baseline_contract_path }}" not in text, (
+        "teacher-gen/agent.md 不应再用 inputs.baseline_contract_path（v4 嵌入后改 flatten.output）"
+    )
 
 
-def test_teacher_gen_agent_md_no_upstream_node_refs():
-    """teacher-gen 当前不嵌入 workflow，不应引用 flatten.output.* / setup.output.* 等
-    跨节点 output（用 inputs.* 直接传值）。"""
+def test_teacher_gen_agent_md_refs_flatten_output():
+    """v4：teacher-gen 嵌入 workflow，引用 flatten.output.*（上游节点）是预期行为
+    （独立阶段「无上游引用」的旧断言已退役）。"""
     import re
     text = (TEACHER_GEN_DIR / "agent.md").read_text(encoding="utf-8")
-    # 引用其他节点 output = 嵌入 workflow 的信号（当前 teacher-gen 独立阶段，不应有）
-    node_pat = re.compile(r"\{\{\s*(flatten|setup|gate|train)\.output\.")
-    bad = node_pat.findall(text)
-    assert not bad, f"teacher-gen/agent.md 不应引用其他节点 output（当前独立阶段）：{bad}"
+    node_pat = re.compile(r"\{\{\s*flatten\.output\.")
+    refs = node_pat.findall(text)
+    assert refs, (
+        "teacher-gen/agent.md 应引用 flatten.output.*（v4 嵌入 workflow，baseline 来自 flatten）"
+    )
 
 
 def test_teacher_gen_agent_md_has_two_validation_gates():

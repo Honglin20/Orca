@@ -1,5 +1,12 @@
 """setup_helpers.py —— kd-setup 步骤 5/6 的确定性后端（rule 5：确定性逻辑用代码）。
 
+[DEPRECATED v4] 本模块的两个 CLI 子命令（``find-teacher-ckpt`` / ``grep-user-train``）自 v4
+嵌入（2026-07-31）起**不再被 active path 调用**：
+  - ``find-teacher-ckpt`` 被 ``train_pipeline.py --mode teacher``（固定 ``--out_ckpt``）取代；
+  - ``grep-user-train`` 被 ``train-script-gen``（生成 train_pipeline.py 时搬用户 loss/dataloader）取代。
+保留本文件 + 其单元测试（``test_setup_helpers_*``）作历史参考 + 可复用 AST/scan 工具；
+未来若无外部消费者，可整体移到 ``_deprecated/``。
+
 回应用户反馈 R4：原 ``kd-setup/agent.md`` step5 把「teacher_train_command 产的 ckpt 路径」
 和 step6「用户 train.py 的 loss/dataloader dotted-path」留给 LLM grep / 字符串拼，违反
 rule 5（确定性逻辑用代码）。本模块把这两段下沉为可 import 的纯函数，agent.md 只调脚本。

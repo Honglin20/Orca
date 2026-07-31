@@ -6,9 +6,8 @@
   - Phase 启动 VRAM 再校验（setup→train 之间显存可能被别进程抢）：不够则降级 WARN；连 1 都放不下
     → fail loud 非零
   - ``ThreadPoolExecutor(max_workers=concurrency)``，device_plan round-robin 绑卡
-    （传 ``--device cuda:i`` 给 train_adapter）
-  - 每 worker：``train_adapter_template.py`` + ``measure_student.py --skip_latency``（复用 gate 的干净
-    latency，HI-1）
+    （传 ``--device cuda:i`` 给 train_pipeline.py --mode distill）
+  - 每 worker：``train_pipeline.py --mode distill``（train-script-gen 产物，统一脚本）+ ``measure_student.py --skip_latency``（复用 gate 的干净 latency，HI-1）
   - 增量账本：``as_completed`` 主线程（已持 ``orca.lock``）逐行 ``write+flush``；单 worker 失败
     try/except → FAIL_train 行，**不杀整批**
   - 末尾 ``viz_kd.py`` 推 sweep 散点
@@ -21,10 +20,10 @@ CLI::
       --manifest <gate_manifest.json> --ledger <ledger.jsonl> \\
       --teacher_cache <teacher_cache.pt> --kd_scripts_dir <_kd_scripts> \\
       --artifacts_dir <kd_artifacts_dir> --per_run_artifacts_dir <$ORCA_ARTIFACTS_DIR> \\
-      --project_root <user project> \\
+      --project_root <user project> --train_pipeline_path <train_pipeline.py> \\
       --test_command "<cmd>" --accuracy_baseline <f> [--accuracy_baseline_kind <k>] \\
       --concurrency <N> --device_plan '<json list>' --per_variant_vram_bytes <B> \\
-      [--epochs 50] [--seed 0] [--user_train_import .. --user_loss_fn ..] [--safety 0.8]
+      [--epochs 50] [--seed 0] [--safety 0.8]
 
 stdout::
 
@@ -105,8 +104,32 @@ def revalidate_vram(
     return total_capacity, ""
 
 
+def classify_final_sweep(
+    rows: list[dict[str, Any]], n_accepted: int, incoming_fail_reason: str,
+) -> tuple[str, str]:
+    """末态 sweep_status 判定（确定性，纯函数便于单测）。
+
+    Increment E（防假）：``n_accepted > 0`` 但 ledger 里 ``SUCCESS`` 行数为 0（全 FAIL_accuracy
+    / FAIL_train）→ ``SWEEP_STATUS=FAIL`` + 原因。避免「全 FAIL 但 SWEEP_STATUS=SUCCESS」的误导
+    （operator / 下游 select 会误以为有达标 student）。
+
+    - ``incoming_fail_reason`` 非空（VRAM 降级 / worker exception 已设）→ 保持 FAIL，原因不覆盖。
+    - ``n_accepted == 0``（gate 全 FAIL_latency 路由 $end，空批）→ SUCCESS（空批不算失败）。
+    """
+    if incoming_fail_reason:
+        return "FAIL", incoming_fail_reason
+    if n_accepted <= 0:
+        return "SUCCESS", ""
+    n_success = sum(1 for r in rows if r.get("status") == "SUCCESS")
+    if n_success == 0:
+        return ("FAIL",
+                f"全批 {n_accepted} 个 ACCEPTED 变体无一 SUCCESS"
+                f"（全 FAIL_accuracy/FAIL_train）；详见 ledger。")
+    return "SUCCESS", ""
+
+
 def _train_one(ctx: dict[str, Any], entry: dict[str, Any], device: str) -> dict[str, Any]:
-    """单 ACCEPTED 变体的训练流水线（train_adapter + measure --skip_latency）。返回 ledger 行。"""
+    """单 ACCEPTED 变体的训练流水线（train_pipeline --mode distill + measure --skip_latency）。返回 ledger 行。"""
     vid = entry["variant_id"]
     variant_path = entry["variant_path"]
     build_fn = entry["build_fn"]
@@ -114,6 +137,9 @@ def _train_one(ctx: dict[str, Any], entry: dict[str, Any], device: str) -> dict[
     cfg_str = json.dumps(accepted_cfg, sort_keys=True)
     cfg_hash = hashlib.sha256(cfg_str.encode()).hexdigest()[:16]
     lat_med = float(entry["latency_ms_median"])
+    # device_plan 的 ""（gpu_probe fail-soft / --device cpu）对 train_pipeline.py 的
+    # _resolve_device 是非法值（torch.device("") raise）→ 归一化为 "cpu"。cuda:N 原样透传。
+    device = device or "cpu"
     lat_std = float(entry["latency_ms_std"])
 
     base = _base_row_from_entry(entry, provider_id_str=ctx["provider_id"])
@@ -126,24 +152,26 @@ def _train_one(ctx: dict[str, Any], entry: dict[str, Any], device: str) -> dict[
     }
 
     # 1. train（完整 KD + 每-epoch 实时图；--device 绑卡；--env_anchor 自举 ORCA env）
+    #    调 train-script-gen 产的 train_pipeline.py --mode distill（统一脚本，自包含搬用户 loss/dataloader）。
     ckpt = os.path.join(ctx["artifacts_dir"], "ckpts", f"{vid}.pt")
     rc, out, err = run_subproc([
-        sys.executable, os.path.join(ctx["kd_scripts_dir"], "train_adapter_template.py"),
-        "--student_cfg", cfg_str,
+        sys.executable, ctx["train_pipeline_path"],
+        "--mode", "distill",
+        "--student_model_path", variant_path, "--build_fn", build_fn,
+        "--build_cfg", cfg_str,
         "--kd_config", json.dumps({"kd_losses": ["mse", "ofd"], "weights": {"mse": 1.0, "ofd": 0.3},
                                    "ema": True}),
         "--teacher_cache", ctx["teacher_cache"],
-        "--student_model_path", variant_path, "--build_fn", build_fn,
         "--variant_id", vid, "--env_anchor", ctx["per_run_artifacts_dir"],
         "--epochs", str(ctx["epochs"]), "--out_ckpt", ckpt,
-        "--user_train_import", ctx["user_train_import"], "--user_loss_fn", ctx["user_loss_fn"],
         "--device", device, "--seed", str(ctx["seed"]),
+        "--project_root", ctx["project_root"],
     ])
     if rc != 0:
         return {**base, **common, "status": "FAIL_train",
                 "accuracy": 0, "accuracy_kind": "",
                 "met_latency": True, "met_accuracy": False, "ckpt": "",
-                "fail_reason": f"train_kd rc={rc}: {err[-400:]}"}
+                "fail_reason": f"train_pipeline rc={rc}: {err[-400:]}"}
     # BLK-11：ckpt 完整性
     if not (os.path.isfile(ckpt) and os.path.getsize(ckpt) > 0):
         return {**base, **common, "status": "FAIL_train",
@@ -192,6 +220,8 @@ def _main() -> int:
     p.add_argument("--latency_provider", required=True,
                    help="落账 latency_provider_id 字段（与 gate/setup 同串，跨 run 身份）")
     p.add_argument("--target_latency_ms", required=True, help="落账 target 字段")
+    p.add_argument("--baseline_latency_ms", type=float, default=None,
+                   help="flatten 实测 baseline latency（透传给 viz_kd 画 latency bar 的 baseline 参考行）")
     p.add_argument("--concurrency", type=int, required=True, help="setup gpu_probe 算的并发数（权威）")
     p.add_argument("--device_plan", required=True,
                    help="JSON list，setup gpu_probe 算的 round-robin 设备列表")
@@ -200,8 +230,8 @@ def _main() -> int:
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--safety", type=float, default=0.8, help="VRAM 再校验安全系数")
-    p.add_argument("--user_train_import", default="")
-    p.add_argument("--user_loss_fn", default="")
+    p.add_argument("--train_pipeline_path", required=True,
+                   help="train-script-gen 产的 train_pipeline.py 绝对路径（worker 调 --mode distill）")
     p.add_argument("--receiver_dir", default="",
                    help="算 variants_total 用；默认 $ORCA_KB_DIR/families/receiver")
     args = p.parse_args()
@@ -271,11 +301,14 @@ def _main() -> int:
         "project_root": args.project_root,
         "epochs": args.epochs,
         "seed": args.seed,
-        "user_train_import": args.user_train_import,
-        "user_loss_fn": args.user_loss_fn,
+        "train_pipeline_path": args.train_pipeline_path,
         # measure --skip_latency：不导 ONNX、不测 latency → 不绑 GPU 卡（避免与 train worker 抢）。
         "measure_device": "cpu",
     }
+    # train_pipeline.py（train-script-gen 产物，落盘到 per-run artifacts）import kd.* 需要
+    # ORCA_KD_SCRIPTS_DIR env 指向 _kd_scripts/。setup 调 teacher 模式时自己设；train_pool
+    # 调 distill 时为 worker 子进程统一注入（run_subproc 继承 os.environ）。
+    os.environ["ORCA_KD_SCRIPTS_DIR"] = args.kd_scripts_dir
 
     # ── 并发池 ─────────────────────────────────────────────────────────────────
     if n_accepted > 0:
@@ -315,16 +348,53 @@ def _main() -> int:
                 append_ledger_row(args.ledger, row)
                 print(f"[train_pool] done {vid}: {row['status']}", file=sys.stderr)
 
+    # ── 统计（先算 variants_total / rows / variants_done / sweep_status，供 viz + emit 共用）─
+    # variants_total 优先用 --receiver_dir（setup 探测经 output 传下来，cwd 无关）。
+    # 旧实现仅 fallback $ORCA_KB_DIR——但 ORCA_KB_DIR 在 in-session ``orca next`` 链里被
+    # 重置成默认 ``~/.orca/knowledge_base``（不存在）→ glob 0（BUG-3）。
+    # 三级 fallback：--receiver_dir → $ORCA_KB_DIR/families/receiver → ledger+manifest 推断。
+    rows = read_ledger(args.ledger)
+    variants_done = len(rows)
+    receiver_dir = args.receiver_dir or os.path.join(
+        os.environ.get("ORCA_KB_DIR", ""), "families", "receiver")
+    variants_total = 0
+    try:
+        if os.path.isdir(receiver_dir):
+            variants_total = len([n for n in os.listdir(receiver_dir)
+                                  if n.endswith(".py") and not n.startswith("_")])
+    except OSError:
+        pass
+    if variants_total == 0:
+        # receiver_dir 不可用（in-session ORCA_KB_DIR 重置 / setup 未传）→ 用 ledger +
+        # manifest 推断：「已接触过的变体数下界」（ledger 行数含历史 FAIL_*，本批 ACCEPTED 是 manifest 大小）。
+        # 注：跨 run 累积下可能 > KB 真实变体数，仅作诊断字段（不卡门），优于静默 0（BUG-3）。
+        inferred = variants_done + n_accepted
+        if inferred > 0:
+            print(
+                f"[train_pool] WARN: receiver_dir={receiver_dir} 无变体或不可访问"
+                f"（ORCA_KB_DIR 重置？），variants_total fallback 到 ledger+n_accepted={inferred}",
+                file=sys.stderr,
+            )
+            variants_total = inferred
+
+    # Increment E（防假）：n_accepted>0 但 0 SUCCESS → SWEEP_STATUS=FAIL。
+    sweep_status, fail_reason = classify_final_sweep(rows, n_accepted, fail_reason)
+
     # ── 末尾 viz（sidecar，异常不阻断）─────────────────────────────────────────
     if n_accepted > 0:
         viz_argv = [
             sys.executable, os.path.join(args.kd_scripts_dir, "viz_kd.py"),
             "--ledger", args.ledger,
             "--target_latency_ms", args.target_latency_ms,
+            "--variants_total", str(variants_total),
             "--accuracy_baseline", args.accuracy_baseline,
             "--accuracy_baseline_kind", args.accuracy_baseline_kind,
             "--env_anchor", args.per_run_artifacts_dir,
         ]
+        # baseline_latency_ms 透传给 viz_kd 画 latency bar 的 baseline 参考行（review #6-1）。
+        # None（agent.md 未传 / 直跑 CLI）时不加该 flag，viz_kd 按 default=None 跳过 baseline 行。
+        if args.baseline_latency_ms is not None:
+            viz_argv += ["--baseline_latency_ms", str(args.baseline_latency_ms)]
         try:
             viz_proc = subprocess.run(viz_argv, capture_output=True, text=True, check=False)
         except Exception as e:
@@ -339,40 +409,7 @@ def _main() -> int:
                     file=sys.stderr,
                 )
 
-    # ── 统计 + emit ─────────────────────────────────────────────────────────────
-    # variants_total 优先用 --receiver_dir（setup 探测经 output 传下来，cwd 无关）。
-    # 旧实现仅 fallback $ORCA_KB_DIR——但 ORCA_KB_DIR 在 in-session ``orca next`` 链里被
-    # 重置成默认 ``~/.orca/knowledge_base``（不存在）→ glob 0（BUG-3）。
-    # 三级 fallback：--receiver_dir → $ORCA_KB_DIR/families/receiver → ledger+manifest 推断。
-    receiver_dir = args.receiver_dir or os.path.join(
-        os.environ.get("ORCA_KB_DIR", ""), "families", "receiver")
-    variants_total = 0
-    try:
-        if os.path.isdir(receiver_dir):
-            variants_total = len([n for n in os.listdir(receiver_dir)
-                                  if n.endswith(".py") and not n.startswith("_")])
-    except OSError:
-        pass
-    if variants_total == 0:
-        # receiver_dir 不可用（in-session ORCA_KB_DIR 重置 / setup 未传）→ 用 ledger +
-        # manifest 推断：「已接触过的变体数下界」（ledger 行数含历史 FAIL_*，本批 ACCEPTED 是 manifest 大小）。
-        # 注：跨 run 累积下可能 > KB 真实变体数，仅作诊断字段（不卡门），优于静默 0（BUG-3）。
-        ledger_n = len(read_ledger(args.ledger))
-        inferred = ledger_n + n_accepted
-        if inferred > 0:
-            print(
-                f"[train_pool] WARN: receiver_dir={receiver_dir} 无变体或不可访问"
-                f"（ORCA_KB_DIR 重置？），variants_total fallback 到 ledger+n_accepted={inferred}",
-                file=sys.stderr,
-            )
-            variants_total = inferred
-
-    rows = read_ledger(args.ledger)
-    variants_done = len(rows)
-
-    if fail_reason:
-        sweep_status = "FAIL"
-
+    # ── emit ────────────────────────────────────────────────────────────────────
     print(f"VARIANTS_DONE: {variants_done}")
     print(f"VARIANTS_TOTAL: {variants_total}")
     print(f"SWEEP_STATUS: {sweep_status}")

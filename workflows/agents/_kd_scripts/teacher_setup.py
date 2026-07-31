@@ -365,13 +365,27 @@ def teacher_setup(args) -> dict:
         args.opset, teacher_onnx, device=args.device,
     )
 
-    # 5. 测 latency（device 透传给 latency_provider；用 inspect 检测形参）
-    measure = _load_measure(args.latency_provider)
-    import inspect
-    if "device" in inspect.signature(measure).parameters:
-        latency_ms = float(measure(teacher_onnx, device=args.device))
+    # 5. latency：优先 --teacher_latency_ms（teacher-gen __main__ 已测，透传避免重复测量）；
+    #    缺省则用 latency_provider 自测 ONNX。两者皆空 → fail loud。
+    if args.teacher_latency_ms is not None:
+        latency_ms = float(args.teacher_latency_ms)
+        print(
+            "[teacher_setup] latency_ms 从 --teacher_latency_ms 透传"
+            "（teacher-gen __main__ 已测），跳过 latency_provider 自测",
+            file=sys.stderr,
+        )
+    elif args.latency_provider:
+        measure = _load_measure(args.latency_provider)
+        import inspect
+        if "device" in inspect.signature(measure).parameters:
+            latency_ms = float(measure(teacher_onnx, device=args.device))
+        else:
+            latency_ms = float(measure(teacher_onnx))
     else:
-        latency_ms = float(measure(teacher_onnx))
+        raise SystemExit(
+            "[teacher_setup] FAIL: 未提供 --teacher_latency_ms 且无 --latency_provider；"
+            "二者至少给一个（teacher-gen 已测 latency 时透传，否则给 latency_provider 自测）"
+        )
 
     # 6. 跑 eval_command
     if args.eval_command and args.eval_command.strip():
@@ -400,7 +414,7 @@ def teacher_setup(args) -> dict:
             )
 
     # 7. teacher_cache.pt：state_dict + hook_names + 重建路径 + 元数据
-    # HI-3：身份哈希（setup 幂等护栏用：teacher_model.py 改了 / ckpt 换了 → 重训，不静默复用）。
+    # HI-3：身份哈希（setup 幂等护栏用：teacher_model_path 指向的 teacher 文件改了 / ckpt 换了 → 重训，不静默复用）。
     teacher_model_hash = _sha256_file(os.path.abspath(args.teacher_model_path))
     ckpt_abs = os.path.abspath(args.teacher_ckpt) if args.teacher_ckpt else ""
     teacher_ckpt_sha256 = _sha256_file(ckpt_abs) if (ckpt_abs and os.path.isfile(ckpt_abs)) else ""
@@ -482,8 +496,10 @@ def _main() -> int:
                    help="JSON：proxy 数据规格；空→随机正态")
     p.add_argument("--output_dir", required=True)
     p.add_argument("--opset", type=int, default=17)
-    p.add_argument("--latency_provider", required=True,
-                   help="path::func，如 .../latency_onnxrt.py::measure")
+    p.add_argument("--latency_provider", default="",
+                   help="path::func，如 .../latency_onnxrt.py::measure（--teacher_latency_ms 缺省时用）")
+    p.add_argument("--teacher_latency_ms", type=float, default=None,
+                   help="teacher latency(ms)，优先于 --latency_provider（teacher-gen __main__ 已测时透传，避免重复测量）")
     p.add_argument("--project_root", default=".",
                    help="eval_command 的 cwd")
     p.add_argument(

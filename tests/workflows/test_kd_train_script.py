@@ -182,9 +182,10 @@ def test_agent_md_has_strong_directive():
     assert "kd.compose" in text
     assert "nas_agent.train.distillation" in text  # 红线里点名禁用
     assert "自包含" in text or "绝不 import" in text
-    # 输出摘要 contract
-    assert "OUTPUT_DIR:" in text
-    assert "GENERATED_SCRIPT:" in text
+    # 输出 JSON contract（v4 嵌入 workflow：最终消息是 JSON {train_pipeline_path}）
+    assert "train_pipeline_path" in text, (
+        "agent.md 输出 contract 应声明 train_pipeline_path（v4 workflow 嵌入后的 JSON 终点）"
+    )
 
 
 def test_skill_md_workflow_three_steps():

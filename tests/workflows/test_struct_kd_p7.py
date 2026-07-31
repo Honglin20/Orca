@@ -284,9 +284,10 @@ class TestVizKd:
             del sys.modules["orca.chart"]
 
     @staticmethod
-    def _variant_row(vid, lat, acc, met_acc=True, status="SUCCESS"):
+    def _variant_row(vid, lat, acc, met_acc=True, status="SUCCESS", kind="nmse"):
         return {"variant_id": vid, "status": status, "latency_ms_median": lat,
-                "accuracy": acc, "met_accuracy": met_acc, "met_latency": True,
+                "accuracy": acc, "accuracy_kind": kind,
+                "met_accuracy": met_acc, "met_latency": True,
                 "accepted_cfg": {"num_blocks": 3}}
 
     def test_sweep_scatter_pushed_with_points(self, tmp_path):
@@ -318,8 +319,360 @@ class TestVizKd:
         # 旧 schema 字段已删
         assert "proxy_mse" not in cols and "db_gap" not in cols and "family" not in cols
 
+    def _write_ledger(self, tmp_path, rows):
+        ledger = tmp_path / "ledger.jsonl"
+        with ledger.open("w") as f:
+            for r in rows:
+                f.write(json.dumps(r) + "\n")
+        return ledger
 
-# ───────────────────────── measure_student.py 绝对精度基线（SR3）─────────────────
+    def test_new_charts_pushed_and_direction_aware(self, tmp_path):
+        """增量 C+D：progress / pareto / accuracy_compare 三新图推送，且方向按 kind 标注。
+
+        review #6 取负显示：nmse(min) 对 accuracy y 取负（-acc），使「轴上越大越好」统一，
+        pareto_y_direction 恒 'max'（displayed 数据越大越好；min 取负后与原 raw+min 前沿等价）。
+        snr(max) 不取负，pareto_y_direction='max'。方向反转会立刻红。
+        """
+        rows = [
+            self._variant_row("v_a", 6.0, 0.020, met_acc=True),   # nmse，达标
+            self._variant_row("v_b", 7.0, 0.018, met_acc=True),   # nmse 更低
+            self._variant_row("v_c", 9.0, 0.030, met_acc=False, status="FAIL_accuracy"),
+        ]
+        ledger = self._write_ledger(tmp_path, rows)
+        self.calls.clear()
+        self.viz_kd.render_all(ledger_path=str(ledger), baseline_latency_ms=8.0,
+                               target_latency_ms=10.0, variants_total=5,
+                               accuracy_baseline=0.025, accuracy_baseline_kind="nmse",
+                               env_anchor="")
+        titles = {c.get("title", "") for c in self.calls}
+        # 三新图必须推送
+        assert "Sweep Progress (status counts)" in titles, f"progress 缺失；got {sorted(titles)}"
+        assert "Pareto Front — latency vs accuracy" in titles, f"pareto 缺失；got {sorted(titles)}"
+        assert "Accuracy Compare (per variant)" in titles, f"accuracy_compare 缺失；got {sorted(titles)}"
+        # pareto：取负显示后 y_direction 恒 'max'（防 -20dB 视觉高于 -22dB；min 取负等价原 raw+min）
+        pareto = next(c for c in self.calls if "Pareto Front" in c.get("title", ""))
+        assert pareto["pareto_x_direction"] == "min"
+        assert pareto["pareto_y_direction"] == "max", (
+            "nmse 取负显示后 y_direction 应 'max'（displayed 越大越好）；got "
+            f"{pareto['pareto_y_direction']!r}")
+        # y_label 标「显示 -原值，越大越好」（原指标越低越好仍出现，描述原方向）
+        assert "显示 -原值" in pareto["y_label"], f"y_label 应标取负显示；got {pareto['y_label']!r}"
+        assert "越低越好" in pareto["y_label"], "y_label 应保留原指标方向说明"
+        # 取负显示数据守门：v_a accuracy=0.020 → displayed -0.020（防漏取负回归）
+        v_a_pt = next(p for p in pareto["data"] if p["latency_ms"] == 6.0)
+        assert v_a_pt["accuracy"] == pytest.approx(-0.020), (
+            f"nmse(min) accuracy 应取负显示（0.020→-0.020）；got {v_a_pt['accuracy']}"
+        )
+        # progress caption 含 n_done/n_total
+        progress = next(c for c in self.calls if "Sweep Progress" in c.get("title", ""))
+        assert "variants_total=5" in progress["caption"]
+
+    def test_pareto_direction_flips_for_snr(self, tmp_path):
+        """snr(max) → pareto_y_direction='max'（防方向写死 min 的回归）。"""
+        rows = [
+            self._variant_row("v_a", 6.0, 19.0, met_acc=True, kind="snr"),
+            self._variant_row("v_b", 7.0, 22.0, met_acc=True, kind="snr"),
+        ]
+        ledger = self._write_ledger(tmp_path, rows)
+        self.calls.clear()
+        self.viz_kd.render_all(ledger_path=str(ledger), baseline_latency_ms=8.0,
+                               target_latency_ms=10.0, accuracy_baseline=18.0,
+                               accuracy_baseline_kind="snr", env_anchor="")
+        pareto = next(c for c in self.calls if "Pareto Front" in c.get("title", ""))
+        assert pareto["pareto_y_direction"] == "max", "snr 应 max（越高越好）"
+        assert "越高越好" in pareto["y_label"]
+
+    def test_pareto_skipped_when_kind_unknown(self, tmp_path):
+        """H2：未知 kind → pareto 推图会误导（方向不可靠），sidecar WARN 跳过而非保守兜底。"""
+        rows = [self._variant_row("v_a", 6.0, 0.02), self._variant_row("v_b", 7.0, 0.03)]
+        ledger = self._write_ledger(tmp_path, rows)
+        self.calls.clear()
+        self.viz_kd.render_all(ledger_path=str(ledger), baseline_latency_ms=8.0,
+                               target_latency_ms=10.0, accuracy_baseline=0.025,
+                               accuracy_baseline_kind="", env_anchor="")
+        titles = {c.get("title", "") for c in self.calls}
+        assert "Pareto Front — latency vs accuracy" not in titles, "未知 kind 不应推 pareto"
+
+    def test_fail_latency_sentinel_excluded_from_accuracy_charts(self, tmp_path):
+        """C1（viz 版）：FAIL_latency 行（真测 lat + acc=0 哨兵）不得进 sweep/pareto/compare。"""
+        rows = [
+            self._variant_row("real_a", 6.0, 0.02, met_acc=True),  # 真测 nmse
+            self._variant_row("real_b", 7.0, 0.025, met_acc=True),  # 真测 nmse（凑够 >=2 点）
+            {"variant_id": "faillat", "status": "FAIL_latency", "latency_ms_median": 3.0,
+             "accuracy": 0, "accuracy_kind": "", "met_accuracy": False, "met_latency": False,
+             "accepted_cfg": {}},  # lat 更小 + acc=0 哨兵：若混入会虚假占据 min 前沿
+        ]
+        ledger = self._write_ledger(tmp_path, rows)
+        self.calls.clear()
+        self.viz_kd.render_all(ledger_path=str(ledger), baseline_latency_ms=8.0,
+                               target_latency_ms=10.0, accuracy_baseline=0.025,
+                               accuracy_baseline_kind="nmse", env_anchor="")
+        # sweep scatter 只含两个真测点（faillat 哨兵剔除）
+        scatter = next(c for c in self.calls if "latency vs accuracy" in c.get("title", ""))
+        assert [p["id"] for p in scatter["data"]] == ["real_a", "real_b"], (
+            "FAIL_latency 哨兵不得进 scatter"
+        )
+        pareto = next(c for c in self.calls if "Pareto Front" in c.get("title", ""))
+        assert len(pareto["data"]) == 2, "FAIL_latency 哨兵不得进 pareto"
+
+    # ── review #6：取负显示（min 方向 kind）+ baseline 数据行 + 进度图 0 保留 ──────────
+
+    def test_negate_display_for_min_kind_scatter_and_compare(self, tmp_path):
+        """review #6-4：nmse(min) → scatter / accuracy_compare 的 accuracy y 取负显示。
+
+        bar 图 -20dB 高于 -22dB 是视觉强误导；取负显示从数据层消除歧义（最强）。
+        snr(max) 不取负。本测试守门 scatter + accuracy_compare 两图的 y 值变换。
+        """
+        rows = [
+            self._variant_row("v_a", 6.0, 0.020, met_acc=True),
+            self._variant_row("v_b", 7.0, 0.030, met_acc=False, status="FAIL_accuracy"),
+        ]
+        ledger = self._write_ledger(tmp_path, rows)
+        self.calls.clear()
+        self.viz_kd.render_all(ledger_path=str(ledger), baseline_latency_ms=8.0,
+                               target_latency_ms=10.0, accuracy_baseline=0.025,
+                               accuracy_baseline_kind="nmse", env_anchor="")
+        # scatter：accuracy 取负（0.020 → -0.020）
+        scatter = next(c for c in self.calls if "latency vs accuracy" in c.get("title", ""))
+        v_a_scatter = next(p for p in scatter["data"] if p["id"] == "v_a")
+        assert v_a_scatter["accuracy"] == pytest.approx(-0.020), (
+            f"nmse scatter accuracy 应取负显示；got {v_a_scatter['accuracy']}")
+        assert "显示 -原值" in scatter["y_label"]
+        # accuracy_compare：accuracy 取负
+        cmp = next(c for c in self.calls if "Accuracy Compare" in c.get("title", ""))
+        v_a_cmp = next(p for p in cmp["data"] if p["variant_id"] == "v_a")
+        assert v_a_cmp["accuracy"] == pytest.approx(-0.020), (
+            f"nmse accuracy_compare accuracy 应取负显示；got {v_a_cmp['accuracy']}")
+        assert "显示 -原值" in cmp["y_label"]
+
+    def test_no_negate_for_max_kind_snr(self, tmp_path):
+        """review #6-4：snr(max) 不取负——accuracy 原值（19.0/22.0），y_label「越高越好」。"""
+        rows = [
+            self._variant_row("v_a", 6.0, 19.0, met_acc=True, kind="snr"),
+            self._variant_row("v_b", 7.0, 22.0, met_acc=True, kind="snr"),
+        ]
+        ledger = self._write_ledger(tmp_path, rows)
+        self.calls.clear()
+        self.viz_kd.render_all(ledger_path=str(ledger), baseline_latency_ms=8.0,
+                               target_latency_ms=10.0, accuracy_baseline=18.0,
+                               accuracy_baseline_kind="snr", env_anchor="")
+        scatter = next(c for c in self.calls if "latency vs accuracy" in c.get("title", ""))
+        v_a = next(p for p in scatter["data"] if p["id"] == "v_a")
+        assert v_a["accuracy"] == pytest.approx(19.0), (
+            f"snr(max) 不取负，应原值 19.0；got {v_a['accuracy']}")
+        assert "越高越好" in scatter["y_label"]
+        assert "显示 -原值" not in scatter["y_label"]
+
+    def test_accuracy_compare_baseline_as_data_row(self, tmp_path):
+        """review #6-2：accuracy_baseline 作为 data 行（met_accuracy="ref"）加入，前端能画出。
+
+        原实现 caption 承诺「虚线=baseline」但 data 无 baseline 行→前端画不出。对齐 latency_bar。
+        min 方向 kind 的 baseline 也取负显示（与变体点同坐标系）。
+        """
+        rows = [
+            self._variant_row("v_a", 6.0, 0.020, met_acc=True),
+            self._variant_row("v_b", 7.0, 0.030, met_acc=False, status="FAIL_accuracy"),
+        ]
+        ledger = self._write_ledger(tmp_path, rows)
+        self.calls.clear()
+        self.viz_kd.render_all(ledger_path=str(ledger), baseline_latency_ms=8.0,
+                               target_latency_ms=10.0, accuracy_baseline=0.025,
+                               accuracy_baseline_kind="nmse", env_anchor="")
+        cmp = next(c for c in self.calls if "Accuracy Compare" in c.get("title", ""))
+        baseline_row = next((p for p in cmp["data"] if p["variant_id"] == "baseline"), None)
+        assert baseline_row is not None, (
+            "accuracy_compare data 应含 baseline 行（met_accuracy=ref）；got "
+            f"{[p['variant_id'] for p in cmp['data']]}")
+        assert baseline_row["met_accuracy"] == "ref"
+        # nmse(min) baseline 也取负显示（0.025 → -0.025），与变体点同坐标系
+        assert baseline_row["accuracy"] == pytest.approx(-0.025), (
+            f"baseline accuracy 应取负显示（nmse）；got {baseline_row['accuracy']}")
+
+    def test_accuracy_compare_no_baseline_when_none(self, tmp_path):
+        """accuracy_baseline=None → 不加 baseline 行（原契约保留）。"""
+        rows = [
+            self._variant_row("v_a", 6.0, 0.020, met_acc=True),
+            self._variant_row("v_b", 7.0, 0.030, met_acc=False, status="FAIL_accuracy"),
+        ]
+        ledger = self._write_ledger(tmp_path, rows)
+        self.calls.clear()
+        self.viz_kd.render_all(ledger_path=str(ledger), baseline_latency_ms=8.0,
+                               target_latency_ms=10.0, accuracy_baseline=None,
+                               accuracy_baseline_kind="nmse", env_anchor="")
+        cmp = next(c for c in self.calls if "Accuracy Compare" in c.get("title", ""))
+        assert all(p["variant_id"] != "baseline" for p in cmp["data"]), (
+            "accuracy_baseline=None 时不应加 baseline 行")
+
+    def test_progress_zero_count_fixed_order_retained(self, tmp_path):
+        """review #6-3：progress 固定 status 项即便 0 计数也保留（一眼全貌）。
+
+        原实现 `if counts.get(k,0)>0` 把未见固定项滤掉，与注释「未见的仍以 0 呈现」矛盾。
+        仅 order 之外的杂项 status 才过滤 0。
+        """
+        # ledger 只含 SUCCESS + FAIL_accuracy：FAIL_train/FAIL_latency/FAIL_export 应以 0 出现
+        rows = [
+            self._variant_row("v_a", 6.0, 0.02, met_acc=True, status="SUCCESS"),
+            self._variant_row("v_b", 7.0, 0.05, met_acc=False, status="FAIL_accuracy"),
+        ]
+        ledger = self._write_ledger(tmp_path, rows)
+        self.calls.clear()
+        self.viz_kd.render_all(ledger_path=str(ledger), baseline_latency_ms=8.0,
+                               target_latency_ms=10.0, variants_total=10,
+                               accuracy_baseline=0.025, accuracy_baseline_kind="nmse",
+                               env_anchor="")
+        progress = next(c for c in self.calls if "Sweep Progress" in c.get("title", ""))
+        by_status = {r["status"]: r["count"] for r in progress["data"]}
+        # 固定项全保留（0 计数也出现）
+        for st in ("SUCCESS", "FAIL_accuracy", "FAIL_train", "FAIL_latency", "FAIL_export"):
+            assert st in by_status, f"固定 status {st} 应保留（即便 0）；got {sorted(by_status)}"
+        assert by_status["SUCCESS"] == 1
+        assert by_status["FAIL_accuracy"] == 1
+        assert by_status["FAIL_train"] == 0, "未见固定项应以 0 呈现（一眼全貌）"
+        assert by_status["FAIL_latency"] == 0
+        assert by_status["FAIL_export"] == 0
+
+    def test_progress_extra_status_filtered_when_zero(self, tmp_path):
+        """order 之外的杂项 status 计数 0 时不出现（杂项不该占位，只固定项保留 0）。"""
+        rows = [self._variant_row("v_a", 6.0, 0.02, met_acc=True, status="SUCCESS")]
+        ledger = self._write_ledger(tmp_path, rows)
+        self.calls.clear()
+        self.viz_kd.render_all(ledger_path=str(ledger), baseline_latency_ms=8.0,
+                               target_latency_ms=10.0, accuracy_baseline=0.025,
+                               accuracy_baseline_kind="nmse", env_anchor="")
+        progress = next(c for c in self.calls if "Sweep Progress" in c.get("title", ""))
+        # 无杂项 status（ledger 只有 SUCCESS）；固定项保留
+        statuses = [r["status"] for r in progress["data"]]
+        assert "SUCCESS" in statuses
+        # 不应有杜撰的杂项 status（防御）
+        assert all(s in ("SUCCESS", "FAIL_accuracy", "FAIL_train", "FAIL_latency", "FAIL_export")
+                   for s in statuses), f"杂项 status 不应占位；got {statuses}"
+
+    def test_scatter_and_compare_skipped_when_kind_unknown(self, tmp_path):
+        """review #6-4：未知 kind → scatter / accuracy_compare 也 fail loud 跳过（不 auto 猜方向）。
+
+        取负显示需已知方向；未知 kind 不知是否该取负 → 跳过（与 pareto 同口径）。
+        对齐 goal「坐标轴方向不能让人误判」——「方向未知」文字标注不足以消除 bar 高度误导。
+        """
+        rows = [self._variant_row("v_a", 6.0, 0.02), self._variant_row("v_b", 7.0, 0.03)]
+        ledger = self._write_ledger(tmp_path, rows)
+        self.calls.clear()
+        self.viz_kd.render_all(ledger_path=str(ledger), baseline_latency_ms=8.0,
+                               target_latency_ms=10.0, accuracy_baseline=0.025,
+                               accuracy_baseline_kind="", env_anchor="")
+        titles = {c.get("title", "") for c in self.calls}
+        assert "Distill Sweep — latency vs accuracy" not in titles, "未知 kind 不应推 scatter"
+        assert "Accuracy Compare (per variant)" not in titles, "未知 kind 不应推 accuracy_compare"
+        assert "Pareto Front — latency vs accuracy" not in titles, "未知 kind 不应推 pareto"
+
+    # ── code-reviewer 收口：latency_bar baseline 端到端 + progress 顺序/杂项/未知分母 ──
+
+    def test_latency_bar_baseline_as_data_row(self, tmp_path):
+        """review #6-1 收口：viz_kd 收到 baseline_latency_ms 时 latency bar data 含 baseline 行。
+
+        端到端 intent 闭合：setup.output.baseline_latency_ms → agent.md → train_pool --flag →
+        viz_argv → viz_kd._push_latency_bar 把 baseline 加 data（latency bar 才画得出参考线）。
+        原测试只验「flag 进 argv」不验「行真渲染」——与 accuracy_compare baseline 行的值级断言对称。
+        """
+        rows = [self._variant_row("v_a", 7.0, 0.02, met_acc=True)]
+        ledger = self._write_ledger(tmp_path, rows)
+        self.calls.clear()
+        self.viz_kd.render_all(ledger_path=str(ledger), baseline_latency_ms=8.0,
+                               target_latency_ms=10.0, accuracy_baseline=0.025,
+                               accuracy_baseline_kind="nmse", env_anchor="")
+        bar = next(c for c in self.calls if "Latency Compare" in c.get("title", ""))
+        stages = {r["stage"]: r["latency_ms"] for r in bar["data"]}
+        assert "baseline" in stages, "latency bar 应含 baseline 行（latency 参考线）"
+        assert stages["baseline"] == pytest.approx(8.0)
+        assert "target" in stages and stages["target"] == pytest.approx(10.0)
+        # 变体行也在（latency 是真测，>=0）
+        assert "v_a" in stages and stages["v_a"] == pytest.approx(7.0)
+
+    def test_latency_bar_no_baseline_when_none(self, tmp_path):
+        """baseline_latency_ms=None → latency bar data 不含 baseline 行（反向对称）。"""
+        rows = [self._variant_row("v_a", 7.0, 0.02, met_acc=True),
+                self._variant_row("v_b", 9.0, 0.03, met_acc=False, status="FAIL_accuracy")]
+        ledger = self._write_ledger(tmp_path, rows)
+        self.calls.clear()
+        self.viz_kd.render_all(ledger_path=str(ledger), baseline_latency_ms=None,
+                               target_latency_ms=10.0, accuracy_baseline=0.025,
+                               accuracy_baseline_kind="nmse", env_anchor="")
+        bar = next(c for c in self.calls if "Latency Compare" in c.get("title", ""))
+        stages = {r["stage"]: r["latency_ms"] for r in bar["data"]}
+        assert "baseline" not in stages, "baseline_latency_ms=None 时不应加 baseline 行"
+
+    def test_progress_fixed_display_order(self, tmp_path):
+        """progress 固定 status 显示序（SUCCESS/FAIL_accuracy/FAIL_train/FAIL_latency/FAIL_export）。
+
+        原 0-保留测试把 data 转 dict 丢顺序信息——打乱 order 的回归不会红。本测试守顺序契约。
+        """
+        rows = [self._variant_row("v_a", 6.0, 0.02, met_acc=True, status="SUCCESS")]
+        ledger = self._write_ledger(tmp_path, rows)
+        self.calls.clear()
+        self.viz_kd.render_all(ledger_path=str(ledger), baseline_latency_ms=8.0,
+                               target_latency_ms=10.0, variants_total=5,
+                               accuracy_baseline=0.025, accuracy_baseline_kind="nmse",
+                               env_anchor="")
+        progress = next(c for c in self.calls if "Sweep Progress" in c.get("title", ""))
+        statuses = [r["status"] for r in progress["data"]]
+        assert statuses == ["SUCCESS", "FAIL_accuracy", "FAIL_train", "FAIL_latency", "FAIL_export"], (
+            f"progress 固定显示序被打乱；got {statuses}")
+
+    def test_progress_extra_status_with_count_retained(self, tmp_path):
+        """order 之外的杂项 status 计数 >0 时应保留（正路径，非仅防御）。
+
+        ledger 含一个 status="TIMEOUT" 杂项 → 应以真实计数出现在 data 末尾（order 之后）。
+        """
+        rows = [
+            self._variant_row("v_a", 6.0, 0.02, met_acc=True, status="SUCCESS"),
+            {"variant_id": "v_t", "status": "TIMEOUT", "latency_ms_median": -1,
+             "accuracy": 0, "accuracy_kind": "", "met_accuracy": False, "met_latency": False,
+             "accepted_cfg": {}},
+        ]
+        ledger = self._write_ledger(tmp_path, rows)
+        self.calls.clear()
+        self.viz_kd.render_all(ledger_path=str(ledger), baseline_latency_ms=8.0,
+                               target_latency_ms=10.0, accuracy_baseline=0.025,
+                               accuracy_baseline_kind="nmse", env_anchor="")
+        progress = next(c for c in self.calls if "Sweep Progress" in c.get("title", ""))
+        by_status = {r["status"]: r["count"] for r in progress["data"]}
+        assert by_status.get("TIMEOUT") == 1, (
+            f"杂项 status TIMEOUT 计数>0 应保留；got {by_status}")
+        # 固定项仍在前面（顺序：固定 order + 杂项在后）
+        statuses = [r["status"] for r in progress["data"]]
+        assert statuses.index("TIMEOUT") > statuses.index("FAIL_export"), (
+            "杂项 status 应排在固定 order 之后")
+
+    def test_progress_variants_total_unknown_when_none(self, tmp_path):
+        """variants_total 未给（None）→ progress caption 标「未知」（新参数的回退分支）。"""
+        rows = [self._variant_row("v_a", 6.0, 0.02, met_acc=True, status="SUCCESS")]
+        ledger = self._write_ledger(tmp_path, rows)
+        self.calls.clear()
+        # 不传 variants_total（default None）
+        self.viz_kd.render_all(ledger_path=str(ledger), baseline_latency_ms=8.0,
+                               target_latency_ms=10.0, accuracy_baseline=0.025,
+                               accuracy_baseline_kind="nmse", env_anchor="")
+        progress = next(c for c in self.calls if "Sweep Progress" in c.get("title", ""))
+        assert "variants_total=未知" in progress["caption"], (
+            f"variants_total=None 时 caption 应标「未知」；got {progress['caption']!r}")
+
+    def test_progress_status_null_normalized_to_unknown(self, tmp_path):
+        """status: null（或空串）→ 归一为 "UNKNOWN" 类目（防字符串 "None" 占类目）。"""
+        rows = [
+            self._variant_row("v_a", 6.0, 0.02, met_acc=True, status="SUCCESS"),
+            {"variant_id": "v_null", "status": None, "latency_ms_median": -1,
+             "accuracy": 0, "accuracy_kind": "", "met_accuracy": False, "met_latency": False,
+             "accepted_cfg": {}},
+        ]
+        ledger = self._write_ledger(tmp_path, rows)
+        self.calls.clear()
+        self.viz_kd.render_all(ledger_path=str(ledger), baseline_latency_ms=8.0,
+                               target_latency_ms=10.0, accuracy_baseline=0.025,
+                               accuracy_baseline_kind="nmse", env_anchor="")
+        progress = next(c for c in self.calls if "Sweep Progress" in c.get("title", ""))
+        statuses = [r["status"] for r in progress["data"]]
+        assert "None" not in statuses, "status:null 不应变成字符串 'None' 类目"
+        # 归一为 UNKNOWN，出现在杂项（order 之后）
+        assert "UNKNOWN" in statuses, "status:null 应归一为 'UNKNOWN'"
 
 
 class TestMeasureStudentAbsoluteBaseline:
@@ -380,7 +733,96 @@ class TestTeacherSetupParse:
         assert conf == "high"
 
 
-# ───────────────────────── CLI surface ─────────────────────────
+# ───────────────────────── teacher_setup latency source (v4) ──────────────────
+# teacher_setup.py 的 latency 来源三分支（CONTRACTS §3）：
+#   A) --teacher_latency_ms 优先（teacher-gen.output 透传，避免重复测量）
+#   B) --latency_provider fallback（向后兼容，自测 ONNX）
+#   C) 两者皆空 → fail loud（SystemExit）
+# 这三条是 v4 teacher latency 下沉到 teacher-gen 的核心契约，必须有直接测试守护。
+
+
+def _minimal_teacher_ckpt(tmp_path: Path) -> Path:
+    """造一个最小 teacher ckpt（teacher_model.state_dict）—— teacher_setup strict=False load。"""
+    import torch
+    spec = importlib.util.spec_from_file_location("_ck_teacher", str(KD_SCRIPTS / "teacher_model.py"))
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    ckpt = tmp_path / "teacher_ckpt.pt"
+    torch.save({"state_dict": mod.build_model().state_dict()}, ckpt)
+    return ckpt
+
+
+class TestTeacherSetupLatencySource:
+    """v4：teacher_setup latency 来源三分支（--teacher_latency_ms 优先 / provider fallback / fail loud）。"""
+
+    def test_latency_from_param_skips_provider(self, tmp_path):
+        """分支 A：--teacher_latency_ms 7.3 + 毒化的 latency_provider → 透传 7.3，provider 不被调。
+
+        意图测试（非行为）：provider 脚本含 ``raise RuntimeError('POISON')``——若 teacher_setup
+        仍调它测 latency，会 exit!=0 + stderr 含 POISON。透传路径必须**完全跳过** provider。
+        """
+        import subprocess
+        ckpt = _minimal_teacher_ckpt(tmp_path)
+        poison = tmp_path / "_poison.py"
+        poison.write_text(
+            "def measure(onnx, device=None):\n    raise RuntimeError('POISON: provider should not be called')\n",
+            encoding="utf-8",
+        )
+        r = subprocess.run([
+            sys.executable, str(KD_SCRIPTS / "teacher_setup.py"),
+            "--teacher_model_path", str(KD_SCRIPTS / "teacher_model.py"),
+            "--teacher_ckpt", str(ckpt),
+            "--build_fn", "build_model",
+            "--dummy_input", '{"shape":[1,4,48,64,1],"dtype":"float32"}',
+            "--output_dir", str(tmp_path),
+            "--teacher_latency_ms", "7.3",
+            "--latency_provider", str(poison) + "::measure",  # 给了但不应被调
+            "--device", "cpu",
+        ], capture_output=True, text=True)
+        assert r.returncode == 0, f"应 exit 0（透传 latency，不调 provider）\nstderr:\n{r.stderr}"
+        assert "TEACHER_LATENCY_MS: 7.3000" in r.stdout, f"应透传 7.3：{r.stdout}"
+        assert "POISON" not in r.stderr, "provider 被调了（透传路径应完全跳过 provider）"
+
+    def test_latency_fallback_to_provider_when_param_absent(self, tmp_path):
+        """分支 B：不传 --teacher_latency_ms，只给 --latency_provider → 走自测路径（向后兼容）。"""
+        import subprocess
+        ckpt = _minimal_teacher_ckpt(tmp_path)
+        stub = tmp_path / "_stub.py"
+        stub.write_text("def measure(onnx, device=None):\n    return 3.14\n", encoding="utf-8")
+        r = subprocess.run([
+            sys.executable, str(KD_SCRIPTS / "teacher_setup.py"),
+            "--teacher_model_path", str(KD_SCRIPTS / "teacher_model.py"),
+            "--teacher_ckpt", str(ckpt),
+            "--build_fn", "build_model",
+            "--dummy_input", '{"shape":[1,4,48,64,1],"dtype":"float32"}',
+            "--output_dir", str(tmp_path),
+            "--latency_provider", str(stub) + "::measure",
+            "--device", "cpu",
+        ], capture_output=True, text=True)
+        assert r.returncode == 0, f"应 exit 0（provider 自测）\nstderr:\n{r.stderr}"
+        assert "TEACHER_LATENCY_MS: 3.1400" in r.stdout, f"应用 provider 测的 3.14：{r.stdout}"
+        # stderr 不应含「透传」字样（走的是自测路径）
+        assert "透传" not in r.stderr
+
+    def test_latency_fail_loud_when_neither_given(self, tmp_path):
+        """分支 C：既不传 --teacher_latency_ms 也不传 --latency_provider → fail loud（exit!=0）。"""
+        import subprocess
+        ckpt = _minimal_teacher_ckpt(tmp_path)
+        r = subprocess.run([
+            sys.executable, str(KD_SCRIPTS / "teacher_setup.py"),
+            "--teacher_model_path", str(KD_SCRIPTS / "teacher_model.py"),
+            "--teacher_ckpt", str(ckpt),
+            "--build_fn", "build_model",
+            "--dummy_input", '{"shape":[1,4,48,64,1],"dtype":"float32"}',
+            "--output_dir", str(tmp_path),
+            "--device", "cpu",
+        ], capture_output=True, text=True)
+        assert r.returncode != 0, "应 fail loud（二者至少给一个）"
+        assert "二者至少给一个" in r.stderr, f"stderr 应报 fail loud 原因：{r.stderr}"
+
+
+
 
 
 @pytest.mark.parametrize("script_rel,args,required_flags", [
@@ -389,14 +831,14 @@ class TestTeacherSetupParse:
     ("_struct_scripts/measure_baseline.py", [], ["--device", "--seed"]),
     ("_kd_scripts/profile_onnx.py", [], ["--device", "--seed"]),
     ("_kd_scripts/measure_student.py", [], ["--device", "--seed", "--skip_latency", "--accuracy_baseline"]),
-    ("_kd_scripts/teacher_setup.py", [], ["--device", "--seed", "--strict-accuracy"]),
+    ("_kd_scripts/teacher_setup.py", [], ["--device", "--seed", "--strict-accuracy", "--teacher_latency_ms"]),
     ("_kd_scripts/pick_variant.py", [], ["--target_latency_ms", "--latency_provider", "--force_rerun"]),
     ("_kd_scripts/tune_latency.py", [], ["--device", "--seed", "--max_measurements"]),
     ("_kd_scripts/distill_dispatch.py", [], ["--tune_status"]),
     ("_kd_scripts/viz_kd.py", [], ["--baseline_latency_ms", "--target_latency_ms", "--env_anchor"]),
     ("_kd_scripts/gate_all.py", [], ["--ledger", "--target_latency_ms", "--latency_provider", "--manifest_out"]),
     ("_kd_scripts/gpu_probe.py", [], ["--teacher_cache", "--representative_variant", "--variants_count", "--device"]),
-    ("_kd_scripts/train_pool.py", [], ["--manifest", "--ledger", "--concurrency", "--device_plan", "--per_variant_vram_bytes"]),
+    ("_kd_scripts/train_pool.py", [], ["--manifest", "--ledger", "--concurrency", "--device_plan", "--per_variant_vram_bytes", "--train_pipeline_path"]),
 ])
 def test_cli_flags_exposed(script_rel, args, required_flags):
     """P7：所有脚本 CLI 暴露 --device / --seed（+ export 的 external-data / teacher_setup 的 strict-accuracy）。"""
@@ -420,11 +862,12 @@ def test_struct_workflow_has_six_nodes():
     assert nodes == expected, f"struct nodes mismatch: {nodes}"
 
 
-def test_kd_workflow_has_four_nodes_flatten_first():
-    """v3 重构：kd workflow 4 节点 flatten→setup→gate→train（flatten 入口展平任意模型入口成 KD 变体契约
-    + 确定性 gate + 有界并发池；删 selector/distill/recorder）。"""
+def test_kd_workflow_has_six_nodes_flatten_first():
+    """kd workflow 7 节点 flatten→teacher_gen→train_script_gen→setup→gate→train→select
+    （flatten 入口 + teacher-gen 纯调参派生 teacher + train-script-gen 生成统一训练脚本 +
+    setup 跑 teacher 训 + gate + train + select 读 ledger 出最终报告）。"""
     nodes = _yaml_nodes(REPO / "workflows" / "kd-nas.yaml")
-    expected = ["flatten", "setup", "gate", "train"]
+    expected = ["flatten", "teacher_gen", "train_script_gen", "setup", "gate", "train", "select"]
     assert nodes == expected, f"kd nodes mismatch: {nodes}"
     # entry 必须是 flatten（不再是 setup）—— 抓 yaml 顶层 `entry:` 行
     entry_line = next(

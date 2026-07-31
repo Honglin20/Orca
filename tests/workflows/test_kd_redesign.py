@@ -259,16 +259,17 @@ def test_kd_agent_md_output_refs_in_schema():
 
 
 def test_train_adapter_no_student_family_regression():
-    """🔴 回归：train_adapter_template 不再引用已删的 args.student_family（ckpt 改用 variant_id）。"""
-    src = (KD / "train_adapter_template.py").read_text(encoding="utf-8")
+    """🔴 回归（v4 退役文件）：_deprecated/train_adapter_template 不再引用已删的 args.student_family
+    （ckpt 改用 variant_id）。文件已退役到 _deprecated/，属性仍守门防回潮。"""
+    src = (KD / "_deprecated" / "train_adapter_template.py").read_text(encoding="utf-8")
     assert "args.student_family" not in src, \
         "student_family 残留（--student_family 已删，ckpt 保存会 AttributeError）"
     assert '"variant_id": args.variant_id' in src
 
 
 def test_train_adapter_loop_no_placeholder_leak():
-    """🔴 + BLK-4：训练循环不链入硬编码 shape 的 placeholder dataloader。"""
-    src = (KD / "train_adapter_template.py").read_text(encoding="utf-8")
+    """🔴 + BLK-4（v4 退役文件）：训练循环不链入硬编码 shape 的 placeholder dataloader。"""
+    src = (KD / "_deprecated" / "train_adapter_template.py").read_text(encoding="utf-8")
     for_lines = [l for l in src.splitlines() if "for batch_idx" in l]
     assert for_lines, "缺少训练循环"
     assert all("_placeholder_user_dataloader" not in l for l in for_lines), \
@@ -570,6 +571,7 @@ def test_train_pool_empty_manifest_emits_success(tmp_path):
         "--target_latency_ms", "8",
         "--concurrency", "1", "--device_plan", '[""]',
         "--per_variant_vram_bytes", "0",
+        "--train_pipeline_path", str(tmp_path / "train_pipeline.py"),
     ], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert "SWEEP_STATUS: SUCCESS" in r.stdout
@@ -592,31 +594,95 @@ def test_train_pool_incremental_ledger_helper(tmp_path):
         assert row["variant_id"] == f"v{i}"
 
 
+def test_train_pool_main_injects_orca_kd_scripts_dir(tmp_path, monkeypatch):
+    """v4：train_pool._main 必须设 os.environ['ORCA_KD_SCRIPTS_DIR'] = kd_scripts_dir，
+    让 worker 子进程（train_pipeline.py，落盘在 per-run artifacts）能 import kd.*。
+    run_subproc 继承 os.environ，故 env 注入是 distill 模式能跑的唯一机制。"""
+    sys.path.insert(0, str(KD))
+    for m in [n for n in sys.modules if n in ("train_pool", "kd_common")]:
+        del sys.modules[m]
+    import train_pool as tp
+
+    monkeypatch.delenv("ORCA_KD_SCRIPTS_DIR", raising=False)
+    # 空 manifest → _main 早退（n_accepted=0），但 ctx 构建 + env 注入在 pool 之前
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", [
+        "train_pool.py",
+        "--manifest", str(manifest), "--ledger", str(tmp_path / "ledger.jsonl"),
+        "--teacher_cache", "/dev/null/nonexistent.pt",
+        "--kd_scripts_dir", str(KD), "--artifacts_dir", str(tmp_path),
+        "--per_run_artifacts_dir", str(tmp_path), "--project_root", str(tmp_path),
+        "--train_pipeline_path", str(tmp_path / "train_pipeline.py"),
+        "--test_command", "echo NMSE: 0.02",
+        "--accuracy_baseline", "0.02",
+        "--latency_provider", str(tmp_path / "p.py::m"),
+        "--target_latency_ms", "8",
+        "--concurrency", "1", "--device_plan", '[""]',
+        "--per_variant_vram_bytes", "0",
+    ])
+    rc = tp._main()
+    assert rc == 0
+    import os
+    assert os.environ.get("ORCA_KD_SCRIPTS_DIR") == str(KD), (
+        "train_pool._main 必须注入 ORCA_KD_SCRIPTS_DIR（worker 子进程 import kd.* 依赖此 env）"
+    )
+
+
 # ── v2 DAG：yaml 节点 + 路由（n_accepted==0 → $end）─────────────────────────────
 
 
 def test_kd_dag_flatten_setup_gate_train():
-    """v2 DAG：4 节点 flatten→setup→gate→train→$end。
+    """DAG：7 节点 flatten→teacher-gen→train-script-gen→setup→gate→train→select→$end。
 
-    flatten 是入口（任意模型入口 → KD 变体契约），把 baseline 契约生成从用户手动改为 agent 自动。
+    flatten 是入口；teacher-gen 纯调参派生 teacher；train-script-gen 生成统一 train_pipeline.py；
+    setup 跑 teacher 训 + teacher_cache + GPU 预检；select（finalize 新增）读 ledger 出最终报告。
     """
     from orca.compile.parser import load_workflow
     wf = load_workflow(REPO / "workflows" / "kd-nas.yaml")
     names = [n.name for n in wf.nodes]
-    assert names == ["flatten", "setup", "gate", "train"]
-    # entry 是 flatten（不再是 setup）
+    assert names == ["flatten", "teacher_gen", "train_script_gen", "setup", "gate",
+                     "train", "select"]
+    # entry 是 flatten
     assert wf.entry == "flatten"
-    # flatten 恒到 setup
-    assert [r.to for r in wf.nodes[0].routes] == ["setup"]
+    # flatten 恒到 teacher_gen
+    assert [r.to for r in wf.nodes[0].routes] == ["teacher_gen"]
+    # teacher_gen 恒到 train_script_gen
+    assert [r.to for r in wf.nodes[1].routes] == ["train_script_gen"]
+    # train_script_gen 恒到 setup
+    assert [r.to for r in wf.nodes[2].routes] == ["setup"]
     # setup 恒到 gate
-    assert [r.to for r in wf.nodes[1].routes] == ["gate"]
+    assert [r.to for r in wf.nodes[3].routes] == ["gate"]
     # gate 首条 when = n_accepted==0 → $end；兜底 → train
-    gate_routes = wf.nodes[2].routes
+    gate_routes = wf.nodes[4].routes
     assert gate_routes[0].to.endswith("end") or gate_routes[0].to == "$end"
     assert "n_accepted" in (gate_routes[0].when or "")
     assert gate_routes[1].to == "train"
-    # train 恒到 $end
-    assert [r.to for r in wf.nodes[3].routes] == ["$end"]
+    # train 恒到 select（finalize：train → select → $end）
+    assert [r.to for r in wf.nodes[5].routes] == ["select"]
+    # select 恒到 $end（末尾节点）
+    assert [r.to for r in wf.nodes[6].routes] == ["$end"]
+
+
+def test_kd_dag_teacher_gen_and_train_script_gen_output_schemas():
+    """v4：teacher-gen + train-script-gen 节点 output_schema 必须暴露下游消费的字段。
+
+    teacher-gen → setup 消费 teacher_model_path + teacher_latency_ms；
+    train-script-gen → setup 消费 train_pipeline_path + train 消费 train_pipeline_path。
+    """
+    from orca.compile.parser import load_workflow
+    wf = load_workflow(REPO / "workflows" / "kd-nas.yaml")
+    by_name = {n.name: n for n in wf.nodes}
+    # teacher_gen output_schema（节点名用下划线——Jinja 标识符不能含连字符）
+    tgen = by_name["teacher_gen"]
+    tgen_props = set(tgen.output_schema.get("properties", {}).keys())
+    for f in ("teacher_model_path", "teacher_latency_ms", "project_root",
+              "depth_axis", "width_axis"):
+        assert f in tgen_props, f"teacher_gen output_schema 缺 {f}"
+    # train_script_gen output_schema
+    tsg = by_name["train_script_gen"]
+    tsg_props = set(tsg.output_schema.get("properties", {}).keys())
+    assert "train_pipeline_path" in tsg_props, "train_script_gen output_schema 缺 train_pipeline_path"
 
 
 def test_kd_dag_flatten_output_schema_contract():
@@ -638,24 +704,36 @@ def test_kd_dag_flatten_output_schema_contract():
 
 
 def test_kd_inputs_slammed_remove_advanced_defaults():
-    """输入瘦身（用户已定）：seed / kd_artifacts_dir / accuracy_baseline_kind /
-    latency_tune_budget / kd_force_rerun 不再从 inputs 注入——下游 CLI 用脚本默认。
-    防止静默回潮。"""
+    """输入瘦身（用户已定）：seed / kd_artifacts_dir / latency_tune_budget /
+    kd_force_rerun 不再从 inputs 注入——下游 CLI 用脚本默认。防止静默回潮。
+
+    注意 ``accuracy_baseline_kind`` 在 KD-NAS finalize（2026-07-31）**加回** inputs：
+    方向须用户显式声明（measure_student / viz_kd / kd-select 三处同源，禁 auto 猜，
+    防 -20dB 误判优于 -22dB 的方向反转）——故它现在是必填 [ask]，不在 removed 集合里。
+    """
     from orca.compile.parser import load_workflow
     wf = load_workflow(REPO / "workflows" / "kd-nas.yaml")
     actual = set((wf.inputs or {}).keys())
     removed = {
-        "seed", "kd_artifacts_dir", "accuracy_baseline_kind",
-        "latency_tune_budget", "kd_force_rerun",
+        "seed", "kd_artifacts_dir", "latency_tune_budget", "kd_force_rerun",
     }
     leaked = actual & removed
     assert not leaked, (
         f"kd-nas.yaml inputs 含已下沉 input {sorted(leaked)}（应改为下游 CLI 默认）。"
     )
-    # 必填 Tier A 不动
-    for must in ("teacher_train_command", "test_command", "target_latency_ms",
-                 "accuracy_baseline", "baseline_model_path", "latency_provider"):
+    # 必填 Tier A 不动（v4: teacher_train_command 改名 user_train_script）
+    for must in ("user_train_script", "test_command", "target_latency_ms",
+                 "accuracy_baseline", "accuracy_baseline_kind",
+                 "baseline_model_path", "latency_provider"):
         assert must in actual, f"必填 input {must} 被误删"
+    # accuracy_baseline_kind 必填（finalize 加回：显式方向驱动，单一真相源）
+    assert wf.inputs["accuracy_baseline_kind"].required is True, (
+        "accuracy_baseline_kind 必须 required=True（finalize：方向禁 auto 猜）"
+    )
+    # v4: teacher_train_command 已改名 user_train_script（防回潮）
+    assert "teacher_train_command" not in actual, (
+        "teacher_train_command 已改名 user_train_script（v4），不应残留"
+    )
     # advanced 保留：device + full_epochs
     assert "device" in actual and "full_epochs" in actual
 
@@ -689,6 +767,12 @@ def test_kd_setup_emits_concurrency_fields():
     required = set(setup.output_schema.get("required", []))
     assert "gpu_report" not in required
     assert "concurrency" in required  # setup 必算（即便 1）
+    # v4 反向守门：user_train_import / user_loss_fn 已从 setup output 移除
+    # （loss/dataloader 适配下沉给 train-script-gen，setup 不再 grep-user-train）。防回潮。
+    for removed in ("user_train_import", "user_loss_fn"):
+        assert removed not in setup_props, (
+            f"setup output_schema 不应再有 {removed}（v4 下沉给 train-script-gen）"
+        )
 
 
 # ── 🔴 回归守门：wf.outputs 在 gate→$end（n_accepted==0）路由下不崩 ──────────────
@@ -707,6 +791,7 @@ def test_wf_outputs_renders_when_gate_routes_to_end():
         "ledger_path": "/tmp/ledger.jsonl", "kd_artifacts_dir": "/tmp/art/",
         "baseline_latency_ms": 7.3, "concurrency": 2,
         "device_plan": '["cuda:0","cuda:1"]',
+        "teacher_model_path": "/tmp/art/teacher_model.py",
     }
     gate_output = {"n_accepted": 0, "n_fail_latency": 3, "all_variants_count": 3,
                    "all_processed": True, "accepted_manifest_path": "/tmp/art/gate_manifest.json"}
@@ -786,6 +871,7 @@ def test_train_pool_worker_exception_handler_row_schema(tmp_path, monkeypatch):
         "--target_latency_ms", "8",
         "--concurrency", "1", "--device_plan", '[""]',
         "--per_variant_vram_bytes", "0",
+        "--train_pipeline_path", str(artifacts / "train_pipeline.py"),
     ])
     rc = tp._main()
     assert rc == 0
@@ -999,8 +1085,7 @@ def _train_one_ctx(tmp_path):
         "project_root": str(tmp_path),
         "epochs": 1,
         "seed": 0,
-        "user_train_import": "",
-        "user_loss_fn": "",
+        "train_pipeline_path": str(tmp_path / "train_pipeline.py"),
         "measure_device": "cpu",
     }
 
@@ -1019,9 +1104,11 @@ def test_train_one_success_row_full_fields(tmp_path, monkeypatch):
     ckpt.parent.mkdir(parents=True)
     ckpt.write_bytes(b"x" * 100)
 
+    captured_argv = []
     def fake_subproc(argv):
+        captured_argv.append(argv)
         # train → rc=0；measure → rc=0 + STUDENT_ACCURACY/MET_ACCURACY
-        if "train_adapter_template.py" in str(argv):
+        if "train_pipeline.py" in str(argv):
             return 0, "", ""
         if "measure_student.py" in str(argv):
             return 0, "STUDENT_ACCURACY: 0.018\nSTUDENT_ACCURACY_KIND: nmse\nMET_ACCURACY: true", ""
@@ -1041,6 +1128,33 @@ def test_train_one_success_row_full_fields(tmp_path, monkeypatch):
               "latency_ms_median", "latency_ms_std", "target_latency_ms", "accuracy_baseline",
               "latency_provider_id", "run_id"):
         assert f in row, f"SUCCESS 行缺 {f}"
+    # v4：device=""（device_plan [""] fail-soft）必须归一化为 "cpu" 传给 train_pipeline.py
+    # （train_pipeline._resolve_device("") 会 torch.device("") raise）。
+    train_argv = next(a for a in captured_argv if "train_pipeline.py" in str(a))
+    dev_idx = train_argv.index("--device")
+    assert train_argv[dev_idx + 1] == "cpu", (
+        f"device='' 应归一化为 'cpu' 传给 train_pipeline（_resolve_device 不接受空串）；"
+        f"got --device {train_argv[dev_idx + 1]!r}"
+    )
+    # v4：train_pool worker 必须以 --mode distill 调 train_pipeline（防误删 mode → 跑成 teacher 模式）
+    mode_idx = train_argv.index("--mode")
+    assert train_argv[mode_idx + 1] == "distill", (
+        f"worker 必须传 --mode distill；got --mode {train_argv[mode_idx + 1]!r}"
+    )
+    # 关键 distill 契约参数齐全（防漏传 → train_pipeline 退 placeholder / 报错）
+    for flag in ("--student_model_path", "--teacher_cache", "--build_cfg",
+                 "--kd_config", "--out_ckpt", "--variant_id"):
+        assert flag in train_argv, f"worker argv 缺 {flag}（distill 契约参数）"
+    # measure_student argv 契约（增量 D：--accuracy_baseline_kind 透传是 met_accuracy 判门的关键；
+    # 漏传 → 退默认 "" → unknown → fail-soft + WARN → met_accuracy=false 误杀合格 student）。
+    measure_argv = next(a for a in captured_argv if "measure_student.py" in str(a))
+    for flag in ("--accuracy_baseline", "--accuracy_baseline_kind", "--eval_command",
+                 "--skip_latency", "--build_cfg", "--student_ckpt"):
+        assert flag in measure_argv, f"measure argv 缺 {flag}（精度测量契约参数）"
+    kind_idx = measure_argv.index("--accuracy_baseline_kind")
+    assert measure_argv[kind_idx + 1] == "nmse", (
+        f"--accuracy_baseline_kind 应透传 ctx 值 nmse；got {measure_argv[kind_idx + 1]!r}"
+    )
 
 
 def test_train_one_missing_ckpt_marks_fail_train(tmp_path, monkeypatch):
@@ -1055,7 +1169,7 @@ def test_train_one_missing_ckpt_marks_fail_train(tmp_path, monkeypatch):
     # 故意不创建 ckpt 文件
 
     def fake_subproc(argv):
-        if "train_adapter_template.py" in str(argv):
+        if "train_pipeline.py" in str(argv):
             return 0, "", ""  # rc=0 但没写真 ckpt（模拟用户脚本静默失败）
         return 0, "", ""
     monkeypatch.setattr(tp, "run_subproc", fake_subproc)
@@ -1080,7 +1194,7 @@ def test_train_one_measure_failure_marks_fail_accuracy(tmp_path, monkeypatch):
     ckpt.write_bytes(b"x" * 100)
 
     def fake_subproc(argv):
-        if "train_adapter_template.py" in str(argv):
+        if "train_pipeline.py" in str(argv):
             return 0, "", ""
         if "measure_student.py" in str(argv):
             return 1, "", "eval command crashed"
@@ -1294,12 +1408,41 @@ def test_kd_train_agent_md_passes_receiver_dir():
     assert "setup.output.receiver_dir" in text, "kd-train/agent.md 应从 setup.output.receiver_dir 取"
 
 
-def test_kd_setup_agent_md_uses_setup_helpers():
-    """R4：kd-setup/agent.md step5/step6 调 setup_helpers.py 确定性脚本（不再留给 LLM grep）。"""
+def test_kd_train_agent_md_passes_baseline_latency_ms():
+    """review #6-1：kd-train/agent.md 必须显式传 --baseline_latency_ms（latency bar baseline 参考行）。
+
+    与 --receiver_dir 守门对称：防 agent.md 这行被漏写（HI-11 schema-chain test 只校验引用字段
+    在 output_schema 内，不防「整段 flag 被删」）。来源链 setup.output.baseline_latency_ms 必填。
+    """
+    text = (REPO / "workflows" / "agents" / "kd-train" / "agent.md").read_text(encoding="utf-8")
+    assert "--baseline_latency_ms" in text, "kd-train/agent.md 缺 --baseline_latency_ms 参数"
+    assert "setup.output.baseline_latency_ms" in text, (
+        "kd-train/agent.md 应从 setup.output.baseline_latency_ms 取（latency bar baseline 来源）")
+
+
+def test_kd_setup_agent_md_no_longer_calls_setup_helpers():
+    """v4：kd-setup/agent.md 不再调 setup_helpers find-teacher-ckpt / grep-user-train
+    （teacher 训练改调 train_pipeline.py --mode teacher 固定 --out_ckpt；
+    loss 适配下沉给 train-script-gen）。反向守门：防旧逻辑回潮。
+
+    允许在注释/迁移说明里提到这些名字（解释变更），但不应作为命令调用（`python3 ... setup_helpers.py`）。
+    """
     text = (REPO / "workflows" / "agents" / "kd-setup" / "agent.md").read_text(encoding="utf-8")
-    assert "setup_helpers.py" in text, "kd-setup/agent.md 缺 setup_helpers.py 调用（R4）"
-    assert "find-teacher-ckpt" in text, "step5 应用 setup_helpers.py find-teacher-ckpt"
-    assert "grep-user-train" in text, "step6 应用 setup_helpers.py grep-user-train"
+    # 反向断言：不应有 setup_helpers.py 的 python 调用命令行
+    assert 'python3 "$KD_SCRIPTS_DIR/setup_helpers.py" find-teacher-ckpt' not in text, (
+        "v4: step5 不应再调 setup_helpers.py find-teacher-ckpt（改用 train_pipeline.py --mode teacher 固定 --out_ckpt）"
+    )
+    assert 'python3 "$KD_SCRIPTS_DIR/setup_helpers.py" grep-user-train' not in text, (
+        "v4: step6 grep-user-train 已删（loss 适配下沉给 train-script-gen）"
+    )
+    # 正向断言：step5 改调 train_pipeline.py --mode teacher
+    assert "train_pipeline.py" in text or "TRAIN_PIPELINE_PATH" in text, (
+        "v4: step5 应改调 train_pipeline.py --mode teacher"
+    )
+    # 正向断言：teacher latency 从 teacher_gen.output 透传（不再 teacher_setup 自测）
+    assert "teacher_gen.output.teacher_latency_ms" in text, (
+        "v4: teacher_setup latency 应从 teacher_gen.output 透传"
+    )
 
 
 # ── R1/R2 回归守门：reviewer 显式 finding 的修复线必有直接测试 ─────────────────────
@@ -1370,8 +1513,10 @@ def test_train_pool_r2_viz_kd_nonzero_rc_warns_not_silent(tmp_path, monkeypatch,
 
     # mock viz_kd rc=1 + 非空 stderr（验证 R2：rc!=0 不静默吞）
     import subprocess as _sp
+    captured_viz_argv = []
     def fake_run(argv, **kw):
         if any("viz_kd.py" in str(a) for a in argv):
+            captured_viz_argv.append(argv)
             class _R:
                 returncode = 1
                 stdout = ""
@@ -1391,10 +1536,12 @@ def test_train_pool_r2_viz_kd_nonzero_rc_warns_not_silent(tmp_path, monkeypatch,
         "--project_root", str(artifacts),
         "--test_command", "echo NMSE: 0.02",
         "--accuracy_baseline", "0.02",
+        "--accuracy_baseline_kind", "nmse",
         "--latency_provider", str(artifacts / "p.py::m"),
         "--target_latency_ms", "8",
         "--concurrency", "1", "--device_plan", '[""]',
         "--per_variant_vram_bytes", "0",
+        "--train_pipeline_path", str(artifacts / "train_pipeline.py"),
     ])
     rc = tp._main()
     captured = capsys.readouterr()
@@ -1410,6 +1557,129 @@ def test_train_pool_r2_viz_kd_nonzero_rc_warns_not_silent(tmp_path, monkeypatch,
     assert "latency_ms_median" in captured.err or "KeyError" in captured.err, (
         f"R2：viz_kd 原 stderr 尾部应透传让用户定位，got stderr={captured.err}"
     )
+    # 增量 C+D：viz argv 必须透传 --variants_total（progress 图分母）+ --accuracy_baseline_kind
+    # （方向标注 / pareto 方向）。漏传 → progress 分母显示「未知」+ pareto 方向退默认（静默退化）。
+    assert captured_viz_argv, "viz_kd 应被调用一次"
+    viz_argv = captured_viz_argv[0]
+    assert "--variants_total" in viz_argv, "viz argv 缺 --variants_total（progress 图分母）"
+    assert "--accuracy_baseline_kind" in viz_argv, "viz argv 缺 --accuracy_baseline_kind（方向驱动）"
+    kind_idx = viz_argv.index("--accuracy_baseline_kind")
+    assert viz_argv[kind_idx + 1] == "nmse", (
+        f"--accuracy_baseline_kind 应透传 inputs 值 nmse；got {viz_argv[kind_idx + 1]!r}"
+    )
+
+
+def test_train_pool_viz_argv_passes_baseline_latency_ms(tmp_path, monkeypatch):
+    """review #6-1：train_pool --baseline_latency_ms 透传给 viz_kd（latency bar 的 baseline 参考行）。
+
+    setup.output.baseline_latency_ms 经 agent.md → train_pool --baseline_latency_ms → viz_argv。
+    漏传 → viz_kd latency bar 永远缺 baseline 那根（viz_kd 已支持该 flag，仅 train_pool 未透传）。
+    """
+    sys.path.insert(0, str(KD))
+    for m in [n for n in sys.modules if n in ("train_pool", "kd_common")]:
+        del sys.modules[m]
+    import train_pool as tp
+
+    entry = _train_one_entry()
+    artifacts = tmp_path / "art"; artifacts.mkdir()
+    ledger = artifacts / "ledger.jsonl"
+    manifest = artifacts / "gate_manifest.json"
+    manifest.write_text(json.dumps([entry]), encoding="utf-8")
+
+    # mock _train_one 抛异常驱动 as_completed handler（与 R2 测试同款，只为触发 viz 调用）
+    monkeypatch.setattr(tp, "_train_one", lambda ctx, e, dev: (_ for _ in ()).throw(
+        RuntimeError("simulated boom")))
+
+    captured_viz_argv = []
+    import subprocess as _sp
+    def fake_run(argv, **kw):
+        if any("viz_kd.py" in str(a) for a in argv):
+            captured_viz_argv.append(argv)
+            class _R:
+                returncode = 0; stdout = ""; stderr = ""
+            return _R()
+        class _R0:
+            returncode = 0; stdout = ""; stderr = ""
+        return _R0()
+    monkeypatch.setattr(_sp, "run", fake_run)
+
+    monkeypatch.setattr(sys, "argv", [
+        "train_pool.py",
+        "--manifest", str(manifest), "--ledger", str(ledger),
+        "--teacher_cache", "/dev/null/nonexistent.pt",
+        "--kd_scripts_dir", str(KD), "--artifacts_dir", str(artifacts),
+        "--per_run_artifacts_dir", str(artifacts),
+        "--project_root", str(artifacts),
+        "--test_command", "echo NMSE: 0.02",
+        "--accuracy_baseline", "0.02",
+        "--accuracy_baseline_kind", "nmse",
+        "--latency_provider", str(artifacts / "p.py::m"),
+        "--target_latency_ms", "8",
+        "--baseline_latency_ms", "7.5",  # review #6-1：从 setup.output 透传
+        "--concurrency", "1", "--device_plan", '[""]',
+        "--per_variant_vram_bytes", "0",
+        "--train_pipeline_path", str(artifacts / "train_pipeline.py"),
+    ])
+    rc = tp._main()
+    assert rc == 0
+    assert captured_viz_argv, "viz_kd 应被调用一次"
+    viz_argv = captured_viz_argv[0]
+    assert "--baseline_latency_ms" in viz_argv, "viz argv 缺 --baseline_latency_ms（latency bar baseline）"
+    idx = viz_argv.index("--baseline_latency_ms")
+    assert viz_argv[idx + 1] == "7.5", (
+        f"--baseline_latency_ms 应透传 7.5；got {viz_argv[idx + 1]!r}")
+
+
+def test_train_pool_viz_argv_omits_baseline_latency_ms_when_none(tmp_path, monkeypatch):
+    """review #6-1：--baseline_latency_ms 未给（None）→ viz_argv 不含该 flag（viz_kd default=None 跳过）。"""
+    sys.path.insert(0, str(KD))
+    for m in [n for n in sys.modules if n in ("train_pool", "kd_common")]:
+        del sys.modules[m]
+    import train_pool as tp
+
+    entry = _train_one_entry()
+    artifacts = tmp_path / "art"; artifacts.mkdir()
+    ledger = artifacts / "ledger.jsonl"
+    manifest = artifacts / "gate_manifest.json"
+    manifest.write_text(json.dumps([entry]), encoding="utf-8")
+    monkeypatch.setattr(tp, "_train_one", lambda ctx, e, dev: (_ for _ in ()).throw(
+        RuntimeError("simulated boom")))
+
+    captured_viz_argv = []
+    import subprocess as _sp
+    def fake_run(argv, **kw):
+        if any("viz_kd.py" in str(a) for a in argv):
+            captured_viz_argv.append(argv)
+            class _R:
+                returncode = 0; stdout = ""; stderr = ""
+            return _R()
+        class _R0:
+            returncode = 0; stdout = ""; stderr = ""
+        return _R0()
+    monkeypatch.setattr(_sp, "run", fake_run)
+
+    # 不传 --baseline_latency_ms（default None）
+    monkeypatch.setattr(sys, "argv", [
+        "train_pool.py",
+        "--manifest", str(manifest), "--ledger", str(ledger),
+        "--teacher_cache", "/dev/null/nonexistent.pt",
+        "--kd_scripts_dir", str(KD), "--artifacts_dir", str(artifacts),
+        "--per_run_artifacts_dir", str(artifacts),
+        "--project_root", str(artifacts),
+        "--test_command", "echo NMSE: 0.02",
+        "--accuracy_baseline", "0.02",
+        "--accuracy_baseline_kind", "nmse",
+        "--latency_provider", str(artifacts / "p.py::m"),
+        "--target_latency_ms", "8",
+        "--concurrency", "1", "--device_plan", '[""]',
+        "--per_variant_vram_bytes", "0",
+        "--train_pipeline_path", str(artifacts / "train_pipeline.py"),
+    ])
+    rc = tp._main()
+    assert rc == 0
+    viz_argv = captured_viz_argv[0]
+    assert "--baseline_latency_ms" not in viz_argv, (
+        "baseline_latency_ms=None 时不应加该 flag（viz_kd default=None 跳过 baseline 行）")
 
 
 # ── train_pool _train_one：train rc!=0 / measure rc=0+met_acc=false 两条负路径 ────
@@ -1427,14 +1697,14 @@ def test_train_one_train_failure_marks_fail_train(tmp_path, monkeypatch):
     ctx = _train_one_ctx(tmp_path)
 
     def fake_subproc(argv):
-        if "train_adapter_template.py" in str(argv):
+        if "train_pipeline.py" in str(argv):
             return 1, "", "OOM: cuda out of memory"
         return 0, "", ""
     monkeypatch.setattr(tp, "run_subproc", fake_subproc)
 
     row = tp._train_one(ctx, entry, device="")
     assert row["status"] == "FAIL_train"
-    assert "train_kd rc=1" in row["fail_reason"]
+    assert "train_pipeline rc=1" in row["fail_reason"]
     assert "OOM" in row["fail_reason"]
     assert row["ckpt"] == ""  # train 失败，没产 ckpt
     assert row["met_accuracy"] is False
@@ -1455,7 +1725,7 @@ def test_train_one_measure_accuracy_not_met_marks_fail_accuracy(tmp_path, monkey
     ckpt.write_bytes(b"x" * 100)
 
     def fake_subproc(argv):
-        if "train_adapter_template.py" in str(argv):
+        if "train_pipeline.py" in str(argv):
             return 0, "", ""
         if "measure_student.py" in str(argv):
             # measure 成功但精度不达标（met_acc=false）
@@ -1505,3 +1775,348 @@ def test_setup_helpers_no_dead_code_loss_regex():
     src = (KD / "setup_helpers.py").read_text(encoding="utf-8")
     assert "_LOSS_RE" not in src, "死代码 _LOSS_RE 应已删（grep 改 AST 后无引用）"
     assert "_NN_LOSS_ASSIGN" not in src, "死代码 _NN_LOSS_ASSIGN 应已删"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# KD-NAS finalize（2026-07-31）：指标方向单一真相源 + 防假 + select 确定性选择
+# ═══════════════════════════════════════════════════════════════════════════════
+
+SELECT_SCRIPT = REPO / "workflows" / "agents" / "kd-select" / "scripts" / "select_and_report.py"
+
+
+def _load_kd_common():
+    sys.path.insert(0, str(KD))
+    import kd_common
+    return kd_common
+
+
+def test_accuracy_direction_single_source_of_truth():
+    """accuracy_baseline_kind → best 方向（防 -20dB 误判优于 -22dB 的方向反转）。
+
+    单一真相源 kd_common.accuracy_direction：measure_student / viz_kd / select 三处同源。
+    """
+    kc = _load_kd_common()
+    assert kc.accuracy_direction("nmse") == "min"
+    assert kc.accuracy_direction("mse") == "min"
+    assert kc.accuracy_direction("ber") == "min"
+    assert kc.accuracy_direction("db") == "min"   # 新增（KD-NAS finalize）
+    assert kc.accuracy_direction("snr") == "max"
+    assert kc.accuracy_direction("acc") == "max"
+    # 未知 / 空 → 空串（caller 必须 fail loud，不许 auto 猜）
+    assert kc.accuracy_direction("") == ""
+    assert kc.accuracy_direction("unknown") == ""
+    assert kc.accuracy_direction("MSE") == "min"  # 大小写不敏感
+
+
+# ── review #5：is_measured_row 直接单测（"真测 vs 哨兵"唯一裁判，决定帕累托画哪些行）──
+
+
+def test_is_measured_row_real_success():
+    """SUCCESS + accuracy_kind 非空 → 真测（保留）。"""
+    kc = _load_kd_common()
+    assert kc.is_measured_row(
+        {"status": "SUCCESS", "accuracy": 0.018, "accuracy_kind": "nmse"}) is True
+
+
+def test_is_measured_row_real_fail_accuracy():
+    """FAIL_accuracy + accuracy_kind 非空 → 真测（measure rc==0 跑到解析，真值可能恰为 0.0）。"""
+    kc = _load_kd_common()
+    # accuracy=0.0 但 accuracy_kind 非空 → measure emit 了 STUDENT_ACCURACY_KIND，真测
+    assert kc.is_measured_row(
+        {"status": "FAIL_accuracy", "accuracy": 0.0, "accuracy_kind": "nmse"}) is True
+
+
+def test_is_measured_row_fail_latency_sentinel():
+    """FAIL_latency → 哨兵（accuracy=0、accuracy_kind 空：gate 阶段落账，accuracy 未测）。"""
+    kc = _load_kd_common()
+    assert kc.is_measured_row(
+        {"status": "FAIL_latency", "accuracy": 0, "accuracy_kind": ""}) is False
+
+
+def test_is_measured_row_fail_train_sentinel():
+    """FAIL_train → 哨兵（训练崩 / 无 ckpt，accuracy 未测）。"""
+    kc = _load_kd_common()
+    assert kc.is_measured_row(
+        {"status": "FAIL_train", "accuracy": 0, "accuracy_kind": ""}) is False
+
+
+def test_is_measured_row_measure_fail_sentinel():
+    """FAIL_accuracy + accuracy_kind 空 → 哨兵（measure rc!=0，accuracy=0 是 fallback 哨兵）。
+
+    这是 C1 防假的关键：accuracy=0 在 min 方向 kind 下会虚假占据帕累托前沿。
+    """
+    kc = _load_kd_common()
+    assert kc.is_measured_row(
+        {"status": "FAIL_accuracy", "accuracy": 0, "accuracy_kind": ""}) is False
+
+
+def test_is_measured_row_success_empty_kind_is_sentinel():
+    """SUCCESS 但 accuracy_kind 空 → 视为哨兵（不符合 emit 契约；防 status-only 伪造）。"""
+    kc = _load_kd_common()
+    assert kc.is_measured_row(
+        {"status": "SUCCESS", "accuracy": 0.02, "accuracy_kind": ""}) is False
+
+
+def test_is_measured_row_unknown_status():
+    """status 不在 {SUCCESS, FAIL_accuracy} → 非真测（FAIL_export / 其他终态）。"""
+    kc = _load_kd_common()
+    assert kc.is_measured_row(
+        {"status": "FAIL_export", "accuracy": 0.01, "accuracy_kind": "nmse"}) is False
+    assert kc.is_measured_row({"status": "UNKNOWN", "accuracy_kind": "snr"}) is False
+
+
+def test_measure_student_db_kind_lower_better():
+    """measure_student 的绝对基线判定按显式 kind：db（越低越好）→ student ≤ baseline 才达标。"""
+    sys.path.insert(0, str(KD))
+    import measure_student
+    # db 方向：student=-22 ≤ baseline=-20 → met=True（更低的 dB 更好，不许反转）
+    met, used, conf = measure_student._compute_met_accuracy_absolute(
+        -22.0, "db", -20.0, "db")
+    assert met is True and used == "db" and conf == "high"
+    # student=-18（比 -20 差）→ met=False
+    met2, _, _ = measure_student._compute_met_accuracy_absolute(-18.0, "db", -20.0, "db")
+    assert met2 is False
+    # snr（越高越好）：student=22 ≥ baseline=20 → met=True
+    met3, _, _ = measure_student._compute_met_accuracy_absolute(22.0, "snr", 20.0, "snr")
+    assert met3 is True
+
+
+def test_train_pool_classify_final_sweep_anti_fake():
+    """Increment E：n_accepted>0 但 0 SUCCESS → SWEEP_STATUS=FAIL（避免「全 FAIL 但 SUCCESS」）。"""
+    sys.path.insert(0, str(KD))
+    import train_pool
+    cfs = train_pool.classify_final_sweep
+    # 1) incoming fail_reason（VRAM 降级）→ 保持 FAIL，原因不覆盖
+    s, r = cfs([{"status": "SUCCESS"}], 3, "VRAM 降级 3->1")
+    assert (s, r) == ("FAIL", "VRAM 降级 3->1")
+    # 2) n_accepted==0（空批，gate 全 FAIL_latency）→ SUCCESS
+    assert cfs([], 0, "") == ("SUCCESS", "")
+    # 3) n_accepted>0 + 0 SUCCESS（全 FAIL_accuracy/FAIL_train）→ FAIL（防假）
+    s, r = cfs([{"status": "FAIL_accuracy"}, {"status": "FAIL_train"}], 2, "")
+    assert s == "FAIL" and "无一 SUCCESS" in r, (s, r)
+    # 4) n_accepted>0 + ≥1 SUCCESS → SUCCESS
+    assert cfs([{"status": "SUCCESS"}, {"status": "FAIL_accuracy"}], 2, "") == ("SUCCESS", "")
+
+
+def _load_select_module():
+    """加载 select_and_report.py（其内部按相对路径注入 _kd_scripts）。"""
+    sys.path.insert(0, str(KD))
+    return _load(SELECT_SCRIPT, "kd_select_and_report")
+
+
+def test_select_best_student_direction_aware():
+    """select 选最优 student 严格按 kind 方向（max/min），平局取 latency 更小者。"""
+    m = _load_select_module()
+    qualified = [
+        {"variant_id": "v_a", "latency_ms_median": 6.0, "accuracy": 0.020},
+        {"variant_id": "v_b", "latency_ms_median": 7.0, "accuracy": 0.018},  # nmse 最低
+        {"variant_id": "v_c", "latency_ms_median": 7.0, "accuracy": 0.018},  # 同 acc 同 lat（平局）
+    ]
+    # nmse（min）：0.018 最好 → v_b（平局取 vid 字典序最小 = v_b）
+    best_min = m._best_student(qualified, "min")
+    assert best_min["variant_id"] == "v_b"
+    # snr（max）：0.020 最好 → v_a
+    best_max = m._best_student(qualified, "max")
+    assert best_max["variant_id"] == "v_a"
+    # 空 → None
+    assert m._best_student([], "max") is None
+
+
+def test_select_measured_and_qualified_filters():
+    """select 过滤：真实测量行 = status ∈ {SUCCESS, FAIL_accuracy} ∧ accuracy_kind 非空。
+
+    C1 防假：FAIL_latency 行的 latency 是**真测**（tune_latency 即便 FAIL 也 emit 测得值）、
+    accuracy=0 是哨兵、accuracy_kind="" —— 必须剔除，否则 min 方向 kind 下会以 acc=0 虚假占据前沿。
+    """
+    m = _load_select_module()
+    rows = [
+        {"variant_id": "ok", "latency_ms_median": 5.0, "accuracy": 0.01, "accuracy_kind": "nmse",
+         "met_latency": True, "met_accuracy": True, "status": "SUCCESS"},
+        {"variant_id": "failacc_real", "latency_ms_median": 5.0, "accuracy": 0.05, "accuracy_kind": "nmse",
+         "met_latency": True, "met_accuracy": False, "status": "FAIL_accuracy"},  # measure rc==0 真测
+        # 以下三类都是哨兵行，必须剔除：
+        {"variant_id": "faillat", "latency_ms_median": 15.0, "accuracy": 0, "accuracy_kind": "",
+         "met_latency": False, "met_accuracy": False, "status": "FAIL_latency"},  # 真测 lat + 哨兵 acc
+        {"variant_id": "failacc_sentinel", "latency_ms_median": 5.0, "accuracy": 0, "accuracy_kind": "",
+         "met_latency": True, "met_accuracy": False, "status": "FAIL_accuracy"},  # measure rc!=0
+        {"variant_id": "failtrain", "latency_ms_median": 6.0, "accuracy": 0, "accuracy_kind": "",
+         "met_latency": True, "met_accuracy": False, "status": "FAIL_train"},
+    ]
+    measured = m._measured_rows(rows)
+    assert [r["variant_id"] for r in measured] == ["ok", "failacc_real"], (
+        f"哨兵行（acc=0 + accuracy_kind 空）必须剔除；got {[r['variant_id'] for r in measured]}"
+    )
+    qualified = m._qualified_rows(measured)
+    assert [r["variant_id"] for r in qualified] == ["ok"]
+
+
+def test_select_pareto_front_excludes_fail_latency_sentinel():
+    """C1 回归：FAIL_latency 行（真测 lat=3.0 + 哨兵 acc=0）不得占据 min 方向帕累托前沿。
+
+    若 ``_measured_rows`` 漏过滤，acc=0 在 nmse(min) 下会支配所有真测点 → 虚假入前沿。
+    """
+    m = _load_select_module()
+    rows = [
+        {"variant_id": "real_a", "latency_ms_median": 5.0, "accuracy": 0.02, "accuracy_kind": "nmse",
+         "status": "SUCCESS"},
+        {"variant_id": "faillat", "latency_ms_median": 3.0, "accuracy": 0, "accuracy_kind": "",
+         "status": "FAIL_latency"},  # lat 比 real_a 更小、acc=0 哨兵 → 若混入会虚假支配
+    ]
+    measured = m._measured_rows(rows)
+    assert [r["variant_id"] for r in measured] == ["real_a"], "FAIL_latency 哨兵行不得进 measured"
+    front = m._pareto_front(measured, "min")
+    assert front == [0]  # 只剩 real_a
+
+
+def test_select_pareto_front_direction_aware():
+    """帕累托前沿方向感知：latency(min) × accuracy(direction)。
+
+    三点：pt0(lat=5,acc=0.02) pt1(lat=6,acc=0.01) pt2(lat=7,acc=0.03)
+    """
+    m = _load_select_module()
+    pts = [
+        {"latency_ms_median": 5.0, "accuracy": 0.02},  # pt0
+        {"latency_ms_median": 6.0, "accuracy": 0.01},  # pt1
+        {"latency_ms_median": 7.0, "accuracy": 0.03},  # pt2
+    ]
+    # nmse(min)：两轴都越小越好。pt0(lat 最小, acc 中) 与 pt1(acc 最小) 互不支配；
+    # pt2(lat 最大且 acc 最大=最差) 被 pt0 双轴支配 → 不在前沿。
+    front_min = set(m._pareto_front(pts, "min"))
+    assert front_min == {0, 1}, front_min
+    # snr(max)：acc 取负后越小越好。pt0(lat 最小) 与 pt2(acc 最大=最好) 互不支配；
+    # pt1(lat 中, acc 中) 被 pt0 双轴支配 → 不在前沿。
+    front_max = set(m._pareto_front(pts, "max"))
+    assert front_max == {0, 2}, front_max
+    # 新增一个被支配的点 pt3(lat=6.5, acc=0.02)：被 pt0(5<=6.5, 0.02<=0.02, lat 严格更小) 支配。
+    pts_dom = pts + [{"latency_ms_median": 6.5, "accuracy": 0.02}]
+    front_dom = set(m._pareto_front(pts_dom, "min"))
+    assert 3 not in front_dom, "pt3 应被 pt0 支配（lat 更小 acc 相同）"
+    assert front_dom == {0, 1}
+
+
+def test_select_and_report_end_to_end_via_subprocess(tmp_path):
+    """脚本本级 E2E：select_and_report.py 读 ledger → final_report + 正确选择（零 LLM）。"""
+    import subprocess
+    ledger = tmp_path / "ledger.jsonl"
+    rows = [
+        {"variant_id": "v_good", "variant_sha256": "a", "latency_ms_median": 6.0,
+         "latency_ms_std": 0.1, "accuracy": 0.020, "accuracy_kind": "nmse",
+         "met_latency": True, "met_accuracy": True, "status": "SUCCESS", "accepted_cfg": {}},
+        {"variant_id": "v_best", "variant_sha256": "b", "latency_ms_median": 7.0,
+         "latency_ms_std": 0.1, "accuracy": 0.018, "accuracy_kind": "nmse",
+         "met_latency": True, "met_accuracy": True, "status": "SUCCESS", "accepted_cfg": {}},
+        {"variant_id": "v_failacc", "variant_sha256": "c", "latency_ms_median": 6.5,
+         "latency_ms_std": 0.1, "accuracy": 0.030, "accuracy_kind": "nmse",
+         "met_latency": True, "met_accuracy": False, "status": "FAIL_accuracy", "accepted_cfg": {}},
+    ]
+    ledger.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    artifacts = tmp_path / "kd_artifacts"
+    artifacts.mkdir()
+    out = subprocess.run(
+        [sys.executable, str(SELECT_SCRIPT), "--ledger", str(ledger),
+         "--kd_artifacts_dir", str(artifacts) + "/",
+         "--accuracy_baseline", "0.025", "--accuracy_baseline_kind", "nmse",
+         "--target_latency_ms", "8"],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 0, out.stderr
+    assert "N_SELECTED: 2" in out.stdout
+    assert "BEST_VARIANT: v_best" in out.stdout  # nmse 最低
+    assert "SELECTION_OK: true" in out.stdout
+    report = (artifacts / "final_report.md").read_text(encoding="utf-8")
+    assert "最优 student" in report and "v_best" in report
+
+
+def test_select_and_report_no_qualified_not_fabricated(tmp_path):
+    """无达标 student → 报告标「无 student 达标」，不假装选出（exit 0, selection_ok=false）。"""
+    import subprocess
+    ledger = tmp_path / "ledger.jsonl"
+    rows = [
+        {"variant_id": "v1", "variant_sha256": "a", "latency_ms_median": 6.0,
+         "latency_ms_std": 0.1, "accuracy": 0.05, "accuracy_kind": "nmse",
+         "met_latency": True, "met_accuracy": False, "status": "FAIL_accuracy", "accepted_cfg": {}},
+    ]
+    ledger.write_text(json.dumps(rows[0]) + "\n", encoding="utf-8")
+    artifacts = tmp_path / "kd_artifacts"
+    artifacts.mkdir()
+    out = subprocess.run(
+        [sys.executable, str(SELECT_SCRIPT), "--ledger", str(ledger),
+         "--kd_artifacts_dir", str(artifacts) + "/",
+         "--accuracy_baseline", "0.025", "--accuracy_baseline_kind", "nmse",
+         "--target_latency_ms", "8"],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 0, out.stderr  # 无达标 = 设计内，非错误
+    assert "N_SELECTED: 0" in out.stdout
+    assert "SELECTION_OK: false" in out.stdout
+    assert "BEST_VARIANT: " in out.stdout  # 空串
+    report = (artifacts / "final_report.md").read_text(encoding="utf-8")
+    assert "无 student 达标" in report
+
+
+def test_select_and_report_unknown_kind_fail_loud(tmp_path):
+    """未知 accuracy_baseline_kind → fail loud（exit 2 + 报告标注），不 auto 猜方向。"""
+    import subprocess
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text(json.dumps(
+        {"variant_id": "v1", "latency_ms_median": 5.0, "accuracy": 0.01,
+         "met_latency": True, "met_accuracy": True, "status": "SUCCESS"}) + "\n",
+        encoding="utf-8")
+    artifacts = tmp_path / "kd_artifacts"
+    artifacts.mkdir()
+    out = subprocess.run(
+        [sys.executable, str(SELECT_SCRIPT), "--ledger", str(ledger),
+         "--kd_artifacts_dir", str(artifacts) + "/",
+         "--accuracy_baseline", "0.025", "--accuracy_baseline_kind", "foobar",
+         "--target_latency_ms", "8"],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 2, "未知 kind 必须 fail loud"
+    assert "SELECTION_OK: false" in out.stdout
+    report = (artifacts / "final_report.md").read_text(encoding="utf-8")
+    assert "Selection FAILED" in report
+
+
+def test_select_and_report_empty_ledger_fail_loud(tmp_path):
+    """空 ledger → fail loud（exit 2 + 报告标注），不假装选出（用户显式列名的 hard 校验）。"""
+    import subprocess
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text("", encoding="utf-8")  # 空 ledger
+    artifacts = tmp_path / "kd_artifacts"
+    artifacts.mkdir()
+    out = subprocess.run(
+        [sys.executable, str(SELECT_SCRIPT), "--ledger", str(ledger),
+         "--kd_artifacts_dir", str(artifacts) + "/",
+         "--accuracy_baseline", "0.025", "--accuracy_baseline_kind", "nmse",
+         "--target_latency_ms", "8"],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 2, "空 ledger 必须 fail loud（非 0 退出）"
+    assert "N_SELECTED: 0" in out.stdout
+    assert "SELECTION_OK: false" in out.stdout
+    assert "ledger 为空" in out.stderr or "ledger 为空" in out.stdout, (
+        f"应在 stderr/stdout 标注空 ledger；stderr={out.stderr[-300:]}"
+    )
+    report = (artifacts / "final_report.md").read_text(encoding="utf-8")
+    assert "Selection FAILED" in report
+
+
+def test_select_and_report_corrupt_ledger_fail_loud(tmp_path):
+    """坏 JSON 行 ledger → kd_common.read_ledger raise → select 捕获 exit 2（BLK-16 fail loud）。"""
+    import subprocess
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text('{"variant_id":"ok","status":"SUCCESS","latency_ms_median":5.0,'
+                      '"accuracy":0.02,"accuracy_kind":"nmse","met_accuracy":true}\n'
+                      '这不是合法 JSON 行\n', encoding="utf-8")
+    artifacts = tmp_path / "kd_artifacts"
+    artifacts.mkdir()
+    out = subprocess.run(
+        [sys.executable, str(SELECT_SCRIPT), "--ledger", str(ledger),
+         "--kd_artifacts_dir", str(artifacts) + "/",
+         "--accuracy_baseline", "0.025", "--accuracy_baseline_kind", "nmse",
+         "--target_latency_ms", "8"],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 2, "坏 JSON ledger 必须 fail loud"
+    assert "SELECTION_OK: false" in out.stdout
+

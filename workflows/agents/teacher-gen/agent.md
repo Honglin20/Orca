@@ -61,7 +61,7 @@ teacher = baseline 的 `build_model` **调大 cfg**（深度轴 ×3 / 宽度轴 
 
 ## 输入
 
-- baseline 契约路径: `{{ inputs.baseline_contract_path }}`（flatten 产出的 `.py`，含 build_model + DUMMY_INPUT + KNOBS；或用户直接提供的合规契约）
+- baseline 契约路径: `{{ flatten.output.baseline_contract_path }}`（flatten 节点产出的 `.py`，含 build_model + DUMMY_INPUT + KNOBS；经 validate_contract.py PASS）
 - 设备: `{{ inputs.device }}`（advanced，默认 `auto`；用于校验 forward + `__main__` latency 测量）
 - latency_provider: `{{ inputs.latency_provider }}`（用户真硬件 latency 脚本 `path::func`；kd-nas workflow 必填。**写入 teacher 文件 `__main__` 的 `--latency_provider` 默认值**——渲染后的实际路径串，不是 Jinja 模板；空串 → helper fallback ONNXRT-CPU + WARN）
 - 输出目录: 引擎注入的 `$ORCA_ARTIFACTS_DIR`（run scope，权威产物目录）；缺则 fallback `llm_artifacts/<base_name>/`（`<base_name>` 定义见下「准备工作」step 4——已含 `_teacher` 后缀）
@@ -72,16 +72,16 @@ teacher = baseline 的 `build_model` **调大 cfg**（深度轴 ×3 / 宽度轴 
    ```bash
    source .venv/bin/activate 2>/dev/null || true
    ```
-2. **校验 baseline 契约可达**：读 `{{ inputs.baseline_contract_path }}`，确认顶层有 `BUILD_FN="build_model"` + `DUMMY_INPUT` + `KNOBS` + `def build_model(**cfg)` 四件套（model-flatten 产出保证；用户自带契约则需自验）。缺字段 → fail loud（stderr 报缺哪个），不进入派生。
-3. **推断 project_root（infer-once，Tier B）**：从 `{{ inputs.baseline_contract_path }}` 所在目录起，向上逐级找**第一个含 `train.py` 或 `pyproject.toml` 或 `.git` 的目录**作为项目根（绝对路径）。走到 `/` 仍找不到 → 取 `{{ inputs.baseline_contract_path }}` 的 dirname，并在 `project_root` 字段后追加 ` (low-confidence: no train.py/pyproject.toml/.git ancestor)`（不阻塞，但必须显式标注）。**不许**用 `pwd` / `git rev-parse` / 最近编辑文件推断；**不许**留空或编造。project_root 用于跨 agent 调 `model-flatten/scripts/validate_contract.py`。
+2. **校验 baseline 契约可达**：读 `{{ flatten.output.baseline_contract_path }}`，确认顶层有 `BUILD_FN="build_model"` + `DUMMY_INPUT` + `KNOBS` + `def build_model(**cfg)` 四件套（flatten 节点产出保证）。缺字段 → fail loud（stderr 报缺哪个），不进入派生。
+3. **推断 project_root（infer-once，Tier B）**：从 `{{ flatten.output.baseline_contract_path }}` 所在目录起，向上逐级找**第一个含 `train.py` 或 `pyproject.toml` 或 `.git` 的目录**作为项目根（绝对路径）。走到 `/` 仍找不到 → 取 `{{ flatten.output.baseline_contract_path }}` 的 dirname，并在 `project_root` 字段后追加 ` (low-confidence: no train.py/pyproject.toml/.git ancestor)`（不阻塞，但必须显式标注）。**不许**用 `pwd` / `git rev-parse` / 最近编辑文件推断；**不许**留空或编造。project_root 用于跨 agent 调 `model-flatten/scripts/validate_contract.py`。
 4. **确定输出目录 + `<base_name>`**（单一真相源，Tier C）：
-   - **推断 `<base_name>`**（teacher 文件 stem，与 SKILL.md Step 3a 一致）：取 `{{ inputs.baseline_contract_path }}` 的文件 stem，剥掉 `_flat` 后缀（若有），再追加 `_teacher`。例：`model8_flat.py` → 剥 `_flat` → `model8` → 追加 `_teacher` → `<base_name>="model8_teacher"`；`baseline_model.py`（无 `_flat` 后缀）→ `<base_name>="baseline_model_teacher"`。
+   - **推断 `<base_name>`**（teacher 文件 stem，与 SKILL.md Step 3a 一致）：取 `{{ flatten.output.baseline_contract_path }}` 的文件 stem，剥掉 `_flat` 后缀（若有），再追加 `_teacher`。例：`model8_flat.py` → 剥 `_flat` → `model8` → 追加 `_teacher` → `<base_name>="model8_teacher"`；`baseline_model.py`（无 `_flat` 后缀）→ `<base_name>="baseline_model_teacher"`。
    - **确定 `<output_dir>`**：优先用引擎注入的 `$ORCA_ARTIFACTS_DIR`（`echo "$ORCA_ARTIFACTS_DIR"` 取值）；为空（非 orca 编排上下文）→ fallback `llm_artifacts/<base_name>/`（`<base_name>` 已含 `_teacher` 后缀，不重复追加）。
    - 记住为 `<output_dir>`，下面所有产物写进它，teacher 文件路径 = `<output_dir>/<base_name>.py`，`teacher_model_path` 字段填它。`cd <output_dir>` 一次后续命令都基于此目录。
 
 ## 执行流程
 
-读取 `$ORCA_AGENT_RESOURCES/SKILL.md` 获取完整 4-step 派生工作流（其中 `<skill_dir>` = `$ORCA_AGENT_RESOURCES`，`<user_project_root>` = 上一步推断所得 project_root，`<baseline_contract_path>` = `{{ inputs.baseline_contract_path }}`）。按其中的 4 个 step 执行（使用 todowrite 跟踪进度）：
+读取 `$ORCA_AGENT_RESOURCES/SKILL.md` 获取完整 4-step 派生工作流（其中 `<skill_dir>` = `$ORCA_AGENT_RESOURCES`，`<user_project_root>` = 上一步推断所得 project_root，`<baseline_contract_path>` = `{{ flatten.output.baseline_contract_path }}`）。按其中的 4 个 step 执行（使用 todowrite 跟踪进度）：
 
 - Step 1: 读 baseline 契约（DUMMY_INPUT / KNOBS / build_model）
 - Step 2: LLM 识别深度轴 + 宽度轴（KNOBS 名字语义匹配）
@@ -94,7 +94,7 @@ teacher = baseline 的 `build_model` **调大 cfg**（深度轴 ×3 / 宽度轴 
 
 ```bash
 CONTRACT="<output_dir>/<base_name>.py"
-BASELINE="{{ inputs.baseline_contract_path }}"
+BASELINE="{{ flatten.output.baseline_contract_path }}"
 PROJECT_ROOT="<project_root 绝对路径>"
 
 # ── 1) model-flatten validate_contract.py（teacher 是 KD 变体契约，复用不复制）──────
@@ -162,4 +162,4 @@ echo "PARSED: TEACHER_LATENCY_MS=$TEACHER_LATENCY_MS LATENCY_SOURCE=$LATENCY_SOU
 - `teacher_model_path` 必须是两道硬校验都 PASS 的同一文件路径；
 - `teacher_latency_ms` 必须是上面 `__main__` 跑出的 `LATENCY_MS:` 裸数值（float，不编造）；
 - `depth_axis` / `width_axis` 必须 == `validate_teacher.py` 解析出的值（不自己编）；
-- 当前不嵌入 kd-nas workflow yaml（teacher-gen 独立阶段）；未来若嵌入，下游 setup 应改读 `teacher_gen.output.teacher_model_path` 作 teacher_model_path 来源（不再硬编码 `_kd_scripts/teacher_model.py`）。
+- 已嵌入 kd-nas workflow yaml（flatten → teacher-gen → train-script-gen → setup）：下游 setup 透传 `teacher_gen.output.teacher_model_path` 作 teacher_model_path（不再硬编码 `_kd_scripts/teacher_model.py`）+ 透传 `teacher_gen.output.teacher_latency_ms` 进 teacher_setup（不再自测 latency）。

@@ -198,8 +198,12 @@ def build_model(**cfg) -> nn.Module:
     return SignalProcessingTransformer(**cfg)
 
 
-if __name__ == "__main__":
-    # 运行示例（smoke）：默认 10 层 teacher 的前向 + 输出 shape 校验。
+def _smoke() -> None:
+    """Smoke test（dummy input）：默认 10 层 teacher 的前向 + 输出 shape 校验。
+
+    用 ``torch.randn`` 按 DUMMY_INPUT 维度造一个 dummy input batch 纯为校验前向 +
+    block 结构——是 smoke/dummy 用途（capacity + shape 自检），不是 production 数据路径。
+    """
     model = build_model()
     model.eval()
     B, num_ports, num_subcarriers, num_symbols = 1, 4, 48, 64
@@ -218,3 +222,7 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"FAIL: {e}")
             raise
+
+
+if __name__ == "__main__":
+    _smoke()
