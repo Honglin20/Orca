@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-31] fix(nas): push_describe 实测 + review 两轮收口（不臆造 / fail-soft 闭环 / 矛盾暴露）
+
+实测 + code-reviewer 审查 4d55c2b 后三处 honesty/fail-soft 收口：① 非 head Linear（MLP fc1 / transformer embed）原用 baseline 维度冒充「超网维度(后)」——SearchSpace 只标准化 head，改显 `—`（不臆造）；② `_build_rows` 原在 `main()` 的 try 之外，SearchSpace 字段异常会绕过 `_err` ERROR 兜底表——并入 try/except 补齐 fail-soft 闭环；③ head `super_in` 原静默取末级 stage 宽度、掩盖 baseline `in_feat` 与之冲突——`in_feat` 已解析且 ≠ 末级宽度时显 `?(baseline=X,last_stage=Y)` 暴露矛盾。两份副本同步；测试 4→10（+ 非 head 臆造 / 非常量 fail-loud / `__main__` kwargs 优先级 override / transformer `stage_emb_dims` 标签 + head 冲突 / 两副本 `filecmp` 同步性 / 无 `*_flat.py` 的 `_err` 兜底表，全绿）。Commits: `22e0762`（实测）+ `54cf33a`（review）。详见 [release note](../releases/2026-07-31-nas-push-describe-enrich.md#实测后修正2026-07-31)。
+
 ## [2026-07-31] feat(kd-nas): 新增 teacher-gen folder-agent（teacher 纯调参派生：深度×3 / 宽度×2）
 
 新建 `workflows/agents/teacher-gen/`（folder-agent：`agent.md` 强执行指令 + `SKILL.md` 4-step 派生工作流 + `scripts/validate_teacher.py` teacher 专属硬校验 + `scripts/measure_latency.py` 字节对齐副本）。基于 flatten 产出的 baseline 契约**纯调参派生** teacher 结构文件——wrapper 通过 `importlib.util.spec_from_file_location` 按绝对路径委托 `baseline.build_model`（不拷贝架构代码），深度轴 ×3 / 宽度轴 ×2（KNOBS 名字语义识别：`block/layer/stage/depth/num_layers` → 深度；`channel/embed_dim/hidden/width/feature` → 宽度），DUMMY_INPUT 与 baseline 逐字一致（KD 硬约束，硬编码字面量非引用），`__main__` 逐字照 `model-flatten/SKILL.md` Step 3 模板（正确性 + latency via `measure_contract_latency`）。**双重硬校验门**：复用 model-flatten `validate_contract.py`（跨 agent 路径调用，KD 变体契约通用）+ 新 `validate_teacher.py`（DUMMY_INPUT 一致 / 深度×3 / 宽度×2 / 其余 KNOBS 不变 / 容量严格上升）；另加 `teacher-gen-verifier` 子 agent（轴识别 / wrapper 纯度 / latency wiring）。两路 code-reviewer 审查：1 BLOCKER（wrapper 委托失败路径无测试）+ 5 MAJOR + 6 MINOR 全修，测试 35→46 全绿。**未嵌入 workflow yaml**（独立阶段；未来嵌入 setup 改读 `teacher_gen.output.teacher_model_path`，不再硬编码 `_kd_scripts/teacher_model.py`）。详见 [release note](../releases/2026-07-31-kd-nas-teacher-gen.md)。

@@ -37,8 +37,22 @@ fail-soft 不变：import / 字段缺 / AST 失败仍推 ERROR 兜底表（F1）
 
 ## 测试
 
-新增 `tests/workflows/test_push_describe.py`（4 测试，纯函数级——`_build_symbols`/`_collect_baseline` 走 AST、
+新增 `tests/workflows/test_push_describe.py`（10 测试，纯函数级——`_build_symbols`/`_collect_baseline` 走 AST、
 `_build_rows` 喂手搓 SearchSpace dict，不依赖 nas_agent / orca.chart 运行时）：
-层名真值、维度变量消解、5 列 + 超网维度 + 组件候选、表头契约。全绿。
+层名真值、维度变量消解、5 列 + 超网维度 + 组件候选、表头契约、非 head Linear 不臆造、非常量 out_ch fail-loud、
+`__main__` kwargs 优先级 override、transformer `stage_emb_dims` 标签 + head 冲突暴露、两副本 `filecmp` 同步性、
+无 `*_flat.py` 的 `_err` ERROR 兜底表。全绿。
 
-Commit: `4d55c2b`。
+## 实测 + review 后修正（2026-07-31）
+
+两轮收口（实测 + code-reviewer 审查 4d55c2b）：
+
+1. **非 head Linear 不臆造**（实测发现）：MLP 的 fc1 / transformer 的 embed 原用 baseline 维度冒充「超网维度(后)」，
+   但 `SearchSpace` 只标准化 head 的超网维度。修正：非 head Linear 显 `—`；head 维度不变。
+2. **`_build_rows` 进 try**（review 发现）：原在 `main()` 的 try 之外，SearchSpace 字段类型异常会绕过 `_err` ERROR 兜底表、
+   只在 stderr 留 traceback（与「绝不静默空图」相抵触）。修正：并入 try/except → `_err("组装对比表失败: ...")`。
+3. **head `super_in` 暴露矛盾**（review 发现）：原静默取末级 stage 宽度，掩盖 baseline `in_feat` 与之不一致
+   （transformer / 带 pooling 的非直连 head）。修正：`in_feat` 已解析且 ≠ 末级宽度时显 `?(baseline=X,last_stage=Y)`，
+   不静默选一个；demo_run（in=64==末级 64）行为不变。
+
+Commit: `4d55c2b`（主体）+ `22e0762`（实测：非 head 不臆造）+ `54cf33a`（review：try 闭环 + 矛盾暴露）。
