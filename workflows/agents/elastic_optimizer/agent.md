@@ -80,7 +80,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
    source "runs/${ORCA_RUN_ID}/orca_env.sh" 2>/dev/null
    python3 "$ORCA_AGENT_RESOURCES/scripts/push_describe.py" --output_dir <output_dir> || true
    ```
-   推单张结构对比表（行=baseline 层，列=name/替换前/替换后；AST 解析 `*_flat.py`、读 `supernet.py` 的 SearchSpace）。`source ... 2>/dev/null` 在非 Orca 上下文（无 orca_env.sh）静默跳过；`|| true` 保 chart 失败不阻断主流程。
+   推单张结构对比表（行=baseline 层，列=层名/替换前/替换后/超网维度(后)/组件·深度·核候选；层名取赋值目标真名、替换前维度解析符号表消解变量名、超网维度取 stage 宽度、组件候选取 stage_layer_configs；AST 解析 `*_flat.py`、读 `supernet.py` 的 SearchSpace）。`source ... 2>/dev/null` 在非 Orca 上下文（无 orca_env.sh）静默跳过；`|| true` 保 chart 失败不阻断主流程。
 
 > **语义边界**：上面这段 `|| true` 是 chart 推送的 best-effort 语义；下面「输出」段是 output_schema
 > 硬契约（strict JSON, fail loud），两层语义独立——chart 推失败**绝不**意味着可以松化 JSON 发射。

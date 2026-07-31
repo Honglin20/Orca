@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
-"""push_describe.py —— C1 基线→elastic 结构对比表（viz_describe / elastic_optimizer 末尾调用）。
+"""push_describe.py —— C1 基线→elastic 结构对比表（pytorch-model-optimizer / elastic_optimizer 末尾调用）。
 
-设计（用户共识 2026-07-18）：
+设计（用户共识 2026-07-18；2026-07-31 富化：真名 + 解析维度 + 超网维度 + 组件候选）：
   - 一张 chart_type=table，行 = **baseline 层**（源码顺序的 nn.Conv2d/Linear/...）。
-  - 列：[name, 替换前 (baseline), 替换后 (elastic)]。删 model_type / source_project /
-    eval_paradigm / training_viable 等元信息（用户不关心）。
-  - 「替换前」= AST 静态解析 *_flat.py 的 nn.* 调用（零 import 副作用——flat 文件常
-    import 用户项目模块，实例化会失败）。
+  - 列：[层名, 替换前, 替换后, 超网维度(后), 组件/深度/核候选]。
+    * 层名：AST 赋值目标真名（`self.head`→head；`self.features = nn.Sequential(...)`
+      内的层→features[0]/[3]/...）。匹配不到赋值目标才 fallback conv{idx}/fc{idx}。
+    * 替换前：baseline 类型 + 维度。维度走符号表消解变量名（`in_channels`/`num_classes`
+      等）——优先级 `__main__` 实例化 kwargs > `__init__` 形参默认 > 模块级常量；仍非常量才显 `?`（不编造）。
+    * 替换后：elastic 类型（`stem（固定）` / `ElasticConv2d` / `ElasticLinear`）。
+    * 超网维度(后)：conv→匹配 stage 的 `stage_widths[i]`（super_out_ch）；head→
+      `super_in`(末级 stage 宽度)→`super_out`(num_classes)。stem / 非常量 → `—`。
+    * 组件/深度/核候选：`stage_depth_candidates[i]` + `stage_layer_configs[i]` 的 block 选择与参数候选。
+  - 「替换前」= AST 静态解析 *_flat.py（零 import 副作用——flat 文件常 import 用户项目模块，实例化会失败）。
   - 「替换后」匹配规则（baseline 层 → elastic stage，确定性，以 out_ch 为准）：
       * conv 的 out_channels == stage_widths[i] → 归入 stage i，取其 elastic 配置。
       * out_channels 不属任何 stage_width（产出中间宽度的入口 conv）→ stem（固定，非 elastic）。
-      * out_channels 非常量（变量）→ 显 `—`，不编造。
+      * out_channels 非常量（变量且符号表消解失败）→ 显 `—`，不编造。
       * Linear → ElasticLinear（head）。
   - 全程 best-effort + fail-soft：supernet.py 由 LLM 生成、结构因 model_type 而异；
     import / 字段缺失 / AST 解析失败 → 推一张 ERROR 表（F1），绝不静默空图。
@@ -48,6 +54,9 @@ _CONV_ARGPOS = {
     "nn.ConvTranspose3d": (0, 1, 2),
 }
 
+# 容器构造：其 positional args 里的结构层按下标命名（self.feat = nn.Sequential(...)）。
+_CONTAINER_CALLS = {"nn.Sequential", "nn.ModuleList"}
+
 
 def _func_name(node: ast.AST) -> str:
     """ast.Call.func → 限定名（如 nn.Conv2d）。非属性/Name 链 → ""。"""
@@ -66,10 +75,132 @@ def _literal(node: ast.AST) -> Any:
         return None
 
 
-def _extract_layer(call_name: str, node: ast.Call) -> dict[str, Any]:
-    """从 ast.Call 抽 in/out/kernel（None 表示非常量）。"""
-    pos = [_literal(a) for a in node.args]
-    kw = {kw.arg: _literal(kw.value) for kw in node.keywords if kw.arg is not None}
+def _resolve(node: ast.AST, symbols: dict[str, Any]) -> Any:
+    """先查符号表（消解变量名），再 fallback literal_eval。"""
+    if isinstance(node, ast.Name) and node.id in symbols:
+        return symbols[node.id]
+    return _literal(node)
+
+
+# ── 符号表：消解 in_channels / num_classes 等变量名为常量 ──────────────────────
+
+def _collect_init_defaults(func: ast.FunctionDef, symbols: dict[str, Any]) -> None:
+    """`__init__` 形参默认值 → symbols（positional defaults 对齐末尾 + kwonly defaults）。"""
+    a = func.args
+    n_pos, n_def = len(a.args), len(a.defaults)
+    for j, dft in enumerate(a.defaults):
+        arg = a.args[n_pos - n_def + j]
+        v = _literal(dft)
+        if v is not None:
+            symbols[arg.arg] = v
+    for arg, dft in zip(a.kwonlyargs, a.kw_defaults):
+        if dft is None:
+            continue
+        v = _literal(dft)
+        if v is not None:
+            symbols[arg.arg] = v
+
+
+def _is_main_guard(test: ast.AST) -> bool:
+    """识别 `if __name__ == "__main__":`。"""
+    if isinstance(test, ast.Compare) and len(test.ops) == 1 and len(test.comparators) == 1:
+        if isinstance(test.ops[0], ast.Eq) and isinstance(test.left, ast.Name) and test.left.id == "__name__":
+            return _literal(test.comparators[0]) == "__main__"
+    return False
+
+
+def _main_call_kwargs(tree: ast.Module, class_names: set[str]) -> dict[str, Any]:
+    """`__main__` 块里实例化模型类的 kwargs（最高优先级，真实运行值）。"""
+    out: dict[str, Any] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and _is_main_guard(node.test):
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call) and _func_name(sub.func) in class_names:
+                    for kw in sub.keywords:
+                        if kw.arg is None:
+                            continue
+                        v = _literal(kw.value)
+                        if v is not None:
+                            out[kw.arg] = v
+            break
+    return out
+
+
+def _build_symbols(tree: ast.Module) -> dict[str, Any]:
+    """变量名 → 常量。优先级：__main__ kwargs > __init__ 默认 > 模块级常量（后者先写入被覆盖）。"""
+    symbols: dict[str, Any] = {}
+    # 1. 模块级常量（最低）
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Assign):
+            v = _literal(stmt.value)
+            if v is None:
+                continue
+            for t in stmt.targets:
+                if isinstance(t, ast.Name):
+                    symbols[t.id] = v
+        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.value is not None:
+            v = _literal(stmt.value)
+            if v is not None:
+                symbols[stmt.target.id] = v
+    # 2. 各类 __init__ 形参默认
+    class_names: set[str] = set()
+    for cls in tree.body:
+        if isinstance(cls, ast.ClassDef):
+            class_names.add(cls.name)
+            for fn in cls.body:
+                if isinstance(fn, ast.FunctionDef) and fn.name == "__init__":
+                    _collect_init_defaults(fn, symbols)
+    # 3. __main__ 实例化 kwargs（最高，覆盖默认）
+    symbols.update(_main_call_kwargs(tree, class_names))
+    return symbols
+
+
+# ── 层名：AST 赋值目标真名 ─────────────────────────────────────────────────────
+
+def _self_attr(target: ast.AST) -> str | None:
+    """`self.foo` → 'foo'；其它 → None。"""
+    if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == "self":
+        return target.attr
+    return None
+
+
+def _map_target(target: ast.AST, value: ast.AST, nm: dict[tuple[int, int], str]) -> None:
+    """`self.X = <Call>` → 结构层命名：直接结构层用 X；容器内按全部 positional 下标 X[i]。"""
+    attr = _self_attr(target)
+    if attr is None or not isinstance(value, ast.Call):
+        return
+    fname = _func_name(value.func)
+    if fname in _STRUCT_CALLS:
+        nm[(value.lineno, value.col_offset)] = attr
+        return
+    if fname in _CONTAINER_CALLS:
+        for idx, arg in enumerate(value.args):  # 下标对所有 positional（含 ReLU/Pool）计位
+            if isinstance(arg, ast.Call) and _func_name(arg.func) in _STRUCT_CALLS:
+                nm[(arg.lineno, arg.col_offset)] = f"{attr}[{idx}]"
+
+
+def _build_name_map(tree: ast.Module) -> dict[tuple[int, int], str]:
+    """{(lineno, col_offset): 层名} —— 扫所有类的所有方法体里的 self.X 赋值。"""
+    nm: dict[tuple[int, int], str] = {}
+    for cls in ast.walk(tree):
+        if not isinstance(cls, ast.ClassDef):
+            continue
+        for fn in cls.body:
+            if not isinstance(fn, ast.FunctionDef):
+                continue
+            for stmt in ast.walk(fn):
+                if isinstance(stmt, ast.Assign):
+                    for tgt in stmt.targets:
+                        _map_target(tgt, stmt.value, nm)
+                elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+                    _map_target(stmt.target, stmt.value, nm)
+    return nm
+
+
+def _extract_layer(call_name: str, node: ast.Call, symbols: dict[str, Any]) -> dict[str, Any]:
+    """从 ast.Call 抽 in/out/kernel（None 表示符号表也消解不出的非常量）。"""
+    pos = [_resolve(a, symbols) for a in node.args]
+    kw = {kw.arg: _resolve(kw.value, symbols) for kw in node.keywords if kw.arg is not None}
     info: dict[str, Any] = {}
     if call_name in _CONV_ARGPOS:
         i_in, i_out, i_k = _CONV_ARGPOS[call_name]
@@ -82,35 +213,33 @@ def _extract_layer(call_name: str, node: ast.Call) -> dict[str, Any]:
     return info
 
 
-def _parse_baseline_layers(flat_path: Path) -> list[tuple[str, dict[str, Any]]]:
-    """AST 解析 *_flat.py → [(call_name, layer_info), ...]，按源码顺序。
-
-    零 import 副作用：只读文本 + ast，不执行 flat 文件（其常 import 用户项目模块）。
-    """
-    tree = ast.parse(flat_path.read_text(encoding="utf-8"))
+def _collect_baseline(tree: ast.Module, symbols: dict[str, Any]) -> list[dict[str, Any]]:
+    """AST 解析 *_flat.py → [{call, info, attr}, ...]，按源码顺序。零 import 副作用。"""
+    name_map = _build_name_map(tree)
     calls = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
-            name = _func_name(node.func)
-            if name in _STRUCT_CALLS:
-                calls.append((node.lineno, node.col_offset, name, node))
+            cname = _func_name(node.func)
+            if cname in _STRUCT_CALLS:
+                calls.append((node.lineno, node.col_offset, cname, node))
     calls.sort(key=lambda t: (t[0], t[1]))  # 源码顺序
-    return [(name, _extract_layer(name, node)) for _, _, name, node in calls]
+    return [
+        {"call": cname, "info": _extract_layer(cname, node, symbols), "attr": name_map.get((ln, co))}
+        for ln, co, cname, node in calls
+    ]
 
 
-def _conv_before(info: dict[str, Any]) -> str:
-    in_ch = info.get("in_ch")
-    out_ch = info.get("out_ch")
-    k = info.get("kernel")
+def _conv_before(call_name: str, info: dict[str, Any]) -> str:
+    typ = call_name.split(".")[-1]  # Conv2d / ConvTranspose1d / ...
+    in_ch, out_ch, k = info.get("in_ch"), info.get("out_ch"), info.get("kernel")
     in_s = "?" if in_ch is None else in_ch
     out_s = "?" if out_ch is None else out_ch
     k_s = "" if k is None else f", k={k}"
-    return f"Conv2d({in_s}→{out_s}{k_s})"
+    return f"{typ}({in_s}→{out_s}{k_s})"
 
 
 def _linear_before(info: dict[str, Any]) -> str:
-    in_f = info.get("in_feat")
-    out_f = info.get("out_feat")
+    in_f, out_f = info.get("in_feat"), info.get("out_feat")
     in_s = "?" if in_f is None else in_f
     out_s = "?" if out_f is None else out_f
     return f"Linear({in_s}→{out_s})"
@@ -139,58 +268,88 @@ def _fmt_cands(cands: Any) -> str:
     return str(cands)
 
 
-def _elastic_stage_repr(d: dict[str, Any], i: int) -> str | None:
-    """stage i 的 compact elastic 描述；i 越界或字段缺 → None。"""
+def _width_label(d: dict[str, Any]) -> str | None:
+    """stage 宽度字段的语义标签：conv→super_out_ch；transformer→super_emb_dim。"""
+    if d.get("stage_widths") is not None:
+        return "super_out_ch"
+    if d.get("stage_emb_dims") is not None:
+        return "super_emb_dim"
+    return None
+
+
+def _stage_candidates_str(d: dict[str, Any], i: int) -> str | None:
+    """stage i 的 depth + 组件/参数候选；i 越界或字段缺 → None。"""
     depth_cands = d.get("stage_depth_candidates") or []
     layer_cfgs = d.get("stage_layer_configs") or []
-    if i >= len(depth_cands):
+    if i >= len(depth_cands) and i >= len(layer_cfgs):
         return None
     parts: list[str] = []
-    depth = depth_cands[i]
-    if isinstance(depth, (tuple, list)) and len(depth) > 1:
-        parts.append(f"depth∈{_fmt_cands(depth)}")
-    elif isinstance(depth, (tuple, list)) and len(depth) == 1:
-        parts.append(f"depth={depth[0]}")
-    # block 选择 + 各参数候选
+    if i < len(depth_cands):
+        depth = depth_cands[i]
+        if isinstance(depth, (tuple, list)):
+            if len(depth) > 1:
+                parts.append(f"depth∈{_fmt_cands(depth)}")
+            elif len(depth) == 1:
+                parts.append(f"depth={depth[0]}")
     cfg = layer_cfgs[i] if i < len(layer_cfgs) else {}
     if isinstance(cfg, dict) and cfg:
-        block_strs = []
+        comp_strs = []
         for blk, params in cfg.items():
             if isinstance(params, dict) and params:
                 pstr = ", ".join(f"{p}∈{_fmt_cands(v)}" for p, v in params.items())
-                block_strs.append(f"{blk}({pstr})")
+                comp_strs.append(f"{blk}({pstr})")
             else:
-                block_strs.append(str(blk))
-        parts.append("blocks: " + " | ".join(block_strs))
-    return ", ".join(parts) if parts else None
+                comp_strs.append(str(blk))
+        parts.append("组件: " + " | ".join(comp_strs))
+    return "\n".join(parts) if parts else None
 
 
 # ── 组装对比表 ────────────────────────────────────────────────────────────────
 
-def _build_rows(baseline: list[tuple[str, dict[str, Any]]], d: dict[str, Any]) -> list[dict[str, str]]:
+def _build_rows(baseline: list[dict[str, Any]], d: dict[str, Any]) -> list[dict[str, str]]:
     stage_widths = list(d.get("stage_widths") or d.get("stage_emb_dims") or [])
     width_set = set(stage_widths)
+    wlabel = _width_label(d)
     rows: list[dict[str, str]] = []
     conv_idx = 0
     lin_idx = 0
-    for name, info in baseline:
-        if name.startswith("nn.Conv") or name.startswith("nn.ConvTranspose"):
+    for item in baseline:
+        cname, info, attr = item["call"], item["info"], item["attr"]
+        is_last = item is baseline[-1]
+        if cname.startswith("nn.Conv") or cname.startswith("nn.ConvTranspose"):
             conv_idx += 1
-            before = _conv_before(info)
+            name = attr or f"conv{conv_idx}"
+            before = _conv_before(cname, info)
             out_ch = info.get("out_ch")
             if out_ch is None:
-                after = "—"
+                rows.append({"层名": name, "替换前": before, "替换后": "—（out_ch 非常量，无法匹配 stage）",
+                             "超网维度(后)": "—", "组件/深度/核候选": "—"})
             elif out_ch in width_set:
-                after = _elastic_stage_repr(d, stage_widths.index(out_ch)) or "—"
+                si = stage_widths.index(out_ch)
+                super_w = stage_widths[si]
+                super_dim = f"{wlabel}={super_w}" if wlabel else f"super_dim={super_w}"
+                rows.append({"层名": name, "替换前": before, "替换后": "ElasticConv2d",
+                             "超网维度(后)": super_dim,
+                             "组件/深度/核候选": _stage_candidates_str(d, si) or "—"})
             else:
-                after = "stem（固定）"
-            rows.append({"name": f"conv{conv_idx}", "替换前": before, "替换后": after})
-        elif name in ("nn.Linear", "nn.LazyLinear"):
+                rows.append({"层名": name, "替换前": before, "替换后": "stem（固定）",
+                             "超网维度(后)": "—", "组件/深度/核候选": "—"})
+        elif cname in ("nn.Linear", "nn.LazyLinear"):
             lin_idx += 1
+            name = attr or f"fc{lin_idx}"
             before = _linear_before(info)
-            after = "ElasticLinear"
-            nm = "head" if lin_idx == 1 and len(baseline) > 0 and (name, info) == baseline[-1] else f"fc{lin_idx}"
-            rows.append({"name": nm, "替换前": before, "替换后": after})
+            in_f, out_f = info.get("in_feat"), info.get("out_feat")
+            # head（末个结构层）：super_in = 末级 stage 宽度；否则用 baseline in_feat（不臆造扩张）
+            if is_last and stage_widths:
+                in_s = str(stage_widths[-1])
+            elif in_f is not None:
+                in_s = str(in_f)
+            else:
+                in_s = "?"
+            out_s = str(out_f) if out_f is not None else "?"
+            rows.append({"层名": name, "替换前": before, "替换后": "ElasticLinear",
+                         "超网维度(后)": f"super_in={in_s}→super_out={out_s}",
+                         "组件/深度/核候选": "—"})
     return rows
 
 
@@ -221,7 +380,9 @@ def main() -> int:
 
     # baseline 侧（AST，零副作用）
     try:
-        baseline = _parse_baseline_layers(flat)
+        tree = ast.parse(flat.read_text(encoding="utf-8"))
+        symbols = _build_symbols(tree)
+        baseline = _collect_baseline(tree, symbols)
     except Exception as e:
         _err(f"解析 {flat.name} 失败：{type(e).__name__}: {e}")
         return 0
@@ -251,10 +412,13 @@ def main() -> int:
         data=rows,
         label="nas/structure",
         title="Baseline → Elastic（per baseline layer）",
-        columns=["name", "替换前", "替换后"],
+        columns=["层名", "替换前", "替换后", "超网维度(后)", "组件/深度/核候选"],
         caption=(
             "每个 baseline 结构层对应的 elastic 替换。"
-            "stem=固定不可变；depth∈{...}=深度候选；「—」=非常量无法静态推断（不编造）。"
+            "层名取自源码赋值目标（Sequential 内带下标）；"
+            "替换前维度解析自 __main__ 实例化/__init__ 默认/模块常量；"
+            "超网维度(后)=stage 宽度（super_out_ch / super_emb_dim）或 head 的 super_in(末级宽度)→super_out；"
+            "「—」=非常量无法静态推断或 stem 固定层（不编造）。"
         ),
     )
     print(f"[push_describe] pushed {len(rows)} rows", flush=True)

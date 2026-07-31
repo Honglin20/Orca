@@ -76,7 +76,8 @@ python3 "$ORCA_AGENT_RESOURCES/scripts/push_describe.py" --output_dir <output_di
 ```
 
 脚本 AST 解析 `<base_name>_flat.py` 的 nn.* 层、读 `supernet.py` 的 SearchSpace，推单张结构对比表
-（行=baseline 层，列=name/替换前/替换后）。`source ... 2>/dev/null` 在非 Orca 上下文静默跳过；
+（行=baseline 层，列=层名/替换前/替换后/超网维度(后)/组件·深度·核候选）：层名取赋值目标真名（Sequential 内带下标）、
+替换前维度解析符号表消解变量名、超网维度取 stage 宽度、组件候选取 stage_layer_configs。`source ... 2>/dev/null` 在非 Orca 上下文静默跳过；
 `|| true` 保 chart 失败不阻断主流程。
 
 > **语义边界**：上面这段 `|| true` 是 chart 推送的 best-effort 语义；下面「输出」段是 output_schema
