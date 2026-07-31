@@ -1,5 +1,5 @@
 name: kd-nas
-description: "KD-NAS 蒸馏 sweep（重构版）：flatten 任意模型入口成 KD 变体契约 → teacher-gen 纯调参派生 teacher（深度×3/宽度×2，自带 latency） → train-script-gen 生成统一 train_pipeline.py（teacher+distill 两模式，自包含搬用户 loss/dataloader） → setup 跑 teacher 训 + teacher_cache + GPU 预检定并发 → gate 一个节点内串行遍历全部 KB 变体（校验 + tune_latency 最小缩量 + distill_dispatch gate），FAIL_latency 当场落账、ACCEPTED 进 manifest → train 吃 manifest 做有界并发蒸馏（VRAM 再校验 + round-robin 绑卡 + 增量账本）+ 末尾 viz 推 sweep 散点。跨 run 复用（稳定 kd_artifacts_dir + 哈希校验 + ledger-driven 跳过）。无 finalize / 无 proxy_mse / 无 search。精度基线 + latency_provider(用户真硬件脚本) 均用户必填。契约见 workflows/agents/_kd_scripts/CONTRACTS.md。"
+description: "KD-NAS 蒸馏 sweep：flatten 任意模型入口 → teacher_gen 派生 teacher（深度×3/宽度×2）→ train_script_gen 生成统一训练脚本（teacher+distill 两模式）→ setup 训 teacher + GPU 预检 → gate 时延筛 student → train 并发蒸馏 → select 选最优 + final_report。student 按 accuracy_baseline（方向显式）+ target_latency 判定，teacher 仅作 KD 软标签源。latency_provider 用户必填。"
 
 entry: flatten
 
