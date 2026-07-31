@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-31] feat(nas): push_describe 对比表富化——真层名/解析维度/超网维度/组件候选
+
+用户反馈 baseline→elastic 对比表「毫无信息量」（`fc2 Linear(?->?) ElasticLinear`）。根因在 `push_describe._build_rows`：层名写死 `conv{idx}/fc{idx}`、维度遇变量名显 `?`、丢 `stage_widths`、组件选择被埋在长串。重构为 5 列 `[层名, 替换前, 替换后, 超网维度(后), 组件/深度/核候选]`：层名取 AST 赋值目标真名（Sequential 内带下标）；替换前维度走符号表消解变量名（`__main__` kwargs > `__init__` 默认 > 模块常量）；超网维度(后)取 `stage_widths[i]` / head `super_in→super_out`；组件/深度/核候选取 `stage_depth_candidates` + `stage_layer_configs`。全程 AST 静态 + `SearchSpace` asdict（不实例化、不靠 LLM），fail-soft 不变。两份副本（pytorch-model-optimizer + elastic_optimizer）+ agent.md 同步；新增 `tests/workflows/test_push_describe.py`（4 纯函数测试，全绿）。Commit: `4d55c2b`。详见 [release note](../releases/2026-07-31-nas-push-describe-enrich.md)。
+
 ## [2026-07-29] fix(visibility): in-session run 可见性根治——marker-free 自注册 tape 所在目录
 
 SPEC v3 Bug A：任意目录（含无 `workflows/`）下 in-session 起 workflow → web 列表/详情/子 agent 推送不可见。根因是 tape 落点（cwd/runs）、注册根（detect 祖先）、discovery 扫描（注册根/runs）三处独立计算 + M-16 门槛太死。修法（逐字对齐 §4.1 A-E）：`register_project` 加 `*, require_marker: bool = True`（仅门控 M-16，M-15/P2 始终守）；bootstrap 改注册 tape 物理位置（cwd）`require_marker=False`；`rebuild_registry` 旧 entry 信任（`not in old_paths`，D-rebuild=A，不擦除 marker-free 旧 entry）；抽 `RUNS_DIRNAME` 到 runtime 中立层单源。测试 AC1-AC5c 全覆盖（C1 布尔方向守门经 mutation 验证非空泛）；runtime/web/in_session/exec 注册相关 147 passed。Commit: `b83d81d`。详见 [release note](../releases/2026-07-29-run-visibility-marker-free.md)。
