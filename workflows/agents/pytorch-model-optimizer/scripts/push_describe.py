@@ -338,18 +338,18 @@ def _build_rows(baseline: list[dict[str, Any]], d: dict[str, Any]) -> list[dict[
             lin_idx += 1
             name = attr or f"fc{lin_idx}"
             before = _linear_before(info)
-            in_f, out_f = info.get("in_feat"), info.get("out_feat")
-            # head（末个结构层）：super_in = 末级 stage 宽度；否则用 baseline in_feat（不臆造扩张）
-            if is_last and stage_widths:
-                in_s = str(stage_widths[-1])
-            elif in_f is not None:
-                in_s = str(in_f)
-            else:
-                in_s = "?"
+            out_f = info.get("out_feat")
             out_s = str(out_f) if out_f is not None else "?"
+            if is_last:
+                # head（末个结构层）：super_in=末级 stage 宽度（cheatsheet 契约 ElasticLinear(super_in_dim=最后 stage 宽度)）；
+                # 无 stage 则 ?（不臆造）；super_out=num_classes（= baseline head out_feat）。
+                in_s = str(stage_widths[-1]) if stage_widths else "?"
+                super_dim = f"super_in={in_s}→super_out={out_s}"
+            else:
+                # 非 head Linear：SearchSpace 不标准化其超网维度 → 显 —，不用 baseline 维度冒充超网维度。
+                super_dim = "—"
             rows.append({"层名": name, "替换前": before, "替换后": "ElasticLinear",
-                         "超网维度(后)": f"super_in={in_s}→super_out={out_s}",
-                         "组件/深度/核候选": "—"})
+                         "超网维度(后)": super_dim, "组件/深度/核候选": "—"})
     return rows
 
 

@@ -49,6 +49,21 @@ if __name__ == "__main__":
 """
 
 
+# 多 Linear（用户的 fc2 场景）：fc1 非 head、fc2 head。
+_MLP_SRC = """
+import torch.nn as nn
+class MLP(nn.Module):
+    def __init__(self, dim: int = 64, num_classes: int = 10):
+        super().__init__()
+        self.fc1 = nn.Linear(dim, 32)
+        self.fc2 = nn.Linear(32, num_classes)
+    def forward(self, x):
+        return self.fc2(self.fc1(x))
+if __name__ == "__main__":
+    MLP(dim=64, num_classes=10)
+"""
+
+
 @pytest.fixture()
 def baseline():
     pd = _load_pd()
@@ -105,3 +120,40 @@ def test_columns_contract():
     """表头契约：5 列顺序固定。"""
     src = _SCRIPT.read_text(encoding="utf-8")
     assert 'columns=["层名", "替换前", "替换后", "超网维度(后)", "组件/深度/核候选"]' in src
+
+
+def test_non_head_linear_shows_dash_not_baseline_dims():
+    """非 head Linear 的超网维度 SearchSpace 不标准化 → 显 —，不用 baseline 维度冒充（不臆造）。"""
+    pd = _load_pd()
+    tree = ast.parse(_MLP_SRC)
+    baseline = pd._collect_baseline(tree, pd._build_symbols(tree))
+    d = {"stage_widths": (32,), "stage_depth_candidates": ((1,),), "stage_layer_configs": ({},)}
+    rows = pd._build_rows(baseline, d)
+    fc1, fc2 = rows
+    assert fc1["层名"] == "fc1"
+    assert fc1["超网维度(后)"] == "—"  # 非 head：不臆造
+    assert fc2["层名"] == "fc2"
+    assert fc2["超网维度(后)"] == "super_in=32→super_out=10"  # head：super_in=末级宽度 32
+
+
+def test_non_constant_out_ch_fails_loud_not_fabricates():
+    """out_ch 消解不出（无默认 + __main__ 位置传参）→ 替换后显 —（非常量），不编造 stage 匹配。"""
+    pd = _load_pd()
+    src = """
+import torch.nn as nn
+class M(nn.Module):
+    def __init__(self, hidden):  # 无默认
+        super().__init__()
+        self.conv = nn.Conv2d(3, hidden, 3)
+    def forward(self, x):
+        return self.conv(x)
+if __name__ == "__main__":
+    M(64)  # 位置传参 → __main__ kwargs 抓不到
+"""
+    tree = ast.parse(src)
+    baseline = pd._collect_baseline(tree, pd._build_symbols(tree))
+    rows = pd._build_rows(baseline, {"stage_widths": (64,), "stage_depth_candidates": ((1,),), "stage_layer_configs": ({},)})
+    (row,) = rows
+    assert row["替换前"] == "Conv2d(3→?, k=3)"  # hidden 消解不了 → ?
+    assert "非常量" in row["替换后"]
+    assert row["超网维度(后)"] == "—"
