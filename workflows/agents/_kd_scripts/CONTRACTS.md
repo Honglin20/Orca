@@ -1,6 +1,7 @@
-# kd-nas workflow — 接口契约（CONTRACTS，重构版 v2）
+# kd-nas workflow — 接口契约（CONTRACTS，重构版 v3）
 
-> KD-NAS = 确定性蒸馏 sweep（receiver KB 的 model8 `.py` 变体）。DAG：`setup → gate → train → $end`。
+> KD-NAS = flatten 任意模型入口成 KD 变体契约 + 确定性蒸馏 sweep（receiver KB 的 model8 `.py` 变体）。
+> DAG：`flatten → setup → gate → train → $end`。
 > 改接口 = 改本文件 + 通知依赖方。
 > fail loud：脚本遇契约不符输入直接非零退出 + stderr 报因（硬件缺失/探测异常则 fail-soft 退 0，不阻塞 workflow）。
 
@@ -8,8 +9,13 @@
 
 ```
 workflows/
-  kd-nas.yaml                              # workflow DAG（setup → gate → train → $end）
+  kd-nas.yaml                              # workflow DAG（flatten → setup → gate → train → $end）
   agents/
+    model-flatten/                         # 【v3 新增】入口 agent：展平任意模型入口成 KD 变体契约
+      agent.md                             # folder-agent 入口（强执行指令 + output schema 前置）
+      SKILL.md                             # 6 步工作流（展平 + KNOBS 识别 + 校验迭代）
+      scripts/validate_contract.py         # 契约硬校验（fail loud，exit 0=PASS / exit 2=FAIL）
+      scripts/measure_latency.py           # 契约默认 cfg latency 测量（自包含；__main__ + flatten agent 复用）
     kd-setup/agent.md                      # 幂等：baseline latency + teacher + train_kd 适配 + 预检 + GPU 预检
     kd-gate/agent.md                       # 串行 latency gate（一个节点遍历全部变体）
     kd-train/agent.md                      # 有界并发蒸馏池（吃 gate manifest）
@@ -98,11 +104,13 @@ def feature_hook_names(self) -> list[str]: ...                 # 可选，OFD/Fi
 
 | 节点 | 关键输出 |
 |---|---|
-| setup | kd_artifacts_dir / per_run_artifacts_dir / project_root / teacher_model_path / teacher_cache / teacher_meta / teacher_ckpt / ledger_path / ckpts_dir / baseline_latency_ms / kd_scripts_dir / user_train_import / user_loss_fn / variants_count / **concurrency / device_plan / per_variant_vram_bytes / gpu_report** |
+| flatten | baseline_contract_path / project_root / model_name / flat_artifacts_dir / **baseline_latency_ms**（v3 入口；展平任意模型入口成 KD 变体契约 .py；`__main__` 跑「正确性 + latency」统一契约 → baseline_latency_ms 由 inputs.latency_provider 实测） |
+| setup | kd_artifacts_dir / per_run_artifacts_dir / project_root / teacher_model_path / teacher_cache / teacher_meta / teacher_ckpt / ledger_path / ckpts_dir / baseline_latency_ms（透传 flatten.output）/ kd_scripts_dir / user_train_import / user_loss_fn / variants_count / **concurrency / device_plan / per_variant_vram_bytes / gpu_report** |
 | gate | accepted_manifest_path / n_accepted / n_fail_latency / all_variants_count / all_processed |
 | train | variants_done / variants_total / sweep_status / fail_reason |
 
 **路由**（纯函数 router 求值，无 LLM）：
+- flatten → setup（恒定；baseline 来源从 `inputs.baseline_model_path` 改为 `flatten.output.baseline_contract_path`）。
 - setup → gate（恒定）。
 - gate：`n_accepted | int == 0` → `$end`（首条 when，跳过 train）；否则 → train。
 - train → `$end`（恒定）。

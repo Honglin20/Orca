@@ -595,32 +595,98 @@ def test_train_pool_incremental_ledger_helper(tmp_path):
 # ── v2 DAG：yaml 节点 + 路由（n_accepted==0 → $end）─────────────────────────────
 
 
-def test_kd_dag_setup_gate_train():
-    """v2 DAG：3 节点 setup→gate→train→$end，无 selector/distill/recorder。"""
+def test_kd_dag_flatten_setup_gate_train():
+    """v2 DAG：4 节点 flatten→setup→gate→train→$end。
+
+    flatten 是入口（任意模型入口 → KD 变体契约），把 baseline 契约生成从用户手动改为 agent 自动。
+    """
     from orca.compile.parser import load_workflow
     wf = load_workflow(REPO / "workflows" / "kd-nas.yaml")
     names = [n.name for n in wf.nodes]
-    assert names == ["setup", "gate", "train"]
+    assert names == ["flatten", "setup", "gate", "train"]
+    # entry 是 flatten（不再是 setup）
+    assert wf.entry == "flatten"
+    # flatten 恒到 setup
+    assert [r.to for r in wf.nodes[0].routes] == ["setup"]
     # setup 恒到 gate
-    assert [r.to for r in wf.nodes[0].routes] == ["gate"]
+    assert [r.to for r in wf.nodes[1].routes] == ["gate"]
     # gate 首条 when = n_accepted==0 → $end；兜底 → train
-    gate_routes = wf.nodes[1].routes
+    gate_routes = wf.nodes[2].routes
     assert gate_routes[0].to.endswith("end") or gate_routes[0].to == "$end"
     assert "n_accepted" in (gate_routes[0].when or "")
     assert gate_routes[1].to == "train"
     # train 恒到 $end
-    assert [r.to for r in wf.nodes[2].routes] == ["$end"]
+    assert [r.to for r in wf.nodes[3].routes] == ["$end"]
+
+
+def test_kd_dag_flatten_output_schema_contract():
+    """flatten output_schema 必须暴露 baseline_contract_path / project_root / model_name /
+    flat_artifacts_dir / baseline_latency_ms 五字段——kd-setup step1/step2 直接取
+    baseline_contract_path + project_root + baseline_latency_ms（latency 下沉到 flatten __main__）。"""
+    from orca.compile.parser import load_workflow
+    wf = load_workflow(REPO / "workflows" / "kd-nas.yaml")
+    flatten = wf.nodes[0]
+    assert flatten.name == "flatten"
+    props = set(flatten.output_schema.get("properties", {}).keys())
+    required = set(flatten.output_schema.get("required", []))
+    for f in ("baseline_contract_path", "project_root", "model_name",
+              "flat_artifacts_dir", "baseline_latency_ms"):
+        assert f in props, f"flatten output_schema 缺 {f}"
+        assert f in required, f"flatten output_schema 应 required {f}（下游 setup 强依赖）"
+    # baseline_latency_ms 是 number（latency 实测值，不编造）
+    assert props and flatten.output_schema["properties"]["baseline_latency_ms"]["type"] == "number"
+
+
+def test_kd_inputs_slammed_remove_advanced_defaults():
+    """输入瘦身（用户已定）：seed / kd_artifacts_dir / accuracy_baseline_kind /
+    latency_tune_budget / kd_force_rerun 不再从 inputs 注入——下游 CLI 用脚本默认。
+    防止静默回潮。"""
+    from orca.compile.parser import load_workflow
+    wf = load_workflow(REPO / "workflows" / "kd-nas.yaml")
+    actual = set((wf.inputs or {}).keys())
+    removed = {
+        "seed", "kd_artifacts_dir", "accuracy_baseline_kind",
+        "latency_tune_budget", "kd_force_rerun",
+    }
+    leaked = actual & removed
+    assert not leaked, (
+        f"kd-nas.yaml inputs 含已下沉 input {sorted(leaked)}（应改为下游 CLI 默认）。"
+    )
+    # 必填 Tier A 不动
+    for must in ("teacher_train_command", "test_command", "target_latency_ms",
+                 "accuracy_baseline", "baseline_model_path", "latency_provider"):
+        assert must in actual, f"必填 input {must} 被误删"
+    # advanced 保留：device + full_epochs
+    assert "device" in actual and "full_epochs" in actual
+
+
+def test_kd_setup_agent_md_consumes_flatten_output():
+    """kd-setup step1/step2 必须从 flatten.output 取 baseline_contract_path
+    （而非 inputs.baseline_model_path——该 input 现在是 flatten 的入口，setup 不直消费）。"""
+    text = (REPO / "workflows" / "agents" / "kd-setup" / "agent.md").read_text(encoding="utf-8")
+    assert "flatten.output.baseline_contract_path" in text, (
+        "kd-setup/agent.md 必须从 flatten.output.baseline_contract_path 取 baseline（而非 inputs）"
+    )
+    # 反向断言：不应再直接消费 inputs.baseline_model_path（被 flatten 取代）
+    # 允许在注释里提到历史 input 名，但实际取值必须走 flatten.output.*
+    for line in text.splitlines():
+        if "baseline_model_path" in line and "inputs.baseline_model_path" in line:
+            # 允许：注释行（# 开头）解释迁移
+            assert line.strip().startswith("#") or "改" in line or "迁移" in line, (
+                f"kd-setup/agent.md 仍直接消费 inputs.baseline_model_path（应改 flatten.output）：{line!r}"
+            )
 
 
 def test_kd_setup_emits_concurrency_fields():
     """setup output_schema 含 v2 新增并发字段（concurrency / device_plan / per_variant_vram_bytes）。"""
     from orca.compile.parser import load_workflow
     wf = load_workflow(REPO / "workflows" / "kd-nas.yaml")
-    setup_props = set(wf.nodes[0].output_schema.get("properties", {}).keys())
+    setup = next(n for n in wf.nodes if n.name == "setup")
+    setup_props = set(setup.output_schema.get("properties", {}).keys())
     for f in ("concurrency", "device_plan", "per_variant_vram_bytes", "gpu_report"):
         assert f in setup_props, f"setup output_schema 缺 {f}"
     # 必填不含 gpu_report（fail-soft 可空）
-    required = set(wf.nodes[0].output_schema.get("required", []))
+    required = set(setup.output_schema.get("required", []))
     assert "gpu_report" not in required
     assert "concurrency" in required  # setup 必算（即便 1）
 

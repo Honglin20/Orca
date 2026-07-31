@@ -66,10 +66,11 @@ WORKFLOWS: dict[str, str] = {
 
 # 每个 workflow 的 [ask]/必填硬件类 input 期望（任务 §1「device/target_hardware/seed 在」）。
 # quant 系用 target_hardware；struct/kd 用 device；nas 用 target_hardware。
-# seed 所有 wf 都有。这些是 P5/P6/P9 收敛后的契约（见 docs/specs/workflow-input-design-principle.md）。
+# seed 除 kd-nas 外都保留（kd-nas 2026-07-31 输入瘦身：seed 下沉到下游 CLI 默认）。
+# 这些是 P5/P6/P9 收敛后的契约（见 docs/specs/workflow-input-design-principle.md）。
 HARDWARE_INPUT_EXPECTED: dict[str, set[str]] = {
     "agent-struct-exploration": {"device", "seed"},
-    "kd-nas": {"device", "seed"},
+    "kd-nas": {"device"},
     "nas-agent-pipeline": {"target_hardware", "seed"},
     "nas-hp-search": {"target_hardware", "seed"},
     "quant-bit-curve": {"target_hardware", "seed"},

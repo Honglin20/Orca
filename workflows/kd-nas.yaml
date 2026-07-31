@@ -1,7 +1,7 @@
 name: kd-nas
-description: "KD-NAS 蒸馏 sweep（重构版）：receiver KB 的 model8 .py 变体 → 确定性遍历。setup 测 baseline 时延 + 幂等训 teacher(10层 t1/t2 交替，KD 软标签源) + GPU 预检定并发；gate 一个节点内串行遍历全部变体（校验 + tune_latency 最小缩量 + distill_dispatch gate），FAIL_latency 当场落账、ACCEPTED 进 manifest；train 吃 manifest 做有界并发蒸馏（VRAM 再校验 + round-robin 绑卡 + 增量账本）+ 末尾 viz 推 sweep 散点。跨 run 复用（稳定 kd_artifacts_dir + 哈希校验 + ledger-driven 跳过）。无 finalize / 无 proxy_mse / 无 search。精度基线 + latency_provider(用户真硬件脚本) 均用户必填。契约见 workflows/agents/_kd_scripts/CONTRACTS.md。"
+description: "KD-NAS 蒸馏 sweep（重构版）：flatten 任意模型入口成 KD 变体契约 → setup 测 baseline 时延 + 幂等训 teacher(10层 t1/t2 交替，KD 软标签源) + GPU 预检定并发 → gate 一个节点内串行遍历全部 KB 变体（校验 + tune_latency 最小缩量 + distill_dispatch gate），FAIL_latency 当场落账、ACCEPTED 进 manifest → train 吃 manifest 做有界并发蒸馏（VRAM 再校验 + round-robin 绑卡 + 增量账本）+ 末尾 viz 推 sweep 散点。跨 run 复用（稳定 kd_artifacts_dir + 哈希校验 + ledger-driven 跳过）。无 finalize / 无 proxy_mse / 无 search。精度基线 + latency_provider(用户真硬件脚本) 均用户必填。契约见 workflows/agents/_kd_scripts/CONTRACTS.md。"
 
-entry: setup
+entry: flatten
 
 # KB 根目录探测（apply_kb_requirement 解析 → 注入 ORCA_KB_DIR，pick_variant glob families/receiver/*.py）。
 requires: [knowledge_base]
@@ -32,7 +32,7 @@ inputs:
     required: true
   baseline_model_path:
     type: string
-    description: "[ask] 原始 baseline 模型文件（4 层，时延参考 + gpu_probe representative）。须是契约文件（暴露 build_model + DUMMY_INPUT），setup 测其 latency 作参考线"
+    description: "[ask] 用户 PyTorch 模型入口文件（任意 .py / yaml / config 入口；flatten agent 会展平成 KD 变体契约 build_model + DUMMY_INPUT + KNOBS，不再要求用户自带契约）"
     required: true
   latency_provider:
     type: string
@@ -43,42 +43,42 @@ inputs:
     description: "[advanced] ONNX 导出 + latency 测量 + 训练设备：auto（默认 cuda→npu→cpu）/ cuda / npu / cpu"
     required: false
     default: "auto"
-  seed:
-    type: string
-    description: "[advanced] 复现种子（默认 0）。权重 init / dummy / tune / train 全固定此 seed（HI-2）"
-    required: false
-    default: "0"
-  kd_artifacts_dir:
-    type: string
-    description: "[advanced] 跨 run 稳定 artifact 根（teacher_cache/ledger/ckpts/gate_manifest/...）。空→默认 <repo>/kd-nas-artifacts/（U-1）"
-    required: false
-    default: ""
-  accuracy_baseline_kind:
-    type: string
-    description: "[advanced] 锁精度方向 + 校验：nmse/mse/ber(越低越好) | snr/acc(越高越好)。空→自动检测+WARN（U-2/SR3）"
-    required: false
-    default: ""
   full_epochs:
     type: string
     description: "[advanced] 每变体完整蒸馏训练 epoch 数（默认 50；非 proxy）"
     required: false
     default: "50"
-  latency_tune_budget:
-    type: string
-    description: "[advanced] latency 调参最大 cfg 测量数（硬 cap，默认 40）；= tune_latency --max_measurements"
-    required: false
-    default: "40"
-  kd_force_rerun:
-    type: string
-    description: "[advanced] 忽略 ledger 全量重扫变体（U-5：仅 variants；teacher/baseline 各自哈希正交）。true/false"
-    required: false
-    default: "false"
 
 nodes:
+  # ═══════════════════════════════════════════════════════════════
+  # flatten（入口·LLM + 脚本混合）：把用户任意 PyTorch 模型入口展平成 KD 变体契约 .py
+  # （build_model + DUMMY_INPUT + KNOBS）。LLM 做展平 + KNOBS 识别（判断），脚本做硬校验（确定性，rule 5）。
+  # __main__ 跑「正确性 + latency」统一契约 → 产出 baseline_contract_path + baseline_latency_ms；
+  # setup step2 读 baseline_latency_ms（不再重测）+ setup_helpers grep-user-train anchor。
+  # 不经过 KB receiver（KB 里 spt_*.py 已是契约，gate 直消费）。
+  # ═══════════════════════════════════════════════════════════════
+  - name: flatten
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: model-flatten
+    output_schema:
+      type: object
+      required: [baseline_contract_path, project_root, model_name, flat_artifacts_dir, baseline_latency_ms]
+      properties:
+        baseline_contract_path: {type: string, description: "展平产出的契约 .py 绝对路径（build_model + DUMMY_INPUT + KNOBS；经 validate_contract.py PASS）"}
+        project_root: {type: string, description: "从 baseline_model_path 向上推断的 project_root 绝对路径（低置信时带后缀）"}
+        model_name: {type: string, description: "推断的 <base_name>（KD 变体 variant_id）"}
+        flat_artifacts_dir: {type: string, description: "<output_dir> 绝对路径（含 <base_name>_flat.py）"}
+        baseline_latency_ms: {type: number, description: "flatten __main__ 测出的默认 cfg latency 中位数（用 inputs.latency_provider 实测；setup step2 读作 baseline 参考线，不再重测）"}
+    routes:
+      - to: setup
+
   # ═══════════════════════════════════════════════════════════════
   # setup（一次性·幂等）：测 baseline 时延 + 校验/训 teacher + 适配 train_kd + 预检变体 + GPU 预检定并发。
   # 跨 run 复用：teacher_cache 存在 ∧ teacher_model_hash 匹配 ∧ teacher_ckpt_sha256 匹配 → 跳过 teacher 训练。
   # setup 是「并发数唯一权威」（CONTRACTS §6）：gpu_probe.py 算 concurrency/device_plan/per_variant_vram_bytes。
+  # baseline 来源从 inputs.baseline_model_path 改为 flatten.output.baseline_contract_path（flatten 已保证契约）。
   # ═══════════════════════════════════════════════════════════════
   - name: setup
     kind: agent
@@ -98,7 +98,7 @@ nodes:
         teacher_ckpt: {type: string}
         ledger_path: {type: string, description: "ledger.jsonl 绝对路径（跨 run 真相源）"}
         ckpts_dir: {type: string, description: "<kd_artifacts_dir>ckpts/ 绝对路径（末尾带 /）"}
-        baseline_latency_ms: {type: number, description: "原始 baseline(4层) 实测 latency 中位数（参考线）"}
+        baseline_latency_ms: {type: number, description: "从 flatten.output.baseline_latency_ms 透传（flatten __main__ 实测的默认 cfg latency 中位数；setup step2 不再重测）"}
         kd_scripts_dir: {type: string, description: "_kd_scripts 绝对路径"}
         receiver_dir: {type: string, description: "KB receiver 绝对路径（setup 探测 $ORCA_KB_DIR/families/receiver；train_pool 算 variants_total 用，避免 ORCA_KB_DIR 在 in-session next 链里被重置）"}
         user_train_import: {type: string, description: "用户 train 模块 dotted-path（BLK-7 持久化；空则哨兵）"}

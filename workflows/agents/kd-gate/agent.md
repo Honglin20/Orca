@@ -41,7 +41,8 @@ tools: [bash, read, write, edit, glob, grep]
 ## 输入
 
 - setup：``kd_scripts_dir = {{ setup.output.kd_scripts_dir }}`` / ``kd_artifacts_dir = {{ setup.output.kd_artifacts_dir }}`` / ``ledger_path = {{ setup.output.ledger_path }}`` / ``receiver_dir = {{ setup.output.receiver_dir }}``
-- inputs：``target_latency_ms = {{ inputs.target_latency_ms }}`` / ``latency_provider = {{ inputs.latency_provider }}`` / ``latency_tune_budget = {{ inputs.latency_tune_budget }}`` / ``device = {{ inputs.device }}`` / ``seed = {{ inputs.seed }}`` / ``accuracy_baseline = {{ inputs.accuracy_baseline }}`` / ``kd_force_rerun = {{ inputs.kd_force_rerun }}``
+- inputs：``target_latency_ms = {{ inputs.target_latency_ms }}`` / ``latency_provider = {{ inputs.latency_provider }}`` / ``accuracy_baseline = {{ inputs.accuracy_baseline }}`` / ``device = {{ inputs.device }}``
+- **已下沉**（不再从 inputs 注入，下游 CLI 用脚本默认）：``latency_tune_budget``（默认 40）/ ``seed``（默认 0）/ ``kd_force_rerun``（默认 false）。如需 override 改 agent.md 常量。
 - ``receiver_dir`` 从 setup output 取（绝对路径），**不**依赖 ``$ORCA_KB_DIR`` env（BUG-3：in-session ``orca next`` 链里 ``ORCA_KB_DIR`` 会被重置成默认 ``~/.orca/knowledge_base`` → glob 0）。
 
 ## 执行：跑 gate_all.py（确定性，一个脚本一次性遍历全部变体）
@@ -57,10 +58,8 @@ GATE_OUT="$(python3 "{{ setup.output.kd_scripts_dir }}/gate_all.py" \
   --artifacts_dir "{{ setup.output.kd_artifacts_dir }}" \
   --kd_scripts_dir "{{ setup.output.kd_scripts_dir }}" \
   --accuracy_baseline "{{ inputs.accuracy_baseline }}" \
-  --latency_tune_budget "{{ inputs.latency_tune_budget }}" \
-  --measure_repeats 3 --device "{{ inputs.device }}" --seed "{{ inputs.seed }}" \
-  --manifest_out "{{ setup.output.kd_artifacts_dir }}gate_manifest.json" \
-  $([ "{{ inputs.kd_force_rerun }}" = "true" ] && echo --force_rerun) 2>&1)"
+  --measure_repeats 3 --device "{{ inputs.device }}" \
+  --manifest_out "{{ setup.output.kd_artifacts_dir }}gate_manifest.json" 2>&1)"
 RC=$?
 # gate_all.py 仅在输入契约不符时非零退出（硬件缺失/探测异常都 fail-soft 退 0）。RC!=0 → fail loud。
 if [ $RC -ne 0 ]; then

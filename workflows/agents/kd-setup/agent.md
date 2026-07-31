@@ -1,5 +1,5 @@
 ---
-description: kd-nas Setup（一次性·幂等）：测 baseline(4层) latency + 校验/训 teacher(10层 model8) + 适配 train_kd + 预检变体 + GPU 预检定并发。跨 run 复用（teacher_cache 哈希校验跳过重训）。所有下游专用路径字段作为顶层 output 一次给齐（单一真相源）。BLK-13 取 orca.lock 单写者护栏。确定性逻辑全在脚本（rule 5）。
+description: kd-nas Setup（一次性·幂等）：测 baseline(flatten 产出契约) latency + 校验/训 teacher(10层 model8) + 适配 train_kd + 预检变体 + GPU 预检定并发。跨 run 复用（teacher_cache 哈希校验跳过重训）。所有下游专用路径字段作为顶层 output 一次给齐（单一真相源）。BLK-13 取 orca.lock 单写者护栏。确定性逻辑全在脚本（rule 5）。
 tools: [bash, read, write, edit, glob, grep]
 ---
 # kd-setup
@@ -57,11 +57,13 @@ tools: [bash, read, write, edit, glob, grep]
 ## 输入
 
 - ``teacher_train_command = {{ inputs.teacher_train_command }}``（10 层 teacher 从头训，无 KD；原样 shell 执行）
-- ``baseline_model_path = {{ inputs.baseline_model_path }}``（原始 4 层 baseline，契约文件：``build_model`` + ``DUMMY_INPUT.shape``）
+- ``baseline_contract_path = {{ flatten.output.baseline_contract_path }}``（flatten 节点产出的 KD 变体契约 .py，已保证 ``build_model`` + ``DUMMY_INPUT.shape`` + ``KNOBS``，经 ``validate_contract.py`` PASS）
+- ``project_root = {{ flatten.output.project_root }}``（flatten 推断的 project_root；step1 fallback 用，step6 grep-user-train anchor 用）
 - ``latency_provider = {{ inputs.latency_provider }}``（用户真硬件 latency 脚本 ``path::func``，必填）
-- ``device = {{ inputs.device }}`` / ``seed = {{ inputs.seed }}`` / ``kd_artifacts_dir = {{ inputs.kd_artifacts_dir }}``
+- ``device = {{ inputs.device }}``
 - ``target_latency_ms = {{ inputs.target_latency_ms }}``（step7 pick_variant 用）
 - 引擎已注入 ``$ORCA_ARTIFACTS_DIR``（per-run 产物目录）+ ``$ORCA_KB_DIR``（KB 根目录）。
+- **已下沉**：``seed``（默认 0）/ ``kd_artifacts_dir``（默认 ``<repo>/kd-nas-artifacts/``）从 inputs 移除——下面 step 用常量默认；如需 override 改 agent.md 常量。
 
 ---
 
@@ -72,12 +74,23 @@ KD_SCRIPTS_DIR="$(dirname "$(find workflows/agents/_kd_scripts -name teacher_mod
 KD_SCRIPTS_DIR="$(python3 -c "import os,sys;print(os.path.abspath(sys.argv[1]))" "$KD_SCRIPTS_DIR")"
 PER_RUN_ARTIFACTS_DIR="${ORCA_ARTIFACTS_DIR:-}"
 [ -z "$PER_RUN_ARTIFACTS_DIR" ] && { echo "FAIL: \$ORCA_ARTIFACTS_DIR 未注入（非 orca run 上下文）" >&2; exit 2; }
-INPUT_ART="{{ inputs.kd_artifacts_dir }}"
-if [ -n "$INPUT_ART" ]; then KD_ARTIFACTS_DIR="$(python3 -c "import os,sys;print(os.path.abspath(sys.argv[1])+'/')" "$INPUT_ART")"; \
-else KD_ARTIFACTS_DIR="$(python3 -c "import os;print(os.path.abspath('kd-nas-artifacts')+'/')")"; fi
+# kd_artifacts_dir 已下沉：默认 <repo>/kd-nas-artifacts/（U-1）。如需 override 改下行常量。
+KD_ARTIFACTS_DIR="$(python3 -c "import os;print(os.path.abspath('kd-nas-artifacts')+'/')")"
 mkdir -p "$KD_ARTIFACTS_DIR"ckpts
-BASELINE="{{ inputs.baseline_model_path }}"
+# baseline 来源从 inputs.baseline_model_path 改为 flatten.output.baseline_contract_path
+# （flatten 已保证 build_model + DUMMY_INPUT + KNOBS 契约，validate_contract.py PASS）。
+BASELINE="{{ flatten.output.baseline_contract_path }}"
+[ -f "$BASELINE" ] || { echo "FAIL: flatten 产物不存在：$BASELINE（flatten 节点是否 PASS？）" >&2; exit 2; }
+# project_root 优先取 flatten 推断；低置信时 flatten 会附 " (low-confidence: ...)" 后缀，
+# 用 python 剥掉后缀取真实路径前缀（bash %% 对含 "(" 的 pattern 行为依赖 extglob，python 更稳）。
+FLATTEN_PROJECT_ROOT="{{ flatten.output.project_root }}"
 PROJECT_ROOT="$(python3 -c "
+import os,sys
+p=sys.argv[1].split(' (low-confidence')[0].strip()
+print(os.path.abspath(p) if p else '')
+" "$FLATTEN_PROJECT_ROOT")"
+# flatten 推断失败 / 空 → fallback 从 BASELINE 向上走找 .git/pyproject.toml
+[ -n "$PROJECT_ROOT" ] && [ "$PROJECT_ROOT" != "/" ] || PROJECT_ROOT="$(python3 -c "
 import os,sys
 p=os.path.dirname(os.path.abspath(sys.argv[1]))
 while p and p!=os.path.dirname(p) and not any(os.path.exists(os.path.join(p,m)) for m in ('.git','pyproject.toml')):
@@ -99,7 +112,13 @@ print('LOCK:', acquire_run_lock('$KD_ARTIFACTS_DIR', __import__('os').environ.ge
 echo "PARSED step1: KD_SCRIPTS_DIR=$KD_SCRIPTS_DIR KD_ARTIFACTS_DIR=$KD_ARTIFACTS_DIR PROJECT_ROOT=$PROJECT_ROOT LEDGER_PATH=$LEDGER_PATH RECEIVER_DIR=$RECEIVER_DIR"
 ```
 
-## step 2 执行：校验 baseline 契约 + 测 baseline latency（参考线，HI-13 median+std）
+## step 2 执行：校验 baseline 契约 + 读 flatten 的 baseline_latency_ms（参考线）
+
+> flatten 已保证 ``build_model`` + ``DUMMY_INPUT`` 契约（``validate_contract.py`` PASS），且 flatten
+> 的 ``__main__`` 已测出 ``baseline_latency_ms``（统一「跑 ``__main__`` = 正确性 + latency」契约）。
+> 下面这段 contract assert 保留作 **fail-loud 复核**——更安全，不删（若 flatten 产出与 setup 读取不一致，
+> 立即炸而非静默）。baseline latency **不再重测**，直接读 ``flatten.output.baseline_latency_ms``
+> （避免重复测量；latency_provider 已在 flatten 阶段用过）。
 
 ```bash
 BASELINE_DUMMY="$(python3 -c "
@@ -108,19 +127,20 @@ p=os.path.abspath('$BASELINE'); d=os.path.dirname(p)
 if d not in sys.path: sys.path.insert(0,d)
 spec=importlib.util.spec_from_file_location('_b',p)
 m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-assert callable(getattr(m,'build_model',None)), 'baseline_model_path 缺 build_model（契约）'
+assert callable(getattr(m,'build_model',None)), 'baseline 缺 build_model（契约）'
 assert isinstance(getattr(m,'DUMMY_INPUT',None),dict) and m.DUMMY_INPUT.get('shape'), 'baseline 缺 DUMMY_INPUT.shape'
 print(json.dumps(m.DUMMY_INPUT))
 ")"
-TUNE_OUT="$(python3 "$KD_SCRIPTS_DIR/tune_latency.py" \
-  --variant_path "$BASELINE" --build_fn build_model \
-  --dummy_input "$BASELINE_DUMMY" --knobs '{}' \
-  --target_latency_ms 0 --latency_provider "{{ inputs.latency_provider }}" \
-  --artifacts_dir "$KD_ARTIFACTS_DIR" --device "{{ inputs.device }}" --seed "{{ inputs.seed }}" \
-  --max_measurements 1 --measure_repeats 3 2>&1 || true)"
-BASELINE_LATENCY_MS="$(echo "$TUNE_OUT" | grep '^LATENCY_MS_MEDIAN:' | awk '{print $2}')"
-[ -n "$BASELINE_LATENCY_MS" ] || { echo "FAIL: baseline latency 未测到"; echo "$TUNE_OUT"; exit 2; }
-echo "PARSED step2: BASELINE_LATENCY_MS=$BASELINE_LATENCY_MS"
+# baseline_latency_ms 来源下沉到 flatten.output（flatten __main__ 已用 latency_provider 测过；
+# setup 不再调 tune_latency 重测——避免重复测量 + 让 latency_provider 在 flatten 阶段就生效）。
+BASELINE_LATENCY_MS="{{ flatten.output.baseline_latency_ms }}"
+python3 -c "
+v='${BASELINE_LATENCY_MS}'.strip()
+assert v, 'baseline_latency_ms 为空（flatten 是否产出？）'
+float(v)  # 必须是合法 float（fail loud）
+print('BASELINE_LATENCY_OK:', v)
+"
+echo "PARSED step2: BASELINE_LATENCY_MS=$BASELINE_LATENCY_MS (source: flatten.output)"
 ```
 
 ## step 3 执行：校验 teacher_model.py（repo 写死，10 层 t1/t2 交替）
@@ -179,7 +199,7 @@ if [ "$NEED_TRAIN" = "1" ]; then
     --teacher_model_path "$TEACHER_MODEL_PATH" --teacher_ckpt "$TEACHER_CKPT" \
     --build_fn build_model --dummy_input '{"shape":[1,4,48,64,1],"dtype":"float32"}' \
     --output_dir "$KD_ARTIFACTS_DIR" --opset 17 \
-    --latency_provider "{{ inputs.latency_provider }}" --device "{{ inputs.device }}" --seed "{{ inputs.seed }}"
+    --latency_provider "{{ inputs.latency_provider }}" --device "{{ inputs.device }}"
 fi
 [ -f "$TEACHER_CACHE" ] && [ -f "$TEACHER_META" ] || { echo "FAIL: teacher_cache/meta 未生成"; exit 2; }
 echo "PARSED step5: TEACHER_CACHE=$TEACHER_CACHE TEACHER_META=$TEACHER_META TEACHER_CKPT=$TEACHER_CKPT"
@@ -233,7 +253,7 @@ GPU_OUT="$(python3 "$KD_SCRIPTS_DIR/gpu_probe.py" \
   --teacher_cache "$TEACHER_CACHE" \
   --representative_variant "$BASELINE" \
   --variants_count "$VARIANTS_COUNT" --device "{{ inputs.device }}" \
-  --safety 0.8 --max_concurrency 8 --seed "{{ inputs.seed }}" 2>&1)"
+  --safety 0.8 --max_concurrency 8 2>&1)"
 GPU_RC=$?
 [ $GPU_RC -ne 0 ] && { echo "$GPU_OUT" >&2; exit 2; }
 CONCURRENCY="$(echo "$GPU_OUT" | grep '^CONCURRENCY:' | awk '{print $2}')"

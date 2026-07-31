@@ -42,7 +42,8 @@ tools: [bash, read, write, edit, glob, grep]
 
 - gate：``accepted_manifest_path = {{ gate.output.accepted_manifest_path }}`` / ``n_accepted = {{ gate.output.n_accepted }}``
 - setup：``teacher_cache = {{ setup.output.teacher_cache }}`` / ``kd_scripts_dir = {{ setup.output.kd_scripts_dir }}`` / ``kd_artifacts_dir = {{ setup.output.kd_artifacts_dir }}`` / ``per_run_artifacts_dir = {{ setup.output.per_run_artifacts_dir }}`` / ``project_root = {{ setup.output.project_root }}`` / ``ledger_path = {{ setup.output.ledger_path }}`` / ``receiver_dir = {{ setup.output.receiver_dir }}`` / ``user_train_import = {{ setup.output.user_train_import }}`` / ``user_loss_fn = {{ setup.output.user_loss_fn }}`` / ``concurrency = {{ setup.output.concurrency }}`` / ``device_plan = {{ setup.output.device_plan }}`` / ``per_variant_vram_bytes = {{ setup.output.per_variant_vram_bytes }}``
-- inputs：``test_command = {{ inputs.test_command }}`` / ``accuracy_baseline = {{ inputs.accuracy_baseline }}`` / ``accuracy_baseline_kind = {{ inputs.accuracy_baseline_kind }}`` / ``target_latency_ms = {{ inputs.target_latency_ms }}`` / ``latency_provider = {{ inputs.latency_provider }}`` / ``full_epochs = {{ inputs.full_epochs }}`` / ``seed = {{ inputs.seed }}``
+- inputs：``test_command = {{ inputs.test_command }}`` / ``accuracy_baseline = {{ inputs.accuracy_baseline }}`` / ``target_latency_ms = {{ inputs.target_latency_ms }}`` / ``latency_provider = {{ inputs.latency_provider }}`` / ``full_epochs = {{ inputs.full_epochs }}`` / ``device = {{ inputs.device }}``
+- **已下沉**（不再从 inputs 注入，下游 CLI 用脚本默认）：``accuracy_baseline_kind``（默认 ``""`` → auto 检测 + WARN）/ ``seed``（默认 0）。如需 override 改 agent.md 常量。
 
 ## 执行：跑 train_pool.py（吃 manifest + setup 并发参数）
 
@@ -60,13 +61,12 @@ TRAIN_OUT="$(python3 "{{ setup.output.kd_scripts_dir }}/train_pool.py" \
   --receiver_dir "{{ setup.output.receiver_dir }}" \
   --test_command "{{ inputs.test_command }}" \
   --accuracy_baseline "{{ inputs.accuracy_baseline }}" \
-  --accuracy_baseline_kind "{{ inputs.accuracy_baseline_kind }}" \
   --latency_provider "{{ inputs.latency_provider }}" \
   --target_latency_ms "{{ inputs.target_latency_ms }}" \
   --concurrency "{{ setup.output.concurrency }}" \
   --device_plan '{{ setup.output.device_plan }}' \
   --per_variant_vram_bytes "{{ setup.output.per_variant_vram_bytes }}" \
-  --epochs "{{ inputs.full_epochs }}" --seed "{{ inputs.seed }}" \
+  --epochs "{{ inputs.full_epochs }}" \
   --user_train_import "{{ setup.output.user_train_import }}" \
   --user_loss_fn "{{ setup.output.user_loss_fn }}" 2>&1)"
 RC=$?

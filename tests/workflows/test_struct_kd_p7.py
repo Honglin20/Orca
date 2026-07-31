@@ -420,11 +420,19 @@ def test_struct_workflow_has_six_nodes():
     assert nodes == expected, f"struct nodes mismatch: {nodes}"
 
 
-def test_kd_workflow_has_three_nodes():
-    """v2 重构：kd workflow 3 节点 setup→gate→train（确定性 gate + 有界并发池；删 selector/distill/recorder）。"""
+def test_kd_workflow_has_four_nodes_flatten_first():
+    """v3 重构：kd workflow 4 节点 flatten→setup→gate→train（flatten 入口展平任意模型入口成 KD 变体契约
+    + 确定性 gate + 有界并发池；删 selector/distill/recorder）。"""
     nodes = _yaml_nodes(REPO / "workflows" / "kd-nas.yaml")
-    expected = ["setup", "gate", "train"]
+    expected = ["flatten", "setup", "gate", "train"]
     assert nodes == expected, f"kd nodes mismatch: {nodes}"
+    # entry 必须是 flatten（不再是 setup）—— 抓 yaml 顶层 `entry:` 行
+    entry_line = next(
+        (l for l in (REPO / "workflows" / "kd-nas.yaml").read_text(encoding="utf-8").splitlines()
+         if l.startswith("entry:")),
+        "",
+    )
+    assert "flatten" in entry_line, f"entry 应为 flatten，got {entry_line!r}"
 
 
 def test_kd_latency_provider_required_no_default():
