@@ -341,9 +341,18 @@ def _build_rows(baseline: list[dict[str, Any]], d: dict[str, Any]) -> list[dict[
             out_f = info.get("out_feat")
             out_s = str(out_f) if out_f is not None else "?"
             if is_last:
-                # head（末个结构层）：super_in=末级 stage 宽度（cheatsheet 契约 ElasticLinear(super_in_dim=最后 stage 宽度)）；
-                # 无 stage 则 ?（不臆造）；super_out=num_classes（= baseline head out_feat）。
-                in_s = str(stage_widths[-1]) if stage_widths else "?"
+                # head（末个结构层）：super_in=末级 stage 宽度（cheatsheet 契约 ElasticLinear(super_in_dim=最后 stage 宽度)）。
+                # 若 baseline in_feat 已解析且与末级宽度不一致（transformer / 带 pooling 的非直连 head）
+                # → 暴露矛盾（?(baseline=X,last_stage=Y)），不静默选一个；无 stage 则 ?。
+                in_f = info.get("in_feat")
+                if stage_widths:
+                    last_w = stage_widths[-1]
+                    if in_f is not None and in_f != last_w:
+                        in_s = f"?(baseline={in_f},last_stage={last_w})"
+                    else:
+                        in_s = str(last_w)
+                else:
+                    in_s = "?"
                 super_dim = f"super_in={in_s}→super_out={out_s}"
             else:
                 # 非 head Linear：SearchSpace 不标准化其超网维度 → 显 —，不用 baseline 维度冒充超网维度。
@@ -402,7 +411,11 @@ def main() -> int:
         _err(f"无法 import/解析 supernet.py：{type(e).__name__}: {e}")
         return 0
 
-    rows = _build_rows(baseline, d)
+    try:
+        rows = _build_rows(baseline, d)
+    except Exception as e:
+        _err(f"组装对比表失败：{type(e).__name__}: {e}")
+        return 0
     if not rows:
         _err("组装对比表为空（baseline 层未匹配）")
         return 0
@@ -417,8 +430,9 @@ def main() -> int:
             "每个 baseline 结构层对应的 elastic 替换。"
             "层名取自源码赋值目标（Sequential 内带下标）；"
             "替换前维度解析自 __main__ 实例化/__init__ 默认/模块常量；"
-            "超网维度(后)=stage 宽度（super_out_ch / super_emb_dim）或 head 的 super_in(末级宽度)→super_out；"
-            "「—」=非常量无法静态推断或 stem 固定层（不编造）。"
+            "超网维度(后)=stage 宽度（super_out_ch / super_emb_dim）；head 的 super_in=末级宽度→super_out=num_classes，"
+            "若 baseline head in_feat 与末级宽度冲突则显 ?(baseline=…,last_stage=…) 暴露矛盾；"
+            "「—」=非常量无法静态推断、stem 固定层、或非 head Linear（SearchSpace 不标准化，不臆造）。"
         ),
     )
     print(f"[push_describe] pushed {len(rows)} rows", flush=True)

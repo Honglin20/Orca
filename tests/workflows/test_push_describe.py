@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -108,9 +109,9 @@ def test_rows_five_columns_and_supernet_dim(baseline):
     assert stage0["超网维度(后)"] == "super_out_ch=32"
     assert "depth∈{1,2}" in stage0["组件/深度/核候选"]
     assert "tiny_conv" in stage0["组件/深度/核候选"]
-    # head：super_in=末级宽度 64（扩张），super_out=num_classes 10
+    # head：baseline in_feat=32 ≠ 末级 stage 宽度 64（超网扩张了末级）→ 暴露矛盾，不静默选一个；super_out=num_classes 10
     assert head["替换后"] == "ElasticLinear"
-    assert head["超网维度(后)"] == "super_in=64→super_out=10"
+    assert head["超网维度(后)"] == "super_in=?(baseline=32,last_stage=64)→super_out=10"
     # 替换前维度已解析（无 ?）
     assert stem["替换前"] == "Conv2d(3→16, k=3)"
     assert head["替换前"] == "Linear(32→10)"
@@ -157,3 +158,59 @@ if __name__ == "__main__":
     assert row["替换前"] == "Conv2d(3→?, k=3)"  # hidden 消解不了 → ?
     assert "非常量" in row["替换后"]
     assert row["超网维度(后)"] == "—"
+
+
+def test_main_kwargs_override_init_default():
+    """优先级：__main__ 实例化 kwargs > __init__ 默认（锁定 _build_symbols 核心契约）。"""
+    pd = _load_pd()
+    src = """
+import torch.nn as nn
+class M(nn.Module):
+    def __init__(self, dim: int = 5):    # 默认 5
+        super().__init__()
+        self.head = nn.Linear(dim, 10)
+    def forward(self, x):
+        return self.head(x)
+if __name__ == "__main__":
+    M(dim=8)                             # main kwargs 8 覆盖默认 5
+"""
+    tree = ast.parse(src)
+    syms = pd._build_symbols(tree)
+    assert syms["dim"] == 8  # main 胜出，非默认 5
+    baseline = pd._collect_baseline(tree, syms)
+    assert baseline[0]["info"]["in_feat"] == 8
+
+
+def test_transformer_emb_dims_and_head_conflict_exposed():
+    """transformer：_width_label 走 super_emb_dim；head baseline in_feat≠末级宽度 → 暴露矛盾，不静默选一个。"""
+    pd = _load_pd()
+    assert pd._width_label({"stage_emb_dims": (128,)}) == "super_emb_dim"
+    assert pd._width_label({"stage_widths": (128,)}) == "super_out_ch"
+    assert pd._width_label({}) is None
+    tree = ast.parse(_MLP_SRC)  # fc1: 64→32, fc2(head): 32→10
+    baseline = pd._collect_baseline(tree, pd._build_symbols(tree))
+    rows = pd._build_rows(baseline, {"stage_emb_dims": (128,)})  # 末级 emb_dim=128 ≠ head in_feat=32
+    fc2 = rows[-1]
+    dim = fc2["超网维度(后)"]
+    assert "baseline=32" in dim and "last_stage=128" in dim  # 暴露冲突
+    assert dim.endswith("→super_out=10")
+
+
+def test_two_script_copies_in_sync():
+    """两份 push_describe.py 必须字节一致——elastic_optimizer 副本零间接测试，靠此锁 drift。"""
+    import filecmp
+    elastic = _SCRIPT.parents[2] / "elastic_optimizer" / "scripts" / "push_describe.py"
+    assert elastic.exists(), f"缺失副本：{elastic}"
+    assert filecmp.cmp(_SCRIPT, elastic, shallow=False), "两份 push_describe.py drift，请同步"
+
+
+def test_error_table_when_no_flat_file(tmp_path, monkeypatch):
+    """无 *_flat.py → _err 推 ERROR 兜底表（fail-loud 契约），不静默空图、不抛未捕获异常。"""
+    pd = _load_pd()
+    captured: dict = {}
+    monkeypatch.setattr(pd, "render_chart", lambda **kw: captured.update(kw))
+    monkeypatch.setattr(sys, "argv", ["pd", "--output_dir", str(tmp_path)])
+    rc = pd.main()
+    assert rc == 0
+    assert captured.get("chart_type") == "table"
+    assert "未找到" in captured["data"][0]["value"]
