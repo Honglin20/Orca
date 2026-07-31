@@ -5,9 +5,25 @@
 
 ---
 
+## [2026-07-31] feat(kd-nas): 新增 teacher-gen folder-agent（teacher 纯调参派生：深度×3 / 宽度×2）
+
+新建 `workflows/agents/teacher-gen/`（folder-agent：`agent.md` 强执行指令 + `SKILL.md` 4-step 派生工作流 + `scripts/validate_teacher.py` teacher 专属硬校验 + `scripts/measure_latency.py` 字节对齐副本）。基于 flatten 产出的 baseline 契约**纯调参派生** teacher 结构文件——wrapper 通过 `importlib.util.spec_from_file_location` 按绝对路径委托 `baseline.build_model`（不拷贝架构代码），深度轴 ×3 / 宽度轴 ×2（KNOBS 名字语义识别：`block/layer/stage/depth/num_layers` → 深度；`channel/embed_dim/hidden/width/feature` → 宽度），DUMMY_INPUT 与 baseline 逐字一致（KD 硬约束，硬编码字面量非引用），`__main__` 逐字照 `model-flatten/SKILL.md` Step 3 模板（正确性 + latency via `measure_contract_latency`）。**双重硬校验门**：复用 model-flatten `validate_contract.py`（跨 agent 路径调用，KD 变体契约通用）+ 新 `validate_teacher.py`（DUMMY_INPUT 一致 / 深度×3 / 宽度×2 / 其余 KNOBS 不变 / 容量严格上升）；另加 `teacher-gen-verifier` 子 agent（轴识别 / wrapper 纯度 / latency wiring）。两路 code-reviewer 审查：1 BLOCKER（wrapper 委托失败路径无测试）+ 5 MAJOR + 6 MINOR 全修，测试 35→46 全绿。**未嵌入 workflow yaml**（独立阶段；未来嵌入 setup 改读 `teacher_gen.output.teacher_model_path`，不再硬编码 `_kd_scripts/teacher_model.py`）。详见 [release note](../releases/2026-07-31-kd-nas-teacher-gen.md)。
+
+## [2026-07-31] feat(kd-nas): flatten `__main__` 升级为「正确性 + latency」统一契约，baseline latency 下沉到 flatten
+
+把 baseline latency 测量从 `kd-setup` step2（调 `tune_latency.py`）上移到 flatten 产出的 `<base>_flat.py` 的 `__main__`：新增自包含 helper `workflows/agents/model-flatten/scripts/measure_latency.py`（导 ONNX + ort 实测 median+std；latency_provider 空 → ONNXRT-CPU fallback + WARN；绝不伪造）；flat 文件 `__main__` 经 `$ORCA_AGENT_RESOURCES` env 调 helper，契约顶层 standalone 不变（latency 逻辑全在 `__main__` 内，validate_contract import 不受影响）；flatten output 加 `baseline_latency_ms`（实测中位数）；kd-setup step2 删 tune_latency 调用、改读 `flatten.output.baseline_latency_ms`；flatten-verifier 加第三维校验（给了 latency_provider 却走 fallback → [BLOCKER]）。两路 code-reviewer 审查，3 个 [MAJOR]（模块级 importorskip 误伤 / accepts_device 分支零覆盖 / 「绝不伪造」intent 4 取 1）全修。`tests/workflows/` 全套 358 passed 无回归。Commit: `<待补>`。详见 [release note](../releases/2026-07-31-kd-nas-flatten-latency.md)。
+
 ## [2026-07-31] feat(nas): push_describe 对比表富化——真层名/解析维度/超网维度/组件候选
 
 用户反馈 baseline→elastic 对比表「毫无信息量」（`fc2 Linear(?->?) ElasticLinear`）。根因在 `push_describe._build_rows`：层名写死 `conv{idx}/fc{idx}`、维度遇变量名显 `?`、丢 `stage_widths`、组件选择被埋在长串。重构为 5 列 `[层名, 替换前, 替换后, 超网维度(后), 组件/深度/核候选]`：层名取 AST 赋值目标真名（Sequential 内带下标）；替换前维度走符号表消解变量名（`__main__` kwargs > `__init__` 默认 > 模块常量）；超网维度(后)取 `stage_widths[i]` / head `super_in→super_out`；组件/深度/核候选取 `stage_depth_candidates` + `stage_layer_configs`。全程 AST 静态 + `SearchSpace` asdict（不实例化、不靠 LLM），fail-soft 不变。两份副本（pytorch-model-optimizer + elastic_optimizer）+ agent.md 同步；新增 `tests/workflows/test_push_describe.py`（4 纯函数测试，全绿）。Commit: `4d55c2b`。详见 [release note](../releases/2026-07-31-nas-push-describe-enrich.md)。
+
+## [2026-07-31] feat(kd-nas): 新增 kd-train-script agent（生成统一 train_pipeline.py，teacher + distill 两模式）
+
+把 nas-agent-pipeline 的 `supernet-train-script` 的生成式哲学（folder-agent + 自包含搬用户逻辑 + verifier 闭环）搬到 KD-NAS，产出 `workflows/agents/kd-train-script/`（`agent.md` + `SKILL.md` + `references/workflows/train_pipeline_script_generation.md` + 2 checklist + `references/templates/train_pipeline.py` 参考实现），一个脚本两模式（`--mode teacher` 纯 task_loss / `--mode distill` task_loss+KD），模型按路径 `importlib` 加载，单卡 `--device` CLI（零 DDP/torchrun/sandwich 残留，AST 扫描守门），用现有 `kd.compose`/`kd.wrapper`/`kd.ema` 库（不碰 `nas_agent.train.distillation`），用户 train.py 边界更窄（只 `compute_loss`+`build_dataloader`，optimizer/scheduler 缺省走 Adam + 显式 fallback 标注）。新增独立测试 `tests/workflows/test_kd_train_script.py`（18 个：folder-agent 结构契约 + 静态校验 + 两模式功能 smoke + fail-loud 路径，全绿；相邻隔离测试 105 全绿无回归）。**未 commit**（待主 session 与用户确认；范围隔离：未嵌入 workflow yaml / 未退役 train_adapter_template.py / 未改隔离清单文件）。Commit: `<待补>`。详见 [release note](../releases/2026-07-31-kd-train-script-agent.md)。
+
+## [2026-07-31] feat(kd-nas): 新增独立 flatten agent（model-flatten）+ 输入瘦身
+
+把 nas-agent-pipeline 的 pytorch-model-optimizer Step 1（展平能力）抽成独立 folder-agent（`workflows/agents/model-flatten/`：`agent.md` + `SKILL.md` + `scripts/validate_contract.py`），让用户只给任意 PyTorch 模型入口，flatten agent 自动展平成 KD 变体契约（`build_model` + `DUMMY_INPUT` + `KNOBS`），脚本做硬校验（fail loud），LLM 做展平 + KNOBS 识别 + flatten-verifier 子 agent 复核（judgment vs deterministic 分工，rule 5）。workflow DAG 改为 4 节点 `flatten → setup → gate → train`，entry 改为 `flatten`；setup 节点 baseline 来源从 `inputs.baseline_model_path` 改为 `flatten.output.baseline_contract_path`；同时砍 5 个 advanced inputs（`seed` / `kd_artifacts_dir` / `accuracy_baseline_kind` / `latency_tune_budget` / `kd_force_rerun`——下游 CLI 本就有默认值），对应 kd-{setup,gate,train}/agent.md bash 块清理。测试新增 `tests/workflows/test_model_flatten.py`（14 个：validate_contract PASS/FAIL 全路径 + agent.md/SKILL.md 结构契约 + DAG），`test_kd_redesign.py` DAG 测试改为 4 节点 + 3 个新测试守门（flatten output_schema / inputs 不回潮 / setup 消费 flatten output）。**未 commit**（待主 session 确认 + WSL 跑 pytest）。Commit: `<待补>`。详见 [release note](../releases/2026-07-31-kd-nas-flatten-agent.md)。
 
 ## [2026-07-29] fix(visibility): in-session run 可见性根治——marker-free 自注册 tape 所在目录
 
