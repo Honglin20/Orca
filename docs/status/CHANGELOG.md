@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-07-31] feat(kd-nas): model8 实际 student 变体（BatchNorm/3层/ReLU）+ 精简 workflow description
+
+新增基于原始 model8（SignalProcessingTransformer）的实际 student 变体到 demo KB（`examples/kd-nas-demo/knowledge_base/families/receiver/`），覆盖三条轻量化路径：① BatchNorm 替 LayerNorm（验证过时延达标）② 缩到 3 层 ③ GELU→ReLU。主变体 `00_model8_bn3relu`（三路径全开）排 KB glob 第一（digit 前缀字典序最小，pick_variant 实测确认）；组合变体 `01_bn3gelu`/`02_ln3relu`/`03_bn4relu` 隔离各路径。共享积木 `_model8_student_blocks.py`（`norm_type`/`act_type` 开关，OCP）。`demo_tiny_*` 保留不动。BatchNorm 维度适配验证（reshape 后 3D `[N,C,L]`，C=embed_dim，真跑 forward+backward+ONNX）。测试 73 passed（test_smoke 36 + test_model8_students 37）+ KD 无回归（158 passed）。另：`kd-nas.yaml` description 精简为只讲作用（"通过 KD 搜索轻量化模型结构达时延目标"），去节点流程细节。Commit: `<待补>`。
+
 ## [2026-07-31] fix(kd-nas): review #6 可视化 + #5 思路 pass 修复（latency baseline 透传 / accuracy_compare baseline 行 / 进度图 0 保留 / min 方向取负显示 / is_measured_row 单测）
 
 修 review #6（可视化 conditional-pass）4 必修 + review #5（思路 pass）1 建议，范围严格限定列出 5 项：① `train_pool.py` 加 `--baseline_latency_ms` + 透传 viz_kd（latency bar 缺 baseline 参考线）+ `kd-train/agent.md` bash 块补 `{{ setup.output.baseline_latency_ms }}`；② `viz_kd._push_accuracy_compare` 把 baseline 作为 data 行（`met_accuracy="ref"`，前端画得出，对齐 latency_bar）；③ `_push_progress` 去掉固定 status 项的 0 过滤（注释承诺「一眼全貌」）；④ **min 方向 kind（db/nmse/mse/ber）取负显示**（`acc_disp=-acc`，`_acc_display` helper，display 变换对齐 tail_metrics）使「轴上越大越好」统一——防 bar 图 -20dB 高于 -22dB 视觉误导（goal 硬要求；Rule 7 选数据层消除歧义最强），未知 kind 三图齐跳（取负需已知方向，不 auto 猜）；⑤ 新增 `is_measured_row` 7 边界直接单测。两路 code-reviewer 自检无 BLOCKER：补 latency_bar baseline 端到端值级断言（闭合 #6-1 intent）+ progress 固定显示序 / 杂项 status 正路径 / variants_total 未知 / status:null 归一测试 + agent.md baseline flag 守门 + docstring 精确化（tail_metrics display 对齐但 kind 检测相反）。测试 +23 / 更新 1；WSL `tests/workflows`+`tests/compile`+`tests/schema` 634 passed + kd-nas contract 79 passed 无回归。Commit: `<待补>`。详见 [release note](../releases/2026-07-31-kd-nas-review-fixes.md)。

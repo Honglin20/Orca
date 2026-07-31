@@ -28,8 +28,14 @@ import pytest
 _DEMO_DIR = Path(__file__).resolve().parent
 _RECEIVER_DIR = _DEMO_DIR / "knowledge_base" / "families" / "receiver"
 
-# 4 变体 + baseline（None = baseline_model.py 在 demo 根，不在 KB receiver 目录）。
+# 8 变体 + baseline（None = baseline_model.py 在 demo 根，不在 KB receiver 目录）。
+# 前 4 个是原始 model8 架构 student 变体（字典序最小，pick_variant glob 排前），
+# 后 4 个是简化 demo 变体。两类共享同一 I/O 契约网。
 VARIANT_PATHS = [
+    _RECEIVER_DIR / "00_model8_bn3relu.py",
+    _RECEIVER_DIR / "01_model8_bn3gelu.py",
+    _RECEIVER_DIR / "02_model8_ln3relu.py",
+    _RECEIVER_DIR / "03_model8_bn4relu.py",
     _RECEIVER_DIR / "demo_tiny_tf.py",
     _RECEIVER_DIR / "demo_tiny_alt.py",
     _RECEIVER_DIR / "demo_tiny_cnn_pw.py",

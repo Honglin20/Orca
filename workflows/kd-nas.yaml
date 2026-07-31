@@ -1,5 +1,5 @@
 name: kd-nas
-description: "KD-NAS 蒸馏 sweep：flatten 任意模型入口 → teacher_gen 派生 teacher（深度×3/宽度×2）→ train_script_gen 生成统一训练脚本（teacher+distill 两模式）→ setup 训 teacher + GPU 预检 → gate 时延筛 student → train 并发蒸馏 → select 选最优 + final_report。student 按 accuracy_baseline（方向显式）+ target_latency 判定，teacher 仅作 KD 软标签源。latency_provider 用户必填。"
+description: "通过知识蒸馏（KD）搜索更优的轻量化模型结构，在精度可接受的前提下达到用户的时延目标。"
 
 entry: flatten
 
