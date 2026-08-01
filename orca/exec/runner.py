@@ -65,6 +65,12 @@ _KILL_GRACE_SECONDS = 10.0
 _TERMINATE_GRACE_SECONDS = 3.0
 # stderr 累积上限（防异常 claude 喷爆内存；错误诊断只需末尾片段）。
 _STDERR_MAX_BYTES = 64 * 1024
+# stdout/stderr StreamReader 单行上限。asyncio 默认 64KiB——opencode stream-json 单行
+# JSON（如 agent_message 内嵌整份生成的 train_pipeline.py / 大 tool_result）超此限即
+# 触发 ``readline()`` 抛 ``ValueError: Separator is found, but chunk is longer than
+# limit``，整 run 崩（实测 kd-nas train_script_gen 节点：读用户 train.py + 多契约后，agent
+# 输出单行 >64KiB 崩）。提到 64MiB 容纳任意单条 stream-json 行；内存按需增长，非预分配。
+_STREAM_READ_LIMIT = 64 * 1024 * 1024
 
 
 # on_result 回调签名：(raw_result 文本, usage dict, cost_usd float, is_error bool,
@@ -201,6 +207,9 @@ class CLIRunner:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # asyncio StreamReader 默认 limit=64KiB，opencode stream-json 单行超此即崩
+            # （见 _STREAM_READ_LIMIT 注释）。提到 64MiB 容纳任意单条 JSON 行。
+            limit=_STREAM_READ_LIMIT,
             env=env,
             # phase-11-process §2.1（推翻 phase-3 §2.5）：进程组隔离。
             # ``spawn_kwargs_for_process_group`` 平台分支：POSIX ``start_new_session=True``
