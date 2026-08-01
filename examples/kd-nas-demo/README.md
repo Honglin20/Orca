@@ -1,7 +1,7 @@
 # kd-nas-demo —— kd-nas workflow 的真实 E2E 测试靶子
 
 一个**最小可跑**的 kd-nas demo 项目，严格满足 `workflows/kd-nas.yaml`（v4 DAG：
-`flatten → teacher_gen → train_script_gen → setup → gate → train → $end`）的 inputs 契约。
+`flatten → teacher_gen → train_script_gen → setup → gate → train → select → $end`）的 inputs 契约。
 用**随机数据**+ **tiny 模型**让真实 workflow 在 CPU 上分钟级跑通。
 
 **铁律遵守**：
@@ -21,18 +21,23 @@ examples/kd-nas-demo/
 ├── README.md                                    # 本文件（inputs 全集 + orca run 示例 + 自验）
 ├── test_smoke.py                                # 契约 smoke（pytest/直跑；变体 I/O 契约 + hook + 前向 shape）
 ├── baseline_model.py                            # 4 层 baseline（契约文件：时延参考 + gpu_probe representative）
-├── train_teacher.py                             # 训 10 层 teacher（teacher_model.py 架构）→ ckpt；即 teacher_train_command
-├── train.py                                     # 用户任务 loss+dataloader（KD 蒸馏消费）；kd-setup grep 它填 user_train_import
-├── test_student.py                              # 读 STUDENT_CKPT env，算 NMSE 打印 STUDENT_ACCURACY 等；即 test_command
+├── train_teacher.py                             # 【v4 退役·历史参考】训 10 层 teacher（teacher_model.py 架构）→ ckpt；不再是 workflow 入口
+├── train.py                                     # 用户任务 loss+dataloader；即 inputs.user_train_script（train-script-gen 自包含搬移）
+├── test_student.py                              # 读 STUDENT_CKPT env，算 NMSE 打印 STUDENT_ACCURACY 等；kd-train-script 自动发现并移植进 train_pipeline --mode eval（取代旧 test_command input）
 ├── latency_provider.py                          # measure(onnx,...) onnxruntime 实测；即 latency_provider 值
 └── knowledge_base/
     └── families/
         └── receiver/
-            ├── _demo_blocks.py                  # 【共享】简化 model8 积木（ReceiverShell 基类 + TF/CNN block；非 _model8_blocks 复制）
-            ├── demo_tiny_tf.py                  # 变体：全 t1 transformer（2 层）
-            ├── demo_tiny_alt.py                 # 变体：t1/t2 交替 transformer（3 层 / 中等）
-            ├── demo_tiny_cnn_pw.py              # 变体：全 CNN pointwise（2 层）
-            └── demo_tiny_cnn_dil.py             # 变体：全 CNN dilated（2 层）
+            ├── _demo_blocks.py                  # 【共享·简化原创】ReceiverShell 基类 + TF/CNN block（非 _model8_blocks 复制）
+            ├── _model8_student_blocks.py        # 【共享·真实架构】SignalProcessingTransformer（逐字对齐 teacher_model.py，+norm_type/act_type 开关）
+            ├── 00_model8_bn3relu.py             # 【主变体】真实 model8 + BN + 3层 + ReLU（字典序最小，gate 枚举排首位）
+            ├── 01_model8_bn3gelu.py             # 变体：真实 model8 + BN + 3层 + GELU
+            ├── 02_model8_ln3relu.py             # 变体：真实 model8 + LN + 3层 + ReLU
+            ├── 03_model8_bn4relu.py             # 变体：真实 model8 + BN + 4层 + ReLU
+            ├── demo_tiny_tf.py                  # 变体：简化 全 t1 transformer（2 层）
+            ├── demo_tiny_alt.py                 # 变体：简化 t1/t2 交替 transformer（3 层 / 中等）
+            ├── demo_tiny_cnn_pw.py              # 变体：简化 全 CNN pointwise（2 层）
+            └── demo_tiny_cnn_dil.py             # 变体：简化 全 CNN dilated（2 层）
 ```
 
 ### 关于 `_demo_blocks.py`（非复制 `_model8_blocks.py`）
@@ -47,13 +52,14 @@ I/O 契约与真实 model8 完全一致（`[B,4,48,64,1]` + alpha 功率归一 +
 
 | 文件 | workflow 角色 | 作用 |
 |---|---|---|
-| `baseline_model.py` | `inputs.baseline_model_path` | 4 层 t1 transformer 契约文件。setup 测其 latency 作参考线；gpu_probe 作 representative_variant |
-| `train_teacher.py` | `inputs.teacher_train_command` | 按路径 import 仓库 `teacher_model.py`（10 层 t1/t2 交替），随机数据 1 epoch 训练，存 `{"state_dict":...}` ckpt |
-| `train.py` | kd-setup `user_train_import` 来源 | 暴露 `compute_loss`(MSE) + `build_dataloader`(随机 batch)；让 setup step6 grep 到，**消除 ask-user 哨兵非确定性** |
-| `test_student.py` | `inputs.test_command` | 读 `STUDENT_CKPT`/`STUDENT_MODEL_PATH` env，import 变体 + load ckpt，随机数据算真实 NMSE，打印契约 stdout |
+| `baseline_model.py` | `inputs.baseline_model_path` | 4 层 t1 transformer 契约文件。flatten 展平成 KD 契约 + `__main__` 实测 `baseline_latency_ms`（setup 透传作参考线）；gpu_probe 作 representative_variant |
+| `train_teacher.py` | （v4 退役·历史参考） | 仓库 `teacher_model.py`（10 层 t1/t2 交替）的独立训练脚本。**不再是 workflow 入口**——v4 起 teacher 训练由 train-script-gen 产出的 `train_pipeline.py --mode teacher` 驱动（setup step5 调） |
+| `train.py` | `inputs.user_train_script`（train-script-gen 读） | 暴露 `compute_loss`(MSE) + `build_dataloader`(随机 batch)；train-script-gen 自包含搬其 loss/dataloader/optimizer 进 `train_pipeline.py`，**消除 user_train_import 哨兵非确定性** |
+| `test_student.py` | kd-train-script 自动发现（取代旧 `inputs.test_command`） | 读 `STUDENT_CKPT`/`STUDENT_MODEL_PATH` env，import 变体 + load ckpt，随机数据算真实 NMSE，打印契约 stdout；指标被移植进 train_pipeline `--mode eval` |
 | `latency_provider.py` | `inputs.latency_provider`（`<abs>::measure`） | onnxruntime 实跑 ONNX 取中位数时延（ms），签名 `measure(onnx, runs, warmup, device, seed)` |
-| `test_smoke.py` | （守护） | 机器化契约 smoke（pytest）：4 变体 + baseline 的 I/O 契约 + hook 数 + 前向 shape |
-| `knowledge_base/families/receiver/demo_tiny_*.py` | KB 变体（gate 枚举 + train 蒸馏对象） | 4 个混合类型 student 变体，契约合规 |
+| `test_smoke.py` | （守护） | 机器化契约 smoke（pytest）：8 变体 + baseline 的 I/O 契约 + hook 数 + 前向 shape |
+| `knowledge_base/families/receiver/00-03_model8_*.py` | KB 变体（gate 枚举 + train 蒸馏对象） | **4 个真实 model8 架构 student**（BN/LN × ReLU/GELU × 3/4 层；字典序最小，gate 排首位）。`_model8_student_blocks.py` 共享积木逐字对齐 `teacher_model.py`，仅多 `norm_type`/`act_type` 开关 |
+| `knowledge_base/families/receiver/demo_tiny_*.py` | KB 变体（同上） | **4 个简化原创 student**（`_demo_blocks.py`；TF/CNN 混合），让 E2E 在 CPU 分钟级跑通。与 model8 共 8 变体，gate 全枚举 |
 
 ## kd-nas inputs 全集
 
@@ -61,19 +67,20 @@ I/O 契约与真实 model8 完全一致（`[B,4,48,64,1]` + alpha 功率归一 +
 
 | input | 值 | 说明 |
 |---|---|---|
-| `user_train_script` | `<REPO>/examples/kd-nas-demo/train.py` | 用户原 train.py（含 `compute_loss` + `build_dataloader`）；train-script-gen 读它生成 train_pipeline.py（自包含搬 loss/dataloader） |
-| `test_command` | `python examples/kd-nas-demo/test_student.py` | measure_student 经 env 注入 STUDENT_CKPT 后执行 |
+| `user_train_script` | `<REPO>/examples/kd-nas-demo/train.py` | 用户原 train.py（含 `compute_loss` + `build_dataloader`）；train-script-gen 读它生成 train_pipeline.py（自包含搬 loss/dataloader + 从 test_student.py 发现移植 eval 指标进 `--mode eval`） |
 | `latency_provider` | `<REPO>/examples/kd-nas-demo/latency_provider.py::measure` | 绝对路径 `::func`（必填无默认） |
 | `baseline_model_path` | `<REPO>/examples/kd-nas-demo/baseline_model.py` | 绝对路径（flatten 展平成 KD 变体契约） |
 | `target_latency_ms` | `5.0` | 宽松门：student 变体 CPU 实测 0.2~1.1ms，均通过；baseline 6.6ms（不卡门） |
 | `accuracy_baseline` | `1.5` | NMSE 基线（越低越好）。随机数据下变体 NMSE ~1.0~1.2，故 1.5 让多数通过 |
+| `accuracy_baseline_kind` | `nmse` | 精度方向（**必填**，越低越好 best=min）。demo 用 NMSE；measure_student / viz_kd / kd-select 三处同源判定 |
 | `device` | `cpu` | demo CPU 可跑（GPU 路径后续测试）；device=cpu 时 gpu_probe 自动 fail-soft 到 concurrency=1 |
 | `full_epochs` | `1` | 每变体蒸馏 1 epoch（demo 求快） |
 
 > v4 变更（2026-07-31）：input `teacher_train_command` 改名 `user_train_script`（用户原 train.py 路径，
 > 给 train-script-gen 读）。teacher 训练改由 train-script-gen 产出的 `train_pipeline.py --mode teacher`
 > 驱动（不再原样跑用户命令）；`train_teacher.py` 退役作历史参考（teacher_model.py 架构的独立训练脚本，
-> 不再是 workflow 入口）。`accuracy_baseline_kind` / `seed` / `kd_artifacts_dir` 已下沉到下游 CLI 默认。
+> 不再是 workflow 入口）。`seed` / `kd_artifacts_dir` 已下沉到下游 CLI 默认（不再是 workflow input）。
+> `accuracy_baseline_kind` 仍是**必填 input**（无默认——防 dB 反向错误，BLK-3/10）。
 
 > `<REPO>` = Orca 仓库根的绝对路径（例 `/mnt/d/Projects/Orca`）。`latency_provider` /
 > `baseline_model_path` 用绝对路径最稳（也可相对 PROJECT_ROOT，但 gate/train 节点 cwd 可能变）。
@@ -84,10 +91,19 @@ I/O 契约与真实 model8 完全一致（`[B,4,48,64,1]` + alpha 功率归一 +
 |---|---|---|
 | baseline_model（4 层 t1） | 6.65 | num_blocks=4, embed_dim=12 |
 | teacher（10 层 t1/t2，teacher_setup 实测） | 38.85 | teacher_model 默认 |
+| **00_model8_bn3relu**（真实 model8 + BN + 3层 + ReLU） | 1.08 | num_blocks=3, embed_dim=16 |
+| **01_model8_bn3gelu**（真实 model8 + BN + 3层 + GELU） | 1.10 | num_blocks=3, embed_dim=16 |
+| **02_model8_ln3relu**（真实 model8 + LN + 3层 + ReLU） | 2.95 | num_blocks=3, embed_dim=16 |
+| **03_model8_bn4relu**（真实 model8 + BN + 4层 + ReLU） | 1.33 | num_blocks=4, embed_dim=16 |
 | demo_tiny_tf（2 层 t1） | 0.52 | num_blocks=2, embed_dim=8 |
 | demo_tiny_alt（3 层 t1/t2） | 1.11 | num_blocks=3, embed_dim=8 |
 | demo_tiny_cnn_pw（2 层 pointwise） | 0.23 | num_blocks=2, embed_dim=8 |
 | demo_tiny_cnn_dil（2 层 dilated） | 0.33 | num_blocks=2, embed_dim=8 |
+
+> model8 四变体 latency 为 gate_all 实测中位数（2026-08-01，CPU，`measure_repeats=2`；embed_dim=16 默认 cfg，
+> 均远低于 5.0ms target，**gate 无需缩容直接 ACCEPTED**）。**关键结论**：model8 BN/LN 轻量化路径在 CPU 上
+> 时延达标——BN 变体 ~1.1ms、LN 变体 ~3.0ms（LN 慢于 BN，符合预期），证实 model8 是可行的真实 student。
+> 真实 NPU/GPU 部署须用用户 `latency_provider` 重测（本表为 ONNXRT-CPU 参考值）。
 
 随机数据 NMSE（untrained / 1-epoch KD）~1.0~1.2（teacher 1-epoch 随机训练 loss ~1.56；KD 1-epoch loss ~1.97）。
 
@@ -108,22 +124,24 @@ REPO="$(git rev-parse --show-toplevel)"
 cd "$REPO"
 
 orca run workflows/kd-nas.yaml --inputs '{
-  "teacher_train_command": "python examples/kd-nas-demo/train_teacher.py --out kd-nas-artifacts/teacher_ckpt.pt --epochs 1",
-  "test_command": "python examples/kd-nas-demo/test_student.py",
+  "user_train_script": "'"$REPO"'/examples/kd-nas-demo/train.py",
   "latency_provider": "'"$REPO"'/examples/kd-nas-demo/latency_provider.py::measure",
   "baseline_model_path": "'"$REPO"'/examples/kd-nas-demo/baseline_model.py",
   "target_latency_ms": "5.0",
   "accuracy_baseline": "1.5",
   "accuracy_baseline_kind": "nmse",
   "device": "cpu",
-  "full_epochs": "1",
-  "seed": "0",
-  "kd_artifacts_dir": "kd-nas-artifacts"
+  "full_epochs": "1"
 }'
 ```
 
-预期：setup（baseline latency + 训 teacher + teacher_setup 产 cache + gpu_probe fail-soft）→
-gate（串行 4 变体 tune_latency 全 ACCEPTED → manifest）→ train（串行 KD 蒸馏 4 变体 → ledger SUCCESS 行）。
+> input 严格匹配 `workflows/kd-nas.yaml` 的 8 个 input（6 必填 + 2 可选）。**已删字段**（传了会 input
+> 校验失败）：`teacher_train_command`（→ `user_train_script`）、`seed`、`kd_artifacts_dir`（后两者下沉为
+> 下游 CLI 默认）。`accuracy_baseline_kind` 仍**必填**。
+
+预期：flatten（baseline → KD 契约 + baseline_latency）→ teacher_gen（派生 teacher + teacher_latency）→
+train_script_gen（产 `train_pipeline.py`）→ setup（训 teacher + teacher_setup 产 cache + gpu_probe fail-soft）→
+gate（串行 **8 变体** tune_latency → manifest）→ train（KD 蒸馏 accepted 变体 → ledger SUCCESS 行）→ select。
 
 > demo **不在本 README 里跑 orca E2E**——那是后续 test-agent 的事。下方「组件自验」已证明
 > setup/gate/train 三节点的确定性后端脚本都能消费 demo 产出（契约对齐 + 集成通）。
@@ -133,11 +151,12 @@ gate（串行 4 变体 tune_latency 全 ACCEPTED → manifest）→ train（串�
 ### A. 契约 smoke（机器化，pytest / 直跑）
 
 ```bash
-pytest examples/kd-nas-demo/test_smoke.py -v          # 20 测试
+pytest examples/kd-nas-demo/test_smoke.py -v          # 8 变体 + baseline = 9 路径 × 4 断言
 # 或：python3 examples/kd-nas-demo/test_smoke.py
 ```
-覆盖：4 变体 + baseline 的 `DUMMY_INPUT`/`BUILD_FN`/`KNOBS` schema（step<0, leverage 合法, num_blocks.min≥2）、
-`build_model()` 默认前向 + 输出同形、`feature_hook_names` 恒 2 个且 hook 名真实存在。
+覆盖：**8 变体（4 model8 + 4 demo_tiny）+ baseline** 的 `DUMMY_INPUT`/`BUILD_FN`/`KNOBS` schema
+（step<0, leverage 合法, num_blocks.min≥2）、`build_model()` 默认前向 + 输出同形、
+`feature_hook_names` 恒 2 个且 hook 名真实存在。
 
 ### B. workflow 集成脚本（三节点的确定性后端，逐个单跑通）
 
@@ -200,9 +219,9 @@ python3 workflows/agents/_kd_scripts/measure_student.py \
 # 期望: STUDENT_LATENCY_MS / STUDENT_ACCURACY / MET_ACCURACY: true / ACCURACY_CONFIDENCE: high
 ```
 
-> B4 的 `--user_train_import train.py` 是 demo 期望 kd-setup agent 写入的值（agent grep demo train.py
-> 抽出 compute_loss）。若 agent 写空串，train_adapter 的 placeholder 回退（MSE + 随机 batch）也已验通，
-> KD 同样能跑（见设计决策 5）。
+> B4 的 `--user_train_import train.py` 是 `train_adapter_template.py` 的 CLI 参数（脚本级自验用），
+> 对应 v4 workflow 里 train-script-gen 从 `inputs.user_train_script` 自包含搬移 `compute_loss` 的等价手跑。
+> 若该参数空串，train_adapter 的 placeholder 回退（MSE + 随机 batch）也已验通，KD 同样能跑（见设计决策 5）。
 
 ## 设计决策
 
@@ -215,10 +234,10 @@ python3 workflows/agents/_kd_scripts/measure_student.py \
    `STUDENT_ACCURACY: X` 行仅人类可读（measure_student 不直接解析，因 JSON 行优先）。
 4. **`accuracy_baseline=1.5`（宽松）**：随机数据 NMSE 无物理意义，宽松阈值让 workflow 跑出 SUCCESS。
    这是**阈值宽松**，非测量造假——NMSE 永远真实计算。真实数据集场景应换成业务 KPI（如 0.02）。
-5. **demo `train.py`（消除 user_train_import 非确定性）**：kd-setup agent step6 的 LLM 行为不可预知
-   （找不到 train.py 时可能发 ask-user 哨兵阻塞 workflow）。demo 显式提供 `train.py`（`compute_loss` +
-   `build_dataloader`），让 agent grep 到、确定性地写 `user_train_import=<train.py>`。即便 agent 写空串，
-   train_adapter 的 placeholder 回退也已验通（B4 路径双兼容）。
+5. **demo `train.py`（消除 `user_train_script` 非确定性）**：train-script-gen 读 `inputs.user_train_script`
+   自包含搬移 loss/dataloader/optimizer。demo 显式提供 `train.py`（`compute_loss` + `build_dataloader`），
+   让 train-script-gen 确定性地搬出真实 loss（而非 placeholder 回退）。即便搬空，train_pipeline 的
+   placeholder 回退（MSE + 随机 batch）也已验通（B4 路径双兼容）。
 6. **KNOBS `num_blocks.min=2`**：保 `feature_hook_names` 两 hook 落在 distinct block（main.0/main.1），
    避免 num_blocks=1 时 hook 重复致 KD OFD 特征对齐退化。tune_latency 不缩到 1 块。
 7. **teacher 训练不求收敛**：随机数据 + 1 epoch，teacher 只作 KD 软标签源（精度基线用户另给）。
