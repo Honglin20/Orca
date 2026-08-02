@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """run_ptq_sweep.py —— 粗粒度 PTQ 扫描 + bake + 可视化（ptq_sweeper 节点调用）。
 
-流程（plan §run_ptq_sweep.py 八步）：
+流程（八步）：
 1. import adapter → FP teacher + calib + eval loaders + eval_fn（默认 teacher-student mse）
 2. 候选网格（mode 分支）：
    - lightweight：4 条累积路径（S/Q/A/R）按 (pre, solver, post) 去重 → ~11 unique 候选
@@ -34,7 +34,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-# 共享 device / seed 逻辑（plan §P5 硬约束：单一真相源，避免 4 份复制）。
+# 共享 device / seed 逻辑（单一真相源，避免 4 份复制）。
 # 路径锚定：本脚本在 workflows/agents/ptq-sweeper/scripts/，_quant_scripts 在
 # workflows/agents/_quant_scripts/（两级 up + 一级 down）。
 _HERE = Path(__file__).resolve()
@@ -88,12 +88,12 @@ except Exception as _e:  # ImportError / 二次依赖（torch 等）失败都兜
     _TS_QUANT_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
 
 CHART_LABEL = "quant/ptq-sweep"
-DEFAULT_MAX_STEPS = 64  # plan §run_ptq_sweep.py：Smooth 组合两遍校准兜底；其它路径同样限制无害
+DEFAULT_MAX_STEPS = 64  # Smooth 组合两遍校准兜底；其它路径同样限制无害
 _TRUE_TOKENS = {"true", "1", "yes", "y", "on"}
 _FALSE_TOKENS = {"false", "0", "no", "n", "off"}
 
 # ─────────────────────────────────────────────────────────────────
-# lightweight 4 累积路径（plan §run_ptq_sweep.py §2）
+# lightweight 4 累积路径
 # 每条目：(step_label, pre, solver, post)
 #   pre ∈ {"none","smooth","quarot"} —— 逻辑标签，等于对应 plugin
 #   solver/post 对应 QConfig.weight_solver / post_correction
@@ -636,7 +636,7 @@ def main() -> int:
     ap.add_argument("--adapter", required=True, help="adapter.py 路径")
     ap.add_argument("--model_path", required=True, help="原始模型入口路径（仅用于回显摘要）")
     ap.add_argument("--output_dir", required=True)
-    # Tier C 固化默认（P9a：自 workflow inputs 下沉，SPEC §5；agent 不再透传，改默认即改全局）：
+    # Tier C 固化默认（自 workflow inputs 下沉；agent 不再透传，改默认即改全局）：
     ap.add_argument("--mode", default="lightweight", help="lightweight / full（默认 lightweight）")
     ap.add_argument("--bit_widths", default="", help="逗号分隔位宽预设（空→lightweight=w4a4-mx / full=w4a4-mx,w4a8-mx,w8a8-mx）")
     ap.add_argument("--recipes", default="", help="路径/配方子集（空→lightweight 全 4 条 / full='all'）")
@@ -679,7 +679,7 @@ def main() -> int:
     # 1. adapter → fp teacher + calib + eval + forward
     adapter = _load_adapter(args.adapter)
     fp_model = adapter.load_model()
-    # device 搬移（plan §P5）：adapter.load_model() 返回 CPU 模型，脚本统一搬到 device。
+    # device 搬移：adapter.load_model() 返回 CPU 模型，脚本统一搬到 device。
     fp_model = fp_model.to(device)
     calib_loader = adapter.get_calib_loader()
     raw_forward_fn = getattr(adapter, "forward_fn", None)
@@ -690,12 +690,12 @@ def main() -> int:
     if callable(get_eval_loader):
         eval_loader = get_eval_loader()
     else:
-        # fail loud（plan §P5 + user brief「复用 calib 当 eval」是禁掉的造假口径）：
+        # fail loud（「复用 calib 当 eval」是禁掉的造假口径）：
         # eval 缺数据时复用 calib 是数据口径污染（calib 是代表性少量样本，eval 需完整分布），
-        # 会让 best_metric 选错的候选。P4 哨兵到位后可退「问用户」，当前直接 exit 2。
+        # 会让 best_metric 选错的候选，当前直接 exit 2。
         sys.stderr.write(
             "[run_ptq_sweep] FAIL LOUD: adapter 未实现 get_eval_loader（eval_data_ref 空）"
-            "→ 缺评估数据。复用 calib_loader 做 eval 是禁掉的造假口径（plan §P5："
+            "→ 缺评估数据。复用 calib_loader 做 eval 是禁掉的造假口径（"
             "「复用 calib 当 eval」）——会让 best_metric 选错候选。请在用户代码里找 "
             "eval loader（如 `def load_eval` / `def get_eval_loader`），或在 workflow "
             "inputs 显式提供 eval_data_ref。\n"

@@ -38,7 +38,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-# 共享 device / seed 逻辑（plan §P5 硬约束：单一真相源）。
+# 共享 device / seed 逻辑（单一真相源）。
 _HERE = Path(__file__).resolve()
 _QUANT_SCRIPTS = _HERE.parent.parent.parent / "_quant_scripts"
 if str(_QUANT_SCRIPTS) not in sys.path:
@@ -123,7 +123,7 @@ def _train_cycle(loader):
 # 单 scheme QAT
 # ─────────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────────
-# Live 推图（P1-5：QAT 收敛曲线改 live 推）
+# Live 推图：QAT 收敛曲线 live 增量推
 # ─────────────────────────────────────────────────────────────────
 def _make_live_push_fn(metric_kind: str) -> Callable[[str, list[dict[str, Any]]], None]:
     """返回 ``live_push_fn(scheme, curve)``：在 _run_scheme 训练 loop 内增量推 line。
@@ -253,7 +253,7 @@ def _run_scheme(
             try:
                 m = _eval_metric(eval_fn, q_model, metric_kind)
                 result["curve"].append({"step": step, "metric": m})
-                # P1-5：每 period 步增量推 live line（同 label="quant/qat" + 同 title =
+                # 每 period 步增量推 live line（同 label="quant/qat" + 同 title =
                 # 刷新语义）。多 scheme 串行：title 带 scheme 名 → 每 scheme 一张图，
                 # 避免同 title 刷新覆盖先跑完的 scheme。终态对比图（cross-scheme）仍由
                 # _push_charts 在 main 末尾推一次（hue=scheme 合一对比）。
@@ -454,12 +454,12 @@ def main() -> int:
     ap.add_argument("--adapter", required=True)
     ap.add_argument("--model_path", required=True, help="原始模型入口路径（回显用）")
     ap.add_argument("--output_dir", required=True)
-    # Tier C 固化默认（P9a：自 workflow inputs 下沉，SPEC §5；agent 不再透传，改默认即改全局）：
+    # Tier C 固化默认（自 workflow inputs 下沉；agent 不再透传，改默认即改全局）：
     ap.add_argument("--scheme", default="both", help="rtn / duquantpp / both（默认 both）")
     ap.add_argument("--bit_width", default="w8a8-mx", help="QAT fake-quant 位宽预设（默认 w8a8-mx，高位宽起步更稳）")
     ap.add_argument("--cage", default="auto", help="CAGE 后校正开关 auto/true/false（默认 auto）")
     ap.add_argument("--bake", default="true", help="true / false（默认 true）")
-    # Tier B best-effort 推断（P9a / SPEC §5：agent 读用户 train.py/config 拿真值；找不到传空→smoke 兜底）：
+    # Tier B best-effort 推断（agent 读用户 train.py/config 拿真值；找不到传空→smoke 兜底）：
     ap.add_argument("--lr", default="", help="Adam 学习率（float 字符串；空→脚本 smoke 兜底 1e-4）")
     ap.add_argument("--total_steps", default="", help="QAT 训练步数（int 字符串；空→脚本 smoke 兜底 64）")
     add_device_seed_args(ap)
@@ -499,8 +499,8 @@ def main() -> int:
         sys.exit(2)
 
     try:
-        # Tier B best-effort（P9a / SPEC §5）：agent 读用户 train.py/config 拿真值；找不到传空。
-        # 空→smoke 兜底必须可见（SPEC §0「绝不静默产出错误交付物」+ Rule 12 fail loud）：
+        # Tier B best-effort：agent 读用户 train.py/config 拿真值；找不到传空。
+        # 空→smoke 兜底必须可见（Rule 12 fail loud）：
         # smoke 不是生产精度，用户须看到降级信号，否则会把 64 步 1e-4 的短训当正式 QAT 结果。
         _ts_provided = (args.total_steps or "").strip()
         total_steps = int(_ts_provided or "64")
@@ -531,14 +531,13 @@ def main() -> int:
     # adapter → fp teacher + loaders + forward
     adapter = _load_adapter(args.adapter)
     fp_model = adapter.load_model()
-    # device 搬移（plan §P5）：adapter.load_model() 返回 CPU 模型，脚本统一搬到 device。
+    # device 搬移：adapter.load_model() 返回 CPU 模型，脚本统一搬到 device。
     fp_model = fp_model.to(device)
     calib_loader = adapter.get_calib_loader()
     raw_forward_fn = getattr(adapter, "forward_fn", None)
     forward_fn = wrap_forward_with_device(raw_forward_fn, device)
 
-    # 训练 loader：QAT 没真实训练数据 = 烧算力跑无意义短训 → fail loud（plan §P5）。
-    # 老版本「复用 calib_loader 做最小 smoke QAT」是数据泄漏 + 误指标，已删除。
+    # 训练 loader：QAT 没真实训练数据 = 烧算力跑无意义短训 → fail loud。
     get_train_loader = getattr(adapter, "get_train_loader", None)
     if callable(get_train_loader):
         train_loader = get_train_loader()
@@ -549,16 +548,16 @@ def main() -> int:
         )
         sys.exit(2)
 
-    # eval loader：未提供 → fail loud（plan §1-c + plan §P5）。
+    # eval loader：未提供 → fail loud。
     # eval=train 是数据泄漏口径（train loss != eval metric，短训后必然 overfit train），
-    # 复用会让 best_scheme 选到 overfit 候选。P4 哨兵到位后可退「问用户」，当前 exit 2。
+    # 复用会让 best_scheme 选到 overfit 候选，当前 exit 2。
     get_eval_loader = getattr(adapter, "get_eval_loader", None)
     if callable(get_eval_loader):
         eval_loader = get_eval_loader()
     else:
         sys.stderr.write(
             "[run_qat] FAIL LOUD: adapter 未实现 get_eval_loader（eval_data_ref 空）"
-            "→ 缺评估数据。复用 train_loader 做 eval 是禁掉的造假口径（plan §1-c + §P5："
+            "→ 缺评估数据。复用 train_loader 做 eval 是禁掉的造假口径（"
             "「复用 train 当 eval」）——train=eval 是数据泄漏口径，会让 best_scheme 选到 "
             "overfit 候选。请在用户代码里找 eval loader，或在 workflow inputs 显式提供 "
             "eval_data_ref。\n"

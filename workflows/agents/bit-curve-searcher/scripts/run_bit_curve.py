@@ -20,7 +20,7 @@
 - 推图失败 → stderr 提示但不阻断（bit_curve_summary.json 是核心产出）
 - 全 mxint/int 基：候选格式 INT8/W4A8/INT4/MX4/MX8（MX 家族即 mxint 基）
 
-注：QConfig 字段、report 结构按 ts_quant.auto_quant.mix_precision（探针 2026-07-20 实证）组织；
+注：QConfig 字段、report 结构按 ts_quant.auto_quant.mix_precision 组织；
 若 ts_quant API 调整，相应核对。
 """
 
@@ -34,7 +34,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-# 共享 device / seed 逻辑（plan §P5 硬约束：单一真相源）。
+# 共享 device / seed 逻辑（单一真相源）。
 _HERE = Path(__file__).resolve()
 _QUANT_SCRIPTS = _HERE.parent.parent.parent / "_quant_scripts"
 if str(_QUANT_SCRIPTS) not in sys.path:
@@ -151,7 +151,7 @@ def _point_metric(point: dict[str, Any]) -> float:
 
 
 # ─────────────────────────────────────────────────────────────────
-# bit_trend.json 解析（P1-3：逐层位宽热力图）
+# bit_trend.json 解析（逐层位宽热力图）
 # ─────────────────────────────────────────────────────────────────
 # bit_trend.json 是 SDK 自落盘到 search_dir 的逐层位宽趋势文件。**schema 未公开稳定**
 # （ts_quant 源不在本仓可探针处），本解析器按「合理兜底结构」多形态 fail-soft 解析：
@@ -269,7 +269,7 @@ def _extract_records(records: list[Any]) -> list[tuple[str, int]]:
 
 
 # ─────────────────────────────────────────────────────────────────
-# 寻优过程状态图（P1-4：cumulative best over evaluation order）
+# 寻优过程状态图（cumulative best over evaluation order）
 # ─────────────────────────────────────────────────────────────────
 def _cumulative_best(
     records: list[dict[str, Any]], y_direction: str
@@ -478,7 +478,7 @@ def _push_charts(
         caption="前沿候选明细；accuracy_loss=相对 FP baseline 的损失。",
     )
 
-    # P1-3 chart：逐层位宽分配（bar：x=layer, y=bit, per-row color 区分 format family）。
+    # 逐层位宽分配 chart（bar：x=layer, y=bit, per-row color 区分 format family）。
     # 数据来自 SDK 自落盘 bit_trend.json（search_dir/bit_trend.json）。
     # bit_trend schema 未稳定 → 多形态 fail-soft 解析；解析失败/文件缺失 → stderr warn 跳过。
     if bit_trend_path is not None:
@@ -519,7 +519,7 @@ def _push_charts(
                     f"[run_bit_curve] per-layer bit bar 推送失败（不阻断）: {e}\n"
                 )
 
-    # P1-4 chart：寻优过程状态图（cumulative best over evaluation order）。
+    # 寻优过程状态图 chart（cumulative best over evaluation order）。
     # m0_pareto 是一次性 report 无代际推进，但从 archive records（按评估序）可派生
     # 「评估过程的累计最优近似」。非代际收敛曲线——caption 显式标注。
     if archive_records:
@@ -581,7 +581,7 @@ def _render_charts(
     )
 
 
-# bake 后对账容差（plan §P5 N7：相对 1e-4；baked 重 eval metric 与 search final.score 对比）。
+# bake 后对账容差（相对 1e-4；baked 重 eval metric 与 search final.score 对比）。
 _BAKE_METRIC_REL_TOL = 1e-4
 _BAKE_METRIC_ABS_FLOOR = 1e-12  # 防 |final|=0 时除零
 
@@ -618,9 +618,8 @@ def _bake_selected(
 ) -> tuple[str, float | None]:
     """把选中候选的 per-layer 格式 assignment 烤成可部署 state_dict。
 
-    改动生效（plan §P5 核心修复）：bake 后**reload baked state_dict + 重 eval**，
-    返回 ``(path, reeval_metric)``。失败返 ``("", None)``——曲线产出不受阻断
-    （spec-review N7：bake 失败跳过对账、不阻断）。
+    bake 后**reload baked state_dict + 重 eval**，返回 ``(path, reeval_metric)``。
+    失败返 ``("", None)``——曲线产出不受阻断（bake 失败跳过对账、不阻断）。
 
     reload 路径：再 deepcopy fp_model → quantize_model 出同拓扑空壳 → load_state_dict
     （从落盘的 best_mixed_model.pt）→ eval。最贴近「用户拿到 .pt 后会看到的精度」。
@@ -648,11 +647,11 @@ def _bake_selected(
         )
         torch.save(q_model.state_dict(), baked_path)
 
-        # 改动生效（plan §P5 核心修复）：reload 落盘 state_dict 到同拓扑空壳，重 eval。
+        # reload 落盘 state_dict 到同拓扑空壳，重 eval。
         # 这才反映「用户拿到 best_mixed_model.pt 后会看到的真实精度」——search 内部
         # final.score 用的是搜索时的 in-memory eval，与 bake artifact 可能因 state_dict
         # 序列化丢 observer/calib buffer 而漂移。
-        # strict=True（code-reviewer 🔴）：键失配必须 fail loud——丢 observer state
+        # strict=True：键失配必须 fail loud——丢 observer state
         # 是 bake 真坏了的信号，不该静默。
         reeval_metric: float | None = None
         try:
@@ -699,9 +698,9 @@ def _check_bake_metric_consistency(
 ) -> None:
     """bake 后重 eval metric 与 search 内部 final.score 对账（副作用层：stderr + exit）。
 
-    plan §P5 N7：``|baked - final| / max(|final|, abs_floor) > rel_tol(1e-4)`` → fail loud。
+    ``|baked - final| / max(|final|, abs_floor) > rel_tol(1e-4)`` → fail loud。
     任一为 None / 解析失败 → 跳过对账（不阻断，打 WARN）。
-    spec-review N7：bake 失败不阻断曲线产出。
+    bake 失败不阻断曲线产出。
 
     数学部分抽到 ``_compute_bake_metric_relative_diff`` 便于单测（无副作用层）。
     """
@@ -739,7 +738,7 @@ def main() -> int:
     ap.add_argument("--accuracy_tolerance", default="0.01", help="absolute 精度损失容忍（float 字符串，默认 0.01）")
     ap.add_argument("--avg_bit_budget", default="", help="硬 bit 上限（空→null，无硬约束）")
     ap.add_argument("--max_evals", default="32", help="主搜索预算（int 字符串，默认 32=smoke）")
-    # Tier C 固化默认（P9a：自 workflow inputs 下沉，SPEC §5；agent 不再透传，改默认即改全局）：
+    # Tier C 固化默认（自 workflow inputs 下沉；agent 不再透传，改默认即改全局）：
     ap.add_argument("--mode", default="explore", help="explore / constrained_select / minimize_bit_under_accuracy（默认 explore）")
     ap.add_argument("--candidate_format_space", default="", help="逗号分隔格式别名（空→默认全集 INT8/W4A8/INT4/MX4/MX8）")
     ap.add_argument("--bit_objective", default="weight_activation_proxy", help="weight_activation_proxy / weight_only（默认 weight_activation_proxy）")
@@ -809,7 +808,7 @@ def main() -> int:
     # adapter → fp teacher + calib + eval + forward
     adapter = _load_adapter(args.adapter)
     fp_model = adapter.load_model()
-    # device 搬移（plan §P5）：adapter.load_model() 返回 CPU 模型，脚本统一搬到 device。
+    # device 搬移：adapter.load_model() 返回 CPU 模型，脚本统一搬到 device。
     # 必须在 TSQuantizer / search_mix_precision 之前，让 search 内部 eval 走 GPU。
     fp_model = fp_model.to(device)
     calib_loader = adapter.get_calib_loader()
@@ -819,12 +818,12 @@ def main() -> int:
     if callable(get_eval_loader):
         eval_loader = get_eval_loader()
     else:
-        # fail loud（plan §P5 + user brief「复用 calib 当 eval」是禁掉的造假口径）：
+        # fail loud（「复用 calib 当 eval」是禁掉的造假口径）：
         # Pareto 搜索依赖业务 eval 分布选最低位宽；用 calib（代表性少量样本）会让 Pareto
-        # 前沿选错。P4 哨兵到位后可退「问用户」，当前直接 exit 2。
+        # 前沿选错，当前直接 exit 2。
         sys.stderr.write(
             "[run_bit_curve] FAIL LOUD: adapter 未实现 get_eval_loader（eval_data_ref 空）"
-            "→ 缺评估数据。复用 calib_loader 做 eval 是禁掉的造假口径（plan §P5："
+            "→ 缺评估数据。复用 calib_loader 做 eval 是禁掉的造假口径（"
             "「复用 calib 当 eval」）——会让 Pareto 前沿在错的 metric 上选最低位宽，"
             "交付物 bit 分配有偏差。请在用户代码里找 eval loader，或在 workflow inputs "
             "显式提供 eval_data_ref。\n"
@@ -950,10 +949,10 @@ def main() -> int:
     }
     _dump_json(summary, summary_path)
 
-    # bake + 改动生效对账（plan §P5 核心修复）。
+    # bake + 改动生效对账。
     # bake 成功 → reload + 重 eval → best_metric 取 baked 实测值（非 search final.score）。
-    # bake 失败/跳过 → 不阻断曲线产出（spec-review N7），best_metric 仍报 search final.score。
-    # 持久化顺序（code-reviewer 🔴）：先 summary.dump(含 baked_model_path) 再对账，
+    # bake 失败/跳过 → 不阻断曲线产出，best_metric 仍报 search final.score。
+    # 持久化顺序：先 summary.dump(含 baked_model_path) 再对账，
     # 保证对账 fail loud exit(3) 时磁盘上 best_mixed_model.pt 与 summary 一致，
     # 不留「summary=None 但 .pt 已落盘」的孤儿态。
     baked_path_str = ""
@@ -976,7 +975,7 @@ def main() -> int:
             summary["baked_model_path"] = baked_path_str or None
             summary["baked_reeval_metric"] = baked_reeval_metric
             _dump_json(summary, summary_path)
-            # 改动生效对账（plan §P5）：bake 成功才对账，超 tol fail loud；失败/None 跳过不阻断。
+            # 改动生效对账：bake 成功才对账，超 tol fail loud；失败/None 跳过不阻断。
             if baked_path_str:
                 _check_bake_metric_consistency(
                     baked_reeval_metric, best_metric, metric_kind
@@ -999,7 +998,7 @@ def main() -> int:
         )
         sys.exit(2)
 
-    # best_metric 取值优先级（plan §P5）：bake 成功且 reeval 可用 → 取 baked 实测值；
+    # best_metric 取值优先级：bake 成功且 reeval 可用 → 取 baked 实测值；
     # 否则取 search 内部 final.score（bake=false 或 bake 重 eval 失败）。
     reported_best_metric: float | None
     if baked_path_str and baked_reeval_metric is not None:
@@ -1028,7 +1027,7 @@ def main() -> int:
     )
 
     # stdout JSON 摘要（agent 原样回显）
-    # P2-7：candidates_evaluated 语义=候选数，优先 len(archive_records)（真实评估的候选），
+    # candidates_evaluated 语义=候选数，优先 len(archive_records)（真实评估的候选），
     # 回退 report.eval_calls（含诊断锚点等非候选评估，字段名相同但语义偏大）。
     candidates_evaluated = (
         len(archive_records) if archive_records

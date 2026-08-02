@@ -20,9 +20,9 @@ inputs:
 
 # ── 已下沉（不再 input，见 docs/specs/workflow-input-design-principle.md §5）──
 #   project_root / calib_data_ref / eval_fn_ref → Tier B（agent 读用户代码推断 + 哨兵，
-#     P4b/P5 已落地；project_root 从 model_path 向上走 infer-once）
+#     project_root 从 model_path 向上走 infer-once）
 #   method / ratio / low_bits / high_bits → Tier C（脚本 argparse 默认，固化）
-#   output_dir → Tier C（引擎注入 $ORCA_ARTIFACTS_DIR，P8 接口）
+#   output_dir → Tier C（引擎注入 $ORCA_ARTIFACTS_DIR）
 
 nodes:
   # ═══════════════════════════════════════════════════════════════

@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
-# 共享 device / seed 逻辑（plan §P5 硬约束：单一真相源）。
+# 共享 device / seed 逻辑（单一真相源）。
 _HERE = Path(__file__).resolve()
 _QUANT_SCRIPTS = _HERE.parent.parent.parent / "_quant_scripts"
 if str(_QUANT_SCRIPTS) not in sys.path:
@@ -176,7 +176,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--adapter", required=True, help="adapter.py 路径")
     ap.add_argument("--output_dir", required=True)
-    # Tier C 固化默认（P9a：自 workflow inputs 下沉，SPEC §5；agent 不再透传，改默认即改全局）：
+    # Tier C 固化默认（自 workflow inputs 下沉；agent 不再透传，改默认即改全局）：
     ap.add_argument("--method", default="mse", help="mse / layer_stats / ptq_binary_sensitivity / mix_precision_search（默认 mse）")
     ap.add_argument("--ratio", default="0.1", help="敏感层选取比例 0~1（默认 0.1=top10%）")
     ap.add_argument("--low_bits", default="w4a4-mx", help="低精度预设（默认 w4a4-mx）")
@@ -241,8 +241,8 @@ def main() -> int:
         if forward_fn is not None:
             kwargs["forward_fn"] = forward_fn
 
-    # P2-6：业务异常 fail loud（与 bit-curve/ptq-sweep/qat 三脚本「业务错 exit 3」约定一致）。
-    # 之前直接调 raise → SDK 异常以 exit 1 + traceback 退出，根因埋在栈里、退出码与其它脚本漂移。
+    # 业务异常 fail loud（与 bit-curve/ptq-sweep/qat 三脚本「业务错 exit 3」约定一致）。
+    # 直接 raise → SDK 异常以 exit 1 + traceback 退出，根因埋在栈里、退出码漂移。
     try:
         analysis = analyze_low_precision_sensitive_layers(**kwargs)
     except Exception as e:
@@ -268,8 +268,8 @@ def main() -> int:
         "module_order": module_order,
     }
     report_path = output_dir / "report.json"
-    # P2-5：原子落盘（原为非原子 write_text，中断会留半个文件）。委托给 _common.dump_json，
-    # 行为等价（default=str 兜底 metric_spec 等不可序列化对象）。
+    # 原子落盘：委托给 _common.dump_json（写 tmp → os.replace，中断不留半个文件），
+    # default=str 兜底 metric_spec 等不可序列化对象。
     _dump_json(report, report_path)
 
     # 4. 推图（容错，不阻断）

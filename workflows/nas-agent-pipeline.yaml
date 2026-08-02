@@ -7,7 +7,7 @@ inputs:
   #   [ask]      业务决策 / KPI / 硬件 / 预算，用户意图未给则启动前集中询问
   #   [default]  有合理默认，不问；高级用户可直接覆盖
   # project_root 已下沉给 model_optimizer 节点运行时推断（从 model_path 向上走）；
-  # output_dir 已下沉到引擎注入的 $ORCA_ARTIFACTS_DIR（P8 接口；agent 读 env，缺则 fallback 旧路径）。
+  # output_dir 已下沉到引擎注入的 $ORCA_ARTIFACTS_DIR（agent 读 env，缺则 fallback 默认产物路径）。
   # heavy 对齐 slim（nas-hp-search）的输入契约 + 确定性护栏。
   model_path:
     type: string

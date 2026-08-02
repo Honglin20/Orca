@@ -8,12 +8,12 @@ tools: [bash, read, write, edit, glob, grep]
 
 ## 定位
 
-与 `quant-ptq-sweep`（W2，固定位宽对比 PTQ 算法）互补：本 workflow 反过来——**在精度约束下对比位宽/格式选择**（INT8 / W4A8 / INT4 / MX4 / MX8，MX 家族即 mxint 基），找 Pareto 前沿「最低平均位宽下最高精度」。底层调 `ts_quant.search_mix_precision(strategy="m0_pareto")`。
+与 `quant-ptq-sweep`（固定位宽对比 PTQ 算法）互补：本 workflow 反过来——**在精度约束下对比位宽/格式选择**（INT8 / W4A8 / INT4 / MX4 / MX8，MX 家族即 mxint 基），找 Pareto 前沿「最低平均位宽下最高精度」。底层调 `ts_quant.search_mix_precision(strategy="m0_pareto")`。
 
 ## 资源锚点（cwd 无关）
 
 - `$ORCA_AGENT_RESOURCES`（orca spawn 注入）= 本 agent 资源目录（含 `scripts/run_bit_curve.py`）。
-- `$ORCA_ARTIFACTS_DIR`（orca spawn 注入，P8 接口）= 本 run 权威产物目录（见下「确定输出目录」）。
+- `$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本 run 权威产物目录（见下「确定输出目录」）。
 - identity（`ORCA_RUN_ID`/`ORCA_NODE`/`ORCA_SESSION_ID`/`ORCA_CHART_SOCK`）沿 env 链继承到脚本，`orca.chart.render_chart` 在脚本内可用。
 
 ## 输入（workflow inputs，Tier A —— KPI / 预算闸门）
@@ -25,7 +25,7 @@ tools: [bash, read, write, edit, glob, grep]
 - 硬 bit 上限: `{{ inputs.avg_bit_budget }}`（空则 null，无硬约束；默认空）
 - 搜索预算: `{{ inputs.max_evals }}`（主搜索 candidate 数，默认 32=smoke，128=真实模型推荐起步）
 
-**已下沉（非 input，见 SPEC §5）**：
+**已下沉（非 input）**：
 - `project_root` / `calib_data_ref` / `eval_data_ref` / `eval_fn_ref` → **Tier B**：你在下面读用户代码推断（loader 找不到走哨兵；project_root 从 model_path 向上走 infer-once）。
 - `mode` / `candidate_format_space` / `bit_objective` / `granularity` / `bake` → **Tier C**：脚本 argparse 默认（mode=explore、format_space=全集、bit_objective=weight_activation_proxy、granularity=per_tensor、bake=true），固化不当 input。
 - `output_dir` → **Tier C**：引擎注入 `$ORCA_ARTIFACTS_DIR`（下面第 1 步取值）。
@@ -34,12 +34,12 @@ tools: [bash, read, write, edit, glob, grep]
 
 1. **推断 project_root（Tier B infer-once）+ 确定 output_dir**：
    - **project_root**：从 `{{ inputs.model_path }}` 所在目录起，向上逐级找**第一个含 `train.py` 或 `pyproject.toml` 或 `.git` 的目录**（绝对路径）作为项目根。走到 `/` 仍找不到 → 取 `{{ inputs.model_path }}` 的 dirname，并 stderr 标注 `low-confidence: no train.py/pyproject.toml/.git ancestor`。记住为 `<project_root>`，下面 grep loader 全用它。**不许**用 `pwd` / `git rev-parse` / 留空 / 编造。
-   - **output_dir**：优先用引擎注入的 `$ORCA_ARTIFACTS_DIR`（`echo "$ORCA_ARTIFACTS_DIR"` 取值，P8 run scope 权威产物目录）；为空（非 orca 编排上下文）→ fallback `llm_artifacts/<model_name>/bit-curve/`（绝对路径，**含 `bit-curve/` 子目录防同模型串跑互覆**）。记住为 `<output_dir>`。
+   - **output_dir**：优先用引擎注入的 `$ORCA_ARTIFACTS_DIR`（`echo "$ORCA_ARTIFACTS_DIR"` 取值，本 run 权威产物目录）；为空（非 orca 编排上下文）→ fallback `llm_artifacts/<model_name>/bit-curve/`（绝对路径，**含 `bit-curve/` 子目录防同模型串跑互覆**）。记住为 `<output_dir>`。
 
 2. **生成 `<output_dir>/adapter.py`**：读 `{{ inputs.model_path }}` 理解模型 forward 签名与 batch 形态，写一个适配模块，暴露：
    - `load_model() -> nn.Module`：加载并返回 FP 模型（eval 态，作为 teacher）。**不**在此处 `.to(device)`——脚本顶层统一 `resolve_device` 后搬移。
    - `get_calib_loader() -> DataLoader`：校准 loader。**Tier B 获取三步**：①读用户代码（`grep -rn "def load_calib\|def get_calib\|DataLoader" <project_root>`）找 loader 的 dotted-path → import 调用；②歧义/找不到 → **不写 adapter / 不调脚本**，以最终消息返回 ask-user 哨兵（见下文「缺失必填输入时」段；**不**让 adapter raise、**不** exit 非 0）；③**绝不通过 `torch.randn` 造假数据**。
-   - `get_eval_loader() -> DataLoader`（**必实现**）：评估 loader。读用户代码（`grep -rn "def load_eval\|def get_eval_loader\|DataLoader" <project_root>`）找 loader → import。**找不到 → 返回 ask-user 哨兵**（见下文「缺失必填输入时」段；**不**让 adapter raise、**不** exit 非 0）。**绝不复用 calib_loader 当 eval**——calib 是代表性少量样本，eval 需完整业务分布，复用会让 Pareto 前沿在错的 metric 上选最低位宽（plan §P5：禁掉的「复用 calib 当 eval」造假口径）。
+   - `get_eval_loader() -> DataLoader`（**必实现**）：评估 loader。读用户代码（`grep -rn "def load_eval\|def get_eval_loader\|DataLoader" <project_root>`）找 loader → import。**找不到 → 返回 ask-user 哨兵**（见下文「缺失必填输入时」段；**不**让 adapter raise、**不** exit 非 0）。**绝不复用 calib_loader 当 eval**——calib 是代表性少量样本，eval 需完整业务分布，复用会让 Pareto 前沿在错的 metric 上选最低位宽（「复用 calib 当 eval」造假口径）。
    - `forward_fn(module, batch) -> Tensor`：按模型 forward 解包 batch（dict/tuple/Tensor）。脚本会包装一层把 batch 搬到 device，adapter 不需要懂 device。
    - `get_eval_fn() -> Callable[[nn.Module], dict[str, float]]`（**仅**当你在用户代码里找到业务 eval_fn 时实现）：按 dotted-path import 业务评估函数；签名 `eval_fn(student_model) -> {"<metric>": float, ...}`。找不到业务 eval_fn → 不生成（脚本 stderr 打 WARN「未提供业务 eval_fn，用 teacher-student mse，精度仅自洽性参考」并自动用 `build_teacher_student_eval_fn`）。
    - `get_metric_spec() -> dict`（**仅**业务 eval_fn 路径需要）：返回 `{"primary_metric": "<key>", "higher_is_better": bool}`。无业务 eval_fn 时不要生成（默认 mse / lower-is-better）。

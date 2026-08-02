@@ -1,12 +1,12 @@
 """_common.py —— 四量化脚本（bit-curve / ptq-sweep / qat / sensitivity）共享的纯 helper。
 
-P2-5 下沉：原四脚本各自维护 ``_load_env_file`` / ``_load_adapter`` / ``_resolve_eval`` /
-``_dump_json`` / ``_free_model`` / ``_is_better`` / ``_BITWIDTH_PRESETS`` 七份近似副本，违反 DRY。
-本模块抽出共享部分，脚本侧只保留**自己独有的契约**（log_prefix / module_name 等）。
+本模块抽出四脚本共享的 helper（``_load_env_file`` / ``_load_adapter`` / ``_resolve_eval`` /
+``_dump_json`` / ``_free_model`` / ``_is_better`` / ``_BITWIDTH_PRESETS``），脚本侧只保留
+**自己独有的契约**（log_prefix / module_name 等）。
 
 设计原则：
 - **纯函数 / 显式参数**：不读全局状态；``log_prefix`` 由 caller 传（每脚本 stderr 前缀不同）。
-- **不改行为**：下沉前后字节等价（除 log_prefix 外）——git diff 应只见 import 替换 + 函数删除。
+- **不改行为**：helper 行为与脚本原内联实现等价（除 log_prefix 外）。
 - **边界**：``_resolve_eval`` 三脚本（bit-curve/ptq-sweep/qat）契约相同，并入；sensitivity 契约
   不同（无 default teacher-student 路径）不强制并入。
 
@@ -24,8 +24,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
-# bit_width 预设 → QConfig 构造字段（W1/W2/W3 三脚本原各自维护的等价表）。
-# 复刻自 run_ptq_sweep._BITWIDTH_PRESETS（bit-curve / qat 的同名字段语义一致；三表合一）。
+# bit_width 预设 → QConfig 构造字段（bit-curve / ptq-sweep / qat 三脚本共用此表）。
 BITWIDTH_PRESETS: dict[str, dict[str, Any]] = {
     "w4a4-mx": {
         "method": "mx",
@@ -52,8 +51,7 @@ BITWIDTH_PRESETS: dict[str, dict[str, Any]] = {
         "n_bits": 8,
     },
     # w4a16 真正语义：weight-only INT4 + 激活保持 FP16（a_quant_enabled=False）。
-    # W1 旧版写 `a_elem_format="fp16"` 但 method=int 不消费该字段，实际退化成 w4a4；
-    # 这里修正为 a_quant_enabled=False 让激活 bypass fake-quant，名副其实。
+    # method=int 不消费 a_elem_format；用 a_quant_enabled=False 让激活 bypass fake-quant，名副其实。
     "w4a16": {
         "method": "int",
         "n_bits": 4,
@@ -192,7 +190,7 @@ def resolve_eval(
             "（按模型 forward 解包 batch）—— 异构 batch 会让 SDK fallback 误算\n"
         )
         sys.exit(2)
-    # WARN 不静默（plan §P5）：未提供业务 eval_fn → 退 teacher-student mse，精度仅自洽性参考。
+    # WARN 不静默：未提供业务 eval_fn → 退 teacher-student mse，精度仅自洽性参考。
     sys.stderr.write(
         f"{log_prefix}WARN: 未提供业务 eval_fn（eval_fn_ref 空）→ 退 teacher-student mse。"
         "该指标仅自洽性参考（量化模型 vs FP teacher 的 mse），不代表业务精度。\n"

@@ -9,7 +9,7 @@ tools: [bash, read, write, edit, glob, grep]
 ## 资源锚点（cwd 无关）
 
 - `$ORCA_AGENT_RESOURCES`（orca spawn 注入）= 本 agent 资源目录（含 `scripts/run_sensitivity.py`）。
-- `$ORCA_ARTIFACTS_DIR`（orca spawn 注入，P8 接口）= 本 run 权威产物目录（见下「确定输出目录」）。
+- `$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本 run 权威产物目录（见下「确定输出目录」）。
 - identity（`ORCA_RUN_ID`/`ORCA_NODE`/`ORCA_SESSION_ID`/`ORCA_CHART_SOCK`）沿 env 链继承到脚本，`orca.chart.render_chart` 在脚本内可用。
 
 ## 输入（workflow inputs，仅 Tier A）
@@ -18,7 +18,7 @@ tools: [bash, read, write, edit, glob, grep]
 - 目标硬件: `{{ inputs.target_hardware }}`（cuda / npu / cpu；空 → 脚本 `resolve_device` 自动探测）
 - 随机种子: `{{ inputs.seed }}`（默认 0；贯穿 torch / numpy / random）
 
-**已下沉（非 input，见 SPEC §5）**：
+**已下沉（非 input）**：
 - `project_root` / `calib_data_ref` / `eval_fn_ref` → **Tier B**：你在下面读用户代码推断（loader/eval_fn 找不到走哨兵；project_root 从 model_path 向上走 infer-once）。
 - `method` / `ratio` / `low_bits` / `high_bits` → **Tier C**：脚本 argparse 默认（method=mse、ratio=0.1、low_bits=w4a4-mx、high_bits=w8a8），固化不当 input。
 - `output_dir` → **Tier C**：引擎注入 `$ORCA_ARTIFACTS_DIR`（下面第 1 步取值）。
@@ -27,7 +27,7 @@ tools: [bash, read, write, edit, glob, grep]
 
 1. **推断 project_root（Tier B infer-once）+ 确定 output_dir**：
    - **project_root**：从 `{{ inputs.model_path }}` 所在目录起，向上逐级找**第一个含 `train.py` 或 `pyproject.toml` 或 `.git` 的目录**（绝对路径）作为项目根。走到 `/` 仍找不到 → 取 `{{ inputs.model_path }}` 的 dirname，并 stderr 标注 `low-confidence: no train.py/pyproject.toml/.git ancestor`。记住为 `<project_root>`，下面 grep loader 全用它。**不许**用 `pwd` / `git rev-parse` / 留空 / 编造。
-   - **output_dir**：优先用引擎注入的 `$ORCA_ARTIFACTS_DIR`（`echo "$ORCA_ARTIFACTS_DIR"` 取值，P8 run scope 权威产物目录）；为空（非 orca 编排上下文）→ fallback `llm_artifacts/<model_name>/sensitivity/`（绝对路径，**含 `sensitivity/` 子目录防同模型串跑互覆**）。记住为 `<output_dir>`。
+   - **output_dir**：优先用引擎注入的 `$ORCA_ARTIFACTS_DIR`（`echo "$ORCA_ARTIFACTS_DIR"` 取值，本 run 权威产物目录）；为空（非 orca 编排上下文）→ fallback `llm_artifacts/<model_name>/sensitivity/`（绝对路径，**含 `sensitivity/` 子目录防同模型串跑互覆**）。记住为 `<output_dir>`。
 
 2. **生成 `<output_dir>/adapter.py`**：读 `{{ inputs.model_path }}` 理解模型 forward 签名与 batch 形态，写一个适配模块，暴露：
    - `load_model() -> nn.Module`：加载并返回 FP 模型（eval 态）。**不**在此处 `.to(device)`——脚本顶层统一 `resolve_device` 后搬移。

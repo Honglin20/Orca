@@ -20,10 +20,10 @@ inputs:
 
 # ── 已下沉（不再 input，见 docs/specs/workflow-input-design-principle.md §5）──
 #   project_root / calib_data_ref / train_data_ref / eval_data_ref / eval_fn_ref
-#     → Tier B（agent 读用户代码推断 + 哨兵，P4b/P5 已落地；project_root 从 model_path 向上走 infer-once）
+#     → Tier B（agent 读用户代码推断 + 哨兵；project_root 从 model_path 向上走 infer-once）
 #   lr / total_steps → Tier B（agent 读用户 train.py/config best-effort 推断；找不到脚本用 smoke 默认兜底）
 #   scheme / bit_width / cage / bake → Tier C（脚本 argparse 默认，固化）
-#   output_dir → Tier C（引擎注入 $ORCA_ARTIFACTS_DIR，P8 接口）
+#   output_dir → Tier C（引擎注入 $ORCA_ARTIFACTS_DIR）
 
 nodes:
   # ═══════════════════════════════════════════════════════════════

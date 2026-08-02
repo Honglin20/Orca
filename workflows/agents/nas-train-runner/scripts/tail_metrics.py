@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """tail_metrics.py —— NAS 训练/搜索指标 sidecar（被 nas-train-runner agent 周期调用）。
 
-设计依据（viz 方案共识，B-1 + F1 + D1 + P2）：
+设计依据：
   - 不改 nas-agent 仓库：本脚本只读已落盘的 jsonl（train_metrics.jsonl / search.jsonl），
     调 orca.chart.render_chart 重推（同 label+title 替换 = 刷新语义）。
   - train 模式：读 <output_dir>/runs/train/train_metrics.jsonl → C3a loss / C3b val。
   - search 模式：读 <output_dir>/runs/search/search.jsonl → C4a-{obj} 收敛 / C4b 种群&缓存 / C5-live 帕累托。
-  - 目标分类（D1 通用化）：objs 值恒 ≤0 → 负向化的质量指标（显示 -v，越大越好）；
+  - 目标分类通用化：objs 值恒 ≤0 → 负向化的质量指标（显示 -v，越大越好）；
     恒 ≥0 → 成本（显示 v，越小越好）。靠符号判定，不写死 acc/latency。
-  - F1：首次读到非空 jsonl 时校验 schema；违规推一张 ERROR 表图（fail-soft：推图异常不阻断主流程，
+  - schema 校验：首次读到非空 jsonl 时校验；违规推一张 ERROR 表图（fail-soft：推图异常不阻断主流程，
     但 schema 错必须可见，杜绝静默空图）。
-  - P2：C5-live 用 chart_type=pareto（小数据，前端算前沿）；finalize 由 push_pareto_final.py 自算。
+  - C5-live 用 chart_type=pareto（小数据，前端算前沿）；finalize 由 push_pareto_final.py 自算。
 
 退出码：0 = 跑完（即使部分图推失败也算，单次 render_chart 失败仅 stderr loud）；非 0 = 致命（如 output_dir 不存在）。
 """

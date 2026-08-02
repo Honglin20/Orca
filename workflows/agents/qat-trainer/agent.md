@@ -8,12 +8,12 @@ tools: [bash, read, write, edit, glob, grep]
 
 ## 定位
 
-W1（敏感层）/ W2（PTQ 扫描）/ W3（位宽曲线）都是**训练后**量化。本 workflow 是**训练感知**量化（QAT）：先 fake-quant 模型（掉精度），再短训恢复（+ CAGE 后校正 `W←W−lr·λ·(W−Q(W))`）。**对比轴 = 训练态方案**（`rtn` vs `duquantpp`），绘图示「fake-quant 基线 → QAT 后」的精度恢复。底层调 `ts_quant.prepare_trainable_fakequant_model` + `prepare_trainable_qat`。
+`quant-sensitivity`（敏感层）/ `quant-ptq-sweep`（PTQ 扫描）/ `quant-bit-curve`（位宽曲线）都是**训练后**量化。本 workflow 是**训练感知**量化（QAT）：先 fake-quant 模型（掉精度），再短训恢复（+ CAGE 后校正 `W←W−lr·λ·(W−Q(W))`）。**对比轴 = 训练态方案**（`rtn` vs `duquantpp`），绘图示「fake-quant 基线 → QAT 后」的精度恢复。底层调 `ts_quant.prepare_trainable_fakequant_model` + `prepare_trainable_qat`。
 
 ## 资源锚点（cwd 无关）
 
 - `$ORCA_AGENT_RESOURCES`（orca spawn 注入）= 本 agent 资源目录（含 `scripts/run_qat.py`）。
-- `$ORCA_ARTIFACTS_DIR`（orca spawn 注入，P8 接口）= 本 run 权威产物目录（见下「确定输出目录」）。
+- `$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本 run 权威产物目录（见下「确定输出目录」）。
 - identity（`ORCA_RUN_ID`/`ORCA_NODE`/`ORCA_SESSION_ID`/`ORCA_CHART_SOCK`）沿 env 链继承到脚本。
 
 ## 输入（workflow inputs，仅 Tier A）
@@ -22,9 +22,9 @@ W1（敏感层）/ W2（PTQ 扫描）/ W3（位宽曲线）都是**训练后**�
 - 目标硬件: `{{ inputs.target_hardware }}`（cuda / npu / cpu；空 → 脚本 `resolve_device` 自动探测）
 - 随机种子: `{{ inputs.seed }}`（默认 0；贯穿 torch / numpy / random）
 
-**已下沉（非 input，见 SPEC §5）**：
+**已下沉（非 input）**：
 - `project_root` / `calib_data_ref` / `train_data_ref` / `eval_data_ref` / `eval_fn_ref` → **Tier B**：你在下面读用户代码推断（loader 找不到走哨兵；project_root 从 model_path 向上走 infer-once）。
-- `lr` / `total_steps` → **Tier B best-effort 推断（显式裁决策：走 smoke 兜底，不走哨兵）**：读用户 train.py/config 拿训练 lr/epochs；找到传真实值，找不到传空（脚本 smoke 兜底 lr=1e-4、total_steps=64 + stderr WARN）。**为何不走哨兵**：QAT 的 total_steps 是「fake-quant 后短训恢复」步数（诊断步），与用户 train.py 里的全量训练 epochs 是两回事；用户的 lr/epochs 并非 QAT 恢复超参的合适来源，强制哨兵问「QAT 恢复 lr=?」会 over-ask（用户多半答不出 QAT 专用值）。故降级为 smoke 兜底——但**绝不静默**：脚本兜底时 stderr 打 WARN「smoke 不是生产精度」（SPEC §0 + Rule 12），用户可见、可覆盖（改脚本默认或重传 `--lr/--total_steps`）。
+- `lr` / `total_steps` → **Tier B best-effort 推断（显式裁决策：走 smoke 兜底，不走哨兵）**：读用户 train.py/config 拿训练 lr/epochs；找到传真实值，找不到传空（脚本 smoke 兜底 lr=1e-4、total_steps=64 + stderr WARN）。**为何不走哨兵**：QAT 的 total_steps 是「fake-quant 后短训恢复」步数（诊断步），与用户 train.py 里的全量训练 epochs 是两回事；用户的 lr/epochs 并非 QAT 恢复超参的合适来源，强制哨兵问「QAT 恢复 lr=?」会 over-ask（用户多半答不出 QAT 专用值）。故降级为 smoke 兜底——但**绝不静默**：脚本兜底时 stderr 打 WARN「smoke 不是生产精度」（Rule 12 fail loud），用户可见、可覆盖（改脚本默认或重传 `--lr/--total_steps`）。
 - `scheme` / `bit_width` / `cage` / `bake` → **Tier C**：脚本 argparse 默认（scheme=both、bit_width=w8a8-mx、cage=auto、bake=true），固化不当 input。
 - `output_dir` → **Tier C**：引擎注入 `$ORCA_ARTIFACTS_DIR`（下面第 1 步取值）。
 
@@ -32,14 +32,14 @@ W1（敏感层）/ W2（PTQ 扫描）/ W3（位宽曲线）都是**训练后**�
 
 1. **推断 project_root（Tier B infer-once）+ 确定 output_dir + 读 lr/total_steps**：
    - **project_root**：从 `{{ inputs.model_path }}` 所在目录起，向上逐级找**第一个含 `train.py` 或 `pyproject.toml` 或 `.git` 的目录**（绝对路径）作为项目根。走到 `/` 仍找不到 → 取 `{{ inputs.model_path }}` 的 dirname，并 stderr 标注 `low-confidence: no train.py/pyproject.toml/.git ancestor`。记住为 `<project_root>`，下面 grep loader 全用它。**不许**用 `pwd` / `git rev-parse` / 留空 / 编造。
-   - **output_dir**：优先用引擎注入的 `$ORCA_ARTIFACTS_DIR`（`echo "$ORCA_ARTIFACTS_DIR"` 取值，P8 run scope 权威产物目录）；为空（非 orca 编排上下文）→ fallback `llm_artifacts/<model_name>/qat/`（绝对路径，**含 `qat/` 子目录防同模型串跑互覆**）。记住为 `<output_dir>`。
+   - **output_dir**：优先用引擎注入的 `$ORCA_ARTIFACTS_DIR`（`echo "$ORCA_ARTIFACTS_DIR"` 取值，本 run 权威产物目录）；为空（非 orca 编排上下文）→ fallback `llm_artifacts/<model_name>/qat/`（绝对路径，**含 `qat/` 子目录防同模型串跑互覆**）。记住为 `<output_dir>`。
    - **lr / total_steps（best-effort 推断）**：读用户 train.py / config 拿训练用的 lr 和 epochs/steps（QAT 短训恢复用）。找到 → 记住真实值 `<lr>` / `<total_steps>`；找不到 → 都记为空串（脚本用 smoke 默认 lr=1e-4、total_steps=64 兜底 + stderr WARN「smoke 不是生产精度」）。**不许造假编一个看似合理的数**——要么读到的真值，要么空（让脚本 smoke 兜底）。
 
 2. **生成 `<output_dir>/adapter.py`**：读 `{{ inputs.model_path }}` 理解模型 forward 签名与 batch 形态，写一个适配模块，暴露：
    - `load_model() -> nn.Module`：加载并返回 FP 模型（eval 态，作为 teacher）。**不**在此处 `.to(device)`——脚本顶层统一 `resolve_device` 后搬移。
    - `get_calib_loader() -> DataLoader`：校准 loader（scheme=duquantpp/both 用；脚本默认 scheme=both 故通常需要）。**Tier B 获取三步**：①读用户代码（`grep -rn "def load_calib\|DataLoader" <project_root>`）找 loader → import；②找不到 → **不写 adapter / 不调脚本**，以最终消息返回 ask-user 哨兵（见下文「缺失必填输入时」段；**不**让 adapter raise、**不** exit 非 0）；③**绝不 `torch.randn` 造假**。
    - `get_train_loader() -> DataLoader`：训练 loader。**Tier B 获取三步同上**；找不到 → **返回 ask-user 哨兵**（见下文「缺失必填输入时」段；**绝不**复用 calib 做最小 smoke——那是数据泄漏 + 烧算力）。
-   - `get_eval_loader() -> DataLoader`（**必实现**）：评估 loader。读用户代码（`grep -rn "def load_eval\|def get_eval_loader\|DataLoader" <project_root>`）找 loader → import。**找不到 → 返回 ask-user 哨兵**（见下文「缺失必填输入时」段；**不**让 adapter raise、**不** exit 非 0）。**绝不复用 train_loader 当 eval**——train=eval 是数据泄漏口径（plan §1-c + §P5：禁掉的「复用 train 当 eval」造假口径）。
+   - `get_eval_loader() -> DataLoader`（**必实现**）：评估 loader。读用户代码（`grep -rn "def load_eval\|def get_eval_loader\|DataLoader" <project_root>`）找 loader → import。**找不到 → 返回 ask-user 哨兵**（见下文「缺失必填输入时」段；**不**让 adapter raise、**不** exit 非 0）。**绝不复用 train_loader 当 eval**——train=eval 是数据泄漏口径（「复用 train 当 eval」造假口径）。
    - `forward_fn(module, batch) -> Tensor`：按模型 forward 解包 batch。脚本会包装一层把 batch 搬到 device，adapter 不需要懂 device。
    - `get_eval_fn()` / `get_metric_spec()`（**仅**当你在用户代码里找到业务 eval_fn 时实现）：业务评估函数（签名 `eval_fn(student_model) -> {"<metric>": float}`）+ `{primary_metric, higher_is_better}`。找不到业务 eval_fn → 不生成（脚本 stderr 打 WARN「用 teacher-student mse，精度仅自洽性参考」；默认 lower-is-better；训练 loss 始终用 teacher-student mse，label-free）。
 

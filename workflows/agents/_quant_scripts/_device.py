@@ -1,6 +1,6 @@
 """_device.py —— quant workflow 共享的 device / seed 解析逻辑。
 
-单一真相源（plan §P5 硬约束）。四个 quant 脚本（ptq-sweep / sensitivity / qat /
+单一真相源。四个 quant 脚本（ptq-sweep / sensitivity / qat /
 bit-curve）经 ``sys.path`` 注入本目录后 ``from _device import ...``，**避免 4 份复制**。
 
 实现照搬 ``nas-agent/nas_agent/train/distributed.py`` 的 ``resolve_device`` +
@@ -98,7 +98,7 @@ def set_seed(seed: int) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
     if is_npu_available():
-        # 缩窄异常（code-reviewer 🟡）：只吞 AttributeError（老 torch_npu 可能无
+        # 缩窄异常：只吞 AttributeError（老 torch_npu 可能无
         # manual_seed_all API）；其余（NPU runtime 未初始化 / OOM）应 stderr WARN 不静默。
         try:
             torch.npu.manual_seed_all(seed)
@@ -152,9 +152,8 @@ def wrap_forward_with_device(raw_forward_fn: Any, device: "torch.device") -> Any
 def add_device_seed_args(parser: Any) -> None:
     """把 ``--device`` / ``--seed`` / ``--env_file`` 三参数加到 argparse parser。
 
-    单一真相源（code-reviewer 🟡 DRY）：P5 引入的 device/seed/env_file argparse +
-    resolve + set_seed 逻辑原本在 4 个 quant 脚本里各写一份（~15 行 × 4 = 60 行重复）。
-    抽本 helper 后，脚本调用形如：
+    单一真相源（DRY）：device/seed argparse + resolve + set_seed 在本 helper 统一实现，
+    4 个 quant 脚本共用。脚本调用形如：
 
         ap = argparse.ArgumentParser()
         ap.add_argument("--adapter", required=True)
@@ -164,7 +163,7 @@ def add_device_seed_args(parser: Any) -> None:
         _load_env_file(args.env_file)
         device, seed = resolve_device_and_seed(args.device, args.seed)
 
-    env_file 由 ``_load_env_file``（各脚本既有，留给 P9 与其它 helpers 统一抽取）消费。
+    env_file 由各脚本的 ``_load_env_file`` 消费。
     """
     parser.add_argument(
         "--device",

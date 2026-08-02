@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """push_pareto_final.py —— C5 终态帕累托前沿图（viz_finalize 调用）。
 
-P2 共识：finalize **sidecar 自算全局非支配前沿**（读全部 evaluated 记录，非 per-gen pareto 标志——
+finalize **sidecar 自算全局非支配前沿**（读全部 evaluated 记录，非 per-gen pareto 标志——
 后者是 per-population，gen1 点会被 gen10 支配），规避前端 _aggregate_by_x 在 >2000 点时
 「按 x 求和 y」破坏前沿的陷阱。确定性优先于前端/模型判断（rule 5）。
 
-产出一张 chart_type=pareto（plan §4.3 方案 A，2026-07-22 由 scatter 升级）：全部前沿点 +
-降采样 dominated 背景云，前端据 pareto_x/y_direction 自绘前沿连线。selected 高亮牺牲
-（已在 Selection Funnel 体现）。
+产出一张 chart_type=pareto：全部前沿点 + 降采样 dominated 背景云，
+前端据 pareto_x/y_direction 自绘前沿连线。selected 高亮牺牲（已在 Selection Funnel 体现）。
 """
 
 from __future__ import annotations
