@@ -5,6 +5,21 @@
 
 ---
 
+## [2026-08-03] chore(audit): Orca 真实代码审查 5 聚类全流程交付（A/B/C/D/E）
+
+**干了什么**：8 维度 fan-out 真实代码审查（24→52 agent，对抗验证）→ **44 raw → 26 confirmed / 18 rejected**，26 条全带 file:line 证据。按根因聚类 A–E，每个走完整 SDD：写 spec → 多轮对抗 spec-review（A/B 各 4 轮、C 7 轮+rev8、D/E 各 2 轮）至 pass → coder 实现 + 单测 → test-agent 真机 E2E → 每改动 commit + CHANGELOG。零 follow-up。
+
+**解决了什么问题**（业务影响）：
+- **A — stop 污染 tape**：`orca stop` 无脑向**已结束**的 run 追加第二条「已取消」事件，破坏 append-only 唯一真相源、使 web 状态机与统计错乱。→ stop 先扫 tape 终态，已终态幂等短路。
+- **B — resume 重跑**：崩溃恢复时重跑**已完成/已跳过**的节点（重复烧 token、重复外部副作用），破「单 tape 重放=同态」铁律。→ resume 起点改按 node 终态判，覆盖 nc/skipped↔route_taken 两窗口。
+- **C — Bug2 永久空白**：前端加载失败仅 `console.error+return`，用户看到**永久空白页**零提示。→ 四处 loader 加用户可见退避重试 + 错误态 + defer-RESUME + ErrorBoundary。
+- **D — auto-exit 误杀 + 守护竞态**：web 默认 auto-exit 撕掉用户在浏览器起的**并发 run B**；sidechain pidfile 竞态级联 respawn；macOS 守护误判 dead。→ auto-exit 加「无非终态 in-process run」第三条件 + pidfile 原子写 + macOS liveness。
+- **E — discovery 撒谎**：legacy run 列表**硬编码「已取消」**，与 tape 真相脱钩（实际 completed 的 run 被误标 cancelled，用户误重跑浪费 token）。→ legacy 走 tape 派生。
+
+**结果**：5 实现全落地，单测全绿（A 126 / B 81 / C 384 / D 38 / E 182）；真机 E2E **A/B/D/E PASS、C 受限于无浏览器（HTTP/store/bundle 层 + 32 vitest 全过）、零真实 bug**。证据 `docs/releases/2026-08-02-audit-e2e-evidence.md`。Commits: A `08cb7b0` / B `f627196` / C `ccb8d7a` / D `c0cdd23` / E `50a52fe`。各聚类详见下方分条 + [release notes](../releases/2026-08-02-audit-e2e-evidence.md)。
+
+---
+
 ## [2026-08-02] fix(web): legacy discovery 走 tape 派生 + handle.status hint 文档化（真实审查聚类 E）
 
 `run_manager.discover_runs` legacy 分支从硬编码 `RunSummary(status="cancelled",...)` 改为复用与 attached 同款的 `_summary_from_tape(tape_path, source="legacy")` 从 tape 派生 status/progress/cost/elapsed/event_count（DRY）；`seen_ids` 跨 attached/in-memory/legacy 三分支显式 dedup（写入优先级 in-memory>attached>legacy，机制故意非对称）；`_summary_from_tape` 内层 except 补 `logger.warning`（N1，AC5「含 run_id+tape path」）；run_id 不一致 warn（E5，返回取 tape_stem，覆盖三源）；`handle.status` 实时 hint 非权威文档化（方向 A，不改代码——B/C 破依赖方向/职责重叠）；in-memory 分支 status/event_count perf 豁免 docstring 标注。**E9 破坏性变更**：crashed legacy run 显示 cancelled→live-pending/running（release note 声明）。round-2 pass + coder 自我 review 0 BLOCKER，web iface 套件 182 测试绿（16 新）。Commit: `50a52fe`。详见 [release note](../releases/2026-08-02-audit-e.md)。
