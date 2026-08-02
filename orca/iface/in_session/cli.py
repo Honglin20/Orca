@@ -54,6 +54,11 @@ from orca.iface.in_session._step_io import (
     fail_in_session,
     merge_recoverable_envelope,
 )
+from orca.iface.in_session._tape_probe import (
+    TapeContradictionError,
+    TapeParseError,
+    scan_terminal,
+)
 from orca.iface.in_session._hostenv import (
     cac_session_id_from_pid as _cac_session_id_from_pid,
     detect_backend_from_env as _detect_backend_from_env,
@@ -853,24 +858,65 @@ _TAPE_HEAD_SCAN_LIMIT = 100
 
 
 def _find_active_run_for_wf(rundir: Path, wf_name: str) -> str | None:
-    """SPEC §7.3（m12）：扫活跃 marker，返同 wf.name 的在途 run_id（无则 None）。
+    """SPEC 2026-08-02-audit-a §4.2：tape 终态派生活跃性，marker 仅作候选索引。
 
-    marker 文件存在 ≡ run 活跃（终态时 clear_marker 清掉）。对每个活跃 marker，按其 run_id
-    读对应 tape 的 workflow_started.workflow_name，与目标 wf_name 比。tape 读失败 → 跳过
-    （不误判；crash 孤儿 marker 由 doctor 另行检测，§9#2）。
+    判据：marker 存在 → 候选；候选 tape 的最末终态事件**才是**活跃判据（I2：终态权威源在
+    tape，不在 marker）。marker 因 crash / SIGKILL 残留时，本函数不再依赖手动 doctor 即自愈
+    （死 marker + tape 已终态 → 不返回）。
+
+    流程（per-candidate 隔离，禁把 try 包在循环外）：
+      1. sorted glob markers；> 5 个 → warn ``[AUDIT] candidate-marker-flood``（不阻塞）。
+      2. 对每个候选先 ``_read_workflow_name`` 比对 wf_name（先过滤再扫终态，否则跨 wf 误判）。
+      3. 对匹配候选调 ``scan_terminal``：
+         - 无终态事件 → 返该 run_id（真·活跃）。
+         - 有终态事件 → 死 marker 残留，跳过。
+         - ``TapeParseError`` / ``TapeContradictionError`` → warn ``[AUDIT]
+           candidate-tape-{corrupted,contradiction}`` + 跳过（保守判不活跃）。
+
+    本函数**不 raise**：活动性查询本职是「找活跃 run」，让无关 run 的坏 tape 阻塞所有
+    bootstrap 是回归。raise 仅留给 ``stop``（被操作 tape 才 raise，§4.1 分支 0/1）。
+
+    头部坏 tape（前 100 行非合法 JSON）→ ``_read_workflow_name`` 返 None → 与 wf_name 不等
+    → 静默 skip；正文坏 tape（>100 行后坏行）→ ``scan_terminal`` raise → warn 跳过。两者
+    分级可观测，符合 I5。
 
     marker 只 3 字段（无 wf 名），故必须读 tape 的 workflow_started——这是「tape 唯一真相源」
     铁律的体现：wf 归属信息从 tape 派生，不在 marker 复存（避免 desync，§7.2）。
     """
     if not rundir.exists():
         return None
-    for mp in sorted(rundir.glob("orca-*.json")):
+    candidate_markers = sorted(rundir.glob("orca-*.json"))
+    if len(candidate_markers) > 5:
+        logger.warning(
+            "[AUDIT] candidate-marker-flood count=%d wf=%s",
+            len(candidate_markers), wf_name,
+        )
+    for mp in candidate_markers:
         marker = read_marker(mp)
         if marker is None:
             continue
         tape_path = Path(rundir) / f"{marker.run_id}.jsonl"
-        if _read_workflow_name(tape_path) == wf_name:
-            return marker.run_id
+        # step 2: wf_name 过滤先于终态扫描（防跨 wf 误判）
+        if _read_workflow_name(tape_path) != wf_name:
+            continue
+        # step 3: per-candidate scan（异常隔离；禁把 try 包循环外）
+        try:
+            term = scan_terminal(tape_path)
+        except TapeContradictionError:
+            logger.warning(
+                "[AUDIT] candidate-tape-contradiction run=%s path=%s",
+                marker.run_id, tape_path,
+            )
+            continue
+        except TapeParseError:
+            logger.warning(
+                "[AUDIT] candidate-tape-corrupted run=%s path=%s",
+                marker.run_id, tape_path,
+            )
+            continue
+        if term is None:
+            return marker.run_id            # 真·活跃（无终态事件）
+        # 已终态 → 死 marker 残留，跳过（duplicate-terminal warn 已在 reader 内打出）
     return None
 
 
@@ -1741,6 +1787,13 @@ def stop(
 ) -> None:
     """停一个 run：清激活 marker + per-call flock emit ``workflow_cancelled``。
 
+    SPEC 2026-08-02-audit-a：emit 前先 fail-loud 扫 tape 终态（I1/I2/I3）：
+      - 已含 ``workflow_cancelled``（含 B-1 同类重复） → 短路 ``already-cancelled`` exit 0。
+      - 已含 ``workflow_completed`` / ``workflow_failed`` → 短路 ``already-terminal`` exit 0
+        （``status`` 字段区分自然终态；对齐 web ``cancel_run`` 返 False）。
+      - 无终态事件 → emit 恰好一条 ``workflow_cancelled``。
+      - tape 损坏 / 多类终态矛盾 → fail loud exit 1（不 emit、不开写句柄）。
+
     ``run_id`` 两种传法都接受（spec §2.1 统一 ``--run-id`` 形态，位置参数保留兼容旧调用 /
     主 session 既有测试）：``orca stop --run-id <id>`` 或 ``orca stop <id>``。两者同传且值不
     一致 → fail loud（BadParameter）。**都省略 → fail loud**（stop 无「列全部」模式，必须
@@ -1768,21 +1821,61 @@ def stop(
         _echo_busy_reply()
         return
     fd, _ = acquired
-    tape_obj = Tape(tape_path, run_id=rid, resume=True)
-    bus = EventBus(tape_obj)
     try:
-        asyncio.run(bus.emit("workflow_cancelled", {"reason": "user_stop"}))
-    finally:
-        # 嵌套 try/finally：bus.close() 异常不得跳过 clear_marker（否则孤儿 marker
-        # 让 dupe-check / open 误判此 run 仍活跃，review M4）。
+        # 纯只读 fail-loud 终态扫描（不开 bus / 不开写句柄）。
         try:
-            _release_flock(fd)
+            last_term = scan_terminal(tape_path)
+        except TapeContradictionError as e:
+            # 分支 0：多类终态矛盾（I1 已破）—— fail loud I5。stderr + warning log
+            # （含 [AUDIT] tag）先于 typer.Exit（typer.Exit 是 SystemExit 子类）。
+            logger.warning(
+                "[AUDIT] tape-contradiction path=%s types=%s last_seq=%d",
+                tape_path, sorted(e.types), e.last_seq,
+            )
+            typer.echo(
+                f"tape 终态矛盾：{tape_path} 含 {sorted(e.types)}"
+                f"（last_seq={e.last_seq}），请手动核查（doctor 暂不修复 tape 内容）",
+                err=True,
+            )
+            raise typer.Exit(1)
+        except TapeParseError as e:
+            # 分支 1：坏 tape（中间残行 / 末尾 partial）—— fail loud I5。绝对不回退到
+            # 「无终态 → emit」分支（避免往坏 tape 追加 workflow_cancelled）。
+            typer.echo(
+                f"tape 损坏：{tape_path} 第 {e.lineno} 行非合法 JSON，"
+                f"请手动核查（doctor 暂不修复 tape 内容）",
+                err=True,
+            )
+            raise typer.Exit(1)
+        if last_term == "workflow_cancelled":
+            # 分支 2：已 cancelled 短路（含 B-1 同类重复 warn 后短路；满足 I3 幂等）。
+            typer.echo(json.dumps({
+                "run_id": rid, "ok": True, "done": True,
+                "note": "already-cancelled", "status": "cancelled",
+            }))
+            return
+        if last_term in ("workflow_completed", "workflow_failed"):
+            # 分支 3：自然终态短路（exit 0，业务可恢复，对齐 web cancel_run 返 False）。
+            typer.echo(json.dumps({
+                "run_id": rid, "ok": False, "done": True,
+                "note": "already-terminal", "status": last_term,
+            }))
+            return
+        # 分支 4：无终态事件 → emit。Tape(resume=True) + EventBus 仅此分支内实例化（B-5）。
+        tape_obj = Tape(tape_path, run_id=rid, resume=True)
+        bus = EventBus(tape_obj)
+        try:
+            asyncio.run(bus.emit("workflow_cancelled", {"reason": "user_stop"}))
         finally:
-            try:
-                bus.close()
-            finally:
-                clear_marker(mpath)
-    typer.echo(json.dumps({"run_id": rid, "ok": True, "done": True}))
+            # 内层 finally：仅 bus.close()，fd / marker 由外层 finally 统一释放
+            # （rev4 N1 / round-4 E3 fd 双释放 hazard：内层已 close fd → 外层再
+            # _release_flock 抛 ValueError → emit 成功却 exit=1 + marker 残留）。
+            bus.close()
+        typer.echo(json.dumps({"run_id": rid, "ok": True, "done": True}))
+    finally:
+        # 外层 finally 兜所有分支（含 raise 之前的 try/finally）：fd + marker 统一释放。
+        _release_flock(fd)
+        clear_marker(mpath)
 
 
 def _scan_skill_install(

@@ -2041,3 +2041,307 @@ def test_next_outputs_template_render_failure_fails_loud(cwd_tmp, tmp_path):
     last = json.loads(lines[-1])
     assert last["type"] == "workflow_failed"
     assert last["data"]["kind"] == "render_error"
+
+
+# ── SPEC 2026-08-02-audit-a：stop 判 run 终态 + dupe-check tape 派生活跃性 ───────
+
+
+def _raw_append_event(tape_path: Path, etype: str, seq: int,
+                      data: dict | None = None) -> None:
+    """绕过 EventBus 直接 raw append 一行 JSONL 到 tape（测试专用，模拟「已污染历史 tape」）。
+
+    SPEC §7 测试#9 要求：构造含 ≥2 条终态 tape 需 raw write 绕过 EventBus（I1 写入侧守护
+    是本 spec 目标，不能让 EventBus 帮我们避免污染）。
+    """
+    payload = {
+        "seq": seq,
+        "type": etype,
+        "timestamp": 1234567890.0,
+        "node": None,
+        "session_id": None,
+        "data": data or {},
+    }
+    with open(tape_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def test_stop_on_completed_run_does_not_emit(cwd_tmp, wf_path):
+    """AC #1 / A1 / A5：tape 已含 workflow_completed + marker 残留 → stop 不追加事件。
+
+    断言：tape 行数不变、无 workflow_cancelled 追加、退出信封 note=already-terminal
+    且 status 字段 == workflow_completed（D4=a，调用方据 status 区分自然终态 vs cancelled）。
+    """
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id, tape = boot["run_id"], boot["tape"]
+
+    tape_p = Path(tape)
+    before = len(tape_p.read_text(encoding="utf-8").strip().split("\n"))
+    _raw_append_event(tape_p, "workflow_completed", seq=before + 1, data={"outputs": {}})
+
+    result = runner.invoke(app, ["stop", run_id])
+    assert result.exit_code == 0
+    reply = json.loads(result.output.splitlines()[-1])
+    assert reply["note"] == "already-terminal"
+    assert reply["status"] == "workflow_completed"
+    assert reply["ok"] is False
+
+    after = len(tape_p.read_text(encoding="utf-8").strip().split("\n"))
+    assert after == before + 1
+    types = [json.loads(ln)["type"]
+             for ln in tape_p.read_text(encoding="utf-8").strip().split("\n")]
+    assert "workflow_cancelled" not in types
+
+
+def test_stop_on_cancelled_run_idempotent(cwd_tmp, wf_path):
+    """AC #2 / A2 / I3：tape 已含 workflow_cancelled → 连调两次 stop，行数始终不变、marker 被清。"""
+    from orca.iface.in_session.marker import marker_path
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id, tape = boot["run_id"], boot["tape"]
+    tape_p = Path(tape)
+    rundir = tape_p.parent
+    before = len(tape_p.read_text(encoding="utf-8").strip().split("\n"))
+    _raw_append_event(tape_p, "workflow_cancelled", seq=before + 1, data={"reason": "earlier"})
+
+    for _ in range(2):
+        result = runner.invoke(app, ["stop", run_id])
+        assert result.exit_code == 0
+        reply = json.loads(result.output.splitlines()[-1])
+        assert reply["note"] == "already-cancelled"
+        assert reply["status"] == "cancelled"
+        after = len(tape_p.read_text(encoding="utf-8").strip().split("\n"))
+        assert after == before + 1
+        # marker 被清（幂等；spec §7 测试#2）
+        assert not marker_path(rundir, run_id).exists()
+
+
+def test_stop_on_active_run_emits_one_cancelled(cwd_tmp, wf_path):
+    """AC #3 / A3：tape 无终态事件 → stop 追加恰好一条 workflow_cancelled。"""
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id, tape = boot["run_id"], boot["tape"]
+    tape_p = Path(tape)
+    before = len(tape_p.read_text(encoding="utf-8").strip().split("\n"))
+
+    result = runner.invoke(app, ["stop", run_id])
+    assert result.exit_code == 0
+    after_lines = tape_p.read_text(encoding="utf-8").strip().split("\n")
+    assert len(after_lines) == before + 1
+    assert json.loads(after_lines[-1])["type"] == "workflow_cancelled"
+
+
+def test_find_active_run_for_wf_skips_dead_marker(cwd_tmp, wf_path):
+    """AC #4 / A4 / I2：marker 残留 + tape 已终态 → 不返回该 run_id（不依赖 doctor）。"""
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id, tape = boot["run_id"], boot["tape"]
+    tape_p = Path(tape)
+    _raw_append_event(tape_p, "workflow_completed", seq=99, data={"outputs": {}})
+
+    from orca.iface.in_session.cli import _find_active_run_for_wf
+    rundir = tape_p.parent
+    assert _find_active_run_for_wf(rundir, "cli_test_wf") is None
+
+
+def test_find_active_run_for_wf_finds_active(cwd_tmp, wf_path):
+    """AC #5 / I2：marker 在 + tape 无终态 → 返回该 run_id（真活跃）。"""
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id, tape = boot["run_id"], boot["tape"]
+
+    from orca.iface.in_session.cli import _find_active_run_for_wf
+    rundir = Path(tape).parent
+    assert _find_active_run_for_wf(rundir, "cli_test_wf") == run_id
+
+
+def test_stop_corrupted_tape_midline_fails_loud(cwd_tmp, wf_path):
+    """AC #6 / A7 / 测试#6 中间行：tape 中间行非合法 JSON → exit 1、不追加 cancelled。"""
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id, tape = boot["run_id"], boot["tape"]
+    tape_p = Path(tape)
+    with open(tape_p, "a", encoding="utf-8") as f:
+        f.write("{this is not valid json\n")
+        f.write(json.dumps({"seq": 999, "type": "node_started", "timestamp": 1.0,
+                            "node": "a", "session_id": "x", "data": {}}) + "\n")
+
+    result = runner.invoke(app, ["stop", run_id])
+    assert result.exit_code == 1
+    assert "doctor" in (result.output or "")
+    # 不追加 workflow_cancelled（含坏行的 tape 也一并扫，命中 cancelled 才计）
+    types = []
+    for ln in tape_p.read_text(encoding="utf-8").strip().split("\n"):
+        try:
+            types.append(json.loads(ln).get("type"))
+        except json.JSONDecodeError:
+            continue
+    assert "workflow_cancelled" not in types
+
+
+def test_stop_corrupted_tape_partial_tail_fails_loud(cwd_tmp, wf_path):
+    """AC #6 / A7 / 测试#6 末尾 partial：tape 末尾 partial 行 → exit 1。"""
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id, tape = boot["run_id"], boot["tape"]
+    tape_p = Path(tape)
+    with open(tape_p, "a", encoding="utf-8") as f:
+        f.write('{"seq": 999, "type": "work')
+
+    result = runner.invoke(app, ["stop", run_id])
+    assert result.exit_code == 1
+    assert "doctor" in (result.output or "")
+
+
+def test_stop_on_contradictory_tape_fails_loud(cwd_tmp, wf_path, caplog):
+    """AC #9 / m5 / 测试#9：tape 含 workflow_completed + workflow_cancelled 两类 →
+    exit 1、stderr/log 含 [AUDIT]、不追加第三条、TapeContradictionError.last_seq 是最末终态 seq。
+    """
+    import logging
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id, tape = boot["run_id"], boot["tape"]
+    tape_p = Path(tape)
+    before = len(tape_p.read_text(encoding="utf-8").strip().split("\n"))
+    _raw_append_event(tape_p, "workflow_completed", seq=before + 1, data={"outputs": {}})
+    _raw_append_event(tape_p, "workflow_cancelled", seq=before + 2, data={"reason": "old"})
+
+    with caplog.at_level(logging.WARNING, logger="orca.iface.in_session.cli"):
+        result = runner.invoke(app, ["stop", run_id])
+
+    assert result.exit_code == 1
+    assert any("[AUDIT] tape-contradiction" in rec.getMessage() for rec in caplog.records)
+    rec = next(r for r in caplog.records if "[AUDIT] tape-contradiction" in r.getMessage())
+    assert f"last_seq={before + 2}" in rec.getMessage()
+    after = len(tape_p.read_text(encoding="utf-8").strip().split("\n"))
+    assert after == before + 2
+
+
+def test_bootstrap_skips_dead_marker_builds_new_run(cwd_tmp, wf_path):
+    """AC #8 / A10：死 marker 残留 + 用户 bootstrap 同 wf → 成功建新 run（不再被拒绝）。"""
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    old_run_id, old_tape = boot["run_id"], boot["tape"]
+    tape_p = Path(old_tape)
+    _raw_append_event(tape_p, "workflow_completed", seq=99, data={"outputs": {}})
+
+    result = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
+    assert result.exit_code == 0, result.output
+    new_reply = json.loads(result.output.splitlines()[-1])
+    assert new_reply["run_id"] != old_run_id
+
+
+def test_candidate_marker_flood_warn_on_bootstrap(cwd_tmp, wf_path, caplog):
+    """AC #10 / A11 / 测试#10（仅 bootstrap 触发，round-4 E6）：6 个候选 marker 全为死孤儿 →
+    [AUDIT] candidate-marker-flood warn 出现 **且** bootstrap 成功建新 run（不阻塞操作）。
+
+    意图：flood warn 不阻塞 bootstrap——验证即便 flood 检测存在，dupe-check 仍返 None → 建新 run。
+    若 flood 检测逻辑反过来阻塞 bootstrap，本测试会 fail（exit_code != 0）。
+    """
+    import logging
+    from orca.iface.in_session.marker import marker_path, write_marker, ActivationMarker
+
+    rundir = cwd_tmp / "runs"
+    rundir.mkdir(parents=True, exist_ok=True)
+
+    # 造 6 个死孤儿 marker（各自 tape 已终态）→ flood（>5）+ dupe-check 全返 None
+    for i in range(6):
+        fake_rid = f"flood-dead-{i}-aaaaaaaa"
+        fake_tape = rundir / f"{fake_rid}.jsonl"
+        _raw_append_event(fake_tape, "workflow_started", seq=1,
+                          data={"workflow_name": "cli_test_wf", "inputs": {},
+                                "node_count": 2, "entry": "a"})
+        _raw_append_event(fake_tape, "workflow_completed", seq=2, data={"outputs": {}})
+        write_marker(marker_path(rundir, fake_rid),
+                     ActivationMarker(run_id=fake_rid, model="m"))
+
+    runner = CliRunner()
+    with caplog.at_level(logging.WARNING, logger="orca.iface.in_session.cli"):
+        result = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
+
+    # flood warn 出现
+    assert any("[AUDIT] candidate-marker-flood" in r.getMessage() for r in caplog.records)
+    # **不阻塞**：死 marker 全被跳过 → bootstrap 成功建新 run
+    assert result.exit_code == 0, result.output
+    reply = json.loads(result.output.splitlines()[-1])
+    assert reply["run_id"].startswith("flood-dead-") is False   # 新 run，非孤儿
+
+
+def test_bootstrap_candidate_corrupted_body_tape_warns(cwd_tmp, wf_path, caplog):
+    """AC #11a / F5 / round-4 E4 正文坏 tape：候选 tape >100 行后含坏 JSON 行 →
+    [AUDIT] candidate-tape-corrupted warn + 跳过候选 + bootstrap 成功建新 run。
+    """
+    import logging
+    from orca.iface.in_session.marker import marker_path, write_marker, ActivationMarker
+
+    runner = CliRunner()
+    rundir = cwd_tmp / "runs"
+    rundir.mkdir(parents=True, exist_ok=True)
+
+    fake_rid = "bodybad-fake-aaaaaaaa"
+    fake_tape = rundir / f"{fake_rid}.jsonl"
+    _raw_append_event(fake_tape, "workflow_started", seq=1,
+                      data={"workflow_name": "cli_test_wf", "inputs": {},
+                            "node_count": 2, "entry": "a"})
+    for i in range(2, 103):
+        _raw_append_event(fake_tape, "agent_message", seq=i, data={"text": "filler"})
+    with open(fake_tape, "a", encoding="utf-8") as f:
+        f.write("{not valid json body\n")
+    write_marker(marker_path(rundir, fake_rid),
+                 ActivationMarker(run_id=fake_rid, model="m"))
+
+    with caplog.at_level(logging.WARNING, logger="orca.iface.in_session.cli"):
+        result = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
+
+    assert result.exit_code == 0, result.output
+    assert any("[AUDIT] candidate-tape-corrupted" in r.getMessage() for r in caplog.records)
+
+
+def test_bootstrap_candidate_corrupted_head_tape_silent_skip(cwd_tmp, wf_path, caplog):
+    """AC #11b / round-4 E4 头部坏 tape：候选 tape 头部坏 JSON →
+    _read_workflow_name 返 None → 与目标 wf_name 不等 → 静默 skip（无 corrupted warn）。
+    """
+    import logging
+    from orca.iface.in_session.marker import marker_path, write_marker, ActivationMarker
+
+    rundir = cwd_tmp / "runs"
+    rundir.mkdir(parents=True, exist_ok=True)
+
+    fake_rid = "headbad-fake-aaaaaaaa"
+    fake_tape = rundir / f"{fake_rid}.jsonl"
+    with open(fake_tape, "w", encoding="utf-8") as f:
+        f.write("{not valid json head\n")
+    write_marker(marker_path(rundir, fake_rid),
+                 ActivationMarker(run_id=fake_rid, model="m"))
+
+    runner = CliRunner()
+    with caplog.at_level(logging.WARNING, logger="orca.iface.in_session.cli"):
+        result = runner.invoke(app, ["bootstrap", str(wf_path), "--inputs", "{}"])
+
+    assert result.exit_code == 0, result.output
+    assert not any("[AUDIT] candidate-tape-corrupted" in r.getMessage() for r in caplog.records)
+
+
+def test_stop_duplicate_same_type_cancelled_warns_not_block(cwd_tmp, wf_path, caplog):
+    """AC #12 / B-1 / 测试#12：tape 含 2× workflow_cancelled（历史污染）+ marker 残留 →
+    warn [AUDIT] duplicate-terminal + exit 0 + 行数不变 + note=already-cancelled。
+    """
+    import logging
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id, tape = boot["run_id"], boot["tape"]
+    tape_p = Path(tape)
+    before = len(tape_p.read_text(encoding="utf-8").strip().split("\n"))
+    _raw_append_event(tape_p, "workflow_cancelled", seq=before + 1, data={"reason": "old1"})
+    _raw_append_event(tape_p, "workflow_cancelled", seq=before + 2, data={"reason": "old2"})
+
+    with caplog.at_level(logging.WARNING, logger="orca.iface.in_session._tape_probe"):
+        result = runner.invoke(app, ["stop", run_id])
+
+    assert result.exit_code == 0
+    reply = json.loads(result.output.splitlines()[-1])
+    assert reply["note"] == "already-cancelled"
+    assert reply["status"] == "cancelled"
+    assert any("[AUDIT] duplicate-terminal" in r.getMessage() for r in caplog.records)
+    after = len(tape_p.read_text(encoding="utf-8").strip().split("\n"))
+    assert after == before + 2
