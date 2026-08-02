@@ -5,9 +5,13 @@
 
 ---
 
+## [2026-08-02] refactor(workflow-docs): 产物去考古化 + 写作规范固化（kd/struct/quant/nas/scripts 全面清理）
+
+把「去考古化」写作规范固化进 create-workflow skill（新建 `reference/writing-style.md` §0-§9：A 类考古禁 `[A-Z]+-[0-9]+` 编号 / analogue of / v嵌入 / 外部 plan·SPEC §；B 类真实文件导航允许 CONTRACTS §N / workflow §N / checklist item；§9 标准正则 + 宽口径 grep 兜底），SKILL.md 集成规范节 + success_criteria，memory 跨会话兜底。按规范清理全仓库产物层 A 类考古：kd 系列（含 _kd_scripts 注释）+ struct 系列（按新规范重做，去 plan §X / SPEC § ~140 处，功能字节级等价）+ quant + nas + model optimizer，保留 B 类导航。新增 prune-channel-sweep.yaml（用新规范生成的剪枝 workflow，端到端验证规范生效）。三轮 code-reviewer 独立 review（含 git diff 核查 struct 功能等价）+ 终审 review 所有实现（抓 4 项严重：prune torch API / struct {%raw%} / 盲区 / 规范三件套不自洽，全修复）。Commits: `7465231`（规范+kd/struct/scripts/prune，45 文件）+ `e546255`（quant+nas，19 文件）+ `4fcda82`（终审返工，12 文件）。详见 [release note](../releases/2026-08-02-workflow-docs-dearchaeology.md)。
+
 ## [2026-08-02] feat(validate): tars validate 加引用合规校验门（自引用 / output_schema 字段对齐 / scripts 存在 / input 三档标签）
 
-把 4 项引用合规校验加进现有 `tars validate`（不新设 lint 子命令），成为 create-workflow skill 生成后的检验门，catch `agent-struct-exploration.yaml` `{%raw%}` 误删类自引用崩。复用 validator 现有 AST 基建（`_ENV` + `_iter_templates`）；`_iter_templates` 重构为 5 元组新增 `self_name` 区分预渲染 vs 评估期字段。同步修 pre-existing silent-warning bug：新增 `load_workflow_with_warnings`，CLI `validate` 现在能把非阻断 warning 显示到 stderr。9 个真实 workflow 全部 0 新 error / 0 新 warning（基线保留），测试 99 → 112 passed。两路 code-reviewer 审查所有 must-fix 已修（含死代码移除 + foreach body 两侧覆盖 + 聚合测试）。Commit: `<待补>`。详见 [release note](../releases/2026-08-02-tars-validate-reference-checks.md)。
+把 4 项引用合规校验加进现有 `tars validate`（不新设 lint 子命令），成为 create-workflow skill 生成后的检验门，catch `agent-struct-exploration.yaml` `{%raw%}` 误删类自引用崩。复用 validator 现有 AST 基建（`_ENV` + `_iter_templates`）；`_iter_templates` 重构为 5 元组新增 `self_name` 区分预渲染 vs 评估期字段。同步修 pre-existing silent-warning bug：新增 `load_workflow_with_warnings`，CLI `validate` 现在能把非阻断 warning 显示到 stderr。9 个真实 workflow 全部 0 新 error / 0 新 warning（基线保留），测试 99 → 112 passed。两路 code-reviewer 审查所有 must-fix 已修（含死代码移除 + foreach body 两侧覆盖 + 聚合测试）。Commit: `5b139ac`。详见 [release note](../releases/2026-08-02-tars-validate-reference-checks.md)。
 
 ## [2026-07-31] feat(kd-nas): model8 实际 student 变体（BatchNorm/3层/ReLU）+ 精简 workflow description
 
