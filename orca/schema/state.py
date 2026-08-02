@@ -61,4 +61,6 @@ class RunState(BaseModel):
     current_node: str | None = None
     node_status: dict[str, Status] = {}  # 每个 node 的状态
     context: dict[str, Any] = {}  # 所有已完成 node 的输出（accumulate）
-    usage: UsageSummary | None = None
+    # SPEC B B3：删顶层 ``usage`` 归集字段（reducer 永不写，死的归集字段）。
+    # usage 派生统一走 ``orca.run.projections.node_usage``（batch fold，per-node
+    # breakdown，按 seq last-wins 幂等）。``UsageSummary`` 类保留（projections 返回类型）。

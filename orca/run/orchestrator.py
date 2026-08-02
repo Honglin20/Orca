@@ -54,7 +54,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from orca.events.bus import EventBus
-    from orca.events.tape import Tape
     from orca.exec.context import RunContext
     from orca.exec.mcp_tools.server import AgentToolsMcpServer
     from orca.gates.interrupt import InterruptHandler
@@ -386,23 +385,28 @@ class Orchestrator:
         bus: EventBus,
         wf: Workflow,
     ) -> Orchestrator:
-        """从 Tape 重放构造 Orchestrator，恢复到崩溃前状态（SPEC §7.2）。
+        """从 Tape 重放构造 Orchestrator，恢复到崩溃前状态（SPEC §7.2 + SPEC B B1）。
 
         - 读 Tape（``resume=True`` 截断末尾残行，SPEC §7.3 fail-soft）。
-        - ``replay_state`` → 拿已完成 node 列表 + outputs aggregate。
+        - ``replay_for_resume``（SPEC B MINOR F1 方案 D 单 pass）→ ``(state, inputs,
+          last_progressed)``：一次 ``tape.replay()`` 同时 fold state + 抽 inputs +
+          记最后 progressed node（node_completed OR node_skipped，B1 双终态）。
         - typed exception 对每个失败模式（CLI 层映射 exit code）：
             * ``EmptyTapeError``：Tape 无事件。
             * ``AlreadyCompletedError``：已是 workflow_completed 终态。
             * ``ParallelGroupMidCrashError``：崩溃在 parallel 组中间。
             * ``MidFileCorruptError``：Tape 中段损坏（replay 不可信）。
-        - resume entry = 最后一个 node_completed 的下一 node（用 routes 求值，
-          与 drive_loop 同一 ``_next_node_after``，避免自造路由逻辑）。
-        - RunContext 携带已完成 outputs（从 state 派生，不手搓）。
+        - **resume 起点（SPEC B B1 / NEW-1 方案 c）**：``state.current_node`` 仍为首选
+          候选，但当其 ``status ∈ {"done","skipped"}`` 终态时退化到 progressed 序列推断
+          （消费 ``replay_for_resume`` 返回的 ``last_progressed``）。覆盖两类崩溃窗口：
+            (1) ``[node_completed(A), route_taken(A→B))`` → status==done
+            (2) ``[node_skipped(A),  route_taken(A→B))`` → status==skipped
+          此判据让 ``resume`` 永不重跑 done / skipped 终态（I-RESUME-1）。
+        - ``RunContext`` 携带已完成 outputs（从 state 派生，不手搓）。
 
         ``bus`` 由调用方传入（其 Tape 已用 ``resume=True`` 构造，残行已截断）。本方法
-        只读 Tape（``replay_state``）+ 校验 + 构造 Orchestrator 实例，不写 Tape。
+        只读 Tape + 校验 + 构造 Orchestrator 实例，不写 Tape。
         """
-        from orca.events.replay import replay_state
         from orca.run.resume import (
             AlreadyCompletedError,
             EmptyTapeError,
@@ -410,6 +414,7 @@ class Orchestrator:
             _detect_parallel_mid_crash,
             _find_first_corrupt_line,
             _outputs_acc_from_state,
+            replay_for_resume,
         )
 
         # 1) 中段损坏检测（严格，区别于 replay 的 fail-soft）+ 顺带计 valid 事件数。
@@ -419,9 +424,9 @@ class Orchestrator:
             lineno, preview = corrupt
             raise MidFileCorruptError(tape_path, lineno, preview)
 
-        # 2) replay（bus.tape 已 resume=True 截断残行；此处用同一路径再读，状态一致）
+        # 2) replay（bus.tape 已 resume=True 截断残行）+ inputs + last_progressed 单 pass。
         tape = bus.tape
-        state = replay_state(tape)
+        state, inputs, last_progressed = replay_for_resume(tape)
 
         # 3) 失败模式判定（按 SPEC §7.3 顺序）。
         if event_count == 0:
@@ -432,31 +437,56 @@ class Orchestrator:
         if parallel_err is not None:
             raise parallel_err
 
-        # 4) 定位 resume 起点：current_node（reducer 据 route_taken 维护）即崩溃点的
-        #    下一 node。若 current_node 为 None（如 tape 末尾正好是 node_completed 但
-        #    route_taken 还没 emit），回退到「最后一个 done node 的下一 node」。
+        # 4) 定位 resume 起点（SPEC B B1 / NEW-1 方案 c）。
+        #    current_node stale 的两类窗口（reducer 维护 current_node 在 route_taken
+        #    才翻）：(1) [node_completed(A), route_taken(A→B)) status==done；
+        #    (2) [node_skipped(A),  route_taken(A→B)) status==skipped。
+        #    任一 window 内若直接用 current_node 会重跑已终态 node（违 I-RESUME-1）。
         resume_node = state.current_node
+        cur_status = state.node_status.get(resume_node) if resume_node else None
         outputs_acc = _outputs_acc_from_state(state)
-        if resume_node is None or resume_node == "$end":
-            # 无明确 current_node：找最后一个 done node，对其 routes 求值下一 node。
-            done_nodes = [
-                n for n, s in state.node_status.items() if s == "done"
+        if (
+            resume_node is None
+            or resume_node == "$end"
+            or cur_status in ("done", "skipped")
+        ):
+            progressed = [
+                n for n, s in state.node_status.items()
+                if s in ("done", "skipped")
             ]
-            if not done_nodes:
+            if not progressed:
                 # 一个 node 都没完成（如首个 node 崩溃）→ 从 wf.entry 重跑。
                 resume_node = wf.entry
             else:
-                # 最后完成的 node 名（按 tape 顺序，reducer 的 node_status 不保序；
-                # 用 state.context 的 key 集合 + wf.nodes 顺序推断最后完成者）。
-                last_done = cls._find_last_done_node_name(tape, done_nodes)
-                resume_node = cls._next_node_for_resume(wf, last_done, outputs_acc)
+                # F2：消费 replay_for_resume 返回的 last_progressed（B1 双终态：扫
+                # node_completed OR node_skipped），不再调 _find_last_done_node_name。
+                if last_progressed is None:
+                    # defense-in-depth（NEW-2）：当前 reducer 不变式下不可达
+                    # （progressed 非空 ⟹ tape 必有对应 node_completed/node_skipped）。
+                    # 保留是为防未来 reducer 改动破坏不变式时静默通过——fail loud 优先。
+                    raise MidFileCorruptError(
+                        tape_path, 0,
+                        "<node_status 含 done/skipped 但 tape 无对应 node_completed/"
+                        "node_skipped 事件——reducer 不变式被破坏>",
+                    )
+                resume_node = cls._next_node_for_resume(
+                    wf, last_progressed, outputs_acc,
+                )
+                # last_progressed 是 skipped 时 outputs_acc[last_prog]={"output":None}
+                # （B2 派生）→ router skip_tolerant 自动命中兜底 route（router.py:106
+                # ``skip_tolerant = output is None``）→ 兜底 route 复现 live 路径。
+                # 若 last_progressed 无 catch-all route → RouteError fail loud（F4-b）。
 
         # 5) 构造 Orchestrator（bypass __init__：避免重新 gen run_id / 重置 ctx）。
-        orch = cls._bare_instance(wf, bus, state, resume_node, outputs_acc)
+        #    F1：inputs 透传给 _bare_instance（不再独立调 _inputs_from_tape）。
+        orch = cls._bare_instance(wf, bus, state, resume_node, outputs_acc, inputs)
         # 记录 replayed 事件数，供 run_from_state emit workflow_resumed 用。
         orch._resume_replayed_events = event_count
         orch._resume_initial_outputs = outputs_acc
         orch._resume_start_node = resume_node
+        # NEW-6 / F5(c)：诊断字段（reducer state 字面快照，非 resume_node）。
+        # B1 窗口场景下指向刚 done/skipped 的节点（= last_progressed），非下一将 dispatch。
+        orch._resume_current_node_at_crash = state.current_node
         return orch
 
     @staticmethod
@@ -492,11 +522,15 @@ class Orchestrator:
         state: RunState,
         resume_node: str,
         outputs_acc: dict[str, Any],
+        inputs: dict[str, Any],
     ) -> Orchestrator:
         """构造 bypass ``__init__`` 的 Orchestrator（resume 专用，复用 drive 逻辑）。
 
         不重新 gen run_id（沿用 state.run_id，保 tape 连续性）；不重跑 inputs default
         填充（已完成 node 不再需要 inputs 校验）；其余索引 / 控制字段同 ``__init__``。
+
+        **SPEC B MINOR F1**：``inputs`` 由调用方（``from_tape`` 经 ``replay_for_resume``
+        单 pass 抽出）透传——不再独立调 ``_inputs_from_tape``（wrapper 已删，E5）。
         """
         from orca.exec.context import RunContext
 
@@ -504,9 +538,7 @@ class Orchestrator:
         orch.wf = wf
         orch.bus = bus
         orch.run_id = state.run_id
-        # RunContext：inputs 从 workflow_started 事件取（保 render 能拿 inputs.*）。
-        # 若取不到（罕见，如 workflow_started 残行被截断）回退空 dict。
-        inputs = Orchestrator._inputs_from_tape(bus.tape)
+        # F1：inputs 透传（来自 replay_for_resume，保 render 能拿 inputs.*）。
         orch.ctx = RunContext(
             inputs=inputs, outputs={}, run_id=state.run_id, task=None,
         )
@@ -528,51 +560,9 @@ class Orchestrator:
         orch._resume_replayed_events = 0
         orch._resume_initial_outputs = outputs_acc
         orch._resume_start_node = resume_node
+        # NEW-6：默认 None，from_tape 设置；run_from_state emit workflow_resumed 用。
+        orch._resume_current_node_at_crash = None
         return orch
-
-    @staticmethod
-    def _inputs_from_tape(tape: Tape) -> dict[str, Any]:
-        """从 Tape 的 ``workflow_started.data.inputs`` 取原始 inputs（render 用）。
-
-        SPEC §3 O1a（包 P3）：薄封装 ``_replay_state_and_inputs`` 取 inputs 部分
-        （单一算法源——inputs 抽取逻辑只在 ``events/replay.py`` 一处）。``advance_step``
-        直接调 ``_replay_state_and_inputs`` 拿 ``(state, inputs)`` 单次遍历；本方法仅供
-        其他只需 inputs 的调用方（如 ``Orchestrator.from_tape`` 经 ``_bare_instance``）
-        使用，**保留对外 API 不变**。
-
-        两种「取不到」语义（与 ``_replay_state_and_inputs`` 一致，SPEC v3 §7.5）：
-          - **tape 无 workflow_started**（bootstrap 首调正常态）→ **静默返 {}**，不 WARNING。
-          - **tape 有 workflow_started 但 data.inputs 缺/坏**（真异常）→ 返 {} + WARNING
-            （render ``{{ inputs.* }}`` 可能 UndefinedError，归因可见）。
-
-        性能 trade-off（本封装副作用，**不在 O1a 范围**）：``from_tape`` 路径既调
-        ``replay_state(tape)`` 又调本封装，封装内部又做一次全 tape fold。典型 tape
-        （ws 在首位）下 ``from_tape`` 读事件量从 OLD 的 ``N + 1``（早返）变为 ``2N``
-        （两次 full fold）。``from_tape`` 仅 crash resume 调用（非热路径），trade-off
-        可接受；若 resume 成热路径，可重新引入 short-circuit 实现（DRY 轻微违反换性能）。
-
-        另一副作用：退化 tape（含未知 EventType）下，``from_tape`` 路径的 reducer
-        ``WARNING`` 会触发两次（``replay_state`` 一次 + 本封装 fold 一次）。仅 log 噪声，
-        非 correctness 问题（同一事件应用 N 次的 reducer 幂等不变）。
-        """
-        from orca.events.replay import _replay_state_and_inputs
-
-        return _replay_state_and_inputs(tape)[1]
-
-    @staticmethod
-    def _find_last_done_node_name(tape: Tape, done_nodes: list[str]) -> str | None:
-        """扫 Tape 找最后一个 ``node_completed`` 的 node 名（保序，区别于 state.node_status）。
-
-        ``state.node_status`` 是 dict（无序），无法直接知道哪个 done node 是最后完成的。
-        本方法扫 Tape 的 ``node_completed`` 事件序列，返回序列中最后一个其 node 在
-        ``done_nodes`` 里的名字。无匹配返回 None。
-        """
-        done_set = set(done_nodes)
-        last: str | None = None
-        for event in tape.replay():
-            if event.type == "node_completed" and event.node in done_set:
-                last = event.node
-        return last
 
     async def run_from_state(self) -> RunState:
         """从 ``from_tape`` 恢复的状态续跑（SPEC §7.2）。
@@ -584,13 +574,16 @@ class Orchestrator:
         from orca.events.replay import replay_state
 
         start_ts = now_monotonic()
-        # workflow_resumed：data = {from_tape, resumed_node, replayed_events}（SPEC §2.2）。
+        # workflow_resumed：data = {from_tape, resumed_node, replayed_events,
+        # current_node_at_crash}（SPEC §2.2 + SPEC B NEW-6 additive）。
+        # current_node_at_crash = reducer state 字面快照（诊断字段，非控制流）。
         await self.bus.emit(
             "workflow_resumed",
             {
                 "from_tape": str(self.bus.tape.path),
                 "resumed_node": self._resume_start_node,
                 "replayed_events": self._resume_replayed_events,
+                "current_node_at_crash": self._resume_current_node_at_crash,
             },
         )
 
@@ -668,7 +661,12 @@ class Orchestrator:
                     await self.bus.emit(
                         "node_skipped", {"reason": "user_interrupt_skip"}, node=current,
                     )
-                    outputs_acc[current] = {"output": None, "skipped": True}
+                    # SPEC B B2 / I-REPLAY-3：live 写 ``{"output": None}``（去
+                    # ``"skipped": True``——该标记从 ``node_status[current]=="skipped"``
+                    # 派生即可，不进 outputs_acc）。reducer 对 ``node_skipped`` 已补
+                    # ``context[current]=None``（raw），经 ``_outputs_acc_from_state``
+                    # 包壳也得 ``{"output": None}``——live 与 resume 视图逐字相等。
+                    outputs_acc[current] = {"output": None}
                     if skip_target is not None:
                         # phase 11 §9 P4：用户显式选了目标 node → 直接跳，不经 route 求值
                         # （避免无兜底 route 时 NoRouteMatch 崩溃，SPEC §10.2 item12）。

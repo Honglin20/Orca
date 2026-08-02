@@ -1236,7 +1236,7 @@ class RunManager:
             else:
                 done = sum(1 for s in state.node_status.values() if s == "done")
                 progress = f"{done}/{wf_total}"
-            cost = _extract_cost(state)
+            cost = _extract_cost(handle.tape)
             workflow_name = state.workflow_name or wf_name_fallback
         except Exception:  # noqa: BLE001 — tape 读失败不应崩 list_runs
             logger.warning("run %s replay 失败，元数据退化", handle.run_id, exc_info=True)
@@ -1948,13 +1948,20 @@ class RunManager:
             logger.warning("run %s bus.close 异常", handle.run_id, exc_info=True)
 
 
-def _extract_cost(state: RunState) -> float:
-    """从 RunState.usage 提取 cost（若有）。无 usage → 0.0。"""
-    usage = state.usage
-    if usage is None:
-        return 0.0
-    # UsageSummary 形态见 schema/state.py；cost 字段可能不存在（纯 script run 无 token）。
-    return float(getattr(usage, "cost", 0.0) or 0.0)
+def _extract_cost(tape: Tape) -> float:
+    """SPEC B B3：从 tape 经 ``projections.node_usage`` 派生总 cost。
+
+    原 ``RunState.usage`` 归集字段已删（B3，reducer 永不写）；usage 派生统一走
+    ``projections.node_usage``（batch fold，per-node breakdown，按 seq last-wins
+    幂等）。本函数求和所有 node 的 ``cost_usd``。
+
+    E1 修正：原 ``getattr(usage, "cost", ...)`` 是 typo（应 ``cost_usd``），被 no-op
+    reducer 掩盖恒返 0.0；切 projections 后该 bug 自动消失（直接读 UsageSummary.cost_usd）。
+    """
+    from orca.run.projections import node_usage
+
+    usage_by_node = node_usage(tape.replay())
+    return float(sum(u.cost_usd for u in usage_by_node.values()))
 
 
 def _gate_to_dict(gate: HumanGate) -> dict:

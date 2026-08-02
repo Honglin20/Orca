@@ -323,16 +323,13 @@ def test_resume_trailing_partial_line_fail_soft(tmp_path, caplog):
 
 
 def test_from_tape_fallback_when_no_route_taken(tmp_path):
-    """tape 末尾是 node_completed 但无后续 route_taken → fallback 走 _next_node_for_resume。
+    """SPEC B B1：tape 末尾是 node_completed 但无后续 route_taken → fallback 走
+    ``_next_node_for_resume``（``last_progressed`` 来自 ``replay_for_resume`` 单 pass）。
 
-    构造场景：a 完成（node_completed）后、route_taken emit 前崩溃。state.current_node
-    仍指向 a（node_completed 不改 current_node），但 a 的 routes 求值的下一 node = b。
-    本测试断言 fallback 路径（``_find_last_done_node_name`` + ``_next_node_for_resume``）
-    正确解析出 resume_node = b。
-
-    注：实际 state.current_node 在 node_completed 后仍指 a（reducer 的 current_node 只被
-    route_taken / node_started 更新），所以这测的是「current_node 指向一个 done node」的
-    边界 —— from_tape 把它当 resume_node 会重跑 a（错），应走 fallback 取下一 node。
+    构造场景：a 完成（node_completed）后、route_taken emit 前崩溃。reducer state 里
+    ``current_node`` 仍指 a（node_completed 不改 current_node），但 a 的
+    ``node_status == "done"`` 是终态——B1 判据覆盖此窗口，走 progressed-fallback
+    推断下一 node = b（route 求值结果）。
     """
     wf = _linear_3_wf()
     tape_path = tmp_path / "events.jsonl"
@@ -353,15 +350,12 @@ def test_from_tape_fallback_when_no_route_taken(tmp_path):
 
     bus = _resume_bus(tmp_path, tape_path)
     orch = Orchestrator.from_tape(tape_path, bus, wf)
-    # state.current_node 此时为 a（node_started 设的，无 route_taken 改写）。
-    # from_tape 把 current_node 当 resume_node 会重跑 a —— 错。
-    # 但 a 已 done，重跑会覆盖 output。正确做法是检测「current_node 已 done」→ fallback。
-    # 当前实现：current_node 非 None 且非 $end → 直接用。故此处 resume_node = a。
-    # 这是已知边界（current_node 指向 done node 时应 fallback），断言当前实际行为以锁住。
-    # 若未来修了这个边界，更新断言为 "b"。
-    assert orch._resume_start_node in ("a", "b")
-    # 无论如何，_resume_initial_outputs 含 a 的 output（不丢）。
+    # B1 落地后：current_node=a 处于 done 终态 → fallback 推断 a 的下一 node = b。
+    assert orch._resume_start_node == "b"
+    # _resume_initial_outputs 含 a 的 output（不丢）。
     assert "a" in orch._resume_initial_outputs
+    # NEW-6：诊断字段 = state.current_node 字面快照（= a，崩在 done 窗口内）。
+    assert orch._resume_current_node_at_crash == "a"
     bus.close()
 
 
@@ -449,3 +443,86 @@ def test_resume_parallel_group_mid_crash_rejected(tmp_path):
     assert "grp" in str(exc_info.value)
     assert "branch_b" in exc_info.value.running_branches
     bus.close()
+
+
+# ── SPEC B MINOR F1：from_tape tape 遍历次数 4 → 2（E3 spy 实测）───────────────
+
+
+def test_from_tape_two_fold(tmp_path):
+    """SPEC B MINOR（F1 方案 D + NEW-8 + E3）：``from_tape`` tape 全量遍历次数 = 2。
+
+    spy 两处语义层入口（**不** spy ``builtins.open``——见 E3：tape.replay 内部调 open
+    会双重计数 + 误伤 pathlib/logging）：
+      1. ``orca.run.resume._find_first_corrupt_line``：raw open 1 次（不走 tape.replay）。
+      2. ``orca.events.tape.Tape.replay``：1 次（``replay_for_resume`` 单 pass fold）。
+
+    总和 = 2（从原 4 次降为 2 次，回归锁）。
+
+    实现注：用 counter dict + 手写 wrapper 替代 ``mock.patch(..., wraps=...)`` ——
+    后者替换 class attribute 后 ``self`` 不再自动绑定到 wrapped function（unbound
+    method 语义），手写 wrapper 接 ``self`` 后转发最稳且语义清晰（E3）。
+    """
+    import orca.events.tape as tape_mod
+    import orca.run.resume as resume_mod
+
+    wf = _linear_3_wf()
+    tape_path = _write_partial_crash_tape(tmp_path, wf, completed_nodes=["a", "b"])
+
+    corrupt_counter = {"count": 0}
+    replay_counter = {"count": 0}
+    real_corrupt = resume_mod._find_first_corrupt_line
+    real_replay = tape_mod.Tape.replay
+
+    def corrupt_wrapper(*args, **kwargs):
+        corrupt_counter["count"] += 1
+        return real_corrupt(*args, **kwargs)
+
+    def replay_wrapper(self, *args, **kwargs):
+        replay_counter["count"] += 1
+        return real_replay(self, *args, **kwargs)
+
+    bus = _resume_bus(tmp_path, tape_path)
+    orig_corrupt = resume_mod._find_first_corrupt_line
+    orig_replay = tape_mod.Tape.replay
+    resume_mod._find_first_corrupt_line = corrupt_wrapper
+    tape_mod.Tape.replay = replay_wrapper
+    try:
+        Orchestrator.from_tape(tape_path, bus, wf)
+    finally:
+        resume_mod._find_first_corrupt_line = orig_corrupt
+        tape_mod.Tape.replay = orig_replay
+        bus.close()
+
+    assert corrupt_counter["count"] == 1, (
+        f"_find_first_corrupt_line 应被调 1 次（raw open），实得 {corrupt_counter['count']}"
+    )
+    assert replay_counter["count"] == 1, (
+        f"Tape.replay 应被调 1 次（replay_for_resume 单 pass），实得 {replay_counter['count']}"
+    )
+    # 总 tape 全量遍历 = corrupt(1) + replay(1) = 2（4→2 回归锁）。
+    total = corrupt_counter["count"] + replay_counter["count"]
+    assert total == 2, f"tape 全量遍历总次数应为 2，实得 {total}"
+
+
+def test_from_tape_does_not_call_inputs_from_tape_wrapper(tmp_path):
+    """SPEC B E5：``_inputs_from_tape`` wrapper 已删（零调用方死代码）。
+    AST 守门：``orca/`` 生产代码内零 ``_inputs_from_tape`` attribute call。
+    """
+    import ast
+    from pathlib import Path
+
+    orca_root = Path(__file__).resolve().parents[2] / "orca"
+    callers: list[str] = []
+    for py in orca_root.rglob("*.py"):
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "_inputs_from_tape"):
+                callers.append(f"{py.name}:{node.lineno}")
+    assert callers == [], (
+        f"`_inputs_from_tape` wrapper 已删（E5），但发现残留调用：{callers}。"
+    )

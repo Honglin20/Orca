@@ -73,9 +73,10 @@ def resolve(routes: list[Route], output: Any, ctx: RunContext) -> Route:
     Args:
         routes: 该 node / parallel 组的出边列表（顺序敏感）。
         output: 本节点刚完成的 raw output（executor 返回，未 ``{"output": raw}`` 包装）。
-          phase 11 §9.2：``output is None`` 表示该 node 被 SKIP（``outputs_acc[node] =
-          {"output": None, "skipped": True}``）。下游 ``when`` 引用 ``output.field``
-          会 UndefinedError → 见下方「skip 容错」。
+          phase 11 §9.2 + SPEC B B2：``output is None`` 表示该 node 被 SKIP
+          （live ``outputs_acc[node] = {"output": None}``；reducer 对 ``node_skipped``
+          补 ``context[node]=None``，经 ``_outputs_acc_from_state`` 包壳同形）。下游
+          ``when`` 引用 ``output.field`` 会 UndefinedError → 见下方「skip 容错」。
         ctx: 当前 RunContext（``ctx.outputs`` 已含历史 node 的 ``{"output": raw}`` 包装）。
 
     Returns:
@@ -99,10 +100,11 @@ def resolve(routes: list[Route], output: Any, ctx: RunContext) -> Route:
     # 让 resolve 继续往下找兜底 route（when=None），避免 NoRouteMatch 崩溃。
     #
     # **隐式契约**：``output is None`` 当前等价于「该 node 被 SKIP」——由 orchestrator
-    # ``_drive_loop`` skip 分支设 ``outputs_acc[node] = {"output": None, "skipped": True}``，
-    # 且非 skip 路径的 executor 返回值经 ``{"output": raw}`` 包装（即便 raw 是 None 也是
-    # dict 而非裸 None），故 router 拿到的 output 只在 skip 时为裸 None。未来若有 executor
-    # 直接返回裸 None（未包装），此容错会误触发——届时需改用更显式的 ``skipped: bool`` 信号。
+    # ``_drive_loop`` skip 分支设 ``outputs_acc[node] = {"output": None}``（SPEC B B2 后去
+    # ``"skipped": True``，该标记从 ``node_status[node]=="skipped"`` 派生）；非 skip 路径
+    # 的 executor 返回值经 ``{"output": raw}`` 包装（即便 raw 是 None 也是 dict 而非裸
+    # None），故 router 拿到的 output 只在 skip 时为裸 None。未来若有 executor 直接返回
+    # 裸 None（未包装），此容错会误触发——届时需改用更显式的 ``skipped: bool`` 信号。
     skip_tolerant = output is None
     for route in routes:
         if route.when is None:

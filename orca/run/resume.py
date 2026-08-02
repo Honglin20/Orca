@@ -25,13 +25,14 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from orca.schema import Event
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from orca.events.tape import Tape
     from orca.schema import RunState, Workflow
 
 logger = logging.getLogger(__name__)
@@ -163,6 +164,65 @@ def _is_valid_event_line(stripped: str) -> bool:
 
 
 # ── resume orchestration 辅助（纯函数，由 Orchestrator.from_tape 调用）────────
+
+
+def replay_for_resume(
+    tape: "Tape",
+) -> tuple["RunState", dict[str, Any], str | None]:
+    """SPEC B B1 / MINOR F1 方案 D：单 ``tape.replay()`` 迭代同时产出
+    ``(state, inputs, last_progressed)``。
+
+    把 ``Orchestrator.from_tape`` 原本的 3 次全量遍历（``replay_state(tape)`` +
+    ``_find_last_done_node_name`` + ``_inputs_from_tape`` 经 ``_bare_instance``）
+    合并为 1 次（外加 ``_find_first_corrupt_line`` 独立 raw open 1 次 = from_tape
+    总遍历次数 4 → 2）。
+
+    - ``state`` ≡ ``replay_state(tape)``：调 events 层**公共** ``apply_event``
+      reducer（不改签名，单向依赖铁律不违）。run 层不自造 fold。
+    - ``inputs`` ≡ ``_replay_state_and_inputs`` 语义（mirror events 层同名函数）：
+      首条 ``workflow_started.data.inputs``；非 dict / 缺键 → WARN + {}；
+      无 ws → 静默 {}。**WARNING 必须保留**（E2，mirror
+      ``orca/events/replay.py:88-93``），让「ws 坏」真异常可见。
+    - ``last_progressed``：最后一条 ``node_completed`` OR ``node_skipped`` 的 node
+      名（B1 双终态，NEW-1）。用于 from_tape 的 progressed-fallback 起点。同序列
+      重复 emit（异常但可能）取最后一个 = shadow-reducer 语义（F5-b：一行 ``if``
+      trade-off，run 层概念不该让 events 层 reducer 知道）。
+
+    幂等：与 ``replay_state`` 同（reducer 纯函数 fold + 单遍历顺手抽取，重放两次
+    结果相同）。
+
+    依赖单向：``orca.run.resume → orca.events.{tape,replay}`` + ``orca.schema``
+    （run → events 单向，无环）。
+    """
+    from orca.events.replay import apply_event
+    from orca.schema import RunState
+
+    state = RunState(run_id=tape.run_id, workflow_name="", status="pending")
+    inputs: dict[str, Any] = {}
+    last_progressed: str | None = None
+    ws_seen = False
+    for event in tape.replay():
+        state = apply_event(state, event)
+        # inputs 抽取：首条 ws 即锁定（mirror _replay_state_and_inputs 早返语义）。
+        if event.type == "workflow_started" and not ws_seen:
+            ws_seen = True
+            raw = event.data.get("inputs")
+            if isinstance(raw, dict):
+                inputs = raw
+            else:
+                # ws 存在但 inputs 缺/坏 → 真异常，WARNING（E2：必须保留可观测区分）。
+                logger.warning(
+                    "Tape %s 的 workflow_started.data.inputs 缺失或非 dict（实得 %r），"
+                    "回退空 inputs（后续 render {{ inputs.* }} 可能 UndefinedError）",
+                    getattr(tape, "path", "?"), type(raw).__name__,
+                )
+        # last_progressed：shadow-reducer（一行 if，扫 node_completed OR node_skipped）。
+        if event.type in ("node_completed", "node_skipped"):
+            last_progressed = event.node
+    return state, inputs, last_progressed
+
+
+
 
 
 def _outputs_acc_from_state(state: "RunState") -> dict[str, dict]:

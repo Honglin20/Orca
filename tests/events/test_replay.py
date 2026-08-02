@@ -24,7 +24,6 @@ from orca.events.replay import (
     replay_state,
 )
 from orca.events.tape import Tape
-from orca.run.orchestrator import Orchestrator
 from orca.schema import Event, RunState
 
 
@@ -211,6 +210,72 @@ def test_node_failed_and_skipped_branches():
     assert s.node_status == {"a": "failed"}
     s = apply_event(s, _evt("node_skipped", seq=2, node="b", reason="cond"))
     assert s.node_status == {"a": "failed", "b": "skipped"}
+    # SPEC B B2：node_skipped 同步补 context[b] = None（raw=None，mirror node_completed
+    # 存 raw 的约定；R1 形状裁定）。
+    assert s.context["b"] is None
+
+
+def test_reducer_node_skipped_writes_context_raw_none():
+    """SPEC B B2 / I-REPLAY-3：``node_skipped`` reducer 补 ``context[N] = None``（raw，
+    非 dict）。``_outputs_acc_from_state`` 会再包壳 ``{"output": raw}`` 得
+    ``{"output": None}``，与 live 路径逐字相等。
+    """
+    s = apply_event(_state(), _evt("node_skipped", seq=1, node="a", reason="x"))
+    assert s.node_status["a"] == "skipped"
+    assert "a" in s.context
+    assert s.context["a"] is None  # raw，**不是** {"output": None} / {"skipped": True}
+
+    # 经 _outputs_acc_from_state 包壳后形状 = live 路径（I-REPLAY-3 锁）。
+    from orca.run.resume import _outputs_acc_from_state
+
+    assert _outputs_acc_from_state(s) == {"a": {"output": None}}
+
+
+def test_reducer_node_skipped_idempotent():
+    """SPEC B B2 铁律 2：``node_skipped`` 应用两次 = 一次（覆盖语义）。"""
+    s = _state()
+    ev = _evt("node_skipped", seq=1, node="a", reason="x")
+    once = apply_event(s, ev)
+    twice = apply_event(once, ev)
+    assert twice == once
+    assert twice.context["a"] is None
+    assert twice.node_status["a"] == "skipped"
+
+
+def test_old_tape_skipped_replays_with_context(tmp_path):
+    """SPEC B I-BCOMPAT-5：老 tape（含 node_skipped）经新 reducer 重放自动补
+    ``context[N] = None``（零迁移）。
+    """
+    path = tmp_path / "old_skipped.jsonl"
+    _write_tape(path, [
+        {"type": "workflow_started", "timestamp": 1.0, "node": None,
+         "session_id": None, "data": {"workflow_name": "wf", "inputs": {}}},
+        {"type": "node_started", "timestamp": 2.0, "node": "a",
+         "session_id": "s1", "data": {}},
+        {"type": "node_skipped", "timestamp": 3.0, "node": "a",
+         "session_id": "s1", "data": {"reason": "old"}},
+    ])
+    tape = Tape(path, run_id="r1")
+    try:
+        state = replay_state(tape)
+    finally:
+        tape.close()
+    assert state.node_status["a"] == "skipped"
+    # 新 reducer 自动补 context[a] = None（老 tape 不需迁移）。
+    assert state.context["a"] is None
+
+
+def test_agent_usage_reducer_is_noop():
+    """SPEC B B3：``agent_usage`` 显式 no-op（session 级 usage 不进顶层 RunState）。
+    派生统一走 ``projections.node_usage``。
+    """
+    s_before = apply_event(_state(), _evt("node_started", seq=1, node="a"))
+    s_after = apply_event(
+        s_before,
+        _evt("agent_usage", seq=2, node="a",
+             input_tokens=100, output_tokens=50, cost_usd=0.01),
+    )
+    assert s_after == s_before  # no-op：state 不变
 
 
 def test_route_taken_updates_current_node():
@@ -691,7 +756,7 @@ def test_replay_state_and_inputs_dict_inputs(tmp_path):
     assert state.workflow_name == "wf_a"
     assert state.status == "running"
     assert state.node_status == {"a": "running"}
-    # inputs ≡ Orchestrator._inputs_from_tape(tape)（首条 ws 的 data.inputs）
+    # inputs ≡ 首条 ws 的 data.inputs（原 Orchestrator._inputs_from_tape 早返语义，SPEC B 后 wrapper 已删）
     assert inputs == {"x": 1, "y": "foo"}
 
 
@@ -807,9 +872,8 @@ def test_replay_state_and_inputs_snapshot_equivalence(tmp_path):
     assert actual_state == expected_state, (
         f"state 部分 mismatch：\nactual={actual_state}\nexpected={expected_state}"
     )
-    # inputs 用固定 expected 值（不通过 Orchestrator._inputs_from_tape 计算 —— 后者现已
-    # 是 _replay_state_and_inputs 的薄封装，对比会循环自证）。固定值守门确保 inputs
-    # 抽取的"首条 ws.data.inputs"语义不被回归。
+    # inputs 用固定 expected 值（不通过 helper 自身计算，对比会循环自证）。
+    # 固定值守门确保 inputs 抽取的"首条 ws.data.inputs"语义不被回归。
     assert actual_inputs == expected_inputs, (
         f"inputs 部分 mismatch：\nactual={actual_inputs}\nexpected={expected_inputs}"
     )
@@ -871,110 +935,4 @@ def test_replay_state_and_inputs_first_ws_bad_second_ws_good(tmp_path, caplog):
     ws_warns = [r for r in caplog.records if "workflow_started.data.inputs" in r.message]
     assert len(ws_warns) == 1, (
         f"首条 ws 坏应 WARN 一次（ws_seen 锁定后续不再判），实得 {len(ws_warns)} 次"
-    )
-
-
-# ── Orchestrator._inputs_from_tape wrapper parity（SPEC §3 O1a 薄封装契约）────
-
-
-def test_inputs_from_tape_wrapper_parity_with_replay_helper(tmp_path):
-    """SPEC §3 O1a：``Orchestrator._inputs_from_tape`` 薄封装返 ``_replay_state_and_inputs[1]``。
-
-    参数化覆盖三种 edge case（非 dict / 缺 key / 多 ws first-wins），锁住 wrapper
-    不会偏离 helper 行为。若有人误改 wrapper（如直接读最后一行 ws 而非首条），本测试会失败。
-    """
-    cases: list[tuple[str, list[dict], dict]] = [
-        (
-            "non_dict_inputs",
-            [{"type": "workflow_started", "timestamp": 1.0, "node": None,
-              "session_id": None,
-              "data": {"workflow_name": "wf", "inputs": "bad-string"}}],
-            {},
-        ),
-        (
-            "missing_inputs_key",
-            [{"type": "workflow_started", "timestamp": 1.0, "node": None,
-              "session_id": None,
-              "data": {"workflow_name": "wf"}}],
-            {},
-        ),
-        (
-            "multiple_ws_first_wins",
-            [
-                {"type": "workflow_started", "timestamp": 1.0, "node": None,
-                 "session_id": None,
-                 "data": {"workflow_name": "wf", "inputs": {"first": True}}},
-                {"type": "workflow_started", "timestamp": 2.0, "node": None,
-                 "session_id": None,
-                 "data": {"workflow_name": "wf", "inputs": {"second": True}}},
-            ],
-            {"first": True},
-        ),
-        (
-            "no_workflow_started",
-            [{"type": "node_started", "timestamp": 1.0, "node": "a",
-              "session_id": "s1", "data": {}}],
-            {},
-        ),
-    ]
-
-    for name, events, expected in cases:
-        path = tmp_path / f"{name}.jsonl"
-        _write_tape(path, events)
-        tape = Tape(path, run_id="r1")
-        try:
-            wrapper_inputs = Orchestrator._inputs_from_tape(tape)
-        finally:
-            tape.close()
-
-        tape2 = Tape(path, run_id="r1")
-        try:
-            helper_inputs = _replay_state_and_inputs(tape2)[1]
-        finally:
-            tape2.close()
-
-        assert wrapper_inputs == expected, (
-            f"[{name}] wrapper 返 {wrapper_inputs}，期望 {expected}"
-        )
-        assert wrapper_inputs == helper_inputs, (
-            f"[{name}] wrapper 与 helper 结果不一致：{wrapper_inputs} vs {helper_inputs}"
-        )
-
-
-# ── SPEC §7 O1a AC3：_inputs_from_tape 调用方 grep 守门 ─────────────────────
-
-
-def test_inputs_from_tape_callers_are_bounded():
-    """SPEC §7 O1a AC3 自动化守门：``_inputs_from_tape`` 生产调用点 ≤ 1（仅 ``_bare_instance``）。
-
-    ``advance_step`` 已直调 ``_replay_state_and_inputs`` 不再走 wrapper；wrapper 仅供
-    ``Orchestrator.from_tape`` 经 ``_bare_instance`` 使用。若未来 orca/ 内出现新调用点，
-    本测试 fail loud，提示 reviewer 确认是否：(a) 改直调 ``_replay_state_and_inputs``
-    合并遍历；或 (b) 显式接受新调用点（更新本测试上限）。
-
-    范围：仅扫 ``orca/`` 生产代码（tests/ 不计；spec-reviewer S2 同款 AST grep 守门模式）。
-    """
-    import ast
-    from pathlib import Path
-
-    orca_root = Path(__file__).resolve().parents[2] / "orca"
-    callers: list[str] = []
-    for py in orca_root.rglob("*.py"):
-        try:
-            tree = ast.parse(py.read_text(encoding="utf-8"))
-        except SyntaxError:
-            continue
-        for node in ast.walk(tree):
-            # 捕获两种形态：Orchestrator._inputs_from_tape(...) / cls._inputs_from_tape(...)
-            # / self._inputs_from_tape(...) —— 任何 ``X._inputs_from_tape`` attribute call。
-            if (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "_inputs_from_tape"):
-                callers.append(f"{py.name}:{node.lineno}")
-
-    # 上限 = 1（``_bare_instance`` 的 ``Orchestrator._inputs_from_tape(bus.tape)``）。
-    # ``advance_step`` 应直调 ``_replay_state_and_inputs``，**不**经 wrapper。
-    assert len(callers) <= 1, (
-        f"`_inputs_from_tape` 生产调用点应为 ≤1（仅 _bare_instance），实得 {callers}。"
-        f"新调用点应直调 `_replay_state_and_inputs` 合并遍历，或显式更新本测试上限。"
     )

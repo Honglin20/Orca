@@ -468,7 +468,8 @@ def advance_step(
     # tape 是 inputs 真相源：next 不传 --inputs 时从 tape 恢复（deterministic —— 模型不必
     # 每步重传，且修掉非 entry 节点 {{ inputs.* }} 依赖 CLI 重传的隐患）。bootstrap 首调时
     # tape 无 workflow_started → inputs 返 {} → 自然 fallback 到 CLI 传入的 inputs。
-    # 与 Orchestrator resume（_inputs_from_tape）同源（后者现为薄封装调同一 reducer 路径）。
+    # 与 Orchestrator resume（SPEC B 后：``replay_for_resume``）同源——均调 events 层
+    # ``_replay_state_and_inputs`` / ``apply_event`` 同一 reducer fold 路径抽 inputs。
     state, tape_inputs = _replay_state_and_inputs(tape)
     merged = {**tape_inputs, **(inputs or {})}  # CLI override 罕见但保留兼容
     inputs = _resolve_inputs(wf, merged)

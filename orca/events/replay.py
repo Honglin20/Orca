@@ -154,8 +154,19 @@ def apply_event(state: RunState, event: Event) -> RunState:
         return state.model_copy(update={"node_status": node_status})
 
     if t == "node_skipped":
+        # SPEC B B2 / I-REPLAY-3：补 ``context[node] = None``（raw=None，mirror
+        # ``node_completed`` 存 raw 的约定；R1 形状裁定）。``_outputs_acc_from_state``
+        # （resume.py:175）会对 ``state.context[N]`` 再包壳 ``{"output": raw}``；
+        # 故 reducer 必须存 raw（= None），不能存 dict——否则 resume 路径得
+        # ``{"output": {"output": None, ...}}``，与 live 的 ``{"output": None}`` 发散。
+        # 此分支让「光凭事件序列重建 outputs_acc」成立（I-REPLAY-3）。老 tape（含
+        # node_skipped 但 reducer 老行为不写 context）重放时新 reducer 自动补
+        # context[N]=None（I-BCOMPAT-5，零迁移）。
         node_status = {**state.node_status, node: "skipped"}
-        return state.model_copy(update={"node_status": node_status})
+        context = {**state.context, node: None}
+        return state.model_copy(
+            update={"node_status": node_status, "context": context}
+        )
 
     # ADR §4.3：blocked 派生（不入 tape，由 gate/interrupt 事件 fold 派生）。
     # node 当前 None / running 且收到 human_decision_requested / interrupt_requested
@@ -186,10 +197,10 @@ def apply_event(state: RunState, event: Event) -> RunState:
     if t in ("agent_message", "agent_thinking", "agent_tool_call",
              "agent_tool_result", "agent_usage"):
         # session 级流式细节不进 RunState（留给前端按 session_id 分组，phase 6）。
-        # agent_usage 可聚合进 usage（覆盖语义，幂等），但累加会破坏幂等（同事件应用两次=翻倍），
-        # 故此处仅在顶层 usage 存在时覆盖为最新一次的快照；phase 5 的 orchestrator 负责
-        # 跨 session 聚合。phase 3 不进 RunState，保持 reducer 纯粹幂等。
-        # → 显式 no-op：不修改 state（session 细节不入顶层状态）。
+        # **SPEC B B3 契约对齐**：``agent_usage`` 显式 no-op——session 级 usage 不进
+        # 顶层 RunState（``RunState.usage`` 字段已删，B3）。usage 派生统一走
+        # ``orca.run.projections.node_usage``（batch fold，per-node breakdown，幂等：
+        # 按 seq last-wins）。本 reducer 保持 no-op 让 live/replay 同形（铁律 3）。
         return state
 
     # web-shell-v2 §3.2 B1 / D8：agent_step_started（liveness 心跳）+ unknown_event

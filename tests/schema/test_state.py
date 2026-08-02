@@ -18,7 +18,6 @@ def test_runstate_defaults():
     assert rs.current_node is None
     assert rs.node_status == {}
     assert rs.context == {}
-    assert rs.usage is None
 
 
 def test_runstate_full():
@@ -29,11 +28,24 @@ def test_runstate_full():
         current_node="trainer",
         node_status={"trainer": "running", "optimizer": "done"},
         context={"optimizer": {"structure": "cnn"}},
-        usage=UsageSummary(input_tokens=100, output_tokens=50, cost_usd=0.01),
     )
     assert rs.status == "running"
     assert rs.node_status["optimizer"] == "done"
-    assert rs.usage.cost_usd == pytest.approx(0.01)
+
+
+def test_runstate_has_no_usage_field():
+    """SPEC B B3：``RunState.usage`` 归集字段已删（reducer 永不写）。
+    usage 派生统一走 ``projections.node_usage``。
+    """
+    rs = RunState(run_id="r1", workflow_name="nas")
+    with pytest.raises(AttributeError):
+        _ = rs.usage  # type: ignore[attr-defined]
+    # 构造时传 usage 也应被拒（pydantic extra="forbid"）。
+    with pytest.raises(ValidationError):
+        RunState(  # type: ignore[call-arg]
+            run_id="r1", workflow_name="nas",
+            usage=UsageSummary(input_tokens=1),  # type: ignore[call-arg]
+        )
 
 
 def test_usage_summary_defaults():
