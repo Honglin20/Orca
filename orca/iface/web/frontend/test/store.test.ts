@@ -306,13 +306,18 @@ describe("workflow-store", () => {
 
     await useWorkflowStore.getState().loadRun("run-xyz");
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/runs/run-xyz/events");
+    // SPEC audit-c：fetch 必带 AbortController signal（G2/C12）
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/runs/run-xyz/events",
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    );
     const state = useWorkflowStore.getState();
     expect(state.activeRunId).toBe("run-xyz");
     expect(state.workflowName).toBe("demo");
     expect(state.status).toBe("running");
     expect(state.nodes.A.status).toBe("done");
     expect(state.events.length).toBe(3);
+    expect(state.loadStatus).toBe("loaded"); // SPEC audit-c INV-1
     vi.unstubAllGlobals();
   });
 

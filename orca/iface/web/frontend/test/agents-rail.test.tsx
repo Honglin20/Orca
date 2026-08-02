@@ -19,6 +19,8 @@ import { useElapsedTickActive, __testReset } from "@/hooks/use-elapsed-tick";
 beforeEach(() => {
   __testReset();
   useWorkflowStore.getState().unloadRun();
+  // SPEC audit-c: 测试 setup 默认进入 loaded 让 processEvent 可驱动（INV-7 不拦）
+  useWorkflowStore.setState({ loadStatus: "loaded" });
   _seq = 100;
 });
 
@@ -26,6 +28,8 @@ afterEach(() => {
   cleanup();
   __testReset();
   useWorkflowStore.getState().unloadRun();
+  // SPEC audit-c: 测试 setup 默认进入 loaded 让 processEvent 可驱动（INV-7 不拦）
+  useWorkflowStore.setState({ loadStatus: "loaded" });
   vi.restoreAllMocks();
 });
 

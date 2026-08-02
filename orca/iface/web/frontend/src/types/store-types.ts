@@ -132,6 +132,14 @@ export interface ServerOverview {
   run_status: string;
 }
 
+// ── Loader 错误态（SPEC audit-c §4.1 INV-1 fail loud）──────────────────────────────
+// 四处 loader（loadRun / loadRunWithMeta / loadFull / loadEarlierChunk）失败时写入
+// store 错误态，UI 渲染错误组件 + 重试入口（不再 console.error + return 静默吞）。
+export type LoadError =
+  | { kind: "http"; status: number; message: string }
+  | { kind: "network"; message: string }
+  | { kind: "parse"; message: string };
+
 // ── /api/runs/<id>/meta 完整响应（SPEC web-attach §3）──────────────────────────────
 export interface RunMetaExtended {
   run_id: string;

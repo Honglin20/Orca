@@ -36,6 +36,8 @@ function ev(type: WebEvent["type"], data: Record<string, unknown>): void {
 beforeEach(() => {
   __testReset();
   useWorkflowStore.getState().unloadRun();
+  // SPEC audit-c: 测试 setup 默认进入 loaded 让 processEvent 可驱动（INV-7 不拦）
+  useWorkflowStore.setState({ loadStatus: "loaded" });
   _seq = 1;
 });
 
@@ -43,6 +45,8 @@ afterEach(() => {
   cleanup();
   __testReset();
   useWorkflowStore.getState().unloadRun();
+  // SPEC audit-c: 测试 setup 默认进入 loaded 让 processEvent 可驱动（INV-7 不拦）
+  useWorkflowStore.setState({ loadStatus: "loaded" });
 });
 
 // 把 TopBar 包在 useElapsedTickActive 容器里（模拟 RunDetailPage 行为）。

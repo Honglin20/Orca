@@ -174,6 +174,8 @@ const HEATMAP_PAYLOAD: ChartPayload = {
 afterEach(() => {
   cleanup();
   useWorkflowStore.getState().unloadRun();
+  // SPEC audit-c: 测试 setup 默认进入 loaded 让 processEvent 可驱动（INV-7 不拦）
+  useWorkflowStore.setState({ loadStatus: "loaded" });
 });
 
 describe("chartTheme —— PALETTE 迁移自 AgentHarness（铁律 5）", () => {
@@ -706,7 +708,7 @@ describe("ChartGroup —— 响应式 grid + IntersectionObserver 懒挂（SPEC 
     render(
       <ChartGroup
         label="g1"
-        charts={[{ ...LINE_PAYLOAD, label: "g1", title: "t1" }]}
+        charts={[{ identity: "t1", payload: { ...LINE_PAYLOAD, label: "g1", title: "t1" } }]}
       />,
     );
     // 展开（默认未折叠）→ 找到 grid 容器（border-t 内的 div）
@@ -724,7 +726,7 @@ describe("ChartGroup —— 响应式 grid + IntersectionObserver 懒挂（SPEC 
     render(
       <ChartGroup
         label="g1"
-        charts={[{ ...LINE_PAYLOAD, label: "g1", title: "t1" }]}
+        charts={[{ identity: "t1", payload: { ...LINE_PAYLOAD, label: "g1", title: "t1" } }]}
       />,
     );
     // chart-widget 立即出现（IO stub 同步触发）

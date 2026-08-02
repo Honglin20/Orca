@@ -26,12 +26,16 @@ afterEach(() => {
   cleanup();
   __testReset();
   useWorkflowStore.getState().unloadRun();
+  // SPEC audit-c: 测试 setup 默认进入 loaded 让 processEvent 可驱动（INV-7 不拦）
+  useWorkflowStore.setState({ loadStatus: "loaded" });
   vi.restoreAllMocks();
 });
 
 beforeEach(() => {
   __testReset();
   useWorkflowStore.getState().unloadRun();
+  // SPEC audit-c: 测试 setup 默认进入 loaded 让 processEvent 可驱动（INV-7 不拦）
+  useWorkflowStore.setState({ loadStatus: "loaded" });
 });
 
 describe("useElapsedTickActive —— 单一 timer 引用计数", () => {
@@ -86,6 +90,8 @@ describe("useElapsedNow —— tick 触发订阅者 re-render", () => {
 describe("selectWorkflowElapsed —— D5 snap 语义", () => {
   test("idle → null", () => {
     useWorkflowStore.getState().unloadRun();
+  // SPEC audit-c: 测试 setup 默认进入 loaded 让 processEvent 可驱动（INV-7 不拦）
+  useWorkflowStore.setState({ loadStatus: "loaded" });
     const s = useWorkflowStore.getState();
     expect(selectWorkflowElapsed(s, 1000)).toBeNull();
   });

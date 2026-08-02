@@ -75,9 +75,14 @@ function resetStore() {
     reasoningTokens: 0,
     lastSeqSeen: 0,
     nodesIndex: {},
+    seenSeqs: new Set<number>(),
     selectedNode: null,
     selectedSession: null,
     activeRunId: null,
+    loadStatus: "loaded",
+    loadError: null,
+    retryCount: 0,
+    historyLoadError: false,
   });
 }
 
@@ -89,9 +94,12 @@ describe("useWebSocket — D6 resume by seq", () => {
     vi.unstubAllGlobals();
   });
 
-  it("初始连接只发 subscribe；收到事件后 lastSeqSeen 推进", async () => {
+  // SPEC audit-c defer-RESUME：初始连接行为改——loadStatus="loaded" → onopen 立即 sendResume
+  // （非 subscribe）。subscribe 只在 reconnect 路径 + loaded/error 时作 server-restart fallback。
+  it("初始连接 loadStatus=loaded → 立即 sendResume（defer-RESUME）；事件推进 lastSeqSeen", async () => {
     vi.useFakeTimers();
     const { factory, lastSocket } = makeFakeSocket();
+    // resetStore 设 loadStatus="loaded"
     renderHook(() =>
       useWebSocket("runA", {
         createSocket: factory as unknown as (url: string) => WebSocket,
@@ -99,7 +107,6 @@ describe("useWebSocket — D6 resume by seq", () => {
       })
     );
 
-    // 触发 onopen（react effect 异步：先 await
     await act(async () => {
       vi.advanceTimersByTime(0);
     });
@@ -111,9 +118,11 @@ describe("useWebSocket — D6 resume by seq", () => {
     const sent = sock.sent.map((s) => JSON.parse(s));
     const subs = sent.filter((m) => m.type === "subscribe");
     const resumes = sent.filter((m) => m.type === "resume");
-    expect(subs.length).toBe(1);
-    expect(subs[0]).toEqual({ type: "subscribe", run_id: "runA" });
-    expect(resumes.length).toBe(0); // 初始连接不发 resume
+    // SPEC audit-c BLOCKER-1：loaded → onopen 立即 sendResume
+    expect(resumes.length).toBe(1);
+    expect(resumes[0]).toEqual({ type: "resume", run_id: "runA", since: 0 });
+    // initial mount 路径不双发（与 reconnect 区分，§3 INV-7 契约）
+    expect(subs.length).toBe(0);
 
     // 收到一个事件 seq=42 → lastSeqSeen=42
     const ev: WebEvent = {
@@ -129,6 +138,37 @@ describe("useWebSocket — D6 resume by seq", () => {
       sock.onmessage?.({ data: JSON.stringify(ev) } as MessageEvent);
     });
     expect(useWorkflowStore.getState().lastSeqSeen).toBe(42);
+  });
+
+  it("初始连接 loadStatus=loading → onopen 不发帧；listener 翻转 loaded 后 sendResume", async () => {
+    vi.useFakeTimers();
+    useWorkflowStore.setState({ loadStatus: "loading", activeRunId: "runA" });
+    const { factory, lastSocket } = makeFakeSocket();
+    renderHook(() =>
+      useWebSocket("runA", {
+        createSocket: factory as unknown as (url: string) => WebSocket,
+        wsUrl: "ws://test/ws",
+      })
+    );
+
+    await act(async () => {
+      vi.advanceTimersByTime(0);
+    });
+    const sock = lastSocket()!;
+    sock.onopen?.(new Event("open"));
+    await Promise.resolve();
+
+    // loading 态：onopen 不发任何帧（等 listener 回调）
+    expect(sock.sent.length).toBe(0);
+
+    // listener 翻转 loaded → fire sendResume + one-shot 自清
+    await act(async () => {
+      useWorkflowStore.setState({ loadStatus: "loaded" });
+    });
+    const sent = sock.sent.map((s) => JSON.parse(s));
+    const resumes = sent.filter((m) => m.type === "resume");
+    expect(resumes.length).toBe(1);
+    expect(resumes[0]).toEqual({ type: "resume", run_id: "runA", since: 0 });
   });
 
   it("重连发 resume(run_id, since=lastSeqSeen) + 兜底 subscribe（D6）", async () => {

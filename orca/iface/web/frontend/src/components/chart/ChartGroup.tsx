@@ -4,6 +4,10 @@
 // SPEC §5.4 identity（``title || chart_type+seq``）upsert 去重；ChartGroup 不再二次去重——
 // 否则空 title 的多 chart 会被压成最后一个（违反 identity 契约）。
 //
+// SPEC audit-c §4.2 E3/BLOCKER-1：签名改为 ``{ identity, payload }[]``，``key={chart.identity}``
+// （非 seq——合成 seq 在 loadFull 前不可知；identity 对 titled chart 跨 huge→full 稳定，
+// 无 title 允许 remount + partition dev warn）。
+//
 // 折叠：UI 交互态（local useState，非业务真相）—— 点击折叠/展开该组 charts。
 //
 // 布局：响应式 grid ``repeat(auto-fit, minmax(300px, 1fr))``（SPEC §5.4）—— 容器宽度
@@ -22,12 +26,17 @@ const GRID_STYLE: React.CSSProperties = {
   gap: 12,
 };
 
+interface ChartGroupItem {
+  identity: string;
+  payload: ChartPayload;
+}
+
 export function ChartGroup({
   label,
   charts,
 }: {
   label: string;
-  charts: ChartPayload[];
+  charts: ChartGroupItem[];
 }) {
   // collapsed 仅 UI 交互态（非业务真相，铁律 2）——与 gate 状态不同，折叠是纯展示层
   const [collapsed, setCollapsed] = useState(false);
@@ -51,11 +60,11 @@ export function ChartGroup({
       </button>
       {!collapsed && (
         <div className="border-t orca-border p-3" style={GRID_STYLE}>
-          {charts.map((c, i) => (
-            // 用 title 优先作 key（selectCharts identity 的稳定部分）；无 title 回退 index
+          {charts.map((c) => (
+            // SPEC audit-c E3/BLOCKER-1：key=identity（titled 跨 huge→full 稳定；无 title 允许 remount）
             <LazyChartWidget
-              key={c.title || `chart-${i}`}
-              payload={c}
+              key={c.identity}
+              payload={c.payload}
             />
           ))}
         </div>

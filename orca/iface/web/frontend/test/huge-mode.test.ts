@@ -287,6 +287,7 @@ describe("huge-mode + writable (web-attach Step1)", () => {
     expect(s.writable).toBe(true);
     expect(s.oldestSeqInWindow).toBe(0);
     expect(s.activeRunId).toBeNull();
+    expect(s.loadStatus).toBe("idle"); // SPEC audit-c M18
   });
 
   // ── AC §8.12 selector AST 守门：所有 selectX 第一参数 = state（单 store 入参） ──
