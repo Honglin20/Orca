@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-02] fix(run): resume/重放幂等裂缝修复（真实审查聚类 B）
+
+B2：`node_skipped` reducer 写 `context[N]=None` + live 去 `"skipped":True`（消除 live/resume 视图发散，破「单 tape 重放=同态」铁律）；B1：resume 起点改 `status∈{done,skipped}` 双判据 + 新 `replay_for_resume(tape)->(state,inputs,last_progressed)` 单 pass fallback 追踪 done/skipped（覆盖 `[node_completed/route_taken]` 与 `[node_skipped/route_taken]` 两窗口，不重跑已完成/skip 节点）；B3：删 `RunState.usage` 字段（保留 `UsageSummary` 类）+ `run_manager._extract_cost` 切 `projections.node_usage`（顺带修 `cost`→`cost_usd` 潜伏 typo）；`from_tape` 全 tape 读 4→2 真承诺；删死代码 `_inputs_from_tape`/`_find_last_done_node_name` + AST 守门。4 轮对抗 spec review 闭环 + coder 自我 review 0 BLOCKER，目标 suite 81 测试绿。Commits: `f627196` + `9fdb6b9`。详见 [release note](../releases/2026-08-02-audit-b.md)。
+
 ## [2026-08-02] fix(in-session): stop 判 run 终态 + dupe-check 活跃判据改 tape 派生（真实审查聚类 A）
 
 stop emit `workflow_cancelled` 前先 fail-loud 扫 tape 终态，已终态幂等短路（不追加第二终态事件污染 append-only tape）；新增 `orca/iface/in_session/_tape_probe.py`（reader：JSONDecodeError→raise TapeParseError / pydantic Event 校验失败→continue+warn / 双判据 `terminal_count`+`terminal_types_seen` 多类 raise 同类重复 warn 不阻塞）；`_find_active_run_for_wf` 活跃判据 marker≡活跃→tape 终态派生，候选坏 tape warn+skip 不阻塞无关 bootstrap；stop 控制流骨架 fd 释放统一外层 finally（防双释放 hazard），Tape/EventBus 仅 emit 分支内实例化。经 4 轮对抗 spec review 闭环 + coder 自我 review 0 BLOCKER，126 测试全绿。Commit: `08cb7b0`。详见 [release note](../releases/2026-08-02-audit-a.md)。
