@@ -203,3 +203,185 @@ def test_pidfile_no_run_id_arg_skips_run_id_check(tmp_path: Path, monkeypatch) -
         module_name="orca.iface.in_session.sidechain_daemon",
         run_id=None,
     ) is True
+
+
+# ── macOS / BSD 分支（SPEC D finding 3 / AC-3 / T6 / D-1）─────────────────────
+
+
+def _force_macos_branch(monkeypatch) -> None:
+    """让 ``Path("/proc").is_dir()`` 返 False，强制走 macOS ps 分支。"""
+    real_is_dir = Path.is_dir
+
+    def _fake_is_dir(self: Path) -> bool:
+        if str(self) == "/proc":
+            return False
+        return real_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", _fake_is_dir)
+
+
+def test_t6_macos_branch_alive_when_cmdline_matches(tmp_path, monkeypatch):
+    """T6（AC-3）：macOS 分支，``/proc`` 不存在时走 ``os.kill(pid,0)`` + ``ps`` cmdline 校验。"""
+    _force_macos_branch(monkeypatch)
+    pidfile = tmp_path / "mac.pid"
+    import os
+    pidfile.write_text(str(os.getpid()), encoding="utf-8")  # 当前进程 pid（活）
+
+    # mock subprocess.run 返一个含 module_name + --run-id 的 cmdline。
+    import subprocess
+    fake_cmdline = (
+        f"python -m orca.iface.in_session.sidechain_daemon "
+        f"--run-id run-X --tape /tmp/x.jsonl"
+    )
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = fake_cmdline
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _FakeCompleted())
+
+    assert pidfile_daemon_alive(
+        pidfile,
+        module_name="orca.iface.in_session.sidechain_daemon",
+        run_id="run-X",
+    ) is True
+
+
+def test_t6_macos_branch_pid_reuse_returns_false(tmp_path, monkeypatch):
+    """T6（AC-3 pid 复用）：macOS 分支 + ps 返不含 module_name 的 cmdline → False。"""
+    _force_macos_branch(monkeypatch)
+    pidfile = tmp_path / "mac-reuse.pid"
+    import os
+    pidfile.write_text(str(os.getpid()), encoding="utf-8")
+
+    import subprocess
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = "python -m pytest tests/some_test.py"  # 不含 module_name
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _FakeCompleted())
+
+    assert pidfile_daemon_alive(
+        pidfile,
+        module_name="orca.iface.in_session.sidechain_daemon",
+        run_id="run-X",
+    ) is False
+
+
+def test_t6_macos_branch_pid_not_found_returns_false(tmp_path, monkeypatch):
+    """T6（AC-3 pid 不存在）：macOS 分支 + ``os.kill(pid,0)`` 抛 ProcessLookupError → False。"""
+    _force_macos_branch(monkeypatch)
+    pidfile = tmp_path / "mac-dead.pid"
+    pidfile.write_text("99999999", encoding="utf-8")  # 几乎确定不存在的 pid
+
+    import os
+    real_kill = os.kill
+
+    def _fake_kill(pid, sig):
+        if pid == 99999999:
+            raise ProcessLookupError()
+        return real_kill(pid, sig)
+
+    monkeypatch.setattr(os, "kill", _fake_kill)
+
+    assert pidfile_daemon_alive(
+        pidfile,
+        module_name="orca.iface.in_session.sidechain_daemon",
+        run_id="run-X",
+    ) is False
+
+
+def test_t6_macos_branch_ps_subprocess_failure_returns_false(tmp_path, monkeypatch, caplog):
+    """T6 fail-path：macOS 分支 + ``ps`` 命令不可用（OSError）→ 保守 False + warning。
+
+    SPEC D §7：ps subprocess 异常必须 warning 提示（fail loud，便于诊断为何守护被判 dead）。
+    """
+    import logging as _logging
+    _force_macos_branch(monkeypatch)
+    pidfile = tmp_path / "mac-psfail.pid"
+    import os
+    pidfile.write_text(str(os.getpid()), encoding="utf-8")
+
+    import subprocess
+
+    def _boom(*a, **kw):
+        raise OSError("ps not found")
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+
+    with caplog.at_level(_logging.WARNING, logger="orca.iface.in_session._daemon_liveness"):
+        assert pidfile_daemon_alive(
+            pidfile,
+            module_name="orca.iface.in_session.sidechain_daemon",
+            run_id="run-X",
+        ) is False
+    # SPEC D §7：ps 异常必 warning 提示检查 ps 命令。
+    msgs = [r.getMessage() for r in caplog.records if r.levelno >= _logging.WARNING]
+    assert any("ps subprocess 异常" in m and "检查 ps" in m for m in msgs), (
+        f"ps 异常未记 warning（fail-path 未 loud）：{msgs}"
+    )
+
+
+def test_d1_macos_branch_run_id_as_substring_in_unrelated_arg_returns_false(
+    tmp_path, monkeypatch,
+):
+    """D-1（round-2 主审）：cmdline 含一个**与 run_id 无关但包含 run_id 作子串**的 arg → False。
+
+    场景：run_id=``a1b2``；另一 arg ``--foo=a1b2deadbeef`` 把 run_id 作前缀子串包含。
+    简单子串匹配 ``run_id in cmdline`` 会误判 True，但本实现要求 ``--run-id`` 同时在 cmdline
+    —— ``--run-id`` 不在 → False。
+    """
+    _force_macos_branch(monkeypatch)
+    pidfile = tmp_path / "mac-d1.pid"
+    import os
+    pidfile.write_text(str(os.getpid()), encoding="utf-8")
+
+    import subprocess
+
+    class _FakeCompleted:
+        returncode = 0
+        # cmdline 含 module_name + 含 run_id 子串的无关 arg，但**无** ``--run-id``。
+        stdout = (
+            "python -m orca.iface.in_session.sidechain_daemon "
+            "--foo=a1b2deadbeef"
+        )
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _FakeCompleted())
+
+    assert pidfile_daemon_alive(
+        pidfile,
+        module_name="orca.iface.in_session.sidechain_daemon",
+        run_id="a1b2",  # 期望 False：cmdline 无 ``--run-id``
+    ) is False
+
+
+def test_macos_branch_kill0_permission_still_runs_ps(tmp_path, monkeypatch):
+    """SPEC D §4.3 m3：``PermissionError`` → 视进程存在，进 cmdline 校验（不 short-circuit True）。"""
+    _force_macos_branch(monkeypatch)
+    pidfile = tmp_path / "mac-perm.pid"
+    import os
+    pidfile.write_text(str(os.getpid()), encoding="utf-8")
+
+    import os
+    import subprocess
+
+    def _fake_kill(pid, sig):
+        raise PermissionError("no permission")
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = "python -m orca.iface.in_session.sidechain_daemon --run-id run-Z"
+        stderr = ""
+
+    monkeypatch.setattr(os, "kill", _fake_kill)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _FakeCompleted())
+
+    assert pidfile_daemon_alive(
+        pidfile,
+        module_name="orca.iface.in_session.sidechain_daemon",
+        run_id="run-Z",
+    ) is True

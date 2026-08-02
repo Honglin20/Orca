@@ -93,6 +93,9 @@ class WebServer:
         # SPEC §13.2 B-4：注册 run_changed 广播回调（manager delete/cancel/attach 时调）。
         self._run_changed_cb = self._on_run_changed
         self._manager.add_run_changed_listener(self._run_changed_cb)
+        # SPEC D（audit-D finding 4）：控制帧 put_nowait QueueFull 累计计数。监控累积漂移用。
+        # 仅警告不阻断（前端轮询兜底，SPEC D9 / §13.1 U-3）。
+        self.dropped_control_frames: int = 0
 
     def _on_run_changed(self, run_id: str, action: str) -> None:
         """``manager`` 触发 run_changed → enqueue 到每条 WS 的出站 queue（控制帧广播）。
@@ -101,7 +104,9 @@ class WebServer:
         前端 ``processEvent`` 见 ``kind==="control"`` 即拒（不进 reducer）。
 
         本回调由 manager 在 delete/cancel/attach 后**同步**调用——直接 put_nowait 入各 WS
-        queue（writer task 异步消费）。queue 满或 WS 已断 → 静默丢（best-effort，轮询兜底）。
+        queue（writer task 异步消费）。**SPEC D I-7（fail-loud）**：queue 满 → ``logger.warning``
+        （与同文件 ``_pump`` / ``_handle_resume`` 对齐）+ 累加 ``dropped_control_frames``。
+        控制帧承载 delete/cancel/attach 真相对账，静默丢会让前端列表与 server 状态漂移且无日志线索。
         """
         frame = {
             "kind": "control",
@@ -113,8 +118,13 @@ class WebServer:
             try:
                 conn.queue.put_nowait(frame)
             except asyncio.QueueFull:
-                # 队列满 → 静默丢（前端轮询兜底，SPEC D9 / §13.1 U-3）
-                pass
+                # SPEC D I-7：控制帧丢必须可见（与 _pump / _handle_resume 一致）。
+                # 不阻断广播给其它连接；前端轮询兜底（SPEC D9 / §13.1 U-3）。
+                self.dropped_control_frames += 1
+                logger.warning(
+                    "ws run_changed 控制帧 queue full (run=%s, action=%s, conn=%s) — dropping",
+                    run_id, action, id(conn),
+                )
 
     def _touch_ws_activity(self) -> None:
         """重置 WS 活动计时（connect/disconnect 调用）。"""

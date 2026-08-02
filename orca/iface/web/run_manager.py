@@ -1164,6 +1164,25 @@ class RunManager:
             return
         await asyncio.wait_for(asyncio.shield(handle._task), timeout=timeout)
 
+    def has_nonterminal_inproc_runs(self) -> bool:
+        """本 manager 是否还有非终态的 in-process run（SPEC D finding 1 / I-1 只读 helper）。
+
+        ``orca run`` web-default 路径的 auto-exit 决策（``_wait_ws_autoexit``）调本方法：
+        返 True → 即便主 run 终态 + 无活跃 WS，也**不退**（防撕掉 ``POST /api/run`` 起的并发 run B）。
+
+        **只读派生视图**（非新增真相源）：遍历 ``_runs.values()``，``InProcessRunHandle._task``
+        非 None 且未 done → 有活 run。读 ``h._task``（私有属性）与现有 ``shutdown``（1181 行）/
+        ``wait_done``（1163 行）一致——已是既存破口，本方法非新增封装破口。
+
+        依赖方向：``cli/commands.py`` → ``RunManager``（iface 内，单向，符合铁律）。
+        """
+        return any(
+            isinstance(h, InProcessRunHandle)
+            and h._task is not None
+            and not h._task.done()
+            for h in self._runs.values()
+        )
+
     async def shutdown(self, timeout: float = 5.0) -> None:
         """收尾：等所有在跑 run 到终态（限时）+ stop 各自 gate_handler。
 

@@ -564,7 +564,7 @@ class TestServeAndRunInprocess:
         monkeypatch.setitem(sys.modules, "orca.iface.web.server", fake_server_mod)
 
         # _wait_ws_autoexit 抛 CancelledError 模拟 Ctrl-C。
-        async def _raise_cancel(web_server, n):
+        async def _raise_cancel(web_server, n, manager=None):
             raise asyncio.CancelledError()
 
         monkeypatch.setattr(
@@ -667,6 +667,14 @@ class TestSpawnAndAttachHelpers:
 class TestWSAutoexit:
     """WS 活动计时器：``_wait_ws_autoexit`` 单元测试（SPEC §0 D4 / §4 step4 / §8 AC5 负向）。"""
 
+    @staticmethod
+    def _no_active_manager():
+        """fake manager：无非终态 in-process run（``has_nonterminal_inproc_runs`` 恒 False）。"""
+        class _FakeManager:
+            def has_nonterminal_inproc_runs(self):
+                return False
+        return _FakeManager()
+
     def test_autoexit_returns_when_window_elapsed(self):
         """无活跃 WS + window 过 → 返回（允许 caller 退出）。"""
         from orca.iface.cli.commands import _wait_ws_autoexit
@@ -679,7 +687,9 @@ class TestWSAutoexit:
 
         # window=0.05s + last 1s 前 → 立即满足条件返回。
         async def _go():
-            await _wait_ws_autoexit(_FakeWebServer(offset=1.0), 0.05)
+            await _wait_ws_autoexit(
+                _FakeWebServer(offset=1.0), 0.05, self._no_active_manager(),
+            )
 
         start = time.monotonic()
         asyncio.run(_go())
@@ -695,7 +705,7 @@ class TestWSAutoexit:
                 self.active_ws_count = 0
 
         async def _go():
-            await _wait_ws_autoexit(_Fresh(), 0.4)
+            await _wait_ws_autoexit(_Fresh(), 0.4, self._no_active_manager())
 
         start = time.monotonic()
         asyncio.run(_go())
@@ -717,7 +727,8 @@ class TestWSAutoexit:
 
         async def _go():
             await asyncio.wait_for(
-                _wait_ws_autoexit(_ActiveWS(), 0.05), timeout=1.0,
+                _wait_ws_autoexit(_ActiveWS(), 0.05, self._no_active_manager()),
+                timeout=1.0,
             )
 
         # 活跃 WS → 永不自然返回 → asyncio.wait_for 超时抛 TimeoutError。
@@ -735,7 +746,9 @@ class TestWSAutoexit:
                 self.active_ws_count = 0
 
         async def _go():
-            await _wait_ws_autoexit(_JustDisconnected(), 0.05)
+            await _wait_ws_autoexit(
+                _JustDisconnected(), 0.05, self._no_active_manager(),
+            )
 
         start = time.monotonic()
         asyncio.run(_go())

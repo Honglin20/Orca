@@ -13,7 +13,7 @@
 - **D1 单 run 加载**：attach 一次一个 tape，不扫盘。
 - **D2 read-only 开 tape**：attacher **绝不** `Tape(resume=True)`（那是 append 模式，会抢外部写者 flock + 污染 seq）；用新 `tape_reader.replay(path)`（`open(mode="r")` 只读流式 yield Event）。
 - **D3 stream-on-demand（不 bulk replay）**：attach 注册 handle + 起 follow task；**不在 attach 时 bulk replay 全 tape**。client 经 `GET /events?...`（按 seq/窗口）拉取 → 服务端从 tape **流式 emit 到该 run 的 bus**（单写入路径 `bus.emit`），客户端 fold。
-- **D4 `orca run` web 默认生命周期**：in-process orchestrator（同 `POST /api/run`）+ 临时 serve（默认 7428，被占 → `GET /api/health` 探测：是 orca 则复用，否/不可达 → 选空闲端口起新 serve）+ `webbrowser.open(/runs/<id>)`（in-process 走 bus，不 attach）+ 阻塞到终态 + **WS 事件驱动计时器**（任一 WS connect/disconnect 重置；`now - last_ws_disconnect_at > N(默认15s, env ORCA_WEB_AUTOEXIT_SECONDS) AND run.terminal` → 退；`--stay` 保留）。
+- **D4 `orca run` web 默认生命周期**：in-process orchestrator（同 `POST /api/run`）+ 临时 serve（默认 7428，被占 → `GET /api/health` 探测：是 orca 则复用，否/不可达 → 选空闲端口起新 serve）+ `webbrowser.open(/runs/<id>)`（in-process 走 bus，不 attach）+ 阻塞到终态 + **WS 事件驱动计时器**（任一 WS connect/disconnect 重置；`now - last_ws_disconnect_at > N(默认15s, env ORCA_WEB_AUTOEXIT_SECONDS) AND run.terminal AND 无非终态 in-process run` → 退；`--stay` 保留）。第三 conjunct 由 SPEC D finding 1 / I-1 引入——防 auto-exit 撕掉 `POST /api/run` 起的并发 run B。
 - **D5 TUI 保留 opt-in**（`--tui`）；`--background` 不变。
 - **D6 RunHandle 双实现 + 单 registry**：`_runs: dict[str, RunView]`；`RunView` 只读协议 `{run_id, bus, state, status, source}`；`InProcessRunHandle(wf, gate_handler, chart_ingestor, ...)` 与 `AttachedRunHandle(bus, follow_task, terminal, source="attached")` 两实现。`_meta_from_handle`/`_teardown_handle` 对 attach 形态分支（`wf=None` 容错、跳过 sock unlink）。
 
@@ -76,7 +76,7 @@
   1. **端口**：探测 7428 `GET /api/health`（§5）；是 orca → 复用（把 run 注册进既有 server 的 RunManager）；否/不可达 → 选空闲端口起新 in-process serve。`--port` 显式指定且被占 → fail loud。
   2. in-process `RunManager.start_run(...)`（同 `POST /api/run`，run 在本进程；走 bus，不 attach）。
   3. `webbrowser.open(http://127.0.0.1:<port>/runs/<run_id>)`。
-  4. **WS 事件驱动 auto-exit**：服务端维护 `last_ws_disconnect_at`；任一 WS connect/disconnect 重置计时；`now - last_ws_disconnect_at > N(15s, env ORCA_WEB_AUTOEXIT_SECONDS) AND run.terminal` → 退。`--stay` 永不自动退。
+  4. **WS 事件驱动 auto-exit**：服务端维护 `last_ws_disconnect_at`；任一 WS connect/disconnect 重置计时；`now - last_ws_disconnect_at > N(15s, env ORCA_WEB_AUTOEXIT_SECONDS) AND run.terminal AND manager 内无非终态 in-process run` → 退。`--stay` 永不自动退。第三 conjunct 见 SPEC D finding 1（防撕并发 run B）。
   5. 退出码同既有（0/1/2）。
 - `--tui`：旧 Textual TUI（opt-in，保留）。`--background`：既有 detached headless（不变；监控走 `orca open`）。
 

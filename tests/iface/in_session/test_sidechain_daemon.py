@@ -804,3 +804,100 @@ def test_ensure_sidechain_daemon_respawns_when_dead(tmp_path, monkeypatch):
             except (ProcessLookupError, ValueError, OSError):
                 pass
             pidfile.unlink(missing_ok=True)
+
+
+# ── SPEC D finding 2：pidfile 原子写 + ownership unlink（AC-2 / T4 / T5）───────
+
+
+def test_t4_pidfile_atomic_write_content_roundtrip(tmp_path):
+    """T4（AC-2）：原子写 pidfile 后读回内容 == 写入 pid。"""
+    from orca.iface.in_session.sidechain_daemon import (
+        _write_pidfile_atomic,
+    )
+    pidfile = tmp_path / "atom.pid"
+    _write_pidfile_atomic(pidfile, 12345)
+    assert pidfile.read_text(encoding="utf-8") == "12345"
+
+
+def test_t4_pidfile_atomic_write_no_partial_file(tmp_path, monkeypatch):
+    """T4（AC-2 并发读端永不读到 partial）：``os.replace`` 前后读 pidfile 全路径必完整。
+
+    monkeypatch ``os.replace``：在 replace 前后插入 pidfile 读，断言内容要么是旧值要么是
+    新完整值，绝不 partial / 空文件 / 残留 tmp。
+    """
+    import os as _os
+    from orca.iface.in_session.sidechain_daemon import (
+        _write_pidfile_atomic,
+    )
+    pidfile = tmp_path / "race.pid"
+    pidfile.write_text("999", encoding="utf-8")  # 旧值
+
+    snapshots: list[str] = []
+    real_replace = _os.replace
+
+    def _snap_replace(src, dst):
+        # replace 前：pidfile 仍为旧值（tmp 文件存在但 rename 未发生）。
+        snapshots.append(pidfile.read_text(encoding="utf-8") if pidfile.is_file() else "<missing>")
+        real_replace(src, dst)
+        # replace 后：pidfile 已为新值。
+        snapshots.append(pidfile.read_text(encoding="utf-8"))
+
+    monkeypatch.setattr("orca.iface.in_session.sidechain_daemon.os.replace", _snap_replace)
+    _write_pidfile_atomic(pidfile, 777)
+    # replace 前=旧值(999) / replace 后=新值(777)；无 partial。
+    assert snapshots == ["999", "777"], f"读端读到非完整值：{snapshots}"
+    # tmp 文件已清理（不残留）。
+    assert not pidfile.with_suffix(pidfile.suffix + ".tmp").exists()
+
+
+def test_t5_unlink_skipped_when_pid_mismatch(tmp_path, caplog):
+    """T5（AC-2 ownership）：pidfile 内容 != self pid → 不删 + warning。
+
+    场景（C-1）：裸 ``pidfile.write_text("A")`` 写一个非 self 的 pid，模拟「B 接管」。
+    """
+    import logging
+    from orca.iface.in_session.sidechain_daemon import (
+        _unlink_pidfile_if_owner,
+    )
+    pidfile = tmp_path / "owner.pid"
+    # C-2：裸 write_text 写（不用 helper，免循环论证）。
+    pidfile.write_text("999999", encoding="utf-8")  # 非 self pid
+
+    self_pid = 12345  # 假 self pid（与 pidfile 内容不同）
+    with caplog.at_level(logging.WARNING, logger="orca.iface.in_session.sidechain_daemon"):
+        _unlink_pidfile_if_owner(pidfile, self_pid)
+
+    # pidfile 未删（ownership 不匹配）。
+    assert pidfile.is_file(), "ownership 不匹配时不应 unlink"
+    assert pidfile.read_text(encoding="utf-8") == "999999"
+    # warning 含「跳过 unlink」+ current/self pid。
+    msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("跳过 unlink" in m and "999999" in m and "12345" in m for m in msgs), (
+        f"ownership mismatch 未 warning：{msgs}"
+    )
+
+
+def test_t5_unlink_executes_when_pid_matches(tmp_path):
+    """T5（AC-2 ownership 正向）：pidfile 内容 == self pid → 删除。"""
+    from orca.iface.in_session.sidechain_daemon import (
+        _unlink_pidfile_if_owner,
+    )
+    pidfile = tmp_path / "match.pid"
+    pidfile.write_text("54321", encoding="utf-8")
+
+    _unlink_pidfile_if_owner(pidfile, 54321)
+    assert not pidfile.exists(), "ownership 匹配时应 unlink"
+
+
+def test_t5_unlink_handles_missing_pidfile(tmp_path, caplog):
+    """T5 fail-path：pidfile 已不存在 → warning + 不抛（ownership 跳过）。"""
+    import logging
+    from orca.iface.in_session.sidechain_daemon import (
+        _unlink_pidfile_if_owner,
+    )
+    pidfile = tmp_path / "ghost.pid"  # 不创建
+
+    with caplog.at_level(logging.WARNING, logger="orca.iface.in_session.sidechain_daemon"):
+        # 不应抛。
+        _unlink_pidfile_if_owner(pidfile, 11111)
+    assert not pidfile.exists()

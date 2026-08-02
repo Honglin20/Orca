@@ -1385,7 +1385,7 @@ async def _serve_and_run_inprocess(
         # 5) run 终态后：WS 驱动 auto-exit（除非 --stay）。
         autoexit_seconds = _web_autoexit_seconds()
         if not stay:
-            await _wait_ws_autoexit(web_server, autoexit_seconds)
+            await _wait_ws_autoexit(web_server, autoexit_seconds, manager)
         else:
             # --stay：serve 直到 Ctrl-C / 外部 should_exit。
             await serve_task
@@ -1430,14 +1430,27 @@ async def _wait_server_started(server, timeout: float = 5.0) -> None:
         await asyncio.sleep(0.05)
 
 
-async def _wait_ws_autoexit(web_server, autoexit_seconds: float) -> None:
-    """轮询 WS auto-exit 条件：``无活跃 WS AND now - last_ws_activity_at > N`` → 返回。
+async def _wait_ws_autoexit(
+    web_server, autoexit_seconds: float, manager=None,
+) -> None:
+    """轮询 WS auto-exit 条件：``无活跃 WS AND now - last_ws_activity_at > N AND
+    manager 内无非终态 in-process run`` → 返回。
 
-    SPEC §0 D4 / §4 step4 / §8 AC5 负向「有活跃 WS 不退」。窗口内 WS connect/disconnect
-    重置 ``last_ws_activity_at``（``WebServer`` 内部 touch）；``active_ws_count`` 由
-    ``WebServer`` 维护（connect++ / disconnect--）。本函数仅在 run 已终态后调；任一条件
-    不满足则继续等。**负向 AC**：只要 ``active_ws_count > 0``（有 WS 仍连着）→ 永不退。
+    SPEC §0 D4 / §4 step4 / §8 AC5 负向「有活跃 WS 不退」+ SPEC D finding 1 / I-1
+    「auto-exit 不越权撕并发 run」。窗口内 WS connect/disconnect 重置
+    ``last_ws_activity_at``（``WebServer`` 内部 touch）；``active_ws_count`` 由
+    ``WebServer`` 维护（connect++ / disconnect--）。本函数仅在主 run 已终态后调；
+    任一条件不满足则继续等。
+
+    **SPEC D I-1**：``manager`` 给出时（``orca run`` web-default 路径），若 manager 内还有
+    非终态 in-process run（``POST /api/run`` 起的并发 run B），即便主 run 终态 + 无活跃 WS
+    也**不退**——防 ``manager.shutdown`` 撕掉 B 的 task。第三条件阻挡退出时记 debug 日志
+    （含非终态 run 数 N），便于 AC-1 验证 + 生产诊断「为什么 orca run 不退」。``manager``
+    探测异常 → 视为「有活 run」（保守不退，让用户自己 Ctrl-C，而非撕掉并发 run）。
+
+    **负向 AC**：只要 ``active_ws_count > 0``（有 WS 仍连着）→ 永不退。
     """
+    _deferred_logged = False  # once-per-deferred-streak 节流（C-1，debug + warning 都走此）
     while True:
         now = time.monotonic()
         # 直接访问字段（fail-loud）：``WebServer.__init__`` 保证 ``active_ws_count`` 存在，
@@ -1446,7 +1459,43 @@ async def _wait_ws_autoexit(web_server, autoexit_seconds: float) -> None:
         if active == 0 and (
             now - web_server.last_ws_activity_at > autoexit_seconds
         ):
-            return
+            # SPEC D I-1：第三条件——manager 内无非终态 in-process run 才退。
+            if manager is None:
+                return
+            try:
+                has_active = manager.has_nonterminal_inproc_runs()
+            except Exception:  # noqa: BLE001 — 防御：保守不退（SPEC D §7 fail-path）
+                # C-1：warning 同 debug log 共用 ``_deferred_logged`` 节流，防日志风暴。
+                if not _deferred_logged:
+                    logger.warning(
+                        "has_nonterminal_inproc_runs 探测异常，auto-exit 保守延后（视为有活 run）",
+                        exc_info=True,
+                    )
+                has_active = True
+            if not has_active:
+                return
+            # 阻挡退出：记 debug 日志（once-per-deferred-streak 节流，C-1）。
+            if not _deferred_logged:
+                from orca.iface.web.run_manager import InProcessRunHandle
+                # 防御：manager 可能不暴露 ``_runs``（探测异常路径），取 N 失败 → 记 "?"。
+                try:
+                    n: int | str = sum(
+                        1
+                        for h in manager._runs.values()
+                        if isinstance(h, InProcessRunHandle)
+                        and h._task is not None
+                        and not h._task.done()
+                    )
+                except Exception:  # noqa: BLE001 — 计数仅诊断用，不阻断延后逻辑
+                    n = "?"
+                logger.debug(
+                    "auto-exit deferred: %s non-terminal in-process run(s) still active",
+                    n,
+                )
+                _deferred_logged = True
+        else:
+            # 退出条件不满足（active WS / window 未过）→ 重置 streak，下一轮再记。
+            _deferred_logged = False
         await asyncio.sleep(1.0)
 
 

@@ -88,6 +88,58 @@ def _sidechain_pidfile_path(run_id: str) -> Path:
     return Path(tempfile.gettempdir()) / f"orca-sidechain-{short}.pid"
 
 
+def _write_pidfile_atomic(pidfile: Path, pid: int) -> None:
+    """原子写 pidfile（SPEC D finding 2 / I-4）。
+
+    ``tmp + os.replace``：POSIX 原子 rename（Windows 同卷亦原子）。读端要么看到旧完整 pid、
+    要么看到新完整 pid，永不读到 partial。
+
+    Raises:
+        OSError: tmp 写失败（磁盘满 / 权限）—— 调用方决定是否 fail spawn（沿用现有 warning 语义）。
+        OSError: ``os.replace`` 失败（跨设备 —— 理论不会，tmp 与 pidfile 同目录）—— fail loud
+            让守护启动失败而非带病运行（SPEC D §7 fail-path）。
+    """
+    tmp = pidfile.with_suffix(pidfile.suffix + ".tmp")
+    try:
+        tmp.write_text(str(pid), encoding="utf-8")
+        os.replace(tmp, pidfile)
+    except OSError:
+        # fail loud（SPEC D §7）+ 清理残留 tmp（防 tmpdir 累积；tmp 路径固定下次会覆盖，
+        # 但严格 fail-loud + 资源干净原则下显式 unlink）。
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _unlink_pidfile_if_owner(pidfile: Path, pid: int) -> None:
+    """ownership 校验后 unlink pidfile（SPEC D finding 2 / I-5）。
+
+    读 pidfile 比对 ``pid``（``os.getpid()``）；匹配 → unlink；不匹配（已被更晚守护覆盖写）
+    → **不删**，仅记 warning。守护 unlink 自己的 pidfile 是 ownership 行为，不是「清理路径」。
+    防竞态：A 退到 finally 误删 B 的 pidfile → 稳定 respawn 链。
+    """
+    try:
+        current = pidfile.read_text(encoding="utf-8").strip()
+    except (FileNotFoundError, ValueError, OSError):
+        # pidfile 已被删 / 内容坏 / IO 错 —— 视作「不是我的」，跳过 unlink。
+        logger.warning(
+            "pidfile %s 读失败或不存在（self pid=%s），跳过 unlink",
+            pidfile, pid, exc_info=True,
+        )
+        return
+    if current == str(pid):
+        try:
+            pidfile.unlink(missing_ok=True)
+        except OSError:
+            logger.warning(
+                "pidfile %s unlink 失败（self pid=%s）", pidfile, pid, exc_info=True,
+            )
+    else:
+        logger.warning(
+            "pidfile %s 已被其它守护覆盖写（current=%s, self=%s），跳过 unlink",
+            pidfile, current, pid,
+        )
+
+
 def _sidechain_daemon_alive(run_id: str) -> bool:
     """探 sidechain 守护是否存活（pidfile + ``/proc/<pid>/cmdline`` 校验）。
 
@@ -477,9 +529,10 @@ def main() -> int:
     flock_path = _flock_path(tape_path)
 
     # 写 pidfile（供 cli._sidechain_daemon_alive 探测）。失败不 fail spawn（probe fallback dead）。
+    # SPEC D finding 2 / I-4：tmp + os.replace 原子写（防读端读到 partial）。
     pidfile = _sidechain_pidfile_path(args.run_id)
     try:
-        pidfile.write_text(str(os.getpid()), encoding="utf-8")
+        _write_pidfile_atomic(pidfile, os.getpid())
     except OSError:
         logger.warning(
             "run %s: 写 pidfile %s 失败（_ensure_sidechain_daemon 探测会误判 dead 触发 respawn）",
@@ -513,10 +566,8 @@ def main() -> int:
         pass
     finally:
         # 进程退出前清 pidfile（graceful 路径）。
-        try:
-            pidfile.unlink(missing_ok=True)
-        except OSError:
-            pass
+        # SPEC D finding 2 / I-5：ownership 校验——比对 pid 后才 unlink，防 A 误删 B 的 pidfile。
+        _unlink_pidfile_if_owner(pidfile, os.getpid())
     return 0
 
 
