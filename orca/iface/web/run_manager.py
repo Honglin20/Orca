@@ -175,7 +175,7 @@ class RunMeta:
 
     run_id: str
     workflow_name: str
-    status: RunStatus
+    status: RunStatus  # hint: 权威在 tape（in-memory 分支取 handle.status，非原子窗口）
     progress: str
     cost: float
     elapsed: float
@@ -195,7 +195,7 @@ class RunSummary(BaseModel):
     workflow_name: str
     project_id: str | None = None
     project_name: str | None = None
-    status: RunStatus
+    status: RunStatus  # hint: 权威在 tape（attached/legacy 分支从 tape fold；in-memory 取 handle.status）
     progress: str = "?"
     cost: float = 0.0
     elapsed: float = 0.0
@@ -965,7 +965,15 @@ class RunManager:
         """返回所有 run 的元数据（**不含事件**，懒加载红线 SPEC §0.1 铁律 2）。
 
         元数据从 ``replay_state(handle.tape)`` 派生（progress/cost），保证与唯一真相源
-        一致（§9 决策 6）。status 取 ``handle.status``（实时）。
+        一致（§9 决策 6）。status 取 ``handle.status``（**实时 hint**，非权威；权威 status 在
+        tape——见 ``_meta_from_handle`` docstring 的 hint 语义说明）。
+
+        **SPEC E-2 / C1 perf 豁免**：in-memory 分支的 ``status`` / ``event_count`` 取 handle
+        字段（handle 不持有 event_count → 字面量 0）属 perf 占位符，``progress`` / ``cost`` /
+        ``elapsed`` 仍走 ``replay_state(handle.tape)``。emit 终态事件落 tape 与 ``handle.status``
+        赋值之间存在**非原子 transient 窗口**——同一 run 在「live」与「重连后（attached 走
+        ``_summary_from_tape`` tape fold）」可能 transient 不一致。设计 trade-off（实时性 >
+        原子性），非 bug。
         """
         metas: list[RunMeta] = []
         for handle in self._runs.values():
@@ -1232,6 +1240,15 @@ class RunManager:
         ``replay_state`` 失败（tape 损坏等罕见）→ progress 退化为 "?/?"，status 仍取
         handle.status（fail loud 记 warning，不崩 list_runs）。
 
+        **hint 语义（SPEC E-2 / C1 perf 豁免）**：``status`` 取 ``handle.status`` 是**实时
+        hint**，**权威 status 永远在 tape**（``_summary_from_tape`` 走 tape fold 才是真相）。
+        in-memory 分支（``list_runs`` / ``discover_runs`` 内存段）的 ``status`` / ``event_count``
+        取 handle 字段属 C1 perf 占位符（handle 不持有 event_count → 字面量 0），``progress`` /
+        ``cost`` / ``elapsed`` 仍走 ``replay_state(handle.tape)``。emit 终态事件落 tape 与
+        ``handle.status`` 赋值之间存在**非原子 transient 窗口**（asyncio 调度），同一 run 在
+        「live」与「重连后（attached 走 tape fold）」可能 transient 不一致——这是设计 trade-off
+        （实时性 > 原子性），非 bug。
+
         attached 形态（``wf=None``）：topology 不存在，``total`` 从 tape
         ``workflow_started.data.topology.nodes`` 推导（若有效）或省略（``?``）；不读 ``wf``。
         """
@@ -1258,7 +1275,11 @@ class RunManager:
             cost = _extract_cost(handle.tape)
             workflow_name = state.workflow_name or wf_name_fallback
         except Exception:  # noqa: BLE001 — tape 读失败不应崩 list_runs
-            logger.warning("run %s replay 失败，元数据退化", handle.run_id, exc_info=True)
+            # AC8b：稳定 grep 锚点（run_id + ``replay-degraded``），CI/跨版本检测。
+            logger.warning(
+                "run %s replay 失败，元数据退化（replay-degraded）",
+                handle.run_id, exc_info=True,
+            )
             progress = "?" if wf_total is None else f"?/{wf_total}"
             cost = 0.0
             workflow_name = wf_name_fallback
@@ -1346,17 +1367,34 @@ class RunManager:
                 )
 
     def discover_runs(self) -> list[RunSummary]:
-        """SPEC §13 §5.2 D5 + M-5 + M-12：跨项目 discovery。
+        """SPEC §13 §5.2 D5 + M-5 + M-12 + SPEC E（单 tape 真相源）：跨项目 discovery。
 
         步骤：
           1. 读注册表 → 拿到所有注册项目根。
           2. 每个存在项目扫 ``runs/*.jsonl``（派生缓存 ``<project>/runs/.orca-meta-cache.json``
-             按 mtime/size 校验，P0）→ 抽 RunSummary。
-          3. 合并内存 live run（in-process + attached）。
-          4. legacy ``~/.orca/runs/*.json`` → source=legacy（project_id=None）。
+             按 mtime/size 校验，P0）→ 抽 RunSummary（走 ``_summary_from_tape`` tape fold）。
+          3. 合并内存 live run（in-process + attached）—— **hint 通道**：``status`` 取
+             ``handle.status``（实时 hint），权威仍在 tape；``progress`` / ``cost`` / ``elapsed``
+             仍走 ``replay_state(handle.tape)``。
+          4. legacy ``~/.orca/runs/*.json`` → source=legacy（project_id=None），**与 attached
+             同款 ``_summary_from_tape`` tape fold**（SPEC E-1：消除 legacy 字面量分支）。
           5. 重建 ``_run_path_index``（M-12）。
 
-        坏 tape 跳过 + warn（R6 fail loud 但不崩列表）。
+        **dedup（SPEC E2 / P1 / AC9）**：``seen_ids: set[str]`` 跨三分支（attached / in-memory /
+        legacy）**均显式 add**，无分支靠注释或隐式 skip 兜底。
+
+        **三分支机制故意非对称（SPEC E10 / N5）**——优先级 in-memory > attached > legacy：
+          - in-memory（live 权威）：无条件 overwrite summaries + new_index。
+          - attached（中间）：skip-if-in-self._runs（live 已注册）+ skip-if-in-seen_ids。
+          - legacy（最弱）：skip-if-in-seen_ids + new_index 仅在未占时写入。
+        禁止实现期「统一」为同机制（会破坏优先级）。
+
+        **hint 语义（SPEC E-2 / C1）**：in-memory 分支的 ``status`` / ``event_count`` 取 handle
+        字段属 perf 豁免，**权威 status 在 tape**；attached / legacy 分支从 tape fold 派生。
+        emit 终态事件落 tape 与 ``handle.status`` 赋值之间的**非原子 transient 窗口**可能让
+        同一 run 在 live 与重连后 transient 不一致（设计 trade-off）。
+
+        坏 tape / 缺失 / 相对路径 → skip + warn（R6 fail loud 但不崩列表，AC4/AC5）。
         """
         summaries: list[RunSummary] = []
         # 注册表读：失败（corrupt）→ 空 dict 继续（fail loud 由 list_registered 决定，此处不崩）。
@@ -1367,6 +1405,10 @@ class RunManager:
             registered = {}
 
         new_index: dict[str, tuple[str | None, Path, str | None]] = {}
+        # SPEC E2 / P1：跨三分支共享 dedup（attached / in-memory / legacy 均显式 add）。
+        seen_ids: set[str] = set()
+
+        # --- attached 分支（注册项目 runs/*.jsonl）---
         for pid, meta in registered.items():
             root_str = meta.get("path")
             name = meta.get("name") or "<unnamed>"
@@ -1382,7 +1424,7 @@ class RunManager:
                         tape_path, project_id=pid, project_name=name,
                         source="attached",
                     )
-                except Exception:  # noqa: BLE001 — 坏 tape skip+warn
+                except Exception:  # noqa: BLE001 — 坏 tape skip+warn（外层「discovery skip」语义）
                     logger.warning(
                         "discover_runs: tape 解析失败跳过 %s", tape_path, exc_info=True,
                     )
@@ -1392,10 +1434,13 @@ class RunManager:
                 # 内存 live run 优先（status 更实时）；attached 同 tape 不重复入列表。
                 if summary.run_id in self._runs:
                     continue
+                if summary.run_id in seen_ids:  # E2：显式 dedup（同 tape 多项目 glob 命中）
+                    continue
+                seen_ids.add(summary.run_id)
                 summaries.append(summary)
                 new_index[summary.run_id] = (pid, tape_path, name)
 
-        # 内存 live run（in-process + attached 已注册的）。
+        # --- in-memory 分支（live 权威：无条件 overwrite summaries + new_index）---
         for handle in self._runs.values():
             try:
                 meta = self._meta_from_handle(handle)
@@ -1403,25 +1448,28 @@ class RunManager:
                 continue
             tp = _handle_tape_path(handle)
             project_id, project_name = self._lookup_project_for_handle(handle, tp)
+            # E2：显式 dedup（理论上 attached 已被 skip-if-in-self._runs 兜底，此处防御
+            # _runs 内部重复 handle 极端情况）。
+            seen_ids.add(handle.run_id)
             summaries.append(
                 RunSummary(
                     run_id=handle.run_id,
                     workflow_name=meta.workflow_name,
                     project_id=project_id,
                     project_name=project_name,
-                    status=meta.status,
+                    status=meta.status,  # hint: 权威在 tape（C1 perf 豁免）
                     progress=meta.progress,
                     cost=meta.cost,
                     elapsed=meta.elapsed,
                     started_at=handle.started_at,
-                    event_count=0,
+                    event_count=0,  # C1 perf 占位符（handle 不持有 event_count）
                     source="in-process" if isinstance(handle, InProcessRunHandle) else "attached",
                 )
             )
             if tp is not None:
-                new_index[handle.run_id] = (project_id, tp, project_name)
+                new_index[handle.run_id] = (project_id, tp, project_name)  # 无条件 overwrite
 
-        # legacy ~/.orca/runs/*.json（旧 BgRunMeta）
+        # --- legacy 分支（~/.orca/runs/*.json 旧 BgRunMeta；SPEC E-1：改走 _summary_from_tape）---
         # 铁律：web 禁 import cli；本处用本地 helper 复刻 ``bg_runner.list_all_meta`` 的
         # 扫描语义（读 ``~/.orca/runs/*.json`` → 简化 meta dict），不引入 cli 依赖。
         try:
@@ -1430,28 +1478,48 @@ class RunManager:
             legacy_metas = []
         for lm in legacy_metas:
             tape_path = Path(getattr(lm, "tape_path", "") or "")
-            try:
-                stat = tape_path.stat()
-                _ = stat.st_size
-            except OSError:
-                # legacy 元数据存但 tape 不在 → 仍展示（前端可看到 stale）
-                pass
-            summaries.append(
-                RunSummary(
-                    run_id=lm.run_id,
-                    workflow_name=Path(getattr(lm, "yaml_path", "") or "legacy").stem
-                    or "legacy",
-                    project_id=None,
-                    project_name="Legacy",
-                    status="cancelled",
-                    progress="?",
-                    cost=0.0,
-                    elapsed=0.0,
-                    started_at=getattr(lm, "started_at", None),
-                    event_count=0,
-                    source="legacy",
+            # AC4：相对路径视为不可定位（即便 cwd 下有同名文件，原始 spawn 目录已丢）。
+            if not tape_path.is_absolute():
+                logger.warning(
+                    "legacy run %s tape 路径非绝对（视为不可定位）：%s",
+                    getattr(lm, "run_id", "?"), tape_path,
                 )
-            )
+                continue
+            if not tape_path.is_file():
+                logger.warning(
+                    "legacy run %s tape 缺失：%s",
+                    getattr(lm, "run_id", "?"), tape_path,
+                )
+                continue
+            try:
+                summary = self._summary_from_tape(
+                    tape_path, project_id=None, project_name="Legacy", source="legacy",
+                    warn_run_id=lm.run_id,
+                )
+            except Exception:  # noqa: BLE001 — 外层「discovery skip」语义
+                # 注：corrupt tape 已被 _summary_from_tape 内层 swallow + warn（N1），
+                # 此处仅兜底 _scan_tape_timebounds / RunSummary 构造等后段异常。
+                logger.warning(
+                    "legacy run %s tape 解析失败 skip：%s",
+                    getattr(lm, "run_id", "?"), tape_path, exc_info=True,
+                )
+                continue
+            if summary is None:
+                continue  # 0 有效事件 / 空 tape → skip（已由 _summary_from_tape 处理）
+            # E5 / AC10：lm.run_id 三源（data.run_id / meta_file.stem / fallback），
+            # 与 tape_path.stem 不一致时以 tape 为真相（覆盖 lm.run_id）+ warn。
+            if summary.run_id != lm.run_id:
+                logger.warning(
+                    "legacy meta run_id mismatch: meta=%s tape_stem=%s (using tape)",
+                    lm.run_id, summary.run_id,
+                )
+            if summary.run_id in seen_ids:  # E2：legacy dedup（撞 attached/in-memory → skip）
+                continue
+            seen_ids.add(summary.run_id)
+            summaries.append(summary)
+            # N5：legacy 最低优先级——仅在更优先分支未占时写入 new_index。
+            if summary.run_id not in new_index:
+                new_index[summary.run_id] = (None, tape_path, "Legacy")
 
         self._run_path_index = new_index
         return summaries
@@ -1616,6 +1684,7 @@ class RunManager:
         project_id: str | None,
         project_name: str | None,
         source: str,
+        warn_run_id: str | None = None,
     ) -> RunSummary | None:
         """从单 tape 文件派生 RunSummary（discovery 用，部分坏 tape → None + warn）。
 
@@ -1625,10 +1694,27 @@ class RunManager:
 
         progress 从 ``overview.agents``（node_status 派生）算 done/total；elapsed 从
         workflow_started.timestamp 到终态事件 timestamp（或 now）算（code-reviewer M-3）。
+
+        ``warn_run_id``（可选）：caller 已知的 meta-level run_id（如 legacy ``lm.run_id``），
+        仅用于 corrupt warn 锚点（含该值时消息同时含 run_id + tape path，便于稳定 grep）。
+        ``RunSummary.run_id`` 仍以 ``tape_path.stem`` 为权威（返回时已覆盖）。
         """
         try:
             count, _, _, overview_data = self._scan_meta_overview_cached(tape_path)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 — corrupt tape → warn + None（fail loud，AC5/N1）
+            # N1：内层 except 必 warn（含 tape path 字符串，便于稳定 grep）。
+            # 否则外层 discover_runs 的 except 永不触发（被此处吞），AC5 warning 不可达。
+            # MAJOR-1 闭环：caller 传入 warn_run_id（如 legacy lm.run_id）时一并嵌入，
+            # 解决 lm.run_id ≠ tape_path.stem 时按 run_id grep 不到该 warning 的可观测缺口。
+            if warn_run_id is not None:
+                logger.warning(
+                    "tape 概览扫描失败（视为 corrupt skip）：run_id=%s tape=%s",
+                    warn_run_id, tape_path, exc_info=True,
+                )
+            else:
+                logger.warning(
+                    "tape 概览扫描失败（视为 corrupt skip）：%s", tape_path, exc_info=True,
+                )
             return None
         if count == 0:
             # 0 有效事件（空 tape 或坏 tape）→ skip
