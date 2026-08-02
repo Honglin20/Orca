@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-02] fix(web/in-session): 并发守护竞态修复（真实审查聚类 D）
+
+`orca run` web-default 的 `_wait_ws_autoexit` 加第三条件 `AND 无非终态 in-process run`（新 `RunManager.has_nonterminal_inproc_runs() -> bool` 只读 helper），防主 run 终态后 auto-exit 撕掉用户在 web UI 起的并发 run B（架构问题：auto-exit 决策权限越界到整个进程生命周期）；sidechain pidfile 改原子写（tmp+`os.replace`）+ 退出 ownership 比对再 unlink（防级联 respawn）；`_daemon_liveness` 加 macOS 分支（`os.kill(pid,0)` + `ps -o args=` 子串匹配，kill-0≠活 zombie 仍响应 cmdline mandatory，不引 psutil）；`ws_handler._on_run_changed` QueueFull 加 warn（仅帧 payload，`_cleanup` None-sentinel 除外）。**M1 行为变更**（并发 run 卡 gate 永不终态 → 进程不再 auto-exit 撕 B，需 Ctrl-C）+ 上游 `web-attach-and-default-spec.md` 第三 conjunct 勘误。round-2 pass-with-minor-caveats + R-1..R-4 裁定，coder 自我 review 0 BLOCKER，38 测试绿。Commit: `c0cdd23`。详见 [release note](../releases/2026-08-02-audit-d.md)。
+
 ## [2026-08-02] fix(web): 前端 fail-loud + defer-RESUME + Bug2 修复（真实审查聚类 C）
 
 四处 loader（loadRun/loadRunWithMeta/loadFull/loadEarlierChunk）HTTP 非200 / parse 失败 / `!Array.isArray(json)` → 用户可见退避重试（3 次）+ `loadError` 错误态（**= Bug2 前端根因**，非 `console.error+return` 静默）；**INV-7 defer-RESUME**：initial-load loaded/error → `sendResume since=lastSeqSeen`（subscribe forward-only，只有 resume 重放 seq>since）+ per-socket `resumeSent` dedup + reconnect 保留 `sendSubscribe` 作 server-restart lazy-mount fallback（reverse A5：`_handle_resume` handle=None short-circuit，唯一 `ensure_attached` 在 `_handle_subscribe`）；listener `useEffect` 顶层注册 + one-shot 自清；ChartRenderer `partitionCharts` cast+reject + **ErrorBoundary**（LazyChartWidget 内/ChartWidget 外）+ ChartGroup `key={chart.identity}`；`seenSeqs: Set` + `enableMapSet` O(1) 去重收进 refold；`retryCount` 进 store + 退避期 loading 叠加非阻塞 retry-banner；AbortController + `moduleEpoch` 防 A→B→A 陈旧 fetch 污染。7 轮对抗 spec review PASS + coder 两轮自我 review 0 BLOCKER，384 测试绿（31 新）。Commits: `ccb8d7a` + `6aa7d5f`。详见 [release note](../releases/2026-08-02-audit-c.md)。
