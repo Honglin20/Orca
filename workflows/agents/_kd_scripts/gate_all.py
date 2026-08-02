@@ -131,7 +131,7 @@ def _run_gate_for_variant(
     dummy_json = json.dumps(dummy_input)
     knobs_json = json.dumps(knobs)
 
-    # tune_latency（最小缩量；HI-2 seed / HI-5 cache / HI-13 median+std）
+    # tune_latency（最小缩量；固定 seed / 结果缓存 / median+std）
     rc, out, err = run_subproc([
         sys.executable, os.path.join(ctx["kd_scripts_dir"], "tune_latency.py"),
         "--variant_path", variant_path, "--build_fn", build_fn,
@@ -160,7 +160,7 @@ def _run_gate_for_variant(
     lat_std = float(parse_key(out, "LATENCY_MS_STD") or 0)
     accepted_cfg = json.loads(cfg_str)
 
-    # distill_dispatch（BLK-17 确定性门）
+    # distill_dispatch（确定性门）
     rc2, out2, err2 = run_subproc([
         sys.executable, os.path.join(ctx["kd_scripts_dir"], "distill_dispatch.py"),
         "--tune_status", tune_status,
@@ -248,7 +248,7 @@ def _main() -> int:
 
     print(f"[gate] {len(all_variants)} 变体，串行 gate 开始", file=sys.stderr)
     if len(all_variants) == 0:
-        # 空 KB 静默 SUCCESS 是隐藏 bug（code-reviewer R3）：用户 99% 是 ORCA_KB_DIR 指错 /
+        # 空 KB 静默 SUCCESS 是隐藏 bug：用户 99% 是 ORCA_KB_DIR 指错 /
         # families/receiver/ 无 .py。stderr WARN 让用户能定位，不静默「N_ACCEPTED:0」误以为 workflow 健康。
         print(
             f"[gate] WARN: receiver_dir={receiver_dir} 下无 .py 变体（ORCA_KB_DIR 指错？"

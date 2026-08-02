@@ -1,4 +1,4 @@
-"""distill_dispatch.py —— BLK-17 确定性 gate：据 selector.tune_status 决定 distill 动作。
+"""distill_dispatch.py —— 确定性 gate：据 selector.tune_status 决定 distill 动作。
 
 为什么需要：distill 节点对 FAIL_latency 变体应 **no-op**（不训练，直接出 status=FAIL_latency）。
 若让 LLM 自行判断，可能误 emit SUCCESS（跳训练）或误 emit FAIL_latency（对 tune-ACCEPTED 变体），
@@ -34,7 +34,7 @@ def dispatch(tune_status: str) -> str:
 
 
 def _main() -> int:
-    p = argparse.ArgumentParser(description="BLK-17 distill 确定性 gate（noop|train）")
+    p = argparse.ArgumentParser(description="distill 确定性 gate（noop|train）")
     p.add_argument("--tune_status", required=True,
                    help="selector.output.tune_status（ACCEPTED|FAIL_latency）")
     args = p.parse_args()

@@ -1,19 +1,19 @@
-"""ledger_reducer.py —— Curator 确定性核心 reducer（草稿 §3 / §11 / §9.2）。
+"""ledger_reducer.py —— Curator 确定性核心 reducer。
 
-职责（草稿 struct-curator agent.md 逐条）：
-  1. append ledger.jsonl（§11.1 schema，timestamp 永远 null）
-  2. 严格模式（§9.2）：reject_hyperparam_only=true 且 tag=hyperparam → status=REJECT_struct
-  3. champion ratchet（§3 step 6）：**全局** min-latency 且 accuracy 达标的 candidate
-  4. explore/exploit 二值路由（§3 step 8）：本轮新 champion → exploit；否则 → explore
+职责（struct-curator agent.md 逐条对应）：
+  1. append ledger.jsonl（timestamp 永远 null）
+  2. 严格模式：reject_hyperparam_only=true 且 tag=hyperparam → status=REJECT_struct
+  3. champion ratchet：**全局** min-latency 且 accuracy 达标的 candidate
+  4. explore/exploit 二值路由：本轮新 champion → exploit；否则 → explore
   5. continue_loop 决策：达标 → champion_met；round ≥ max_rounds → max_rounds；否则 true
 
-**纯函数式、确定性**（[[deterministic-over-model-mediated]]）：
+**纯函数式、确定性**：
   - 读 ledger.jsonl + champions.jsonl + 本轮 candidate
   - 写 ledger.jsonl（append）+ champions.jsonl（仅新 champion 时 append）
   - stdout JSON 输出 curator output_schema 字段
   - **不读时钟、不读随机、不调 LLM、不调网络**
 
-champion 读取范围 = 全局（跨 path，为 §8 多路径预留）：从 ledger 取全局 min-latency
+champion 读取范围 = 全局（跨 path，为多路径预留）：从 ledger 取全局 min-latency
 且 accuracy 达标（SUCCESS & met_accuracy）的 candidate，**不限于本 path**。
 
 CLI：
@@ -66,7 +66,7 @@ from typing import Any
 
 # ── 常量 ────────────────────────────────────────────────────────────────────
 
-# ledger.jsonl 每行必备字段（§11.1）。
+# ledger.jsonl 每行必备字段。
 _LEDGER_REQUIRED = (
     "id",
     "parent",
@@ -82,10 +82,10 @@ _LEDGER_REQUIRED = (
     "diff_summary",
     "hypothesis",
 )
-# champions.jsonl 每行必备字段（§11.2）。
+# champions.jsonl 每行必备字段。
 _CHAMPIONS_REQUIRED = ("round", "id", "latency_ms", "accuracy", "delta_vs_baseline_ms", "snapshot")
 
-# status 合法值（§11.1 / §9.2）。
+# status 合法值。
 _LEDGER_STATUS = {
     "SUCCESS",
     "FAIL_latency",
@@ -93,10 +93,10 @@ _LEDGER_STATUS = {
     "FAIL_export",
     "REJECT_struct",
 }
-# tag 合法值（§9.1）。
+# tag 合法值。
 _TAG_VALUES = {"structural", "hyperparam", "mixed"}
 
-# 算 SUCCESS 且 met_accuracy 才能当 champion（§3 step 6 / §4）。
+# 算 SUCCESS 且 met_accuracy 才能当 champion。
 _CHAMPION_OK_STATUS = {"SUCCESS"}
 
 
@@ -188,7 +188,7 @@ def _validate_candidate(cand: dict[str, Any]) -> None:
 
 
 def _current_champion(champions: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """当前 champion = champions.jsonl 最后一行（family_detect 已 seed baseline）。"""
+    """当前 champion = champions.jsonl 最后一行（setup 已 seed baseline）。"""
     if not champions:
         return None
     return champions[-1]
@@ -199,7 +199,7 @@ def _global_best_champion(
 ) -> dict[str, Any]:
     """全局最优 champion：跨所有 path 从 ledger 取 SUCCESS & met_accuracy 的 min-latency。
 
-    没有任何 SUCCESS 达标 candidate → 返回 baseline（family_detect seed 的 round=0 baseline）。
+    没有任何 SUCCESS 达标 candidate → 返回 baseline（setup seed 的 round=0 baseline）。
     平局（多个 candidate 同 latency）→ 取最早出现的（稳定：FIFO tiebreak，确定性）。
     """
     candidates = [
@@ -216,7 +216,7 @@ def _global_best_champion(
 def _to_champion_record(
     champion_entry: dict[str, Any], baseline_latency_ms: float
 ) -> dict[str, Any]:
-    """把 ledger entry（或 baseline seed）规范成 champions.jsonl 一行（§11.2 schema）。"""
+    """把 ledger entry（或 baseline seed）规范成 champions.jsonl 一行。"""
     return {
         "round": champion_entry.get("round", 0),
         "id": champion_entry["id"],
@@ -230,7 +230,7 @@ def _to_champion_record(
 
 
 def _structural_ratio(ledger: list[dict[str, Any]]) -> float:
-    """本轮为止 ledger 中 tag=structural 占比（§9.2 软配额诊断）。"""
+    """本轮为止 ledger 中 tag=structural 占比（软配额诊断）。"""
     if not ledger:
         return 0.0
     n_struct = sum(1 for e in ledger if e.get("tag") == "structural")
@@ -266,7 +266,7 @@ def reduce_ledger(
 
     # baseline champion（若 champions.jsonl 未 seed，用入参构造一个虚拟 baseline）。
     if champions:
-        baseline_champion = champions[0]  # 首行 = family_detect seed 的 round=0 baseline
+        baseline_champion = champions[0]  # 首行 = setup seed 的 round=0 baseline
     else:
         baseline_champion = {
             "round": 0,
@@ -280,7 +280,7 @@ def reduce_ledger(
 
     cur_champion = _current_champion(champions) or baseline_champion
 
-    # ── Step 1：构造 ledger entry（§11.1），timestamp=null（脚本禁用 Date.now）──────
+    # ── Step 1：构造 ledger entry，timestamp=null（脚本禁用 Date.now）──────
     status_final = candidate["status"]
     if reject_hyperparam_only and candidate["tag"] == "hyperparam":
         status_final = "REJECT_struct"  # §9.2 严格模式
@@ -303,9 +303,9 @@ def reduce_ledger(
         "onnx": candidate["onnx"],
         "diff_summary": candidate["diff_summary"],
         "hypothesis": candidate["hypothesis"],
-        "timestamp": None,  # §11.1 注：由调度器写，脚本内禁用 Date.now
+        "timestamp": None,  # 注：由调度器写，脚本内禁用 Date.now
     }
-    # plan sprightly-questing-donut §2.2：direction_id 可选透传（hypothesizer 声明的 KB direction，
+    # direction_id 可选透传（hypothesizer 声明的 KB direction，
     # 供 direction_coverage.py 算 tried/untried）。不在 _LEDGER_REQUIRED（旧 ledger 向后兼容）。
     did = candidate.get("direction_id")
     if isinstance(did, str) and did.strip():
@@ -342,7 +342,7 @@ def reduce_ledger(
     else:
         champion_record = _to_champion_record(champion_now, baseline_latency_ms)
 
-    # ── Step 5：explore/exploit 二值路由（§3 step 8）──────────────────────────
+    # ── Step 5：explore/exploit 二值路由 ──────────────────────────
     route_mode = "exploit" if new_champion_this_round else "explore"
 
     # ── Step 2（诊断）：structural 配额软告警（不驳回，只标记）───────────────────
@@ -351,7 +351,7 @@ def reduce_ledger(
     if ratio_after < structural_slot_ratio:
         slot_warning = (
             f"structural 占比 {ratio_after:.2f} < 配额 {structural_slot_ratio}；"
-            "下轮建议补结构假设（软配额，§9.2）"
+            "下轮建议补结构假设（软配额）"
         )
 
     # ── Step 6：continue_loop 决策（驱动 DAG 循环）──────────────────────────
@@ -415,7 +415,7 @@ def _main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Curator 确定性 reducer：append ledger + champion ratchet + explore/exploit "
-            "+ continue_loop 决策（草稿 §3/§11/§9.2）。"
+            "+ continue_loop 决策。"
         )
     )
     parser.add_argument("--ledger", required=True, help="ledger.jsonl 路径")
@@ -439,7 +439,7 @@ def _main() -> int:
         help="baseline 快照路径（champions.jsonl 未 seed 时用）",
     )
     parser.add_argument(
-        "--structural_slot_ratio", type=float, default=0.5, help="§9.2 软配额（默认 0.5）"
+        "--structural_slot_ratio", type=float, default=0.5, help="软配额（默认 0.5）"
     )
     parser.add_argument(
         "--reject_hyperparam_only",

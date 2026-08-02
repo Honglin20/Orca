@@ -302,7 +302,7 @@ Check three dimensions and report issues with severity tags:
      default in `__main__` MUST be the rendered value of `inputs.latency_provider`
      (e.g. `/abs/path.py::measure`), NOT an empty string. Giving a latency_provider in
      the input but leaving the default empty (→ ONNXRT-CPU fallback) violates the
-     "latency 必用用户脚本" 铁律 (CONTRACTS §6 / BLK-3) → [BLOCKER].
+     "latency 必用用户脚本" 铁律 (CONTRACTS §6 ) → [BLOCKER].
    - The default is a **rendered path string**, not a Jinja template (`{{ ... }}`
      literally in the .py → [BLOCKER]).
 

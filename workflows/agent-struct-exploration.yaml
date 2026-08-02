@@ -1,9 +1,9 @@
 name: agent-struct-exploration
-description: "LLM agent 驱动的模型结构搜索：迭代改写模型结构（AST 级）、实测时延与精度，循环逼近目标（降时延保精度）。不依赖超网，结构由 agent 直接改。契约见 docs/specs/agent-structural-exploration-design-draft.md。"
+description: "LLM agent 驱动的模型结构搜索：迭代改写模型结构（AST 级）、实测时延与精度，循环逼近目标（降时延保精度）。输入模型定义 + 训练命令 + 目标时延；输出最优结构 champion（model.py 快照 + final_report）。不依赖超网，结构由 agent 直接改。"
 
 entry: setup
 
-# plan sprightly-questing-donut §1.4：声明需要 KB（结构知识库 latency_moves/directions）。
+# 声明需要 KB（结构知识库 latency_moves/directions）。
 # run 启动预检（orca.iface.cli.config.apply_kb_requirement）解析不到 KB 根 → fail loud
 # （含 searched 路径 + 修复指引），不进 setup agent。
 requires: [knowledge_base]
@@ -15,10 +15,10 @@ inputs:
   #   [default]  Tier C：工程默认（固化，不问）
   #   [advanced] Tier C 子集：罕见 override，固化默认，文档可见但不暴露为主 input
   #
-  # P9b（按 input 三档原则）：6 个 [ask] 主 input + 3 个 [advanced] 固化默认（device/latency_provider/seed）。
+  # 本 workflow：6 个 [ask] 主 input + 3 个 [advanced] 固化默认（device/latency_provider/seed）。
   # Tier B 下沉：project_root / build_fn / dummy_input → setup 节点 output_schema（缺失走哨兵，见 setup prompt）。
   # Tier C 固化：struct_scripts_dir → setup.output.struct_scripts_dir（默认 workflows/agents/_struct_scripts）；
-  #             iterations → 移除（引擎兜底 100；长 run 用 `--max-iter` CLI 覆盖）；output_dir → $ORCA_ARTIFACTS_DIR。
+  #             iterations 不作 input（引擎兜底 100；长 run 用 `--max-iter` CLI 覆盖）；output_dir → $ORCA_ARTIFACTS_DIR。
 
   model_path:
     type: string
@@ -44,7 +44,7 @@ inputs:
     default: ""
   max_rounds:
     type: string
-    description: "[ask] 最大探索轮数（寻优预算，决定跑多久/烧多少卡）；耗尽即终止走 finalize。默认 20，用户可调。**注意**：iterations 已移除（P9b），引擎兜底节点访问上限 100；struct 每轮 4 节点访问 + setup/finalize 2 = max_rounds×4+2，故 max_rounds > 24 时须配合 `--max-iter <max_rounds*4+10>` CLI 覆盖，否则 MaxIterationsError 会在 finalize 前终止（champion 报告丢失）"
+    description: "[ask] 最大探索轮数（寻优预算，决定跑多久/烧多少卡）；耗尽即终止走 finalize。默认 20，用户可调。**注意**：引擎节点访问上限兜底 100；struct 每轮 4 节点访问 + setup/finalize 2 = max_rounds×4+2，故 max_rounds > 24 时须配合 `--max-iter <max_rounds*4+10>` CLI 覆盖，否则 MaxIterationsError 会在 finalize 前终止（champion 报告丢失）"
     required: false
     default: "20"
   device:
@@ -65,9 +65,8 @@ inputs:
 
 nodes:
   # ═══════════════════════════════════════════════════════════════
-  # Setup（一次性，P7 合并 family_detect + baseline_measure）：
-  #   建输出目录 + 浅层族检测 + 加载 KB 切片
-  #   + 探测 project_root / build_fn / dummy_input（这三项原是用户 input，下沉运行时内省）
+  # Setup（一次性）：建输出目录 + 浅层族检测 + 加载 KB 切片
+  #   + 探测 project_root / build_fn / dummy_input（这三项由运行时内省得到）
   #   + 导出 baseline ONNX + cost_model 测时延 + 取 baseline accuracy + seed champions
   # ═══════════════════════════════════════════════════════════════
   - name: setup
@@ -79,49 +78,48 @@ nodes:
       type: object
       required: [output_dir, family, kb_cache_dir, project_root, build_fn, dummy_input, struct_scripts_dir, snapshots_dir, worktree_root, ledger_path, champions_path, baseline_latency_ms, baseline_accuracy, accuracy_target, accuracy_mode, baseline_onnx]
       properties:
-        output_dir: {type: string, description: "run 根目录绝对路径（末尾必须带 /，下游拼接依赖此约定）；P9b 起优先 = $ORCA_ARTIFACTS_DIR（引擎注入）"}
+        output_dir: {type: string, description: "run 根目录绝对路径（末尾必须带 /，下游拼接依赖此约定）；优先取引擎注入的 $ORCA_ARTIFACTS_DIR"}
         family: {type: string, description: "命中的族名（可多族用 + 连，如 transformer+cnn）"}
         kb_cache_dir: {type: string}
         project_root: {type: string, description: "探测所得用户项目根绝对路径"}
         build_fn: {type: string, description: "探测所得实例化入口函数名（导出 ONNX 用）"}
         dummy_input: {type: string, description: "探测所得 dummy_input JSON 串，如 {\"shape\":[1,3,224,224],\"dtype\":\"float32\"}"}
-        struct_scripts_dir: {type: string, description: "P9b 固化（原 input）：确定性辅助脚本目录，默认 workflows/agents/_struct_scripts。下游经此字段取，不再 inputs 暴露"}
+        struct_scripts_dir: {type: string, description: "确定性辅助脚本目录，默认 workflows/agents/_struct_scripts。下游经此字段取"}
         snapshots_dir: {type: string, description: "<output_dir>/snapshots/ 绝对路径（末尾带 /）。下游只 append `<candidate_id>_model.py`，禁止自己拼根"}
         worktree_root: {type: string, description: "<output_dir>/.worktrees/ 绝对路径（末尾带 /）。下游只 append `<candidate_id>/`"}
         ledger_path: {type: string, description: "<output_dir>/ledger.jsonl 绝对路径（账本单一真相源，下游只读此字段不拼接）"}
         champions_path: {type: string, description: "<output_dir>/champions.jsonl 绝对路径（champion 轨迹，下游只读此字段不拼接）"}
-        baseline_latency_ms: {type: number, description: "cost model 实测（LLM 永不预测，§5）"}
+        baseline_latency_ms: {type: number, description: "cost model 实测（LLM 永不预测）"}
         baseline_accuracy: {type: number}
         accuracy_target: {type: number}
         accuracy_mode: {type: string, description: "train|test|given"}
         baseline_onnx: {type: string}
     prompt: |
-      你是结构性探索 workflow 的 **Setup（一次性）**（P7 合并 family_detect + baseline_measure）：
+      你是结构性探索 workflow 的 **Setup（一次性）**：
       建输出目录 + **浅层族检测** + 加载 KB 切片 + 探测 project_root / build_fn / dummy_input
       + 调脚本测 baseline 时延 + 取 baseline accuracy + seed champions。**不**做训练外的自由发挥。
 
       ## 输入
       - model_path: {{ inputs.model_path }}
-      - model_family：恒 `auto`（由你浅层判族，已从 inputs 固化）
-      - knowledge_base 根目录：`$ORCA_KB_DIR`（plan §1.2：run 启动预检已解析为绝对路径并 fail-loud；
-        不再作 input，换项目跑可移植）
+      - model_family：恒 `auto`（由你浅层判族，已固化）
+      - knowledge_base 根目录：`$ORCA_KB_DIR`（run 启动预检已解析为绝对路径并 fail-loud；不再作 input，换项目跑可移植）
       - train_command / test_command / accuracy_target：透传给 measure_baseline.py
-      - device / latency_provider / seed（P7 新增）：透传给 measure_baseline.py
-      - **struct_scripts_dir（P9b 固化默认）**：`workflows/agents/_struct_scripts`（原 [default] input，下沉为 setup output 字段，下游 `{% raw %}{{ setup.output.struct_scripts_dir }}{% endraw %}` 取）
+      - device / latency_provider / seed：透传给 measure_baseline.py
+      - **struct_scripts_dir（固化默认）**：`workflows/agents/_struct_scripts`（下游 `{{ setup.output.struct_scripts_dir }}` 取）
 
       ## 执行（确定性优先，fail loud）
 
-      **Phase A：建输出目录 + 浅层族检测 + 探测路径 + KB 切片**（原 family_detect 职责）
+      **Phase A：建输出目录 + 浅层族检测 + 探测路径 + KB 切片**
 
-      1. **建输出目录（append-only 账本，§6）+ 一次性计算所有下游专用路径字段（单一真相源）**：
-         **P9b**：`OUTPUT_DIR` 优先取引擎注入的 `$ORCA_ARTIFACTS_DIR`（P8 接口，`<abs>/runs/<run_id>/artifacts/`，
+      1. **建输出目录（append-only 账本）+ 一次性计算所有下游专用路径字段（单一真相源）**：
+         `OUTPUT_DIR` 优先取引擎注入的 `$ORCA_ARTIFACTS_DIR`（`<abs>/runs/<run_id>/artifacts/`，
          由 `orca.exec.env.build_env_overlay` 注入）；缺则回退 `llm_artifacts/<model>/runs/<timestamp>/`（headless / spike / 非 `orca run` 路径）。
          无论哪条路径，**末尾必须带 `/`**（下游拼接依赖此约定；杜绝 `<run>snapshots/`、`<run>.worktrees/` 兄弟孤儿目录）。
          ```bash
-         # P9b：优先 $ORCA_ARTIFACTS_DIR（P8 引擎注入），回退 llm_artifacts/...
+         # 优先 $ORCA_ARTIFACTS_DIR（引擎注入），回退 llm_artifacts/...
          if [ -n "$ORCA_ARTIFACTS_DIR" ]; then
            OUTPUT_DIR="$ORCA_ARTIFACTS_DIR"
-           [ "${OUTPUT_DIR: -1}" != "/" ] && OUTPUT_DIR="$OUTPUT_DIR/"  # P8 注入可能不带尾斜杠 → 补齐
+           [ "${OUTPUT_DIR: -1}" != "/" ] && OUTPUT_DIR="$OUTPUT_DIR/"  # 注入可能不带尾斜杠 → 补齐
          else
            OUTPUT_DIR=$(python3 -c "
          import os, time, pathlib
@@ -130,7 +128,7 @@ nodes:
          print(os.path.abspath(os.path.join('llm_artifacts', model_name, 'runs', run_id)) + '/')
          ")
          fi
-         STRUCT_SCRIPTS_DIR="workflows/agents/_struct_scripts"  # P9b 固化默认（原 inputs.struct_scripts_dir）
+         STRUCT_SCRIPTS_DIR="workflows/agents/_struct_scripts"  # 固化默认
          # OUTPUT_DIR 末尾已带 /，下面 ${OUTPUT_DIR}<suffix> 是安全拼接（单一真相源在 setup 节点内部）
          SNAPSHOTS_DIR="${OUTPUT_DIR}snapshots/"
          WORKTREE_ROOT="${OUTPUT_DIR}.worktrees/"
@@ -148,8 +146,8 @@ nodes:
          echo "LEDGER_PATH=$LEDGER_PATH"
          echo "CHAMPIONS_PATH=$CHAMPIONS_PATH"
          ```
-         **注意（P7）**：不再建死目录 `viz/`（可视化全走 render_chart，无 HTML 产物；viz_dir 字段已从 output_schema 删除）。
-         **把 stdout 的 7 个 `KEY=value` 原样填进输出 JSON**（每个目录字段末尾必须带 `/`，文件字段是完整路径；含 P9b 新增的 `STRUCT_SCRIPTS_DIR`）。
+         可视化全走 render_chart，无 HTML 产物，故不建 `viz/` 目录。
+         **把 stdout 的 7 个 `KEY=value` 原样填进输出 JSON**（每个目录字段末尾必须带 `/`，文件字段是完整路径，含 `STRUCT_SCRIPTS_DIR`）。
          下游节点直接读这些 JSON 字段、**不**自己拼根——若你漏字段或忘尾斜杠，孤儿目录就回来了。
       2. **探测 project_root**：从 model_path 所在目录向上走，取**第一个含 `train.py` 或 `pyproject.toml`
          或 `.git` 的目录**作为项目根（绝对路径）。走到 / 仍找不到 → 取 model_path 的 dirname，并在输出注明"低置信"
@@ -163,7 +161,7 @@ nodes:
          - **能可靠推断** → 直接用。
          - **无法可靠推断** → **不要**按族给常见默认（`[1,3,224,224]` / `[1,2,128]`）造假，**返回 ask-user 哨兵**
            （见下方「缺失必填输入时」段；这是 downstream ONNX 导出契约，错则 evaluator FAIL_export fail loud）。
-      5. **浅层族检测（§7.3，关键：只看表面）**：
+      5. **浅层族检测（关键：只看表面）**：
          - **只看 model.py 的最表面一层**：顶层 `import`、`nn.Module` 子类的**类名**、`__init__` 里**顶层**用到的模块类型
            （如 `nn.Conv1d` / `nn.MultiheadAttention` / 自定义 attention 类 / `nn.Linear` / RNN）。**只判整体方向**——
            例如"有 Conv + 自定义 attention → `cnn+transformer` 或 `wireless_receiver`"、"全 Conv → `cnn`"、"全 Linear+attention → `transformer`"。
@@ -171,13 +169,12 @@ nodes:
          - **不明确就按最接近的方向给一个最佳猜测**（不阻塞流程），并在输出注明"低置信"。族名优先用 KB 已注册的：
            `transformer` / `cnn` / `wireless_receiver` / `hybrid`。
          - **不用 AST 脚本判族**。
-      6. **加载 KB 切片进 kb_cache/**（§7.3 run 级缓存）：KB 根读 `$ORCA_KB_DIR`（plan §1.2：run 启动
-         预检已确保非空；换项目跑也能解析到）。按 `$ORCA_KB_DIR/index.json` 的 `common.files` + 命中族的
-         `families.<族>.files`（base 文件 primitives / latency_moves / failures）+ **命中族的 `directions/`
-         整目录 + `meta.json`**（plan §2.5：hypothesizer Step 0 据此算未试结构方向），把所需 md/json
+      6. **加载 KB 切片进 kb_cache/**（run 级缓存）：KB 根读 `$ORCA_KB_DIR`（run 启动预检已确保非空；换项目跑也能解析到）。
+         按 `$ORCA_KB_DIR/index.json` 的 `common.files` + 命中族的 `families.<族>.files`（base 文件 primitives / latency_moves /
+         failures）+ **命中族的 `directions/` 整目录 + `meta.json`**（hypothesizer Step 0 据此算未试结构方向），把所需 md/json
          **每文件只读一次**拷/缓存到 `kb_cache/`（单层族 cnn/transformer 无 directions/ → 跳过）。
 
-      **Phase B：测 baseline 时延 + accuracy + seed champions**（原 baseline_measure 职责）
+      **Phase B：测 baseline 时延 + accuracy + seed champions**
 
       7. 调 `measure_baseline.py`（确定性后端，fail loud）：
          ```bash
@@ -239,7 +236,7 @@ nodes:
       ```json
       {"output_dir": "<OUTPUT_DIR，末尾带 />", "family": "<族名，可带低置信注>", "kb_cache_dir": "<KB_CACHE_DIR，末尾带 />",
        "project_root": "<绝对路径>", "build_fn": "<函数名>", "dummy_input": "<JSON 串>",
-       "struct_scripts_dir": "<STRUCT_SCRIPTS_DIR，P9b 固化默认 workflows/agents/_struct_scripts>",
+       "struct_scripts_dir": "<STRUCT_SCRIPTS_DIR，默认 workflows/agents/_struct_scripts>",
        "snapshots_dir": "<SNAPSHOTS_DIR，末尾带 />", "worktree_root": "<WORKTREE_ROOT，末尾带 />",
        "ledger_path": "<LEDGER_PATH>", "champions_path": "<CHAMPIONS_PATH>",
        "baseline_latency_ms": <数>, "baseline_accuracy": <数>, "accuracy_target": <数>,
@@ -266,8 +263,8 @@ nodes:
         hypothesis: {type: string, description: "宏观结构假设（改什么、为什么降时延）"}
         rationale_latency: {type: string}
         rationale_novelty: {type: string}
-        structural_intent: {type: boolean, description: "是否为宏观结构方向（供 §9.2 配额计数）"}
-        direction_id: {type: string, description: "plan §2.3：命中的 KB direction（Dx）/ hyperparam / off_catalog:指纹；curator 记入 ledger 供 direction_coverage 算 tried/untried"}
+        structural_intent: {type: boolean, description: "是否为宏观结构方向（供配额计数）"}
+        direction_id: {type: string, description: "命中的 KB direction（Dx）/ hyperparam / off_catalog:指纹；curator 记入 ledger 供 direction_coverage 算 tried/untried"}
     routes:
       - to: engineer
 
@@ -288,9 +285,8 @@ nodes:
     routes:
       - to: evaluator
 
-  # Step 3：Evaluator（确定性）—— P7 删除 structure_gate 后直连。
-  #   导出 ONNX → cost_model.measure → 时延门 → 按需抢卡跑 train_command → 取 accuracy
-  #   （已是「时延门→训练→判决」三合一，§4；P7 保留不动）。
+  # Step 3：Evaluator（确定性）：导出 ONNX → cost_model.measure → 时延门 → 按需抢卡跑
+  #   train_command → 取 accuracy（「时延门→训练→判决」三合一）。
   - name: evaluator
     kind: agent
     executor: opencode
@@ -302,7 +298,7 @@ nodes:
       properties:
         status: {type: string, enum: [SUCCESS, FAIL_latency, FAIL_accuracy, FAIL_export]}
         latency_ms: {type: number, description: "实测时延（cost model，不变量1）；FAIL_export 时为 -1"}
-        met_latency: {type: boolean, description: "latency < champion.latency（时延门，§3/§4）"}
+        met_latency: {type: boolean, description: "latency < champion.latency（时延门）"}
         accuracy: {type: number, description: "训练所得精度；未训练时为 -1"}
         met_accuracy: {type: boolean}
         onnx_path: {type: string}
@@ -311,9 +307,8 @@ nodes:
     routes:
       - to: curator
 
-  # Step 4（P7 合并 analyst + curator + viz_round）：
-  #   Curator（先确定性 reducer → 失败候选才 LLM 归因 → 跑 viz）。
-  #   原结构门的 tag/diff_summary 现由本节点内联跑 ast_diff.py deterministic 推导（零判决力 LLM 删除）。
+  # Step 4：Curator（先确定性 reducer → 失败候选才 LLM 归因 → 跑 viz）。
+  #   tag/diff_summary 由本节点内联跑 ast_diff.py deterministic 推导。
   - name: curator
     kind: agent
     executor: opencode
@@ -328,13 +323,13 @@ nodes:
         champion_id: {type: string}
         champion_latency_ms: {type: number}
         champion_accuracy: {type: number}
-        route_mode: {type: string, enum: [exploit, explore], description: "champion 改进→exploit；否则→explore（§3 step 8）"}
+        route_mode: {type: string, enum: [exploit, explore], description: "champion 改进→exploit；否则→explore"}
         terminate_reason: {type: string, description: "continue_loop=false 时的原因（champion_met / max_rounds / budget）"}
         viz_status:
           type: object
           required: [env_status, charts]
           additionalProperties: false
-          description: "本轮可视化产出状态（SPEC 2026-07-23 §3.3）。失败值（env_missing/generic 等）合法产出；缺字段=节点 fail（agent 未遵守契约）。viz 为 sidecar：失败值不影响 continue_loop。"
+          description: "本轮可视化产出状态。失败值（env_missing/generic 等）合法产出；缺字段=节点 fail（agent 未遵守契约）。viz 为 sidecar：失败值不影响 continue_loop。"
           properties:
             env_status: {type: string, enum: [ok, env_loaded_from_file, env_missing, import_failed, generic]}
             charts:
@@ -355,7 +350,7 @@ nodes:
       - to: finalize
 
   # ═══════════════════════════════════════════════════════════════
-  # 收尾（一次性，P7 内联 viz_finalize）：champion 从头重训 + 导出 ONNX + final_report + 终态可视化
+  # 收尾（一次性）：champion 从头重训 + 导出 ONNX + final_report + 终态可视化
   # ═══════════════════════════════════════════════════════════════
   - name: finalize
     kind: agent
@@ -375,7 +370,7 @@ nodes:
           type: object
           required: [env_status, charts]
           additionalProperties: false
-          description: "终态可视化产出状态（三图刷新 + 对比 bar 合并；SPEC 2026-07-23 §3.3）。失败值（env_missing/generic 等）合法产出；缺字段=节点 fail。viz 为 sidecar：失败值不阻断 finalize。"
+          description: "终态可视化产出状态（三图刷新 + 对比 bar 合并）。失败值（env_missing/generic 等）合法产出；缺字段=节点 fail。viz 为 sidecar：失败值不阻断 finalize。"
           properties:
             env_status: {type: string, enum: [ok, env_loaded_from_file, env_missing, import_failed, generic]}
             charts:
@@ -389,7 +384,7 @@ nodes:
                   pushed: {type: boolean}
                   reason: {type: string}
     prompt: |
-      你是结构性探索 workflow 的 **收尾 + 终态可视化**（P7 合并 viz_finalize，§14 决策5）：
+      你是结构性探索 workflow 的 **收尾 + 终态可视化**：
       champion 从头重训 + 导出 ONNX + final_report + 推送终态图表。
 
       ## 输入
@@ -400,13 +395,13 @@ nodes:
       - build_fn / dummy_input：`{{ setup.output.build_fn }}` / `{{ setup.output.dummy_input }}`（onnx_opset 已固化为 17）
       - baseline：latency `{{ setup.output.baseline_latency_ms }}`ms / accuracy `{{ setup.output.baseline_accuracy }}`
       - 目标: latency `{{ inputs.target_latency_ms }}`ms / accuracy `{{ setup.output.accuracy_target }}`
-      - struct_scripts_dir：`{{ setup.output.struct_scripts_dir }}`（P9b：从 setup output 取，原 inputs 已下沉）
+      - struct_scripts_dir：`{{ setup.output.struct_scripts_dir }}`
       - device / seed：`{{ inputs.device }}` / `{{ inputs.seed }}`
 
       ## 执行（fail loud）
       1. 从 `champions.jsonl` 最后一行取 champion snapshot 路径（`final_model`）。
       2. 把 champion model.py 置入干净 worktree → **原样跑 `train_command`**（按需 `nvidia-smi` 探测空闲卡设
-         `CUDA_VISIBLE_DEVICES`，§8）从头重训（full epochs）→ 取 final_accuracy。
+         `CUDA_VISIBLE_DEVICES`）从头重训（full epochs）→ 取 final_accuracy。
          训练失败 → fail loud（读日志写进输出，不假装完成）。
       3. 用确定性脚本导出 ONNX 并测时延（与 setup 一致，device / latency_provider 沿 inputs）：
          ```bash
@@ -417,15 +412,15 @@ nodes:
          ```
          再动态加载 `{{ inputs.latency_provider }}`
          （`module_path::func_name` 切开、`importlib.util.spec_from_file_location`）→
-         调 `measure(final_onnx, device="{{ inputs.device }}")` 得 `final_latency_ms`（不变量1，§5；
+         调 `measure(final_onnx, device="{{ inputs.device }}")` 得 `final_latency_ms`（不变量1：
          用 `inspect.signature(measure).parameters` 检测 device 形参；旧式 measure 无 device kwarg → fallback `measure(final_onnx)`）。加载失败 fail loud。
       4. 写 `final_report.md`：baseline vs champion（latency/accuracy 降幅）、terminate_reason、探索轮数、
-         结构图（从 ledger.jsonl 的 parent 链）、Pareto 摘要。**顶部加 `## 可视化产出` 段**（SPEC 2026-07-23 §3.3）：
+         结构图（从 ledger.jsonl 的 parent 链）、Pareto 摘要。**顶部加 `## 可视化产出` 段**：
          全成功 → 列出推送的图（label/title）；任一失败 → `⚠️ 可视化未生成：<失败图 + reason 汇总>`，
          附修复指引（检查 `runs/<run_id>/chart_daemon.log`；in-session 下图依赖 `orca_env.sh`，已由脚本自加载）。
-      5. **终态可视化 step A（P7 内联 viz_finalize，三图刷新）**——调 `viz_struct.py`（默认模式）重推三图终态版：
+      5. **终态可视化 step A（三图刷新）**——调 `viz_struct.py`（默认模式）重推三图终态版：
          ```bash
-         # 不要 `|| true` 盲吞：stdout 必含合法 JSON（_main 兜底，SPEC §3.2 B1）。
+         # 不要 `|| true` 盲吞：stdout 必含合法 JSON（_main 兜底保证）。
          # 仅 exit 2 时容忍（进程级失败；stdout 已含 generic fallback JSON）。
          VIZ_THREE_STDOUT=$(python3 "{{ setup.output.struct_scripts_dir }}/viz_struct.py" \
            --ledger "{{ setup.output.ledger_path }}" \
@@ -436,8 +431,8 @@ nodes:
            --accuracy_target "{{ setup.output.accuracy_target }}" \
            || true)
          ```
-      6. **终态可视化 step B（对比 bar，SPEC §3.4 D1=b）**——调 `viz_struct.py --mode compare` 推
-         baseline / champion / final 三柱 latency bar（替代原 inline `python3 -c` 块）：
+      6. **终态可视化 step B（对比 bar）**——调 `viz_struct.py --mode compare` 推
+         baseline / champion / final 三柱 latency bar：
          ```bash
          VIZ_CMP_STDOUT=$(python3 "{{ setup.output.struct_scripts_dir }}/viz_struct.py" \
            --mode compare \
@@ -448,7 +443,7 @@ nodes:
            --final_accuracy "<step2 final_accuracy>" \
            || true)
          ```
-         final 两值由本节点 step 2/3 实测算出后作 CLI 参数传入（**不再替换 inline 占位**）。
+         final 两值由本节点 step 2/3 实测算出后作 CLI 参数传入。
          champion latency/accuracy 由脚本内部从 champions.jsonl 最后一行读取。
       7. **合并 viz_status（dumb copy stdout JSON，零合成零解读）**——把 step A/B 两个 stdout JSON 合并成
          `output.viz_status`（**必填字段**，缺 → output_schema 校验 fail loud）：

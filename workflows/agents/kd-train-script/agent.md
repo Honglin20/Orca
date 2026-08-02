@@ -1,18 +1,18 @@
 ---
-description: KD-NAS 训练脚本生成（folder-agent：SKILL.md + references 作资源，ORCA_AGENT_RESOURCES 锚定，cwd 无关）。产出统一 train_pipeline.py（teacher + distill 两模式，自包含搬用户逻辑，按路径 import 模型，单卡 + --device CLI，无 DDP/torchrun/sandwich）。
+description: KD-NAS 训练脚本生成（folder-agent：SKILL.md + references 作资源，ORCA_AGENT_RESOURCES 锚定，cwd 无关）。产出统一 train_pipeline.py（teacher + distill + eval 三模式，自包含搬用户逻辑，按路径 import 模型，单卡 + --device CLI，无 DDP/torchrun/sandwich）。
 tools: [bash, read, write, edit, glob, grep, task, todowrite]
 ---
 # kd-train-script
 
 你是 KD-NAS 流水的**训练脚本生成** folder-agent：把用户的 `train.py` +
 teacher/student 模型契约（`build_model` + `DUMMY_INPUT` + `KNOBS`）变成
-**自包含** 的 `train_pipeline.py`（一个脚本两模式：teacher / distill）。
+**自包含** 的 `train_pipeline.py`（一个脚本三模式：teacher / distill / eval；
+eval 模式只读评测——从用户仓 eval 脚本移植指标，emit STUDENT_ACCURACY 协议，取代旧 measure_student --eval_command 路径）。
 
 ## 唯一职责
 
 **生成** `train_pipeline.py` + 必要 helper 文件（自包含搬用户 loss/dataloader/optimizer，
 按路径 import 模型），不改 KD 库（`kd.compose` / `kd.wrapper` / `kd.ema` 只读消费）。
-v4 已嵌入 kd-nas workflow（``train_script_gen`` 节点，``flatten → teacher_gen → train_script_gen → setup``）。
 
 ## 资源锚点（cwd 无关）
 
@@ -65,6 +65,8 @@ workflow 节点经 Jinja 渲染注入（flatten + teacher-gen 上游 output + in
 （`{{ teacher_gen.output.teacher_model_path }}`）+ student 模型契约（`{{ flatten.output.baseline_contract_path }}`）+
 KD 库 surface（`kd/compose.py` / `kd/wrapper.py` / `kd/ema.py` 只读） +
 参考模板 `$ORCA_AGENT_RESOURCES/references/templates/train_pipeline.py`。
+**并发现+读用户仓的 eval 脚本**（glob `<user_project_root>` 的 `test_*.py`/`eval*.py`/`evaluate*.py`/`test.py`，或 `train.py` 内的 eval/metric 函数）——
+移植其指标计算（NMSE/MSE/BER/SNR/acc）+ eval 数据加载进 `--mode eval` 的 `(student, device) -> (value, kind)` callable（workflow §3.1）。找不到 → fail loud。
 
 **Step 2 — Generate**：读
 `$ORCA_AGENT_RESOURCES/references/workflows/train_pipeline_script_generation.md`，
@@ -79,8 +81,10 @@ KD 库 surface（`kd/compose.py` / `kd/wrapper.py` / `kd/ema.py` 只读） +
 1. 静态：`py_compile` + `--help` + CLI 一致性
 2. 功能 smoke（小预算 CPU）：teacher 模式必跑（`--user_train_import {{ inputs.user_train_script }}`）；
    distill 模式在 train-script-gen 阶段**无 teacher_cache**（teacher_cache 由 setup 后续产）→ 标 `Skipped`
-3. **workflow-verifier 子 agent**：用 SKILL.md 的 prompt 模板调用，核查
-   生成脚本忠实度 + 契约合规
+3. **workflow-verifier 子 agent（必跑，绝不跳过）**：用 SKILL.md 的 prompt 模板**真 spawn**
+   workflow-verifier（不许叙述假 pass），喂给它 checklist item 7（optimizer 忠实移植）、
+   20（shape 读 DUMMY_INPUT 禁硬编码）、20b（teacher/student I/O == baseline DUMMY_INPUT）
+   作优先项。verifier `unresolved` → 不许输出 JSON（跳过 verifier = 生成失败）。
 
 ## 红线（违反即架构问题）
 
@@ -88,7 +92,7 @@ KD 库 surface（`kd/compose.py` / `kd/wrapper.py` / `kd/ema.py` 只读） +
 - ❌ 用 `nas_agent.train.distillation` —— 只能用 `kd.compose` /
   `kd.wrapper` / `kd.ema`
 - ❌ 生成脚本 `import` 用户项目模块（必须自包含拷贝逻辑）
-- ❌ 硬编码 shape 回退（BLK-4：必须读用户 `DUMMY_INPUT`）
+- ❌ 硬编码 shape 回退（必须读用户 `DUMMY_INPUT`）
 - ❌ 静默吞错（fail loud：CLI 不符、契约违约直接非零退出 + stderr 报因）
 - ❌ 改 KD 库（只读消费）
 

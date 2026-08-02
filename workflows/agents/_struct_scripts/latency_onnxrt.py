@@ -1,6 +1,6 @@
-"""latency_onnxrt.py —— 默认 cost model（§5 逐字实现）。
+"""latency_onnxrt.py —— 默认 cost model。
 
-契约钉死（草稿 §5 / 不变量1）：workflow 永远通过一个 ``measure(onnx_path)->float`` 函数取
+契约钉死（不变量1）：workflow 永远通过一个 ``measure(onnx_path)->float`` 函数取
 时延，**LLM 永不预测时延**。本模块是默认实现：onnxruntime 实跑取中位数 ms。
 
 被加载方式（见 struct-evaluator / setup / finalize）::
@@ -16,14 +16,14 @@
     python latency_onnxrt.py --onnx path/to/model.onnx
     python latency_onnxrt.py --onnx path/to/model.onnx --runs 50 --warmup 10 --device npu
 
-device（P7 新增）：
+device：
     - ``measure`` 接受可选 ``device`` 参数（默认 "auto"），由 ``_device.ort_providers`` 映射到
       onnxruntime provider 顺位。NPU=Ascend 走 CANNExecutionProvider。
     - 通过 ``::measure`` 动态加载的调用方（evaluator/setup/finalize）若不传 device 则用 auto；
       agent 节点用 ``--device`` CLI 显式跑或读 ``inputs.device`` 注入。
     - 跑完 stderr 打印实际 providers（透明性：让用户看到真在 cuda/npu/cpu 上测）。
 
-fail loud：ONNX 文件缺失 / onnxruntime 加载失败 → 非零退出 + stderr 完整异常（§5 契约：
+fail loud：ONNX 文件缺失 / onnxruntime 加载失败 → 非零退出 + stderr 完整异常（契约：
 "不是 callable 或加载失败 → fail loud，整轮停"）。
 """
 
@@ -44,7 +44,7 @@ def measure(
     device: str = "auto",
     seed: int = 0,
 ) -> float:
-    """实跑 ONNX 取中位数时延（ms）。§5 逐字实现 + 边界 fail loud。
+    """实跑 ONNX 取中位数时延（ms）。边界 fail loud。
 
     Args:
         onnx_path: ONNX 模型文件路径（绝对或相对 cwd）。
@@ -58,7 +58,7 @@ def measure(
         中位数单次推理时延（ms，浮点）。
 
     Raises:
-        FileNotFoundError: onnx_path 不存在（fail loud，§5）。
+        FileNotFoundError: onnx_path 不存在（fail loud）。
         Exception: onnxruntime 加载 / 推理异常原样抛（fail loud，整轮停）。
     """
     # 延迟 import：只在实际测量时加载 onnxruntime / numpy（避免 CLI --help 拖重）。
@@ -68,7 +68,7 @@ def measure(
     import numpy as np
     import onnxruntime as ort
 
-    # 本脚本同目录的 _device.py 提供 ort_providers（inline 自 NAS，不引跨包依赖）。
+    # 本脚本同目录的 _device.py 提供 ort_providers（自包含，不引跨包依赖）。
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
@@ -107,7 +107,7 @@ def measure(
 
 def _main() -> int:
     parser = argparse.ArgumentParser(
-        description="默认 cost model：onnxruntime 实跑取中位数时延(ms)。§5 契约实现。"
+        description="默认 cost model：onnxruntime 实跑取中位数时延(ms)。"
     )
     parser.add_argument("--onnx", required=True, help="ONNX 模型文件路径")
     parser.add_argument(
@@ -143,7 +143,7 @@ def _main() -> int:
 
         print(f"[latency_onnxrt] FAIL: {type(e).__name__}: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
-        return 2  # 非零：fail loud（§5 整轮停）。
+        return 2  # 非零：fail loud（整轮停）。
     # 结构化 stdout（key=value，下游 agent bash 解析）。
     print(f"LATENCY_MS: {latency_ms:.4f}")
     print(f"ONNX: {args.onnx}")

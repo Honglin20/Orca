@@ -1,10 +1,10 @@
-"""direction_coverage.py —— KB direction 目录覆盖感知（plan sprightly-questing-donut §2.1）。
+"""direction_coverage.py —— KB direction 目录覆盖感知。
 
 回答 struct-exploration「选取没有尝试过的结构」的确定性基准：拿 KB 本族 direction 目录作
 「结构方向」枚举集，读 ledger 历史算出 tried / untried，喂给 hypothesizer 软闸 prompt
 （优先选 untried 方向；超参仅在 catalog 耗尽 / champion 接近目标时兜底）。
 
-**纯函数式、确定性**（[[deterministic-over-model-mediated]]）：
+**纯函数式、确定性**：
   - 读 KB ``index.json`` + ``families/<family>/meta.json``（tiers 族）枚举 direction 目录
   - 读 ``ledger.jsonl`` 收集历史候选的 ``direction_id``（tried）
   - stdout JSON 输出覆盖信号（不写任何文件、不调 LLM/网络/时钟/随机）
@@ -100,7 +100,7 @@ def _load_catalog(kb_dir: Path, family: str) -> list[dict[str, Any]]:
 def _read_ledger_direction_ids(ledger_path: str) -> tuple[set[str], list[dict[str, Any]]]:
     """读 ledger.jsonl，收集所有候选的 ``direction_id``（tried 集合）+ 返回全行（供 champion 查找）。
 
-    direction_id 是 plan §2.2 新增的**可选**字段（旧 ledger 无 → 跳过，向后兼容）。值形如
+    direction_id 是**可选**字段（旧 ledger 无 → 跳过，向后兼容）。值形如
     ``"D5"``（命中 catalog）或 ``"off_catalog:<指纹>"``（catalog 外新结构）。
     """
     p = Path(ledger_path)

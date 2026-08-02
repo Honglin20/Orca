@@ -1,8 +1,8 @@
-"""ast_diff.py —— module-level AST diff（草稿 §9.1 确定性事实摘要）。
+"""ast_diff.py —— module-level AST diff（确定性事实摘要）。
 
-契约（草稿 §9.1）：Curator 在结构门跑 module-level AST diff（父 vs 子 model.py），
-客观列出"算子类型/拓扑是否变 / 哪些是纯数值改"，作为**参考输入**喂 LLM 终判 tag
-（LLM 在事实面前无法把自己的超参微调硬标成 structural）。
+契约：Curator 跑 module-level AST diff（父 vs 子 model.py），
+客观列出"算子类型/拓扑是否变 / 哪些是纯数值改"，供 Curator deterministic 推导 tag
+（topology/op 变 → structural；纯数值 → hyperparam；其余 mixed）。
 
 AST 不是唯一判据、也不直接驳回；它是防自凑配额的**事实参考**。
 
@@ -361,8 +361,8 @@ def _format_text(r: DiffResult) -> str:
 def _main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "module-level AST diff（草稿 §9.1）：父 vs 子 model.py，"
-            "出算子/拓扑变化 vs 纯数值改的客观摘要，供 LLM 结构门终判 grounding。"
+            "module-level AST diff：父 vs 子 model.py，"
+            "出算子/拓扑变化 vs 纯数值改的客观摘要，供 Curator deterministic 推导 tag。"
         )
     )
     parser.add_argument("--parent", required=True, help="父 model.py（champion）")

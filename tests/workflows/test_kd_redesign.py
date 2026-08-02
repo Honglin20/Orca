@@ -565,7 +565,6 @@ def test_train_pool_empty_manifest_emits_success(tmp_path):
         "--kd_scripts_dir", str(KD), "--artifacts_dir", str(artifacts),
         "--per_run_artifacts_dir", str(tmp_path),
         "--project_root", str(tmp_path),
-        "--test_command", "echo NMSE: 0.02",
         "--accuracy_baseline", "0.02",
         "--latency_provider", str(tmp_path / "p.py::m"),
         "--target_latency_ms", "8",
@@ -614,7 +613,6 @@ def test_train_pool_main_injects_orca_kd_scripts_dir(tmp_path, monkeypatch):
         "--kd_scripts_dir", str(KD), "--artifacts_dir", str(tmp_path),
         "--per_run_artifacts_dir", str(tmp_path), "--project_root", str(tmp_path),
         "--train_pipeline_path", str(tmp_path / "train_pipeline.py"),
-        "--test_command", "echo NMSE: 0.02",
         "--accuracy_baseline", "0.02",
         "--latency_provider", str(tmp_path / "p.py::m"),
         "--target_latency_ms", "8",
@@ -722,7 +720,7 @@ def test_kd_inputs_slammed_remove_advanced_defaults():
         f"kd-nas.yaml inputs 含已下沉 input {sorted(leaked)}（应改为下游 CLI 默认）。"
     )
     # 必填 Tier A 不动（v4: teacher_train_command 改名 user_train_script）
-    for must in ("user_train_script", "test_command", "target_latency_ms",
+    for must in ("user_train_script", "target_latency_ms",
                  "accuracy_baseline", "accuracy_baseline_kind",
                  "baseline_model_path", "latency_provider"):
         assert must in actual, f"必填 input {must} 被误删"
@@ -865,7 +863,6 @@ def test_train_pool_worker_exception_handler_row_schema(tmp_path, monkeypatch):
         "--kd_scripts_dir", str(KD), "--artifacts_dir", str(artifacts),
         "--per_run_artifacts_dir", str(artifacts),
         "--project_root", str(artifacts),
-        "--test_command", "echo NMSE: 0.02",
         "--accuracy_baseline", "0.02",
         "--latency_provider", str(artifacts / "p.py::m"),
         "--target_latency_ms", "8",
@@ -1077,7 +1074,6 @@ def _train_one_ctx(tmp_path):
         "provider_id": "prov|1234",
         "accuracy_baseline": "0.02",
         "accuracy_baseline_kind": "nmse",
-        "test_command": "echo NMSE: 0.02",
         "teacher_cache": "/fake/tc.pt",
         "kd_scripts_dir": str(KD),
         "artifacts_dir": str(tmp_path),
@@ -1086,7 +1082,7 @@ def _train_one_ctx(tmp_path):
         "epochs": 1,
         "seed": 0,
         "train_pipeline_path": str(tmp_path / "train_pipeline.py"),
-        "measure_device": "cpu",
+        "eval_device": "cpu",
     }
 
 
@@ -1107,11 +1103,13 @@ def test_train_one_success_row_full_fields(tmp_path, monkeypatch):
     captured_argv = []
     def fake_subproc(argv):
         captured_argv.append(argv)
-        # train → rc=0；measure → rc=0 + STUDENT_ACCURACY/MET_ACCURACY
-        if "train_pipeline.py" in str(argv):
+        argv_str = str(argv)
+        # train_pipeline.py --mode distill → rc=0（训练产 ckpt）
+        # train_pipeline.py --mode eval → rc=0 + STUDENT_ACCURACY 协议（取代 measure_student）
+        if "train_pipeline.py" in argv_str:
+            if "--mode" in argv and argv[argv.index("--mode") + 1] == "eval":
+                return 0, "STUDENT_ACCURACY: 0.018\nSTUDENT_ACCURACY_KIND: nmse\nMET_ACCURACY: true", ""
             return 0, "", ""
-        if "measure_student.py" in str(argv):
-            return 0, "STUDENT_ACCURACY: 0.018\nSTUDENT_ACCURACY_KIND: nmse\nMET_ACCURACY: true", ""
         return 0, "", ""
     monkeypatch.setattr(tp, "run_subproc", fake_subproc)
 
@@ -1145,15 +1143,18 @@ def test_train_one_success_row_full_fields(tmp_path, monkeypatch):
     for flag in ("--student_model_path", "--teacher_cache", "--build_cfg",
                  "--kd_config", "--out_ckpt", "--variant_id"):
         assert flag in train_argv, f"worker argv 缺 {flag}（distill 契约参数）"
-    # measure_student argv 契约（增量 D：--accuracy_baseline_kind 透传是 met_accuracy 判门的关键；
-    # 漏传 → 退默认 "" → unknown → fail-soft + WARN → met_accuracy=false 误杀合格 student）。
-    measure_argv = next(a for a in captured_argv if "measure_student.py" in str(a))
-    for flag in ("--accuracy_baseline", "--accuracy_baseline_kind", "--eval_command",
-                 "--skip_latency", "--build_cfg", "--student_ckpt"):
-        assert flag in measure_argv, f"measure argv 缺 {flag}（精度测量契约参数）"
-    kind_idx = measure_argv.index("--accuracy_baseline_kind")
-    assert measure_argv[kind_idx + 1] == "nmse", (
-        f"--accuracy_baseline_kind 应透传 ctx 值 nmse；got {measure_argv[kind_idx + 1]!r}"
+    # eval argv 契约（取代旧 measure_student argv；train_pipeline.py --mode eval 测精度，
+    # 增量 D：--accuracy_baseline_kind 透传是 met_accuracy 判门的关键——漏传 → unknown →
+    # fail-soft + WARN → met_accuracy=false 误杀合格 student）。
+    eval_argv = next(a for a in captured_argv
+                     if "train_pipeline.py" in str(a) and "--mode" in a
+                     and a[a.index("--mode") + 1] == "eval")
+    for flag in ("--accuracy_baseline", "--accuracy_baseline_kind", "--student_ckpt",
+                 "--build_cfg", "--student_model_path"):
+        assert flag in eval_argv, f"eval argv 缺 {flag}（精度测量契约参数）"
+    kind_idx = eval_argv.index("--accuracy_baseline_kind")
+    assert eval_argv[kind_idx + 1] == "nmse", (
+        f"--accuracy_baseline_kind 应透传 ctx 值 nmse；got {eval_argv[kind_idx + 1]!r}"
     )
 
 
@@ -1194,16 +1195,17 @@ def test_train_one_measure_failure_marks_fail_accuracy(tmp_path, monkeypatch):
     ckpt.write_bytes(b"x" * 100)
 
     def fake_subproc(argv):
-        if "train_pipeline.py" in str(argv):
-            return 0, "", ""
-        if "measure_student.py" in str(argv):
-            return 1, "", "eval command crashed"
+        argv_str = str(argv)
+        if "train_pipeline.py" in argv_str:
+            if "--mode" in argv and argv[argv.index("--mode") + 1] == "eval":
+                return 1, "", "eval crashed"  # eval 失败 → FAIL_accuracy
+            return 0, "", ""  # distill rc=0
         return 0, "", ""
     monkeypatch.setattr(tp, "run_subproc", fake_subproc)
 
     row = tp._train_one(ctx, entry, device="")
     assert row["status"] == "FAIL_accuracy"
-    assert "measure rc=1" in row["fail_reason"]
+    assert "eval rc=1" in row["fail_reason"]
     assert row["ckpt"] == str(ckpt)  # train 成功了，ckpt 有
 
 
@@ -1534,7 +1536,6 @@ def test_train_pool_r2_viz_kd_nonzero_rc_warns_not_silent(tmp_path, monkeypatch,
         "--kd_scripts_dir", str(KD), "--artifacts_dir", str(artifacts),
         "--per_run_artifacts_dir", str(artifacts),
         "--project_root", str(artifacts),
-        "--test_command", "echo NMSE: 0.02",
         "--accuracy_baseline", "0.02",
         "--accuracy_baseline_kind", "nmse",
         "--latency_provider", str(artifacts / "p.py::m"),
@@ -1610,7 +1611,6 @@ def test_train_pool_viz_argv_passes_baseline_latency_ms(tmp_path, monkeypatch):
         "--kd_scripts_dir", str(KD), "--artifacts_dir", str(artifacts),
         "--per_run_artifacts_dir", str(artifacts),
         "--project_root", str(artifacts),
-        "--test_command", "echo NMSE: 0.02",
         "--accuracy_baseline", "0.02",
         "--accuracy_baseline_kind", "nmse",
         "--latency_provider", str(artifacts / "p.py::m"),
@@ -1666,7 +1666,6 @@ def test_train_pool_viz_argv_omits_baseline_latency_ms_when_none(tmp_path, monke
         "--kd_scripts_dir", str(KD), "--artifacts_dir", str(artifacts),
         "--per_run_artifacts_dir", str(artifacts),
         "--project_root", str(artifacts),
-        "--test_command", "echo NMSE: 0.02",
         "--accuracy_baseline", "0.02",
         "--accuracy_baseline_kind", "nmse",
         "--latency_provider", str(artifacts / "p.py::m"),
@@ -1725,11 +1724,12 @@ def test_train_one_measure_accuracy_not_met_marks_fail_accuracy(tmp_path, monkey
     ckpt.write_bytes(b"x" * 100)
 
     def fake_subproc(argv):
-        if "train_pipeline.py" in str(argv):
-            return 0, "", ""
-        if "measure_student.py" in str(argv):
-            # measure 成功但精度不达标（met_acc=false）
-            return 0, "STUDENT_ACCURACY: 0.05\nSTUDENT_ACCURACY_KIND: nmse\nMET_ACCURACY: false", ""
+        argv_str = str(argv)
+        if "train_pipeline.py" in argv_str:
+            if "--mode" in argv and argv[argv.index("--mode") + 1] == "eval":
+                # eval 成功但精度不达标（met_acc=false）
+                return 0, "STUDENT_ACCURACY: 0.05\nSTUDENT_ACCURACY_KIND: nmse\nMET_ACCURACY: false", ""
+            return 0, "", ""  # distill rc=0
         return 0, "", ""
     monkeypatch.setattr(tp, "run_subproc", fake_subproc)
 

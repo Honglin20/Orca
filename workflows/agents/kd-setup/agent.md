@@ -1,5 +1,5 @@
 ---
-description: kd-nas Setup（一次性·幂等）：跑 teacher 训练（train_pipeline.py --mode teacher，teacher-gen 产出的 wrapper）+ teacher_setup 产 cache（latency 透传 teacher_gen.output）+ 预检变体 + GPU 预检定并发。跨 run 复用（teacher_cache 哈希校验跳过重训）。所有下游专用路径字段作为顶层 output 一次给齐（单一真相源）。BLK-13 取 orca.lock 单写者护栏。确定性逻辑全在脚本（rule 5）。
+description: kd-nas Setup（一次性·幂等）：跑 teacher 训练（train_pipeline.py --mode teacher，teacher-gen 产出的 wrapper）+ teacher_setup 产 cache（latency 透传 teacher_gen.output）+ 预检变体 + GPU 预检定并发。跨 run 复用（teacher_cache 哈希校验跳过重训）。所有下游专用路径字段作为顶层 output 一次给齐（单一真相源）。取 orca.lock 单写者护栏。确定性逻辑全在脚本（rule 5）。
 tools: [bash, read, write, edit, glob, grep]
 ---
 # kd-setup
@@ -66,14 +66,14 @@ tools: [bash, read, write, edit, glob, grep]
 
 ---
 
-## step 1 执行：解析路径 + 单写者锁（BLK-13）
+## step 1 执行：解析路径 + 单写者锁
 
 ```bash
 KD_SCRIPTS_DIR="$(dirname "$(find workflows/agents/_kd_scripts -name kd_common.py -print -quit)")"
 KD_SCRIPTS_DIR="$(python3 -c "import os,sys;print(os.path.abspath(sys.argv[1]))" "$KD_SCRIPTS_DIR")"
 PER_RUN_ARTIFACTS_DIR="${ORCA_ARTIFACTS_DIR:-}"
 [ -z "$PER_RUN_ARTIFACTS_DIR" ] && { echo "FAIL: \$ORCA_ARTIFACTS_DIR 未注入（非 orca run 上下文）" >&2; exit 2; }
-# kd_artifacts_dir 已下沉：默认 <repo>/kd-nas-artifacts/（U-1）。如需 override 改下行常量。
+# kd_artifacts_dir 已下沉：默认 <repo>/kd-nas-artifacts/。如需 override 改下行常量。
 KD_ARTIFACTS_DIR="$(python3 -c "import os;print(os.path.abspath('kd-nas-artifacts')+'/')")"
 mkdir -p "$KD_ARTIFACTS_DIR"ckpts
 # baseline 来源从 inputs.baseline_model_path 改为 flatten.output.baseline_contract_path
@@ -96,7 +96,7 @@ while p and p!=os.path.dirname(p) and not any(os.path.exists(os.path.join(p,m)) 
     p=os.path.dirname(p)
 print(p)
 " "$BASELINE")"
-# KB receiver 绝对路径（setup 探测一次，下游 train_pool 经 output 取——不依赖 ORCA_KB_DIR env，BUG-3）
+# KB receiver 绝对路径（setup 探测一次，下游 train_pool 经 output 取——不依赖 ORCA_KB_DIR env）
 RECEIVER_DIR="$(python3 -c "import os;print(os.path.abspath(os.path.join(os.environ.get('ORCA_KB_DIR',''),'families','receiver'))+'/' if os.environ.get('ORCA_KB_DIR') else '')")"
 [ -z "$RECEIVER_DIR" ] || [ ! -d "$RECEIVER_DIR" ] && { echo "FAIL: ORCA_KB_DIR 未注入或 ${RECEIVER_DIR:-<empty>} 不存在" >&2; exit 2; }
 # ledger 跨 run 复用铁律：仅首次创建，**绝不截断已有行**（否则历史蒸馏全丢 → 重复训练）
@@ -165,7 +165,7 @@ print('TEACHER_OK')
 echo "PARSED step3: TEACHER_MODEL_PATH=$TEACHER_MODEL_PATH (source: teacher_gen.output)"
 ```
 
-## step 4 执行：幂等护栏（teacher_cache 存在 + 哈希匹配 → 跳过 teacher 训练，HI-3）
+## step 4 执行：幂等护栏（teacher_cache 存在 + 哈希匹配 → 跳过 teacher 训练）
 
 ```bash
 TEACHER_CACHE="${KD_ARTIFACTS_DIR}teacher_cache.pt"
@@ -196,7 +196,7 @@ echo "PARSED step4: TEACHER_CACHE=$TEACHER_CACHE TEACHER_META=$TEACHER_META TEAC
 ```bash
 TRAIN_PIPELINE_PATH="{{ train_script_gen.output.train_pipeline_path }}"
 [ -f "$TRAIN_PIPELINE_PATH" ] || { echo "FAIL: train-script-gen 产物不存在：$TRAIN_PIPELINE_PATH（train-script-gen 节点是否 PASS？）" >&2; exit 2; }
-# DUMMY_INPUT 从 baseline 契约读（与 teacher wrapper 一致；不硬编码 shape——BLK-4）
+# DUMMY_INPUT 从 baseline 契约读（与 teacher wrapper 一致；不硬编码 shape）
 TEACHER_DUMMY="$(python3 -c "
 import importlib.util, json, sys, os
 p='$BASELINE'; d=os.path.dirname(p)
@@ -226,7 +226,7 @@ fi
 echo "PARSED step5: TEACHER_CACHE=$TEACHER_CACHE TEACHER_META=$TEACHER_META TEACHER_CKPT=$TEACHER_CKPT"
 ```
 
-## step 6 执行：预检 KB 变体 ≥1（BLK-14）
+## step 6 执行：预检 KB 变体 ≥1
 
 ```bash
 python3 "$KD_SCRIPTS_DIR/pick_variant.py" --receiver_dir "$RECEIVER_DIR" \

@@ -1,7 +1,7 @@
-"""measure_baseline.py —— baseline_measure 节点的确定性后端（草稿 §4/§5/§10）。
+"""measure_baseline.py —— setup 节点的确定性后端。
 
-把原 family_detect 里"导出 ONNX + 测时延 + 取 baseline accuracy + seed champions"这 4 件
-**确定性**活抽出来，做成脚本（Rule 5：deterministic 逻辑用代码）。baseline_measure 节点
+把"导出 ONNX + 测时延 + 取 baseline accuracy + seed champions"这 4 件
+**确定性**活做成脚本（deterministic 逻辑用代码）。setup 节点
 只负责调本脚本 + 解析输出。
 
 pre-trained 模式（用户有 baseline 预训练权重时）：
@@ -26,9 +26,7 @@ from pathlib import Path
 
 # ── 复用同目录的 export_onnx + 动态加载 latency_provider ──────────────────────
 def _export_onnx(model_path, build_fn, dummy_input, opset, out, device: str = "auto", seed: int = 0):
-    """复用 export_onnx.export_onnx（同目录 import）。
-
-    P7：解开原硬编码 device="cpu"，透传 device + seed。
+    """复用 export_onnx.export_onnx（同目录 import）。透传 device + seed。
     """
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
@@ -113,7 +111,7 @@ def measure_baseline(args) -> dict:
     champions_path = os.path.join(out_dir, "champions.jsonl")
     ledger_path = os.path.join(out_dir, "ledger.jsonl")
 
-    # 1. 导出 baseline ONNX（P7：seed 透传给 export_onnx，dummy 输入复现）
+    # 1. 导出 baseline ONNX（seed 透传给 export_onnx，dummy 输入复现）
     onnx_path = _export_onnx(
         args.model_path, args.build_fn, args.dummy_input, args.opset,
         out=os.path.join(snapshots, "baseline.onnx"),
@@ -176,7 +174,7 @@ def measure_baseline(args) -> dict:
 
 
 def _main() -> int:
-    p = argparse.ArgumentParser(description="baseline_measure 确定性后端（fail loud）")
+    p = argparse.ArgumentParser(description="measure_baseline 确定性后端（fail loud）")
     p.add_argument("--output_dir", required=True)
     p.add_argument("--model_path", required=True)
     p.add_argument("--build_fn", required=True)
@@ -193,7 +191,7 @@ def _main() -> int:
         "--device",
         default="auto",
         choices=["auto", "cuda", "npu", "cpu"],
-        help="ONNX 导出 + latency 测量设备（P7；默认 auto，cuda→npu→cpu 探测）",
+        help="ONNX 导出 + latency 测量设备（默认 auto，cuda→npu→cpu 探测）",
     )
     p.add_argument(
         "--seed",

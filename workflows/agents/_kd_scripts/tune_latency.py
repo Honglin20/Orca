@@ -4,12 +4,12 @@
 ``target_latency_ms`` 时，按 KNOBS 的 leverage 高→低、每次缩一档，**刚跨过 target 即停**
 （最小缩量，保精度余量），不在真硬件上过度缩到很小。预算耗尽仍超 → FAIL_latency。
 
-确定性 / 复现（HI-2 / HI-13）：
+确定性 / 复现：
   - 每次 export 前 ``torch.manual_seed(seed)``（``export_onnx`` 内部已做）→ 每 cfg 权重确定。
   - ``cudnn.benchmark=False`` + ``use_deterministic_algorithms(True)``（best-effort）。
-  - 每 cfg 测 ``--measure_repeats`` 次取 median + std（HI-13，抗硬件噪声）。
+  - 每 cfg 测 ``--measure_repeats`` 次取 median + std（抗硬件噪声）。
   - 结果缓存 ``<artifacts_dir>/tune_cache.json`` key=(variant_id,cfg_hash,target)→{median,std}，
-    distill recoverable 重试时读缓存、不在真硬件上重测（HI-5）。
+    distill recoverable 重试时读缓存、不在真硬件上重测。
 
 CLI::
     python3 tune_latency.py --variant_path <.py> --dummy_input '<json>' --knobs '<json>' \
@@ -125,7 +125,7 @@ def tune_latency(
 ) -> dict[str, Any]:
     """跑最小缩量调参，返回结果 dict（status / cfg / latency_median / latency_std / measurements）。"""
     import torch  # 延迟 import（脚本顶层不强制 torch）
-    # HI-13：确定性（best-effort；某些算子无 deterministic 实现则忽略）。
+    # 确定性（best-effort；某些算子无 deterministic 实现则忽略）。
     try:
         torch.backends.cudnn.benchmark = False
     except Exception:
@@ -139,7 +139,7 @@ def tune_latency(
 
     measure = _load_measure(latency_provider)
     variant_id = os.path.splitext(os.path.basename(variant_path))[0]
-    cur_provider_id = provider_id(latency_provider)  # HI-12：cache key 含 provider 维度（换 provider → miss）
+    cur_provider_id = provider_id(latency_provider)  # cache key 含 provider 维度（换 provider → miss）
     cache_path = os.path.join(artifacts_dir, "tune_cache.json")
     cache = _load_cache(cache_path)
     tune_dir = os.path.join(artifacts_dir, "tune")
@@ -166,7 +166,7 @@ def tune_latency(
         )
         med, std = _measure_cfg(measure, onnx_path, device, measure_repeats)
         cache[key] = {"median": med, "std": std}
-        _atomic_write_json(cache_path, cache)  # 每测必写（crash-safe，HI-5）
+        _atomic_write_json(cache_path, cache)  # 每测必写（crash-safe）
         measurements["n"] += 1
         return med, std
 

@@ -1,14 +1,14 @@
 """measure_student.py —— KD-NAS student 精度/时延测量（确定性后端）。
 
-新设计（KD-NAS 重构后）职责：
+本模块职责：
   - **精度测量**（distill 节点主用）：跑 ``--eval_command``（或 ``--eval_dataset``）→ 解析 student
     accuracy → 对比**用户提供的绝对精度基线** ``--accuracy_baseline``（方向由 kind 决定）。
     teacher 不再是精度参考（teacher 只当 KD 软标签源），故 ``--teacher_meta`` 改可选、
     teacher-relative dB-gap 路径降级为 legacy。
-  - **时延测量**（可选）：导 ONNX + ``--latency_provider`` 实测。distill 节点按 HI-1 **复用**
+  - **时延测量**（可选）：导 ONNX + ``--latency_provider`` 实测。distill 节点**复用**
     selector 的 latency（不在真硬件上重测），故传 ``--skip_latency`` 跳过（latency_ms=-1）。
 
-方向语义（绝对基线对比，SR3）：
+方向语义（绝对基线对比）：
   - kind ∈ {mse, nmse, ber}（误差型，越低越好）→ ``met = student ≤ baseline``
   - kind ∈ {snr, acc}（越高越好）              → ``met = student ≥ baseline``
   - kind unknown                                → ``met = false`` + confidence=low + 大声 WARN
@@ -126,7 +126,7 @@ def _run(cmd: str, cwd: str, env: dict | None = None) -> str:
 def _compute_met_accuracy_absolute(
     student_acc: float, detected_kind: str, baseline: float, kind_override: str,
 ) -> tuple[bool, str, str]:
-    """绝对精度基线对比（SR3）。返回 (met_accuracy, used_kind, confidence)。
+    """绝对精度基线对比。返回 (met_accuracy, used_kind, confidence)。
 
     kind_override 非空 → 锁方向；若与 detected_kind 不符 → WARN（用 override）。
     kind unknown → met=false, confidence=low（绝不静默 pass）。
@@ -261,7 +261,7 @@ def measure_student(args) -> dict:
     else:
         student_acc, student_kind = 0.0, "unknown"
 
-    # 4. 精度判定：绝对基线（新设计唯一路径，HI-8：已删 teacher-relative dB gap legacy）。
+    # 4. 精度判定：绝对基线（唯一路径）。
     if args.accuracy_baseline is not None:
         met_acc, used_kind, acc_conf = _compute_met_accuracy_absolute(
             student_acc, student_kind, float(args.accuracy_baseline),
@@ -313,9 +313,9 @@ def measure_student(args) -> dict:
 
 
 def _compute_db_gap(*args, **kwargs):  # noqa: D401
-    """已删（HI-8）：teacher-relative dB gap legacy 路径移除。新设计用绝对精度基线。"""
+    """不再支持：teacher-relative dB gap 路径已移除，用 --accuracy_baseline 绝对基线对比。"""
     raise NotImplementedError(
-        "teacher-relative dB gap 已移除（HI-8）；新设计用 --accuracy_baseline 绝对基线对比"
+        "teacher-relative dB gap 已移除；用 --accuracy_baseline 绝对基线对比"
     )
 
 

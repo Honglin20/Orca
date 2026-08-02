@@ -1,8 +1,8 @@
-"""pick_variant.py —— KD-NAS 确定性变体选择器（contract §4）。
+"""pick_variant.py —— KD-NAS 确定性变体选择器。
 
-按文件名排序遍历 ``$ORCA_KB_DIR/families/receiver/*.py``（**非递归**，排除 ``_*.py`` 共享模块，
-HI-10），取第一个**未 done** 的变体，写 SelectionSpec。全 done → ``ALL_DONE``。无变体 →
-``NO_VARIANTS``（exit 3，BLK-14）。
+按文件名排序遍历 ``$ORCA_KB_DIR/families/receiver/*.py``（**非递归**，排除 ``_*.py`` 共享模块），
+取第一个**未 done** 的变体，写 SelectionSpec。全 done → ``ALL_DONE``。无变体 →
+``NO_VARIANTS``（exit 3）。
 
 done 谓词见 ``kd_common.is_variant_done``（跨 run 复用：sha256 / provider_id / ckpt / target 校验）。
 
@@ -16,10 +16,10 @@ stdout::
     ALL_DONE: true                    # 全部变体已 done
     NO_VARIANTS: true                 # receiver 目录无变体 .py（exit 3）
 
-fail loud（BLK 系列）：
-    - 变体无 callable build_model / 无 DUMMY_INPUT.shape → 非零退出（BLK-4：禁硬编码 shape 回退）。
-    - KNOBS 非法（step>=0 / leverage∉{high,medium,low}）→ 非零（BLK-1/2）。
-    - ledger 坏行 → raise（BLK-16，经 kd_common.read_ledger）。
+fail loud：
+    - 变体无 callable build_model / 无 DUMMY_INPUT.shape → 非零退出（禁硬编码 shape 回退）。
+    - KNOBS 非法（step>=0 / leverage∉{high,medium,low}）→ 非零。
+    - ledger 坏行 → raise（经 kd_common.read_ledger）。
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ def _load_variant(path: str) -> Any:
 
 
 def _validate_variant(mod: Any, path: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    """校验契约：build_model callable + DUMMY_INPUT.shape（BLK-4）+ KNOBS（BLK-1/2）。
+    """校验契约：build_model callable + DUMMY_INPUT.shape + KNOBS。
 
     返回 (dummy_input, knobs)。knobs={} 表示不可调（latency 超阈即 FAIL_latency）。
     """
@@ -115,7 +115,7 @@ def pick_variant(
     """返回下一未 done 变体的 SelectionSpec，或 None（全 done）。无变体 → raise（exit 3 由 caller）。"""
     variants = _list_variants(receiver_dir)
     if not variants:
-        # BLK-14：无变体是配置错误，raise（caller 退 exit 3）。
+        # 无变体是配置错误，raise（caller 退 exit 3）。
         raise _NoVariants(receiver_dir)
 
     rows = [] if force_rerun else read_ledger(ledger_path)
@@ -145,7 +145,7 @@ def pick_variant(
 
 
 class _NoVariants(Exception):
-    """receiver 目录无变体 .py（BLK-14）。专用信号 → exit 3。"""
+    """receiver 目录无变体 .py。专用信号 → exit 3。"""
 
     def __init__(self, receiver_dir: str):
         super().__init__(f"NO_VARIANTS: {receiver_dir} 无变体 .py")
@@ -160,7 +160,7 @@ def _main() -> int:
     p.add_argument("--target_latency_ms", required=True, type=float, help="当前 latency 目标")
     p.add_argument("--latency_provider", required=True,
                    help="用户 latency 脚本 path::func（算 provider_id）")
-    p.add_argument("--force_rerun", action="store_true", help="忽略 ledger，全量重扫（U-5：仅 variants）")
+    p.add_argument("--force_rerun", action="store_true", help="忽略 ledger，全量重扫（仅 variants）")
     p.add_argument("--out", default="", help="SelectionSpec json 输出路径")
     args = p.parse_args()
 
@@ -179,7 +179,7 @@ def _main() -> int:
     except _NoVariants as e:
         print("NO_VARIANTS: true")
         print(f"# {e}", file=sys.stderr)
-        return 3  # BLK-14：配置错误专用码
+        return 3  # 配置错误专用码
     except Exception as e:
         print(f"[pick_variant] FAIL: {type(e).__name__}: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)

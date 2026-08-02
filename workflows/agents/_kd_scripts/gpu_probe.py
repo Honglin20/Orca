@@ -153,7 +153,7 @@ def _probe_per_variant_vram(
     # 老版无此 kwarg。先试 weights_only=False（信任自家 production 文件），TypeError 回退。
     # teacher_cache.pt 是 teacher_setup.py 自家产物（trusted-internal trust boundary），
     # setup step 5 已校验可加载；此处若 load 失败 = 输入契约不符（损坏），fail loud 归入 ValueError
-    # 让 _main 走 exit 2（与 missing-file 同政策，code-reviewer 🟡-2）。
+    # 让 _main 走 exit 2（与 missing-file 同政策）。
     try:
         try:
             cache = torch.load(teacher_cache, map_location=dev, weights_only=False)
@@ -311,9 +311,9 @@ def _main() -> int:
     total_free = sum(free_per_card)
     if per_variant <= 0:
         # max_memory_allocated 测不到（某些 NPU 后端 / API 缺失）→ fail-soft 但**不静默估算**：
-        # 原实现 ``per_variant = total_free // 4`` 是沉默估算驱动并发（code-reviewer R1，
-        # 破坏 fail-loud；昇腾部署相关）。改回 cpu 同款 fail-soft：PER_VARIANT_VRAM_BYTES=0 +
-        # CONCURRENCY=1 + GPU_REPORT 标 ``[probe failed]``，不估算驱动并发。
+        # 用 ``per_variant = total_free // 4`` 估算驱动并发会破坏 fail-loud（昇腾部署相关），
+        # 故走 cpu 同款 fail-soft：PER_VARIANT_VRAM_BYTES=0 + CONCURRENCY=1 + GPU_REPORT 标
+        # ``[probe failed]``，不估算驱动并发。
         print(
             "[gpu_probe] WARN: per-variant VRAM 探测失败（max_memory_allocated 返 0 / NPU 后端"
             "不支持）→ fail-soft：PER_VARIANT_VRAM_BYTES=0 + CONCURRENCY=1，不估算驱动并发。",

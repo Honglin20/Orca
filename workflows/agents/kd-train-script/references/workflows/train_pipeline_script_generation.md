@@ -1,12 +1,11 @@
 # Train Pipeline Script Generation Workflow (KD-NAS)
 
 Use this workflow to generate `<output_dir>/train_pipeline.py` — the unified
-KD-NAS training entry point supporting both **teacher** and **distill** modes
-behind one CLI. The script is self-contained: user project code is **copied
-in**, never imported.
+KD-NAS training entry point supporting **teacher**, **distill**, and **eval**
+modes behind one CLI. The script is self-contained: user project code is
+**copied in**, never imported.
 
-This is the KD-NAS analogue of the NAS supernet-train-script workflow, with
-these key differences (KD-NAS adaptations, must not regress):
+Key characteristics of the generated script (must not regress):
 
 1. **No sandwich sampling, no DDP, no torchrun.** KD-NAS is single-device +
    `--device` CLI; concurrency is handled at the workflow level via
@@ -14,17 +13,24 @@ these key differences (KD-NAS adaptations, must not regress):
 2. **Models loaded by path** via `importlib.util.spec_from_file_location` —
    teacher and student share the same contract (`build_model` + `DUMMY_INPUT` +
    `KNOBS`, see `workflows/agents/_kd_scripts/CONTRACTS.md` §1).
-3. **Two modes** in one script (teacher / distill), sharing the training
-   infrastructure (optimizer / scheduler / dataloader / task_loss / loop
-   skeleton); mode-specific code paths diverge only at loss + ckpt schema.
+3. **Three modes** in one script (teacher / distill / eval). Teacher + distill
+   share the training infrastructure (optimizer / scheduler / dataloader /
+   task_loss / loop skeleton); mode-specific code paths diverge at loss +
+   ckpt schema. **Eval is read-only**: it loads a student ckpt, runs the user's
+   eval metric, and emits the accuracy protocol consumed by `train_pool` —
+   replacing the old `measure_student --eval_command` path.
 4. **KD loss** uses the existing KD-NAS library
    (`kd.compose.build_kd_loss` + `kd.wrapper.KDStudentWrapper` +
-   `kd.wrapper.TeacherCache.load` + `kd.ema.MeanTeacherEMA`); **not** the NAS
-   `nas_agent.train.distillation` helpers.
+   `kd.wrapper.TeacherCache.load` + `kd.ema.MeanTeacherEMA`).
 5. **Narrower user-train.py contract.** KD-NAS users only provide
    `compute_loss(s_out, y)` + `build_dataloader()` (see
    `examples/kd-nas-demo/train.py`); optimizer / scheduler default to
    `Adam` + none when absent, with an explicit fallback note.
+6. **Eval metric auto-discovered.** The user's repo already contains an eval
+   script (e.g. `examples/kd-nas-demo/test_student.py`) — the agent discovers
+   and reads it (see §3 "User Eval Metric"), ports its metric computation into
+   `--mode eval`, and emits the `STUDENT_ACCURACY` protocol. No `test_command`
+   workflow input is required.
 
 ## Source Evidence
 
@@ -32,6 +38,11 @@ Build the script from:
 
 * **User train.py** under `<user_project_root>` — task loss, dataloader,
   optimizer/scheduler if present, batch format, model-call signature.
+* **User eval script** under `<user_project_root>` (discovered: `test_*.py` /
+  `eval*.py` / `evaluate*.py` / `test.py`, or an eval/metric fn inside
+  `train.py`) — the accuracy metric (NMSE/MSE/BER/SNR/acc) + eval data
+  loading, ported into `--mode eval`. If none is found, fail loud (the user
+  contract asserts the repo contains one).
 * **Teacher model** at `<teacher_model_path>` (e.g.
   `workflows/agents/_kd_scripts/teacher_model.py`) — exposes `build_model(**cfg)`,
   `DUMMY_INPUT`, `feature_hook_names()`.
@@ -60,7 +71,7 @@ them.
 
 Stable base CLI (must remain in every generated `train_pipeline.py`):
 
-- `--mode {teacher,distill}` (required) — selects training mode.
+- `--mode {teacher,distill,eval}` (required) — selects mode.
 - `--out_ckpt PATH` (required) — checkpoint output path.
 - `--epochs INT` (default 3).
 - `--lr FLOAT` (default 1e-3).
@@ -72,15 +83,21 @@ Stable base CLI (must remain in every generated `train_pipeline.py`):
 - `--build_cfg JSON` (default `{}`; passed to `build_model(**cfg)` —
   teacher's `build_cfg` and student's `student_cfg` share this flag).
 - `--model_path PATH` (required in teacher mode) — teacher `.py` path.
-- `--student_model_path PATH` (required in distill mode) — student `.py` path.
+- `--student_model_path PATH` (required in distill & eval mode) — student `.py` path.
 - `--teacher_cache PATH` (required in distill mode) — `teacher_cache.pt` from
   `teacher_setup.py`.
 - `--kd_config JSON` (default `{"kd_losses": [], "weights": {}}`; distill mode).
 - `--user_train_import STR` — overrides `USER_TRAIN_MODULE` placeholder.
 - `--user_loss_fn STR` — overrides `USER_LOSS_FN` placeholder.
+- `--user_eval_import STR` — overrides `USER_EVAL_MODULE` placeholder (eval mode).
+- `--user_eval_fn STR` — overrides `USER_EVAL_FN` placeholder (eval mode).
+- `--student_ckpt PATH` (required in eval mode) — student checkpoint to load.
+- `--accuracy_baseline FLOAT` (eval mode) — absolute accuracy baseline (user-provided).
+- `--accuracy_baseline_kind STR` (eval mode) — nmse/mse/ber/db (lower better) |
+  snr/acc (higher better); locks direction via `kd_common.accuracy_direction`.
 - `--project_root PATH` — prepended to `sys.path` for user-side
   `from <pkg> import <mod>` imports.
-- `--env_anchor PATH` — BLK-5 ORCA env bootstrap anchor (per-run artifacts dir).
+- `--env_anchor PATH` — ORCA env bootstrap anchor (per-run artifacts dir).
 
 **No DDP / torchrun / world-size / local-rank flags.** Single device only.
 
@@ -132,6 +149,29 @@ batch stream. The placeholder fallback `_PlaceholderDataLoader` (a class with
 `__iter__`/`__len__`) is the reference shape. If the user's `build_dataloader`
 returns a one-shot generator, wrap it in a re-iterable adapter (or call
 `build_dataloader()` at the start of every epoch).
+
+### 3.1 User Eval Metric (eval mode, self-contained)
+
+**Single strategy: path/module injection** (mirrors the loss strategy above).
+Set `USER_EVAL_MODULE = "/abs/path/to/test_student.py"` (or a module name) and
+`USER_EVAL_FN = "evaluate"`, resolved by `_load_user_eval()` via the same
+`importlib` path/module loader. The resolved callable has signature
+`fn(student: nn.Module, device) -> (value: float, kind: str)` — it owns its
+own eval data loading (ported from the user's eval script) and returns the
+metric value + kind tag (`nmse`/`mse`/`ber`/`snr`/`acc`).
+
+Discovery (the agent's judgment, not a workflow input): glob
+`<user_project_root>` for `test_*.py` / `eval*.py` / `evaluate*.py` /
+`test.py`, and read `train.py` for an eval/metric fn. Read the hit, extract
+its metric computation + eval data loading, and port it into the
+`(student, device) -> (value, kind)` callable. When the user's eval script
+does not expose a matching-signature fn (e.g. its logic is inline in `main()`),
+inline an `evaluate_student` helper into the generated script and point
+`USER_EVAL_MODULE`/`USER_EVAL_FN` at it. **No eval script found → fail loud.**
+
+Only the eval-metric *reference* is resolved by path injection at eval time;
+the eval data-loading code is ported (copied), not imported live — same
+self-containment rule as the dataloader.
 
 ### 4. Optimizer, Scheduler (user-port-or-fallback)
 
@@ -243,6 +283,39 @@ KD_LOSS_FINAL: <float>
 KD_PROXY_MSE: <float>
 ```
 
+### 6.5 Eval Mode (read-only metric)
+
+```python
+student = _load_model_by_path(args.student_model_path, args.build_fn, cfg).to(device)
+ck = torch.load(args.student_ckpt, map_location=device)
+# tolerate distill / teacher / bare-state_dict ckpt formats
+sd = ck["student_state_dict"] if isinstance(ck.get("student_state_dict"), dict) \
+    else (ck["state_dict"] if isinstance(ck.get("state_dict"), dict) else ck)
+student.load_state_dict(sd, strict=False)
+student.eval()
+with torch.no_grad():
+    value, kind = user_eval(student, device)   # ported from the user eval script
+```
+
+**No checkpoint is written** — eval is read-only. **Fail-loud guard
+(mandatory)**: assert `math.isfinite(value)` before emitting; a non-finite
+metric must raise (never a silent fake value — CLAUDE.md Rule 12).
+
+Direction + met judgment use `kd_common.accuracy_direction(kind)` (lazy
+import, mirrors distill mode's lazy `kd.wrapper` import) against
+`--accuracy_baseline` / `--accuracy_baseline_kind`; unknown kind →
+`met_accuracy=false`, `confidence=low` + stderr WARN (never auto-guess
+direction).
+
+Stdout keys (downstream `train_pool` worker parses these — same protocol the
+old `measure_student` emitted):
+```
+STUDENT_ACCURACY: <float>
+STUDENT_ACCURACY_KIND: <nmse|mse|ber|snr|acc>
+MET_ACCURACY: <bool>
+ACCURACY_CONFIDENCE: high|low
+```
+
 ### 7. KD Loss Composition
 
 Use `kd.compose.build_kd_loss(user_loss, kd_config)` to assemble the composite.
@@ -347,6 +420,28 @@ the ckpt file exists and `torch.load(...)` returns a dict with keys
 `student_state_dict`, `variant_id`, `student_cfg`, `kd_config`, `epochs`,
 `proxy_mse`, `mode` (mode == `"distill"`).
 
+**Eval mode smoke** (uses placeholder fallback if `USER_EVAL_MODULE`
+unexpanded; otherwise points at the user's eval script). Reuse the distill
+smoke ckpt as the student ckpt:
+
+```bash
+ORCA_KD_SCRIPTS_DIR=<kd_scripts_dir> \
+python <output_dir>/train_pipeline.py \
+    --mode eval \
+    --student_model_path <student_variant_path> \
+    --student_ckpt <output_dir>/smoke_student.pth \
+    --build_cfg '{"num_blocks": 3, "embed_dim": 16}' \
+    --accuracy_baseline 1.5 \
+    --accuracy_baseline_kind nmse \
+    --device cpu \
+    --user_eval_import <abs path to user eval script> \
+    --user_eval_fn evaluate
+```
+
+Assert: stdout contains `STUDENT_ACCURACY:` + `STUDENT_ACCURACY_KIND:` +
+`MET_ACCURACY:` + `ACCURACY_CONFIDENCE:`; **no checkpoint file is written**
+by eval mode (read-only).
+
 ### Layer 3: Cross-reference verifier subagent
 
 Invoke the `workflow-verifier` subagent with:
@@ -363,7 +458,10 @@ Invoke the `workflow-verifier` subagent with:
 The verifier checks: (a) the generated script faithfully ports the user's
 loss/dataloader/optimizer logic (no behaviour drift), (b) CLI contract
 matches §1, (c) checkpoint schemas match §5/§6, (d) no DDP/sandwich/torchrun
-residue, (e) the kd library is used (not `nas_agent.train.distillation`).
+residue, (e) the kd library is used (not `nas_agent.train.distillation`),
+(f) eval mode ports the user's eval metric faithfully, emits the
+`STUDENT_ACCURACY` protocol, writes no ckpt, and uses
+`kd_common.accuracy_direction` for direction (no symbol auto-guess).
 
 Handle the verifier response:
 

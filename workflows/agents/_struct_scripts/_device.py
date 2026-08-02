@@ -1,8 +1,4 @@
-"""_device.py —— device 解析（inline 自 NAS，不引跨包依赖）。
-
-来源：nas-agent/nas_agent/train/distributed.py::resolve_device（is_npu_available 同源）。
-逐字 inline 副本（P7 决策：struct/kd 抄 NAS 的 resolve_device，不引跨包依赖；本文件是 struct 侧
-副本，kd 侧在 _kd_scripts/_device.py 同款）。
+"""_device.py —— device 解析（自包含，不引跨包依赖）。
 
 两套 device 语义，明确区分：
     - torch.device：训练 / ONNX 导出实例化用（resolve_device() 返回）。
@@ -29,7 +25,7 @@ def is_npu_available() -> bool:
 
 
 def resolve_device(device_arg: str = "auto", local_rank: int = 0) -> Any:
-    """torch.device 解析（NAS 同款）。
+    """torch.device 解析。
 
     Args:
         device_arg: "auto"（默认，cuda→npu→cpu 自动探测）/ "cuda" / "npu" / "cpu" /

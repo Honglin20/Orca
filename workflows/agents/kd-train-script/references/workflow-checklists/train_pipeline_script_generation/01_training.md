@@ -18,19 +18,20 @@ the issue for the caller.
 
 ## Items
 
-### [CRITICAL] 1. Two Modes In One Script
+### [CRITICAL] 1. Three Modes In One Script
 **auto-fixable**: yes
 **Section**: §1 CLI And Runtime Args, SKILL.md Workflow
-**Check**: `train_pipeline.py` exposes `--mode {teacher,distill}` (required,
-choices exactly `teacher` and `distill`). Both modes share the training
-infrastructure (optimizer / scheduler / dataloader / task_loss); mode-specific
-code diverges only at loss + ckpt schema.
+**Check**: `train_pipeline.py` exposes `--mode {teacher,distill,eval}` (required,
+choices exactly `teacher`, `distill`, `eval`). Teacher + distill share the
+training infrastructure (optimizer / scheduler / dataloader / task_loss);
+eval is read-only (loads a ckpt, runs the user eval metric, writes no ckpt).
 **Verify**: grep `add_argument("--mode"` and confirm `choices=["teacher",
-"distill"]`. Confirm the main entry dispatches to `run_teacher_mode` /
-`run_distill_mode`.
+"distill", "eval"]`. Confirm the main entry dispatches to `run_teacher_mode` /
+`run_distill_mode` / `run_eval_mode`.
 **Anti-pattern**: Two separate scripts; missing `--mode` flag; mode duplicated
-as two near-identical scripts instead of one with a mode switch.
-**Fix**: Add `--mode` argparse entry and a dispatcher.
+as two near-identical scripts instead of one with a mode switch; eval mode
+writing a checkpoint.
+**Fix**: Add `--mode` argparse entry and a three-way dispatcher.
 
 ### [CRITICAL] 2. No Distributed / Architecture-Sampling Residue
 **auto-fixable**: yes
@@ -109,21 +110,26 @@ training stops at epoch 1 with "dataloader empty".
 **Fix**: Wrap the generator in a class with `__iter__` that re-invokes the
 factory.
 
-### [MAJOR] 7. Optimizer / Scheduler — Port Or Explicit Fallback
+### [CRITICAL] 7. Optimizer / Scheduler — Port Or Explicit Fallback
 **auto-fixable**: yes
 **Section**: §4 Optimizer, Scheduler
 **Check**: When the user's `train.py` defines an optimizer / scheduler, the
-generated script uses the same class + hyperparameters. When absent, uses
-`torch.optim.Adam(model.parameters(), lr=args.lr)` with no scheduler and a
-`# TODO(kd-train-script):` comment marking the fallback.
-**Verify**: Compare the optimizer constructor against the user's `train.py`.
-If the user uses `AdamW` / `SGD`, the generated script must match. If the user
-has a `CosineAnnealingLR` / `StepLR`, it must be ported with the same
-milestones. The fallback must not introduce a scheduler the user didn't have.
-**Anti-pattern**: Inventing a `CosineAnnealingLR` for the fallback; using
-`AdamW` when the user's `train.py` uses `Adam`.
-**Fix**: Replace with the user's optimizer/scheduler, or add the
-`# TODO(kd-train-script):` fallback note.
+generated script uses the **same class + same hyperparameters** (e.g. `AdamW`
+not `Adam`, same `lr`/`weight_decay`, same `CosineAnnealingLR`/`StepLR`
+milestones). Only when the user's `train.py` has **no** optimizer may the
+generated script fall back to `torch.optim.Adam(model.parameters(), lr=args.lr)`
+with a `# TODO(kd-train-script):` note.
+**Verify**: grep the user's `train.py` for the optimizer constructor
+(`Adam`/`AdamW`/`SGD`/...) + scheduler (`*LR`). Compare class + kwargs against
+the generated script **verbatim**. Any drift (e.g. user `AdamW` → generated
+`Adam`) = FAIL — teacher/student would train under a config the user did not
+choose (violates "按原始配置训练"). The fallback is permitted **only** if grep
+finds no optimizer in the user's `train.py`.
+**Anti-pattern**: Silently using the template's `Adam` fallback when the user's
+`train.py` has `AdamW`; inventing a scheduler the user didn't have; drifting
+`lr`/`weight_decay`.
+**Fix**: Replace the fallback with the user's optimizer/scheduler verbatim; add
+the `# TODO(kd-train-script):` note **only** if the user truly defines none.
 
 ### [CRITICAL] 8. Distill Optimizer Includes KD Adapter Parameters
 **auto-fixable**: yes
@@ -193,23 +199,31 @@ cached teacher).
 - Student ckpt dict has keys: `student_state_dict`, `variant_id`,
   `student_cfg`, `kd_config`, `epochs`, `proxy_mse`, `mode` (mode ==
   `"distill"`).
-**Verify**: Read the two `torch.save({...})` calls. Compare key sets.
+- Eval mode writes **no checkpoint** (read-only evaluation, §6.5).
+**Verify**: Read the two `torch.save({...})` calls. Compare key sets. Confirm
+`run_eval_mode` contains no `torch.save`.
 **Anti-pattern**: Missing `mode` key (downstream cannot dispatch on mode);
 using `state_dict` for the student (breaks `KDStudentWrapper` consumers that
-expect `student_state_dict`).
-**Fix**: Adjust the dict keys to match the contract.
+expect `student_state_dict`); writing a ckpt in eval mode.
+**Fix**: Adjust the dict keys to match the contract; remove any eval ckpt save.
 
 ### [CRITICAL] 13. Stdout Keys Present
 **auto-fixable**: yes
-**Section**: §5 Teacher Mode Loop, §6 Distill Mode Loop
+**Section**: §5 Teacher Mode Loop, §6 Distill Mode Loop, §6.5 Eval Mode
 **Check**:
 - Teacher mode prints: `TEACHER_CKPT: <path>` + `TASK_LOSS_FINAL: <float>`.
 - Distill mode prints: `STUDENT_CKPT: <path>` + `KD_LOSS_FINAL: <float>` +
   `KD_PROXY_MSE: <float>`.
+- Eval mode prints: `STUDENT_ACCURACY: <float>` + `STUDENT_ACCURACY_KIND:
+  <nmse|mse|ber|snr|acc>` + `MET_ACCURACY: <bool>` + `ACCURACY_CONFIDENCE:
+  high|low>`.
 **Verify**: grep for `print(f"TEACHER_CKPT:` / `print(f"STUDENT_CKPT:` /
-`print(f"TASK_LOSS_FINAL:` / `print(f"KD_LOSS_FINAL:` / `print(f"KD_PROXY_MSE:`.
+`print(f"TASK_LOSS_FINAL:` / `print(f"KD_LOSS_FINAL:` / `print(f"KD_PROXY_MSE:`
+/ `print(f"STUDENT_ACCURACY:` / `print(f"STUDENT_ACCURACY_KIND:` /
+`print(f"MET_ACCURACY:` / `print(f"ACCURACY_CONFIDENCE:`.
 **Anti-pattern**: Missing keys (downstream `train_pool` / `teacher_setup`
-cannot parse output); extra keys polluting stdout.
+cannot parse output); extra keys polluting stdout; eval mode omitting
+`STUDENT_ACCURACY_KIND` (train_pool can't lock direction).
 **Fix**: Add the missing print statements.
 
 ### [CRITICAL] 13b. NaN-Loss Fail-Loud Guard Before Ckpt Save
@@ -228,6 +242,11 @@ SystemExit(...)`.
 through teacher_setup → distill → proxy_mse with returncode=0; returning a
 fake `0.0` proxy_mse that masks a broken dataloader (CLAUDE.md Rule 12).
 **Fix**: Add the `math.isfinite` assertion + the `seen == 0` raise.
+
+**Eval mode** (§6.5) has no ckpt save, but applies the same fail-loud
+principle: `run_eval_mode` asserts `math.isfinite(value)` on the user eval
+metric before emitting — a non-finite metric raises `SystemExit` (never a
+silent fake value). Verify the guard is present in `run_eval_mode`.
 
 ### [MAJOR] 14. Proxy MSE Computed In Distill Mode
 **auto-fixable**: yes
@@ -288,3 +307,60 @@ the default is `0.999` (mean-teacher convention). The EMA shadow is
 **Anti-pattern**: Hardcoding `decay=0.99` (not the mean-teacher default); not
 moving EMA to device.
 **Fix**: Use 0.999 default and `.to(device)`.
+
+### [CRITICAL] 19. Eval Metric Ported Fidelity
+**auto-fixable**: no
+**Section**: §3.1 User Eval Metric, §6.5 Eval Mode
+**Check**: The user's eval metric (discovered from the repo's eval script,
+e.g. `test_student.py`) is faithfully ported into the `(student, device) ->
+(value, kind)` callable used by `run_eval_mode`. Same formula + eval data
+loading as the user's script (e.g. NMSE = `‖out-y‖²/‖y‖²`); the kind tag
+matches the metric (`nmse`/`mse`/`ber`/`snr`/`acc`) and is consistent with
+`--accuracy_baseline_kind` direction.
+**Verify**: Compare the ported eval fn body against the user's eval script.
+Confirm same ops, same normalization, same data source. Confirm
+`run_eval_mode` emits `STUDENT_ACCURACY` + `STUDENT_ACCURACY_KIND` +
+`MET_ACCURACY` + `ACCURACY_CONFIDENCE`, writes no ckpt, and resolves direction
+via `kd_common.accuracy_direction` (no symbol auto-guess).
+**Anti-pattern**: Inventing a metric the user's eval script doesn't compute;
+swapping NMSE for MSE; auto-guessing direction from the value's sign; writing
+a ckpt in eval mode.
+**Fix**: Replace the ported body with the user's verbatim; emit the four-key
+protocol; use `accuracy_direction` for judgment.
+
+### [CRITICAL] 20. I/O Shape Reads DUMMY_INPUT (no hardcoded shape)
+**auto-fixable**: yes
+**Section**: §3 User Task Loss + Dataloader
+**Check**: Every placeholder/fallback shape in the generated script and any
+sibling helper (e.g. `data_utils.py`) — dataloader batch shape, eval-metric
+random data, `_PlaceholderDataLoader` — is sourced from the model contract's
+`DUMMY_INPUT`, never a hardcoded literal. **Hardcoded shape (e.g. writing 32
+where `DUMMY_INPUT` says 64) = FAIL.**
+**Verify**: grep the generated `train_pipeline.py` + `data_utils.py` for shape
+literals (e.g. `[1,4,48,...]`, `torch.randn(...,*inner)`). Confirm each matches
+`DUMMY_INPUT["shape"]`, not a hand-typed number. Layer 2 smoke must forward a
+batch of `DUMMY_INPUT` shape through teacher + student without a shape error.
+**Anti-pattern**: `data_utils.py` hardcoding `shape=(...,32,...)` while the
+model contract is `(...,64,...)` (real bug observed in remote runs); the
+template's `_PlaceholderDataLoader` default shape surviving into a
+project-specialised `data_utils.py` unaligned with the user `DUMMY_INPUT`.
+**Fix**: Replace any hardcoded shape with the value read from the model
+contract's `DUMMY_INPUT`; re-run Layer 2 smoke.
+
+### [CRITICAL] 20b. Teacher/Student I/O Dimensions == Baseline DUMMY_INPUT
+**auto-fixable**: no
+**Section**: §2 Model Construction, §6.5 Eval Mode (problem-1 guard)
+**Check**: teacher and student models, once built (`build_model(**cfg)`), accept
+the baseline `DUMMY_INPUT` and produce the baseline output shape. The teacher is
+`baseline.build_model` widened/deepened — its **I/O shape must equal the
+baseline's**; only internal channels/depth differ. Smoke tests that use the
+teacher as a student proxy (`build_cfg={}`) must still forward `DUMMY_INPUT`
+cleanly; if a smoke build ever changes I/O shape, that is a bug, not a
+workaround to paper over.
+**Verify**: In Layer 2 smoke, assert `model(torch.zeros(DUMMY_INPUT_shape)).shape`
+matches the baseline output shape for both teacher and student. `teacher_gen`'s
+wrapper must delegate to `baseline.build_model` with I/O preserved.
+**Anti-pattern**: A smoke proxy building the teacher with a config that changes
+I/O shape; assuming `build_cfg={}` is safe without checking the forward shape.
+**Fix**: Fix the build config / wrapper so I/O matches baseline; never paper
+over a shape mismatch in smoke.

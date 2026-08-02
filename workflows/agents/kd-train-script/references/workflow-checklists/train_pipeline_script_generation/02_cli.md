@@ -18,34 +18,38 @@ artifact directly. For `auto-fixable: no`, report the issue for the caller.
 `--mode`, `--out_ckpt`, `--epochs`, `--lr`, `--batch_size`, `--device`,
 `--seed`, `--variant_id`, `--build_fn`, `--build_cfg`, `--model_path`,
 `--student_model_path`, `--teacher_cache`, `--kd_config`,
-`--user_train_import`, `--user_loss_fn`, `--project_root`, `--env_anchor`.
+`--user_train_import`, `--user_loss_fn`, `--user_eval_import`, `--user_eval_fn`,
+`--student_ckpt`, `--accuracy_baseline`, `--accuracy_baseline_kind`,
+`--project_root`, `--env_anchor`.
 **Verify**: Run `python <output_dir>/train_pipeline.py --help`. Confirm every
 flag above is listed with a compatible default. Confirm `--mode` is required
-with `choices=["teacher", "distill"]`; `--out_ckpt` is required.
-**Anti-pattern**: Missing `--mode` or `--out_ckpt` (required); `--device`
-missing the `auto` default; `--mode` accepting values beyond teacher/distill.
+with `choices=["teacher", "distill", "eval"]`; `--out_ckpt` is required in
+teacher/distill mode (eval writes no ckpt).
+**Anti-pattern**: Missing `--mode` or `--out_ckpt` (required for train modes);
+`--device` missing the `auto` default.
 **Fix**: Add the missing argparse entries.
 
 ### [CRITICAL] 2. --mode Required With Exact Choices
 **auto-fixable**: yes
 **Section**: workflow §1
 **Check**: `--mode` is added with `required=True` and `choices=["teacher",
-"distill"]`. No other choices are accepted.
+"distill", "eval"]`. No other choices are accepted.
 **Verify**: grep `add_argument("--mode"`; inspect `required=` and `choices=`.
 **Anti-pattern**: `--mode` optional with a default (downstream can't tell
-which mode produced the ckpt); `choices` including legacy values like
+which mode produced the output); `choices` including legacy values like
 `"train"` or `"finetune"`.
-**Fix**: Set `required=True, choices=["teacher", "distill"]`.
+**Fix**: Set `required=True, choices=["teacher", "distill", "eval"]`.
 
 ### [CRITICAL] 3. Mode-Required Flags Enforced At Runtime
 **auto-fixable**: yes
 **Section**: workflow §1 (mode-specific required flags)
 **Check**: When `--mode teacher`, `--model_path` must be provided; when
-`--mode distill`, `--student_model_path` + `--teacher_cache` must be provided.
+`--mode distill`, `--student_model_path` + `--teacher_cache` must be provided;
+when `--mode eval`, `--student_model_path` + `--student_ckpt` must be provided.
 Enforced via `if not args.<flag>: raise SystemExit(...)` in the respective
 mode function (argparse can't express conditional requirements cleanly).
-**Verify**: Read `run_teacher_mode` and `run_distill_mode` openings. Confirm
-the explicit presence checks.
+**Verify**: Read `run_teacher_mode`, `run_distill_mode`, and `run_eval_mode`
+openings. Confirm the explicit presence checks.
 **Anti-pattern**: Letting argparse handle it (it can't conditionally require);
 silently defaulting to placeholder values (downstream crashes on None).
 **Fix**: Add explicit `raise SystemExit` guards.
@@ -89,7 +93,7 @@ env bootstrap → inject `args.project_root` → override placeholders → call
 
 ### [MAJOR] 7. Env Bootstrap Non-Fatal
 **auto-fixable**: yes
-**Section**: workflow (BLK-5 env anchor)
+**Section**: workflow (env anchor)
 **Check**: `--env_anchor` triggers `_maybe_bootstrap_env(env_anchor)` which
 wraps the import + call in try/except → stderr warning. Failure must not
 abort training.
@@ -119,14 +123,18 @@ help is shown); silent typos in flag names.
 ### [CRITICAL] 10. Mode Dispatch Correct
 **auto-fixable**: yes
 **Section**: workflow SKILL.md Workflow
-**Check**: `main()` dispatches `args.mode == "teacher"` → `run_teacher_mode`,
-else → `run_distill_mode`. The dispatch happens after placeholder override +
-`_load_user_train()` so both modes get the resolved `(user_loss,
+**Check**: `main()` dispatches three ways: `--mode eval` → `run_eval_mode`
+(resolved via `_load_user_eval()` first — eval does not need the train
+loss/dataloader), `--mode teacher` → `run_teacher_mode`, else →
+`run_distill_mode`. Teacher/distill dispatch happens after placeholder
+override + `_load_user_train()` so both get the resolved `(user_loss,
 build_dataloader)`.
-**Verify**: Read `main()`. Confirm the dispatch ordering.
-**Anti-pattern**: Dispatching before resolving user_loss/build_dataloader
-(each mode would have to re-resolve); switching on a string typo.
-**Fix**: Re-order dispatch after `_load_user_train()`.
+**Verify**: Read `main()`. Confirm eval is dispatched (and `_load_user_eval()`
+resolved) before `_load_user_train()`; confirm train-mode dispatch ordering.
+**Anti-pattern**: Dispatching eval after `_load_user_train()` (eval would
+break if train.py's compute_loss is unimportable); switching on a string typo.
+**Fix**: Dispatch eval first with its own `_load_user_eval()`; train modes
+after `_load_user_train()`.
 
 ### [MAJOR] 11. Device Resolution
 **auto-fixable**: yes

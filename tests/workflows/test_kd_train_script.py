@@ -52,7 +52,9 @@ STABLE_BASE_CLI = [
     "--mode", "--out_ckpt", "--epochs", "--lr", "--batch_size",
     "--device", "--seed", "--variant_id", "--build_fn", "--build_cfg",
     "--model_path", "--student_model_path", "--teacher_cache", "--kd_config",
-    "--user_train_import", "--user_loss_fn", "--project_root", "--env_anchor",
+    "--user_train_import", "--user_loss_fn", "--user_eval_import", "--user_eval_fn",
+    "--student_ckpt", "--accuracy_baseline", "--accuracy_baseline_kind",
+    "--project_root", "--env_anchor",
 ]
 
 

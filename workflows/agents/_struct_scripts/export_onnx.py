@@ -1,7 +1,7 @@
-"""export_onnx.py —— 把用户的 build_fn 实例化模型导出为 ONNX（§4 / §10）。
+"""export_onnx.py —— 把用户的 build_fn 实例化模型导出为 ONNX。
 
-契约（草稿 §4 评测环 / §10 inputs）：每轮 candidate 由 Engineer 写入 model.py，
-Evaluator / family_detect / finalize 用本脚本统一导出 ONNX，再交 cost_model.measure() 取时延。
+契约：每轮 candidate 由 Engineer 写入 model.py，
+Evaluator / setup / finalize 用本脚本统一导出 ONNX，再交 cost_model.measure() 取时延。
 
 入参：
     --model_path   : 用户 model.py 绝对路径（被 import；其所在目录入 sys.path）
@@ -11,7 +11,7 @@ Evaluator / family_detect / finalize 用本脚本统一导出 ONNX，再交 cost
     --out          : 输出 .onnx 绝对路径（缺失则派生为 model_path 同名 .onnx）
     --device       : 导出设备（默认 auto：cuda→npu→cpu；导出确定性与实测 device 解耦）
     --no-external-data / --allow-external-data :
-                     外部 .data 伴生文件策略（P7 新增）。默认 --no-external-data：导出后
+                     外部 .data 伴生文件策略。默认 --no-external-data：导出后
                      断言无 `<out>.data` 伴生（model 权重 inline 进 protobuf）。
                      --allow-external-data 显式允许伴生（超大模型 >2GB 时必开）。
     --seed         : 随机种子（dummy 输入用；默认 0，保复现）
@@ -21,7 +21,7 @@ Evaluator / family_detect / finalize 用本脚本统一导出 ONNX，再交 cost
     OPSET: <int>
     STATUS: ok
 
-fail loud（草稿 §4 "exotic 结构导不出 → 记 FAIL_export"）：
+fail loud（"exotic 结构导不出 → 记 FAIL_export"）：
     任何异常（import 失败 / build_fn 报错 / torch.onnx.export 失败 /
     --no-external-data 模式下意外产出 .data）→ 非零退出 + stderr 完整 traceback。
     本脚本不写 ledger，由 curator reducer 入账。
@@ -91,7 +91,7 @@ def _load_dummy_input(spec_raw: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"dummy_input 必须是 JSON object（得到 {type(data).__name__}）")
 
-    # 形态一（推荐 / 草稿 §10）：{"shape":[...],"dtype":"float32"} → 单输入 tuple。
+    # 形态一（推荐）：{"shape":[...],"dtype":"float32"} → 单输入 tuple。
     # 形态二（多输入）：{"inputs":[{"name":..,"shape":..,"dtype":..}, ...]}。
     if "shape" in data:
         shape = data.get("shape")
@@ -196,7 +196,7 @@ def export_onnx(
         raise TypeError(
             f"{build_fn}() 返回 {type(model).__name__}，期望 torch.nn.Module"
         )
-    # device 解析：auto → cuda→npu→cpu（NAS resolve_device）；显式串原样用。
+    # device 解析：auto → cuda→npu→cpu；显式串原样用。
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
@@ -234,7 +234,7 @@ def export_onnx(
             dynamo=False,
         )
 
-    # --no-external-data 守门（P7）：默认断言无 .data 伴生（model 权重 inline）。
+    # --no-external-data 守门：默认断言无 .data 伴生（model 权重 inline）。
     if no_external_data:
         data_companion = out + ".data"
         if os.path.isfile(data_companion):
@@ -247,7 +247,7 @@ def export_onnx(
 
 def _main() -> int:
     parser = argparse.ArgumentParser(
-        description="实例化 build_fn → 导出 ONNX（草稿 §4/§10 契约）。fail loud。"
+        description="实例化 build_fn → 导出 ONNX。fail loud。"
     )
     parser.add_argument("--model_path", required=True, help="用户 model.py 绝对路径")
     parser.add_argument(
@@ -268,7 +268,7 @@ def _main() -> int:
         choices=["auto", "cuda", "npu", "cpu"],
         help="导出设备（默认 auto：cuda→npu→cpu 探测；与实测 device 解耦）",
     )
-    # 外部 .data 伴生文件策略（P7）：默认无 .data；--allow-external-data 显式开禁。
+    # 外部 .data 伴生文件策略：默认无 .data；--allow-external-data 显式开禁。
     parser.add_argument(
         "--no-external-data",
         dest="no_external_data",
@@ -322,7 +322,7 @@ def _main() -> int:
     except Exception as e:
         print(f"[export_onnx] FAIL: {type(e).__name__}: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
-        return 2  # 非零：FAIL_export，整轮停（草稿 §4）。
+        return 2  # 非零：FAIL_export，整轮停。
     print(f"STATUS: ok")
     print(f"ONNX: {onnx_path}")
     print(f"OPSET: {args.opset}")

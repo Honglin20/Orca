@@ -43,11 +43,11 @@ tools: [bash, read, write, edit, glob, grep]
 - setup：``kd_scripts_dir = {{ setup.output.kd_scripts_dir }}`` / ``kd_artifacts_dir = {{ setup.output.kd_artifacts_dir }}`` / ``ledger_path = {{ setup.output.ledger_path }}`` / ``receiver_dir = {{ setup.output.receiver_dir }}``
 - inputs：``target_latency_ms = {{ inputs.target_latency_ms }}`` / ``latency_provider = {{ inputs.latency_provider }}`` / ``accuracy_baseline = {{ inputs.accuracy_baseline }}`` / ``device = {{ inputs.device }}``
 - **已下沉**（不再从 inputs 注入，下游 CLI 用脚本默认）：``latency_tune_budget``（默认 40）/ ``seed``（默认 0）/ ``kd_force_rerun``（默认 false）。如需 override 改 agent.md 常量。
-- ``receiver_dir`` 从 setup output 取（绝对路径），**不**依赖 ``$ORCA_KB_DIR`` env（BUG-3：in-session ``orca next`` 链里 ``ORCA_KB_DIR`` 会被重置成默认 ``~/.orca/knowledge_base`` → glob 0）。
+- ``receiver_dir`` 从 setup output 取（绝对路径），**不**依赖 ``$ORCA_KB_DIR`` env（in-session ``orca next`` 链里 ``ORCA_KB_DIR`` 会被重置成默认 ``~/.orca/knowledge_base`` → glob 0）。
 
 ## 执行：跑 gate_all.py（确定性，一个脚本一次性遍历全部变体）
 
-整段**原样照抄**为一条 bash 调用（不要拆开、不要改参数、不要加 ``echo`` 调试）。**关键**：``--receiver_dir`` 从 setup output 取（不依赖 ``$ORCA_KB_DIR`` env，BUG-3）：
+整段**原样照抄**为一条 bash 调用（不要拆开、不要改参数、不要加 ``echo`` 调试）。**关键**：``--receiver_dir`` 从 setup output 取（不依赖 ``$ORCA_KB_DIR`` env）：
 
 ```bash
 GATE_OUT="$(python3 "{{ setup.output.kd_scripts_dir }}/gate_all.py" \

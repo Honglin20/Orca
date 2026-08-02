@@ -11,16 +11,12 @@ inputs:
   #   [ask]      Tier A：业务决策（意图/预算/KPI/硬件/模型入口/业务命令），用户意图未给则启动前集中询问
   #   [advanced] Tier C：工程默认（固化，不问；罕见 override）
   #
-  # 铁律（spec-review BLK-3/10）：latency_provider 必填无默认（编译期 validator 强制 required⇒无default），
+  # 铁律：latency_provider 必填无默认（编译期 validator 强制 required⇒无default），
   # 用户必须给真部署硬件的 latency 脚本——ONNXRT-CPU 测对 NPU 部署是误导。
 
   user_train_script:
     type: string
     description: "[ask] 用户原 train.py 路径（含 compute_loss + build_dataloader），给 train-script-gen 读、生成 train_pipeline.py 时搬 loss/dataloader/optimizer（自包含拷贝，不 import 用户项目）"
-    required: true
-  test_command:
-    type: string
-    description: "[ask] eval/测试命令（测 student 精度，原样执行）。脚本须读 STUDENT_CKPT 加载本轮 ckpt，产出含可解析精度（NMSE/MSE/BER/SNR/accuracy）"
     required: true
   target_latency_ms:
     type: string
@@ -40,7 +36,7 @@ inputs:
     required: true
   latency_provider:
     type: string
-    description: "[ask] 用户 latency 测量脚本 `path::func`（真部署硬件 NPU/GPU 实测）。所有 latency 测量必用此脚本——无默认、不可省（BLK-3/10）"
+    description: "[ask] 用户 latency 测量脚本 `path::func`（真部署硬件 NPU/GPU 实测）。所有 latency 测量必用此脚本——无默认、不可省"
     required: true
   device:
     type: string
@@ -148,7 +144,7 @@ nodes:
         baseline_latency_ms: {type: number, description: "从 flatten.output.baseline_latency_ms 透传（flatten __main__ 实测的默认 cfg latency 中位数；setup step2 不再重测）"}
         kd_scripts_dir: {type: string, description: "_kd_scripts 绝对路径"}
         receiver_dir: {type: string, description: "KB receiver 绝对路径（setup 探测 $ORCA_KB_DIR/families/receiver；train_pool 算 variants_total 用，避免 ORCA_KB_DIR 在 in-session next 链里被重置）"}
-        variants_count: {type: integer, description: "KB receiver 变体数（BLK-14 预检 ≥1）"}
+        variants_count: {type: integer, description: "KB receiver 变体数（预检 ≥1）"}
         concurrency: {type: integer, description: "并发数（setup gpu_probe 算，唯一权威；fail-soft 最低 1）"}
         device_plan: {type: string, description: "JSON 串：round-robin 设备列表（如 [\"cuda:0\",\"cuda:1\"]；无 CUDA 时 [\"\"]）"}
         per_variant_vram_bytes: {type: integer, description: "per-variant 训练显存占用 bytes（train VRAM 再校验用；无 CUDA 时 0）"}

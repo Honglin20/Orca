@@ -144,6 +144,17 @@ Tier B 项读代码无果时，agent **不要**造假（`torch.randn` / 复用 t
 - Tier C 固化：`output_dir` 走 `$ORCA_ARTIFACTS_DIR`、`iterations` 不作 input、算法开关固化默认；
 - 每个 input 的 `description` 以 `[ask]` / `[infer]` / `[default]` / `[advanced]` 标签起头。
 
+## 产物写作规范（去考古化 + 普适性）
+
+> 权威参考：`reference/writing-style.md`（与本 SKILL.md 同目录）。**产物是产品说明书，不是设计日志。**
+
+生成 workflow/agent 时，写作语气遵守三条底线（详 `reference/writing-style.md`）：
+1. **受众是使用者（LLM 执行者 + 复用者），不是作者本人**。开发考古（迁移自哪、约束来自哪个 spec issue、某版本嵌入哪个节点）放 `docs/specs/` 或 commit，**绝不进** `agent.md` / `SKILL.md` / yaml。
+2. **description / prompt / agent.md 只答 what-input-output，不答 why-history**。NAS 系列是正面样板（`workflows/agents/nas-select/agent.md` 55 行），kd 系列是反面教材（满篇 `BLK-X` / `§X` / 迁移自）。
+3. **红线 > 解释，契约 > 口头约束**：不该做的用 `❌ 违反即失败` 列；关键正确性用 `output_schema` / `when` 做成引擎硬检查。
+
+🔴 **考古自检（生成后 grep 产物）**：命中 `[A-Z]+-[0-9]+`（开发编号 BLK/BUG/HI/U/LO 等，含单字母前缀如 U-1/P-5）/ `迁移自` / `analogue of` / `v[0-9]+ 已嵌入` / `spec-review` / 外部 plan·SPEC 章节引用 = FAIL。引用仓库内真实文件的章节（`CONTRACTS.md §N`、`agent-ask-user-sentinel.md §N`、`workflow §N`、`checklist item N`）是精确导航，**允许**。详 `reference/writing-style.md` §8。例外：`docs/specs/`、CHANGELOG、release note。
+
 ## 产出过程（通用，非死步骤）
 
 0. **素材就近读、别派探索子任务**：契约参考 + crib 例子就在本 skill 同目录（`reference/` + `examples/`），**直接 `Read` 它们**——不要 spawn explore/search 子任务去翻用户代码库（慢且无关）。用户提供的素材在 `assets/` 或指定路径，`Read` 即可。
@@ -185,7 +196,9 @@ YAML 字段名、`kind`、`executor` 等是固定契约（见参考，别改）�
 ## 契约在哪
 
 完整字段表 / routes 语义 / agent md 格式 / validate 错误类别 / 12 条正确性 cheatsheet 在：
-**`reference/orca-workflow-contract.md`**（与本 SKILL.md 同目录）。生成前读它，schema 改了只动那个文件。
+**`reference/orca-workflow-contract.md`**（结构 / 字段契约）。
+产物写作语气规范（去考古化 + 普适性）在：**`reference/writing-style.md`**（语气 / 受众）。
+两文件并列，生成前都读。schema 改了只动 contract，语气规范改了只动 writing-style。
 
 <success_criteria>
 - [ ] 产出的 YAML 通过 `tars validate`（0 error）
@@ -198,4 +211,6 @@ YAML 字段名、`kind`、`executor` 等是固定契约（见参考，别改）�
 - [ ] 已落盘到最终路径 + 画了草 DAG 报告（非阻塞）
 - [ ] `description` 一两句说清功能目的，且与 `orca list` 现有 workflow 有明确区别（无区别则问了用户）（H8）
 - [ ] **input 三档**：每个 input 归 Tier A 四子类之一，`description` 以 `[ask]`/`[infer]`/`[default]`/`[advanced]` 标签起头；Tier B 下沉为 setup output；Tier C 固化（`output_dir`→`$ORCA_ARTIFACTS_DIR`、`iterations` 不作 input、算法开关固化）；workflow 有 `seed` 默认 0；含 Tier B 的 agent.md 有「读代码→哨兵→fail loud」段
+- [ ] 产物无开发考古引用：grep workflow.yaml + `agents/*.md` + SKILL.md，命中 `[A-Z]+-[0-9]+`（开发编号，含单字母前缀如 U-1/P-5）/ `迁移自` / `analogue of` / `v[0-9]+ 已嵌入` / `spec-review` / 外部 plan·SPEC § 任一 = FAIL（引用真实文件章节 §N 是导航，允许；`docs/specs/`、CHANGELOG、release note 例外）
+- [ ] description / agent.md 写产品说明书语气（what/input/output），无迁移出处、版本嵌入、spec issue 编号；红线用 ❌ 列举
 </success_criteria>

@@ -1,21 +1,21 @@
 """viz_kd.py —— KD-NAS 蒸馏 sweep 可视化（orca.chart render_chart 推送，无 HTML 产物）。
 
-新设计（KD-NAS 重构后）：读 ``ledger.jsonl``（变体行：variant_id/accepted_cfg/latency_ms_median/
+读 ``ledger.jsonl``（变体行：variant_id/accepted_cfg/latency_ms_median/
 latency_ms_std/accuracy/met_latency/met_accuracy/status/...），推：
   1. Distill Sweep 散点 —— latency_ms_median(x) vs accuracy(y)，hue=met_accuracy。
-     caption 标 baseline_latency 参考线 + target_latency 阈值 + accuracy_baseline 基线（U-4 sweep 单图）。
+     caption 标 baseline_latency 参考线 + target_latency 阈值 + accuracy_baseline 基线（sweep 单图）。
   2. Candidate Ledger 表 —— variant_id/status/latency/accuracy/met_lat/met_acc/cfg。
   3. Latency Compare bar —— baseline / target / 各变体 latency。
   4. Sweep Progress —— status 计数（SUCCESS/FAIL_accuracy/FAIL_train/FAIL_latency）+ n_done/n_total。
   5. Pareto Front —— latency(x,min) vs accuracy(y,方向按 kind)；chart_type=pareto，前端绘前沿。
   6. Accuracy Compare bar —— 各变体 accuracy + accuracy_baseline 参考线；方向按 kind（越低/越高越好）。
 
-指标方向（KD-NAS finalize 2026-07-31）：单一真相源 = ``kd_common.accuracy_direction``。
+指标方向：单一真相源 = ``kd_common.accuracy_direction``。
   - kind ∈ {nmse, mse, ber, db}（越低越好，best=min）
   - kind ∈ {snr, acc}（越高越好，best=max）
   - kind 未声明 → accuracy 坐标图（scatter/pareto/accuracy_compare）fail loud WARN 跳过，**不 auto 猜**
     （取负显示需已知方向；防 -20dB 误判优于 -22dB 的反转）。
-取负显示（review #6）：min 方向 kind 的 accuracy 坐标图对 y 值取负（``_acc_display``），使「轴上
+取负显示：min 方向 kind 的 accuracy 坐标图对 y 值取负（``_acc_display``），使「轴上
 越大越好」统一——防 bar/scatter 图 -20dB 视觉高于 -22dB 的强误导（goal：坐标轴方向不能让人误判）。
 **display 变换**对齐 ``nas-train-runner/scripts/tail_metrics.py`` 的 ``disp = -v if quality``；但 kind
 检测相反——tail_metrics 按符号 auto-guess，viz_kd 要求显式 kind（禁 auto 猜）。pareto_y_direction
@@ -57,7 +57,7 @@ from kd_common import accuracy_direction, is_measured_row, to_float  # noqa: E40
 _LABEL = "kd-nas"
 _MIN_POINTS = 2
 
-# orca.chart web push。BLK-5：先尝试 env_anchor 自举（防 ledger 在稳定根、向上搜不到 orca_env.sh）。
+# orca.chart web push。先尝试 env_anchor 自举（防 ledger 在稳定根、向上搜不到 orca_env.sh）。
 _orca_render_chart = None
 
 
@@ -482,7 +482,7 @@ def _main() -> int:
     parser.add_argument("--accuracy_baseline", type=float, default=None)
     parser.add_argument("--accuracy_baseline_kind", default="")
     parser.add_argument("--env_anchor", default="",
-                        help="BLK-5：自举 ORCA env 锚点（per-run $ORCA_ARTIFACTS_DIR）")
+                        help="自举 ORCA env 锚点（per-run $ORCA_ARTIFACTS_DIR）")
     args = parser.parse_args()
     try:
         result = render_all(

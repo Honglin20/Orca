@@ -2,11 +2,11 @@
 
 无 LLM、无网络、不读时钟、不读随机。fail loud。
 
-关键约定（见 docs/plans/2026-07-24-kd-nas-distill-redesign.md）：
+关键约定：
   - variant_id = ``.py`` 文件名 stem；done 谓词跨 run 复用的核心。
-  - ``variant_sha256`` = 变体 ``.py`` 字节 sha256（文件改了 → 重做，BLK-12）。
-  - ``latency_provider_id`` = ``"<path::func>|<sha16>"``（换 latency 脚本 → 重做，HI-12）。
-  - ``target_latency_ms`` 浮点归一比较（MED-3）。
+  - ``variant_sha256`` = 变体 ``.py`` 字节 sha256（文件改了 → 重做）。
+  - ``latency_provider_id`` = ``"<path::func>|<sha16>"``（换 latency 脚本 → 重做）。
+  - ``target_latency_ms`` 浮点归一比较。
 """
 
 from __future__ import annotations
@@ -17,12 +17,12 @@ import os
 import subprocess
 from typing import Any
 
-# BLK-1：KNOBS leverage 缩容优先级（高→低）。禁止字母序（"low"<"medium"<"high" 反了）。
+# KNOBS leverage 缩容优先级（高→低）。禁止字母序（"low"<"medium"<"high" 反了）。
 RANK: dict[str, int] = {"high": 0, "medium": 1, "low": 2}
 VALID_LEVERAGE = set(RANK)
 LEVERAGE_DEFAULT = "medium"
 
-# ── accuracy_baseline_kind → best 方向（单一真相源，KD-NAS finalize 2026-07-31）────────
+# ── accuracy_baseline_kind → best 方向（单一真相源）────────
 # 三处消费：measure_student / viz_kd / kd-select.select_and_report 都 import 本表，
 # 防止「-20dB 误判比 -22dB 好」式的方向反转（符号判定不可靠，必须显式 kind）。
 # 越高越好（best=max）：snr / acc；越低越好（best=min）：mse / nmse / ber / db。
@@ -91,7 +91,7 @@ def sha256_file(path: str) -> str:
 
 
 def acquire_run_lock(artifacts_dir: str, run_id: str, max_age_s: float = 3600.0) -> str:
-    """BLK-13：单写者护栏——防并发 run 写同一 kd_artifacts_dir。
+    """单写者护栏——防并发 run 写同一 kd_artifacts_dir。
 
     心跳式锁（非内核锁；agent 跨节点无法持有内核锁）：写 ``<artifacts_dir>/orca.lock``
     = ``{run_id, ts}``。若已存在且 run_id 不同且 ts 在 ``max_age_s`` 内 → raise（另一 run 活跃）。
@@ -123,7 +123,7 @@ def provider_id(provider: str) -> str:
     """latency_provider 的稳定身份：``<path::func>|<文件 sha256 前 16>``。
 
     文件读不到（如非本地路径）→ 退化为 ``<provider>|<nobyhash>``（仍随 provider 串变化）。
-    换 provider 脚本内容 → 身份变 → done 谓词判重做（HI-12）。
+    换 provider 脚本内容 → 身份变 → done 谓词判重做。
     """
     provider = (provider or "").strip()
     if "::" in provider:
@@ -137,7 +137,7 @@ def provider_id(provider: str) -> str:
 
 
 def feq(a: Any, b: Any, rel: float = 1e-6) -> bool:
-    """浮点近似相等（MED-3：target_latency_ms 字符串 vs float 比较）。非数 → False。"""
+    """浮点近似相等（target_latency_ms 字符串 vs float 比较）。非数 → False。"""
     try:
         af, bf = float(a), float(b)
     except (TypeError, ValueError):
@@ -146,7 +146,7 @@ def feq(a: Any, b: Any, rel: float = 1e-6) -> bool:
 
 
 def read_ledger(path: str) -> list[dict[str, Any]]:
-    """读 ledger.jsonl。**fail loud**（BLK-16）：任一行非合法 JSON → raise（不 warn-跳过，
+    """读 ledger.jsonl。**fail loud**：任一行非合法 JSON → raise（不 warn-跳过，
     否则坏行会静默缩小变体池 / 误判 done）。文件不存在 → 空列表。
     """
     if not path or not os.path.isfile(path):
@@ -160,7 +160,7 @@ def read_ledger(path: str) -> list[dict[str, Any]]:
             try:
                 obj = json.loads(s)
             except json.JSONDecodeError as e:
-                # BLK-16：坏行 raise（ledger 是 domain 真相源，corruption → 误 skip/重跑）。
+                # 坏行 raise（ledger 是 domain 真相源，corruption → 误 skip/重跑）。
                 raise ValueError(
                     f"ledger {path} 第 {lineno} 行非合法 JSON：{e}\n原文：{s[:200]!r}"
                 ) from e
@@ -170,16 +170,15 @@ def read_ledger(path: str) -> list[dict[str, Any]]:
 
 
 # ── ledger 增量写 + 子进程辅助（gate_all / train_pool 共享，契约级逻辑勿复制）──────
-# 演进历史：v2 抽出（code-reviewer 🟢-1）。原本 gate_all.py / train_pool.py 各有一份
-# byte-identical 副本，``_append_ledger_row`` 的「主线程持 orca.lock + 逐行 write+flush」
-# 是 crash-safety 契约——分散两处会让契约演进时漏改一处。
+# ``_append_ledger_row`` 的「主线程持 orca.lock + 逐行 write+flush」是 crash-safety 契约——
+# 集中在此处，防 gate_all / train_pool 各持一份副本漂移漏改。
 
 
 def append_ledger_row(ledger_path: str, row: dict[str, Any]) -> None:
     """增量 append 一行到 ledger（主线程持 orca.lock，逐行 write+flush，crash-safe）。
 
-    契约：调用方必须先 ``acquire_run_lock`` 拿到单写者锁（BLK-13）。JSONL append-only
-    逐行原子；kill 不丢已完成行（v2：替换原 train_variants_parallel 末尾的 bulk append）。
+    契约：调用方必须先 ``acquire_run_lock`` 拿到单写者锁。JSONL append-only
+    逐行原子；kill 不丢已完成行。
     """
     os.makedirs(os.path.dirname(os.path.abspath(ledger_path)) or ".", exist_ok=True)
     with open(ledger_path, "a", encoding="utf-8") as f:
@@ -209,10 +208,10 @@ def is_variant_done(
 ) -> bool:
     """done 谓词（跨 run 复用核心）。
 
-    任一**有效行**（variant_sha256 匹配 BLK-12 + latency_provider_id 匹配 HI-12）满足：
+    任一**有效行**（variant_sha256 匹配 + latency_provider_id 匹配）满足：
       - status ∈ {SUCCESS, FAIL_accuracy, FAIL_train}：
-          * SUCCESS：还须 ckpt 文件存在且非空（BLK-11）且 latency_ms_median ≤ 当前 target
-            （MED-4：target 调低到低于该 variant latency → 不再算 done，需重试更小 cfg）。
+          * SUCCESS：还须 ckpt 文件存在且非空且 latency_ms_median ≤ 当前 target
+            （target 调低到低于该 variant latency → 不再算 done，需重试更小 cfg）。
           * FAIL_accuracy / FAIL_train：训练已发生、结果已记 → done（「记账后下一个」，不重训）。
       - status == FAIL_latency：仅当 row.target_latency_ms ≈ 当前 target（同 target 才算 done；
         改 target → 重试）。

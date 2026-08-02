@@ -1,19 +1,16 @@
 ---
 name: kd-train-script
-description: Generate the unified KD-NAS training script (train_pipeline.py) supporting teacher + distill modes from the user's train.py. Invoke after the user's train.py and teacher/student model contracts are available.
+description: Generate the unified KD-NAS training script (train_pipeline.py) supporting teacher + distill + eval modes from the user's train.py. Invoke after the user's train.py and teacher/student model contracts are available.
 ---
 
 # KD-NAS Train Pipeline Script Generator
 
 Use this skill to generate the project-specific KD-NAS training entry point
-`train_pipeline.py`. The script supports two modes behind one CLI
-(`--mode teacher` / `--mode distill`), is self-contained (user logic copied
+`train_pipeline.py`. The script supports three modes behind one CLI
+(`--mode teacher` / `--mode distill` / `--mode eval`; eval is read-only — it
+loads a student ckpt and runs the user's eval metric discovered from the user
+repo), is self-contained (user logic copied
 in, never imported), and loads models by path via `importlib.util`.
-
-This is the KD-NAS analogue of the NAS `supernet-train-script` skill, with
-sandwich sampling / DDP / torchrun removed and KD provided by the existing
-`kd.compose` / `kd.wrapper` / `kd.ema` library instead of
-`nas_agent.train.distillation`.
 
 Skill resource paths:
 
@@ -71,10 +68,16 @@ step requires when you begin that step.
    - Optimizer / scheduler if present.
    - Any domain-specific training patterns worth porting (e.g. gradient
      accumulation, custom regularizers).
+1b. **Discover and read the user's eval script** under `<user_project_root>`
+   (glob `test_*.py` / `eval*.py` / `evaluate*.py` / `test.py`, or an
+   eval/metric fn inside `train.py`). Focus on its metric computation
+   (NMSE/MSE/BER/SNR/acc) + eval data loading. This is ported into `--mode
+   eval` as the `(student, device) -> (value, kind)` callable (workflow §3.1).
+   **No eval script found → fail loud.**
 2. **Probe the teacher and student model contracts** (do not execute them):
    - Confirm `build_model` exists and is callable.
    - Read `DUMMY_INPUT` shape (the user's real I/O shape — never hardcode a
-     fallback per CONTRACTS §6 BLK-4).
+     fallback per CONTRACTS §6).
    - Read `feature_hook_names()` (required for feature-based KD terms).
 3. **Read the KD library surface** to know what's available (read-only):
    - `workflows/agents/_kd_scripts/kd/compose.py` — `build_kd_loss` factory +
@@ -131,15 +134,20 @@ section, in order:
 2. **Layer 2 — Functional smoke tests**: run both teacher and distill modes
    with a tiny budget on CPU (1 epoch, batch_size 2). Verify stdout keys +
    ckpt schemas.
-3. **Layer 3 — Verifier subagent**: invoke `workflow-verifier` with the
-   workflow doc + checklists + artifacts + user's original `train.py` +
-   CONTRACTS.md as cross-references.
+3. **Layer 3 — Verifier subagent (mandatory, never skip)**: invoke the
+   `workflow-verifier` subagent with the workflow doc + checklists + artifacts
+   + user's original `train.py` + CONTRACTS.md as cross-references. This is not
+   optional — you **must** actually spawn and run the subagent (not narrate a
+   pass). Feed it checklist items 7 (optimizer), 20 (shape reads DUMMY_INPUT),
+   20b (teacher/student I/O == baseline) as priority checks.
 
 Handle the verifier response:
 
 - `all-pass` with no **Fixed** section → done.
 - `all-pass` with a **Fixed** section → re-run Layer 2 smoke tests.
-- `unresolved` → apply each suggested fix, re-run Layer 1 + Layer 2.
+- `unresolved` → apply each suggested fix, re-run Layer 1 + Layer 2. **Never
+  emit the output JSON while any item is unresolved** (a skipped verifier is a
+  failed generation).
 
 ## Verifier Subagent Prompt Template
 
@@ -169,13 +177,23 @@ Verify:
 1. The generated train_pipeline.py faithfully ports the user's compute_loss
    + build_dataloader logic (no behaviour drift, no silent substitutions).
 2. CLI matches the stable base CLI in workflow §1 (every flag present,
-   --mode required with choices teacher/distill).
+   --mode required with choices teacher/distill/eval).
 3. Checkpoint schemas match workflow §5 (teacher) and §6 (distill).
 4. No distributed-launch / architecture-sampling / nas_agent.train.distillation
    residue (checklist 01 item 2 + item 9).
 5. Distill optimizer includes kd_loss.kd_parameters() (checklist 01 item 8).
 6. KD library used: kd.compose.build_kd_loss + kd.wrapper.* + kd.ema.* (not
    nas_agent.train.distillation).
+7. **Optimizer/scheduler faithfully ported** from the user's `train.py`
+   (checklist item 7): grep the user's optimizer class + kwargs; any drift
+   (e.g. user `AdamW` → generated `Adam`) is FAIL. The `Adam` fallback is
+   allowed only if the user defines no optimizer.
+8. **No hardcoded shape** (checklist item 20): every shape literal in
+   `train_pipeline.py` / `data_utils.py` matches `DUMMY_INPUT["shape"]`; a
+   hand-typed number (e.g. 32 where DUMMY_INPUT says 64) is FAIL.
+9. **Teacher/student I/O == baseline DUMMY_INPUT** (checklist item 20b): both
+   models forward `DUMMY_INPUT` and produce the baseline output shape; a smoke
+   proxy that changes I/O shape is FAIL, not a workaround.
 
 For each item, report: PASS / FIXED (with what you changed) / UNRESOLVED
 (with a suggested fix). End with a single line: `VERDICT: all-pass` or

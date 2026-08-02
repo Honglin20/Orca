@@ -201,7 +201,7 @@ def _measure_with_provider(
     """调 ``measure(onnx[, device])`` ``repeats`` 次 → (median, pstdev)。
 
     与 ``tune_latency._measure_cfg`` 同款：provider 自带 runs/warmup，本函数外层再取
-    ``repeats`` 次.median（抗硬件噪声，HI-13）。
+    ``repeats`` 次.median（抗硬件噪声）。
     """
     vals: list[float] = []
     accepts_device = "device" in inspect.signature(measure).parameters

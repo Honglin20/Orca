@@ -1,13 +1,13 @@
 """train_pool.py —— KD-NAS 训练阶段：有界并发池 + 增量账本（吃 gate 的 accepted manifest）。
 
-前身是 ``train_variants_parallel.py``（每 worker 独立全流水线），重构后**只做训练阶段**：
+本脚本**只做训练阶段**：
   - latency gate 已在 ``gate_all.py`` 完成（FAIL_latency 已落账、ACCEPTED 进 manifest）
   - 本脚本读 gate manifest + setup 的 ``concurrency / device_plan / per_variant_vram_bytes``
   - Phase 启动 VRAM 再校验（setup→train 之间显存可能被别进程抢）：不够则降级 WARN；连 1 都放不下
     → fail loud 非零
   - ``ThreadPoolExecutor(max_workers=concurrency)``，device_plan round-robin 绑卡
     （传 ``--device cuda:i`` 给 train_pipeline.py --mode distill）
-  - 每 worker：``train_pipeline.py --mode distill``（train-script-gen 产物，统一脚本）+ ``measure_student.py --skip_latency``（复用 gate 的干净 latency，HI-1）
+  - 每 worker：``train_pipeline.py --mode distill``（train-script-gen 产物，统一脚本）+ ``measure_student.py --skip_latency``（复用 gate 的干净 latency）
   - 增量账本：``as_completed`` 主线程（已持 ``orca.lock``）逐行 ``write+flush``；单 worker 失败
     try/except → FAIL_train 行，**不杀整批**
   - 末尾 ``viz_kd.py`` 推 sweep 散点
@@ -109,7 +109,7 @@ def classify_final_sweep(
 ) -> tuple[str, str]:
     """末态 sweep_status 判定（确定性，纯函数便于单测）。
 
-    Increment E（防假）：``n_accepted > 0`` 但 ledger 里 ``SUCCESS`` 行数为 0（全 FAIL_accuracy
+    防假：``n_accepted > 0`` 但 ledger 里 ``SUCCESS`` 行数为 0（全 FAIL_accuracy
     / FAIL_train）→ ``SWEEP_STATUS=FAIL`` + 原因。避免「全 FAIL 但 SWEEP_STATUS=SUCCESS」的误导
     （operator / 下游 select 会误以为有达标 student）。
 
@@ -172,30 +172,30 @@ def _train_one(ctx: dict[str, Any], entry: dict[str, Any], device: str) -> dict[
                 "accuracy": 0, "accuracy_kind": "",
                 "met_latency": True, "met_accuracy": False, "ckpt": "",
                 "fail_reason": f"train_pipeline rc={rc}: {err[-400:]}"}
-    # BLK-11：ckpt 完整性
+    # ckpt 完整性
     if not (os.path.isfile(ckpt) and os.path.getsize(ckpt) > 0):
         return {**base, **common, "status": "FAIL_train",
                 "accuracy": 0, "accuracy_kind": "",
                 "met_latency": True, "met_accuracy": False, "ckpt": "",
                 "fail_reason": f"ckpt 缺失/空: {ckpt}"}
 
-    # 2. measure（绝对基线；--skip_latency 复用 gate latency，HI-1）
+    # 2. eval（train_pipeline.py --mode eval：load ckpt → 用户 eval 指标 → STUDENT_ACCURACY 协议）。
+    #    取代旧 measure_student --eval_command 路径——eval 逻辑由 kd-train-script 从用户仓
+    #    eval 脚本移植、固化进 train_pipeline.py。latency 复用 gate，eval 在 CPU 只测精度。
     rc2, out2, err2 = run_subproc([
-        sys.executable, os.path.join(ctx["kd_scripts_dir"], "measure_student.py"),
+        sys.executable, ctx["train_pipeline_path"],
+        "--mode", "eval",
         "--student_model_path", variant_path, "--student_ckpt", ckpt,
         "--build_fn", build_fn, "--build_cfg", cfg_str,
-        "--eval_command", ctx["test_command"],
         "--accuracy_baseline", str(ctx["accuracy_baseline"]),
         "--accuracy_baseline_kind", ctx["accuracy_baseline_kind"],
-        "--output_dir", ctx["per_run_artifacts_dir"],
-        "--project_root", ctx["project_root"], "--skip_latency",
-        "--device", ctx["measure_device"],
+        "--device", ctx["eval_device"],
     ])
     if rc2 != 0:
         return {**base, **common, "status": "FAIL_accuracy",
                 "accuracy": 0, "accuracy_kind": "",
                 "met_latency": True, "met_accuracy": False, "ckpt": ckpt,
-                "fail_reason": f"measure rc={rc2}: {err2[-300:]}"}
+                "fail_reason": f"eval rc={rc2}: {err2[-300:]}"}
     acc = float(parse_key(out2, "STUDENT_ACCURACY") or 0)
     kind = parse_key(out2, "STUDENT_ACCURACY_KIND") or ""
     met_acc = (parse_key(out2, "MET_ACCURACY") or "false").lower() == "true"
@@ -214,7 +214,6 @@ def _main() -> int:
     p.add_argument("--artifacts_dir", required=True, help="稳定 kd_artifacts_dir（ckpts/lock）")
     p.add_argument("--per_run_artifacts_dir", required=True, help="$ORCA_ARTIFACTS_DIR（env_anchor）")
     p.add_argument("--project_root", default=os.environ.get("ORCA_PROJECT_ROOT", "."))
-    p.add_argument("--test_command", required=True)
     p.add_argument("--accuracy_baseline", required=True)
     p.add_argument("--accuracy_baseline_kind", default="")
     p.add_argument("--latency_provider", required=True,
@@ -293,7 +292,6 @@ def _main() -> int:
         "provider_id": provider_id(args.latency_provider),
         "accuracy_baseline": args.accuracy_baseline,
         "accuracy_baseline_kind": args.accuracy_baseline_kind,
-        "test_command": args.test_command,
         "teacher_cache": args.teacher_cache,
         "kd_scripts_dir": args.kd_scripts_dir,
         "artifacts_dir": args.artifacts_dir,
@@ -302,8 +300,8 @@ def _main() -> int:
         "epochs": args.epochs,
         "seed": args.seed,
         "train_pipeline_path": args.train_pipeline_path,
-        # measure --skip_latency：不导 ONNX、不测 latency → 不绑 GPU 卡（避免与 train worker 抢）。
-        "measure_device": "cpu",
+        # eval --mode 只测精度（latency 复用 gate）→ 跑 CPU 不绑 GPU（避免与 train worker 抢）。
+        "eval_device": "cpu",
     }
     # train_pipeline.py（train-script-gen 产物，落盘到 per-run artifacts）import kd.* 需要
     # ORCA_KD_SCRIPTS_DIR env 指向 _kd_scripts/。setup 调 teacher 模式时自己设；train_pool
@@ -351,7 +349,7 @@ def _main() -> int:
     # ── 统计（先算 variants_total / rows / variants_done / sweep_status，供 viz + emit 共用）─
     # variants_total 优先用 --receiver_dir（setup 探测经 output 传下来，cwd 无关）。
     # 旧实现仅 fallback $ORCA_KB_DIR——但 ORCA_KB_DIR 在 in-session ``orca next`` 链里被
-    # 重置成默认 ``~/.orca/knowledge_base``（不存在）→ glob 0（BUG-3）。
+    # 重置成默认 ``~/.orca/knowledge_base``（不存在）→ glob 0。
     # 三级 fallback：--receiver_dir → $ORCA_KB_DIR/families/receiver → ledger+manifest 推断。
     rows = read_ledger(args.ledger)
     variants_done = len(rows)
@@ -367,7 +365,7 @@ def _main() -> int:
     if variants_total == 0:
         # receiver_dir 不可用（in-session ORCA_KB_DIR 重置 / setup 未传）→ 用 ledger +
         # manifest 推断：「已接触过的变体数下界」（ledger 行数含历史 FAIL_*，本批 ACCEPTED 是 manifest 大小）。
-        # 注：跨 run 累积下可能 > KB 真实变体数，仅作诊断字段（不卡门），优于静默 0（BUG-3）。
+        # 注：跨 run 累积下可能 > KB 真实变体数，仅作诊断字段（不卡门），优于静默 0。
         inferred = variants_done + n_accepted
         if inferred > 0:
             print(
@@ -377,7 +375,7 @@ def _main() -> int:
             )
             variants_total = inferred
 
-    # Increment E（防假）：n_accepted>0 但 0 SUCCESS → SWEEP_STATUS=FAIL。
+    # 防假：n_accepted>0 但 0 SUCCESS → SWEEP_STATUS=FAIL。
     sweep_status, fail_reason = classify_final_sweep(rows, n_accepted, fail_reason)
 
     # ── 末尾 viz（sidecar，异常不阻断）─────────────────────────────────────────
@@ -391,7 +389,7 @@ def _main() -> int:
             "--accuracy_baseline_kind", args.accuracy_baseline_kind,
             "--env_anchor", args.per_run_artifacts_dir,
         ]
-        # baseline_latency_ms 透传给 viz_kd 画 latency bar 的 baseline 参考行（review #6-1）。
+        # baseline_latency_ms 透传给 viz_kd 画 latency bar 的 baseline 参考行。
         # None（agent.md 未传 / 直跑 CLI）时不加该 flag，viz_kd 按 default=None 跳过 baseline 行。
         if args.baseline_latency_ms is not None:
             viz_argv += ["--baseline_latency_ms", str(args.baseline_latency_ms)]
@@ -400,7 +398,7 @@ def _main() -> int:
         except Exception as e:
             print(f"[train_pool] WARN: viz_kd 异常（不阻断）：{type(e).__name__}: {e}", file=sys.stderr)
         else:
-            # viz 失败不阻断 sweep（viz 是 sidecar），但**不静默吞**（code-reviewer R2）：
+            # viz 失败不阻断 sweep（viz 是 sidecar），但**不静默吞**：
             # 把 stderr 尾部 300 字打出来让用户能定位「图为什么没推」。
             if viz_proc.returncode != 0:
                 print(

@@ -223,7 +223,7 @@ def _build_proxy_batch(spec_raw: str, dummy_input_raw: str):
 
 
 def _dummy_shape(dummy_input_raw: str) -> list[int]:
-    """从 dummy_input JSON 抽 shape。**禁硬编码回退**（BLK-4）：缺失/非法 → raise。
+    """从 dummy_input JSON 抽 shape。**禁硬编码回退**：缺失/非法 → raise。
 
     dummy_input 维度由用户指定（真实模型 I/O）；硬编码 [1,4,48,64,1] 回退会让导出/测量
     基于错误 shape 静默进行。缺失或无合法 shape → fail loud。
@@ -244,7 +244,7 @@ def _dummy_shape(dummy_input_raw: str) -> list[int]:
 
 
 def _sha256_file(path: str) -> str:
-    """文件字节 sha256（teacher_model / teacher_ckpt 身份校验，HI-3）。"""
+    """文件字节 sha256（teacher_model / teacher_ckpt 身份校验）。"""
     import hashlib
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -414,7 +414,7 @@ def teacher_setup(args) -> dict:
             )
 
     # 7. teacher_cache.pt：state_dict + hook_names + 重建路径 + 元数据
-    # HI-3：身份哈希（setup 幂等护栏用：teacher_model_path 指向的 teacher 文件改了 / ckpt 换了 → 重训，不静默复用）。
+    # 身份哈希（setup 幂等护栏用：teacher_model_path 指向的 teacher 文件改了 / ckpt 换了 → 重训，不静默复用）。
     teacher_model_hash = _sha256_file(os.path.abspath(args.teacher_model_path))
     ckpt_abs = os.path.abspath(args.teacher_ckpt) if args.teacher_ckpt else ""
     teacher_ckpt_sha256 = _sha256_file(ckpt_abs) if (ckpt_abs and os.path.isfile(ckpt_abs)) else ""

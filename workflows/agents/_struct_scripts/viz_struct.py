@@ -1,36 +1,29 @@
-"""viz_struct.py —— 草稿 §12 三张图，经 orca.chart render_chart 推送（无 HTML 产物）。
+"""viz_struct.py —— 结构性探索可视化，经 orca.chart render_chart 推送（无 HTML 产物）。
 
-P7 重设计（2026-07-22）：
-  原五张图里有大量噪声 / 误导根因。精简到三张，每张都有可读的语义：
-    1. Champion Trace       —— line（候选灰点 + champion 轨迹，hue=series，已带 x/y label）
-    2. Latency-Accuracy Pareto —— pareto（hue=status，min/max 方向）。
-                                  **过滤 accuracy is None（FAIL_latency/FAIL_export 行）→
-                                  之前 None 被前端渲染成 0 导致 y=0 根因**。
-    3. Candidate Ledger     —— table（逐候选短字段：round/id/tag/latency_ms/
-                                  accuracy/status/one_line_summary；长 hypothesis 留 hover）。
+四张图（default 模式），每张都有可读的语义：
+    1. Champion Trace            —— line（候选灰点 + champion 轨迹，hue=series，x=round/y=latency_ms）
+    2. Champion Trace — Accuracy —— line（accuracy 维度 champion 轨迹；对齐「降时延保精度」）
+    3. Latency-Accuracy Pareto   —— pareto（hue=status，min/max 方向；过滤 accuracy 缺失/负数行
+                                    防 y=0 伪点）
+    4. Candidate Ledger          —— table（逐候选短字段：round/id/tag/latency_ms/
+                                    accuracy/status/one_line_summary；长 hypothesis 留 hover）
 
-  删除（P7 根因清理）：
-    - Round Ledger（每轮 1 候选无聚合价值，混淆 candidate 维度）
-    - Exploration Tree（scatter 充数；path 恒 p1，零信息量）
+``--mode compare``：仅推终态 Baseline vs Champion vs Final bar（final 两值经 CLI 参数传入）。
 
-鲁棒出图 + 失败告知 agent（2026-07-23 SPEC §3.2/§3.4）：
+鲁棒出图 + 失败告知 agent：
   - **自加载 env**：in-session 下子代理 bash 不一定有 ORCA_* env（opencode bash 不跨调用保 env）。
     render_all 开头从 ledger 路径向上找 ``orca_env.sh``，补 4 个身份键进 ``os.environ``——
-    让 ``render_chart`` core 零改动（铁律 #2 不破）。
-  - **stdout JSON 升级**：顶层加 ``viz_env_status``（ok/env_loaded_from_file/env_missing/
-    import_failed/generic），``charts[name]`` 从 ``{pushed}`` → ``{pushed, reason}``。
+    让 ``render_chart`` core 零改动。
+  - **stdout JSON**：顶层 ``viz_env_status``（ok/env_loaded_from_file/env_missing/
+    import_failed/generic），``charts[name]`` = ``{pushed, reason}``。
     reason 分类（env_missing / socket_unreachable / ack_failed / data_insufficient /
     import_failed / generic:<Type>:<msg>）让 agent dumb copy 后「知道」失败原因。
-  - **``--mode compare``**：仅推终态 Baseline vs Champion vs Final bar（替代 inline ``python3 -c``
-    块；final 两值经 CLI 参数传入，不再替换 inline 占位）。两模式共享 stdout schema + 自加载
-    + ``_main`` 兜底 + import try/except。
-  - **``_main`` 兜底（B1 命门）**：进程级异常被 catch 后，先构造 fallback result（generic +
+  - **``_main`` 兜底**：进程级异常被 catch 后，先构造 fallback result（generic +
     charts 全 ``{pushed:false, reason:"generic:<Type>:<msg>"}``），先 ``print+flush`` 再
     ``return 2``——stdout 永远有合法 JSON，agent dumb copy 不依赖 LLM 合成。
 
 纪律：
-  - 仅用 ``orca.chart.render_chart``；**不输出任何 HTML 文件**（用户共识 2026-07-18：
-    workflow 不产 HTML，所有可视化走 orca 原生 render_chart）。
+  - 仅用 ``orca.chart.render_chart``；**不输出任何 HTML 文件**（所有可视化走 orca 原生 render_chart）。
   - 数据不足（ledger < 2 行 / 必备字段缺失 / 无有效数据点）→ **该图跳过**（stderr WARN，
     reason=data_insufficient，不报错、不阻断）。
   - 同 label="struct-explore" 下每图用唯一 title；同 title 再推 = 刷新（实时更新语义）。
@@ -38,10 +31,10 @@ P7 重设计（2026-07-22）：
     import_failed，所有图 reason=import_failed。
   - 确定性脚本：无 LLM、无网络、不读时钟、不读随机。
   - fail loud：仅 I/O 或参数硬错时非零退出（exit 2）；数据问题永远 exit 0。exit 2 时 stdout
-    **必有合法 JSON**（``_main`` 兜底，B1 命门）。
+    **必有合法 JSON**（``_main`` 兜底）。
 
 CLI：
-    # 默认模式（三图）
+    # 默认模式（四图）
     viz_struct.py \\
       --ledger <path> --champions <path> \\
       --baseline_latency_ms <f> --baseline_accuracy <f> \\
@@ -64,13 +57,13 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-# orca.chart web push（phase-13 render_chart API）。不在 Orca 子进程内跑时为 None。
+# orca.chart web push（render_chart API）。不在 Orca 子进程内跑时为 None。
 try:
     from orca.chart import render_chart as _orca_render_chart
 except ImportError:
     _orca_render_chart = None
 
-# orca.chart._env：确定性 env 自加载（SPEC 2026-07-23 §3.1）。与 ``orca.chart`` 同包，
+# orca.chart._env：确定性 env 自加载。与 ``orca.chart`` 同包，
 # 同包可 import 时本 import 也会成功；不可用时（headless / 自定义环境）降级走 import_failed。
 try:
     from orca.chart._env import load_run_env_from_artifacts as _load_run_env
@@ -80,10 +73,10 @@ except ImportError:
 
 # ── 常量 ─────────────────────────────────────────────────────────────────────
 
-# 数据不足的下限：ledger 少于这么多**有效行** → 该图跳过（§12 纪律）。
+# 数据不足的下限：ledger 少于这么多**有效行** → 该图跳过（纪律）。
 _MIN_ROWS = 2
 
-# 同一群组 label：三张图共用，title 区分；同 title 再推 = 刷新。
+# 同一群组 label：四图共用，title 区分；同 title 再推 = 刷新。
 _LABEL = "struct-explore"
 
 # ledger.jsonl 每行必备字段（缺则该行从可视化剔除，仅 WARN）。
@@ -142,11 +135,11 @@ def _clean_ledger(ledger: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return clean
 
 
-# ── env 自加载 + reason 分类（SPEC 2026-07-23 §3.1/§3.2）──────────────────────
+# ── env 自加载 + reason 分类 ──────────────────────────
 
 
 def _classify_exc(e: Exception) -> str:
-    """把 ``render_chart`` 抛的异常映射到稳定的 reason 字符串（SPEC §3.2）。
+    """把 ``render_chart`` 抛的异常映射到稳定的 reason 字符串。
 
     ``_render.py`` 把底层 socket 错误包成 ``RuntimeError``，viz_struct 这层按**消息内容**
     分类（类型已统一成 RuntimeError / ValueError）：
@@ -156,8 +149,8 @@ def _classify_exc(e: Exception) -> str:
     - ack 类（``_render.py:183-211``：ack 超时 / socket 关闭无 ack / ack 非 JSON / 拒收 /
       缺 seq）→ ``ack_failed``。
     - half-injection 兜底：SOCK 已注但其他 3 键缺时，``_render.py:97-101`` 抛
-      ``缺 ORCA_* env`` → ``env_missing``（更精确归因；SPEC §3.1 KISS 决策只在
-      ``_resolve_env_status`` 看 SOCK 单键，归类精度在此兜底）。
+      ``缺 ORCA_* env`` → ``env_missing``（更精确归因；``_resolve_env_status`` 只看 SOCK
+      单键，归类精度在此兜底）。
     - 其余（payload 校验 / 大小超限 / sock path 过长 / 未知）→ ``generic:<Type>:<msg>``。
     """
     msg = str(e)
@@ -173,7 +166,7 @@ def _classify_exc(e: Exception) -> str:
 
 
 def _resolve_env_status(anchor_path: Path) -> str:
-    """求 ``viz_env_status``（SPEC §3.2）：ok / env_loaded_from_file / env_missing / import_failed。
+    """求 ``viz_env_status``：ok / env_loaded_from_file / env_missing / import_failed。
 
     - ``orca.chart`` 不可用（``_orca_render_chart is None``）或自加载 helper 不可用 → import_failed。
     - ``ORCA_CHART_SOCK`` 已在 env（真 orca-run / ClaudeExecutor spawn 路径）→ ok。
@@ -193,7 +186,7 @@ def _resolve_env_status(anchor_path: Path) -> str:
     return "env_missing"
 
 
-# ── 三张图 → render_chart ────────────────────────────────────────────────────
+# ── 四图 → render_chart ────────────────────────────────────────────────────
 
 
 def _push_champion_trace(
@@ -203,9 +196,7 @@ def _push_champion_trace(
 ) -> tuple[bool, str]:
     """图1：候选灰点 + champion 轨迹（running min）。x=ledger 行序, y=latency_ms, hue=series。
 
-    P1 已加 x_label/y_label/caption（候选序号 / 时延 ms / 图下说明）。
-
-    返回 ``(pushed, reason)``（SPEC §3.2）：成功 ``(True, "")``；数据不足
+    返回 ``(pushed, reason)``：成功 ``(True, "")``；数据不足
     ``(False, "data_insufficient")``；``render_chart`` 异常 ``(False, _classify_exc(e))``。
     """
     if len(ledger) < _MIN_ROWS:
@@ -281,7 +272,7 @@ def _push_champion_accuracy_trace(
     champions: list[dict[str, Any]],
     accuracy_target: float,
 ) -> tuple[bool, str]:
-    """图1b（P2-1 新增）：accuracy 维度的 champion 轨迹。x=round, y=accuracy, hue=series。
+    """accuracy 维度的 champion 轨迹。x=round, y=accuracy, hue=series。
 
     对齐「降时延保精度」语义：单纯 latency 轨迹看不到精度是否被牺牲。本图复用 champion
     轨迹数据模式，但 y=accuracy（每轮候选灰点 + champion 彩线，running max）。
@@ -367,10 +358,10 @@ def _push_pareto(
 ) -> tuple[bool, str]:
     """图2：latency(x) vs accuracy(y)，hue=status。pareto_x=min, pareto_y=max。
 
-    P7 修复 y=0 根因：过滤 accuracy is None 行（FAIL_latency 候选 accuracy=-1 → None，
+    过滤 accuracy is None 行（FAIL_latency 候选 accuracy=-1 → None，
     之前被前端渲染成 0 导致 y=0）。FAIL_export 的 latency=-1 已在 lat<0 过滤剔除。
 
-    返回 ``(pushed, reason)``（SPEC §3.2，与 ``_push_champion_trace`` 同款契约）。
+    返回 ``(pushed, reason)``（与 ``_push_champion_trace`` 同款契约）。
     """
     if len(ledger) < _MIN_ROWS:
         print(f"[viz_struct] WARN: 跳过 pareto：ledger 行数 {len(ledger)} < {_MIN_ROWS}", file=sys.stderr)
@@ -429,14 +420,14 @@ def _push_pareto(
 
 
 def _push_candidate_table(ledger: list[dict[str, Any]]) -> tuple[bool, str]:
-    """图3：逐候选明细表（P7 精简）。
+    """逐候选明细表。
 
     列 = round / id / tag / latency_ms / accuracy / status / one_line_summary。
     - **短字段** 留 table 列；长 hypothesis 不直接展（前端 wrap 难读），放 hover 字段
       ``hypothesis``（前端 tooltip）。
     - one_line_summary = 取 hypothesis / diff_summary 首行 / 截断前 80 字符。
 
-    返回 ``(pushed, reason)``（SPEC §3.2，与 ``_push_champion_trace`` 同款契约）。
+    返回 ``(pushed, reason)``（与 ``_push_champion_trace`` 同款契约）。
     """
     if len(ledger) < _MIN_ROWS:
         print(f"[viz_struct] WARN: 跳过 candidate_table：ledger 行数 {len(ledger)} < {_MIN_ROWS}", file=sys.stderr)
@@ -487,7 +478,7 @@ def _push_candidate_table(ledger: list[dict[str, Any]]) -> tuple[bool, str]:
     return True, ""
 
 
-# ── 终态对比 bar（--mode compare，SPEC §3.4）────────────────────────────────
+# ── 终态对比 bar（--mode compare）────────────────────────────────
 
 
 def _push_compare_bar(
@@ -499,12 +490,12 @@ def _push_compare_bar(
 ) -> tuple[bool, str]:
     """终态对比 bar：baseline / champion / final 的 latency，accuracy 写进每行。
 
-    取代 finalize step6 的 inline ``python3 -c`` 块（SPEC §3.4 D1=b）：
+    数据来源：
     - champion latency/accuracy 取 ``champions.jsonl`` 最后一行。
     - baseline 经 CLI 传（Jinja 取自 ``setup.output.baseline_*``）。
-    - final 经 CLI 传（本节点 step 2/3 算出，**不再替换 inline 占位**）。
+    - final 经 CLI 传（finalize step 2/3 算出）。
 
-    返回 ``(pushed, reason)``（SPEC §3.2，与三图 pusher 同款契约）。空 champions
+    返回 ``(pushed, reason)``（与三图 pusher 同款契约）。空 champions
     （全失败的 run）→ ``data_insufficient``（与三图空数据同款语义，不推误导性占位图）。
     """
     if not champions:
@@ -550,7 +541,7 @@ def render_all(
     target_latency_ms: float,
     accuracy_target: float,
 ) -> dict[str, Any]:
-    """推三张图到 Orca Web 面板。返回 stdout JSON schema（SPEC §3.2 升级）。
+    """推四图到 Orca Web 面板。返回 stdout JSON schema。
 
     返回结构（agent dumb copy 写进 ``output.viz_status``，零合成）::
 
@@ -614,7 +605,7 @@ def render_compare(
     final_latency_ms: float,
     final_accuracy: float,
 ) -> dict[str, Any]:
-    """``--mode compare``：仅推终态 Baseline vs Champion vs Final bar（SPEC §3.4）。
+    """``--mode compare``：仅推终态 Baseline vs Champion vs Final bar。
 
     共享 stdout JSON schema（``viz_env_status`` + ``charts.<name>.{pushed,reason}``），
     共享 ``_resolve_env_status`` 自加载 + ``_main`` 兜底 + import try/except。
@@ -651,7 +642,7 @@ def render_compare(
 def _build_main_fallback(exc: Exception, *, compare_mode: bool) -> dict[str, Any]:
     """``_main`` 异常兜底（B1 命门）：构造 deterministic stdout JSON 让 agent dumb copy。
 
-    SPEC §3.2 B1：进程级异常路径下 stdout **必有合法 JSON**——``viz_env_status="generic"`` +
+    进程级异常路径下 stdout **必有合法 JSON**——``viz_env_status="generic"`` +
     所有图 ``{pushed:false, reason:"generic:<Type>:<msg>"}``。default 模式填三图，compare 模式
     填 ``compare_bar``。退出码仍返 2（进程级失败信号保留），但 agent 已能 dumb copy。
     """
@@ -669,8 +660,7 @@ def _build_main_fallback(exc: Exception, *, compare_mode: bool) -> dict[str, Any
 def _main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "草稿 §12 四张图（P7 精简 + P2-1 加 accuracy champion trace；orca.chart render_chart 推送，无 HTML 产物）。"
-            " 2026-07-23 SPEC §3.2/§3.4：加 viz_env_status / charts.reason / --mode compare / _main 兜底。"
+            "结构性探索可视化（orca.chart render_chart 推送，无 HTML 产物）：四图 + --mode compare 终态对比 bar。"
         )
     )
     parser.add_argument(
@@ -684,7 +674,7 @@ def _main() -> int:
     # default 模式必填（target_latency_ms / accuracy_target）。
     parser.add_argument("--target_latency_ms", type=float, required=False)
     parser.add_argument("--accuracy_target", type=float, required=False)
-    # compare 模式必填（final 实测两值，SPEC §3.4：经 CLI 参数传入，不替换 inline 占位）。
+    # compare 模式必填（final 实测两值，经 CLI 参数传入）。
     parser.add_argument("--final_latency_ms", type=float, required=False)
     parser.add_argument("--final_accuracy", type=float, required=False)
     args = parser.parse_args()
@@ -731,7 +721,7 @@ def _main() -> int:
                 accuracy_target=args.accuracy_target,
             )
     except Exception as e:
-        # _main 兜底（B1 命门，SPEC §3.2）：stdout 必有合法 JSON → agent dumb copy。
+        # _main 兜底：stdout 必有合法 JSON → agent dumb copy。
         # 退出码保留 2（进程级失败信号）；先 print+flush 再 return（防被后续异常截断）。
         print(f"[viz_struct] FAIL: {type(e).__name__}: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
