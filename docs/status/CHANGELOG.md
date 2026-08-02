@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-02] fix(web): legacy discovery 走 tape 派生 + handle.status hint 文档化（真实审查聚类 E）
+
+`run_manager.discover_runs` legacy 分支从硬编码 `RunSummary(status="cancelled",...)` 改为复用与 attached 同款的 `_summary_from_tape(tape_path, source="legacy")` 从 tape 派生 status/progress/cost/elapsed/event_count（DRY）；`seen_ids` 跨 attached/in-memory/legacy 三分支显式 dedup（写入优先级 in-memory>attached>legacy，机制故意非对称）；`_summary_from_tape` 内层 except 补 `logger.warning`（N1，AC5「含 run_id+tape path」）；run_id 不一致 warn（E5，返回取 tape_stem，覆盖三源）；`handle.status` 实时 hint 非权威文档化（方向 A，不改代码——B/C 破依赖方向/职责重叠）；in-memory 分支 status/event_count perf 豁免 docstring 标注。**E9 破坏性变更**：crashed legacy run 显示 cancelled→live-pending/running（release note 声明）。round-2 pass + coder 自我 review 0 BLOCKER，web iface 套件 182 测试绿（16 新）。Commit: `50a52fe`。详见 [release note](../releases/2026-08-02-audit-e.md)。
+
 ## [2026-08-02] fix(web/in-session): 并发守护竞态修复（真实审查聚类 D）
 
 `orca run` web-default 的 `_wait_ws_autoexit` 加第三条件 `AND 无非终态 in-process run`（新 `RunManager.has_nonterminal_inproc_runs() -> bool` 只读 helper），防主 run 终态后 auto-exit 撕掉用户在 web UI 起的并发 run B（架构问题：auto-exit 决策权限越界到整个进程生命周期）；sidechain pidfile 改原子写（tmp+`os.replace`）+ 退出 ownership 比对再 unlink（防级联 respawn）；`_daemon_liveness` 加 macOS 分支（`os.kill(pid,0)` + `ps -o args=` 子串匹配，kill-0≠活 zombie 仍响应 cmdline mandatory，不引 psutil）；`ws_handler._on_run_changed` QueueFull 加 warn（仅帧 payload，`_cleanup` None-sentinel 除外）。**M1 行为变更**（并发 run 卡 gate 永不终态 → 进程不再 auto-exit 撕 B，需 Ctrl-C）+ 上游 `web-attach-and-default-spec.md` 第三 conjunct 勘误。round-2 pass-with-minor-caveats + R-1..R-4 裁定，coder 自我 review 0 BLOCKER，38 测试绿。Commit: `c0cdd23`。详见 [release note](../releases/2026-08-02-audit-d.md)。
