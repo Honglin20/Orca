@@ -82,11 +82,16 @@ frontmatter 识别字段：`description`、`model`、`tools`。body 即 prompt�
 
 ## 5. validate 错误类别（`tars validate <yaml>`）
 
-`validate_workflow`（`validator.py:96`）聚合全部检查一次性抛 `ConfigurationError`（errors 阻断，warnings 不阻断）。主要类别：
+`validate_workflow`（`validator.py`）聚合全部检查一次性抛 `ConfigurationError`（errors 阻断，warnings 不阻断）。主要类别：
 
 - **结构**：节点缺 `name` / 重名（含 parallel 组）；`entry` 不存在或指向组；`route.to` 引用未知目标；`parallel.branches` <2 / 引用未定义节点 / 重复；catch-all route 未放最后；`foreach.source` 首段非真实节点；`terminate` 约束违反。
 - **图**：从 `entry` 不可达任何终止节点（死路）；孤儿节点不可达（warning）。
-- **模板**：Jinja2 语法错 / 引用未声明根（根必须是节点名 / `workflow` / `inputs`）；引用未声明 input key（warning）。
+- **模板（浅校验）**：Jinja2 语法错 / 引用未声明根（根必须是节点名 / `workflow` / `inputs`）；引用未声明 input key（warning）。
+- **模板（引用合规深度校验）**：
+  - 自引用：节点 `prompt`/`command`/`values`（含 foreach body）引用 `<self>.output[.X]` → error（这些字段在节点跑之前渲染，自身无 output）。`route.when` / `route.output` / `workflow.outputs` 在节点跑后评估，引用自身 output 合法。`{% raw %}` 包裹的提及 Jinja2 parse 为 Const 文本，不进 AST ref 集合，天然免疫。
+  - output_schema 字段对齐：模板引用 `{{ X.output.foo }}`，X 的 `output_schema` 设了 `additionalProperties: false`，但 `foo` 不在 `properties` → error（拼错必崩）。跳过：X 无 schema / schema 未关 additionalProperties / ScriptNode `parse_json:true` 的 `output.json.<X>`（运行时解析）/ `X.output` 整段引用（无字段）。
+  - 文件夹/文件 agent scripts 存在性：节点 prompt（resolver 物化的 body）引用 `$ORCA_AGENT_RESOURCES/scripts/<file>`，但 `<resources_root>/scripts/<file>` 不存在 → error。内联 prompt（无 `agent:` 引用，`resources_root=None`）不查。
+- **input 三档标签（warning）**：`inputs.<name>.description` 不以 `[ask]`/`[infer]`/`[default]`/`[advanced]` 起头 → warning（contract §6 强制标签）。
 - **能力**：execute 阶段 agent `tools` 含 `ask_user`/`gate`；profile 校验（executor / output_schema 等）。
 
 此外 pydantic schema 层先拦：`extra="forbid"` 拒未知字段；判别联合拒未知 `kind`；`RetryPolicy.max_attempts≥1`、`ValidatorConfig.criteria` 非空等。

@@ -33,7 +33,12 @@ from typing import Any
 
 import typer
 
-from orca.compile import ConfigurationError, catalog, load_workflow
+from orca.compile import (
+    ConfigurationError,
+    catalog,
+    load_workflow,
+    load_workflow_with_warnings,
+)
 from orca.iface.cli.config import apply_kb_requirement, resolve_kb_dir
 
 logger = logging.getLogger(__name__)
@@ -312,9 +317,13 @@ def validate(
         # phase-14：捕获 compile 期 DeprecationWarning（旧约定 prompt=None + name 匹配），
         # 展示到 stderr（不阻断，exit 0）。simplefilter("always") 确保每次都捕获（默认
         # DeprecationWarning 在 Python 3.2+ 只显示一次且非 main 时静默）。
+        #
+        # 引用合规校验（自引用 / output_schema 字段对齐 / scripts 路径 / input 三档标签）
+        # 也走 load_workflow_with_warnings：errors 抛 ConfigurationError（exit 非 0），
+        # warnings 经返回值展示到 stderr（exit 0，非阻断）。
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            load_workflow(yaml)
+            _wf, val_warnings = load_workflow_with_warnings(yaml)
     except ConfigurationError as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(code=EXIT_ARG_OR_VALIDATE)
@@ -324,6 +333,8 @@ def validate(
     for w in caught:
         if issubclass(w.category, DeprecationWarning):
             typer.echo(f"⚠️  {w.message}", err=True)
+    for w in val_warnings:
+        typer.echo(f"⚠️  {w}", err=True)
     typer.echo(f"✓ {yaml} 校验通过")
 
 

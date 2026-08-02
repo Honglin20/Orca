@@ -37,7 +37,9 @@ from orca.compile.validator import ConfigurationError, validate_workflow
 from orca.schema import AgentNode, ForeachNode, Workflow
 
 
-def load_workflow(path: str | Path, resolver: AgentResolver | None = None) -> Workflow:
+def load_workflow(
+    path: str | Path, resolver: AgentResolver | None = None
+) -> Workflow:
     """YAML 文件 → 校验过的 Workflow。失败抛 ConfigurationError（含所有 errors+warnings）。
 
     phase-14：可选注入 ``resolver``（默认 ``LocalPoolResolver``）。旧约定（prompt 省略 +
@@ -49,6 +51,24 @@ def load_workflow(path: str | Path, resolver: AgentResolver | None = None) -> Wo
       - pydantic 结构错 → 包装成 ConfigurationError（对外单一错误类型）
       - agent 引用缺失 / 互斥违反 / foreach body 双 None → ConfigurationError（聚合）
       - 语义校验失败 → ConfigurationError（含所有 errors + warnings）
+
+    注意：``validate_workflow`` 返回的 warnings 在本函数内被丢弃（保持单返回值 API）。
+    需要拿 warnings 的 caller（如 ``tars validate`` CLI）改用 ``load_workflow_with_warnings``。
+    """
+    wf, _warnings = load_workflow_with_warnings(path, resolver)
+    return wf
+
+
+def load_workflow_with_warnings(
+    path: str | Path, resolver: AgentResolver | None = None
+) -> tuple[Workflow, list[str]]:
+    """同 ``load_workflow`` 但额外返回 ``validate_workflow`` 的 warnings 列表。
+
+    用于需要展示非阻断警告的 caller（CLI ``validate`` / doctor）。errors 仍走
+    ``ConfigurationError`` 抛出，warnings 经返回值交还 caller 自行展示。
+
+    单一解析路径（铁律 1）：不复制 ``load_workflow`` 的流水线，反向让 ``load_workflow``
+    委托本函数 + 丢弃 warnings —— 两 caller 共享同一解析实现，零行为漂移。
     """
     yaml_path = Path(path)
     raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
@@ -67,8 +87,8 @@ def load_workflow(path: str | Path, resolver: AgentResolver | None = None) -> Wo
         extra_roots=(),
     )
     _resolve_agents(wf, resolver, context)  # 物化 + 物化前预检（互斥 / body 双 None）
-    validate_workflow(wf)                    # 物化后语义校验（Route.output + 现有 9 项）
-    return wf
+    warnings_list = validate_workflow(wf)   # 物化后语义校验（含引用合规 + 现有 9 项）
+    return wf, warnings_list
 
 
 def _iter_agent_nodes(

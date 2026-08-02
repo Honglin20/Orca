@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-02] feat(validate): tars validate 加引用合规校验门（自引用 / output_schema 字段对齐 / scripts 存在 / input 三档标签）
+
+把 4 项引用合规校验加进现有 `tars validate`（不新设 lint 子命令），成为 create-workflow skill 生成后的检验门，catch `agent-struct-exploration.yaml` `{%raw%}` 误删类自引用崩。复用 validator 现有 AST 基建（`_ENV` + `_iter_templates`）；`_iter_templates` 重构为 5 元组新增 `self_name` 区分预渲染 vs 评估期字段。同步修 pre-existing silent-warning bug：新增 `load_workflow_with_warnings`，CLI `validate` 现在能把非阻断 warning 显示到 stderr。9 个真实 workflow 全部 0 新 error / 0 新 warning（基线保留），测试 99 → 112 passed。两路 code-reviewer 审查所有 must-fix 已修（含死代码移除 + foreach body 两侧覆盖 + 聚合测试）。Commit: `<待补>`。详见 [release note](../releases/2026-08-02-tars-validate-reference-checks.md)。
+
 ## [2026-07-31] feat(kd-nas): model8 实际 student 变体（BatchNorm/3层/ReLU）+ 精简 workflow description
 
 新增基于原始 model8（SignalProcessingTransformer）的实际 student 变体到 demo KB（`examples/kd-nas-demo/knowledge_base/families/receiver/`），覆盖三条轻量化路径：① BatchNorm 替 LayerNorm（验证过时延达标）② 缩到 3 层 ③ GELU→ReLU。主变体 `00_model8_bn3relu`（三路径全开）排 KB glob 第一（digit 前缀字典序最小，pick_variant 实测确认）；组合变体 `01_bn3gelu`/`02_ln3relu`/`03_bn4relu` 隔离各路径。共享积木 `_model8_student_blocks.py`（`norm_type`/`act_type` 开关，OCP）。`demo_tiny_*` 保留不动。BatchNorm 维度适配验证（reshape 后 3D `[N,C,L]`，C=embed_dim，真跑 forward+backward+ONNX）。测试 73 passed（test_smoke 36 + test_model8_students 37）+ KD 无回归（158 passed）。另：`kd-nas.yaml` description 精简为只讲作用（"通过 KD 搜索轻量化模型结构达时延目标"），去节点流程细节。Commit: `<待补>`。

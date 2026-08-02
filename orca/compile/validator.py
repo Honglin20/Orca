@@ -26,7 +26,9 @@ phase 5 单轨化迁移后校验项重排（9 项：①②④⑥⑦⑧⑨⑩⑪�
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterable
 
 from jinja2 import Environment
@@ -130,6 +132,11 @@ def validate_workflow(wf: Workflow) -> list[str]:
     _check_route_fallback_last(wf, result)     # ⑪ 兜底 route 位置（node + parallel 组）
     _check_route_output_only_at_end(wf, result)  # phase-14：route.output 仅 $end 生效（非 $end warn）
     _check_jinja2_refs(wf, result)             # ⑦
+    # 引用合规校验（⑦ 浅校验之上的深度校验；catch struct {%raw%} 误删类 bug）
+    _check_self_reference(wf, result)          # prompt/command/values 禁引用自身 output（render 期崩）
+    _check_output_schema_field_alignment(wf, result)  # strict schema 字段拼写对齐
+    _check_folder_agent_scripts_exist(wf, result)     # $ORCA_AGENT_RESOURCES/scripts/<f> 存在性
+    _check_input_tier_labels(wf, result)       # input description 三档标签（contract §6）
     _check_foreach_source(wf, result)          # ⑧
     _check_terminate_constraints(wf, result)   # terminate step 约束（routes 空 / 非entry / 非parallel branch / 非foreach body）
     _check_execute_phase_no_gate_tools(wf, result)  # 铁律 7：execute phase 永不中断
@@ -477,36 +484,51 @@ def _check_route_output_only_at_end(wf: Workflow, result: ValidationResult) -> N
 
 def _iter_templates(
     wf: Workflow,
-) -> Iterable[tuple[str, str, bool, set[str]]]:
-    """产出 (位置, 文本, 是否裸表达式, 额外合法 root)。
+) -> Iterable[tuple[str, str | None, str, bool, set[str]]]:
+    """产出 (位置, self_name, 文本, 是否裸表达式, 额外合法 root)。
 
     覆盖所有 Jinja2 模板字段（plan §7-B 裁决：不止 prompt/when/outputs）：
     AgentNode.prompt / ScriptNode.command / SetNode.values / Route.when（node 与
     parallel 组两侧）/ Workflow.outputs / foreach body 的 prompt·command。
     额外合法 root：when 允许 ``output``（当前 node 自身输出）；foreach body 允许
     ``item_var`` / ``index_var``。
+
+    ``self_name`` 用于自引用检测：模板**在所属节点跑之前**渲染的字段（prompt /
+    command / values / foreach body）填**当前节点名**——这些位置引用 ``<self>.output``
+    会触发 UndefinedError（render 期自身不在 ctx.outputs）。模板**在节点跑之后**评估
+    的字段（route.when / route.output / workflow.outputs / terminate.reason /
+    terminate.outputs）填 ``None``——此时 self.output 已在 ctx，引用合法。
     """
     for node in wf.nodes:
         if isinstance(node, AgentNode) and node.prompt:
-            yield (f"node '{node.name}'.prompt", node.prompt, False, set())
+            yield (f"node '{node.name}'.prompt", node.name, node.prompt, False, set())
         elif isinstance(node, ScriptNode) and node.command:
-            yield (f"node '{node.name}'.command", node.command, False, set())
+            yield (f"node '{node.name}'.command", node.name, node.command, False, set())
         elif isinstance(node, SetNode):
             for key, expr in node.values.items():
-                yield (f"node '{node.name}'.values.{key}", expr, False, set())
+                yield (
+                    f"node '{node.name}'.values.{key}",
+                    node.name,
+                    expr,
+                    False,
+                    set(),
+                )
         elif isinstance(node, TerminateNode):
             # terminate 的 reason / outputs 都是 Jinja2 模板（同 set_node 渲染机制），
             # 同样需浅校验未声明引用（fail loud 在 compile 期而非 run 期）。
+            # self_name=None：terminate 触达时本节点无 auto-output，self.output 无意义但
+            # 非本检测目标（业务上不会写），归到「评估期 self=None」一档避免误报。
             if node.reason:
-                yield (f"node '{node.name}'.reason", node.reason, False, set())
+                yield (f"node '{node.name}'.reason", None, node.reason, False, set())
             for key, expr in node.outputs.items():
-                yield (f"node '{node.name}'.outputs.{key}", expr, False, set())
+                yield (f"node '{node.name}'.outputs.{key}", None, expr, False, set())
 
+        # route.when / route.output 在节点跑完后评估，self.output 合法 → self_name=None。
         for route in node.routes:
             if route.when:
-                # when 是裸表达式（无 {{ }}），允许引用本节点自身输出 output
                 yield (
                     f"node '{node.name}'.route.when",
+                    None,
                     route.when,
                     True,
                     {"output"},
@@ -516,6 +538,7 @@ def _iter_templates(
                 for key, expr in route.output.items():
                     yield (
                         f"node '{node.name}'.route.output.{key}",
+                        None,
                         expr,
                         False,
                         set(),
@@ -524,9 +547,12 @@ def _iter_templates(
         if isinstance(node, ForeachNode):
             body_extras = {node.item_var, node.index_var}
             body = node.body
+            # body 在 foreach 执行期内逐项跑，foreach 自身尚未完成 → 引用 foreach.output 崩。
+            # 故 body 的 self_name = foreach 节点名（catch body 里写 {{ foreach.output.X }}）。
             if isinstance(body, AgentNode) and body.prompt:
                 yield (
                     f"foreach '{node.name}'.body.prompt",
+                    node.name,
                     body.prompt,
                     False,
                     body_extras,
@@ -534,18 +560,20 @@ def _iter_templates(
             elif isinstance(body, ScriptNode) and body.command:
                 yield (
                     f"foreach '{node.name}'.body.command",
+                    node.name,
                     body.command,
                     False,
                     body_extras,
                 )
 
     # parallel 组的 route.when 与 node 走相同 ⑦ 校验（组完成后路由的 Jinja2 引用
-    # 也需浅校验，避免静默放行坏引用）。
+    # 也需浅校验，避免静默放行坏引用）。组的 self_name=None（组聚合输出在评估期可用）。
     for group in wf.parallel:
         for route in group.routes:
             if route.when:
                 yield (
                     f"parallel 组 '{group.name}'.route.when",
+                    None,
                     route.when,
                     True,
                     {"output"},
@@ -555,13 +583,14 @@ def _iter_templates(
                 for key, expr in route.output.items():
                     yield (
                         f"parallel 组 '{group.name}'.route.output.{key}",
+                        None,
                         expr,
                         False,
                         set(),
                     )
 
     for key, expr in wf.outputs.items():
-        yield (f"workflow.outputs.{key}", expr, False, set())
+        yield (f"workflow.outputs.{key}", None, expr, False, set())
 
 
 def _parse_for_meta(text: str, is_expression: bool):
@@ -638,7 +667,7 @@ def _check_jinja2_refs(wf: Workflow, result: ValidationResult) -> None:
     X 未在 ``wf.inputs`` 声明 → warning（非致命，允许运行时注入未声明的 key）。
     """
     names = _jinja_root_set(wf)
-    for location, text, is_expr, extras in _iter_templates(wf):
+    for location, _self_name, text, is_expr, extras in _iter_templates(wf):
         ast, err = _parse_for_meta(text, is_expr)
         if err is not None:
             result.add_error(f"{location}：{err}")
@@ -656,6 +685,247 @@ def _check_jinja2_refs(wf: Workflow, result: ValidationResult) -> None:
                 result.add_warning(
                     f"{location} 引用了未声明的 workflow input '{key}'"
                 )
+
+
+# ── 引用合规深度校验（⑦ 之上的层；catch {%raw%} 误删类 bug）────────────────────
+
+
+def _output_field_refs(ast) -> list[tuple[str, str | None]]:
+    """提取 AST 里所有 ``<X>.output[.<field>]`` 一级引用，返回 ``[(node_name, field_or_None), ...]``。
+
+    识别 4 种字面写法（dotted + subscript 两两组合）：
+
+    - ``{{ X.output }}``              → ``(X, None)``  整段引用
+    - ``{{ X['output'] }}``           → ``(X, None)``
+    - ``{{ X.output.foo }}``          → ``(X, 'foo')`` 一级字段
+    - ``{{ X['output']['foo'] }}``    → ``(X, 'foo')``
+    - ``{{ X.output.foo.bar }}``      → ``(X, 'foo')`` 只取一级（bar 不归静态对齐管）
+
+    覆盖自引用检测（``X == self``）+ output_schema 字段对齐（``foo ∈ schema.properties``）。
+
+    不深拷嵌套字段（``foo.bar`` 的 ``bar`` 留给运行时；JSON schema 嵌套对齐 brittle）。
+    ``{% raw %}`` 包裹的内容 Jinja2 parse 时记为 ``Const`` 文本节点，**不**进 ``find_all``，
+    天然不在此函数返回值里 —— raw 包裹的自引用提及不会被误报。
+
+    **双重发射（已知）**：同一条 ``X.output.foo`` 引用可能同时产 ``(X, 'foo')`` 与
+    ``(X, None)`` 两条（``Getattr(X, output)`` 自身命中 branch 1，``Getattr(foo, …)``
+    命中 branch 2）。消费者需按需过滤 ``field is None``（``_check_self_reference`` 用
+    ``break``，``_check_output_schema_field_alignment`` 显式跳过 ``field is None``）。
+    """
+    refs: list[tuple[str, str | None]] = []
+    # outer 是 Getattr：field = outer.attr
+    for outer in ast.find_all(Getattr):
+        inner = outer.node
+        if outer.attr == "output" and isinstance(inner, Name):
+            # {{ X.output }} 整段引用（outer 即 output 根）
+            refs.append((inner.name, None))
+            continue
+        if (
+            isinstance(inner, Getattr)
+            and inner.attr == "output"
+            and isinstance(inner.node, Name)
+        ):
+            # {{ X.output.<outer.attr> }}
+            refs.append((inner.node.name, outer.attr))
+            continue
+        if (
+            isinstance(inner, Getitem)
+            and isinstance(inner.arg, Const)
+            and inner.arg.value == "output"
+            and isinstance(inner.node, Name)
+        ):
+            # {{ X['output'].<outer.attr> }}
+            refs.append((inner.node.name, outer.attr))
+            continue
+    # outer 是 Getitem：field = outer.arg.value（仅字面字符串索引）
+    for outer in ast.find_all(Getitem):
+        if not isinstance(outer.arg, Const) or not isinstance(outer.arg.value, str):
+            continue
+        field = outer.arg.value
+        inner = outer.node
+        if isinstance(inner, Name) and field == "output":
+            # {{ X['output'] }} 整段引用
+            refs.append((inner.name, None))
+            continue
+        if (
+            isinstance(inner, Getattr)
+            and inner.attr == "output"
+            and isinstance(inner.node, Name)
+        ):
+            # {{ X.output['<field>'] }}
+            refs.append((inner.node.name, field))
+            continue
+        if (
+            isinstance(inner, Getitem)
+            and isinstance(inner.arg, Const)
+            and inner.arg.value == "output"
+            and isinstance(inner.node, Name)
+        ):
+            # {{ X['output']['<field>'] }}
+            refs.append((inner.node.name, field))
+            continue
+    return refs
+
+
+def _check_self_reference(wf: Workflow, result: ValidationResult) -> None:
+    """禁自引用：prompt / command / values / foreach body 引用 ``<self>.output[.X]`` → error。
+
+    语义（contract §3）：``prompt`` / ``command`` / ``values`` 在所属节点跑**之前**渲染，
+    render context 只含上游节点的 ``ctx.outputs``，自身尚未产出 → ``<self>.output`` 必
+    UndefinedError 崩。``route.when`` 与 ``route.output`` 在节点跑**之后**评估，self.output
+    合法（``when: "output.json.kind == 'A'"``），故 self_name=None 不进此检查。
+
+    动机：终审发现 ``agent-struct-exploration.yaml`` 的 ``{% raw %}`` 被误删 → setup prompt
+    自引用 ``{{ setup.output.X }}`` → StrictUndefined 崩。``{% raw %}`` 修复后此规则零误报，
+    且永久 catch 此类误删（raw 包裹的提及不进 AST 的 ref 集合，见 ``_output_field_refs``）。
+    """
+    for location, self_name, text, is_expr, _extras in _iter_templates(wf):
+        if self_name is None:
+            continue
+        ast, err = _parse_for_meta(text, is_expr)
+        if err is not None or ast is None:
+            continue  # 语法错已由 ⑦ 报；此处不重复
+        for node_name, _field in _output_field_refs(ast):
+            if node_name == self_name:
+                result.add_error(
+                    f"{location} 自引用 '{self_name}.output'："
+                    f"prompt/command/values 在节点跑之前渲染，自身无 output 可读"
+                    f"（用 route.when 引用本节点 output，或改上游节点传递）"
+                )
+                break  # 同一模板内多条自引用只报一次（避免刷屏）
+
+
+def _check_output_schema_field_alignment(
+    wf: Workflow, result: ValidationResult
+) -> None:
+    """strict output_schema 字段对齐：模板引用 ``{{ X.output.foo }}``，``foo`` 必须 ∈ schema。
+
+    规则（contract §2 agent output_schema）：当 ``X.output_schema`` 存在且
+    ``additionalProperties: false``，模板引用的**一级字段** ``foo`` 必须 ∈
+    ``output_schema.properties``，否则拼错必 render 后被 schema 拒 / UndefinedError。
+
+    跳过情形：
+    - ``X`` 无 output_schema（AgentNode 自由文本 / ScriptNode 固定字段 stdout/stderr/
+      exit_code + parse_json 的 ``json``）。ScriptNode schema 字段不在 ``schema.py`` 里，
+      恒为 None → 天然落入此跳过（``output.json.<X>`` 运行时解析，静态无法对齐）。
+    - ``X.output_schema.additionalProperties`` 非 ``False``（schema 默认放行）。
+    - 字段链 ``X.output`` 整段引用（``field=None``）—— 不字段级对齐，跳过。
+
+    只对齐**一级**字段（``foo.bar`` 的 ``bar`` 留给运行时；嵌套 schema brittle 易误报）。
+    """
+    # X 名 → output_schema（仅 AgentNode 有此字段；ScriptNode/parallel 组不进表，自然跳过）。
+    schema_map: dict[str, dict] = {}
+    for node in wf.nodes:
+        if not node.name:
+            continue
+        if isinstance(node, AgentNode) and node.output_schema is not None:
+            schema_map[node.name] = node.output_schema
+
+    for location, _self_name, text, is_expr, _extras in _iter_templates(wf):
+        ast, err = _parse_for_meta(text, is_expr)
+        if err is not None or ast is None:
+            continue
+        reported: set[tuple[str, str]] = set()  # 同模板内同(X,field)去重
+        for node_name, field in _output_field_refs(ast):
+            if field is None:
+                continue  # 整段引用，不字段级对齐
+            schema = schema_map.get(node_name)
+            if schema is None:
+                continue  # X 无 strict output_schema（AgentNode 自由文本 / ScriptNode / parallel 组）
+            if schema.get("additionalProperties") is not False:
+                continue  # schema 未强制关闭 additionalProperties
+            properties = schema.get("properties") or {}
+            if field in properties:
+                continue
+            key = (node_name, field)
+            if key in reported:
+                continue
+            reported.add(key)
+            result.add_error(
+                f"{location} 引用了 node '{node_name}'.output 不存在的字段 '{field}'"
+                f"（output_schema additionalProperties:false，合法字段："
+                f"{sorted(properties.keys())}）"
+            )
+
+
+# folder-agent body 里 ``$ORCA_AGENT_RESOURCES/scripts/<file>`` 的 <file> 提取。
+# allow-list 字符类 ``[A-Za-z0-9_\-./]`` 截断尾部（引号/反引号/空白/行尾等自然停止匹配），
+# 支持子目录路径。**文本级正则非 AST 感知**：``{% raw %}`` 包裹的文档化示例（如 prompt
+# 里写 "示例：$ORCA_AGENT_RESOURCES/scripts/example.py"）也会被检——已知限制，可接受
+# （folder agent prompt 实际不会用 raw 包裹真实脚本路径）。
+_AGENT_RESOURCE_SCRIPT_RE = re.compile(
+    r"\$ORCA_AGENT_RESOURCES/scripts/([A-Za-z0-9_][A-Za-z0-9_\-./]*)"
+)
+
+
+def _check_folder_agent_scripts_exist(
+    wf: Workflow, result: ValidationResult
+) -> None:
+    """文件夹/文件 agent 的 body 引用 ``$ORCA_AGENT_RESOURCES/scripts/<file>`` 必须存在。
+
+    语义（contract §4 + create-workflow H1）：folder agent spawn 时 executor 注入
+    ``ORCA_AGENT_RESOURCES`` 指向 agent 资源目录（resolver 物化为 ``node.resources_root``）；
+    body 引用 ``$ORCA_AGENT_RESOURCES/scripts/<file>`` 等价读 ``<resources_root>/scripts/<file>``。
+    缺失 → spawn 后 agent Bash 工具实际执行时崩（FileNotFoundError）。
+
+    仅对 ``node.resources_root`` 已物化（agent 引用，由 resolver 填）的节点检查；
+    内联 prompt（无 agent 引用）``resources_root=None``，无 ORCA_AGENT_RESOURCES 语义，跳过。
+    只检查 ``node.prompt``（resolver 物化进来的 body）—— 不递归 .md 引用的二级文件
+    （如 agent.md body 指向 SKILL.md，SKILL.md 再引用脚本；递归静态分析 brittle 超出范围）。
+    """
+    for node in wf.nodes:
+        if isinstance(node, AgentNode):
+            _check_scripts_exist_one(node, f"node '{node.name}'", result)
+        elif isinstance(node, ForeachNode):
+            body = node.body
+            if isinstance(body, AgentNode):
+                _check_scripts_exist_one(
+                    body, f"foreach '{node.name}'.body", result
+                )
+
+
+def _check_scripts_exist_one(
+    agent_node: AgentNode, location: str, result: ValidationResult
+) -> None:
+    """单 AgentNode 的 prompt + resources_root 一致性检查（DRY 提取）。"""
+    if not agent_node.prompt or not agent_node.resources_root:
+        return
+    resources_root = Path(agent_node.resources_root)
+    reported: set[str] = set()
+    for match in _AGENT_RESOURCE_SCRIPT_RE.finditer(agent_node.prompt):
+        rel = match.group(1)
+        if rel in reported:
+            continue
+        reported.add(rel)
+        # resolve 但不要求路径存在（existence 是本检查的判定，不是 resolve 的前提）
+        target = resources_root / "scripts" / rel
+        if not target.is_file():
+            result.add_error(
+                f"{location} 引用了 $ORCA_AGENT_RESOURCES/scripts/{rel}"
+                f" 但脚本不存在（resources_root={resources_root}，"
+                f"期望路径 {target}）"
+            )
+
+
+# input description 三档标签（contract §6 / create-workflow SKILL.md）。
+# description 必须以 [ask]/[infer]/[default]/[advanced] 起头。
+_TIER_LABELS = ("[ask]", "[infer]", "[default]", "[advanced]")
+
+
+def _check_input_tier_labels(wf: Workflow, result: ValidationResult) -> None:
+    """input description 必须以三档标签起头（contract §6 强制，warning 非阻断）。
+
+    语义：三档标签是 in-session 编排器 / tars skill 读取 input 分类的机器可读前缀；
+    缺标签 = input 不会被正确路由到 ask/infer/default 处理流。warning（非 error）：
+    旧 workflow 可能缺标签，阻断会破坏既有可用性；用 warning 提示作者补齐。
+    """
+    for name, idef in wf.inputs.items():
+        desc = idef.description or ""
+        if not desc.startswith(_TIER_LABELS):
+            result.add_warning(
+                f"input '{name}' 的 description 未以三档标签起头"
+                f"（[ask]/[infer]/[default]/[advanced]，contract §6）"
+            )
 
 
 # ── ⑧ foreach.source 的 node 存在（浅校验）──────────────────────────────────

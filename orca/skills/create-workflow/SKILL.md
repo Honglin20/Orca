@@ -170,6 +170,7 @@ Tier B 项读代码无果时，agent **不要**造假（`torch.randn` / 复用 t
    ```
    - 退出码非 0 → 读 stderr，**自己改**，再验。循环直到 0 error。warnings 可接受但要跟用户提一句。
    - （`orca` 是 in-session shell，无 validate 子命令；校验一律走 `tars validate`。）
+   - `tars validate` 现含**引用合规校验**（除结构校验外）：① 自引用（节点 prompt/command/values 禁引用自身 `.output`，render 期会崩）；② output_schema 字段对齐（strict schema 下字段拼写错必报）；③ 文件夹 agent scripts 路径存在性（`$ORCA_AGENT_RESOURCES/scripts/<f>` 必须真实存在）；④ input 三档标签（`description` 缺 `[ask]`/`[infer]`/`[default]`/`[advanced]` 起头 → warning）。前 3 条 error 阻断，第 4 条 warning 不阻断但会显示。
    - validate 通过后**必跑 input 三档 checklist**（详 SPEC §6）：
      - [ ] 每个 input 归类到 Tier A 四子类之一（模型入口/业务命令/KPI/硬件/seed），否则下沉
      - [ ] Tier B 项有 setup 节点 `output_schema` 字段承接（infer-once + propagate，链不破）
