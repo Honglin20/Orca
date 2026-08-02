@@ -153,7 +153,7 @@ Tier B 项读代码无果时，agent **不要**造假（`torch.randn` / 复用 t
 2. **description / prompt / agent.md 只答 what-input-output，不答 why-history**。NAS 系列是正面样板（`workflows/agents/nas-select/agent.md` 55 行），kd 系列是反面教材（满篇 `BLK-X` / `§X` / 迁移自）。
 3. **红线 > 解释，契约 > 口头约束**：不该做的用 `❌ 违反即失败` 列；关键正确性用 `output_schema` / `when` 做成引擎硬检查。
 
-🔴 **考古自检（生成后 grep 产物）**：命中 `[A-Z]+-[0-9]+`（开发编号 BLK/BUG/HI/U/LO 等，含单字母前缀如 U-1/P-5）/ `迁移自` / `analogue of` / `v[0-9]+ 已嵌入` / `spec-review` / 外部 plan·SPEC 章节引用 = FAIL。引用仓库内真实文件的章节（`CONTRACTS.md §N`、`agent-ask-user-sentinel.md §N`、`workflow §N`、`checklist item N`）是精确导航，**允许**。详 `reference/writing-style.md` §8。例外：`docs/specs/`、CHANGELOG、release note。
+🔴 **考古自检（生成后 grep 产物）**：命中 `[A-Z]+-[0-9]+`（开发编号 BLK/BUG/HI/U/LO 等，含单字母前缀如 U-1/P-5）/ `迁移自` / `analogue of` / `leaves off` / `前作` / `前身是` / `v[0-9]+ 已嵌入` / `spec-review` / `spec_review` / `plan [a-z-]+ §` / `SPEC 20[0-9]{2}-` = FAIL。**宽口径兜底**（无连字符开发编号，标准正则 `[A-Z]+-[0-9]+` 抓不到）：额外 grep `P[0-9]|Increment [A-Z]|code-reviewer|review #[0-9]|SR[0-9]|finalize 20[0-9]{2}|演进历史|前身是`，命中按 §1 判据删/留。引用仓库内真实文件的章节（`CONTRACTS.md §N`、`agent-ask-user-sentinel.md §N`、`workflow §N`、`checklist item N`）是精确导航，**允许**。详 `reference/writing-style.md` §8/§9。例外：`docs/specs/`、CHANGELOG、release note、**跨 agent 的 `CONTRACTS.md`**（如 `workflows/agents/_kd_scripts/CONTRACTS.md`）。
 
 ## 产出过程（通用，非死步骤）
 
@@ -211,6 +211,6 @@ YAML 字段名、`kind`、`executor` 等是固定契约（见参考，别改）�
 - [ ] 已落盘到最终路径 + 画了草 DAG 报告（非阻塞）
 - [ ] `description` 一两句说清功能目的，且与 `orca list` 现有 workflow 有明确区别（无区别则问了用户）（H8）
 - [ ] **input 三档**：每个 input 归 Tier A 四子类之一，`description` 以 `[ask]`/`[infer]`/`[default]`/`[advanced]` 标签起头；Tier B 下沉为 setup output；Tier C 固化（`output_dir`→`$ORCA_ARTIFACTS_DIR`、`iterations` 不作 input、算法开关固化）；workflow 有 `seed` 默认 0；含 Tier B 的 agent.md 有「读代码→哨兵→fail loud」段
-- [ ] 产物无开发考古引用：grep workflow.yaml + `agents/*.md` + SKILL.md，命中 `[A-Z]+-[0-9]+`（开发编号，含单字母前缀如 U-1/P-5）/ `迁移自` / `analogue of` / `v[0-9]+ 已嵌入` / `spec-review` / 外部 plan·SPEC § 任一 = FAIL（引用真实文件章节 §N 是导航，允许；`docs/specs/`、CHANGELOG、release note 例外）
+- [ ] 产物无开发考古引用：grep workflow.yaml + `agents/*.md` + SKILL.md，命中 `[A-Z]+-[0-9]+`（开发编号，含单字母前缀如 U-1/P-5）/ `迁移自` / `analogue of` / `leaves off` / `前作` / `前身是` / `v[0-9]+ 已嵌入` / `spec-review` / `spec_review` / `plan [a-z-]+ §` / `SPEC 20[0-9]{2}-` 任一 = FAIL；宽口径兜底 grep `P[0-9]|Increment [A-Z]|code-reviewer|review #[0-9]|SR[0-9]|finalize 20[0-9]{2}|演进历史|前身是`，命中按 §1 判据删/留（引用真实文件章节 §N 是导航，允许；`docs/specs/`、CHANGELOG、release note、跨 agent `CONTRACTS.md` 例外）
 - [ ] description / agent.md 写产品说明书语气（what/input/output），无迁移出处、版本嵌入、spec issue 编号；红线用 ❌ 列举
 </success_criteria>

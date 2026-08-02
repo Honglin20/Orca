@@ -89,7 +89,7 @@ def _load_teacher_module(model_path: str, build_fn: str):
 def _export_onnx(model_path, build_fn, dummy_input, opset, out, device: str = "auto"):
     """复用 export_onnx（同 struct 测时延的导出路径）。
 
-    P7：解开原硬编码 device="cpu"，透传 device 给 export_onnx（auto/cuda/npu/cpu）。
+    解开原硬编码 device="cpu"，透传 device 给 export_onnx（auto/cuda/npu/cpu）。
     """
     here_struct = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "..", "_struct_scripts"
@@ -305,7 +305,7 @@ def teacher_setup(args) -> dict:
     out_dir = os.path.abspath(args.output_dir)
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
-    # P7：复现种子（proxy_dataset_spec 随机正态 + hook 探测 forward 用）
+    # 复现种子（proxy_dataset_spec 随机正态 + hook 探测 forward 用）
     torch.manual_seed(getattr(args, "seed", 0))
 
     # 1. 动态 import teacher + build + load ckpt
@@ -394,7 +394,7 @@ def teacher_setup(args) -> dict:
     else:
         accuracy, kind, confidence = 0.0, "unknown", "low"
 
-    # P7：teacher_accuracy 解析失败时隐性假数据（0.0 + confidence=low）→ 不能让下游 dB gap
+    # teacher_accuracy 解析失败时隐性假数据（0.0 + confidence=low）→ 不能让下游 dB gap
     # 把它当真（measure_student 算出的 dB gap 会不可信）。fail loud 开关由 --strict-accuracy
     # 控制：默认 stderr WARN + 在 teacher_meta 写 teacher_accuracy_known=False（图表 / 下游可标
     # "teacher_accuracy 未知，dB gap 不可信"）；--strict-accuracy=true 时直接 fail loud。
@@ -449,7 +449,7 @@ def teacher_setup(args) -> dict:
         "teacher_accuracy": accuracy,
         "teacher_accuracy_kind": kind,
         "accuracy_confidence": confidence,
-        "teacher_accuracy_known": accuracy_known,  # P7：dB gap 可信度的关键标记
+        "teacher_accuracy_known": accuracy_known,  # dB gap 可信度的关键标记
         "teacher_db_baseline": 0.0,  # 自身基准
         "hook_names": hook_names,
         "feature_dims": feature_dims,
@@ -506,12 +506,12 @@ def _main() -> int:
         "--device",
         default="auto",
         choices=["auto", "cuda", "npu", "cpu"],
-        help="ONNX 导出 + latency 测量设备（P7；默认 auto，与 latency_onnxrt 一致）",
+        help="ONNX 导出 + latency 测量设备（默认 auto，与 latency_onnxrt 一致）",
     )
     p.add_argument(
         "--strict-accuracy",
         action="store_true",
-        help="(P7，reserve) teacher_accuracy 解析失败时 fail loud。**当前 kd-setup agent 默认不启用**"
+        help="(reserve) teacher_accuracy 解析失败时 fail loud。**当前 kd-setup agent 默认不启用**"
         "（lenient 路径：WARN + teacher_accuracy_known=false 让下游/图表标 dB gap 不可信）；"
         "用户对 teacher 精度有硬约束时可经 inputs 暴露此开关。",
     )

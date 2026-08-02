@@ -16,7 +16,7 @@ CLI（契约 §4）::
 
     python3 profile_onnx.py --onnx <teacher.onnx> --out <profile_report.json> --topk 5 [--device cpu]
 
-device（P7 新增）：默认 "cpu"（profiling 看算子耗时，CPU 确定性最好，与 latency_onnxrt 的
+device：默认 "cpu"（profiling 看算子耗时，CPU 确定性最好，与 latency_onnxrt 的
 实测 device 解耦）；可用 --device cuda/npu 在硬件真 profile（Ascend NPU=CANNExecutionProvider）。
 
 stdout（结构化 key=value，供 agent 节点 grep）::
@@ -131,7 +131,7 @@ def profile_onnx(onnx_path: str, out: str, topk: int = 5,
     import numpy as np
     import onnxruntime as ort
 
-    # P7：device 默认 cpu（profiling 确定性最好），但允许 cuda/npu 真硬件 profile。
+    # device 默认 cpu（profiling 确定性最好），但允许 cuda/npu 真硬件 profile。
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)

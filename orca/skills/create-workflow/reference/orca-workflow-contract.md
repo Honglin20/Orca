@@ -116,7 +116,7 @@ frontmatter 识别字段：`description`、`model`、`tools`。body 即 prompt�
 
 ### Tier C 典型项（固化，绝不作 input）
 
-- `output_dir` → 走引擎注入的 `$ORCA_ARTIFACTS_DIR`（P8 接口 `<abs>/runs/<run_id>/artifacts/`，由 `orca.exec.env.build_env_overlay` 注入）；setup 节点优先 `OUTPUT_DIR="${ORCA_ARTIFACTS_DIR:-<fallback>}/"`。
+- `output_dir` → 走引擎注入的 `$ORCA_ARTIFACTS_DIR`（接口路径 `<abs>/runs/<run_id>/artifacts/`，由 `orca.exec.env.build_env_overlay` 注入）；setup 节点优先 `OUTPUT_DIR="${ORCA_ARTIFACTS_DIR:-<fallback>}/"`。
 - `iterations` → 不作 input（引擎兜底 100；长 run 用户用 `--max-iter` CLI 覆盖）。
 - 算法开关 / 预设 → 固化默认（`mode`/`recipes`/`scheme`/`bit_width(s)`/`candidate_format_space`/`bit_objective`/`granularity`/`method`/`ratio`/`low_bits`/`high_bits`/`bake`/`cage`/`proxy_dataset_spec`）。
 - 工程路径 → 落 setup output 字段向后传（`*_scripts_dir`/`kb_cache_dir`），下游 `{{ setup.output.X }}` 取（不字符串拼根）。

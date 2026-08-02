@@ -147,7 +147,7 @@ def _build_student(student_model_path: str, build_fn: str, cfg: dict) -> nn.Modu
 
 
 def _make_live_push(variant_id: str):
-    """每-epoch 把累积 loss 曲线推 web（U-4：每变体一张图，label kd-distill-<variant_id>）。
+    """每-epoch 把累积 loss 曲线推 web（每变体一张图，label kd-distill-<variant_id>）。
 
     镜像 ``run_qat.py:127-176``：lazy import ``orca.chart``，不可用→no-op；每次 try/except
     stderr-only，**永不让推图失败杀掉训练循环**。同 label+title 再推 = 刷新（dedup 语义）。
@@ -197,7 +197,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--build_fn", default="build_model",
                    help="build function name in the student module")
     p.add_argument("--variant_id", default="student",
-                   help="变体 id（实时图 label/title 参数化，U-4）")
+                   help="变体 id（实时图 label/title 参数化）")
     p.add_argument("--epochs", type=int, default=3,
                    help="number of short-training epochs (distillation is short)")
     p.add_argument("--out_ckpt", required=True,
@@ -215,9 +215,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--project_root", default=None,
                    help="用户项目根（含 train.py/model.py）；注入 sys.path 使 from model import ... 生效")
     p.add_argument("--env_anchor", default="",
-                   help="BLK-5：自举 ORCA env 的锚点路径（per-run $ORCA_ARTIFACTS_DIR，orca_env.sh 祖先）")
+                   help="自举 ORCA env 的锚点路径（per-run $ORCA_ARTIFACTS_DIR，orca_env.sh 祖先）")
     p.add_argument("--seed", type=int, default=0,
-                   help="HI-2：复现种子（训练起始 + 权重 init）")
+                   help="复现种子（训练起始 + 权重 init）")
     return p.parse_args()
 
 
@@ -227,7 +227,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
-    # BLK-5：自举 ORCA env（防 agent 拆 bash 丢 ORCA_CHART_SOCK → render_chart 推不上）。
+    # 自举 ORCA env（防 agent 拆 bash 丢 ORCA_CHART_SOCK → render_chart 推不上）。
     # env_anchor 指向 per-run $ORCA_ARTIFACTS_DIR（orca_env.sh 的祖先）。
     if args.env_anchor:
         try:
@@ -236,7 +236,7 @@ def main() -> int:
         except Exception as e:
             print(f"[train_kd] WARN: env 自举失败（实时图可能推不上）：{type(e).__name__}: {e}",
                   file=sys.stderr)
-    # HI-2：复现种子（训练起始 + build_model 权重 init）。
+    # 复现种子（训练起始 + build_model 权重 init）。
     torch.manual_seed(args.seed)
 
     student_cfg = json.loads(args.student_cfg)
@@ -330,7 +330,7 @@ def main() -> int:
         wrapper.train()
         epoch_loss = 0.0
         n_batches = 0
-        # BLK-4：不复用 placeholder dataloader（其硬编码 shape 会污染真实训练）。
+        # 不复用 placeholder dataloader（其硬编码 shape 会污染真实训练）。
         # 每 epoch 重新迭代用户 dataloader（可重复迭代的 DataLoader）；空则停（不续假数据）。
         for batch_idx, (x, y) in enumerate(iter(dl)):
             x = x.to(device)

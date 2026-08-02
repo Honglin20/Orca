@@ -60,7 +60,7 @@
 | 模式 | 含义 |
 |---|---|
 | `[A-Z]+-[0-9]+` | 开发 issue / 里程碑编号（`BLK-3` / `BUG-3` / `HI-1` / `U-1` / `LO-5` 等，大写前缀+数字；含单字母前缀如 `U-1`、`P-5`、`T-2`） |
-| `迁移自` / `analogue of` / `leaves off` / `前作` | 迁移出处 / 前身叙述 |
+| `迁移自` / `analogue of` / `leaves off` / `前作` / `前身是` | 迁移出处 / 前身叙述 |
 | `v[0-9]+ 已嵌入` | 版本考古 |
 | `spec-review` / `spec_review` | 评审记录泄漏 |
 | `plan [a-z-]+ §` | 临时 plan 文件的章节（如 `plan sprightly-questing-donut §2.3`） |

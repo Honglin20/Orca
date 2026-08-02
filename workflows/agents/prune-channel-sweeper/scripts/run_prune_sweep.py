@@ -242,7 +242,9 @@ def _apply_structured_mask(conv, keep_mask_1d) -> None:
     keep = keep_mask_1d.to(conv.weight.device).bool()
     # prune.mask 需与 weight 同 shape：扩到 (Cout, Cin, kH, kW)
     weight_mask = keep.view(-1, 1, 1, 1).expand_as(conv.weight)
-    custom = prune.CustomFromMask(module=conv, name="weight", mask=weight_mask)
+    # CustomFromMask 是 class（不是 callable 工厂），直接构造会 TypeError（签名只接 mask）。
+    # 用同名函数 prune.custom_from_mask（副作用：注册 forward_pre_hook 零掩码）。
+    prune.custom_from_mask(conv, "weight", mask=weight_mask)
 
 
 def _prune_model(model, ratio: float, criterion: str, rng: random.Random):

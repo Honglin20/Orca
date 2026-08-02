@@ -105,7 +105,7 @@ nodes:
       - knowledge_base 根目录：`$ORCA_KB_DIR`（run 启动预检已解析为绝对路径并 fail-loud；不再作 input，换项目跑可移植）
       - train_command / test_command / accuracy_target：透传给 measure_baseline.py
       - device / latency_provider / seed：透传给 measure_baseline.py
-      - **struct_scripts_dir（固化默认）**：`workflows/agents/_struct_scripts`（下游 `{{ setup.output.struct_scripts_dir }}` 取）
+      - **struct_scripts_dir（固化默认）**：`workflows/agents/_struct_scripts`（下游 {% raw %}`{{ setup.output.struct_scripts_dir }}`{% endraw %} 取）
 
       ## 执行（确定性优先，fail loud）
 

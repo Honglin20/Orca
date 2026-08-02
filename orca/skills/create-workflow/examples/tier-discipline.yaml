@@ -38,14 +38,14 @@ nodes:
       type: object
       required: [output_dir, project_root, calib_loader]
       properties:
-        output_dir: {type: string, description: "P9b 起优先 = $ORCA_ARTIFACTS_DIR（引擎注入）；setup 内 OUTPUT_DIR=\"${ORCA_ARTIFACTS_DIR:-<fallback>}/\""}
+        output_dir: {type: string, description: "优先 = $ORCA_ARTIFACTS_DIR（引擎注入）；setup 内 OUTPUT_DIR=\"${ORCA_ARTIFACTS_DIR:-<fallback>}/\""}
         project_root: {type: string, description: "Tier B 推断：从 model_path 向上找 .git/pyproject.toml；低置信 fallback=dirname(model_path)"}
         calib_loader: {type: string, description: "Tier B 推断：用户代码里返回 DataLoader 的 callable dotted-path（如 myproj.data:load_calib）；缺失走 ask-user 哨兵"}
     prompt: |
-      你是 setup（一次性）。**P9b 三档原则**示范：建 output_dir（$ORCA_ARTIFACTS_DIR 优先）+ Tier B 推断。
+      你是 setup（一次性）。**三档原则**示范：建 output_dir（$ORCA_ARTIFACTS_DIR 优先）+ Tier B 推断。
 
       ## 执行
-      1. 建输出目录：`OUTPUT_DIR="${ORCA_ARTIFACTS_DIR:-$(pwd)/llm_artifacts/run_$(date +%s)}/"`（P8 引擎注入优先）。
+      1. 建输出目录：`OUTPUT_DIR="${ORCA_ARTIFACTS_DIR:-$(pwd)/llm_artifacts/run_$(date +%s)}/"`（引擎注入优先）。
       2. 探测 `project_root`：从 `{{ inputs.model_path }}` 向上找 `.git` / `pyproject.toml`；找不到 → 取 dirname(model_path)，低置信标注（dirname 是合理 fallback，**不走哨兵**）。
       3. 探测 `calib_loader`（Tier B）：`grep -rnE 'def \w+.*DataLoader' {{ inputs.model_path }}` 找返回 DataLoader 的 callable。
          - 唯一明确 → 用 dotted-path（`module:func`）。
