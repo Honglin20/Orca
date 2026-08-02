@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-02] fix(web): 前端 fail-loud + defer-RESUME + Bug2 修复（真实审查聚类 C）
+
+四处 loader（loadRun/loadRunWithMeta/loadFull/loadEarlierChunk）HTTP 非200 / parse 失败 / `!Array.isArray(json)` → 用户可见退避重试（3 次）+ `loadError` 错误态（**= Bug2 前端根因**，非 `console.error+return` 静默）；**INV-7 defer-RESUME**：initial-load loaded/error → `sendResume since=lastSeqSeen`（subscribe forward-only，只有 resume 重放 seq>since）+ per-socket `resumeSent` dedup + reconnect 保留 `sendSubscribe` 作 server-restart lazy-mount fallback（reverse A5：`_handle_resume` handle=None short-circuit，唯一 `ensure_attached` 在 `_handle_subscribe`）；listener `useEffect` 顶层注册 + one-shot 自清；ChartRenderer `partitionCharts` cast+reject + **ErrorBoundary**（LazyChartWidget 内/ChartWidget 外）+ ChartGroup `key={chart.identity}`；`seenSeqs: Set` + `enableMapSet` O(1) 去重收进 refold；`retryCount` 进 store + 退避期 loading 叠加非阻塞 retry-banner；AbortController + `moduleEpoch` 防 A→B→A 陈旧 fetch 污染。7 轮对抗 spec review PASS + coder 两轮自我 review 0 BLOCKER，384 测试绿（31 新）。Commits: `ccb8d7a` + `6aa7d5f`。详见 [release note](../releases/2026-08-02-audit-c.md)。
+
 ## [2026-08-02] fix(run): resume/重放幂等裂缝修复（真实审查聚类 B）
 
 B2：`node_skipped` reducer 写 `context[N]=None` + live 去 `"skipped":True`（消除 live/resume 视图发散，破「单 tape 重放=同态」铁律）；B1：resume 起点改 `status∈{done,skipped}` 双判据 + 新 `replay_for_resume(tape)->(state,inputs,last_progressed)` 单 pass fallback 追踪 done/skipped（覆盖 `[node_completed/route_taken]` 与 `[node_skipped/route_taken]` 两窗口，不重跑已完成/skip 节点）；B3：删 `RunState.usage` 字段（保留 `UsageSummary` 类）+ `run_manager._extract_cost` 切 `projections.node_usage`（顺带修 `cost`→`cost_usd` 潜伏 typo）；`from_tape` 全 tape 读 4→2 真承诺；删死代码 `_inputs_from_tape`/`_find_last_done_node_name` + AST 守门。4 轮对抗 spec review 闭环 + coder 自我 review 0 BLOCKER，目标 suite 81 测试绿。Commits: `f627196` + `9fdb6b9`。详见 [release note](../releases/2026-08-02-audit-b.md)。
