@@ -4,37 +4,29 @@
 
 ---
 
-## 当前任务（2026-07-27）：五议题方案设计 —— 辩论 workflow 已出方案，待用户拍板
+## 当前任务（2026-08-03）：Orca 真实审查 5 聚类 spec→review→实现→E2E（自主驱动到零 follow-up）
 
-5 议题经 24-agent 辩论 workflow（议题1 走 4 策略×3 评委 judge panel；其余各 2 视角审视）→ 5 份综合 spec → 5 路 spec-reviewer 对抗审视。方案 + review **全 conditional-pass**（无 fail、无纯 pass，每份都被抓到实施前必修 blocker）。**待拍板 4 个 P0 后进入修订 + 实现**。
+8 维度 fan-out 审查（对抗验证）：**44 raw → 26 confirmed / 18 rejected**。5 聚类 A–E 全部 spec→对抗 review→实现→E2E，每改动 commit+changelog，零 follow-up。
 
-> ⚠️ spec 当前在**临时 job 目录**（session 级，job 清理后失效）：`/home/mozzie/.claude/jobs/305ff919/tmp/specs/`。落地时建议迁入 `docs/specs/<topic>-design-draft.md`。
+### 进度
+- **A — stop 判终态**：✅ **实现完成** commit `08cb7b0`（`_tape_probe.py` fail-loud reader + stop 守卫 + dupe-check tape 派生）。4 轮 spec review 闭环，coder 自我 review 0 BLOCKER，126 测试绿。待 E2E。
+- **B — resume 幂等**：⏳ **coder 中途中断（5h 限额 429）**，工作树有未提交半成品（orchestrator/replay/resume/state/router + test_resume_crash_window.py + test 改动，改到 spy 测试 wraps 中断）。resume agent `aa1625f022c2ae695` 接续。spec `docs/specs/2026-08-02-audit-b.md`（r4 pass，4→2 真承诺，实施序 B2→B1→B3）。
+- **C — 前端 fail-loud（Bug2）**：spec r7（round-6 evaluator 抓到 BLOCKER-1 §3/§7 矛盾 + MAJOR-3 lazy-mount 回归 reverse A5，已闭环）。⏳ **round-7 review 中断（429）**，待重跑确认零后放 coder。
+- **D — 并发守护竞态**：spec r2 round-2 **pass-with-minor-caveats**（R-1..R-4 裁定 + D-1/D-2 + C-1..C-4）。coder blocked on B（共改 run_manager.py，串行）。
+- **E — 单 tape discovery 裂缝**：spec r3 **中途中断（429，改到 §10 E9）**，resume agent `a7e06f9c771f91e07` 接续；round-2 已 conditional→pass-after-rev3。coder blocked on D + E r3。
 
-| # | 议题 | 推荐方案 | spec |
-|---|---|---|---|
-| 1 | workflow 被主 session 误停 | **S1 goal-gate 硬 Stop hook**（goal≡run 终态，零引擎/schema 改动，演进 cc_nudge.sh） | `stop/spec.md` |
-| 2 | NAS 超网可视化 | Mode A（recharts 原生通道覆盖 V5/V6/V7）→ Mode B（`custom(kind=supernet)` + 第三 tab） | `supernet-viz/spec.md` |
-| 3 | workflow 文档可视化 | ASCII/mermaid 分治，10 gap 排 P0–P7 | `doc-viz/spec.md` |
-| 4 | workflow 普适性 | 定位 B：通用编排引擎 + DL-first 模板 + 新 vertical 按需 | `generalizability/spec.md` |
-| 5 | 前端 web 优化 | Tier1 红线（ws 谎报 caught-up / viz 静默）→ Tier2 性能 → Tier3 超网 tab | `web/spec.md` |
+### 串行约束
+B/D/E coder 都改 `run_manager.py`，**串行 B→D→E**；A（cli.py）/C（前端 TS）已独立。
 
-汇总：`specs/SUMMARY.md`（完整 verdict/blocker/拍板清单）+ `specs/scout/`（4 份事实基线）。
+### 限额
+5h 限额 2026-08-03 00:27:38 重置。00:29 唤醒续跑。
 
-**待用户拍板 P0**：① stop scope 是否追加 S3 无人值守自动化 ② gen 定位 B 须产品层 ratify ③ supernet Mode A 确认砍 Plotly 走纯 recharts ④ supernet Mode B ingestor P1 参数化 vs P2 并行新 ingestor。
-
----
-
-## 待修复 bug（已定位根因，待排期）
-
-- **Bug2 web：同 session 第二次 workflow 前端空白**。根因=二次 run 首次 `/events` 拉取失败时前端零重试零报错（`workflow-store.ts:537-552` `loadRun` 非 200 仅 `console.error`+return，详情页无轮询）→ 永久空白；后端触发=`orca run` 默认路径的 `_wait_ws_autoexit`（`commands.py:1430`）只感知首个 run，R1 终态+WS 空窗即自杀、误杀复用的 R2。修向：前端 `loadRun` 加退避重试+错误态；auto-exit 感知非终态 run。动手前须确认二次 run 启动方式（持久 serve vs 每次 in-process）。（Bug A run-visibility 已于 2026-07-29 修复合并，见 CHANGELOG。）
-
----
-
-## 必读文件（开工前按需）
-
-- `specs/SUMMARY.md`（临时路径见上⚠️）
+## 必读文件
+- 本文件 + `CLAUDE.md`
+- 5 份 spec：`docs/specs/2026-08-02-audit-{a,b,c,d,e}.md`
+- A release note `docs/releases/2026-08-02-audit-a.md`
 - [CHANGELOG](CHANGELOG.md)
 
 ---
 
-> 上一任务「KD-NAS 并行 workflow 全流程」已完成（commits `e14f775`/`02b927b`/`902457d`/`ee44b4b`，CHANGELOG 2026-07-25 四条索引），已从本文件清理。
+> 注：2026-07-27「五议题辩论」spec 已随 session 清理失效且被本次真实审查证伪/重定义——**作废**。

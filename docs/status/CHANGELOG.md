@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-02] fix(in-session): stop 判 run 终态 + dupe-check 活跃判据改 tape 派生（真实审查聚类 A）
+
+stop emit `workflow_cancelled` 前先 fail-loud 扫 tape 终态，已终态幂等短路（不追加第二终态事件污染 append-only tape）；新增 `orca/iface/in_session/_tape_probe.py`（reader：JSONDecodeError→raise TapeParseError / pydantic Event 校验失败→continue+warn / 双判据 `terminal_count`+`terminal_types_seen` 多类 raise 同类重复 warn 不阻塞）；`_find_active_run_for_wf` 活跃判据 marker≡活跃→tape 终态派生，候选坏 tape warn+skip 不阻塞无关 bootstrap；stop 控制流骨架 fd 释放统一外层 finally（防双释放 hazard），Tape/EventBus 仅 emit 分支内实例化。经 4 轮对抗 spec review 闭环 + coder 自我 review 0 BLOCKER，126 测试全绿。Commit: `08cb7b0`。详见 [release note](../releases/2026-08-02-audit-a.md)。
+
 ## [2026-08-02] refactor(workflow-docs): 产物去考古化 + 写作规范固化（kd/struct/quant/nas/scripts 全面清理）
 
 把「去考古化」写作规范固化进 create-workflow skill（新建 `reference/writing-style.md` §0-§9：A 类考古禁 `[A-Z]+-[0-9]+` 编号 / analogue of / v嵌入 / 外部 plan·SPEC §；B 类真实文件导航允许 CONTRACTS §N / workflow §N / checklist item；§9 标准正则 + 宽口径 grep 兜底），SKILL.md 集成规范节 + success_criteria，memory 跨会话兜底。按规范清理全仓库产物层 A 类考古：kd 系列（含 _kd_scripts 注释）+ struct 系列（按新规范重做，去 plan §X / SPEC § ~140 处，功能字节级等价）+ quant + nas + model optimizer，保留 B 类导航。新增 prune-channel-sweep.yaml（用新规范生成的剪枝 workflow，端到端验证规范生效）。三轮 code-reviewer 独立 review（含 git diff 核查 struct 功能等价）+ 终审 review 所有实现（抓 4 项严重：prune torch API / struct {%raw%} / 盲区 / 规范三件套不自洽，全修复）。Commits: `7465231`（规范+kd/struct/scripts/prune，45 文件）+ `e546255`（quant+nas，19 文件）+ `4fcda82`（终审返工，12 文件）。详见 [release note](../releases/2026-08-02-workflow-docs-dearchaeology.md)。
