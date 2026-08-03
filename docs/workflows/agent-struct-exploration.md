@@ -52,7 +52,7 @@
 | `model_path` | A | `[ask]` | — | 模型入口（glob 推断，多候选启动前问用户） |
 | `train_command` | A | `[ask]` | — | 训练命令（原样 shell 执行，agent 不改训练逻辑） |
 | `test_command` | A | `[ask]` | "" | 评估命令（pre-trained 模式只测不训；空则跑 train_command） |
-| `target_latency_ms` | A | `[ask]` | — | 时延目标上界（业务 KPI） |
+| `target_latency_us` | A | `[ask]` | — | 时延目标上界（业务 KPI） |
 | `accuracy_target` | A | `[ask]` | "" | 精度下界（空=baseline−0.5%） |
 | `max_rounds` | A | `[ask]` | 20 | 最大探索轮数（预算闸门） |
 | `device` | C | `[advanced]` | auto | ONNX 导出+latency 测量设备（auto/cuda/npu/cpu） |
@@ -62,7 +62,7 @@
 **Tier B 下沉**（setup 节点 output_schema 字段，缺失走 ask-user 哨兵）：`project_root` / `build_fn` / `dummy_input` / `struct_scripts_dir`。
 **Tier C 固化**：`iterations`（移除，引擎兜底 100，长 run 用 `--max-iter` CLI 覆盖）、`output_dir`（走引擎注入 `$ORCA_ARTIFACTS_DIR`）。
 
-**输出**：`champion`（满足目标的最佳模型快照）+ `champions.jsonl`（冠军轨迹）+ `ledger.jsonl`（全候选账本）+ `final_report.md` + 可视化（时延-精度下探曲线、轮次账本表）。workflow 产出含 `result`、`champion`、`final_latency_ms`、`final_accuracy`。
+**输出**：`champion`（满足目标的最佳模型快照）+ `champions.jsonl`（冠军轨迹）+ `ledger.jsonl`（全候选账本）+ `final_report.md` + 可视化（时延-精度下探曲线、轮次账本表）。workflow 产出含 `result`、`champion`、`final_latency_us`、`final_accuracy`。
 
 ### 1.4 如何激活
 
@@ -78,7 +78,7 @@ orca agent-struct-exploration --inputs '{
   "model_path": "demo_target/vit_tiny_cifar100/model.py",
   "train_command": "python demo_target/vit_tiny_cifar100/train.py",
   "test_command": "python demo_target/vit_tiny_cifar100/train.py --eval",
-  "target_latency_ms": "100", "accuracy_target": "0.70", "max_rounds": "5"
+  "target_latency_us": "100", "accuracy_target": "0.70", "max_rounds": "5"
 }'
 ```
 
@@ -249,8 +249,8 @@ measure_baseline(args) -> dict
 ```python
 reduce_ledger(
     *, ledger_path, champions_path, candidate,
-    target_latency_ms, accuracy_target, max_rounds,
-    baseline_latency_ms, baseline_accuracy,
+    target_latency_us, accuracy_target, max_rounds,
+    baseline_latency_us, baseline_accuracy,
     structural_slot_ratio=0.5,        # 结构改写软配额
 ) -> dict
 # 输出：账本追加 + 全局 champion（FIFO 平局）+ route_mode(exploit/exploit) + continue_loop + terminate_reason

@@ -1,7 +1,7 @@
 """latency_onnxrt.py —— 默认 cost model。
 
 契约钉死（不变量1）：workflow 永远通过一个 ``measure(onnx_path)->float`` 函数取
-时延，**LLM 永不预测时延**。本模块是默认实现：onnxruntime 实跑取中位数 ms。
+时延，**LLM 永不预测时延**。本模块是默认实现：onnxruntime 实跑取中位数 us。
 
 被加载方式（见 struct-evaluator / setup / finalize）::
 
@@ -9,7 +9,7 @@
     spec = importlib.util.spec_from_file_location("cost_model", path)
     mod  = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
     measure = getattr(mod, func)
-    latency_ms = measure(onnx_path)
+    latency_us = measure(onnx_path)
 
 也可直接 CLI 跑（自检 / 一次性测量）::
 
@@ -44,7 +44,7 @@ def measure(
     device: str = "auto",
     seed: int = 0,
 ) -> float:
-    """实跑 ONNX 取中位数时延（ms）。边界 fail loud。
+    """实跑 ONNX 取中位数时延（us）。边界 fail loud。
 
     Args:
         onnx_path: ONNX 模型文件路径（绝对或相对 cwd）。
@@ -55,7 +55,7 @@ def measure(
         seed: dummy 输入随机种子（可复现）。
 
     Returns:
-        中位数单次推理时延（ms，浮点）。
+        中位数单次推理时延（us，浮点）。
 
     Raises:
         FileNotFoundError: onnx_path 不存在（fail loud）。
@@ -102,12 +102,12 @@ def measure(
         t = time.perf_counter()
         sess.run(None, inp)
         ts.append(time.perf_counter() - t)
-    return statistics.median(ts) * 1000.0
+    return statistics.median(ts) * 1e6
 
 
 def _main() -> int:
     parser = argparse.ArgumentParser(
-        description="默认 cost model：onnxruntime 实跑取中位数时延(ms)。"
+        description="默认 cost model：onnxruntime 实跑取中位数时延(us)。"
     )
     parser.add_argument("--onnx", required=True, help="ONNX 模型文件路径")
     parser.add_argument(
@@ -131,7 +131,7 @@ def _main() -> int:
     args = parser.parse_args()
 
     try:
-        latency_ms = measure(
+        latency_us = measure(
             args.onnx,
             runs=args.runs,
             warmup=args.warmup,
@@ -145,7 +145,7 @@ def _main() -> int:
         traceback.print_exc(file=sys.stderr)
         return 2  # 非零：fail loud（整轮停）。
     # 结构化 stdout（key=value，下游 agent bash 解析）。
-    print(f"LATENCY_MS: {latency_ms:.4f}")
+    print(f"LATENCY_US: {latency_us:.4f}")
     print(f"ONNX: {args.onnx}")
     print(f"RUNS: {args.runs}")
     print(f"WARMUP: {args.warmup}")

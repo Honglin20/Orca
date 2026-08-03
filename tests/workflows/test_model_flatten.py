@@ -629,7 +629,7 @@ def test_measure_latency_cli_cpu_fallback(tmp_path):
         capture_output=True, text=True,
     )
     assert r.returncode == 0, f"stderr={r.stderr}"
-    assert "LATENCY_MS:" in r.stdout
+    assert "LATENCY_US:" in r.stdout
     assert "LATENCY_SOURCE: cpu-fallback" in r.stdout
     assert "LATENCY_CONFIDENCE: low" in r.stdout
     # WARN 在 stderr（非用户真硬件提示）
@@ -647,25 +647,25 @@ def test_measure_latency_cli_with_provider(tmp_path):
         capture_output=True, text=True,
     )
     assert r.returncode == 0, f"stderr={r.stderr}"
-    assert "LATENCY_MS:" in r.stdout
+    assert "LATENCY_US:" in r.stdout
     assert "LATENCY_SOURCE: provider" in r.stdout
     assert "LATENCY_CONFIDENCE: high" in r.stdout
-    # LATENCY_MS 是正数（真实测量，>0）
-    line = next(l for l in r.stdout.splitlines() if l.startswith("LATENCY_MS:"))
+    # LATENCY_US 是正数（真实测量，>0）
+    line = next(l for l in r.stdout.splitlines() if l.startswith("LATENCY_US:"))
     val = float(line.split(":", 1)[1].strip())
     assert val > 0.0, f"latency 应 >0（真实测量），得到 {val}"
 
 
 def test_measure_latency_cli_fail_missing_contract(tmp_path):
-    """CLI：契约文件不存在 → exit 2 + stderr FAIL。绝不伪造（stdout 无 LATENCY_MS）。"""
+    """CLI：契约文件不存在 → exit 2 + stderr FAIL。绝不伪造（stdout 无 LATENCY_US）。"""
     r = subprocess.run(
         [sys.executable, str(MEASURE), "--contract", str(tmp_path / "nope.py")],
         capture_output=True, text=True,
     )
     assert r.returncode == 2
     assert "FileNotFoundError" in r.stderr or "不存在" in r.stderr
-    # 绝不伪造（CONTRACTS §6）：失败路径不产出 LATENCY_MS
-    assert "LATENCY_MS:" not in r.stdout
+    # 绝不伪造（CONTRACTS §6）：失败路径不产出 LATENCY_US
+    assert "LATENCY_US:" not in r.stdout
 
 
 def test_measure_latency_cli_fail_bad_provider(tmp_path):
@@ -679,8 +679,8 @@ def test_measure_latency_cli_fail_bad_provider(tmp_path):
     )
     assert r.returncode == 2
     assert "latency_provider 文件不存在" in r.stderr or "FileNotFoundError" in r.stderr
-    # 关键：不产出 LATENCY_MS（绝不伪造）
-    assert "LATENCY_MS:" not in r.stdout
+    # 关键：不产出 LATENCY_US（绝不伪造）
+    assert "LATENCY_US:" not in r.stdout
 
 
 def test_measure_latency_cli_fail_bad_provider_format(tmp_path):
@@ -694,8 +694,8 @@ def test_measure_latency_cli_fail_bad_provider_format(tmp_path):
     )
     assert r.returncode == 2
     assert "path::func" in r.stderr or "ValueError" in r.stderr
-    # 绝不伪造（CONTRACTS §6）：失败路径不产出 LATENCY_MS
-    assert "LATENCY_MS:" not in r.stdout
+    # 绝不伪造（CONTRACTS §6）：失败路径不产出 LATENCY_US
+    assert "LATENCY_US:" not in r.stdout
 
 
 def test_measure_latency_cli_fail_no_dummy_shape(tmp_path):
@@ -715,8 +715,8 @@ def test_measure_latency_cli_fail_no_dummy_shape(tmp_path):
     )
     assert r.returncode == 2
     assert "DUMMY_INPUT.shape" in r.stderr
-    # 绝不伪造（CONTRACTS §6）：失败路径不产出 LATENCY_MS
-    assert "LATENCY_MS:" not in r.stdout
+    # 绝不伪造（CONTRACTS §6）：失败路径不产出 LATENCY_US
+    assert "LATENCY_US:" not in r.stdout
 
 
 def test_measure_latency_cli_fail_provider_func_missing(tmp_path):
@@ -736,7 +736,7 @@ def test_measure_latency_cli_fail_provider_func_missing(tmp_path):
     )
     assert r.returncode == 2
     assert "无函数" in r.stderr or "AttributeError" in r.stderr
-    assert "LATENCY_MS:" not in r.stdout
+    assert "LATENCY_US:" not in r.stdout
 
 
 @needs_ort
@@ -750,7 +750,7 @@ def test_measure_latency_function_returns_dict_cpu_fallback(tmp_path):
     )
     assert res["source"] == "cpu-fallback"
     assert res["confidence"] == "low"
-    assert res["latency_ms_median"] > 0.0
+    assert res["latency_us_median"] > 0.0
     assert res["onnx_path"].endswith(".onnx")
 
 
@@ -767,7 +767,7 @@ def test_measure_latency_function_returns_dict_with_provider(tmp_path):
     )
     assert res["source"] == "provider"
     assert res["confidence"] == "high"
-    assert res["latency_ms_median"] > 0.0
+    assert res["latency_us_median"] > 0.0
 
 
 @needs_ort
@@ -799,7 +799,7 @@ def test_measure_latency_provider_without_device_kwarg(tmp_path):
     )
     assert res["source"] == "provider"
     assert res["confidence"] == "high"
-    assert res["latency_ms_median"] > 0.0
+    assert res["latency_us_median"] > 0.0
 
 
 @needs_ort
@@ -821,7 +821,7 @@ def test_measure_latency_empty_knobs_defaults(tmp_path):
     res = ml.measure_contract_latency(
         contract_path=str(p), latency_provider="", device="cpu", repeats=1,
     )
-    assert res["latency_ms_median"] > 0.0
+    assert res["latency_us_median"] > 0.0
     assert res["source"] == "cpu-fallback"
 
 
@@ -851,7 +851,7 @@ def test_measure_latency_cli_seed_opset_non_default(tmp_path):
         capture_output=True, text=True,
     )
     assert r.returncode == 0, f"stderr={r.stderr}"
-    assert "LATENCY_MS:" in r.stdout
+    assert "LATENCY_US:" in r.stdout
     assert "LATENCY_STD:" in r.stdout
     assert "ONNX:" in r.stdout
 
@@ -904,7 +904,7 @@ if __name__ == '__main__':
             latency_provider=_args.latency_provider,
             device=_args.device, seed=_args.seed, opset=_args.opset, repeats=_args.repeats,
         )
-        print(f"LATENCY_MS: {{_r['latency_ms_median']:.6f}}")
+        print(f"LATENCY_US: {{_r['latency_us_median']:.6f}}")
         print(f"LATENCY_SOURCE: {{_r['source']}}")
         print(f"LATENCY_CONFIDENCE: {{_r['confidence']}}")
     else:
@@ -915,7 +915,7 @@ if __name__ == '__main__':
 @needs_ort
 def test_flat_main_runs_correctness_and_latency_with_provider(tmp_path, monkeypatch):
     """flat 文件 __main__：ORCA_AGENT_RESOURCES 注入 + provider 默认值 → 跑出
-    CORRECTNESS: OK + LATENCY_MS + LATENCY_SOURCE: provider（统一契约 happy path）。"""
+    CORRECTNESS: OK + LATENCY_US + LATENCY_SOURCE: provider（统一契约 happy path）。"""
     # flat 文件写入 output_dir；latency_provider 默认值 = 渲染后的 provider 路径
     flat = tmp_path / "demo_flat.py"
     flat.write_text(
@@ -931,7 +931,7 @@ def test_flat_main_runs_correctness_and_latency_with_provider(tmp_path, monkeypa
     )
     assert r.returncode == 0, f"stderr={r.stderr}"
     assert "CORRECTNESS: OK" in r.stdout
-    assert "LATENCY_MS:" in r.stdout
+    assert "LATENCY_US:" in r.stdout
     assert "LATENCY_SOURCE: provider" in r.stdout
 
 
@@ -955,7 +955,7 @@ def test_flat_main_cli_overrides_empty_default(tmp_path):
         capture_output=True, text=True, env=env,
     )
     assert r.returncode == 0, f"stderr={r.stderr}"
-    assert "LATENCY_MS:" in r.stdout
+    assert "LATENCY_US:" in r.stdout
     assert "LATENCY_SOURCE: provider" in r.stdout
 
 
@@ -978,8 +978,8 @@ def test_flat_main_latency_skipped_without_resources(tmp_path, monkeypatch):
     assert r.returncode == 0, f"stderr={r.stderr}"
     assert "CORRECTNESS: OK" in r.stdout
     assert "LATENCY_SKIPPED" in r.stdout
-    # 关键：不产出 LATENCY_MS（绝不伪造）
-    assert "LATENCY_MS:" not in r.stdout
+    # 关键：不产出 LATENCY_US（绝不伪造）
+    assert "LATENCY_US:" not in r.stdout
 
 
 def test_flat_main_validate_contract_unaffected_by_main_block(tmp_path):
@@ -1005,18 +1005,18 @@ def test_flat_main_validate_contract_unaffected_by_main_block(tmp_path):
 
 
 def test_flatten_agent_md_has_latency_inputs_and_output():
-    """agent.md 必须声明 latency_provider input + baseline_latency_ms output + 跑 __main__ 的 bash。"""
+    """agent.md 必须声明 latency_provider input + baseline_latency_us output + 跑 __main__ 的 bash。"""
     text = (FLATTEN_DIR / "agent.md").read_text(encoding="utf-8")
     # input 声明 latency_provider（写入 flat 文件 __main__ 默认值）
     assert "{{ inputs.latency_provider }}" in text, (
         "agent.md 必须声明 latency_provider input（写入 flat __main__ 默认值）"
     )
-    # output schema 含 baseline_latency_ms
-    assert "baseline_latency_ms" in text, (
-        "agent.md output JSON schema 必须含 baseline_latency_ms"
+    # output schema 含 baseline_latency_us
+    assert "baseline_latency_us" in text, (
+        "agent.md output JSON schema 必须含 baseline_latency_us"
     )
-    # bash 块跑 __main__ 测 latency + 解析 LATENCY_MS
-    assert "LATENCY_MS" in text, "agent.md 必须跑 flat __main__ 并解析 LATENCY_MS"
+    # bash 块跑 __main__ 测 latency + 解析 LATENCY_US
+    assert "LATENCY_US" in text, "agent.md 必须跑 flat __main__ 并解析 LATENCY_US"
     assert 'python3 "$CONTRACT"' in text, (
         "agent.md 必须直接跑 flat 文件 __main__（python3 $CONTRACT）测 latency"
     )
@@ -1028,7 +1028,7 @@ def test_flatten_skill_md_main_template_has_latency_block():
     assert "measure_contract_latency" in text, (
         "SKILL.md __main__ 模板必须调 measure_contract_latency（统一正确性 + latency）"
     )
-    assert "LATENCY_MS" in text
+    assert "LATENCY_US" in text
     assert "LATENCY_SKIPPED" in text, (
         "SKILL.md __main__ 模板必须覆盖 helper 未找到的降级路径（不伪造）"
     )
@@ -1051,22 +1051,22 @@ def test_flatten_skill_md_verifier_checks_latency_wiring():
     )
 
 
-# ── kd-setup step2：读 flatten.output.baseline_latency_ms，不再调 tune_latency ────
+# ── kd-setup step2：读 flatten.output.baseline_latency_us，不再调 tune_latency ────
 
 
 def test_kd_setup_step2_reads_flatten_latency_not_tune():
-    """kd-setup step2：baseline_latency_ms 来源 = flatten.output（不再调 tune_latency 重测）。"""
+    """kd-setup step2：baseline_latency_us 来源 = flatten.output（不再调 tune_latency 重测）。"""
     text = (REPO / "workflows" / "agents" / "kd-setup" / "agent.md").read_text(encoding="utf-8")
-    # 读 flatten.output.baseline_latency_ms
-    assert "flatten.output.baseline_latency_ms" in text, (
-        "kd-setup step2 必须从 flatten.output.baseline_latency_ms 读 latency（下沉到 flatten）"
+    # 读 flatten.output.baseline_latency_us
+    assert "flatten.output.baseline_latency_us" in text, (
+        "kd-setup step2 必须从 flatten.output.baseline_latency_us 读 latency（下沉到 flatten）"
     )
     # step2 块：baseline 来源标注 + 不调 tune_latency
     step2_idx = text.find("## step 2")
     assert step2_idx >= 0
     step2_block = text[step2_idx:text.find("## step 3", step2_idx)]
-    assert "flatten.output" in step2_block and "baseline_latency_ms" in step2_block, (
-        "kd-setup step2 必须显式标注 baseline_latency_ms 来源 = flatten.output"
+    assert "flatten.output" in step2_block and "baseline_latency_us" in step2_block, (
+        "kd-setup step2 必须显式标注 baseline_latency_us 来源 = flatten.output"
     )
     # step2 不再调 tune_latency.py（baseline 测量已下沉）
     assert "tune_latency.py" not in step2_block, (

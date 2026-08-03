@@ -20,7 +20,7 @@ CLI：
       --ledger <path> \\
       --kb-dir <path=$ORCA_KB_DIR> \\
       --family <family> \\
-      [--target-latency-ms <float>] \\
+      [--target-latency-us <float>] \\
       [--accuracy-target <float>] \\
       [--near-band <float=1.15>]
 
@@ -126,7 +126,7 @@ def _read_ledger_direction_ids(ledger_path: str) -> tuple[set[str], list[dict[st
 
 
 def _champion_latency(rows: list[dict[str, Any]]) -> tuple[float, bool] | None:
-    """从 ledger 行找当前 champion（全局 min-latency 且 SUCCESS & met_accuracy）的 (latency_ms, met_accuracy)。
+    """从 ledger 行找当前 champion（全局 min-latency 且 SUCCESS & met_accuracy）的 (latency_us, met_accuracy)。
 
     镜像 ledger_reducer._global_best_champion 语义（§3 step 6）。无达标候选 → None。
     """
@@ -134,19 +134,19 @@ def _champion_latency(rows: list[dict[str, Any]]) -> tuple[float, bool] | None:
     for r in rows:
         if r.get("status") != "SUCCESS" or not r.get("met_accuracy"):
             continue
-        lat = r.get("latency_ms")
+        lat = r.get("latency_us")
         if not isinstance(lat, (int, float)):
             continue
-        if best is None or lat < best["latency_ms"]:
+        if best is None or lat < best["latency_us"]:
             best = r
     if best is None:
         return None
-    return float(best["latency_ms"]), bool(best.get("met_accuracy"))
+    return float(best["latency_us"]), bool(best.get("met_accuracy"))
 
 
 def compute_coverage(
     *, ledger: str, kb_dir: Path, family: str,
-    target_latency_ms: float | None, near_band: float,
+    target_latency_us: float | None, near_band: float,
 ) -> dict[str, Any]:
     """纯函数：算 direction 覆盖信号（无副作用，可单测）。"""
     catalog = _load_catalog(kb_dir, family)
@@ -161,11 +161,11 @@ def compute_coverage(
 
     # near_target：champion 已在 striking distance（latency <= target*near_band & met_accuracy）
     near_target = False
-    if target_latency_ms is not None and target_latency_ms > 0:
+    if target_latency_us is not None and target_latency_us > 0:
         champ = _champion_latency(rows)
         if champ is not None:
             champ_lat, champ_met = champ
-            near_target = champ_met and champ_lat <= target_latency_ms * near_band
+            near_target = champ_met and champ_lat <= target_latency_us * near_band
 
     return {
         "family": family,
@@ -187,7 +187,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--ledger", required=True, help="ledger.jsonl 路径")
     parser.add_argument("--kb-dir", default="", help=f"KB 根（默认 $ORCA_KB_DIR={os.environ.get('ORCA_KB_DIR','')!r}）")
     parser.add_argument("--family", required=True, help="命中族名（如 wireless_receiver）")
-    parser.add_argument("--target-latency-ms", type=float, default=None, help="目标时延（near_target 判定用；省略 → near_target=False）")
+    parser.add_argument("--target-latency-us", type=float, default=None, help="目标时延（near_target 判定用；省略 → near_target=False）")
     parser.add_argument("--accuracy-target", type=float, default=None, help="（保留，暂未参与判定）")
     parser.add_argument("--near-band", type=float, default=_NEAR_BAND_DEFAULT, help=f"near_target latency 容忍带（默认 {_NEAR_BAND_DEFAULT}）")
     args = parser.parse_args(argv)
@@ -196,7 +196,7 @@ def main(argv: list[str]) -> int:
         kb_dir = _resolve_kb_dir(args.kb_dir)
         result = compute_coverage(
             ledger=args.ledger, kb_dir=kb_dir, family=args.family,
-            target_latency_ms=args.target_latency_ms, near_band=args.near_band,
+            target_latency_us=args.target_latency_us, near_band=args.near_band,
         )
     except ValueError as e:  # KB 缺 / ledger 损 → fail loud
         print(f"[direction_coverage] FAIL: {e}", file=sys.stderr)

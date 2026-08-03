@@ -241,8 +241,8 @@ if __name__ == "__main__":
             opset=_args.opset,
             repeats=_args.repeats,
         )
-        print(f"LATENCY_MS: {_r['latency_ms_median']:.6f}")
-        print(f"LATENCY_STD: {_r['latency_ms_std']:.6f}")
+        print(f"LATENCY_US: {_r['latency_us_median']:.6f}")
+        print(f"LATENCY_STD: {_r['latency_us_std']:.6f}")
         print(f"LATENCY_SOURCE: {_r['source']}")
         print(f"LATENCY_CONFIDENCE: {_r['confidence']}")
     else:
@@ -389,14 +389,14 @@ Prioritize [BLOCKER] > [MAJOR] > [MINOR] in your review.
 
 - Step 1-3 each complete only when the teacher file's `__main__` block runs successfully (no
   import / shape / dtype / device / runtime errors). The `__main__` block must emit
-  `CORRECTNESS: OK` AND `LATENCY_MS: <number>` (the unified "run `__main__` = correctness +
+  `CORRECTNESS: OK` AND `LATENCY_US: <number>` (the unified "run `__main__` = correctness +
   latency" contract; `LATENCY_SKIPPED` only when run outside the orca context without
   `ORCA_AGENT_RESOURCES`).
 - Step 4a (`validate_contract.py` + `validate_teacher.py`) is the deterministic gate for
   contract format + derivation fidelity math; 4b is judgment-driven (axis identification +
   wrapper purity + latency `__main__` wiring).
 - The final artifact is `<output_dir>/<base_name>.py` —— agent.md reads its path into the
-  `teacher_model_path` output field and its `LATENCY_MS:` into `teacher_latency_ms`.
+  `teacher_model_path` output field and its `LATENCY_US:` into `teacher_latency_us`.
 
 ## Guidelines
 

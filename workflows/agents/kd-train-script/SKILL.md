@@ -129,13 +129,24 @@ Generation steps:
    metric formula + eval data loading, self-contained, returning
    `(value, kind)` with kind ∈ {nmse, mse, ber, snr, acc}. No dummy
    degradation — if the eval script is missing, fail loud.
+   - **归一化由 agent 完成，不要求用户脚本打印特定 key**：实际项目的 eval 可能打
+     `MSE:0.02` / `loss:...` / 表格 / 自定义指标名，甚至只打原始数值。agent 须把
+     **指标计算公式**（不是 stdout 文本）移植进 `user_eval_metric`，由它返回 `(value, kind)`；
+     train_pipeline `--mode eval` 恒打标准化的 `STUDENT_ACCURACY: {value}` +
+     `STUDENT_ACCURACY_KIND: {kind}`（与用户原指标名/打印格式无关），下游
+     （student/teacher 评估、全模型总表）一律读此标准 key。
+   - kind 映射覆盖两个方向：误差型 `nmse/mse/ber`（越低越好）/ 得分型 `snr/acc`（越高越好）；
+     自定义指标按方向归入最近的一类（如 PSNR→snr，任意 higher-better→acc）。
 6. **Pick KD terms** based on the user's task semantics (see workflow §7):
-   - Default: task loss only (`{"kd_losses": [], "weights": {}}`).
-   - Output MSE for regression tasks where teacher/student output shapes match
-     exactly.
+   - **distill 模式必须含非空 KD 项**——`build_kd_loss` 对空 `kd_losses`（且未开 ema）
+     fail loud 拒绝（纯 task loss 不是蒸馏）。默认 `{"kd_losses": ["mse"], "weights": {"mse": 1.0}}`，
+     epoch 0 即生效（默认不加 warmup block）。
+   - Output MSE (`mse`) for regression tasks where teacher/student output shapes match
+     exactly — the safe default.
    - OFD / FitNets / RKD only when `feature_hook_names()` aligns between
      teacher and student; raise loudly on mismatch, never silently drop.
-7. **Update the default `--kd_config`** in argparse to the chosen KD recipe.
+7. **Update the default `--kd_config`** in argparse to the chosen KD recipe
+   （默认 `mse`；纯 task loss 属于 `--mode teacher`，不是 distill）.
 8. **Verify CLI consistency** by running
    `python <output_dir>/train_pipeline.py --help` and confirming every flag
    in the workflow §1 stable base CLI is listed (**no `--user_*` flags**).
@@ -273,6 +284,6 @@ VERIFIER_VERDICT: all-pass
   literals, comments, and docstrings in English.
 - The generated script must be runnable standalone (outside Orca) — no
   top-level `import orca` (guarded lazy import only, for live chart push).
-- Prefer conservative KD defaults (task-loss only) when task semantics are
-  ambiguous; raise loudly on hook mismatch rather than silently dropping a
-  feature-KD term.
+- KD is mandatory in distill mode (default `mse`); empty `kd_losses` is
+  rejected fail loud. Prefer `mse` when task semantics are ambiguous; raise
+  loudly on hook mismatch rather than silently dropping a feature-KD term.

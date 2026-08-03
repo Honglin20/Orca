@@ -136,7 +136,7 @@ def _write_run(tmp_path: Path, *, n_rows: int = 3) -> tuple[Path, Path]:
     rows = [
         {"id": f"c{i}", "parent": "baseline", "path": "p", "round": i,
          "status": "SUCCESS", "tag": "structural",
-         "latency_ms": 10.0 - i, "accuracy": 0.9 + i * 0.005,
+         "latency_us": 10.0 - i, "accuracy": 0.9 + i * 0.005,
          "met_accuracy": True, "snapshot": "/x", "onnx": "/x",
          "diff_summary": "d", "hypothesis": "h"}
         for i in range(1, n_rows + 1)
@@ -144,7 +144,7 @@ def _write_run(tmp_path: Path, *, n_rows: int = 3) -> tuple[Path, Path]:
     ledger.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
     champions = tmp_path / "champions.jsonl"
     champions.write_text(
-        json.dumps({"round": 0, "id": "baseline", "latency_ms": 12.0,
+        json.dumps({"round": 0, "id": "baseline", "latency_us": 12.0,
                     "accuracy": 0.88, "snapshot": "/x"}) + "\n",
         encoding="utf-8",
     )
@@ -178,8 +178,8 @@ def test_ac5a_happy_path_emits_viz_env_status_and_empty_reasons(tmp_path, viz_ha
 
     result = viz_harness.viz_struct.render_all(
         ledger_path=str(ledger), champions_path=str(champions),
-        baseline_latency_ms=12.0, baseline_accuracy=0.88,
-        target_latency_ms=10.0, accuracy_target=0.87,
+        baseline_latency_us=12.0, baseline_accuracy=0.88,
+        target_latency_us=10.0, accuracy_target=0.87,
     )
     assert result["viz_env_status"] == "ok"
     assert set(result["charts"].keys()) == {"champion_trace", "champion_accuracy_trace", "pareto", "candidate_table"}
@@ -198,8 +198,8 @@ def test_ac5a_env_missing_when_no_env_file(tmp_path, viz_harness, clean_orca_env
 
     result = viz_harness.viz_struct.render_all(
         ledger_path=str(ledger), champions_path=str(champions),
-        baseline_latency_ms=12.0, baseline_accuracy=0.88,
-        target_latency_ms=10.0, accuracy_target=0.87,
+        baseline_latency_us=12.0, baseline_accuracy=0.88,
+        target_latency_us=10.0, accuracy_target=0.87,
     )
     assert result["viz_env_status"] == "env_missing"
     for name, info in result["charts"].items():
@@ -215,8 +215,8 @@ def test_ac5a_env_loaded_from_file_when_orca_env_sh_present(tmp_path, viz_harnes
 
     result = viz_harness.viz_struct.render_all(
         ledger_path=str(ledger), champions_path=str(champions),
-        baseline_latency_ms=12.0, baseline_accuracy=0.88,
-        target_latency_ms=10.0, accuracy_target=0.87,
+        baseline_latency_us=12.0, baseline_accuracy=0.88,
+        target_latency_us=10.0, accuracy_target=0.87,
     )
     assert result["viz_env_status"] == "env_loaded_from_file"
     # 自加载后 env 已注 → 三图正常推送
@@ -236,8 +236,8 @@ def test_ac4_socket_unreachable_reason(tmp_path, viz_harness, clean_orca_env):
 
     result = viz_harness.viz_struct.render_all(
         ledger_path=str(ledger), champions_path=str(champions),
-        baseline_latency_ms=12.0, baseline_accuracy=0.88,
-        target_latency_ms=10.0, accuracy_target=0.87,
+        baseline_latency_us=12.0, baseline_accuracy=0.88,
+        target_latency_us=10.0, accuracy_target=0.87,
     )
     for name, info in result["charts"].items():
         assert info["pushed"] is False
@@ -261,8 +261,8 @@ def test_ac4_ack_failed_reason(tmp_path, viz_harness, clean_orca_env):
         viz_harness.viz_struct._orca_render_chart = _raise
         result = viz_harness.viz_struct.render_all(
             ledger_path=str(ledger), champions_path=str(champions),
-            baseline_latency_ms=12.0, baseline_accuracy=0.88,
-            target_latency_ms=10.0, accuracy_target=0.87,
+            baseline_latency_us=12.0, baseline_accuracy=0.88,
+            target_latency_us=10.0, accuracy_target=0.87,
         )
         for name, info in result["charts"].items():
             assert info["reason"] == "ack_failed", f"msg={msg!r} name={name}: {info}"
@@ -279,8 +279,8 @@ def test_ac4_generic_reason_for_unclassified_exception(tmp_path, viz_harness, cl
 
     result = viz_harness.viz_struct.render_all(
         ledger_path=str(ledger), champions_path=str(champions),
-        baseline_latency_ms=12.0, baseline_accuracy=0.88,
-        target_latency_ms=10.0, accuracy_target=0.87,
+        baseline_latency_us=12.0, baseline_accuracy=0.88,
+        target_latency_us=10.0, accuracy_target=0.87,
     )
     for name, info in result["charts"].items():
         assert info["pushed"] is False
@@ -295,8 +295,8 @@ def test_ac4_data_insufficient_when_ledger_too_short(tmp_path, viz_harness, clea
 
     result = viz_harness.viz_struct.render_all(
         ledger_path=str(ledger), champions_path=str(champions),
-        baseline_latency_ms=12.0, baseline_accuracy=0.88,
-        target_latency_ms=10.0, accuracy_target=0.87,
+        baseline_latency_us=12.0, baseline_accuracy=0.88,
+        target_latency_us=10.0, accuracy_target=0.87,
     )
     assert result["viz_env_status"] == "env_loaded_from_file"
     for name, info in result["charts"].items():
@@ -315,8 +315,8 @@ def test_ac5a_import_failed_when_orca_chart_unavailable(tmp_path, clean_orca_env
         ledger, champions = _write_run(tmp_path)
         result = h.viz_struct.render_all(
             ledger_path=str(ledger), champions_path=str(champions),
-            baseline_latency_ms=12.0, baseline_accuracy=0.88,
-            target_latency_ms=10.0, accuracy_target=0.87,
+            baseline_latency_us=12.0, baseline_accuracy=0.88,
+            target_latency_us=10.0, accuracy_target=0.87,
         )
         assert result["viz_env_status"] == "import_failed"
         for name, info in result["charts"].items():
@@ -335,8 +335,8 @@ def test_ac5a_compare_mode_emits_compare_bar(tmp_path, viz_harness, clean_orca_e
 
     result = viz_harness.viz_struct.render_compare(
         champions_path=str(champions),
-        baseline_latency_ms=12.0, baseline_accuracy=0.88,
-        final_latency_ms=7.5, final_accuracy=0.92,
+        baseline_latency_us=12.0, baseline_accuracy=0.88,
+        final_latency_us=7.5, final_accuracy=0.92,
     )
     assert result["viz_env_status"] == "env_loaded_from_file"
     assert set(result["charts"].keys()) == {"compare_bar"}
@@ -350,7 +350,7 @@ def test_ac5a_compare_mode_emits_compare_bar(tmp_path, viz_harness, clean_orca_e
     assert stages == ["baseline", "champion", "final"]
     # final latency/accuracy 来自 CLI 参数（不替换 inline 占位）
     final_row = next(r for r in viz_harness.calls[0]["data"] if r["stage"] == "final")
-    assert final_row["latency_ms"] == 7.5
+    assert final_row["latency_us"] == 7.5
     assert final_row["accuracy"] == 0.92
 
 
@@ -361,8 +361,8 @@ def test_ac5a_compare_mode_env_missing(tmp_path, viz_harness, clean_orca_env):
 
     result = viz_harness.viz_struct.render_compare(
         champions_path=str(champions),
-        baseline_latency_ms=12.0, baseline_accuracy=0.88,
-        final_latency_ms=7.5, final_accuracy=0.92,
+        baseline_latency_us=12.0, baseline_accuracy=0.88,
+        final_latency_us=7.5, final_accuracy=0.92,
     )
     assert result["viz_env_status"] == "env_missing"
     assert result["charts"]["compare_bar"] == {"pushed": False, "reason": "env_missing"}
@@ -390,9 +390,9 @@ def test_ac5a_main_fallback_emits_generic_json_on_exception(tmp_path, viz_harnes
         "viz_struct.py",
         "--ledger", str(ledger),
         "--champions", str(champions),
-        "--baseline_latency_ms", "12.0",
+        "--baseline_latency_us", "12.0",
         "--baseline_accuracy", "0.88",
-        "--target_latency_ms", "10.0",
+        "--target_latency_us", "10.0",
         "--accuracy_target", "0.87",
     ]
     exit_code = viz_harness.viz_struct._main()
@@ -421,8 +421,8 @@ def test_main_fallback_compare_mode_emits_compare_bar_generic(tmp_path, viz_harn
     sys.argv = [
         "viz_struct.py", "--mode", "compare",
         "--champions", str(champions),
-        "--baseline_latency_ms", "12.0", "--baseline_accuracy", "0.88",
-        "--final_latency_ms", "7.5", "--final_accuracy", "0.92",
+        "--baseline_latency_us", "12.0", "--baseline_accuracy", "0.88",
+        "--final_latency_us", "7.5", "--final_accuracy", "0.92",
     ]
     exit_code = viz_harness.viz_struct._main()
     captured = capsys.readouterr()
@@ -441,8 +441,8 @@ def test_main_happy_path_default_mode_exits_zero(tmp_path, viz_harness, clean_or
     sys.argv = [
         "viz_struct.py",
         "--ledger", str(ledger), "--champions", str(champions),
-        "--baseline_latency_ms", "12.0", "--baseline_accuracy", "0.88",
-        "--target_latency_ms", "10.0", "--accuracy_target", "0.87",
+        "--baseline_latency_us", "12.0", "--baseline_accuracy", "0.88",
+        "--target_latency_us", "10.0", "--accuracy_target", "0.87",
     ]
     exit_code = viz_harness.viz_struct._main()
     captured = capsys.readouterr()
@@ -461,8 +461,8 @@ def test_main_requires_ledger_in_default_mode(capsys, tmp_path, viz_harness, cle
     sys.argv = [
         "viz_struct.py",  # default mode
         "--champions", str(champions),
-        "--baseline_latency_ms", "12.0", "--baseline_accuracy", "0.88",
-        "--target_latency_ms", "10.0", "--accuracy_target", "0.87",
+        "--baseline_latency_us", "12.0", "--baseline_accuracy", "0.88",
+        "--target_latency_us", "10.0", "--accuracy_target", "0.87",
         # 故意不传 --ledger
     ]
     with pytest.raises(SystemExit) as exc:
@@ -473,19 +473,19 @@ def test_main_requires_ledger_in_default_mode(capsys, tmp_path, viz_harness, cle
 
 
 def test_main_requires_final_values_in_compare_mode(capsys, tmp_path, viz_harness, clean_orca_env):
-    """``--mode compare`` 缺 ``--final_latency_ms`` / ``--final_accuracy`` → exit 2 + stderr 提示。"""
+    """``--mode compare`` 缺 ``--final_latency_us`` / ``--final_accuracy`` → exit 2 + stderr 提示。"""
     _, champions = _write_run(tmp_path)
     sys.argv = [
         "viz_struct.py", "--mode", "compare",
         "--champions", str(champions),
-        "--baseline_latency_ms", "12.0", "--baseline_accuracy", "0.88",
+        "--baseline_latency_us", "12.0", "--baseline_accuracy", "0.88",
         # 故意不传 --final_*
     ]
     with pytest.raises(SystemExit) as exc:
         viz_harness.viz_struct._main()
     assert exc.value.code == 2
     err = capsys.readouterr().err
-    assert "--final_latency_ms" in err
+    assert "--final_latency_us" in err
     assert "--final_accuracy" in err
 
 
@@ -509,8 +509,8 @@ def test_ac4_ack_failed_covers_eof_and_invalid_json(tmp_path, viz_harness, clean
         viz_harness.viz_struct._orca_render_chart = _raise
         result = viz_harness.viz_struct.render_all(
             ledger_path=str(ledger), champions_path=str(champions),
-            baseline_latency_ms=12.0, baseline_accuracy=0.88,
-            target_latency_ms=10.0, accuracy_target=0.87,
+            baseline_latency_us=12.0, baseline_accuracy=0.88,
+            target_latency_us=10.0, accuracy_target=0.87,
         )
         for name, info in result["charts"].items():
             assert info["reason"] == "ack_failed", f"msg={msg!r} name={name}: {info}"
@@ -535,8 +535,8 @@ def test_ac4_socket_unreachable_also_covers_connection_refused_message(
         viz_harness.viz_struct._orca_render_chart = _raise
         result = viz_harness.viz_struct.render_all(
             ledger_path=str(ledger), champions_path=str(champions),
-            baseline_latency_ms=12.0, baseline_accuracy=0.88,
-            target_latency_ms=10.0, accuracy_target=0.87,
+            baseline_latency_us=12.0, baseline_accuracy=0.88,
+            target_latency_us=10.0, accuracy_target=0.87,
         )
         for name, info in result["charts"].items():
             assert info["reason"] == "socket_unreachable", f"msg={msg!r} name={name}: {info}"
@@ -563,8 +563,8 @@ def test_ac4_half_injection_classified_as_env_missing(tmp_path, viz_harness, cle
     # 注意：env 含 SOCK → _resolve_env_status 返 ok → pusher 会真调 render_chart → 触发上面 raise
     result = viz_harness.viz_struct.render_all(
         ledger_path=str(ledger), champions_path=str(champions),
-        baseline_latency_ms=12.0, baseline_accuracy=0.88,
-        target_latency_ms=10.0, accuracy_target=0.87,
+        baseline_latency_us=12.0, baseline_accuracy=0.88,
+        target_latency_us=10.0, accuracy_target=0.87,
     )
     for name, info in result["charts"].items():
         assert info["reason"] == "env_missing", f"{name}: {info}"
@@ -577,11 +577,11 @@ def test_ac4_data_insufficient_when_all_rows_invalid(tmp_path, viz_harness, clea
     意图：覆盖 SPEC §0 背景提到的 FAIL_latency/FAIL_export 真实场景——所有行 latency 缺失。
     """
     ledger = tmp_path / "ledger.jsonl"
-    # 3 行全 FAIL_export（latency_ms=-1 → _to_float 视为有效但 lat<0 被过滤）
+    # 3 行全 FAIL_export（latency_us=-1 → _to_float 视为有效但 lat<0 被过滤）
     rows = [
         {"id": f"c{i}", "parent": "b", "path": "p", "round": i,
          "status": "FAIL_export", "tag": "structural",
-         "latency_ms": -1, "accuracy": -1,
+         "latency_us": -1, "accuracy": -1,
          "met_accuracy": False, "snapshot": "/x", "onnx": "/x",
          "diff_summary": "d", "hypothesis": "h"}
         for i in range(1, 4)
@@ -593,8 +593,8 @@ def test_ac4_data_insufficient_when_all_rows_invalid(tmp_path, viz_harness, clea
 
     result = viz_harness.viz_struct.render_all(
         ledger_path=str(ledger), champions_path=str(champions),
-        baseline_latency_ms=12.0, baseline_accuracy=0.88,
-        target_latency_ms=10.0, accuracy_target=0.87,
+        baseline_latency_us=12.0, baseline_accuracy=0.88,
+        target_latency_us=10.0, accuracy_target=0.87,
     )
     # champion_trace / pareto 因「无有效数据点」走 data_insufficient（lat<0 全过滤）；
     # candidate_table 不按 latency 过滤（表展示所有行，含 FAIL_export），仍 pushed=true。
@@ -662,8 +662,8 @@ def test_compare_bar_data_insufficient_when_champions_empty(tmp_path, viz_harnes
 
     result = viz_harness.viz_struct.render_compare(
         champions_path=str(champions),
-        baseline_latency_ms=12.0, baseline_accuracy=0.88,
-        final_latency_ms=7.5, final_accuracy=0.92,
+        baseline_latency_us=12.0, baseline_accuracy=0.88,
+        final_latency_us=7.5, final_accuracy=0.92,
     )
     assert result["charts"]["compare_bar"] == {"pushed": False, "reason": "data_insufficient"}
     assert viz_harness.calls == []
@@ -680,8 +680,8 @@ def test_main_happy_path_compare_mode_exits_zero(tmp_path, viz_harness, clean_or
     sys.argv = [
         "viz_struct.py", "--mode", "compare",
         "--champions", str(champions),
-        "--baseline_latency_ms", "12.0", "--baseline_accuracy", "0.88",
-        "--final_latency_ms", "7.5", "--final_accuracy", "0.92",
+        "--baseline_latency_us", "12.0", "--baseline_accuracy", "0.88",
+        "--final_latency_us", "7.5", "--final_accuracy", "0.92",
     ]
     exit_code = viz_harness.viz_struct._main()
     captured = capsys.readouterr()

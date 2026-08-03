@@ -1,7 +1,7 @@
 """kd_reducer.py —— KD-NAS 串行迭代确定性 reducer（KD 专版，**非复用** struct 的 ledger_reducer）。
 
 职责（SPEC §6.9 + §13 逐条对应）：
-  1. append ledger.jsonl（KD schema：variant_id/student_path/round/parent/latency_ms/
+  1. append ledger.jsonl（KD schema：variant_id/student_path/round/parent/latency_us/
      accuracy/met_*/accuracy_kind/direction_id/hypothesis/accepted_cfg/cfg_hash/ckpt/status）
   2. champion ratchet（min-latency）：准入 = ``met_latency ∧ met_accuracy ∧ status==SUCCESS``；
      准入集合内按 latency 最小 ratchet；**tie 不 ratchet（FIFO 最早）**（N12）。
@@ -28,11 +28,11 @@ CLI：
       --ledger <path> \\
       --champions <path> \\
       --candidate <json-string-or-@file> \\
-      --target_latency_ms <float> \\
+      --target_latency_us <float> \\
       --accuracy_baseline <float> \\
       --accuracy_baseline_kind <nmse|mse|ber|db|snr|acc> \\
       --max_rounds <int> \\
-      --baseline_latency_ms <float> \\
+      --baseline_latency_us <float> \\
       --baseline_accuracy <float> \\
       [--baseline_id baseline] \\
       [--baseline_snapshot ""] \\
@@ -43,7 +43,7 @@ stdout（JSON）：decide output_schema + 本轮写入证据
       "round": int,
       "continue_loop": bool,
       "champion_id": str,
-      "champion_latency_ms": float,
+      "champion_latency_us": float,
       "champion_accuracy": float,
       "terminate_reason": "target_met" | "max_rounds" | "",
       "new_champion_this_round": bool,
@@ -76,7 +76,7 @@ _LEDGER_REQUIRED = (
     "student_path",
     "round",
     "parent",
-    "latency_ms",
+    "latency_us",
     "accuracy",
     "met_latency",
     "met_accuracy",
@@ -89,7 +89,7 @@ _LEDGER_REQUIRED = (
     "status",
 )
 # champions.jsonl 每行必备字段（id==variant_id；snapshot==student_path）。
-_CHAMPIONS_REQUIRED = ("round", "id", "latency_ms", "accuracy", "delta_vs_baseline_ms", "snapshot")
+_CHAMPIONS_REQUIRED = ("round", "id", "latency_us", "accuracy", "delta_vs_baseline_us", "snapshot")
 
 # status 合法值（KD 串行版）。FAIL_build = gen_student validate_contract 3-strike（catch 协议）。
 _LEDGER_STATUS = {"SUCCESS", "FAIL_latency", "FAIL_train", "FAIL_build"}
@@ -162,8 +162,8 @@ def _validate_candidate(cand: dict[str, Any]) -> None:
         raise ValueError(
             f"candidate.status 非法：{cand['status']!r}；合法：{sorted(_LEDGER_STATUS)}"
         )
-    # latency_ms / accuracy 可为 -1（FAIL_train / FAIL_build 未训练或未测），允许数字。
-    for k in ("latency_ms", "accuracy"):
+    # latency_us / accuracy 可为 -1（FAIL_train / FAIL_build 未训练或未测），允许数字。
+    for k in ("latency_us", "accuracy"):
         if not isinstance(cand[k], (int, float)) or isinstance(cand[k], bool):
             raise ValueError(f"candidate.{k} 必须是数字（得到 {type(cand[k]).__name__}）")
     if not isinstance(cand["round"], int) or isinstance(cand["round"], bool):
@@ -209,22 +209,22 @@ def _min_latency_champion(
     best = admitted[0]
     for e in admitted[1:]:
         # 严格小于才替换：tie 不 ratchet（保 FIFO 最早，N12）。
-        if e["latency_ms"] < best["latency_ms"]:
+        if e["latency_us"] < best["latency_us"]:
             best = e
     return best
 
 
 def _to_champion_record(
-    champion_entry: dict[str, Any], baseline_latency_ms: float
+    champion_entry: dict[str, Any], baseline_latency_us: float
 ) -> dict[str, Any]:
     """把 ledger entry（或 baseline seed）规范成 champions.jsonl 一行。"""
     return {
         "round": champion_entry.get("round", 0),
         "id": champion_entry.get("variant_id", champion_entry.get("id", "baseline")),
-        "latency_ms": champion_entry["latency_ms"],
+        "latency_us": champion_entry["latency_us"],
         "accuracy": champion_entry["accuracy"],
-        "delta_vs_baseline_ms": round(
-            champion_entry["latency_ms"] - baseline_latency_ms, 6
+        "delta_vs_baseline_us": round(
+            champion_entry["latency_us"] - baseline_latency_us, 6
         ),
         "snapshot": champion_entry.get("student_path", champion_entry.get("snapshot", "")),
     }
@@ -235,11 +235,11 @@ def reduce_ledger(
     ledger_path: str,
     champions_path: str,
     candidate: dict[str, Any],
-    target_latency_ms: float,
+    target_latency_us: float,
     accuracy_baseline: float,
     accuracy_baseline_kind: str,
     max_rounds: int,
-    baseline_latency_ms: float,
+    baseline_latency_us: float,
     baseline_accuracy: float,
     baseline_id: str = "baseline",
     baseline_snapshot: str = "",
@@ -263,25 +263,25 @@ def reduce_ledger(
         baseline_champion = {
             "round": 0,
             "id": baseline_id,
-            "latency_ms": baseline_latency_ms,
+            "latency_us": baseline_latency_us,
             "accuracy": baseline_accuracy,
-            "delta_vs_baseline_ms": 0,
+            "delta_vs_baseline_us": 0,
             "snapshot": baseline_snapshot,
         }
 
     cur_champion = _current_champion(champions) or baseline_champion
 
     # ── Step 1：构造 ledger entry，timestamp=null（脚本禁用 Date.now）──────
-    delta_latency_ms = round(candidate["latency_ms"] - cur_champion["latency_ms"], 6)
+    delta_latency_us = round(candidate["latency_us"] - cur_champion["latency_us"], 6)
 
     ledger_entry: dict[str, Any] = {
         "variant_id": candidate["variant_id"],
         "student_path": candidate["student_path"],
         "round": candidate["round"],
         "parent": candidate["parent"],
-        "latency_ms": candidate["latency_ms"],
+        "latency_us": candidate["latency_us"],
         "accuracy": candidate["accuracy"],
-        "delta_latency_ms": delta_latency_ms,
+        "delta_latency_us": delta_latency_us,
         "met_latency": candidate["met_latency"],
         "met_accuracy": candidate["met_accuracy"],
         "accuracy_kind": candidate["accuracy_kind"],
@@ -307,7 +307,7 @@ def reduce_ledger(
     new_champion_this_round = (
         best_after.get("variant_id", best_after.get("id")) == candidate["variant_id"]
         and candidate["variant_id"] != prev_best_id
-        and candidate["latency_ms"] < cur_champion["latency_ms"]
+        and candidate["latency_us"] < cur_champion["latency_us"]
     )
 
     if best_after.get("variant_id", best_after.get("id")) != prev_best_id:
@@ -318,11 +318,11 @@ def reduce_ledger(
     # champion 规范成 champions.jsonl 一行。
     if champion_now.get("id") == baseline_champion.get("id") and not champions:
         champion_record = baseline_champion
-    elif "delta_vs_baseline_ms" in champion_now and "snapshot" in champion_now:
+    elif "delta_vs_baseline_us" in champion_now and "snapshot" in champion_now:
         # 已是 champions 格式（如 cur_champion 来自 champions.jsonl）。
         champion_record = champion_now
     else:
-        champion_record = _to_champion_record(champion_now, baseline_latency_ms)
+        champion_record = _to_champion_record(champion_now, baseline_latency_us)
 
     # ── Step 3：continue_loop 决策（驱动 DAG 循环）──────────────────────────
     round_num = candidate["round"]
@@ -357,7 +357,7 @@ def reduce_ledger(
         "round": round_num,
         "continue_loop": continue_loop,
         "champion_id": champion_record["id"],
-        "champion_latency_ms": champion_record["latency_ms"],
+        "champion_latency_us": champion_record["latency_us"],
         "champion_accuracy": champion_record["accuracy"],
         "terminate_reason": terminate_reason,
         "new_champion_this_round": new_champion_this_round,
@@ -365,7 +365,7 @@ def reduce_ledger(
         "champions_entry_written": champions_written,
         "candidate_id": candidate["variant_id"],
         "status_final": candidate["status"],
-        "delta_latency_ms": delta_latency_ms,
+        "delta_latency_us": delta_latency_us,
     }
 
 
@@ -386,7 +386,7 @@ def _main() -> int:
         required=True,
         help="本轮 candidate JSON 字符串 / 文件路径 / @file",
     )
-    parser.add_argument("--target_latency_ms", type=float, required=True)
+    parser.add_argument("--target_latency_us", type=float, required=True)
     parser.add_argument("--accuracy_baseline", type=float, required=True)
     parser.add_argument(
         "--accuracy_baseline_kind",
@@ -394,7 +394,7 @@ def _main() -> int:
         help="nmse/mse/ber/db（越低越好）| snr/acc（越高越好）",
     )
     parser.add_argument("--max_rounds", type=int, required=True)
-    parser.add_argument("--baseline_latency_ms", type=float, required=True)
+    parser.add_argument("--baseline_latency_us", type=float, required=True)
     parser.add_argument("--baseline_accuracy", type=float, required=True)
     parser.add_argument(
         "--baseline_id", default="baseline", help="baseline id（与 champions seed 对齐）"
@@ -417,11 +417,11 @@ def _main() -> int:
             ledger_path=args.ledger,
             champions_path=args.champions,
             candidate=candidate,
-            target_latency_ms=args.target_latency_ms,
+            target_latency_us=args.target_latency_us,
             accuracy_baseline=args.accuracy_baseline,
             accuracy_baseline_kind=args.accuracy_baseline_kind,
             max_rounds=args.max_rounds,
-            baseline_latency_ms=args.baseline_latency_ms,
+            baseline_latency_us=args.baseline_latency_us,
             baseline_accuracy=args.baseline_accuracy,
             baseline_id=args.baseline_id,
             baseline_snapshot=args.baseline_snapshot,

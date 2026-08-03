@@ -39,7 +39,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
   "project_root": "<推断绝对路径>",
   "model_name": "<base_name>",
   "flat_artifacts_dir": "<output_dir> 绝对路径",
-  "baseline_latency_ms": <float>,
+  "baseline_latency_us": <float>,
   "viz_status": {<dumb copy 自 viz_kd_stage --stage baseline stdout>}
 }
 ```
@@ -48,7 +48,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 - 字段名严格匹配；`baseline_contract_path` 必须是文件实际存在的绝对路径；
 - `model_name` 即 `<base_name>`（推断规则见 SKILL.md Step 4）；
 - `project_root` 填**推断所得的绝对路径**（低置信时追加 ` (low-confidence: ...)` 后缀，仍是单字符串）；
-- `baseline_latency_ms` = `__main__` 测出的默认 cfg latency 中位数（下方 bash 块解析 `LATENCY_MS:`）；
+- `baseline_latency_us` = `__main__` 测出的默认 cfg latency 中位数（下方 bash 块解析 `LATENCY_US:`）；
 - `viz_status` 必填（缺 → output_schema fail loud）；失败值（env_missing/generic 等）合法产出，sidecar 失败不阻断主流程。
 
 ## 输入
@@ -80,8 +80,8 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 
 ## 末尾硬校验 执行：validate_contract.py 必 PASS + `__main__` 测 baseline latency（fail loud，否则不返 JSON）
 
-整段**原样照抄**为一条 bash 调用。`VALIDATION: PASS` + `LATENCY_MS:` 都拿到才能继续组 JSON；
-`VALIDATION: FAIL` → 读 `FAIL_REASON:` 行修 flat 文件重跑；`__main__` 跑挂 / 无 `LATENCY_MS:` →
+整段**原样照抄**为一条 bash 调用。`VALIDATION: PASS` + `LATENCY_US:` 都拿到才能继续组 JSON；
+`VALIDATION: FAIL` → 读 `FAIL_REASON:` 行修 flat 文件重跑；`__main__` 跑挂 / 无 `LATENCY_US:` →
 读 stderr 修 flat 文件 `__main__` 块（含 latency 测量）重跑。
 
 ```bash
@@ -110,13 +110,13 @@ if [ $RUN_RC -ne 0 ]; then
   echo "flat 文件 __main__ FAIL (rc=$RUN_RC) —— 读 stderr 修 __main__ 块（correctness + latency），不返 JSON"
   exit 2
 fi
-BASELINE_LATENCY_MS="$(echo "$RUN_OUT" | grep '^LATENCY_MS:' | awk '{print $2}')"
-if [ -z "$BASELINE_LATENCY_MS" ]; then
-  echo "FAIL: __main__ 未产出 LATENCY_MS（LATENCY_SKIPPED？ORCA_AGENT_RESOURCES 未注入？onnxruntime 缺失？）"
+BASELINE_LATENCY_US="$(echo "$RUN_OUT" | grep '^LATENCY_US:' | awk '{print $2}')"
+if [ -z "$BASELINE_LATENCY_US" ]; then
+  echo "FAIL: __main__ 未产出 LATENCY_US（LATENCY_SKIPPED？ORCA_AGENT_RESOURCES 未注入？onnxruntime 缺失？）"
   exit 2
 fi
 LATENCY_SOURCE="$(echo "$RUN_OUT" | grep '^LATENCY_SOURCE:' | awk '{print $2}')"
-echo "PARSED: BASELINE_LATENCY_MS=$BASELINE_LATENCY_MS LATENCY_SOURCE=$LATENCY_SOURCE"
+echo "PARSED: BASELINE_LATENCY_US=$BASELINE_LATENCY_US LATENCY_SOURCE=$LATENCY_SOURCE"
 ```
 
 ## 末尾 web 推送 执行：viz_kd_stage --stage baseline（dumb copy stdout 进 viz_status）
@@ -128,7 +128,7 @@ echo "PARSED: BASELINE_LATENCY_MS=$BASELINE_LATENCY_MS LATENCY_SOURCE=$LATENCY_S
 KD_SCRIPTS_DIR="$(python3 -c "import os;print(os.path.abspath('workflows/agents/_kd_scripts'))")"
 VIZ_STDOUT=$(python3 "$KD_SCRIPTS_DIR/viz_kd_stage.py" \
   --stage baseline \
-  --baseline_latency_ms "$BASELINE_LATENCY_MS" \
+  --baseline_latency_us "$BASELINE_LATENCY_US" \
   --env_anchor "${ORCA_ARTIFACTS_DIR:-}" \
   || true)
 VIZ_STATUS=$(python3 -c "
@@ -141,7 +141,7 @@ echo "VIZ_STATUS_JSON=$VIZ_STATUS"
 
 ## 产出 JSON（最终消息）
 
-把 `CONTRACT` / project_root / base_name / output_dir / BASELINE_LATENCY_MS / VIZ_STATUS_JSON 填进模板，**只**返回这个 JSON：
+把 `CONTRACT` / project_root / base_name / output_dir / BASELINE_LATENCY_US / VIZ_STATUS_JSON 填进模板，**只**返回这个 JSON：
 
 ```json
 {
@@ -149,12 +149,12 @@ echo "VIZ_STATUS_JSON=$VIZ_STATUS"
   "project_root": "<PROJECT_ROOT 绝对路径>",
   "model_name": "<base_name>",
   "flat_artifacts_dir": "<output_dir 绝对路径>",
-  "baseline_latency_ms": <BASELINE_LATENCY_MS float>,
+  "baseline_latency_us": <BASELINE_LATENCY_US float>,
   "viz_status": <VIZ_STATUS_JSON 对象原样嵌入>
 }
 ```
 
 - `baseline_contract_path` 必须是 validate_contract.py 校验 PASS 的同一文件路径；
-- `baseline_latency_ms` 必须是上面 `__main__` 跑出的 `LATENCY_MS:` 裸数值（float，不编造）；
+- `baseline_latency_us` 必须是上面 `__main__` 跑出的 `LATENCY_US:` 裸数值（float，不编造）；
 - `viz_status` 必须是 JSON 对象（dumb copy 自 viz_kd_stage stdout，失败值合法不阻断）；
-- 路由恒到 `setup`（setup 透传 `baseline_latency_ms` + 透传 `baseline_contract_path` 进下游 + seed baseline champion）。
+- 路由恒到 `setup`（setup 透传 `baseline_latency_us` + 透传 `baseline_contract_path` 进下游 + seed baseline champion）。

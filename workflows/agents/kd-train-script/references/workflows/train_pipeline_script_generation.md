@@ -102,7 +102,7 @@ Stable base CLI (must remain in every generated `train_pipeline.py`):
 - `--student_model_path PATH` (required in distill & eval mode) — student `.py` path.
 - `--teacher_cache PATH` (required in distill mode) — `teacher_cache.pt` from
   `teacher_setup.py`.
-- `--kd_config JSON` (default `{"kd_losses": [], "weights": {}}`; distill mode).
+- `--kd_config JSON` (default `{"kd_losses": ["mse"], "weights": {"mse": 1.0}}`; distill mode — non-empty kd_losses mandatory).
 - `--student_ckpt PATH` (required in eval mode) — student checkpoint to load.
 - `--accuracy_baseline FLOAT` (eval mode) — absolute accuracy baseline (user-provided).
 - `--accuracy_baseline_kind STR` (eval mode) — nmse/mse/ber/db (lower better) |
@@ -353,9 +353,11 @@ enable all by default):
 - EMA (mean teacher) is enabled only when `kd_config["ema"]` is true; decay
   defaults to 0.999 (mean-teacher convention).
 
-The default `--kd_config` is `{"kd_losses": [], "weights": {}}` (task-loss
-only) — the agent picks KD terms based on the user's task, never invents
-exotic KD recipes.
+The default `--kd_config` is `{"kd_losses": ["mse"], "weights": {"mse": 1.0}}`
+— distill mode **must** carry a non-empty KD term; `build_kd_loss` rejects
+empty `kd_losses` (with ema off) fail loud (pure task loss is not distillation;
+that belongs to `--mode teacher`). The agent picks KD terms based on the user's
+task, never invents exotic KD recipes.
 
 ### 8. Path Handling
 

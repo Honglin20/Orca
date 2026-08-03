@@ -1,11 +1,11 @@
 """viz_struct.py —— 结构性探索可视化，经 orca.chart render_chart 推送（无 HTML 产物）。
 
 四张图（default 模式），每张都有可读的语义：
-    1. Champion Trace            —— line（候选灰点 + champion 轨迹，hue=series，x=round/y=latency_ms）
+    1. Champion Trace            —— line（候选灰点 + champion 轨迹，hue=series，x=round/y=latency_us）
     2. Champion Trace — Accuracy —— line（accuracy 维度 champion 轨迹；对齐「降时延保精度」）
     3. Latency-Accuracy Pareto   —— pareto（hue=status，min/max 方向；过滤 accuracy 缺失/负数行
                                     防 y=0 伪点）
-    4. Candidate Ledger          —— table（逐候选短字段：round/id/tag/latency_ms/
+    4. Candidate Ledger          —— table（逐候选短字段：round/id/tag/latency_us/
                                     accuracy/status/one_line_summary；长 hypothesis 留 hover）
 
 ``--mode compare``：仅推终态 Baseline vs Champion vs Final bar（final 两值经 CLI 参数传入）。
@@ -37,14 +37,14 @@ CLI：
     # 默认模式（四图）
     viz_struct.py \\
       --ledger <path> --champions <path> \\
-      --baseline_latency_ms <f> --baseline_accuracy <f> \\
-      --target_latency_ms <f> --accuracy_target <f>
+      --baseline_latency_us <f> --baseline_accuracy <f> \\
+      --target_latency_us <f> --accuracy_target <f>
 
     # compare 模式（仅终态对比 bar）
     viz_struct.py --mode compare \\
       --champions <path> \\
-      --baseline_latency_ms <f> --baseline_accuracy <f> \\
-      --final_latency_ms <f> --final_accuracy <f>
+      --baseline_latency_us <f> --baseline_accuracy <f> \\
+      --final_latency_us <f> --final_accuracy <f>
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ _MIN_ROWS = 2
 _LABEL = "struct-explore"
 
 # ledger.jsonl 每行必备字段（缺则该行从可视化剔除，仅 WARN）。
-_LEDGER_REQUIRED = ("id", "parent", "path", "round", "status", "latency_ms", "accuracy")
+_LEDGER_REQUIRED = ("id", "parent", "path", "round", "status", "latency_us", "accuracy")
 
 
 # ── I/O ──────────────────────────────────────────────────────────────────────
@@ -110,7 +110,7 @@ def _read_jsonl(path: str, *, kind: str) -> list[dict[str, Any]]:
 
 
 def _to_float(v: Any) -> float | None:
-    """宽松转 float；None / 非数字 / NaN → None（FAIL_export 时 latency_ms=-1 也视为缺失）。"""
+    """宽松转 float；None / 非数字 / NaN → None（FAIL_export 时 latency_us=-1 也视为缺失）。"""
     if v is None or isinstance(v, bool):
         return None
     if isinstance(v, (int, float)):
@@ -192,9 +192,9 @@ def _resolve_env_status(anchor_path: Path) -> str:
 def _push_champion_trace(
     ledger: list[dict[str, Any]],
     champions: list[dict[str, Any]],
-    target_latency_ms: float,
+    target_latency_us: float,
 ) -> tuple[bool, str]:
-    """图1：候选灰点 + champion 轨迹（running min）。x=ledger 行序, y=latency_ms, hue=series。
+    """图1：候选灰点 + champion 轨迹（running min）。x=ledger 行序, y=latency_us, hue=series。
 
     返回 ``(pushed, reason)``：成功 ``(True, "")``；数据不足
     ``(False, "data_insufficient")``；``render_chart`` 异常 ``(False, _classify_exc(e))``。
@@ -205,7 +205,7 @@ def _push_champion_trace(
 
     data: list[dict[str, Any]] = []
     for i, e in enumerate(ledger):
-        lat = _to_float(e.get("latency_ms"))
+        lat = _to_float(e.get("latency_us"))
         if lat is None or lat < 0:
             continue
         rnd = e.get("round")
@@ -214,7 +214,7 @@ def _push_champion_trace(
             rnd = i
         data.append({
             "round": rnd,
-            "latency_ms": lat,
+            "latency_us": lat,
             "series": "candidate",
             "candidate_id": str(e.get("id", "?")),
             "status": str(e.get("status", "?")),
@@ -225,7 +225,7 @@ def _push_champion_trace(
         cid = ch.get("id")
         if cid is None:
             continue
-        lat = _to_float(ch.get("latency_ms"))
+        lat = _to_float(ch.get("latency_us"))
         if lat is None:
             continue
         acc = _to_float(ch.get("accuracy"))
@@ -234,7 +234,7 @@ def _push_champion_trace(
             rnd = id_to_idx.get(cid, -1)
         data.append({
             "round": rnd,
-            "latency_ms": lat,
+            "latency_us": lat,
             "series": "champion",
             "candidate_id": str(cid),
             "status": "champion",
@@ -252,13 +252,13 @@ def _push_champion_trace(
             label=_LABEL,
             title="Champion Trace",
             x="round",
-            y="latency_ms",
+            y="latency_us",
             hue="series",
             x_label="搜索轮次（round）",
-            y_label="时延 (ms)",
+            y_label="时延 (us)",
             caption=(
                 f"每轮候选的实测时延（灰点）与 champion 轨迹（彩线，running min）。"
-                f" 目标时延 {target_latency_ms} ms（champion 轨迹越靠近/低于此线越达标）。"
+                f" 目标时延 {target_latency_us} us（champion 轨迹越靠近/低于此线越达标）。"
             ),
         )
     except Exception as e:
@@ -352,7 +352,7 @@ def _push_champion_accuracy_trace(
 
 def _push_pareto(
     ledger: list[dict[str, Any]],
-    baseline_latency_ms: float,
+    baseline_latency_us: float,
     baseline_accuracy: float,
     accuracy_target: float,
 ) -> tuple[bool, str]:
@@ -370,7 +370,7 @@ def _push_pareto(
     data: list[dict[str, Any]] = []
     none_acc_skipped = 0
     for e in ledger:
-        lat = _to_float(e.get("latency_ms"))
+        lat = _to_float(e.get("latency_us"))
         if lat is None or lat < 0:
             continue
         acc = _to_float(e.get("accuracy"))
@@ -379,7 +379,7 @@ def _push_pareto(
             none_acc_skipped += 1
             continue
         data.append({
-            "latency_ms": lat,
+            "latency_us": lat,
             "accuracy": acc,
             "status": str(e.get("status", "?")),
             "candidate_id": str(e.get("id", "?")),
@@ -400,16 +400,16 @@ def _push_pareto(
             data=data,
             label=_LABEL,
             title="Latency-Accuracy Pareto",
-            x="latency_ms",
+            x="latency_us",
             y="accuracy",
             hue="status",
             pareto_x_direction="min",
             pareto_y_direction="max",
-            x_label="时延 (ms，越低越好)",
+            x_label="时延 (us，越低越好)",
             y_label="精度 (越高越好)",
             caption=(
                 f"每候选实测 latency vs accuracy；Pareto 前沿（双最优）。"
-                f" baseline={baseline_latency_ms} ms / acc={baseline_accuracy}；"
+                f" baseline={baseline_latency_us} us / acc={baseline_accuracy}；"
                 f" 目标 acc≥{accuracy_target}。"
             ),
         )
@@ -422,7 +422,7 @@ def _push_pareto(
 def _push_candidate_table(ledger: list[dict[str, Any]]) -> tuple[bool, str]:
     """逐候选明细表。
 
-    列 = round / id / tag / latency_ms / accuracy / status / one_line_summary。
+    列 = round / id / tag / latency_us / accuracy / status / one_line_summary。
     - **短字段** 留 table 列；长 hypothesis 不直接展（前端 wrap 难读），放 hover 字段
       ``hypothesis``（前端 tooltip）。
     - one_line_summary = 取 hypothesis / diff_summary 首行 / 截断前 80 字符。
@@ -450,7 +450,7 @@ def _push_candidate_table(ledger: list[dict[str, Any]]) -> tuple[bool, str]:
             "round": rnd,
             "id": str(e.get("id", "?")),
             "tag": str(e.get("tag", "")),
-            "latency_ms": _to_float(e.get("latency_ms")),
+            "latency_us": _to_float(e.get("latency_us")),
             "accuracy": _to_float(e.get("accuracy")),
             "status": str(e.get("status", "?")),
             "one_line_summary": _one_line(hypo),
@@ -466,7 +466,7 @@ def _push_candidate_table(ledger: list[dict[str, Any]]) -> tuple[bool, str]:
             data=rows,
             label=_LABEL,
             title="Candidate Ledger (per change)",
-            columns=["round", "id", "tag", "latency_ms", "accuracy", "status", "one_line_summary"],
+            columns=["round", "id", "tag", "latency_us", "accuracy", "status", "one_line_summary"],
             caption=(
                 "每候选一行（短字段）。hypothesis 完整文本在 hover 字段；"
                 "accuracy 为 None/-1 = 未训练（FAIL_latency/FAIL_export）。"
@@ -483,9 +483,9 @@ def _push_candidate_table(ledger: list[dict[str, Any]]) -> tuple[bool, str]:
 
 def _push_compare_bar(
     champions: list[dict[str, Any]],
-    baseline_latency_ms: float,
+    baseline_latency_us: float,
     baseline_accuracy: float,
-    final_latency_ms: float,
+    final_latency_us: float,
     final_accuracy: float,
 ) -> tuple[bool, str]:
     """终态对比 bar：baseline / champion / final 的 latency，accuracy 写进每行。
@@ -502,13 +502,13 @@ def _push_compare_bar(
         print("[viz_struct] WARN: 跳过 compare_bar：champions.jsonl 为空（全失败 run）", file=sys.stderr)
         return False, "data_insufficient"
     last_champ = champions[-1]
-    champ_lat = _to_float(last_champ.get("latency_ms"))
+    champ_lat = _to_float(last_champ.get("latency_us"))
     champ_acc = _to_float(last_champ.get("accuracy"))
     rows = [
-        {"stage": "baseline", "latency_ms": baseline_latency_ms, "accuracy": baseline_accuracy},
+        {"stage": "baseline", "latency_us": baseline_latency_us, "accuracy": baseline_accuracy},
         # champion latency/accuracy 缺失时 None（前端 tooltip 自洽，不写 0 误导成「不可能的优秀值」）。
-        {"stage": "champion", "latency_ms": champ_lat, "accuracy": champ_acc},
-        {"stage": "final", "latency_ms": final_latency_ms, "accuracy": final_accuracy},
+        {"stage": "champion", "latency_us": champ_lat, "accuracy": champ_acc},
+        {"stage": "final", "latency_us": final_latency_us, "accuracy": final_accuracy},
     ]
     try:
         _orca_render_chart(
@@ -517,10 +517,10 @@ def _push_compare_bar(
             title="Baseline vs Champion vs Final",
             data=rows,
             x="stage",
-            y="latency_ms",
+            y="latency_us",
             hue="stage",
             x_label="阶段",
-            y_label="时延 (ms)",
+            y_label="时延 (us)",
             caption="baseline → champion（搜索中 running min）→ final（从头重训后）的时延对比",
         )
     except Exception as e:
@@ -536,9 +536,9 @@ def render_all(
     *,
     ledger_path: str,
     champions_path: str,
-    baseline_latency_ms: float,
+    baseline_latency_us: float,
     baseline_accuracy: float,
-    target_latency_ms: float,
+    target_latency_us: float,
     accuracy_target: float,
 ) -> dict[str, Any]:
     """推四图到 Orca Web 面板。返回 stdout JSON schema。
@@ -577,12 +577,12 @@ def render_all(
         return results
 
     pushers = [
-        ("champion_trace", lambda: _push_champion_trace(ledger, champions, target_latency_ms)),
+        ("champion_trace", lambda: _push_champion_trace(ledger, champions, target_latency_us)),
         (
             "champion_accuracy_trace",
             lambda: _push_champion_accuracy_trace(ledger, champions, accuracy_target),
         ),
-        ("pareto", lambda: _push_pareto(ledger, baseline_latency_ms, baseline_accuracy, accuracy_target)),
+        ("pareto", lambda: _push_pareto(ledger, baseline_latency_us, baseline_accuracy, accuracy_target)),
         ("candidate_table", lambda: _push_candidate_table(ledger)),
     ]
     for name, fn in pushers:
@@ -600,9 +600,9 @@ def render_all(
 def render_compare(
     *,
     champions_path: str,
-    baseline_latency_ms: float,
+    baseline_latency_us: float,
     baseline_accuracy: float,
-    final_latency_ms: float,
+    final_latency_us: float,
     final_accuracy: float,
 ) -> dict[str, Any]:
     """``--mode compare``：仅推终态 Baseline vs Champion vs Final bar。
@@ -630,9 +630,9 @@ def render_compare(
 
     pushed, reason = _push_compare_bar(
         champions,
-        baseline_latency_ms=baseline_latency_ms,
+        baseline_latency_us=baseline_latency_us,
         baseline_accuracy=baseline_accuracy,
-        final_latency_ms=final_latency_ms,
+        final_latency_us=final_latency_us,
         final_accuracy=final_accuracy,
     )
     results["charts"]["compare_bar"] = {"pushed": pushed, "reason": reason}
@@ -669,13 +669,13 @@ def _main() -> int:
     )
     parser.add_argument("--ledger", required=False, help="ledger.jsonl 路径（default 模式必填）")
     parser.add_argument("--champions", required=True, help="champions.jsonl 路径")
-    parser.add_argument("--baseline_latency_ms", type=float, required=True)
+    parser.add_argument("--baseline_latency_us", type=float, required=True)
     parser.add_argument("--baseline_accuracy", type=float, required=True)
-    # default 模式必填（target_latency_ms / accuracy_target）。
-    parser.add_argument("--target_latency_ms", type=float, required=False)
+    # default 模式必填（target_latency_us / accuracy_target）。
+    parser.add_argument("--target_latency_us", type=float, required=False)
     parser.add_argument("--accuracy_target", type=float, required=False)
     # compare 模式必填（final 实测两值，经 CLI 参数传入）。
-    parser.add_argument("--final_latency_ms", type=float, required=False)
+    parser.add_argument("--final_latency_us", type=float, required=False)
     parser.add_argument("--final_accuracy", type=float, required=False)
     args = parser.parse_args()
 
@@ -685,7 +685,7 @@ def _main() -> int:
     if compare_mode:
         missing = [
             n for n, v in (
-                ("--final_latency_ms", args.final_latency_ms),
+                ("--final_latency_us", args.final_latency_us),
                 ("--final_accuracy", args.final_accuracy),
             ) if v is None
         ]
@@ -695,7 +695,7 @@ def _main() -> int:
         missing = [
             n for n, v in (
                 ("--ledger", args.ledger),
-                ("--target_latency_ms", args.target_latency_ms),
+                ("--target_latency_us", args.target_latency_us),
                 ("--accuracy_target", args.accuracy_target),
             ) if v is None
         ]
@@ -706,18 +706,18 @@ def _main() -> int:
         if compare_mode:
             result = render_compare(
                 champions_path=args.champions,
-                baseline_latency_ms=args.baseline_latency_ms,
+                baseline_latency_us=args.baseline_latency_us,
                 baseline_accuracy=args.baseline_accuracy,
-                final_latency_ms=args.final_latency_ms,
+                final_latency_us=args.final_latency_us,
                 final_accuracy=args.final_accuracy,
             )
         else:
             result = render_all(
                 ledger_path=args.ledger,
                 champions_path=args.champions,
-                baseline_latency_ms=args.baseline_latency_ms,
+                baseline_latency_us=args.baseline_latency_us,
                 baseline_accuracy=args.baseline_accuracy,
-                target_latency_ms=args.target_latency_ms,
+                target_latency_us=args.target_latency_us,
                 accuracy_target=args.accuracy_target,
             )
     except Exception as e:

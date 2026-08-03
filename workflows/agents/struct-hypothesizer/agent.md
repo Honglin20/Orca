@@ -19,8 +19,8 @@ tools: [bash, read, glob, grep]
   ```bash
   tail -n 1 "{{ setup.output.champions_path }}"
   ```
-  从最近一行取 `latency_ms` / `accuracy` / `snapshot`（= 父 model.py）。
-- 时延缺口 = `{{ inputs.target_latency_ms }} − champion.latency_ms`。
+  从最近一行取 `latency_us` / `accuracy` / `snapshot`（= 父 model.py）。
+- 时延缺口 = `{{ inputs.target_latency_us }} − champion.latency_us`。
 - 精度下限：`{{ setup.output.accuracy_target }}`。
 - 族：`{{ setup.output.family }}`。
 - 配额参数：`structural_slot_ratio=0.5`（已固化）。
@@ -36,7 +36,7 @@ python3 "{{ setup.output.struct_scripts_dir }}/direction_coverage.py" \
   --ledger "{{ setup.output.ledger_path }}" \
   --kb-dir "$ORCA_KB_DIR" \
   --family "{{ setup.output.family }}" \
-  --target-latency-ms "{{ inputs.target_latency_ms }}"
+  --target-latency-us "{{ inputs.target_latency_us }}"
 ```
 从 stdout JSON 读：`catalog`（本族结构方向目录，如 wireless 的 D0-D21）/ `untried`（**未试过**的方向 id）
 / `all_exhausted`（catalog 是否全试过）/ `near_target`（champion 是否已在目标带）/ `catalog_size`。
@@ -69,7 +69,7 @@ python3 "{{ setup.output.struct_scripts_dir }}/direction_coverage.py" \
    - catalog 外的真·新颖结构（KB 未收录）允许，`direction_id` 填 `"off_catalog:<一句话指纹>"`，
      但**优先**用尽 catalog 内方向再考虑。
 4. **配额意识**：若近期轮的 `structural` tag 占比低于 `structural_slot_ratio`，优先提宏观结构方向。
-5. **不变量1**：你可以写"预计能降时延，因为…"的**定性**理由，但**绝不**输出具体时延数字（ms）。
+5. **不变量1**：你可以写"预计能降时延，因为…"的**定性**理由，但**绝不**输出具体时延数字（us）。
 
 ## 与账本的交互
 

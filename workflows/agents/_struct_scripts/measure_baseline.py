@@ -125,9 +125,9 @@ def measure_baseline(args) -> dict:
     import inspect
     device = getattr(args, "device", "auto")
     if "device" in inspect.signature(measure).parameters:
-        latency_ms = float(measure(onnx_path, device=device))
+        latency_us = float(measure(onnx_path, device=device))
     else:
-        latency_ms = float(measure(onnx_path))
+        latency_us = float(measure(onnx_path))
 
     # 3. baseline accuracy（pre-trained 只测 / 给定 / 训练）
     if args.test_command and args.test_command.strip():
@@ -151,9 +151,9 @@ def measure_baseline(args) -> dict:
     champion = {
         "round": 0,
         "id": "baseline",
-        "latency_ms": latency_ms,
+        "latency_us": latency_us,
         "accuracy": acc,
-        "delta_vs_baseline_ms": 0.0,
+        "delta_vs_baseline_us": 0.0,
         "snapshot": model_abs,
     }
     Path(champions_path).write_text(json.dumps(champion) + "\n", encoding="utf-8")
@@ -163,7 +163,7 @@ def measure_baseline(args) -> dict:
     return {
         "status": "ok",
         "onnx_path": onnx_path,
-        "baseline_latency_ms": latency_ms,
+        "baseline_latency_us": latency_us,
         "baseline_accuracy": acc,
         "accuracy_target": target,
         "accuracy_mode": mode,

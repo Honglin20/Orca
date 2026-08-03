@@ -285,8 +285,9 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--kd_config",
-        default='{"kd_losses": [], "weights": {}}',
-        help="[distill mode] JSON kd_config for kd.compose.build_kd_loss",
+        default='{"kd_losses": ["mse"], "weights": {"mse": 1.0}}',
+        help="[distill mode] JSON kd_config for kd.compose.build_kd_loss；"
+             "distill 必须含非空 kd_losses（默认 mse），空 kd_losses 会被 fail loud 拒绝",
     )
 
     # --- eval mode -------------------------------------------------------

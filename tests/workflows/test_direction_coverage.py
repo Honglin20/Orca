@@ -70,7 +70,7 @@ def test_empty_ledger_all_untried(tmp_path):
     ledger = _write_ledger(tmp_path, [])
     r = dc.compute_coverage(
         ledger=str(ledger), kb_dir=KB, family="wireless_receiver",
-        target_latency_ms=None, near_band=1.15,
+        target_latency_us=None, near_band=1.15,
     )
     assert r["catalog_size"] == 22
     assert len(r["untried"]) == 22
@@ -87,7 +87,7 @@ def test_tried_directions_subtract_from_untried(tmp_path):
     ])
     r = dc.compute_coverage(
         ledger=str(ledger), kb_dir=KB, family="wireless_receiver",
-        target_latency_ms=None, near_band=1.15,
+        target_latency_us=None, near_band=1.15,
     )
     assert set(r["tried"]) == {"D0", "D5", "off_catalog:novel_mamba"}
     assert r["tried_in_catalog"] == ["D0", "D5"]
@@ -104,7 +104,7 @@ def test_old_ledger_without_direction_id_backward_compat(tmp_path):
     ])
     r = dc.compute_coverage(
         ledger=str(ledger), kb_dir=KB, family="wireless_receiver",
-        target_latency_ms=None, near_band=1.15,
+        target_latency_us=None, near_band=1.15,
     )
     assert r["tried"] == []
     assert len(r["untried"]) == 22
@@ -116,7 +116,7 @@ def test_all_exhausted_when_catalog_fully_covered(tmp_path):
     ledger = _write_ledger(tmp_path, [{"direction_id": d} for d in all_ids])
     r = dc.compute_coverage(
         ledger=str(ledger), kb_dir=KB, family="wireless_receiver",
-        target_latency_ms=None, near_band=1.15,
+        target_latency_us=None, near_band=1.15,
     )
     assert r["untried"] == []
     assert r["all_exhausted"] is True
@@ -128,7 +128,7 @@ def test_single_layer_family_all_exhausted_false(tmp_path):
     ledger = _write_ledger(tmp_path, [])
     r = dc.compute_coverage(
         ledger=str(ledger), kb_dir=KB, family="cnn",
-        target_latency_ms=None, near_band=1.15,
+        target_latency_us=None, near_band=1.15,
     )
     assert r["catalog_size"] == 0
     assert r["all_exhausted"] is False
@@ -140,11 +140,11 @@ def test_single_layer_family_all_exhausted_false(tmp_path):
 def test_near_target_true_when_champion_within_band(tmp_path):
     dc = _load_dc()
     ledger = _write_ledger(tmp_path, [
-        {"status": "SUCCESS", "met_accuracy": True, "latency_ms": 0.018},  # ≤ 0.02*1.15=0.023
+        {"status": "SUCCESS", "met_accuracy": True, "latency_us": 0.018},  # ≤ 0.02*1.15=0.023
     ])
     r = dc.compute_coverage(
         ledger=str(ledger), kb_dir=KB, family="wireless_receiver",
-        target_latency_ms=0.02, near_band=1.15,
+        target_latency_us=0.02, near_band=1.15,
     )
     assert r["near_target"] is True
 
@@ -152,11 +152,11 @@ def test_near_target_true_when_champion_within_band(tmp_path):
 def test_near_target_false_when_champion_outside_band(tmp_path):
     dc = _load_dc()
     ledger = _write_ledger(tmp_path, [
-        {"status": "SUCCESS", "met_accuracy": True, "latency_ms": 0.05},  # > 0.02*1.15
+        {"status": "SUCCESS", "met_accuracy": True, "latency_us": 0.05},  # > 0.02*1.15
     ])
     r = dc.compute_coverage(
         ledger=str(ledger), kb_dir=KB, family="wireless_receiver",
-        target_latency_ms=0.02, near_band=1.15,
+        target_latency_us=0.02, near_band=1.15,
     )
     assert r["near_target"] is False
 
@@ -165,11 +165,11 @@ def test_near_target_false_without_champion(tmp_path):
     """无达标 champion（FAIL 行 / 无 SUCCESS）→ near_target False。"""
     dc = _load_dc()
     ledger = _write_ledger(tmp_path, [
-        {"status": "FAIL_latency", "met_accuracy": False, "latency_ms": 0.1},
+        {"status": "FAIL_latency", "met_accuracy": False, "latency_us": 0.1},
     ])
     r = dc.compute_coverage(
         ledger=str(ledger), kb_dir=KB, family="wireless_receiver",
-        target_latency_ms=0.02, near_band=1.15,
+        target_latency_us=0.02, near_band=1.15,
     )
     assert r["near_target"] is False
 

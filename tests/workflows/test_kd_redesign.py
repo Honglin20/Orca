@@ -132,7 +132,7 @@ def test_pick_variant_fail_latency_retried_when_target_changes(tmp_path):
     vsha = "abc"
     pid = "prov|1234"
     rows = [{"variant_id": "v1", "variant_sha256": vsha, "latency_provider_id": pid,
-             "status": "FAIL_latency", "target_latency_ms": 8.0}]
+             "status": "FAIL_latency", "target_latency_us": 8.0}]
     # 同 target(8) → done（跳过）
     assert is_variant_done(rows, 8.0, pid, vsha) is True
     # 改 target(5) → 不 done（重试）
@@ -148,8 +148,8 @@ def test_pick_variant_target_monotonic_success(tmp_path):
     vsha = "abc"; pid = "p|1"
     ckpt = tmp_path / "c.pt"; ckpt.write_bytes(b"x" * 10)
     rows = [{"variant_id": "v1", "variant_sha256": vsha, "latency_provider_id": pid,
-             "status": "SUCCESS", "latency_ms_median": 7.0, "ckpt": str(ckpt),
-             "target_latency_ms": 10.0}]
+             "status": "SUCCESS", "latency_us_median": 7.0, "ckpt": str(ckpt),
+             "target_latency_us": 10.0}]
     assert is_variant_done(rows, 8.0, pid, vsha) is True   # 7.0 ≤ 8 → skip
     assert is_variant_done(rows, 5.0, pid, vsha) is False  # 7.0 > 5 → 重试
 
@@ -162,7 +162,7 @@ def test_pick_variant_done_requires_sha_and_provider_match(tmp_path):
     from kd_common import is_variant_done
     ckpt = tmp_path / "c.pt"; ckpt.write_bytes(b"x" * 10)
     rows = [{"variant_id": "v1", "variant_sha256": "oldsha", "latency_provider_id": "p|1",
-             "status": "SUCCESS", "latency_ms_median": 5.0, "ckpt": str(ckpt)}]
+             "status": "SUCCESS", "latency_us_median": 5.0, "ckpt": str(ckpt)}]
     assert is_variant_done(rows, 8.0, "p|1", "newsha") is False   # sha 不匹配
     assert is_variant_done(rows, 8.0, "p|2", "oldsha") is False   # provider 不匹配
 
@@ -200,7 +200,7 @@ def test_tune_minimal_shrink_stops_at_first_crossing(tmp_path, monkeypatch):
     res = tune.tune_latency(
         variant_path=str(KBDIR / "spt_t1.py"), build_fn="build_model",
         dummy_input='{"shape":[1,4,48,64,1],"dtype":"float32"}', knobs=knobs,
-        target_latency_ms=2.0, latency_provider="mock::measure",
+        target_latency_us=2.0, latency_provider="mock::measure",
         artifacts_dir=str(tmp_path), max_measurements=40, measure_repeats=1,
         device="cpu", seed=0, opset=17,
     )
@@ -221,7 +221,7 @@ def test_tune_fail_latency_when_unreachable(tmp_path, monkeypatch):
     res = tune.tune_latency(
         variant_path=str(KBDIR / "spt_t1.py"), build_fn="build_model",
         dummy_input='{"shape":[1,4,48,64,1],"dtype":"float32"}', knobs=knobs,
-        target_latency_ms=0.5, latency_provider="mock::measure",
+        target_latency_us=0.5, latency_provider="mock::measure",
         artifacts_dir=str(tmp_path), max_measurements=40, measure_repeats=1,
         device="cpu", seed=0, opset=17,
     )
@@ -334,7 +334,7 @@ def test_gate_all_fail_latency_incremental_ledger_and_manifest(tmp_path):
 
     common = [
         "--receiver_dir", str(recv), "--ledger", str(ledger),
-        "--target_latency_ms", "0.5", "--latency_provider", str(prov) + "::measure",
+        "--target_latency_us", "0.5", "--latency_provider", str(prov) + "::measure",
         "--artifacts_dir", str(artifacts), "--kd_scripts_dir", str(KD),
         "--accuracy_baseline", "0.02",
         "--latency_tune_budget", "5", "--measure_repeats", "1",
@@ -354,7 +354,7 @@ def test_gate_all_fail_latency_incremental_ledger_and_manifest(tmp_path):
     assert {r["variant_id"] for r in rows} == {"v_a", "v_b"}
     assert all(r["status"] == "FAIL_latency" for r in rows)
     assert all(r["variant_sha256"] and r["latency_provider_id"] for r in rows), "缺跨 run 身份字段"
-    assert all(r["target_latency_ms"] == 0.5 for r in rows)
+    assert all(r["target_latency_us"] == 0.5 for r in rows)
     # manifest 是空 list（v_a/v_b 全 FAIL_latency，无 ACCEPTED）
     assert json.loads(manifest.read_text(encoding="utf-8")) == []
 
@@ -385,7 +385,7 @@ def test_gate_all_accepted_collects_into_manifest(tmp_path):
     manifest = artifacts / "gate_manifest.json"
     common = [
         "--receiver_dir", str(recv), "--ledger", str(ledger),
-        "--target_latency_ms", "1000000.0",  # 极高 → latency 永远 < target → 全 ACCEPTED
+        "--target_latency_us", "1000000.0",  # 极高 → latency 永远 < target → 全 ACCEPTED
         "--latency_provider", str(prov) + "::measure",
         "--artifacts_dir", str(artifacts), "--kd_scripts_dir", str(KD),
         "--accuracy_baseline", "0.02",
@@ -409,9 +409,9 @@ def test_gate_all_accepted_collects_into_manifest(tmp_path):
     for vid in ("v_a", "v_b"):
         e = by_id[vid]
         for field in ("variant_id", "variant_path", "variant_sha256", "accepted_cfg",
-                       "latency_ms_median", "latency_ms_std", "build_fn", "dummy_input", "knobs"):
+                       "latency_us_median", "latency_us_std", "build_fn", "dummy_input", "knobs"):
             assert field in e, f"manifest[{vid}] 缺 {field}"
-        assert e["latency_ms_median"] > 0
+        assert e["latency_us_median"] > 0
 
 
 # ── v2 gpu_probe.py：并发公式 + round-robin + fail-soft + 契约校验 ─────────────────
@@ -568,7 +568,7 @@ def test_train_pool_empty_manifest_emits_success(tmp_path):
         "--project_root", str(tmp_path),
         "--accuracy_baseline", "0.02",
         "--latency_provider", str(tmp_path / "p.py::m"),
-        "--target_latency_ms", "8",
+        "--target_latency_us", "8",
         "--concurrency", "1", "--device_plan", '[""]',
         "--per_variant_vram_bytes", "0",
         "--train_pipeline_path", str(tmp_path / "train_pipeline.py"),
@@ -616,7 +616,7 @@ def test_train_pool_main_injects_orca_kd_scripts_dir(tmp_path, monkeypatch):
         "--train_pipeline_path", str(tmp_path / "train_pipeline.py"),
         "--accuracy_baseline", "0.02",
         "--latency_provider", str(tmp_path / "p.py::m"),
-        "--target_latency_ms", "8",
+        "--target_latency_us", "8",
         "--concurrency", "1", "--device_plan", '[""]',
         "--per_variant_vram_bytes", "0",
     ])
@@ -668,7 +668,7 @@ def test_kd_dag_flatten_setup_gate_train():
 def test_kd_dag_teacher_gen_and_train_script_gen_output_schemas():
     """v4：teacher-gen + train-script-gen 节点 output_schema 必须暴露下游消费的字段。
 
-    teacher-gen → setup 消费 teacher_model_path + teacher_latency_ms；
+    teacher-gen → setup 消费 teacher_model_path + teacher_latency_us；
     train-script-gen → setup 消费 train_pipeline_path + train 消费 train_pipeline_path。
     """
     from orca.compile.parser import load_workflow
@@ -677,7 +677,7 @@ def test_kd_dag_teacher_gen_and_train_script_gen_output_schemas():
     # teacher_gen output_schema（节点名用下划线——Jinja 标识符不能含连字符）
     tgen = by_name["teacher_gen"]
     tgen_props = set(tgen.output_schema.get("properties", {}).keys())
-    for f in ("teacher_model_path", "teacher_latency_ms", "project_root",
+    for f in ("teacher_model_path", "teacher_latency_us", "project_root",
               "depth_axis", "width_axis"):
         assert f in tgen_props, f"teacher_gen output_schema 缺 {f}"
     # train_script_gen output_schema
@@ -689,8 +689,8 @@ def test_kd_dag_teacher_gen_and_train_script_gen_output_schemas():
 @pytest.mark.skip(reason="obsolete after 2026-08-03 kd-nas serial rework: yaml drops batch gate/train/select nodes in favor of serial gen_student/distill/decide loop")
 def test_kd_dag_flatten_output_schema_contract():
     """flatten output_schema 必须暴露 baseline_contract_path / project_root / model_name /
-    flat_artifacts_dir / baseline_latency_ms 五字段——kd-setup step1/step2 直接取
-    baseline_contract_path + project_root + baseline_latency_ms（latency 下沉到 flatten __main__）。"""
+    flat_artifacts_dir / baseline_latency_us 五字段——kd-setup step1/step2 直接取
+    baseline_contract_path + project_root + baseline_latency_us（latency 下沉到 flatten __main__）。"""
     from orca.compile.parser import load_workflow
     wf = load_workflow(REPO / "workflows" / "kd-nas.yaml")
     flatten = wf.nodes[0]
@@ -698,11 +698,11 @@ def test_kd_dag_flatten_output_schema_contract():
     props = set(flatten.output_schema.get("properties", {}).keys())
     required = set(flatten.output_schema.get("required", []))
     for f in ("baseline_contract_path", "project_root", "model_name",
-              "flat_artifacts_dir", "baseline_latency_ms"):
+              "flat_artifacts_dir", "baseline_latency_us"):
         assert f in props, f"flatten output_schema 缺 {f}"
         assert f in required, f"flatten output_schema 应 required {f}（下游 setup 强依赖）"
-    # baseline_latency_ms 是 number（latency 实测值，不编造）
-    assert props and flatten.output_schema["properties"]["baseline_latency_ms"]["type"] == "number"
+    # baseline_latency_us 是 number（latency 实测值，不编造）
+    assert props and flatten.output_schema["properties"]["baseline_latency_us"]["type"] == "number"
 
 
 @pytest.mark.skip(reason="obsolete after 2026-08-03 kd-nas serial rework: yaml drops batch gate/train/select nodes in favor of serial gen_student/distill/decide loop")
@@ -725,7 +725,7 @@ def test_kd_inputs_slammed_remove_advanced_defaults():
         f"kd-nas.yaml inputs 含已下沉 input {sorted(leaked)}（应改为下游 CLI 默认）。"
     )
     # 必填 Tier A 不动（v4: teacher_train_command 改名 user_train_script）
-    for must in ("user_train_script", "target_latency_ms",
+    for must in ("user_train_script", "target_latency_us",
                  "accuracy_baseline", "accuracy_baseline_kind",
                  "baseline_model_path", "latency_provider"):
         assert must in actual, f"必填 input {must} 被误删"
@@ -795,7 +795,7 @@ def test_wf_outputs_renders_when_gate_routes_to_end():
     # 模拟 setup + gate 都跑了，train 被路由跳过（outputs_acc 无 train key）
     setup_output = {
         "ledger_path": "/tmp/ledger.jsonl", "kd_artifacts_dir": "/tmp/art/",
-        "baseline_latency_ms": 7.3, "concurrency": 2,
+        "baseline_latency_us": 7.3, "concurrency": 2,
         "device_plan": '["cuda:0","cuda:1"]',
         "teacher_model_path": "/tmp/art/teacher_model.py",
     }
@@ -806,7 +806,7 @@ def test_wf_outputs_renders_when_gate_routes_to_end():
         "gate": {"output": gate_output},
         # 注意：train key 不存在（gate 路由到 $end，train 从未 visit）
     }
-    inputs = {"target_latency_ms": "8.0", "latency_provider": "p::m"}
+    inputs = {"target_latency_us": "8.0", "latency_provider": "p::m"}
     from orca.run.step import _build_ctx
     ctx = _build_ctx(wf, outputs_acc, inputs, "test-run")
     # 每个 wf.outputs 模板必须能渲染（不 raise UndefinedError / ExecError）
@@ -840,7 +840,7 @@ def test_train_pool_worker_exception_handler_row_schema(tmp_path, monkeypatch):
     # 一个 ACCEPTED manifest entry（模拟 gate 产出）
     entry = {
         "variant_id": "v_x", "variant_path": "/tmp/v_x.py", "variant_sha256": "abc",
-        "accepted_cfg": {"num_blocks": 2}, "latency_ms_median": 5.0, "latency_ms_std": 0.1,
+        "accepted_cfg": {"num_blocks": 2}, "latency_us_median": 5.0, "latency_us_std": 0.1,
         "build_fn": "build_model", "dummy_input": {"shape": [1], "dtype": "float32"},
         "knobs": {"num_blocks": {"default": 3, "min": 1, "step": -1, "leverage": "high"}},
     }
@@ -874,7 +874,7 @@ def test_train_pool_worker_exception_handler_row_schema(tmp_path, monkeypatch):
         "--project_root", str(artifacts),
         "--accuracy_baseline", "0.02",
         "--latency_provider", str(artifacts / "p.py::m"),
-        "--target_latency_ms", "8",
+        "--target_latency_us", "8",
         "--concurrency", "1", "--device_plan", '[""]',
         "--per_variant_vram_bytes", "0",
         "--train_pipeline_path", str(artifacts / "train_pipeline.py"),
@@ -888,8 +888,8 @@ def test_train_pool_worker_exception_handler_row_schema(tmp_path, monkeypatch):
     # CONTRACTS §5 必备字段
     required_fields = {
         "variant_id", "variant_path", "variant_sha256", "accepted_cfg", "cfg_hash",
-        "status", "latency_ms_median", "latency_ms_std", "accuracy", "accuracy_kind",
-        "met_latency", "met_accuracy", "ckpt", "target_latency_ms", "accuracy_baseline",
+        "status", "latency_us_median", "latency_us_std", "accuracy", "accuracy_kind",
+        "met_latency", "met_accuracy", "ckpt", "target_latency_us", "accuracy_baseline",
         "latency_provider_id", "run_id", "fail_reason",
     }
     missing = required_fields - set(row.keys())
@@ -921,7 +921,7 @@ def test_gate_all_empty_kb_warns_not_silent(tmp_path):
     r = subprocess.run([
         sys.executable, str(KD / "gate_all.py"),
         "--receiver_dir", str(recv), "--ledger", str(ledger),
-        "--target_latency_ms", "5.0", "--latency_provider", str(prov) + "::measure",
+        "--target_latency_us", "5.0", "--latency_provider", str(prov) + "::measure",
         "--artifacts_dir", str(artifacts), "--kd_scripts_dir", str(KD),
         "--manifest_out", str(manifest),
     ], capture_output=True, text=True)
@@ -957,7 +957,7 @@ def test_gate_all_tune_failure_marks_fail_train(tmp_path):
     r = subprocess.run([
         sys.executable, str(KD / "gate_all.py"),
         "--receiver_dir", str(recv), "--ledger", str(ledger),
-        "--target_latency_ms", "5.0",
+        "--target_latency_us", "5.0",
         "--latency_provider", str(tmp_path / "nonexistent.py::measure"),  # 文件不存在
         "--artifacts_dir", str(artifacts), "--kd_scripts_dir", str(KD),
         "--manifest_out", str(manifest),
@@ -1004,7 +1004,7 @@ def test_gate_all_dispatch_failure_marks_fail_train(tmp_path, monkeypatch):
             return 0, (
                 "TUNE_STATUS: ACCEPTED\n"
                 "ACCEPTED_CFG: {\"num_blocks\": 3}\n"
-                "LATENCY_MS_MEDIAN: 2.5\nLATENCY_MS_STD: 0.1\n"
+                "LATENCY_US_MEDIAN: 2.5\nLATENCY_US_STD: 0.1\n"
             ), ""
         # 第 2 次：distill_dispatch rc!=0
         return 1, "", "simulated dispatch crash"
@@ -1015,7 +1015,7 @@ def test_gate_all_dispatch_failure_marks_fail_train(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", [
         "gate_all.py",
         "--receiver_dir", str(recv), "--ledger", str(ledger),
-        "--target_latency_ms", "5.0", "--latency_provider", str(tmp_path / "p.py::m"),
+        "--target_latency_us", "5.0", "--latency_provider", str(tmp_path / "p.py::m"),
         "--artifacts_dir", str(artifacts), "--kd_scripts_dir", str(KD),
         "--manifest_out", str(manifest),
         "--measure_repeats", "1", "--latency_tune_budget", "3",
@@ -1049,7 +1049,7 @@ def test_gate_all_variant_import_exception_caught(tmp_path):
     r = subprocess.run([
         sys.executable, str(KD / "gate_all.py"),
         "--receiver_dir", str(recv), "--ledger", str(ledger),
-        "--target_latency_ms", "5.0", "--latency_provider", str(tmp_path / "p.py::m"),
+        "--target_latency_us", "5.0", "--latency_provider", str(tmp_path / "p.py::m"),
         "--artifacts_dir", str(artifacts), "--kd_scripts_dir", str(KD),
         "--manifest_out", str(manifest),
     ], capture_output=True, text=True)
@@ -1070,7 +1070,7 @@ def _train_one_entry():
     """构造一个 ACCEPTED manifest entry（_train_one 单测用）。"""
     return {
         "variant_id": "v_ok", "variant_path": "/fake/v_ok.py", "variant_sha256": "abc",
-        "accepted_cfg": {"num_blocks": 2}, "latency_ms_median": 5.0, "latency_ms_std": 0.1,
+        "accepted_cfg": {"num_blocks": 2}, "latency_us_median": 5.0, "latency_us_std": 0.1,
         "build_fn": "build_model", "dummy_input": {"shape": [1], "dtype": "float32"},
         "knobs": {"num_blocks": {"default": 3, "min": 1, "step": -1, "leverage": "high"}},
     }
@@ -1079,7 +1079,7 @@ def _train_one_entry():
 def _train_one_ctx(tmp_path):
     """构造 _train_one 的 ctx（_main 内部 ctx 字段全集）。"""
     return {
-        "target_latency_ms": "8.0",
+        "target_latency_us": "8.0",
         "provider_id": "prov|1234",
         "accuracy_baseline": "0.02",
         "accuracy_baseline_kind": "nmse",
@@ -1132,7 +1132,7 @@ def test_train_one_success_row_full_fields(tmp_path, monkeypatch):
     assert row["fail_reason"] == ""
     # CONTRACTS §5 必备字段
     for f in ("variant_id", "variant_path", "variant_sha256", "accepted_cfg", "cfg_hash",
-              "latency_ms_median", "latency_ms_std", "target_latency_ms", "accuracy_baseline",
+              "latency_us_median", "latency_us_std", "target_latency_us", "accuracy_baseline",
               "latency_provider_id", "run_id"):
         assert f in row, f"SUCCESS 行缺 {f}"
     # v4：device=""（device_plan [""] fail-soft）必须归一化为 "cpu" 传给 train_pipeline.py
@@ -1420,16 +1420,16 @@ def test_kd_train_agent_md_passes_receiver_dir():
     assert "setup.output.receiver_dir" in text, "kd-train/agent.md 应从 setup.output.receiver_dir 取"
 
 
-def test_kd_train_agent_md_passes_baseline_latency_ms():
-    """review #6-1：kd-train/agent.md 必须显式传 --baseline_latency_ms（latency bar baseline 参考行）。
+def test_kd_train_agent_md_passes_baseline_latency_us():
+    """review #6-1：kd-train/agent.md 必须显式传 --baseline_latency_us（latency bar baseline 参考行）。
 
     与 --receiver_dir 守门对称：防 agent.md 这行被漏写（HI-11 schema-chain test 只校验引用字段
-    在 output_schema 内，不防「整段 flag 被删」）。来源链 setup.output.baseline_latency_ms 必填。
+    在 output_schema 内，不防「整段 flag 被删」）。来源链 setup.output.baseline_latency_us 必填。
     """
     text = (REPO / "workflows" / "agents" / "kd-train" / "agent.md").read_text(encoding="utf-8")
-    assert "--baseline_latency_ms" in text, "kd-train/agent.md 缺 --baseline_latency_ms 参数"
-    assert "setup.output.baseline_latency_ms" in text, (
-        "kd-train/agent.md 应从 setup.output.baseline_latency_ms 取（latency bar baseline 来源）")
+    assert "--baseline_latency_us" in text, "kd-train/agent.md 缺 --baseline_latency_us 参数"
+    assert "setup.output.baseline_latency_us" in text, (
+        "kd-train/agent.md 应从 setup.output.baseline_latency_us 取（latency bar baseline 来源）")
 
 
 @pytest.mark.skip(reason="obsolete after 2026-08-03 kd-nas serial rework: yaml drops batch gate/train/select nodes in favor of serial gen_student/distill/decide loop")
@@ -1453,7 +1453,7 @@ def test_kd_setup_agent_md_no_longer_calls_setup_helpers():
         "v4: step5 应改调 train_pipeline.py --mode teacher"
     )
     # 正向断言：teacher latency 从 teacher_gen.output 透传（不再 teacher_setup 自测）
-    assert "teacher_gen.output.teacher_latency_ms" in text, (
+    assert "teacher_gen.output.teacher_latency_us" in text, (
         "v4: teacher_setup latency 应从 teacher_gen.output 透传"
     )
 
@@ -1533,7 +1533,7 @@ def test_train_pool_r2_viz_kd_nonzero_rc_warns_not_silent(tmp_path, monkeypatch,
             class _R:
                 returncode = 1
                 stdout = ""
-                stderr = "KeyError: 'latency_ms_median' in viz_kd._render_scatter"
+                stderr = "KeyError: 'latency_us_median' in viz_kd._render_scatter"
             return _R()
         class _R0:
             returncode = 0; stdout = ""; stderr = ""
@@ -1550,7 +1550,7 @@ def test_train_pool_r2_viz_kd_nonzero_rc_warns_not_silent(tmp_path, monkeypatch,
         "--accuracy_baseline", "0.02",
         "--accuracy_baseline_kind", "nmse",
         "--latency_provider", str(artifacts / "p.py::m"),
-        "--target_latency_ms", "8",
+        "--target_latency_us", "8",
         "--concurrency", "1", "--device_plan", '[""]',
         "--per_variant_vram_bytes", "0",
         "--train_pipeline_path", str(artifacts / "train_pipeline.py"),
@@ -1566,7 +1566,7 @@ def test_train_pool_r2_viz_kd_nonzero_rc_warns_not_silent(tmp_path, monkeypatch,
         f"R2：viz_kd rc!=0 WARN 应含「不阻断」语义，got stderr={captured.err}"
     )
     # viz 原 stderr 尾部应被透传（让用户能定位）
-    assert "latency_ms_median" in captured.err or "KeyError" in captured.err, (
+    assert "latency_us_median" in captured.err or "KeyError" in captured.err, (
         f"R2：viz_kd 原 stderr 尾部应透传让用户定位，got stderr={captured.err}"
     )
     # 增量 C+D：viz argv 必须透传 --variants_total（progress 图分母）+ --accuracy_baseline_kind
@@ -1581,10 +1581,10 @@ def test_train_pool_r2_viz_kd_nonzero_rc_warns_not_silent(tmp_path, monkeypatch,
     )
 
 
-def test_train_pool_viz_argv_passes_baseline_latency_ms(tmp_path, monkeypatch):
-    """review #6-1：train_pool --baseline_latency_ms 透传给 viz_kd（latency bar 的 baseline 参考行）。
+def test_train_pool_viz_argv_passes_baseline_latency_us(tmp_path, monkeypatch):
+    """review #6-1：train_pool --baseline_latency_us 透传给 viz_kd（latency bar 的 baseline 参考行）。
 
-    setup.output.baseline_latency_ms 经 agent.md → train_pool --baseline_latency_ms → viz_argv。
+    setup.output.baseline_latency_us 经 agent.md → train_pool --baseline_latency_us → viz_argv。
     漏传 → viz_kd latency bar 永远缺 baseline 那根（viz_kd 已支持该 flag，仅 train_pool 未透传）。
     """
     sys.path.insert(0, str(KD))
@@ -1625,8 +1625,8 @@ def test_train_pool_viz_argv_passes_baseline_latency_ms(tmp_path, monkeypatch):
         "--accuracy_baseline", "0.02",
         "--accuracy_baseline_kind", "nmse",
         "--latency_provider", str(artifacts / "p.py::m"),
-        "--target_latency_ms", "8",
-        "--baseline_latency_ms", "7.5",  # review #6-1：从 setup.output 透传
+        "--target_latency_us", "8",
+        "--baseline_latency_us", "7.5",  # review #6-1：从 setup.output 透传
         "--concurrency", "1", "--device_plan", '[""]',
         "--per_variant_vram_bytes", "0",
         "--train_pipeline_path", str(artifacts / "train_pipeline.py"),
@@ -1635,14 +1635,14 @@ def test_train_pool_viz_argv_passes_baseline_latency_ms(tmp_path, monkeypatch):
     assert rc == 0
     assert captured_viz_argv, "viz_kd 应被调用一次"
     viz_argv = captured_viz_argv[0]
-    assert "--baseline_latency_ms" in viz_argv, "viz argv 缺 --baseline_latency_ms（latency bar baseline）"
-    idx = viz_argv.index("--baseline_latency_ms")
+    assert "--baseline_latency_us" in viz_argv, "viz argv 缺 --baseline_latency_us（latency bar baseline）"
+    idx = viz_argv.index("--baseline_latency_us")
     assert viz_argv[idx + 1] == "7.5", (
-        f"--baseline_latency_ms 应透传 7.5；got {viz_argv[idx + 1]!r}")
+        f"--baseline_latency_us 应透传 7.5；got {viz_argv[idx + 1]!r}")
 
 
-def test_train_pool_viz_argv_omits_baseline_latency_ms_when_none(tmp_path, monkeypatch):
-    """review #6-1：--baseline_latency_ms 未给（None）→ viz_argv 不含该 flag（viz_kd default=None 跳过）。"""
+def test_train_pool_viz_argv_omits_baseline_latency_us_when_none(tmp_path, monkeypatch):
+    """review #6-1：--baseline_latency_us 未给（None）→ viz_argv 不含该 flag（viz_kd default=None 跳过）。"""
     sys.path.insert(0, str(KD))
     for m in [n for n in sys.modules if n in ("train_pool", "kd_common")]:
         del sys.modules[m]
@@ -1669,7 +1669,7 @@ def test_train_pool_viz_argv_omits_baseline_latency_ms_when_none(tmp_path, monke
         return _R0()
     monkeypatch.setattr(_sp, "run", fake_run)
 
-    # 不传 --baseline_latency_ms（default None）
+    # 不传 --baseline_latency_us（default None）
     monkeypatch.setattr(sys, "argv", [
         "train_pool.py",
         "--manifest", str(manifest), "--ledger", str(ledger),
@@ -1680,7 +1680,7 @@ def test_train_pool_viz_argv_omits_baseline_latency_ms_when_none(tmp_path, monke
         "--accuracy_baseline", "0.02",
         "--accuracy_baseline_kind", "nmse",
         "--latency_provider", str(artifacts / "p.py::m"),
-        "--target_latency_ms", "8",
+        "--target_latency_us", "8",
         "--concurrency", "1", "--device_plan", '[""]',
         "--per_variant_vram_bytes", "0",
         "--train_pipeline_path", str(artifacts / "train_pipeline.py"),
@@ -1688,8 +1688,8 @@ def test_train_pool_viz_argv_omits_baseline_latency_ms_when_none(tmp_path, monke
     rc = tp._main()
     assert rc == 0
     viz_argv = captured_viz_argv[0]
-    assert "--baseline_latency_ms" not in viz_argv, (
-        "baseline_latency_ms=None 时不应加该 flag（viz_kd default=None 跳过 baseline 行）")
+    assert "--baseline_latency_us" not in viz_argv, (
+        "baseline_latency_us=None 时不应加该 flag（viz_kd default=None 跳过 baseline 行）")
 
 
 # ── train_pool _train_one：train rc!=0 / measure rc=0+met_acc=false 两条负路径 ────
@@ -1919,9 +1919,9 @@ def test_select_best_student_direction_aware():
     """select 选最优 student 严格按 kind 方向（max/min），平局取 latency 更小者。"""
     m = _load_select_module()
     qualified = [
-        {"variant_id": "v_a", "latency_ms_median": 6.0, "accuracy": 0.020},
-        {"variant_id": "v_b", "latency_ms_median": 7.0, "accuracy": 0.018},  # nmse 最低
-        {"variant_id": "v_c", "latency_ms_median": 7.0, "accuracy": 0.018},  # 同 acc 同 lat（平局）
+        {"variant_id": "v_a", "latency_us_median": 6.0, "accuracy": 0.020},
+        {"variant_id": "v_b", "latency_us_median": 7.0, "accuracy": 0.018},  # nmse 最低
+        {"variant_id": "v_c", "latency_us_median": 7.0, "accuracy": 0.018},  # 同 acc 同 lat（平局）
     ]
     # nmse（min）：0.018 最好 → v_b（平局取 vid 字典序最小 = v_b）
     best_min = m._best_student(qualified, "min")
@@ -1941,16 +1941,16 @@ def test_select_measured_and_qualified_filters():
     """
     m = _load_select_module()
     rows = [
-        {"variant_id": "ok", "latency_ms_median": 5.0, "accuracy": 0.01, "accuracy_kind": "nmse",
+        {"variant_id": "ok", "latency_us_median": 5.0, "accuracy": 0.01, "accuracy_kind": "nmse",
          "met_latency": True, "met_accuracy": True, "status": "SUCCESS"},
-        {"variant_id": "failacc_real", "latency_ms_median": 5.0, "accuracy": 0.05, "accuracy_kind": "nmse",
+        {"variant_id": "failacc_real", "latency_us_median": 5.0, "accuracy": 0.05, "accuracy_kind": "nmse",
          "met_latency": True, "met_accuracy": False, "status": "FAIL_accuracy"},  # measure rc==0 真测
         # 以下三类都是哨兵行，必须剔除：
-        {"variant_id": "faillat", "latency_ms_median": 15.0, "accuracy": 0, "accuracy_kind": "",
+        {"variant_id": "faillat", "latency_us_median": 15.0, "accuracy": 0, "accuracy_kind": "",
          "met_latency": False, "met_accuracy": False, "status": "FAIL_latency"},  # 真测 lat + 哨兵 acc
-        {"variant_id": "failacc_sentinel", "latency_ms_median": 5.0, "accuracy": 0, "accuracy_kind": "",
+        {"variant_id": "failacc_sentinel", "latency_us_median": 5.0, "accuracy": 0, "accuracy_kind": "",
          "met_latency": True, "met_accuracy": False, "status": "FAIL_accuracy"},  # measure rc!=0
-        {"variant_id": "failtrain", "latency_ms_median": 6.0, "accuracy": 0, "accuracy_kind": "",
+        {"variant_id": "failtrain", "latency_us_median": 6.0, "accuracy": 0, "accuracy_kind": "",
          "met_latency": True, "met_accuracy": False, "status": "FAIL_train"},
     ]
     measured = m._measured_rows(rows)
@@ -1968,9 +1968,9 @@ def test_select_pareto_front_excludes_fail_latency_sentinel():
     """
     m = _load_select_module()
     rows = [
-        {"variant_id": "real_a", "latency_ms_median": 5.0, "accuracy": 0.02, "accuracy_kind": "nmse",
+        {"variant_id": "real_a", "latency_us_median": 5.0, "accuracy": 0.02, "accuracy_kind": "nmse",
          "status": "SUCCESS"},
-        {"variant_id": "faillat", "latency_ms_median": 3.0, "accuracy": 0, "accuracy_kind": "",
+        {"variant_id": "faillat", "latency_us_median": 3.0, "accuracy": 0, "accuracy_kind": "",
          "status": "FAIL_latency"},  # lat 比 real_a 更小、acc=0 哨兵 → 若混入会虚假支配
     ]
     measured = m._measured_rows(rows)
@@ -1986,9 +1986,9 @@ def test_select_pareto_front_direction_aware():
     """
     m = _load_select_module()
     pts = [
-        {"latency_ms_median": 5.0, "accuracy": 0.02},  # pt0
-        {"latency_ms_median": 6.0, "accuracy": 0.01},  # pt1
-        {"latency_ms_median": 7.0, "accuracy": 0.03},  # pt2
+        {"latency_us_median": 5.0, "accuracy": 0.02},  # pt0
+        {"latency_us_median": 6.0, "accuracy": 0.01},  # pt1
+        {"latency_us_median": 7.0, "accuracy": 0.03},  # pt2
     ]
     # nmse(min)：两轴都越小越好。pt0(lat 最小, acc 中) 与 pt1(acc 最小) 互不支配；
     # pt2(lat 最大且 acc 最大=最差) 被 pt0 双轴支配 → 不在前沿。
@@ -1999,7 +1999,7 @@ def test_select_pareto_front_direction_aware():
     front_max = set(m._pareto_front(pts, "max"))
     assert front_max == {0, 2}, front_max
     # 新增一个被支配的点 pt3(lat=6.5, acc=0.02)：被 pt0(5<=6.5, 0.02<=0.02, lat 严格更小) 支配。
-    pts_dom = pts + [{"latency_ms_median": 6.5, "accuracy": 0.02}]
+    pts_dom = pts + [{"latency_us_median": 6.5, "accuracy": 0.02}]
     front_dom = set(m._pareto_front(pts_dom, "min"))
     assert 3 not in front_dom, "pt3 应被 pt0 支配（lat 更小 acc 相同）"
     assert front_dom == {0, 1}
@@ -2010,14 +2010,14 @@ def test_select_and_report_end_to_end_via_subprocess(tmp_path):
     import subprocess
     ledger = tmp_path / "ledger.jsonl"
     rows = [
-        {"variant_id": "v_good", "variant_sha256": "a", "latency_ms_median": 6.0,
-         "latency_ms_std": 0.1, "accuracy": 0.020, "accuracy_kind": "nmse",
+        {"variant_id": "v_good", "variant_sha256": "a", "latency_us_median": 6.0,
+         "latency_us_std": 0.1, "accuracy": 0.020, "accuracy_kind": "nmse",
          "met_latency": True, "met_accuracy": True, "status": "SUCCESS", "accepted_cfg": {}},
-        {"variant_id": "v_best", "variant_sha256": "b", "latency_ms_median": 7.0,
-         "latency_ms_std": 0.1, "accuracy": 0.018, "accuracy_kind": "nmse",
+        {"variant_id": "v_best", "variant_sha256": "b", "latency_us_median": 7.0,
+         "latency_us_std": 0.1, "accuracy": 0.018, "accuracy_kind": "nmse",
          "met_latency": True, "met_accuracy": True, "status": "SUCCESS", "accepted_cfg": {}},
-        {"variant_id": "v_failacc", "variant_sha256": "c", "latency_ms_median": 6.5,
-         "latency_ms_std": 0.1, "accuracy": 0.030, "accuracy_kind": "nmse",
+        {"variant_id": "v_failacc", "variant_sha256": "c", "latency_us_median": 6.5,
+         "latency_us_std": 0.1, "accuracy": 0.030, "accuracy_kind": "nmse",
          "met_latency": True, "met_accuracy": False, "status": "FAIL_accuracy", "accepted_cfg": {}},
     ]
     ledger.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
@@ -2027,7 +2027,7 @@ def test_select_and_report_end_to_end_via_subprocess(tmp_path):
         [sys.executable, str(SELECT_SCRIPT), "--ledger", str(ledger),
          "--kd_artifacts_dir", str(artifacts) + "/",
          "--accuracy_baseline", "0.025", "--accuracy_baseline_kind", "nmse",
-         "--target_latency_ms", "8"],
+         "--target_latency_us", "8"],
         capture_output=True, text=True,
     )
     assert out.returncode == 0, out.stderr
@@ -2043,8 +2043,8 @@ def test_select_and_report_no_qualified_not_fabricated(tmp_path):
     import subprocess
     ledger = tmp_path / "ledger.jsonl"
     rows = [
-        {"variant_id": "v1", "variant_sha256": "a", "latency_ms_median": 6.0,
-         "latency_ms_std": 0.1, "accuracy": 0.05, "accuracy_kind": "nmse",
+        {"variant_id": "v1", "variant_sha256": "a", "latency_us_median": 6.0,
+         "latency_us_std": 0.1, "accuracy": 0.05, "accuracy_kind": "nmse",
          "met_latency": True, "met_accuracy": False, "status": "FAIL_accuracy", "accepted_cfg": {}},
     ]
     ledger.write_text(json.dumps(rows[0]) + "\n", encoding="utf-8")
@@ -2054,7 +2054,7 @@ def test_select_and_report_no_qualified_not_fabricated(tmp_path):
         [sys.executable, str(SELECT_SCRIPT), "--ledger", str(ledger),
          "--kd_artifacts_dir", str(artifacts) + "/",
          "--accuracy_baseline", "0.025", "--accuracy_baseline_kind", "nmse",
-         "--target_latency_ms", "8"],
+         "--target_latency_us", "8"],
         capture_output=True, text=True,
     )
     assert out.returncode == 0, out.stderr  # 无达标 = 设计内，非错误
@@ -2070,7 +2070,7 @@ def test_select_and_report_unknown_kind_fail_loud(tmp_path):
     import subprocess
     ledger = tmp_path / "ledger.jsonl"
     ledger.write_text(json.dumps(
-        {"variant_id": "v1", "latency_ms_median": 5.0, "accuracy": 0.01,
+        {"variant_id": "v1", "latency_us_median": 5.0, "accuracy": 0.01,
          "met_latency": True, "met_accuracy": True, "status": "SUCCESS"}) + "\n",
         encoding="utf-8")
     artifacts = tmp_path / "kd_artifacts"
@@ -2079,7 +2079,7 @@ def test_select_and_report_unknown_kind_fail_loud(tmp_path):
         [sys.executable, str(SELECT_SCRIPT), "--ledger", str(ledger),
          "--kd_artifacts_dir", str(artifacts) + "/",
          "--accuracy_baseline", "0.025", "--accuracy_baseline_kind", "foobar",
-         "--target_latency_ms", "8"],
+         "--target_latency_us", "8"],
         capture_output=True, text=True,
     )
     assert out.returncode == 2, "未知 kind 必须 fail loud"
@@ -2099,7 +2099,7 @@ def test_select_and_report_empty_ledger_fail_loud(tmp_path):
         [sys.executable, str(SELECT_SCRIPT), "--ledger", str(ledger),
          "--kd_artifacts_dir", str(artifacts) + "/",
          "--accuracy_baseline", "0.025", "--accuracy_baseline_kind", "nmse",
-         "--target_latency_ms", "8"],
+         "--target_latency_us", "8"],
         capture_output=True, text=True,
     )
     assert out.returncode == 2, "空 ledger 必须 fail loud（非 0 退出）"
@@ -2116,7 +2116,7 @@ def test_select_and_report_corrupt_ledger_fail_loud(tmp_path):
     """坏 JSON 行 ledger → kd_common.read_ledger raise → select 捕获 exit 2（BLK-16 fail loud）。"""
     import subprocess
     ledger = tmp_path / "ledger.jsonl"
-    ledger.write_text('{"variant_id":"ok","status":"SUCCESS","latency_ms_median":5.0,'
+    ledger.write_text('{"variant_id":"ok","status":"SUCCESS","latency_us_median":5.0,'
                       '"accuracy":0.02,"accuracy_kind":"nmse","met_accuracy":true}\n'
                       '这不是合法 JSON 行\n', encoding="utf-8")
     artifacts = tmp_path / "kd_artifacts"
@@ -2125,7 +2125,7 @@ def test_select_and_report_corrupt_ledger_fail_loud(tmp_path):
         [sys.executable, str(SELECT_SCRIPT), "--ledger", str(ledger),
          "--kd_artifacts_dir", str(artifacts) + "/",
          "--accuracy_baseline", "0.025", "--accuracy_baseline_kind", "nmse",
-         "--target_latency_ms", "8"],
+         "--target_latency_us", "8"],
         capture_output=True, text=True,
     )
     assert out.returncode == 2, "坏 JSON ledger 必须 fail loud"

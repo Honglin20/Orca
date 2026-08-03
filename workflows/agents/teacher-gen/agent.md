@@ -47,7 +47,7 @@ teacher = baseline 的 `build_model` **调大 cfg**（深度轴 ×3 / 宽度轴 
 {
   "teacher_model_path": "<output_dir>/<base_name>.py 绝对路径",
   "project_root": "<推断绝对路径>",
-  "teacher_latency_ms": <float>,
+  "teacher_latency_us": <float>,
   "depth_axis": "<识别出的深度轴 knob 名，可审计>",
   "width_axis": "<识别出的宽度轴 knob 名，可审计>",
   "viz_status": {<dumb copy 自 viz_kd_stage --stage teacher stdout>}
@@ -56,7 +56,7 @@ teacher = baseline 的 `build_model` **调大 cfg**（深度轴 ×3 / 宽度轴 
 
 - JSON 前后**不许**有任何描述性文字（workflow `outputs` 直接取这个 JSON）；
 - 字段名严格匹配；`teacher_model_path` 必须是文件实际存在的绝对路径，且两道硬校验都 PASS；
-- `teacher_latency_ms` = teacher 文件 `__main__` 测出的默认 cfg latency 中位数（下方 bash 块解析 `LATENCY_MS:`）；
+- `teacher_latency_us` = teacher 文件 `__main__` 测出的默认 cfg latency 中位数（下方 bash 块解析 `LATENCY_US:`）；
 - `depth_axis` / `width_axis` 必须与 teacher 文件里的 `DEPTH_AXIS` / `WIDTH_AXIS` 模块常量一致（用 `validate_teacher.py` 解析出的值回填，不自己编）；
 - 若 baseline 无深度轴或宽度轴（罕见；KNOBS 名字均不匹配模式），对应字段填空串 `""`，并后缀 ` (low-confidence: <一行说明>)`；
 - `viz_status` 必填（缺 → output_schema fail loud）；失败值（env_missing/generic 等）合法产出，sidecar 失败不阻断主流程。
@@ -92,7 +92,7 @@ teacher = baseline 的 `build_model` **调大 cfg**（深度轴 ×3 / 宽度轴 
 
 ## 末尾硬校验 执行：两道校验必 PASS + teacher `__main__` 测 latency（fail loud，否则不返 JSON）
 
-整段**原样照抄**为一条 bash 调用。把 `<output_dir>` / `<base_name>` / `<baseline_contract_path>` / `<project_root>` 替换为实际值，`{{ inputs.device }}` / `{{ inputs.latency_provider }}` 由 Jinja 渲染。`VALIDATION: PASS` ×2 + `LATENCY_MS:` 都拿到才能继续组 JSON；任一 `VALIDATION: FAIL` → 读 `FAIL_REASON:` 行修 teacher 文件重跑；`__main__` 跑挂 / 无 `LATENCY_MS:` → 读 stderr 修 teacher 文件 `__main__` 块（含 latency 测量）重跑。
+整段**原样照抄**为一条 bash 调用。把 `<output_dir>` / `<base_name>` / `<baseline_contract_path>` / `<project_root>` 替换为实际值，`{{ inputs.device }}` / `{{ inputs.latency_provider }}` 由 Jinja 渲染。`VALIDATION: PASS` ×2 + `LATENCY_US:` 都拿到才能继续组 JSON；任一 `VALIDATION: FAIL` → 读 `FAIL_REASON:` 行修 teacher 文件重跑；`__main__` 跑挂 / 无 `LATENCY_US:` → 读 stderr 修 teacher 文件 `__main__` 块（含 latency 测量）重跑。
 
 ```bash
 CONTRACT="<output_dir>/<base_name>.py"
@@ -138,27 +138,27 @@ if [ $RUN_RC -ne 0 ]; then
   echo "teacher __main__ FAIL (rc=$RUN_RC) —— 读 stderr 修 __main__ 块（correctness + latency），不返 JSON"
   exit 2
 fi
-TEACHER_LATENCY_MS="$(echo "$RUN_OUT" | grep '^LATENCY_MS:' | awk '{print $2}')"
-if [ -z "$TEACHER_LATENCY_MS" ]; then
-  echo "FAIL: teacher __main__ 未产出 LATENCY_MS（LATENCY_SKIPPED？ORCA_AGENT_RESOURCES 未注入？onnxruntime 缺失？wrapper 委托失败？）"
+TEACHER_LATENCY_US="$(echo "$RUN_OUT" | grep '^LATENCY_US:' | awk '{print $2}')"
+if [ -z "$TEACHER_LATENCY_US" ]; then
+  echo "FAIL: teacher __main__ 未产出 LATENCY_US（LATENCY_SKIPPED？ORCA_AGENT_RESOURCES 未注入？onnxruntime 缺失？wrapper 委托失败？）"
   exit 2
 fi
 LATENCY_SOURCE="$(echo "$RUN_OUT" | grep '^LATENCY_SOURCE:' | awk '{print $2}')"
-echo "PARSED: TEACHER_LATENCY_MS=$TEACHER_LATENCY_MS LATENCY_SOURCE=$LATENCY_SOURCE"
+echo "PARSED: TEACHER_LATENCY_US=$TEACHER_LATENCY_US LATENCY_SOURCE=$LATENCY_SOURCE"
 ```
 
 ## 末尾 web 推送 执行：viz_kd_stage --stage teacher（dumb copy stdout 进 viz_status）
 
-> 推 teacher vs baseline latency bar（label=kd-nas）。baseline_latency_ms 从 flatten.output 取。
+> 推 teacher vs baseline latency bar（label=kd-nas）。baseline_latency_us 从 flatten.output 取。
 > sidecar：失败值合法产出，不阻断 teacher-gen。
 
 ```bash
 KD_SCRIPTS_DIR="$(python3 -c "import os;print(os.path.abspath('workflows/agents/_kd_scripts'))")"
-BASELINE_LATENCY_MS="{{ flatten.output.baseline_latency_ms }}"
+BASELINE_LATENCY_US="{{ flatten.output.baseline_latency_us }}"
 VIZ_STDOUT=$(python3 "$KD_SCRIPTS_DIR/viz_kd_stage.py" \
   --stage teacher \
-  --baseline_latency_ms "$BASELINE_LATENCY_MS" \
-  --teacher_latency_ms "$TEACHER_LATENCY_MS" \
+  --baseline_latency_us "$BASELINE_LATENCY_US" \
+  --teacher_latency_us "$TEACHER_LATENCY_US" \
   --env_anchor "${ORCA_ARTIFACTS_DIR:-}" \
   || true)
 VIZ_STATUS=$(python3 -c "
@@ -171,13 +171,13 @@ echo "VIZ_STATUS_JSON=$VIZ_STATUS"
 
 ## 产出 JSON（最终消息）
 
-把 `CONTRACT` / project_root / TEACHER_LATENCY_MS / DEPTH_AXIS_PARSED / WIDTH_AXIS_PARSED / VIZ_STATUS_JSON 填进模板，**只**返回这个 JSON：
+把 `CONTRACT` / project_root / TEACHER_LATENCY_US / DEPTH_AXIS_PARSED / WIDTH_AXIS_PARSED / VIZ_STATUS_JSON 填进模板，**只**返回这个 JSON：
 
 ```json
 {
   "teacher_model_path": "<CONTRACT 绝对路径>",
   "project_root": "<PROJECT_ROOT 绝对路径>",
-  "teacher_latency_ms": <TEACHER_LATENCY_MS float>,
+  "teacher_latency_us": <TEACHER_LATENCY_US float>,
   "depth_axis": "<DEPTH_AXIS_PARSED>",
   "width_axis": "<WIDTH_AXIS_PARSED>",
   "viz_status": <VIZ_STATUS_JSON 对象原样嵌入>
@@ -185,7 +185,7 @@ echo "VIZ_STATUS_JSON=$VIZ_STATUS"
 ```
 
 - `teacher_model_path` 必须是两道硬校验都 PASS 的同一文件路径；
-- `teacher_latency_ms` 必须是上面 `__main__` 跑出的 `LATENCY_MS:` 裸数值（float，不编造）；
+- `teacher_latency_us` 必须是上面 `__main__` 跑出的 `LATENCY_US:` 裸数值（float，不编造）；
 - `depth_axis` / `width_axis` 必须 == `validate_teacher.py` 解析出的值（不自己编）；
 - `viz_status` 必须是 JSON 对象（dumb copy 自 viz_kd_stage stdout，失败值合法不阻断）；
-- 已嵌入 kd-nas workflow yaml（flatten → setup → gen_teacher → ...）：下游 train_teacher 透传 `gen_teacher.output.teacher_model_path` + `teacher_latency_ms`。
+- 已嵌入 kd-nas workflow yaml（flatten → setup → gen_teacher → ...）：下游 train_teacher 透传 `gen_teacher.output.teacher_model_path` + `teacher_latency_us`。

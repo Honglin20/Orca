@@ -10,7 +10,7 @@ tools: [bash, read, write, glob, grep]
 ## 输入
 
 - 本轮 candidate：`{{ engineer.output.snapshot_path }}` / worktree `{{ engineer.output.worktree }}`
-- 父/champion（时延门基准）：从 `{{ setup.output.champions_path }}` 最后一行读 `latency_ms`。
+- 父/champion（时延门基准）：从 `{{ setup.output.champions_path }}` 最后一行读 `latency_us`。
 - accuracy_target：`{{ setup.output.accuracy_target }}`
 - train_command（原样 shell 执行，不变量2）：`{{ inputs.train_command }}`
 - latency_provider（用户脚本优先 / 默认 latency_onnxrt，不变量1）：`{{ inputs.latency_provider }}`
@@ -45,14 +45,14 @@ tools: [bash, read, write, glob, grep]
   measure = getattr(mod, func)
   ```
   **不是 callable 或加载失败 → fail loud**（打印异常、整轮停；契约钉死）。
-- `latency_ms = measure(onnx_path, device="{{ inputs.device }}")`（中位数 ms）。
+- `latency_us = measure(onnx_path, device="{{ inputs.device }}")`（中位数 us）。
   用 `inspect.signature(measure).parameters` 检测是否含 `device` 形参（**不**用裸 try/except TypeError，
   会误吞用户脚本内部 TypeError）；旧式 measure 不接 device → fallback `measure(onnx_path)`。
 
 ### 3. 时延门在前
-- `latency_ms ≥ champion.latency_ms` → 直接记 **`FAIL_latency`**（`met_latency=false`），**不训练**（廉价过滤）。
+- `latency_us ≥ champion.latency_us` → 直接记 **`FAIL_latency`**（`met_latency=false`），**不训练**（廉价过滤）。
   `accuracy=-1, met_accuracy=false`，跳过步骤 4。
-- `latency_ms < champion.latency_ms` → 进训练池。
+- `latency_us < champion.latency_us` → 进训练池。
 
 ### 4. 训练（只跑用户 train_command，不变量2）—— 仅时延门通过才跑
 - **按需探测空闲卡**：`gpus=auto` 时 `nvidia-smi` 查显存/利用率 → claim 一张空闲 → `export CUDA_VISIBLE_DEVICES=<id>`
@@ -72,5 +72,5 @@ tools: [bash, read, write, glob, grep]
 ## 输出（**必须输出合法 JSON 对象**，匹配 output_schema；非 JSON → fail loud）
 
 ```json
-{"status": "SUCCESS|FAIL_latency|FAIL_accuracy|FAIL_export", "latency_ms": <数；FAIL_export 时 -1>, "met_latency": true|false, "accuracy": <数；未训练时 -1>, "met_accuracy": true|false, "onnx_path": "<ONNX 绝对路径；FAIL_export 时空>", "snapshot_path": "{{ engineer.output.snapshot_path }}", "fail_reason": "<失败原因；成功时空>"}
+{"status": "SUCCESS|FAIL_latency|FAIL_accuracy|FAIL_export", "latency_us": <数；FAIL_export 时 -1>, "met_latency": true|false, "accuracy": <数；未训练时 -1>, "met_accuracy": true|false, "onnx_path": "<ONNX 绝对路径；FAIL_export 时空>", "snapshot_path": "{{ engineer.output.snapshot_path }}", "fail_reason": "<失败原因；成功时空>"}
 ```

@@ -62,21 +62,21 @@ flatten → setup → gen_teacher → gen_train_script → train_script_verify �
 ### 6.1 `flatten`（复用 model-flatten + viz_status）
 
 - 复用 `workflows/agents/model-flatten/`（SKILL + validate_contract + __main__ latency）。
-- output: `baseline_contract_path` / `project_root` / `model_name` / `baseline_latency_ms` / `viz_status`。
+- output: `baseline_contract_path` / `project_root` / `model_name` / `baseline_latency_us` / `viz_status`。
 - web push（sidecar `viz_kd_stage.py --stage baseline`）：baseline latency bar。
 
 ### 6.2 `setup`（精简 kd-setup，**拆出 train_teacher**）
 
 - **职责**：探测 shared infra 路径 + seed baseline champion + device 探测。**不含 train_teacher**（拆到独立节点）。
-- 产出（单一真相源，下游经 setup.output 透传）：`kd_artifacts_dir`（末尾带 /）/ `per_run_artifacts_dir`（$ORCA_ARTIFACTS_DIR）/ `project_root` / `kd_scripts_dir`（`workflows/agents/_kd_scripts` 绝对路径，下游 distill/decide 调脚本用）/ `struct_scripts_dir`（`workflows/agents/_struct_scripts` 绝对路径，export_onnx 用）/ `ledger_path` / `champions_path` / `ckpts_dir`（末尾带 /）/ `snapshots_dir`（末尾带 /）/ `worktree_root`（末尾带 /，KD 可选——见 §6.7 注）/ `device`（探测）/ `concurrency`（串行版=1）/ `baseline_latency_ms`（透传 flatten）/ `baseline_accuracy`（=inputs.accuracy_baseline）/ `viz_status`。
-- **seed baseline champion**：`champions.jsonl` 第一行 = `{id:"baseline", round:0, latency_ms:baseline_latency_ms, accuracy:baseline_accuracy, met_latency:false, met_accuracy:false, snapshot:baseline_contract_path}`。ledger 初始化（不截断已有）。
+- 产出（单一真相源，下游经 setup.output 透传）：`kd_artifacts_dir`（末尾带 /）/ `per_run_artifacts_dir`（$ORCA_ARTIFACTS_DIR）/ `project_root` / `kd_scripts_dir`（`workflows/agents/_kd_scripts` 绝对路径，下游 distill/decide 调脚本用）/ `struct_scripts_dir`（`workflows/agents/_struct_scripts` 绝对路径，export_onnx 用）/ `ledger_path` / `champions_path` / `ckpts_dir`（末尾带 /）/ `snapshots_dir`（末尾带 /）/ `worktree_root`（末尾带 /，KD 可选——见 §6.7 注）/ `device`（探测）/ `concurrency`（串行版=1）/ `baseline_latency_us`（透传 flatten）/ `baseline_accuracy`（=inputs.accuracy_baseline）/ `viz_status`。
+- **seed baseline champion**：`champions.jsonl` 第一行 = `{id:"baseline", round:0, latency_us:baseline_latency_us, accuracy:baseline_accuracy, met_latency:false, met_accuracy:false, snapshot:baseline_contract_path}`。ledger 初始化（不截断已有）。
 - 复用现 `kd-setup/agent.md` 的 step1（路径解析 + lock）+ step7（GPU 探测），**删 step2-6**（baseline 校验移 flatten / teacher 训练移 train_teacher）。
 - web push：baseline champion seed table。
 
 ### 6.3 `gen_teacher`（复用 teacher-gen + viz_status）
 
 - 复用 `workflows/agents/teacher-gen/`（深×3/宽×2 wrapper + validate_teacher + measure_latency）。
-- output: `teacher_model_path` / `teacher_latency_ms` / `depth_axis` / `width_axis` / `viz_status`。
+- output: `teacher_model_path` / `teacher_latency_us` / `depth_axis` / `width_axis` / `viz_status`。
 - web push：teacher vs baseline latency bar。
 
 ### 6.4 `gen_train_script`（复用 kd-train-script）
@@ -119,11 +119,11 @@ flatten → setup → gen_teacher → gen_train_script → train_script_verify �
     --teacher_ckpt "{{ setup.output.kd_artifacts_dir }}teacher_ckpt.pt" \
     --build_fn build_model --dummy_input "<json.dumps(flatten baseline DUMMY_INPUT)>" \
     --output_dir "{{ setup.output.kd_artifacts_dir }}" --opset 17 \
-    --teacher_latency_ms "{{ gen_teacher.output.teacher_latency_ms }}" \
+    --teacher_latency_us "{{ gen_teacher.output.teacher_latency_us }}" \
     --device "{{ inputs.device }}"
   ```
 - **metrics_tail**（新写 sidecar）：读 `teacher_train.log`，按 `inputs.metrics_template`（可选 §9 schema）摘 metrics 推 web（line per-epoch）；无模板则默认推 loss curve（_make_live_push 已由 --env_anchor 激活）。分工：_make_live_push 推 loss（live，训练循环内），metrics_tail 推模板字段（post-hoc，训练后或 tail）。
-- output: `teacher_cache` / `teacher_meta` / `teacher_ckpt` / `teacher_latency_ms`（透传）/ `viz_status`。
+- output: `teacher_cache` / `teacher_meta` / `teacher_ckpt` / `teacher_latency_us`（透传）/ `viz_status`。
 - web push：teacher 训练 loss/epoch line + 摘取 metrics。
 
 ### 6.7 `gen_student`（**新写**，结构变换；首轮固定 + 迭代 KB；SPEC-REVIEW T2 合并）
@@ -149,13 +149,13 @@ flatten → setup → gen_teacher → gen_train_script → train_script_verify �
      --variant_path "{{ gen_student.output.student_model_path }}" \
      --build_fn build_model --dummy_input "<json.dumps(flatten baseline DUMMY_INPUT)>" \
      --knobs "{{ gen_student.output.knobs }}" \
-     --target_latency_ms "{{ inputs.target_latency_ms }}" \
+     --target_latency_us "{{ inputs.target_latency_us }}" \
      --latency_provider "{{ inputs.latency_provider }}" \
      --artifacts_dir "{{ setup.output.kd_artifacts_dir }}" \
      --device "{{ inputs.device }}" --seed "{{ inputs.seed }}"
    ```
-   → stdout `TUNE_STATUS: ACCEPTED|FAIL_latency` + `ACCEPTED_CFG`/`BEST_EFFORT_CFG` + `LATENCY_MS_MEDIAN`/`LATENCY_MS_STD`。shape 跟 baseline DUMMY_INPUT。
-2. **FAIL_latency 分支**（M4）：`TUNE_STATUS=FAIL_latency` → **跳过训练省 GPU** → output `status=FAIL_latency, tune_status=FAIL_latency, latency_ms=<best_effort_median>, accuracy=-1, met_latency=false, met_accuracy=false`，agent 退 0（catch 协议），交 decide 落账 continue。
+   → stdout `TUNE_STATUS: ACCEPTED|FAIL_latency` + `ACCEPTED_CFG`/`BEST_EFFORT_CFG` + `LATENCY_US_MEDIAN`/`LATENCY_US_STD`。shape 跟 baseline DUMMY_INPUT。
+2. **FAIL_latency 分支**（M4）：`TUNE_STATUS=FAIL_latency` → **跳过训练省 GPU** → output `status=FAIL_latency, tune_status=FAIL_latency, latency_us=<best_effort_median>, accuracy=-1, met_latency=false, met_accuracy=false`，agent 退 0（catch 协议），交 decide 落账 continue。
 3. **distill 训练**（ACCEPTED 才跑；**N1 必传 --kd_config 否则 KD 名存实亡**）：
    ```bash
    ORCA_KD_SCRIPTS_DIR="{{ setup.output.kd_scripts_dir }}" python3 "{{ gen_train_script.output.train_pipeline_path }}" \
@@ -186,16 +186,16 @@ flatten → setup → gen_teacher → gen_train_script → train_script_verify �
    → stdout `STUDENT_ACCURACY` / `MET_ACCURACY`（方向按 kind）。distill 训练同样可选 metrics_tail（同 §6.6 契约，N14）。
 - **catch 协议**（B5/N11）：训练/eval 子进程 rc≠0 → `status=FAIL_train, tune_status=ACCEPTED, fail_reason=<stderr 尾 300 字>`，agent 退 0（不抛→不 workflow_failed），交 decide。**FAIL_train 时 met_latency=true（tune 已过）, met_accuracy=false, accuracy=-1**（对齐 v1 train_pool.py:172-173）。
 - **tune_status ↔ status 映射**（N21）：`FAIL_latency → status=FAIL_latency ∧ tune_status=FAIL_latency`；`SUCCESS → status=SUCCESS ∧ tune_status=ACCEPTED`；`FAIL_train → status=FAIL_train ∧ tune_status=ACCEPTED`。
-- output（m3 补全）：`round` / `student_model_path` / `accepted_cfg` / `cfg_hash` / `latency_ms` / `latency_ms_std` / `accuracy` / `accuracy_kind` / `met_latency` / `met_accuracy` / `ckpt` / `tune_status` / `status`（SUCCESS/FAIL_latency/FAIL_train）/ `fail_reason` / `viz_status`。
+- output（m3 补全）：`round` / `student_model_path` / `accepted_cfg` / `cfg_hash` / `latency_us` / `latency_us_std` / `accuracy` / `accuracy_kind` / `met_latency` / `met_accuracy` / `ckpt` / `tune_status` / `status`（SUCCESS/FAIL_latency/FAIL_train）/ `fail_reason` / `viz_status`。
 - web push：本轮 student latency/accuracy table + distill loss line。
 
 ### 6.9 `decide`（**新写**，KD 专版 reducer min-latency + continue_loop；SPEC-REVIEW B4 写死）
 
 确定性脚本 `kd_reducer.py`（**KD 专版重写**，参考 ledger_reducer 骨架但 schema/排序键不同——SPEC-REVIEW B4）：
-- **append ledger**：`{variant_id:r<round>_student, student_path, round, parent:<上轮 student>, latency_ms, accuracy, met_latency, met_accuracy, accuracy_kind, direction_id, hypothesis, accepted_cfg, cfg_hash, ckpt, status}`。
+- **append ledger**：`{variant_id:r<round>_student, student_path, round, parent:<上轮 student>, latency_us, accuracy, met_latency, met_accuracy, accuracy_kind, direction_id, hypothesis, accepted_cfg, cfg_hash, ckpt, status}`。
 - **champion ratchet**（B4 写死，min-latency）：准入 = `met_latency ∧ met_accuracy`；准入集合内按 **latency 最小** ratchet（FIFO tiebreak）。无达标 → 维持 baseline（setup seed 的 round=0）。
 - **continue_loop**（§13）：champion_met（准入集合非空）→ false, reason="target_met"；round ≥ max_rounds → false, reason="max_rounds"；else → true。
-- output: `round` / `continue_loop` / `champion_id` / `champion_latency_ms` / `champion_accuracy` / `terminate_reason` / `viz_status`。
+- output: `round` / `continue_loop` / `champion_id` / `champion_latency_us` / `champion_accuracy` / `terminate_reason` / `viz_status`。
 - web push：champion 轨迹 line + 逐轮汇总 table。
 
 ### 6.10 `finalize`（**KD 专版 inline prompt**；SPEC-REVIEW M3 + N10/N19）
@@ -217,9 +217,9 @@ flatten → setup → gen_teacher → gen_train_script → train_script_verify �
     --device "{{ inputs.device }}" --seed "{{ inputs.seed }}"
   # latency：动态加载 inputs.latency_provider（path::func），measure(final.onnx, device)
   ```
-- **champion=baseline 兜底**（MAJOR-1）：若 `decide.output.champion_id == "baseline"`（round=0，即所有轮 FAIL_latency/FAIL_train/FAIL_build，admitted 空），finalize **跳过 student eval/ONNX/latency 命令**（baseline snapshot 是 flatten 产的 contract 非 student .py，student 命令会崩），直接用 `setup.output.baseline_latency_ms` / `baseline_accuracy` 写 final_report（标注「无 student 达标」+ 各轮失败汇总）。
+- **champion=baseline 兜底**（MAJOR-1）：若 `decide.output.champion_id == "baseline"`（round=0，即所有轮 FAIL_latency/FAIL_train/FAIL_build，admitted 空），finalize **跳过 student eval/ONNX/latency 命令**（baseline snapshot 是 flatten 产的 contract 非 student .py，student 命令会崩），直接用 `setup.output.baseline_latency_us` / `baseline_accuracy` 写 final_report（标注「无 student 达标」+ 各轮失败汇总）。
 - 写 final_report.md（teacher vs students + 选择依据 + 帕累托 + 探索轮数 + terminate_reason）。
-- output: `final_model` / `final_onnx` / `final_latency_ms` / `final_accuracy` / `final_report` / `viz_status`。
+- output: `final_model` / `final_onnx` / `final_latency_us` / `final_accuracy` / `final_report` / `viz_status`。
 - web push：终态对比 bar（baseline/teacher/champion）+ 帕累托 scatter。
 - KD 专版 inline prompt（参考 struct finalize 结构，**非复用 agent.md**——struct finalize 是 yaml inline）。
 
@@ -246,7 +246,7 @@ flatten → setup → gen_teacher → gen_train_script → train_script_verify �
 
 | 节点 | chart | chart_type | data |
 |---|---|---|---|
-| flatten | baseline latency | bar | `[{stage:"baseline", latency_ms}]` |
+| flatten | baseline latency | bar | `[{stage:"baseline", latency_us}]` |
 | setup | baseline champion seed | table | `[{round:0, latency, accuracy}]` |
 | gen_teacher | teacher vs baseline | bar | baseline/teacher |
 | train_teacher | 训练 loss/metrics | line | per-epoch（_make_live_push + metrics_tail） |
@@ -317,7 +317,7 @@ flatten → setup → gen_teacher → gen_train_script → train_script_verify �
 inputs:
   baseline_model_path:     [ask] 用户模型入口
   user_train_script:       [ask] 用户 train.py（teacher 默认 lr/epochs 从此提取）
-  target_latency_ms:       [ask] latency 目标
+  target_latency_us:       [ask] latency 目标
   accuracy_baseline:       [ask] 精度基线
   accuracy_baseline_kind:  [ask] nmse/mse/ber/db | snr/acc
   latency_provider:        [ask] 用户 latency 脚本 path::func
@@ -393,7 +393,7 @@ else: continue_loop=true
 - **M4 FAIL_latency**：✅ §6.8 分支。
 - **m1 MaxIterations**：✅ §5 改 3R+7。
 - **m2 DUMMY_INPUT 校验**：✅ §6.7 字节级 deterministic。
-- **m3 distill output**：✅ §6.8 补 accepted_cfg/cfg_hash/latency_ms_std。
+- **m3 distill output**：✅ §6.8 补 accepted_cfg/cfg_hash/latency_us_std。
 - **m4 验收**：✅ §14 #2 加 fixture 前置。
 - **m5 metrics_template schema**：✅ §9。
 - **T1 student 时延推迟**：✅ §8 声明。

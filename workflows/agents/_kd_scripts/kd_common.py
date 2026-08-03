@@ -6,7 +6,7 @@
   - variant_id = ``.py`` 文件名 stem；done 谓词跨 run 复用的核心。
   - ``variant_sha256`` = 变体 ``.py`` 字节 sha256（文件改了 → 重做）。
   - ``latency_provider_id`` = ``"<path::func>|<sha16>"``（换 latency 脚本 → 重做）。
-  - ``target_latency_ms`` 浮点归一比较。
+  - ``target_latency_us`` 浮点归一比较。
 """
 
 from __future__ import annotations
@@ -137,7 +137,7 @@ def provider_id(provider: str) -> str:
 
 
 def feq(a: Any, b: Any, rel: float = 1e-6) -> bool:
-    """浮点近似相等（target_latency_ms 字符串 vs float 比较）。非数 → False。"""
+    """浮点近似相等（target_latency_us 字符串 vs float 比较）。非数 → False。"""
     try:
         af, bf = float(a), float(b)
     except (TypeError, ValueError):
@@ -202,7 +202,7 @@ def parse_key(stdout: str, key: str) -> str | None:
 
 def is_variant_done(
     rows_for_v: list[dict[str, Any]],
-    cur_target_latency_ms: float,
+    cur_target_latency_us: float,
     cur_provider_id: str,
     variant_sha256: str,
 ) -> bool:
@@ -210,10 +210,10 @@ def is_variant_done(
 
     任一**有效行**（variant_sha256 匹配 + latency_provider_id 匹配）满足：
       - status ∈ {SUCCESS, FAIL_accuracy, FAIL_train}：
-          * SUCCESS：还须 ckpt 文件存在且非空且 latency_ms_median ≤ 当前 target
+          * SUCCESS：还须 ckpt 文件存在且非空且 latency_us_median ≤ 当前 target
             （target 调低到低于该 variant latency → 不再算 done，需重试更小 cfg）。
           * FAIL_accuracy / FAIL_train：训练已发生、结果已记 → done（「记账后下一个」，不重训）。
-      - status == FAIL_latency：仅当 row.target_latency_ms ≈ 当前 target（同 target 才算 done；
+      - status == FAIL_latency：仅当 row.target_latency_us ≈ 当前 target（同 target 才算 done；
         改 target → 重试）。
     """
     for r in rows_for_v:
@@ -225,15 +225,15 @@ def is_variant_done(
         if status in TRAIN_DONE_STATUSES:
             if status == "SUCCESS":
                 ckpt = r.get("ckpt", "")
-                lat = r.get("latency_ms_median")
+                lat = r.get("latency_us_median")
                 ckpt_ok = bool(ckpt) and os.path.isfile(ckpt) and os.path.getsize(ckpt) > 0
-                lat_ok = lat is not None and float(lat) <= float(cur_target_latency_ms)
+                lat_ok = lat is not None and float(lat) <= float(cur_target_latency_us)
                 if ckpt_ok and lat_ok:
                     return True
                 # SUCCESS 但 ckpt 丢了 / latency 超 new target → 不算 done，落空继续找
             else:
                 return True
         elif status == "FAIL_latency":
-            if feq(r.get("target_latency_ms"), cur_target_latency_ms):
+            if feq(r.get("target_latency_us"), cur_target_latency_us):
                 return True
     return False

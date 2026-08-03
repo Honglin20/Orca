@@ -10,7 +10,7 @@ ckpt）。负责：
        TeacherCache 对齐中间 feature）；
     3. 一次性前向 sanity check（用 dummy_input / proxy_dataset_spec）——验证 hook 能取到 feature；
     4. 存 `teacher_cache.pt`（= `{teacher_state_dict, hook_names, teacher_model_path,
-       build_fn, dummy_input, feature_dims, latency_ms, accuracy}`）；
+       build_fn, dummy_input, feature_dims, latency_us, accuracy}`）；
        **格式决策（task override CONTRACTS §3）**：TeacherCache.load 重建 teacher 并直接
        teacher(x)（teacher 始终在线），不做预缓存查表。
     5. 导 teacher ONNX + 测 latency（复用 _struct_scripts/export_onnx.py +
@@ -29,7 +29,7 @@ CLI（契约 §4）::
 
 stdout::
 
-    TEACHER_LATENCY_MS: <float>
+    TEACHER_LATENCY_US: <float>
     TEACHER_ACCURACY: <float>
     TEACHER_DB_BASELINE: 0.0
     TEACHER_ONNX: <abs path>
@@ -267,8 +267,25 @@ _ACC_PATTERNS = [
 def _parse_accuracy(stdout: str) -> tuple[float, str, str]:
     """从 eval stdout 解析精度。返回 (value, kind, confidence)。
 
-    confidence = 'high'（命中 TEACHER_ACCURACY/NMSE/MSE/BER/SNR/accuracy）或 'low'（解析失败→占位 0.0）。
+    confidence = 'high'（命中 STUDENT_ACCURACY/TEACHER_ACCURACY/NMSE/MSE/BER/SNR/accuracy）或 'low'（解析失败→占位 0.0）。
+
+    teacher eval 复用 ``train_pipeline --mode eval``，其 stdout 协议为
+    ``STUDENT_ACCURACY: <float>`` + ``STUDENT_ACCURACY_KIND: <kind>`` —— 优先按此对解析，
+    kind 取自 _KIND 同伴行（校验 ∈ {nmse,mse,ber,snr,acc}，非法则回退 acc）。
     """
+    # 优先：train_pipeline --mode eval 协议（value + kind 同伴）
+    m_val = re.search(
+        r"STUDENT_ACCURACY\s*[:=]\s*([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)",
+        stdout, re.I,
+    )
+    if m_val:
+        kind = "acc"
+        m_kind = re.search(r"STUDENT_ACCURACY_KIND\s*[:=]\s*([A-Za-z_]+)", stdout, re.I)
+        if m_kind:
+            k = m_kind.group(1).strip().lower()
+            if k in {"nmse", "mse", "ber", "snr", "acc"}:
+                kind = k
+        return float(m_val.group(1)), kind, "high"
     for line in stdout.splitlines()[::-1]:
         s = line.strip()
         if s.startswith("{") and s.endswith("}"):
@@ -365,12 +382,12 @@ def teacher_setup(args) -> dict:
         args.opset, teacher_onnx, device=args.device,
     )
 
-    # 5. latency：优先 --teacher_latency_ms（teacher-gen __main__ 已测，透传避免重复测量）；
+    # 5. latency：优先 --teacher_latency_us（teacher-gen __main__ 已测，透传避免重复测量）；
     #    缺省则用 latency_provider 自测 ONNX。两者皆空 → fail loud。
-    if args.teacher_latency_ms is not None:
-        latency_ms = float(args.teacher_latency_ms)
+    if args.teacher_latency_us is not None:
+        latency_us = float(args.teacher_latency_us)
         print(
-            "[teacher_setup] latency_ms 从 --teacher_latency_ms 透传"
+            "[teacher_setup] latency_us 从 --teacher_latency_us 透传"
             "（teacher-gen __main__ 已测），跳过 latency_provider 自测",
             file=sys.stderr,
         )
@@ -378,12 +395,12 @@ def teacher_setup(args) -> dict:
         measure = _load_measure(args.latency_provider)
         import inspect
         if "device" in inspect.signature(measure).parameters:
-            latency_ms = float(measure(teacher_onnx, device=args.device))
+            latency_us = float(measure(teacher_onnx, device=args.device))
         else:
-            latency_ms = float(measure(teacher_onnx))
+            latency_us = float(measure(teacher_onnx))
     else:
         raise SystemExit(
-            "[teacher_setup] FAIL: 未提供 --teacher_latency_ms 且无 --latency_provider；"
+            "[teacher_setup] FAIL: 未提供 --teacher_latency_us 且无 --latency_provider；"
             "二者至少给一个（teacher-gen 已测 latency 时透传，否则给 latency_provider 自测）"
         )
 
@@ -431,7 +448,7 @@ def teacher_setup(args) -> dict:
         "build_fn": args.build_fn,
         "dummy_input": args.dummy_input,
         "feature_dims": feature_dims,
-        "latency_ms": latency_ms,
+        "latency_us": latency_us,
         "accuracy": accuracy,
         "accuracy_kind": kind,
         "accuracy_confidence": confidence,
@@ -445,7 +462,7 @@ def teacher_setup(args) -> dict:
     teacher_meta = {
         "teacher_onnx": teacher_onnx,
         "teacher_cache": teacher_cache_path,
-        "teacher_latency_ms": latency_ms,
+        "teacher_latency_us": latency_us,
         "teacher_accuracy": accuracy,
         "teacher_accuracy_kind": kind,
         "accuracy_confidence": confidence,
@@ -472,7 +489,7 @@ def teacher_setup(args) -> dict:
         "teacher_onnx": teacher_onnx,
         "teacher_cache": teacher_cache_path,
         "teacher_meta": teacher_meta_path,
-        "teacher_latency_ms": latency_ms,
+        "teacher_latency_us": latency_us,
         "teacher_accuracy": accuracy,
         "teacher_accuracy_known": accuracy_known,
         "teacher_db_baseline": 0.0,
@@ -497,9 +514,9 @@ def _main() -> int:
     p.add_argument("--output_dir", required=True)
     p.add_argument("--opset", type=int, default=17)
     p.add_argument("--latency_provider", default="",
-                   help="path::func，如 .../latency_onnxrt.py::measure（--teacher_latency_ms 缺省时用）")
-    p.add_argument("--teacher_latency_ms", type=float, default=None,
-                   help="teacher latency(ms)，优先于 --latency_provider（teacher-gen __main__ 已测时透传，避免重复测量）")
+                   help="path::func，如 .../latency_onnxrt.py::measure（--teacher_latency_us 缺省时用）")
+    p.add_argument("--teacher_latency_us", type=float, default=None,
+                   help="teacher latency(us)，优先于 --latency_provider（teacher-gen __main__ 已测时透传，避免重复测量）")
     p.add_argument("--project_root", default=".",
                    help="eval_command 的 cwd")
     p.add_argument(
@@ -530,7 +547,7 @@ def _main() -> int:
         traceback.print_exc(file=sys.stderr)
         return 2
 
-    print(f"TEACHER_LATENCY_MS: {r['teacher_latency_ms']:.4f}")
+    print(f"TEACHER_LATENCY_US: {r['teacher_latency_us']:.4f}")
     print(f"TEACHER_ACCURACY: {r['teacher_accuracy']}")
     print(f"TEACHER_ACCURACY_KNOWN: {str(r['teacher_accuracy_known']).lower()}")
     print(f"TEACHER_DB_BASELINE: {r['teacher_db_baseline']}")

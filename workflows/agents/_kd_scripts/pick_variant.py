@@ -7,7 +7,7 @@
 done 谓词见 ``kd_common.is_variant_done``（跨 run 复用：sha256 / provider_id / ckpt / target 校验）。
 
 CLI::
-    python3 pick_variant.py --ledger <ledger.jsonl> --target_latency_ms <f> \
+    python3 pick_variant.py --ledger <ledger.jsonl> --target_latency_us <f> \
         --latency_provider <path::func> [--receiver_dir <dir>] [--force_rerun] [--out <spec.json>]
 
 stdout::
@@ -108,7 +108,7 @@ def _validate_variant(mod: Any, path: str) -> tuple[dict[str, Any], dict[str, An
 def pick_variant(
     receiver_dir: str,
     ledger_path: str,
-    target_latency_ms: float,
+    target_latency_us: float,
     latency_provider: str,
     force_rerun: bool,
 ) -> dict[str, Any] | None:
@@ -129,7 +129,7 @@ def pick_variant(
 
         if not force_rerun:
             rows_for_v = [r for r in rows if r.get("variant_id") == variant_id]
-            if is_variant_done(rows_for_v, target_latency_ms, cur_provider_id, vsha):
+            if is_variant_done(rows_for_v, target_latency_us, cur_provider_id, vsha):
                 continue  # 已 done → 跳过
 
         return {
@@ -157,7 +157,7 @@ def _main() -> int:
     p.add_argument("--receiver_dir", default="",
                    help="receiver KB 目录；默认 $ORCA_KB_DIR/families/receiver")
     p.add_argument("--ledger", required=True, help="ledger.jsonl 路径（可能不存在）")
-    p.add_argument("--target_latency_ms", required=True, type=float, help="当前 latency 目标")
+    p.add_argument("--target_latency_us", required=True, type=float, help="当前 latency 目标")
     p.add_argument("--latency_provider", required=True,
                    help="用户 latency 脚本 path::func（算 provider_id）")
     p.add_argument("--force_rerun", action="store_true", help="忽略 ledger，全量重扫（仅 variants）")
@@ -172,7 +172,7 @@ def _main() -> int:
         spec = pick_variant(
             receiver_dir=receiver_dir,
             ledger_path=args.ledger,
-            target_latency_ms=args.target_latency_ms,
+            target_latency_us=args.target_latency_us,
             latency_provider=args.latency_provider,
             force_rerun=args.force_rerun,
         )

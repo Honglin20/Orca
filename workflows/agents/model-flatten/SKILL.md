@@ -143,8 +143,8 @@ Starting from the model entry point:
                opset=_args.opset,
                repeats=_args.repeats,
            )
-           print(f"LATENCY_MS: {_r['latency_ms_median']:.6f}")
-           print(f"LATENCY_STD: {_r['latency_ms_std']:.6f}")
+           print(f"LATENCY_US: {_r['latency_us_median']:.6f}")
+           print(f"LATENCY_STD: {_r['latency_us_std']:.6f}")
            print(f"LATENCY_SOURCE: {_r['source']}")
            print(f"LATENCY_CONFIDENCE: {_r['confidence']}")
        else:
@@ -194,7 +194,7 @@ Starting from the model entry point:
    inlining or device-portability fixes, (e) the `--latency_provider` default in `__main__`
    is the **rendered** `{{ inputs.latency_provider }}` value (not a Jinja template string;
    empty input → `""`). Then run `python <base_name>_flat.py` —— the `__main__` block must
-   complete without error and emit both `CORRECTNESS: OK` and `LATENCY_MS: <number>`
+   complete without error and emit both `CORRECTNESS: OK` and `LATENCY_US: <number>`
    (or `LATENCY_SKIPPED` if run outside the orca context).
 
 ### Step 5: KNOBS Identification (LLM Judgment —— core difficulty)
@@ -228,7 +228,7 @@ in Step 6's verifier output. An empty `KNOBS={}` is a contract violation
 > alignment** (so the flat file is a valid KD variant per CONTRACTS §1, ready for future
 > use as a KB variant or for direct gate consumption if the workflow evolves). The flat
 > file's primary consumers are `setup.step2` (reads `build_model` + `DUMMY_INPUT` for a
-> fail-loud contract re-assert, and reads `baseline_latency_ms` produced by this file's
+> fail-loud contract re-assert, and reads `baseline_latency_us` produced by this file's
 > `__main__`) — so an imprecise KNOBS dict does not block the main flow. Still aim for
 > accuracy: Step 6's flatten-verifier reviews KNOBS coverage as a `[MAJOR]` finding.
 
@@ -330,14 +330,14 @@ Prioritize [BLOCKER] > [MAJOR] > [MINOR] in your review.
 
 - Step 1-5 each complete only when the `__main__` block of `<base_name>_flat.py` runs
   successfully (no import / shape / dtype / device / runtime errors). The `__main__`
-  block must emit `CORRECTNESS: OK` AND `LATENCY_MS: <number>` (the unified "run `__main__`
+  block must emit `CORRECTNESS: OK` AND `LATENCY_US: <number>` (the unified "run `__main__`
   = correctness + latency" contract; `LATENCY_SKIPPED` only when run outside the orca
   context without `ORCA_AGENT_RESOURCES`).
 - Step 6a (`validate_contract.py`) is the deterministic gate for contract format; 6b is
   judgment-driven (flatten fidelity + KNOBS + latency `__main__` wiring).
 - The final artifact is `<output_dir>/<base_name>_flat.py` —— agent.md reads its path
-  into the `baseline_contract_path` output field and its `LATENCY_MS:` into
-  `baseline_latency_ms`.
+  into the `baseline_contract_path` output field and its `LATENCY_US:` into
+  `baseline_latency_us`.
 
 ## Guidelines
 

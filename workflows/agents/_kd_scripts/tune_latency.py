@@ -1,7 +1,7 @@
 """tune_latency.py —— KD-NAS 最小缩量 latency 调参（确定性，有界）。
 
 哲学：latency 是结构属性（默认权重导 ONNX 即可测，不需训练）。变体默认 cfg 的 latency 超
-``target_latency_ms`` 时，按 KNOBS 的 leverage 高→低、每次缩一档，**刚跨过 target 即停**
+``target_latency_us`` 时，按 KNOBS 的 leverage 高→低、每次缩一档，**刚跨过 target 即停**
 （最小缩量，保精度余量），不在真硬件上过度缩到很小。预算耗尽仍超 → FAIL_latency。
 
 确定性 / 复现：
@@ -13,7 +13,7 @@
 
 CLI::
     python3 tune_latency.py --variant_path <.py> --dummy_input '<json>' --knobs '<json>' \
-        --target_latency_ms <f> --latency_provider <path::func> --artifacts_dir <dir> \
+        --target_latency_us <f> --latency_provider <path::func> --artifacts_dir <dir> \
         [--build_fn build_model] [--max_measurements 40] [--measure_repeats 3] \
         [--device auto] [--seed 0] [--opset 17]
 
@@ -21,8 +21,8 @@ stdout::
     TUNE_STATUS: ACCEPTED|FAIL_latency
     ACCEPTED_CFG: <json>        # ACCEPTED 时
     BEST_EFFORT_CFG: <json>     # FAIL_latency 时（最低 latency 的 cfg）
-    LATENCY_MS_MEDIAN: <f>
-    LATENCY_MS_STD: <f>
+    LATENCY_US_MEDIAN: <f>
+    LATENCY_US_STD: <f>
     MEASUREMENTS: <int>
 
 fail loud：export/measure 异常 → exit 2（非零）。
@@ -114,7 +114,7 @@ def tune_latency(
     build_fn: str,
     dummy_input: str,
     knobs: dict[str, dict[str, Any]],
-    target_latency_ms: float,
+    target_latency_us: float,
     latency_provider: str,
     artifacts_dir: str,
     max_measurements: int,
@@ -149,7 +149,7 @@ def tune_latency(
     measurements = {"n": 0}  # 闭包可变计数
 
     def measure_cfg(cfg: dict[str, Any]) -> tuple[float, float]:
-        key = f"{variant_id}|{_cfg_hash(cfg)}|{target_latency_ms}|{cur_provider_id}"
+        key = f"{variant_id}|{_cfg_hash(cfg)}|{target_latency_us}|{cur_provider_id}"
         cached = cache.get(key)
         if isinstance(cached, dict) and "median" in cached:
             return float(cached["median"]), float(cached.get("std", 0.0))
@@ -180,12 +180,12 @@ def tune_latency(
         return {
             "status": "ACCEPTED",
             "accepted_cfg": c,
-            "latency_ms_median": m,
-            "latency_ms_std": s,
+            "latency_us_median": m,
+            "latency_us_std": s,
             "measurements": measurements["n"],
         }
 
-    if med <= target_latency_ms:
+    if med <= target_latency_us:
         return accepted(cfg, med, std)
 
     # 不可调变体（无 KNOBS）→ 起点 latency 即超阈 → FAIL_latency。
@@ -193,8 +193,8 @@ def tune_latency(
         return {
             "status": "FAIL_latency",
             "best_effort_cfg": best_cfg,
-            "latency_ms_median": best_med,
-            "latency_ms_std": std,
+            "latency_us_median": best_med,
+            "latency_us_std": std,
             "measurements": measurements["n"],
         }
 
@@ -208,14 +208,14 @@ def tune_latency(
             med, std = measure_cfg(cfg)
             if med < best_med:
                 best_med, best_cfg = med, dict(cfg)
-            if med <= target_latency_ms:
+            if med <= target_latency_us:
                 return accepted(cfg, med, std)
             if measurements["n"] >= max_measurements:
                 return {
                     "status": "FAIL_latency",
                     "best_effort_cfg": best_cfg,
-                    "latency_ms_median": best_med,
-                    "latency_ms_std": std,
+                    "latency_us_median": best_med,
+                    "latency_us_std": std,
                     "measurements": measurements["n"],
                     "reason": "max_measurements reached",
                 }
@@ -223,8 +223,8 @@ def tune_latency(
     return {
         "status": "FAIL_latency",
         "best_effort_cfg": best_cfg,
-        "latency_ms_median": best_med,
-        "latency_ms_std": std,
+        "latency_us_median": best_med,
+        "latency_us_std": std,
         "measurements": measurements["n"],
         "reason": "all knobs at floor",
     }
@@ -236,7 +236,7 @@ def _main() -> int:
     p.add_argument("--build_fn", default="build_model")
     p.add_argument("--dummy_input", required=True, help="JSON 字符串（变体 DUMMY_INPUT）")
     p.add_argument("--knobs", required=True, help="JSON 字符串（变体 KNOBS；不可调传 {}）")
-    p.add_argument("--target_latency_ms", required=True, type=float)
+    p.add_argument("--target_latency_us", required=True, type=float)
     p.add_argument("--latency_provider", required=True, help="path::func（用户真硬件 latency 脚本）")
     p.add_argument("--artifacts_dir", required=True, help="稳定 artifact 根（tune_cache.json + 临时 ONNX）")
     p.add_argument("--max_measurements", type=int, default=40, help="最大 cfg 测量数（硬 cap）")
@@ -259,7 +259,7 @@ def _main() -> int:
             build_fn=args.build_fn,
             dummy_input=dummy,
             knobs=knobs,
-            target_latency_ms=args.target_latency_ms,
+            target_latency_us=args.target_latency_us,
             latency_provider=args.latency_provider,
             artifacts_dir=args.artifacts_dir,
             max_measurements=args.max_measurements,
@@ -279,8 +279,8 @@ def _main() -> int:
         print(f"ACCEPTED_CFG: {json.dumps(res['accepted_cfg'], sort_keys=True)}")
     else:
         print(f"BEST_EFFORT_CFG: {json.dumps(res['best_effort_cfg'], sort_keys=True)}")
-    print(f"LATENCY_MS_MEDIAN: {res['latency_ms_median']:.6f}")
-    print(f"LATENCY_MS_STD: {res['latency_ms_std']:.6f}")
+    print(f"LATENCY_US_MEDIAN: {res['latency_us_median']:.6f}")
+    print(f"LATENCY_US_STD: {res['latency_us_std']:.6f}")
     print(f"MEASUREMENTS: {res['measurements']}")
     return 0
 

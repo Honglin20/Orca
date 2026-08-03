@@ -10,7 +10,7 @@ tools: [bash, read, write, edit, glob, grep]
 
 **产出步骤**：
 1. 幂等 check（teacher_cache + meta + ckpt 存在 ∧ sha256 匹配 → 跳过训练）；
-2. NEED_TRAIN=1 时跑 train_pipeline.py --mode teacher（用 gen_train_script 提取的用户默认 lr/epochs）+ teacher_setup 产 cache；
+2. NEED_TRAIN=1 时跑 train_pipeline.py --mode teacher（用 gen_train_script 提取的用户默认 lr/epochs）+ teacher_setup 产 cache（含 teacher eval：复用 train_pipeline --mode eval 测 teacher 精度进 meta）；
 3. metrics_tail 推 teacher 训练 metrics（live loss / 自定义模板）；
 4. 末尾 viz_kd_stage --stage baseline_seed 不再跑（已在 setup seed）—— 这里无新 stage 推送，
    viz_status 直接复用 metrics_tail stdout（dumb copy）；train_teacher 不调 viz_kd_stage，
@@ -33,7 +33,7 @@ tools: [bash, read, write, edit, glob, grep]
 ## 输入
 
 - ``teacher_model_path = {{ gen_teacher.output.teacher_model_path }}``（teacher wrapper .py，纯调参派生）
-- ``teacher_latency_ms = {{ gen_teacher.output.teacher_latency_ms }}``（teacher_setup 透传进 meta，不再自测）
+- ``teacher_latency_us = {{ gen_teacher.output.teacher_latency_us }}``（teacher_setup 透传进 meta，不再自测）
 - ``train_pipeline_path = {{ gen_train_script.output.train_pipeline_path }}``
 - ``teacher_default_lr = {{ gen_train_script.output.teacher_default_lr }}``（用户默认 lr）
 - ``teacher_default_epochs = {{ gen_train_script.output.teacher_default_epochs }}``（用户默认 epochs）
@@ -120,13 +120,28 @@ if [ "$NEED_TRAIN" = "1" ]; then
   fi
   [ -f "$TEACHER_CKPT" ] || { echo "FAIL: teacher 训练未产 ckpt：$TEACHER_CKPT" >&2; exit 2; }
   # 2b) teacher_setup 产 cache + meta（latency 从 gen_teacher.output 透传，不再自测）
+  #     teacher 可视化须由 evaluate 驱动（非 training loss）：复用 train_pipeline --mode eval
+  #     跑 teacher ckpt+model → STUDENT_ACCURACY，teacher_setup._parse_accuracy 解析进 meta。
+  #     eval 失败不阻断（teacher_setup 默认 lenient → teacher_accuracy_known=False，图表标 unknown）。
+  TEACHER_EVAL_CMD="python3 '$TRAIN_PIPELINE' --mode eval \
+    --student_model_path '$TEACHER_MODEL_PATH' \
+    --build_fn build_model --build_cfg '{}' \
+    --student_ckpt '$TEACHER_CKPT' --out_ckpt '$TEACHER_CKPT' \
+    --accuracy_baseline '{{ inputs.accuracy_baseline }}' \
+    --accuracy_baseline_kind '{{ inputs.accuracy_baseline_kind }}' \
+    --device '{{ setup.output.device }}' --seed '{{ inputs.seed }}' \
+    --project_root '{{ setup.output.project_root }}' \
+    --env_anchor '{{ setup.output.per_run_artifacts_dir }}'"
   python3 "$KD_SCRIPTS_DIR/teacher_setup.py" \
     --teacher_model_path "$TEACHER_MODEL_PATH" \
     --teacher_ckpt "$TEACHER_CKPT" \
     --build_fn build_model --dummy_input "$TEACHER_DUMMY" \
     --output_dir "$KD_ARTIFACTS_DIR" --opset 17 \
-    --teacher_latency_ms "{{ gen_teacher.output.teacher_latency_ms }}" \
-    --device "{{ setup.output.device }}"
+    --teacher_latency_us "{{ gen_teacher.output.teacher_latency_us }}" \
+    --eval_command "$TEACHER_EVAL_CMD" \
+    --project_root "{{ setup.output.project_root }}" \
+    --device "{{ setup.output.device }}" \
+    > "${KD_ARTIFACTS_DIR}meta/teacher_setup.log" 2>&1
   TS_RC=$?
   if [ $TS_RC -ne 0 ]; then
     echo "FAIL: teacher_setup.py rc=$TS_RC（teacher_cache 产不出，distill 无法跑）" >&2
@@ -134,7 +149,14 @@ if [ "$NEED_TRAIN" = "1" ]; then
   fi
 fi
 [ -f "$TEACHER_CACHE" ] && [ -f "$TEACHER_META" ] || { echo "FAIL: teacher_cache/meta 未生成（NEED_TRAIN=$NEED_TRAIN 但产物缺）" >&2; exit 2; }
-echo "PARSED step2: TEACHER_CACHE=$TEACHER_CACHE TEACHER_META=$TEACHER_META TEACHER_CKPT=$TEACHER_CKPT"
+# teacher_accuracy / known 从 teacher_meta.json 读（train 与幂等 skip 两条路径都覆盖；
+# eval 未跑或失败 → teacher_accuracy_known=false，下游图表标 unknown，不阻断）
+read TEACHER_ACC TEACHER_ACC_KNOWN <<< "$(python3 -c "
+import json
+m=json.load(open('$TEACHER_META'))
+print(m.get('teacher_accuracy', 0.0), str(m.get('teacher_accuracy_known', False)).lower())
+")"
+echo "PARSED step2: TEACHER_CACHE=$TEACHER_CACHE TEACHER_META=$TEACHER_META TEACHER_CKPT=$TEACHER_CKPT TEACHER_ACC=$TEACHER_ACC TEACHER_ACC_KNOWN=$TEACHER_ACC_KNOWN"
 ```
 
 ## step 3 执行：metrics_tail（live loss + 自定义模板 metrics）
@@ -168,11 +190,15 @@ echo "VIZ_STATUS_JSON=$VIZ_STATUS"
   "teacher_cache": "<TEACHER_CACHE abs>",
   "teacher_meta": "<TEACHER_META abs>",
   "teacher_ckpt": "<TEACHER_CKPT abs>",
-  "teacher_latency_ms": <gen_teacher.output.teacher_latency_ms 透传 float>,
+  "teacher_latency_us": <gen_teacher.output.teacher_latency_us 透传 float>,
+  "teacher_accuracy": <TEACHER_ACC float, eval 真测；eval 缺/失败=0.0>,
+  "teacher_accuracy_known": <TEACHER_ACC_KNOWN bool, true=eval 命中真值>,
   "viz_status": <VIZ_STATUS_JSON 对象原样嵌入>
 }
 ```
 
 - ``teacher_cache`` / ``teacher_meta`` / ``teacher_ckpt`` 必须是 step2 产出的实际文件路径；
-- ``teacher_latency_ms`` 透传 ``gen_teacher.output.teacher_latency_ms``（非自测）；
+- ``teacher_latency_us`` 透传 ``gen_teacher.output.teacher_latency_us``（非自测）；
+- ``teacher_accuracy`` / ``teacher_accuracy_known`` 读自 ``teacher_meta.json``（train_pipeline --mode eval 真测；
+  eval 未跑或解析失败 → 0.0 / false，下游总表标 "teacher(unknown acc)"，不阻断）；
 - ``viz_status`` 必须是 JSON 对象（dumb copy 自 metrics_tail stdout，失败值合法不阻断）。

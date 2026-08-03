@@ -85,7 +85,7 @@ loss 的函数即候选）+ 数据加载逻辑（`build_dataloader` 或训练循
   `build_user_optimizer` / `build_user_scheduler`（用户有才搬，无则返回 None）——
   **搬入 = 函数体 + 其引用的模块级依赖闭包一并拷贝**（常量 / helper / 类）；
   拷贝后仍依赖用户项目符号 → **fail loud**（不许运行时加载用户模块兜底）；
-- 按 §7 选 KD 项（保守默认：纯 task_loss）+ 更新 `--kd_config` 默认；
+- 按 §7 选 KD 项（distill 必须非空，默认 `mse`；空 `kd_losses` 被 `build_kd_loss` fail loud 拒绝）+ 更新 `--kd_config` 默认；
 - 校验 CLI 一致性（`--help` + 与 workflow §1 stable base CLI 对齐，**已无
   `--user_*` 覆盖 flag**）。
 

@@ -1,13 +1,13 @@
 """latency_provider.py —— kd-nas-demo 的 ONNX latency 测量（onnxruntime 真实计时）。
 
 签名对齐 ``tune_latency._measure_cfg`` / ``measure_student._load_measure`` 的期望：
-``measure(onnx_path, ...) -> float (ms)``（``device`` 形参可选，调用方按需注入）。
+``measure(onnx_path, ...) -> float (us)``（``device`` 形参可选，调用方按需注入）。
 
 用法（kd-nas inputs.latency_provider 的值）::
 
     <abs>/examples/kd-nas-demo/latency_provider.py::measure
 
-**绝不伪造**：onnxruntime 实跑 ``runs`` 次取中位数（ms）；文件缺失/加载失败 → raise（fail loud）。
+**绝不伪造**：onnxruntime 实跑 ``runs`` 次取中位数（us）；文件缺失/加载失败 → raise（fail loud）。
 默认 ``runs=5 / warmup=2``（demo 偏快；真硬件实测可调大）。
 """
 
@@ -40,7 +40,7 @@ def measure(
     device: str = "auto",
     seed: int = 0,
 ) -> float:
-    """实跑 ONNX 取中位数单次推理时延（ms）。
+    """实跑 ONNX 取中位数单次推理时延（us）。
 
     Args:
         onnx_path: ONNX 文件路径。
@@ -50,7 +50,7 @@ def measure(
         seed: dummy 输入随机种子（可复现）。
 
     Returns:
-        中位数单次推理时延（ms，浮点）。
+        中位数单次推理时延（us，浮点）。
 
     Raises:
         FileNotFoundError: onnx_path 不存在。
@@ -85,7 +85,7 @@ def measure(
         t = time.perf_counter()
         sess.run(None, inp)
         ts.append(time.perf_counter() - t)
-    return statistics.median(ts) * 1000.0
+    return statistics.median(ts) * 1e6
 
 
 def _main() -> int:
@@ -98,13 +98,13 @@ def _main() -> int:
     args = p.parse_args()
 
     try:
-        ms = measure(args.onnx, runs=args.runs, warmup=args.warmup, device=args.device, seed=args.seed)
+        us = measure(args.onnx, runs=args.runs, warmup=args.warmup, device=args.device, seed=args.seed)
     except Exception as e:
         import traceback
         traceback.print_exc(file=sys.stderr)
         print(f"FAIL: {type(e).__name__}: {e}", file=sys.stderr)
         return 2
-    print(f"LATENCY_MS: {ms:.4f}")
+    print(f"LATENCY_US: {us:.4f}")
     return 0
 
 

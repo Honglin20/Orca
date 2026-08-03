@@ -82,8 +82,9 @@ string (breaks `build_model(**cfg)`); different flags for teacher vs student.
 **auto-fixable**: yes
 **Section**: workflow §1, §7
 **Check**: `--kd_config` is parsed as JSON only in distill mode (`json.loads(
-args.kd_config)`). Default is `'{"kd_losses": [], "weights": {}}'` (task
-loss only — no KD terms).
+args.kd_config)`). Default is `'{"kd_losses": ["mse"], "weights": {"mse": 1.0}}'`
+(non-empty kd_losses mandatory in distill — empty is rejected fail loud by
+`build_kd_loss`).
 **Verify**: Read `run_distill_mode`. Confirm `json.loads(args.kd_config)`.
 Confirm teacher mode does not parse it (would crash if user passes
 `--mode teacher` without `--kd_config`).

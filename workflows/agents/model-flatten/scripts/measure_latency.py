@@ -12,7 +12,7 @@
      - `latency_provider` 非空 → 加载 `path::func` → `measure(onnx[, device=...])` repeats 次取 median+std
      - `latency_provider` 空 → fallback ONNXRT-CPU + stderr WARN（非用户真硬件；KD-NAS workflow
        必填 latency_provider 时不应走到这里）
-  4. 返回 `{latency_ms_median, latency_ms_std, source, confidence, onnx_path}`
+  4. 返回 `{latency_us_median, latency_us_std, source, confidence, onnx_path}`
 
 绝不伪造（CONTRACTS §6）：测不出 → raise（caller fail loud），不编造数值。
 
@@ -24,7 +24,7 @@ CLI::
 
 stdout::
 
-    LATENCY_MS: <median>
+    LATENCY_US: <median>
     LATENCY_STD: <std>
     LATENCY_SOURCE: provider|cpu-fallback
     LATENCY_CONFIDENCE: high|low
@@ -220,7 +220,7 @@ def _measure_cpu_fallback(
 ) -> tuple[float, float]:
     """ONNXRT 直接测（latency_provider 未给时的 fallback）。
 
-    返回 (median_ms, pstdev_ms)。stderr 打 WARN：非用户真硬件（KD-NAS workflow 必填
+    返回 (median_us, pstdev_us)。stderr 打 WARN：非用户真硬件（KD-NAS workflow 必填
     latency_provider 时不应走到这里；flatten agent 自身容错为通用性）。
     """
     import numpy as np
@@ -247,8 +247,8 @@ def _measure_cpu_fallback(
         t = time.perf_counter()
         sess.run(None, inp)
         ts.append(time.perf_counter() - t)
-    med = float(statistics.median(ts) * 1000.0)
-    std = float(statistics.pstdev(ts) * 1000.0) if len(ts) > 1 else 0.0
+    med = float(statistics.median(ts) * 1e6)
+    std = float(statistics.pstdev(ts) * 1e6) if len(ts) > 1 else 0.0
     return med, std
 
 
@@ -274,7 +274,7 @@ def measure_contract_latency(
         onnx_out: ONNX 输出路径；空 → contract 同目录 ``<stem>_baseline.onnx``。
 
     Returns:
-        ``{latency_ms_median, latency_ms_std, source, confidence, onnx_path}``。
+        ``{latency_us_median, latency_us_std, source, confidence, onnx_path}``。
 
     Raises:
         任何 import / export / measure 异常（caller fail loud，不伪造数值）。
@@ -317,8 +317,8 @@ def measure_contract_latency(
         confidence = "low"
 
     return {
-        "latency_ms_median": med,
-        "latency_ms_std": std,
+        "latency_us_median": med,
+        "latency_us_std": std,
         "source": source,
         "confidence": confidence,
         "onnx_path": onnx_path,
@@ -363,8 +363,8 @@ def _main() -> int:
         traceback.print_exc(file=sys.stderr)
         return 2
 
-    _emit("LATENCY_MS", f"{res['latency_ms_median']:.6f}")
-    _emit("LATENCY_STD", f"{res['latency_ms_std']:.6f}")
+    _emit("LATENCY_US", f"{res['latency_us_median']:.6f}")
+    _emit("LATENCY_STD", f"{res['latency_us_std']:.6f}")
     _emit("LATENCY_SOURCE", res["source"])
     _emit("LATENCY_CONFIDENCE", res["confidence"])
     _emit("ONNX", res["onnx_path"])

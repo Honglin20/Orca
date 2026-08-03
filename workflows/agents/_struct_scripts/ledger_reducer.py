@@ -21,10 +21,10 @@ CLI：
       --ledger <path> \\
       --champions <path> \\
       --candidate <json-string-or-@file> \\
-      --target_latency_ms <float> \\
+      --target_latency_us <float> \\
       --accuracy_target <float> \\
       --max_rounds <int> \\
-      --baseline_latency_ms <float> \\
+      --baseline_latency_us <float> \\
       --baseline_accuracy <float> \\
       --structural_slot_ratio <float> \\
       [--reject_hyperparam_only] \\
@@ -36,7 +36,7 @@ stdout（JSON）：curator output_schema + 本轮 ledger/champions 写入证据
       "round": int,
       "continue_loop": bool,
       "champion_id": str,
-      "champion_latency_ms": float,
+      "champion_latency_us": float,
       "champion_accuracy": float,
       "route_mode": "exploit" | "explore",
       "terminate_reason": "champion_met" | "max_rounds" | "budget" | "",
@@ -74,7 +74,7 @@ _LEDGER_REQUIRED = (
     "round",
     "status",
     "tag",
-    "latency_ms",
+    "latency_us",
     "accuracy",
     "met_accuracy",
     "snapshot",
@@ -83,7 +83,7 @@ _LEDGER_REQUIRED = (
     "hypothesis",
 )
 # champions.jsonl 每行必备字段。
-_CHAMPIONS_REQUIRED = ("round", "id", "latency_ms", "accuracy", "delta_vs_baseline_ms", "snapshot")
+_CHAMPIONS_REQUIRED = ("round", "id", "latency_us", "accuracy", "delta_vs_baseline_us", "snapshot")
 
 # status 合法值。
 _LEDGER_STATUS = {
@@ -175,8 +175,8 @@ def _validate_candidate(cand: dict[str, Any]) -> None:
         raise ValueError(
             f"candidate.tag 非法：{cand['tag']!r}；合法：{sorted(_TAG_VALUES)}"
         )
-    # latency_ms / accuracy 可为 -1（FAIL_export / 未训练），允许数字。
-    for k in ("latency_ms", "accuracy"):
+    # latency_us / accuracy 可为 -1（FAIL_export / 未训练），允许数字。
+    for k in ("latency_us", "accuracy"):
         if not isinstance(cand[k], (int, float)) or isinstance(cand[k], bool):
             raise ValueError(f"candidate.{k} 必须是数字（得到 {type(cand[k]).__name__}）")
     if not isinstance(cand["round"], int) or isinstance(cand["round"], bool):
@@ -208,22 +208,22 @@ def _global_best_champion(
     ]
     if not candidates:
         return baseline
-    # min by latency_ms；FIFO tiebreak 用 ledger 顺序（stable sort 保序）。
-    best = min(candidates, key=lambda e: e["latency_ms"])
+    # min by latency_us；FIFO tiebreak 用 ledger 顺序（stable sort 保序）。
+    best = min(candidates, key=lambda e: e["latency_us"])
     return best
 
 
 def _to_champion_record(
-    champion_entry: dict[str, Any], baseline_latency_ms: float
+    champion_entry: dict[str, Any], baseline_latency_us: float
 ) -> dict[str, Any]:
     """把 ledger entry（或 baseline seed）规范成 champions.jsonl 一行。"""
     return {
         "round": champion_entry.get("round", 0),
         "id": champion_entry["id"],
-        "latency_ms": champion_entry["latency_ms"],
+        "latency_us": champion_entry["latency_us"],
         "accuracy": champion_entry["accuracy"],
-        "delta_vs_baseline_ms": round(
-            champion_entry["latency_ms"] - baseline_latency_ms, 6
+        "delta_vs_baseline_us": round(
+            champion_entry["latency_us"] - baseline_latency_us, 6
         ),
         "snapshot": champion_entry.get("snapshot", ""),
     }
@@ -242,10 +242,10 @@ def reduce_ledger(
     ledger_path: str,
     champions_path: str,
     candidate: dict[str, Any],
-    target_latency_ms: float,
+    target_latency_us: float,
     accuracy_target: float,
     max_rounds: int,
-    baseline_latency_ms: float,
+    baseline_latency_us: float,
     baseline_accuracy: float,
     baseline_id: str = "baseline",
     baseline_snapshot: str = "",
@@ -271,9 +271,9 @@ def reduce_ledger(
         baseline_champion = {
             "round": 0,
             "id": baseline_id,
-            "latency_ms": baseline_latency_ms,
+            "latency_us": baseline_latency_us,
             "accuracy": baseline_accuracy,
-            "delta_vs_baseline_ms": 0,
+            "delta_vs_baseline_us": 0,
             "snapshot": baseline_snapshot,
         }
         # 首次没 champions.jsonl 时，等会儿同步 seed（保持 §3 Setup 不变量）。
@@ -285,8 +285,8 @@ def reduce_ledger(
     if reject_hyperparam_only and candidate["tag"] == "hyperparam":
         status_final = "REJECT_struct"  # §9.2 严格模式
 
-    # delta_latency_ms：相对**当前 champion**（ratchet 基准），非相对 baseline。
-    delta_latency_ms = round(candidate["latency_ms"] - cur_champion["latency_ms"], 6)
+    # delta_latency_us：相对**当前 champion**（ratchet 基准），非相对 baseline。
+    delta_latency_us = round(candidate["latency_us"] - cur_champion["latency_us"], 6)
 
     ledger_entry: dict[str, Any] = {
         "id": candidate["id"],
@@ -295,9 +295,9 @@ def reduce_ledger(
         "round": candidate["round"],
         "status": status_final,
         "tag": candidate["tag"],
-        "latency_ms": candidate["latency_ms"],
+        "latency_us": candidate["latency_us"],
         "accuracy": candidate["accuracy"],
-        "delta_latency_ms": delta_latency_ms,
+        "delta_latency_us": delta_latency_us,
         "met_accuracy": candidate["met_accuracy"],
         "snapshot": candidate["snapshot"],
         "onnx": candidate["onnx"],
@@ -323,7 +323,7 @@ def reduce_ledger(
     new_champion_this_round = (
         best_after["id"] == candidate["id"]
         and best_after["id"] != prev_best_id
-        and best_after["latency_ms"] < cur_champion["latency_ms"]
+        and best_after["latency_us"] < cur_champion["latency_us"]
     )
     # 也可能 baseline 已是 best 但 candidate 与 baseline tie — 不算新 champion（无改进）。
     # 若全局 best 仍是 baseline（无 SUCCESS candidate）→ champion 不变。
@@ -336,11 +336,11 @@ def reduce_ledger(
     # champion 规范成 champions.jsonl 一行（baseline 已是该格式；ledger entry 需转换）。
     if champion_now.get("id") == baseline_champion.get("id") and not champions:
         champion_record = baseline_champion
-    elif "delta_vs_baseline_ms" in champion_now and "snapshot" in champion_now:
+    elif "delta_vs_baseline_us" in champion_now and "snapshot" in champion_now:
         # 已是 champions 格式（如 cur_champion 来自 champions.jsonl）。
         champion_record = champion_now
     else:
-        champion_record = _to_champion_record(champion_now, baseline_latency_ms)
+        champion_record = _to_champion_record(champion_now, baseline_latency_us)
 
     # ── Step 5：explore/exploit 二值路由 ──────────────────────────
     route_mode = "exploit" if new_champion_this_round else "explore"
@@ -357,7 +357,7 @@ def reduce_ledger(
     # ── Step 6：continue_loop 决策（驱动 DAG 循环）──────────────────────────
     round_num = candidate["round"]
     target_met = (
-        champion_record["latency_ms"] <= target_latency_ms
+        champion_record["latency_us"] <= target_latency_us
         and champion_record["accuracy"] >= accuracy_target
     )
     if target_met:
@@ -388,7 +388,7 @@ def reduce_ledger(
         "round": round_num,
         "continue_loop": continue_loop,
         "champion_id": champion_record["id"],
-        "champion_latency_ms": champion_record["latency_ms"],
+        "champion_latency_us": champion_record["latency_us"],
         "champion_accuracy": champion_record["accuracy"],
         "route_mode": route_mode,
         "terminate_reason": terminate_reason,
@@ -400,7 +400,7 @@ def reduce_ledger(
         "champions_entry_written": champions_written,
         "candidate_id": candidate["id"],
         "status_final": status_final,
-        "delta_latency_ms": delta_latency_ms,
+        "delta_latency_us": delta_latency_us,
     }
 
 
@@ -425,10 +425,10 @@ def _main() -> int:
         required=True,
         help="本轮 candidate JSON 字符串 / 文件路径 / @file",
     )
-    parser.add_argument("--target_latency_ms", type=float, required=True)
+    parser.add_argument("--target_latency_us", type=float, required=True)
     parser.add_argument("--accuracy_target", type=float, required=True)
     parser.add_argument("--max_rounds", type=int, required=True)
-    parser.add_argument("--baseline_latency_ms", type=float, required=True)
+    parser.add_argument("--baseline_latency_us", type=float, required=True)
     parser.add_argument("--baseline_accuracy", type=float, required=True)
     parser.add_argument(
         "--baseline_id", default="baseline", help="baseline id（与 champions seed 对齐）"
@@ -460,10 +460,10 @@ def _main() -> int:
             ledger_path=args.ledger,
             champions_path=args.champions,
             candidate=candidate,
-            target_latency_ms=args.target_latency_ms,
+            target_latency_us=args.target_latency_us,
             accuracy_target=args.accuracy_target,
             max_rounds=args.max_rounds,
-            baseline_latency_ms=args.baseline_latency_ms,
+            baseline_latency_us=args.baseline_latency_us,
             baseline_accuracy=args.baseline_accuracy,
             baseline_id=args.baseline_id,
             baseline_snapshot=args.baseline_snapshot,

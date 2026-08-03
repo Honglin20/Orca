@@ -39,7 +39,7 @@ def _cand(
     variant_id: str = "r1_student",
     round_: int = 1,
     parent: str = "baseline",
-    latency_ms: float = 5.0,
+    latency_us: float = 5.0,
     accuracy: float = 0.018,
     met_latency: bool = True,
     met_accuracy: bool = True,
@@ -57,7 +57,7 @@ def _cand(
         "student_path": student_path,
         "round": round_,
         "parent": parent,
-        "latency_ms": latency_ms,
+        "latency_us": latency_us,
         "accuracy": accuracy,
         "met_latency": met_latency,
         "met_accuracy": met_accuracy,
@@ -87,11 +87,11 @@ def test_admitted_requires_all_three_conditions(tmp_path):
         ledger_path=str(ledger_path),
         champions_path=str(champions_path),
         candidate=_cand(met_accuracy=False, accuracy=0.05),
-        target_latency_ms=6.0,
+        target_latency_us=6.0,
         accuracy_baseline=0.02,
         accuracy_baseline_kind="nmse",
         max_rounds=5,
-        baseline_latency_ms=10.0,
+        baseline_latency_us=10.0,
         baseline_accuracy=0.02,
     )
     assert res["champion_id"] == "baseline"
@@ -108,11 +108,11 @@ def test_fail_train_not_admitted_even_with_met_latency(tmp_path):
         ledger_path=str(ledger_path),
         champions_path=str(champions_path),
         candidate=_cand(status="FAIL_train", met_latency=True, met_accuracy=False, accuracy=-1),
-        target_latency_ms=6.0,
+        target_latency_us=6.0,
         accuracy_baseline=0.02,
         accuracy_baseline_kind="nmse",
         max_rounds=5,
-        baseline_latency_ms=10.0,
+        baseline_latency_us=10.0,
         baseline_accuracy=0.02,
     )
     assert res["champion_id"] == "baseline"
@@ -126,11 +126,11 @@ def test_fail_latency_skipped_from_admit(tmp_path):
         ledger_path=str(ledger_path),
         champions_path=str(champions_path),
         candidate=_cand(status="FAIL_latency", met_latency=False, met_accuracy=False, accuracy=-1),
-        target_latency_ms=6.0,
+        target_latency_us=6.0,
         accuracy_baseline=0.02,
         accuracy_baseline_kind="nmse",
         max_rounds=5,
-        baseline_latency_ms=10.0,
+        baseline_latency_us=10.0,
         baseline_accuracy=0.02,
     )
     assert res["champion_id"] == "baseline"
@@ -145,12 +145,12 @@ def test_first_success_becomes_champion(tmp_path):
     res = r.reduce_ledger(
         ledger_path=str(ledger_path),
         champions_path=str(champions_path),
-        candidate=_cand(latency_ms=4.0),
-        target_latency_ms=6.0,
+        candidate=_cand(latency_us=4.0),
+        target_latency_us=6.0,
         accuracy_baseline=0.02,
         accuracy_baseline_kind="nmse",
         max_rounds=5,
-        baseline_latency_ms=10.0,
+        baseline_latency_us=10.0,
         baseline_accuracy=0.02,
     )
     assert res["champion_id"] == "r1_student"
@@ -167,15 +167,15 @@ def test_min_latency_ratchet_strict_improvement(tmp_path):
     common = dict(
         ledger_path=str(ledger_path),
         champions_path=str(champions_path),
-        target_latency_ms=100.0,
+        target_latency_us=100.0,
         accuracy_baseline=0.02,
         accuracy_baseline_kind="nmse",
         max_rounds=5,
-        baseline_latency_ms=10.0,
+        baseline_latency_us=10.0,
         baseline_accuracy=0.02,
     )
-    r.reduce_ledger(candidate=_cand(variant_id="r1_student", latency_ms=5.0, round_=1), **common)
-    res = r.reduce_ledger(candidate=_cand(variant_id="r2_student", latency_ms=3.0, round_=2), **common)
+    r.reduce_ledger(candidate=_cand(variant_id="r1_student", latency_us=5.0, round_=1), **common)
+    res = r.reduce_ledger(candidate=_cand(variant_id="r2_student", latency_us=3.0, round_=2), **common)
     assert res["champion_id"] == "r2_student"
     assert res["new_champion_this_round"] is True
 
@@ -191,15 +191,15 @@ def test_tie_does_not_ratchet_fifo_earliest_wins(tmp_path):
     common = dict(
         ledger_path=str(ledger_path),
         champions_path=str(champions_path),
-        target_latency_ms=100.0,
+        target_latency_us=100.0,
         accuracy_baseline=0.02,
         accuracy_baseline_kind="nmse",
         max_rounds=5,
-        baseline_latency_ms=10.0,
+        baseline_latency_us=10.0,
         baseline_accuracy=0.02,
     )
-    r.reduce_ledger(candidate=_cand(variant_id="r1_student", latency_ms=5.0, round_=1), **common)
-    res = r.reduce_ledger(candidate=_cand(variant_id="r2_student", latency_ms=5.0, round_=2), **common)
+    r.reduce_ledger(candidate=_cand(variant_id="r1_student", latency_us=5.0, round_=1), **common)
+    res = r.reduce_ledger(candidate=_cand(variant_id="r2_student", latency_us=5.0, round_=2), **common)
     assert res["new_champion_this_round"] is False
     assert res["champion_id"] == "r1_student"
 
@@ -211,15 +211,15 @@ def test_higher_latency_admitted_does_not_replace_champion(tmp_path):
     common = dict(
         ledger_path=str(ledger_path),
         champions_path=str(champions_path),
-        target_latency_ms=100.0,
+        target_latency_us=100.0,
         accuracy_baseline=0.02,
         accuracy_baseline_kind="nmse",
         max_rounds=5,
-        baseline_latency_ms=10.0,
+        baseline_latency_us=10.0,
         baseline_accuracy=0.02,
     )
-    r.reduce_ledger(candidate=_cand(variant_id="r1_student", latency_ms=3.0, round_=1), **common)
-    res = r.reduce_ledger(candidate=_cand(variant_id="r2_student", latency_ms=8.0, round_=2), **common)
+    r.reduce_ledger(candidate=_cand(variant_id="r1_student", latency_us=3.0, round_=1), **common)
+    res = r.reduce_ledger(candidate=_cand(variant_id="r2_student", latency_us=8.0, round_=2), **common)
     assert res["champion_id"] == "r1_student"
     assert res["new_champion_this_round"] is False
 
@@ -235,11 +235,11 @@ def test_max_rounds_terminate(tmp_path):
         ledger_path=str(ledger_path),
         champions_path=str(champions_path),
         candidate=_cand(round_=5, met_accuracy=False, status="FAIL_train", accuracy=-1),
-        target_latency_ms=6.0,
+        target_latency_us=6.0,
         accuracy_baseline=0.02,
         accuracy_baseline_kind="nmse",
         max_rounds=5,
-        baseline_latency_ms=10.0,
+        baseline_latency_us=10.0,
         baseline_accuracy=0.02,
     )
     assert res["continue_loop"] is False
@@ -253,11 +253,11 @@ def test_continue_loop_true_when_under_budget_no_admit(tmp_path):
         ledger_path=str(ledger_path),
         champions_path=str(champions_path),
         candidate=_cand(round_=2, met_accuracy=False, status="FAIL_train", accuracy=-1),
-        target_latency_ms=6.0,
+        target_latency_us=6.0,
         accuracy_baseline=0.02,
         accuracy_baseline_kind="nmse",
         max_rounds=5,
-        baseline_latency_ms=10.0,
+        baseline_latency_us=10.0,
         baseline_accuracy=0.02,
     )
     assert res["continue_loop"] is True
@@ -273,12 +273,12 @@ def test_ledger_appended_one_line_champions_seeded(tmp_path):
     r.reduce_ledger(
         ledger_path=str(ledger_path),
         champions_path=str(champions_path),
-        candidate=_cand(latency_ms=4.0),
-        target_latency_ms=6.0,
+        candidate=_cand(latency_us=4.0),
+        target_latency_us=6.0,
         accuracy_baseline=0.02,
         accuracy_baseline_kind="nmse",
         max_rounds=5,
-        baseline_latency_ms=10.0,
+        baseline_latency_us=10.0,
         baseline_accuracy=0.02,
     )
     ledger_rows = [json.loads(l) for l in ledger_path.read_text("utf-8").splitlines() if l.strip()]
@@ -290,7 +290,7 @@ def test_ledger_appended_one_line_champions_seeded(tmp_path):
     assert len(champ_rows) == 2
     assert champ_rows[0]["id"] == "baseline"
     assert champ_rows[1]["id"] == "r1_student"
-    assert champ_rows[1]["delta_vs_baseline_ms"] == round(4.0 - 10.0, 6)
+    assert champ_rows[1]["delta_vs_baseline_us"] == round(4.0 - 10.0, 6)
 
 
 def test_dry_run_writes_nothing(tmp_path):
@@ -299,12 +299,12 @@ def test_dry_run_writes_nothing(tmp_path):
     r.reduce_ledger(
         ledger_path=str(ledger_path),
         champions_path=str(champions_path),
-        candidate=_cand(latency_ms=4.0),
-        target_latency_ms=6.0,
+        candidate=_cand(latency_us=4.0),
+        target_latency_us=6.0,
         accuracy_baseline=0.02,
         accuracy_baseline_kind="nmse",
         max_rounds=5,
-        baseline_latency_ms=10.0,
+        baseline_latency_us=10.0,
         baseline_accuracy=0.02,
         dry_run=True,
     )
@@ -325,11 +325,11 @@ def test_missing_field_fails_loud(tmp_path):
             ledger_path=str(ledger_path),
             champions_path=str(champions_path),
             candidate=bad,
-            target_latency_ms=6.0,
+            target_latency_us=6.0,
             accuracy_baseline=0.02,
             accuracy_baseline_kind="nmse",
             max_rounds=5,
-            baseline_latency_ms=10.0,
+            baseline_latency_us=10.0,
             baseline_accuracy=0.02,
         )
 
@@ -342,11 +342,11 @@ def test_invalid_status_fails_loud(tmp_path):
             ledger_path=str(ledger_path),
             champions_path=str(champions_path),
             candidate=_cand(status="REJECT_struct"),
-            target_latency_ms=6.0,
+            target_latency_us=6.0,
             accuracy_baseline=0.02,
             accuracy_baseline_kind="nmse",
             max_rounds=5,
-            baseline_latency_ms=10.0,
+            baseline_latency_us=10.0,
             baseline_accuracy=0.02,
         )
 
@@ -360,11 +360,11 @@ def test_corrupted_ledger_fails_loud(tmp_path):
             ledger_path=str(ledger_path),
             champions_path=str(champions_path),
             candidate=_cand(),
-            target_latency_ms=6.0,
+            target_latency_us=6.0,
             accuracy_baseline=0.02,
             accuracy_baseline_kind="nmse",
             max_rounds=5,
-            baseline_latency_ms=10.0,
+            baseline_latency_us=10.0,
             baseline_accuracy=0.02,
         )
 
@@ -379,11 +379,11 @@ def test_non_bool_met_flag_fails_loud(tmp_path):
             ledger_path=str(ledger_path),
             champions_path=str(champions_path),
             candidate=bad,
-            target_latency_ms=6.0,
+            target_latency_us=6.0,
             accuracy_baseline=0.02,
             accuracy_baseline_kind="nmse",
             max_rounds=5,
-            baseline_latency_ms=10.0,
+            baseline_latency_us=10.0,
             baseline_accuracy=0.02,
         )
 
@@ -397,7 +397,7 @@ def test_cli_runs_end_to_end(tmp_path):
     ledger_path = tmp_path / "ledger.jsonl"
     champions_path = tmp_path / "champions.jsonl"
     cand_file = tmp_path / "cand.json"
-    cand_file.write_text(json.dumps(_cand(latency_ms=4.0)), encoding="utf-8")
+    cand_file.write_text(json.dumps(_cand(latency_us=4.0)), encoding="utf-8")
     proc = subprocess.run(
         [
             sys.executable,
@@ -405,11 +405,11 @@ def test_cli_runs_end_to_end(tmp_path):
             "--ledger", str(ledger_path),
             "--champions", str(champions_path),
             "--candidate", f"@{cand_file}",
-            "--target_latency_ms", "6.0",
+            "--target_latency_us", "6.0",
             "--accuracy_baseline", "0.02",
             "--accuracy_baseline_kind", "nmse",
             "--max_rounds", "5",
-            "--baseline_latency_ms", "10.0",
+            "--baseline_latency_us", "10.0",
             "--baseline_accuracy", "0.02",
         ],
         capture_output=True,

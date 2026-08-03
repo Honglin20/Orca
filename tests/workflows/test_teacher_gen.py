@@ -8,7 +8,7 @@
 - teacher-gen/agent.md 结构契约（output_schema、SKILL.md / scripts 引用、强执行指令）
 - teacher-gen/SKILL.md 4-step 派生工作流 + verifier prompt 框架
 - E2E：用真实 baseline（``examples/kd-nas-demo/baseline_model.py``）派生 teacher wrapper，
-  跑双重硬校验 + teacher ``__main__``，验 CORRECTNESS + LATENCY_MS（统一契约）
+  跑双重硬校验 + teacher ``__main__``，验 CORRECTNESS + LATENCY_US（统一契约）
 - wrapper 模式：teacher 经 ``importlib.util.spec_from_file_location`` 加载 baseline，build_model
   委托不拷贝架构代码
 
@@ -165,7 +165,7 @@ if __name__ == "__main__":
             latency_provider=_args.latency_provider,
             device=_args.device, seed=_args.seed, opset=_args.opset, repeats=_args.repeats,
         )
-        print(f"LATENCY_MS: {{_r['latency_ms_median']:.6f}}")
+        print(f"LATENCY_US: {{_r['latency_us_median']:.6f}}")
         print(f"LATENCY_SOURCE: {{_r['source']}}")
         print(f"LATENCY_CONFIDENCE: {{_r['confidence']}}")
     else:
@@ -826,7 +826,7 @@ def test_teacher_gen_agent_md_has_two_validation_gates():
     )
     # 3. teacher __main__ 测 latency（统一契约）
     assert 'python3 "$CONTRACT"' in text
-    assert "LATENCY_MS" in text
+    assert "LATENCY_US" in text
     # 4. output schema 含 depth_axis / width_axis（可审计）
     assert "depth_axis" in text and "width_axis" in text
 
@@ -878,7 +878,7 @@ def test_teacher_gen_skill_md_has_main_template_copied_from_flatten():
     逐字照 model-flatten/SKILL.md Step 3 模板。"""
     text = (TEACHER_GEN_DIR / "SKILL.md").read_text(encoding="utf-8")
     assert "measure_contract_latency" in text
-    assert "LATENCY_MS" in text
+    assert "LATENCY_US" in text
     assert "LATENCY_SKIPPED" in text
     assert "CORRECTNESS: OK" in text
     # 占位符说明（rendered value，非 Jinja 串）
@@ -949,7 +949,7 @@ def test_teacher_gen_measure_latency_cli_cpu_fallback(tmp_path):
         capture_output=True, text=True,
     )
     assert r.returncode == 0, f"stderr={r.stderr}"
-    assert "LATENCY_MS:" in r.stdout
+    assert "LATENCY_US:" in r.stdout
     assert "LATENCY_SOURCE: cpu-fallback" in r.stdout
     assert "LATENCY_CONFIDENCE: low" in r.stdout
     assert "fallback" in r.stderr.lower() or "WARN" in r.stderr
@@ -967,10 +967,10 @@ def test_teacher_gen_measure_latency_cli_with_provider(tmp_path):
         capture_output=True, text=True,
     )
     assert r.returncode == 0, f"stderr={r.stderr}"
-    assert "LATENCY_MS:" in r.stdout
+    assert "LATENCY_US:" in r.stdout
     assert "LATENCY_SOURCE: provider" in r.stdout
     assert "LATENCY_CONFIDENCE: high" in r.stdout
-    line = next(l for l in r.stdout.splitlines() if l.startswith("LATENCY_MS:"))
+    line = next(l for l in r.stdout.splitlines() if l.startswith("LATENCY_US:"))
     val = float(line.split(":", 1)[1].strip())
     assert val > 0.0
 
@@ -1045,7 +1045,7 @@ def test_e2e_validate_teacher_passes_on_real_baseline_teacher(tmp_path):
 
 @needs_ort
 def test_e2e_teacher_main_runs_correctness_and_latency(tmp_path):
-    """E2E：teacher 文件 __main__ 跑出 CORRECTNESS: OK + LATENCY_MS（统一契约 happy path）。
+    """E2E：teacher 文件 __main__ 跑出 CORRECTNESS: OK + LATENCY_US（统一契约 happy path）。
 
     用真实 baseline_model.py 派生 teacher，$ORCA_AGENT_RESOURCES=teacher-gen dir，
     latency_provider 默认值渲染为 demo provider。
@@ -1072,10 +1072,10 @@ def test_e2e_teacher_main_runs_correctness_and_latency(tmp_path):
     )
     assert r.returncode == 0, f"stderr={r.stderr}\nstdout={r.stdout}"
     assert "CORRECTNESS: OK" in r.stdout
-    assert "LATENCY_MS:" in r.stdout
+    assert "LATENCY_US:" in r.stdout
     assert "LATENCY_SOURCE: provider" in r.stdout
     # latency > 0（真实测量）
-    line = next(l for l in r.stdout.splitlines() if l.startswith("LATENCY_MS:"))
+    line = next(l for l in r.stdout.splitlines() if l.startswith("LATENCY_US:"))
     val = float(line.split(":", 1)[1].strip())
     assert val > 0.0, f"latency 应 >0（真实测量），得到 {val}"
 
@@ -1108,8 +1108,8 @@ def test_e2e_teacher_main_latency_skipped_without_resources(tmp_path):
     assert r.returncode == 0, f"stderr={r.stderr}\nstdout={r.stdout}"
     assert "CORRECTNESS: OK" in r.stdout
     assert "LATENCY_SKIPPED" in r.stdout
-    # 关键：不产出 LATENCY_MS（绝不伪造）
-    assert "LATENCY_MS:" not in r.stdout
+    # 关键：不产出 LATENCY_US（绝不伪造）
+    assert "LATENCY_US:" not in r.stdout
 
 
 @needs_ort
@@ -1142,7 +1142,7 @@ def test_e2e_teacher_main_cli_overrides_empty_default(tmp_path):
         capture_output=True, text=True, env=env,
     )
     assert r.returncode == 0, f"stderr={r.stderr}\nstdout={r.stdout}"
-    assert "LATENCY_MS:" in r.stdout
+    assert "LATENCY_US:" in r.stdout
     assert "LATENCY_SOURCE: provider" in r.stdout  # CLI 覆盖走 provider 路径（非 fallback）
 
 

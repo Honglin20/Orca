@@ -6,7 +6,7 @@
     teacher 不再是精度参考（teacher 只当 KD 软标签源），故 ``--teacher_meta`` 改可选、
     teacher-relative dB-gap 路径降级为 legacy。
   - **时延测量**（可选）：导 ONNX + ``--latency_provider`` 实测。distill 节点**复用**
-    selector 的 latency（不在真硬件上重测），故传 ``--skip_latency`` 跳过（latency_ms=-1）。
+    selector 的 latency（不在真硬件上重测），故传 ``--skip_latency`` 跳过（latency_us=-1）。
 
 方向语义（绝对基线对比）：
   - kind ∈ {mse, nmse, ber}（误差型，越低越好）→ ``met = student ≤ baseline``
@@ -16,7 +16,7 @@
 
 stdout::
 
-    STUDENT_LATENCY_MS: <float>      # --skip_latency 时 -1
+    STUDENT_LATENCY_US: <float>      # --skip_latency 时 -1
     STUDENT_ACCURACY:   <float>
     STUDENT_ACCURACY_KIND: <kind>
     MET_ACCURACY:       <bool>
@@ -219,7 +219,7 @@ def measure_student(args) -> dict:
     # 1-2. 时延（可选；--skip_latency 跳过，distill 复用 selector latency）。
     if skip_latency:
         student_onnx = ""
-        latency_ms = -1.0
+        latency_us = -1.0
         met_lat = False
     else:
         if not (args.dummy_input and args.dummy_input.strip()):
@@ -233,11 +233,11 @@ def measure_student(args) -> dict:
         measure = _load_measure(args.latency_provider)
         import inspect
         if "device" in inspect.signature(measure).parameters:
-            latency_ms = float(measure(student_onnx, device=args.device))
+            latency_us = float(measure(student_onnx, device=args.device))
         else:
-            latency_ms = float(measure(student_onnx))
-        if args.target_latency_ms is not None:
-            met_lat = bool(latency_ms <= float(args.target_latency_ms))
+            latency_us = float(measure(student_onnx))
+        if args.target_latency_us is not None:
+            met_lat = bool(latency_us <= float(args.target_latency_us))
         else:
             met_lat = True  # 未给 target：不卡时延门（distill 不用此路径判门）
 
@@ -284,14 +284,14 @@ def measure_student(args) -> dict:
         "student_model_path": os.path.abspath(args.student_model_path),
         "student_ckpt": os.path.abspath(args.student_ckpt) if args.student_ckpt else "",
         "build_cfg": build_kwargs,
-        "latency_ms": latency_ms,
+        "latency_us": latency_us,
         "latency_skipped": skip_latency,
         "student_accuracy": student_acc,
         "student_accuracy_kind": student_kind,
         "accuracy_kind_used": used_kind,
         "accuracy_baseline": args.accuracy_baseline,
         "accuracy_confidence": acc_conf,
-        "target_latency_ms": args.target_latency_ms,
+        "target_latency_us": args.target_latency_us,
         "met_accuracy": met_acc,
         "met_latency": met_lat,
     }
@@ -303,7 +303,7 @@ def measure_student(args) -> dict:
     return {
         "student_onnx": student_onnx,
         "measure_report": report_path,
-        "latency_ms": latency_ms,
+        "latency_us": latency_us,
         "student_accuracy": student_acc,
         "student_accuracy_kind": used_kind,
         "accuracy_confidence": acc_conf,
@@ -338,7 +338,7 @@ def _main() -> int:
     p.add_argument("--opset", type=int, default=17)
     p.add_argument("--latency_provider", default="",
                    help="path::func；--skip_latency 时可省")
-    p.add_argument("--target_latency_ms", type=float, default=None, help="latency 目标")
+    p.add_argument("--target_latency_us", type=float, default=None, help="latency 目标")
     p.add_argument("--project_root", default=".", help="eval_command 的 cwd")
     p.add_argument("--skip_latency", action="store_true",
                    help="跳过 ONNX 导出 + latency 测量（distill 复用 selector latency 时用）")
@@ -353,7 +353,7 @@ def _main() -> int:
         traceback.print_exc(file=sys.stderr)
         return 2
 
-    print(f"STUDENT_LATENCY_MS: {r['latency_ms']:.4f}")
+    print(f"STUDENT_LATENCY_US: {r['latency_us']:.4f}")
     print(f"STUDENT_ACCURACY: {r['student_accuracy']}")
     print(f"STUDENT_ACCURACY_KIND: {r['student_accuracy_kind']}")
     print(f"MET_ACCURACY: {str(r['met_accuracy']).lower()}")
