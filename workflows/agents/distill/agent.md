@@ -35,7 +35,7 @@ tools: [bash, read, write, edit, glob, grep]
 | tune 不过 | FAIL_latency | FAIL_latency | false | false | -1 |
 | 训练崩 | ACCEPTED | FAIL_train | **true** | false | -1 |
 
-> FAIL_train 时 met_latency=true（tune 已过），met_accuracy=false, accuracy=-1（对齐 v1 train_pool.py:172-173）。
+> FAIL_train 时 met_latency=true（tune 已过），met_accuracy=false, accuracy=-1（与 decide reducer / viz_kd_stage / finalize_kd 的 FAIL_train ledger row 字面一致；旧 v1 train_pool.py 已删，语义已 port 到串行 distill 节点）。
 
 ## 输入
 
