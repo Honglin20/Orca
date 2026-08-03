@@ -16,7 +16,7 @@ by this composite and exposed via :meth:`KDComposite.kd_parameters` so the
 outer optimizer can include them.  Adapters are built lazily on the first
 feature-bearing forward — callers that want their parameters registered with
 the optimizer **before** the first step should call :meth:`prepare` with a
-sample feature batch (the ``train_adapter_template.py`` does this).
+sample feature batch (the historical train_adapter_template.py (deleted 2026-08-04 cleanup §2) did this).
 """
 
 from __future__ import annotations

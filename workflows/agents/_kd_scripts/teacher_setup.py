@@ -254,7 +254,7 @@ def _sha256_file(path: str) -> str:
 
 # ── eval_command accuracy 解析 ─────────────────────────────────────────────────
 _ACC_PATTERNS = [
-    (re.compile(r"TEACHER_ACCURACY\s*[:=]\s*([0-9]*\.?[0-9]+)", re.I), "acc"),
+    # 注：TEACHER_ACCURACY 不在此表——由 _parse_accuracy 显式优先级分支（line ~280）先 match。
     (re.compile(r"\baccuracy\s*[:=]\s*([0-9]*\.?[0-9]+)", re.I), "acc"),
     (re.compile(r"\bNMSE\s*[:=]\s*([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)", re.I), "nmse"),
     (re.compile(r"\bMSE\s*[:=]\s*([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)", re.I), "mse"),

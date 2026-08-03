@@ -97,9 +97,6 @@ def test_tune_fail_latency_when_unreachable(tmp_path, monkeypatch):
     assert res["status"] == "FAIL_latency"
 
 
-# ── HI-11：kd agent.md field 引用 ∈ output_schema ─────────────────────────────
-
-
 # ── code-reviewer 🔴 回归守门 ─────────────────────────────────────────────────
 
 
@@ -215,9 +212,6 @@ def test_gpu_probe_contract_violation_missing_dummy_shape(tmp_path):
         gp._dummy_input(mod, str(bad))
 
 
-# ── v2 DAG：yaml 节点 + 路由（n_accepted==0 → $end）─────────────────────────────
-
-
 # ── 🔴 回归守门：wf.outputs 在 gate→$end（n_accepted==0）路由下不崩 ──────────────
 # code-reviewer 🔴-1：原 yaml 引用 train.output.X，gate 路由 $end 时 train.output 不存在
 # （不是 None，是 missing）→ StrictUndefined raise → workflow_failed。v2 修复：outputs 只引
@@ -329,7 +323,8 @@ def _load_kd_common():
 def test_accuracy_direction_single_source_of_truth():
     """accuracy_baseline_kind → best 方向（防 -20dB 误判优于 -22dB 的方向反转）。
 
-    单一真相源 kd_common.accuracy_direction：measure_student / viz_kd / select 三处同源。
+    单一真相源 kd_common.accuracy_direction（viz_kd_stage._push_pareto_front + 本函数共用；
+    原 measure_student / viz_kd / select 三处已删于 2026-08-04 cleanup）。
     """
     kc = _load_kd_common()
     assert kc.accuracy_direction("nmse") == "min"

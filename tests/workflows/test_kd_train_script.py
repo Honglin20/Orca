@@ -725,8 +725,8 @@ def test_smoke_distill_mode_fitnets_kd(tmp_path):
     OFD/FitNets adapter 经 ``prepare()`` 预建 + ``kd_parameters()`` 进 optimizer
     是 distill mode 最复杂的路径，单独守门（reviewer 🟡-2）。
 
-    spt_alt + teacher_model 都暴露 ``feature_hook_names()`` 长度 2（KD-NAS 变体
-    契约 + teacher 契约一致），fitnets 取中间层 hint。
+    spt_alt（receiver KB 变体）+ teacher wrapper（teacher-gen 产物；本测用 spt_alt 占位）
+    都暴露 ``feature_hook_names()`` 长度 2（KD-NAS 变体契约一致），fitnets 取中间层 hint。
     """
     spec = _specialized_demo_pipeline(tmp_path)
     cache_path = tmp_path / "teacher_cache.pt"

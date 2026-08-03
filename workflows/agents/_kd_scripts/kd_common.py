@@ -14,7 +14,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import subprocess
 import sys
 from typing import Any
@@ -25,10 +24,10 @@ VALID_LEVERAGE = set(RANK)
 LEVERAGE_DEFAULT = "medium"
 
 # ── accuracy_baseline_kind → best 方向（单一真相源）────────
-# §4 doc sweep：原三处消费者（measure_student / viz_kd / kd-select.select_and_report）已删；
-# 当前消费者：viz_kd_stage（标轴方向）+ kd_common.compute_met_accuracy_absolute（met 判定）+
-# finalize_kd（report 文本）。单一真相源防「-20dB 误判比 -22dB 好」式方向反转
-# （符号判定不可靠，必须显式 kind）。
+# §4 doc sweep：原三处消费者（measure_student / viz_kd / kd-select.select_and_report）已删。
+# 当前真实消费者：``viz_kd_stage._push_pareto_front``（import 本函数判轴方向）+
+# ``kd_common.compute_met_accuracy_absolute``（内部调本函数判 met_accuracy）。
+# finalize_kd 不 import kd_common（其文本报告用本地 kind 字面），仅在概念上对齐。
 # 越高越好（best=max）：snr / acc；越低越好（best=min）：mse / nmse / ber / db。
 HIGHER_BETTER_KINDS = {"snr", "acc"}
 LOWER_BETTER_KINDS = {"mse", "nmse", "ber", "db"}
@@ -37,9 +36,8 @@ LOWER_BETTER_KINDS = {"mse", "nmse", "ber", "db"}
 def accuracy_direction(kind: str) -> str:
     """accuracy kind → best 方向：``"max"``（越高越好）/ ``"min"``（越低越好）/ ``""``（未知）。
 
-    单一真相源（DRY）：viz_kd_stage 标轴方向 + kd_common.compute_met_accuracy_absolute 判
-    met_accuracy + finalize_kd 报告文本全部经此函数。未知 kind → 空串（caller 须 fail loud /
-    低置信，**不** auto 猜方向）。
+    真实消费者：``viz_kd_stage._push_pareto_front`` + ``kd_common.compute_met_accuracy_absolute``。
+    未知 kind → 空串（caller 须 fail loud / 低置信，**不** auto 猜方向）。
     """
     k = (kind or "").strip().lower()
     if k in HIGHER_BETTER_KINDS:
@@ -52,7 +50,8 @@ def accuracy_direction(kind: str) -> str:
 def to_float(v: Any) -> float | None:
     """宽松转 float（坐标图过滤用）：``None`` / bool / NaN / 非数值 → ``None``。
 
-    单一真相源（DRY）：viz_kd_stage 与 finalize_kd 共用，防两份字节级副本漂移。
+    单一真相源（DRY）：viz_kd_stage._push_all_models_table / _push_pareto_front 共用（finalize_kd
+    报告用本地 to_float-free 字面读法，不 import 此处）。防字节级副本漂移。
     """
     if v is None or isinstance(v, bool):
         return None
@@ -83,8 +82,9 @@ def is_measured_row(row: dict[str, Any]) -> bool:
 
 # 终态：训练已发生过（不再重训，跨 run 跳过）。
 TRAIN_DONE_STATUSES = {"SUCCESS", "FAIL_accuracy", "FAIL_train"}
-# 全部终态。
-ALL_TERMINAL_STATUSES = TRAIN_DONE_STATUSES | {"FAIL_latency", "FAIL_export"}
+# 全部终态（F1 fix 2026-08-04：必须含 FAIL_build —— gen_student validate_contract 3-strike 也是终态；
+# 与 kd_reducer._LEDGER_STATUS / finalize_kd.known_statuses / viz_kd_stage._push_fail_status_bar 集合成员对齐）。
+ALL_TERMINAL_STATUSES = TRAIN_DONE_STATUSES | {"FAIL_latency", "FAIL_build", "FAIL_export"}
 
 
 def sha256_file(path: str) -> str:
@@ -145,10 +145,11 @@ def validate_variant(mod: Any, path: str) -> tuple[dict[str, Any], dict[str, Any
     """校验 receiver KB 变体 .py 的契约：``build_model`` callable + ``DUMMY_INPUT.shape`` +
     ``KNOBS``（step<0 / leverage∈{high,medium,low} / default·min 数值）。
 
-    单一真相源（DRY）：原 ``pick_variant._validate_variant`` 守所有 receiver KB variant；
-    迁到 ``kd_common`` 后 receiver variant 校验 + receiver KB 生成时自查共用，防止两份字节
-    级副本漂移。返回 ``(dummy_input, knobs)``；``knobs={}`` 表示该 variant 不可调
-    （latency 超阈即 FAIL_latency）。
+    返回 ``(dummy_input, knobs)``；``knobs={}`` 表示该 variant 不可调（latency 超阈即 FAIL_latency）。
+
+    当前消费者：``test_receiver_variants.py::test_variant_knobs_valid``（receiver KB 契约
+    smoke）。生产路径（tune_latency / gen_student）当前直接读 ``KNOBS`` 字段，未调本函数；
+    保留作 receiver KB contract 文档化 + 单点测试入口（contract 改时只改一处）。
     """
     if not hasattr(mod, "build_model") or not callable(mod.build_model):
         raise AttributeError(f"{path} 无 callable build_model（契约必备）")
@@ -179,45 +180,13 @@ def validate_variant(mod: Any, path: str) -> tuple[dict[str, Any], dict[str, Any
     return di, knobs
 
 
-# ── student accuracy 解析 + 绝对基线对比（§3 迁移：原 measure_student.py 不变量）───────
-# 单一真相源：teacher_setup / finalize_kd / viz_kd_stage / 旧 measure_student 共用方向语义。
-# measure_student 删除后，绝对基线对比的不变量留 kd_common——防三处字节级副本漂移。
-
-_ACC_PATTERNS = [
-    (re.compile(r"\baccuracy\s*[:=]\s*([0-9]*\.?[0-9]+)", re.I), "acc"),
-    (re.compile(r"\bNMSE\s*[:=]\s*([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)", re.I), "nmse"),
-    (re.compile(r"\bMSE\s*[:=]\s*([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)", re.I), "mse"),
-    (re.compile(r"\bBER\s*[:=]\s*([0-9]*\.?[0-9]+)", re.I), "ber"),
-    (re.compile(r"\bSNR[_-]?dB\s*[:=]\s*([-+]?[0-9]*\.?[0-9]+)", re.I), "snr"),
-    (re.compile(r"\bSNR\s*[:=]\s*([-+]?[0-9]*\.?[0-9]+)", re.I), "snr"),
-]
-
-
-def parse_accuracy(stdout: str) -> tuple[float, str, str]:
-    """从 eval stdout 解析精度（无 STUDENT_ACCURACY 协议时用）。返回 (value, kind, confidence)。
-
-    单一真相源（DRY）：原 ``measure_student._parse_accuracy``；优先级为
-    JSON-line → 裸 ``accuracy/NMSE/MSE/BER/SNR`` regex（无 STUDENT_ACCURACY 协议前缀）。
-    解析失败 → (0.0, "unknown", "low")。teacher_setup / 复用 STUDENT_ACCURACY 协议的 eval
-    走其本地优先级（含 TEACHER_/STUDENT_ACCURACY 前缀），**不**复用本函数（语义不同）。
-    """
-    for line in stdout.splitlines()[::-1]:
-        s = line.strip()
-        if s.startswith("{") and s.endswith("}"):
-            try:
-                d = json.loads(s)
-                for k, kind in (("accuracy", "acc"), ("acc", "acc"),
-                                ("nmse", "nmse"), ("mse", "mse"),
-                                ("ber", "ber"), ("snr", "snr"), ("snr_db", "snr")):
-                    if k in d and isinstance(d[k], (int, float)):
-                        return float(d[k]), kind, "high"
-            except json.JSONDecodeError:
-                pass
-    for pat, kind in _ACC_PATTERNS:
-        m = pat.search(stdout)
-        if m:
-            return float(m.group(1)), kind, "high"
-    return 0.0, "unknown", "low"
+# ── 绝对精度基线对比（§3 迁移：原 measure_student._compute_met_accuracy_absolute）─────
+# 当前消费者：test_struct_kd_p7.py::TestMeasureStudentAbsoluteBaseline（绝对基线 + kind 方向
+# 不变量守护）。无生产路径消费——保留作 receiver KB contract 不变量的文档化 + 单点测试入口
+# （将来若 distill/eval agent 想显式对比绝对基线，从 kd_common 引即可，无需重写）。
+# 注：原 measure_student._parse_accuracy（含 STUDENT_ACCURACY 协议优先级）**未**迁——活跃
+# 路径的精度解析由 teacher_setup._parse_accuracy（含 TEACHER_/STUDENT_ACCURACY 优先级）承担，
+# kd_common 不持有重复版（YAGNI / 防字节级副本漂移）。
 
 
 def compute_met_accuracy_absolute(
@@ -225,7 +194,10 @@ def compute_met_accuracy_absolute(
 ) -> tuple[bool, str, str]:
     """绝对精度基线对比。返回 (met_accuracy, used_kind, confidence)。
 
-    单一真相源（DRY）：原 ``measure_student._compute_met_accuracy_absolute``。
+    原迁移自 ``measure_student._compute_met_accuracy_absolute``；当前消费者：
+    ``test_struct_kd_p7.py::TestMeasureStudentAbsoluteBaseline``（不变量守护测）。
+    生产路径（distill / finalize）当前直接读 train_pipeline --mode eval 的 MET_ACCURACY 输出，
+    不调本函数；本函数存在是为锁「绝对基线 + kind 方向」语义，便于未来显式对比复用。
 
     - ``kind_override`` 非空 → 锁方向；与 detected_kind 不符 → WARN（用 override）。
     - kind unknown → met=false, confidence=low（绝不静默 pass）。

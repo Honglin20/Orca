@@ -167,7 +167,7 @@ def _resolve_device(name: str) -> torch.device:
 def _make_live_push(variant_id: str, mode: str):
     """Per-epoch live chart push (best-effort, never kills the training loop).
 
-    Mirrors ``train_adapter_template._make_live_push``: lazy import
+    Mirrors historical train_adapter_template._make_live_push (deleted 2026-08-04 cleanup §2): lazy import
     ``orca.chart.render_chart``; on any failure (import error, push error)
     degrade to a no-op or stderr warning.  Same ``label``+``title`` re-push
     = refresh semantics (dedup).
@@ -642,7 +642,7 @@ def run_eval_mode(args: argparse.Namespace) -> int:
 def _compute_proxy_mse(wrapper, teacher, dataloader, device, max_batches: int = 3) -> float:
     """Soft MSE between student and teacher outputs — short-training proxy.
 
-    Mirrors ``train_adapter_template._compute_proxy_mse``: capped at
+    Mirrors historical train_adapter_template._compute_proxy_mse (deleted 2026-08-04 cleanup §2): capped at
     ``max_batches`` to bound cost; averages MSE over seen batches. Fails loud
     on an empty dataloader (returns no batch to average) rather than silently
     returning 0.0 — proxy_mse is a downstream-consumed signal and a fake 0.0

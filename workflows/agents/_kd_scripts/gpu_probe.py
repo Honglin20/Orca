@@ -67,7 +67,7 @@ def _emit_fail_soft(reason: str, *, device_arg: str) -> int:
 
 
 def _load_variant_module(path: str) -> Any:
-    """按路径 import representative variant .py（与 pick_variant._load_variant 同语义）。"""
+    """按路径 import representative variant .py（与 historical pick_variant._load_variant 同语义（pick_variant 删于 2026-08-04 cleanup §3））。"""
     p = os.path.abspath(path)
     if not os.path.isfile(p):
         raise FileNotFoundError(f"representative_variant 不存在: {p}")

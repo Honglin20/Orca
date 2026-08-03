@@ -84,7 +84,8 @@ def feature_hook_names(self) -> list[str]: ...                 # 可选，OFD/Fi
   - **FAIL_train / measure-fail FAIL_accuracy**：latency 取自 tune（真测值），`accuracy=0` 哨兵。
 - `accuracy_kind`：measure rc==0 时非空（真测，即便数值恰为 0.0 或 db-kind -1.0）；measure 失败 / 未进训练池
   时为空串（此时 ``accuracy=0`` 是哨兵）。是区分真测 vs 哨兵的权威字段。
-  下游消费者（viz_kd_stage / finalize）按 ``kd_common.is_measured_row`` 判「是否真测了 accuracy」
+  下游消费者 viz_kd_stage（``_push_pareto_front``）按 ``kd_common.is_measured_row`` 判「是否真测了 accuracy」
+  （finalize_kd 用本地 status 字面判定，不 import 此处）
   （status ∈ {SUCCESS, FAIL_accuracy} 且 ``accuracy_kind`` 非空）——哨兵行不计入帕累托前沿。
 
 **status 全部取值**：`SUCCESS` / `FAIL_latency`（tune 不过）/ `FAIL_train`（训练/eval 崩）/
@@ -101,7 +102,8 @@ def feature_hook_names(self) -> list[str]: ...                 # 可选，OFD/Fi
   fail-soft：无 CUDA/NPU / 探测异常 → `CONCURRENCY: 1` + `DEVICE_PLAN: [""]` + WARN，exit 0；仅输入契约不符 → exit 2。
 - **measure_student.py 已删**（2026-08-04 cleanup §3）。KD 精度路径由 train_pipeline.py --mode eval 承担；
   原 ``_parse_accuracy`` / ``_compute_met_accuracy_absolute`` 不变量已 port 到 ``kd_common.parse_accuracy`` /
-  ``kd_common.compute_met_accuracy_absolute``（单一真相源；viz_kd_stage / finalize_kd 共用）。
+  ``kd_common.compute_met_accuracy_absolute``（不变量守护；当前仅 ``test_struct_kd_p7::TestMeasureStudentAbsoluteBaseline``
+  调，生产路径 distill/finalize 直接读 train_pipeline --mode eval 的 MET_ACCURACY——保留作 contract 单点测试入口）。
 - **teacher_setup.py**：`--teacher_model_path --teacher_ckpt --build_fn --dummy_input [--eval_command] --output_dir [--latency_provider] [--teacher_latency_us] [--device] [--seed]`
   → `TEACHER_LATENCY_US` + `TEACHER_ACCURACY` + `TEACHER_ACCURACY_KNOWN` + `TEACHER_DB_BASELINE` + `TEACHER_ONNX` + `TEACHER_CACHE` + `TEACHER_META`（meta 含 `teacher_model_hash` + `teacher_ckpt_sha256`）。
 - **viz_kd_stage.py**（活跃每节点 web 推送 sidecar）：`--stage <baseline|baseline_seed|teacher|student|distill_table|decide|final> [--ledger] [--champions] [--baseline_latency_us] [--baseline_accuracy] [--target_latency_us] [--accuracy_baseline_kind] [--teacher_latency_us] [--champion_latency_us] [--champion_accuracy] [--teacher_meta] [--round_hypothesis] [--env_anchor]`
@@ -159,7 +161,7 @@ def feature_hook_names(self) -> list[str]: ...                 # 可选，OFD/Fi
 - **时延测量必串行**：latency 对 contention 敏感（并发测→读数失真→false FAIL_latency）。
 - **绝不伪造**：latency / accuracy 必须真实测量；无任何 fallback 造假路径。finalize 无达标 → 报告标「无 student 达标」（champion 维持 baseline），**不**假装选出。
 - **指标方向显式 + 单一真相源**：``accuracy_baseline_kind`` 是必填 [ask] input。方向判定统一走 ``kd_common.accuracy_direction``
-  （viz_kd_stage / finalize_kd / kd_common.compute_met_accuracy_absolute 三处 import 同一函数），**禁**符号 auto 猜（防「-20dB 误判优于 -22dB」反向错误）。
+  （viz_kd_stage._push_pareto_front + kd_common.compute_met_accuracy_absolute 经此函数判方向；finalize_kd 用本地 kind 字面，不 import 此处），**禁**符号 auto 猜（防「-20dB 误判优于 -22dB」反向错误）。
   未知 kind → fail loud / 低置信 + met=false，绝不静默 pass。
 - **特征蒸馏 fail-loud**（SPEC §1）：``kd/compose.py`` 守卫——kd_losses 含 ofd/fitnets/rkd 且运行时 feats 空 → raise ValueError → FAIL_train。
   distill agent 默认 KD_CONFIG 已 AST 条件化（按 student.feature_hook_names 存在决定启 ofd 还是 mse-only），无 hook 时自动剥离特征项不崩。

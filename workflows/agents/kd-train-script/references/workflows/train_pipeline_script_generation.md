@@ -17,8 +17,9 @@ runtime loading of the user's project.
 Key characteristics of the generated script (must not regress):
 
 1. **No sandwich sampling, no DDP, no torchrun.** KD-NAS is single-device +
-   `--device` CLI; concurrency is handled at the workflow level via
-   `train_pool` ThreadPoolExecutor round-robin binding, not inside this script.
+   `--device` CLI; serial kd-nas workflow (gen_student → distill → decide loop, one
+   student per round) handles orchestration outside this script. (Historical:
+   2026-08-04 cleanup §2 deleted `train_pool` ThreadPoolExecutor parallel sweep.)
 2. **Models loaded by path** via `importlib.util.spec_from_file_location` —
    teacher and student share the same contract (`build_model` + `DUMMY_INPUT` +
    `KNOBS`, see `workflows/agents/_kd_scripts/CONTRACTS.md` §1).
@@ -27,7 +28,8 @@ Key characteristics of the generated script (must not regress):
    task_loss / loop skeleton); mode-specific code paths diverge at loss +
    ckpt schema. **Eval is read-only**: it loads a student ckpt, runs the
    ported `user_eval_metric`, and emits the accuracy protocol consumed by
-   `train_pool` — replacing the old `measure_student --eval_command` path.
+   the serial `distill` node's ledger append (replacing the historical
+   `measure_student --eval_command` path; see 2026-08-04 cleanup).
 4. **KD loss** uses the existing KD-NAS library
    (`kd.compose.build_kd_loss` + `kd.wrapper.KDStudentWrapper` +
    `kd.wrapper.TeacherCache.load` + `kd.ema.MeanTeacherEMA`).
@@ -295,7 +297,7 @@ Save checkpoint with schema:
 (returning a fake `0.0` would mask a broken pipeline — proxy_mse is a
 downstream-consumed signal, CLAUDE.md Rule 12).
 
-Stdout keys (downstream `train_pool` worker parses these):
+Stdout keys (downstream `distill` node parses these via ledger append):
 ```
 STUDENT_CKPT: <path>
 KD_LOSS_FINAL: <float>
@@ -326,7 +328,7 @@ import, mirrors distill mode's lazy `kd.wrapper` import) against
 `met_accuracy=false`, `confidence=low` + stderr WARN (never auto-guess
 direction).
 
-Stdout keys (downstream `train_pool` worker parses these — same protocol the
+Stdout keys (downstream `distill` node parses these via ledger append — same protocol the
 old `measure_student` emitted):
 ```
 STUDENT_ACCURACY: <float>

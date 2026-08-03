@@ -92,8 +92,8 @@ _LEDGER_REQUIRED = (
 _CHAMPIONS_REQUIRED = ("round", "id", "latency_us", "accuracy", "delta_vs_baseline_us", "snapshot")
 
 # status 合法值（KD 串行版）。FAIL_build = gen_student validate_contract 3-strike（catch 协议）。
-# 与 ``kd_common.ALL_TERMINAL_STATUSES`` / ``viz_kd_stage._push_fail_status_bar`` 顺序 /
-# ``finalize_kd.known_statuses`` 对齐——任何新增终态须四处同步（DRY 单一真相源）。
+# 与 ``kd_common.ALL_TERMINAL_STATUSES`` / ``viz_kd_stage._push_fail_status_bar`` status 序 /
+# ``finalize_kd.known_statuses`` 集合成员对齐——任何新增终态须四处同步（DRY 单一真相源）。
 _LEDGER_STATUS = {"SUCCESS", "FAIL_latency", "FAIL_train", "FAIL_build",
                   "FAIL_accuracy", "FAIL_export"}
 
