@@ -106,7 +106,12 @@ def _seed_runs(tmp_path: Path, manager, count: int = 3) -> list[str]:
 
 @pytest.mark.skipif(not _PLAYWRIGHT_AVAILABLE, reason="playwright 未安装")
 def test_default_board_renders_and_five_columns(live_server, tmp_path):
-    """AC-19/20：默认渲染 board；五列 testid 均在 DOM（即使列空也渲染占位）。"""
+    """AC-19/20/25：默认渲染 board；默认 showEmpty=false 时空列隐藏；
+    开「显示空」后五列 testid 均在 DOM。
+
+    §10.9（AC-25）覆盖了旧 §10.2「空列仍渲染占位」——默认隐藏 0-run 桶。
+    故本用例先验证默认仅非空列（completed），再 toggle showEmpty 验证五列结构（AC-20）。
+    """
     base_url, manager = live_server
     _seed_runs(tmp_path, manager, count=1)
 
@@ -116,7 +121,17 @@ def test_default_board_renders_and_five_columns(live_server, tmp_path):
             page = await browser.new_page()
             await page.goto(base_url)
             await page.wait_for_selector("[data-testid=board]", timeout=5000)
-            # 五列 testid 都在。
+            # AC-25 反向回归：默认 showEmpty=false，仅 completed（非空）列渲染；
+            # queued/running/blocked/failed 四个空列必须隐藏。
+            await page.wait_for_selector(
+                "[data-testid=board-column-completed]", timeout=2000
+            )
+            for empty_col in ("queued", "running", "blocked", "failed"):
+                assert await page.locator(
+                    f"[data-testid=board-column-{empty_col}]"
+                ).count() == 0, f"showEmpty=false 时空列 {empty_col} 应隐藏"
+            # AC-20：toggle 开「显示空」→ 五列 testid 都在。
+            await page.click("[data-testid=show-empty-toggle]")
             for col in ("queued", "running", "blocked", "completed", "failed"):
                 await page.wait_for_selector(
                     f"[data-testid=board-column-{col}]", timeout=2000
