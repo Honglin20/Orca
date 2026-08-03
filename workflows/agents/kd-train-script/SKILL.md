@@ -39,8 +39,9 @@ step requires when you begin that step.
   project containing `train.py` (the user's task loss + dataloader builder).
 - `<teacher_model_path>`: absolute path to the teacher model `.py` (exposes
   `build_model` + `DUMMY_INPUT` + `feature_hook_names()` per
-  `workflows/agents/_kd_scripts/CONTRACTS.md` §1). For KD-NAS this is
-  typically `workflows/agents/_kd_scripts/teacher_model.py`.
+  `workflows/agents/_kd_scripts/CONTRACTS.md` §1). For KD-NAS this is the
+  teacher-gen node output (a derived teacher wrapper `.py`); any KD variant
+  `.py` exposing the same contract is acceptable.
 - `<student_model_path>` (distill mode only): absolute path to a KD-NAS
   student variant `.py` under `knowledge_base/families/receiver/`.
 - `<kd_scripts_dir>`: absolute path to `workflows/agents/_kd_scripts/`. The

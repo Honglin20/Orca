@@ -56,9 +56,9 @@ Build the script from:
   `train.py`) — the accuracy metric (NMSE/MSE/BER/SNR/acc) + eval data
   loading, ported into `user_eval_metric`. If none is found, fail loud (the
   user contract asserts the repo contains one).
-* **Teacher model** at `<teacher_model_path>` (e.g.
-  `workflows/agents/_kd_scripts/teacher_model.py`) — exposes `build_model(**cfg)`,
-  `DUMMY_INPUT`, `feature_hook_names()`.
+* **Teacher model** at `<teacher_model_path>` (e.g. a teacher-gen output
+  wrapper `.py`, or any KD variant `.py` exposing the same contract) — exposes
+  `build_model(**cfg)`, `DUMMY_INPUT`, `feature_hook_names()`.
 * **Student variant** at `<student_model_path>` (KB receiver `.py`) — same
   contract.
 * The reference **skeleton template** at

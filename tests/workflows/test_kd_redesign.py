@@ -2,11 +2,14 @@
 
 覆盖 spec-review 高优 finding：
 - BLK-8：tune_latency 最小缩量（mock latency∝cfg 体量，断言刚跨 target 即停；贪心跳步实现会挂）
-- BLK-1/2：pick_variant KNOBS 校验（leverage rank / step<0）
-- MED-4：pick_variant FAIL_latency 在 target 变化时重试；target-monotonic
 - HI-2：tune_latency 每 build_model 前 seed（确定性，可复现）
 - HI-11：kd agent.md 每个 `{{ <node>.output.<field> }}` 的 field ∈ 该 node output_schema
-- teacher：10 层 t1/t2 交替（fixture 用法见 test_kd_train_script.py / TestTeacherSetup*）
+
+注：pick_variant / setup_helpers / measure_student / teacher_model 死代码已删（2026-08-04
+cleanup §3）。KNOBS 校验 + 绝对精度基线对比不变量已迁 kd_common（validate_variant /
+compute_met_accuracy_absolute / parse_accuracy）。teacher topology（10 层 t1/t2 交替 +
+student hook 等长回归）随 teacher_model.py 一并删——活跃 teacher 来自 teacher-gen 产物，
+receiver KB 变体 smoke 在 test_receiver_variants.py。
 """
 
 from __future__ import annotations
@@ -31,128 +34,6 @@ def _load(path: Path, name: str):
     sys.modules[name] = mod
     spec.loader.exec_module(mod)
     return mod
-
-
-# ── teacher：10 层 t1/t2 交替 ──────────────────────────────────────────────────
-
-
-def test_teacher_ten_blocks_alternating():
-    sys.path.insert(0, str(KD))
-    for m in [n for n in sys.modules if n == "teacher_model"]:
-        del sys.modules[m]
-    from teacher_model import build_model, DUMMY_INPUT, BUILD_FN
-    import torch
-    t = build_model()
-    blocks = list(t.main)
-    assert len(blocks) == 10
-    mt = [b.m_a.m_type for b in blocks]
-    assert mt == ["t1", "t2"] * 5, f"非 t1/t2 交替: {mt}"
-    assert BUILD_FN == "build_model"
-    out = t(torch.randn(*DUMMY_INPUT["shape"]))
-    assert out.shape == torch.Size(DUMMY_INPUT["shape"])
-    assert t.feature_hook_names()  # KD feature 对齐
-
-
-# ── 回归：student feature_hook_names 恒与 teacher 等长 ─────────────────────────
-# _model8_blocks.feature_hook_names 在 num_blocks=1 时曾返回 1 个 hook，与固定
-# 2-hook 的 teacher 长度不等 → compose.prepare 对 OFD/FitNets/RKD raise length-mismatch。
-# 修复后 student 恒返回 2 个（n=1 时第二个重复 main.0，单 block 无中间层）。
-
-def test_student_feature_hooks_match_teacher_length():
-    for m in [n for n in sys.modules if n in ("_model8_blocks", "spt_t1", "teacher_model")]:
-        del sys.modules[m]
-    sys.path.insert(0, str(KD))
-    sys.path.insert(0, str(KBDIR))
-    from teacher_model import build_model as build_teacher
-    from spt_t1 import build_model as build_student
-
-    t_hooks = build_teacher().feature_hook_names()
-    for n_blocks in (1, 2, 3):
-        s = build_student(num_blocks=n_blocks)
-        hooks = s.feature_hook_names()
-        assert len(hooks) == len(t_hooks), (
-            f"num_blocks={n_blocks}: student {len(hooks)} hooks ≠ teacher {len(t_hooks)}; "
-            f"OFD/FitNets/RKD 的 prepare 会 raise length-mismatch"
-        )
-        assert "main.0" in hooks
-
-
-# ── BLK-1/2：pick_variant KNOBS 校验 ──────────────────────────────────────────
-
-
-def test_pick_variant_rejects_bad_knobs(tmp_path, monkeypatch):
-    pv = _load(KD / "pick_variant.py", "_pv_test")
-    # 造一个 KNOBS 非法的变体（step>=0）
-    bad = tmp_path / "bad_knobs.py"
-    bad.write_text(
-        "DUMMY_INPUT={'shape':[1,4,48,64,1],'dtype':'float32'}\n"
-        "BUILD_FN='build_model'\n"
-        "KNOBS={'num_blocks':{'default':3,'min':1,'step':1,'leverage':'high'}}\n"  # step>=0 非法
-        "def build_model(**c):\n"
-        "    import torch.nn as nn\n    return nn.Identity()\n",
-        encoding="utf-8",
-    )
-    # _validate_variant 应 raise（step>=0）
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("bad_knobs", str(bad))
-    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
-    with pytest.raises(ValueError, match="step"):
-        pv._validate_variant(mod, str(bad))
-
-
-def test_pick_variant_leverage_rank_order():
-    """BLK-1：RANK 排序不是字母序（'low'<'medium'<'high' 反了）。"""
-    from kd_common import RANK
-    assert RANK["high"] < RANK["medium"] < RANK["low"]
-    sorted_leverages = sorted(["high", "low", "medium"], key=lambda lv: RANK[lv])
-    assert sorted_leverages == ["high", "medium", "low"], \
-        "leverage 须按 high→medium→low 排，不是字母序"
-
-
-# ── MED-4：FAIL_latency 在 target 变化时重试；target-monotonic ─────────────────
-
-
-def test_pick_variant_fail_latency_retried_when_target_changes(tmp_path):
-    sys.path.insert(0, str(KD))
-    for m in [n for n in sys.modules if n == "kd_common"]:
-        del sys.modules[m]
-    from kd_common import is_variant_done
-    vsha = "abc"
-    pid = "prov|1234"
-    rows = [{"variant_id": "v1", "variant_sha256": vsha, "latency_provider_id": pid,
-             "status": "FAIL_latency", "target_latency_us": 8.0}]
-    # 同 target(8) → done（跳过）
-    assert is_variant_done(rows, 8.0, pid, vsha) is True
-    # 改 target(5) → 不 done（重试）
-    assert is_variant_done(rows, 5.0, pid, vsha) is False
-
-
-def test_pick_variant_target_monotonic_success(tmp_path):
-    """MED-4：SUCCESS 行 latency ≤ 当前 target → skip；target 调低到低于 latency → 重试。"""
-    sys.path.insert(0, str(KD))
-    for m in [n for n in sys.modules if n == "kd_common"]:
-        del sys.modules[m]
-    from kd_common import is_variant_done
-    vsha = "abc"; pid = "p|1"
-    ckpt = tmp_path / "c.pt"; ckpt.write_bytes(b"x" * 10)
-    rows = [{"variant_id": "v1", "variant_sha256": vsha, "latency_provider_id": pid,
-             "status": "SUCCESS", "latency_us_median": 7.0, "ckpt": str(ckpt),
-             "target_latency_us": 10.0}]
-    assert is_variant_done(rows, 8.0, pid, vsha) is True   # 7.0 ≤ 8 → skip
-    assert is_variant_done(rows, 5.0, pid, vsha) is False  # 7.0 > 5 → 重试
-
-
-def test_pick_variant_done_requires_sha_and_provider_match(tmp_path):
-    """BLK-12/HI-12：variant_sha256 / latency_provider_id 不匹配 → 不 done（重做）。"""
-    sys.path.insert(0, str(KD))
-    for m in [n for n in sys.modules if n == "kd_common"]:
-        del sys.modules[m]
-    from kd_common import is_variant_done
-    ckpt = tmp_path / "c.pt"; ckpt.write_bytes(b"x" * 10)
-    rows = [{"variant_id": "v1", "variant_sha256": "oldsha", "latency_provider_id": "p|1",
-             "status": "SUCCESS", "latency_us_median": 5.0, "ckpt": str(ckpt)}]
-    assert is_variant_done(rows, 8.0, "p|1", "newsha") is False   # sha 不匹配
-    assert is_variant_done(rows, 8.0, "p|2", "oldsha") is False   # provider 不匹配
 
 
 # ── BLK-8：tune_latency 最小缩量（mock，无真 ONNX/硬件）────────────────────────
@@ -343,134 +224,6 @@ def test_gpu_probe_contract_violation_missing_dummy_shape(tmp_path):
 # setup + gate（恒跑）。本测试驱动 render 模拟 gate→$end（train missing）断言不崩。
 
 
-# ── setup_helpers：R4 确定性 teacher_ckpt 解析 + user_train grep ─────────────────
-
-
-def test_setup_helpers_parse_out_from_command():
-    """find-teacher-ckpt 的 --out 解析覆盖各种命令形态（确定性，rule 5）。"""
-    sys.path.insert(0, str(KD))
-    for m in [n for n in sys.modules if n == "setup_helpers"]:
-        del sys.modules[m]
-    from setup_helpers import _parse_out_from_command
-    assert _parse_out_from_command("python train.py --out /a/b.pt") == "/a/b.pt"
-    assert _parse_out_from_command("python train.py --out=/c/d.ckpt") == "/c/d.ckpt"
-    assert _parse_out_from_command("python train.py --output e.pt") == "e.pt"
-    assert _parse_out_from_command("python train.py --ckpt-path ckpts/x.pth") == "ckpts/x.pth"
-    assert _parse_out_from_command("python train.py") is None
-    assert _parse_out_from_command("") is None
-
-
-def test_setup_helpers_find_teacher_ckpt_via_out_flag(tmp_path):
-    """teacher_train_command 含 --out → 直接用（无歧义首选）。"""
-    sys.path.insert(0, str(KD))
-    for m in [n for n in sys.modules if n == "setup_helpers"]:
-        del sys.modules[m]
-    from setup_helpers import find_teacher_ckpt
-    # 造一个源 ckpt
-    src = tmp_path / "src.pt"
-    src.write_bytes(b"x" * 50)
-    target = tmp_path / "art" / "teacher_ckpt.pt"
-    target_abs, src_abs = find_teacher_ckpt(
-        project_root=str(tmp_path),
-        train_command=f"python train.py --out {src}",
-        target=str(target),
-    )
-    assert target_abs == str(target.resolve())
-    assert src_abs == str(src.resolve())
-    # 拷贝成功（target 文件存在且大小一致）
-    assert target.is_file() and target.stat().st_size == 50
-
-
-def test_setup_helpers_find_teacher_ckpt_scan_when_no_out(tmp_path):
-    """无 --out → 扫 project_root 最新 .pt（排除 kd-nas-artifacts/ckpts 等假候选）。"""
-    sys.path.insert(0, str(KD))
-    for m in [n for n in sys.modules if n == "setup_helpers"]:
-        del sys.modules[m]
-    from setup_helpers import find_teacher_ckpt
-    # 用户 project_root 下散落几个 .pt（不应被选：在 ckpts/ 子目录）
-    (tmp_path / "ckpts").mkdir()
-    (tmp_path / "ckpts" / "old.pt").write_bytes(b"old")
-    # 真候选：项目根 latest.pt（mTime 最新）
-    import time
-    latest = tmp_path / "latest.pt"
-    latest.write_bytes(b"latest")
-    # 强制 mTime 比 old.pt 新（防 filesystem 抖动）
-    later = time.time() + 100
-    import os
-    os.utime(latest, (later, later))
-    os.utime(tmp_path / "ckpts" / "old.pt", (later - 200, later - 200))
-
-    target = tmp_path / "out.pt"
-    target_abs, src_abs = find_teacher_ckpt(
-        project_root=str(tmp_path),
-        train_command="python train.py",  # 无 --out
-        target=str(target),
-    )
-    assert src_abs == str(latest.resolve())
-    assert target.is_file()
-
-
-def test_setup_helpers_find_teacher_ckpt_fail_loud_when_no_candidate(tmp_path):
-    """扫不到任何 .pt/.ckpt → FileNotFoundError（caller exit 2 fail loud）。"""
-    sys.path.insert(0, str(KD))
-    for m in [n for n in sys.modules if n == "setup_helpers"]:
-        del sys.modules[m]
-    from setup_helpers import find_teacher_ckpt
-    import pytest as _pt
-    with _pt.raises(FileNotFoundError, match="无 .pt"):
-        find_teacher_ckpt(
-            project_root=str(tmp_path),
-            train_command="python train.py",
-            target=str(tmp_path / "out.pt"),
-        )
-
-
-def test_setup_helpers_grep_user_train_demo(tmp_path):
-    """grep-user-train AST 解析能从 demo 风格 train.py 抽 compute_loss（确定性，rule 5）。"""
-    sys.path.insert(0, str(KD))
-    for m in [n for n in sys.modules if n == "setup_helpers"]:
-        del sys.modules[m]
-    from setup_helpers import grep_user_train
-    # 造一个 demo 风格 train.py
-    (tmp_path / "train.py").write_text(
-        "import torch\n"
-        "import torch.nn as nn\n"
-        "def compute_loss(s_out, y):\n"
-        "    return nn.functional.mse_loss(s_out, y)\n"
-        "def build_dataloader():\n"
-        "    return []\n",
-        encoding="utf-8",
-    )
-    train_import, loss_fn, sentinel = grep_user_train(
-        project_root=str(tmp_path), train_command="python train.py",
-    )
-    assert train_import == str((tmp_path / "train.py").resolve())
-    assert loss_fn == "compute_loss"
-    assert sentinel is None
-
-
-def test_setup_helpers_grep_user_train_sentinel_when_no_loss_fn(tmp_path):
-    """train.py 无 loss callable → emit ask-user 哨兵（不编造，rule 5）。"""
-    sys.path.insert(0, str(KD))
-    for m in [n for n in sys.modules if n == "setup_helpers"]:
-        del sys.modules[m]
-    from setup_helpers import grep_user_train
-    (tmp_path / "train.py").write_text(
-        "import torch\n"
-        "def forward(x):\n"
-        "    return x\n"  # 无 loss / compute_loss / *_loss 命名
-        "",
-        encoding="utf-8",
-    )
-    train_import, loss_fn, sentinel = grep_user_train(
-        project_root=str(tmp_path), train_command="python train.py",
-    )
-    assert train_import == "" and loss_fn == ""
-    assert sentinel is not None
-    assert sentinel["_sentinel"] == "orca_ask_user_v1"
-    assert "_orca_ask_user" in sentinel
-
-
 # ── agent.md：BUG-1 执行指令强化（存在性 + 关键短语）────────────────────────────
 
 
@@ -562,46 +315,6 @@ def test_gpu_probe_r1_npu_zero_per_variant_fails_soft_no_estimation(
     )
 
 
-# ── setup_helpers：R4 _walk_with_prune + 死代码守护 ──────────────────────────────
-
-
-def test_setup_helpers_walk_with_prune_skips_venv(tmp_path):
-    """_walk_with_prune 必须跳过 .venv/site-packages（实测 Orca repo 33k 文件会让
-    rglob 卡 >30s；setup_helpers.py WSL2-prune 设计的核心动机）。"""
-    sys.path.insert(0, str(KD))
-    for m in [n for n in sys.modules if n == "setup_helpers"]:
-        del sys.modules[m]
-    from setup_helpers import _walk_with_prune, _PRUNE_DIRS
-    # 造一个含 .venv/ 的 project_root（venv 下造 100 个假文件）
-    pr = tmp_path / "proj"
-    (pr / ".venv" / "lib" / "site-packages").mkdir(parents=True)
-    for i in range(50):
-        ((pr / ".venv") / f"fake{i}.py").write_text("x", encoding="utf-8")
-    # 真候选：项目根的 train.pt
-    (pr / "real_train.pt").write_bytes(b"real")
-    # llm_artifacts 子目录也应剪枝
-    (pr / "llm_artifacts").mkdir()
-    (pr / "llm_artifacts" / "skip.pt").write_bytes(b"skip")
-
-    walked_files = [(rel_parts, fname) for _, rel_parts, fname in _walk_with_prune(pr)]
-    fnames = {fname for _, fname in walked_files}
-    # venv 内的假文件全不应出现
-    assert not any(name.startswith("fake") for name in fnames), (
-        f"_walk_with_prune 应剪掉 .venv，got fake files: {[n for n in fnames if n.startswith('fake')]}"
-    )
-    # llm_artifacts/skip.pt 不应出现
-    assert "skip.pt" not in fnames, "_walk_with_prune 应剪掉 llm_artifacts"
-    # real_train.pt 应保留
-    assert "real_train.pt" in fnames
-
-
-def test_setup_helpers_no_dead_code_loss_regex():
-    """code-reviewer finding：``_LOSS_RE`` / ``_NN_LOSS_ASSIGN`` 死代码已删（YAGNI）。"""
-    src = (KD / "setup_helpers.py").read_text(encoding="utf-8")
-    assert "_LOSS_RE" not in src, "死代码 _LOSS_RE 应已删（grep 改 AST 后无引用）"
-    assert "_NN_LOSS_ASSIGN" not in src, "死代码 _NN_LOSS_ASSIGN 应已删"
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # KD-NAS finalize（2026-07-31）：指标方向单一真相源 + 防假（select 已删，留下 kd_common 不变量）
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -686,21 +399,5 @@ def test_is_measured_row_unknown_status():
     assert kc.is_measured_row(
         {"status": "FAIL_export", "accuracy": 0.01, "accuracy_kind": "nmse"}) is False
     assert kc.is_measured_row({"status": "UNKNOWN", "accuracy_kind": "snr"}) is False
-
-
-def test_measure_student_db_kind_lower_better():
-    """measure_student 的绝对基线判定按显式 kind：db（越低越好）→ student ≤ baseline 才达标。"""
-    sys.path.insert(0, str(KD))
-    import measure_student
-    # db 方向：student=-22 ≤ baseline=-20 → met=True（更低的 dB 更好，不许反转）
-    met, used, conf = measure_student._compute_met_accuracy_absolute(
-        -22.0, "db", -20.0, "db")
-    assert met is True and used == "db" and conf == "high"
-    # student=-18（比 -20 差）→ met=False
-    met2, _, _ = measure_student._compute_met_accuracy_absolute(-18.0, "db", -20.0, "db")
-    assert met2 is False
-    # snr（越高越好）：student=22 ≥ baseline=20 → met=True
-    met3, _, _ = measure_student._compute_met_accuracy_absolute(22.0, "snr", 20.0, "snr")
-    assert met3 is True
 
 

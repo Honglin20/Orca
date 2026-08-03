@@ -186,7 +186,8 @@ Starting from the model entry point:
    ```
 
    These four symbols are the KD variant contract verbatim (`CONTRACTS.md` §1). Downstream
-   `pick_variant.py` / `gate_all.py` / `tune_latency.py` import them directly.
+   `kd_common.validate_variant` / `tune_latency.py` import them directly
+   (2026-08-04 cleanup: `pick_variant.py` / `gate_all.py` 已删，不变量已 port 到 `kd_common`).
 
 3. **Review and self-validate**: re-read the flat file and verify (a) definitions ordered
    correctly (no `NameError`), (b) constructor args consistent with how `build_model`

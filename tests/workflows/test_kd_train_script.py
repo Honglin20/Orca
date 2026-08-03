@@ -48,10 +48,19 @@ FIDELITY_CHECK = AGENT_DIR / "scripts" / "fidelity_check.py"
 
 # 测试输入（真实存在的契约文件）
 KD_SCRIPTS_DIR = REPO / "workflows" / "agents" / "_kd_scripts"
-TEACHER_MODEL = KD_SCRIPTS_DIR / "teacher_model.py"
+# 旧 teacher_model.py（10 层 t1/t2 交替）已删（2026-08-04 cleanup §3）——
+# 活跃 teacher 来自 teacher-gen 产物；此处的 train_pipeline script 测试只需一个
+# 「exposes build_model/DUMMY_INPUT/BUILD_FN 的 contract .py」作 --model_path 占位，
+# 复用 receiver KB 的 spt_alt.py（同 contract shape [1,4,48,64,1]，KD feature hooks 恒 2）。
 USER_TRAIN_PY = REPO / "examples" / "kd-nas-demo" / "train.py"
 USER_EVAL_PY = REPO / "examples" / "kd-nas-demo" / "test_student.py"
 STUDENT_VARIANT = REPO / "knowledge_base" / "families" / "receiver" / "spt_alt.py"
+TEACHER_MODEL = STUDENT_VARIANT  # contract .py 占位（teacher-gen wrapper 同款形状）
+# spt_alt.py 依赖同目录 _model8_blocks——直接 importlib 加载前需把 receiver dir 入 sys.path。
+# subprocess 调用（train_pipeline.py 等）会自管 sys.path，无需此 setup。
+_RECEIVER_DIR = str(STUDENT_VARIANT.parent)
+if _RECEIVER_DIR not in sys.path:
+    sys.path.insert(0, _RECEIVER_DIR)
 
 # Stable base CLI（generation workflow §1）—— train_pipeline.py 必须全部暴露。
 # 4 个 --user_* 覆盖 flag 已删（占位符体系随骨架化移除，无运行时注入）。
@@ -1078,6 +1087,8 @@ def test_fidelity_check_demo_fixture(tmp_path):
     spec = _specialized_demo_pipeline(tmp_path)
     env = dict(os.environ)
     env.pop("ORCA_CHART_SOCK", None)
+    # TEACHER_MODEL = spt_alt.py 依赖同目录 _model8_blocks；fidelity_check subprocess 需 receiver dir 入 PYTHONPATH。
+    env["PYTHONPATH"] = _RECEIVER_DIR + os.pathsep + env.get("PYTHONPATH", "")
 
     r = subprocess.run(
         [sys.executable, str(FIDELITY_CHECK),

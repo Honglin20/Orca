@@ -14,7 +14,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
+import sys
 from typing import Any
 
 # KNOBS leverage 缩容优先级（高→低）。禁止字母序（"low"<"medium"<"high" 反了）。
@@ -23,8 +25,10 @@ VALID_LEVERAGE = set(RANK)
 LEVERAGE_DEFAULT = "medium"
 
 # ── accuracy_baseline_kind → best 方向（单一真相源）────────
-# 三处消费：measure_student / viz_kd / kd-select.select_and_report 都 import 本表，
-# 防止「-20dB 误判比 -22dB 好」式的方向反转（符号判定不可靠，必须显式 kind）。
+# §4 doc sweep：原三处消费者（measure_student / viz_kd / kd-select.select_and_report）已删；
+# 当前消费者：viz_kd_stage（标轴方向）+ kd_common.compute_met_accuracy_absolute（met 判定）+
+# finalize_kd（report 文本）。单一真相源防「-20dB 误判比 -22dB 好」式方向反转
+# （符号判定不可靠，必须显式 kind）。
 # 越高越好（best=max）：snr / acc；越低越好（best=min）：mse / nmse / ber / db。
 HIGHER_BETTER_KINDS = {"snr", "acc"}
 LOWER_BETTER_KINDS = {"mse", "nmse", "ber", "db"}
@@ -33,8 +37,9 @@ LOWER_BETTER_KINDS = {"mse", "nmse", "ber", "db"}
 def accuracy_direction(kind: str) -> str:
     """accuracy kind → best 方向：``"max"``（越高越好）/ ``"min"``（越低越好）/ ``""``（未知）。
 
-    单一真相源（DRY）：measure_student 判 met_accuracy、viz_kd 标轴方向、kd-select 选最优
-    student 全部经此函数。未知 kind → 空串（caller 须 fail loud / 低置信，**不** auto 猜方向）。
+    单一真相源（DRY）：viz_kd_stage 标轴方向 + kd_common.compute_met_accuracy_absolute 判
+    met_accuracy + finalize_kd 报告文本全部经此函数。未知 kind → 空串（caller 须 fail loud /
+    低置信，**不** auto 猜方向）。
     """
     k = (kind or "").strip().lower()
     if k in HIGHER_BETTER_KINDS:
@@ -47,7 +52,7 @@ def accuracy_direction(kind: str) -> str:
 def to_float(v: Any) -> float | None:
     """宽松转 float（坐标图过滤用）：``None`` / bool / NaN / 非数值 → ``None``。
 
-    单一真相源（DRY）：viz_kd 与 select_and_report 共用，防两份字节级副本漂移。
+    单一真相源（DRY）：viz_kd_stage 与 finalize_kd 共用，防两份字节级副本漂移。
     """
     if v is None or isinstance(v, bool):
         return None
@@ -136,6 +141,119 @@ def provider_id(provider: str) -> str:
         return f"{provider}|nobyhash"
 
 
+def validate_variant(mod: Any, path: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """校验 receiver KB 变体 .py 的契约：``build_model`` callable + ``DUMMY_INPUT.shape`` +
+    ``KNOBS``（step<0 / leverage∈{high,medium,low} / default·min 数值）。
+
+    单一真相源（DRY）：原 ``pick_variant._validate_variant`` 守所有 receiver KB variant；
+    迁到 ``kd_common`` 后 receiver variant 校验 + receiver KB 生成时自查共用，防止两份字节
+    级副本漂移。返回 ``(dummy_input, knobs)``；``knobs={}`` 表示该 variant 不可调
+    （latency 超阈即 FAIL_latency）。
+    """
+    if not hasattr(mod, "build_model") or not callable(mod.build_model):
+        raise AttributeError(f"{path} 无 callable build_model（契约必备）")
+    di = getattr(mod, "DUMMY_INPUT", None)
+    if not isinstance(di, dict) or not isinstance(di.get("shape"), list) or not di["shape"]:
+        raise ValueError(
+            f"{path} DUMMY_INPUT 缺 shape（list）——禁硬编码 shape 回退（用户须声明真实 I/O 维度）"
+        )
+    knobs = getattr(mod, "KNOBS", None)
+    if knobs is None:
+        return di, {}
+    if not isinstance(knobs, dict) or not knobs:
+        raise ValueError(f"{path} KNOBS 必须是非空 dict（得到 {type(knobs).__name__}）")
+    for k, kn in knobs.items():
+        if not isinstance(kn, dict):
+            raise ValueError(f"{path} KNOBS[{k!r}] 不是 dict")
+        for field in ("default", "min", "step", "leverage"):
+            if field not in kn:
+                raise ValueError(f"{path} KNOBS[{k!r}] 缺字段 {field!r}")
+        if not isinstance(kn["step"], (int, float)) or kn["step"] >= 0:
+            raise ValueError(f"{path} KNOBS[{k!r}].step 必须 <0（缩容方向；得到 {kn['step']!r}）")
+        if kn["leverage"] not in RANK:
+            raise ValueError(
+                f"{path} KNOBS[{k!r}].leverage={kn['leverage']!r} 非法；须 ∈ {sorted(RANK)}"
+            )
+        if not isinstance(kn["default"], (int, float)) or not isinstance(kn["min"], (int, float)):
+            raise ValueError(f"{path} KNOBS[{k!r}] default/min 须为数值")
+    return di, knobs
+
+
+# ── student accuracy 解析 + 绝对基线对比（§3 迁移：原 measure_student.py 不变量）───────
+# 单一真相源：teacher_setup / finalize_kd / viz_kd_stage / 旧 measure_student 共用方向语义。
+# measure_student 删除后，绝对基线对比的不变量留 kd_common——防三处字节级副本漂移。
+
+_ACC_PATTERNS = [
+    (re.compile(r"\baccuracy\s*[:=]\s*([0-9]*\.?[0-9]+)", re.I), "acc"),
+    (re.compile(r"\bNMSE\s*[:=]\s*([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)", re.I), "nmse"),
+    (re.compile(r"\bMSE\s*[:=]\s*([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)", re.I), "mse"),
+    (re.compile(r"\bBER\s*[:=]\s*([0-9]*\.?[0-9]+)", re.I), "ber"),
+    (re.compile(r"\bSNR[_-]?dB\s*[:=]\s*([-+]?[0-9]*\.?[0-9]+)", re.I), "snr"),
+    (re.compile(r"\bSNR\s*[:=]\s*([-+]?[0-9]*\.?[0-9]+)", re.I), "snr"),
+]
+
+
+def parse_accuracy(stdout: str) -> tuple[float, str, str]:
+    """从 eval stdout 解析精度（无 STUDENT_ACCURACY 协议时用）。返回 (value, kind, confidence)。
+
+    单一真相源（DRY）：原 ``measure_student._parse_accuracy``；优先级为
+    JSON-line → 裸 ``accuracy/NMSE/MSE/BER/SNR`` regex（无 STUDENT_ACCURACY 协议前缀）。
+    解析失败 → (0.0, "unknown", "low")。teacher_setup / 复用 STUDENT_ACCURACY 协议的 eval
+    走其本地优先级（含 TEACHER_/STUDENT_ACCURACY 前缀），**不**复用本函数（语义不同）。
+    """
+    for line in stdout.splitlines()[::-1]:
+        s = line.strip()
+        if s.startswith("{") and s.endswith("}"):
+            try:
+                d = json.loads(s)
+                for k, kind in (("accuracy", "acc"), ("acc", "acc"),
+                                ("nmse", "nmse"), ("mse", "mse"),
+                                ("ber", "ber"), ("snr", "snr"), ("snr_db", "snr")):
+                    if k in d and isinstance(d[k], (int, float)):
+                        return float(d[k]), kind, "high"
+            except json.JSONDecodeError:
+                pass
+    for pat, kind in _ACC_PATTERNS:
+        m = pat.search(stdout)
+        if m:
+            return float(m.group(1)), kind, "high"
+    return 0.0, "unknown", "low"
+
+
+def compute_met_accuracy_absolute(
+    student_acc: float, detected_kind: str, baseline: float, kind_override: str,
+) -> tuple[bool, str, str]:
+    """绝对精度基线对比。返回 (met_accuracy, used_kind, confidence)。
+
+    单一真相源（DRY）：原 ``measure_student._compute_met_accuracy_absolute``。
+
+    - ``kind_override`` 非空 → 锁方向；与 detected_kind 不符 → WARN（用 override）。
+    - kind unknown → met=false, confidence=low（绝不静默 pass）。
+    """
+    used = (kind_override or "").strip().lower() or detected_kind
+    confidence = "high"
+    if kind_override and detected_kind != "unknown" and detected_kind != used:
+        print(
+            f"[kd_common] WARN: 自动检测 kind={detected_kind!r} 与 "
+            f"--accuracy_baseline_kind={used!r} 不符；按 override {used!r} 判定。",
+            file=sys.stderr,
+        )
+    direction = accuracy_direction(used)
+    if direction == "max":
+        met = bool(student_acc >= baseline)
+    elif direction == "min":
+        met = bool(student_acc <= baseline)
+    else:
+        met = False
+        confidence = "low"
+        print(
+            f"[kd_common] WARN: accuracy kind 未知（detected={detected_kind!r}, "
+            f"override={kind_override!r}）；无法判方向 → met_accuracy=false, confidence=low。",
+            file=sys.stderr,
+        )
+    return met, used, confidence
+
+
 def feq(a: Any, b: Any, rel: float = 1e-6) -> bool:
     """浮点近似相等（target_latency_us 字符串 vs float 比较）。非数 → False。"""
     try:
@@ -169,9 +287,10 @@ def read_ledger(path: str) -> list[dict[str, Any]]:
     return out
 
 
-# ── ledger 增量写 + 子进程辅助（gate_all / train_pool 共享，契约级逻辑勿复制）──────
-# ``_append_ledger_row`` 的「主线程持 orca.lock + 逐行 write+flush」是 crash-safety 契约——
-# 集中在此处，防 gate_all / train_pool 各持一份副本漂移漏改。
+# ── ledger 增量写 + 子进程辅助（crash-safety 契约级逻辑，勿复制）─────────────────
+# §4 doc sweep：原消费者 gate_all / train_pool 已删；``append_ledger_row`` 的「主线程持
+# orca.lock + 逐行 write+flush」是 crash-safety 契约，留在 kd_common 供未来脚本复用
+# （当前活跃消费者：gen_student / distill 间接经 ledger_reducer append）。
 
 
 def append_ledger_row(ledger_path: str, row: dict[str, Any]) -> None:

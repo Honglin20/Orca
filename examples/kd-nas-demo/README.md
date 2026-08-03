@@ -72,7 +72,7 @@ I/O 契约与真实 model8 完全一致（`[B,4,48,64,1]` + alpha 功率归一 +
 | `baseline_model_path` | `<REPO>/examples/kd-nas-demo/baseline_model.py` | 绝对路径（flatten 展平成 KD 变体契约） |
 | `target_latency_us` | `5.0` | 宽松门：student 变体 CPU 实测 0.2~1.1ms，均通过；baseline 6.6ms（不卡门） |
 | `accuracy_baseline` | `1.5` | NMSE 基线（越低越好）。随机数据下变体 NMSE ~1.0~1.2，故 1.5 让多数通过 |
-| `accuracy_baseline_kind` | `nmse` | 精度方向（**必填**，越低越好 best=min）。demo 用 NMSE；measure_student / viz_kd / kd-select 三处同源判定 |
+| `accuracy_baseline_kind` | `nmse` | 精度方向（**必填**，越低越好 best=min）。demo 用 NMSE；viz_kd_stage / kd_common.compute_met_accuracy_absolute 同源判定 |
 | `device` | `cpu` | demo CPU 可跑（GPU 路径后续测试）；device=cpu 时 gpu_probe 自动 fail-soft 到 concurrency=1 |
 | `full_epochs` | `1` | 每变体蒸馏 1 epoch（demo 求快） |
 
@@ -204,7 +204,9 @@ python3 workflows/agents/_kd_scripts/gpu_probe.py \
   --variants_count 4 --device cpu
 # 期望: CONCURRENCY: 1 + DEVICE_PLAN: [""] + exit 0
 
-# B6. measure_student 端到端（test_command + latency_provider + accuracy_baseline）
+# B6. （2026-08-04 cleanup §3：measure_student.py 已删——活跃串行 kd-nas 的精度测量由
+# train_pipeline --mode eval + decide reducer 内联完成；以下命令保留作历史参考，不再可跑。）
+# 旧 measure_student 端到端示例（test_command + latency_provider + accuracy_baseline）：
 python3 workflows/agents/_kd_scripts/measure_student.py \
   --student_model_path "$REPO/examples/kd-nas-demo/knowledge_base/families/receiver/demo_tiny_tf.py" \
   --student_ckpt /tmp/kd_demo/demo_tiny_tf.pt --build_fn build_model \
@@ -218,10 +220,11 @@ python3 workflows/agents/_kd_scripts/measure_student.py \
 # 期望: STUDENT_LATENCY_US / STUDENT_ACCURACY / MET_ACCURACY: true / ACCURACY_CONFIDENCE: high
 ```
 
-> B4 手跑的是已退役的 `train_adapter_template.py`（脚本级自验参考，走其自身历史 placeholder
-> 回退 MSE + 随机 batch）。**真实用户 loss 搬入由 `train_pipeline.py` 生成流程承担**：kd-train-script
-> 实例化骨架模板 + 逐字搬入 `inputs.user_train_script` 的 `compute_loss` / `build_dataloader`
-> （零占位符产物，无 `--user_train_import` 注入——该 flag 已随占位符体系删除）。
+> B4 手跑的是已退役的 `train_adapter_template.py`（**已删**——2026-08-04 cleanup §2，
+> `_deprecated/` 目录整目录移除）。脚本级自验参考现在由 kd-train-script 的
+> `fidelity_check.py` 守护。**真实用户 loss 搬入由 `train_pipeline.py` 生成流程承担**：
+> kd-train-script 实例化骨架模板 + 逐字搬入 `inputs.user_train_script` 的 `compute_loss` /
+> `build_dataloader`（零占位符产物，无 `--user_train_import` 注入——该 flag 已随占位符体系删除）。
 
 ## 设计决策
 

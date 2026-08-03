@@ -7,10 +7,12 @@
 > 改接口 = 改本文件 + 通知依赖方。
 > fail loud：脚本遇契约不符输入直接非零退出 + stderr 报因（硬件缺失/探测异常则 fail-soft 退 0，不阻塞 workflow）。
 
-> **v5 变更**（2026-08-03 串行化 + DEPRECATED 标注）：活跃 workflow 改串行迭代（gen_student→distill→decide），
-> 旧并行 sweep（gate_all/train_pool/select_and_report/viz_kd）退出活跃 runtime。这些脚本**仍在活跃测试中**
-> 被直接 import（test_kd_redesign ~74 测 / test_struct_kd_p7 TestVizKD* ~20 测），物理删除 defer 到独立 followup SPEC
-> （先删测试迁移 viz_kd 可复用不变量到 viz_kd_stage 测试，再删脚本）。本文件不再把旧并行脚本描述为活跃路径。
+> **v5 变更**（2026-08-03 串行化 + 2026-08-04 死代码清理）：
+> 活跃 workflow 改串行迭代（gen_student→distill→decide）；旧并行 sweep
+> （gate_all / train_pool / select_and_report / viz_kd / pick_variant / distill_dispatch /
+> measure_student / setup_helpers / teacher_model / _deprecated/train_adapter_template）已**全部删除**
+> （2026-08-04 cleanup SPEC §2/§3）。可复用不变量（KNOBS 校验 / 精度解析 / 绝对基线对比 /
+> pareto 语义 / sentinel 过滤）已 port 到 ``kd_common.py`` + ``viz_kd_stage.py`` 单一真相源。
 
 ## 0. 目录布局
 
@@ -29,31 +31,19 @@ workflows/
     distill/agent.md                       # 串行：单 student KD 蒸馏（tune_latency→distill→eval）
     decide/agent.md                        # 串行：champion ratchet + 终止判定 + ledger 落账
     finalize/agent.md                      # 终态：champion eval/ONNX/latency + final_report.md
-    kd-gate/agent.md                       # 【DEPRECATED】旧并行 gate 节点（活跃路径不调用，见 §3）
-    kd-train/agent.md                      # 【DEPRECATED】旧并行 train 节点
-    kd-select/                             # 【DEPRECATED】旧并行 select 节点
-      agent.md / scripts/select_and_report.py
     _kd_scripts/
       CONTRACTS.md                         # 本文件
       kd_common.py                         # 共享 helper（sha256/provider_id/read_ledger/is_variant_done/acquire_run_lock/RANK/accuracy_direction/is_measured_row）
       _device.py                           # resolve_device / ort_providers / is_npu_available（cuda:local_rank 支持）
-      teacher_model.py                     # 【legacy】teacher（10 层 t1/t2 交替）；active path 改用 teacher-gen 产物，此文件仅 demo/单测消费
-      pick_variant.py                      # 确定性变体枚举（_list_variants / _validate_variant / done 谓词）
+      # §3 cleanup：teacher_model.py / pick_variant.py / measure_student.py / setup_helpers.py 已删；
+      # 它们的不变量（KNOBS 校验 / 精度解析 / 绝对基线对比）已 port 到 kd_common.py。
       tune_latency.py                      # 最小缩量 latency 调参（seed/cache/median+std）
-      distill_dispatch.py                  # BLK-17 gate（noop|train）
-      gate_all.py                          # 【DEPRECATED】旧并行串行 gate（活跃串行 kd-nas.yaml 不调用）
       gpu_probe.py                         # GPU 探测 + 并发判定（setup 阶段，fail-soft）
-      train_pool.py                        # 【DEPRECATED】旧并行有界并发池（活跃串行 kd-nas.yaml 不调用）
-      measure_student.py                   # 精度测量（纯函数供测试/struct 复用；KD 精度路径已由 train_pipeline --mode eval 取代）
       teacher_setup.py                     # teacher_cache.pt + teacher_meta.json
-      setup_helpers.py                     # 【legacy】find-teacher-ckpt / grep-user-train（active path 不再调）
-      viz_kd.py                            # 【DEPRECATED】旧 sweep 可视化（活跃串行路径用 viz_kd_stage；pareto 语义已 port 到 viz_kd_stage）
       viz_kd_stage.py                      # 活跃串行每节点 web 推送 sidecar（baseline/teacher/student/distill_table/decide/final）
       metrics_tail.py                      # distill loss line（log-tail 推送）
       finalize_kd.py                       # finalize 确定性后端（champion eval/ONNX/latency + final_report.md）
       kd/{losses,wrapper,compose,ema}.py   # KD 库（不变）
-      _deprecated/
-        train_adapter_template.py          # 【v4 退役】原蒸馏训练脚本，被 train_pipeline.py 取代
 knowledge_base/families/receiver/          # model8 变体仓（.py）+ _model8_blocks.py 共享积木
 kd-nas-artifacts/                          # 跨 run 稳定 artifact 根（teacher_cache/ledger/ckpts/...）
 ```
@@ -71,8 +61,8 @@ def build_model(**cfg) -> nn.Module: ...                       # 零参用 KNOBS
 def feature_hook_names(self) -> list[str]: ...                 # 可选，OFD/FitNets/RKD 特征对齐（缺则 distill 自动 mse-only）
 ```
 - **I/O**：输入 `[B,num_ports,num_subcarriers,num_symbols,1]`，输出同形；内部自理 alpha 归一。
-- **文件名 = variant_id**（stem）；`_*.py` 是共享模块（pick_variant glob 排除）。
-- **teacher 不在此**：在 `_kd_scripts/teacher_model.py`（10 层 t1/t2 交替）。
+- **文件名 = variant_id**（stem）；`_*.py` 是共享模块（旧 pick_variant glob 排除，现 KNOBS 校验由 ``kd_common.validate_variant`` 持）。
+- **teacher 不在此**：活跃 teacher 由 `teacher-gen` 节点派生（wrapper .py 委托 baseline），不入 KB。
 - **feature_hook_names fail-loud**（SPEC §1）：distill 用 AST 判定此 fn 是否存在 → 启用/剥离 ofd；
   若 student 缺此 fn 但下游强配 ofd → ``kd/compose.py`` 守卫 fail-loud 抛 ValueError → FAIL_train。
 
@@ -109,9 +99,9 @@ def feature_hook_names(self) -> list[str]: ...                 # 可选，OFD/Fi
 - **gpu_probe.py**【setup step 8】：`--teacher_cache --representative_variant --variants_count [--device auto] [--safety 0.8] [--max_concurrency 8] [--seed 0]`
   → `RESOLVED_DEVICE` + `N_GPUS` + `FREE_VRAM_BYTES` + `PER_VARIANT_VRAM_BYTES` + `CONCURRENCY` + `DEVICE_PLAN`（JSON list）+ `GPU_REPORT`。
   fail-soft：无 CUDA/NPU / 探测异常 → `CONCURRENCY: 1` + `DEVICE_PLAN: [""]` + WARN，exit 0；仅输入契约不符 → exit 2。
-- **measure_student.py**【**KD 精度路径已由 train_pipeline.py --mode eval 取代**（活跃路径不再调）；文件保留供测试/struct 复用其纯函数】：`--student_model_path --student_ckpt --build_fn [--build_cfg] [--eval_command|--eval_dataset] [--accuracy_baseline] [--accuracy_baseline_kind] [--latency_provider] [--target_latency_us] --output_dir [--skip_latency] [--device] [--seed]`
-  → `STUDENT_LATENCY_US` + `STUDENT_ACCURACY` + `STUDENT_ACCURACY_KIND` + `MET_ACCURACY` + `MET_LATENCY` + `STUDENT_ONNX` + `ACCURACY_CONFIDENCE`。
-  其 `_parse_accuracy` / `_compute_met_accuracy_absolute` 逻辑是 eval mode stdout 协议 + 方向判定的参照来源。
+- **measure_student.py 已删**（2026-08-04 cleanup §3）。KD 精度路径由 train_pipeline.py --mode eval 承担；
+  原 ``_parse_accuracy`` / ``_compute_met_accuracy_absolute`` 不变量已 port 到 ``kd_common.parse_accuracy`` /
+  ``kd_common.compute_met_accuracy_absolute``（单一真相源；viz_kd_stage / finalize_kd 共用）。
 - **teacher_setup.py**：`--teacher_model_path --teacher_ckpt --build_fn --dummy_input [--eval_command] --output_dir [--latency_provider] [--teacher_latency_us] [--device] [--seed]`
   → `TEACHER_LATENCY_US` + `TEACHER_ACCURACY` + `TEACHER_ACCURACY_KNOWN` + `TEACHER_DB_BASELINE` + `TEACHER_ONNX` + `TEACHER_CACHE` + `TEACHER_META`（meta 含 `teacher_model_hash` + `teacher_ckpt_sha256`）。
 - **viz_kd_stage.py**（活跃每节点 web 推送 sidecar）：`--stage <baseline|baseline_seed|teacher|student|distill_table|decide|final> [--ledger] [--champions] [--baseline_latency_us] [--baseline_accuracy] [--target_latency_us] [--accuracy_baseline_kind] [--teacher_latency_us] [--champion_latency_us] [--champion_accuracy] [--teacher_meta] [--round_hypothesis] [--env_anchor]`
@@ -131,19 +121,6 @@ def feature_hook_names(self) -> list[str]: ...                 # 可选，OFD/Fi
   eval：`STUDENT_ACCURACY` + `STUDENT_ACCURACY_KIND` + `MET_ACCURACY` + `ACCURACY_CONFIDENCE`。
   runtime 需 `ORCA_KD_SCRIPTS_DIR` env 指向 `_kd_scripts/`。
 - **export_onnx.py**（共享）：`--model_path --build_fn --dummy_input --opset --out --device --seed [--build_cfg]`。
-
-### 3.2 DEPRECATED 脚本（旧并行 sweep 残留，活跃串行 workflow 不调用，保留供历史测试；删除见 followup SPEC）
-
-> 这些脚本被 ``test_kd_redesign.py``（~74 测）/``test_struct_kd_p7.py::TestVizKD*``（~20 测）等直接 import；
-> 物理删除需先迁/删测试，单独 SPEC 处理（不在本 CONTRACTS 范围）。**新增功能不应再调用它们**。
-
-- **gate_all.py**【DEPRECATED，旧 gate 节点】：原并行 sweep 的串行 latency gate（一个节点遍历全部变体）。
-- **train_pool.py**【DEPRECATED，旧 train 节点】：原并行 sweep 的有界并发训练池。
-- **select_and_report.py**【DEPRECATED，旧 select 节点】：原并行 sweep 的脚本化最终选择 + 报告。
-- **viz_kd.py**【DEPRECATED，旧 sweep 可视化】：原并行 sweep 的 6 图推送（scatter / table / latency bar / progress / pareto / accuracy_compare）。
-  **pareto + 方向门 + sentinel 过滤的可复用不变量已 port 到活跃的 ``viz_kd_stage --stage final``**（SPEC §3），为后续物理删除铺路。
-- **pick_variant.py / distill_dispatch.py**：旧并行 sweep 的内部 helper（gate_all 用）。tune_latency 的 done 谓词逻辑
-  仍由 ``kd_common.is_variant_done`` 复用（活跃路径不直接调 pick_variant）。
 
 ## 4. 节点 I/O（活跃串行 DAG）
 
@@ -180,9 +157,9 @@ def feature_hook_names(self) -> list[str]: ...                 # 可选，OFD/Fi
 - **确定性路由**：`terminate` / `tune_status` 由确定性脚本算，agent 不自定（LO-5）。
 - **跨 run 复用**：稳定 `kd_artifacts_dir` + 哈希校验 + ledger-driven 跳过；单写者（BLK-13 orca.lock）。
 - **时延测量必串行**：latency 对 contention 敏感（并发测→读数失真→false FAIL_latency）。
-- **绝不伪造**：latency / accuracy 必须真实测量；无任何 fallback 造假路径。select/finalize 无达标 → 报告标「无 student 达标」（champion 维持 baseline），**不**假装选出。
+- **绝不伪造**：latency / accuracy 必须真实测量；无任何 fallback 造假路径。finalize 无达标 → 报告标「无 student 达标」（champion 维持 baseline），**不**假装选出。
 - **指标方向显式 + 单一真相源**：``accuracy_baseline_kind`` 是必填 [ask] input。方向判定统一走 ``kd_common.accuracy_direction``
-  （measure_student / viz_kd_stage / select 三处 import 同一函数），**禁**符号 auto 猜（防「-20dB 误判优于 -22dB」反向错误）。
+  （viz_kd_stage / finalize_kd / kd_common.compute_met_accuracy_absolute 三处 import 同一函数），**禁**符号 auto 猜（防「-20dB 误判优于 -22dB」反向错误）。
   未知 kind → fail loud / 低置信 + met=false，绝不静默 pass。
 - **特征蒸馏 fail-loud**（SPEC §1）：``kd/compose.py`` 守卫——kd_losses 含 ofd/fitnets/rkd 且运行时 feats 空 → raise ValueError → FAIL_train。
   distill agent 默认 KD_CONFIG 已 AST 条件化（按 student.feature_hook_names 存在决定启 ofd 还是 mse-only），无 hook 时自动剥离特征项不崩。

@@ -1,7 +1,8 @@
 """test_receiver_variants.py —— receiver KB 变体 smoke + 契约校验（无 GPU/真硬件）。
 
 对每个变体 .py：forward shape、feature_hook_names 恒 2（与 teacher 等长，回归 OFD/prepare bug）、
-KNOBS 过 pick_variant._validate_variant、KNOBS 最小值仍可用、逐变体特有断言。
+KNOBS 过 kd_common.validate_variant（§3 迁移：原 pick_variant._validate_variant 已 port）、
+KNOBS 最小值仍可用、逐变体特有断言。
 
 复用 test_kd_redesign.py 的 _load(path,name) + KBDIR 模式。
 """
@@ -46,8 +47,8 @@ def _load_variant(name: str):
 
 
 @pytest.fixture(scope="module")
-def pick_variant():
-    return _load(KD / "pick_variant.py", "_pv_test_rv")
+def kd_common():
+    return _load(KD / "kd_common.py", "_kd_common_test_rv")
 
 
 # ── 通用契约：forward shape / feature_hook 恒 2 / KNOBS 合法 / 最小值可用 ─────────
@@ -73,10 +74,13 @@ def test_variant_feature_hooks_eq_two(name):
 
 
 @pytest.mark.parametrize("name", VARIANTS)
-def test_variant_knobs_valid(name, pick_variant):
-    """KNOBS 过 pick_variant._validate_variant（build_model/DUMMY_INPUT/step<0/leverage）。"""
+def test_variant_knobs_valid(name, kd_common):
+    """KNOBS 过 kd_common.validate_variant（build_model/DUMMY_INPUT/step<0/leverage）。
+
+    §3 迁移：原 pick_variant._validate_variant 已 port 到 kd_common.validate_variant（DRY 单一真相源）。
+    """
     mod = _load_variant(name)
-    pick_variant._validate_variant(mod, str(KBDIR / f"{name}.py"))  # 不 raise 即通过
+    kd_common.validate_variant(mod, str(KBDIR / f"{name}.py"))  # 不 raise 即通过
 
 
 @pytest.mark.parametrize("name", VARIANTS)

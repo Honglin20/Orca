@@ -5,8 +5,8 @@
 - viz_struct.py：Pareto 过滤 accuracy is None（FAIL_latency）行——P7 修的 y=0 根因
 - viz_struct.py：删 Round Ledger + Exploration Tree（只剩 3 图）
 - viz_kd_stage.py：final stage 全模型总表 + pareto_front + fail_status_bar（viz_kd 已删，语义 port 到 viz_kd_stage）
-- measure_student.py：既无 --eval_command 又无 --eval_dataset → latency-only 模式（db_gap sentinel -1）
-- latency_onnxrt.py / export_onnx.py / profile_onnx.py / teacher_setup.py / measure_student.py
+- kd_common.compute_met_accuracy_absolute：绝对精度基线对比 + kind 方向（§3 迁移自 measure_student）
+- latency_onnxrt.py / export_onnx.py / profile_onnx.py / teacher_setup.py CLI：--device / --seed 等
   / measure_baseline.py CLI：--device / --seed / --no-external-data / --strict-accuracy 全暴露
 - teacher_setup.py `_parse_accuracy`：解析失败 → (0.0, "unknown", "low")（不静默造假）
 - struct/kd workflow YAML：P7 后节点数 = 6（不是原计划 headline 的 7）
@@ -252,40 +252,44 @@ class TestVizStructP7:
         ], f"should push 4 charts (P7 三张 + P2-1 accuracy 维度); got {titles}"
 
 
-# ───────────────────────── measure_student.py（绝对精度基线 + 方向）──────────────
+# ───────────────────────── kd_common 绝对精度基线 + 方向（§3 迁移自 measure_student）──
 
 
 class TestMeasureStudentAbsoluteBaseline:
-    """新设计：精度对比用户绝对基线，方向由 kind 决定（不再 teacher-relative dB gap）。"""
+    """新设计：精度对比用户绝对基线，方向由 kind 决定（不再 teacher-relative dB gap）。
+
+    §3 迁移：原 ``measure_student._compute_met_accuracy_absolute`` 已 port 到
+    ``kd_common.compute_met_accuracy_absolute``（DRY 单一真相源；measure_student.py 已删）。
+    """
 
     def test_nmse_lower_is_better_met(self):
         sys.path.insert(0, str(KD_SCRIPTS))
-        from measure_student import _compute_met_accuracy_absolute
+        from kd_common import compute_met_accuracy_absolute as _compute_met_accuracy_absolute
         met, kind, conf = _compute_met_accuracy_absolute(0.02, "nmse", 0.03, "")
         assert met is True and kind == "nmse" and conf == "high"
 
     def test_nmse_not_met_when_above_baseline(self):
         sys.path.insert(0, str(KD_SCRIPTS))
-        from measure_student import _compute_met_accuracy_absolute
+        from kd_common import compute_met_accuracy_absolute as _compute_met_accuracy_absolute
         met, kind, conf = _compute_met_accuracy_absolute(0.05, "nmse", 0.03, "")
         assert met is False
 
     def test_snr_higher_is_better_met(self):
         sys.path.insert(0, str(KD_SCRIPTS))
-        from measure_student import _compute_met_accuracy_absolute
+        from kd_common import compute_met_accuracy_absolute as _compute_met_accuracy_absolute
         met, _, conf = _compute_met_accuracy_absolute(20.0, "snr", 18.0, "")
         assert met is True and conf == "high"
 
     def test_unknown_kind_never_silent_pass(self):
         sys.path.insert(0, str(KD_SCRIPTS))
-        from measure_student import _compute_met_accuracy_absolute
+        from kd_common import compute_met_accuracy_absolute as _compute_met_accuracy_absolute
         met, _, conf = _compute_met_accuracy_absolute(0.02, "unknown", 0.03, "")
         assert met is False and conf == "low"
 
     def test_kind_override_locks_direction(self):
         """SR3：override 锁方向；与 detected 不符 → WARN 但用 override。"""
         sys.path.insert(0, str(KD_SCRIPTS))
-        from measure_student import _compute_met_accuracy_absolute
+        from kd_common import compute_met_accuracy_absolute as _compute_met_accuracy_absolute
         # detected=mse(越低越好) 但 override=snr(越高越好) → 用 snr 判定
         met, kind, _ = _compute_met_accuracy_absolute(20.0, "mse", 18.0, "snr")
         assert kind == "snr" and met is True
@@ -360,9 +364,21 @@ class TestTeacherSetupParse:
 
 
 def _minimal_teacher_ckpt(tmp_path: Path) -> Path:
-    """造一个最小 teacher ckpt（teacher_model.state_dict）—— teacher_setup strict=False load。"""
+    """造一个最小 teacher ckpt（contract .py state_dict）—— teacher_setup strict=False load。
+
+    §3 迁移：原 teacher_model.py（10 层 t1/t2 交替）已删；活跃 teacher 来自 teacher-gen 产物。
+    teacher_setup 测试只需「exposes build_model/DUMMY_INPUT 的 contract .py」+ feature_hook_names，
+    复用 receiver KB spt_alt.py（同 contract shape [1,4,48,64,1]，KD feature hooks 恒 2）。
+    """
     import torch
-    spec = importlib.util.spec_from_file_location("_ck_teacher", str(KD_SCRIPTS / "teacher_model.py"))
+    _student_variant = REPO / "knowledge_base" / "families" / "receiver" / "spt_alt.py"
+    # spt_alt.py 依赖同目录 _model8_blocks，import 前需把 receiver dir 加入 sys.path。
+    _receiver_dir = str(_student_variant.parent)
+    if _receiver_dir not in sys.path:
+        sys.path.insert(0, _receiver_dir)
+    for m in [n for n in sys.modules if n in ("_ck_teacher", "_model8_blocks", "spt_alt")]:
+        del sys.modules[m]
+    spec = importlib.util.spec_from_file_location("_ck_teacher", str(_student_variant))
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(mod)
@@ -389,7 +405,7 @@ class TestTeacherSetupLatencySource:
         )
         r = subprocess.run([
             sys.executable, str(KD_SCRIPTS / "teacher_setup.py"),
-            "--teacher_model_path", str(KD_SCRIPTS / "teacher_model.py"),
+            "--teacher_model_path", str(REPO / "knowledge_base" / "families" / "receiver" / "spt_alt.py"),
             "--teacher_ckpt", str(ckpt),
             "--build_fn", "build_model",
             "--dummy_input", '{"shape":[1,4,48,64,1],"dtype":"float32"}',
@@ -410,7 +426,7 @@ class TestTeacherSetupLatencySource:
         stub.write_text("def measure(onnx, device=None):\n    return 3.14\n", encoding="utf-8")
         r = subprocess.run([
             sys.executable, str(KD_SCRIPTS / "teacher_setup.py"),
-            "--teacher_model_path", str(KD_SCRIPTS / "teacher_model.py"),
+            "--teacher_model_path", str(REPO / "knowledge_base" / "families" / "receiver" / "spt_alt.py"),
             "--teacher_ckpt", str(ckpt),
             "--build_fn", "build_model",
             "--dummy_input", '{"shape":[1,4,48,64,1],"dtype":"float32"}',
@@ -429,7 +445,7 @@ class TestTeacherSetupLatencySource:
         ckpt = _minimal_teacher_ckpt(tmp_path)
         r = subprocess.run([
             sys.executable, str(KD_SCRIPTS / "teacher_setup.py"),
-            "--teacher_model_path", str(KD_SCRIPTS / "teacher_model.py"),
+            "--teacher_model_path", str(REPO / "knowledge_base" / "families" / "receiver" / "spt_alt.py"),
             "--teacher_ckpt", str(ckpt),
             "--build_fn", "build_model",
             "--dummy_input", '{"shape":[1,4,48,64,1],"dtype":"float32"}',
@@ -445,9 +461,7 @@ class TestTeacherSetupLatencySource:
     ("_struct_scripts/export_onnx.py", [], ["--no-external-data", "--allow-external-data", "--device", "--seed", "--build_cfg"]),
     ("_struct_scripts/measure_baseline.py", [], ["--device", "--seed"]),
     ("_kd_scripts/profile_onnx.py", [], ["--device", "--seed"]),
-    ("_kd_scripts/measure_student.py", [], ["--device", "--seed", "--skip_latency", "--accuracy_baseline"]),
     ("_kd_scripts/teacher_setup.py", [], ["--device", "--seed", "--strict-accuracy", "--teacher_latency_us"]),
-    ("_kd_scripts/pick_variant.py", [], ["--target_latency_us", "--latency_provider", "--force_rerun"]),
     ("_kd_scripts/tune_latency.py", [], ["--device", "--seed", "--max_measurements"]),
     ("_kd_scripts/gpu_probe.py", [], ["--teacher_cache", "--representative_variant", "--variants_count", "--device"]),
 ])
