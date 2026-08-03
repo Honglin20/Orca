@@ -14,7 +14,9 @@ export type RunStatus =
   | "queued"
   | "live-pending";
 
-const STATUS_DOT_BG: Record<RunStatus, string> = {
+// SPEC web-runlist-redesign §6.3：状态 chip dot 配色 DRY 单一出口。导出供
+// StatusFilterChips 复用（避免散落硬编码 bg-orca-running）。
+export const STATUS_DOT_BG: Record<RunStatus, string> = {
   running: "bg-orca-running",
   completed: "bg-orca-done",
   failed: "bg-orca-failed",
