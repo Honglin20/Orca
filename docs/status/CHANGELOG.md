@@ -5,6 +5,22 @@
 
 ---
 
+## [2026-08-03] feat(web): RunListPage 重设计——看板 + 列表 toggle + 多选/排序/批量删/折叠持久/修主题
+
+Web 主页 `/` 重设计：**默认状态列看板**（排队/运行中/待决策/已完成/失败，运行中·待决策聚焦）+ **列表 toggle**
+（双行顶栏、无 border 分组容器、项目头美化、多选三级+Shift 范围选、6 字段排序、批量删除部分失败对账、
+放大常显删除）。三类 localStorage 持久化（折叠/排序/视图）；主题按钮真切换；WS 断线退避重连；
+refresh `inflightSeq` 防 stale 覆盖；`pendingDeletes` 防幽灵 run；`reset()` epoch 守卫；focus trap；
+搜索/待决策穿透折叠；三态加载。**前端唯一 / 零新依赖 / R3 不违 / 后端零改**（AC-18 后端回归 43 passed 旁证）。
+过程：D1/D2/D3 三 agent 并行审查 → SPEC → spec-reviewer 对抗闭环（2 FATAL+多 MAJOR）→ coder-agent
+（自带 code-review 0 FATAL/4 MAJOR/3 MINOR 全修）→ test-agent 真机 E2E（WSL+chromium：
+Playwright 9 passed + vitest 437 passed）。E2E 抓到并修了 vitest 漏掉的 AC-4 折叠持久 regression（reload 擦写 storage）。
+SPEC：`docs/specs/web-runlist-redesign.md`。详见
+[release note](../releases/2026-08-03-web-runlist-redesign.md) + [E2E 证据](../releases/2026-08-03-web-runlist-e2e.md)。
+Commits: `d782335` + `1f8e5cd`。
+
+---
+
 ## [2026-08-03] refactor(kd-train-script): 模板占位符 → 基于用户代码强制特化生成
 
 kd-train-script 生成策略重写：**根除「拷贝模板 + 填 `{{...}}` 占位符」模式**（用户指出远程产物残留占位符、
