@@ -115,17 +115,21 @@ nodes:
     agent: kd-setup
     output_schema:
       type: object
-      required: [kd_artifacts_dir, per_run_artifacts_dir, project_root, kd_scripts_dir, struct_scripts_dir, ledger_path, champions_path, ckpts_dir, snapshots_dir, worktree_root, device, concurrency, baseline_latency_ms, baseline_accuracy, viz_status]
+      required: [kd_artifacts_dir, per_run_artifacts_dir, project_root, kd_scripts_dir, struct_scripts_dir, ledger_path, champions_path, checkpoints_dir, student_models_dir, scripts_dir, onnx_dir, meta_dir, reports_dir, worktree_root, device, concurrency, baseline_latency_ms, baseline_accuracy, viz_status]
       properties:
-        kd_artifacts_dir: {type: string, description: "稳定 artifact 根（末尾带 /）。跨 run 持久"}
+        kd_artifacts_dir: {type: string, description: "稳定 artifact 根（末尾带 /）。跨 run 持久，在 <project>/artifacts/kd-nas/"}
         per_run_artifacts_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR（per-run；env_anchor 用）"}
         project_root: {type: string}
         kd_scripts_dir: {type: string, description: "_kd_scripts 绝对路径（distill/decide 调脚本用）"}
         struct_scripts_dir: {type: string, description: "_struct_scripts 绝对路径（finalize export_onnx 用）"}
         ledger_path: {type: string, description: "ledger.jsonl 绝对路径（跨 run 真相源）"}
         champions_path: {type: string, description: "champions.jsonl 绝对路径（champion ratchet 轨迹，setup seed baseline）"}
-        ckpts_dir: {type: string, description: "<kd_artifacts_dir>ckpts/（末尾带 /）"}
-        snapshots_dir: {type: string, description: "<kd_artifacts_dir>snapshots/（末尾带 /）"}
+        checkpoints_dir: {type: string, description: "<kd_artifacts_dir>checkpoints/（末尾带 /）"}
+        student_models_dir: {type: string, description: "<kd_artifacts_dir>models/students/（末尾带 /）"}
+        scripts_dir: {type: string, description: "<kd_artifacts_dir>scripts/（末尾带 /）"}
+        onnx_dir: {type: string, description: "<kd_artifacts_dir>onnx/（末尾带 /）"}
+        meta_dir: {type: string, description: "<kd_artifacts_dir>meta/（末尾带 /）"}
+        reports_dir: {type: string, description: "<kd_artifacts_dir>reports/（末尾带 /）"}
         worktree_root: {type: string, description: "<kd_artifacts_dir>.worktrees/（末尾带 /）"}
         device: {type: string, description: "gpu_probe 解析的 device（cuda/cpu/npu/auto）"}
         concurrency: {type: integer, description: "串行版恒 1（防误用并发蒸馏池，违 SPEC §3.1 串行化）"}
@@ -191,7 +195,10 @@ nodes:
 
   # ═══════════════════════════════════════════════════════════════
   # gen_train_script（复用 kd-train-script + 扩展 teacher 默认 lr/epochs 提取）：
-  # 生成 train_pipeline.py（teacher+distill+eval 三 mode）+ 从 user_train_script 提 lr/epochs。
+  # 实例化骨架模板 + 特化搬入用户逻辑 → train_pipeline.py（teacher+distill+eval 三 mode，
+  # 5 个 user_* slot 零占位符）+ 四层校验（静态无残留 / 三模式 smoke 无覆盖 flag /
+  # fidelity_check.py 数值等价 / workflow-verifier）+ 从 user_train_script 提 lr/epochs。
+  # train_teacher / distill / finalize 节点命令零改动（本节点产出 train_pipeline_path 下游消费）。
   # ═══════════════════════════════════════════════════════════════
   - name: gen_train_script
     kind: agent
@@ -282,7 +289,7 @@ nodes:
       type: object
       required: [student_model_path, round, hypothesis, direction_id, knobs, status, viz_status]
       properties:
-        student_model_path: {type: string, description: "snapshots/r<round>_student_model.py 绝对路径"}
+        student_model_path: {type: string, description: "models/students/r<round>_student_model.py 绝对路径"}
         round: {type: integer, description: "本轮轮次（ledger student 行数 + 1）"}
         hypothesis: {type: string, description: "本轮结构假设一句话（首轮固定规则 / 迭代轮 KB+perf 驱动）"}
         direction_id: {type: string, description: "首轮: scale_1_layer | ffn_pointwise；迭代轮: KB direction Dx | off_catalog:fingerprint"}

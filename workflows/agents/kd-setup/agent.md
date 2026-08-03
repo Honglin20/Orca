@@ -36,8 +36,12 @@ tools: [bash, read, write, edit, glob, grep]
   "struct_scripts_dir": "<STRUCT_SCRIPTS_DIR abs>",
   "ledger_path": "<LEDGER_PATH abs>",
   "champions_path": "<CHAMPIONS_PATH abs>",
-  "ckpts_dir": "<末尾带 />",
-  "snapshots_dir": "<末尾带 />",
+  "checkpoints_dir": "<末尾带 />",
+  "student_models_dir": "<末尾带 />",
+  "scripts_dir": "<末尾带 />",
+  "onnx_dir": "<末尾带 />",
+  "meta_dir": "<末尾带 />",
+  "reports_dir": "<末尾带 />",
   "worktree_root": "<末尾带 />",
   "device": "<auto|cuda|npu|cpu>",
   "concurrency": <int>,
@@ -48,7 +52,7 @@ tools: [bash, read, write, edit, glob, grep]
 ```
 
 - JSON 前后**不许**有任何描述性文字；
-- 字段名严格匹配（``kd_scripts_dir`` / ``struct_scripts_dir`` 等）；
+- 字段名严格匹配（``checkpoints_dir`` / ``student_models_dir`` / ``scripts_dir`` 等）；
 - 数值字段必须是裸数字（``concurrency: 1``，不要 ``"1"``）；
 - ``viz_status`` 必填（缺 → output_schema fail loud）；失败值合法（baseline_seed 推送失败不阻断主流程）。
 
@@ -71,16 +75,7 @@ STRUCT_SCRIPTS_DIR="$(python3 -c "import os,sys;print(os.path.abspath('workflows
 [ -d "$STRUCT_SCRIPTS_DIR" ] || { echo "FAIL: struct_scripts_dir 不存在：$STRUCT_SCRIPTS_DIR" >&2; exit 2; }
 PER_RUN_ARTIFACTS_DIR="${ORCA_ARTIFACTS_DIR:-}"
 [ -z "$PER_RUN_ARTIFACTS_DIR" ] && { echo "FAIL: \$ORCA_ARTIFACTS_DIR 未注入（非 orca run 上下文）" >&2; exit 2; }
-# kd_artifacts_dir 跨 run 持久（默认 <repo>/kd-nas-artifacts/）。
-KD_ARTIFACTS_DIR="$(python3 -c "import os;print(os.path.abspath('kd-nas-artifacts')+'/')")"
-mkdir -p "$KD_ARTIFACTS_DIR"ckpts "$KD_ARTIFACTS_DIR"snapshots "$KD_ARTIFACTS_DIR".worktrees
-CKPTS_DIR="${KD_ARTIFACTS_DIR}ckpts/"
-SNAPSHOTS_DIR="${KD_ARTIFACTS_DIR}snapshots/"
-WORKTREE_ROOT="${KD_ARTIFACTS_DIR}.worktrees/"
-LEDGER_PATH="${KD_ARTIFACTS_DIR}ledger.jsonl"
-CHAMPIONS_PATH="${KD_ARTIFACTS_DIR}champions.jsonl"
-# ledger 跨 run 复用铁律：仅首次创建，**绝不截断已有行**（否则历史蒸馏全丢 → 重复训练）。
-[ -f "$LEDGER_PATH" ] || : > "$LEDGER_PATH"
+# project_root 先算（kd_artifacts_dir 依赖它，下移因后面路径拼 PROJECT_ROOT）。
 BASELINE="{{ flatten.output.baseline_contract_path }}"
 [ -f "$BASELINE" ] || { echo "FAIL: flatten 产物不存在：$BASELINE" >&2; exit 2; }
 FLATTEN_PROJECT_ROOT="{{ flatten.output.project_root }}"
@@ -96,13 +91,29 @@ while p and p!=os.path.dirname(p) and not any(os.path.exists(os.path.join(p,m)) 
     p=os.path.dirname(p)
 print(p)
 " "$BASELINE")"
-export KD_SCRIPTS_DIR STRUCT_SCRIPTS_DIR KD_ARTIFACTS_DIR PER_RUN_ARTIFACTS_DIR LEDGER_PATH CHAMPIONS_PATH BASELINE PROJECT_ROOT CKPTS_DIR SNAPSHOTS_DIR WORKTREE_ROOT
+# kd_artifacts_dir 跨 run 持久（项目 artifacts 目录；随项目走，不绑 orca 仓库）。
+KD_ARTIFACTS_DIR="${PROJECT_ROOT}/artifacts/kd-nas/"
+mkdir -p "$KD_ARTIFACTS_DIR"models/baseline "$KD_ARTIFACTS_DIR"models/teacher "$KD_ARTIFACTS_DIR"models/students
+mkdir -p "$KD_ARTIFACTS_DIR"scripts "$KD_ARTIFACTS_DIR"onnx/tune "$KD_ARTIFACTS_DIR"checkpoints "$KD_ARTIFACTS_DIR"meta "$KD_ARTIFACTS_DIR"reports "$KD_ARTIFACTS_DIR"logs
+mkdir -p "$KD_ARTIFACTS_DIR".worktrees
+CHECKPOINTS_DIR="${KD_ARTIFACTS_DIR}checkpoints/"
+STUDENT_MODELS_DIR="${KD_ARTIFACTS_DIR}models/students/"
+SCRIPTS_DIR="${KD_ARTIFACTS_DIR}scripts/"
+ONNX_DIR="${KD_ARTIFACTS_DIR}onnx/"
+META_DIR="${KD_ARTIFACTS_DIR}meta/"
+REPORTS_DIR="${KD_ARTIFACTS_DIR}reports/"
+WORKTREE_ROOT="${KD_ARTIFACTS_DIR}.worktrees/"
+LEDGER_PATH="${KD_ARTIFACTS_DIR}ledger.jsonl"
+CHAMPIONS_PATH="${KD_ARTIFACTS_DIR}champions.jsonl"
+# ledger 跨 run 复用铁律：仅首次创建，**绝不截断已有行**（否则历史蒸馏全丢 → 重复训练）。
+[ -f "$LEDGER_PATH" ] || : > "$LEDGER_PATH"
+export KD_SCRIPTS_DIR STRUCT_SCRIPTS_DIR KD_ARTIFACTS_DIR PER_RUN_ARTIFACTS_DIR LEDGER_PATH CHAMPIONS_PATH BASELINE PROJECT_ROOT CHECKPOINTS_DIR STUDENT_MODELS_DIR SCRIPTS_DIR ONNX_DIR META_DIR REPORTS_DIR WORKTREE_ROOT
 python3 -c "
 import sys; sys.path.insert(0,'$KD_SCRIPTS_DIR')
 from kd_common import acquire_run_lock
 print('LOCK:', acquire_run_lock('$KD_ARTIFACTS_DIR', __import__('os').environ.get('ORCA_RUN_ID','')))
 "
-echo "PARSED step1: KD_SCRIPTS_DIR=$KD_SCRIPTS_DIR STRUCT_SCRIPTS_DIR=$STRUCT_SCRIPTS_DIR KD_ARTIFACTS_DIR=$KD_ARTIFACTS_DIR PROJECT_ROOT=$PROJECT_ROOT LEDGER_PATH=$LEDGER_PATH CHAMPIONS_PATH=$CHAMPIONS_PATH CKPTS_DIR=$CKPTS_DIR SNAPSHOTS_DIR=$SNAPSHOTS_DIR WORKTREE_ROOT=$WORKTREE_ROOT"
+echo "PARSED step1: KD_SCRIPTS_DIR=$KD_SCRIPTS_DIR STRUCT_SCRIPTS_DIR=$STRUCT_SCRIPTS_DIR KD_ARTIFACTS_DIR=$KD_ARTIFACTS_DIR PROJECT_ROOT=$PROJECT_ROOT LEDGER_PATH=$LEDGER_PATH CHAMPIONS_PATH=$CHAMPIONS_PATH CHECKPOINTS_DIR=$CHECKPOINTS_DIR STUDENT_MODELS_DIR=$STUDENT_MODELS_DIR SCRIPTS_DIR=$SCRIPTS_DIR ONNX_DIR=$ONNX_DIR META_DIR=$META_DIR REPORTS_DIR=$REPORTS_DIR WORKTREE_ROOT=$WORKTREE_ROOT"
 ```
 
 ## step 2 执行：透传 baseline latency/accuracy + seed baseline champion
@@ -223,8 +234,12 @@ echo "VIZ_STATUS_JSON=$VIZ_STATUS"
   "struct_scripts_dir": "<STRUCT_SCRIPTS_DIR>",
   "ledger_path": "<LEDGER_PATH>",
   "champions_path": "<CHAMPIONS_PATH>",
-  "ckpts_dir": "<CKPTS_DIR>",
-  "snapshots_dir": "<SNAPSHOTS_DIR>",
+  "checkpoints_dir": "<CHECKPOINTS_DIR>",
+  "student_models_dir": "<STUDENT_MODELS_DIR>",
+  "scripts_dir": "<SCRIPTS_DIR>",
+  "onnx_dir": "<ONNX_DIR>",
+  "meta_dir": "<META_DIR>",
+  "reports_dir": "<REPORTS_DIR>",
   "worktree_root": "<WORKTREE_ROOT>",
   "device": "<DEVICE_RESOLVED>",
   "concurrency": <CONCURRENCY int>,
@@ -236,4 +251,4 @@ echo "VIZ_STATUS_JSON=$VIZ_STATUS"
 
 - ``viz_status`` 必须是 JSON 对象（dumb copy 自 viz_kd_stage stdout，失败值合法不阻断）；
 - 下游 train_teacher / distill / decide 经 ``setup.output.kd_scripts_dir`` 取脚本路径，
-  经 ``setup.output.ckpts_dir`` 拼接 ckpt 路径，经 ``setup.output.snapshots_dir`` 写 student 快照。
+  经 ``setup.output.checkpoints_dir`` 拼接 ckpt 路径，经 ``setup.output.student_models_dir`` 写 student 模型。

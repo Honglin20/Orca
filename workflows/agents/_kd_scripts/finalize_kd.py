@@ -296,14 +296,14 @@ def _main() -> int:
                 str(args.accuracy_baseline), args.accuracy_baseline_kind,
                 args.device, args.seed, args.project_root, args.per_run_artifacts_dir,
             )
-            final_onnx = os.path.join(args.kd_artifacts_dir, "final.onnx")
+            final_onnx = os.path.join(args.kd_artifacts_dir, "onnx", "final.onnx")
             _export_onnx(
                 args.struct_scripts_dir, champion, dummy, final_onnx,
                 args.device, args.seed,
             )
             final_latency = _measure_latency(args.latency_provider, final_onnx, args.device)
 
-        report_path = os.path.join(args.kd_artifacts_dir, "final_report.md")
+        report_path = os.path.join(args.kd_artifacts_dir, "reports", "final_report.md")
         _write_report(
             report_path, args.ledger, args.champion_id, champion, is_baseline,
             args.terminate_reason, final_latency, final_accuracy,

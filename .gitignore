@@ -58,11 +58,11 @@ e2e_clean.sh
 # 只忽略运行产物目录；源码（nas-agent/）与 docs/plans、docs/releases 仍跟踪。
 demo_run/
 demo_target/
-llm_artifacts/
 quant_params/
 
-# KD-NAS 蒸馏 sweep 跨 run 稳定 artifact 根（teacher_cache/ledger/ckpts/...，可重生成，不入库）。
+# KD-NAS 项目级 artifact 根（teacher/student model、ONNX、ckpt、ledger；可重生成，随项目走）。
+# 每个项目的 artifacts/kd-nas 由该项目的 .gitignore 管理（本 repo 只忽略 demo 项目的）。
+examples/kd-nas-demo/artifacts/
+# 旧 artifact 目录（可重生成，不入库）
 kd-nas-artifacts/
-
-# kd-nas-demo E2E test artifacts (test-agent 产物，可重生成，不入库)
-kd-nas-demo-artifacts/
+llm_artifacts/

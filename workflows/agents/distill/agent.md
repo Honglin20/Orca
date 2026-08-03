@@ -47,7 +47,7 @@ tools: [bash, read, write, edit, glob, grep]
 - ``baseline_contract_path = {{ flatten.output.baseline_contract_path }}``
 - ``kd_scripts_dir = {{ setup.output.kd_scripts_dir }}``
 - ``kd_artifacts_dir = {{ setup.output.kd_artifacts_dir }}``
-- ``ckpts_dir = {{ setup.output.ckpts_dir }}``
+- ``checkpoints_dir = {{ setup.output.checkpoints_dir }}``
 - ``per_run_artifacts_dir = {{ setup.output.per_run_artifacts_dir }}``
 - ``target_latency_ms = {{ inputs.target_latency_ms }}``
 - ``accuracy_baseline = {{ inputs.accuracy_baseline }}``
@@ -177,10 +177,10 @@ fi
 # catch 协议（SPEC §15）：rc≠0 → status=FAIL_train, tune_status=ACCEPTED，agent 退 0。
 TRAIN_PIPELINE="{{ gen_train_script.output.train_pipeline_path }}"
 TEACHER_CACHE="{{ train_teacher.output.teacher_cache }}"
-CKPTS_DIR="{{ setup.output.ckpts_dir }}"
+CKPTS_DIR="{{ setup.output.checkpoints_dir }}"
 CKPT_PATH="${CKPTS_DIR}r${ROUND}_student.pt"
 KD_CONFIG='{"kd_losses":["mse","ofd"],"weights":{"mse":1.0,"ofd":0.3},"ema":true}'
-DISTILL_LOG="${KD_ARTIFACTS_DIR}r${ROUND}_distill.log"
+DISTILL_LOG="${KD_ARTIFACTS_DIR}logs/r${ROUND}_distill.log"
 
 OUT="$(ORCA_KD_SCRIPTS_DIR="$KD_SCRIPTS_DIR" python3 "$TRAIN_PIPELINE" \
   --mode distill \

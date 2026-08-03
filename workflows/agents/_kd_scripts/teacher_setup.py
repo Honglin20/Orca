@@ -359,7 +359,7 @@ def teacher_setup(args) -> dict:
         h.remove()
 
     # 4. 导 ONNX
-    teacher_onnx = os.path.join(out_dir, "teacher.onnx")
+    teacher_onnx = os.path.join(out_dir, "onnx", "teacher.onnx")
     _export_onnx(
         args.teacher_model_path, args.build_fn, args.dummy_input,
         args.opset, teacher_onnx, device=args.device,
@@ -419,7 +419,7 @@ def teacher_setup(args) -> dict:
     ckpt_abs = os.path.abspath(args.teacher_ckpt) if args.teacher_ckpt else ""
     teacher_ckpt_sha256 = _sha256_file(ckpt_abs) if (ckpt_abs and os.path.isfile(ckpt_abs)) else ""
 
-    teacher_cache_path = os.path.join(out_dir, "teacher_cache.pt")
+    teacher_cache_path = os.path.join(out_dir, "checkpoints", "teacher_cache.pt")
     cache_payload = {
         # TeacherCache.load 契约键（wrapper.py 读取）
         "state_dict": teacher.state_dict(),
@@ -463,7 +463,7 @@ def teacher_setup(args) -> dict:
         "device": args.device,
         "proxy_dataset_spec_used": spec_used,
     }
-    teacher_meta_path = os.path.join(out_dir, "teacher_meta.json")
+    teacher_meta_path = os.path.join(out_dir, "meta", "teacher_meta.json")
     Path(teacher_meta_path).write_text(
         json.dumps(teacher_meta, indent=2, ensure_ascii=False), encoding="utf-8"
     )

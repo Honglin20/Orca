@@ -17,7 +17,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 **产出步骤**：
 1. step 1 算 round + 取「上轮 student model.py」路径（首轮 = baseline）；
 2. step 2 读 baseline + DUMMY_INPUT（首轮固定规则 / 迭代轮 KB+perf 驱动）；
-3. 你（LLM）整文件改写 student model.py（写进 snapshots/r<round>_student_model.py）；
+3. 你（LLM）整文件改写 student model.py（写进 models/students/r<round>_student_model.py）；
 4. step 3 DUMMY_INPUT 字节级 deterministic 校验（== flatten baseline，dict 相等）；
 5. step 4 validate_contract.py PASS（3 轮修不过 → catch 协议转 FAIL_build，agent 退 0 不抛）；
 6. step 5 feature_hook_names 契约检查（ofd/fitnets/rkd 特征蒸馏时 student 须暴露此 fn）；
@@ -40,7 +40,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 - ``baseline_contract_path = {{ flatten.output.baseline_contract_path }}``
 - ``ledger_path = {{ setup.output.ledger_path }}``
 - ``champions_path = {{ setup.output.champions_path }}``
-- ``snapshots_dir = {{ setup.output.snapshots_dir }}``
+- ``student_models_dir = {{ setup.output.student_models_dir }}``
 - ``project_root = {{ setup.output.project_root }}``
 - ``baseline_latency_ms = {{ setup.output.baseline_latency_ms }}``
 - ``baseline_accuracy = {{ setup.output.baseline_accuracy }}``
@@ -56,8 +56,8 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 
 ```bash
 LEDGER="{{ setup.output.ledger_path }}"
-SNAPSHOTS_DIR="{{ setup.output.snapshots_dir }}"
-[ -d "$SNAPSHOTS_DIR" ] || mkdir -p "$SNAPSHOTS_DIR"
+STUDENT_MODELS_DIR="{{ setup.output.student_models_dir }}"
+[ -d "$STUDENT_MODELS_DIR" ] || mkdir -p "$STUDENT_MODELS_DIR"
 ROUND_PARENT_PATH="$(python3 -c "
 import json, sys
 # round = ledger 中非 baseline student 行数 + 1（baseline round=0 不算）。
@@ -134,8 +134,8 @@ if student_rows:
 fi
 ```
 
-**接下来（LLM 任务，非 bash）**：你按 ROUND_NUM 分支写 student model.py 到 ``{{ setup.output.snapshots_dir }}r${ROUND_NUM}_student_model.py``。
-读 baseline（首轮）/ 上轮 student（迭代轮）源代码 → 整文件改写 → 用 ``write`` 工具落盘到 snapshots 路径。
+**接下来（LLM 任务，非 bash）**：你按 ROUND_NUM 分支写 student model.py 到 ``{{ setup.output.student_models_dir }}r${ROUND_NUM}_student_model.py``。
+读 baseline（首轮）/ 上轮 student（迭代轮）源代码 → 整文件改写 → 用 ``write`` 工具落盘到 models/students/ 路径。
 
 **LLM 改写纪律**：
 - 文件结构：``BUILD_FN="build_model"`` + ``DUMMY_INPUT`` + ``KNOBS`` + ``def build_model(**cfg)`` + ``def feature_hook_names()``（如 baseline 有可对齐特征层）；
@@ -152,7 +152,7 @@ fi
 > （dict 相等，**非字节相等**——dict 顺序无关；N5 措辞）。不等 → fail loud 修到相等。
 
 ```bash
-STUDENT="{{ setup.output.snapshots_dir }}r${ROUND_NUM}_student_model.py"
+STUDENT="{{ setup.output.student_models_dir }}r${ROUND_NUM}_student_model.py"
 [ -f "$STUDENT" ] || { echo "FAIL: student model.py 未写出：$STUDENT（LLM 未用 write 落盘？）" >&2; exit 2; }
 python3 -c "
 import importlib.util, json, sys, os

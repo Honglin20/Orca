@@ -8,7 +8,7 @@
   - 每次 export 前 ``torch.manual_seed(seed)``（``export_onnx`` 内部已做）→ 每 cfg 权重确定。
   - ``cudnn.benchmark=False`` + ``use_deterministic_algorithms(True)``（best-effort）。
   - 每 cfg 测 ``--measure_repeats`` 次取 median + std（抗硬件噪声）。
-  - 结果缓存 ``<artifacts_dir>/tune_cache.json`` key=(variant_id,cfg_hash,target)→{median,std}，
+  - 结果缓存 ``<artifacts_dir>/meta/tune_cache.json`` key=(variant_id,cfg_hash,target)→{median,std}，
     distill recoverable 重试时读缓存、不在真硬件上重测。
 
 CLI::
@@ -140,9 +140,9 @@ def tune_latency(
     measure = _load_measure(latency_provider)
     variant_id = os.path.splitext(os.path.basename(variant_path))[0]
     cur_provider_id = provider_id(latency_provider)  # cache key 含 provider 维度（换 provider → miss）
-    cache_path = os.path.join(artifacts_dir, "tune_cache.json")
+    cache_path = os.path.join(artifacts_dir, "meta", "tune_cache.json")
     cache = _load_cache(cache_path)
-    tune_dir = os.path.join(artifacts_dir, "tune")
+    tune_dir = os.path.join(artifacts_dir, "onnx", "tune")
     os.makedirs(tune_dir, exist_ok=True)
     onnx_path = os.path.join(tune_dir, f"{variant_id}.onnx")
 

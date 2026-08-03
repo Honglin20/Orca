@@ -53,9 +53,9 @@ tools: [bash, read, write, edit, glob, grep]
 KD_SCRIPTS_DIR="{{ setup.output.kd_scripts_dir }}"
 KD_ARTIFACTS_DIR="{{ setup.output.kd_artifacts_dir }}"
 TEACHER_MODEL_PATH="{{ gen_teacher.output.teacher_model_path }}"
-TEACHER_CACHE="${KD_ARTIFACTS_DIR}teacher_cache.pt"
-TEACHER_META="${KD_ARTIFACTS_DIR}teacher_meta.json"
-TEACHER_CKPT="${KD_ARTIFACTS_DIR}teacher_ckpt.pt"
+TEACHER_CACHE="${KD_ARTIFACTS_DIR}checkpoints/teacher_cache.pt"
+TEACHER_META="${KD_ARTIFACTS_DIR}meta/teacher_meta.json"
+TEACHER_CKPT="${KD_ARTIFACTS_DIR}checkpoints/teacher_ckpt.pt"
 NEED_TRAIN=1
 if [ -f "$TEACHER_CACHE" ] && [ -f "$TEACHER_META" ] && [ -f "$TEACHER_CKPT" ]; then
   NEED_TRAIN=$(python3 -c "
@@ -111,11 +111,11 @@ if [ "$NEED_TRAIN" = "1" ]; then
     --out_ckpt "$TEACHER_CKPT" \
     --device "{{ setup.output.device }}" --seed "{{ inputs.seed }}" \
     --env_anchor "{{ setup.output.per_run_artifacts_dir }}" \
-    > "${KD_ARTIFACTS_DIR}teacher_train.log" 2>&1
+    > "${KD_ARTIFACTS_DIR}meta/teacher_train.log" 2>&1
   TP_RC=$?
   if [ $TP_RC -ne 0 ]; then
     echo "FAIL: train_pipeline.py --mode teacher rc=$TP_RC（teacher_cache 缺，KD 循环无意义）。log 尾：" >&2
-    tail -c 800 "${KD_ARTIFACTS_DIR}teacher_train.log" >&2 || true
+    tail -c 800 "${KD_ARTIFACTS_DIR}meta/teacher_train.log" >&2 || true
     exit 2
   fi
   [ -f "$TEACHER_CKPT" ] || { echo "FAIL: teacher 训练未产 ckpt：$TEACHER_CKPT" >&2; exit 2; }
@@ -145,7 +145,7 @@ echo "PARSED step2: TEACHER_CACHE=$TEACHER_CACHE TEACHER_META=$TEACHER_META TEAC
 > 两者互补：live push 失败时 metrics_tail 兜底。metrics_template 空 → 走默认 loss。
 
 ```bash
-TEACHER_LOG="${KD_ARTIFACTS_DIR}teacher_train.log"
+TEACHER_LOG="${KD_ARTIFACTS_DIR}meta/teacher_train.log"
 VIZ_STDOUT=$(python3 "$KD_SCRIPTS_DIR/metrics_tail.py" \
   --template "{{ inputs.metrics_template }}" \
   --source_log "$TEACHER_LOG" \
