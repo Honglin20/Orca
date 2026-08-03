@@ -1,6 +1,6 @@
 # 2026-08-04 — kd-nas 死代码清理 + review 修复
 
-**Commits**：`323a0a4`（§1）+ `61a6e45`（§2）+ `3bcc1d2`（§3+§4）
+**Commits**：`323a0a4`（§1）+ `61a6e45`（§2）+ `3bcc1d2`（§3+§4）+ `ff65b14`（docs）+ `ad14436`（review 闭环）
 **SPEC**：`docs/specs/2026-08-04-kd-nas-dead-code-cleanup.md`
 
 ## 概览
@@ -94,3 +94,22 @@ train_pipeline state_dict load 回路）。`test_struct_kd_p7.py::TestTeacherSet
 无（按 SPEC §5 逐条实现）。SPEC §3 表中「删 topology 测 `test_struct_kd_p7.py:40,62`」
 实际指 `test_kd_redesign.py:40,62`（行号定位的 test_teacher_ten_blocks_alternating +
 test_student_feature_hooks_match_teacher_length），按语义删除。
+
+## code-reviewer 闭环（commit `ad14436`）
+
+cumulative diff 审计 1 FATAL + 5 MAJOR + 3 MINOR + 1 NIT，全闭环：
+
+- **F1**：`kd_common.ALL_TERMINAL_STATUSES` 缺 `FAIL_build`（与 SPEC §1 Y1 / reducer 注释 /
+  release note 三重承诺冲突）→ 加 FAIL_build 恢复集合对齐。
+- **M1**：`kd_common.parse_accuracy` + `_ACC_PATTERNS` 迁移后零消费且语义漂移 → 删除（活跃
+  精度解析在 teacher_setup._parse_accuracy）。
+- **M2/M3/M4**：kd_common.py + CONTRACTS.md 多处 docstring 虚假声称 viz_kd_stage / finalize_kd
+  在用 accuracy_direction / compute_met_accuracy_absolute / validate_variant → 纠正为真实消费者
+  （test_only 不变量守护；生产路径用本地字面）。
+- **M5**：`train_pipeline_script_generation.md` 3 处把已删 train_pool 误述为当前并发机制 →
+  改为「distill node parses via ledger append」+ historical banner。
+- **m1**：teacher_setup._ACC_PATTERNS 第一项 TEACHER_ACCURACY 死表项（显式分支已 match）→ 删。
+- **m2**：test_kd_redesign.py 孤儿 section 头（HI-11 / v2 DAG）→ 删。
+- **m3**：5 处 stale provenance 注释（kd/compose / gpu_probe / train_pipeline 模板 / 2 个测试）→
+  加 historical banner 或改活跃等价表述。
+- **n1**：kd_reducer.py:94-95 注释「顺序对齐」措辞误导（_LEDGER_STATUS 是 set）→ 改「集合成员对齐」。
