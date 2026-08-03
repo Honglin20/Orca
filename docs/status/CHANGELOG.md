@@ -5,6 +5,23 @@
 
 ---
 
+## [2026-08-04] refactor(kd-nas): 死代码清理 + review 修复（3 commits）
+
+SPEC `2026-08-04-kd-nas-dead-code-cleanup.md` 全 4 节闭环：
+- §1 review 修复（commit `323a0a4`）：`_LEDGER_STATUS` 加 FAIL_accuracy/export；teacher_setup
+  `_parse_accuracy` TEACHER_ 优先于 STUDENT_；viz_kd_stage + finalize_kd hue/met_* 字面对齐
+  （student 行 lowercase true/false，baseline/teacher 行 "ref"）；16bd8b5 release note 补全。
+- §2 Phase 1 纯删（commit `61a6e45`）：gate_all / distill_dispatch / train_pool / viz_kd /
+  kd-select / _deprecated/ 全删（脚本 + agent 目录 + ~60 测 + 11 obsolete skip）。
+- §3+§4 迁移+文档清扫（commit `3bcc1d2`）：pick_variant / measure_student / setup_helpers /
+  teacher_model 全删；可复用不变量（KNOBS 校验 / 精度解析 / 绝对基线对比）迁 kd_common；
+  CONTRACTS.md / SKILL.md / README.md 同步。详见
+  [release note](docs/releases/2026-08-04-kd-nas-dead-code-cleanup.md)。
+
+验证：pytest tests/workflows/ → 5 预存失败（HEAD 已有）/ 0 新红 / 总数 -148 死代码。
+
+---
+
 ## [2026-08-03] feat(kd-nas): 时延单位统一 us + KD loss 强制 + teacher 评估 + 全模型总表
 
 四项串行化改动（commit `16bd8b5`）：(1) latency ms→us 全链重命名（修 1000× 误判 FAIL_latency）；
