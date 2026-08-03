@@ -5,6 +5,18 @@
 
 ---
 
+## [2026-08-03] fix(web): 双路 review 闭环——实现时序漏洞 + 看板视觉放大 + 死代码清理
+
+分两 agent 对 RunList 重设计做 review（实现 code-reviewer + 美观真机截图）。实现侧闭环 6 MAJOR：
+选择求交改用未过滤 runs（切 chip 保留选择，SPEC §3.3）/ expandAll·collapseAll 合并语义（跨 dim 不擦写，§10.8）/
+单删成功 toast + 不清整个选择集 / Shift 范围选收窄到当前桶（§5.5）/ 去 project_id-as-path / + parseProgress 认后端
+`"done/total"`（原 parseFloat 截成 3%→43%）等。美观侧：BoardCard padding、非状态 dim 列加默认左条（看板不再退化成
+带底色列表）、列底色 /0.45、竖条 w-1、显示空加字、暗 mode 删 icon 可见。删 deletingIds 死代码链（乐观移除使
+in-flight opacity-40 不可达）。补 M-1/M-2/M-4 cross-scenario 单测。vitest 465 / build OK / R3 无命中 / 后端 diff 空。
+SPEC §6.5/§5.6 同步消歧。Commits: `93f931d` + `c58172a`。
+
+---
+
 ## [2026-08-03] feat(web): RunList 加分组维度选择器（状态/项目/workflow/时间）+ 空桶自动隐藏
 
 用户反馈「要更多分区 + 按项目分类 + 排队/待决策空列没用」的增量（在 RunListPage 重设计之上）：

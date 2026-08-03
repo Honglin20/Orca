@@ -97,6 +97,15 @@ Playwright 真机发现 vitest 漏掉的 **AC-4 折叠持久 regression**：relo
 
 **验证**：vitest 456 passed（+19，含 AC-24/25/26 + cross-dim 折叠 bug 回归）/ Playwright 真机 10 passed / 后端回归 31 passed / tsc 0 错 / R3 无命中 / 后端 diff 空。code-reviewer 闭环（含揪出的 cross-dim 折叠擦写 bug）；E2E 抓到并修了 stale 五列用例（对齐空桶隐藏）。
 
+## review 闭环（双路 review：实现 code-reviewer + 美观真机截图）
+
+分两 agent review 后闭环（commit `93f931d` + `c58172a`）：
+- **实现**：选择求交改用未过滤 `runs`（切 chip/搜索保留选择，SPEC §3.3 原打脸）；`expandAll/collapseAll` 合并语义（跨 dim 折叠态不擦写，§10.8）；单删成功 toast + 不清整个选择集；Shift 范围选收窄到当前桶（§5.5「同分组内」）；去 `project_id`-as-path 显示；`parseProgress` 认后端 `"done/total"`（原截成 3%→43%）；+ WS 重连 refresh / localeCompare 固定 / role=group / skeleton relative 等 MINOR。
+- **美观**：BoardCard padding 提到 `py-2.5`；**非状态 dim 列加默认左色条**（project/workflow/时间 dim 不再退化成「带底色列表」——这是「不像看板」的主因）；列底色 `/0.2→/0.45`；竖条 `w-0.5→w-1`；显示空加「空」字；refresh/theme hover 统一；暗 mode 删除 icon `/0.55→/0.8` 可见。
+- **死代码清理**：删 `deletingIds` 链（乐观移除使 in-flight opacity-40 不可达；SPEC §5.6 降级）。
+
+vitest 465 passed / build OK / R3 无命中 / 后端 diff 空；补 M-1/M-2/M-4 cross-scenario 单测。
+
 ## 9. 已知 follow-up（非本次 scope）
 
 - `tests/iface/web/conftest.py::live_server` 不隔离 `ORCA_HOME`——在真实开发机（千级 runs）跑会拖慢 `/api/runs?scope=all`。建议加 fixture 级 env 隔离。
