@@ -91,9 +91,12 @@ nodes:
       - to: train_runner
 
   # ═══════════════════════════════════════════════════════════════
-  # Agent 4: 训练与搜索执行（复用 nas-train-runner，含训练/搜索实时图）
-  # output_schema 强制（防假执行）：runner 末尾用 python 从真 search.jsonl 计数输出 JSON。
-  # 散文复述/没真跑搜索(records=0) → output_schema_mismatch → node_failed（确定性）。
+  # Agent 4: 训练与搜索执行（复用 nas-train-runner，含训练/搜索实时图，报错自愈）
+  # 双层强制（防假执行）：
+  #   1. output_schema —— 结构 + search_records≥1（runner 末尾 python 从真 search.jsonl 计数）。
+  #   2. validator —— 语义门：train_viable=true 必须 train_done=true（supernet ckpt 真产出）；
+  #      last_error 非空即不通过。失败 max_retries=1 重跑 runner（runner 内部已有 ≤3 次自愈，这是外层兜底）。
+  # runner 自身：Step0 探测 GPU patch NPROC_PER_NODE（治生成器 8 卡默认）→ Step1/2 训练+搜索各有界自愈。
   # ═══════════════════════════════════════════════════════════════
   - name: train_runner
     kind: agent
@@ -102,13 +105,19 @@ nodes:
     agent: nas-train-runner
     output_schema:
       type: object
-      required: [output_dir, search_done, search_records, search_log]
+      required: [output_dir, train_viable, train_done, search_done, search_records, search_log, last_error]
       properties:
         output_dir: {type: string}
+        train_viable: {type: boolean, description: "run_train_supernet.sh 是否存在（训练是否可行）"}
+        train_done: {type: boolean, description: "训练可行时 supernet ckpt 是否真产出；不可行时恒 true"}
         search_done: {type: boolean}
         search_records: {type: integer, minimum: 1}
         search_log: {type: string}
+        last_error: {type: string, description: "空=全通过；非空=有阶段耗尽自愈仍失败，附真因 log 尾部"}
       additionalProperties: false
+    validator:
+      criteria: "train_viable 为 true 时 train_done 必须为 true（supernet ckpt 已真产出，不许只跑搜索漏训练）；search_records 必须来自真实搜索（≥1，已在 schema 兜底，此处复查）。last_error 必须为空字符串——非空即判不通过。"
+      max_retries: 1
     routes:
       - to: select
 
