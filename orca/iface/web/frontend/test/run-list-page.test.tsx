@@ -105,6 +105,9 @@ describe("RunListPage 重设计", () => {
     localStorage.clear();
     // 既有 list 视图用例：固定 view=list（默认是 board，见 board 用例）。
     localStorage.setItem("orca-runlist-view-v1", JSON.stringify("list"));
+    // 既有 list 用例按「project 分组」假设写（``group-<name>`` testid、project_name 分桶）。
+    // §10.8 起 default dim=「状态」，此处显式 pin 回 project 以最小改动保留既有用例。
+    localStorage.setItem("orca-runlist-groupby-v1", JSON.stringify("project"));
   });
   afterEach(() => {
     cleanup();
@@ -237,11 +240,11 @@ describe("RunListPage 重设计", () => {
     });
   });
 
-  // ── AC-2 选择保留：切 groupBy 不重置选择 ──
-  it("AC-2 切 groupBy 不重置选择（SPEC §3.3 时序不变量）", async () => {
+  // ── AC-2 选择保留：切 dim 不重置选择（SPEC §3.3 时序不变量 + §10.8 dim 切换） ──
+  it("AC-2 切分组维度（project → workflow）不重置选择（SPEC §3.3 时序不变量）", async () => {
     mockFetchFor([
-      mkRun({ run_id: "r1", project_name: "demo" }),
-      mkRun({ run_id: "r2", project_name: "demo" }),
+      mkRun({ run_id: "r1", project_name: "demo", workflow_name: "wf-a" }),
+      mkRun({ run_id: "r2", project_name: "demo", workflow_name: "wf-a" }),
     ]);
     renderPage();
     await screen.findAllByTestId("run-row");
@@ -250,11 +253,14 @@ describe("RunListPage 重设计", () => {
     });
     expect(screen.getByTestId("bulk-bar")).toBeTruthy();
 
-    // 切 groupBy。
+    // 用 GroupBySelector 切到 workflow 维度（替换旧 group-toggle on/off）。
     await act(async () => {
-      fireEvent.click(screen.getByTestId("group-toggle"));
+      fireEvent.click(screen.getByTestId("group-by-select"));
     });
-    // 选择应保留（bulk-bar 仍在）。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-by-option-workflow"));
+    });
+    // 选择应保留（bulk-bar 仍在）—— SPEC §3.3 时序不变量。
     expect(screen.getByTestId("bulk-bar")).toBeTruthy();
   });
 
@@ -333,27 +339,30 @@ describe("RunListPage 重设计", () => {
     expect(stored).toMatch(/workflow_name/);
   });
 
-  // ── AC-4 折叠持久 ──
-  it("AC-4 折叠持久：点 group-header 折叠 → localStorage 写入 collapsed 集合", async () => {
+  // ── AC-4 折叠持久（§10.8 泛化：v2 ``"dim:key"`` 格式） ──
+  it("AC-4 折叠持久：点 group-header 折叠 → localStorage 写入 collapsed-v2（project:demo 形式）", async () => {
     mockFetchFor([mkRun({ run_id: "r1", project_name: "demo" })]);
     renderPage();
     await screen.findByTestId("group-demo");
     await act(async () => {
       fireEvent.click(screen.getByTestId("group-header"));
     });
-    const stored = localStorage.getItem("orca-runlist-collapsed-v1");
+    const stored = localStorage.getItem("orca-runlist-collapsed-v2");
     expect(stored).toBeTruthy();
-    expect(stored).toMatch(/demo/);
+    expect(stored).toMatch(/"project:demo"/);
   });
 
   // AC-4 反向：mount 前预先持久化 collapsed（模拟 reload 场景）→ 加载后初始态应保持折叠。
   // 防 regression：旧版 useState 初值在 ``known`` 为空（fetch 未回）时过滤掉持久项，
   // 然后 write-back effect 把空集覆盖回 storage，永久清空持久态（Playwright 曾 catch 此 bug）。
-  it("AC-4 持久态加载：mount 前 localStorage 预存 [demo] → 加载后保持折叠（不擦写 storage）", async () => {
-    localStorage.setItem("orca-runlist-collapsed-v1", JSON.stringify(["demo"]));
+  it("AC-4 持久态加载：mount 前 localStorage 预存 [project:demo] → 加载后保持折叠（不擦写 storage）", async () => {
+    localStorage.setItem(
+      "orca-runlist-collapsed-v2",
+      JSON.stringify(["project:demo"]),
+    );
     mockFetchFor([mkRun({ run_id: "r1", project_name: "demo" })]);
     renderPage();
-    // group 出现（runs 已加载、knownProjects 已算出），useCollapsedProjects 应已 hydrate。
+    // group 出现（runs 已加载、knownKeys 已算出），useCollapsedBuckets 应已 hydrate。
     await screen.findByTestId("group-demo");
     // 仍应折叠：run-row 不在 DOM。
     await act(async () => {
@@ -362,13 +371,13 @@ describe("RunListPage 重设计", () => {
     });
     expect(screen.queryAllByTestId("run-row")).toHaveLength(0);
     // storage 不应被擦写为空。
-    const stored = localStorage.getItem("orca-runlist-collapsed-v1");
+    const stored = localStorage.getItem("orca-runlist-collapsed-v2");
     expect(stored).toBeTruthy();
-    expect(stored).toMatch(/demo/);
+    expect(stored).toMatch(/project:demo/);
   });
 
   it("AC-4 localStorage 损坏 → 降级空集不崩", async () => {
-    localStorage.setItem("orca-runlist-collapsed-v1", "{not valid json");
+    localStorage.setItem("orca-runlist-collapsed-v2", "{not valid json");
     mockFetchFor([mkRun({ run_id: "r1", project_name: "demo" })]);
     expect(() => renderPage()).not.toThrow();
     await screen.findByTestId("run-row");
@@ -798,16 +807,20 @@ describe("RunListPage 看板视图（SPEC §10）", () => {
     expect((listCbs[0] as HTMLInputElement).checked).toBe(true);
   });
 
-  // ── 看板下隐藏 groupBy toggle ──
-  it("AC-19：看板视图下不显 group-toggle；切列表后出现", async () => {
+  // ── §10.8：GroupBySelector 两视图都显（替换旧 groupBy on/off toggle） ──
+  it("AC-19/§10.8：GroupBySelector 看板/列表两视图都显（dim 共用）", async () => {
     mockFetchFor([mkRun({ run_id: "r1", status: "completed" })]);
     renderPage();
     await screen.findByTestId("board");
+    // 看板视图显 GroupBySelector（旧 ``group-toggle`` 已移除）。
+    expect(screen.getByTestId("group-by-select")).toBeTruthy();
     expect(screen.queryByTestId("group-toggle")).toBeNull();
     await act(async () => {
       fireEvent.click(screen.getByTestId("view-toggle-list"));
     });
-    expect(screen.getByTestId("group-toggle")).toBeTruthy();
+    // 列表视图也显。
+    expect(screen.getByTestId("group-by-select")).toBeTruthy();
+    expect(screen.queryByTestId("group-toggle")).toBeNull();
   });
 });
 
@@ -982,3 +995,491 @@ describe("RunListPage WS 状态渲染（MAJOR-4 整页 wiring）", () => {
   });
 });
 
+// ── 分组维度 + 空桶自动隐藏（SPEC §10.8-10.10）──
+//
+// 断言意图（Rule 9）：
+//   - **AC-24 分组维度**：5 维度可选；看板列/列表段随 dim 变；持久 ``orca-runlist-groupby-v1``。
+//   - **AC-25 空桶隐藏**：``showEmpty=false`` 时空桶不渲染；``=true`` 显占位；待决策>0 仍高亮。
+//   - **AC-26 折叠泛化**：``use-collapsed-buckets`` 按 ``dim:key`` 持久；切 dim 各自独立；reload 保持。
+
+describe("RunListPage 分组维度 + 空桶自动隐藏（SPEC §10.8-10.10）", () => {
+  beforeEach(() => {
+    MockWebSocket.instances = [];
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    useRunListStore.getState().reset();
+    useRunListStore.setState({ lastFetch: 0 });
+    localStorage.clear();
+    // 默认即 board 视图 + 默认 status dim；个别用例按需覆盖。
+  });
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  // ── AC-24 维度切换 + 持久 ──
+  it("AC-24：默认 status dim → 5 status 桶；切 project → 按 project_name 分桶；持久写入", async () => {
+    mockFetchFor([
+      mkRun({ run_id: "rc", status: "completed", project_name: "demo" }),
+    ]);
+    renderPage();
+    await screen.findByTestId("board");
+    // 默认 status dim：completed 列存在（唯一非空桶，showEmpty=false 默认隐藏其它 4 个空列）。
+    expect(screen.getByTestId("board-column-completed")).toBeTruthy();
+    expect(screen.queryByTestId("board-column-demo")).toBeNull();
+
+    // 用 GroupBySelector 切到 project dim。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-by-select"));
+    });
+    expect(screen.getByTestId("group-by-menu")).toBeTruthy();
+    // 5 个选项都在。
+    expect(screen.getByTestId("group-by-option-none")).toBeTruthy();
+    expect(screen.getByTestId("group-by-option-status")).toBeTruthy();
+    expect(screen.getByTestId("group-by-option-project")).toBeTruthy();
+    expect(screen.getByTestId("group-by-option-workflow")).toBeTruthy();
+    expect(screen.getByTestId("group-by-option-time")).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-by-option-project"));
+    });
+    // project dim → board-column-demo 存在；旧的 status 列 testid 不再存在。
+    expect(screen.getByTestId("board-column-demo")).toBeTruthy();
+    expect(screen.queryByTestId("board-column-completed")).toBeNull();
+
+    // 持久化 localStorage。
+    const stored = localStorage.getItem("orca-runlist-groupby-v1");
+    expect(stored).toMatch(/project/);
+  });
+
+  it("AC-24：dim=time → 桶按今天/昨天/本周/更早/未知分（无 started_at 落未知）", async () => {
+    mockFetchFor([
+      // 无 started_at → 未知桶。
+      mkRun({ run_id: "ru", status: "completed", started_at: undefined }),
+    ]);
+    renderPage();
+    await screen.findByTestId("board");
+    // 切到 time dim。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-by-select"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-by-option-time"));
+    });
+    // 未知桶渲染（key=unknown）。
+    expect(screen.getByTestId("board-column-unknown")).toBeTruthy();
+    expect(
+      within(screen.getByTestId("board-column-unknown")).getAllByTestId(
+        "board-card",
+      ).length,
+    ).toBe(1);
+  });
+
+  it("AC-24：dim=none → 单桶「全部」", async () => {
+    mockFetchFor([
+      mkRun({ run_id: "r1", status: "completed", project_name: "demo" }),
+      mkRun({ run_id: "r2", status: "failed", project_name: "other" }),
+    ]);
+    renderPage();
+    await screen.findByTestId("board");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-by-select"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-by-option-none"));
+    });
+    // 单桶 all：两张 board-card 都在同一列。
+    expect(screen.getByTestId("board-column-all")).toBeTruthy();
+    expect(
+      within(screen.getByTestId("board-column-all")).getAllByTestId("board-card")
+        .length,
+    ).toBe(2);
+  });
+
+  it("AC-24：groupBy localStorage 损坏 → 降级 status 不崩", async () => {
+    localStorage.setItem("orca-runlist-groupby-v1", "{not json");
+    mockFetchFor([mkRun({ run_id: "r1", status: "completed" })]);
+    expect(() => renderPage()).not.toThrow();
+    expect(await screen.findByTestId("board-column-completed")).toBeTruthy();
+  });
+
+  // ── AC-25 空桶隐藏 + 待决策高亮 ──
+  it("AC-25：showEmpty=false（默认）→ 空列不渲染；待决策>0 仍渲染 + ring 高亮", async () => {
+    mockFetchFor([
+      mkRun({ run_id: "rb", status: "blocked" }),
+      mkRun({ run_id: "rc", status: "completed" }),
+    ]);
+    renderPage();
+    await screen.findByTestId("board");
+    // showEmpty=false 默认：空列（queued/running/failed）不渲染。
+    expect(screen.queryByTestId("board-column-queued")).toBeNull();
+    expect(screen.queryByTestId("board-column-running")).toBeNull();
+    expect(screen.queryByTestId("board-column-failed")).toBeNull();
+    // 待决策列 >0 → 仍渲染（AC-25「无论 showEmpty」）+ ring 高亮（§10.9）。
+    const blockedCol = screen.getByTestId("board-column-blocked");
+    expect(blockedCol.className).toMatch(/ring-orca-skipped\/20/);
+    // 已完成列也渲染。
+    expect(screen.getByTestId("board-column-completed")).toBeTruthy();
+  });
+
+  it("AC-25：点 show-empty-toggle → showEmpty=true → 5 列都在；再点回 false", async () => {
+    mockFetchFor([mkRun({ run_id: "rc", status: "completed" })]);
+    renderPage();
+    await screen.findByTestId("board");
+    // 初始仅 completed 列。
+    expect(screen.queryByTestId("board-column-queued")).toBeNull();
+
+    // 点 toggle → true。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("show-empty-toggle"));
+    });
+    // 5 列都在。
+    expect(screen.getByTestId("board-column-queued")).toBeTruthy();
+    expect(screen.getByTestId("board-column-running")).toBeTruthy();
+    expect(screen.getByTestId("board-column-blocked")).toBeTruthy();
+    expect(screen.getByTestId("board-column-completed")).toBeTruthy();
+    expect(screen.getByTestId("board-column-failed")).toBeTruthy();
+    // 持久化。
+    expect(localStorage.getItem("orca-runlist-show-empty-v1")).toMatch(/true/);
+
+    // 待决策列空 → 无 ring（ring 仅 >0 时）。
+    expect(screen.getByTestId("board-column-blocked").className).not.toMatch(
+      /ring-orca-skipped/,
+    );
+
+    // 再点回 false → 空列又消失。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("show-empty-toggle"));
+    });
+    expect(screen.queryByTestId("board-column-queued")).toBeNull();
+  });
+
+  it("AC-25：列表视图也遵循空桶隐藏（project dim 单 run → 仅 1 个 group 段）", async () => {
+    localStorage.setItem("orca-runlist-view-v1", JSON.stringify("list"));
+    localStorage.setItem("orca-runlist-groupby-v1", JSON.stringify("status"));
+    mockFetchFor([
+      mkRun({ run_id: "rc", status: "completed", project_name: "demo" }),
+    ]);
+    renderPage();
+    await screen.findByTestId("group-completed");
+    // status dim 单 run → 仅 completed 段（其它 4 个空段隐藏）。
+    expect(screen.getByTestId("group-completed")).toBeTruthy();
+    expect(screen.queryByTestId("group-queued")).toBeNull();
+    expect(screen.queryByTestId("group-running")).toBeNull();
+    expect(screen.queryByTestId("group-blocked")).toBeNull();
+    expect(screen.queryByTestId("group-failed")).toBeNull();
+  });
+
+  // ── AC-26 dim:key 折叠泛化 + 切 dim 各自独立 + reload ──
+  it("AC-26：折叠 project:demo → 切 workflow dim 各自独立（workflow 段展开）；两态都持久", async () => {
+    localStorage.setItem("orca-runlist-view-v1", JSON.stringify("list"));
+    localStorage.setItem("orca-runlist-groupby-v1", JSON.stringify("project"));
+    mockFetchFor([
+      mkRun({
+        run_id: "r1",
+        project_name: "demo",
+        workflow_name: "wf-a",
+      }),
+    ]);
+    renderPage();
+    await screen.findByTestId("group-demo");
+
+    // 折叠 project:demo。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-header"));
+    });
+    expect(screen.queryAllByTestId("run-row")).toHaveLength(0);
+    const stored1 = localStorage.getItem("orca-runlist-collapsed-v2");
+    expect(stored1).toMatch(/project:demo/);
+
+    // 切到 workflow dim → workflow:wf-a 未折叠 → run-row 可见（dim 各自独立折叠态）。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-by-select"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-by-option-workflow"));
+    });
+    expect(screen.queryAllByTestId("run-row")).toHaveLength(1);
+
+    // 折叠 workflow:wf-a。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-header"));
+    });
+    expect(screen.queryAllByTestId("run-row")).toHaveLength(0);
+
+    // 两态都持久（project:demo + workflow:wf-a）。
+    const stored2 = localStorage.getItem("orca-runlist-collapsed-v2");
+    expect(stored2).toMatch(/project:demo/);
+    expect(stored2).toMatch(/workflow:wf-a/);
+  });
+
+  it("AC-26 reload 保持：mount 前预存 [workflow:wf-a] → workflow dim 加载后保持折叠", async () => {
+    localStorage.setItem("orca-runlist-view-v1", JSON.stringify("list"));
+    localStorage.setItem("orca-runlist-groupby-v1", JSON.stringify("workflow"));
+    localStorage.setItem(
+      "orca-runlist-collapsed-v2",
+      JSON.stringify(["workflow:wf-a"]),
+    );
+    mockFetchFor([
+      mkRun({
+        run_id: "r1",
+        project_name: "demo",
+        workflow_name: "wf-a",
+      }),
+    ]);
+    renderPage();
+    await screen.findByTestId("group-wf-a");
+    // 给 hydrate effect + render 一拍时间。
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    // 仍折叠：run-row 不在 DOM。
+    expect(screen.queryAllByTestId("run-row")).toHaveLength(0);
+    // storage 不被擦写。
+    const stored = localStorage.getItem("orca-runlist-collapsed-v2");
+    expect(stored).toMatch(/workflow:wf-a/);
+  });
+
+  // ── AC-26 cross-dim hydrate 保留（M8：mount 时其它 dim 的折叠态不被清） ──
+  it("AC-26 cross-dim hydrate：预存 [project:demo, workflow:wf-a] + mount in workflow → 两者都保留", async () => {
+    localStorage.setItem("orca-runlist-view-v1", JSON.stringify("list"));
+    localStorage.setItem("orca-runlist-groupby-v1", JSON.stringify("workflow"));
+    localStorage.setItem(
+      "orca-runlist-collapsed-v2",
+      JSON.stringify(["project:demo", "workflow:wf-a"]),
+    );
+    mockFetchFor([
+      mkRun({
+        run_id: "r1",
+        project_name: "demo",
+        workflow_name: "wf-a",
+      }),
+    ]);
+    renderPage();
+    await screen.findByTestId("group-wf-a");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    // workflow:wf-a 折叠 → run-row 不可见。
+    expect(screen.queryAllByTestId("run-row")).toHaveLength(0);
+    // storage 两条都还在（project:demo 是其它 dim 的，hydrate 不应清掉）。
+    const stored = localStorage.getItem("orca-runlist-collapsed-v2");
+    expect(stored).toMatch(/project:demo/);
+    expect(stored).toMatch(/workflow:wf-a/);
+  });
+
+  // ── AC-26 dim=status 折叠键格式（M9：补 status/time dim 的 dim:key 格式断言） ──
+  it("AC-26 dim=status 折叠 → storage 含 status:queued 格式", async () => {
+    localStorage.setItem("orca-runlist-view-v1", JSON.stringify("list"));
+    // 默认 groupBy=status。
+    mockFetchFor([mkRun({ run_id: "rq", status: "queued" })]);
+    renderPage();
+    await screen.findByTestId("group-queued");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-header"));
+    });
+    const stored = localStorage.getItem("orca-runlist-collapsed-v2");
+    expect(stored).toMatch(/status:queued/);
+  });
+
+  // ── AC-24 status dim 桶**顺序**锁定（M5：DOM 左→右 queued→...→failed） ──
+  it("AC-24 status dim 列 DOM 顺序：queued → running → blocked → completed → failed", async () => {
+    mockFetchFor([
+      mkRun({ run_id: "rq", status: "queued" }),
+      mkRun({ run_id: "rr", status: "running" }),
+      mkRun({ run_id: "rb", status: "blocked" }),
+      mkRun({ run_id: "rc", status: "completed" }),
+      mkRun({ run_id: "rf", status: "failed" }),
+    ]);
+    renderPage();
+    await screen.findByTestId("board");
+    // 5 列都非空（showEmpty=false 默认也全部渲染）。
+    const cols = screen.getAllByTestId(
+      /^board-column-(queued|running|blocked|completed|failed)$/,
+    );
+    expect(cols.map((c) => c.getAttribute("data-testid"))).toEqual([
+      "board-column-queued",
+      "board-column-running",
+      "board-column-blocked",
+      "board-column-completed",
+      "board-column-failed",
+    ]);
+  });
+
+  // ── AC-24 status 多状态归桶（M1：cancelled → 失败；live-pending → 排队） ──
+  it("AC-24 cancelled → 失败列；live-pending → 排队列（SPEC §10.8 多状态归桶契约）", async () => {
+    mockFetchFor([
+      mkRun({ run_id: "rlp", status: "live-pending" }),
+      mkRun({ run_id: "rca", status: "cancelled" }),
+    ]);
+    renderPage();
+    await screen.findByTestId("board");
+    // live-pending 归排队（board-column-queued accept 集合）。
+    expect(
+      within(screen.getByTestId("board-column-queued")).getAllByTestId(
+        "board-card",
+      ).length,
+    ).toBe(1);
+    // cancelled 归失败（board-column-failed accept 集合）。
+    expect(
+      within(screen.getByTestId("board-column-failed")).getAllByTestId(
+        "board-card",
+      ).length,
+    ).toBe(1);
+  });
+
+  // ── AC-24 project dim 兜底桶 + alpha + Legacy/其它垫底（M2） ──
+  it("AC-24 project dim：source=legacy → Legacy 桶；空 project_name → 其它桶；alpha + Legacy/其它垫底", async () => {
+    mockFetchFor([
+      mkRun({ run_id: "rd", project_name: "demo" }),
+      mkRun({ run_id: "ra", project_name: "alpha" }),
+      mkRun({ run_id: "rl", source: "legacy", project_name: undefined }),
+      mkRun({ run_id: "ro", project_name: undefined, source: "in-process" }),
+    ]);
+    renderPage();
+    await screen.findByTestId("board");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-by-select"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-by-option-project"));
+    });
+    // 4 桶都在（按 alpha + Legacy/其它 垫底）。
+    const cols = screen.getAllByTestId(
+      /^board-column-(alpha|demo|Legacy|其它)$/,
+    );
+    expect(cols.map((c) => c.getAttribute("data-testid"))).toEqual([
+      "board-column-alpha",
+      "board-column-demo",
+      "board-column-Legacy",
+      "board-column-其它",
+    ]);
+    // 各桶各 1 卡片。
+    expect(
+      within(screen.getByTestId("board-column-Legacy")).getAllByTestId(
+        "board-card",
+      ).length,
+    ).toBe(1);
+    expect(
+      within(screen.getByTestId("board-column-其它")).getAllByTestId(
+        "board-card",
+      ).length,
+    ).toBe(1);
+  });
+
+  // ── AC-24 workflow dim 兜底桶 + alpha + 其它垫底（M3） ──
+  it("AC-24 workflow dim：空 workflow_name → 其它桶；alpha + 其它垫底", async () => {
+    mockFetchFor([
+      mkRun({ run_id: "rb", workflow_name: "wf-b" }),
+      mkRun({ run_id: "ra", workflow_name: "wf-a" }),
+      mkRun({ run_id: "ro", workflow_name: undefined }),
+    ]);
+    renderPage();
+    await screen.findByTestId("board");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-by-select"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-by-option-workflow"));
+    });
+    const cols = screen.getAllByTestId(
+      /^board-column-(wf-a|wf-b|其它)$/,
+    );
+    expect(cols.map((c) => c.getAttribute("data-testid"))).toEqual([
+      "board-column-wf-a",
+      "board-column-wf-b",
+      "board-column-其它",
+    ]);
+  });
+
+  // ── AC-24 time dim 边界（M4：用真实「现在」算各 bucket 边界，避免 fake timers 冻结 findBy 轮询） ──
+  it("AC-24 time dim：今天/昨天/本周/更早/未知 各一桶；按 started_at 秒级 epoch 落桶", async () => {
+    const MS_PER_DAY = 86400 * 1000;
+    // 与 group-runs.startOfTodayMs 同算法（运行时 ``Date.now()``），用真实「现在」算边界。
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todayStartMs = today.getTime();
+    const sec = (ms: number) => Math.floor(ms / 1000);
+
+    mockFetchFor([
+      mkRun({ run_id: "rt", started_at: sec(todayStartMs + 12 * 3600 * 1000) }), // 今天 12:00
+      mkRun({ run_id: "ry", started_at: sec(todayStartMs - 12 * 3600 * 1000) }), // 昨天 12:00
+      mkRun({ run_id: "rw", started_at: sec(todayStartMs - 3 * MS_PER_DAY) }), // 本周（3 天前）
+      mkRun({ run_id: "re", started_at: sec(todayStartMs - 30 * MS_PER_DAY) }), // 更早（30 天前）
+      mkRun({ run_id: "ru", started_at: undefined }), // 未知
+      // 边界：started_at=0 / 负数也落未知。
+      mkRun({ run_id: "rz", started_at: 0 }),
+    ]);
+    renderPage();
+    await screen.findByTestId("board");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-by-select"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-by-option-time"));
+    });
+    // 5 桶都在，按 TIME_ORDER（今天/昨天/本周/更早/未知）DOM 顺序。
+    const cols = screen.getAllByTestId(
+      /^board-column-(today|yesterday|week|earlier|unknown)$/,
+    );
+    expect(cols.map((c) => c.getAttribute("data-testid"))).toEqual([
+      "board-column-today",
+      "board-column-yesterday",
+      "board-column-week",
+      "board-column-earlier",
+      "board-column-unknown",
+    ]);
+    // 未知桶含 ru + rz（started_at=undefined 与 started_at=0 都落未知）。
+    expect(
+      within(screen.getByTestId("board-column-unknown")).getAllByTestId(
+        "board-card",
+      ).length,
+    ).toBe(2);
+  });
+
+  // ── AC-25 ring 矩阵第 3 格（M6：showEmpty=true + 待决策>0 → 仍 ring） ──
+  it("AC-25：showEmpty=true + 待决策 count>0 → 仍 ring（SPEC §10.9「无论 showEmpty」）", async () => {
+    mockFetchFor([
+      mkRun({ run_id: "rb", status: "blocked" }),
+      mkRun({ run_id: "rc", status: "completed" }),
+    ]);
+    renderPage();
+    await screen.findByTestId("board");
+    // 切到 showEmpty=true。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("show-empty-toggle"));
+    });
+    // 待决策列 count>0 → 仍 ring。
+    expect(screen.getByTestId("board-column-blocked").className).toMatch(
+      /ring-orca-skipped\/20/,
+    );
+  });
+
+  // ── AC-25 列表视图 + showEmpty=true（M7：锁定当前「显空段头但段内空」行为） ──
+  it("AC-25：list 视图 showEmpty=true → 空段也渲染（仅头，无 run-row）", async () => {
+    localStorage.setItem("orca-runlist-view-v1", JSON.stringify("list"));
+    localStorage.setItem("orca-runlist-groupby-v1", JSON.stringify("status"));
+    mockFetchFor([mkRun({ run_id: "rc", status: "completed" })]);
+    renderPage();
+    // 默认 showEmpty=false：仅 completed 段。
+    await screen.findByTestId("group-completed");
+    expect(screen.queryByTestId("group-queued")).toBeNull();
+    // 切 showEmpty=true → 空段头也渲染（run-row 仍只有 completed 那 1 条）。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("show-empty-toggle"));
+    });
+    expect(screen.getByTestId("group-queued")).toBeTruthy();
+    expect(screen.getByTestId("group-running")).toBeTruthy();
+    expect(screen.getAllByTestId("run-row").length).toBe(1);
+  });
+
+  // ── AC-25 use-show-empty localStorage 损坏降级（m1：补对称） ──
+  it("AC-25：show-empty localStorage 损坏 → 降级 false 不崩", async () => {
+    localStorage.setItem("orca-runlist-show-empty-v1", "{not json");
+    mockFetchFor([mkRun({ run_id: "rc", status: "completed" })]);
+    expect(() => renderPage()).not.toThrow();
+    await screen.findByTestId("board");
+    // 降级 false → 仅 completed 列（其它空列隐藏）。
+    expect(screen.queryByTestId("board-column-queued")).toBeNull();
+  });
+});

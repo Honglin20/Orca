@@ -12,15 +12,15 @@ import {
   type Theme,
 } from "@/hooks/use-theme";
 import type { RunListView } from "@/hooks/use-runlist-view";
+import type { GroupBy } from "@/hooks/use-group-by";
 import { SearchInput } from "./SearchInput";
 import { StatusFilterChips, type StatusFilter } from "./StatusFilterChips";
 import { SortMenu } from "./SortMenu";
+import { GroupBySelector } from "./GroupBySelector";
+import { ShowEmptyToggle } from "./ShowEmptyToggle";
 import type { SortState } from "@/hooks/use-list-sort";
 import type { LucideIcon } from "lucide-react";
 import {
-  ArrowDownNarrowWide,
-  ArrowUpNarrowWide,
-  Group,
   LayoutGrid,
   List as ListIcon,
 } from "lucide-react";
@@ -36,9 +36,12 @@ interface Props {
   onQ: (v: string) => void;
   status: StatusFilter;
   onStatus: (s: StatusFilter) => void;
-  /** 列表视图专属：分组开关（看板视图下调用方隐藏此控件） */
-  groupBy: boolean;
-  onToggleGroup: () => void;
+  /** 分组维度（SPEC §10.8，两视图共用同一 dim） */
+  groupBy: GroupBy;
+  onGroupBy: (v: GroupBy) => void;
+  /** 空桶显隐（SPEC §10.9，两视图共用） */
+  showEmpty: boolean;
+  onShowEmpty: (v: boolean) => void;
   refreshing: boolean;
   onRefresh: () => void;
   sort: SortState;
@@ -54,7 +57,9 @@ export function ListTopBar({
   status,
   onStatus,
   groupBy,
-  onToggleGroup,
+  onGroupBy,
+  showEmpty,
+  onShowEmpty,
   refreshing,
   onRefresh,
   sort,
@@ -159,31 +164,15 @@ export function ListTopBar({
         </div>
         <span className="ml-auto flex items-center gap-2">
           <SortMenu sort={sort} onSelectField={onSelectSortField} />
-          {view === "list" && (
-            <button
-              type="button"
-              data-testid="group-toggle"
-              onClick={onToggleGroup}
-              title={groupBy ? "取消分组" : "按项目分组"}
-              aria-label={groupBy ? "取消分组" : "按项目分组"}
-              className={`inline-flex items-center gap-1.5 rounded border px-2 py-1 orca-text-muted hover:orca-text hover:orca-bg-surface-2 ${
-                groupBy
-                  ? "border-orca-accent/30 bg-[rgb(var(--accent)/0.08)] orca-accent"
-                  : "orca-border"
-              }`}
-            >
-              {groupBy ? (
-                <Group size={14} strokeWidth={1.5} aria-hidden />
-              ) : (
-                <ListIcon size={14} strokeWidth={1.5} aria-hidden />
-              )}
-            </button>
-          )}
+          {/*
+            分组维度选择器（SPEC §10.8）+ 空桶显隐 toggle（§10.9）——
+            两视图都显（dim/showEmpty 看板列表共用同一值）。
+          */}
+          <GroupBySelector value={groupBy} onChange={onGroupBy} />
+          <ShowEmptyToggle value={showEmpty} onChange={onShowEmpty} />
         </span>
       </div>
     </header>
   );
 }
 
-// re-export icons used by SortMenu trigger so they're tree-shakeable in one place
-export { ArrowDownNarrowWide, ArrowUpNarrowWide };

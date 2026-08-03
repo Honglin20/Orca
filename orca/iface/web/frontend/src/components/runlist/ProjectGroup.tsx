@@ -21,8 +21,19 @@ import { fmtAgo, fmtCost } from "./format-helpers";
 import { RunRow } from "./RunRow";
 
 export interface ProjectGroupData {
+  /** 显示名（项目名 / workflow 名 / 状态中文 / 时间中文）。 */
   name: string;
-  path: string;
+  /**
+   * 桶稳定 id（testid ``group-<bucketKey>`` 用）。
+   * status dim = "running" 等；project/workflow dim = 名字本身；time dim = "today" 等。
+   * 缺省回退到 ``name``（兼容旧用例）。
+   */
+  bucketKey?: string;
+  /**
+   * 路径，仅 project dim 传（取该桶首个 run 的 ``project_id``）。
+   * 其它 dim 缺省 → 不渲染 path 行。
+   */
+  path?: string;
   runs: RunSummary[];
 }
 
@@ -50,6 +61,7 @@ interface Props extends ProjectGroupData {
 
 export function ProjectGroup({
   name,
+  bucketKey,
   path,
   runs,
   open,
@@ -90,9 +102,12 @@ export function ProjectGroup({
     if (el) el.indeterminate = selectAllState === "partial";
   };
 
+  const groupTestId = bucketKey ?? name;
+  const hasPath = !!path;
+
   return (
     <section
-      data-testid={`group-${name}`}
+      data-testid={`group-${groupTestId}`}
       className="relative rounded bg-[rgb(var(--surface-2)/0.3)]"
     >
       {/* 左侧色条：默认 accent/40；含 blocked run 时整组 skipped/50（用 STATUS_BAR_HEX.blocked inline） */}
@@ -144,22 +159,23 @@ export function ProjectGroup({
               {agg.blocked} 待决策
             </span>
           )}
-          {/* path：展开态第二行；折叠态同行截断 */}
-          {open ? (
-            <span
-              className="block w-full truncate font-mono text-xs orca-text-muted"
-              title={path}
-            >
-              {path}
-            </span>
-          ) : (
-            <span
-              className="truncate font-mono text-xs orca-text-faint"
-              title={path}
-            >
-              {path}
-            </span>
-          )}
+          {/* path：仅 project dim 传（其它 dim path 缺省）；展开态第二行，折叠态同行截断 */}
+          {hasPath &&
+            (open ? (
+              <span
+                className="block w-full truncate font-mono text-xs orca-text-muted"
+                title={path}
+              >
+                {path}
+              </span>
+            ) : (
+              <span
+                className="truncate font-mono text-xs orca-text-faint"
+                title={path}
+              >
+                {path}
+              </span>
+            ))}
           {/* 搜索命中数（搜索穿透） */}
           {q && searchHitCount !== undefined && (
             <span className="orca-text-muted ml-auto shrink-0 text-xs">

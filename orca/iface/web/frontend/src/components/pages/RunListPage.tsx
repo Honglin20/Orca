@@ -1,13 +1,14 @@
 // components/pages/RunListPage.tsx —— RunListPage 重设计（薄页壳）。
 //
-// SPEC docs/specs/web-runlist-redesign.md v2 已闭环 spec-reviewer。
+// SPEC docs/specs/web-runlist-redesign.md v2（含 §10.8/§10.9/§10.10）已闭环 spec-reviewer。
 // 职责：编排 mount refresh+轮询+WS、过滤、分组、排序、选择、bulk、dialog；不直接渲染细节，
 // 组合 ``components/runlist/*`` 子组件。铁律：**不** import workflow-store（R3）。
 //
 // 关键时序不变量（SPEC §3.3）：
-//   - 选择集 / 排序 / 折叠 三类 view-state **互不重置**（切排序/chip/groupBy/清搜索 → 选择全保留）。
+//   - 选择集 / 排序 / 折叠 三类 view-state **互不重置**（切排序/chip/groupBy dim/清搜索 → 选择全保留）。
 //   - 仅「用户点取消选择」「删除完成」「页面 unmount」清空选择。
-//   - 排序与分组叠加：全局排序 → 再按 project 分桶；组间按 started_at desc，组内按用户 sort field。
+//   - 排序与分组叠加：全局排序 → 再按当前 dim 分桶（§10.8 共享 groupRuns）；桶内按用户 sort field。
+//   - 折叠态按 ``"dim:key"`` 持久（§10.8），切 dim 各自独立。
 
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -17,10 +18,11 @@ import {
   startPolling,
   stopPolling,
   useRunListStore,
-  type RunSummary,
 } from "@/stores/run-list-store";
 import { statusToRunStatus } from "@/components/layout/status-badge";
-import { useCollapsedProjects } from "@/hooks/use-collapsed-projects";
+import { useCollapsedBuckets } from "@/hooks/use-collapsed-buckets";
+import { useGroupBy } from "@/hooks/use-group-by";
+import { useShowEmpty } from "@/hooks/use-show-empty";
 import { useListSelection } from "@/hooks/use-list-selection";
 import { useListSort } from "@/hooks/use-list-sort";
 import { useRunListView } from "@/hooks/use-runlist-view";
@@ -31,7 +33,6 @@ import { EmptyState } from "@/components/runlist/EmptyState";
 import { ListSkeleton } from "@/components/runlist/ListSkeleton";
 import { ErrorBanner } from "@/components/runlist/ErrorBanner";
 import { ProjectGroup } from "@/components/runlist/ProjectGroup";
-import type { ProjectGroupData } from "@/components/runlist/ProjectGroup";
 import { BulkActionBar } from "@/components/runlist/BulkActionBar";
 import {
   DeleteConfirmDialog,
@@ -40,6 +41,7 @@ import {
 import { StaleProjectsSection } from "@/components/runlist/StaleProjectsSection";
 import { RunBoard } from "@/components/runlist/RunBoard";
 import { sortRuns } from "@/components/runlist/sort-runs";
+import { groupRuns } from "@/components/runlist/group-runs";
 import type { StatusFilter } from "@/components/runlist/StatusFilterChips";
 
 export function RunListPage() {
@@ -59,7 +61,8 @@ export function RunListPage() {
   // ── view-state ────────────────────────────────────────────────────────────
   const [q, setQ] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
-  const [groupBy, setGroupBy] = useState(true);
+  const { groupBy, setGroupBy } = useGroupBy();
+  const { showEmpty, setShowEmpty } = useShowEmpty();
   const { sort, selectField } = useListSort();
   const { view, setView } = useRunListView();
 
@@ -117,53 +120,46 @@ export function RunListPage() {
   // ── 全局排序（分组前）：稳定排序 + tiebreaker ───────────────────────────────
   const sorted = useMemo(() => sortRuns(filtered, sort), [filtered, sort]);
 
-  // ── 分组 ──────────────────────────────────────────────────────────────────
-  const groups = useMemo<ProjectGroupData[]>(() => {
-    if (!groupBy) {
-      return [{ name: "全部", path: "", runs: sorted }];
-    }
-    const buckets: Record<string, RunSummary[]> = {};
-    const pathById: Record<string, string> = {};
-    for (const r of sorted) {
-      const key = r.project_name || (r.source === "legacy" ? "Legacy" : "其它");
-      (buckets[key] ??= []).push(r);
-      pathById[key] = r.project_id ?? "";
-    }
-    // 组间排序：Legacy 沉底；其余按各组最新 run 的 started_at desc（SPEC §3.3）。
-    // NM6 tiebreaker：同 ``max(started_at)`` 时按 project name asc，防同瞬组跳位。
-    const names = Object.keys(buckets).sort((a, b) => {
-      if (a === "Legacy") return 1;
-      if (b === "Legacy") return -1;
-      const aLatest = Math.max(...buckets[a].map((r) => r.started_at ?? 0));
-      const bLatest = Math.max(...buckets[b].map((r) => r.started_at ?? 0));
-      if (aLatest !== bLatest) return bLatest - aLatest;
-      return a.localeCompare(b);
-    });
-    return names.map((n) => ({
-      name: n,
-      path: pathById[n] ?? "",
-      runs: buckets[n],
-    }));
-  }, [groupBy, sorted]);
+  // ── 分组（共享 groupRuns DRY 单出口，§10.8） ───────────────────────────────
+  const buckets = useMemo(() => groupRuns(sorted, groupBy), [sorted, groupBy]);
+  // 空桶隐藏（§10.9/AC-25）：showEmpty=false → 0-run 桶不渲染。
+  // none 维度单桶永不为空（有 run 时），filter 不影响。
+  const visibleBuckets = useMemo(
+    () => buckets.filter((b) => showEmpty || b.runs.length > 0),
+    [buckets, showEmpty],
+  );
 
-  // ── 折叠持久（known = 当前所有分组名；惰性清理用） ──────────────────────────
-  const knownProjects = useMemo(() => {
+  // ── path 仅 project dim 有（取该桶首个 run 的 project_id；§6.5 NF2 不显后端字段） ──
+  const pathByKey = useMemo(() => {
+    const m = new Map<string, string>();
+    if (groupBy !== "project") return m;
+    for (const b of buckets) {
+      const firstWithId = b.runs.find((r) => r.project_id);
+      if (firstWithId?.project_id) m.set(b.key, firstWithId.project_id);
+    }
+    return m;
+  }, [buckets, groupBy]);
+
+  // ── 折叠持久（known = 当前所有 "dim:key"；惰性清理用） ──────────────────────
+  const knownKeys = useMemo(() => {
     const s = new Set<string>();
-    for (const g of groups) s.add(g.name);
+    for (const b of buckets) s.add(`${groupBy}:${b.key}`);
     return s;
-  }, [groups]);
+  }, [buckets, groupBy]);
   const { collapsed, toggle: toggleCollapse, expandAll, collapseAll } =
-    useCollapsedProjects(knownProjects);
+    useCollapsedBuckets(knownKeys);
 
   // ── 选择（runs 变化自动求交，§3.3） ────────────────────────────────────────
   const runIds = useMemo(() => sorted.map((r) => r.run_id), [sorted]);
   const { selected, toggle, toggleGroup, groupState, setMany, clear } =
     useListSelection(runIds);
 
-  // ── 搜索穿透：q 非空 → 含匹配 run 的分组强制展开（覆盖持久折叠） ──────────
+  // ── 搜索穿透：q 非空 → 含匹配 run 的桶强制展开（覆盖持久折叠） ─────────────
   const searching = q.trim().length > 0;
-  const isOpenByForce = (g: ProjectGroupData): boolean =>
-    searching ? g.runs.length > 0 : !collapsed.has(g.name);
+  const isBucketOpen = (bucketKey: string): boolean =>
+    searching
+      ? (buckets.find((b) => b.key === bucketKey)?.runs.length ?? 0) > 0
+      : !collapsed.has(`${groupBy}:${bucketKey}`);
 
   // ── handlers ──────────────────────────────────────────────────────────────
   const handleOpen = (id: string) => navigate(`/runs/${id}`);
@@ -236,9 +232,10 @@ export function RunListPage() {
   };
 
   // ── 三态加载判定（§5.1） ────────────────────────────────────────────────────
+  // 注：``showEmptyState`` 命名避让 §10.9 的 ``showEmpty``（空桶显隐 toggle）。
   const showSkeleton = loading && runs.length === 0;
   const showError = !loading && !!error && runs.length === 0;
-  const showEmpty = !loading && !error && runs.length === 0;
+  const showEmptyState = !loading && !error && runs.length === 0;
   const showFilteredEmpty = runs.length > 0 && sorted.length === 0;
 
   return (
@@ -253,7 +250,9 @@ export function RunListPage() {
         status={status}
         onStatus={setStatus}
         groupBy={groupBy}
-        onToggleGroup={() => setGroupBy((v) => !v)}
+        onGroupBy={setGroupBy}
+        showEmpty={showEmpty}
+        onShowEmpty={setShowEmpty}
         refreshing={loading}
         onRefresh={() => void refresh()}
         sort={sort}
@@ -279,7 +278,7 @@ export function RunListPage() {
           {showError && (
             <ErrorBanner message={error ?? ""} onRetry={() => void refresh()} />
           )}
-          {showEmpty && <EmptyState mode="empty" />}
+          {showEmptyState && <EmptyState mode="empty" />}
           {showFilteredEmpty && <EmptyState mode="filtered" />}
 
           {/* WS 状态：断线显非阻塞提示（§5.8） */}
@@ -313,19 +312,22 @@ export function RunListPage() {
           {view === "list" &&
             !showSkeleton &&
             !showError &&
-            !showEmpty &&
+            !showEmptyState &&
             sorted.length > 0 && (
               <div className={`space-y-3 ${loading ? "opacity-60" : ""}`}>
-                {groups.map((g) => {
-                  const open = isOpenByForce(g);
-                  const groupIds = g.runs.map((r) => r.run_id);
+                {visibleBuckets.map((b) => {
+                  const open = isBucketOpen(b.key);
+                  const groupIds = b.runs.map((r) => r.run_id);
                   return (
                     <ProjectGroup
-                      key={g.name}
-                      {...g}
+                      key={`${groupBy}:${b.key}`}
+                      name={b.label}
+                      bucketKey={b.key}
+                      path={pathByKey.get(b.key)}
+                      runs={b.runs}
                       open={open}
-                      onToggleOpen={() => toggleCollapse(g.name)}
-                      searchHitCount={searching ? g.runs.length : undefined}
+                      onToggleOpen={() => toggleCollapse(`${groupBy}:${b.key}`)}
+                      searchHitCount={searching ? b.runs.length : undefined}
                       q={q}
                       selectedIds={selected}
                       onToggleRun={(id, shiftKey) =>
@@ -338,7 +340,8 @@ export function RunListPage() {
                         handleDeleteOne({
                           runId: id,
                           workflowName:
-                            runs.find((r) => r.run_id === id)?.workflow_name ?? id,
+                            runs.find((r) => r.run_id === id)?.workflow_name ??
+                            id,
                         })
                       }
                       deletingIds={deletingIds}
@@ -349,16 +352,18 @@ export function RunListPage() {
               </div>
             )}
 
-          {/* 看板（仅 board 视图渲染；与列表共享 store/selection/sort/etc.） */}
+          {/* 看板（仅 board 视图渲染；与列表共享 store/selection/sort/dim/showEmpty/etc.） */}
           {view === "board" &&
             !showSkeleton &&
             !showError &&
-            !showEmpty &&
+            !showEmptyState &&
             sorted.length > 0 && (
               <div className={loading ? "opacity-60" : ""}>
                 <RunBoard
                   runs={sorted}
                   sort={sort}
+                  dim={groupBy}
+                  showEmpty={showEmpty}
                   selectedIds={selected}
                   deletingIds={deletingIds}
                   onToggleRun={(id, shiftKey) =>
@@ -399,7 +404,7 @@ export function RunListPage() {
             </>
           )}
         </span>
-        {view === "list" && groups.length >= 3 && (
+        {view === "list" && visibleBuckets.length >= 3 && (
           <span className="flex items-center gap-2">
             <button
               type="button"

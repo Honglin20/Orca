@@ -371,6 +371,35 @@ const KEY = "orca-runlist-collapsed-v1";
 
 ---
 
+### 10.8 分组方式（Group By）—— 用户追加需求
+维度 `GroupBy = "none" | "status" | "project" | "workflow" | "time"`。看板列 / 列表段 = 当前维度的桶（**替换原 groupBy on/off toggle**；两视图共用同一 dim）。
+- 选择器 `GroupBySelector`（工具行下拉，复用 `SortMenu` 样式语言），选项：不分组 / 状态 / 项目 / workflow / 时间。
+- 持久化 `orca-runlist-groupby-v1`，默认 `"status"`（看板自然轴）。testid：`group-by-select` / `group-by-option-<dim>`。
+- 桶定义与顺序：
+  - `status`：排队→运行中→待决策→已完成→失败（运行中·待决策列强调，§10.2）。
+  - `project`：`project_name`（`source==="legacy"`→"Legacy"，无→"其它"）；alpha + Legacy 垫底。
+  - `workflow`：`workflow_name`（空→"其它"）；alpha。
+  - `time`：今天 / 昨天 / 本周(近7天) / 更早 / 未知（按 `started_at`，逆序；无 `started_at`→未知）。
+  - `none`：单桶「全部」。
+- 桶内排序：用户 sort field（`use-list-sort`，stable）。
+- **折叠持久化泛化**：`use-collapsed-buckets`（由 `use-collapsed-projects` 演进）存 `Set<"${dim}:${key}">`，key 升级 `orca-runlist-collapsed-v2`（v1 数据不兼容，直接弃）；dim 切换各自独立折叠态。AC-4 测试同步更新到 v2 键格式。
+- 含 blocked run 的桶：左侧色条用 `STATUS_BAR_HEX.blocked`（紫），穿透提示（不限 status 维度）。
+
+### 10.9 空桶自动隐藏 —— 用户追加需求
+- toggle「显示空」`ShowEmptyToggle`（工具行），持久化 `orca-runlist-show-empty-v1`，默认 `false`（**隐藏空桶**）。testid：`show-empty-toggle`。
+- `showEmpty=false`：过滤/分组后 0-run 的桶不渲染（看板列 / 列表段都隐藏）——直接解决「排队/待决策空列占位噪音」。
+- `showEmpty=true`：显空桶（占位 faint「暂无」）。
+- `none` 维度单桶永不为空（有 run 时）。
+- **待决策桶 >0 时高亮**（ring/accent），无论 showEmpty（保证 gate 待处理不被埋）。
+- 分组数 ≥1 即显选择器；空态/筛选空态走 §5.1 不显桶。
+
+### 10.10 新增 AC（追加）
+- **AC-24 分组维度**：5 维度可选；看板列/列表段随 dim 变；持久；桶顺序与定义正确。
+- **AC-25 空桶隐藏**：`showEmpty=false` 时空桶不渲染；`showEmpty=true` 显占位；待决策>0 仍高亮。
+- **AC-26 折叠泛化**：`use-collapsed-buckets` 按 `dim:key` 持久；切 dim 各自独立；reload 保持（AC-4 的泛化版）。
+
+---
+
 ## 11. 风险与边界
 
 - **批量删除部分失败**：乐观全移→逐条 DELETE→失败 refresh 对账 + toast 列失败项（fail-loud）。

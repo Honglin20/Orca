@@ -241,7 +241,7 @@ def test_list_view_sort_menu(live_server, tmp_path):
 
 @pytest.mark.skipif(not _PLAYWRIGHT_AVAILABLE, reason="playwright 未安装")
 def test_list_view_collapse_persistence_across_reload(live_server, tmp_path):
-    """AC-4：折叠项目分组 → reload → 仍折叠（localStorage 持久）。"""
+    """AC-4/AC-26：折叠 project 分组 → reload → 仍折叠（localStorage ``collapsed-v2`` ``"dim:key"`` 持久）。"""
     base_url, manager = live_server
     _seed_runs(tmp_path, manager, count=2)
 
@@ -251,6 +251,9 @@ def test_list_view_collapse_persistence_across_reload(live_server, tmp_path):
             page = await browser.new_page()
             await page.goto(base_url)
             await page.click("[data-testid=view-toggle-list]")
+            # §10.8 默认 dim=「状态」→ 切到 project（保留旧用例的 project 分组假设）。
+            await page.click("[data-testid=group-by-select]")
+            await page.click("[data-testid=group-by-option-project]")
             await page.wait_for_selector("[data-testid=group-header]", timeout=5000)
             # 初始展开：run-row 可见。
             await page.wait_for_selector("[data-testid=run-row]", timeout=2000)
@@ -262,15 +265,62 @@ def test_list_view_collapse_persistence_across_reload(live_server, tmp_path):
                 timeout=2000,
             )
             stored = await page.evaluate(
-                "localStorage.getItem('orca-runlist-collapsed-v1')"
+                "localStorage.getItem('orca-runlist-collapsed-v2')"
             )
-            assert stored and "demo" in stored
+            assert stored and "project:demo" in stored
             # reload → 仍折叠。
             await page.reload()
             await page.wait_for_selector("[data-testid=group-header]", timeout=5000)
             await page.wait_for_function(
                 "() => document.querySelectorAll('[data-testid=run-row]').length === 0",
                 timeout=2000,
+            )
+            await browser.close()
+
+    asyncio.run(go())
+
+
+@pytest.mark.skipif(not _PLAYWRIGHT_AVAILABLE, reason="playwright 未安装")
+def test_group_by_dim_switch_and_empty_bucket_hide(live_server, tmp_path):
+    """AC-24/AC-25：切分组维度 → 桶变化；空桶默认隐藏（showEmpty=false）。"""
+    base_url, manager = live_server
+    _seed_runs(tmp_path, manager, count=1)
+
+    async def go():
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
+            page = await browser.new_page()
+            await page.goto(base_url)
+            # 默认 board 视图 + 默认 dim=status：仅 completed 列（其它 4 空列隐藏）。
+            await page.wait_for_selector("[data-testid=board]", timeout=5000)
+            await page.wait_for_selector(
+                "[data-testid=board-column-completed]", timeout=2000
+            )
+            assert await page.locator(
+                "[data-testid=board-column-queued]"
+            ).count() == 0, "showEmpty=false 时空列应隐藏"
+
+            # 切到 project dim → board-column-demo 出现。
+            await page.click("[data-testid=group-by-select]")
+            await page.click("[data-testid=group-by-option-project]")
+            await page.wait_for_selector(
+                "[data-testid=board-column-demo]", timeout=2000
+            )
+            assert await page.locator(
+                "[data-testid=board-column-completed]"
+            ).count() == 0, "切到 project 后旧 status 列 testid 应消失"
+
+            # localStorage 持久 dim=project。
+            stored = await page.evaluate(
+                "localStorage.getItem('orca-runlist-groupby-v1')"
+            )
+            assert stored and "project" in stored
+
+            # 切回 status → completed 列回来。
+            await page.click("[data-testid=group-by-select]")
+            await page.click("[data-testid=group-by-option-status]")
+            await page.wait_for_selector(
+                "[data-testid=board-column-completed]", timeout=2000
             )
             await browser.close()
 

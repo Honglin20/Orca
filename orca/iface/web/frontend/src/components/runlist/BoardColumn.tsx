@@ -1,14 +1,16 @@
-// components/runlist/BoardColumn.tsx —— 看板单列（SPEC §10.2）。
+// components/runlist/BoardColumn.tsx —— 看板单列（SPEC §10.2 / §10.8 含泛化）。
 //
-// 视觉契约（§10.2 + §2 速查表）：
+// 视觉契约（§10.2 + §10.8 + §2 速查表）：
 //   - 列容器：``min-w-[260px] flex-1 rounded-md bg-[rgb(var(--surface-2)/0.2)] p-2``。
-//   - 列头：状态 dot + label + 计数（``text-sm font-semibold``）。
-//   - **运行中/待决策列**：左侧 3px 色条（STATUS_BAR_HEX）+ 列头加粗 + 计数用状态色。
-//   - **待决策列计数>0**：整列 ring（``ring-1 ring-orca-skipped/20``）。
-//   - 已完成/失败列：仅显最近 N=10 + 「显示更多（共 X）」展开（本会话记忆）。
-//   - 空列：居中 faint 占位「暂无」。
+//   - 列头：状态 dot（仅 status dim）+ label + 计数（``text-sm font-semibold``）。
+//   - **运行中/待决策列**（status dim）：左侧 3px 色条（STATUS_BAR_HEX[status]）+ 列头加粗 + 计数状态色。
+//   - **含 blocked run 的桶**（任意 dim，§10.8 紫条穿透）：``hasBlocked`` 时左色条变 STATUS_BAR_HEX.blocked。
+//   - **待决策列计数>0**（status dim blocked）：整列 ring（``ring-1 ring-orca-skipped/20``）。
+//   - 已完成/失败列（status dim）：仅显最近 N=10 + 「显示更多（共 X）」展开（本会话记忆）。
+//   - 空列：居中 faint 占位「暂无」（``showEmpty=true`` 时才进得到这里）。
 //
-// data-testid：``board-column-<status>``。
+// data-testid：``board-column-<columnKey>``（columnKey = 桶 key：status dim 为 "queued" 等，
+// 其它 dim 为 project/workflow/time 名）。
 
 import { useEffect, useState } from "react";
 import type { RunSummary } from "@/stores/run-list-store";
@@ -35,12 +37,17 @@ const COLUMN_EMPHASIS_TEXT: Record<RunStatus, string> = {
 };
 
 interface Props {
-  status: RunStatus;
+  /** testid 用（status dim = "queued"/"running"/...；其它 dim = 桶 key）。 */
+  columnKey: string;
+  /** 仅 status dim 提供（emphasize 色条 + dot + 计数状态色用）；其它 dim 缺省。 */
+  status?: RunStatus;
   label: string;
-  /** 强调列（运行中/待决策）：色条 + 列头加粗 + 计数状态色 */
+  /** 强调列（status dim 的 running/blocked）：色条 + 列头加粗 + 计数状态色 */
   emphasize: boolean;
-  /** 待决策列：计数>0 时整列 ring */
+  /** 待决策列：计数>0 时整列 ring（仅 status dim blocked） */
   ringWhenNonEmpty: boolean;
+  /** 含 blocked run → 紫色条穿透提示（不限 dim，§10.8） */
+  hasBlocked: boolean;
   runs: RunSummary[];
   selectedIds: Set<string>;
   deletingIds: Set<string>;
@@ -52,10 +59,12 @@ interface Props {
 }
 
 export function BoardColumn({
+  columnKey,
   status,
   label,
   emphasize,
   ringWhenNonEmpty,
+  hasBlocked,
   runs,
   selectedIds,
   deletingIds,
@@ -76,38 +85,52 @@ export function BoardColumn({
   const hiddenCount = total - visible.length;
   const empty = total === 0;
 
+  // 左色条规则（§10.8 + §10.2）：
+  //   - status dim 的 running/blocked 列（emphasize）：STATUS_BAR_HEX[status]。
+  //   - 任意 dim 含 blocked run（hasBlocked）：STATUS_BAR_HEX.blocked（紫，穿透提示）。
+  //   - 二者皆真（如 status dim 的 blocked 列）：颜色都是 blocked 紫，一致。
+  //   - 二者皆假：不显色条。
+  const showBar = !empty && (emphasize || hasBlocked);
+  // barColor：hasBlocked 强制紫穿透；否则用 STATUS_BAR_HEX[status]（emphasize=true 保证 status 有值）。
+  // ``status ?? "blocked"`` 是防御性兜底——showBar=false 时本字段不被渲染，逻辑上 unreachable。
+  const barColor = STATUS_BAR_HEX[hasBlocked ? "blocked" : status ?? "blocked"];
+  // 列头强调态文字色（仅 status dim emphasize）。
+  const emphasisText = status ? COLUMN_EMPHASIS_TEXT[status] : "orca-text";
+
   return (
     <section
-      data-testid={`board-column-${status}`}
+      data-testid={`board-column-${columnKey}`}
       className={`relative flex min-w-[260px] flex-1 flex-col rounded-md bg-[rgb(var(--surface-2)/0.2)] p-2 ${
         ringWhenNonEmpty && !empty ? "ring-1 ring-orca-skipped/20" : ""
       }`}
     >
-      {/* 运行中/待决策列：左侧 3px 色条 */}
-      {emphasize && !empty && (
+      {/* 左侧 3px 色条：emphasize 或 hasBlocked 时显（见模块注释规则） */}
+      {showBar && (
         <div
           className="absolute inset-y-0 left-0 w-[3px] rounded-l"
-          style={{ backgroundColor: STATUS_BAR_HEX[status] }}
+          style={{ backgroundColor: barColor }}
         />
       )}
-      {/* 列头：dot + label + 计数 */}
+      {/* 列头：dot（仅 status dim）+ label + 计数 */}
       <div className="mb-2 flex items-center gap-2 px-1 py-1">
-        <span
-          className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT_BG[status]} ${
-            status === "running" ? "animate-pulse" : ""
-          }`}
-          aria-hidden
-        />
+        {status && (
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT_BG[status]} ${
+              status === "running" ? "animate-pulse" : ""
+            }`}
+            aria-hidden
+          />
+        )}
         <span
           className={`text-sm ${emphasize ? "font-bold" : "font-semibold"} ${
-            emphasize ? COLUMN_EMPHASIS_TEXT[status] : "orca-text"
+            emphasize ? emphasisText : "orca-text"
           }`}
         >
           {label}
         </span>
         <span
           className={`text-xs tabular-nums ${
-            emphasize ? COLUMN_EMPHASIS_TEXT[status] : "orca-text-muted"
+            emphasize ? emphasisText : "orca-text-muted"
           }`}
         >
           {total}
@@ -137,7 +160,7 @@ export function BoardColumn({
       {hiddenCount > 0 && !expanded && (
         <button
           type="button"
-          data-testid={`board-column-more-${status}`}
+          data-testid={`board-column-more-${columnKey}`}
           onClick={() => setExpanded(true)}
           className="orca-text-muted hover:orca-text mt-2 rounded border border-dashed orca-border px-2 py-1 text-xs"
         >
