@@ -346,6 +346,27 @@ describe("RunListPage 重设计", () => {
     expect(stored).toMatch(/demo/);
   });
 
+  // AC-4 反向：mount 前预先持久化 collapsed（模拟 reload 场景）→ 加载后初始态应保持折叠。
+  // 防 regression：旧版 useState 初值在 ``known`` 为空（fetch 未回）时过滤掉持久项，
+  // 然后 write-back effect 把空集覆盖回 storage，永久清空持久态（Playwright 曾 catch 此 bug）。
+  it("AC-4 持久态加载：mount 前 localStorage 预存 [demo] → 加载后保持折叠（不擦写 storage）", async () => {
+    localStorage.setItem("orca-runlist-collapsed-v1", JSON.stringify(["demo"]));
+    mockFetchFor([mkRun({ run_id: "r1", project_name: "demo" })]);
+    renderPage();
+    // group 出现（runs 已加载、knownProjects 已算出），useCollapsedProjects 应已 hydrate。
+    await screen.findByTestId("group-demo");
+    // 仍应折叠：run-row 不在 DOM。
+    await act(async () => {
+      // 给 hydrate effect + render 一拍时间。
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.queryAllByTestId("run-row")).toHaveLength(0);
+    // storage 不应被擦写为空。
+    const stored = localStorage.getItem("orca-runlist-collapsed-v1");
+    expect(stored).toBeTruthy();
+    expect(stored).toMatch(/demo/);
+  });
+
   it("AC-4 localStorage 损坏 → 降级空集不崩", async () => {
     localStorage.setItem("orca-runlist-collapsed-v1", "{not valid json");
     mockFetchFor([mkRun({ run_id: "r1", project_name: "demo" })]);

@@ -50,20 +50,32 @@ function writeStored(set: Set<string>): boolean {
  *          - ``setCollapsed(next)``：整体替换（用于「全部展开/折叠」）。
  */
 export function useCollapsedProjects(known: Set<string>) {
-  const [collapsed, setCollapsedState] = useState<Set<string>>(() => {
-    const raw = readStored();
-    // 读时惰性清理：保留 ∩ known。
-    const cleaned = new Set<string>();
-    for (const n of raw) if (known.has(n)) cleaned.add(n);
-    return cleaned;
-  });
+  // hydration 模式：父级 ``known`` 在挂载时通常为空（``/api/runs`` 还没回）。
+  // 若 ``useState`` 初值在此刻过滤 ``known``，会把持久态（如 ``["demo"]``）过滤成空集，
+  // 然后写回 effect 又把空集覆盖回 localStorage → 持久态被永久清空（AC-4 regression）。
+  // 因此：初值取空，等 ``known`` 首次非空时再 hydrate 一次（读+惰性清理），并只在 hydrate 之后
+  // 才允许写回（避免把过滤后的空集覆盖回 storage）。
+  const [collapsed, setCollapsedState] = useState<Set<string>>(() => new Set());
 
   // known 引用每次渲染可能变（父 useMemo 重算）。用 ref 跟最新，避免 stale 写时不收口。
   const knownRef = useRef(known);
   knownRef.current = known;
+  const hydratedRef = useRef(false);
+
+  // 一次性 hydrate：``known`` 首次非空时，从 localStorage 读 + ∩ known 惰性清理后 setState。
+  useEffect(() => {
+    if (hydratedRef.current || known.size === 0) return;
+    hydratedRef.current = true;
+    const stored = readStored();
+    const cleaned = new Set<string>();
+    for (const n of stored) if (known.has(n)) cleaned.add(n);
+    if (cleaned.size > 0) setCollapsedState(cleaned);
+  }, [known]);
 
   // 持久化副作用：collapsed 变 → 写 localStorage（仅 known 子集）。
+  // 仅在 hydrate 之后允许写——否则会把初值（空集）覆盖回 storage，清空持久态。
   useEffect(() => {
+    if (!hydratedRef.current) return;
     const knownNow = knownRef.current;
     const subset = new Set<string>();
     for (const n of collapsed) if (knownNow.has(n)) subset.add(n);
