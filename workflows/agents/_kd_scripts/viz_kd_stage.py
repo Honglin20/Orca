@@ -220,8 +220,8 @@ def _push_distill_round_table(ledger: list[dict[str, Any]]) -> tuple[bool, str]:
             "variant_id": str(e.get("variant_id", "?")),
             "latency_us": _to_float(e.get("latency_us")),
             "accuracy": _to_float(e.get("accuracy")),
-            "met_latency": str(bool(e.get("met_latency"))),
-            "met_accuracy": str(bool(e.get("met_accuracy"))),
+            "met_latency": str(bool(e.get("met_latency"))).lower(),
+            "met_accuracy": str(bool(e.get("met_accuracy"))).lower(),
             "status": str(e.get("status", "")),
         })
     if not rows:
@@ -354,8 +354,9 @@ def _push_all_models_table(
             "latency_us": b_lat if b_lat is not None else "",
             "accuracy": b_acc if b_acc is not None else "",
             # baseline 是 latency/accuracy 参考线本身，不参与达标判定（与 teacher 行一致）。
-            "met_latency": "",
-            "met_accuracy": "",
+            # met_*="ref"（Y5 fix：与 finalize_kd 字面对齐；空串会被前端 hue 渲染成第三类目）。
+            "met_latency": "ref",
+            "met_accuracy": "ref",
             "status": "baseline",
         })
 
@@ -370,8 +371,9 @@ def _push_all_models_table(
             "role": "teacher",
             "latency_us": t_lat if t_lat is not None else "",
             "accuracy": t_acc if t_acc is not None else "",
-            "met_latency": "",   # teacher 不卡 target，仅作 KD 源
-            "met_accuracy": "",
+            # teacher 不卡 target，仅作 KD 源（met_*="ref"，与 baseline 行一致）。
+            "met_latency": "ref",
+            "met_accuracy": "ref",
             "status": "teacher" if known else "teacher(unknown acc)",
         })
 
@@ -397,8 +399,8 @@ def _push_all_models_table(
             "role": "champion" if vid in champ_ids else "student",
             "latency_us": lat if lat is not None else "",
             "accuracy": acc if acc is not None else "",
-            "met_latency": str(bool(e.get("met_latency"))) if e.get("met_latency") is not None else "",
-            "met_accuracy": str(bool(e.get("met_accuracy"))) if e.get("met_accuracy") is not None else "",
+            "met_latency": str(bool(e.get("met_latency"))).lower() if e.get("met_latency") is not None else "",
+            "met_accuracy": str(bool(e.get("met_accuracy"))).lower() if e.get("met_accuracy") is not None else "",
             "status": str(e.get("status", "")),
         })
 
@@ -445,8 +447,8 @@ def _push_pareto_front(
       （display 后数据恒「越大越好」）。
     - latency 字段双 fallback：``latency_us_median`` → ``latency_us``（与 ``_push_all_models_table``
       一致；reducer 归一化别名 latency_us 兼容）。
-    - hue：student 行 ``str(bool(met_accuracy))``（"True"/"False"）；baseline 参考点 ``met_accuracy="ref"``
-      （与 viz_kd ``_push_accuracy_compare`` 的 "ref" 约定一致，避免空串成第三类目）。
+    - hue：student 行 ``str(bool(met_accuracy)).lower()``（"true"/"false"）；baseline 参考点 ``met_accuracy="ref"``
+      （Y5 fix：与 viz_kd ``_push_accuracy_compare`` 的 "ref" 约定一致，与 finalize_kd 字面对齐，避免空串成第三类目）。
     """
     direction = accuracy_direction(accuracy_baseline_kind)
     if not direction:
@@ -472,7 +474,7 @@ def _push_pareto_front(
         pts.append({
             "latency_us": lat,
             "accuracy": disp,
-            "met_accuracy": str(bool(e.get("met_accuracy"))),
+            "met_accuracy": str(bool(e.get("met_accuracy"))).lower(),
         })
     if len(pts) < 2:
         print(

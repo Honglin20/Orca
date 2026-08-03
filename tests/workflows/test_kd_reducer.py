@@ -136,6 +136,49 @@ def test_fail_latency_skipped_from_admit(tmp_path):
     assert res["champion_id"] == "baseline"
 
 
+# ── Y1 fix：FAIL_accuracy / FAIL_export 合法 status（对齐 kd_common.ALL_TERMINAL_STATUSES）──
+
+
+@pytest.mark.parametrize("status", ["FAIL_accuracy", "FAIL_export"])
+def test_fail_accuracy_or_export_appends_ok(tmp_path, status):
+    """Y1：``_LEDGER_STATUS`` 必须包含 FAIL_accuracy / FAIL_export，与
+    ``kd_common.ALL_TERMINAL_STATUSES`` / ``viz_kd_stage._push_fail_status_bar`` /
+    ``finalize_kd.known_statuses`` 四处对齐。否则 candidate 带 FAIL_accuracy/export 时
+    ``_validate_candidate`` fail loud（exit 2），下游 measure_student / export_onnx 失败的
+    ledger append 会断流（延时炸弹）。本测守护合约：合法 append + 维持 baseline + continue_loop true。
+    """
+    r = _load_reducer()
+    ledger_path, champions_path = _seed_baseline(tmp_path)
+    res = r.reduce_ledger(
+        ledger_path=str(ledger_path),
+        champions_path=str(champions_path),
+        candidate=_cand(
+            status=status,
+            met_latency=False,
+            met_accuracy=False,
+            accuracy=-1,
+        ),
+        target_latency_us=6.0,
+        accuracy_baseline=0.02,
+        accuracy_baseline_kind="nmse",
+        max_rounds=5,
+        baseline_latency_us=10.0,
+        baseline_accuracy=0.02,
+    )
+    # FAIL_* 不入 admitted → champion 维持 baseline，但 ledger 行应正常 append。
+    assert res["champion_id"] == "baseline"
+    assert res["new_champion_this_round"] is False
+    assert res["ledger_entry_written"] is True
+    assert res["champions_entry_written"] is False  # 仅 seed baseline（首次）+ 无新 champion
+    assert res["status_final"] == status
+    # ledger 文件 1 行（FAIL_accuracy/export candidate）+ champions 文件 1 行（baseline seed）
+    assert ledger_path.is_file()
+    lines = [l for l in ledger_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(lines) == 1
+    import json as _json
+    assert _json.loads(lines[0])["status"] == status
+
+
 # ── champion ratchet ──────────────────────────────────────────────────────────
 
 

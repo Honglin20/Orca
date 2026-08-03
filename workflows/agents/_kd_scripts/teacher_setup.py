@@ -267,13 +267,21 @@ _ACC_PATTERNS = [
 def _parse_accuracy(stdout: str) -> tuple[float, str, str]:
     """从 eval stdout 解析精度。返回 (value, kind, confidence)。
 
-    confidence = 'high'（命中 STUDENT_ACCURACY/TEACHER_ACCURACY/NMSE/MSE/BER/SNR/accuracy）或 'low'（解析失败→占位 0.0）。
+    confidence = 'high'（命中 TEACHER_ACCURACY/STUDENT_ACCURACY/NMSE/MSE/BER/SNR/accuracy）或 'low'（解析失败→占位 0.0）。
 
-    teacher eval 复用 ``train_pipeline --mode eval``，其 stdout 协议为
-    ``STUDENT_ACCURACY: <float>`` + ``STUDENT_ACCURACY_KIND: <kind>`` —— 优先按此对解析，
-    kind 取自 _KIND 同伴行（校验 ∈ {nmse,mse,ber,snr,acc}，非法则回退 acc）。
+    优先级（Y3 fix）：``TEACHER_ACCURACY`` 显式真值优先于 ``STUDENT_ACCURACY``——
+    用户自写 eval_command 可能同时含两者（例如复用 train_pipeline eval stdout 但额外标注
+    teacher 真值），TEACHER_ 是显式真值。``STUDENT_ACCURACY`` 次优（含 _KIND 同伴行），
+    再 fallback JSON / NMSE / MSE / BER / SNR / accuracy。
     """
-    # 优先：train_pipeline --mode eval 协议（value + kind 同伴）
+    # 优先级 1：TEACHER_ACCURACY（显式 teacher 真值；用户 eval_command 显式标注时取此）。
+    m_teacher = re.search(
+        r"TEACHER_ACCURACY\s*[:=]\s*([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)",
+        stdout, re.I,
+    )
+    if m_teacher:
+        return float(m_teacher.group(1)), "acc", "high"
+    # 优先级 2：train_pipeline --mode eval 协议（STUDENT_ACCURACY + _KIND 同伴行）。
     m_val = re.search(
         r"STUDENT_ACCURACY\s*[:=]\s*([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)",
         stdout, re.I,

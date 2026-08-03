@@ -234,17 +234,11 @@ def _write_report(
     lines.append("")
     lines.append("| id | role | round | latency_us | accuracy | met_lat | met_acc | status |")
     lines.append("|---|---|---|---|---|---|---|---|")
-    # baseline
-    # b_met 统一 "true"/"false" 字面量（与 student 行 str(bool(...)).lower() 一致；
-    # 旧 "" 空串是第三类目，前端 hue 渲染会漂移）。
-    b_met = (
-        "true" if baseline_latency_us is not None
-        and target_latency_us is not None
-        and baseline_latency_us <= target_latency_us else "false"
-    )
+    # baseline / teacher 行 met_*="ref"（Y5 fix：参考线本身不参与达标判定，与 student 行
+    # str(bool(...)).lower() 区分；viz_kd_stage._push_all_models_table 字面对齐）。
     lines.append(
         f"| baseline | baseline | 0 | {baseline_latency_us:.6g} | "
-        f"{baseline_accuracy:.6g} | {b_met} | — | baseline |"
+        f"{baseline_accuracy:.6g} | ref | ref | baseline |"
     )
     # teacher
     if teacher_obj:
@@ -253,7 +247,7 @@ def _write_report(
         t_known = bool(teacher_obj.get("teacher_accuracy_known", False))
         lines.append(
             f"| teacher | teacher | — | {t_lat if t_lat is not None else ''} | "
-            f"{t_acc if t_acc is not None else ''} | — | — | "
+            f"{t_acc if t_acc is not None else ''} | ref | ref | "
             f"{'teacher' if t_known else 'teacher(unknown acc)'} |"
         )
     # students / champions

@@ -753,6 +753,23 @@ class TestTeacherSetupParse:
         )
         assert (acc, kind, conf) == (0.5, "acc", "high")
 
+    def test_teacher_accuracy_takes_priority_over_student(self):
+        """Y3 fix：stdout 同时含 TEACHER_ACCURACY + STUDENT_ACCURACY 时取 TEACHER_。
+
+        意图：用户自写 eval_command 可能复用 train_pipeline --mode eval stdout（含
+        STUDENT_ACCURACY 协议）但额外标注 teacher 真值——TEACHER_ACCURACY 是显式真值，
+        必须优先匹配，否则会被 STUDENT_ACCURACY 遮蔽（teacher 精度被误用 student 值）。
+        """
+        sys.path.insert(0, str(KD_SCRIPTS))
+        from teacher_setup import _parse_accuracy
+        out = (
+            "STUDENT_ACCURACY: 0.95\n"
+            "STUDENT_ACCURACY_KIND: nmse\n"
+            "TEACHER_ACCURACY: 0.015\n"
+        )
+        acc, kind, conf = _parse_accuracy(out)
+        assert (acc, kind, conf) == (0.015, "acc", "high")
+
 
 # ───────────────────────── teacher_setup latency source (v4) ──────────────────
 # teacher_setup.py 的 latency 来源三分支（CONTRACTS §3）：

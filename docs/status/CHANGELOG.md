@@ -5,6 +5,28 @@
 
 ---
 
+## [2026-08-03] feat(kd-nas): 时延单位统一 us + KD loss 强制 + teacher 评估 + 全模型总表
+
+四项串行化改动（commit `16bd8b5`）：(1) latency ms→us 全链重命名（修 1000× 误判 FAIL_latency）；
+(2) distill 模式 KD loss 强制（`compose.py` 构造期空 kd_losses → raise）；(3) teacher 评估复用
+train_pipeline --mode eval（精度进 teacher_meta）；(4) `viz_kd_stage._push_all_models_table`
++ finalize_kd final_report.md 同步「All Architectures」总表（baseline + teacher + students + champions）。
+309 passed / 0 回归。详见 [release note](docs/releases/2026-08-03-kd-nas-us-kd-mandatory-teacher-eval-master-table.md)。
+
+---
+
+## [2026-08-03] fix(kd-nas): 特征蒸馏 fail-loud 守卫 + 终态帕累托/FAIL 图 + CONTRACTS 串行化
+
+SPEC `2026-08-03-kd-nas-fail-loud-chart-cleanup.md` §1/§3/§4/§2 收尾：`kd/compose.py`
+加守卫（含 ofd/fitnets/rkd 且运行时 feats 空 → raise）；distill/gen-student agent.md 的
+KD_CONFIG 改 AST 条件化（修 F2 dormant bug：旧 `grep '^def'` 漏判缩进 class method → ofd 永远剥离）；
+`viz_kd_stage --stage final` 新增 pareto_front + fail_status_bar（port viz_kd 语义非 import，
+为 followup 删 viz_kd 铺路）；finalize final_report.md 加 `## Search Outcome` + §4 bool/latency 一致性；
+CONTRACTS.md 重写串行 v5 + 4 脚本加 DEPRECATED docstring 头。Commit: `d9fcd9c`。详见
+[release note](docs/releases/2026-08-03-kd-nas-fail-loud-chart-cleanup.md)。
+
+---
+
 ## [2026-08-03] fix(web): 双路 review 闭环——实现时序漏洞 + 看板视觉放大 + 死代码清理
 
 分两 agent 对 RunList 重设计做 review（实现 code-reviewer + 美观真机截图）。实现侧闭环 6 MAJOR：
