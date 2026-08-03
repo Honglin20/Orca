@@ -69,14 +69,16 @@ print(student_rows[-1].get('variant_id', 'baseline') if student_rows else 'basel
 " "$LEDGER")"
 
 # 组装 candidate（status / latency / accuracy / met_* / accepted_cfg / ckpt 等从 distill.output + gen_student.output 透传）。
-# accepted_cfg 在 distill output 是 JSON object（非串），用 Jinja 渲染后会成 Python-rep → 此处序列化为 JSON 串传 CLI。
-python3 - <<'PY' > /tmp/kd_candidate.json
+# accepted_cfg 在 distill output 是 JSON object，Jinja 渲染后嵌入 python literal。
+# candidate 写 mktemp 路径（per-process 唯一，防并发 run 撞 /tmp 固定路径污染）。
+CAND_PATH="$(mktemp /tmp/kd_candidate.XXXXXX.json)"
+python3 - <<PY > "$CAND_PATH"
 import json
 cand = {
     "variant_id": "r{{ distill.output.round }}_student",
     "student_path": "{{ gen_student.output.student_model_path }}",
     "round": {{ distill.output.round }},
-    "parent": "__PARENT__",
+    "parent": "$PARENT",
     "latency_ms": {{ distill.output.latency_ms }},
     "accuracy": {{ distill.output.accuracy }},
     "met_latency": {{ distill.output.met_latency }},
@@ -92,31 +94,21 @@ cand = {
 print(json.dumps(cand, ensure_ascii=False))
 PY
 
-# 替换 __PARENT__（避免 Jinja 在 heredoc 中的渲染歧义）。
-python3 -c "
-import sys, json
-p = sys.argv[1]
-with open('/tmp/kd_candidate.json') as f:
-    cand = json.load(f)
-cand['parent'] = p
-with open('/tmp/kd_candidate.json', 'w') as f:
-    json.dump(cand, f, ensure_ascii=False)
-" "$PARENT"
-
 REDUCER_OUT="$(python3 "$KD_SCRIPTS_DIR/kd_reducer.py" \
   --ledger "$LEDGER" \
   --champions "{{ setup.output.champions_path }}" \
-  --candidate @/tmp/kd_candidate.json \
+  --candidate "@$CAND_PATH" \
   --target_latency_ms "{{ inputs.target_latency_ms }}" \
   --accuracy_baseline "{{ inputs.accuracy_baseline }}" \
   --accuracy_baseline_kind "{{ inputs.accuracy_baseline_kind }}" \
   --max_rounds "{{ inputs.max_rounds }}" \
   --baseline_latency_ms "{{ setup.output.baseline_latency_ms }}" \
   --baseline_accuracy "{{ setup.output.baseline_accuracy }}" 2>&1)"
-REDUCER_RC=$?
+RC=$?
+rm -f "$CAND_PATH"
 echo "$REDUCER_OUT"
-if [ $REDUCER_RC -ne 0 ]; then
-  echo "FAIL: kd_reducer.py rc=$REDUCER_RC（candidate schema 错？ledger 坏？→ 系统失败）" >&2
+if [ $RC -ne 0 ]; then
+  echo "FAIL: kd_reducer.py rc=$RC（candidate schema 错？ledger 坏？→ 系统失败）" >&2
   exit 2
 fi
 echo "PARSED step1: kd_reducer PASS（ledger append + champion ratchet done）"

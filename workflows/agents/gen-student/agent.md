@@ -105,14 +105,6 @@ echo "PARSED step1: ROUND_NUM=$ROUND_NUM PARENT_STUDENT=$PARENT_STUDENT"
 BASELINE="{{ flatten.output.baseline_contract_path }}"
 DEPTH_AXIS="{{ gen_teacher.output.depth_axis }}"
 # 读 baseline DUMMY_INPUT 供 step 3 字节级校验
-BASELINE_DUMMY_JSON="$(python3 -c "
-import importlib.util, json, sys, os
-p='$BASELINE'; d=os.path.dirname(p)
-if d not in sys.path: sys.path.insert(0,d)
-spec=importlib.util.spec_from_file_location('_b',p); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-print(json.dumps(m.DUMMY_INPUT, sort_keys=True))
-")"
-echo "BASELINE_DUMMY_JSON=$BASELINE_DUMMY_JSON"
 # 迭代轮：读 ledger 上轮 + champion + KB
 if [ "$ROUND_NUM" -ge 2 ]; then
   LAST_STUDENT_PERF="$(python3 -c "
@@ -214,11 +206,16 @@ done
 if [ "$STRIKE" -ge 3 ]; then
   # catch 协议：emit FAIL_build JSON，agent 退 0（不 workflow_failed）
   FAIL_REASON="$(echo "$OUT" | grep '^FAIL_REASON:' | head -1 | cut -d' ' -f2-)"
-  cat <<EOF
-{"student_model_path": "$STUDENT", "round": $ROUND_NUM, "hypothesis": "validate_contract 3 strikes failed",
- "direction_id": "fail_build_round_${ROUND_NUM}", "knobs": "{}",
- "status": "FAIL_build", "fail_reason": "${FAIL_REASON:-validate 3x fail}"}
-EOF
+  python3 -c '
+import json, sys
+print(json.dumps({
+  "student_model_path": sys.argv[1], "round": int(sys.argv[2]),
+  "hypothesis": "validate_contract 3 strikes failed",
+  "direction_id": f"fail_build_round_{sys.argv[2]}",
+  "knobs": "{}", "status": "FAIL_build",
+  "fail_reason": sys.argv[3] or "validate 3x fail",
+}))
+' "$STUDENT" "$ROUND_NUM" "$FAIL_REASON"
   exit 0
 fi
 # PASS：解析 KNOBS（dumb JSON 串，供 distill 省去重新加载）

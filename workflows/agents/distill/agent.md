@@ -60,12 +60,49 @@ tools: [bash, read, write, edit, glob, grep]
 
 ---
 
+## step 0 执行：FAIL_build 早退（gen_student.status=FAIL_build → 不调 tune_latency，直接落账）
+
+> SPEC §15 catch 协议：gen_student validate_contract 3-strike FAIL_build 时 student 文件
+> import 必坏（py_compile / AST 错），调 tune_latency 会再崩一次（系统失败 → workflow_failed）。
+> 此处 early-return：emit FAIL_build JSON，agent 退 0 → decide 落账 continue。
+
+```bash
+GEN_STATUS="{{ gen_student.output.status }}"
+ROUND="{{ gen_student.output.round }}"
+STUDENT="{{ gen_student.output.student_model_path }}"
+if [ "$GEN_STATUS" = "FAIL_build" ]; then
+  python3 -c '
+import json, sys
+print(json.dumps({
+  "round": int(sys.argv[1]),
+  "student_model_path": sys.argv[2],
+  "accepted_cfg": {}, "cfg_hash": "fail_build",
+  "latency_ms": -1, "latency_ms_std": 0,
+  "accuracy": -1, "accuracy_kind": "",
+  "met_latency": False, "met_accuracy": False,
+  "ckpt": "", "tune_status": "FAIL_latency",
+  "status": "FAIL_build",
+  "fail_reason": "gen_student FAIL_build (validate_contract 3 strikes)",
+  "viz_status": {"env_status": "skipped",
+                 "charts": {"distill_loss": {"pushed": False, "reason": "FAIL_build skip"}}},
+}))
+' "$ROUND" "$STUDENT"
+  exit 0
+fi
+echo "PARSED step0: GEN_STATUS=$GEN_STATUS → 进 tune_latency"
+```
+
 ## step 1 执行：tune_latency（产 accepted_cfg + latency + met_latency）
 
-> ``--artifacts_dir`` required（N17：tune_cache.json + 临时 ONNX 落此）。
+> **整段 step 1-5 必须作为连续一条 bash 调用执行**（catch pattern 跨 step 共享变量；
+> 变量声明在 step 1，step 2-5 直接复用；任何 step 之间不应重开 bash 会话——否则 $ACCEPTED_CFG
+> / $LATENCY_MS / $CKPT_PATH 等会丢）。每个 ``## step N`` 是注释分隔，不是 bash 边界。
+>
+> ``--artifacts_dir`` required（tune_cache.json + 临时 ONNX 落此）。
 > DUMMY_INPUT 从 flatten baseline 读（与 teacher 一致；shape 跟 baseline，非写死）。
 
 ```bash
+# ─── step 1: tune_latency ─────────────────────────────────────────────────
 KD_SCRIPTS_DIR="{{ setup.output.kd_scripts_dir }}"
 KD_ARTIFACTS_DIR="{{ setup.output.kd_artifacts_dir }}"
 STUDENT="{{ gen_student.output.student_model_path }}"
@@ -75,15 +112,15 @@ TARGET_LATENCY="{{ inputs.target_latency_ms }}"
 LATENCY_PROVIDER="{{ inputs.latency_provider }}"
 
 BASELINE="{{ flatten.output.baseline_contract_path }}"
-DUMMY_JSON="$(python3 -c "
+[ -f "$BASELINE" ] || { echo "FAIL: baseline_contract 不存在：$BASELINE" >&2; exit 2; }
+DUMMY_JSON="$(python3 -c '
 import importlib.util, json, sys, os
-p='$BASELINE'; d=os.path.dirname(p)
+p=sys.argv[1]; d=os.path.dirname(p)
 if d not in sys.path: sys.path.insert(0,d)
-spec=importlib.util.spec_from_file_location('_b',p); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+spec=importlib.util.spec_from_file_location("_b",p); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 print(json.dumps(m.DUMMY_INPUT))
-")"
+' "$BASELINE")"
 
-# 串行版：gen_student status=FAIL_build 时不该进 distill（decide 应跳）；但若到了，DUMMY_JSON 仍可用（baseline 永远在）。
 TUNE_OUT="$(python3 "$KD_SCRIPTS_DIR/tune_latency.py" \
   --variant_path "$STUDENT" \
   --build_fn build_model --dummy_input "$DUMMY_JSON" \
@@ -109,44 +146,42 @@ else
   echo "FAIL: TUNE_STATUS=$TUNE_STATUS 非法（合法：ACCEPTED|FAIL_latency）" >&2
   exit 2
 fi
-CFG_HASH="$(python3 -c "import hashlib,json,sys;print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])" "$ACCEPTED_CFG")"
+CFG_HASH="$(python3 -c "import hashlib,sys;print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])" "$ACCEPTED_CFG")"
 MET_LATENCY=$(python3 -c "
 lat=float('$LATENCY_MS'.strip() or 'nan'); target=float('$TARGET_LATENCY'.strip())
 print('true' if lat <= target else 'false')
 ")
 echo "PARSED step1: TUNE_STATUS=$TUNE_STATUS ACCEPTED_CFG=$ACCEPTED_CFG LATENCY_MS=$LATENCY_MS MET_LATENCY=$MET_LATENCY"
-```
 
-## step 2 执行：FAIL_latency 分支 → emit FAIL_latency JSON，agent 退 0（跳训练省 GPU）
-
-```bash
+# ─── step 2: FAIL_latency 分支 → emit FAIL_latency JSON，agent 退 0（跳训练省 GPU）────────
 if [ "$TUNE_STATUS" = "FAIL_latency" ]; then
-  cat <<EOF
-{"round": $ROUND, "student_model_path": "$STUDENT", "accepted_cfg": $ACCEPTED_CFG,
- "cfg_hash": "$CFG_HASH", "latency_ms": $LATENCY_MS, "latency_ms_std": $LATENCY_STD,
- "accuracy": -1, "accuracy_kind": "", "met_latency": false, "met_accuracy": false,
- "ckpt": "", "tune_status": "FAIL_latency", "status": "FAIL_latency", "fail_reason": "tune_latency FAIL",
- "viz_status": {"env_status": "skipped", "charts": {"distill_loss": {"pushed": false, "reason": "FAIL_latency skip train"}}}}
-EOF
+  python3 -c '
+import json, sys
+print(json.dumps({
+  "round": int(sys.argv[1]), "student_model_path": sys.argv[2],
+  "accepted_cfg": json.loads(sys.argv[3]), "cfg_hash": sys.argv[4],
+  "latency_ms": float(sys.argv[5]), "latency_ms_std": float(sys.argv[6]),
+  "accuracy": -1, "accuracy_kind": "", "met_latency": False, "met_accuracy": False,
+  "ckpt": "", "tune_status": "FAIL_latency", "status": "FAIL_latency",
+  "fail_reason": "tune_latency FAIL",
+  "viz_status": {"env_status": "skipped",
+                 "charts": {"distill_loss": {"pushed": False, "reason": "FAIL_latency skip train"}}},
+}))
+' "$ROUND" "$STUDENT" "$ACCEPTED_CFG" "$CFG_HASH" "$LATENCY_MS" "$LATENCY_STD"
   exit 0
 fi
-echo "PARSED step2: TUNE_ACCEPTED → 进 distill 训练"
-```
 
-## step 3 执行：distill 训练（ACCEPTED 才跑；--kd_config recipe 必传 N1）
-
-> ``--kd_config`` SPEC §6.8 recipe：``{"kd_losses":["mse","ofd"],"weights":{"mse":1.0,"ofd":0.3},"ema":true}``
-> （ofd 对齐 student.feature_hook_names；无此 fn → ofd adapter 静默退化为零，但 KD 仍跑 mse）。
-> catch 协议：rc≠0 → ``status=FAIL_train, tune_status=ACCEPTED``，agent 退 0（SPEC §15）。
-
-```bash
+# ─── step 3: distill 训练（ACCEPTED 才跑；--kd_config recipe 必传）────────────────────
+# kd_config recipe（SPEC §6.8）：mse+ofd + EMA。ofd 对齐 student.feature_hook_names；
+# 无此 fn → ofd adapter 静默退化为零，但 KD 仍跑 mse。
+# catch 协议（SPEC §15）：rc≠0 → status=FAIL_train, tune_status=ACCEPTED，agent 退 0。
 TRAIN_PIPELINE="{{ gen_train_script.output.train_pipeline_path }}"
 TEACHER_CACHE="{{ train_teacher.output.teacher_cache }}"
 CKPTS_DIR="{{ setup.output.ckpts_dir }}"
 CKPT_PATH="${CKPTS_DIR}r${ROUND}_student.pt"
 KD_CONFIG='{"kd_losses":["mse","ofd"],"weights":{"mse":1.0,"ofd":0.3},"ema":true}'
+DISTILL_LOG="${KD_ARTIFACTS_DIR}r${ROUND}_distill.log"
 
-# catch pattern bash 模板（SPEC §15）：
 OUT="$(ORCA_KD_SCRIPTS_DIR="$KD_SCRIPTS_DIR" python3 "$TRAIN_PIPELINE" \
   --mode distill \
   --student_model_path "$STUDENT" \
@@ -161,29 +196,29 @@ OUT="$(ORCA_KD_SCRIPTS_DIR="$KD_SCRIPTS_DIR" python3 "$TRAIN_PIPELINE" \
   --env_anchor "{{ setup.output.per_run_artifacts_dir }}" 2>&1)"
 RC=$?
 echo "$OUT"
+# distill 训练 stdout 落盘（metrics_tail post-hoc 兜底 _make_live_push 用）
+echo "$OUT" > "$DISTILL_LOG"
 if [ $RC -ne 0 ]; then
-  # 业务失败：emit FAIL_train JSON，agent 退 0（不 workflow_failed → decide 落账 continue）
-  FAIL_REASON="$(echo "$OUT" | tail -c 300)"
-  cat <<EOF
-{"round": $ROUND, "student_model_path": "$STUDENT", "accepted_cfg": $ACCEPTED_CFG,
- "cfg_hash": "$CFG_HASH", "latency_ms": $LATENCY_MS, "latency_ms_std": $LATENCY_STD,
- "accuracy": -1, "accuracy_kind": "", "met_latency": true, "met_accuracy": false,
- "ckpt": "", "tune_status": "ACCEPTED", "status": "FAIL_train",
- "fail_reason": "rc=$RC: $FAIL_REASON",
- "viz_status": {"env_status": "skipped", "charts": {"distill_loss": {"pushed": false, "reason": "FAIL_train skip eval"}}}}
-EOF
+  FAIL_TAIL="$(echo "$OUT" | tail -c 300)"
+  python3 -c '
+import json, sys
+print(json.dumps({
+  "round": int(sys.argv[1]), "student_model_path": sys.argv[2],
+  "accepted_cfg": json.loads(sys.argv[3]), "cfg_hash": sys.argv[4],
+  "latency_ms": float(sys.argv[5]), "latency_ms_std": float(sys.argv[6]),
+  "accuracy": -1, "accuracy_kind": "", "met_latency": True, "met_accuracy": False,
+  "ckpt": "", "tune_status": "ACCEPTED", "status": "FAIL_train",
+  "fail_reason": "rc=" + sys.argv[7] + ": " + sys.argv[8],
+  "viz_status": {"env_status": "skipped",
+                 "charts": {"distill_loss": {"pushed": False, "reason": "FAIL_train skip eval"}}},
+}))
+' "$ROUND" "$STUDENT" "$ACCEPTED_CFG" "$CFG_HASH" "$LATENCY_MS" "$LATENCY_STD" "$RC" "$FAIL_TAIL"
   exit 0
 fi
 [ -f "$CKPT_PATH" ] || { echo "FAIL: distill rc=0 但 ckpt 未产：$CKPT_PATH" >&2; exit 2; }
 echo "PARSED step3: CKPT_PATH=$CKPT_PATH"
-```
 
-## step 4 执行：eval 取精度（全 flag，N18）
-
-> eval 不写 ckpt 但 argparse 仍校验 ``--out_ckpt``；指向 distill 产出的同一 ckpt（不覆盖）。
-> ``--accuracy_baseline / --accuracy_baseline_kind`` 决定 met_accuracy 方向（kd_common.accuracy_direction）。
-
-```bash
+# ─── step 4: eval 取精度（全 flag：--student_ckpt --out_ckpt --accuracy_baseline --accuracy_baseline_kind）──
 EVAL_OUT="$(python3 "$TRAIN_PIPELINE" \
   --mode eval \
   --student_model_path "$STUDENT" \
@@ -197,15 +232,20 @@ EVAL_OUT="$(python3 "$TRAIN_PIPELINE" \
 EVAL_RC=$?
 echo "$EVAL_OUT"
 if [ $EVAL_RC -ne 0 ]; then
-  FAIL_REASON="$(echo "$EVAL_OUT" | tail -c 300)"
-  cat <<EOF
-{"round": $ROUND, "student_model_path": "$STUDENT", "accepted_cfg": $ACCEPTED_CFG,
- "cfg_hash": "$CFG_HASH", "latency_ms": $LATENCY_MS, "latency_ms_std": $LATENCY_STD,
- "accuracy": -1, "accuracy_kind": "", "met_latency": true, "met_accuracy": false,
- "ckpt": "$CKPT_PATH", "tune_status": "ACCEPTED", "status": "FAIL_train",
- "fail_reason": "eval rc=$EVAL_RC: $FAIL_REASON",
- "viz_status": {"env_status": "skipped", "charts": {"distill_loss": {"pushed": false, "reason": "eval fail"}}}}
-EOF
+  EVAL_TAIL="$(echo "$EVAL_OUT" | tail -c 300)"
+  python3 -c '
+import json, sys
+print(json.dumps({
+  "round": int(sys.argv[1]), "student_model_path": sys.argv[2],
+  "accepted_cfg": json.loads(sys.argv[3]), "cfg_hash": sys.argv[4],
+  "latency_ms": float(sys.argv[5]), "latency_ms_std": float(sys.argv[6]),
+  "accuracy": -1, "accuracy_kind": "", "met_latency": True, "met_accuracy": False,
+  "ckpt": sys.argv[9], "tune_status": "ACCEPTED", "status": "FAIL_train",
+  "fail_reason": "eval rc=" + sys.argv[7] + ": " + sys.argv[8],
+  "viz_status": {"env_status": "skipped",
+                 "charts": {"distill_loss": {"pushed": False, "reason": "eval fail"}}},
+}))
+' "$ROUND" "$STUDENT" "$ACCEPTED_CFG" "$CFG_HASH" "$LATENCY_MS" "$LATENCY_STD" "$EVAL_RC" "$EVAL_TAIL" "$CKPT_PATH"
   exit 0
 fi
 ACCURACY="$(echo "$EVAL_OUT" | grep '^STUDENT_ACCURACY:' | awk '{print $2}')"
@@ -213,14 +253,11 @@ ACCURACY_KIND="$(echo "$EVAL_OUT" | grep '^STUDENT_ACCURACY_KIND:' | awk '{print
 MET_ACC="$(echo "$EVAL_OUT" | grep '^MET_ACCURACY:' | awk '{print $2}')"
 [ -n "$ACCURACY" ] || { echo "FAIL: --mode eval 未 emit STUDENT_ACCURACY（user_eval 移植异常）" >&2; exit 2; }
 echo "PARSED step4: ACCURACY=$ACCURACY KIND=$ACCURACY_KIND MET_ACC=$MET_ACC"
-```
 
-## step 5 执行：viz_kd_stage --stage distill_table + metrics_tail（distill loss line）
-
-```bash
-# distill_table：读 ledger 全 student 行（含本轮未入账前的历史）+ viz_kd_stage 派发。
-# 注：本轮 student 行尚未 append ledger（decide 节点才 append），distill_table 推的是历史 + 上轮为止；
-# 本轮实时点由 step 5 的 metrics_tail loss line + decide 下一轮 distill_table 刷新覆盖。
+# ─── step 5: viz_kd_stage --stage distill_table + metrics_tail（distill loss line）──────
+# distill_table：读 ledger 全 student 行（含本轮未入账前的历史）。本轮 student 行尚未 append ledger
+# （decide 节点才 append），distill_table 推的是历史；本轮实时点由 metrics_tail loss line 暂代，
+# decide 下一轮 distill_table 刷新覆盖。
 VIZ_STDOUT_TABLE=$(python3 "$KD_SCRIPTS_DIR/viz_kd_stage.py" \
   --stage distill_table \
   --ledger "{{ setup.output.ledger_path }}" \
@@ -228,10 +265,6 @@ VIZ_STDOUT_TABLE=$(python3 "$KD_SCRIPTS_DIR/viz_kd_stage.py" \
   --env_anchor "{{ setup.output.per_run_artifacts_dir }}" \
   || true)
 
-# metrics_tail：distill loss line（post-hoc 兜底 _make_live_push）。
-# distill 训练 stdout 在 step 3 OUT 变量里，写临时 log 给 metrics_tail 读。
-DISTILL_LOG="${KD_ARTIFACTS_DIR}r${ROUND}_distill.log"
-echo "$OUT" > "$DISTILL_LOG"  # step 3 distill 训练 stdout 落盘
 VIZ_STDOUT_LOSS=$(python3 "$KD_SCRIPTS_DIR/metrics_tail.py" \
   --template "{{ inputs.metrics_template }}" \
   --source_log "$DISTILL_LOG" \
@@ -240,38 +273,41 @@ VIZ_STDOUT_LOSS=$(python3 "$KD_SCRIPTS_DIR/metrics_tail.py" \
   --env_anchor "{{ setup.output.per_run_artifacts_dir }}" \
   || true)
 
-# 合并两个 viz_status（dumb copy + 取两边最坏 env_status + charts 合并，与 struct finalize 同款）。
-VIZ_STATUS=$(python3 -c "
+VIZ_STATUS=$(python3 -c '
 import json, sys
 a = json.loads(sys.argv[1]); b = json.loads(sys.argv[2])
-ae, be = a.get('viz_env_status', 'generic'), b.get('viz_env_status', 'generic')
-env = ae if ae != 'ok' else be
-print(json.dumps({'env_status': env, 'charts': {**a.get('charts',{}), **b.get('charts',{})}}))
-" "$VIZ_STDOUT_TABLE" "$VIZ_STDOUT_LOSS")
+ae, be = a.get("viz_env_status", "generic"), b.get("viz_env_status", "generic")
+env = ae if ae != "ok" else be
+print(json.dumps({"env_status": env, "charts": {**a.get("charts", {}), **b.get("charts", {})}}))
+' "$VIZ_STDOUT_TABLE" "$VIZ_STDOUT_LOSS")
 echo "VIZ_STATUS_JSON=$VIZ_STATUS"
+
+# ─── step 6: emit SUCCESS JSON（python json.dumps 防 injection）─────────────────────────
+python3 -c '
+import json, sys
+print(json.dumps({
+  "round": int(sys.argv[1]), "student_model_path": sys.argv[2],
+  "accepted_cfg": json.loads(sys.argv[3]), "cfg_hash": sys.argv[4],
+  "latency_ms": float(sys.argv[5]), "latency_ms_std": float(sys.argv[6]),
+  "accuracy": float(sys.argv[7]), "accuracy_kind": sys.argv[8],
+  "met_latency": sys.argv[9] == "true", "met_accuracy": sys.argv[10] == "true",
+  "ckpt": sys.argv[11], "tune_status": "ACCEPTED", "status": "SUCCESS",
+  "fail_reason": "",
+  "viz_status": json.loads(sys.argv[12]),
+}))
+' "$ROUND" "$STUDENT" "$ACCEPTED_CFG" "$CFG_HASH" "$LATENCY_MS" "$LATENCY_STD" \
+   "$ACCURACY" "$ACCURACY_KIND" "$MET_LATENCY" "$MET_ACC" "$CKPT_PATH" "$VIZ_STATUS"
 ```
 
 ## 产出 JSON（最终消息）
 
-```json
-{
-  "round": <ROUND int>,
-  "student_model_path": "<STUDENT abs>",
-  "accepted_cfg": <ACCEPTED_CFG object>,
-  "cfg_hash": "<CFG_HASH>",
-  "latency_ms": <LATENCY_MS float>,
-  "latency_ms_std": <LATENCY_STD float>,
-  "accuracy": <ACCURACY float | -1>,
-  "accuracy_kind": "<ACCURACY_KIND | 空串>",
-  "met_latency": <MET_LATENCY bool>,
-  "met_accuracy": <MET_ACC bool>,
-  "ckpt": "<CKPT_PATH | 空串>",
-  "tune_status": "ACCEPTED | FAIL_latency",
-  "status": "SUCCESS | FAIL_latency | FAIL_train",
-  "fail_reason": "<FAIL_* 时填，否则空串>",
-  "viz_status": <VIZ_STATUS_JSON 对象原样嵌入>
-}
-```
+step 0 / step 2 / step 3 (catch) / step 4 (catch) / step 6 任一早退或末尾 emit 即最终 output。
+所有 emit 走 ``python3 -c json.dumps``（防 stderr 引号 / 裸换行注入破坏 JSON）。字段：
+
+- ``round`` / ``student_model_path`` / ``accepted_cfg`` (object) / ``cfg_hash`` /
+- ``latency_ms`` / ``latency_ms_std`` / ``accuracy`` / ``accuracy_kind`` /
+- ``met_latency`` / ``met_accuracy`` / ``ckpt`` / ``tune_status`` (ACCEPTED|FAIL_latency) /
+- ``status`` (SUCCESS|FAIL_latency|FAIL_train|FAIL_build) / ``fail_reason`` / ``viz_status`` (object)。
 
 - ``latency_ms`` / ``accuracy`` 必须从 stdout KEY 真值解析（FAIL_* 时 latency 可填 best_effort / accuracy=-1）；
 - ``status`` / ``tune_status`` 严格遵守 N21 映射（SUCCESS→ACCEPTED+SUCCESS / FAIL_latency→FAIL_latency+FAIL_latency / FAIL_train→ACCEPTED+FAIL_train）；

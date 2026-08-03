@@ -322,7 +322,7 @@ nodes:
       properties:
         round: {type: integer}
         student_model_path: {type: string}
-        accepted_cfg: {type: string, description: "tune_latency 产出的 accepted cfg JSON 串（distill build_cfg 来源）"}
+        accepted_cfg: {type: object, description: "tune_latency 产出的 accepted cfg（JSON object；distill build_cfg 来源 + ledger 审计）"}
         cfg_hash: {type: string, description: "accepted_cfg sha256 前 16（ledger 去重 + audit）"}
         latency_ms: {type: number, description: "tune_latency 实测 latency 中位数（FAIL_* 时填 best_effort）"}
         latency_ms_std: {type: number, description: "latency std（重复测量）"}
@@ -332,7 +332,7 @@ nodes:
         met_accuracy: {type: boolean, description: "accuracy 达 baseline（方向按 kind）"}
         ckpt: {type: string, description: "student ckpt 路径；FAIL_* 时空串"}
         tune_status: {type: string, enum: [ACCEPTED, FAIL_latency]}
-        status: {type: string, enum: [SUCCESS, FAIL_latency, FAIL_train], description: "N21 映射：SUCCESS↔ACCEPTED / FAIL_latency↔FAIL_latency / FAIL_train↔ACCEPTED"}
+        status: {type: string, enum: [SUCCESS, FAIL_latency, FAIL_train, FAIL_build], description: "N21 映射：SUCCESS↔ACCEPTED / FAIL_latency↔FAIL_latency / FAIL_train↔ACCEPTED / FAIL_build=gen_student FAIL_build 早退（catch 协议）"}
         fail_reason: {type: string, description: "FAIL_* 时填 rc + stderr 尾 300 字"}
         viz_status:
           type: object

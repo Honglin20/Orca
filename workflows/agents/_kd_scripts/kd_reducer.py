@@ -91,7 +91,7 @@ _LEDGER_REQUIRED = (
 # champions.jsonl 每行必备字段（id==variant_id；snapshot==student_path）。
 _CHAMPIONS_REQUIRED = ("round", "id", "latency_ms", "accuracy", "delta_vs_baseline_ms", "snapshot")
 
-# status 合法值（KD 串行版）。
+# status 合法值（KD 串行版）。FAIL_build = gen_student validate_contract 3-strike（catch 协议）。
 _LEDGER_STATUS = {"SUCCESS", "FAIL_latency", "FAIL_train", "FAIL_build"}
 
 

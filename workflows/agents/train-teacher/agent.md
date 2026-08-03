@@ -90,13 +90,15 @@ assert lr and float(lr) >= 0, f'teacher_default_lr 缺失/无效：{lr!r}（gen_
 assert ep and int(ep) > 0, f'teacher_default_epochs 缺失/无效：{ep!r}（gen_train_script 应已 fail loud）'
 "
 # DUMMY_INPUT 从 baseline 契约读（与 teacher wrapper 一致；不硬编码 shape）
-TEACHER_DUMMY="$(python3 -c "
+BASELINE="{{ flatten.output.baseline_contract_path }}"
+[ -f "$BASELINE" ] || { echo "FAIL: baseline_contract 不存在：$BASELINE" >&2; exit 2; }
+TEACHER_DUMMY="$(python3 -c '
 import importlib.util, json, sys, os
-p='$BASELINE'; d=os.path.dirname(p)
+p=sys.argv[1]; d=os.path.dirname(p)
 if d not in sys.path: sys.path.insert(0,d)
-spec=importlib.util.spec_from_file_location('_bd',p); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+spec=importlib.util.spec_from_file_location("_bd",p); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 print(json.dumps(m.DUMMY_INPUT))
-" BASELINE="{{ flatten.output.baseline_contract_path }}")"
+' "$BASELINE")"
 
 if [ "$NEED_TRAIN" = "1" ]; then
   # 2a) train_pipeline.py --mode teacher（用户默认 lr/epochs + --out_ckpt + --env_anchor）

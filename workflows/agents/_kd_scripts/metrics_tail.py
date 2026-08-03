@@ -64,11 +64,14 @@ if str(_HERE) not in sys.path:
 _LABEL = "kd-nas"
 _orca_render_chart: Callable | None = None
 
-# train_pipeline.py run_teacher_mode / run_distill_mode 的 stdout 行：
-#   [train_pipeline:teacher] epoch=0 loss_avg=0.123456
-#   [train_pipeline:distill] epoch=0 kd_loss_avg=0.654321
+# 锚定 train_pipeline stdout 行前缀（防误匹配用户 log 里偶发的 epoch=X loss=Y 行）。
+# 契约：train_pipeline run_teacher_mode / run_distill_mode 末尾 print
+#   "[train_pipeline:teacher] epoch=0 loss_avg=0.123456"
+#   "[train_pipeline:distill] epoch=0 kd_loss_avg=0.654321"
+# 改前缀 / 字段名 → 此处同步，否则 metrics_tail 静默 0 match + WARN。
 _LOSS_LINE_RE = re.compile(
-    r"epoch=(?P<epoch>\d+)\s+(?P<key>loss_avg|kd_loss_avg)=(?P<val>[0-9.eE+-]+)"
+    r"\[train_pipeline:(?P<mode>teacher|distill)\]\s+epoch=(?P<epoch>\d+)\s+"
+    r"(?P<key>loss_avg|kd_loss_avg)=(?P<val>[0-9.eE+-]+)"
 )
 
 
