@@ -11,8 +11,9 @@ eval 模式只读评测——从用户仓 eval 脚本移植指标，emit STUDENT
 
 ## 唯一职责
 
-**生成** `train_pipeline.py` + 必要 helper 文件（自包含搬用户 loss/dataloader/optimizer，
-按路径 import 模型），不改 KD 库（`kd.compose` / `kd.wrapper` / `kd.ema` 只读消费）。
+**生成** `train_pipeline.py` + 必要 helper 文件（**实例化骨架模板并特化搬入**用户
+loss/dataloader/optimizer/scheduler/eval 指标，按路径 import 模型），不改 KD 库
+（`kd.compose` / `kd.wrapper` / `kd.ema` 只读消费）。
 
 ## 资源锚点（cwd 无关）
 
@@ -30,10 +31,11 @@ workflow 节点经 Jinja 渲染注入（flatten + teacher-gen 上游 output + in
 
 - baseline 契约路径: `{{ flatten.output.baseline_contract_path }}`（flatten 产出的 `.py`，含 build_model + DUMMY_INPUT + KNOBS；读它对齐 student 模型契约 I/O）
 - teacher 模型路径: `{{ gen_teacher.output.teacher_model_path }}`（teacher-gen 派生的 teacher wrapper .py；teacher 模式 smoke + 契约参考用）
-- 用户 train.py: `{{ inputs.user_train_script }}`（用户原 train.py 绝对路径，含 `compute_loss` + `build_dataloader`；生成时搬其 loss/dataloader/optimizer 进 train_pipeline.py，自包含拷贝不 import 用户项目）
+- 用户 train.py: `{{ inputs.user_train_script }}`（用户原 train.py 绝对路径，含任务 loss + 数据加载 + 可选 optimizer/scheduler；生成时**逐字搬入**其逻辑进 train_pipeline.py，自包含拷贝不 import 用户项目）
 - 设备: `{{ inputs.device }}`（advanced，默认 auto；smoke 校验用）
 - latency_provider: `{{ inputs.latency_provider }}`（用户真硬件 latency 脚本 `path::func`；teacher smoke __main__ latency 用）
-- 引擎注入 `$ORCA_ARTIFACTS_DIR`（per-run 权威产物目录；train_pipeline.py 落盘到此目录）+ `$ORCA_AGENT_RESOURCES`（本 agent 资源目录，SKILL.md / references 所在）。
+- 引擎注入 `$ORCA_ARTIFACTS_DIR`（per-run 权威产物目录）+ `$ORCA_AGENT_RESOURCES`（本 agent 资源目录，SKILL.md / references 所在）。
+- scripts_dir: `{{ setup.output.scripts_dir }}`（项目 artifacts 持久目录，train_pipeline.py 落此跨 run 复用）。
 
 ## 准备工作
 
@@ -46,10 +48,10 @@ workflow 节点经 Jinja 渲染注入（flatten + teacher-gen 上游 output + in
    # KD_SCRIPTS_DIR：从仓库结构找 _kd_scripts（kd.compose/wrapper/ema 所在；生成物 runtime 需在 sys.path）
    KD_SCRIPTS_DIR="$(dirname "$(find workflows/agents/_kd_scripts -name kd_common.py -print -quit)")"
    KD_SCRIPTS_DIR="$(python3 -c "import os,sys;print(os.path.abspath(sys.argv[1]))" "$KD_SCRIPTS_DIR")"
-   # OUTPUT_DIR：优先 $ORCA_ARTIFACTS_DIR（per-run），缺则 fallback llm_artifacts/kd_train_script/
-   OUTPUT_DIR="${ORCA_ARTIFACTS_DIR:-$(python3 -c 'import os;print(os.path.abspath("llm_artifacts/kd_train_script"))')}"
+   # OUTPUT_DIR：项目 artifacts 持久目录（跨 run 复用 train_pipeline.py）
+   OUTPUT_DIR="{{ setup.output.scripts_dir }}"
    mkdir -p "$OUTPUT_DIR"
-   # USER_TRAIN_SCRIPT / TEACHER_MODEL_PATH / BASELINEContract 经 Jinja 渲染后是绝对路径串
+   # USER_TRAIN_SCRIPT / TEACHER_MODEL_PATH / BASELINE_CONTRACT 经 Jinja 渲染后是绝对路径串
    echo "PARSED: KD_SCRIPTS_DIR=$KD_SCRIPTS_DIR OUTPUT_DIR=$OUTPUT_DIR"
    ```
 
@@ -59,32 +61,54 @@ workflow 节点经 Jinja 渲染注入（flatten + teacher-gen 上游 output + in
 `$ORCA_AGENT_RESOURCES`，`<output_dir>` = 上面 OUTPUT_DIR，`<kd_scripts_dir>` = 上面 KD_SCRIPTS_DIR，
 `<baseline_contract_path>` = `{{ flatten.output.baseline_contract_path }}`，
 `<teacher_model_path>` = `{{ gen_teacher.output.teacher_model_path }}`，
-`<user_train_import>` = `{{ inputs.user_train_script }}`）。按其中 3 步执行：
+`<user_train_script>` = `{{ inputs.user_train_script }}`）。按其中步骤执行：
 
-**Step 1 — Load Context**：读用户 `train.py`（`{{ inputs.user_train_script }}`）+ teacher 模型契约
-（`{{ gen_teacher.output.teacher_model_path }}`）+ student 模型契约（`{{ flatten.output.baseline_contract_path }}`）+
-KD 库 surface（`kd/compose.py` / `kd/wrapper.py` / `kd/ema.py` 只读） +
-参考模板 `$ORCA_AGENT_RESOURCES/references/templates/train_pipeline.py`。
-**并发现+读用户仓的 eval 脚本**（glob `<user_project_root>` 的 `test_*.py`/`eval*.py`/`evaluate*.py`/`test.py`，或 `train.py` 内的 eval/metric 函数）——
-移植其指标计算（NMSE/MSE/BER/SNR/acc）+ eval 数据加载进 `--mode eval` 的 `(student, device) -> (value, kind)` callable（workflow §3.1）。找不到 → fail loud。
+**Step 1 — Load Context**：读用户 `train.py`（`{{ inputs.user_train_script }}`）——
+**按语义识别任务 loss**（不限于函数名 `compute_loss`：接收 `(output, target)` 返回标量
+loss 的函数即候选）+ 数据加载逻辑（`build_dataloader` 或训练循环里的 dataset/loader
+构造）+ optimizer / scheduler（存在则必须搬入）。**并发现+读用户仓的 eval 脚本**
+（glob `<user_project_root>` 的 `test_*.py`/`eval*.py`/`evaluate*.py`/`test.py`，或
+`train.py` 内的 eval/metric 函数）——移植其指标计算（NMSE/MSE/BER/SNR/acc）+ eval 数据
+加载进 `user_eval_metric`（workflow §3.1）。**找不到 → fail loud**。再读 teacher 模型契约
+（`{{ gen_teacher.output.teacher_model_path }}`）+ student 模型契约
+（`{{ flatten.output.baseline_contract_path }}`）+ KD 库 surface（`kd/compose.py` /
+`kd/wrapper.py` / `kd/ema.py` 只读）+ 骨架模板
+`$ORCA_AGENT_RESOURCES/references/templates/train_pipeline.py`。
 
-**Step 2 — Generate**：读
+**Step 2 — Generate**（特化生成，非填空）：读
 `$ORCA_AGENT_RESOURCES/references/workflows/train_pipeline_script_generation.md`，
-按规则把参考模板特化为项目特定 `train_pipeline.py`：
-- 拷贝模板到 `$OUTPUT_DIR/train_pipeline.py`
-- 搬用户 loss / dataloader / optimizer / scheduler（自包含，绝不 import
-  用户项目模块）
-- 按 §7 选 KD 项（保守默认：纯 task_loss）
-- 校验 CLI 一致性（`--help` + 与 workflow §1 stable base CLI 对齐）
+**实例化骨架并特化搬入**到 `$OUTPUT_DIR/train_pipeline.py`：
+- 拷贝骨架模板到 `$OUTPUT_DIR/train_pipeline.py`；
+- **逐字搬入** 5 个固定 slot：`user_compute_loss`（用户 loss 函数体原样，同 ops 同
+  reduction）、`user_build_dataloader`（保 re-iterable；one-shot generator 包
+  re-iterable 适配器）、`user_eval_metric`（指标公式 + eval 数据加载自包含搬入）、
+  `build_user_optimizer` / `build_user_scheduler`（用户有才搬，无则返回 None）——
+  **搬入 = 函数体 + 其引用的模块级依赖闭包一并拷贝**（常量 / helper / 类）；
+  拷贝后仍依赖用户项目符号 → **fail loud**（不许运行时加载用户模块兜底）；
+- 按 §7 选 KD 项（保守默认：纯 task_loss）+ 更新 `--kd_config` 默认；
+- 校验 CLI 一致性（`--help` + 与 workflow §1 stable base CLI 对齐，**已无
+  `--user_*` 覆盖 flag**）。
 
-**Step 3 — Validate**（3 层）：
-1. 静态：`py_compile` + `--help` + CLI 一致性
-2. 功能 smoke（小预算 CPU）：teacher 模式必跑（`--user_train_import {{ inputs.user_train_script }}`）；
-   distill 模式在 train-script-gen 阶段**无 teacher_cache**（teacher_cache 由 train_teacher 后续产）→ 标 `Skipped`
-3. **workflow-verifier 子 agent（必跑，绝不跳过）**：用 SKILL.md 的 prompt 模板**真 spawn**
-   workflow-verifier（不许叙述假 pass），喂给它 checklist item 7（optimizer 忠实移植）、
-   20（shape 读 DUMMY_INPUT 禁硬编码）、20b（teacher/student I/O == baseline DUMMY_INPUT）
-   作优先项。verifier `unresolved` → 不许输出 JSON（跳过 verifier = 生成失败）。
+**Step 3 — Validate**（四层，见 workflow Validation 节）：
+1. 静态 + 无残留（Layer 1）：`py_compile` + `--help` + CLI 一致性 + **AST 扫描
+   零占位符残留**（双花括号字面量 / `_placeholder_*` / `USER_TRAIN_MODULE` /
+   `_load_user_train` / `_load_user_eval` / 4 个 `--user_*` flag 不得出现）
+2. 功能 smoke（Layer 2，小预算 CPU，**不传任何覆盖 flag**——脚本必须自带搬入逻辑才能跑）：
+   teacher 模式必跑（未特化 slot → NotImplementedError 直接崩 = fail loud 守门）；
+   distill 模式用 `kd.wrapper.TeacherCache.build` 构造**测试 cache**（未训练 teacher
+   state dict，in-repo 先例 `tests/workflows/test_kd_train_script.py`）跑通；若构造
+   不可得 → 显式标 Skipped（**不许** placeholder 降级）；eval 模式用 teacher smoke ckpt
+   当 student ckpt 跑真 `user_eval_metric` → STUDENT_ACCURACY 协议
+3. **fidelity_check.py（Layer 3，必跑）**：`scripts/fidelity_check.py
+   --train_pipeline ... --user_train {{ inputs.user_train_script }} --user_eval <发现到的
+   eval 脚本> --dummy_input <baseline DUMMY_INPUT> --model_path ...` → 数值级等价性
+   （loss / loader / eval / optimizer / model I/O），`FIDELITY: PASS` 才继续
+4. **workflow-verifier 子 agent（Layer 4，必跑，绝不跳过）**：用 SKILL.md 的 prompt
+   模板**真 spawn** workflow-verifier（不许叙述假 pass），喂给它 checklist C21-C24
+   （零占位符残留 / loss 逐字 / eval 逐字 / fidelity 证据）+ item 7（optimizer 忠实
+   移植）+ 20（shape 读 DUMMY_INPUT 禁硬编码）+ 20b（teacher/student I/O == baseline
+   DUMMY_INPUT）作优先项。verifier `unresolved` → 不许输出 JSON（跳过 verifier =
+   生成失败）。
 
 **Step 4 — 提取 teacher 默认 lr/epochs（SPEC §6.4 M1，串行版必跑）**：
 smoke PASS 后，从 `{{ inputs.user_train_script }}` grep 用户**默认 lr/epochs**（teacher 用用户默认而非硬编码 1/2）：
@@ -139,14 +163,18 @@ print(f'TEACHER_DEFAULT_EPOCHS: {int(ep_match)}')
 ```
 
 提取不到 → **fail loud**（非 WARN——SPEC-REVIEW M1：用户 teacher 可能因 lr 错不收敛，违步骤3）；
-不靠 train_pipeline 模板的 argparse default=1e-3/3 兜底（那是 placeholder，非用户真值）。
+不靠 train_pipeline 模板的 argparse default=1e-3/3 兜底（那是占位，非用户真值）。
 
 ## 红线（违反即架构问题）
 
 - ❌ 引入 DDP / torchrun / sandwich 采样 / `set_sample_config`
 - ❌ 用 `nas_agent.train.distillation` —— 只能用 `kd.compose` /
   `kd.wrapper` / `kd.ema`
-- ❌ 生成脚本 `import` 用户项目模块（必须自包含拷贝逻辑）
+- ❌ 生成脚本 `import` 用户项目模块（必须自包含拷贝逻辑；拷贝后仍依赖用户项目符号 →
+  **fail loud**，不许运行时加载用户模块兜底）
+- ❌ **零占位符残留**：产物不得含双花括号字面量 / `_placeholder_*` / `USER_TRAIN_MODULE` /
+  `USER_EVAL_MODULE` / `_load_user_train` / `_load_user_eval` / 4 个 `--user_*` flag
+  （骨架 slot 未填 → NotImplementedError fail loud，**不是**静默 dummy fallback）
 - ❌ 硬编码 shape 回退（必须读用户 `DUMMY_INPUT`）
 - ❌ 静默吞错（fail loud：CLI 不符、契约违约直接非零退出 + stderr 报因）
 - ❌ 改 KD 库（只读消费）

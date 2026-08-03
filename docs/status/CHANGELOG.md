@@ -5,6 +5,25 @@
 
 ---
 
+## [2026-08-03] refactor(kd-train-script): 模板占位符 → 基于用户代码强制特化生成
+
+kd-train-script 生成策略重写：**根除「拷贝模板 + 填 `{{...}}` 占位符」模式**（用户指出远程产物残留占位符、
+loss/eval 指标与用户原逻辑不符）。对齐 NAS-AGENT-PIPLINE 的「读用户代码 → 特化生成」设计：
+骨架模板（协议机械：CLI/三 mode/ckpt schema/stdout 协议/live push/fail-loud）保留，
+**删除** 4 个占位符常量 / `_placeholder_*` dummy fallback / `_load_user_*` 运行时 importlib 注入 /
+4 个 `--user_*` 覆盖 flag；新增 5 个固定 slot（user_compute_loss / user_build_dataloader /
+user_eval_metric / build_user_optimizer / build_user_scheduler），未填 = NotImplementedError fail loud
+（非静默 dummy）。**校验升级为四层**：静态无残留 AST 扫描 → 三模式 smoke（无覆盖 flag，脚本必须自带搬入逻辑才能跑）
+→ 新写 `fidelity_check.py`（数值级等价性：同种子同输入下用户 loss/eval 函数 vs 搬入版 torch.allclose）→
+workflow-verifier 交叉核对（C21-C24 无残留/loss 逐字/eval 逐字/fidelity 证据 + C5/C17/C20 清理）。
+train-script-verify 升级（替换会 vacuous pass 的旧 substring 检查 → 5 接口 grep + fidelity 复核）。
+设计草稿 `docs/specs/kd-train-script-rework-design-draft.md` 经独立 review agent 比对闭环
+（PASS with conditions → 5 MAJOR + 7 MINOR 全并入）；实现经 code-review 两轮闭环（1 CRITICAL frontmatter
+YAML + 3 MINOR 修复；3 个过时测试补 obsolete skip）。全量回归 **240 passed, 14 skipped, 0 failed**。
+未 commit（待用户确认）。
+
+---
+
 ## [2026-08-03] feat(kd-nas): 串行迭代重写（替代批量并发，SPEC v3）
 
 把 `kd-nas` 从批量并发（gate_all → train_pool → select）重写为**串行迭代 KD 蒸馏**（10 节点 DAG：

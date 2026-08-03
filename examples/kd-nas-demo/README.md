@@ -54,7 +54,7 @@ I/O 契约与真实 model8 完全一致（`[B,4,48,64,1]` + alpha 功率归一 +
 |---|---|---|
 | `baseline_model.py` | `inputs.baseline_model_path` | 4 层 t1 transformer 契约文件。flatten 展平成 KD 契约 + `__main__` 实测 `baseline_latency_ms`（setup 透传作参考线）；gpu_probe 作 representative_variant |
 | `train_teacher.py` | （v4 退役·历史参考） | 仓库 `teacher_model.py`（10 层 t1/t2 交替）的独立训练脚本。**不再是 workflow 入口**——v4 起 teacher 训练由 train-script-gen 产出的 `train_pipeline.py --mode teacher` 驱动（setup step5 调） |
-| `train.py` | `inputs.user_train_script`（train-script-gen 读） | 暴露 `compute_loss`(MSE) + `build_dataloader`(随机 batch)；train-script-gen 自包含搬其 loss/dataloader/optimizer 进 `train_pipeline.py`，**消除 user_train_import 哨兵非确定性** |
+| `train.py` | `inputs.user_train_script`（train-script-gen 读） | 暴露 `compute_loss`(MSE) + `build_dataloader`(随机 batch)；train-script-gen 实例化骨架模板并**逐字搬入**其 loss/dataloader/optimizer 进 `train_pipeline.py`（零占位符产物，无 `user_train_import` 运行时注入） |
 | `test_student.py` | kd-train-script 自动发现（取代旧 `inputs.test_command`） | 读 `STUDENT_CKPT`/`STUDENT_MODEL_PATH` env，import 变体 + load ckpt，随机数据算真实 NMSE，打印契约 stdout；指标被移植进 train_pipeline `--mode eval` |
 | `latency_provider.py` | `inputs.latency_provider`（`<abs>::measure`） | onnxruntime 实跑 ONNX 取中位数时延（ms），签名 `measure(onnx, runs, warmup, device, seed)` |
 | `test_smoke.py` | （守护） | 机器化契约 smoke（pytest）：8 变体 + baseline 的 I/O 契约 + hook 数 + 前向 shape |
@@ -187,15 +187,14 @@ python3 workflows/agents/_kd_scripts/tune_latency.py \
   --artifacts_dir /tmp/kd_demo/tune_test --device cpu --max_measurements 5 --measure_repeats 2
 # 期望: TUNE_STATUS: ACCEPTED + ACCEPTED_CFG + LATENCY_MS_MEDIAN
 
-# B4. train 核心：train_adapter KD 蒸馏（train_pool 硬编码 OFD+EMA kd_config；用 demo train.py）
+# B4. train 核心：train_adapter KD 蒸馏（train_pool 硬编码 OFD+EMA kd_config；deprecated 模板脚本级自验）
 python3 workflows/agents/_kd_scripts/train_adapter_template.py \
   --student_cfg '{"num_blocks":2,"embed_dim":8}' \
   --kd_config '{"kd_losses":["mse","ofd"],"weights":{"mse":1.0,"ofd":0.3},"ema":true}' \
   --teacher_cache /tmp/kd_demo/teacher_setup_out/teacher_cache.pt \
   --student_model_path "$REPO/examples/kd-nas-demo/knowledge_base/families/receiver/demo_tiny_tf.py" \
   --build_fn build_model --variant_id demo_tiny_tf --epochs 1 \
-  --out_ckpt /tmp/kd_demo/demo_tiny_tf.pt --device cpu --seed 0 \
-  --user_train_import "$REPO/examples/kd-nas-demo/train.py" --user_loss_fn compute_loss
+  --out_ckpt /tmp/kd_demo/demo_tiny_tf.pt --device cpu --seed 0
 # 期望: STUDENT_CKPT / KD_LOSS_FINAL / KD_PROXY_MSE 三行齐全，exit 0（render_chart WARN 是设计内非阻断）
 
 # B5. setup step8：gpu_probe（device=cpu → fail-soft concurrency=1）
@@ -219,9 +218,10 @@ python3 workflows/agents/_kd_scripts/measure_student.py \
 # 期望: STUDENT_LATENCY_MS / STUDENT_ACCURACY / MET_ACCURACY: true / ACCURACY_CONFIDENCE: high
 ```
 
-> B4 的 `--user_train_import train.py` 是 `train_adapter_template.py` 的 CLI 参数（脚本级自验用），
-> 对应 v4 workflow 里 train-script-gen 从 `inputs.user_train_script` 自包含搬移 `compute_loss` 的等价手跑。
-> 若该参数空串，train_adapter 的 placeholder 回退（MSE + 随机 batch）也已验通，KD 同样能跑（见设计决策 5）。
+> B4 手跑的是已退役的 `train_adapter_template.py`（脚本级自验参考，走其自身历史 placeholder
+> 回退 MSE + 随机 batch）。**真实用户 loss 搬入由 `train_pipeline.py` 生成流程承担**：kd-train-script
+> 实例化骨架模板 + 逐字搬入 `inputs.user_train_script` 的 `compute_loss` / `build_dataloader`
+> （零占位符产物，无 `--user_train_import` 注入——该 flag 已随占位符体系删除）。
 
 ## 设计决策
 
@@ -235,9 +235,11 @@ python3 workflows/agents/_kd_scripts/measure_student.py \
 4. **`accuracy_baseline=1.5`（宽松）**：随机数据 NMSE 无物理意义，宽松阈值让 workflow 跑出 SUCCESS。
    这是**阈值宽松**，非测量造假——NMSE 永远真实计算。真实数据集场景应换成业务 KPI（如 0.02）。
 5. **demo `train.py`（消除 `user_train_script` 非确定性）**：train-script-gen 读 `inputs.user_train_script`
-   自包含搬移 loss/dataloader/optimizer。demo 显式提供 `train.py`（`compute_loss` + `build_dataloader`），
-   让 train-script-gen 确定性地搬出真实 loss（而非 placeholder 回退）。即便搬空，train_pipeline 的
-   placeholder 回退（MSE + 随机 batch）也已验通（B4 路径双兼容）。
+   实例化骨架模板并逐字搬移 loss/dataloader/optimizer（5 个固定 `user_*` slot）。demo 显式提供
+   `train.py`（`compute_loss` + `build_dataloader`），让 train-script-gen 确定性地搬出真实 loss。
+   **train_pipeline 是骨架特化产物**：slot 未搬入即 NotImplementedError fail loud（无 placeholder
+   回退）；B4 路径（`train_adapter_template.py` 的历史 placeholder 回退）仅作脚本级自验参考，
+   非 train_pipeline 行为。
 6. **KNOBS `num_blocks.min=2`**：保 `feature_hook_names` 两 hook 落在 distinct block（main.0/main.1），
    避免 num_blocks=1 时 hook 重复致 KD OFD 特征对齐退化。tune_latency 不缩到 1 块。
 7. **teacher 训练不求收敛**：随机数据 + 1 epoch，teacher 只作 KD 软标签源（精度基线用户另给）。

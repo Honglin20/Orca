@@ -7,7 +7,7 @@
     → fail loud 非零
   - ``ThreadPoolExecutor(max_workers=concurrency)``，device_plan round-robin 绑卡
     （传 ``--device cuda:i`` 给 train_pipeline.py --mode distill）
-  - 每 worker：``train_pipeline.py --mode distill``（train-script-gen 产物，统一脚本）+ ``measure_student.py --skip_latency``（复用 gate 的干净 latency）
+  - 每 worker：``train_pipeline.py --mode distill``（train-script-gen 产物，统一脚本）+ ``train_pipeline.py --mode eval``（复用 gate 的干净 latency，精度走 train_pipeline 内联的用户 eval 指标）
   - 增量账本：``as_completed`` 主线程（已持 ``orca.lock``）逐行 ``write+flush``；单 worker 失败
     try/except → FAIL_train 行，**不杀整批**
   - 末尾 ``viz_kd.py`` 推 sweep 散点
@@ -186,6 +186,7 @@ def _train_one(ctx: dict[str, Any], entry: dict[str, Any], device: str) -> dict[
         sys.executable, ctx["train_pipeline_path"],
         "--mode", "eval",
         "--student_model_path", variant_path, "--student_ckpt", ckpt,
+        "--out_ckpt", ckpt,
         "--build_fn", build_fn, "--build_cfg", cfg_str,
         "--accuracy_baseline", str(ctx["accuracy_baseline"]),
         "--accuracy_baseline_kind", ctx["accuracy_baseline_kind"],

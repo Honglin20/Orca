@@ -19,7 +19,7 @@ workflows/
       scripts/measure_latency.py           # 契约默认 cfg latency 测量（自包含；__main__ + flatten agent 复用）
     teacher-gen/                           # 【v4 嵌入】纯调参派生 teacher（深度×3/宽度×2，wrapper 委托 baseline）
       agent.md / SKILL.md / scripts/{validate_teacher,measure_latency}.py
-    kd-train-script/                       # 【v4 嵌入】生成统一 train_pipeline.py（teacher+distill 两模式，自包含）
+    kd-train-script/                       # 【v4 嵌入】生成统一 train_pipeline.py（teacher+distill+eval 三模式，自包含）
       agent.md / SKILL.md / references/{templates/train_pipeline.py, workflows/, workflow-checklists/}
     kd-setup/agent.md                      # 幂等：teacher 训（train_pipeline --mode teacher）+ teacher_setup + 预检 + GPU 预检
     kd-gate/agent.md                       # 串行 latency gate（一个节点遍历全部变体）
@@ -55,6 +55,13 @@ kd-nas-artifacts/                          # 跨 run 稳定 artifact 根（teach
 > （不再自测）；``train_pool`` worker 改调 ``train_pipeline.py --mode distill``；
 > ``train_adapter_template.py`` 退役到 ``_deprecated/``。input ``teacher_train_command`` 改名
 > ``user_train_script``（用户原 train.py 路径，给 train-script-gen 读）。
+>
+> **v4 用户契约强化**（kd-train-script 骨架特化重写，2026-08-03）：用户 train.py 的 loss 按语义识别
+> （不限于函数名 ``compute_loss``）；**有 optimizer/scheduler 时必须由 train-script-gen 逐字搬入**
+> （``build_user_optimizer`` / ``build_user_scheduler``，存在才搬）；**``build_dataloader`` 缺失 → 从训练循环
+> 找等价数据加载逻辑搬入，找不到 fail loud**（删除「lenient on loader」静默降级语义）；
+> eval 指标从用户仓 eval 脚本逐字搬入 ``user_eval_metric``（无 dummy 降级，找不到 fail loud）。
+> 生成 = 实例化骨架 + 特化搬入，产物零占位符；``train_pipeline.py`` CLI 删除 4 个 ``--user_*`` 覆盖 flag。
 
 ## 1. 变体 I/O 契约（每个 receiver/*.py 必须暴露）
 
@@ -111,7 +118,7 @@ def feature_hook_names(self) -> list[str]: ...                 # 可选，OFD/Fi
   **fail loud**：ledger 空/坏 / kind 未知方向 → exit 2 + 报告标注失败（不假装选完）；**无达标 student** → exit 0 + 报告标「无 student 达标」+ ``N_SELECTED: 0`` + ``BEST_VARIANT:`` 空串（**绝不**伪造选出）。
 - **viz_kd.py**（train_pool 末尾 sidecar 调用）：`--ledger [--baseline_latency_ms] [--target_latency_ms] [--variants_total] [--accuracy_baseline] [--accuracy_baseline_kind] [--env_anchor]`。
   推 6 图：sweep scatter / ledger table / latency bar / **progress（status 计数 + n_done/n_total）** / **pareto（latency×accuracy，方向按 kind）** / **accuracy_compare（各变体 accuracy + baseline 参考线）**。指标方向经 ``kd_common.accuracy_direction`` 标轴（y_label/caption 注「越低/越高越好」），未知 kind 大声标「方向未知」**不 auto 猜**。
-- **train_pipeline.py**【train-script-gen 产物；setup step5 调 --mode teacher + train_pool worker 调 --mode distill/eval】：`--mode teacher|distill|eval --out_ckpt [--model_path（teacher）] [--student_model_path（distill/eval）] [--teacher_cache（distill）] [--student_ckpt（eval）] [--build_fn] [--build_cfg] [--kd_config（distill）] [--user_train_import] [--user_loss_fn] [--user_eval_import（eval）] [--user_eval_fn（eval）] [--accuracy_baseline（eval）] [--accuracy_baseline_kind（eval）] [--epochs] [--lr] [--batch_size] [--device] [--seed] [--variant_id] [--project_root] [--env_anchor]`
+- **train_pipeline.py**【train-script-gen 产物；setup step5 调 --mode teacher + train_pool worker 调 --mode distill/eval】：`--mode teacher|distill|eval --out_ckpt [--model_path（teacher）] [--student_model_path（distill/eval）] [--teacher_cache（distill）] [--student_ckpt（eval）] [--build_fn] [--build_cfg] [--kd_config（distill）] [--accuracy_baseline（eval）] [--accuracy_baseline_kind（eval）] [--epochs] [--lr] [--batch_size] [--device] [--seed] [--variant_id] [--project_root] [--env_anchor]`（**无 `--user_train_import` / `--user_loss_fn` / `--user_eval_import` / `--user_eval_fn`**——用户逻辑生成时自包含搬入，无运行时注入）
   → teacher 模式：`TEACHER_CKPT` + `TASK_LOSS_FINAL`；distill 模式：`STUDENT_CKPT` + `KD_LOSS_FINAL` + `KD_PROXY_MSE`（每-epoch render_chart 推 loss 图）；**eval 模式：`STUDENT_ACCURACY` + `STUDENT_ACCURACY_KIND` + `MET_ACCURACY` + `ACCURACY_CONFIDENCE`（只读，不写 ckpt，取代 measure_student 精度路径）**。
   ckpt schema（teacher）：`{state_dict, build_cfg, variant_id, epochs, final_loss, mode}`；（distill）：`{student_state_dict, variant_id, student_cfg, kd_config, epochs, proxy_mse, mode}`；（eval）：**不写 ckpt**（只读评测）。
   runtime 需 `ORCA_KD_SCRIPTS_DIR` env 指向 `_kd_scripts/`（import kd.compose/wrapper/ema）；模板见 `kd-train-script/references/templates/train_pipeline.py`。
@@ -120,7 +127,7 @@ def feature_hook_names(self) -> list[str]: ...                 # 可选，OFD/Fi
 - **teacher_setup.py**：`--teacher_model_path --teacher_ckpt --build_fn --dummy_input [--eval_command] --output_dir [--latency_provider] [--teacher_latency_ms] [--device] [--seed]`
   → `TEACHER_LATENCY_MS` + `TEACHER_ACCURACY` + `TEACHER_ACCURACY_KNOWN` + `TEACHER_DB_BASELINE` + `TEACHER_ONNX` + `TEACHER_CACHE` + `TEACHER_META`（meta 含 `teacher_model_hash` + `teacher_ckpt_sha256`）。
   latency 来源优先级：`--teacher_latency_ms`（teacher-gen.output 透传，避免重复测量）> `--latency_provider`（自测 ONNX）；两者皆空 → fail loud。
-- **train_adapter_template.py**【v4 退役，移到 `_deprecated/`】：原 train_pool worker 调的蒸馏训练脚本，被 `train_pipeline.py`（teacher+distill 两模式）取代。保留作历史参考，**active path 不再引用**。
+- **train_adapter_template.py**【v4 退役，移到 `_deprecated/`】：原 train_pool worker 调的蒸馏训练脚本，被 `train_pipeline.py`（teacher+distill+eval 三模式）取代。保留作历史参考，**active path 不再引用**。
 - **export_onnx.py**（共享）：新增 `--build_cfg`（透传 build_kwargs）+ `build_kwargs: dict|None` 参（向后兼容）。
 
 ## 4. 节点 I/O

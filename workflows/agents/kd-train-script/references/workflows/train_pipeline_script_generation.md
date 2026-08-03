@@ -3,7 +3,16 @@
 Use this workflow to generate `<output_dir>/train_pipeline.py` — the unified
 KD-NAS training entry point supporting **teacher**, **distill**, and **eval**
 modes behind one CLI. The script is self-contained: user project code is
-**copied in**, never imported.
+**ported in verbatim**, never imported at runtime.
+
+**Generation strategy: specialise a skeleton, not fill placeholders.** The
+reference template
+(`<skill_dir>/references/templates/train_pipeline.py`) is a **skeleton** — a
+non-runnable intermediate whose five fixed user-interface slots raise
+`NotImplementedError`. You copy it to `<output_dir>/train_pipeline.py` and
+port the user's own code into those slots. The generated artifact is
+project-specific code: zero placeholder strings, zero dummy fallbacks, zero
+runtime loading of the user's project.
 
 Key characteristics of the generated script (must not regress):
 
@@ -16,21 +25,25 @@ Key characteristics of the generated script (must not regress):
 3. **Three modes** in one script (teacher / distill / eval). Teacher + distill
    share the training infrastructure (optimizer / scheduler / dataloader /
    task_loss / loop skeleton); mode-specific code paths diverge at loss +
-   ckpt schema. **Eval is read-only**: it loads a student ckpt, runs the user's
-   eval metric, and emits the accuracy protocol consumed by `train_pool` —
-   replacing the old `measure_student --eval_command` path.
+   ckpt schema. **Eval is read-only**: it loads a student ckpt, runs the
+   ported `user_eval_metric`, and emits the accuracy protocol consumed by
+   `train_pool` — replacing the old `measure_student --eval_command` path.
 4. **KD loss** uses the existing KD-NAS library
    (`kd.compose.build_kd_loss` + `kd.wrapper.KDStudentWrapper` +
    `kd.wrapper.TeacherCache.load` + `kd.ema.MeanTeacherEMA`).
-5. **Narrower user-train.py contract.** KD-NAS users only provide
-   `compute_loss(s_out, y)` + `build_dataloader()` (see
-   `examples/kd-nas-demo/train.py`); optimizer / scheduler default to
-   `Adam` + none when absent, with an explicit fallback note.
+5. **Narrower user-train.py contract.** KD-NAS users provide a task loss
+   (`compute_loss(s_out, y)` or semantically equivalent) + data loading
+   (`build_dataloader()` or equivalent in the training loop); optimizer /
+   scheduler are optional and ported when present (see
+   `examples/kd-nas-demo/train.py`). Absent optimizer → explicit `Adam`
+   fallback with an annotated note; absent dataloader-equivalent →
+   **fail loud**.
 6. **Eval metric auto-discovered.** The user's repo already contains an eval
    script (e.g. `examples/kd-nas-demo/test_student.py`) — the agent discovers
-   and reads it (see §3 "User Eval Metric"), ports its metric computation into
-   `--mode eval`, and emits the `STUDENT_ACCURACY` protocol. No `test_command`
-   workflow input is required.
+   and reads it (see §3.1 "User Eval Metric"), ports its metric computation
+   into `user_eval_metric`, and emits the `STUDENT_ACCURACY` protocol. No
+   `test_command` workflow input is required. No eval script → fail loud (no
+   dummy degradation).
 
 ## Source Evidence
 
@@ -41,30 +54,33 @@ Build the script from:
 * **User eval script** under `<user_project_root>` (discovered: `test_*.py` /
   `eval*.py` / `evaluate*.py` / `test.py`, or an eval/metric fn inside
   `train.py`) — the accuracy metric (NMSE/MSE/BER/SNR/acc) + eval data
-  loading, ported into `--mode eval`. If none is found, fail loud (the user
-  contract asserts the repo contains one).
+  loading, ported into `user_eval_metric`. If none is found, fail loud (the
+  user contract asserts the repo contains one).
 * **Teacher model** at `<teacher_model_path>` (e.g.
   `workflows/agents/_kd_scripts/teacher_model.py`) — exposes `build_model(**cfg)`,
   `DUMMY_INPUT`, `feature_hook_names()`.
 * **Student variant** at `<student_model_path>` (KB receiver `.py`) — same
   contract.
-* The reference template at
-  `<skill_dir>/references/templates/train_pipeline.py` — a complete,
-  smoke-testable gold example. **Start from this file**: copy it to
-  `<output_dir>/train_pipeline.py` and specialise the placeholders.
+* The reference **skeleton template** at
+  `<skill_dir>/references/templates/train_pipeline.py` — a non-runnable
+  intermediate with five fixed `user_*` slots. **Start from this file**:
+  copy it to `<output_dir>/train_pipeline.py` and **specialise the slots**
+  by porting the user's code verbatim (see §3 / §3.1 / §4).
 
 Generated artifacts must be self-contained. Apart from the Python standard
 library, installed third-party packages, and the KD-NAS ``kd/`` library
 (provided by the workflow), generated artifacts must not import from
 `<user_project_root>`. Copy any required user logic (dataset, loss, optimizer,
-scheduler, dataloader) into `train_pipeline.py` or a sibling helper file under
-`<output_dir>`.
+scheduler, dataloader, eval metric) into `train_pipeline.py` or a sibling
+helper file under `<output_dir>`; a ported function body that still depends
+on user-project symbols (e.g. `from <user_pkg> import ...`) is a **fail loud**
+condition — never load the user's module at runtime to cover it.
 
 ## Generation Rules
 
 ### 1. CLI And Runtime Args
 
-The reference template already exposes the full CLI contract. Preserve it
+The reference skeleton already exposes the full CLI contract. Preserve it
 verbatim; only add project-derived arguments (dataset/config paths, training
 budget, optimizer/scheduler hyperparameters) when the user's project requires
 them.
@@ -87,24 +103,28 @@ Stable base CLI (must remain in every generated `train_pipeline.py`):
 - `--teacher_cache PATH` (required in distill mode) — `teacher_cache.pt` from
   `teacher_setup.py`.
 - `--kd_config JSON` (default `{"kd_losses": [], "weights": {}}`; distill mode).
-- `--user_train_import STR` — overrides `USER_TRAIN_MODULE` placeholder.
-- `--user_loss_fn STR` — overrides `USER_LOSS_FN` placeholder.
-- `--user_eval_import STR` — overrides `USER_EVAL_MODULE` placeholder (eval mode).
-- `--user_eval_fn STR` — overrides `USER_EVAL_FN` placeholder (eval mode).
 - `--student_ckpt PATH` (required in eval mode) — student checkpoint to load.
 - `--accuracy_baseline FLOAT` (eval mode) — absolute accuracy baseline (user-provided).
 - `--accuracy_baseline_kind STR` (eval mode) — nmse/mse/ber/db (lower better) |
   snr/acc (higher better); locks direction via `kd_common.accuracy_direction`.
-- `--project_root PATH` — prepended to `sys.path` for user-side
-  `from <pkg> import <mod>` imports.
+- `--project_root PATH` — prepended to `sys.path`; **semantics narrowed to
+  data-file / path resolution** (user data files referenced by relative
+  paths), no longer a runtime user-module injection mechanism.
 - `--env_anchor PATH` — ORCA env bootstrap anchor (per-run artifacts dir).
+
+**Removed flags (must NOT reappear):** the four placeholder-override flags
+`--user_train_import`, `--user_loss_fn`, `--user_eval_import`,
+`--user_eval_fn` are **deleted** from the stable base CLI. All user logic is
+ported into the five fixed slots at generation time; no runtime
+module/function injection exists. A generated script exposing any of them is
+a regression (checklist 02 [CRITICAL]).
 
 **No DDP / torchrun / world-size / local-rank flags.** Single device only.
 
 ### 2. Model Construction (by path)
 
 Use `_load_model_by_path(model_path, build_fn, cfg)` from the reference
-template verbatim. It:
+skeleton verbatim. It:
 
 1. Resolves the model file's absolute path and inserts its directory into
    `sys.path` (so KD-NAS variant shared blocks like `from _model8_blocks
@@ -122,78 +142,78 @@ list if the student doesn't expose the optional hook method — KD-NAS contract
 requires it for feature-KD terms but not for plain MSE KD). Load the teacher
 cache via `TeacherCache.load(args.teacher_cache)`.
 
-### 3. User Task Loss + Dataloader (self-contained)
+### 3. User Task Loss + Dataloader (self-contained specialisation)
 
-**Single strategy: path/module injection.** Set
-`USER_TRAIN_MODULE = "/abs/path/to/train.py"` (or a module name reachable on
-`sys.path`) and `USER_LOSS_FN = "compute_loss"`. The user's module is loaded
-via `importlib.util.spec_from_file_location` (path form) or
-`importlib.import_module` (module form). Add the user's project root to
-`sys.path` via `--project_root` so their internal imports resolve.
+**Single strategy: port the user's code into the fixed slots verbatim.** The
+user's `compute_loss` (identified **by semantics**, not by name: the
+`(output, target) -> scalar loss` function) is copied into
+`user_compute_loss` — same function body, same ops, same reduction, same
+shape assumptions. The user's data loading (`build_dataloader()` or the
+equivalent loader construction found in the training loop) is copied into
+`user_build_dataloader`. No runtime loading of the user's train module
+exists — the old path/module-injection mechanism (`_load_user_train` +
+`USER_TRAIN_MODULE`/`USER_LOSS_FN` constants + `--user_train_import` /
+`--user_loss_fn` flags) is **removed**.
 
-The earlier "inline copy" strategy (sentinel `USER_TRAIN_MODULE =
-"__inlined__"` + dispatch branch in `_load_user_train`) was **removed** in
-favour of single-strategy simplicity (KISS): the inline approach required
-the agent to modify both the placeholder *and* add a dispatch branch, which
-is a contract-drift risk; path injection is a one-shot init load and covers
-all cases. The reference template's `_load_user_train` raises loudly on
-unknown module names — no silent sentinel dispatch.
-
-The user's optimizer/scheduler/dataloader must still be **copied into
-`train_pipeline.py` or a sibling helper file** under `<output_dir>`. Only
-the loss-function *reference* is resolved by path injection — the loader
-code is ported, not imported live at training time.
+**Dependency-closure rule (port boundary):** a ported function body includes
+its **module-level dependency closure** — constants, helper classes and
+helper functions it references (e.g. demo's `_SHAPE` / `_RandomDataLoader`
+in `examples/kd-nas-demo/train.py`) — copied alongside the body. A ported
+function that still depends on user-project symbols (an unresolved
+`from <user_pkg> import ...`) is a **fail loud** condition, never a
+runtime-import workaround.
 
 The dataloader must be **re-iterable**: each epoch's `iter(dl)` yields a fresh
-batch stream. The placeholder fallback `_PlaceholderDataLoader` (a class with
-`__iter__`/`__len__`) is the reference shape. If the user's `build_dataloader`
-returns a one-shot generator, wrap it in a re-iterable adapter (or call
-`build_dataloader()` at the start of every epoch).
+batch stream. The reference shape is a class with `__iter__`/`__len__`. If
+the user's loader is a one-shot generator, wrap it in a re-iterable adapter
+(or call the builder at the start of every epoch).
 
 ### 3.1 User Eval Metric (eval mode, self-contained)
 
-**Single strategy: path/module injection** (mirrors the loss strategy above).
-Set `USER_EVAL_MODULE = "/abs/path/to/test_student.py"` (or a module name) and
-`USER_EVAL_FN = "evaluate"`, resolved by `_load_user_eval()` via the same
-`importlib` path/module loader. The resolved callable has signature
-`fn(student: nn.Module, device) -> (value: float, kind: str)` — it owns its
-own eval data loading (ported from the user's eval script) and returns the
-metric value + kind tag (`nmse`/`mse`/`ber`/`snr`/`acc`).
+**Single strategy: port the user's eval metric into `user_eval_metric`
+verbatim.** `user_eval_metric(student, device)` returns `(value, kind)` with
+kind ∈ {nmse, mse, ber, snr, acc} and owns its own eval data loading (ported
+from the user's eval script).
 
 Discovery (the agent's judgment, not a workflow input): glob
 `<user_project_root>` for `test_*.py` / `eval*.py` / `evaluate*.py` /
 `test.py`, and read `train.py` for an eval/metric fn. Read the hit, extract
-its metric computation + eval data loading, and port it into the
-`(student, device) -> (value, kind)` callable. When the user's eval script
-does not expose a matching-signature fn (e.g. its logic is inline in `main()`),
-inline an `evaluate_student` helper into the generated script and point
-`USER_EVAL_MODULE`/`USER_EVAL_FN` at it. **No eval script found → fail loud.**
+its metric computation + eval data loading, and port it into
+`user_eval_metric`. When the user's eval logic is inline in `main()`, extract
+the metric computation + data loading and inline it in `user_eval_metric`.
+**No eval script found → fail loud** (no dummy-metric degradation — eval
+always measures the user's real metric).
 
-Only the eval-metric *reference* is resolved by path injection at eval time;
-the eval data-loading code is ported (copied), not imported live — same
+The eval data-loading code is ported (copied), not imported live — same
 self-containment rule as the dataloader.
 
-### 4. Optimizer, Scheduler (user-port-or-fallback)
+### 4. Optimizer, Scheduler (user-port-or-explicit-None)
 
-Reuse the user's optimizer and scheduler when they exist in `train.py`. When
-absent (common for KD-NAS demo users), use the fallback:
+Port the user's optimizer / scheduler into `build_user_optimizer(params, lr)`
+/ `build_user_scheduler(optimizer, epochs)` **verbatim** (same class, same
+hyperparameters — `AdamW` stays `AdamW`). When the user's `train.py` defines
+no optimizer, `build_user_optimizer` returns `None` and the skeleton's
+explicit fallback applies:
 
 ```python
-optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-# NOTE: no scheduler in fallback — KD-NAS teacher/student distillation is
-# short-horizon; port the user's scheduler if present, do not invent one.
+optimizer = build_user_optimizer(teacher.parameters(), args.lr)
+if optimizer is None:
+    # kd-train-script: user train.py defines no optimizer — explicit fallback.
+    optimizer = torch.optim.Adam(teacher.parameters(), lr=args.lr)
 ```
 
-Annotate the fallback explicitly with a `# TODO(kd-train-script):` comment
-marking where the agent would substitute the user's optimizer/scheduler. The
-fallback must not invent hyperparameters not present in the user's project.
+Annotate the fallback explicitly; it must not invent hyperparameters not
+present in the user's project. `build_user_scheduler` returns `None` when the
+user defines no scheduler (never invent one); the ported scheduler's **step
+cadence must match the user's** (per-epoch vs per-batch — align with the
+loop's `scheduler.step()`).
 
 **Distill mode**: the optimizer parameter group must include both the student
 parameters (`wrapper.parameters()`) **and** the KD adapter parameters
 (`kd_loss.kd_parameters()`) so OFD/FitNets adapters train. This requires
 materialising one batch, calling `wrapper(x0)` + `teacher(x0)` once under
 `torch.no_grad`, and `kd_loss.prepare(s_feats0, t_feats0)` to pre-build the
-adapters **before** constructing the optimizer. The reference template shows
+adapters **before** constructing the optimizer. The reference skeleton shows
 the exact ordering.
 
 ### 5. Teacher Mode Loop
@@ -204,7 +224,7 @@ for epoch in range(args.epochs):
     for x, y in iter(dl):
         x, y = x.to(device), y.to(device)
         out = teacher(x)
-        loss = user_loss(out, y)        # pure task loss — no KD in teacher mode
+        loss = user_compute_loss(out, y)   # pure task loss — no KD in teacher mode
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
@@ -224,12 +244,11 @@ Save checkpoint with schema:
 
 **Fail-loud guard (mandatory)**: before `torch.save`, assert
 `math.isfinite(last_avg)`. If the dataloader yielded zero batches across all
-epochs (e.g. user `build_dataloader` returned an empty loader or a one-shot
-generator that already exhausted), `last_avg` stays at its `float("nan")`
-initialiser — raise `SystemExit` with a clear stderr message rather than
-silently writing a NaN ckpt. A NaN teacher ckpt would propagate NaN through
-`teacher_setup` → distill → `proxy_mse` with `returncode=0`, violating
-CLAUDE.md Rule 12.
+epochs (e.g. user loader returned an empty loader or a one-shot generator that
+already exhausted), `last_avg` stays at its `float("nan")` initialiser —
+raise `SystemExit` with a clear stderr message rather than silently writing a
+NaN ckpt. A NaN teacher ckpt would propagate NaN through `teacher_setup` →
+distill → `proxy_mse` with `returncode=0`, violating CLAUDE.md Rule 12.
 
 Stdout keys (downstream `teacher_setup` parses these):
 ```
@@ -248,7 +267,7 @@ for epoch in range(args.epochs):
         with torch.no_grad():
             t_out, t_feats = teacher(x)
         ema_out = ema(x) if ema is not None else None
-        # kd_loss calls user_loss(s_out, y) internally and adds KD terms.
+        # kd_loss calls user_compute_loss(s_out, y) internally + KD terms.
         loss = kd_loss(s_out, y, s_feats, t_out, t_feats, ema_out, epoch)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -294,7 +313,7 @@ sd = ck["student_state_dict"] if isinstance(ck.get("student_state_dict"), dict) 
 student.load_state_dict(sd, strict=False)
 student.eval()
 with torch.no_grad():
-    value, kind = user_eval(student, device)   # ported from the user eval script
+    value, kind = user_eval_metric(student, device)   # ported from the user eval script
 ```
 
 **No checkpoint is written** — eval is read-only. **Fail-loud guard
@@ -318,9 +337,9 @@ ACCURACY_CONFIDENCE: high|low
 
 ### 7. KD Loss Composition
 
-Use `kd.compose.build_kd_loss(user_loss, kd_config)` to assemble the composite.
-The composite owns OFD / FitNets adapters internally; their parameters land in
-the optimizer via `kd_loss.kd_parameters()` (see §4).
+Use `kd.compose.build_kd_loss(user_compute_loss, kd_config)` to assemble the
+composite. The composite owns OFD / FitNets adapters internally; their
+parameters land in the optimizer via `kd_loss.kd_parameters()` (see §4).
 
 **Decision rules** (select KD terms from the user's task semantics, do not
 enable all by default):
@@ -341,7 +360,7 @@ exotic KD recipes.
 ### 8. Path Handling
 
 Use `pathlib.Path` for all path construction (no `os.path.join`). All paths
-must be CLI-overridable (no hardcoded literals). The reference template
+must be CLI-overridable (no hardcoded literals). The reference skeleton
 already does this — preserve the pattern.
 
 The output directory is created lazily via
@@ -350,32 +369,37 @@ do not pre-create directories outside the ckpt path.
 
 ### 9. Live Chart Push (best-effort sidecar)
 
-The reference template includes `_make_live_push(variant_id, mode)` which
+The reference skeleton includes `_make_live_push(variant_id, mode)` which
 lazy-imports `orca.chart.render_chart` and degrades to no-op outside Orca.
 Preserve this helper verbatim — it is the live-training-curve sidecar.
 Push failure must never abort training (`try/except` → stderr warning).
 
 ## Validation
 
-Generated artifacts are validated in three layers, run in order. Fix any
+Generated artifacts are validated in **four layers**, run in order. Fix any
 failure before invoking the verifier subagent.
 
-### Layer 1: Static checks
+### Layer 1: Static + no-residue checks
 
 - `python -m py_compile <output_dir>/train_pipeline.py` — must succeed.
 - `python <output_dir>/train_pipeline.py --help` — must succeed and list all
   CLI flags. Verify the actual argparse block matches the documented stable
   base CLI.
 - **CLI consistency**: every `--flag` the workflow expects (listed in §1) is
-  accepted; no orphaned flags.
+  accepted; no orphaned flags (**zero `--user_*` flags**).
+- **AST scan — zero placeholder residue**: parse with `ast` and confirm no
+  `{{` literal, no `_placeholder_*` identifier, no `USER_TRAIN_MODULE` /
+  `USER_EVAL_MODULE` constant, and no `_load_user_train` / `_load_user_eval`
+  function definition (the removed runtime-injection mechanism) anywhere in
+  the generated artifacts.
 
-### Layer 2: Functional smoke tests (always)
+### Layer 2: Functional smoke tests (always, no override flags)
 
-Run both modes with a tiny budget on CPU. Both must complete without error
-and produce the documented stdout keys.
+Run all three modes with a tiny budget on CPU. **No `--user_*` override
+flags are passed** — the script must carry its ported logic itself; an
+unspecialised slot crashes with `NotImplementedError` (fail-loud gate).
 
-**Teacher mode smoke** (uses placeholder fallback if `USER_TRAIN_MODULE`
-unexpanded; otherwise points at the user's `train.py`):
+**Teacher mode smoke**:
 
 ```bash
 ORCA_KD_SCRIPTS_DIR=<kd_scripts_dir> \
@@ -386,33 +410,33 @@ python <output_dir>/train_pipeline.py \
     --epochs 1 \
     --batch_size 2 \
     --device cpu \
-    --out_ckpt <output_dir>/smoke_teacher.pth \
-    --user_train_import <abs path to user train.py> \
-    --user_loss_fn compute_loss
+    --out_ckpt <output_dir>/smoke_teacher.pth
 ```
 
 Assert: stdout contains `TEACHER_CKPT:` + `TASK_LOSS_FINAL:`; the ckpt file
 exists and `torch.load(...)` returns a dict with keys `state_dict`, `build_cfg`,
 `variant_id`, `epochs`, `final_loss`, `mode` (mode == `"teacher"`).
 
-**Distill mode smoke** requires a teacher_cache.pt — produce one via
-`teacher_setup.py` (or reuse an existing one). Tiny budget:
+**Distill mode smoke** requires a teacher_cache.pt. At gen_train_script time
+the DAG has not trained a teacher yet, so build a **test cache** via
+`kd.wrapper.TeacherCache.build` with the (untrained) teacher state dict
+(in-repo precedent: `tests/workflows/test_kd_train_script.py`), or mark this
+smoke explicitly `Skipped` if the cache cannot be constructed — never a
+placeholder fallback. Tiny budget:
 
 ```bash
 ORCA_KD_SCRIPTS_DIR=<kd_scripts_dir> \
 python <output_dir>/train_pipeline.py \
     --mode distill \
     --student_model_path <student_variant_path> \
-    --teacher_cache <teacher_cache.pt> \
+    --teacher_cache <test teacher_cache.pt> \
     --build_cfg '{"num_blocks": 3, "embed_dim": 16}' \
     --kd_config '{"kd_losses": ["mse"], "weights": {"mse": 1.0}}' \
     --epochs 1 \
     --batch_size 2 \
     --device cpu \
     --out_ckpt <output_dir>/smoke_student.pth \
-    --variant_id smoke \
-    --user_train_import <abs path to user train.py> \
-    --user_loss_fn compute_loss
+    --variant_id smoke
 ```
 
 Assert: stdout contains `STUDENT_CKPT:` + `KD_LOSS_FINAL:` + `KD_PROXY_MSE:`;
@@ -420,29 +444,48 @@ the ckpt file exists and `torch.load(...)` returns a dict with keys
 `student_state_dict`, `variant_id`, `student_cfg`, `kd_config`, `epochs`,
 `proxy_mse`, `mode` (mode == `"distill"`).
 
-**Eval mode smoke** (uses placeholder fallback if `USER_EVAL_MODULE`
-unexpanded; otherwise points at the user's eval script). Reuse the distill
-smoke ckpt as the student ckpt:
+**Eval mode smoke** runs the real ported `user_eval_metric` on the teacher
+smoke ckpt (read-only; teacher ckpt keys are tolerated):
 
 ```bash
 ORCA_KD_SCRIPTS_DIR=<kd_scripts_dir> \
 python <output_dir>/train_pipeline.py \
     --mode eval \
-    --student_model_path <student_variant_path> \
-    --student_ckpt <output_dir>/smoke_student.pth \
-    --build_cfg '{"num_blocks": 3, "embed_dim": 16}' \
+    --student_model_path <teacher_model_path> \
+    --student_ckpt <output_dir>/smoke_teacher.pth \
+    --build_cfg '{}' \
     --accuracy_baseline 1.5 \
     --accuracy_baseline_kind nmse \
-    --device cpu \
-    --user_eval_import <abs path to user eval script> \
-    --user_eval_fn evaluate
+    --device cpu
 ```
 
 Assert: stdout contains `STUDENT_ACCURACY:` + `STUDENT_ACCURACY_KIND:` +
 `MET_ACCURACY:` + `ACCURACY_CONFIDENCE:`; **no checkpoint file is written**
 by eval mode (read-only).
 
-### Layer 3: Cross-reference verifier subagent
+### Layer 3: fidelity_check.py (numeric equivalence, mandatory)
+
+Run `python <skill_dir>/scripts/fidelity_check.py` against the generated
+artifact and the user's original code:
+
+```bash
+python <skill_dir>/scripts/fidelity_check.py \
+    --train_pipeline <output_dir>/train_pipeline.py \
+    --user_train <user_project_root>/train.py \
+    --user_eval <discovered user eval script> \
+    --dummy_input '{"shape": [1,4,48,64,1], "dtype": "float32"}' \
+    --model_path <teacher_model_path> \
+    --build_fn build_model --build_cfg '{}' \
+    --project_root <user_project_root>
+```
+
+Must print `FIDELITY: PASS`. The script checks loss / dataloader / eval
+metric numeric equivalence with the user's original code (fixed seed, same
+tensors, `torch.allclose(rtol=1e-5)`), optimizer class-name equivalence, and
+model I/O shape against `DUMMY_INPUT`. `FIDELITY: FAIL` (or exit 2) → fix
+the artifact and re-run Layers 1-2.
+
+### Layer 4: Cross-reference verifier subagent
 
 Invoke the `workflow-verifier` subagent with:
 
@@ -452,22 +495,24 @@ Invoke the `workflow-verifier` subagent with:
   - `<skill_dir>/references/workflow-checklists/train_pipeline_script_generation/02_cli.md`
 - **Artifacts** (verifier may modify): `<output_dir>/train_pipeline.py` and any
   generated helper files.
-- **Cross-references** (read-only): the user's original `train.py` under
-  `<user_project_root>`; the KD-NAS contract `workflows/agents/_kd_scripts/CONTRACTS.md`.
+- **Cross-references** (read-only): the user's original `train.py` and eval
+  script under `<user_project_root>`; the KD-NAS contract
+  `workflows/agents/_kd_scripts/CONTRACTS.md`.
 
-The verifier checks: (a) the generated script faithfully ports the user's
-loss/dataloader/optimizer logic (no behaviour drift), (b) CLI contract
-matches §1, (c) checkpoint schemas match §5/§6, (d) no DDP/sandwich/torchrun
-residue, (e) the kd library is used (not `nas_agent.train.distillation`),
-(f) eval mode ports the user's eval metric faithfully, emits the
-`STUDENT_ACCURACY` protocol, writes no ckpt, and uses
-`kd_common.accuracy_direction` for direction (no symbol auto-guess).
+The verifier checks: (a) the five fixed slots are all specialised with the
+user's logic ported verbatim (zero placeholder residue — C21/C22/C23), (b)
+CLI contract matches §1 (no `--user_*` flags), (c) checkpoint schemas match
+§5/§6, (d) no DDP/sandwich/torchrun residue, (e) the kd library is used (not
+`nas_agent.train.distillation`), (f) eval mode ports the user's eval metric
+faithfully, emits the `STUDENT_ACCURACY` protocol, writes no ckpt, and uses
+`kd_common.accuracy_direction` for direction (no symbol auto-guess), (g)
+fidelity_check.py printed `FIDELITY: PASS` (C24).
 
 Handle the verifier response:
 
 - `all-pass` with no **Fixed** section → done.
 - `all-pass` with a **Fixed** section → re-run Layer 2 smoke tests.
-- `unresolved` → apply each suggested fix, re-run Layer 1 + Layer 2.
+- `unresolved` → apply each suggested fix, re-run Layer 1 + Layer 2 + Layer 3.
 
 ## Forbidden
 
@@ -480,3 +525,14 @@ Handle the verifier response:
 - Do not hardcode dataset paths, model paths, or ckpt paths — all CLI-driven.
 - Do not skip Layer 2 smoke tests; they catch integration bugs the static
   checks miss.
+- **Zero placeholder residue**: no `{{` literals, no `_placeholder_*` names,
+  no `USER_TRAIN_MODULE` / `USER_EVAL_MODULE` constants, no
+  `_load_user_train` / `_load_user_eval` runtime-loading code in the
+  generated artifacts — unfilled slots must stay `NotImplementedError`
+  (fail loud), never dummy fallbacks.
+- **No `--user_*` flags**: the four removed flags
+  (`--user_train_import` / `--user_loss_fn` / `--user_eval_import` /
+  `--user_eval_fn`) must not reappear in the generated CLI.
+- **No runtime loading of the user's project**: all user logic is ported in
+  at generation time; a ported body that still imports user-project symbols
+  is a fail-loud condition, not a runtime workaround.

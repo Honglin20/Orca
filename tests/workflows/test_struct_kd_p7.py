@@ -862,6 +862,7 @@ def test_struct_workflow_has_six_nodes():
     assert nodes == expected, f"struct nodes mismatch: {nodes}"
 
 
+@pytest.mark.skip(reason="obsolete after 2026-08-03 kd-nas serial rework: yaml drops batch gate/train/select nodes in favor of serial gen_student/distill/decide loop")
 def test_kd_workflow_has_six_nodes_flatten_first():
     """kd workflow 7 节点 flatten→teacher_gen→train_script_gen→setup→gate→train→select
     （flatten 入口 + teacher-gen 纯调参派生 teacher + train-script-gen 生成统一训练脚本 +
@@ -887,6 +888,7 @@ def test_kd_latency_provider_required_no_default():
     assert idef.default is None, "latency_provider 必须无 default"
 
 
+@pytest.mark.skip(reason="obsolete after 2026-08-03 kd-nas serial rework: yaml drops batch gate/train/select nodes in favor of serial gen_student/distill/decide loop")
 def test_kd_no_finalize_no_proxy():
     """重构：无 finalize 节点；无 proxy_mse / accuracy_gap_db 输入（旧搜索语义全砍）。"""
     nodes = _yaml_nodes(REPO / "workflows" / "kd-nas.yaml")

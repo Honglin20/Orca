@@ -566,6 +566,7 @@ def test_validate_contract_fail_min_breaks_forward(tmp_path):
 # ── kd-nas.yaml DAG：flatten 是 entry，4 节点链 ─────────────────────────────────
 
 
+@pytest.mark.skip(reason="obsolete after 2026-08-03 kd-nas serial rework: yaml drops batch gate/train/select nodes in favor of serial gen_student/distill/decide loop")
 def test_kd_nas_entry_is_flatten():
     """kd-nas.yaml entry 是 flatten（不再是 setup）；v4 DAG flatten routes to teacher_gen。"""
     from orca.compile.parser import load_workflow

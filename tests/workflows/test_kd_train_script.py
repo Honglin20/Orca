@@ -3,13 +3,16 @@
 覆盖：
 - folder-agent 结构契约（agent.md / SKILL.md / generation workflow / 2 个
   checklist 文件齐全 + 关键不变量文本）
-- 参考模板 ``references/templates/train_pipeline.py`` 静态校验
+- 参考骨架模板 ``references/templates/train_pipeline.py`` 静态校验
   （py_compile / --help / stable base CLI / 无 distributed+sandwich 残留 /
   用 kd 库 / mode dispatch 顺序）
-- 功能 smoke：teacher 模式（placeholder + 真 user train.py）+ distill 模式
-  （端到端：先构造 teacher_cache.pt → distill 跑通）
+- 功能 smoke：teacher 模式（**未特化骨架 fail loud** + 特化产物跑真搬入逻辑）
+  + distill 模式（端到端：先构造 teacher_cache.pt → distill 跑通）
+- 测试侧特化 helper（``_specialize_skeleton`` 程序化填 slot，替代已删的
+  ``--user_train_import`` 注入）
+- fidelity_check.py（Layer 3 数值级等价性）对 demo fixture PASS
 - fail-loud 路径（teacher 缺 --model_path / distill 缺 --student_model_path
-  / --teacher_cache）
+  / --teacher_cache / slot 未填 NotImplementedError / 空 dataloader）
 
 不依赖 GPU（全 CPU），不嵌入 workflow yaml。
 """
@@ -20,6 +23,7 @@ import ast
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -40,37 +44,144 @@ CHECKLIST_CLI = (
     "train_pipeline_script_generation" / "02_cli.md"
 )
 TEMPLATE = AGENT_DIR / "references" / "templates" / "train_pipeline.py"
+FIDELITY_CHECK = AGENT_DIR / "scripts" / "fidelity_check.py"
 
 # 测试输入（真实存在的契约文件）
 KD_SCRIPTS_DIR = REPO / "workflows" / "agents" / "_kd_scripts"
 TEACHER_MODEL = KD_SCRIPTS_DIR / "teacher_model.py"
 USER_TRAIN_PY = REPO / "examples" / "kd-nas-demo" / "train.py"
+USER_EVAL_PY = REPO / "examples" / "kd-nas-demo" / "test_student.py"
 STUDENT_VARIANT = REPO / "knowledge_base" / "families" / "receiver" / "spt_alt.py"
 
 # Stable base CLI（generation workflow §1）—— train_pipeline.py 必须全部暴露。
+# 4 个 --user_* 覆盖 flag 已删（占位符体系随骨架化移除，无运行时注入）。
 STABLE_BASE_CLI = [
     "--mode", "--out_ckpt", "--epochs", "--lr", "--batch_size",
     "--device", "--seed", "--variant_id", "--build_fn", "--build_cfg",
     "--model_path", "--student_model_path", "--teacher_cache", "--kd_config",
-    "--user_train_import", "--user_loss_fn", "--user_eval_import", "--user_eval_fn",
     "--student_ckpt", "--accuracy_baseline", "--accuracy_baseline_kind",
     "--project_root", "--env_anchor",
 ]
+REMOVED_USER_FLAGS = [
+    "--user_train_import", "--user_loss_fn", "--user_eval_import", "--user_eval_fn",
+]
+FIXED_SLOTS = [
+    "user_compute_loss", "user_build_dataloader", "user_eval_metric",
+    "build_user_optimizer", "build_user_scheduler",
+]
+
+
+# ===========================================================================
+# 测试侧特化 helper（实例化骨架 + 精确字符串替换填 slot，替代 --user_train_import）
+# ===========================================================================
+DEMO_LOSS_BODY = '''\
+def user_compute_loss(s_out: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """Ported verbatim from examples/kd-nas-demo/train.py compute_loss (MSE)."""
+    return F.mse_loss(s_out, y)
+'''
+
+
+DEMO_LOADER_BODY = '''\
+_SHAPE = (1, 4, 48, 64, 1)
+
+class _RandomDataLoader:
+    """Re-iterable random (x, y) batch generator — dependency closure ported
+    verbatim from examples/kd-nas-demo/train.py."""
+
+    def __init__(self, batch_size: int = 4, n_batches: int = 8, shape: tuple = _SHAPE) -> None:
+        self.batch_size = batch_size
+        self.n_batches = n_batches
+        self.shape = shape
+
+    def __iter__(self):
+        inner = tuple(self.shape[1:])
+        for _ in range(self.n_batches):
+            x = torch.randn(self.batch_size, *inner)
+            y = torch.randn(self.batch_size, *inner)
+            yield x, y
+
+    def __len__(self) -> int:
+        return self.n_batches
+
+
+def user_build_dataloader(batch_size: int = 4):
+    """Ported verbatim from examples/kd-nas-demo/train.py build_dataloader."""
+    return _RandomDataLoader(batch_size=batch_size)
+'''
+
+
+DEMO_EVAL_BODY = '''\
+def user_eval_metric(student: torch.nn.Module, device) -> tuple[float, str]:
+    """Ported verbatim from examples/kd-nas-demo/test_student.py _compute_nmse."""
+    torch.manual_seed(20260725)
+    n_samples = 8
+    x = torch.randn(n_samples, 4, 48, 64, 1)
+    y = torch.randn(n_samples, 4, 48, 64, 1)
+    student.eval()
+    with torch.no_grad():
+        out = student(x)
+    target = y.view_as(out)
+    num = float(torch.sum((out - target) ** 2).item())
+    den = float(torch.sum(target ** 2).item()) + 1e-12
+    nmse = num / den
+    if not math.isfinite(nmse):
+        nmse = 1e9
+    return nmse, "nmse"
+'''
+
+
+EMPTY_LOADER_BODY = '''\
+def user_build_dataloader(batch_size: int = 4):
+    return []  # empty loader — simulates broken/one-shot generator
+'''
+
+
+def _specialize_skeleton(skeleton_path: Path, out_path: Path, *,
+                         loss_body: str | None = None,
+                         loader_body: str | None = None,
+                         eval_body: str | None = None,
+                         opt_body: str | None = None,
+                         sch_body: str | None = None) -> Path:
+    """实例化骨架：把对应 slot 的整个顶层 def 块精确替换为注入代码。
+
+    slot 名 → 正则 ``^def <slot> ...`` 匹配到下一个顶层 ``def `` 前（依赖闭包
+    一并注入——loader_body 里含类/常量 + slot def）。返回写盘后的产物路径。
+    """
+    text = skeleton_path.read_text(encoding="utf-8")
+    for name, body in (
+        ("user_compute_loss", loss_body),
+        ("user_build_dataloader", loader_body),
+        ("user_eval_metric", eval_body),
+        ("build_user_optimizer", opt_body),
+        ("build_user_scheduler", sch_body),
+    ):
+        if body is None:
+            continue
+        pattern = re.compile(
+            rf"^def {re.escape(name)}\b.*?(?=^\ndef |\Z)",
+            re.MULTILINE | re.DOTALL,
+        )
+        new_text, n = pattern.subn(body, text)
+        assert n == 1, f"slot def {name} 未精确命中（n={n}）"
+        text = new_text
+    out_path.write_text(text, encoding="utf-8")
+    return out_path
 
 
 # ===========================================================================
 # helpers
 # ===========================================================================
 def _run_pipeline(args: list[str], *, env_extra: dict | None = None,
-                  expect_success: bool = True) -> subprocess.CompletedProcess:
-    """跑参考模板 train_pipeline.py，注入 ORCA_KD_SCRIPTS_DIR。"""
+                  expect_success: bool = True,
+                  pipeline_path: Path | None = None) -> subprocess.CompletedProcess:
+    """跑 train_pipeline.py（默认骨架模板，可传特化产物），注入 ORCA_KD_SCRIPTS_DIR。"""
     env = dict(os.environ)
     env["ORCA_KD_SCRIPTS_DIR"] = str(KD_SCRIPTS_DIR)
     env.pop("ORCA_CHART_SOCK", None)  # 抑制 orca chart 副作用
     if env_extra:
         env.update(env_extra)
     r = subprocess.run(
-        [sys.executable, str(TEMPLATE), *args],
+        [sys.executable, str(pipeline_path or TEMPLATE), *args],
         capture_output=True, text=True, env=env, timeout=180,
     )
     if expect_success:
@@ -158,14 +269,27 @@ def _build_teacher_cache(cache_path: Path, teacher_model_path: Path,
     cache.save(str(cache_path))
 
 
+def _specialized_demo_pipeline(tmp_path: Path, name: str = "tp_spec.py",
+                               *, loss: bool = True, loader: bool = True,
+                               eval_body: bool = True) -> Path:
+    """demo 等价函数体的特化产物（自包含，不 import 用户模块）。"""
+    return _specialize_skeleton(
+        TEMPLATE,
+        tmp_path / name,
+        loss_body=DEMO_LOSS_BODY if loss else None,
+        loader_body=DEMO_LOADER_BODY if loader else None,
+        eval_body=DEMO_EVAL_BODY if eval_body else None,
+    )
+
+
 # ===========================================================================
 # folder-agent 结构契约
 # ===========================================================================
 def test_agent_files_all_present():
     """所有 folder-agent 文件齐全（agent.md / SKILL.md / generation workflow /
-    2 checklist / template）。"""
+    2 checklist / template / fidelity_check.py）。"""
     for p in (AGENT_MD, SKILL_MD, GEN_WORKFLOW, CHECKLIST_TRAINING,
-              CHECKLIST_CLI, TEMPLATE):
+              CHECKLIST_CLI, TEMPLATE, FIDELITY_CHECK):
         assert p.is_file(), f"missing agent file: {p}"
 
 
@@ -184,6 +308,9 @@ def test_agent_md_has_strong_directive():
     assert "kd.compose" in text
     assert "nas_agent.train.distillation" in text  # 红线里点名禁用
     assert "自包含" in text or "绝不 import" in text
+    # 骨架特化红线（重写新增）
+    assert "零占位符残留" in text, "agent.md 缺「零占位符残留」红线"
+    assert "user_compute_loss" in text or "5 个固定 slot" in text or "slot" in text
     # 输出 JSON contract（v4 嵌入 workflow：最终消息是 JSON {train_pipeline_path}）
     assert "train_pipeline_path" in text, (
         "agent.md 输出 contract 应声明 train_pipeline_path（v4 workflow 嵌入后的 JSON 终点）"
@@ -191,13 +318,16 @@ def test_agent_md_has_strong_directive():
 
 
 def test_skill_md_workflow_three_steps():
-    """SKILL.md 必须有 Step 1/2/3 三步工作流 + 3 层校验 + verifier prompt。"""
+    """SKILL.md 必须有 Step 1/2/3 三步工作流 + 四层校验 + verifier prompt。"""
     text = SKILL_MD.read_text(encoding="utf-8")
     assert "Step 1: Load Context" in text
     assert "Step 2: Generate" in text
     assert "Step 3: Validate" in text
-    # 3 层校验（Layer 1 静态 / Layer 2 smoke / Layer 3 verifier）
+    # 四层校验（Layer 1 静态+无残留 / Layer 2 smoke / Layer 3 fidelity / Layer 4 verifier）
     assert "Layer 1" in text and "Layer 2" in text and "Layer 3" in text
+    assert "Layer 4" in text
+    # fidelity_check.py 是 Layer 3（必跑）
+    assert "fidelity_check.py" in text
     # verifier prompt 模板（参考 nas-agent-pipeline 的 workflow-verifier 调用）
     assert "workflow-verifier" in text.lower() or "VERDICT:" in text
     # 输出摘要 contract
@@ -226,9 +356,14 @@ def test_generation_workflow_doc_complete():
     assert "DDP" in text
     assert "importlib" in text
     assert "kd.compose" in text
-    # Validation + Forbidden
+    # Validation（四层）+ Forbidden
     assert "## Validation" in text
     assert "## Forbidden" in text
+    assert "Layer 1" in text and "Layer 2" in text and "Layer 3" in text and "Layer 4" in text
+    assert "fidelity_check.py" in text
+    # 已删 flag 点名（逐 flag）
+    for flag in REMOVED_USER_FLAGS:
+        assert flag in text, f"generation workflow 应点名已删 flag: {flag}"
     # ckpt schemas（teacher / distill）
     assert "TEACHER_CKPT:" in text
     assert "STUDENT_CKPT:" in text
@@ -250,6 +385,21 @@ def test_checklists_have_critical_items():
     assert "KD Library" in t, "01_training.md 缺 [CRITICAL] KD Library 项"
     assert "Stable Base CLI" in c, "02_cli.md 缺 [CRITICAL] Stable Base CLI 项"
     assert "--mode Required" in c, "02_cli.md 缺 [CRITICAL] --mode Required 项"
+    # 重写新增项（零占位符语义）
+    assert "Zero Placeholder Residue" in t, "01_training.md 缺 [CRITICAL] C21"
+    assert "Loss Function Body Ported Verbatim" in t, "01_training.md 缺 [CRITICAL] C22"
+    assert "Eval Metric Body Ported Verbatim" in t, "01_training.md 缺 [CRITICAL] C23"
+    assert "Fidelity Check PASS Evidence" in t, "01_training.md 缺 [CRITICAL] C24"
+    assert "No `--user_*` Override Flags" in c or "user_*" in c, (
+        "02_cli.md 缺「无 --user_* 覆盖 flag」[CRITICAL]"
+    )
+    # 已删占位符语义项（防 verifier 冲突）
+    assert "Placeholder Fallback Keeps Script Runnable" not in t, (
+        "01_training.md 的 C17 应已删除（占位符语义随骨架化移除）"
+    )
+    assert "_PlaceholderDataLoader" not in t, (
+        "01_training.md 不应再引用 _PlaceholderDataLoader（C20 已改写）"
+    )
 
 
 # ===========================================================================
@@ -265,7 +415,7 @@ def test_template_py_compile():
 
 
 def test_template_help_lists_stable_cli():
-    """--help 列出全部 stable base CLI flag。"""
+    """--help 列出全部 stable base CLI flag（不含已删的 --user_*）。"""
     r = subprocess.run(
         [sys.executable, str(TEMPLATE), "--help"],
         capture_output=True, text=True, timeout=30,
@@ -273,6 +423,8 @@ def test_template_help_lists_stable_cli():
     assert r.returncode == 0, f"--help 失败:\n{r.stderr}"
     for flag in STABLE_BASE_CLI:
         assert flag in r.stdout, f"--help 输出缺 flag: {flag}"
+    for flag in REMOVED_USER_FLAGS:
+        assert flag not in r.stdout, f"--help 输出不应含已删 flag: {flag}"
 
 
 def test_template_no_forbidden_code_tokens():
@@ -313,6 +465,25 @@ def test_template_no_forbidden_code_tokens():
     )
 
 
+def test_template_zero_placeholder_residue():
+    """骨架模板零占位符残留：无 {{ 字面量、无 _placeholder_*、无
+    USER_TRAIN_MODULE / USER_EVAL_MODULE 常量、无 _load_user_train /
+    _load_user_eval（含 docstring——Layer 1 扫描对整文件做）。
+
+    骨架 = 非可运行中间态：5 个 slot 必须 raise NotImplementedError。
+    """
+    text = TEMPLATE.read_text(encoding="utf-8")
+    assert "{{" not in text, "模板不得含 {{ 字面量（含 docstring）"
+    assert "_placeholder" not in text, "模板不得含 _placeholder_* 标识符"
+    assert "USER_TRAIN_MODULE" not in text and "USER_EVAL_MODULE" not in text
+    assert "_load_user_train" not in text and "_load_user_eval" not in text
+    for flag in REMOVED_USER_FLAGS:
+        assert flag not in text, f"模板不得含已删 flag: {flag}"
+    # 5 个固定 slot 都以 NotImplementedError / return None 占位
+    for slot in FIXED_SLOTS:
+        assert re.search(rf"^def {slot}\s*\(", text, re.MULTILINE), f"缺 slot def {slot}"
+
+
 def test_template_uses_kd_library():
     """distill mode 用 kd.compose.build_kd_loss / kd.wrapper / kd.ema（lazy import）。"""
     text = TEMPLATE.read_text(encoding="utf-8")
@@ -335,8 +506,9 @@ def test_template_uses_kd_library():
 
 
 def test_template_mode_dispatch_in_main():
-    """main() 按 args.mode 分发 + 在 dispatch 前解析 user_loss/build_dataloader
-    + dispatch 正确性（``if args.mode == "teacher"`` 块内真调 run_teacher_mode）。
+    """main() 按 args.mode 三分发（eval → run_eval_mode / teacher →
+    run_teacher_mode / else → run_distill_mode），且无 _load_user_* 运行时加载
+    （用户逻辑在 5 个固定 slot 内，slot 未填 → NotImplementedError fail loud）。
 
     用 AST 验证而不靠 substring 偏移：避免有人把分支 body 互换（teacher 块调
     run_distill_mode）而 substring 测试仍 pass。
@@ -351,16 +523,8 @@ def test_template_mode_dispatch_in_main():
             break
     assert main_fn is not None, "train_pipeline.py 缺 main() 函数"
 
-    load_line = None
-    teacher_dispatch_line = None
-
+    dispatch: dict[str, list[str]] = {}
     for node in ast.walk(main_fn):
-        # _load_user_train() 调用
-        if (isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "_load_user_train"):
-            load_line = node.lineno
-        # if args.mode == "teacher": 块内调 run_teacher_mode
         if isinstance(node, ast.If):
             test = node.test
             if (isinstance(test, ast.Compare)
@@ -369,33 +533,43 @@ def test_template_mode_dispatch_in_main():
                     and test.left.value.id == "args"
                     and test.left.attr == "mode"):
                 for comp in test.comparators:
-                    if (isinstance(comp, ast.Constant)
-                            and comp.value == "teacher"):
-                        for sub in ast.walk(node):
-                            if (isinstance(sub, ast.Call)
-                                    and isinstance(sub.func, ast.Name)
-                                    and sub.func.id == "run_teacher_mode"):
-                                teacher_dispatch_line = sub.lineno
+                    if isinstance(comp, ast.Constant):
+                        calls = [
+                            c.func.id for c in ast.walk(node)
+                            if isinstance(c, ast.Call)
+                            and isinstance(c.func, ast.Name)
+                            and c.func.id.startswith("run_")
+                        ]
+                        dispatch[comp.value] = calls
 
-    assert load_line is not None, "main() 缺 _load_user_train() 调用"
-    assert teacher_dispatch_line is not None, (
-        "main() 缺 `if args.mode == 'teacher': run_teacher_mode(...)` 分支 "
-        "（dispatch 错配：teacher 块未调 run_teacher_mode）"
+    assert dispatch.get("eval") == ["run_eval_mode"], (
+        f"main() eval 分支应调 run_eval_mode，实际：{dispatch.get('eval')}"
     )
-    assert teacher_dispatch_line > load_line, (
-        "run_teacher_mode 调用必须在 _load_user_train() 之后（两模式共享解析结果）"
+    assert dispatch.get("teacher") == ["run_teacher_mode"], (
+        f"main() teacher 分支应调 run_teacher_mode，实际：{dispatch.get('teacher')}"
     )
+    # else 兜底 → run_distill_mode（main 函数体顶层 return）
+    distill_calls = [
+        c.func.id for c in ast.walk(main_fn)
+        if isinstance(c, ast.Call)
+        and isinstance(c.func, ast.Name)
+        and c.func.id == "run_distill_mode"
+    ]
+    assert distill_calls, "main() 缺 run_distill_mode 兜底调用（else 分支）"
+    # 已删机制不得复活：无 _load_user_train / _load_user_eval 运行时加载
+    assert "_load_user_train" not in text and "_load_user_eval" not in text
 
 
 # ===========================================================================
 # 功能 smoke（teacher 模式）
 # ===========================================================================
-def test_smoke_teacher_mode_placeholder(tmp_path):
-    """teacher 模式 + placeholder fallback（不传 --user_train_import）：
+def test_smoke_teacher_mode_unspecialized_fails(tmp_path):
+    """**未特化骨架**跑 teacher 模式 → 非零退出 + stderr 含 NotImplementedError。
 
-    跑通 1 epoch + 产 TEACHER_CKPT + TASK_LOSS_FINAL + ckpt schema 正确。
+    守门 fail-loud：slot 未填 = 不可运行中间态，任何模式直接崩（不是静默
+    dummy fallback），且不写 ckpt。
     """
-    out_ckpt = tmp_path / "teacher_placeholder.pth"
+    out_ckpt = tmp_path / "teacher_unspecialized.pth"
     r = _run_pipeline([
         "--mode", "teacher",
         "--model_path", str(TEACHER_MODEL),
@@ -404,27 +578,19 @@ def test_smoke_teacher_mode_placeholder(tmp_path):
         "--batch_size", "2",
         "--device", "cpu",
         "--out_ckpt", str(out_ckpt),
-        "--variant_id", "placeholder_test",
-    ])
-    assert "TEACHER_CKPT:" in r.stdout
-    assert "TASK_LOSS_FINAL:" in r.stdout
-    assert out_ckpt.is_file()
-
-    import torch
-    blob = torch.load(out_ckpt, map_location="cpu")
-    assert blob["mode"] == "teacher"
-    assert blob["variant_id"] == "placeholder_test"
-    assert "state_dict" in blob
-    assert "build_cfg" in blob
-    assert blob["epochs"] == 1
-    assert isinstance(blob["final_loss"], float)
+    ], expect_success=False)
+    assert r.returncode != 0, "未特化骨架应 fail loud（NotImplementedError），不应 return 0"
+    assert "NotImplementedError" in (r.stderr + r.stdout), (
+        f"错误信息应含 NotImplementedError，实际：\n{r.stderr}\n{r.stdout}"
+    )
+    assert not out_ckpt.exists(), "未特化骨架不应写 ckpt"
 
 
 def test_smoke_teacher_mode_real_user_train(tmp_path):
-    """teacher 模式 + 真 examples/kd-nas-demo/train.py（compute_loss MSE）：
-
-    跑通 + loss 是有限数（非 NaN/Inf）+ state_dict 可 load 回 teacher。
+    """teacher 模式 + **特化产物**（demo 等价 loss/loader 逐字搬入，无
+    `--user_*` flag）：跑通 + loss 是有限数（非 NaN/Inf）+ state_dict 可 load 回。
     """
+    spec = _specialized_demo_pipeline(tmp_path)
     out_ckpt = tmp_path / "teacher_real.pth"
     r = _run_pipeline([
         "--mode", "teacher",
@@ -434,10 +600,8 @@ def test_smoke_teacher_mode_real_user_train(tmp_path):
         "--batch_size", "2",
         "--device", "cpu",
         "--out_ckpt", str(out_ckpt),
-        "--user_train_import", str(USER_TRAIN_PY),
-        "--user_loss_fn", "compute_loss",
-        "--project_root", str(USER_TRAIN_PY.parent),
-    ])
+        "--variant_id", "real_user",
+    ], pipeline_path=spec)
     assert "TEACHER_CKPT:" in r.stdout
     for line in r.stdout.splitlines():
         if line.startswith("TASK_LOSS_FINAL:"):
@@ -450,10 +614,10 @@ def test_smoke_teacher_mode_real_user_train(tmp_path):
     # state_dict 可 load 回 fresh teacher
     import torch
     blob = torch.load(out_ckpt, map_location="cpu")
-    spec = importlib.util.spec_from_file_location("_check_teacher", str(TEACHER_MODEL))
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
+    spec_mod = importlib.util.spec_from_file_location("_check_teacher", str(TEACHER_MODEL))
+    mod = importlib.util.module_from_spec(spec_mod)
+    assert spec_mod.loader is not None
+    spec_mod.loader.exec_module(mod)
     fresh = mod.build_model()
     fresh.load_state_dict(blob["state_dict"])  # 不抛 = key 完全对齐
 
@@ -465,9 +629,10 @@ def test_smoke_distill_mode_end_to_end(tmp_path):
     """distill 模式端到端：
 
     1. 先用 kd.wrapper.TeacherCache.build 直接构造 teacher_cache.pt（4 字段 blob）
-    2. 跑 train_pipeline.py --mode distill + spt_alt student + 真 user train.py
+    2. 跑特化产物 train_pipeline.py --mode distill + spt_alt student（无 --user_* flag）
     3. 校验 STUDENT_CKPT / KD_LOSS_FINAL / KD_PROXY_MSE + ckpt schema
     """
+    spec = _specialized_demo_pipeline(tmp_path)
     cache_path = tmp_path / "teacher_cache.pt"
     _build_teacher_cache(cache_path, TEACHER_MODEL, [1, 4, 48, 64, 1])
 
@@ -483,10 +648,7 @@ def test_smoke_distill_mode_end_to_end(tmp_path):
         "--device", "cpu",
         "--out_ckpt", str(out_ckpt),
         "--variant_id", "smoke_student",
-        "--user_train_import", str(USER_TRAIN_PY),
-        "--user_loss_fn", "compute_loss",
-        "--project_root", str(USER_TRAIN_PY.parent),
-    ])
+    ], pipeline_path=spec)
     assert "STUDENT_CKPT:" in r.stdout
     assert "KD_LOSS_FINAL:" in r.stdout
     assert "KD_PROXY_MSE:" in r.stdout
@@ -504,12 +666,12 @@ def test_smoke_distill_mode_end_to_end(tmp_path):
     # student_state_dict 可 load 回 fresh student（按路径 import spt_alt）
     sys.path.insert(0, str(STUDENT_VARIANT.parent))
     try:
-        spec = importlib.util.spec_from_file_location(
+        spec_mod = importlib.util.spec_from_file_location(
             "_check_student", str(STUDENT_VARIANT)
         )
-        mod = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        spec.loader.exec_module(mod)
+        mod = importlib.util.module_from_spec(spec_mod)
+        assert spec_mod.loader is not None
+        spec_mod.loader.exec_module(mod)
         fresh_student = mod.build_model(num_blocks=3, embed_dim=16)
         fresh_student.load_state_dict(blob["student_state_dict"])
     finally:
@@ -521,6 +683,7 @@ def test_smoke_distill_mode_kd_loss_finite(tmp_path):
 
     守门 KD composite 真能 forward + backward + optimizer.step 不崩。
     """
+    spec = _specialized_demo_pipeline(tmp_path)
     cache_path = tmp_path / "teacher_cache.pt"
     _build_teacher_cache(cache_path, TEACHER_MODEL, [1, 4, 48, 64, 1])
 
@@ -536,10 +699,7 @@ def test_smoke_distill_mode_kd_loss_finite(tmp_path):
         "--device", "cpu",
         "--out_ckpt", str(out_ckpt),
         "--variant_id", "kd_check",
-        "--user_train_import", str(USER_TRAIN_PY),
-        "--user_loss_fn", "compute_loss",
-        "--project_root", str(USER_TRAIN_PY.parent),
-    ])
+    ], pipeline_path=spec)
     for line in r.stdout.splitlines():
         if line.startswith("KD_LOSS_FINAL:"):
             val = float(line.split(":", 1)[1].strip())
@@ -559,6 +719,7 @@ def test_smoke_distill_mode_fitnets_kd(tmp_path):
     spt_alt + teacher_model 都暴露 ``feature_hook_names()`` 长度 2（KD-NAS 变体
     契约 + teacher 契约一致），fitnets 取中间层 hint。
     """
+    spec = _specialized_demo_pipeline(tmp_path)
     cache_path = tmp_path / "teacher_cache.pt"
     _build_teacher_cache(cache_path, TEACHER_MODEL, [1, 4, 48, 64, 1])
 
@@ -577,10 +738,7 @@ def test_smoke_distill_mode_fitnets_kd(tmp_path):
         "--device", "cpu",
         "--out_ckpt", str(out_ckpt),
         "--variant_id", "fitnets_test",
-        "--user_train_import", str(USER_TRAIN_PY),
-        "--user_loss_fn", "compute_loss",
-        "--project_root", str(USER_TRAIN_PY.parent),
-    ])
+    ], pipeline_path=spec)
     assert "STUDENT_CKPT:" in r.stdout
     assert "KD_LOSS_FINAL:" in r.stdout
     assert "KD_PROXY_MSE:" in r.stdout
@@ -656,31 +814,44 @@ def test_distill_mode_teacher_cache_not_found(tmp_path):
 
 
 # ===========================================================================
-# fail-loud: empty dataloader + missing loss fn（reviewer 🟡#1/#2/#3 修复守门）
+# fail-loud: slot 未填 + 空 dataloader（reviewer 🟡#1/#2/#3 修复守门）
 # ===========================================================================
-def _write_empty_loader_user_train(p: Path) -> None:
-    """写一个 compute_loss OK 但 build_dataloader 返回空 list 的 user train.py。
+def test_missing_loss_slot_fails_loud(tmp_path):
+    """**部分特化**（loader/eval 填了、loss slot 未填）→ teacher 模式
+    NotImplementedError fail loud。
 
-    触发 NaN-loss fail-loud guard：epoch 0 n_batches=0 → last_avg 保持 nan
-    → `math.isfinite(last_avg)` False → raise SystemExit（不写 NaN ckpt）。
+    覆盖意图：缺失用户逻辑必须 fail loud（原 test_user_train_module_missing_loss_fn
+    的骨架版——缺 loss 函数 = slot 未填）。
     """
-    p.write_text(
-        "import torch.nn.functional as F\n"
-        "def compute_loss(s_out, y):\n"
-        "    return F.mse_loss(s_out, y)\n"
-        "def build_dataloader():\n"
-        "    return []  # empty loader — simulates broken/one-shot generator\n",
-        encoding="utf-8",
+    spec = _specialize_skeleton(
+        TEMPLATE, tmp_path / "tp_no_loss.py",
+        loader_body=DEMO_LOADER_BODY, eval_body=DEMO_EVAL_BODY,
     )
+    r = _run_pipeline([
+        "--mode", "teacher",
+        "--model_path", str(TEACHER_MODEL),
+        "--build_cfg", "{}",
+        "--epochs", "1",
+        "--device", "cpu",
+        "--out_ckpt", str(tmp_path / "x.pth"),
+    ], pipeline_path=spec, expect_success=False)
+    assert r.returncode != 0, "loss slot 未填应 fail loud（NotImplementedError）"
+    assert "NotImplementedError" in (r.stderr + r.stdout), (
+        f"错误信息应含 NotImplementedError，实际：\n{r.stderr}\n{r.stdout}"
+    )
+    assert not (tmp_path / "x.pth").exists(), "slot 未填不应写 ckpt"
 
 
 def test_teacher_mode_empty_dataloader_fails_loud(tmp_path):
-    """teacher 模式 + 空 dataloader → 非零退出 + 不写 NaN ckpt（CLAUDE.md Rule 12）。
+    """teacher 模式 + 空 dataloader（特化 helper 注入空 loader）→ 非零退出 +
+    不写 NaN ckpt（CLAUDE.md Rule 12）。
 
     守门 reviewer 🟡#1：dataloader 空时 last_avg 保持 nan，必须 raise 不静默落盘。
     """
-    user_train = tmp_path / "empty_train.py"
-    _write_empty_loader_user_train(user_train)
+    spec = _specialize_skeleton(
+        TEMPLATE, tmp_path / "tp_empty_loader.py",
+        loss_body=DEMO_LOSS_BODY, loader_body=EMPTY_LOADER_BODY,
+    )
     out_ckpt = tmp_path / "should_not_exist.pth"
 
     r = _run_pipeline([
@@ -690,9 +861,7 @@ def test_teacher_mode_empty_dataloader_fails_loud(tmp_path):
         "--epochs", "1",
         "--device", "cpu",
         "--out_ckpt", str(out_ckpt),
-        "--user_train_import", str(user_train),
-        "--user_loss_fn", "compute_loss",
-    ], expect_success=False)
+    ], pipeline_path=spec, expect_success=False)
 
     assert r.returncode != 0, "空 dataloader 应 fail loud，不应 return 0"
     combined = r.stderr + r.stdout
@@ -707,15 +876,17 @@ def test_teacher_mode_empty_dataloader_fails_loud(tmp_path):
 
 
 def test_distill_mode_empty_dataloader_fails_loud(tmp_path):
-    """distill 模式 + 空 dataloader → 非零退出 + 不写 NaN ckpt。
+    """distill 模式 + 空 dataloader（特化 helper 注入空 loader）→ 非零退出 +
+    不写 NaN ckpt。
 
     distill mode 先 materialise 一个 batch 做 kd_loss.prepare（用 next(iter(dl))），
     所以空 loader 在 prepare 阶段就会 StopIteration → 未捕获 → 非零退出。
     这是 prepare 阶段的隐式 fail-loud（即使是空的也会响）。
     """
-    user_train = tmp_path / "empty_train.py"
-    _write_empty_loader_user_train(user_train)
-
+    spec = _specialize_skeleton(
+        TEMPLATE, tmp_path / "tp_empty_loader_distill.py",
+        loss_body=DEMO_LOSS_BODY, loader_body=EMPTY_LOADER_BODY,
+    )
     cache_path = tmp_path / "teacher_cache.pt"
     _build_teacher_cache(cache_path, TEACHER_MODEL, [1, 4, 48, 64, 1])
 
@@ -729,9 +900,7 @@ def test_distill_mode_empty_dataloader_fails_loud(tmp_path):
         "--epochs", "1",
         "--device", "cpu",
         "--out_ckpt", str(out_ckpt),
-        "--user_train_import", str(user_train),
-        "--user_loss_fn", "compute_loss",
-    ], expect_success=False)
+    ], pipeline_path=spec, expect_success=False)
 
     assert r.returncode != 0
     # distill prepare 阶段 next(iter(dl)) 对空 list → StopIteration
@@ -739,43 +908,71 @@ def test_distill_mode_empty_dataloader_fails_loud(tmp_path):
     assert not out_ckpt.exists(), "空 dataloader 时不应写 ckpt"
 
 
-def test_user_train_module_missing_loss_fn_fails(tmp_path):
-    """user train.py 缺 loss fn（--user_loss_fn 指向不存在的函数）→ 非零退出。
+# ===========================================================================
+# fidelity_check.py（Layer 3 数值级等价性）
+# ===========================================================================
+def test_fidelity_check_demo_fixture(tmp_path):
+    """fidelity_check.py 对 demo fixture（特化产物 vs 用户原 train.py +
+    test_student.py）→ FIDELITY: PASS + FIDELITY_LEVEL: numeric。
 
-    覆盖 `_load_user_train` 的 AttributeError 分支（reviewer 🟡#3）。
+    数值级守门：loss（MSE 同输入同种子 allclose）、loader（batch shape +
+    re-iterable）、eval（NMSE 同模型实例同种子 allclose + kind 一致）、
+    model I/O（teacher forward DUMMY_INPUT shape 同形）。demo train.py 无
+    optimizer → OPT_TYPE_OK: skip（非 FAIL）。
     """
-    # 写一个有 build_dataloader 但缺 compute_loss 的 user train.py
-    user_train = tmp_path / "no_loss_fn.py"
-    user_train.write_text(
-        "import torch.nn.functional as F\n"
-        # 故意不定义 compute_loss —— 只有 some_other_loss
-        "def some_other_loss(s_out, y):\n"
-        "    return F.l1_loss(s_out, y)\n"
-        "def build_dataloader(batch_size=2):\n"
-        "    class _L:\n"
-        "        def __iter__(self):\n"
-        "            import torch\n"
-        "            for _ in range(2):\n"
-        "                yield torch.randn(2, 4, 48, 64, 1), torch.randn(2, 4, 48, 64, 1)\n"
-        "    return _L()\n",
-        encoding="utf-8",
-    )
+    spec = _specialized_demo_pipeline(tmp_path)
+    env = dict(os.environ)
+    env.pop("ORCA_CHART_SOCK", None)
 
-    r = _run_pipeline([
-        "--mode", "teacher",
-        "--model_path", str(TEACHER_MODEL),
-        "--build_cfg", "{}",
-        "--epochs", "1",
-        "--device", "cpu",
-        "--out_ckpt", str(tmp_path / "x.pth"),
-        "--user_train_import", str(user_train),
-        "--user_loss_fn", "compute_loss",  # 模块里没这个函数
-    ], expect_success=False)
-
-    assert r.returncode != 0
-    combined = r.stderr + r.stdout
-    # 错误信息含 AttributeError / "loss fn" / 模块名
-    assert "compute_loss" in combined or "loss fn" in combined.lower() or \
-           "AttributeError" in combined, (
-        f"错误信息应说明 loss fn 缺失，实际：{combined}"
+    r = subprocess.run(
+        [sys.executable, str(FIDELITY_CHECK),
+         "--train_pipeline", str(spec),
+         "--user_train", str(USER_TRAIN_PY),
+         "--user_eval", str(USER_EVAL_PY),
+         "--dummy_input", json.dumps({"shape": [1, 4, 48, 64, 1], "dtype": "float32"}),
+         "--model_path", str(TEACHER_MODEL),
+         "--build_fn", "build_model", "--build_cfg", "{}",
+         "--project_root", str(USER_TRAIN_PY.parent)],
+        capture_output=True, text=True, env=env, timeout=180,
     )
+    assert r.returncode == 0, (
+        f"fidelity_check 期望 exit 0 实际 {r.returncode}\n"
+        f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
+    )
+    assert "FIDELITY: PASS" in r.stdout, f"FIDELITY 应为 PASS：\n{r.stdout}\n{r.stderr}"
+    assert "FIDELITY_LEVEL: numeric" in r.stdout
+    assert "LOSS_ALLCLOSE: true" in r.stdout
+    assert "LOADER_SHAPE_OK: true" in r.stdout
+    assert "EVAL_ALLCLOSE: true" in r.stdout
+    assert "IO_SHAPE_OK: true" in r.stdout
+    # demo train.py 无 optimizer → 该项 skip（不算 FAIL）
+    assert "OPT_TYPE_OK: skip" in r.stdout
+
+
+def test_fidelity_check_catches_loss_drift(tmp_path):
+    """fidelity_check.py 抓 loss 漂移：特化产物 loss 换成 L1 → LOSS_ALLCLOSE: false
+    → exit 2 + FIDELITY: FAIL（守门「train 调一个函数」——静默替换必须被抓）。"""
+    drifted_loss = '''\
+def user_compute_loss(s_out: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """DRIFTED: L1 instead of the user's MSE — must be caught."""
+    return F.l1_loss(s_out, y)
+'''
+    spec = _specialize_skeleton(
+        TEMPLATE, tmp_path / "tp_drift.py",
+        loss_body=drifted_loss, loader_body=DEMO_LOADER_BODY,
+        eval_body=DEMO_EVAL_BODY,
+    )
+    env = dict(os.environ)
+    env.pop("ORCA_CHART_SOCK", None)
+
+    r = subprocess.run(
+        [sys.executable, str(FIDELITY_CHECK),
+         "--train_pipeline", str(spec),
+         "--user_train", str(USER_TRAIN_PY),
+         "--dummy_input", json.dumps({"shape": [1, 4, 48, 64, 1], "dtype": "float32"}),
+         "--project_root", str(USER_TRAIN_PY.parent)],
+        capture_output=True, text=True, env=env, timeout=180,
+    )
+    assert r.returncode != 0, "loss 漂移应 exit 2（fail loud）"
+    assert "LOSS_ALLCLOSE: false" in r.stdout, f"LOSS_ALLCLOSE 应为 false：\n{r.stdout}"
+    assert "FIDELITY: FAIL" in r.stdout

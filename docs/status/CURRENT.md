@@ -4,26 +4,28 @@
 
 ---
 
-## 当前任务（2026-08-03）：kd-nas 串行迭代重写 — 待 E2E 真机
+## 当前任务（2026-08-03）：kd-train-script 重写 — 实现闭环，待用户确认 commit
 
 ### 干了什么
-按 SPEC v3（`docs/specs/kd-nas-serial-iteration-rework.md`，spec-reviewer 三轮对抗 PASS）实现 kd-nas
-串行迭代重写：批量并发 → 串行迭代 DAG（10 节点 + decide back-route）。新写 4 脚本 + 5 agent；
-精简 kd-setup（拆出 train_teacher）；扩展 model-flatten/teacher-gen/kd-train-script；重写 yaml。
-code-reviewer 一轮反馈闭环（2 FATAL + 5 MAJOR + 2 MINOR 全修）。
+按设计草稿（`docs/specs/kd-train-script-rework-design-draft.md`）完成 kd-train-script
+「模板占位符 → 基于用户代码强制特化生成」重写：骨架模板（删占位符/dummy fallback/`--user_*` flag，
+加 5 个 NotImplementedError slot）+ 新写 fidelity_check.py（数值级等价性校验）+ 四层校验
+（静态无残留/smoke/fidelity/verifier）+ train-script-verify 升级（替换 vacuous substring 检查）。
+实现 agent → code-review 两轮闭环（1 CRITICAL + 3 MINOR + 3 过时测试 skip）。
 
 ### 状态
-- 实现 + 单测 + tars validate + code-reviewer 反馈闭环：**完成**。
-- E2E 真机（task #6）：**待用户跑**（本环境无 GPU + opencode + deepseek 真后端）。
+- 设计草稿经独立 review agent 比对：**PASS with conditions**（5 MAJOR + 7 MINOR 全并入草稿 §8）。
+- 实现经 code-review 两轮：**闭环**。全量回归 **240 passed, 14 skipped, 0 failed**。
+- 改动 20 文件 + 新写 fidelity_check.py（未 commit，待用户确认）。
 
 ### 必读文件（≤5）
-1. `docs/specs/kd-nas-serial-iteration-rework.md`（SPEC v3 契约）
-2. `docs/releases/2026-08-03-kd-nas-serial-iteration.md`（本次 release note）
-3. `workflows/kd-nas.yaml`（10 节点串行 DAG）
-4. `workflows/agents/_kd_scripts/kd_reducer.py`（KD 决策 reducer 真相源）
-5. `workflows/agents/distill/agent.md`（catch 协议 + 命令 flag 完整性范式）
+1. `docs/specs/kd-train-script-rework-design-draft.md`（设计草稿，含 §8 review 闭环记录）
+2. `workflows/agents/kd-train-script/references/templates/train_pipeline.py`（骨架模板）
+3. `workflows/agents/kd-train-script/scripts/fidelity_check.py`（新写校验脚本）
+4. `workflows/agents/train-script-verify/agent.md`（升级后校验 agent）
+5. `docs/status/CHANGELOG.md`（2026-08-03 refactor 条目）
 
 ### 待办
-- [用户] E2E 真机：用 baseline 不达标 fixture（target=baseline×0.7 / acc_baseline=baseline+margin）
-  强制 ≥2 轮 distill→decide 循环 → finalize；验收 max_rounds 终止 + champion ratchet + 各轮 DUMMY_INPUT 字节级 == baseline。
-- [用户] 旧 yaml 批量节点文件（gate_all/train_pool/pick_variant 等）保留供回滚；如确认不回滚可清理。
+- [用户] 确认后 commit（改动未提交；e2e_kd_nas_script_level.sh / 测试 / 文档 20 文件 + fidelity_check.py）
+- [可选] 真机 E2E（kd-nas 全流程：gen_train_script → train_script_verify → train_teacher → 循环），
+  验收四层校验在真实 workflow 中生效（本环境无 GPU + 远程跑）

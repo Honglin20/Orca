@@ -18,16 +18,29 @@ artifact directly. For `auto-fixable: no`, report the issue for the caller.
 `--mode`, `--out_ckpt`, `--epochs`, `--lr`, `--batch_size`, `--device`,
 `--seed`, `--variant_id`, `--build_fn`, `--build_cfg`, `--model_path`,
 `--student_model_path`, `--teacher_cache`, `--kd_config`,
-`--user_train_import`, `--user_loss_fn`, `--user_eval_import`, `--user_eval_fn`,
 `--student_ckpt`, `--accuracy_baseline`, `--accuracy_baseline_kind`,
 `--project_root`, `--env_anchor`.
 **Verify**: Run `python <output_dir>/train_pipeline.py --help`. Confirm every
 flag above is listed with a compatible default. Confirm `--mode` is required
-with `choices=["teacher", "distill", "eval"]`; `--out_ckpt` is required in
-teacher/distill mode (eval writes no ckpt).
+with `choices=["teacher", "distill", "eval"]`; `--out_ckpt` is **unconditionally
+required** (all three modes — eval is read-only and does not write it, but
+argparse requires the flag).
 **Anti-pattern**: Missing `--mode` or `--out_ckpt` (required for train modes);
 `--device` missing the `auto` default.
 **Fix**: Add the missing argparse entries.
+
+### [CRITICAL] 1b. No `--user_*` Override Flags
+**auto-fixable**: yes
+**Section**: workflow §1 (removed flags)
+**Check**: The four removed placeholder-override flags — `--user_train_import`,
+`--user_loss_fn`, `--user_eval_import`, `--user_eval_fn` — are **absent** from
+the generated CLI (they were deleted from the stable base CLI; all user logic
+is ported in at generation time, no runtime module/function injection).
+**Verify**: Run `python <output_dir>/train_pipeline.py --help` and grep the
+argparse block; confirm none of the four `--user_*` flags is listed.
+**Anti-pattern**: Any `--user_*` flag reappearing (regression to runtime
+injection — would allow an unspecialised script to pass smoke via overrides).
+**Fix**: Delete the flag definitions and the override logic in `main()`.
 
 ### [CRITICAL] 2. --mode Required With Exact Choices
 **auto-fixable**: yes
@@ -78,18 +91,18 @@ Confirm teacher mode does not parse it (would crash if user passes
 default enabling exotic KD terms.
 **Fix**: Parse inside `run_distill_mode` only.
 
-### [MAJOR] 6. Project Root sys.path Injection
+### [MAJOR] 6. Project Root sys.path Injection (data-file resolution)
 **auto-fixable**: yes
-**Section**: workflow §3 User Task Loss + Dataloader
+**Section**: workflow §1 (`--project_root` semantic)
 **Check**: When `--project_root` is provided, it is inserted into `sys.path`
-**before** `_load_user_train()` is called (so user-side `from <pkg> import
-<mod>` resolves).
+in `main()` **before** mode dispatch (semantics narrowed to data-file / path
+resolution — user data files referenced by relative paths resolve). It is no
+longer a runtime user-module injection mechanism (all user logic is ported in).
 **Verify**: Read `main()`. Confirm the ordering: parse args → (optional)
-env bootstrap → inject `args.project_root` → override placeholders → call
-`_load_user_train()`.
-**Anti-pattern**: Calling `_load_user_train()` before sys.path injection
-(ImportError on user's internal imports).
-**Fix**: Re-order in `main()`.
+env bootstrap → inject `args.project_root` → dispatch modes.
+**Anti-pattern**: Dropping `--project_root` handling (relative user data
+paths break); any `_load_user_*` runtime import resurrected near it.
+**Fix**: Keep the `sys.path` insert in `main()` before dispatch.
 
 ### [MAJOR] 7. Env Bootstrap Non-Fatal
 **auto-fixable**: yes
@@ -123,18 +136,17 @@ help is shown); silent typos in flag names.
 ### [CRITICAL] 10. Mode Dispatch Correct
 **auto-fixable**: yes
 **Section**: workflow SKILL.md Workflow
-**Check**: `main()` dispatches three ways: `--mode eval` → `run_eval_mode`
-(resolved via `_load_user_eval()` first — eval does not need the train
-loss/dataloader), `--mode teacher` → `run_teacher_mode`, else →
-`run_distill_mode`. Teacher/distill dispatch happens after placeholder
-override + `_load_user_train()` so both get the resolved `(user_loss,
-build_dataloader)`.
-**Verify**: Read `main()`. Confirm eval is dispatched (and `_load_user_eval()`
-resolved) before `_load_user_train()`; confirm train-mode dispatch ordering.
-**Anti-pattern**: Dispatching eval after `_load_user_train()` (eval would
-break if train.py's compute_loss is unimportable); switching on a string typo.
-**Fix**: Dispatch eval first with its own `_load_user_eval()`; train modes
-after `_load_user_train()`.
+**Check**: `main()` dispatches three ways: `--mode eval` → `run_eval_mode`,
+`--mode teacher` → `run_teacher_mode`, else → `run_distill_mode`. There is no
+`_load_user_train` / `_load_user_eval` resolution step — all user logic lives
+in the five fixed slots and the mode functions call them directly; an
+unspecialised slot raises `NotImplementedError` inside the mode function.
+**Verify**: Read `main()`. Confirm the three-way dispatch and that no
+`_load_user_*` call appears.
+**Anti-pattern**: Dispatching on a string typo; resurrecting a runtime
+loader between parse and dispatch; skipping the `NotImplementedError`
+fail-loud gate.
+**Fix**: Dispatch eval / teacher / else-distill directly on `args.mode`.
 
 ### [MAJOR] 11. Device Resolution
 **auto-fixable**: yes
@@ -167,13 +179,20 @@ generated script. All paths come from CLI args or env vars.
 **Anti-pattern**: `DATA_DIR = "/path/to/dataset"`; `MODEL_PATH = "model.py"`.
 **Fix**: Replace literals with CLI args.
 
-### [MAJOR] 14. Dataloader Builder Signature Tolerant
+### [MAJOR] 14. Dataloader Slot Interface Fixed
 **auto-fixable**: yes
 **Section**: workflow §3
-**Check**: `_build_dataloader(build_dataloader, batch_size)` tries
-`build_dataloader()` first and falls back to `build_dataloader(batch_size=)`
-on TypeError. The user contract permits either signature.
-**Verify**: Read `_build_dataloader`.
-**Anti-pattern**: Only supporting one signature (breaks the other); broad
-`except Exception` (masks real errors in the builder body).
-**Fix**: Use the narrow `except TypeError` pattern.
+**Check**: `user_build_dataloader(batch_size)` is the **fixed slot
+interface** — the training loops call
+`user_build_dataloader(batch_size=args.batch_size)` directly (no
+signature-tolerance shim needed). The slot must be **re-iterable**: every
+epoch's `iter(dl)` yields a fresh stream; one-shot generators are wrapped in
+a re-iterable adapter or re-invoked per epoch.
+**Verify**: Read the slot call sites in `run_teacher_mode` / `run_distill_mode`.
+Confirm `batch_size=args.batch_size` is passed and the loader yields at least
+one batch per epoch (Layer 2 smoke proves it).
+**Anti-pattern**: A one-shot generator exhausting after epoch 0 (Layer 2
+smoke catches the NaN fail-loud guard); a `_build_dataloader` shim that hides
+a broken slot behind broad `except`.
+**Fix**: Make the slot re-iterable; remove any legacy signature-tolerance
+shim.

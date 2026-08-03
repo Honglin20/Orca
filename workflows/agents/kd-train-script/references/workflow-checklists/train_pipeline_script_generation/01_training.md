@@ -86,14 +86,18 @@ only work when launched from the user's project root.
 ### [MAJOR] 5. User Task Loss Ported Fidelity
 **auto-fixable**: no
 **Section**: §3 User Task Loss + Dataloader
-**Check**: The user's `compute_loss(s_out, y)` is faithfully ported: same
-formula, same reduction, same shape assumptions. The placeholder fallback is
-only kept when the placeholder strings are unexpanded.
-**Verify**: Compare the loss function body in `train_pipeline.py` against the
-user's `train.py` `compute_loss`. Confirm same ops (e.g. `F.mse_loss`,
+**Check**: The user's `compute_loss(s_out, y)` (or the semantically equivalent
+loss fn — identified by `(output, target) -> scalar`, not by name) is
+faithfully ported into `user_compute_loss`: same formula, same reduction,
+same shape assumptions. **Zero placeholder fallback**: the generated artifact
+must contain no `_placeholder_*` path — any occurrence is FAIL (a fallback
+loss would train a different objective than the user's).
+**Verify**: Compare the `user_compute_loss` body in `train_pipeline.py`
+against the user's `train.py` loss fn. Confirm same ops (e.g. `F.mse_loss`,
 `F.l1_loss`, etc.), same reduction mode, same order of operations.
 **Anti-pattern**: Silently swapping `mse_loss` for `l1_loss`; adding a
-normalization factor the user didn't have; inverting argument order.
+normalization factor the user didn't have; inverting argument order; a
+`_placeholder_*` fallback loss surviving into the artifact.
 **Fix**: Replace the ported body with the user's verbatim.
 
 ### [MAJOR] 6. Dataloader Re-Iterable
@@ -285,17 +289,15 @@ importlib loader for `os.path.abspath` / `os.path.isfile` checks).
 the script never writes to.
 **Fix**: Switch to `pathlib.Path` / literals to CLI args.
 
-### [MAJOR] 17. Placeholder Fallback Keeps Script Runnable
-**auto-fixable**: no
-**Section**: §3 User Task Loss + Dataloader (placeholder fallback)
-**Check**: When `USER_TRAIN_MODULE.startswith("{{")`, the script falls back to
-`_placeholder_user_loss` (MSE) + `_PlaceholderDataLoader` (re-iterable random
-loader). This keeps the template smoke-testable before specialisation.
-**Verify**: Read `_load_user_train`. Confirm the placeholder branch returns
-both fallbacks and doesn't raise.
-**Anti-pattern**: Raising on unexpanded placeholders (breaks smoke testing
-before the agent specialises); fallback only returning loss, not dataloader.
-**Fix**: Add the fallback branch.
+### [MAJOR] 17. <deleted — placeholder fallback semantics removed>
+**auto-fixable**: n/a
+**Section**: (removed with the placeholder system)
+**Check**: Removed in the skeleton rework (design draft §4 Layer 4): the
+skeleton is a non-runnable intermediate and an unspecialised slot must fail
+loud with `NotImplementedError` — there is no "placeholder fallback keeps the
+script runnable" path. Any fallback body that silently substitutes dummy
+loss / loader / eval logic is FAIL (see item 5 zero-placeholder rule and
+C21-C24).
 
 ### [MAJOR] 18. EMA Decay Default 0.999
 **auto-fixable**: yes
@@ -331,19 +333,19 @@ protocol; use `accuracy_direction` for judgment.
 ### [CRITICAL] 20. I/O Shape Reads DUMMY_INPUT (no hardcoded shape)
 **auto-fixable**: yes
 **Section**: §3 User Task Loss + Dataloader
-**Check**: Every placeholder/fallback shape in the generated script and any
-sibling helper (e.g. `data_utils.py`) — dataloader batch shape, eval-metric
-random data, `_PlaceholderDataLoader` — is sourced from the model contract's
-`DUMMY_INPUT`, never a hardcoded literal. **Hardcoded shape (e.g. writing 32
-where `DUMMY_INPUT` says 64) = FAIL.**
+**Check**: Every shape literal in the generated script and any sibling helper
+(e.g. `data_utils.py`) — dataloader batch shape, eval-metric random data,
+user-eval fixed data — is sourced from the model contract's `DUMMY_INPUT`,
+never a hardcoded literal. **Hardcoded shape (e.g. writing 32 where
+`DUMMY_INPUT` says 64) = FAIL.**
 **Verify**: grep the generated `train_pipeline.py` + `data_utils.py` for shape
 literals (e.g. `[1,4,48,...]`, `torch.randn(...,*inner)`). Confirm each matches
 `DUMMY_INPUT["shape"]`, not a hand-typed number. Layer 2 smoke must forward a
 batch of `DUMMY_INPUT` shape through teacher + student without a shape error.
 **Anti-pattern**: `data_utils.py` hardcoding `shape=(...,32,...)` while the
-model contract is `(...,64,...)` (real bug observed in remote runs); the
-template's `_PlaceholderDataLoader` default shape surviving into a
-project-specialised `data_utils.py` unaligned with the user `DUMMY_INPUT`.
+model contract is `(...,64,...)` (real bug observed in remote runs); a
+skeleton default shape surviving into a project-specialised
+`data_utils.py` unaligned with the user `DUMMY_INPUT`.
 **Fix**: Replace any hardcoded shape with the value read from the model
 contract's `DUMMY_INPUT`; re-run Layer 2 smoke.
 
@@ -364,3 +366,73 @@ wrapper must delegate to `baseline.build_model` with I/O preserved.
 I/O shape; assuming `build_cfg={}` is safe without checking the forward shape.
 **Fix**: Fix the build config / wrapper so I/O matches baseline; never paper
 over a shape mismatch in smoke.
+
+### [CRITICAL] 21. Zero Placeholder Residue
+**auto-fixable**: yes
+**Section**: workflow Validation Layer 1 (AST scan)
+**Check**: The generated artifacts contain **none** of: the `{{` literal,
+`_placeholder_*` identifiers, the `USER_TRAIN_MODULE` / `USER_EVAL_MODULE`
+constants, the `_load_user_train` / `_load_user_eval` functions, or the four
+removed `--user_*` CLI flags (`--user_train_import` / `--user_loss_fn` /
+`--user_eval_import` / `--user_eval_fn`). An unspecialised slot must keep its
+`raise NotImplementedError(...)` (fail loud), never a dummy fallback.
+**Verify**: Parse `train_pipeline.py` + helper files with `ast`; confirm no
+`{{` string constant, no `_placeholder_`-prefixed name, no
+`USER_TRAIN_MODULE`/`USER_EVAL_MODULE` assignment, no `_load_user_train` /
+`_load_user_eval` def, and grep the CLI block for the four `--user_*` flags.
+**Anti-pattern**: Skeleton slot bodies leaking into the artifact; a
+runtime-injection loader resurrected under a new name; any `--user_*` flag.
+**Fix**: Replace residue with the ported user logic; delete the flags.
+
+### [CRITICAL] 22. Loss Function Body Ported Verbatim
+**auto-fixable**: no
+**Section**: §3 User Task Loss + Dataloader
+**Check**: `user_compute_loss` body is the user's loss fn (semantically
+identified — `(output, target) -> scalar`) ported verbatim: **same ops, same
+reduction, same shape assumptions**. **Any silent substitution (MSE→L1,
+added normalization factor, swapped argument order) = FAIL** — teacher/student
+would train a different objective than the user's original (violates
+"按原始配置训练", mirrors supernet checklist 12's verbatim-port spirit).
+**Verify**: AST-compare the user loss fn body against `user_compute_loss`
+(grep the ported body; confirm the same `F.mse_loss` / `F.l1_loss` etc. calls,
+the same reduction args, the same constant factors). Layer 3
+fidelity_check.py must print `LOSS_ALLCLOSE: true` (or `LOSS_AST_MATCH: true`
+when degraded).
+**Anti-pattern**: Any op/reduction/factor drift between the two bodies.
+**Fix**: Replace the ported body with the user's verbatim (plus its dependency
+closure); re-run Layers 2-3.
+
+### [CRITICAL] 23. Eval Metric Body Ported Verbatim
+**auto-fixable**: no
+**Section**: §3.1 User Eval Metric
+**Check**: `user_eval_metric` body is the user's eval metric (discovered from
+the repo's eval script — `test_*.py` / `eval*.py` / `evaluate*.py` /
+`test.py`) ported verbatim: **same formula, same normalization, same data
+source** (e.g. NMSE = `‖out-y‖²/‖y‖²` with the same `+1e-12` guard). A
+silently different metric (NMSE→MSE, different denominator) = FAIL — the
+displayed accuracy would not match the user's own measurement.
+**Verify**: Compare the ported eval fn body against the user's eval script.
+Confirm `run_eval_mode` emits `STUDENT_ACCURACY` + `STUDENT_ACCURACY_KIND` +
+`MET_ACCURACY` + `ACCURACY_CONFIDENCE`, writes no ckpt, and resolves direction
+via `kd_common.accuracy_direction` (no symbol auto-guess). Layer 3
+fidelity_check.py must print `EVAL_ALLCLOSE: true` on the same model instance.
+**Anti-pattern**: Inventing a metric the user's eval script doesn't compute;
+swapping NMSE for MSE; a dummy-metric fallback; auto-guessing direction from
+the value's sign; writing a ckpt in eval mode.
+**Fix**: Replace the ported body with the user's verbatim; emit the four-key
+protocol; use `accuracy_direction` for judgment.
+
+### [CRITICAL] 24. Fidelity Check PASS Evidence
+**auto-fixable**: no
+**Section**: workflow Validation Layer 3
+**Check**: `scripts/fidelity_check.py` against the generated artifact + the
+user's original code printed **`FIDELITY: PASS`** with **`FIDELITY_LEVEL:
+numeric`** (or `ast` with a declared degradation reason on stderr — the
+degradation itself must be reported, never silently skipped). Loss / loader /
+eval / optimizer / model-I/O items must be `true` or `skip` (no `false`).
+**Verify**: Re-run the fidelity command (workflow Layer 3) and capture
+`FIDELITY:` + `FIDELITY_LEVEL:` + the per-item `*_OK`/`*_ALLCLOSE` lines.
+**Anti-pattern**: Emitting the JSON without running fidelity; `FIDELITY: FAIL`
+(exited 2) ignored; masking a `false` item as skip.
+**Fix**: Fix the drift (verbatim port / closure copy / optimizer class),
+re-run Layers 2-3, then re-verify.
