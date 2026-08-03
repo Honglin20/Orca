@@ -320,3 +320,49 @@ cd orca/iface/web/frontend && npx vitest run
 ---
 
 **E2E 全绿**（10/10 Playwright 真机 + 456 vitest + 31 后端回归；1 个 stale 真机用例已 minimal 修复+反向回归，未 commit）。
+
+---
+
+## 第三轮：review 复验（commit `93f931d` + `c58172a`，2026-08-03）
+
+> 复验「双路 review 闭环」改动（选择/折叠/单删/Shift 时序 + 看板视觉放大，叠加在 RunList 重设计 + 分组维度之上）。重点验证 5 个行为改动（M-1..M-5）+ 美观（M-6）。**真机驱动抓真 bug**——前两轮分别抓到 AC-4 折叠 regression、stale 五列用例；本轮看 review 改动有无引入新问题。
+
+### K. 自测门（重 build + 后端回归 + 既有真机）
+
+1. **重 build**：`cd orca/iface/web/frontend && npx vite build` → `✓ built in 5.38s`（index-B9xiw2G9.js 378.84 kB）。
+2. **后端回归（AC-18）**：`pytest tests/iface/web/test_routes.py tests/iface/web/test_multi_run_phase_c.py -q`（`ORCA_HOME=/tmp/orca-e2e-home-r3` 隔离）→ **31 passed in 2.57s**。
+3. **既有 Playwright 真机**：`pytest tests/iface/web/test_playwright_runlist.py -v`（`LD_LIBRARY_PATH=/tmp/orca-libs/root/usr/lib/x86_64-linux-gnu`）→ **10 passed in 18.44s**（含 AC-19/20/21/23/4/6/7/24/25/26 + 9b 兼容）。
+
+### L. review 行为改动逐条真机复验（probe `_e2e_artifacts/probe_round3.py`）
+
+> 5 个 probe 全 PASS。M-1/M-5 在网络边界（`page.route("**/api/runs*")`）注入 mock 控 status/progress——真 tape 难产 running+精确 progress；store/React/渲染/选择/chip 全部真驱动。M-2/M-3/M-4 用真 tape seed + 真 DELETE（M-3）。
+
+| probe | 意图 | 真机命令 | 真机观察 | 判定 |
+|---|---|---|---|---|
+| **M-1 选择保留** | 切「运行中」chip 隐藏已选 completed → 切回「全部」选择仍在（review：求交改用未过滤 `runs`，RunListPage L148-151） | 勾 2 checkbox（completed+running）→ 切 running chip → 切回 all | `selected_before=2`；running chip 期 visible=1/checked=1（completed 隐藏非剔）；切回 `selected_after=2` | ✓ PASS |
+| **M-2 跨 dim 折叠不擦写** | project dim 折叠 proj-a → status dim「全部折叠」→ 切回 project dim proj-a 仍折叠（review：`expandAll/collapseAll` 合并语义，`use-collapsed-buckets.ts` L109-126） | project dim 折叠 proj-a → 切 status dim → collapse-all → 切回 project dim | localStorage 演化：`["project:proj-a"]` → `["project:proj-a","status:queued",...,"status:failed"]`（status 桶加入，project:proj-a **保留**）→ 切回后同集；`proj_a_still_collapsed=true`、`status_fold_kept=true` | ✓ PASS |
+| **M-3 单删成功 toast** | 点行删除 → 确认 → 右下 toast（review：旧实现无反馈，RunListPage L179 `toast("已删除 …")`） | 真 tape `del-target` → 列表点 delete-btn → confirm-delete | toast 文案 `已删除 deletable-wf`，`role=status`；行乐观消失 `run_row_count_after=0` | ✓ PASS |
+| **M-4 Shift 组内范围选** | 同组 A→Shift+B 选区间；跨组 Shift 不越界（review：`orderedIds` 收窄到当前桶，RunListPage L326-329） | proj-a 4 run + proj-b 1 run；click a0 → Shift+click a2 → Shift+click b0 | a0..a2 区间 = 3 selected，a3 未选（无越界）；跨组 Shift 只 +b0 = 4 total，a3 仍未选（`indexOf(anchor)=-1` 退化普通 toggle） | ✓ PASS |
+| **M-5 parseProgress** | `progress="3/7"` → 进度条约 43%（review：done/total 契约，旧 `parseFloat("3/7")` 截断成 3%，BoardCard `parseProgress`） | board view，running 列 BoardCard 进度条 fill | `style="width: 43%"`（3/7=0.4286→round 43），精确匹配 `expected_pct=43` | ✓ PASS |
+
+probe 结果 JSON：`_e2e_artifacts/round3_results.json`。
+
+### M. 美观真机（M-6，截图 `_e2e_artifacts/round3_*.png`）
+
+> 用 mock 多状态数据（4 run 跨 completed/running/failed × 2 project）截图，视觉验证 review 美观改动。
+
+- **项目 dim 每列左色条**（review A-M2「非状态 dim 列也需锚点，看板不再退化」）：`round3_mock_board_project_light.png` → AI 验「proj-a / proj-b 每列左侧均有 3px 色条」（BoardColumn `showBar=!empty` + 默认 `accent/0.4`）。
+- **列底色可见 + BoardCard 不局促**：`round3_mock_board_status_light.png` → AI 验「列有 subtle surface tint 底色；cards comfortable padding，无 overflow」（BoardCard `py-2.5` + 列 `bg-[rgb(var(--surface-2)/0.45)]`）。
+- **暗模式色条 + 卡片可读**：`round3_mock_board_status_dark.png` → AI 验「dark 背景；cards 文字/状态点对比可读；左色条（blue/green/red）暗模式仍可见」。
+- **暗模式删 icon 可见**（review「暗 mode 删除 icon 可见」）：`round3_dark_list_delete_icon.png` → AI 验「3 行右侧 trash/open 两 icon 均清晰可辨（light gray，对比足）」（RunRow 常显 + `text-[rgb(var(--text-faint)/0.55)]` token 暗模式自适配）。注：BoardCard 删 icon 设计为 hover-only（SPEC §10.3），静态截图按预期不显——`round3_dark_board_card_hover.png` 捕获 hover 态。
+- **bulk bar + 选中 ring**：`round3_mock_list_multiselect_light.png` → AI 验「已选 1 项 + 删除(N) + 取消；selected row 蓝色 ring 高亮」。
+
+### N. 本轮结论
+
+- **无新 bug**：5/5 review 行为 probe 全绿；美观改动（色条/底色/padding/暗模式 icon）真机可视确认生效。两次迭代回归基线（AC-4 折叠、stale 五列用例）未退化。
+- **唯一「失败」是 probe 自身**：M-1 首跑用 `[checked]` HTML 属性选择器（React controlled checkbox 不同步 attribute）误报 0；改 `:checked` DOM 伪类后 PASS——非产品问题。
+- **工作树变更（未 commit）**：`?? orca/iface/web/static/assets/*`（本轮 vite build 产物）；`?? _e2e_artifacts/round3_*` + `probe_round3*.py`（取证，勿 commit）。
+
+---
+
+**E2E 全绿**（第三轮：5/5 review 行为 probe + 10/10 Playwright 真机 + 31 后端回归；无新 bug，美观真机确认）。
