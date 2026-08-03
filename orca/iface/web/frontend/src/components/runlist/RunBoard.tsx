@@ -34,7 +34,6 @@ interface Props {
   /** 空桶显隐（两视图共用，§10.9）：false → 0-run 桶不渲染列。 */
   showEmpty: boolean;
   selectedIds: Set<string>;
-  deletingIds: Set<string>;
   /** 切换 run 选择（Shift 范围选用）；orderedIds 由本组件按当前桶收窄（M-4，与 ProjectGroup 一致）。 */
   onToggleRun: (id: string, shiftKey: boolean, orderedIds: string[]) => void;
   onOpenRun: (id: string) => void;
@@ -46,7 +45,6 @@ export function RunBoard({
   dim,
   showEmpty,
   selectedIds,
-  deletingIds,
   onToggleRun,
   onOpenRun,
   onDeleteRun,
@@ -86,7 +84,6 @@ export function RunBoard({
             hasBlocked={hasBlocked}
             runs={b.runs}
             selectedIds={selectedIds}
-            deletingIds={deletingIds}
             onToggleRun={(id, shiftKey) => onToggleRun(id, shiftKey, bucketIds)}
             onOpenRun={onOpenRun}
             onDeleteRun={onDeleteRun}

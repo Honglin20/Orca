@@ -48,8 +48,6 @@ interface Props extends ProjectGroupData {
   selectAllState: "all" | "none" | "partial";
   onOpenRun: (id: string) => void;
   onDeleteRun: (id: string) => void;
-  /** 删除 in-flight 的 id 集合（视觉 opacity-40） */
-  deletingIds: Set<string>;
 }
 
 export function ProjectGroup({
@@ -66,7 +64,6 @@ export function ProjectGroup({
   selectAllState,
   onOpenRun,
   onDeleteRun,
-  deletingIds,
 }: Props) {
   // 聚合统计（运行中 / 待决策 / 总花费 / 最近）。
   const agg = useMemo(() => {
@@ -202,7 +199,6 @@ export function ProjectGroup({
               run={r}
               q={q}
               selected={selectedIds.has(r.run_id)}
-              deleting={deletingIds.has(r.run_id)}
               onToggleSelect={(shiftKey) => onToggleRun(r.run_id, shiftKey)}
               onOpen={() => onOpenRun(r.run_id)}
               onDelete={() => onDeleteRun(r.run_id)}

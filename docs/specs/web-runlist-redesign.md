@@ -189,10 +189,10 @@
 - 点 checkbox `stopPropagation`，不触发行跳转。
 
 ### 5.6 删除反馈（D3 M3）
-- 成功 → 右下 toast `已删除 <name>` + 行 `opacity/height` 200ms 过渡消失。
+- 成功 → 右下 toast `已删除 <name>`（M-3）。
 - 失败 → toast（**废 `alert()`**）`删除失败：<原因>` + 行回滚动画。
 - 批量 → toast `已删除 N 项` 或 `已删除 X 项，Y 项失败：[详情]`。
-- DELETE in-flight 期间行 `opacity-40`（视觉「删除中」）。
+- 行为真相：store 同步乐观移除 run（`await fetch` 之前）→ 渲染时该 run 已被 filter 掉 → 行**瞬时消失**。删除反馈靠成功 toast（M-3）+ 瞬时行消失；**不保留** in-flight 中间视觉态（同步乐观移除使其不可达，旧 `opacity-40` 中间态为死代码已删）。
 
 ### 5.7 删除确认对话框 a11y（D1 M10 / D3 M7）
 - Esc → 取消；Enter（焦点在框内）→ 确认；focus trap（Tab 循环限框内）；`aria-describedby` 关联描述 `<p>`；关闭后焦点回触发元素；背景容器加 `inert`。
@@ -289,7 +289,7 @@ const KEY = "orca-runlist-collapsed-v1";
 ## 8. 验收标准（AC，逐条可测）
 
 ### A. 痛点闭环
-- **AC-1 删除**：删除按钮 `size=16`、命中区 ≥32px、常显（无 `opacity-0 group-hover`）；键盘 tab 可达；点删除→确认→行 200ms 消失 + 成功 toast。
+- **AC-1 删除**：删除按钮 `size=16`、命中区 ≥32px、常显（无 `opacity-0 group-hover`）；键盘 tab 可达；点删除→确认→行瞬时消失（同步乐观移除）+ 成功 toast。
 - **AC-2 多选**：行/分组/全选三级 checkbox；Shift+点范围选；选择 `Set<run_id>`；切排序/chip/groupBy/清搜索 选择保留；refresh/WS 删除后选择自动求交。
 - **AC-3 排序**：6 字段可排；触发器显当前字段+方向；同字段二次点反转；持久 localStorage；分组+排序 stable。
 - **AC-4 折叠持久**：折叠写 `orca-runlist-collapsed-v1`；F5 后保持；localStorage 损坏降级不崩。

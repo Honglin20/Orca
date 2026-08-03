@@ -50,7 +50,6 @@ interface Props {
   hasBlocked: boolean;
   runs: RunSummary[];
   selectedIds: Set<string>;
-  deletingIds: Set<string>;
   onToggleRun: (id: string, shiftKey: boolean) => void;
   onOpenRun: (id: string) => void;
   onDeleteRun: (id: string) => void;
@@ -67,7 +66,6 @@ export function BoardColumn({
   hasBlocked,
   runs,
   selectedIds,
-  deletingIds,
   onToggleRun,
   onOpenRun,
   onDeleteRun,
@@ -145,7 +143,6 @@ export function BoardColumn({
               key={r.run_id}
               run={r}
               selected={selectedIds.has(r.run_id)}
-              deleting={deletingIds.has(r.run_id)}
               onToggleSelect={(shiftKey) => onToggleRun(r.run_id, shiftKey)}
               onOpen={() => onOpenRun(r.run_id)}
               onDelete={() => onDeleteRun(r.run_id)}

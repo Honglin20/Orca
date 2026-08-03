@@ -74,8 +74,6 @@ export function RunListPage() {
     | { mode: "bulk"; targets: DeleteTarget[] }
   >(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
-  // DELETE in-flight 的 id 集合（视觉 opacity-40）。
-  const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
 
   // ── WS（控制帧 + 重连） ─────────────────────────────────────────────────────
   const wsUrl = useMemo(() => {
@@ -171,13 +169,6 @@ export function RunListPage() {
   const handleConfirm = async () => {
     if (!dialog) return;
     setDeleteBusy(true);
-    // 用 inflight id 集合标记视觉「删除中」。
-    const inflight = new Set<string>(
-      dialog.mode === "single"
-        ? [dialog.target.runId]
-        : dialog.targets.map((t) => t.runId),
-    );
-    setDeletingIds(inflight);
     // 全部成功才清选择 + 关对话框（SPEC §3.3：仅「删除完成」清空选择；失败保留以便重试）。
     let allOk = true;
     try {
@@ -222,7 +213,6 @@ export function RunListPage() {
       }
     } finally {
       setDeleteBusy(false);
-      setDeletingIds(new Set());
     }
   };
 
@@ -348,7 +338,6 @@ export function RunListPage() {
                             id,
                         })
                       }
-                      deletingIds={deletingIds}
                     />
                   );
                 })}
@@ -367,7 +356,6 @@ export function RunListPage() {
                   dim={groupBy}
                   showEmpty={showEmpty}
                   selectedIds={selected}
-                  deletingIds={deletingIds}
                   // M-4：RunBoard 内部按桶收窄 orderedIds（同列表 ProjectGroup 一致）。
                   onToggleRun={toggle}
                   onOpenRun={handleOpen}

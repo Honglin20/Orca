@@ -30,7 +30,6 @@ interface Props {
   run: RunSummary;
   q: string;
   selected: boolean;
-  deleting: boolean;
   onToggleSelect: (shiftKey: boolean) => void;
   onOpen: () => void;
   onDelete: () => void;
@@ -40,7 +39,6 @@ export function RunRow({
   run,
   q,
   selected,
-  deleting,
   onToggleSelect,
   onOpen,
   onDelete,
@@ -55,7 +53,7 @@ export function RunRow({
       data-testid="run-row"
       className={`group relative flex items-center gap-3 rounded border orca-border orca-bg-surface px-3 py-2 pl-4 shadow-sm transition-opacity duration-200 hover:orca-bg-surface-2 ${
         isBlocked ? "ring-1 ring-inset ring-orca-skipped/30" : ""
-      } ${deleting ? "opacity-40" : ""}`}
+      }`}
     >
       {/* 状态竖条（行内 hex 来自 STATUS_BAR_HEX，§1.2 约定允许） */}
       <div

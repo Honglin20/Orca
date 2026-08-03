@@ -31,7 +31,6 @@ import { fmtCost, fmtElapsed } from "./format-helpers";
 interface Props {
   run: RunSummary;
   selected: boolean;
-  deleting: boolean;
   onToggleSelect: (shiftKey: boolean) => void;
   onOpen: () => void;
   onDelete: () => void;
@@ -67,7 +66,6 @@ function parseProgress(p: string | undefined | null): number | null {
 export function BoardCard({
   run,
   selected,
-  deleting,
   onToggleSelect,
   onOpen,
   onDelete,
@@ -90,9 +88,7 @@ export function BoardCard({
       }}
       className={`group relative cursor-pointer rounded border orca-border orca-bg-surface px-3 py-2.5 pl-4 text-left shadow-sm transition-opacity hover:orca-bg-surface-2 ${
         selected ? "ring-1 ring-orca-accent/40 bg-[rgb(var(--accent)/0.06)]" : ""
-      } ${isBlocked ? "ring-1 ring-inset ring-orca-skipped/30" : ""} ${
-        deleting ? "opacity-40" : ""
-      }`}
+      } ${isBlocked ? "ring-1 ring-inset ring-orca-skipped/30" : ""}`}
     >
       {/* 状态竖条（行内 hex 来自 STATUS_BAR_HEX，§1.2 约定允许）。w-1=4px，与列条 3px 同档（A-MINOR） */}
       <div
