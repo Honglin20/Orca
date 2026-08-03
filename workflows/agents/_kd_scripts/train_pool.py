@@ -1,5 +1,7 @@
 """train_pool.py —— KD-NAS 训练阶段：有界并发池 + 增量账本（吃 gate 的 accepted manifest）。
 
+# ⚠️ DEPRECATED —— 旧并行 sweep 路径，活跃串行 kd-nas.yaml 不调用；保留供历史测试，删除见 followup SPEC。
+
 本脚本**只做训练阶段**：
   - latency gate 已在 ``gate_all.py`` 完成（FAIL_latency 已落账、ACCEPTED 进 manifest）
   - 本脚本读 gate manifest + setup 的 ``concurrency / device_plan / per_variant_vram_bytes``
@@ -136,19 +138,19 @@ def _train_one(ctx: dict[str, Any], entry: dict[str, Any], device: str) -> dict[
     accepted_cfg = entry["accepted_cfg"]
     cfg_str = json.dumps(accepted_cfg, sort_keys=True)
     cfg_hash = hashlib.sha256(cfg_str.encode()).hexdigest()[:16]
-    lat_med = float(entry["latency_ms_median"])
+    lat_med = float(entry["latency_us_median"])
     # device_plan 的 ""（gpu_probe fail-soft / --device cpu）对 train_pipeline.py 的
     # _resolve_device 是非法值（torch.device("") raise）→ 归一化为 "cpu"。cuda:N 原样透传。
     device = device or "cpu"
-    lat_std = float(entry["latency_ms_std"])
+    lat_std = float(entry["latency_us_std"])
 
     base = _base_row_from_entry(entry, provider_id_str=ctx["provider_id"])
-    base["target_latency_ms"] = float(ctx["target_latency_ms"])
+    base["target_latency_us"] = float(ctx["target_latency_us"])
     base["accuracy_baseline"] = float(ctx["accuracy_baseline"])
 
     common = {
         "accepted_cfg": accepted_cfg, "cfg_hash": cfg_hash,
-        "latency_ms_median": lat_med, "latency_ms_std": lat_std,
+        "latency_us_median": lat_med, "latency_us_std": lat_std,
     }
 
     # 1. train（完整 KD + 每-epoch 实时图；--device 绑卡；--env_anchor 自举 ORCA env）
@@ -219,8 +221,8 @@ def _main() -> int:
     p.add_argument("--accuracy_baseline_kind", default="")
     p.add_argument("--latency_provider", required=True,
                    help="落账 latency_provider_id 字段（与 gate/setup 同串，跨 run 身份）")
-    p.add_argument("--target_latency_ms", required=True, help="落账 target 字段")
-    p.add_argument("--baseline_latency_ms", type=float, default=None,
+    p.add_argument("--target_latency_us", required=True, help="落账 target 字段")
+    p.add_argument("--baseline_latency_us", type=float, default=None,
                    help="flatten 实测 baseline latency（透传给 viz_kd 画 latency bar 的 baseline 参考行）")
     p.add_argument("--concurrency", type=int, required=True, help="setup gpu_probe 算的并发数（权威）")
     p.add_argument("--device_plan", required=True,
@@ -288,7 +290,7 @@ def _main() -> int:
             print(f"[train_pool] WARN: {warn}", file=sys.stderr)
 
     ctx = {
-        "target_latency_ms": args.target_latency_ms,
+        "target_latency_us": args.target_latency_us,
         # 落账 latency_provider_id 用 gate/setup 的同一 provider 串（跨 run done 谓词身份匹配）。
         "provider_id": provider_id(args.latency_provider),
         "accuracy_baseline": args.accuracy_baseline,
@@ -327,7 +329,7 @@ def _main() -> int:
                 except Exception as e:  # 单 worker 崩不杀整批
                     traceback.print_exc(file=sys.stderr)
                     base = _base_row_from_entry(entry, provider_id_str=ctx["provider_id"])
-                    base["target_latency_ms"] = float(ctx["target_latency_ms"])
+                    base["target_latency_us"] = float(ctx["target_latency_us"])
                     base["accuracy_baseline"] = float(ctx["accuracy_baseline"])
                     row = {
                         **base,
@@ -335,8 +337,8 @@ def _main() -> int:
                         "cfg_hash": hashlib.sha256(
                             json.dumps(entry["accepted_cfg"], sort_keys=True).encode()
                         ).hexdigest()[:16],
-                        "latency_ms_median": float(entry["latency_ms_median"]),
-                        "latency_ms_std": float(entry["latency_ms_std"]),
+                        "latency_us_median": float(entry["latency_us_median"]),
+                        "latency_us_std": float(entry["latency_us_std"]),
                         "status": "FAIL_train", "accuracy": 0, "accuracy_kind": "",
                         "met_latency": True, "met_accuracy": False, "ckpt": "",
                         "fail_reason": f"worker exception: {type(e).__name__}: {e}",
@@ -384,16 +386,16 @@ def _main() -> int:
         viz_argv = [
             sys.executable, os.path.join(args.kd_scripts_dir, "viz_kd.py"),
             "--ledger", args.ledger,
-            "--target_latency_ms", args.target_latency_ms,
+            "--target_latency_us", args.target_latency_us,
             "--variants_total", str(variants_total),
             "--accuracy_baseline", args.accuracy_baseline,
             "--accuracy_baseline_kind", args.accuracy_baseline_kind,
             "--env_anchor", args.per_run_artifacts_dir,
         ]
-        # baseline_latency_ms 透传给 viz_kd 画 latency bar 的 baseline 参考行。
+        # baseline_latency_us 透传给 viz_kd 画 latency bar 的 baseline 参考行。
         # None（agent.md 未传 / 直跑 CLI）时不加该 flag，viz_kd 按 default=None 跳过 baseline 行。
-        if args.baseline_latency_ms is not None:
-            viz_argv += ["--baseline_latency_ms", str(args.baseline_latency_ms)]
+        if args.baseline_latency_us is not None:
+            viz_argv += ["--baseline_latency_us", str(args.baseline_latency_us)]
         try:
             viz_proc = subprocess.run(viz_argv, capture_output=True, text=True, check=False)
         except Exception as e:

@@ -909,6 +909,161 @@ def test_distill_mode_empty_dataloader_fails_loud(tmp_path):
 
 
 # ===========================================================================
+# KD loss 强制（distill 必须含非空 kd_losses）
+# ===========================================================================
+def _import_kd_compose():
+    """直接 import _kd_scripts/kd/compose.py（不经 train_pipeline 子进程）。"""
+    sys.path.insert(0, str(KD_SCRIPTS_DIR))
+    try:
+        import importlib
+        mod = importlib.import_module("kd.compose")
+        return mod
+    finally:
+        sys.path.pop(0)
+
+
+def test_compose_rejects_empty_kd_losses_fail_loud():
+    """distill 铁律：空 kd_losses ∧ ema off → build_kd_loss/KDComposite 构造即 fail loud。
+
+    意图：student 训练必须加载 KD loss；纯 task loss 不是蒸馏（属 --mode teacher）。
+    """
+    compose = _import_kd_compose()
+
+    def _task_loss(s_out, y):
+        return ((s_out - y) ** 2).mean()
+
+    # 空 kd_losses + ema off → 构造期 ValueError
+    with pytest.raises(ValueError, match="kd_losses 为空"):
+        compose.build_kd_loss(_task_loss, {"kd_losses": [], "weights": {}})
+
+    # ema 开但 kd_losses 空 → 允许（mean-teacher 一致性也是 KD 信号）
+    comp_ema = compose.build_kd_loss(_task_loss, {"kd_losses": [], "ema": True})
+    assert comp_ema.use_ema is True
+
+    # 默认 mse config → 构造成功，调用返回 task + mse 项
+    import torch
+    comp_mse = compose.build_kd_loss(
+        _task_loss, {"kd_losses": ["mse"], "weights": {"mse": 1.0}}
+    )
+    s_out = torch.randn(2, 3)
+    t_out = torch.randn(2, 3)
+    y = torch.randn(2, 3)
+    loss = comp_mse(s_out, y, None, t_out, None, None, epoch=0)
+    assert torch.isfinite(loss)
+    # KD（mse）从 epoch 0 即贡献：loss > 纯 task loss
+    assert loss.item() > _task_loss(s_out, y).item()
+
+
+def test_compose_feature_term_without_hooks_fails_loud():
+    """SPEC §1.3 fail-loud 守卫：kd_losses 含特征项（ofd/fitnets/rkd）但运行时无 feats → raise。
+
+    覆盖 4 分支：
+      1. mse+ofd + feats=None → raise ValueError（含"特征项"）；旧逻辑静默 continue 是 bug。
+      2. mse-only + feats=None → ok（mse 不依赖 feats）。
+      3. kd_losses=[] + ema=True + feats=None → ok（无特征项）。
+      4. prepare(sample=[feat,...]) 后 __call__(s_feats=None,...) → 仍 raise
+         （守卫看运行时 feats，不看 prepare 历史；锁 intent）。
+    """
+    import torch
+    compose = _import_kd_compose()
+
+    def _task_loss(s_out, y):
+        return ((s_out - y) ** 2).mean()
+
+    s_out = torch.randn(2, 3)
+    t_out = torch.randn(2, 3)
+    y = torch.randn(2, 3)
+
+    # 分支 1：mse+ofd + 无 feats → raise
+    comp_ofd = compose.build_kd_loss(
+        _task_loss,
+        {"kd_losses": ["mse", "ofd"], "weights": {"mse": 1.0, "ofd": 0.3}},
+    )
+    with pytest.raises(ValueError, match="特征项"):
+        comp_ofd(s_out, y, None, t_out, None, None, epoch=0)
+
+    # 分支 2：mse-only + 无 feats → 不 raise
+    comp_mse = compose.build_kd_loss(
+        _task_loss, {"kd_losses": ["mse"], "weights": {"mse": 1.0}}
+    )
+    loss = comp_mse(s_out, y, None, t_out, None, None, epoch=0)
+    assert torch.isfinite(loss)
+
+    # 分支 3：空 kd_losses + ema + 无 feats → 不 raise（无特征项）
+    comp_ema = compose.build_kd_loss(
+        _task_loss, {"kd_losses": [], "ema": True, "weights": {"ema": 1.0}}
+    )
+    loss_ema = comp_ema(s_out, y, None, t_out, None, s_out, epoch=0)
+    assert torch.isfinite(loss_ema)
+
+    # 分支 4：prepare(sample=...) 后 __call__(s_feats=None,...) → 仍 raise
+    # 守卫看运行时 feats，不看 prepare 历史（intent: prepare 只 build adapter 参数，
+    # 不缓解"训练时 forward 没产出 feats"的真实问题）。
+    s_feat_sample = [torch.randn(2, 5)]
+    t_feat_sample = [torch.randn(2, 5)]
+    comp_ofd.prepare(s_feat_sample, t_feat_sample)
+    assert comp_ofd.ofd_adapter is not None  # prepare 已 lazy-build adapter
+    with pytest.raises(ValueError, match="特征项"):
+        comp_ofd(s_out, y, None, t_out, None, None, epoch=0)
+
+
+def test_distill_gen_student_ast_hook_detection_handles_indented_class_method(tmp_path):
+    """SPEC §6.4 / §7 F2 回归守护：distill/gen-student agent.md 的 AST 判定必须能识别
+    **缩进的 class method** ``def feature_hook_names(self)``（旧 ``grep '^def'`` 永远漏判 →
+    ofd 永远被剥离 → 回归"静默降级"）。
+
+    锁定 agent.md 内嵌的 AST python -c 片段对缩进 method 返回 True、对无 hook 文件返回 False。
+    """
+    import textwrap
+    # 从 distill/agent.md 提取 AST 判定片段（与 gen-student/agent.md step5 同款）。
+    ast_snippet = textwrap.dedent('''
+        import ast,sys
+        t=ast.parse(open(sys.argv[1]).read())
+        print(any(isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name=="feature_hook_names" for n in ast.walk(t)))
+    ''')
+
+    # 含缩进 class method 的 student（demo 真实形态：hook 是 class 成员，不是 module-level def）
+    student_with_hook = tmp_path / "with_hook.py"
+    student_with_hook.write_text(textwrap.dedent('''
+        import torch.nn as nn
+        class StudentModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+            def feature_hook_names(self) -> list:
+                return ["layer1", "layer2"]
+        def build_model(**cfg):
+            return StudentModel()
+    '''), encoding="utf-8")
+
+    # 无 hook 的 student
+    student_no_hook = tmp_path / "no_hook.py"
+    student_no_hook.write_text(textwrap.dedent('''
+        import torch.nn as nn
+        class StudentModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+        def build_model(**cfg):
+            return StudentModel()
+    '''), encoding="utf-8")
+
+    # 有 hook → True（旧 grep '^def' 会返回 0 → ofd 永远剥离 → F2 bug）
+    r1 = subprocess.run(
+        [sys.executable, "-c", ast_snippet, str(student_with_hook)],
+        capture_output=True, text=True,
+    )
+    assert r1.returncode == 0, r1.stderr
+    assert r1.stdout.strip() == "True", f"缩进 class method 应被 AST 识别：{r1.stdout}"
+
+    # 无 hook → False
+    r2 = subprocess.run(
+        [sys.executable, "-c", ast_snippet, str(student_no_hook)],
+        capture_output=True, text=True,
+    )
+    assert r2.returncode == 0, r2.stderr
+    assert r2.stdout.strip() == "False"
+
+
+# ===========================================================================
 # fidelity_check.py（Layer 3 数值级等价性）
 # ===========================================================================
 def test_fidelity_check_demo_fixture(tmp_path):

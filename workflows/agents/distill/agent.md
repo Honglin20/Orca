@@ -49,7 +49,7 @@ tools: [bash, read, write, edit, glob, grep]
 - ``kd_artifacts_dir = {{ setup.output.kd_artifacts_dir }}``
 - ``checkpoints_dir = {{ setup.output.checkpoints_dir }}``
 - ``per_run_artifacts_dir = {{ setup.output.per_run_artifacts_dir }}``
-- ``target_latency_ms = {{ inputs.target_latency_ms }}``
+- ``target_latency_us = {{ inputs.target_latency_us }}``
 - ``accuracy_baseline = {{ inputs.accuracy_baseline }}``
 - ``accuracy_baseline_kind = {{ inputs.accuracy_baseline_kind }}``
 - ``latency_provider = {{ inputs.latency_provider }}``
@@ -77,7 +77,7 @@ print(json.dumps({
   "round": int(sys.argv[1]),
   "student_model_path": sys.argv[2],
   "accepted_cfg": {}, "cfg_hash": "fail_build",
-  "latency_ms": -1, "latency_ms_std": 0,
+  "latency_us": -1, "latency_us_std": 0,
   "accuracy": -1, "accuracy_kind": "",
   "met_latency": False, "met_accuracy": False,
   "ckpt": "", "tune_status": "FAIL_latency",
@@ -96,7 +96,7 @@ echo "PARSED step0: GEN_STATUS=$GEN_STATUS → 进 tune_latency"
 
 > **整段 step 1-5 必须作为连续一条 bash 调用执行**（catch pattern 跨 step 共享变量；
 > 变量声明在 step 1，step 2-5 直接复用；任何 step 之间不应重开 bash 会话——否则 $ACCEPTED_CFG
-> / $LATENCY_MS / $CKPT_PATH 等会丢）。每个 ``## step N`` 是注释分隔，不是 bash 边界。
+> / $LATENCY_US / $CKPT_PATH 等会丢）。每个 ``## step N`` 是注释分隔，不是 bash 边界。
 >
 > ``--artifacts_dir`` required（tune_cache.json + 临时 ONNX 落此）。
 > DUMMY_INPUT 从 flatten baseline 读（与 teacher 一致；shape 跟 baseline，非写死）。
@@ -108,7 +108,7 @@ KD_ARTIFACTS_DIR="{{ setup.output.kd_artifacts_dir }}"
 STUDENT="{{ gen_student.output.student_model_path }}"
 KNOBS="{{ gen_student.output.knobs }}"
 ROUND="{{ gen_student.output.round }}"
-TARGET_LATENCY="{{ inputs.target_latency_ms }}"
+TARGET_LATENCY="{{ inputs.target_latency_us }}"
 LATENCY_PROVIDER="{{ inputs.latency_provider }}"
 
 BASELINE="{{ flatten.output.baseline_contract_path }}"
@@ -125,7 +125,7 @@ TUNE_OUT="$(python3 "$KD_SCRIPTS_DIR/tune_latency.py" \
   --variant_path "$STUDENT" \
   --build_fn build_model --dummy_input "$DUMMY_JSON" \
   --knobs "$KNOBS" \
-  --target_latency_ms "$TARGET_LATENCY" \
+  --target_latency_us "$TARGET_LATENCY" \
   --latency_provider "$LATENCY_PROVIDER" \
   --artifacts_dir "$KD_ARTIFACTS_DIR" \
   --device "{{ setup.output.device }}" --seed "{{ inputs.seed }}" 2>&1)"
@@ -136,8 +136,8 @@ if [ $TUNE_RC -ne 0 ]; then
   exit 2  # 系统失败（非业务），不进 catch 协议
 fi
 TUNE_STATUS="$(echo "$TUNE_OUT" | grep '^TUNE_STATUS:' | awk '{print $2}')"
-LATENCY_MS="$(echo "$TUNE_OUT" | grep '^LATENCY_MS_MEDIAN:' | awk '{print $2}')"
-LATENCY_STD="$(echo "$TUNE_OUT" | grep '^LATENCY_MS_STD:' | awk '{print $2}')"
+LATENCY_US="$(echo "$TUNE_OUT" | grep '^LATENCY_US_MEDIAN:' | awk '{print $2}')"
+LATENCY_STD="$(echo "$TUNE_OUT" | grep '^LATENCY_US_STD:' | awk '{print $2}')"
 if [ "$TUNE_STATUS" = "ACCEPTED" ]; then
   ACCEPTED_CFG="$(echo "$TUNE_OUT" | grep '^ACCEPTED_CFG:' | cut -d' ' -f2-)"
 elif [ "$TUNE_STATUS" = "FAIL_latency" ]; then
@@ -148,10 +148,10 @@ else
 fi
 CFG_HASH="$(python3 -c "import hashlib,sys;print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])" "$ACCEPTED_CFG")"
 MET_LATENCY=$(python3 -c "
-lat=float('$LATENCY_MS'.strip() or 'nan'); target=float('$TARGET_LATENCY'.strip())
+lat=float('$LATENCY_US'.strip() or 'nan'); target=float('$TARGET_LATENCY'.strip())
 print('true' if lat <= target else 'false')
 ")
-echo "PARSED step1: TUNE_STATUS=$TUNE_STATUS ACCEPTED_CFG=$ACCEPTED_CFG LATENCY_MS=$LATENCY_MS MET_LATENCY=$MET_LATENCY"
+echo "PARSED step1: TUNE_STATUS=$TUNE_STATUS ACCEPTED_CFG=$ACCEPTED_CFG LATENCY_US=$LATENCY_US MET_LATENCY=$MET_LATENCY"
 
 # ─── step 2: FAIL_latency 分支 → emit FAIL_latency JSON，agent 退 0（跳训练省 GPU）────────
 if [ "$TUNE_STATUS" = "FAIL_latency" ]; then
@@ -160,26 +160,36 @@ import json, sys
 print(json.dumps({
   "round": int(sys.argv[1]), "student_model_path": sys.argv[2],
   "accepted_cfg": json.loads(sys.argv[3]), "cfg_hash": sys.argv[4],
-  "latency_ms": float(sys.argv[5]), "latency_ms_std": float(sys.argv[6]),
+  "latency_us": float(sys.argv[5]), "latency_us_std": float(sys.argv[6]),
   "accuracy": -1, "accuracy_kind": "", "met_latency": False, "met_accuracy": False,
   "ckpt": "", "tune_status": "FAIL_latency", "status": "FAIL_latency",
   "fail_reason": "tune_latency FAIL",
   "viz_status": {"env_status": "skipped",
                  "charts": {"distill_loss": {"pushed": False, "reason": "FAIL_latency skip train"}}},
 }))
-' "$ROUND" "$STUDENT" "$ACCEPTED_CFG" "$CFG_HASH" "$LATENCY_MS" "$LATENCY_STD"
+' "$ROUND" "$STUDENT" "$ACCEPTED_CFG" "$CFG_HASH" "$LATENCY_US" "$LATENCY_STD"
   exit 0
 fi
 
 # ─── step 3: distill 训练（ACCEPTED 才跑；--kd_config recipe 必传）────────────────────
-# kd_config recipe（SPEC §6.8）：mse+ofd + EMA。ofd 对齐 student.feature_hook_names；
-# 无此 fn → ofd adapter 静默退化为零，但 KD 仍跑 mse。
+# kd_config recipe（SPEC §6.8）：mse+ofd + EMA（ofd 仅在 student 暴露 feature_hook_names 时启用）。
+# AST 判定 student 是否暴露 feature_hook_names()（不用 grep '^def'——class method 缩进，^def 漏判）。
+# 无 hook → KD_CONFIG 退 mse-only（不崩）；有 hook → mse+ofd（compose 守卫 §1.2(1) fail-loud 兜底）。
 # catch 协议（SPEC §15）：rc≠0 → status=FAIL_train, tune_status=ACCEPTED，agent 退 0。
 TRAIN_PIPELINE="{{ gen_train_script.output.train_pipeline_path }}"
 TEACHER_CACHE="{{ train_teacher.output.teacher_cache }}"
 CKPTS_DIR="{{ setup.output.checkpoints_dir }}"
 CKPT_PATH="${CKPTS_DIR}r${ROUND}_student.pt"
-KD_CONFIG='{"kd_losses":["mse","ofd"],"weights":{"mse":1.0,"ofd":0.3},"ema":true}'
+HAS_HOOK=$(python3 -c '
+import ast,sys
+t=ast.parse(open(sys.argv[1]).read())
+print(any(isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name=="feature_hook_names" for n in ast.walk(t)))
+' "$STUDENT")
+if [ "$HAS_HOOK" = "True" ]; then
+  KD_CONFIG='{"kd_losses":["mse","ofd"],"weights":{"mse":1.0,"ofd":0.3},"ema":true}'
+else
+  KD_CONFIG='{"kd_losses":["mse"],"weights":{"mse":1.0},"ema":true}'
+fi
 DISTILL_LOG="${KD_ARTIFACTS_DIR}logs/r${ROUND}_distill.log"
 
 OUT="$(ORCA_KD_SCRIPTS_DIR="$KD_SCRIPTS_DIR" python3 "$TRAIN_PIPELINE" \
@@ -205,14 +215,14 @@ import json, sys
 print(json.dumps({
   "round": int(sys.argv[1]), "student_model_path": sys.argv[2],
   "accepted_cfg": json.loads(sys.argv[3]), "cfg_hash": sys.argv[4],
-  "latency_ms": float(sys.argv[5]), "latency_ms_std": float(sys.argv[6]),
+  "latency_us": float(sys.argv[5]), "latency_us_std": float(sys.argv[6]),
   "accuracy": -1, "accuracy_kind": "", "met_latency": True, "met_accuracy": False,
   "ckpt": "", "tune_status": "ACCEPTED", "status": "FAIL_train",
   "fail_reason": "rc=" + sys.argv[7] + ": " + sys.argv[8],
   "viz_status": {"env_status": "skipped",
                  "charts": {"distill_loss": {"pushed": False, "reason": "FAIL_train skip eval"}}},
 }))
-' "$ROUND" "$STUDENT" "$ACCEPTED_CFG" "$CFG_HASH" "$LATENCY_MS" "$LATENCY_STD" "$RC" "$FAIL_TAIL"
+' "$ROUND" "$STUDENT" "$ACCEPTED_CFG" "$CFG_HASH" "$LATENCY_US" "$LATENCY_STD" "$RC" "$FAIL_TAIL"
   exit 0
 fi
 [ -f "$CKPT_PATH" ] || { echo "FAIL: distill rc=0 但 ckpt 未产：$CKPT_PATH" >&2; exit 2; }
@@ -238,14 +248,14 @@ import json, sys
 print(json.dumps({
   "round": int(sys.argv[1]), "student_model_path": sys.argv[2],
   "accepted_cfg": json.loads(sys.argv[3]), "cfg_hash": sys.argv[4],
-  "latency_ms": float(sys.argv[5]), "latency_ms_std": float(sys.argv[6]),
+  "latency_us": float(sys.argv[5]), "latency_us_std": float(sys.argv[6]),
   "accuracy": -1, "accuracy_kind": "", "met_latency": True, "met_accuracy": False,
   "ckpt": sys.argv[9], "tune_status": "ACCEPTED", "status": "FAIL_train",
   "fail_reason": "eval rc=" + sys.argv[7] + ": " + sys.argv[8],
   "viz_status": {"env_status": "skipped",
                  "charts": {"distill_loss": {"pushed": False, "reason": "eval fail"}}},
 }))
-' "$ROUND" "$STUDENT" "$ACCEPTED_CFG" "$CFG_HASH" "$LATENCY_MS" "$LATENCY_STD" "$EVAL_RC" "$EVAL_TAIL" "$CKPT_PATH"
+' "$ROUND" "$STUDENT" "$ACCEPTED_CFG" "$CFG_HASH" "$LATENCY_US" "$LATENCY_STD" "$EVAL_RC" "$EVAL_TAIL" "$CKPT_PATH"
   exit 0
 fi
 ACCURACY="$(echo "$EVAL_OUT" | grep '^STUDENT_ACCURACY:' | awk '{print $2}')"
@@ -261,7 +271,7 @@ echo "PARSED step4: ACCURACY=$ACCURACY KIND=$ACCURACY_KIND MET_ACC=$MET_ACC"
 VIZ_STDOUT_TABLE=$(python3 "$KD_SCRIPTS_DIR/viz_kd_stage.py" \
   --stage distill_table \
   --ledger "{{ setup.output.ledger_path }}" \
-  --baseline_latency_ms "{{ setup.output.baseline_latency_ms }}" \
+  --baseline_latency_us "{{ setup.output.baseline_latency_us }}" \
   --env_anchor "{{ setup.output.per_run_artifacts_dir }}" \
   || true)
 
@@ -288,14 +298,14 @@ import json, sys
 print(json.dumps({
   "round": int(sys.argv[1]), "student_model_path": sys.argv[2],
   "accepted_cfg": json.loads(sys.argv[3]), "cfg_hash": sys.argv[4],
-  "latency_ms": float(sys.argv[5]), "latency_ms_std": float(sys.argv[6]),
+  "latency_us": float(sys.argv[5]), "latency_us_std": float(sys.argv[6]),
   "accuracy": float(sys.argv[7]), "accuracy_kind": sys.argv[8],
   "met_latency": sys.argv[9] == "true", "met_accuracy": sys.argv[10] == "true",
   "ckpt": sys.argv[11], "tune_status": "ACCEPTED", "status": "SUCCESS",
   "fail_reason": "",
   "viz_status": json.loads(sys.argv[12]),
 }))
-' "$ROUND" "$STUDENT" "$ACCEPTED_CFG" "$CFG_HASH" "$LATENCY_MS" "$LATENCY_STD" \
+' "$ROUND" "$STUDENT" "$ACCEPTED_CFG" "$CFG_HASH" "$LATENCY_US" "$LATENCY_STD" \
    "$ACCURACY" "$ACCURACY_KIND" "$MET_LATENCY" "$MET_ACC" "$CKPT_PATH" "$VIZ_STATUS"
 ```
 
@@ -305,10 +315,10 @@ step 0 / step 2 / step 3 (catch) / step 4 (catch) / step 6 任一早退或末尾
 所有 emit 走 ``python3 -c json.dumps``（防 stderr 引号 / 裸换行注入破坏 JSON）。字段：
 
 - ``round`` / ``student_model_path`` / ``accepted_cfg`` (object) / ``cfg_hash`` /
-- ``latency_ms`` / ``latency_ms_std`` / ``accuracy`` / ``accuracy_kind`` /
+- ``latency_us`` / ``latency_us_std`` / ``accuracy`` / ``accuracy_kind`` /
 - ``met_latency`` / ``met_accuracy`` / ``ckpt`` / ``tune_status`` (ACCEPTED|FAIL_latency) /
 - ``status`` (SUCCESS|FAIL_latency|FAIL_train|FAIL_build) / ``fail_reason`` / ``viz_status`` (object)。
 
-- ``latency_ms`` / ``accuracy`` 必须从 stdout KEY 真值解析（FAIL_* 时 latency 可填 best_effort / accuracy=-1）；
+- ``latency_us`` / ``accuracy`` 必须从 stdout KEY 真值解析（FAIL_* 时 latency 可填 best_effort / accuracy=-1）；
 - ``status`` / ``tune_status`` 严格遵守 N21 映射（SUCCESS→ACCEPTED+SUCCESS / FAIL_latency→FAIL_latency+FAIL_latency / FAIL_train→ACCEPTED+FAIL_train）；
 - ``viz_status`` 必须是 JSON 对象（dumb copy 自 sidecar stdout，失败值合法不阻断）。

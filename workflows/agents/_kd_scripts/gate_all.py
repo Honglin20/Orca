@@ -1,5 +1,7 @@
 """gate_all.py —— KD-NAS 确定性 gate（一个节点内**串行**遍历全部变体）。
 
+# ⚠️ DEPRECATED —— 旧并行 sweep 路径，活跃串行 kd-nas.yaml 不调用；保留供历史测试，删除见 followup SPEC。
+
 为什么是它：原 ``kd-nas.yaml`` 用 workflow 循环（selector→distill→recorder→…）一个变体一轮地跑，
 LLM 编排开销 ×N 变体很贵；且并发训练对 latency 测量 contention 敏感。新 DAG 把 latency gate 收进
 **一个节点一个脚本**：本脚本串行遍历所有变体，每变体 ``_validate_variant`` + ``tune_latency`` +
@@ -16,7 +18,7 @@ CLI::
 
     python3 gate_all.py \\
       --receiver_dir <KB/receiver> --ledger <ledger.jsonl> \\
-      --target_latency_ms <f> --latency_provider <path::func> \\
+      --target_latency_us <f> --latency_provider <path::func> \\
       --artifacts_dir <kd_artifacts_dir> --kd_scripts_dir <_kd_scripts> \\
       --latency_tune_budget <int> [--measure_repeats 3] [--device auto] [--seed 0] \\
       [--accuracy_baseline <f>] [--force_rerun] [--manifest_out <path>]
@@ -60,7 +62,7 @@ from pick_variant import _list_variants, _load_variant, _validate_variant  # noq
 
 def _base_row(
     *, vid: str, variant_path: str, vsha: str, provider_id_str: str,
-    target_latency_ms: float, accuracy_baseline: float,
+    target_latency_us: float, accuracy_baseline: float,
 ) -> dict[str, Any]:
     """ledger 行的公共身份字段（与原 train_variants_parallel 一致，跨 run 复用真相源）。"""
     return {
@@ -69,7 +71,7 @@ def _base_row(
         "variant_sha256": vsha,
         "run_id": os.environ.get("ORCA_RUN_ID", ""),
         "latency_provider_id": provider_id_str,
-        "target_latency_ms": float(target_latency_ms),
+        "target_latency_us": float(target_latency_us),
         "accuracy_baseline": float(accuracy_baseline),
     }
 
@@ -86,8 +88,8 @@ def _fail_latency_row(
         "status": "FAIL_latency",
         "accepted_cfg": accepted_cfg,
         "cfg_hash": cfg_hash,
-        "latency_ms_median": lat_med,
-        "latency_ms_std": lat_std,
+        "latency_us_median": lat_med,
+        "latency_us_std": lat_std,
         "accuracy": 0,
         "accuracy_kind": "",
         "met_latency": False,
@@ -117,14 +119,14 @@ def _run_gate_for_variant(
     base = _base_row(
         vid=vid, variant_path=variant_path, vsha=vsha,
         provider_id_str=ctx["provider_id"],
-        target_latency_ms=ctx["target_latency_ms"],
+        target_latency_us=ctx["target_latency_us"],
         accuracy_baseline=ctx["accuracy_baseline"],
     )
 
     # done 谓词（force_rerun 时跳过判断）
     if not ctx["force_rerun"]:
         rows_for_v = [r for r in ctx["ledger_rows"] if r.get("variant_id") == vid]
-        if is_variant_done(rows_for_v, float(ctx["target_latency_ms"]),
+        if is_variant_done(rows_for_v, float(ctx["target_latency_us"]),
                            ctx["provider_id"], vsha):
             return None, None, "SKIPPED_DONE"
 
@@ -136,7 +138,7 @@ def _run_gate_for_variant(
         sys.executable, os.path.join(ctx["kd_scripts_dir"], "tune_latency.py"),
         "--variant_path", variant_path, "--build_fn", build_fn,
         "--dummy_input", dummy_json, "--knobs", knobs_json,
-        "--target_latency_ms", str(ctx["target_latency_ms"]),
+        "--target_latency_us", str(ctx["target_latency_us"]),
         "--latency_provider", ctx["latency_provider"],
         "--artifacts_dir", ctx["artifacts_dir"],
         "--max_measurements", str(ctx["max_measurements"]),
@@ -147,7 +149,7 @@ def _run_gate_for_variant(
         row = {
             **base,
             "status": "FAIL_train", "accepted_cfg": {}, "cfg_hash": "",
-            "latency_ms_median": -1, "latency_ms_std": 0,
+            "latency_us_median": -1, "latency_us_std": 0,
             "accuracy": 0, "accuracy_kind": "",
             "met_latency": False, "met_accuracy": False, "ckpt": "",
             "fail_reason": f"tune_latency rc={rc}: {err[-300:]}",
@@ -156,8 +158,8 @@ def _run_gate_for_variant(
 
     tune_status = parse_key(out, "TUNE_STATUS") or "FAIL_latency"
     cfg_str = parse_key(out, "ACCEPTED_CFG") or parse_key(out, "BEST_EFFORT_CFG") or "{}"
-    lat_med = float(parse_key(out, "LATENCY_MS_MEDIAN") or -1)
-    lat_std = float(parse_key(out, "LATENCY_MS_STD") or 0)
+    lat_med = float(parse_key(out, "LATENCY_US_MEDIAN") or -1)
+    lat_std = float(parse_key(out, "LATENCY_US_STD") or 0)
     accepted_cfg = json.loads(cfg_str)
 
     # distill_dispatch（确定性门）
@@ -189,8 +191,8 @@ def _run_gate_for_variant(
         "variant_path": os.path.abspath(variant_path),
         "variant_sha256": vsha,
         "accepted_cfg": accepted_cfg,
-        "latency_ms_median": lat_med,
-        "latency_ms_std": lat_std,
+        "latency_us_median": lat_med,
+        "latency_us_std": lat_std,
         "build_fn": build_fn,
         "dummy_input": dummy_input,
         "knobs": knobs,
@@ -202,7 +204,7 @@ def _main() -> int:
     p = argparse.ArgumentParser(description="KD-NAS 确定性 gate（串行遍历全部变体）")
     p.add_argument("--receiver_dir", default="", help="默认 $ORCA_KB_DIR/families/receiver")
     p.add_argument("--ledger", required=True, help="共享 ledger.jsonl")
-    p.add_argument("--target_latency_ms", required=True)
+    p.add_argument("--target_latency_us", required=True)
     p.add_argument("--latency_provider", required=True)
     p.add_argument("--artifacts_dir", required=True, help="稳定 kd_artifacts_dir（写 manifest + lock）")
     p.add_argument("--kd_scripts_dir", required=True, help="_kd_scripts 绝对路径")
@@ -225,7 +227,7 @@ def _main() -> int:
     all_variants = _list_variants(receiver_dir)
 
     ctx = {
-        "target_latency_ms": args.target_latency_ms,
+        "target_latency_us": args.target_latency_us,
         "latency_provider": args.latency_provider,
         "provider_id": provider_id(args.latency_provider),
         "accuracy_baseline": args.accuracy_baseline,
@@ -269,12 +271,12 @@ def _main() -> int:
             base = _base_row(
                 vid=vid, variant_path=variant_path, vsha=vsha,
                 provider_id_str=ctx["provider_id"],
-                target_latency_ms=ctx["target_latency_ms"],
+                target_latency_us=ctx["target_latency_us"],
                 accuracy_baseline=ctx["accuracy_baseline"],
             )
             row = {
                 **base, "status": "FAIL_train", "accepted_cfg": {}, "cfg_hash": "",
-                "latency_ms_median": -1, "latency_ms_std": 0,
+                "latency_us_median": -1, "latency_us_std": 0,
                 "accuracy": 0, "accuracy_kind": "",
                 "met_latency": False, "met_accuracy": False, "ckpt": "",
                 "fail_reason": f"gate exception: {type(e).__name__}: {e}",
@@ -289,7 +291,7 @@ def _main() -> int:
         if status == "ACCEPTED":
             manifest.append(entry)
             n_accepted += 1
-            print(f"[gate] {vid}: ACCEPTED (latency={entry['latency_ms_median']:.3f}ms)",
+            print(f"[gate] {vid}: ACCEPTED (latency={entry['latency_us_median']:.3f}us)",
                   file=sys.stderr)
             continue
         # FAIL_latency / FAIL_train → 当场增量落账
@@ -297,7 +299,7 @@ def _main() -> int:
             append_ledger_row(args.ledger, row)
         if status == "FAIL_latency":
             n_fail_latency += 1
-            print(f"[gate] {vid}: FAIL_latency (latency={row['latency_ms_median']:.3f}ms) -> ledger",
+            print(f"[gate] {vid}: FAIL_latency (latency={row['latency_us_median']:.3f}us) -> ledger",
                   file=sys.stderr)
         else:  # FAIL_train
             n_fail_train += 1

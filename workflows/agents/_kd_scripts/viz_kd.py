@@ -1,8 +1,10 @@
 """viz_kd.py —— KD-NAS 蒸馏 sweep 可视化（orca.chart render_chart 推送，无 HTML 产物）。
 
-读 ``ledger.jsonl``（变体行：variant_id/accepted_cfg/latency_ms_median/
-latency_ms_std/accuracy/met_latency/met_accuracy/status/...），推：
-  1. Distill Sweep 散点 —— latency_ms_median(x) vs accuracy(y)，hue=met_accuracy。
+# ⚠️ DEPRECATED —— 旧并行 sweep 路径，活跃串行 kd-nas.yaml 不调用；保留供历史测试，删除见 followup SPEC。
+
+读 ``ledger.jsonl``（变体行：variant_id/accepted_cfg/latency_us_median/
+latency_us_std/accuracy/met_latency/met_accuracy/status/...），推：
+  1. Distill Sweep 散点 —— latency_us_median(x) vs accuracy(y)，hue=met_accuracy。
      caption 标 baseline_latency 参考线 + target_latency 阈值 + accuracy_baseline 基线（sweep 单图）。
   2. Candidate Ledger 表 —— variant_id/status/latency/accuracy/met_lat/met_acc/cfg。
   3. Latency Compare bar —— baseline / target / 各变体 latency。
@@ -23,7 +25,7 @@ latency_ms_std/accuracy/met_latency/met_accuracy/status/...），推：
 viz_kd 不判门（不 kill 也不 fail），只标方向；方向门禁在 measure_student / select。
 
 数据语义：
-  - ``latency_ms_median`` 由 tune_latency 真测（用户 latency 脚本，median+std）。
+  - ``latency_us_median`` 由 tune_latency 真测（用户 latency 脚本，median+std）。
   - ``accuracy`` 由 measure_student 测（绝对值），``met_accuracy`` 对比用户精度基线。
   - 失败行（status=FAIL_*）latency/accuracy 可能 -1 → 坐标图剔除、表中原样显示。
 
@@ -36,7 +38,7 @@ viz_kd 不判门（不 kill 也不 fail），只标方向；方向门禁在 meas
 
 CLI：
     viz_kd.py --ledger <ledger.jsonl> \\
-      [--baseline_latency_ms <f>] [--target_latency_ms <f>] [--variants_total <int>] \\
+      [--baseline_latency_us <f>] [--target_latency_us <f>] [--variants_total <int>] \\
       [--accuracy_baseline <f>] [--accuracy_baseline_kind <s>] [--env_anchor <path>]
 """
 
@@ -110,7 +112,7 @@ def _acc_point(row: dict[str, Any]) -> tuple[float, float] | None:
     """
     if not is_measured_row(row):
         return None
-    lat = to_float(row.get("latency_ms_median"))
+    lat = to_float(row.get("latency_us_median"))
     acc = to_float(row.get("accuracy"))
     if lat is None or lat < 0 or acc is None:
         return None
@@ -187,7 +189,7 @@ def _push_sweep_scatter(
             continue
         lat, acc = pt
         data.append({
-            "latency_ms": lat,
+            "latency_us": lat,
             "accuracy": _acc_display(acc, acc_kind),
             "met_accuracy": str(bool(e.get("met_accuracy"))),
             "id": str(e.get("variant_id", "?")),
@@ -216,10 +218,10 @@ def _push_sweep_scatter(
         data=data,
         label=_LABEL,
         title="Distill Sweep — latency vs accuracy",
-        x="latency_ms",
+        x="latency_us",
         y="accuracy",
         hue="met_accuracy",
-        x_label="时延 ms（越低越好）",
+        x_label="时延 us（越低越好）",
         y_label=f"accuracy（{acc_kind}，{_acc_y_label(acc_kind)}）",
         caption=caption,
     )
@@ -237,7 +239,7 @@ def _push_ledger_table(ledger: list[dict[str, Any]]) -> bool:
         rows.append({
             "variant_id": vid,
             "status": str(e.get("status", "")),
-            "latency_ms": to_float(e.get("latency_ms_median")),
+            "latency_us": to_float(e.get("latency_us_median")),
             "accuracy": to_float(e.get("accuracy")),
             "met_lat": str(bool(e.get("met_latency"))),
             "met_acc": str(bool(e.get("met_accuracy"))),
@@ -248,7 +250,7 @@ def _push_ledger_table(ledger: list[dict[str, Any]]) -> bool:
         data=rows,
         label=_LABEL,
         title="Distill Ledger (per variant)",
-        columns=["variant_id", "status", "latency_ms", "accuracy", "met_lat", "met_acc", "cfg"],
+        columns=["variant_id", "status", "latency_us", "accuracy", "met_lat", "met_acc", "cfg"],
         caption="每变体蒸馏结果：status/latency(中位数)/accuracy/met_*。FAIL_* 行原样显示。",
     )
     return True
@@ -262,13 +264,13 @@ def _push_latency_bar(
     """图3：latency 对比 bar —— baseline / target / 各变体。"""
     rows: list[dict[str, Any]] = []
     if baseline_lat is not None:
-        rows.append({"stage": "baseline", "latency_ms": baseline_lat})
+        rows.append({"stage": "baseline", "latency_us": baseline_lat})
     if target_lat is not None:
-        rows.append({"stage": "target", "latency_ms": target_lat})
+        rows.append({"stage": "target", "latency_us": target_lat})
     for e in ledger:
-        lat = to_float(e.get("latency_ms_median"))
+        lat = to_float(e.get("latency_us_median"))
         if lat is not None and lat >= 0:
-            rows.append({"stage": str(e.get("variant_id", "?")), "latency_ms": lat})
+            rows.append({"stage": str(e.get("variant_id", "?")), "latency_us": lat})
     if len(rows) < _MIN_POINTS:
         print(f"[viz_kd] WARN: 跳过 latency bar：行数 {len(rows)} < {_MIN_POINTS}",
               file=sys.stderr)
@@ -279,9 +281,9 @@ def _push_latency_bar(
         label=_LABEL,
         title="Latency Compare (baseline / target / variants)",
         x="stage",
-        y="latency_ms",
+        y="latency_us",
         x_label="阶段 / 变体",
-        y_label="时延 ms（越低越好）",
+        y_label="时延 us（越低越好）",
         caption="baseline=原始模型时延参考；target=用户阈值；余为各蒸馏变体实测（中位数）。",
     )
     return True
@@ -348,7 +350,7 @@ def _push_pareto(ledger: list[dict[str, Any]], acc_kind: str, acc_baseline: floa
         if pt is None:
             continue
         lat, acc = pt
-        pts.append({"latency_ms": lat, "accuracy": _acc_display(acc, acc_kind)})
+        pts.append({"latency_us": lat, "accuracy": _acc_display(acc, acc_kind)})
     if len(pts) < _MIN_POINTS:
         print(f"[viz_kd] WARN: 跳过 pareto：有效点 {len(pts)} < {_MIN_POINTS}", file=sys.stderr)
         return False
@@ -360,13 +362,13 @@ def _push_pareto(ledger: list[dict[str, Any]], acc_kind: str, acc_baseline: floa
         data=pts,
         label=_LABEL,
         title="Pareto Front — latency vs accuracy",
-        x="latency_ms",
+        x="latency_us",
         y="accuracy",
         pareto_x_direction="min",
         # 取负显示后 displayed 数据恒「越大越好」→ y_direction 恒 max（min 方向 kind 的取负
         # 使 -20<-22 翻转为 20<22，max 前沿与原 raw+min 前沿等价；防 -20dB 视觉高于 -22dB）。
         pareto_y_direction="max",
-        x_label="时延 ms（越小越好）",
+        x_label="时延 us（越小越好）",
         y_label=f"accuracy（{acc_kind}，{_acc_y_label(acc_kind)}）",
         caption=(
             "latency-accuracy 非支配前沿（前端据 direction 自绘）。x=时延（成本，越小越好）；"
@@ -437,8 +439,8 @@ def _push_accuracy_compare(ledger: list[dict[str, Any]], acc_kind: str,
 def render_all(
     *,
     ledger_path: str,
-    baseline_latency_ms: float | None,
-    target_latency_ms: float | None,
+    baseline_latency_us: float | None,
+    target_latency_us: float | None,
     variants_total: int | None = None,
     accuracy_baseline: float | None,
     accuracy_baseline_kind: str,
@@ -453,9 +455,9 @@ def render_all(
         return results
     pushers = [
         ("sweep_scatter", lambda: _push_sweep_scatter(
-            ledger, baseline_latency_ms, target_latency_ms, accuracy_baseline, accuracy_baseline_kind)),
+            ledger, baseline_latency_us, target_latency_us, accuracy_baseline, accuracy_baseline_kind)),
         ("ledger_table", lambda: _push_ledger_table(ledger)),
-        ("latency_bar", lambda: _push_latency_bar(ledger, baseline_latency_ms, target_latency_ms)),
+        ("latency_bar", lambda: _push_latency_bar(ledger, baseline_latency_us, target_latency_us)),
         ("progress", lambda: _push_progress(ledger, variants_total)),
         ("pareto", lambda: _push_pareto(ledger, accuracy_baseline_kind, accuracy_baseline)),
         ("accuracy_compare", lambda: _push_accuracy_compare(
@@ -475,8 +477,8 @@ def render_all(
 def _main() -> int:
     parser = argparse.ArgumentParser(description="KD-NAS 蒸馏 sweep 可视化（render_chart 推送）")
     parser.add_argument("--ledger", required=True, help="ledger.jsonl 路径")
-    parser.add_argument("--baseline_latency_ms", type=float, default=None)
-    parser.add_argument("--target_latency_ms", type=float, default=None)
+    parser.add_argument("--baseline_latency_us", type=float, default=None)
+    parser.add_argument("--target_latency_us", type=float, default=None)
     parser.add_argument("--variants_total", type=int, default=None,
                         help="KB 变体总数（progress 图分母；train_pool 算后透传）")
     parser.add_argument("--accuracy_baseline", type=float, default=None)
@@ -487,8 +489,8 @@ def _main() -> int:
     try:
         result = render_all(
             ledger_path=args.ledger,
-            baseline_latency_ms=args.baseline_latency_ms,
-            target_latency_ms=args.target_latency_ms,
+            baseline_latency_us=args.baseline_latency_us,
+            target_latency_us=args.target_latency_us,
             variants_total=args.variants_total,
             accuracy_baseline=args.accuracy_baseline,
             accuracy_baseline_kind=args.accuracy_baseline_kind or "",

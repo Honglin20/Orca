@@ -16,8 +16,8 @@ CLI：
     finalize_kd.py \\
       --ledger <path> --champions <path> --champion_id <id> --terminate_reason <str> \\
       --baseline_contract_path <path> --train_pipeline_path <path> \\
-      --baseline_latency_ms <f> --baseline_accuracy <f> --teacher_latency_ms <f> \\
-      --target_latency_ms <f> --accuracy_baseline <f> --accuracy_baseline_kind <kind> \\
+      --baseline_latency_us <f> --baseline_accuracy <f> --teacher_latency_us <f> \\
+      --target_latency_us <f> --accuracy_baseline <f> --accuracy_baseline_kind <kind> \\
       --kd_artifacts_dir <dir> --struct_scripts_dir <dir> --kd_scripts_dir <dir> \\
       --device <auto|cuda|cpu|npu> --seed <int> --latency_provider <path::func> \\
       --project_root <path> --per_run_artifacts_dir <dir>
@@ -26,7 +26,7 @@ stdout KEY::
     CHAMPION_IS_BASELINE: <1|0>
     CHAMPION_STUDENT: <path>
     CHAMPION_CKPT: <path|空串>
-    FINAL_LATENCY_MS: <f>
+    FINAL_LATENCY_US: <f>
     FINAL_ACCURACY: <f>
     FINAL_ONNX: <path|空串>
     FINAL_REPORT: <path>
@@ -183,14 +183,16 @@ def _write_report(
     champion: dict[str, Any],
     is_baseline: bool,
     terminate_reason: str,
-    final_latency_ms: float,
+    final_latency_us: float,
     final_accuracy: float,
-    baseline_latency_ms: float,
+    baseline_latency_us: float,
     baseline_accuracy: float,
-    teacher_latency_ms: float,
-    target_latency_ms: float,
+    teacher_latency_us: float,
+    target_latency_us: float,
     accuracy_baseline: float,
     accuracy_baseline_kind: str,
+    teacher_obj: dict[str, Any] | None = None,
+    champion_ids: set[str] | None = None,
 ) -> None:
     rows: list[dict[str, Any]] = []
     with open(ledger_path, encoding="utf-8") as f:
@@ -216,14 +218,77 @@ def _write_report(
     lines.append(f"- **champion**: `{champion_id}`")
     lines.append(f"- **terminate_reason**: {terminate_reason or '(无)'}")
     lines.append(f"- **explored rounds**: {len(student_rows)}")
-    lines.append(f"- **final_latency_ms**: {final_latency_ms:.6g}")
+    lines.append(f"- **final_latency_us**: {final_latency_us:.6g}")
     lines.append(f"- **final_accuracy**: {final_accuracy:.6g}")
-    lines.append(f"- **baseline_latency_ms**: {baseline_latency_ms:.6g}")
+    lines.append(f"- **baseline_latency_us**: {baseline_latency_us:.6g}")
     lines.append(f"- **baseline_accuracy**: {baseline_accuracy:.6g}")
-    lines.append(f"- **teacher_latency_ms**: {teacher_latency_ms:.6g}")
-    lines.append(f"- **target_latency_ms**: {target_latency_ms:.6g}")
+    lines.append(f"- **teacher_latency_us**: {teacher_latency_us:.6g}")
+    lines.append(f"- **target_latency_us**: {target_latency_us:.6g}")
     lines.append(f"- **accuracy_baseline** ({accuracy_baseline_kind}): {accuracy_baseline:.6g}")
     lines.append("")
+
+    # ── All Architectures 总表（baseline + teacher + students + champions）──
+    # 一张表看全所有架构的 latency+accuracy；accuracy 来自 evaluate（非 training loss）。
+    champ_ids = champion_ids or set()
+    lines.append("## All Architectures (baseline + teacher + students + champions)")
+    lines.append("")
+    lines.append("| id | role | round | latency_us | accuracy | met_lat | met_acc | status |")
+    lines.append("|---|---|---|---|---|---|---|---|")
+    # baseline
+    # b_met 统一 "true"/"false" 字面量（与 student 行 str(bool(...)).lower() 一致；
+    # 旧 "" 空串是第三类目，前端 hue 渲染会漂移）。
+    b_met = (
+        "true" if baseline_latency_us is not None
+        and target_latency_us is not None
+        and baseline_latency_us <= target_latency_us else "false"
+    )
+    lines.append(
+        f"| baseline | baseline | 0 | {baseline_latency_us:.6g} | "
+        f"{baseline_accuracy:.6g} | {b_met} | — | baseline |"
+    )
+    # teacher
+    if teacher_obj:
+        t_lat = teacher_obj.get("teacher_latency_us")
+        t_acc = teacher_obj.get("teacher_accuracy")
+        t_known = bool(teacher_obj.get("teacher_accuracy_known", False))
+        lines.append(
+            f"| teacher | teacher | — | {t_lat if t_lat is not None else ''} | "
+            f"{t_acc if t_acc is not None else ''} | — | — | "
+            f"{'teacher' if t_known else 'teacher(unknown acc)'} |"
+        )
+    # students / champions
+    # latency 双 fallback（latency_us_median → latency_us）与 all_models_table / pareto 一致；
+    # met_lat / met_acc 统一 str(bool(...)).lower()（旧 Python 原生 True/False 与 baseline true/false 字面不一致）。
+    for r in student_rows:
+        vid = str(r.get("variant_id", "?"))
+        lat = r.get("latency_us_median", r.get("latency_us", ""))
+        role = "champion" if vid in champ_ids else "student"
+        met_lat = str(bool(r.get("met_latency"))).lower()
+        met_acc = str(bool(r.get("met_accuracy"))).lower()
+        lines.append(
+            f"| {vid} | {role} | {r.get('round', '')} | {lat} | "
+            f"{r.get('accuracy', '')} | {met_lat} | "
+            f"{met_acc} | {r.get('status', '')} |"
+        )
+    lines.append("")
+
+    # ── Search Outcome 纯文本计数（SPEC §3.3：图表是唯一真相源，这里不算非支配集）──
+    fail_accuracy = [r for r in student_rows if r.get("status") == "FAIL_accuracy"]
+    fail_export = [r for r in student_rows if r.get("status") == "FAIL_export"]
+    known_statuses = {
+        "SUCCESS", "FAIL_latency", "FAIL_train", "FAIL_build",
+        "FAIL_accuracy", "FAIL_export",
+    }
+    n_other = sum(1 for r in student_rows if r.get("status") not in known_statuses)
+    lines.append("## Search Outcome")
+    lines.append(
+        f"- SUCCESS: {len(ok)} / FAIL_latency: {len(fail_latency)} / "
+        f"FAIL_train: {len(fail_train)} / FAIL_build: {len(fail_build)} / "
+        f"FAIL_accuracy: {len(fail_accuracy)} / FAIL_export: {len(fail_export)} / "
+        f"其它: {n_other}"
+    )
+    lines.append("")
+
     lines.append("## Champion 选择依据")
     if is_baseline:
         lines.append(
@@ -241,12 +306,17 @@ def _write_report(
         )
     lines.append("")
     lines.append("## 各轮 student 汇总")
-    lines.append("| round | variant_id | latency_ms | accuracy | met_lat | met_acc | status | direction_id |")
+    lines.append("| round | variant_id | latency_us | accuracy | met_lat | met_acc | status | direction_id |")
     lines.append("|---|---|---|---|---|---|---|---|")
+    # latency 双 fallback（latency_us_median → latency_us）对齐 "All Architectures" 段；
+    # bool 渲染统一 str(bool(...)).lower()（与 baseline 行 true/false 一致）。
     for r in student_rows:
+        lat = r.get("latency_us_median", r.get("latency_us", ""))
+        met_lat = str(bool(r.get("met_latency"))).lower()
+        met_acc = str(bool(r.get("met_accuracy"))).lower()
         lines.append(
-            f"| {r.get('round', '')} | {r.get('variant_id', '')} | {r.get('latency_ms', '')} | "
-            f"{r.get('accuracy', '')} | {r.get('met_latency', '')} | {r.get('met_accuracy', '')} | "
+            f"| {r.get('round', '')} | {r.get('variant_id', '')} | {lat} | "
+            f"{r.get('accuracy', '')} | {met_lat} | {met_acc} | "
             f"{r.get('status', '')} | {r.get('direction_id', '')} |"
         )
     lines.append("")
@@ -265,10 +335,10 @@ def _main() -> int:
     p.add_argument("--terminate_reason", default="")
     p.add_argument("--baseline_contract_path", required=True)
     p.add_argument("--train_pipeline_path", required=True)
-    p.add_argument("--baseline_latency_ms", type=float, required=True)
+    p.add_argument("--baseline_latency_us", type=float, required=True)
     p.add_argument("--baseline_accuracy", type=float, required=True)
-    p.add_argument("--teacher_latency_ms", type=float, required=True)
-    p.add_argument("--target_latency_ms", type=float, required=True)
+    p.add_argument("--teacher_latency_us", type=float, required=True)
+    p.add_argument("--target_latency_us", type=float, required=True)
     p.add_argument("--accuracy_baseline", type=float, required=True)
     p.add_argument("--accuracy_baseline_kind", required=True)
     p.add_argument("--kd_artifacts_dir", required=True)
@@ -279,6 +349,10 @@ def _main() -> int:
     p.add_argument("--latency_provider", required=True)
     p.add_argument("--project_root", default="")
     p.add_argument("--per_run_artifacts_dir", default="")
+    p.add_argument(
+        "--teacher_meta", default="",
+        help="teacher_meta.json 路径（All Architectures 总表读 teacher latency+accuracy）",
+    )
     args = p.parse_args()
 
     try:
@@ -286,7 +360,7 @@ def _main() -> int:
         is_baseline = (args.champion_id == "baseline")
 
         if is_baseline:
-            final_latency = args.baseline_latency_ms
+            final_latency = args.baseline_latency_us
             final_accuracy = args.baseline_accuracy
             final_onnx = ""
         else:
@@ -304,17 +378,42 @@ def _main() -> int:
             final_latency = _measure_latency(args.latency_provider, final_onnx, args.device)
 
         report_path = os.path.join(args.kd_artifacts_dir, "reports", "final_report.md")
+        # teacher_meta + champion_ids 喂给 All Architectures 总表。
+        teacher_obj: dict[str, Any] | None = None
+        if args.teacher_meta and os.path.isfile(args.teacher_meta):
+            try:
+                teacher_obj = json.loads(
+                    Path(args.teacher_meta).read_text(encoding="utf-8")
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"[finalize_kd] WARN: teacher_meta 不可读：{e}", file=sys.stderr)
+        champ_ids: set[str] = set()
+        if os.path.isfile(args.champions):
+            with open(args.champions, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        c = json.loads(line)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if not isinstance(c, dict):
+                        continue
+                    if c.get("round") != 0 and c.get("id") and c.get("id") != "baseline":
+                        champ_ids.add(str(c["id"]))
         _write_report(
             report_path, args.ledger, args.champion_id, champion, is_baseline,
             args.terminate_reason, final_latency, final_accuracy,
-            args.baseline_latency_ms, args.baseline_accuracy, args.teacher_latency_ms,
-            args.target_latency_ms, args.accuracy_baseline, args.accuracy_baseline_kind,
+            args.baseline_latency_us, args.baseline_accuracy, args.teacher_latency_us,
+            args.target_latency_us, args.accuracy_baseline, args.accuracy_baseline_kind,
+            teacher_obj=teacher_obj, champion_ids=champ_ids,
         )
 
         print(f"CHAMPION_IS_BASELINE: {1 if is_baseline else 0}")
         print(f"CHAMPION_STUDENT: {champion['student_path']}")
         print(f"CHAMPION_CKPT: {champion['ckpt']}")
-        print(f"FINAL_LATENCY_MS: {final_latency:.6f}")
+        print(f"FINAL_LATENCY_US: {final_latency:.6f}")
         print(f"FINAL_ACCURACY: {final_accuracy:.6f}")
         print(f"FINAL_ONNX: {final_onnx}")
         print(f"FINAL_REPORT: {report_path}")

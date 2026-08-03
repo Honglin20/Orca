@@ -41,6 +41,11 @@ from .losses import (
 
 VALID_KD_LOSSES = ("mse", "rkd", "ofd", "fitnets")
 
+# 特征蒸馏项（依赖 s_feats/t_feats 非空）。compose 守卫：含特征项且 feats 空 → fail loud
+# （distill agent 默认 KD_CONFIG 已 AST 条件化按 student.feature_hook_names 决定是否启用）。
+# 从 VALID_KD_LOSSES 派生（DRY）：未来加新特征项只需改 VALID_KD_LOSSES。
+_FEATURE_TERMS = tuple(n for n in VALID_KD_LOSSES if n != "mse")
+
 
 class KDComposite:
     """Callable KD loss assembled from a user task loss + a kd_config block.
@@ -66,6 +71,17 @@ class KDComposite:
         self.weights: dict[str, float] = dict(self.kd_config.get("weights", {}))
 
         self.use_ema: bool = bool(self.kd_config.get("ema", False))
+
+        # distill 模式铁律：student 训练必须加载 KD loss（软标签/特征对齐项）。
+        # 空 kd_losses 且未开 ema = 纯 task loss，这不是蒸馏，fail loud。
+        # build_kd_loss 仅在 train_pipeline --mode distill 被调（teacher/eval 模式不构造），
+        # 故此断言天然只约束 distill。
+        if not self.kd_losses and not self.use_ema:
+            raise ValueError(
+                "KDComposite 构造时 kd_losses 为空且 ema=False —— 这是纯 task loss，"
+                "不是蒸馏。distill 模式必须给非空 kd_losses（如 ['mse']）或开启 ema。"
+                "（teacher/eval 模式不构造 KDComposite，天然不触发。）"
+            )
 
         sched_cfg: dict = dict(self.kd_config.get("scheduler", {}))
         self.schedulers: dict[str, KDWeightScheduler] = {}
@@ -142,11 +158,22 @@ class KDComposite:
         epoch: int,
     ) -> Tensor:
         loss = self.user_loss_fn(s_out, y)
-        if not self.kd_losses and not self.use_ema:
-            return loss
+        # 注：空 kd_losses ∧ ema off 已在 __init__ 拒绝（distill 必加载 KD），此处必非空。
+        s_feats_list = list(s_feats) if s_feats else []
+        t_feats_list = list(t_feats) if t_feats else []
 
-        s_feats = list(s_feats) if s_feats else []
-        t_feats = list(t_feats) if t_feats else []
+        # fail-loud 守卫（SPEC §1.2(1)）：配置含特征项但运行时 feats 空 → 抛 ValueError。
+        # 旧逻辑 _compute_term 对 ofd/fitnets/rkd 在 feats 空时静默 return None，主调 continue
+        # → 配置声称 ofd 在跑、实际只跑 mse，违反 Rule 12。守卫看运行时 feats（不看 prepare 历史）。
+        # 仅当含特征项且 feats 空才抛；mse / ema-only 不受影响（mse 不依赖 feats）。
+        feature_requested = [n for n in self.kd_losses if n in _FEATURE_TERMS]
+        if feature_requested and (not s_feats_list or not t_feats_list):
+            raise ValueError(
+                f"kd_losses 含特征项 {feature_requested} 但无 feature feats"
+                f"（s_feats={len(s_feats_list)}, t_feats={len(t_feats_list)}）。"
+                f"特征蒸馏需模型暴露 feature_hook_names() 且 forward 经过该层。"
+                f"给 student 加 feature_hook_names()，或从 kd_losses 去掉特征项（只留 mse）。"
+            )
 
         for name in self.kd_losses:
             weight = float(self.weights.get(name, 1.0))
@@ -154,7 +181,7 @@ class KDComposite:
             sched_w = scheduler.get_weight(epoch) if scheduler else 1.0
             if sched_w <= 0.0:
                 continue
-            term = self._compute_term(name, s_out, t_out, s_feats, t_feats)
+            term = self._compute_term(name, s_out, t_out, s_feats_list, t_feats_list)
             if term is None:
                 continue
             loss = loss + sched_w * weight * term

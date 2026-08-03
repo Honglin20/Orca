@@ -98,12 +98,12 @@ def test_baseline_stage_pushes_latency_bar(viz_stage):
         stage="baseline",
         ledger_path="",
         champions_path="",
-        baseline_latency_ms=5.0,
+        baseline_latency_us=5.0,
         baseline_accuracy=None,
-        target_latency_ms=None,
+        target_latency_us=None,
         accuracy_baseline_kind="",
-        teacher_latency_ms=None,
-        champion_latency_ms=None,
+        teacher_latency_us=None,
+        champion_latency_us=None,
         champion_accuracy=None,
         round_hypothesis="",
         env_anchor="",
@@ -117,8 +117,8 @@ def test_baseline_stage_pushes_latency_bar(viz_stage):
 def test_baseline_stage_missing_latency_skip(viz_stage):
     r = viz_stage.mod.render_stage(
         stage="baseline", ledger_path="", champions_path="",
-        baseline_latency_ms=None, baseline_accuracy=None, target_latency_ms=None,
-        accuracy_baseline_kind="", teacher_latency_ms=None, champion_latency_ms=None,
+        baseline_latency_us=None, baseline_accuracy=None, target_latency_us=None,
+        accuracy_baseline_kind="", teacher_latency_us=None, champion_latency_us=None,
         champion_accuracy=None, round_hypothesis="", env_anchor="",
     )
     assert r["charts"]["baseline_latency_bar"]["pushed"] is False
@@ -128,8 +128,8 @@ def test_baseline_stage_missing_latency_skip(viz_stage):
 def test_teacher_stage_pushes_compare_bar(viz_stage):
     r = viz_stage.mod.render_stage(
         stage="teacher", ledger_path="", champions_path="",
-        baseline_latency_ms=5.0, baseline_accuracy=None, target_latency_ms=None,
-        accuracy_baseline_kind="", teacher_latency_ms=15.0, champion_latency_ms=None,
+        baseline_latency_us=5.0, baseline_accuracy=None, target_latency_us=None,
+        accuracy_baseline_kind="", teacher_latency_us=15.0, champion_latency_us=None,
         champion_accuracy=None, round_hypothesis="", env_anchor="",
     )
     assert r["charts"]["teacher_vs_baseline_bar"]["pushed"] is True
@@ -141,8 +141,8 @@ def test_student_stage_parses_round_hypothesis(viz_stage):
     ])
     r = viz_stage.mod.render_stage(
         stage="student", ledger_path="", champions_path="",
-        baseline_latency_ms=None, baseline_accuracy=None, target_latency_ms=None,
-        accuracy_baseline_kind="", teacher_latency_ms=None, champion_latency_ms=None,
+        baseline_latency_us=None, baseline_accuracy=None, target_latency_us=None,
+        accuracy_baseline_kind="", teacher_latency_us=None, champion_latency_us=None,
         champion_accuracy=None, round_hypothesis=rh, env_anchor="",
     )
     assert r["charts"]["student_hypothesis_table"]["pushed"] is True
@@ -151,8 +151,8 @@ def test_student_stage_parses_round_hypothesis(viz_stage):
 def test_student_stage_empty_hypothesis_skip(viz_stage):
     r = viz_stage.mod.render_stage(
         stage="student", ledger_path="", champions_path="",
-        baseline_latency_ms=None, baseline_accuracy=None, target_latency_ms=None,
-        accuracy_baseline_kind="", teacher_latency_ms=None, champion_latency_ms=None,
+        baseline_latency_us=None, baseline_accuracy=None, target_latency_us=None,
+        accuracy_baseline_kind="", teacher_latency_us=None, champion_latency_us=None,
         champion_accuracy=None, round_hypothesis="", env_anchor="",
     )
     assert r["charts"]["student_hypothesis_table"]["pushed"] is False
@@ -161,17 +161,17 @@ def test_student_stage_empty_hypothesis_skip(viz_stage):
 def test_decide_stage_pushes_trajectory_from_champions(tmp_path, viz_stage):
     champs = tmp_path / "champions.jsonl"
     champs.write_text(
-        json.dumps({"round": 0, "id": "baseline", "latency_ms": 10.0, "accuracy": 0.02,
-                    "delta_vs_baseline_ms": 0, "snapshot": ""}) + "\n" +
-        json.dumps({"round": 1, "id": "r1_student", "latency_ms": 4.0, "accuracy": 0.018,
-                    "delta_vs_baseline_ms": -6.0, "snapshot": "/snap/r1.py"}) + "\n",
+        json.dumps({"round": 0, "id": "baseline", "latency_us": 10.0, "accuracy": 0.02,
+                    "delta_vs_baseline_us": 0, "snapshot": ""}) + "\n" +
+        json.dumps({"round": 1, "id": "r1_student", "latency_us": 4.0, "accuracy": 0.018,
+                    "delta_vs_baseline_us": -6.0, "snapshot": "/snap/r1.py"}) + "\n",
         encoding="utf-8",
     )
     r = viz_stage.mod.render_stage(
         stage="decide", ledger_path="", champions_path=str(champs),
-        baseline_latency_ms=10.0, baseline_accuracy=0.02, target_latency_ms=5.0,
-        accuracy_baseline_kind="nmse", teacher_latency_ms=None,
-        champion_latency_ms=None, champion_accuracy=None,
+        baseline_latency_us=10.0, baseline_accuracy=0.02, target_latency_us=5.0,
+        accuracy_baseline_kind="nmse", teacher_latency_us=None,
+        champion_latency_us=None, champion_accuracy=None,
         round_hypothesis="", env_anchor="",
     )
     assert r["charts"]["champion_trajectory"]["pushed"] is True
@@ -182,7 +182,7 @@ def test_distill_table_stage_reads_ledger(tmp_path, viz_stage):
     ledger = tmp_path / "ledger.jsonl"
     ledger.write_text(
         json.dumps({"variant_id": "r1_student", "student_path": "/s/r1.py", "round": 1,
-                    "parent": "baseline", "latency_ms": 4.0, "accuracy": 0.018,
+                    "parent": "baseline", "latency_us": 4.0, "accuracy": 0.018,
                     "met_latency": True, "met_accuracy": True, "accuracy_kind": "nmse",
                     "direction_id": "d1", "hypothesis": "x", "accepted_cfg": {},
                     "cfg_hash": "h", "ckpt": "/c/r1.pt", "status": "SUCCESS"}) + "\n",
@@ -190,9 +190,9 @@ def test_distill_table_stage_reads_ledger(tmp_path, viz_stage):
     )
     r = viz_stage.mod.render_stage(
         stage="distill_table", ledger_path=str(ledger), champions_path="",
-        baseline_latency_ms=10.0, baseline_accuracy=0.02, target_latency_ms=5.0,
-        accuracy_baseline_kind="nmse", teacher_latency_ms=None,
-        champion_latency_ms=None, champion_accuracy=None,
+        baseline_latency_us=10.0, baseline_accuracy=0.02, target_latency_us=5.0,
+        accuracy_baseline_kind="nmse", teacher_latency_us=None,
+        champion_latency_us=None, champion_accuracy=None,
         round_hypothesis="", env_anchor="",
     )
     assert r["charts"]["distill_round_table"]["pushed"] is True
@@ -201,18 +201,233 @@ def test_distill_table_stage_reads_ledger(tmp_path, viz_stage):
 def test_final_stage_uses_champion_cli_over_champions_file(tmp_path, viz_stage):
     champs = tmp_path / "champions.jsonl"
     champs.write_text(
-        json.dumps({"round": 0, "id": "baseline", "latency_ms": 10.0, "accuracy": 0.02,
-                    "delta_vs_baseline_ms": 0, "snapshot": ""}) + "\n",
+        json.dumps({"round": 0, "id": "baseline", "latency_us": 10.0, "accuracy": 0.02,
+                    "delta_vs_baseline_us": 0, "snapshot": ""}) + "\n",
         encoding="utf-8",
     )
     r = viz_stage.mod.render_stage(
         stage="final", ledger_path="", champions_path=str(champs),
-        baseline_latency_ms=10.0, baseline_accuracy=0.02, target_latency_ms=5.0,
-        accuracy_baseline_kind="nmse", teacher_latency_ms=15.0,
-        champion_latency_ms=3.5, champion_accuracy=0.019,
+        baseline_latency_us=10.0, baseline_accuracy=0.02, target_latency_us=5.0,
+        accuracy_baseline_kind="nmse", teacher_latency_us=15.0,
+        champion_latency_us=3.5, champion_accuracy=0.019,
         round_hypothesis="", env_anchor="",
     )
     assert r["charts"]["final_compare_bar"]["pushed"] is True
+
+
+def test_final_stage_all_models_table_covers_all_architectures(tmp_path, viz_stage):
+    """全模型总表：baseline + teacher + student + champion 各一行（latency+accuracy）。
+
+    意图：一张表覆盖所有架构，accuracy 来自 evaluate（teacher 行读 teacher_meta.json）。
+    """
+    champs = tmp_path / "champions.jsonl"
+    champs.write_text(
+        json.dumps({"round": 0, "id": "baseline", "latency_us": 10.0, "accuracy": 0.02,
+                    "delta_vs_baseline_us": 0, "snapshot": ""}) + "\n" +
+        json.dumps({"round": 2, "id": "r2_champ", "latency_us": 4.0, "accuracy": 0.018,
+                    "delta_vs_baseline_us": -6.0, "snapshot": "/snap/r2.py"}) + "\n",
+        encoding="utf-8",
+    )
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text(
+        json.dumps({"variant_id": "r1_student", "round": 1, "latency_us_median": 6.0,
+                    "accuracy": 0.022, "met_latency": False, "met_accuracy": False,
+                    "status": "FAIL_latency"}) + "\n" +
+        json.dumps({"variant_id": "r2_champ", "round": 2, "latency_us_median": 4.0,
+                    "accuracy": 0.018, "met_latency": True, "met_accuracy": True,
+                    "status": "SUCCESS"}) + "\n",
+        encoding="utf-8",
+    )
+    teacher_meta = tmp_path / "teacher_meta.json"
+    teacher_meta.write_text(json.dumps({
+        "teacher_latency_us": 35.0, "teacher_accuracy": 0.015,
+        "teacher_accuracy_known": True,
+    }), encoding="utf-8")
+
+    r = viz_stage.mod.render_stage(
+        stage="final", ledger_path=str(ledger), champions_path=str(champs),
+        baseline_latency_us=10.0, baseline_accuracy=0.02, target_latency_us=5.0,
+        accuracy_baseline_kind="nmse", teacher_latency_us=35.0,
+        champion_latency_us=4.0, champion_accuracy=0.018,
+        teacher_meta_path=str(teacher_meta), env_anchor="",
+    )
+    assert r["charts"]["all_models_table"]["pushed"] is True
+    # 从 mock 捕获的 render_chart 调用里找到总表（按 title）
+    table_calls = [c for c in viz_stage.calls if c.get("title") == "All Models (accuracy × latency)"]
+    assert table_calls, "all_models_table 未被推送"
+    rows = table_calls[-1]["data"]
+    roles = {row["role"] for row in rows}
+    assert {"baseline", "teacher", "student", "champion"} <= roles, roles
+    # teacher 行带真实 accuracy
+    teacher_row = next(row for row in rows if row["role"] == "teacher")
+    assert teacher_row["accuracy"] == 0.015
+    assert teacher_row["status"] == "teacher"
+    # r2_champ 标为 champion（命中 champion id 集合）
+    champ_row = next(row for row in rows if row["id"] == "r2_champ")
+    assert champ_row["role"] == "champion"
+
+
+# ── SPEC §3.4 终态帕累托前沿 + FAIL 分布（viz_kd 可复用不变量迁移）──────────────
+
+
+def _write_pareto_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    """写 SPEC §3.4 fixture：
+    - 2 行 SUCCESS（一 min-kind 方向 db，一 max-kind 方向 acc）；
+    - 1 行 FAIL_accuracy + accuracy_kind 非空（真测值，应计入前沿）；
+    - 1 行 FAIL_latency（accuracy_kind 空，哨兵，不计入）；
+    - 1 行 FAIL_train（accuracy_kind 空，哨兵，不计入）；
+    - 1 行 db-kind accuracy=-1.0 真测（NEW-2 回归守护：不误剔）。
+    """
+    ledger = tmp_path / "ledger.jsonl"
+    rows = [
+        # min-kind (db) SUCCESS
+        {"variant_id": "r1_min", "round": 1, "latency_us_median": 6.0,
+         "accuracy": -20.0, "accuracy_kind": "db", "met_accuracy": True,
+         "status": "SUCCESS"},
+        # max-kind (acc) SUCCESS
+        {"variant_id": "r2_max", "round": 2, "latency_us_median": 8.0,
+         "accuracy": 0.95, "accuracy_kind": "acc", "met_accuracy": True,
+         "status": "SUCCESS"},
+        # FAIL_accuracy + accuracy_kind 非空 = 真测，应计入前沿（与 viz_kd 一致）
+        {"variant_id": "r3_facc", "round": 3, "latency_us_median": 7.0,
+         "accuracy": -25.0, "accuracy_kind": "db", "met_accuracy": False,
+         "status": "FAIL_accuracy"},
+        # FAIL_latency 哨兵（accuracy_kind 空 → is_measured_row False → 不计入）
+        {"variant_id": "r4_flat", "round": 4, "latency_us_median": 100.0,
+         "accuracy": 0, "accuracy_kind": "", "met_accuracy": False,
+         "status": "FAIL_latency"},
+        # FAIL_train 哨兵（accuracy_kind 空 → 不计入）
+        {"variant_id": "r5_ftrain", "round": 5, "latency_us_median": 5.0,
+         "accuracy": 0, "accuracy_kind": "", "met_accuracy": False,
+         "status": "FAIL_train"},
+        # db-kind accuracy=-1.0 真测点（NEW-2：旧 !=-1 过滤会误剔）
+        {"variant_id": "r6_dbneg", "round": 6, "latency_us_median": 9.0,
+         "accuracy": -1.0, "accuracy_kind": "db", "met_accuracy": False,
+         "status": "FAIL_accuracy"},
+    ]
+    ledger.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    champs = tmp_path / "champions.jsonl"
+    champs.write_text(
+        json.dumps({"round": 0, "id": "baseline", "latency_us": 10.0,
+                    "accuracy": -22.0}) + "\n",
+        encoding="utf-8",
+    )
+    return ledger, champs
+
+
+def test_final_stage_pareto_front_and_fail_status_bar_pushed(tmp_path, viz_stage):
+    """SPEC §3.4：final stage 推 pareto_front + fail_status_bar；5 不变量守护。"""
+    ledger, champs = _write_pareto_fixture(tmp_path)
+    r = viz_stage.mod.render_stage(
+        stage="final", ledger_path=str(ledger), champions_path=str(champs),
+        baseline_latency_us=10.0, baseline_accuracy=-22.0, target_latency_us=5.0,
+        accuracy_baseline_kind="db", teacher_latency_us=35.0,
+        champion_latency_us=6.0, champion_accuracy=-20.0,
+        env_anchor="",
+    )
+    assert r["charts"]["pareto_front"]["pushed"] is True, r["charts"]["pareto_front"]
+    assert r["charts"]["fail_status_bar"]["pushed"] is True, r["charts"]["fail_status_bar"]
+
+    pareto_calls = [c for c in viz_stage.calls if c.get("chart_type") == "pareto"]
+    assert pareto_calls, "pareto_front 未推送"
+    pts = pareto_calls[-1]["data"]
+    # ① min-kind (db) → y 取负显示（原 -20 → 20）
+    r1 = next(p for p in pts if p.get("met_accuracy") != "ref" and p["latency_us"] == 6.0)
+    assert r1["accuracy"] == 20.0, f"min-kind 取负显示失败：{r1}"
+    # baseline 参考点 hue="ref"
+    ref = next(p for p in pts if p.get("met_accuracy") == "ref")
+    assert ref["latency_us"] == 10.0 and ref["accuracy"] == 22.0
+    # ③ FAIL_latency / FAIL_train 哨兵不计入（accuracy_kind 空 → is_measured_row False）
+    pt_lats = {p["latency_us"] for p in pts if p.get("met_accuracy") != "ref"}
+    assert 100.0 not in pt_lats, "FAIL_latency 哨兵行不应计入 pareto"
+    assert 5.0 not in pt_lats, "FAIL_train 哨兵行不应计入 pareto"
+    # ④ FAIL_accuracy + accuracy_kind 非空 计入前沿（与 SUCCESS 同列）
+    assert 7.0 in pt_lats, "FAIL_accuracy 真测行应计入 pareto"
+    # ⑤ db-kind accuracy=-1.0 真测点不误剔（NEW-2 回归）
+    r6 = next(p for p in pts if p["latency_us"] == 9.0)
+    assert r6["accuracy"] == 1.0, f"db-kind -1.0 应取负显示为 1.0：{r6}"
+    # pareto 点数 == 有效测量行（r1/r2/r3/r6 = 4）+ baseline ref
+    non_ref = [p for p in pts if p.get("met_accuracy") != "ref"]
+    assert len(non_ref) == 4, f"应有 4 个真测 student 点，实际 {len(non_ref)}：{pts}"
+    # 方向参数
+    assert pareto_calls[-1]["pareto_x_direction"] == "min"
+    assert pareto_calls[-1]["pareto_y_direction"] == "max"
+
+    # fail_status_bar：6 status 计数（SUCCESS=2, FAIL_accuracy=2, FAIL_latency=1, FAIL_train=1）
+    bar_calls = [c for c in viz_stage.calls
+                 if c.get("chart_type") == "bar" and "status counts" in c.get("title", "")]
+    assert bar_calls, "fail_status_bar 未推送"
+    counts = {row["status"]: row["count"] for row in bar_calls[-1]["data"]}
+    assert counts["SUCCESS"] == 2
+    assert counts["FAIL_latency"] == 1
+    assert counts["FAIL_train"] == 1
+    assert counts["FAIL_accuracy"] == 2
+
+
+def test_pareto_front_unknown_kind_warn_skip(viz_stage, tmp_path):
+    """不变量 ②：unknown kind → pareto WARN-skip（pushed=False），不 auto 猜方向。"""
+    ledger, champs = _write_pareto_fixture(tmp_path)
+    r = viz_stage.mod.render_stage(
+        stage="final", ledger_path=str(ledger), champions_path=str(champs),
+        baseline_latency_us=10.0, baseline_accuracy=0.5, target_latency_us=5.0,
+        accuracy_baseline_kind="mystery",  # 未知 kind
+        teacher_latency_us=35.0, champion_latency_us=6.0, champion_accuracy=0.5,
+        env_anchor="",
+    )
+    assert r["charts"]["pareto_front"]["pushed"] is False
+    assert "unknown kind" in r["charts"]["pareto_front"]["reason"]
+
+
+def test_pareto_front_min_kind_negates_y_for_max_direction(viz_stage, tmp_path):
+    """不变量 ① 单测：min-kind (snr/mse/db/nmse/ber) → display 取负使「越大越好」统一。
+
+    用 snr（max-kind）作对照：原值不取负。同 fixture 跑两遍 kind=db vs kind=snr 验证变换。
+    """
+    ledger, champs = _write_pareto_fixture(tmp_path)
+    # min-kind (db)：y 取负
+    r_min = viz_stage.mod.render_stage(
+        stage="final", ledger_path=str(ledger), champions_path=str(champs),
+        baseline_latency_us=10.0, baseline_accuracy=-22.0, target_latency_us=5.0,
+        accuracy_baseline_kind="db", teacher_latency_us=35.0,
+        champion_latency_us=6.0, champion_accuracy=-20.0, env_anchor="",
+    )
+    assert r_min["charts"]["pareto_front"]["pushed"] is True
+    pts_min = [c for c in viz_stage.calls if c.get("chart_type") == "pareto"][-1]["data"]
+    # r1_min latency=6.0 accuracy=-20.0 → display 20.0
+    r1_min = next(p for p in pts_min if p["latency_us"] == 6.0)
+    assert r1_min["accuracy"] == 20.0
+
+    # max-kind (acc)：原值不取负
+    # 改 fixture：r2_max accuracy=0.95（acc 方向）
+    r_max = viz_stage.mod.render_stage(
+        stage="final", ledger_path=str(ledger), champions_path=str(champs),
+        baseline_latency_us=10.0, baseline_accuracy=0.5, target_latency_us=5.0,
+        accuracy_baseline_kind="acc", teacher_latency_us=35.0,
+        champion_latency_us=6.0, champion_accuracy=0.95, env_anchor="",
+    )
+    assert r_max["charts"]["pareto_front"]["pushed"] is True
+    pts_max = [c for c in viz_stage.calls if c.get("chart_type") == "pareto"][-1]["data"]
+    # r2_max latency=8.0 accuracy=0.95 → display 原值 0.95
+    r2_max = next(p for p in pts_max if p["latency_us"] == 8.0)
+    assert r2_max["accuracy"] == 0.95
+
+
+def test_fail_status_bar_empty_ledger_skip(viz_stage, tmp_path):
+    """空 ledger → fail_status_bar WARN 跳过（pushed=False）。"""
+    champs = tmp_path / "champions.jsonl"
+    champs.write_text(
+        json.dumps({"round": 0, "id": "baseline", "latency_us": 10.0}) + "\n",
+        encoding="utf-8",
+    )
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    r = viz_stage.mod.render_stage(
+        stage="final", ledger_path=str(empty), champions_path=str(champs),
+        baseline_latency_us=10.0, baseline_accuracy=0.02, target_latency_us=5.0,
+        accuracy_baseline_kind="nmse", teacher_latency_us=35.0,
+        champion_latency_us=6.0, champion_accuracy=0.02, env_anchor="",
+    )
+    assert r["charts"]["fail_status_bar"]["pushed"] is False
 
 
 # ── viz_kd_stage: render_chart 抛异常时单图不阻断 ──────────────────────────
@@ -227,8 +442,8 @@ def test_render_chart_exception_does_not_block(viz_stage):
     try:
         r = h.mod.render_stage(
             stage="baseline", ledger_path="", champions_path="",
-            baseline_latency_ms=5.0, baseline_accuracy=None, target_latency_ms=None,
-            accuracy_baseline_kind="", teacher_latency_ms=None, champion_latency_ms=None,
+            baseline_latency_us=5.0, baseline_accuracy=None, target_latency_us=None,
+            accuracy_baseline_kind="", teacher_latency_us=None, champion_latency_us=None,
             champion_accuracy=None, round_hypothesis="", env_anchor="",
         )
         assert r["charts"]["baseline_latency_bar"]["pushed"] is False
@@ -330,7 +545,7 @@ def test_viz_kd_stage_main_emits_json_even_on_bad_args(tmp_path):
     """CLI 不存在的 stage 被 argparse 拒（choices 限制）；验证正常 stage 下 stdout 合法。"""
     proc = subprocess.run(
         [sys.executable, str(KD_SCRIPTS / "viz_kd_stage.py"),
-         "--stage", "baseline", "--baseline_latency_ms", "5.0"],
+         "--stage", "baseline", "--baseline_latency_us", "5.0"],
         capture_output=True, text=True,
     )
     # 没装 orca.chart 时 import_failed/env_missing，stdout 仍 emit 合法 JSON。

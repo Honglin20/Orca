@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """select_and_report.py —— KD-NAS 第六步：脚本化 student 选择 + 最终报告（零 LLM）。
 
+# ⚠️ DEPRECATED —— 旧并行 sweep 路径，活跃串行 kd-nas.yaml 不调用；保留供历史测试，删除见 followup SPEC。
+
 读 ``ledger.jsonl``（所有变体的 latency / accuracy / met_* / status），按**显式**
 ``accuracy_baseline_kind`` 判定 best 方向（kd_common.accuracy_direction，单一真相源），
 挑最优 student + 列 latency-accuracy 帕累托前沿 + 模板填空 ``final_report.md``，推一张
@@ -20,8 +22,8 @@ CLI::
     python3 select_and_report.py \\
       --ledger <ledger.jsonl> --kd_artifacts_dir <stable kd_artifacts_dir/> \\
       --accuracy_baseline <f> --accuracy_baseline_kind <nmse|mse|ber|db|snr|acc> \\
-      --target_latency_ms <f> \\
-      [--teacher_latency_ms <f>] [--baseline_latency_ms <f>] [--env_anchor <path>]
+      --target_latency_us <f> \\
+      [--teacher_latency_us <f>] [--baseline_latency_us <f>] [--env_anchor <path>]
 
 stdout::
 
@@ -71,7 +73,7 @@ def _measured_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for r in rows:
         if not is_measured_row(r):
             continue
-        lat = to_float(r.get("latency_ms_median"))
+        lat = to_float(r.get("latency_us_median"))
         acc = to_float(r.get("accuracy"))
         if lat is None or lat < 0 or acc is None:
             continue
@@ -96,7 +98,7 @@ def _best_student(qualified: list[dict[str, Any]], direction: str) -> dict[str, 
     def key(r: dict[str, Any]) -> tuple[float, float, str]:
         acc = to_float(r.get("accuracy"))
         acc = acc if acc is not None else 0.0
-        lat = to_float(r.get("latency_ms_median"))
+        lat = to_float(r.get("latency_us_median"))
         lat = lat if lat is not None else float("inf")
         vid = str(r.get("variant_id", ""))
         # max 方向：-acc 使 min→最大 acc；lat 升序（越小越好）；vid 升序（确定性兜底）。
@@ -112,7 +114,7 @@ def _pareto_front(measured: list[dict[str, Any]], acc_dir: str) -> list[int]:
     统一转换成「两轴都越小越好」：latency 原样；accuracy 在 max 方向取负（-acc），min 方向原样。
     点 i 被支配 ⟺ 存在 j（j≠i）使 norm_j 两轴都 ≤ norm_i 且至少一轴 <。
     """
-    pts = [(to_float(r.get("latency_ms_median")), to_float(r.get("accuracy"))) for r in measured]
+    pts = [(to_float(r.get("latency_us_median")), to_float(r.get("accuracy"))) for r in measured]
     norm = [(x, -y if acc_dir == "max" else y) for x, y in pts]
     front = []
     for i in range(len(norm)):
@@ -150,9 +152,9 @@ def _build_report(
     front_idx: list[int],
     accuracy_baseline: float,
     acc_kind: str,
-    target_latency_ms: float,
-    teacher_latency_ms: float | None,
-    baseline_latency_ms: float | None,
+    target_latency_us: float,
+    teacher_latency_us: float | None,
+    baseline_latency_us: float | None,
     error_reason: str,
 ) -> str:
     lines = ["# KD-NAS Final Report", ""]
@@ -168,36 +170,36 @@ def _build_report(
         ]
     lines += [
         f"- accuracy_baseline: `{accuracy_baseline}` （方向：{_fmt_kind_note(acc_kind)}）",
-        f"- target_latency_ms: `{target_latency_ms}`",
+        f"- target_latency_us: `{target_latency_us}`",
         f"- variants in ledger: {len(rows)}（measured={len(measured)}, qualified={len(qualified)}）",
     ]
-    if teacher_latency_ms is not None:
-        lines.append(f"- teacher_latency_ms（参考，teacher 仅作 KD 软标签源）: `{teacher_latency_ms}`")
-    if baseline_latency_ms is not None:
-        lines.append(f"- baseline_latency_ms（flatten 原始模型）: `{baseline_latency_ms}`")
+    if teacher_latency_us is not None:
+        lines.append(f"- teacher_latency_us（参考，teacher 仅作 KD 软标签源）: `{teacher_latency_us}`")
+    if baseline_latency_us is not None:
+        lines.append(f"- baseline_latency_us（flatten 原始模型）: `{baseline_latency_us}`")
 
     lines += ["", "## Teacher vs Students", ""]
-    if teacher_latency_ms is not None or baseline_latency_ms is not None:
-        lines.append("| model | latency_ms | accuracy | met_acc |")
+    if teacher_latency_us is not None or baseline_latency_us is not None:
+        lines.append("| model | latency_us | accuracy | met_acc |")
         lines.append("|---|---|---|---|")
-        if baseline_latency_ms is not None:
-            lines.append(f"| baseline (flatten) | {baseline_latency_ms:.4g} | — | — |")
-        if teacher_latency_ms is not None:
-            lines.append(f"| teacher (KD source) | {teacher_latency_ms:.4g} | — | — |")
+        if baseline_latency_us is not None:
+            lines.append(f"| baseline (flatten) | {baseline_latency_us:.4g} | — | — |")
+        if teacher_latency_us is not None:
+            lines.append(f"| teacher (KD source) | {teacher_latency_us:.4g} | — | — |")
         for r in measured:
             vid = str(r.get("variant_id", "?"))
-            lat = to_float(r.get("latency_ms_median"))
+            lat = to_float(r.get("latency_us_median"))
             acc = to_float(r.get("accuracy"))
             met = str(bool(r.get("met_accuracy")))
             lines.append(f"| student {vid} | {lat:.4g} | {acc:.4g} | {met} |")
     else:
         lines.append("(teacher/baseline latency 未提供，仅列 students)")
         lines.append("")
-        lines.append("| variant_id | latency_ms | accuracy | met_lat | met_acc | status |")
+        lines.append("| variant_id | latency_us | accuracy | met_lat | met_acc | status |")
         lines.append("|---|---|---|---|---|---|")
         for r in measured:
             vid = str(r.get("variant_id", "?"))
-            lat = to_float(r.get("latency_ms_median"))
+            lat = to_float(r.get("latency_us_median"))
             acc = to_float(r.get("accuracy"))
             lines.append(
                 f"| {vid} | {lat:.4g} | {acc:.4g} | {bool(r.get('met_latency'))} | "
@@ -208,16 +210,16 @@ def _build_report(
     if best is not None:
         vid = str(best.get("variant_id", "?"))
         acc = to_float(best.get("accuracy"))
-        lat = to_float(best.get("latency_ms_median"))
+        lat = to_float(best.get("latency_us_median"))
         lines.append(f"- **最优 student：`{vid}`** — accuracy={acc:.4g}（{_fmt_kind_note(acc_kind)}），"
-                     f"latency={lat:.4g}ms ≤ target {target_latency_ms}。")
+                     f"latency={lat:.4g}us ≤ target {target_latency_us}。")
         lines.append("- 选择依据：在达标（met_latency ∧ met_accuracy）的 student 中，按显式 kind "
                      f"方向取精度最优；平局取 latency 更小者（成本更优）。方向由 "
                      f"kd_common.accuracy_direction 判定（单一真相源，禁符号 auto 猜）。")
     else:
         lines.append("- **无 student 达标**（met_latency ∧ met_accuracy 全为 false）。")
         lines.append(f"- 已 measured 的 {len(measured)} 个变体均未同时满足 latency 与精度基线；"
-                     "不假装选出。建议放宽 target_latency_ms / accuracy_baseline 或扩大变体池。")
+                     "不假装选出。建议放宽 target_latency_us / accuracy_baseline 或扩大变体池。")
 
     lines += ["", "## Latency-Accuracy Pareto Front", ""]
     if front_idx:
@@ -225,11 +227,11 @@ def _build_report(
         for i in front_idx:
             r = measured[i]
             vid = str(r.get("variant_id", "?"))
-            lat = to_float(r.get("latency_ms_median"))
+            lat = to_float(r.get("latency_us_median"))
             acc = to_float(r.get("accuracy"))
             mark = " ← selected" if (best is not None and str(r.get("variant_id")) ==
                                      str(best.get("variant_id"))) else ""
-            lines.append(f"- `{vid}` latency={lat:.4g}ms, accuracy={acc:.4g}{mark}")
+            lines.append(f"- `{vid}` latency={lat:.4g}us, accuracy={acc:.4g}{mark}")
     else:
         lines.append("-（无 measured 点，无法算前沿）")
 
@@ -241,7 +243,7 @@ def _build_report(
 
 def _push_pareto_chart(
     measured: list[dict[str, Any]], front_idx: list[int], acc_kind: str,
-    acc_baseline: float, target_latency_ms: float, env_anchor: str,
+    acc_baseline: float, target_latency_us: float, env_anchor: str,
 ) -> None:
     """推 latency-accuracy 帕累托前沿图（chart_type=pareto；sidecar，不 raise）。"""
     try:
@@ -259,11 +261,11 @@ def _push_pareto_chart(
         return
     pts = []
     for i, r in enumerate(measured):
-        lat = to_float(r.get("latency_ms_median"))
+        lat = to_float(r.get("latency_us_median"))
         acc = to_float(r.get("accuracy"))
         if lat is None or acc is None:
             continue
-        pts.append({"latency_ms": lat, "accuracy": acc,
+        pts.append({"latency_us": lat, "accuracy": acc,
                     "on_front": str(i in set(front_idx))})
     if len(pts) < 2:
         print(f"[select_and_report] WARN: 跳过 pareto 推图：有效点 {len(pts)} < 2", file=sys.stderr)
@@ -276,16 +278,16 @@ def _push_pareto_chart(
             data=pts,
             label="kd-nas",
             title="KD-NAS Final Pareto — latency vs accuracy",
-            x="latency_ms",
+            x="latency_us",
             y="accuracy",
             pareto_x_direction="min",
             pareto_y_direction=y_dir,
-            x_label="时延 ms（越小越好）",
+            x_label="时延 us（越小越好）",
             y_label=f"accuracy（{acc_kind or '未知'}，{d_phrase}）",
             caption=(
                 "终态 latency-accuracy 非支配前沿。x=时延（成本，越小越好）；"
                 f"y=accuracy（{d_phrase}，方向由 accuracy_baseline_kind={acc_kind!r} 显式锁定）。"
-                f"参考：accuracy_baseline={acc_baseline}, target_latency_ms={target_latency_ms}。"
+                f"参考：accuracy_baseline={acc_baseline}, target_latency_us={target_latency_us}。"
             ),
         )
     except Exception as e:  # sidecar：不阻断
@@ -304,16 +306,16 @@ def main() -> int:
     p.add_argument("--accuracy_baseline", required=True)
     p.add_argument("--accuracy_baseline_kind", required=True,
                    help="nmse/mse/ber/db(越低越好) | snr/acc(越高越好)；未知 → fail loud")
-    p.add_argument("--target_latency_ms", required=True)
-    p.add_argument("--teacher_latency_ms", default=None)
-    p.add_argument("--baseline_latency_ms", default=None)
+    p.add_argument("--target_latency_us", required=True)
+    p.add_argument("--teacher_latency_us", default=None)
+    p.add_argument("--baseline_latency_us", default=None)
     p.add_argument("--env_anchor", default="", help="per-run $ORCA_ARTIFACTS_DIR（自举 ORCA env）")
     args = p.parse_args()
 
     accuracy_baseline = float(args.accuracy_baseline)
-    target_latency_ms = float(args.target_latency_ms)
-    teacher_latency_ms = float(args.teacher_latency_ms) if args.teacher_latency_ms else None
-    baseline_latency_ms = float(args.baseline_latency_ms) if args.baseline_latency_ms else None
+    target_latency_us = float(args.target_latency_us)
+    teacher_latency_us = float(args.teacher_latency_us) if args.teacher_latency_us else None
+    baseline_latency_us = float(args.baseline_latency_us) if args.baseline_latency_us else None
 
     report_dir = args.kd_artifacts_dir.rstrip(os.sep)
     os.makedirs(report_dir or ".", exist_ok=True)
@@ -359,8 +361,8 @@ def main() -> int:
         qualified=[r for r in measured if bool(r.get("met_latency")) and bool(r.get("met_accuracy"))],
         best=best, front_idx=front_idx,
         accuracy_baseline=accuracy_baseline, acc_kind=args.accuracy_baseline_kind,
-        target_latency_ms=target_latency_ms,
-        teacher_latency_ms=teacher_latency_ms, baseline_latency_ms=baseline_latency_ms,
+        target_latency_us=target_latency_us,
+        teacher_latency_us=teacher_latency_us, baseline_latency_us=baseline_latency_us,
         error_reason=error_reason,
     )
     Path(report_path).write_text(report, encoding="utf-8")
@@ -368,7 +370,7 @@ def main() -> int:
     # 5) sidecar 推图（失败不阻断；仅在有数据时）。
     if measured and not error_reason:
         _push_pareto_chart(measured, front_idx, args.accuracy_baseline_kind,
-                           accuracy_baseline, target_latency_ms, args.env_anchor)
+                           accuracy_baseline, target_latency_us, args.env_anchor)
 
     best_vid = str(best.get("variant_id", "")) if best else ""
     selection_ok = bool(best is not None)

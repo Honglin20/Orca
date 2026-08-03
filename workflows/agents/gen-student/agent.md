@@ -42,9 +42,9 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 - ``champions_path = {{ setup.output.champions_path }}``
 - ``student_models_dir = {{ setup.output.student_models_dir }}``
 - ``project_root = {{ setup.output.project_root }}``
-- ``baseline_latency_ms = {{ setup.output.baseline_latency_ms }}``
+- ``baseline_latency_us = {{ setup.output.baseline_latency_us }}``
 - ``baseline_accuracy = {{ setup.output.baseline_accuracy }}``
-- ``target_latency_ms = {{ inputs.target_latency_ms }}``
+- ``target_latency_us = {{ inputs.target_latency_us }}``
 - ``accuracy_baseline = {{ inputs.accuracy_baseline }}``
 - ``accuracy_baseline_kind = {{ inputs.accuracy_baseline_kind }}``
 - ``depth_axis = {{ gen_teacher.output.depth_axis }}``（首轮缩层用，复用 teacher-gen 识别的轴）
@@ -119,7 +119,7 @@ if student_rows:
     last = student_rows[-1]
     print(json.dumps({
         'round': last.get('round'),
-        'latency_ms': last.get('latency_ms'),
+        'latency_us': last.get('latency_us'),
         'accuracy': last.get('accuracy'),
         'met_latency': last.get('met_latency'),
         'met_accuracy': last.get('met_accuracy'),
@@ -141,9 +141,11 @@ fi
 - 文件结构：``BUILD_FN="build_model"`` + ``DUMMY_INPUT`` + ``KNOBS`` + ``def build_model(**cfg)`` + ``def feature_hook_names()``（如 baseline 有可对齐特征层）；
 - DUMMY_INPUT 逐字复制 baseline（**不**改 shape/dtype）；
 - import 只允许 torch + 3rd-party pip 包，禁 import 用户项目 / _kd_scripts / nas_agent；
-- feature_hook_names 契约（SPEC-REVIEW N4）：当 distill.kd_config 含 ofd/fitnets/rkd 特征蒸馏时，
-  student 须暴露 ``def feature_hook_names() -> list[str]``（返回内部特征层名）。**首轮 baseline 有可对齐
-  特征层时必移植此 fn**，否则特征蒸馏静默退化为零（distill 模板 train_pipeline.py:555 ``getattr(student,"feature_hook_names",None)`` 读）。
+- feature_hook_names 契约（SPEC-REVIEW N4 + SPEC §1 fail-loud）：当 distill.kd_config 含
+  ofd/fitnets/rkd 特征蒸馏时，student 须暴露 ``def feature_hook_names() -> list[str]``（返回内部特征层名）。
+  **首轮 baseline 有可对齐特征层时必移植此 fn**；distill 侧 AST 判定此 fn 存在 → 启特征项，否则自动剥离
+  成 mse-only（不崩）。若 student 此 fn 缺失但下游强行配 ofd → compose 守卫 fail-loud 抛 ValueError →
+  FAIL_train（train_pipeline.py:555 ``getattr(student,"feature_hook_names",None)`` 读此 fn 名）。
 - 缩层后 KNOBS schema 保持（default 改，min/step/leverage 继承 baseline）。
 
 ## step 3 执行：DUMMY_INPUT 字节级 deterministic 校验（fail loud，3 轮修不过 → catch FAIL_build）
@@ -232,14 +234,20 @@ echo "PARSED step4: STUDENT_KNOBS_JSON=$STUDENT_KNOBS_JSON"
 > **重写循环**：step 3 DUMMY_FAIL_STRIKE=1 或 step 4 NEED_REWRITE=1 → 你（LLM）按 fail reason
 > 修 student model.py，重跑 step 3-4。3 轮 step 4 不过 → catch 协议 emit FAIL_build，退 0。
 
-## step 5 执行：feature_hook_names 契约（silent 提醒，不阻断）
+## step 5 执行：feature_hook_names 契约检查（AST 判定，与 distill 一致）
 
-> student 有此 fn → 特征蒸馏（ofd/fitnets/rkd）生效；无 → 静默退化为零（distill 模板 hook_names=[]）。
-> 这里只 grep 提醒（不改 student），让 LLM 知道下游 distill.kd_config 用 ofd 时是否生效。
+> distill 侧已 AST 条件化 KD_CONFIG：student 有 ``feature_hook_names()`` → 启 ofd/fitnets；无 → 自动剥离
+> 特征项（mse-only，不崩）。**有 hook 时必移植此 fn**——否则下游 distill 配 ofd 会 fail-loud 抛
+> （SPEC §1.2(1) compose 守卫：含特征项且运行时 feats 空即 ValueError → FAIL_train）。
+> 这里用 AST 判定（不用 ``grep '^def'``——class method 缩进，``^def`` 永远漏判会让 ofd 永远被剥离）。
 
 ```bash
-HAS_HOOK="$(grep -c '^def feature_hook_names' "$STUDENT" || true)"
-echo "FEATURE_HOOK_NAMES=$HAS_HOOK  # 1=有（ofd/fitnets 生效）|0=无（特征蒸馏退化为零）"
+HAS_HOOK=$(python3 -c '
+import ast,sys
+t=ast.parse(open(sys.argv[1]).read())
+print(any(isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name=="feature_hook_names" for n in ast.walk(t)))
+' "$STUDENT")
+echo "FEATURE_HOOK_NAMES=$HAS_HOOK  # True=有（distill 配 mse+ofd）|False=无（distill 自动 mse-only）"
 ```
 
 ## step 6 执行：viz_kd_stage --stage student（hypothesis 表 dumb copy 进 viz_status）
