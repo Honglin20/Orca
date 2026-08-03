@@ -5,6 +5,18 @@
 
 ---
 
+## [2026-08-03] feat(web): RunList 加分组维度选择器（状态/项目/workflow/时间）+ 空桶自动隐藏
+
+用户反馈「要更多分区 + 按项目分类 + 排队/待决策空列没用」的增量（在 RunListPage 重设计之上）：
+**分组方式下拉**（替换旧 groupBy on/off toggle）支持 不分组/状态/项目/workflow/时间 五维度，看板列/列表段随 dim，
+持久 `orca-runlist-groupby-v1` 默认 status，共享 `groupRuns` 单出口（DRY）；**空桶默认自动隐藏**（解决排队/待决策空列噪音）+
+「显示空」toggle + 待决策>0 高亮；折叠持久泛化 `use-collapsed-buckets`（`Set<dim:key>` + key v2，切 dim 各自独立）。
+前端唯一 / 零新依赖 / R3 不违 / 后端零改。vitest 456 / Playwright 真机 10 / 后端回归 31 全绿；E2E 抓到并修了 stale 五列用例。
+SPEC：`docs/specs/web-runlist-redesign.md` §10.8-10.10。详见
+[release note](../releases/2026-08-03-web-runlist-redesign.md)（增量段）。Commits: `7cd8328` + `13f60d5`。
+
+---
+
 ## [2026-08-03] feat(web): RunListPage 重设计——看板 + 列表 toggle + 多选/排序/批量删/折叠持久/修主题
 
 Web 主页 `/` 重设计：**默认状态列看板**（排队/运行中/待决策/已完成/失败，运行中·待决策聚焦）+ **列表 toggle**

@@ -86,6 +86,17 @@ Playwright 真机发现 vitest 漏掉的 **AC-4 折叠持久 regression**：relo
 - 新测试：`test/run-list-page.test.tsx`、`test/run-list-store.test.ts`、`tests/iface/web/test_playwright_runlist.py`。
 - SPEC：`docs/specs/web-runlist-redesign.md`。
 
+## 增量（同日追加）：分组维度 + 空桶隐藏（SPEC §10.8-10.10）
+
+用户反馈：要更多分区方式（含按项目）+ 质疑排队/待决策空列。增量交付（commit `7cd8328` + `13f60d5`）：
+
+- **分组方式选择器** `GroupBySelector`（替换旧 groupBy on/off toggle）：不分组 / 状态 / 项目 / workflow / 时间 五维度。看板列 / 列表段随 dim；持久 `orca-runlist-groupby-v1` 默认 `status`。共享 `groupRuns` 单出口（DRY）。
+- **空桶自动隐藏** `ShowEmptyToggle`：默认隐藏 0-run 桶（直接解决排队/待决策空列噪音）；「显示空」可开；**待决策桶 >0 时高亮**（保证 gate 待处理不被埋，无论 showEmpty）。
+- **折叠持久泛化** `use-collapsed-buckets`：`Set<"dim:key">` + key 升级 `v2`；切 dim 各自独立折叠态。
+- 回答「排队/待决策有啥用」：排队是 `start_run` 瞬态 / 并发>3 溢出（轻量用户几乎不见）；待决策是 gate 等你 `human_decision`（出现=最该处理）。空则隐藏、有则突出。
+
+**验证**：vitest 456 passed（+19，含 AC-24/25/26 + cross-dim 折叠 bug 回归）/ Playwright 真机 10 passed / 后端回归 31 passed / tsc 0 错 / R3 无命中 / 后端 diff 空。code-reviewer 闭环（含揪出的 cross-dim 折叠擦写 bug）；E2E 抓到并修了 stale 五列用例（对齐空桶隐藏）。
+
 ## 9. 已知 follow-up（非本次 scope）
 
 - `tests/iface/web/conftest.py::live_server` 不隔离 `ORCA_HOME`——在真实开发机（千级 runs）跑会拖慢 `/api/runs?scope=all`。建议加 fixture 级 env 隔离。

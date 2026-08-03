@@ -187,3 +187,136 @@ ORCA_HOME=/tmp/orca-e2e-home .venv/bin/python -m pytest \
 - `D:\Projects\Orca\_e2e_artifacts\{screenshot.png, page.html}` —— 取证存档（非项目文件，可删）
 
 未 commit，等用户决定（CLAUDE.md：commit only when user asks）。
+
+---
+
+# 增量轮：分组维度选择器 + 空桶自动隐藏（commit `7cd8328`，SPEC §10.8-10.10）
+
+> 验证时间 2026-08-03 21:00-21:10。本段为「分组+空桶隐藏」增量的端到端真机追加轮，承袭上文的复现命令约定。
+
+## A. 增量范围回顾
+
+- `GroupBySelector`（none/status/project/workflow/time 五维度）+ `ShowEmptyToggle`（默认隐藏 0-run 桶）
+- `use-group-by` / `use-show-empty` / `use-collapsed-buckets`（v2 `dim:key` 持久，替换 v1）
+- 共享 `groupRuns` 单出口（DRY）；看板列 / 列表段随 dim
+- 新 AC-24/25/26
+
+## B. 环境解锁（纯环境问题，未改代码）
+
+1. **chromium 缺系统库**：WSL 内 `libnspr4.so` / `libnss3.so` / `libasound.so.2` 缺失（`apt-get` 须 sudo，无法用）。**workaround**：从 `mirrors.tuna.tsinghua.edu.cn/ubuntu` 下载 3 个 `.deb`（`libnspr4` / `libnss3` / `libasound2t64`），`dpkg-deb -x` 解压到 `/tmp/orca-libs/root/`，跑测试时 `export LD_LIBRARY_PATH=/tmp/orca-libs/root/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH`。`chrome-headless-shell --version` 返回 `Google Chrome for Testing 151.0.7922.34`，`ldd` 无 `not found`。
+2. **`/tmp/orca-e2e-home` 污染**：上次轮遗留的 `projects.json` 累积 30+ 死 `demo` 注册 + 注册了真 Orca 项目（`/mnt/d/Projects/Orca`），其 `runs/__probe__-*.jsonl` 千级 → `/api/runs` 返回千级 run → 前端停 `list-skeleton`、board 永不渲染。**workaround**：每次跑前 `rm -rf /tmp/orca-e2e-home && mkdir`。诊断确认：clean home 下 API 只返 2 条 demo run、页面渲染 `[board]/[board-column-completed]/[board-card]`、零 console error。Orca 项目不会自动重注册（手动/历史行为污染）。
+
+> 这是上一轮 §5 已记录的 conftest 隔离缺陷（`live_server` 不隔离 `ORCA_HOME`），非被测代码 bug。
+
+## C. 前端 build 验证
+
+```
+cd orca/iface/web/frontend && npx vite build
+→ ✓ built in 5.37s
+```
+bundle `index-BlYcgUuN.js`（`index.html` 实际引用的那个）grep 到全部新锚点：
+`group-by-select` / `show-empty-toggle` / `orca-runlist-groupby-v1` / `orca-runlist-collapsed-v2` / `orca-runlist-show-empty-v1`。
+
+## D. 后端回归（AC-18 旁证）
+
+```
+ORCA_HOME=/tmp/orca-e2e-home .venv/bin/python -m pytest \
+  tests/iface/web/test_routes.py tests/iface/web/test_multi_run_phase_c.py -q
+→ 31 passed in 2.52s
+```
+`git diff HEAD~1 HEAD -- orca/iface/web/{routes,run_manager.py,server.py,ws_handler.py}` 空 → **AC-18 后端零改 ✓**。
+
+## E. Playwright 真机结果（10/10 全绿）
+
+复现命令：
+```bash
+rm -rf /tmp/orca-e2e-home && mkdir -p /tmp/orca-e2e-home
+cd /mnt/d/Projects/Orca
+export LD_LIBRARY_PATH=/tmp/orca-libs/root/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+export ORCA_HOME=/tmp/orca-e2e-home
+.venv/bin/python -m pytest -m integration tests/iface/web/test_playwright_runlist.py -v
+→ 10 passed in 17.90s
+```
+
+逐条（含本次增量新增的 `test_group_by_dim_switch_and_empty_bucket_hide`）：
+
+| 用例 | 结果 |
+|---|---|
+| `test_default_board_renders_and_five_columns`（**已修**，见 §G） | ✓ |
+| `test_click_board_card_navigates_to_detail` | ✓ |
+| `test_view_toggle_persists_to_list_and_back` | ✓ |
+| `test_list_view_bulk_select_and_delete` | ✓ |
+| `test_list_view_sort_menu` | ✓ |
+| `test_list_view_collapse_persistence_across_reload`（AC-26 v2 `dim:key`） | ✓ |
+| **`test_group_by_dim_switch_and_empty_bucket_hide`**（AC-24/25 新） | ✓ |
+| `test_theme_button_toggles_html_class` | ✓ |
+| `test_list_view_search_force_expands_collapsed_group` | ✓ |
+| `test_run_item_selector_works_in_both_views`（9b 兼容） | ✓ |
+
+## F. 重点意图真机验证（AC-24 / AC-26 逐维度真驱动）
+
+驱动脚本 seed：2 项目（`alpha-proj` / `beta-proj`）× 3 workflow（`wf-x/y/z`）× 跨 4 时段（today/yesterday/week/earlier），共 4 条 completed run。切 dim + reload + cross-dim 折叠，DOM/column label 实采（`_e2e_artifacts/intent_results.json`）：
+
+### AC-24 五维度（真机 column testid + label）
+
+| dim | 实际看板列（按出现顺序） | 桶顺序对 §10.8 |
+|---|---|---|
+| status（默认） | `[已完成]`（4 run 全 completed） | ✓ |
+| project | `[alpha-proj, beta-proj]` | ✓ alpha + 兜底沉底 |
+| workflow | `[wf-x, wf-y, wf-z]` | ✓ alpha |
+| time | `[今天, 昨天, 本周, 更早]` | ✓ 逆序 + 未知沉底 |
+| none | `[全部]` | ✓ 单桶 |
+| **reload 保持** | none reload 后仍 `[全部]`；`localStorage` reload 前后均 `"none"` | ✓ |
+
+### AC-26 cross-dim 折叠独立（真机行计数）
+
+| 步骤 | run-row 计数 | localStorage `collapsed-v2` |
+|---|---|---|
+| project dim，初始展开 | 4 | `[]`（初始） |
+| 折叠 alpha-proj 第一个 group | 2（只剩 beta-proj 2 run） | `["project:alpha-proj"]` |
+| 切到 status dim | **4（全展开，独立）** | 不变 |
+| 切回 project dim | **2（alpha-proj 仍折叠）** | 不变 |
+| reload | **2（仍折叠）** | `["project:alpha-proj"]` |
+
+→ **AC-26 cross-dim 独立 + v2 `dim:key` 持久 ✓**。
+
+### AC-25 空桶隐藏（真机 + vitest 双通道）
+
+- **空隐藏**：Playwright `test_group_by_dim_switch_and_empty_bucket_hide` + `test_default_board_renders_and_five_columns`（修后）真机证明：单 completed run + showEmpty=false（默认）→ 仅 `[board-column-completed]`，queued/running/blocked/failed count==0。
+- **显空**：`test_default_board_renders_and_five_columns` 修后点击 `[show-empty-toggle]` → 五列全在。
+- **待决策高亮**：后端 `_summary_from_tape` 不映射 `blocked`（attached/tape-discovered run 永不返 `blocked`，仅 in-process run 才能；**pre-existing 后端行为，非本增量引入，违 AC-18 故不改**）。故该子句走 vitest 组件通道：`run-list-page.test.tsx` `AC-25：showEmpty=false → 空列不渲染；待决策>0 仍渲染 + ring 高亮` 用 `mkRun({status:"blocked"})` 断言 `board-column-blocked` 渲染 + className 含 `ring-orca-skipped/20`。✓（vitest 通道闭环）
+
+## G. 发现的唯一真机暴露 bug：stale Playwright 用例（已 minimal 修复 + 反向回归）
+
+**现象**：`test_default_board_renders_and_five_columns` 真机 FAIL（`board-column-queued` wait 2000ms 超时）。
+
+**根因**：该用例 assertion 停留在增量**之前**的 §10.2 语义（"即使列空也渲染占位"），与新增 §10.9 / AC-25（showEmpty=false 默认隐藏空桶）**直接矛盾**。coder 加了新 `test_group_by_dim_switch_and_empty_bucket_hide`（断言空列 count==0）却漏改这条旧用例——套件自相矛盾。vitest 抓不到（这是 Playwright 真机用例，不在 vitest 套件内）。
+
+**修复**（仅测试代码，`tests/iface/web/test_playwright_runlist.py` +17/-2，未动产品代码）：
+1. 先断言默认 showEmpty=false 下仅 `board-column-completed` 渲染、其余 4 空列 count==0（**反向回归**锁 AC-25 默认行为）；
+2. 再 click `[show-empty-toggle]` → 断言五列全在（保留原 AC-19/20 intent）。
+
+**修复后**：10/10 真机绿；diff 全部在测试文件，无产品代码改动。
+
+## H. vitest 回归
+
+```
+cd orca/iface/web/frontend && npx vitest run
+→ 26 test files, 456 passed (run-list-page.test.tsx 57 tests，含 AC-24/25/26 全部新用例)
+```
+
+## I. 回归确认（未退化）
+
+看板默认仍是 status（单完成 run → 单 completed 列，非空列）；列表多选/排序/批量删/单删/主题/搜索 全部 Playwright 真机绿（见 §E 表）。
+
+## J. 工作树变更（**未 commit**，等用户决定）
+
+- `M tests/iface/web/test_playwright_runlist.py` —— stale 用例 minimal 修复 + AC-25 反向回归
+- `?? orca/iface/web/static/assets/*` —— `npx vite build` 产物（增量源码已 build）
+- `?? tests/iface/web/_e2e_artifacts/*` —— 真机取证（`intent_*.png` / `intent_results.json` / `diag_*`，可删，**勿 commit**）
+
+环境一次性产物（不在工作树）：`/tmp/orca-libs/`（解压的 3 个 .deb）、`/tmp/orca-e2e-home/`（clean home）。
+
+---
+
+**E2E 全绿**（10/10 Playwright 真机 + 456 vitest + 31 后端回归；1 个 stale 真机用例已 minimal 修复+反向回归，未 commit）。
