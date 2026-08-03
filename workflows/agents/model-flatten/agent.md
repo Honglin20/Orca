@@ -39,7 +39,8 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
   "project_root": "<推断绝对路径>",
   "model_name": "<base_name>",
   "flat_artifacts_dir": "<output_dir> 绝对路径",
-  "baseline_latency_ms": <float>
+  "baseline_latency_ms": <float>,
+  "viz_status": {<dumb copy 自 viz_kd_stage --stage baseline stdout>}
 }
 ```
 
@@ -47,7 +48,8 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 - 字段名严格匹配；`baseline_contract_path` 必须是文件实际存在的绝对路径；
 - `model_name` 即 `<base_name>`（推断规则见 SKILL.md Step 4）；
 - `project_root` 填**推断所得的绝对路径**（低置信时追加 ` (low-confidence: ...)` 后缀，仍是单字符串）；
-- `baseline_latency_ms` = `__main__` 测出的默认 cfg latency 中位数（下方 bash 块解析 `LATENCY_MS:`）。
+- `baseline_latency_ms` = `__main__` 测出的默认 cfg latency 中位数（下方 bash 块解析 `LATENCY_MS:`）；
+- `viz_status` 必填（缺 → output_schema fail loud）；失败值（env_missing/generic 等）合法产出，sidecar 失败不阻断主流程。
 
 ## 输入
 
@@ -117,9 +119,29 @@ LATENCY_SOURCE="$(echo "$RUN_OUT" | grep '^LATENCY_SOURCE:' | awk '{print $2}')"
 echo "PARSED: BASELINE_LATENCY_MS=$BASELINE_LATENCY_MS LATENCY_SOURCE=$LATENCY_SOURCE"
 ```
 
+## 末尾 web 推送 执行：viz_kd_stage --stage baseline（dumb copy stdout 进 viz_status）
+
+> 推 baseline latency bar（label=kd-nas）。sidecar：失败值合法产出，不阻断 flatten。
+> ``$ORCA_ARTIFACTS_DIR`` 经 env_anchor 透传给 sidecar（per-run 自举 ORCA env）。
+
+```bash
+KD_SCRIPTS_DIR="$(python3 -c "import os;print(os.path.abspath('workflows/agents/_kd_scripts'))")"
+VIZ_STDOUT=$(python3 "$KD_SCRIPTS_DIR/viz_kd_stage.py" \
+  --stage baseline \
+  --baseline_latency_ms "$BASELINE_LATENCY_MS" \
+  --env_anchor "${ORCA_ARTIFACTS_DIR:-}" \
+  || true)
+VIZ_STATUS=$(python3 -c "
+import json, sys
+o = json.loads(sys.argv[1])
+print(json.dumps({'env_status': o.get('viz_env_status', 'generic'), 'charts': o.get('charts', {})}))
+" "$VIZ_STDOUT")
+echo "VIZ_STATUS_JSON=$VIZ_STATUS"
+```
+
 ## 产出 JSON（最终消息）
 
-把 `CONTRACT` / project_root / base_name / output_dir / BASELINE_LATENCY_MS 填进模板，**只**返回这个 JSON：
+把 `CONTRACT` / project_root / base_name / output_dir / BASELINE_LATENCY_MS / VIZ_STATUS_JSON 填进模板，**只**返回这个 JSON：
 
 ```json
 {
@@ -127,10 +149,12 @@ echo "PARSED: BASELINE_LATENCY_MS=$BASELINE_LATENCY_MS LATENCY_SOURCE=$LATENCY_S
   "project_root": "<PROJECT_ROOT 绝对路径>",
   "model_name": "<base_name>",
   "flat_artifacts_dir": "<output_dir 绝对路径>",
-  "baseline_latency_ms": <BASELINE_LATENCY_MS float>
+  "baseline_latency_ms": <BASELINE_LATENCY_MS float>,
+  "viz_status": <VIZ_STATUS_JSON 对象原样嵌入>
 }
 ```
 
 - `baseline_contract_path` 必须是 validate_contract.py 校验 PASS 的同一文件路径；
 - `baseline_latency_ms` 必须是上面 `__main__` 跑出的 `LATENCY_MS:` 裸数值（float，不编造）；
-- 路由恒到 `setup`（setup step2 读 `baseline_latency_ms` 作 baseline 参考线 + step6 跑 setup_helpers 时作 anchor）。
+- `viz_status` 必须是 JSON 对象（dumb copy 自 viz_kd_stage stdout，失败值合法不阻断）；
+- 路由恒到 `setup`（setup 透传 `baseline_latency_ms` + 透传 `baseline_contract_path` 进下游 + seed baseline champion）。

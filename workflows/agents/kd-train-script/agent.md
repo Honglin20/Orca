@@ -29,7 +29,7 @@ eval 模式只读评测——从用户仓 eval 脚本移植指标，emit STUDENT
 workflow 节点经 Jinja 渲染注入（flatten + teacher-gen 上游 output + inputs）：
 
 - baseline 契约路径: `{{ flatten.output.baseline_contract_path }}`（flatten 产出的 `.py`，含 build_model + DUMMY_INPUT + KNOBS；读它对齐 student 模型契约 I/O）
-- teacher 模型路径: `{{ teacher_gen.output.teacher_model_path }}`（teacher-gen 派生的 teacher wrapper .py；teacher 模式 smoke + 契约参考用）
+- teacher 模型路径: `{{ gen_teacher.output.teacher_model_path }}`（teacher-gen 派生的 teacher wrapper .py；teacher 模式 smoke + 契约参考用）
 - 用户 train.py: `{{ inputs.user_train_script }}`（用户原 train.py 绝对路径，含 `compute_loss` + `build_dataloader`；生成时搬其 loss/dataloader/optimizer 进 train_pipeline.py，自包含拷贝不 import 用户项目）
 - 设备: `{{ inputs.device }}`（advanced，默认 auto；smoke 校验用）
 - latency_provider: `{{ inputs.latency_provider }}`（用户真硬件 latency 脚本 `path::func`；teacher smoke __main__ latency 用）
@@ -58,11 +58,11 @@ workflow 节点经 Jinja 渲染注入（flatten + teacher-gen 上游 output + in
 读取 `$ORCA_AGENT_RESOURCES/SKILL.md` 获取完整工作流（`<skill_dir>` =
 `$ORCA_AGENT_RESOURCES`，`<output_dir>` = 上面 OUTPUT_DIR，`<kd_scripts_dir>` = 上面 KD_SCRIPTS_DIR，
 `<baseline_contract_path>` = `{{ flatten.output.baseline_contract_path }}`，
-`<teacher_model_path>` = `{{ teacher_gen.output.teacher_model_path }}`，
+`<teacher_model_path>` = `{{ gen_teacher.output.teacher_model_path }}`，
 `<user_train_import>` = `{{ inputs.user_train_script }}`）。按其中 3 步执行：
 
 **Step 1 — Load Context**：读用户 `train.py`（`{{ inputs.user_train_script }}`）+ teacher 模型契约
-（`{{ teacher_gen.output.teacher_model_path }}`）+ student 模型契约（`{{ flatten.output.baseline_contract_path }}`）+
+（`{{ gen_teacher.output.teacher_model_path }}`）+ student 模型契约（`{{ flatten.output.baseline_contract_path }}`）+
 KD 库 surface（`kd/compose.py` / `kd/wrapper.py` / `kd/ema.py` 只读） +
 参考模板 `$ORCA_AGENT_RESOURCES/references/templates/train_pipeline.py`。
 **并发现+读用户仓的 eval 脚本**（glob `<user_project_root>` 的 `test_*.py`/`eval*.py`/`evaluate*.py`/`test.py`，或 `train.py` 内的 eval/metric 函数）——
@@ -80,11 +80,66 @@ KD 库 surface（`kd/compose.py` / `kd/wrapper.py` / `kd/ema.py` 只读） +
 **Step 3 — Validate**（3 层）：
 1. 静态：`py_compile` + `--help` + CLI 一致性
 2. 功能 smoke（小预算 CPU）：teacher 模式必跑（`--user_train_import {{ inputs.user_train_script }}`）；
-   distill 模式在 train-script-gen 阶段**无 teacher_cache**（teacher_cache 由 setup 后续产）→ 标 `Skipped`
+   distill 模式在 train-script-gen 阶段**无 teacher_cache**（teacher_cache 由 train_teacher 后续产）→ 标 `Skipped`
 3. **workflow-verifier 子 agent（必跑，绝不跳过）**：用 SKILL.md 的 prompt 模板**真 spawn**
    workflow-verifier（不许叙述假 pass），喂给它 checklist item 7（optimizer 忠实移植）、
    20（shape 读 DUMMY_INPUT 禁硬编码）、20b（teacher/student I/O == baseline DUMMY_INPUT）
    作优先项。verifier `unresolved` → 不许输出 JSON（跳过 verifier = 生成失败）。
+
+**Step 4 — 提取 teacher 默认 lr/epochs（SPEC §6.4 M1，串行版必跑）**：
+smoke PASS 后，从 `{{ inputs.user_train_script }}` grep 用户**默认 lr/epochs**（teacher 用用户默认而非硬编码 1/2）：
+
+```bash
+python3 -c "
+import re, sys, pathlib
+src = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8', errors='replace')
+
+# lr 提取（任一模式命中即取；按确定性优先级）：
+#   1. argparse default: '--lr', default=<num>  /  '--learning-rate', default=<num>
+#   2. 赋值: lr = <num>  /  learning_rate = <num>
+lr_patterns = [
+    r\"['\\\"]--lr['\\\"],\\s*[^)]*default\\s*=\\s*([0-9.eE+-]+)\",
+    r\"['\\\"]--learning-rate['\\\"],\\s*[^)]*default\\s*=\\s*([0-9.eE+-]+)\",
+    r\"\\blr\\s*=\\s*([0-9.eE+-]+)\",
+    r\"\\blearning_rate\\s*=\\s*([0-9.eE+-]+)\",
+]
+lr_match = None
+for pat in lr_patterns:
+    m = re.search(pat, src)
+    if m:
+        lr_match = m.group(1)
+        break
+# epochs 提取（任一模式命中即取）：
+#   1. argparse default: '--epochs', default=<num>
+#   2. 赋值: epochs = <num>  /  n_epochs = <num>
+ep_patterns = [
+    r\"['\\\"]--epochs['\\\"],\\s*[^)]*default\\s*=\\s*(\\d+)\",
+    r\"['\\\"]--num-epochs['\\\"],\\s*[^)]*default\\s*=\\s*(\\d+)\",
+    r\"\\bepochs\\s*=\\s*(\\d+)\",
+    r\"\\bn_epochs\\s*=\\s*(\\d+)\",
+]
+ep_match = None
+for pat in ep_patterns:
+    m = re.search(pat, src)
+    if m:
+        ep_match = m.group(1)
+        break
+
+errs = []
+if not lr_match:
+    errs.append('teacher_default_lr 提取失败（grep argparse default/赋值均无；请显式声明用户 teacher 默认 lr）')
+if not ep_match:
+    errs.append('teacher_default_epochs 提取失败（grep argparse default/赋值均无；请显式声明用户 teacher 默认 epochs）')
+if errs:
+    print('FAIL: ' + ' | '.join(errs), file=sys.stderr)
+    sys.exit(2)
+print(f'TEACHER_DEFAULT_LR: {float(lr_match)}')
+print(f'TEACHER_DEFAULT_EPOCHS: {int(ep_match)}')
+" "{{ inputs.user_train_script }}"
+```
+
+提取不到 → **fail loud**（非 WARN——SPEC-REVIEW M1：用户 teacher 可能因 lr 错不收敛，违步骤3）；
+不靠 train_pipeline 模板的 argparse default=1e-3/3 兜底（那是 placeholder，非用户真值）。
 
 ## 红线（违反即架构问题）
 
@@ -102,13 +157,17 @@ KD 库 surface（`kd/compose.py` / `kd/wrapper.py` / `kd/ema.py` 只读） +
 
 ```json
 {
-  "train_pipeline_path": "<OUTPUT_DIR>/train_pipeline.py 绝对路径"
+  "train_pipeline_path": "<OUTPUT_DIR>/train_pipeline.py 绝对路径",
+  "teacher_default_lr": <float>,
+  "teacher_default_epochs": <int>
 }
 ```
 
-- JSON 前后**不许**有任何描述性文字（workflow `outputs` / 下游 setup+train_pool 直接取这个 JSON）；
+- JSON 前后**不许**有任何描述性文字（workflow `outputs` / 下游 train_teacher 直接取这个 JSON）；
 - `train_pipeline_path` 必须是 py_compile 通过 + teacher 模式 smoke PASS 的同一文件绝对路径；
-- workflow-verifier 未 all-pass → 不返 JSON（读 verifier findings 修脚本重跑）。
+- `teacher_default_lr` / `teacher_default_epochs` = 从 inputs.user_train_script 提取的用户默认值（下方 Step 4 grep）；
+- workflow-verifier 未 all-pass → 不返 JSON（读 verifier findings 修脚本重跑）；
+- 提取不到 teacher_default_lr/epochs → **fail loud**（用户 teacher 可能因 lr 错不收敛，违步骤3）。
 
 生成过程 stdout 可打 `KEY: value` 调试行（OUTPUT_DIR / GENERATED_SCRIPT / MODES_SUPPORTED /
 TEACHER_MODE_SMOKED / VERIFIER_VERDICT 等），但**最终消息**只许是上面那个 JSON。
