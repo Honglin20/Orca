@@ -5,6 +5,23 @@
 
 ---
 
+## [2026-08-03] feat(kd-nas): 串行迭代重写（替代批量并发，SPEC v3）
+
+把 `kd-nas` 从批量并发（gate_all → train_pool → select）重写为**串行迭代 KD 蒸馏**（10 节点 DAG：
+flatten→setup→gen_teacher→gen_train_script→train_script_verify→train_teacher→
+gen_student→distill→decide[loopback]→finalize）。每轮 1 个 student（首轮固定规则缩1层+FFN→pointwise
+/ 迭代轮 KB+perf 驱动，DUMMY_INPUT 字节级校验防 LLM 写死 shape）→ KD 蒸馏（--kd_config mse+ofd+EMA
+recipe 必传）→ min-latency champion ratchet（FIFO tiebreak）+ continue_loop 决策。teacher 用用户默认
+lr/epochs（从 user_train_script 提取，非硬编码）。全程 metrics 推 web（每节点 viz_kd_stage sidecar）。
+显式 catch 协议（业务失败 rc≠0 → FAIL_* 落账 continue；系统失败 → workflow_failed）。新 4 脚本
+（kd_reducer / viz_kd_stage / metrics_tail / finalize_kd）+ 新 5 agent（train-script-verify /
+train-teacher / gen-student / distill / decide）+ setup 精简（拆出 train_teacher）+ model-flatten/
+teacher-gen 扩 viz_status。tars validate 0 error；43 新单测 + 73 旧 kd_redesign 通过（11 obsolete 跳过）。
+SPEC v3 spec-reviewer 三轮对抗 PASS。Commits: `b3c3c91` + `aa6e5d7` + `a230ebe` + `d03e4c9`。
+详见 [release note](../releases/2026-08-03-kd-nas-serial-iteration.md)。E2E 真机留 task #6（需 GPU）。
+
+---
+
 ## [2026-08-03] chore(audit): Orca 真实代码审查 5 聚类全流程交付（A/B/C/D/E）
 
 **干了什么**：8 维度 fan-out 真实代码审查（24→52 agent，对抗验证）→ **44 raw → 26 confirmed / 18 rejected**，26 条全带 file:line 证据。按根因聚类 A–E，每个走完整 SDD：写 spec → 多轮对抗 spec-review（A/B 各 4 轮、C 7 轮+rev8、D/E 各 2 轮）至 pass → coder 实现 + 单测 → test-agent 真机 E2E → 每改动 commit + CHANGELOG。零 follow-up。
