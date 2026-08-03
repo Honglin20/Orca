@@ -42,7 +42,7 @@ function SkeletonGroup() {
 
 function SkeletonRow() {
   return (
-    <div className="orca-bg-surface orca-border flex animate-pulse items-center gap-3 rounded border px-3 py-2 pl-4 shadow-sm">
+    <div className="orca-bg-surface orca-border relative flex animate-pulse items-center gap-3 rounded border px-3 py-2 pl-4 shadow-sm">
       {/* 状态竖条 */}
       <div className="orca-bg-surface-2 absolute inset-y-0 left-0 w-0.5 rounded-l" />
       {/* checkbox 位 */}

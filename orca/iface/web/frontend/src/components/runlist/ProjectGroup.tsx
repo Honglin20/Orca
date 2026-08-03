@@ -29,11 +29,6 @@ export interface ProjectGroupData {
    * 缺省回退到 ``name``（兼容旧用例）。
    */
   bucketKey?: string;
-  /**
-   * 路径，仅 project dim 传（取该桶首个 run 的 ``project_id``）。
-   * 其它 dim 缺省 → 不渲染 path 行。
-   */
-  path?: string;
   runs: RunSummary[];
 }
 
@@ -45,7 +40,7 @@ interface Props extends ProjectGroupData {
   q: string;
   /** 已选 id 集合（决定三态 checkbox 状态） */
   selectedIds: Set<string>;
-  /** 切换单个 run 选择（带 shiftKey） */
+  /** 切换单个 run 选择（带 shiftKey）；orderedIds 由调用方按当前桶收窄（M-4） */
   onToggleRun: (id: string, shiftKey: boolean) => void;
   /** 三态全选切换 */
   onToggleSelectAll: () => void;
@@ -55,14 +50,11 @@ interface Props extends ProjectGroupData {
   onDeleteRun: (id: string) => void;
   /** 删除 in-flight 的 id 集合（视觉 opacity-40） */
   deletingIds: Set<string>;
-  /** shift 范围选用的有序 id 列表（组内当前展示顺序） */
-  orderedRunIds: string[];
 }
 
 export function ProjectGroup({
   name,
   bucketKey,
-  path,
   runs,
   open,
   onToggleOpen,
@@ -75,7 +67,6 @@ export function ProjectGroup({
   onOpenRun,
   onDeleteRun,
   deletingIds,
-  orderedRunIds,
 }: Props) {
   // 聚合统计（运行中 / 待决策 / 总花费 / 最近）。
   const agg = useMemo(() => {
@@ -103,7 +94,6 @@ export function ProjectGroup({
   };
 
   const groupTestId = bucketKey ?? name;
-  const hasPath = !!path;
 
   return (
     <section
@@ -120,10 +110,12 @@ export function ProjectGroup({
         }}
       />
       <div className="py-2 pl-4 pr-2">
-        {/* 折叠/展开 + 项目头（点击切折叠） */}
+        {/* 折叠/展开 + 项目头（点击切折叠）。
+            role=group（非 button）：header 内嵌 group-select-all checkbox（interactive），
+            嵌套 interactive 进 role=button 违反 ARIA，改 group 消解（review MINOR）。 */}
         <div
           data-testid="group-header"
-          role="button"
+          role="group"
           tabIndex={0}
           onClick={onToggleOpen}
           onKeyDown={(e) => {
@@ -159,23 +151,6 @@ export function ProjectGroup({
               {agg.blocked} 待决策
             </span>
           )}
-          {/* path：仅 project dim 传（其它 dim path 缺省）；展开态第二行，折叠态同行截断 */}
-          {hasPath &&
-            (open ? (
-              <span
-                className="block w-full truncate font-mono text-xs orca-text-muted"
-                title={path}
-              >
-                {path}
-              </span>
-            ) : (
-              <span
-                className="truncate font-mono text-xs orca-text-faint"
-                title={path}
-              >
-                {path}
-              </span>
-            ))}
           {/* 搜索命中数（搜索穿透） */}
           {q && searchHitCount !== undefined && (
             <span className="orca-text-muted ml-auto shrink-0 text-xs">
@@ -231,7 +206,6 @@ export function ProjectGroup({
               onToggleSelect={(shiftKey) => onToggleRun(r.run_id, shiftKey)}
               onOpen={() => onOpenRun(r.run_id)}
               onDelete={() => onDeleteRun(r.run_id)}
-              orderedRunIds={orderedRunIds}
             />
           ))}
         </div>

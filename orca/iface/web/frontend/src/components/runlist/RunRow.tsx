@@ -34,7 +34,6 @@ interface Props {
   onToggleSelect: (shiftKey: boolean) => void;
   onOpen: () => void;
   onDelete: () => void;
-  orderedRunIds: string[];
 }
 
 export function RunRow({
@@ -54,7 +53,7 @@ export function RunRow({
     <li
       role="row"
       data-testid="run-row"
-      className={`group relative flex items-center gap-3 rounded border orca-border orca-bg-surface px-3 py-2 pl-4 shadow-sm transition-opacity hover:orca-bg-surface-2 ${
+      className={`group relative flex items-center gap-3 rounded border orca-border orca-bg-surface px-3 py-2 pl-4 shadow-sm transition-opacity duration-200 hover:orca-bg-surface-2 ${
         isBlocked ? "ring-1 ring-inset ring-orca-skipped/30" : ""
       } ${deleting ? "opacity-40" : ""}`}
     >

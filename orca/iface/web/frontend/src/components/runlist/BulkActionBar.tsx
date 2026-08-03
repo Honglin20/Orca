@@ -26,10 +26,9 @@ export function BulkActionBar({
   onClearSelection,
   onSelectAll,
 }: Props) {
-  // Shift 范围选 hint：首次见时显示 3s 后淡出，localStorage 记忆不再显。
+  // Shift 范围选 hint：mount 时检查一次（已 seen 则不显），避免选择增减触发重排（review MINOR）。
   const [showHint, setShowHint] = useState(false);
   useEffect(() => {
-    if (selectedCount === 0) return;
     try {
       const seen = window.localStorage.getItem(HINT_KEY);
       if (!seen) {
@@ -48,7 +47,8 @@ export function BulkActionBar({
       // localStorage 不可用：不显 hint（静默降级）。
     }
     return;
-  }, [selectedCount]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div

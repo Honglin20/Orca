@@ -37,11 +37,22 @@ interface Props {
   onDelete: () => void;
 }
 
-/** 解析 progress 字符串为 0..1 比例。失败/空 → null（indeterminate）。 */
+/** 解析 progress 字符串为 0..1 比例。失败/空/越界/未知分子 → null（indeterminate）。
+ *  backend 契约（run_manager.py）：``progress = "done/total"`` | ``"?"`` | ``"?/total"``。
+ *  另兼容历史/外部 ``"xx%"`` 与裸数（视为百分数）。 */
 function parseProgress(p: string | undefined | null): number | null {
   if (!p) return null;
   const s = String(p).trim();
   if (!s) return null;
+  // backend 真实格式 "done/total"（如 "3/7"）或 "?/total"。
+  const frac = s.match(/^(\d+|\?)\s*\/\s*(\d+)$/);
+  if (frac) {
+    if (frac[1] === "?") return null; // 分子未知 → indeterminate
+    const d = Number.parseInt(frac[1], 10);
+    const t = Number.parseInt(frac[2], 10);
+    return t > 0 ? Math.min(1, d / t) : null;
+  }
+  if (s === "?") return null;
   if (s.endsWith("%")) {
     const n = Number.parseFloat(s.slice(0, -1));
     if (Number.isNaN(n)) return null;
@@ -49,9 +60,8 @@ function parseProgress(p: string | undefined | null): number | null {
   }
   const n = Number.parseFloat(s);
   if (Number.isNaN(n)) return null;
-  if (n <= 1) return n; // 视为比例
-  if (n <= 100) return n / 100; // 视为百分数
-  return null; // >100 不合理 → indeterminate
+  if (n < 0 || n > 100) return null; // 越界不合理 → indeterminate
+  return n / 100; // 裸数视为百分数
 }
 
 export function BoardCard({
@@ -69,7 +79,7 @@ export function BoardCard({
   return (
     <div
       data-testid="board-card"
-      role="button"
+      role="group"
       tabIndex={0}
       onClick={onOpen}
       onKeyDown={(e) => {
@@ -78,15 +88,15 @@ export function BoardCard({
           onOpen();
         }
       }}
-      className={`group relative cursor-pointer rounded border orca-border orca-bg-surface px-3 py-2 pl-4 text-left shadow-sm transition-opacity hover:orca-bg-surface-2 ${
+      className={`group relative cursor-pointer rounded border orca-border orca-bg-surface px-3 py-2.5 pl-4 text-left shadow-sm transition-opacity hover:orca-bg-surface-2 ${
         selected ? "ring-1 ring-orca-accent/40 bg-[rgb(var(--accent)/0.06)]" : ""
       } ${isBlocked ? "ring-1 ring-inset ring-orca-skipped/30" : ""} ${
         deleting ? "opacity-40" : ""
       }`}
     >
-      {/* 状态竖条（行内 hex 来自 STATUS_BAR_HEX，§1.2 约定允许） */}
+      {/* 状态竖条（行内 hex 来自 STATUS_BAR_HEX，§1.2 约定允许）。w-1=4px，与列条 3px 同档（A-MINOR） */}
       <div
-        className="absolute inset-y-0 left-0 w-0.5 rounded-l"
+        className="absolute inset-y-0 left-0 w-1 rounded-l"
         style={{ backgroundColor: STATUS_BAR_HEX[rs] }}
       />
       {/* hover 左上：run-checkbox（与列表共享 selection） */}
@@ -111,7 +121,7 @@ export function BoardCard({
         }}
         title="删除"
         aria-label="删除 run"
-        className="absolute right-1.5 top-1.5 inline-flex min-h-[32px] min-w-[32px] items-center justify-center rounded text-[rgb(var(--text-faint)/0.55)] opacity-0 transition-colors hover:bg-orca-failed/10 hover:text-orca-failed group-hover:opacity-100 group-focus-within:opacity-100"
+        className="absolute right-1.5 top-1.5 inline-flex min-h-[32px] min-w-[32px] items-center justify-center rounded text-[rgb(var(--text-faint)/0.8)] opacity-0 transition-colors hover:bg-orca-failed/10 hover:text-orca-failed group-hover:opacity-100 group-focus-within:opacity-100"
       >
         <Trash2 size={16} strokeWidth={1.5} aria-hidden />
       </button>

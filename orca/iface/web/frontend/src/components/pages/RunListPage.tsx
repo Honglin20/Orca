@@ -83,7 +83,15 @@ export function RunListPage() {
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     return `${proto}//${window.location.host}/ws`;
   }, []);
-  const wsState = useWsRunlist(wsUrl, onRunChanged);
+  const wsState = useWsRunlist(
+    wsUrl,
+    onRunChanged,
+    // 重连成功 → 清 lastFetch 节流后 refresh（SPEC §5.8「重连成功淡出 + refresh」）。
+    () => {
+      useRunListStore.setState({ lastFetch: 0 });
+      void refresh();
+    },
+  );
 
   // ── mount：refresh + 启轮询。unmount：reset + 停轮询。 ──────────────────────
   useEffect(() => {
@@ -129,17 +137,6 @@ export function RunListPage() {
     [buckets, showEmpty],
   );
 
-  // ── path 仅 project dim 有（取该桶首个 run 的 project_id；§6.5 NF2 不显后端字段） ──
-  const pathByKey = useMemo(() => {
-    const m = new Map<string, string>();
-    if (groupBy !== "project") return m;
-    for (const b of buckets) {
-      const firstWithId = b.runs.find((r) => r.project_id);
-      if (firstWithId?.project_id) m.set(b.key, firstWithId.project_id);
-    }
-    return m;
-  }, [buckets, groupBy]);
-
   // ── 折叠持久（known = 当前所有 "dim:key"；惰性清理用） ──────────────────────
   const knownKeys = useMemo(() => {
     const s = new Set<string>();
@@ -150,7 +147,10 @@ export function RunListPage() {
     useCollapsedBuckets(knownKeys);
 
   // ── 选择（runs 变化自动求交，§3.3） ────────────────────────────────────────
-  const runIds = useMemo(() => sorted.map((r) => r.run_id), [sorted]);
+  // 求交数据源用**未过滤** runs（review M-1 / SPEC §3.3）：切 chip/搜索隐藏已选 run 时，
+  // 选择**保留**——只有 run 真正从 runs 消失（删除/WS）才被求交剔除。若用 sorted（含 q/status
+  // 过滤），切 chip 隐藏已选 run 后会被误剔，永久丢选择。
+  const runIds = useMemo(() => runs.map((r) => r.run_id), [runs]);
   const { selected, toggle, toggleGroup, groupState, setMany, clear } =
     useListSelection(runIds);
 
@@ -184,6 +184,8 @@ export function RunListPage() {
       if (dialog.mode === "single") {
         try {
           await deleteRun(dialog.target.runId);
+          // M-3：单删成功 toast（SPEC §5.6「成功 → 右下 toast 已删除 <name>」）。
+          toast(`已删除 ${dialog.target.workflowName}`, "ok");
         } catch (e) {
           allOk = false;
           // fail-loud（§ AC-15）：toast 错误原因，**不**用 alert。
@@ -212,9 +214,10 @@ export function RunListPage() {
           );
         }
       }
-      // 仅全部成功才清空选择 + 关对话框（SPEC §3.3：失败时选择保留，便于用户重试或主动取消）。
+      // 仅全部成功才关对话框；清空选择**仅 bulk 全成功**（review M-5）——单删成功不清选择集
+      // （被删 id 由 M-1 的求交自动剔，其它已选保留；旧实现无条件 clear 会误清整个选择集）。
       if (allOk) {
-        clear();
+        if (dialog.mode === "bulk") clear();
         setDialog(null);
       }
     } finally {
@@ -323,15 +326,16 @@ export function RunListPage() {
                       key={`${groupBy}:${b.key}`}
                       name={b.label}
                       bucketKey={b.key}
-                      path={pathByKey.get(b.key)}
                       runs={b.runs}
                       open={open}
                       onToggleOpen={() => toggleCollapse(`${groupBy}:${b.key}`)}
                       searchHitCount={searching ? b.runs.length : undefined}
                       q={q}
                       selectedIds={selected}
+                      // M-4：Shift 范围选 orderedIds 收窄到**当前桶**（SPEC §5.5「同分组内」），
+                      // anchor 跨桶时 toggle 内 indexOf 自然返 -1 → 退化为普通点，不越组。
                       onToggleRun={(id, shiftKey) =>
-                        toggle(id, shiftKey, sorted.map((r) => r.run_id))
+                        toggle(id, shiftKey, groupIds)
                       }
                       onToggleSelectAll={() => toggleGroup(groupIds)}
                       selectAllState={groupState(groupIds)}
@@ -345,7 +349,6 @@ export function RunListPage() {
                         })
                       }
                       deletingIds={deletingIds}
-                      orderedRunIds={sorted.map((r) => r.run_id)}
                     />
                   );
                 })}
@@ -361,14 +364,12 @@ export function RunListPage() {
               <div className={loading ? "opacity-60" : ""}>
                 <RunBoard
                   runs={sorted}
-                  sort={sort}
                   dim={groupBy}
                   showEmpty={showEmpty}
                   selectedIds={selected}
                   deletingIds={deletingIds}
-                  onToggleRun={(id, shiftKey) =>
-                    toggle(id, shiftKey, sorted.map((r) => r.run_id))
-                  }
+                  // M-4：RunBoard 内部按桶收窄 orderedIds（同列表 ProjectGroup 一致）。
+                  onToggleRun={toggle}
                   onOpenRun={handleOpen}
                   onDeleteRun={(id) =>
                     handleDeleteOne({
@@ -451,7 +452,8 @@ function toast(message: string, kind: "ok" | "partial" | "failed"): void {
   if (typeof document === "undefined") return;
   const el = document.createElement("div");
   el.setAttribute("data-testid", "runlist-toast");
-  el.setAttribute("role", "status");
+  // 失败/部分 → role=alert（assertive，AT 立即播报）；成功 → role=status（polite）。
+  el.setAttribute("role", kind === "ok" ? "status" : "alert");
   el.className =
     "orca-bg-surface orca-border fixed bottom-4 right-4 z-[60] rounded border px-4 py-2 text-sm shadow-md " +
     (kind === "failed"

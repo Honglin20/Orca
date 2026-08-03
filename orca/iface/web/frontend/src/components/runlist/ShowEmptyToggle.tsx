@@ -29,6 +29,7 @@ export function ShowEmptyToggle({ value, onChange }: Props) {
       }`}
     >
       <Icon size={14} strokeWidth={1.5} aria-hidden />
+      <span className="text-xs">空</span>
     </button>
   );
 }

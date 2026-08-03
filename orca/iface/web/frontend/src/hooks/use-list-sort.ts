@@ -71,11 +71,6 @@ function writeStored(s: SortState): void {
 export function useListSort() {
   const [sort, setSortState] = useState<SortState>(() => readStored());
 
-  const setSort = useCallback((next: SortState) => {
-    setSortState(next);
-    writeStored(next);
-  }, []);
-
   // 点字段名语义（SPEC §5.4）：切到该字段（默认 desc）；同字段二次点反转方向；不循环回「无排序」。
   const selectField = useCallback(
     (field: SortField) => {
@@ -91,5 +86,5 @@ export function useListSort() {
     [],
   );
 
-  return { sort, setSort, selectField };
+  return { sort, selectField };
 }

@@ -29,6 +29,7 @@ const GIVE_UP_THRESHOLD = 3;
 export function useWsRunlist(
   url: string,
   onRunChanged: (frame: { run_id: string; action: string }) => void,
+  onConnected?: () => void,
 ): WsRunlistState {
   const [connected, setConnected] = useState(false);
   const [reconnects, setReconnects] = useState(0);
@@ -41,6 +42,11 @@ export function useWsRunlist(
   // 把最新的 onRunChanged 存 ref，避免重连时 effect 依赖抖动。
   const cbRef = useRef(onRunChanged);
   cbRef.current = onRunChanged;
+  // 把最新的 onConnected 存 ref（重连成功后回调，SPEC §5.8「重连成功淡出 + refresh」）。
+  const onConnectedRef = useRef(onConnected);
+  onConnectedRef.current = onConnected;
+  // 首次 onopen 不触发 onConnected（mount effect 已 refresh）；仅重连时触发（review MINOR / §5.8）。
+  const didInitialConnectRef = useRef(false);
 
   const clearBackoff = () => {
     if (backoffTimerRef.current !== null) {
@@ -68,6 +74,12 @@ export function useWsRunlist(
       reconnectsRef.current = 0;
       setReconnects(0);
       setGiveUp(false);
+      // 仅重连（非首次连接）触发 onConnected：调用方清 lastFetch 后 refresh（SPEC §5.8）。
+      if (didInitialConnectRef.current) {
+        onConnectedRef.current?.();
+      } else {
+        didInitialConnectRef.current = true;
+      }
     };
 
     ws.onmessage = (ev) => {

@@ -13,7 +13,7 @@
 // 测试范式：mock fetch + WebSocket（vi.stubGlobal）；happy-dom 提供 window/document。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent, cleanup, within, act, renderHook } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup, within, act, renderHook, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { RunListPage } from "@/components/pages/RunListPage";
 import { useRunListStore, type RunSummary } from "@/stores/run-list-store";
@@ -272,8 +272,8 @@ describe("RunListPage 重设计", () => {
     ]);
     renderPage();
     await screen.findAllByTestId("run-row");
-    // 默认（started_at desc）触发器显「排序」。
-    expect(screen.getByTestId("sort-trigger").textContent).toMatch(/排序/);
+    // 默认（started_at desc）触发器显当前字段名「开始时间」（A-M3：省通用「排序」前缀）。
+    expect(screen.getByTestId("sort-trigger").textContent).toMatch(/开始时间/);
 
     // 打开菜单。
     await act(async () => {
@@ -547,8 +547,8 @@ describe("RunListPage 重设计", () => {
     warnSpy.mockRestore();
   });
 
-  // ── 项目头美化：folder icon + path + 聚合 ──
-  it("AC-5 项目头：folder icon + path + 聚合（N runs）", async () => {
+  // ── 项目头美化：folder icon + 聚合（M-6：去 path 显示） ──
+  it("AC-5 项目头：folder icon + 聚合（N runs）；不显 project_id 作 path（M-6）", async () => {
     mockFetchFor([
       mkRun({ run_id: "r1", project_name: "demo", cost: 0.3, started_at: 1700000000 }),
       mkRun({ run_id: "r2", project_name: "demo", cost: 0.4, status: "running" }),
@@ -559,8 +559,8 @@ describe("RunListPage 重设计", () => {
     const header = within(group).getByTestId("group-header");
     // 含「demo」项目名。
     expect(header.textContent).toMatch(/demo/);
-    // 含 path /tmp/demo。
-    expect(header.textContent).toMatch(/\/tmp\/demo/);
+    // M-6：project_id 是 id 非 path，不显——头不显 /tmp/demo。
+    expect(header.textContent).not.toMatch(/\/tmp\/demo/);
     // 聚合显 runs 数。
     const sectionText = within(group).getAllByText(/runs|运行中|待决策|总花费|最近/);
     expect(sectionText.length).toBeGreaterThan(0);
@@ -730,6 +730,30 @@ describe("RunListPage 看板视图（SPEC §10）", () => {
     const fill = document.querySelector(".bg-orca-accent.h-full");
     expect(fill).toBeTruthy();
     expect((fill as HTMLElement).style.width).toBe("40%");
+  });
+
+  // ── MAJOR-1：backend 真实 "done/total" 格式（run_manager.py：progress=f"{done}/{total}"） ──
+  it("AC-21：progress=\"3/7\"（backend done/total）→ 进度条约 43%（非 parseFloat 截断的 3%）", async () => {
+    mockFetchFor([
+      mkRun({ run_id: "rr", status: "running", progress: "3/7" }),
+    ]);
+    renderPage();
+    await screen.findByTestId("board-card");
+    const fill = document.querySelector(".bg-orca-accent.h-full") as HTMLElement;
+    expect(fill).toBeTruthy();
+    // 3/7 ≈ 0.4286 → Math.round → 43%（旧 parseFloat("3/7")=3 → 3% 是 MAJOR-1 bug）。
+    expect(fill.style.width).toBe("43%");
+  });
+
+  it("AC-21：progress=\"?/7\"（分子未知）→ indeterminate pulse（无具体宽度）", async () => {
+    mockFetchFor([
+      mkRun({ run_id: "rr", status: "running", progress: "?/7" }),
+    ]);
+    renderPage();
+    await screen.findByTestId("board-card");
+    // indeterminate 分支用 bg-orca-accent/60 + w-full + animate-pulse（无 .bg-orca-accent.h-full）。
+    expect(document.querySelector(".bg-orca-accent.h-full")).toBeNull();
+    expect(document.querySelector(".animate-pulse")).toBeTruthy();
   });
 
   it("AC-21：blocked 卡片显「等待」+ ring（NM1 沿用 RunRow）", async () => {
@@ -922,6 +946,42 @@ describe("useWsRunlist 重连（AC-14 / 反例3）", () => {
       expect(result.current.connected).toBe(true);
       expect(result.current.reconnects).toBe(0);
       expect(result.current.giveUp).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // ── MINOR：onConnected 仅重连时触发（首次连接不调），重连成功后回调 refresh（§5.8） ──
+  it("MINOR：onConnected 首次连接不调；重连成功后调一次（§5.8 重连 refresh）", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    try {
+      const onConnected = vi.fn();
+      const { result } = renderHook(() =>
+        useWsRunlist("ws://test/ws", () => {}, onConnected),
+      );
+      const ws1 = SilentMockWebSocket.instances[0];
+      // 首次连接成功 → onConnected **不**调（mount effect 已 refresh，避免冗余 double-fetch）。
+      await act(async () => {
+        ws1.readyState = 1;
+        ws1.onopen?.(new Event("open"));
+      });
+      expect(onConnected).not.toHaveBeenCalled();
+
+      // 断线 → 退避 → 重连成功。
+      await act(async () => {
+        ws1.onclose?.(new CloseEvent("close"));
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(1100);
+      });
+      const ws2 = SilentMockWebSocket.instances[1];
+      await act(async () => {
+        ws2.readyState = 1;
+        ws2.onopen?.(new Event("open"));
+      });
+      // 重连成功 → onConnected 调一次（调用方据此清 lastFetch + refresh）。
+      expect(onConnected).toHaveBeenCalledTimes(1);
+      expect(result.current.connected).toBe(true);
     } finally {
       vi.useRealTimers();
     }
@@ -1481,5 +1541,204 @@ describe("RunListPage 分组维度 + 空桶自动隐藏（SPEC §10.8-10.10）",
     await screen.findByTestId("board");
     // 降级 false → 仅 completed 列（其它空列隐藏）。
     expect(screen.queryByTestId("board-column-queued")).toBeNull();
+  });
+});
+
+// ── review 闭环：cross-scenario 测试（M-1/M-2/M-3/M-4） ──
+//
+// 断言意图（Rule 9）：这些用例横跨「过滤 × 选择」「折叠 × 切 dim」「单删反馈」「Shift × 分组」
+// 多个 view-state 维度，专门捕获 review 发现的时序/语义漏洞——单一维度用例测不到。
+
+describe("RunListPage review 闭环（M-1..M-4 cross-scenario）", () => {
+  beforeEach(() => {
+    MockWebSocket.instances = [];
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    useRunListStore.getState().reset();
+    useRunListStore.setState({ lastFetch: 0 });
+    localStorage.clear();
+    // 列表视图 + project dim（个别用例如需在用例内覆盖）。
+    localStorage.setItem("orca-runlist-view-v1", JSON.stringify("list"));
+    localStorage.setItem("orca-runlist-groupby-v1", JSON.stringify("project"));
+  });
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  // ── M-1：选择求交用未过滤 runs（切 chip 隐藏已选 → 切回选择仍在） ──
+  it("M-1：切 status chip 隐藏已选 run → bulk-bar 仍显；切回全部 → 选择保留", async () => {
+    mockFetchFor([
+      mkRun({ run_id: "r1", project_name: "demo", status: "completed" }),
+      mkRun({ run_id: "r2", project_name: "demo", status: "running" }),
+    ]);
+    renderPage();
+    await screen.findAllByTestId("run-row");
+    // 选 r1（completed）——显式按 label 定位，避免受 sort 顺序影响。
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("选择 r1"));
+    });
+    expect(screen.getByTestId("bulk-bar").textContent).toMatch(/已选\s*1/);
+
+    // 切「运行中」chip → r1（completed）被隐藏，仅 r2 可见。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("status-chip-running"));
+    });
+    // M-1 关键：r1 隐藏后选择**保留**（求交用未过滤 runs，不被过滤态误剔）。
+    // 旧实现（runIds=sorted）会把 r1 从选择集剔掉 → bulk-bar 消失。
+    expect(screen.getByTestId("bulk-bar").textContent).toMatch(/已选\s*1/);
+
+    // 切回「全部」→ r1 重新可见且仍选中。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("status-chip-all"));
+    });
+    const r1Cb = screen.getByLabelText("选择 r1") as HTMLInputElement;
+    expect(r1Cb.checked).toBe(true);
+  });
+
+  // ── M-2：expandAll/collapseAll 合并语义（跨 dim 不擦写） ──
+  it("M-2：预存 project:demo → status dim 全部折叠 → 切回 project → demo 仍折叠", async () => {
+    localStorage.setItem("orca-runlist-groupby-v1", JSON.stringify("status"));
+    localStorage.setItem(
+      "orca-runlist-collapsed-v2",
+      JSON.stringify(["project:demo"]),
+    );
+    mockFetchFor([
+      mkRun({ run_id: "rc", project_name: "demo", status: "completed" }),
+      mkRun({ run_id: "rr", project_name: "demo", status: "running" }),
+      mkRun({ run_id: "rf", project_name: "demo", status: "failed" }),
+    ]);
+    renderPage();
+    await screen.findByTestId("group-completed");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // status dim 3 个非空桶 → footer 显全部折叠按钮。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("collapse-all"));
+    });
+    expect(screen.queryAllByTestId("run-row")).toHaveLength(0);
+    // M-2 关键：collapseAll 合并语义——只加 status:* key，project:demo 保留。
+    // 旧实现（整体覆写）会把 project:demo 擦掉。
+    expect(localStorage.getItem("orca-runlist-collapsed-v2")).toMatch(
+      /project:demo/,
+    );
+
+    // 切到 project dim → demo 段仍折叠（project:demo 没被擦写）。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-by-select"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-by-option-project"));
+    });
+    expect(screen.queryAllByTestId("run-row")).toHaveLength(0);
+  });
+
+  // ── M-3：单删成功 → runlist-toast 出现 ──
+  it("M-3：单删成功 → runlist-toast（已删除 <name>）出现", async () => {
+    mockFetchFor([mkRun({ run_id: "r1", workflow_name: "demo-wf" })]);
+    renderPage();
+    await screen.findByTestId("run-row");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("delete-btn"));
+    });
+    await screen.findByTestId("delete-dialog");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("confirm-delete"));
+    });
+    // M-3：单删成功 toast（SPEC §5.6）。toast 是命令式 DOM（document.body），handleConfirm 是
+    // fire-and-forget；用 waitFor 直接轮询 document.body（不依赖 act 刷完整个异步链），给足 4s。
+    await waitFor(
+      () => {
+        const t = document.querySelector('[data-testid="runlist-toast"]');
+        expect(t, "单删成功应出现 runlist-toast").toBeTruthy();
+        expect(t!.textContent).toMatch(/已删除 demo-wf/);
+      },
+      { timeout: 4000 },
+    );
+  });
+
+  // ── M-3/M-5 联动：单删成功不清整个选择集 ──
+  it("M-5：单删成功 → 不清空其它已选（仅被删 id 由求交自动剔）", async () => {
+    mockFetchFor([
+      mkRun({ run_id: "r1", project_name: "demo" }),
+      mkRun({ run_id: "r2", project_name: "demo" }),
+    ]);
+    renderPage();
+    await screen.findAllByTestId("run-row");
+    // 选 r1 + r2。
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("选择 r1"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("选择 r2"));
+    });
+    expect(screen.getByTestId("bulk-bar").textContent).toMatch(/已选\s*2/);
+
+    // 单删 r1（通过 r1 的 delete-btn）。
+    const r1Row = screen.getByLabelText("选择 r1").closest("li")!;
+    await act(async () => {
+      fireEvent.click(within(r1Row).getByTestId("delete-btn"));
+    });
+    await screen.findByTestId("delete-dialog");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("confirm-delete"));
+    });
+    // M-5：r1 被删（求交剔），r2 仍选 → bulk-bar 显已选 1（旧实现 clear() 会清空）。
+    expect(screen.getByTestId("bulk-bar").textContent).toMatch(/已选\s*1/);
+  });
+
+  // ── M-4：组内 Shift 范围选 ✓ ──
+  it("M-4：组内 Shift+点 A→B → 选中区间（同分组内范围选）", async () => {
+    mockFetchFor([
+      mkRun({ run_id: "a1", project_name: "projA", started_at: 1700000000 }),
+      mkRun({ run_id: "a2", project_name: "projA", started_at: 1700000001 }),
+      mkRun({ run_id: "b1", project_name: "projB", started_at: 1700000002 }),
+      mkRun({ run_id: "b2", project_name: "projB", started_at: 1700000003 }),
+    ]);
+    renderPage();
+    await screen.findAllByTestId("run-row");
+    // 单点 a1（设 anchor）。
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("选择 a1"));
+    });
+    // Shift+点 a2 → 范围选 a1..a2。
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("选择 a2"), { shiftKey: true });
+    });
+    // a1 + a2 都选中。
+    expect((screen.getByLabelText("选择 a1") as HTMLInputElement).checked).toBe(
+      true,
+    );
+    expect((screen.getByLabelText("选择 a2") as HTMLInputElement).checked).toBe(
+      true,
+    );
+    expect(screen.getByTestId("bulk-bar").textContent).toMatch(/已选\s*2/);
+  });
+
+  // ── M-4：cross-group Shift 不应跨组范围选 ✗ ──
+  it("M-4：cross-group Shift+点（projA 的 a1 → projB 的 b1）→ 不跨组范围选", async () => {
+    mockFetchFor([
+      mkRun({ run_id: "a1", project_name: "projA", started_at: 1700000000 }),
+      mkRun({ run_id: "a2", project_name: "projA", started_at: 1700000001 }),
+      mkRun({ run_id: "b1", project_name: "projB", started_at: 1700000002 }),
+      mkRun({ run_id: "b2", project_name: "projB", started_at: 1700000003 }),
+    ]);
+    renderPage();
+    await screen.findAllByTestId("run-row");
+    // 单点 a1（anchor=a1）。
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("选择 a1"));
+    });
+    // Shift+点 b1（不同分组）→ anchor a1 不在 projB 桶 → 退化为普通点，不跨组范围选。
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("选择 b1"), { shiftKey: true });
+    });
+    // 仅 a1 + b1 选中（2），a2 不应被波及（旧实现用全局 orderedIds 会把 a1..b1 全选 = 3+）。
+    expect((screen.getByLabelText("选择 a2") as HTMLInputElement).checked).toBe(
+      false,
+    );
+    expect(screen.getByTestId("bulk-bar").textContent).toMatch(/已选\s*2/);
   });
 });

@@ -133,7 +133,7 @@ export function ListTopBar({
             onClick={onRefresh}
             title="刷新"
             aria-label="刷新"
-            className="orca-text-muted hover:orca-text inline-flex items-center rounded border orca-border px-2 py-1"
+            className="orca-text-muted hover:orca-text hover:orca-bg-surface-2 inline-flex items-center rounded border orca-border px-2 py-1"
           >
             {refreshing ? (
               <Loader2 size={14} strokeWidth={1.5} className="animate-spin" aria-hidden />
@@ -147,7 +147,7 @@ export function ListTopBar({
             onClick={onToggleTheme}
             title={`主题：${theme}`}
             aria-label="切换主题"
-            className="orca-text-muted hover:orca-text inline-flex items-center rounded border orca-border px-2 py-1"
+            className="orca-text-muted hover:orca-text hover:orca-bg-surface-2 inline-flex items-center rounded border orca-border px-2 py-1"
           >
             <ThemeIcon size={14} strokeWidth={1.5} aria-hidden />
           </button>
@@ -162,7 +162,7 @@ export function ListTopBar({
         <div className="hidden md:block">
           <StatusFilterChips active={status} onChange={onStatus} />
         </div>
-        <span className="ml-auto flex items-center gap-2">
+        <span className="ml-auto flex flex-wrap items-center justify-end gap-2">
           <SortMenu sort={sort} onSelectField={onSelectSortField} />
           {/*
             分组维度选择器（SPEC §10.8）+ 空桶显隐 toggle（§10.9）——

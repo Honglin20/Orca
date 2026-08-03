@@ -233,7 +233,7 @@ chip dot 一律从 `STATUS_DOT_BG[RunStatus]` 取——**需在 `status-badge.ts
 ### 6.5 项目分组头（D2 M2）
 - 第一行：`📁 Folder size={16} orca-accent` + 项目名 `text-sm font-semibold orca-text` + 「全选」三态 checkbox（右）。
 - 第二行：聚合 `text-xs orca-text-muted`：`N runs` + 「运行中」mini pill（`bg-orca-running/10 text-orca-running` + 1.5×1.5 pulse dot，仅 running>0）+ 「待决策」mini pill（`bg-orca-skipped/10 text-orca-skipped`，仅 blocked>0）+ `· $总花费` + `· 最近 Zm`。**不显 project 路径**——`RunSummary` 无 `project_path` 字段（NF2：显路径需改后端，违 AC-18），分组标题已是 project_name，不再重复。
-- 折叠态：单行 = chevron + folder + 名 + `· N runs` + （blocked>0 时）「⚠ Y 待决策」pill + path（截断）。
+- 折叠态：单行 = chevron + folder + 名 + `· N runs` + （blocked>0 时）「⚠ Y 待决策」pill。**展开/折叠态均不显 path**（review M-6 消歧：`project_id` 是 id 非 path，非可读路径；project_name 已是分组头，不再重复）。
 
 ### 6.6 RunRow DOM 结构（D1 M5）
 ```tsx

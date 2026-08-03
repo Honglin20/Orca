@@ -15,7 +15,6 @@
 import { useMemo } from "react";
 import type { RunSummary } from "@/stores/run-list-store";
 import { BoardColumn } from "./BoardColumn";
-import { sortRuns } from "./sort-runs";
 import {
   groupRuns,
   bucketHasBlocked,
@@ -24,26 +23,26 @@ import {
   LIMITED_STATUSES,
   COMPLETED_LIMIT,
 } from "./group-runs";
-import type { SortState } from "@/hooks/use-list-sort";
 import type { GroupBy } from "@/hooks/use-group-by";
 
 interface Props {
+  /** 调用方应**已全局排序**（SPEC §3.3：先排序再分桶；列内顺序 = 输入顺序，stable）。
+   *  本组件不再二次排序（code-reviewer MAJOR-3：去冗余 sortRuns）。 */
   runs: RunSummary[];
-  sort: SortState;
   /** 当前分组维度（两视图共用，§10.8）。 */
   dim: GroupBy;
   /** 空桶显隐（两视图共用，§10.9）：false → 0-run 桶不渲染列。 */
   showEmpty: boolean;
   selectedIds: Set<string>;
   deletingIds: Set<string>;
-  onToggleRun: (id: string, shiftKey: boolean) => void;
+  /** 切换 run 选择（Shift 范围选用）；orderedIds 由本组件按当前桶收窄（M-4，与 ProjectGroup 一致）。 */
+  onToggleRun: (id: string, shiftKey: boolean, orderedIds: string[]) => void;
   onOpenRun: (id: string) => void;
   onDeleteRun: (id: string) => void;
 }
 
 export function RunBoard({
   runs,
-  sort,
   dim,
   showEmpty,
   selectedIds,
@@ -52,9 +51,8 @@ export function RunBoard({
   onOpenRun,
   onDeleteRun,
 }: Props) {
-  // 全局排序后分桶（SPEC §3.3：先排序再分桶；列内顺序 = 全局 sort）。
-  const sorted = useMemo(() => sortRuns(runs, sort), [runs, sort]);
-  const buckets = useMemo(() => groupRuns(sorted, dim), [sorted, dim]);
+  // 分桶（输入已由调用方全局 stable 排序，SPEC §3.3；不再二次排序——code-reviewer MAJOR-3）。
+  const buckets = useMemo(() => groupRuns(runs, dim), [runs, dim]);
   // 空桶隐藏（§10.9/AC-25）：showEmpty=false → 过滤 0-run 桶。none 维度单桶永不为空（有 run 时）。
   const visible = useMemo(
     () => buckets.filter((b) => showEmpty || b.runs.length > 0),
@@ -75,6 +73,8 @@ export function RunBoard({
         const initialLimit =
           status && LIMITED_STATUSES.has(status) ? COMPLETED_LIMIT : Infinity;
         const hasBlocked = bucketHasBlocked(b);
+        // M-4：Shift 范围选 orderedIds 收窄到当前列（桶），anchor 跨列时退化普通点。
+        const bucketIds = b.runs.map((r) => r.run_id);
         return (
           <BoardColumn
             key={`${dim}:${b.key}`}
@@ -87,7 +87,7 @@ export function RunBoard({
             runs={b.runs}
             selectedIds={selectedIds}
             deletingIds={deletingIds}
-            onToggleRun={onToggleRun}
+            onToggleRun={(id, shiftKey) => onToggleRun(id, shiftKey, bucketIds)}
             onOpenRun={onOpenRun}
             onDeleteRun={onDeleteRun}
             initialLimit={initialLimit}

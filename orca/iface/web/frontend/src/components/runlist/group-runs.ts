@@ -136,6 +136,13 @@ const TIME_LABELS: Record<TimeKey, string> = {
 /** time 桶顺序（逆序：最新在最前，未知沉底）。 */
 const TIME_ORDER: TimeKey[] = ["today", "yesterday", "week", "earlier", "unknown"];
 
+/** 纯 codepoint 比较（确定性，消除 localeCompare 跨环境 / CJK locale 差异）。 */
+function compareCodepoint(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
 /** project/workflow 桶间排序：alpha + 兜底桶（"Legacy" / "其它"）沉底。 */
 function compareNamedBuckets(
   a: string,
@@ -148,12 +155,11 @@ function compareNamedBuckets(
   if (!aFallback && bFallback) return -1;
   if (aFallback && bFallback) {
     // 都在兜底集合内：确定性排序——「其它」最沉（无信息量），「Legacy」次之。
-    // 避免依赖 localeCompare 跨环境差异（CJK vs Latin 排序不稳定）。
     if (a === "其它") return 1;
     if (b === "其它") return -1;
-    return a.localeCompare(b);
+    return compareCodepoint(a, b);
   }
-  return a.localeCompare(b);
+  return compareCodepoint(a, b);
 }
 
 /**

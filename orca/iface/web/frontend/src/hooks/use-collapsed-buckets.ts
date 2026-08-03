@@ -104,11 +104,26 @@ export function useCollapsedBuckets(known: Set<string>) {
     });
   }, []);
 
-  const expandAll = useCallback(() => setCollapsedState(new Set()), []);
-  const collapseAll = useCallback(
-    () => setCollapsedState(new Set(knownRef.current)),
-    [],
-  );
+  // 合并语义（review M-2 / SPEC §10.8）：expandAll/collapseAll 仅影响**当前 dim** 的 known key，
+  // 保留其它 dim 的折叠态。旧实现整体覆写 state → 切 dim 做全部折叠会把其它 dim 的折叠态擦写丢失。
+  const expandAll = useCallback(() => {
+    setCollapsedState((prev) => {
+      const known = knownRef.current;
+      const next = new Set<string>();
+      for (const k of prev) {
+        // 非 known（其它 dim 或已不存在的 key）→ 保留。
+        if (!known.has(k)) next.add(k);
+      }
+      return next;
+    });
+  }, []);
+  const collapseAll = useCallback(() => {
+    setCollapsedState((prev) => {
+      const next = new Set(prev);
+      for (const k of knownRef.current) next.add(k);
+      return next;
+    });
+  }, []);
 
   return { collapsed, toggle, expandAll, collapseAll };
 }

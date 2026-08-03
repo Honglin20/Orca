@@ -76,15 +76,13 @@ export function SortMenu({ sort, onSelectField }: Props) {
         }`}
       >
         <ChevronsUpDown size={14} strokeWidth={1.5} aria-hidden />
-        <span className="text-xs">
-          {isDefault ? "排序" : `${currentLabel}`}
-        </span>
-        {!isDefault &&
-          (sort.dir === "desc" ? (
-            <ArrowDown size={12} strokeWidth={1.5} aria-hidden />
-          ) : (
-            <ArrowUp size={12} strokeWidth={1.5} aria-hidden />
-          ))}
+        {/* A-M3：始终显当前字段名+方向（如「开始时间 ↓」），省通用「排序」前缀；与 GroupBySelector 一致。 */}
+        <span className="text-xs">{currentLabel}</span>
+        {sort.dir === "desc" ? (
+          <ArrowDown size={12} strokeWidth={1.5} aria-hidden />
+        ) : (
+          <ArrowUp size={12} strokeWidth={1.5} aria-hidden />
+        )}
       </button>
 
       {open && coords &&

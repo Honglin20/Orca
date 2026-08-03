@@ -23,8 +23,8 @@ import { BoardCard } from "./BoardCard";
 
 /**
  * 列头强调态文字色（完整 class string，让 Tailwind JIT 扫到；禁模板拼接）。
- * 与 status-badge.tsx STATUS_TEXT 同色源，但本组件需要独立 map——避免 export 私有常量
- * 破坏 status-badge 封装。颜色集合是 orca palette 的稳定子集。
+ * 真相源 = status-badge.tsx 的私有 ``STATUS_TEXT``（同 orca palette）；此处独立 map 以不 export
+ * 私有常量破坏 status-badge 封装。若 status-badge 配色改了，**此处需同步**（防双源漂移）。
  */
 const COLUMN_EMPHASIS_TEXT: Record<RunStatus, string> = {
   running: "text-orca-running",
@@ -85,22 +85,23 @@ export function BoardColumn({
   const hiddenCount = total - visible.length;
   const empty = total === 0;
 
-  // 左色条规则（§10.8 + §10.2）：
-  //   - status dim 的 running/blocked 列（emphasize）：STATUS_BAR_HEX[status]。
-  //   - 任意 dim 含 blocked run（hasBlocked）：STATUS_BAR_HEX.blocked（紫，穿透提示）。
-  //   - 二者皆真（如 status dim 的 blocked 列）：颜色都是 blocked 紫，一致。
-  //   - 二者皆假：不显色条。
-  const showBar = !empty && (emphasize || hasBlocked);
-  // barColor：hasBlocked 强制紫穿透；否则用 STATUS_BAR_HEX[status]（emphasize=true 保证 status 有值）。
-  // ``status ?? "blocked"`` 是防御性兜底——showBar=false 时本字段不被渲染，逻辑上 unreachable。
-  const barColor = STATUS_BAR_HEX[hasBlocked ? "blocked" : status ?? "blocked"];
+  // 左色条规则（review A-M2：非状态 dim 列也需锚点——看板不再退化）：
+  //   - 所有非空列都显色条（showBar = !empty），消除非状态 dim 列「无锚」的视觉退化。
+  //   - 颜色优先级：hasBlocked（紫穿透）> emphasize（STATUS_BAR_HEX[status]）> 默认 accent/0.4。
+  //   - status dim 的 running/blocked 列（emphasize）用其状态色；非状态 dim 默认 accent/0.4。
+  const showBar = !empty;
+  const barColor = hasBlocked
+    ? STATUS_BAR_HEX.blocked
+    : emphasize && status
+      ? STATUS_BAR_HEX[status]
+      : "rgb(var(--accent)/0.4)";
   // 列头强调态文字色（仅 status dim emphasize）。
   const emphasisText = status ? COLUMN_EMPHASIS_TEXT[status] : "orca-text";
 
   return (
     <section
       data-testid={`board-column-${columnKey}`}
-      className={`relative flex min-w-[260px] flex-1 flex-col rounded-md bg-[rgb(var(--surface-2)/0.2)] p-2 ${
+      className={`relative flex min-w-[260px] flex-1 flex-col rounded-md bg-[rgb(var(--surface-2)/0.45)] p-2 ${
         ringWhenNonEmpty && !empty ? "ring-1 ring-orca-skipped/20" : ""
       }`}
     >
@@ -162,7 +163,7 @@ export function BoardColumn({
           type="button"
           data-testid={`board-column-more-${columnKey}`}
           onClick={() => setExpanded(true)}
-          className="orca-text-muted hover:orca-text mt-2 rounded border border-dashed orca-border px-2 py-1 text-xs"
+          className="orca-text-muted hover:orca-text mt-2 rounded border border-dashed orca-border bg-[rgb(var(--surface-2)/0.5)] px-2 py-1 text-xs"
         >
           显示更多（共 {total}）
         </button>
