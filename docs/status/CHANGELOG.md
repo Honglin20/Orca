@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-04] refactor(kd-nas): Phase 4 agent prompt 去 SPEC 源化——任务纯净态
+
+把 kd-nas workflow 的所有 agent prompt（10 节点 agent.md + 3 SKILL.md + references/templates/leaves/*.py.skel + workflow-checklists/*）+ 引擎库代码（`_kd_scripts/*.py`、`kd/*.py`）+ `CONTRACTS.md` + `kd-nas.yaml` 残留的**来源叙事**（SPEC §x.y / SPEC-REVIEW NX / spec-review mX / cleanup 20XX / v5 变更 / deleted / historical / port from / Phase N / plan §x / 决策标签 Q2·E4·N21·M8·D2·E6·A8 等）全部清除，改为任务纯净态（只描述「做什么 / 契约 / 输入输出 / 执行步骤 / fail 条件 / catch 协议行为」）。D7 客观边界执行：agent.md 零源叙事硬线；引擎 .py 留设计注释删源叙事；CONTRACTS 保留 §N 章节号删 changelog。distill agent.md 补 M8 ofd 重试提示（fail-loud → 降级 mse-only 重跑 step 3+4）。新增反回归测试 `tests/workflows/test_kd_prompt_no_source_narrative.py`（deny-list grep 守门）。基线 128 命中 → 完成后 0；测试 467 passed, 3 skipped（deselect 1 个 pre-existing `nas-supernet.yaml` 解析失败，与本 Phase 无关）。Commit: `<TBD>`。详见 [release note](../releases/2026-08-04-kd-nas-trainer-engine-phase4.md)。
+
 ## [2026-08-04] feat(workflow): nas-supernet workflow YAML——DAG + inputs + select 契约
 
 新增 `workflows/nas-supernet.yaml`（298 行，纯增量）——把 7 个已实现 `ns_*` folder-agent 接成完整 DAG（expand → train-script → search-pipeline → run-train → run-search → select → retrain → $end）+ 2 fail-loud terminate（model_type 不支持 / select 无候选）。5 inputs（plan §12 三档标签：3 [ask] 必填 + 1 [advanced] + 1 [default]）。7 节点 output_schema 全 `additionalProperties:false` 逐字对齐各 agent.md `## 输出` JSON 块；run_* 节点 status enum 按实际产出收窄（ns_run_train 含 skipped；ns_run_search / ns_retrain 仅 [executed, failed]）。路由守卫：`ns_expand_supernet.model_type_supported != false` + `ns_select.selected_arch truthy AND pareto_size > 0`（plan §4.1 note：不用 `is defined`）。验证：manual rule-trace 全 9 项 `_check_*` 通过 + node + js-yaml 结构自检；`tars validate` 因 shell 无 Python 未实跑。**已知 BLOCKER（不在本 commit 范围）**：`ns_select/agent.md:69` 文档字符串 `{{ ns_select.output.selected_arch }}` 自引用 → Jinja2 parser 误判 → `_check_self_reference` error；修复=反引号内套 `{% raw %}...{% endraw %}`（contract §5），follow-up。code-reviewer 一轮（1 BLOCKER 确认 + 5 MINOR，2 applied / 3 surface disagreement with reasoning）。Commit: `e02245c`。详见 [release note](../releases/2026-08-04-nas-supernet-yaml.md)。

@@ -16,7 +16,7 @@ by this composite and exposed via :meth:`KDComposite.kd_parameters` so the
 outer optimizer can include them.  Adapters are built lazily on the first
 feature-bearing forward — callers that want their parameters registered with
 the optimizer **before** the first step should call :meth:`prepare` with a
-sample feature batch (the historical train_adapter_template.py (deleted 2026-08-04 cleanup §2) did this).
+sample feature batch.
 """
 
 from __future__ import annotations
@@ -162,8 +162,8 @@ class KDComposite:
         s_feats_list = list(s_feats) if s_feats else []
         t_feats_list = list(t_feats) if t_feats else []
 
-        # fail-loud 守卫（SPEC §1.2(1)）：配置含特征项但运行时 feats 空 → 抛 ValueError。
-        # 旧逻辑 _compute_term 对 ofd/fitnets/rkd 在 feats 空时静默 return None，主调 continue
+        # fail-loud 守卫：配置含特征项但运行时 feats 空 → 抛 ValueError。
+        # 否则 _compute_term 对 ofd/fitnets/rkd 在 feats 空时静默 return None，主调 continue
         # → 配置声称 ofd 在跑、实际只跑 mse，违反 Rule 12。守卫看运行时 feats（不看 prepare 历史）。
         # 仅当含特征项且 feats 空才抛；mse / ema-only 不受影响（mse 不依赖 feats）。
         feature_requested = [n for n in self.kd_losses if n in _FEATURE_TERMS]

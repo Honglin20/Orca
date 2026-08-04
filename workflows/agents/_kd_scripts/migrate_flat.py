@@ -1,4 +1,4 @@
-"""migrate_flat.py —— KD-NAS durable artifacts 拍平迁移（Phase 3，plan §3.4）。
+"""migrate_flat.py —— KD-NAS durable artifacts 拍平迁移。
 
 把旧 ``<project>/artifacts/kd-nas/`` 拍平到 ``<project>/artifacts/``（去 kd-nas 层）。
 
@@ -204,7 +204,7 @@ def _copy_subdirs_and_root_files(
     但须让 operator 看到——否则 flat 后路径字段指向不存在文件，is_variant_done 突然
     返 False 触发无必要重训，无任何错误信号）。可选子目录（onnx/reports）缺失静默。
     """
-    # 必需子目录 / 根 jsonl 缺失 → WARN（plan §3.4：迁移是「不动旧 + fail loud」；
+    # 必需子目录 / 根 jsonl 缺失 → WARN（迁移是「不动旧 + fail loud」；
     # 这里数据真空非契约违反，不 raise，但必须可观测——fail loud ≠ 静默）。
     _REQUIRED_SUBS = ("checkpoints", "meta", "models")
     _REQUIRED_ROOT_FILES = ("ledger.jsonl", "champions.jsonl")
@@ -387,7 +387,7 @@ def migrate(kd_old: Path, flat_new: Path, dry_run: bool = False) -> dict[str, An
     # 幂等分支：sentinel 已在 → 校验 flat 文件存在 + kd_old 内容与已迁移时一致 → rmtree kd_old。
     # 数据安全契约（code-reviewer R3）：sentinel 在但 kd_old 又出现时，必须确认 kd_old 内容
     # 与已迁移时相同——否则可能含用户后续写入的新数据（旧版 setup 误跑 / 备份恢复），
-    # 静默 rmtree 会丢数据。行数不一致 → fail loud（plan §3.4「不动旧、不替换、fail loud」）。
+    # 静默 rmtree 会丢数据。行数不一致 → fail loud（契约：「不动旧、不替换、fail loud」）。
     if not dry_run and _validate_sentinel(flat_new):
         if kd_old.exists():
             sentinel_data = json.loads(
@@ -460,7 +460,7 @@ def migrate(kd_old: Path, flat_new: Path, dry_run: bool = False) -> dict[str, An
 def _main() -> int:
     p = argparse.ArgumentParser(
         description=(
-            "KD-NAS durable artifacts 拍平迁移（Phase 3，plan §3.4）："
+            "KD-NAS durable artifacts 拍平迁移："
             "把旧 <project>/artifacts/kd-nas/ 拍平到 <project>/artifacts/。"
             "5 步原子迁移 + 全字段 rewrite + sentinel 幂等。"
         )

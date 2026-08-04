@@ -48,7 +48,7 @@ or rename a required param).
 - **lower is better (min)**: `mse`, `nmse`, `ber`, `db`
 
 The kind's direction group must match `inputs.accuracy_baseline_kind`'s
-direction group, else the verify stage fails loud (D2 hard check).
+direction group, else the verify stage fails loud.
 
 ## Required Inputs
 
@@ -105,7 +105,7 @@ step requires when you begin that step.
    `TeacherCache`), `ema.py` (`MeanTeacherEMA`). These are referenced by the
    engine, not by the leaves.
 
-### Step 2: AST-detect unsupported training regimes (D8)
+### Step 2: AST-detect unsupported training regimes
 
 Before porting, scan the user's `train.py` for tokens that the KD-NAS engine
 does **not** support:

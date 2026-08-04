@@ -33,7 +33,7 @@ lists the engine's stable CLI: `--mode`, `--artifacts_dir`, `--out_ckpt`,
 `--accuracy_baseline`, `--accuracy_baseline_kind`, `--project_root`,
 `--env_anchor`.
 **Verify**: Run the command; cross-check the printed flags.
-**Anti-pattern**: Engine argparse broken (regression in Phase 1 engine code).
+**Anti-pattern**: Engine argparse broken (regression in engine code).
 **Fix**: This is engine code (out of scope for the leaf generator); surface
 the issue — do not modify `_kd_scripts/train_pipeline.py` from this skill.
 

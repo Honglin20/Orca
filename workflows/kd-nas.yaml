@@ -45,7 +45,7 @@ inputs:
     default: "10"
   metrics_template:
     type: string
-    description: "[advanced] 可选 metrics 摘取模板 JSON（SPEC §9 schema：{source_log, metrics:[{name,regex,chart_type,x,y}]}）；空=只推 loss 曲线。train_teacher / distill 末尾的 metrics_tail 读"
+    description: "[advanced] 可选 metrics 摘取模板 JSON（schema：{source_log, metrics:[{name,regex,chart_type,x,y}]}）；空=只推 loss 曲线。train_teacher / distill 末尾的 metrics_tail 读"
     required: false
     default: ""
   device:
@@ -70,7 +70,7 @@ nodes:
   # （build_model + DUMMY_INPUT + KNOBS）+ __main__ 跑「正确性 + latency」→ 产 baseline_contract_path
   # + baseline_latency_us（latency_provider 在此阶段就生效）。flatten 不推 web 图（单柱 baseline bar
   #   与 setup baseline_seed_table 冗余）；baseline 信息由 setup 的 baseline_seed_table 承载。
-  #   flat 契约落 ${PROJECT_ROOT}/artifacts/models/baseline/（与 setup kd_artifacts_dir 同根，跨 run 持久；Phase 3 拍平去 kd-nas 层）。
+  #   flat 契约落 ${PROJECT_ROOT}/artifacts/models/baseline/（与 setup kd_artifacts_dir 同根，跨 run 持久；拍平布局去 kd-nas 层）。
   # ═══════════════════════════════════════════════════════════════
   - name: flatten
     kind: agent
@@ -84,7 +84,7 @@ nodes:
         baseline_contract_path: {type: string, description: "展平产出的契约 .py 绝对路径（build_model + DUMMY_INPUT + KNOBS；经 validate_contract.py PASS）"}
         project_root: {type: string, description: "从 baseline_model_path 向上推断的 project_root 绝对路径（低置信时带后缀）"}
         model_name: {type: string, description: "推断的 <base_name>"}
-        flat_artifacts_dir: {type: string, description: "flatten 产物目录绝对路径（${PROJECT_ROOT}/artifacts/models/baseline/；与 setup kd_artifacts_dir 同根，跨 run 持久；Phase 3 拍平去 kd-nas 层）"}
+        flat_artifacts_dir: {type: string, description: "flatten 产物目录绝对路径（${PROJECT_ROOT}/artifacts/models/baseline/；与 setup kd_artifacts_dir 同根，跨 run 持久；拍平布局去 kd-nas 层）"}
         baseline_latency_us: {type: number, description: "flatten __main__ 测出的默认 cfg latency 中位数（latency_provider 真测；setup 透传作 baseline 参考线，不再重测）"}
         viz_status:
           type: object
@@ -119,7 +119,7 @@ nodes:
       type: object
       required: [kd_artifacts_dir, per_run_artifacts_dir, project_root, kd_scripts_dir, struct_scripts_dir, ledger_path, champions_path, checkpoints_dir, student_models_dir, scripts_dir, onnx_dir, meta_dir, reports_dir, worktree_root, device, concurrency, baseline_latency_us, baseline_accuracy, viz_status]
       properties:
-        kd_artifacts_dir: {type: string, description: "稳定 artifact 根（末尾带 /）。跨 run 持久，在 <project>/artifacts/（Phase 3 拍平：去 kd-nas 层）"}
+        kd_artifacts_dir: {type: string, description: "稳定 artifact 根（末尾带 /）。跨 run 持久，在 <project>/artifacts/（拍平布局：去 kd-nas 层）"}
         per_run_artifacts_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR（per-run；env_anchor 用）"}
         project_root: {type: string}
         kd_scripts_dir: {type: string, description: "_kd_scripts 绝对路径（distill/decide 调脚本用）"}
@@ -134,7 +134,7 @@ nodes:
         reports_dir: {type: string, description: "<kd_artifacts_dir>reports/（末尾带 /）"}
         worktree_root: {type: string, description: "<kd_artifacts_dir>.worktrees/（末尾带 /）"}
         device: {type: string, description: "gpu_probe 解析的 resolved device（cuda:0/npu:0/cpu）；gpu_probe fail-soft 时 fallback inputs.device（含 auto）"}
-        concurrency: {type: integer, description: "串行版恒 1（防误用并发蒸馏池，违 SPEC §3.1 串行化）"}
+        concurrency: {type: integer, description: "串行版恒 1（防误用并发蒸馏池）"}
         baseline_latency_us: {type: number, description: "flatten.output.baseline_latency_us 透传"}
         baseline_accuracy: {type: number, description: "inputs.accuracy_baseline 透传"}
         viz_status:
@@ -249,7 +249,7 @@ nodes:
   # train_teacher（独立节点，从 setup 拆出）：inline flag 调引擎 train_pipeline.py --mode teacher
   # （用用户默认 lr/epochs + --artifacts_dir per-run）+
   # teacher_setup 产 cache + metrics_tail 推 loss。幂等：teacher_cache+meta+ckpt 存在 ∧ sha256 匹配 → 跳。
-  # teacher 训练崩 → fail loud（teacher_cache 缺整个循环无意义，SPEC §15 不走 catch）。
+  # teacher 训练崩 → fail loud（teacher_cache 缺整个循环无意义，不走 catch）。
   # ═══════════════════════════════════════════════════════════════
   - name: train_teacher
     kind: agent
@@ -351,7 +351,7 @@ nodes:
         met_accuracy: {type: boolean, description: "accuracy 达 baseline（方向按 kind）"}
         ckpt: {type: string, description: "student ckpt 路径；FAIL_* 时空串"}
         tune_status: {type: string, enum: [ACCEPTED, FAIL_latency]}
-        status: {type: string, enum: [SUCCESS, FAIL_latency, FAIL_train, FAIL_build], description: "N21 映射：SUCCESS↔ACCEPTED / FAIL_latency↔FAIL_latency / FAIL_train↔ACCEPTED / FAIL_build=gen_student FAIL_build 早退（catch 协议）"}
+        status: {type: string, enum: [SUCCESS, FAIL_latency, FAIL_train, FAIL_build], description: "tune_status↔status 映射：SUCCESS↔ACCEPTED / FAIL_latency↔FAIL_latency / FAIL_train↔ACCEPTED / FAIL_build=gen_student FAIL_build 早退（catch 协议）"}
         fail_reason: {type: string, description: "FAIL_* 时填 rc + stderr 尾 300 字"}
         viz_status:
           type: object

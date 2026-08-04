@@ -1,22 +1,22 @@
-"""kd.trainer — fixed KD-NAS training engine (Phase 1, engine orphan).
+"""kd.trainer — fixed KD-NAS training engine.
 
-Aligned with plan §3.1 (v3.2).  Three modes:
+Three modes:
 
 * ``teacher`` — pure task-loss training, save a teacher ckpt consumable by
   ``teacher_setup.py`` (schema: ``{state_dict, build_cfg, variant_id, epochs,
   final_loss, mode}``).
-* ``distill`` — task-loss + KD composite loss (Q2 hot-order: prepare →
+* ``distill`` — task-loss + KD composite loss (hot-order: prepare →
   kd_parameters → optimizer), save a student ckpt (schema:
   ``{student_state_dict, variant_id, student_cfg, kd_config, epochs,
   proxy_mse, mode}``).
 * ``eval`` — load a ckpt, run ``leaves.eval_metric``, emit the accuracy
   protocol block.  Read-only — no ckpt written.
 
-Discipline (CLAUDE.md / plan v3.2):
+Discipline:
 
-* **M1**: the engine only ``print``s to stdout; the caller redirects to
+* The engine only ``print``s to stdout; the caller redirects to
   ``runs/<exp>/train.log``.  No FileHandler, no log file owned here.
-* **Dual protocol** (Q9/Q24):
+* **Dual protocol**:
 
     - stdout keys ``TEACHER_CKPT`` / ``STUDENT_CKPT`` / ``KD_LOSS_FINAL`` /
       ``KD_PROXY_MSE`` / ``STUDENT_ACCURACY`` / ``STUDENT_ACCURACY_KIND`` /
@@ -25,25 +25,25 @@ Discipline (CLAUDE.md / plan v3.2):
       (metrics_tail.py:72-75): teacher prints
       ``[train_pipeline:teacher] epoch=N loss_avg=F`` per epoch, distill
       prints ``[train_pipeline:distill] epoch=N kd_loss_avg=F``.  Eval mode
-      emits **no** such line (B2).
-* **Q2 distill order**: ``wrapper.eval()`` + ``no_grad`` forward →
+      emits **no** such line.
+* **distill order**: ``wrapper.eval()`` + ``no_grad`` forward →
   ``kd_loss.prepare(...)`` → ``opt_params = wrapper.parameters() +
   kd_loss.kd_parameters()`` → optimizer construction.  Reordering breaks
   OFD/FitNets adapter registration.
-* **M3 scheduler None guard**: ``if sch is not None: sch.step()`` at epoch end.
-* **M4 + B6 proxy_mse**: ``.to(device)`` each batch before forward;
+* **scheduler None guard**: ``if sch is not None: sch.step()`` at epoch end.
+* **proxy_mse**: ``.to(device)`` each batch before forward;
   ``max_batches=3``; dataloader with fewer batches → use what we saw,
   StopIteration is the normal iterator termination, never raised past the
   for-loop.
-* **B5 + Q18 live-push degrade**: ``orca.chart`` is lazy-imported inside
+* **live-push degrade**: ``orca.chart`` is lazy-imported inside
   :func:`_make_live_push`; on any failure training continues and stdout
   protocol keys are still emitted.
-* **D3 resume**: ``latest.pt`` atomic tmp+replace, sort_keys sha16 hashes
+* **resume**: ``latest.pt`` atomic tmp+replace, sort_keys sha16 hashes
   of ``build_cfg`` + ``kd_config``; mode/hash mismatch → fail loud (handled
   in :mod:`kd._resume`).
-* **D4 early stop**: patience epochs without metric improvement → break;
+* **early stop**: patience epochs without metric improvement → break;
   tracked via :meth:`_on_epoch_end`.
-* **R1**: persisted ``latest.pt`` / ``best.pt`` carry only the resume-schema
+* Persisted ``latest.pt`` / ``best.pt`` carry only the resume-schema
   keys (no absolute paths).  Verified by a unit test.
 """
 
@@ -260,7 +260,7 @@ class KDTrainer:
 
         dl = leaves.build_dataloader(cfg.batch_size)
 
-        # ----- Q2 hot-order: materialise one batch → eval fwd → prepare → opt.
+        # ----- distill hot-order: materialise one batch → eval fwd → prepare → opt.
         x0 = _first_batch_x(dl, device)
         wrapper.eval()
         with torch.no_grad():
@@ -423,7 +423,7 @@ class KDTrainer:
                 file=sys.stderr,
             )
 
-        # eval mode does NOT emit the [train_pipeline:<mode>] loss line (B2).
+        # eval mode does NOT emit the [train_pipeline:<mode>] loss line.
         print(f"STUDENT_ACCURACY: {value}")
         print(f"STUDENT_ACCURACY_KIND: {kind}")
         print(f"MET_ACCURACY: {str(met).lower()}")
@@ -446,7 +446,7 @@ class KDTrainer:
     ) -> dict | None:
         """Save latest.pt; optionally evaluate + update best.pt; return new best."""
         cfg = self.cfg
-        # mid-train eval (D2 single source of truth = leaf kind).
+        # mid-train eval (single source of truth = leaf kind).
         metric_value: float | None = None
         metric_kind: str | None = None
         if cfg.eval_every > 0 and (epoch + 1) % cfg.eval_every == 0:
@@ -632,8 +632,8 @@ class KDTrainer:
 
 
 # ===========================================================================
-# Module-level helpers (ported from the historical template; not part of the
-# public class surface so they can be unit-tested in isolation).
+# Module-level helpers (not part of the public class surface so they can be
+# unit-tested in isolation).
 # ===========================================================================
 def _load_model_by_path(
     model_path: Path | str, build_fn: str, cfg: dict
@@ -666,7 +666,7 @@ def _load_model_by_path(
 
 
 def _maybe_bootstrap_env(env_anchor: str) -> None:
-    """Best-effort ORCA env bootstrap from per-run artifacts anchor (Q18)."""
+    """Best-effort ORCA env bootstrap from per-run artifacts anchor."""
     if not env_anchor:
         return
     try:
@@ -682,11 +682,10 @@ def _maybe_bootstrap_env(env_anchor: str) -> None:
 
 
 def _make_live_push(variant_id: str, mode: str) -> Callable[[list], None]:
-    """Per-epoch live chart push (B5 degrade; Q18 lazy import).
+    """Per-epoch live chart push (degrade-safe).
 
-    Mirrors the historical train_pipeline._make_live_push: lazy-import
-    ``orca.chart.render_chart``; on any failure the push degrades to a no-op
-    or stderr WARN.  **Never** raises — training must continue.
+    Lazy-imports ``orca.chart.render_chart``; on any failure the push degrades
+    to a no-op or stderr WARN.  **Never** raises — training must continue.
     """
     try:
         from orca.chart import render_chart  # type: ignore
@@ -723,7 +722,7 @@ def _make_live_push(variant_id: str, mode: str) -> Callable[[list], None]:
 def _first_batch_x(dl: Any, device: torch.device) -> torch.Tensor:
     """Materialise one batch from the dataloader; return ``x`` on ``device``.
 
-    Used by distill's Q2 hot-order (materialise → eval forward → prepare).
+    Used by distill's hot-order (materialise → eval forward → prepare).
     Fails loud on an empty dataloader — symmetric with ``_compute_proxy_mse``
     (Rule 12: a bare ``StopIteration`` here would surface as a stacktrace
     rather than an actionable error).
@@ -732,7 +731,7 @@ def _first_batch_x(dl: Any, device: torch.device) -> torch.Tensor:
         x0, _ = next(iter(dl))
     except StopIteration as e:
         raise SystemExit(
-            "[distill] dataloader yielded no batch — cannot run Q2 prepare "
+            "[distill] dataloader yielded no batch — cannot run prepare "
             "forward. Check build_dataloader() is re-iterable and yields at "
             "least one batch."
         ) from e
@@ -749,14 +748,14 @@ def _compute_proxy_mse(
 ) -> float:
     """Soft MSE between student and teacher outputs — short-training proxy.
 
-    Mirrors the historical template behaviour:
+    Behaviour:
 
-    * ``max_batches=3`` bounds cost (M4).
-    * Each batch is ``.to(device)`` **before** the forward pass (M4 — device
-      mismatch otherwise).
+    * ``max_batches=3`` bounds cost.
+    * Each batch is ``.to(device)`` **before** the forward pass (otherwise
+      device mismatch).
     * Dataloader yielding fewer than ``max_batches`` batches is graceful: we
       average over what we saw.  StopIteration is the for-loop's normal
-      termination, never raised past it (B6 / Q22).
+      termination, never raised past it.
     * Fails loud on an empty dataloader rather than silently returning 0.0.
     """
     wrapper.eval()

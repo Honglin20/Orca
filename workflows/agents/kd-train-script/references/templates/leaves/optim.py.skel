@@ -1,6 +1,6 @@
 """optim.py — optimizer + scheduler leaf (kd-train-script codegen target).
 
-Self-contained contract (CONTRACTS §1, plan §3.2):
+Self-contained contract (CONTRACTS §1):
 
 * Required callables:
     - ``build_optimizer(params, lr)``         → ``Optimizer | None``

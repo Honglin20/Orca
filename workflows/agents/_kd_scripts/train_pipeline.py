@@ -7,11 +7,11 @@ from CLI flags (+ optional ``--config`` YAML) and calls
 under ``<artifacts_dir>/user/`` and this engine loads them via
 :mod:`kd._leaves`.
 
-Phase 2 (atomic switch, plan §5): ``gen_train_script``'s output schema and the
-five downstream call sites (train-teacher / distill / finalize) all point at
-this fixed entry. No per-project ``train_pipeline.py`` is generated anymore.
+This is the engine entry that ``gen_train_script``'s output schema and the
+five downstream call sites (train-teacher / distill / finalize) all point at.
+No per-project ``train_pipeline.py`` is generated.
 
-Priority (plan §3.3): ``CLI --flag`` > ``--config run_config.yaml`` > engine default.
+Priority: ``CLI --flag`` > ``--config run_config.yaml`` > engine default.
 
 Stdout/log contract — owned by the engine (``kd.trainer``), not this entry:
 
@@ -23,7 +23,7 @@ Stdout/log contract — owned by the engine (``kd.trainer``), not this entry:
   ``ACCURACY_CONFIDENCE`` protocol keys
 
 The engine prints to stdout only; **the caller redirects** stdout to
-``runs/<exp>/train.log`` (M1).
+``runs/<exp>/train.log``.
 """
 
 from __future__ import annotations
@@ -129,7 +129,7 @@ def _resolve_cfg(args: argparse.Namespace) -> TrainConfig:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
-            "KD-NAS fixed training engine entry (Phase 1 orphan). "
+            "KD-NAS fixed training engine entry. "
             "Builds TrainConfig + calls KDTrainer.train()."
         )
     )

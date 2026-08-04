@@ -1,6 +1,6 @@
 """loss.py — task loss leaf (kd-train-script codegen target).
 
-Self-contained contract (CONTRACTS §1, plan §3.2):
+Self-contained contract (CONTRACTS §1):
 
 * Required callable: ``compute_loss(s_out, y) -> Tensor``.
 * No sibling / relative imports — only the whitelisted stdlib + torch subset

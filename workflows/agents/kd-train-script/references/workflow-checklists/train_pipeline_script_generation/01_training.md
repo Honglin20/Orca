@@ -161,7 +161,7 @@ group as `inputs.accuracy_baseline_kind`:
 - **max group**: `{snr, acc}`
 - **min group**: `{mse, nmse, ber, db}`
 
-A cross-group mismatch is FAIL (D2 hard check).
+A cross-group mismatch is FAIL.
 **Verify**: Read `eval_metric`'s return literal / computed kind; compare
 group with `--accuracy_baseline_kind`. Layer 3 fidelity_check enforces this.
 **Anti-pattern**: User says `kind=snr` (higher-better) but the leaf returns

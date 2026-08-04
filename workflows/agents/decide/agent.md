@@ -1,5 +1,5 @@
 ---
-description: kd-nas 串行版 decide（SPEC §6.9）：确定性 kd_reducer.py 决策——append ledger（KD schema）+ champion ratchet（min-latency + FIFO tiebreak）+ continue_loop 决策（target_met / max_rounds / 继续）。distill 失败（FAIL_latency/FAIL_train/FAIL_build）也落账 continue（除非 max_rounds）。
+description: kd-nas 串行版 decide：确定性 kd_reducer.py 决策——append ledger（KD schema）+ champion ratchet（min-latency + FIFO tiebreak）+ continue_loop 决策（target_met / max_rounds / 继续）。distill 失败（FAIL_latency/FAIL_train/FAIL_build）也落账 continue（除非 max_rounds）。
 tools: [bash, read, write, edit, glob, grep]
 ---
 # decide
@@ -46,7 +46,7 @@ tools: [bash, read, write, edit, glob, grep]
 
 ## step 1 执行：组装 candidate + 跑 kd_reducer.py
 
-> candidate schema 严格匹配 kd_reducer._LEDGER_REQUIRED（SPEC §6.9）。
+> candidate schema 严格匹配 kd_reducer._LEDGER_REQUIRED（KD ledger 行契约）。
 > parent = ledger 最近一行 student 的 variant_id；首轮（ledger 空）→ parent="baseline"。
 
 ```bash

@@ -1,8 +1,6 @@
 """kd._resume — atomic latest.pt read/write + hash/mode verification.
 
-Aligned with plan §3.1 / §5 (Phase 1) and decision D3.
-
-Payload schema (R1 — no absolute paths)::
+Payload schema (no absolute paths on disk)::
 
     {
       "state_dict":       <OrderedDict>,
@@ -15,7 +13,7 @@ Payload schema (R1 — no absolute paths)::
       "kd_config_hash":   str,         # sha16 of sort_keys(kd_config JSON); "" for teacher
     }
 
-Discipline (D3 + B4 + Q8 + Q14):
+Discipline:
 
 * **Atomic write**: serialize to a same-fs ``.tmp`` then ``os.replace`` so a
   kill mid-write leaves either the previous latest.pt or the new one, never a
@@ -23,7 +21,7 @@ Discipline (D3 + B4 + Q8 + Q14):
   crash-safety.
 * **Hashes**: ``sha256(json.dumps(d, sort_keys=True, ensure_ascii=False))[:16]``
   — mode + both hashes must match on resume, else fail loud.
-* **Scheduler state mismatch (B4)**: if the persisted payload has a scheduler
+* **Scheduler state mismatch**: if the persisted payload has a scheduler
   state but the current run built no scheduler, drop it with a stderr WARN
   (do not crash).  The caller passes ``scheduler_state=None`` on save when no
   scheduler exists.
@@ -108,8 +106,8 @@ def load_latest(
 ) -> dict | None:
     """Load + verify ``latest.pt``.  Returns ``None`` when absent.
 
-    Fail loud on mode/build_cfg/kd_config hash mismatch (Q8).  Caller handles
-    scheduler_state drop (B4) via :data:`ResumeState.scheduler_state`.
+    Fail loud on mode/build_cfg/kd_config hash mismatch.  Caller handles
+    scheduler_state drop via :data:`ResumeState.scheduler_state`.
     """
     if path is None:
         return None
@@ -168,7 +166,7 @@ class ResumeState:
 
     @property
     def start_epoch(self) -> int:
-        """Next epoch to train — last completed + 1 (Q14)."""
+        """Next epoch to train — last completed + 1."""
         return self.epoch + 1
 
     @property

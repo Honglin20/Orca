@@ -79,7 +79,7 @@ def _emit_fail_soft(reason: str, *, device_arg: str) -> int:
 
 
 def _load_variant_module(path: str) -> Any:
-    """按路径 import representative variant .py（与 historical pick_variant._load_variant 同语义（pick_variant 删于 2026-08-04 cleanup §3））。"""
+    """按路径 import representative variant .py（importlib.util.spec_from_file_location，不污染 sys.path）。"""
     p = os.path.abspath(path)
     if not os.path.isfile(p):
         raise FileNotFoundError(f"representative_variant 不存在: {p}")
@@ -389,7 +389,7 @@ def _main() -> int:
         device_only = False
     else:
         # device-only：串行版 setup（teacher 未训，无 teacher_cache.pt）。只解析 device + GPU inventory，
-        # concurrency 恒 1（SPEC §3.1 串行化；无 per-variant 占用不算并发公式）。
+        # concurrency 恒 1（串行版强制；无 per-variant 占用不算并发公式）。
         try:
             resolved, n_gpus, free_per_card = _probe_device_only(args.device)
         except Exception as e:

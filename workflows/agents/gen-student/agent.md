@@ -1,5 +1,5 @@
 ---
-description: kd-nas 串行版 gen-student（SPEC §6.7，合并 hypothesizer+engineer 为一节点）：结构变换派生 student model.py。首轮固定规则（缩1层 + FFN→pointwise），迭代轮读 ledger 上轮 perf + KB 技术点。DUMMY_INPUT 字节级 deterministic 校验 == flatten baseline；validate_contract PASS（3 轮修不过 → catch → FAIL_build）。feature_hook_names 契约（ofd/fitnets/rkd 特征蒸馏时 student 须暴露）。
+description: kd-nas 串行版 gen-student（合并 hypothesizer+engineer 为一节点）：结构变换派生 student model.py。首轮固定规则（缩1层 + FFN→pointwise），迭代轮读 ledger 上轮 perf + KB 技术点。DUMMY_INPUT 字节级 deterministic 校验 == flatten baseline；validate_contract PASS（3 轮修不过 → catch → FAIL_build）。feature_hook_names 契约（ofd/fitnets/rkd 特征蒸馏时 student 须暴露）。
 tools: [bash, read, write, edit, glob, grep, task, todowrite]
 ---
 # gen-student
@@ -32,7 +32,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 
 **失败 = fail loud（FAIL_build 走 catch 协议，非 workflow_failed）**：
 - DUMMY_INPUT 不等 baseline（step 3）→ 修到相等，3 轮不过 → status=FAIL_build，agent 退 0；
-- validate_contract FAIL 3 轮 → status=FAIL_build，agent 退 0（SPEC §15 catch 协议）；
+- validate_contract FAIL 3 轮 → status=FAIL_build，agent 退 0（catch 协议：业务失败 → 落账 continue，非 workflow_failed）；
 - agent 自身崩 / 脚本语法错 → workflow_failed（系统失败，不吞）。
 
 ## 输入
@@ -87,7 +87,7 @@ echo "PARSED step1: ROUND_NUM=$ROUND_NUM PARENT_STUDENT=$PARENT_STUDENT"
 
 ## step 2 执行：读 baseline + DUMMY_INPUT（首轮固定规则 / 迭代轮 KB+perf）
 
-**首轮（ROUND_NUM=1）固定规则（SPEC §7）**：
+**首轮（ROUND_NUM=1）固定规则**：
 1. 读 baseline ``build_model`` + KNOBS + DUMMY_INPUT；
 2. **缩1层**：depth_axis knob default − 1（无深度轴 → 跳过此规则）；
 3. **FFN → pointwise**：baseline 的 FFN block（expand→act→contract）替换为 pointwise（Conv1d kernel=1）；
@@ -141,7 +141,7 @@ fi
 - 文件结构：``BUILD_FN="build_model"`` + ``DUMMY_INPUT`` + ``KNOBS`` + ``def build_model(**cfg)`` + ``def feature_hook_names()``（如 baseline 有可对齐特征层）；
 - DUMMY_INPUT 逐字复制 baseline（**不**改 shape/dtype）；
 - import 只允许 torch + 3rd-party pip 包，禁 import 用户项目 / _kd_scripts / nas_agent；
-- feature_hook_names 契约（SPEC-REVIEW N4 + SPEC §1 fail-loud）：当 distill.kd_config 含
+- feature_hook_names 契约（fail-loud）：当 distill.kd_config 含
   ofd/fitnets/rkd 特征蒸馏时，student 须暴露 ``def feature_hook_names() -> list[str]``（返回内部特征层名）。
   **首轮 baseline 有可对齐特征层时必移植此 fn**；distill 侧 AST 判定此 fn 存在 → 启特征项，否则自动剥离
   成 mse-only（不崩）。若 student 此 fn 缺失但下游强行配 ofd → compose 守卫 fail-loud 抛 ValueError →
@@ -150,8 +150,8 @@ fi
 
 ## step 3 执行：DUMMY_INPUT 字节级 deterministic 校验（fail loud，3 轮修不过 → catch FAIL_build）
 
-> SPEC-REVIEW m2：``student.DUMMY_INPUT == flatten.output.baseline_contract_path 加载的 DUMMY_INPUT``
-> （dict 相等，**非字节相等**——dict 顺序无关；N5 措辞）。不等 → fail loud 修到相等。
+> 校验：``student.DUMMY_INPUT == flatten.output.baseline_contract_path 加载的 DUMMY_INPUT``
+> （dict 相等，**非字节相等**——dict 顺序无关）。不等 → fail loud 修到相等。
 
 ```bash
 STUDENT="{{ setup.output.student_models_dir }}r${ROUND_NUM}_student_model.py"
@@ -168,7 +168,7 @@ base = load(sys.argv[1]); stud = load(sys.argv[2])
 b = json.dumps(base.DUMMY_INPUT, sort_keys=True)
 s = json.dumps(stud.DUMMY_INPUT, sort_keys=True)
 if b != s:
-    print(f'FAIL: student.DUMMY_INPUT != baseline.DUMMY_INPUT（spec-review m2 deterministic 校验）', file=sys.stderr)
+    print(f'FAIL: student.DUMMY_INPUT != baseline.DUMMY_INPUT（deterministic 校验）', file=sys.stderr)
     print(f'  baseline={b}', file=sys.stderr)
     print(f'  student ={s}', file=sys.stderr)
     sys.exit(2)
@@ -183,7 +183,7 @@ echo "PARSED step3: STUDENT=$STUDENT DUMMY_MATCH done"
 
 ## step 4 执行：validate_contract.py PASS（3 轮修不过 → catch → FAIL_build，agent 退 0）
 
-> SPEC §15 catch 协议：validate_contract FAIL 是**业务失败**（student 结构不对），
+> catch 协议：validate_contract FAIL 是**业务失败**（student 结构不对），
 > 转结构化 output status=FAIL_build，agent **退 0**（不抛→不 workflow_failed → decide 落账 continue）。
 > 与 teacher 训练崩（系统失败，workflow_failed）边界显式。
 
@@ -238,7 +238,7 @@ echo "PARSED step4: STUDENT_KNOBS_JSON=$STUDENT_KNOBS_JSON"
 
 > distill 侧已 AST 条件化 KD_CONFIG：student 有 ``feature_hook_names()`` → 启 ofd/fitnets；无 → 自动剥离
 > 特征项（mse-only，不崩）。**有 hook 时必移植此 fn**——否则下游 distill 配 ofd 会 fail-loud 抛
-> （SPEC §1.2(1) compose 守卫：含特征项且运行时 feats 空即 ValueError → FAIL_train）。
+> （compose 守卫：含特征项且运行时 feats 空即 ValueError → FAIL_train）。
 > 这里用 AST 判定（不用 ``grep '^def'``——class method 缩进，``^def`` 永远漏判会让 ofd 永远被剥离）。
 
 ```bash

@@ -31,7 +31,7 @@ requires **when you begin that step**. This keeps context focused.
 ## Working Directory and Path Conventions
 
 - `<output_dir>`: `${PROJECT_ROOT}/artifacts/models/baseline/` —— cross-run persistent
-  and **co-rooted with the downstream `setup` node's `kd_artifacts_dir`** (Phase 3 flattened:
+  and **co-rooted with the downstream `setup` node's `kd_artifacts_dir`** (flattened layout:
   setup uses `${PROJECT_ROOT}/artifacts/`; flatten lives in its `models/baseline/` subdir). The
   baseline contract travels with the project across runs instead of scattering under per-run
   `runs/<run_id>/`. `PROJECT_ROOT` is the **low-confidence suffix-stripped** value inferred in
@@ -192,8 +192,7 @@ Starting from the model entry point:
    ```
 
    These four symbols are the KD variant contract verbatim (`CONTRACTS.md` §1). Downstream
-   `kd_common.validate_variant` / `tune_latency.py` import them directly
-   (2026-08-04 cleanup: `pick_variant.py` / `gate_all.py` 已删，不变量已 port 到 `kd_common`).
+   `kd_common.validate_variant` / `tune_latency.py` import them directly.
 
 3. **Review and self-validate**: re-read the flat file and verify (a) definitions ordered
    correctly (no `NameError`), (b) constructor args consistent with how `build_model`
@@ -217,7 +216,7 @@ For each candidate tunable dimension in the flattened model, decide:
 | **Which dims are knobs?** | Structural parameters that change compute/latency when scaled: block count (`num_blocks`), embedding/channel dim (`embed_dim`, `channels`), layer depth (`num_layers`), head count (`num_heads`), expansion ratio (`expansion`). **Not** knobs: tensor shapes fixed by I/O (batch, seq_len), optimizer hyperparams (lr), dropout rate (no latency impact). |
 | **`default`** | The value `build_model` is currently instantiated with (the as-shipped architecture). Integer preferred. |
 | **`min`** | Structural floor: the smallest value that still produces a valid forward (no shape mismatch, no `RuntimeError`). For `num_blocks`: 1. For `embed_dim`: a round number that keeps layer shapes integral (often 8 or 16). **Never** set `min` so low it breaks the forward (Step 6 hard-validation will catch this — but aim to get it right here). |
-| **`step`** | **Must be negative** (shrink direction, `CONTRACTS.md` §1; `pick_variant._validate_variant` rejects `step>=0`). Magnitude = single-shrink delta: `-1` for block/layer counts, `-4` or `-8` for channel dims (keep even/round), `-2` for head count. |
+| **`step`** | **Must be negative** (shrink direction, `CONTRACTS.md` §1; downstream `kd_common.validate_variant` rejects `step>=0`). Magnitude = single-shrink delta: `-1` for block/layer counts, `-4` or `-8` for channel dims (keep even/round), `-2` for head count. |
 | **`leverage`** | Impact rank on latency/compute when shrunk: `high` = near-linear compute scaling (block count, layer depth); `medium` = quadratic-but-tunable (embed_dim, channels); `low` = mild (head count with fixed embed_dim, expansion ratio). `tune_latency.py` shrinks high-leverage knobs first. |
 
 Write the `KNOBS` dict at module top-level (above `build_model`). Each knob MUST have all

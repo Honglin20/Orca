@@ -70,7 +70,7 @@ The kind fixes the metric direction:
 - **lower is better (min)**: `mse`, `nmse`, `ber`, `db`
 
 The kind's direction group must match `inputs.accuracy_baseline_kind`'s
-direction group, else `fidelity_check.py` fails loud (D2 hard check).
+direction group, else `fidelity_check.py` fails loud.
 
 ### 2. Self-Containment Rules
 
@@ -144,10 +144,10 @@ early_stop_patience: 0
 accuracy_baseline: <from inputs.accuracy_baseline>
 accuracy_baseline_kind: <from inputs.accuracy_baseline_kind>
 build_cfg: {}                 # teacher default
-# mode is NOT written here — driven solely by the --mode flag (A8).
+# mode is NOT written here — driven solely by the --mode flag.
 ```
 
-distill mode patches `kd_config` into this yaml each round (E4: distill's
+distill mode patches `kd_config` into this yaml each round (distill's
 unique kd_config source of truth). gen_train_script does not pre-write
 `kd_config` — it's a distill-agent responsibility.
 

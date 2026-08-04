@@ -24,7 +24,6 @@ VALID_LEVERAGE = set(RANK)
 LEVERAGE_DEFAULT = "medium"
 
 # ── accuracy_baseline_kind → best 方向（单一真相源）────────
-# §4 doc sweep：原三处消费者（measure_student / viz_kd / kd-select.select_and_report）已删。
 # 当前真实消费者：``viz_kd_stage._push_pareto_front``（import 本函数判轴方向）+
 # ``kd_common.compute_met_accuracy_absolute``（内部调本函数判 met_accuracy）。
 # finalize_kd 不 import kd_common（其文本报告用本地 kind 字面），仅在概念上对齐。
@@ -260,9 +259,9 @@ def read_ledger(path: str) -> list[dict[str, Any]]:
 
 
 # ── ledger 增量写 + 子进程辅助（crash-safety 契约级逻辑，勿复制）─────────────────
-# §4 doc sweep：原消费者 gate_all / train_pool 已删；``append_ledger_row`` 的「主线程持
-# orca.lock + 逐行 write+flush」是 crash-safety 契约，留在 kd_common 供未来脚本复用
-# （当前活跃消费者：gen_student / distill 间接经 ledger_reducer append）。
+# ``append_ledger_row`` 的「主线程持 orca.lock + 逐行 write+flush」是 crash-safety 契约，
+# 留在 kd_common 供活跃/未来脚本复用（当前活跃消费者：gen_student / distill 间接经
+# ledger_reducer append）。
 
 
 def append_ledger_row(ledger_path: str, row: dict[str, Any]) -> None:

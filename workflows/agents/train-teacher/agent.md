@@ -18,14 +18,14 @@ tools: [bash, read, write, edit, glob, grep]
 
 **严禁**：
 - ❌ 硬编码 epochs=1 / lr=1e-3（必用 ``gen_train_script.output.teacher_default_lr/epochs``）；
-- ❌ 缺 ``--out_ckpt`` / ``--env_anchor``（SPEC-REVIEW N2：distill/eval/teacher 三 mode 都 required）；
+- ❌ 缺 ``--out_ckpt`` / ``--env_anchor``（distill/eval/teacher 三 mode 都 required）；
 - ❌ 跳过 metrics_tail（即使 ``inputs.metrics_template`` 空，默认 loss 推送也得跑）；
 - ❌ 改 train_pipeline.py / teacher_model_path / 用户训练函数；
 - ❌ 编造字段、假装训练成功。
 
 **失败 = fail loud**：
 - teacher 训练 rc≠0（teacher_cache 缺，整个 KD 循环无意义）→ **fail loud 阻塞**（workflow_failed，
-  SPEC §15 不走 catch 协议——这是 setup/前置错误非业务波动）；
+  不走 catch 协议——这是 setup/前置错误非业务波动）；
 - teacher_setup rc≠0 → fail loud；
 - teacher 参数缺（teacher_default_lr/epochs 上游没产出）→ fail loud；
 - metrics_tail / viz_kd_stage sidecar 失败 → **不阻断**（sidecar，失败值合法）。
@@ -43,7 +43,7 @@ tools: [bash, read, write, edit, glob, grep]
 - ``per_run_artifacts_dir = {{ setup.output.per_run_artifacts_dir }}``
 - ``device = {{ setup.output.device }}``
 - ``seed = {{ inputs.seed }}``
-- ``metrics_template = {{ inputs.metrics_template }}``（SPEC §9 JSON，可空）
+- ``metrics_template = {{ inputs.metrics_template }}``（metrics 摘取模板 JSON，可空）
 
 ---
 
@@ -72,7 +72,7 @@ echo "PARSED step1: NEED_TRAIN=$NEED_TRAIN TEACHER_CACHE=$TEACHER_CACHE TEACHER_
 
 ## step 2 执行：NEED_TRAIN=1 → 跑 train_pipeline.py --mode teacher + teacher_setup
 
-> **命令 flag 完整**（SPEC §6.6 + SPEC-REVIEW N2）：
+> **命令 flag 完整**：
 >   - ``--out_ckpt`` required（teacher mode 也必传，模板 argparse 校验）；
 >   - ``--epochs / --lr`` 用 gen_train_script 提取的用户默认（非硬编码）；
 >   - ``--env_anchor`` 激活 _maybe_bootstrap_env（防 live push 静默 no-op）；
@@ -83,7 +83,7 @@ echo "PARSED step1: NEED_TRAIN=$NEED_TRAIN TEACHER_CACHE=$TEACHER_CACHE TEACHER_
 TRAIN_PIPELINE="{{ gen_train_script.output.train_pipeline_path }}"
 TEACHER_DEFAULT_LR="{{ gen_train_script.output.teacher_default_lr }}"
 TEACHER_DEFAULT_EPOCHS="{{ gen_train_script.output.teacher_default_epochs }}"
-# 必备字段 fail loud（spec-review M1）
+# 必备字段 fail loud（gen_train_script 应已校验；此处兜底拦）
 python3 -c "
 lr='${TEACHER_DEFAULT_LR}'.strip(); ep='${TEACHER_DEFAULT_EPOCHS}'.strip()
 assert lr and float(lr) >= 0, f'teacher_default_lr 缺失/无效：{lr!r}（gen_train_script 应已 fail loud）'
@@ -127,7 +127,7 @@ if [ "$NEED_TRAIN" = "1" ]; then
   # 2b) teacher_setup 产 cache + meta（latency 从 gen_teacher.output 透传，不再自测）
   #     teacher 可视化须由 evaluate 驱动（非 training loss）：复用引擎 --mode eval
   #     跑 teacher ckpt+model → STUDENT_ACCURACY，teacher_setup._parse_accuracy 解析进 meta。
-  #     E6：eval_command 是 shell 字符串嵌套；--artifacts_dir 须拼入此字符串字面量。
+  #     eval_command 是 shell 字符串嵌套；--artifacts_dir 须拼入此字符串字面量。
   #     eval 失败不阻断（teacher_setup 默认 lenient → teacher_accuracy_known=False，图表标 unknown）。
   TEACHER_EVAL_CMD="python3 '$TRAIN_PIPELINE' --mode eval \
     --artifacts_dir '$PER_RUN' --experiment '$TEACHER_EXP' \
@@ -171,7 +171,7 @@ echo "PARSED step2: TEACHER_CACHE=$TEACHER_CACHE TEACHER_META=$TEACHER_META TEAC
 > 分工（引擎 + metrics_tail）：
 >   - 引擎 ``_make_live_push``（训练循环内）：实时推 per-epoch loss（--env_anchor 激活）；
 >   - ``metrics_tail``（post-hoc 兜底）：扫引擎 redirect 出的 ``runs/teacher/train.log``
->     （Phase 3：logs/ 折叠，直接指 per-run ``runs/<exp>/train.log``）推 loss / 自定义 metrics。
+>     （logs/ 折叠，直接指 per-run ``runs/<exp>/train.log``）推 loss / 自定义 metrics。
 > 两者互补：live push 失败时 metrics_tail 兜底。metrics_template 空 → 走默认 loss。
 
 ```bash

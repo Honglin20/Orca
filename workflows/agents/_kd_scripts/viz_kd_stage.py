@@ -1,4 +1,4 @@
-"""viz_kd_stage.py —— KD-NAS 串行迭代**每节点 web 推送 sidecar**（SPEC §8）。
+"""viz_kd_stage.py —— KD-NAS 串行迭代**每节点 web 推送 sidecar**。
 
 每个节点末尾以对应 ``--stage`` 调用本脚本，推**阶段汇总图**（与 metrics_tail.py 的
 log-tail 推送互补——loss 曲线由 metrics_tail 摘 train log；本脚本只做静态阶段汇总）。
@@ -246,7 +246,7 @@ def _push_champion_trajectory(champions: list[dict[str, Any]]) -> tuple[bool, st
         y="champion_latency_us",
         x_label="round",
         y_label="时延 us（越低越好）",
-        caption="每轮 champion latency 轨迹（min-latency ratchet + FIFO tiebreak，SPEC §13）。",
+        caption="每轮 champion latency 轨迹（min-latency ratchet + FIFO tiebreak）。",
     )
     return True, "ok"
 
@@ -299,7 +299,7 @@ def _push_final_compare_bar(
         y="latency_us",
         x_label="阶段",
         y_label="时延 us（越低越好）",
-        caption="终态对比：baseline / teacher / champion。champion 来自 min-latency ratchet（SPEC §13）。",
+        caption="终态对比：baseline / teacher / champion。champion 来自 min-latency ratchet。",
     )
     return True, "ok"
 
@@ -653,7 +653,7 @@ def render_stage(
         _run("all_models_table", lambda: _push_all_models_table(
             ledger, champions, baseline_latency_us, baseline_accuracy, teacher_obj,
         ))
-        # 终态帕累托前沿 + FAIL 分布（SPEC §3）：补 viz_kd 的核心语义到 active 串行 sidecar。
+        # 终态帕累托前沿 + FAIL 分布：补 viz_kd 的核心语义到 active 串行 sidecar。
         # 需 accuracy_baseline_kind 显式声明方向；ledger 已读，复用。
         _run("pareto_front", lambda: _push_pareto_front(
             ledger, baseline_latency_us, baseline_accuracy, accuracy_baseline_kind,
@@ -668,7 +668,7 @@ def render_stage(
 
 def _main() -> int:
     parser = argparse.ArgumentParser(
-        description="KD-NAS 每节点 web 推送 sidecar（SPEC §8）"
+        description="KD-NAS 每节点 web 推送 sidecar"
     )
     parser.add_argument(
         "--stage",

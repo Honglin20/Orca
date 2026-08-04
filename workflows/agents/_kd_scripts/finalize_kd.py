@@ -1,12 +1,12 @@
-"""finalize_kd.py —— KD-NAS finalize 节点的确定性后端（SPEC §6.10）。
+"""finalize_kd.py —— KD-NAS finalize 节点的确定性后端。
 
 为什么独立脚本：yaml inline prompt 里嵌 multi-line python（heredoc）会破坏 YAML literal
 block 的缩进规则；放脚本里既保持 yaml 干净，又让 finalize 的复杂逻辑可单测、可复用。
 
-职责（SPEC §6.10 N10/N19）：
+职责：
   1. 从 ledger 查 champion 详情（variant_id / student_path / accepted_cfg / ckpt）。
-  2. champion=baseline → 跳 student eval/ONNX/latency，用 setup 透传 baseline 值（MAJOR-1 兜底）。
-  3. champion=真 student → eval（复用 champion ckpt，N10 不重训）+ ONNX 导出（N19）+ latency 真测。
+  2. champion=baseline → 跳 student eval/ONNX/latency，用 setup 透传 baseline 值（兜底分支）。
+  3. champion=真 student → eval（复用 champion ckpt，不重训省 GPU）+ ONNX 导出 + latency 真测。
   4. 写 final_report.md（baseline/teacher/students 对比 + 选择依据 + 帕累托 + 探索轮数）。
   5. emit stdout KEY: value（yaml agent dumb copy 进 output_schema 字段）。
 
@@ -107,7 +107,7 @@ def _run_eval(
     """跑固定引擎 train_pipeline --mode eval（champion 真相源 inline：student_model_path /
     build_cfg / student_ckpt 三字段强制 inline，禁 yaml——末轮 distill 可能覆盖 yaml）。
 
-    Phase 2：引擎入口 + inline flag + --artifacts_dir per-run；eval 是 read-only（不写 ckpt）。
+    引擎入口 + inline flag + --artifacts_dir per-run；eval 是 read-only（不写 ckpt）。
     """
     if not champion["ckpt"]:
         raise ValueError("champion ckpt 为空（无法 eval；champion 应是 SUCCESS&met_* student）")
@@ -274,7 +274,7 @@ def _write_report(
         )
     lines.append("")
 
-    # ── Search Outcome 纯文本计数（SPEC §3.3：图表是唯一真相源，这里不算非支配集）──
+    # ── Search Outcome 纯文本计数（图表是唯一真相源，这里不算非支配集）──
     fail_accuracy = [r for r in student_rows if r.get("status") == "FAIL_accuracy"]
     fail_export = [r for r in student_rows if r.get("status") == "FAIL_export"]
     known_statuses = {
@@ -330,7 +330,7 @@ def _write_report(
 
 
 def _main() -> int:
-    p = argparse.ArgumentParser(description="KD-NAS finalize 确定性后端（SPEC §6.10）")
+    p = argparse.ArgumentParser(description="KD-NAS finalize 确定性后端")
     p.add_argument("--ledger", required=True)
     p.add_argument("--champions", required=True)
     p.add_argument("--champion_id", required=True)

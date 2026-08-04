@@ -1,14 +1,14 @@
 """fidelity_check.py — per-leaf numeric-equivalence + AST + kind-direction check.
 
-Phase 2 rewrite: the codegen product is the four leaves under ``--leaves_dir``,
+The codegen product is the four leaves under ``--leaves_dir``,
 not a monolithic train_pipeline.py. This script verifies the leaves against the
 user's original ``train.py`` / eval script.
 
 Checks (per leaf + cross-leaf):
 
-1. **AST self-containment** (Q6) — each leaf has only whitelisted top-level
+1. **AST self-containment** — each leaf has only whitelisted top-level
    imports and no sibling / relative imports. Mirrors ``kd/_leaves.py``.
-2. **AST signature equality** (E9) — each contract callable's function name +
+2. **AST signature equality** — each contract callable's function name +
    required positional args match the contract (defaults additive).
 3. **loss** — ``compute_loss`` vs the user's loss fn on identical seeded
    inputs (``torch.allclose(rtol=1e-5)``); AST body fallback when the user
@@ -19,7 +19,7 @@ Checks (per leaf + cross-leaf):
    same model instance (values allclose + kind identical).
 6. **optimizer** — class name produced by ``build_optimizer`` vs the user
    train.py's optimizer class.
-7. **kind direction hard check** (D2) — the kind returned by ``eval_metric``
+7. **kind direction hard check** — the kind returned by ``eval_metric``
    is in the same direction group (max: snr/acc; min: mse/nmse/ber/db) as
    ``--accuracy_baseline_kind``.
 8. **model I/O** — model forward on ``DUMMY_INPUT`` shape preserves the shape.
@@ -516,7 +516,7 @@ def main() -> int:
         if eval_path is not None:
             print(f"EVAL_SCRIPT_DISCOVERED: {eval_path}")
 
-    # Kind direction hard check (D2): the leaf's returned kind must match
+    # Kind direction hard check: the leaf's returned kind must match
     # --accuracy_baseline_kind's direction group. We do not need to run the
     # metric — we read the kind the leaf returns on a synthetic forward.
     leaf_kind = ""
@@ -540,7 +540,7 @@ def main() -> int:
         elif baseline_dir != leaf_dir:
             print(
                 f"KIND_DIRECTION_DIFF: baseline={args.accuracy_baseline_kind}({baseline_dir}) "
-                f"leaf={leaf_kind!r}({leaf_dir}) — D2 hard check",
+                f"leaf={leaf_kind!r}({leaf_dir}) — kind direction mismatch",
                 file=sys.stderr,
             )
             kind_ok = "false"

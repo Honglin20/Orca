@@ -11,7 +11,7 @@ tools: [bash, read, write, edit, glob, grep, task]
 1. 4 叶子存在（`user/{loss,data,eval,optim}.py`）且 `run_config.yaml` / `run.sh` 齐；
 2. **AST 自包含**（Q6：禁 sibling/相对 import；顶层 import 仅白名单 {torch,math,numpy,typing,itertools,functools,collections,dataclasses,random}）；
 3. **AST 签名相等**（E9：函数名 + 必填位置参数集；默认参数 additive）；
-4. **kind 方向硬校验**（D2：leaf kind 方向组 vs `inputs.accuracy_baseline_kind` 方向组）；
+4. **kind 方向硬校验**（leaf kind 方向组 vs `inputs.accuracy_baseline_kind` 方向组）；
 5. **fidelity_check.py 复核**数值级等价性（`FIDELITY: PASS`）；
 6. **引擎 smoke**：用固定引擎入口 `train_pipeline.py` + 合成 model+ckpt 跑 `--mode teacher`
    1 epoch + `--mode eval`，验证 stdout 协议键（`TEACHER_CKPT`/`TASK_LOSS_FINAL`/
@@ -26,7 +26,7 @@ tools: [bash, read, write, edit, glob, grep, task]
 - ❌ 降级 pass（issues 非空却 verified=true）。
 
 **失败 = fail loud 阻塞**：issues 非空 → verified=false，agent 退非零（这是配置错误非业务波动，
-SPEC §15 不走 catch 协议，不进 train_teacher）；agent 自身崩 → 直接非零退出（workflow_failed）。
+不走 catch 协议，不进 train_teacher）；agent 自身崩 → 直接非零退出（workflow_failed）。
 
 ## 输入
 

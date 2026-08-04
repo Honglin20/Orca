@@ -1,6 +1,6 @@
 """eval.py — evaluation metric leaf (kd-train-script codegen target).
 
-Self-contained contract (CONTRACTS §1, plan §3.2 + §3.1 D2):
+Self-contained contract (CONTRACTS §1 + kind-direction rule):
 
 * Required callable: ``eval_metric(student, device) -> (value, kind)``.
 * ``kind`` MUST be one of ``{nmse, mse, ber, db, snr, acc}`` — the engine

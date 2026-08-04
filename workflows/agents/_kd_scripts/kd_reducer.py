@@ -1,10 +1,10 @@
 """kd_reducer.py —— KD-NAS 串行迭代确定性 reducer（KD 专版，**非复用** struct 的 ledger_reducer）。
 
-职责（SPEC §6.9 + §13 逐条对应）：
+职责：
   1. append ledger.jsonl（KD schema：variant_id/student_path/round/parent/latency_us/
      accuracy/met_*/accuracy_kind/direction_id/hypothesis/accepted_cfg/cfg_hash/ckpt/status）
   2. champion ratchet（min-latency）：准入 = ``met_latency ∧ met_accuracy ∧ status==SUCCESS``；
-     准入集合内按 latency 最小 ratchet；**tie 不 ratchet（FIFO 最早）**（N12）。
+     准入集合内按 latency 最小 ratchet；**tie 不 ratchet（FIFO 最早）**。
      无达标 → 维持 baseline（setup seed 的 round=0 baseline）。
   3. continue_loop 决策：admitted 集合非空（champion_met）→ false, reason="target_met"；
      round ≥ max_rounds → false, reason="max_rounds"；否则 true。
@@ -21,7 +21,7 @@
   - 排序键不同：struct 准入 = ``SUCCESS ∧ met_accuracy``；KD 准入 = ``SUCCESS ∧ met_latency ∧ met_accuracy``
     （latency 是 KD 第一目标，需显式 met_latency；struct 时延门在 evaluator 已过）。
   - tie 语义不同：struct 用 ``best_after["id"] != prev_best_id`` 严改进；KD 显式 FIFO tiebreak
-    （SPEC §13 N12「tie 不 ratchet」）。schema 与语义都不同 → 复用会字节漂移，重写。
+    （「tie 不 ratchet」）。schema 与语义都不同 → 复用会字节漂移，重写。
 
 CLI：
     kd_reducer.py \\
@@ -70,7 +70,7 @@ from typing import Any
 
 # ── 常量 ────────────────────────────────────────────────────────────────────
 
-# KD ledger.jsonl 每行必备字段（SPEC §6.9）。
+# KD ledger.jsonl 每行必备字段（KD ledger 行契约）。
 _LEDGER_REQUIRED = (
     "variant_id",
     "student_path",
@@ -184,7 +184,7 @@ def _current_champion(champions: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def _admitted(ledger: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """准入门：SUCCESS ∧ met_latency ∧ met_accuracy（SPEC §13 admitted 集合）。
+    """准入门：SUCCESS ∧ met_latency ∧ met_accuracy（admitted 集合）。
 
     FAIL_train 即使 met_latency=true 也不准入（met_accuracy=false 必然）；
     FAIL_latency / FAIL_build 同理。准入 = 三条件全 true。
@@ -329,7 +329,7 @@ def reduce_ledger(
 
     # ── Step 3：continue_loop 决策（驱动 DAG 循环）──────────────────────────
     round_num = candidate["round"]
-    # admitted 非空 = champion 是真 student 非 baseline（SPEC §13 champion_met）。
+    # admitted 非空 = champion 是真 student 非 baseline（champion_met）。
     admitted_after = _admitted(ledger_after)
     champion_met = bool(admitted_after)
     if champion_met:

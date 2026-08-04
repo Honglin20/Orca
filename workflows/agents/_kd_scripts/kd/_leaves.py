@@ -1,28 +1,27 @@
 """kd._leaves — single-file leaf loader for the KDTrainer engine.
 
-Aligned with the plan §3.2 (v3.2) leaf contract.  Four leaves live under
-``<artifacts_dir>/user/``:
+Leaf contract: four leaves live under ``<artifacts_dir>/user/``:
 
 * ``loss.py``  → ``compute_loss(s_out, y)``
 * ``data.py``  → ``build_dataloader(batch_size)``
 * ``eval.py``  → ``eval_metric(student, device) -> (value, kind)``
 * ``optim.py`` → ``build_optimizer(params, lr)`` and ``build_scheduler(optimizer, epochs)``
 
-Design (decision D9-c, plan §3.2):
+Design:
 
-* **No sys.path injection** (Q6) — each leaf is loaded via
+* **No sys.path injection** — each leaf is loaded via
   :func:`importlib.util.spec_from_file_location` as its own module so sibling
   helpers / relative imports cannot leak across files.
 * **Eager validation** at load time: file existence + AST signature
-  (function name + required positional params equal, defaults additive; E9)
+  (function name + required positional params equal, defaults additive)
   + AST self-containment deny-list (no relative imports, no sibling imports
   outside the whitelisted stdlib/torch subset).  Failures raise
   :class:`LeafContractError` before any exec.
 * **Lazy exec** of the leaf body: the module is ``exec_module``-ed the first
-  time one of its callables is invoked (D9-c).  Exec failures are wrapped in
+  time one of its callables is invoked.  Exec failures are wrapped in
   :class:`LeafExecError` carrying filename + line.
 
-Error contract (B7):
+Error contract:
 
 * Missing file → :class:`FileNotFoundError` with the leaf name.
 * Exec failure → :class:`LeafExecError` wrapping the original exception with
@@ -79,7 +78,7 @@ class LeafExecError(RuntimeError):
 # AST validation
 # ---------------------------------------------------------------------------
 def _check_self_contained(tree: ast.AST, path: Path) -> None:
-    """Reject imports outside the whitelist (Q6).  Relative imports always fail."""
+    """Reject imports outside the whitelist.  Relative imports always fail."""
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             if node.level and node.level > 0:
@@ -110,7 +109,7 @@ def _required_args(fn: ast.FunctionDef) -> list[str]:
 
 
 def _check_signature(tree: ast.AST, path: Path, fname: str, expected_required: list[str]) -> None:
-    """Function must exist + required positional param names match exactly (E9).
+    """Function must exist + required positional param names match exactly.
 
     Defaults are additive: extra optional params are fine, dropping or
     renaming a required param is a contract violation.
@@ -174,7 +173,7 @@ class _LazyModule:
             raise
         except Exception as e:
             # ``exec_module`` typically embeds filename + lineno on the raised
-            # exception; surface both loudly via LeafExecError wrap (B7).
+            # exception; surface both loudly via LeafExecError wrap.
             lineno = getattr(e, "lineno", None)
             msg = f"{self.path}"
             if lineno is not None:
@@ -203,7 +202,7 @@ class Leaves:
     """Eager-validated, lazily-executed bundle of the four leaf callables.
 
     Attribute access returns a thin closure that triggers exec on first call
-    (D9-c) so an unused leaf file is never exec'd.
+    so an unused leaf file is never exec'd.
     """
 
     loss_module: _LazyModule
@@ -235,7 +234,7 @@ class Leaves:
 def load(user_dir: Path | str) -> Leaves:
     """Eager-validate + lazily wrap the four leaves under ``user_dir``.
 
-    Raises :class:`FileNotFoundError` if any leaf is missing (B7).
+    Raises :class:`FileNotFoundError` if any leaf is missing.
     """
     user_dir = Path(user_dir)
     if not user_dir.is_dir():

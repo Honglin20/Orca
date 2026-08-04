@@ -1,6 +1,6 @@
 """data.py — dataloader leaf (kd-train-script codegen target).
 
-Self-contained contract (CONTRACTS §1, plan §3.2):
+Self-contained contract (CONTRACTS §1):
 
 * Required callable: ``build_dataloader(batch_size)``.
 * **Must be re-iterable**: every epoch's ``iter(dl)`` yields a fresh batch

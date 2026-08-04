@@ -1,9 +1,9 @@
-"""metrics_tail.py —— KD-NAS 可配置模板 metrics 摘取 sidecar（SPEC §9）。
+"""metrics_tail.py —— KD-NAS 可配置模板 metrics 摘取 sidecar。
 
 读 ``--template`` JSON（``inputs.metrics_template`` 经 Jinja 渲染传入，可空）→
 tail ``source_log`` → 按 metrics 列表的 regex（named group）抽字段 → ``render_chart`` 推图。
 
-schema（SPEC §9）::
+schema::
 
     {
       "source_log": "<train log/jsonl 路径>",
@@ -28,7 +28,7 @@ schema（SPEC §9）::
   - 单 metric 异常不影响其他 metric。
   - ``_main`` 兜底永远 emit 合法 JSON（agent dumb copy 进 viz_status，**必填字段**）。
 
-与 ``train_pipeline._make_live_push`` 的分工（SPEC §6.6 / §9）：
+与 ``train_pipeline._make_live_push`` 的分工：
   - ``_make_live_push``：训练循环内 live push loss（per-epoch；web 实时刷新）。
   - ``metrics_tail``：post-hoc 摘 log，模板可自定义（loss 之外如 nmse/snr 等）。
   两者**互补**：live push 需 ``--env_anchor`` 自举 ORCA env，metrics_tail 是
@@ -36,7 +36,7 @@ schema（SPEC §9）::
 
 CLI::
     metrics_tail.py \\
-      [--template '<SPEC §9 JSON>'] \\
+      [--template '<metrics 摘取模板 JSON>'] \\
       --source_log '<train log path>' \\
       --variant_id '<id>' \\
       --mode teacher|distill \\
@@ -306,9 +306,9 @@ def render_metrics(
 
 def _main() -> int:
     parser = argparse.ArgumentParser(
-        description="KD-NAS 可配置模板 metrics 摘取 sidecar（SPEC §9）"
+        description="KD-NAS 可配置模板 metrics 摘取 sidecar"
     )
-    parser.add_argument("--template", default="", help="SPEC §9 JSON 串（可空→走默认 loss）")
+    parser.add_argument("--template", default="", help="metrics 摘取模板 JSON 串（可空→走默认 loss）")
     parser.add_argument("--source_log", required=True, help="train log 路径")
     parser.add_argument("--variant_id", default="model", help="变体 id（图 title 用）")
     parser.add_argument(

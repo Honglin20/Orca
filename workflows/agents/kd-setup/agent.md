@@ -1,5 +1,5 @@
 ---
-description: kd-nas 串行版 Setup（一次性·幂等，SPEC §6.2）：探测 shared infra 路径 + seed baseline champion + device/GPU 探测。**不含 teacher 训练**（已拆到独立 train_teacher 节点）。所有下游专用路径字段作为顶层 output 一次给齐（单一真相源）。取 orca.lock 单写者护栏。确定性逻辑全在脚本（rule 5）。
+description: kd-nas 串行版 Setup（一次性·幂等）：探测 shared infra 路径 + seed baseline champion + device/GPU 探测。**不含 teacher 训练**（已拆到独立 train_teacher 节点）。所有下游专用路径字段作为顶层 output 一次给齐（单一真相源）。取 orca.lock 单写者护栏。确定性逻辑全在脚本（rule 5）。
 tools: [bash, read, write, edit, glob, grep]
 ---
 # kd-setup（串行版）
@@ -91,12 +91,12 @@ while p and p!=os.path.dirname(p) and not any(os.path.exists(os.path.join(p,m)) 
     p=os.path.dirname(p)
 print(p)
 " "$BASELINE")"
-# kd_artifacts_dir 跨 run 持久（项目 artifacts 根；Phase 3 拍平：去 kd-nas 层，plan §3.4 D6）。
+# kd_artifacts_dir 跨 run 持久（项目 artifacts 根；去 kd-nas 层，直接落 artifacts/）。
 KD_ARTIFACTS_DIR="${PROJECT_ROOT}/artifacts/"
 mkdir -p "$KD_ARTIFACTS_DIR"models/baseline "$KD_ARTIFACTS_DIR"models/teacher "$KD_ARTIFACTS_DIR"models/students
 mkdir -p "$KD_ARTIFACTS_DIR"scripts "$KD_ARTIFACTS_DIR"onnx "$KD_ARTIFACTS_DIR"checkpoints "$KD_ARTIFACTS_DIR"meta "$KD_ARTIFACTS_DIR"reports
 mkdir -p "$KD_ARTIFACTS_DIR".worktrees
-# ★ Phase 3 原子迁移（plan §3.4）：检测旧 artifacts/kd-nas/ 存在 → 拍平迁移。
+# ★ 原子迁移：检测旧 artifacts/kd-nas/ 存在 → 拍平迁移。
 #   migrate_flat.py 5 步原子（copy → rewrite 路径字段 → 校验 → os.replace → sentinel → rmtree）+ 幂等。
 KD_OLD="${PROJECT_ROOT}/artifacts/kd-nas"
 if [ -d "$KD_OLD" ]; then
@@ -117,7 +117,7 @@ REPORTS_DIR="${KD_ARTIFACTS_DIR}reports/"
 WORKTREE_ROOT="${KD_ARTIFACTS_DIR}.worktrees/"
 LEDGER_PATH="${KD_ARTIFACTS_DIR}ledger.jsonl"
 CHAMPIONS_PATH="${KD_ARTIFACTS_DIR}champions.jsonl"
-# ledger 跨 run 复用铁律：仅首次创建，**绝不截断已有行**（否则历史蒸馏全丢 → 重复训练）。
+# ledger 跨 run 复用铁律：仅首次创建，**绝不截断已有行**（否则既有蒸馏记录全丢 → 重复训练）。
 [ -f "$LEDGER_PATH" ] || : > "$LEDGER_PATH"
 export KD_SCRIPTS_DIR STRUCT_SCRIPTS_DIR KD_ARTIFACTS_DIR PER_RUN_ARTIFACTS_DIR LEDGER_PATH CHAMPIONS_PATH BASELINE PROJECT_ROOT CHECKPOINTS_DIR STUDENT_MODELS_DIR SCRIPTS_DIR ONNX_DIR META_DIR REPORTS_DIR WORKTREE_ROOT
 python3 -c "
@@ -133,7 +133,7 @@ echo "PARSED step1: KD_SCRIPTS_DIR=$KD_SCRIPTS_DIR STRUCT_SCRIPTS_DIR=$STRUCT_SC
 > baseline_latency_us 透传 flatten.output（flatten __main__ 已用 latency_provider 测过；
 > setup 不再重测，避免重复测量 + 让 latency_provider 在 flatten 阶段就生效）。
 > baseline_accuracy 直接透传 inputs.accuracy_baseline（用户提供的绝对值）。
-> champions.jsonl 首行 = round=0 baseline champion（SPEC §6.2 seed；为 min-latency ratchet 起点）；
+> champions.jsonl 首行 = round=0 baseline champion（setup seed；为 min-latency ratchet 起点）；
 > 仅首次创建（已存在则不覆盖——跨 run 复用）。
 
 ```bash
@@ -197,7 +197,7 @@ echo "PARSED step2: BASELINE_LATENCY_US=$BASELINE_LATENCY_US BASELINE_ACCURACY=$
 
 > 串行版 setup 在 **teacher 训练之前**执行（DAG: flatten→setup→…→train_teacher），此刻
 > `teacher_cache.pt` 尚不存在。故 gpu_probe 走 **device-only 模式**（不传 `--teacher_cache`）：
-> 只解析 device（cuda/cpu/npu）+ GPU inventory，`concurrency=1`（SPEC §3.1 串行化）。
+> 只解析 device（cuda/cpu/npu）+ GPU inventory，`concurrency=1`（串行版强制）。
 > **禁止**传 `--teacher_cache "$BASELINE"`——$BASELINE 是 flatten 产的 `.py` 契约文件，
 > gpu_probe VRAM 模式会 `torch.load` 它 → UnpicklingError（.py 非 pickle）→ exit 2 → workflow_failed。
 > device-only 模式 gpu_probe 不 load teacher_cache，安全。

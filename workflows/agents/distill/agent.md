@@ -12,31 +12,36 @@ tools: [bash, read, write, edit, glob, grep]
 1. ``tune_latency`` → 产 accepted_cfg + latency + met_latency；
 2. **FAIL_latency 分支**：``TUNE_STATUS=FAIL_latency`` → **跳训练省 GPU** → status=FAIL_latency，agent 退 0；
 3. **distill 训练**（ACCEPTED 才跑）：AST 决定 kd_config（mse+ofd / mse-only）→ **read→patch
-   run_config.yaml 的 kd_config 字段（E4：唯一真相源；禁 inline --kd_config）** + inline flag 调引擎；
+   run_config.yaml 的 kd_config 字段（唯一真相源；禁 inline --kd_config）** + inline flag 调引擎；
 4. **eval 取精度**：``--mode eval`` 全 flag（student_model_path / build_cfg / student_ckpt inline）→ ``STUDENT_ACCURACY`` / ``MET_ACCURACY``。
 
 **严禁**：
 - ❌ 跳 tune_latency 直接 distill（accepted_cfg 是 distill 的 build_cfg 来源，鸡生蛋）；
-- ❌ distill 训练传 inline ``--kd_config``（E4：唯一真相源是 run_config.yaml；每轮 read→patch kd_config）；
+- ❌ distill 训练传 inline ``--kd_config``（唯一真相源是 run_config.yaml；每轮 read→patch kd_config）；
 - ❌ eval 缺 ``--student_ckpt / --accuracy_baseline / --accuracy_baseline_kind``（argparse required）；
 - ❌ FAIL_latency 时还跑训练（白烧 GPU）；
 - ❌ 静默吞错（训练 rc≠0 → catch 协议 FAIL_train，agent 退 0；agent 自身崩 → workflow_failed）；
 - ❌ 编造 latency / accuracy（必从 stdout KEY 解析）。
 
-**失败路径 + catch 协议**（SPEC §15）：
+**失败路径 + catch 协议**：
 - tune_latency rc≠0 → 系统失败（脚本语法错）→ workflow_failed；
 - distill 训练 rc≠0 → 业务失败 → ``status=FAIL_train, tune_status=ACCEPTED``，agent 退 0；
 - eval rc≠0 → 业务失败 → ``status=FAIL_train``，agent 退 0；
 - ``TUNE_STATUS=FAIL_latency`` → 业务失败 → ``status=FAIL_latency``，agent 退 0（省 GPU 跳训练）。
 
-**tune_status ↔ status 映射**（N21）：
+**tune_status ↔ status 映射**：
 | 场景 | tune_status | status | met_latency | met_accuracy | accuracy |
 |---|---|---|---|---|---|
 | 全过 | ACCEPTED | SUCCESS | true | （eval 真值） | eval 真值 |
 | tune 不过 | FAIL_latency | FAIL_latency | false | false | -1 |
 | 训练崩 | ACCEPTED | FAIL_train | **true** | false | -1 |
 
-> FAIL_train 时 met_latency=true（tune 已过），met_accuracy=false, accuracy=-1（与 decide reducer / viz_kd_stage / finalize_kd 的 FAIL_train ledger row 字面一致；旧 v1 train_pool.py 已删，语义已 port 到串行 distill 节点）。
+> FAIL_train 时 met_latency=true（tune 已过），met_accuracy=false, accuracy=-1（与 decide reducer / viz_kd_stage / finalize_kd 的 FAIL_train ledger row 字面一致）。
+>
+> **ofd 重试**：student 暴露 ``feature_hook_names`` 时本节点配 ofd 走 ``mse+ofd``；若训练时 ofd
+> 因运行时 feature 取空触发 compose fail-loud（rc≠0）→ **降级 mse-only 重试一次训练**（patch
+> run_config.yaml 的 ``kd_config`` 为 ``{"kd_losses":["mse"],"weights":{"mse":1.0},"ema":true}``，
+> 重跑 step 3 训练 + step 4 eval）。降级重试仍 rc≠0 → 进 FAIL_train catch（agent 退 0）。
 
 ## 输入
 
@@ -63,7 +68,7 @@ tools: [bash, read, write, edit, glob, grep]
 
 ## step 0 执行：FAIL_build 早退（gen_student.status=FAIL_build → 不调 tune_latency，直接落账）
 
-> SPEC §15 catch 协议：gen_student validate_contract 3-strike FAIL_build 时 student 文件
+> catch 协议：gen_student validate_contract 3-strike FAIL_build 时 student 文件
 > import 必坏（py_compile / AST 错），调 tune_latency 会再崩一次（系统失败 → workflow_failed）。
 > 此处 early-return：emit FAIL_build JSON，agent 退 0 → decide 落账 continue。
 
@@ -172,13 +177,13 @@ print(json.dumps({
   exit 0
 fi
 
-# ─── step 3: distill 训练（ACCEPTED 才跑；E4：kd_config 写 run_config.yaml，唯一真相源）──
+# ─── step 3: distill 训练（ACCEPTED 才跑；kd_config 写 run_config.yaml，唯一真相源）──
 # kd_config recipe：mse+ofd + EMA（ofd 仅在 student 暴露 feature_hook_names 时启用）。
 # AST 判定 student 是否暴露 feature_hook_names()（不用 grep '^def'——class method 缩进，^def 漏判）。
-# 无 hook → KD_CONFIG 退 mse-only（不崩）；有 hook → mse+ofd（compose 守卫 §1.2(1) fail-loud 兜底）。
-# ★ E4：distill 每轮 read→patch run_config.yaml 的 kd_config 字段（不传 inline --kd_config；
+# 无 hook → KD_CONFIG 退 mse-only（不崩）；有 hook → mse+ofd（compose 守卫 fail-loud 兜底：feats 空 → ValueError）。
+# ★ distill 每轮 read→patch run_config.yaml 的 kd_config 字段（不传 inline --kd_config；
 #   CLI > yaml 否则 yaml 形同虚设——禁用 inline 才能让 yaml 成唯一真相源）。
-# catch 协议（SPEC §15）：rc≠0 → status=FAIL_train, tune_status=ACCEPTED，agent 退 0。
+# catch 协议：rc≠0 → status=FAIL_train, tune_status=ACCEPTED，agent 退 0。
 TRAIN_PIPELINE="{{ gen_train_script.output.train_pipeline_path }}"
 TEACHER_CACHE="{{ train_teacher.output.teacher_cache }}"
 CKPTS_DIR="{{ setup.output.checkpoints_dir }}"
@@ -196,7 +201,7 @@ if [ "$HAS_HOOK" = "True" ]; then
 else
   KD_CONFIG='{"kd_losses":["mse"],"weights":{"mse":1.0},"ema":true}'
 fi
-# E4：read→patch run_config.yaml 的 kd_config 字段（保留 epochs/lr/eval_every/patience/...）。
+# read→patch run_config.yaml 的 kd_config 字段（保留 epochs/lr/eval_every/patience/...）。
 python3 -c '
 import json, sys, yaml
 path, kd_cfg = sys.argv[1], sys.argv[2]
@@ -336,5 +341,5 @@ step 0 / step 2 / step 3 (catch) / step 4 (catch) / step 6 任一早退或末尾
 - ``status`` (SUCCESS|FAIL_latency|FAIL_train|FAIL_build) / ``fail_reason`` / ``viz_status`` (object)。
 
 - ``latency_us`` / ``accuracy`` 必须从 stdout KEY 真值解析（FAIL_* 时 latency 可填 best_effort / accuracy=-1）；
-- ``status`` / ``tune_status`` 严格遵守 N21 映射（SUCCESS→ACCEPTED+SUCCESS / FAIL_latency→FAIL_latency+FAIL_latency / FAIL_train→ACCEPTED+FAIL_train）；
+- ``status`` / ``tune_status`` 严格遵守映射（SUCCESS→ACCEPTED+SUCCESS / FAIL_latency→FAIL_latency+FAIL_latency / FAIL_train→ACCEPTED+FAIL_train）；
 - ``viz_status`` 必须是 JSON 对象（dumb copy 自 sidecar stdout，失败值合法不阻断）。
