@@ -1,0 +1,9 @@
+# torchvision auto-downloaded MNIST
+data/
+# training checkpoints (regenerated each run)
+*.pt
+# ONNX exports (e.g. latency probing)
+*.onnx
+# Python cache
+__pycache__/
+*.pyc
