@@ -230,6 +230,7 @@ def test_main_baseline_fallback_writes_report_no_eval(tmp_path, monkeypatch):
     champions = _write_champions(tmp_path, [_baseline_row()])
     kd_artifacts = tmp_path / "kd"
     kd_artifacts.mkdir()
+    (kd_artifacts / "reports").mkdir()   # _write_report 写 kd/reports/final_report.md
 
     # 设哨兵：如果调了任何 champion=student 路径，测试 fail。
     def _bomb(*a, **kw):
@@ -241,7 +242,7 @@ def test_main_baseline_fallback_writes_report_no_eval(tmp_path, monkeypatch):
     # 用 sys.argv 调 _main（exit 0）
     baseline_contract = tmp_path / "base.py"
     baseline_contract.write_text("# synthetic", encoding="utf-8")
-    train_pipeline = tmp_path / "train_pipeline.py"
+    train_pipeline = tmp_path / "fake_pipeline.py"
     train_pipeline.write_text("# synthetic", encoding="utf-8")
     monkeypatch.setattr(sys, "argv", [
         "finalize_kd.py",
@@ -268,7 +269,7 @@ def test_main_baseline_fallback_writes_report_no_eval(tmp_path, monkeypatch):
     assert rc == 0
     # 检查 stdout 含 baseline 兜底值
     # （_main 用 print，捕获较繁；直接验 report 文件）
-    report = (kd_artifacts / "final_report.md").read_text("utf-8")
+    report = (kd_artifacts / "reports" / "final_report.md").read_text("utf-8")
     assert "**champion**: `baseline`" in report
     assert "**terminate_reason**: max_rounds" in report
     assert "**final_latency_us**: 10" in report  # baseline 兜底用 setup 透传值
@@ -286,9 +287,11 @@ def test_main_real_champion_runs_eval_onnx_latency(tmp_path, monkeypatch):
     }])
     kd_artifacts = tmp_path / "kd"
     kd_artifacts.mkdir()
+    (kd_artifacts / "onnx").mkdir()      # _fake_export 写 kd/onnx/final.onnx
+    (kd_artifacts / "reports").mkdir()   # _write_report 写 kd/reports/final_report.md
     baseline_contract = tmp_path / "base.py"
     baseline_contract.write_text("DUMMY_INPUT = {'shape': [1]}\ndef build_model(**c): ...\n", encoding="utf-8")
-    train_pipeline = tmp_path / "train_pipeline.py"
+    train_pipeline = tmp_path / "fake_pipeline.py"
     train_pipeline.write_text("# noop", encoding="utf-8")
 
     # mock _run_eval（捕获 argv，校验 flag 完整）→ 返精度
@@ -345,7 +348,8 @@ def test_main_real_champion_runs_eval_onnx_latency(tmp_path, monkeypatch):
 
 
 def test_run_eval_passes_all_required_flags(tmp_path, monkeypatch):
-    """SPEC-REVIEW N18：eval 必传 --student_ckpt --out_ckpt --accuracy_baseline --accuracy_baseline_kind。"""
+    """Phase 2：eval 命令 champion 三字段强制 inline（student_model_path / build_cfg /
+    student_ckpt）+ --artifacts_dir + --experiment；eval 是 read-only，不传 --out_ckpt。"""
     fk = _load_finalize()
     captured = {}
     class _Fake:
@@ -354,6 +358,7 @@ def test_run_eval_passes_all_required_flags(tmp_path, monkeypatch):
         stderr = ""
     def _fake_run(argv, **kw):
         captured["argv"] = argv
+        captured["env"] = kw.get("env", {})
         return _Fake()
     monkeypatch.setattr(subprocess, "run", _fake_run)
 
@@ -368,11 +373,19 @@ def test_run_eval_passes_all_required_flags(tmp_path, monkeypatch):
     )
     assert acc == 0.019
     argv = captured["argv"]
-    for flag in ("--student_ckpt", "--out_ckpt", "--accuracy_baseline", "--accuracy_baseline_kind",
-                 "--student_model_path", "--build_cfg", "--mode", "eval"):
+    # Phase 2 contract: champion three fields force-inline + artifacts_dir + experiment.
+    for flag in ("--student_ckpt", "--accuracy_baseline", "--accuracy_baseline_kind",
+                 "--student_model_path", "--build_cfg", "--mode", "eval",
+                 "--artifacts_dir", "--experiment"):
         assert flag in argv, f"eval 命令缺 flag: {flag}"
+    # eval is read-only — must NOT pass --out_ckpt (matrix row 5: champion inline).
+    assert "--out_ckpt" not in argv, (
+        "eval 是 read-only；--out_ckpt 不应传（Phase 2 引擎 eval mode 不写 ckpt）"
+    )
     # ckpt 必须存在（champion.ckpt 非空）
     assert "/c.pt" in argv
+    # ORCA_KD_SCRIPTS_DIR env 注入（引擎 sys.path bootstrap）
+    assert captured["env"].get("ORCA_KD_SCRIPTS_DIR"), "ORCA_KD_SCRIPTS_DIR env 未注入"
 
 
 def test_run_eval_empty_ckpt_fails_loud(tmp_path):

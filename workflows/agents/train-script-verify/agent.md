@@ -1,28 +1,28 @@
 ---
-description: kd-nas 串行版 train-script-verify（SPEC §6.5）：校验 gen_train_script 产出的 train_pipeline.py——grep 三 mode 函数 + 5 个固定 user_* slot 接口已特化 + 零占位符残留 + fidelity_check.py 复核通过（FIDELITY PASS）+ _make_live_push/_maybe_bootstrap_env 保留 + micro eval 用 flatten baseline contract 跑一步确认能 load + forward 不崩。verified=false → fail loud 阻塞（不进 train_teacher）。配置错误非业务波动，不进 catch 协议。
-tools: [bash, read, write, edit, glob, grep]
+description: kd-nas 串行版 train-script-verify：校验 gen_train_script 产出的 4 叶子（user/{loss,data,eval,optim}.py）契约 + AST 自包含 + AST 签名 + kind 方向硬校验 + fidelity_check 数值等价 + 引擎 smoke（合成 model+ckpt 跑 --mode teacher/eval 一 epoch）+ workflow-verifier（4 叶子并行 review）。verified=false → fail loud 阻塞（不进 train_teacher）。配置错误非业务波动，不进 catch 协议。
+tools: [bash, read, write, edit, glob, grep, task]
 ---
 # train-script-verify
 
 ## ⚠️ 你的唯一职责
 
-**校验 gen_train_script 产出的 ``train_pipeline.py`` 满足 KD 串行版的硬约束**：
-1. 三 mode 函数齐全（teacher/distill/eval）；
-2. **5 个固定用户接口 slot 已特化**（`def user_compute_loss` / `def user_build_dataloader`
-   / `def user_eval_metric` / `def build_user_optimizer` / `def build_user_scheduler`）
-   —— 未特化 = NotImplementedError fail loud，verify 阶段必须已消除；
-3. **零占位符残留**（无双花括号字面量）；
-4. ``_make_live_push`` / ``_maybe_bootstrap_env`` 保留（web live loss）；
+**校验 gen_train_script 产出的 4 叶子满足 KD 串行版的硬约束**：
+
+1. 4 叶子存在（`user/{loss,data,eval,optim}.py`）且 `run_config.yaml` / `run.sh` 齐；
+2. **AST 自包含**（Q6：禁 sibling/相对 import；顶层 import 仅白名单 {torch,math,numpy,typing,itertools,functools,collections,dataclasses,random}）；
+3. **AST 签名相等**（E9：函数名 + 必填位置参数集；默认参数 additive）；
+4. **kind 方向硬校验**（D2：leaf kind 方向组 vs `inputs.accuracy_baseline_kind` 方向组）；
 5. **fidelity_check.py 复核**数值级等价性（`FIDELITY: PASS`）；
-6. ``--mode eval`` 用 micro dummy ckpt（torch.save 一个空 state_dict）跑一步，确认能 load + forward 不崩
-   （eval 走真内联 `user_eval_metric`，NotImplementedError 应已在 gen_train_script 阶段消除，
-   verify 阶段 micro eval 应能过）。
+6. **引擎 smoke**：用固定引擎入口 `train_pipeline.py` + 合成 model+ckpt 跑 `--mode teacher`
+   1 epoch + `--mode eval`，验证 stdout 协议键（`TEACHER_CKPT`/`TASK_LOSS_FINAL`/
+   `STUDENT_ACCURACY`/…）+ 叶子 loader/eval_metric 能被引擎加载并跑通；
+7. **workflow-verifier 子 agent**（4 叶子并行 review）—— 真 spawn，不许叙述假 pass。
 
 **产出 = 一个严格匹配下面 output_schema 的 JSON 对象。**
 
 **严禁**：
-- ❌ 修 train_pipeline.py（校验 agent，不改产物）；
-- ❌ 跑全量训练（micro eval 只跑一步 forward，不进 train loop）；
+- ❌ 修叶子或引擎代码（校验 agent，不改产物）；
+- ❌ 跑全量训练（smoke 只 1 epoch + batch_size=2）；
 - ❌ 降级 pass（issues 非空却 verified=true）。
 
 **失败 = fail loud 阻塞**：issues 非空 → verified=false，agent 退非零（这是配置错误非业务波动，
@@ -30,69 +30,54 @@ SPEC §15 不走 catch 协议，不进 train_teacher）；agent 自身崩 → �
 
 ## 输入
 
-- ``train_pipeline_path = {{ gen_train_script.output.train_pipeline_path }}``
+- ``train_pipeline_path = {{ gen_train_script.output.train_pipeline_path }}``（固定引擎入口）
+- ``leaves_dir = {{ gen_train_script.output.leaves_dir }}``
+- ``run_config_path = {{ gen_train_script.output.run_config_path }}``
+- ``run_sh_path = {{ gen_train_script.output.run_sh_path }}``
 - ``user_train_script = {{ inputs.user_train_script }}``（fidelity_check --user_train 用）
-- ``baseline_contract_path = {{ flatten.output.baseline_contract_path }}``（micro eval + fidelity --model_path 用）
+- ``baseline_contract_path = {{ flatten.output.baseline_contract_path }}``（smoke + fidelity --model_path 用）
+- ``accuracy_baseline_kind = {{ inputs.accuracy_baseline_kind }}``（kind 方向硬校验）
 - ``device = {{ inputs.device }}``
 
 ---
 
-## step 1 执行：grep mode 函数 + 5 个 slot 接口 + 零占位符残留 + live push helpers
+## step 1 执行：4 叶子存在 + AST 自包含 + AST 签名（用 fidelity_check 的 AST 分支）
+
+> fidelity_check.py 内置 AST 自包含 + AST 签名校验，本步直接调它（不重复实现）。
+> 失败立即 fail loud 退非零，不进 step 2/3。
 
 ```bash
 TRAIN_PIPELINE="{{ gen_train_script.output.train_pipeline_path }}"
-[ -f "$TRAIN_PIPELINE" ] || { echo "FAIL: train_pipeline 不存在：$TRAIN_PIPELINE" >&2; exit 2; }
+LEAVES_DIR="{{ gen_train_script.output.leaves_dir }}"
+RUN_CONFIG="{{ gen_train_script.output.run_config_path }}"
+RUN_SH="{{ gen_train_script.output.run_sh_path }}"
+[ -f "$TRAIN_PIPELINE" ] || { echo "FAIL: 固定引擎入口不存在：$TRAIN_PIPELINE" >&2; exit 2; }
+[ -d "$LEAVES_DIR" ] || { echo "FAIL: leaves_dir 不存在：$LEAVES_DIR" >&2; exit 2; }
+[ -f "$RUN_CONFIG" ] || { echo "FAIL: run_config.yaml 不存在：$RUN_CONFIG" >&2; exit 2; }
+[ -f "$RUN_SH" ] || { echo "FAIL: run.sh 不存在：$RUN_SH" >&2; exit 2; }
+for leaf in loss data eval optim; do
+  [ -f "$LEAVES_DIR/$leaf.py" ] || { echo "FAIL: 缺叶子：$LEAVES_DIR/$leaf.py" >&2; exit 2; }
+done
 USER_TRAIN="{{ inputs.user_train_script }}"
 [ -f "$USER_TRAIN" ] || { echo "FAIL: user_train_script 不存在：$USER_TRAIN" >&2; exit 2; }
-
-python3 -c "
-import re, sys, pathlib
-tp = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8', errors='replace')
-issues = []
-
-# (a) 三 mode 函数存在
-for fn in ('run_teacher_mode', 'run_distill_mode', 'run_eval_mode'):
-    if not re.search(rf'^def\\s+{fn}\\s*\\(', tp, re.MULTILINE):
-        issues.append(f'缺函数 def {fn}（模板未生成完整？）')
-
-# (b) 5 个固定用户接口 slot 已特化（正则锚定 def 行；未特化 = NotImplementedError，gen 阶段应已消除）
-slot_pat = r'^def\\s+(user_compute_loss|user_build_dataloader|user_eval_metric|build_user_optimizer|build_user_scheduler)\\s*\\('
-found_slots = set(re.findall(slot_pat, tp, re.MULTILINE))
-required_slots = {'user_compute_loss', 'user_build_dataloader', 'user_eval_metric',
-                  'build_user_optimizer', 'build_user_scheduler'}
-for name in sorted(required_slots - found_slots):
-    issues.append(f'缺固定接口 def {name}（slot 未特化搬入？）')
-
-# (c) 零占位符残留：双花括号字面量不得出现（docstring 也不许——骨架 docstring 已改写）
-double_brace = "{" * 2
-if double_brace in tp:
-    issues.append(f'产物含 {double_brace} 占位符字面量残留（骨架 docstring 未改写？）')
-
-# (d) live push helpers 保留
-for fn in ('_make_live_push', '_maybe_bootstrap_env'):
-    if fn not in tp:
-        issues.append(f'缺 helper {fn}（web live loss 失效）')
-
-print('ISSUES_COUNT:', len(issues))
-for i, msg in enumerate(issues):
-    print(f'ISSUE_{i}: {msg}')
-" "$TRAIN_PIPELINE"
+# AST 签名 / 自包含 / py_compile 全套（任一失败立即退非零）
+for leaf in loss data eval optim; do
+  python3 -m py_compile "$LEAVES_DIR/$leaf.py" || { echo "FAIL: py_compile $leaf.py 失败" >&2; exit 2; }
+done
+echo "PARSED step1: leaves + run_config + run.sh 存在 + py_compile 全过"
 ```
 
-## step 2 执行：fidelity_check.py 复核（数值级等价性）
+## step 2 执行：fidelity_check.py 复核（数值等价 + AST 自包含 + AST 签名 + kind 方向硬校验）
 
-> gen_train_script 的 Layer 3 已跑过 fidelity；此处二次复核（防生成后产物被改坏）。
-> ``--user_eval`` 省略时 fidelity 自动 glob user project root（user_train 所在目录）。
-> ``--dummy_input`` 从 baseline contract 的 ``DUMMY_INPUT`` 字面量提取（AST literal_eval，
-> 不 exec）；``--model_path`` 用 baseline contract（I/O + eval 数值比对需模型实例）。
+> 单脚本三合一：AST 自包含 + AST 签名 + 数值等价 + kind 方向。
+> ``--dummy_input`` 从 baseline contract 的 ``DUMMY_INPUT`` 字面量提取（AST literal_eval，不 exec）。
 
 ```bash
-TRAIN_PIPELINE="{{ gen_train_script.output.train_pipeline_path }}"
+LEAVES_DIR="{{ gen_train_script.output.leaves_dir }}"
 USER_TRAIN="{{ inputs.user_train_script }}"
 BASELINE="{{ flatten.output.baseline_contract_path }}"
 [ -f "$BASELINE" ] || { echo "FAIL: baseline_contract 不存在：$BASELINE" >&2; exit 2; }
 
-# fidelity_check.py 位置：kd-train-script 资源目录（ORCA_AGENT_RESOURCES 锚定，cwd 无关）
 FIDELITY_CHECK="${ORCA_AGENT_RESOURCES:-workflows/agents/train-script-verify}/../kd-train-script/scripts/fidelity_check.py"
 [ -f "$FIDELITY_CHECK" ] || FIDELITY_CHECK="workflows/agents/kd-train-script/scripts/fidelity_check.py"
 [ -f "$FIDELITY_CHECK" ] || { echo "FAIL: fidelity_check.py 找不到：$FIDELITY_CHECK" >&2; exit 2; }
@@ -111,75 +96,108 @@ else:
 " "$BASELINE")" || exit 2
 
 FID_OUT="$(python3 "$FIDELITY_CHECK" \
-  --train_pipeline "$TRAIN_PIPELINE" \
+  --leaves_dir "$LEAVES_DIR" \
   --user_train "$USER_TRAIN" \
   --dummy_input "$DUMMY_JSON" \
   --model_path "$BASELINE" --build_fn build_model --build_cfg '{}' \
+  --accuracy_baseline_kind "{{ inputs.accuracy_baseline_kind }}" \
   --project_root "$(dirname "$USER_TRAIN")" 2>&1)"
 FID_RC=$?
 echo "$FID_OUT"
 if [ $FID_RC -ne 0 ]; then
-  echo "FAIL: fidelity_check.py rc=$FID_RC（生成产物与用户原逻辑数值不等价）" >&2
+  echo "FAIL: fidelity_check.py rc=$FID_RC（叶子与用户原逻辑不等价 / AST 自包含失败 / 签名错 / kind 方向不符）" >&2
   exit 2
 fi
-echo "$FID_OUT" | grep -q '^FIDELITY: PASS' || { echo "FAIL: fidelity_check 未 PASS（FIDELITY: FAIL）" >&2; exit 2; }
-echo "PARSED step2: fidelity PASS"
+echo "$FID_OUT" | grep -q '^FIDELITY: PASS' || { echo "FAIL: fidelity_check 未 PASS" >&2; exit 2; }
+echo "$FID_OUT" | grep -q '^LEAF_AST_OK: true' || { echo "FAIL: LEAF_AST_OK != true" >&2; exit 2; }
+echo "$FID_OUT" | grep -q '^KIND_DIRECTION_OK: true' || { echo "FAIL: KIND_DIRECTION_OK != true（leaf kind 方向组 ≠ accuracy_baseline_kind 方向组）" >&2; exit 2; }
+echo "PARSED step2: fidelity PASS + AST + kind-direction 全过"
 ```
 
-## step 3 执行：micro eval（torch.save 空 state_dict + --mode eval 用 baseline contract）
+## step 3 执行：引擎 smoke（固定入口 + 合成 teacher ckpt + baseline 当 model）
 
-> 用 ``flatten.output.baseline_contract_path`` 当 student_model_path 跑 ``--mode eval``：
-> student = baseline 模型，load 一个空 ckpt（strict=False 容忍 missing keys），跑一步 forward
-> 确认 train_pipeline 不会因 ``--student_ckpt`` 缺 / load 失败崩。
->
-> 关键：micro eval 只验证 eval 路径**能跑通**（不验精度，baseline 也不是真 student）；
-> eval 指标 = 真内联 ``user_eval_metric``（gen_train_script 已搬入；NotImplementedError
-> 若残留此处会直接崩 = fail loud 守门）；真精度评估在 distill 节点的 eval step（带真 student + 真 ckpt）。
+> 用 ``flatten.output.baseline_contract_path`` 当 student_model_path 跑：
+>   1) ``--mode teacher`` 1 epoch（batch_size=2）→ 验叶子 loader/loss/optim 在引擎里能跑通；
+>   2) ``--mode eval`` → 验 eval_metric 能跑通 + emit STUDENT_ACCURACY 协议键。
+> eval student_ckpt 用 step 3a 产出的 teacher ckpt（read-only，不重训）。
 
 ```bash
 TRAIN_PIPELINE="{{ gen_train_script.output.train_pipeline_path }}"
+LEAVES_DIR="{{ gen_train_script.output.leaves_dir }}"
 BASELINE="{{ flatten.output.baseline_contract_path }}"
+PER_RUN="{{ setup.output.per_run_artifacts_dir }}"
 [ -f "$BASELINE" ] || { echo "FAIL: baseline_contract 不存在：$BASELINE" >&2; exit 2; }
 
-MICRO_CKPT="$(mktemp /tmp/kd_micro_XXXX.pt)"
-python3 -c "
-import torch, sys
-# 空 state_dict（micro eval 只验证 load 路径，不验证精度）。
-torch.save({}, sys.argv[1])
-" "$MICRO_CKPT"
+SMOKE_DIR="$(mktemp -d /tmp/kd_verify_XXXX)"
+SMOKE_CKPT="$SMOKE_DIR/smoke_teacher.pth"
+export ORCA_KD_SCRIPTS_DIR="$(dirname "$TRAIN_PIPELINE")"
 
-OUT="$(python3 "$TRAIN_PIPELINE" \
-  --mode eval \
-  --student_model_path "$BASELINE" \
-  --build_fn build_model --build_cfg '{}' \
-  --student_ckpt "$MICRO_CKPT" --out_ckpt "$MICRO_CKPT" \
-  --accuracy_baseline "{{ inputs.accuracy_baseline }}" \
-  --accuracy_baseline_kind "{{ inputs.accuracy_baseline_kind }}" \
-  --device "{{ inputs.device }}" 2>&1)"
-RC=$?
-rm -f "$MICRO_CKPT"
-echo "$OUT"
-if [ $RC -ne 0 ]; then
-  echo "FAIL: train_pipeline --mode eval rc=$RC（micro eval 跑挂；读 stdout/stderr 修 train_pipeline 的 eval 路径）" >&2
+# 3a) teacher mode 1 epoch
+OUT_A="$(python3 "$TRAIN_PIPELINE" \
+  --mode teacher --artifacts_dir "$PER_RUN" \
+  --model_path "$BASELINE" --build_cfg '{}' \
+  --epochs 1 --batch_size 2 --device "{{ inputs.device }}" \
+  --out_ckpt "$SMOKE_CKPT" --experiment verify_smoke 2>&1)"
+RC_A=$?
+echo "$OUT_A"
+if [ $RC_A -ne 0 ]; then
+  echo "FAIL: 引擎 --mode teacher rc=$RC_A（叶子 loader/loss/optim 加载或循环崩）" >&2
+  rm -rf "$SMOKE_DIR"
   exit 2
 fi
-# eval 路径必 emit STUDENT_ACCURACY（模板 run_eval_mode 末尾 print）。
-echo "$OUT" | grep -q '^STUDENT_ACCURACY:' || { echo "FAIL: --mode eval 未 emit STUDENT_ACCURACY（user_eval_metric 移植异常）" >&2; exit 2; }
-echo "PARSED step3: micro_eval PASS"
+echo "$OUT_A" | grep -q '^TEACHER_CKPT:' || { echo "FAIL: teacher 未 emit TEACHER_CKPT" >&2; rm -rf "$SMOKE_DIR"; exit 2; }
+echo "$OUT_A" | grep -q '^TASK_LOSS_FINAL:' || { echo "FAIL: teacher 未 emit TASK_LOSS_FINAL" >&2; rm -rf "$SMOKE_DIR"; exit 2; }
+
+# 3b) eval mode read-only
+OUT_B="$(python3 "$TRAIN_PIPELINE" \
+  --mode eval --artifacts_dir "$PER_RUN" \
+  --student_model_path "$BASELINE" --build_cfg '{}' \
+  --student_ckpt "$SMOKE_CKPT" \
+  --accuracy_baseline "{{ inputs.accuracy_baseline }}" \
+  --accuracy_baseline_kind "{{ inputs.accuracy_baseline_kind }}" \
+  --device "{{ inputs.device }}" --experiment verify_smoke 2>&1)"
+RC_B=$?
+echo "$OUT_B"
+rm -rf "$SMOKE_DIR"
+if [ $RC_B -ne 0 ]; then
+  echo "FAIL: 引擎 --mode eval rc=$RC_B（eval_metric 加载或签名崩）" >&2
+  exit 2
+fi
+echo "$OUT_B" | grep -q '^STUDENT_ACCURACY:' || { echo "FAIL: eval 未 emit STUDENT_ACCURACY" >&2; exit 2; }
+echo "$OUT_B" | grep -q '^STUDENT_ACCURACY_KIND:' || { echo "FAIL: eval 未 emit STUDENT_ACCURACY_KIND" >&2; exit 2; }
+echo "PARSED step3: 引擎 smoke PASS（teacher + eval 两 mode 跑通）"
 ```
+
+## step 4 执行：workflow-verifier 子 agent（4 叶子并行 review）
+
+> 必跑，绝不跳过。用 kd-train-script SKILL.md 的 verifier prompt 模板**真 spawn**
+> workflow-verifier（不许叙述假 pass），喂给它 4 叶子 + 2 checklists + 用户原 train.py / eval 脚本。
+
+spawn workflow-verifier，传入：
+- workflow doc: ``workflows/agents/kd-train-script/references/workflows/train_pipeline_script_generation.md``
+- checklists: ``workflows/agents/kd-train-script/references/workflow-checklists/train_pipeline_script_generation/{01_training,02_cli}.md``
+- artifacts: ``{{ gen_train_script.output.leaves_dir }}/{loss,data,eval,optim}.py`` +
+  ``{{ gen_train_script.output.run_config_path }}`` + ``{{ gen_train_script.output.run_sh_path }}``
+- cross-refs: 用户原 train.py / eval 脚本 + ``workflows/agents/_kd_scripts/CONTRACTS.md`` §6
+
+收集 verifier verdict：
+- ``VERDICT: all-pass``（无 Fixed 段）→ 进 emit；
+- ``VERDICT: all-pass``（含 Fixed 段）→ 重跑 step 3 引擎 smoke；
+- ``VERDICT: unresolved`` → verified=false，把 verifier findings 填入 issues，**退非零**。
 
 ## 产出 JSON（最终消息）
 
-step1 issues 为空 ∧ step2 fidelity PASS ∧ step3 micro eval PASS → verified=true；否则 verified=false（fail loud 阻塞）。
+step1-3 全过 ∧ step4 verifier all-pass → verified=true；否则 verified=false（fail loud 阻塞）。
 
 ```json
 {
   "verified": <bool>,
-  "issues": [<step1 列出的 issue 字符串数组>]
+  "issues": [<step2/step4 列出的 issue 字符串数组>]
 }
 ```
 
-- step1 任何 issue → verified=false，**退非零**（fail loud 阻塞，不进 train_teacher）；
-- step2 fidelity_check rc≠0 或未 PASS → 退非零（fail loud）；
-- step3 micro eval rc≠0 或未 emit STUDENT_ACCURACY → 退非零（fail loud）；
+- step1 任何缺文件 / py_compile 失败 → verified=false，**退非零**；
+- step2 fidelity rc≠0 或 AST/KIND 不 true → 退非零；
+- step3 引擎 smoke rc≠0 或协议键缺失 → 退非零；
+- step4 verifier unresolved → verified=false，**退非零**；
 - 全过 → verified=true, issues=[]，agent 退 0。

@@ -1,14 +1,15 @@
-"""train_pipeline.py — KD-NAS fixed engine entry (Phase 1 orphan).
+"""train_pipeline.py — KD-NAS fixed engine entry.
 
 This file is the **engine entry**: it builds a :class:`kd.trainer.TrainConfig`
 from CLI flags (+ optional ``--config`` YAML) and calls
-:meth:`kd.trainer.KDTrainer.train`.
+:meth:`kd.trainer.KDTrainer.train`. It is fixed library code — the LLM-driven
+``kd-train-script`` codegen produces four leaves (``loss/data/eval/optim.py``)
+under ``<artifacts_dir>/user/`` and this engine loads them via
+:mod:`kd._leaves`.
 
-Phase 1 (N4): the file exists as an orphan driven only by unit tests.
-``kd-train-script``'s ``gen_train_script`` output schema and the 5 agent
-call sites still point at the historical ``references/templates/train_pipeline.py``
-until Phase 2's atomic switch.  Nothing in this file is wired into the DAG
-yet — that wiring is Phase 2's responsibility.
+Phase 2 (atomic switch, plan §5): ``gen_train_script``'s output schema and the
+five downstream call sites (train-teacher / distill / finalize) all point at
+this fixed entry. No per-project ``train_pipeline.py`` is generated anymore.
 
 Priority (plan §3.3): ``CLI --flag`` > ``--config run_config.yaml`` > engine default.
 

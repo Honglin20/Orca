@@ -20,7 +20,7 @@ inputs:
     required: true
   user_train_script:
     type: string
-    description: "[ask] 用户原 train.py 路径（含 compute_loss + build_dataloader），kd-train-script 读、生成 train_pipeline.py 时搬 loss/dataloader/optimizer（自包含拷贝，不 import 用户项目）；同时提取 teacher 默认 lr/epochs 供 train_teacher 用"
+    description: "[ask] 用户原 train.py 路径（含 compute_loss + build_dataloader），kd-train-script 读后产 4 叶子（loss/data/eval/optim.py，自包含拷贝用户逻辑，不 import 用户项目）+ run_config.yaml；同时提取 teacher 默认 lr/epochs 供 train_teacher 用"
     required: true
   target_latency_us:
     type: string
@@ -196,11 +196,13 @@ nodes:
       - to: gen_train_script
 
   # ═══════════════════════════════════════════════════════════════
-  # gen_train_script（复用 kd-train-script + 扩展 teacher 默认 lr/epochs 提取）：
-  # 实例化骨架模板 + 特化搬入用户逻辑 → train_pipeline.py（teacher+distill+eval 三 mode，
-  # 5 个 user_* slot 零占位符）+ 四层校验（静态无残留 / 三模式 smoke 无覆盖 flag /
-  # fidelity_check.py 数值等价 / workflow-verifier）+ 从 user_train_script 提 lr/epochs。
-  # train_teacher / distill / finalize 节点命令零改动（本节点产出 train_pipeline_path 下游消费）。
+  # gen_train_script（kd-train-script codegen）：产 4 叶子（user/{loss,data,eval,optim}.py）
+  # + run_config.yaml + run.sh（人类用）+ 提 teacher 默认 lr/epochs。叶子从固定引擎
+  # `_kd_scripts/train_pipeline.py`（`KDTrainer`）消费；本节点**不产单体 train_pipeline.py**。
+  # train_pipeline_path 字段切指向该固定引擎入口（下游 5 调用点 inline flag 调）。
+  # D8 AST 检测：读用户 train.py 时扫 GAN/RL/DDP，命中 fail loud + `--force-template` override。
+  # 四层校验：逐叶子静态 + smoke + fidelity_check（数值等价 + AST 自包含 + AST 签名 + kind 方向硬校验）+
+  # workflow-verifier（4 叶子并行 review）。
   # ═══════════════════════════════════════════════════════════════
   - name: gen_train_script
     kind: agent
@@ -209,17 +211,22 @@ nodes:
     agent: kd-train-script
     output_schema:
       type: object
-      required: [train_pipeline_path, teacher_default_lr, teacher_default_epochs]
+      required: [train_pipeline_path, leaves_dir, run_config_path, run_sh_path, teacher_default_lr, teacher_default_epochs]
       properties:
-        train_pipeline_path: {type: string, description: "生成的 train_pipeline.py 绝对路径（三 mode 自包含；py_compile + teacher smoke PASS）"}
+        train_pipeline_path: {type: string, description: "固定引擎入口绝对路径（_kd_scripts/train_pipeline.py；下游 inline flag 调，本节点不产单体脚本）"}
+        leaves_dir: {type: string, description: "叶子目录绝对路径（$ORCA_ARTIFACTS_DIR/user/；含 loss.py / data.py / eval.py / optim.py）"}
+        run_config_path: {type: string, description: "run_config.yaml 绝对路径（$ORCA_ARTIFACTS_DIR/run_config.yaml；teacher 模板，distill 每轮 read→patch kd_config）"}
+        run_sh_path: {type: string, description: "run.sh 绝对路径（$ORCA_ARTIFACTS_DIR/run.sh；人类手动专用，节点不走此）"}
         teacher_default_lr: {type: number, description: "从 user_train_script 提取的用户默认 lr（train_teacher 用，非硬编码 1e-3）"}
         teacher_default_epochs: {type: integer, description: "从 user_train_script 提取的用户默认 epochs（train_teacher 用，非硬编码 1）"}
     routes:
       - to: train_script_verify
 
   # ═══════════════════════════════════════════════════════════════
-  # train_script_verify（新写）：校验 train_pipeline.py（mode 函数齐全 + 用户函数搬入 +
-  # live push helpers + micro eval 跑一步）。verified=false → fail loud 阻塞（配置错误非业务波动）。
+  # train_script_verify：校验 4 叶子（loss/data/eval/optim.py）契约 + AST 自包含 +
+  # AST 签名 + kind 方向硬校验 + fidelity_check 数值等价 + 引擎 smoke（合成 model+ckpt
+  # 跑 --mode teacher/eval 一 epoch）+ workflow-verifier（4 叶子并行 review）。
+  # verified=false → fail loud 阻塞（配置错误非业务波动）。
   # ═══════════════════════════════════════════════════════════════
   - name: train_script_verify
     kind: agent
@@ -239,7 +246,8 @@ nodes:
       - to: train_teacher
 
   # ═══════════════════════════════════════════════════════════════
-  # train_teacher（独立节点，从 setup 拆出）：跑 train_pipeline.py --mode teacher（用户默认 lr/epochs）+
+  # train_teacher（独立节点，从 setup 拆出）：inline flag 调引擎 train_pipeline.py --mode teacher
+  # （用用户默认 lr/epochs + --artifacts_dir per-run）+
   # teacher_setup 产 cache + metrics_tail 推 loss。幂等：teacher_cache+meta+ckpt 存在 ∧ sha256 匹配 → 跳。
   # teacher 训练崩 → fail loud（teacher_cache 缺整个循环无意义，SPEC §15 不走 catch）。
   # ═══════════════════════════════════════════════════════════════

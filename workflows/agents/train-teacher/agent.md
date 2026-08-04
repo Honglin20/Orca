@@ -1,5 +1,5 @@
 ---
-description: kd-nas 串行版 train_teacher（独立节点，SPEC §6.6）：从 setup 拆出，跑 train_pipeline.py --mode teacher 训 teacher（用用户默认 lr/epochs，非硬编码）+ teacher_setup 产 cache + metrics_tail 推训练 metrics。幂等：teacher_cache/meta/ckpt 三者存在 + sha256 匹配 → 跳过训练。teacher 训练崩 → fail loud（teacher_cache 缺整个循环无意义）。
+description: kd-nas 串行版 train_teacher（独立节点）：inline flag 调固定引擎 train_pipeline.py --mode teacher（用用户默认 lr/epochs + --artifacts_dir per-run）+ teacher_setup 产 cache + metrics_tail 推训练 metrics。幂等：teacher_cache/meta/ckpt 三者存在 + sha256 匹配 → 跳过训练。teacher 训练崩 → fail loud（teacher_cache 缺整个循环无意义）。
 tools: [bash, read, write, edit, glob, grep]
 ---
 # train-teacher
@@ -101,37 +101,46 @@ print(json.dumps(m.DUMMY_INPUT))
 ' "$BASELINE")"
 
 if [ "$NEED_TRAIN" = "1" ]; then
-  # 2a) train_pipeline.py --mode teacher（用户默认 lr/epochs + --out_ckpt + --env_anchor）
+  # 2a) 固定引擎 train_pipeline.py --mode teacher（inline flag + --artifacts_dir per-run；
+  #     叶子由 gen_train_script 产在 $PER_RUN/user/，引擎加载它们跑循环）
+  PER_RUN="{{ setup.output.per_run_artifacts_dir }}"
+  TEACHER_EXP="teacher"
+  mkdir -p "$PER_RUN/runs/$TEACHER_EXP"
   ORCA_KD_SCRIPTS_DIR="$KD_SCRIPTS_DIR" python3 "$TRAIN_PIPELINE" \
-    --mode teacher --model_path "$TEACHER_MODEL_PATH" \
+    --mode teacher --artifacts_dir "$PER_RUN" --experiment "$TEACHER_EXP" \
+    --model_path "$TEACHER_MODEL_PATH" \
     --build_fn build_model --build_cfg '{}' \
     --epochs "$TEACHER_DEFAULT_EPOCHS" \
     --lr "$TEACHER_DEFAULT_LR" \
     --variant_id teacher \
     --out_ckpt "$TEACHER_CKPT" \
     --device "{{ setup.output.device }}" --seed "{{ inputs.seed }}" \
-    --env_anchor "{{ setup.output.per_run_artifacts_dir }}" \
-    > "${KD_ARTIFACTS_DIR}meta/teacher_train.log" 2>&1
+    --env_anchor "$PER_RUN" \
+    > "$PER_RUN/runs/$TEACHER_EXP/train.log" 2>&1
   TP_RC=$?
   if [ $TP_RC -ne 0 ]; then
     echo "FAIL: train_pipeline.py --mode teacher rc=$TP_RC（teacher_cache 缺，KD 循环无意义）。log 尾：" >&2
-    tail -c 800 "${KD_ARTIFACTS_DIR}meta/teacher_train.log" >&2 || true
+    tail -c 800 "$PER_RUN/runs/$TEACHER_EXP/train.log" >&2 || true
     exit 2
   fi
   [ -f "$TEACHER_CKPT" ] || { echo "FAIL: teacher 训练未产 ckpt：$TEACHER_CKPT" >&2; exit 2; }
+  # 兼容旧 metrics_tail 兜底路径：把 runs/<exp>/train.log 软拷贝到旧 meta/teacher_train.log（post-hoc 读此）
+  cp "$PER_RUN/runs/$TEACHER_EXP/train.log" "${KD_ARTIFACTS_DIR}meta/teacher_train.log" 2>/dev/null || true
   # 2b) teacher_setup 产 cache + meta（latency 从 gen_teacher.output 透传，不再自测）
-  #     teacher 可视化须由 evaluate 驱动（非 training loss）：复用 train_pipeline --mode eval
+  #     teacher 可视化须由 evaluate 驱动（非 training loss）：复用引擎 --mode eval
   #     跑 teacher ckpt+model → STUDENT_ACCURACY，teacher_setup._parse_accuracy 解析进 meta。
+  #     E6：eval_command 是 shell 字符串嵌套；--artifacts_dir 须拼入此字符串字面量。
   #     eval 失败不阻断（teacher_setup 默认 lenient → teacher_accuracy_known=False，图表标 unknown）。
   TEACHER_EVAL_CMD="python3 '$TRAIN_PIPELINE' --mode eval \
+    --artifacts_dir '$PER_RUN' --experiment '$TEACHER_EXP' \
     --student_model_path '$TEACHER_MODEL_PATH' \
     --build_fn build_model --build_cfg '{}' \
-    --student_ckpt '$TEACHER_CKPT' --out_ckpt '$TEACHER_CKPT' \
+    --student_ckpt '$TEACHER_CKPT' \
     --accuracy_baseline '{{ inputs.accuracy_baseline }}' \
     --accuracy_baseline_kind '{{ inputs.accuracy_baseline_kind }}' \
     --device '{{ setup.output.device }}' --seed '{{ inputs.seed }}' \
     --project_root '{{ setup.output.project_root }}' \
-    --env_anchor '{{ setup.output.per_run_artifacts_dir }}'"
+    --env_anchor '$PER_RUN'"
   python3 "$KD_SCRIPTS_DIR/teacher_setup.py" \
     --teacher_model_path "$TEACHER_MODEL_PATH" \
     --teacher_ckpt "$TEACHER_CKPT" \
@@ -161,9 +170,10 @@ echo "PARSED step2: TEACHER_CACHE=$TEACHER_CACHE TEACHER_META=$TEACHER_META TEAC
 
 ## step 3 执行：metrics_tail（live loss + 自定义模板 metrics）
 
-> 分工（SPEC §6.6 / §9）：
->   - ``train_pipeline._make_live_push``（训练循环内）：实时推 per-epoch loss（--env_anchor 激活）；
->   - ``metrics_tail``（post-hoc 兜底）：扫 teacher_train.log 推 loss / 自定义 metrics。
+> 分工（引擎 + metrics_tail）：
+>   - 引擎 ``_make_live_push``（训练循环内）：实时推 per-epoch loss（--env_anchor 激活）；
+>   - ``metrics_tail``（post-hoc 兜底）：扫引擎 redirect 出的 ``runs/teacher/train.log``
+>     （step 2 已软拷贝到旧 ``meta/teacher_train.log``，兼容此路径）推 loss / 自定义 metrics。
 > 两者互补：live push 失败时 metrics_tail 兜底。metrics_template 空 → 走默认 loss。
 
 ```bash

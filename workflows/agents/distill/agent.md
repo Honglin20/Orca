@@ -1,5 +1,5 @@
 ---
-description: kd-nas 串行版 distill（SPEC §6.8）：单 student KD 蒸馏。顺序：tune_latency（产 accepted_cfg + latency）→ FAIL_latency 分支跳训练 → distill 训练（--kd_config recipe 必传否则 KD 名存实亡）→ eval 取精度。catch 协议：训练/eval rc≠0 → status=FAIL_train，agent 退 0（不 workflow_failed）→ decide 落账 continue。tune_status↔status 映射严格。
+description: kd-nas 串行版 distill：单 student KD 蒸馏。顺序：tune_latency（产 accepted_cfg + latency）→ FAIL_latency 分支跳训练 → distill 训练（read→patch run_config.yaml kd_config；唯一真相源）→ eval 取精度。catch 协议：训练/eval rc≠0 → status=FAIL_train，agent 退 0（不 workflow_failed）→ decide 落账 continue。tune_status↔status 映射严格。
 tools: [bash, read, write, edit, glob, grep]
 ---
 # distill
@@ -8,16 +8,17 @@ tools: [bash, read, write, edit, glob, grep]
 
 **对单个 student 跑 KD 蒸馏 + eval，emit 结构化 output**（status=SUCCESS/FAIL_latency/FAIL_train）。
 
-**顺序**（SPEC-REVIEW B3 修正，accepted_cfg 不再鸡生蛋）：
+**顺序**：
 1. ``tune_latency`` → 产 accepted_cfg + latency + met_latency；
 2. **FAIL_latency 分支**：``TUNE_STATUS=FAIL_latency`` → **跳训练省 GPU** → status=FAIL_latency，agent 退 0；
-3. **distill 训练**（ACCEPTED 才跑）：``--kd_config`` 必传（N1：否则 KD 名存实亡）+ ``--out_ckpt`` + ``--env_anchor``；
-4. **eval 取精度**：``--mode eval`` 全 flag（N18）→ ``STUDENT_ACCURACY`` / ``MET_ACCURACY``。
+3. **distill 训练**（ACCEPTED 才跑）：AST 决定 kd_config（mse+ofd / mse-only）→ **read→patch
+   run_config.yaml 的 kd_config 字段（E4：唯一真相源；禁 inline --kd_config）** + inline flag 调引擎；
+4. **eval 取精度**：``--mode eval`` 全 flag（student_model_path / build_cfg / student_ckpt inline）→ ``STUDENT_ACCURACY`` / ``MET_ACCURACY``。
 
 **严禁**：
 - ❌ 跳 tune_latency 直接 distill（accepted_cfg 是 distill 的 build_cfg 来源，鸡生蛋）；
-- ❌ distill 训练缺 ``--kd_config``（必传 SPEC §6.8 kd_losses+weights+ema recipe，N1）；
-- ❌ eval 缺 ``--student_ckpt / --out_ckpt / --accuracy_baseline / --accuracy_baseline_kind``（argparse required，N18）；
+- ❌ distill 训练传 inline ``--kd_config``（E4：唯一真相源是 run_config.yaml；每轮 read→patch kd_config）；
+- ❌ eval 缺 ``--student_ckpt / --accuracy_baseline / --accuracy_baseline_kind``（argparse required）；
 - ❌ FAIL_latency 时还跑训练（白烧 GPU）；
 - ❌ 静默吞错（训练 rc≠0 → catch 协议 FAIL_train，agent 退 0；agent 自身崩 → workflow_failed）；
 - ❌ 编造 latency / accuracy（必从 stdout KEY 解析）。
@@ -171,15 +172,20 @@ print(json.dumps({
   exit 0
 fi
 
-# ─── step 3: distill 训练（ACCEPTED 才跑；--kd_config recipe 必传）────────────────────
-# kd_config recipe（SPEC §6.8）：mse+ofd + EMA（ofd 仅在 student 暴露 feature_hook_names 时启用）。
+# ─── step 3: distill 训练（ACCEPTED 才跑；E4：kd_config 写 run_config.yaml，唯一真相源）──
+# kd_config recipe：mse+ofd + EMA（ofd 仅在 student 暴露 feature_hook_names 时启用）。
 # AST 判定 student 是否暴露 feature_hook_names()（不用 grep '^def'——class method 缩进，^def 漏判）。
 # 无 hook → KD_CONFIG 退 mse-only（不崩）；有 hook → mse+ofd（compose 守卫 §1.2(1) fail-loud 兜底）。
+# ★ E4：distill 每轮 read→patch run_config.yaml 的 kd_config 字段（不传 inline --kd_config；
+#   CLI > yaml 否则 yaml 形同虚设——禁用 inline 才能让 yaml 成唯一真相源）。
 # catch 协议（SPEC §15）：rc≠0 → status=FAIL_train, tune_status=ACCEPTED，agent 退 0。
 TRAIN_PIPELINE="{{ gen_train_script.output.train_pipeline_path }}"
 TEACHER_CACHE="{{ train_teacher.output.teacher_cache }}"
 CKPTS_DIR="{{ setup.output.checkpoints_dir }}"
 CKPT_PATH="${CKPTS_DIR}r${ROUND}_student.pt"
+PER_RUN="{{ setup.output.per_run_artifacts_dir }}"
+EXP="r${ROUND}_student"   # = variant_id = experiment
+RUN_CONFIG="{{ gen_train_script.output.run_config_path }}"
 HAS_HOOK=$(python3 -c '
 import ast,sys
 t=ast.parse(open(sys.argv[1]).read())
@@ -190,24 +196,36 @@ if [ "$HAS_HOOK" = "True" ]; then
 else
   KD_CONFIG='{"kd_losses":["mse"],"weights":{"mse":1.0},"ema":true}'
 fi
-DISTILL_LOG="${KD_ARTIFACTS_DIR}logs/r${ROUND}_distill.log"
-
-OUT="$(ORCA_KD_SCRIPTS_DIR="$KD_SCRIPTS_DIR" python3 "$TRAIN_PIPELINE" \
-  --mode distill \
+# E4：read→patch run_config.yaml 的 kd_config 字段（保留 epochs/lr/eval_every/patience/...）。
+python3 -c '
+import json, sys, yaml
+path, kd_cfg = sys.argv[1], sys.argv[2]
+with open(path, "r", encoding="utf-8") as f:
+    cfg = yaml.safe_load(f) or {}
+cfg["kd_config"] = json.loads(kd_cfg)
+with open(path, "w", encoding="utf-8") as f:
+    yaml.safe_dump(cfg, f, sort_keys=False)
+' "$RUN_CONFIG" "$KD_CONFIG"
+# ★ E13/M1：redirect stdout → runs/<exp>/train.log（引擎只 print stdout；调用方 redirect）。
+mkdir -p "$PER_RUN/runs/$EXP"
+ORCA_KD_SCRIPTS_DIR="$KD_SCRIPTS_DIR" python3 "$TRAIN_PIPELINE" \
+  --mode distill --config "$RUN_CONFIG" \
+  --artifacts_dir "$PER_RUN" --experiment "$EXP" \
   --student_model_path "$STUDENT" \
   --build_fn build_model --build_cfg "$ACCEPTED_CFG" \
   --teacher_cache "$TEACHER_CACHE" \
-  --kd_config "$KD_CONFIG" \
-  --variant_id "r${ROUND}_student" \
+  --variant_id "$EXP" \
   --epochs "{{ inputs.full_epochs }}" \
   --out_ckpt "$CKPT_PATH" \
   --device "{{ setup.output.device }}" --seed "{{ inputs.seed }}" \
   --project_root "{{ setup.output.project_root }}" \
-  --env_anchor "{{ setup.output.per_run_artifacts_dir }}" 2>&1)"
+  --env_anchor "$PER_RUN" \
+  > "$PER_RUN/runs/$EXP/train.log" 2>&1
 RC=$?
+OUT="$(tail -c 4000 "$PER_RUN/runs/$EXP/train.log" 2>/dev/null || true)"
 echo "$OUT"
-# distill 训练 stdout 落盘（metrics_tail post-hoc 兜底 _make_live_push 用）
-echo "$OUT" > "$DISTILL_LOG"
+# DISTILL_LOG 兼容（post-hoc 兜底路径；保留旧名以减少 viz 路径 churn）
+DISTILL_LOG="$PER_RUN/runs/$EXP/train.log"
 if [ $RC -ne 0 ]; then
   FAIL_TAIL="$(echo "$OUT" | tail -c 300)"
   python3 -c '
@@ -228,17 +246,17 @@ fi
 [ -f "$CKPT_PATH" ] || { echo "FAIL: distill rc=0 但 ckpt 未产：$CKPT_PATH" >&2; exit 2; }
 echo "PARSED step3: CKPT_PATH=$CKPT_PATH"
 
-# ─── step 4: eval 取精度（全 flag：--student_ckpt --out_ckpt --accuracy_baseline --accuracy_baseline_kind）──
+# ─── step 4: eval 取精度（inline flag：student_model_path / build_cfg / student_ckpt inline）──
 EVAL_OUT="$(python3 "$TRAIN_PIPELINE" \
-  --mode eval \
+  --mode eval --artifacts_dir "$PER_RUN" --experiment "$EXP" \
   --student_model_path "$STUDENT" \
   --build_fn build_model --build_cfg "$ACCEPTED_CFG" \
-  --student_ckpt "$CKPT_PATH" --out_ckpt "$CKPT_PATH" \
+  --student_ckpt "$CKPT_PATH" \
   --accuracy_baseline "{{ inputs.accuracy_baseline }}" \
   --accuracy_baseline_kind "{{ inputs.accuracy_baseline_kind }}" \
   --device "{{ setup.output.device }}" --seed "{{ inputs.seed }}" \
   --project_root "{{ setup.output.project_root }}" \
-  --env_anchor "{{ setup.output.per_run_artifacts_dir }}" 2>&1)"
+  --env_anchor "$PER_RUN" 2>&1)"
 EVAL_RC=$?
 echo "$EVAL_OUT"
 if [ $EVAL_RC -ne 0 ]; then

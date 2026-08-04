@@ -104,24 +104,32 @@ def _run_eval(
     project_root: str,
     per_run_artifacts_dir: str,
 ) -> float:
-    """跑 train_pipeline --mode eval（复用 champion ckpt，N10 不重训）；返回 accuracy。"""
+    """跑固定引擎 train_pipeline --mode eval（champion 真相源 inline：student_model_path /
+    build_cfg / student_ckpt 三字段强制 inline，禁 yaml——末轮 distill 可能覆盖 yaml）。
+
+    Phase 2：引擎入口 + inline flag + --artifacts_dir per-run；eval 是 read-only（不写 ckpt）。
+    """
     if not champion["ckpt"]:
         raise ValueError("champion ckpt 为空（无法 eval；champion 应是 SUCCESS&met_* student）")
-    out = subprocess.run(
-        [
-            sys.executable, train_pipeline_path,
-            "--mode", "eval",
-            "--student_model_path", champion["student_path"],
-            "--build_fn", "build_model", "--build_cfg", champion["accepted_cfg"],
-            "--student_ckpt", champion["ckpt"], "--out_ckpt", champion["ckpt"],
-            "--accuracy_baseline", str(accuracy_baseline),
-            "--accuracy_baseline_kind", str(accuracy_baseline_kind),
-            "--device", str(device), "--seed", str(seed),
-            "--project_root", str(project_root),
-            "--env_anchor", str(per_run_artifacts_dir),
-        ],
-        capture_output=True, text=True,
-    )
+    cmd = [
+        sys.executable, train_pipeline_path,
+        "--mode", "eval",
+        # ★ 矩阵第 5 行：champion 三字段强制 inline（yaml 可能被末轮 distill 覆盖）
+        "--student_model_path", champion["student_path"],
+        "--build_fn", "build_model", "--build_cfg", champion["accepted_cfg"],
+        "--student_ckpt", champion["ckpt"],
+        "--accuracy_baseline", str(accuracy_baseline),
+        "--accuracy_baseline_kind", str(accuracy_baseline_kind),
+        "--device", str(device), "--seed", str(seed),
+        "--project_root", str(project_root),
+        "--env_anchor", str(per_run_artifacts_dir),
+        "--artifacts_dir", str(per_run_artifacts_dir),
+        "--experiment", "finalize_champion",
+    ]
+    env = os.environ.copy()
+    kd_dir = os.path.dirname(os.path.abspath(train_pipeline_path))
+    env["ORCA_KD_SCRIPTS_DIR"] = kd_dir
+    out = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if out.returncode != 0:
         raise RuntimeError(
             f"champion eval rc={out.returncode}（champion ckpt 损坏？eval 路径异常？）\n"

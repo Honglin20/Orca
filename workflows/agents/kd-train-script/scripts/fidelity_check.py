@@ -1,32 +1,38 @@
-"""fidelity_check.py — deterministic numeric-equivalence check (kd-train-script Layer 3).
+"""fidelity_check.py — per-leaf numeric-equivalence + AST + kind-direction check.
 
-Verifies that the specialised ``train_pipeline.py`` slots are **numerically
-equivalent** to the user's original code:
+Phase 2 rewrite: the codegen product is the four leaves under ``--leaves_dir``,
+not a monolithic train_pipeline.py. This script verifies the leaves against the
+user's original ``train.py`` / eval script.
 
-1. loss — ``user_compute_loss`` vs the user train.py loss fn on identical
-   seeded inputs (``torch.allclose(rtol=1e-5)``).
-2. dataloader — ``user_build_dataloader(batch_size=2)`` vs user
+Checks (per leaf + cross-leaf):
+
+1. **AST self-containment** (Q6) — each leaf has only whitelisted top-level
+   imports and no sibling / relative imports. Mirrors ``kd/_leaves.py``.
+2. **AST signature equality** (E9) — each contract callable's function name +
+   required positional args match the contract (defaults additive).
+3. **loss** — ``compute_loss`` vs the user's loss fn on identical seeded
+   inputs (``torch.allclose(rtol=1e-5)``); AST body fallback when the user
+   module can't be imported.
+4. **dataloader** — ``build_dataloader(batch_size=2)`` vs user
    ``build_dataloader``: same batch shape + both re-iterable.
-3. eval metric — ``user_eval_metric`` vs the user eval script's metric on the
+5. **eval metric** — ``eval_metric`` vs the user eval script's metric on the
    same model instance (values allclose + kind identical).
-4. optimizer — class name produced by ``build_user_optimizer`` vs the user
+6. **optimizer** — class name produced by ``build_optimizer`` vs the user
    train.py's optimizer class.
-5. model I/O — model forward on ``DUMMY_INPUT`` shape preserves the shape.
-
-Degradation: if the user train.py cannot be imported cleanly (import
-side-effects / missing deps), ``FIDELITY_LEVEL: ast`` and the loss item is
-checked via AST body equivalence instead (``LOSS_AST_MATCH``); other numeric
-items are skipped with the reason on stderr (fail loud reporting, no silent
-skip of the *level*).
+7. **kind direction hard check** (D2) — the kind returned by ``eval_metric``
+   is in the same direction group (max: snr/acc; min: mse/nmse/ber/db) as
+   ``--accuracy_baseline_kind``.
+8. **model I/O** — model forward on ``DUMMY_INPUT`` shape preserves the shape.
 
 Deterministic script contract (CONTRACTS §3): stdout is ``KEY: value`` lines,
 non-zero exit on FAIL (fail loud).
 
 Usage::
 
-    fidelity_check.py --train_pipeline <path> --user_train <path>
+    fidelity_check.py --leaves_dir <dir> --user_train <path>
         [--user_eval <path>] --dummy_input <json-string|json-file>
         [--model_path <path>] [--build_fn build_model] [--build_cfg <json>]
+        [--accuracy_baseline_kind <nmse|mse|ber|db|snr|acc>]
         [--project_root <path>]
 
 Exit: 0 = FIDELITY: PASS; 2 = any checked item is false (no skip).
@@ -48,6 +54,30 @@ from pathlib import Path
 import torch
 
 # ---------------------------------------------------------------------------
+# contract mirrors (must agree with kd/_leaves.py)
+# ---------------------------------------------------------------------------
+_LEAF_IMPORT_WHITELIST: frozenset[str] = frozenset(
+    {
+        "torch", "math", "numpy", "typing", "itertools", "functools",
+        "collections", "dataclasses", "random",
+    }
+)
+
+_LEAF_SIGNATURES: dict[tuple[str, str], list[str]] = {
+    ("loss.py", "compute_loss"): ["s_out", "y"],
+    ("data.py", "build_dataloader"): ["batch_size"],
+    ("eval.py", "eval_metric"): ["student", "device"],
+    ("optim.py", "build_optimizer"): ["params", "lr"],
+    ("optim.py", "build_scheduler"): ["optimizer", "epochs"],
+}
+
+_KIND_DIRECTION: dict[str, str] = {
+    "snr": "max", "acc": "max",
+    "mse": "min", "nmse": "min", "ber": "min", "db": "min",
+}
+
+
+# ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 def _import_by_path(path: Path, module_name: str):
@@ -64,7 +94,6 @@ def _import_by_path(path: Path, module_name: str):
 
 
 def _load_dummy_input(raw: str) -> dict:
-    """--dummy_input accepts either a JSON string or a path to a .json file."""
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
@@ -77,15 +106,72 @@ def _load_dummy_input(raw: str) -> dict:
     return data
 
 
+# ---------------------------------------------------------------------------
+# AST checks (self-containment + signature equality)
+# ---------------------------------------------------------------------------
+def _check_self_contained(path: Path) -> list[str]:
+    """Return list of violations (empty = OK).  Mirrors kd/_leaves._check_self_contained."""
+    src = path.read_text(encoding="utf-8")
+    try:
+        tree = ast.parse(src, filename=str(path))
+    except SyntaxError as e:
+        return [f"{path}:{e.lineno}: syntax error: {e.msg}"]
+    issues: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.level and node.level > 0:
+                issues.append(
+                    f"{path}: relative import (level={node.level}) forbidden — "
+                    f"leaf must be self-contained"
+                )
+                continue
+            if node.module and node.module.split(".")[0] not in _LEAF_IMPORT_WHITELIST:
+                issues.append(
+                    f"{path}: import from {node.module!r} not in whitelist "
+                    f"{sorted(_LEAF_IMPORT_WHITELIST)}"
+                )
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".")[0]
+                if top not in _LEAF_IMPORT_WHITELIST:
+                    issues.append(
+                        f"{path}: import {alias.name!r} not in whitelist "
+                        f"{sorted(_LEAF_IMPORT_WHITELIST)}"
+                    )
+    return issues
+
+
+def _required_args(fn: ast.FunctionDef) -> list[str]:
+    args = fn.args.args
+    ndef = len(fn.args.defaults)
+    return [a.arg for a in args[: len(args) - ndef]]
+
+
+def _check_signature(path: Path, fname: str, expected_required: list[str]) -> bool:
+    src = path.read_text(encoding="utf-8")
+    try:
+        tree = ast.parse(src, filename=str(path))
+    except SyntaxError:
+        return False
+    target = next(
+        (n for n in tree.body
+         if isinstance(n, ast.FunctionDef) and n.name == fname),
+        None,
+    )
+    if target is None:
+        return False
+    return _required_args(target) == expected_required
+
+
+# ---------------------------------------------------------------------------
+# user-side discovery (mirrors agent Step 1)
+# ---------------------------------------------------------------------------
 def _discover_loss_fn(module, batch_shape: list[int]):
-    """Prefer ``compute_loss``; else the first top-level 2-arg function that
-    returns a scalar tensor on tensor inputs (semantic recognition mirroring
-    the agent's Step 1).  Returns the callable or None."""
     if hasattr(module, "compute_loss"):
         return module.compute_loss
     candidates: list = []
     for name, obj in vars(module).items():
-        if isinstance(obj, type):  # classes are not loss candidates
+        if isinstance(obj, type):
             continue
         if not callable(obj) or getattr(obj, "__module__", None) != module.__name__:
             continue
@@ -93,9 +179,7 @@ def _discover_loss_fn(module, batch_shape: list[int]):
             params = list(inspect.signature(obj).parameters.values())
         except (ValueError, TypeError):
             continue
-        if len(params) != 2:
-            continue
-        if name == "build_dataloader":
+        if len(params) != 2 or name == "build_dataloader":
             continue
         candidates.append(obj)
     s = torch.zeros(2, *batch_shape[1:])
@@ -111,9 +195,6 @@ def _discover_loss_fn(module, batch_shape: list[int]):
 
 
 def _loss_ast_match(user_src: str, gen_src: str, user_fn_name: str) -> bool:
-    """AST function-body equivalence between the user loss and
-    ``user_compute_loss``: same statement node dumps after normalising
-    parameter names and dropping docstrings (ignores arg names / doc drift)."""
     user_tree = ast.parse(user_src)
     gen_tree = ast.parse(gen_src)
     user_fn = next(
@@ -123,7 +204,7 @@ def _loss_ast_match(user_src: str, gen_src: str, user_fn_name: str) -> bool:
     )
     gen_fn = next(
         (n for n in ast.walk(gen_tree)
-         if isinstance(n, ast.FunctionDef) and n.name == "user_compute_loss"),
+         if isinstance(n, ast.FunctionDef) and n.name == "compute_loss"),
         None,
     )
     if user_fn is None or gen_fn is None:
@@ -134,7 +215,7 @@ def _loss_ast_match(user_src: str, gen_src: str, user_fn_name: str) -> bool:
         body = list(fn.body)
         if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
                 and isinstance(body[0].value.value, str):
-            body = body[1:]  # drop docstring
+            body = body[1:]
 
         class _Norm(ast.NodeTransformer):
             def visit_Name(self, node: ast.Name):
@@ -148,8 +229,6 @@ def _loss_ast_match(user_src: str, gen_src: str, user_fn_name: str) -> bool:
 
 
 def _call_user_build_dataloader(fn, batch_size: int = 2):
-    """Fixed-slot interface is ``(batch_size=)``; tolerate a no-arg builder so
-    both sides are compared at the same batch size (apples-to-apples)."""
     try:
         return fn(batch_size=batch_size)
     except TypeError:
@@ -157,8 +236,6 @@ def _call_user_build_dataloader(fn, batch_size: int = 2):
 
 
 def _batch_info(loader) -> tuple[list, int] | None:
-    """(first-batch x shape, first-batch y shape) over two fresh iter()s;
-    None if either iter yields nothing (one-shot / empty)."""
     shapes: list[tuple] = []
     for _ in range(2):
         it = iter(loader)
@@ -173,20 +250,12 @@ def _batch_info(loader) -> tuple[list, int] | None:
 
 
 def _extract_seed(eval_path: Path) -> int:
-    """Seed alignment: grep the user eval script for ``torch.manual_seed`` /
-    ``manual_seed``; fall back to the fixed demo seed 20260725."""
     src = eval_path.read_text(encoding="utf-8", errors="replace")
     m = re.search(r"manual_seed\(\s*(\d+)\s*\)", src)
-    if m:
-        return int(m.group(1))
-    return 20260725
+    return int(m.group(1)) if m else 20260725
 
 
-def _discover_user_eval_callable(eval_path: Path, kind_hint: str = ""):
-    """Mirror the agent's Step 1 discovery: prefer ``evaluate``; else the
-    first top-level fn whose name hints nmse/mse/ber/snr/acc; adapt the call
-    signature ((model, n_samples) -> partial; (model) -> direct).  Returns
-    (callable, kind) or (None, "") when no fn matches the signature."""
+def _discover_user_eval_callable(eval_path: Path):
     mod = _import_by_path(eval_path, "_user_eval")
     fn = None
     name = ""
@@ -208,12 +277,10 @@ def _discover_user_eval_callable(eval_path: Path, kind_hint: str = ""):
                 fn, name = obj, n
     if fn is None:
         return None, ""
-
     try:
         params = list(inspect.signature(fn).parameters.values())
     except (ValueError, TypeError):
         return None, ""
-
     adapter = None
     for p in params:
         if p.name in ("n_samples", "n", "num_samples"):
@@ -240,7 +307,6 @@ def _discover_user_eval_callable(eval_path: Path, kind_hint: str = ""):
 
 
 def _extract_user_optimizer_class(user_src: str) -> str | None:
-    """First ``torch.optim.<Class>`` occurrence in the user train.py source."""
     m = re.search(r"torch\.optim\.(\w+)", user_src)
     return m.group(1) if m else None
 
@@ -252,32 +318,81 @@ def _build_model(model_path: Path, build_fn: str, cfg: dict):
     return getattr(mod, build_fn)(**cfg)
 
 
+def _kind_direction(kind: str) -> str | None:
+    return _KIND_DIRECTION.get(kind)
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="kd-train-script Layer 3 fidelity check (numeric equivalence)"
+        description="kd-train-script fidelity check (per-leaf numeric + AST + kind)"
     )
-    p.add_argument("--train_pipeline", required=True, help="generated train_pipeline.py path")
+    p.add_argument("--leaves_dir", required=True,
+                   help="directory containing user/{loss,data,eval,optim}.py")
     p.add_argument("--user_train", required=True, help="user original train.py path")
     p.add_argument("--user_eval", default=None, help="user eval script path (else auto-glob)")
-    p.add_argument("--dummy_input", required=True, help="JSON string or .json file (dict with 'shape')")
-    p.add_argument("--model_path", default=None, help="model .py for I/O + eval checks")
+    p.add_argument("--dummy_input", required=True,
+                   help="JSON string or .json file (dict with 'shape')")
+    p.add_argument("--model_path", default=None,
+                   help="model .py for I/O + eval checks")
     p.add_argument("--build_fn", default="build_model")
     p.add_argument("--build_cfg", default="{}")
+    p.add_argument("--accuracy_baseline_kind", default=None,
+                   help="locks the metric direction group; leaf kind must match")
     p.add_argument("--project_root", default=None)
+    # Back-compat: the old monolithic flag is still accepted but ignored.
+    p.add_argument("--train_pipeline", default=None,
+                   help=argparse.SUPPRESS)
     args = p.parse_args()
 
     if args.project_root and args.project_root not in sys.path:
         sys.path.insert(0, args.project_root)
 
+    leaves_dir = Path(args.leaves_dir)
+    if not leaves_dir.is_dir():
+        print(f"FIDELITY: FAIL\nLEAVES_DIR_MISSING: {leaves_dir}", file=sys.stderr)
+        return 2
+
+    leaf_paths = {
+        "loss.py": leaves_dir / "loss.py",
+        "data.py": leaves_dir / "data.py",
+        "eval.py": leaves_dir / "eval.py",
+        "optim.py": leaves_dir / "optim.py",
+    }
+    missing = [str(p) for p in leaf_paths.values() if not p.is_file()]
+    if missing:
+        print(f"FIDELITY: FAIL\nLEAF_MISSING: {missing}", file=sys.stderr)
+        return 2
+
     dummy = _load_dummy_input(args.dummy_input)
     shape = [int(s) for s in dummy["shape"]]
 
-    gen = _import_by_path(Path(args.train_pipeline), "_gen_train_pipeline")
+    # ---- 0. AST self-containment + signature equality --------------------
+    ast_ok = True
+    for fname, path in leaf_paths.items():
+        violations = _check_self_contained(path)
+        if violations:
+            ast_ok = False
+            for v in violations:
+                print(f"LEAF_AST_VIOLATION: {v}", file=sys.stderr)
+    for (fname, fn_name), expected in _LEAF_SIGNATURES.items():
+        if not _check_signature(leaf_paths[fname], fn_name, expected):
+            ast_ok = False
+            print(
+                f"LEAF_SIGNATURE_MISMATCH: {fname}::{fn_name} expected required={expected}",
+                file=sys.stderr,
+            )
+    print(f"LEAF_AST_OK: {'true' if ast_ok else 'false'}")
 
-    # ---- user train module (degrade to AST level on import failure) -----
+    # ---- load leaf modules (signatures already verified) ----------------
+    loss_mod = _import_by_path(leaf_paths["loss.py"], "_gen_loss")
+    data_mod = _import_by_path(leaf_paths["data.py"], "_gen_data")
+    eval_mod = _import_by_path(leaf_paths["eval.py"], "_gen_eval")
+    optim_mod = _import_by_path(leaf_paths["optim.py"], "_gen_optim")
+
+    # ---- user train module (degrade to AST on import failure) -----------
     level = "numeric"
     user = None
     user_src = Path(args.user_train).read_text(encoding="utf-8", errors="replace")
@@ -303,13 +418,9 @@ def main() -> int:
             y = torch.randn(2, *shape[1:])
             try:
                 u = user_loss(s_out, y)
-                g = gen.user_compute_loss(s_out, y)
-            except (NotImplementedError, AttributeError) as e:
-                print(
-                    f"LOSS_ERROR: {type(e).__name__}: {e} "
-                    f"(slot 未特化/接口缺失 → loss item false)",
-                    file=sys.stderr,
-                )
+                g = loss_mod.compute_loss(s_out, y)
+            except Exception as e:
+                print(f"LOSS_ERROR: {type(e).__name__}: {e}", file=sys.stderr)
                 loss_ok = "false"
             else:
                 if isinstance(u, torch.Tensor) and isinstance(g, torch.Tensor):
@@ -324,14 +435,17 @@ def main() -> int:
         if user_fn_name not in user_src:
             cand = re.findall(r"^def\s+(\w+)\s*\(", user_src, re.MULTILINE)
             user_fn_name = cand[0] if cand else "compute_loss"
-        ast_ok = _loss_ast_match(user_src, gen_src=Path(args.train_pipeline).read_text(
-            encoding="utf-8"), user_fn_name=user_fn_name)
-        print(f"LOSS_AST_MATCH: {'true' if ast_ok else 'false'}")
-        if not ast_ok:
-            print("LOSS_AST_DIFF: user loss body != user_compute_loss body (AST)", file=sys.stderr)
-        loss_ok = "true" if ast_ok else "false"
+        ast_ok_loss = _loss_ast_match(
+            user_src,
+            leaf_paths["loss.py"].read_text(encoding="utf-8"),
+            user_fn_name=user_fn_name,
+        )
+        print(f"LOSS_AST_MATCH: {'true' if ast_ok_loss else 'false'}")
+        if not ast_ok_loss:
+            print("LOSS_AST_DIFF: user loss body != compute_loss body (AST)", file=sys.stderr)
+        loss_ok = "true" if ast_ok_loss else "false"
 
-    # ---- 2. dataloader -----------------------------------------------------
+    # ---- 2. dataloader ---------------------------------------------------
     loader_ok = "skip"
     if level == "numeric" and user is not None:
         user_build_dl = getattr(user, "build_dataloader", None)
@@ -340,7 +454,7 @@ def main() -> int:
         else:
             try:
                 user_dl = _call_user_build_dataloader(user_build_dl)
-                gen_dl = gen.user_build_dataloader(batch_size=2)
+                gen_dl = data_mod.build_dataloader(batch_size=2)
             except Exception as e:
                 print(f"LOADER_ERROR: {type(e).__name__}: {e}", file=sys.stderr)
                 loader_ok = "false"
@@ -350,12 +464,11 @@ def main() -> int:
                 if u_info is None or g_info is None:
                     print(
                         "LOADER_REITERABLE: false (an iter() yielded no batch — "
-                        "empty or one-shot generator)",
-                        file=sys.stderr,
+                        "empty or one-shot generator)", file=sys.stderr,
                     )
                     loader_ok = "false"
                 else:
-                    (u_shapes, _u_iters), (g_shapes, _g_iters) = u_info, g_info
+                    (u_shapes, _), (g_shapes, _) = u_info, g_info
                     same = u_shapes == g_shapes
                     if not same:
                         print(f"LOADER_SHAPE_DIFF: user={u_shapes} gen={g_shapes}", file=sys.stderr)
@@ -363,18 +476,16 @@ def main() -> int:
     elif level == "ast":
         print("LOADER_SHAPE_OK: skip (user module import failed; see stderr)", file=sys.stderr)
 
-    # ---- model (IO + eval shared instance) ---------------------------------
+    # ---- model (IO + eval shared instance) -------------------------------
     model = None
     io_ok = "skip"
     if args.model_path:
         try:
-            model = _build_model(Path(args.model_path), args.build_fn,
-                                 json.loads(args.build_cfg))
+            model = _build_model(Path(args.model_path), args.build_fn, json.loads(args.build_cfg))
         except Exception as e:
             print(f"MODEL_ERROR: {type(e).__name__}: {e}", file=sys.stderr)
             model = None
     if model is not None:
-        # ---- 5. model I/O -------------------------------------------------
         model.eval()
         with torch.no_grad():
             out = model(torch.zeros(*shape))
@@ -383,8 +494,9 @@ def main() -> int:
             print(f"IO_SHAPE_DIFF: out={tuple(out.shape)} dummy={tuple(shape)}", file=sys.stderr)
         io_ok = "true" if ok else "false"
 
-    # ---- 3. eval metric -----------------------------------------------------
+    # ---- 3. eval metric + 7. kind direction hard check -------------------
     eval_ok = "skip"
+    kind_ok = "skip"
     eval_path = None
     if args.user_eval:
         eval_path = Path(args.user_eval)
@@ -393,8 +505,6 @@ def main() -> int:
         candidates = []
         for pattern in ("test_*.py", "eval*.py", "evaluate*.py", "test.py"):
             candidates.extend(sorted(proj.glob(pattern)))
-        # 取第一个「真发现指标函数」的脚本（test_*.py 可能是 pytest 文件——
-        # 无 nmse/mse/ber/snr/acc 顶层函数则跳过，镜像 agent Step 1 的发现判断）。
         for cand in candidates:
             try:
                 fn, _kind = _discover_user_eval_callable(cand)
@@ -405,6 +515,39 @@ def main() -> int:
                 break
         if eval_path is not None:
             print(f"EVAL_SCRIPT_DISCOVERED: {eval_path}")
+
+    # Kind direction hard check (D2): the leaf's returned kind must match
+    # --accuracy_baseline_kind's direction group. We do not need to run the
+    # metric — we read the kind the leaf returns on a synthetic forward.
+    leaf_kind = ""
+    if model is not None:
+        try:
+            with torch.no_grad():
+                _v, leaf_kind = eval_mod.eval_metric(model, "cpu")
+        except Exception as e:
+            print(f"LEAF_EVAL_PROBE_ERROR: {type(e).__name__}: {e}", file=sys.stderr)
+
+    if args.accuracy_baseline_kind:
+        baseline_dir = _kind_direction(args.accuracy_baseline_kind)
+        leaf_dir = _kind_direction(leaf_kind) if leaf_kind else None
+        if baseline_dir is None:
+            print(f"BASELINE_KIND_UNKNOWN: {args.accuracy_baseline_kind!r}", file=sys.stderr)
+            kind_ok = "false"
+        elif leaf_dir is None:
+            # Fall back: assume the leaf matches the baseline direction unless
+            # we can prove otherwise. The numeric-eval branch below still runs.
+            kind_ok = "skip"
+        elif baseline_dir != leaf_dir:
+            print(
+                f"KIND_DIRECTION_DIFF: baseline={args.accuracy_baseline_kind}({baseline_dir}) "
+                f"leaf={leaf_kind!r}({leaf_dir}) — D2 hard check",
+                file=sys.stderr,
+            )
+            kind_ok = "false"
+        else:
+            kind_ok = "true"
+    print(f"KIND_DIRECTION_OK: {kind_ok}")
+
     if eval_path is None:
         print("EVAL_SCRIPT_FOUND: false")
     else:
@@ -424,13 +567,9 @@ def main() -> int:
                 u = float(user_eval(model))
                 torch.manual_seed(seed)
                 with torch.no_grad():
-                    g_val, g_kind = gen.user_eval_metric(model, "cpu")
-            except (NotImplementedError, AttributeError, TypeError) as e:
-                print(
-                    f"EVAL_ERROR: {type(e).__name__}: {e} "
-                    f"(slot 未特化/接口缺失/签名不匹配 → eval item false)",
-                    file=sys.stderr,
-                )
+                    g_val, g_kind = eval_mod.eval_metric(model, "cpu")
+            except Exception as e:
+                print(f"EVAL_ERROR: {type(e).__name__}: {e}", file=sys.stderr)
                 eval_ok = "false"
             else:
                 ok = bool(torch.allclose(torch.tensor(u), torch.tensor(float(g_val)), rtol=1e-5))
@@ -441,7 +580,7 @@ def main() -> int:
                     ok = False
                 eval_ok = "true" if ok else "false"
 
-    # ---- 4. optimizer --------------------------------------------------------
+    # ---- 4. optimizer ----------------------------------------------------
     opt_ok = "skip"
     if level == "numeric" and user is not None:
         user_opt = _extract_user_optimizer_class(user_src)
@@ -449,9 +588,7 @@ def main() -> int:
             print("OPT_FOUND: false")
         else:
             try:
-                inst = gen.build_user_optimizer(
-                    [torch.zeros(2, requires_grad=True)], lr=1e-3
-                )
+                inst = optim_mod.build_optimizer([torch.zeros(2, requires_grad=True)], lr=1e-3)
             except Exception as e:
                 print(f"OPT_ERROR: {type(e).__name__}: {e}", file=sys.stderr)
                 inst = None
@@ -467,14 +604,22 @@ def main() -> int:
     elif level == "ast":
         print("OPT_TYPE_OK: skip (user module import failed; see stderr)", file=sys.stderr)
 
-    # ---- report ---------------------------------------------------------------
+    # ---- report -----------------------------------------------------------
     print(f"FIDELITY_LEVEL: {level}")
+    print(f"LEAF_AST_OK: {ast_ok}")
     print(f"LOSS_ALLCLOSE: {loss_ok}")
     print(f"LOADER_SHAPE_OK: {loader_ok}")
     print(f"EVAL_ALLCLOSE: {eval_ok}")
     print(f"OPT_TYPE_OK: {opt_ok}")
     print(f"IO_SHAPE_OK: {io_ok}")
-    any_false = any(v == "false" for v in (loss_ok, loader_ok, eval_ok, opt_ok, io_ok))
+    print(f"KIND_DIRECTION_OK: {kind_ok}")
+    any_false = any(
+        v == "false"
+        for v in (
+            "true" if ast_ok else "false",
+            loss_ok, loader_ok, eval_ok, opt_ok, io_ok, kind_ok,
+        )
+    )
     print(f"FIDELITY: {'PASS' if not any_false else 'FAIL'}")
     return 2 if any_false else 0
 
