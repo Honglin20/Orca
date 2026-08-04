@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-05] fix(kd-nas): finalize JSON 改 json.dumps 发射——禁手写模板（P6）
+
+修 KD-NAS finalize 节点 e2e 末段 JSON 结构性畸形（缺根级 `}` / depth=1）。根因：finalize inline prompt 用手写 ```` ```json ```` 模板填值发射，agent 易漏逗号/括号；其它节点（distill/decide）早已用 `python3 -c json.dumps` 安全发射，finalize 没遵循。修复 = `workflows/kd-nas.yaml` finalize inline prompt 新增 Step 3 `python3 -c json.dumps({...})` 发射 + viz 解析合并进单 try/except + stderr 显式告警（消除 Step 2/3 双层兜底不对称）；output_schema / Step 1（finalize_kd.py）/ Step 2 viz_kd_stage 调用 / routes / outputs 零改动。tars validate 通过；守门测试 `test_kd_prompt_no_source_narrative.py` 绿；kd-nas 测试套件 169 passed / 2 skipped；code-reviewer 一轮闭环 0 must-fix / 2 nice-to-have 已合并。真实 e2e 终态见 CURRENT.md。Commit: `4cd2428`。详见 [release note](../releases/2026-08-05-kd-nas-finalize-json-dumps-p6.md)。
+
 ## [2026-08-05] fix(exec): opencode events result 取末条消息——中间叙述不再抢 result（P5）
 
 修 engine 核心 result 抽取 bug：opencode events 模式下 `RunAccumulator.events_result_text` 旧逻辑把所有 `agent_message` 串接，`result_extractor._first_balanced_block` 兜底取首个平衡块——KD-NAS flatten agent 中间叙述「input `[1,1,28,28]`」比末条合法 JSON 早出现，被误抓为 result（真实失败 tape `kd-nas-20260805-005130-ac3b11.jsonl` seq 98 复现）。SDD 契约本就声明「agent 最终消息 = JSON result」（sentinel specs），故修法 = `events_result_text` 改取末条（`_last_text`），`result_extractor` 不动（blast radius 最小：只影响 events 模式；claude `result_line` 路径不变）。决定性回归门：真实失败 tape 101 events replay → 抽出 seq 98 合法 JSON object，`"[1,1,28,28]" not in result_text`。tests/exec/ 全绿（440 passed + 1 skipped）+ tests/profiles/ 全绿（89 passed）。真实 e2e `kd-nas-20260805-011253-6c2ebe` flatten 节点 PASS（P5 原失败点直接验证）。Commit: `269e288` + `f9fe02c`（code-reviewer 一轮：YAGNI 简化 `_text_parts` → `_last_text` + text=None 边界测试）。详见 [release note](../releases/2026-08-05-opencode-events-result-last-message-p5.md)。
