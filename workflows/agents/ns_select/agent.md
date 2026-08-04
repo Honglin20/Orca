@@ -1,5 +1,5 @@
 ---
-description: nas-supernet 架构选择 agent（folder-agent，确定性，零 LLM 判断）。运行 ns_search_pipeline 生成的 select_architecture.py 恰好一次——读 search_results.jsonl + target_latency_ms，按「target 下 max-acc；缺则 Pareto knee」策略选架构，stdout 打 JSON。agent 铁律：不许改脚本/不许自己重算/不许复述上游，把脚本 stdout JSON 作为唯一最终回复。$ORCA_ARTIFACTS_DIR 经 Git Bash 展开（env.py:91 注入 + plotter 既有 ORCA_* pattern 证同机制，N1 闭环）。脚本非 0 退出 → 原样上抛 fail loud。output_schema 强制 selected_arch 等 5 字段，路由守卫 selected_arch 未定义 → terminate_select_failed。
+description: nas-supernet 架构选择 agent（folder-agent，确定性，零 LLM 判断）。运行 ns_search_pipeline 生成的 select_architecture.py 恰好一次——读 search_results.jsonl + target_latency_ms，按「target 下 max-acc；缺则 Pareto knee」策略选架构，stdout 打 JSON。agent 铁律：不许改脚本/不许自己重算/不许复述上游，把脚本 stdout JSON 作为唯一最终回复。$ORCA_ARTIFACTS_DIR 经 Git Bash 展开（orca spawn 注入）。脚本非 0 退出 → 原样上抛 fail loud。output_schema 强制 selected_arch 等 5 字段，路由守卫 selected_arch 未定义 → terminate_select_failed。
 tools: [bash]
 ---
 # ns_select
@@ -20,15 +20,14 @@ search_results.jsonl`。**你的工作：运行下面命令恰好一次，把它
 3. 脚本非 0 退出（select_architecture.py 崩 / search_results.jsonl 缺 / 格式错）→ 把脚本
    stderr/stdout 原样上抛，**不要假装完成**。下游路由守卫为「`selected_arch` 真值 **且**
    `pareto_size > 0`」双条件（yaml `ns_select.output.selected_arch and ns_select.output.pareto_size > 0`，
-   不用 `is defined`——它只测键存在，空 dict/null 都过）；不成立 → terminate_select_failed（plan §6）。
+   不用 `is defined`——它只测键存在，空 dict/null 都过）；不成立 → terminate_select_failed。
 4. **不许 edit/write 任何文件**：你的 tools 只有 bash——你没有改脚本的能力，也不应有。
 
 ## 资源锚点（cwd 无关）
 
 `$ORCA_ARTIFACTS_DIR`（orca spawn / env.py:91 注入）= 本 run 的 artifacts 目录。
 `select_architecture.py` 与 `search_results.jsonl` 都在此目录下（由上游节点产出）。
-`$ORCA_ARTIFACTS_DIR` 经 **Git Bash 展开**（不是 cmd.exe——ScriptNode 不展开 `$VAR`，agent Bash
-会，N1 闭环依据：`examples/agents/plotter/agent.md` 既有 `$ORCA_AGENT_RESOURCES` pattern 证同机制）。
+`$ORCA_ARTIFACTS_DIR` 经 **Git Bash 展开**（不是 cmd.exe——ScriptNode 不展开 `$VAR`，agent Bash 会）。
 
 ## 执行（跑这一条命令，然后把 stdout 原样作为你的回复）
 

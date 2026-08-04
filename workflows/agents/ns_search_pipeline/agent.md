@@ -129,7 +129,7 @@ path = f"{d}/file.py"                # 禁：f-string 拼接
 仅在本步开始时读 `$ORCA_AGENT_RESOURCES/references/workflows/measure_latency_script_generation.md`。
 按它为既有 `$ORCA_ARTIFACTS_DIR/supernet.py` 产项目专属 online latency estimator——`latency_estimator.py`。
 
-#### 时延规则（plan §10/B2 — 默认 PyTorch，非 onnx）
+#### 时延规则（默认 PyTorch，非 onnx）
 
 生成 `latency_estimator.py` 时按 `{{ inputs.latency_script_path }}` 是否提供分支：
 
@@ -150,8 +150,6 @@ path = f"{d}/file.py"                # 禁：f-string 拼接
   - dummy_input 构造 = latency_estimator 责任（按 manifest input shape），传给 export 与脚本。
   - IO 张量名 / shape / dtype 不匹配由 `latency_estimator.py` 适配（**禁**改用户脚本）。
   - 调用户脚本 + 解析 stdout 末行 / 返回值得 ms；脚本非 0 退出 → raise / 显式 error。
-
-MNIST E2E 不提供 `{{ inputs.latency_script_path }}` → 走默认 PyTorch latency。
 
 #### Non-Searchable Model Logic（来自 workflow doc）
 
@@ -285,17 +283,17 @@ Handle the response:
   validation，**按协议（read+embed verifier loop）**再调 `workflow-verifier`，embed
   `Fixed: [12], [CROSS-REF-1]` 让它只 re-check 那些。Repeat 直到 `all-pass` → 进 Step 2b。
 
-### Step 2b: Generate select_architecture.py (schema-aware, plan §7.2)
+### Step 2b: Generate select_architecture.py (schema-aware)
 
 > **本 skill 在原 nas-agent 基础上的增量**——下游 `ns_select` folder agent 会以确定性 Bash 调用
-> 此脚本（plan §7.2），禁自己重算选架构逻辑。
+> 此脚本，禁自己重算选架构逻辑。
 
 生成 `$ORCA_ARTIFACTS_DIR/select_architecture.py`，**schema-aware**：它定义 search 结果
 `search_results.jsonl` 的记录 schema（哪些字段是 arch config / acc / latency）+ 项目 metric 方向
 （higher-better / lower-better，从 `search_config.yaml` `objs` 推导）。命名权威：
 `$ORCA_ARTIFACTS_DIR/search_results.jsonl`（与下游 `ns_run_search` 写出 / `ns_select` 读取一致）。
 
-#### CLI 契约（plan §7.2，跨平台）
+#### CLI 契约（跨平台）
 
 ```bash
 python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
@@ -303,7 +301,7 @@ python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
   --search-results "$ORCA_ARTIFACTS_DIR/search_results.jsonl"
 ```
 
-`$ORCA_ARTIFACTS_DIR` 经 Git Bash 展开（plan §7.2 N1）；脚本内部路径用 `pathlib.Path` /
+`$ORCA_ARTIFACTS_DIR` 经 Git Bash 展开；脚本内部路径用 `pathlib.Path` /
 `os.path`（铁律）。`--target-latency-ms` 缺省或 `<=0` 时走 pareto-knee 兜底。
 
 #### stdout 契约（强制单行 JSON，下游 `ns_select` 直接 echo 作唯一输出）
@@ -324,7 +322,7 @@ python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
 > ns_select.output.pareto_size > 0`；不用 `is defined`——它只测键存在，空 dict/null 都过），据此空 dict
 > / `pareto_size=0` 分支到 `terminate_select_failed`，不与成功路径混。
 
-#### 无候选处理（plan §7.2/§4.1 note，fail loud）
+#### 无候选处理（fail loud）
 
 `search_results.jsonl` 不存在 / 空 / 所有候选超 target → 二选一（实现时择一并注释清楚）：
 
@@ -390,7 +388,7 @@ python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
    **Key API Surface** code block、任何项目专属 note。值取自 `search_config.yaml`、生成的 launcher、
    确认的 `{{ inputs.user_project_root }}`。**含 `select_architecture.py` 的 CLI 契约 + JSON schema**
    作为选架构段事实。
-4. **清剿 interactive/ask-user 残留**（plan §9.1 rule 5 适配）：复制自 `agents_template.md` 的
+4. **清剿 interactive/ask-user 残留**：复制自 `agents_template.md` 的
    `AGENTS.md` 副本里，把任何「stop and ask the user」/「Interactive ... based on feedback」/
    「present next steps / new session」类交互收尾段改为 Orca 链路事实——所有产物路径都在
    `$ORCA_ARTIFACTS_DIR` 已知（不 ask），选定架构已由上游 `ns_select` 确定性 `select_architecture.py`
@@ -507,7 +505,7 @@ torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm, foreach=False if is
 }
 ```
 
-字段语义（tape 审计字段，plan §2.3）：
+字段语义（tape 审计字段）：
 
 - `error`：fail loud 时写明根因（如 `$ORCA_ARTIFACTS_DIR` 缺 `supernet.py` / `supernet_summary.md`
   等上游产物——写明缺哪个）。成功时为空串。命名 `error` 而非 Orca runner 惯例的 `last_error`：

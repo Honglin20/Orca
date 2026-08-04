@@ -262,9 +262,9 @@ context + Step 2 viability 决定 evaluation paradigm。
 2. **按协议调 `memory-verifier`**，inputs `$ORCA_ARTIFACTS_DIR` + `{{ inputs.user_project_root }}`。
    读 report；若任何更正暴露你生成代码的不一致→修代码。
 
-3. （原 "Warn if supernet training is not viable" + "Present next steps to the user" **删**——
-   plan §9.1 rule 6。viability=No 已在 summary + output_schema `viable` 字段体现，下游自动按
-   `run_train_supernet.sh` 存在性门控（plan §6）。）
+3. （原 "Warn if supernet training is not viable" + "Present next steps to the user" **删**。
+   viability=No 已在 summary + output_schema `viable` 字段体现，下游自动按
+   `run_train_supernet.sh` 存在性门控。）
 
 ## Validation
 
@@ -314,14 +314,14 @@ context + Step 2 viability 决定 evaluation paradigm。
 }
 ```
 
-字段语义（tape 审计字段，plan §2.3）：
+字段语义（tape 审计字段）：
 
 - `error`：fail loud 时写明根因（如 `$ORCA_ARTIFACTS_DIR` 缺 `supernet.py` / `supernet_summary.md`
   等上游产物——写明缺哪个；viability=No 不算 error，是正常分支）。成功时为空串。命名 `error`
   而非 Orca runner 惯例的 `last_error`：本节点无 self-heal 重试，"last" 语义不适用（明确偏离
   `nas-train-runner` 的 `last_error`，理由是 generation 节点无 retry）。
 - `viable: false` 时 `train_script_path` / `train_supernet_py_path` 为空串——下游 `ns_run_train`
-  以 `run_train_supernet.sh` 文件存在性为权威 self-gate（plan §6/I10）。
+  以 `run_train_supernet.sh` 文件存在性为权威 self-gate。
 - `fidelity_passed`：fidelity audit loop 返 `all-pass` → `true`；viability=No（无 fidelity audit）→
   `true`（vacuous——无 ported 训练逻辑即无 fidelity 失败）。
 - `workflow_verifier_passed`：workflow compliance loop 返 `all-pass` → `true`；viability=No（无

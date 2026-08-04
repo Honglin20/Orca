@@ -1,5 +1,5 @@
 ---
-description: nas-supernet 搜索执行 agent（folder-agent）。运行上游 ns_search_pipeline 生成的 run_search_supernet.sh——cd $ORCA_ARTIFACTS_DIR → nohup bash ... & detach + 轮询进程到结束（沿用 nas-train-runner detach+poll 句式 + nohup 强化脱离 controlling terminal；detach+poll 经 I12 验证 Git Bash/MSYS 兼容）。self-heal：报错按「编辑白名单」用 edit 修 + 重跑，max_retries=3，超限 fail loud 绝不带错下传。权威产物 = $ORCA_ARTIFACTS_DIR/search_results.jsonl（ns_select 下游消费），行数 ≥1 才算成功。触碰搜索/evaluator 逻辑类目 → 重触 project-fidelity-verifier（read+embed 协议）。读 Pareto/搜索结果写软判断 assessment。output_schema 双层强制单行 JSON。
+description: nas-supernet 搜索执行 agent（folder-agent）。运行上游 ns_search_pipeline 生成的 run_search_supernet.sh——cd $ORCA_ARTIFACTS_DIR → nohup bash ... & detach + 轮询进程到结束（沿用 nas-train-runner detach+poll 句式 + nohup 强化脱离 controlling terminal；detach+poll 在 Git Bash/MSYS 验证兼容）。self-heal：报错按「编辑白名单」用 edit 修 + 重跑，max_retries=3，超限 fail loud 绝不带错下传。权威产物 = $ORCA_ARTIFACTS_DIR/search_results.jsonl（ns_select 下游消费），行数 ≥1 才算成功。触碰搜索/evaluator 逻辑类目 → 重触 project-fidelity-verifier（read+embed 协议）。读 Pareto/搜索结果写软判断 assessment。output_schema 双层强制单行 JSON。
 tools: [bash, read, edit, grep, glob, task]
 ---
 # ns_run_search
@@ -60,7 +60,7 @@ Step 3 python 读 marker 拼 JSON，agent 不需要改 python 脚本）：
   `printf "%s" "<one-line assessment>" > "$ORCA_ARTIFACTS_DIR/.ns_run_search_assessment.txt"`
 
 > marker 文件路径相对 `$ORCA_ARTIFACTS_DIR`；agent 不许伪造——下游 review 核对 healed_files
-> 是否触碰禁碰清单（plan §8 防蒙混靠审计）。
+> 是否触碰禁碰清单（防蒙混靠审计）。
 
 ## Step 1 ── 前置检查（确定性，跑一次）
 
@@ -88,7 +88,7 @@ fi
 对**每一次尝试** `N=1..3`：
 
 1. 后台跑 + 轮询到结束（`nohup` detach + `kill -0` 探活 + `wait` 收 RC，沿用 nas-train-runner
-   句式，Git Bash win32 经验证可行——I12）：
+   句式，Git Bash win32 经验证可行）：
    ```bash
    mkdir -p runs/search
    nohup bash run_search_supernet.sh > runs/search/search.attempt${N}.stdout.log 2>&1 &
@@ -126,8 +126,8 @@ fi
 
 ### Step 2.5 ── 重触 project-fidelity-verifier（read+embed 协议，按需）
 
-当 Step 2 的 self-heal 触碰**搜索/评估逻辑**类目时**主动**跑这步（I7/N5：审计字段
-`fidelity_retriggered` 自报；I6：fresh subagent 凭重 embed 的 report 复核）：
+当 Step 2 的 self-heal 触碰**搜索/评估逻辑**类目时**主动**跑这步（审计字段
+`fidelity_retriggered` 自报；fresh subagent 凭重 embed 的 report 复核）：
 
 1. `bash` 取 subagent body：
    ```bash

@@ -1,5 +1,5 @@
 ---
-description: nas-supernet 超网训练执行 agent（folder-agent）。运行上游 ns_train_script 生成的 run_train_supernet.sh——cd $ORCA_ARTIFACTS_DIR → nohup bash ... & detach + 轮询进程到结束（沿用 nas-train-runner detach+poll 句式 + nohup 强化脱离 controlling terminal；detach+poll 经 I12 验证 Git Bash/MSYS 兼容）。自门控：脚本不存在立即 output status=skipped（viability 以文件存在性为权威，I10）。self-heal：报错按「编辑白名单」用 edit 修 + 重跑，max_retries=3，超限 fail loud 绝不带错下传。触碰训练逻辑类目 → 重触 project-fidelity-verifier（read+embed 协议）。成功后读收敛曲线写软判断 assessment。output_schema 双层强制单行 JSON（agent 最终回复 = python stdout 那一行）。
+description: nas-supernet 超网训练执行 agent（folder-agent）。运行上游 ns_train_script 生成的 run_train_supernet.sh——cd $ORCA_ARTIFACTS_DIR → nohup bash ... & detach + 轮询进程到结束（沿用 nas-train-runner detach+poll 句式 + nohup 强化脱离 controlling terminal；detach+poll 在 Git Bash/MSYS 验证兼容）。自门控：脚本不存在立即 output status=skipped（viability 以文件存在性为权威）。self-heal：报错按「编辑白名单」用 edit 修 + 重跑，max_retries=3，超限 fail loud 绝不带错下传。触碰训练逻辑类目 → 重触 project-fidelity-verifier（read+embed 协议）。成功后读收敛曲线写软判断 assessment。output_schema 双层强制单行 JSON（agent 最终回复 = python stdout 那一行）。
 tools: [bash, read, edit, grep, glob, task]
 ---
 # ns_run_train
@@ -12,7 +12,7 @@ tools: [bash, read, edit, grep, glob, task]
 
 🔴 **铁律（违反即失败）**：
 
-1. **自门控（viability 以文件存在性为权威，I10）**：`$ORCA_ARTIFACTS_DIR/run_train_supernet.sh`
+1. **自门控（viability 以文件存在性为权威）**：`$ORCA_ARTIFACTS_DIR/run_train_supernet.sh`
    不存在 → 立即跳到 Step 3 输出 `{"status":"skipped"}`，**不要**伪造执行。`supernet_summary.md`
    的 `viable` 字段只是文档，不替代文件存在性判断。
 2. **报错自愈，不许放过**。`run_train_supernet.sh` 的 `wait` 退出码 ≠ 0、或预期 supernet ckpt
@@ -57,7 +57,7 @@ Step 3 python 读 marker 拼 JSON，agent 不需要改 python 脚本）：
   `printf "%s" "<one-line assessment>" > "$ORCA_ARTIFACTS_DIR/.ns_run_train_assessment.txt"`
 
 > marker 文件路径相对 `$ORCA_ARTIFACTS_DIR`；agent 不许伪造——下游 review 核对 healed_files
-> 是否触碰禁碰清单（plan §8 防蒙混靠审计）。
+> 是否触碰禁碰清单（防蒙混靠审计）。
 
 ## Step 1 ── 自门控（确定性，跑一次）
 
@@ -70,7 +70,7 @@ cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit
 rm -f .ns_run_train_healed.txt .ns_run_train_fidelity.flag .ns_run_train_assessment.txt
 
 if [ ! -f run_train_supernet.sh ]; then
-  printf "run_train_supernet.sh absent; training not viable per I10 file-existence gate." \
+  printf "run_train_supernet.sh absent; training not viable: run_train_supernet.sh not generated." \
     > .ns_run_train_assessment.txt
   echo "GATE: run_train_supernet.sh absent -> SKIP"
 else
@@ -86,7 +86,7 @@ fi
 对**每一次尝试** `N=1..3`：
 
 1. 后台跑 + 轮询到结束（`nohup` detach + `kill -0` 探活 + `wait` 收 RC，沿用 nas-train-runner
-   句式，Git Bash win32 经验证可行——I12）：
+   句式，Git Bash win32 经验证可行）：
    ```bash
    mkdir -p runs/train
    nohup bash run_train_supernet.sh > runs/train/train.attempt${N}.log 2>&1 &
@@ -116,8 +116,8 @@ fi
 
 ### Step 2.5 ── 重触 project-fidelity-verifier（read+embed 协议，按需）
 
-当 Step 2 的 self-heal 触碰**训练逻辑**类目时**主动**跑这步（I7/N5：审计字段
-`fidelity_retriggered` 自报；I6：fresh subagent 凭重 embed 的 report 复核）：
+当 Step 2 的 self-heal 触碰**训练逻辑**类目时**主动**跑这步（审计字段
+`fidelity_retriggered` 自报；fresh subagent 凭重 embed 的 report 复核）：
 
 1. `bash` 取 subagent body：
    ```bash

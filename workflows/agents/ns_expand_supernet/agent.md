@@ -157,7 +157,7 @@ body 里重复绝对项目路径。只记原始项目事实；NAS 决策 / 产�
 
 ### Step 2: Supernet Readiness Rules (mandatory only, optional skipped)
 
-> **适配说明（plan §9.1 rule 5）**：原 skill 的 optional ruleset curation + A/B consent 全删。
+> **适配说明**：原 skill 的 optional ruleset curation + A/B consent 全删。
 > 本步仅施加 **mandatory readiness 规则**——它们本来就不依赖用户 consent（原 skill 也声明
 > "regardless of the user's consent choice for optional rules"）。optional 优化跳过。
 
@@ -171,7 +171,7 @@ body 里重复绝对项目路径。只记原始项目事实；NAS 决策 / 产�
    - 若无 readiness 文件匹配该模型类别，无 mandatory 结构改动→直接进 Step 3（无规则可施），
      保留 flat file 作 NAS input 候选。
 2. （原 optional ruleset loading / curated recommendations / conflict detection / A/B consent
-   **全部跳过**——plan §9.1 rule 5。）
+   **全部跳过**。）
 
 ### Step 3: Apply Mandatory Readiness Rules
 
@@ -214,7 +214,7 @@ body 里重复绝对项目路径。只记原始项目事实；NAS 决策 / 产�
    不进 Step 5 或后续。**fail loud**：最终 JSON 输出 `model_type_supported: false` + `supernet_path: ""` +
    `fidelity_passed: true`（vacuous——本节点无 fidelity-verifier 调用，与 yaml `fidelity_passed` 语义一致）+
    `workflow_verifier_passed: false`（未跑 Step 6 workflow loop），引擎判节点失败路由 `terminate_unsupported`
-   （plan §6）。
+   。
 
 ### Step 5: Generate Supernet
 
@@ -243,7 +243,7 @@ workflow 完成（含 validation）后，进 evaluator verification loop：
 按它 inspect 生成的 supernet、显示每个 representative candidate block 的参数 + 当前 host device
 时延、调既有 `SearchSpace` 字段、校验每个 accepted round。
 
-> 注：原 workflow 的「user feedback loop」退化（plan §9.1 rule 5）——不交互，agent 自己按
+> 注：原 workflow 的「user feedback loop」退化——不交互，agent 自己按
 > workflow 内规则完成 refinement 并校验；缺关键信息 fail loud 或文档化假设进 manifest / summary。
 
 本阶段主要改既有 `SearchSpace` 字段值（fixed dimension / range / candidate / stage setting /
@@ -281,7 +281,7 @@ layer config / branch choice）。refinement 后：
 2. **按协议调 `memory-verifier`**，inputs `$ORCA_ARTIFACTS_DIR` + `{{ inputs.user_project_root }}`。
    读 report；若任何更正暴露你生成代码的不一致→修代码。
 
-3. （原 "Present next steps to the user" **删**——plan §9.1 rule 6。下游 `ns_train_script` 自动接力。）
+3. （原 "Present next steps to the user" **删**。下游 `ns_train_script` 自动接力。）
 
 ## Validation
 
@@ -321,7 +321,7 @@ layer config / branch choice）。refinement 后：
 }
 ```
 
-字段语义（tape 审计字段，plan §2.3）：
+字段语义（tape 审计字段）：
 
 - `error`：fail loud 时写明根因（如 `{{ inputs.user_project_root }}` / `{{ inputs.model_path }}`
   缺 / 不可访问——写明缺哪个；model_type 不支持**不**写 error，是 `model_type_supported: false`
@@ -332,7 +332,7 @@ layer config / branch choice）。refinement 后：
   按实际填（`supernet_path=""`、`fidelity_passed: true`（vacuous——本节点无 fidelity-verifier 调用）、
   `workflow_verifier_passed: false`（未跑 Step 6 workflow loop）、`error` 留空——unsupported 是已知分支非异常）。
 - `fidelity_passed`：本节点**无** `project-fidelity-verifier` 调用（无 porting 发生）→ 恒 `true`
-  （vacuous——无 porting 即无 fidelity 失败）。语义保持与 plan §2.3 一致。
+  （vacuous——无 porting 即无 fidelity 失败）。
 - `workflow_verifier_passed`：Step 6 的 `workflow-verifier` 返 `all-pass` → `true`；Step 4
   unsupported stop → `false`；其它按实际。
 - `generated_artifacts`：至少含 `project_manifest.md`、`supernet_summary.md`、`<base_name>_flat.py`、
