@@ -10,7 +10,7 @@
 
 **计划**：[`docs/plans/2026-08-04-kd-nas-trainer-engine-and-leaf-codegen.md`](../plans/2026-08-04-kd-nas-trainer-engine-and-leaf-codegen.md)（5 Phase，独立可 commit；v3.2 经 spec-reviewer 四轮闭环）。
 
-**状态**：**Phase 4 完成**（commit `<TBD>`，零回归 + code-reviewer 两轮闭环：第一轮 10 must-fix + 9 nice-to-have 全修；自加反回归测试 `test_kd_prompt_no_source_narrative.py`）。
+**状态**：**Phase 4 完成**（commit `204a64d`，零回归 + code-reviewer 两轮闭环：第一轮 10 must-fix + 9 nice-to-have 全修；自加反回归测试 `test_kd_prompt_no_source_narrative.py`）。
 
 ### Phase 4 已交付（agent prompt 去 SPEC 源化 + 任务纯净）
 - grep 范围：`workflows/agents/{model-flatten,teacher-gen,kd-setup,kd-train-script,train-script-verify,train-teacher,gen-student,distill,decide}/` + `_kd_scripts/**`（含 CONTRACTS.md）+ `workflows/kd-nas.yaml`。

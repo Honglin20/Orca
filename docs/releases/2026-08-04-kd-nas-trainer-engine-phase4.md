@@ -1,7 +1,7 @@
 # Release: KD-NAS Trainer 引擎化 Phase 4（agent prompt 去 SPEC 源化 + 任务纯净）
 
 **Date**: 2026-08-04
-**Commit**: `<TBD>`（28 文件，纯文本层改动）
+**Commit**: `204a64d`（35 文件，纯文本层改动）
 **Plan**: [`docs/plans/2026-08-04-kd-nas-trainer-engine-and-leaf-codegen.md`](../plans/2026-08-04-kd-nas-trainer-engine-and-leaf-codegen.md) §5 Phase 4 checklist + §11（M8 ofd 重试）+ D7（去源化客观边界）
 
 ## What was done
@@ -131,7 +131,7 @@
 
 ## Commit
 
-`<TBD>` —— 28 文件 +注释/措辞调整，无语义改动。
+`204a64d` —— 35 文件 +注释/措辞调整，无语义改动。
 
 文件清单（按目录）：
 
