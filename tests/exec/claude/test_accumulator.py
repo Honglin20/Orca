@@ -75,6 +75,18 @@ def test_consume_event_empty_text_not_appended():
     assert acc.events_result_text == "only"
 
 
+def test_consume_event_missing_or_none_text_ignored():
+    """``data`` 缺 text 字段 / text=None → 不污染 result（fail loud 不抛，保持 None）。
+
+    钉死 ``if text:`` 对 falsy（None / 空 / 缺失）的过滤——若未来改成 ``is not None``
+    会引入空串污染；此测试守住契约。
+    """
+    acc = RunAccumulator()
+    acc.consume_event(_ev("agent_message", {}))  # 缺 text 字段
+    acc.consume_event(_ev("agent_message", {"text": None}))  # text=None
+    assert acc.events_result_text is None
+
+
 def test_consume_event_agent_usage_last_wins():
     """多条 agent_usage：usage/cost 以最后一条为准（钉死「覆盖」语义，非累加）。"""
     acc = RunAccumulator()

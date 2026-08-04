@@ -55,10 +55,10 @@ class RunAccumulator:
     api_error_status: int | None = None
     # events 模式专用：error 事件的自报消息（让 diagnose 能带具体失败原因，否则用户看不到）。
     error_message: str | None = None
-    # events 模式专用：按序记录每条 agent_message 的文本块（契约：末条 = JSON result）。
-    # result_line 模式不用（直接覆盖 result_text）。保留全部是为 diagnose/调试可回溯，
-    # events_result_text 只取末条（中间叙述不应污染 result——P5 修复）。
-    _text_parts: list[str] = field(default_factory=list)
+    # events 模式专用：末条 agent_message 的文本块（契约：末条 = JSON result）。
+    # result_line 模式不用（直接覆盖 result_text）。中间叙述不应进 result（P5），
+    # 故只存末条而非全列表——KISS / YAGNI（无其它消费方）。
+    _last_text: str | None = None
 
     # ── result_line 模式：on_result 回调工厂（行为逐字同重构前闭包）─────────────
 
@@ -90,8 +90,8 @@ class RunAccumulator:
         """events 模式：把一条翻译后的 Orca Event 喂进累积器（与 yield 并行调用）。
 
         映射（与 opencode_translator 产出对齐）：
-          - ``agent_message``：记录 ``data["text"]`` 到 ``_text_parts``（末条 = JSON result；
-            见 ``events_result_text`` 的「末条即 result」语义）。
+          - ``agent_message``：把 ``data["text"]`` 记到 ``_last_text``（末条覆盖前者 = JSON
+            result；见 ``events_result_text`` 的「末条即 result」语义）。
           - ``agent_usage``：存 usage dict + cost（最后一条 step_finish 的为准）。
           - ``error``：置 ``is_error=True``，抓 ``data.get("api_error_status")``（若有）。
 
@@ -101,9 +101,9 @@ class RunAccumulator:
         if ev.type == "agent_message":
             text = ev.data.get("text")
             if text:
-                # 末条即 result（见 events_result_text）。中间叙述（如 "input [1,1,28,28]"
+                # 末条覆盖前者（契约：末条 = result）。中间叙述（如 "input [1,1,28,28]"
                 # 字面量）不能进 result_text，否则 result_extractor 的平衡块兜底会误抓。
-                self._text_parts.append(text)
+                self._last_text = text
         elif ev.type == "agent_usage":
             # usage dict 整体存（executor 的 _normalize_usage 读具体 key）；cost 单独存。
             self.usage = dict(ev.data)
@@ -136,9 +136,7 @@ class RunAccumulator:
         无任何 agent_message → None（让 executor 的「无 result」错误判定生效，与其他模式一致）。
         executor 在 events 模式 EOF 后把此值赋给 ``result_text``（统一后续读路径）。
         """
-        if not self._text_parts:
-            return None
-        return self._text_parts[-1]
+        return self._last_text
 
     # ── 错误诊断（搬自 executor.py:188-200 的 _result_diag，DRY：两模式共用）────
 
