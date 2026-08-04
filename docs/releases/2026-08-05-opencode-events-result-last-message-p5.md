@@ -71,10 +71,30 @@ kd-nas 各节点用 opencode executor → 中间叙述带 `[...]`/`{...}` 字面
 `tars run workflows/kd-nas.yaml` 对 `examples/mnist_kd/`（max_rounds=2 / full_epochs=2 / device=cpu），
 run_id `kd-nas-20260805-011253-6c2ebe`。**flatten 节点 seq 92 `node_completed` PASS**——P5 修复在
 原失败点直接验证（旧实现必死在 schema 校验 `[1,1,28,28] is not of type 'object'`）。后续节点：
-flatten → setup → gen_teacher → gen_train_script → train_script_verify（依次 PASS / 进行中）。
-gen_teacher 末条 `agent_message`（seq 243）是合法 JSON（`{"teacher_model_path": ...}`），
-证明「末条即 result」契约在生产 agent 上自然成立。
+flatten → setup → gen_teacher → gen_train_script → train_script_verify → train_teacher（真 10 epoch CPU
+训练 + eval）→ gen_student → distill → decide（轮 1）→ gen_student → distill → decide（轮 2）→ finalize。
+
+**12/13 节点 PASS**（含 P5 原失败点 flatten，以及 2 轮完整 KD 蒸馏循环）。gen_teacher 末条
+`agent_message`（seq 243）是合法 JSON（`{"teacher_model_path": ...}`），证明「末条即 result」契约
+在生产 agent 上自然成立。
+
+### finalize 节点失败（非 P5 回归，workflow-agent 层 bug）
+
+finalize agent 末条消息的 ```json fence 内 JSON **结构性畸形**——括号深度计数显示 `final_depth=1`
+（缺一个根级 `}`），`json.loads` 报 `Expecting ',' delimiter: line 6 column 1253`。**与 P5 无关**：
+验证方法是把 finalize 节点的所有 `agent_message` 按旧「全串接」语义拼起来再跑同样的 fence 提取 +
+json.loads，**同样失败**（同一个 char 1523 错）。这是 workflow 层 agent 产出的真实 malformed JSON，
+按用户约束「不碰 kd-nas workflow 文件（P5 是 engine 层）」不在本次范围。Engine 的 fail loud 行为正确：
+错误信息清晰指出「result 文本无法提取为合法 JSON」+ 前 200 字符预览。
+
+### 产物（真实落盘）
+
+- ledger.jsonl: 2 行（2 轮 KD）
+- champions.jsonl: `{"round": 0, "id": "baseline", "latency_us": 42.262021, "accuracy": 0.9,
+  "delta_vs_baseline_us": 0.0, "snapshot": ""}`（baseline champion，无 student 超越）
+- reports/final_report.md: 已写（finalize agent Step 1 完成）
 
 ## 偏差
 
-无。修复方案落在用户给的首选方案（events_result_text 返回末条），result_extractor 未动。
+无（实现方案落在用户给的首选方案：events_result_text 返回末条，result_extractor 不动）。
+finalize 失败属新发现的 workflow-agent bug（P6 候选），不在 P5 engine 层范围。

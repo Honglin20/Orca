@@ -19,9 +19,17 @@ result 抢过末条合法 JSON），打通 KD-NAS e2e 的最后一个阻塞。
   setup / gen_teacher / gen_train_script 依次 PASS，train_script_verify 进行中。
 
 **待办**：
-- [ ] e2e 跑到 finalize（train_script_verify → train_teacher → 2 轮 gen_student/distill/decide → finalize），
-  报终态 + ledger 行数 / champion / final_latency / final_accuracy。
+- [ ] **P6（新发现，非本次范围）**：finalize agent 末条 JSON 结构性畸形（缺根级 `}`）→
+  `result_extractor` fail loud。需调 finalize agent prompt（属 workflow 层，不在 P5 engine 范围）。
 - [ ] Phase 5 E2E（KD-NAS Trainer 引擎化）遗留——详见下方。
+
+### 真实 e2e 终态（run_id `kd-nas-20260805-011253-6c2ebe`）
+
+- **12/13 节点 PASS**：flatten（P5 原失败点直接验证）→ setup → gen_teacher → gen_train_script →
+  train_script_verify → train_teacher（真 10 epoch CPU）→ gen_student/distill/decide × 2 轮 → finalize FAIL。
+- **finalize 失败**：agent 末条 ```json fence 内 JSON 畸形（depth=1，缺根 `}`）。**与 P5 无关**
+  （旧「全串接」语义对同一 fixture 同样失败，已验证）。属 workflow-agent bug。
+- **产物**：ledger 2 行 / champion=baseline / latency=42.26µs / accuracy=0.9 / final_report.md 已写。
 
 ---
 
