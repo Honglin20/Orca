@@ -10,7 +10,7 @@
 不在叶子 import 白名单 → codegen 用 `torch.rand`+`torch.randint` 冒充 MNIST → teacher acc=0.12
 锁死 ln 10 / student acc=0.09（零学习）。
 
-**状态**：**修复完成 + 单测全绿 + code-reviewer 一轮闭环**（待 commit + e2e）。
+**状态**：**修复完成 + 单测全绿 + code-reviewer 一轮闭环 + 已 commit**（`f22568b`，待 e2e）。
 - 扩 import 白名单（`_leaves.py` + `fidelity_check.py`）：含 torchvision/torchaudio/scipy/sklearn/PIL + stdlib；禁用户项目模块保留。
 - `fidelity_check.py::_check_no_random_fabrication`：AST 扫 data.py/eval.py，捕 `torch.rand/randn/randint/normal/rand_like/randn_like` + `numpy.random.*` + `random.*` + in-place `uniform_/normal_/...`；`torch.randperm` / seed 类合法跳过；用户 train.py 自身用 random → 视为 verbatim port。
 - SKILL.md / agent.md / workflow doc / 2 checklist / 4 leaf skel / CONTRACTS §6 / kd-nas.yaml：全套加反造假硬规则（port 真实 loader / 不可得时 fail loud + ask-user 哨兵）。
@@ -21,7 +21,7 @@
 **测试**：175 passed / 2 skipped（原 169 + 6 新）；audit-run 6c2ebe artifact 经新 fidelity_check 复测准确 4 处造假捕获。
 
 **待办**：
-- [ ] commit + push（`fix(kd-nas): codegen 禁造假数据——扩标准包白名单 + 反造假硬规则 + fail-loud/ask-user`）。
+- [x] commit `f22568b`。
 - [ ] **关键 headless e2e**（`tars run workflows/kd-nas.yaml` 对 `examples/mnist_kd/`，max_rounds=2 full_epochs=2 device=cpu）：**核心验证 teacher 真训练 acc > 0.90**（非 0.12）；data.py 应 port 真实 torchvision MNIST（非 torch.rand）+ loss 真下降（非锁死 ln 10）+ ≥1 轮蒸馏 student acc 合理 + finalize（P6）过。
 - [ ] 如实报 teacher/student 真实精度。
 - [ ] Phase 5 E2E（KD-NAS Trainer 引擎化）遗留——详见下方。
