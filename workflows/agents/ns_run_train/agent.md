@@ -39,7 +39,7 @@ tools: [bash, read, edit, grep, glob, task]
 
 ## 资源锚点（cwd 无关）
 
-- `$ORCA_ARTIFACTS_DIR`（orca spawn / env.py 注入）= 本 run 的 artifacts 目录，上游 ns_train_script
+- `$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本 run 的 artifacts 目录，上游 ns_train_script
   落脚本处，跨节点共享。
 - `$HOME/.orca/nas-supernet/subagents/project-fidelity-verifier.md` = fidelity-verifier subagent
   body（read+embed 协议，Step 2.5）。

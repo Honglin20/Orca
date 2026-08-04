@@ -25,9 +25,9 @@ search_results.jsonl`。**你的工作：运行下面命令恰好一次，把它
 
 ## 资源锚点（cwd 无关）
 
-`$ORCA_ARTIFACTS_DIR`（orca spawn / env.py:91 注入）= 本 run 的 artifacts 目录。
+`$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本 run 的 artifacts 目录。
 `select_architecture.py` 与 `search_results.jsonl` 都在此目录下（由上游节点产出）。
-`$ORCA_ARTIFACTS_DIR` 经 **Git Bash 展开**（不是 cmd.exe——ScriptNode 不展开 `$VAR`，agent Bash 会）。
+`$ORCA_ARTIFACTS_DIR` 经 **Git Bash 展开**（agent Bash 会展开 `$VAR`）。
 
 ## 执行（跑这一条命令，然后把 stdout 原样作为你的回复）
 

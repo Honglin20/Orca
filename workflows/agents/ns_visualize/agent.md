@@ -1,5 +1,5 @@
 ---
-description: nas-supernet 可视化 agent（folder-agent，只读汇报节点）。读 $ORCA_ARTIFACTS_DIR 的全部 artifacts（search_results.jsonl / training log / supernet_summary.md / project_manifest.md / runs/retrain/test_metrics.json 等），跑 6 个 chart 脚本——每张图经 orca.chart.render_chart → per-run socket → tape custom(chart) → 三壳渲染。指标名 + 方向从 search_config.yaml objs 动态发现（权威源，与 select_architecture.py 同源），project_manifest.md 回退，禁硬编码 NMSE/ACC。per-chart fail-soft（artifact 缺失 → 该图 skip + marker 记原因，整体不崩）。最终回复 = report.py stdout 单行 JSON。
+description: nas-supernet 可视化 agent（folder-agent，只读汇报节点）。读 $ORCA_ARTIFACTS_DIR 的全部 artifacts（search_results.jsonl / training log / supernet_summary.md / project_manifest.md / runs/retrain/test_metrics.json 等），跑 6 个 chart 脚本——每张图经 orca.chart.render_chart 推到 tape。指标名 + 方向从 search_config.yaml objs 动态发现（权威源，与 select_architecture.py 同源），project_manifest.md 回退，禁硬编码 NMSE/ACC。per-chart fail-soft（artifact 缺失 → 该图 skip + marker 记原因，整体不崩）。最终回复 = report.py stdout 单行 JSON。
 model: "deepseek/deepseek-v4-flash"
 tools: [bash]
 ---
@@ -37,10 +37,10 @@ ns_retrain 已成功完成（你只在 `ns_retrain.output.status == 'executed'` 
 
 ## 资源锚点（cwd 无关）
 
-- `$ORCA_ARTIFACTS_DIR`（orca spawn / env.py 注入）= 本 run 的 artifacts 目录，所有节点产物共享。
+- `$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本 run 的 artifacts 目录，所有节点产物共享。
 - `$ORCA_AGENT_RESOURCES`（orca spawn 注入）= 本 agent 的资源目录（含 scripts/）。
 - `{{ ns_select.output.selected_latency_ms }}` / `{{ ns_select.output.selected_acc }}` =
-  Jinja 渲染的选定架构坐标（由 yaml orchestrator 在 agent spawn 前注入到 agent.md 文本）。
+  Jinja 渲染的选定架构坐标（由 orca spawn 在 agent spawn 前注入到 agent.md 文本）。
 
 ## 执行（跑这些命令，然后把 report.py stdout 原样作为你的回复）
 
@@ -91,9 +91,9 @@ python3 "$ORCA_AGENT_RESOURCES/scripts/report.py" \
   artifact 缺）只记 stderr + marker "skipped" + 继续下一个。workflow 结果已在 ns_retrain 确定，
   可视化是 bonus。
 - **Jinja 渲染值**：`{{ ns_select.output.selected_latency_ms }}` 和 `{{ ns_select.output.selected_acc }}`
-  由 yaml orchestrator 在 agent.md 文本渲染时替换为实际数字。你看到的 bash 命令里已是数字字符串。
+  由 orca spawn 在 agent.md 文本渲染时替换为实际数字。你看到的 bash 命令里已是数字字符串。
 - **不在 Orca run 上下文**：脚本调 `render_chart` 时若缺 `ORCA_*` env → fail-soft 记 "skipped"
-  （脚本内的 try/except 处理），不崩。正常 Orca run 中 env 由 executor spawn 注入。
+  （脚本内的 try/except 处理），不崩。正常 Orca run 中 env 由 orca spawn 注入。
 
 ## 输出
 

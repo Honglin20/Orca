@@ -44,7 +44,7 @@ tools: [bash, read, write, edit, grep, glob, task]
 
 ## 资源锚点（cwd 无关）
 
-- `$ORCA_ARTIFACTS_DIR`（orca spawn / env.py 注入）= 本 run 的 artifacts 目录。
+- `$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本 run 的 artifacts 目录。
 - `$HOME/.orca/nas-supernet/subagents/project-fidelity-verifier.md` = fidelity-verifier subagent
   body（read+embed 协议，Step 3）。
 - `{{ ns_select.output.selected_arch }}` = 上游选定架构（Jinja 渲染，dict）。
