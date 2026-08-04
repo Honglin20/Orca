@@ -856,11 +856,12 @@ describe("RunListPage 看板视图（SPEC §10）", () => {
     expect(screen.queryByTestId("group-toggle")).toBeNull();
   });
 
-  // ── AC-B2 KPI 带计数正确（SPEC web-board-cardgrid §2.2） ──
-  it("AC-B2：KPI 计数 = 运行(含 queued) · 待决策 · 失败(含 cancelled) · 完成 · 共", async () => {
+  // ── AC-B2 KPI 带计数正确（SPEC web-board-cardgrid §2.2，v1.2 含 live-pending） ──
+  it("AC-B2：KPI 计数 = 运行(含 queued+live-pending) · 待决策 · 失败(含 cancelled) · 完成 · 共（4 胶囊合计=total）", async () => {
     mockFetchFor([
       mkRun({ run_id: "r1", status: "running" }),
       mkRun({ run_id: "r2", status: "queued" }),
+      mkRun({ run_id: "r7", status: "live-pending" }),
       mkRun({ run_id: "r3", status: "blocked" }),
       mkRun({ run_id: "r4", status: "failed" }),
       mkRun({ run_id: "r5", status: "cancelled" }),
@@ -868,17 +869,19 @@ describe("RunListPage 看板视图（SPEC §10）", () => {
     ]);
     renderPage();
     await screen.findByTestId("kpi-strip");
-    // 运行 = running(1) + queued(1) = 2。
+    // 运行 = running(1) + queued(1) + live-pending(1) = 3（live-pending 归排队桶，§2.2）。
     const runningChip = screen.getByTestId("kpi-chip-running");
-    expect(runningChip.textContent).toMatch(/运行.*2/);
+    expect(runningChip.textContent).toMatch(/运行.*3/);
     // 待决策 = 1。
     expect(screen.getByTestId("kpi-chip-blocked").textContent).toMatch(/待决策.*1/);
     // 失败 = failed(1) + cancelled(1) = 2（SPEC §2.2 I3）。
     expect(screen.getByTestId("kpi-chip-failed").textContent).toMatch(/失败.*2/);
     // 完成 = 1。
     expect(screen.getByTestId("kpi-chip-completed").textContent).toMatch(/完成.*1/);
-    // 共 = 6。
-    expect(screen.getByTestId("kpi-chip-all").textContent).toMatch(/共.*6.*runs/);
+    // 共 = 7。
+    expect(screen.getByTestId("kpi-chip-all").textContent).toMatch(/共.*7.*runs/);
+    // 4 胶囊合计 = total（发现 2：live-pending 不漏算，否则合计 6 ≠ total 7）。
+    expect(3 + 1 + 2 + 1).toBe(7);
   });
 
   // ── AC-B3 KPI 即过滤：点 kpi-chip-failed → 显 failed 与 cancelled（SPEC §2.2 I3） ──
@@ -911,6 +914,32 @@ describe("RunListPage 看板视图（SPEC §10）", () => {
       fireEvent.click(screen.getByTestId("kpi-chip-all"));
     });
     expect(screen.getAllByTestId("board-card").length).toBe(3);
+  });
+
+  // ── AC-B3 点 kpi-chip-running → 显 running + queued + live-pending（§2.2 live-pending 修订，发现 2） ──
+  it("AC-B3：点 kpi-chip-running → status=running → 显 running + queued + live-pending run", async () => {
+    mockFetchFor([
+      mkRun({ run_id: "rr", status: "running" }),
+      mkRun({ run_id: "rq", status: "queued" }),
+      mkRun({ run_id: "rlp", status: "live-pending" }),
+      mkRun({ run_id: "rc", status: "completed" }),
+    ]);
+    renderPage();
+    await screen.findByTestId("board");
+    // 初始全显（4 张）。
+    expect(screen.getAllByTestId("board-card").length).toBe(4);
+
+    // 点 kpi-chip-running → 显 running + queued + live-pending（3 张），completed 被过滤。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("kpi-chip-running"));
+    });
+    expect(screen.getAllByTestId("board-card").length).toBe(3);
+    // live-pending 归排队 section 且**未被 running 过滤剔除**（发现 2 修复验证：
+    // 旧 filter running 不含 live-pending → rlp 会被过滤掉，排队 section 仅 1 张）。
+    expect(
+      within(screen.getByTestId("card-section-queued")).getAllByTestId("board-card")
+        .length,
+    ).toBe(2); // queued + live-pending
   });
 
   // ── AC-B3 失败>0 胶囊红（SPEC §2.2） ──

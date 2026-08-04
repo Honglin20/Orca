@@ -115,7 +115,9 @@ export function RunListPage() {
         return false;
       }
       const rs = statusToRunStatus(r.status);
-      if (status === "running") return rs === "running" || rs === "queued";
+      // 运行胶囊 = 运行中 + 排队（queued + live-pending），与 group-runs 排队桶 accept 对齐（§2.2）。
+      if (status === "running")
+        return rs === "running" || rs === "queued" || rs === "live-pending";
       if (status === "blocked") return rs === "blocked";
       if (status === "completed") return rs === "completed";
       // SPEC web-board-cardgrid §2.2（I3）：failed 桶含 cancelled——与 group-runs failed 桶
@@ -163,7 +165,9 @@ export function RunListPage() {
     let completed = 0;
     for (const r of runs) {
       const rs = statusToRunStatus(r.status);
-      if (rs === "running" || rs === "queued") running++;
+      // 运行计数含 queued + live-pending（与 group-runs 排队桶 accept 对齐，§2.2）——
+      // 否则 live-pending run 在「排队」section 可见但 KPI 不算，4 胶囊合计 ≠ total。
+      if (rs === "running" || rs === "queued" || rs === "live-pending") running++;
       else if (rs === "blocked") blocked++;
       else if (rs === "failed" || rs === "cancelled") failed++;
       else if (rs === "completed") completed++;
