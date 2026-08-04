@@ -128,7 +128,8 @@ nodes:
          print(os.path.abspath(os.path.join('llm_artifacts', model_name, 'runs', run_id)) + '/')
          ")
          fi
-         STRUCT_SCRIPTS_DIR="workflows/agents/_struct_scripts"  # 固化默认
+         STRUCT_SCRIPTS_DIR="$ORCA_WORKFLOWS_ROOT/agents/_struct_scripts"  # executor 注入，cwd 无关
+         [ -f "$STRUCT_SCRIPTS_DIR/measure_baseline.py" ] || { echo "FAIL: struct_scripts_dir 缺：$STRUCT_SCRIPTS_DIR（\$ORCA_WORKFLOWS_ROOT 未注入？）" >&2; exit 2; }
          # OUTPUT_DIR 末尾已带 /，下面 ${OUTPUT_DIR}<suffix> 是安全拼接（单一真相源在 setup 节点内部）
          SNAPSHOTS_DIR="${OUTPUT_DIR}snapshots/"
          WORKTREE_ROOT="${OUTPUT_DIR}.worktrees/"

@@ -153,7 +153,10 @@ echo "PARSED: TEACHER_LATENCY_US=$TEACHER_LATENCY_US LATENCY_SOURCE=$LATENCY_SOU
 > sidecar：失败值合法产出，不阻断 teacher-gen。
 
 ```bash
-KD_SCRIPTS_DIR="$(python3 -c "import os;print(os.path.abspath('workflows/agents/_kd_scripts'))")"
+# KD_SCRIPTS_DIR：canonical 来源 = executor 注入的 $ORCA_WORKFLOWS_ROOT（cwd 无关）。
+[ -n "$ORCA_WORKFLOWS_ROOT" ] || { echo "FAIL: \$ORCA_WORKFLOWS_ROOT 未注入" >&2; exit 2; }
+KD_SCRIPTS_DIR="$ORCA_WORKFLOWS_ROOT/agents/_kd_scripts"
+[ -f "$KD_SCRIPTS_DIR/viz_kd_stage.py" ] || { echo "FAIL: viz_kd_stage.py 缺：$KD_SCRIPTS_DIR" >&2; exit 2; }
 BASELINE_LATENCY_US="{{ flatten.output.baseline_latency_us }}"
 VIZ_STDOUT=$(python3 "$KD_SCRIPTS_DIR/viz_kd_stage.py" \
   --stage teacher \

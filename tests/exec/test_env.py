@@ -221,3 +221,32 @@ def test_build_env_overlay_kb_dir_coexists_with_artifacts():
     )
     assert overlay["ORCA_ARTIFACTS_DIR"] == "/abs/runs/r-1/artifacts"
     assert overlay["ORCA_KB_DIR"] == "/abs/knowledge_base"
+
+
+# ── plan 2026-08-04 kd-nas headless fix：workflows_root（workflow yaml 所在目录，cwd 无关）──
+
+
+def test_build_env_overlay_injects_workflows_root():
+    """``workflows_root`` 非空 → overlay 含 ``ORCA_WORKFLOWS_ROOT``
+    （agent.md 据此 cwd 无关定位 workflow 级共享资源，如 agents/_kd_scripts）。"""
+    overlay = build_env_overlay((), workflows_root="/abs/workflows")
+    assert overlay["ORCA_WORKFLOWS_ROOT"] == "/abs/workflows"
+
+
+def test_build_env_overlay_workflows_root_default_not_injected():
+    """``workflows_root`` 缺省 → 不注 ``ORCA_WORKFLOWS_ROOT``（向后兼容，旧调用零回归）。"""
+    overlay = build_env_overlay(("ANTHROPIC_",))
+    assert "ORCA_WORKFLOWS_ROOT" not in overlay
+
+
+def test_build_env_overlay_workflows_root_coexists_with_others():
+    """workflows_root 与 artifacts_dir / kb_dir 同注（spawn 一次性透传全部权威目录）。"""
+    overlay = build_env_overlay(
+        (),
+        artifacts_dir="/abs/runs/r-1/artifacts",
+        kb_dir="/abs/knowledge_base",
+        workflows_root="/abs/workflows",
+    )
+    assert overlay["ORCA_ARTIFACTS_DIR"] == "/abs/runs/r-1/artifacts"
+    assert overlay["ORCA_KB_DIR"] == "/abs/knowledge_base"
+    assert overlay["ORCA_WORKFLOWS_ROOT"] == "/abs/workflows"

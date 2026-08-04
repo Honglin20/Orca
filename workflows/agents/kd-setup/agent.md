@@ -23,7 +23,7 @@ tools: [bash, read, write, edit, glob, grep]
 - ❌ 修改任何上游产物 / 改用户训练函数；
 - ❌ 编造字段、截断 stdout、加描述性文字到 JSON 前后、跳过任一 step。
 
-**失败 = fail loud**：任一 step 非零退出 → 把 stderr + stdout 原样上抛作为最终消息（**不**编造字段、**不**假装成功、**不**跳过失败 step）。
+**失败 = fail loud**：任一 step 非零退出 → 把 stderr + stdout 原样上抛作为最终消息（**不**编造字段、**不**假装成功、**不**跳过失败 step、**不**返回含空字符串字段的 JSON 占位对象如 ``{"kd_artifacts_dir":"", ...}`` —— 必须上抛原始 stderr/stdout）。
 
 ## 输出 JSON schema（你的终点）
 
@@ -69,9 +69,13 @@ tools: [bash, read, write, edit, glob, grep]
 ## step 1 执行：解析路径 + 单写者锁
 
 ```bash
-KD_SCRIPTS_DIR="$(dirname "$(find workflows/agents/_kd_scripts -name kd_common.py -print -quit)")"
-KD_SCRIPTS_DIR="$(python3 -c "import os,sys;print(os.path.abspath(sys.argv[1]))" "$KD_SCRIPTS_DIR")"
-STRUCT_SCRIPTS_DIR="$(python3 -c "import os,sys;print(os.path.abspath('workflows/agents/_struct_scripts'))")"
+# KD_SCRIPTS_DIR / STRUCT_SCRIPTS_DIR：canonical 来源 = executor 注入的 $ORCA_WORKFLOWS_ROOT
+# （= workflow yaml 所在目录，dev=<repo>/workflows，安装态=~/.orca/workflows）。cwd 无关。
+# 缺 env → fail loud（不静默猜 / 不 cwd-relative fallback，防 tars run 从用户项目起跑时静默失败）。
+[ -n "$ORCA_WORKFLOWS_ROOT" ] || { echo "FAIL: \$ORCA_WORKFLOWS_ROOT 未注入（非 orca run 上下文）" >&2; exit 2; }
+KD_SCRIPTS_DIR="$ORCA_WORKFLOWS_ROOT/agents/_kd_scripts"
+STRUCT_SCRIPTS_DIR="$ORCA_WORKFLOWS_ROOT/agents/_struct_scripts"
+[ -f "$KD_SCRIPTS_DIR/kd_common.py" ] || { echo "FAIL: _kd_scripts 缺 kd_common.py：$KD_SCRIPTS_DIR" >&2; exit 2; }
 [ -d "$STRUCT_SCRIPTS_DIR" ] || { echo "FAIL: struct_scripts_dir 不存在：$STRUCT_SCRIPTS_DIR" >&2; exit 2; }
 PER_RUN_ARTIFACTS_DIR="${ORCA_ARTIFACTS_DIR:-}"
 [ -z "$PER_RUN_ARTIFACTS_DIR" ] && { echo "FAIL: \$ORCA_ARTIFACTS_DIR 未注入（非 orca run 上下文）" >&2; exit 2; }

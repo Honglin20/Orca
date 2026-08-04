@@ -22,8 +22,9 @@ teacher/student 模型契约（`build_model` + `DUMMY_INPUT` + `KNOBS`）变成
 - `$ORCA_AGENT_RESOURCES`（orca spawn 时注入）= 本 agent 的资源目录，也就是
   `SKILL.md` 所在目录。本 skill 中所有 `<skill_dir>` 引用一律解析为
   `$ORCA_AGENT_RESOURCES`。
-- `<kd_scripts_dir>` = `workflows/agents/_kd_scripts/`（绝对路径）。固定引擎
-  入口在 `<kd_scripts_dir>/train_pipeline.py`，KD 库在 `<kd_scripts_dir>/kd/`。
+- `<kd_scripts_dir>` = `$ORCA_WORKFLOWS_ROOT/agents/_kd_scripts/`（绝对路径，
+  executor 注入 ``ORCA_WORKFLOWS_ROOT`` = workflow yaml 所在目录，cwd 无关）。
+  固定引擎入口在 `<kd_scripts_dir>/train_pipeline.py`，KD 库在 `<kd_scripts_dir>/kd/`。
 - 引擎注入 `$ORCA_ARTIFACTS_DIR`（per-run 权威产物目录 = `<output_dir>`）。
 
 ## 输入
@@ -41,9 +42,11 @@ workflow 节点经 Jinja 渲染注入（flatten + teacher-gen 上游 output + in
 
 ```bash
 source .venv/bin/activate 2>/dev/null || true
-# KD_SCRIPTS_DIR：从仓库结构定位 _kd_scripts（kd 库 + 固定引擎 train_pipeline.py 所在）
-KD_SCRIPTS_DIR="$(dirname "$(find workflows/agents/_kd_scripts -name kd_common.py -print -quit)")"
-KD_SCRIPTS_DIR="$(python3 -c "import os,sys;print(os.path.abspath(sys.argv[1]))" "$KD_SCRIPTS_DIR")"
+# KD_SCRIPTS_DIR：canonical 来源 = executor 注入的 $ORCA_WORKFLOWS_ROOT（cwd 无关）。
+# 缺 env → fail loud（不 cwd-relative fallback，防 tars run 从用户项目起跑时静默失败）。
+[ -n "$ORCA_WORKFLOWS_ROOT" ] || { echo "FAIL: \$ORCA_WORKFLOWS_ROOT 未注入（非 orca run 上下文）" >&2; exit 2; }
+KD_SCRIPTS_DIR="$ORCA_WORKFLOWS_ROOT/agents/_kd_scripts"
+[ -f "$KD_SCRIPTS_DIR/kd_common.py" ] || { echo "FAIL: _kd_scripts 缺 kd_common.py：$KD_SCRIPTS_DIR" >&2; exit 2; }
 # OUTPUT_DIR = $ORCA_ARTIFACTS_DIR（per-run；引擎 --artifacts_dir 指此；叶子落 <OUTPUT_DIR>/user/）
 OUTPUT_DIR="${ORCA_ARTIFACTS_DIR:-{{ setup.output.per_run_artifacts_dir }}}"
 mkdir -p "$OUTPUT_DIR/user"

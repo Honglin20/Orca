@@ -58,6 +58,7 @@ async def run_workflow(
     max_iter: int | None = None,
     tape_path: Path | None = None,
     run_id: str | None = None,
+    workflows_root: Path | None = None,
 ) -> RunState:
     """编排入口（SPEC §5 / 计划 R5.1）。
 
@@ -68,6 +69,9 @@ async def run_workflow(
         max_iter: ``--max-iter`` 覆盖（最高优先级）。
         tape_path: Tape 文件路径（测试传 tmp_path；默认 ``./runs/<run_id>.jsonl``）。
         run_id: 固定 run_id（测试用；默认 ``gen_run_id(wf.name)``）。
+        workflows_root: plan 2026-08-04 kd-nas headless fix —— workflow yaml 所在目录
+            绝对路径（``load_workflow(yaml_path).parent``）。None == 不注 ``ORCA_WORKFLOWS_ROOT``
+            （向后兼容；workflow 级共享资源 cwd-relative 查找的 agent 会 fail loud）。
 
     Returns:
         RunState（tape 派生的最终状态）。
@@ -82,5 +86,6 @@ async def run_workflow(
     bus = EventBus(tape)
     orch = Orchestrator(
         wf, bus, inputs, task=task, max_iter=max_iter, run_id=actual_run_id,
+        workflows_root=workflows_root,
     )
     return await orch.run()

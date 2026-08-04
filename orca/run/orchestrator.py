@@ -111,6 +111,7 @@ class Orchestrator:
         interrupt_handler: InterruptHandler | None = None,
         agent_tools_server: AgentToolsMcpServer | None = None,
         registry: ProcessRegistry | None = None,
+        workflows_root: Path | None = None,
     ):
         self.wf = wf
         self.bus = bus
@@ -177,6 +178,10 @@ class Orchestrator:
         # production 用 ``get_default_registry()``；测试 / CLI 入口可注入独立实例。
         # ``shutdown()`` 经此 registry 兜底清理未释放的子进程（signal / atexit 三处都调）。
         self._registry: ProcessRegistry = registry or get_default_registry()
+        # plan 2026-08-04 kd-nas headless fix：workflow yaml 所在目录（cwd 无关定位 workflow 级
+        # 共享资源，如 agents/_kd_scripts）。None == 不注 ORCA_WORKFLOWS_ROOT（向后兼容）。
+        # 由 RunManager / CLI 在 load_workflow(yaml_path) 时透传 yaml_path.parent。
+        self._workflows_root = workflows_root
 
     # ── phase 11：中断公开通道（SPEC §2.3）──────────────────────────────────
 
@@ -384,6 +389,8 @@ class Orchestrator:
         tape_path: Path,
         bus: EventBus,
         wf: Workflow,
+        *,
+        workflows_root: Path | None = None,
     ) -> Orchestrator:
         """从 Tape 重放构造 Orchestrator，恢复到崩溃前状态（SPEC §7.2 + SPEC B B1）。
 
@@ -479,7 +486,10 @@ class Orchestrator:
 
         # 5) 构造 Orchestrator（bypass __init__：避免重新 gen run_id / 重置 ctx）。
         #    F1：inputs 透传给 _bare_instance（不再独立调 _inputs_from_tape）。
-        orch = cls._bare_instance(wf, bus, state, resume_node, outputs_acc, inputs)
+        orch = cls._bare_instance(
+            wf, bus, state, resume_node, outputs_acc, inputs,
+            workflows_root=workflows_root,
+        )
         # 记录 replayed 事件数，供 run_from_state emit workflow_resumed 用。
         orch._resume_replayed_events = event_count
         orch._resume_initial_outputs = outputs_acc
@@ -523,6 +533,8 @@ class Orchestrator:
         resume_node: str,
         outputs_acc: dict[str, Any],
         inputs: dict[str, Any],
+        *,
+        workflows_root: Path | None = None,
     ) -> Orchestrator:
         """构造 bypass ``__init__`` 的 Orchestrator（resume 专用，复用 drive 逻辑）。
 
@@ -556,6 +568,8 @@ class Orchestrator:
         orch._agent_tools_server = None
         # phase-11-process：resume 用 default registry（同 process；signal 兜底仍生效）。
         orch._registry = get_default_registry()
+        # plan 2026-08-04 kd-nas headless fix：workflows_root 透传（resume 路径同款 cwd 无关）。
+        orch._workflows_root = workflows_root
         # resume 专用状态（run_from_state 消费）。
         orch._resume_replayed_events = 0
         orch._resume_initial_outputs = outputs_acc
@@ -881,6 +895,7 @@ class Orchestrator:
             self._agent_tools_server,
             bus=self.bus,
             runs_dir=self.bus.tape.path.parent,
+            workflows_root=self._workflows_root,
         )
         # node.kind=="agent" 已保证 node 是 AgentNode；node.retry 字段必然存在。
         if node.kind == "agent" and getattr(node, "retry", None) is not None:  # type: ignore[union-attr]

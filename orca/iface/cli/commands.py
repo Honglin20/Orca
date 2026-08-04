@@ -741,7 +741,9 @@ def _resume_workflow(tape_or_run_id: str, yaml_override: Path | None) -> int:
 
     # 4) from_tape 校验 + 构造（typed exceptions → exit code）。
     try:
-        orch = Orchestrator.from_tape(tape_path, bus, wf)
+        orch = Orchestrator.from_tape(
+            tape_path, bus, wf, workflows_root=resolved_yaml.parent,
+        )
     except AlreadyCompletedError as e:
         # 非错误：workflow 已完成，exit 0。
         typer.echo(f"✓ {e}")
@@ -902,6 +904,7 @@ def _run_workflow(config: RunConfig) -> int:
         inputs=config.inputs,
         task=config.task,
         max_iter=config.max_iter,
+        workflows_root=config.yaml_path.parent,
     )
     # 不在此处调 kickoff：``@work`` decorator 需要 Textual event loop running，
     # 而 ``tui.run()`` 是阻塞起 loop 的入口——run() 之前 loop 还没起，调 kickoff 会撞
@@ -944,6 +947,7 @@ def _run_workflow_headless(
         orch = Orchestrator(
             wf, bus, inputs=config.inputs,
             task=config.task, max_iter=config.max_iter, run_id=bg_run_id,
+            workflows_root=config.yaml_path.parent,
         )
     except ValueError:
         # 配置错误（必填 input 缺失等）→ workflow_failed（Orchestrator.__init__ 抛）。

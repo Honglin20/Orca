@@ -398,9 +398,13 @@ class OrcaApp(App):
         *,
         gate_port: int | None = None,
         tape_path: Path | None = None,
+        workflows_root: Path | None = None,
     ) -> None:
         super().__init__()
         self.wf = wf
+        # plan 2026-08-04 kd-nas headless fix：workflow yaml 所在目录，透传给 Orchestrator
+        # → executor 注入 ORCA_WORKFLOWS_ROOT env（agent.md cwd 无关定位共享资源目录）。
+        self._workflows_root = workflows_root
         self._inputs = inputs or {}
         self._task = task
         self._max_iter = max_iter
@@ -643,6 +647,7 @@ class OrcaApp(App):
                 task=self._task, max_iter=self._max_iter, run_id=self.run_id,
                 interrupt_handler=self.interrupt_handler,
                 agent_tools_server=self.agent_tools_server,
+                workflows_root=self._workflows_root,
             )
             self._orchestrator = orch
             state = await orch.run()

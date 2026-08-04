@@ -126,7 +126,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         state = asyncio.run(
-            run_workflow(wf, inputs, task=args.task, max_iter=args.max_iter)
+            run_workflow(
+                wf, inputs, task=args.task, max_iter=args.max_iter,
+                workflows_root=Path(args.yaml).resolve().parent,
+            )
         )
     except KeyboardInterrupt:
         # SIGINT → asyncio 转 task cancel + KeyboardInterrupt。registry.shutdown 兜底

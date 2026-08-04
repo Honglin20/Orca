@@ -136,6 +136,9 @@ class InProcessRunHandle(RunView):
 
     source: RunSource = field(default="in-process", init=False)
     wf: Workflow | None = None
+    # plan 2026-08-04 kd-nas headless fix：workflow yaml 所在目录，透传给 Orchestrator
+    # → executor 注入 ORCA_WORKFLOWS_ROOT env（agent.md cwd 无关定位共享资源）。
+    workflows_root: Path | None = None
     gate_handler: HumanGateHandler | None = None
     # run task（``_run_with_sem`` 创建）；``wait_done`` await 它。
     _task: asyncio.Task | None = field(default=None, repr=False)
@@ -349,6 +352,7 @@ class RunManager:
             tape=tape,
             gate_handler=gate_handler,
             status="queued",
+            workflows_root=Path(yaml_path).resolve().parent,
         )
         # phase-13 §3.1：起 per-run chart ingestor（resume 模式不起，SPEC §3.1）。
         # sock_path 与 start_run 生命周期一致：teardown 时 cancel + unlink。
@@ -1983,6 +1987,7 @@ class RunManager:
                 task=task,
                 max_iter=max_iter,
                 run_id=handle.run_id,
+                workflows_root=handle.workflows_root,
             )
             try:
                 await orch.run()

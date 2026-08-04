@@ -89,6 +89,7 @@ class ClaudeExecutor(Executor):
         agent_tools_server: AgentToolsMcpServer | None = None,
         *,
         runs_dir: Path | None = None,
+        workflows_root: Path | None = None,
     ) -> None:
         self.profile = profile
         self._agent_tools_server = agent_tools_server
@@ -96,6 +97,10 @@ class ClaudeExecutor(Executor):
         # None == 不注 ``ORCA_CHART_SOCK`` env（向后兼容，script 端 render_chart fail loud）。
         # 由 orchestrator 从 ``self.bus.tape.path.parent`` 推导传入（同 tape 父目录）。
         self._runs_dir = runs_dir
+        # plan 2026-08-04 kd-nas headless fix：workflow yaml 所在目录绝对路径，cwd 无关定位
+        # workflow 级共享资源（如 agents/_kd_scripts）。None == 不注（向后兼容）。
+        # 由 orchestrator 从 load_workflow(yaml_path).parent 透传（run 启动期解析）。
+        self._workflows_root = workflows_root
 
     async def exec(self, node: AgentNode, ctx: RunContext) -> AsyncIterator[Event]:
         """执行 agent node，产出完整生命周期事件流（SPEC §4.3）。
@@ -147,6 +152,7 @@ class ClaudeExecutor(Executor):
                 run_id=ctx.run_id, session_id=session_id, chart_sock=chart_sock,
                 agent_resources=node.resources_root or "",
                 artifacts_dir=artifacts_dir,
+                workflows_root=str(self._workflows_root.resolve()) if self._workflows_root else "",
             )
 
             # phase 11 §5.5（review B2）：register debt —— spawn 前（写 mcp-config 之后）
@@ -288,6 +294,7 @@ def _build_spawn_config(
     chart_sock: str = "",
     agent_resources: str = "",
     artifacts_dir: str = "",
+    workflows_root: str = "",
 ) -> SpawnConfig:
     """按 SPEC §2.1 拼动态 argv + env overlay + 可选 --mcp-config（phase 11 §5.4）+ chart 路由（phase-13 §2）。
 
@@ -366,6 +373,7 @@ def _build_spawn_config(
         agent_resources=agent_resources,
         artifacts_dir=artifacts_dir,
         kb_dir=os.environ.get("ORCA_KB_DIR", ""),
+        workflows_root=workflows_root,
     )
     cli_path = profile.resolve_cli_path()  # env > default，运行时读（SPEC §2.6）
 

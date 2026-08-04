@@ -65,11 +65,15 @@ class ScriptExecutor(Executor):
         self,
         *,
         runs_dir: Path | None = None,
+        workflows_root: Path | None = None,
         registry: ProcessRegistry | None = None,
     ) -> None:
         # phase-13 §2：chart ingestor sock 父目录（``runs/<run_id>.sock`` 寻址用）。
         # None == 不注 ``ORCA_CHART_SOCK`` env（向后兼容，script 端 render_chart fail loud）。
         self._runs_dir = runs_dir
+        # plan 2026-08-04 kd-nas headless fix：workflow yaml 所在目录绝对路径（cwd 无关定位
+        # workflow 级共享资源）。None == 不注（向后兼容）。与 ClaudeExecutor 对称（§11 #9）。
+        self._workflows_root = workflows_root
         # phase-11-process §1.2（ADR §4.7）：DI 注入 ProcessRegistry。
         # production 用 ``get_default_registry()``；测试可注入独立实例。
         self._registry: ProcessRegistry = registry or get_default_registry()
@@ -103,6 +107,7 @@ class ScriptExecutor(Executor):
             artifacts_dir = _resolve_artifacts_dir(self._runs_dir, ctx.run_id)
             spawn_env = _build_spawn_env(
                 node.name, ctx.run_id, session_id, chart_sock, artifacts_dir,
+                workflows_root=str(self._workflows_root.resolve()) if self._workflows_root else "",
             )
             registry = self._registry
             try:
@@ -243,14 +248,17 @@ def _resolve_artifacts_dir(runs_dir: Path | None, run_id: str) -> str:
 
 def _build_spawn_env(
     node: str, run_id: str, session_id: str, chart_sock: str, artifacts_dir: str = "",
+    workflows_root: str = "",
 ) -> dict[str, str]:
-    """phase-13 §2 + P8：构造 spawn 子进程 env（``os.environ`` + chart 路由 + 产物目录 overlay）。
+    """phase-13 §2 + P8 + plan 2026-08-04：构造 spawn 子进程 env（``os.environ`` + overlay）。
 
     - 4 个 ORCA_* chart 路由全注：script 子进程内 ``orca.chart.render_chart`` 从 env 读身份路由。
     - chart_sock 空（runs_dir 缺 / sock path 过长）→ 仍注 run_id / node / session_id
       （其余 3 个非路径信息，script 端 §7.1 fail loud 提示缺 ``ORCA_CHART_SOCK``）。
     - artifacts_dir 空（runs_dir 缺）→ 不注 ``ORCA_ARTIFACTS_DIR``（向后兼容；workflow 脚本
       读 env 时需自处理缺省）。非空 → 注绝对路径（P8：workflow 据此写产物，替代自建目录）。
+    - workflows_root 空 → 不注 ``ORCA_WORKFLOWS_ROOT``（向后兼容）。非空 → 注绝对路径
+      （plan 2026-08-04：workflow 级共享资源 cwd 无关定位）。
     - 空 prefix 元组（script executor 不绑特定 backend，不透传 ANTHROPIC_/CLAUDE_）：
       保持子进程继承 ``os.environ``（除 ORCA_* overlay 外），让 script 看到正常 shell env。
     """
@@ -265,5 +273,6 @@ def _build_spawn_env(
         # 在 run 启动期写入）→ 显式 overlay（spawn_env 已 **os.environ，此处显式注保持与
         # artifacts_dir 一致的确定性 overlay 契约）。
         kb_dir=os.environ.get("ORCA_KB_DIR", ""),
+        workflows_root=workflows_root,
     )
     return {**os.environ, **overlay}
