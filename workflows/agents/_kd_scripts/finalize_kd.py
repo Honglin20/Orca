@@ -304,7 +304,7 @@ def _write_report(
     else:
         lines.append(
             f"champion = min-latency ratchet（admitted 集合 {len(admitted)} 个 SUCCESS ∧ met_latency ∧ "
-            f"met_accuracy 中 latency 最小，FIFO tiebreak N12）。"
+            f"met_accuracy 中 latency 最小，FIFO tiebreak）。"
         )
     lines.append("")
     lines.append("## 各轮 student 汇总")

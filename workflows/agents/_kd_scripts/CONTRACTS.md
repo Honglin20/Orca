@@ -38,7 +38,7 @@ workflows/
       kd/{losses,wrapper,compose,ema}.py   # KD 库（不变）
       kd/{trainer,_leaves,_resume}.py      # 固定训练引擎 + 叶子加载器 + 原子 resume
 knowledge_base/families/receiver/          # model8 变体仓（.py）+ _model8_blocks.py 共享积木
-<project>/artifacts/                       # ★ 跨 run 稳定 artifact 根（去 kd-nas 层；旧 artifacts/kd-nas/ 由 migrate_flat.py 原子迁移）
+<project>/artifacts/                       # ★ 跨 run 稳定 artifact 根（去 kd-nas 层）
 ```
 
 ## 1. 变体 I/O 契约（每个 receiver/*.py 必须暴露）
@@ -54,7 +54,7 @@ def build_model(**cfg) -> nn.Module: ...                       # 零参用 KNOBS
 def feature_hook_names(self) -> list[str]: ...                 # 可选，OFD/FitNets/RKD 特征对齐（缺则 distill 自动 mse-only）
 ```
 - **I/O**：输入 `[B,num_ports,num_subcarriers,num_symbols,1]`，输出同形；内部自理 alpha 归一。
-- **文件名 = variant_id**（stem）；`_*.py` 是共享模块（旧 pick_variant glob 排除，现 KNOBS 校验由 ``kd_common.validate_variant`` 持）。
+- **文件名 = variant_id**（stem）；`_*.py` 是共享模块（KNOBS 校验由 ``kd_common.validate_variant`` 持）。
 - **teacher 不在此**：活跃 teacher 由 `teacher-gen` 节点派生（wrapper .py 委托 baseline），不入 KB。
 - **feature_hook_names fail-loud**：distill 用 AST 判定此 fn 是否存在 → 启用/剥离 ofd；
   若 student 缺此 fn 但下游强配 ofd → ``kd/compose.py`` 守卫 fail-loud 抛 ValueError → FAIL_train。
@@ -128,7 +128,7 @@ def feature_hook_names(self) -> list[str]: ...                 # 可选，OFD/Fi
   | `--early_stop_patience` | **新增 optional** | patience 轮无改进 break（0=禁用） |
   | `--eval_every` | 保留 | mid-train eval cadence（默认 1） |
   | `--mode` / `--out_ckpt` / `--build_fn` / `--build_cfg` / `--kd_config` / `--model_path` / `--student_model_path` / `--teacher_cache` / `--student_ckpt` / `--accuracy_baseline` / `--accuracy_baseline_kind` / `--epochs` / `--lr` / `--batch_size` / `--device` / `--seed` / `--variant_id` / `--project_root` / `--env_anchor` | 保留 | 语义不变（CLI > yaml > 默认） |
-  | 单体 inline ``user_*`` slot / `--user_*` flag | **删除** | 旧运行时注入机制随骨架化移除；用户逻辑改经 kd-train-script codegen 产 4 叶子承载 |
+  | 单体 inline ``user_*`` slot / `--user_*` flag | **已移除** | 用户逻辑经 kd-train-script codegen 产 4 叶子承载 |
 
   **★ 调用点 × 字段 × 数据源矩阵**（5 调用点）：
 

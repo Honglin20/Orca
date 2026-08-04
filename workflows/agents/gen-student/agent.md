@@ -1,5 +1,5 @@
 ---
-description: kd-nas 串行版 gen-student（合并 hypothesizer+engineer 为一节点）：结构变换派生 student model.py。首轮固定规则（缩1层 + FFN→pointwise），迭代轮读 ledger 上轮 perf + KB 技术点。DUMMY_INPUT 字节级 deterministic 校验 == flatten baseline；validate_contract PASS（3 轮修不过 → catch → FAIL_build）。feature_hook_names 契约（ofd/fitnets/rkd 特征蒸馏时 student 须暴露）。
+description: kd-nas 串行版 gen-student：结构变换派生 student model.py。首轮固定规则（缩1层 + FFN→pointwise），迭代轮读 ledger 上轮 perf + KB 技术点。DUMMY_INPUT 字节级 deterministic 校验 == flatten baseline；validate_contract PASS（3 轮修不过 → catch → FAIL_build）。feature_hook_names 契约（ofd/fitnets/rkd 特征蒸馏时 student 须暴露）。
 tools: [bash, read, write, edit, glob, grep, task, todowrite]
 ---
 # gen-student

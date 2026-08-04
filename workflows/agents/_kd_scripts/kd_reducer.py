@@ -200,7 +200,7 @@ def _admitted(ledger: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _min_latency_champion(
     ledger_after: list[dict[str, Any]], baseline: dict[str, Any]
 ) -> dict[str, Any]:
-    """admitted 集合内 latency 最小；**FIFO tiebreak（首个出现的，不 ratchet tie）**（N12）。
+    """admitted 集合内 latency 最小；**FIFO tiebreak（首个出现的，不 ratchet tie）**。
 
     无 admitted → 返回 baseline（setup seed 的 round=0 baseline）。
     FIFO tiebreak：admitted 中遍历按 ledger 顺序，``<=`` 严格小于才替换 →
@@ -211,7 +211,7 @@ def _min_latency_champion(
         return baseline
     best = admitted[0]
     for e in admitted[1:]:
-        # 严格小于才替换：tie 不 ratchet（保 FIFO 最早，N12）。
+        # 严格小于才替换：tie 不 ratchet（保 FIFO 最早）。
         if e["latency_us"] < best["latency_us"]:
             best = e
     return best
@@ -306,7 +306,7 @@ def reduce_ledger(
     # 本轮 candidate 是否成为新 champion：
     #   (a) 全局 best 就是 candidate；
     #   (b) candidate 不是 baseline（避免 baseline 自身被算作「新 champion」）；
-    #   (c) candidate.latency **严格小于** cur_champion.latency（tie 不 ratchet，N12）。
+    #   (c) candidate.latency **严格小于** cur_champion.latency（tie 不 ratchet）。
     new_champion_this_round = (
         best_after.get("variant_id", best_after.get("id")) == candidate["variant_id"]
         and candidate["variant_id"] != prev_best_id

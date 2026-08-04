@@ -181,7 +181,7 @@ class KDTrainer:
                     file=sys.stderr,
                 )
                 break
-            if sch is not None:                                   # M3 None guard
+            if sch is not None:                                   # None guard
                 sch.step()
             last_avg = epoch_loss / max(n_batches, 1)
             print(f"[train_pipeline:teacher] epoch={epoch} loss_avg={last_avg:.6f}", flush=True)
@@ -297,7 +297,7 @@ class KDTrainer:
                     file=sys.stderr,
                 )
                 break
-            if sch is not None:                                          # M3 None guard
+            if sch is not None:                                          # None guard
                 sch.step()
             last_avg = epoch_loss / max(n_batches, 1)
             print(
@@ -393,7 +393,7 @@ class KDTrainer:
         if not math.isfinite(float(value)):
             raise SystemExit(
                 f"[eval mode] eval_metric returned non-finite value={value}; aborting "
-                "(a fake metric would mask a broken eval pipeline — CLAUDE.md Rule 12)."
+                "(a fake metric would mask a broken eval pipeline — fail loud, do not mask)."
             )
 
         # Direction + met judgment via kd_common.accuracy_direction (lazy import so
@@ -460,7 +460,7 @@ class KDTrainer:
                     file=sys.stderr,
                 )
 
-        # latest.pt — always saved (resume contract). R1: schema keys only.
+        # latest.pt — always saved (resume contract). Schema keys only.
         _resume.save_latest(
             self.latest_path,
             state_dict=model.state_dict(),
@@ -546,7 +546,7 @@ class KDTrainer:
                     f"({type(e).__name__}: {e}); continuing with fresh optimizer.",
                     file=sys.stderr,
                 )
-        # B4 — scheduler state drop: persisted scheduler but current run has none.
+        # scheduler state drop: persisted scheduler but current run has none.
         if rs.scheduler_state is not None and sch is None:
             _resume.warn_scheduler_drop(
                 cfg.resume_ckpt,
@@ -796,7 +796,7 @@ def _kd_accuracy_direction(kind: str) -> str:
 
     Falls back to ``""`` (unknown direction) when ``kd_common`` is not on
     sys.path — but emits a single stderr WARN so the operator can see that
-    early-stop / direction-aware comparison has been disabled (F3).
+    early-stop / direction-aware comparison has been disabled.
     """
     global _KD_ACCURACY_DIRECTION_WARNED
     try:

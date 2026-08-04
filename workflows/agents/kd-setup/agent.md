@@ -1,5 +1,5 @@
 ---
-description: kd-nas 串行版 Setup（一次性·幂等）：探测 shared infra 路径 + seed baseline champion + device/GPU 探测。**不含 teacher 训练**（已拆到独立 train_teacher 节点）。所有下游专用路径字段作为顶层 output 一次给齐（单一真相源）。取 orca.lock 单写者护栏。确定性逻辑全在脚本（rule 5）。
+description: kd-nas 串行版 Setup（一次性·幂等）：探测 shared infra 路径 + seed baseline champion + device/GPU 探测。setup 只做路径探测 + baseline seed + device（teacher 训练在 train_teacher 节点）。所有下游专用路径字段作为顶层 output 一次给齐（单一真相源）。取 orca.lock 单写者护栏。确定性逻辑全在脚本（rule 5）。
 tools: [bash, read, write, edit, glob, grep]
 ---
 # kd-setup（串行版）
@@ -15,7 +15,7 @@ tools: [bash, read, write, edit, glob, grep]
 4. 最后组**一个** JSON 对象作为最终消息返回。
 
 **严禁**（违反任一项 = 任务失败）：
-- ❌ 训 teacher / 跑 teacher_setup / 跑 train_pipeline.py（已拆到 train_teacher 节点）；
+- ❌ 训 teacher / 跑 teacher_setup / 跑 train_pipeline.py（teacher 训练属 train_teacher 节点）；
 - ❌ 重测 baseline latency（透传 flatten.output.baseline_latency_us，避免重复测量）；
 - ❌ 校验 baseline 契约（flatten 已 PASS；本节点只透传路径）；
 - ❌ 枚举 KB 变体 / 跑 pick_variant（串行版不消费 KB receiver，student 由 gen_student 派生）；

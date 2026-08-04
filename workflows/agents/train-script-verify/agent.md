@@ -9,8 +9,8 @@ tools: [bash, read, write, edit, glob, grep, task]
 **校验 gen_train_script 产出的 4 叶子满足 KD 串行版的硬约束**：
 
 1. 4 叶子存在（`user/{loss,data,eval,optim}.py`）且 `run_config.yaml` / `run.sh` 齐；
-2. **AST 自包含**（Q6：禁 sibling/相对 import；顶层 import 仅白名单 {torch,math,numpy,typing,itertools,functools,collections,dataclasses,random}）；
-3. **AST 签名相等**（E9：函数名 + 必填位置参数集；默认参数 additive）；
+2. **AST 自包含**（禁 sibling/相对 import；顶层 import 仅白名单 {torch,math,numpy,typing,itertools,functools,collections,dataclasses,random}）；
+3. **AST 签名相等**（函数名 + 必填位置参数集；默认参数 additive）；
 4. **kind 方向硬校验**（leaf kind 方向组 vs `inputs.accuracy_baseline_kind` 方向组）；
 5. **fidelity_check.py 复核**数值级等价性（`FIDELITY: PASS`）；
 6. **引擎 smoke**：用固定引擎入口 `train_pipeline.py` + 合成 model+ckpt 跑 `--mode teacher`

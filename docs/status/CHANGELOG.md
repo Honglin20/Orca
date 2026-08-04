@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-04] refactor(kd-nas): P5 任务纯净度清扫——决策标签 / 历史叙事清除 + 守门测试强化
+
+Phase 4 之后**审查过程决策标签**（D2/D8/D10/E1-E13/M1-M8/N3-N21/Q6-Q10/B4/R1-R3/F3/A4-A8 等非括号形式）pervasive 残留 + 3 个 agent description 含历史对比叙事 + CONTRACTS/yaml 夹带迁移叙事——本次纯文本层清扫闭环：agent prompt（5 agent.md + 1 leaf skel + kd-nas.yaml 4 处 + CONTRACTS 3 处）零过程标签零历史叙事；引擎 .py（migrate_flat ~15 处 / trainer / _resume / kd_reducer / finalize_kd）删尾部过程 ID + `code-reviewer Rx` 归属，保留设计 why 注释；守门测试 `test_kd_prompt_no_source_narrative.py` deny-list 分层强化——agent prompt 层加非括号决策标签 + 历史叙事词锁，.py 仅保留括号 + 复合源叙事锁（D7 边界），E402 noqa 双重免疫。零逻辑 / 契约 / CLI / 字段改动。测试 468 passed, 3 skipped（零回归）。Commit: `<待填>`。详见 [release note](../releases/2026-08-04-kd-nas-trainer-engine-phase5.md)。
+
 ## [2026-08-04] refactor(kd-nas): Phase 4 agent prompt 去 SPEC 源化——任务纯净态
 
 把 kd-nas workflow 的所有 agent prompt（10 节点 agent.md + 3 SKILL.md + references/templates/leaves/*.py.skel + workflow-checklists/*）+ 引擎库代码（`_kd_scripts/*.py`、`kd/*.py`）+ `CONTRACTS.md` + `kd-nas.yaml` 残留的**来源叙事**（SPEC §x.y / SPEC-REVIEW NX / spec-review mX / cleanup 20XX / v5 变更 / deleted / historical / port from / Phase N / plan §x / 决策标签 Q2·E4·N21·M8·D2·E6·A8 等）全部清除，改为任务纯净态（只描述「做什么 / 契约 / 输入输出 / 执行步骤 / fail 条件 / catch 协议行为」）。D7 客观边界执行：agent.md 零源叙事硬线；引擎 .py 留设计注释删源叙事；CONTRACTS 保留 §N 章节号删 changelog。distill agent.md 补 M8 ofd 重试提示（fail-loud → 降级 mse-only 重跑 step 3+4）。新增反回归测试 `tests/workflows/test_kd_prompt_no_source_narrative.py`（deny-list grep 守门）。基线 128 命中 → 完成后 0；测试 467 passed, 3 skipped（deselect 1 个 pre-existing `nas-supernet.yaml` 解析失败，与本 Phase 无关）。Commit: `204a64d`。详见 [release note](../releases/2026-08-04-kd-nas-trainer-engine-phase4.md)。

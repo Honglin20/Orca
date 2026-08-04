@@ -2,11 +2,11 @@
 
 把旧 ``<project>/artifacts/kd-nas/`` 拍平到 ``<project>/artifacts/``（去 kd-nas 层）。
 
-**5 步原子迁移 + 全字段 rewrite + sentinel 幂等**（Q10/N3/E1/E2/E3）：
+**5 步原子迁移 + 全字段 rewrite + sentinel 幂等**：
 
   1. **copy**（非 move，``dirs_exist_ok=True`` 总覆盖语义）旧 ``checkpoints/`` / ``meta/`` /
      ``models/`` / ``onnx/`` / ``reports/`` + 根级 ``ledger.jsonl`` / ``champions.jsonl``
-     → 拍平新位置。``meta/tune_cache.json`` 不迁移（R2：latency 缓存删旧重建，换路径
+     → 拍平新位置。``meta/tune_cache.json`` 不迁移（latency 缓存删旧重建，换路径
      即作废，迁移无意义）。
   2. **rewrite 路径字段 → ``.new`` 文件**（``Path.relative_to(kd_old) → flat_new / rel``，
      **禁裸 string replace**——防 ``kd-nas-artifacts`` 同前缀 / 项目根含 "kd-nas" 误伤）：
@@ -19,14 +19,14 @@
   3. **校验** 新 ledger / champions 行数 == 旧。
   4. **``os.replace``** 原子替换（逐文件 ``.new`` → 正名）。
   5. **sentinel ``.migration_done``**（manifest 含文件清单 + 行数 + sha256）作最后一步
-     原子 touch（E1/D-B）。
+     原子 touch。
   6. sentinel 成功后才 ``shutil.rmtree`` 旧 ``kd-nas/`` 子树。
 
-**幂等（E1）**：sentinel 缺 → 从 copy 重跑（``dirs_exist_ok=True`` 覆盖语义读未动的 kd_old
+**幂等**：sentinel 缺 → 从 copy 重跑（``dirs_exist_ok=True`` 覆盖语义读未动的 kd_old
 原始，flat 中间态被覆盖；多文件 partial-replace 后续步骤幂等）。sentinel 在 → 校验 flat
 文件存在 → 直接进步骤 6 删旧。
 
-**磁盘峰值 ≈ 2x**（D10）：迁移期间旧 + 新 checkpoints 同时存在；迁移完 rmtree 释放。
+**磁盘峰值 ≈ 2x**：迁移期间旧 + 新 checkpoints 同时存在；迁移完 rmtree 释放。
 
 CLI::
 
@@ -50,18 +50,18 @@ from pathlib import Path
 from typing import Any
 
 
-# ── 须 rewrite 的字段拓扑（E2：实施前 grep ``_LEDGER_REQUIRED`` + ``_CHAMPIONS_REQUIRED``
-#    + teacher_meta keys 锁死；N3 全字段清单）──────────────────────────────────
+# ── 须 rewrite 的字段拓扑（实施前 grep ``_LEDGER_REQUIRED`` + ``_CHAMPIONS_REQUIRED``
+#    + teacher_meta keys 锁死；全字段清单）──────────────────────────────────
 _LEDGER_PATH_FIELDS = ("ckpt", "student_path")
 _CHAMPIONS_PATH_FIELDS = ("snapshot",)
 _TEACHER_META_PATH_FIELDS = ("teacher_onnx", "teacher_cache", "teacher_ckpt")
 
-# copy 的子目录（checkpoints/meta/models/onnx/reports）；logs/ 不迁移（M1：日志走 per-run）。
+# copy 的子目录（checkpoints/meta/models/onnx/reports）；logs/ 不迁移（日志走 per-run）。
 _COPY_SUBDIRS = ("checkpoints", "meta", "models", "onnx", "reports")
 # copy 的根级文件（jsonl 真相源——经 rewrite 步骤改写后落 flat 根）。
 _COPY_ROOT_FILES = ("ledger.jsonl", "champions.jsonl")
 
-# tune_cache.json 不迁移（R2：路径键失效，删旧重建）。
+# tune_cache.json 不迁移（路径键失效，删旧重建）。
 _NO_MIGRATE_CACHE = "tune_cache.json"
 
 
@@ -76,7 +76,7 @@ def _sha256_file(path: Path) -> str:
 def _rewrite_path(p_str: str, kd_old: Path, flat_new: Path) -> str:
     """``Path(p).relative_to(kd_old) → flat_new / rel``；不在 kd_old 子树 → 原样返回。
 
-    禁裸 string replace（防 ``kd-nas-artifacts`` 同前缀 / 项目根含 "kd-nas" 误伤，E3）。
+    禁裸 string replace（防 ``kd-nas-artifacts`` 同前缀 / 项目根含 "kd-nas" 误伤）。
     """
     p_str = p_str.strip() if isinstance(p_str, str) else p_str
     if not p_str:
@@ -125,7 +125,7 @@ def _rewrite_teacher_meta(
 ) -> dict[str, Any]:
     """rewrite teacher_meta.json 的 teacher_onnx/teacher_cache/teacher_ckpt。
 
-    **禁 rewrite** ``teacher_model_path``（per-run scope，不在 kd-nas 子树，A4/E2）。
+    **禁 rewrite** ``teacher_model_path``（per-run scope，不在 kd-nas 子树）。
     """
     out = dict(obj)
     for k in _TEACHER_META_PATH_FIELDS:
@@ -196,10 +196,10 @@ def _copy_subdirs_and_root_files(
     """copy checkpoints/meta/models/onnx/reports 子目录 + 根级 jsonl → flat_new。
 
     ``dirs_exist_ok=True`` 总覆盖语义（幂等：重跑覆盖 partial 中间态）。
-    ``meta/tune_cache.json`` 删除（R2：latency 缓存路径键失效，删旧重建）。
+    ``meta/tune_cache.json`` 删除（latency 缓存路径键失效，删旧重建）。
     返回实际 copy 的文件相对路径列表（manifest 用）。
 
-    **fail loud 适配（code-reviewer R3）**：必需子目录（checkpoints/meta/models）+
+    **fail loud 适配**：必需子目录（checkpoints/meta/models）+
     根 jsonl（ledger/champions）缺失 → stderr WARN（不 raise，因旧实例可能真空；
     但须让 operator 看到——否则 flat 后路径字段指向不存在文件，is_variant_done 突然
     返 False 触发无必要重训，无任何错误信号）。可选子目录（onnx/reports）缺失静默。
@@ -239,7 +239,7 @@ def _copy_subdirs_and_root_files(
                     copied.append(str(rel))
             continue
         shutil.copytree(src, dst, dirs_exist_ok=True)
-        # R2：删 tune_cache.json（latency 缓存路径键失效，删旧重建）
+        # 删 tune_cache.json（latency 缓存路径键失效，删旧重建）
         cache_in_dst = dst / "tune_cache.json" if sub == "meta" else None
         if cache_in_dst and cache_in_dst.is_file():
             cache_in_dst.unlink()
@@ -380,12 +380,12 @@ def _validate_sentinel(flat_new: Path) -> bool:
 def migrate(kd_old: Path, flat_new: Path, dry_run: bool = False) -> dict[str, Any]:
     """主入口。返回结果 dict（含 manifest / 动作记录）。
 
-    幂等（E1）：sentinel 缺 → 从 copy 重跑；sentinel 在 → 校验 flat → rmtree kd_old。
+    幂等：sentinel 缺 → 从 copy 重跑；sentinel 在 → 校验 flat → rmtree kd_old。
     """
     _validate_layout(kd_old, flat_new)
 
     # 幂等分支：sentinel 已在 → 校验 flat 文件存在 + kd_old 内容与已迁移时一致 → rmtree kd_old。
-    # 数据安全契约（code-reviewer R3）：sentinel 在但 kd_old 又出现时，必须确认 kd_old 内容
+    # 数据安全契约：sentinel 在但 kd_old 又出现时，必须确认 kd_old 内容
     # 与已迁移时相同——否则可能含用户后续写入的新数据（旧版 setup 误跑 / 备份恢复），
     # 静默 rmtree 会丢数据。行数不一致 → fail loud（契约：「不动旧、不替换、fail loud」）。
     if not dry_run and _validate_sentinel(flat_new):

@@ -1,5 +1,5 @@
 ---
-description: KD-NAS 训练叶子生成（folder-agent：SKILL.md + references 作资源，ORCA_AGENT_RESOURCES 锚定，cwd 无关）。产出 4 叶子（user/{loss,data,eval,optim}.py）+ run_config.yaml + run.sh（人类用）+ teacher 默认 lr/epochs。下游节点不再 import 生成脚本——它们调固定引擎 _kd_scripts/train_pipeline.py，引擎从 --artifacts_dir/user/ 加载叶子。
+description: KD-NAS 训练叶子生成（folder-agent：SKILL.md + references 作资源，ORCA_AGENT_RESOURCES 锚定，cwd 无关）。产出 4 叶子（user/{loss,data,eval,optim}.py）+ run_config.yaml + run.sh（人类用）+ teacher 默认 lr/epochs。下游节点调固定引擎 _kd_scripts/train_pipeline.py（不 import 生成脚本），引擎从 --artifacts_dir/user/ 加载叶子。
 tools: [bash, read, write, edit, glob, grep, task, todowrite]
 ---
 # kd-train-script
@@ -67,7 +67,7 @@ optimizer/scheduler（存在则搬）。发现+读用户仓 eval 脚本（glob `
 （`kd/compose.py` / `kd/wrapper.py` / `kd/ema.py` 只读）+ 4 个叶子骨架
 （`$ORCA_AGENT_RESOURCES/references/templates/leaves/*.py.skel`）。
 
-**Step 2 — D8 AST 检测**：扫用户 `train.py` 找 GAN/RL/DDP token（Discriminator /
+**Step 2 — AST 检测**：扫用户 `train.py` 找 GAN/RL/DDP token（Discriminator /
 adversarial / policy_gradient / DistributedDataParallel / torchrun / …）。命中且
 未给 `--force-template` → **fail loud**（stderr 报 token + file:line），不产 JSON。
 用户给 `--force-template` = 声明 false positive（引擎可能静默错模型，用户承担）。
@@ -173,7 +173,7 @@ print(f'TEACHER_DEFAULT_EPOCHS: {int(ep_match)}')
 - ❌ 硬编码 shape 回退（必须读 baseline `DUMMY_INPUT`）；
 - ❌ 静默吞错（fail loud：CLI 不符、契约违约直接非零退出 + stderr 报因）；
 - ❌ 改 KD 库 / 引擎（叶子是消费者，引擎是固定库代码）；
-- ❌ D8 检测到 GAN/RL/DDP token 且未给 `--force-template` → fail loud，**不**继续生成。
+- ❌ AST 检测到 GAN/RL/DDP token 且未给 `--force-template` → fail loud，**不**继续生成。
 
 ## 输出 JSON schema（你的终点）
 

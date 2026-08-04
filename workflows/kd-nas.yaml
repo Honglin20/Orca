@@ -108,7 +108,7 @@ nodes:
 
   # ═══════════════════════════════════════════════════════════════
   # setup（一次性·幂等）：探测 shared infra 路径 + seed baseline champion + device 探测。
-  # **不含 teacher 训练**（拆到 train_teacher）。所有下游专用路径字段作为顶层 output 一次给齐。
+  # **不含 teacher 训练**（teacher 训练属 train_teacher 节点）。所有下游专用路径字段作为顶层 output 一次给齐。
   # ═══════════════════════════════════════════════════════════════
   - name: setup
     kind: agent
@@ -200,7 +200,7 @@ nodes:
   # + run_config.yaml + run.sh（人类用）+ 提 teacher 默认 lr/epochs。叶子从固定引擎
   # `_kd_scripts/train_pipeline.py`（`KDTrainer`）消费；本节点**不产单体 train_pipeline.py**。
   # train_pipeline_path 字段切指向该固定引擎入口（下游 5 调用点 inline flag 调）。
-  # D8 AST 检测：读用户 train.py 时扫 GAN/RL/DDP，命中 fail loud + `--force-template` override。
+  # AST 检测：读用户 train.py 时扫 GAN/RL/DDP，命中 fail loud + `--force-template` override。
   # 四层校验：逐叶子静态 + smoke + fidelity_check（数值等价 + AST 自包含 + AST 签名 + kind 方向硬校验）+
   # workflow-verifier（4 叶子并行 review）。
   # ═══════════════════════════════════════════════════════════════
@@ -328,7 +328,7 @@ nodes:
     routes:
       - to: distill
 
-  # Step 2：distill（新写，单 student KD）：tune_latency → FAIL_latency 跳训练 → distill 训练（--kd_config recipe 必传）→ eval。
+  # Step 2：distill（单 student KD）：tune_latency → FAIL_latency 跳训练 → distill 训练（read→patch run_config.yaml 的 kd_config 字段）→ eval。
   # catch 协议：训练/eval rc≠0 → status=FAIL_train，agent 退 0 → decide 落账 continue。
   - name: distill
     kind: agent
@@ -416,7 +416,7 @@ nodes:
 
   # ═══════════════════════════════════════════════════════════════
   # finalize（KD 专版 inline prompt）：champion=baseline 兜底（不重蒸馏）+ eval + ONNX + latency
-  # + final_report.md + 终态可视化。champion 是真 student 时用 champion ckpt 跑 eval（不重训，N10 省 GPU）。
+  # + final_report.md + 终态可视化。champion 是真 student 时用 champion ckpt 跑 eval（不重训，省 GPU）。
   # ═══════════════════════════════════════════════════════════════
   - name: finalize
     kind: agent

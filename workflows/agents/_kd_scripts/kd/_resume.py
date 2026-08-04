@@ -25,7 +25,7 @@ Discipline:
   state but the current run built no scheduler, drop it with a stderr WARN
   (do not crash).  The caller passes ``scheduler_state=None`` on save when no
   scheduler exists.
-* **R1**: the persisted dict is checked to contain only the schema keys above
+* **Schema keys only**: the persisted dict is checked to contain only the schema keys above
   (no absolute paths leak in — verified by a test, not enforced here).
 """
 
@@ -194,7 +194,7 @@ def maybe_load(
 
 
 def warn_scheduler_drop(path: Path | str, reason: str) -> None:
-    """B4 — scheduler_state present but current run has no scheduler: drop loudly."""
+    """scheduler_state present but current run has no scheduler: drop loudly."""
     print(
         f"[kd._resume] WARN: latest.pt ({path}) carries scheduler_state but the "
         f"current run built no scheduler ({reason}); dropping scheduler state, "

@@ -211,7 +211,7 @@ cfg["kd_config"] = json.loads(kd_cfg)
 with open(path, "w", encoding="utf-8") as f:
     yaml.safe_dump(cfg, f, sort_keys=False)
 ' "$RUN_CONFIG" "$KD_CONFIG"
-# ★ E13/M1：redirect stdout → runs/<exp>/train.log（引擎只 print stdout；调用方 redirect）。
+# ★ redirect stdout → runs/<exp>/train.log（引擎只 print stdout；调用方 redirect）。
 mkdir -p "$PER_RUN/runs/$EXP"
 ORCA_KD_SCRIPTS_DIR="$KD_SCRIPTS_DIR" python3 "$TRAIN_PIPELINE" \
   --mode distill --config "$RUN_CONFIG" \
