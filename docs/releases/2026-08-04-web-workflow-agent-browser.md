@@ -1,7 +1,7 @@
 # Release: Web workflow/agent 文件浏览器（只读）（2026-08-04）
 
 > 经 spec-reviewer 对抗审查的实现计划（conditional-pass，4 blocker 全并入）。
-> Commit: `<TBD>`
+> Commit: `0103235`
 
 ## 做了什么
 

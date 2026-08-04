@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-04] feat(web): workflow/agent 文件浏览器（只读）——/workflows 页 + 5 API + prism 高亮
+
+新增 Web 纯只读浏览页 `/workflows`：列 workflow → 看引用 + 全量 agents → 点 agent 文件树 → 看文件内容（md 渲染 + .py prism 高亮）。后端 `routes/workflows.py`（无 manager 薄封装 compile loader）+ `_safe_resolve` 守卫（symlink 双查/null byte/越界）+ file endpoint 1MB cap & 二进制检测→422；前端 `workflow-browse-store`（plain zustand）+ `WorkflowsPage`/`WorkflowBrowsePage`(lazy)+`FileTree`+`CodeViewer`，prism CSS 进 browse chunk 不污染 `/runs/:runId`。spec-reviewer 4 blocker 闭环 + coder code-review 3 项闭环 + test-agent 真机 16 断言全过；回归后端 203 / 前端 487 零红；现有 route/页面/`main.tsx`/`FileContentView` 零改。**build 产物未含此 commit**（本机 python 环境受限），需另行 `npm run build`。Commit: `0103235`。详见 [release note](../releases/2026-08-04-web-workflow-agent-browser.md)。
+
 ## [2026-08-04] feat(in-session): 失败哨兵 + 失败历史注入——next 单一校验关口收口（根治 run 孤儿化）
 
 子代理自报失败经 `orca_node_failed_v1` 哨兵 → 引擎 `agent_blocked` recoverable → 重 arm 并把连续失败历史（**含本次**）确定性注入 prompt。主 session 改哑管道（永远喂 next，唯一例外 ask-user 哨兵），根治「见失败截胡变 executor 致 run 孤儿化 + 前端不出第二轮」——`orca status` 期间恒显 running。SPEC v3 经两轮 spec-reviewer 对抗闭环（R-N2「含本次」收紧获认可）；57 单测/集成 + 真实 `orca` CLI E2E 全绿；`_step_io`/`cli`/`daemon`/`events`/前端 **零改**（generic 透传，AC12/AC14 守门），不侵 in-session 灵活度（引擎不 dispatch、不决定 fresh/复用）。Commit: `35fdf78`。详见 [SPEC](../specs/2026-08-04-in-session-failure-sentinel-and-injection.md) + [plan](../plans/2026-08-04-in-session-failure-sentinel-and-injection.md)。
