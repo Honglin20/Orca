@@ -5,6 +5,14 @@
 
 ---
 
+## [2026-08-04] feat(kd-nas): Trainer 引擎化 Phase 2——接口原子切换（叶子化 codegen + 5 调用点切固定引擎）
+
+把 `kd-train-script` codegen 从产单体 `train_pipeline.py`（5 inline user_* slot）切到产 4 叶子（`user/{loss,data,eval,optim}.py`）+ `run_config.yaml` + `run.sh`。下游 5 调用点（train-teacher train+eval / distill train+eval / finalize eval）按 §3.3 矩阵原子切到固定引擎入口（`_kd_scripts/train_pipeline.py`）+ inline flag + `--artifacts_dir` per-run。**distill 移除 inline `--kd_config`（E4），唯一真相源 = run_config.yaml**（每轮 AST 决策 read→patch kd_config 字段）+ redirect stdout → `runs/r${ROUND}_student/train.log`（E13/M1）。**finalize eval champion 三字段强制 inline**（student_model_path / build_cfg / student_ckpt；矩阵第 5 行硬约束）。`fidelity_check.py` 重写为 `--leaves_dir` 模式 + AST 自包含（Q6）+ AST 签名相等（E9）+ kind 方向硬校验（D2）+ 数值等价。`kd-train-script` SKILL/agent/workflow doc/checklists 全部重写为叶子化契约 + D8 AST 检测；删旧单体模板（692 行）；任务纯净形态。`train-script-verify` 重写为 4 叶子并行 review + 引擎 smoke + workflow-verifier。CONTRACTS §3.1 flag diff 表（M6）+ 调用点 × 字段 × 数据源矩阵（N1）+ §6 叶子契约节 + E7 错位修正（「`train_teacher 调`」）。零回归：164 passed（含 Phase 1 引擎 33 测 + 新 leaf codegen 19 测 + finalize 13 测，含顺手修 2 个预存 mkdir bug + sys.path 污染）；3 个 test_struct_kd_p7 预存失败（git stash 验证无关）。code-reviewer 一轮闭环（1 must-fix + 1 决策 + 2 minor）。Commit: `521e8e3`（commit message 受并行 session 干扰；`git show --stat` 可见 18 文件属于本 phase）。详见 [release note](../releases/2026-08-04-kd-nas-trainer-engine-phase2.md)。
+
+## [2026-08-04] feat(test): nas-supernet E2E MNIST fixture——小 CNN + train/test + 离线降级
+
+`tests/e2e_nas_supernet/fixtures/mnist/`——为 `nas-supernet` workflow（计划 `2026-08-04-nas-agent-pipeline-rebuild.md` §17）准备的 E2E 目标项目：标准 LeNet 风格两层 CNN（参数化 conv1/conv2/fc_hidden，可被 expand-to-supernet 张开）+ CrossEntropy 训练 + test 集评估。复用判定：`examples/mnist_kd/` 带 kd-nas 专属契约（KNOBS/feature_hook_names/latency_provider），故**仅复用其 CNN 架构设计**、新建干净用户项目，让 expand 节点真实发现搜索维度。落点对齐 `tests/e2e_mxint/target_project/` 先例；全程 `pathlib`；离线降级 `torch.randn`（stderr WARNING，仅冒烟）；空 loader raise（fail loud）；code-reviewer 一轮闭环（M1 空 loader raise / S1 argparse 边界 / N1 weights_only / N2 num_classes 注释），保留 `test.py` 文件名（显式 spec 优先）。不改 `workflows/`/`orca/`。Commit: `bfe857f`。详见 [release note](../releases/2026-08-04-nas-supernet-mnist-fixture.md)。
+
 ## [2026-08-04] feat(examples): 真实 MNIST 分类项目（kd-nas 真实输入）
 
 `examples/mnist_kd/`——LeNet 风格两层 CNN，torchvision MNIST + cross-entropy，CPU 1-epoch test_acc≈0.98。契约兼容（CONTRACTS §1）：`build_model`/`DUMMY_INPUT=[1,1,28,28]`/`KNOBS`（conv1/conv2/fc，step<0）/`feature_hook_names`；`train.py` 暴露 `compute_loss`+re-iterable `build_dataloader`；`eval.py` top-1 acc；`latency_provider.py` ONNX 实测（cuda 缺失 WARN、文件缺失 fail loud）。零 orca import——genuine user project；code-reviewer 一轮闭环（空 loader raise / cuda WARN / `--epochs<1` 拒绝）。Commit: `2d9b5ff`。
