@@ -1,0 +1,5 @@
+{
+  "cnn": "The primary feature-mixing mechanism in the repeated layers is convolution (e.g. nn.Conv1d, nn.Conv2d, nn.Conv3d), driving spatial or temporal feature extraction. The layer stacking may preserve a fixed spatial resolution or include downsampling/pooling stages.",
+  "isotropic_transformer": "The primary feature-mixing mechanism in the repeated layers is attention, MLP-based token mixing, or similar token-mixing variants. The token count remains constant across all layers with no stage barriers, token-merging, or spatial-downsampling transitions, making overall depth highly flexible.",
+  "hierarchical_transformer": "The primary feature-mixing mechanism in the repeated layers is attention, with token merging, pooling, or spatial downsampling transitions between fixed macro-stages. The sequence length or spatial resolution progressively decreases across stages, constraining layer distribution by stage layout."
+}
