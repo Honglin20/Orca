@@ -4,6 +4,7 @@
 // 主题按钮**真调** use-theme（修 D1 FATAL F1：旧实现只切本地 state，不写 localStorage 也不改 <html> class）。
 
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { Loader2, RefreshCw, Sun, Moon, Monitor } from "lucide-react";
 import {
   currentTheme,
@@ -22,6 +23,7 @@ import type { LucideIcon } from "lucide-react";
 import {
   LayoutGrid,
   List as ListIcon,
+  Files,
 } from "lucide-react";
 
 const THEME_ICON: Record<Theme, LucideIcon> = {
@@ -81,6 +83,15 @@ export function ListTopBar({
       >
         <span className="orca-accent text-lg font-semibold tracking-wider">TARS</span>
         <span className="orca-text-faint text-sm">/ Orca Runs</span>
+        <Link
+          to="/workflows"
+          data-testid="nav-workflows"
+          className="orca-text-muted hover:orca-text hover:orca-bg-surface-2 orca-border ml-2 inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs"
+          title="浏览 workflow / agent 定义"
+        >
+          <Files size={12} strokeWidth={1.5} aria-hidden />
+          Workflows
+        </Link>
         <span className="ml-auto flex items-center gap-2">
           {/* 视图切换 segmented toggle（SPEC §10.1/AC-19）：默认看板 */ }
           <span
