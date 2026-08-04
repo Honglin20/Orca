@@ -18,6 +18,13 @@ Design principles:
 - pathlib only (no string path concatenation).
 - Fail-soft per chart: render_chart failure writes stderr + records "skipped"; never
   crashes the orchestrator (design-charts H1).
+- Static-file fallback: when the Orca chart socket is unavailable (headless / post-run
+  rendering), push_chart writes a self-contained static file (plotly HTML, matplotlib
+  PNG fallback) under ``<artifacts>/charts/<script_name>.{html,png}`` and records
+  status="rendered_static" with the path. Lets runs whose charts were skipped after
+  completion be re-rendered from their own artifacts (design-charts H1). Static path
+  supports chart_type subset {line, bar, pareto/scatter, table}; other live types
+  (area/radar/heatmap) raise _UnsupportedChartType and are skipped loudly.
 - Metric name + direction discovered from search_config.yaml objs (authoritative) ->
   project_manifest.md fallback -> generic.
 """
@@ -404,6 +411,341 @@ def parse_loss_log(log_path: Path) -> list[dict[str, float]]:
 
 
 # ---------------------------------------------------------------------------
+# Static file rendering fallback (headless / post-run)
+# ---------------------------------------------------------------------------
+
+# Static chart files land under ``<artifacts>/<this subdir>/<script_name>.<ext>``.
+STATIC_CHARTS_SUBDIR = "charts"
+
+# Cap on rows rendered into a static matplotlib table (unreadable beyond this).
+_MPL_TABLE_ROW_CAP = 30
+
+
+class _UnsupportedChartType(ValueError):
+    """Raised when neither plotly nor matplotlib static path supports a chart_type.
+
+    Carries the offending chart_type so push_chart can record a precise reason
+    instead of a generic "render failed". Subclasses ValueError for backward
+    compatibility with any caller that catches ValueError on render.
+    """
+
+
+def _charts_dir(artifacts_dir_path: Path) -> Path:
+    """Create + return ``<artifacts>/charts/`` (idempotent)."""
+    out = artifacts_dir_path / STATIC_CHARTS_SUBDIR
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def _series(data: list[dict[str, Any]], key: str) -> list[Any]:
+    """Project one field across all records (missing -> "")."""
+    return [d.get(key, "") for d in data]
+
+
+def _fmt_cell(val: Any) -> str:
+    """Format a cell value for static table rendering (mirrors search_table._to_str)."""
+    if val is None:
+        return ""
+    if isinstance(val, bool):
+        return "yes" if val else ""
+    if isinstance(val, float):
+        return f"{val:.4f}".rstrip("0").rstrip(".") or "0"
+    return str(val)
+
+
+def _compute_pareto_front(
+    data: list[dict[str, Any]],
+    x_key: str,
+    y_key: str,
+    x_dir: str,
+    y_dir: str,
+) -> list[int]:
+    """Return indices of non-dominated points under (x_dir, y_dir) in {"min","max"}.
+
+    A point p is dominated if some q is at-least-as-good in both axes and strictly
+    better in at least one. Duplicate points (same x,y) are de-duplicated by keeping
+    only the smallest index (others treated as dominated) so the front does not
+    collapse to all-duplicates when ties exist. Used only for static rendering
+    (the live front-end computes the front itself).
+    """
+    pts: list[tuple[int, float, float]] = []
+    for i, rec in enumerate(data):
+        try:
+            pts.append((i, float(rec[x_key]), float(rec[y_key])))
+        except (KeyError, ValueError, TypeError):
+            continue
+    front: list[int] = []
+    for i, xi, yi in pts:
+        dominated = False
+        for j, xj, yj in pts:
+            if j == i:
+                continue
+            # Duplicate-coord de-duplication: a later identical point is dominated
+            # by the earlier one (keeps the smallest-index representative).
+            if xj == xi and yj == yi:
+                if j < i:
+                    dominated = True
+                    break
+                else:
+                    continue
+            x_le = (xj <= xi) if x_dir != "max" else (xj >= xi)
+            y_le = (yj <= yi) if y_dir != "max" else (yj >= yi)
+            x_strict = (xj < xi) if x_dir != "max" else (xj > xi)
+            y_strict = (yj < yi) if y_dir != "max" else (yj > yi)
+            if x_le and y_le and (x_strict or y_strict):
+                dominated = True
+                break
+        if not dominated:
+            front.append(i)
+    return front
+
+
+def _parse_selected_from_caption(caption: str) -> tuple[float, float] | None:
+    """Best-effort extract selected (latency_ms, metric_display) from a pareto.py caption.
+
+    Matches ``"Selected arch: latency=X.XXms, <metric>=Y.YYYY."`` (case-insensitive).
+    The numeric groups use a strict ``\\d+(?:\\.\\d+)?`` pattern so the trailing
+    sentence period is NOT swallowed (``[\\d.]+`` would eat it and break float()).
+    Returns None if the caption does not carry selected coords.
+    """
+    m = re.search(
+        r"selected arch:.*?latency\s*=\s*(\d+(?:\.\d+)?)\s*ms\s*,\s*\w+\s*=\s*(-?\d+(?:\.\d+)?)",
+        caption,
+        re.IGNORECASE,
+    )
+    if not m:
+        return None
+    try:
+        return float(m.group(1)), float(m.group(2))
+    except ValueError:
+        return None
+
+
+def _render_static(
+    artifacts_dir_path: Path,
+    script_name: str,
+    title: str,
+    chart_type: str,
+    data: list[dict[str, Any]],
+    render_kwargs: dict[str, Any],
+) -> tuple[Path, str] | tuple[None, str]:
+    """Render one chart to a static file when the Orca chart socket is unavailable.
+
+    Prefers plotly HTML (self-contained, interactive in a browser). Falls back to
+    matplotlib PNG if plotly is not installed. Returns ``(path, fmt)`` on success,
+    ``(None, reason)`` on failure (caller records "skipped" with the reason).
+    Fail-soft: never raises. ``_UnsupportedChartType`` from plotly short-circuits
+    the matplotlib fallback (unsupported types are unsupported in both backends).
+    """
+    plotly_reason = ""
+    try:
+        return _render_plotly(
+            artifacts_dir_path, script_name, title, chart_type, data, render_kwargs,
+        )
+    except _UnsupportedChartType as exc:
+        # Unrecoverable for both backends -> skip matplotlib, fail fast.
+        sys.stderr.write(
+            f"[{script_name}] static render unsupported for '{title}': {exc}\n"
+        )
+        return None, str(exc)
+    except ImportError:
+        plotly_reason = "plotly not installed"
+        sys.stderr.write(
+            f"[{script_name}] plotly unavailable; falling back to matplotlib PNG\n"
+        )
+    except Exception as exc:  # noqa: BLE001 -- fail-soft: try matplotlib next
+        plotly_reason = f"plotly failed: {exc}"
+        sys.stderr.write(
+            f"[{script_name}] plotly render failed for '{title}': {exc}; "
+            f"trying matplotlib\n"
+        )
+    try:
+        return _render_matplotlib(
+            artifacts_dir_path, script_name, title, chart_type, data, render_kwargs,
+        )
+    except _UnsupportedChartType as exc:
+        return None, str(exc)
+    except Exception as exc:  # noqa: BLE001 -- fail-soft: caller records "skipped"
+        mpl_reason = f"matplotlib failed: {exc}"
+        sys.stderr.write(f"[{script_name}] matplotlib render failed for '{title}': {exc}\n")
+        combined = f"{plotly_reason}; {mpl_reason}" if plotly_reason else mpl_reason
+        return None, combined
+
+
+def _render_plotly(
+    artifacts_dir_path: Path,
+    script_name: str,
+    title: str,
+    chart_type: str,
+    data: list[dict[str, Any]],
+    kw: dict[str, Any],
+) -> tuple[Path, str]:
+    """Render a self-contained plotly HTML file. Raises on failure (caller fail-soft)."""
+    import html  # noqa: PLC0415 -- stdlib, imported lazily for escape
+    import plotly.graph_objects as go  # noqa: PLC0415 -- optional dep
+
+    x = kw.get("x", "")
+    y = kw.get("y", "")
+    x_label = kw.get("x_label") or x or "x"
+    y_label = kw.get("y_label") or y or "y"
+    caption = kw.get("caption", "")
+
+    fig = go.Figure()
+    if chart_type == "line":
+        fig.add_trace(go.Scatter(
+            x=_series(data, x), y=_series(data, y), mode="lines+markers", name=title,
+        ))
+    elif chart_type == "bar":
+        fig.add_trace(go.Bar(x=_series(data, x), y=_series(data, y), name=title))
+    elif chart_type in ("pareto", "scatter"):
+        xs = _series(data, x)
+        ys = _series(data, y)
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="markers", name="candidates"))
+        front = _compute_pareto_front(
+            data, x, y,
+            kw.get("pareto_x_direction", "min"),
+            kw.get("pareto_y_direction", "min"),
+        )
+        if front:
+            fig.add_trace(go.Scatter(
+                x=[xs[i] for i in front], y=[ys[i] for i in front],
+                mode="markers",
+                marker=dict(size=13, color="crimson", symbol="star"),
+                name="pareto front",
+            ))
+        sel = _parse_selected_from_caption(caption)
+        if sel is not None:
+            fig.add_trace(go.Scatter(
+                x=[sel[0]], y=[sel[1]], mode="markers",
+                marker=dict(
+                    size=16, color="gold", symbol="x",
+                    line=dict(width=2, color="black"),
+                ),
+                name="selected",
+            ))
+    elif chart_type == "table":
+        columns = kw.get("columns") or (list(data[0].keys()) if data else [])
+        header_vals = [c for c in columns]
+        cell_vals = [[_fmt_cell(d.get(c, "")) for d in data] for c in columns]
+        fig = go.Figure(data=[go.Table(
+            header=dict(
+                values=header_vals, align="left",
+                fill_color="paleturquoise",
+                font=dict(size=12, color="black"),
+            ),
+            cells=dict(values=cell_vals, align="left", height=22),
+        )])
+    else:
+        raise _UnsupportedChartType(
+            f"static plotly render does not support chart_type={chart_type!r} "
+            f"(supported: line, bar, pareto/scatter, table)"
+        )
+
+    # HTML-escape title/caption so a metric name containing '<'/'&' cannot break
+    # the page. The <br><sup> wrapper is intentional structure (kept as-is).
+    esc_caption = html.escape(caption) if caption else ""
+    full_title = html.escape(title) + (f"<br><sup>{esc_caption}</sup>" if caption else "")
+    fig.update_layout(
+        title=dict(text=full_title),
+        xaxis_title=x_label if chart_type != "table" else None,
+        yaxis_title=y_label if chart_type != "table" else None,
+        font=dict(size=12),
+        legend=dict(orientation="h", y=-0.25) if chart_type != "table" else None,
+    )
+    out = _charts_dir(artifacts_dir_path) / f"{script_name}.html"
+    # include_plotlyjs=True -> self-contained HTML (viewable offline).
+    fig.write_html(str(out), include_plotlyjs=True, full_html=True, auto_open=False)
+    return out, "html"
+
+
+def _render_matplotlib(
+    artifacts_dir_path: Path,
+    script_name: str,
+    title: str,
+    chart_type: str,
+    data: list[dict[str, Any]],
+    kw: dict[str, Any],
+) -> tuple[Path, str]:
+    """Render a static PNG via matplotlib. Raises on failure (caller fail-soft)."""
+    import matplotlib  # noqa: PLC0415 -- optional dep
+
+    matplotlib.use("Agg")  # headless-safe backend
+    import matplotlib.pyplot as plt  # noqa: PLC0415 -- after backend set
+
+    x = kw.get("x", "")
+    y = kw.get("y", "")
+    x_label = kw.get("x_label") or x
+    y_label = kw.get("y_label") or y
+    caption = kw.get("caption", "")
+
+    fig, ax = plt.subplots(figsize=(11, 6.5))
+    if chart_type == "line":
+        ax.plot(_series(data, x), _series(data, y), "-o", linewidth=1.5, markersize=4)
+    elif chart_type == "bar":
+        xs = _series(data, x)
+        ys = _series(data, y)
+        ax.bar(range(len(data)), ys)
+        ax.set_xticks(range(len(data)))
+        ax.set_xticklabels([str(v) for v in xs], rotation=45, ha="right", fontsize=8)
+    elif chart_type in ("pareto", "scatter"):
+        xs = _series(data, x)
+        ys = _series(data, y)
+        ax.scatter(xs, ys, label="candidates", s=25)
+        front = _compute_pareto_front(
+            data, x, y,
+            kw.get("pareto_x_direction", "min"),
+            kw.get("pareto_y_direction", "min"),
+        )
+        if front:
+            ax.scatter(
+                [xs[i] for i in front], [ys[i] for i in front],
+                c="crimson", s=180, marker="*", label="pareto front",
+            )
+        sel = _parse_selected_from_caption(caption)
+        if sel is not None:
+            ax.scatter(
+                [sel[0]], [sel[1]], c="gold", s=220, marker="X",
+                edgecolors="black", linewidths=1.5, label="selected",
+            )
+        ax.legend(loc="best", fontsize=9)
+    elif chart_type == "table":
+        ax.axis("off")
+        columns = kw.get("columns") or (list(data[0].keys()) if data else [])
+        capped = data[:_MPL_TABLE_ROW_CAP]
+        rows = [[_fmt_cell(d.get(c, "")) for c in columns] for d in capped]
+        tbl = ax.table(
+            cellText=rows, colLabels=[str(c) for c in columns],
+            loc="center", cellLoc="left",
+        )
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(8)
+        tbl.scale(1, 1.35)
+        omitted = len(data) - len(capped)
+        if omitted > 0:
+            ax.set_title(
+                f"{title}\n(matplotlib PNG fallback: showing first {_MPL_TABLE_ROW_CAP} "
+                f"of {len(data)} rows; {omitted} omitted — see plotly HTML for full table)",
+            )
+        else:
+            ax.set_title(title)
+    else:
+        raise _UnsupportedChartType(
+            f"static matplotlib render does not support chart_type={chart_type!r} "
+            f"(supported: line, bar, pareto/scatter, table)"
+        )
+
+    if chart_type != "table":
+        ax.set_title(title + (f"\n{caption}" if caption else ""), fontsize=11)
+        ax.set_xlabel(x_label)
+        ax.set_ylabel(y_label)
+    fig.tight_layout()
+    out = _charts_dir(artifacts_dir_path) / f"{script_name}.png"
+    fig.savefig(str(out), dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    return out, "png"
+
+
+# ---------------------------------------------------------------------------
 # Chart push + result recording
 # ---------------------------------------------------------------------------
 
@@ -426,8 +768,12 @@ def push_chart(
             different ``title`` → independent charts under one fold; same label +
             same title → front-end replaces (live-update semantic).
 
-    Fail-soft: if render_chart is unavailable or raises, records status="skipped"
-    with the error message and continues (design-charts H1).
+    Fail-soft (design-charts H1): on missing/empty data → status="skipped". On
+    render_chart unavailable OR failure (e.g. Orca chart socket gone in headless /
+    post-run rendering), falls back to a static file under
+    ``<artifacts>/charts/<script_name>.{html,png}`` via ``_render_static`` and
+    records status="rendered_static" + path. Only if the static fallback also
+    fails does it record status="skipped". Never raises.
     """
     if not data and not skip_reason:
         skip_reason = "empty data (artifact produced no records)"
@@ -437,25 +783,55 @@ def push_chart(
         _record_result(artifacts_dir_path, script_name, title, chart_type, "skipped", reason=skip_reason)
         return
 
-    if render_chart is None:
-        sys.stderr.write(f"[{script_name}] orca.chart not available (outside Orca run?)\n")
+    # 1. Try the live Orca chart socket first.
+    if render_chart is not None:
+        try:
+            seq = render_chart(
+                chart_type=chart_type, data=data, label=label, title=title, **render_kwargs,
+            )
+            print(f"[{script_name}] pushed '{title}', seq={seq}", flush=True)
+            _record_result(artifacts_dir_path, script_name, title, chart_type, "pushed", seq=seq)
+            return
+        except Exception as exc:  # noqa: BLE001 -- fall through to static fallback
+            sys.stderr.write(
+                f"[{script_name}] render_chart failed for '{title}': {exc}; "
+                f"falling back to static file\n"
+            )
+            static_reason = str(exc)
+    else:
+        sys.stderr.write(
+            f"[{script_name}] orca.chart not available; using static file fallback\n"
+        )
+        static_reason = "orca.chart.render_chart unavailable"
+
+    # 2. Static file fallback (headless / post-run).
+    path_fmt = _render_static(
+        artifacts_dir_path, script_name, title, chart_type, data, render_kwargs,
+    )
+    if path_fmt[0] is not None:
+        path, fmt = path_fmt
+        sys.stderr.write(
+            f"[{script_name}] rendered static '{title}' -> {path} ({fmt})\n"
+        )
         _record_result(
-            artifacts_dir_path, script_name, title, chart_type, "skipped",
-            reason="orca.chart.render_chart unavailable",
+            artifacts_dir_path, script_name, title, chart_type, "rendered_static",
+            path=str(path), fmt=fmt,
         )
         return
 
-    try:
-        seq = render_chart(
-            chart_type=chart_type, data=data, label=label, title=title, **render_kwargs,
-        )
-        print(f"[{script_name}] pushed '{title}', seq={seq}", flush=True)
-        _record_result(artifacts_dir_path, script_name, title, chart_type, "pushed", seq=seq)
-    except Exception as exc:  # noqa: BLE001 -- fail-soft per chart
-        sys.stderr.write(f"[{script_name}] render_chart failed for '{title}': {exc}\n")
-        _record_result(
-            artifacts_dir_path, script_name, title, chart_type, "skipped", reason=str(exc),
-        )
+    # 3. Both paths failed -> skipped. Carry BOTH the live + static failure
+    #    reasons so the marker JSONL is self-explanatory (no silent distortion).
+    static_fail_reason = path_fmt[1]
+    combined_reason = (
+        f"live=[{static_reason}]; static=[{static_fail_reason}]"
+        if static_fail_reason else static_reason
+    )
+    sys.stderr.write(
+        f"[{script_name}] static fallback also failed for '{title}'\n"
+    )
+    _record_result(
+        artifacts_dir_path, script_name, title, chart_type, "skipped", reason=combined_reason,
+    )
 
 
 def _record_result(
@@ -466,6 +842,8 @@ def _record_result(
     status: str,
     seq: int = 0,
     reason: str = "",
+    path: str = "",
+    fmt: str = "",
 ) -> None:
     """Append one chart result line to the marker JSONL file."""
     result: dict[str, Any] = {
@@ -476,6 +854,9 @@ def _record_result(
     }
     if status == "pushed":
         result["seq"] = seq
+    if status == "rendered_static":
+        result["path"] = path
+        result["fmt"] = fmt
     if reason:
         result["reason"] = reason
 
