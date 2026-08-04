@@ -32,6 +32,7 @@ from orca.iface.web.routes import (
     build_projects_router,
     build_run_router,
     build_runs_router,
+    build_workflows_router,
 )
 from orca.iface.web._auth import install_auth_middleware
 from orca.iface.web.ws_handler import WebServer
@@ -80,6 +81,8 @@ def create_app(manager: RunManager) -> FastAPI:
     app.include_router(build_attach_router(manager))
     # SPEC §13.3 P3：stale projects 只读端点（无 manager 依赖）。
     app.include_router(build_projects_router())
+    # workflow / agent 资源只读浏览（无 manager 依赖；plan idempotent-churning-lampson）。
+    app.include_router(build_workflows_router())
 
     # WS 单通道（按需订阅）。
     web_server = WebServer(manager)
