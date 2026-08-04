@@ -10,7 +10,7 @@
 
 **计划**：[`docs/plans/2026-08-04-kd-nas-trainer-engine-and-leaf-codegen.md`](../plans/2026-08-04-kd-nas-trainer-engine-and-leaf-codegen.md)（5 Phase，独立可 commit；v3.2 经 spec-reviewer 四轮闭环）。
 
-**状态**：**Phase 5 纯净度清扫完成**（commit `<待填>`，零回归 + code-reviewer 一轮闭环：0 must-fix / 1 nice-to-have 已在 release note 显式说明）。
+**状态**：**Phase 5 纯净度清扫完成**（commit `e3c2c2b`，零回归 + code-reviewer 一轮闭环：0 must-fix / 1 nice-to-have 已在 release note 显式说明）。
 
 ### Phase 5 已交付（任务纯净度清扫 + 守门测试强化）
 - agent prompt 决策标签清扫：5 agent.md（kd-setup / kd-train-script / gen-student / train-script-verify / distill）+ eval.py.skel + kd-nas.yaml 4 处注释；description 历史叙事纯化（删「已拆到 / 不再 import / 合并…为一节点」）。

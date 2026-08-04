@@ -7,7 +7,7 @@
 
 ## [2026-08-04] refactor(kd-nas): P5 任务纯净度清扫——决策标签 / 历史叙事清除 + 守门测试强化
 
-Phase 4 之后**审查过程决策标签**（D2/D8/D10/E1-E13/M1-M8/N3-N21/Q6-Q10/B4/R1-R3/F3/A4-A8 等非括号形式）pervasive 残留 + 3 个 agent description 含历史对比叙事 + CONTRACTS/yaml 夹带迁移叙事——本次纯文本层清扫闭环：agent prompt（5 agent.md + 1 leaf skel + kd-nas.yaml 4 处 + CONTRACTS 3 处）零过程标签零历史叙事；引擎 .py（migrate_flat ~15 处 / trainer / _resume / kd_reducer / finalize_kd）删尾部过程 ID + `code-reviewer Rx` 归属，保留设计 why 注释；守门测试 `test_kd_prompt_no_source_narrative.py` deny-list 分层强化——agent prompt 层加非括号决策标签 + 历史叙事词锁，.py 仅保留括号 + 复合源叙事锁（D7 边界），E402 noqa 双重免疫。零逻辑 / 契约 / CLI / 字段改动。测试 468 passed, 3 skipped（零回归）。Commit: `<待填>`。详见 [release note](../releases/2026-08-04-kd-nas-trainer-engine-phase5.md)。
+Phase 4 之后**审查过程决策标签**（D2/D8/D10/E1-E13/M1-M8/N3-N21/Q6-Q10/B4/R1-R3/F3/A4-A8 等非括号形式）pervasive 残留 + 3 个 agent description 含历史对比叙事 + CONTRACTS/yaml 夹带迁移叙事——本次纯文本层清扫闭环：agent prompt（5 agent.md + 1 leaf skel + kd-nas.yaml 4 处 + CONTRACTS 3 处）零过程标签零历史叙事；引擎 .py（migrate_flat ~15 处 / trainer / _resume / kd_reducer / finalize_kd）删尾部过程 ID + `code-reviewer Rx` 归属，保留设计 why 注释；守门测试 `test_kd_prompt_no_source_narrative.py` deny-list 分层强化——agent prompt 层加非括号决策标签 + 历史叙事词锁，.py 仅保留括号 + 复合源叙事锁（D7 边界），E402 noqa 双重免疫。零逻辑 / 契约 / CLI / 字段改动。测试 468 passed, 3 skipped（零回归）。Commit: `e3c2c2b`。详见 [release note](../releases/2026-08-04-kd-nas-trainer-engine-phase5.md)。
 
 ## [2026-08-04] refactor(kd-nas): Phase 4 agent prompt 去 SPEC 源化——任务纯净态
 

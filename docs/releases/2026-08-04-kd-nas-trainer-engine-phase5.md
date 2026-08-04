@@ -97,7 +97,7 @@ Phase 4 已把 `SPEC §x` / `cleanup` / `Phase N` 类来源叙事清除，但**�
 
 ## Commit
 
-`<待填>`
+`e3c2c2b`
 
 ## code-reviewer
 
