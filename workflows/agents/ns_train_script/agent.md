@@ -98,6 +98,13 @@ path = f"{d}/file.py"                # 禁：f-string 拼接
   一次**；后续相对路径（如 `run_train_supernet.sh`、`train_supernet.py`）在该 cwd 下解析；
   sibling 模块（如 `supernet.py`）作 plain import，禁 `sys.path` / `PYTHONPATH` 改写。
 - **Path handling**（铁律）：见上 **Path 处理铁律**。
+- **supernet ckpt 路径契约（跨节点，与 ns_search_pipeline / ns_run_train 共享）**：`train_supernet.py`
+  产出的 supernet 最佳 ckpt 默认写 `$ORCA_ARTIFACTS_DIR/runs/train/supernet_best.pth`（相对
+  `$ORCA_ARTIFACTS_DIR` 的相对路径）。此路径是下游 `ns_search_pipeline` 生成 `search_config.yaml`
+  的 `supernet_ckpt_path` 字段、以及 `ns_run_train` Step 3 python 的 ckpt 解析 fallback 的契约默认值。
+  若项目需改路径，`train_supernet.py` 的 ckpt save 路径必须与 `search_config.yaml` 的
+  `supernet_ckpt_path` **严格一致**（两节点同一相对 `$ORCA_ARTIFACTS_DIR` 路径），否则 ns_run_search
+  会拿不到 ckpt fail loud。
 
 ## Workflow
 

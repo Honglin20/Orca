@@ -212,7 +212,8 @@ body 里重复绝对项目路径。只记原始项目事实；NAS 决策 / 产�
 6. **Stop unsupported NAS branches (fail loud):** 若 `Model Type` 不是 `model_type.json` 标签之一，
    保留已校验 model artifact + 已创建报告，解释该 macro-architecture 不支持 / 不明，**stop here**——
    不进 Step 5 或后续。**fail loud**：最终 JSON 输出 `model_type_supported: false` + `supernet_path: ""` +
-   `fidelity_passed: false` + `workflow_verifier_passed: false`，引擎判节点失败路由 `terminate_unsupported`
+   `fidelity_passed: true`（vacuous——本节点无 fidelity-verifier 调用，与 yaml `fidelity_passed` 语义一致）+
+   `workflow_verifier_passed: false`（未跑 Step 6 workflow loop），引擎判节点失败路由 `terminate_unsupported`
    （plan §6）。
 
 ### Step 5: Generate Supernet
@@ -328,7 +329,8 @@ layer config / branch choice）。refinement 后：
   节点无 self-heal 重试，"last" 语义不适用（明确偏离 `nas-train-runner` 的 `last_error`，理由
   是 generation 节点无 retry）。
 - `model_type_supported: false` → 引擎路由 `terminate_unsupported`（fail loud）。此时其它字段
-  按实际填（`supernet_path=""`、`*_passed=false`、`error` 留空——unsupported 是已知分支非异常）。
+  按实际填（`supernet_path=""`、`fidelity_passed: true`（vacuous——本节点无 fidelity-verifier 调用）、
+  `workflow_verifier_passed: false`（未跑 Step 6 workflow loop）、`error` 留空——unsupported 是已知分支非异常）。
 - `fidelity_passed`：本节点**无** `project-fidelity-verifier` 调用（无 porting 发生）→ 恒 `true`
   （vacuous——无 porting 即无 fidelity 失败）。语义保持与 plan §2.3 一致。
 - `workflow_verifier_passed`：Step 6 的 `workflow-verifier` 返 `all-pass` → `true`；Step 4

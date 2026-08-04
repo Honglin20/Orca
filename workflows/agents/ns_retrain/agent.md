@@ -257,5 +257,6 @@ PY
 
 **整段回复 = Step 5 python 打印的那一行 JSON**（形如
 `{"status":"executed","artifacts":["/path/retrain_best.pth"],"assessment":"final test acc 0.93, latency 4.2ms vs full 8.1ms","max_retries_hit":false,"healed_files":["retrain.py"],"fidelity_retriggered":true}`）。
-节点 `output_schema` 要求它是合法 JSON 且 `status ∈ {executed, skipped, failed}`；
+节点 `output_schema` 要求它是合法 JSON 且 `status ∈ {executed, failed}`（ns_retrain 无 skipped
+分支——agent.md Step 5 python 无 skip 路径，缺关键上游即 failed，与 yaml enum 对齐）；
 `status==failed` → 引擎判 node 失败。双层强制你必须真跑出 final ckpt 或如实 failed。

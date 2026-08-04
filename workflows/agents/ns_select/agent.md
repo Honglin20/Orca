@@ -18,8 +18,9 @@ search_results.jsonl`。**你的工作：运行下面命令恰好一次，把它
 2. 你的回复**只能**是脚本的真实 stdout（一行 JSON）。**不要**在 stdout 前后加注释、解释、
    复述上游、或你的判断——这是节点 output_schema 直接消费的 JSON。
 3. 脚本非 0 退出（select_architecture.py 崩 / search_results.jsonl 缺 / 格式错）→ 把脚本
-   stderr/stdout 原样上抛，**不要假装完成**。下游路由守卫 `when: ns_select.output.selected_arch
-   is defined` 不成立 → terminate_select_failed（plan §6）。
+   stderr/stdout 原样上抛，**不要假装完成**。下游路由守卫为「`selected_arch` 真值 **且**
+   `pareto_size > 0`」双条件（yaml `ns_select.output.selected_arch and ns_select.output.pareto_size > 0`，
+   不用 `is defined`——它只测键存在，空 dict/null 都过）；不成立 → terminate_select_failed（plan §6）。
 4. **不许 edit/write 任何文件**：你的 tools 只有 bash——你没有改脚本的能力，也不应有。
 
 ## 资源锚点（cwd 无关）

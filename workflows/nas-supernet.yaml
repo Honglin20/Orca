@@ -267,7 +267,13 @@ nodes:
         fidelity_retriggered: {type: boolean, description: "true=首次生成后或 self-heal 改训练逻辑后跑过 project-fidelity-verifier"}
       additionalProperties: false
     routes:
-      - to: $end
+      # 引擎只对 terminate 节点读 status（orchestrator._finalize_terminated）——AgentNode 的
+      # output.status 不被引擎判失败。故 ns_retrain 失败必须显式路由 terminate_retrain_failed，
+      # 否则 status=failed 仍 workflow_completed。ns_retrain 无 skipped 分支（agent.md Step 5
+      # python 无 skip 路径），故 status 非 executed（=failed）→ catch-all → fail loud。
+      - when: "ns_retrain.output.status == 'executed'"
+        to: $end
+      - to: terminate_retrain_failed
 
   # ═══════════════════════════════════════════════════════════════════════════
   # Terminate 节点（plan §6）——status: failed；routes 必空；不作 entry / 不进 parallel。
@@ -281,6 +287,11 @@ nodes:
     kind: terminate
     status: failed
     reason: "ns_select 未能选出架构（select_architecture.py 失败 / search_results.jsonl 缺或空 / 所有候选都超 target_latency / pareto_size=0）。回看 ns_run_search.output.assessment 与 $ORCA_ARTIFACTS_DIR/runs/search/ 日志定位搜索是否真产出候选。"
+
+  - name: terminate_retrain_failed
+    kind: terminate
+    status: failed
+    reason: "ns_retrain 未能产出 final 子网 ckpt（self-heal 耗尽 3 次仍失败 / AGENTS.md 缺 / supernet ckpt 缺）。回看 ns_retrain.output.assessment（含 last_error 日志尾部）与 $ORCA_ARTIFACTS_DIR/runs/retrain/ 日志定位 retrain 失败根因。"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # outputs —— ns_retrain→$end 终态映射关键产物供 orchestrator / 下游消费。

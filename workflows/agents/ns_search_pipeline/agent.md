@@ -113,6 +113,12 @@ path = f"{d}/file.py"                # 禁：f-string 拼接
 - `{{ inputs.user_project_root }}` 用法：**禁**从生成 artifact import `{{ inputs.user_project_root }}`
   模块；把所需 logic 复制 / 改写进 `$ORCA_ARTIFACTS_DIR` 下文件，让生成脚本在远端 runtime 自包含。
 - **Path handling**（铁律）：见上 **Path 处理铁律**。
+- **supernet ckpt 路径契约（跨节点，与 ns_train_script / ns_run_train 共享）**：生成
+  `search_config.yaml` 时，`supernet_ckpt_path` 字段（evaluator 加载 supernet 的入口）默认填
+  `runs/train/supernet_best.pth`（相对 `$ORCA_ARTIFACTS_DIR`），必须与 `ns_train_script` 的
+  `train_supernet.py` ckpt 输出路径**严格一致**（两节点同一相对路径）。这是 `ns_run_train` Step 3
+  python ckpt 解析 + `ns_run_search` evaluator 加载 ckpt 的契约默认值；不一致会让 ns_run_search
+  拿不到 ckpt fail loud。
 
 ## Workflow
 
@@ -313,9 +319,10 @@ python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
 ```
 
 > **enum 自洽说明**：成功路径 `select_reason ∈ {max-acc-under-target, pareto-knee}`。无候选时
-> 的 `"none"`（见下）是 **fail-loud sentinel，不在成功 enum 内**——下游 `ns_select` 路由守卫
-> `when: "ns_select.output.selected_arch is defined"`（plan §7.2）据此空 dict 分支到
-> `terminate_select_failed`，不与成功路径混。
+> 的 `"none"`（见下）是 **fail-loud sentinel，不在成功 enum 内**——下游 `ns_select` 路由守卫为
+> 「`selected_arch` 真值 **且** `pareto_size > 0`」双条件（yaml `ns_select.output.selected_arch and
+> ns_select.output.pareto_size > 0`；不用 `is defined`——它只测键存在，空 dict/null 都过），据此空 dict
+> / `pareto_size=0` 分支到 `terminate_select_failed`，不与成功路径混。
 
 #### 无候选处理（plan §7.2/§4.1 note，fail loud）
 
@@ -325,8 +332,9 @@ python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
   + `select_reason: "none"`，退出码 0；或
 - 退出码非 0 + stderr 写明原因。
 
-下游 `ns_select` 路由守卫 `when: "ns_select.output.selected_arch is defined"`（plan §7.2）
-据此分支到 `terminate_select_failed`。**禁**静默选个超 target 的候选冒充成功。
+下游 `ns_select` 路由守卫为「`selected_arch` 真值 **且** `pareto_size > 0`」双条件（yaml
+`ns_select.output.selected_arch and ns_select.output.pareto_size > 0`；不用 `is defined`——它只测键
+存在），据此空 dict / `pareto_size=0` 分支到 `terminate_select_failed`。**禁**静默选个超 target 的候选冒充成功。
 
 #### 实现要点
 
@@ -382,18 +390,25 @@ python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
    **Key API Surface** code block、任何项目专属 note。值取自 `search_config.yaml`、生成的 launcher、
    确认的 `{{ inputs.user_project_root }}`。**含 `select_architecture.py` 的 CLI 契约 + JSON schema**
    作为选架构段事实。
-4. evaluation paradigm 是 `train_from_scratch` 因 supernet 训练不可行（记在 `supernet_summary.md`）时：
+4. **清剿 interactive/ask-user 残留**（plan §9.1 rule 5 适配）：复制自 `agents_template.md` 的
+   `AGENTS.md` 副本里，把任何「stop and ask the user」/「Interactive ... based on feedback」/
+   「present next steps / new session」类交互收尾段改为 Orca 链路事实——所有产物路径都在
+   `$ORCA_ARTIFACTS_DIR` 已知（不 ask），选定架构已由上游 `ns_select` 确定性 `select_architecture.py`
+   选出（非 interactive），下游 `ns_retrain` 直接读 `AGENTS.md` + `ns_select.output.selected_arch`
+   生成 retrain 脚本。源头 `assets/agents_template.md` 不改（它是 template，agent 复制后改副本）。
+5. evaluation paradigm 是 `train_from_scratch` 因 supernet 训练不可行（记在 `supernet_summary.md`）时：
    - 从 **Generated Artifacts** tree 删 `run_train_supernet.sh` 与 `train_supernet.py`。
    - 把 **1. Supernet Training** section 内容换为：说明 supernet 训练不适用本项目，`train_supernet.py`
      与 `run_train_supernet.sh` 未生成，search 用 `train_from_scratch` evaluation（每个候选 subnet
      独立训练）。
-5. 写后验：
+6. 写后验：
    - 无字面 `{% raw %}{{{% endraw %}` placeholder 残留。
    - 无 example path 或值未替换。
    - artifacts tree 匹配实际文件（含 ported helper、`tests/`、`select_architecture.py`）。
    - API surface 匹配 `supernet.py`。
    - evaluation paradigm 匹配 `evaluator.py` 实际 code path。
    - objective 名 + smaller-better 语义匹配 `search_config.yaml` `objs` 与 `evaluator.py`。
+   - 无 interactive/ask-user 残留（新 point 4 清剿项）。
 
 #### Update `supernet_summary.md`
 

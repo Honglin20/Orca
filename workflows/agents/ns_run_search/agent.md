@@ -238,5 +238,6 @@ PY
 
 **整段回复 = Step 3 python 打印的那一行 JSON**（形如
 `{"status":"executed","artifacts":["/path/search_results.jsonl"],"assessment":"640 candidates, Pareto size 12...","max_retries_hit":false,"healed_files":[],"fidelity_retriggered":false}`）。
-节点 `output_schema` 要求它是合法 JSON 且 `status ∈ {executed, skipped, failed}`；
+节点 `output_schema` 要求它是合法 JSON 且 `status ∈ {executed, failed}`（ns_run_search 无 skipped
+分支——agent.md Step 3 python 无 skip 路径，脚本缺失/ck pt 缺即 failed，与 yaml enum 对齐）；
 `status==failed` → 引擎判 node 失败。双层强制你必须真跑出 search_results.jsonl 或如实 failed。
