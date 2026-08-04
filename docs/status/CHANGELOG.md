@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-04] feat(examples): 真实 MNIST 分类项目（kd-nas 真实输入）
+
+`examples/mnist_kd/`——LeNet 风格两层 CNN，torchvision MNIST + cross-entropy，CPU 1-epoch test_acc≈0.98。契约兼容（CONTRACTS §1）：`build_model`/`DUMMY_INPUT=[1,1,28,28]`/`KNOBS`（conv1/conv2/fc，step<0）/`feature_hook_names`；`train.py` 暴露 `compute_loss`+re-iterable `build_dataloader`；`eval.py` top-1 acc；`latency_provider.py` ONNX 实测（cuda 缺失 WARN、文件缺失 fail loud）。零 orca import——genuine user project；code-reviewer 一轮闭环（空 loader raise / cuda WARN / `--epochs<1` 拒绝）。Commit: `2d9b5ff`。
+
 ## [2026-08-04] feat(kd-nas): Trainer 引擎化 Phase 1——KDTrainer 孤儿 + 叶子 skel + 33 单测（不改 DAG）
 
 新增固定引擎层：`_kd_scripts/kd/trainer.py`（`KDTrainer` + `TrainConfig`，三 mode；distill 严格走 Q2 hot-order：prepare→kd_parameters→opt；emit 双协议 stdout keys + 日志前缀字面命中 metrics_tail._LOSS_LINE_RE；M1 只 print stdout / M3 scheduler None 守卫 / M4+B6 proxy_mse / B5+Q18 orca.chart lazy import 降级 / D3 resume hash+mode fail loud / B4 scheduler drop WARN / R1 latest.pt 无 abs path）+ `_leaves.py`（importlib 单文件 + AST 签名 + 自包含 deny-list + lazy exec，D9-c）+ `_resume.py`（原子 tmp+replace + sort_keys sha16）+ `train_pipeline.py` 孤儿入口 + 4 个 leaves skel + 33 单测（含 Q2 顺序 spy 断言 + 端到端 resume + 6 个 kind 方向参数化 + R1 无 abs path）。**严格隔离 N4**：DAG / gen_train_script emit / kd-nas.yaml / `references/templates/train_pipeline.py` / kd 库 / CONTRACTS 全未改（git diff 空）；Phase 2 才原子切 emit + 5 调用点 + 删旧模板。code-reviewer 四轮闭环（F0/F1/F2/F3/F4/F5/F6/F7/F8/F10 全修）。Commit: `6929685`。详见 [release note](../releases/2026-08-04-kd-nas-trainer-engine-phase1.md)。
