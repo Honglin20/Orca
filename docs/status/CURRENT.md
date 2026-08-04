@@ -4,12 +4,43 @@
 
 ---
 
-## 当前：KD-NAS P6 修复完成（finalize JSON 改 json.dumps 发射），headless e2e 进行中
+## 当前：KD-NAS codegen 反造假修复完成，待 headless e2e 验 teacher 真训练 acc
 
-**任务**：修 KD-NAS finalize 节点 e2e 末段 JSON 结构性畸形（缺根级 `}` / depth=1）——KD-NAS 全链路
-e2e 最后一个阻塞点（P0-P5 全闭环，仅 finalize FAIL）。
+**任务**：修审计 run `6c2ebe` 发现的 KD-NAS codegen 数据造假真根因（最严重）——`torchvision`
+不在叶子 import 白名单 → codegen 用 `torch.rand`+`torch.randint` 冒充 MNIST → teacher acc=0.12
+锁死 ln 10 / student acc=0.09（零学习）。
 
-**状态**：**P6 修复完成 + 单测全绿 + code-reviewer 一轮闭环**（commit `4cd2428`）。
+**状态**：**修复完成 + 单测全绿 + code-reviewer 一轮闭环**（待 commit + e2e）。
+- 扩 import 白名单（`_leaves.py` + `fidelity_check.py`）：含 torchvision/torchaudio/scipy/sklearn/PIL + stdlib；禁用户项目模块保留。
+- `fidelity_check.py::_check_no_random_fabrication`：AST 扫 data.py/eval.py，捕 `torch.rand/randn/randint/normal/rand_like/randn_like` + `numpy.random.*` + `random.*` + in-place `uniform_/normal_/...`；`torch.randperm` / seed 类合法跳过；用户 train.py 自身用 random → 视为 verbatim port。
+- SKILL.md / agent.md / workflow doc / 2 checklist / 4 leaf skel / CONTRACTS §6 / kd-nas.yaml：全套加反造假硬规则（port 真实 loader / 不可得时 fail loud + ask-user 哨兵）。
+- CONTRACTS 删迁移叙事行；守门 regex 加 `已移除`/`相对单体`。
+- fail-loud：`--user_train/eval` 缺失 → rc=2 + stderr（原裸 traceback rc=1）。
+- code-reviewer 一轮闭环：3 must-fix（np.random.seed 误判 / torch.randperm shuffle 误判 / 缺失文件 fail-loud）+ 1 nice-to-have（factory 变体覆盖）已全修；新增 6 测覆盖。
+
+**测试**：175 passed / 2 skipped（原 169 + 6 新）；audit-run 6c2ebe artifact 经新 fidelity_check 复测准确 4 处造假捕获。
+
+**待办**：
+- [ ] commit + push（`fix(kd-nas): codegen 禁造假数据——扩标准包白名单 + 反造假硬规则 + fail-loud/ask-user`）。
+- [ ] **关键 headless e2e**（`tars run workflows/kd-nas.yaml` 对 `examples/mnist_kd/`，max_rounds=2 full_epochs=2 device=cpu）：**核心验证 teacher 真训练 acc > 0.90**（非 0.12）；data.py 应 port 真实 torchvision MNIST（非 torch.rand）+ loss 真下降（非锁死 ln 10）+ ≥1 轮蒸馏 student acc 合理 + finalize（P6）过。
+- [ ] 如实报 teacher/student 真实精度。
+- [ ] Phase 5 E2E（KD-NAS Trainer 引擎化）遗留——详见下方。
+
+**必读**：
+- 本任务 release note `docs/releases/2026-08-05-kd-nas-codegen-anti-fabrication.md`
+- `workflows/agents/_kd_scripts/CONTRACTS.md` §6（叶子契约 + 反造假）
+- `workflows/agents/kd-train-script/scripts/fidelity_check.py`（`_check_no_random_fabrication`）
+
+---
+
+## 历史：KD-NAS P6 修复完成（finalize JSON 改 json.dumps 发射）
+
+**状态**：已完成（commit `4cd2428`）。详见 [release note](../releases/2026-08-05-kd-nas-finalize-json-dumps-p6.md)。
+
+P6 修复要点：`workflows/kd-nas.yaml` finalize inline prompt 新增 Step 3 `python3 -c json.dumps({...})`
+发射 + viz 解析合并进单 try/except + stderr 显式告警；output_schema / Step 1（finalize_kd.py）/
+Step 2 viz_kd_stage 调用 / routes / outputs 零改动。tars validate 通过；守门测试绿；kd-nas 测试套件
+169 passed / 2 skipped；code-reviewer 一轮闭环 0 must-fix / 2 nice-to-have 已合并。
 - `workflows/kd-nas.yaml` finalize 节点 inline prompt 新增 Step 3 `python3 -c json.dumps({...})`
   发射（对齐 distill/decide 模式）；删手写 ```` ```json ```` 模板；viz 解析合并进 Step 3 单
   try/except + stderr 显式告警。

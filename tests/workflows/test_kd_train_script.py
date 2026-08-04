@@ -405,6 +405,243 @@ def test_fidelity_check_catches_self_containment_violation(tmp_path):
     assert "LEAF_AST_OK: false" in out.stdout
 
 
+def _write_real_loader_user_train(tmp_path: Path) -> Path:
+    """Write a user train.py that uses a real torchvision loader (no random).
+
+    Mirrors the audit-run 6c2ebe user ``train.py``: the agent should have
+    ported this verbatim instead of fabricating with ``torch.rand``.
+    """
+    src = '''\
+"""User train.py — real torchvision MNIST loader (no synthetic data)."""
+import torch
+import torch.nn.functional as F
+from torchvision import datasets, transforms
+
+
+def compute_loss(s_out, y):
+    return F.cross_entropy(s_out, y)
+
+
+def build_dataloader(batch_size=128):
+    t = transforms.Compose([transforms.ToTensor()])
+    ds = datasets.MNIST("./data", train=True, download=True, transform=t)
+    return torch.utils.data.DataLoader(ds, batch_size=batch_size, shuffle=True)
+'''
+    p = tmp_path / "train.py"
+    p.write_text(src, encoding="utf-8")
+    return p
+
+
+def test_fidelity_check_catches_data_fabrication(tmp_path):
+    """Leaf fabricates data with torch.rand but user train.py has a real
+    torchvision loader → LEAF_FABRICATION_OK: false → FIDELITY: FAIL.
+
+    Reproduces the audit-run 6c2ebe root cause: codegen synthesised
+    ``torch.rand`` pixels + ``torch.randint`` labels because ``torchvision``
+    was (wrongly) treated as outside the leaf import whitelist.
+    """
+    leaves_dir = tmp_path / "user"
+    leaves_dir.mkdir()
+    leaves = _write_demo_leaves(leaves_dir)  # supplies loss/eval/optim + a random-data leaf
+    # Overwrite data.py with the audit-run fabrication: random pixels + labels.
+    leaves["data.py"].write_text(
+        '''\
+"""Fabricated data leaf — the audit-found anti-pattern."""
+import torch
+from torch.utils.data import DataLoader, TensorDataset
+
+_N = 1024
+_SHAPE = (1, 4, 48, 64, 1)
+
+
+def build_dataloader(batch_size):
+    images = torch.rand(_N, *_SHAPE[1:])
+    labels = torch.randint(0, 10, (_N,))
+    return DataLoader(TensorDataset(images, labels), batch_size=batch_size)
+''',
+        encoding="utf-8",
+    )
+    user_train = _write_real_loader_user_train(tmp_path)
+    out = subprocess.run(
+        [
+            sys.executable, str(FIDELITY_CHECK),
+            "--leaves_dir", str(leaves_dir),
+            "--user_train", str(user_train),
+            "--dummy_input", _dummy_input_json(),
+            "--model_path", str(BASELINE_CONTRACT),
+            "--build_fn", "build_model", "--build_cfg", "{}",
+            "--accuracy_baseline_kind", "nmse",
+        ],
+        capture_output=True, text=True, env=_fidelity_env(),
+    )
+    assert out.returncode == 2, (
+        f"expected FAIL rc=2, got {out.returncode}\nstdout:{out.stdout}\nstderr:{out.stderr}"
+    )
+    assert "LEAF_FABRICATION_OK: false" in out.stdout
+    assert "fabrication detected" in out.stderr
+    assert "FIDELITY: FAIL" in out.stdout
+
+
+def test_fidelity_check_allows_user_synthetic_data(tmp_path):
+    """When the user's own train.py uses ``torch.randn`` (synthetic-data demo,
+    denoising autoencoder, etc.), the leaf's random data is a verbatim port,
+    not fabrication → LEAF_FABRICATION_OK: true.
+
+    Locks in the kd-nas-demo case: ``examples/kd-nas-demo/train.py`` uses
+    ``torch.randn`` for its loader, so the demo leaf's ``torch.randn`` is
+    ported-verbatim, not fabricated.
+    """
+    leaves_dir = tmp_path / "user"
+    leaves_dir.mkdir()
+    _write_demo_leaves(leaves_dir)  # demo leaves use torch.randn
+    # USER_TRAIN_PY (kd-nas-demo) uses torch.randn → user_synthetic=True.
+    out = subprocess.run(
+        [
+            sys.executable, str(FIDELITY_CHECK),
+            "--leaves_dir", str(leaves_dir),
+            "--user_train", str(USER_TRAIN_PY),
+            "--user_eval", str(USER_EVAL_PY),
+            "--dummy_input", _dummy_input_json(),
+            "--model_path", str(BASELINE_CONTRACT),
+            "--build_fn", "build_model", "--build_cfg", "{}",
+            "--accuracy_baseline_kind", "nmse",
+        ],
+        capture_output=True, text=True, env=_fidelity_env(),
+    )
+    assert out.returncode == 0, (
+        f"fidelity_check rc={out.returncode}\nstdout:{out.stdout}\nstderr:{out.stderr}"
+    )
+    assert "LEAF_FABRICATION_OK: true" in out.stdout
+
+
+def _fabrication_unit_case(leaf_body: str) -> bool:
+    """Run _check_no_random_fabrication against ``leaf_body`` (data.py-shaped)
+    with a real-loader user (user_synthetic=False). Returns True iff the
+    check flagged fabrication (i.e. emitted at least one violation).
+    """
+    import importlib.util, tempfile
+    spec = importlib.util.spec_from_file_location(
+        "_fc_fabrication", FIDELITY_CHECK,
+    )
+    fc = importlib.util.module_from_spec(spec)
+    sys.modules["_fc_fabrication"] = fc
+    spec.loader.exec_module(fc)
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+        f.write(leaf_body)
+        p = f.name
+    violations = fc._check_no_random_fabrication(Path(p), user_synthetic=False)
+    return len(violations) > 0
+
+
+def test_fabrication_scan_catches_common_factory_variants():
+    """The fabrication scan must catch every common random-data factory,
+    not just ``torch.rand``/``torch.randint`` (LLMs that fail the audit will
+    reach for variants).  Locks in: rand, randn, randint, normal, rand_like,
+    randn_like, in-place uniform_/normal_/exponential_, np.random.*, stdlib random.
+    """
+    cases = [
+        "import torch\ndef f():\n    x = torch.rand(8, 1, 28, 28)\n",
+        "import torch\ndef f():\n    x = torch.randn(8, 1, 28, 28)\n",
+        "import torch\ndef f():\n    x = torch.randint(0, 10, (8,))\n",
+        "import torch\ndef f():\n    x = torch.normal(mean=0.0, std=1.0, size=(8,))\n",
+        "import torch\ndef f():\n    x = torch.rand_like(torch.zeros(8))\n",
+        "import torch\ndef f():\n    x = torch.randn_like(torch.zeros(8))\n",
+        "import torch\ndef f():\n    x = torch.zeros(8); x.uniform_()\n",
+        "import torch\ndef f():\n    x = torch.zeros(8); x.normal_()\n",
+        "import torch\ndef f():\n    x = torch.zeros(8); x.exponential_()\n",
+        "import numpy as np\ndef f():\n    x = np.random.rand(8, 28)\n",
+        "import numpy as np\ndef f():\n    x = np.random.standard_normal((8, 28))\n",
+        "import random\ndef f():\n    x = [random.random() for _ in range(8)]\n",
+        "import random\ndef f():\n    x = random.randint(0, 10)\n",
+    ]
+    misses = [c.splitlines()[-1].strip() for c in cases if not _fabrication_unit_case(c)]
+    assert not misses, (
+        "anti-fabrication scan missed these factories (LLM could bypass): "
+        + "; ".join(misses)
+    )
+
+
+def test_fabrication_scan_allows_seed_and_shuffle_primitives():
+    """Seeds (``torch.manual_seed`` / ``np.random.seed`` /
+    ``random.seed``) and ``torch.randperm`` (index permutation, not data
+    synthesis) must NOT trip the fabrication check.
+    """
+    cases = [
+        "import torch\ndef f():\n    torch.manual_seed(0)\n    idx = torch.randperm(100)\n    return idx\n",
+        "import numpy as np\ndef f():\n    np.random.seed(0)\n",
+        "import random\ndef f():\n    random.seed(0)\n",
+        "import random\ndef f():\n    r = random.Random(0)\n",
+        "import numpy as np\ndef f():\n    rng = np.random.default_rng(0)\n",
+    ]
+    false_positives = [
+        c.splitlines()[-1].strip() for c in cases if _fabrication_unit_case(c)
+    ]
+    assert not false_positives, (
+        "anti-fabrication scan false-positived on legitimate seed/shuffle: "
+        + "; ".join(false_positives)
+    )
+
+
+def test_fidelity_check_fails_loud_on_missing_user_train(tmp_path):
+    """``--user_train`` pointing at a non-existent file → rc=2 + stderr
+    (fail-loud per CONTRACTS §3), not a bare FileNotFoundError traceback.
+    """
+    leaves_dir = tmp_path / "user"
+    leaves_dir.mkdir()
+    _write_demo_leaves(leaves_dir)
+    out = subprocess.run(
+        [
+            sys.executable, str(FIDELITY_CHECK),
+            "--leaves_dir", str(leaves_dir),
+            "--user_train", str(tmp_path / "nonexistent_train.py"),
+            "--dummy_input", _dummy_input_json(),
+            "--accuracy_baseline_kind", "nmse",
+        ],
+        capture_output=True, text=True, env=_fidelity_env(),
+    )
+    assert out.returncode == 2, (
+        f"expected rc=2 fail-loud, got {out.returncode}\nstderr:{out.stderr}"
+    )
+    assert "USER_TRAIN_MISSING" in out.stderr
+    assert "FIDELITY: FAIL" in out.stderr
+    # Bare traceback means we didn't catch it.
+    assert "Traceback" not in out.stderr
+
+
+def test_leaf_import_whitelist_contains_standard_scipy_stack():
+    """The leaf import whitelist MUST include the pip scientific stack
+    (torchvision / PIL / scipy / sklearn) — these are standard packages, not
+    user-project modules.  Locks in the audit-found root cause: ``torchvision``
+    being absent from the whitelist forced codegen to fabricate data.
+    """
+    import importlib.util
+    leaves_spec = importlib.util.spec_from_file_location(
+        "_leaves_whitelist_check",
+        REPO / "workflows" / "agents" / "_kd_scripts" / "kd" / "_leaves.py",
+    )
+    leaves_mod = importlib.util.module_from_spec(leaves_spec)
+    sys.modules["_leaves_whitelist_check"] = leaves_mod
+    leaves_spec.loader.exec_module(leaves_mod)
+
+    fid_spec = importlib.util.spec_from_file_location(
+        "_fidelity_whitelist_check", FIDELITY_CHECK,
+    )
+    fid_mod = importlib.util.module_from_spec(fid_spec)
+    sys.modules["_fidelity_whitelist_check"] = fid_mod
+    fid_spec.loader.exec_module(fid_mod)
+
+    # Parity — the two whitelists must agree.
+    assert leaves_mod._LEAF_IMPORT_WHITELIST == fid_mod._LEAF_IMPORT_WHITELIST
+    # The audit-found fix: standard scientific stack must be present.
+    wl = leaves_mod._LEAF_IMPORT_WHITELIST
+    for pkg in ("torch", "torchvision", "torchaudio", "numpy", "scipy",
+                "sklearn", "PIL"):
+        assert pkg in wl, (
+            f"{pkg!r} missing from leaf import whitelist — its absence was the "
+            f"audit-found root cause of KD-NAS codegen data fabrication"
+        )
+
+
 # ===========================================================================
 # 4. kd-nas.yaml gen_train_script schema 切换（回归门）
 # ===========================================================================

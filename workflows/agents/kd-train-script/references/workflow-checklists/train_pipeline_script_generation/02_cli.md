@@ -42,13 +42,17 @@ the issue — do not modify `_kd_scripts/train_pipeline.py` from this skill.
 **Section**: workflow §2, CONTRACTS §6
 **Check**: Each leaf passes `kd/_leaves.py`'s AST self-containment check:
 no relative imports; no top-level imports outside the whitelist
-`{torch, math, numpy, typing, itertools, functools, collections,
-dataclasses, random}`.
+`{torch, torchvision, torchaudio, numpy, scipy, sklearn, PIL, math, os, sys,
+json, pathlib, typing, itertools, functools, collections, dataclasses,
+random, io, abc, copy, re, warnings, time}`. The standard scientific stack
+(torch / torchvision / numpy / scipy / scikit-learn / Pillow) IS allowed —
+port the user's real torchvision loader.
 **Verify**: Mirror `_leaves._check_self_contained` against each leaf.
 **Anti-pattern**: `from <user_pkg> import ...`; `from . import helpers`;
-`import pandas` (not in the whitelist).
-**Fix**: Copy the needed helper into the leaf; drop the import; or justify
-widening the whitelist (rare).
+`import pandas` (not in the whitelist); avoiding `torchvision` under the
+false belief that the leaf "must be self-contained".
+**Fix**: Copy the needed helper into the leaf; drop the user-project
+import; or keep the standard-package import (torchvision/PIL/numpy are fine).
 
 ### [CRITICAL] 4. AST Signature Equality
 **auto-fixable**: yes

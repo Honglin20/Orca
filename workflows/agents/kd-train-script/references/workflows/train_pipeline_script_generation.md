@@ -21,12 +21,27 @@ Key characteristics of the generated leaves:
    user's loss / dataloader / eval-metric / optimizer / scheduler.
 2. **Self-contained** — the engine loader (`kd/_leaves.py`) does not inject
    `sys.path`; each leaf is loaded via `importlib.util.spec_from_file_location`
-   as its own module. Top-level imports are limited to the whitelist
-   `{torch, math, numpy, typing, itertools, functools, collections,
-   dataclasses, random}`. Relative imports and sibling imports are forbidden.
-3. **Four leaves + run_config.yaml + run.sh** — no monolithic script. The
+   as its own module. "Self-contained" forbids **user-project modules**
+   (relative imports + non-whitelisted absolute imports such as
+   `from user_pkg import …`), NOT the standard scientific stack. Top-level
+   imports are limited to the whitelist
+   `{torch, torchvision, torchaudio, numpy, scipy, sklearn, PIL, math, os,
+   sys, json, pathlib, typing, itertools, functools, collections,
+   dataclasses, random, io, abc, copy, re, warnings, time}`. The pip
+   scientific stack (torch / torchvision / numpy / scipy / scikit-learn /
+   Pillow) is always available — port the user's real torchvision / PIL /
+   numpy loader verbatim. Relative imports and sibling imports are forbidden.
+3. **No data fabrication** — `data.py` and `eval.py` must load the user's
+   **real** dataset. `torch.rand` / `torch.randn` / `torch.randint` /
+   `torch.randperm` / `numpy.random.*` as the source of pixels or labels is
+   fabrication (it decouples inputs from targets and silently produces a
+   model that cannot learn — the audit root cause of KD-NAS zero-learning
+   in run 6c2ebe). `fidelity_check.py` rejects such leaves. If the user's
+   data is genuinely unavailable (user-project module, missing files), fail
+   loud + emit an ask-user sentinel; never silently substitute random data.
+4. **Four leaves + run_config.yaml + run.sh** — no monolithic script. The
    fixed engine entry consumes the leaves via the `--artifacts_dir` flag.
-4. **AST signature contract** — function name + required positional args must
+5. **AST signature contract** — function name + required positional args must
    match the contract exactly (defaults are additive; you may add optional
    kwargs, never drop or rename a required param).
 
@@ -79,12 +94,38 @@ A leaf must not import sibling files or the user's project. The engine loader
 
 - Any `from . import …` / `from .. import …` (relative imports).
 - Any top-level `import X` / `from X import Y` where `X.split('.')[0]` is
-  outside the whitelist `{torch, math, numpy, typing, itertools, functools,
-  collections, dataclasses, random}`.
+  outside the whitelist `{torch, torchvision, torchaudio, numpy, scipy,
+  sklearn, PIL, math, os, sys, json, pathlib, typing, itertools, functools,
+  collections, dataclasses, random, io, abc, copy, re, warnings, time}`.
+
+"Self-contained" forbids **user-project modules**, NOT the standard scientific
+stack — `from torchvision.datasets import MNIST` is legitimate and expected.
+Port the user's real torchvision / PIL / numpy loader verbatim.
 
 Constants / helper classes / helper functions used by a leaf must live in the
 same file. There is no `data_utils.py` sibling — put loader helpers in
 `data.py`.
+
+### 2b. No Data Fabrication (hard rule, enforced by `fidelity_check.py`)
+
+`data.py` and `eval.py` exist to load the user's **real** dataset.  Using the
+following calls as the **source of pixels or labels** is fabrication and is
+rejected by `fidelity_check.py` (`LEAF_FABRICATION_OK: false`):
+
+- `torch.rand(...)`, `torch.randn(...)`, `torch.randint(...)`,
+  `torch.randperm(...)`
+- `numpy.random.<any>(...)` / `np.random.<any>(...)`
+
+Randomness for parameter init (`torch.nn.init.*`), batch shuffling
+(`torch.randperm` used as a DataLoader sampler over **real** samples), and
+augmentation applied on top of ground-truth data loaded from disk is allowed.
+
+If the user's dataloader depends on a **user-project module** or on data that
+is genuinely unavailable (not a pip package, not on disk), **fail loud** and
+emit an ask-user sentinel describing the missing dependency / data path.
+Never silently substitute random tensors for the real loader — that is the
+audit-found root cause of KD-NAS zero-learning (run 6c2ebe: random pixels +
+random labels → 10 epochs locked at ln(10) loss, ~10% accuracy).
 
 ### 3. User Task Loss + Dataloader (port verbatim)
 
@@ -94,17 +135,21 @@ reduction, same shape assumptions. The function body plus its module-level
 dependency closure (constants / helpers it references) is copied in. A ported
 function that still depends on user-project symbols is a fail-loud condition.
 
-`data.py::build_dataloader` ports the user's data-loading logic verbatim. The
-returned object must be **re-iterable**: each epoch's `iter(dl)` yields a fresh
-batch stream. If the user's loader is a one-shot generator, wrap it in a
-re-iterable adapter (a class with `__iter__` that re-invokes the factory).
+`data.py::build_dataloader` ports the user's data-loading logic verbatim —
+including its `torchvision` / `PIL` / `numpy` imports and the real dataset
+path/transform. The returned object must be **re-iterable**: each epoch's
+`iter(dl)` yields a fresh batch stream. If the user's loader is a one-shot
+generator, wrap it in a re-iterable adapter (a class with `__iter__` that
+re-invokes the factory). **Never substitute `torch.rand` / `torch.randint` /
+`numpy.random.*` for the user's dataset** — see §2b.
 
 ### 4. User Eval Metric (port verbatim)
 
 `eval.py::eval_metric(student, device)` ports the user's eval metric verbatim:
-same formula, same normalization, same data source. The eval data loading is
-copied into the leaf, not imported live. Returns `(value, kind)` with kind in
-the allowed set.
+same formula, same normalization, **same real data source** (port the user's
+eval loader — torchvision/PIL/numpy, never `torch.rand`/`torch.randint` — see
+§2b). The eval data loading is copied into the leaf, not imported live.
+Returns `(value, kind)` with kind in the allowed set.
 
 Discovery (the agent's judgment): glob `<user_project_root>` for `test_*.py` /
 `eval*.py` / `evaluate*.py` / `test.py`, and read `train.py` for an eval/metric
@@ -188,9 +233,12 @@ For each leaf under `<output_dir>/user/`:
 
 - `python -m py_compile <leaf>` must succeed.
 - AST scan: no sibling / relative imports; top-level imports limited to the
-  whitelist.
+  whitelist (standard scientific stack + stdlib).
 - AST signature: function name + required positional args match the contract
   exactly (defaults additive).
+- Anti-fabrication scan (data.py / eval.py only): no `torch.rand` /
+  `torch.randn` / `torch.randint` / `torch.randperm` / `numpy.random.*` calls.
+  Mirrored by `fidelity_check.py`'s `LEAF_FABRICATION_OK` check (Layer 3).
 
 ### Layer 2: Engine smoke
 
@@ -248,7 +296,8 @@ python <skill_dir>/scripts/fidelity_check.py \
 Must print `FIDELITY: PASS`. The script checks per-leaf loss / dataloader /
 eval-metric / optimizer numeric equivalence with the user's original code
 (`torch.allclose(rtol=1e-5)`), AST self-containment, AST signature equality,
-and kind-direction hard consistency with `--accuracy_baseline_kind`.
+anti-fabrication (no random-tensor data source in data/eval leaves), and
+kind-direction hard consistency with `--accuracy_baseline_kind`.
 `FIDELITY: FAIL` (or exit 2) → fix the leaves and re-run Layers 1–2.
 
 ### Layer 4: Cross-reference verifier subagent
@@ -274,6 +323,10 @@ Handle the verifier response:
   project-fixed at workflow-run scope, not leaf scope.
 - Do not skip Layer 2 smoke tests.
 - No sibling imports, no relative imports, no top-level imports outside the
-  whitelist.
+  whitelist (standard scientific stack + stdlib).
+- No data fabrication: `data.py` / `eval.py` must not use `torch.rand` /
+  `torch.randn` / `torch.randint` / `torch.randperm` / `numpy.random.*` as
+  data/label source. Fail loud + ask-user sentinel if the user's data is
+  genuinely unavailable.
 - No placeholder fallbacks: an unspecialised leaf body must keep its
   `NotImplementedError` (fail loud), never a dummy substitution.

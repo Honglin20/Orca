@@ -10,6 +10,25 @@ the fixed `KDTrainer` engine (`workflows/agents/_kd_scripts/train_pipeline.py`)
 loads at runtime. The leaves plus a `run_config.yaml` and a human-use `run.sh`
 are the only artifacts produced — there is no monolithic generated script.
 
+## Guiding Principle: Faithful Mover, Not Designer
+
+You are a **faithful mover** of the user's training/eval logic into the four
+leaves, **not a designer**. Preserve every behavior: formulas, constants,
+signs, control flow, randomness semantics. **Do not simplify, approximate, or
+substitute look-alike utilities.** Replacing the user's real dataloader with
+`torch.rand(...)` because "the leaf must be self-contained" is exactly such a
+forbidden substitution — it was the audit-found root cause of KD-NAS
+zero-learning (run 6c2ebe: random pixels + random labels → loss locked at
+ln(10), ~10% accuracy forever).
+
+The four leaves exist so the fixed engine can drive training while the user's
+real loss / data / eval / optim live in self-contained files. Your job is to
+**port** that logic verbatim (inline its dependency closure — constants,
+helpers, transforms), never to **re-design** it. When you cannot port
+faithfully (the user's dataloader depends on a user-project module you cannot
+inline, or on data that is genuinely unavailable), report it as **Unresolved**
+and emit an ask-user sentinel — never fabricate a look-alike.
+
 ## Leaf contract (authoritative — `workflows/agents/_kd_scripts/CONTRACTS.md` §6)
 
 Four files land under `<output_dir>/user/`:
@@ -29,16 +48,42 @@ Plus three files directly under `<output_dir>`:
 
 ### Self-containment (hard requirement, enforced by the engine loader)
 
-A leaf must not import sibling files or the user's project. Allowed top-level
-imports are limited to the whitelist
-`{torch, math, numpy, typing, itertools, functools, collections, dataclasses, random}`.
-Relative imports (`from . import …`) are forbidden. Constants / helpers used by
-a leaf must live in the same file.
+A leaf must not import sibling files or the user's project. **"Self-contained"
+forbids user-project modules — NOT the standard scientific stack.** Allowed
+top-level imports cover the pip scientific stack + Python stdlib:
+`{torch, torchvision, torchaudio, numpy, scipy, sklearn, PIL, math, os, sys,
+json, pathlib, typing, itertools, functools, collections, dataclasses, random,
+io, abc, copy, re, warnings, time}`. `from torchvision.datasets import MNIST`
+is legitimate and expected — port the user's real torchvision/PIL/numpy
+dataloader verbatim. Relative imports (`from . import …`) and any non-whitelisted
+absolute import (e.g. `from user_pkg import …`) are forbidden. Constants /
+helpers used by a leaf must live in the same file.
 
 The engine loader (`kd/_leaves.py`) AST-validates each leaf **before** exec'ing
 the body: function name + required positional args must match the contract
 exactly (defaults are additive — you may add optional kwargs but cannot drop
 or rename a required param).
+
+### Anti-fabrication (hard requirement, enforced by `fidelity_check.py`)
+
+`data.py` and `eval.py` must load the user's **real** dataset.  Using
+`torch.rand` / `torch.randn` / `torch.randint` / `torch.randperm` or
+`numpy.random.*` as the **source of pixels or labels** is fabrication — it
+decouples inputs from targets and silently produces a model that cannot learn.
+
+- **Forbidden in `data.py` / `eval.py`**: any call to the random-tensor
+  factories above as the data/label source.  `fidelity_check.py` rejects such
+  leaves with `LEAF_FABRICATION_OK: false`.
+- **Allowed**: randomness for parameter init (`torch.nn.init.*`), shuffling
+  (`torch.randperm` for batch order inside a DataLoader that yields real
+  samples), and augmentation applied on top of ground-truth data loaded from
+  disk.
+- **Unportable user data**: if the user's dataloader depends on a
+  **user-project module** or on data that is genuinely unavailable (not a pip
+  package, not on disk), **fail loud** and emit an ask-user sentinel
+  describing the missing dependency / data path.  Never substitute random
+  tensors for the real loader — that is the audit-found root cause of KD-NAS
+  zero-learning.
 
 ### Kind direction
 
@@ -131,12 +176,18 @@ for the verbatim-port rules. Generation steps:
 2. **Port the user's loss** into `loss.py::compute_loss` verbatim — same ops,
    same reduction, same shape assumptions. Copy its module-level dependency
    closure (constants / helpers) into the same file. No `from <user_pkg>`.
-3. **Port the user's dataloader** into `data.py::build_dataloader`. Ensure the
-   returned object is re-iterable; one-shot generators must be wrapped in a
-   re-iterable adapter.
+3. **Port the user's dataloader** into `data.py::build_dataloader`. Port the
+   user's real loader verbatim — including its `torchvision` / `PIL` / `numpy`
+   imports and the real dataset path/transform.  Ensure the returned object is
+   re-iterable; one-shot generators must be wrapped in a re-iterable adapter.
+   **Never substitute `torch.rand` / `torch.randint` / `numpy.random.*` for the
+   user's dataset** — that is fabrication (see Anti-fabrication above).  If the
+   user's loader depends on a user-project module or genuinely unavailable
+   data, fail loud + emit an ask-user sentinel.
 4. **Port the user's eval metric** into `eval.py::eval_metric`. Same formula,
-   same normalization, same data source. Return `(value, kind)` with kind in
-   the allowed set.
+   same normalization, **same real data source** (port the user's eval loader,
+   do not synthesise eval inputs). Return `(value, kind)` with kind in the
+   allowed set.
 5. **Port the user's optimizer / scheduler** into `optim.py`. Return `None`
    when the user defines none — the engine falls back to `Adam` and no
    scheduler. Never invent hyperparameters the user didn't supply.
@@ -194,19 +245,26 @@ Cross-references (read-only):
 Verify (in priority order):
 0. Each leaf's required callable exists with the contract signature
    (function name + required positional args). Defaults are additive.
-1. Each leaf is self-contained: only whitelisted top-level imports, no sibling
-   / relative imports. Run `python -c "import ast; ..."` or equivalent.
+1. Each leaf is self-contained: only whitelisted top-level imports (standard
+   scientific stack + stdlib), no sibling / relative imports, no user-project
+   modules. Run `python -c "import ast; ..."` or equivalent.
 2. `loss.py::compute_loss` body == user's loss body (same ops / reduction).
-3. `data.py::build_dataloader` returns a re-iterable loader yielding the
-   DUMMY_INPUT batch shape.
-4. `eval.py::eval_metric` body == user's eval body (same formula). kind ∈
+3. `data.py::build_dataloader` ports the user's **real** loader (torchvision /
+   PIL / numpy) and returns a re-iterable loader yielding the DUMMY_INPUT
+   batch shape. **No `torch.rand` / `torch.randn` / `torch.randint` /
+   `torch.randperm` / `numpy.random.*` as data or label source** — that is
+   fabrication. If the user's data is genuinely unavailable, the leaf should
+   fail loud at runtime (not synthesise).
+4. `eval.py::eval_metric` body == user's eval body (same formula) and uses the
+   user's real eval data source (no random fabrication). kind ∈
    {nmse,mse,ber,db,snr,acc}; kind direction matches
    `inputs.accuracy_baseline_kind` direction.
 5. `optim.py` ported the user's optimizer / scheduler (same class + kwargs)
    or returns None when the user has none.
 6. `run_config.yaml` parses and carries the user-default lr/epochs plus the
    inputs.accuracy_baseline(_kind).
-7. `fidelity_check.py` printed FIDELITY: PASS for the four leaves.
+7. `fidelity_check.py` printed FIDELITY: PASS for the four leaves
+   (incl. `LEAF_FABRICATION_OK: true`).
 
 For each item, report PASS / FIXED / UNRESOLVED. End with:
   VERDICT: all-pass | unresolved

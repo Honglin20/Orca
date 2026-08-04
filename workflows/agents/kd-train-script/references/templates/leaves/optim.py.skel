@@ -11,7 +11,8 @@ Self-contained contract (CONTRACTS §1):
 * Scheduler step cadence must match the user's: the engine calls
   ``scheduler.step()`` **per epoch**; if the user's train.py stepped per
   batch, port it as a per-epoch equivalent or document the deviation.
-* Self-contained: whitelisted stdlib + torch only.
+* Self-contained: whitelisted standard scientific stack (torch / torchvision
+  / torchaudio / numpy / scipy / sklearn / PIL) + stdlib.
 
 The kd-train-script agent ports the user's optimizer / scheduler verbatim.
 """

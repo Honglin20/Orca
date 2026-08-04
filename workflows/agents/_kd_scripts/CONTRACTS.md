@@ -125,7 +125,7 @@ def feature_hook_names(self) -> list[str]: ...                 # 可选，OFD/Fi
   runtime 需 `ORCA_KD_SCRIPTS_DIR` env 指向 `_kd_scripts/`。
   叶子位于 ``<artifacts_dir>/user/{loss,data,eval,optim}.py``（kd-train-script codegen 产）。
 
-  **★ flag diff 表（相对单体 train_pipeline.py）**：
+  **★ flag diff 表**：
 
   | flag | 状态 | 说明 |
   |---|---|---|
@@ -136,7 +136,6 @@ def feature_hook_names(self) -> list[str]: ...                 # 可选，OFD/Fi
   | `--early_stop_patience` | **新增 optional** | patience 轮无改进 break（0=禁用） |
   | `--eval_every` | 保留 | mid-train eval cadence（默认 1） |
   | `--mode` / `--out_ckpt` / `--build_fn` / `--build_cfg` / `--kd_config` / `--model_path` / `--student_model_path` / `--teacher_cache` / `--student_ckpt` / `--accuracy_baseline` / `--accuracy_baseline_kind` / `--epochs` / `--lr` / `--batch_size` / `--device` / `--seed` / `--variant_id` / `--project_root` / `--env_anchor` | 保留 | 语义不变（CLI > yaml > 默认） |
-  | 单体 inline ``user_*`` slot / `--user_*` flag | **已移除** | 用户逻辑经 kd-train-script codegen 产 4 叶子承载 |
 
   **★ 调用点 × 字段 × 数据源矩阵**（5 调用点）：
 
@@ -223,9 +222,18 @@ def feature_hook_names(self) -> list[str]: ...                 # 可选，OFD/Fi
 **自包含校验（引擎 loader + fidelity_check 双重执行）**：
 
 - 禁 sibling / 相对 import（``ImportFrom.level > 0`` → FAIL）。
-- 顶层的 ``import`` / ``from import`` 仅允许白名单 {``torch``, ``math``, ``numpy``,
-  ``typing``, ``itertools``, ``functools``, ``collections``, ``dataclasses``, ``random``}。
+- 顶层的 ``import`` / ``from import`` 仅允许白名单 = **标准科学计算包 + stdlib**：
+  {``torch``, ``torchvision``, ``torchaudio``, ``numpy``, ``scipy``, ``sklearn``, ``PIL``,
+  ``math``, ``os``, ``sys``, ``json``, ``pathlib``, ``typing``, ``itertools``,
+  ``functools``, ``collections``, ``dataclasses``, ``random``, ``io``, ``abc``,
+  ``copy``, ``re``, ``warnings``, ``time``}。"自包含" 禁的是**用户项目模块**，
+  **不**禁标准包——``from torchvision.datasets import MNIST`` 合法且预期，port 用户真实 loader。
 - 常量 / helper 必须内联同文件（不允许跨 ``user/*.py`` 文件互相 import）。
+
+**反造假校验（fidelity_check 执行）**：``data.py`` / ``eval.py`` 严禁用 ``torch.rand`` /
+``torch.randn`` / ``torch.randint`` / ``torch.randperm`` / ``numpy.random.*`` 作数据或标签来源
+（作参数 init / 真实数据上的 augmentation 可）。用户 dataloader 依赖用户项目模块 / 不可得数据
+→ **fail loud** + emit ask-user 哨兵，**绝不**用随机数冒充（KD-NAS 零学习的根因）。
 
 **AST 签名相等**：函数名相等 + 必填位置参数集相等（``compute_loss`` 必须有 ``s_out, y``；
 ``build_optimizer`` 必须有 ``params, lr``；等）。默认参数 additive（可加新 optional kwargs，不可删 / 改名 required）。

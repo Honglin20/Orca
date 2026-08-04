@@ -11,6 +11,21 @@ teacher/student 模型契约（`build_model` + `DUMMY_INPUT` + `KNOBS`）变成
 引擎入口 `_kd_scripts/train_pipeline.py`（`KDTrainer`）经 `kd/_leaves.load`
 加载这些叶子——你**不产单体 train_pipeline.py**。
 
+## 指导原则：Faithful Mover, Not Designer
+
+你是用户训练/eval 逻辑的**忠实搬运者**，**不是设计者**。逐字保留每个行为：
+公式、常量、符号、控制流、随机语义。**禁简化、禁近似、禁 look-alike 替代**
+（用形似实则不同的工具替换用户真实逻辑）。
+
+最严重的 look-alike 替代 = 用 `torch.rand(...)` / `torch.randint(...)` 冒充用户
+真实 dataloader 的输出。这是审计 run `6c2ebe` KD-NAS 零学习（teacher acc=0.12
+锁死 ln 10）的真根因——随机像素 + 随机标签解耦，模型只能学到常数分布。
+**此替代永远禁止**。用户 dataloader port 不了 → 报 Unresolved + emit ask-user 哨兵，
+绝不造假兜底。
+
+你的活是 **port** 用户逻辑 verbatim（依赖闭包 inline 进同文件：常量 / helper /
+transform），不是 **re-design**。
+
 ## 唯一职责
 
 **生成** `<output_dir>/user/{loss,data,eval,optim}.py` +
@@ -93,9 +108,16 @@ done
 # 搬入规则：
 #  - 函数体 + 其引用的模块级依赖闭包（常量 / helper / 类）一并拷贝进同一文件；
 #  - 拷贝后仍依赖用户项目符号（`from <user_pkg> import ...`）→ **fail loud**；
-#  - 顶层 import 仅允许白名单 {torch,math,numpy,typing,itertools,functools,collections,
-#    dataclasses,random}；禁 sibling / 相对 import；
+#  - 顶层 import 仅允许白名单 {torch,torchvision,torchaudio,numpy,scipy,sklearn,PIL,
+#    math,os,sys,json,pathlib,typing,itertools,functools,collections,dataclasses,
+#    random,io,abc,copy,re,warnings,time}；标准科学计算包（torch/torchvision/numpy/
+#    scipy/sklearn/PIL）允许，**禁** sibling / 相对 import / 用户项目模块；
 #  - 禁硬编码 shape（必须读 baseline DUMMY_INPUT）；
+#  - **禁造假数据源**：data.py / eval.py 严禁用 `torch.rand/randn/randint/randperm` 或
+#    `numpy.random.*` 作数据/标签来源（作参数 init / 真实数据上的 augmentation 可）；
+#    必须 port 用户真实 dataloader（含其 torchvision/PIL/numpy import + 真实数据路径）。
+#    用户 dataloader 依赖用户项目模块 / 不可得数据 → **fail loud** + emit ask-user 哨兵，
+#    **绝不**用随机数冒充。
 #  - data.py 的 loader 必须 re-iterable（每 epoch iter() 重新 yield；one-shot generator
 #    须包 re-iterable adapter）。
 
@@ -172,8 +194,9 @@ print(f'TEACHER_DEFAULT_EPOCHS: {int(ep_match)}')
 - ❌ 产单体 `train_pipeline.py`（产物仅 4 叶子 + run_config.yaml + run.sh；引擎是固定库代码，LLM 不碰）；
 - ❌ 引入 DDP / torchrun / sandwich 采样 / `set_sample_config`；
 - ❌ 用 `nas_agent.train.distillation` —— 引擎只用 `kd.compose` / `kd.wrapper` / `kd.ema`；
-- ❌ 叶子 `import` 用户项目模块 / sibling 文件 / 相对 import（必须自包含；白名单外的顶层 import → fail loud）；
+- ❌ 叶子 `import` 用户项目模块 / sibling 文件 / 相对 import（必须自包含；白名单含标准科学计算包 torch/torchvision/numpy/scipy/sklearn/PIL + stdlib，**只禁**用户项目模块 / sibling / 相对 import）；
 - ❌ 硬编码 shape 回退（必须读 baseline `DUMMY_INPUT`）；
+- ❌ **造假数据源**：data.py / eval.py 用 `torch.rand/randn/randint/randperm` / `numpy.random.*` 作数据或标签来源（用户 dataloader 不可 port 时 fail loud + ask-user 哨兵，绝不随机冒充——这是 KD-NAS 零学习的根因）；
 - ❌ 静默吞错（fail loud：CLI 不符、契约违约直接非零退出 + stderr 报因）；
 - ❌ 改 KD 库 / 引擎（叶子是消费者，引擎是固定库代码）；
 - ❌ AST 检测到 GAN/RL/DDP token 且未给 `--force-template` → fail loud，**不**继续生成。

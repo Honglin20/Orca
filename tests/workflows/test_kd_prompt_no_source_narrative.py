@@ -106,6 +106,8 @@ HISTORICAL_NARRATIVE = re.compile(
     | 随骨架化移除
     | 拆到独立
     | 拆到\s*train_teacher
+    | 已移除                       # 迁移叙事（「X 已移除」）——只写当前契约，不写迁移史
+    | 相对单体                     # flag diff 表「相对单体 …」——迁移对照，非当前契约
     """,
     re.VERBOSE,
 )

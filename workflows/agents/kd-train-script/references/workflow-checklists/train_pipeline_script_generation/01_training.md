@@ -54,15 +54,43 @@ must not.
 **auto-fixable**: no
 **Section**: workflow §2 Self-Containment Rules, CONTRACTS §6
 **Check**: Each leaf's top-level `import` / `from import` targets only the
-whitelist `{torch, math, numpy, typing, itertools, functools, collections,
-dataclasses, random}`. Relative imports (`from .`) are forbidden. No leaf
-imports another leaf or any user-project module.
+whitelist `{torch, torchvision, torchaudio, numpy, scipy, sklearn, PIL, math,
+os, sys, json, pathlib, typing, itertools, functools, collections,
+dataclasses, random, io, abc, copy, re, warnings, time}`. The standard
+scientific stack (torch / torchvision / numpy / scipy / scikit-learn /
+Pillow) IS allowed — port the user's real torchvision loader. Relative
+imports (`from .`) and non-whitelisted absolute imports (e.g.
+`from user_pkg import ...`) are forbidden. No leaf imports another leaf or
+any user-project module.
 **Verify**: `ast.walk` each leaf; reject `ImportFrom` with `level > 0` or
 `module.split('.')[0]` not in the whitelist; reject `Import` whose
 `alias.name.split('.')[0]` is not in the whitelist.
 **Anti-pattern**: `from data_utils import ...`; `from <user_pkg> import ...`;
-`from . import helpers`.
-**Fix**: Copy the helper into the same leaf file.
+`from . import helpers`; avoiding `torchvision` out of a false belief that
+it is forbidden.
+**Fix**: Copy the helper into the same leaf file. For `torchvision` / `PIL`
+/ `numpy` / `scipy` / `sklearn` imports, keep them as-is — they are
+whitelisted standard packages.
+
+### [CRITICAL] 3b. No Random-Tensor Data Fabrication In data.py / eval.py
+**auto-fixable**: no
+**Section**: workflow §2b No Data Fabrication, CONTRACTS §6
+**Check**: `data.py` and `eval.py` must not use `torch.rand` / `torch.randn`
+/ `torch.randint` / `torch.randperm` or `numpy.random.*` (or `np.random.*`)
+as the source of pixels or labels. The leaf must load the user's real
+dataset (e.g. `from torchvision.datasets import MNIST`). Randomness for
+parameter init, batch shuffling over real samples, or augmentation on top
+of ground-truth data is allowed.
+**Verify**: `fidelity_check.py`'s `LEAF_FABRICATION_OK: true` plus an AST
+walk over `data.py` / `eval.py` rejecting `ast.Call` to the random-tensor
+factories above.
+**Anti-pattern**: Replacing the user's torchvision MNIST loader with
+`torch.rand(N, 1, 28, 28)` + `torch.randint(0, 10, (N,))` because the leaf
+"must be self-contained" — this fabricated data was the audit-found root
+cause of KD-NAS zero-learning (run 6c2ebe: loss locked at ln(10), acc ~10%).
+**Fix**: Port the user's real dataloader (with its torchvision / PIL /
+numpy imports and real data path). If the user's data is genuinely
+unavailable, fail loud + emit an ask-user sentinel — never fabricate.
 
 ### [CRITICAL] 4. AST Signature Equality
 **auto-fixable**: yes
@@ -145,12 +173,16 @@ no scheduler.
 **auto-fixable**: no
 **Section**: workflow §4
 **Check**: `eval.py::eval_metric` ports the user's eval metric verbatim —
-same formula, same normalization, same data source. Returns `(value, kind)`
-with `kind ∈ {nmse, mse, ber, db, snr, acc}`.
+same formula, same normalization, **same real data source** (port the user's
+eval loader — torchvision/PIL/numpy, never `torch.rand`/`torch.randint` —
+see item 3b). Returns `(value, kind)` with `kind ∈ {nmse, mse, ber, db, snr, acc}`.
 **Verify**: Compare the leaf body against the user's eval script. Layer 3
-`fidelity_check.py` must print `EVAL_ALLCLOSE: true`.
+`fidelity_check.py` must print `EVAL_ALLCLOSE: true` and
+`LEAF_FABRICATION_OK: true`.
 **Anti-pattern**: Inventing a metric the user's eval script doesn't compute;
-swapping NMSE for MSE; auto-guessing direction from the value's sign.
+swapping NMSE for MSE; auto-guessing direction from the value's sign;
+fabricating eval inputs with `torch.rand` so the metric reads "random
+accuracy on random labels".
 **Fix**: Replace with the user's verbatim eval body + dependency closure.
 
 ### [CRITICAL] 11. Kind Direction Matches accuracy_baseline_kind

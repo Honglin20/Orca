@@ -10,8 +10,12 @@ Self-contained contract (CONTRACTS §1 + kind-direction rule):
     - **lower-better**  (``min``): ``mse``, ``nmse``, ``ber``, ``db``
 * Returning an unknown kind causes ``met_accuracy=false`` and a stderr WARN
   (low confidence) — never silently passes.
-* Self-contained: no sibling / relative imports; whitelisted stdlib + torch
-  + numpy only.
+* Self-contained: no sibling / relative imports; whitelisted standard
+  scientific stack (torch / torchvision / torchaudio / numpy / scipy /
+  sklearn / PIL) + stdlib.
+* **No data fabrication**: never use ``torch.rand`` / ``torch.randn`` /
+  ``torch.randint`` / ``torch.randperm`` / ``numpy.random.*`` to synthesise
+  eval inputs/labels. Port the user's real eval loader (torchvision/PIL/numpy).
 
 The kd-train-script agent ports the user's eval logic verbatim from
 ``test_student.py`` (or the equivalent eval entry in the user's repo).

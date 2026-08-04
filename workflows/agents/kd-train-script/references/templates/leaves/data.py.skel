@@ -7,7 +7,13 @@ Self-contained contract (CONTRACTS §1):
   stream (the engine iterates it once per epoch + once for proxy_mse).
   Wrap one-shot generators in a re-iterable adapter.
 * Yields ``(x, y)`` tuples whose shapes match the model contract.
-* No sibling / relative imports — whitelisted stdlib + torch + numpy only.
+* No sibling / relative imports; top-level imports limited to the whitelist
+  (torch / torchvision / torchaudio / numpy / scipy / sklearn / PIL + stdlib).
+  Port the user's real torchvision / PIL / numpy loader verbatim.
+* **No data fabrication**: never use ``torch.rand`` / ``torch.randn`` /
+  ``torch.randint`` / ``torch.randperm`` / ``numpy.random.*`` as the source
+  of pixels or labels. If the user's data is genuinely unavailable, fail
+  loud + emit an ask-user sentinel — never fabricate.
 
 The kd-train-script agent ports the user's data-loading logic verbatim.
 """

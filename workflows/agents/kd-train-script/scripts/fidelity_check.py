@@ -10,19 +10,24 @@ Checks (per leaf + cross-leaf):
    imports and no sibling / relative imports. Mirrors ``kd/_leaves.py``.
 2. **AST signature equality** — each contract callable's function name +
    required positional args match the contract (defaults additive).
-3. **loss** — ``compute_loss`` vs the user's loss fn on identical seeded
+3. **anti-fabrication** — ``data.py`` / ``eval.py`` must not use
+   ``torch.rand`` / ``torch.randn`` / ``torch.randint`` / ``torch.randperm``
+   or ``numpy.random.*`` as a data/label source.  Such calls signal that
+   the codegen fabricated data instead of porting the user's real loader
+   (the audit-found root cause of KD-NAS zero-learning, run 6c2ebe).
+4. **loss** — ``compute_loss`` vs the user's loss fn on identical seeded
    inputs (``torch.allclose(rtol=1e-5)``); AST body fallback when the user
    module can't be imported.
-4. **dataloader** — ``build_dataloader(batch_size=2)`` vs user
+5. **dataloader** — ``build_dataloader(batch_size=2)`` vs user
    ``build_dataloader``: same batch shape + both re-iterable.
-5. **eval metric** — ``eval_metric`` vs the user eval script's metric on the
+6. **eval metric** — ``eval_metric`` vs the user eval script's metric on the
    same model instance (values allclose + kind identical).
-6. **optimizer** — class name produced by ``build_optimizer`` vs the user
+7. **optimizer** — class name produced by ``build_optimizer`` vs the user
    train.py's optimizer class.
-7. **kind direction hard check** — the kind returned by ``eval_metric``
+8. **kind direction hard check** — the kind returned by ``eval_metric``
    is in the same direction group (max: snr/acc; min: mse/nmse/ber/db) as
    ``--accuracy_baseline_kind``.
-8. **model I/O** — model forward on ``DUMMY_INPUT`` shape preserves the shape.
+9. **model I/O** — model forward on ``DUMMY_INPUT`` shape preserves the shape.
 
 Deterministic script contract (CONTRACTS §3): stdout is ``KEY: value`` lines,
 non-zero exit on FAIL (fail loud).
@@ -56,10 +61,21 @@ import torch
 # ---------------------------------------------------------------------------
 # contract mirrors (must agree with kd/_leaves.py)
 # ---------------------------------------------------------------------------
+# Deliberately mirrored from ``kd/_leaves.py`` (not imported) — fidelity_check
+# is a codegen-time CLI invoked as ``python3 scripts/fidelity_check.py`` and
+# must not depend on ``_kd_scripts`` being on sys.path.  Drift between the two
+# copies is caught by ``tests/workflows/test_kd_train_script.py::
+# test_leaf_import_whitelist_contains_standard_scipy_stack`` (parity assert).
+# "Self-contained" forbids user-project modules, NOT the standard scientific
+# stack — torch / torchvision / numpy / scipy / scikit-learn / Pillow are pip
+# packages and legitimate.  Only relative imports + non-whitelisted absolute
+# imports (e.g. user_pkg) are rejected.
 _LEAF_IMPORT_WHITELIST: frozenset[str] = frozenset(
     {
-        "torch", "math", "numpy", "typing", "itertools", "functools",
-        "collections", "dataclasses", "random",
+        "torch", "torchvision", "torchaudio", "numpy", "scipy", "sklearn", "PIL",
+        "math", "os", "sys", "json", "pathlib", "typing",
+        "itertools", "functools", "collections", "dataclasses",
+        "random", "io", "abc", "copy", "re", "warnings", "time",
     }
 )
 
@@ -145,6 +161,141 @@ def _required_args(fn: ast.FunctionDef) -> list[str]:
     args = fn.args.args
     ndef = len(fn.args.defaults)
     return [a.arg for a in args[: len(args) - ndef]]
+
+
+# ---------------------------------------------------------------------------
+# anti-fabrication (data / eval leaves must load real data, not synthesize)
+# ---------------------------------------------------------------------------
+# ``data.py`` and ``eval.py`` exist to load the user's REAL dataset (e.g.
+# torchvision MNIST).  Using ``torch.rand`` / ``torch.randn`` / ``torch.randint``
+# / ``torch.randperm`` or ``numpy.random.*`` as the SOURCE of pixels or labels
+# is fabrication — it decouples inputs from targets and silently produces a
+# model that cannot learn (the audit-found root cause of KD-NAS zero-learning
+# in run 6c2ebe).  Such calls are forbidden in data.py and eval.py *unless the
+# user's own train.py uses them too* (genuine synthetic-data demos, denoising
+# autoencoders, etc.).  In that case the leaf is porting the user verbatim,
+# not fabricating.
+# ``torch.randperm`` is intentionally absent — it produces permutation indices,
+# not pixels or labels, and is the standard primitive for shuffling real
+# samples (DataLoader samplers). ``np.random.seed`` is also excluded at the
+# numpy branch below — seeding is the opposite of fabrication.
+_RANDOM_TENSOR_ATTRS: frozenset[str] = frozenset(
+    {"rand", "randn", "randint", "normal", "rand_like", "randn_like"}
+)
+# In-place tensor methods that fill a tensor with random data (e.g.
+# ``x.uniform_()``).  Trailing-underscore methods mutate the callee; the
+# callee need not be ``torch`` so we check the attr alone.
+_RANDOM_INPLACE_ATTRS: frozenset[str] = frozenset(
+    {"uniform_", "normal_", "exponential_", "cauchy_", "log_normal_", "geometric_"}
+)
+_RANDOM_CALL_RE = re.compile(
+    r"\b(?:torch|numpy|np)\.(?:rand|randn|randint|rand_like|randn_like|normal|random)\b"
+    r"|\brandom\.(?:random|randint|uniform|gauss|choice)\b"
+)
+
+
+def _head_name(node: ast.AST) -> str:
+    """Return the leftmost Name id of an attribute chain, or '' if not a Name."""
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else ""
+
+
+def _user_uses_random_data(*paths: Path) -> bool:
+    """True iff any of the user's source files uses a random-tensor factory.
+
+    Used to whitelist genuine synthetic-data user code (kd-nas-demo, denoising
+    autoencoders, BER noise eval).  Conservative: any match in the user's
+    train.py / eval script → assume the user is OK with synthetic data and the
+    leaf is porting verbatim rather than fabricating.
+    """
+    for p in paths:
+        if p is None or not p.is_file():
+            continue
+        try:
+            src = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if _RANDOM_CALL_RE.search(src):
+            return True
+    return False
+
+
+def _check_no_random_fabrication(path: Path, user_synthetic: bool) -> list[str]:
+    """Reject torch.*rand / numpy.random.* calls in data/eval leaves.
+
+    Returns a list of violation messages (empty = OK).  When ``user_synthetic``
+    is True (the user's own train.py / eval script already uses random-tensor
+    factories), the leaf is treated as a verbatim port of a genuine
+    synthetic-data user pipeline and the check is skipped.
+    """
+    if user_synthetic:
+        return []
+    try:
+        src = path.read_text(encoding="utf-8")
+    except OSError as e:
+        return [f"{path}: cannot read leaf file: {e}"]
+    try:
+        tree = ast.parse(src, filename=str(path))
+    except SyntaxError as e:
+        return [f"{path}:{e.lineno}: syntax error: {e.msg}"]
+
+    issues: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        # torch.rand / torch.randn / torch.randint / torch.normal /
+        # torch.rand_like / torch.randn_like
+        if isinstance(fn, ast.Attribute) and fn.attr in _RANDOM_TENSOR_ATTRS:
+            head = _head_name(fn.value)
+            if head in {"torch"}:
+                issues.append(
+                    f"{path}:{node.lineno}: fabrication detected — "
+                    f"`{head}.{fn.attr}(...)` synthesises data/labels; "
+                    f"data/eval leaves must load the user's real dataset "
+                    f"(e.g. `from torchvision.datasets import MNIST`). "
+                    f"If the user's data is genuinely unavailable, fail loud "
+                    f"+ emit ask-user sentinel — never fabricate."
+                )
+        # In-place random-fill tensor methods (x.uniform_(), x.normal_(), ...).
+        # The callee can be any Name; the trailing underscore is the signal.
+        if isinstance(fn, ast.Attribute) and fn.attr in _RANDOM_INPLACE_ATTRS:
+            issues.append(
+                f"{path}:{node.lineno}: fabrication detected — "
+                f"`...{fn.attr}()` fills a tensor with random data; data/eval "
+                f"leaves must load the user's real dataset, not synthesise it."
+            )
+        # numpy.random.<func>(...) / np.random.<func>(...).  ``seed`` and
+        # ``default_rng`` are constructors/seeds, not data synthesis — skip.
+        if (
+            isinstance(fn, ast.Attribute)
+            and isinstance(fn.value, ast.Attribute)
+            and fn.value.attr == "random"
+            and fn.attr not in {"seed", "default_rng"}
+            and _head_name(fn.value.value) in {"np", "numpy"}
+        ):
+            issues.append(
+                f"{path}:{node.lineno}: fabrication detected — "
+                f"`{_head_name(fn.value.value)}.random.{fn.attr}(...)` "
+                f"synthesises data/labels; data/eval leaves must load the "
+                f"user's real dataset. If the user's data is genuinely "
+                f"unavailable, fail loud + emit ask-user sentinel."
+            )
+        # stdlib ``random.<func>(...)`` (module-level).  ``random.seed`` and
+        # ``random.Random`` (constructor) are not data synthesis — skip.
+        if (
+            isinstance(fn, ast.Attribute)
+            and isinstance(fn.value, ast.Name)
+            and fn.value.id == "random"
+            and fn.attr not in {"seed", "Random"}
+        ):
+            issues.append(
+                f"{path}:{node.lineno}: fabrication detected — "
+                f"`random.{fn.attr}(...)` synthesises data/labels; data/eval "
+                f"leaves must load the user's real dataset."
+            )
+    return issues
 
 
 def _check_signature(path: Path, fname: str, expected_required: list[str]) -> bool:
@@ -255,7 +406,7 @@ def _extract_seed(eval_path: Path) -> int:
     return int(m.group(1)) if m else 20260725
 
 
-def _discover_user_eval_callable(eval_path: Path):
+def _discover_user_eval_callable(eval_path: Path, loader_factory=None):
     mod = _import_by_path(eval_path, "_user_eval")
     fn = None
     name = ""
@@ -295,8 +446,18 @@ def _discover_user_eval_callable(eval_path: Path):
             )
         except Exception:
             sig_nargs = 1
+        # (model, loader[, device]) family: supply the leaf loader lazily so the
+        # numeric compare exercises the user's formula on the leaf's data.
+        loader_names = ("loader", "data_loader", "test_loader", "dataloader", "test_dl")
+        second_is_loader = len(params) >= 2 and params[1].name in loader_names
         if sig_nargs <= 1:
             adapter = (lambda m, _fn=fn: _fn(m))
+        elif second_is_loader and loader_factory is not None:
+            _ld = loader_factory
+            if sig_nargs >= 3:
+                adapter = (lambda m, _fn=fn, _ld=_ld: _fn(m, _ld(), "cpu"))
+            else:
+                adapter = (lambda m, _fn=fn, _ld=_ld: _fn(m, _ld()))
         else:
             adapter = (lambda m, _fn=fn: _fn(m, "cpu"))
     kind = ""
@@ -307,7 +468,9 @@ def _discover_user_eval_callable(eval_path: Path):
 
 
 def _extract_user_optimizer_class(user_src: str) -> str | None:
-    m = re.search(r"torch\.optim\.(\w+)", user_src)
+    # Match the instantiated optimizer class (`torch.optim.<Class>(`), not a
+    # type annotation (`-> torch.optim.Optimizer` / `: torch.optim.Optimizer`).
+    m = re.search(r"torch\.optim\.(\w+)\s*\(", user_src)
     return m.group(1) if m else None
 
 
@@ -350,6 +513,23 @@ def main() -> int:
     if args.project_root and args.project_root not in sys.path:
         sys.path.insert(0, args.project_root)
 
+    # Fail loud on bad CLI inputs (rc=2 + stderr per CONTRACTS §3).
+    user_train_path = Path(args.user_train)
+    if not user_train_path.is_file():
+        print(
+            f"FIDELITY: FAIL\nUSER_TRAIN_MISSING: {user_train_path}",
+            file=sys.stderr,
+        )
+        return 2
+    if args.user_eval:
+        ue = Path(args.user_eval)
+        if not ue.is_file():
+            print(
+                f"FIDELITY: FAIL\nUSER_EVAL_MISSING: {ue}",
+                file=sys.stderr,
+            )
+            return 2
+
     leaves_dir = Path(args.leaves_dir)
     if not leaves_dir.is_dir():
         print(f"FIDELITY: FAIL\nLEAVES_DIR_MISSING: {leaves_dir}", file=sys.stderr)
@@ -385,6 +565,27 @@ def main() -> int:
                 file=sys.stderr,
             )
     print(f"LEAF_AST_OK: {'true' if ast_ok else 'false'}")
+
+    # ---- 0b. Anti-fabrication: data/eval leaves must not synthesise data ----
+    # The user's own train.py / eval script may legitimately use random-tensor
+    # factories (synthetic-data demos, denoising autoencoders).  In that case
+    # the leaf is porting verbatim, not fabricating — skip the check.
+    user_eval_path_obj = Path(args.user_eval) if args.user_eval else None
+    user_synthetic = _user_uses_random_data(Path(args.user_train), user_eval_path_obj)
+    if user_synthetic:
+        print(
+            "LEAF_FABRICATION_NOTE: user train.py / eval script uses random-tensor "
+            "factories — leaf random data treated as verbatim port, not fabrication.",
+            file=sys.stderr,
+        )
+    fabric_ok = True
+    for fname in ("data.py", "eval.py"):
+        violations = _check_no_random_fabrication(leaf_paths[fname], user_synthetic)
+        if violations:
+            fabric_ok = False
+            for v in violations:
+                print(f"LEAF_FABRICATION: {v}", file=sys.stderr)
+    print(f"LEAF_FABRICATION_OK: {'true' if fabric_ok else 'false'}")
 
     # ---- load leaf modules (signatures already verified) ----------------
     loss_mod = _import_by_path(leaf_paths["loss.py"], "_gen_loss")
@@ -489,9 +690,28 @@ def main() -> int:
         model.eval()
         with torch.no_grad():
             out = model(torch.zeros(*shape))
-        ok = tuple(out.shape) == tuple(shape)
-        if not ok:
-            print(f"IO_SHAPE_DIFF: out={tuple(out.shape)} dummy={tuple(shape)}", file=sys.stderr)
+        out_shape = tuple(out.shape)
+        in_shape = tuple(shape)
+        # Classifier-family I/O: the output shape need not equal the input
+        # shape (e.g. [B, C, H, W] -> [B, num_classes]).  Prefer the model
+        # contract's optional OUTPUT_SHAPE when declared; otherwise require the
+        # forward to have succeeded on a DUMMY_INPUT batch with the batch dim
+        # preserved (mirrors validate_contract P4 7a/7c for the classifier
+        # family — reconstruction equality was over-constrained).
+        _fid_mod = sys.modules.get("_fid_model")
+        declared = None
+        if _fid_mod is not None:
+            _decl = getattr(_fid_mod, "OUTPUT_SHAPE", None)
+            if _decl is not None:
+                declared = tuple(int(s) for s in _decl)
+        if declared is not None:
+            ok = out_shape == declared
+            if not ok:
+                print(f"IO_SHAPE_DIFF: out={out_shape} OUTPUT_SHAPE={declared}", file=sys.stderr)
+        else:
+            ok = bool(out_shape) and out_shape[0] == in_shape[0]
+            if not ok:
+                print(f"IO_SHAPE_DIFF: out={out_shape} input_batch_dim={in_shape[0]}", file=sys.stderr)
         io_ok = "true" if ok else "false"
 
     # ---- 3. eval metric + 7. kind direction hard check -------------------
@@ -552,7 +772,10 @@ def main() -> int:
         print("EVAL_SCRIPT_FOUND: false")
     else:
         try:
-            user_eval, user_kind = _discover_user_eval_callable(eval_path)
+            user_eval, user_kind = _discover_user_eval_callable(
+                eval_path,
+                loader_factory=(lambda: data_mod.build_dataloader(batch_size=8)),
+            )
         except Exception as e:
             print(f"EVAL_ERROR: {type(e).__name__}: {e}", file=sys.stderr)
             user_eval, user_kind = None, ""
@@ -607,6 +830,7 @@ def main() -> int:
     # ---- report -----------------------------------------------------------
     print(f"FIDELITY_LEVEL: {level}")
     print(f"LEAF_AST_OK: {ast_ok}")
+    print(f"LEAF_FABRICATION_OK: {'true' if fabric_ok else 'false'}")
     print(f"LOSS_ALLCLOSE: {loss_ok}")
     print(f"LOADER_SHAPE_OK: {loader_ok}")
     print(f"EVAL_ALLCLOSE: {eval_ok}")
@@ -617,6 +841,7 @@ def main() -> int:
         v == "false"
         for v in (
             "true" if ast_ok else "false",
+            "true" if fabric_ok else "false",
             loss_ok, loader_ok, eval_ok, opt_ok, io_ok, kind_ok,
         )
     )

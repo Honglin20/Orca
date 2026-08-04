@@ -201,7 +201,9 @@ nodes:
   # `_kd_scripts/train_pipeline.py`（`KDTrainer`）消费；本节点**不产单体 train_pipeline.py**。
   # train_pipeline_path 字段切指向该固定引擎入口（下游 5 调用点 inline flag 调）。
   # AST 检测：读用户 train.py 时扫 GAN/RL/DDP，命中 fail loud + `--force-template` override。
-  # 四层校验：逐叶子静态 + smoke + fidelity_check（数值等价 + AST 自包含 + AST 签名 + kind 方向硬校验）+
+  # 叶子白名单 = 标准科学计算包（torch/torchvision/numpy/scipy/sklearn/PIL）+ stdlib；禁用户项目模块。
+  # 反造假：data.py/eval.py 严禁 torch.rand/randint/numpy.random 作数据/标签源；用户数据不可得 → fail loud + ask-user。
+  # 四层校验：逐叶子静态 + smoke + fidelity_check（数值等价 + AST 自包含 + AST 签名 + 反造假 + kind 方向硬校验）+
   # workflow-verifier（4 叶子并行 review）。
   # ═══════════════════════════════════════════════════════════════
   - name: gen_train_script
@@ -224,7 +226,7 @@ nodes:
 
   # ═══════════════════════════════════════════════════════════════
   # train_script_verify：校验 4 叶子（loss/data/eval/optim.py）契约 + AST 自包含 +
-  # AST 签名 + kind 方向硬校验 + fidelity_check 数值等价 + 引擎 smoke（合成 model+ckpt
+  # AST 签名 + kind 方向硬校验 + fidelity_check 数值等价 + 反造假 + 引擎 smoke（合成 model+ckpt
   # 跑 --mode teacher/eval 一 epoch）+ workflow-verifier（4 叶子并行 review）。
   # verified=false → fail loud 阻塞（配置错误非业务波动）。
   # ═══════════════════════════════════════════════════════════════

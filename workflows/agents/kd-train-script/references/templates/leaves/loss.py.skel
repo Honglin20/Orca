@@ -3,8 +3,9 @@
 Self-contained contract (CONTRACTS §1):
 
 * Required callable: ``compute_loss(s_out, y) -> Tensor``.
-* No sibling / relative imports — only the whitelisted stdlib + torch subset
-  (the loader's AST deny-list rejects anything else).
+* No sibling / relative imports — only the whitelisted standard scientific
+  stack (torch / torchvision / torchaudio / numpy / scipy / sklearn / PIL)
+  + stdlib (the loader's AST deny-list rejects anything else).
 * The KD composite (``kd.compose.build_kd_loss``) calls this for the task
   term; KD terms (mse / ofd / fitnets / rkd / ema) are added by the engine.
 

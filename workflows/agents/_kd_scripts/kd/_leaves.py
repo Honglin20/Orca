@@ -36,21 +36,50 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-# Whitelist of modules a leaf may import.  Leaves must be self-contained —
-# they cannot reach into sibling KD-NAS scripts or the user's project via
-# sys.path.  Stdlib + torch + numpy are enough for any reasonable loss / eval
-# / optim definition; anything else is a sign the leaf is not self-contained.
+# Modules a leaf may import.  "Self-contained" means a leaf cannot reach into
+# sibling KD-NAS scripts or the user's project tree via sys.path — it does NOT
+# mean forbidding the standard scientific stack.  ``torch``, ``torchvision``,
+# ``numpy``, ``scipy``, ``scikit-learn`` (imported as ``sklearn``) and
+# ``Pillow`` (imported as ``PIL``) are pip packages available in any KD-NAS
+# runtime; ``from torchvision.datasets import MNIST`` is legitimate and
+# expected.  Only **user-project modules** (relative imports + non-whitelisted
+# absolute imports such as ``from user_pkg import ...``) are rejected.
+# Stdlib entries cover everything a leaf plausibly needs (path manipulation,
+# json config, regex, etc.).
+#
+# This whitelist is deliberately mirrored in
+# ``workflows/agents/kd-train-script/scripts/fidelity_check.py`` — the codegen
+# CLI must not import this module (it runs as a standalone script).  Drift is
+# caught by ``tests/workflows/test_kd_train_script.py::
+# test_leaf_import_whitelist_contains_standard_scipy_stack``.
 _LEAF_IMPORT_WHITELIST: frozenset[str] = frozenset(
     {
+        # PyTorch + scientific Python (pip packages).
         "torch",
-        "math",
+        "torchvision",
+        "torchaudio",
         "numpy",
+        "scipy",
+        "sklearn",
+        "PIL",
+        # Python stdlib.
+        "math",
+        "os",
+        "sys",
+        "json",
+        "pathlib",
         "typing",
         "itertools",
         "functools",
         "collections",
         "dataclasses",
         "random",
+        "io",
+        "abc",
+        "copy",
+        "re",
+        "warnings",
+        "time",
     }
 )
 
