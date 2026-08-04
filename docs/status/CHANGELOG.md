@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-04] fix(web): 看板重设计 test-agent 真机实测闭环——KPI live-pending + blocked 架构 draft
+
+test-agent 真机实测 18 PASS/0 FAIL，抓到 2 个只有真机才能发现的缺陷（mock 边界假绿）：① KPI 运行计数漏算 live-pending（`RunListPage` kpiCounts `{running,queued}` 与 `group-runs` 排队桶 `accept={queued,live-pending}` 不一致，4 胶囊合计 ≠ total）——已修 kpiCounts+filter 补 live-pending，SPEC §2.2/AC-B2/B3 同步，vitest 99 pass（`76073ef`）；② 待决策(blocked) 死 UI——后端 `RunStatus` 无 blocked（仅 node 级 gate/interrupt 投影），继承的架构裂缝，另开 [`run-blocked-status-design-draft.md`](../specs/run-blocked-status-design-draft.md) 跟进（方案 A 后端 fold），本次保留 UI 待激活。SPEC 升 v1.2（`b6d5034`）。详见看板 release note + draft。
+
 ## [2026-08-04] feat(web): 看板卡片网格重设计——横向列→KPI概览带+section垂直堆叠+卡片网格
 
 Web 主页 `/` 看板从 Trello 式横向 5 列重设计为「KPI 概览带（可点过滤）+ 分组 section + 卡片网格」；去 cost、状态只画一遍、失败/待决策提级。SPEC `web-board-cardgrid-redesign.md` v1.1 逐字实现，code-reviewer 6 项反馈闭环。Commit: `ca5c07a`。详见 [release note](docs/releases/2026-08-04-web-board-cardgrid-redesign.md)。

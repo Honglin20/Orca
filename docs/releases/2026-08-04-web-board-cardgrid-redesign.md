@@ -52,3 +52,14 @@
 - 🟡 跨 dim blocked ring 集成测试补全。
 - 🟡 ProjectGroup 注释清「总花费」。
 - 🟢 KpiStrip failedAlert dot 分支简化（去死逻辑）。
+
+## test-agent 真机实测闭环（commit `76073ef` + `b6d5034`，SPEC 升 v1.2）
+
+test-agent 真机实测（真实 uvicorn 后端 + 真实 tape fold + 真实 `/api/runs` + build 好的真实 SPA + 真实 Playwright Chromium，非 mock）：**18 PASS / 0 FAIL**——垂直堆叠无横滚、KPI 即过滤、响应式 2-4 列、状态只画一遍、去 cost、失败红边红底 + cancelled 中性灰、section 限显 6 + 折叠持久 + forceOpen、分组切换、共享 selection/bulk bar 全部真机通过。截图在 `_e2e_artifacts/`。
+
+抓到 2 个只有真机才能发现的缺陷（mock 边界假绿）：
+
+- **发现 2（MINOR，已修 `76073ef`）**：KPI 运行计数漏算 `live-pending`——`RunListPage` kpiCounts `{running,queued}` 与 `group-runs` 排队桶 `accept={queued,live-pending}` 不一致，4 胶囊合计 ≠ total。修 kpiCounts + filter running 补 live-pending；SPEC §2.2/AC-B2/B3 同步；补 live-pending + 合计断言、新增 running 过滤显 live-pending 测试。**vitest 99 pass**（+1）。
+- **发现 1（HIGH，架构裂缝，另开 draft `b6d5034`）**：待决策(blocked) 死 UI——后端 `RunStatus` 无 `blocked`（仅 node 级 gate/interrupt 投影），故 KPI 待决策永远 0、待决策 section 永远空、blocked 卡紫边永不触发（vitest 过仅因 mock 了真实后端永不产出的 `status:"blocked"`）。继承的既有前后端契约裂缝（原 Trello 看板同），非本次重设计引入。经用户决策**另开 SPEC**：[`run-blocked-status-design-draft.md`](../specs/run-blocked-status-design-draft.md)（方案 A：后端 `_summary_from_tape` fold gate/interrupt → run status=blocked；前端零改，待激活）。本次保留 blocked UI 与 mock 单测。
+
+> 注：test-agent 另报「发现 3」——本机 `~/.orca` 被 1117 个历史 run 污染致 `discover_runs` 同步阻塞 15.4s，baseline e2e 本机红（干净 `ORCA_HOME` 下 10 passed）。pre-existing 性能隐患，out of scope，另记 issue。
