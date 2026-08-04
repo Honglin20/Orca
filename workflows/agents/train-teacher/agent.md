@@ -124,8 +124,6 @@ if [ "$NEED_TRAIN" = "1" ]; then
     exit 2
   fi
   [ -f "$TEACHER_CKPT" ] || { echo "FAIL: teacher 训练未产 ckpt：$TEACHER_CKPT" >&2; exit 2; }
-  # 兼容旧 metrics_tail 兜底路径：把 runs/<exp>/train.log 软拷贝到旧 meta/teacher_train.log（post-hoc 读此）
-  cp "$PER_RUN/runs/$TEACHER_EXP/train.log" "${KD_ARTIFACTS_DIR}meta/teacher_train.log" 2>/dev/null || true
   # 2b) teacher_setup 产 cache + meta（latency 从 gen_teacher.output 透传，不再自测）
   #     teacher 可视化须由 evaluate 驱动（非 training loss）：复用引擎 --mode eval
   #     跑 teacher ckpt+model → STUDENT_ACCURACY，teacher_setup._parse_accuracy 解析进 meta。
@@ -173,11 +171,11 @@ echo "PARSED step2: TEACHER_CACHE=$TEACHER_CACHE TEACHER_META=$TEACHER_META TEAC
 > 分工（引擎 + metrics_tail）：
 >   - 引擎 ``_make_live_push``（训练循环内）：实时推 per-epoch loss（--env_anchor 激活）；
 >   - ``metrics_tail``（post-hoc 兜底）：扫引擎 redirect 出的 ``runs/teacher/train.log``
->     （step 2 已软拷贝到旧 ``meta/teacher_train.log``，兼容此路径）推 loss / 自定义 metrics。
+>     （Phase 3：logs/ 折叠，直接指 per-run ``runs/<exp>/train.log``）推 loss / 自定义 metrics。
 > 两者互补：live push 失败时 metrics_tail 兜底。metrics_template 空 → 走默认 loss。
 
 ```bash
-TEACHER_LOG="${KD_ARTIFACTS_DIR}meta/teacher_train.log"
+TEACHER_LOG="{{ setup.output.per_run_artifacts_dir }}/runs/teacher/train.log"
 VIZ_STDOUT=$(python3 "$KD_SCRIPTS_DIR/metrics_tail.py" \
   --template "{{ inputs.metrics_template }}" \
   --source_log "$TEACHER_LOG" \

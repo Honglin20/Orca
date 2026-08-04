@@ -526,10 +526,10 @@ def test_kd_no_finalize_no_proxy():
 
 
 def test_kd_setup_node_exposes_path_fields():
-    """重构：setup output_schema 暴露新路径字段（kd_artifacts_dir 稳定根 + ledger + ckpts + teacher + ...）。"""
+    """重构：setup output_schema 暴露新路径字段（kd_artifacts_dir 稳定根 + ledger + checkpoints + teacher + ...）。"""
     yaml_text = (REPO / "workflows" / "kd-nas.yaml").read_text(encoding="utf-8")
     for field in ["kd_artifacts_dir:", "per_run_artifacts_dir:", "ledger_path:",
-                  "ckpts_dir:", "teacher_cache:", "teacher_meta:", "kd_scripts_dir:",
+                  "checkpoints_dir:", "teacher_cache:", "teacher_meta:", "kd_scripts_dir:",
                   "baseline_latency_us:"]:
         assert field in yaml_text, f"kd setup output_schema missing {field}"
 

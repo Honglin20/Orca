@@ -56,7 +56,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 - 模型入口: `{{ inputs.baseline_model_path }}`（任意 `.py` / `.yaml` / config 入口；flatten agent 会展平成 KD 变体契约，**不再要求用户自带契约**）
 - 设备: `{{ inputs.device }}`（advanced，默认 `auto`；用于 `validate_contract.py` forward 校验 + `__main__` latency 测量）
 - latency_provider: `{{ inputs.latency_provider }}`（用户真硬件 latency 脚本 `path::func`；kd-nas workflow 必填。**写入 flat 文件 `__main__` 的 `--latency_provider` 默认值**——渲染后的实际路径串，不是 Jinja 模板；空串 → helper fallback ONNXRT-CPU + WARN）
-- 输出目录: `${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/`（跨 run 持久，与下游 setup 的 `kd_artifacts_dir` 同根——setup 用 `${PROJECT_ROOT}/artifacts/kd-nas/`，flatten 落其 `models/baseline/` 子目录；baseline 契约随项目走，不再散落 per-run `runs/<run_id>/`）。PROJECT_ROOT 由 step2 推断（找不到 .git/pyproject.toml/train.py 时取 baseline_model_path 的 dirname，总非空 → OUTPUT_DIR 总非空，无 fallback）
+- 输出目录: `${PROJECT_ROOT}/artifacts/models/baseline/`（跨 run 持久，与下游 setup 的 `kd_artifacts_dir` 同根——Phase 3 拍平后 setup 用 `${PROJECT_ROOT}/artifacts/`，flatten 落其 `models/baseline/` 子目录；baseline 契约随项目走，不再散落 per-run `runs/<run_id>/`）。PROJECT_ROOT 由 step2 推断（找不到 .git/pyproject.toml/train.py 时取 baseline_model_path 的 dirname，总非空 → OUTPUT_DIR 总非空，无 fallback）
 
 ## 准备工作
 
@@ -72,14 +72,14 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
    import os, sys
    p = sys.argv[1].split(' (low-confidence')[0].strip()
    proot = os.path.abspath(p) if p else ''
-   print(os.path.join(proot, 'artifacts', 'kd-nas', 'models', 'baseline') if proot else '')
+   print(os.path.join(proot, 'artifacts', 'models', 'baseline') if proot else '')
    " "<LLM 填：step2 推断的 project_root 绝对路径（含 low-confidence 后缀照填）>")"
    [ -n "$OUTPUT_DIR" ] || { echo "FAIL: step2 推断的 project_root 为空（未推断？）" >&2; exit 2; }
    mkdir -p "$OUTPUT_DIR" && cd "$OUTPUT_DIR"
    echo "OUTPUT_DIR=$OUTPUT_DIR"
    ```
 
-   下面所有产物写进 `$OUTPUT_DIR`，`flat_artifacts_dir` 字段填它。**low-confidence 边缘**：step2 推断失败时 `PROJECT_ROOT_IN` = baseline_model_path 的 dirname（去后缀后），OUTPUT_DIR = `dirname/artifacts/kd-nas/models/baseline/`——可能与 setup 不合流（setup 从 `baseline_contract_path` 向上重算根），但 `baseline_contract_path` 绝对路径仍供 setup 读取，功能不阻断（统一用 PROJECT_ROOT 公式，确定性优先，不再 fallback `llm_artifacts/`）。
+   下面所有产物写进 `$OUTPUT_DIR`，`flat_artifacts_dir` 字段填它。**low-confidence 边缘**：step2 推断失败时 `PROJECT_ROOT_IN` = baseline_model_path 的 dirname（去后缀后），OUTPUT_DIR = `dirname/artifacts/models/baseline/`——可能与 setup 不合流（setup 从 `baseline_contract_path` 向上重算根），但 `baseline_contract_path` 绝对路径仍供 setup 读取，功能不阻断（统一用 PROJECT_ROOT 公式，确定性优先，不再 fallback `llm_artifacts/`）。
 
 ## 执行流程
 

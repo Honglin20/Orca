@@ -30,9 +30,9 @@ requires **when you begin that step**. This keeps context focused.
 
 ## Working Directory and Path Conventions
 
-- `<output_dir>`: `${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/` —— cross-run persistent
-  and **co-rooted with the downstream `setup` node's `kd_artifacts_dir`** (setup uses
-  `${PROJECT_ROOT}/artifacts/kd-nas/`; flatten lives in its `models/baseline/` subdir). The
+- `<output_dir>`: `${PROJECT_ROOT}/artifacts/models/baseline/` —— cross-run persistent
+  and **co-rooted with the downstream `setup` node's `kd_artifacts_dir`** (Phase 3 flattened:
+  setup uses `${PROJECT_ROOT}/artifacts/`; flatten lives in its `models/baseline/` subdir). The
   baseline contract travels with the project across runs instead of scattering under per-run
   `runs/<run_id>/`. `PROJECT_ROOT` is the **low-confidence suffix-stripped** value inferred in
   preparation; `agent.md` step 3 computes `<output_dir>` with a **deterministic python snippet**

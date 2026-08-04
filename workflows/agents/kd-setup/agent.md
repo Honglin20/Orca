@@ -91,11 +91,23 @@ while p and p!=os.path.dirname(p) and not any(os.path.exists(os.path.join(p,m)) 
     p=os.path.dirname(p)
 print(p)
 " "$BASELINE")"
-# kd_artifacts_dir 跨 run 持久（项目 artifacts 目录；随项目走，不绑 orca 仓库）。
-KD_ARTIFACTS_DIR="${PROJECT_ROOT}/artifacts/kd-nas/"
+# kd_artifacts_dir 跨 run 持久（项目 artifacts 根；Phase 3 拍平：去 kd-nas 层，plan §3.4 D6）。
+KD_ARTIFACTS_DIR="${PROJECT_ROOT}/artifacts/"
 mkdir -p "$KD_ARTIFACTS_DIR"models/baseline "$KD_ARTIFACTS_DIR"models/teacher "$KD_ARTIFACTS_DIR"models/students
-mkdir -p "$KD_ARTIFACTS_DIR"scripts "$KD_ARTIFACTS_DIR"onnx/tune "$KD_ARTIFACTS_DIR"checkpoints "$KD_ARTIFACTS_DIR"meta "$KD_ARTIFACTS_DIR"reports "$KD_ARTIFACTS_DIR"logs
+mkdir -p "$KD_ARTIFACTS_DIR"scripts "$KD_ARTIFACTS_DIR"onnx "$KD_ARTIFACTS_DIR"checkpoints "$KD_ARTIFACTS_DIR"meta "$KD_ARTIFACTS_DIR"reports
 mkdir -p "$KD_ARTIFACTS_DIR".worktrees
+# ★ Phase 3 原子迁移（plan §3.4）：检测旧 artifacts/kd-nas/ 存在 → 拍平迁移。
+#   migrate_flat.py 5 步原子（copy → rewrite 路径字段 → 校验 → os.replace → sentinel → rmtree）+ 幂等。
+KD_OLD="${PROJECT_ROOT}/artifacts/kd-nas"
+if [ -d "$KD_OLD" ]; then
+  MIGRATE_OUT="$(python3 "$KD_SCRIPTS_DIR/migrate_flat.py" --kd_old "$KD_OLD" --flat_new "$KD_ARTIFACTS_DIR" 2>&1)"
+  MIGRATE_RC=$?
+  echo "$MIGRATE_OUT"
+  if [ $MIGRATE_RC -ne 0 ]; then
+    echo "FAIL: migrate_flat rc=$MIGRATE_RC（旧 kd-nas/ 拍平迁移失败；不动旧数据，fail loud）" >&2
+    exit 2
+  fi
+fi
 CHECKPOINTS_DIR="${KD_ARTIFACTS_DIR}checkpoints/"
 STUDENT_MODELS_DIR="${KD_ARTIFACTS_DIR}models/students/"
 SCRIPTS_DIR="${KD_ARTIFACTS_DIR}scripts/"

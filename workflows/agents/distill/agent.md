@@ -224,8 +224,6 @@ ORCA_KD_SCRIPTS_DIR="$KD_SCRIPTS_DIR" python3 "$TRAIN_PIPELINE" \
 RC=$?
 OUT="$(tail -c 4000 "$PER_RUN/runs/$EXP/train.log" 2>/dev/null || true)"
 echo "$OUT"
-# DISTILL_LOG 兼容（post-hoc 兜底路径；保留旧名以减少 viz 路径 churn）
-DISTILL_LOG="$PER_RUN/runs/$EXP/train.log"
 if [ $RC -ne 0 ]; then
   FAIL_TAIL="$(echo "$OUT" | tail -c 300)"
   python3 -c '
@@ -295,7 +293,7 @@ VIZ_STDOUT_TABLE=$(python3 "$KD_SCRIPTS_DIR/viz_kd_stage.py" \
 
 VIZ_STDOUT_LOSS=$(python3 "$KD_SCRIPTS_DIR/metrics_tail.py" \
   --template "{{ inputs.metrics_template }}" \
-  --source_log "$DISTILL_LOG" \
+  --source_log "$PER_RUN/runs/$EXP/train.log" \
   --variant_id "r${ROUND}_student" \
   --mode distill \
   --env_anchor "{{ setup.output.per_run_artifacts_dir }}" \

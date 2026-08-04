@@ -329,6 +329,9 @@ def teacher_setup(args) -> dict:
 
     out_dir = os.path.abspath(args.output_dir)
     Path(out_dir).mkdir(parents=True, exist_ok=True)
+    # 子目录恒存在（生产路径由 kd-setup mkdir；测试 / 直接调脚本场景兜底——fail loud 不靠运气）。
+    for sub in ("checkpoints", "onnx", "meta"):
+        Path(out_dir, sub).mkdir(parents=True, exist_ok=True)
 
     # 复现种子（proxy_dataset_spec 随机正态 + hook 探测 forward 用）
     torch.manual_seed(getattr(args, "seed", 0))
