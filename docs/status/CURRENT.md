@@ -21,6 +21,11 @@
 
 ### Phase 5 E2E 待办（端到端验证）
 - [ ] E2E `examples/kd-nas-demo` 全链路 + resume 多时点 smoke + 早停 patience 触发 + 拍平迁移 smoke（旧 `kd-nas/` 真迁）
+- [ ] **headless e2e 重跑**（被 P3 deepseek flatten 延迟卡住）：本次（commit `a952ecc`）从 `examples/mnist_kd/` 起 `tars run` 卡在 flatten 25min+；待 P3 优化后重跑验 setup→teacher→distill 全链路
+
+### 已知 follow-up（非 kd-nas 重构范围）
+- **P2**: `~/.orca/runs/<id>/log` 空文件（executor 日志 bug）—— executor 层
+- **P3**: flatten 9m46s+ deepseek 重读文件延迟 —— 优化层（本 e2e 实测命中）
 
 **必读**：
 - 计划 `docs/plans/2026-08-04-kd-nas-trainer-engine-and-leaf-codegen.md`（§5 Phase 5 checklist + §11 v3.2）

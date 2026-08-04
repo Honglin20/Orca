@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-04] fix(kd-nas): ORCA_WORKFLOWS_ROOT env 注入 + agent.md 去 cwd-relative + fail-loud 空 JSON 禁止
+
+修 test-agent 真跑 `tars run` 暴露的 P0 架构问题：`kd-setup/kd-train-script/teacher-gen/struct-curator` 的 agent.md 用 `find workflows/agents/_kd_scripts ...` 这种 cwd-relative 查找，`tars run` 从用户项目起跑时 agent CWD ≠ Orca 仓库根 → fail。修复方案（OCP-clean，单通用 env）：executor 在 spawn 时注入 `ORCA_WORKFLOWS_ROOT`（= workflow yaml 所在目录绝对路径，dev=<repo>/workflows，安装态=~/.orca/workflows），agent.md 读 `$ORCA_WORKFLOWS_ROOT/agents/_kd_scripts` + 三档 fail loud（env 缺 / dir 缺 / file 缺）。plumbing 全链（build_env_overlay / make_executor / ClaudeExecutor / ScriptExecutor / Orchestrator 3 构造路径 / OrcaApp / RunManager / run_workflow 库 API / `python -m orca.run`）透传，kwarg 默认 None → 旧调用零回归。P1 强化：kd-setup 严禁块加「step 非零退出时禁止返回空字段 JSON 占位」（覆盖 deepseek 填 schema 倾向）。单测 +6（env_overlay 注入/缺省/共存 + executor 构造/spawn config 注入/缺省）；守门 + 全 suite 对比零回归（25 failed + 13 errors 全是 pre-existing test isolation）。Commit: `a952ecc`。详见 [release note](../releases/2026-08-04-kd-nas-workflows-root-env-injection.md)。
+
 ## [2026-08-04] refactor(kd-nas): P5 任务纯净度清扫——决策标签 / 历史叙事清除 + 守门测试强化
 
 Phase 4 之后**审查过程决策标签**（D2/D8/D10/E1-E13/M1-M8/N3-N21/Q6-Q10/B4/R1-R3/F3/A4-A8 等非括号形式）pervasive 残留 + 3 个 agent description 含历史对比叙事 + CONTRACTS/yaml 夹带迁移叙事——本次纯文本层清扫闭环：agent prompt（5 agent.md + 1 leaf skel + kd-nas.yaml 4 处 + CONTRACTS 3 处）零过程标签零历史叙事；引擎 .py（migrate_flat ~15 处 / trainer / _resume / kd_reducer / finalize_kd）删尾部过程 ID + `code-reviewer Rx` 归属，保留设计 why 注释；守门测试 `test_kd_prompt_no_source_narrative.py` deny-list 分层强化——agent prompt 层加非括号决策标签 + 历史叙事词锁，.py 仅保留括号 + 复合源叙事锁（D7 边界），E402 noqa 双重免疫。零逻辑 / 契约 / CLI / 字段改动。测试 468 passed, 3 skipped（零回归）。Commit: `e3c2c2b`。详见 [release note](../releases/2026-08-04-kd-nas-trainer-engine-phase5.md)。
