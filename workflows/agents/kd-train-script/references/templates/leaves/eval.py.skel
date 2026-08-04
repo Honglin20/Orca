@@ -1,0 +1,32 @@
+"""eval.py — evaluation metric leaf (kd-train-script codegen target).
+
+Self-contained contract (CONTRACTS §1, plan §3.2 + §3.1 D2):
+
+* Required callable: ``eval_metric(student, device) -> (value, kind)``.
+* ``kind`` MUST be one of ``{nmse, mse, ber, db, snr, acc}`` — the engine
+  resolves ``max`` vs ``min`` direction via ``kd_common.accuracy_direction``
+  (the single source of truth, D2):
+    - **higher-better** (``max``): ``snr``, ``acc``
+    - **lower-better**  (``min``): ``mse``, ``nmse``, ``ber``, ``db``
+* Returning an unknown kind causes ``met_accuracy=false`` and a stderr WARN
+  (low confidence) — never silently passes.
+* Self-contained: no sibling / relative imports; whitelisted stdlib + torch
+  + numpy only.
+
+The kd-train-script agent ports the user's eval logic verbatim from
+``test_student.py`` (or the equivalent eval entry in the user's repo).
+"""
+
+
+def eval_metric(student, device):
+    """Compute the eval metric on the student.  Port verbatim.
+
+    Returns:
+        (value, kind): ``kind`` ∈ {nmse, mse, ber, db, snr, acc}.
+        PSNR / SNR / accuracy-family metrics return kind="snr"|"acc"
+        (higher is better); MSE / NMSE / BER / dB-family return their
+        corresponding kind (lower is better).
+    """
+    raise NotImplementedError(
+        "kd-train-script: port the user's eval_metric body into eval.py"
+    )

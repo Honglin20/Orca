@@ -1,0 +1,21 @@
+"""loss.py — task loss leaf (kd-train-script codegen target).
+
+Self-contained contract (CONTRACTS §1, plan §3.2):
+
+* Required callable: ``compute_loss(s_out, y) -> Tensor``.
+* No sibling / relative imports — only the whitelisted stdlib + torch subset
+  (the loader's AST deny-list rejects anything else).
+* The KD composite (``kd.compose.build_kd_loss``) calls this for the task
+  term; KD terms (mse / ofd / fitnets / rkd / ema) are added by the engine.
+
+The kd-train-script agent ports the user's training loss verbatim into the
+function body below.
+"""
+
+
+def compute_loss(s_out, y):
+    """Task loss (user-defined).  Same ops / reduction / shape assumptions as
+    the user's ``train.py`` compute_loss — port verbatim."""
+    raise NotImplementedError(
+        "kd-train-script: port the user's compute_loss body into loss.py"
+    )
