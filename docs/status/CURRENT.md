@@ -10,9 +10,9 @@
 
 **计划**：[`docs/plans/2026-08-04-kd-nas-trainer-engine-and-leaf-codegen.md`](../plans/2026-08-04-kd-nas-trainer-engine-and-leaf-codegen.md)（5 Phase，独立可 commit；v3.2 经 spec-reviewer 四轮闭环）。
 
-**状态**：**Phase 2 完成**（commit `521e8e3`，零回归 + code-reviewer 一轮闭环）。**Phase 3 未开工**。
+**状态**：**Phase 2 完成**（commit `7870b2a`，零回归 + code-reviewer 一轮闭环）。**Phase 3 未开工**。
 
-### Phase 2 已交付（commit 521e8e3，commit message 受并行 session 干扰）
+### Phase 2 已交付（commit 7870b2a，16 文件 +1694/-3420）
 - `kd-train-script` codegen 切到产 4 叶子 + run_config.yaml + run.sh（删旧单体模板 692 行）
 - 5 调用点（train-teacher train+eval / distill train+eval / finalize eval）切固定引擎入口 + inline flag + `--artifacts_dir`
 - distill E4：移除 inline `--kd_config`，每轮 AST 决策 read→patch run_config.yaml 的 kd_config 字段

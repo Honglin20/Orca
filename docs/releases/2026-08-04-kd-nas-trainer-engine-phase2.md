@@ -1,7 +1,7 @@
 # Release: KD-NAS Trainer 引擎化 Phase 2（接口原子切换——叶子化 codegen + 5 调用点）
 
 **Date**: 2026-08-04
-**Commit**: `521e8e3`（commit message 受并行 session 干扰成 "nas-supernet MNIST fixture"；实际包含本 Phase 2 全部改动 + 2 个无关的 nas-supernet 改动 `bfe857f`/`2d9b5ff` 的 docs。`git show 521e8e3 --stat` 可见 18 个文件、-3246/+1700 行属于本 phase）
+**Commit**: `7870b2a`（16 文件，+1694/-3420；含删旧单体模板 692 行）
 **Plan**: [`docs/plans/2026-08-04-kd-nas-trainer-engine-and-leaf-codegen.md`](../plans/2026-08-04-kd-nas-trainer-engine-and-leaf-codegen.md) §5 Phase 2
 
 ## What was done
