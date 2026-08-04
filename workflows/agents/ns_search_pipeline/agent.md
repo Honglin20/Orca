@@ -372,7 +372,7 @@ python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
 #### Generation
 
 1. 复制 `$ORCA_AGENT_RESOURCES/assets/agents_template.md` 到 `$ORCA_ARTIFACTS_DIR/AGENTS.md`。
-2. 替换 `{{EVALUATION_PARADIGM}}` 为生成 `evaluator.py` 实际用的 paradigm（`validate` / `finetune`
+2. 替换 `{% raw %}{{EVALUATION_PARADIGM}}{% endraw %}` 为生成 `evaluator.py` 实际用的 paradigm（`validate` / `finetune`
    / `train_from_scratch`）。可能与 `supernet_summary.md` 不同（用户 override）；最终 `AGENTS.md`
    陈述所选 route 为已决定事实。
 3. 替换所有 example content 为实际项目专属值：example path（如权威 `$ORCA_ARTIFACTS_DIR/search_results.jsonl`
@@ -388,7 +388,7 @@ python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
      与 `run_train_supernet.sh` 未生成，search 用 `train_from_scratch` evaluation（每个候选 subnet
      独立训练）。
 5. 写后验：
-   - 无字面 `{{` placeholder 残留。
+   - 无字面 `{% raw %}{{{% endraw %}` placeholder 残留。
    - 无 example path 或值未替换。
    - artifacts tree 匹配实际文件（含 ported helper、`tests/`、`select_architecture.py`）。
    - API surface 匹配 `supernet.py`。

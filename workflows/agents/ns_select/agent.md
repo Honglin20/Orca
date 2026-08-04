@@ -66,5 +66,5 @@ python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
 `{"selected_arch":{"depth":3,"widths":[16,32,64]},"selected_acc":0.91,"selected_latency_ms":4.2,"pareto_size":12,"select_reason":"max-acc-under-target"}`）。
 节点 `output_schema` 要求它是合法 JSON 且 5 字段齐备 + `select_reason ∈ {max-acc-under-target,
 pareto-knee, none}`。`selected_arch` 未定义 / 脚本非 0 → 引擎判 node 失败 → yaml 路由守卫触发
-terminate_select_failed。ns_retrain 引用 `{{ ns_select.output.selected_arch }}` 据此生成 retrain
+terminate_select_failed。ns_retrain 引用 selected_arch 字段据此生成 retrain
 脚本。
