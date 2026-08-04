@@ -2,7 +2,7 @@
 
 **日期**: 2026-08-05
 **类型**: fix（架构层修正，非补丁）
-**Commit**: 见 `git log`（commit message: `fix(kd-nas): validate_contract 去同形 I/O 过约束——支持分类器族（P4）`）
+**Commit**: `24f3df0`（commit message: `fix(kd-nas): validate_contract 去同形 I/O 过约束——支持分类器族（P4）`）
 
 ---
 
