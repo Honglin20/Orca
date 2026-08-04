@@ -53,12 +53,18 @@ def test_make_on_result_hook_api_error_status_defaults_none():
 # ── consume_event（events 模式）───────────────────────────────────────────────
 
 
-def test_consume_event_agent_message_appends():
-    """多条 agent_message 的 text 拼接成最终答案（events 模式核心契约）。"""
+def test_consume_event_agent_message_last_wins():
+    """多条 agent_message：末条文本即 result（events 模式核心契约 / P5）。
+
+    P5：契约声明「agent 最终消息 = JSON result」，中间消息是叙述/工具输出。故末条覆盖前者，
+    不再拼接——否则中间叙述里的 ``[...]`` / ``{...}`` 字面量会被 result_extractor 的平衡块
+    兜底误抓为 result（KD-NAS flatten agent 真实命中）。
+    """
     acc = RunAccumulator()
-    acc.consume_event(_ev("agent_message", {"text": "Hello "}))
-    acc.consume_event(_ev("agent_message", {"text": "World"}))
-    assert acc.events_result_text == "Hello World"
+    acc.consume_event(_ev("agent_message", {"text": "narrative with [1,1,28,28] shape"}))
+    acc.consume_event(_ev("agent_message", {"text": "more narrative"}))
+    acc.consume_event(_ev("agent_message", {"text": '{"final": true}'}))
+    assert acc.events_result_text == '{"final": true}'
 
 
 def test_consume_event_empty_text_not_appended():
@@ -134,6 +140,54 @@ def test_events_result_text_none_when_no_messages():
     """无任何 agent_message → events_result_text 为 None（executor 的「无 result」判定依赖此）。"""
     acc = RunAccumulator()
     assert acc.events_result_text is None
+
+
+# ── P5：tape-replay 回归（KD-NAS flatten agent 真实失败 tape）──────────────────
+
+
+def test_p5_tape_replay_kd_nas_flatten_extracts_final_json(tmp_path):
+    """P5 决定性回归门：真实失败 tape replay → result = seq 98 末条合法 JSON，非 ``[1,1,28,28]``。
+
+    复现：KD-NAS flatten agent（opencode events 模式）中间叙述含 ``input [1,1,28,28]`` 字面量，
+    被旧版「全串接 + 首个平衡块」逻辑抢成 result → schema 报 ``[1,1,28,28] is not of type 'object'``。
+    契约本就声明末条消息即 JSON result，修后应抽出 seq 98 的合法 object。
+
+    fixture 来源：``examples/mnist_kd/runs/kd-nas-20260805-005130-ac3b11.jsonl``（runs/ gitignored，
+    故抽到 tests 下做 committed regression 证据）。
+    """
+    import json
+    from pathlib import Path
+
+    from orca.exec.claude.result_extractor import extract_and_validate
+
+    fixture = Path(__file__).parent / "fixtures" / "kd_nas_flatten_p5_replay.jsonl"
+    events = [json.loads(line) for line in fixture.read_text().splitlines() if line.strip()]
+
+    acc = RunAccumulator()
+    for raw in events:
+        # consume_event 只读 type/data；非 agent_message 事件（tool_call / usage / node_*）
+        # 必须被正确忽略（验证过滤器不污染 result_text）。
+        acc.consume_event(_ev(raw["type"], raw.get("data") or {}))
+
+    result_text = acc.events_result_text
+    assert result_text is not None, "flatten agent 至少有 1 条 agent_message（末条 = JSON）"
+    # 守门：result 不是中间叙述里的 shape 字面量（旧 bug 的可观测信号）。
+    assert "[1,1,28,28]" not in result_text
+    assert result_text.lstrip().startswith("{")
+
+    # 末条 JSON 必须通过 flatten output_schema（type=object + 关键字段）。
+    flatten_schema = {
+        "type": "object",
+        "required": ["baseline_contract_path", "project_root", "model_name"],
+        "properties": {
+            "baseline_contract_path": {"type": "string"},
+            "project_root": {"type": "string"},
+            "model_name": {"type": "string"},
+        },
+    }
+    extracted = extract_and_validate(result_text, flatten_schema)
+    assert extracted["model_name"] == "mnist_cnn"
+    assert extracted["baseline_contract_path"].endswith("mnist_cnn_flat.py")
 
 
 # ── diagnose（两模式共用错误摘要）────────────────────────────────────────────

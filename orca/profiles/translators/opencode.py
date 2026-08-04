@@ -5,8 +5,9 @@ NDJSON 协议（抓取校准，见 ``tests/profiles/fixtures/opencode_sample.jso
 
 opencode 协议与 claude stream-json 完全不同：
   - 每行是一个 ``part``（信封），顶层 ``type`` 标事件类型，``part`` 是 payload。
-  - **无 result 终止行**——最终答案 = 所有 ``text`` 事件的 ``part.text`` 拼接；usage 在
-    ``step_finish`` 的 ``part.tokens`` / ``part.cost``；错误是单独的 ``error`` 事件。
+  - **无 result 终止行**——最终答案 = **末条** ``text`` 事件的 ``part.text``（契约：
+    agent 最终消息即 result，中间 text 是叙述——见 RunAccumulator.events_result_text）；
+    usage 在 ``step_finish`` 的 ``part.tokens`` / ``part.cost``；错误是单独的 ``error`` 事件。
     故 opencode 走 ``TerminalContract(mode="events")``，executor 用 RunAccumulator 累积。
 
 映射（按真实抓取字段，web-shell-v2 §3.2 lossless 扩展）：
@@ -159,7 +160,8 @@ def _translate_text(obj: dict, session_id: str) -> list[Event]:
     """text 事件：``part.text`` 整块 → agent_message。
 
     opencode 一次发完整文本段（非 token 增量），故整块发；RunAccumulator 在 events 模式下
-    把多块拼接成最终答案（result_text）。
+    以**末条** agent_message 为最终答案（result_text）——中间叙述不进 result（P5：避免
+    中间 ``[...]`` / ``{...}`` 字面量被平衡块兜底误抓）。
     """
     part = obj.get("part")
     if not isinstance(part, dict):

@@ -7,7 +7,7 @@
     ``make_on_result_hook()`` 返回的 5 参闭包，一次性填满所有字段（行为**逐字同**重构前
     executor.py:144-169 的 ``result_holder`` + ``on_result`` 闭包）。
   - ``events`` 模式（opencode）：无终止行。executor 把每条翻译后的 Orca Event 既 ``yield``
-    又喂 ``consume_event(ev)``——``agent_message`` 追加文本、``agent_usage`` 存 usage/cost、
+    又喂 ``consume_event(ev)``——``agent_message`` 记录文本块、``agent_usage`` 存 usage/cost、
     ``error`` 置 is_error + 抓 api_error_status。EOF 后字段已累积好。
 
 两种模式共用同一组字段 + 同一个 ``diagnose(stderr)``（搬自 executor.py:188-200 的
@@ -37,7 +37,8 @@ class RunAccumulator:
 
     字段语义对齐重构前 ``result_holder`` dict 的 5 个 key：
       - ``result_text``：最终答案文本（result_line 模式来自 result.result；events 模式
-        来自所有 agent_message.data["text"] 拼接）。
+        来自**末条** agent_message.data["text"]——契约：agent 最终消息 = JSON result，
+        中间消息是叙述/工具输出，**不是 result**）。
       - ``usage`` / ``cost``：token usage dict + 美元成本。
       - ``is_error``：后端自报错误（result_line 模式来自 result.is_error；events 模式
         来自 error 事件）。
@@ -54,7 +55,9 @@ class RunAccumulator:
     api_error_status: int | None = None
     # events 模式专用：error 事件的自报消息（让 diagnose 能带具体失败原因，否则用户看不到）。
     error_message: str | None = None
-    # events 模式专用：累积 agent_message 文本片段。result_line 模式不用（直接覆盖 result_text）。
+    # events 模式专用：按序记录每条 agent_message 的文本块（契约：末条 = JSON result）。
+    # result_line 模式不用（直接覆盖 result_text）。保留全部是为 diagnose/调试可回溯，
+    # events_result_text 只取末条（中间叙述不应污染 result——P5 修复）。
     _text_parts: list[str] = field(default_factory=list)
 
     # ── result_line 模式：on_result 回调工厂（行为逐字同重构前闭包）─────────────
@@ -87,7 +90,8 @@ class RunAccumulator:
         """events 模式：把一条翻译后的 Orca Event 喂进累积器（与 yield 并行调用）。
 
         映射（与 opencode_translator 产出对齐）：
-          - ``agent_message``：追加 ``data["text"]`` 到 ``_text_parts``（最终拼成 result_text）。
+          - ``agent_message``：记录 ``data["text"]`` 到 ``_text_parts``（末条 = JSON result；
+            见 ``events_result_text`` 的「末条即 result」语义）。
           - ``agent_usage``：存 usage dict + cost（最后一条 step_finish 的为准）。
           - ``error``：置 ``is_error=True``，抓 ``data.get("api_error_status")``（若有）。
 
@@ -97,6 +101,8 @@ class RunAccumulator:
         if ev.type == "agent_message":
             text = ev.data.get("text")
             if text:
+                # 末条即 result（见 events_result_text）。中间叙述（如 "input [1,1,28,28]"
+                # 字面量）不能进 result_text，否则 result_extractor 的平衡块兜底会误抓。
                 self._text_parts.append(text)
         elif ev.type == "agent_usage":
             # usage dict 整体存（executor 的 _normalize_usage 读具体 key）；cost 单独存。
@@ -119,14 +125,20 @@ class RunAccumulator:
 
     @property
     def events_result_text(self) -> str | None:
-        """events 模式：所有 agent_message 片段拼接成的最终答案文本。
+        """events 模式：**末条** ``agent_message`` 的文本（契约：末条 = JSON result）。
+
+        为什么不是全串接：SDD 契约声明 agent 最终消息即 result（见 failure-sentinel /
+        ask-user sentinel spec —— 「返回恰好这个 JSON 作为最终消息」）。中间 ``agent_message``
+        是叙述（典型如 ``"input [1,1,28,28] float32"``），全串接会让 ``result_extractor``
+        的平衡块兜底抓到中间叙述里的 ``[...]`` / ``{...}`` 字面量——KD-NAS flatten agent
+        真实命中的 P5 bug。修后只取末条：result_text 严格 = agent 最终消息，干净。
 
         无任何 agent_message → None（让 executor 的「无 result」错误判定生效，与其他模式一致）。
         executor 在 events 模式 EOF 后把此值赋给 ``result_text``（统一后续读路径）。
         """
         if not self._text_parts:
             return None
-        return "".join(self._text_parts)
+        return self._text_parts[-1]
 
     # ── 错误诊断（搬自 executor.py:188-200 的 _result_diag，DRY：两模式共用）────
 
