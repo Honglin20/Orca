@@ -1,32 +1,34 @@
-// components/runlist/BoardCard.tsx —— 看板单卡（SPEC §10.3）。
+// components/runlist/BoardCard.tsx —— 看板单卡（SPEC web-board-cardgrid §3.3/§3.4 + §2 速查表）。
 //
-// 视觉契约（§10.3 + §2 速查表）：
-//   - 容器：``rounded border orca-border orca-bg-surface shadow-sm p-3`` + 左侧状态竖条（STATUS_BAR_HEX）。
+// 视觉契约（§3.3 状态只画一遍 + §3.4 失败/待决策提级）：
+//   - 容器：``rounded border orca-bg-surface shadow-sm px-3 py-2.5 pl-4`` + 左侧状态竖条（STATUS_BAR_HEX）。
+//     状态**只画一遍**：左竖条 = 唯一状态色锚点 + 行内文字 label（STATUS_TEXT 色 + STATUS_LABEL 文案）。
 //   - selected → ``ring-1 ring-orca-accent/40 bg-[rgb(var(--accent)/0.06)]``。
-//   - blocked → 额外 ``ring-1 ring-inset ring-orca-skipped/30``（NM1，沿用 RunRow）。
-//   - 圆角 rounded；阴影 shadow-sm；字号 text-sm/xs（禁 lg/xl/2xl、禁 text-[1[013]px]）。
+//   - blocked → 左竖条紫 + 紫边 ``ring-1 ring-inset ring-orca-skipped/30`` + 第二行「⚠ 等待 <elapsed>」。
+//   - failed → 左竖条红 + 整卡淡红边 ``border-orca-failed/40`` + 淡红底 ``bg-orca-failed/5``（§3.1 例外放行）。
+//   - 圆角 rounded；阴影 shadow-sm；字号 text-sm/xs。
 //
 // 内容（全部来自现有 RunSummary，零新字段）：
-//   - 第一行：StatusBadge + workflow_name（truncate text-sm font-medium）+ project_name（text-xs muted）。
+//   - 第一行：内联状态 label（STATUS_LABEL + STATUS_TEXT）+ workflow_name（truncate text-sm font-medium）。
 //   - 第二行（running/queued）：进度条 progress（按字符串解析百分比；失败 indeterminate pulse）。
 //   - 第二行（blocked）：⚠ 等待 <elapsed>（紫）。
-//   - 第三行：cost · elapsed · event_count（text-xs muted tabular-nums）。
+//   - 第三行：fmtElapsed(elapsed) · {event_count} 事件 · fmtAgo(started_at)（SPEC §4.2 去 cost）。
 //
 // 交互：整卡 click → onOpen；hover 右上显 delete-btn（size=16，命中区≥32px）；hover 左上显 run-checkbox；
 //       卡片 selected 时 ring 强调。
 //
 // data-testid：根 ``board-card``；内层内容 wrapper 挂 ``run-item``（兼容 9b ——
-//   ``page.click("[data-testid=run-item]")`` 命中内层，事件冒泡到根触发 onOpen）。这与 RunRow
-//   「外 ``run-row`` + 内 button ``run-item``」同模式（外层卡片 + 内层 run-item 标记）。
+//   ``page.click("[data-testid=run-item]")`` 命中内层，事件冒泡到根触发 onOpen）。
 
 import { Trash2, AlertTriangle } from "lucide-react";
 import type { RunSummary } from "@/stores/run-list-store";
 import {
   STATUS_BAR_HEX,
-  StatusBadge,
+  STATUS_LABEL,
+  STATUS_TEXT,
   statusToRunStatus,
 } from "@/components/layout/status-badge";
-import { fmtCost, fmtElapsed } from "./format-helpers";
+import { fmtAgo, fmtElapsed } from "./format-helpers";
 
 interface Props {
   run: RunSummary;
@@ -72,6 +74,12 @@ export function BoardCard({
 }: Props) {
   const rs = statusToRunStatus(run.status);
   const isBlocked = rs === "blocked";
+  // SPEC §3.4/§4.1 隐含冲突 surface（code-reviewer 🟡）：failed 桶（group-runs accept）
+  // 与 KPI 失败计数均含 cancelled，但卡片视觉提级（红边/红底）仅对 rs==="failed"——
+  // cancelled 保持中性灰条（STATUS_BAR_HEX.cancelled=#94a3b8）+ label「已取消」。
+  // 设计意图：cancelled 严重性低于 failed，灰条传达「非真失败」是有价值信号。
+  // KPI「失败 N」含 cancelled 是分桶口径（计数/过滤/分桶统一），视觉口径区分严重性。
+  const isFailed = rs === "failed";
   const isRunning = rs === "running" || rs === "queued";
   const progress = isRunning ? parseProgress(run.progress) : null;
   return (
@@ -86,11 +94,13 @@ export function BoardCard({
           onOpen();
         }
       }}
-      className={`group relative cursor-pointer rounded border orca-border orca-bg-surface px-3 py-2.5 pl-4 text-left shadow-sm transition-opacity hover:orca-bg-surface-2 ${
-        selected ? "ring-1 ring-orca-accent/40 bg-[rgb(var(--accent)/0.06)]" : ""
-      } ${isBlocked ? "ring-1 ring-inset ring-orca-skipped/30" : ""}`}
+      className={`group relative cursor-pointer rounded border orca-bg-surface px-3 py-2.5 pl-4 text-left shadow-sm transition-opacity hover:orca-bg-surface-2 ${
+        isFailed ? "border-orca-failed/40 bg-orca-failed/5" : "orca-border"
+      } ${selected ? "ring-1 ring-orca-accent/40 bg-[rgb(var(--accent)/0.06)]" : ""} ${
+        isBlocked ? "ring-1 ring-inset ring-orca-skipped/30" : ""
+      }`}
     >
-      {/* 状态竖条（行内 hex 来自 STATUS_BAR_HEX，§1.2 约定允许）。w-1=4px，与列条 3px 同档（A-MINOR） */}
+      {/* 状态竖条（行内 hex 来自 STATUS_BAR_HEX，§1.2 约定允许）。w-1=4px。 */}
       <div
         className="absolute inset-y-0 left-0 w-1 rounded-l"
         style={{ backgroundColor: STATUS_BAR_HEX[rs] }}
@@ -126,9 +136,11 @@ export function BoardCard({
         事件冒泡到外层根触发 onOpen）。同时是布局容器。
       */}
       <div data-testid="run-item">
-        {/* 第一行：状态徽章 + workflow 名 */}
+        {/* 第一行：内联状态 label + workflow 名（§3.3 状态只画一遍） */}
         <div className="flex items-center gap-2 pr-8">
-          <StatusBadge status={rs} />
+          <span className={`text-xs font-medium ${STATUS_TEXT[rs]}`}>
+            {STATUS_LABEL[rs]}
+          </span>
           <span className="truncate text-sm font-medium orca-text">
             {run.workflow_name}
           </span>
@@ -156,13 +168,13 @@ export function BoardCard({
             等待 {fmtElapsed(run.elapsed)}
           </div>
         )}
-        {/* 第三行：cost · elapsed · event_count（muted tabular-nums） */}
+        {/* 第三行：耗时 · 事件数 · 相对时间（SPEC §4.2 去 cost） */}
         <div className="orca-text-muted mt-2 flex items-center gap-x-3 gap-y-1 text-xs tabular-nums">
-          <span>{fmtCost(run.cost)}</span>
-          <span className="orca-text-faint">·</span>
           <span>{fmtElapsed(run.elapsed)}</span>
           <span className="orca-text-faint">·</span>
           <span>{run.event_count ?? 0} 事件</span>
+          <span className="orca-text-faint">·</span>
+          <span>{fmtAgo(run.started_at)}</span>
         </div>
       </div>
     </div>

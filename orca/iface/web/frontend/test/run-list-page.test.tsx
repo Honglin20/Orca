@@ -264,7 +264,7 @@ describe("RunListPage 重设计", () => {
     expect(screen.getByTestId("bulk-bar")).toBeTruthy();
   });
 
-  // ── AC-3 排序：6 字段 + 触发器显当前 ──
+  // ── AC-3 排序：5 字段（SPEC web-board-cardgrid §4.2 删 cost）+ 触发器显当前 ──
   it("AC-3 排序：触发器文案随选定字段更新；点 workflow_name 切到该字段", async () => {
     mockFetchFor([
       mkRun({ run_id: "r1", workflow_name: "alpha" }),
@@ -280,11 +280,11 @@ describe("RunListPage 重设计", () => {
       fireEvent.click(screen.getByTestId("sort-trigger"));
     });
     expect(screen.getByTestId("sort-menu")).toBeTruthy();
-    // 6 字段都在。
+    // 5 字段都在（SPEC web-board-cardgrid §4.2：cost 已删，AC-B9 无「花费」项）。
     expect(screen.queryByTestId("sort-option-started_at")).toBeTruthy();
     expect(screen.queryByTestId("sort-option-workflow_name")).toBeTruthy();
     expect(screen.queryByTestId("sort-option-status")).toBeTruthy();
-    expect(screen.queryByTestId("sort-option-cost")).toBeTruthy();
+    expect(screen.queryByTestId("sort-option-cost")).toBeNull();
     expect(screen.queryByTestId("sort-option-elapsed")).toBeTruthy();
     expect(screen.queryByTestId("sort-option-event_count")).toBeTruthy();
 
@@ -295,7 +295,7 @@ describe("RunListPage 重设计", () => {
     expect(screen.getByTestId("sort-trigger").textContent).toMatch(/workflow 名称/);
   });
 
-  // ── AC-3 排序：同字段二次点反转方向 ──
+  // ── AC-3 排序：同字段二次点反转方向（用 elapsed 字段，cost 已删） ──
   it("AC-3 同字段二次点击反转方向（desc → asc）", async () => {
     mockFetchFor([mkRun({ run_id: "r1" })]);
     renderPage();
@@ -305,10 +305,10 @@ describe("RunListPage 重设计", () => {
       fireEvent.click(screen.getByTestId("sort-trigger"));
     });
     await act(async () => {
-      fireEvent.click(screen.getByTestId("sort-option-cost"));
+      fireEvent.click(screen.getByTestId("sort-option-elapsed"));
     });
     // 默认 desc。
-    expect(screen.getByTestId("sort-trigger").textContent).toMatch(/花费/);
+    expect(screen.getByTestId("sort-trigger").textContent).toMatch(/耗时/);
     // HTML 含 ArrowDown（svg）。
     expect(screen.getByTestId("sort-trigger").querySelector("svg")).toBeTruthy();
 
@@ -317,10 +317,10 @@ describe("RunListPage 重设计", () => {
       fireEvent.click(screen.getByTestId("sort-trigger"));
     });
     await act(async () => {
-      fireEvent.click(screen.getByTestId("sort-option-cost"));
+      fireEvent.click(screen.getByTestId("sort-option-elapsed"));
     });
     // 仍显字段名（方向已切，箭头会变）。
-    expect(screen.getByTestId("sort-trigger").textContent).toMatch(/花费/);
+    expect(screen.getByTestId("sort-trigger").textContent).toMatch(/耗时/);
   });
 
   // ── AC-3 排序持久化（localStorage） ──
@@ -671,8 +671,8 @@ describe("RunListPage 看板视图（SPEC §10）", () => {
     expect(await screen.findByTestId("board")).toBeTruthy();
   });
 
-  // ── AC-20 五列落位 ──
-  it("AC-20：五列均渲染；run 按 statusToRunStatus 落对应列", async () => {
+  // ── AC-20 五 section 落位（SPEC web-board-cardgrid：列→section 重命名） ──
+  it("AC-20：五 section 均渲染；run 按 statusToRunStatus 落对应 section", async () => {
     mockFetchFor([
       mkRun({ run_id: "rq", status: "queued" }),
       mkRun({ run_id: "rr", status: "running" }),
@@ -682,41 +682,41 @@ describe("RunListPage 看板视图（SPEC §10）", () => {
     ]);
     renderPage();
     await screen.findByTestId("board");
-    // 五列 testid 都在。
-    expect(screen.getByTestId("board-column-queued")).toBeTruthy();
-    expect(screen.getByTestId("board-column-running")).toBeTruthy();
-    expect(screen.getByTestId("board-column-blocked")).toBeTruthy();
-    expect(screen.getByTestId("board-column-completed")).toBeTruthy();
-    expect(screen.getByTestId("board-column-failed")).toBeTruthy();
-    // 每列各含一张 board-card。
+    // 五 section testid 都在。
+    expect(screen.getByTestId("card-section-running")).toBeTruthy();
+    expect(screen.getByTestId("card-section-queued")).toBeTruthy();
+    expect(screen.getByTestId("card-section-blocked")).toBeTruthy();
+    expect(screen.getByTestId("card-section-completed")).toBeTruthy();
+    expect(screen.getByTestId("card-section-failed")).toBeTruthy();
+    // 每 section 各含一张 board-card。
     expect(
-      within(screen.getByTestId("board-column-queued")).getAllByTestId("board-card")
+      within(screen.getByTestId("card-section-running")).getAllByTestId("board-card")
         .length,
     ).toBe(1);
     expect(
-      within(screen.getByTestId("board-column-running")).getAllByTestId("board-card")
+      within(screen.getByTestId("card-section-queued")).getAllByTestId("board-card")
         .length,
     ).toBe(1);
     expect(
-      within(screen.getByTestId("board-column-blocked")).getAllByTestId("board-card")
+      within(screen.getByTestId("card-section-blocked")).getAllByTestId("board-card")
         .length,
     ).toBe(1);
     expect(
-      within(screen.getByTestId("board-column-completed")).getAllByTestId(
+      within(screen.getByTestId("card-section-completed")).getAllByTestId(
         "board-card",
       ).length,
     ).toBe(1);
     expect(
-      within(screen.getByTestId("board-column-failed")).getAllByTestId("board-card")
+      within(screen.getByTestId("card-section-failed")).getAllByTestId("board-card")
         .length,
     ).toBe(1);
   });
 
-  it("AC-20：待决策列计数>0 → 整列 ring（class 含 ring-orca-skipped/20）", async () => {
+  it("AC-20：待决策 section 计数>0 → 整 section ring（class 含 ring-orca-skipped/20）", async () => {
     mockFetchFor([mkRun({ run_id: "rb", status: "blocked" })]);
     renderPage();
-    const col = await screen.findByTestId("board-column-blocked");
-    expect(col.className).toMatch(/ring-orca-skipped\/20/);
+    const sec = await screen.findByTestId("card-section-blocked");
+    expect(sec.className).toMatch(/ring-orca-skipped\/20/);
   });
 
   // ── AC-21 BoardCard 进度条 + 点击 ──
@@ -764,6 +764,15 @@ describe("RunListPage 看板视图（SPEC §10）", () => {
     expect(card.textContent).toMatch(/等待/);
   });
 
+  // ── AC-B7 失败卡提级配色（SPEC web-board-cardgrid §3.4） ──
+  it("AC-B7：failed 卡片 → border-orca-failed/40 + bg-orca-failed/5（红边红底提级）", async () => {
+    mockFetchFor([mkRun({ run_id: "rf", status: "failed" })]);
+    renderPage();
+    const card = await screen.findByTestId("board-card");
+    expect(card.className).toMatch(/border-orca-failed\/40/);
+    expect(card.className).toMatch(/bg-orca-failed\/5/);
+  });
+
   it("AC-21：click board-card → 导航到 /runs/<id>", async () => {
     mockFetchFor([mkRun({ run_id: "r1", status: "completed" })]);
     renderPage();
@@ -775,8 +784,8 @@ describe("RunListPage 看板视图（SPEC §10）", () => {
     // 这里仅断言不报错 + 卡片可点（详情页渲染由 9b 真机测覆盖）。
   });
 
-  // ── AC-22 已完成/失败列限长 + 显示更多 ──
-  it("AC-22：completed 列 >10 条 → 显「显示更多」；点击展开", async () => {
+  // ── AC-B10 section 限显 6 + 展开剩余（SPEC web-board-cardgrid §2.3/§4.1 统一 SECTION_LIMIT=6） ──
+  it("AC-B10：completed section >6 条 → 显「展开剩余」；点击展开", async () => {
     const many = Array.from({ length: 15 }, (_, i) =>
       mkRun({
         run_id: `c${i}`,
@@ -786,21 +795,21 @@ describe("RunListPage 看板视图（SPEC §10）", () => {
     );
     mockFetchFor(many);
     renderPage();
-    await screen.findByTestId("board-column-completed");
-    // 初始 10 张。
+    await screen.findByTestId("card-section-completed");
+    // 初始 6 张（SECTION_LIMIT=6，替代旧 completed 列限 10）。
     expect(
-      within(screen.getByTestId("board-column-completed")).getAllByTestId("board-card")
+      within(screen.getByTestId("card-section-completed")).getAllByTestId("board-card")
         .length,
-    ).toBe(10);
-    // 显示更多按钮存在。
-    const more = screen.getByTestId("board-column-more-completed");
-    expect(more.textContent).toMatch(/共 15/);
+    ).toBe(6);
+    // 展开剩余按钮存在（15 - 6 = 9）。
+    const more = screen.getByTestId("card-section-more-completed");
+    expect(more.textContent).toMatch(/展开剩余 9/);
     // 点击展开。
     await act(async () => {
       fireEvent.click(more);
     });
     expect(
-      within(screen.getByTestId("board-column-completed")).getAllByTestId("board-card")
+      within(screen.getByTestId("card-section-completed")).getAllByTestId("board-card")
         .length,
     ).toBe(15);
   });
@@ -845,6 +854,157 @@ describe("RunListPage 看板视图（SPEC §10）", () => {
     // 列表视图也显。
     expect(screen.getByTestId("group-by-select")).toBeTruthy();
     expect(screen.queryByTestId("group-toggle")).toBeNull();
+  });
+
+  // ── AC-B2 KPI 带计数正确（SPEC web-board-cardgrid §2.2） ──
+  it("AC-B2：KPI 计数 = 运行(含 queued) · 待决策 · 失败(含 cancelled) · 完成 · 共", async () => {
+    mockFetchFor([
+      mkRun({ run_id: "r1", status: "running" }),
+      mkRun({ run_id: "r2", status: "queued" }),
+      mkRun({ run_id: "r3", status: "blocked" }),
+      mkRun({ run_id: "r4", status: "failed" }),
+      mkRun({ run_id: "r5", status: "cancelled" }),
+      mkRun({ run_id: "r6", status: "completed" }),
+    ]);
+    renderPage();
+    await screen.findByTestId("kpi-strip");
+    // 运行 = running(1) + queued(1) = 2。
+    const runningChip = screen.getByTestId("kpi-chip-running");
+    expect(runningChip.textContent).toMatch(/运行.*2/);
+    // 待决策 = 1。
+    expect(screen.getByTestId("kpi-chip-blocked").textContent).toMatch(/待决策.*1/);
+    // 失败 = failed(1) + cancelled(1) = 2（SPEC §2.2 I3）。
+    expect(screen.getByTestId("kpi-chip-failed").textContent).toMatch(/失败.*2/);
+    // 完成 = 1。
+    expect(screen.getByTestId("kpi-chip-completed").textContent).toMatch(/完成.*1/);
+    // 共 = 6。
+    expect(screen.getByTestId("kpi-chip-all").textContent).toMatch(/共.*6.*runs/);
+  });
+
+  // ── AC-B3 KPI 即过滤：点 kpi-chip-failed → 显 failed 与 cancelled（SPEC §2.2 I3） ──
+  it("AC-B3：点 kpi-chip-failed → status=failed → 显 failed + cancelled run", async () => {
+    mockFetchFor([
+      mkRun({ run_id: "rf", status: "failed" }),
+      mkRun({ run_id: "rca", status: "cancelled" }),
+      mkRun({ run_id: "rc", status: "completed" }),
+    ]);
+    renderPage();
+    await screen.findByTestId("board");
+    // 初始全显（3 张 board-card）。
+    expect(screen.getAllByTestId("board-card").length).toBe(3);
+
+    // 点 kpi-chip-failed。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("kpi-chip-failed"));
+    });
+    // 显 failed + cancelled（2 张），completed 被过滤。
+    const cards = screen.getAllByTestId("board-card");
+    expect(cards.length).toBe(2);
+    // 都在 failed section。
+    expect(
+      within(screen.getByTestId("card-section-failed")).getAllByTestId("board-card")
+        .length,
+    ).toBe(2);
+
+    // 点 kpi-chip-all → 恢复全显。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("kpi-chip-all"));
+    });
+    expect(screen.getAllByTestId("board-card").length).toBe(3);
+  });
+
+  // ── AC-B3 失败>0 胶囊红（SPEC §2.2） ──
+  it("AC-B3：failed>0 → kpi-chip-failed 显红（即便非 active）", async () => {
+    mockFetchFor([
+      mkRun({ run_id: "rf", status: "failed" }),
+      mkRun({ run_id: "rc", status: "completed" }),
+    ]);
+    renderPage();
+    await screen.findByTestId("board");
+    const failedChip = screen.getByTestId("kpi-chip-failed");
+    // 非 active 但 failed>0 → text-orca-failed class。
+    expect(failedChip.className).toMatch(/text-orca-failed/);
+  });
+
+  // ── AC-B4 卡片网格 grid class（SPEC §2.3/§3.2） ──
+  it("AC-B4：section 内卡片网格含 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4", async () => {
+    mockFetchFor([mkRun({ run_id: "r1", status: "completed" })]);
+    renderPage();
+    await screen.findByTestId("board");
+    // 找 grid 容器（section 内的 grid div）。
+    const grid = document.querySelector('[data-testid="card-section-completed"] > .grid');
+    expect(grid).toBeTruthy();
+    expect(grid!.className).toMatch(/grid-cols-1/);
+    expect(grid!.className).toMatch(/sm:grid-cols-2/);
+    expect(grid!.className).toMatch(/lg:grid-cols-3/);
+    expect(grid!.className).toMatch(/xl:grid-cols-4/);
+  });
+
+  // ── AC-B10 forceOpen：折叠 blocked section → 点 kpi-chip-blocked → 强制展开（SPEC §2.3 I8） ──
+  it("AC-B10：折叠 blocked section → 点 kpi-chip-blocked → section 展开（forceOpen 覆盖持久折叠）", async () => {
+    mockFetchFor([
+      mkRun({ run_id: "rb", status: "blocked" }),
+      mkRun({ run_id: "rc", status: "completed" }),
+    ]);
+    renderPage();
+    await screen.findByTestId("board");
+    // 初始 blocked section 展开（有 board-card）。
+    expect(
+      within(screen.getByTestId("card-section-blocked")).getAllByTestId("board-card")
+        .length,
+    ).toBe(1);
+
+    // 折叠 blocked section（点 section header）。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("card-section-header-blocked"));
+    });
+    // 折叠后 board-card 不可见（blocked section 内无 board-card）。
+    expect(
+      within(screen.getByTestId("card-section-blocked")).queryAllByTestId("board-card")
+        .length,
+    ).toBe(0);
+
+    // 点 kpi-chip-blocked → status=blocked → forceOpen → blocked section 强制展开。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("kpi-chip-blocked"));
+    });
+    expect(
+      within(screen.getByTestId("card-section-blocked")).getAllByTestId("board-card")
+        .length,
+    ).toBe(1);
+
+    // 点 kpi-chip-all → status=all → 退回持久折叠态（blocked section 再折叠）。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("kpi-chip-all"));
+    });
+    expect(
+      within(screen.getByTestId("card-section-blocked")).queryAllByTestId("board-card")
+        .length,
+    ).toBe(0);
+  });
+
+  // ── AC-B11/I9 跨 dim blocked ring（SPEC §2.3 I9：任意 dim 含 blocked → section ring） ──
+  it("AC-B11：dim=project 含 blocked run 的 section → ring-orca-skipped/20（紫条穿透不限 dim）", async () => {
+    mockFetchFor([
+      mkRun({ run_id: "rb", status: "blocked", project_name: "demo" }),
+      mkRun({ run_id: "rc", status: "completed", project_name: "demo" }),
+      mkRun({ run_id: "ro", status: "completed", project_name: "other" }),
+    ]);
+    renderPage();
+    await screen.findByTestId("board");
+    // 切到 project dim。
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-by-select"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("group-by-option-project"));
+    });
+    // demo section 含 blocked run → ring（I9 不限 dim）。
+    const demoSec = screen.getByTestId("card-section-demo");
+    expect(demoSec.className).toMatch(/ring-orca-skipped\/20/);
+    // other section 不含 blocked → 无 ring。
+    const otherSec = screen.getByTestId("card-section-other");
+    expect(otherSec.className).not.toMatch(/ring-orca-skipped/);
   });
 });
 
@@ -1085,8 +1245,8 @@ describe("RunListPage 分组维度 + 空桶自动隐藏（SPEC §10.8-10.10）",
     renderPage();
     await screen.findByTestId("board");
     // 默认 status dim：completed 列存在（唯一非空桶，showEmpty=false 默认隐藏其它 4 个空列）。
-    expect(screen.getByTestId("board-column-completed")).toBeTruthy();
-    expect(screen.queryByTestId("board-column-demo")).toBeNull();
+    expect(screen.getByTestId("card-section-completed")).toBeTruthy();
+    expect(screen.queryByTestId("card-section-demo")).toBeNull();
 
     // 用 GroupBySelector 切到 project dim。
     await act(async () => {
@@ -1103,9 +1263,9 @@ describe("RunListPage 分组维度 + 空桶自动隐藏（SPEC §10.8-10.10）",
     await act(async () => {
       fireEvent.click(screen.getByTestId("group-by-option-project"));
     });
-    // project dim → board-column-demo 存在；旧的 status 列 testid 不再存在。
-    expect(screen.getByTestId("board-column-demo")).toBeTruthy();
-    expect(screen.queryByTestId("board-column-completed")).toBeNull();
+    // project dim → card-section-demo 存在；旧的 status 列 testid 不再存在。
+    expect(screen.getByTestId("card-section-demo")).toBeTruthy();
+    expect(screen.queryByTestId("card-section-completed")).toBeNull();
 
     // 持久化 localStorage。
     const stored = localStorage.getItem("orca-runlist-groupby-v1");
@@ -1127,9 +1287,9 @@ describe("RunListPage 分组维度 + 空桶自动隐藏（SPEC §10.8-10.10）",
       fireEvent.click(screen.getByTestId("group-by-option-time"));
     });
     // 未知桶渲染（key=unknown）。
-    expect(screen.getByTestId("board-column-unknown")).toBeTruthy();
+    expect(screen.getByTestId("card-section-unknown")).toBeTruthy();
     expect(
-      within(screen.getByTestId("board-column-unknown")).getAllByTestId(
+      within(screen.getByTestId("card-section-unknown")).getAllByTestId(
         "board-card",
       ).length,
     ).toBe(1);
@@ -1149,9 +1309,9 @@ describe("RunListPage 分组维度 + 空桶自动隐藏（SPEC §10.8-10.10）",
       fireEvent.click(screen.getByTestId("group-by-option-none"));
     });
     // 单桶 all：两张 board-card 都在同一列。
-    expect(screen.getByTestId("board-column-all")).toBeTruthy();
+    expect(screen.getByTestId("card-section-all")).toBeTruthy();
     expect(
-      within(screen.getByTestId("board-column-all")).getAllByTestId("board-card")
+      within(screen.getByTestId("card-section-all")).getAllByTestId("board-card")
         .length,
     ).toBe(2);
   });
@@ -1160,7 +1320,7 @@ describe("RunListPage 分组维度 + 空桶自动隐藏（SPEC §10.8-10.10）",
     localStorage.setItem("orca-runlist-groupby-v1", "{not json");
     mockFetchFor([mkRun({ run_id: "r1", status: "completed" })]);
     expect(() => renderPage()).not.toThrow();
-    expect(await screen.findByTestId("board-column-completed")).toBeTruthy();
+    expect(await screen.findByTestId("card-section-completed")).toBeTruthy();
   });
 
   // ── AC-25 空桶隐藏 + 待决策高亮 ──
@@ -1172,14 +1332,14 @@ describe("RunListPage 分组维度 + 空桶自动隐藏（SPEC §10.8-10.10）",
     renderPage();
     await screen.findByTestId("board");
     // showEmpty=false 默认：空列（queued/running/failed）不渲染。
-    expect(screen.queryByTestId("board-column-queued")).toBeNull();
-    expect(screen.queryByTestId("board-column-running")).toBeNull();
-    expect(screen.queryByTestId("board-column-failed")).toBeNull();
+    expect(screen.queryByTestId("card-section-queued")).toBeNull();
+    expect(screen.queryByTestId("card-section-running")).toBeNull();
+    expect(screen.queryByTestId("card-section-failed")).toBeNull();
     // 待决策列 >0 → 仍渲染（AC-25「无论 showEmpty」）+ ring 高亮（§10.9）。
-    const blockedCol = screen.getByTestId("board-column-blocked");
+    const blockedCol = screen.getByTestId("card-section-blocked");
     expect(blockedCol.className).toMatch(/ring-orca-skipped\/20/);
     // 已完成列也渲染。
-    expect(screen.getByTestId("board-column-completed")).toBeTruthy();
+    expect(screen.getByTestId("card-section-completed")).toBeTruthy();
   });
 
   it("AC-25：点 show-empty-toggle → showEmpty=true → 5 列都在；再点回 false", async () => {
@@ -1187,23 +1347,23 @@ describe("RunListPage 分组维度 + 空桶自动隐藏（SPEC §10.8-10.10）",
     renderPage();
     await screen.findByTestId("board");
     // 初始仅 completed 列。
-    expect(screen.queryByTestId("board-column-queued")).toBeNull();
+    expect(screen.queryByTestId("card-section-queued")).toBeNull();
 
     // 点 toggle → true。
     await act(async () => {
       fireEvent.click(screen.getByTestId("show-empty-toggle"));
     });
     // 5 列都在。
-    expect(screen.getByTestId("board-column-queued")).toBeTruthy();
-    expect(screen.getByTestId("board-column-running")).toBeTruthy();
-    expect(screen.getByTestId("board-column-blocked")).toBeTruthy();
-    expect(screen.getByTestId("board-column-completed")).toBeTruthy();
-    expect(screen.getByTestId("board-column-failed")).toBeTruthy();
+    expect(screen.getByTestId("card-section-queued")).toBeTruthy();
+    expect(screen.getByTestId("card-section-running")).toBeTruthy();
+    expect(screen.getByTestId("card-section-blocked")).toBeTruthy();
+    expect(screen.getByTestId("card-section-completed")).toBeTruthy();
+    expect(screen.getByTestId("card-section-failed")).toBeTruthy();
     // 持久化。
     expect(localStorage.getItem("orca-runlist-show-empty-v1")).toMatch(/true/);
 
     // 待决策列空 → 无 ring（ring 仅 >0 时）。
-    expect(screen.getByTestId("board-column-blocked").className).not.toMatch(
+    expect(screen.getByTestId("card-section-blocked").className).not.toMatch(
       /ring-orca-skipped/,
     );
 
@@ -1211,7 +1371,7 @@ describe("RunListPage 分组维度 + 空桶自动隐藏（SPEC §10.8-10.10）",
     await act(async () => {
       fireEvent.click(screen.getByTestId("show-empty-toggle"));
     });
-    expect(screen.queryByTestId("board-column-queued")).toBeNull();
+    expect(screen.queryByTestId("card-section-queued")).toBeNull();
   });
 
   it("AC-25：列表视图也遵循空桶隐藏（project dim 单 run → 仅 1 个 group 段）", async () => {
@@ -1342,8 +1502,9 @@ describe("RunListPage 分组维度 + 空桶自动隐藏（SPEC §10.8-10.10）",
     expect(stored).toMatch(/status:queued/);
   });
 
-  // ── AC-24 status dim 桶**顺序**锁定（M5：DOM 左→右 queued→...→failed） ──
-  it("AC-24 status dim 列 DOM 顺序：queued → running → blocked → completed → failed", async () => {
+  // ── AC-24/AC-B7 status dim 桶**顺序**锁定（SPEC web-board-cardgrid §4.1：
+  //    running → queued → blocked → failed → completed，失败提前到完成前） ──
+  it("AC-24 status dim section DOM 顺序：running → queued → blocked → failed → completed", async () => {
     mockFetchFor([
       mkRun({ run_id: "rq", status: "queued" }),
       mkRun({ run_id: "rr", status: "running" }),
@@ -1353,16 +1514,16 @@ describe("RunListPage 分组维度 + 空桶自动隐藏（SPEC §10.8-10.10）",
     ]);
     renderPage();
     await screen.findByTestId("board");
-    // 5 列都非空（showEmpty=false 默认也全部渲染）。
-    const cols = screen.getAllByTestId(
-      /^board-column-(queued|running|blocked|completed|failed)$/,
+    // 5 section 都非空（showEmpty=false 默认也全部渲染）。
+    const secs = screen.getAllByTestId(
+      /^card-section-(running|queued|blocked|failed|completed)$/,
     );
-    expect(cols.map((c) => c.getAttribute("data-testid"))).toEqual([
-      "board-column-queued",
-      "board-column-running",
-      "board-column-blocked",
-      "board-column-completed",
-      "board-column-failed",
+    expect(secs.map((s) => s.getAttribute("data-testid"))).toEqual([
+      "card-section-running",
+      "card-section-queued",
+      "card-section-blocked",
+      "card-section-failed",
+      "card-section-completed",
     ]);
   });
 
@@ -1374,15 +1535,15 @@ describe("RunListPage 分组维度 + 空桶自动隐藏（SPEC §10.8-10.10）",
     ]);
     renderPage();
     await screen.findByTestId("board");
-    // live-pending 归排队（board-column-queued accept 集合）。
+    // live-pending 归排队（card-section-queued accept 集合）。
     expect(
-      within(screen.getByTestId("board-column-queued")).getAllByTestId(
+      within(screen.getByTestId("card-section-queued")).getAllByTestId(
         "board-card",
       ).length,
     ).toBe(1);
-    // cancelled 归失败（board-column-failed accept 集合）。
+    // cancelled 归失败（card-section-failed accept 集合）。
     expect(
-      within(screen.getByTestId("board-column-failed")).getAllByTestId(
+      within(screen.getByTestId("card-section-failed")).getAllByTestId(
         "board-card",
       ).length,
     ).toBe(1);
@@ -1406,22 +1567,22 @@ describe("RunListPage 分组维度 + 空桶自动隐藏（SPEC §10.8-10.10）",
     });
     // 4 桶都在（按 alpha + Legacy/其它 垫底）。
     const cols = screen.getAllByTestId(
-      /^board-column-(alpha|demo|Legacy|其它)$/,
+      /^card-section-(alpha|demo|Legacy|其它)$/,
     );
     expect(cols.map((c) => c.getAttribute("data-testid"))).toEqual([
-      "board-column-alpha",
-      "board-column-demo",
-      "board-column-Legacy",
-      "board-column-其它",
+      "card-section-alpha",
+      "card-section-demo",
+      "card-section-Legacy",
+      "card-section-其它",
     ]);
     // 各桶各 1 卡片。
     expect(
-      within(screen.getByTestId("board-column-Legacy")).getAllByTestId(
+      within(screen.getByTestId("card-section-Legacy")).getAllByTestId(
         "board-card",
       ).length,
     ).toBe(1);
     expect(
-      within(screen.getByTestId("board-column-其它")).getAllByTestId(
+      within(screen.getByTestId("card-section-其它")).getAllByTestId(
         "board-card",
       ).length,
     ).toBe(1);
@@ -1443,12 +1604,12 @@ describe("RunListPage 分组维度 + 空桶自动隐藏（SPEC §10.8-10.10）",
       fireEvent.click(screen.getByTestId("group-by-option-workflow"));
     });
     const cols = screen.getAllByTestId(
-      /^board-column-(wf-a|wf-b|其它)$/,
+      /^card-section-(wf-a|wf-b|其它)$/,
     );
     expect(cols.map((c) => c.getAttribute("data-testid"))).toEqual([
-      "board-column-wf-a",
-      "board-column-wf-b",
-      "board-column-其它",
+      "card-section-wf-a",
+      "card-section-wf-b",
+      "card-section-其它",
     ]);
   });
 
@@ -1480,18 +1641,18 @@ describe("RunListPage 分组维度 + 空桶自动隐藏（SPEC §10.8-10.10）",
     });
     // 5 桶都在，按 TIME_ORDER（今天/昨天/本周/更早/未知）DOM 顺序。
     const cols = screen.getAllByTestId(
-      /^board-column-(today|yesterday|week|earlier|unknown)$/,
+      /^card-section-(today|yesterday|week|earlier|unknown)$/,
     );
     expect(cols.map((c) => c.getAttribute("data-testid"))).toEqual([
-      "board-column-today",
-      "board-column-yesterday",
-      "board-column-week",
-      "board-column-earlier",
-      "board-column-unknown",
+      "card-section-today",
+      "card-section-yesterday",
+      "card-section-week",
+      "card-section-earlier",
+      "card-section-unknown",
     ]);
     // 未知桶含 ru + rz（started_at=undefined 与 started_at=0 都落未知）。
     expect(
-      within(screen.getByTestId("board-column-unknown")).getAllByTestId(
+      within(screen.getByTestId("card-section-unknown")).getAllByTestId(
         "board-card",
       ).length,
     ).toBe(2);
@@ -1510,7 +1671,7 @@ describe("RunListPage 分组维度 + 空桶自动隐藏（SPEC §10.8-10.10）",
       fireEvent.click(screen.getByTestId("show-empty-toggle"));
     });
     // 待决策列 count>0 → 仍 ring。
-    expect(screen.getByTestId("board-column-blocked").className).toMatch(
+    expect(screen.getByTestId("card-section-blocked").className).toMatch(
       /ring-orca-skipped\/20/,
     );
   });
@@ -1540,7 +1701,7 @@ describe("RunListPage 分组维度 + 空桶自动隐藏（SPEC §10.8-10.10）",
     expect(() => renderPage()).not.toThrow();
     await screen.findByTestId("board");
     // 降级 false → 仅 completed 列（其它空列隐藏）。
-    expect(screen.queryByTestId("board-column-queued")).toBeNull();
+    expect(screen.queryByTestId("card-section-queued")).toBeNull();
   });
 });
 
@@ -1580,9 +1741,9 @@ describe("RunListPage review 闭环（M-1..M-4 cross-scenario）", () => {
     });
     expect(screen.getByTestId("bulk-bar").textContent).toMatch(/已选\s*1/);
 
-    // 切「运行中」chip → r1（completed）被隐藏，仅 r2 可见。
+    // 切「运行中」kpi 胶囊 → r1（completed）被隐藏，仅 r2 可见。
     await act(async () => {
-      fireEvent.click(screen.getByTestId("status-chip-running"));
+      fireEvent.click(screen.getByTestId("kpi-chip-running"));
     });
     // M-1 关键：r1 隐藏后选择**保留**（求交用未过滤 runs，不被过滤态误剔）。
     // 旧实现（runIds=sorted）会把 r1 从选择集剔掉 → bulk-bar 消失。
@@ -1590,7 +1751,7 @@ describe("RunListPage review 闭环（M-1..M-4 cross-scenario）", () => {
 
     // 切回「全部」→ r1 重新可见且仍选中。
     await act(async () => {
-      fireEvent.click(screen.getByTestId("status-chip-all"));
+      fireEvent.click(screen.getByTestId("kpi-chip-all"));
     });
     const r1Cb = screen.getByLabelText("选择 r1") as HTMLInputElement;
     expect(r1Cb.checked).toBe(true);

@@ -1,9 +1,12 @@
 // hooks/use-list-sort.ts —— 排序 state + localStorage 持久（SPEC §3.2/§5.4）。
 //
 // 契约：
-//   - ``SortField = "started_at"|"workflow_name"|"status"|"cost"|"elapsed"|"event_count"``。
+//   - ``SortField = "started_at"|"workflow_name"|"status"|"elapsed"|"event_count"``。
+//     （SPEC web-board-cardgrid §4.2：``cost`` 已删——前端不显示/不排序/不聚合。）
 //   - 默认 ``{field:"started_at", dir:"desc"}``。
 //   - 持久 localStorage ``orca-runlist-sort-v1``；损坏 try/catch 降级默认。
+//   - **持久化回退无新代码（AC-B9）**：现有 ``readStored`` 的 ``SORT_FIELDS.some(...)`` 校验
+//     已自动拒绝旧 ``field==="cost"`` 值并回退默认——删 cost 项后该校验自动生效。
 //   - 切换语义：点字段名 → 切到该字段（默认 desc）；**同字段二次点击反转方向**；不循环回「无排序」。
 //   - 排序必须 stable（ES2019+ Array.sort 已 stable；调用方在 comparator 末尾加 run_id tiebreaker 兜底）。
 
@@ -13,7 +16,6 @@ export type SortField =
   | "started_at"
   | "workflow_name"
   | "status"
-  | "cost"
   | "elapsed"
   | "event_count";
 
@@ -28,7 +30,6 @@ export const SORT_FIELDS: { field: SortField; label: string }[] = [
   { field: "started_at", label: "开始时间" },
   { field: "workflow_name", label: "workflow 名称" },
   { field: "status", label: "状态" },
-  { field: "cost", label: "花费" },
   { field: "elapsed", label: "耗时" },
   { field: "event_count", label: "事件数" },
 ];

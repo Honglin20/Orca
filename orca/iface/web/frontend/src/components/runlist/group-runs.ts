@@ -4,14 +4,15 @@
 // 这是 ``sort-runs.ts`` 的同层姊妹模块——排序先于分桶（调用方先 ``sortRuns`` 全局 stable 排序，
 // 再 groupRuns 保 stable 顺序）。
 //
-// 桶顺序（SPEC §10.8）：
-//   - ``status``：排队 → 运行中 → 待决策 → 已完成 → 失败（运行中·待决策列强调）。
+// 桶顺序（SPEC web-board-cardgrid §4.1 修订；原 §10.8 status 顺序被 supersede）：
+//   - ``status``：运行中 → 排队 → 待决策 → 失败 → 已完成（监控关注项置前，失败提前到完成前避免淹没；
+//     运行中·待决策强调；限显统一由 ``CardGridSection.SECTION_LIMIT`` 接管）。
 //   - ``project``：``project_name``（``source==="legacy"``→"Legacy"，空→"其它"）；alpha 排序 + Legacy/其它垫底。
 //   - ``workflow``：``workflow_name``（空→"其它"）；alpha + 其它垫底。
 //   - ``time``：今天 / 昨天 / 本周 / 更早 / 未知；按 ``started_at`` 逆序；无→未知。
 //   - ``none``：单桶「全部」。
 //
-// 桶 ``status`` 字段仅 ``status`` dim 存在（用于 BoardColumn emphasize/ring/dot）。其它 dim 的
+// 桶 ``status`` 字段仅 ``status`` dim 存在（用于 CardGridSection emphasize/ring）。其它 dim 的
 // blocked 穿透提示（紫条）由调用方调 ``bucketHasBlocked(bucket)`` 判定。
 
 import type { RunSummary } from "@/stores/run-list-store";
@@ -32,7 +33,8 @@ export interface RunBucket {
   status?: RunStatus;
 }
 
-/** status dim 的桶定义（左→右顺序 + 多 status 归桶，例如 cancelled → 失败列）。 */
+/** status dim 的桶定义（SPEC web-board-cardgrid §4.1 顺序：运行中→排队→待决策→失败→已完成
+ *  + 多 status 归桶，例如 cancelled → 失败桶；live-pending → 排队桶）。 */
 interface StatusBucketDef {
   status: RunStatus;
   key: string;
@@ -42,16 +44,16 @@ interface StatusBucketDef {
 
 const STATUS_BUCKETS: StatusBucketDef[] = [
   {
-    status: "queued",
-    key: "queued",
-    label: "排队",
-    accept: new Set<RunStatus>(["queued", "live-pending"]),
-  },
-  {
     status: "running",
     key: "running",
     label: "运行中",
     accept: new Set<RunStatus>(["running"]),
+  },
+  {
+    status: "queued",
+    key: "queued",
+    label: "排队",
+    accept: new Set<RunStatus>(["queued", "live-pending"]),
   },
   {
     status: "blocked",
@@ -60,32 +62,30 @@ const STATUS_BUCKETS: StatusBucketDef[] = [
     accept: new Set<RunStatus>(["blocked"]),
   },
   {
-    status: "completed",
-    key: "completed",
-    label: "已完成",
-    accept: new Set<RunStatus>(["completed"]),
-  },
-  {
     status: "failed",
     key: "failed",
     label: "失败",
     accept: new Set<RunStatus>(["failed", "cancelled"]),
   },
+  {
+    status: "completed",
+    key: "completed",
+    label: "已完成",
+    accept: new Set<RunStatus>(["completed"]),
+  },
 ];
 
-/** 列强调（色条 + 列头加粗 + 计数状态色）：运行中 / 待决策（SPEC §10.2）。 */
+/** 列强调（色条 + 列头加粗 + 计数状态色）：运行中 / 待决策（SPEC §10.2，保留）。 */
 export const EMPHASIS_STATUSES: ReadonlySet<RunStatus> = new Set([
   "running",
   "blocked",
 ]);
-/** 非空时整列 ring：待决策（SPEC §10.2/§10.9）。 */
+/** 非空时整列 ring：待决策（SPEC §10.2/§10.9，保留）。
+ *  注：§2.3 I9 将 ring 触发条件泛化到 ``bucketHasBlocked``（任意 dim 含 blocked run），
+ *  此常量仅作 status dim 的语义标记保留，CardGridSection 实际用 ``bucketHasBlocked`` 判定。 */
 export const RING_STATUSES: ReadonlySet<RunStatus> = new Set(["blocked"]);
-/** 限长（已完成/失败列最近 10，SPEC §10.2/AC-22）。 */
-export const LIMITED_STATUSES: ReadonlySet<RunStatus> = new Set([
-  "completed",
-  "failed",
-]);
-export const COMPLETED_LIMIT = 10;
+// SPEC web-board-cardgrid §4.1：``LIMITED_STATUSES`` / ``COMPLETED_LIMIT`` 已删除——
+// 限显统一由 ``CardGridSection.SECTION_LIMIT=6`` 接管所有 section（不再区分 completed/failed）。
 
 const MS_PER_DAY = 86400 * 1000;
 

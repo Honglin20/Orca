@@ -14,8 +14,9 @@ export type RunStatus =
   | "queued"
   | "live-pending";
 
-// SPEC web-runlist-redesign §6.3：状态 chip dot 配色 DRY 单一出口。导出供
-// StatusFilterChips 复用（避免散落硬编码 bg-orca-running）。
+// SPEC web-runlist-redesign §6.3 + web-board-cardgrid §5.1：状态色 DRY 单一出口。
+// 导出供 KpiStrip（dot 配色）/ BoardCard / RunRow（内联 label 文字色 + 文案）复用，
+// 避免散落硬编码 bg-orca-running / text-orca-*。
 export const STATUS_DOT_BG: Record<RunStatus, string> = {
   running: "bg-orca-running",
   completed: "bg-orca-done",
@@ -26,7 +27,9 @@ export const STATUS_DOT_BG: Record<RunStatus, string> = {
   "live-pending": "bg-orca-pending",
 };
 
-const STATUS_TEXT: Record<RunStatus, string> = {
+// SPEC web-board-cardgrid §5.1：新增 export（原私有 const），供 BoardCard/RunRow 内联
+// label 复用（停用 StatusBadge 后，文字色 + 文案的单出口）。
+export const STATUS_TEXT: Record<RunStatus, string> = {
   running: "text-orca-running",
   completed: "text-orca-done",
   failed: "text-orca-failed",
@@ -46,7 +49,9 @@ const STATUS_BORDER: Record<RunStatus, string> = {
   "live-pending": "border-orca-pending/30",
 };
 
-const STATUS_LABEL: Record<RunStatus, string> = {
+// SPEC web-board-cardgrid §5.1：新增 export（原私有 const），供 BoardCard/RunRow 内联
+// label 文案复用（停用 StatusBadge 后，文案的单出口）。
+export const STATUS_LABEL: Record<RunStatus, string> = {
   running: "运行中",
   completed: "已完成",
   failed: "失败",

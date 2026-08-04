@@ -3,7 +3,7 @@
 // 契约：
 //   - 容器无 border，靠 ``bg-[rgb(var(--surface-2)/0.3)]`` 半透底 + 左侧 3px accent 色条表达层次。
 //   - 含 blocked run → 整组左条变 skipped/50（用 STATUS_BAR_HEX.blocked = #a78bfa inline）。
-//   - 头：folder icon + 名 + path + 聚合（运行中/待决策/总花费/最近）+ 三态全选 checkbox。
+//   - 头：folder icon + 名 + 聚合（运行中/待决策/最近）+ 三态全选 checkbox（SPEC web-board-cardgrid §4.2 去 cost）。
 //   - 折叠态：单行头 + （blocked>0 时）「⚠ Y 待决策」紫色 mini pill（不被埋，§5.3）。
 //   - 搜索穿透：``forceOpen`` 覆盖持久折叠（§5.2）；分组头右侧显搜索命中数。
 //   - 三态全选 checkbox 用 indeterminate 半选态。
@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import type { RunSummary } from "@/stores/run-list-store";
 import { STATUS_BAR_HEX } from "@/components/layout/status-badge";
-import { fmtAgo, fmtCost } from "./format-helpers";
+import { fmtAgo } from "./format-helpers";
 import { RunRow } from "./RunRow";
 
 export interface ProjectGroupData {
@@ -65,21 +65,19 @@ export function ProjectGroup({
   onOpenRun,
   onDeleteRun,
 }: Props) {
-  // 聚合统计（运行中 / 待决策 / 总花费 / 最近）。
+  // 聚合统计（运行中 / 待决策 / 最近；SPEC web-board-cardgrid §4.2 去 cost）。
   const agg = useMemo(() => {
     let running = 0;
     let blocked = 0;
-    let cost = 0;
     let latest: number | null = null;
     for (const r of runs) {
       const s = r.status;
       if (s === "running" || s === "queued") running++;
       if (s === "blocked") blocked++;
-      cost += r.cost ?? 0;
       const sa = r.started_at ?? null;
       if (sa !== null && (latest === null || sa > latest)) latest = sa;
     }
-    return { running, blocked, cost, latest };
+    return { running, blocked, latest };
   }, [runs]);
 
   const hasBlocked = agg.blocked > 0;
@@ -186,7 +184,6 @@ export function ProjectGroup({
                 {agg.blocked} 待决策
               </span>
             )}
-            <span>{fmtCost(agg.cost)} 总花费</span>
             <span>最近 {fmtAgo(agg.latest)}</span>
           </div>
         )}

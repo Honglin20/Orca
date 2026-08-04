@@ -28,9 +28,7 @@ export function compareRuns(
     case "status":
       cmp = (a.status || "").localeCompare(b.status || "");
       break;
-    case "cost":
-      cmp = (a.cost ?? 0) - (b.cost ?? 0);
-      break;
+    // SPEC web-board-cardgrid §4.2：cost 排序分支已删（SortField 删 cost 后 TS 强制）。
     case "elapsed":
       cmp = (a.elapsed ?? 0) - (b.elapsed ?? 0);
       break;

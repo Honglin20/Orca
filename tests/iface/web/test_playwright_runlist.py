@@ -1,10 +1,10 @@
-"""test_playwright_runlist.py —— RunListPage 重设计（SPEC web-runlist-redesign）真机验证。
+"""test_playwright_runlist.py —— RunListPage 重设计（SPEC web-runlist-redesign + web-board-cardgrid）真机验证。
 
 ``@pytest.mark.integration``：默认 CI 不跑。需 playwright + 浏览器已安装。
 
-覆盖（SPEC §8 AC + §10 看板）：
+覆盖（SPEC §8 AC + §10 看板 + web-board-cardgrid 卡片网格）：
   1. **AC-19 默认看板**：``/`` 默认渲染 board；toggle 切 list；持久 ``orca-runlist-view-v1``。
-  2. **AC-20 五列渲染**：board-column-queued/running/blocked/completed/failed 均在 DOM。
+  2. **AC-20 五 section 渲染**：card-section-running/queued/blocked/failed/completed 均在 DOM。
   3. **AC-21 点卡进详情**：click board-card → /runs/<id>（同时验证 9b 兼容 run-item 选择器）。
   4. **AC-23 共享 selection**：看板勾选 → bulk-bar；切列表选择保留。
   5. **AC-4 折叠持久**：列表视图折叠分组 → reload → 仍折叠。
@@ -106,11 +106,11 @@ def _seed_runs(tmp_path: Path, manager, count: int = 3) -> list[str]:
 
 @pytest.mark.skipif(not _PLAYWRIGHT_AVAILABLE, reason="playwright 未安装")
 def test_default_board_renders_and_five_columns(live_server, tmp_path):
-    """AC-19/20/25：默认渲染 board；默认 showEmpty=false 时空列隐藏；
-    开「显示空」后五列 testid 均在 DOM。
+    """AC-19/20/25：默认渲染 board；默认 showEmpty=false 时空 section 隐藏；
+    开「显示空」后五 section testid 均在 DOM。
 
     §10.9（AC-25）覆盖了旧 §10.2「空列仍渲染占位」——默认隐藏 0-run 桶。
-    故本用例先验证默认仅非空列（completed），再 toggle showEmpty 验证五列结构（AC-20）。
+    故本用例先验证默认仅非空 section（completed），再 toggle showEmpty 验证五 section 结构（AC-20）。
     """
     base_url, manager = live_server
     _seed_runs(tmp_path, manager, count=1)
@@ -121,20 +121,20 @@ def test_default_board_renders_and_five_columns(live_server, tmp_path):
             page = await browser.new_page()
             await page.goto(base_url)
             await page.wait_for_selector("[data-testid=board]", timeout=5000)
-            # AC-25 反向回归：默认 showEmpty=false，仅 completed（非空）列渲染；
-            # queued/running/blocked/failed 四个空列必须隐藏。
+            # AC-25 反向回归：默认 showEmpty=false，仅 completed（非空）section 渲染；
+            # queued/running/blocked/failed 四个空 section 必须隐藏。
             await page.wait_for_selector(
-                "[data-testid=board-column-completed]", timeout=2000
+                "[data-testid=card-section-completed]", timeout=2000
             )
             for empty_col in ("queued", "running", "blocked", "failed"):
                 assert await page.locator(
-                    f"[data-testid=board-column-{empty_col}]"
-                ).count() == 0, f"showEmpty=false 时空列 {empty_col} 应隐藏"
-            # AC-20：toggle 开「显示空」→ 五列 testid 都在。
+                    f"[data-testid=card-section-{empty_col}]"
+                ).count() == 0, f"showEmpty=false 时空 section {empty_col} 应隐藏"
+            # AC-20：toggle 开「显示空」→ 五 section testid 都在。
             await page.click("[data-testid=show-empty-toggle]")
             for col in ("queued", "running", "blocked", "completed", "failed"):
                 await page.wait_for_selector(
-                    f"[data-testid=board-column-{col}]", timeout=2000
+                    f"[data-testid=card-section-{col}]", timeout=2000
                 )
             # 默认视图不应显列表 run-row。
             assert await page.locator("[data-testid=run-row]").count() == 0
@@ -306,24 +306,24 @@ def test_group_by_dim_switch_and_empty_bucket_hide(live_server, tmp_path):
             browser = await p.chromium.launch()
             page = await browser.new_page()
             await page.goto(base_url)
-            # 默认 board 视图 + 默认 dim=status：仅 completed 列（其它 4 空列隐藏）。
+            # 默认 board 视图 + 默认 dim=status：仅 completed section（其它 4 空 section 隐藏）。
             await page.wait_for_selector("[data-testid=board]", timeout=5000)
             await page.wait_for_selector(
-                "[data-testid=board-column-completed]", timeout=2000
+                "[data-testid=card-section-completed]", timeout=2000
             )
             assert await page.locator(
-                "[data-testid=board-column-queued]"
+                "[data-testid=card-section-queued]"
             ).count() == 0, "showEmpty=false 时空列应隐藏"
 
-            # 切到 project dim → board-column-demo 出现。
+            # 切到 project dim → card-section-demo 出现。
             await page.click("[data-testid=group-by-select]")
             await page.click("[data-testid=group-by-option-project]")
             await page.wait_for_selector(
-                "[data-testid=board-column-demo]", timeout=2000
+                "[data-testid=card-section-demo]", timeout=2000
             )
             assert await page.locator(
-                "[data-testid=board-column-completed]"
-            ).count() == 0, "切到 project 后旧 status 列 testid 应消失"
+                "[data-testid=card-section-completed]"
+            ).count() == 0, "切到 project 后旧 status section testid 应消失"
 
             # localStorage 持久 dim=project。
             stored = await page.evaluate(
@@ -335,7 +335,7 @@ def test_group_by_dim_switch_and_empty_bucket_hide(live_server, tmp_path):
             await page.click("[data-testid=group-by-select]")
             await page.click("[data-testid=group-by-option-status]")
             await page.wait_for_selector(
-                "[data-testid=board-column-completed]", timeout=2000
+                "[data-testid=card-section-completed]", timeout=2000
             )
             await browser.close()
 

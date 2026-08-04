@@ -40,9 +40,9 @@ import {
 } from "@/components/runlist/DeleteConfirmDialog";
 import { StaleProjectsSection } from "@/components/runlist/StaleProjectsSection";
 import { RunBoard } from "@/components/runlist/RunBoard";
+import { KpiStrip, type StatusFilter, type KpiCounts } from "@/components/runlist/KpiStrip";
 import { sortRuns } from "@/components/runlist/sort-runs";
 import { groupRuns } from "@/components/runlist/group-runs";
-import type { StatusFilter } from "@/components/runlist/StatusFilterChips";
 
 export function RunListPage() {
   const navigate = useNavigate();
@@ -118,7 +118,9 @@ export function RunListPage() {
       if (status === "running") return rs === "running" || rs === "queued";
       if (status === "blocked") return rs === "blocked";
       if (status === "completed") return rs === "completed";
-      if (status === "failed") return rs === "failed";
+      // SPEC web-board-cardgrid §2.2（I3）：failed 桶含 cancelled——与 group-runs failed 桶
+      // accept 集合（{failed, cancelled}）、KPI 失败计数三者统一。点 KPI 失败 → failed 与 cancelled run 均显示。
+      if (status === "failed") return rs === "failed" || rs === "cancelled";
       return true;
     });
   }, [q, status, runs]);
@@ -152,12 +154,34 @@ export function RunListPage() {
   const { selected, toggle, toggleGroup, groupState, setMany, clear } =
     useListSelection(runIds);
 
-  // ── 搜索穿透：q 非空 → 含匹配 run 的桶强制展开（覆盖持久折叠） ─────────────
+  // ── KPI 计数（SPEC web-board-cardgrid §2.2/§4.3） ──────────────────────────
+  // 计数始终显全量分布（不受 q/status 过滤影响）——KPI 作全局真相锚点。
+  const kpiCounts = useMemo<KpiCounts>(() => {
+    let running = 0;
+    let blocked = 0;
+    let failed = 0;
+    let completed = 0;
+    for (const r of runs) {
+      const rs = statusToRunStatus(r.status);
+      if (rs === "running" || rs === "queued") running++;
+      else if (rs === "blocked") blocked++;
+      else if (rs === "failed" || rs === "cancelled") failed++;
+      else if (rs === "completed") completed++;
+    }
+    return { running, blocked, failed, completed, total: runs.length };
+  }, [runs]);
+
+  // ── 搜索穿透 + 过滤穿透（SPEC §2.3 I8 唯一解） ──────────────────────────────
+  // q 非空 **或** status 过滤激活 → 含数据的桶强制展开（覆盖持久折叠）+ 限显放开。
   const searching = q.trim().length > 0;
-  const isBucketOpen = (bucketKey: string): boolean =>
-    searching
-      ? (buckets.find((b) => b.key === bucketKey)?.runs.length ?? 0) > 0
-      : !collapsed.has(`${groupBy}:${bucketKey}`);
+  const statusFilterActive = status !== "all";
+  const forceExpandAll = searching || statusFilterActive;
+  const isBucketOpen = (bucketKey: string): boolean => {
+    if (searching || statusFilterActive) {
+      return (buckets.find((b) => b.key === bucketKey)?.runs.length ?? 0) > 0;
+    }
+    return !collapsed.has(`${groupBy}:${bucketKey}`);
+  };
 
   // ── handlers ──────────────────────────────────────────────────────────────
   const handleOpen = (id: string) => navigate(`/runs/${id}`);
@@ -240,8 +264,6 @@ export function RunListPage() {
       <ListTopBar
         q={q}
         onQ={setQ}
-        status={status}
-        onStatus={setStatus}
         groupBy={groupBy}
         onGroupBy={setGroupBy}
         showEmpty={showEmpty}
@@ -253,6 +275,9 @@ export function RunListPage() {
         view={view}
         onView={setView}
       />
+
+      {/* KPI 概览带（SPEC web-board-cardgrid §2.2）：固定区，main 滚动区之外。 */}
+      <KpiStrip counts={kpiCounts} active={status} onChange={setStatus} />
 
       <main className="orca-bg-app flex-1 overflow-y-auto">
         <div className="mx-auto max-w-7xl px-6 py-5">
@@ -366,6 +391,13 @@ export function RunListPage() {
                         runs.find((r) => r.run_id === id)?.workflow_name ?? id,
                     })
                   }
+                  isBucketOpen={isBucketOpen}
+                  onToggleBucket={(bucketKey) =>
+                    toggleCollapse(`${groupBy}:${bucketKey}`)
+                  }
+                  forceExpandAll={forceExpandAll}
+                  q={q}
+                  searching={searching}
                 />
               </div>
             )}
@@ -393,7 +425,7 @@ export function RunListPage() {
             </>
           )}
         </span>
-        {view === "list" && visibleBuckets.length >= 3 && (
+        {visibleBuckets.length >= 3 && (
           <span className="flex items-center gap-2">
             <button
               type="button"

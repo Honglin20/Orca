@@ -1,19 +1,20 @@
-// components/runlist/RunRow.tsx —— 单行（SPEC §4/§6.6）。
+// components/runlist/RunRow.tsx —— 单行（SPEC §4/§6.6 + web-board-cardgrid §3.3）。
 //
 // **DOM 重构**（D1 M5）：checkbox 不嵌 button（旧实现整个行是 button，点 checkbox 跳详情页 bug）。
 // 结构：``<li role=row>`` 内：左 checkbox（独立 input，stopPropagation）+ 主体 button（点 → 详情页）
 // + 操作组（打开/删除，size=16，命中区≥32px，常显）。
 //
-// 视觉契约（§6.6/§2.6）：
-//   - 状态竖条 ``STATUS_BAR_HEX[rs]`` inline（行内 hex 仅限 STATUS_BAR_HEX）。
+// 视觉契约（§6.6/§2.6 + §3.3 状态只画一遍）：
+//   - 状态竖条 ``STATUS_BAR_HEX[rs]`` inline（行内 hex 仅限 STATUS_BAR_HEX）= 唯一状态色锚点。
+//   - 状态文字 label 内联（STATUS_TEXT 色 + STATUS_LABEL 文案），停用旧 dot 徽章（§3.3）。
 //   - 待决策 ring：``ring-1 ring-inset ring-orca-skipped/30``。
 //   - 删除按钮：size=16 p-1.5，三级 opacity（默认 faint/0.55 → 行 hover faint → 自身 hover failed），
 //     **常显**（无 opacity-0 group-hover），命中区 ``min-w-[32px] min-h-[32px]``。
 //   - checkbox：opacity-40 → 行 hover/selected → 100%（SPEC §5.5）。
+//   - 去 cost metric（SPEC §4.2）。
 
 import {
   Activity,
-  Coins,
   ExternalLink,
   Timer,
   Trash2,
@@ -21,10 +22,11 @@ import {
 import type { RunSummary } from "@/stores/run-list-store";
 import {
   STATUS_BAR_HEX,
-  StatusBadge,
+  STATUS_LABEL,
+  STATUS_TEXT,
   statusToRunStatus,
 } from "@/components/layout/status-badge";
-import { fmtAgo, fmtCost, fmtElapsed, highlightMatch } from "./format-helpers";
+import { fmtAgo, fmtElapsed, highlightMatch } from "./format-helpers";
 
 interface Props {
   run: RunSummary;
@@ -80,7 +82,9 @@ export function RunRow({
         className="flex min-w-0 flex-1 items-center gap-3 text-left"
       >
         <span className="w-24 shrink-0">
-          <StatusBadge status={rs} />
+          <span className={`text-xs font-medium ${STATUS_TEXT[rs]}`}>
+            {STATUS_LABEL[rs]}
+          </span>
         </span>
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="flex items-center gap-2">
@@ -96,7 +100,6 @@ export function RunRow({
         </span>
         <span className="hidden shrink-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs orca-text-muted md:flex">
           <Metric icon={Activity} value={run.progress ?? "?"} label="进度" />
-          <Metric icon={Coins} value={fmtCost(run.cost)} label="花费" />
           <Metric icon={Timer} value={fmtElapsed(run.elapsed)} label="耗时" />
           <Metric
             icon={Activity}
@@ -143,7 +146,7 @@ function Metric({
   value,
   label,
 }: {
-  icon: typeof Coins;
+  icon: typeof Activity;
   value: string;
   label: string;
 }) {

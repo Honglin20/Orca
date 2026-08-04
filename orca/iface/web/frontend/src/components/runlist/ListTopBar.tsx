@@ -14,7 +14,6 @@ import {
 import type { RunListView } from "@/hooks/use-runlist-view";
 import type { GroupBy } from "@/hooks/use-group-by";
 import { SearchInput } from "./SearchInput";
-import { StatusFilterChips, type StatusFilter } from "./StatusFilterChips";
 import { SortMenu } from "./SortMenu";
 import { GroupBySelector } from "./GroupBySelector";
 import { ShowEmptyToggle } from "./ShowEmptyToggle";
@@ -34,8 +33,6 @@ const THEME_ICON: Record<Theme, LucideIcon> = {
 interface Props {
   q: string;
   onQ: (v: string) => void;
-  status: StatusFilter;
-  onStatus: (s: StatusFilter) => void;
   /** 分组维度（SPEC §10.8，两视图共用同一 dim） */
   groupBy: GroupBy;
   onGroupBy: (v: GroupBy) => void;
@@ -54,8 +51,6 @@ interface Props {
 export function ListTopBar({
   q,
   onQ,
-  status,
-  onStatus,
   groupBy,
   onGroupBy,
   showEmpty,
@@ -159,9 +154,10 @@ export function ListTopBar({
         className="flex h-10 items-center gap-2 px-4"
       >
         <SearchInput value={q} onChange={onQ} />
-        <div className="hidden md:block">
-          <StatusFilterChips active={status} onChange={onStatus} />
-        </div>
+        {/*
+          状态过滤已移至 KPI 概览带（SPEC web-board-cardgrid §2.2/§2.4）——
+          顶栏不再渲染 StatusFilterChips。
+        */}
         <span className="ml-auto flex flex-wrap items-center justify-end gap-2">
           <SortMenu sort={sort} onSelectField={onSelectSortField} />
           {/*

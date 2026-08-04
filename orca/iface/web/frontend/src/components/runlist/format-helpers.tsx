@@ -1,6 +1,7 @@
 // components/runlist/format-helpers.ts —— 列表页格式化 DRY（SPEC §6 隐含）。
 //
-// 集中 elapsed/cost/ago 的格式化逻辑，供 RunRow/ProjectGroup/SortMenu 共用。
+// 集中 elapsed/ago 的格式化逻辑，供 RunRow/ProjectGroup/BoardCard 共用。
+// （SPEC web-board-cardgrid §4.2：花费格式化函数已删——前端不显示 cost。）
 
 export function fmtElapsed(sec: number | undefined | null): string {
   if (!sec || sec < 0) return "—";
@@ -15,11 +16,6 @@ export function fmtElapsed(sec: number | undefined | null): string {
   const d = Math.floor(h / 24);
   const hh = h % 24;
   return hh ? `${d}d${hh}h` : `${d}d`;
-}
-
-export function fmtCost(c: number | undefined | null): string {
-  if (!c) return "$0.00";
-  return `$${c.toFixed(2)}`;
 }
 
 export function fmtAgo(ts: number | null | undefined): string {
