@@ -18,14 +18,22 @@ e2e 最后一个阻塞点（P0-P5 全闭环，仅 finalize FAIL）。
 - code-reviewer 一轮闭环：0 must-fix / 2 nice-to-have（stderr 日志 + Step 2/3 兜底对称合并）已合并。
 
 **待办**：
-- [ ] 真实 headless e2e `kd-nas-20260805-033107-04e861` 进行中（max_rounds=2 / full_epochs=2 /
-      cpu）。目标 13/13 节点全 PASS，finalize 出 final_report.md + champion + final_latency +
-      final_accuracy，workflow `done:true`。30-60min（真训练 + 2 轮蒸馏）。
+- [ ] **真实 headless e2e 被 opencode 环境破坏阻塞**（非 P6 问题）：opencode 1.14.22 binary +
+      `~/.local/share/opencode/opencode.db` 在 2026-08-05 03:28 被改动（疑似 auto-update），
+      `__drizzle_migrations` 表清空（0 rows）但 `project` 表残留迁移后 schema（多
+      `icon_url_override` / `commands` 列）→ 新 binary 启动时跑初始 CREATE TABLE `project`
+      撞已有表 → exit_code=1 → spawn phase 失败。已用 `opencode run "say hi"` 直跑复现（同样
+      错误，非 orca 路径问题）。**需用户决策**：备选恢复路径（a. 回滚 opencode binary 到
+      03:28 前版本；(b. 手工补 __drizzle_migrations 哈希；(c. 重置 db 但丢失会话历史）。
+      orca 代码侧零改动。
+- [ ] 真实 headless e2e `kd-nas-20260805-033107-04e861` 已 fail（flatten spawn 阶段）。
+      待 opencode 环境恢复后重跑——目标 13/13 节点全 PASS。
 - [ ] Phase 5 E2E（KD-NAS Trainer 引擎化）遗留——详见下方。
 
 ### 真实 e2e 终态（run_id `kd-nas-20260805-033107-04e861`，P6 验证）
 
-- 待 e2e 完成后回填。
+- **fail**：opencode 子进程 spawn 阶段 exit_code=1（详见上文待办）。**未触达 finalize**，
+  无法验证 P6。需先修 opencode 环境。
 
 ### 历史 e2e（run_id `kd-nas-20260805-011253-6c2ebe`，P5 验证 + 暴露 P6）
 
