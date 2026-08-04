@@ -40,7 +40,7 @@ workflows/
       tune_latency.py                      # 最小缩量 latency 调参（seed/cache/median+std）
       gpu_probe.py                         # GPU 探测 + 并发判定（setup 阶段，fail-soft）
       teacher_setup.py                     # teacher_cache.pt + teacher_meta.json
-      viz_kd_stage.py                      # 活跃串行每节点 web 推送 sidecar（baseline/teacher/student/distill_table/decide/final）
+      viz_kd_stage.py                      # 活跃串行每节点 web 推送 sidecar（baseline_seed/teacher/student/distill_table/decide/final；flatten 不推图）
       metrics_tail.py                      # distill loss line（log-tail 推送）
       finalize_kd.py                       # finalize 确定性后端（champion eval/ONNX/latency + final_report.md）
       kd/{losses,wrapper,compose,ema}.py   # KD 库（不变）
@@ -97,7 +97,7 @@ def feature_hook_names(self) -> list[str]: ...                 # 可选，OFD/Fi
 
 - **tune_latency.py**（distill 节点内部）：`--variant_path --build_fn --dummy_input --knobs --target_latency_us --latency_provider --artifacts_dir [--max_measurements 40] [--measure_repeats 3] [--device auto] [--seed 0] [--opset 17]`
   → `TUNE_STATUS: ACCEPTED|FAIL_latency` + `ACCEPTED_CFG`/`BEST_EFFORT_CFG` + `LATENCY_US_MEDIAN` + `LATENCY_US_STD` + `MEASUREMENTS`。
-- **gpu_probe.py**【setup step 8】：`--teacher_cache --representative_variant --variants_count [--device auto] [--safety 0.8] [--max_concurrency 8] [--seed 0]`
+- **gpu_probe.py**【setup step 3】：`[--teacher_cache <.pt>] --representative_variant <.py> --variants_count [--device auto] [--safety 0.8] [--max_concurrency 8] [--seed 0]`（teacher_cache 可选：提供→VRAM 模式测 per-variant 占用算并发；不提供→device-only 模式 concurrency=1，串行 setup teacher 未训时用）
   → `RESOLVED_DEVICE` + `N_GPUS` + `FREE_VRAM_BYTES` + `PER_VARIANT_VRAM_BYTES` + `CONCURRENCY` + `DEVICE_PLAN`（JSON list）+ `GPU_REPORT`。
   fail-soft：无 CUDA/NPU / 探测异常 → `CONCURRENCY: 1` + `DEVICE_PLAN: [""]` + WARN，exit 0；仅输入契约不符 → exit 2。
 - **measure_student.py 已删**（2026-08-04 cleanup §3）。KD 精度路径由 train_pipeline.py --mode eval 承担；
@@ -106,7 +106,7 @@ def feature_hook_names(self) -> list[str]: ...                 # 可选，OFD/Fi
   调，生产路径 distill/finalize 直接读 train_pipeline --mode eval 的 MET_ACCURACY——保留作 contract 单点测试入口）。
 - **teacher_setup.py**：`--teacher_model_path --teacher_ckpt --build_fn --dummy_input [--eval_command] --output_dir [--latency_provider] [--teacher_latency_us] [--device] [--seed]`
   → `TEACHER_LATENCY_US` + `TEACHER_ACCURACY` + `TEACHER_ACCURACY_KNOWN` + `TEACHER_DB_BASELINE` + `TEACHER_ONNX` + `TEACHER_CACHE` + `TEACHER_META`（meta 含 `teacher_model_hash` + `teacher_ckpt_sha256`）。
-- **viz_kd_stage.py**（活跃每节点 web 推送 sidecar）：`--stage <baseline|baseline_seed|teacher|student|distill_table|decide|final> [--ledger] [--champions] [--baseline_latency_us] [--baseline_accuracy] [--target_latency_us] [--accuracy_baseline_kind] [--teacher_latency_us] [--champion_latency_us] [--champion_accuracy] [--teacher_meta] [--round_hypothesis] [--env_anchor]`
+- **viz_kd_stage.py**（活跃每节点 web 推送 sidecar）：`--stage <baseline_seed|teacher|student|distill_table|decide|final> [--ledger] [--champions] [--baseline_latency_us] [--baseline_accuracy] [--target_latency_us] [--accuracy_baseline_kind] [--teacher_latency_us] [--champion_latency_us] [--champion_accuracy] [--teacher_meta] [--round_hypothesis] [--env_anchor]`（flatten 不调本脚本——不推图，viz_status 固定 `env_status:skipped`）
   → stdout JSON：`{viz_env_status, charts: {<图名>: {pushed, reason}}}`。
   - `--stage final` 推：``final_compare_bar``（baseline/teacher/champion latency bar）+ ``champion_summary_table``
     + ``all_models_table``（baseline+teacher+students+champions 全模型总表）+ **``pareto_front``**（latency×accuracy
@@ -128,16 +128,16 @@ def feature_hook_names(self) -> list[str]: ...                 # 可选，OFD/Fi
 
 | 节点 | 关键输出 |
 |---|---|
-| flatten | baseline_contract_path / project_root / model_name / flat_artifacts_dir / **baseline_latency_us**（展平任意模型入口成 KD 变体契约 .py；`__main__` 跑「正确性 + latency」统一契约 → baseline_latency_us 由 inputs.latency_provider 实测） |
-| setup | kd_artifacts_dir / per_run_artifacts_dir / project_root / teacher_model_path / teacher_cache / teacher_meta / teacher_ckpt / ledger_path / champions_path / ckpts_dir / student_models_dir / baseline_latency_us / baseline_accuracy / kd_scripts_dir / receiver_dir / **concurrency / device_plan / per_variant_vram_bytes / gpu_report** |
-| gen_teacher | teacher_model_path / teacher_latency_us / depth_axis / width_axis |
-| gen_train_script | train_pipeline_path |
-| train_script_verify | verify_status / fidelity_report |
-| train_teacher | teacher_cache（透传 setup） |
-| gen_student | student_model_path / round / hypothesis / direction_id / knobs / status（OK|FAIL_build） |
-| distill | round / latency_us / accuracy / accuracy_kind / met_latency / met_accuracy / ckpt / status（SUCCESS|FAIL_latency|FAIL_train|FAIL_build） |
-| decide | terminate / terminate_reason / champion_id / ledger append |
-| finalize | champion_is_baseline / champion_student / final_latency_us / final_accuracy / final_onnx / final_report / viz_status |
+| flatten | baseline_contract_path / project_root / model_name / flat_artifacts_dir / baseline_latency_us / viz_status（展平任意模型入口成 KD 变体契约 .py；`__main__` 跑「正确性 + latency」统一契约 → baseline_latency_us 由 inputs.latency_provider 实测） |
+| setup | kd_artifacts_dir / per_run_artifacts_dir / project_root / kd_scripts_dir / struct_scripts_dir / ledger_path / champions_path / checkpoints_dir / student_models_dir / scripts_dir / onnx_dir / meta_dir / reports_dir / worktree_root / device / concurrency / baseline_latency_us / baseline_accuracy / viz_status |
+| gen_teacher | teacher_model_path / teacher_latency_us / project_root / depth_axis / width_axis / viz_status |
+| gen_train_script | train_pipeline_path / teacher_default_lr / teacher_default_epochs |
+| train_script_verify | verified / issues |
+| train_teacher | teacher_cache / teacher_meta / teacher_ckpt / teacher_latency_us / teacher_accuracy / teacher_accuracy_known / viz_status |
+| gen_student | student_model_path / round / hypothesis / direction_id / knobs / status（OK|FAIL_build） / viz_status |
+| distill | round / student_model_path / accepted_cfg / cfg_hash / latency_us / latency_us_std / accuracy / met_latency / met_accuracy / ckpt / tune_status / status（SUCCESS|FAIL_latency|FAIL_train|FAIL_build） / viz_status |
+| decide | round / continue_loop / champion_id / champion_latency_us / champion_accuracy / viz_status（+ terminate_reason） |
+| finalize | final_model / final_onnx / final_latency_us / final_accuracy / final_report / viz_status |
 
 **路由**（纯函数 router 求值，无 LLM）：
 - flatten → setup（恒定）。

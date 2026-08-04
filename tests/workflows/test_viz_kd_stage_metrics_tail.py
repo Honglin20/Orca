@@ -93,36 +93,18 @@ def m_tail():
 # ── viz_kd_stage: stage dispatch ──────────────────────────────────────────────
 
 
-def test_baseline_stage_pushes_latency_bar(viz_stage):
-    r = viz_stage.mod.render_stage(
-        stage="baseline",
-        ledger_path="",
-        champions_path="",
-        baseline_latency_us=5.0,
-        baseline_accuracy=None,
-        target_latency_us=None,
-        accuracy_baseline_kind="",
-        teacher_latency_us=None,
-        champion_latency_us=None,
-        champion_accuracy=None,
-        round_hypothesis="",
-        env_anchor="",
-    )
-    assert r["viz_env_status"] in {"ok", "env_loaded_from_file", "env_missing"}
-    assert "baseline_latency_bar" in r["charts"]
-    assert r["charts"]["baseline_latency_bar"]["pushed"] is True
-    assert viz_stage.calls and viz_stage.calls[0]["chart_type"] == "bar"
-
-
-def test_baseline_stage_missing_latency_skip(viz_stage):
+def test_baseline_stage_removed_no_chart(viz_stage):
+    """flatten 不推图：--stage baseline 已从 viz_kd_stage 移除 → argparse choices 拒绝
+    （render_stage 走 unknown-stage WARN 分支，charts 记 _unknown_stage）。baseline 信息
+    由 setup baseline_seed_table 承载。"""
     r = viz_stage.mod.render_stage(
         stage="baseline", ledger_path="", champions_path="",
-        baseline_latency_us=None, baseline_accuracy=None, target_latency_us=None,
+        baseline_latency_us=5.0, baseline_accuracy=None, target_latency_us=None,
         accuracy_baseline_kind="", teacher_latency_us=None, champion_latency_us=None,
         champion_accuracy=None, round_hypothesis="", env_anchor="",
     )
-    assert r["charts"]["baseline_latency_bar"]["pushed"] is False
-    assert "缺失" in r["charts"]["baseline_latency_bar"]["reason"] or "无效" in r["charts"]["baseline_latency_bar"]["reason"]
+    assert "baseline_latency_bar" not in r["charts"]
+    assert r["charts"].get("_unknown_stage", {}).get("pushed") is False
 
 
 def test_teacher_stage_pushes_compare_bar(viz_stage):
@@ -434,20 +416,21 @@ def test_fail_status_bar_empty_ledger_skip(viz_stage, tmp_path):
 
 
 def test_render_chart_exception_does_not_block(viz_stage):
-    """baseline stage 抛异常 → charts.baseline_latency_bar.pushed=False reason=generic:..."""
+    """teacher stage render_chart 抛异常 → charts.teacher_vs_baseline_bar.pushed=False reason=generic:...
+    （单图异常不阻断其他图；原用 baseline stage 验证，baseline stage 已移除，改 teacher 保覆盖。）"""
     h = _MockOrca(
         "viz_kd_stage.py",
         render_impl=lambda **kw: (_ for _ in ()).throw(RuntimeError("boom")),
     )
     try:
         r = h.mod.render_stage(
-            stage="baseline", ledger_path="", champions_path="",
+            stage="teacher", ledger_path="", champions_path="",
             baseline_latency_us=5.0, baseline_accuracy=None, target_latency_us=None,
-            accuracy_baseline_kind="", teacher_latency_us=None, champion_latency_us=None,
+            accuracy_baseline_kind="", teacher_latency_us=15.0, champion_latency_us=None,
             champion_accuracy=None, round_hypothesis="", env_anchor="",
         )
-        assert r["charts"]["baseline_latency_bar"]["pushed"] is False
-        assert "generic:RuntimeError" in r["charts"]["baseline_latency_bar"]["reason"]
+        assert r["charts"]["teacher_vs_baseline_bar"]["pushed"] is False
+        assert "generic:RuntimeError" in r["charts"]["teacher_vs_baseline_bar"]["reason"]
     finally:
         h.restore()
 
@@ -542,10 +525,11 @@ def test_metrics_tail_invalid_template_json_falls_back_to_default(tmp_path, m_ta
 
 
 def test_viz_kd_stage_main_emits_json_even_on_bad_args(tmp_path):
-    """CLI 不存在的 stage 被 argparse 拒（choices 限制）；验证正常 stage 下 stdout 合法。"""
+    """正常 stage（baseline_seed）下，即便 orca.chart 不可用（env_missing/import_failed），
+    _main 兜底仍 emit 合法 JSON（returncode 0）。注：baseline stage 已移除（flatten 不推图）。"""
     proc = subprocess.run(
         [sys.executable, str(KD_SCRIPTS / "viz_kd_stage.py"),
-         "--stage", "baseline", "--baseline_latency_us", "5.0"],
+         "--stage", "baseline_seed", "--baseline_latency_us", "5.0"],
         capture_output=True, text=True,
     )
     # 没装 orca.chart 时 import_failed/env_missing，stdout 仍 emit 合法 JSON。

@@ -12,8 +12,8 @@ log-tail 推送互补——loss 曲线由 metrics_tail 摘 train log；本脚本
   - ``_main`` 兜底永远 emit 合法 JSON（agent dumb copy 进 viz_status，**必填字段**）。
 
 阶段（``--stage``）→ 推图清单：
-  baseline        : flatten — baseline latency bar。
-  baseline_seed   : setup — baseline champion seed 表。
+  baseline_seed   : setup — baseline champion seed 表（baseline latency/accuracy 由 setup 推；
+                     flatten 不推图——单柱 baseline bar 信息量低且与 seed table 冗余）。
   teacher         : gen_teacher — teacher vs baseline latency bar。
   student         : gen_student — 每轮 hypothesis 表（含 status）。
   distill_table   : distill — 每轮 student latency/accuracy 表（含 met_*）。
@@ -128,24 +128,6 @@ def _to_float(v: Any) -> float | None:
 
 
 # ── 单图推送 helpers ──────────────────────────────────────────────────────────
-
-
-def _push_baseline_latency_bar(baseline_lat: float | None) -> tuple[bool, str]:
-    if baseline_lat is None or baseline_lat < 0:
-        return False, f"baseline_latency_us 缺失/无效={baseline_lat!r}"
-    assert _orca_render_chart is not None
-    _orca_render_chart(
-        chart_type="bar",
-        data=[{"stage": "baseline", "latency_us": baseline_lat}],
-        label=_LABEL,
-        title="Baseline Latency (flatten)",
-        x="stage",
-        y="latency_us",
-        x_label="阶段",
-        y_label="时延 us（越低越好）",
-        caption=f"flatten __main__ 实测 baseline latency 中位数 = {baseline_lat:.4g}us（用户 latency_provider 真测）。",
-    )
-    return True, "ok"
 
 
 def _push_baseline_seed_table(baseline_lat: float | None, baseline_acc: float | None) -> tuple[bool, str]:
@@ -571,7 +553,6 @@ def _push_fail_status_bar(ledger: list[dict[str, Any]]) -> tuple[bool, str]:
 
 
 _STAGES: dict[str, str] = {
-    "baseline": "baseline_latency_bar",
     "baseline_seed": "baseline_seed_table",
     "teacher": "teacher_vs_baseline_bar",
     "student": "student_hypothesis_table",
@@ -619,9 +600,7 @@ def render_stage(
             ok, reason = False, f"generic:{type(e).__name__}:{e}"
         result["charts"][name] = {"pushed": bool(ok), "reason": reason}
 
-    if stage == "baseline":
-        _run("baseline_latency_bar", lambda: _push_baseline_latency_bar(baseline_latency_us))
-    elif stage == "baseline_seed":
+    if stage == "baseline_seed":
         _run(
             "baseline_seed_table",
             lambda: _push_baseline_seed_table(baseline_latency_us, baseline_accuracy),

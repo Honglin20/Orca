@@ -18,7 +18,11 @@ Web 主页 `/` 看板从 Trello 式横向 5 列重设计为「KPI 概览带（�
   （`^DEVICE:`→`^RESOLVED_DEVICE:`，旧 grep 永不命中致 device 总 fallback）。
 - flatten review R1 闭环：step3 去后缀落定确定性 python 片段（`split(' (low-confidence')`+`os.path.abspath`，
   与 setup 逐字对齐，Rule 5/DRY）；测试升级断言确定性代码。
-- 验证：`tests/workflows/` 421 passed / 5 预存失败 / 0 新红。详见
+- 验证：`tests/workflows/` 421 passed / 5 预存失败 / 0 新红。
+- review 第二轮闭环（7 项）：gpu_probe DRY 抽 `_resolve_backend`/`_probe_gpu_inventory` helper +
+  llm_artifacts fallback 文档统一（4 处 stale 删）+ CONTRACTS §4 表整表对齐 yaml required +
+  PROJECT_ROOT_IN 改 inline argv + device-only 测试 docstring 诚实标注 + setup CONCURRENCY grep
+  死代码删 + device enum 注明 resolved。详见
   [gpu_probe release](docs/releases/2026-08-04-kd-nas-gpu-probe-teacher-cache-optional.md)。
 
 ## [2026-08-04] fix(kd-nas): flatten 产物落项目 artifacts 根 + 删 baseline latency bar（未 commit）
@@ -26,7 +30,7 @@ Web 主页 `/` 看板从 Trello 式横向 5 列重设计为「KPI 概览带（�
 两处 drift 修复：
 - flatten `<output_dir>` 从 `$ORCA_ARTIFACTS_DIR`（per-run `runs/<run_id>/`）改为
   `${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/`（与 setup `kd_artifacts_dir` 同根，跨 run 持久；
-  flatten 先于 setup 执行故自算 PROJECT_ROOT）；low-confidence 时 fallback `llm_artifacts/<base>/`。
+  flatten 先于 setup 执行故自算 PROJECT_ROOT；PROJECT_ROOT=dirname 总非空，无 fallback）。
 - 删 `viz_kd_stage` baseline stage（单柱 bar 与 setup `baseline_seed_table` 冗余）；flatten 不推图，
   `viz_status` 固定 `{env_status:skipped}`（字段保留，保 schema 统一纪律）。SPEC/yaml/CONTRACTS + 测试同步。
 - 验证：tests/workflows/ 418 passed / 5 预存失败（HEAD 已存）/ 0 新红。详见

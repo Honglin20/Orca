@@ -63,14 +63,14 @@ flatten → setup → gen_teacher → gen_train_script → train_script_verify �
 
 - 复用 `workflows/agents/model-flatten/`（SKILL + validate_contract + __main__ latency）。
 - output: `baseline_contract_path` / `project_root` / `model_name` / `baseline_latency_us` / `viz_status`。
-- web push（sidecar `viz_kd_stage.py --stage baseline`）：baseline latency bar。
+- web push：flatten **不推图**（单柱 baseline latency bar 信息量低，与 setup `baseline_seed_table` 冗余；baseline latency/accuracy 由 setup 承载）。`viz_status` 固定 `{"env_status":"skipped","charts":{}}`。
 
 ### 6.2 `setup`（精简 kd-setup，**拆出 train_teacher**）
 
 - **职责**：探测 shared infra 路径 + seed baseline champion + device 探测。**不含 train_teacher**（拆到独立节点）。
 - 产出（单一真相源，下游经 setup.output 透传）：`kd_artifacts_dir`（末尾带 /）/ `per_run_artifacts_dir`（$ORCA_ARTIFACTS_DIR）/ `project_root` / `kd_scripts_dir`（`workflows/agents/_kd_scripts` 绝对路径，下游 distill/decide 调脚本用）/ `struct_scripts_dir`（`workflows/agents/_struct_scripts` 绝对路径，export_onnx 用）/ `ledger_path` / `champions_path` / `ckpts_dir`（末尾带 /）/ `snapshots_dir`（末尾带 /）/ `worktree_root`（末尾带 /，KD 可选——见 §6.7 注）/ `device`（探测）/ `concurrency`（串行版=1）/ `baseline_latency_us`（透传 flatten）/ `baseline_accuracy`（=inputs.accuracy_baseline）/ `viz_status`。
 - **seed baseline champion**：`champions.jsonl` 第一行 = `{id:"baseline", round:0, latency_us:baseline_latency_us, accuracy:baseline_accuracy, met_latency:false, met_accuracy:false, snapshot:baseline_contract_path}`。ledger 初始化（不截断已有）。
-- 复用现 `kd-setup/agent.md` 的 step1（路径解析 + lock）+ step7（GPU 探测），**删 step2-6**（baseline 校验移 flatten / teacher 训练移 train_teacher）。
+- 复用现 `kd-setup/agent.md` 的 step1（路径解析 + lock）+ step7（GPU 探测），**删 step2-6**（baseline 校验移 flatten / teacher 训练移 train_teacher）。GPU 探测走 **device-only 模式**（setup 在 train_teacher 之前执行，teacher 未训、无 `teacher_cache.pt`，故不传 `--teacher_cache`；gpu_probe 只解析 device，`concurrency` 恒 1）——禁止传 baseline `.py` 契约当 teacher_cache（gpu_probe VRAM 模式会 `torch.load` 它 → UnpicklingError → exit 2 → workflow_failed）。
 - web push：baseline champion seed table。
 
 ### 6.3 `gen_teacher`（复用 teacher-gen + viz_status）
@@ -246,7 +246,6 @@ flatten → setup → gen_teacher → gen_train_script → train_script_verify �
 
 | 节点 | chart | chart_type | data |
 |---|---|---|---|
-| flatten | baseline latency | bar | `[{stage:"baseline", latency_us}]` |
 | setup | baseline champion seed | table | `[{round:0, latency, accuracy}]` |
 | gen_teacher | teacher vs baseline | bar | baseline/teacher |
 | train_teacher | 训练 loss/metrics | line | per-epoch（_make_live_push + metrics_tail） |
@@ -344,7 +343,7 @@ else: continue_loop=true
 1. `tars validate kd-nas` 0 error。
 2. E2E（opencode+deepseek）：用一个 **baseline 不达标的 fixture**（target_latency 调低 / accuracy_baseline 调高）强制 ≥2 轮 distill→decide 循环 → finalize；验收 decide 在 max_rounds 耗尽时正确终止。
 3. **核心判据**：每轮 student `DUMMY_INPUT` 字节级 == baseline DUMMY_INPUT（§6.7 deterministic 校验；非写死 64）。
-4. web：每阶段 chart 推 web（baseline/teacher latency bar、teacher 训练 line、每轮 student table、champion 轨迹 line、终态对比）。
+4. web：每阶段 chart 推 web（teacher latency bar、teacher 训练 line、每轮 student table、champion 轨迹 line、终态对比）。flatten 不推图（baseline 信息由 setup baseline_seed_table 承载）。
 5. teacher 参数：从 user_train_script 提取默认 lr/epochs（非硬编码；提取不到 fail loud）。
 6. 串行：一次一个 student（不并发），decide back-route。
 7. 达标终止：admitted 非空 → finalize；或 max_rounds 耗尽。

@@ -43,7 +43,7 @@ tools: [bash, read, write, edit, glob, grep]
   "meta_dir": "<末尾带 />",
   "reports_dir": "<末尾带 />",
   "worktree_root": "<末尾带 />",
-  "device": "<auto|cuda|npu|cpu>",
+  "device": "<resolved: cuda:0|npu:0|cpu | fallback=inputs.device>",
   "concurrency": <int>,
   "baseline_latency_us": <float>,
   "baseline_accuracy": <float>,
@@ -181,23 +181,26 @@ fi
 echo "PARSED step2: BASELINE_LATENCY_US=$BASELINE_LATENCY_US BASELINE_ACCURACY=$BASELINE_ACCURACY CHAMPIONS_PATH=$CHAMPIONS_PATH"
 ```
 
-## step 3 执行：GPU 探测（定 device / concurrency；setup 是并发数唯一权威）
+## step 3 执行：GPU 探测（device-only；定 device，串行版 concurrency 恒 1）
 
-> 串行版 concurrency 恒 1（无并发蒸馏池），但 device 仍由 gpu_probe 探测（distill/train_teacher
-> 用），保留 device 字段供下游。串行版 max_concurrency=1 防误用并发（违反 SPEC §3.1 串行化）。
+> 串行版 setup 在 **teacher 训练之前**执行（DAG: flatten→setup→…→train_teacher），此刻
+> `teacher_cache.pt` 尚不存在。故 gpu_probe 走 **device-only 模式**（不传 `--teacher_cache`）：
+> 只解析 device（cuda/cpu/npu）+ GPU inventory，`concurrency=1`（SPEC §3.1 串行化）。
+> **禁止**传 `--teacher_cache "$BASELINE"`——$BASELINE 是 flatten 产的 `.py` 契约文件，
+> gpu_probe VRAM 模式会 `torch.load` 它 → UnpicklingError（.py 非 pickle）→ exit 2 → workflow_failed。
+> device-only 模式 gpu_probe 不 load teacher_cache，安全。
 
 ```bash
 GPU_OUT="$(python3 "$KD_SCRIPTS_DIR/gpu_probe.py" \
-  --teacher_cache "$BASELINE" \
   --representative_variant "$BASELINE" \
   --variants_count 1 --device "{{ inputs.device }}" \
-  --safety 0.8 --max_concurrency 1 2>&1)"
+  --max_concurrency 1 2>&1)"
 GPU_RC=$?
 [ $GPU_RC -ne 0 ] && { echo "$GPU_OUT" >&2; exit 2; }
-DEVICE_RESOLVED="$(echo "$GPU_OUT" | grep '^DEVICE:' | awk '{print $2}')"
-CONCURRENCY="$(echo "$GPU_OUT" | grep '^CONCURRENCY:' | awk '{print $2}')"
+# gpu_probe emit ``RESOLVED_DEVICE:``（非 ``DEVICE:``）；旧 grep ``^DEVICE:`` 永不命中 → 总 fallback。
+DEVICE_RESOLVED="$(echo "$GPU_OUT" | grep '^RESOLVED_DEVICE:' | awk '{print $2}')"
 GPU_REPORT="$(echo "$GPU_OUT" | grep '^GPU_REPORT:' | cut -d' ' -f2-)"
-# 串行版兜底：concurrency 强制 1（防 gpu_probe 在 multi-GPU 机上回多并发）。
+# 串行版 concurrency 恒 1（device-only 模式 gpu_probe 已强制 1；此处显式断言防 multi-GPU 误并发）。
 CONCURRENCY=1
 [ -z "$DEVICE_RESOLVED" ] && { DEVICE_RESOLVED="{{ inputs.device }}"; GPU_REPORT="${GPU_REPORT} WARN device grep miss -> ${DEVICE_RESOLVED}"; }
 echo "PARSED step3: DEVICE=$DEVICE_RESOLVED CONCURRENCY=$CONCURRENCY GPU_REPORT=$GPU_REPORT"

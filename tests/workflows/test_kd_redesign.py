@@ -191,6 +191,46 @@ def test_gpu_probe_fail_soft_on_auto_no_cuda(tmp_path):
     assert "WARN" in r.stdout
 
 
+def test_gpu_probe_device_only_without_teacher_cache(tmp_path):
+    """串行版 setup：不传 --teacher_cache（teacher 未训，无 teacher_cache.pt）→ device-only 模式，
+    gpu_probe 不 load cache、不崩（回归守护：旧 setup 传 .py 当 teacher_cache → UnpicklingError
+    exit 2；或旧 required=True 不传 → argparse 崩）。
+
+    CI 路径说明：CI 无 CUDA → gpu_probe `_main` 在硬件检查阶段就 `_emit_fail_soft`（exit 0），
+    **未进入 `_probe_device_only` 函数体**。故本测试在 CI 守的是「argparse 不崩 + 不因缺
+    teacher_cache exit 2」；`_probe_device_only` 的 happy path（device 解析 + GPU inventory）需真
+    CUDA/NPU 机器验证——其逻辑经 DRY helper `_resolve_backend`/`_probe_gpu_inventory` 与 VRAM 模式
+    共用，等价性由既有 VRAM 测试间接覆盖。"""
+    import subprocess
+    r = subprocess.run([
+        sys.executable, str(KD / "gpu_probe.py"),
+        "--representative_variant", str(KBDIR / "spt_t1.py"),
+        "--variants_count", "1", "--device", "auto",
+    ], capture_output=True, text=True)
+    assert r.returncode == 0, f"device-only 不传 teacher_cache 不应崩：{r.stderr}"
+    assert "CONCURRENCY: 1" in r.stdout
+    # device-only 模式不走 VRAM 路径，不应出现 cache 契约 fail-loud
+    assert "FAIL (input contract)" not in r.stderr
+    assert "FAIL (variant contract)" not in r.stderr
+
+
+def test_kd_setup_step3_gpu_probe_device_only_no_teacher_cache():
+    """串行版 setup step3 的 gpu_probe 调用不传 --teacher_cache（teacher 未训；2026-08-04 修复守护）。
+    注：用 regex 定位实际命令块（gpu_probe.py … 2>&1)），避免误伤注释里的「禁止传 --teacher_cache」说明。"""
+    import re
+    text = (REPO / "workflows" / "agents" / "kd-setup" / "agent.md").read_text(encoding="utf-8")
+    step3_idx = text.find("## step 3")
+    assert step3_idx >= 0, "kd-setup/agent.md 缺 ## step 3"
+    step3_block = text[step3_idx:text.find("## step 4", step3_idx)]
+    m = re.search(r'gpu_probe\.py.*?2>&1\)', step3_block, re.DOTALL)
+    assert m, "step3 缺 gpu_probe.py 调用命令"
+    cmd = m.group(0)
+    assert "--teacher_cache" not in cmd, (
+        f"kd-setup step3 gpu_probe 调用不应传 --teacher_cache（串行版 teacher 未训走 device-only；"
+        f"旧版传 $BASELINE(.py) 当 teacher_cache → UnpicklingError exit 2）：{cmd}"
+    )
+
+
 def test_gpu_probe_contract_violation_representative_missing_build_model(tmp_path):
     """representative 缺 build_model → AttributeError（输入契约不符 → fail loud 在 _main 包成 exit 2）。"""
     gp = _load(KD / "gpu_probe.py", "_gp_contract")

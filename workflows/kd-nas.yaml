@@ -68,7 +68,9 @@ nodes:
   # ═══════════════════════════════════════════════════════════════
   # flatten（入口·LLM + 脚本混合）：把用户任意 PyTorch 模型入口展平成 KD 变体契约 .py
   # （build_model + DUMMY_INPUT + KNOBS）+ __main__ 跑「正确性 + latency」→ 产 baseline_contract_path
-  # + baseline_latency_us（latency_provider 在此阶段就生效）。末尾 viz_kd_stage --stage baseline 推 latency bar。
+  # + baseline_latency_us（latency_provider 在此阶段就生效）。flatten 不推 web 图（单柱 baseline bar
+  #   与 setup baseline_seed_table 冗余）；baseline 信息由 setup 的 baseline_seed_table 承载。
+  #   flat 契约落 ${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/（与 setup kd_artifacts_dir 同根，跨 run 持久）。
   # ═══════════════════════════════════════════════════════════════
   - name: flatten
     kind: agent
@@ -82,7 +84,7 @@ nodes:
         baseline_contract_path: {type: string, description: "展平产出的契约 .py 绝对路径（build_model + DUMMY_INPUT + KNOBS；经 validate_contract.py PASS）"}
         project_root: {type: string, description: "从 baseline_model_path 向上推断的 project_root 绝对路径（低置信时带后缀）"}
         model_name: {type: string, description: "推断的 <base_name>"}
-        flat_artifacts_dir: {type: string, description: "<output_dir> 绝对路径"}
+        flat_artifacts_dir: {type: string, description: "flatten 产物目录绝对路径（${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/；与 setup kd_artifacts_dir 同根，跨 run 持久）"}
         baseline_latency_us: {type: number, description: "flatten __main__ 测出的默认 cfg latency 中位数（latency_provider 真测；setup 透传作 baseline 参考线，不再重测）"}
         viz_status:
           type: object
@@ -131,7 +133,7 @@ nodes:
         meta_dir: {type: string, description: "<kd_artifacts_dir>meta/（末尾带 /）"}
         reports_dir: {type: string, description: "<kd_artifacts_dir>reports/（末尾带 /）"}
         worktree_root: {type: string, description: "<kd_artifacts_dir>.worktrees/（末尾带 /）"}
-        device: {type: string, description: "gpu_probe 解析的 device（cuda/cpu/npu/auto）"}
+        device: {type: string, description: "gpu_probe 解析的 resolved device（cuda:0/npu:0/cpu）；gpu_probe fail-soft 时 fallback inputs.device（含 auto）"}
         concurrency: {type: integer, description: "串行版恒 1（防误用并发蒸馏池，违 SPEC §3.1 串行化）"}
         baseline_latency_us: {type: number, description: "flatten.output.baseline_latency_us 透传"}
         baseline_accuracy: {type: number, description: "inputs.accuracy_baseline 透传"}

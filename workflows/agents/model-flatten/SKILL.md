@@ -30,10 +30,16 @@ requires **when you begin that step**. This keeps context focused.
 
 ## Working Directory and Path Conventions
 
-- `<output_dir>`: Use engine-injected `$ORCA_ARTIFACTS_DIR` if non-empty (run scope,
-  authoritative). Otherwise default to `llm_artifacts/<base_name>/` under cwd. **Run
-  `cd <output_dir>` once before executing any command**; the working directory persists.
-  All artifacts are written under `<output_dir>`.
+- `<output_dir>`: `${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/` —— cross-run persistent
+  and **co-rooted with the downstream `setup` node's `kd_artifacts_dir`** (setup uses
+  `${PROJECT_ROOT}/artifacts/kd-nas/`; flatten lives in its `models/baseline/` subdir). The
+  baseline contract travels with the project across runs instead of scattering under per-run
+  `runs/<run_id>/`. `PROJECT_ROOT` is the **low-confidence suffix-stripped** value inferred in
+  preparation; `agent.md` step 3 computes `<output_dir>` with a **deterministic python snippet**
+  (`split(' (low-confidence')[0]` + `os.path.abspath`) **verbatim-aligned with `kd-setup/agent.md`**
+  so both nodes derive the same root (Rule 5: deterministic logic in code, not prose). `mkdir -p
+  <output_dir>` before writing. **Run `cd <output_dir>` once before executing any command**; the
+  working directory persists. All artifacts are written under `<output_dir>`.
 - `<user_project_root>`: The root of the user project (contains the model entry file).
   Inferred once in preparation (see agent.md), not a workflow input.
 - Use `pathlib.Path` for path construction; never string concatenation.

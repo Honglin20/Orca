@@ -492,6 +492,42 @@ def test_model_flatten_agent_md_consumes_baseline_model_path_input():
     )
 
 
+def test_flatten_agent_md_output_dir_co_rooted_with_setup():
+    """flatten output_dir 必须与下游 setup ``kd_artifacts_dir`` 同根
+    （``${PROJECT_ROOT}/artifacts/kd-nas/``），不再落 per-run ``$ORCA_ARTIFACTS_DIR``
+    （2026-08-04 drift 修复守护：flatten 早于 setup 写入，曾误用 P9 旧约定 per-run 目录）。
+
+    R1 闭环（code-reviewer）：step3 去后缀必须落定为**确定性 python 片段**（``split(' (low-confidence')``
+    + ``os.path.abspath``，与 ``kd-setup/agent.md`` 逐字对齐），非 prose（Rule 5）。
+    本测试守「契约 prose + 确定性代码」两层；runtime 同根性靠两边 python 片段逐字对齐保证。"""
+    text = (FLATTEN_DIR / "agent.md").read_text(encoding="utf-8")
+    assert "${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/" in text, (
+        "flatten output_dir 必须落 ${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/"
+        "（与 setup kd_artifacts_dir 同根，跨 run 持久）"
+    )
+    # 产物目录的两处指定（输入段「输出目录:」+ 准备 step3「确定输出目录」）不应再用
+    # $ORCA_ARTIFACTS_DIR（per-run runs/<run_id>/）作产物目录。
+    for anchor in ("输出目录:", "确定输出目录"):
+        idx = text.find(anchor)
+        assert idx >= 0, f"agent.md 缺 {anchor!r} 段"
+        block = text[idx:idx + 400]
+        assert "$ORCA_ARTIFACTS_DIR" not in block, (
+            f"{anchor!r} 段不应再用 $ORCA_ARTIFACTS_DIR（per-run）作产物目录；"
+            f"已改 ${PROJECT_ROOT}/artifacts/kd-nas/ 同根合流"
+        )
+    # R1：step3 去后缀必须用确定性代码（与 setup kd-setup/agent.md 逐字对齐），非 prose。
+    step3_idx = text.find("确定输出目录")
+    assert step3_idx >= 0
+    step3_block = text[step3_idx:step3_idx + 1500]
+    assert "split(' (low-confidence')" in step3_block, (
+        "flatten step3 必须含确定性去后缀代码 split(' (low-confidence')（与 setup 对齐，Rule 5："
+        "deterministic 用代码不用 prose）"
+    )
+    assert "os.path.abspath" in step3_block, (
+        "flatten step3 去后缀后必须 os.path.abspath（与 setup 对齐，保证两边路径字面一致）"
+    )
+
+
 def test_model_flatten_skill_md_only_step1_no_supernet():
     """SKILL.md 只搬 p-m-o Step 1（展平 + KNOBS + 校验），剥掉 Step 2-7
     （optimize_rules / supernet / SearchSpace —— NAS 专用，KD 用不到）。"""

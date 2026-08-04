@@ -40,7 +40,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
   "model_name": "<base_name>",
   "flat_artifacts_dir": "<output_dir> 绝对路径",
   "baseline_latency_us": <float>,
-  "viz_status": {<dumb copy 自 viz_kd_stage --stage baseline stdout>}
+  "viz_status": {"env_status": "skipped", "charts": {}}  ← flatten 不推 web 图（baseline bar 与 setup seed table 冗余）
 }
 ```
 
@@ -56,7 +56,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 - 模型入口: `{{ inputs.baseline_model_path }}`（任意 `.py` / `.yaml` / config 入口；flatten agent 会展平成 KD 变体契约，**不再要求用户自带契约**）
 - 设备: `{{ inputs.device }}`（advanced，默认 `auto`；用于 `validate_contract.py` forward 校验 + `__main__` latency 测量）
 - latency_provider: `{{ inputs.latency_provider }}`（用户真硬件 latency 脚本 `path::func`；kd-nas workflow 必填。**写入 flat 文件 `__main__` 的 `--latency_provider` 默认值**——渲染后的实际路径串，不是 Jinja 模板；空串 → helper fallback ONNXRT-CPU + WARN）
-- 输出目录: 引擎注入的 `$ORCA_ARTIFACTS_DIR`（run scope，权威产物目录）；缺则 fallback `llm_artifacts/<base_name>/`
+- 输出目录: `${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/`（跨 run 持久，与下游 setup 的 `kd_artifacts_dir` 同根——setup 用 `${PROJECT_ROOT}/artifacts/kd-nas/`，flatten 落其 `models/baseline/` 子目录；baseline 契约随项目走，不再散落 per-run `runs/<run_id>/`）。PROJECT_ROOT 由 step2 推断（找不到 .git/pyproject.toml/train.py 时取 baseline_model_path 的 dirname，总非空 → OUTPUT_DIR 总非空，无 fallback）
 
 ## 准备工作
 
@@ -65,7 +65,21 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
    source .venv/bin/activate 2>/dev/null || true
    ```
 2. **推断 project_root（infer-once，Tier B）**：从 `{{ inputs.baseline_model_path }}` 所在目录起，向上逐级找**第一个含 `train.py` 或 `pyproject.toml` 或 `.git` 的目录**作为项目根（绝对路径）。走到 `/` 仍找不到 → 取 `{{ inputs.baseline_model_path }}` 的 dirname，并在 `project_root` 字段后追加 ` (low-confidence: no train.py/pyproject.toml/.git ancestor)`（不阻塞，但必须显式标注）。**不许**用 `pwd` / `git rev-parse` / 最近编辑文件推断；**不许**留空或编造。
-3. **确定输出目录**（单一真相源，Tier C）：优先用引擎注入的 `$ORCA_ARTIFACTS_DIR`（`echo "$ORCA_ARTIFACTS_DIR"` 取值）；为空（非 orca 编排上下文）→ fallback `llm_artifacts/<inferred_name>/`。记住为 `<output_dir>`，下面所有产物写进它，`flat_artifacts_dir` 字段填它。`cd <output_dir>` 一次后续命令都基于此目录。
+3. **确定输出目录**（跨 run 持久，与 setup 同根合流）：执行以下 bash 计算 `<output_dir>`——去后缀公式与 `kd-setup/agent.md` step1 **逐字对齐**（`split(' (low-confidence')[0]` + `os.path.abspath`），保证 flatten（先于 setup 执行）与 setup 算出同一根（Rule 5：deterministic 用代码不用 prose）。`$PROJECT_ROOT_IN` = step2 推断的 project_root（**照填，含可能的 ` (low-confidence: ...)` 后缀**——python 片段去后缀）：
+
+   ```bash
+   OUTPUT_DIR="$(python3 -c "
+   import os, sys
+   p = sys.argv[1].split(' (low-confidence')[0].strip()
+   proot = os.path.abspath(p) if p else ''
+   print(os.path.join(proot, 'artifacts', 'kd-nas', 'models', 'baseline') if proot else '')
+   " "<LLM 填：step2 推断的 project_root 绝对路径（含 low-confidence 后缀照填）>")"
+   [ -n "$OUTPUT_DIR" ] || { echo "FAIL: step2 推断的 project_root 为空（未推断？）" >&2; exit 2; }
+   mkdir -p "$OUTPUT_DIR" && cd "$OUTPUT_DIR"
+   echo "OUTPUT_DIR=$OUTPUT_DIR"
+   ```
+
+   下面所有产物写进 `$OUTPUT_DIR`，`flat_artifacts_dir` 字段填它。**low-confidence 边缘**：step2 推断失败时 `PROJECT_ROOT_IN` = baseline_model_path 的 dirname（去后缀后），OUTPUT_DIR = `dirname/artifacts/kd-nas/models/baseline/`——可能与 setup 不合流（setup 从 `baseline_contract_path` 向上重算根），但 `baseline_contract_path` 绝对路径仍供 setup 读取，功能不阻断（统一用 PROJECT_ROOT 公式，确定性优先，不再 fallback `llm_artifacts/`）。
 
 ## 执行流程
 
@@ -119,29 +133,22 @@ LATENCY_SOURCE="$(echo "$RUN_OUT" | grep '^LATENCY_SOURCE:' | awk '{print $2}')"
 echo "PARSED: BASELINE_LATENCY_US=$BASELINE_LATENCY_US LATENCY_SOURCE=$LATENCY_SOURCE"
 ```
 
-## 末尾 web 推送 执行：viz_kd_stage --stage baseline（dumb copy stdout 进 viz_status）
+## web 推送（不推图）
 
-> 推 baseline latency bar（label=kd-nas）。sidecar：失败值合法产出，不阻断 flatten。
-> ``$ORCA_ARTIFACTS_DIR`` 经 env_anchor 透传给 sidecar（per-run 自举 ORCA env）。
+flatten **不推 web 图**：baseline 的单柱 latency bar 信息量低，且与下游 setup 节点的
+`baseline_seed_table`（含 latency + accuracy + met_*）完全冗余。baseline 信息由 setup 承载。
+故 `viz_status` 固定为：
 
-```bash
-KD_SCRIPTS_DIR="$(python3 -c "import os;print(os.path.abspath('workflows/agents/_kd_scripts'))")"
-VIZ_STDOUT=$(python3 "$KD_SCRIPTS_DIR/viz_kd_stage.py" \
-  --stage baseline \
-  --baseline_latency_us "$BASELINE_LATENCY_US" \
-  --env_anchor "${ORCA_ARTIFACTS_DIR:-}" \
-  || true)
-VIZ_STATUS=$(python3 -c "
-import json, sys
-o = json.loads(sys.argv[1])
-print(json.dumps({'env_status': o.get('viz_env_status', 'generic'), 'charts': o.get('charts', {})}))
-" "$VIZ_STDOUT")
-echo "VIZ_STATUS_JSON=$VIZ_STATUS"
+```json
+{"env_status": "skipped", "charts": {}}
 ```
+
+`env_status: skipped` 是 viz_status schema enum 的合法值（诚实表达「本节点跳过 web 推送」，
+非 sidecar 失败）。flatten 因此**不再依赖** `viz_kd_stage.py` / `$ORCA_ARTIFACTS_DIR` env_anchor。
 
 ## 产出 JSON（最终消息）
 
-把 `CONTRACT` / project_root / base_name / output_dir / BASELINE_LATENCY_US / VIZ_STATUS_JSON 填进模板，**只**返回这个 JSON：
+把 `CONTRACT` / project_root / base_name / output_dir / BASELINE_LATENCY_US 填进模板（`viz_status` 固定为下方的 skipped 对象），**只**返回这个 JSON：
 
 ```json
 {
@@ -150,11 +157,11 @@ echo "VIZ_STATUS_JSON=$VIZ_STATUS"
   "model_name": "<base_name>",
   "flat_artifacts_dir": "<output_dir 绝对路径>",
   "baseline_latency_us": <BASELINE_LATENCY_US float>,
-  "viz_status": <VIZ_STATUS_JSON 对象原样嵌入>
+  "viz_status": {"env_status": "skipped", "charts": {}}
 }
 ```
 
 - `baseline_contract_path` 必须是 validate_contract.py 校验 PASS 的同一文件路径；
 - `baseline_latency_us` 必须是上面 `__main__` 跑出的 `LATENCY_US:` 裸数值（float，不编造）；
-- `viz_status` 必须是 JSON 对象（dumb copy 自 viz_kd_stage stdout，失败值合法不阻断）；
+- `viz_status` 固定为 `{"env_status": "skipped", "charts": {}}`（flatten 不推图；baseline 信息由 setup `baseline_seed_table` 承载）；
 - 路由恒到 `setup`（setup 透传 `baseline_latency_us` + 透传 `baseline_contract_path` 进下游 + seed baseline champion）。

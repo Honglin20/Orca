@@ -12,14 +12,26 @@
 fail-soft（不阻塞 workflow）：
   - 无 CUDA/NPU（或 device=cpu）→ ``CONCURRENCY: 1`` + ``DEVICE_PLAN: [""]`` + WARN，exit 0
   - 探测过程异常（建模型 / 加载 teacher_cache 失败）→ 同上 fail-soft + WARN，exit 0
-  - **仅输入契约不符**（representative_variant 缺 build_model / teacher_cache 文件不存在）→ exit 2
+  - **仅输入契约不符**（representative_variant 缺 build_model / teacher_cache 损坏）→ exit 2
     （fail loud，是配置错误不是硬件缺失）
+
+两种探测模式（由 ``--teacher_cache`` 是否提供决定）：
+  - **VRAM 模式**（提供 teacher_cache）：测 per-variant 训练显存（model+grad+Adam+teacher_cache+
+    activation）→ 算并发公式。并发蒸馏池场景用。
+  - **device-only 模式**（不提供 teacher_cache）：只解析 device + GPU inventory，
+    ``CONCURRENCY: 1`` + ``PER_VARIANT_VRAM_BYTES: 0``。串行版 setup（concurrency 恒 1，
+    teacher 未训，无 teacher_cache.pt）走此路径——setup 在 train_teacher 之前执行。
 
 CLI::
 
+    # VRAM 模式（并发判定；teacher_cache.pt 已存在）
     python3 gpu_probe.py --teacher_cache <teacher_cache.pt> \
         --representative_variant <baseline_model.py> \
         --variants_count <N> --device auto --safety 0.8 --max_concurrency 8 [--seed 0]
+
+    # device-only 模式（串行 setup；teacher 未训，无 teacher_cache.pt）
+    python3 gpu_probe.py --representative_variant <baseline_model.py> \
+        --variants_count 1 --device auto --max_concurrency 1
 
 stdout::
 
@@ -107,6 +119,50 @@ def _dummy_input(mod: Any, path: str):
     return di
 
 
+def _resolve_backend(device_arg: str) -> str:
+    """解析 device_arg → backend（"cuda"/"npu"）；无 CUDA/NPU 或无 VRAM 概念 → raise。
+
+    VRAM 模式（``_probe_per_variant_vram``）与 device-only 模式（``_probe_device_only``）共用，
+    消除两处 device 解析重复（DRY）。caller 捕获 RuntimeError 走 fail-soft。
+    """
+    import torch
+
+    if device_arg == "auto":
+        if torch.cuda.is_available():
+            return "cuda"
+        if is_npu_available():
+            return "npu"
+        raise RuntimeError("no CUDA/NPU available")
+    if device_arg in ("cuda", "npu"):
+        return device_arg
+    raise RuntimeError(f"device={device_arg!r} 无 VRAM 概念")
+
+
+def _probe_gpu_inventory(backend: str) -> tuple[int, list[int]]:
+    """GPU inventory：``(n_gpus, free_per_card_bytes_list)``。cuda 直读；npu try/except 容错。
+
+    VRAM 模式与 device-only 模式共用（DRY）。
+    """
+    import torch
+
+    if backend == "cuda":
+        n_gpus = torch.cuda.device_count()
+        free = [int(torch.cuda.mem_get_info(i)[0]) for i in range(max(n_gpus, 1))]
+        return max(n_gpus, 1), free
+    # npu
+    try:
+        n_gpus = torch.npu.device_count()
+    except Exception:
+        n_gpus = 1
+    free: list[int] = []
+    for i in range(max(n_gpus, 1)):
+        try:
+            free.append(int(torch.npu.mem_get_info(i)[0]))
+        except Exception:
+            free.append(0)
+    return max(n_gpus, 1), free
+
+
 def _probe_per_variant_vram(
     *, teacher_cache: str, rep_path: str, device_arg: str, seed: int,
 ) -> tuple[int, str, int, list[int]]:
@@ -129,17 +185,7 @@ def _probe_per_variant_vram(
     # batch 维度保持 DUMMY_INPUT 给的（用户真实 batch=shape[0]）；不放大。
     x = torch.randn(*shape)
 
-    if device_arg == "auto":
-        if torch.cuda.is_available():
-            backend = "cuda"
-        elif is_npu_available():
-            backend = "npu"
-        else:
-            raise RuntimeError("no CUDA/NPU available")
-    elif device_arg in ("cuda", "npu"):
-        backend = device_arg
-    else:
-        raise RuntimeError(f"device={device_arg!r} 无 VRAM 概念")
+    backend = _resolve_backend(device_arg)
 
     # 多卡：device 0 做 per-variant 占用探测（单卡占用与卡无关，只取决于模型）。
     dev = torch.device(f"{backend}:0")
@@ -197,22 +243,28 @@ def _probe_per_variant_vram(
             per_variant = 0
 
     # n_gpus + 各卡 free
-    if backend == "cuda":
-        n_gpus = torch.cuda.device_count()
-        free_per_card = [int(torch.cuda.mem_get_info(i)[0]) for i in range(max(n_gpus, 1))]
-    else:  # npu
-        try:
-            n_gpus = torch.npu.device_count()
-        except Exception:
-            n_gpus = 1
-        free_per_card = []
-        for i in range(max(n_gpus, 1)):
-            try:
-                free_per_card.append(int(torch.npu.mem_get_info(i)[0]))
-            except Exception:
-                free_per_card.append(0)
+    n_gpus, free_per_card = _probe_gpu_inventory(backend)
 
     return per_variant, f"{backend}:0", max(n_gpus, 1), free_per_card
+
+
+def _probe_device_only(device_arg: str) -> tuple[str, int, list[int]]:
+    """无 teacher_cache 时的 device-only 探测：只解析 device + GPU inventory（不 build model /
+    不 load cache / 不测 per-variant VRAM）。
+
+    串行版 setup（concurrency 恒 1，teacher 未训，无 teacher_cache.pt）走此路径——它只需
+    device（cuda/cpu/npu）+ n_gpus + free VRAM 供报告，不需要 per-variant 占用（并发恒 1，
+    不算并发公式）。
+
+    返回 ``(resolved_device_str, n_gpus, free_per_card_bytes_list)``。
+    无 CUDA/NPU → raise RuntimeError（caller 走 fail-soft，与 _probe_per_variant_vram 同政策）。
+    """
+    import torch
+
+    backend = _resolve_backend(device_arg)
+
+    n_gpus, free_per_card = _probe_gpu_inventory(backend)
+    return f"{backend}:0", max(n_gpus, 1), free_per_card
 
 
 def compute_concurrency(
@@ -250,7 +302,9 @@ def _format_bytes(n: int) -> str:
 
 def _main() -> int:
     p = argparse.ArgumentParser(description="KD-NAS GPU 探测 + 并发判定（确定性，fail-soft）")
-    p.add_argument("--teacher_cache", required=True, help="teacher_cache.pt（per-variant 占用必含）")
+    p.add_argument("--teacher_cache", default="",
+                   help="teacher_cache.pt（可选；提供→VRAM 模式测 per-variant 占用算并发；"
+                        "不提供→device-only 模式 concurrency=1，串行 setup teacher 未训时用）")
     p.add_argument("--representative_variant", required=True,
                    help="representative 变体 .py（通常 = baseline_model_path）")
     p.add_argument("--variants_count", required=True, type=int, help="KB 变体总数（cap 并发上限）")
@@ -288,47 +342,65 @@ def _main() -> int:
     if args.device == "npu" and not has_npu:
         return _emit_fail_soft("device=npu 但 NPU 不可用", device_arg=args.device)
 
-    # 2) per-variant 占用探测 + free VRAM。探测异常 → fail-soft（不阻塞）。
-    try:
-        per_variant, resolved, n_gpus, free_per_card = _probe_per_variant_vram(
-            teacher_cache=args.teacher_cache, rep_path=args.representative_variant,
-            device_arg=args.device, seed=args.seed,
-        )
-    except FileNotFoundError as e:
-        # 输入契约不符（teacher_cache 文件不存在 / variant 文件不存在）→ fail loud
-        print(f"[gpu_probe] FAIL (input contract): {type(e).__name__}: {e}", file=sys.stderr)
-        return 2
-    except (AttributeError, ValueError) as e:
-        # variant 缺 build_model / DUMMY_INPUT.shape → fail loud（契约错误）
-        print(f"[gpu_probe] FAIL (variant contract): {type(e).__name__}: {e}", file=sys.stderr)
-        return 2
-    except Exception as e:
-        # 探测本身崩（OOM / teacher_cache 加载失败 / cudnn 错……）→ fail-soft
-        print(f"[gpu_probe] WARN: 探测异常 -> fail-soft：{type(e).__name__}: {e}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-        return _emit_fail_soft(f"probe error ({type(e).__name__})", device_arg=args.device)
+    # 2) 占用探测 + free VRAM。由 --teacher_cache 是否提供决定模式：
+    #    - 提供 → VRAM 模式：测 per-variant 占用算并发（并发蒸馏池场景）。
+    #    - 不提供 → device-only：串行版 setup（concurrency 恒 1，teacher 未训，无 teacher_cache.pt）。
+    if args.teacher_cache:
+        try:
+            per_variant, resolved, n_gpus, free_per_card = _probe_per_variant_vram(
+                teacher_cache=args.teacher_cache, rep_path=args.representative_variant,
+                device_arg=args.device, seed=args.seed,
+            )
+        except FileNotFoundError as e:
+            # 输入契约不符（teacher_cache 文件不存在 / variant 文件不存在）→ fail loud
+            print(f"[gpu_probe] FAIL (input contract): {type(e).__name__}: {e}", file=sys.stderr)
+            return 2
+        except (AttributeError, ValueError) as e:
+            # variant 缺 build_model / DUMMY_INPUT.shape / teacher_cache 损坏 → fail loud（契约错误）
+            print(f"[gpu_probe] FAIL (variant contract): {type(e).__name__}: {e}", file=sys.stderr)
+            return 2
+        except Exception as e:
+            # 探测本身崩（OOM / cudnn 错……）→ fail-soft
+            print(f"[gpu_probe] WARN: 探测异常 -> fail-soft：{type(e).__name__}: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            return _emit_fail_soft(f"probe error ({type(e).__name__})", device_arg=args.device)
 
-    total_free = sum(free_per_card)
-    if per_variant <= 0:
-        # max_memory_allocated 测不到（某些 NPU 后端 / API 缺失）→ fail-soft 但**不静默估算**：
-        # 用 ``per_variant = total_free // 4`` 估算驱动并发会破坏 fail-loud（昇腾部署相关），
-        # 故走 cpu 同款 fail-soft：PER_VARIANT_VRAM_BYTES=0 + CONCURRENCY=1 + GPU_REPORT 标
-        # ``[probe failed]``，不估算驱动并发。
-        print(
-            "[gpu_probe] WARN: per-variant VRAM 探测失败（max_memory_allocated 返 0 / NPU 后端"
-            "不支持）→ fail-soft：PER_VARIANT_VRAM_BYTES=0 + CONCURRENCY=1，不估算驱动并发。",
-            file=sys.stderr,
-        )
-        return _emit_fail_soft(
-            "per-variant VRAM probe failed (max_memory_allocated unavailable on this backend)",
-            device_arg=args.device,
-        )
+        total_free = sum(free_per_card)
+        if per_variant <= 0:
+            # max_memory_allocated 测不到（某些 NPU 后端 / API 缺失）→ fail-soft 但**不静默估算**：
+            # 用 ``per_variant = total_free // 4`` 估算驱动并发会破坏 fail-loud（昇腾部署相关），
+            # 故走 cpu 同款 fail-soft：PER_VARIANT_VRAM_BYTES=0 + CONCURRENCY=1 + GPU_REPORT 标
+            # ``[probe failed]``，不估算驱动并发。
+            print(
+                "[gpu_probe] WARN: per-variant VRAM 探测失败（max_memory_allocated 返 0 / NPU 后端"
+                "不支持）→ fail-soft：PER_VARIANT_VRAM_BYTES=0 + CONCURRENCY=1，不估算驱动并发。",
+                file=sys.stderr,
+            )
+            return _emit_fail_soft(
+                "per-variant VRAM probe failed (max_memory_allocated unavailable on this backend)",
+                device_arg=args.device,
+            )
 
-    concurrency = compute_concurrency(
-        total_free_bytes=total_free, per_variant_bytes=per_variant,
-        safety=args.safety, variants_count=max(args.variants_count, 1),
-        max_concurrency=max(args.max_concurrency, 1),
-    )
+        concurrency = compute_concurrency(
+            total_free_bytes=total_free, per_variant_bytes=per_variant,
+            safety=args.safety, variants_count=max(args.variants_count, 1),
+            max_concurrency=max(args.max_concurrency, 1),
+        )
+        device_only = False
+    else:
+        # device-only：串行版 setup（teacher 未训，无 teacher_cache.pt）。只解析 device + GPU inventory，
+        # concurrency 恒 1（SPEC §3.1 串行化；无 per-variant 占用不算并发公式）。
+        try:
+            resolved, n_gpus, free_per_card = _probe_device_only(args.device)
+        except Exception as e:
+            return _emit_fail_soft(
+                f"device-only probe failed: {type(e).__name__}: {e}", device_arg=args.device,
+            )
+        total_free = sum(free_per_card)
+        per_variant = 0
+        concurrency = 1
+        device_only = True
+
     backend = resolved.split(":")[0]
     device_plan = build_device_plan(concurrency, n_gpus, backend)
 
@@ -338,11 +410,17 @@ def _main() -> int:
     print(f"PER_VARIANT_VRAM_BYTES: {per_variant}")
     print(f"CONCURRENCY: {concurrency}")
     print(f"DEVICE_PLAN: {json.dumps(device_plan)}")
-    print(
-        f"GPU_REPORT: {n_gpus}x {backend.upper()}, {_format_bytes(total_free)} free, "
-        f"~{_format_bytes(per_variant)}/variant -> concurrency={concurrency} "
-        f"(safety {args.safety})"
-    )
+    if device_only:
+        print(
+            f"GPU_REPORT: {n_gpus}x {backend.upper()}, {_format_bytes(total_free)} free, "
+            f"device-only (no teacher_cache yet; serial setup) -> concurrency=1"
+        )
+    else:
+        print(
+            f"GPU_REPORT: {n_gpus}x {backend.upper()}, {_format_bytes(total_free)} free, "
+            f"~{_format_bytes(per_variant)}/variant -> concurrency={concurrency} "
+            f"(safety {args.safety})"
+        )
     return 0
 
 
