@@ -1,5 +1,5 @@
 name: nas-agent-pipeline
-description: "基于 Elastic 超网的端到端 NAS：生成超网 → 训练 → 搜索架构 → 评估选择，同时优化超参（宽/深）与模型组件（block 类型）。"
+description: "[DEPRECATED] 被 nas-supernet workflow 取代（本 workflow 基于 nas-agent 重构前的过期 skill 快照，缺 project-fidelity-verifier 守门机制，已不再维护；新能力见 workflows/nas-supernet.yaml）。原描述：基于 Elastic 超网的端到端 NAS：生成超网 → 训练 → 搜索架构 → 评估选择，同时优化超参（宽/深）与模型组件（block 类型）。"
 entry: model_optimizer
 
 inputs:
