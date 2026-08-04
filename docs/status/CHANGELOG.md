@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-04] feat(in-session): 失败哨兵 + 失败历史注入——next 单一校验关口收口（根治 run 孤儿化）
+
+子代理自报失败经 `orca_node_failed_v1` 哨兵 → 引擎 `agent_blocked` recoverable → 重 arm 并把连续失败历史（**含本次**）确定性注入 prompt。主 session 改哑管道（永远喂 next，唯一例外 ask-user 哨兵），根治「见失败截胡变 executor 致 run 孤儿化 + 前端不出第二轮」——`orca status` 期间恒显 running。SPEC v3 经两轮 spec-reviewer 对抗闭环（R-N2「含本次」收紧获认可）；57 单测/集成 + 真实 `orca` CLI E2E 全绿；`_step_io`/`cli`/`daemon`/`events`/前端 **零改**（generic 透传，AC12/AC14 守门），不侵 in-session 灵活度（引擎不 dispatch、不决定 fresh/复用）。Commit: `35fdf78`。详见 [SPEC](../specs/2026-08-04-in-session-failure-sentinel-and-injection.md) + [plan](../plans/2026-08-04-in-session-failure-sentinel-and-injection.md)。
+
 ## [2026-08-04] fix(web): 看板重设计 test-agent 真机实测闭环——KPI live-pending + blocked 架构 draft
 
 test-agent 真机实测 18 PASS/0 FAIL，抓到 2 个只有真机才能发现的缺陷（mock 边界假绿）：① KPI 运行计数漏算 live-pending（`RunListPage` kpiCounts `{running,queued}` 与 `group-runs` 排队桶 `accept={queued,live-pending}` 不一致，4 胶囊合计 ≠ total）——已修 kpiCounts+filter 补 live-pending，SPEC §2.2/AC-B2/B3 同步，vitest 99 pass（`76073ef`）；② 待决策(blocked) 死 UI——后端 `RunStatus` 无 blocked（仅 node 级 gate/interrupt 投影），继承的架构裂缝，另开 [`run-blocked-status-design-draft.md`](../specs/run-blocked-status-design-draft.md) 跟进（方案 A 后端 fold），本次保留 UI 待激活。SPEC 升 v1.2（`b6d5034`）。详见看板 release note + draft。
