@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-05] feat(workflow): nas-supernet——nas-agent 重构版固化 + MNIST 端到端验证
+
+新建 `nas-supernet` workflow（8 节点：超网生成→训练脚本→搜索脚本→超网训练→NAS搜索→选架构→retrain→可视化），把 nas-agent 最新版「3 skill + 5 subagent + Pipeline Memory」完整能力固化进 Orca，根治旧 `nas-agent-pipeline` 生成脚本语义偏离（缺 fidelity-verifier 守门）导致的 acc 问题。subagent 可移植文件存 `~/.orca`（read+embed，host-agnostic）；ns_visualize 6 图含静态文件回退；MNIST fixture；时延脚本规则（用户提供→onnx 包装，否则 PyTorch 内置）。3 轮 spec-review + logic review 全闭环，`tars validate` 通过。**MNIST headless E2E workflow_completed**：640 候选搜索、选定 latency=0.384ms<全开 0.82ms（时延下降）、retrain 最终 acc=0.9866、6 图全渲染。关键发现：opencode.db 膨胀（786MB）是长会话问题根因，reset 后全链通。旧 workflow 标 DEPRECATED。详见 [release note](../releases/2026-08-05-nas-supernet-workflow-rebuild.md)。
+
 ## [2026-08-05] fix(kd-nas): finalize JSON 改 json.dumps 发射——禁手写模板（P6）
 
 修 KD-NAS finalize 节点 e2e 末段 JSON 结构性畸形（缺根级 `}` / depth=1）。根因：finalize inline prompt 用手写 ```` ```json ```` 模板填值发射，agent 易漏逗号/括号；其它节点（distill/decide）早已用 `python3 -c json.dumps` 安全发射，finalize 没遵循。修复 = `workflows/kd-nas.yaml` finalize inline prompt 新增 Step 3 `python3 -c json.dumps({...})` 发射 + viz 解析合并进单 try/except + stderr 显式告警（消除 Step 2/3 双层兜底不对称）；output_schema / Step 1（finalize_kd.py）/ Step 2 viz_kd_stage 调用 / routes / outputs 零改动。tars validate 通过；守门测试 `test_kd_prompt_no_source_narrative.py` 绿；kd-nas 测试套件 169 passed / 2 skipped；code-reviewer 一轮闭环 0 must-fix / 2 nice-to-have 已合并。真实 e2e 终态见 CURRENT.md。Commit: `4cd2428`。详见 [release note](../releases/2026-08-05-kd-nas-finalize-json-dumps-p6.md)。
