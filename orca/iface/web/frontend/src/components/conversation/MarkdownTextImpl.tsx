@@ -120,7 +120,7 @@ function MarkdownTextImpl({ children, className }: MarkdownTextProps) {
     ),
     table: ({ children }) => (
       <div className="my-2 overflow-x-auto">
-        <table className="border-collapse text-xs">{children}</table>
+        <table className="border-collapse text-xs w-full">{children}</table>
       </div>
     ),
     th: ({ children }) => (

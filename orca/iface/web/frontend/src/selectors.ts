@@ -60,9 +60,10 @@ export function formatElapsed(
   precision: "tenths" | "seconds" = "seconds"
 ): string {
   if (seconds < 60) {
-    return precision === "tenths"
-      ? `${seconds.toFixed(1)}s`
-      : `${seconds.toFixed(0)}s`;
+    if (precision === "tenths") return `${seconds.toFixed(1)}s`;
+    // "seconds" 精度：亚秒节点（set/script/route 等近瞬时节点） formerly 被 toFixed(0)
+    // 抹成 "0s"（撒谎——节点其实跑了零点几秒）。<1s 显式标 "<1s"，诚实且不破坏紧凑度。
+    return seconds < 1 ? "<1s" : `${seconds.toFixed(0)}s`;
   }
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);

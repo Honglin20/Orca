@@ -437,11 +437,21 @@ const eventHandlers: Record<EventType, Handler> = {
   },
   node_completed: (s, d, e) => {
     if (!e.node) return;
-    const elapsed = Number(d.elapsed);
+    const dataElapsed = Number(d.elapsed);
+    const hasDataElapsed = d.elapsed != null && Number.isFinite(dataElapsed);
+    // in-session 路径 node_completed.data 只含 output（无 elapsed）→ 用事件 timestamp
+    // 差补算（node_completed.ts − node_started.ts，均 epoch 秒 → 差为真实耗时秒数）。
+    // 标准 executor 路径优先取 data.elapsed（executor 用 time.monotonic 实测，更精确）。
+    // 两路都无（缺 startedAt，如老 tape 重放）→ undefined，AgentsRail 不显示（fail loud 不撒谎）。
+    const startedAt = s.nodes[e.node]?.startedAt;
+    const tsElapsed =
+      startedAt != null && e.timestamp != null
+        ? Math.max(0, e.timestamp - startedAt)
+        : undefined;
     patchNode(s.nodes, e.node, {
       status: "done",
       output: d.output,
-      elapsed: Number.isFinite(elapsed) ? elapsed : undefined,
+      elapsed: hasDataElapsed ? dataElapsed : tsElapsed,
     });
   },
   node_failed: (s, _d, e) => {

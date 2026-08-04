@@ -13,6 +13,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import {
   classifyLogLevel,
+  formatElapsed,
   selectAgents,
   selectCharts,
   selectConversation,
@@ -504,6 +505,27 @@ describe("selectors", () => {
     expect(a?.status).toBe("done");
     expect(a?.elapsed).toBeCloseTo(1.5, 5);
     expect(b?.status).toBe("running");
+  });
+});
+
+// ── formatElapsed：亚秒诚实显示（"<1s" 取代 toFixed(0) 的 "0s" 撒谎）──
+describe("formatElapsed —— 亚秒 <1s", () => {
+  it('"seconds" 精度：0 / 亚秒 → "<1s"（不抹成 "0s"）', () => {
+    expect(formatElapsed(0, "seconds")).toBe("<1s");
+    expect(formatElapsed(0.3, "seconds")).toBe("<1s");
+    expect(formatElapsed(0.999, "seconds")).toBe("<1s");
+  });
+  it('"seconds" 精度：≥1s → 四舍五入整秒', () => {
+    expect(formatElapsed(1, "seconds")).toBe("1s");
+    expect(formatElapsed(44.6, "seconds")).toBe("45s");
+    expect(formatElapsed(59.4, "seconds")).toBe("59s");
+  });
+  it('"tenths" 精度不受影响（TopBar 高精度）', () => {
+    expect(formatElapsed(0.3, "tenths")).toBe("0.3s");
+    expect(formatElapsed(30.04, "tenths")).toBe("30.0s");
+  });
+  it("≥60s → NmNNs", () => {
+    expect(formatElapsed(125, "seconds")).toBe("2m05s");
   });
 });
 
