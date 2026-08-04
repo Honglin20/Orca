@@ -517,22 +517,35 @@ nodes:
         --teacher_meta "{{ train_teacher.output.teacher_meta }}" \
         --env_anchor "{{ setup.output.per_run_artifacts_dir }}" \
         || true)
-      VIZ_STATUS=$(python3 -c "
-      import json, sys
-      o = json.loads(sys.argv[1])
-      print(json.dumps({'env_status': o.get('viz_env_status', 'generic'), 'charts': o.get('charts', {})}))
-      " "$VIZ_STDOUT")
-      echo "VIZ_STATUS_JSON=$VIZ_STATUS"
       ```
 
-      ## 输出（**必须是合法 JSON 对象**，匹配上方 output_schema；非 JSON → fail loud）
-      ```json
-      {"final_model": "<CHAMP_STUDENT abs>",
-       "final_onnx": "<FINAL_ONNX | 空串>",
-       "final_latency_us": <FINAL_LATENCY float>,
-       "final_accuracy": <FINAL_ACCURACY float>,
-       "final_report": "<FINAL_REPORT abs>",
-       "viz_status": <VIZ_STATUS_JSON 对象>}
+      ### Step 3：emit 最终 JSON（python json.dumps 防 injection / 结构保证）
+
+      末条消息 = 下面 ``python3`` stdout（合法 JSON 对象）。**禁止手写 ````` ```json ````` 模板填值**
+      （易漏逗号 / 括号 → JSON 畸形 fail）。
+
+      ```bash
+      # argv: 1=CHAMP_STUDENT 2=FINAL_ONNX 3=FINAL_LATENCY 4=FINAL_ACCURACY
+      #       5=FINAL_REPORT 6=VIZ_STDOUT（viz_kd_stage raw stdout）
+      python3 -c '
+      import json, sys
+      # viz 是 sidecar：失败值不阻断主流程，但字段必产出（schema required: env_status+charts）
+      try:
+          o = json.loads(sys.argv[6])
+          viz = {"env_status": o.get("viz_env_status", "generic"),
+                 "charts": o.get("charts", {})}
+      except (ValueError, TypeError) as e:
+          sys.stderr.write(f"[finalize] VIZ_STDOUT parse failed ({e!r}); fallback to generic\n")
+          viz = {"env_status": "generic", "charts": {}}
+      print(json.dumps({
+        "final_model": sys.argv[1],
+        "final_onnx": sys.argv[2],
+        "final_latency_us": float(sys.argv[3]),
+        "final_accuracy": float(sys.argv[4]),
+        "final_report": sys.argv[5],
+        "viz_status": viz,
+      }))
+      ' "$CHAMP_STUDENT" "$FINAL_ONNX" "$FINAL_LATENCY" "$FINAL_ACCURACY" "$FINAL_REPORT" "$VIZ_STDOUT"
       ```
     routes:
       - to: $end
