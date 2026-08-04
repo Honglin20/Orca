@@ -22,16 +22,16 @@ tools: [bash, read, write, edit, glob, grep]
 - 本轮全链产出：
   - hypothesizer：`{{ hypothesizer.output }}`（hypothesis / rationale_*）
   - engineer：`{{ engineer.output }}`（candidate_id / snapshot_path / worktree）
-  - evaluator：`{{ evaluator.output }}`（status / latency_ms / accuracy / met_* / onnx_path / fail_reason）
+  - evaluator：`{{ evaluator.output }}`（status / latency_us / accuracy / met_* / onnx_path / fail_reason）
 - 账本（**只读 setup 提供的绝对路径字段**，不字符串拼接）：
   - ledger：`{{ setup.output.ledger_path }}`
   - champions：`{{ setup.output.champions_path }}`
 - 父 model.py（champion snapshot）：从 champions.jsonl 最后一行 `snapshot` 取。
 - 本轮 candidate snapshot：`{{ engineer.output.snapshot_path }}`
-- 目标：`target_latency_ms={{ inputs.target_latency_ms }}` / `accuracy_target={{ setup.output.accuracy_target }}`
+- 目标：`target_latency_us={{ inputs.target_latency_us }}` / `accuracy_target={{ setup.output.accuracy_target }}`
 - 预算：`max_rounds={{ inputs.max_rounds }}` / 配额 `structural_slot_ratio=0.5`（已固化） /
   `reject_hyperparam_only=false`（已固化）
-- baseline：`baseline_latency_ms={{ setup.output.baseline_latency_ms }}` / `baseline_accuracy={{ setup.output.baseline_accuracy }}`
+- baseline：`baseline_latency_us={{ setup.output.baseline_latency_us }}` / `baseline_accuracy={{ setup.output.baseline_accuracy }}`
 - struct_scripts_dir：`{{ setup.output.struct_scripts_dir }}`
 
 ## 职责（按序，fail loud）
@@ -67,7 +67,7 @@ python3 "{{ setup.output.struct_scripts_dir }}/ast_diff.py" \
   "round":      <本轮轮次 R = ledger 候选评估行数>,
   "status":     "{{ evaluator.output.status }}",
   "tag":        "<step1 推得的 structural|hyperparam|mixed>",
-  "latency_ms": {{ evaluator.output.latency_ms }},
+  "latency_us": {{ evaluator.output.latency_us }},
   "accuracy":   {{ evaluator.output.accuracy }},
   "met_accuracy": {{ evaluator.output.met_accuracy }},
   "snapshot":   "{{ engineer.output.snapshot_path }}",
@@ -83,7 +83,7 @@ python3 "{{ setup.output.struct_scripts_dir }}/ast_diff.py" \
 - **path 字段（deterministic）**：从 `{{ setup.output.family }}` 派生，**不**让 LLM 自由发挥。
   首轮 `path = "<family>/baseline"`；后续 `path = "<family>/<parent_path>"`（或简单 = family 本身）。
   `viz_struct._LEDGER_REQUIRED` 把 path 列为必备 → 缺则整行从可视化剔除；自由发挥会让 LLM 忘填。
-- 注：若 `status=FAIL_export` 且 `latency_ms=-1`，仍传给脚本（脚本会把 delta_latency_ms 算成相对 champion 的负差值；
+- 注：若 `status=FAIL_export` 且 `latency_us=-1`，仍传给脚本（脚本会把 delta_latency_us 算成相对 champion 的负差值；
   这是约定，FAIL_export 也入账）。
 
 跑 reducer 脚本（fail loud）：
@@ -92,16 +92,16 @@ python3 "{{ setup.output.struct_scripts_dir }}/ledger_reducer.py" \
   --ledger "{{ setup.output.ledger_path }}" \
   --champions "{{ setup.output.champions_path }}" \
   --candidate '<上面组装的 candidate JSON>' \
-  --target_latency_ms {{ inputs.target_latency_ms }} \
+  --target_latency_us {{ inputs.target_latency_us }} \
   --accuracy_target {{ setup.output.accuracy_target }} \
   --max_rounds {{ inputs.max_rounds }} \
-  --baseline_latency_ms {{ setup.output.baseline_latency_ms }} \
+  --baseline_latency_us {{ setup.output.baseline_latency_us }} \
   --baseline_accuracy {{ setup.output.baseline_accuracy }} \
   --structural_slot_ratio 0.5 \
   --reject_hyperparam_only false
 ```
 脚本输出（stdout JSON，已 append ledger + 必要时 append champions）含本节点所需**全部字段**：
-`round` / `continue_loop` / `champion_id` / `champion_latency_ms` / `champion_accuracy` / `route_mode` /
+`round` / `continue_loop` / `champion_id` / `champion_latency_us` / `champion_accuracy` / `route_mode` /
 `terminate_reason` / `new_champion_this_round` / `structural_ratio` / `slot_warning` / `status_final`。
 脚本非零退出 → 读 stderr、fail loud。
 
@@ -129,9 +129,9 @@ python3 "{{ setup.output.struct_scripts_dir }}/ledger_reducer.py" \
 VIZ_STDOUT=$(python3 "{{ setup.output.struct_scripts_dir }}/viz_struct.py" \
   --ledger "{{ setup.output.ledger_path }}" \
   --champions "{{ setup.output.champions_path }}" \
-  --baseline_latency_ms "{{ setup.output.baseline_latency_ms }}" \
+  --baseline_latency_us "{{ setup.output.baseline_latency_us }}" \
   --baseline_accuracy "{{ setup.output.baseline_accuracy }}" \
-  --target_latency_ms "{{ inputs.target_latency_ms }}" \
+  --target_latency_us "{{ inputs.target_latency_us }}" \
   --accuracy_target "{{ setup.output.accuracy_target }}" \
   || true)
 # Dumb copy：viz_env_status → env_status（rename），charts 原样透传。零合成零解读。
@@ -157,7 +157,7 @@ ack_failed / data_insufficient / import_failed / generic:<Type>:<msg>）告知�
 ## 输出（**必须输出合法 JSON 对象**，匹配 output_schema；continue_loop 驱动 route；非 JSON → fail loud）
 
 ```json
-{"round": <本轮轮次>, "continue_loop": true|false, "champion_id": "<当前全局 champion id>", "champion_latency_ms": <数>, "champion_accuracy": <数>, "route_mode": "exploit|explore", "terminate_reason": "champion_met|max_rounds|budget|空",
+{"round": <本轮轮次>, "continue_loop": true|false, "champion_id": "<当前全局 champion id>", "champion_latency_us": <数>, "champion_accuracy": <数>, "route_mode": "exploit|explore", "terminate_reason": "champion_met|max_rounds|budget|空",
  "viz_status": {"env_status": "<ok|env_loaded_from_file|env_missing|import_failed|generic>",
                 "charts": {"<图名>": {"pushed": <bool>, "reason": "<str>"}, ...}}}
 ```

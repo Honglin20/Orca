@@ -19,8 +19,8 @@ tools: [bash, read, write, edit, glob, grep]
 
 - ``round = {{ distill.output.round }}``
 - ``student_model_path = {{ gen_student.output.student_model_path }}``
-- ``latency_ms = {{ distill.output.latency_ms }}``
-- ``latency_ms_std = {{ distill.output.latency_ms_std }}``
+- ``latency_us = {{ distill.output.latency_us }}``
+- ``latency_us_std = {{ distill.output.latency_us_std }}``
 - ``accuracy = {{ distill.output.accuracy }}``
 - ``accuracy_kind = {{ distill.output.accuracy_kind }}``
 - ``met_latency = {{ distill.output.met_latency }}``
@@ -34,9 +34,9 @@ tools: [bash, read, write, edit, glob, grep]
 - ``ledger_path = {{ setup.output.ledger_path }}``
 - ``champions_path = {{ setup.output.champions_path }}``
 - ``kd_scripts_dir = {{ setup.output.kd_scripts_dir }}``
-- ``baseline_latency_ms = {{ setup.output.baseline_latency_ms }}``
+- ``baseline_latency_us = {{ setup.output.baseline_latency_us }}``
 - ``baseline_accuracy = {{ setup.output.baseline_accuracy }}``
-- ``target_latency_ms = {{ inputs.target_latency_ms }}``
+- ``target_latency_us = {{ inputs.target_latency_us }}``
 - ``accuracy_baseline = {{ inputs.accuracy_baseline }}``
 - ``accuracy_baseline_kind = {{ inputs.accuracy_baseline_kind }}``
 - ``max_rounds = {{ inputs.max_rounds }}``
@@ -79,7 +79,7 @@ cand = {
     "student_path": "{{ gen_student.output.student_model_path }}",
     "round": {{ distill.output.round }},
     "parent": "$PARENT",
-    "latency_ms": {{ distill.output.latency_ms }},
+    "latency_us": {{ distill.output.latency_us }},
     "accuracy": {{ distill.output.accuracy }},
     "met_latency": {{ distill.output.met_latency }},
     "met_accuracy": {{ distill.output.met_accuracy }},
@@ -98,11 +98,11 @@ REDUCER_OUT="$(python3 "$KD_SCRIPTS_DIR/kd_reducer.py" \
   --ledger "$LEDGER" \
   --champions "{{ setup.output.champions_path }}" \
   --candidate "@$CAND_PATH" \
-  --target_latency_ms "{{ inputs.target_latency_ms }}" \
+  --target_latency_us "{{ inputs.target_latency_us }}" \
   --accuracy_baseline "{{ inputs.accuracy_baseline }}" \
   --accuracy_baseline_kind "{{ inputs.accuracy_baseline_kind }}" \
   --max_rounds "{{ inputs.max_rounds }}" \
-  --baseline_latency_ms "{{ setup.output.baseline_latency_ms }}" \
+  --baseline_latency_us "{{ setup.output.baseline_latency_us }}" \
   --baseline_accuracy "{{ setup.output.baseline_accuracy }}" 2>&1)"
 RC=$?
 rm -f "$CAND_PATH"
@@ -121,7 +121,7 @@ VIZ_STDOUT=$(python3 "$KD_SCRIPTS_DIR/viz_kd_stage.py" \
   --stage decide \
   --champions "{{ setup.output.champions_path }}" \
   --ledger "{{ setup.output.ledger_path }}" \
-  --baseline_latency_ms "{{ setup.output.baseline_latency_ms }}" \
+  --baseline_latency_us "{{ setup.output.baseline_latency_us }}" \
   --env_anchor "{{ setup.output.per_run_artifacts_dir }}" \
   || true)
 VIZ_STATUS=$(python3 -c "
@@ -141,7 +141,7 @@ echo "VIZ_STATUS_JSON=$VIZ_STATUS"
   "round": <kd_reducer round int>,
   "continue_loop": <kd_reducer continue_loop bool>,
   "champion_id": "<kd_reducer champion_id>",
-  "champion_latency_ms": <kd_reducer float>,
+  "champion_latency_us": <kd_reducer float>,
   "champion_accuracy": <kd_reducer float>,
   "terminate_reason": "<target_met | max_rounds | 空串>",
   "viz_status": <VIZ_STATUS_JSON 对象原样嵌入>

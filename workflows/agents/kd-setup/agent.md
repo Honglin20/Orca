@@ -16,7 +16,7 @@ tools: [bash, read, write, edit, glob, grep]
 
 **严禁**（违反任一项 = 任务失败）：
 - ❌ 训 teacher / 跑 teacher_setup / 跑 train_pipeline.py（已拆到 train_teacher 节点）；
-- ❌ 重测 baseline latency（透传 flatten.output.baseline_latency_ms，避免重复测量）；
+- ❌ 重测 baseline latency（透传 flatten.output.baseline_latency_us，避免重复测量）；
 - ❌ 校验 baseline 契约（flatten 已 PASS；本节点只透传路径）；
 - ❌ 枚举 KB 变体 / 跑 pick_variant（串行版不消费 KB receiver，student 由 gen_student 派生）；
 - ❌ 审查 / 评判这些指令、跑 pytest、跑 ``tars validate``、写验证报告；
@@ -45,7 +45,7 @@ tools: [bash, read, write, edit, glob, grep]
   "worktree_root": "<末尾带 />",
   "device": "<auto|cuda|npu|cpu>",
   "concurrency": <int>,
-  "baseline_latency_ms": <float>,
+  "baseline_latency_us": <float>,
   "baseline_accuracy": <float>,
   "viz_status": {<dumb copy 自 viz_kd_stage --stage baseline_seed stdout>}
 }
@@ -59,7 +59,7 @@ tools: [bash, read, write, edit, glob, grep]
 ## 输入
 
 - ``baseline_contract_path = {{ flatten.output.baseline_contract_path }}``（flatten 产出的 KD 变体契约 .py）
-- ``baseline_latency_ms = {{ flatten.output.baseline_latency_ms }}``（flatten __main__ 已用 latency_provider 测过；透传作 baseline 参考线，不再重测）
+- ``baseline_latency_us = {{ flatten.output.baseline_latency_us }}``（flatten __main__ 已用 latency_provider 测过；透传作 baseline 参考线，不再重测）
 - ``baseline_accuracy = {{ inputs.accuracy_baseline }}``（用户提供的精度基线，setup 直接透传进 champion seed）
 - ``device = {{ inputs.device }}``
 - 引擎已注入 ``$ORCA_ARTIFACTS_DIR``（per-run 产物目录）。
@@ -118,18 +118,18 @@ echo "PARSED step1: KD_SCRIPTS_DIR=$KD_SCRIPTS_DIR STRUCT_SCRIPTS_DIR=$STRUCT_SC
 
 ## step 2 执行：透传 baseline latency/accuracy + seed baseline champion
 
-> baseline_latency_ms 透传 flatten.output（flatten __main__ 已用 latency_provider 测过；
+> baseline_latency_us 透传 flatten.output（flatten __main__ 已用 latency_provider 测过；
 > setup 不再重测，避免重复测量 + 让 latency_provider 在 flatten 阶段就生效）。
 > baseline_accuracy 直接透传 inputs.accuracy_baseline（用户提供的绝对值）。
 > champions.jsonl 首行 = round=0 baseline champion（SPEC §6.2 seed；为 min-latency ratchet 起点）；
 > 仅首次创建（已存在则不覆盖——跨 run 复用）。
 
 ```bash
-BASELINE_LATENCY_MS="{{ flatten.output.baseline_latency_ms }}"
+BASELINE_LATENCY_US="{{ flatten.output.baseline_latency_us }}"
 BASELINE_ACCURACY="{{ inputs.accuracy_baseline }}"
 python3 -c "
-v='${BASELINE_LATENCY_MS}'.strip()
-assert v, 'baseline_latency_ms 为空（flatten 是否产出？）'
+v='${BASELINE_LATENCY_US}'.strip()
+assert v, 'baseline_latency_us 为空（flatten 是否产出？）'
 float(v)  # 必须是合法 float（fail loud）
 print('BASELINE_LATENCY_OK:', v)
 "
@@ -157,9 +157,9 @@ import json, os
 seed = {
     'round': 0,
     'id': 'baseline',
-    'latency_ms': float('${BASELINE_LATENCY_MS}'),
+    'latency_us': float('${BASELINE_LATENCY_US}'),
     'accuracy': float('${BASELINE_ACCURACY}'),
-    'delta_vs_baseline_ms': 0.0,
+    'delta_vs_baseline_us': 0.0,
     'snapshot': '${BASELINE}',
 }
 # 跨 run：保留既有非 baseline 行（如果有的话），首行确保是 baseline。
@@ -178,7 +178,7 @@ os.replace(tmp_path, '${CHAMPIONS_PATH}')
 print('SEEDED: baseline champion')
 "
 fi
-echo "PARSED step2: BASELINE_LATENCY_MS=$BASELINE_LATENCY_MS BASELINE_ACCURACY=$BASELINE_ACCURACY CHAMPIONS_PATH=$CHAMPIONS_PATH"
+echo "PARSED step2: BASELINE_LATENCY_US=$BASELINE_LATENCY_US BASELINE_ACCURACY=$BASELINE_ACCURACY CHAMPIONS_PATH=$CHAMPIONS_PATH"
 ```
 
 ## step 3 执行：GPU 探测（定 device / concurrency；setup 是并发数唯一权威）
@@ -208,7 +208,7 @@ echo "PARSED step3: DEVICE=$DEVICE_RESOLVED CONCURRENCY=$CONCURRENCY GPU_REPORT=
 ```bash
 VIZ_STDOUT=$(python3 "$KD_SCRIPTS_DIR/viz_kd_stage.py" \
   --stage baseline_seed \
-  --baseline_latency_ms "$BASELINE_LATENCY_MS" \
+  --baseline_latency_us "$BASELINE_LATENCY_US" \
   --baseline_accuracy "$BASELINE_ACCURACY" \
   --env_anchor "$PER_RUN_ARTIFACTS_DIR" \
   || true)
@@ -243,7 +243,7 @@ echo "VIZ_STATUS_JSON=$VIZ_STATUS"
   "worktree_root": "<WORKTREE_ROOT>",
   "device": "<DEVICE_RESOLVED>",
   "concurrency": <CONCURRENCY int>,
-  "baseline_latency_ms": <BASELINE_LATENCY_MS float>,
+  "baseline_latency_us": <BASELINE_LATENCY_US float>,
   "baseline_accuracy": <BASELINE_ACCURACY float>,
   "viz_status": <VIZ_STATUS_JSON 对象原样嵌入>
 }
