@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-04] feat(kd-nas): Trainer 引擎化 Phase 1——KDTrainer 孤儿 + 叶子 skel + 33 单测（不改 DAG）
+
+新增固定引擎层：`_kd_scripts/kd/trainer.py`（`KDTrainer` + `TrainConfig`，三 mode；distill 严格走 Q2 hot-order：prepare→kd_parameters→opt；emit 双协议 stdout keys + 日志前缀字面命中 metrics_tail._LOSS_LINE_RE；M1 只 print stdout / M3 scheduler None 守卫 / M4+B6 proxy_mse / B5+Q18 orca.chart lazy import 降级 / D3 resume hash+mode fail loud / B4 scheduler drop WARN / R1 latest.pt 无 abs path）+ `_leaves.py`（importlib 单文件 + AST 签名 + 自包含 deny-list + lazy exec，D9-c）+ `_resume.py`（原子 tmp+replace + sort_keys sha16）+ `train_pipeline.py` 孤儿入口 + 4 个 leaves skel + 33 单测（含 Q2 顺序 spy 断言 + 端到端 resume + 6 个 kind 方向参数化 + R1 无 abs path）。**严格隔离 N4**：DAG / gen_train_script emit / kd-nas.yaml / `references/templates/train_pipeline.py` / kd 库 / CONTRACTS 全未改（git diff 空）；Phase 2 才原子切 emit + 5 调用点 + 删旧模板。code-reviewer 四轮闭环（F0/F1/F2/F3/F4/F5/F6/F7/F8/F10 全修）。Commit: `6929685`。详见 [release note](../releases/2026-08-04-kd-nas-trainer-engine-phase1.md)。
+
 ## [2026-08-04] feat(web): workflow/agent 文件浏览器（只读）——/workflows 页 + 5 API + prism 高亮
 
 新增 Web 纯只读浏览页 `/workflows`：列 workflow → 看引用 + 全量 agents → 点 agent 文件树 → 看文件内容（md 渲染 + .py prism 高亮）。后端 `routes/workflows.py`（无 manager 薄封装 compile loader）+ `_safe_resolve` 守卫（symlink 双查/null byte/越界）+ file endpoint 1MB cap & 二进制检测→422；前端 `workflow-browse-store`（plain zustand）+ `WorkflowsPage`/`WorkflowBrowsePage`(lazy)+`FileTree`+`CodeViewer`，prism CSS 进 browse chunk 不污染 `/runs/:runId`。spec-reviewer 4 blocker 闭环 + coder code-review 3 项闭环 + test-agent 真机 16 断言全过；回归后端 203 / 前端 487 零红；现有 route/页面/`main.tsx`/`FileContentView` 零改。**build 产物未含此 commit**（本机 python 环境受限），需另行 `npm run build`。Commit: `0103235`。详见 [release note](../releases/2026-08-04-web-workflow-agent-browser.md)。
