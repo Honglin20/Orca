@@ -1,0 +1,4 @@
+torch>=2.0
+torchvision>=0.15
+onnxruntime>=1.15
+numpy>=1.21
