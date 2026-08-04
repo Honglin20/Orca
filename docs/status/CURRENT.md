@@ -4,21 +4,23 @@
 
 ---
 
-## 当前：KD-NAS P4 修复完成——validate_contract 去同形 I/O 过约束（分类器族合法）
+## 当前：KD-NAS P5 修复完成（opencode events result 取末条消息），headless e2e 进行中
 
-**任务**：修 test-agent 真跑 `examples/mnist_kd/`（MNIST 分类器 [1,1,28,28]→[1,10]）在 flatten 节点
-fail 的 P4 架构问题——`validate_contract.py` check 7 旧逻辑把 `DUMMY_INPUT.shape` 当输出契约过约束。
+**任务**：修 engine 核心 result 抽取 bug（opencode events 模式下中间叙述里的 `[shape]` 字面量被当成
+result 抢过末条合法 JSON），打通 KD-NAS e2e 的最后一个阻塞。
 
-**状态**：**P4 修复完成**（commit 待记，单测层闭环）。
-- `validate_contract.py` check 7 拆 7a/7b/7c（forward 实测 / determinism 自检 / 可选 OUTPUT_SHAPE 声明校验）。
-- CONTRACTS §1 加可选 `OUTPUT_SHAPE`；flatten agent forward 捕获真实输出 shape 写入契约（programmatic + 二次 validate）。
-- teacher-gen / gen-student 防御性双声明一致性检查。
-- 下游审计：无残留同形假设（tune_latency / export_onnx / gpu_probe / teacher_setup / measure_latency 仅用 DUMMY_INPUT.shape 构造输入）。
-- 测试：274 passed + 3 skipped 零回归；守门 `test_kd_prompt_no_source_narrative.py` 绿。
-- code-reviewer 一轮闭环：0 BLOCKER / 0 MAJOR / 3 MINOR（2 修 / 1 保留有理由）。
+**状态**：**P5 修复完成 + 单测全绿 + 真实 e2e flatten PASS**（commit `269e288` + `f9fe02c`）。
+- `orca/exec/claude/accumulator.py` `events_result_text` 改取末条 `agent_message`（`_last_text`），
+  对齐 SDD 契约「agent 最终消息 = JSON result」。`result_extractor.py` 不动（blast radius 最小）。
+- 决定性回归门：`test_p5_tape_replay_kd_nas_flatten_extracts_final_json` 用真实失败 tape（101 events）
+  replay，断言抽出 seq 98 合法 JSON object，`"[1,1,28,28]" not in result_text`。
+- tests/exec/ 440 passed + 1 skipped；tests/profiles/ 89 passed；code-reviewer 一轮闭环（0 BLOCKER）。
+- 真实 e2e `kd-nas-20260805-011253-6c2ebe`：flatten 节点 seq 92 `node_completed` PASS（P5 原失败点），
+  setup / gen_teacher / gen_train_script 依次 PASS，train_script_verify 进行中。
 
 **待办**：
-- [ ] test-agent 复跑 headless e2e（`tars run workflows/kd-nas.yaml` 对 `examples/mnist_kd/`）验 flatten→setup→teacher→distill 全链路。
+- [ ] e2e 跑到 finalize（train_script_verify → train_teacher → 2 轮 gen_student/distill/decide → finalize），
+  报终态 + ledger 行数 / champion / final_latency / final_accuracy。
 - [ ] Phase 5 E2E（KD-NAS Trainer 引擎化）遗留——详见下方。
 
 ---
@@ -31,22 +33,16 @@ fail 的 P4 架构问题——`validate_contract.py` check 7 旧逻辑把 `DUMMY
 
 **状态**：**Phase 5 纯净度清扫完成**（commit `e3c2c2b`，零回归 + code-reviewer 一轮闭环：0 must-fix / 1 nice-to-have 已在 release note 显式说明）。
 
-### Phase 5 已交付（任务纯净度清扫 + 守门测试强化）
-- agent prompt 决策标签清扫：5 agent.md（kd-setup / kd-train-script / gen-student / train-script-verify / distill）+ eval.py.skel + kd-nas.yaml 4 处注释；description 历史叙事纯化（删「已拆到 / 不再 import / 合并…为一节点」）。
-- 引擎 .py 决策标签清扫：migrate_flat.py ~15 处 + trainer.py / _resume.py / kd_reducer.py / finalize_kd.py，删尾部过程 ID（D8/M3/N12/R1...）+ `code-reviewer Rx` 归属，保留设计 why 注释。
-- CONTRACTS.md + yaml 迁移叙事清扫（删「旧…现…」对照 + 「随骨架化移除」+ stale `--kd_config recipe 必传` 改为 `read→patch run_config.yaml`）。
-- 守门测试 deny-list 分层强化：agent prompt 层加非括号决策标签 + 历史叙事词锁；.py 仅锁括号 + 复合源叙事（D7 边界）；E402 noqa 双重免疫。
-- 零逻辑 / 契约 / CLI / 字段改动；468 passed, 3 skipped（零回归）。
-
 ### Phase 5 E2E 待办（端到端验证）
 - [ ] E2E `examples/kd-nas-demo` 全链路 + resume 多时点 smoke + 早停 patience 触发 + 拍平迁移 smoke（旧 `kd-nas/` 真迁）
-- [ ] **headless e2e 重跑**（被 P3 deepseek flatten 延迟卡住）：本次（commit `a952ecc`）从 `examples/mnist_kd/` 起 `tars run` 卡在 flatten 25min+；待 P3 优化后重跑验 setup→teacher→distill 全链路
+- [ ] headless e2e 全链路（P5 修复后正在重跑）
 
 ### 已知 follow-up（非 kd-nas 重构范围）
 - **P2**: `~/.orca/runs/<id>/log` 空文件（executor 日志 bug）—— executor 层
 - **P3**: flatten 9m46s+ deepseek 重读文件延迟 —— 优化层（本 e2e 实测命中）
 
 **必读**：
+- P5 release note `docs/releases/2026-08-05-opencode-events-result-last-message-p5.md`
 - 计划 `docs/plans/2026-08-04-kd-nas-trainer-engine-and-leaf-codegen.md`（§5 Phase 5 checklist + §11 v3.2）
 - `workflows/agents/_kd_scripts/CONTRACTS.md`（§3.1 flag diff + 调用点矩阵 + §6 叶子契约 + migrate_flat CLI）
 - Phase 1-5 release note `docs/releases/2026-08-04-kd-nas-trainer-engine-phase{1,2,3,4,5}.md`

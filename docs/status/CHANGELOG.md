@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-05] fix(exec): opencode events result 取末条消息——中间叙述不再抢 result（P5）
+
+修 engine 核心 result 抽取 bug：opencode events 模式下 `RunAccumulator.events_result_text` 旧逻辑把所有 `agent_message` 串接，`result_extractor._first_balanced_block` 兜底取首个平衡块——KD-NAS flatten agent 中间叙述「input `[1,1,28,28]`」比末条合法 JSON 早出现，被误抓为 result（真实失败 tape `kd-nas-20260805-005130-ac3b11.jsonl` seq 98 复现）。SDD 契约本就声明「agent 最终消息 = JSON result」（sentinel specs），故修法 = `events_result_text` 改取末条（`_last_text`），`result_extractor` 不动（blast radius 最小：只影响 events 模式；claude `result_line` 路径不变）。决定性回归门：真实失败 tape 101 events replay → 抽出 seq 98 合法 JSON object，`"[1,1,28,28]" not in result_text`。tests/exec/ 全绿（440 passed + 1 skipped）+ tests/profiles/ 全绿（89 passed）。真实 e2e `kd-nas-20260805-011253-6c2ebe` flatten 节点 PASS（P5 原失败点直接验证）。Commit: `269e288` + `f9fe02c`（code-reviewer 一轮：YAGNI 简化 `_text_parts` → `_last_text` + text=None 边界测试）。详见 [release note](../releases/2026-08-05-opencode-events-result-last-message-p5.md)。
+
 ## [2026-08-05] fix(kd-nas): validate_contract 去同形 I/O 过约束——支持分类器族（P4）
 
 修 test-agent 真跑 `examples/mnist_kd/`（MNIST 分类器 [1,1,28,28]→[1,10]）在 flatten 节点 fail 的根因：`validate_contract.py` check 7 旧逻辑要求 `forward output shape == DUMMY_INPUT.shape`，把输入当输出契约过约束（CONTRACTS §1 此前为 receiver 自编码器族设计，I/O 同形）。KD 本质只要求 teacher/student 共享输出 shape，不要求 output==input。架构层修复（向后兼容）：check 7 拆 7a（forward 实测）/7b（determinism 自检）/7c（可选 OUTPUT_SHAPE 声明校验）；CONTRACTS §1 加可选 `OUTPUT_SHAPE` 字段；flatten agent forward 捕获真实输出 shape 写入契约；teacher-gen / gen-student 加防御性双声明一致性检查。下游审计：tune_latency / export_onnx / gpu_probe / teacher_setup / measure_latency 均只用 DUMMY_INPUT.shape 构造输入张量，无残留同形假设。新增 / 重写 10 个测试用例（分类器族 PASS / OUTPUT_SHAPE mismatch FAIL / determinism FAIL / 类型错 FAIL / teacher 双声明三件套等）；274 passed + 守门 `test_kd_prompt_no_source_narrative.py` 绿零回归。code-reviewer 一轮闭环：0 BLOCKER / 0 MAJOR / 3 MINOR（2 修 / 1 保留有理由）。Commit: `24f3df0`。详见 [release note](../releases/2026-08-05-kd-nas-validate-contract-relax-same-shape.md)。
