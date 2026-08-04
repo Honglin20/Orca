@@ -4,7 +4,26 @@
 
 ---
 
-## 当前：KD-NAS Trainer 引擎化重构——Phase 5 纯净度清扫完成，Phase 5 E2E 待开工
+## 当前：KD-NAS P4 修复完成——validate_contract 去同形 I/O 过约束（分类器族合法）
+
+**任务**：修 test-agent 真跑 `examples/mnist_kd/`（MNIST 分类器 [1,1,28,28]→[1,10]）在 flatten 节点
+fail 的 P4 架构问题——`validate_contract.py` check 7 旧逻辑把 `DUMMY_INPUT.shape` 当输出契约过约束。
+
+**状态**：**P4 修复完成**（commit 待记，单测层闭环）。
+- `validate_contract.py` check 7 拆 7a/7b/7c（forward 实测 / determinism 自检 / 可选 OUTPUT_SHAPE 声明校验）。
+- CONTRACTS §1 加可选 `OUTPUT_SHAPE`；flatten agent forward 捕获真实输出 shape 写入契约（programmatic + 二次 validate）。
+- teacher-gen / gen-student 防御性双声明一致性检查。
+- 下游审计：无残留同形假设（tune_latency / export_onnx / gpu_probe / teacher_setup / measure_latency 仅用 DUMMY_INPUT.shape 构造输入）。
+- 测试：274 passed + 3 skipped 零回归；守门 `test_kd_prompt_no_source_narrative.py` 绿。
+- code-reviewer 一轮闭环：0 BLOCKER / 0 MAJOR / 3 MINOR（2 修 / 1 保留有理由）。
+
+**待办**：
+- [ ] test-agent 复跑 headless e2e（`tars run workflows/kd-nas.yaml` 对 `examples/mnist_kd/`）验 flatten→setup→teacher→distill 全链路。
+- [ ] Phase 5 E2E（KD-NAS Trainer 引擎化）遗留——详见下方。
+
+---
+
+## 历史：KD-NAS Trainer 引擎化重构——Phase 5 纯净度清扫完成，Phase 5 E2E 待开工
 
 **任务**：把 `kd-train-script` 单体 codegen 重构为「固定 `KDTrainer` 引擎 + 4 叶子（loss/data/eval/optim）+ run.sh」；产物拍平到 `artifacts/`（去 kd-nas 层）；agent prompt 去 SPEC 源化；补 resume / 早停 / 循环内 evaluator。
 

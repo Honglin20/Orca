@@ -6,6 +6,9 @@ teacher 是 baseline 的**纯调参派生**（选项 1：深度轴 ×3 / 宽度�
 
   1. **DUMMY_INPUT 逐字一致**：teacher.DUMMY_INPUT == baseline.DUMMY_INPUT（KD 硬约束——
      teacher/student 必须同 I/O shape；任何漂移 → FAIL）。
+  1b. **OUTPUT_SHAPE 逐字一致**（若双方都声明）：teacher.OUTPUT_SHAPE == baseline.OUTPUT_SHAPE
+     （KD 硬约束——teacher/student 必须共享输出 shape，KD loss 才能比对；任一方未声明 → 跳过此条，
+     由 validate_contract forward 实测保底）。分类器族（output≠input）须声明 OUTPUT_SHAPE。
   2. **派生轴声明存在**：teacher 顶层有 ``DEPTH_AXIS`` / ``WIDTH_AXIS`` 字符串常量（可审计）。
      缺任一 → FAIL。空串允许（baseline 无该类轴时，罕见，须 verifier 复核）。
   3. **深度轴 ×3**：teacher.KNOBS[DEPTH_AXIS].default >= baseline.KNOBS[DEPTH_AXIS].default * 3
@@ -129,6 +132,19 @@ def validate_teacher(
         return {"ok": False, "reason": f"DUMMY_INPUT 须为 dict（baseline={type(b_di).__name__}, teacher={type(t_di).__name__}）"}
     if t_di != b_di:
         return {"ok": False, "reason": f"teacher.DUMMY_INPUT != baseline.DUMMY_INPUT（KD 要求逐字一致；teacher={t_di}, baseline={b_di}）"}
+
+    # 1b) OUTPUT_SHAPE 逐字一致（KD 输出 shape 硬约束——仅当双方都声明时校验；任一方未声明 → 跳过）
+    b_out = getattr(baseline, "OUTPUT_SHAPE", None)
+    t_out = getattr(teacher, "OUTPUT_SHAPE", None)
+    if b_out is not None and t_out is not None:
+        if list(t_out) != list(b_out):
+            return {
+                "ok": False,
+                "reason": (
+                    f"teacher.OUTPUT_SHAPE {list(t_out)} != baseline.OUTPUT_SHAPE {list(b_out)}"
+                    "（KD 要求 teacher/student 共享输出 shape；分类器族须声明 OUTPUT_SHAPE）"
+                ),
+            }
 
     # 2) 派生轴声明存在（字符串；空串允许但记 low-confidence，由 verifier 复核）
     depth_axis = getattr(teacher, "DEPTH_AXIS", None)

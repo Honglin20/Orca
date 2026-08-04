@@ -1,5 +1,5 @@
 ---
-description: kd-nas 串行版 gen-student：结构变换派生 student model.py。首轮固定规则（缩1层 + FFN→pointwise），迭代轮读 ledger 上轮 perf + KB 技术点。DUMMY_INPUT 字节级 deterministic 校验 == flatten baseline；validate_contract PASS（3 轮修不过 → catch → FAIL_build）。feature_hook_names 契约（ofd/fitnets/rkd 特征蒸馏时 student 须暴露）。
+description: kd-nas 串行版 gen-student：结构变换派生 student model.py。首轮固定规则（缩1层 + FFN→pointwise），迭代轮读 ledger 上轮 perf + KB 技术点。DUMMY_INPUT 字节级 deterministic 校验 == flatten baseline；OUTPUT_SHAPE 双声明时亦校验（KD 输出 shape 硬约束）；validate_contract PASS（3 轮修不过 → catch → FAIL_build）。feature_hook_names 契约（ofd/fitnets/rkd 特征蒸馏时 student 须暴露）。
 tools: [bash, read, write, edit, glob, grep, task, todowrite]
 ---
 # gen-student
@@ -18,13 +18,14 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 1. step 1 算 round + 取「上轮 student model.py」路径（首轮 = baseline）；
 2. step 2 读 baseline + DUMMY_INPUT（首轮固定规则 / 迭代轮 KB+perf 驱动）；
 3. 你（LLM）整文件改写 student model.py（写进 models/students/r<round>_student_model.py）；
-4. step 3 DUMMY_INPUT 字节级 deterministic 校验（== flatten baseline，dict 相等）；
+4. step 3 DUMMY_INPUT 字节级 deterministic 校验（== flatten baseline，dict 相等）+ OUTPUT_SHAPE 双声明校验；
 5. step 4 validate_contract.py PASS（3 轮修不过 → catch 协议转 FAIL_build，agent 退 0 不抛）；
 6. step 5 feature_hook_names 契约检查（ofd/fitnets/rkd 特征蒸馏时 student 须暴露此 fn）；
 7. step 6 viz_kd_stage --stage student 推 hypothesis 表。
 
 **严禁**：
 - ❌ 写死 DUMMY_INPUT shape（必字节级复制 baseline；step 3 deterministic 校验拦）；
+- ❌ 改 OUTPUT_SHAPE（须逐字复制 baseline；KD 要求 teacher/student 共享输出 shape；分类器族 output≠input 合法，但 student 必须与 baseline 同输出）；
 - ❌ 在 student 文件 import 用户项目模块 / _kd_scripts / nas_agent（须 standalone）；
 - ❌ 编造 KNOBS（student.KNOBS schema 必须同 baseline，default 改 min/step/leverage 继承）；
 - ❌ 跳过 validate_contract / DUMMY_INPUT 校验假装 PASS；
@@ -92,7 +93,7 @@ echo "PARSED step1: ROUND_NUM=$ROUND_NUM PARENT_STUDENT=$PARENT_STUDENT"
 2. **缩1层**：depth_axis knob default − 1（无深度轴 → 跳过此规则）；
 3. **FFN → pointwise**：baseline 的 FFN block（expand→act→contract）替换为 pointwise（Conv1d kernel=1）；
 4. KNOBS 保留可调维度（缩层后值作 default，min/step/leverage 继承 baseline）；
-5. DUMMY_INPUT 逐字复制 baseline + step 3 字节级校验。
+5. DUMMY_INPUT + OUTPUT_SHAPE 逐字复制 baseline + step 3 字节级校验。
 
 **迭代轮（ROUND_NUM≥2）**：
 1. 读 ledger 上轮 student（latency / accuracy / met_latency / met_accuracy）+ champion + KB；
@@ -140,6 +141,7 @@ fi
 **LLM 改写纪律**：
 - 文件结构：``BUILD_FN="build_model"`` + ``DUMMY_INPUT`` + ``KNOBS`` + ``def build_model(**cfg)`` + ``def feature_hook_names()``（如 baseline 有可对齐特征层）；
 - DUMMY_INPUT 逐字复制 baseline（**不**改 shape/dtype）；
+- OUTPUT_SHAPE 逐字复制 baseline（**不**改输出 shape；KD 要求 teacher/student 共享输出）；
 - import 只允许 torch + 3rd-party pip 包，禁 import 用户项目 / _kd_scripts / nas_agent；
 - feature_hook_names 契约（fail-loud）：当 distill.kd_config 含
   ofd/fitnets/rkd 特征蒸馏时，student 须暴露 ``def feature_hook_names() -> list[str]``（返回内部特征层名）。
@@ -152,6 +154,8 @@ fi
 
 > 校验：``student.DUMMY_INPUT == flatten.output.baseline_contract_path 加载的 DUMMY_INPUT``
 > （dict 相等，**非字节相等**——dict 顺序无关）。不等 → fail loud 修到相等。
+> 同时校验 ``OUTPUT_SHAPE`` 逐字一致（**仅当双方都声明时**——KD 要求 teacher/student 共享输出 shape；
+> 分类器族须声明 OUTPUT_SHAPE；同形族 output==input 自然一致）。任一方未声明 → 跳过此条。
 
 ```bash
 STUDENT="{{ setup.output.student_models_dir }}r${ROUND_NUM}_student_model.py"
@@ -172,11 +176,17 @@ if b != s:
     print(f'  baseline={b}', file=sys.stderr)
     print(f'  student ={s}', file=sys.stderr)
     sys.exit(2)
+# OUTPUT_SHAPE 双声明校验（KD 输出 shape 硬约束；任一方未声明则跳过）
+b_out = getattr(base, 'OUTPUT_SHAPE', None)
+s_out = getattr(stud, 'OUTPUT_SHAPE', None)
+if b_out is not None and s_out is not None and list(b_out) != list(s_out):
+    print(f'FAIL: student.OUTPUT_SHAPE {list(s_out)} != baseline.OUTPUT_SHAPE {list(b_out)}（KD 输出 shape 硬约束）', file=sys.stderr)
+    sys.exit(2)
 print('DUMMY_MATCH: ok')
 " "$BASELINE" "$STUDENT"
 RC=$?
 if [ $RC -ne 0 ]; then
-  echo "DUMMY_FAIL_STRIKE=1"  # LLM 须修 student.DUMMY_INPUT 重写、重跑 step 3
+  echo "DUMMY_FAIL_STRIKE=1"  # LLM 须修 student.DUMMY_INPUT/OUTPUT_SHAPE 重写、重跑 step 3
 fi
 echo "PARSED step3: STUDENT=$STUDENT DUMMY_MATCH done"
 ```

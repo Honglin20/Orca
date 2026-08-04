@@ -44,7 +44,8 @@ knowledge_base/families/receiver/          # model8 变体仓（.py）+ _model8_
 ## 1. 变体 I/O 契约（每个 receiver/*.py 必须暴露）
 
 ```python
-DUMMY_INPUT = {"shape": [1,4,48,64,1], "dtype": "float32"}   # 用户真实 I/O 维度（禁硬编码回退）
+DUMMY_INPUT = {"shape": [1,4,48,64,1], "dtype": "float32"}   # 输入 shape（用户真实输入维度，禁硬编码回退）
+OUTPUT_SHAPE = [1,4,48,64,1]                                  # 可选：声明 forward 输出 shape；缺省时 validator 用 forward 实测
 BUILD_FN = "build_model"
 KNOBS = {                                                      # 可调旋钮；step<0, leverage∈{high,medium,low}
     "num_blocks": {"default":3,"min":1,"step":-1,"leverage":"high"},
@@ -53,7 +54,14 @@ KNOBS = {                                                      # 可调旋钮；
 def build_model(**cfg) -> nn.Module: ...                       # 零参用 KNOBS.default；cfg 覆盖旋钮
 def feature_hook_names(self) -> list[str]: ...                 # 可选，OFD/FitNets/RKD 特征对齐（缺则 distill 自动 mse-only）
 ```
-- **I/O**：输入 `[B,num_ports,num_subcarriers,num_symbols,1]`，输出同形；内部自理 alpha 归一。
+- **I/O**：输入由 ``DUMMY_INPUT`` 定义；输出由 model forward 决定（或可选 ``OUTPUT_SHAPE`` 声明），
+  **不要求 output==input**。KD 只要求 **teacher/student 共享输出 shape**（KD loss 比对两者输出）——
+  分类器族（输出 = num_classes，与输入异形）是合法 KD 目标，同形族（receiver 自编码器 output==input）亦通过。
+  ``validate_contract.py`` check 7 forward 一次捕获实测输出 shape + 二次确认 deterministic；若声明了
+  ``OUTPUT_SHAPE``，校验 forward 实测 == 声明，否则仅记录（emit ``FORWARD_SHAPE`` + ``SHAPE_MATCH: not_declared``）。
+- **flatten 须声明 OUTPUT_SHAPE**：model-flatten agent forward 捕获真实输出 shape，写入契约
+  ``OUTPUT_SHAPE``（同形族 = ``DUMMY_INPUT.shape``；分类器族 = 模型真实输出）。下游 teacher-gen /
+  gen-student 派生时复制 baseline.OUTPUT_SHAPE 逐字一致（KD 输出 shape 硬约束）。
 - **文件名 = variant_id**（stem）；`_*.py` 是共享模块（KNOBS 校验由 ``kd_common.validate_variant`` 持）。
 - **teacher 不在此**：活跃 teacher 由 `teacher-gen` 节点派生（wrapper .py 委托 baseline），不入 KB。
 - **feature_hook_names fail-loud**：distill 用 AST 判定此 fn 是否存在 → 启用/剥离 ofd；

@@ -116,7 +116,11 @@ Starting from the model entry point:
        _dummy = torch.randn(*_shape, dtype=_dtype, device=_device)
        with torch.no_grad():
            _out = _model(_dummy)
-       print(f"CORRECTNESS: OK | input={_shape} output={list(_out.shape)}")
+       _out_shape = list(_out.shape)
+       print(f"CORRECTNESS: OK | input={_shape} output={_out_shape}")
+       # 显式 emit output shape 供 flatten agent 解析写进 OUTPUT_SHAPE（CONTRACTS §1 可选字段）
+       import json as _json
+       print(f"OUTPUT_SHAPE_OBSERVED: {_json.dumps(_out_shape)}")
 
        # latency 测量（默认 cfg）：跑 __main__ = 正确性 + latency（统一契约）
        # --latency_provider 默认值 = flatten 时用户给的 inputs.latency_provider（可 CLI 覆盖）
@@ -182,7 +186,8 @@ Starting from the model entry point:
 2. Write `<output_dir>/<base_name>_flat.py`. **The file MUST expose, at module top-level:**
 
    ```python
-   DUMMY_INPUT = {"shape": [<non-empty list>], "dtype": "float32"}
+   DUMMY_INPUT = {"shape": [<non-empty list>], "dtype": "float32"}  # input shape (user's real input dims)
+   OUTPUT_SHAPE = [<non-empty int list>]                            # forward output shape (captured in Step 3)
    BUILD_FN = "build_model"
    KNOBS = {                                                  # ≥1 knob; step<0, leverage∈{high,medium,low}
        "<knob_a>": {"default": <num>, "min": <num>, "step": <-num>, "leverage": "high"},
@@ -191,8 +196,16 @@ Starting from the model entry point:
    def build_model(**cfg) -> nn.Module: ...                   # zero-arg uses KNOBS defaults; cfg overrides
    ```
 
-   These four symbols are the KD variant contract verbatim (`CONTRACTS.md` §1). Downstream
+   These five symbols are the KD variant contract verbatim (`CONTRACTS.md` §1). Downstream
    `kd_common.validate_variant` / `tune_latency.py` import them directly.
+
+   `OUTPUT_SHAPE` is the model's forward output shape captured from the Step 3 correctness
+   run (the `output=...` list printed by `CORRECTNESS: OK | input=... output=...`).
+   - **Same-shape family** (autoencoder / receiver): `OUTPUT_SHAPE == DUMMY_INPUT["shape"]`.
+   - **Classifier family** (output ≠ input, e.g. `[1,1,28,28]→[1,10]`): `OUTPUT_SHAPE` is the
+     real output (`[1,10]`). KD does not require output==input; teacher/student must share
+     output shape (the KD loss compares them) — declaring it here lets `validate_contract.py`
+     check 7 hard-verify, and lets teacher-gen / gen-student copy it verbatim.
 
 3. **Review and self-validate**: re-read the flat file and verify (a) definitions ordered
    correctly (no `NameError`), (b) constructor args consistent with how `build_model`
@@ -256,8 +269,10 @@ python3 "$ORCA_AGENT_RESOURCES/scripts/validate_contract.py" \
 `validate_contract.py` checks: import success, `BUILD_FN == "build_model"`, callable
 `build_model`, `DUMMY_INPUT.shape` non-empty list, `KNOBS` non-empty dict with every field
 present and valid (`step<0`, `leverage∈{high,medium,low}`, `default/min` numeric),
-`build_model(**defaults)` instantiates, and forward output shape equals
-`DUMMY_INPUT["shape"]`.
+`build_model(**defaults)` instantiates, and forward output shape is **deterministic**
+(same input twice → same output shape) — and, if the optional `OUTPUT_SHAPE` is declared,
+matches the declared list. It no longer requires `output == DUMMY_INPUT["shape"]`
+(KD does not require same-shape I/O; classifier families with output ≠ input are valid).
 
 If exit code != 0 → read `FAIL_REASON:` line, fix the flat file, re-run. **Do not proceed
 to 6b until the script PASSes** —— the LLM verifier cannot catch import / shape errors.

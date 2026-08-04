@@ -130,7 +130,48 @@ if [ -z "$BASELINE_LATENCY_US" ]; then
   exit 2
 fi
 LATENCY_SOURCE="$(echo "$RUN_OUT" | grep '^LATENCY_SOURCE:' | awk '{print $2}')"
-echo "PARSED: BASELINE_LATENCY_US=$BASELINE_LATENCY_US LATENCY_SOURCE=$LATENCY_SOURCE"
+# 解析 OUTPUT_SHAPE_OBSERVED：forward 实测的输出 shape（CONTRACTS §1 可选字段，flatten 必声明）
+OUTPUT_SHAPE_OBSERVED="$(echo "$RUN_OUT" | grep '^OUTPUT_SHAPE_OBSERVED:' | head -1 | cut -d' ' -f2-)"
+if [ -z "$OUTPUT_SHAPE_OBSERVED" ]; then
+  echo "FAIL: __main__ 未产出 OUTPUT_SHAPE_OBSERVED（forward 未跑？模板漏写？）"
+  exit 2
+fi
+# 把 OUTPUT_SHAPE = <observed> 写进契约顶层（如尚未写）
+# 注：依赖 SKILL.md Step 4 模板约定 DUMMY_INPUT 为单行字面量赋值；多行 dict 续行会错位
+# （二次 validate 兜底——错位 → exit 2 → LLM 修）
+python3 -c "
+import json, re, sys
+p = sys.argv[1]
+observed = json.loads(sys.argv[2])
+with open(p, encoding='utf-8') as f:
+    src = f.read()
+if re.search(r'^OUTPUT_SHAPE\\s*=', src, re.M):
+    print('OUTPUT_SHAPE_ALREADY_DECLARED')
+else:
+    # 在 DUMMY_INPUT = ... 行后插入 OUTPUT_SHAPE = ...
+    new_src = re.sub(
+        r'(^[ \t]*DUMMY_INPUT\\s*=.*\$)',
+        r'\\1\nOUTPUT_SHAPE = ' + json.dumps(observed),
+        src, count=1, flags=re.M,
+    )
+    if new_src == src:
+        print('FAIL: 未找到 DUMMY_INPUT = 行（无法插 OUTPUT_SHAPE）', file=sys.stderr)
+        sys.exit(2)
+    with open(p, 'w', encoding='utf-8') as f:
+        f.write(new_src)
+    print('OUTPUT_SHAPE_WRITTEN')
+" "$CONTRACT" "$OUTPUT_SHAPE_OBSERVED"
+# 再跑 validate_contract 确认 OUTPUT_SHAPE 写入后仍 PASS（声明即校验）
+VAL_OUT2="$(python3 "$ORCA_AGENT_RESOURCES/scripts/validate_contract.py" \
+  --contract "$CONTRACT" --device "{{ inputs.device }}" --seed 0 2>&1)"
+RC2=$?
+echo "$VAL_OUT2"
+if [ $RC2 -ne 0 ]; then
+  echo "validate_contract.py 二次校验 FAIL（OUTPUT_SHAPE 写入后）—— forward 实测与声明不一致？读 FAIL_REASON 修契约"
+  exit 2
+fi
+SHAPE_MATCH="$(echo "$VAL_OUT2" | grep '^SHAPE_MATCH:' | awk '{print $2}')"
+echo "PARSED: BASELINE_LATENCY_US=$BASELINE_LATENCY_US LATENCY_SOURCE=$LATENCY_SOURCE SHAPE_MATCH=$SHAPE_MATCH"
 ```
 
 ## web 推送（不推图）

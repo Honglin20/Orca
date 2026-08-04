@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-05] fix(kd-nas): validate_contract 去同形 I/O 过约束——支持分类器族（P4）
+
+修 test-agent 真跑 `examples/mnist_kd/`（MNIST 分类器 [1,1,28,28]→[1,10]）在 flatten 节点 fail 的根因：`validate_contract.py` check 7 旧逻辑要求 `forward output shape == DUMMY_INPUT.shape`，把输入当输出契约过约束（CONTRACTS §1 此前为 receiver 自编码器族设计，I/O 同形）。KD 本质只要求 teacher/student 共享输出 shape，不要求 output==input。架构层修复（向后兼容）：check 7 拆 7a（forward 实测）/7b（determinism 自检）/7c（可选 OUTPUT_SHAPE 声明校验）；CONTRACTS §1 加可选 `OUTPUT_SHAPE` 字段；flatten agent forward 捕获真实输出 shape 写入契约；teacher-gen / gen-student 加防御性双声明一致性检查。下游审计：tune_latency / export_onnx / gpu_probe / teacher_setup / measure_latency 均只用 DUMMY_INPUT.shape 构造输入张量，无残留同形假设。新增 / 重写 10 个测试用例（分类器族 PASS / OUTPUT_SHAPE mismatch FAIL / determinism FAIL / 类型错 FAIL / teacher 双声明三件套等）；274 passed + 守门 `test_kd_prompt_no_source_narrative.py` 绿零回归。code-reviewer 一轮闭环：0 BLOCKER / 0 MAJOR / 3 MINOR（2 修 / 1 保留有理由）。Commit: `<sha>`。详见 [release note](../releases/2026-08-05-kd-nas-validate-contract-relax-same-shape.md)。
+
 ## [2026-08-04] fix(kd-nas): ORCA_WORKFLOWS_ROOT env 注入 + agent.md 去 cwd-relative + fail-loud 空 JSON 禁止
 
 修 test-agent 真跑 `tars run` 暴露的 P0 架构问题：`kd-setup/kd-train-script/teacher-gen/struct-curator` 的 agent.md 用 `find workflows/agents/_kd_scripts ...` 这种 cwd-relative 查找，`tars run` 从用户项目起跑时 agent CWD ≠ Orca 仓库根 → fail。修复方案（OCP-clean，单通用 env）：executor 在 spawn 时注入 `ORCA_WORKFLOWS_ROOT`（= workflow yaml 所在目录绝对路径，dev=<repo>/workflows，安装态=~/.orca/workflows），agent.md 读 `$ORCA_WORKFLOWS_ROOT/agents/_kd_scripts` + 三档 fail loud（env 缺 / dir 缺 / file 缺）。plumbing 全链（build_env_overlay / make_executor / ClaudeExecutor / ScriptExecutor / Orchestrator 3 构造路径 / OrcaApp / RunManager / run_workflow 库 API / `python -m orca.run`）透传，kwarg 默认 None → 旧调用零回归。P1 强化：kd-setup 严禁块加「step 非零退出时禁止返回空字段 JSON 占位」（覆盖 deepseek 填 schema 倾向）。单测 +6（env_overlay 注入/缺省/共存 + executor 构造/spawn config 注入/缺省）；守门 + 全 suite 对比零回归（25 failed + 13 errors 全是 pre-existing test isolation）。Commit: `a952ecc`。详见 [release note](../releases/2026-08-04-kd-nas-workflows-root-env-injection.md)。

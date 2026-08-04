@@ -290,6 +290,108 @@ def test_validate_teacher_fail_dummy_input_mismatch(tmp_path):
     assert "逐字一致" in r.stdout or "!=" in r.stdout
 
 
+def test_validate_teacher_fail_output_shape_mismatch(tmp_path):
+    """FAIL：双方都声明 OUTPUT_SHAPE 但不一致（KD 输出 shape 硬约束）。
+
+    P4：分类器族（output≠input）须声明 OUTPUT_SHAPE；teacher/student 必须共享输出 shape
+    （KD loss 比对两者输出）。validate_teacher check 1b 拦截双声明不一致。
+    """
+    baseline = tmp_path / "baseline.py"
+    teacher = tmp_path / "baseline_teacher.py"
+    # baseline 输出 [1,10]；teacher 输出 [1,5]——KD loss 无法比对（FAIL）
+    baseline.write_text(
+        "import torch.nn as nn\n"
+        "DUMMY_INPUT = {'shape': [1, 1, 28, 28], 'dtype': 'float32'}\n"
+        "OUTPUT_SHAPE = [1, 10]\n"
+        "BUILD_FN = 'build_model'\n"
+        "KNOBS = {'num_blocks': {'default': 3, 'min': 1, 'step': -1, 'leverage': 'high'}}\n"
+        "def build_model(**cfg):\n"
+        "    return nn.Sequential(nn.Flatten(), nn.Linear(28*28, 10))\n",
+        encoding="utf-8",
+    )
+    teacher.write_text(
+        "import torch.nn as nn\n"
+        "DUMMY_INPUT = {'shape': [1, 1, 28, 28], 'dtype': 'float32'}\n"
+        "OUTPUT_SHAPE = [1, 5]\n"  # != baseline [1,10]
+        "BUILD_FN = 'build_model'\n"
+        "DEPTH_AXIS = 'num_blocks'\n"
+        "WIDTH_AXIS = ''\n"
+        "KNOBS = {'num_blocks': {'default': 9, 'min': 1, 'step': -1, 'leverage': 'high'}}\n"  # 3*3
+        "def build_model(**cfg):\n"
+        "    return nn.Sequential(nn.Flatten(), nn.Linear(28*28, 5))\n",
+        encoding="utf-8",
+    )
+    r = subprocess.run(
+        [sys.executable, str(VALIDATE_TEACHER),
+         "--baseline", str(baseline), "--teacher", str(teacher), "--device", "cpu"],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 2
+    assert "OUTPUT_SHAPE" in r.stdout
+    assert "[1, 5]" in r.stdout and "[1, 10]" in r.stdout
+
+
+def test_validate_teacher_pass_output_shape_both_declared_matching(tmp_path):
+    """PASS：双方声明 OUTPUT_SHAPE 一致（分类器族 teacher 派生，输出 shape 共享）。"""
+    baseline = tmp_path / "baseline.py"
+    teacher = tmp_path / "baseline_teacher.py"
+    baseline.write_text(
+        "import torch.nn as nn\n"
+        "DUMMY_INPUT = {'shape': [1, 1, 28, 28], 'dtype': 'float32'}\n"
+        "OUTPUT_SHAPE = [1, 10]\n"
+        "BUILD_FN = 'build_model'\n"
+        "KNOBS = {'num_blocks': {'default': 3, 'min': 1, 'step': -1, 'leverage': 'high'}}\n"
+        "def build_model(**cfg):\n"
+        "    n = int(cfg.get('num_blocks', KNOBS['num_blocks']['default']))\n"
+        "    layers = [nn.Flatten(), nn.Linear(28*28, 128)]\n"
+        "    for _ in range(n):\n"
+        "        layers.append(nn.Linear(128, 128))\n"
+        "    layers.append(nn.Linear(128, 10))\n"
+        "    return nn.Sequential(*layers)\n",
+        encoding="utf-8",
+    )
+    # teacher 深度轴 ×3（n=9），输出仍 [1,10]（与 baseline 共享——KD loss 可比对）
+    teacher.write_text(
+        "import torch.nn as nn\n"
+        "DUMMY_INPUT = {'shape': [1, 1, 28, 28], 'dtype': 'float32'}\n"
+        "OUTPUT_SHAPE = [1, 10]\n"
+        "BUILD_FN = 'build_model'\n"
+        "DEPTH_AXIS = 'num_blocks'\n"
+        "WIDTH_AXIS = ''\n"
+        "KNOBS = {'num_blocks': {'default': 9, 'min': 1, 'step': -1, 'leverage': 'high'}}\n"
+        "def build_model(**cfg):\n"
+        "    n = int(cfg.get('num_blocks', KNOBS['num_blocks']['default']))\n"
+        "    layers = [nn.Flatten(), nn.Linear(28*28, 128)]\n"
+        "    for _ in range(n):\n"
+        "        layers.append(nn.Linear(128, 128))\n"
+        "    layers.append(nn.Linear(128, 10))\n"
+        "    return nn.Sequential(*layers)\n",
+        encoding="utf-8",
+    )
+    r = subprocess.run(
+        [sys.executable, str(VALIDATE_TEACHER),
+         "--baseline", str(baseline), "--teacher", str(teacher), "--device", "cpu"],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert "VALIDATION: PASS" in r.stdout
+
+
+def test_validate_teacher_pass_output_shape_neither_declared(tmp_path):
+    """PASS：双方都未声明 OUTPUT_SHAPE（同形族）→ check 1b 跳过，由 forward 实测保底。"""
+    baseline = tmp_path / "baseline.py"
+    teacher = tmp_path / "baseline_teacher.py"
+    _write_parametric_baseline(baseline)  # 不声明 OUTPUT_SHAPE
+    _write_teacher_wrapper(teacher, baseline)  # 不声明 OUTPUT_SHAPE
+    r = subprocess.run(
+        [sys.executable, str(VALIDATE_TEACHER),
+         "--baseline", str(baseline), "--teacher", str(teacher), "--device", "cpu"],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert "VALIDATION: PASS" in r.stdout
+
+
 def test_validate_teacher_fail_depth_not_scaled(tmp_path):
     """FAIL：深度轴 default < baseline.default × 3（×2 写错成 ×3，不配当 teacher）。"""
     baseline = tmp_path / "baseline.py"
@@ -1006,7 +1108,9 @@ def test_e2e_validate_contract_passes_on_real_baseline_teacher(tmp_path):
     )
     assert r.returncode == 0, f"validate_contract FAIL:\nstdout={r.stdout}\nstderr={r.stderr}"
     assert "VALIDATION: PASS" in r.stdout
-    assert "SHAPE_MATCH: true" in r.stdout
+    # demo baseline 是同形族（output==input），未声明 OUTPUT_SHAPE → SHAPE_MATCH: not_declared
+    # （P4：check 7 不再要求 output==DUMMY_INPUT.shape；validate PASS 即契约合规）
+    assert "SHAPE_MATCH: not_declared" in r.stdout
 
 
 def test_e2e_validate_teacher_passes_on_real_baseline_teacher(tmp_path):

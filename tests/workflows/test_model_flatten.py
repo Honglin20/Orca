@@ -35,13 +35,19 @@ def _load(path: Path, name: str):
 # ── validate_contract.py 纯函数：PASS 路径 ──────────────────────────────────────
 
 
-def _write_valid_contract(p: Path, *, knobs: dict | None = None) -> None:
-    """写一个最小合规的 KD 变体契约 .py（Identity 模型 + 1 knob）。"""
+def _write_valid_contract(p: Path, *, knobs: dict | None = None, output_shape: list | None = None) -> None:
+    """写一个最小合规的 KD 变体契约 .py（Identity 模型 + 1 knob）。
+
+    output_shape=None → 不声明 OUTPUT_SHAPE（用 forward 实测保底，同形族自然通过）；
+    output_shape=[...] → 声明 OUTPUT_SHAPE（validate_contract check 7c 校验 forward 实测 == 声明）。
+    """
     if knobs is None:
         knobs = {"num_blocks": {"default": 3, "min": 1, "step": -1, "leverage": "high"}}
+    out_line = f"OUTPUT_SHAPE = {output_shape!r}\n" if output_shape is not None else ""
     p.write_text(
         "import torch\nimport torch.nn as nn\n"
         "DUMMY_INPUT = {'shape': [1, 4, 48, 64, 1], 'dtype': 'float32'}\n"
+        + out_line +
         "BUILD_FN = 'build_model'\n"
         f"KNOBS = {knobs!r}\n"
         "def build_model(**cfg):\n"
@@ -53,7 +59,8 @@ def _write_valid_contract(p: Path, *, knobs: dict | None = None) -> None:
 def test_validate_contract_pass_minimal(tmp_path):
     """PASS：合规契约 → exit 0 + emit VALIDATION: PASS + 全字段。"""
     p = tmp_path / "ok_flat.py"
-    _write_valid_contract(p)
+    # Identity forward → output shape == input shape；声明 OUTPUT_SHAPE 触发 check 7c（SHAPE_MATCH: true）
+    _write_valid_contract(p, output_shape=[1, 4, 48, 64, 1])
     r = subprocess.run(
         [sys.executable, str(VALIDATE), "--contract", str(p), "--device", "cpu", "--seed", "0"],
         capture_output=True, text=True,
@@ -64,6 +71,7 @@ def test_validate_contract_pass_minimal(tmp_path):
     assert "DUMMY_INPUT:" in r.stdout
     assert "KNOBS:" in r.stdout
     assert "FORWARD_SHAPE:" in r.stdout
+    assert "OUTPUT_SHAPE_DECLARED: [1, 4, 48, 64, 1]" in r.stdout
     assert "SHAPE_MATCH: true" in r.stdout
     # FAIL_REASON 不应出现
     assert "FAIL_REASON" not in r.stdout
@@ -246,19 +254,20 @@ def test_validate_contract_fail_bad_leverage(tmp_path):
     assert "leverage" in r.stdout
 
 
-def test_validate_contract_fail_forward_shape_mismatch(tmp_path):
-    """FAIL：build_model forward 成功但输出 shape != DUMMY_INPUT.shape（契约头条不变量）。
+def test_validate_contract_fail_output_shape_mismatch(tmp_path):
+    """FAIL：声明了 OUTPUT_SHAPE 但 forward 实测 != 声明（check 7c）。
 
-    用 Conv2d(4, 8, kernel_size=1) + 4D DUMMY_INPUT：forward OK，输出 [1,8,8,8] != 声明 [1,4,8,8]。
+    Conv2d(4, 8, kernel_size=1) + 4D DUMMY_INPUT [1,4,8,8]：forward OK 输出 [1,8,8,8]。
+    声明 OUTPUT_SHAPE=[1,4,8,8]（错误）→ FAIL；不声明则 PASS（分类器族 output≠input 合法）。
     """
-    p = tmp_path / "shape_mismatch.py"
+    p = tmp_path / "output_shape_mismatch.py"
     p.write_text(
         "import torch.nn as nn\n"
         "DUMMY_INPUT = {'shape': [1, 4, 8, 8], 'dtype': 'float32'}\n"
+        "OUTPUT_SHAPE = [1, 4, 8, 8]\n"  # 错误声明：forward 实测是 [1,8,8,8]
         "BUILD_FN = 'build_model'\n"
         "KNOBS = {'n': {'default': 1, 'min': 1, 'step': -1, 'leverage': 'high'}}\n"
         "def build_model(**c):\n"
-        "    # 输入通道 4 → 输出通道 8（forward OK 但 shape 不匹配 DUMMY_INPUT.shape）\n"
         "    return nn.Conv2d(4, 8, kernel_size=1)\n",
         encoding="utf-8",
     )
@@ -268,8 +277,134 @@ def test_validate_contract_fail_forward_shape_mismatch(tmp_path):
     )
     assert r.returncode == 2
     assert "VALIDATION: FAIL" in r.stdout
-    assert "forward shape" in r.stdout
+    assert "OUTPUT_SHAPE" in r.stdout
     assert "[1, 8, 8, 8]" in r.stdout and "[1, 4, 8, 8]" in r.stdout
+
+
+def test_validate_contract_pass_classifier_no_output_shape(tmp_path):
+    """PASS：分类器族（output≠input，如 MNIST [1,1,28,28]→[1,10]）不声明 OUTPUT_SHAPE → 通过。
+
+    P4 修复核心：旧 check 7 要求 output==DUMMY_INPUT.shape，分类器族被误拦；
+    新 check 7 改为 forward 实测记录 + deterministic 自检 + 可选 OUTPUT_SHAPE 声明校验。
+    """
+    p = tmp_path / "classifier_flat.py"
+    p.write_text(
+        "import torch\nimport torch.nn as nn\n"
+        "DUMMY_INPUT = {'shape': [1, 1, 28, 28], 'dtype': 'float32'}\n"
+        # 不声明 OUTPUT_SHAPE → validator 用 forward 实测保底
+        "BUILD_FN = 'build_model'\n"
+        "KNOBS = {'num_blocks': {'default': 3, 'min': 1, 'step': -1, 'leverage': 'high'}}\n"
+        "def build_model(**cfg):\n"
+        "    return nn.Sequential(nn.Flatten(), nn.Linear(1*28*28, 10))\n",
+        encoding="utf-8",
+    )
+    r = subprocess.run(
+        [sys.executable, str(VALIDATE), "--contract", str(p), "--device", "cpu", "--seed", "0"],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert "VALIDATION: PASS" in r.stdout
+    assert "FORWARD_SHAPE: [1, 10]" in r.stdout
+    assert "SHAPE_MATCH: not_declared" in r.stdout
+    assert "OUTPUT_SHAPE_DECLARED: none" in r.stdout
+
+
+def test_validate_contract_pass_classifier_with_output_shape(tmp_path):
+    """PASS：分类器族声明 OUTPUT_SHAPE=[1,10]（与 forward 实测一致）→ SHAPE_MATCH: true。"""
+    p = tmp_path / "classifier_with_out.py"
+    p.write_text(
+        "import torch\nimport torch.nn as nn\n"
+        "DUMMY_INPUT = {'shape': [1, 1, 28, 28], 'dtype': 'float32'}\n"
+        "OUTPUT_SHAPE = [1, 10]\n"
+        "BUILD_FN = 'build_model'\n"
+        "KNOBS = {'num_blocks': {'default': 3, 'min': 1, 'step': -1, 'leverage': 'high'}}\n"
+        "def build_model(**cfg):\n"
+        "    return nn.Sequential(nn.Flatten(), nn.Linear(1*28*28, 10))\n",
+        encoding="utf-8",
+    )
+    r = subprocess.run(
+        [sys.executable, str(VALIDATE), "--contract", str(p), "--device", "cpu", "--seed", "0"],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert "VALIDATION: PASS" in r.stdout
+    assert "FORWARD_SHAPE: [1, 10]" in r.stdout
+    assert "OUTPUT_SHAPE_DECLARED: [1, 10]" in r.stdout
+    assert "SHAPE_MATCH: true" in r.stdout
+
+
+def test_validate_contract_fail_output_shape_non_deterministic(tmp_path):
+    """FAIL：forward 输出 shape 非确定性（stateful 模型，同输入两次 forward 输出 shape 不同）。
+
+    check 7b determinism 自检——用全局调用计数器让 forward 第二次返回不同 shape。
+    """
+    p = tmp_path / "non_det.py"
+    p.write_text(
+        "import torch\nimport torch.nn as nn\n"
+        "DUMMY_INPUT = {'shape': [1, 4], 'dtype': 'float32'}\n"
+        "BUILD_FN = 'build_model'\n"
+        "KNOBS = {'n': {'default': 1, 'min': 1, 'step': -1, 'leverage': 'high'}}\n"
+        "_call_count = {'n': 0}\n"
+        "class _Stateful(nn.Module):\n"
+        "    def forward(self, x):\n"
+        "        _call_count['n'] += 1\n"
+        "        # 第一次返回 [1,4]；第二次返回 [1,2]（shape 不稳定）\n"
+        "        return x[:, :2] if _call_count['n'] >= 2 else x\n"
+        "def build_model(**c):\n"
+        "    return _Stateful()\n",
+        encoding="utf-8",
+    )
+    r = subprocess.run(
+        [sys.executable, str(VALIDATE), "--contract", str(p), "--device", "cpu"],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 2
+    assert "VALIDATION: FAIL" in r.stdout
+    assert "非确定性" in r.stdout or "determinism" in r.stdout.lower()
+
+
+def test_validate_contract_fail_output_shape_wrong_type(tmp_path):
+    """FAIL：OUTPUT_SHAPE 声明类型错（非 list / 含非 int）→ FAIL（check 4b）。"""
+    p = tmp_path / "bad_out_shape.py"
+    p.write_text(
+        "import torch.nn as nn\n"
+        "DUMMY_INPUT = {'shape': [1, 4], 'dtype': 'float32'}\n"
+        "OUTPUT_SHAPE = 'not-a-list'\n"  # 错类型
+        "BUILD_FN = 'build_model'\n"
+        "KNOBS = {'n': {'default': 1, 'min': 1, 'step': -1, 'leverage': 'high'}}\n"
+        "def build_model(**c):\n"
+        "    return nn.Identity()\n",
+        encoding="utf-8",
+    )
+    r = subprocess.run(
+        [sys.executable, str(VALIDATE), "--contract", str(p), "--device", "cpu"],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 2
+    assert "OUTPUT_SHAPE" in r.stdout
+    assert "list" in r.stdout
+
+
+def test_validate_contract_fail_output_shape_empty_list(tmp_path):
+    """FAIL：OUTPUT_SHAPE = []（空 list）→ FAIL（check 4b：声明即须非空）。"""
+    p = tmp_path / "empty_out_shape.py"
+    p.write_text(
+        "import torch.nn as nn\n"
+        "DUMMY_INPUT = {'shape': [1, 4], 'dtype': 'float32'}\n"
+        "OUTPUT_SHAPE = []\n"  # 空 list
+        "BUILD_FN = 'build_model'\n"
+        "KNOBS = {'n': {'default': 1, 'min': 1, 'step': -1, 'leverage': 'high'}}\n"
+        "def build_model(**c):\n"
+        "    return nn.Identity()\n",
+        encoding="utf-8",
+    )
+    r = subprocess.run(
+        [sys.executable, str(VALIDATE), "--contract", str(p), "--device", "cpu"],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 2
+    assert "OUTPUT_SHAPE" in r.stdout
+    assert "非空" in r.stdout or "list" in r.stdout
 
 
 def test_validate_contract_fail_forward_exception(tmp_path):

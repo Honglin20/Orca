@@ -1,7 +1,9 @@
 """validate_contract.py —— model-flatten 产出的契约 .py 硬校验（fail loud）。
 
 契约（``workflows/agents/_kd_scripts/CONTRACTS.md`` §1）逐字对齐：
-  - ``DUMMY_INPUT = {"shape": [<非空 list>], "dtype": "float32"}``
+  - ``DUMMY_INPUT = {"shape": [<非空 list>], "dtype": "float32"}``（定义**输入**）
+  - ``OUTPUT_SHAPE = [<非空 list>]``（**可选**；声明 forward **输出** shape；缺省时 validator
+    用 forward 实测——KD 不要求 output==input，分类器族 output≠input 合法）
   - ``BUILD_FN = "build_model"``（字面量）
   - ``KNOBS = {<knob>: {"default","min","step","leverage"}}``（非空 dict；step<0、leverage∈{high,medium,low}）
   - ``def build_model(**cfg) -> nn.Module``（零参用 KNOBS.default；cfg 覆盖旋钮）
@@ -13,7 +15,10 @@
   4. ``DUMMY_INPUT.shape`` 非空 list + ``dtype`` 显式声明且是合法 torch dtype 名（CONTRACTS §1 要求）
   5. ``KNOBS`` 非空 dict + 每 knob 字段齐全 + step<0 + leverage 合法 + default/min 数值（排除 bool）
   6. ``build_model(**defaults)`` 实例化 + ``.to(device)`` 成功（与 device 解析分阶段归因）
-  7. forward 出来的 shape ``== DUMMY_INPUT["shape"]``（device 可移植自检）
+  7. forward 输出 shape **deterministic + 固定**（同输入两次 forward 输出 shape 一致）；
+     若契约声明了可选 ``OUTPUT_SHAPE``，校验 forward 实测 == 声明。
+     不再要求 ``output == DUMMY_INPUT.shape``（KD 只要求 teacher/student 共享输出 shape，
+     不要求 output==input；分类器族 output≠input 合法）。
   8. ``build_model(**mins)`` 也能 forward —— min 是结构地板，gate.tune_latency 会缩到这里
      （SKILL.md Step 5 宣称「Step 6 hard-validation will catch invalid min」由本步闭环）
 
@@ -90,7 +95,8 @@ def _resolve_device(device_arg: str) -> Any:
 
 
 def validate_contract(path: str, device_arg: str = "auto", seed: int = 0) -> dict[str, Any]:
-    """纯函数校验：返回 {ok, reason, dummy_input, knobs, build_fn, forward_shape}。
+    """纯函数校验：返回 {ok, reason, dummy_input, knobs, build_fn, forward_shape,
+    output_shape_declared, shape_match}。
 
     任一契约不符 → ok=False + reason（caller emit FAIL）。raise = caller 包成 FAIL。
     """
@@ -118,7 +124,22 @@ def validate_contract(path: str, device_arg: str = "auto", seed: int = 0) -> dic
     if not isinstance(dtype_str, str) or not hasattr(torch, dtype_str):
         return {"ok": False, "reason": f"DUMMY_INPUT.dtype={dtype_str!r} 不是合法 torch dtype 名（如 'float32'）"}
     dummy_input = di
-    expected_shape = list(di["shape"])
+    input_shape = list(di["shape"])
+
+    # 4b) OUTPUT_SHAPE 可选（CONTRACTS §1）：声明即校验类型；值校验在 check 7（forward 实测后）
+    declared_output_shape = getattr(mod, "OUTPUT_SHAPE", None)
+    if declared_output_shape is not None:
+        if not isinstance(declared_output_shape, list) or not declared_output_shape:
+            return {
+                "ok": False,
+                "reason": (
+                    f"OUTPUT_SHAPE 须为非空 list（声明即校验；得到 {declared_output_shape!r}）。"
+                    "不声明则 validator 用 forward 实测——KD 不要求 output==input。"
+                ),
+            }
+        for d in declared_output_shape:
+            if isinstance(d, bool) or not isinstance(d, int):
+                return {"ok": False, "reason": f"OUTPUT_SHAPE 须为 int list（得到 {declared_output_shape!r}）"}
 
     # 5) KNOBS 非空 dict + 字段齐全
     knobs = getattr(mod, "KNOBS", None)
@@ -153,21 +174,47 @@ def validate_contract(path: str, device_arg: str = "auto", seed: int = 0) -> dic
     except Exception as e:  # noqa: BLE001 — fail loud 须捕获实例化所有异常
         return {"ok": False, "reason": f"build_model(**defaults) 实例化失败：{type(e).__name__}: {e}"}
 
-    # 7) forward shape == DUMMY_INPUT.shape
+    # 7) forward 输出 shape：deterministic + 固定（+ 可选 OUTPUT_SHAPE 声明校验）
+    #    不再要求 output == DUMMY_INPUT.shape（KD 不要求同形：分类器族 output≠input 合法）。
     dtype = getattr(torch, dtype_str)
     try:
-        dummy = torch.randn(*expected_shape, dtype=dtype, device=device)
+        dummy = torch.randn(*input_shape, dtype=dtype, device=device)
         with torch.no_grad():
             out = model(dummy)
         actual_shape = list(out.shape)
     except Exception as e:  # noqa: BLE001 — dummy 创建 + forward 任一异常 = FAIL
         return {"ok": False, "reason": f"forward 失败：{type(e).__name__}: {e}"}
 
-    if actual_shape != expected_shape:
+    # 7b) determinism 自检：同输入再 forward 一次，输出 shape 须一致（防 stateful / 非确定性模型）
+    try:
+        with torch.no_grad():
+            out_second = model(dummy)
+        second_shape = list(out_second.shape)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "reason": f"forward 二次（determinism 自检）失败：{type(e).__name__}: {e}"}
+    if second_shape != actual_shape:
         return {
             "ok": False,
-            "reason": f"forward shape {actual_shape} != DUMMY_INPUT.shape {expected_shape}",
+            "reason": (
+                f"forward 输出 shape 非确定性：首次={actual_shape} 二次={second_shape}"
+                "（KD 契约要求输出 shape 稳定）"
+            ),
         }
+
+    # 7c) OUTPUT_SHAPE 可选声明校验（CONTRACTS §1：可选字段；声明则 forward 实测须 == 声明）
+    if declared_output_shape is not None:
+        declared = [int(d) for d in declared_output_shape]
+        if actual_shape != declared:
+            return {
+                "ok": False,
+                "reason": (
+                    f"forward shape {actual_shape} != OUTPUT_SHAPE {declared}"
+                    "（声明了 OUTPUT_SHAPE 即校验；不声明则用 forward 实测）"
+                ),
+            }
+        shape_match = "true"
+    else:
+        shape_match = "not_declared"
 
     # 8) build_model(**mins) 也能 forward —— min 是结构地板，gate.tune_latency 会缩到这里
     # （SKILL.md Step 5 宣称「Step 6 hard-validation will catch invalid min」由本步闭环）
@@ -193,6 +240,8 @@ def validate_contract(path: str, device_arg: str = "auto", seed: int = 0) -> dic
         "dummy_input": dummy_input,
         "knobs": knobs,
         "forward_shape": actual_shape,
+        "output_shape_declared": list(declared_output_shape) if declared_output_shape is not None else None,
+        "shape_match": shape_match,
     }
 
 
@@ -217,7 +266,8 @@ def _main() -> int:
     _emit("DUMMY_INPUT", result["dummy_input"])
     _emit("KNOBS", result["knobs"])
     _emit("FORWARD_SHAPE", result["forward_shape"])
-    _emit("SHAPE_MATCH", "true")
+    _emit("OUTPUT_SHAPE_DECLARED", result["output_shape_declared"] or "none")
+    _emit("SHAPE_MATCH", result["shape_match"])
     _emit("VALIDATION", "PASS")
     return 0
 
