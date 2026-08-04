@@ -680,3 +680,157 @@ def test_install_bundled_workflows_deploys_cwd_to_global(tmp_path, monkeypatch):
     empty.mkdir()
     monkeypatch.chdir(empty)
     assert install_cmds._install_bundled_workflows() == []
+
+
+# ── _install_bundled_subagents（plan v5 §9.2 拓扑映射）────────────────────────
+
+
+def test_install_bundled_subagents_maps_dirname_to_target(tmp_path, monkeypatch):
+    """``_install_bundled_subagents``：workflows/_<name>_subagents/*.md → ~/.orca/<name>/subagents。
+
+    覆盖意图（非仅行为）：
+      - **拓扑映射**：``_nas-supernet_subagents`` → ``nas-supernet``（strip 首 ``_`` 尾
+        ``_subagents``，plan §9.2 契约——node Bash 按 ``$HOME/.orca/nas-supernet/subagents/``
+        读，映射错位会让 read+embed 协议读不到 body）。
+      - 5 个真实 subagent body 全部部署（nas-supernet 的依赖完整性）。
+      - 多 workflow 目录并发部署（OCP：加 ``_<other>_subagents/`` 自动捡，零核心改动）。
+      - 空目录容错（无 *.md → no-op 该目录，不 fail）。
+      - 幂等（内容同跳过）+ 变更 refresh（覆盖）+ 内容逐字一致（read+embed 要原文 body）。
+      - 无 CWD/workflows → no-op（非仓库根跑 install 不报错）。
+    """
+    cwd = tmp_path / "proj"
+    sa_src = cwd / "workflows" / "_nas-supernet_subagents"
+    sa_src.mkdir(parents=True)
+    bodies = {
+        "supernet-evaluator.md": "# Supernet Evaluator\nbody A\n",
+        "workflow-verifier.md": "# Workflow Verifier\nbody B\n",
+        "memory-verifier.md": "# Memory Verifier\nbody C\n",
+        "project-porter.md": "# Project Porter\nbody D\n",
+        "project-fidelity-verifier.md": "# Project Fidelity Verifier\nbody E\n",
+    }
+    for name, content in bodies.items():
+        (sa_src / name).write_text(content, encoding="utf-8")
+    # 第二个 workflow 的 subagent 目录（验证多目录映射 + OCP 加目录零核心改动）
+    other_src = cwd / "workflows" / "_other-wf_subagents"
+    other_src.mkdir()
+    (other_src / "helper.md").write_text("# Helper\n", encoding="utf-8")
+    # 空目录（无 *.md）→ 容错 no-op
+    (cwd / "workflows" / "_empty-wf_subagents").mkdir()
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.chdir(cwd)
+    # Path.home 直接打桩——比 setenv HOME 更可靠（Windows 下 Path.home 走 USERPROFILE 不走 HOME）
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    deployed = install_cmds._install_bundled_subagents()
+    # 5 (nas-supernet) + 1 (other-wf) = 6 文件部署；空目录 no-op
+    assert len(deployed) == 6, f"期望 6 个部署，实际 {len(deployed)}: {[p.name for p in deployed]}"
+    # 拓扑映射：_nas-supernet_subagents → ~/.orca/nas-supernet/subagents/
+    ns_dst = fake_home / ".orca" / "nas-supernet" / "subagents"
+    for name, content in bodies.items():
+        dst_file = ns_dst / name
+        assert dst_file.is_file(), f"{name} 应部署到 {dst_file}"
+        assert dst_file.read_text(encoding="utf-8") == content, f"{name} body 应逐字一致"
+    # 第二 workflow 映射：_other-wf_subagents → ~/.orca/other-wf/subagents/
+    assert (fake_home / ".orca" / "other-wf" / "subagents" / "helper.md").is_file()
+    # 空目录无落点
+    assert not (fake_home / ".orca" / "empty-wf").exists()
+
+    # 幂等：再跑 → 全部跳过（内容同）
+    assert install_cmds._install_bundled_subagents() == [], "内容一致的 subagent 再跑应全跳过"
+
+    # 变更 → refresh（覆盖）
+    (sa_src / "supernet-evaluator.md").write_text("# Supernet Evaluator v2\n", encoding="utf-8")
+    deployed3 = install_cmds._install_bundled_subagents()
+    assert len(deployed3) == 1 and deployed3[0].name == "supernet-evaluator.md"
+    assert "v2" in (ns_dst / "supernet-evaluator.md").read_text(encoding="utf-8")
+
+    # 无 CWD/workflows → no-op
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+    assert install_cmds._install_bundled_subagents() == []
+
+
+def test_install_bundled_subagents_skips_degenerate_dirname(tmp_path, monkeypatch):
+    """非法中间名（空 / 路径穿透片段）→ warn + skip（不中断 install，stderr 可见；无落点）。
+
+    意图：install 是部署步骤，不该因用户随手建的怪目录硬失败；但必须 stderr warn（可见，
+    符合 fail loud 铁律——不静默吞），且**绝不为非法名创建落点目录**（防 ``..`` 把落点
+    逃出 ``~/.orca/<name>/`` 的路径穿透 footgun）。用 CliRunner 捕 ``typer.echo(..., err=True)``
+    的输出（CliRunner mix 进 result.output）。覆盖两类非法名：
+      - ``__subagents``（中间名空 ``''``——退化名）
+      - ``_.._subagents``（中间名 ``'..'``——路径穿透，落点会变成 ``~/.orca/../subagents``）
+    """
+    cwd = tmp_path / "proj"
+    empty_dir = cwd / "workflows" / "__subagents"  # strip 首 _ 尾 _subagents → 中间名空
+    empty_dir.mkdir(parents=True)
+    (empty_dir / "x.md").write_text("# x\n", encoding="utf-8")
+    traversal_dir = cwd / "workflows" / "_.._subagents"  # 中间名 '..' → 路径穿透
+    traversal_dir.mkdir()
+    (traversal_dir / "y.md").write_text("# y\n", encoding="utf-8")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    result = runner.invoke(app, ["--target", "cc", "--scope", "user"])
+    # install 整体不崩（exit 0），subagent 部署对两个非法目录都 warn + skip
+    assert result.exit_code == 0, result.output
+    assert "非法 subagent 目录名" in result.output
+    assert "中间名 ''" in result.output  # __subagents → 空串
+    assert "'..'" in result.output  # _.._subagents → 路径穿透片段
+    # 关键安全断言：绝不为非法名创建任何 ~/.orca 落点（``.orca`` 目录都不应存在）
+    assert not (fake_home / ".orca").exists(), (
+        "非法中间名不应产生任何 ~/.orca 落点（防路径穿透）"
+    )
+
+
+def test_install_bundled_subagents_warns_on_per_file_copy_failure(
+    tmp_path, monkeypatch
+):
+    """单文件 ``shutil.copy2`` 抛 OSError → warn + continue（per-file fail-soft 契约承重墙）。
+
+    意图（Rule 9）：per-file fail-soft——一个 subagent copy 失败**不得**中断其他文件部署，
+    也**不得**静默（stderr warn 可见 = 符合 fail loud）；失败文件不计入返回值，成功文件
+    正常落地。与 ``_install_bundled_workflows`` 的 per-file OSError fail-soft 同款契约。
+    """
+    cwd = tmp_path / "proj"
+    sa_src = cwd / "workflows" / "_nas-supernet_subagents"
+    sa_src.mkdir(parents=True)
+    (sa_src / "good-a.md").write_text("# A\n", encoding="utf-8")
+    (sa_src / "bad.md").write_text("# B\n", encoding="utf-8")
+    (sa_src / "good-c.md").write_text("# C\n", encoding="utf-8")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    real_copy2 = install_cmds.shutil.copy2
+
+    def flaky_copy2(src, dst, *, follow_symlinks=True):
+        if Path(src).name == "bad.md":
+            raise OSError("simulated permission denied")
+        return real_copy2(src, dst, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(install_cmds.shutil, "copy2", flaky_copy2)
+
+    deployed = install_cmds._install_bundled_subagents()
+    # bad.md 失败 warn+skip；good-a / good-c 仍部署（fail-soft：单点失败不中断）
+    assert sorted(p.name for p in deployed) == ["good-a.md", "good-c.md"], (
+        f"失败文件应排除，成功文件应保留: {[p.name for p in deployed]}"
+    )
+    dst_dir = fake_home / ".orca" / "nas-supernet" / "subagents"
+    assert (dst_dir / "good-a.md").is_file()
+    assert (dst_dir / "good-c.md").is_file()
+    assert not (dst_dir / "bad.md").exists()
+
+
+def test_install_bundled_subagents_noop_without_workflows_dir(tmp_path, monkeypatch):
+    """无 CWD/workflows 目录 → no-op 返回 []（非仓库根跑 install 不报错，幂等安全）。"""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    assert install_cmds._install_bundled_subagents() == []

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from importlib.resources import files
@@ -492,6 +493,64 @@ def _install_bundled_knowledge_base() -> list[Path]:
     return [dest_dir]
 
 
+def _install_bundled_subagents() -> list[Path]:
+    """部署 CWD/workflows/_<name>_subagents/*.md → ~/.orca/<name>/subagents/（plan v5 §9.2）。
+
+    让 ``tars install`` 把仓库自带的 workflow subagent body（如 nas-supernet 的 5 个：
+    supernet-evaluator / workflow-verifier / memory-verifier / project-porter /
+    project-fidelity-verifier）装成**全局可见**——任何项目跑该 workflow 时，node Bash
+    ``cat $HOME/.orca/<name>/subagents/<agent>.md`` 都能读到（read+embed 协议，§9.1.7）。
+    subagent 是运行时 data（host 内置通用 ``subagent_type`` spawn，特化靠 prompt），**不是**
+    compile 期 AgentResolver 解析对象 → 不引入新 env / 不动 exec（§5 最小引擎改动）。
+
+    拓扑映射规则（通用，OCP：加新 workflow 的 subagent = 加 ``_<name>_subagents/`` 目录）：
+    glob ``workflows/_*_subagents/`` → 落 ``~/.orca/<中间名>/subagents/``
+    （``_nas-supernet_subagents`` → ``nas-supernet``，即 strip 首 ``_`` 与尾 ``_subagents``）。
+
+    幂等：目标内容同源跳过，不同覆盖。无 CWD/workflows 或无匹配目录 → no-op（非仓库根跑
+    install 不报错）。单文件 copy 失败 → warn + continue（与 ``_install_bundled_workflows``
+    per-file fail-soft 同款）；空 ``_<name>_subagents/`` 目录（无 *.md）→ no-op 该目录。
+    """
+    src_root = Path.cwd() / "workflows"
+    if not src_root.is_dir():
+        return []
+    deployed: list[Path] = []
+    for src_dir in sorted(src_root.glob("_*_subagents")):
+        if not src_dir.is_dir():
+            continue
+        # 映射：_<middle>_subagents → <middle>（glob 已保证首 ``_`` 尾 ``_subagents``）。
+        middle = src_dir.name[1:-len("_subagents")]
+        # 合法性校验（防路径穿透 footgun）：中间名须是安全字符集，且非 ``.`` / ``..`` 穿越片段。
+        # regex ``+`` 同时拒绝空串（退化名 ``__subagents``）；字符集排除 ``/`` 与空白，挡
+        # ``_.._.._tmp_subagents``（middle="../../../tmp"）把落点逃出 ~/.orca/<name>/ 的意外名。
+        # warn + skip（不中断 install：用户随手建的怪目录不该让部署硬失败；stderr warn = 可见，
+        # 符合 fail loud 铁律）。
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", middle) or middle in {".", ".."}:
+            typer.echo(
+                f"  ⚠ 跳过非法 subagent 目录名 {src_dir.name}（中间名 {middle!r}）", err=True,
+            )
+            continue
+        dest_dir = Path.home() / ".orca" / middle / "subagents"
+        md_files = sorted(src_dir.glob("*.md"))
+        if not md_files:
+            continue  # 空目录容错：no-op 该目录（不建空落点目录）
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        for src_md in md_files:
+            dst_md = dest_dir / src_md.name
+            try:
+                if dst_md.exists() and dst_md.read_text(encoding="utf-8") == src_md.read_text(encoding="utf-8"):
+                    continue  # 内容同跳过（幂等）
+                shutil.copy2(src_md, dst_md)
+            except OSError as e:  # noqa: BLE001
+                typer.echo(
+                    f"  ⚠ 部署 subagent {src_dir.name}/{src_md.name} 失败：{e}",
+                    err=True,
+                )
+                continue
+            deployed.append(dst_md)
+    return deployed
+
+
 def run_install(target: str, scope: str) -> list[str]:
     """install 核心逻辑（callback + ``skill install`` 弃用委托共用）。返回失败 host 列表。
 
@@ -531,6 +590,14 @@ def run_install(target: str, scope: str) -> list[str]:
         typer.echo("\n[workflows] → ~/.orca/workflows（全局内置，orca list 可扫到）")
         for w in deployed_wfs:
             typer.echo(f"  ✓ {w.name}")
+
+    # 部署内置 workflow subagent（CWD/workflows/_<name>_subagents → ~/.orca/<name>/subagents，
+    # 全局可见；plan v5 §9.2：node Bash read+embed 协议读这些 body。与 workflows / KB 同级串行）
+    deployed_sa = _install_bundled_subagents()
+    if deployed_sa:
+        typer.echo("\n[subagents] → ~/.orca/<workflow>/subagents（全局内置，node read+embed 可读）")
+        for s in deployed_sa:
+            typer.echo(f"  ✓ {s.parent.parent.name}/{s.name}")
 
     # 部署内置 KB（CWD/knowledge_base → ~/.orca/knowledge_base，全局可见；与 host 无关，跑一次）
     # plan sprightly-questing-donut §1.1：让 struct-exploration 换项目跑也能 resolve 到 KB。
