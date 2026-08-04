@@ -80,6 +80,33 @@ describe("LogStream —— 行渲染（SPEC §5.5）", () => {
     render(<LogStream />);
     expect(screen.getByTestId("log-empty")).toBeInTheDocument();
   });
+
+  // SPEC 2026-08-04-in-session-failure-sentinel-and-injection §7 AC8：
+  // retry 走 next → tape 落 [node_failed, node_started] → 前端 LogStream 出两行可见
+  // （selectors.ts:694/698：node_failed → "node FAILED: <msg>"，node_started → "node started"）。
+  // 前端零改回归：引擎修复后 retry 自然走 next，第二轮 retry 经此序列可见。
+  test("AC8 retry 序列 [node_failed, node_started] 渲染两行可见（前端零改回归）", () => {
+    useWorkflowStore.getState().loadFromEvents([
+      makeEvent("workflow_started", { seq: 1 }),
+      // retry 序列：recoverable 失败后重 arm 同节点（in-session recoverable 路径 emit）
+      makeEvent("node_failed", {
+        seq: 2,
+        node: "a",
+        data: { message: "blocked_on: 缺前置", kind: "agent_blocked" },
+      }),
+      makeEvent("node_started", { seq: 3, node: "a" }),
+    ]);
+    render(<LogStream />);
+    const rows = screen.getAllByTestId(/^log-row-/);
+    // 3 行进 Log：workflow_started + node_failed + node_started（均非过程事件）
+    expect(rows.length).toBe(3);
+    const texts = rows.map((r) => r.textContent ?? "");
+    // 第二轮 retry 可见：失败行 + 新 start 行
+    expect(texts.some((t) => t.includes("node FAILED"))).toBe(true);
+    expect(texts.some((t) => t.includes("node started"))).toBe(true);
+    // 第二轮的失败原因（blocked_on 文本）可见
+    expect(texts.some((t) => t.includes("blocked_on"))).toBe(true);
+  });
 });
 
 // ── SPEC web-presentation-refinement §P1：LogStream 降噪 classifier（过程事件不进 Log）──

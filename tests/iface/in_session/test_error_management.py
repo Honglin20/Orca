@@ -223,7 +223,8 @@ def test_recoverable_output_schema_mismatch_re_arms(tmp_path):
     assert result.retry_budget == 2
     assert result.error_kind == ERR_OUTPUT_SCHEMA_MISMATCH
     assert result.reason and ("output_schema" in result.reason or "非 JSON" in result.reason)
-    assert result.hint and "反馈" in result.hint
+    # 2026-08-04 §6.⑩ 改 hint 措辞：从「反馈」改为「重 arm 的 prompt 已含历次失败原因」。
+    assert result.hint and "重 arm" in result.hint and "剩余" in result.hint
     # emits：[nf, ns]，无 workflow_failed（未升格）
     types = [e.type for e in result.emits]
     assert types == ["node_failed", "node_started"]

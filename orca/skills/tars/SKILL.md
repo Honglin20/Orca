@@ -95,10 +95,11 @@ orca <wf-name> --inputs '<inputs JSON>'
    它的最终消息就是这步产出。🔴 **你自己不许 Read 节点指令文件**（撑爆上下文）——派子代理读。
 2. 子代理返回后，**先检查它的最终消息是不是 ask-user 哨兵**（见下【哨兵处理】）：
    - 是哨兵 → 走哨兵小循环：问用户 → 恢复**同一**子代理 → 拿真实产出。
-   - 不是哨兵（真实产出）→ 把产出**原样**作 `--output` 推进：
+   - 不是哨兵 → **一律**把最终消息原样作 `--output` 喂 `next`（**包括子代理自报的失败**——
+     引擎的哨兵检测 / schema 校验会判 ``recoverable``，见下【产出不合 schema / 自报失败】）：
 
      ```bash
-     orca next --run-id <run_id> --output '<子代理产出>'
+     orca next --run-id <run_id> --output '<子代理最终消息>'
      ```
 3. 读这条 stdout 的 JSON：
    - `"done": true` → workflow 完成，停。把最终结果总结给用户。
@@ -137,17 +138,16 @@ orca <wf-name> --inputs '<inputs JSON>'
 
 🔴 **哨兵绝不喂 `orca next`**（带 `_sentinel` 等私有字段会被节点 `output_schema` 拒）。只有消化后的
 真实产出才进 `--output`。
-🔴 真实产出含明显造假痕迹（`torch.randn` / `torch.rand` / `fake_data` / `dummy_calib` 等）→ 不喂 next，
-当失败处理（告知用户 + `orca stop`）。
 
-## 产出不合 schema（recoverable）/ 连续未派活（warn）
+## 产出不合 schema / 子代理自报失败（recoverable）/ 连续未派活（warn）
 
 `orca next` 回的信封可能带这两个字段（都是 run 存活，**不 stop、不重启**）：
 
-- `"recoverable": true` → 节点产出不合 `output_schema`（非 JSON / 缺字段 / 类型错）。把信封 `reason`
-  反馈给执行本节点的子代理重派（同 session 用 SendMessage 复用同一子代理；跨 session 续跑则派 fresh
-  子代理，并**把 tape 里累积的历次 reason 一并注入**首 prompt），拿修正产出再 `orca next --output`。
-  连续 3 次未过 engine 自动终态。
+- `"recoverable": true` → 节点产出不合 `output_schema`（非 JSON / 缺字段 / 类型错）**或**子代理自报失败
+  哨兵（信封 ``error_kind == "agent_blocked"``，同走 recoverable 重派分支）。**重 arm 的 prompt 已由
+  引擎注入历次失败原因（含本次）**——主 session 不再手动注入（见 2026-08-04 SPEC §4.3）。按你的判断
+  重派（同 session 用 SendMessage 复用同一子代理；跨 session 续跑则派 fresh 子代理），拿产出再
+  `orca next --output`。连续 3 次未过 engine 自动终态。
 - `"warn": true` → 连续多次 next 没派子代理 / 没回传 output 的提醒。正常派 Task 推进即可，或主动 `orca stop`。
 
 ## 单引号转义
@@ -195,7 +195,7 @@ orca next --run-id <run_id> --output 'it'\''s a good film'
 - [ ] `orca <wf> --inputs` 启动拿到 run_id
 - [ ] 每节点：派 Task 子代理读指令 → **检查最终消息是否哨兵** → 真实产出原样作 --output → `orca next --run-id`
 - [ ] 哨兵：捕获 task_id → 问用户 → 恢复**同一**子代理 → 循环到真实产出；连续 ≥3 次（MAX_ASK）fail loud；**哨兵绝不进 next**
-- [ ] `recoverable`：把 reason 反馈子代理重派（跨 session 注入累积 reason）→ `orca next --output`；连续 3 次自动终态
+- [ ] `recoverable`：重 arm prompt 已含失败历史（引擎注入）→ 按判断重派（复用/fresh）→ `orca next --output`；连续 3 次自动终态
 - [ ] `warn`：正常派 Task 推进或主动 `orca stop`
 - [ ] 单引号产出正确转义（`'\''`）
 - [ ] 循环到 `done:true` 后停止并总结

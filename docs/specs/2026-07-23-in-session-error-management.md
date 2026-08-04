@@ -1,6 +1,7 @@
 # SPEC: in-session 错误管理 —— recoverable vs irrecoverable 分级（主 session 自由度）
 
 > **状态**：定稿 **v2**（2026-07-23）。v1 经 spec-reviewer 对抗审视（conditional-pass，15 issue 全部源码核实为真），本版闭环全部 issue（E1–E15）+ 采纳 U1/U2/U3 推荐。进实现。
+> **被扩展**（2026-08-04）：本 SPEC 的 recoverable 框架（``RecoverableInSessionError`` / ``consecutive_fail_count`` / ``_recover_step_result`` / 升格 N=3）由 [`2026-08-04-in-session-failure-sentinel-and-injection.md`](./2026-08-04-in-session-failure-sentinel-and-injection.md) 复用并**收窄一个根因缺口**——「子代理自报失败」在本 SPEC 是未定义盲区（recoverable 集合只含 ``output_schema_mismatch``），2026-08-04 加 ``agent_blocked`` kind + 引擎注入失败历史。下方 §4.2 / §5(A)3 加注指向 2026-08-04。
 > **修订对象**：本 SPEC 有意修订 [`in-session-shell-design-draft.md`](./in-session-shell-design-draft.md) §2.5「失败 taxonomy」、D-v7-6（合规计数器）、D-v8.x-2（缺字段 fail loud）。凡与 §2.5 「统一 emit `workflow_failed`、不 emit `node_failed`」字面冲突处，以本 SPEC 为准。
 > **范围**：仅 in-session 路径（`orca iface/in_session/`：`step.py` / `cli.py` / `_step_io.py` / TARS skill）。`orca run`（drive_loop）/ executor 路径零改——它们已用 `node_failed`（非终态）模式，本 SPEC 只是让 in-session 与其对齐。
 
@@ -120,6 +121,7 @@
 **recoverable（重 arm）**：emit 一批 `[node_failed, node_started]`（B1 单次 write 原子化，与现状 next 的 `[nc, rt, ns]` 同批写模式）。
 
 - `node_failed` data **复用 executor 的 4-字段形态** `{kind, error_type, message, phase}`（`exec/interface.py:15`）；但 **`kind` 值是 in-session 专属字符串**（`output_schema_mismatch` 等），**故意不**是 `ErrorKind` 枚举成员（`exec/error_kinds.py:28-52`）——失败本体不同（in-session 是宿主协同错误，executor 是后端协议错误），不强求共享枚举（E6）。4 字段 inline 构造，不新增 lifecycle helper（YAGNI）。
+- **N4 加注（2026-08-04 §4.2 扩展）**：上述 4 字段为**下限**，可 additive 扩展——reducer 不读 data 字段（C1 不变量：`events/replay.py:152-154` 的 `node_failed` 分支只置 `node_status[node]=failed`）。2026-08-04 的 `agent_blocked` kind 额外携带可选 `blocked_on` / `tried`，additive 不破坏本 SPEC 形态。
 - reducer 投影：`node_failed` → `node_status[node]=failed`；紧接 `node_started` → `node_status[node]=running, current_node=node`。净效果：节点回 running，`state.status` 始终 `running`（从未进 failed）。**幂等可重放**（G2 守门）。
 
 **compliance-warn**：不 emit 任何 tape 事件（仅信封）；marker 的 `no_output_count` 仍按现有 RMW 累加（达 hard 10 才 emit `workflow_failed`）。
@@ -145,7 +147,8 @@
 2. 把信封 `reason` 反馈给节点子代理重派 → 拿新产出 → `orca next --run-id X --output '<新产出>'`。
 3. 循环到通过 / 撞 `retry_budget`（主 session 可在撞 engine 升格前主动 `stop` 放弃）。
    - **同 session**（task_id 还在）：CC `SendMessage(task_id)` / opencode `Task(task_id=)` 复用**同一**子代理（与【哨兵处理】同源句柄捕获）。
-   - **resume 跨 session**（E7）：原 task_id 已失，派 **fresh 子代理**；`retry_count` 从 tape 派生（跨 session 持续）；**主 session 须把 tape 中累积的 `node_failed` reason 历史注入 fresh 子代理首 prompt**（避免不公平升格——retry_count=2 时 fresh 子代理若只看到本次 reason 不知前两次为何失败，等于只剩 1 次机会）。这是 TARS skill 行为，实现计划须细化注入格式。
+   - **resume 跨 session**（E7）：原 task_id 已失，派 **fresh 子代理**；`retry_count` 从 tape 派生（跨 session 持续）。
+   - **失败历史注入（2026-08-04 §4.3 改为引擎注入）**：本 SPEC v2 原写「主 session 须把 tape 中累积的 `node_failed` reason 历史注入 fresh 子代理首 prompt」——该 model-mediated 路径已被 2026-08-04 收口为**引擎 deterministic 注入**：`_recover_step_result`（re-arm 路径）+ `advance_step` 幂等重发分支（cross-session resume）从 tape 合成失败历史（含本次失败）prepend 进重 arm 的 prompt。主 session 不再手动注入（P8 取代本节原描述）。
 
 **(B) compliance-warn 分支**（回复带 `warn:true`）：
 
