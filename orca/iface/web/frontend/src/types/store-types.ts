@@ -66,13 +66,17 @@ export interface LastResolved {
   answer: string;
 }
 
-// ── WS 客户端 → 后端消息（subscribe/unsubscribe/gate_response/resume）──────────────────
-// 对齐 orca/iface/web/ws_handler.py _dispatch 接收的 msg 形状 + D6 resume 扩展。
+// ── WS 客户端 → 后端消息（subscribe/unsubscribe/gate_response/resume/approval_*）────────
+// 对齐 orca/iface/web/ws_handler.py _dispatch 接收的 msg 形状 + D6 resume 扩展
+// + SPEC in-session-permission-hook §4.3 approval 反向通道。
 export type WsClientMessage =
   | { type: "subscribe"; run_id: string }
   | { type: "unsubscribe" }
   | { type: "gate_response"; gate_id: string; answer: string }
-  | { type: "resume"; run_id: string; since: number };
+  | { type: "resume"; run_id: string; since: number }
+  | { type: "request_approval_snapshot" }
+  | { type: "approval_respond"; approval_id: string; answer: "allow" | "deny" }
+  | { type: "approval_yolo"; yolo: boolean };
 
 // ── RunMeta（懒加载列表项，元数据，SPEC §0.1 铁律 2）──────────────────────────────
 // 后置 chunk 才用（RunsListPage 已删；保留供未来「runs 列表后置」复用）。

@@ -38,30 +38,29 @@
 
 ---
 
-## 当前：in-session 权限审批 Web 桥——实现完成 + 单测全绿，待 test-agent 真机 e2e
+## 当前：in-session 权限审批 Web 桥——已 commit + test-agent e2e 闭环，仅剩 §9 #2 真机 spike
 
 **任务**：SPEC [`in-session-permission-hook.md`](../specs/in-session-permission-hook.md) v3.2
-（spec-review conditional-pass）—— in-session workflow 运行期，宿主 CC 的 PermissionRequest →
+（3 轮 spec-review conditional-pass）—— in-session workflow 运行期，宿主 CC 的 PermissionRequest →
 web 审批卡 → 用户 allow/deny；超时默认 allow（可配）；前端 yolo 开关。
 
-**状态**：**实现完成 + 54 单测全绿（broker 24 / hook 15 / install 9 / ws 集成 6）+ 回归 100 测试绿 +
-前端 527 测试绿 + tsc + vite build 通过**。改动**未 commit**（用户明示）。
-- hook stdlib-only；ApprovalBroker 不碰 tape / handler / exec / events.bus（grep 守门 AST 验证）。
-- 失败语义（SPEC §7）：broker 不可达 → ask；HTTP 4xx/5xx → deny+stderr；非 JSON → deny+stderr；
-  timeout → policy（默认 allow）；disconnect → aborted（不发 allow）。
-- 实现 SPEC §3.2 P1 偏差：手写 timer task + disconnect poller + await fut 替代 ``asyncio.gather(wait_for, ...)``
-  避免 `wait_for` cancel 底层 future 触发 `InvalidStateError`（语义等价）。
+**状态**：**已 commit + 单测全绿 + test-agent 真机 e2e 闭环**（real uvicorn + real hook 子进程 + real WS）。
+- 7 组件：stdlib-only hook + ApprovalBroker（不碰 tape/gate/handler/exec/events.bus）+ 路由 + ws 第二 pump +
+  前端独立 approval store + install 扩展 `_install_cc_nudge` + doctor 心跳。
+- test-agent e2e 抓到 2 真 bug 并已修 + 防回归测试：**BUG A**（`_disconnect_poller` 缺 `await` → timeout
+  路径全断，已修）、**BUG B**（redact regex 空白截断 → Bearer token 泄露，已修）。64 单测 + 回归全绿。
+- 失败语义（SPEC §7）：broker 不可达→ask / HTTP 4xx-5xx→deny+stderr / 非 JSON→deny+stderr /
+  timeout→policy（默认 allow）/ disconnect→aborted。
 
 **待办**：
-- [x] 引擎 + 前端 + install + doctor + 单测。
-- [ ] **code-reviewer 一轮**（已分发，等结论 + 修全部反馈）。
-- [ ] **test-agent 真机 e2e**（SPEC §9 #2 spike 冻结前置）：交互式 CC + Task 子 agent 下
-      PermissionRequest 是否触发；stdin 字段名实证；broker-unreachable→ask；真实审批流端到端。
-- [ ] commit（待用户许可）。
+- [x] 实现 + 单测 + code-reviewer + test-agent e2e + 2 bug 修复 + commit。
+- [ ] **§9 #2 spike（唯一剩余，真机用户侧）**：交互式 CC + Task 子 agent 下 PermissionRequest 是否
+      自然触发 + stdin 字段名实证（自动化 `claude -p` 证不了，task 4 Q3 已证非交互不触发）。
+      失败 → SPEC §9 #6 fallback 切 PreToolUse（`block` 枚举 + tool-classification 扩 `readonly_tools`）。
 
 **必读**：
-- 本任务 release note `docs/releases/2026-08-05-in-session-permission-hook.md`
-- SPEC `docs/specs/in-session-permission-hook.md`（§3.1 hook / §3.2 broker / §4.3 WS / §4.4 install / §9 spike）
+- release note `docs/releases/2026-08-05-in-session-permission-hook.md`（r2 含 bug 修复）
+- SPEC `docs/specs/in-session-permission-hook.md`（§3.1 hook / §3.2 broker / §9 spike）
 
 ---
 

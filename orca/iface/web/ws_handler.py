@@ -31,6 +31,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from orca.events.bus import Subscription
 
 if TYPE_CHECKING:
+    from orca.iface.web.approval_broker import ApprovalBroker, ApprovalEvent
     from orca.iface.web.run_manager import RunHandle, RunManager
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,10 @@ class _RunSubscription:
     handle: RunHandle
     sub: Subscription
     pump: asyncio.Task
+    # SPEC in-session-permission-hook §4.3 P4：第二条 approval pump task（broker.subscribe(run_id)
+    # → 出站 queue）。approval_broker 可能为 None（旧构造路径），此时 approval pump 不起。
+    approval_pump: asyncio.Task | None = None
+    approval_queue: asyncio.Queue | None = None
 
 
 @dataclass
@@ -74,8 +79,10 @@ class WebServer:
         app.websocket("/ws")(web_server.ws_endpoint)
     """
 
-    def __init__(self, manager: RunManager):
+    def __init__(self, manager: RunManager, *, approval_broker=None):
         self._manager = manager
+        # SPEC in-session-permission-hook §4.3 P4：approval_broker 可选（旧路径 / 测试可缺省）。
+        self._approval_broker = approval_broker
         # WS → 当前订阅。一个 WS 同时只订阅一个 run（subscribe 切换覆盖旧订阅）。
         self._subs: dict[WebSocket, _RunSubscription] = {}
         # SPEC §13.2 B-4 WS connection registry：独立于 ``_subs``（控制帧广播遍历此 registry）。
@@ -196,6 +203,15 @@ class WebServer:
             # web-shell-v2 §0 D6：client 重连发 resume(run_id, since=last_seq_seen)；
             # server 重放 seq>since 的历史事件，再 subscribe（接 live 流）。
             await self._handle_resume(ws, msg.get("run_id"), msg.get("since"))
+        elif mtype == "request_approval_snapshot":
+            # SPEC in-session-permission-hook §4.3 P2/N5：connect / 重连后拉权威 pending 集。
+            await self._handle_approval_snapshot(ws)
+        elif mtype == "approval_respond":
+            # SPEC §4.2：WS 反向通道 resolve approval（与 /approval/respond HTTP 等价）。
+            await self._handle_approval_respond(ws, msg)
+        elif mtype == "approval_yolo":
+            # SPEC §3.3：toggle yolo 开关。
+            await self._handle_approval_yolo(ws, msg)
         else:
             logger.warning("ws 收到未知消息 type=%s（忽略）", mtype)
 
@@ -312,10 +328,46 @@ class WebServer:
             self._pump(conn, sub, run_id),
             name=f"orca-web-ws-pump-{run_id}",
         )
-        run_sub = _RunSubscription(handle=handle, sub=sub, pump=pump)
+        # SPEC in-session-permission-hook §4.3 P4：第二条 approval pump（broker.subscribe(run_id)
+        # → 出站 queue 串行化）。broker 不存在时 approval pump 不起（旧路径兼容）。
+        approval_queue: asyncio.Queue | None = None
+        approval_pump: asyncio.Task | None = None
+        if self._approval_broker is not None:
+            approval_queue = self._approval_broker.subscribe(run_id)
+            approval_pump = asyncio.create_task(
+                self._approval_pump(conn, approval_queue, run_id),
+                name=f"orca-web-ws-approval-pump-{run_id}",
+            )
+        run_sub = _RunSubscription(
+            handle=handle,
+            sub=sub,
+            pump=pump,
+            approval_pump=approval_pump,
+            approval_queue=approval_queue,
+        )
         self._subs[ws] = run_sub
         if conn is not None:
             conn.subscription = run_sub
+        # 订阅后立即推一份 approval_snapshot（pending + yolo）—— SPEC §4.3 P2/N5/N13。
+        # snapshot 权威：不在 snapshot 里的本地卡清掉（防 broker 重启后 stale）。
+        if self._approval_broker is not None and conn is not None:
+            snap = self._approval_broker.snapshot()
+            scoped = [a for a in snap["approvals"] if a["run_id"] == run_id]
+            try:
+                conn.queue.put_nowait(
+                    {
+                        "kind": "approval",
+                        "type": "approval_snapshot",
+                        "run_id": run_id,
+                        "approvals": scoped,
+                        "yolo": snap["yolo"],
+                    }
+                )
+            except asyncio.QueueFull:
+                logger.warning(
+                    "ws subscribe approval_snapshot queue full run_id=%s — dropping",
+                    run_id,
+                )
 
     async def _handle_gate_response(self, ws: WebSocket, msg: dict) -> None:
         """反向通道：gate_response → 当前订阅 run 的 gate_handler.resolve。
@@ -371,6 +423,99 @@ class WebServer:
         except Exception:  # noqa: BLE001 — pump 异常 fail loud 记 warning，不 crash server
             logger.warning("ws pump（run=%s）异常退出", run_id, exc_info=True)
 
+    async def _approval_pump(
+        self,
+        conn: _WSConnection | None,
+        queue: asyncio.Queue,
+        run_id: str,
+    ) -> None:
+        """SPEC §4.3 P4：第二条 approval pump。
+
+        从 ``broker.subscribe(run_id)`` 队列取 ``ApprovalEvent`` → enqueue 到 WS 出站 queue
+        （与 _pump 共用出站 queue 串行化）。**不经 handle.bus**（保持审批 / 事件总线分离）。
+
+        帧形态（SPEC §4.3）::
+
+            {kind:"approval", type:"approval_requested"|"approval_resolved"|..., <payload>, run_id}
+        """
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    return  # unsubscribe 哨兵（幂等清理）
+                payload = dict(event.payload)
+                payload["kind"] = "approval"
+                payload["type"] = event.kind
+                payload["run_id"] = run_id
+                if conn is None:
+                    return
+                try:
+                    conn.queue.put_nowait(payload)
+                except asyncio.QueueFull:
+                    logger.warning(
+                        "ws approval_pump queue full (run=%s) — dropping %s",
+                        run_id, event.kind,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — fail loud 记 warning
+            logger.warning(
+                "ws approval_pump（run=%s）异常退出", run_id, exc_info=True,
+            )
+
+    async def _handle_approval_snapshot(self, ws: WebSocket) -> None:
+        """SPEC §4.3 P2：connect / 重连后发 ``request_approval_snapshot`` → broker.snapshot。"""
+        if self._approval_broker is None:
+            return  # broker 未 wire（旧路径），no-op
+        conn = self._connections.get(ws)
+        if conn is None:
+            return
+        run_sub = self._subs.get(ws)
+        run_id = run_sub.handle.run_id if run_sub is not None else None
+        snap = self._approval_broker.snapshot()
+        scoped = (
+            [a for a in snap["approvals"] if a["run_id"] == run_id]
+            if run_id is not None
+            else snap["approvals"]
+        )
+        try:
+            conn.queue.put_nowait(
+                {
+                    "kind": "approval",
+                    "type": "approval_snapshot",
+                    "run_id": run_id,
+                    "approvals": scoped,
+                    "yolo": snap["yolo"],
+                }
+            )
+        except asyncio.QueueFull:
+            logger.warning("ws approval_snapshot queue full — dropping")
+
+    async def _handle_approval_respond(self, ws: WebSocket, msg: dict) -> None:
+        """SPEC §4.2：WS 反向通道 resolve approval（与 POST /approval/respond 等价）。"""
+        if self._approval_broker is None:
+            logger.warning("ws approval_respond 但 broker 未 wire（忽略）")
+            return
+        approval_id = msg.get("approval_id")
+        answer = msg.get("answer")
+        if not approval_id or answer is None:
+            logger.warning("ws approval_respond 缺 approval_id/answer（忽略）")
+            return
+        if answer not in ("allow", "deny"):
+            logger.warning("ws approval_respond 非法 answer=%r（忽略）", answer)
+            return
+        self._approval_broker.resolve(str(approval_id), str(answer), "web")
+
+    async def _handle_approval_yolo(self, ws: WebSocket, msg: dict) -> None:
+        """SPEC §3.3：toggle yolo（WS 反向通道，与 POST /approval/yolo 等价）。"""
+        if self._approval_broker is None:
+            logger.warning("ws approval_yolo 但 broker 未 wire（忽略）")
+            return
+        if "yolo" not in msg:
+            logger.warning("ws approval_yolo 缺 yolo 字段（忽略）")
+            return
+        self._approval_broker.set_yolo(bool(msg["yolo"]))
+
     async def _cancel_sub(self, ws: WebSocket) -> None:
         """cancel 当前 WS 的订阅 pump（若有）。幂等。"""
         run_sub = self._subs.pop(ws, None)
@@ -383,6 +528,21 @@ class WebServer:
                 await run_sub.pump
             except asyncio.CancelledError:
                 pass
+        # SPEC §4.3 P4：第二条 approval pump 同步 cancel + unsubscribe（防 broker queue 泄漏）。
+        if run_sub.approval_pump is not None:
+            if not run_sub.approval_pump.done():
+                run_sub.approval_pump.cancel()
+                try:
+                    await run_sub.approval_pump
+                except asyncio.CancelledError:
+                    pass
+        if (
+            self._approval_broker is not None
+            and run_sub.approval_queue is not None
+        ):
+            self._approval_broker.unsubscribe(
+                run_sub.handle.run_id, run_sub.approval_queue,
+            )
 
     async def _cleanup(self, ws: WebSocket) -> None:
         """WS 断开时的清理：cancel pump + 停 writer task + 移出 _subs/_connections。幂等。"""

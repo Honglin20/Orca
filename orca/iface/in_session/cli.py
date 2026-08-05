@@ -2156,6 +2156,52 @@ def _check_sidechain_daemon_liveness(rundir: Path) -> dict[str, Any]:
     }
 
 
+def _check_approval_broker() -> dict[str, Any]:
+    """SPEC in-session-permission-hook §8 N12：approval broker 心跳检查（hard=False）。
+
+    探测 ``http://ORCA_HOST:ORCA_PORT/approval/snapshot``：
+      - 200 → ``pass``（serve 在线，broker 已 wire）。
+      - 连接失败 → ``fail``（serve offline；hook 会 fail-open to native prompt，但 web 审批不可用）。
+      - 非预期状态 → ``unknown``。
+
+    hard=False：doctor ``ok`` 不因此 fail（broker 不在线时 in-session workflow 仍可跑，只是
+    权限请求退化为 CC 原生 prompt，SPEC §6）。
+    """
+    import urllib.error
+    import urllib.request
+
+    host = os.environ.get("ORCA_HOST", "127.0.0.1")
+    port = os.environ.get("ORCA_PORT", "7428")
+    url = f"http://{host}:{port}/approval/snapshot"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            if resp.status == 200:
+                return {
+                    "name": "approval_broker", "hard": False, "status": "pass",
+                    "detail": (
+                        f"PASS：broker 在线（{url}）。in-session 权限审批桥可用。"
+                    ),
+                }
+            return {
+                "name": "approval_broker", "hard": False, "status": "unknown",
+                "detail": f"broker 心跳返回 HTTP {resp.status}（{url}）。",
+            }
+    except urllib.error.URLError as e:
+        return {
+            "name": "approval_broker", "hard": False, "status": "fail",
+            "detail": (
+                f"FAIL：broker 不可达（{url}）：{getattr(e, 'reason', e)}。"
+                "用 `tars serve` 启动 web 后端恢复审批桥；不启动时权限请求退化为 CC 原生 prompt。"
+            ),
+        }
+    except Exception as e:  # noqa: BLE001 — 兜底
+        return {
+            "name": "approval_broker", "hard": False, "status": "unknown",
+            "detail": f"broker 心跳未预期异常（{url}）：{e}",
+        }
+
+
 @app.command()
 def doctor(
     log_level: str = typer.Option("INFO", "--log-level", help="INFO/DEBUG/WARN/ERROR"),
@@ -2290,6 +2336,10 @@ def doctor(
     # hard=False：守护死亡不阻塞 doctor（next 路径自动 respawn）；覆盖死亡，**不覆盖持续
     # iterate 失败**（§8#4）。与 sidechain_backend 互补：前者查静态基础设施，本 check 查运行时存活。
     checks.append(_check_sidechain_daemon_liveness(rundir))
+
+    # ⑦ approval_broker（可选诊断，SPEC in-session-permission-hook §8 N12）：web broker 心跳。
+    # hard=False：doctor 不因此 fail；serve 在线 pass / offline fail（提示用户启 ``tars serve``）。
+    checks.append(_check_approval_broker())
 
     # ok = 仅 ``hard=True`` 的检查无 fail。可选检查（diag/hook/sidechain）不计数。
     ok = all(c["status"] != "fail" for c in checks if c.get("hard"))

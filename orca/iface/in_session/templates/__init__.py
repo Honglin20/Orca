@@ -20,6 +20,13 @@
   ``tool.execute.after`` 钩子启动时各 read 一次，做传输层分类（决定是否注入提示文本），非编排
   状态机判断（D-v7-1 不禁；判例 §3 注脚 P2）。install 时拷到 cc 家族 ``<root>/hooks/`` 与
   opencode 家族 ``<root>/plugins/`` 下（与脚本/plugin 同目录）。
+- ``orca-permission-hook.py`` —— CC PermissionRequest 审批桥 hook（SPEC
+  in-session-permission-hook §3.1）。**stdlib-only**（urllib/json/os/sys/time/socket），跑在 CC
+  spawn 子进程（可能无 Orca venv）。读 stdin（容错多候选字段名）→ POST ``/approval`` → emit
+  ``{decision:{behavior}}``。失败语义与 ``hook_script.py`` **有意反转**：broker 不可达→ask（fail-open
+  to CC native）/ HTTP 4xx-5xx→deny+stderr / 非 JSON→deny+stderr / timeout→policy（默认 allow）。
+  broker 侧 ``ApprovalBroker``（``orca/iface/web/approval_broker.py``）做 orca-aware 判定（活跃 run
+  反查 + yolo + first-wins + late respond 审计），**不碰 tape/gate/handler/exec/events.bus**。
 
 v5 §8 step 2b：``cc_hooks.py``（CC 路 A 的 Stop/PostToolUse hook 脚本生成）已删——A 路径退场，
 B 路径（主 session 自调 ``orca next``）统一。``start`` 命令同 commit 删除。**注**：现行

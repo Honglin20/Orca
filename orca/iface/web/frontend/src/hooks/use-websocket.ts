@@ -33,6 +33,7 @@
 
 import { useEffect } from "react";
 import { useWorkflowStore } from "@/stores/workflow-store";
+import { useApprovalStore } from "@/stores/approval-store";
 import { useWsConnectionStore } from "./ws-connection-store";
 import type { WebEvent } from "@/types/events";
 import type { WsClientMessage } from "@/types/store-types";
@@ -65,6 +66,7 @@ export function useWebSocket(
   deps: WebSocketDeps = {}
 ): void {
   const processEvent = useWorkflowStore((s) => s.processEvent);
+  const ingestApprovalFrame = useApprovalStore((s) => s.ingestFrame);
 
   useEffect(() => {
     if (!runId) return;
@@ -182,6 +184,14 @@ export function useWebSocket(
       }
     };
 
+    /** SPEC in-session-permission-hook §4.3 P2：connect / 重连后请求权威 approval snapshot。 */
+    const sendRequestApprovalSnapshot = (sock: WebSocket) => {
+      if (sock.readyState === READY_OPEN) {
+        const msg: WsClientMessage = { type: "request_approval_snapshot" };
+        sock.send(JSON.stringify(msg));
+      }
+    };
+
     const open = () => {
       socket = createSocket(wsUrl);
       const wasReconnect = everConnected;
@@ -210,6 +220,10 @@ export function useWebSocket(
           if (wasReconnect) {
             sendSubscribe(socket!);
           }
+          // SPEC in-session-permission-hook §4.3 P2/B-5：connect / 重连后请求权威 approval
+          // snapshot，清掉 broker 重启后 stale 本地卡（N13）。无论 initial / reconnect 都发：
+          // subscribe 时 server 也会自动推 snapshot，但显式 request 兜底 lazy-mount 失败场景。
+          sendRequestApprovalSnapshot(socket!);
         } else if (wasReconnect) {
           // F1：loading/idle + reconnect → 不双发（loadStatus 优先），仍走 listener 路径
           // （loading 期 server 一般未重启，lazy-mount 不需要；listener 后续 fire 仅 sendResume）。
@@ -232,6 +246,13 @@ export function useWebSocket(
         // processEvent，只清 watchdog。避免 idle 场景下「无事件 = resume 失败」的误判。
         if (parsed.type === "resume_ok") {
           if (parsed.run_id === runId) clearResumeWatchdog();
+          return;
+        }
+        // SPEC in-session-permission-hook §4.3：approval 帧（``kind === "approval"``）是
+        // broker 直推的非 tape 事件（权限决策 ≠ workflow 事件）。单独路由到 approval store，
+        // **不**进 processEvent（避免污染 workflow reducer / 触发 watchdog 误清逻辑）。
+        if (parsed.kind === "approval") {
+          ingestApprovalFrame(parsed);
           return;
         }
         // 业务事件：run_id 匹配过滤 + 清 watchdog（任一事件 = resume 成功）。
@@ -281,5 +302,5 @@ export function useWebSocket(
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId, processEvent]);
+  }, [runId, processEvent, ingestApprovalFrame]);
 }

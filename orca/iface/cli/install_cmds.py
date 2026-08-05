@@ -147,6 +147,11 @@ def _cc_nudge_script_src() -> Path:
     return Path(str(files("orca.iface.in_session.templates"))) / "cc_nudge.sh"
 
 
+def _cc_permission_hook_src() -> Path:
+    """随包 CC PermissionRequest 审批桥 hook（SPEC in-session-permission-hook §3.1）。"""
+    return Path(str(files("orca.iface.in_session.templates"))) / "orca-permission-hook.py"
+
+
 def _tool_classification_src() -> Path:
     """随包工具分类单一真相源（SPEC posttooluse-rogue-guard §5）。
 
@@ -341,20 +346,22 @@ def _install_opencode(hr: HostRoot) -> dict[str, Any]:
 
 
 def _install_cc_nudge(hr: HostRoot) -> dict[str, Path]:
-    """CC 家族（cc + cac）nudge Stop + PostToolUse guard hook 落地（v5 §4.4 + SPEC
-    posttooluse-rogue-guard，step 6：CAC≡cc，结构相同）。
+    """CC 家族（cc + cac）nudge Stop + PostToolUse guard hook + PermissionRequest 审批桥
+    hook 落地（v5 §4.4 + SPEC posttooluse-rogue-guard + SPEC in-session-permission-hook）。
 
     服务整个 cc 家族（cc→``.claude``、cac→``.cac``），全路径 root-relative，无硬编码 dotdir：
     - 拷 ``cc_nudge.sh`` → ``<root>/hooks/orca-nudge.sh``（单脚本双事件，按 hook_event_name 分支）。
+    - 拷 ``orca-permission-hook.py`` → ``<root>/hooks/``（PermissionRequest 审批桥，stdlib-only）。
     - 拷 ``tool-classification.json`` → ``<root>/hooks/``（PostToolUse 分支的工具分类单一真相源）。
-    - 合并 ``<root>/settings.json`` 的 ``hooks.Stop``：加一条 ``command: bash <abs>/orca-nudge.sh``
-      （去重，保已有 hooks / 其他键）。
-    - 合并 ``<root>/settings.json`` 的 ``hooks.PostToolUse``：matcher 锚定
-      ``^(Write|Edit|NotebookEdit|Bash|PowerShell)$``，同 command（去重）。
+    - 合并 ``<root>/settings.json`` 的 ``hooks.Stop`` / ``hooks.PostToolUse`` / ``hooks.PermissionRequest``
+      （均去重关键字区分；保已有 hooks / 其他键）。
 
-    nudge = Stop hook 提醒（``decision:block`` 注入「请调 orca next」）；guard = PostToolUse
-    事后告警（``additionalContext`` 纯提示，不阻止）。**两者绝不调 next**（B 路径铁律）。
-    脚本自含 60s/30s 节流 + marker 扫描 + 工具分类；settings.json 只声明引用，零业务逻辑（守门 D-v7-1）。
+    nudge = Stop hook 提醒；guard = PostToolUse 事后告警；permission = PermissionRequest 审批桥。
+    三者**绝不调 next**（B 路径铁律不变，permission 桥只把决策转给 web）。
+
+    SPEC in-session-permission-hook §3.4 / §4.4：CC hook ``timeout=86400``（永不误杀一个等人的
+    审批 hook）；hook 运行 env = ``ORCA_PORT`` / ``ORCA_HOST`` / ``ORCA_APPROVAL_TIMEOUT`` /
+    ``ORCA_APPROVAL_TIMEOUT_POLICY``（SPEC §4.4 末段）。
     """
     written: dict[str, Path] = {}
     script_dst = hr.root / "hooks" / "orca-nudge.sh"
@@ -366,6 +373,17 @@ def _install_cc_nudge(hr: HostRoot) -> dict[str, Path]:
         pass
     written["nudge_script"] = script_dst
 
+    # SPEC in-session-permission-hook §3.1 / §4.4 / N8：PermissionRequest 审批桥 hook（stdlib-only）。
+    permission_dst = hr.root / "hooks" / "orca-permission-hook.py"
+    _atomic_write_with_backup(
+        permission_dst, _cc_permission_hook_src().read_text(encoding="utf-8"),
+    )
+    try:
+        permission_dst.chmod(0o755)
+    except OSError:
+        pass
+    written["permission_hook"] = permission_dst
+
     # tool-classification.json（SPEC §5 单一真相源，PostToolUse 分支启动时 read）。
     cls_dst = hr.root / "hooks" / "tool-classification.json"
     _atomic_write_with_backup(cls_dst, _tool_classification_src().read_text(encoding="utf-8"))
@@ -376,6 +394,14 @@ def _install_cc_nudge(hr: HostRoot) -> dict[str, Path]:
     cmd = f"bash {script_dst.expanduser().resolve()}"
     # PostToolUse matcher（SPEC §7.2 锚定）：限定关心的工具，减少无谓 spawn；脚本内再做 §5 精分类。
     posttooluse_matcher = "^(Write|Edit|NotebookEdit|Bash|PowerShell)$"
+    # SPEC in-session-permission-hook §3.4 / §4.4：PermissionRequest 命令 + CC-side timeout。
+    permission_cmd = f"python {permission_dst.expanduser().resolve()}"
+    permission_timeout = 86400  # 24h，传输层永不误杀一个等人的审批 hook
+    # SPEC §4.4 末段：hook 运行 env（与 settings.json 同事务写入；env 在 hook 的 spawn env 上）。
+    orca_port = os.environ.get("ORCA_PORT", "7428")
+    orca_host = os.environ.get("ORCA_HOST", "127.0.0.1")
+    approval_timeout = os.environ.get("ORCA_APPROVAL_TIMEOUT", "600")
+    approval_policy = os.environ.get("ORCA_APPROVAL_TIMEOUT_POLICY", "allow")
 
     def _add_hooks(data: dict) -> None:
         hooks = data.setdefault("hooks", {})
@@ -427,6 +453,39 @@ def _install_cc_nudge(hr: HostRoot) -> dict[str, Path]:
             ptu_list.append({
                 "matcher": posttooluse_matcher,
                 "hooks": [{"type": "command", "command": cmd}],
+            })
+
+        # ── PermissionRequest hook（SPEC in-session-permission-hook §4.4，新加）──
+        pr_list = hooks.setdefault("PermissionRequest", [])
+        if not isinstance(pr_list, list):
+            typer.echo(
+                f'  ⚠ settings.json 的 "hooks.PermissionRequest" 非 array（原值：{pr_list!r}），'
+                f"已重置为 []。",
+                err=True,
+            )
+            pr_list = []
+            hooks["PermissionRequest"] = pr_list
+        # 去重：entry 的 command 含 ``orca-permission`` 即视为已声明（关键字 ``orca-permission``
+        # 区分于 ``orca-nudge``，两类 hook 同 settings.json 共存不撞去重）。
+        already_pr = any(
+            "orca-permission" in str(entry.get("hooks", []))
+            for entry in pr_list
+            if isinstance(entry, dict)
+        )
+        if not already_pr:
+            pr_list.append({
+                "hooks": [{
+                    "type": "command",
+                    "command": permission_cmd,
+                    "timeout": permission_timeout,
+                    # hook spawn env（SPEC §4.4）。
+                    "env": {
+                        "ORCA_PORT": orca_port,
+                        "ORCA_HOST": orca_host,
+                        "ORCA_APPROVAL_TIMEOUT": approval_timeout,
+                        "ORCA_APPROVAL_TIMEOUT_POLICY": approval_policy,
+                    },
+                }],
             })
 
     _merge_json_file(settings_path, _add_hooks)

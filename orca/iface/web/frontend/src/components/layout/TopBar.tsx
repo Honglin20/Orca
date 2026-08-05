@@ -17,6 +17,7 @@ import { useElapsedNow } from "@/hooks/use-elapsed-tick";
 import { selectWorkflowElapsed, formatElapsed } from "@/selectors";
 import { StatusIcon } from "@/components/icons";
 import { statusColor } from "./status-style";
+import { YoloToggle } from "@/components/gate/YoloToggle";
 import { useWsStatus, type WsConnStatus } from "@/hooks/use-ws-status";
 import { currentTheme, nextTheme, setTheme, type Theme } from "@/hooks/use-theme";
 
@@ -116,8 +117,11 @@ export function TopBar({ runId }: { runId?: string }) {
         <Timer size={14} strokeWidth={1.5} aria-hidden />
         {workflowElapsed !== null ? formatElapsed(workflowElapsed, "tenths") : "—"}
       </span>
-      {/* 右侧：spacer + WS 指示 + 主题开关 */}
+      {/* 右侧：spacer + yolo 开关 + WS 指示 + 主题开关 */}
       <span className="ml-auto flex items-center gap-3">
+        {/* SPEC in-session-permission-hook §3.3：yolo 全局开关。仅在已订阅 run 时显示
+            （TopBar 无 runId 时不渲染 yolo——列表页不涉及审批）。 */}
+        {runId && <YoloToggle />}
         <span
           className="inline-flex items-center gap-1"
           data-testid="top-ws"

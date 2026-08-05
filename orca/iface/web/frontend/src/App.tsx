@@ -8,10 +8,11 @@
 // GateDialog 挂在根（SPEC §5.6）：human_decision_requested → 中心模态浮层。
 
 import { lazy, Suspense } from "react";
-import { BrowserRouter, Route, Routes, Navigate } from "react-router-dom";
+import { BrowserRouter, Route, Routes, Navigate, useParams } from "react-router-dom";
 import { RunDetailPage } from "@/components/pages/RunDetailPage";
 import { RunListPage } from "@/components/pages/RunListPage";
 import { GateDialog } from "@/components/gate/GateDialog";
+import { ApprovalDialog } from "@/components/gate/ApprovalDialog";
 import { initTheme } from "@/hooks/use-theme";
 
 // D1（plan idempotent-churning-lampson）：workflow 浏览页 lazy 拆独立 chunk——CodeViewer
@@ -32,11 +33,17 @@ const WorkflowBrowsePage = lazy(() =>
 initTheme();
 
 function SingleRunRoot({ children }: { children: React.ReactNode }) {
+  // SPEC in-session-permission-hook §4.3：ApprovalDialog 按 URL runId 取（route-scoped），
+  // broker 已 run-scoped 投递，前端再用 URL 双保险过滤。
+  const { runId } = useParams<{ runId: string }>();
   return (
     <div className="flex h-screen flex-col">
       {children}
       {/* GateDialog 挂在 app 根（SPEC §5.6）：fixed inset-0，覆盖三栏。 */}
       <GateDialog />
+      {/* ApprovalDialog 挂在 app 根（SPEC in-session-permission-hook §4.3）：独立 store，
+          非 workflow gate；按 URL runId 渲染当前 run 的 pending。 */}
+      <ApprovalDialog runId={runId} />
     </div>
   );
 }

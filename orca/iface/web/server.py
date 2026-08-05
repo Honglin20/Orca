@@ -27,6 +27,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from orca.iface.web.routes import (
+    build_approval_router,
     build_attach_router,
     build_gate_router,
     build_projects_router,
@@ -35,6 +36,7 @@ from orca.iface.web.routes import (
     build_workflows_router,
 )
 from orca.iface.web._auth import install_auth_middleware
+from orca.iface.web.approval_broker import ApprovalBroker
 from orca.iface.web.ws_handler import WebServer
 
 if TYPE_CHECKING:
@@ -49,12 +51,20 @@ _STATIC_DIR = Path(__file__).parent / "static"
 def create_app(manager: RunManager) -> FastAPI:
     """构建 FastAPI app（SPEC §1.2 §3）。
 
-    - lifespan：shutdown 时 ``manager.shutdown``（清理资源，无 leak）。
-    - 路由：``/api/runs``（懒加载）+ ``/api/run`` + ``/gate`` + ``/gate/respond`` + ``/ws``。
+    - lifespan：shutdown 时 ``approval_broker.shutdown`` + ``manager.shutdown``（清理资源，无 leak）。
+    - 路由：``/api/runs``（懒加载）+ ``/api/run`` + ``/gate`` + ``/approval`` + ``/ws``。
     - 静态前端：``/`` 挂 StaticFiles（phase 9b 构建产物；9a 占位）。
 
     manager 注入（不全局），便于测试隔离。
+
+    **SPEC §3.2 B-12 偏差说明**：SPEC 字面是「lifespan startup 构造 broker」。本实现把 broker
+    构造提前到 ``create_app`` 顶层，shutdown 仍在 lifespan finally——功能等价（broker 生命周期仍绑
+    app 生命周期；startup 前无请求路径会触达 broker）。这样路由与 WS 注入只需一次（避免 lazy
+    ``app.state`` 取值 + 中间代理对象的复杂度，KISS）。reviewer 接受为「实际行为无差」。
     """
+
+    # SPEC §3.2 B-12：进程级 singleton broker，与 app 同生命周期；shutdown 清理 pending。
+    approval_broker = ApprovalBroker(manager.registry)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -62,11 +72,17 @@ def create_app(manager: RunManager) -> FastAPI:
         try:
             yield
         finally:
-            # shutdown：等在跑 run 到终态 + stop 各自 gate_handler（无 leaked task）。
+            # shutdown：approval broker 先清 pending（让 hook 早日 TCP 失败走 ask），
+            # 再 manager.shutdown 等在跑 run 到终态 + stop 各自 gate_handler（无 leaked task）。
+            try:
+                await approval_broker.shutdown()
+            except Exception:  # noqa: BLE001 — broker shutdown 异常不阻断 manager 收尾
+                logger.warning("approval_broker.shutdown 异常", exc_info=True)
             await manager.shutdown()
 
     app = FastAPI(title="orca-web", lifespan=lifespan)
     app.state.manager = manager
+    app.state.approval_broker = approval_broker
     # ``tars close`` 的 ``/api/shutdown`` 端点经此句柄触发 ``should_exit``；run_server /
     # _serve_and_run_inprocess 创建 uvicorn.Server 后覆写为真实句柄。None = 未 wire（端点
     # 取不到时返 500 fail loud，见 attach.py::shutdown）。
@@ -74,18 +90,19 @@ def create_app(manager: RunManager) -> FastAPI:
     # SPEC §13.1 M-1 / AC19：全局 no-op auth middleware（多用户接口预留，当前不校验）。
     install_auth_middleware(app)
 
-    # 懒加载 REST + gate（多 run 分发）+ attach（X — read-only tail-follow）+ health。
+    # 懒加载 REST + gate（多 run 分发）+ attach（X — read-only tail-follow）+ approval + health。
     app.include_router(build_runs_router(manager))
     app.include_router(build_run_router(manager))
     app.include_router(build_gate_router(manager))
+    app.include_router(build_approval_router(approval_broker))
     app.include_router(build_attach_router(manager))
     # SPEC §13.3 P3：stale projects 只读端点（无 manager 依赖）。
     app.include_router(build_projects_router())
     # workflow / agent 资源只读浏览（无 manager 依赖；plan idempotent-churning-lampson）。
     app.include_router(build_workflows_router())
 
-    # WS 单通道（按需订阅）。
-    web_server = WebServer(manager)
+    # WS 单通道（按需订阅）。approval_broker 注入让 ws_handler 加第二条 approval pump。
+    web_server = WebServer(manager, approval_broker=approval_broker)
     app.state.web_server = web_server
     app.websocket("/ws")(web_server.ws_endpoint)
 
