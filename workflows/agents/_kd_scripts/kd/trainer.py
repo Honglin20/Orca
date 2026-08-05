@@ -99,6 +99,7 @@ class TrainConfig:
     batch_size: int = 4
     device: str = "auto"                      # "auto" | "cpu" | "cuda" | ...
     seed: int = 0
+    max_batches: int = 0                      # 0 ⇒ unlimited (full-epoch training); >0 ⇒ smoke cap, break inner loop after N batches/epoch
 
     # identity / outputs
     variant_id: str = "model"                 # = experiment id; drives runs/<exp>/ + ckpt variant_id
@@ -216,6 +217,7 @@ class KDTrainer:
     ) -> tuple[float, int]:
         epoch_loss = 0.0
         n_batches = 0
+        max_batches = self.cfg.max_batches
         for x, y in iter(dl):
             x = x.to(device)
             y = y.to(device)
@@ -226,6 +228,8 @@ class KDTrainer:
             opt.step()
             epoch_loss += float(loss.detach())
             n_batches += 1
+            if max_batches and n_batches >= max_batches:
+                break
         return epoch_loss, n_batches
 
     # --------------------------------------------------------- distill mode
@@ -342,6 +346,7 @@ class KDTrainer:
     ) -> tuple[float, int]:
         epoch_loss = 0.0
         n_batches = 0
+        max_batches = self.cfg.max_batches
         for x, y in iter(dl):
             x = x.to(device)
             y = y.to(device)
@@ -357,6 +362,8 @@ class KDTrainer:
                 ema.update(wrapper.student)
             epoch_loss += float(loss.detach())
             n_batches += 1
+            if max_batches and n_batches >= max_batches:
+                break
         return epoch_loss, n_batches
 
     # ------------------------------------------------------------- eval mode

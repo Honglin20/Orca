@@ -923,6 +923,131 @@ def test_train_pipeline_entry_runs_teacher_end_to_end(leaves_dir: Path, capsys):
 
 
 # ---------------------------------------------------------------------------
+# max_batches smoke cap (breaks the per-epoch inner loop after N batches;
+# default 0 = unlimited = full-epoch training).  Verified by spying on
+# ``compute_loss`` invocations — exactly N calls ⇒ exactly N batches ran.
+# ---------------------------------------------------------------------------
+def _patch_leaves_load_with_loss_counter(monkeypatch, call_count: dict):
+    """Patch ``_leaves.load`` so the loaded leaves' compute_loss increments ``call_count['n']``.
+
+    Used by the max_batches tests to assert the inner loop ran an exact number
+    of batches.  We monkeypatch the module-level ``_leaves.load`` so KDTrainer
+    — which calls ``_leaves.load(<artifacts_dir>/user)`` — picks up the spy.
+    The spy is installed by mutating ``leaves.loss_module['compute_loss']``
+    (the backing dict the ``compute_loss`` property reads from — the property
+    itself has no setter).
+    """
+    real_load = _leaves.load
+
+    def spying_load(user_dir):
+        leaves = real_load(user_dir)
+        # Force lazy exec, then override the function on the underlying module.
+        loss_mod = leaves.loss_module._exec()
+        real_compute_loss = loss_mod.compute_loss
+
+        def spy(s_out, y):
+            call_count["n"] += 1
+            return real_compute_loss(s_out, y)
+
+        loss_mod.compute_loss = spy
+        return leaves
+
+    monkeypatch.setattr(_leaves, "load", spying_load)
+
+
+def test_max_batches_caps_teacher_inner_loop(leaves_dir: Path, capsys, monkeypatch):
+    """``max_batches=3`` must break the teacher inner loop after exactly 3 batches.
+
+    The default data leaf yields 4 batches/epoch — so capping at 3 must produce
+    exactly 3 ``compute_loss`` invocations per epoch.  This is the smoke-cap
+    guarantee that lets ``train_script_verify`` run sub-second on real MNIST.
+    """
+    call_count = {"n": 0}
+    _patch_leaves_load_with_loss_counter(monkeypatch, call_count)
+
+    cfg = _basic_cfg(leaves_dir, "teacher", epochs=1, eval_every=0)
+    cfg.max_batches = 3
+    rc = KDTrainer(cfg).train()
+    assert rc == 0
+    capsys.readouterr()  # drain
+    assert call_count["n"] == 3, (
+        f"max_batches=3 should yield exactly 3 compute_loss calls, got {call_count['n']}"
+    )
+
+
+def test_max_batches_zero_runs_full_epoch(leaves_dir: Path, capsys, monkeypatch):
+    """``max_batches=0`` (default) must NOT cap — full 4 batches/epoch run.
+
+    This guards the invariant that the smoke flag is opt-in and never silently
+    truncates real training (Rule 12: real training must not be silently cut).
+    """
+    call_count = {"n": 0}
+    _patch_leaves_load_with_loss_counter(monkeypatch, call_count)
+
+    cfg = _basic_cfg(leaves_dir, "teacher", epochs=1, eval_every=0)
+    assert cfg.max_batches == 0  # default
+    rc = KDTrainer(cfg).train()
+    assert rc == 0
+    capsys.readouterr()
+    # Default data leaf = 4 batches/epoch.
+    assert call_count["n"] == 4, (
+        f"max_batches=0 should yield all 4 batches, got {call_count['n']}"
+    )
+
+
+def test_max_batches_caps_distill_inner_loop(leaves_dir: Path, capsys, monkeypatch):
+    """``max_batches=2`` caps the distill inner loop after exactly 2 batches.
+
+    Symmetry with the teacher cap — both inner loops must honor the flag
+    (the smoke cap is useless if distill silently ignores it).
+    """
+    cache = _build_teacher_cache(leaves_dir)
+    call_count = {"n": 0}
+    _patch_leaves_load_with_loss_counter(monkeypatch, call_count)
+
+    cfg = _basic_cfg(leaves_dir, "distill", epochs=1, eval_every=0)
+    cfg.teacher_cache = cache
+    cfg.max_batches = 2
+    rc = KDTrainer(cfg).train()
+    assert rc == 0
+    capsys.readouterr()
+    # distill calls compute_loss indirectly via kd_loss; we spy on the leaf
+    # callable which is closed over by build_kd_loss.  Expect 2 invocations.
+    assert call_count["n"] == 2, (
+        f"max_batches=2 should yield exactly 2 compute_loss calls, got {call_count['n']}"
+    )
+
+
+def test_train_pipeline_entry_max_batches_flag_parsed():
+    """``--max_batches`` CLI flag flows through argparse → TrainConfig.max_batches."""
+    from train_pipeline import parse_args, _resolve_cfg
+
+    args = parse_args([
+        "--mode", "teacher",
+        "--artifacts_dir", "fake_user_root",
+        "--experiment", "smoke",
+        "--max_batches", "20",
+    ])
+    assert args.max_batches == 20
+    cfg = _resolve_cfg(args)
+    assert cfg.max_batches == 20
+
+
+def test_train_pipeline_entry_max_batches_default_zero():
+    """Omitting ``--max_batches`` must default to 0 (unlimited = full training)."""
+    from train_pipeline import parse_args, _resolve_cfg
+
+    args = parse_args([
+        "--mode", "teacher",
+        "--artifacts_dir", "fake_user_root",
+        "--experiment", "full",
+    ])
+    assert args.max_batches is None
+    cfg = _resolve_cfg(args)
+    assert cfg.max_batches == 0
+
+
+# ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 def _load_model(leaves_dir: Path) -> nn.Module:

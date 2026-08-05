@@ -22,7 +22,7 @@ tools: [bash, read, write, edit, glob, grep, task]
 
 **严禁**：
 - ❌ 修叶子或引擎代码（校验 agent，不改产物）；
-- ❌ 跑全量训练（smoke 只 1 epoch + batch_size=2）；
+- ❌ 跑全量训练（smoke 用 `--max_batches 20` 限 batch 数；不限 epoch/dataset，真实数据也秒级）；
 - ❌ 降级 pass（issues 非空却 verified=true）。
 
 **失败 = fail loud 阻塞**：issues 非空 → verified=false，agent 退非零（这是配置错误非业务波动，
@@ -117,7 +117,7 @@ echo "PARSED step2: fidelity PASS + AST + kind-direction 全过"
 ## step 3 执行：引擎 smoke（固定入口 + 合成 teacher ckpt + baseline 当 model）
 
 > 用 ``flatten.output.baseline_contract_path`` 当 student_model_path 跑：
->   1) ``--mode teacher`` 1 epoch（batch_size=2）→ 验叶子 loader/loss/optim 在引擎里能跑通；
+>   1) ``--mode teacher`` 1 epoch（batch_size=2，``--max_batches 20`` 限 batch 数）→ 验叶子 loader/loss/optim 在引擎里能跑通；
 >   2) ``--mode eval`` → 验 eval_metric 能跑通 + emit STUDENT_ACCURACY 协议键。
 > eval student_ckpt 用 step 3a 产出的 teacher ckpt（read-only，不重训）。
 
@@ -132,11 +132,11 @@ SMOKE_DIR="$(mktemp -d /tmp/kd_verify_XXXX)"
 SMOKE_CKPT="$SMOKE_DIR/smoke_teacher.pth"
 export ORCA_KD_SCRIPTS_DIR="$(dirname "$TRAIN_PIPELINE")"
 
-# 3a) teacher mode 1 epoch
+# 3a) teacher mode 1 epoch, cap batches so smoke stays sub-second on real data
 OUT_A="$(python3 "$TRAIN_PIPELINE" \
   --mode teacher --artifacts_dir "$PER_RUN" \
   --model_path "$BASELINE" --build_cfg '{}' \
-  --epochs 1 --batch_size 2 --device "{{ inputs.device }}" \
+  --epochs 1 --batch_size 2 --max_batches 20 --device "{{ inputs.device }}" \
   --out_ckpt "$SMOKE_CKPT" --experiment verify_smoke 2>&1)"
 RC_A=$?
 echo "$OUT_A"
@@ -148,13 +148,15 @@ fi
 echo "$OUT_A" | grep -q '^TEACHER_CKPT:' || { echo "FAIL: teacher 未 emit TEACHER_CKPT" >&2; rm -rf "$SMOKE_DIR"; exit 2; }
 echo "$OUT_A" | grep -q '^TASK_LOSS_FINAL:' || { echo "FAIL: teacher 未 emit TASK_LOSS_FINAL" >&2; rm -rf "$SMOKE_DIR"; exit 2; }
 
-# 3b) eval mode read-only
+# 3b) eval mode read-only (max_batches accepted for CLI parity; eval delegates
+# batching to the eval_metric leaf, which does a single forward pass)
 OUT_B="$(python3 "$TRAIN_PIPELINE" \
   --mode eval --artifacts_dir "$PER_RUN" \
   --student_model_path "$BASELINE" --build_cfg '{}' \
   --student_ckpt "$SMOKE_CKPT" \
   --accuracy_baseline "{{ inputs.accuracy_baseline }}" \
   --accuracy_baseline_kind "{{ inputs.accuracy_baseline_kind }}" \
+  --max_batches 20 \
   --device "{{ inputs.device }}" --experiment verify_smoke 2>&1)"
 RC_B=$?
 echo "$OUT_B"
@@ -178,7 +180,7 @@ spawn workflow-verifier，传入：
 - checklists: ``workflows/agents/kd-train-script/references/workflow-checklists/train_pipeline_script_generation/{01_training,02_cli}.md``
 - artifacts: ``{{ gen_train_script.output.leaves_dir }}/{loss,data,eval,optim}.py`` +
   ``{{ gen_train_script.output.run_config_path }}`` + ``{{ gen_train_script.output.run_sh_path }}``
-- cross-refs: 用户原 train.py / eval 脚本 + ``workflows/agents/_kd_scripts/CONTRACTS.md`` §6
+- cross-refs: 用户原 train.py / eval 脚本 + ``workflows/agents/_kd_scripts/CONTRACTS.md``
 
 收集 verifier verdict：
 - ``VERDICT: all-pass``（无 Fixed 段）→ 进 emit；

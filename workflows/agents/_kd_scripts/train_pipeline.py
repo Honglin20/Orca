@@ -116,6 +116,7 @@ def _resolve_cfg(args: argparse.Namespace) -> TrainConfig:
         batch_size=int(pick(args.batch_size, "batch_size", 4)),
         device=args.device,
         seed=int(pick(args.seed, "seed", 0)),
+        max_batches=int(pick(args.max_batches, "max_batches", 0)),
         variant_id=args.experiment or args.variant_id or args.mode,
         out_ckpt=_coerce_path(args.out_ckpt),
         resume_ckpt=_coerce_path(args.resume),
@@ -174,6 +175,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--lr", type=float, default=None)
     p.add_argument("--batch_size", type=int, default=None)
+    p.add_argument(
+        "--max_batches", type=int, default=None,
+        help="smoke cap: break per-epoch inner loop after N batches (0/None = "
+             "unlimited = full-epoch training; default 0)",
+    )
     p.add_argument("--device", default="auto")
     p.add_argument("--seed", type=int, default=None)
 
