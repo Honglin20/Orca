@@ -144,8 +144,18 @@ def _bundled_skill_sources() -> list[Path]:
 
 
 def _cc_nudge_script_src() -> Path:
-    """随包 CC nudge Stop-hook 脚本（v5 §4.4 / step 2b(7)，提醒不推进）。"""
+    """随包 CC nudge Stop/PostToolUse 双事件 hook 脚本（v5 §4.4 + SPEC posttooluse-rogue-guard）。"""
     return Path(str(files("orca.iface.in_session.templates"))) / "cc_nudge.sh"
+
+
+def _tool_classification_src() -> Path:
+    """随包工具分类单一真相源（SPEC posttooluse-rogue-guard §5）。
+
+    cc_nudge.sh（PostToolUse 分支）与 orca.ts（tool.execute.after 钩子）启动时各 read 一次。
+    install 时拷到 cc 家族 ``<root>/hooks/`` 与 opencode 家族 ``<root>/plugins/`` 下，
+    与脚本/plugin 同目录（脚本/plugin 用 ORCA_NUDGE_DIR / __dirname 等定位）。
+    """
+    return Path(str(files("orca.iface.in_session.templates"))) / "tool-classification.json"
 
 
 # ── 落地原语：原子写（带 backup）+ JSON 合并 ──────────────────────────────────
@@ -278,6 +288,12 @@ def _install_opencode(hr: HostRoot) -> dict[str, Any]:
     _atomic_write_with_backup(plugin_dst, _opencode_plugin_src().read_text(encoding="utf-8"))
     written["plugin"] = plugin_dst
 
+    # tool-classification.json（SPEC posttooluse-rogue-guard §5 单一真相源，tool.execute.after
+    # 钩子读；与 plugin 同目录，orca.ts 用相对路径 readFileSync 兜底解析）。
+    cls_dst = hr.root / "plugins" / "tool-classification.json"
+    _atomic_write_with_backup(cls_dst, _tool_classification_src().read_text(encoding="utf-8"))
+    written["tool_classification"] = cls_dst
+
     # 清理旧命令模板（v5 step 2b：command 已删，入口切 skill）。
     # - 旧单命令 ``command/orca.md``（批 B 前的 marker 派发）
     # - 旧命令命名空间 ``command/orca/``（批 B 的 4 文件 run/status/stop/doctor）
@@ -326,15 +342,20 @@ def _install_opencode(hr: HostRoot) -> dict[str, Any]:
 
 
 def _install_cc_nudge(hr: HostRoot) -> dict[str, Path]:
-    """CC 家族（cc + cac）nudge Stop-hook 落地（v5 §4.4 / step 6：CAC≡cc，结构相同）。
+    """CC 家族（cc + cac）nudge Stop + PostToolUse guard hook 落地（v5 §4.4 + SPEC
+    posttooluse-rogue-guard，step 6：CAC≡cc，结构相同）。
 
     服务整个 cc 家族（cc→``.claude``、cac→``.cac``），全路径 root-relative，无硬编码 dotdir：
-    - 拷 ``cc_nudge.sh`` → ``<root>/hooks/orca-nudge.sh``。
+    - 拷 ``cc_nudge.sh`` → ``<root>/hooks/orca-nudge.sh``（单脚本双事件，按 hook_event_name 分支）。
+    - 拷 ``tool-classification.json`` → ``<root>/hooks/``（PostToolUse 分支的工具分类单一真相源）。
     - 合并 ``<root>/settings.json`` 的 ``hooks.Stop``：加一条 ``command: bash <abs>/orca-nudge.sh``
       （去重，保已有 hooks / 其他键）。
+    - 合并 ``<root>/settings.json`` 的 ``hooks.PostToolUse``：matcher 锚定
+      ``^(Write|Edit|NotebookEdit|Bash|PowerShell)$``，同 command（去重）。
 
-    nudge = 提醒（``decision:block`` 注入「请调 orca next」），**绝不调 next**（B 路径铁律）。
-    脚本自含 60s 节流 + marker 扫描；settings.json 只声明引用，零业务逻辑（守门 D-v7-1）。
+    nudge = Stop hook 提醒（``decision:block`` 注入「请调 orca next」）；guard = PostToolUse
+    事后告警（``additionalContext`` 纯提示，不阻止）。**两者绝不调 next**（B 路径铁律）。
+    脚本自含 60s/30s 节流 + marker 扫描 + 工具分类；settings.json 只声明引用，零业务逻辑（守门 D-v7-1）。
     """
     written: dict[str, Path] = {}
     script_dst = hr.root / "hooks" / "orca-nudge.sh"
@@ -346,21 +367,30 @@ def _install_cc_nudge(hr: HostRoot) -> dict[str, Path]:
         pass
     written["nudge_script"] = script_dst
 
+    # tool-classification.json（SPEC §5 单一真相源，PostToolUse 分支启动时 read）。
+    cls_dst = hr.root / "hooks" / "tool-classification.json"
+    _atomic_write_with_backup(cls_dst, _tool_classification_src().read_text(encoding="utf-8"))
+    written["tool_classification"] = cls_dst
+
     settings_path = hr.root / "settings.json"
     # 命令用绝对路径（CC 在 cwd 跑，绝对路径不依赖 cwd；settings.json 全局/项目都适用）。
     cmd = f"bash {script_dst.expanduser().resolve()}"
+    # PostToolUse matcher（SPEC §7.2 锚定）：限定关心的工具，减少无谓 spawn；脚本内再做 §5 精分类。
+    posttooluse_matcher = "^(Write|Edit|NotebookEdit|Bash|PowerShell)$"
 
-    def _add_stop_hook(data: dict) -> None:
+    def _add_hooks(data: dict) -> None:
         hooks = data.setdefault("hooks", {})
         if not isinstance(hooks, dict):
             # 非法形态（用户手填非 object）→ warn + 重置（review 🟡#2 同款：不静默吞）。
             typer.echo(
                 f'  ⚠ settings.json 的 "hooks" 非 object（原值：{hooks!r}），已重置为 {{}} '
-                f"并加入 orca nudge Stop 声明。请检查原配置。",
+                f"并加入 orca nudge Stop/PostToolUse 声明。请检查原配置。",
                 err=True,
             )
             hooks = {}
             data["hooks"] = hooks
+
+        # ── Stop hook（v5 §4.4，原行为）──
         stop_list = hooks.setdefault("Stop", [])
         if not isinstance(stop_list, list):
             typer.echo(
@@ -370,15 +400,37 @@ def _install_cc_nudge(hr: HostRoot) -> dict[str, Path]:
             stop_list = []
             hooks["Stop"] = stop_list
         # 去重：任一 Stop entry 的 command 含 ``orca-nudge`` 即视为已声明。
-        already = any(
+        already_stop = any(
             "orca-nudge" in str(entry.get("hooks", []))
             for entry in stop_list
             if isinstance(entry, dict)
         )
-        if not already:
+        if not already_stop:
             stop_list.append({"hooks": [{"type": "command", "command": cmd}]})
 
-    _merge_json_file(settings_path, _add_stop_hook)
+        # ── PostToolUse hook（SPEC posttooluse-rogue-guard §7.2，新加）──
+        ptu_list = hooks.setdefault("PostToolUse", [])
+        if not isinstance(ptu_list, list):
+            typer.echo(
+                f'  ⚠ settings.json 的 "hooks.PostToolUse" 非 array（原值：{ptu_list!r}），已重置为 []。',
+                err=True,
+            )
+            ptu_list = []
+            hooks["PostToolUse"] = ptu_list
+        # 去重：PostToolUse entry 的 command 含 ``orca-nudge`` 即视为已声明（matcher 不参与去重
+        # 判定——用户可能改 matcher，但不该让 install 反复加同 command 的重复条目）。
+        already_ptu = any(
+            "orca-nudge" in str(entry.get("hooks", []))
+            for entry in ptu_list
+            if isinstance(entry, dict)
+        )
+        if not already_ptu:
+            ptu_list.append({
+                "matcher": posttooluse_matcher,
+                "hooks": [{"type": "command", "command": cmd}],
+            })
+
+    _merge_json_file(settings_path, _add_hooks)
     written["settings.json"] = settings_path
     return written
 

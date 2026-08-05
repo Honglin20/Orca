@@ -73,6 +73,7 @@ function writeIdleHeartbeat(sessionID: string): void {
 // 提醒，杜绝跨 session 串台。归属从 tape 首条 workflow_started.data.host_session 派生
 // （marker 不存归属——tape 唯一真相源）。per-session 限流（NUDGE_FILE 按 sessionID 分键）。
 const NUDGE_COOLDOWN_SEC = 60  // per-session 60s 节流（按 sessionID 分键，防 A 抑制 B，评审 C1）
+const GUARD_COOLDOWN_SEC = 30  // PostToolUse guard per-session 30s 节流（SPEC §4.3，与 nudge 分键）
 
 // 读 run 的 tape 首条 workflow_started.data.host_session（同 cc_nudge.sh 的 _host_session_from_tape）。
 // tape 不存在 / 首行非 workflow_started / 缺 host_session / 读失败 → undefined（fail-safe）。
@@ -137,31 +138,109 @@ function listActiveRuns(hostSession: string): { run_id: string; model?: string }
   return mine  // 注入生效但本 session 无 run → []
 }
 
-// per-session nudge 节流文件路径（按 sessionID 分键，防 A 的 nudge 抑制 B，评审 C1）。
-function nudgeFile(sessionID: string): string {
-  return `runs/.orca-nudge-${sessionID}.json`
+// per-session 节流文件路径（按 sessionID 分键，防 A 的 nudge 抑制 B，评审 C1）。
+// scope: "nudge"（idle hook，60s）| "guard"（tool.execute.after，30s，SPEC §4.3）。
+// 两 hook 共用 nudgeAllowed / markNudged 内核，仅文件名不同（DRY，SPEC §8.1）。
+function throttleFile(scope: "nudge" | "guard", sessionID: string): string {
+  const prefix = scope === "guard" ? ".orca-guard" : ".orca-nudge"
+  return `runs/${prefix}-${sessionID}.json`
 }
 
 // nudge 节流：距上次成功 nudge > COOLDOWN 才允许。**不**在此写时间戳——调用方成功注入后
 // 调 ``markNudged`` 写，注入失败不计入节流（下轮 idle 可重试）。
-function nudgeAllowed(sessionID: string): boolean {
-  const file = nudgeFile(sessionID)
+function nudgeAllowed(scope: "nudge" | "guard", sessionID: string): boolean {
+  const file = throttleFile(scope, sessionID)
+  const cooldown = scope === "guard" ? GUARD_COOLDOWN_SEC : NUDGE_COOLDOWN_SEC
   try {
     if (!existsSync(file)) return true
     const data = JSON.parse(readFileSync(file, "utf-8")) as { last_nudged_at?: number }
     const last = typeof data?.last_nudged_at === "number" ? data.last_nudged_at : 0
-    return (nowSec() - last) >= NUDGE_COOLDOWN_SEC
+    return (nowSec() - last) >= cooldown
   } catch {
     return true  // 节流文件坏 → fail-open（宁多提醒不漏提醒）
   }
 }
 
-function markNudged(sessionID: string): void {
-  writeHeartbeat(nudgeFile(sessionID), { last_nudged_at: nowSec() })
+function markNudged(scope: "nudge" | "guard", sessionID: string): void {
+  writeHeartbeat(throttleFile(scope, sessionID), { last_nudged_at: nowSec() })
 }
 
-// in-flight mutex（F5 闭环）：防 await promptAsync 期间下一 idle 重入。
-const injecting: Set<string> = new Set()
+// in-flight mutex（F5 闭环）：防 await promptAsync 期间重入。idle nudge 与 guard 各持独立
+// mutex——reviewer 指出原共用 mutex 让 idle 的 await 期间所有 PostToolUse 静默漏告警，恰好
+// 挡住 guard 设计要覆盖的「turn 中途连续调工具」盲区。拆为 injectingIdle / injectingGuard：
+// 同路径重入仍互斥（idle idle / guard guard），异路径并发不再互相吞噬。
+const injectingIdle: Set<string> = new Set()
+const injectingGuard: Set<string> = new Set()
+
+// ── PostToolUse 事后告警守卫（SPEC posttooluse-rogue-guard §8）──────────────────
+//
+// tool.execute.after 钩子：主 session 在活跃 run 期间用了「下场干活」工具 → promptAsync
+// 注入一段纯文本提示。**不**阻止动作（pure hint，无 deny/permissionDecision），**不**调
+// orca next（B 路径铁律）。仅当本 session 有活跃 run 时触发。
+//
+// 工具分类单一真相源 = plugins/tool-classification.json（install 时与 orca.ts 同目录落地，
+// SPEC §5）。分类属传输层判定（决定是否注入文本），非状态机判断（D-v7-1 不禁，§3 注脚 P2）。
+let classificationCache: any = null
+let classificationLoaded = false
+
+function loadClassification(): any {
+  if (classificationLoaded) return classificationCache
+  classificationLoaded = true
+  // 候选路径：opencode plugin runtime 的 cwd 未实证（Bun / Node 均可能，且取决于 opencode 启动
+  // 时的 cwd），故穷举常见落点——install 落地的 user/project scope 路径 + cwd 相对兜底。
+  // SPEC §10 R1：取不到 → null，guard 降级不告警。
+  const home = (typeof process !== "undefined" && process.env && process.env.HOME) || ""
+  const candidates = [
+    // 项目 scope：cwd 是项目根 → .opencode/.nga plugins/
+    ".opencode/plugins/tool-classification.json",
+    ".nga/plugins/tool-classification.json",
+    // plugin 同目录（若 cwd = plugin dir）
+    "tool-classification.json",
+    "plugins/tool-classification.json",
+  ]
+  if (home) {
+    // 用户 scope：opencode 全局 config 根 + nga 对称
+    candidates.push(`${home}/.config/opencode/plugins/tool-classification.json`)
+    candidates.push(`${home}/.nga/plugins/tool-classification.json`)
+  }
+  for (const p of candidates) {
+    try {
+      const raw = readFileSync(p, "utf-8")
+      classificationCache = JSON.parse(raw)
+      return classificationCache
+    } catch { /* try next */ }
+  }
+  console.error("[orca] tool-classification.json 未找到（guard 降级：不告警）")
+  classificationCache = null
+  return null
+}
+
+// SPEC §5 分类：返 true = 下场干活（告警）；false = 放行。
+function classifyTool(toolName: string, args: any): boolean {
+  const cls = loadClassification()
+  if (!cls) return false  // fail-safe：分类缺失不告警
+  const name = (toolName || "").trim()
+  const writing: string[] = cls.writing_tools || []
+  if (writing.includes(name)) return true
+  const bashTools: string[] = cls.bash_tools || []
+  if (!bashTools.includes(name)) return false  // Read/Glob/Grep/Task/AskUserQuestion 等 → 放行
+  // bash 类：解析命令串
+  let cmd = ""
+  if (typeof args === "string") cmd = args
+  else if (args && typeof args === "object") cmd = args.command || args.args || ""
+  if (typeof cmd !== "string" || cmd.trim() === "") return true  // bash 工具却无命令 → 保守视为下场
+  const seps: string[] = cls.compound_separators || []
+  if (seps.some(s => s && cmd.includes(s))) return true  // 复合命令 → 下场（§5 Bash 分类 1）
+  // word-boundary 前缀匹配（E6）：prefix 后须接 EOL 或空白，禁止 ``ls`` 命中 ``lsof``。
+  // 同时支持多词前缀（``git log``）—— 不取首词，整 cmd 前缀比对。
+  const cmdLower = cmd.trim().toLowerCase()
+  const readonly: string[] = cls.readonly_bash_prefixes || []
+  for (const prefix of readonly) {
+    const p = prefix.toLowerCase()
+    if (cmdLower === p || cmdLower.startsWith(p + " ")) return false  // 命中只读 → 放行
+  }
+  return true
+}
 
 interface Marker {
   run_id: string
@@ -210,12 +289,12 @@ export const OrcaPlugin = async (ctx: any) => {
       if (DIAGNOSE) writeIdleHeartbeat(sessionID)
 
       // nudge：扫**本 session 的**活跃 run → 节流 → 注入提醒（不 spawn next）。
-      if (injecting.has(sessionID)) return
+      if (injectingIdle.has(sessionID)) return
       const active = listActiveRuns(sessionID)
       if (active.length === 0) return        // 无本 session 的活跃 run → 无需 nudge
-      if (!nudgeAllowed(sessionID)) return   // per-session 节流窗口内 → 跳过（防刷屏）
+      if (!nudgeAllowed("nudge", sessionID)) return   // per-session 节流窗口内 → 跳过（防刷屏）
 
-      injecting.add(sessionID)
+      injectingIdle.add(sessionID)
       try {
         const ids = active.map(r => r.run_id)
         const reminder =
@@ -237,12 +316,12 @@ export const OrcaPlugin = async (ctx: any) => {
             model: { providerID, modelID },
           },
         })
-        markNudged(sessionID)  // 成功注入才计入节流（失败下轮重试）
+        markNudged("nudge", sessionID)  // 成功注入才计入节流（失败下轮重试）
       } catch (e) {
         // 注入失败（client API 错 / session 不存在）→ console.error，不计节流，下轮 idle 重试。
         console.error("[orca] nudge promptAsync failed:", e)
       } finally {
-        injecting.delete(sessionID)
+        injectingIdle.delete(sessionID)
       }
     },
 
@@ -259,6 +338,76 @@ export const OrcaPlugin = async (ctx: any) => {
     "shell.env": async (input: { sessionID?: string }, output: { env: Record<string, string> }) => {
       if (input.sessionID) {
         output.env.ORCA_HOST_SESSION_ID = input.sessionID
+      }
+    },
+
+    // PostToolUse 事后告警守卫（SPEC posttooluse-rogue-guard §8）：opencode 等价 ``tool.execute.after``。
+    // 主 session 在活跃 run 期间用了「下场干活」工具 → promptAsync 注入纯文本提示。**不**阻止动作
+    // （pure hint），**不**调 orca next（B 路径铁律）。仅当本 session 有活跃 run 时触发。
+    //
+    // 输入形状（SPEC §10 R1 fallback）：官方文档未给完整字段，按 tool.execute.before 示例推 ``input.tool``。
+    // sessionID 取法：首选 input.sessionID；取不到 → 写 runs/.orca-guard-unbound.json 心跳 + return
+    // （fail-safe 降级，SPEC §10 R1）。mid-turn promptAsync 失败 → console.error + 不计节流。
+    "tool.execute.after": async (input: any) => {
+      // step 0：in-flight mutex（独立于 idle 的 mutex——防 turn 中工具调用与 idle 并发注入互相吞噬）。
+      let sessionID: string | undefined = undefined
+      try {
+        sessionID = typeof input?.sessionID === "string" ? input.sessionID : undefined
+      } catch { /* input 异常 → sessionID undefined，下方 fallback */ }
+      if (sessionID && injectingGuard.has(sessionID)) return
+      if (sessionID) injectingGuard.add(sessionID)
+      try {
+        // step 1：sessionID fallback（SPEC §10 R1 / §8.1 P4 修订）。
+        if (!sessionID) {
+          try {
+            mkdirSync("runs", { recursive: true })
+            writeFileSync(
+              "runs/.orca-guard-unbound.json",
+              JSON.stringify({ unbound_at: nowSec(), tool: input?.tool ?? null }),
+            )
+          } catch (e) {
+            console.error("[orca] guard heartbeat failed:", e)
+          }
+          return  // 取不到 session → fail-safe 不告警
+        }
+
+        // step 2：扫本 session 活跃 run。
+        const active = listActiveRuns(sessionID)
+        if (active.length === 0) return  // 无活跃 run → 不告警
+
+        // step 3：分类。input.tool 是工具名；bash 类需看命令（args 字段名未实证，多候选）。
+        const tool = input?.tool
+        if (typeof tool !== "string" || !classifyTool(tool, input?.args ?? input?.command)) return
+
+        // step 4：guard 30s 节流（独立文件 runs/.orca-guard-<sessionID>.json，与 nudge 分键）。
+        if (!nudgeAllowed("guard", sessionID)) return
+
+        // step 5：注入 §6 提示（同 idle nudge 同款 promptAsync）。reason 模板从 classification
+        // 单一真相源取（review 🟡#3 DRY：与 cc_nudge.sh 共享同一份文案），按 {run_id}/{tool} 占位符
+        // 填充。模板缺失 → 内联兜底（保持两路径告警能力）。
+        const runId = active[0].run_id
+        const cls = loadClassification()
+        const template: string = (cls && typeof cls.guard_reason_template === "string")
+          ? cls.guard_reason_template
+          : "【Orca 守卫·事后提醒】检测到你在活跃 run（{run_id}）期间自己用了 {tool}。编排期主 session 不该下场做节点工作——那是子代理的活。建议：改派 Task 子代理完成此步，或把已有产出作为 --output 调 orca next --run-id {run_id} 推进。本提醒不阻止（动作已执行）；若这是必要的调试/解锁操作，忽略即可。"
+        const reminder = template.replace(/\{run_id\}/g, runId).replace(/\{tool\}/g, tool)
+        const rawModel = active[0].model
+        const modelStr = typeof rawModel === "string" && rawModel.includes("/")
+          ? rawModel : "deepseek/deepseek-v4-flash"
+        const [providerID, modelID] = modelStr.split("/")
+        await client.session.promptAsync({
+          path: { id: sessionID },
+          body: {
+            parts: [{ type: "text", text: reminder }],
+            model: { providerID, modelID },
+          },
+        })
+        markNudged("guard", sessionID)  // 成功注入才计节流（注入失败下个工具调用重试）
+      } catch (e) {
+        // mid-turn promptAsync 失败（SPEC §10 R1 fallback）：console.error + 不计节流。
+        console.error("[orca] guard promptAsync failed:", e)
+      } finally {
+        if (sessionID) injectingGuard.delete(sessionID)
       }
     },
   }
