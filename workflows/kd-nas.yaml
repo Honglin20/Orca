@@ -203,8 +203,10 @@ nodes:
   # AST 检测：读用户 train.py 时扫 GAN/RL/DDP，命中 fail loud + `--force-template` override。
   # 叶子白名单 = 标准科学计算包（torch/torchvision/numpy/scipy/sklearn/PIL）+ stdlib；禁用户项目模块。
   # 反造假：data.py/eval.py 严禁 torch.rand/randint/numpy.random 作数据/标签源；用户数据不可得 → fail loud + ask-user。
-  # 四层校验：逐叶子静态 + smoke + fidelity_check（数值等价 + AST 自包含 + AST 签名 + 反造假 + kind 方向硬校验）+
-  # workflow-verifier（4 叶子并行 review）。
+  # 校验栈（执行顺序）：L1 逐叶子 py_compile+AST / L2 引擎 smoke / L3 fidelity_check（数值等价 + AST 自包含
+  # + AST 签名 + 反造假 + kind 方向硬校验） / **L4-semantic project-fidelity-verifier 收敛环**（MAX_TURNS=3，
+  # ID 化 Resumed Re-Check；覆盖 L3 不展开 module-level helper / 不比 transform 内容 / 不比 optim kwargs 的语义层）/
+  # L4-mechanical workflow-verifier（机械层 4 叶子并行 review）。L3 FAIL 立即 fail loud 不进 L4-semantic。
   # ═══════════════════════════════════════════════════════════════
   - name: gen_train_script
     kind: agent
@@ -225,10 +227,13 @@ nodes:
       - to: train_script_verify
 
   # ═══════════════════════════════════════════════════════════════
-  # train_script_verify：校验 4 叶子（loss/data/eval/optim.py）契约 + AST 自包含 +
-  # AST 签名 + kind 方向硬校验 + fidelity_check 数值等价 + 反造假 + 引擎 smoke（合成 model+ckpt
-  # 跑 --mode teacher/eval 一 epoch）+ workflow-verifier（4 叶子并行 review）。
-  # verified=false → fail loud 阻塞（配置错误非业务波动）。
+  # train_script_verify（独立二闸，**report-only**）：校验 4 叶子（loss/data/eval/optim.py）契约 +
+  # AST 自包含 + AST 签名 + kind 方向硬校验 + fidelity_check 数值等价 + 反造假 + 引擎 smoke（合成 model+ckpt
+  # 跑 --mode teacher/eval 一 epoch）+ **step 3.5 project-fidelity-verifier（语义静态比对，一次性全量
+  # report-only）**+ step 4 workflow-verifier（机械层 4 叶子并行 review，report-only；spawn prompt 带
+  # step 3.5 的 Accepted IDs）。
+  # 任一 spawn 崩 / Unresolved / Static Fidelity 非 pass → verified=false fail loud 阻塞（配置错误非业务波动）。
+  # 二闸独立性：发现即 fail loud 暴露 gen 节点漏判 / 叙述假 pass；auto-fix 留给 gen 节点（有完整上下文）。
   # ═══════════════════════════════════════════════════════════════
   - name: train_script_verify
     kind: agent

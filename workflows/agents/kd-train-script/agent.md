@@ -124,7 +124,7 @@ done
 # 4) 写 run.sh（人类专用：调 <KD_SCRIPTS_DIR>/train_pipeline.py + --config/--artifacts_dir）
 ```
 
-**Step 4 — Validate**（四层，见 workflow Validation 节）：
+**Step 4 — Validate**（执行顺序：L1 → L2 → L3 → L4-semantic 收敛环 → L4-mechanical 一次性）：
 
 1. **逐叶子静态 + AST 自包含 + AST 签名**（Layer 1）：
    `py_compile` 每个 leaf；AST 扫描确保禁入清单（sibling / 相对 / 非白名单 top-level import）
@@ -137,9 +137,32 @@ done
    `scripts/fidelity_check.py --leaves_dir <OUTPUT_DIR>/user --user_train {{ inputs.user_train_script }}
    --user_eval <发现到的 eval 脚本> --dummy_input <baseline DUMMY_INPUT> --model_path ...
    --accuracy_baseline_kind {{ inputs.accuracy_baseline_kind }}` → `FIDELITY: PASS`。
-4. **workflow-verifier 子 agent**（Layer 4，必跑）：用 SKILL.md 的 prompt 模板**真 spawn**
-   workflow-verifier（不许叙述假 pass），喂给它 4 叶子 + checklists + 用户原码做 cross-ref。
-   verifier `unresolved` → 不许输出 JSON。
+   **L3 FAIL → 立即 fail loud 退非零，不进 L4-semantic**（避免与确定性层重叠双报）。
+4. **L4-semantic 收敛环**（必跑，确定性控制流而非 LLM 自驱）：spawn `project-fidelity-verifier-kd`
+   子 agent 做语义静态比对（展开 module-level helper / transform 内容 / optim kwargs / 控制流）+
+   一次性 differential probe。详细循环逻辑见 SKILL.md `## L4-semantic — project-fidelity-verifier spawn`。
+   - 通过 `{{ subagents_root }}/project-fidelity-verifier-kd.md` 经 orca point-to-file 协议自读
+     子 agent md，按 SKILL.md 的 first-run / resume 模板渲染 spawn prompt。
+   - MAX_TURNS=3：每轮 spawn → 解析 STATUS 行 → 若非 all-pass 则只修 caller 可独立判定的
+     semantic findings（仅叶子，禁碰引擎/KD 库）→ 重跑 L1 py_compile + L3 fidelity_check →
+     下一轮 resume（Fixed: <closed_ids>）。
+   - **verifier spawn 自身崩**（rc≠0 / sentinel 缺失 / 产出无 `all-pass` 或 Static Fidelity 段）
+     → fail loud 不重试 + stderr 报 raw 产出 + emit ask-user 哨兵（协议层崩非 transient）。
+   - **ID 范围防御**：resume 报告里的 ID 必须是上轮 stash 的子集；超出 → fail loud（hallucinate）。
+   - **同一 ID 连续两轮 `STATUS: open`**（reaffirm）→ fail loud + emit ask-user 哨兵（报「ID
+     反复 reaffirm，agent 改不动」），不盲目耗满 MAX_TURNS。
+   - **Unresolved 项**（verifier 缺 basis）→ 不擅自改，fail loud + emit ask-user 哨兵（与
+     「严禁造假、缺数据问用户」铁律一致）。
+   - **每轮 apply fixes 后必须重跑 L1 py_compile + L3 fidelity_check**：fix 改坏了确定性层
+     → fail loud + emit ask-user 哨兵（回滚或人工），不继续盲目改。
+   - 达 MAX_TURNS 仍未 all-pass → fail loud + stderr 报未闭环保留的 IDs + 上轮 findings + 退非零，
+     不 emit JSON、不降级 pass。
+   - all-pass → 把 Accepted Deviations IDs 列表带进 L4-mechanical（防机械层误报）。
+5. **L4-mechanical：workflow-verifier 子 agent**（一次性，必跑）：用 SKILL.md 的 prompt 模板
+   **真 spawn** workflow-verifier（不许叙述假 pass），喂给它 4 叶子 + checklists + 用户原码做
+   cross-ref。spawn prompt 显式带上 L4-semantic 的 Accepted IDs，提示 workflow-verifier 不要
+   重复审计这些 ID（机械层不认 Accepted 概念，否则会误报 unresolved）。verifier `unresolved`
+   → 不许输出 JSON。
 
 **Step 5 — 提取 teacher 默认 lr/epochs**：
 

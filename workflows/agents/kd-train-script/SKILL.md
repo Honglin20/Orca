@@ -201,23 +201,183 @@ for the verbatim-port rules. Generation steps:
 
 ### Step 4: Validate
 
-Run the four validation layers described in the workflow's Validation section,
-in order: (1) per-leaf static + AST self-containment + AST signature, (2) engine
-smoke against the fixed engine entry with a synthetic teacher + ckpt, (3)
-`fidelity_check.py` per-leaf numeric equivalence + AST + kind direction hard
-check, (4) `workflow-verifier` subagent over the four leaves in parallel.
+Run the validation layers in this exact order:
+
+1. **L1** — per-leaf `py_compile` + AST self-containment + AST signature.
+2. **L2** — engine smoke against the fixed engine entry with a synthetic
+   teacher + ckpt.
+3. **L3** — `fidelity_check.py` per-leaf numeric equivalence + AST + kind
+   direction hard check. L3 FAIL → fail loud and stop; do **not** enter
+   L4-semantic (avoid double-reporting the same deviation with the
+   deterministic layer).
+4. **L4-semantic** — bounded convergence loop spawning the
+   `project-fidelity-verifier-kd` subagent. See
+   `## L4-semantic — project-fidelity-verifier spawn` below for the spawn
+   templates (first-run + resume) and the deterministic control flow.
+5. **L4-mechanical** — one-shot `workflow-verifier` spawn over the four
+   leaves in parallel. Pass the Accepted IDs from L4-semantic into that
+   spawn prompt so the mechanical layer does not re-audit IDs that the
+   semantic layer already accepted.
 
 ### Step 5: Extract teacher defaults
 
 Extract the user's default `lr` / `epochs` from `<user_project_root>/train.py`.
 Extraction failure → fail loud.
 
+## L4-semantic — project-fidelity-verifier spawn
+
+The semantic fidelity audit runs as a bounded convergence loop. You drive
+the loop with deterministic control flow (not LLM self-direction): spawn,
+parse, fix, re-run, repeat — at most `MAX_TURNS = 3` turns.
+
+**Read the subagent contract first**: open
+`{{ subagents_root }}/project-fidelity-verifier-kd.md` and read it. That file
+is the authoritative contract for the subagent — its scope, audit procedure,
+deviation judgment, STATUS contract, and red lines. Embed its body into the
+spawn context; do not paraphrase it.
+
+**State you carry across turns**:
+- `id_stash` — the set of all IDs the verifier has ever reported in this
+  audit instance (Static Fidelity / Accepted / Unresolved combined). The
+  resume ID-range defense checks every resume-reported ID against this set.
+- `reaffirm_count` — `id -> consecutive open count`. When an ID hits 2,
+  stop the loop and fail loud with an ask-user sentinel.
+- `fixed_ids` — the IDs whose latest STATUS is `closed`; these go into the
+  next turn's `Fixed:` line.
+
+**Deterministic loop** (pseudo-code; you execute it step by step):
+
+```
+turn = 0
+fixed_ids = []
+reaffirm_count = {}
+loop:
+    turn += 1
+    if turn == 1:
+        spawn fidelity-verifier with the first-run template
+    else:
+        spawn fidelity-verifier with the resume template (Fixed: <fixed_ids>)
+    if spawn crashed (rc != 0, sentinel missing, output has no all-pass
+                       line and no Static Fidelity section):
+        fail loud, do not retry, stderr the raw output,
+        emit ask-user sentinel (protocol-layer crash, not transient)
+    verify every ID in the resume report is a subset of id_stash
+        (hallucination defense); on violation, fail loud
+    parse STATUS lines -> closed_ids, open_ids, accepted_ids
+    id_stash.update(every ID in this turn's report)
+        (so turn-1 findings are stash members before turn-2's subset check)
+    if report == all-pass: break (proceed to L4-mechanical)
+    for id in open_ids:
+        reaffirm_count[id] += 1 else reaffirm_count[id] = 1
+    if any reaffirm_count[id] >= 2:
+        fail loud + ask-user sentinel
+        ("ID <id> repeatedly reaffirmed; agent cannot resolve it")
+    if turn >= MAX_TURNS (=3):
+        fail loud, stderr the unclosed IDs + last findings,
+        exit non-zero, do not emit JSON
+    if any Unresolved items are present:
+        do not guess fixes; fail loud + ask-user sentinel
+    apply fixes to leaves only (never touch engine / KD library)
+    re-run L1 py_compile + L3 fidelity_check
+    if L1 or L3 FAIL:
+        fail loud + ask-user sentinel
+        ("fix broke L1/L3 — roll back or hand off")
+        exit non-zero
+    fixed_ids = closed_ids (from this turn's STATUS lines)
+        # overwrite, not accumulate: once an ID is closed the verifier
+        # does not re-audit it next turn unless the caller edits its code
+        # again, in which case the verifier would re-flag it with a new ID
+```
+
+**Parse the resume report mechanically, never by prose inference**: for
+every re-checked ID the verifier's report block opens with a `STATUS:
+closed | open | accepted` line. Read those lines directly; do not infer
+status from surrounding prose.
+
+**You may only fix what the verifier flagged as caller-actionable semantic
+findings (open IDs)**. Unresolved items mean the verifier lacks the basis
+to judge — never fabricate a fix for them; surface them via the ask-user
+sentinel instead.
+
+### First-run spawn template
+
+```
+You are auditing the four KD-NAS training leaves for fidelity to the
+user's original training / evaluation logic.
+
+Read your contract (this is your authoritative instruction):
+  {{ subagents_root }}/project-fidelity-verifier-kd.md
+
+Leaves (read-only for you; the caller fixes them between turns):
+  <leaves_dir>/loss.py
+  <leaves_dir>/data.py
+  <leaves_dir>/eval.py
+  <leaves_dir>/optim.py
+
+User original code (read-only):
+  user train.py: <user_train_script>
+  user eval script: <discovered eval script path>
+  user project root: <user_project_root>
+
+Source -> generated mapping:
+  loss.py::compute_loss       <-> user's task loss function
+  data.py::build_dataloader   <-> user's training dataloader
+  eval.py::eval_metric        <-> user's evaluation metric function
+  optim.py::build_optimizer   <-> user's optimizer constructor
+  optim.py::build_scheduler   <-> user's scheduler constructor
+
+Intended behavior (fixed):
+  - Each leaf must port the user's loss / dataloader / eval metric /
+    optimizer / scheduler verbatim — formulas, constants, signs, control
+    flow, randomness semantics.
+  - Designed-in non-deviations: the distillation loss combination lives
+    in the engine (kd.compose.build_kd_loss), not in any leaf; no leaf
+    references kd.*. eval_metric returns (value, kind); the kind direction
+    is enforced by an earlier deterministic check, so do not re-test the
+    kind direction — audit only the metric formula body, the eval data
+    source, and transform content.
+
+This is the first audit pass: perform the full static comparison and any
+differential probes you can. Return the standard report (Coverage /
+Static Fidelity / Runtime Fidelity / Accepted Deviations / Unresolved /
+all-pass) per your contract.
+```
+
+### Resume spawn template
+
+```
+You are resuming the KD-NAS training-leaves fidelity audit. Same contract:
+  {{ subagents_root }}/project-fidelity-verifier-kd.md
+
+Fixed: <fixed_ids>     # caller changed code for these IDs
+
+Leaves (read-only):
+  <leaves_dir>/loss.py
+  <leaves_dir>/data.py
+  <leaves_dir>/eval.py
+  <leaves_dir>/optim.py
+
+For each re-checked ID, open its report block with the STATUS line
+(`STATUS: closed | open | accepted`) per your contract. Return the
+standard report for the re-checked items only — do not repeat the full
+audit.
+```
+
 ## Verifier Subagent Prompt Template
 
-When invoking the `workflow-verifier` subagent in Step 4, use this framework:
+When invoking the `workflow-verifier` subagent in Step 4 (L4-mechanical), use
+this framework. This is the mechanical layer that runs once after the
+L4-semantic loop has reached `all-pass`; it covers file/import/config keys
+and may auto-fix mechanical issues. If L4-semantic produced an Accepted
+Deviations list, pass those IDs in explicitly so the mechanical layer does
+not re-audit them (the mechanical layer does not recognize the Accepted
+concept and would otherwise re-report them as `unresolved`).
 
 ```
 You are verifying the four KD-NAS training leaves produced by kd-train-script.
+
+Accepted IDs (do not re-audit; the semantic layer already accepted these):
+  <accepted_ids>     # e.g. "[2], [5]" — empty if L4-semantic had none
 
 Workflow doc (read-only contract):
   <skill_dir>/references/workflows/train_pipeline_script_generation.md

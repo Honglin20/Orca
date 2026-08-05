@@ -1,5 +1,5 @@
 ---
-description: kd-nas 串行版 train-script-verify：校验 gen_train_script 产出的 4 叶子（user/{loss,data,eval,optim}.py）契约 + AST 自包含 + AST 签名 + kind 方向硬校验 + fidelity_check 数值等价 + 引擎 smoke（合成 model+ckpt 跑 --mode teacher/eval 一 epoch）+ workflow-verifier（4 叶子并行 review）。verified=false → fail loud 阻塞（不进 train_teacher）。配置错误非业务波动，不进 catch 协议。
+description: kd-nas 串行版 train-script-verify：校验 gen_train_script 产出的 4 叶子（user/{loss,data,eval,optim}.py）契约 + AST 自包含 + AST 签名 + kind 方向硬校验 + fidelity_check 数值等价 + 引擎 smoke（合成 model+ckpt 跑 --mode teacher/eval 一 epoch）+ project-fidelity-verifier（语义静态比对，report-only 一次性）+ workflow-verifier（机械层 4 叶子并行 review，report-only）。任一非 pass → fail loud 阻塞（不进 train_teacher）。配置错误非业务波动，不进 catch 协议。
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # train-script-verify
@@ -16,7 +16,15 @@ tools: [bash, read, write, edit, glob, grep, task]
 6. **引擎 smoke**：用固定引擎入口 `train_pipeline.py` + 合成 model+ckpt 跑 `--mode teacher`
    1 epoch + `--mode eval`，验证 stdout 协议键（`TEACHER_CKPT`/`TASK_LOSS_FINAL`/
    `STUDENT_ACCURACY`/…）+ 叶子 loader/eval_metric 能被引擎加载并跑通；
-7. **workflow-verifier 子 agent**（4 叶子并行 review）—— 真 spawn，不许叙述假 pass。
+7. **project-fidelity-verifier 子 agent**（语义静态比对，一次性全量，**report-only**）——
+   真 spawn，不许叙述假 pass。verifier `unresolved` / Static Fidelity 非 pass / spawn 自身崩
+   → verified=false 退非零；
+8. **workflow-verifier 子 agent**（机械层 4 叶子并行 review，**report-only**）—— 真 spawn。
+   spawn prompt 显式带「do not modify artifacts; report only」+ 上一步 fidelity-verifier 的
+   Accepted IDs（机械层不认 Accepted 概念，否则会误报 unresolved）。
+
+**你是独立二闸，不修产物**：发现即 fail loud 暴露 gen 节点漏判 / 叙述假 pass；auto-fix 留给
+gen 节点（有完整上下文）。两个 spawn 均带 `do not modify artifacts; report only`。
 
 **产出 = 一个严格匹配下面 output_schema 的 JSON 对象。**
 
@@ -170,10 +178,37 @@ echo "$OUT_B" | grep -q '^STUDENT_ACCURACY_KIND:' || { echo "FAIL: eval 未 emit
 echo "PARSED step3: 引擎 smoke PASS（teacher + eval 两 mode 跑通）"
 ```
 
-## step 4 执行：workflow-verifier 子 agent（4 叶子并行 review）
+## step 3.5 执行：project-fidelity-verifier 子 agent（语义静态比对，一次性 report-only）
+
+> 必跑，绝不跳过。经 orca point-to-file 协议自读
+> ``{{ subagents_root }}/project-fidelity-verifier-kd.md`` 作为子 agent 契约，
+> 喂给它 4 叶子路径 + source→generated mapping + 用户原 train.py / eval 脚本路径 +
+> ``<user_project_root>``（differential probe 用）。
+> **二闸只报告不改产物**：spawn prompt 必含 ``do not modify artifacts; report only``。
+> 这不是 resume——是全量首审。
+
+spawn project-fidelity-verifier-kd（一次性全量审计），传入：
+- 子 agent 契约：``{{ subagents_root }}/project-fidelity-verifier-kd.md``
+- leaves_dir：``{{ gen_train_script.output.leaves_dir }}``
+- 用户 train.py / eval 脚本 / ``<user_project_root>``
+- source→generated mapping（loss / data / eval / optim 四组）
+
+verifier 产出判定（任一非 pass 立即 fail loud 退非零）：
+- spawn 自身崩（rc≠0 / sentinel 缺失 / 产出无 ``all-pass`` 且无 Static Fidelity 段）
+  → verified=false，stderr 报 raw 产出，**退非零**；
+- 报告含 ``Unresolved`` → verified=false，把 Unresolved IDs 填入 issues，**退非零**；
+- ``Static Fidelity`` 非 ``pass`` → verified=false，把 findings 填入 issues，**退非零**；
+- ``all-pass`` → 记下 Accepted Deviations IDs 列表（带进 step 4 spawn prompt）。
+
+> Runtime Fidelity ``not verified`` 在 KD 语境下属预期（用户 train.py 几乎不可 import），
+> 不算 fail——B1 主要价值在 Static Fidelity。
+
+## step 4 执行：workflow-verifier 子 agent（机械层 4 叶子并行 review，report-only）
 
 > 必跑，绝不跳过。用 kd-train-script SKILL.md 的 verifier prompt 模板**真 spawn**
 > workflow-verifier（不许叙述假 pass），喂给它 4 叶子 + 2 checklists + 用户原 train.py / eval 脚本。
+> **二闸只报告不改产物**：spawn prompt 必含 ``do not modify artifacts; report only``。
+> spawn prompt 还须显式带上 step 3.5 的 Accepted IDs（机械层不认 Accepted 概念，否则误报 unresolved）。
 
 spawn workflow-verifier，传入：
 - workflow doc: ``workflows/agents/kd-train-script/references/workflows/train_pipeline_script_generation.md``
@@ -181,25 +216,29 @@ spawn workflow-verifier，传入：
 - artifacts: ``{{ gen_train_script.output.leaves_dir }}/{loss,data,eval,optim}.py`` +
   ``{{ gen_train_script.output.run_config_path }}`` + ``{{ gen_train_script.output.run_sh_path }}``
 - cross-refs: 用户原 train.py / eval 脚本 + ``workflows/agents/_kd_scripts/CONTRACTS.md``
+- ``do not modify artifacts; report only``
+- ``Accepted IDs: <来自 step 3.5>``（机械层不对这些 ID 重复审计）
 
 收集 verifier verdict：
-- ``VERDICT: all-pass``（无 Fixed 段）→ 进 emit；
-- ``VERDICT: all-pass``（含 Fixed 段）→ 重跑 step 3 引擎 smoke；
-- ``VERDICT: unresolved`` → verified=false，把 verifier findings 填入 issues，**退非零**。
+- ``VERDICT: all-pass`` → 进 emit（二闸 report-only，不会有 Fixed 段）；
+- ``VERDICT: unresolved`` → verified=false，把 verifier findings 填入 issues（标 ``[mechanical]``），
+  与 step 3.5（标 ``[semantic]``）的 issues 取并集，**退非零**。
 
 ## 产出 JSON（最终消息）
 
-step1-3 全过 ∧ step4 verifier all-pass → verified=true；否则 verified=false（fail loud 阻塞）。
+step1-3 全过 ∧ step 3.5 fidelity-verifier all-pass ∧ step4 workflow-verifier all-pass → verified=true；
+否则 verified=false（fail loud 阻塞）。
 
 ```json
 {
   "verified": <bool>,
-  "issues": [<step2/step4 列出的 issue 字符串数组>]
+  "issues": [<step2/step3.5/step4 列出的 issue 字符串数组，标来源 [semantic]/[mechanical]>]
 }
 ```
 
 - step1 任何缺文件 / py_compile 失败 → verified=false，**退非零**；
 - step2 fidelity rc≠0 或 AST/KIND 不 true → 退非零；
 - step3 引擎 smoke rc≠0 或协议键缺失 → 退非零；
-- step4 verifier unresolved → verified=false，**退非零**；
+- step 3.5 fidelity-verifier spawn 崩 / Unresolved / Static Fidelity 非 pass → verified=false，**退非零**；
+- step4 workflow-verifier unresolved → verified=false，**退非零**；
 - 全过 → verified=true, issues=[]，agent 退 0。
