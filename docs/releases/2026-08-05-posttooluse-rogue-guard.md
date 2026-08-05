@@ -90,6 +90,15 @@ fallback，coder-agent 实施时 fallback 路径已编码并单测覆盖，真�
 若 test-agent 真机 spike 发现某家族彻底失败，按 SPEC §10 降级为「不覆盖」（心跳文件 + warn），
 不阻塞另一家族。
 
+### 3.1 真机 spike 闭环（test-agent，2026-08-05）
+
+| Spike | 真机结论 | 证据 |
+|---|---|---|
+| **R5（CC env 链）** | ✅ **PostToolUse 子进程继承 `CLAUDE_CODE_SESSION_ID`**——与 Stop hook 同一 env 链。env 路径命中（`_host_session_from_env` 直接返回），stdin `session_id` fallback 不触发。 | 隔离 cwd `/tmp/orca-guard-test`，PostToolUse hook 子进程 env dump 实测含 `CLAUDE_CODE_SESSION_ID=631201d7-...`（与 Stop 同值，与 stdin `session_id` 同值）。 |
+| **R1（opencode input 形状）** | ✅ **官方文档未给，真机实证**：`input.tool`（小写工具名，如 `"bash"`）/ `input.sessionID`（字符串）/ `input.callID` / `input.args = { command: "..." }`。sessionID **正常存在**，fallback `runs/.orca-guard-unbound.json` 不触发；args 字段名 = `args.command`（与 orca.ts 的 `args.command || args.args` 取法一致）。mid-turn `promptAsync` ✅ **可调**——deepseek 主 session 在 mkdir 后立即收到 §6 注入并响应「已执行。这是调试性操作，按提醒说明忽略即可」。 | 隔离 cwd `/tmp/orca-oc-test`（plugin id 改 `orca-r1-spike` 避开用户 global 或ca 同名冲突），dump 实测：`{"tool":"bash","sessionID":"ses_...","callID":"call_...","args":{"command":"echo r1orca"}}`；sqlite part 表查到 `【Orca 守卫·事后提醒】...用了 bash...r1test...` 真注入。 |
+
+**两家族 merge blocker 解除**——SPEC §10 R1/R5 spike 项闭环，fallback 路径保留（编码 + 单测）但不依赖。
+
 ## 4. 测试
 
 **新增 27 测**（`tests/iface/cli/test_install_cmds.py`）覆盖：
@@ -157,5 +166,9 @@ fallback，coder-agent 实施时 fallback 路径已编码并单测覆盖，真�
 - [x] §11.1 安装（4 测）+ 工具集相等（1 测）
 - [x] §11.2 PostToolUse 行为（12 测）+ Stop 字节级回归（1 测）
 - [x] §11.4 守门（4 测 + install_cmds 零业务逻辑）
-- [ ] §11.2 真机 e2e（test-agent）
-- [ ] §11.3 opencode 家族真机 e2e + R1 spike 闭环（test-agent）
+- [x] **§11.2 真机 e2e（test-agent，2026-08-05）**：隔离 cwd 真 `claude -p` 驱动——
+  PostToolUse hook 真触发（`runs/.orca-guard-cc-<sid>` 时间戳落盘 + transcript 出现 `【Orca 守卫·事后提醒】...用了 Bash...r5test...`）；read-only 单 Bash（`cat`）静默（无 guard 文件）；无活跃 run 静默；**Stop nudge 回归 intact**（`runs/.orca-nudge-cc-<sid>` 时间戳落盘 + transcript 出现 `Stop hook feedback: 你还有活跃的 Orca run：r5test...`）。
+- [x] **§11.3 opencode 家族真机 e2e + R1 spike 闭环（test-agent，2026-08-05）**：隔离 cwd + 隔离
+  `OPENCODE_CONFIG_DIR` 真 `opencode run` 驱动——`tool.execute.after` 真触发（`runs/.orca-guard-<sid>.json` `last_nudged_at` 落盘 = promptAsync 成功后才写）；sqlite part 表实证 `【Orca 守卫·事后提醒】...用了 bash...r1test...` 真注入；read-only bash 静默；无活跃 run 静默；**idle nudge 回归 intact**（part 表实证 `【Orca nudge】你还有活跃的 Orca run：r1test...`）。
+- [x] **R5 spike 闭环**：CC PostToolUse env 链继承 `CLAUDE_CODE_SESSION_ID`（实证），fallback 不触发。
+- [x] **R1 spike 闭环**：opencode `input.tool` / `sessionID` / `args.command` / mid-turn `promptAsync` 全部实证可用（deepseek 主 session 收到 §6 注入并响应）；fallback 不触发。
