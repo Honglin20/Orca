@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-05] feat(compile): agent prompt dev-residue lint + 洁净契约——根治 workflow 残留开发期信息
+
+`tars validate` 加 `_check_prompt_dev_residue`：扫 AgentNode.prompt body 的开发期残留（plan/§节号、issue breadcrumb、Orca 源码路径、内部 examples 路径），命中即 warning（不阻断既有 workflow）；跳过 inline prompt；foreach body 同扫；同类别去重；operational 串零误报。新建 `orca/skills/create-workflow/reference/agent-prompt-cleanliness-contract.md`（受众分离原则 + 禁止/允许表 + 测试夹具防火墙 + 受众翻转通读审查法）；CLAUDE.md / SKILL.md 加短引用。执行靠契约 + 受众翻转通读，deterministic lint 兜底。单测 23 例含全覆盖矩阵 invariant（防 regex 捕获组破坏类别映射）。Commit: `2c87e72`。详见 [release note](../releases/2026-08-05-agent-prompt-dev-residue-lint.md)。
+
 ## [2026-08-05] fix(kd-nas): codegen 禁造假数据——扩标准包白名单 + 反造假硬规则 + fail-loud/ask-user
 
 修审计 run `6c2ebe` 发现的 KD-NAS 训练零学习真根因：codegen 因 `torchvision` 不在叶子 import 白名单 → 用 `torch.rand`+`torch.randint` 冒充 "ported verbatim" MNIST（teacher acc=0.12 锁死 ln 10）。修复 = (1) 扩白名单含 torchvision/PIL/numpy/scipy/sklearn + stdlib（禁用户项目模块保留）；(2) `fidelity_check.py` 加 `_check_no_random_fabrication` AST 扫描（torch.rand/randn/randint/normal/like 变体 + numpy.random.* + stdlib random.* + in-place uniform_/normal_/...）；torch.randperm 不入造假集（仅索引非数据）；用户 train.py 自身用 random 视为 verbatim port 跳过；(3) SKILL/agent/workflow doc/checklist/leaf skel/CONTRACTS/yaml 全套加反造假硬规则 + 'faithful mover, not designer' 原则；(4) CONTRACTS 删迁移叙事行 + flag-diff 表去「相对单体」；(5) 守门 regex 加 `已移除`/`相对单体`；(6) `--user_train/eval` 缺失改 rc=2 fail-loud（原裸 traceback）。**175 passed / 2 skipped**（原 169 + 6 新测），零回归；audit-run artifact 经新 fidelity_check 复测准确 4 处造假被捕获。Commit: `f22568b`。详见 [release note](../releases/2026-08-05-kd-nas-codegen-anti-fabrication.md)。
