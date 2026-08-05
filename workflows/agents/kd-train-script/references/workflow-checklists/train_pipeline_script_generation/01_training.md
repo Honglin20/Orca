@@ -47,12 +47,12 @@ required positional arg names (positional args without defaults).
 must not.
 **Verify**: `ast.walk` each leaf; check `Import` / `ImportFrom` / `Name` /
 `Attribute` nodes against the deny-list.
-**Anti-pattern**: Copying NAS `supernet-train-script` scaffolding into a leaf.
+**Anti-pattern**: Copying foreign NAS-style scaffolding into a leaf.
 **Fix**: Delete the offending lines; KD-NAS leaves contribute only user logic.
 
 ### [CRITICAL] 3. Self-Contained Leaves (no sibling / user-project imports)
 **auto-fixable**: no
-**Section**: workflow §2 Self-Containment Rules, CONTRACTS §6
+**Section**: Self-Containment Rules
 **Check**: Each leaf's top-level `import` / `from import` targets only the
 whitelist `{torch, torchvision, torchaudio, numpy, scipy, sklearn, PIL, math,
 os, sys, json, pathlib, typing, itertools, functools, collections,
@@ -74,27 +74,27 @@ whitelisted standard packages.
 
 ### [CRITICAL] 3b. No Random-Tensor Data Fabrication In data.py / eval.py
 **auto-fixable**: no
-**Section**: workflow §2b No Data Fabrication, CONTRACTS §6
+**Section**: No Data Fabrication
 **Check**: `data.py` and `eval.py` must not use `torch.rand` / `torch.randn`
 / `torch.randint` / `torch.randperm` or `numpy.random.*` (or `np.random.*`)
 as the source of pixels or labels. The leaf must load the user's real
-dataset (e.g. `from torchvision.datasets import MNIST`). Randomness for
-parameter init, batch shuffling over real samples, or augmentation on top
-of ground-truth data is allowed.
+dataset (e.g. `from torchvision.datasets import <RealDataset>`). Randomness
+for parameter init, batch shuffling over real samples, or augmentation on
+top of ground-truth data is allowed.
 **Verify**: `fidelity_check.py`'s `LEAF_FABRICATION_OK: true` plus an AST
 walk over `data.py` / `eval.py` rejecting `ast.Call` to the random-tensor
 factories above.
-**Anti-pattern**: Replacing the user's torchvision MNIST loader with
-`torch.rand(N, 1, 28, 28)` + `torch.randint(0, 10, (N,))` because the leaf
-"must be self-contained" — this fabricated data was the audit-found root
-cause of KD-NAS zero-learning (run 6c2ebe: loss locked at ln(10), acc ~10%).
+**Anti-pattern**: Replacing the user's real dataset loader with
+`torch.rand(N, C, H, W)` + `torch.randint(0, num_classes, (N,))` because
+the leaf "must be self-contained" — fabricated data decouples inputs from
+targets and silently produces a model that cannot learn.
 **Fix**: Port the user's real dataloader (with its torchvision / PIL /
 numpy imports and real data path). If the user's data is genuinely
 unavailable, fail loud + emit an ask-user sentinel — never fabricate.
 
 ### [CRITICAL] 4. AST Signature Equality
 **auto-fixable**: yes
-**Section**: workflow §1 (AST signature), CONTRACTS §6
+**Section**: Leaf Contract (AST signature)
 **Check**: Each contract callable's required positional arg set matches the
 contract (function name equality + positional-without-default names equal).
 Defaults are additive — extra optional kwargs are allowed.
@@ -187,7 +187,7 @@ accuracy on random labels".
 
 ### [CRITICAL] 11. Kind Direction Matches accuracy_baseline_kind
 **auto-fixable**: no
-**Section**: workflow §1 (kind direction), CONTRACTS §6
+**Section**: Leaf Contract (kind direction)
 **Check**: The kind returned by `eval_metric` belongs to the same direction
 group as `inputs.accuracy_baseline_kind`:
 - **max group**: `{snr, acc}`

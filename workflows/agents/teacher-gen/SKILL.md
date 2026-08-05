@@ -11,10 +11,10 @@ the depth axis is scaled ×3 and the width axis ×2, **with no architecture chan
 block-type change**. The teacher file is a **wrapper** that delegates `build_model(**cfg)` to
 the baseline's `build_model` with the scaled default cfg.
 
-This skill is **the latency-measuring counterpart of model-flatten**: the teacher file's
-`__main__` block is a verbatim copy of `model-flatten/SKILL.md` Step 3's template (correctness
-+ latency via `measure_contract_latency`). Teacher latency is measured here in teacher-gen,
-not deferred to setup.
+This skill derives the teacher file from the baseline KD-NAS variant contract
+produced by `model-flatten`. The teacher file's `__main__` block mirrors the
+flatten template: correctness + latency via `measure_contract_latency`. Teacher
+latency is measured here in teacher-gen, not deferred to setup.
 
 Skill resource paths:
 
@@ -97,7 +97,8 @@ disambiguates within an axis.
 #### 3a. File name and location
 
 - `<base_name>`: take baseline file stem, strip `_flat` suffix if present, append `_teacher`.
-  E.g., `model8_flat.py` → `model8_teacher.py`; `baseline_model.py` → `baseline_model_teacher.py`.
+  E.g., `<base_name>_flat.py` → `<base_name>_teacher.py`; `baseline_model.py` →
+  `baseline_model_teacher.py`.
 - Write to `<output_dir>/<base_name>.py`.
 
 #### 3b. File structure (use this template verbatim — only the `<FILL>` placeholders change)
@@ -137,7 +138,7 @@ _BASELINE_CONTRACT_PATH = "<FILL: baseline_contract_path 绝对路径>"
 def _load_baseline_module() -> Any:
     """按绝对路径加载 baseline 契约模块（spec_from_file_location，不污染 sys.modules）。
 
-    baseline 自身的 sibling import（如 ``_demo_blocks`` / ``_model8_blocks``）由 baseline 顶层
+    baseline 自身的 sibling import（如 ``<baseline_sibling_module>``）由 baseline 顶层
     代码自管（其顶层会 ``sys.path.insert`` 自己的 sibling 目录）。
     """
     p = os.path.abspath(_BASELINE_CONTRACT_PATH)
@@ -276,8 +277,8 @@ points to an existing file; (b) `DUMMY_INPUT` matches baseline byte-for-byte; (c
 keys are identical to baseline, with only axis defaults scaled; (d) `build_model` body is
 exactly `return _baseline_build_model(**cfg)` — no architecture code, no inlined block classes,
 no new imports beyond `importlib.util` / `os` / `sys` / `typing` / `torch` (torch is imported
-inside `__main__`); (e) no hardcoded model name like `SignalTransformer` or `model8` — the
-docstring uses generic terms (深度轴 / 宽度轴 / baseline).
+inside `__main__`); (e) no hardcoded specific architecture name (use placeholder form, never
+concrete model names) — the docstring uses generic terms (深度轴 / 宽度轴 / baseline).
 
 ### Step 4: Hard Validation + `teacher-gen-verifier` Iteration
 
@@ -349,8 +350,8 @@ Check three dimensions and report issues with severity tags:
      imported inside __main__. Any local-project import beyond baseline module loading →
      [BLOCKER] (breaks standalone).
    - Docstring uses generic terms (深度轴 / 宽度轴 / baseline) — any hardcoded specific
-     architecture name (SignalTransformer, model8, receiver_net, etc.) → [MAJOR] (over-fitted
-     to one model family; teacher-gen must be model-agnostic).
+     architecture name (e.g. `<SpecificModelName>`) → [MAJOR] (over-fitted to one model
+     family; teacher-gen must be model-agnostic).
    - KNOBS min / step / leverage for axis knobs are inherited verbatim from baseline (only
      default scaled). Any extra field change → [MAJOR].
 
@@ -361,7 +362,7 @@ Check three dimensions and report issues with severity tags:
    - **When `{{ inputs.latency_provider }}` is non-empty**: the `--latency_provider` default
      in `__main__` MUST be the rendered value (e.g., `/abs/path.py::measure`), NOT empty.
      Giving a latency_provider in the input but leaving the default empty (→ ONNXRT-CPU
-     fallback) violates the "latency 必用用户脚本" 铁律 (CONTRACTS §6 ) → [BLOCKER].
+     fallback) violates the "latency 必用用户脚本" 铁律 → [BLOCKER].
    - The default is a **rendered path string**, not a Jinja template (`{{ ... }}` literally
      in the .py → [BLOCKER]).
 

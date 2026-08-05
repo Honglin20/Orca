@@ -49,7 +49,7 @@ tools: [bash, read, write, edit, glob, grep]
      --env_file "<节点指令里 orca_env.sh 的绝对路径，如 runs/<run_id>/orca_env.sh>"
    ```
    ℹ️ `--env_file` 是图表推送的**关键兜底**：脚本启动时自加载 `ORCA_CHART_SOCK` 等到自身进程 env。opencode 的 bash 工具不跨调用保 env——若上面的 `source` 和 `python3` 被拆成两次 bash 调用（deepseek 常见行为），`python3` 那次 shell 没有 `ORCA_CHART_SOCK`，**但只要 `--env_file` 路径传对，脚本自己补齐 env**，`render_chart` 就能连上 chart daemon 把图推到 web。所以 **`--env_file` 必须传**（路径从节点指令里抄，是个普通参数，比让 LLM 合并多行 bash 可靠）。
-   ⚠️ **必须整段作为一条 bash 调用原样照抄**（用 `${ORCA_RUN_ID}` 自定位 `orca_env.sh`，**不要**手填绝对路径、**不要**拆成多次调用、**不要**把 `$ORCA_AGENT_RESOURCES` 展开后跳过 source）。opencode 的 bash 工具不跨调用保 env——拆开会让 `render_chart` 缺 `ORCA_CHART_SOCK` 静默失败、图不推（report 仍正常）。这是 `nas-select`/`elastic_optimizer` 验证过的可用模式。
+   ⚠️ **必须整段作为一条 bash 调用原样照抄**（用 `${ORCA_RUN_ID}` 自定位 `orca_env.sh`，**不要**手填绝对路径、**不要**拆成多次调用、**不要**把 `$ORCA_AGENT_RESOURCES` 展开后跳过 source）。opencode 的 bash 工具不跨调用保 env——拆开会致 `render_chart` 缺 `ORCA_CHART_SOCK` 静默失败、图不推（report 仍正常）。
    脚本非 0 退出 → 把 stderr/stdout 原样上抛，**不要假装完成**。推图失败脚本会 stderr 提示但**不阻断**（`report.json` 是核心产出）。单个候选失败不阻断全局（脚本内 try/except 隔离 + 增量落盘 report）。
 
 4. **回显**：脚本 stdout 末尾输出一个 JSON（含 `output_dir`/`report_path`/`model_path`/`baked_model_path`/`best_config`/`best_metric`/`candidates_evaluated`/`mode`/`metric_kind`）。**原样**作为本节点产出（`output_schema` 校验）。

@@ -35,10 +35,10 @@ Key characteristics of the generated leaves:
    **real** dataset. `torch.rand` / `torch.randn` / `torch.randint` /
    `torch.randperm` / `numpy.random.*` as the source of pixels or labels is
    fabrication (it decouples inputs from targets and silently produces a
-   model that cannot learn — the audit root cause of KD-NAS zero-learning
-   in run 6c2ebe). `fidelity_check.py` rejects such leaves. If the user's
-   data is genuinely unavailable (user-project module, missing files), fail
-   loud + emit an ask-user sentinel; never silently substitute random data.
+   model that cannot learn). `fidelity_check.py` rejects such leaves. If the
+   user's data is genuinely unavailable (user-project module, missing files),
+   fail loud + emit an ask-user sentinel; never silently substitute random
+   data.
 4. **Four leaves + run_config.yaml + run.sh** — no monolithic script. The
    fixed engine entry consumes the leaves via the `--artifacts_dir` flag.
 5. **AST signature contract** — function name + required positional args must
@@ -57,8 +57,8 @@ Build the leaves from:
   `eval.py::eval_metric`. If none is found, fail loud.
 * **Teacher model** at `<teacher_model_path>` — exposes `build_model(**cfg)`,
   `DUMMY_INPUT`, `feature_hook_names()` (optional).
-* **Student variant** at `<student_model_path>` (KB receiver `.py`) — same
-  contract.
+* **Student variant** at `<student_model_path>` (user student model `.py`)
+  — same contract.
 * The **leaf skeletons** at
   `<skill_dir>/references/templates/leaves/{loss,data,eval,optim}.py.skel` —
   non-runnable starting points that fix the contract surface.
@@ -99,8 +99,8 @@ A leaf must not import sibling files or the user's project. The engine loader
   collections, dataclasses, random, io, abc, copy, re, warnings, time}`.
 
 "Self-contained" forbids **user-project modules**, NOT the standard scientific
-stack — `from torchvision.datasets import MNIST` is legitimate and expected.
-Port the user's real torchvision / PIL / numpy loader verbatim.
+stack — `from torchvision.datasets import <RealDataset>` is legitimate and
+expected. Port the user's real torchvision / PIL / numpy loader verbatim.
 
 Constants / helper classes / helper functions used by a leaf must live in the
 same file. There is no `data_utils.py` sibling — put loader helpers in
@@ -123,9 +123,9 @@ augmentation applied on top of ground-truth data loaded from disk is allowed.
 If the user's dataloader depends on a **user-project module** or on data that
 is genuinely unavailable (not a pip package, not on disk), **fail loud** and
 emit an ask-user sentinel describing the missing dependency / data path.
-Never silently substitute random tensors for the real loader — that is the
-audit-found root cause of KD-NAS zero-learning (run 6c2ebe: random pixels +
-random labels → 10 epochs locked at ln(10) loss, ~10% accuracy).
+Never silently substitute random tensors for the real loader — fabricated
+data decouples inputs from targets and silently produces a model that cannot
+learn.
 
 ### 3. User Task Loss + Dataloader (port verbatim)
 
@@ -181,8 +181,8 @@ or document the deviation in a comment.
 engine reads via `--config`. Fields:
 
 ```yaml
-epochs: <user_default>        # from Step 5 extraction
-lr: <user_default>            # from Step 5 extraction
+epochs: <user_default>        # extracted from the user's train.py
+lr: <user_default>            # extracted from the user's train.py
 batch_size: 4
 eval_every: 1
 early_stop_patience: 0
@@ -304,7 +304,7 @@ kind-direction hard consistency with `--accuracy_baseline_kind`.
 
 Invoke the `workflow-verifier` subagent per the SKILL.md prompt template. It
 reviews the four leaves in parallel against the user's original `train.py` /
-eval script + CONTRACTS §6.
+eval script.
 
 Handle the verifier response:
 

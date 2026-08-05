@@ -12,7 +12,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 
 每轮两个分支：
 - **首轮**（ledger 无 student 行）：读 flatten baseline 契约，按固定规则改写 → 缩1层 + FFN→pointwise。
-- **迭代轮**（decide back-route，ledger 有 student 行）：读 ledger 上轮 student perf + champion + KB（``$ORCA_KB_DIR/families/receiver/spt_*.py``）→ 提结构假设（降时延/补精度）→ 整文件改写上轮 student model.py。
+- **迭代轮**（decide back-route，ledger 有 student 行）：读 ledger 上轮 student perf + champion + KB（``$ORCA_KB_DIR/families/<family>/spt_*.py``，family 从 workflow 输入或 KB 注入读）→ 提结构假设（降时延/补精度）→ 整文件改写上轮 student model.py。
 
 **产出步骤**：
 1. step 1 算 round + 取「上轮 student model.py」路径（首轮 = baseline）；
@@ -49,7 +49,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 - ``accuracy_baseline = {{ inputs.accuracy_baseline }}``
 - ``accuracy_baseline_kind = {{ inputs.accuracy_baseline_kind }}``
 - ``depth_axis = {{ gen_teacher.output.depth_axis }}``（首轮缩层用，复用 teacher-gen 识别的轴）
-- 引擎已注入 ``$ORCA_KB_DIR``（KB 根，迭代轮读 ``families/receiver/spt_*.py``）。
+- 引擎已注入 ``$ORCA_KB_DIR``（KB 根，迭代轮读 ``families/<family>/spt_*.py``，family 由 ``$KB_FAMILY`` 提供）。
 
 ---
 
@@ -130,8 +130,13 @@ if student_rows:
 " "$LEDGER")"
   echo "LAST_STUDENT_PERF=$LAST_STUDENT_PERF"
   echo "KB_DIR=$ORCA_KB_DIR"
-  # 列 KB receiver 技术点供 LLM 读
-  ls "$ORCA_KB_DIR/families/receiver/"*.py 2>/dev/null | head -20 || echo "WARN: KB receiver 目录无 spt_*.py"
+  # 列 KB families/<family> 技术点供 LLM 读（family 由 $KB_FAMILY 提供；缺则 warn 不阻断）
+  KB_FAMILY="${KB_FAMILY:-}"
+  if [ -n "$KB_FAMILY" ]; then
+    ls "$ORCA_KB_DIR/families/$KB_FAMILY/"*.py 2>/dev/null | head -20 || echo "WARN: KB families/$KB_FAMILY 目录无 spt_*.py"
+  else
+    echo "WARN: \$KB_FAMILY 未注入（无法定位 KB families/<family>）；迭代轮结构灵感仅靠 ledger perf"
+  fi
 fi
 ```
 
@@ -147,7 +152,7 @@ fi
   ofd/fitnets/rkd 特征蒸馏时，student 须暴露 ``def feature_hook_names() -> list[str]``（返回内部特征层名）。
   **首轮 baseline 有可对齐特征层时必移植此 fn**；distill 侧 AST 判定此 fn 存在 → 启特征项，否则自动剥离
   成 mse-only（不崩）。若 student 此 fn 缺失但下游强行配 ofd → compose 守卫 fail-loud 抛 ValueError →
-  FAIL_train（train_pipeline.py:555 ``getattr(student,"feature_hook_names",None)`` 读此 fn 名）。
+  FAIL_train（下游 compose 守卫 / 引擎会通过 ``getattr(student, "feature_hook_names", None)`` 读取此 fn 名）。
 - 缩层后 KNOBS schema 保持（default 改，min/step/leverage 继承 baseline）。
 
 ## step 3 执行：DUMMY_INPUT 字节级 deterministic 校验（fail loud，3 轮修不过 → catch FAIL_build）

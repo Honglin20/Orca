@@ -28,7 +28,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 - 搜索预算-代数: `{{ inputs.max_rounds }}`（写入 supernet_summary.md，下游 search_pipeline_gen 透传到 search_config.yaml 的 num_generations）
 - 复现性种子: `{{ inputs.seed }}`（写入 supernet_summary.md；生成的训练/搜索脚本带 `--seed` CLI 时默认用此值）
 
-**注意**：`project_root` 不再是 workflow input——你在下面「推断 project_root」步骤里**从 model_path 向上走**得到（Tier B infer-once + propagate），写入 supernet_summary.md + 输出 JSON。
+**注意**：`project_root` 由你在下面「推断 project_root」步骤里**从 model_path 向上走**得到（infer-once + propagate），写入 supernet_summary.md + 输出 JSON。
 
 ## 绝不做（slim 边界 —— 违反即变成重 agent）
 
@@ -38,12 +38,12 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 
 ## 执行
 
-1. **激活环境 + probe + 推断 project_root（infer-once，Tier B）**：
+1. **激活环境 + probe + 推断 project_root（infer-once + propagate）**：
    ```bash
    source .venv/bin/activate 2>/dev/null || true
    python -c "from pathlib import Path; import nas_agent; print(Path(nas_agent.__file__).resolve().parent.parent)"
    ```
-   记住 `<nas_agent_root>` 绝对路径。**确定输出目录**（单一真相源，Tier C）：优先用引擎注入的
+   记住 `<nas_agent_root>` 绝对路径。**确定输出目录**（单一真相源）：优先用引擎注入的
    `$ORCA_ARTIFACTS_DIR`（`echo "$ORCA_ARTIFACTS_DIR"` 取值，run scope 权威产物目录）；为空
    （非 orca 编排上下文）→ 读模型推断模型名，fallback `<output_dir>=llm_artifacts/<name>/`。记住 `<output_dir>`，
    所有产物写进它，输出 JSON 的 `output_dir` 字段填它（下游节点从本节点 JSON 读 `output_dir`）。
@@ -54,7 +54,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 
 2. **读模型理解结构**（只读，不展平）：读 `{{ inputs.model_path }}`，识别卷积/线性层的拓扑（in/out channels、kernel、stage 划分、head 结构）。目标：把每一层映射到 Elastic 等价物。
 
-3. **读速查 + 模板**：读 `$ORCA_AGENT_RESOURCES/references/elastic_cheatsheet.md`（原语 API）与 `$ORCA_AGENT_RESOURCES/references/supernet_template.py`（合法超网长什么样的结构基准）。模板已针对 3-conv+1-linear 的 CNN（对齐 `demo_target/model.py` 类结构），可直接仿写。
+3. **读速查 + 模板**：读 `$ORCA_AGENT_RESOURCES/references/elastic_cheatsheet.md`（原语 API）与 `$ORCA_AGENT_RESOURCES/references/supernet_template.py`（合法超网长什么样的结构基准）。模板已针对典型小型 CNN（多 conv + 单线性 head）结构，可直接仿写。
 
 4. **判 Elastic 参数**（简单，面向超参搜索）：针对模型的每一层决定
    - 哪些卷积层 elastic 化（→ `ElasticConv2d`，候选 `kernel_size` 如 (3,5)，必要时 channel 候选）
@@ -70,7 +70,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 
 6. **生成 `<output_dir>/supernet_summary.md`**：精简，含
    - `Model Type: cnn`（或实际类型）
-   - `Source Project: <推断绝对路径>`（**不要**写 inputs.project_root 占位——该 input 已下沉，不存在）
+   - `Source Project: <推断绝对路径>`（**不要**写 inputs.project_root 占位——该 input 不存在）
    - 四个 KPI 一行一个：`Target Hardware: {{ inputs.target_hardware }}` / `Latency Constraint(ms): {{ inputs.latency_constraint }}` / `Max Rounds(generations): {{ inputs.max_rounds }}` / `Seed: {{ inputs.seed }}`
    - 搜索空间概述（stage / depth / kernel / channel 候选一览）
    - 产物清单（supernet.py 等）
@@ -107,7 +107,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 
 ### 早退路径（supernet 自测反复失败 / 模型无法 elastic 化）
 
-slim 没有 SKILL Step 4 分类门，但 supernet 自测不过（`python supernet.py` 报错且修不动）时同理：仍**必须**按 output_schema 发 JSON：
+slim 不做架构预分类，但 supernet 自测不过（`python supernet.py` 报错且修不动）时同理：仍**必须**按 output_schema 发 JSON：
 
 - `model_type` 填字面 `"unsupported"`（schema enum 允许；workflow 路由据此短路到 `$end`，不进 train_script_gen，不烧训练/搜索算力）。
 - `artifacts` 只列实际生成的（可能仅 `supernet_summary.md` 草稿或为空 `[]`）；**绝不**伪造 `supernet.py`。

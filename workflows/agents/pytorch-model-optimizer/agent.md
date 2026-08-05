@@ -1,5 +1,5 @@
 ---
-description: NAS 流水线第一步：PyTorch 模型优化与超网生成（文件夹化 agent，SKILL.md + references + assets 作为资源，经 ORCA_AGENT_RESOURCES 锚定，cwd 无关）。展平 + optimize_rules + supernet 迭代；末尾推 baseline→elastic 结构对比表（push_describe 内联，对齐 slim elastic_optimizer）。
+description: NAS 流水线第一步：PyTorch 模型优化与超网生成（文件夹化 agent，SKILL.md + references + assets 作为资源，经 ORCA_AGENT_RESOURCES 锚定，cwd 无关）。展平 + optimize_rules + supernet 迭代；末尾推 baseline→elastic 结构对比表（push_describe 内联）。
 tools: [bash, read, write, edit, glob, grep, task, todowrite]
 ---
 # pytorch-model-optimizer
@@ -30,7 +30,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 - 搜索预算-代数: `{{ inputs.max_rounds }}`（写入 supernet_summary.md，下游 search_pipeline_gen 透传到 search_config.yaml 的 num_generations）
 - 复现性种子: `{{ inputs.seed }}`（写入 supernet_summary.md；生成的训练/搜索脚本带 `--seed` CLI 时默认用此值）
 
-**注意**：`project_root` 不再是 workflow input——你在下面「推断 project_root」步骤里**从 model_path 向上走**得到（Tier B infer-once + propagate），写入 supernet_summary.md + 输出 JSON。
+**注意**：`project_root` 不是 workflow input——你在下面「推断 project_root」步骤里**从 model_path 向上走**得到（infer-once + propagate），写入 supernet_summary.md + 输出 JSON。
 
 ## 准备工作
 
@@ -39,12 +39,12 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
    source .venv/bin/activate 2>/dev/null || true
    ```
 2. 按上文 probe 解析 `<nas_agent_root>` 并记住其绝对路径。
-3. **推断 project_root（infer-once，Tier B）**：从 `{{ inputs.model_path }}` 所在目录起，
+3. **推断 project_root（infer-once）**：从 `{{ inputs.model_path }}` 所在目录起，
    向上逐级找**第一个含 `train.py` 或 `pyproject.toml` 或 `.git` 的目录**作为项目根（绝对路径）。
    走到 `/` 仍找不到 → 取 `{{ inputs.model_path }}` 的 dirname，并在输出里 `project_root` 字段
    后追加 `" (low-confidence: no train.py/pyproject.toml/.git ancestor)"`（不阻塞，但必须显式标注）。
    **不许**用 `pwd` / `git rev-parse` / 最近编辑文件推断；**不许**留空或编造。
-4. **确定输出目录**（单一真相源，Tier C）：优先用引擎注入的 `$ORCA_ARTIFACTS_DIR`
+4. **确定输出目录**（单一真相源）：优先用引擎注入的 `$ORCA_ARTIFACTS_DIR`
    （`echo "$ORCA_ARTIFACTS_DIR"` 取值，run scope 权威产物目录）；为空（非 orca 编排上下文）
    → 读取模型文件内容推断模型名，fallback `llm_artifacts/<inferred_name>/`。记住为 `<output_dir>`，
    下面所有产物写进它，输出 JSON 的 `output_dir` 字段填它（下游 supernet-train-script /
@@ -64,7 +64,7 @@ Step 6: 检查并优化 SearchSpace
 Step 7: 输出 `supernet_summary.md`
 
 **supernet_summary.md 的 "Source Project" 段必须**包含：
-- 推断所得的 project_root 绝对路径（**不要**写 inputs.project_root 占位——该 input 已下沉，不存在）。
+- 推断所得的 project_root 绝对路径（**不要**写 inputs.project_root 占位——该 input 不存在）。
 - target_hardware / latency_constraint / max_rounds / seed 四个 KPI（一行一个，`Key: value`），
   供下游 supernet-train-script / nas-search-pipeline agent 读取。
 

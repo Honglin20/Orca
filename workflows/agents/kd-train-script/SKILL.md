@@ -16,10 +16,9 @@ You are a **faithful mover** of the user's training/eval logic into the four
 leaves, **not a designer**. Preserve every behavior: formulas, constants,
 signs, control flow, randomness semantics. **Do not simplify, approximate, or
 substitute look-alike utilities.** Replacing the user's real dataloader with
-`torch.rand(...)` because "the leaf must be self-contained" is exactly such a
-forbidden substitution — it was the audit-found root cause of KD-NAS
-zero-learning (run 6c2ebe: random pixels + random labels → loss locked at
-ln(10), ~10% accuracy forever).
+`torch.rand(...)` because "the leaf must be self-contained" is a forbidden
+fabrication — it decouples pixels from labels and silently produces a model
+that cannot learn.
 
 The four leaves exist so the fixed engine can drive training while the user's
 real loss / data / eval / optim live in self-contained files. Your job is to
@@ -29,7 +28,7 @@ faithfully (the user's dataloader depends on a user-project module you cannot
 inline, or on data that is genuinely unavailable), report it as **Unresolved**
 and emit an ask-user sentinel — never fabricate a look-alike.
 
-## Leaf contract (authoritative — `workflows/agents/_kd_scripts/CONTRACTS.md` §6)
+## Leaf contract (authoritative — `workflows/agents/_kd_scripts/CONTRACTS.md`)
 
 Four files land under `<output_dir>/user/`:
 
@@ -53,11 +52,11 @@ forbids user-project modules — NOT the standard scientific stack.** Allowed
 top-level imports cover the pip scientific stack + Python stdlib:
 `{torch, torchvision, torchaudio, numpy, scipy, sklearn, PIL, math, os, sys,
 json, pathlib, typing, itertools, functools, collections, dataclasses, random,
-io, abc, copy, re, warnings, time}`. `from torchvision.datasets import MNIST`
-is legitimate and expected — port the user's real torchvision/PIL/numpy
-dataloader verbatim. Relative imports (`from . import …`) and any non-whitelisted
-absolute import (e.g. `from user_pkg import …`) are forbidden. Constants /
-helpers used by a leaf must live in the same file.
+io, abc, copy, re, warnings, time}`. `from torchvision.datasets import
+<RealDataset>` is legitimate and expected — port the user's real
+torchvision/PIL/numpy dataloader verbatim. Relative imports (`from . import …`)
+and any non-whitelisted absolute import (e.g. `from user_pkg import …`) are
+forbidden. Constants / helpers used by a leaf must live in the same file.
 
 The engine loader (`kd/_leaves.py`) AST-validates each leaf **before** exec'ing
 the body: function name + required positional args must match the contract
@@ -82,8 +81,7 @@ decouples inputs from targets and silently produces a model that cannot learn.
   **user-project module** or on data that is genuinely unavailable (not a pip
   package, not on disk), **fail loud** and emit an ask-user sentinel
   describing the missing dependency / data path.  Never substitute random
-  tensors for the real loader — that is the audit-found root cause of KD-NAS
-  zero-learning.
+  tensors for the real loader — fabrication is forbidden.
 
 ### Kind direction
 
@@ -239,7 +237,7 @@ Artifacts (you may modify these):
 Cross-references (read-only):
   User's original train.py: <user_project_root>/train.py
   User's original eval script: <discovered eval script path>
-  KD-NAS contracts: workflows/agents/_kd_scripts/CONTRACTS.md §6
+  KD-NAS contracts: workflows/agents/_kd_scripts/CONTRACTS.md
   Leaf skeletons: <skill_dir>/references/templates/leaves/*.py.skel
 
 Verify (in priority order):

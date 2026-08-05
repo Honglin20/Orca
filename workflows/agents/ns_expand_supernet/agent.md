@@ -1,5 +1,5 @@
 ---
-description: NAS supernet 张开生成器（folder-agent）——把用户 PyTorch 模型 flatten + 验证 + 仅施加 mandatory supernet readiness 规则（optional 优化与 A/B consent 全删）+ 生成 supernet.py 与精炼 SearchSpace；调 supernet-evaluator / workflow-verifier / memory-verifier（read+embed 协议）；不支持模型类型 → output_schema model_type_supported=false fail loud 路由 terminate_unsupported。
+description: NAS supernet 张开生成器（folder-agent）——把用户 PyTorch 模型 flatten + 验证 + 仅施加 mandatory supernet readiness 规则（optional 优化跳过）+ 生成 supernet.py 与精炼 SearchSpace；调 supernet-evaluator / workflow-verifier / memory-verifier（read+embed 协议）；不支持模型类型 → output_schema model_type_supported=false fail loud 路由 terminate_unsupported。
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # ns_expand_supernet
@@ -14,10 +14,10 @@ NAS `supernet.py` + 精炼 `SearchSpace`，全部产物落 `$ORCA_ARTIFACTS_DIR`
 
 - `$ORCA_AGENT_RESOURCES`（orca spawn 注入）= 本 agent 资源目录（含 `references/`、`assets/`）。
   所有 `references/` 与 `assets/` 路径相对于它。
-- `$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本节点产物目录（原 skill 的 `<output_dir>`）。
+- `$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本节点产物目录。
   **先 `cd "$ORCA_ARTIFACTS_DIR"` 再执行任何命令**；后续相对路径在该 cwd 下解析；sibling
   模块（如 `supernet.py`）作 plain import，禁 `sys.path` / `PYTHONPATH` 改写。
-- `{{ inputs.user_project_root }}`：用户原始 PyTorch 项目根（原 `<user_project_root>`）。
+- `{{ inputs.user_project_root }}`：用户原始 PyTorch 项目根。
 - `<nas_agent_root>` 探测保留（cwd 是产物目录非项目根，需一次性解析）：
   ```bash
   python -c "from pathlib import Path; import nas_agent; print(Path(nas_agent.__file__).resolve().parent.parent)"
@@ -82,7 +82,7 @@ Step 1 前确认都已知（缺任一 → fail loud，output_schema `error` 字�
 
 ## Workflow
 
-按 7 步顺序执行。**todolist 退化**（opencode 无 todowrite 等价）：在回复中维护一份 markdown
+按 7 步顺序执行。**todolist**（opencode 无 todowrite 等价）：在回复中维护一份 markdown
 编号清单（1–7）跟踪进度，每完成一步更新清单状态。
 
 ### Step 1: Discover Project And Flatten Model
@@ -126,8 +126,8 @@ body 里重复绝对项目路径。只记原始项目事实；NAS 决策 / 产�
 #### Procedure
 
 1. **Collect task context:**
-   - 读用户请求，然后用 Read / Grep / Bash 直接探 `{{ inputs.user_project_root }}`（**原 `Explore`
-     子 agent 退化**——opencode host 内无等价只读子 agent，本节点直接探）。
+   - 读用户请求，然后用 Read / Grep / Bash 直接探 `{{ inputs.user_project_root }}`（opencode
+     host 内无等价只读子 agent，本节点直接探）。
    - 报告 manifest sections 所需事实（见上 **Project Manifest**）+ 部署约束 / 瓶颈 / 优化优先级。
    - 直接探只产结构摘要，非 verified source——本 skill 直接依赖的细节（至少目标模型源、
      其 constructor + `forward` signature）必须自己打开引用文件确认；纠正任何与源不符之处。
@@ -157,9 +157,7 @@ body 里重复绝对项目路径。只记原始项目事实；NAS 决策 / 产�
 
 ### Step 2: Supernet Readiness Rules (mandatory only, optional skipped)
 
-> **适配说明**：原 skill 的 optional ruleset curation + A/B consent 全删。
-> 本步仅施加 **mandatory readiness 规则**——它们本来就不依赖用户 consent（原 skill 也声明
-> "regardless of the user's consent choice for optional rules"）。optional 优化跳过。
+> 本步仅施加 **mandatory readiness 规则**——它们本来就不依赖用户 consent。optional 优化跳过。
 
 1. **Load supernet readiness rules:**
    - 列 `$ORCA_AGENT_RESOURCES/assets/optimize_rules/supernet_readiness/` 目录文件名。
@@ -170,12 +168,10 @@ body 里重复绝对项目路径。只记原始项目事实；NAS 决策 / 产�
      - **Note**：禁盲目施加一个文件里的所有规则——只选适用于用户模型的规则。
    - 若无 readiness 文件匹配该模型类别，无 mandatory 结构改动→直接进 Step 3（无规则可施），
      保留 flat file 作 NAS input 候选。
-2. （原 optional ruleset loading / curated recommendations / conflict detection / A/B consent
-   **全部跳过**。）
 
 ### Step 3: Apply Mandatory Readiness Rules
 
-> 原 skill 的 optional 应用部分删（与 Step 2 一并跳过 optional）。本步仅施 mandatory readiness。
+> 本步仅施 mandatory readiness。
 
 1. **Rewrite the flat model** 用所有 mandatory readiness 规则。用每条规则 instruction 段作实现指南。
    默认保留 public interface、默认 `__init__` 参数、`forward` tensor shapes——仅当 mandatory
@@ -243,7 +239,7 @@ workflow 完成（含 validation）后，进 evaluator verification loop：
 按它 inspect 生成的 supernet、显示每个 representative candidate block 的参数 + 当前 host device
 时延、调既有 `SearchSpace` 字段、校验每个 accepted round。
 
-> 注：原 workflow 的「user feedback loop」退化——不交互，agent 自己按
+> 注：不交互，agent 自己按
 > workflow 内规则完成 refinement 并校验；缺关键信息 fail loud 或文档化假设进 manifest / summary。
 
 本阶段主要改既有 `SearchSpace` 字段值（fixed dimension / range / candidate / stage setting /
@@ -281,7 +277,7 @@ layer config / branch choice）。refinement 后：
 2. **按协议调 `memory-verifier`**，inputs `$ORCA_ARTIFACTS_DIR` + `{{ inputs.user_project_root }}`。
    读 report；若任何更正暴露你生成代码的不一致→修代码。
 
-3. （原 "Present next steps to the user" **删**。下游 `ns_train_script` 自动接力。）
+3. （下游 `ns_train_script` 自动接力。）
 
 ## Validation
 
@@ -325,9 +321,7 @@ layer config / branch choice）。refinement 后：
 
 - `error`：fail loud 时写明根因（如 `{{ inputs.user_project_root }}` / `{{ inputs.model_path }}`
   缺 / 不可访问——写明缺哪个；model_type 不支持**不**写 error，是 `model_type_supported: false`
-  的正常 fail loud 分支）。成功时为空串。命名 `error` 而非 Orca runner 惯例的 `last_error`：本
-  节点无 self-heal 重试，"last" 语义不适用（明确偏离 `nas-train-runner` 的 `last_error`，理由
-  是 generation 节点无 retry）。
+  的正常 fail loud 分支）。成功时为空串。命名 `error`：本节点无 self-heal 重试，"last" 语义不适用。
 - `model_type_supported: false` → 引擎路由 `terminate_unsupported`（fail loud）。此时其它字段
   按实际填（`supernet_path=""`、`fidelity_passed: true`（vacuous——本节点无 fidelity-verifier 调用）、
   `workflow_verifier_passed: false`（未跑 Step 6 workflow loop）、`error` 留空——unsupported 是已知分支非异常）。

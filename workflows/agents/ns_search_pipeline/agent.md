@@ -21,11 +21,11 @@ AMP、checkpoint convention、dummy input shape、其它训练行为。
 
 - `$ORCA_AGENT_RESOURCES`（orca spawn 注入）= 本 agent 资源目录（含 `references/`、`assets/`）。
   所有 `references/` 与 `assets/` 路径相对于它。
-- `$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本节点产物目录（原 skill 的 `<output_dir>`，即上游
+- `$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本节点产物目录（即上游
   expand + train 已初始化的同一目录）。**先 `cd "$ORCA_ARTIFACTS_DIR"` 再执行任何命令**；后续
   相对路径在该 cwd 下解析；sibling 模块（如 `supernet.py`、`latency_estimator.py`）作 plain import，
   禁 `sys.path` / `PYTHONPATH` 改写。
-- `{{ inputs.user_project_root }}`：用户原始 PyTorch 项目根（原 `<user_project_root>`）。缺省时
+- `{{ inputs.user_project_root }}`：用户原始 PyTorch 项目根。缺省时
   从 `supernet_summary.md` 的 **Source Project** section 读。
 - `{{ inputs.latency_script_path }}`：可选——用户提供的外部时延脚本路径（见 **Step 1 时延规则**）。
 - `<nas_agent_root>` 探测保留（cwd 是产物目录非项目根，需一次性解析）：
@@ -98,10 +98,10 @@ path = f"{d}/file.py"                # 禁：f-string 拼接
 
 - 探 `{{ inputs.user_project_root }}` 前先读；它告诉你去哪看。manifest 已记项目结构
   （env / data / reward / metric / 辅助模型）在 **Training And Evaluation** / **Data And Environment**。
-- Step 2 开始时，用 Read / Grep / Bash 直接探仅 code-writing-level gap（原 `Explore` 子 agent 退化）
+- Step 2 开始时，用 Read / Grep / Bash 直接探仅 code-writing-level gap
   写 `evaluator.py` 所需：exact env step / reset signature、reward / metric 公式、辅助模型 invocation、
   dataloader batch 结构（manifest 未覆盖处，guided by **Relevant Source Files**）。然后打开将写
-  code 的源自己确认。本 skill **首次**探 `{{ inputs.user_project_root }}` 必须用直接探（已退化）。
+  code 的源自己确认。本 skill **首次**探 `{{ inputs.user_project_root }}` 必须用直接探。
 - 本 skill 任何处读 `{{ inputs.user_project_root }}`（探 / porter 决策）发现 manifest 错 / 缺→
   当即就地更正。
 
@@ -136,7 +136,7 @@ path = f"{d}/file.py"                # 禁：f-string 拼接
 - **未提供 `{{ inputs.latency_script_path }}`（默认）**：用 **nas-agent 内置 PyTorch latency**——
   调 `measure_module_latency(subnet, dummy_input, device=..., warmup=..., repetitions=...)`，定义于
   `nas-agent/nas_agent/latency/pytorch_latency_utils.py:94`（`@torch.inference_mode()` + `nn.Module`，
-  **PyTorch 非 onnx**——onnx 是 nas-agent future 规划）。参考实现见
+  **PyTorch 实现（非 onnx 路径）**）。参考实现见
   `$ORCA_AGENT_RESOURCES/references/supernet_workflow_examples/latency_estimator.py`。dummy_input
   构造 = latency_estimator 责任（按 manifest input shape）。
 - **提供 `{{ inputs.latency_script_path }}`**：`latency_estimator.py` 包装用户脚本：
@@ -285,8 +285,7 @@ Handle the response:
 
 ### Step 2b: Generate select_architecture.py (schema-aware)
 
-> **本 skill 在原 nas-agent 基础上的增量**——下游 `ns_select` folder agent 会以确定性 Bash 调用
-> 此脚本，禁自己重算选架构逻辑。
+> 下游 `ns_select` folder agent 会以确定性 Bash 调用此脚本，禁自己重算选架构逻辑。
 
 生成 `$ORCA_ARTIFACTS_DIR/select_architecture.py`，**schema-aware**：它定义 search 结果
 `search_results.jsonl` 的记录 schema（哪些字段是 arch config / acc / latency）+ 项目 metric 方向
@@ -508,9 +507,7 @@ torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm, foreach=False if is
 字段语义（tape 审计字段）：
 
 - `error`：fail loud 时写明根因（如 `$ORCA_ARTIFACTS_DIR` 缺 `supernet.py` / `supernet_summary.md`
-  等上游产物——写明缺哪个）。成功时为空串。命名 `error` 而非 Orca runner 惯例的 `last_error`：
-  本节点无 self-heal 重试，"last" 语义不适用（明确偏离 `nas-train-runner` 的 `last_error`，理由
-  是 generation 节点无 retry）。
+  等上游产物——写明缺哪个）。成功时为空串。命名 `error`：本节点无 self-heal 重试，"last" 语义不适用。
 - `fidelity_passed`：Step 2 fidelity audit loop（`project-fidelity-verifier`）返 `all-pass` → `true`。
 - `workflow_verifier_passed`：Step 1 + Step 2 两个 workflow compliance loop 都 `all-pass` → `true`
   （Step 1 `latency_estimator` verifier + Step 2 `search_supernet` verifier，任一未过 → `false` +

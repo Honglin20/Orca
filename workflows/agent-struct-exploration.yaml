@@ -112,8 +112,7 @@ nodes:
       **Phase A：建输出目录 + 浅层族检测 + 探测路径 + KB 切片**
 
       1. **建输出目录（append-only 账本）+ 一次性计算所有下游专用路径字段（单一真相源）**：
-         `OUTPUT_DIR` 优先取引擎注入的 `$ORCA_ARTIFACTS_DIR`（`<abs>/runs/<run_id>/artifacts/`，
-         由 `orca.exec.env.build_env_overlay` 注入）；缺则回退 `llm_artifacts/<model>/runs/<timestamp>/`（headless / spike / 非 `orca run` 路径）。
+         `OUTPUT_DIR` 优先取引擎注入的 `$ORCA_ARTIFACTS_DIR`（`<abs>/runs/<run_id>/artifacts/`）；缺则回退 `llm_artifacts/<model>/runs/<timestamp>/`（headless / spike / 非 `orca run` 路径）。
          无论哪条路径，**末尾必须带 `/`**（下游拼接依赖此约定；杜绝 `<run>snapshots/`、`<run>.worktrees/` 兄弟孤儿目录）。
          ```bash
          # 优先 $ORCA_ARTIFACTS_DIR（引擎注入），回退 llm_artifacts/...
@@ -203,9 +202,9 @@ nodes:
 
       ## 缺失必填输入时（严禁造假）— ask-user 哨兵
 
-      > 契约：`docs/specs/agent-ask-user-sentinel.md` §3。TARS skill strict 识别 `_sentinel:"orca_ask_user_v1"` 魔键
-      > → 问用户 → SendMessage / Task(task_id) 恢复**同一**子 agent（上下文不丢）→ MAX_ASK=3 兜底；
-      > 哨兵**不进 `orca next`**（output_schema `additionalProperties:false` 会拒，引擎零改动）。
+      > TARS skill strict 识别 `_sentinel:"orca_ask_user_v1"` 魔键 → 问用户 → SendMessage / Task(task_id)
+      > 恢复**同一**子 agent（上下文不丢）→ MAX_ASK=3 兜底；哨兵**不进 `orca next`**（output_schema
+      > `additionalProperties:false` 会拒，引擎零改动）。
 
       本节点的 Tier B 项（"读用户代码可得"的事实，缺失走哨兵而非造假/低置信猜测）：
 

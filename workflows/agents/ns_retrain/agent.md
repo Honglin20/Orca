@@ -1,5 +1,5 @@
 ---
-description: nas-supernet 重训 agent（folder-agent）。读 ns_select 选定 arch + AGENTS.md scaffold + supernet_summary.md + project_manifest.md → 生成 retrain.py / finetune.py + run_retrain.sh → project-fidelity-verifier 复查（read+embed 协议，cat $HOME/.orca/nas-supernet/subagents/...）→ cd $ORCA_ARTIFACTS_DIR nohup detach + 轮询执行（沿用 nas-train-runner detach+poll 句式 + nohup 强化脱离 controlling terminal；detach+poll 在 Git Bash/MSYS 验证兼容）→ self-heal max_retries=3（仅改本次生成的脚本；改训练逻辑类目 → 重触 fidelity-verifier）→ 读 final test metric 写软判断 assessment。禁碰 supernet.py / project_manifest.md / supernet_summary.md / AGENTS.md / user_project_root。output_schema 双层强制单行 JSON。
+description: nas-supernet 重训 agent（folder-agent）。读 ns_select 选定 arch + AGENTS.md scaffold + supernet_summary.md + project_manifest.md → 生成 retrain.py / finetune.py + run_retrain.sh → project-fidelity-verifier 复查（read+embed 协议，cat $HOME/.orca/nas-supernet/subagents/...）→ cd $ORCA_ARTIFACTS_DIR nohup detach + 轮询执行（nohup 强化脱离 controlling terminal；detach+poll 在 Git Bash/MSYS 兼容）→ self-heal max_retries=3（仅改本次生成的脚本；改训练逻辑类目 → 重触 fidelity-verifier）→ 读 final test metric 写软判断 assessment。禁碰 supernet.py / project_manifest.md / supernet_summary.md / AGENTS.md / user_project_root。output_schema 双层强制单行 JSON。
 tools: [bash, read, write, edit, grep, glob, task]
 ---
 # ns_retrain
@@ -93,8 +93,8 @@ grep -E 'supernet_ckpt_path:' search_config.yaml 2>/dev/null || true
   optimizer 按 AGENTS.md + manifest 的 metric 方向）。
 - `finetune.py`（若 scaffold 指定 finetune-from-supernet）：从 supernet ckpt 提取选定子网权重
   作 init + 微调。
-- `run_retrain.sh`：launcher（设 `NPROC_PER_NODE` 实测值——参考 nas-train-runner Step 0 的 GPU
-  探测 python；无 GPU→1；python3 -c 'import torch; print(torch.cuda.device_count())'），
+- `run_retrain.sh`：launcher（设 `NPROC_PER_NODE` 实测值——无 GPU→1；
+  python3 -c 'import torch; print(torch.cuda.device_count())'），
   `cd $ORCA_ARTIFACTS_DIR` + 调 `python3 retrain.py --artifacts-dir "$ORCA_ARTIFACTS_DIR" ...`，
   final ckpt 写 `$ORCA_ARTIFACTS_DIR/runs/retrain/retrain_best.pth`。
 
@@ -128,8 +128,8 @@ grep -E 'supernet_ckpt_path:' search_config.yaml 2>/dev/null || true
 
 对**每一次尝试** `N=1..3`：
 
-1. 后台跑 + 轮询到结束（`nohup` detach + `kill -0` 探活 + `wait` 收 RC，沿用 nas-train-runner
-   句式，Git Bash win32 经验证可行）：
+1. 后台跑 + 轮询到结束（`nohup` detach + `kill -0` 探活 + `wait` 收 RC，
+   detach+poll 在 Git Bash/MSYS 兼容）：
    ```bash
    mkdir -p runs/retrain
    nohup bash run_retrain.sh > runs/retrain/retrain.attempt${N}.log 2>&1 &
@@ -258,5 +258,5 @@ PY
 **整段回复 = Step 5 python 打印的那一行 JSON**（形如
 `{"status":"executed","artifacts":["/path/retrain_best.pth"],"assessment":"final test acc 0.93, latency 4.2ms vs full 8.1ms","max_retries_hit":false,"healed_files":["retrain.py"],"fidelity_retriggered":true}`）。
 节点 `output_schema` 要求它是合法 JSON 且 `status ∈ {executed, failed}`（ns_retrain 无 skipped
-分支——agent.md Step 5 python 无 skip 路径，缺关键上游即 failed，与 yaml enum 对齐）；
+分支——agent.md Step 5 python 无 skip 路径，缺关键上游即 failed）；
 `status==failed` → 引擎判 node 失败。双层强制你必须真跑出 final ckpt 或如实 failed。

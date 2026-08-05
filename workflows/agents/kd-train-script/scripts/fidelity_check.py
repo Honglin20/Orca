@@ -13,8 +13,7 @@ Checks (per leaf + cross-leaf):
 3. **anti-fabrication** — ``data.py`` / ``eval.py`` must not use
    ``torch.rand`` / ``torch.randn`` / ``torch.randint`` / ``torch.randperm``
    or ``numpy.random.*`` as a data/label source.  Such calls signal that
-   the codegen fabricated data instead of porting the user's real loader
-   (the audit-found root cause of KD-NAS zero-learning, run 6c2ebe).
+   the codegen fabricated data instead of porting the user's real loader.
 4. **loss** — ``compute_loss`` vs the user's loss fn on identical seeded
    inputs (``torch.allclose(rtol=1e-5)``); AST body fallback when the user
    module can't be imported.
@@ -29,7 +28,7 @@ Checks (per leaf + cross-leaf):
    ``--accuracy_baseline_kind``.
 9. **model I/O** — model forward on ``DUMMY_INPUT`` shape preserves the shape.
 
-Deterministic script contract (CONTRACTS §3): stdout is ``KEY: value`` lines,
+Deterministic script contract: stdout is ``KEY: value`` lines,
 non-zero exit on FAIL (fail loud).
 
 Usage::
@@ -167,11 +166,11 @@ def _required_args(fn: ast.FunctionDef) -> list[str]:
 # anti-fabrication (data / eval leaves must load real data, not synthesize)
 # ---------------------------------------------------------------------------
 # ``data.py`` and ``eval.py`` exist to load the user's REAL dataset (e.g.
-# torchvision MNIST).  Using ``torch.rand`` / ``torch.randn`` / ``torch.randint``
-# / ``torch.randperm`` or ``numpy.random.*`` as the SOURCE of pixels or labels
-# is fabrication — it decouples inputs from targets and silently produces a
-# model that cannot learn (the audit-found root cause of KD-NAS zero-learning
-# in run 6c2ebe).  Such calls are forbidden in data.py and eval.py *unless the
+# ``torchvision.datasets.<RealDataset>``).  Using ``torch.rand`` / ``torch.randn``
+# / ``torch.randint`` / ``torch.randperm`` or ``numpy.random.*`` as the SOURCE of
+# pixels or labels is fabrication — it decouples inputs from targets and
+# silently produces a model that cannot learn.  Such calls are forbidden in
+# data.py and eval.py *unless the
 # user's own train.py uses them too* (genuine synthetic-data demos, denoising
 # autoencoders, etc.).  In that case the leaf is porting the user verbatim,
 # not fabricating.
@@ -254,7 +253,7 @@ def _check_no_random_fabrication(path: Path, user_synthetic: bool) -> list[str]:
                     f"{path}:{node.lineno}: fabrication detected — "
                     f"`{head}.{fn.attr}(...)` synthesises data/labels; "
                     f"data/eval leaves must load the user's real dataset "
-                    f"(e.g. `from torchvision.datasets import MNIST`). "
+                    f"(e.g. `from torchvision.datasets import <RealDataset>`). "
                     f"If the user's data is genuinely unavailable, fail loud "
                     f"+ emit ask-user sentinel — never fabricate."
                 )
@@ -513,7 +512,7 @@ def main() -> int:
     if args.project_root and args.project_root not in sys.path:
         sys.path.insert(0, args.project_root)
 
-    # Fail loud on bad CLI inputs (rc=2 + stderr per CONTRACTS §3).
+    # Fail loud on bad CLI inputs (rc=2 + stderr, per the deterministic script contract).
     user_train_path = Path(args.user_train)
     if not user_train_path.is_file():
         print(

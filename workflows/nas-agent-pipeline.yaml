@@ -1,14 +1,14 @@
 name: nas-agent-pipeline
-description: "[DEPRECATED] 被 nas-supernet workflow 取代（本 workflow 基于 nas-agent 重构前的过期 skill 快照，缺 project-fidelity-verifier 守门机制，已不再维护；新能力见 workflows/nas-supernet.yaml）。原描述：基于 Elastic 超网的端到端 NAS：生成超网 → 训练 → 搜索架构 → 评估选择，同时优化超参（宽/深）与模型组件（block 类型）。"
+description: "[DEPRECATED] 使用 workflows/nas-supernet.yaml 获取 NAS 能力。"
 entry: model_optimizer
 
 inputs:
   # ── inputs 标签约定（description 前缀，供 in-session 编排器 / tars skill 读取）──
   #   [ask]      业务决策 / KPI / 硬件 / 预算，用户意图未给则启动前集中询问
   #   [default]  有合理默认，不问；高级用户可直接覆盖
-  # project_root 已下沉给 model_optimizer 节点运行时推断（从 model_path 向上走）；
-  # output_dir 已下沉到引擎注入的 $ORCA_ARTIFACTS_DIR（agent 读 env，缺则 fallback 默认产物路径）。
-  # heavy 对齐 slim（nas-hp-search）的输入契约 + 确定性护栏。
+  # project_root 由 model_optimizer 节点运行时推断（从 model_path 向上走）；
+  # output_dir 走引擎注入的 $ORCA_ARTIFACTS_DIR（agent 读 env，缺则 fallback 默认产物路径）。
+  # 输入契约 + 确定性护栏。
   model_path:
     type: string
     description: "[ask] 用户 PyTorch 模型入口文件路径（如 examples/ViT_Imageclassfication/model.py）。项目内唯一锚点，必须用户给"
@@ -35,13 +35,13 @@ inputs:
 
 nodes:
   # ═══════════════════════════════════════════════════════════════
-  # Agent 1: 模型优化与超网生成（heavy：展平 + optimize_rules + supernet 迭代）
+  # Agent 1: 模型优化与超网生成（展平 + optimize_rules + supernet 迭代）
   # 节点名 `model_optimizer` 是下游复用 agent（supernet-train-script）的硬契约：
   # 其 agent.md body 引用 {{ model_optimizer.output }}，经 Jinja2 StrictUndefined
   # 渲染——故此处节点名须与之一致。
   # output_schema 强制 JSON 输出 + project_root infer-once（从 model_path 向上走）
   # + KPI 向后传（target_hardware/latency_constraint/max_rounds/seed）。
-  # viz_describe 已删——push_describe 内联进 agent.md（对齐 slim）。
+  # push_describe 内联进 agent.md（baseline→elastic 结构对比表）。
   # ═══════════════════════════════════════════════════════════════
   - name: model_optimizer
     kind: agent
@@ -122,7 +122,7 @@ nodes:
       - to: select
 
   # ═══════════════════════════════════════════════════════════════
-  # Agent 5: 脚本化架构选择（复用 slim nas-select，替代 LLM evaluator + viz_finalize）
+  # Agent 5: 脚本化架构选择（复用 nas-select，零 LLM 判断 + 推图内联）
   # nas-select-architecture + 模板填空 final_report.md + 推 C5/C6（无 LLM）。
   # ═══════════════════════════════════════════════════════════════
   - name: select

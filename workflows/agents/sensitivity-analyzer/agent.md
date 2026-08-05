@@ -45,16 +45,16 @@ tools: [bash, read, write, edit, glob, grep]
      --device "{{ inputs.target_hardware }}" --seed "{{ inputs.seed }}" \
      --env_file "<节点指令里 orca_env.sh 的绝对路径，如 runs/<run_id>/orca_env.sh>"
    ```
-   ⚠️ **必须整段作为一条 bash 调用原样照抄**（用 `${ORCA_RUN_ID}` 自定位 `orca_env.sh`）。`--env_file` 是图表推送的关键兜底，**必须传**——与 PTQ/bit-curve 已踩过的坑对齐。
+   ⚠️ **必须整段作为一条 bash 调用原样照抄**（用 `${ORCA_RUN_ID}` 自定位 `orca_env.sh`）。`--env_file` 是图表推送的关键兜底，**必须传**（缺失→推图失败，脚本会 stderr 标注但不阻断 report.json 产出）。
    脚本非 0 退出 → 把 stderr/stdout 原样上抛，**不要假装完成**。推图失败脚本会 stderr 提示但**不阻断**（`report.json` 是核心产出）。
 
 4. **回显**：脚本 stdout 末尾输出一个 JSON（含 `output_dir`/`report_path`/`sensitive_layers`/`selected_count`/`method`）。**原样**作为本节点产出（`output_schema` 校验）。
 
 ## 缺失必填输入时（严禁造假）—— ask-user 哨兵
 
-> 契约：`docs/specs/agent-ask-user-sentinel.md` §3。TARS skill strict 识别 `_sentinel:"orca_ask_user_v1"` 魔键
+> TARS skill strict 识别 `_sentinel:"orca_ask_user_v1"` 魔键
 > → 问用户 → SendMessage / Task(task_id) 恢复**同一**子 agent（上下文不丢）→ MAX_ASK=3 兜底；
-> 哨兵**不进 `orca next`**（output_schema `additionalProperties:false` 会拒，引擎零改动）。
+> 哨兵**不进 `orca next`**（output_schema `additionalProperties:false` 会拒）。
 
 本节点 Tier B 项（"读用户代码可得"的 dotted-path，缺失走哨兵而非造假）：
 

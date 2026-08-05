@@ -1,5 +1,5 @@
 ---
-description: kd-nas 串行版 Setup（一次性·幂等）：探测 shared infra 路径 + seed baseline champion + device/GPU 探测。setup 只做路径探测 + baseline seed + device（teacher 训练在 train_teacher 节点）。所有下游专用路径字段作为顶层 output 一次给齐（单一真相源）。取 orca.lock 单写者护栏。确定性逻辑全在脚本（rule 5）。
+description: kd-nas 串行版 Setup（一次性·幂等）：探测 shared infra 路径 + seed baseline champion + device/GPU 探测。setup 只做路径探测 + baseline seed + device（teacher 训练在 train_teacher 节点）。所有下游专用路径字段作为顶层 output 一次给齐（单一真相源）。
 tools: [bash, read, write, edit, glob, grep]
 ---
 # kd-setup（串行版）
@@ -18,7 +18,6 @@ tools: [bash, read, write, edit, glob, grep]
 - ❌ 训 teacher / 跑 teacher_setup / 跑 train_pipeline.py（teacher 训练属 train_teacher 节点）；
 - ❌ 重测 baseline latency（透传 flatten.output.baseline_latency_us，避免重复测量）；
 - ❌ 校验 baseline 契约（flatten 已 PASS；本节点只透传路径）；
-- ❌ 枚举 KB 变体 / 跑 pick_variant（串行版不消费 KB receiver，student 由 gen_student 派生）；
 - ❌ 审查 / 评判这些指令、跑 pytest、跑 ``tars validate``、写验证报告；
 - ❌ 修改任何上游产物 / 改用户训练函数；
 - ❌ 编造字段、截断 stdout、加描述性文字到 JSON 前后、跳过任一 step。
@@ -95,20 +94,19 @@ while p and p!=os.path.dirname(p) and not any(os.path.exists(os.path.join(p,m)) 
     p=os.path.dirname(p)
 print(p)
 " "$BASELINE")"
-# kd_artifacts_dir 跨 run 持久（项目 artifacts 根；去 kd-nas 层，直接落 artifacts/）。
+# kd_artifacts_dir 跨 run 持久（项目 artifacts 根，直接落 artifacts/）。
 KD_ARTIFACTS_DIR="${PROJECT_ROOT}/artifacts/"
 mkdir -p "$KD_ARTIFACTS_DIR"models/baseline "$KD_ARTIFACTS_DIR"models/teacher "$KD_ARTIFACTS_DIR"models/students
 mkdir -p "$KD_ARTIFACTS_DIR"scripts "$KD_ARTIFACTS_DIR"onnx "$KD_ARTIFACTS_DIR"checkpoints "$KD_ARTIFACTS_DIR"meta "$KD_ARTIFACTS_DIR"reports
 mkdir -p "$KD_ARTIFACTS_DIR".worktrees
-# ★ 原子迁移：检测旧 artifacts/kd-nas/ 存在 → 拍平迁移。
-#   migrate_flat.py 5 步原子（copy → rewrite 路径字段 → 校验 → os.replace → sentinel → rmtree）+ 幂等。
+# 检测旧 artifacts/kd-nas/ 存在 → 迁移到当前布局。
 KD_OLD="${PROJECT_ROOT}/artifacts/kd-nas"
 if [ -d "$KD_OLD" ]; then
   MIGRATE_OUT="$(python3 "$KD_SCRIPTS_DIR/migrate_flat.py" --kd_old "$KD_OLD" --flat_new "$KD_ARTIFACTS_DIR" 2>&1)"
   MIGRATE_RC=$?
   echo "$MIGRATE_OUT"
   if [ $MIGRATE_RC -ne 0 ]; then
-    echo "FAIL: migrate_flat rc=$MIGRATE_RC（旧 kd-nas/ 拍平迁移失败；不动旧数据，fail loud）" >&2
+    echo "FAIL: migrate_flat rc=$MIGRATE_RC（迁移失败；不动旧数据，fail loud）" >&2
     exit 2
   fi
 fi
@@ -213,7 +211,7 @@ GPU_OUT="$(python3 "$KD_SCRIPTS_DIR/gpu_probe.py" \
   --max_concurrency 1 2>&1)"
 GPU_RC=$?
 [ $GPU_RC -ne 0 ] && { echo "$GPU_OUT" >&2; exit 2; }
-# gpu_probe emit ``RESOLVED_DEVICE:``（非 ``DEVICE:``）；旧 grep ``^DEVICE:`` 永不命中 → 总 fallback。
+# gpu_probe emit ``RESOLVED_DEVICE:``（非 ``DEVICE:``），grep 此 key 取 resolved device。
 DEVICE_RESOLVED="$(echo "$GPU_OUT" | grep '^RESOLVED_DEVICE:' | awk '{print $2}')"
 GPU_REPORT="$(echo "$GPU_OUT" | grep '^GPU_REPORT:' | cut -d' ' -f2-)"
 # 串行版 concurrency 恒 1（device-only 模式 gpu_probe 已强制 1；此处显式断言防 multi-GPU 误并发）。

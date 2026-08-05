@@ -33,13 +33,13 @@ lists the engine's stable CLI: `--mode`, `--artifacts_dir`, `--out_ckpt`,
 `--accuracy_baseline`, `--accuracy_baseline_kind`, `--project_root`,
 `--env_anchor`.
 **Verify**: Run the command; cross-check the printed flags.
-**Anti-pattern**: Engine argparse broken (regression in engine code).
+**Anti-pattern**: Engine argparse broken (engine code, not leaf code).
 **Fix**: This is engine code (out of scope for the leaf generator); surface
 the issue — do not modify `_kd_scripts/train_pipeline.py` from this skill.
 
 ### [CRITICAL] 3. AST Self-Containment (deny-list)
 **auto-fixable**: no
-**Section**: workflow §2, CONTRACTS §6
+**Section**: Self-Containment Rules
 **Check**: Each leaf passes `kd/_leaves.py`'s AST self-containment check:
 no relative imports; no top-level imports outside the whitelist
 `{torch, torchvision, torchaudio, numpy, scipy, sklearn, PIL, math, os, sys,
@@ -56,7 +56,7 @@ import; or keep the standard-package import (torchvision/PIL/numpy are fine).
 
 ### [CRITICAL] 4. AST Signature Equality
 **auto-fixable**: yes
-**Section**: workflow §1, CONTRACTS §6
+**Section**: Leaf Contract (AST signature)
 **Check**: Each contract callable has the exact required positional args
 (defaults additive). Mirror `_leaves._check_signature`:
 - `loss.py::compute_loss` → `["s_out", "y"]`
@@ -108,11 +108,11 @@ a monolithic per-project `train_pipeline.py`.
 
 ### [MAJOR] 8. No `--user_*` Flags Anywhere
 **auto-fixable**: yes
-**Section**: workflow (removed flags)
-**Check**: The legacy `--user_train_import` / `--user_loss_fn` /
-`--user_eval_import` / `--user_eval_fn` flags appear nowhere in the leaves,
-run_config.yaml, or run.sh. The legacy `_load_user_train` / `_load_user_eval`
-helpers appear nowhere.
+**Section**: workflow §6
+**Check**: The flag names `--user_train_import` / `--user_loss_fn` /
+`--user_eval_import` / `--user_eval_fn` and the helper names
+`_load_user_train` / `_load_user_eval` appear nowhere in the leaves,
+run_config.yaml, or run.sh.
 **Verify**: grep the artifacts; zero hits.
-**Anti-pattern**: Resurrecting runtime-injection under a new name.
-**Fix**: Remove; user logic is ported into the leaves at generation time.
+**Anti-pattern**: Introducing any `--user_*` flag or runtime user-logic loader.
+**Fix**: Remove; user logic lives only inside the leaves.

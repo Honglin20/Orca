@@ -1,5 +1,5 @@
 ---
-description: kd-nas workflow teacher-gen（folder-agent，SKILL.md + scripts 作为资源，经 ORCA_AGENT_RESOURCES 锚定，cwd 无关）：基于 flatten 产出的 baseline 契约，纯调参派生 teacher 结构文件（深度轴 ×3 / 宽度轴 ×2），不改架构/block 类型。teacher 文件是 wrapper（委托给 baseline.build_model）；其 __main__ 逐字照 model-flatten/SKILL.md Step 3 模板（正确性 + latency），跑同一套校验门。LLM 做深度/宽度轴识别（判断），脚本做硬校验（确定性，rule 5）。
+description: kd-nas workflow teacher-gen（folder-agent，SKILL.md + scripts 作为资源，经 ORCA_AGENT_RESOURCES 锚定，cwd 无关）：基于 flatten 产出的 baseline 契约，纯调参派生 teacher 结构文件（深度轴 ×3 / 宽度轴 ×2），不改架构/block 类型。teacher 文件是 wrapper（委托给 baseline.build_model）；其 __main__ 逐字照 model-flatten/SKILL.md Step 3 模板（正确性 + latency），跑同一套校验门。LLM 做深度/宽度轴识别（判断），脚本做硬校验（确定性）。
 tools: [bash, read, write, edit, glob, grep, task, todowrite]
 ---
 # teacher-gen
@@ -25,7 +25,7 @@ teacher = baseline 的 `build_model` **调大 cfg**（深度轴 ×3 / 宽度轴 
 - ❌ 改架构 / 改 block 类型 / 自实现 forward（teacher 是 wrapper，必须委托给 baseline.build_model，不拷贝 baseline 的 nn.Module 类）；
 - ❌ DUMMY_INPUT 与 baseline 不一致（KD 要求 teacher/student 同 I/O shape——硬约束，validate_teacher 拦）；
 - ❌ 编造 KNOBS（teacher.KNOBS 必须与 baseline 同 schema，只 default 按轴规则调大；动 min/step/leverage = 改契约）；
-- ❌ 在 teacher 文件里写死具体架构名（SignalTransformer / model8 / receiver_net 等）——描述用通用术语（深度轴 / 宽度轴 / baseline）；
+- ❌ 在 teacher 文件里写死具体架构名（如 `<SpecificModelName>` / `<user_model_xxx>`）——描述用通用术语（深度轴 / 宽度轴 / baseline）；
 - ❌ 在 teacher 文件里 import `_kd_scripts` / `nas_agent` / `_struct_scripts`（teacher-gen 保 standalone，与 flatten 同款）；
 - ❌ 跳过任一道硬校验，或 FAIL 仍假装 PASS 返回 JSON。
 
@@ -75,9 +75,9 @@ teacher = baseline 的 `build_model` **调大 cfg**（深度轴 ×3 / 宽度轴 
    source .venv/bin/activate 2>/dev/null || true
    ```
 2. **校验 baseline 契约可达**：读 `{{ flatten.output.baseline_contract_path }}`，确认顶层有 `BUILD_FN="build_model"` + `DUMMY_INPUT` + `KNOBS` + `def build_model(**cfg)` 四件套（flatten 节点产出保证）。缺字段 → fail loud（stderr 报缺哪个），不进入派生。
-3. **推断 project_root（infer-once，Tier B）**：从 `{{ flatten.output.baseline_contract_path }}` 所在目录起，向上逐级找**第一个含 `train.py` 或 `pyproject.toml` 或 `.git` 的目录**作为项目根（绝对路径）。走到 `/` 仍找不到 → 取 `{{ flatten.output.baseline_contract_path }}` 的 dirname，并在 `project_root` 字段后追加 ` (low-confidence: no train.py/pyproject.toml/.git ancestor)`（不阻塞，但必须显式标注）。**不许**用 `pwd` / `git rev-parse` / 最近编辑文件推断；**不许**留空或编造。project_root 用于跨 agent 调 `model-flatten/scripts/validate_contract.py`。
-4. **确定输出目录 + `<base_name>`**（单一真相源，Tier C）：
-   - **推断 `<base_name>`**（teacher 文件 stem，与 SKILL.md Step 3a 一致）：取 `{{ flatten.output.baseline_contract_path }}` 的文件 stem，剥掉 `_flat` 后缀（若有），再追加 `_teacher`。例：`model8_flat.py` → 剥 `_flat` → `model8` → 追加 `_teacher` → `<base_name>="model8_teacher"`；`baseline_model.py`（无 `_flat` 后缀）→ `<base_name>="baseline_model_teacher"`。
+3. **推断 project_root（infer-once）**：从 `{{ flatten.output.baseline_contract_path }}` 所在目录起，向上逐级找**第一个含 `train.py` 或 `pyproject.toml` 或 `.git` 的目录**作为项目根（绝对路径）。走到 `/` 仍找不到 → 取 `{{ flatten.output.baseline_contract_path }}` 的 dirname，并在 `project_root` 字段后追加 ` (low-confidence: no train.py/pyproject.toml/.git ancestor)`（不阻塞，但必须显式标注）。**不许**用 `pwd` / `git rev-parse` / 最近编辑文件推断；**不许**留空或编造。project_root 用于跨 agent 调 `model-flatten/scripts/validate_contract.py`。
+4. **确定输出目录 + `<base_name>`**（单一真相源）：
+   - **推断 `<base_name>`**（teacher 文件 stem，与 SKILL.md Step 3a 一致）：取 `{{ flatten.output.baseline_contract_path }}` 的文件 stem，剥掉 `_flat` 后缀（若有），再追加 `_teacher`。例：`<baseline>_flat.py` → 剥 `_flat` → `<baseline>` → 追加 `_teacher` → `<baseline>_teacher`；`baseline_model.py`（无 `_flat` 后缀）→ `<base_name>="baseline_model_teacher"`。
    - **确定 `<output_dir>`**：优先用引擎注入的 `$ORCA_ARTIFACTS_DIR`（`echo "$ORCA_ARTIFACTS_DIR"` 取值）；为空（非 orca 编排上下文）→ fallback `llm_artifacts/<base_name>/`（`<base_name>` 已含 `_teacher` 后缀，不重复追加）。
    - 记住为 `<output_dir>`，下面所有产物写进它，teacher 文件路径 = `<output_dir>/<base_name>.py`，`teacher_model_path` 字段填它。`cd <output_dir>` 一次后续命令都基于此目录。
 

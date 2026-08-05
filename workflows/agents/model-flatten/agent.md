@@ -1,5 +1,5 @@
 ---
-description: kd-nas workflow 第一步（文件夹化 agent，SKILL.md + scripts 作为资源，经 ORCA_AGENT_RESOURCES 锚定，cwd 无关）：把用户任意 PyTorch 模型入口展平成 KD 变体契约（build_model + DUMMY_INPUT + KNOBS）。LLM 做展平 + KNOBS 识别（判断），脚本做硬校验（确定性，rule 5）。
+description: kd-nas workflow 第一步（文件夹化 agent，SKILL.md + scripts 作为资源，经 ORCA_AGENT_RESOURCES 锚定，cwd 无关）：把用户任意 PyTorch 模型入口展平成 KD 变体契约（build_model + DUMMY_INPUT + KNOBS）。LLM 做展平 + KNOBS 识别（判断），脚本做硬校验（确定性）。
 tools: [bash, read, write, edit, glob, grep, task, todowrite]
 ---
 # model-flatten
@@ -56,7 +56,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 - 模型入口: `{{ inputs.baseline_model_path }}`（任意 `.py` / `.yaml` / config 入口；flatten agent 会展平成 KD 变体契约，**不再要求用户自带契约**）
 - 设备: `{{ inputs.device }}`（advanced，默认 `auto`；用于 `validate_contract.py` forward 校验 + `__main__` latency 测量）
 - latency_provider: `{{ inputs.latency_provider }}`（用户真硬件 latency 脚本 `path::func`；kd-nas workflow 必填。**写入 flat 文件 `__main__` 的 `--latency_provider` 默认值**——渲染后的实际路径串，不是 Jinja 模板；空串 → helper fallback ONNXRT-CPU + WARN）
-- 输出目录: `${PROJECT_ROOT}/artifacts/models/baseline/`（跨 run 持久，与下游 setup 的 `kd_artifacts_dir` 同根——拍平布局下 setup 用 `${PROJECT_ROOT}/artifacts/`，flatten 落其 `models/baseline/` 子目录；baseline 契约随项目走，不再散落 per-run `runs/<run_id>/`）。PROJECT_ROOT 由 step2 推断（找不到 .git/pyproject.toml/train.py 时取 baseline_model_path 的 dirname，总非空 → OUTPUT_DIR 总非空，无 fallback）
+- 输出目录: `${PROJECT_ROOT}/artifacts/models/baseline/`（跨 run 持久，与下游 setup 同根）。PROJECT_ROOT 由 step2 推断（找不到 .git/pyproject.toml/train.py 时取 baseline_model_path 的 dirname，总非空 → OUTPUT_DIR 总非空，无 fallback）
 
 ## 准备工作
 
@@ -64,8 +64,8 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
    ```bash
    source .venv/bin/activate 2>/dev/null || true
    ```
-2. **推断 project_root（infer-once，Tier B）**：从 `{{ inputs.baseline_model_path }}` 所在目录起，向上逐级找**第一个含 `train.py` 或 `pyproject.toml` 或 `.git` 的目录**作为项目根（绝对路径）。走到 `/` 仍找不到 → 取 `{{ inputs.baseline_model_path }}` 的 dirname，并在 `project_root` 字段后追加 ` (low-confidence: no train.py/pyproject.toml/.git ancestor)`（不阻塞，但必须显式标注）。**不许**用 `pwd` / `git rev-parse` / 最近编辑文件推断；**不许**留空或编造。
-3. **确定输出目录**（跨 run 持久，与 setup 同根合流）：执行以下 bash 计算 `<output_dir>`——去后缀公式与 `kd-setup/agent.md` step1 **逐字对齐**（`split(' (low-confidence')[0]` + `os.path.abspath`），保证 flatten（先于 setup 执行）与 setup 算出同一根（Rule 5：deterministic 用代码不用 prose）。`$PROJECT_ROOT_IN` = step2 推断的 project_root（**照填，含可能的 ` (low-confidence: ...)` 后缀**——python 片段去后缀）：
+2. **推断 project_root（infer-once）**：从 `{{ inputs.baseline_model_path }}` 所在目录起，向上逐级找**第一个含 `train.py` 或 `pyproject.toml` 或 `.git` 的目录**作为项目根（绝对路径）。走到 `/` 仍找不到 → 取 `{{ inputs.baseline_model_path }}` 的 dirname，并在 `project_root` 字段后追加 ` (low-confidence: no train.py/pyproject.toml/.git ancestor)`（不阻塞，但必须显式标注）。**不许**用 `pwd` / `git rev-parse` / 最近编辑文件推断；**不许**留空或编造。
+3. **确定输出目录**（跨 run 持久，与 setup 同根合流）：执行以下 bash 计算 `<output_dir>`——去后缀公式与 `kd-setup/agent.md` step1 **逐字对齐**（`split(' (low-confidence')[0]` + `os.path.abspath`），保证 flatten（先于 setup 执行）与 setup 算出同一根（确定性逻辑用代码不靠 prose）。`$PROJECT_ROOT_IN` = step2 推断的 project_root（**照填，含可能的 ` (low-confidence: ...)` 后缀**——python 片段去后缀）：
 
    ```bash
    OUTPUT_DIR="$(python3 -c "
@@ -130,7 +130,7 @@ if [ -z "$BASELINE_LATENCY_US" ]; then
   exit 2
 fi
 LATENCY_SOURCE="$(echo "$RUN_OUT" | grep '^LATENCY_SOURCE:' | awk '{print $2}')"
-# 解析 OUTPUT_SHAPE_OBSERVED：forward 实测的输出 shape（CONTRACTS §1 可选字段，flatten 必声明）
+# 解析 OUTPUT_SHAPE_OBSERVED：forward 实测的输出 shape（可选字段，flatten 必声明）
 OUTPUT_SHAPE_OBSERVED="$(echo "$RUN_OUT" | grep '^OUTPUT_SHAPE_OBSERVED:' | head -1 | cut -d' ' -f2-)"
 if [ -z "$OUTPUT_SHAPE_OBSERVED" ]; then
   echo "FAIL: __main__ 未产出 OUTPUT_SHAPE_OBSERVED（forward 未跑？模板漏写？）"

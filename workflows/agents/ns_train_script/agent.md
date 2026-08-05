@@ -14,11 +14,11 @@ tools: [bash, read, write, edit, glob, grep, task]
 
 - `$ORCA_AGENT_RESOURCES`（orca spawn 注入）= 本 agent 资源目录（含 `references/`）。
   所有 `references/` 路径相对于它。
-- `$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本节点产物目录（原 skill 的 `<output_dir>`，
-  即上游 expand 已初始化的同一目录）。**先 `cd "$ORCA_ARTIFACTS_DIR"` 再执行任何命令**；
+- `$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本节点产物目录（即上游
+  expand 已初始化的同一目录）。**先 `cd "$ORCA_ARTIFACTS_DIR"` 再执行任何命令**；
   后续相对路径在该 cwd 下解析；sibling 模块（如 `supernet.py`）作 plain import，禁
   `sys.path` / `PYTHONPATH` 改写。
-- `{{ inputs.user_project_root }}`：用户原始 PyTorch 项目根（原 `<user_project_root>`）。
+- `{{ inputs.user_project_root }}`：用户原始 PyTorch 项目根。
   缺省时从 `supernet_summary.md` 的 **Source Project** section 读。
 - `<nas_agent_root>` 探测保留（cwd 是产物目录非项目根，需一次性解析）：
   ```bash
@@ -85,7 +85,7 @@ path = f"{d}/file.py"                # 禁：f-string 拼接
 
 - Step 1 探前先读；它告诉你去 `{{ inputs.user_project_root }}` 哪里看。
 - 用 Read / Grep / Bash 直接探本 skill 写 `train_supernet.py` 所需的 code-writing-level gap
-  （原 `Explore` 子 agent 退化——opencode host 内无等价只读子 agent）：exact dataloader batch
+  （opencode host 内无等价只读子 agent）：exact dataloader batch
   structure / tensor shape、loss/metric call signature 与公式、optimizer / scheduler 构造与
   step order、checkpoint save/load API，仅 manifest 未覆盖处。然后打开将 port / mirror 的源
   自己确认。按 **Project Manifest** section 就地更正 manifest。即使 Step 2 判 viability=No 也更。
@@ -116,7 +116,7 @@ path = f"{d}/file.py"                # 禁：f-string 拼接
    path、model type、pre-built block 信息、之前产物列表。
 3. **Read generated artifacts:** 读 `$ORCA_ARTIFACTS_DIR/supernet.py` 与 `$ORCA_ARTIFACTS_DIR/inspect_supernet.py`
    理解 supernet 架构、`SearchSpace`、supernet 结构。
-4. **Probe the user's training code and update the manifest（直接探，非 `Explore` 子 agent）:**
+4. **Probe the user's training code and update the manifest（直接探）:**
    manifest 的 **Training And Evaluation** / **Data And Environment** 已记训练 loop / 数据管道 /
    loss-metric 结构。用 Read / Grep / Bash 直接探仅 code-writing-level gap（见上 **Pipeline Memory**
    规则）。然后打开将 port 的源确认。按 **Project Manifest** section 就地更正 `project_manifest.md`。
@@ -262,8 +262,7 @@ context + Step 2 viability 决定 evaluation paradigm。
 2. **按协议调 `memory-verifier`**，inputs `$ORCA_ARTIFACTS_DIR` + `{{ inputs.user_project_root }}`。
    读 report；若任何更正暴露你生成代码的不一致→修代码。
 
-3. （原 "Warn if supernet training is not viable" + "Present next steps to the user" **删**。
-   viability=No 已在 summary + output_schema `viable` 字段体现，下游自动按
+3. （viability=No 已在 summary + output_schema `viable` 字段体现，下游自动按
    `run_train_supernet.sh` 存在性门控。）
 
 ## Validation
@@ -317,9 +316,8 @@ context + Step 2 viability 决定 evaluation paradigm。
 字段语义（tape 审计字段）：
 
 - `error`：fail loud 时写明根因（如 `$ORCA_ARTIFACTS_DIR` 缺 `supernet.py` / `supernet_summary.md`
-  等上游产物——写明缺哪个；viability=No 不算 error，是正常分支）。成功时为空串。命名 `error`
-  而非 Orca runner 惯例的 `last_error`：本节点无 self-heal 重试，"last" 语义不适用（明确偏离
-  `nas-train-runner` 的 `last_error`，理由是 generation 节点无 retry）。
+  等上游产物——写明缺哪个；viability=No 不算 error，是正常分支）。成功时为空串。命名 `error`：
+  本节点无 self-heal 重试，"last" 语义不适用。
 - `viable: false` 时 `train_script_path` / `train_supernet_py_path` 为空串——下游 `ns_run_train`
   以 `run_train_supernet.sh` 文件存在性为权威 self-gate。
 - `fidelity_passed`：fidelity audit loop 返 `all-pass` → `true`；viability=No（无 fidelity audit）→

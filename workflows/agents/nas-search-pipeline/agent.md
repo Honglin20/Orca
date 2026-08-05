@@ -21,8 +21,8 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 - 上一步的输出（含 output_dir、project_root、KPI）:
   {{ train_script_gen.output }}
   从中提取 `<output_dir>`、`TRAINING_VIABLE`、`EVALUATION_PARADIGM`。`<user_project_root>` 从
-  `<output_dir>/supernet_summary.md` 的 `Source Project:` 行读取（由 setup 节点 infer-once 写入）。
-- NAS KPI（从 workflow inputs 经 setup 节点透传，写入 search_config.yaml）：
+  `<output_dir>/supernet_summary.md` 的 `Source Project:` 行读取。
+- NAS KPI（从 workflow inputs 直取，写入 search_config.yaml）：
   - 目标时延(ms): `{{ inputs.latency_constraint }}`（空=无硬约束）
   - 搜索预算-代数: `{{ inputs.max_rounds }}`（默认 20）
   - 目标硬件: `{{ inputs.target_hardware }}`（cuda|npu|cpu；device 处理沿用既有 `--device auto` 路径，不破坏）
@@ -78,11 +78,11 @@ Step 3: 生成 `AGENTS.md` scaffold（后续步骤的 AI 指导文件）
 
 ## 缺失必填输入时（严禁造假）—— ask-user 哨兵
 
-> 契约：`docs/specs/agent-ask-user-sentinel.md` §3。TARS skill strict 识别 `_sentinel:"orca_ask_user_v1"` 魔键
+> TARS skill strict 识别 `_sentinel:"orca_ask_user_v1"` 魔键
 > → 问用户 → SendMessage / Task(task_id) 恢复**同一**子 agent（上下文不丢）→ MAX_ASK=3 兜底；
 > 哨兵**不进 `orca next`**（output_schema `additionalProperties:false` 会拒，引擎零改动）。
 
-本节点 Tier B 项（"读用户代码可得"，缺失走哨兵而非造假）：
+本节点 infer-once 项（"读用户代码可得"，缺失走哨兵而非造假）：
 
 - **dataset 路径**（`evaluator_cfg.data_dir` 的真实绝对路径）——grep 用户项目代码可得
 
@@ -94,7 +94,7 @@ Step 3: 生成 `AGENTS.md` scaffold（后续步骤的 AI 指导文件）
 
   ```json
   {"_orca_ask_user": "<一句话问题，如 '你项目的训练/评估数据集根目录绝对路径是什么？'>",
-   "options": ["<候选 1，如 '/home/user/proj/data/train'>", "<候选 2>"],
+   "options": ["<候选 1，如 '/path/to/your/data/train'>", "<候选 2>"],
    "context": "<已 grep 过哪些模式、看到了哪些疑似但未确认的路径>",
    "_sentinel": "orca_ask_user_v1"}
   ```

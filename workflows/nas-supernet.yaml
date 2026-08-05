@@ -1,10 +1,10 @@
 name: nas-supernet
-description: "NAS supernet 全链流水线（ns_* agent 重构版，纯增量）：张开超网 → 生成训练脚本 → 生成搜索 pipeline + select_architecture.py → 自愈执行训练/搜索 → 确定性选架构（target_latency 下 max-acc，缺则 Pareto knee）→ retrain 选定子网 → 可视化（帕累托/搜索表/loss 曲线/指标对比/张开前后对比/latency 分布）。8 agent 节点 + 2 fail-loud terminate（model_type 不支持 / select 无候选）。区别于 nas-agent-pipeline.yaml：全新 ns_* agent 名 + fidelity-verifier / workflow-verifier / memory-verifier 三层闭环 + 确定性 Bash select + 模块化 auto-run/retrain + self-heal 白名单审计字段（healed_files / fidelity_retriggered）。"
+description: "NAS supernet 全链流水线：张开超网 → 生成训练脚本 → 生成搜索 pipeline + select_architecture.py → 自愈执行训练/搜索 → 确定性选架构（target_latency 下 max-acc，缺则 Pareto knee）→ retrain 选定子网 → 可视化（帕累托/搜索表/loss 曲线/指标对比/张开前后对比/latency 分布）。8 agent 节点 + 2 fail-loud terminate（model_type 不支持 / select 无候选）。fidelity-verifier / workflow-verifier / memory-verifier 三层闭环 + 确定性 Bash select + 模块化 auto-run/retrain + self-heal 白名单审计字段（healed_files / fidelity_retriggered）。"
 
 entry: ns_expand_supernet
 
 # ─────────────────────────────────────────────────────────────────────────────
-# inputs（plan §12）——三档标签（contract §6）：[ask]=业务决策必填 / [advanced]=罕见
+# inputs——三档标签（contract §6）：[ask]=业务决策必填 / [advanced]=罕见
 # override 可选 / [default]=工程默认。seed 全 workflow必有（contract §6 Tier A 子类）。
 # ─────────────────────────────────────────────────────────────────────────────
 inputs:
@@ -18,11 +18,11 @@ inputs:
     required: true
   target_latency_ms:
     type: number
-    description: "[ask] 选架构时延目标（毫秒）。ns_select 调 select_architecture.py 时下传 --target-latency-ms：latency ≤ target 的 Pareto 前沿候选里选 max-acc。核心业务 KPI——NAS 无目标 = 瞎搜，必须用户给（knee 兜底是 future follow-up，本阶段恒提供）"
+    description: "[ask] 选架构时延目标（毫秒）。ns_select 调 select_architecture.py 时下传 --target-latency-ms：latency ≤ target 的 Pareto 前沿候选里选 max-acc。核心业务 KPI——NAS 无目标 = 瞎搜，必须用户给（本工作流恒提供 target，无 target 不开工）"
     required: true
   latency_script_path:
     type: string
-    description: "[advanced] 用户外部时延脚本路径（可选）。提供则 ns_search_pipeline 生成 latency_estimator.py 时包装此脚本（onnx 单文件契约，见 plan §10）；未提供（默认）走 nas-agent 内置 PyTorch measure_module_latency。罕见 override——多数项目用内置 PyTorch latency 即可"
+    description: "[advanced] 用户外部时延脚本路径（可选）。提供则 ns_search_pipeline 生成 latency_estimator.py 时包装此脚本（onnx 单文件契约）；未提供（默认）走 nas-agent 内置 PyTorch measure_module_latency。罕见 override——多数项目用内置 PyTorch latency 即可"
     required: false
     default: ""
   seed:
@@ -73,7 +73,7 @@ nodes:
   #   读 expand 上游产物 + 用户训练代码 → 决定 supernet 训练 viability（RL/GAN/momentum-
   #   encoder 类不可行→skip）→ porter 移植训练逻辑 → 生成 train_supernet.py + run_train_supernet.sh
   #   → fidelity-verifier + workflow-verifier + memory-verifier 三 loop 闭环。
-  #   下游 ns_run_train 以 run_train_supernet.sh 文件存在性为权威 viability gate（I10）。
+  #   下游 ns_run_train 以 run_train_supernet.sh 文件存在性为权威 viability gate。
   # ═══════════════════════════════════════════════════════════════════════════
   - name: ns_train_script
     kind: agent
@@ -137,10 +137,9 @@ nodes:
 
   # ═══════════════════════════════════════════════════════════════════════════
   # Agent 4: ns_run_train（auto-run，self-gate viability）
-  #   自门控：run_train_supernet.sh 不存在（I10 文件存在性权威）→ status=skipped，
-  #   yaml 不分支（plan §6）；self-heal max_retries=3 绝不带错下传；detach+poll 沿用
-  #   nas-train-runner 句式（I12 Git Bash/MSYS 兼容）。触碰训练逻辑 → 重触 fidelity-verifier
-  #   （read+embed 协议）。
+  #   自门控：run_train_supernet.sh 不存在 → status=skipped（以文件存在性为权威），
+  #   yaml 不分支；self-heal max_retries=3 绝不带错下传；detach+poll 在 Git Bash/MSYS 兼容。
+  #   触碰训练逻辑 → 重触 fidelity-verifier（read+embed 协议）。
   #   yaml 不分支——下游 ns_run_search 拿不到 ckpt 自身 fail loud，最终由 ns_select
   #   路由守卫（selected_arch 空）兜底 terminate_select_failed。
   # ═══════════════════════════════════════════════════════════════════════════
@@ -205,7 +204,7 @@ nodes:
   #   + target_latency_ms，按「target 下 max-acc；缺则 Pareto knee」策略选架构，stdout 单行
   #   JSON 作唯一最终回复。脚本非 0 / selected_arch 空兜底 → terminate_select_failed。
   #   路由守卫：selected_arch 非空 + pareto_size>0 → ns_retrain；catch-all → terminate_select_failed。
-  #   （plan §4.1 note：is defined 只测键存在，不测空——必须用真值判定）
+  #   （is defined 只测键存在，不测空——必须用真值判定）
   # ═══════════════════════════════════════════════════════════════════════════
   - name: ns_select
     kind: agent
@@ -217,7 +216,7 @@ nodes:
       required: [selected_arch, selected_acc, selected_latency_ms, pareto_size, select_reason]
       properties:
         selected_arch:
-          # 任务 spec：允许 object 或 null（无候选时）。agent.md §7.2 实际产物为空 dict {}；
+          # 任务 spec：允许 object 或 null（无候选时）。
           # 两者在 when 真值判定下都 falsy → catch-all terminate_select_failed 兜底。
           type: ["object", "null"]
           description: "选定的子网架构描述（layer-wise 配置）；无候选时为 {} 或 null"
@@ -230,7 +229,7 @@ nodes:
           description: "max-acc-under-target=target_latency 下选 max acc；pareto-knee=无 target 走 knee；none=无候选 fail-loud sentinel"
       additionalProperties: false
     routes:
-      # 真值判定（plan §4.1 note）：selected_arch 空对象/null 都 falsy + pareto_size>0 双条件。
+      # 真值判定：selected_arch 空对象/null 都 falsy + pareto_size>0 双条件。
       # 不用 `is defined`（只测键存在，空 dict/null 都过）。
       - when: "ns_select.output.selected_arch and ns_select.output.pareto_size > 0"
         to: ns_retrain
@@ -320,7 +319,7 @@ nodes:
       - to: $end
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # Terminate 节点（plan §6）——status: failed；routes 必空；不作 entry / 不进 parallel。
+  # Terminate 节点——status: failed；routes 必空；不作 entry / 不进 parallel。
   # ═══════════════════════════════════════════════════════════════════════════
   - name: terminate_unsupported
     kind: terminate

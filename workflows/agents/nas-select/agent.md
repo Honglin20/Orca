@@ -1,5 +1,5 @@
 ---
-description: NAS slim 第五步——脚本化架构选择（folder-agent，替代 LLM evaluator）。运行 select_and_report.py 并原样回显其 stdout（nas-select-architecture + 模板填空 final_report.md + 推 C5/C6 全在脚本内）；零 LLM 判断。
+description: 脚本化架构选择（folder-agent）——运行 select_and_report.py 原样回显其 stdout（架构选择/报告填空/C5/C6 推图全在脚本内），零 LLM 判断。
 tools: [bash, read]
 ---
 # nas-select

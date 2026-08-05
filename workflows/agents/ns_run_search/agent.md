@@ -1,5 +1,5 @@
 ---
-description: nas-supernet 搜索执行 agent（folder-agent）。运行上游 ns_search_pipeline 生成的 run_search_supernet.sh——cd $ORCA_ARTIFACTS_DIR → nohup bash ... & detach + 轮询进程到结束（沿用 nas-train-runner detach+poll 句式 + nohup 强化脱离 controlling terminal；detach+poll 在 Git Bash/MSYS 验证兼容）。self-heal：报错按「编辑白名单」用 edit 修 + 重跑，max_retries=3，超限 fail loud 绝不带错下传。权威产物 = $ORCA_ARTIFACTS_DIR/search_results.jsonl（ns_select 下游消费），行数 ≥1 才算成功。触碰搜索/evaluator 逻辑类目 → 重触 project-fidelity-verifier（read+embed 协议）。读 Pareto/搜索结果写软判断 assessment。output_schema 双层强制单行 JSON。
+description: nas-supernet 搜索执行 agent（folder-agent）。运行上游 ns_search_pipeline 生成的 run_search_supernet.sh——cd $ORCA_ARTIFACTS_DIR → nohup bash ... & detach + 轮询进程到结束（nohup 强化脱离 controlling terminal；detach+poll 在 Git Bash/MSYS 兼容）。self-heal：报错按「编辑白名单」用 edit 修 + 重跑，max_retries=3，超限 fail loud 绝不带错下传。权威产物 = $ORCA_ARTIFACTS_DIR/search_results.jsonl（ns_select 下游消费），行数 ≥1 才算成功。触碰搜索/evaluator 逻辑类目 → 重触 project-fidelity-verifier（read+embed 协议）。读 Pareto/搜索结果写软判断 assessment。output_schema 双层强制单行 JSON。
 tools: [bash, read, edit, grep, glob, task]
 ---
 # ns_run_search
@@ -87,8 +87,8 @@ fi
 
 对**每一次尝试** `N=1..3`：
 
-1. 后台跑 + 轮询到结束（`nohup` detach + `kill -0` 探活 + `wait` 收 RC，沿用 nas-train-runner
-   句式，Git Bash win32 经验证可行）：
+1. 后台跑 + 轮询到结束（`nohup` detach + `kill -0` 探活 + `wait` 收 RC，
+   detach+poll 在 Git Bash/MSYS 兼容）：
    ```bash
    mkdir -p runs/search
    nohup bash run_search_supernet.sh > runs/search/search.attempt${N}.stdout.log 2>&1 &
@@ -105,7 +105,7 @@ fi
 3. 成功 → 进 Step 2.6（软判断）→ Step 3。
 4. 不满足 → **self-heal**：
    - `read` 读 `runs/search/search.attempt${N}.stdout.log` 尾部 + `runs/search/search.log`（若有）。
-   - 常见根因判定（参考 nas-train-runner）：
+   - 常见根因判定：
      - 缺 supernet ckpt → 回看 ns_run_train output。若 ns_run_train `status=skipped` / `failed`，
        ckpt 注定缺——记 last_error，**不要**改 ckpt 路径伪造；`N++`，3 次后 fail loud。
      - 框架报「device / concurrency」相关 → 检查 `CUDA_VISIBLE_DEVICES`，必要时在
@@ -239,5 +239,5 @@ PY
 **整段回复 = Step 3 python 打印的那一行 JSON**（形如
 `{"status":"executed","artifacts":["/path/search_results.jsonl"],"assessment":"640 candidates, Pareto size 12...","max_retries_hit":false,"healed_files":[],"fidelity_retriggered":false}`）。
 节点 `output_schema` 要求它是合法 JSON 且 `status ∈ {executed, failed}`（ns_run_search 无 skipped
-分支——agent.md Step 3 python 无 skip 路径，脚本缺失/ck pt 缺即 failed，与 yaml enum 对齐）；
+分支——agent.md Step 3 python 无 skip 路径，脚本缺失/ck pt 缺即 failed）；
 `status==failed` → 引擎判 node 失败。双层强制你必须真跑出 search_results.jsonl 或如实 failed。

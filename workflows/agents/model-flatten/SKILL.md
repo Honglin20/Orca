@@ -9,14 +9,12 @@ Use this skill to take an arbitrary PyTorch model entry point (any `.py` / `.yam
 entry) from the user project and flatten it into a **KD-NAS variant contract** —— a single
 standalone `.py` file exposing `DUMMY_INPUT` + `BUILD_FN="build_model"` + `KNOBS` +
 `def build_model(**cfg) -> nn.Module`. The output is consumed verbatim by the downstream
-`setup` / `gate` / `train` nodes (see `workflows/agents/_kd_scripts/CONTRACTS.md` §1).
+`setup` / `gate` / `train` nodes.
 
-This skill is **Step 1 of `pytorch-model-optimizer/SKILL.md` extracted and extended**:
-- Same: collect task context → flatten local deps → add `__main__` → device portability →
-  infer `base_name` → validate.
-- Added: KNOBS identification (LLM judgment step), KD-contract alignment, hard script
-  validation + `flatten-verifier` subagent iteration loop.
-- Removed: NAS-specific steps from the upstream skill (not used by KD-NAS).
+This skill is the entry point of the kd-nas workflow: it flattens an arbitrary
+PyTorch model entry into a KD-NAS variant contract (DUMMY_INPUT + BUILD_FN +
+KNOBS + build_model). The LLM does flattening + KNOBS identification
+(judgment); scripts do hard validation (deterministic).
 
 Skill resource paths:
 
@@ -31,15 +29,14 @@ requires **when you begin that step**. This keeps context focused.
 ## Working Directory and Path Conventions
 
 - `<output_dir>`: `${PROJECT_ROOT}/artifacts/models/baseline/` —— cross-run persistent
-  and **co-rooted with the downstream `setup` node's `kd_artifacts_dir`** (flattened layout:
-  setup uses `${PROJECT_ROOT}/artifacts/`; flatten lives in its `models/baseline/` subdir). The
-  baseline contract travels with the project across runs instead of scattering under per-run
-  `runs/<run_id>/`. `PROJECT_ROOT` is the **low-confidence suffix-stripped** value inferred in
-  preparation; `agent.md` step 3 computes `<output_dir>` with a **deterministic python snippet**
-  (`split(' (low-confidence')[0]` + `os.path.abspath`) **verbatim-aligned with `kd-setup/agent.md`**
-  so both nodes derive the same root (Rule 5: deterministic logic in code, not prose). `mkdir -p
-  <output_dir>` before writing. **Run `cd <output_dir>` once before executing any command**; the
-  working directory persists. All artifacts are written under `<output_dir>`.
+  and **co-rooted with the downstream `setup` node's `kd_artifacts_dir`**. The
+  baseline contract travels with the project across runs. `PROJECT_ROOT` is the **low-confidence
+  suffix-stripped** value inferred in preparation; `agent.md` step 3 computes `<output_dir>` with
+  a **deterministic python snippet** (`split(' (low-confidence')[0]` + `os.path.abspath`)
+  **verbatim-aligned with `kd-setup/agent.md`** so both nodes derive the same root (deterministic
+  logic in code, not prose). `mkdir -p <output_dir>` before writing. **Run `cd <output_dir>`
+  once before executing any command**; the working directory persists. All artifacts are written
+  under `<output_dir>`.
 - `<user_project_root>`: The root of the user project (contains the model entry file).
   Inferred once in preparation (see agent.md), not a workflow input.
 - Use `pathlib.Path` for path construction; never string concatenation.
@@ -118,7 +115,7 @@ Starting from the model entry point:
            _out = _model(_dummy)
        _out_shape = list(_out.shape)
        print(f"CORRECTNESS: OK | input={_shape} output={_out_shape}")
-       # 显式 emit output shape 供 flatten agent 解析写进 OUTPUT_SHAPE（CONTRACTS §1 可选字段）
+       # 显式 emit output shape 供 flatten agent 解析写进 OUTPUT_SHAPE（可选字段）
        import json as _json
        print(f"OUTPUT_SHAPE_OBSERVED: {_json.dumps(_out_shape)}")
 
@@ -180,7 +177,7 @@ Starting from the model entry point:
 ### Step 4: Infer `<base_name>` and Write the Flat File
 
 1. **Infer `<base_name>`** from semantic model type / architecture / project context when
-   possible (e.g., `receiver_net`, `unet_baseline`); otherwise use the primary model class
+   possible (e.g., `<user_model_name>`); otherwise use the primary model class
    name converted to snake_case. The `<base_name>` becomes the `variant_id` of the
    baseline contract.
 2. Write `<output_dir>/<base_name>_flat.py`. **The file MUST expose, at module top-level:**
@@ -196,7 +193,7 @@ Starting from the model entry point:
    def build_model(**cfg) -> nn.Module: ...                   # zero-arg uses KNOBS defaults; cfg overrides
    ```
 
-   These five symbols are the KD variant contract verbatim (`CONTRACTS.md` §1). Downstream
+   These five symbols are the KD variant contract verbatim. Downstream
    `kd_common.validate_variant` / `tune_latency.py` import them directly.
 
    `OUTPUT_SHAPE` is the model's forward output shape captured from the Step 3 correctness
@@ -229,7 +226,7 @@ For each candidate tunable dimension in the flattened model, decide:
 | **Which dims are knobs?** | Structural parameters that change compute/latency when scaled: block count (`num_blocks`), embedding/channel dim (`embed_dim`, `channels`), layer depth (`num_layers`), head count (`num_heads`), expansion ratio (`expansion`). **Not** knobs: tensor shapes fixed by I/O (batch, seq_len), optimizer hyperparams (lr), dropout rate (no latency impact). |
 | **`default`** | The value `build_model` is currently instantiated with (the as-shipped architecture). Integer preferred. |
 | **`min`** | Structural floor: the smallest value that still produces a valid forward (no shape mismatch, no `RuntimeError`). For `num_blocks`: 1. For `embed_dim`: a round number that keeps layer shapes integral (often 8 or 16). **Never** set `min` so low it breaks the forward (Step 6 hard-validation will catch this — but aim to get it right here). |
-| **`step`** | **Must be negative** (shrink direction, `CONTRACTS.md` §1; downstream `kd_common.validate_variant` rejects `step>=0`). Magnitude = single-shrink delta: `-1` for block/layer counts, `-4` or `-8` for channel dims (keep even/round), `-2` for head count. |
+| **`step`** | **Must be negative** (shrink direction; downstream `kd_common.validate_variant` rejects `step>=0`). Magnitude = single-shrink delta: `-1` for block/layer counts, `-4` or `-8` for channel dims (keep even/round), `-2` for head count. |
 | **`leverage`** | Impact rank on latency/compute when shrunk: `high` = near-linear compute scaling (block count, layer depth); `medium` = quadratic-but-tunable (embed_dim, channels); `low` = mild (head count with fixed embed_dim, expansion ratio). `tune_latency.py` shrinks high-leverage knobs first. |
 
 Write the `KNOBS` dict at module top-level (above `build_model`). Each knob MUST have all
@@ -240,16 +237,6 @@ If the model genuinely has no tunable structural dims (rare —— e.g., a singl
 linear layer), emit a single best-effort knob and document it as a low-leverage candidate
 in Step 6's verifier output. An empty `KNOBS={}` is a contract violation
 (`validate_contract.py` fails loud).
-
-> **Downstream consumer transparency**: in the current kd-nas workflow, gate consumes
-> KNOBS from the KB receiver variants (`knowledge_base/families/receiver/*.py`), **not**
-> from this flat file's KNOBS. The flat file's KNOBS is required for **contract format
-> alignment** (so the flat file is a valid KD variant per CONTRACTS §1, ready for future
-> use as a KB variant or for direct gate consumption if the workflow evolves). The flat
-> file's primary consumers are `setup.step2` (reads `build_model` + `DUMMY_INPUT` for a
-> fail-loud contract re-assert, and reads `baseline_latency_us` produced by this file's
-> `__main__`) — so an imprecise KNOBS dict does not block the main flow. Still aim for
-> accuracy: Step 6's flatten-verifier reviews KNOBS coverage as a `[MAJOR]` finding.
 
 ### Step 6: Hard Validation + `flatten-verifier` Iteration
 
@@ -323,7 +310,7 @@ Check three dimensions and report issues with severity tags:
      default in `__main__` MUST be the rendered value of `inputs.latency_provider`
      (e.g. `/abs/path.py::measure`), NOT an empty string. Giving a latency_provider in
      the input but leaving the default empty (→ ONNXRT-CPU fallback) violates the
-     "latency 必用用户脚本" 铁律 (CONTRACTS §6 ) → [BLOCKER].
+     "latency 必用用户脚本" 铁律 → [BLOCKER].
    - The default is a **rendered path string**, not a Jinja template (`{{ ... }}`
      literally in the .py → [BLOCKER]).
 

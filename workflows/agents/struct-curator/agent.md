@@ -82,7 +82,7 @@ python3 "{{ setup.output.struct_scripts_dir }}/ast_diff.py" \
 - 父 id：baseline 首轮 → `"baseline"`；否则取 ledger.jsonl **最后一行候选评估行**的 `id`（血脉父）。
 - **path 字段（deterministic）**：从 `{{ setup.output.family }}` 派生，**不**让 LLM 自由发挥。
   首轮 `path = "<family>/baseline"`；后续 `path = "<family>/<parent_path>"`（或简单 = family 本身）。
-  `viz_struct._LEDGER_REQUIRED` 把 path 列为必备 → 缺则整行从可视化剔除；自由发挥会让 LLM 忘填。
+  viz 脚本把 path 列为必备 → 缺则整行从可视化剔除；自由发挥会让 LLM 忘填。
 - 注：若 `status=FAIL_export` 且 `latency_us=-1`，仍传给脚本（脚本会把 delta_latency_us 算成相对 champion 的负差值；
   这是约定，FAIL_export 也入账）。
 
