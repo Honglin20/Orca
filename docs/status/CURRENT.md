@@ -4,7 +4,28 @@
 
 ---
 
-## 当前：KD-NAS codegen 反造假修复完成，待 headless e2e 验 teacher 真训练 acc
+## 当前：PostToolUse 事后告警守卫——coder-agent 完成 + 单测全绿，待 test-agent 四前端真机 e2e
+
+**任务**：SPEC [`posttooluse-rogue-guard.md`](../specs/posttooluse-rogue-guard.md)——给四前端（cc/cac + opencode/nga）加 PostToolUse 纯提示 hook（B 路径扩展）：主 session 在活跃 run 期间自己用 Edit/Write/跑 train → 事后注入文本提醒。不阻止、不推进、不捕 output。
+
+**状态**：**coder-agent 完成 + code-reviewer 两轮闭环（一轮 4 should-fix + 二轮 fresh 1 must-fix + 2 should-fix）+ 138 单测绿 + install 四前端 dry-run 验证通过**。Commit: 见 git log。
+- `tool-classification.json`（§5 单一真相源：writing/bash 工具集 + readonly 前缀 word-boundary + 复合分隔符（含 `>` / `>>` 重定向）+ guard_reason_template）
+- `cc_nudge.sh`：hook_event_name 分支（Stop 字节级不变 / PostToolUse 新增 additionalContext 输出 + 30s guard 节流 + session_id fallback R5 + unbound 心跳 R1 + **marker 损坏 fail-open 不 exit 2（strict 参数）**）
+- `install_cmds._install_cc_nudge`：合并 hooks.PostToolUse 条目（matcher 锚定 + 去重）+ 拷 classification；`_install_opencode` 同步拷 classification
+- `orca.ts`：tool.execute.after 钩子（复用 listActiveRuns/nudgeAllowed；throttleFile 参数化；idle/guard 独立 mutex `injectingIdle`/`injectingGuard`；classification 候选路径穷举 user/project scope）
+- 27 新测覆盖 §11.1/§11.2/§11.4 + Stop 字节级 golden fixture + malformed marker fail-open 回归
+
+**待办**：
+- [x] coder-agent 实现 + 单测（138 passed）
+- [ ] **test-agent 四前端真机 e2e**（SPEC §11.2 CC 真机 + §11.3 opencode 真机 + R1/R5 spike 闭环）：注入证据（消息历史 / decision JSON）+ idle nudge 回归保护。
+
+**必读**：
+- 本任务 release note `docs/releases/2026-08-05-posttooluse-rogue-guard.md`
+- SPEC `docs/specs/posttooluse-rogue-guard.md`（§3 与 A 路径退场区别、§10 R1/R5 spike fallback）
+
+---
+
+## 历史：KD-NAS codegen 反造假修复完成，待 headless e2e 验 teacher 真训练 acc
 
 **任务**：修审计 run `6c2ebe` 发现的 KD-NAS codegen 数据造假真根因（最严重）——`torchvision`
 不在叶子 import 白名单 → codegen 用 `torch.rand`+`torch.randint` 冒充 MNIST → teacher acc=0.12

@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-05] feat(in-session): PostToolUse 事后告警守卫——四前端纯提示 hook（B 路径扩展）
+
+给四前端（cc/cac + opencode/nga）加 PostToolUse 事后告警：主 session 在活跃 run 期间自己下场干活（Edit/Write/跑 train）→ 工具执行后注入**纯文本提示**（additionalContext / promptAsync），不阻止、不推进、不捕 output、不 emit decision。覆盖 §4.4 Stop/idle nudge 的 turn 中途盲区。新增 `tool-classification.json` 单一真相源（writing/bash 工具集 + readonly 前缀 word-boundary + 复合命令分隔符 + guard_reason_template）；`cc_nudge.sh` 加 hook_event_name 分支（Stop 字节级不变 / PostToolUse 新增）；`install_cmds` 合并 hooks.PostToolUse 条目（matcher 锚定 + 去重）+ 拷 classification；`orca.ts` 加 tool.execute.after 钩子（复用 listActiveRuns/nudgeAllowed；throttleFile 参数化；idle/guard 独立 mutex）。code-reviewer 两轮闭环：第一轮 4 should-fix（Stop 字节级 golden fixture / 节流顺序对称 / reason 模板入 JSON / opencode classification 候选路径补全）+ 3 nice-to-have；第二轮 fresh 拾遗 1 must-fix（PostToolUse 路径 leak exit 2 → `_scan_my_active_run_ids` 加 `strict` 参数，guard fail-open / Stop 仍 fail loud）+ 2 should-fix（idle/guard 共用 mutex 拆为 `injectingIdle`/`injectingGuard`；`>`/`>>` 重定向加入复合分隔符）+ 2 nice-to-have（Edit 直命中测、空命令注释）。**138 passed**（含 27 新测）。Commit: 见 git log。详见 [release note](../releases/2026-08-05-posttooluse-rogue-guard.md)。
+
 ## [2026-08-05] feat(compile): agent prompt dev-residue lint + 洁净契约——根治 workflow 残留开发期信息
 
 `tars validate` 加 `_check_prompt_dev_residue`：扫 AgentNode.prompt body 的开发期残留（plan/§节号、issue breadcrumb、Orca 源码路径、内部 examples 路径），命中即 warning（不阻断既有 workflow）；跳过 inline prompt；foreach body 同扫；同类别去重；operational 串零误报。新建 `orca/skills/create-workflow/reference/agent-prompt-cleanliness-contract.md`（受众分离原则 + 禁止/允许表 + 测试夹具防火墙 + 受众翻转通读审查法）；CLAUDE.md / SKILL.md 加短引用。执行靠契约 + 受众翻转通读，deterministic lint 兜底。单测 23 例含全覆盖矩阵 invariant（防 regex 捕获组破坏类别映射）。Commit: `2c87e72`。详见 [release note](../releases/2026-08-05-agent-prompt-dev-residue-lint.md)。

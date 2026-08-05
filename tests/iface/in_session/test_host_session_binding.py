@@ -597,9 +597,17 @@ def test_orca_ts_has_host_session_binding_hooks():
     # listActiveRuns 按 hostSession 过滤 + fail-open 回退（C5 静默死防护）
     assert "function listActiveRuns(hostSession: string)" in text
     assert "fail-open" in text.lower() or "hasAnyReal" in text, "fail-open 回退逻辑必须存在（C5 防护）"
-    # per-session 限流分键（§2.4）
-    assert "function nudgeFile(sessionID: string)" in text
+    # per-session 限流分键（§2.4 + SPEC posttooluse-rogue-guard §4.3 guard 分键）
+    # nudgeFile 已参数化为 throttleFile(scope, sessionID)（idle nudge + guard 共用内核）。
+    assert "function throttleFile(scope: \"nudge\" | \"guard\", sessionID: string)" in text
     assert "${sessionID}" in text
+    # in-flight mutex 拆分（review §四-2 must-fix）：idle 与 guard 各持独立 mutex，
+    # 防止 idle 的 await promptAsync 期间所有 PostToolUse 静默漏告警。
+    assert "injectingIdle" in text, "idle 路径必须用独立 mutex injectingIdle"
+    assert "injectingGuard" in text, "guard 路径必须用独立 mutex injectingGuard"
+    assert "const injecting:" not in text, (
+        "旧共用 mutex `injecting` 应拆为 injectingIdle / injectingGuard"
+    )
     # Marker interface 不加 host_session（tape-only 铁律，§4.5）
     marker_block = text[text.index("interface Marker"):text.index("interface Marker") + 200]
     assert "host_session" not in marker_block, "Marker interface 不应加 host_session（tape-only）"

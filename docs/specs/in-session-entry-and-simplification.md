@@ -106,6 +106,7 @@ SKILL.md 教主 session：
   - **cc 家族**（cc + cac，step 6）：`settings.json` 的 `Stop` hook（`tars install` 生成 nudge 片段）→ 检查活跃 marker → `decision:block` 注入「还有 run `<id>`，请调 `orca next`」（不调 next）。cac 走相同 `cc_nudge.sh` + `settings.json`，仅落点 `.claude`→`.cac`。
   - **精确判定**：idle/Stop event 本身区分「子代理在工作」（主 session 在等，**不触发**）vs「卡住」（主 session 空闲没调 next，**触发**）。**不靠 tape 超时**（tape 看不到子代理状态，超时判定会误报）。用宿主事件精确判定。
   - **不推进**：nudge 只提醒，`next` 仍主 session 自调（B 路径不变；hook 自动调 next = 退化 A）。
+- **PostToolUse 事后告警守卫**（SPEC [`posttooluse-rogue-guard.md`](posttooluse-rogue-guard.md)，B 路径扩展，2026-08-05 加）：nudge 的第二个事件载体。主 session 在活跃 run 期间**自己下场干活**（Edit/Write/跑 train）→ 在该工具执行后注入一段**纯文本提示**（不阻止、不推进、不捕 output）。覆盖 Stop/idle 盲区——turn 中途连续调工具时 Stop/idle 没机会触发。cc 家族：`cc_nudge.sh` 加 `PostToolUse` 分支（同脚本双事件，按 `hook_event_name` 分支）+ `settings.json` 加 `hooks.PostToolUse` 条目（matcher 锚定 Write/Edit/NotebookEdit/Bash/PowerShell）；opencode 家族：`orca.ts` 加 `tool.execute.after` 钩子。**纯提示（additionalContext / promptAsync），绝不 `decision:block`，绝不 exit 2，绝不调 next**。工具分类单一真相源 = `templates/tool-classification.json`（cc_nudge.sh + orca.ts 启动各 read）。
 - **诊断 hook**（doctor 心跳）可选。
 
 ### 4.5 skill 守门

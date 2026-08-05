@@ -834,3 +834,657 @@ def test_install_bundled_subagents_noop_without_workflows_dir(tmp_path, monkeypa
     monkeypatch.chdir(empty)
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     assert install_cmds._install_bundled_subagents() == []
+
+
+# ── PostToolUse 事后告警守卫（SPEC docs/specs/posttooluse-rogue-guard.md）─────────
+#
+# 新增能力：cc_nudge.sh 单脚本双事件（Stop + PostToolUse）+ orca.ts tool.execute.after
+# 钩子 + tool-classification.json 单一真相源。下方覆盖 SPEC §11.1/§11.2/§11.4 验收。
+
+# PostToolUse 测试专用 session id（与 _NUDGE_TEST_SESSION 同款，便于复用 marker helper）。
+_GUARD_TEST_SESSION = "cc-session-guard-xyz"
+
+
+def _guard_payload(tool_name: str, *, command: str | None = None,
+                   session_id: str | None = _GUARD_TEST_SESSION) -> str:
+    """构造 CC PostToolUse hook stdin JSON（SPEC §7.1 输入契约）。"""
+    payload: dict = {"hook_event_name": "PostToolUse", "tool_name": tool_name}
+    if command is not None:
+        payload["tool_input"] = {"command": command}
+    else:
+        payload["tool_input"] = {}
+    if session_id is not None:
+        payload["session_id"] = session_id
+    return json.dumps(payload)
+
+
+def _guard_env(session: str | None = _GUARD_TEST_SESSION) -> dict:
+    """subprocess env：注入 CLAUDE_CODE_SESSION_ID（模拟 CC hook 子进程 env 链，§10 R5）。"""
+    import os
+    env = dict(os.environ)
+    if session is not None:
+        env["CLAUDE_CODE_SESSION_ID"] = session
+    else:
+        env.pop("CLAUDE_CODE_SESSION_ID", None)
+        env.pop("ORCA_HOST_SESSION_ID", None)
+    return env
+
+
+def _write_classification_next_to_script(script_dir: Path) -> Path:
+    """拷随包 tool-classification.json 到脚本同目录（install 时 install_cmds 也这么做）。"""
+    src = install_cmds._tool_classification_src()
+    dst = script_dir / "tool-classification.json"
+    dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    return dst
+
+
+@pytestmark_nudge_behavior
+def test_cc_guard_emits_additionalcontext_for_write(tmp_path: Path):
+    """SPEC §11.2：PostToolUse + 有活跃 run（本 session）+ Write → stdout 含 additionalContext，
+    不含 decision/permissionDecision，exit 0（非 2）—— pure hint 契约。"""
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    _write_active_marker_with_tape(runs, "run1", host_session=_GUARD_TEST_SESSION)
+    script = _write_nudge_script(tmp_path)
+    _write_classification_next_to_script(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        input=_guard_payload("Write"), capture_output=True, text=True,
+        timeout=10, env=_guard_env(),
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert "hookSpecificOutput" in out
+    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+    additional = out["hookSpecificOutput"]["additionalContext"]
+    assert "run1" in additional
+    assert "Write" in additional
+    # pure hint：绝不 emit decision/permissionDecision（§11.4 结构化断言）
+    assert "decision" not in out
+    assert "permissionDecision" not in out
+
+
+@pytestmark_nudge_behavior
+def test_cc_guard_silent_for_readonly_bash(tmp_path: Path):
+    """SPEC §11.2：只读 Bash（ls / cat / git log）→ 静默（无 stdout）。"""
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    _write_active_marker_with_tape(runs, "run1", host_session=_GUARD_TEST_SESSION)
+    script = _write_nudge_script(tmp_path)
+    _write_classification_next_to_script(tmp_path)
+    for cmd in ("ls", "cat README.md", "git log", "git status", "git diff", "rg foo"):
+        proc = subprocess.run(
+            ["bash", str(script)], cwd=tmp_path,
+            input=_guard_payload("Bash", command=cmd), capture_output=True, text=True,
+            timeout=10, env=_guard_env(),
+        )
+        assert proc.returncode == 0, (cmd, proc.stderr)
+        assert proc.stdout.strip() == "", f"只读 Bash {cmd!r} 应静默，实际 stdout: {proc.stdout}"
+
+
+@pytestmark_nudge_behavior
+def test_cc_guard_silent_for_orca_next_bash(tmp_path: Path):
+    """SPEC §11.2：``orca next`` Bash（正确推进）→ 静默（不告警）。"""
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    _write_active_marker_with_tape(runs, "run1", host_session=_GUARD_TEST_SESSION)
+    script = _write_nudge_script(tmp_path)
+    _write_classification_next_to_script(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        input=_guard_payload("Bash", command="orca next --run-id run1 --output done"),
+        capture_output=True, text=True, timeout=10, env=_guard_env(),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == ""
+
+
+@pytestmark_nudge_behavior
+def test_cc_guard_emits_for_writing_bash(tmp_path: Path):
+    """SPEC §11.2：非只读 Bash（``python train.py``）→ stdout 含 additionalContext。"""
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    _write_active_marker_with_tape(runs, "run1", host_session=_GUARD_TEST_SESSION)
+    script = _write_nudge_script(tmp_path)
+    _write_classification_next_to_script(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        input=_guard_payload("Bash", command="python train.py"),
+        capture_output=True, text=True, timeout=10, env=_guard_env(),
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert "additionalContext" in out["hookSpecificOutput"]
+    assert "Bash" in out["hookSpecificOutput"]["additionalContext"]
+
+
+@pytestmark_nudge_behavior
+@pytest.mark.parametrize("sep", [";", "&&", "||", "|", "&", "\n", ">", ">>"])
+def test_cc_guard_emits_for_compound_command(tmp_path: Path, sep: str):
+    """SPEC §11.2 / §5 Bash 分类 1：复合命令（含任一分隔符）→ 告警（E1 验收 + review 🟢#1 全分隔符覆盖）。
+
+    review 🟡#2：``>`` / ``>>`` 重定向加入分隔符集——``cat foo > /etc/passwd`` 是潜在 rogue 路径，
+    不该被 ``cat`` readonly 前缀放行（重定向即写文件语义）。
+    """
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    _write_active_marker_with_tape(runs, "run1", host_session=_GUARD_TEST_SESSION)
+    script = _write_nudge_script(tmp_path)
+    _write_classification_next_to_script(tmp_path)
+    cmd = f"git log{sep}python train.py"
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        input=_guard_payload("Bash", command=cmd),
+        capture_output=True, text=True, timeout=10, env=_guard_env(),
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert "additionalContext" in out["hookSpecificOutput"], (
+        f"复合命令 sep={sep!r} 应告警"
+    )
+
+
+@pytestmark_nudge_behavior
+def test_cc_guard_emits_for_edit_direct_hit(tmp_path: Path):
+    """SPEC §11.2 / review §五-6：``Edit`` 工具直接命中 ``writing_tools`` ——与 Write 同语义，
+    单独 case 锁住，避免集合相等测（E11）掩盖个体 bug。"""
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    _write_active_marker_with_tape(runs, "run1", host_session=_GUARD_TEST_SESSION)
+    script = _write_nudge_script(tmp_path)
+    _write_classification_next_to_script(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        input=_guard_payload("Edit"), capture_output=True, text=True,
+        timeout=10, env=_guard_env(),
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert "additionalContext" in out["hookSpecificOutput"]
+    assert "Edit" in out["hookSpecificOutput"]["additionalContext"]
+
+
+@pytestmark_nudge_behavior
+def test_cc_guard_failopen_on_malformed_marker(tmp_path: Path):
+    """SPEC §7.3 / §11.4：PostToolUse + malformed marker → exit 0 + 静默 + stderr warn（**绝不 exit 2**）。
+
+    review §四-1 must-fix：原 ``_scan_my_active_run_ids`` 在 marker 损坏时 ``sys.exit(2)``，
+    会经 PostToolUse 路径泄漏成 exit 2——违反 SPEC §7.3 纯提示铁律。Stop 路径仍 fail loud
+    （marker 真相源契约）；guard 路径用 ``strict=False`` fail-open（与 hook 本地 best-effort 态对称）。
+    """
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    _write_active_marker_with_tape(runs, "run1", host_session=_GUARD_TEST_SESSION)
+    # 在合法 marker 之间混入损坏 marker（模拟 atomic_write 半成品残留）
+    (runs / "orca-broken.json").write_text("{not valid json", encoding="utf-8")
+    script = _write_nudge_script(tmp_path)
+    _write_classification_next_to_script(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        input=_guard_payload("Write"), capture_output=True, text=True,
+        timeout=10, env=_guard_env(),
+    )
+    # 纯提示铁律：guard 路径绝不 exit 2——即便 marker 损坏。
+    assert proc.returncode == 0, (
+        f"PostToolUse guard 必须 fail-open（exit 0），实际 exit {proc.returncode}；"
+        f"stderr: {proc.stderr}"
+    )
+    # 仍应从其他合法 marker 命中并告警（损坏的 skip + warn，不阻断主流程）
+    out = json.loads(proc.stdout.strip())
+    assert "additionalContext" in out["hookSpecificOutput"]
+    # stderr 应有 warn（不是静默吞错——与 hook 本地态 fail-open + warn 对称）
+    assert "broken" in proc.stderr or "不可读" in proc.stderr, (
+        f"malformed marker 应 stderr warn，实际 stderr: {proc.stderr!r}"
+    )
+
+
+@pytestmark_nudge_behavior
+def test_cc_guard_word_boundary_lsof_not_mistaken_for_ls(tmp_path: Path):
+    """SPEC §11.2 / §5 E6：word-boundary——``lsof`` 不该被 ``ls`` 误命中（应告警）。"""
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    _write_active_marker_with_tape(runs, "run1", host_session=_GUARD_TEST_SESSION)
+    script = _write_nudge_script(tmp_path)
+    _write_classification_next_to_script(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        input=_guard_payload("Bash", command="lsof -i"),
+        capture_output=True, text=True, timeout=10, env=_guard_env(),
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert "additionalContext" in out["hookSpecificOutput"]
+
+
+@pytestmark_nudge_behavior
+def test_cc_guard_silent_when_no_active_run(tmp_path: Path):
+    """SPEC §11.2：无活跃 run + Write → 静默。"""
+    script = _write_nudge_script(tmp_path)
+    _write_classification_next_to_script(tmp_path)
+    (tmp_path / "runs").mkdir()
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        input=_guard_payload("Write"), capture_output=True, text=True,
+        timeout=10, env=_guard_env(),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == ""
+
+
+@pytestmark_nudge_behavior
+def test_cc_guard_silent_when_run_belongs_to_other_session(tmp_path: Path):
+    """SPEC §11.2：run 归属他 session + Write → 静默（host_session 隔离）。"""
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    _write_active_marker_with_tape(runs, "run1", host_session="other-session-zzz")
+    script = _write_nudge_script(tmp_path)
+    _write_classification_next_to_script(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        input=_guard_payload("Write"), capture_output=True, text=True,
+        timeout=10, env=_guard_env(),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == ""
+
+
+@pytestmark_nudge_behavior
+def test_cc_guard_throttles_within_30s(tmp_path: Path):
+    """SPEC §11.2 / §4.3：30s 内重复 Write → 仅第一次有 stdout（guard 节流，与 nudge 分键）。"""
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    _write_active_marker_with_tape(runs, "run1", host_session=_GUARD_TEST_SESSION)
+    script = _write_nudge_script(tmp_path)
+    _write_classification_next_to_script(tmp_path)
+    guard_state = runs / f".orca-guard-cc-{_GUARD_TEST_SESSION}"
+
+    first = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        input=_guard_payload("Write"), capture_output=True, text=True,
+        timeout=10, env=_guard_env(),
+    )
+    assert first.returncode == 0
+    assert "additionalContext" in json.loads(first.stdout.strip())["hookSpecificOutput"]
+    # 节流文件名 = runs/.orca-guard-cc-<session>.json（SPEC §4.3 分键，与 .orca-nudge-cc- 互不影响）
+    assert guard_state.is_file(), "首次告警必须写 guard 节流时间戳（per-session 分键）"
+
+    second = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        input=_guard_payload("Write"), capture_output=True, text=True,
+        timeout=10, env=_guard_env(),
+    )
+    assert second.returncode == 0
+    assert second.stdout.strip() == "", "30s 窗内第二次 Write 应节流静默"
+
+
+@pytestmark_nudge_behavior
+def test_cc_guard_throttle_key_independent_from_nudge(tmp_path: Path):
+    """SPEC §4.3：guard 30s 节流与 nudge 60s 节流分键，互不影响。
+
+    意图：guard 节流写过 .orca-guard-cc-<sid> 后，nudge 仍可触发（.orca-nudge-cc-<sid> 不存在）。
+    """
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    _write_active_marker_with_tape(runs, "run1", host_session=_GUARD_TEST_SESSION)
+    script = _write_nudge_script(tmp_path)
+    _write_classification_next_to_script(tmp_path)
+
+    # 先触发 guard（写 .orca-guard-cc-<sid>）
+    g = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        input=_guard_payload("Write"), capture_output=True, text=True,
+        timeout=10, env=_guard_env(),
+    )
+    assert "additionalContext" in json.loads(g.stdout.strip())["hookSpecificOutput"]
+    # nudge 节流文件不存在（分键）
+    assert not (runs / f".orca-nudge-cc-{_GUARD_TEST_SESSION}").exists()
+    assert (runs / f".orca-guard-cc-{_GUARD_TEST_SESSION}").exists()
+
+
+@pytestmark_nudge_behavior
+def test_cc_stop_branch_byte_identical_regression(tmp_path: Path):
+    """SPEC §11.2 Stop 分支回归：Stop mock stdin → stdout 字节级 == pre-change golden。
+
+    golden 在本次改动前捕获（commit pre-posttooluse-rogue-guard，详见 _fixtures/cc_stop_golden.json）：
+    单一活跃 run abc + session cc-session-test-abc → decision:block + 完整 reason 文本。
+    本测锁 Stop 分支字节级不变（防 refactoring 误改）+ 不泄漏 PostToolUse 字段。
+    """
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    _write_active_marker_with_tape(runs, "abc", host_session=_NUDGE_TEST_SESSION)
+    script = _write_nudge_script(tmp_path)
+    _write_classification_next_to_script(tmp_path)
+    stop_payload = json.dumps({"hook_event_name": "Stop"})
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        input=stop_payload, capture_output=True, text=True,
+        timeout=10, env=_nudge_env(),
+    )
+    assert proc.returncode == 0, proc.stderr
+    # 字节级 golden（review 🟡#1）：stdout == fixture 文件内容 + 换行
+    golden_path = Path(__file__).parent / "_fixtures" / "cc_stop_golden.json"
+    expected = golden_path.read_text(encoding="utf-8").rstrip("\n")
+    assert proc.stdout.rstrip("\n") == expected, (
+        f"Stop 分支 stdout 不等于 golden：\n--got--\n{proc.stdout!r}\n--golden--\n{expected!r}\n"
+    )
+    # 双保险：解析后字段集 + 不泄漏 PostToolUse 字段
+    out = json.loads(proc.stdout.strip())
+    assert set(out.keys()) == {"decision", "reason"}
+    assert out["decision"] == "block"
+    # 60s 节流文件名不变（v5 §4.4 分键，guard 不改 nudge 行为）
+    assert (runs / f".orca-nudge-cc-{_NUDGE_TEST_SESSION}").is_file()
+
+
+@pytestmark_nudge_behavior
+def test_cc_guard_silent_when_classification_missing(tmp_path: Path):
+    """SPEC §10 / fail-open：tool-classification.json 缺失 → PostToolUse guard 不分类（不告警），
+    stderr warn（不静默）；不影响 Stop 路径。install 出错时不应让用户 session 卡死。"""
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    _write_active_marker_with_tape(runs, "run1", host_session=_GUARD_TEST_SESSION)
+    script = _write_nudge_script(tmp_path)
+    # 故意不拷 classification
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        input=_guard_payload("Write"), capture_output=True, text=True,
+        timeout=10, env=_guard_env(),
+    )
+    assert proc.returncode == 0
+    assert proc.stdout.strip() == "", "classification 缺失应不告警（fail-open）"
+    assert "tool-classification" in proc.stderr or "classification" in proc.stderr, (
+        "缺失应 stderr warn（不静默吞）"
+    )
+
+
+@pytestmark_nudge_behavior
+def test_cc_guard_session_id_fallback_when_env_missing(tmp_path: Path):
+    """SPEC §10 R5 fallback：env 未注入 CLAUDE_CODE_SESSION_ID → 从 stdin JSON.session_id 取
+    host_session；分类命中 + 活跃 run → 仍告警。"""
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    _write_active_marker_with_tape(runs, "run1", host_session=_GUARD_TEST_SESSION)
+    script = _write_nudge_script(tmp_path)
+    _write_classification_next_to_script(tmp_path)
+    # env 不注入 → _host_session_from_env() 返 None；fallback 取 payload.session_id
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        input=_guard_payload("Write", session_id=_GUARD_TEST_SESSION),
+        capture_output=True, text=True, timeout=10,
+        env=_guard_env(session=None),
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert "additionalContext" in out["hookSpecificOutput"]
+
+
+@pytestmark_nudge_behavior
+def test_cc_guard_unbound_heartbeat_when_no_session_anywhere(tmp_path: Path):
+    """SPEC §10 R1/R5 fail-safe：env + stdin 都取不到 session → 写 runs/.orca-guard-unbound.json
+    心跳 + 放行（不告警，不抛错）。"""
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    _write_active_marker_with_tape(runs, "run1", host_session=_GUARD_TEST_SESSION)
+    script = _write_nudge_script(tmp_path)
+    _write_classification_next_to_script(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        input=_guard_payload("Write", session_id=None),
+        capture_output=True, text=True, timeout=10,
+        env=_guard_env(session=None),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == ""
+    heartbeat = runs / ".orca-guard-unbound.json"
+    assert heartbeat.is_file(), "无 session 时应写 unbound 心跳（doctor 诊断信号）"
+
+
+# ── §11.1 四前端安装对称（PostToolUse 守卫新增）─────────────────────────────────
+
+
+def test_install_cc_family_registers_posttooluse_hook(isolated_home: Path):
+    """SPEC §11.1：cc/cac settings.json 注册 hooks.PostToolUse（matcher 锚定 + command 含 orca-nudge）。"""
+    for target, dot in (("cc", ".claude"), ("cac", ".cac")):
+        isolated_home_pkg = isolated_home if target == "cc" else isolated_home
+        result = runner.invoke(app, ["--target", target, "--scope", "user"])
+        assert result.exit_code == 0, result.output
+        root = isolated_home_pkg / dot
+        cfg = json.loads((root / "settings.json").read_text())
+        ptu = cfg["hooks"]["PostToolUse"]
+        orca_entry = next(
+            (e for e in ptu if isinstance(e, dict)
+             and any("orca-nudge" in str(h.get("command", "")) for h in e.get("hooks", []))),
+            None,
+        )
+        assert orca_entry is not None, f"{target} PostToolUse 未注册 orca-nudge"
+        assert orca_entry["matcher"] == "^(Write|Edit|NotebookEdit|Bash|PowerShell)$", (
+            f"{target} PostToolUse matcher 应锚定 §7.2 工具集"
+        )
+        # tool-classification.json 同目录落地（PostToolUse 分支启动时 read）
+        assert (root / "hooks" / "tool-classification.json").is_file()
+
+
+def test_install_opencode_family_copies_tool_classification(isolated_home: Path):
+    """SPEC §11.1：opencode/nga plugins/ 下 tool-classification.json 与 orca.ts 同目录。"""
+    for target in ("opencode", "nga"):
+        result = runner.invoke(app, ["--target", target, "--scope", "user"])
+        assert result.exit_code == 0, result.output
+        root = {
+            "opencode": isolated_home / ".config" / "opencode",
+            "nga": isolated_home / ".nga",
+        }[target]
+        assert (root / "plugins" / "tool-classification.json").is_file(), (
+            f"{target} plugins/tool-classification.json 应与 orca.ts 同目录落地"
+        )
+        # 内容 = 随包单一真相源
+        bundled = install_cmds._tool_classification_src().read_text(encoding="utf-8")
+        assert (root / "plugins" / "tool-classification.json").read_text() == bundled
+
+
+def test_install_cc_posttooluse_idempotent_no_duplicate(isolated_home: Path):
+    """SPEC §11.1 幂等：重跑 cc install，PostToolUse 不重复加 orca-nudge 条目。"""
+    for _ in range(2):
+        r = runner.invoke(app, ["--target", "cc", "--scope", "user"])
+        assert r.exit_code == 0, r.output
+    cfg = json.loads((isolated_home / ".claude" / "settings.json").read_text())
+    ptu = cfg["hooks"]["PostToolUse"]
+    orca_entries = [
+        e for e in ptu if isinstance(e, dict)
+        and any("orca-nudge" in str(h.get("command", "")) for h in e.get("hooks", []))
+    ]
+    assert len(orca_entries) == 1, f"PostToolUse orca-nudge 条目重复: {orca_entries}"
+
+
+def test_install_cc_posttooluse_preserves_user_existing(isolated_home: Path):
+    """SPEC §11.1 合并友好：用户已有 PostToolUse（其他 matcher）保留 + orca 追加。"""
+    cc = isolated_home / ".claude"
+    cc.mkdir(parents=True)
+    (cc / "settings.json").write_text(json.dumps({
+        "hooks": {
+            "PostToolUse": [
+                {"matcher": "Read", "hooks": [{"type": "command", "command": "echo read-hook"}]},
+            ],
+        },
+    }))
+    result = runner.invoke(app, ["--target", "cc", "--scope", "user"])
+    assert result.exit_code == 0, result.output
+    cfg = json.loads((cc / "settings.json").read_text())
+    ptu = cfg["hooks"]["PostToolUse"]
+    matchers = [e.get("matcher") for e in ptu]
+    assert "Read" in matchers, "用户已有 PostToolUse 应保留"
+    assert "^(Write|Edit|NotebookEdit|Bash|PowerShell)$" in matchers
+
+
+def test_four_frontend_trigger_tool_set_equal(isolated_home: Path, tmp_path: Path):
+    """SPEC §11.1 E11：cc/cac settings.json matcher 工具集 ≡ opencode/nga orca.ts 分类工具集。
+
+    cc/cac matcher = ^(Write|Edit|NotebookEdit|Bash|PowerShell)$
+    opencode/nga orca.ts = writing_tools + bash_tools（tool-classification.json）
+    两家族对「下场干活」工具的判定面应一致（CC 用 matcher 预过滤 + 脚本分类；opencode 全靠分类）。
+    """
+    import re as _re
+    # CC matcher 工具集（来自 install 后的 settings.json）
+    runner.invoke(app, ["--target", "cc", "--scope", "user"])
+    cc_cfg = json.loads((isolated_home / ".claude" / "settings.json").read_text())
+    matcher = next(
+        e["matcher"] for e in cc_cfg["hooks"]["PostToolUse"]
+        if any("orca-nudge" in str(h.get("command", "")) for h in e.get("hooks", []))
+    )
+    # matcher 形如 ^(Write|Edit|...|PowerShell)$ —— 剥 ^(...) $ 取 | 分隔的工具集
+    inner = _re.match(r"^\^\((.+)\)\$$", matcher).group(1)
+    cc_tools = set(inner.split("|"))
+
+    # opencode 分类工具集（writing_tools + bash_tools，来自 tool-classification.json）
+    cls = json.loads(install_cmds._tool_classification_src().read_text(encoding="utf-8"))
+    # 仅取 opencode 小写形态（write/edit + bash），排除 CC PascalCase
+    oc_writing = {t for t in cls["writing_tools"] if not t[0].isupper()}
+    oc_bash = {t for t in cls["bash_tools"] if not t[0].isupper()}
+    oc_tools = oc_writing | oc_bash
+
+    # cc_tools = {Write, Edit, NotebookEdit, Bash, PowerShell}（PascalCase）
+    # 对应 opencode 小写：{write, edit, bash}（NotebookEdit/PowerShell 是 CC 特有，无 opencode 对应）
+    cc_lowered = {t.lower() for t in cc_tools} - {"notebookedit", "powershell"}
+    assert cc_lowered == oc_tools, (
+        f"四前端触发工具集不一致（E11）：cc(去 NoteBook/PS)={cc_lowered} opencode={oc_tools}"
+    )
+
+
+# ── §11.4 守门（架构 + 纯提示 + 单一真相源）────────────────────────────────────
+
+
+def test_cc_nudge_decision_block_count_at_baseline(isolated_home: Path):
+    """SPEC §11.4：模板内 ``"decision": "block"`` 总出现次数 ≤ 基线（Stop 分支合法含 1 处）。
+
+    PostToolUse 分支不得新增 decision:block（pure hint 契约）。
+    """
+    runner.invoke(app, ["--target", "cc", "--scope", "user"])
+    script = (isolated_home / ".claude" / "hooks" / "orca-nudge.sh").read_text()
+    count = len(re.findall(r'"decision"\s*:\s*"block"', script))
+    assert count == 1, f"decision:block 出现 {count} 次，基线应为 1（仅 Stop 分支）"
+
+
+def test_cc_nudge_posttooluse_no_self_orca_next_call(isolated_home: Path):
+    """SPEC §11.4 B 路径铁律：模板/plugin 不得自调 ``orca next``。PostToolUse 分支也不得新增。
+
+    正则禁令（与现有 test_install_cc_nudge_script_never_calls_next 同款）：行首裸 orca 命令 /
+    ``$(orca`` / 反引号。PostToolUse 分支共享同一脚本，规则继承。
+    """
+    runner.invoke(app, ["--target", "cc", "--scope", "user"])
+    script = (isolated_home / ".claude" / "hooks" / "orca-nudge.sh").read_text()
+    assert "`" not in script
+    assert "$(orca" not in script
+    exec_lines = [
+        ln for ln in script.splitlines()
+        if ln.strip().startswith("orca ") and not ln.lstrip().startswith("#")
+    ]
+    assert exec_lines == [], f"脚本不得行首裸执行 orca: {exec_lines}"
+
+
+def test_tool_classification_is_single_source_of_truth():
+    """SPEC §11.4 P5/E2：白名单字面量在 *.sh / *.ts 各出现 ≤1 次（只读 JSON 引用，非硬编码副本）。
+
+    检查 cc_nudge.sh 与 orca.ts 不硬编码具体只读命令字面（如 'git log' / 'python'），而是通过
+    读 tool-classification.json 派生。允许：JSON 文件名 / 字段名（readonly_bash_prefixes）的引用、
+    注释里的提及。守门对象：代码主体（去注释后）不得硬编码具体 readonly 前缀列表（引号包裹形态）。
+    """
+    templates = Path(install_cmds._cc_nudge_script_src()).parent
+    sh = (templates / "cc_nudge.sh").read_text(encoding="utf-8")
+    ts = (templates / "opencode" / "orca.ts").read_text(encoding="utf-8")
+    cls = json.loads((templates / "tool-classification.json").read_text(encoding="utf-8"))
+
+    def _strip_sh_comments(text: str) -> str:
+        return "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+
+    def _strip_ts_comments(text: str) -> str:
+        text = re.sub(r"/\*[\s\S]*?\*/", "", text)
+        out = []
+        for ln in text.splitlines():
+            idx = ln.find("//")
+            if idx >= 0:
+                ln = ln[:idx]
+            out.append(ln)
+        return "\n".join(out)
+
+    sh_code = _strip_sh_comments(sh)
+    ts_code = _strip_ts_comments(ts)
+    # 多字 readonly 前缀（'git status' 等）不应作为引号字面出现在代码主体（容许 JSON 文件内容 /
+    # 注释 / 字段名引用）。引号形态断言抓「硬编码字符串」而不误伤注释文本里的提及。
+    for prefix in cls["readonly_bash_prefixes"]:
+        if " " not in prefix:
+            continue  # 单词前缀（orca/cat/ls）容许在 reason / 命令名等场景
+        for quoted in (f"'{prefix}'", f'"{prefix}'):
+            assert quoted not in sh_code, (
+                f"cc_nudge.sh 代码主体不应硬编码 readonly 前缀 {quoted!r}（应读 tool-classification.json）"
+            )
+            assert quoted not in ts_code, (
+                f"orca.ts 代码主体不应硬编码 readonly 前缀 {quoted!r}（应读 tool-classification.json）"
+            )
+    # 反向守门：JSON 文件存在 + 两模板均 read 它（reference 字面至少出现一次）。
+    assert "tool-classification.json" in sh
+    assert "tool-classification.json" in ts
+
+
+def test_guard_reason_template_single_source_of_truth():
+    """SPEC §6 + review 🟡#3：guard_reason_template 文案是 cc_nudge.sh 与 orca.ts 共享的 canonical
+    字面，存 tool-classification.json 单一真相源。两家族读 JSON 填占位符——代码主体容许**1 份**
+    内联兜底（应对 JSON 缺失，防御性双声明），但不得多处硬编码（漂移源）。
+
+    本测断言：canonical 文案字面在 *.sh / *.ts 各出现 ≤1 次（仅内联兜底，非多处副本）。
+    """
+    templates = Path(install_cmds._cc_nudge_script_src()).parent
+    cls = json.loads((templates / "tool-classification.json").read_text(encoding="utf-8"))
+    canonical = cls["guard_reason_template"]
+    sh = (templates / "cc_nudge.sh").read_text(encoding="utf-8")
+    ts = (templates / "opencode" / "orca.ts").read_text(encoding="utf-8")
+    # 各最多 1 份（内联兜底）；JSON 文件是真相源，不在限制内。
+    assert sh.count(canonical) <= 1, (
+        f"cc_nudge.sh 含 {sh.count(canonical)} 份 canonical reason（容许 ≤1 份兜底）"
+    )
+    assert ts.count(canonical) <= 1, (
+        f"orca.ts 含 {ts.count(canonical)} 份 canonical reason（容许 ≤1 份兜底）"
+    )
+    # 两家族都从 JSON 读 guard_reason_template 字段（取真相源，非纯兜底）
+    assert "guard_reason_template" in sh
+    assert "guard_reason_template" in ts
+
+
+def test_orca_ts_has_tool_execute_after_hook():
+    """SPEC §11.1：orca.ts 含 tool.execute.after 钩子（grep 守门），idle event 不变。"""
+    plugin = install_cmds._opencode_plugin_src()
+    text = plugin.read_text(encoding="utf-8")
+    assert '"tool.execute.after"' in text, "缺 tool.execute.after 钩子（SPEC §8）"
+    assert "classifyTool" in text, "缺 classifyTool helper（SPEC §5 分类）"
+    assert "loadClassification" in text, "缺 loadClassification（读 tool-classification.json）"
+    assert "guard" in text.lower()
+    # idle 钩子不变（SPEC §11.3 回归保护）
+    assert 'if (event.type !== "session.idle") return' in text
+    assert "Orca nudge" in text  # idle nudge 文案保留
+
+
+def test_orca_ts_tool_execute_after_never_advances():
+    """SPEC §11.4 B 路径铁律：tool.execute.after 钩子绝不 spawn orca / 调 advance/router/tape。"""
+    plugin = install_cmds._opencode_plugin_src()
+    text = plugin.read_text(encoding="utf-8")
+    start = text.find('"tool.execute.after"')
+    assert start >= 0
+    # 钩子区段到下一个同级钩子/对象闭合。粗切到 '} finally {' 后的 '},' 闭合即可。
+    end = text.find('    },', start)
+    assert end >= 0
+    hook = text[start:end]
+    # 禁止实际 spawn/调用 advance 路径（reminder 文本里提到 ``orca next`` 是允许的——教模型去调）。
+    for forbidden in ("spawnCli", "spawnTopLevelCli", "Bun.spawn", "advance_step"):
+        assert forbidden not in hook, f"tool.execute.after 不得 {forbidden}"
+    # 钩子内含 promptAsync（pure hint 注入路径）+ classifyTool（分类）
+    assert "promptAsync" in hook
+    assert "classifyTool" in hook
+
+
+def test_install_cmds_has_no_orca_business_logic_posttooluse():
+    """SPEC §11.4 D-v7-1：install_cmds 仍零 Orca 业务逻辑（新增 PostToolUse 条目 = 纯配置合并）。"""
+    src = Path(install_cmds.__file__).read_text(encoding="utf-8")
+    forbidden = [
+        "from orca.run", "from orca.events", "from orca.schema",
+        "advance_step", "router.resolve", "replay_state", "tape.append",
+        "EventBus(", "Orchestrator(",
+    ]
+    for kw in forbidden:
+        assert kw not in src, f"install_cmds 含禁词 {kw!r}（违反零业务逻辑守门）"
