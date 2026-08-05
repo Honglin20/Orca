@@ -137,6 +137,7 @@ def validate_workflow(wf: Workflow) -> list[str]:
     _check_output_schema_field_alignment(wf, result)  # strict schema 字段拼写对齐
     _check_folder_agent_scripts_exist(wf, result)     # $ORCA_AGENT_RESOURCES/scripts/<f> 存在性
     _check_input_tier_labels(wf, result)       # input description 三档标签（contract §6）
+    _check_prompt_dev_residue(wf, result)      # agent.md body 禁开发期残留（受众分离契约）
     _check_foreach_source(wf, result)          # ⑧
     _check_terminate_constraints(wf, result)   # terminate step 约束（routes 空 / 非entry / 非parallel branch / 非foreach body）
     _check_execute_phase_no_gate_tools(wf, result)  # 铁律 7：execute phase 永不中断
@@ -926,6 +927,114 @@ def _check_input_tier_labels(wf: Workflow, result: ValidationResult) -> None:
                 f"input '{name}' 的 description 未以三档标签起头"
                 f"（[ask]/[infer]/[default]/[advanced]，contract §6）"
             )
+
+
+# ── agent.md body 禁开发期残留（受众分离契约）──────────────────────────────────
+
+
+# 开发期残留 pattern 表（无歧义开发上下文，运行时 prompt 用不到）。
+# ``category`` 是面向作者的简短分类（用于 warning message）。
+# 顺序即报告顺序（保持稳定，便于回归）。
+#
+# 不变量（critical）：每个 pattern 内部必须用 ``(?:...)`` 非捕获组——下方
+# ``_DEV_RESIDUE_RE`` 用 ``(?P<c{i}>...)`` 把每个 pattern 整体命名为 ``c0``/``c1``/...，
+# ``m.lastgroup`` 据此反查 ``_DEV_RESIDUE_PATTERNS[cat_idx]`` 取类别文案。若 pattern
+# 内出现捕获组（去 ``?:``），``lastgroup`` 会指向内部组，类别映射 silent 错位。
+_DEV_RESIDUE_PATTERNS: tuple[tuple[str, str], ...] = (
+    # 引用 plan 编号（plan §9.1 / plan §N1 / plan §B2）。trailing 字符类吞掉完整编号
+    # （N1 / 9.1 等），避免 warning 文案只显示截断的 "plan §N"。
+    ("plan 编号", r"plan\s*§\s*[0-9INBivx][0-9A-Za-z.]*"),
+    # spec/plan 节号（§9.1 / §2.3）—— 要求 N.M 形（避免误报枚举编号「§9 items」类）
+    ("spec/plan 节号", r"§\s*[0-9]+\.[0-9]+"),
+    # issue-tracker breadcrumb（中英文括号；I/N/B 前缀 + 数字）
+    ("issue breadcrumb", r"[（(]\s*[INB]\d+"),
+    # Orca 引擎源码路径:行号（运行时 agent 不需要读引擎源码作论据）。白名单子目录**不含**
+    # ``skills`` —— agent 可合法 ``Read`` skill 资源（如 ``orca/skills/tars/SKILL.md``），
+    # 属 operational 引用；也不含 ``runtime``（runtime/ 是只读辅助层，引用属 operational）。
+    ("Orca 源码路径", r"orca/(?:compile|exec|run|iface|events|chart|profiles|schema|gates)/\S+?\.py(?::\d+)?"),
+    # 内部 examples 路径作论据（examples/agents/<x>/agent.md）
+    ("内部 examples 路径", r"examples/agents/[a-z0-9_-]+/agent\.md"),
+)
+
+_DEV_RESIDUE_RE = re.compile(
+    "|".join(f"(?P<c{i}>{pat})" for i, (_cat, pat) in enumerate(_DEV_RESIDUE_PATTERNS))
+)
+
+
+def _check_prompt_dev_residue(wf: Workflow, result: ValidationResult) -> None:
+    """agent.md body 禁开发期残留（受众分离契约，warning 非阻断）。
+
+    动机（受众分离）：``agent.md`` body 是给 **LLM agent 的运行时指令**（只含 WHAT to do），
+    不是给 reviewer / 未来自己的设计论证（WHY 属 commit / release-note / plan）。把 plan 节号
+    （``§9.1``）、issue breadcrumb（``（I10）``）、Orca 源码路径（``orca/exec/env.py:91``）、
+    内部 examples 路径作论据（``examples/agents/plotter/agent.md``）写进 prompt，等于把开发期
+    上下文塞给不关心它的执行 agent——污染注意力 + 长期看让 prompt 漂成考古日志。两类受众各看各的文本。
+
+    pattern 表（无歧义、零业务含义）：
+      - ``plan §N`` / ``plan §9.1``             → plan 编号
+      - ``§9.1`` / ``§2.3``                     → spec/plan 节号
+      - ``（I10）`` / ``(N1`` / ``（B2``         → issue-tracker breadcrumb（中英文括号）
+      - ``orca/exec/env.py:91``                 → Orca 引擎源码路径:行号
+      - ``examples/agents/plotter/agent.md``    → 内部 examples 路径作论据
+
+    **不 flag**（operational 合法串）：``$ORCA_AGENT_RESOURCES/...``、``orca.chart.render_chart``
+    （API 调用，非源码路径——源码路径 regex 要求 ``.py`` 后缀 + 子目录名在白名单）、
+    ``orca spawn 注入``、``Git Bash``、``tape``、``output_schema``、``Task(subagent_type=...)``、
+    NAS block 库通用示例名（``swin_window`` / ``cswin`` 等）。
+
+    warning-not-error 的取舍：deterministic 检测 + **不破坏现有 workflow**——既有 workflow 可能
+    有残留，error 会阻断 ``tars validate`` 使其不可用；warning 让残留可见、作者按契约清理，执行靠
+    契约（``orca/skills/create-workflow/reference/agent-prompt-cleanliness-contract.md``）+ 受众
+    翻转通读。
+
+    扫描范围：仅 AgentNode.prompt body（folder-agent / file-agent，即 ``resources_root`` 已物化
+    的节点），**跳过** inline 短 prompt（inline 无 agent.md、不适用本契约）；**不扫** references/
+    assets/subagent 文件（那些是数据，非 prompt；references/ 与源字节一致，不该改）。foreach body
+    agent 同样扫描（body prompt 亦是 LLM 运行时指令）。
+
+    误报排除：源码路径 regex 仅匹配 ``orca/<subdir>/<file>.py[:<line>]``，operational API 路径
+    （``orca.chart.render_chart``、``$ORCA_AGENT_RESOURCES/...``）天然不命中——它们不是文件系统
+    路径（无 ``.py`` 后缀 / 无白名单子目录前缀）。
+    """
+    for node in wf.nodes:
+        if isinstance(node, AgentNode):
+            _check_dev_residue_one(node.prompt, node.resources_root,
+                                   f"agent '{node.name}'", result)
+        elif isinstance(node, ForeachNode):
+            body = node.body
+            if isinstance(body, AgentNode):
+                _check_dev_residue_one(body.prompt, body.resources_root,
+                                       f"foreach '{node.name}'.body agent", result)
+
+
+def _check_dev_residue_one(
+    prompt: str | None,
+    resources_root: str | None,
+    location: str,
+    result: ValidationResult,
+) -> None:
+    """单 AgentNode 的 prompt 开发期残留扫描（DRY 提取，顶层 + foreach body 共用）。
+
+    跳过 inline prompt（``resources_root is None`` 表示未被 resolver 物化，是内联短 prompt）。
+    同一类别在同一节点内只报首条命中（避免刷屏；作者按类别清理即可）。
+    """
+    if not prompt or resources_root is None:
+        return
+    reported_cats: set[str] = set()
+    for m in _DEV_RESIDUE_RE.finditer(prompt):
+        # 命中的类别序号 = group name ``cN`` 中 N
+        cat_idx = int(m.lastgroup[1:])
+        category = _DEV_RESIDUE_PATTERNS[cat_idx][0]
+        if category in reported_cats:
+            continue
+        reported_cats.add(category)
+        matched = m.group(0)
+        result.add_warning(
+            f"{location}.prompt：含开发期残留 '{matched}'（{category}）"
+            f"——agent 运行时 prompt 应只含执行指令；"
+            f"设计理由/issue 编号/源码路径移至 commit 或 release-note。"
+            f"契约见 orca/skills/create-workflow/reference/agent-prompt-cleanliness-contract.md"
+        )
 
 
 # ── ⑧ foreach.source 的 node 存在（浅校验）──────────────────────────────────

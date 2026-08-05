@@ -62,6 +62,8 @@ Orca 是对 AgentHarness（前一个 claude code 编排框架）的重写，目�
 
 **报错处理**：重试必须用户可见（"重试中 / 第 N 次 / 失败原因"）；三层重试（transport/协议/业务）不能互相吞错；限流走退避重试而非直接中断。
 
+**workflow agent prompt 洁净**：agent.md body 是 LLM 运行时指令，禁开发期残留（plan/issue 编号、Orca 源码路径、内部 examples 路径、测试项目名硬编码）。`tars validate` 的 `_check_prompt_dev_residue` 自动检测（warning）；创建/改完 workflow 后按 [洁净契约](orca/skills/create-workflow/reference/agent-prompt-cleanliness-contract.md) 做一遍检查（受众翻转通读），warning 清零。
+
 ---
 
 ## 问题分类（必须遵守）
