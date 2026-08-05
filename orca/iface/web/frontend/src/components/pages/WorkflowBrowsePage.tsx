@@ -7,9 +7,9 @@
 //
 // **m5**：切 workflow 时 store 同步清空 activeAgent/fileTree/activeFile（在 store action 内做）。
 
-import { useEffect, useState, lazy, Suspense } from "react";
+import { useEffect, lazy, Suspense } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { ChevronDown, ChevronRight, Loader2, ArrowLeft } from "lucide-react";
+import { Loader2, ArrowLeft } from "lucide-react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import {
   useWorkflowBrowseStore,
@@ -38,17 +38,16 @@ export function WorkflowBrowsePage() {
     reset,
   } = useWorkflowBrowseStore();
 
-  // referenced agents 集合（左栏高亮 + 排序用）
-  const referencedSet = new Set(activeWorkflow?.agents_referenced ?? []);
+  // 只显示 workflow 引用的 agent（agents_referenced），按声明顺序。description/is_folder/
+  // missing 从全量 resolve（all_agents）查表；referenced 名单中未命中 resolve 的仍显示（兜底空 meta）。
+  // 不再把全量 unreferenced agent 拼进列表（用户诉求：浏览某 workflow 时只看它引用的 agent）。
   const allAgents = activeWorkflow?.all_agents ?? [];
-  // 排序：referenced 在前（按 agents_referenced 顺序），其后补 unreferenced（按 name）
-  const referencedOrdered = (activeWorkflow?.agents_referenced ?? [])
-    .map((n) => allAgents.find((a) => a.name === n))
-    .filter((a): a is AgentSummary => a !== undefined);
-  const unreferenced = allAgents.filter((a) => !referencedSet.has(a.name));
-  const orderedAgents = [...referencedOrdered, ...unreferenced];
-
-  const [showAllAgents, setShowAllAgents] = useState(true);
+  const referencedAgents: AgentSummary[] = (
+    activeWorkflow?.agents_referenced ?? []
+  ).map((n) => {
+    const found = allAgents.find((a) => a.name === n);
+    return found ?? { name: n, is_folder: false, description: "", missing: false };
+  });
 
   useEffect(() => {
     if (!name) return;
@@ -121,68 +120,55 @@ export function WorkflowBrowsePage() {
 
               {activeWorkflow && (
                 <div className="orca-border border-t">
-                  <button
-                    type="button"
-                    onClick={() => setShowAllAgents((s) => !s)}
-                    className="orca-bg-surface-2 orca-text-muted hover:orca-text flex w-full items-center gap-1 px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide"
-                    data-testid="toggle-all-agents"
-                  >
-                    {showAllAgents ? (
-                      <ChevronDown size={12} strokeWidth={1.5} aria-hidden />
-                    ) : (
-                      <ChevronRight size={12} strokeWidth={1.5} aria-hidden />
+                  <div className="orca-bg-surface-2 orca-text-muted orca-border border-b px-3 py-2 text-xs font-semibold uppercase tracking-wide">
+                    Agents（{referencedAgents.length}）
+                  </div>
+                  <ul data-testid="agent-list">
+                    {referencedAgents.length === 0 && (
+                      <li
+                        className="orca-text-faint px-3 py-3 text-xs"
+                        data-testid="agent-list-empty"
+                      >
+                        该 workflow 未引用任何 agent
+                      </li>
                     )}
-                    <span>Agents（{allAgents.length}）</span>
-                  </button>
-                  {showAllAgents && (
-                    <ul data-testid="agent-list">
-                      {orderedAgents.map((agent) => {
-                        const isReferenced = referencedSet.has(agent.name);
-                        const isActive = activeAgent === agent.name;
-                        return (
-                          <li key={agent.name}>
-                            <button
-                              type="button"
-                              onClick={() => void openAgent(agent.name)}
-                              className={`flex w-full flex-col items-start px-3 py-1.5 text-left text-xs ${
-                                isActive
-                                  ? "orca-bg-surface-2 orca-accent orca-border-accent border-l-2"
-                                  : "orca-text-muted hover:orca-bg-surface-2 border-l-2 border-transparent"
-                              } ${agent.missing ? "opacity-50" : ""}`}
-                              data-testid={`agent-row-${agent.name}`}
-                            >
-                              <span className="flex w-full items-center gap-1">
-                                <span className="truncate font-medium">
-                                  {agent.name}
-                                </span>
-                                {isReferenced && (
-                                  <span
-                                    className="orca-border orca-accent ml-auto rounded border px-1 text-xs"
-                                    title="workflow 引用"
-                                  >
-                                    ref
-                                  </span>
-                                )}
-                                {agent.missing && (
-                                  <span
-                                    className="text-orca-failed ml-auto text-xs"
-                                    title="agent 解析失败（坏 frontmatter 或 TOCTOU）"
-                                  >
-                                    missing
-                                  </span>
-                                )}
+                    {referencedAgents.map((agent) => {
+                      const isActive = activeAgent === agent.name;
+                      return (
+                        <li key={agent.name}>
+                          <button
+                            type="button"
+                            onClick={() => void openAgent(agent.name)}
+                            className={`flex w-full flex-col items-start px-3 py-1.5 text-left text-xs ${
+                              isActive
+                                ? "orca-bg-surface-2 orca-accent orca-border-accent border-l-2"
+                                : "orca-text-muted hover:orca-bg-surface-2 border-l-2 border-transparent"
+                            } ${agent.missing ? "opacity-50" : ""}`}
+                            data-testid={`agent-row-${agent.name}`}
+                          >
+                            <span className="flex w-full items-center gap-1">
+                              <span className="truncate font-medium">
+                                {agent.name}
                               </span>
-                              {agent.description && (
-                                <span className="orca-text-faint mt-0.5 truncate text-xs">
-                                  {agent.description}
+                              {agent.missing && (
+                                <span
+                                  className="text-orca-failed ml-auto text-xs"
+                                  title="agent 解析失败（坏 frontmatter 或 TOCTOU）"
+                                >
+                                  missing
                                 </span>
                               )}
-                            </button>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  )}
+                            </span>
+                            {agent.description && (
+                              <span className="orca-text-faint mt-0.5 truncate text-xs">
+                                {agent.description}
+                              </span>
+                            )}
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
                 </div>
               )}
             </div>
