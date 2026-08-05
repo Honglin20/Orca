@@ -170,8 +170,19 @@ Your return message is consumed by the calling agent. Return:
    judge. The block opens with its ID, then a flat markdown list (not
    nested) of what is uncertain and what the caller must confirm or fix.
 
-Omit empty sections. If everything passes, state `all-pass` followed by the
-Coverage summary.
+Omit empty sections.
+
+**Terminal verdict (mechanical, machine-parsed).** Your report **must** end
+with a single terminal line of exactly one of:
+
+- `VERDICT: all-pass` — Static Fidelity is `pass` **and** there are no
+  Unresolved items. Accepted Deviations do **not** block `all-pass`
+  (they are caller-visible, not failures).
+- `VERDICT: unresolved` — there is any Static Fidelity finding or any
+  Unresolved item.
+
+The caller breaks its convergence loop on a literal `VERDICT: all-pass`
+token, so this line is authoritative — emit it verbatim as the last line.
 
 ### Resume STATUS contract (mechanical, machine-parsed)
 

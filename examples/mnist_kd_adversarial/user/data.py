@@ -26,7 +26,7 @@ def _transform() -> transforms.Compose:
     )
 
 
-def build_dataloader(batch_size: int = 128):
+def build_dataloader(batch_size):
     """Re-iterable training DataLoader (torchvision MNIST)."""
     ds = datasets.MNIST(
         _DATA_ROOT, train=True, download=True, transform=_transform()

@@ -146,7 +146,7 @@ done
    - MAX_TURNS=3：每轮 spawn → 解析 STATUS 行 → 若非 all-pass 则只修 caller 可独立判定的
      semantic findings（仅叶子，禁碰引擎/KD 库）→ 重跑 L1 py_compile + L3 fidelity_check →
      下一轮 resume（Fixed: <closed_ids>）。
-   - **verifier spawn 自身崩**（rc≠0 / sentinel 缺失 / 产出无 `all-pass` 或 Static Fidelity 段）
+   - **verifier spawn 自身崩**（rc≠0 / sentinel 缺失 / 产出无 `VERDICT:` 行且无 Static Fidelity 段）
      → fail loud 不重试 + stderr 报 raw 产出 + emit ask-user 哨兵（协议层崩非 transient）。
    - **ID 范围防御**：resume 报告里的 ID 必须是上轮 stash 的子集；超出 → fail loud（hallucinate）。
    - **同一 ID 连续两轮 `STATUS: open`**（reaffirm）→ fail loud + emit ask-user 哨兵（报「ID
@@ -154,9 +154,9 @@ done
    - **Unresolved 项**（verifier 缺 basis）→ 不擅自改，fail loud + emit ask-user 哨兵。
    - **每轮 apply fixes 后必须重跑 L1 py_compile + L3 fidelity_check**：fix 改坏了确定性层
      → fail loud + emit ask-user 哨兵（回滚或人工），不继续盲目改。
-   - 达 MAX_TURNS 仍未 all-pass → fail loud + stderr 报未闭环保留的 IDs + 上轮 findings + 退非零，
+   - 达 MAX_TURNS 仍未 `VERDICT: all-pass` → fail loud + stderr 报未闭环保留的 IDs + 上轮 findings + 退非零，
      不 emit JSON、不降级 pass。
-   - all-pass → 把 Accepted Deviations IDs 列表带进 L4-mechanical（防机械层误报）。
+   - `VERDICT: all-pass`（字面 token 匹配，Accepted Deviations 不阻断）→ 把 Accepted IDs 列表带进 L4-mechanical（防机械层误报）。
 5. **L4-mechanical：workflow-verifier 子 agent**（一次性，必跑）：用 SKILL.md 的 prompt 模板
    **真 spawn** workflow-verifier（不许叙述假 pass），喂给它 4 叶子 + checklists + 用户原码做
    cross-ref。spawn prompt 显式带上 L4-semantic 的 Accepted IDs，提示 workflow-verifier 不要

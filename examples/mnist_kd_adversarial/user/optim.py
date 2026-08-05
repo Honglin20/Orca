@@ -17,11 +17,11 @@ ADVERSARIAL DEVIATION:
 import torch
 
 
-def build_optimizer(params, lr: float = 1e-3):
+def build_optimizer(params, lr):
     return torch.optim.Adam(params, lr=lr, weight_decay=1e-3)
 
 
-def build_scheduler(optimizer, epochs: int = 10):
+def build_scheduler(optimizer, epochs):
     return torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=max(epochs, 1)
     )

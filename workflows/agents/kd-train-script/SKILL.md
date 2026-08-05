@@ -257,8 +257,8 @@ loop:
         spawn fidelity-verifier with the first-run template
     else:
         spawn fidelity-verifier with the resume template (Fixed: <fixed_ids>)
-    if spawn crashed (rc != 0, sentinel missing, output has no all-pass
-                       line and no Static Fidelity section):
+    if spawn crashed (rc != 0, sentinel missing, output has no
+                       `VERDICT:` line and no Static Fidelity section):
         fail loud, do not retry, stderr the raw output,
         emit ask-user sentinel (protocol-layer crash, not transient)
     verify every ID in the resume report is a subset of id_stash
@@ -266,7 +266,10 @@ loop:
     parse STATUS lines -> closed_ids, open_ids, accepted_ids
     id_stash.update(every ID in this turn's report)
         (so turn-1 findings are stash members before turn-2's subset check)
-    if report == all-pass: break (proceed to L4-mechanical)
+    if the terminal `VERDICT:` line == `VERDICT: all-pass`: break
+        (proceed to L4-mechanical). Literal token match only — Accepted
+        Deviations do not block all-pass; missing/non-literal VERDICT line
+        is treated as a spawn crash above.
     for id in open_ids:
         reaffirm_count[id] += 1 else reaffirm_count[id] = 1
     if any reaffirm_count[id] >= 2:

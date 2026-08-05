@@ -194,11 +194,10 @@ spawn project-fidelity-verifier-kd（一次性全量审计），传入：
 - source→generated mapping（loss / data / eval / optim 四组）
 
 verifier 产出判定（任一非 pass 立即 fail loud 退非零）：
-- spawn 自身崩（rc≠0 / sentinel 缺失 / 产出无 ``all-pass`` 且无 Static Fidelity 段）
+- spawn 自身崩（rc≠0 / sentinel 缺失 / 产出无 ``VERDICT:`` 行且无 Static Fidelity 段）
   → verified=false，stderr 报 raw 产出，**退非零**；
-- 报告含 ``Unresolved`` → verified=false，把 Unresolved IDs 填入 issues，**退非零**；
-- ``Static Fidelity`` 非 ``pass`` → verified=false，把 findings 填入 issues，**退非零**；
-- ``all-pass`` → 记下 Accepted Deviations IDs 列表（带进 step 4 spawn prompt）。
+- ``VERDICT: unresolved``（含 ``Unresolved`` 段或 Static Fidelity 非 ``pass``）→ verified=false，把 findings/Unresolved IDs 填入 issues，**退非零**；
+- ``VERDICT: all-pass``（字面 token；Accepted Deviations 不阻断）→ 记下 Accepted IDs 列表（带进 step 4 spawn prompt）。
 
 > Runtime Fidelity ``not verified`` 在 KD 语境下属预期（用户 train.py 几乎不可 import），
 > 不算 fail——本审计主要价值在 Static Fidelity。
