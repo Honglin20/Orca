@@ -1,3 +1,10 @@
+---
+subagent: supernet-evaluator
+version: 1
+sentinel: SE7K2A
+---
+
+**Output first line**: echo your frontmatter sentinel verbatim as `[subagent:supernet-evaluator v1 SE7K2A]` before anything else.
 
 # Supernet Evaluator
 

@@ -63,6 +63,24 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _compute_subagents_root(
+    workflows_root: "Path | None", wf_name: str
+) -> str:
+    """计算 point-to-file 协议的 ``subagents_root``（SPEC §3.2 v3 公式）。
+
+    解析 ``workflows_root / "subagents" / wf_name`` 为存在的目录 → 返其绝对路径字符串；
+    任一缺失（workflows_root=None / 目录不存在 / wf_name 空）→ 返空串（SPEC §3.3 默认行为，
+    如 quant-* 等无子 agent 的 workflow）。
+
+    在 orchestrator 的 6 处 RunContext 构造点统一调用（SPEC §4 防漏点）。空串场景由
+    render 层 fail loud 兜底（agent.md 引 ``{{ subagents_root }}`` 但值为空 → 报错）。
+    """
+    if workflows_root is None or not wf_name:
+        return ""
+    p = workflows_root / "subagents" / wf_name
+    return str(p) if p.is_dir() else ""
+
+
 class Orchestrator:
     """单指针推进的编排器（SPEC §4.2）。
 
@@ -157,6 +175,7 @@ class Orchestrator:
             outputs={},
             run_id=self.run_id,
             task=task,
+            subagents_root=_compute_subagents_root(workflows_root, wf.name),
         )
         self.task = task
         # resolve_max_iter 在 __init__ 调用（run() 之前）：非法 iterations（如 "abc"）
@@ -517,7 +536,9 @@ class Orchestrator:
             routes = parallel_by_name[last_done].routes
         else:
             routes = node_by_name[last_done].routes
-        # ctx 仅用于 route 求值（outputs 已含 last_done 的 output）。
+        # ctx 仅用于 route 求值（outputs 已含 last_done 的 output）。subagents_root 此路径
+        # 不渲染 agent.md（route.when 不引 {{ subagents_root }}），保持空串（reviewer 防漏点：
+        # route eval 不需要 subagents，与 render 路径解耦）。
         from orca.exec.context import RunContext
 
         ctx = RunContext(
@@ -551,8 +572,11 @@ class Orchestrator:
         orch.bus = bus
         orch.run_id = state.run_id
         # F1：inputs 透传（来自 replay_for_resume，保 render 能拿 inputs.*）。
+        # subagents_root：bare instance 的 ctx 会被 _make_ctx 重置（仅 carry inputs/task/...），
+        # 但保留此处的 populate 一致性以防 _make_ctx 之外的早期路径读 ctx.subagents_root。
         orch.ctx = RunContext(
             inputs=inputs, outputs={}, run_id=state.run_id, task=None,
+            subagents_root=_compute_subagents_root(workflows_root, wf.name),
         )
         orch.task = None
         orch.max_iter = resolve_max_iter(wf, inputs)
@@ -844,6 +868,10 @@ class Orchestrator:
         phase 11 §4：把累积的 ``_guidance_acc``（Ctrl+G + CONTINUE 时追加）注入 ctx，
         render_prompt 拼 ``[User Guidance]`` 段（SPEC §10.3 修正 C3：走既有 _make_ctx，
         不新增 with_outputs）。空 acc = 无 guidance（向后兼容）。
+
+        point-to-file 协议：``subagents_root`` 从 ``self.ctx``（__init__ 已 populate）透传。
+        不能在 _make_ctx 重新算（无 workflows_root 形参）；__init__ 一次性解析后由本方法
+        在每次 snapshot 携带——保 render 期 ``{{ subagents_root }}`` inline 正确。
         """
         from orca.exec.context import RunContext
 
@@ -853,6 +881,7 @@ class Orchestrator:
             run_id=self.run_id,
             task=self.task,
             user_guidance=tuple(self._guidance_acc),
+            subagents_root=self.ctx.subagents_root,
         )
 
     async def _dispatch(self, current: str, ctx: RunContext) -> Any:

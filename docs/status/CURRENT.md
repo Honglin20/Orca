@@ -4,7 +4,25 @@
 
 ---
 
-## 当前：PostToolUse 事后告警守卫——coder-agent 完成 + 单测全绿，待 test-agent 四前端真机 e2e
+## 当前：subagent point-to-file 协议——实现完成 + 单测全绿，待 headless e2e
+
+**任务**：SPEC [`subagent-point-to-file-design-draft.md`](../specs/subagent-point-to-file-design-draft.md) v3——把 nas-supernet 子 agent 调用从 read+embed 改为 point-to-file：子 agent 自读 `{{ subagents_root }}/<name>.md`（render 期 inline 绝对路径），parent 只发短指针 + sentinel 回显约束。
+
+**状态**：**实现完成 + 890 单测绿 + code-reviewer 一轮闭环（0 must-fix）**。Commit: 见 git log。
+- 引擎：RunContext 加 `subagents_root` 字段；orchestrator `_compute_subagents_root` + 4 处 populate；step.py `_build_ctx(workflows_root=...)` 透传；render.py fail loud（引用但空串 → ExecError）；validator `_check_subagents_md`（frontmatter strict regex + Read 校验大小写无关）；install copytree v3 拓扑。
+- 资产：`git mv workflows/_nas-supernet_subagents workflows/subagents/nas-supernet`；6 parent agent.md 协议段重写；5 子 agent md 加 frontmatter（sentinel: SE7K2A/WF3QP8/MM4ZR6/PT5NX2/PF8LK3）。
+
+**待办**：
+- [x] 引擎 + agent.md + 子 agent md + 测试 + code-review + commit。
+- [ ] **headless nas-supernet e2e**（用户 main 跑）：tape 断言子 agent 首个 tool call 是 Read 绝对路径 / report 首行含 sentinel / `sentinel_stats.jsonl` 落地 / prompt 体量 < body 50%。
+
+**必读**：
+- 本任务 release note `docs/releases/2026-08-05-subagent-point-to-file.md`
+- SPEC `docs/specs/subagent-point-to-file-design-draft.md`（§3.1 协议段 / §5.2 frontmatter strict regex / §7 compile 校验）
+
+---
+
+## 历史：PostToolUse 事后告警守卫——coder-agent 完成 + 单测全绿，待 test-agent 四前端真机 e2e
 
 **任务**：SPEC [`posttooluse-rogue-guard.md`](../specs/posttooluse-rogue-guard.md)——给四前端（cc/cac + opencode/nga）加 PostToolUse 纯提示 hook（B 路径扩展）：主 session 在活跃 run 期间自己用 Edit/Write/跑 train → 事后注入文本提醒。不阻止、不推进、不捕 output。
 

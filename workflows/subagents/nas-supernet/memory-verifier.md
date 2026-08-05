@@ -1,3 +1,10 @@
+---
+subagent: memory-verifier
+version: 1
+sentinel: MM4ZR6
+---
+
+**Output first line**: echo your frontmatter sentinel verbatim as `[subagent:memory-verifier v1 MM4ZR6]` before anything else.
 
 # Memory Verifier
 

@@ -234,3 +234,55 @@ def test_render_template_empty_locals_no_effect():
     """locals 默认空 dict，对普通 node 渲染无影响（零回归）。"""
     ctx = RunContext(inputs={"x": "1"}, outputs={}, run_id="r1", locals={})
     assert render_template("{{ inputs.x }}", ctx) == "1"
+
+
+# ── point-to-file subagent 协议（SPEC subagent-point-to-file-design-draft）───
+
+
+def test_render_template_subagents_root_inlined_when_set():
+    """{{ subagents_root }} 在 namespace，被 inline 为 ctx 设置的绝对路径字符串。
+
+    SPEC §3.2/§4：render 层 ``_namespace`` 暴露 ``subagents_root`` 顶层变量；
+    agent.md body ``{{ subagents_root }}/<name>.md`` 在 render 期被替换为绝对路径。
+    """
+    ctx = RunContext(
+        inputs={}, outputs={}, run_id="r1",
+        subagents_root="/abs/path/to/workflows/subagents/nas-supernet",
+    )
+    out = render_template(
+        "Read {{ subagents_root }}/supernet-evaluator.md", ctx
+    )
+    assert out == (
+        "Read /abs/path/to/workflows/subagents/nas-supernet/supernet-evaluator.md"
+    )
+
+
+def test_render_template_subagents_root_empty_default_no_token():
+    """无 subagents_root 字段（默认空串）且模板不引用 → 正常渲染，无副作用（向后兼容）。"""
+    ctx = RunContext(inputs={"x": "1"}, outputs={}, run_id="r1")
+    # 默认 subagents_root=""，模板不引用 → 渲染成功
+    assert render_template("{{ inputs.x }}", ctx) == "1"
+
+
+def test_render_template_subagents_root_referenced_but_empty_fails_loud():
+    """模板引用 ``{{ subagents_root }}`` 但 ctx.subagents_root="" → ExecError fail loud。
+
+    SPEC §7 末：workflow 期望子 agent 但 subagents_root 未解析 → fail loud，不静默渲染空串
+    让子 agent Read 失败。StrictUndefined 兜不到此场景（字段默认空串是合法值）。
+    """
+    ctx = RunContext(inputs={}, outputs={}, run_id="r1")  # subagents_root 默认 ""
+    with pytest.raises(ExecError) as ei:
+        render_template("Read {{ subagents_root }}/foo.md", ctx)
+    assert "subagents_root" in str(ei.value)
+    assert ei.value.phase == "render"
+
+
+def test_render_template_subagents_root_token_in_comments_also_fails_loud():
+    """``subagents_root`` 出现在模板任何位置（含 markdown 注释 / 指令）且值为空 → fail loud。
+
+    文本级子串探测（非 AST）保住 fail-loud 兜底——不依赖 Jinja 解析粒度。
+    """
+    ctx = RunContext(inputs={}, outputs={}, run_id="r1")
+    with pytest.raises(ExecError):
+        # 出现在看似注释里也触发——确定性优先（dev 写错路径仍可定位）
+        render_template("# note: subagents_root is required\nhello", ctx)

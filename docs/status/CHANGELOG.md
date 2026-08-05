@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-05] feat(exec): subagent point-to-file 协议——nas-supernet 子 agent 自读 md + sentinel 回显
+
+把 nas-supernet 子 agent 调用从 read+embed（parent cat body 内联进 Task prompt）改为 point-to-file（子 agent 自读 md body）：`{{ subagents_root }}/<name>.md` 在 render 期 inline 成绝对路径（不引新 env var，shell 无关）；parent prompt 只发短指针 + sentinel 回显约束；5 个子 agent md 加 frontmatter（subagent/version/sentinel 三键）；目录拓扑 v3 `workflows/subagents/<wf>/`（git mv 迁移）。引擎：RunContext 加 `subagents_root` 字段；6 处构造点 populate（orchestrator/step.py）；render.py 引用但空串时 fail loud；validator 加 `_check_subagents_md`（frontmatter strict regex + dev-residue 扩扫子 agent md + Read 工具前置校验）；install copytree `workflows/subagents/` → `~/.orca/workflows/subagents/`。code-reviewer 一轮闭环：0 must-fix / 3 should-fix（_recover_step_result e2e 测 + 子串探测 vs regex 注释 + SPEC 文本 footnote）+ 3 nice-to-have（foreach body 测 + 例外直接断言 + skip 可见性），2 项已采纳。**890 passed**（含 35 新测，1 pre-existing demo fail 与本次无关）。Commit: 见 git log。详见 [release note](../releases/2026-08-05-subagent-point-to-file.md)。
+
 ## [2026-08-05] feat(in-session): PostToolUse 事后告警守卫——四前端纯提示 hook（B 路径扩展）
 
 给四前端（cc/cac + opencode/nga）加 PostToolUse 事后告警：主 session 在活跃 run 期间自己下场干活（Edit/Write/跑 train）→ 工具执行后注入**纯文本提示**（additionalContext / promptAsync），不阻止、不推进、不捕 output、不 emit decision。覆盖 §4.4 Stop/idle nudge 的 turn 中途盲区。新增 `tool-classification.json` 单一真相源（writing/bash 工具集 + readonly 前缀 word-boundary + 复合命令分隔符 + guard_reason_template）；`cc_nudge.sh` 加 hook_event_name 分支（Stop 字节级不变 / PostToolUse 新增）；`install_cmds` 合并 hooks.PostToolUse 条目（matcher 锚定 + 去重）+ 拷 classification；`orca.ts` 加 tool.execute.after 钩子（复用 listActiveRuns/nudgeAllowed；throttleFile 参数化；idle/guard 独立 mutex）。code-reviewer 两轮闭环：第一轮 4 should-fix（Stop 字节级 golden fixture / 节流顺序对称 / reason 模板入 JSON / opencode classification 候选路径补全）+ 3 nice-to-have；第二轮 fresh 拾遗 1 must-fix（PostToolUse 路径 leak exit 2 → `_scan_my_active_run_ids` 加 `strict` 参数，guard fail-open / Stop 仍 fail loud）+ 2 should-fix（idle/guard 共用 mutex 拆为 `injectingIdle`/`injectingGuard`；`>`/`>>` 重定向加入复合分隔符）+ 2 nice-to-have（Edit 直命中测、空命令注释）。**138 passed**（含 27 新测）。Commit: 见 git log。详见 [release note](../releases/2026-08-05-posttooluse-rogue-guard.md)。

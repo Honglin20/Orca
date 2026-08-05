@@ -1,5 +1,5 @@
 ---
-description: NAS supernet 张开生成器（folder-agent）——把用户 PyTorch 模型 flatten + 验证 + 仅施加 mandatory supernet readiness 规则（optional 优化跳过）+ 生成 supernet.py 与精炼 SearchSpace；调 supernet-evaluator / workflow-verifier / memory-verifier（read+embed 协议）；不支持模型类型 → output_schema model_type_supported=false fail loud 路由 terminate_unsupported。
+description: NAS supernet 张开生成器（folder-agent）——把用户 PyTorch 模型 flatten + 验证 + 仅施加 mandatory supernet readiness 规则（optional 优化跳过）+ 生成 supernet.py 与精炼 SearchSpace；调 supernet-evaluator / workflow-verifier / memory-verifier（point-to-file 协议）；不支持模型类型 → output_schema model_type_supported=false fail loud 路由 terminate_unsupported。
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # ns_expand_supernet
@@ -37,21 +37,23 @@ path = d + "/file.py"                # 禁：字符串拼接
 path = f"{d}/file.py"                # 禁：f-string 拼接
 ```
 
-## Subagent 调用协议（read+embed）
+## Subagent 调用协议（point-to-file）
 
 本节点调以下子 agent（**全名**，禁简写）：`supernet-evaluator`、`workflow-verifier`、
-`memory-verifier`。它们的 body 逐字存仓库 `workflows/_nas-supernet_subagents/`，install 落
-`~/.orca/nas-supernet/subagents/`。host 无需注册——**read body + embed prompt**：
+`memory-verifier`。它们的 body 存 `{{ subagents_root }}/<name>.md`（render 期 inline 为绝对
+路径，cwd 无关）。host 无需注册——子 agent 自读 body + 执行。
 
-调用 `<name>`：
-1. `cat $HOME/.orca/nas-supernet/subagents/<name>.md` 取 body（完整保留）。
-2. `Task(subagent_type=<host 内置通用类型>, prompt=<body> + <任务+inputs>)`。
-   - 首轮：`prompt = <body> + 本轮任务描述 + 具体输入`。
-   - **fresh-Task loop（verifier / evaluator / 多轮 porter 都适用；fresh Task 无记忆，每轮须重 embed）**：
-     `prompt = <body> + <本轮任务+inputs> + <上一轮完整 verifier report 原文> + Fixed:[ids]/Context:[id]`。
-     - `Fixed:[12],[CROSS-REF-1]` = 已修 Item ID 清单。
-     - `Context:[id] <理由>` = 你不同意的 item 证据（禁静默推翻 verifier 判断）。
-3. 收到的 report 进入你自己的判断（按各 Step 规定处理）。
+调用 `<name>`（首轮）：
+`Task(subagent_type=<host 内置通用类型>, prompt="先完整 Read {{ subagents_root }}/<name>.md，严格按其 Procedure 执行本轮任务。本轮 inputs：<具体 inputs>。按 md 规定的格式 return。**report 首行**必须照原样回显你 Read 到的 md frontmatter 里的 sentinel 字段（格式见 md 顶部；不要猜，不要从本 prompt 推——必须来自你 Read 的文件）。")`
+
+调用 `<name>`（多轮 verifier loop 续轮）：在首轮 prompt 末尾追加
+`<上一轮完整 report 原文> + Fixed:[ids]/Context:[id]`。
+- `Fixed:[12],[CROSS-REF-1]` = 已修 Item ID 清单。
+- `Context:[id] <理由>` = 你不同意的 item 证据（禁静默推翻 verifier 判断）。
+
+每次 `Task` 是 fresh subagent（host 内 `task` 工具语义：stateless，每轮新建上下文）——
+子 agent 单轮单次 Read body，不跨轮累积；续轮 report 不视为 body，由你在本轮 prompt 末尾
+作为 inputs 追加。**parent 全程不碰 body，sentinel 字面量绝不出现在 parent prompt。**
 
 正文各调用处以「按协议调 `<全名>`，inputs=…」引用，不重复协议本身。
 
@@ -230,7 +232,7 @@ workflow 完成（含 validation）后，进 evaluator verification loop：
    - 仔细读 feedback。每个 issue 含 severity（`[BLOCKER]` / `[MAJOR]` / `[MINOR]`）、symptom、reason、fix guidance。
    - 按 feedback 对 `supernet.py` 施 targeted fix。优先级 `[BLOCKER]` > `[MAJOR]` > `[MINOR]`。
    - 重跑该 workflow 的 Validation。
-   - **按协议（read+embed verifier loop）**再调 `supernet-evaluator`：embed `<上一轮完整 evaluator report> + Fixed:[ids]`，让它只 re-check 那些 finding。
+   - **按协议（point-to-file verifier loop 续轮）**再调 `supernet-evaluator`：首轮 prompt 末尾追加 `<上一轮完整 evaluator report> + Fixed:[ids]`，让它只 re-check 那些 finding。
 3. **Repeat** 1–2 直到 evaluator 返 PASS（`LGTM`）。PASS → 进 Step 6。
 
 ### Step 6: Inspect and Refine `SearchSpace`
@@ -253,8 +255,8 @@ layer config / branch choice）。refinement 后：
    - `all-pass` 且有 **Fixed** section → 重跑该 workflow Validation（+ `python inspect_supernet.py`）后进 Step 7。
    - `unresolved` → 读每个 unresolved item（block 开头是 Item ID，如 `[12]` checklist item 或
      `[CROSS-REF-1]`），对 artifact 施 suggested fix，重跑 Validation（+ `python inspect_supernet.py`），
-     **按协议（read+embed verifier loop）**再调 `workflow-verifier`，embed `Fixed: [12], [CROSS-REF-1]`
-     让它只 re-check 那些。Repeat 直到 `all-pass` → 进 Step 7。
+     **按协议（point-to-file verifier loop 续轮）**再调 `workflow-verifier`，首轮 prompt 末尾
+     追加 `Fixed: [12], [CROSS-REF-1]` 让它只 re-check 那些。Repeat 直到 `all-pass` → 进 Step 7。
 
 ### Step 7: Write Initial Summary
 

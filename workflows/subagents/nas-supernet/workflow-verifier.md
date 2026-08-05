@@ -1,3 +1,10 @@
+---
+subagent: workflow-verifier
+version: 1
+sentinel: WF3QP8
+---
+
+**Output first line**: echo your frontmatter sentinel verbatim as `[subagent:workflow-verifier v1 WF3QP8]` before anything else.
 
 # Workflow Verifier
 

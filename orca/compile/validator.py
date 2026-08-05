@@ -118,8 +118,16 @@ class ValidationResult:
 # ── 对外入口 ─────────────────────────────────────────────────────────────────
 
 
-def validate_workflow(wf: Workflow) -> list[str]:
-    """全部语义校验。返回 warnings；有 errors 抛 ConfigurationError（SPEC §4）。"""
+def validate_workflow(
+    wf: Workflow, workflows_root: Path | None = None
+) -> list[str]:
+    """全部语义校验。返回 warnings；有 errors 抛 ConfigurationError（SPEC §4）。
+
+    ``workflows_root``（point-to-file subagent 协议 SPEC §3.2/§7，可选）：workflow yaml
+    所在目录。提供时，``_check_subagents_md`` 校验 ``workflows_root / "subagents" / wf.name``
+    内的子 agent md frontmatter 完整性 + body 旧协议残留。None / 目录不存在 → 跳过（如
+    quant-* 无子 agent 的 workflow，SPEC §3.3 正常）。
+    """
     result = ValidationResult()
     _check_workflow_name_reserved(wf, result)  # §2.2 保留字黑名单（先于一切）
     _check_required_inputs_no_default(wf, result)  # 必填 input 不得带 default（KD-NAS latency_provider 铁律）
@@ -138,6 +146,7 @@ def validate_workflow(wf: Workflow) -> list[str]:
     _check_folder_agent_scripts_exist(wf, result)     # $ORCA_AGENT_RESOURCES/scripts/<f> 存在性
     _check_input_tier_labels(wf, result)       # input description 三档标签（contract §6）
     _check_prompt_dev_residue(wf, result)      # agent.md body 禁开发期残留（受众分离契约）
+    _check_subagents_md(wf, workflows_root, result)   # point-to-file subagent md frontmatter + 残留
     _check_foreach_source(wf, result)          # ⑧
     _check_terminate_constraints(wf, result)   # terminate step 约束（routes 空 / 非entry / 非parallel branch / 非foreach body）
     _check_execute_phase_no_gate_tools(wf, result)  # 铁律 7：execute phase 永不中断
@@ -673,8 +682,9 @@ def _check_jinja2_refs(wf: Workflow, result: ValidationResult) -> None:
         if err is not None:
             result.add_error(f"{location}：{err}")
             continue
-        # inputs 是 render 层合法顶层变量（{{ inputs.x }}）
-        valid_roots = names | {"workflow", "inputs"} | extras
+        # inputs 是 render 层合法顶层变量（{{ inputs.x }}）；subagents_root 是 point-to-file
+        # 协议（SPEC §3.2/§4）render 层 ``_namespace`` 暴露的顶层变量（{{ subagents_root }}）。
+        valid_roots = names | {"workflow", "inputs", "subagents_root"} | extras
         for var in sorted(find_undeclared_variables(ast)):
             if var not in valid_roots:
                 result.add_error(
@@ -1037,7 +1047,160 @@ def _check_dev_residue_one(
         )
 
 
-# ── ⑧ foreach.source 的 node 存在（浅校验）──────────────────────────────────
+# ── point-to-file subagent md 校验（SPEC §7）──────────────────────────────────
+
+
+# strict frontmatter regex：仅匹配首块 ``---\n...---\n``（SPEC §5.2 evaluator #13 闭环）。
+# 非整文件 yaml parse——body 后续 ``---``（markdown hr / 表格分隔）不误判。
+_SUBAGENT_FRONTMATTER_RE = re.compile(
+    r"^---\n(?P<yaml>.+?\n)---\n", re.DOTALL,
+)
+# frontmatter 内三键的捕获（multiline 容错；每键一行 ``key: value``）。
+_FM_SUBAGENT_RE = re.compile(r"^subagent:\s*(?P<v>\S+)\s*$", re.MULTILINE)
+_FM_VERSION_RE = re.compile(r"^version:\s*(?P<v>\d+)\s*$", re.MULTILINE)
+_FM_SENTINEL_RE = re.compile(
+    r"^sentinel:\s*(?P<v>[A-Za-z0-9]{4,})\s*$", re.MULTILINE,
+)
+# body 旧协议残留（read+embed 时代的 $ORCA_SUBAGENTS_DIR / cat ~/.orca/...subagents/）。
+_SUBAGENT_LEGACY_RESIDUE_RE = re.compile(
+    r"\$ORCA_SUBAGENTS_DIR\b|cat\s+(?:\"\$HOME|\$HOME)/\.orca/[\w.-]+/subagents/",
+)
+# ``subagents_root`` 引用 → host 通用类型 tools 含 Read（静态可探：node.tools 显式白名单
+# 或 frontmatter meta tools）。tools==None（全开）= 含 Read；显式 list 才校验。
+#
+# **与 render.py ``_SUBAGENTS_ROOT_TOKEN`` 的关系（刻意不同）**：本 regex 精确匹配
+# ``{{ subagents_root }}`` var-ref 形态（compile 期静态校验，假阳性代价高，需精确）；
+# render.py 用子串 ``in`` 探测（run 期兜底，确定性优先——任何位置提及都视为依赖，
+# 宁可假阳性 fail loud 也不放行）。两者判定集不相等是 design intent。
+_SUBAGENTS_ROOT_REF_RE = re.compile(r"\{\{\s*subagents_root\s*\}\}")
+
+
+def _parse_subagent_frontmatter(text: str) -> dict | None:
+    """strict regex 解析 subagent md frontmatter（SPEC §5.2）。
+
+    返 ``{"subagent", "version", "sentinel"}`` dict（首块 frontmatter，body 后续 ``---`` 不误判）；
+    无 frontmatter / 缺键 → ``None``（调用方按 error 上报）。consumer（parent 校验回显 / lint）
+    统一用此函数——禁用整文件 yaml parse。
+    """
+    m = _SUBAGENT_FRONTMATTER_RE.match(text)
+    if not m:
+        return None
+    yaml_block = m.group("yaml")
+    sub = _FM_SUBAGENT_RE.search(yaml_block)
+    ver = _FM_VERSION_RE.search(yaml_block)
+    sen = _FM_SENTINEL_RE.search(yaml_block)
+    if not (sub and ver and sen):
+        return None
+    return {
+        "subagent": sub.group("v"),
+        "version": int(ver.group("v")),
+        "sentinel": sen.group("v"),
+    }
+
+
+def _check_subagents_md(
+    wf: Workflow, workflows_root: Path | None, result: ValidationResult
+) -> None:
+    """point-to-file subagent md 校验（SPEC §7，仅当 subagents_root 解析到存在目录时跑）。
+
+    三项校验：
+      1. 目录内每个 ``*.md`` 必有合法 frontmatter（``subagent`` / ``version`` / ``sentinel``
+         三键）——strict regex 解析（SPEC §5.2，非整文件 yaml parse）。
+      2. body 含 ``$ORCA_SUBAGENTS_DIR`` / ``cat ~/.orca/...subagents/`` 等旧协议残留 →
+         warning（dev-residue）。
+      3. agent.md body 引用 ``{{ subagents_root }}`` 的节点 → 校验 host 通用类型 tools 含
+         Read（静态可知则校验；tools=None=全开视为含 Read）。
+
+    workflows_root=None / 目录不存在 → 跳过（SPEC §3.3：无 subagents 的 workflow 正常）。
+    run 期 render 兜底（agent.md 引 ``{{ subagents_root }}`` 但 ctx.subagents_root=""）
+    归 ``orca.exec.render`` 而非本检查。
+    """
+    if workflows_root is None or not wf.name:
+        return
+    subagents_root = workflows_root / "subagents" / wf.name
+    if not subagents_root.is_dir():
+        return
+    md_files = sorted(subagents_root.glob("*.md"))
+    for md in md_files:
+        try:
+            text = md.read_text(encoding="utf-8")
+        except OSError as e:
+            result.add_warning(
+                f"读取 subagent md {md.name} 失败（{e}）；跳过其 frontmatter 校验"
+            )
+            continue
+        fm = _parse_subagent_frontmatter(text)
+        if fm is None:
+            result.add_error(
+                f"subagent md '{md.name}' 缺合法 frontmatter（需 ``subagent`` / "
+                f"``version`` / ``sentinel`` 三键，strict regex 解析首块 ``---`` 块）。"
+                f"详见 SPEC subagent-point-to-file-design-draft §5.2。"
+            )
+        elif fm["subagent"] != md.stem:
+            result.add_error(
+                f"subagent md '{md.name}' frontmatter 的 subagent={fm['subagent']!r}"
+                f" 与文件名 stem {md.stem!r} 不一致（SPEC §5.2：subagent = 文件名 stem）。"
+            )
+        if _SUBAGENT_LEGACY_RESIDUE_RE.search(text):
+            result.add_warning(
+                f"subagent md '{md.name}' body 含旧协议残留（$ORCA_SUBAGENTS_DIR / "
+                f"cat ~/.orca/.../subagents/）——point-to-file 协议下子 agent 自读 md，"
+                f"无需 env var 或 cat $HOME 路径。"
+            )
+        # 开发期残留（受众分离契约 §8 #5 扩扫子 agent md）：复用 _DEV_RESIDUE_RE 的 pattern
+        # 表（plan §N / §N.M / issue breadcrumb / Orca 源码路径 / 内部 examples 路径）。
+        # 与 _check_dev_residue_one 同款「同类别只报首条命中」去重逻辑，但 category 文案一致。
+        reported_cats: set[str] = set()
+        for m in _DEV_RESIDUE_RE.finditer(text):
+            cat_idx = int(m.lastgroup[1:])
+            category = _DEV_RESIDUE_PATTERNS[cat_idx][0]
+            if category in reported_cats:
+                continue
+            reported_cats.add(category)
+            result.add_warning(
+                f"subagent md '{md.name}'：含开发期残留 '{m.group(0)}'（{category}）"
+                f"——子 agent md 是运行时指令，设计理由/issue 编号/源码路径移至 commit 或 release-note。"
+                f"契约见 orca/skills/create-workflow/reference/agent-prompt-cleanliness-contract.md"
+            )
+
+    # 校验 3：agent.md 引用 {{ subagents_root }} 的节点，host 通用类型 tools 须含 Read。
+    for node in wf.nodes:
+        if isinstance(node, AgentNode):
+            _check_subagent_root_ref_tools(node, f"node '{node.name}'", result)
+        elif isinstance(node, ForeachNode):
+            body = node.body
+            if isinstance(body, AgentNode):
+                _check_subagent_root_ref_tools(
+                    body, f"foreach '{node.name}'.body agent", result
+                )
+
+
+def _check_subagent_root_ref_tools(
+    agent_node: AgentNode, location: str, result: ValidationResult
+) -> None:
+    """单 AgentNode：若 prompt 引用 ``{{ subagents_root }}`` 则校验 tools 含 Read。
+
+    tools=None（默认全开）= host 通用类型全工具集（含 Read），跳过；显式 list 才校验。
+    缺 Read → error（SPEC §5.5 fail loud 前移 compile——render 期子 agent 必须 Read md body）。
+    """
+    if not agent_node.prompt:
+        return
+    if not _SUBAGENTS_ROOT_REF_RE.search(agent_node.prompt):
+        return
+    if agent_node.tools is None:
+        return  # 全开（默认），含 Read
+    # 大小写无关匹配：opencode 工具名小写（``read``），claude 工具名首字母大写（``Read``）。
+    # 三壳共用契约（SPEC §5.5）：任一 host 的 Read 工具名形态都接受。
+    tools_lower = [t.lower() for t in agent_node.tools]
+    if "read" not in tools_lower:
+        result.add_error(
+            f"{location} 引用 {{{{ subagents_root }}}}（point-to-file 子 agent 自读 md），"
+            f"但其 tools 白名单 {agent_node.tools!r} 缺 'Read'（大小写无关；SPEC §5.5："
+            f"host 通用类型须含 Read——opencode 为 read，claude 为 Read）。"
+        )
+
+
+
 
 
 def _check_foreach_source(wf: Workflow, result: ValidationResult) -> None:

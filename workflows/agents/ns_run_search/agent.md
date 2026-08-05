@@ -1,5 +1,5 @@
 ---
-description: nas-supernet 搜索执行 agent（folder-agent）。运行上游 ns_search_pipeline 生成的 run_search_supernet.sh——cd $ORCA_ARTIFACTS_DIR → nohup bash ... & detach + 轮询进程到结束（nohup 强化脱离 controlling terminal；detach+poll 在 Git Bash/MSYS 兼容）。self-heal：报错按「编辑白名单」用 edit 修 + 重跑，max_retries=3，超限 fail loud 绝不带错下传。权威产物 = $ORCA_ARTIFACTS_DIR/search_results.jsonl（ns_select 下游消费），行数 ≥1 才算成功。触碰搜索/evaluator 逻辑类目 → 重触 project-fidelity-verifier（read+embed 协议）。读 Pareto/搜索结果写软判断 assessment。output_schema 双层强制单行 JSON。
+description: nas-supernet 搜索执行 agent（folder-agent）。运行上游 ns_search_pipeline 生成的 run_search_supernet.sh——cd $ORCA_ARTIFACTS_DIR → nohup bash ... & detach + 轮询进程到结束（nohup 强化脱离 controlling terminal；detach+poll 在 Git Bash/MSYS 兼容）。self-heal：报错按「编辑白名单」用 edit 修 + 重跑，max_retries=3，超限 fail loud 绝不带错下传。权威产物 = $ORCA_ARTIFACTS_DIR/search_results.jsonl（ns_select 下游消费），行数 ≥1 才算成功。触碰搜索/evaluator 逻辑类目 → 重触 project-fidelity-verifier（point-to-file 协议）。读 Pareto/搜索结果写软判断 assessment。output_schema 双层强制单行 JSON。
 tools: [bash, read, edit, grep, glob, task]
 ---
 # ns_run_search
@@ -44,8 +44,8 @@ tools: [bash, read, edit, grep, glob, task]
 
 - `$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本 run 的 artifacts 目录，上游
   ns_search_pipeline 落脚本处，跨节点共享；`search_results.jsonl` 权威产物落此处。
-- `$HOME/.orca/nas-supernet/subagents/project-fidelity-verifier.md` = fidelity-verifier subagent
-  body（read+embed 协议，Step 2.5）。
+- `{{ subagents_root }}/project-fidelity-verifier.md` = fidelity-verifier subagent body
+  （point-to-file 协议，Step 2.5；render 期 inline 为绝对路径，cwd 无关）。
 
 ## Step 0 ── 行为痕迹 marker 文件（self-heal 过程中维护）
 
@@ -124,21 +124,23 @@ fi
 > 搜索是真长任务。`wait` 必须等到子进程真正退出，不许凭「日志看起来在跑」提前返回。每次 `wait`
 > 后**先存退出码**（`SEARCH_RC`）再判断，不许丢弃。
 
-### Step 2.5 ── 重触 project-fidelity-verifier（read+embed 协议，按需）
+### Step 2.5 ── 重触 project-fidelity-verifier（point-to-file 协议，按需）
 
 当 Step 2 的 self-heal 触碰**搜索/评估逻辑**类目时**主动**跑这步（审计字段
-`fidelity_retriggered` 自报；fresh subagent 凭重 embed 的 report 复核）：
+`fidelity_retriggered` 自报；fresh subagent 自读 md body 复核）：
 
-1. `bash` 取 subagent body：
-   ```bash
-   cat "$HOME/.orca/nas-supernet/subagents/project-fidelity-verifier.md"
+1. 调 host 内置通用 subagent（point-to-file 协议，subagent_type 填 host 内置通用类型如
+   `general`；首轮 prompt 末尾按多轮续轮规则追加本轮 inputs）：
    ```
-   若文件不存在 → **不要**假装跑了；在 `.ns_run_search_assessment.txt` 末尾追加
+   Task(subagent_type=<host 内置通用类型>,
+        prompt="先完整 Read {{ subagents_root }}/project-fidelity-verifier.md，严格按其 Procedure 执行本轮任务。
+                本轮 inputs：<task: re-verify whether my edits to evaluator.py / arch_codec.py / search_supernet.py drift from original project search semantics> + <my latest healed diff context> + Fixed:[<healed file list this round>] + Context: ns_run_search self-heal。
+                按 md 规定的格式 return。
+                **report 首行**必须照原样回显你 Read 到的 md frontmatter 里的 sentinel 字段（格式见 md 顶部；不要猜，必须来自你 Read 的文件）。")
+   ```
+   `Read` 失败（文件不存在）→ **不要**假装跑了；在 `.ns_run_search_assessment.txt` 末尾追加
    `" | fidelity-verifier subagent body not deployed; cannot retrigger"`，跳过本步。
-2. 调 host 内置通用 subagent（read+embed 协议，subagent_type 填 host 内置通用类型如
-   `general`）：
-   `Task(subagent_type=general, prompt=<body> + <task: re-verify whether my edits to evaluator.py / arch_codec.py / search_supernet.py drift from original project search semantics> + <my latest healed diff context> + Fixed:[<healed file list this round>] + Context: ns_run_search self-heal)`
-3. 把 verifier 结论（pass / fail + 理由）合并写进 `.ns_run_search_assessment.txt`；
+2. 把 verifier 结论（pass / fail + 理由）合并写进 `.ns_run_search_assessment.txt`；
    `printf "true" > .ns_run_search_fidelity.flag`（**无论 verifier pass/fail**——重触了就标记 true，
    fail 则在 assessment 里如实说明）。
 

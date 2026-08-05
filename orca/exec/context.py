@@ -63,6 +63,13 @@ class RunContext:
     # 原语（web 端从 tape 重放 dialog_message 构造 ctx 时用）。当前 CLI 路径保持空 tuple，
     # 不构成第二真相源（反 AgentHarness 多 store 漂移，本项目顶层铁律）。
     dialog_history: tuple[dict[str, Any], ...] = ()
+    # point-to-file subagent 协议（SPEC subagent-point-to-file-design-draft §3.2/§4）：
+    # workflow 子 agent md body 所在目录的**绝对路径字符串**，由 orchestrator 在 run 期经
+    # ``workflows_root / "subagents" / wf.name`` 解析后透传到 render 层。agent.md body 用
+    # ``{{ subagents_root }}/<name>.md`` 引用，render 期被替换为绝对路径——shell 无关、cwd 无关。
+    # 默认空串 = 该 workflow 无 subagents 目录（如 quant-*）；agent.md 不应在此场景引用
+    # ``{{ subagents_root }}``，render 层对「引用了但值为空串」fail loud（SPEC §7 末）。
+    subagents_root: str = ""
 
     def with_locals(self, locals_: dict[str, Any]) -> RunContext:
         """派生带 locals 的新 frozen 实例（foreach body 用，注入 item / _index）。

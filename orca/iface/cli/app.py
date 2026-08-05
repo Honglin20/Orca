@@ -1062,6 +1062,8 @@ class OrcaApp(App):
         handler = DialogHandler(get_profile("claude"), self.bus)
         # 最小 ctx：dialog handler 仅用 run_id（spawn env overlay 路由用）。outputs/inputs 不参与
         # dialog 逻辑（agent_output 已显式传入），故空 dict 足够。
+        # subagents_root 保持空串：dialog 是 post-run Q&A，不渲染原 agent.md body
+        # （DialogHandler spawn 的是通用追问 agent，不引 {{ subagents_root }}）。
         ctx = RunContext(
             inputs=self._inputs, outputs={}, run_id=self.run_id, task=self._task,
         )

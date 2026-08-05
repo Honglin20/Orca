@@ -241,13 +241,39 @@ def _coerce_tried(
     return coerced or None
 
 
-def _build_ctx(wf: Workflow, outputs_acc: dict[str, Any], inputs: dict[str, Any],
-               run_id: str) -> RunContext:
+def _build_ctx(
+    wf: Workflow,
+    outputs_acc: dict[str, Any],
+    inputs: dict[str, Any],
+    run_id: str,
+    *,
+    workflows_root: Path | None = None,
+) -> RunContext:
+    """in-session 路径的 RunContext 构造（mirror orchestrator._make_ctx 的子集）。
+
+    point-to-file 协议（SPEC §3.2）：``workflows_root`` 由 ``advance_step`` 经
+    ``yaml_path`` 父目录透传；解析 ``workflows_root / "subagents" / wf.name`` 为存在
+    目录 → 返绝对路径字符串，否则空串（无 subagents 的 workflow 走空串分支，§3.3）。
+    """
     from orca.exec.context import RunContext
+    from orca.run.orchestrator import _compute_subagents_root
 
     return RunContext(
         inputs=inputs, outputs=outputs_acc, run_id=run_id, task=None,
+        subagents_root=_compute_subagents_root(workflows_root, wf.name),
     )
+
+
+def _workflows_root_from_yaml(yaml_path: str | None) -> Path | None:
+    """yaml_path → workflows_root 解析（point-to-file 协议 SPEC §3.2 in-session 透传）。
+
+    yaml_path 是 workflow yaml 的绝对路径；workflows_root = yaml 所在目录（与 orchestrator
+    ``__init__`` 同源 ``yaml_path.parent``）。None / 空串 → None（向后兼容：daemon 未传
+    yaml_path 的旧 caller，subagents_root 落空串，render 层 fail loud 兜底）。
+    """
+    if not yaml_path:
+        return None
+    return Path(yaml_path).resolve().parent
 
 
 def _parse_output(raw: str, node: Any) -> Any:
@@ -514,6 +540,7 @@ def _recover_step_result(
     tape: Tape, wf: Workflow, exc: RecoverableInSessionError, pending: str,
     state: Any, inputs: dict[str, Any], rid: str,
     prompts_dir: Path | None, project_root: Path | None, no_memory: bool,
+    workflows_root: Path | None = None,
 ) -> StepResult:
     """recoverable 自恢复（SPEC 2026-07-23 §4.2 + 2026-08-04 §4.3/§6 含本次 + 升格 kind）。
 
@@ -574,7 +601,8 @@ def _recover_step_result(
     # 未升格 → 重 arm：重渲染 prompt（与正常 next 同形交付，compact/inline 由 prompts_dir 决定）。
     retry_budget = _RECOVERABLE_ESCALATE_AT - this_attempt
     failure_history = _render_failure_history(records_inclusive, this_attempt, retry_budget)
-    ctx = _build_ctx(wf, _outputs_acc_from_state(state), inputs, rid)
+    ctx = _build_ctx(wf, _outputs_acc_from_state(state), inputs, rid,
+                     workflows_root=workflows_root)
     prompt, prompt_file, rroot = _deliver(
         nodes[pending], ctx, prompts_dir,
         wf=wf, project_root=project_root, no_memory=no_memory,
@@ -670,7 +698,8 @@ def advance_step(
         t, d = make_workflow_started(rid, wf, inputs, yaml_path=yaml_path, host_session=host_session)
         emits.append(Emit(t, d))
         emits.append(Emit("node_started", {"node": entry}, node=entry))
-        ctx = _build_ctx(wf, {}, inputs, rid)
+        ctx = _build_ctx(wf, {}, inputs, rid,
+                         workflows_root=_workflows_root_from_yaml(yaml_path))
         prompt, prompt_file, rroot = _deliver(
             nodes[entry], ctx, prompts_dir,
             wf=wf, project_root=project_root, no_memory=no_memory,
@@ -696,6 +725,7 @@ def advance_step(
             return _recover_step_result(
                 tape, wf, e, pending, state, inputs, rid,
                 prompts_dir, project_root, no_memory,
+                workflows_root=_workflows_root_from_yaml(yaml_path),
             )
         emits.append(Emit("node_completed", {"output": parsed}, node=pending))
         # 用「历史 outputs + 本次 output」求下一 node（同 _next_node_for_resume 的入参形态）。
@@ -711,7 +741,8 @@ def advance_step(
         _check_agent_node(nodes.get(nxt), nxt)
         emits.append(Emit("route_taken", {"from": pending, "to": nxt}))
         emits.append(Emit("node_started", {"node": nxt}, node=nxt))
-        ctx = _build_ctx(wf, outputs_acc, inputs, rid)
+        ctx = _build_ctx(wf, outputs_acc, inputs, rid,
+                         workflows_root=_workflows_root_from_yaml(yaml_path))
         prompt, prompt_file, rroot = _deliver(
             nodes[nxt], ctx, prompts_dir,
             wf=wf, project_root=project_root, no_memory=no_memory,
@@ -737,7 +768,8 @@ def advance_step(
         )
         if count > 0 else None
     )
-    ctx = _build_ctx(wf, _outputs_acc_from_state(state), inputs, rid)
+    ctx = _build_ctx(wf, _outputs_acc_from_state(state), inputs, rid,
+                     workflows_root=_workflows_root_from_yaml(yaml_path))
     prompt, prompt_file, rroot = _deliver(
         nodes[pending], ctx, prompts_dir,
         wf=wf, project_root=project_root, no_memory=no_memory,

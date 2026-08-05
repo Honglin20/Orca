@@ -1,5 +1,5 @@
 ---
-description: nas-supernet 重训 agent（folder-agent）。读 ns_select 选定 arch + AGENTS.md scaffold + supernet_summary.md + project_manifest.md → 生成 retrain.py / finetune.py + run_retrain.sh → project-fidelity-verifier 复查（read+embed 协议，cat $HOME/.orca/nas-supernet/subagents/...）→ cd $ORCA_ARTIFACTS_DIR nohup detach + 轮询执行（nohup 强化脱离 controlling terminal；detach+poll 在 Git Bash/MSYS 兼容）→ self-heal max_retries=3（仅改本次生成的脚本；改训练逻辑类目 → 重触 fidelity-verifier）→ 读 final test metric 写软判断 assessment。禁碰 supernet.py / project_manifest.md / supernet_summary.md / AGENTS.md / user_project_root。output_schema 双层强制单行 JSON。
+description: nas-supernet 重训 agent（folder-agent）。读 ns_select 选定 arch + AGENTS.md scaffold + supernet_summary.md + project_manifest.md → 生成 retrain.py / finetune.py + run_retrain.sh → project-fidelity-verifier 复查（point-to-file 协议，Read {{ subagents_root }}/project-fidelity-verifier.md）→ cd $ORCA_ARTIFACTS_DIR nohup detach + 轮询执行（nohup 强化脱离 controlling terminal；detach+poll 在 Git Bash/MSYS 兼容）→ self-heal max_retries=3（仅改本次生成的脚本；改训练逻辑类目 → 重触 fidelity-verifier）→ 读 final test metric 写软判断 assessment。禁碰 supernet.py / project_manifest.md / supernet_summary.md / AGENTS.md / user_project_root。output_schema 双层强制单行 JSON。
 tools: [bash, read, write, edit, grep, glob, task]
 ---
 # ns_retrain
@@ -45,8 +45,8 @@ tools: [bash, read, write, edit, grep, glob, task]
 ## 资源锚点（cwd 无关）
 
 - `$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本 run 的 artifacts 目录。
-- `$HOME/.orca/nas-supernet/subagents/project-fidelity-verifier.md` = fidelity-verifier subagent
-  body（read+embed 协议，Step 3）。
+- `{{ subagents_root }}/project-fidelity-verifier.md` = fidelity-verifier subagent body
+  （point-to-file 协议，Step 3；render 期 inline 为绝对路径，cwd 无关）。
 - `{{ ns_select.output.selected_arch }}` = 上游选定架构（Jinja 渲染，dict）。
 
 ## Step 0 ── 行为痕迹 marker 文件（生成 / self-heal 过程中维护）
@@ -105,20 +105,23 @@ grep -E 'supernet_ckpt_path:' search_config.yaml 2>/dev/null || true
   API（`build_supernet` / `extract_subnet` 等）调。若 manifest 未暴露所需 API → fail loud（铁律 5），
   不要绕路改 supernet.py。
 
-## Step 3 ── fidelity-verifier 复查（read+embed 协议，必跑）
+## Step 3 ── fidelity-verifier 复查（point-to-file 协议，必跑）
 
 对**首次生成**的 retrain.py / finetune.py 跑一次 fidelity 复查（首次触发也写 fidelity.flag=true）：
 
-1. `bash` 取 subagent body：
-   ```bash
-   cat "$HOME/.orca/nas-supernet/subagents/project-fidelity-verifier.md"
+1. 调 host 内置通用 subagent（point-to-file 协议，subagent_type 填 host 内置通用类型；
+   首轮 prompt）：
    ```
-   若文件不存在 → **不要**假装跑了；在 `.ns_retrain_assessment.txt` 追加
+   Task(subagent_type=<host 内置通用类型>,
+        prompt="先完整 Read {{ subagents_root }}/project-fidelity-verifier.md，严格按其 Procedure 执行本轮任务。
+                本轮 inputs：<task: verify whether my generated retrain.py / finetune.py faithfully reflect original project training semantics (loss / optimizer / sampling / KD / data pipeline), given AGENTS.md scaffold + supernet_summary.md + project_manifest.md> + <my generated scripts full content> + Context: ns_retrain Step 3 first-time review。
+                按 md 规定的格式 return。
+                **report 首行**必须照原样回显你 Read 到的 md frontmatter 里的 sentinel 字段（格式见 md 顶部；不要猜，必须来自你 Read 的文件）。")
+   ```
+   `Read` 失败（文件不存在）→ **不要**假装跑了；在 `.ns_retrain_assessment.txt` 追加
    `" | fidelity-verifier subagent body not deployed; cannot review"`，跳过本步（不阻塞执行，
    但 tape 留痕）。
-2. 调 host 内置通用 subagent（read+embed 协议，subagent_type 填 host 内置通用类型如 `general`）：
-   `Task(subagent_type=general, prompt=<body> + <task: verify whether my generated retrain.py / finetune.py faithfully reflect original project training semantics (loss / optimizer / sampling / KD / data pipeline), given AGENTS.md scaffold + supernet_summary.md + project_manifest.md> + <my generated scripts full content> + Context: ns_retrain Step 3 first-time review)`
-3. 把 verifier 结论（pass / fail + 理由）写进 `.ns_retrain_assessment.txt`；
+2. 把 verifier 结论（pass / fail + 理由）写进 `.ns_retrain_assessment.txt`；
    `printf "true" > .ns_retrain_fidelity.flag`（无论 pass/fail——跑过就标 true，fail 则据 verifier
    建议在 Step 2 重新生成脚本，再跑一次本步）。
 
@@ -155,15 +158,22 @@ grep -E 'supernet_ckpt_path:' search_config.yaml 2>/dev/null || true
 > retrain 是真长任务（分钟～小时级）。`wait` 必须等到子进程真正退出。每次 `wait` 后**先存退出码**
 > （`RETRAIN_RC`）再判断，不许丢弃。
 
-### Step 4.5 ── 重触 project-fidelity-verifier（read+embed 协议，按需）
+### Step 4.5 ── 重触 project-fidelity-verifier（point-to-file 协议，按需）
 
 当 Step 4 的 self-heal 改动**训练逻辑**类目时**主动**跑这步（审计字段
-`fidelity_retriggered` 自报；fresh subagent 凭重 embed 的 report 复核）：
+`fidelity_retriggered` 自报；fresh subagent 自读 md body 复核）：
 
-1. `cat "$HOME/.orca/nas-supernet/subagents/project-fidelity-verifier.md"` 取 body（缺则按 Step 3
-   同款诚实声明）。
-2. `Task(subagent_type=general, prompt=<body> + <task: re-verify whether my self-heal edits to retrain.py / finetune.py drift from original project training semantics> + <my latest healed diff context> + <previous Step 3 verifier report, if any> + Fixed:[<healed file list this round>] + Context: ns_retrain Step 4.5 self-heal retrigger>)`
-3. 把 verifier 结论合并写进 `.ns_retrain_assessment.txt`；`printf "true" > .ns_retrain_fidelity.flag`。
+1. 按 point-to-file 协议（多轮续轮规则：首轮 prompt 末尾追加本轮 inputs）调
+   `project-fidelity-verifier`：
+   ```
+   Task(subagent_type=<host 内置通用类型>,
+        prompt="先完整 Read {{ subagents_root }}/project-fidelity-verifier.md，严格按其 Procedure 执行本轮任务。
+                本轮 inputs：<task: re-verify whether my self-heal edits to retrain.py / finetune.py drift from original project training semantics> + <my latest healed diff context> + <previous Step 3 verifier report, if any> + Fixed:[<healed file list this round>] + Context: ns_retrain Step 4.5 self-heal retrigger>。
+                按 md 规定的格式 return。
+                **report 首行**必须照原样回显你 Read 到的 md frontmatter 里的 sentinel 字段（格式见 md 顶部；不要猜，必须来自你 Read 的文件）。")
+   ```
+   `Read` 失败（文件不存在）→ 按 Step 3 同款诚实声明。
+2. 把 verifier 结论合并写进 `.ns_retrain_assessment.txt`；`printf "true" > .ns_retrain_fidelity.flag`。
 
 ## Step 5 ── 自校验 JSON（你的唯一最终回复）
 
