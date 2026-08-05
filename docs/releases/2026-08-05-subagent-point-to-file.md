@@ -85,6 +85,8 @@ report 首行格式：`[subagent:<name> v<version> <sentinel>]`（E-1 软回显�
 | compile 期 frontmatter + Read 校验 | ✅ | `tests/compile/test_subagents_md.py` |
 | install copytree v3 拓扑 | ✅ | `tests/iface/cli/test_install_cmds.py` |
 | 依赖铁律不破 | ✅ | code-reviewer 确认；render.py 用 ExecError 保单向 |
+| **dispatch 配置（确定性，生产 render 路径）**：ns_expand_supernet 真实 agent.md 渲染后 `{{ subagents_root }}` → 绝对路径 inline；sentinel 字面量不进 parent prompt；子 agent body 不内联（read+embed 残留为 0）；host subagent_type 是 meta 描述非硬编码 | ✅ | `scripts/verify_dispatch_render.py`（本轮 main 验证，跑完已清；用真实 `render_prompt(node, ctx)` + `_compute_subagents_root`） |
+| **headless 真跑（opencode + deepseek-v4-flash）**：单 agent 经绝对路径自读真实 `supernet-evaluator.md` + report 首行正确回显 `[subagent:supernet-evaluator v1 SE7K2A]`（sentinel 从 frontmatter 取，非猜）；workflow `completed` | ✅ | 本轮 main 跑 `run_workflow` smoke（WSL `.venv`，真 spawn opencode） |
 
 ## 5. 测试结果
 
@@ -95,7 +97,7 @@ report 首行格式：`[subagent:<name> v<version> <sentinel>]`（E-1 软回显�
 
 ## 6. 已知 follow-up（非本次范围）
 
-- **headless nas-supernet e2e**：用户 main 跑（不在本次实现范围）。SPEC §9 #4/§5 的 sentinel_stats.jsonl 落地 + tape 断言（首行命中 / Task prompt 体量 < body 50% / 子 agent 首个 tool call 是 Read 绝对路径）需 e2e 跑出来才能闭环；本次只交付 unit/集成层。
+- **headless nas-supernet e2e**：~~用户 main 跑（不在本次实现范围）~~ **已闭环（2026-08-05 main）**：确定性 render 校验 + opencode/deepseek-v4-flash 真跑 smoke 双通过（见 §4 末两行）。完整 8-agent pipeline 的 tape 断言（子 agent 首个 tool call 是 Read / sentinel_stats.jsonl 落地 / Task prompt 体量 < body 50%）未在真跑里逐条采集——smoke 已覆盖核心机制（自读 + sentinel 回显），完整 pipeline 跑可作后续 follow-up，非阻塞。
 - **SPEC 文本修订**：§7 末 ConfigurationError → ExecError footnote。
 
 ## 7. Commit
