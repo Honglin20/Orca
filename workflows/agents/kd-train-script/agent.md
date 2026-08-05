@@ -151,8 +151,7 @@ done
    - **ID 范围防御**：resume 报告里的 ID 必须是上轮 stash 的子集；超出 → fail loud（hallucinate）。
    - **同一 ID 连续两轮 `STATUS: open`**（reaffirm）→ fail loud + emit ask-user 哨兵（报「ID
      反复 reaffirm，agent 改不动」），不盲目耗满 MAX_TURNS。
-   - **Unresolved 项**（verifier 缺 basis）→ 不擅自改，fail loud + emit ask-user 哨兵（与
-     「严禁造假、缺数据问用户」铁律一致）。
+   - **Unresolved 项**（verifier 缺 basis）→ 不擅自改，fail loud + emit ask-user 哨兵。
    - **每轮 apply fixes 后必须重跑 L1 py_compile + L3 fidelity_check**：fix 改坏了确定性层
      → fail loud + emit ask-user 哨兵（回滚或人工），不继续盲目改。
    - 达 MAX_TURNS 仍未 all-pass → fail loud + stderr 报未闭环保留的 IDs + 上轮 findings + 退非零，

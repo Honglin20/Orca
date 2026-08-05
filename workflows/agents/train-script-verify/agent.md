@@ -201,7 +201,7 @@ verifier 产出判定（任一非 pass 立即 fail loud 退非零）：
 - ``all-pass`` → 记下 Accepted Deviations IDs 列表（带进 step 4 spawn prompt）。
 
 > Runtime Fidelity ``not verified`` 在 KD 语境下属预期（用户 train.py 几乎不可 import），
-> 不算 fail——B1 主要价值在 Static Fidelity。
+> 不算 fail——本审计主要价值在 Static Fidelity。
 
 ## step 4 执行：workflow-verifier 子 agent（机械层 4 叶子并行 review，report-only）
 
