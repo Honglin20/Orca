@@ -1,10 +1,15 @@
-"""Unit tests for ns_visualize chart script helpers.
+"""Unit tests for nas-supernet chart script helpers.
 
 Tests the NAS-aware discovery layer (_common.py) and individual chart script helpers
 against the REAL NAS data convention:
   - search_config.yaml objs is a list of strings (``["acc", "latency"]``)
   - search_results.jsonl records have nested ``objs`` dict
   - all stored objectives are smaller-is-better (accuracy is negated)
+
+Scripts live in the producing agents' resources (no separate visualize agent):
+  - ns_run_search/scripts/: _common.py / pareto.py / search_table.py / latency_dist.py
+  - ns_retrain/scripts/: _common.py / metrics_bar.py / compare_table.py
+Both ``_common.py`` copies are identical; this test imports from either.
 """
 
 from __future__ import annotations
@@ -15,9 +20,11 @@ from pathlib import Path
 
 import pytest
 
-# Add scripts dir to path so we can import _common.
-_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "workflows" / "agents" / "ns_visualize" / "scripts"
-sys.path.insert(0, str(_SCRIPTS_DIR))
+# Add both chart-script dirs to path (duplicate _common is identical in either).
+_SEARCH_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "workflows" / "agents" / "ns_run_search" / "scripts"
+_RETRAIN_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "workflows" / "agents" / "ns_retrain" / "scripts"
+sys.path.insert(0, str(_RETRAIN_SCRIPTS_DIR))
+sys.path.insert(0, str(_SEARCH_SCRIPTS_DIR))
 
 from _common import (  # noqa: E402
     CHART_MARKER,
@@ -34,6 +41,19 @@ from _common import (  # noqa: E402
 )
 from compare_table import _parse_si  # noqa: E402
 from latency_dist import _histogram  # noqa: E402
+
+# import 完成后立即清理全局态，防污染同 session 的其他测试：
+# 1. 移除 sys.path 里插入的脚本目录；
+# 2. 弹出 ``_common`` / ``compare_table`` / ``latency_dist`` 模块缓存——这三个是同名
+#    跨目录模块（``_quant_scripts/_common`` / ``_struct_scripts/_device`` 等），本文件
+#    顶层的 `from _common import ...` 会把 chart 版 `_common` 注册进 sys.modules，
+#    不清会截胡后续测试对 `_quant_scripts/_common` 的解析（viz_audit P2-5 全崩）。
+#    模块级已绑定的函数引用不受影响（bound names 与 sys.modules 解耦）。
+sys.path.remove(str(_SEARCH_SCRIPTS_DIR))
+sys.path.remove(str(_RETRAIN_SCRIPTS_DIR))
+sys.modules.pop("_common", None)
+sys.modules.pop("compare_table", None)
+sys.modules.pop("latency_dist", None)
 
 
 # ---------------------------------------------------------------------------

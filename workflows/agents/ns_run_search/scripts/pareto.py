@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""pareto.py -- Pareto front scatter (latency vs metric) for ns_visualize.
+"""pareto.py -- Pareto front scatter (latency vs metric) for nas-supernet.
 
 Reads search_results.jsonl + selected-arch coords (from ns_select output via CLI args).
 Pushes a ``pareto`` chart: all candidates as points, frontend computes + highlights

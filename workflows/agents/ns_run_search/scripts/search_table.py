@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""search_table.py -- Search results table for ns_visualize.
+"""search_table.py -- Search results table for nas-supernet.
 
 Reads search_results.jsonl and pushes a ``table`` chart: one row per candidate with
 arch-config digest / latency / metric / Pareto flag. Columns are ordered for

@@ -1,5 +1,5 @@
 ---
-description: nas-supernet 搜索执行 agent（folder-agent）。运行上游 ns_search_pipeline 生成的 run_search_supernet.sh——cd $ORCA_ARTIFACTS_DIR → nohup detach + 跨多次短调用轮询（避免单调用撞 bash 工具超时；Git Bash/MSYS 兼容）。self-heal：报错按「编辑白名单」用 edit 修 + 重跑，max_retries=3，超限 fail loud 绝不带错下传。权威产物 = $ORCA_ARTIFACTS_DIR/search_results.jsonl（ns_select 下游消费），行数 ≥1 才算成功。触碰搜索/evaluator 逻辑类目 → 重触 project-fidelity-verifier（point-to-file 协议）。读 Pareto/搜索结果写软判断 assessment。output_schema 双层强制单行 JSON。
+description: nas-supernet 搜索执行 agent（folder-agent）。运行上游 ns_search_pipeline 生成的 run_search_supernet.sh——cd $ORCA_ARTIFACTS_DIR → nohup detach + 跨多次短调用轮询（避免单调用撞 bash 工具超时；Git Bash/MSYS 兼容）。self-heal：报错按「编辑白名单」用 edit 修 + 重跑，max_retries=3，超限 fail loud 绝不带错下传。权威产物 = $ORCA_ARTIFACTS_DIR/search_results.jsonl（ns_select 下游消费），行数 ≥1 才算成功。触碰搜索/evaluator 逻辑类目 → 重触 project-fidelity-verifier（point-to-file 协议）。读 Pareto/搜索结果写软判断 assessment。成功后跑确定性 chart 脚本推搜索 3 图（pareto/search_table/latency_dist，`|| true` 不阻塞）。output_schema 双层强制单行 JSON。
 tools: [bash, read, edit, grep, glob, task]
 ---
 # ns_run_search
@@ -222,6 +222,20 @@ fi
 size / best metric / latency 分布），agent 自判一句话写进 `.ns_run_search_assessment.txt`（例：
 "640 candidates, Pareto front size 12, max-acc 0.91 @ latency 4.2ms, target 5ms achievable"）。
 **不是**闸门——闸门是 RC=0 + jsonl ≥1 行。
+
+### Step 2.7 ── 推送搜索图表（成功后；确定性脚本，`|| true` 不阻塞）
+
+搜索成功后、进 Step 3 前，跑 3 个 chart 脚本推帕累托 / 搜索表 / latency 分布到前端
+（**边搜完边可见，不用等 retrain/可视化收尾**）。脚本自带 fail-soft：artifact 缺失 →
+skip + stderr，不崩；stdout/stderr 全丢弃——最终回复必须只含 Step 3 python 的输出。
+（env 按宿主 prompt 指令先 source，chart 推送依赖 ORCA_CHART_SOCK。）
+
+```bash
+cd "$ORCA_ARTIFACTS_DIR" || exit 1
+python3 "$ORCA_AGENT_RESOURCES/scripts/pareto.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" >/dev/null 2>&1 || true
+python3 "$ORCA_AGENT_RESOURCES/scripts/search_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" >/dev/null 2>&1 || true
+python3 "$ORCA_AGENT_RESOURCES/scripts/latency_dist.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" >/dev/null 2>&1 || true
+```
 
 ## Step 3 ── 自校验 JSON（你的唯一最终回复）
 

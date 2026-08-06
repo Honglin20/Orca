@@ -4,26 +4,60 @@
 
 ---
 
-## 当前：deferred-training-cron 迁移完成（ns_retrain + kd-nas train-teacher），留真机 E2E 给后续 task
+## 当前：nas-supernet 可视化分散化——已完成（删 ns_visualize，边训练边推前端）
 
-**任务**：SPEC [`deferred-training-cron-design-draft.md`](../specs/deferred-training-cron-design-draft.md)
-§5 迁移——把 `ns_run_train` 原型（commit `e8f7700`）的 deferred-training-cron 模式迁移到其它
-training agent。
+**任务**：用户要求可视化不放最后（原 ns_visualize 是全链跑完才出），不要单独 agent，
+固化进前面节点确定性脚本，**边训练边推送到前端**。
 
-**状态**：**ns_retrain + train-teacher 迁移完成 + `tars validate` 两 wf 0/0 + code-reviewer 一轮闭环**。
-distill 评估后**不**迁移（迭代节点跨 run 状态依赖 + decide 同步读 distill output，硬上会跨 4 节点
-耦合改造，按 SPEC §5 留用户定夺）。
+**状态**：**完成**：`live_loss_watcher.py`（ns_run_train/ns_retrain 镜像）由 launch.sh
+wrapper 内伴生启动，解析生成契约进度行 `epoch N/T loss V` 每新点推全量 loss 曲线（同
+title 前端实时刷新）；done-marker 驱动退出 + stale 防误杀 + fail-soft 绝不碰训练。其余
+5 图分散：搜索 3 图（pareto/search_table/latency_dist）→ ns_run_search Step 2.7；
+对比 2 图（metrics_bar/compare_table）→ ns_retrain Step 3.5。yaml 8→7 agent（retrain
+executed → $end）+ 删 ns_visualize 目录。chart daemon TTL 6h→72h。验证：`tars validate`
+全 workflow 0/0 + compile/workflows 717 passed + in-session chart 84 passed。测试隔离
+修复：新测试 pop sys.modules 同名 `_common` + monkeypatch.chdir。详见
+`docs/releases/2026-08-06-nas-supernet-live-viz.md`。
 
-**待办**（留用户/后续 task）：
-- [ ] **真机 E2E**（原型 SPEC §4 + 迁移段「测试覆盖」列的三场景）：造小训练 fixture，跑
-      `ns_run_train` / `ns_retrain` / `train-teacher`，断言 warmup → 估时 → cron 注册 → park →
-      （可选）cron 触发后 reuse 接力；warmup fail → failed terminal → workflow_failed。
-- [ ] **distill 是否走跨节点状态耦合改造**（用户定夺）：加持久 round in-progress marker + gen_student
-      跨 run soft-skip + decide deferred ledger row 处理。
+**待办**（留用户定夺）：
+- [ ] 真机 E2E：跑一次 nas-supernet（或 mock 训练），验证训练中前端实时刷新 loss 曲线 +
+      搜索完 3 图 + retrain 完成 2 图全链路。
+- [ ] kd-nas train-teacher 迁移到 in-session CRON 模型（仍走旧 deferred-training-cron）。
+- [ ] 可选：>72h 训练需调大 chart daemon TTL（`--ttl` 参数已存在，bootstrap 未暴露）。
 
 **必读**：
-- release note `docs/releases/2026-08-06-deferred-training-cron.md`（原型 + 迁移段 + distill 评估结论）。
-- SPEC `docs/specs/deferred-training-cron-design-draft.md`（§2 三分支 / §3 改动 / §5 迁移）。
+- release note `docs/releases/2026-08-06-nas-supernet-live-viz.md`。
+- `workflows/agents/ns_run_train/scripts/live_loss_watcher.py`（watcher 契约 + fail-soft）。
+- 参照：`workflows/agents/ns_run_train/scripts/launch.sh`（wrapper 内 watcher 启动）。
+
+---
+
+## 历史：ns_retrain 迁移到 in-session CRON 模型（同 ns_run_train），留 train-teacher 迁移 + 真机验证
+
+**任务**：把 `ns_retrain` 从 deferred-training-cron（detached + 外部 cron + headless 重跑）迁移到
+ns_run_train 的 in-session CRON 模型——节点常驻到重训**真正完成**（rc=0 + 进程退出 + ckpt 有效才认完成，
+ckpt 存在 ≠ 完成），in-session CRON 1~2h 定时自检，未完成更新 `retrain_status.md` + 重注册，完成才产出 JSON。
+
+**状态**：**迁移完成 + code-reviewer 独立洁净审查闭环（0 MUST-FIX + 2 SHOULD-FIX + 6 MINOR 全修）+
+37 项 smoke test 全过 + `tars validate` 0/0 + 残留扫描全清**。改动：agent.md 686→365 行（决策树 +
+尝试预算 + CRON 生命周期 + 生成阶段保留 [3a 生成 retrain.py/finetune.py/run_retrain.sh 只做一次 +
+3b fidelity 复查] + 生成契约新增 [progress line `epoch N/T loss V` + `--epochs` 暴露 + final ckpt
+固定路径]）+ 确定性逻辑固化到 `scripts/` 7 脚本（镜像 ns_run_train 契约）+ yaml（status 去 detached /
+删 terminate_retrain_pending / 4 terminate → 3 全 fail-loud）。审查修的关键项：launch.sh 不再清
+fidelity flag（3b 先于 launch 时序导致成功路径审计失真）、生成落点声明 + 双文件 gate、
+`max_retries_hit` 从 `.retrain_attempt` 推导（≥3 才 true）。
+详见 release note `docs/releases/2026-08-06-ns-retrain-cron-selfcheck.md`。
+
+**待办**（留用户定夺）：
+- [ ] **kd-nas train-teacher 迁移到本模型**——仍走旧 deferred-training-cron（detached + 外部
+      cron + headless 重跑），与本模型不一致。
+- [ ] 真机验证：CRON 工具唤醒 → 检查 → 完成 → `orca next` 提交 → 下游继续的完整闭环
+      （ns_run_train / ns_retrain 同一待办）。
+
+**必读**：
+- release note `docs/releases/2026-08-06-ns-retrain-cron-selfcheck.md`。
+- 新 agent.md `workflows/agents/ns_retrain/agent.md`（决策树 + 生成契约 + CRON 生命周期）。
+- 参照模型 `workflows/agents/ns_run_train/agent.md`（本次迁移的对齐基准）。
 
 ---
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""metrics_bar.py -- Cross-phase metric comparison bar chart for ns_visualize.
+"""metrics_bar.py -- Cross-phase metric comparison bar chart for nas-supernet.
 
 Aggregates the project metric from up to 4 phases:
   1. Supernet eval (best validation metric from training log, if parseable)

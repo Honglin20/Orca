@@ -1,4 +1,4 @@
-"""_common.py -- shared utilities for ns_visualize chart scripts.
+"""_common.py -- shared utilities for nas-supernet chart scripts.
 
 Every chart script imports from here for artifact discovery, metric name/direction
 discovery (no hardcoding), JSONL reading, and a fail-soft render_chart wrapper.
@@ -52,7 +52,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 # Marker file: each chart script appends one JSON line per chart result.
-CHART_MARKER = ".ns_visualize_charts.jsonl"
+CHART_MARKER = ".nas-supernet_charts.jsonl"
 
 # Common latency field paths — includes NAS nested form ``objs.latency``.
 LATENCY_FIELDS: tuple[str, ...] = (

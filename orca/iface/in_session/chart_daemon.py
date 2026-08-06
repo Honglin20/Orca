@@ -52,9 +52,10 @@ from orca.events.tape import Tape, read_last_complete_lines
 
 logger = logging.getLogger(__name__)
 
-# SPEC §3.1 in-session 衔接：守护自退 TTL 兜底（防泄漏）。6h 覆盖任何合理的长跑 workflow；
+# SPEC §3.1 in-session 衔接：守护自退 TTL 兜底（防泄漏）。72h 覆盖天级长训练
+# （nas-supernet ns_run_train / ns_retrain 边训练边推实时 loss 曲线，见 live_loss_watcher）；
 # 真实运行通常由 ``_watch_terminal`` 在终态事件时早退。CLI ``--ttl`` 可覆盖（测试用短值）。
-_DEFAULT_TTL_SECONDS = 6 * 3600
+_DEFAULT_TTL_SECONDS = 72 * 3600
 
 # ``_watch_terminal`` 的 tape 增量 poll 间隔：平衡「终态感知延迟」与「IO 频率」。2s 足够
 # （主 session 调 next 间隔通常 ≥10s；chart 实时性由 socket 直接保证，与此 poll 无关）。
@@ -358,7 +359,7 @@ def main() -> int:
     parser.add_argument("--tape", required=True, help="run 的 tape 文件绝对路径")
     parser.add_argument(
         "--ttl", type=int, default=_DEFAULT_TTL_SECONDS,
-        help=f"守护 TTL 兜底秒数（默认 {_DEFAULT_TTL_SECONDS}s = 6h）",
+        help=f"守护 TTL 兜底秒数（默认 {_DEFAULT_TTL_SECONDS}s = 72h）",
     )
     parser.add_argument("--log-level", default="INFO", help="INFO/DEBUG/WARN/ERROR")
     args = parser.parse_args()

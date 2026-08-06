@@ -114,6 +114,12 @@ Provide real-time training progress via periodic batch-level logging (rank 0 onl
 - **Primary approach (`tqdm`)**: Use `tqdm` progress bars via `disable=not is_main_process()`. For epoch-based training, wrap the batch iterator so each epoch displays a per-batch progress bar. For step-based training without an epoch concept, use a single `tqdm` bar tracking `global_step` up to the total training horizon. Include running metrics (e.g. loss, learning rate) in the bar's `postfix` or `description`.
 - **Fallback approach (`print`)**: If the user's original project environment is not suitable for `tqdm`, use a periodic `print` statement (e.g. `if global_step % args.log_interval == 0:`) instead.
 
+**CRITICAL — machine-parseable progress line (contract, mandatory)**. On top of the human-readable progress above, the generated script **must** print one line per completed progress unit (rank 0 only) in exactly one of these two formats:
+- epoch-based training: `epoch <cur>/<total> loss <value>` — e.g. `epoch 3/10 loss 0.4521`
+- step-based training: `step <cur>/<total> loss <value>` — e.g. `step 1200/6000 loss 0.4521`
+
+where `<cur>` starts at 1, `<total>` is the full training horizon, and `<value>` is the current loss as a plain float. This is the **log contract consumed by downstream `ns_run_train`** (warmup runnability check / per-unit timing / health checks all parse these lines); it must be satisfied verbatim. A `tqdm` bar alone does **not** satisfy the contract — the plain `epoch`/`step` line must be printed to stdout (e.g. via the same gated `print()` that updates the bar, once per epoch/step). Do not print other lines that contain the bare words `epoch`/`step` followed by digits in a different meaning (e.g. "epoch:3/10", "Epoch 3", or a save message like "saved supernet_epoch_0005.pth" — use "checkpoint epoch 5 saved" or a bracketed form instead), so that the downstream regex (`epoch[^0-9]*[0-9]+` / `step[^0-9]*[0-9]+`) cannot misparse. Expose the horizon as `--epochs N` (epoch-based) or `--max_steps N` (step-based) so downstream can read the total from the launcher script.
+
 **CRITICAL: Guard all single-writer side effects with `if is_main_process()` so only rank 0 performs them.** Failure to do so causes race conditions or duplicate outputs across ranks. Operations that require this guard include:
 
 - **Logging**: `print()` statements, `tqdm` output, and any metric reporting
