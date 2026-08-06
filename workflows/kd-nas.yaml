@@ -1,5 +1,5 @@
 name: kd-nas
-description: "通过知识蒸馏（KD）串行迭代搜索更优的轻量化模型结构：每轮派生一个 student → KD 蒸馏 → 实测 latency/accuracy → 决策（达标或预算耗尽即终止）。teacher 用用户默认 lr/epochs 训；全程 metrics 推 web。"
+description: "通过知识蒸馏（KD）串行迭代搜索更优的轻量化模型结构：每轮派生一个 student → KD 蒸馏 → 实测 latency/accuracy → 决策（达标或预算耗尽即终止）。teacher 用用户默认 lr/epochs 训；全程 metrics 推 web。train_teacher 走 deferred training via cron（多天训练解耦）：三分支 Step 0（reuse / resume-pending / fresh-launch）+ warmup 估时 + cron 注册 + park detached。1 terminate（deferred success：train_teacher detached 后 cron 接力重跑）。"
 
 entry: flatten
 
@@ -254,10 +254,12 @@ nodes:
       - to: train_teacher
 
   # ═══════════════════════════════════════════════════════════════
-  # train_teacher（独立节点，从 setup 拆出）：inline flag 调引擎 train_pipeline.py --mode teacher
-  # （用用户默认 lr/epochs + --artifacts_dir per-run）+
-  # teacher_setup 产 cache + metrics_tail 推 loss。幂等：teacher_cache+meta+ckpt 存在 ∧ sha256 匹配 → 跳。
-  # teacher 训练崩 → fail loud（teacher_cache 缺整个循环无意义，不走 catch）。
+  # train_teacher（独立节点，deferred training via cron——多天训练解耦）：三分支 Step 0
+  # （reuse：teacher_cache+meta+ckpt + sha256 匹配 → executed / resume-pending：.train_teacher_pid
+  # 活着 → 重估 + 重 cron → detached / fresh-launch：wrapper 串 train_pipeline --mode teacher +
+  # teacher_setup nohup detach + warmup 测每 epoch 耗时 + 估剩余 T + cron 注册 → detached）。
+  # warmup 失败 → fail loud（teacher_cache 缺整个循环无意义，不走 catch）。
+  # status=detached → terminate_train_teacher_pending（非失败）；executed → gen_student。
   # ═══════════════════════════════════════════════════════════════
   - name: train_teacher
     kind: agent
@@ -266,14 +268,16 @@ nodes:
     agent: train-teacher
     output_schema:
       type: object
-      required: [teacher_cache, teacher_meta, teacher_ckpt, teacher_latency_us, teacher_accuracy, teacher_accuracy_known, viz_status]
+      required: [status, teacher_cache, teacher_meta, teacher_ckpt, teacher_latency_us, teacher_accuracy, teacher_accuracy_known, viz_status]
       properties:
-        teacher_cache: {type: string, description: "teacher_cache.pt 绝对路径（distill --teacher_cache 用）"}
-        teacher_meta: {type: string, description: "teacher_meta.json（含 teacher_model_hash + teacher_ckpt_sha256 + teacher_latency_us 透传）"}
-        teacher_ckpt: {type: string, description: "teacher ckpt（train_pipeline --mode teacher 产出）"}
+        status: {type: string, enum: [executed, failed, detached], description: "executed=teacher_cache+meta+ckpt 产出（含 reuse 既有 cache）；failed=warmup 失败 / 进程死且 cache 缺（→ 路由 terminate_train_teacher_failed → workflow_failed）；detached=训练 wrapper 已 nohup detach + warmup 测过每 epoch 耗时 + cron 已注册定时重跑——节点主动 park，非失败"}
+        teacher_cache: {type: string, description: "teacher_cache.pt 绝对路径；detached / failed 时空串（distill --teacher_cache 用）"}
+        teacher_meta: {type: string, description: "teacher_meta.json 绝对路径；detached / failed 时空串（含 teacher_model_hash + teacher_ckpt_sha256 + teacher_latency_us 透传）"}
+        teacher_ckpt: {type: string, description: "teacher ckpt 绝对路径；detached / failed 时空串（train_pipeline --mode teacher 产出）"}
         teacher_latency_us: {type: number, description: "gen_teacher.output.teacher_latency_us 透传（非自测）"}
-        teacher_accuracy: {type: number, description: "teacher 真实精度（train_pipeline --mode eval 实测；eval 缺/失败=0.0）"}
-        teacher_accuracy_known: {type: boolean, description: "true=eval 命中真值；false=未知（图表/总表标 unknown）"}
+        teacher_accuracy: {type: number, description: "teacher 真实精度（train_pipeline --mode eval 实测；executed 但 eval 缺/失败=0.0；detached / failed 时 0.0）"}
+        teacher_accuracy_known: {type: boolean, description: "true=eval 命中真值；false=未知（图表/总表标 unknown）；detached / failed 时 false"}
+        assessment: {type: string, description: "状态对应摘要：executed=teacher trained / reused / detached 估时 / failed 根因"}
         viz_status:
           type: object
           required: [env_status, charts]
@@ -292,6 +296,15 @@ nodes:
                   pushed: {type: boolean}
                   reason: {type: string}
     routes:
+      # detached → 终态 terminate_train_teacher_pending（**非失败**：训练后台跑着 + cron 已注册）。
+      # cron 到点重跑 workflow → 新 run 的 train_teacher Step 0 三分支按训练状态自动收敛。
+      - when: "train_teacher.output.status == 'detached'"
+        to: terminate_train_teacher_pending
+      # failed → terminate_train_teacher_failed（warmup 失败 / 进程死且 cache 缺 / 参数缺）。
+      # 引擎对 AgentNode 的 output.status 不自动判失败——必须显式路由，否则 failed 仍 workflow_completed。
+      - when: "train_teacher.output.status == 'failed'"
+        to: terminate_train_teacher_failed
+      # executed → 下游 gen_student。
       - to: gen_student
 
   # ═══════════════════════════════════════════════════════════════
@@ -557,6 +570,25 @@ nodes:
       ```
     routes:
       - to: $end
+
+  # ═══════════════════════════════════════════════════════════════
+  # Terminate: teacher training deferred via cron（**非失败**终态）
+  #   train_teacher 选 detached 分支时触达——teacher 训练分钟～小时级，单 agent 节点无法 open
+  #   那么久。本 terminate 用 status=success（Orca TerminateNode 只有 success/failed 两态）+
+  #   reason 文案明示"teacher training deferred，cron 接力重跑"，避免被误判 workflow 失败。
+  #   cron 到点 `orca kd-nas --inputs ...` 重跑 → 新 run 的 train_teacher Step 0 三分支收敛：
+  #   cache 好 → reuse → gen_student；仍在跑 → resume-pending 重估 + 重 cron；进程死且 cache 缺
+  #   → fresh-launch 重启。
+  # ═══════════════════════════════════════════════════════════════
+  - name: terminate_train_teacher_pending
+    kind: terminate
+    status: success
+    reason: "train_teacher detached：teacher 训练 wrapper（train_pipeline --mode teacher + teacher_setup）已 nohup 后台运行 + warmup 已测每 epoch 耗时并估剩余时间 + cron 已注册定时重跑 workflow。非失败——多天训练解耦模式（deferred training via cron）。下次 cron 触发启动新 run 时，train_teacher Step 0 三分支会按训练实际状态自动收敛（reuse teacher_cache / resume-pending 重估 + 重 cron / fresh-launch 重启）。<kd_artifacts_dir>/checkpoints/.train_teacher_pid 有后台进程 PID，<kd_artifacts_dir>/meta/.train_teacher_eta.txt 有估时，<kd_artifacts_dir>/.cron_rerun_train_teacher.sh 是 cron 重跑脚本。"
+
+  - name: terminate_train_teacher_failed
+    kind: terminate
+    status: failed
+    reason: "train_teacher 未能产出 teacher_cache（warmup 失败 / wrapper 退出 rc≠0 / baseline_contract 缺 / teacher_default_lr/epochs 上游没产出）。teacher_cache 缺整个 KD 循环无意义。回看 train_teacher.output.assessment（含 last_error / log tail）与 <kd_artifacts_dir>/runs/teacher/train.log + <kd_artifacts_dir>/meta/teacher_setup.log 定位失败根因。"
 
 outputs:
   result: "{{ finalize.output }}"

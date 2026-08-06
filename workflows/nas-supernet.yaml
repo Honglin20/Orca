@@ -1,5 +1,5 @@
 name: nas-supernet
-description: "NAS supernet 全链流水线：张开超网 → 生成训练脚本 → 生成搜索 pipeline + select_architecture.py → 自愈执行训练/搜索 → 确定性选架构（target_latency 下 max-acc，缺则 Pareto knee）→ retrain 选定子网 → 可视化（帕累托/搜索表/loss 曲线/指标对比/张开前后对比/latency 分布）。8 agent 节点 + 3 terminate（2 fail-loud：model_type 不支持 / select 无候选；1 deferred success：ns_run_train detached 后 cron 接力重跑）。ns_run_train 走 deferred training via cron（多天训练解耦）：三分支 Step 0（reuse / resume-pending / fresh-launch）+ warmup 估时 + cron 注册 + park detached。fidelity-verifier / workflow-verifier / memory-verifier 三层闭环 + 确定性 Bash select + 模块化 auto-run/retrain + self-heal 白名单审计字段（healed_files / fidelity_retriggered）。"
+description: "NAS supernet 全链流水线：张开超网 → 生成训练脚本 → 生成搜索 pipeline + select_architecture.py → 自愈执行训练/搜索 → 确定性选架构（target_latency 下 max-acc，缺则 Pareto knee）→ retrain 选定子网 → 可视化（帕累托/搜索表/loss 曲线/指标对比/张开前后对比/latency 分布）。8 agent 节点 + 5 terminate（3 fail-loud：model_type 不支持 / select 无候选 / retrain 失败；2 deferred success：ns_run_train / ns_retrain detached 后 cron 接力重跑）。ns_run_train + ns_retrain 走 deferred training via cron（多天训练解耦）：三分支 Step 0（reuse / resume-pending / fresh-launch）+ warmup 估时 + cron 注册 + park detached。fidelity-verifier / workflow-verifier / memory-verifier 三层闭环 + 确定性 Bash select + 模块化 auto-run/retrain + self-heal 白名单审计字段（healed_files / fidelity_retriggered）。"
 
 entry: ns_expand_supernet
 
@@ -249,11 +249,14 @@ nodes:
       - to: terminate_select_failed
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # Agent 7: ns_retrain（→ ns_visualize on success）
-  #   读 ns_select 选定 arch + AGENTS.md scaffold + summary + manifest → 生成 retrain.py /
-  #   finetune.py + run_retrain.sh → fidelity-verifier 复查 → self-heal 执行（max_retries=3，
-  #   仅改本次生成的脚本；改训练逻辑→重触 fidelity）→ 读 final test metric 写软判断 assessment。
-  #   成功（status=executed）→ ns_visualize；失败 → terminate_retrain_failed。
+  # Agent 7: ns_retrain（deferred training via cron——多天训练解耦；→ ns_visualize on success）
+  #   Step 0 三分支：reuse（final ckpt 在 + 可 load → executed）/ resume-pending（ckpt 缺但
+  #   .retrain_pid 活着 → 重估 + 重 cron → detached）/ fresh-launch（ckpt 缺且无训练在跑 →
+  #   Step 1-4：读上游 + 生成 retrain 脚本 + fidelity 复查 + detach + warmup 测每 epoch 耗时 +
+  #   估剩余 T + cron 注册 → detached）。warmup 失败 → self-heal（白名单修 + 重试 ≤3 次）。
+  #   触碰训练逻辑 → 重触 fidelity-verifier（read+embed 协议）。
+  #   status=detached → terminate_retrain_pending（非失败）；executed → ns_visualize；
+  #   failed → terminate_retrain_failed。
   # ═══════════════════════════════════════════════════════════════════════════
   - name: ns_retrain
     kind: agent
@@ -264,12 +267,12 @@ nodes:
       type: object
       required: [status, artifacts, assessment, max_retries_hit, healed_files, fidelity_retriggered]
       properties:
-        status: {type: string, enum: [executed, failed], description: "executed=RC=0+final ckpt 真产出；failed=自愈耗尽 3 次仍失败 / AGENTS.md 缺（ns_retrain 无 skipped 分支——agent.md Step 5 python 无 skip 路径，缺关键上游即 failed）"}
+        status: {type: string, enum: [executed, failed, detached], description: "executed=RC=0+final ckpt 真产出（含 reuse 既有 ckpt）；failed=自愈耗尽 3 次仍失败 / AGENTS.md 缺（ns_retrain 无 skipped 分支——agent.md Step 5 python 无 skip 路径，缺关键上游即 failed）；detached=训练已 nohup detach 后台 + warmup 测过每 epoch 耗时 + 估剩余 T + cron 已注册定时重跑 workflow——节点主动 park，非失败"}
         artifacts:
           type: array
           items: {type: string}
-          description: "成功时 [final retrain ckpt 路径]；failed 时 []"
-        assessment: {type: string, description: "软判断：final test acc / latency 对比 / supernet gap；failed 时含 last_error 日志尾部"}
+          description: "成功时 [final retrain ckpt 路径]；failed / detached 时 []"
+        assessment: {type: string, description: "软判断：final test acc / latency 对比 / supernet gap；failed 时含 last_error 日志尾部；detached 时含估时摘要"}
         max_retries_hit: {type: boolean, description: "true=3 次尝试耗尽仍失败"}
         healed_files:
           type: array
@@ -278,10 +281,13 @@ nodes:
         fidelity_retriggered: {type: boolean, description: "true=首次生成后或 self-heal 改训练逻辑后跑过 project-fidelity-verifier"}
       additionalProperties: false
     routes:
-      # 引擎只对 terminate 节点读 status（orchestrator._finalize_terminated）——AgentNode 的
-      # output.status 不被引擎判失败。故 ns_retrain 失败必须显式路由 terminate_retrain_failed，
-      # 否则 status=failed 仍 workflow_completed。ns_retrain 无 skipped 分支（agent.md Step 5
-      # python 无 skip 路径），故 status 非 executed（=failed）→ catch-all → fail loud。
+      # detached → 终态 terminate_retrain_pending（**非失败**：训练后台跑着 + cron 已注册）。
+      # cron 到点重跑 workflow → 新 run 的 ns_retrain Step 0 三分支按训练状态自动收敛
+      # （reuse ckpt / resume-pending 重估 / fresh-launch 重启）。
+      - when: "ns_retrain.output.status == 'detached'"
+        to: terminate_retrain_pending
+      # executed → 下游可视化；failed → catch-all terminate_retrain_failed（引擎对 AgentNode
+      # 的 output.status 不自动判失败，故 failed 必须显式路由，否则 workflow_completed 误成功）。
       - when: "ns_retrain.output.status == 'executed'"
         to: ns_visualize
       - to: terminate_retrain_failed
@@ -347,6 +353,20 @@ nodes:
     kind: terminate
     status: failed
     reason: "ns_retrain 未能产出 final 子网 ckpt（self-heal 耗尽 3 次仍失败 / AGENTS.md 缺 / supernet ckpt 缺）。回看 ns_retrain.output.assessment（含 last_error 日志尾部）与 $ORCA_ARTIFACTS_DIR/runs/retrain/ 日志定位 retrain 失败根因。"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Terminate: retrain deferred via cron（**非失败**终态）
+  #   ns_retrain 选 detached 分支时触达——final 子网 retrain 小时～天级，单 agent 节点无法 open
+  #   那么久。本 terminate 用 status=success（Orca TerminateNode 只有 success/failed 两态，
+  #   无 pending）+ reason 文案明示"retrain deferred，cron 接力重跑"，避免被误判 workflow 失败。
+  #   cron 到点 `orca nas-supernet --inputs ...` 重跑 → 新 run 的 ns_retrain Step 0 三分支
+  #   收敛：ckpt 好 → reuse → ns_visualize；仍在跑 → resume-pending 重估 + 重 cron；进程死且 ckpt 缺
+  #   → fresh-launch 重启。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: terminate_retrain_pending
+    kind: terminate
+    status: success
+    reason: "ns_retrain detached：final 子网 retrain 已 nohup 后台运行 + warmup 已测每 epoch 耗时并估剩余时间 + cron 已注册定时重跑 workflow。非失败——多天训练解耦模式（deferred training via cron）。下次 cron 触发启动新 run 时，ns_retrain Step 0 三分支会按训练实际状态自动收敛（reuse 既有 ckpt / resume-pending 重估 + 重 cron / fresh-launch 重启）。$ORCA_ARTIFACTS_DIR/runs/retrain/.retrain_pid 有后台进程 PID，.retrain_eta.txt 有估时，.cron_rerun_retrain.sh 是 cron 重跑脚本。"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # Terminate: training deferred via cron（**非失败**终态）
