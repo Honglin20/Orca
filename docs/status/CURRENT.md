@@ -18,12 +18,12 @@ cron + park detached）+ Step 3 dual-signal status 推导（`pid_alive AND cron_
 - [ ] **真机 E2E**（SPEC §4 acceptance 1-5）：造小训练 fixture（MNIST 2-epoch 或 mock 每 epoch
       sleep + 写 epoch log + 末写 ckpt），跑 `ns_run_train`，断言 warmup→估时→cron 注册→park→
       （可选）cron 触发后 reuse 接力。
-- [ ] **迁移到 ns_retrain**（nas-supernet）：同模式（task #9）。
-- [ ] **迁移到 kd-nas train-teacher / distill**（task #9）：同模式（cron 重跑命令 `orca kd-nas`）。
+- [ ] **迁移到 ns_retrain**（nas-supernet）：同模式。
+- [ ] **迁移到 kd-nas train-teacher / distill**：同模式（cron 重跑命令 `orca kd-nas`）。
 
 **必读**：
-- release note `docs/releases/2026-08-06-deferred-training-cron.md`（含 SPEC 偏差 + code-reviewer
-  闭环明细 + 已知限制 `at` 路径无幂等清理 / per_epoch 60s 默认 / TerminateNode 无 pending）。
+- release note `docs/releases/2026-08-06-deferred-training-cron.md`（含实现决策与已知限制 +
+  self-review 加固明细；已知限制：`at` 路径无幂等清理 / per_epoch 60s 默认 / TerminateNode 无 pending）。
 - SPEC `docs/specs/deferred-training-cron-design-draft.md`（§2 三分支 / §3 改动）。
 
 ---

@@ -422,7 +422,7 @@ echo "CRON_REGISTERED=$CRON_REGISTERED t_min=$T_MIN"
 >
 > **`at` 路径的已知限制**：`at` queue 无 comment marker，重注册（resume-pending）会留 stale entry。
 > 触发后两个 run 都跑，新 run Step 0a reuse 收敛（无副作用，仅浪费一次 cron 触发）。crontab 路径
-> 有 marker 自清，无此问题。release note 标注。
+> 有 marker 自清，无此问题。
 
 ### 2e. park（写 detached assessment，落 marker）
 
@@ -574,7 +574,7 @@ ckpt_exists = os.path.exists(ckpt)
 
 train_pid_path = os.path.join(ad, "runs", "train", ".train_pid")
 cron_registered_flag = os.path.join(ad, ".cron_registered.flag")
-# detached 双信号（防 M1：eta marker 单条件会在 fresh-launch self-heal 全败后掩盖 failed）：
+# detached 双信号（eta marker 单条件会在 fresh-launch self-heal 全败后掩盖 failed）：
 # 必须训练进程**存活** + cron 已注册（flag 在）——两者皆真才 detached。
 detached_signal = pid_alive(train_pid_path) and os.path.exists(cron_registered_flag)
 
