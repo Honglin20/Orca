@@ -79,7 +79,7 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
    echo "OUTPUT_DIR=$OUTPUT_DIR"
    ```
 
-   下面所有产物写进 `$OUTPUT_DIR`，`flat_artifacts_dir` 字段填它。**low-confidence 边缘**：step2 推断失败时 `PROJECT_ROOT_IN` = baseline_model_path 的 dirname（去后缀后），OUTPUT_DIR = `dirname/artifacts/kd-nas/models/baseline/`——可能与 setup 不合流（setup 从 `baseline_contract_path` 向上重算根），但 `baseline_contract_path` 绝对路径仍供 setup 读取，功能不阻断（统一用 PROJECT_ROOT 公式，确定性优先，不再 fallback `llm_artifacts/`）。
+   下面所有产物写进 `$OUTPUT_DIR`，`flat_artifacts_dir` 字段填它。**low-confidence 边缘**：step2 推断失败时 `PROJECT_ROOT_IN` = baseline_model_path 的 dirname（去后缀后），OUTPUT_DIR = `dirname/artifacts/kd-nas/models/baseline/`——可能与 setup 不合流（setup 从 `baseline_contract_path` 向上重算根），但 `baseline_contract_path` 绝对路径仍供 setup 读取，功能不阻断。
 
 ### Step 0: Reuse-Check（软跳过）
 

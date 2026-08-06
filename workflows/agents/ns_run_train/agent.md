@@ -100,7 +100,8 @@ fi
   `reused existing supernet ckpt: <path>`（复用可观测性，机械可检：artifact mtime 早于本次 run 起点）。
 - 不存在 / 不达标 → 照常执行 Step 1 自门控 + Step 2 self-heal。
 - **status 枚举不动**：reused 走 `executed`（成功路径同一 status，路由守卫不误判）；既有
-  `skipped` 仅留 viability self-gate（脚本不存在），**不**用于 reused（语义不同，。
+  `skipped` 仅留 viability self-gate（脚本不存在），**不**用于 reused（语义不同：
+  skipped=上游不可行，reused=产物已存在）。
 
 ## Step 1 ── 自门控（确定性，跑一次）
 

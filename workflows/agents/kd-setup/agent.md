@@ -95,7 +95,7 @@ while p and p!=os.path.dirname(p) and not any(os.path.exists(os.path.join(p,m)) 
 print(p)
 " "$BASELINE")"
 # kd_artifacts_dir 跨 run 持久（project-scoped artifacts 根，落 artifacts/kd-nas/ 子目录
-# 与 nas-supernet 等其它 workflow 隔离； 撤销既有拍平）。
+# 与 nas-supernet 等其它 workflow 隔离）。
 KD_ARTIFACTS_DIR="${PROJECT_ROOT}/artifacts/kd-nas/"
 mkdir -p "$KD_ARTIFACTS_DIR"models/baseline "$KD_ARTIFACTS_DIR"models/teacher "$KD_ARTIFACTS_DIR"models/students
 mkdir -p "$KD_ARTIFACTS_DIR"scripts "$KD_ARTIFACTS_DIR"onnx "$KD_ARTIFACTS_DIR"checkpoints "$KD_ARTIFACTS_DIR"meta "$KD_ARTIFACTS_DIR"reports

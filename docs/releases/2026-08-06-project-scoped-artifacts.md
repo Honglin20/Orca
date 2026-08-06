@@ -6,7 +6,7 @@
 
 ### 1. 引擎面（仅 in-session 单文件）
 `orca/iface/in_session/cli.py`：
-- 新增 `_read_workflow_inputs(tape_path)`——镜像既有 `_read_workflow_name` 的 tape 头扫描骨架，return `workflow_started.data.inputs` dict（无 ws / 损坏 → `{}`）。**禁** import 私有 `orca.events.replay._replay_state_and_inputs`（不存在公开 `inputs_from_tape`，E5 已删）。
+- 新增 `_read_workflow_inputs(tape_path)`——镜像既有 `_read_workflow_name` 的 tape 头扫描骨架，return `workflow_started.data.inputs` dict（无 ws / 损坏 → `{}`）。**禁** import 私有 `orca.events.replay._replay_state_and_inputs`（不存在公开 `inputs_from_tape`）。
 - 新增 `_resolve_artifacts_dir(tape_path, run_id) -> tuple[Path, bool]`——SPEC §2.1：
   - workflow inputs 含非空**绝对** `project_root` + 有 wf_name → `<project_root>/artifacts/<wf_name>/` + `is_project_scoped=True`；
   - 否则 → per-run `runs/<run_id>/artifacts/`（向后兼容）+ `is_project_scoped=False`。
