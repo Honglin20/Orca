@@ -871,6 +871,55 @@ def test_raw_wrapped_self_reference_immune():
     validate_workflow(wf)  # raw 包裹 → 不报自引用
 
 
+# ── 守卫豁免：回环累加惯用法（self.output + `is defined` 守卫）──
+
+
+def test_self_reference_guarded_by_is_defined_allowed():
+    """回环累加惯用法：``a.output.n if a is defined and a.output is defined else fallback``
+    ——守卫使首轮 a.output 未定义时成立分支被短路跳过，runtime 不崩 → 放行（demo_loop 模式）。"""
+    wf = _wf([
+        {"name": "a", "kind": "set",
+         "values": {"n": "{{ (a.output.n if a is defined and a.output is defined else 0) | int + 1 }}"},
+         "routes": [{"when": "output.n | int >= 3", "to": "$end"}, {"to": "a"}]},
+    ])
+    validate_workflow(wf)  # 守卫豁免 → 不报自引用
+
+
+def test_self_reference_partial_guard_rejected():
+    """仅 ``a is defined`` 守卫**不够**：不保护后续 ``a.output`` 子访问（.output 在 undefined 上
+    仍崩）→ 仍报自引用。必须 ``a.output is defined`` 才算守卫。"""
+    wf = _wf([
+        {"name": "a", "kind": "set",
+         "values": {"n": "{{ a.output.n if a is defined else 0 }}"},
+         "routes": [{"when": "output.n | int >= 3", "to": "$end"}, {"to": "a"}]},
+    ])
+    errs = _errors(wf)
+    assert any("自引用" in e and "a.output" in e for e in errs), errs
+
+
+def test_self_reference_guarded_in_if_block_allowed():
+    """``{% if a is defined and a.output is defined %}{{ a.output.n }}{% endif %}`` 块形态守卫
+    同样放行（成立分支 body 受 if 守卫保护）。"""
+    wf = _wf([
+        _agent("a",
+               prompt=("{% if a is defined and a.output is defined %}{{ a.output.n }}"
+                       "{% else %}0{% endif %}"),
+               routes=[{"to": "$end"}]),
+    ])
+    validate_workflow(wf)
+
+
+def test_self_reference_guard_does_not_cover_else_branch():
+    """守卫只覆盖成立分支；否则分支里的无守卫自引用仍报错（防误放行）。"""
+    wf = _wf([
+        {"name": "a", "kind": "set",
+         "values": {"n": "{{ 1 if a is defined and a.output is defined else a.output.n }}"},
+         "routes": [{"when": "output.n | int >= 3", "to": "$end"}, {"to": "a"}]},
+    ])
+    errs = _errors(wf)
+    assert any("自引用" in e and "a.output" in e for e in errs), errs
+
+
 def test_raw_wrap_verified_in_original_struct_scenario():
     """复刻 struct yaml 的真实场景：setup prompt 里 {% raw %}`{{ setup.output.X }}`{% endraw %}
     是文档说明（指示下游节点怎么取），不是 setup 自己的运行时引用 → 不应报自引用。

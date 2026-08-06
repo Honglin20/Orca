@@ -34,7 +34,7 @@ from typing import Iterable
 from jinja2 import Environment
 from jinja2.exceptions import TemplateSyntaxError
 from jinja2.meta import find_undeclared_variables
-from jinja2.nodes import Const, Getattr, Getitem, Name
+from jinja2.nodes import And, CondExpr, Const, Getattr, Getitem, If, Name, Test
 
 from orca.schema import (
     AgentNode,
@@ -722,8 +722,9 @@ def _output_field_refs(ast) -> list[tuple[str, str | None]]:
 
     **双重发射（已知）**：同一条 ``X.output.foo`` 引用可能同时产 ``(X, 'foo')`` 与
     ``(X, None)`` 两条（``Getattr(X, output)`` 自身命中 branch 1，``Getattr(foo, …)``
-    命中 branch 2）。消费者需按需过滤 ``field is None``（``_check_self_reference`` 用
-    ``break``，``_check_output_schema_field_alignment`` 显式跳过 ``field is None``）。
+    命中 branch 2）。消费者需按需过滤 ``field is None``（``_check_output_schema_field_alignment``
+    显式跳过 ``field is None``；``_check_self_reference`` 另走 ``_unguarded_self_output_refs``
+    递归 walker，不消费本函数）。
     """
     refs: list[tuple[str, str | None]] = []
     # outer 是 Getattr：field = outer.attr
@@ -781,7 +782,7 @@ def _output_field_refs(ast) -> list[tuple[str, str | None]]:
 
 
 def _check_self_reference(wf: Workflow, result: ValidationResult) -> None:
-    """禁自引用：prompt / command / values / foreach body 引用 ``<self>.output[.X]`` → error。
+    """禁**无守卫的**自引用：prompt / command / values / foreach body 引用 ``<self>.output[.X]`` → error。
 
     语义（contract §3）：``prompt`` / ``command`` / ``values`` 在所属节点跑**之前**渲染，
     render context 只含上游节点的 ``ctx.outputs``，自身尚未产出 → ``<self>.output`` 必
@@ -791,6 +792,14 @@ def _check_self_reference(wf: Workflow, result: ValidationResult) -> None:
     动机：终审发现 ``agent-struct-exploration.yaml`` 的 ``{% raw %}`` 被误删 → setup prompt
     自引用 ``{{ setup.output.X }}`` → StrictUndefined 崩。``{% raw %}`` 修复后此规则零误报，
     且永久 catch 此类误删（raw 包裹的提及不进 AST 的 ref 集合，见 ``_output_field_refs``）。
+
+    **守卫豁免（回环累加惯用法）**：set/agent 节点用 ``{{ self.output.n if self is defined
+    and self.output is defined else fallback }}``（或 ``{% if %}`` 块）跨轮累加上轮 output
+    是 runtime 合法的——首轮 self.output 未定义时，``is defined`` 短路使成立分支不评估，
+    StrictUndefined 不崩。``_unguarded_self_output_refs`` 识别「成立分支 + test 合取含
+    ``self.output is defined`` 守卫」的访问并放行；仅 ``self is defined`` 不够（不保护
+    ``.output`` 子访问），部分守卫仍报错。``defined``/``undefined`` test 的被测表达式本身是
+    守卫材料，不计违规。
     """
     for location, self_name, text, is_expr, _extras in _iter_templates(wf):
         if self_name is None:
@@ -798,14 +807,112 @@ def _check_self_reference(wf: Workflow, result: ValidationResult) -> None:
         ast, err = _parse_for_meta(text, is_expr)
         if err is not None or ast is None:
             continue  # 语法错已由 ⑦ 报；此处不重复
-        for node_name, _field in _output_field_refs(ast):
-            if node_name == self_name:
-                result.add_error(
-                    f"{location} 自引用 '{self_name}.output'："
-                    f"prompt/command/values 在节点跑之前渲染，自身无 output 可读"
-                    f"（用 route.when 引用本节点 output，或改上游节点传递）"
-                )
-                break  # 同一模板内多条自引用只报一次（避免刷屏）
+        if _unguarded_self_output_refs(ast, self_name):
+            result.add_error(
+                f"{location} 自引用 '{self_name}.output'："
+                f"prompt/command/values 在节点跑之前渲染，自身无 output 可读"
+                f"（用 route.when 引用本节点 output，或改上游节点传递，"
+                f"或用 `{{{{ {self_name} is defined and {self_name}.output is defined }}}}` "
+                f"守卫的回环累加写法）"
+            )
+
+
+def _unguarded_self_output_refs(ast, self_name: str) -> list:
+    """返回 AST 中**未受 ``is defined`` 守卫保护**的 ``self.output`` 访问节点。
+
+    递归遍历（``_walk_self_ref``）维护 ``safe`` 上下文：
+
+    - 命中 ``self.output`` 访问（``_is_self_output_access``）且非 ``safe`` → 记违规。
+    - ``Test(name in 'defined'/'undefined')`` 的被测表达式是守卫材料 → 以 ``safe=True`` 下钻
+      （不计违规；这两类 test 在 Undefined 上不崩，其余 ``is <X>`` 会崩 → 不豁免，正常计入）。
+    - ``CondExpr`` / ``If``：若其 test 合取含 ``self.output is defined``（``_test_guards_self_output``）
+      → 成立分支（``expr1`` / ``body``）标 ``safe``，否则分支不标。
+
+    保守取舍（false-positive > false-negative）：识别不了的守卫形态一律不放行，仍报错。
+    """
+    return _walk_self_ref(ast, self_name, safe=False)
+
+
+def _walk_self_ref(node, self_name: str, safe: bool) -> list:
+    """``_unguarded_self_output_refs`` 的递归内核（见其 docstring）。"""
+    violations: list = []
+    if node is None:
+        return violations
+    if _is_self_output_access(node, self_name):
+        if not safe:
+            violations.append(node)
+        return violations  # 子节点是 Name(self)，非访问，无需下钻
+    # is defined / is undefined 的被测表达式 = 守卫材料，标 safe 不计违规
+    if isinstance(node, Test) and node.name in ("defined", "undefined"):
+        violations += _walk_self_ref(node.node, self_name, safe=True)
+        return violations
+    # 内联条件 A if B else C：成立分支 expr1 受 test 守卫则 safe，否则分支 expr2 不受
+    if isinstance(node, CondExpr):
+        guarded = _test_guards_self_output(node.test, self_name)
+        violations += _walk_self_ref(node.test, self_name, safe)
+        violations += _walk_self_ref(node.expr1, self_name, safe or guarded)
+        violations += _walk_self_ref(node.expr2, self_name, safe)
+        return violations
+    # {% if %} 块：body 受 test 守卫则 safe；else_/elif_ 不受本 test 保护（elif 自带 test，
+    # 递归时由其自身 If 分支按它的 test 判定，语境等同 outer 的否则分支）。
+    if isinstance(node, If):
+        guarded = _test_guards_self_output(node.test, self_name)
+        violations += _walk_self_ref(node.test, self_name, safe)
+        for n in node.body:
+            violations += _walk_self_ref(n, self_name, safe or guarded)
+        for n in node.else_:
+            violations += _walk_self_ref(n, self_name, safe)
+        for n in node.elif_:
+            violations += _walk_self_ref(n, self_name, safe)
+        return violations
+    # 默认：下钻所有子节点，传递当前 safe
+    for child in node.iter_child_nodes():
+        violations += _walk_self_ref(child, self_name, safe)
+    return violations
+
+
+def _is_self_output_access(node, self_name: str) -> bool:
+    """node 是否为 ``self.output`` 访问根（``X.output`` dotted 或 ``X['output']`` subscript）。"""
+    if (
+        isinstance(node, Getattr)
+        and node.attr == "output"
+        and isinstance(node.node, Name)
+        and node.node.name == self_name
+    ):
+        return True
+    return (
+        isinstance(node, Getitem)
+        and isinstance(node.arg, Const)
+        and node.arg.value == "output"
+        and isinstance(node.node, Name)
+        and node.node.name == self_name
+    )
+
+
+def _test_guards_self_output(test, self_name: str) -> bool:
+    """条件 test 的合取子句中是否含 ``self.output is defined`` 守卫。
+
+    仅 ``self.output is defined``（直接测试 output 子访问）才算——它使首轮 self.output
+    未定义时成立分支被短路跳过；单独 ``self is defined`` 不保护后续 ``.output`` 子访问，
+    不算守卫。
+    """
+    for clause in _conjunction_clauses(test):
+        if (
+            isinstance(clause, Test)
+            and clause.name == "defined"
+            and _is_self_output_access(clause.node, self_name)
+        ):
+            return True
+    return False
+
+
+def _conjunction_clauses(node):
+    """展平 ``And`` 合取为叶子子句序列（Jinja2 ``And.left/right`` 直接为操作数）。"""
+    if isinstance(node, And):
+        yield from _conjunction_clauses(node.left)
+        yield from _conjunction_clauses(node.right)
+    else:
+        yield node
 
 
 def _check_output_schema_field_alignment(
