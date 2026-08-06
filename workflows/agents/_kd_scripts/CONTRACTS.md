@@ -37,7 +37,7 @@ workflows/
       kd/{losses,wrapper,compose,ema}.py   # KD 库（不变）
       kd/{trainer,_leaves,_resume}.py      # 固定训练引擎 + 叶子加载器 + 原子 resume
 knowledge_base/families/receiver/          # model8 变体仓（.py）+ _model8_blocks.py 共享积木
-<project>/artifacts/kd-nas/                # ★ 跨 run 稳定 project-scoped artifact 根（SPEC 2026-08-06 §2.3：撤销既有拍平，恢复 kd-nas 子目录与 nas-supernet 等其它 workflow 隔离）
+<project>/artifacts/kd-nas/                # ★ 跨 run 稳定 project-scoped artifact 根（kd-nas 子目录，与 nas-supernet 等其它 workflow 隔离）
 ```
 
 ## 1. 变体 I/O 契约（每个 receiver/*.py 必须暴露）

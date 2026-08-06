@@ -1,5 +1,5 @@
 ---
-description: nas-supernet 搜索执行 agent（folder-agent）。运行上游 ns_search_pipeline 生成的 run_search_supernet.sh——cd $ORCA_ARTIFACTS_DIR → nohup bash ... & detach + 轮询进程到结束（nohup 强化脱离 controlling terminal；detach+poll 在 Git Bash/MSYS 兼容）。self-heal：报错按「编辑白名单」用 edit 修 + 重跑，max_retries=3，超限 fail loud 绝不带错下传。权威产物 = $ORCA_ARTIFACTS_DIR/search_results.jsonl（ns_select 下游消费），行数 ≥1 才算成功。触碰搜索/evaluator 逻辑类目 → 重触 project-fidelity-verifier（point-to-file 协议）。读 Pareto/搜索结果写软判断 assessment。output_schema 双层强制单行 JSON。
+description: nas-supernet 搜索执行 agent（folder-agent）。运行上游 ns_search_pipeline 生成的 run_search_supernet.sh——cd $ORCA_ARTIFACTS_DIR → nohup detach + 跨多次短调用轮询（避免单调用撞 bash 工具超时；Git Bash/MSYS 兼容）。self-heal：报错按「编辑白名单」用 edit 修 + 重跑，max_retries=3，超限 fail loud 绝不带错下传。权威产物 = $ORCA_ARTIFACTS_DIR/search_results.jsonl（ns_select 下游消费），行数 ≥1 才算成功。触碰搜索/evaluator 逻辑类目 → 重触 project-fidelity-verifier（point-to-file 协议）。读 Pareto/搜索结果写软判断 assessment。output_schema 双层强制单行 JSON。
 tools: [bash, read, edit, grep, glob, task]
 ---
 # ns_run_search
@@ -125,46 +125,76 @@ fi
 
 若上一段打印 `cannot proceed` → 直接进 Step 3（python 会判 `status=failed`）。
 
-## Step 2 ── 搜索（detach + poll；有界自愈 ≤3 次）
+## Step 2 ── 搜索（detach + 跨多次短调用轮询；有界自愈 ≤3 次）
 
-对**每一次尝试** `N=1..3`：
+搜索是真长任务。
 
-1. 后台跑 + 轮询到结束（`nohup` detach + `kill -0` 探活 + `wait` 收 RC，
-   detach+poll 在 Git Bash/MSYS 兼容）：
-   ```bash
-   mkdir -p runs/search
-   nohup bash run_search_supernet.sh > runs/search/search.attempt${N}.stdout.log 2>&1 &
-   SEARCH_PID=$!
-   while kill -0 $SEARCH_PID 2>/dev/null; do
-     sleep 30
-   done
-   wait $SEARCH_PID; SEARCH_RC=$?
-   ```
-2. 判成功：`SEARCH_RC=0` **且** `$ORCA_ARTIFACTS_DIR/search_results.jsonl` 行数 ≥ 1。
-   - 若 search 脚本把结果写到别处（如 `runs/search/search.jsonl`）而 `search_results.jsonl` 缺失，
-     属于 `search_config.yaml` 输出路径错配 → self-heal 时把 `search_config.yaml` 的输出路径对齐
-     到 `search_results.jsonl`（绝对路径或相对 `$ORCA_ARTIFACTS_DIR`），重跑。
-3. 成功 → 进 Step 2.6（软判断）→ Step 3。
-4. 不满足 → **self-heal**：
-   - `read` 读 `runs/search/search.attempt${N}.stdout.log` 尾部 + `runs/search/search.log`（若有）。
-   - 常见根因判定：
-     - 缺 supernet ckpt → 回看 ns_run_train output。若 ns_run_train `status=skipped` / `failed`，
-       ckpt 注定缺——记 last_error，**不要**改 ckpt 路径伪造；`N++`，3 次后 fail loud。
-     - 框架报「device / concurrency」相关 → 检查 `CUDA_VISIBLE_DEVICES`，必要时在
-       `run_search_supernet.sh` 顶部 export 限定（纯补丁层）。
-   - 判断根因所属层级（铁律 2 白名单两层）：
-     - **纯补丁层**（launcher / 路径 / import 错 / typo / `search_config.yaml` 输出路径对齐）→ 用
-       `edit` 改对应文件，把改动文件相对路径 append 到 `.ns_run_search_healed.txt`（Step 0 marker
-       协议）。无需重触 fidelity。
-     - **搜索/评估逻辑层**（`evaluator.py` / `arch_codec.py` / `search_supernet.py` 的 sampling /
-       subnet 提取 / metric 计算 / data pipeline）→ 用 `edit` 改，append 到
-       `.ns_run_search_healed.txt`，**且必须**进 Step 2.5 重触 fidelity-verifier，写
-       `.ns_run_search_fidelity.flag`。
-     - 否（根因需碰**禁碰清单**铁律 3）→ **禁止 edit**；记 last_error，`N++`（本次尝试算失败）。
-   - `N++` 回到 1。`N>3` 放弃，进 Step 3 如实输出 `{"status":"failed"}`。
+🔴 **长任务执行铁律**：bash 工具**单次调用有超时上限**（约 10 min）。**禁**把 detach + 轮询循环放进
+单个 bash 调用——长搜索会让整调用超时被杀、搜索被终止。正确姿势是**多次短工具调用**：先一个调用
+detach（秒级返回），再**重复**发短轮询调用，直到进程结束。SPEC 见 `docs/specs/long-task-execution-design-draft.md`。
 
-> 搜索是真长任务。`wait` 必须等到子进程真正退出，不许凭「日志看起来在跑」提前返回。每次 `wait`
-> 后**先存退出码**（`SEARCH_RC`）再判断，不许丢弃。
+对**每一次尝试** `N=1..3`（N = 本次 self-heal 尝试号，据当前轮填 1/2/3）：
+
+### 2a. detach（一次短调用，秒级返回，**禁在此调用 wait/sleep**）
+
+```bash
+cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable" >&2; exit 1; }
+mkdir -p runs/search
+rm -f runs/search/.search_pid runs/search/.search_rc
+nohup bash -c 'bash run_search_supernet.sh > "runs/search/search.attempt'"$N"'.stdout.log" 2>&1; echo $? > runs/search/.search_rc' >/dev/null 2>&1 &
+echo $! > runs/search/.search_pid
+echo "DETACHED pid=$(cat runs/search/.search_pid) attempt=$N"
+```
+
+### 2b. 短轮询（**重复发**这个调用直到 stdout 出现 `DONE`；每次 ≤5 min，不撞工具超时）
+
+```bash
+cd "$ORCA_ARTIFACTS_DIR" || exit 1
+PID="$(cat runs/search/.search_pid 2>/dev/null)"
+if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
+  echo "DONE rc=$(cat runs/search/.search_rc 2>/dev/null || echo unknown)"
+  tail -30 "runs/search/search.attempt${N}.stdout.log" 2>/dev/null
+else
+  sleep 240   # 4 min；禁改更大（撞 bash 工具超时）
+  echo "RUNNING"
+  tail -8 "runs/search/search.attempt${N}.stdout.log" 2>/dev/null
+fi
+```
+
+- stdout `RUNNING` → **再发一次 2b**（禁在同一调用里 while 循环；每次 2b 是独立短调用）。
+- stdout `DONE rc=...` → 进 2c。
+- **无轮询上限**：搜索可能跑很久（小时～天级）。重复发 2b 直到 `DONE`——**不设次数上限**。仅 warmup
+  检测早期假死；过了 warmup（前几次轮询已见到 generation/候选评估标记 + objective 有限）即信任进程在
+  跑，持续轮询到结束。
+- **warmup 健康检查**：前 2~3 次 `RUNNING` 的 `tail` 应出现 generation / 候选评估标记（objective 非
+  NaN/inf）。无标记 / objective 发散 → 搜索假死或静默崩 → `kill` + self-heal，**不空等**。
+
+> 跨 shell RC：detach 子 shell 末尾 `echo $? > .search_rc`；轮询调用是不同 bash 子 shell（`wait` 跨
+> shell 无效）→ 从 `.search_rc` 读 RC。
+
+### 2c. 判成功
+
+`DONE rc=0` **且** `$ORCA_ARTIFACTS_DIR/search_results.jsonl` 行数 ≥ 1 → 成功 → 进 Step 2.6（软判断）→ Step 3。
+- 若 search 脚本把结果写到别处（如 `runs/search/search.jsonl`）而 `search_results.jsonl` 缺失，属于
+  `search_config.yaml` 输出路径错配 → self-heal 时把 `search_config.yaml` 输出路径对齐到
+  `search_results.jsonl`（绝对路径或相对 `$ORCA_ARTIFACTS_DIR`），重跑。
+
+`DONE rc≠0` / `search_results.jsonl` 缺或 0 行 → **self-heal**：
+- `read` 读 `runs/search/search.attempt${N}.stdout.log` 尾部 + `runs/search/search.log`（若有）。
+- 常见根因判定：
+  - 缺 supernet ckpt → 回看 ns_run_train output。若 ns_run_train `status=skipped` / `failed`，ckpt 注定
+    缺——记 last_error，**不要**改 ckpt 路径伪造；`N++`，3 次后 fail loud。
+  - 框架报「device / concurrency」相关 → 检查 `CUDA_VISIBLE_DEVICES`，必要时在 `run_search_supernet.sh`
+    顶部 export 限定（纯补丁层）。
+- 判断根因所属层级（铁律 2 白名单两层）：
+  - **纯补丁层**（launcher / 路径 / import 错 / typo / `search_config.yaml` 输出路径对齐）→ 用 `edit`
+    改对应文件，把改动文件相对路径 append 到 `.ns_run_search_healed.txt`（Step 0 marker 协议）。无需
+    重触 fidelity。
+  - **搜索/评估逻辑层**（`evaluator.py` / `arch_codec.py` / `search_supernet.py` 的 sampling / subnet
+    提取 / metric 计算 / data pipeline）→ 用 `edit` 改，append 到 `.ns_run_search_healed.txt`，**且必须**
+    进 Step 2.5 重触 fidelity-verifier，写 `.ns_run_search_fidelity.flag`。
+  - 否（根因需碰**禁碰清单**铁律 3）→ **禁止 edit**；记 last_error，`N++`（本次尝试算失败）。
+- `N++` 回 2a。`N>3` 放弃，进 Step 3 如实输出 `{"status":"failed"}`。
 
 ### Step 2.5 ── 重触 project-fidelity-verifier（point-to-file 协议，按需）
 

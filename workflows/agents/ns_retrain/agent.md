@@ -1,5 +1,5 @@
 ---
-description: nas-supernet 重训 agent（folder-agent）。读 ns_select 选定 arch + AGENTS.md scaffold + supernet_summary.md + project_manifest.md → 生成 retrain.py / finetune.py + run_retrain.sh → project-fidelity-verifier 复查（point-to-file 协议，Read {{ subagents_root }}/project-fidelity-verifier.md）→ cd $ORCA_ARTIFACTS_DIR nohup detach + 轮询执行（nohup 强化脱离 controlling terminal；detach+poll 在 Git Bash/MSYS 兼容）→ self-heal max_retries=3（仅改本次生成的脚本；改训练逻辑类目 → 重触 fidelity-verifier）→ 读 final test metric 写软判断 assessment。禁碰 supernet.py / project_manifest.md / supernet_summary.md / AGENTS.md / project_root 源文件（artifacts/ 子目录例外可写）。output_schema 双层强制单行 JSON。
+description: nas-supernet 重训 agent（folder-agent）。读 ns_select 选定 arch + AGENTS.md scaffold + supernet_summary.md + project_manifest.md → 生成 retrain.py / finetune.py + run_retrain.sh → project-fidelity-verifier 复查（point-to-file 协议，Read {{ subagents_root }}/project-fidelity-verifier.md）→ cd $ORCA_ARTIFACTS_DIR nohup detach + 跨多次短调用轮询（避免单调用撞 bash 工具超时；Git Bash/MSYS 兼容）→ self-heal max_retries=3（仅改本次生成的脚本；改训练逻辑类目 → 重触 fidelity-verifier）→ 读 final test metric 写软判断 assessment。禁碰 supernet.py / project_manifest.md / supernet_summary.md / AGENTS.md / project_root 源文件（artifacts/ 子目录例外可写）。output_schema 双层强制单行 JSON。
 tools: [bash, read, write, edit, grep, glob, task]
 ---
 # ns_retrain
@@ -176,36 +176,66 @@ grep -E 'supernet_ckpt_path:' search_config.yaml 2>/dev/null || true
 
 若 verifier fail 且建议改动属铁律 4 禁碰清单 → 不要改禁碰文件，记 last_error，进 Step 5 fail loud。
 
-## Step 4 ── 执行（detach + poll；有界自愈 ≤3 次）
+## Step 4 ── 执行（detach + 跨多次短调用轮询；有界自愈 ≤3 次）
 
-对**每一次尝试** `N=1..3`：
+retrain 是真长任务（分钟～小时级）。
 
-1. 后台跑 + 轮询到结束（`nohup` detach + `kill -0` 探活 + `wait` 收 RC，
-   detach+poll 在 Git Bash/MSYS 兼容）：
-   ```bash
-   mkdir -p runs/retrain
-   nohup bash run_retrain.sh > runs/retrain/retrain.attempt${N}.log 2>&1 &
-   RETRAIN_PID=$!
-   while kill -0 $RETRAIN_PID 2>/dev/null; do
-     sleep 30
-   done
-   wait $RETRAIN_PID; RETRAIN_RC=$?
-   ```
-2. 判成功：`RETRAIN_RC=0` **且** `.ns_retrain_ckpt_path.txt` 指向的 ckpt 文件存在。
-3. 成功 → 读 final test metric（retrain.py 应把 test metric 写到
-   `$ORCA_ARTIFACTS_DIR/runs/retrain/test_metrics.json` 或 log 尾部），写软判断 assessment →
-   Step 5。
-4. 不满足 → **self-heal**：
-   - `read` 读 `runs/retrain/retrain.attempt${N}.log` 尾部 ~50 行定位根因。
-   - 判断是否在**编辑白名单**内（铁律 3）：
-     - 是（改本次生成的 retrain.py / finetune.py / run_retrain.sh）→ 用 `edit` 改，append
-       `.ns_retrain_healed.txt`。若改动属**训练逻辑**（loss / optimizer / sampling / KD / data
-       pipeline）→ **必须**进 Step 4.5 重触 fidelity-verifier，写 fidelity.flag=true。
-     - 否（根因需碰**禁碰清单**铁律 4）→ **禁止 edit**；记 last_error，`N++`。
-   - `N++` 回到 1。`N>3` 放弃，进 Step 5 如实输出 `{"status":"failed"}`。
+🔴 **长任务执行铁律**：bash 工具**单次调用有超时上限**（约 10 min）。**禁**把 detach + 轮询循环放进
+单个 bash 调用——长 retrain 会让整调用超时被杀、retrain 被终止。正确姿势是**多次短工具调用**：先一个
+调用 detach（秒级返回），再**重复**发短轮询调用，直到进程结束。SPEC 见 `docs/specs/long-task-execution-design-draft.md`。
 
-> retrain 是真长任务（分钟～小时级）。`wait` 必须等到子进程真正退出。每次 `wait` 后**先存退出码**
-> （`RETRAIN_RC`）再判断，不许丢弃。
+对**每一次尝试** `N=1..3`（N = 本次 self-heal 尝试号，据当前轮填 1/2/3）：
+
+### 4a. detach（一次短调用，秒级返回，**禁在此调用 wait/sleep**）
+
+```bash
+cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable" >&2; exit 1; }
+mkdir -p runs/retrain
+rm -f runs/retrain/.retrain_pid runs/retrain/.retrain_rc
+nohup bash -c 'bash run_retrain.sh > "runs/retrain/retrain.attempt'"$N"'.log" 2>&1; echo $? > runs/retrain/.retrain_rc' >/dev/null 2>&1 &
+echo $! > runs/retrain/.retrain_pid
+echo "DETACHED pid=$(cat runs/retrain/.retrain_pid) attempt=$N"
+```
+
+### 4b. 短轮询（**重复发**这个调用直到 stdout 出现 `DONE`；每次 ≤5 min，不撞工具超时）
+
+```bash
+cd "$ORCA_ARTIFACTS_DIR" || exit 1
+PID="$(cat runs/retrain/.retrain_pid 2>/dev/null)"
+if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
+  echo "DONE rc=$(cat runs/retrain/.retrain_rc 2>/dev/null || echo unknown)"
+  tail -30 "runs/retrain/retrain.attempt${N}.log" 2>/dev/null
+else
+  sleep 240   # 4 min；禁改更大（撞 bash 工具超时）
+  echo "RUNNING"
+  tail -8 "runs/retrain/retrain.attempt${N}.log" 2>/dev/null
+fi
+```
+
+- stdout `RUNNING` → **再发一次 4b**（禁在同一调用里 while 循环；每次 4b 是独立短调用）。
+- stdout `DONE rc=...` → 进 4c。
+- **无轮询上限**：retrain 可能跑很久（小时～天级）。重复发 4b 直到 `DONE`——**不设次数上限**。仅 warmup
+  检测早期假死；过了 warmup（前几次轮询已见到 epoch 标记 + loss 有限）即信任进程在跑，持续轮询到结束。
+- **warmup 健康检查**：前 2~3 次 `RUNNING` 的 `tail` 应出现 epoch 标记 + loss 有限（非 NaN/inf）。无标记 /
+  loss 发散 → 假死或静默崩 → `kill` + self-heal，**不空等满 2h**。
+
+> 跨 shell RC：detach 子 shell 末尾 `echo $? > .retrain_rc`；轮询调用是不同 bash 子 shell（`wait` 跨
+> shell 无效）→ 从 `.retrain_rc` 读 RC。
+
+### 4c. 判成功
+
+`DONE rc=0` **且** `.ns_retrain_ckpt_path.txt` 指向的 ckpt 文件存在 → 成功 → 读 final test metric
+（retrain.py 应把 test metric 写到 `$ORCA_ARTIFACTS_DIR/runs/retrain/test_metrics.json` 或 log 尾部），
+写软判断 assessment → Step 5。
+
+`DONE rc≠0` / ckpt 缺 → **self-heal**：
+- `read` 读 `runs/retrain/retrain.attempt${N}.log` 尾部 ~50 行定位根因。
+- 判断是否在**编辑白名单**内（铁律 3）：
+  - 是（改本次生成的 retrain.py / finetune.py / run_retrain.sh）→ 用 `edit` 改，append
+    `.ns_retrain_healed.txt`。若改动属**训练逻辑**（loss / optimizer / sampling / KD / data pipeline）
+    → **必须**进 Step 4.5 重触 fidelity-verifier，写 fidelity.flag=true。
+  - 否（根因需碰**禁碰清单**铁律 4）→ **禁止 edit**；记 last_error，`N++`。
+- `N++` 回 4a。`N>3` 放弃，进 Step 5 如实输出 `{"status":"failed"}`。
 
 ### Step 4.5 ── 重触 project-fidelity-verifier（point-to-file 协议，按需）
 

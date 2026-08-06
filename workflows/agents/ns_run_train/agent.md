@@ -1,5 +1,5 @@
 ---
-description: nas-supernet 超网训练执行 agent（folder-agent）。运行上游 ns_train_script 生成的 run_train_supernet.sh——cd $ORCA_ARTIFACTS_DIR → nohup bash ... & detach + 轮询进程到结束（nohup 强化脱离 controlling terminal；detach+poll 在 Git Bash/MSYS 兼容）。自门控：脚本不存在立即 output status=skipped（viability 以文件存在性为权威）。self-heal：报错按「编辑白名单」用 edit 修 + 重跑，max_retries=3，超限 fail loud 绝不带错下传。触碰训练逻辑类目 → 重触 project-fidelity-verifier（point-to-file 协议）。成功后读收敛曲线写软判断 assessment。output_schema 双层强制单行 JSON（agent 最终回复 = python stdout 那一行）。
+description: nas-supernet 超网训练执行 agent（folder-agent）。运行上游 ns_train_script 生成的 run_train_supernet.sh——cd $ORCA_ARTIFACTS_DIR → nohup detach + 跨多次短调用轮询（避免单调用撞 bash 工具超时；nohup 脱离 controlling terminal；Git Bash/MSYS 兼容）。自门控：脚本不存在立即 output status=skipped（viability 以文件存在性为权威）。self-heal：报错按「编辑白名单」用 edit 修 + 重跑，max_retries=3，超限 fail loud 绝不带错下传。触碰训练逻辑类目 → 重触 project-fidelity-verifier（point-to-file 协议）。成功后读收敛曲线写软判断 assessment。output_schema 双层强制单行 JSON（agent 最终回复 = python stdout 那一行）。
 tools: [bash, read, edit, grep, glob, task]
 ---
 # ns_run_train
@@ -125,38 +125,69 @@ fi
 若上一段打印 `SKIP` → 直接进 Step 3（python 会读 marker 输出 `{"status":"skipped"}`）。
 **不要**伪造执行。
 
-## Step 2 ── 训练（detach + poll；有界自愈 ≤3 次）
+## Step 2 ── 训练（detach + 跨多次短调用轮询；有界自愈 ≤3 次）
 
-对**每一次尝试** `N=1..3`：
+训练是真长任务（分钟～小时级）。
 
-1. 后台跑 + 轮询到结束（`nohup` detach + `kill -0` 探活 + `wait` 收 RC，
-   detach+poll 在 Git Bash/MSYS 兼容）：
-   ```bash
-   mkdir -p runs/train
-   nohup bash run_train_supernet.sh > runs/train/train.attempt${N}.log 2>&1 &
-   TRAIN_PID=$!
-   while kill -0 $TRAIN_PID 2>/dev/null; do
-     sleep 30
-   done
-   wait $TRAIN_PID; TRAIN_RC=$?
-   ```
-2. 判成功：`TRAIN_RC=0` **且** supernet ckpt 文件存在。ckpt 路径解析（os.path 拼接，禁字符串拼）：
-   先 `grep supernet_ckpt_path search_config.yaml`，取到则用它（相对路径相对
-   `$ORCA_ARTIFACTS_DIR`），否则 `runs/train/supernet_best.pth`。
-3. 成功 → 记住 ckpt 路径，进 Step 2.6（软判断）→ Step 3。
-4. 不满足 → **self-heal**：
-   - `read` 读 `runs/train/train.attempt${N}.log` 尾部 ~50 行定位根因。
-   - 判断根因所属层级（铁律 3 白名单两层）：
-     - **纯补丁层**（launcher / 路径 / import 错 / typo）→ 用 `edit` 改对应文件，把改动文件相对
-       路径 append 到 `.ns_run_train_healed.txt`（Step 0 marker 协议）。无需重触 fidelity。
-     - **训练逻辑层**（`train_supernet.py` / `evaluator.py` 的 loss / optimizer / sampling / KD /
-       数据管道）→ 用 `edit` 改，append 到 `.ns_run_train_healed.txt`，**且必须**进 Step 2.5
-       重触 fidelity-verifier，写 `.ns_run_train_fidelity.flag`。
-     - 否（根因需碰**禁碰清单**铁律 4）→ **禁止 edit**；记 last_error，直接 `N++`（本次尝试算失败）。
-   - `N++` 回到 1。`N>3` 放弃，进 Step 3 如实输出 `{"status":"failed"}`。
+🔴 **长任务执行铁律**：bash 工具**单次调用有超时上限**（约 10 min）。**禁**把 detach + 轮询循环放进
+单个 bash 调用——长训练会让整调用超时被杀、训练被终止（training 静默终止的常见根因）。正确姿势是
+**多次短工具调用**：先一个调用 detach（秒级返回），再**重复**发短轮询调用（每次 `sleep` < 工具超时），
+直到进程结束；agent 多轮 loop 天然提供轮询间隔。SPEC 见 `docs/specs/long-task-execution-design-draft.md`。
 
-> 训练是真长任务（分钟～小时级）。`wait` 必须等到子进程真正退出，不许凭「日志看起来在跑」
-> 提前返回。每次 `wait` 后**先存退出码**（`TRAIN_RC`）再判断，不许丢弃。
+对**每一次尝试** `N=1..3`（N = 本次 self-heal 尝试号，据当前轮填 1/2/3）：
+
+### 2a. detach（一次短调用，秒级返回，**禁在此调用 wait/sleep**）
+
+```bash
+cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable" >&2; exit 1; }
+mkdir -p runs/train
+rm -f runs/train/.train_pid runs/train/.train_rc
+nohup bash -c 'bash run_train_supernet.sh > "runs/train/train.attempt'"$N"'.log" 2>&1; echo $? > runs/train/.train_rc' >/dev/null 2>&1 &
+echo $! > runs/train/.train_pid
+echo "DETACHED pid=$(cat runs/train/.train_pid) attempt=$N"
+```
+
+### 2b. 短轮询（**重复发**这个调用直到 stdout 出现 `DONE`；每次 ≤5 min，不撞工具超时）
+
+```bash
+cd "$ORCA_ARTIFACTS_DIR" || exit 1
+PID="$(cat runs/train/.train_pid 2>/dev/null)"
+if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
+  echo "DONE rc=$(cat runs/train/.train_rc 2>/dev/null || echo unknown)"
+  tail -30 "runs/train/train.attempt${N}.log" 2>/dev/null
+else
+  sleep 240   # 4 min；禁改更大（撞 bash 工具超时）
+  echo "RUNNING"
+  tail -8 "runs/train/train.attempt${N}.log" 2>/dev/null
+fi
+```
+
+- stdout `RUNNING` → **再发一次 2b**（禁在同一调用里 while 循环；每次 2b 是独立短调用）。
+- stdout `DONE rc=...` → 进 2c。
+- **无轮询上限**：训练可能跑很久（小时～天级）。重复发 2b 直到 `DONE`——**不设次数上限**。仅 warmup
+  检测早期假死；过了 warmup（前几次轮询已见到 epoch 标记 + loss 有限）即信任进程在跑，持续轮询到结束。
+- **warmup 健康检查**：前 2~3 次 `RUNNING` 的 `tail` 应出现 epoch 标记 + loss 有限（非 NaN/inf）。无 epoch
+  标记 / loss 发散 → 训练假死或静默崩 → `kill` + self-heal，**不空等满 2h**。
+
+> 跨 shell RC：detach 的子 shell 末尾 `echo $? > .train_rc` 把进程 RC 落文件；轮询调用是**不同** bash
+> 子 shell（`wait` 跨 shell 无效）→ 从 `.train_rc` 读 RC。
+
+### 2c. 判成功
+
+`DONE rc=0` **且** supernet ckpt 文件存在 → 成功 → 记住 ckpt 路径，进 Step 2.6（软判断）→ Step 3。
+ckpt 路径解析（`pathlib`/`os.path`，禁字符串拼）：先 `grep supernet_ckpt_path search_config.yaml`，
+取到则用它（相对路径相对 `$ORCA_ARTIFACTS_DIR`），否则 `runs/train/supernet_best.pth`。
+
+`DONE rc≠0` / ckpt 缺 → **self-heal**：
+- `read` 读 `runs/train/train.attempt${N}.log` 尾部 ~50 行定位根因。
+- 判断根因所属层级（铁律 3 白名单两层）：
+  - **纯补丁层**（launcher / 路径 / import 错 / typo）→ 用 `edit` 改对应文件，把改动文件相对路径
+    append 到 `.ns_run_train_healed.txt`（Step 0 marker 协议）。无需重触 fidelity。
+  - **训练逻辑层**（`train_supernet.py` / `evaluator.py` 的 loss / optimizer / sampling / KD / 数据管道）
+    → 用 `edit` 改，append 到 `.ns_run_train_healed.txt`，**且必须**进 Step 2.5 重触 fidelity-verifier，
+    写 `.ns_run_train_fidelity.flag`。
+  - 否（根因需碰**禁碰清单**铁律 4）→ **禁止 edit**；记 last_error，直接 `N++`（本次尝试算失败）。
+- `N++` 回 2a。`N>3` 放弃，进 Step 3 如实输出 `{"status":"failed"}`。
 
 ### Step 2.5 ── 重触 project-fidelity-verifier（point-to-file 协议，按需）
 
