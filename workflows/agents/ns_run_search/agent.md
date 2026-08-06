@@ -30,7 +30,8 @@ tools: [bash, read, edit, grep, glob, task]
        metric 计算 / data pipeline
 3. **禁碰清单（硬铁律，违反=架构破坏）**：以下文件**只许 read，禁 edit/write**——
    `supernet.py`、`project_manifest.md`、`supernet_summary.md`、
-   `{{ inputs.user_project_root }}` 下任何文件。若 self-heal 需要改这些 → **不要改**，记
+   `{{ inputs.project_root }}` 下**源文件**（**例外**：`{{ inputs.project_root }}/artifacts/`
+   是本 workflow 产物目录树，可写）。若 self-heal 需要改禁碰文件 → **不要改**，记
    last_error，耗尽 3 次后 fail loud。
 4. **上游 ckpt 缺失不是你的责任，但要 fail loud**：若 ns_run_train output `status=skipped` 或
    ckpt 缺失导致 search 跑不动，**不要**伪造 search 成功——如实 fail，让用户看到训练没跑。
@@ -47,7 +48,7 @@ tools: [bash, read, edit, grep, glob, task]
 - `{{ subagents_root }}/project-fidelity-verifier.md` = fidelity-verifier subagent body
   （point-to-file 协议，Step 2.5；render 期 inline 为绝对路径，cwd 无关）。
 
-## Step 0 ── 行为痕迹 marker 文件（self-heal 过程中维护）
+## 行为痕迹 marker 文件（self-heal 期间维护，约定）
 
 agent 本次 self-heal 的行为痕迹写到三个 marker 文件（deterministic 部分 + 行为痕迹分离——
 Step 3 python 读 marker 拼 JSON，agent 不需要改 python 脚本）：
@@ -61,6 +62,49 @@ Step 3 python 读 marker 拼 JSON，agent 不需要改 python 脚本）：
 
 > marker 文件路径相对 `$ORCA_ARTIFACTS_DIR`；agent 不许伪造——下游 review 核对 healed_files
 > 是否触碰禁碰清单（防蒙混靠审计）。
+
+## Step 0 ── Reuse-Check（软跳过
+
+> project-scoped artifacts 跨 run 复用：本节点权威产物 = `$ORCA_ARTIFACTS_DIR/search_results.jsonl`
+> （行数 ≥1 + 合法 JSON）。本步**先查产物在不在，在则验证达标就跳过重做**——避免重复搜索烧算力。
+
+**确定性查 + 验证（禁盲目跳过）**：在 Step 1 前置检查之前执行：
+
+```bash
+cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
+RESULTS="$ORCA_ARTIFACTS_DIR/search_results.jsonl"
+if [ -s "$RESULTS" ]; then
+  # 验证达标：每行合法 JSON（用 python json.loads 验证 ≥1 行有效）
+  if python3 -c "
+import json, sys
+n = 0
+with open(sys.argv[1], 'r', encoding='utf-8', errors='replace') as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        json.loads(line)   # raise on invalid
+        n += 1
+assert n >= 1, 'no valid records'
+print('RESULTS_VALID')
+" "$RESULTS" 2>/dev/null | grep -q RESULTS_VALID; then
+    # 清旧 marker + 写 reuse assessment（Step 3 python 读 marker 拼 JSON）。
+    rm -f .ns_run_search_healed.txt .ns_run_search_fidelity.flag
+    : > .ns_run_search_healed.txt   # 空 healed_files
+    printf 'reused existing search_results.jsonl: %s' "$RESULTS" > .ns_run_search_assessment.txt
+    echo "REUSE: search_results.jsonl 已存在且达标 → 跳过 Step 1/2，直进 Step 3"
+    EXEC_REUSE=1
+  fi
+fi
+```
+
+- 达标（`search_results.jsonl` ≥1 行合法 JSON）→ 跳过 Step 1 / Step 2，直接进 Step 3 emit
+  `{"status":"executed","artifacts":["$RESULTS"],...}`（Step 3 python 从盘读出，自然产出 executed）。
+  `assessment` 前缀 `reused existing search_results.jsonl: <path>`（复用可观测性，机械可检：artifact
+  mtime 早于本次 run 起点）。
+- 不存在 / 不达标 → 照常执行 Step 1 前置检查 + Step 2 self-heal。
+- **status 枚举不动**：reused 走 `executed`（成功路径同一 status，ns_select 路由守卫读 executed
+  不误判）。
 
 ## Step 1 ── 前置检查（确定性，跑一次）
 
@@ -231,7 +275,8 @@ PY
 - **绝不带错下传**：self-heal 耗尽 3 次仍失败 → `status=failed`，让引擎终止，**不要**降级
   `executed` 让下游 ns_select 拿着空/坏 jsonl 跑。
 - **禁碰清单是硬铁律**：哪怕 self-heal 卡死，也不许 edit `supernet.py` / `project_manifest.md` /
-  `supernet_summary.md` / `{{ inputs.user_project_root }}` 下任何文件。卡死就 fail loud。
+  `supernet_summary.md` / `{{ inputs.project_root }}` 下**源文件**（例外：`{{ inputs.project_root }}/artifacts/`
+  是本 workflow 产物目录树，可写）。卡死就 fail loud。
 - **marker 文件不伪造**：healed_files 必须 = 本次真实 edit 过的文件；fidelity_retriggered 必须 =
   本次真实跑过 Step 2.5。下游 review 核对 marker vs healed_files 是否触碰禁碰清单。
 - 搜索 stdout 不进最终回复——只有 Step 3 python 的输出是你的回复。

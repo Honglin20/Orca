@@ -628,17 +628,19 @@ def test_model_flatten_agent_md_consumes_baseline_model_path_input():
 
 
 def test_flatten_agent_md_output_dir_co_rooted_with_setup():
-    """flatten output_dir 必须与下游 setup ``kd_artifacts_dir`` 同根
-    （``${PROJECT_ROOT}/artifacts/``，Phase 3 拍平去 kd-nas 层），不再落 per-run ``$ORCA_ARTIFACTS_DIR``
-    （2026-08-04 drift 修复守护：flatten 早于 setup 写入，曾误用 P9 旧约定 per-run 目录）。
+    """flatten output_dir 必须与下游 setup ``kd_artifacts_dir`` 同根同子目录
+    （``${PROJECT_ROOT}/artifacts/kd-nas/``，project-scoped，撤销 Phase 3 拍平——SPEC 2026-08-06 §2.3），
+    不再落 per-run ``$ORCA_ARTIFACTS_DIR``（2026-08-04 drift 修复守护：flatten 早于 setup 写入，
+    曾误用 P9 旧约定 per-run 目录）。
 
     R1 闭环（code-reviewer）：step3 去后缀必须落定为**确定性 python 片段**（``split(' (low-confidence')``
     + ``os.path.abspath``，与 ``kd-setup/agent.md`` 逐字对齐），非 prose（Rule 5）。
     本测试守「契约 prose + 确定性代码」两层；runtime 同根性靠两边 python 片段逐字对齐保证。"""
     text = (FLATTEN_DIR / "agent.md").read_text(encoding="utf-8")
-    assert "${PROJECT_ROOT}/artifacts/models/baseline/" in text, (
-        "flatten output_dir 必须落 ${PROJECT_ROOT}/artifacts/models/baseline/"
-        "（与 setup kd_artifacts_dir 同根，Phase 3 拍平去 kd-nas 层，跨 run 持久）"
+    assert "${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/" in text, (
+        "flatten output_dir 必须落 ${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/"
+        "（project-scoped artifacts 子目录，与 setup kd_artifacts_dir=${PROJECT_ROOT}/artifacts/kd-nas/ "
+        "同根合流，跨 run 持久，撤销 Phase 3 拍平）"
     )
     # 产物目录的两处指定（输入段「输出目录:」+ 准备 step3「确定输出目录」）不应再用
     # $ORCA_ARTIFACTS_DIR（per-run runs/<run_id>/）作产物目录。
@@ -648,16 +650,20 @@ def test_flatten_agent_md_output_dir_co_rooted_with_setup():
         block = text[idx:idx + 400]
         assert "$ORCA_ARTIFACTS_DIR" not in block, (
             f"{anchor!r} 段不应再用 $ORCA_ARTIFACTS_DIR（per-run）作产物目录；"
-            f"已改 ${PROJECT_ROOT}/artifacts/ 同根合流（Phase 3 拍平）"
+            f"已改 ${PROJECT_ROOT}/artifacts/kd-nas/ 同根合流（project-scoped）"
         )
-    # R2 闭环（Phase 3 code-reviewer）：SKILL.md 同步扫描——LLM 实际跑 SKILL.md 工作流，
-    # 若 SKILL.md 残留旧 kd-nas/ 路径，会与 setup 已拍平的 flat 路径不同根（plan §3.4 D6 + R1）。
+    # R2 闭环（Phase 3 code-reviewer → SPEC 2026-08-06 §2.3 反转）：SKILL.md 同步扫描——LLM 实际跑
+    # SKILL.md 工作流，若 SKILL.md 残留旧拍平路径（无 kd-nas/ 子目录），会与 setup 现布局不同根。
     skill_text = (FLATTEN_DIR / "SKILL.md").read_text(encoding="utf-8")
-    assert "${PROJECT_ROOT}/artifacts/models/baseline/" in skill_text, (
-        "SKILL.md output_dir 必须落 ${PROJECT_ROOT}/artifacts/models/baseline/（Phase 3 拍平）"
+    assert "${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/" in skill_text, (
+        "SKILL.md output_dir 必须落 ${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/（project-scoped，撤销拍平）"
     )
-    assert "artifacts/kd-nas/" not in skill_text, (
-        "SKILL.md 不应残留 artifacts/kd-nas/（Phase 3 已拍平；agent.md 与 SKILL.md 必须同根）"
+    # agent.md 与 SKILL.md 都不应残留旧拍平根（artifacts/models/baseline/ 不带 kd-nas/ 前缀）。
+    assert "artifacts/models/baseline/" not in text, (
+        "agent.md 不应残留旧拍平路径 artifacts/models/baseline/（无 kd-nas/ 前缀，SPEC 2026-08-06 §2.3 已撤销拍平）"
+    )
+    assert "artifacts/models/baseline/" not in skill_text, (
+        "SKILL.md 不应残留旧拍平路径 artifacts/models/baseline/（无 kd-nas/ 前缀，SPEC 2026-08-06 §2.3 已撤销拍平）"
     )
     # R1：step3 去后缀必须用确定性代码（与 setup kd-setup/agent.md 逐字对齐），非 prose。
     step3_idx = text.find("确定输出目录")

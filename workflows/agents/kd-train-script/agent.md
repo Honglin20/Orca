@@ -54,6 +54,46 @@ workflow 节点经 Jinja 渲染注入（flatten + teacher-gen 上游 output + in
 
 ## 准备工作
 
+### Step 0: Reuse-Check（软跳过）
+
+> 本节点权威产物 = 4 叶子（`$OUTPUT_DIR/user/{loss,data,eval,optim}.py`）+ `run_config.yaml`。
+> 本步**先查产物在不在，在则验证达标就跳过重做**——避免重复生成训练脚本烧 LLM 算力。
+>
+> **scope 注**：4 叶子 + run_config 当前落 per-run `$ORCA_ARTIFACTS_DIR`（无 project_root input →
+>  per-run 回落）。cross-run reuse 受限于 per-run 目录生命周期；本步主要覆盖
+> **同一 run 内** re-arm 场景（fidelity audit fail → 同节点重派 → 不重复生成既有合法叶子）。
+
+**确定性查 + 验证（禁盲目跳过）**：在准备工作 bash 之后、Step 1 之前执行：
+
+```bash
+LEAVES_DIR="$OUTPUT_DIR/user"
+RUN_CONFIG="$OUTPUT_DIR/run_config.yaml"
+REUSE_LEAVES=0
+if [ -s "$RUN_CONFIG" ] && [ -d "$LEAVES_DIR" ]; then
+  MISSING=""
+  for leaf in loss data eval optim; do
+    [ -s "$LEAVES_DIR/$leaf.py" ] || MISSING="$MISSING $leaf.py"
+  done
+  if [ -z "$MISSING" ]; then
+    # 验证达标：四叶子 python 语法 OK + run_config.yaml 合法 YAML
+    if python3 -c "
+import ast, yaml
+for l in ('loss','data','eval','optim'):
+    ast.parse(open('$LEAVES_DIR/'+l+'.py').read())
+yaml.safe_load(open('$RUN_CONFIG'))
+print('LEAVES_VALID')
+" 2>/dev/null | grep -q LEAVES_VALID; then
+      REUSE_LEAVES=1
+      echo "REUSE: 4 叶子 + run_config.yaml 已存在且达标 → 跳过 Step 1-3，直进 Step 4 校验栈"
+    fi
+  fi
+fi
+```
+
+- 达标 → 跳过 Step 1-3（load context / AST 检测 / generate），直接进 Step 4 校验栈（L1+L2+L3+L4）。
+- 不存在 / 不达标 → 照常执行 Step 1-3。
+- **schema 不动**：本节点 output_schema 无 status 字段；reused 与首次成功 emit 同一组字段值。
+
 ```bash
 source .venv/bin/activate 2>/dev/null || true
 # KD_SCRIPTS_DIR：canonical 来源 = executor 注入的 $ORCA_WORKFLOWS_ROOT（cwd 无关）。

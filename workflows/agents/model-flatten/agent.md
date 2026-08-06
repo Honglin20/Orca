@@ -56,30 +56,64 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 - 模型入口: `{{ inputs.baseline_model_path }}`（任意 `.py` / `.yaml` / config 入口；flatten agent 会展平成 KD 变体契约，**不再要求用户自带契约**）
 - 设备: `{{ inputs.device }}`（advanced，默认 `auto`；用于 `validate_contract.py` forward 校验 + `__main__` latency 测量）
 - latency_provider: `{{ inputs.latency_provider }}`（用户真硬件 latency 脚本 `path::func`；kd-nas workflow 必填。**写入 flat 文件 `__main__` 的 `--latency_provider` 默认值**——渲染后的实际路径串，不是 Jinja 模板；空串 → helper fallback ONNXRT-CPU + WARN）
-- 输出目录: `${PROJECT_ROOT}/artifacts/models/baseline/`（跨 run 持久，与下游 setup 同根）。PROJECT_ROOT 由 step2 推断（找不到 .git/pyproject.toml/train.py 时取 baseline_model_path 的 dirname，总非空 → OUTPUT_DIR 总非空，无 fallback）
+- 输出目录: `${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/`（跨 run 持久，project-scoped artifacts 子目录，与下游 setup `kd_artifacts_dir=${PROJECT_ROOT}/artifacts/kd-nas/` 同根合流）。PROJECT_ROOT 由 step2 推断（找不到 .git/pyproject.toml/train.py 时取 baseline_model_path 的 dirname，总非空 → OUTPUT_DIR 总非空，无 fallback）
 
 ## 准备工作
+
+### Step 0: Reuse-Check（软跳过）
+
+> project-scoped artifacts 跨 run 复用：本节点权威产物 = `${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/<base_name>_flat.py`
+> （project-scoped，跨 run 持久）。本步**先查产物在不在，在则验证达标就跳过重做**——避免重复
+> flatten 烧 LLM 算力。
+
+**确定性查 + 验证（禁盲目跳过）**：在 Step 2 推断 project_root 之后执行：
+
+```bash
+# 扫 OUTPUT_DIR 下既有 *_flat.py（project-scoped，跨 run 持久）。
+FLAT_CANDIDATES=$(ls "$OUTPUT_DIR"/*_flat.py 2>/dev/null || true)
+if [ -n "$FLAT_CANDIDATES" ]; then
+  for f in $FLAT_CANDIDATES; do
+    # 验证达标：validate_contract.py PASS（exit 0）= build_model + DUMMY_INPUT + KNOBS 都合法
+    if python3 "$ORCA_AGENT_RESOURCES/scripts/validate_contract.py" \
+        --contract "$f" --device "{{ inputs.device }}" --seed 0 2>/dev/null; then
+      REUSE_FLAT="$f"
+      break
+    fi
+  done
+fi
+if [ -n "$REUSE_FLAT" ]; then
+  echo "REUSE: 既有 flat 契约 $REUSE_FLAT validate PASS → 跳过 flatten，直接跑 __main__ 测 latency"
+fi
+```
+
+- 达标（既有 `*_flat.py` `validate_contract.py` PASS）→ 跳过 Step 1-5（展平 + KNOBS 识别），
+  直接跑既有 flat 文件的 `__main__` 测 latency（拿到 `LATENCY_US:` / `OUTPUT_SHAPE_OBSERVED:`），
+  按 output_schema emit `baseline_contract_path=$REUSE_FLAT` + 真 latency + `model_name` 从文件名推断
+  （去 `_flat.py` 后缀）+ `flat_artifacts_dir=$OUTPUT_DIR` + `project_root` 同 step2 推断。
+  复用可观测性：flat 文件 mtime 早于本次 run 起点（机械可检，防 LLM 谎报 reused）。
+- 不存在 / 不达标（validate FAIL）→ 照常执行 Step 1-6 flatten 流程。
+- **schema 不动**：本节点 output_schema 无 status 字段；reused 与首次 emit 同一组字段值。
 
 1. 激活 Python 虚拟环境:
    ```bash
    source .venv/bin/activate 2>/dev/null || true
    ```
 2. **推断 project_root（infer-once）**：从 `{{ inputs.baseline_model_path }}` 所在目录起，向上逐级找**第一个含 `train.py` 或 `pyproject.toml` 或 `.git` 的目录**作为项目根（绝对路径）。走到 `/` 仍找不到 → 取 `{{ inputs.baseline_model_path }}` 的 dirname，并在 `project_root` 字段后追加 ` (low-confidence: no train.py/pyproject.toml/.git ancestor)`（不阻塞，但必须显式标注）。**不许**用 `pwd` / `git rev-parse` / 最近编辑文件推断；**不许**留空或编造。
-3. **确定输出目录**（跨 run 持久，与 setup 同根合流）：执行以下 bash 计算 `<output_dir>`——去后缀公式与 `kd-setup/agent.md` step1 **逐字对齐**（`split(' (low-confidence')[0]` + `os.path.abspath`），保证 flatten（先于 setup 执行）与 setup 算出同一根（确定性逻辑用代码不靠 prose）。`$PROJECT_ROOT_IN` = step2 推断的 project_root（**照填，含可能的 ` (low-confidence: ...)` 后缀**——python 片段去后缀）：
+3. **确定输出目录**（跨 run 持久，project-scoped artifacts 子目录，与 setup 同根合流）：执行以下 bash 计算 `<output_dir>`——去后缀公式与 `kd-setup/agent.md` step1 **逐字对齐**（`split(' (low-confidence')[0]` + `os.path.abspath`），保证 flatten（先于 setup 执行）与 setup 算出同一根 + 同一 `kd-nas` 子目录（确定性逻辑用代码不靠 prose）。`$PROJECT_ROOT_IN` = step2 推断的 project_root（**照填，含可能的 ` (low-confidence: ...)` 后缀**——python 片段去后缀）：
 
    ```bash
    OUTPUT_DIR="$(python3 -c "
    import os, sys
    p = sys.argv[1].split(' (low-confidence')[0].strip()
    proot = os.path.abspath(p) if p else ''
-   print(os.path.join(proot, 'artifacts', 'models', 'baseline') if proot else '')
+   print(os.path.join(proot, 'artifacts', 'kd-nas', 'models', 'baseline') if proot else '')
    " "<LLM 填：step2 推断的 project_root 绝对路径（含 low-confidence 后缀照填）>")"
    [ -n "$OUTPUT_DIR" ] || { echo "FAIL: step2 推断的 project_root 为空（未推断？）" >&2; exit 2; }
    mkdir -p "$OUTPUT_DIR" && cd "$OUTPUT_DIR"
    echo "OUTPUT_DIR=$OUTPUT_DIR"
    ```
 
-   下面所有产物写进 `$OUTPUT_DIR`，`flat_artifacts_dir` 字段填它。**low-confidence 边缘**：step2 推断失败时 `PROJECT_ROOT_IN` = baseline_model_path 的 dirname（去后缀后），OUTPUT_DIR = `dirname/artifacts/models/baseline/`——可能与 setup 不合流（setup 从 `baseline_contract_path` 向上重算根），但 `baseline_contract_path` 绝对路径仍供 setup 读取，功能不阻断（统一用 PROJECT_ROOT 公式，确定性优先，不再 fallback `llm_artifacts/`）。
+   下面所有产物写进 `$OUTPUT_DIR`，`flat_artifacts_dir` 字段填它。**low-confidence 边缘**：step2 推断失败时 `PROJECT_ROOT_IN` = baseline_model_path 的 dirname（去后缀后），OUTPUT_DIR = `dirname/artifacts/kd-nas/models/baseline/`——可能与 setup 不合流（setup 从 `baseline_contract_path` 向上重算根），但 `baseline_contract_path` 绝对路径仍供 setup 读取，功能不阻断（统一用 PROJECT_ROOT 公式，确定性优先，不再 fallback `llm_artifacts/`）。
 
 ## 执行流程
 

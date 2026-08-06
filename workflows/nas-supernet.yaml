@@ -6,15 +6,19 @@ entry: ns_expand_supernet
 # ─────────────────────────────────────────────────────────────────────────────
 # inputs——三档标签（contract §6）：[ask]=业务决策必填 / [advanced]=罕见
 # override 可选 / [default]=工程默认。seed 全 workflow必有（contract §6 Tier A 子类）。
+#
+# `$ORCA_ARTIFACTS_DIR`（in-session 入口注入）：``project_root`` 非空绝对路径 →
+# ``<project_root>/artifacts/nas-supernet/``（project-scoped，跨 run 复用 + 多 wf 隔离）；
+# 否则 per-run ``runs/<run_id>/artifacts/`` 回落（见 SPEC 2026-08-06 §2.1）。
 # ─────────────────────────────────────────────────────────────────────────────
 inputs:
-  user_project_root:
+  project_root:
     type: string
-    description: "[ask] 用户原始 PyTorch 项目根目录绝对路径。supernet 张开 / 训练 logic porting / fidelity 校验都以此为源项目锚点（agent.md 经 {{ inputs.user_project_root }} 引用）。必须用户给——代码里能 grep 出事实但项目根本身是意图/上下文边界"
+    description: "[ask] 用户原始 PyTorch 项目根目录绝对路径。supernet 张开 / 训练 logic porting / fidelity 校验都以此为源项目锚点（agent.md 经 {{ inputs.project_root }} 引用）。必须用户给——代码里能 grep 出事实但项目根本身是意图/上下文边界。亦作 in-session project-scoped artifacts 解析锚点（绝对路径，否则 bootstrap fail loud）"
     required: true
   model_path:
     type: string
-    description: "[ask] 目标模型入口文件路径（相对 user_project_root 或绝对）。supernet 张开的起点——ns_expand_supernet flatten 此文件生成 supernet.py。项目内唯一锚点，必须用户给"
+    description: "[ask] 目标模型入口文件路径（相对 project_root 或绝对）。supernet 张开的起点——ns_expand_supernet flatten 此文件生成 supernet.py。项目内唯一锚点，必须用户给"
     required: true
   target_latency_ms:
     type: number

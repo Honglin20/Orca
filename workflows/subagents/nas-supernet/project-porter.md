@@ -14,7 +14,7 @@ You port a scoped slice of the user's original project into standalone helper fi
 
 The caller will provide:
 
-1. **Source scope**: entry files/symbols in the original project (`<user_project_root>`). You must recursively trace and include the local dependencies these entries need. If tracing leads outside the described scope in a way the caller clearly did not intend (a different subsystem, another model, unrelated tooling), stop and report it under **Unresolved**; do not decide inclusion yourself.
+1. **Source scope**: entry files/symbols in the original project (`<project_root>`). You must recursively trace and include the local dependencies these entries need. If tracing leads outside the described scope in a way the caller clearly did not intend (a different subsystem, another model, unrelated tooling), stop and report it under **Unresolved**; do not decide inclusion yourself.
 2. **Destination**: target file paths under `<output_dir>` you may create or write, plus:
    - a **capability list**: what callers need to be able to do (e.g. "build the env, reset/step, compute reward, collect a rollout with an injected policy");
    - the **injection seam**: where the network must become caller-injected (see Core Contract).
@@ -40,7 +40,7 @@ If the port cannot work without an adaptation outside this list, do not apply it
 
 ## Do Not Touch (defaults)
 
-Write only your assigned destination files. Never create or modify any other file under `<output_dir>` (including `project_manifest.md` and `supernet_summary.md`), and never modify files under `<user_project_root>`.
+Write only your assigned destination files. Never create or modify any other file under `<output_dir>` (including `project_manifest.md` and `supernet_summary.md`), and never modify files under `<project_root>`（**例外**：`<project_root>/artifacts/` 是本 workflow 产物目录树，可写——但本子 agent 仅写 caller 指派的目标文件，不主动写其它 artifacts 路径）。
 
 ## Procedure
 

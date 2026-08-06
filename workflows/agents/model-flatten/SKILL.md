@@ -28,15 +28,16 @@ requires **when you begin that step**. This keeps context focused.
 
 ## Working Directory and Path Conventions
 
-- `<output_dir>`: `${PROJECT_ROOT}/artifacts/models/baseline/` —— cross-run persistent
-  and **co-rooted with the downstream `setup` node's `kd_artifacts_dir`**. The
-  baseline contract travels with the project across runs. `PROJECT_ROOT` is the **low-confidence
-  suffix-stripped** value inferred in preparation; `agent.md` step 3 computes `<output_dir>` with
-  a **deterministic python snippet** (`split(' (low-confidence')[0]` + `os.path.abspath`)
-  **verbatim-aligned with `kd-setup/agent.md`** so both nodes derive the same root (deterministic
-  logic in code, not prose). `mkdir -p <output_dir>` before writing. **Run `cd <output_dir>`
-  once before executing any command**; the working directory persists. All artifacts are written
-  under `<output_dir>`.
+- `<output_dir>`: `${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/` —— cross-run persistent,
+  project-scoped (lives under the `kd-nas/` sub-tree alongside other kd-nas artifacts) and
+  **co-rooted with the downstream `setup` node's `kd_artifacts_dir`**
+  (`${PROJECT_ROOT}/artifacts/kd-nas/`). The baseline contract travels with the project across
+  runs. `PROJECT_ROOT` is the **low-confidence suffix-stripped** value inferred in preparation;
+  `agent.md` step 3 computes `<output_dir>` with a **deterministic python snippet**
+  (`split(' (low-confidence')[0]` + `os.path.abspath`) **verbatim-aligned with `kd-setup/agent.md`**
+  so both nodes derive the same root + `kd-nas` sub-tree (deterministic logic in code, not prose).
+  `mkdir -p <output_dir>` before writing. **Run `cd <output_dir>` once before executing any
+  command**; the working directory persists. All artifacts are written under `<output_dir>`.
 - `<user_project_root>`: The root of the user project (contains the model entry file).
   Inferred once in preparation (see agent.md), not a workflow input.
 - Use `pathlib.Path` for path construction; never string concatenation.

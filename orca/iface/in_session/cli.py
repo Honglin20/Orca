@@ -853,6 +853,65 @@ def _read_workflow_name(tape_path: Path) -> str | None:
     return None
 
 
+def _read_workflow_inputs(tape_path: Path) -> dict:
+    """读 tape 首条 ``workflow_started.data.inputs``（project-scoped artifacts 解析用）。
+
+    镜像 ``_read_workflow_name`` 的 tape 头扫描骨架（同一 ``workflow_started`` 事件）。
+    无 ws / 损坏 / 无 inputs → ``{}``（调用方按「无 project_root」回落 per-run，不崩）。
+
+    本地 helper 而非 import ``orca.events.replay._replay_state_and_inputs``（私有）
+    或既有 ``inputs_from_tape``（已删，E5）——SPEC 2026-08-06 §2.1：next 路径 ``--inputs``
+    默认 ``"{}"`` 拿不到原始 inputs，bootstrap/next 两处统一从 tape 读为单一真相源。
+    """
+    if not tape_path.is_file():
+        return {}
+    try:
+        with open(tape_path, encoding="utf-8") as f:
+            for _i, line in enumerate(f):
+                if _i >= _TAPE_HEAD_SCAN_LIMIT:
+                    return {}
+                s = line.strip()
+                if not s:
+                    continue
+                obj = json.loads(s)
+                if obj.get("type") == "workflow_started":
+                    inputs = obj.get("data", {}).get("inputs")
+                    return inputs if isinstance(inputs, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return {}
+
+
+def _resolve_artifacts_dir(
+    tape_path: Path, run_id: str,
+) -> tuple[Path, bool]:
+    """SPEC 2026-08-06 §2.1：派生 ``$ORCA_ARTIFACTS_DIR``（in-session 入口）。
+
+    返回 ``(artifacts_dir, is_project_scoped)``：
+      - workflow 的 inputs 含非空**绝对** ``project_root`` + 有 wf_name →
+        ``<project_root>/artifacts/<workflow_name>/``，``is_project_scoped=True``。
+      - 否则 → 既有 per-run ``runs/<run_id>/artifacts/``（向后兼容，旧 workflow 零回归），
+        ``is_project_scoped=False``。
+
+    fail loud：``project_root`` 给了但非绝对 → raise（防相对路径跨 run 漂移；
+    bootstrap 起点暴露，不静默 ``.resolve()`` 出错位路径）。
+
+    ``wf_name`` + ``inputs`` 都从 tape 读（bootstrap 与 ``next`` 两处统一，单一真相源；
+    ``next --inputs`` 默认 ``"{}"`` 不反映真实 inputs，tape 是唯一可信源）。
+    """
+    wf_name = _read_workflow_name(tape_path)
+    inputs = _read_workflow_inputs(tape_path)
+    proj = (inputs or {}).get("project_root", "")
+    if proj and wf_name:
+        p = Path(proj)
+        if not p.is_absolute():
+            raise ValueError(
+                f"project_root 必须绝对路径：{proj!r}（workflow={wf_name!r}）"
+            )
+        return (p / "artifacts" / wf_name).resolve(), True
+    return artifacts_dir_for_run(tape_path.parent, run_id).resolve(), False
+
+
 # tape 头扫描行数上限（workflow_started 正常是首条；超此仍无即放弃，防读大文件）。
 _TAPE_HEAD_SCAN_LIMIT = 100
 
@@ -1247,17 +1306,22 @@ def bootstrap(
     sock_path = chart_sock_path(run_id)
     env_path = _env_file_path(tape_path, run_id)
     # P8（plan 2026-07-21 §Phase 4-A）：算产物权威目录 + ``mkdir -p``。
-    # 单一真相源：``artifacts_dir_for_run(runs_dir, run_id)``。绝对路径 → subagent 切目录仍正确。
-    # bootstrap 是 run 生命周期起点（marker + tape 已就绪），此处 mkdir 安全（不存在 race）：
-    # 同 wf dupe check 已在 bootstrap_lock 内 fail loud；不同 wf 各自 run_id 唯一 → artifacts
-    # 目录互不冲突。next 路径复用同一目录（per-run 常量，不重 mkdir）。
-    # ``artifacts_dir_for_run`` 来自 ``orca.chart._paths``（单一真相源，顶部已 import）。
-    artifacts_dir = artifacts_dir_for_run(tape_path.parent, run_id).resolve()
+    # SPEC 2026-08-06 §2.1：workflow 有 ``project_root`` 绝对 input → project-scoped
+    # ``<proj>/artifacts/<wf>/``（跨 run 复用）；否则 per-run ``runs/<run_id>/artifacts/``
+    # （向后兼容）。两路径都从 tape 读 wf_name + inputs（bootstrap 路径 tape 已有 ws）。
+    # ``is_project_scoped`` 区分 mkdir 失败语义：project-scoped 写不进后续全崩 → fail loud
+    # （SPEC §2.1）；per-run 写不进仍 fail-open（workflow 脚本自己 fail loud）。
+    artifacts_dir, is_project_scoped = _resolve_artifacts_dir(tape_path, run_id)
     try:
         artifacts_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
-        # mkdir 失败（磁盘满 / 权限）→ warn 不 fail bootstrap（与 env 文件写失败同 fail-open
-        # 语义：ORCA_ARTIFACTS_DIR 仍注 env，workflow 脚本写产物时自己 fail loud）。
+        if is_project_scoped:
+            # project-scoped 目录 mkdir 失败（只读项目根 / 权限）→ bootstrap fail loud。
+            # 区别于 per-run fail-open：project-scoped 写不进后续节点全崩，须起点暴露
+            # （SPEC §2.1）。``project_root`` 非绝对已在 ``_resolve_artifacts_dir`` raise。
+            raise
+        # per-run mkdir 失败（磁盘满 / 权限）→ warn 不 fail bootstrap（与 env 文件写失败
+        # 同 fail-open 语义：ORCA_ARTIFACTS_DIR 仍注 env，workflow 脚本写产物时自 fail loud）。
         logger.warning(
             "run %s: artifacts 目录 %s mkdir 失败（workflow 写产物时自 fail loud）",
             run_id, artifacts_dir, exc_info=True,
@@ -1547,10 +1611,12 @@ def _load_wf_for_run(run_id: str, tape: Tape) -> "Workflow":
 def _derive_artifacts_dir(tape: Tape, run_id: str) -> Path:
     """P8：从 tape.path + run_id 派生 artifacts_dir（next 路径用，与 bootstrap 同源）。
 
-    单一真相源：``orca.chart._paths.artifacts_dir_for_run``（顶部已 import）。``resolve()``
-    返绝对路径（与 ``ORCA_CHART_SOCK`` / ``ORCA_AGENT_RESOURCES`` 同 resolve 契约）。
+    SPEC 2026-08-06 §2.1：透传 ``_resolve_artifacts_dir``（project-scoped 或 per-run 回落）。
+    与 bootstrap 同 helper、同 tape 读 sources → 两路径产物目录字面一致（DRY）。
+    next 路径不重 mkdir（bootstrap 已建）；``project_root`` 非绝对 → 透传 raise（fail loud）。
     """
-    return artifacts_dir_for_run(Path(tape.path).parent, run_id).resolve()
+    path, _is_project_scoped = _resolve_artifacts_dir(Path(tape.path), run_id)
+    return path
 
 
 async def _next_in_critical_section(

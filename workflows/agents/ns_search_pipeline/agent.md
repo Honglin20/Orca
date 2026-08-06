@@ -13,7 +13,7 @@ supernet 训练后的 NAS pipeline——block-level latency profiling、多目�
 
 本节点从 `ns_train_script` 留下的 `$ORCA_ARTIFACTS_DIR`（含 supernet / inspector / 可选训练脚本 /
 完成的 `supernet_summary.md` / `project_manifest.md`）接力。生成执行脚本时，用 `project_manifest.md`
-作原始项目地图，读 `$ORCA_ARTIFACTS_DIR` 下生成 artifact + `{{ inputs.user_project_root }}` 下
+作原始项目地图，读 `$ORCA_ARTIFACTS_DIR` 下生成 artifact + `{{ inputs.project_root }}` 下
 相关源取：数据管道、validation metric、batch 结构、model-call signature、optimizer / scheduler、
 AMP、checkpoint convention、dummy input shape、其它训练行为。
 
@@ -25,7 +25,7 @@ AMP、checkpoint convention、dummy input shape、其它训练行为。
   expand + train 已初始化的同一目录）。**先 `cd "$ORCA_ARTIFACTS_DIR"` 再执行任何命令**；后续
   相对路径在该 cwd 下解析；sibling 模块（如 `supernet.py`、`latency_estimator.py`）作 plain import，
   禁 `sys.path` / `PYTHONPATH` 改写。
-- `{{ inputs.user_project_root }}`：用户原始 PyTorch 项目根。缺省时
+- `{{ inputs.project_root }}`：用户原始 PyTorch 项目根。缺省时
   从 `supernet_summary.md` 的 **Source Project** section 读。
 - `{{ inputs.latency_script_path }}`：可选——用户提供的外部时延脚本路径（见 **Step 1 时延规则**）。
 - `<nas_agent_root>` 探测保留（cwd 是产物目录非项目根，需一次性解析）：
@@ -79,7 +79,7 @@ path = f"{d}/file.py"                # 禁：f-string 拼接
 - `$ORCA_ARTIFACTS_DIR`：必须已含上游产出的 supernet、refined `SearchSpace`、supernet inspector、
   supernet 训练脚本（viable 时）、`supernet_summary.md`、`project_manifest.md`（见 **Pipeline Memory**）。
   本 skill 所有产物写在此。任何缺失 → fail loud（output_schema error 字段写明缺哪个），禁静默默认。
-- `{{ inputs.user_project_root }}`：原始用户 PyTorch 项目根。缺 → 从 `supernet_summary.md` 的
+- `{{ inputs.project_root }}`：原始用户 PyTorch 项目根。缺 → 从 `supernet_summary.md` 的
   **Source Project** section 读。
 - **Evaluation paradigm override**（可选）：workflow input 可指定 evaluation paradigm
   （`validate` / `finetune` / `train_from_scratch`）覆盖 `supernet_summary.md` 记录的。提供时，
@@ -93,17 +93,17 @@ path = f"{d}/file.py"                # 禁：f-string 拼接
   到 **Generated Artifacts**；**Evaluation Paradigm** 在有效 paradigm 与记录不同时（用户 override）
   更新并单行记原推荐。
 - **`project_manifest.md`**：原始项目事实。导航索引非 ground truth——codegen 决策前对照
-  `{{ inputs.user_project_root }}` 源码再确认；发现错 / 缺当即就地更正。
+  `{{ inputs.project_root }}` 源码再确认；发现错 / 缺当即就地更正。
 
 `project_manifest.md` 在本 skill 的规则：
 
-- 探 `{{ inputs.user_project_root }}` 前先读；它告诉你去哪看。manifest 已记项目结构
+- 探 `{{ inputs.project_root }}` 前先读；它告诉你去哪看。manifest 已记项目结构
   （env / data / reward / metric / 辅助模型）在 **Training And Evaluation** / **Data And Environment**。
 - Step 2 开始时，用 Read / Grep / Bash 直接探仅 code-writing-level gap
   写 `evaluator.py` 所需：exact env step / reset signature、reward / metric 公式、辅助模型 invocation、
   dataloader batch 结构（manifest 未覆盖处，guided by **Relevant Source Files**）。然后打开将写
-  code 的源自己确认。本 skill **首次**探 `{{ inputs.user_project_root }}` 必须用直接探。
-- 本 skill 任何处读 `{{ inputs.user_project_root }}`（探 / porter 决策）发现 manifest 错 / 缺→
+  code 的源自己确认。本 skill **首次**探 `{{ inputs.project_root }}` 必须用直接探。
+- 本 skill 任何处读 `{{ inputs.project_root }}`（探 / porter 决策）发现 manifest 错 / 缺→
   当即就地更正。
 
 ## Working Directory and Path Conventions
@@ -111,7 +111,7 @@ path = f"{d}/file.py"                # 禁：f-string 拼接
 - `$ORCA_ARTIFACTS_DIR`（**working directory**）：所有产物写在此。**先 `cd "$ORCA_ARTIFACTS_DIR"`
   一次**；后续相对路径在该 cwd 下解析；sibling 模块（如已生成的 supernet / 训练脚本）作 plain
   import。
-- `{{ inputs.user_project_root }}` 用法：**禁**从生成 artifact import `{{ inputs.user_project_root }}`
+- `{{ inputs.project_root }}` 用法：**禁**从生成 artifact import `{{ inputs.project_root }}`
   模块；把所需 logic 复制 / 改写进 `$ORCA_ARTIFACTS_DIR` 下文件，让生成脚本在远端 runtime 自包含。
 - **Path handling**（铁律）：见上 **Path 处理铁律**。
 - **supernet ckpt 路径契约（跨节点，与 ns_train_script / ns_run_train 共享）**：生成
@@ -124,6 +124,41 @@ path = f"{d}/file.py"                # 禁：f-string 拼接
 ## Workflow
 
 按 3 步顺序执行。
+
+### Step 0: Reuse-Check（软跳过
+
+> project-scoped artifacts 跨 run 复用：本节点权威产物 = `select_architecture.py` + `search_config.yaml`
+> + `evaluator.py` + `arch_codec.py`（都落 `$ORCA_ARTIFACTS_DIR/`）。本步**先查产物在不在，在则
+> 验证达标就跳过重做**——避免重复生成搜索 pipeline 烧 LLM 算力。
+
+**确定性查 + 验证（禁盲目跳过）**：在 Step 1 开始前执行：
+
+```bash
+cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
+MISSING=""
+for f in select_architecture.py search_config.yaml evaluator.py arch_codec.py; do
+  [ -s "$f" ] || MISSING="$MISSING $f"
+done
+if [ -z "$MISSING" ]; then
+  # 验证达标：四个 .py 语法 OK + search_config.yaml 合法 YAML（用 python yaml.safe_load）
+  if python3 -c "
+import ast, yaml, sys
+for p in ('select_architecture.py', 'evaluator.py', 'arch_codec.py'):
+    ast.parse(open(p).read())
+yaml.safe_load(open('search_config.yaml'))
+print('PIPELINE_VALID')
+" 2>/dev/null | grep -q PIPELINE_VALID; then
+    echo "REUSE: 搜索 pipeline 四产物已存在且达标 → 跳过 Step 1-3，直进 输出 JSON"
+    EXEC_REUSE=1
+  fi
+fi
+```
+
+- 达标（四产物齐 + .py 语法 OK + YAML 合法）→ 跳过 Step 1-3，按既有 output_schema emit：
+  各 `*_path` 字段从 disk 读真实路径 + `error=""` + `generated_artifacts` 列既有产物。复用可观测性
+  靠产物 mtime 早于本次 run 起点（机械可检）。
+- 不存在 / 不达标 → 照常执行 Step 1-3。
+- **status 枚举不动**：本节点 output_schema 无 status 字段，reused 与首次成功 emit 同一组字段值。
 
 ### Step 1: Generate Latency Estimator
 
@@ -208,7 +243,7 @@ call-site code 无论如何是你的工作；porter 只 offload 读源 closure +
 
 每个 porter 返回后：
 
-- 检查 mapping 与 unresolved items，确认无生成文件 runtime import `{{ inputs.user_project_root }}`。
+- 检查 mapping 与 unresolved items，确认无生成文件 runtime import `{{ inputs.project_root }}`。
 - 写 `evaluator.py` 的 call-site 对 porter 的 **API report**（真 signature）。报告 API 不适配写 /
   测试时浮现的需要→改 call-site 或直接 edit helper 的 interface；禁加 wrapper layer。
 - handoff 后 helper 文件归你：修 unresolved items、后续变更直接做。碰 ported logic（公式 / 控制
@@ -225,7 +260,7 @@ ported helper。固定 search 框架由 `nas_agent/search/` 提供，经生成 c
 
 **Fidelity audit loop.** **按协议调 `project-fidelity-verifier`**，inputs：
 
-- `project_manifest.md` 与 `{{ inputs.user_project_root }}`。
+- `project_manifest.md` 与 `{{ inputs.project_root }}`。
 - 待 audit 的生成 / ported artifact + source→generated mapping（任何 porter **Mapping** 的
   file / symbol pair + 你自己 port 的）让 verifier 快速定位对应。
 - 生成 `evaluator.py` 的 intended behavior：如何设计成偏离原项目。填下模板：保留 fixed 行，填
@@ -263,7 +298,7 @@ ported helper。固定 search 框架由 `nas_agent/search/` 提供，经生成 c
   `run_search_supernet.sh` + 任何 `evaluator.py` 旁生成 helper（如 `data_utils.py`、`losses.py`）。
 - **Cross-references**（read-only）: `supernet.py`、`latency_estimator.py`、`train_supernet.py`
   （存在时）、`$ORCA_AGENT_RESOURCES/references/evaluator_training_loop_guide.md`。**禁**在此传
-  `project_manifest.md` 或 `{{ inputs.user_project_root }}`；原项目 fidelity 由
+  `project_manifest.md` 或 `{{ inputs.project_root }}`；原项目 fidelity 由
   `project-fidelity-verifier` audit，不是 `workflow-verifier`。
 - **Additional checks**:
   1. `arch_codec.py` gene layout 与 `SearchSpace` field 精确对应。
@@ -386,7 +421,7 @@ python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
    `runs/train/supernet_best.pth`、`/path/to/user_project`）、**Generated Artifacts** tree（含 ported
    helper 与 `tests/`、`select_architecture.py`）、**Objective Semantics** table 行、**Search Objectives**、
    **Key API Surface** code block、任何项目专属 note。值取自 `search_config.yaml`、生成的 launcher、
-   确认的 `{{ inputs.user_project_root }}`。**含 `select_architecture.py` 的 CLI 契约 + JSON schema**
+   确认的 `{{ inputs.project_root }}`。**含 `select_architecture.py` 的 CLI 契约 + JSON schema**
    作为选架构段事实。
 4. **清剿 interactive/ask-user 残留**：复制自 `agents_template.md` 的
    `AGENTS.md` 副本里，把任何「stop and ask the user」/「Interactive ... based on feedback」/
@@ -421,7 +456,7 @@ python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
 禁重构或重写其它 section。
 
 更新 `supernet_summary.md` 后，**按协议调 `memory-verifier`**，inputs `$ORCA_ARTIFACTS_DIR` +
-`{{ inputs.user_project_root }}`。读 report；若任何更正暴露你生成代码的不一致→修代码。
+`{{ inputs.project_root }}`。读 report；若任何更正暴露你生成代码的不一致→修代码。
 
 ## Validation
 

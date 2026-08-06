@@ -34,11 +34,10 @@ workflows/
       viz_kd_stage.py                      # 活跃串行每节点 web 推送 sidecar（baseline_seed/teacher/student/distill_table/decide/final；flatten 不推图）
       metrics_tail.py                      # distill loss line（log-tail 推送）
       finalize_kd.py                       # finalize 确定性后端（champion eval/ONNX/latency + final_report.md）
-      migrate_flat.py                      # durable artifacts 拍平迁移（旧 artifacts/kd-nas/ → artifacts/；5 步原子 + sentinel 幂等）
       kd/{losses,wrapper,compose,ema}.py   # KD 库（不变）
       kd/{trainer,_leaves,_resume}.py      # 固定训练引擎 + 叶子加载器 + 原子 resume
 knowledge_base/families/receiver/          # model8 变体仓（.py）+ _model8_blocks.py 共享积木
-<project>/artifacts/                       # ★ 跨 run 稳定 artifact 根（去 kd-nas 层）
+<project>/artifacts/kd-nas/                # ★ 跨 run 稳定 project-scoped artifact 根（SPEC 2026-08-06 §2.3：撤销既有拍平，恢复 kd-nas 子目录与 nas-supernet 等其它 workflow 隔离）
 ```
 
 ## 1. 变体 I/O 契约（每个 receiver/*.py 必须暴露）
@@ -150,17 +149,6 @@ def feature_hook_names(self) -> list[str]: ...                 # 可选，OFD/Fi
   所有调用点额外加 `--artifacts_dir {{ setup.output.per_run_artifacts_dir }}`（叶子定位 = workflow-run-scope 共享）。
   **distill redirect 片段**：`mkdir -p "$PER_RUN/runs/$EXP" && python3 ... > "$PER_RUN/runs/$EXP/train.log" 2>&1`；experiment=variant_id；`metrics_tail --source_log` 指此。
 - **export_onnx.py**（共享）：`--model_path --build_fn --dummy_input --opset --out --device --seed [--build_cfg]`。
-- **migrate_flat.py**【durable artifacts 拍平迁移，kd-setup step1 检测旧 kd-nas/ 存在时调】：
-  `--kd_old <abs artifacts/kd-nas> --flat_new <abs artifacts/> [--dry-run]`
-  → `ACTION: migrated|sentinel_present_rmtree_old|dry_run` + 行数对账（`LEDGER_COUNTS` /
-  `CHAMPIONS_COUNTS` / `TEACHER_META_MIGRATED`）+ `MIGRATION_DONE: 1`（或 `DRY_RUN: 1`）。
-  5 步原子：copy checkpoints/meta/models/onnx/reports + 根 jsonl（``dirs_exist_ok=True``
-  覆盖语义）→ rewrite 路径字段（``Path.relative_to(kd_old) → flat_new / rel``，禁裸 string replace）→
-  行数校验 → ``os.replace`` 逐文件 → sentinel ``.migration_done``（manifest 含 sha256）→ rmtree 旧 kd-nas/。
-  全字段 rewrite 清单：``ledger.{ckpt,student_path}`` + ``champions.{snapshot}`` + ``teacher_meta.{teacher_onnx,teacher_cache,teacher_ckpt}``；
-  禁 rewrite ``teacher_meta.teacher_model_path``（per-run scope，不在 kd-nas 子树）。
-  幂等：sentinel 缺 → 从 copy 重跑；sentinel 在 → 校验 flat 文件存在 → 直接 rmtree 旧。
-  ``tune_cache.json`` 不迁移（latency 缓存路径键失效，删旧重建）。
 
 ## 4. 节点 I/O（活跃串行 DAG）
 

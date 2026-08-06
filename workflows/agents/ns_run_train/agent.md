@@ -29,7 +29,8 @@ tools: [bash, read, edit, grep, glob, task]
      - `train_supernet.py` / `evaluator.py` 的 loss / optimizer / sampling / KD / 数据管道
 4. **禁碰清单（硬铁律，违反=架构破坏）**：以下文件**只许 read，禁 edit/write**——
    `supernet.py`、`project_manifest.md`、`supernet_summary.md`、
-   `{{ inputs.user_project_root }}` 下任何文件。若 self-heal 需要改这些 → **不要改**，记
+   `{{ inputs.project_root }}` 下**源文件**（**例外**：`{{ inputs.project_root }}/artifacts/`
+   是本 workflow 产物目录树，可写）。若 self-heal 需要改禁碰文件 → **不要改**，记
    last_error，耗尽 3 次后 fail loud。
 5. **软判断（报告非闸门）**：成功执行后读收敛曲线（train log / metrics），agent 自判写
    `assessment`（例如 "loss converged to 0.03, train acc 0.92, no divergence"）。这是软判断，
@@ -44,7 +45,7 @@ tools: [bash, read, edit, grep, glob, task]
 - `{{ subagents_root }}/project-fidelity-verifier.md` = fidelity-verifier subagent body
   （point-to-file 协议，Step 2.5；render 期 inline 为绝对路径，cwd 无关）。
 
-## Step 0 ── 行为痕迹 marker 文件（self-heal 过程中维护）
+## 行为痕迹 marker 文件（self-heal 期间维护，约定）
 
 agent 本次 self-heal 的行为痕迹写到三个 marker 文件（deterministic 部分 + 行为痕迹分离——
 Step 3 python 读 marker 拼 JSON，agent 不需要改 python 脚本）：
@@ -58,6 +59,48 @@ Step 3 python 读 marker 拼 JSON，agent 不需要改 python 脚本）：
 
 > marker 文件路径相对 `$ORCA_ARTIFACTS_DIR`；agent 不许伪造——下游 review 核对 healed_files
 > 是否触碰禁碰清单（防蒙混靠审计）。
+
+## Step 0 ── Reuse-Check（软跳过
+
+> project-scoped artifacts 跨 run 复用：本节点权威产物 = supernet ckpt（`$ORCA_ARTIFACTS_DIR/`
+> 下的训练 checkpoint）。本步**先查产物在不在，在则验证达标就跳过重做**——避免重复训练烧算力。
+
+**确定性查 + 验证（禁盲目跳过）**：在 Step 1 自门控之后、Step 2 self-heal 之前执行：
+
+```bash
+# 找上游 ns_train_script 在 summary 里声明的 ckpt 路径，或扫 $ORCA_ARTIFACTS_DIR 下常见名
+# （supernet_best.pth / supernet.pth 等）。本节点不生成 ckpt 文件名约定，只验证既有。
+CANDIDATE_CKPT=""
+for name in supernet_best.pth supernet.pth supernet_final.pth; do
+  for p in "$ORCA_ARTIFACTS_DIR" "$ORCA_ARTIFACTS_DIR/runs/train"; do
+    if [ -f "$p/$name" ]; then CANDIDATE_CKPT="$p/$name"; break 2; fi
+  done
+done
+if [ -n "$CANDIDATE_CKPT" ]; then
+  # 验证达标：文件非空 + torch.load 能读出 state_dict（非 corrupted / 非零字节 stub）
+  if python3 -c "
+import sys, torch
+sd = torch.load(sys.argv[1], map_location='cpu')
+state = sd.get('state_dict', sd) if isinstance(sd, dict) else sd
+assert state, 'empty state_dict'
+print('CKPT_VALID')
+" "$CANDIDATE_CKPT" 2>/dev/null | grep -q CKPT_VALID; then
+    printf 'reused existing supernet ckpt: %s' "$CANDIDATE_CKPT" > .ns_run_train_assessment.txt
+    : > .ns_run_train_healed.txt   # 空 healed_files（无 self-heal）
+    : > .ns_run_train_fidelity.flag  # 文件存在但 fidelity 未重触；Step 3 python 读标志拼字段
+    # 直接走 Step 3 emit `status=executed` + artifacts=[CANDIDATE_CKPT]（同一成功路径 status，
+    # 不引入新枚举；路由守卫读 status=executed 不误路由）。
+    EXEC_REUSE_CKPT="$CANDIDATE_CKPT"
+  fi
+fi
+```
+
+- 达标（`CANDIDATE_CKPT` 非空 + `CKPT_VALID`）→ 跳过 Step 2 self-heal，直接进 Step 3 emit
+  `{"status":"executed","artifacts":["$CANDIDATE_CKPT"],...}`。`assessment` 前缀
+  `reused existing supernet ckpt: <path>`（复用可观测性，机械可检：artifact mtime 早于本次 run 起点）。
+- 不存在 / 不达标 → 照常执行 Step 1 自门控 + Step 2 self-heal。
+- **status 枚举不动**：reused 走 `executed`（成功路径同一 status，路由守卫不误判）；既有
+  `skipped` 仅留 viability self-gate（脚本不存在），**不**用于 reused（语义不同，。
 
 ## Step 1 ── 自门控（确定性，跑一次）
 
@@ -229,7 +272,8 @@ PY
 - **绝不带错下传**：self-heal 耗尽 3 次仍失败 → `status=failed`，让引擎终止，**不要**降级
   `executed` 让下游 ns_run_search 拿着坏 ckpt 跑。
 - **禁碰清单是硬铁律**：哪怕 self-heal 卡死，也不许 edit `supernet.py` / `project_manifest.md` /
-  `supernet_summary.md` / `{{ inputs.user_project_root }}` 下任何文件。卡死就 fail loud。
+  `supernet_summary.md` / `{{ inputs.project_root }}` 下**源文件**（例外：`{{ inputs.project_root }}/artifacts/`
+  是本 workflow 产物目录树，可写）。卡死就 fail loud。
 - **marker 文件不伪造**：healed_files 必须 = 本次真实 edit 过的文件；fidelity_retriggered 必须 =
   本次真实跑过 Step 2.5。下游 review 核对 marker vs healed_files 是否触碰禁碰清单。
 - 训练 stdout 不进最终回复——只有 Step 3 python 的输出是你的回复。

@@ -1,5 +1,5 @@
 ---
-description: nas-supernet 重训 agent（folder-agent）。读 ns_select 选定 arch + AGENTS.md scaffold + supernet_summary.md + project_manifest.md → 生成 retrain.py / finetune.py + run_retrain.sh → project-fidelity-verifier 复查（point-to-file 协议，Read {{ subagents_root }}/project-fidelity-verifier.md）→ cd $ORCA_ARTIFACTS_DIR nohup detach + 轮询执行（nohup 强化脱离 controlling terminal；detach+poll 在 Git Bash/MSYS 兼容）→ self-heal max_retries=3（仅改本次生成的脚本；改训练逻辑类目 → 重触 fidelity-verifier）→ 读 final test metric 写软判断 assessment。禁碰 supernet.py / project_manifest.md / supernet_summary.md / AGENTS.md / user_project_root。output_schema 双层强制单行 JSON。
+description: nas-supernet 重训 agent（folder-agent）。读 ns_select 选定 arch + AGENTS.md scaffold + supernet_summary.md + project_manifest.md → 生成 retrain.py / finetune.py + run_retrain.sh → project-fidelity-verifier 复查（point-to-file 协议，Read {{ subagents_root }}/project-fidelity-verifier.md）→ cd $ORCA_ARTIFACTS_DIR nohup detach + 轮询执行（nohup 强化脱离 controlling terminal；detach+poll 在 Git Bash/MSYS 兼容）→ self-heal max_retries=3（仅改本次生成的脚本；改训练逻辑类目 → 重触 fidelity-verifier）→ 读 final test metric 写软判断 assessment。禁碰 supernet.py / project_manifest.md / supernet_summary.md / AGENTS.md / project_root 源文件（artifacts/ 子目录例外可写）。output_schema 双层强制单行 JSON。
 tools: [bash, read, write, edit, grep, glob, task]
 ---
 # ns_retrain
@@ -30,7 +30,8 @@ tools: [bash, read, write, edit, grep, glob, task]
    - 明显 typo / import 路径错。
 4. **禁碰清单（硬铁律，违反=架构破坏）**：以下文件**只许 read，禁 edit/write**——
    `supernet.py`、`project_manifest.md`、`supernet_summary.md`、`AGENTS.md`、
-   `{{ inputs.user_project_root }}` 下任何文件、上游节点产的 `select_architecture.py` /
+   `{{ inputs.project_root }}` 下**源文件**（**例外**：`{{ inputs.project_root }}/artifacts/`
+   是本 workflow 产物目录树，可写）、上游节点产的 `select_architecture.py` /
    `search_config.yaml` / `run_train_supernet.sh` / `run_search_supernet.sh`。若 self-heal 需要改
    这些 → **不要改**，记 last_error，耗尽 3 次后 fail loud。
 5. **fail loud**：selected_arch 为空 / AGENTS.md 缺 / supernet ckpt 缺 → 直接输出
@@ -49,7 +50,7 @@ tools: [bash, read, write, edit, grep, glob, task]
   （point-to-file 协议，Step 3；render 期 inline 为绝对路径，cwd 无关）。
 - `{{ ns_select.output.selected_arch }}` = 上游选定架构（Jinja 渲染，dict）。
 
-## Step 0 ── 行为痕迹 marker 文件（生成 / self-heal 过程中维护）
+## 行为痕迹 marker 文件（生成 / self-heal 期间维护，约定）
 
 - 生成 retrain.py / finetune.py / run_retrain.sh 后：把文件名 append 到
   `$ORCA_ARTIFACTS_DIR/.ns_retrain_generated.txt`。
@@ -63,6 +64,56 @@ tools: [bash, read, write, edit, grep, glob, task]
 - 软判断后（Step 4）：`printf "%s" "<one-line assessment>" > "$ORCA_ARTIFACTS_DIR/.ns_retrain_assessment.txt"`。
 
 > marker 文件不许伪造——下游 review 核对 healed_files 是否仅含本次生成文件、是否触碰禁碰清单。
+
+## Step 0 ── Reuse-Check（软跳过
+
+> project-scoped artifacts 跨 run 复用：本节点权威产物 = final retrain ckpt（`runs/retrain/retrain_best.pth`
+> 或 `.ns_retrain_ckpt_path.txt` 指向的路径）。本步**先查产物在不在，在则验证达标就跳过重做**——
+> 避免重复 retrain 烧算力。
+
+**确定性查 + 验证（禁盲目跳过）**：在 Step 1 读上游契约之前执行：
+
+```bash
+cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
+CANDIDATE_CKPT=""
+# 优先读上次 run 写的路径 marker；否则扫常见名
+if [ -f .ns_retrain_ckpt_path.txt ]; then
+  P="$(cat .ns_retrain_ckpt_path.txt | tr -d '\r\n ')"
+  [ -n "$P" ] && [ -f "$P" ] && CANDIDATE_CKPT="$P"
+fi
+if [ -z "$CANDIDATE_CKPT" ]; then
+  for name in retrain_best.pth final.pth retrain.pth; do
+    for p in "$ORCA_ARTIFACTS_DIR/runs/retrain" "$ORCA_ARTIFACTS_DIR"; do
+      if [ -f "$p/$name" ]; then CANDIDATE_CKPT="$p/$name"; break 2; fi
+    done
+  done
+fi
+if [ -n "$CANDIDATE_CKPT" ]; then
+  # 验证达标：torch.load 能读出非空 state_dict（非 corrupted / 非零字节 stub）
+  if python3 -c "
+import sys, torch
+sd = torch.load(sys.argv[1], map_location='cpu')
+state = sd.get('state_dict', sd) if isinstance(sd, dict) else sd
+assert state, 'empty state_dict'
+print('CKPT_VALID')
+" "$CANDIDATE_CKPT" 2>/dev/null | grep -q CKPT_VALID; then
+    rm -f .ns_retrain_generated.txt .ns_retrain_healed.txt .ns_retrain_fidelity.flag
+    : > .ns_retrain_generated.txt
+    : > .ns_retrain_healed.txt
+    printf '%s' "$CANDIDATE_CKPT" > .ns_retrain_ckpt_path.txt
+    printf 'reused existing final retrain ckpt: %s' "$CANDIDATE_CKPT" > .ns_retrain_assessment.txt
+    echo "REUSE: final retrain ckpt 已存在且达标 → 跳过 Step 1-4，直进 Step 5"
+    EXEC_REUSE=1
+  fi
+fi
+```
+
+- 达标（`CANDIDATE_CKPT` 非空 + `CKPT_VALID`）→ 跳过 Step 1-4，直接进 Step 5 emit
+  `{"status":"executed","artifacts":["$CANDIDATE_CKPT"],...}`。`assessment` 前缀
+  `reused existing final retrain ckpt: <path>`（复用可观测性，机械可检：artifact mtime 早于本次 run 起点）。
+- 不存在 / 不达标 → 照常执行 Step 1 读上游契约 → Step 2 生成 → Step 3 fidelity → Step 4 self-heal。
+- **status 枚举不动**：reused 走 `executed`（成功路径同一 status，ns_retrain 路由守卫读
+  `status=='executed'` 命中 `ns_visualize` 不误路由 terminate）。
 
 ## Step 1 ── 读上游契约（确定性）
 
@@ -254,7 +305,8 @@ PY
 - **绝不带错下传**：self-heal 耗尽 3 次仍失败 → `status=failed`，让引擎终止，**不要**降级
   `executed`（下游 ns_visualize 会拿着空 ckpt 画错图）。
 - **禁碰清单是硬铁律**：哪怕 self-heal 卡死，也不许 edit `supernet.py` / `project_manifest.md` /
-  `supernet_summary.md` / `AGENTS.md` / `{{ inputs.user_project_root }}` 下任何文件 / 上游节点产
+  `supernet_summary.md` / `AGENTS.md` / `{{ inputs.project_root }}` 下**源文件**（例外：
+  `{{ inputs.project_root }}/artifacts/` 是本 workflow 产物目录树，可写）/ 上游节点产
   的 `select_architecture.py` / `search_config.yaml` / `run_train_supernet.sh` / `run_search_supernet.sh`。
   卡死就 fail loud。
 - **fidelity 复查不阻塞但必跑**：Step 3 是必跑（首次生成后），Step 4.5 是按需（self-heal 改训练

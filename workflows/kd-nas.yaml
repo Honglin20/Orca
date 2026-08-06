@@ -70,7 +70,8 @@ nodes:
   # （build_model + DUMMY_INPUT + KNOBS）+ __main__ 跑「正确性 + latency」→ 产 baseline_contract_path
   # + baseline_latency_us（latency_provider 在此阶段就生效）。flatten 不推 web 图（单柱 baseline bar
   #   与 setup baseline_seed_table 冗余）；baseline 信息由 setup 的 baseline_seed_table 承载。
-  #   flat 契约落 ${PROJECT_ROOT}/artifacts/models/baseline/（与 setup kd_artifacts_dir 同根，跨 run 持久）。
+  #   flat 契约落 ${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/（project-scoped artifacts 子目录，
+  #   与 setup kd_artifacts_dir=${PROJECT_ROOT}/artifacts/kd-nas/ 同根合流，跨 run 持久）。
   # ═══════════════════════════════════════════════════════════════
   - name: flatten
     kind: agent
@@ -84,7 +85,7 @@ nodes:
         baseline_contract_path: {type: string, description: "展平产出的契约 .py 绝对路径（build_model + DUMMY_INPUT + KNOBS；经 validate_contract.py PASS）"}
         project_root: {type: string, description: "从 baseline_model_path 向上推断的 project_root 绝对路径（低置信时带后缀）"}
         model_name: {type: string, description: "推断的 <base_name>"}
-        flat_artifacts_dir: {type: string, description: "flatten 产物目录绝对路径（${PROJECT_ROOT}/artifacts/models/baseline/；与 setup kd_artifacts_dir 同根，跨 run 持久）"}
+        flat_artifacts_dir: {type: string, description: "flatten 产物目录绝对路径（${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/；project-scoped artifacts 子目录，与 setup kd_artifacts_dir 同根合流，跨 run 持久）"}
         baseline_latency_us: {type: number, description: "flatten __main__ 测出的默认 cfg latency 中位数（latency_provider 真测；setup 透传作 baseline 参考线，不再重测）"}
         viz_status:
           type: object
@@ -119,7 +120,7 @@ nodes:
       type: object
       required: [kd_artifacts_dir, per_run_artifacts_dir, project_root, kd_scripts_dir, struct_scripts_dir, ledger_path, champions_path, checkpoints_dir, student_models_dir, scripts_dir, onnx_dir, meta_dir, reports_dir, worktree_root, device, concurrency, baseline_latency_us, baseline_accuracy, viz_status]
       properties:
-        kd_artifacts_dir: {type: string, description: "稳定 artifact 根（末尾带 /）。跨 run 持久，在 <project>/artifacts/"}
+        kd_artifacts_dir: {type: string, description: "稳定 artifact 根（末尾带 /）。跨 run 持久，project-scoped 子目录 <project>/artifacts/kd-nas/"}
         per_run_artifacts_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR（per-run；env_anchor 用）"}
         project_root: {type: string}
         kd_scripts_dir: {type: string, description: "_kd_scripts 绝对路径（distill/decide 调脚本用）"}

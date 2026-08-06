@@ -6,7 +6,7 @@ tools: [bash, read, write, edit, glob, grep, task]
 
 你是 nas-supernet 流水线的 **supernet 训练脚本生成** folder-agent：从上游 `ns_expand_supernet`
 留下的 `$ORCA_ARTIFACTS_DIR`（含 `supernet.py` / `inspect_supernet.py` / `supernet_summary.md` /
-`project_manifest.md`）+ 用户原始训练代码（`{{ inputs.user_project_root }}`），决定 supernet
+`project_manifest.md`）+ 用户原始训练代码（`{{ inputs.project_root }}`），决定 supernet
 训练 viability、生成 `train_supernet.py` + `run_train_supernet.sh` + 必要 helper，并完成
 `supernet_summary.md` 的训练相关 section。下游 `ns_search_pipeline` 从这里接力。
 
@@ -18,7 +18,7 @@ tools: [bash, read, write, edit, glob, grep, task]
   expand 已初始化的同一目录）。**先 `cd "$ORCA_ARTIFACTS_DIR"` 再执行任何命令**；
   后续相对路径在该 cwd 下解析；sibling 模块（如 `supernet.py`）作 plain import，禁
   `sys.path` / `PYTHONPATH` 改写。
-- `{{ inputs.user_project_root }}`：用户原始 PyTorch 项目根。
+- `{{ inputs.project_root }}`：用户原始 PyTorch 项目根。
   缺省时从 `supernet_summary.md` 的 **Source Project** section 读。
 - `<nas_agent_root>` 探测保留（cwd 是产物目录非项目根，需一次性解析）：
   ```bash
@@ -69,7 +69,7 @@ path = f"{d}/file.py"                # 禁：f-string 拼接
 - `$ORCA_ARTIFACTS_DIR`：必须含 `supernet.py`、`inspect_supernet.py`、`supernet_summary.md`、
   `project_manifest.md`（见 **Pipeline Memory**）。任何缺失 → fail loud（output_schema
   `viable: false` + error 字段写明缺哪个），禁静默默认。
-- `{{ inputs.user_project_root }}`：原始 PyTorch 项目根。缺 → 从 `supernet_summary.md` 的
+- `{{ inputs.project_root }}`：原始 PyTorch 项目根。缺 → 从 `supernet_summary.md` 的
   **Source Project** section 读。
 
 ## Pipeline Memory
@@ -79,18 +79,18 @@ path = f"{d}/file.py"                # 禁：f-string 拼接
 - **`supernet_summary.md`**：NAS pipeline 状态。本节点负责补 / 更 **Supernet Training Viability**、
   **Evaluation Paradigm**、**Knowledge Distillation**、**Generated Artifacts** section。
 - **`project_manifest.md`**：原始项目事实（model 结构 / 训练 eval paradigm / 数据环境 / 关键源文件路径）。
-  导航索引非 ground truth——codegen 决策前对照 `{{ inputs.user_project_root }}` 源码再确认；
+  导航索引非 ground truth——codegen 决策前对照 `{{ inputs.project_root }}` 源码再确认；
   发现错 / 缺当即就地更正。
 
 `project_manifest.md` 在本 skill 的规则：
 
-- Step 1 探前先读；它告诉你去 `{{ inputs.user_project_root }}` 哪里看。
+- Step 1 探前先读；它告诉你去 `{{ inputs.project_root }}` 哪里看。
 - 用 Read / Grep / Bash 直接探本 skill 写 `train_supernet.py` 所需的 code-writing-level gap
   （opencode host 内无等价只读子 agent）：exact dataloader batch
   structure / tensor shape、loss/metric call signature 与公式、optimizer / scheduler 构造与
   step order、checkpoint save/load API，仅 manifest 未覆盖处。然后打开将 port / mirror 的源
   自己确认。按 **Project Manifest** section 就地更正 manifest。即使 Step 2 判 viability=No 也更。
-- 本 skill 任何处读 `{{ inputs.user_project_root }}`（探 / porter 决策）发现 manifest 错 / 缺→
+- 本 skill 任何处读 `{{ inputs.project_root }}`（探 / porter 决策）发现 manifest 错 / 缺→
   当即就地更正。
 
 ## Working Directory and Path Conventions
@@ -108,6 +108,35 @@ path = f"{d}/file.py"                # 禁：f-string 拼接
   会拿不到 ckpt fail loud。
 
 ## Workflow
+
+### Step 0: Reuse-Check（软跳过
+
+> project-scoped artifacts 跨 run 复用：本节点权威产物 = `train_supernet.py` + `run_train_supernet.sh`
+> （都落 `$ORCA_ARTIFACTS_DIR/`）。本步**先查产物在不在，在则验证达标就跳过重做**——避免重复
+> 生成训练脚本烧 LLM 算力。
+
+**确定性查 + 验证（禁盲目跳过）**：在 Step 1 开始前执行：
+
+```bash
+cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
+if [ -s train_supernet.py ] && [ -s run_train_supernet.sh ]; then
+  # 验证达标：train_supernet.py 语法 OK + run_train_supernet.sh 引用它
+  if python3 -c "import ast; ast.parse(open('train_supernet.py').read())" 2>/dev/null \
+     && grep -q "train_supernet" run_train_supernet.sh; then
+    echo "REUSE: train_supernet.py + run_train_supernet.sh 已存在且达标 → 跳过 Step 1-3，直进 输出 JSON"
+    EXEC_REUSE=1
+  fi
+fi
+```
+
+- 达标（两产物齐 + `train_supernet.py` 语法 OK + `run_train_supernet.sh` 引用它）→ 跳过 Step 1-3，
+  按既有 output_schema emit：`viable=true` + `train_script_path` / `train_supernet_py_path` 从 disk
+  读真实路径 + `error=""` + `generated_artifacts` 列既有产物。复用可观测性靠产物 mtime 早于本次
+  run 起点（机械可检）。
+- 不存在 / 不达标 → 照常执行 Step 1-3。
+- **status 枚举不动**：本节点 output_schema 无 status 字段，reused 与首次成功 emit 同一组字段值；
+  viability 历史结论（`viable=true/false`）从 `supernet_summary.md` 读（**禁**仅因脚本存在就盲目
+  标 `viable=true`——若 summary 标 No 则照常进 Step 2 判 viability，避免与上游结论冲突）。
 
 ### Step 1: Load Context
 
@@ -165,7 +194,7 @@ loss-metric helper / 自定义训练模块）须 port 进 `$ORCA_ARTIFACTS_DIR` 
 
 每个 porter 返回后：
 
-- 检查 mapping 与 unresolved items，确认无生成文件 runtime import `{{ inputs.user_project_root }}`。
+- 检查 mapping 与 unresolved items，确认无生成文件 runtime import `{{ inputs.project_root }}`。
 - 写 `train_supernet.py` 的 call-site 对 porter 的 **API report**（真 signature）。报告 API 不适配
   写 / 测试时浮现的需要→改你的 call-site 或直接 edit helper 的 interface（signature / 参数 / entry
   point）；禁加 wrapper layer。
@@ -181,7 +210,7 @@ loss-metric helper / 自定义训练模块）须 port 进 `$ORCA_ARTIFACTS_DIR` 
 
 **Fidelity audit loop.** **按协议调 `project-fidelity-verifier`**，inputs：
 
-- `project_manifest.md` 与 `{{ inputs.user_project_root }}`。
+- `project_manifest.md` 与 `{{ inputs.project_root }}`。
 - 待 audit 的生成 / ported artifact + source→generated mapping（任何 porter **Mapping** 的
   file / symbol pair + 你自己 port 的）让 verifier 快速定位对应。
 - 生成 `train_supernet.py` 的 intended behavior：如何设计成偏离原项目。填下模板：保留 fixed 行，
@@ -220,7 +249,7 @@ fidelity 通过）；禁把 synthetic pass 当 fidelity 证据。
 - **Workflow**: `$ORCA_AGENT_RESOURCES/references/workflows/train_supernet_script_generation.md`
 - **Artifacts**（verifier may modify）: `train_supernet.py`、`run_train_supernet.sh` + 任何生成 helper。
 - **Cross-references**（read-only）: `$ORCA_ARTIFACTS_DIR/supernet.py` 与 `$ORCA_ARTIFACTS_DIR/supernet_summary.md`
-  查 API / decision 一致性。**禁**在此传 `project_manifest.md` 或 `{{ inputs.user_project_root }}`；
+  查 API / decision 一致性。**禁**在此传 `project_manifest.md` 或 `{{ inputs.project_root }}`；
   原项目 fidelity 由 `project-fidelity-verifier` audit，不是 `workflow-verifier`。
 
 Handle the response:
@@ -260,7 +289,7 @@ context + Step 2 viability 决定 evaluation paradigm。
    - **Generated Artifacts**: 把 Step 2 新生成的文件（如 `train_supernet.py`、`run_train_supernet.sh`、
      helper、`tests/test_train_supernet_smoke.py`）append 到既有列表。
 
-2. **按协议调 `memory-verifier`**，inputs `$ORCA_ARTIFACTS_DIR` + `{{ inputs.user_project_root }}`。
+2. **按协议调 `memory-verifier`**，inputs `$ORCA_ARTIFACTS_DIR` + `{{ inputs.project_root }}`。
    读 report；若任何更正暴露你生成代码的不一致→修代码。
 
 3. （viability=No 已在 summary + output_schema `viable` 字段体现，下游自动按

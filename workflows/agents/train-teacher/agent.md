@@ -47,6 +47,17 @@ tools: [bash, read, write, edit, glob, grep]
 
 ---
 
+## Step 0 ── Reuse-Check（软跳过）
+
+> project-scoped artifacts 跨 run 复用：本节点权威产物 = `${KD_ARTIFACTS_DIR}checkpoints/teacher_cache.pt`
+> + `teacher_meta.json` + `teacher_ckpt.pt`（project-scoped，跨 run 持久）。本步**先查产物在不在，
+> 在则验证达标就跳过重做**——避免重复 teacher 训练烧 GPU 算力。
+>
+> **本节点 reuse-check = 下方 step 1 的幂等 check**（teacher_cache + meta + ckpt 三者存在 ∧
+> sha256 匹配 → `NEED_TRAIN=0`）。该 check 已达  reuse-check 契约（确定性查 +
+> sha256 验证 + 命中跳过），此处不重复实现，仅在 framing 上明确：step 1 即为本节点的 Step 0。
+> reuse 可观测性：teacher_cache mtime 早于本次 run 起点（机械可检，防 LLM 谎报 reused）。
+
 ## step 1 执行：幂等 check（teacher_cache + meta + ckpt 存在 ∧ sha256 匹配 → 跳过）
 
 ```bash

@@ -5,7 +5,7 @@ tools: [bash, read, write, edit, glob, grep, task]
 # ns_expand_supernet
 
 你是 nas-supernet 流水线的 **supernet 张开** folder-agent：把用户原始 PyTorch
-模型（`{{ inputs.user_project_root }}` 下的 `{{ inputs.model_path }}`）拍平成可独立运行的
+模型（`{{ inputs.project_root }}` 下的 `{{ inputs.model_path }}`）拍平成可独立运行的
 standalone 文件、施加 **mandatory supernet readiness 规则**（optional 优化跳过）、张开成
 NAS `supernet.py` + 精炼 `SearchSpace`，全部产物落 `$ORCA_ARTIFACTS_DIR`。下游 `ns_train_script`
 节点从这里接力。
@@ -17,7 +17,7 @@ NAS `supernet.py` + 精炼 `SearchSpace`，全部产物落 `$ORCA_ARTIFACTS_DIR`
 - `$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本节点产物目录。
   **先 `cd "$ORCA_ARTIFACTS_DIR"` 再执行任何命令**；后续相对路径在该 cwd 下解析；sibling
   模块（如 `supernet.py`）作 plain import，禁 `sys.path` / `PYTHONPATH` 改写。
-- `{{ inputs.user_project_root }}`：用户原始 PyTorch 项目根。
+- `{{ inputs.project_root }}`：用户原始 PyTorch 项目根。
 - `<nas_agent_root>` 探测保留（cwd 是产物目录非项目根，需一次性解析）：
   ```bash
   python -c "from pathlib import Path; import nas_agent; print(Path(nas_agent.__file__).resolve().parent.parent)"
@@ -66,8 +66,8 @@ path = f"{d}/file.py"                # 禁：f-string 拼接
 
 Step 1 前确认都已知（缺任一 → fail loud，output_schema `error` 字段写明缺哪个，禁静默默认）：
 
-- `{{ inputs.user_project_root }}`：用户原始 PyTorch 项目根（必填）。
-- `{{ inputs.model_path }}`：目标模型入口文件（必填，相对 `user_project_root` 的路径或绝对路径）。
+- `{{ inputs.project_root }}`：用户原始 PyTorch 项目根（必填）。
+- `{{ inputs.model_path }}`：目标模型入口文件（必填，相对 `project_root` 的路径或绝对路径）。
 - `$ORCA_ARTIFACTS_DIR`：本节点产物目录（orca spawn 注入；不存在则 `mkdir -p`）。
 
 ## Pipeline Memory
@@ -79,13 +79,54 @@ Step 1 前确认都已知（缺任一 → fail loud，output_schema `error` 字�
 - **`project_manifest.md`**：原始项目事实（model 结构 / 训练 eval paradigm / 数据环境 / 关键源文件路径）。
   YAML frontmatter `source_project_root`；body sections：**Project Overview** / **Model** /
   **Training And Evaluation** / **Data And Environment** / **Relevant Source Files**。当作导航
-  索引非 ground truth——codegen 决策前必须对照 `{{ inputs.user_project_root }}` 源码再确认；
+  索引非 ground truth——codegen 决策前必须对照 `{{ inputs.project_root }}` 源码再确认；
   发现错/缺当即就地更正。
 
 ## Workflow
 
 按 7 步顺序执行。**todolist**（opencode 无 todowrite 等价）：在回复中维护一份 markdown
 编号清单（1–7）跟踪进度，每完成一步更新清单状态。
+
+### Step 0: Reuse-Check（软跳过
+
+> project-scoped artifacts 跨 run 复用：本节点权威产物 = `supernet.py` + `supernet_summary.md`
+> + `project_manifest.md`（都落 `$ORCA_ARTIFACTS_DIR/`）。本步**先查产物在不在，在则验证达标
+> 就跳过重做**——避免重复张开烧 LLM 算力。
+
+**确定性查 + 验证（禁盲目跳过）**：在 Step 1 开始前执行：
+
+```bash
+cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
+MISSING=""
+for f in supernet.py supernet_summary.md project_manifest.md; do
+  [ -s "$f" ] || MISSING="$MISSING $f"
+done
+if [ -z "$MISSING" ]; then
+  # 验证达标：supernet.py 可 import（python 语法 + import 不炸）+ summary 含 model_type 标签
+  if python3 -c "
+import ast, sys
+src = open(sys.argv[1]).read()
+ast.parse(src)   # syntax OK
+mod = compile(src, sys.argv[1], 'exec')
+ns = {}
+exec(mod, ns)    # import OK（依赖未装会 ImportError → 不达标）
+assert 'SearchSpace' in ns or 'build_supernet' in ns, 'no SearchSpace/build_supernet'
+print('SUPERNET_VALID')
+" supernet.py 2>/dev/null | grep -q SUPERNET_VALID; then
+    echo "REUSE: supernet.py + summary + manifest 已存在且达标 → 跳过 Step 1-7，直进 输出 JSON"
+    EXEC_REUSE=1
+  fi
+fi
+```
+
+- 达标（三产物齐 + `supernet.py` 可 exec 出 `SearchSpace`/`build_supernet`）→ 跳过 Step 1-7，
+  按既有 output_schema emit：`model_type_supported=true` + `supernet_path` / `prepared_model`
+  从 disk 读真实路径 + `error=""` + `generated_artifacts` 列既有产物；`assessment` 字段无（本节点
+  schema 无 assessment）——复用信号靠 `supernet.py` mtime 早于本次 run 起点（机械可检）。
+- 不存在 / 不达标 → 照常执行 Step 1-7。
+- **status 枚举不动**：本节点 output_schema 无 status 字段，reused 与首次成功 emit 同一组字段值；
+  若 `supernet.py` 在但 model_type 不支持（Step 4 历史结论），照常进 Step 4 判 unsupported fail loud
+  （**不**因 supernet.py 存在就盲目跳过 unsupported 分支——验证达标仅检可执行性，不替代分类判断）。
 
 ### Step 1: Discover Project And Flatten Model
 
@@ -128,7 +169,7 @@ body 里重复绝对项目路径。只记原始项目事实；NAS 决策 / 产�
 #### Procedure
 
 1. **Collect task context:**
-   - 读用户请求，然后用 Read / Grep / Bash 直接探 `{{ inputs.user_project_root }}`（opencode
+   - 读用户请求，然后用 Read / Grep / Bash 直接探 `{{ inputs.project_root }}`（opencode
      host 内无等价只读子 agent，本节点直接探）。
    - 报告 manifest sections 所需事实（见上 **Project Manifest**）+ 部署约束 / 瓶颈 / 优化优先级。
    - 直接探只产结构摘要，非 verified source——本 skill 直接依赖的细节（至少目标模型源、
@@ -142,7 +183,7 @@ body 里重复绝对项目路径。只记原始项目事实；NAS 决策 / 产�
    - **Flatten:** 从 context 找到的目标模型入口出发，标准库 / 第三方 import 保留为 import。
      仅 inline 模型跑起来所需的本地项目代码，递归解 nested 本地 import，排序定义避免本地
      import 错或 `NameError`。
-   - **Add a runnable test block:** 追加 `if __name__ == "__main__":`，用 `{{ inputs.user_project_root }}`
+   - **Add a runnable test block:** 追加 `if __name__ == "__main__":`，用 `{{ inputs.project_root }}`
      里的真实 constructor 参数实例化（如真 `num_classes`、`in_channels`），构造 dummy input
      tensor（shape 匹配用户项目真实输入规格，如真实分辨率 / 序列长 / channel 数，禁任意小尺寸），
      跑 forward，print 可读输出 shape 信息。用 `from nas_agent.train.distributed import resolve_device`
@@ -263,7 +304,7 @@ layer config / branch choice）。refinement 后：
 1. **Write `supernet_summary.md`:** 生成 `$ORCA_ARTIFACTS_DIR/supernet_summary.md`，含以下 section。
    **禁**在此重复原始项目事实；`project_manifest.md` 是源项目权威记录，本 summary 记 NAS 决策与产物。
    - **Source Project**:
-     - `{{ inputs.user_project_root }}` 作为原始 PyTorch 项目根，加一行 "See `project_manifest.md`
+     - `{{ inputs.project_root }}` 作为原始 PyTorch 项目根，加一行 "See `project_manifest.md`
        for all original-project details (model, training/evaluation, data)."
      - inline 进 `<base_name>_flat.py` 的原始项目本地源文件。
      - 校验用 dummy input shape。
@@ -276,7 +317,7 @@ layer config / branch choice）。refinement 后：
      - 查该类型可用 pre-built block 的 `jq` 命令：`jq '.{model_type}' <nas_agent_root>/nas_agent/blocks/metadata.json`。
    - **Generated Artifacts**: Step 1–6 在 `$ORCA_ARTIFACTS_DIR` 下生成的全部文件，含 `project_manifest.md`。
 
-2. **按协议调 `memory-verifier`**，inputs `$ORCA_ARTIFACTS_DIR` + `{{ inputs.user_project_root }}`。
+2. **按协议调 `memory-verifier`**，inputs `$ORCA_ARTIFACTS_DIR` + `{{ inputs.project_root }}`。
    读 report；若任何更正暴露你生成代码的不一致→修代码。
 
 3. （下游 `ns_train_script` 自动接力。）
@@ -321,7 +362,7 @@ layer config / branch choice）。refinement 后：
 
 字段语义（tape 审计字段）：
 
-- `error`：fail loud 时写明根因（如 `{{ inputs.user_project_root }}` / `{{ inputs.model_path }}`
+- `error`：fail loud 时写明根因（如 `{{ inputs.project_root }}` / `{{ inputs.model_path }}`
   缺 / 不可访问——写明缺哪个；model_type 不支持**不**写 error，是 `model_type_supported: false`
   的正常 fail loud 分支）。成功时为空串。命名 `error`：本节点无 self-heal 重试，"last" 语义不适用。
 - `model_type_supported: false` → 引擎路由 `terminate_unsupported`（fail loud）。此时其它字段

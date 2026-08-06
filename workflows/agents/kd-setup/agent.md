@@ -94,22 +94,12 @@ while p and p!=os.path.dirname(p) and not any(os.path.exists(os.path.join(p,m)) 
     p=os.path.dirname(p)
 print(p)
 " "$BASELINE")"
-# kd_artifacts_dir 跨 run 持久（项目 artifacts 根，直接落 artifacts/）。
-KD_ARTIFACTS_DIR="${PROJECT_ROOT}/artifacts/"
+# kd_artifacts_dir 跨 run 持久（project-scoped artifacts 根，落 artifacts/kd-nas/ 子目录
+# 与 nas-supernet 等其它 workflow 隔离； 撤销既有拍平）。
+KD_ARTIFACTS_DIR="${PROJECT_ROOT}/artifacts/kd-nas/"
 mkdir -p "$KD_ARTIFACTS_DIR"models/baseline "$KD_ARTIFACTS_DIR"models/teacher "$KD_ARTIFACTS_DIR"models/students
 mkdir -p "$KD_ARTIFACTS_DIR"scripts "$KD_ARTIFACTS_DIR"onnx "$KD_ARTIFACTS_DIR"checkpoints "$KD_ARTIFACTS_DIR"meta "$KD_ARTIFACTS_DIR"reports
 mkdir -p "$KD_ARTIFACTS_DIR".worktrees
-# 检测旧 artifacts/kd-nas/ 存在 → 迁移到当前布局。
-KD_OLD="${PROJECT_ROOT}/artifacts/kd-nas"
-if [ -d "$KD_OLD" ]; then
-  MIGRATE_OUT="$(python3 "$KD_SCRIPTS_DIR/migrate_flat.py" --kd_old "$KD_OLD" --flat_new "$KD_ARTIFACTS_DIR" 2>&1)"
-  MIGRATE_RC=$?
-  echo "$MIGRATE_OUT"
-  if [ $MIGRATE_RC -ne 0 ]; then
-    echo "FAIL: migrate_flat rc=$MIGRATE_RC（迁移失败；不动旧数据，fail loud）" >&2
-    exit 2
-  fi
-fi
 CHECKPOINTS_DIR="${KD_ARTIFACTS_DIR}checkpoints/"
 STUDENT_MODELS_DIR="${KD_ARTIFACTS_DIR}models/students/"
 SCRIPTS_DIR="${KD_ARTIFACTS_DIR}scripts/"

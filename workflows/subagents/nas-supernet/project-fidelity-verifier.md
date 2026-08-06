@@ -16,7 +16,7 @@ Audit whether the original project's training and evaluation logic (data pipelin
 
 The caller will provide:
 
-1. `project_manifest.md` path and `<user_project_root>`.
+1. `project_manifest.md` path and `<project_root>`.
 2. The generated/ported artifacts to audit (paths), plus a source→generated mapping (file/symbol pairs) so you can locate each artifact's original-project counterpart quickly.
 3. **Intended behavior**: the designed differences between the generated artifacts and the original project's training/evaluation loop (e.g. validate-only, short finetune, from-scratch training). Audit against this declaration, not against a full replica of the original loop.
 
@@ -36,7 +36,7 @@ Use the source→generated mapping (Input #2) to locate counterparts quickly. Ju
 
 ### 2. Differential probes
 
-For cheap, deterministic, importable pure functions (reward formulas, state construction, loss, metric computation): run a throwaway probe, inline or as a script outside `<output_dir>`, that constructs synthetic inputs and calls the ORIGINAL function from `<user_project_root>` and the PORTED function side by side, comparing outputs numerically. This is the only runtime check that is independent of the caller's own understanding.
+For cheap, deterministic, importable pure functions (reward formulas, state construction, loss, metric computation): run a throwaway probe, inline or as a script outside `<output_dir>`, that constructs synthetic inputs and calls the ORIGINAL function from `<project_root>` and the PORTED function side by side, comparing outputs numerically. This is the only runtime check that is independent of the caller's own understanding.
 
 When the original project is not importable in this environment, the function is stateful or entangled, or execution is expensive, skip the probe and say so in the report. Never fake a probe result.
 
