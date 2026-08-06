@@ -1325,11 +1325,22 @@ def bootstrap(
         artifacts_dir, is_project_scoped = _resolve_artifacts_dir(tape_path, run_id)
     except ValueError as e:
         clear_marker(mpath)
-        reply = asyncio.run(_emit_workflow_failed(
-            bus, "invalid_inputs",
-            f"project_root 解析失败：{e}（bootstrap 拒绝；用绝对路径或省略 project_root 走 per-run 回落）",
-        ))
-        bus.close()
+        # bus 已被 advisory-flock 的 inner finally（上方 ``bus.close()``）关闭 → 另开
+        # tape2/bus2 写 workflow_failed（对齐 write_marker 失败分支「另开 tape2/bus2」模式）。
+        # 否则 ``_emit_workflow_failed`` 在已关 bus 上 append → ``RuntimeError: Tape 已 close`` 被
+        # 其 except 静默吞 → tape 缺 ``workflow_failed`` 终态，违反「tape 唯一真相源」契约。
+        try:
+            tape2 = Tape(tape_path, run_id=run_id, resume=True)
+            bus2 = EventBus(tape2)
+            try:
+                asyncio.run(_emit_workflow_failed(
+                    bus2, "invalid_inputs",
+                    f"project_root 解析失败：{e}（bootstrap 拒绝；用绝对路径或省略 project_root 走 per-run 回落）",
+                ))
+            finally:
+                bus2.close()
+        except Exception:
+            logger.exception("project_root 解析失败后 workflow_failed 也失败")
         typer.echo(json.dumps({
             "done": True,
             "reason": "invalid-inputs",

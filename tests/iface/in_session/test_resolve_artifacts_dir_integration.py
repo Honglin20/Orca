@@ -311,29 +311,15 @@ def test_relative_project_root_fails_loud_with_structured_envelope(
     assert "workflow_started" in tape_text, "tape 应含 workflow_started"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "已知 BUG（2026-08-06 端到端集成测试发现，未修）：bootstrap ``_resolve_artifacts_dir`` "
-        "ValueError 路径在 ``bus`` 已被 inner finally 关闭后调 ``_emit_workflow_failed(bus, ...)`` → "
-        "``RuntimeError: Tape 已 close``，emit 静默失败（被 ``_emit_workflow_failed`` 的 except 吞）。"
-        "用户可见 stdout 信封仍正确（独立 typer.echo），marker 也正确清，但 tape **缺 ``workflow_failed`` "
-        "终态事件** → 违反「tape 唯一真相源」契约（raw tape / 直接读 tape 的消费者看不到终态）。"
-        "复现：见 cli.py:1252-1256 ``finally: bus.close()`` vs cli.py:1328-1332 ``_emit_workflow_failed(bus, ...)`` "
-        "用同一已关闭 bus。对比 line 1268-1276 ``write_marker`` 失败路径正确开了新 ``tape2/bus2``。"
-        "修法（留给 coder）：ValueError 分支仿 marker 失败路径，新开 ``Tape(resume=True) + EventBus`` 再 emit。"
-    ),
-)
-def test_relative_project_root_known_bug_tape_missing_workflow_failed(
+def test_relative_project_root_tape_has_workflow_failed(
     cwd_tmp: Path, wf_project_root: Path, monkeypatch: pytest.MonkeyPatch,
 ):
-    """xfail：钉死已知 bug——相对路径 fail loud 时 tape 缺 ``workflow_failed`` 终态事件。
+    """回归测试：相对路径 ``project_root`` fail loud 时 tape 必含 ``workflow_failed`` 终态事件。
 
-    本测试**期望失败**（xfail strict）——若 coder 修了 bug，本测试开始通过 → xfail strict 会让
-    pytest 失败（``XPASS(strict)``），提醒删除 xfail 标记。这是「bug 修复回归测试」的常用 pattern。
-
-    断言（bug 存在时为 False → xfail 满足）：
-      tape 含 ``workflow_failed`` 终态事件。bug 路径下 emit 静默失败 → 不含 → 断言失败 → xfail。
+    ValueError 分支（``_resolve_artifacts_dir`` 对相对路径 raise）须另开 fresh ``tape2/bus2`` 写
+    ``workflow_failed``（bus 已被 advisory-flock inner finally 关闭，复用会 ``RuntimeError: Tape 已
+    close`` 被 emit 的 except 静默吞 → tape 缺终态，违反「tape 唯一真相源」契约）。对齐 write_marker
+    失败分支的「另开 tape2/bus2」模式。
     """
     _stub_daemon_subprocesses(monkeypatch)
 
@@ -350,10 +336,8 @@ def test_relative_project_root_known_bug_tape_missing_workflow_failed(
     assert len(tape_files) == 1
     tape_text = tape_files[0].read_text(encoding="utf-8")
 
-    # bug 存在时：workflow_failed 不在 tape（emit 静默失败）→ 断言 False → xfail 满足。
-    # bug 修复后：workflow_failed 真落 tape → 断言 True → xfail strict 触发 XPASS 失败。
     assert "workflow_failed" in tape_text, (
-        f"已知 bug 复现：tape 缺 workflow_failed 终态事件。tape 内容：\n{tape_text}"
+        f"tape 缺 workflow_failed 终态事件（ValueError 分支未正确另开 tape2/bus2 emit）。tape 内容：\n{tape_text}"
     )
 
 
