@@ -4,30 +4,28 @@
 
 ---
 
-## 当前：project-scoped artifacts——实现完成 + commit 797a6c8，待 code-reviewer 闭环
+## 当前：project-scoped artifacts——实现 + code-reviewer 闭环完成，留集成测试补全给用户
 
 **任务**：SPEC [`project-scoped-artifacts-design-draft.md`](../specs/project-scoped-artifacts-design-draft.md)
 （spec-review 14 issue 全闭 → 实现）—— in-session 引擎面 project-scoped `$ORCA_ARTIFACTS_DIR`
 解析 + nas-supernet input 改名 + 6 个昂贵节点 Step 0 软跳过 + kd-nas 撤销拍平 + 4 个 kd-nas
 节点 Step 0。
 
-**状态**：**实现完成 + `tars validate` 两 wf 0 error / 0 warning + 已 commit `797a6c8`**。
-- 引擎面：`_read_workflow_inputs` + `_resolve_artifacts_dir`（`tuple[Path, bool]`，**签名偏差**
-  见 release note）+ bootstrap fail-loud mkdir（project-scoped）/ fail-open（per-run）。
-- nas-supernet：input 改名 + 8 ns_*.md Jinja 同步 + 3 个严格 agent + project-porter 加 carve-out
-  + 6 节点 Step 0（status 枚举不动，reused 命中成功分支）。
-- kd-nas：`KD_ARTIFACTS_DIR` 加 `kd-nas` 子目录 + 删 `migrate_flat.py` 520 行 + test +
-  model-flatten 路径同步 + test_model_flatten.py 6 条 pin 反转 + kd-setup/model-flatten/
-  train-teacher/kd-train-script 4 节点 Step 0（train-teacher 是 framing note，既有 sha256 幂等
-  check 等价；kd-train-script scope 受限——4 叶子 per-run，主要覆盖同 run re-arm）。
-- 15 新单测 + 126 in-session CLI + 57 model-flatten 全绿。
+**状态**：**实现 + code-reviewer 一轮闭环完成**（0 must-fix / 4 should-fix / 3 optional；
+surgical should-fix 全修 + 1 docstring，留 1 测试补全项给用户）。
+- `797a6c8`：核心三块（引擎面 + nas-supernet 改名/carve-out/Step 0 + kd-nas 撤销拍平）。
+- `1cb377f`：code-reviewer 闭环（bootstrap raise 结构化 + Step 0 dead code 清理 + docstring Rule 7）。
+- `77013e4`：CHANGELOG + CURRENT.md 索引。
 
-**待办**：
-- [x] 实现 + tars validate + 15 单测 + commit。
-- [ ] **code-reviewer 一轮闭环**（agentId 在背景跑，等待 must-fix 清单）。
+**待办**（留用户定夺）：
+- [ ] **bootstrap 集成测试补全**（code-reviewer should-fix #3）：补 `CliRunner` 驱动
+      `orca <wf> --inputs '{"project_root":"/abs"}'` 断言 `<proj>/artifacts/<wf>/` 真 mkdir +
+      `$ORCA_ARTIFACTS_DIR` 注入 env；`project_root="rel"` → 非 0 退出 + 结构化错误信封。
+      属测试补全非生产代码改动，单独立 case 更合适。
 
 **必读**：
-- release note `docs/releases/2026-08-06-project-scoped-artifacts.md`（含偏离 SPEC 记录）。
+- release note `docs/releases/2026-08-06-project-scoped-artifacts.md`（含偏离 SPEC 记录 +
+  code-reviewer 闭环明细）。
 - SPEC `docs/specs/project-scoped-artifacts-design-draft.md`（§2 契约 / §5 非目标）。
 
 ---

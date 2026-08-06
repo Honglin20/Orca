@@ -37,6 +37,23 @@
   - `train-teacher/agent.md`：既有 step1 sha256 幂等 check 已等价 Step 0，加 framing note 指明 step1 即 Step 0（不重复实现，DRY）。
   - `kd-train-script/agent.md`：4 叶子 + run_config 当前落 per-run（SPEC §2.3 明示无 project_root input → §2.1 per-run 回落），cross-run reuse 受限；Step 0 主要覆盖同 run re-arm 场景（fidelity audit fail → 同节点重派）。
 
+## Code-reviewer 闭环（一轮）
+
+0 must-fix / 4 should-fix / 3 optional。全部 surgical should-fix + 1 docstring 已修（commit `1cb377f`）：
+
+1. **bootstrap post-lock raise 留 orphan marker + 裸 traceback**（should-fix #1）→ `cli.py` `_resolve_artifacts_dir` 调用包 `try/except ValueError` → emit `workflow_failed` (kind=`invalid_inputs`) + `clear_marker` + JSON 错误信封 + `typer.Exit(1)`，对齐 `InSessionError` 路径。
+2. **`_resolve_artifacts_dir` docstring 缺 Rule 7 surfacing**（optional #1）→ 显式 note 签名偏离 SPEC §2.1 示例 `-> Path`，本实现 `tuple[Path, bool]`，理由：fail-loud mkdir discriminator。
+3. **6 个 Step 0 bash block 的 `EXEC_REUSE*` dead variables**（should-fix #2）→ 删（bash subshell 间不传 state，跳过信号已通过 echo 文本 + disk marker 传递）。
+4. **ns_run_train Step 0 stale-marker 清理弱于 ns_run_search / ns_retrain**（should-fix #4）→ 统一为 `rm -f` only 模式（Step 3 python 对缺文件 `read_text` 默认 `"false"` / `read_lines` 默认 `[]`，无需 `: >` 空文件占位）；ns_run_search / ns_retrain 也对齐同款。
+5. **model-flatten Step 0 物理位置在 step3 之前，靠 prose 注释锁执行序**（should-fix #5）→ 移到「Step 3 确定 OUTPUT_DIR」bash 块之后，删「在 Step 2 之后执行」prose lock（order-by-position 比 order-by-prose 可信）。
+
+**留用户定夺**：
+- 🟡 **bootstrap 集成测试缺失**（should-fix #3）：补 `CliRunner` 驱动 `orca <wf> --inputs '{"project_root":"/abs"}'` 断言 `<proj>/artifacts/<wf>/` 真 mkdir + `$ORCA_ARTIFACTS_DIR` 注入 env；`project_root="rel"` → 非 0 退出 + 结构化错误信封。属测试补全非生产代码改动，单独立 case 更合适。
+
+**不修**（optional #2 / #3）：
+- 🟢 `_read_workflow_inputs` 与 `_read_workflow_name` 共享扫描骨架——SPEC §2.1 字面允许现状（逐字复用），抽 helper 出 SPEC scope。
+- 🟢 `nas-supernet.yaml:12` 顶层注释含 `SPEC 2026-08-06 §2.1`——是开发者向 meta-doc，非 LLM prompt 面，tars validate 不报。
+
 ## 偏离 SPEC 的地方（先记下）
 
 1. **`_resolve_artifacts_dir` 返 `tuple[Path, bool]`**（SPEC §2.1 示例签名 `-> Path`）——为支持同函数调用点（bootstrap）区分 project-scoped fail-loud vs per-run fail-open mkdir 语义。最小必要扩展。
@@ -62,4 +79,6 @@
 
 ## Commit
 
-（commit SHA 在 CHANGELOG 索引里更新。）
+- `797a6c8` —— feat: project-scoped artifacts + nas-supernet input rename + kd-nas 撤销拍平（核心三块）。
+- `1cb377f` —— fix: code-reviewer 闭环（bootstrap raise 结构化 + Step 0 dead code 清理 + docstring Rule 7）。
+- `77013e4` —— docs: CHANGELOG + CURRENT.md 索引更新。
