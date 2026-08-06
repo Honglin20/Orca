@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-06] feat(artifacts): project-scoped artifacts + nas-supernet input rename + kd-nas 撤销拍平
+
+按 SPEC `project-scoped-artifacts-design-draft.md`（spec-review 14 issue 全闭）三块实现：(1) in-session 引擎面 `cli.py` 新增 `_read_workflow_inputs` + `_resolve_artifacts_dir`（workflow 有 `project_root` 绝对 input → `<proj>/artifacts/<wf>/`，否则 per-run 回落；签名扩展为 `tuple[Path, bool]` 以支持 project-scoped fail-loud mkdir vs per-run fail-open 区分）；(2) nas-supernet：input `user_project_root`→`project_root`（yaml + 8 ns_*.md Jinja + 散文）+ 6 个昂贵节点加 Step 0 Reuse-Check 软跳过（status 枚举不动，reused 命中成功分支）+ 严格编辑 agent 的禁碰清单 carve-out（project_root 下源文件只读，artifacts/ 子目录例外可写）；(3) kd-nas 撤销拍平：`KD_ARTIFACTS_DIR` 加 `kd-nas` 子目录 + 删 `migrate_flat.py`（520 行）及其测试 + model-flatten 路径同步 `${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/` + `test_model_flatten.py` 6 条 pin 断言反转。`tars validate` 两 wf 0 error / 0 warning；15 新单测 + 126 既有 in-session CLI 测试 + 57 model-flatten 测试全绿。Commit: `797a6c8`。详见 [release note](../releases/2026-08-06-project-scoped-artifacts.md)。
+
 ## [2026-08-05] feat(kd-nas): LLM 语义 fidelity 审计 + ID 化收敛环（B1+B2）
 
 按 SPEC `2026-08-05-kd-nas-fidelity-audit-spec.md`（REVIEWED + 用户拍板）逐字实现：新建 `workflows/subagents/kd-nas/project-fidelity-verifier-kd.md`（KD 化独立副本，删 RL/auxiliary/reward 段，加 STATUS 契约 + KD 专属 Intended behavior）；`kd-train-script/agent.md` + `SKILL.md` Step 4 在 L3 与 L4-mechanical 间插 **L4-semantic 收敛环**（MAX_TURNS=3，first-run + resume 模板经 `{{ subagents_root }}` point-to-file，ID 范围防御，reaffirm/Unresolved→ask-user）；`train-script-verify/agent.md` 加 step 3.5 一次性 report-only fidelity-verifier spawn（D1）+ step 4 同样 report-only + 传 Accepted IDs（N8）；`kd-nas.yaml` 两节点注释同步（output_schema 不变）；新建 `examples/mnist_kd_adversarial/`（D3，复制 mnist_kd，仅 `optim.py::build_optimizer` 注入 `weight_decay=1e-3` 偏差——L3 `OPT_TYPE_OK` 比 class 名 PASS、B1 比 kwargs 命中）。`tars validate` 0 error / 0 warning；code-reviewer 一轮闭环 0 must-fix / 3 should-fix 已采纳。SPEC §3.1 line 54/106 文件名 typo（与 line 60 frontmatter `-kd` 后缀冲突 validator `fm["subagent"]==md.stem` 铁律）→ 文件统一命名为 `project-fidelity-verifier-kd.md`。Commit: 见 git log。详见 [release note](../releases/2026-08-05-kd-nas-fidelity-audit.md)。
