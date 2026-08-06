@@ -253,3 +253,77 @@ def test_recover_step_result_re_arm_preserves_subagents_root(tmp_path, monkeypat
     assert str(workflows_root / "subagents" / "demo-wf") in r2.prompt, (
         "重 arm 后的 prompt 应仍含 inline subagents_root（_recover_step_result 透传）"
     )
+
+
+# ── 加载期绑定：load_workflow 把 workflows_root 写进 wf（单一真源）──────────────
+
+
+def test_load_workflow_binds_workflows_root(tmp_path):
+    """``load_workflow`` 加载期绑定 ``wf.workflows_root = yaml 目录（resolve 绝对）``。
+
+    point-to-file 协议（SPEC §3.2/§4）：确定性路径只在加载期解析一次，运行期所有
+    RunContext 构造点从 ``wf.workflows_root`` 推导 subagents_root，零参数透传。
+    """
+    yaml_path = tmp_path / "demo-wf.yaml"
+    yaml_path.write_text(
+        "name: demo-wf\ndescription: d\nentry: n1\n"
+        "nodes:\n  - name: n1\n    kind: agent\n    executor: claude\n"
+        "    prompt: 'hello'\n",
+        encoding="utf-8",
+    )
+    from orca.compile.parser import load_workflow
+    wf = load_workflow(yaml_path)
+    assert wf.workflows_root == tmp_path.resolve()
+
+
+def test_advance_step_second_arm_without_yaml_path_uses_wf_workflows_root(
+    tmp_path, monkeypatch,
+):
+    """历史 bug 复现路径：``orca next`` 不传 yaml_path，下一节点渲染仍拿到 subagents_root。
+
+    根因：``_build_ctx`` 只从 ``yaml_path`` 推导 workflows_root，``cli.py next`` /
+    daemon 漏传 → workflows_root=None → subagents_root="" → render fail loud。
+    修复：``load_workflow`` 把 workflows_root 绑到 wf，``_build_ctx`` 在形参为 None
+    时回退 ``wf.workflows_root``——本测试两次 ``advance_step`` 均**不传 yaml_path**，
+    断言第二节点 prompt 已 inline 绝对路径。
+    """
+    import asyncio
+
+    from orca.events.bus import EventBus
+    from orca.events.tape import Tape
+    from orca.iface.in_session._step_io import apply_step_result
+    from orca.run.step import advance_step
+
+    workflows_root = tmp_path
+    (workflows_root / "subagents" / "demo-wf").mkdir(parents=True)
+    yaml_path = workflows_root / "demo-wf.yaml"
+    yaml_path.write_text(
+        "name: demo-wf\ndescription: d\nentry: n1\n"
+        "nodes:\n"
+        "  - name: n1\n    kind: agent\n    executor: claude\n"
+        "    prompt: 'first'\n    routes:\n      - to: n2\n"
+        "  - name: n2\n    kind: agent\n    executor: claude\n"
+        "    prompt: 'Read {{ subagents_root }}/helper.md then act.'\n",
+        encoding="utf-8",
+    )
+    from orca.compile.parser import load_workflow
+    wf = load_workflow(yaml_path)
+    assert wf.workflows_root == workflows_root.resolve()
+
+    tape = Tape(tmp_path / "tape.jsonl", run_id="r1", resume=True)
+    bus = EventBus(tape)
+    monkeypatch.chdir(tmp_path)
+
+    # 1) bootstrap（不传 yaml_path）：entry 渲染
+    r1 = advance_step(tape, wf, inputs={}, run_id="r1", prompts_dir=None)
+    assert not r1.done
+    asyncio.run(apply_step_result(bus, r1, wf=wf, run_id="r1"))
+
+    # 2) 完成 entry → advance 分支渲染下一节点（模拟 orca next --output，不传 yaml_path）
+    r2 = advance_step(tape, wf, output="ok", run_id="r1", prompts_dir=None)
+    assert not r2.done
+    assert r2.node == "n2"
+    assert "{{ subagents_root }}" not in r2.prompt, "next 渲染应已 inline subagents_root"
+    assert str(workflows_root / "subagents" / "demo-wf") in r2.prompt, (
+        "不传 yaml_path 时 next 分支应回退 wf.workflows_root（历史 bug 回归防线）"
+    )

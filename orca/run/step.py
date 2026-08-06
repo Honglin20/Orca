@@ -258,6 +258,8 @@ def _build_ctx(
     from orca.exec.context import RunContext
     from orca.run.orchestrator import _compute_subagents_root
 
+    if workflows_root is None:
+        workflows_root = wf.workflows_root
     return RunContext(
         inputs=inputs, outputs=outputs_acc, run_id=run_id, task=None,
         subagents_root=_compute_subagents_root(workflows_root, wf.name),

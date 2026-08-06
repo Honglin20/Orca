@@ -167,6 +167,11 @@ class Orchestrator:
                 )
         # gen run_id（若调用方未传，内部 gen；测试可注入固定 id）
         self.run_id = run_id or gen_run_id(wf.name)
+        # point-to-file 协议：workflows_root 是 wf 的加载期元数据（load_workflow 绑定）。
+        # 显式形参保留为向后兼容覆盖；None 时回退 wf.workflows_root——确定性推导只此一处，
+        # 任何入口（CLI/TUI/Web/daemon/resume）都不会因漏传参数而丢失 subagents_root。
+        if workflows_root is None:
+            workflows_root = wf.workflows_root
         # RunContext 构造（frozen，node 间构造新实例累加 outputs）
         from orca.exec.context import RunContext
 
@@ -567,6 +572,9 @@ class Orchestrator:
         """
         from orca.exec.context import RunContext
 
+        # 同 __init__：显式覆盖优先，None 回退 wf 加载期绑定的 workflows_root。
+        if workflows_root is None:
+            workflows_root = wf.workflows_root
         orch = Orchestrator.__new__(Orchestrator)
         orch.wf = wf
         orch.bus = bus

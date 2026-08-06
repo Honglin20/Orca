@@ -87,10 +87,12 @@ def load_workflow_with_warnings(
         extra_roots=(),
     )
     _resolve_agents(wf, resolver, context)  # 物化 + 物化前预检（互斥 / body 双 None）
-    # workflows_root = yaml 所在目录（point-to-file subagent 协议 SPEC §3.2/§7）：让
-    # ``_check_subagents_md`` 能解析 ``<yaml_dir>/subagents/<wf.name>`` 子树做 frontmatter +
-    # 旧协议残留校验。dev 态 yaml 在 repo workflows/ 下 → 直接解析 repo 子树。
-    warnings_list = validate_workflow(wf, workflows_root=yaml_path.parent)
+    # workflows_root = yaml 所在目录（point-to-file subagent 协议 SPEC §3.2/§7）：加载期
+    # 绑定到 wf（单一真源，运行期零参数透传）。``_check_subagents_md`` 据此解析
+    # ``<yaml_dir>/subagents/<wf.name>`` 子树做 frontmatter + 旧协议残留校验；
+    # dev 态 yaml 在 repo workflows/ 下 → 直接解析 repo 子树。
+    wf.workflows_root = yaml_path.resolve().parent
+    warnings_list = validate_workflow(wf, workflows_root=wf.workflows_root)
     return wf, warnings_list
 
 

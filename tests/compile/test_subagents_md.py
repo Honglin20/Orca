@@ -123,6 +123,25 @@ def test_check_subagents_md_no_directory_skipped(tmp_path):
     assert result.errors == []
 
 
+def test_check_subagents_md_referencing_missing_dir_error(tmp_path):
+    """模板引用 ``{{ subagents_root }}`` 但目录不存在 → load 期 error（fail 前移）。
+
+    确定性错误（子 agent body 目录缺失）应在 compile/load 期暴露，而非 run 中途
+    render 才炸（历史 bug：in-session ``orca next`` 漏传 yaml_path → 运行期空串）。
+    """
+    node = AgentNode(
+        name="n1",
+        kind="agent",
+        executor="claude",
+        prompt="Read {{ subagents_root }}/helper.md then act.",
+    )
+    wf = Workflow(name="demo-wf", description="d", entry="n1", nodes=[node], parallel=[])
+    result = ValidationResult()
+    # workflows_root 显式给但 subagents/demo-wf 目录不存在
+    _check_subagents_md(wf, tmp_path, result)
+    assert any("subagents_root" in e and "不存在" in e for e in result.errors)
+
+
 def test_check_subagents_md_valid_frontmatter_no_warning(tmp_path):
     """合法 frontmatter + 无旧协议残留 → 0 errors / 0 warnings。"""
     sub = tmp_path / "subagents" / "demo-wf"

@@ -13,6 +13,7 @@
 - 模板渲染、输出摘取在 exec/ 阶段做
 """
 
+from pathlib import Path
 from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -298,6 +299,12 @@ class Workflow(BaseModel):
     requires: list[str] = []  # 运行时依赖声明（plan sprightly-questing-donut §1.4）。含
     # ``"knowledge_base"`` → run 启动预检 KB 存在（``resolve_kb_dir`` 非空），缺则 fail-loud
     # （清晰指引 + searched 路径），不进 setup agent。默认空 = 无外部依赖。
+    # 运行时加载元数据（不进 YAML 契约，serialize 排除）：workflow yaml 所在目录，由
+    # ``load_workflow`` 加载期绑定一次。run 层所有 RunContext 构造点从它推导
+    # ``subagents_root = workflows_root / "subagents" / wf.name``（point-to-file 协议
+    # SPEC §3.2/§4）——确定性路径只在加载期解析，运行期零参数透传（修复 in-session
+    # ``orca next`` / daemon 漏传 yaml_path 导致 subagents_root 为空的历史 bug）。
+    workflows_root: Path | None = Field(default=None, exclude=True)
 
     @field_validator("requires")
     @classmethod

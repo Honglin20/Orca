@@ -125,8 +125,10 @@ def validate_workflow(
 
     ``workflows_root``（point-to-file subagent 协议 SPEC §3.2/§7，可选）：workflow yaml
     所在目录。提供时，``_check_subagents_md`` 校验 ``workflows_root / "subagents" / wf.name``
-    内的子 agent md frontmatter 完整性 + body 旧协议残留。None / 目录不存在 → 跳过（如
-    quant-* 无子 agent 的 workflow，SPEC §3.3 正常）。
+    内的子 agent md frontmatter 完整性 + body 旧协议残留。``None`` → 回退 ``wf.workflows_root``
+    （``load_workflow`` 加载期绑定，单一真源）。目录不存在时：无模板引用 ``{{ subagents_root }}``
+    → 跳过（如 quant-* 无子 agent 的 workflow，SPEC §3.3 正常）；有引用 → load 期 error
+    （确定性错误前移，而非 run 中途 render 才炸）。
     """
     result = ValidationResult()
     _check_workflow_name_reserved(wf, result)  # §2.2 保留字黑名单（先于一切）
@@ -1111,14 +1113,32 @@ def _check_subagents_md(
       3. agent.md body 引用 ``{{ subagents_root }}`` 的节点 → 校验 host 通用类型 tools 含
          Read（静态可知则校验；tools=None=全开视为含 Read）。
 
-    workflows_root=None / 目录不存在 → 跳过（SPEC §3.3：无 subagents 的 workflow 正常）。
-    run 期 render 兜底（agent.md 引 ``{{ subagents_root }}`` 但 ctx.subagents_root=""）
-    归 ``orca.exec.render`` 而非本检查。
+    ``workflows_root=None`` 时回退 ``wf.workflows_root``（load_workflow 加载期绑定，
+    单一真源）。目录不存在时：若没有任何模板引用 ``{{ subagents_root }}`` → 跳过
+    （SPEC §3.3：无 subagents 的 workflow 正常）；若引用了 → **load 期 fail loud**
+    （确定性错误在确定性阶段暴露，而非 run 中途 render 才炸）。run 期 render 兜底
+    （``{{ subagents_root }}`` 但 ctx.subagents_root=""）保留作纵深防御（防程序化
+    构造的 wf）。
     """
+    if workflows_root is None:
+        workflows_root = wf.workflows_root
     if workflows_root is None or not wf.name:
         return
     subagents_root = workflows_root / "subagents" / wf.name
     if not subagents_root.is_dir():
+        referencing = [
+            location
+            for location, _self_name, text, _is_expr, _extras in _iter_templates(wf)
+            if text and _SUBAGENTS_ROOT_REF_RE.search(text)
+        ]
+        if referencing:
+            result.add_error(
+                f"模板引用了 {{{{ subagents_root }}}} 但解析目录不存在："
+                f"{subagents_root}（位置：{'、'.join(referencing)}）。"
+                "子 agent body 目录缺失：dev 态请确认 workflow yaml 位于 repo "
+                "``workflows/`` 下（subagents/ 与之同级）；已安装环境请先 ``tars install`` "
+                "（部署到 ~/.orca/workflows/subagents/）。"
+            )
         return
     md_files = sorted(subagents_root.glob("*.md"))
     for md in md_files:
