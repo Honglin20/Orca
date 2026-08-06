@@ -200,8 +200,8 @@ distill 是每轮迭代的 student 训练。评估结论：deferred-cron 对迭�
 
 ## Commit（迁移）
 
-- `<填入 commit SHA 后>`
-  原型 commit：`e8f7700`（ns_run_train deferred-cron 原型实现）；本迁移 commit 见 git log。
+- `658f85c`（迁移 ns_retrain + kd-nas train-teacher；distill 评估后不迁移）
+- 原型 commit：`e8f7700`（ns_run_train deferred-cron 原型实现）
 
 ## 相关
 
