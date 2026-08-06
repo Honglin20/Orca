@@ -4,7 +4,31 @@
 
 ---
 
-## 当前：project-scoped artifacts——实现 + code-reviewer 闭环完成，留集成测试补全给用户
+## 当前：deferred-training-cron 原型实现完成，留真机 E2E + 迁移给后续 task
+
+**任务**：SPEC [`deferred-training-cron-design-draft.md`](../specs/deferred-training-cron-design-draft.md)
+（§2 模式 / §3 改动 / §4 验收 / §6 非目标）—— `ns_run_train` 多天训练解耦：三分支 Step 0
+（reuse / resume-pending / fresh-launch）+ Step 2 fresh-launch 五步（detach + warmup + 估时 +
+cron + park detached）+ Step 3 dual-signal status 推导（`pid_alive AND cron_registered.flag`）。
+
+**状态**：**实现 + `tars validate` 0/0 + code-reviewer 一轮闭环完成**（3 must-fix + 8 should-fix
+全修，1 optional 采纳 / 3 optional 跳过）。已 commit。
+
+**待办**（留用户/后续 task）：
+- [ ] **真机 E2E**（SPEC §4 acceptance 1-5）：造小训练 fixture（MNIST 2-epoch 或 mock 每 epoch
+      sleep + 写 epoch log + 末写 ckpt），跑 `ns_run_train`，断言 warmup→估时→cron 注册→park→
+      （可选）cron 触发后 reuse 接力。
+- [ ] **迁移到 ns_retrain**（nas-supernet）：同模式（task #9）。
+- [ ] **迁移到 kd-nas train-teacher / distill**（task #9）：同模式（cron 重跑命令 `orca kd-nas`）。
+
+**必读**：
+- release note `docs/releases/2026-08-06-deferred-training-cron.md`（含 SPEC 偏差 + code-reviewer
+  闭环明细 + 已知限制 `at` 路径无幂等清理 / per_epoch 60s 默认 / TerminateNode 无 pending）。
+- SPEC `docs/specs/deferred-training-cron-design-draft.md`（§2 三分支 / §3 改动）。
+
+---
+
+## 历史：project-scoped artifacts——实现 + code-reviewer 闭环完成，留集成测试补全给用户
 
 **任务**：SPEC [`project-scoped-artifacts-design-draft.md`](../specs/project-scoped-artifacts-design-draft.md)
 （spec-review 14 issue 全闭 → 实现）—— in-session 引擎面 project-scoped `$ORCA_ARTIFACTS_DIR`
