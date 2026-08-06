@@ -149,7 +149,6 @@ yaml.safe_load(open('search_config.yaml'))
 print('PIPELINE_VALID')
 " 2>/dev/null | grep -q PIPELINE_VALID; then
     echo "REUSE: 搜索 pipeline 四产物已存在且达标 → 跳过 Step 1-3，直进 输出 JSON"
-    EXEC_REUSE=1
   fi
 fi
 ```

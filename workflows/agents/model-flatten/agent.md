@@ -60,13 +60,35 @@ tools: [bash, read, write, edit, glob, grep, task, todowrite]
 
 ## 准备工作
 
+1. 激活 Python 虚拟环境:
+   ```bash
+   source .venv/bin/activate 2>/dev/null || true
+   ```
+2. **推断 project_root（infer-once）**：从 `{{ inputs.baseline_model_path }}` 所在目录起，向上逐级找**第一个含 `train.py` 或 `pyproject.toml` 或 `.git` 的目录**作为项目根（绝对路径）。走到 `/` 仍找不到 → 取 `{{ inputs.baseline_model_path }}` 的 dirname，并在 `project_root` 字段后追加 ` (low-confidence: no train.py/pyproject.toml/.git ancestor)`（不阻塞，但必须显式标注）。**不许**用 `pwd` / `git rev-parse` / 最近编辑文件推断；**不许**留空或编造。
+3. **确定输出目录**（跨 run 持久，project-scoped artifacts 子目录，与 setup 同根合流）：执行以下 bash 计算 `<output_dir>`——去后缀公式与 `kd-setup/agent.md` step1 **逐字对齐**（`split(' (low-confidence')[0]` + `os.path.abspath`），保证 flatten（先于 setup 执行）与 setup 算出同一根 + 同一 `kd-nas` 子目录（确定性逻辑用代码不靠 prose）。`$PROJECT_ROOT_IN` = step2 推断的 project_root（**照填，含可能的 ` (low-confidence: ...)` 后缀**——python 片段去后缀）：
+
+   ```bash
+   OUTPUT_DIR="$(python3 -c "
+   import os, sys
+   p = sys.argv[1].split(' (low-confidence')[0].strip()
+   proot = os.path.abspath(p) if p else ''
+   print(os.path.join(proot, 'artifacts', 'kd-nas', 'models', 'baseline') if proot else '')
+   " "<LLM 填：step2 推断的 project_root 绝对路径（含 low-confidence 后缀照填）>")"
+   [ -n "$OUTPUT_DIR" ] || { echo "FAIL: step2 推断的 project_root 为空（未推断？）" >&2; exit 2; }
+   mkdir -p "$OUTPUT_DIR" && cd "$OUTPUT_DIR"
+   echo "OUTPUT_DIR=$OUTPUT_DIR"
+   ```
+
+   下面所有产物写进 `$OUTPUT_DIR`，`flat_artifacts_dir` 字段填它。**low-confidence 边缘**：step2 推断失败时 `PROJECT_ROOT_IN` = baseline_model_path 的 dirname（去后缀后），OUTPUT_DIR = `dirname/artifacts/kd-nas/models/baseline/`——可能与 setup 不合流（setup 从 `baseline_contract_path` 向上重算根），但 `baseline_contract_path` 绝对路径仍供 setup 读取，功能不阻断（统一用 PROJECT_ROOT 公式，确定性优先，不再 fallback `llm_artifacts/`）。
+
 ### Step 0: Reuse-Check（软跳过）
 
-> project-scoped artifacts 跨 run 复用：本节点权威产物 = `${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/<base_name>_flat.py`
+> project-scoped artifacts 跨 run 复用：本节点权威产物 = `$OUTPUT_DIR/<base_name>_flat.py`
 > （project-scoped，跨 run 持久）。本步**先查产物在不在，在则验证达标就跳过重做**——避免重复
-> flatten 烧 LLM 算力。
+> flatten 烧 LLM 算力。位置在 step3 算 OUTPUT_DIR 之后，因 Step 0 依赖 `$OUTPUT_DIR`（order-by-position，
+> 非 order-by-prose）。
 
-**确定性查 + 验证（禁盲目跳过）**：在 Step 2 推断 project_root 之后执行：
+**确定性查 + 验证（禁盲目跳过）**：
 
 ```bash
 # 扫 OUTPUT_DIR 下既有 *_flat.py（project-scoped，跨 run 持久）。
@@ -93,27 +115,6 @@ fi
   复用可观测性：flat 文件 mtime 早于本次 run 起点（机械可检，防 LLM 谎报 reused）。
 - 不存在 / 不达标（validate FAIL）→ 照常执行 Step 1-6 flatten 流程。
 - **schema 不动**：本节点 output_schema 无 status 字段；reused 与首次 emit 同一组字段值。
-
-1. 激活 Python 虚拟环境:
-   ```bash
-   source .venv/bin/activate 2>/dev/null || true
-   ```
-2. **推断 project_root（infer-once）**：从 `{{ inputs.baseline_model_path }}` 所在目录起，向上逐级找**第一个含 `train.py` 或 `pyproject.toml` 或 `.git` 的目录**作为项目根（绝对路径）。走到 `/` 仍找不到 → 取 `{{ inputs.baseline_model_path }}` 的 dirname，并在 `project_root` 字段后追加 ` (low-confidence: no train.py/pyproject.toml/.git ancestor)`（不阻塞，但必须显式标注）。**不许**用 `pwd` / `git rev-parse` / 最近编辑文件推断；**不许**留空或编造。
-3. **确定输出目录**（跨 run 持久，project-scoped artifacts 子目录，与 setup 同根合流）：执行以下 bash 计算 `<output_dir>`——去后缀公式与 `kd-setup/agent.md` step1 **逐字对齐**（`split(' (low-confidence')[0]` + `os.path.abspath`），保证 flatten（先于 setup 执行）与 setup 算出同一根 + 同一 `kd-nas` 子目录（确定性逻辑用代码不靠 prose）。`$PROJECT_ROOT_IN` = step2 推断的 project_root（**照填，含可能的 ` (low-confidence: ...)` 后缀**——python 片段去后缀）：
-
-   ```bash
-   OUTPUT_DIR="$(python3 -c "
-   import os, sys
-   p = sys.argv[1].split(' (low-confidence')[0].strip()
-   proot = os.path.abspath(p) if p else ''
-   print(os.path.join(proot, 'artifacts', 'kd-nas', 'models', 'baseline') if proot else '')
-   " "<LLM 填：step2 推断的 project_root 绝对路径（含 low-confidence 后缀照填）>")"
-   [ -n "$OUTPUT_DIR" ] || { echo "FAIL: step2 推断的 project_root 为空（未推断？）" >&2; exit 2; }
-   mkdir -p "$OUTPUT_DIR" && cd "$OUTPUT_DIR"
-   echo "OUTPUT_DIR=$OUTPUT_DIR"
-   ```
-
-   下面所有产物写进 `$OUTPUT_DIR`，`flat_artifacts_dir` 字段填它。**low-confidence 边缘**：step2 推断失败时 `PROJECT_ROOT_IN` = baseline_model_path 的 dirname（去后缀后），OUTPUT_DIR = `dirname/artifacts/kd-nas/models/baseline/`——可能与 setup 不合流（setup 从 `baseline_contract_path` 向上重算根），但 `baseline_contract_path` 绝对路径仍供 setup 读取，功能不阻断（统一用 PROJECT_ROOT 公式，确定性优先，不再 fallback `llm_artifacts/`）。
 
 ## 执行流程
 

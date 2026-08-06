@@ -898,6 +898,11 @@ def _resolve_artifacts_dir(
 
     ``wf_name`` + ``inputs`` 都从 tape 读（bootstrap 与 ``next`` 两处统一，单一真相源；
     ``next --inputs`` 默认 ``"{}"`` 不反映真实 inputs，tape 是唯一可信源）。
+
+    **Rule 7 surfacing**：SPEC §2.1 示例签名是 ``-> Path``，本实现偏离为 ``tuple[Path, bool]``。
+    理由：SPEC 同段要求 project-scoped mkdir 失败 fail loud 区别于 per-run fail-open，
+    调用方（bootstrap）需要 discriminator 区分两种路径性质；path 字面比对（``path !=
+    artifacts_dir_for_run(...).resolve()``）会耦合 per-run 路径布局更脆。tuple 是最小返回契约。
     """
     wf_name = _read_workflow_name(tape_path)
     inputs = _read_workflow_inputs(tape_path)
@@ -1311,7 +1316,27 @@ def bootstrap(
     # （向后兼容）。两路径都从 tape 读 wf_name + inputs（bootstrap 路径 tape 已有 ws）。
     # ``is_project_scoped`` 区分 mkdir 失败语义：project-scoped 写不进后续全崩 → fail loud
     # （SPEC §2.1）；per-run 写不进仍 fail-open（workflow 脚本自己 fail loud）。
-    artifacts_dir, is_project_scoped = _resolve_artifacts_dir(tape_path, run_id)
+    #
+    # fail loud 包装（code-reviewer 🟡#1）：``_resolve_artifacts_dir`` 在 marker 已写、
+    # 锁已释之后调；``project_root`` 非绝对 raise 若不接 → 留 orphan marker + 裸 traceback。
+    # 对齐 ``InSessionError`` 路径：emit ``workflow_failed``（kind=invalid_inputs）+ JSON 错误
+    # 信封 + clear_marker + Exit(1)。bootstrap 是 run 生命周期起点，fail loud 须结构化暴露。
+    try:
+        artifacts_dir, is_project_scoped = _resolve_artifacts_dir(tape_path, run_id)
+    except ValueError as e:
+        clear_marker(mpath)
+        reply = asyncio.run(_emit_workflow_failed(
+            bus, "invalid_inputs",
+            f"project_root 解析失败：{e}（bootstrap 拒绝；用绝对路径或省略 project_root 走 per-run 回落）",
+        ))
+        bus.close()
+        typer.echo(json.dumps({
+            "done": True,
+            "reason": "invalid-inputs",
+            "error_kind": "invalid_inputs",
+            "hint": str(e),
+        }, ensure_ascii=False))
+        raise typer.Exit(1)
     try:
         artifacts_dir.mkdir(parents=True, exist_ok=True)
     except OSError:

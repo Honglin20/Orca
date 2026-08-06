@@ -85,12 +85,12 @@ state = sd.get('state_dict', sd) if isinstance(sd, dict) else sd
 assert state, 'empty state_dict'
 print('CKPT_VALID')
 " "$CANDIDATE_CKPT" 2>/dev/null | grep -q CKPT_VALID; then
+    # 清旧 marker（与 ns_run_search Step 0 同款 rm-first 模式；Step 3 python 对缺文件 read_text
+    # 默认 "false" / read_lines 默认 []，故无需写空文件占位）。
+    rm -f .ns_run_train_healed.txt .ns_run_train_fidelity.flag
     printf 'reused existing supernet ckpt: %s' "$CANDIDATE_CKPT" > .ns_run_train_assessment.txt
-    : > .ns_run_train_healed.txt   # 空 healed_files（无 self-heal）
-    : > .ns_run_train_fidelity.flag  # 文件存在但 fidelity 未重触；Step 3 python 读标志拼字段
     # 直接走 Step 3 emit `status=executed` + artifacts=[CANDIDATE_CKPT]（同一成功路径 status，
     # 不引入新枚举；路由守卫读 status=executed 不误路由）。
-    EXEC_REUSE_CKPT="$CANDIDATE_CKPT"
   fi
 fi
 ```

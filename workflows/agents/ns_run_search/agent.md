@@ -88,12 +88,10 @@ with open(sys.argv[1], 'r', encoding='utf-8', errors='replace') as f:
 assert n >= 1, 'no valid records'
 print('RESULTS_VALID')
 " "$RESULTS" 2>/dev/null | grep -q RESULTS_VALID; then
-    # 清旧 marker + 写 reuse assessment（Step 3 python 读 marker 拼 JSON）。
+    # 清旧 marker（rm-only；Step 3 python 对缺文件 read_text 默认 "false" / read_lines 默认 []）。
     rm -f .ns_run_search_healed.txt .ns_run_search_fidelity.flag
-    : > .ns_run_search_healed.txt   # 空 healed_files
     printf 'reused existing search_results.jsonl: %s' "$RESULTS" > .ns_run_search_assessment.txt
     echo "REUSE: search_results.jsonl 已存在且达标 → 跳过 Step 1/2，直进 Step 3"
-    EXEC_REUSE=1
   fi
 fi
 ```

@@ -124,7 +124,6 @@ if [ -s train_supernet.py ] && [ -s run_train_supernet.sh ]; then
   if python3 -c "import ast; ast.parse(open('train_supernet.py').read())" 2>/dev/null \
      && grep -q "train_supernet" run_train_supernet.sh; then
     echo "REUSE: train_supernet.py + run_train_supernet.sh 已存在且达标 → 跳过 Step 1-3，直进 输出 JSON"
-    EXEC_REUSE=1
   fi
 fi
 ```

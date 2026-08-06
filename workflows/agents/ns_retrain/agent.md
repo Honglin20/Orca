@@ -97,13 +97,11 @@ state = sd.get('state_dict', sd) if isinstance(sd, dict) else sd
 assert state, 'empty state_dict'
 print('CKPT_VALID')
 " "$CANDIDATE_CKPT" 2>/dev/null | grep -q CKPT_VALID; then
+    # 清旧 marker（rm-only；Step 5 python 对缺文件 read_text 默认 "false" / read_lines 默认 []）。
     rm -f .ns_retrain_generated.txt .ns_retrain_healed.txt .ns_retrain_fidelity.flag
-    : > .ns_retrain_generated.txt
-    : > .ns_retrain_healed.txt
     printf '%s' "$CANDIDATE_CKPT" > .ns_retrain_ckpt_path.txt
     printf 'reused existing final retrain ckpt: %s' "$CANDIDATE_CKPT" > .ns_retrain_assessment.txt
     echo "REUSE: final retrain ckpt 已存在且达标 → 跳过 Step 1-4，直进 Step 5"
-    EXEC_REUSE=1
   fi
 fi
 ```

@@ -114,7 +114,6 @@ assert 'SearchSpace' in ns or 'build_supernet' in ns, 'no SearchSpace/build_supe
 print('SUPERNET_VALID')
 " supernet.py 2>/dev/null | grep -q SUPERNET_VALID; then
     echo "REUSE: supernet.py + summary + manifest 已存在且达标 → 跳过 Step 1-7，直进 输出 JSON"
-    EXEC_REUSE=1
   fi
 fi
 ```
