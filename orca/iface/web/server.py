@@ -36,6 +36,7 @@ from orca.iface.web.routes import (
     build_workflows_router,
 )
 from orca.iface.web._auth import install_auth_middleware
+from orca.iface.web.active_runs import build_active_run_resolver
 from orca.iface.web.approval_broker import ApprovalBroker
 from orca.iface.web.ws_handler import WebServer
 
@@ -64,7 +65,12 @@ def create_app(manager: RunManager) -> FastAPI:
     """
 
     # SPEC §3.2 B-12：进程级 singleton broker，与 app 同生命周期；shutdown 清理 pending。
-    approval_broker = ApprovalBroker(manager.registry)
+    # SPEC 2026-08-07 §3.3：注入 active-run 兜底 resolver——session 未注册时扫活跃 run
+    # tape 双键匹配，命中后 yolo/web 审批通道生效（工厂零 IO，调用期枚举）。
+    approval_broker = ApprovalBroker(
+        manager.registry,
+        active_run_resolver=build_active_run_resolver(),
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:

@@ -24,10 +24,15 @@
     "disconnect")``。
   - **late respond（N2）**：first-wins；后续 respond 返 ``ok=False`` + emit 独立
     ``approval_resolved_late`` 审计事件（仅审计可见，不翻盘 UI）。
+  - **active-run 兜底（SPEC 2026-08-07）**：registry miss 且 ``session_id`` 非空时
+    调用注入的 ``active_run_resolver(session_id)``（扫活跃 run tape 双键匹配）；命中 →
+    走与注册命中完全相同的 Approval/yolo 流程；未命中/异常/无 resolver → 原样
+    ``native-fallback ask``。
 
 依赖单向：本模块仅 import ``orca.gates.http_endpoint.resolve_session_context`` + 标准库 +
 fastapi.Request（断连探测）；**不 import** ``orca.gates.handler`` / ``orca.tape*`` /
-``orca.exec.*`` / ``orca.events.bus``（grep 守门 N11）。
+``orca.exec.*`` / ``orca.events.bus`` / ``orca.run``（grep 守门 N11；resolver 以
+callable 注入，模块零 run/tape 依赖）。
 """
 
 from __future__ import annotations
@@ -42,7 +47,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Final
+from typing import Any, AsyncIterator, Callable, Final
 from uuid import uuid4
 
 from orca.gates.http_endpoint import resolve_session_context
@@ -170,9 +175,18 @@ class ApprovalBroker:
     广播 ``approval_resolved(resolved_by:"shutdown")``。
     """
 
-    def __init__(self, registry, *, timeout: float | None = None) -> None:
-        """:param registry: ``SessionContextRegistry``（``resolve_session_context`` 用）。"""
+    def __init__(
+        self,
+        registry,
+        *,
+        timeout: float | None = None,
+        active_run_resolver: Callable[[str], str | None] | None = None,
+    ) -> None:
+        """:param registry: ``SessionContextRegistry``（``resolve_session_context`` 用）。
+        :param active_run_resolver: registry miss 时的 active-run 兜底
+            （``Callable[[session_id], run_id | None]``；None → 行为与现状完全一致）。"""
         self._registry = registry
+        self._active_run_resolver = active_run_resolver
         self._timeout = float(
             timeout
             if timeout is not None
@@ -245,19 +259,23 @@ class ApprovalBroker:
     ) -> dict[str, Any]:
         """hook POST /approval 入口。返回 ``{behavior, approval_id, resolved_by}``。
 
-        - ``resolve_session_context`` 未命中活跃 run → ``{behavior:"ask",
-          resolved_by:"native-fallback"}``（SPEC §1.3 / §6）。
+        - ``resolve_session_context`` 未命中活跃 run → 走 active-run 兜底
+          （``active_run_resolver``，SPEC 2026-08-07）：命中 → 与注册命中完全相同的
+          Approval/yolo 流程；未命中/异常/无 resolver → ``{behavior:"ask",
+          resolved_by:"native-fallback"}``（SPEC §1.3 / §6，不干扰日常 CC）。
         - 命中 → 建 Approval；yolo on → 即时 allow；
           否则 ``gather(wait_for(fut, BROKER_TIMEOUT), _disconnect_poller)`` 竞速。
         """
         run_id, _node = resolve_session_context(self._registry, payload)
         if run_id == "unknown":
-            # SPEC §6 / §7：未命中活跃 run → ask（行为同未装，不干扰日常 CC）。
-            return {
-                "behavior": "ask",
-                "approval_id": None,
-                "resolved_by": "native-fallback",
-            }
+            run_id = self._resolve_active_run(payload)
+            if run_id is None:
+                # SPEC §6 / §7：未命中活跃 run → ask（行为同未装，不干扰日常 CC）。
+                return {
+                    "behavior": "ask",
+                    "approval_id": None,
+                    "resolved_by": "native-fallback",
+                }
 
         approval_id = uuid4().hex
         tool = str(payload.get("tool") or "<unknown>")
@@ -334,6 +352,35 @@ class ApprovalBroker:
             "approval_id": approval_id,
             "resolved_by": final_source,
         }
+
+    def _resolve_active_run(self, payload: dict[str, Any]) -> str | None:
+        """active-run 兜底（SPEC 2026-08-07 §2.1 / §3.1）。
+
+        仅在 ``session_id`` 为非空 str 且 resolver 注入时调用；缺失/空/无 resolver →
+        直接返回 None（不调 resolver，不干扰日常 CC）。resolver 异常 → warning →
+        视为未命中（ask），**不自动 allow、不传播**。
+        """
+        session_id = payload.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            return None
+        resolver = self._active_run_resolver
+        if resolver is None:
+            return None
+        try:
+            run_id = resolver(session_id)
+        except Exception:  # noqa: BLE001 —— resolver 边界异常不传播（fail loud 靠 warning）
+            logger.warning(
+                "approval active-run resolver 异常 session=%s，按未命中回退 native-fallback ask",
+                session_id, exc_info=True,
+            )
+            return None
+        if run_id:
+            logger.info(
+                "approval active-run fallback 命中 session=%s → run=%s", session_id, run_id,
+            )
+        else:
+            logger.warning("approval active-run fallback 未命中 session=%s", session_id)
+        return run_id
 
     def resolve(
         self, approval_id: str, answer: str, source: str = "web",

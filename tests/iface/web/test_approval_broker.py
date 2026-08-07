@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 import threading
@@ -580,22 +581,33 @@ def test_snapshot_includes_pending_and_yolo():
 
 
 def test_approval_broker_not_import_forbidden_modules():
-    """SPEC §11 N11：approval_broker 不 import tape/handler/exec/events.bus。"""
+    """SPEC §11 N11 / AC4：approval_broker 不 import tape/handler/exec/events.bus/run。
+
+    结构化 AST 检查（非裸 grep，防 ``from orca.run import X`` 漏网）；模块边界精确匹配，
+    ``orca.runtime`` 等前缀相似模块不受误伤。
+    """
+    import ast
     import orca.iface.web.approval_broker as mod
-    src_path = Path(mod.__file__)
-    src = src_path.read_text(encoding="utf-8")
-    forbidden = [
-        "import orca.gates.handler",
-        "from orca.gates.handler import",
-        "import orca.tape",
-        "from orca.tape",
-        "import orca.exec",
-        "from orca.exec",
-        "from orca.events.bus",
-        "import orca.events.bus",
-    ]
-    for needle in forbidden:
-        assert needle not in src, f"approval_broker 不应 import {needle!r}"
+    src = Path(mod.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    forbidden = (
+        "orca.gates.handler",
+        "orca.tape",
+        "orca.exec",
+        "orca.events.bus",
+        "orca.run",
+    )
+    modules: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.extend(n.name for n in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.append(node.module)
+    for mod_name in modules:
+        assert not any(
+            mod_name == prefix or mod_name.startswith(prefix + ".")
+            for prefix in forbidden
+        ), f"approval_broker 不应 import {mod_name!r}"
 
 
 # ── hook 脚本 stdlib 守门 + 行为 ──────────────────────────────────────────────
@@ -626,3 +638,204 @@ def test_hook_script_uses_stdlib_only():
             assert top in allowed, (
                 f"hook 仅 stdlib，发现 from {node.module}"
             )
+
+
+# ── active-run 兜底路由（SPEC 2026-08-07 T1–T6 / T16 / T17） ────────────────
+
+
+def _make_fallback_broker(
+    resolver_result: str | None,
+    calls: list[str],
+    *,
+    timeout: float = 5.0,
+    policy: str | None = None,
+) -> ApprovalBroker:
+    """经公开构造器注入 resolver spy 的 broker：记录入参并返回固定 run_id/None。
+
+    走 ``active_run_resolver=`` 公开参数（非私有属性注入），保证新 public API 被真实测试。
+    """
+    holder: dict[str, ApprovalBroker] = {}
+
+    def resolver(session_id: str) -> str | None:
+        calls.append(session_id)
+        # spy 不变量：resolver 先于 Approval 创建（pending 尚空）被执行。
+        assert len(holder["broker"]._pending) == 0
+        return resolver_result
+
+    broker = ApprovalBroker(
+        SessionContextRegistry(),
+        timeout=timeout,
+        active_run_resolver=resolver,
+    )
+    holder["broker"] = broker
+    if policy is not None:
+        broker._policy = policy  # 测试注入（同 _make_broker 约定）。
+    return broker
+
+
+def test_resolver_hit_yolo_on_immediate_allow():
+    """SPEC T1：registry miss → resolver 命中 + yolo on → 即时 allow（resolved_by=yolo）。"""
+    calls: list[str] = []
+    broker = _make_fallback_broker("run-fb", calls, timeout=5.0)
+    broker.set_yolo(True)
+    q = broker.subscribe("run-fb")
+
+    result = run(
+        broker.request(
+            {"session_id": "ses-unregistered", "tool": "Bash", "tool_input": {"cmd": "ls"}},
+            http_request=_FakeRequest(),
+        )
+    )
+    assert result["behavior"] == "allow"
+    assert result["resolved_by"] == "yolo"
+    assert result["approval_id"] is not None
+    # spy：registry miss 时被调用一次，入参 = hook session_id。
+    assert calls == ["ses-unregistered"]
+    # WS 可见 requested + resolved(yolo)。
+    kinds = []
+    while not q.empty():
+        kinds.append(q.get_nowait().kind)
+    assert "approval_requested" in kinds
+    assert "approval_resolved" in kinds
+
+
+def test_resolver_hit_yolo_off_creates_run_scoped_approval():
+    """SPEC T2：resolver 命中 + yolo off → run-scoped Approval + web resolve allow。"""
+    calls: list[str] = []
+    broker = _make_fallback_broker("run-fb", calls, timeout=5.0)
+    q = broker.subscribe("run-fb")
+
+    async def scenario():
+        task = asyncio.create_task(
+            broker.request(
+                {"session_id": "ses-unregistered", "tool": "Bash", "tool_input": {}},
+                http_request=_FakeRequest(),
+            )
+        )
+        await asyncio.sleep(0.05)
+        aid = next(iter(broker._pending.keys()))
+        # Approval run-scoped：run_id = resolver 返回的 run-fb（非 registry 路径）。
+        assert broker._pending[aid].run_id == "run-fb"
+        r = broker.resolve(aid, "allow", "web")
+        assert r["ok"] is True
+        result = await asyncio.wait_for(task, timeout=2.0)
+        assert result["behavior"] == "allow"
+        assert result["resolved_by"] == "web"
+        assert result["approval_id"] == aid
+
+    run(scenario())
+    assert calls == ["ses-unregistered"]
+    kinds = []
+    while not q.empty():
+        kinds.append(q.get_nowait().kind)
+    assert "approval_requested" in kinds
+    assert "approval_resolved" in kinds
+
+
+def test_resolver_hit_yolo_off_user_deny():
+    """resolver 命中 + yolo off + 用户 deny → deny（web 通道完整走通，含拒绝分支）。"""
+    calls: list[str] = []
+    broker = _make_fallback_broker("run-fb", calls, timeout=5.0)
+
+    async def scenario():
+        task = asyncio.create_task(
+            broker.request(
+                {"session_id": "ses-unregistered", "tool": "Bash", "tool_input": {}},
+                http_request=_FakeRequest(),
+            )
+        )
+        await asyncio.sleep(0.05)
+        aid = next(iter(broker._pending.keys()))
+        r = broker.resolve(aid, "deny", "web")
+        assert r["ok"] is True
+        result = await asyncio.wait_for(task, timeout=2.0)
+        assert result["behavior"] == "deny"
+        assert result["resolved_by"] == "web"
+
+    run(scenario())
+    assert calls == ["ses-unregistered"]
+
+
+def test_resolver_miss_falls_back_to_ask():
+    """SPEC T3：resolver 未命中 → ask / native-fallback，无 pending。"""
+    calls: list[str] = []
+    broker = _make_fallback_broker(None, calls, timeout=5.0)
+    result = run(
+        broker.request(
+            {"session_id": "ses-x", "tool": "Bash", "tool_input": {}},
+            http_request=_FakeRequest(),
+        )
+    )
+    assert result["behavior"] == "ask"
+    assert result["resolved_by"] == "native-fallback"
+    assert result["approval_id"] is None
+    assert calls == ["ses-x"]
+    assert len(broker._pending) == 0
+
+
+def test_resolver_none_default_unchanged_behavior():
+    """SPEC T4：resolver=None（默认）→ 行为与现状一致（未注册 → ask）。"""
+    broker = _make_broker()
+    result = run(broker.request({"session_id": "unknown", "tool": "Bash", "tool_input": {}}))
+    assert result["behavior"] == "ask"
+    assert result["resolved_by"] == "native-fallback"
+
+
+def test_resolver_raises_falls_back_to_ask(caplog):
+    """SPEC T5：resolver 抛异常 → ask + warning（不自动 allow，不传播）。"""
+    broker = _make_broker(timeout=5.0)
+
+    def boom(_session_id: str) -> str | None:
+        raise RuntimeError("synthetic resolver crash")
+
+    broker._active_run_resolver = boom
+    with caplog.at_level(logging.WARNING, logger="orca.iface.web.approval_broker"):
+        result = run(
+            broker.request(
+                {"session_id": "ses-x", "tool": "Bash", "tool_input": {}},
+                http_request=_FakeRequest(),
+            )
+        )
+    assert result["behavior"] == "ask"
+    assert result["resolved_by"] == "native-fallback"
+    assert any("resolver" in r.message for r in caplog.records)
+
+
+def test_resolver_not_called_when_session_id_missing_or_empty():
+    """SPEC T6：session_id 缺失/空 → resolver spy 不被调用，直接 ask。"""
+    calls: list[str] = []
+    broker = _make_fallback_broker("run-x", calls, timeout=5.0)
+    r1 = run(broker.request({"tool": "Bash", "tool_input": {}}))
+    r2 = run(broker.request({"session_id": "", "tool": "Bash", "tool_input": {}}))
+    assert r1["behavior"] == "ask" and r2["behavior"] == "ask"
+    assert calls == []
+
+
+def test_resolver_hit_timeout_policy():
+    """SPEC T16：resolver 命中 + 无响应 → BROKER_TIMEOUT → 按 policy（默认 allow）。"""
+    calls: list[str] = []
+    broker = _make_fallback_broker("run-fb", calls, timeout=0.2, policy="allow")
+    result = run(
+        broker.request(
+            {"session_id": "ses-x", "tool": "Bash", "tool_input": {}},
+            http_request=_FakeRequest(),
+        )
+    )
+    assert result["behavior"] == "allow"
+    assert result["resolved_by"] == "timeout"
+    assert calls == ["ses-x"]
+
+
+def test_resolver_hit_disconnect_aborts():
+    """SPEC T17：resolver 命中 + HTTP disconnect → aborted（resolved_by=disconnect）。"""
+    calls: list[str] = []
+    broker = _make_fallback_broker("run-fb", calls, timeout=10.0)
+    result = run(
+        broker.request(
+            {"session_id": "ses-x", "tool": "Bash", "tool_input": {}},
+            http_request=_FakeRequest(disconnected=True),
+        )
+    )
+    assert result["behavior"] == "aborted"
+    assert result["resolved_by"] == "disconnect"
+    assert calls == ["ses-x"]
