@@ -19,6 +19,7 @@ from orca.runtime._project import (
     project_id,
     rebuild_registry,
     register_project,
+    resolve_runs_dir,
 )
 
 __all__ = [
@@ -33,4 +34,5 @@ __all__ = [
     "project_id",
     "rebuild_registry",
     "register_project",
+    "resolve_runs_dir",
 ]

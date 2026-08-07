@@ -465,11 +465,12 @@ def _write_orca_env(
     artifacts_dir: Path,
     kb_dir: str = "",
 ) -> None:
-    """原子写 ``runs/<run_id>/orca_env.sh``（6-7 个变量，按当前节点身份 + per-run 产物目录 + KB 根）。
+    """原子写 ``runs/<run_id>/orca_env.sh``（7-8 个变量，按当前节点身份 + 项目根锚点 + per-run 产物目录 + KB 根）。
 
     内容（**字面值**，子代理只 ``source`` 不 typing）::
 
         export ORCA_RUN_ID=<run_id>
+        export ORCA_PROJECT_ROOT=<resolve_runs_dir().resolve().parent>  # 项目根锚点（per-run 常量）
         export ORCA_NODE=<当前节点名>
         export ORCA_SESSION_ID=<本次 dispatch 的 uuid>
         export ORCA_CHART_SOCK=<chart_sock_path(run_id)>
@@ -479,6 +480,10 @@ def _write_orca_env(
 
     ``resources_root`` 非空（folder-agent）→ ``export``；为 None（inline-prompt 节点）→
     ``unset ORCA_AGENT_RESOURCES`` 清潜在 stale（同一 shell 内前一次 source 的残留）。
+
+    ``ORCA_PROJECT_ROOT``（per-run 常量，与节点无关）：= ``resolve_runs_dir().resolve().parent``
+    （与 ``_register_current_project`` 同算方式 → 幂等）。子代理 source 后无论 CWD 落哪个子目录，
+    ``resolve_runs_dir`` 都回到此根 → ``runs/`` 解析正确（防子目录迷路 bug）。
 
     ``artifacts_dir``（P8）per-run 常量（与节点无关）：bootstrap ``mkdir -p`` 后恒存在，
     每次 next 重写 env 文件时透传同一路径（不随节点变化）。
@@ -491,8 +496,13 @@ def _write_orca_env(
     → warn（不 fail next：env 文件是子代理侧便利，缺了也只让 chart/资源引用 fail loud 在子代理侧）。
     """
     env_path.parent.mkdir(parents=True, exist_ok=True)
+    # 项目根锚点：``resolve_runs_dir().resolve().parent`` 与 ``_register_current_project`` 同算方式。
+    # next 重写 env 时主 session 仍在项目根（CWD=project_root 或已设 ORCA_PROJECT_ROOT），重算一致。
+    from orca.runtime import resolve_runs_dir
+    project_root = resolve_runs_dir().resolve().parent
     lines = [
         f"export ORCA_RUN_ID={shlex.quote(run_id)}",
+        f"export ORCA_PROJECT_ROOT={shlex.quote(str(project_root))}",
         f"export ORCA_NODE={shlex.quote(node)}",
         f"export ORCA_SESSION_ID={shlex.quote(session_id)}",
         f"export ORCA_CHART_SOCK={shlex.quote(str(sock_path))}",
@@ -514,8 +524,11 @@ def _write_orca_env(
         os.replace(tmp, env_path)
     except OSError:
         tmp.unlink(missing_ok=True)
-        logger.warning("run %s: 写 env 文件 %s 失败（子代理 chart/资源可能受影响）",
-                       run_id, env_path, exc_info=True)
+        logger.warning(
+            "run %s: 写 env 文件 %s 失败（子代理 chart/资源/ORCA_PROJECT_ROOT 可能受影响；"
+            "ORCA_PROJECT_ROOT 缺失 → 子代理在子目录时 runs 解析退回 CWD 相对 → 看不到本项目 run）",
+            run_id, env_path, exc_info=True,
+        )
 
 
 def _drive_protocol(run_id: str) -> str:
@@ -556,9 +569,17 @@ def _drive_protocol(run_id: str) -> str:
 
 
 def _default_tape_path(run_id: str) -> Path:
-    """lazy import 避开 orca.iface.cli 包初始化期的循环 import。"""
-    from orca.iface.cli.bg_runner import default_tape_path
-    return default_tape_path(run_id)
+    """in-session tape 路径 = ``<resolve_runs_dir()>/<run_id>.jsonl``。
+
+    runs 目录由 ``orca.runtime.resolve_runs_dir`` 两级解析（ORCA_PROJECT_ROOT env >
+    CWD 相对）。**不**调 ``bg_runner.default_tape_path`` ——后者服务 ``tars run --background``
+    daemon 路径（子进程继承正确 CWD，且有锁定测试钉死 ``Path("runs")/<id>.jsonl``）；in-session
+    CLI 必须在子代理切子目录场景下仍回到正确项目根（见 ``resolve_runs_dir`` docstring）。
+
+    lazy import ``orca.runtime`` 避开包初始化期的循环 import（与旧 ``bg_runner`` lazy import 同款）。
+    """
+    from orca.runtime import resolve_runs_dir
+    return resolve_runs_dir() / f"{run_id}.jsonl"
 
 
 def _default_rundir() -> Path:
@@ -1764,6 +1785,40 @@ def _merge_run_id(run_id: str | None, run_id_opt: str | None) -> str | None:
     return run_id if run_id is not None else run_id_opt
 
 
+def _build_empty_runs_hint() -> str:
+    """``orca status`` 无参扫 ``runs/`` 无 marker 时的 fail-loud hint（子目录迷路场景）。
+
+    **不聚合跨项目 run 数据**（隔离不变式）——hint 只是文字指引，不改 ``runs`` 列表内容/来源。
+    registry 非空 → 提示注册项目 path + 三种修复（cd / source env / 设 ORCA_PROJECT_ROOT）；
+    registry 空 → 提示 source env 或设 ORCA_PROJECT_ROOT（子目录场景最常见修复）。
+
+    list_registered 失败（RegistryCorruptError 等）→ 当作空 registry 处理（hint 退化到通用
+    文案；不 raise——status 不应因 registry 坏而崩，doctor 另行检测）。
+    """
+    from orca.runtime import list_registered
+
+    cwd = Path.cwd()
+    try:
+        registered = list_registered()
+    except Exception:  # noqa: BLE001 — registry 坏不阻断 status（doctor 另查）
+        registered = {}
+    if registered:
+        paths = "; ".join(
+            meta.get("path", "?")
+            for meta in registered.values()
+            if isinstance(meta, dict)
+        )
+        # 不声称「注册项目下有 run」——那需扫每个注册项目 runs/ 才能验证，违隔离不变式。
+        # 只陈述注册表非空 + 当前 runs/ 空，引导用户回项目根或 source env。
+        return (
+            f"检测到注册项目 {paths}，但当前目录 {cwd}/runs 无活跃 run；"
+            "请 cd 到项目根、或 source runs/<run_id>/orca_env.sh、或设 ORCA_PROJECT_ROOT"
+        )
+    return (
+        "无活跃 run；若你在子目录，请 source runs/<run_id>/orca_env.sh 或设 ORCA_PROJECT_ROOT"
+    )
+
+
 @app.command(name="status")
 def status(
     run_id: str = typer.Argument(
@@ -1828,12 +1883,20 @@ def status(
                 "elapsed": elapsed,
                 "resumable": True,
             })
+        # 空 markers → fail-loud hint（子代理 CWD 迷路场景常见）。新增可选 ``hint`` 字段，
+        # 不破坏既有 JSON 契约（host 恒读 ``reply["runs"]``）；不聚合跨项目 run 数据（隔离不变式）。
+        hint = _build_empty_runs_hint() if not markers else None
         if json_output:
             # 空列表 shape 与非空一致（消费方恒读 reply["runs"]，spec-reviewer #5）。
-            typer.echo(json.dumps({"runs": runs}, ensure_ascii=False))
+            reply: dict[str, Any] = {"runs": runs}
+            if hint:
+                reply["hint"] = hint
+            typer.echo(json.dumps(reply, ensure_ascii=False))
             return
         if not runs:
             typer.echo("(无活跃 run)")
+            if hint:
+                typer.echo(hint)
             return
         for r in runs:
             typer.echo(

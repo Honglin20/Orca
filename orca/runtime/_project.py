@@ -151,6 +151,28 @@ def detect_project_root() -> Path:
     return _resolve_strict(cwd)
 
 
+def resolve_runs_dir() -> Path:
+    """in-session runs 目录解析（两级，确定性，不回溯祖先）。
+
+    优先级：
+      1. ORCA_PROJECT_ROOT env → <root>/RUNS_DIRNAME（子代理 source orca_env.sh 后设此 env，
+         无论在哪个子目录都回到正确项目的 runs/）。
+      2. Path(RUNS_DIRNAME)（CWD 相对——bootstrap-at-root 现状，零回归）。
+
+    刻意不调 detect_project_root()：后者会向上找 workflows/.git 跳到 cwd 祖先，
+    与 tape 落点 cwd/runs 脱节——这是 cli.py:573 文档化的上一轮 visibility bug 根因，
+    不重开。runs 恒为 <project_root>/runs（RUNS_DIRNAME 不变式）。
+    """
+    env_root = os.environ.get("ORCA_PROJECT_ROOT")
+    if env_root:
+        try:
+            return _resolve_strict(env_root) / RUNS_DIRNAME
+        except ValueError as e:
+            # env 值坏 → 不静默退化，fail loud（铁律 4）。保链 + 带底层原因，保 debuggability。
+            raise ValueError(f"ORCA_PROJECT_ROOT 解析失败：{env_root}（{e}）") from e
+    return Path(RUNS_DIRNAME)
+
+
 def project_id(project_root: Path | str) -> str:
     """``project_id = sha256(resolve(project_root))[:16]``（SPEC §13 D2/P2）。
 
