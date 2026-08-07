@@ -4,7 +4,29 @@
 
 ---
 
-## 当前：in-session runs 目录解析鲁棒化——已完成（env 自描述 + 两级解析器）
+## 当前（严重/设计错误，待修）：主页 run 列表随 tape 数量线性变慢——缺懒加载
+
+**现象**：`runs/` 有 1354 个 tape（120M，多为测试产物）时，`GET /api/runs?scope=all`
+首屏 **12s+** 才返回（discovery 全量扫描 + 逐 tape fold 概览），主页一直转圈卡死。
+诊断复现：`/api/runs` 其他端点均 <1s，唯 `scope=all` 慢；二层派生缓存（in-memory +
+`.orca-meta-cache.json`）**每次请求仍要对全部 1354 tape 逐个 stat + glob + 过滤**，
+且 legacy 分支对每个 meta 重扫 tape 路径，O(n) 全量开销不可豁免（缓存只省 fold 不省扫描）。
+
+**设计判定**：这是**架构问题不是 bug**——违背「一条读路径」精神的懒加载契约：
+主页只需总览（run_id / workflow / status / progress），却在请求期做全量 tape 派生，
+把磁盘 IO 成本押在首屏关键路径上。修复 ≥3 文件且需改数据流，不允许 surgical 打补丁。
+
+**修复方向（待写设计稿）**：
+- 列表端点应基于**轻量总览层**（如 `.orca-meta-cache.json` 作为 index 直接读，mtime 增量
+  失效），不逐 tape stat/parse；或分页/增量返回 + 前端滚动加载。
+- 关键路径与全量派生解耦：总览快、详情才 fold。
+- 附带：清理历史测试产物（本次已手动清 1354 tape + 1456 个注册表测试项目，`projects.json`
+  仅剩 Orca；`/home/mozzie/tars-serve*.log` 为本次排查日志）。
+
+**必读**：
+- `orca/iface/web/run_manager.py:discover_runs`（1373）+ `_scan_meta_overview_cached`（1560）。
+- `orca/iface/web/routes/runs.py:list_runs`（40，`scope=all` 全量路径）。
+- 复现数据：`/api/runs?scope=all` 12.3s（1354 tape）/ 1.2s（0 tape，本次清理后）。
 
 **任务**：子代理 CWD 落子目录时 `orca status` 扫不到活跃 run（marker 在项目根 `runs/`，
 子代理 `cwd/runs` 空）。根因：`_write_orca_env` 没写项目根锚点 → tape/rundir 解析全走
@@ -176,3 +198,23 @@ web 审批卡 → 用户 allow/deny；超时默认 allow（可配）；前端 yo
 ## 历史：PostToolUse 事后告警守卫——coder-agent 完成，待 test-agent 四前端真机 e2e
 
 详见 [release note](../releases/2026-08-05-posttooluse-rogue-guard.md)。**待四前端真机 e2e**。
+
+---
+
+## 历史：in-session YOLO 兜底路由（active-run fallback）——已完成 + code-reviewer 两轮闭环
+
+**任务**：真实用户反馈 CC 终端跑 in-session workflow、web 已开 yolo，但工具权限审批仍照常弹出。
+根因：in-session 宿主 CC/子代理 session 从不注册 registry（注册 id 是 executor 入口 uuid，非 CC
+会话 id）→ `resolve_session_context` 恒 miss → yolo 分支不可达。
+**状态**：**完成**：新增 `orca/iface/web/active_runs.py`（扫 marker → 终态第二守卫 → tape 双键
+匹配 host_session/顶层 session_id → 多 run 取 marker mtime 最新 + 平局字典序；per-run 缓存键含
+marker 存在性；坏数据 per-item fail-soft）+ `ApprovalBroker` 注入 `active_run_resolver`（registry
+miss 命中走与注册命中完全相同的 yolo/web 审批，未命中/异常 → ask）+ `create_app` 装配（工厂零
+IO，调用期枚举全项目）。code-reviewer 两轮闭环 0 MUST-FIX（缓存键显式化 / UnicodeDecodeError
+per-item / 静默 continue 补 warn / broker 守门升级 AST+orca.run / 测试走公开构造器 / deny 分支）。
+63 pinned + iface/web 全量（除 Playwright）272 passed。Commit `984d55b`。详见
+`docs/releases/2026-08-07-in-session-yolo-active-run-fallback.md`。
+**待办**（真机验证，SPEC §7 遗留）：CC 终端跑一次 in-session workflow，验证 yolo on 自动放行 /
+yolo off 出 web 审批卡。
+**必读**：release note `docs/releases/2026-08-07-in-session-yolo-active-run-fallback.md`；
+`orca/iface/web/active_runs.py`；SPEC `docs/specs/2026-08-07-in-session-yolo-active-run-fallback.md`。

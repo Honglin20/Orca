@@ -5,6 +5,20 @@
 
 ---
 
+## [2026-08-07] feat(in-session): YOLO active-run 兜底路由——session 未注册时扫活跃 run tape 双键匹配
+
+真实用户反馈：CC 终端跑 in-session workflow、web 已开 yolo，但工具权限审批仍照常弹出。根因：
+in-session 宿主 CC/子代理 session 从不注册进 `SessionContextRegistry`（注册 id 是 executor 入口
+uuid，非 CC 会话 id），`resolve_session_context` 恒 miss → 每次 PermissionRequest 都走
+`native-fallback ask`，yolo 分支不可达。**改动**：新增 `orca/iface/web/active_runs.py`（扫 marker
+→ 终态第二守卫 → tape 双键匹配：首行 `data.host_session` / 全量顶层 `session_id`；多 run 取 marker
+mtime 最新 + 平局字典序；per-run 缓存键含 marker 存在性；坏数据 per-item fail-soft）；
+`ApprovalBroker` 注入 `active_run_resolver`（DI，零 run/tape 依赖），registry miss 时命中走与注册
+命中完全相同的 yolo/web 审批流程，未命中/异常 → `native-fallback ask`；`create_app` 装配工厂
+（零 IO，调用期枚举 `resolve_runs_dir` + `list_registered` 全项目）。code-reviewer 两轮闭环
+0 MUST-FIX。63 pinned + iface/web 全量（除 Playwright）272 passed。Commit: `984d55b`。详见
+[release note](../releases/2026-08-07-in-session-yolo-active-run-fallback.md)。
+
 ## [2026-08-07] fix(in-session): runs 目录解析鲁棒化——env 自描述 + 两级解析器，修子代理子目录迷路
 
 子代理 CWD 落子目录（如 `artifacts/.../runs/train/`）时 `orca status` 扫不到活跃 run：marker 在项目根 `runs/`，子代理 `cwd/runs` 空。根因：`_write_orca_env` 只写 7 个变量，无项目根锚点 → tape/rundir 解析全走 CWD 相对。**改动**：`runtime/_project.py` 新增中立层 `resolve_runs_dir()`（两级：`ORCA_PROJECT_ROOT` env > CWD 相对 `Path("runs")`；刻意不调 `detect_project_root` 避免回溯祖先重开上一轮 visibility bug）；`cli.py` 三入口（`_default_tape_path` / `_write_orca_env` 加 `ORCA_PROJECT_ROOT` per-run 常量 / status 空 markers 新增可选 `hint` 字段）全经它同源；`bg_runner` 零影响（锁定测试绿）。code-reviewer 0 MUST-FIX / 3 SHOULD-FIX 全采纳 + 1 MINOR 测试补全；17 新测 + 284+53 回归全绿。Commit: `658d1cd`。详见 [release note](../releases/2026-08-07-in-session-runs-resolution.md)。
@@ -1024,4 +1038,3 @@ phase 9 前端浏览器实测可用但 playwright E2E 套件有测试代码 bug 
 ## [2026-06-29] 阶段 1 schema/ 数据层 —— 纯数据结构地基（workflow/event/state），50 测试全绿
 - commit: `d69c47c`（实现）+ `6d7dfea`（二次 review 修复：SPEC 25→21 + 测试加固）
 - 详情：[release note](../releases/2026-06-29-phase1-schema.md)
-
