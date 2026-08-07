@@ -94,7 +94,7 @@ doctor 另行检测）。
 
 ## Commit
 
-（待 commit 后填入）
+- `658d1cd` —— 主改动（runtime `_project.py` 新增 `resolve_runs_dir` + cli.py 三处接线 + 17 测试 + 本 release note）。
 
 ## 偏离决策
 

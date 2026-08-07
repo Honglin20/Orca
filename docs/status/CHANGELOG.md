@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-07] fix(in-session): runs 目录解析鲁棒化——env 自描述 + 两级解析器，修子代理子目录迷路
+
+子代理 CWD 落子目录（如 `artifacts/.../runs/train/`）时 `orca status` 扫不到活跃 run：marker 在项目根 `runs/`，子代理 `cwd/runs` 空。根因：`_write_orca_env` 只写 7 个变量，无项目根锚点 → tape/rundir 解析全走 CWD 相对。**改动**：`runtime/_project.py` 新增中立层 `resolve_runs_dir()`（两级：`ORCA_PROJECT_ROOT` env > CWD 相对 `Path("runs")`；刻意不调 `detect_project_root` 避免回溯祖先重开上一轮 visibility bug）；`cli.py` 三入口（`_default_tape_path` / `_write_orca_env` 加 `ORCA_PROJECT_ROOT` per-run 常量 / status 空 markers 新增可选 `hint` 字段）全经它同源；`bg_runner` 零影响（锁定测试绿）。code-reviewer 0 MUST-FIX / 3 SHOULD-FIX 全采纳 + 1 MINOR 测试补全；17 新测 + 284+53 回归全绿。Commit: `658d1cd`。详见 [release note](../releases/2026-08-07-in-session-runs-resolution.md)。
+
 ## [2026-08-06] feat(nas-supernet): 可视化分散化——边训练边推送到前端（删 ns_visualize 单独节点）
 
 用户要求「不要单独可视化 agent，可视化固化进前面节点，边训练边推送」。机制核实：render_chart 是 stdlib 轻客户端（4 env 即可推图），同 label+title 重复推送 = 前端替换（实时更新语义）；chart daemon per-run、run 活跃期间一直活着 → 训练伴生进程可直接推图，零引擎改动。**改动**：(1) 新增 `live_loss_watcher.py`（ns_run_train + ns_retrain 镜像）——launch.sh wrapper 内训练前后台启动（同进程组组杀一并清），解析生成契约进度行 `epoch N/T loss V` / `step N/T loss V` 每新点推全量曲线（同 title 前端刷新）；done-marker（.train_rc/.retrain_rc mtime 晚于启动）驱动退出 + stale marker 防误杀续训 + 首点前不启用 idle（首 epoch 慢不误杀）+ 全路径 fail-soft exit 0 绝不碰训练 rc；(2) 其余 5 图按产数据节点分散：pareto/search_table/latency_dist → ns_run_search Step 2.7（搜索完立刻可见），metrics_bar/compare_table → ns_retrain Step 3.5（完成时，selected 坐标 Jinja 注入）；(3) yaml 8→7 agent（ns_retrain executed → $end，outputs 去 visualization）+ 删 ns_visualize 目录（loss_curve/generate_charts/report 随 watcher 取代）；(4) chart daemon TTL 6h→72h（覆盖天级训练，保留防泄漏兜底；用户拍板非无限制）。**验证**：tars validate 全 10 workflow 0/0；compile+workflows 717 passed / 3 skipped（新 watcher 单测 11 + chart scripts 28）；in-session chart 相关 84 passed。**测试隔离修复**：新测试 `from _common import` 把 chart 版 `_common` 注册进 sys.modules 截胡 `_quant_scripts/_common`（同名跨目录模块）→ import 后 pop 三模块名 + 移除 sys.path 插入 + watcher 测试 cwd 泄漏改 monkeypatch.chdir。预存失败 8 项（用户 WIP 相关，stash 验证与本次无关）。详见 [release note](../releases/2026-08-06-nas-supernet-live-viz.md)。

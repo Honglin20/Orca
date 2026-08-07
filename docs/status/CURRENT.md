@@ -4,7 +4,27 @@
 
 ---
 
-## 当前：nas-supernet 可视化分散化——已完成（删 ns_visualize，边训练边推前端）
+## 当前：in-session runs 目录解析鲁棒化——已完成（env 自描述 + 两级解析器）
+
+**任务**：子代理 CWD 落子目录时 `orca status` 扫不到活跃 run（marker 在项目根 `runs/`，
+子代理 `cwd/runs` 空）。根因：`_write_orca_env` 没写项目根锚点 → tape/rundir 解析全走
+CWD 相对。
+
+**状态**：**完成**：`runtime/_project.py` 新增 `resolve_runs_dir()`（两级 `ORCA_PROJECT_ROOT`
+env > CWD 相对，刻意不调 `detect_project_root` 避免回溯祖先重开上一轮 visibility bug）+
+cli.py 三入口（`_default_tape_path` / `_write_orca_env` 加 `ORCA_PROJECT_ROOT` / status 空
+markers 新增可选 `hint` 字段）全经它同源；`bg_runner` 零影响。code-reviewer 0 MUST-FIX /
+3 SHOULD-FIX 全采纳（hint 文案去未验证断言、warning 反映 runs 解析退化、异常链保真）+
+1 MINOR 测试补全（registry 坏 fail-soft）。17 新测 + 284+53 回归全绿。Commit `658d1cd`。
+详见 `docs/releases/2026-08-07-in-session-runs-resolution.md`。
+
+**必读**：
+- release note `docs/releases/2026-08-07-in-session-runs-resolution.md`。
+- `orca/runtime/_project.py:resolve_runs_dir`（两级解析契约 + 不回溯祖先约束）。
+
+---
+
+## 历史：nas-supernet 可视化分散化——已完成（删 ns_visualize，边训练边推前端）
 
 **任务**：用户要求可视化不放最后（原 ns_visualize 是全链跑完才出），不要单独 agent，
 固化进前面节点确定性脚本，**边训练边推送到前端**。
