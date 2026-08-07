@@ -55,10 +55,13 @@ e2e_clean.sh
 .orca/
 
 # NAS / KD 实验工件（kd-nas workflow 运行产物：带时间戳、含 .onnx/.pt ckpt、可重生成，不入库）。
-# 只忽略运行产物目录；源码（nas-agent/）与 docs/plans、docs/releases 仍跟踪。
+# 只忽略运行产物目录；docs/plans、docs/releases 仍跟踪。
 demo_run/
 demo_target/
 quant_params/
+
+# nas-agent 本地私有代码，不入库、不推送到远程
+/nas-agent/
 
 # KD-NAS 项目级 artifact 根（teacher/student model、ONNX、ckpt、ledger；可重生成，随项目走）。
 # 每个项目的 artifacts/kd-nas 由该项目的 .gitignore 管理（本 repo 只忽略 demo 项目的）。
