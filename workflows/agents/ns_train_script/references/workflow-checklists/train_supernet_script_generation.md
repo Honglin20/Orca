@@ -171,10 +171,11 @@ Each item below is a verifiable requirement from the companion workflow. Verify 
 **Section**: §3 Progress Driver, §9 DDP Metric Aggregation
 **Check**:
 - Uses `AverageMeter` from `nas_agent.train` for metric aggregation in **both** the training loop and the validation function.
+- Exception (global reference-set metrics): when the validation metric cannot be computed per-batch (KNN / retrieval / embedding-matching metrics computed over a full reference set), the validation function uses the all-gather pattern instead: each rank collects its shard's embeddings, `all_gather` them, the main rank computes the metric over the full gathered set, and the result is broadcast to all ranks. This is the user-paradigm iron rule (ns_train_script agent 用户测度清单「评估入口函数」); do NOT force-fit such metrics into per-batch `AverageMeter` aggregation.
 - `.avg` and `.count` trigger `all_reduce`, a collective operation that all ranks must call together. Every `.avg` / `.count` call must be outside any `if is_main_process():` guard.
 - `.avg` returns a Python `float` (not a tensor). Any post-processing must use `math` / plain Python operations, not `torch.*` ops.
 **Verify**:
-- grep for `AverageMeter` import and usage in both the training loop and the validation function.
+- grep for `AverageMeter` import and usage in both the training loop and the validation function. When the validation metric is global reference-set (KNN / retrieval), grep for the all-gather pattern (`all_gather` / `all_gather_object`) in the validation function instead, and confirm the metric is computed on the main rank from full gathered data with the result broadcast.
 - Confirm training metrics displayed in `tqdm` postfix or periodic `print` come from `AverageMeter.avg`, not raw per-rank values.
 - Verify that every `.avg` or `.count` access is NOT inside an `if is_main_process():` block.
 - Verify that `.avg` results are not passed to `torch.*` ops (`.avg` returns `float`).
@@ -184,6 +185,7 @@ Each item below is a verifiable requirement from the companion workflow. Verify 
 - Per-rank training loss in `tqdm` without aggregation.
 - Per-rank validation metrics without `all_reduce`.
 - Computing `total_loss / num_batches` per rank then `all_reduce`-averaging (biased when ranks have different sample counts).
+- Force-fitting a global reference-set metric (KNN / retrieval) into per-batch `AverageMeter` aggregation — that computes a different quantity than the user's metric (semantic deviation per the user-paradigm iron rule).
 
 ### [CRITICAL] 22. KD Only When Appropriate
 **auto-fixable**: no

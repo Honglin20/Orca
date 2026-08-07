@@ -151,7 +151,13 @@ location, construction entry, `forward` signature, inputs/outputs, auxiliary net
 
 ## Training And Evaluation
 
-paradigm, loss/reward/metric, optimizer/scheduler, budget, checkpoint/init/resume, eval protocol
+paradigm, loss/reward/metric, optimizer/scheduler, budget, checkpoint/init/resume, eval protocol.
+每个 ranking metric **显式标方向**：`higher-better` / `lower-better`（禁靠 metric 名隐含推断）；
+用户的任何 metric 变换（dB 域 / 归一化 / 对数 / top-k）逐字记下。**`Evaluation entry`** 字段必记：
+评估/验证函数入口（函数名或独立 eval 脚本相对路径，如 `train_and_eval.py::eval_model`），
+`ns_train_script` / `ns_search_pipeline` / `ns_retrain` 的「用户测度权威铁律」和
+`project-fidelity-verifier` 靠它定位评估函数作 port 与审计基准。下游 `ns_train_script` /
+`ns_search_pipeline` / `ns_retrain` 的「用户测度权威铁律」把本 section 作权威数据源。
 
 ## Data And Environment
 

@@ -109,6 +109,35 @@ path = f"{d}/file.py"                # 禁：f-string 拼接
 
 ## Workflow
 
+## 🔴 用户范式权威铁律（生成 train_supernet.py 前必读）
+
+用户原始项目的**训练范式**是不可替代权威。生成训练脚本前，先从 `project_manifest.md` 的
+**Training And Evaluation** section + 用户训练源码，**显式列举「用户测度清单」**（manifest 缺字段
+则就地补全——含 metric direction，缺则按源码判定 higher/lower-better 补写）：
+
+- **loss / reward**：定义、公式、常量、符号
+- **optimizer + scheduler**：类、关键 kwargs、step order
+- **数据流与控制流**：batch 结构、训练循环结构
+- **metric 名 + metric 方向**（higher-better / lower-better）
+- **metric 变换**：用户的任何变换逐字保留（dB 域、归一化、对数、top-k 等）
+- **评估入口函数**：原项目的验证/评估函数（`eval_model` / `evaluate` / `test` / `validate` 等，按 manifest 的
+  Evaluation entry 定位）必须**整体 port** 进生成脚本的评估路径——签名、参考/测试数据协议（如 clean
+  reference embeddings + noisy test queries）、KNN k 值 / 距离函数、metric 计算步骤逐字保留，仅做
+  supernet 化改造（固定 block choice + max/min config）。**禁**用 loss 或其它代理标量替代用户评估
+  metric（loss↔acc 互换属语义偏差）。评估函数无法 per-batch 计算（全局参考集型，如 KNN / retrieval）
+  时，用 embedding 跨 rank 收集（all_gather）+ 主 rank 计算 + 结果广播，**禁**按 per-batch 聚合硬拆。
+
+**生成脚本逐字保留清单每一项**。NAS 允许的改造**仅限 supernet 化必需**：subnet 采样
+（sandwich max/min/random config）、共享权重 forward、搜索编排、预算压缩（epochs/batches 缩减 +
+scheduler rescale）。
+
+**禁替代**：不得引入用户未声明的代理替换用户范式——含擅自换 optimizer 类（如 AdamW→SGD）、
+改 loss 公式/常量、改 metric 名/方向/变换、loss↔acc 互换、擅自取负或还原变换。
+
+> 评价测度（metric/方向/变换）与时延测度的禁替代由下游 `ns_search_pipeline` 节点的同款铁律覆盖
+>（evaluator.py + latency_estimator.py）。本节点聚焦训练范式。生成后 deterministic 自检见
+> **Validation** 段「用户范式自检」。
+
 ### Step 0: Reuse-Check（软跳过
 
 > project-scoped artifacts 跨 run 复用：本节点权威产物 = `train_supernet.py` + `run_train_supernet.sh`
@@ -217,6 +246,8 @@ loss-metric helper / 自定义训练模块）须 port 进 `$ORCA_ARTIFACTS_DIR` 
   difference 替换（或删）。语义判断不在此→走 `Context` token。
 
   ```
+  - 用户 loss / optimizer / scheduler / 数据流 / 控制流逐字取自原项目（见 manifest「用户测度清单」），仅做 supernet 化改造（subnet 采样 / 共享权重 forward / 预算压缩）；禁替换 optimizer 类、改 loss 公式或常量、改 metric 名/方向/变换。
+  - Evaluation = port of <原项目评估函数入口>（manifest Evaluation entry）：<metric 名 + 评估协议，如 KNN accuracy (k=1) on L2-normalized embeddings，clean reference / noisy test protocol>。生成 evaluate() 的输出 metric 必须与该函数一致；evaluate() 内出现非该 metric 的输出（如 loss 替代）→ 语义偏差。
   - Sandwich-sampled supernet training: each batch forwards the max, min, and N random subnet configs and takes one optimizer step.
     - Evaluation runs fixed max and min configs every eval interval.
     - (only when KD is enabled) KD between sampled subnets: the max subnet's outputs distill into smaller subnets via <loss>, with weight and warmup.
@@ -296,6 +327,18 @@ context + Step 2 viability 决定 evaluation paradigm。
 
 ## Validation
 
+- **用户范式自检（deterministic，生成后必跑）**：grep `train_supernet.py` 的 optimizer 构造 +
+  loss 调用 token——optimizer 类名必须与 `project_manifest.md` 的 Training And Evaluation section
+  记录的 optimizer 一致（manifest 记 `Adam`/`AdamW` 则脚本禁出现未声明的 `SGD` 等替换）；loss 函数名
+  必须与记录一致。**评估路径自检**（同属此 check）：manifest Evaluation entry 的评估函数入口名
+  （`eval_model` / `evaluate` / `test` / `validate` 等，含 supernet 化改造后的等价命名）必须出现在
+  `train_supernet.py` 的评估路径；评估函数体内返回/计算的 metric 名必须与 manifest 记录的
+  metric 一致（记 `accuracy` 则评估输出禁为 `loss`/`info_nce` 等代理标量）。不匹配 → 属训练逻辑层
+  漂移，按 fidelity audit loop 修后重生成，再自检。写成
+  `$ORCA_ARTIFACTS_DIR/tests/test_train_measure_fidelity.py`（持久，per 下条 Persistent Tests）。
+  > metric 名 / 方向 / 变换（dB 等）忠实性属**语义层**，由 `project-fidelity-verifier` 的
+  > Evaluation-measure fidelity 维度覆盖——deterministic 自检只 grep 可机械比对的 optimizer/loss
+  > token 与评估入口/metric token。
 - **Persistent Tests**：若 check 会重跑（fix loop、verifier re-check、后续 workflow），写成
   `$ORCA_ARTIFACTS_DIR/tests/` 下 plain Python 脚本（`test_<behavior>_<purpose>.py`）；否则保持
   inline（`py_compile`、`bash -n`、`ruff`、其它 one-off 诊断）。文件粒度一行为一文件，非一产物
