@@ -4,6 +4,32 @@
 
 ---
 
+## 当前：nas-supernet-v2 新 workflow 实现——实现 + 自验完成，code-reviewer 后台运行中
+
+**任务**：SPEC `docs/specs/2026-08-11-nas-supernet-v2.md`（REVIEWED-PASS，21 issue 闭环）——
+新建 `nas-supernet-v2` workflow（8 agent + 0 terminate），根治 v1 四类问题（terminate 在 in-session
+崩 / DDP 脚本坏 / 伪 agent 浪费 / 生成节点过重）。
+
+**状态**：**实现 + 自验完成，等待 code-reviewer 后台审查结果**：C1-C6 全部实现，
+`tars validate` 0/0，v1 零改动，bash -n 全过，Python 语法全过，dev residue 清零。
+- C1: ns2_flatten (Step 0-3) + ns2_expand_supernet (Step 4-7) 拆分
+- C2: select 合并进 ns2_run_search + 失败安全网（emit falsy JSON 禁 node_failed）
+- C3: 3 子代理并行生成 + search_record_schema.json 共享 schema
+- C4: 单设备默认（plain python3 / AMP=false / 条件 DDP / guarded sync_random_seed）
+- C5: 7 个 check_*.sh 固化脚本 + .user_pkg marker
+- C6: ns2_report 单一终端 reporter（零跨节点 output 引用 + 磁盘判终态 + workflow outputs 全读 ns2_report）
+
+**必读**：
+- SPEC `docs/specs/2026-08-11-nas-supernet-v2.md`（§3 C1-C6 + §10 闭环日志）。
+- release note `docs/releases/2026-08-11-nas-supernet-v2.md`。
+- yaml `workflows/nas-supernet-v2.yaml`（8 节点拓扑 + 路由）。
+
+**待办**：
+- [ ] code-reviewer 后台审查完成后修全部反馈
+- [ ] test-agent headless 双项目 E2E（下一阶段）
+
+---
+
 ## 历史：详情页返回主页导航——已完成（SPA navigate + Playwright 真机闭环）
 
 **任务**：详情页 TopBar 返回按钮 `window.location.href`（整页刷新，"没法后退"体感）→ SPA navigate。

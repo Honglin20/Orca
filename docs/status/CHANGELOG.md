@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-11] feat(workflow): nas-supernet-v2 新 workflow——in-session 友好 / 单卡非 DDP / 弱模型友好的 NAS supernet 全链
+
+新建 `nas-supernet-v2` workflow（8 agent + 0 terminate），根治 v1 四类问题：C1 entry 拆分（flatten + expand）/ C2 select 合并进 run_search + 失败安全网 / C3 search pipeline 3 子代理并行 + 共享 schema / C4 单设备默认（plain python3 + 条件 DDP + guarded sync_random_seed）/ C5 每节点固化校验脚本 / C6 单一 ns2_report reporter（零跨节点引用 + 磁盘判终态）。SPEC 21 issue 全闭环。Commit: <SHA>。详见 [release note](docs/releases/2026-08-11-nas-supernet-v2.md)。
+
 ## [2026-08-10] fix(web): 详情页返回主页导航——window.location 整页刷新 → SPA navigate
 
 详情页 TopBar 返回按钮原用 `window.location.href="/"`（整页刷新，慢 + 丢 store 状态，用户体感
