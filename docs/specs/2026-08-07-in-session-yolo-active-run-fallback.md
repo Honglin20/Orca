@@ -191,7 +191,7 @@ approval_broker = ApprovalBroker(
 ## 6. 风险与开放问题
 
 - **R1（已知竞态，可接受）**：子代理首个工具调用即危险工具时，tape 可能尚未写入该子代理 `session_id`。缓解：host 键（主 CC 会话 id）是主路径、bootstrap 即写入无竞态；node 键竞态窗口仅「hook 发送的是子代理 id 且 host 键也未命中」时出现，此时 miss 回退 ask（CC 原生可答），不阻塞。
-- **R2（静态可确认部分）**：hook 取 session_id 的 env 优先级静态确认 = `ORCA_HOST_SESSION_ID` > `CLAUDE_CODE_SESSION_ID` > stdin（`orca-permission-hook.py:_resolve_session_id`）；子代理环境注入值待真机实证（§9 #2 spike 同源）。双键匹配覆盖两种来源。
+- **R2（静态可确认部分）**：hook 取 session_id 的优先级 = `ORCA_HOST_SESSION_ID` > `CLAUDE_CODE_SESSION_ID` > CAC PID 回溯 > stdin（`orca-permission-hook.py:_resolve_session_id`）。CAC 分支（2026-08-10 补）：hook 内嵌 `_cac_session_id_from_pid`，**行为等价**（同路径 / 同 exe 精确匹配 / 同异常元组 / 同循环边界）于 `_hostenv.cac_session_id_from_pid` / `cc_nudge.sh` 同款函数——读同样的 `~/.cac/sessions/<pid>.json`，sessionId 为 ASCII 故编码差不产生分歧，取值与 tape `data.host_session`（bootstrap 由 `host_session_from_env` 同款写出）一致 → broker 双键命中。取值一致性经 inspection 比对（无 CAC 真机执行覆盖，靠漂移闸门守恒常量防回归）。CC 路径 env 第二键短路不触达 PID 回溯；子代理环境注入值仍待真机实证（§9 #2 spike 同源）。
 - **R3（扫描面）**：每请求仅扫「marker 存在 + 非终态」的 run（通常 1-2 个），tape 索引走 mtime/size/marker 缓存；多项目 registered runs dir 全扫由缓存兜底。
 - **R4（多 run 并行）**：同 session 多活跃 run 取最新 + warn；不静默。
 - **R5（既有 warning 噪音）**：`resolve_session_context` 对未注册 session 的既有 warning 在兜底命中时仍会每次触发——**预期行为**，不改共享函数；broker 命中后补 `info`（含 run_id）、双 miss 补 `warning` 语义日志。

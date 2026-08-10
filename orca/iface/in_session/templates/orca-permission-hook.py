@@ -32,6 +32,9 @@ httpx/fastapi/orca 任何模块。
     与 CC hook timeout=86400 留巨大余量，SPEC §3.4）。
   - ``ORCA_APPROVAL_TIMEOUT_POLICY``：``allow``|``ask``|``deny``（默认 ``allow``）。
   - ``ORCA_HOST_SESSION_ID`` / ``CLAUDE_CODE_SESSION_ID``：host session 标识（CC 注入后者）。
+  - CAC（CC 换皮）两键皆不注入 → ``_cac_session_id_from_pid`` 沿 PID 链回溯
+    ``codeagentcli`` 父进程读 ``~/.cac/sessions/<pid>.json``（与 ``_hostenv`` /
+    ``cc_nudge.sh`` 同源；tape ``data.host_session`` 由同款逻辑写出 → broker 双键命中）。
 """
 
 from __future__ import annotations
@@ -104,12 +107,96 @@ def _emit(behavior: str, reason: str = "") -> None:
     sys.stdout.flush()
 
 
+def _cac_session_id_from_pid() -> str | None:
+    """沿 PID 链向上找 CAC 主进程（cmdline 含 ``codeagentcli``），
+    从 ``~/.cac/sessions/<cac_pid>.json`` 读 ``sessionId``。
+
+    CAC（CC 换皮）不把 session id 写 ``process.env``（存内存变量 ``eZ.sessionId``），
+    故 PermissionRequest spawn 的 hook 子进程继承不到 ``CLAUDE_CODE_SESSION_ID`` →
+    无此回溯则 ``_resolve_session_id`` 返 None → broker ``_resolve_active_run`` miss →
+    yolo 永不触发（CAC 是 CC 家族，PermissionRequest hook 已装，唯独缺 session 身份）。
+
+    **行为等价**（同路径 ``~/.cac/sessions`` / 同 exe 精确匹配 ``codeagentcli`` / 同异常元组 /
+    同 ``range(20)`` 边界）于 ``orca/iface/in_session/_hostenv.py:cac_session_id_from_pid`` 与
+    ``cc_nudge.sh`` 内嵌同款函数——取值一致性经 inspection 逐字段比对（无 CAC 真机执行覆盖，
+    靠漂移闸门 ``test_cac_pid_walk_drift_gate_against_canonical`` 守恒常量防回归）。 sessionId
+    为 ASCII，故基准 ``read_text()`` 与本处 ``encoding="utf-8"`` 的编码差不产生取值分歧。取值与
+    bootstrap 写进 tape ``data.host_session`` 的值一致 → broker 双键命中。
+    三处副本是**结构性强制**：三者皆 stdlib-only / 运行在无 Orca venv 的 CC/CAC 子进程，
+    不能 import ``_hostenv``（SPEC §3.1 铁律）；改一处须三处同步（漂移闸门只守 hook 这一份）。
+
+    并行安全：每个进程沿自己的 PID 链回溯，只指向自己的 CAC 父进程，不混到同项目其他
+    并行 session。非 Linux（无 ``/proc``）/ 无 ``~/.cac/sessions`` → ``isdir`` False 或首个
+    ``/proc`` read 即 ``FileNotFoundError`` → 返 None（CC 路径 env 已短路，不会走到此）。
+    """
+    sessions_dir = os.path.join(os.path.expanduser("~"), ".cac", "sessions")
+    if not os.path.isdir(sessions_dir):
+        return None
+
+    pid = os.getpid()
+    for _ in range(20):
+        try:
+            with open(f"/proc/{pid}/status", encoding="utf-8") as f:
+                status = f.read()
+            ppid_line = next(
+                (l for l in status.splitlines() if l.startswith("PPid:")), None
+            )
+            if not ppid_line:
+                break
+            ppid = int(ppid_line.split()[1])
+        except (FileNotFoundError, PermissionError, ValueError, IndexError):
+            break
+
+        try:
+            with open(f"/proc/{ppid}/cmdline", "rb") as f:
+                raw = f.read()
+        except (FileNotFoundError, PermissionError):
+            pid = ppid
+            continue
+
+        # 第一个 \0 前是 exe 路径；精确匹配可执行文件名，避免 bash snapshot 等子进程的
+        # cmdline 参数含 "codeagentcli" 字样而误匹配（与 _hostenv / cc_nudge.sh 同款守卫）。
+        exe = raw.split(b"\x00", 1)[0].decode("utf-8", errors="replace")
+        if exe.endswith("/codeagentcli") or exe == "codeagentcli":
+            session_file = os.path.join(sessions_dir, f"{ppid}.json")
+            if os.path.exists(session_file):
+                try:
+                    with open(session_file, encoding="utf-8") as f:
+                        return json.loads(f.read()).get("sessionId")
+                except (json.JSONDecodeError, KeyError):
+                    pass
+            break
+
+        pid = ppid
+        if pid <= 1:
+            break
+
+    return None
+
+
 def _resolve_session_id(payload: dict) -> str | None:
-    """session_id = ORCA_HOST_SESSION_ID | CLAUDE_CODE_SESSION_ID | stdin（SPEC §3.1 step 2）。"""
+    """session_id = ORCA_HOST_SESSION_ID | CLAUDE_CODE_SESSION_ID | CAC PID 回溯 | stdin。
+
+    优先级与 ``_hostenv.host_session_from_env`` 对齐（env 身份 > 进程身份 > payload）：
+    tape ``data.host_session`` 由同款逻辑写出，故此处取值一致 → broker 双键命中 →
+    yolo/审批可达。CC 路径 ``CLAUDE_CODE_SESSION_ID`` 在 env 第二键即短路，不触达 PID 回溯；
+    仅 CAC（两 env 键皆空）走 PID 回溯分支。stdin（payload ``session_id``/``sessionId``）
+    为最后兜底（N6 容错）。
+    """
     for env_key in ("ORCA_HOST_SESSION_ID", "CLAUDE_CODE_SESSION_ID"):
         val = os.environ.get(env_key)
         if val:
             return val
+    # PID 回溯 best-effort：本调用点位于 main() 的无保护区（stdin-try 与 urlopen-try 之间），
+    # session 文件读取只接 (JSONDecodeError, KeyError)，非 UTF-8 字节会抛 UnicodeDecodeError
+    # → 不包则会穿出 main → exit 1 不 emit 任何 decision（比 bug 修前的干净 ask 更差）。
+    # 故任何异常都回退 stdin，绝不让 hook 子进程崩在此。
+    try:
+        cac_sid = _cac_session_id_from_pid()
+    except Exception:  # noqa: BLE001 — best-effort 身份回溯，异常 → 回退 stdin
+        cac_sid = None
+    if cac_sid:
+        return cac_sid
     sid = _pick(payload, _SESSION_ID_KEYS)
     return sid if isinstance(sid, str) and sid else None
 

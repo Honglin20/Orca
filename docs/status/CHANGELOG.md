@@ -5,6 +5,19 @@
 
 ---
 
+## [2026-08-10] fix(in-session): CAC 权限审批/yolo 生效——permission hook 补 CAC PID 回溯
+
+CAC（CC 换皮、进程 `codeagentcli`）不注入 `CLAUDE_CODE_SESSION_ID`，permission hook 三路 session 解析
+（env > env > stdin）皆空 → broker `_resolve_active_run` miss → `ask` → `if self._yolo`（resolver-hit 门后）
+永不执行——hook 已随 cc+cac 家族装好，唯独缺 session 身份。**修复**：hook 内嵌 `_cac_session_id_from_pid`
+（行为等价 `_hostenv.cac_session_id_from_pid` / `cc_nudge.sh` 同款，纯 stdlib 无新 import），`_resolve_session_id`
+加 `CAC PID 回溯 > stdin` 一级（对齐 `host_session_from_env` 进程身份 > payload，保证取值 == tape
+`data.host_session` → broker 双键命中）+ best-effort `try/except` 包裹（防 `UnicodeDecodeError` 崩 hook）。
+SPEC §3.1 + yolo R2 同步。验证：hook+install 30 passed + code-reviewer 一轮 0 MUST-FIX / 3 SHOULD-FIX 全修
+（fail-soft / DRY 漂移闸门 / inspection-verified 措辞）。**无 CAC 真机**，取值一致性靠 inspection 逐字段比对 +
+漂移闸门守恒常量（`sessionId` ASCII 故编码差不产生分歧）。Commit: <TBD>。详见
+[release note](../releases/2026-08-10-cac-permission-yolo.md)。
+
 ## [2026-08-10] fix(web): 卡片事件数对齐 log + 图表数字段（双分支计数 + cache v2→v3）
 
 主页卡片"事件数"在别处服务器显示 0（in-memory 分支硬编码 0）+ 语义错（全量而非 log 行数，
@@ -16,8 +29,10 @@
 全量（双语义对照表）；④ in-memory 分支直调 `_scan_meta_overview` 不经 cache（ISSUE-B：避免 per-poll
 持久 writeback）；⑤ cache version v2→v3 五处。前端 RunRow/BoardCard 加 chart_count metric。验证：
 12 新单测（AC4-AC7 + F3 + 异常路径）+ 非 Playwright 299 passed + 前端 tsc/535 vitest 干净 +
-code-reviewer 一轮闭环 0 MUST-FIX / 2 SHOULD-FIX 全修。Commit: `a234b94`。详见 SPEC
-[2026-08-10-card-event-log-align.md](../specs/2026-08-10-card-event-log-align.md)（release note 用户后续）。
+code-reviewer 一轮闭环 0 MUST-FIX / 2 SHOULD-FIX 全修。test-agent 真机 HTTP：AC1 event_count==log 行数零偏差
+（F1 双分支真机守门 retry_started 计入 + tool_call/route_taken 排除）/ AC2 in-memory 分支非 0（§1.1 根因修复）/
+AC3 chart_count 去重 + F4 空 chart_type edge case 全过。Commit: `a234b94`。详见
+[release note](../releases/2026-08-10-card-event-log-align.md)。
 
 ## [2026-08-10] fix(nas-supernet): 图表正确性修复 + prompt 洁净 + train/retrain 监控改造（CRON→有界轮询+无上限自愈）+ search 无上限自愈
 

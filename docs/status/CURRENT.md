@@ -4,7 +4,34 @@
 
 ---
 
-## 历史：卡片事件数对齐 log + 图表数字段——已完成 + code-reviewer 闭环（待 test-agent e2e）
+## 历史：CAC 权限审批/yolo 生效——已完成（permission hook 补 CAC PID 回溯 + code-reviewer 闭环）
+
+**任务**：CAC（CC 换皮 `codeagentcli`）PermissionRequest hook 已随 cc+cac 家族装好，但 yolo / web
+审批卡从不生效。根因：CAC 不注入 `CLAUDE_CODE_SESSION_ID`（sessionId 存内存变量），hook
+`_resolve_session_id` 三路（env > env > stdin）皆空 → broker `_resolve_active_run` miss → `ask` →
+`if self._yolo`（resolver-hit 门后）永不执行。
+
+**状态**：**完成 + code-reviewer 一轮闭环（0 MUST-FIX / 3 SHOULD-FIX 全修）**：hook 内嵌
+`_cac_session_id_from_pid`（行为等价 `_hostenv`/`cc_nudge.sh` 同款，纯 stdlib 无新 import），
+`_resolve_session_id` 加 `CAC PID 回溯 > stdin` 一级（对齐 `host_session_from_env`，取值 == tape
+`data.host_session` → broker 双键命中）+ best-effort `try/except` 包裹（防 `UnicodeDecodeError` 崩 hook）。
+SPEC §3.1 + yolo R2 同步。验证：hook+install 30 passed；更广 in_session+approval_broker 621 passed /
+8 failed（全 pre-existing，grep 证零命中本改动符号）。
+
+**必读**：
+- release note `docs/releases/2026-08-10-cac-permission-yolo.md`。
+- `orca/iface/in_session/templates/orca-permission-hook.py:_cac_session_id_from_pid` +
+  `_resolve_session_id`（CAC PID 回溯 + 优先级 + fail-soft 包裹）。
+- DRY 漂移闸门 `tests/iface/in_session/test_orca_permission_hook.py:test_cac_pid_walk_drift_gate_against_canonical`
+  （守 `_hostenv` ↔ hook 守恒常量同步，防本 bug 复发）。
+
+**遗留**（环境限制，如实）：无 CAC 真机——`/proc` 回溯体执行覆盖率为零，取值与 tape 一致靠 inspection
+逐字段比对 + 漂移闸门守恒常量（`sessionId` ASCII 故编码差不产生分歧）。§9 #2 spike 降级为"真机确认"
+（根因已代码层堵死）。另两块未做：opencode `--auto` 固化 / opencode↔nga 自动探测。
+
+---
+
+## 历史：卡片事件数对齐 log + 图表数字段——已完成（code-reviewer + test-agent e2e 真机闭环）
 
 **任务**：SPEC `docs/specs/2026-08-10-card-event-log-align.md` v3（两轮 spec-review FAIL→PASS-ready）
 ——主页卡片"事件数"在别处服务器显示 0（in-memory 分支硬编码 0）+ 语义错（全量而非 log 行数）+
@@ -24,38 +51,50 @@
 - §3.5 cache version v2→v3 五处（default/gate/writeback stamp/两个 docstring）。
 - 前端 RunRow.tsx + BoardCard.tsx 加 chart_count metric；TS 类型同步。
 验证：tests/iface/web 非 Playwright 299 passed（297 旧 + 12 新）+ 前端 tsc 干净 + 535 vitest passed。
+**test-agent 真机 HTTP 闭环（独立 oracle 重实现白名单对账，全 PASS）**：AC1 event_count==log 行数零偏差
+（rich 6/minimal 4/toolheavy 3；F1 双分支真机守门 retry_started fast-path 计入 + tool_call/route_taken 排除）/
+AC2 in-memory 分支非 0（orphan attach→6，§1.1 根因）/ AC3 chart_count==5（同 title 去重 + 无/空 title +
+空 chart_type edge case，F4 isinstance）。
 
 **必读**：
 - SPEC `docs/specs/2026-08-10-card-event-log-align.md`（§3 五块契约 + §7 U1 同步）。
+- release note `docs/releases/2026-08-10-card-event-log-align.md`。
 - `orca/iface/web/run_manager.py:_scan_meta_overview`（双分支计数 + chart 去重）+ `_LOG_EVENT_TYPES`
   （U1 白名单）+ `_summary_from_overview`（F3 fallback）+ `discover_runs`（§3.4 in-memory 直调）。
 
-**待办**（test-agent 后续）：
-- [ ] e2e AC1：拉几个真实 run，卡片事件数 vs log 面板行数零偏差（showDebug=false）。
-- [ ] e2e AC2：in-session 跑 run，主页卡片事件数 > 0（验证 §1.1 根因）。
-- [ ] e2e AC3：有图表的 run，卡片图表数 == 详情页图表数（非 huge / loadFull 后）。
-- [ ] release note（用户后续）。
+**遗留**（环境限制，如实）：纯 InProcessRunHandle（live CC in-session）未真机起（AttachedRunHandle 同代码
+路径覆盖 + 单测兜底）；前端浏览器渲染未验（WSL 缺 libnspr4，间接证据：后端字段==独立 oracle + 前端逐字渲染同 JSON）。
 
 ---
 
-## 当前：nas-supernet 监控改造+图表修复+洁净——实现完成，待 test-agent E2E
+## 当前：nas-supernet 监控改造+图表修复+洁净——实现+单测+code-reviewer+test-agent E2E 完成；全链 in-flow 验证受阻于 2 个上游缺陷（SPEC 外）
 
 **任务**：SPEC `docs/specs/2026-08-10-nas-supernet-chart-cleanliness-monitoring.md`（两轮 spec-review pass）
 A/B/C/D 四段改动——图表正确性 6 项 + prompt 洁净 5 项 + train/retrain CRON→有界轮询+无上限自愈 +
 search 无上限自愈。
 
-**状态**：**实现 + 单测 + code-reviewer 闭环完成，待 test-agent E2E**：
-- A/B/C/D 全部实现，`tars validate` 0/0，bash -n 全过，ruff 干净，grep 门全过。
-- tests/workflows 559 passed + 3 skipped + 41 新测试（A1/A2/A4/C1/C2/镜像同步）。
-- code-reviewer 两轮闭环（implementation + test-coverage）。
+**状态**：**实现（commit `4f829b1`）+ 单测 + code-reviewer 两轮闭环 + test-agent 真机 E2E 完成**：
+- A/B/C/D 全部实现，`tars validate` 0/0，bash -n 全过，ruff 干净，grep 门全过（cron/3次/ATTEMPT_BUDGET 清零）。
+- tests/workflows 559 passed + 92 新测试（A1四场景/A2drain/A4sentinel/A3caption/A6stderr/C1结构/C2静态门/镜像同步）。
+- **test-agent 真机 E2E（WSL headless + tars run + playground/mnist_kd 清旧脚本）**：
+  - **监控改造（SPEC C/D）交付物：真机 PASS**（三层）——monitor_until_done.sh 真机 8 场景全过
+    （TRAIN_COMPLETE/INCOMPLETE/STUCK/STILL_RUNNING/GATE_SKIP/status-ambiguous/artifacts-unreachable，
+    cheap 活性进程活时 status.sh delta=0 不 torch.load；镜像仅 4 行路径前缀差异；RETRAIN_* 经 *COMPLETE* 通配匹配）；
+    静态门全过；agent.md C-loop/HEAL-LOOP/C-end 真连线 + 铁律 3 无上限 + FOREIGN guard + ns_run_search D3 RESUME_SEARCH guard + D1 glob；
+    真实 run tape `grep -ic cron`=0（去 cron 生效）。
+  - **全链 in-flow 到 ns_run_train：未达成**——受阻于 2 个**上游、SPEC 外**真机缺陷（见待办）。
 
 **必读**：
 - release note `docs/releases/2026-08-10-nas-supernet-chart-cleanliness-monitoring.md`。
-- SPEC `docs/specs/2026-08-10-nas-supernet-chart-cleanliness-monitoring.md`（契约逐条可验证）。
+- SPEC `docs/specs/2026-08-10-nas-supernet-chart-cleanliness-monitoring.md`。
 - `workflows/agents/ns_run_train/scripts/monitor_until_done.sh`（有界轮询+cheap 活性+发散检测）。
+- test-agent 真机证据：`tests/iface/web/_e2e_artifacts/monitor_real_test.sh`（8 场景驱动）+ run2 tape `runs/nas-supernet-20260810-213024-0f132e.jsonl`。
 
-**待办**：
-- [ ] test-agent E2E（§4.3：playground/mnist_kd + opencode executor，headless 全链验证）。
+**待办**（E2E 暴露的 2 个上游缺陷，**非本 SPEC 引入**，各立 case）：
+- [ ] **DEFECT-1（headless hang，exec 层）**：`tars run --background` ns_expand_supernet memory-verifier 读 project_root（cwd 外）触发 opencode `external_directory` permission ask → headless 无人审批 → opencode 挂死。根因：opencode profile 用 `--dangerously-skip-permissions` 但 `external_directory` 需单独 `--auto`。**已 user-scope 绕过**（`~/.orca/config.json` 加 `--auto`，run2 expand→train_script 推进）。固化方案：把 `--auto` 加进 opencode profile default flags（`orca/exec` exec 层小改）。
+- [ ] **DEFECT-2（ns_train_script DDP smoke-test 杀宿主，架构层）**：run2 train_script 成功生成 train_supernet.py/run_train_supernet.sh/data_utils.py，但其 smoke-test `nohup torchrun`（DDP）把 SIGTERM 传给 opencode 宿主（exit -15）→ node_failed + workflow_failed。根因：torchrun DDP 信号/进程组传播命中宿主；ns_train_script 无 kill_train_group.sh 归属门（那是 ns_run_train/ns_retrain 才有）。**需设计**：smoke-test 进程隔离（setsid 独立会话 + 进程组感知 kill，仿 kill_train_group）或去 DDP 单进程冒烟。
+- [ ] 修 DEFECT-1 + DEFECT-2 后重跑 E2E，验 ns_run_train in-flow 调 monitor_until_done.sh + HEAL-LOOP 自愈。
+- [ ] stale kd-nas opencode 孤儿进程（WSL PID 982146，5 天前）清理。
 
 ---
 

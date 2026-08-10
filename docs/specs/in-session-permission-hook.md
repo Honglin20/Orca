@@ -90,7 +90,7 @@ hook 只做 stdlib HTTP 转发；活跃 run / session→run 路由全在 broker 
 
 **逻辑**：
 1. 读 stdin JSON，容错取 `tool_name`/`tool_input`/`session_id`（多候选字段名，N6）。
-2. session_id = `ORCA_HOST_SESSION_ID` | `CLAUDE_CODE_SESSION_ID` | stdin（任一可空）。
+2. session_id = `ORCA_HOST_SESSION_ID` | `CLAUDE_CODE_SESSION_ID` | CAC PID 回溯 | stdin（任一可空）。CAC（CC 换皮）不注入 `CLAUDE_CODE_SESSION_ID`，两 env 键皆空时 hook 沿 PID 链回溯 `codeagentcli` 父进程读 `~/.cac/sessions/<pid>.json`——与 `_hostenv.host_session_from_env` / `cc_nudge.sh` 同源（tape `data.host_session` 由同款逻辑写出 → broker 双键命中）。CC 路径 env 第二键即短路，不触达 PID 回溯。
 3. POST `/approval`，`timeout = ORCA_APPROVAL_TIMEOUT`（env，默认 §3.4）；支持 `ORCA_HOST`（跨边界，N9）+ `ORCA_PORT`（默认 7428）。
 4. emit：
    - 响应 `behavior` → 透传。

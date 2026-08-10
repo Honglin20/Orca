@@ -74,16 +74,115 @@ def test_pick_returns_first_match():
 
 
 def test_resolve_session_id_prefers_env(monkeypatch):
-    """ORCA_HOST_SESSION_ID > CLAUDE_CODE_SESSION_ID > stdin。"""
-    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
-    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "from-cc")
-    assert hook._resolve_session_id({}) == "from-cc"
-    monkeypatch.setenv("ORCA_HOST_SESSION_ID", "from-host")
-    assert hook._resolve_session_id({}) == "from-host"
+    """ORCA_HOST_SESSION_ID > CLAUDE_CODE_SESSION_ID > CAC PID 回溯 > stdin。
+
+    PID 回溯在此 mock 为 None（确定性——不依赖宿主 ``~/.cac/sessions`` 是否存在）。
+    """
+    with mock.patch.object(hook, "_cac_session_id_from_pid", return_value=None):
+        monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "from-cc")
+        assert hook._resolve_session_id({}) == "from-cc"
+        monkeypatch.setenv("ORCA_HOST_SESSION_ID", "from-host")
+        assert hook._resolve_session_id({}) == "from-host"
+        monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        # env 空 + PID 回溯 None → 落 stdin。
+        assert hook._resolve_session_id({"sessionId": "from-stdin"}) == "from-stdin"
+        assert hook._resolve_session_id({}) is None
+
+
+def test_resolve_session_id_cac_pid_walk_when_env_absent(monkeypatch):
+    """env 两键皆空 → CAC PID 回溯取值（CAC 不注入 CLAUDE_CODE_SESSION_ID 的兜底）。
+
+    覆盖 CAC 修复的核心：无 env 时 hook 仍能拿到 session_id → broker 双键命中 → yolo 可达。
+    """
     monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
-    assert hook._resolve_session_id({"sessionId": "from-stdin"}) == "from-stdin"
-    assert hook._resolve_session_id({}) is None
+    with mock.patch.object(hook, "_cac_session_id_from_pid", return_value="cac-sid-1"):
+        assert hook._resolve_session_id({}) == "cac-sid-1"
+
+
+def test_resolve_session_id_cac_pid_walk_beats_stdin(monkeypatch):
+    """PID 回溯优先于 stdin（与 host_session_from_env 对齐：进程身份 > payload）。
+
+    保证 hook 取值与 tape ``data.host_session``（同款 PID 回溯写出）一致 → broker 命中。
+    """
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    with mock.patch.object(hook, "_cac_session_id_from_pid", return_value="cac-sid-1"):
+        assert hook._resolve_session_id({"sessionId": "stdin-sid"}) == "cac-sid-1"
+
+
+def test_resolve_session_id_env_beats_cac_pid_walk(monkeypatch):
+    """CC 路径：env 第二键短路，PID 回溯根本不触达。"""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "from-cc")
+    with mock.patch.object(
+        hook, "_cac_session_id_from_pid", return_value="should-not-be-used",
+    ) as m:
+        assert hook._resolve_session_id({}) == "from-cc"
+        m.assert_not_called()
+
+
+def test_cac_session_id_from_pid_no_sessions_dir(monkeypatch, tmp_path):
+    """``~/.cac/sessions`` 不存在 → 立即 None（跨平台确定性守卫，不触 ``/proc``）。
+
+    非 CAC 环境（含 Windows）的确定性兜底；真机 codeagentcli 路径靠行为等价
+    ``_hostenv.cac_session_id_from_pid`` / ``cc_nudge.sh`` 保证（无 CAC 环境无法 e2e）。
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows expanduser 兜底
+    assert hook._cac_session_id_from_pid() is None
+
+
+def test_cac_pid_walk_drift_gate_against_canonical():
+    """DRY 漂移闸门：hook 的 ``_cac_session_id_from_pid`` 守恒常量必须与基准 ``_hostenv`` 同步。
+
+    这是第三份副本（``_hostenv.py`` / ``cc_nudge.sh`` / hook 模板），三者皆 stdlib-only /
+    跑在无 Orca venv 的子进程，不能 import 共享——改基准忘改 hook → hook 取值 ≠ tape
+    ``data.host_session`` → broker 双键 miss → **yolo 静默失效（本次 bug 原样复发）**，且无
+    CAC 真机能抓。本闸门把"守恒常量"从 inspection 物化为可执行断言：改基准常量而忘改 hook → fail。
+    范式仿 ``test_host_session_binding.py`` 的 cc_nudge DRY 漂移闸门。不断言风格（pathlib vs
+    os.path），只断言语义不变量。
+    """
+    hostenv_path = (
+        Path(__file__).resolve().parents[3]
+        / "orca" / "iface" / "in_session" / "_hostenv.py"
+    )
+    hostenv_src = hostenv_path.read_text(encoding="utf-8")
+    hook_src = HOOK_PATH.read_text(encoding="utf-8")
+    # 守恒不变量：改任一都意味着 CAC 身份解析语义变了，hook 必须同步。
+    invariants = [
+        "codeagentcli",                                                # exe 精确匹配串
+        "range(20)",                                                   # PID 链回溯上界
+        "(FileNotFoundError, PermissionError, ValueError, IndexError)",  # status 异常元组
+        "(json.JSONDecodeError, KeyError)",                            # session 文件异常元组
+    ]
+    for inv in invariants:
+        assert inv in hostenv_src, (
+            f"基准 _hostenv 不再含守恒常量 {inv!r}——闸门自身需更新（确认 hook 是否也要跟改）"
+        )
+        assert inv in hook_src, (
+            f"hook 模板与 _hostenv 漂移：缺守恒常量 {inv!r}（hook 取值将 ≠ tape，yolo 会静默失效）"
+        )
+
+
+def test_resolve_session_id_cac_pid_walk_exception_falls_back_to_stdin(monkeypatch):
+    """PID 回溯抛任意异常（含 UnicodeDecodeError）→ 回退 stdin，绝不让 hook 崩溃。
+
+    fail-safety：``_resolve_session_id`` 位于 main() 无保护区，PID 回溯 best-effort 包裹后
+    异常必须降级为 None → 走 stdin → 最终 None 时 main 仍能 emit ask（而非 exit 1 无 decision）。
+    """
+    monkeypatch.delenv("ORCA_HOST_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+    def _boom():
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "simulated non-utf8 session file")
+
+    with mock.patch.object(hook, "_cac_session_id_from_pid", side_effect=_boom):
+        # PID 回溯炸 → 回退 stdin。
+        assert hook._resolve_session_id({"sessionId": "stdin-sid"}) == "stdin-sid"
+        # PID 回溯炸 + 无 stdin → None（main 会落 ask，不崩）。
+        assert hook._resolve_session_id({}) is None
 
 
 # ── broker mock：用 stdlib http.server 起 ThreadingHTTPServer ─────────────────
@@ -345,10 +444,11 @@ def test_main_session_id_taken_from_stdin(capsys):
             "toolUseInput": {"cmd": "ls"},
             "sessionId": "stdin-sid-1",
         })
-        # 清 env 让 stdin 是唯一来源。
+        # 清 env 让 stdin 是唯一来源；mock PID 回溯为 None（确定性，隔离宿主 ~/.cac 状态）。
         os.environ.pop("ORCA_HOST_SESSION_ID", None)
         os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
-        _run_hook_with_stdin(stdin, env, capsys)
+        with mock.patch.object(hook, "_cac_session_id_from_pid", return_value=None):
+            _run_hook_with_stdin(stdin, env, capsys)
         assert b.received[0]["session_id"] == "stdin-sid-1"
         assert b.received[0]["tool"] == "Bash"
         assert b.received[0]["tool_input"] == {"cmd": "ls"}
