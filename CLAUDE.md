@@ -14,6 +14,12 @@ Orca 是对 AgentHarness（前一个 claude code 编排框架）的重写，目�
 
 **测试后端约定**：E2E / 集成测试固定使用 **opencode + deepseek-v4-flash**（API 已配置），不再使用 claude 作为后端测试。
 
+**E2E 测试模式 = in-session headless（重要）**：E2E 必须用 **in-session 模式**——`opencode run`（非交互/headless）起一个 opencode 会话 → 主 agent 按意图（"用 TARS 跑 X"）触发 **tars skill** → skill 编排 agent 调 **`orca` CLI**（`orca <wf> --inputs` bootstrap + `orca next --run-id --output` 逐节点）驱动 workflow，每个节点的 prompt 由主 agent 执行。**禁用 `tars run --background`** 做 E2E——那是另一入口的批处理（绕过 opencode 会话 + tars skill 编排），且不连 chart daemon（`ORCA_CHART_SOCK`）→ **无 live web 图表推送**（只落静态 fallback）。in-session 模式才连 chart daemon，能验「web 图表生成正常」。启动/推进永远走 `orca` CLI（tars skill 编排），不存在 `tars <wf> --inputs`。
+
+**playground 测试项目位置（重要）**：NAS/KD 等真机 E2E 的用户项目在 **本仓库的上一级 `D:\Projects\playground\`**（如 `mnist_kd/`、`target/`），**不在** `Orca/projects/`。E2E 的 `project_root` 指向上一级 playground 项目。
+
+**E2E 必查 agent 输出质量**：不只看节点 `node_completed`，必须逐个 agent 检查其产出是否符合该节点契约（生成脚本正确性 / 校验机制通过 / output_schema 字段语义对 / 图表数据真实非空），证伪"节点过但产出错"。
+
 **TARS 是 SKILL，不是 CLI**：TARS 是 Orca 经 `orca install` 装入 opencode skills 目录（`~/.config/opencode/skills/tars/SKILL.md`，源在 `orca/skills/tars/SKILL.md`）的 **skill**——在 opencode 会话内被主 agent 按用户意图（"用 TARS 做 X"）触发。**它不是 workflow 启动命令**：skill 自身零执行逻辑，只编排——指挥 agent 调 **`orca` CLI**（`orca list` / `orca <wf> --inputs` / `orca next --run-id --output`）逐节点驱动 workflow。注意 `tars` 同名两物：**skill 名 = `tars`**（opencode 内触发）≠ **`tars` CLI**（Orca 管理入口，`tars validate`/`tars list`/`tars install`，不驱动 workflow）。启动/推进 workflow 永远走 `orca` CLI，由 tars skill 编排调用——不存在 `tars <wf> --inputs`。
 
 ---
