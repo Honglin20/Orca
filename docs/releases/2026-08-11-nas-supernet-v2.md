@@ -56,7 +56,7 @@
 - ns2_search_pipeline/agent.md 的 Step 1-3 生成详情保留作子代理 reference（子代理 Read contract 指引）
 
 ## Commits
-- (SHA 待填)
+- `976e132` feat(workflow): nas-supernet-v2 — in-session 友好 / 单卡非 DDP / 弱模型友好的 NAS supernet 全链
 
 ## Next steps
 - E2E（projects/playground 双项目真跑）属下一阶段 test-agent 范围
