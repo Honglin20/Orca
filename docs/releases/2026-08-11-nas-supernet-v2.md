@@ -58,6 +58,7 @@
 ## Commits
 - `976e132` feat(workflow): nas-supernet-v2 — in-session 友好 / 单卡非 DDP / 弱模型友好的 NAS supernet 全链
 - `de5878b` fix(workflow): nas-supernet-v2 review MUST-FIX + SHOULD-FIX 闭环（7 MF + 10 SF + MINOR）
+- `cb6c536` fix(workflow): 图表覆盖缺口修复——progress_watcher 静态 fallback + metrics_bar 渲染（AC6.3 9/9 charts）
 
 ## Next steps
 - E2E（projects/playground 双项目真跑）属下一阶段 test-agent 范围
