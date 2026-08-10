@@ -5,6 +5,15 @@
 
 ---
 
+## [2026-08-10] fix(web): 详情页返回主页导航——window.location 整页刷新 → SPA navigate
+
+详情页 TopBar 返回按钮原用 `window.location.href="/"`（整页刷新，慢 + 丢 store 状态，用户体感
+"没法后退"）。改 react-router `useNavigate` → `navigate("/")`（SPA 内导航，快，保留 store）。
+附带修 test fixture（tape topology 缺 `routes` → AgentsRail `selectAgentGroups` 迭代 `def.routes`
+崩白屏；真实 run 有 routes，非产品 bug——既有 `test_playwright_runlist` 只验进详情页 URL 不验渲染
+故漏网）。Playwright 真机 13 passed（返回 + 主页 runlist 10 + 卡片 metrics 2）。Commit: 待 commit。
+详见 [release note](../releases/2026-08-10-detail-back-nav.md)。
+
 ## [2026-08-10] fix(in-session): CAC 权限审批/yolo 生效——permission hook 补 CAC PID 回溯
 
 CAC（CC 换皮、进程 `codeagentcli`）不注入 `CLAUDE_CODE_SESSION_ID`，permission hook 三路 session 解析

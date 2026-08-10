@@ -4,6 +4,19 @@
 
 ---
 
+## 历史：详情页返回主页导航——已完成（SPA navigate + Playwright 真机闭环）
+
+**任务**：详情页 TopBar 返回按钮 `window.location.href`（整页刷新，"没法后退"体感）→ SPA navigate。
+**状态**：**完成**：`TopBar.tsx` 改 `useNavigate` + `navigate("/")`（react-router v6.28，多处已用，
+安全）。附带修 test fixture：tape topology 缺 `routes` → 详情页 `AgentsRail` 的 `selectAgentGroups`
+迭代 `def.routes`（`selectors.ts:171`）崩白屏 `routes is not iterable`；真实 run topology 有 routes
+（workflow 定义），非产品 bug——`test_playwright_runlist` 只验进详情页 URL 不验渲染故漏网。新增
+`test_back_navigation.py`（真机断言返回主页，topology 补 `routes: []`）。Playwright 真机 13 passed
+（WSL 无 sudo 装 libnspr4 等系统库，见 `wsl-playwright-no-sudo-deps` memory + home-list-lazy-index release）。
+**必读**：release note `docs/releases/2026-08-10-detail-back-nav.md`；`TopBar.tsx`（navigate）。
+
+---
+
 ## 历史：CAC 权限审批/yolo 生效——已完成（permission hook 补 CAC PID 回溯 + code-reviewer 闭环）
 
 **任务**：CAC（CC 换皮 `codeagentcli`）PermissionRequest hook 已随 cc+cac 家族装好，但 yolo / web

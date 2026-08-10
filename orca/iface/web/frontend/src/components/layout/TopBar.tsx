@@ -12,6 +12,7 @@
 
 import { useState } from "react";
 import { Timer, Copy, Check, Sun, Moon, Monitor, ArrowLeft } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import { useElapsedNow } from "@/hooks/use-elapsed-tick";
 import { selectWorkflowElapsed, formatElapsed } from "@/selectors";
@@ -35,6 +36,9 @@ const THEME_ICON: Record<Theme, typeof Sun> = {
 };
 
 export function TopBar({ runId }: { runId?: string }) {
+  // 返回主页用 SPA navigate（非 window.location 整页刷新——后者慢 + 丢 store 状态，
+  // 是用户"没法后退"体感根因）。
+  const navigate = useNavigate();
   const status = useWorkflowStore((s) => s.status);
   const workflowName = useWorkflowStore((s) => s.workflowName);
   const wsStatus = useWsStatus();
@@ -74,9 +78,7 @@ export function TopBar({ runId }: { runId?: string }) {
       {/* 返回列表页（SPEC §13 §6.1：TopBar 加「← 返回」） */}
       <button
         type="button"
-        onClick={() => {
-          window.location.href = "/";
-        }}
+        onClick={() => navigate("/")}
         title="返回 run 列表"
         className="orca-text-faint hover:orca-text inline-flex items-center rounded border orca-border px-2 py-1"
         aria-label="返回 run 列表"
