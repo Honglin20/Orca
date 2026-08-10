@@ -21,7 +21,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
     discover_metric_info,
-    extract_numeric_values,
     flatten_record,
     init_marker,
     push_chart,
@@ -59,6 +58,8 @@ def main() -> int:
         return 0
 
     # Build scatter data from raw stored values, then convert for display.
+    # NaN/overflow sentinels (float32 max from failed evaluations) are dropped —
+    # they would otherwise pin a single point at 3.4e38 and wreck the chart.
     data: list[dict[str, float]] = []
     for rec in records:
         flat = flatten_record(rec)
@@ -68,10 +69,15 @@ def main() -> int:
             continue
         try:
             lat = float(lat_raw)
-            met = info.for_display(float(met_raw))
+            met_stored = float(met_raw)
         except (ValueError, TypeError):
             continue
-        data.append({"latency": lat, "metric": met})
+        # Keep only finite, in-range values. Positive-inclusion form (`abs < 1e6`)
+        # matters: NaN fails `nan < x` (so it's dropped), whereas `nan >= 1e6` is
+        # False and would let real NaN leak through.
+        if not (abs(met_stored) < 1e6 and abs(lat) < 1e6):
+            continue
+        data.append({"latency": lat, "metric": info.for_display(met_stored)})
 
     if not data:
         push_chart(

@@ -45,6 +45,48 @@ The `if __name__ == "__main__":` entry point in the generated script is strictly
 
 
 
+## User-provided latency script (when `latency_script_path` is given)
+
+When the workflow input `{{ inputs.latency_script_path }}` is provided, the user's script is the
+**single source of truth** for latency. `latency_estimator.py` wraps it; do **not** fall back to the
+built-in PyTorch `measure_module_latency`, FLOPs/MACs/params, or any proxy. The latency this path
+produces is the `latency` objective in `search_config.yaml objs` and the latency source in
+`select_architecture.py` — single source of truth across the whole search pipeline (see the user-measure
+fidelity rule in `ns_search_pipeline/agent.md`).
+
+### Wrapper contract
+
+`get_latency(arch_config)` must:
+
+1. `self.supernet.set_sample_config(arch_config)` + `get_active_subnet()` to extract the active subnet
+   (same as the default path), and apply the freeze step from "Handling Non-Searchable Model Logic" when
+   applicable.
+2. Construct a dummy input matching the subnet's forward signature (use `latency_cfg.batch_size` for the
+   batch dim; hardcode the rest per the concrete supernet + manifest input shape) — this is
+   `latency_estimator.py`'s responsibility, not the user script's.
+3. Export the subnet to a **single-file ONNX**: `torch.onnx.export(...)`, then
+   `onnx.save_model(path, model, save_as_external_data=False)` to forbid the `.data` sidecar (keep params
+   <2GB; `torch.onnx.export` has no `external_data` arg — use the onnx-package call to disable it). Adapt
+   IO tensor names / shapes / dtypes to what the user script expects **inside `latency_estimator.py`** —
+   never modify the user script.
+4. Invoke the user script with the onnx path as a CLI arg (`subprocess.run([script, onnx_path], ...)`).
+5. Parse the **last stdout line** (or the script's return value) as the latency in ms.
+6. If the script exits non-zero → `raise` / explicit error (fail loud, never swallow). After measurement,
+   `del subnet; empty_cache(self.device)`.
+
+### User script contract (record in `latency_estimator.py` docstring/comments)
+
+- Input: onnx file path (CLI arg).
+- Output: latency in ms as the last stdout line or return value.
+- Exit code 0 = success; non-zero = failure.
+
+### Validation (user-script path)
+
+- `python -m py_compile latency_estimator.py` (inline).
+- Extend the persistent `tests/test_latency_estimator_smoke.py`: when `latency_script_path` is provided,
+  the smoke test wraps the user script path (skip the runtime call if the script is unavailable in this
+  runtime and say so — never fake a result). Non-negative latency + exit 0 on the wrapped path.
+
 ## Validation
 
 If a check fails, fix the generated file and rerun the failed check before proceeding.

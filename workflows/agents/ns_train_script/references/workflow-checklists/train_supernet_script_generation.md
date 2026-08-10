@@ -237,7 +237,7 @@ Each item below is a verifiable requirement from the companion workflow. Verify 
 
 ## Launcher And Budget
 
-Items 28 through 35 verify `run_train_supernet.sh` and budget/hyperparameter coherence. Numbering continues from the training items above.
+Items 28 through 37 verify `run_train_supernet.sh` and budget/hyperparameter coherence. Numbering continues from the training items above.
 
 ### [CRITICAL] 28. Budget 3× Scaling
 **auto-fixable**: no
@@ -260,7 +260,7 @@ Items 28 through 35 verify `run_train_supernet.sh` and budget/hyperparameter coh
 ### [MAJOR] 30. Launcher Editable Variables Complete
 **auto-fixable**: no
 **Section**: Run Launcher
-**Check**: The launcher exposes key training parameters as editable shell variables at the top: `DATA_DIR`, `OUTPUT_DIR`, training budget, `BATCH_SIZE`, `LR`, `NUM_WORKERS`, `EVAL_INTERVAL`, `SEED`, `MAX_GRAD_NORM`, `SANDWICH_N_RANDOM`, `AMP`, `NNODES`, `NPROC_PER_NODE`. When KD is enabled, also: `KD_WEIGHT`, `KD_WARMUP_START`, `KD_WARMUP_LENGTH`.
+**Check**: The launcher exposes key training parameters as editable shell variables at the top: `DATA_DIR`, `OUTPUT_DIR`, training budget, `BATCH_SIZE`, `LR`, `NUM_WORKERS`, `EVAL_INTERVAL`, `SEED`, `MAX_GRAD_NORM`, `SANDWICH_N_RANDOM`, `AMP`, `NNODES`, `NPROC_PER_NODE`, `MASTER_PORT`. `NUM_WORKERS` defaults to `0` (DataLoader Launch Hygiene, item 36). When KD is enabled, also: `KD_WEIGHT`, `KD_WARMUP_START`, `KD_WARMUP_LENGTH`.
 **Verify**: Read the editable variables section of `run_train_supernet.sh`.
 **Anti-pattern**: Hardcoding values in the torchrun command instead of using variables; missing key variables.
 
@@ -283,8 +283,8 @@ Items 28 through 35 verify `run_train_supernet.sh` and budget/hyperparameter coh
 ### [CRITICAL] 33. Launcher CLI Flags Match Argparse
 **auto-fixable**: yes
 **Section**: Run Launcher, Validation (Launcher-script CLI consistency)
-**Check**: Every `--flag` in the `torchrun` invocation inside `run_train_supernet.sh` corresponds to an argument that `train_supernet.py` actually accepts. No extra flags, no missing flags.
-**Verify**: Extract all `--flag_name` from `run_train_supernet.sh` torchrun block. Extract all `add_argument('--flag_name')` from `train_supernet.py`. Compare the two lists.
+**Check**: Every `--flag` in the `torchrun` invocation inside `run_train_supernet.sh` corresponds to an argument that `train_supernet.py` actually accepts. No extra flags, no missing flags. torchrun's own flags (`--nnodes`, `--nproc_per_node`, `--master_port`) are launcher-side and excluded from this cross-check.
+**Verify**: Extract all `--flag_name` from `run_train_supernet.sh` torchrun block, excluding torchrun's own flags. Extract all `add_argument('--flag_name')` from `train_supernet.py`. Compare the two lists.
 **Anti-pattern**: Launcher passes `--learning_rate` but script defines `--lr`; launcher passes a flag the script doesn't define.
 **Fix**: Rename the mismatched flags in `run_train_supernet.sh` to match `train_supernet.py` argparse definitions.
 
@@ -301,3 +301,19 @@ Items 28 through 35 verify `run_train_supernet.sh` and budget/hyperparameter coh
 **Check**: `run_train_supernet.sh` has executable permission.
 **Verify**: Check file permissions.
 **Fix**: `chmod +x run_train_supernet.sh`.
+
+### [CRITICAL] 36. DataLoader Launch Hygiene
+**auto-fixable**: yes
+**Section**: §4 Data Pipeline (DataLoader Launch Hygiene)
+**Check**: All generated DataLoaders use `num_workers=0` and `pin_memory=False`. The launcher's `NUM_WORKERS` variable defaults to `0` and is not raised without justification. No DataLoader enables pin memory.
+**Verify**: grep for `DataLoader(` in `train_supernet.py` and generated helper files; confirm `num_workers=0` (or default) and `pin_memory=False` on every constructor. Confirm `NUM_WORKERS=0` in `run_train_supernet.sh`.
+**Anti-pattern**: `num_workers>0` on CUDA training boxes (fork worker crashes after CUDA init — real incident); `pin_memory=True` (CUDA tensors cannot be pinned — real incident).
+**Fix**: Set `num_workers=0`, `pin_memory=False` on every DataLoader; reset launcher default to `0`.
+
+### [CRITICAL] 37. Rendezvous Port Uniqueness
+**auto-fixable**: yes
+**Section**: Run Launcher
+**Check**: The launcher passes `--master_port="$MASTER_PORT"` where `MASTER_PORT` is randomized per invocation (e.g. `$((20000 + RANDOM % 20000))`), never the fixed default `29500`.
+**Verify**: grep for `master_port` and `MASTER_PORT` in `run_train_supernet.sh`. Confirm the port is derived from `RANDOM` (or an equivalent unique-per-run mechanism), not a hardcoded literal.
+**Anti-pattern**: Omitting `--master_port` (fixed default 29500 — collides across concurrent/stale instances, EADDRINUSE on the rendezvous — real incident); hardcoding a fixed port that reuse across attempts.
+**Fix**: Randomize `MASTER_PORT` per launch and pass `--master_port="$MASTER_PORT"`.

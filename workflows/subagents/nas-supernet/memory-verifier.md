@@ -43,6 +43,7 @@ Common claim types and how to verify:
 - **NAS decisions** (model type, evaluation paradigm, training viability, KD): verify against the actual generated code. For example, `model_type` must be consistent with the pre-built block imports in `supernet.py`; evaluation paradigm must match the evaluator class name in `evaluator.py`; training viability must match whether `train_supernet.py` exists on disk.
 - **Descriptive claims** about the original project (model structure, training paradigm, data pipeline, etc.): verify against `<project_root>` source code that the descriptions are accurate.
 - **Section completeness**: `project_manifest.md` must contain all five section headings: **Project Overview**, **Model**, **Training And Evaluation**, **Data And Environment**, **Relevant Source Files**. Add any missing headings with empty body.
+- **Metric direction presence**: the **Training And Evaluation** section must explicitly state each ranking metric's optimization direction (`higher-better` / `lower-better`), not leave it implied by the metric name. If a metric is named but its direction is not recorded, verify the direction against `<project_root>` source code (e.g. accuracy/top-k→higher-better, loss/error/perplexity→lower-better) and record it next to the metric. This field is the authoritative source for the downstream user-measure fidelity rule; a missing direction is a gap, fix it.
 
 If a claim references an artifact that does not yet exist (e.g. `evaluator.py` has not been generated yet), skip that claim.
 

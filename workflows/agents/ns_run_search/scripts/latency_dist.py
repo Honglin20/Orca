@@ -51,6 +51,8 @@ def main() -> int:
         return 0
 
     latencies = extract_numeric_values(records, latency_path)
+    # NaN/overflow sentinels (float32 max) dropped — they would skew the bins.
+    latencies = [v for v in latencies if abs(v) < 1e6]
     if not latencies:
         push_chart(
             artifacts_dir_path=ad, script_name="latency_dist", label="nas-supernet/search",

@@ -32,7 +32,6 @@ Design principles:
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import sys
@@ -153,6 +152,108 @@ def find_latest_attempt_log(artifacts_dir: Path, subdir: str, prefix: str) -> Pa
     return candidates[-1] if candidates else None
 
 
+def best_val_metric_from_log(
+    artifacts_dir: Path, metric_name: str, display_direction: str
+) -> float | None:
+    """Parse the best validation metric from the latest training attempt log.
+
+    Training logs use ACTUAL metric values (not NAS-negated). ``best`` is
+    determined by ``display_direction``: higher -> max, lower -> min. Handles both
+    JSON-log lines and ``metric=value`` text (regex fallback). Returns None if the
+    log is missing or contains no parseable metric.
+    """
+    log_path = find_latest_attempt_log(artifacts_dir, "train", "train")
+    if log_path is None:
+        return None
+
+    text = read_text(log_path)
+    if not text:
+        return None
+
+    best: float | None = None
+    mn_lower = metric_name.lower()
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        val: float | None = None
+
+        # JSON line.
+        try:
+            rec = json.loads(line)
+            if isinstance(rec, dict):
+                for key in (f"val_{metric_name}", f"test_{metric_name}", metric_name, "val_metric", "best_metric"):
+                    if key in rec:
+                        try:
+                            val = float(rec[key])
+                            break
+                        except (ValueError, TypeError):
+                            pass
+        except json.JSONDecodeError:
+            pass
+
+        # Regex fallback on text.
+        if val is None:
+            for pattern in (
+                rf"val_{re.escape(mn_lower)}\s*[:=]\s*([\d.eE+-]+)",
+                rf"{re.escape(mn_lower)}\s*[:=]\s*([\d.eE+-]+)",
+            ):
+                m = re.search(pattern, line, re.IGNORECASE)
+                if m:
+                    try:
+                        val = float(m.group(1))
+                        break
+                    except ValueError:
+                        pass
+
+        if val is not None:
+            if best is None:
+                best = val
+            elif display_direction == "higher" and val > best:
+                best = val
+            elif display_direction == "lower" and val < best:
+                best = val
+
+    return best
+
+
+def final_metric_from_json(artifacts_dir: Path, metric_name: str) -> float | None:
+    """Read the retrain final test metric from ``runs/retrain/test_metrics.json``.
+
+    Returns the raw stored value. Retrain scripts typically write un-negated values
+    (e.g. 0.92 for accuracy), so the caller should NOT double-negate.
+    """
+    metrics_path = artifacts_dir / "runs" / "retrain" / "test_metrics.json"
+    if not metrics_path.is_file():
+        return None
+    try:
+        data = json.loads(metrics_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    for key in (metric_name, f"test_{metric_name}", f"val_{metric_name}", "test_metric", "best_metric", "metric"):
+        if key in data:
+            try:
+                return float(data[key])
+            except (ValueError, TypeError):
+                pass
+
+    # Fallback: first numeric value that is not loss.
+    for key, val in data.items():
+        if "loss" in key.lower():
+            continue
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                continue
+    return None
+
+
 def safe_float(raw: str) -> float | None:
     """Parse a Jinja-rendered numeric arg that might be empty or quoted."""
     raw = raw.strip().strip("\"'")
@@ -252,13 +353,21 @@ def discover_metric_info(
     latency_path = find_field(records, LATENCY_FIELDS) if records else ""
     metric_path = find_field(records, (f"objs.{metric_name}", metric_name)) if records else ""
 
-    # Determine display polarity: if all stored metric values are <= 0,
-    # they are negated higher-better metrics (NAS convention).
+    # Determine display polarity: if all (valid) stored metric values are <= 0,
+    # they are negated higher-better metrics (NAS convention). Invalid values
+    # (e.g. NaN encoded as float32 max 3.4e38 from a failed evaluator run) are
+    # excluded — they would otherwise flip the sign heuristics below. The garbage
+    # threshold targets overflow sentinels only, never legitimate metrics whose
+    # magnitude can exceed 1 (reward, BLEU, ...). If every value is garbage,
+    # fall back to the raw set so the legacy heuristic still runs.
     negate = False
     display_direction = "higher"
     if records and metric_path:
         vals = extract_numeric_values(records, metric_path)
-        if vals and all(v <= 0 for v in vals):
+        valid = [v for v in vals if abs(v) < 1e6]
+        if not valid:
+            valid = vals
+        if valid and all(v <= 0 for v in valid):
             negate = True
             display_direction = "higher"
         elif vals:

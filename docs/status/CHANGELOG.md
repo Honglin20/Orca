@@ -5,6 +5,32 @@
 
 ---
 
+## [2026-08-10] fix(nas-supernet): 图表链路修复——progress 每指标一图 / compare_table NaN / search 3 图 reuse 补推
+
+真机跑 nas-supernet 全流程后修 5 类图表问题：① progress_watcher 每指标推独立图（不再 loss/acc 一张
+hue 图，零硬编码指标名）；② metrics_bar bar→table（Acc by Pipeline Phase，含中文阶段解释）；
+③ compare_table Full Supernet Acc 用训练 log 真实精度（不再 `max(vals)` 选中 NaN 3.4e38）+ Selected
+不二次取负；④ ns_run_search Step 0 reuse 内联推 3 图；⑤ `ns_run_search/_common.py` 整体替换为已修副本
+（消除 `_read_objective` NameError，NaN 极性过滤 + 共享函数）。另修 `nas-supernet.yaml` description 未转义
+双引号。**验证**：tests/workflows 相关 120 passed + ruff + tars validate；真机重训确认 loss/test_acc 两图
+独立推送。Commit: `HEAD`。详见
+[release note](../releases/2026-08-10-nas-supernet-chart-fixes.md)。
+
+## [2026-08-10] fix(nas-supernet): launch hygiene 契约 + 残留进程清理——封死历史 run 训练失败事故类别
+
+他机弱模型实跑历史 run 复盘：训练反复死于确定性启动卫生问题（`num_workers=4` fork 崩
+CUDA / `pin_memory=True` 报 cannot be pinned / torchrun 默认 29500 端口 rendezvous
+EADDRINUSE / 残留 wrapper 叠加二次训练），属契约层该固化的问题。**改动**：`train_supernet_script_generation.md`
+新增 §4 DataLoader Launch Hygiene（`num_workers=0` + `pin_memory=False` 写死）+ launcher
+骨架 `NUM_WORKERS=0` + `MASTER_PORT=$((20000 + RANDOM % 20000))` 随机端口 + torchrun 自身
+flag 排除 cross-check；checklist 新增 [C]36/37（追加编号不重排）+ [M]30/[C]33 措辞；
+`ns_retrain/agent.md` 生成契约加同款 DataLoader 卫生铁律；`launch.sh`（ns_run_train +
+ns_retrain）detach 前清残留 wrapper（`/proc/<pid>/cmdline` 匹配才组杀，防 PID 复用误杀）。
+**验证**：bash -n 过；实测清理逻辑两场景过（无关进程不误杀 / 匹配残留整组杀）；compile 212
+passed；tests/workflows 506 passed（4 个预存失败 stash 隔离验证与本改动无关——
+`_common.py:251` NameError 为用户未提交 WIP）；tars validate 过。Commit: 待 commit。详见
+[release note](../releases/2026-08-10-launch-hygiene-contract.md)。
+
 ## [2026-08-07] feat(in-session): YOLO active-run 兜底路由——session 未注册时扫活跃 run tape 双键匹配
 
 真实用户反馈：CC 终端跑 in-session workflow、web 已开 yolo，但工具权限审批仍照常弹出。根因：

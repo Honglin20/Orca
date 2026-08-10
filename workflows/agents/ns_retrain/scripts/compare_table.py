@@ -6,8 +6,10 @@ Builds a 2-column comparison table (Full Supernet vs Selected Subnet) across:
 
 Data sources (best-effort, each row independent):
   - Full Supernet params/FLOPs: parsed from supernet_summary.md or inspect_supernet.py output.
-  - Full Supernet latency/metric: worst-case from search_results.jsonl.
-  - Selected Subnet latency/metric: from ns_select output (CLI args).
+  - Full Supernet metric: trained supernet's real best validation metric from the
+    training log (fallback: best search candidate when the log is unavailable).
+  - Full Supernet latency: max latency across candidates.
+  - Selected Subnet latency/metric: from ns_select output (CLI args, already natural).
 
 Metric values are un-negated for display if NAS stores them negated.
 """
@@ -18,10 +20,10 @@ import argparse
 import re
 import sys
 from pathlib import Path
-from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
+    best_val_metric_from_log,
     discover_metric_info,
     extract_numeric_values,
     push_chart,
@@ -61,17 +63,30 @@ def main() -> int:
         if lats:
             full_latency = max(lats)
 
-    # Full supernet metric proxy: worst metric across candidates.
+    # Full supernet metric: the trained supernet's real best validation metric
+    # (from the training log) — NOT a proxy over search candidates. Fallback when
+    # the training log is unavailable: best search candidate (min negated acc),
+    # which is a defensible lower bound on supernet quality. NaN/overflow
+    # sentinels (float32 max) are filtered so they can never surface.
     full_metric = None
-    if info and info.field_path and records:
-        vals = extract_numeric_values(records, info.field_path)
-        if vals:
-            # NAS: smaller-is-better → worst = max (least negative = lowest real accuracy).
-            full_metric = info.for_display(max(vals))
+    full_metric_source = ""
+    if info:
+        full_metric = best_val_metric_from_log(ad, info.name, info.display_direction)
+        if full_metric is not None:
+            full_metric_source = "train-log best validation"
+        elif info.field_path and records:
+            vals = extract_numeric_values(records, info.field_path)
+            valid = [v for v in vals if abs(v) < 1e6]
+            if valid:
+                # NAS: smaller-is-better -> best = min (most negative = highest acc).
+                full_metric = info.for_display(min(valid))
+                full_metric_source = "search best candidate (train log unavailable)"
 
     sel_latency = safe_float(args.selected_latency_ms)
+    # Selected metric comes from ns_select stdout — already natural
+    # higher-is-better direction (select_architecture.py contract). Do NOT negate.
     sel_metric_raw = safe_float(args.selected_acc)
-    sel_metric = info.for_display(sel_metric_raw) if (info and sel_metric_raw is not None) else sel_metric_raw
+    sel_metric = sel_metric_raw
 
     # Build comparison rows.
     rows: list[dict[str, str]] = []
@@ -91,6 +106,8 @@ def main() -> int:
         return 0
 
     caption = f"Full-open supernet vs selected subnet. Metric: {metric_name}."
+    if full_metric_source:
+        caption += f" Full Supernet metric = {full_metric_source}."
     if info and info.negate_for_display:
         caption += " Metric values un-negated from NAS storage."
     caption += " '-' = source did not report."

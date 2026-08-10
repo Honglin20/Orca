@@ -125,6 +125,34 @@ path = f"{d}/file.py"                # 禁：f-string 拼接
 
 按 3 步顺序执行。
 
+## 🔴 用户测度权威铁律（生成 evaluator.py / latency_estimator.py / search_config.yaml 前必读）
+
+用户原始项目的**评价测度**与**时延测度**是不可替代权威。
+
+**评价测度清单**（生成 evaluator.py 前，从 `project_manifest.md` 的 **Training And Evaluation**
+section + 用户 eval 源码显式列举，manifest 缺字段则就地补全——含 metric direction）：
+- **metric 名 + metric 方向**（higher-better / lower-better）
+- **metric 变换**：用户的任何变换逐字保留（dB 域、归一化、对数、top-k 等）
+- **loss / reward**（evaluator 复用训练 loss 作 objective 时）：定义、公式、常量
+
+**时延测度**：
+- 用户提供 `{{ inputs.latency_script_path }}` → **全链路时延唯一权威**。`latency_estimator.py` 包装
+  此脚本，`search_config.yaml objs` 的 latency objective + `select_architecture.py` 的 latency 来源
+  全部同源于此，**禁 fallback** 到内置 PyTorch / FLOPs / 任何代理。
+- 未提供 → 内置 PyTorch `measure_module_latency`，同样全链路同源。
+
+**禁替代**：不得引入用户未声明的代理测度替换用户测度——**含 FLOPs / MACs / params 代时延**
+（FLOPs/MACs/params 仅可作 `inspect_supernet.py` 打印 / 下游 `ns_retrain/scripts/compare_table.py` 的**展示性参考列**，
+**绝不可**进 `search_config.yaml objs` 作 objective）、loss↔acc 互换、擅自取负或还原用户变换。
+
+**smaller-is-better 仅作 NAS 内部存储与多目标优化方向**（多目标进化需统一方向，higher-better
+metric 在 `search_results.jsonl` 存为取负值）。面向用户的输出——训练 log、chart、返回 JSON、
+`select_architecture.py` 的 `selected_acc`、对比表、assessment——**必须还原用户原值、原方向、
+原变换**（higher-better 的 acc 展示正值；dB 域 loss 展示 dB 值；不把用户的 dB 还原成原始 loss）。
+
+> 训练范式（loss/optimizer/scheduler）的禁替代由上游 `ns_train_script` 节点的同款铁律覆盖。
+> 本节点聚焦评价测度 + 时延测度。生成后 deterministic 自检见 **Validation** 段「search objective 自检」。
+
 ### Step 0: Reuse-Check（软跳过
 
 > project-scoped artifacts 跨 run 复用：本节点权威产物 = `select_architecture.py` + `search_config.yaml`
@@ -185,6 +213,11 @@ fi
   - dummy_input 构造 = latency_estimator 责任（按 manifest input shape），传给 export 与脚本。
   - IO 张量名 / shape / dtype 不匹配由 `latency_estimator.py` 适配（**禁**改用户脚本）。
   - 调用户脚本 + 解析 stdout 末行 / 返回值得 ms；脚本非 0 退出 → raise / 显式 error。
+
+> **全链路同源铁律**：无论默认 PyTorch 还是用户脚本路径，`latency_estimator.py` 产出的 latency 即
+> `search_config.yaml objs` 的 latency objective + `select_architecture.py` 的 latency **唯一来源**；
+> 禁 fallback 到 FLOPs/MACs/params/内置 PyTorch（用户脚本路径时）。见**用户测度权威铁律** + Step 1
+> workflow doc `measure_latency_script_generation.md` 的用户脚本章节。
 
 #### Non-Searchable Model Logic（来自 workflow doc）
 
@@ -269,7 +302,7 @@ ported helper。固定 search 框架由 `nas_agent/search/` 提供，经生成 c
   ```
   - Evaluation paradigm: <validate | finetune | train_from_scratch>.
   - Runs per candidate on a single device; the original DDP/rank logic is stripped.
-  - Objective metrics: <names>, all converted to smaller-is-better (larger-is-better metrics are negated).
+  - Objective metrics: <names> + 方向 + 任何变换逐字取自用户 manifest（见**用户测度权威铁律**）；higher-better metric 仅在 `search_results.jsonl` **内部存储**取负（smaller-is-better 优化方向），面向用户输出（chart / select / 对比表）还原原值原方向，禁改变用户的评价标准。
   - The original logging framework is replaced by start/finish stdout banners.
   - (only when a budget is reduced; keep the parts that apply) Training budget: <actual numbers, a fraction of the original>, with scheduler <compressed or replaced to fit the short horizon: how>; validation capped at <max samples or batches>.
   - (only for cross-dataset finetune) Supernet pretrained on <source dataset>; candidates finetuned and validated on <target dataset>.
@@ -378,6 +411,10 @@ python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
   候选里选主 metric 最优（acc 最大）。
 - `target_latency_ms <= 0` / 缺省：`select_reason="pareto-knee"`——前沿 knee 点（实现时定具体
   knee 算法，建议最大曲率 / 距对角线最远）。
+- **输出 `selected_acc` 须还原用户原方向**：内部 Pareto / 优化用 smaller-is-better（higher-better
+  metric，即 larger-is-better，在 `search_results.jsonl` 内部 negate 存储），但报告进 stdout JSON 的
+  `selected_acc` 必须 un-negate 回用户原值（higher-better metric 还原正值）——禁把内部 negated 值
+  直接输出（见**用户测度权威铁律**）。
 - 用 `pathlib.Path` / `os.path`（铁律）；输出 JSON 用 `json.dumps(..., separators=(",", ":"))`
   单行；变量 / 注释英文。
 
@@ -459,6 +496,14 @@ python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
 
 ## Validation
 
+- **search objective 自检（deterministic，生成 search_config.yaml 后必跑）**：python 解析
+  `search_config.yaml` 的 `objs` 做两项机械校验——① 必含 `latency` objective；② `objs` 内**禁**
+  `flops`/`macs`/`params` 作 objective（仅允许它们作 inspect / 下游 `ns_retrain/scripts/compare_table.py`
+  展示列）。不匹配 → fail loud 按 workflow compliance loop 修后重生成，再自检。写成
+  `$ORCA_ARTIFACTS_DIR/tests/test_search_objective_fidelity.py`（持久，per 下条 Persistent Tests）。
+  > metric 名 / 方向 / 变换是否忠实用户清单、面向用户输出（log/chart/select）是否还原原值原方向
+  > 属**语义层**，由 `project-fidelity-verifier` 的 Evaluation-measure fidelity 维度覆盖（manifest 是
+  > 自由文本非结构化锚点，不在本 deterministic 自检 scope）。
 - **Persistent Tests**：若 check 会重跑（fix loop、verifier re-check、后续 workflow），写成
   `$ORCA_ARTIFACTS_DIR/tests/` 下 plain Python 脚本（`test_<behavior>_<purpose>.py`）；否则保持
   inline（`py_compile`、`bash -n`、`ruff`、其它 one-off 诊断）。文件粒度一行为一文件，非一产物

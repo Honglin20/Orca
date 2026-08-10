@@ -3,8 +3,9 @@
 # 每次调用含 sleep 240，撞不到 bash 工具超时上限）。
 # 判据（互斥）：
 #   WARMUP_FAIL reason=process-exit rc=<RC>   进程已退出（崩或正常结束）
-#   WARMUP_FAIL reason=loss-diverged          log 含 NaN/inf（对全文检测，不先过滤数字行——
-#                                             `loss nan` 无数字，先 grep 数字会漏掉成死分支）
+#   WARMUP_FAIL reason=metric-diverged        progress.jsonl 任一指标 NaN/Infinity（用户指标不可
+#                                             预测——loss/reward/gain 皆可能，查结构化全量；文件
+#                                             缺失回落 prose 行结构化匹配）
 #   WARMUP_OK epoch_cnt>=2                    ≥2 个进度标记（epoch 或 step，可测每单位耗时）
 #   WARMUP_RUNNING epoch_cnt=<n>              还在跑但进度标记不足
 # LOG_MTIME / LOG_SIZE 供 agent 在"无进度标记"时判 log 是否在增长（格式未契约化兜底）。
@@ -29,18 +30,25 @@ if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
 fi
 
 sleep 240   # 4 min；禁改更大（撞 bash 工具超时）
-# 发散检测：对 log **全文**（loss nan/inf 无数字，不能先过滤数字行）
-if grep -iE 'loss[^0-9-]*(nan|inf)' "$LOG" >/dev/null 2>&1; then
-  echo "WARMUP_FAIL reason=loss-diverged"
+# 发散检测：progress.jsonl 任一指标 NaN/Infinity（用户指标不可预测，查结构化全量而非字面 loss）；
+# 文件缺失（训练未写首点）回落到 prose 行结构化匹配。
+PROGRESS="runs/train/progress.jsonl"
+if [ -f "$PROGRESS" ]; then
+  DIVERGED="$(grep -E ':[[:space:]]*-?(NaN|Infinity)' "$PROGRESS" 2>/dev/null | tail -1)"
+else
+  DIVERGED="$(grep -iE '(epoch|step)[[:space:]]+[0-9]+/[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+[-+]?(nan|inf)' "$LOG" 2>/dev/null | tail -1)"
+fi
+if [ -n "$DIVERGED" ]; then
+  echo "WARMUP_FAIL reason=metric-diverged"
   tail -8 "$LOG" 2>/dev/null
   exit 0
 fi
 EPOCH_LINES="$(grep -iE '(epoch|step)[^0-9]*[0-9]+' "$LOG" 2>/dev/null | tail -5)"
-LOSS_LINE="$(grep -iE 'loss[^0-9]*[-+]?[0-9]' "$LOG" 2>/dev/null | tail -1)"
+METRIC_LINE="$(grep -iE '(epoch|step)[[:space:]]+[0-9]+/[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+[-+]?[0-9]' "$LOG" 2>/dev/null | tail -1)"
 echo "---EPOCH_MARKERS---"
 echo "$EPOCH_LINES"
-echo "---LAST_LOSS---"
-echo "$LOSS_LINE"
+echo "---LAST_METRIC---"
+echo "$METRIC_LINE"
 echo "---TAIL---"
 tail -8 "$LOG" 2>/dev/null
 MTIME2="$(stat -c %Y "$LOG" 2>/dev/null || stat -f %m "$LOG" 2>/dev/null || echo none)"

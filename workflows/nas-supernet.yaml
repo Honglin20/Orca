@@ -1,5 +1,5 @@
 name: nas-supernet
-description: "NAS supernet 全链流水线：张开超网 → 生成训练脚本 → 生成搜索 pipeline + select_architecture.py → 自愈执行训练/搜索 → 确定性选架构（target_latency 下 max-acc，缺则 Pareto knee）→ retrain 选定子网。7 agent 节点 + 3 terminate（全 fail-loud：model_type 不支持 / select 无候选 / retrain 失败）。ns_run_train / ns_retrain 走 in-session CRON 定时自检（节点常驻运行直到训练**真正完成**——rc=0 + ckpt 有效才认完成，中断残留 ckpt 续训；detach + warmup + CRON 1~2h 自检 + train_status.md / retrain_status.md 真相源，未完成不产出 JSON）；ns_retrain 额外含 retrain 脚本生成（AGENTS.md scaffold + fidelity 复查）。**可视化无单独 agent，全部固化进节点确定性脚本**：live_loss_watcher 边训练/重训边推实时 loss 曲线（launch.sh 伴生启动，解析契约进度行 `epoch N/T loss V`，同 title 前端实时刷新）；搜索 3 图（pareto/search_table/latency_dist）由 ns_run_search 成功后推；最终对比图（metrics_bar/compare_table）由 ns_retrain 完成时推。fidelity-verifier / workflow-verifier / memory-verifier 三层闭环 + 确定性 Bash select + 模块化 auto-run/retrain + self-heal 白名单审计字段（healed_files / fidelity_retriggered）。"
+description: "NAS supernet 全链流水线：张开超网 → 生成训练脚本 → 生成搜索 pipeline + select_architecture.py → 自愈执行训练/搜索 → 确定性选架构（target_latency 下 max-acc，缺则 Pareto knee）→ retrain 选定子网。7 agent 节点 + 3 terminate（全 fail-loud：model_type 不支持 / select 无候选 / retrain 失败）。ns_run_train / ns_retrain 走 in-session CRON 定时自检（节点常驻运行直到训练**真正完成**——rc=0 + ckpt 有效才认完成，中断残留 ckpt 续训；detach + warmup + CRON 1~2h 自检 + train_status.md / retrain_status.md 真相源，未完成不产出 JSON）；ns_retrain 额外含 retrain 脚本生成（AGENTS.md scaffold + fidelity 复查）。**可视化无单独 agent，全部固化进节点确定性脚本**：progress_watcher 边训练/重训 tail 生成契约 progress.jsonl `{\"step\":N,\"metrics\":{...}}` 边推实时多指标曲线（launch.sh 伴生启动，用户指标全推——loss/acc/gain 皆可，消费端零硬编码，hue=series，同 title 前端实时刷新）；搜索 3 图（pareto/search_table/latency_dist）由 ns_run_search 成功后推；最终对比图（metrics_bar/compare_table）由 ns_retrain 完成时推。fidelity-verifier / workflow-verifier / memory-verifier 三层闭环 + 确定性 Bash select + 模块化 auto-run/retrain + self-heal 白名单审计字段（healed_files / fidelity_retriggered）。"
 
 entry: ns_expand_supernet
 
@@ -26,7 +26,7 @@ inputs:
     required: true
   latency_script_path:
     type: string
-    description: "[advanced] 用户外部时延脚本路径（可选）。提供则 ns_search_pipeline 生成 latency_estimator.py 时包装此脚本（onnx 单文件契约）；未提供（默认）走 nas-agent 内置 PyTorch measure_module_latency。罕见 override——多数项目用内置 PyTorch latency 即可"
+    description: "[advanced] 用户外部时延脚本路径（可选）。**提供则全链路时延唯一权威**——ns_search_pipeline 生成 latency_estimator.py 时包装此脚本（onnx 单文件契约），search_config.yaml objs 的 latency objective + select_architecture.py 的 latency 来源全部同源于此，禁 fallback 到内置 PyTorch / FLOPs / 任何代理（见 ns_search_pipeline 用户测度权威铁律 + measure_latency_script_generation.md 用户脚本章节）。未提供（默认）走 nas-agent 内置 PyTorch measure_module_latency"
     required: false
     default: ""
   seed:
@@ -108,7 +108,7 @@ nodes:
   # ═══════════════════════════════════════════════════════════════════════════
   # Agent 3: ns_search_pipeline
   #   读 train 上游产物 + 用户项目 → 生成 latency_estimator.py（默认 nas-agent PyTorch
-  #   measure_module_latency，或包装用户 latency_script_path）+ search 脚本（evaluator /
+  #   measure_module_latency，或包装用户 latency_script_path——提供则全链路时延唯一权威，禁 FLOPs/代理替代）+ search 脚本（evaluator /
   #   arch_codec / search_config / run_search_supernet.sh）+ select_architecture.py
   #   （schema-aware JSON 契约）+ AGENTS.md scaffold；Non-Searchable Logic + NPU foreach=False。
   # ═══════════════════════════════════════════════════════════════════════════
@@ -279,9 +279,9 @@ nodes:
         fidelity_retriggered: {type: boolean, description: "true=首次生成后或 self-heal 改训练逻辑后跑过 project-fidelity-verifier"}
       additionalProperties: false
     routes:
-      # executed → $end（可视化已分散到各节点确定性脚本：训练/重训实时 loss 曲线由
-      # live_loss_watcher 边训练边推，搜索 3 图由 ns_run_search 推，最终对比图由
-      # ns_retrain Step 3.5 推——无单独可视化 agent 节点）。
+      # executed → $end（可视化已分散到各节点确定性脚本：训练/重训实时多指标曲线由
+      # progress_watcher tail progress.jsonl 边训练边推（用户指标全推，hue=series），搜索 3 图
+      # 由 ns_run_search 推，最终对比图由 ns_retrain Step 3.5 推——无单独可视化 agent 节点）。
       # failed → terminate_retrain_failed（引擎对 AgentNode 的 output.status 不自动判失败，
       # 故 failed 必须显式路由，否则 workflow_completed 误成功）。
       - when: "ns_retrain.output.status == 'executed'"
@@ -309,7 +309,7 @@ nodes:
 # ─────────────────────────────────────────────────────────────────────────────
 # outputs —— 终态（ns_retrain→$end）映射关键产物供 orchestrator / 下游消费。
 # 核心交付（retrain ckpt + 选定架构）来自 ns_retrain / ns_select；可视化无单独节点——
-# 实时 loss 曲线由 live_loss_watcher 边训练边推，搜索 3 图由 ns_run_search 推，
+# 实时多指标曲线由 progress_watcher tail progress.jsonl 边训练边推（用户指标全推），搜索 3 图由 ns_run_search 推，
 # 最终对比图由 ns_retrain Step 3.5 推（全部经 orca.chart → tape custom(chart) → 三壳渲染）。
 # ─────────────────────────────────────────────────────────────────────────────
 outputs:

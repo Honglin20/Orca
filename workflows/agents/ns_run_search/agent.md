@@ -91,12 +91,18 @@ print('RESULTS_VALID')
     # 清旧 marker（rm-only；Step 3 python 对缺文件 read_text 默认 "false" / read_lines 默认 []）。
     rm -f .ns_run_search_healed.txt .ns_run_search_fidelity.flag
     printf 'reused existing search_results.jsonl: %s' "$RESULTS" > .ns_run_search_assessment.txt
-    echo "REUSE: search_results.jsonl 已存在且达标 → 跳过 Step 1/2，直进 Step 3"
+    # reuse 也要推 search 3 图（pareto/search_table/latency_dist）——否则前端永远看不到
+    # 帕累托/搜索表/latency 分布。与 Step 2.7 同款 `|| true` 不阻塞、fail-soft。
+    # （env 已由宿主 prompt 指令先 source，chart 推送依赖 ORCA_CHART_SOCK。）
+    python3 "$ORCA_AGENT_RESOURCES/scripts/pareto.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" >/dev/null 2>&1 || true
+    python3 "$ORCA_AGENT_RESOURCES/scripts/search_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" >/dev/null 2>&1 || true
+    python3 "$ORCA_AGENT_RESOURCES/scripts/latency_dist.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" >/dev/null 2>&1 || true
+    echo "REUSE: search_results.jsonl 已存在且达标 → 跳过搜索重做，已推 3 图 → 进 Step 3"
   fi
 fi
 ```
 
-- 达标（`search_results.jsonl` ≥1 行合法 JSON）→ 跳过 Step 1 / Step 2，直接进 Step 3 emit
+- 达标（`search_results.jsonl` ≥1 行合法 JSON）→ 跳过 Step 1 / Step 2 的搜索重做，但**仍走 Step 2.7 推 3 图**（reuse 也要让帕累托/搜索表/latency 分布可见；`|| true` 不阻塞），再进 Step 3 emit
   `{"status":"executed","artifacts":["$RESULTS"],...}`（Step 3 python 从盘读出，自然产出 executed）。
   `assessment` 前缀 `reused existing search_results.jsonl: <path>`（复用可观测性，机械可检：artifact
   mtime 早于本次 run 起点）。

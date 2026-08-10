@@ -63,13 +63,25 @@ def main() -> int:
     rows: list[dict[str, Any]] = []
     for idx, rec in enumerate(records, start=1):
         flat = flatten_record(rec)
-        lat = _to_str(flat.get(info.latency_path))
-        met_raw = flat.get(info.field_path)
+        lat_raw = flat.get(info.latency_path)
+        lat = "-"
         try:
-            met_display = info.for_display(float(met_raw)) if met_raw is not None else None
+            lat_stored = float(lat_raw) if lat_raw is not None else None
         except (ValueError, TypeError):
-            met_display = None
-        met = _to_str(met_display)
+            lat_stored = None
+        # NaN/overflow sentinels (float32 max) shown as "-", same as the metric col.
+        if lat_stored is not None and abs(lat_stored) < 1e6:
+            lat = _to_str(lat_stored)
+        met_raw = flat.get(info.field_path)
+        met = "-"
+        try:
+            met_stored = float(met_raw) if met_raw is not None else None
+        except (ValueError, TypeError):
+            met_stored = None
+        # NaN/overflow sentinels (float32 max from failed evals) shown as "-", not
+        # a bogus 3.4e38.
+        if met_stored is not None and abs(met_stored) < 1e6:
+            met = _to_str(info.for_display(met_stored))
         is_pareto = _pareto_label(flat.get(pareto_field)) if pareto_field else ""
         arch_digest = _arch_digest(flat, exclude_set)
         rows.append({

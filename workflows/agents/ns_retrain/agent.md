@@ -1,5 +1,5 @@
 ---
-description: nas-supernet 子网重训执行 agent（folder-agent）。**把重训跑到真正完成**：按 AGENTS.md scaffold 生成 retrain 脚本（retrain.py / finetune.py / run_retrain.sh）→ fidelity 复查 → detach 后台 → warmup 确认跑通 → 自修 ≤3 次 → 写 `retrain_status.md`（跨唤醒真相源）→ CRON 定时自检（1~2h），未完成更新 MD + 重注册，完成（rc=0 + 进程退出 + ckpt 有效；**ckpt 存在 ≠ 完成**，中断残留续训）才输出 JSON；训练未完成前不产出节点 JSON（宿主不调 next），节点常驻执行中。确定性逻辑固化在 `scripts/`（status/launch/warmup/eta/update_status_md/emit_result/live_loss_watcher/metrics_bar/compare_table），agent 只做判断（生成 / self-heal / CRON / 收尾）。launch.sh 自动启动 live_loss_watcher 边重训边推实时 loss 曲线；完成时 Step 3.5 推最终对比图（metrics_bar/compare_table）。触碰训练逻辑 → 重触 project-fidelity-verifier（point-to-file 协议）。
+description: nas-supernet 子网重训执行 agent（folder-agent）。**把重训跑到真正完成**：按 AGENTS.md scaffold 生成 retrain 脚本（retrain.py / finetune.py / run_retrain.sh）→ fidelity 复查 → detach 后台 → warmup 确认跑通 → 自修 ≤3 次 → 写 `retrain_status.md`（跨唤醒真相源）→ CRON 定时自检（1~2h），未完成更新 MD + 重注册，完成（rc=0 + 进程退出 + ckpt 有效；**ckpt 存在 ≠ 完成**，中断残留续训）才输出 JSON；训练未完成前不产出节点 JSON（宿主不调 next），节点常驻执行中。确定性逻辑固化在 `scripts/`（status/launch/warmup/eta/update_status_md/emit_result/progress_watcher/metrics_bar/compare_table），agent 只做判断（生成 / self-heal / CRON / 收尾）。launch.sh 自动启动 progress_watcher 边重训边推实时曲线（tail 生成契约 progress.jsonl `{"step":N,"metrics":{...}}`，**每指标一张独立图**——title 带真实指标名，同 title 重复推送 = 前端实时刷新）；完成时 Step 3.5 推最终对比图（metrics_bar/compare_table）。触碰训练逻辑 → 重触 project-fidelity-verifier（point-to-file 协议）。
 tools: [bash, read, edit, grep, glob, write, task, cron]
 ---
 # ns_retrain
@@ -32,14 +32,16 @@ tools: [bash, read, edit, grep, glob, write, task, cron]
 - `$ORCA_AGENT_RESOURCES`（orca spawn / orca_env.sh 注入）= 本 agent 资源目录，即本文件所在
   目录。**确定性逻辑全在 `scripts/`，只跑不读**（agent 不需要看脚本内容）：
   - `scripts/status.sh` —— 状态二合一判定（完成 / 存活）
-  - `scripts/health.sh` —— 健康检查（epoch / loss / log 尾部）
-  - `scripts/launch.sh` —— 尝试预算 + detach（wrapper 内自动启动 `live_loss_watcher.py`
-    实时推 loss 曲线；只跑不改，agent 无需干预）
+  - `scripts/health.sh` —— 健康检查（epoch / 主指标 / log 尾部）
+  - `scripts/launch.sh` —— 尝试预算 + detach（wrapper 内自动启动 `progress_watcher.py`
+    实时推曲线；只跑不改，agent 无需干预）
   - `scripts/warmup_poll.sh` —— warmup 单轮轮询（含 4min sleep）
   - `scripts/eta.py` —— 估时（落 `runs/retrain/.retrain_eta.json`，信息用）
   - `scripts/update_status_md.sh` —— 写 `retrain_status.md`（artifacts 根下）
   - `scripts/emit_result.py` —— 最终 JSON（唯一产出）
-  - `scripts/live_loss_watcher.py` —— 边重训边推实时 loss 曲线（launch.sh 自动启动）
+  - `scripts/progress_watcher.py` —— 边重训边推实时曲线（launch.sh 自动启动；
+    tail 生成契约 progress.jsonl `{"step":N,"metrics":{...}}`，遍历 metrics **每指标推一张独立图**
+    （title 带真实指标名），同 title 重复推送 = 前端实时刷新；指标名取用户代码，消费端零硬编码）
   - `scripts/metrics_bar.py` / `scripts/compare_table.py` —— 完成时推最终对比图（Step 3.5）
 - `{{ subagents_root }}/project-fidelity-verifier.md` = fidelity-verifier subagent body
   （point-to-file 协议，Step 3b / 3g；render 期 inline 为绝对路径，cwd 无关）。
@@ -74,7 +76,7 @@ agent 本次生成 / self-heal 的行为痕迹写到 marker 文件（determinist
 2. **ckpt 存在 ≠ 训练完成**：完成判定（status.sh 的 `RETRAIN_COMPLETE`）= `.retrain_rc` 内容为 `0`
    **且训练进程已退出 且** ckpt 存在 **且** `torch.load` 可读（进程活着时 rc 可能是前次 attempt
    的 stale 值）。ckpt 在但未完成（中断过）→ **续训到真正完成**，不跳过。
-3. **报错自愈，不许放过**。warmup 失败（无 epoch 标记 / loss 发散 / 训练崩）→ **必须** 用 `read`
+3. **报错自愈，不许放过**。warmup 失败（无 epoch 标记 / 指标发散 / 训练崩）→ **必须** 用 `read`
    读日志尾部定位根因、用 `edit` **仅按下方白名单**修、重跑。最多 **3 次尝试**（含首次，尝试预算
    见 launch.sh）；耗尽仍失败 → 如实输出 `{"status":"failed"}`，**绝不带错下传**。
 4. **编辑白名单（prompt 软约束，tape 审计字段 healed_files/fidelity_retriggered）**，分两层：
@@ -98,6 +100,13 @@ agent 本次生成 / self-heal 的行为痕迹写到 marker 文件（determinist
 8. 你的**最终回复**只能是 Step 4 那个 `emit_result.py` 打印的**单行 JSON**（仅训练完成/确定
    失败时）——节点 `output_schema` 校验，非 JSON 直接 node_failed。**未完成时**最终回复 =
    状态说明（含"请勿调用 orca next"字样），宿主不会提交它。
+
+9. **用户测度权威（生成 retrain.py 时）**：retrain.py / finetune.py 的 loss / optimizer /
+   scheduler / 数据流 / metric 名 / metric 方向 / metric 变换**逐字取自** `project_manifest.md`
+   的 **Training And Evaluation** section + AGENTS.md scaffold（见 Step 3a 生成契约 + 自检）。NAS
+   改造仅限 supernet 化必需（子网提取 / 预算压缩）；禁替换 optimizer 类、改 loss 公式/常量、改
+   metric 名/方向/变换、引入 FLOPs 等代理测度。漂移 → 属训练逻辑层，按 3f self-heal + 3g 重触
+   fidelity。
 
 ## 决策树总览（每次进入本节点 / CRON 唤醒都从头走）
 
@@ -132,7 +141,7 @@ bash "$ORCA_AGENT_RESOURCES/scripts/status.sh"
 bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
 ```
 
-- log 健康（进度标记在前进 + loss 有限，无 NaN/inf）→ **更新 MD（3e）+ 重注册 CRON（3h）+
+- log 健康（进度标记在前进 + 主指标有限，无 NaN/inf）→ **更新 MD（3e）+ 重注册 CRON（3h）+
   状态说明结束（3i）**（本步不产出 JSON）。
 - **假死判定（fail loud 防静默空等，统一措辞）**：
   - 有进度标记：本轮 log 的标记数 ≤ 上次 `retrain_status.md`（`$ORCA_ARTIFACTS_DIR/retrain_status.md`）
@@ -165,7 +174,8 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
 artifacts 根解析，落错目录会白烧尝试预算）：
 
 - `retrain.py`：主训练入口（架构 = `{{ ns_select.output.selected_arch }}`；数据管道 / loss /
-  optimizer 按 AGENTS.md + manifest 的 metric 方向）。
+  optimizer / metric 名 / metric 方向 / metric 变换**逐字取自** `project_manifest.md` 的 Training
+  And Evaluation section + AGENTS.md scaffold，禁替代——见铁律 9）。
 - `finetune.py`（若 scaffold 指定 finetune-from-supernet）：从 supernet ckpt 提取选定子网权重
   作 init + 微调。
 - `run_retrain.sh`：launcher（设 `NPROC_PER_NODE` 实测值——无 GPU→1；
@@ -173,15 +183,34 @@ artifacts 根解析，落错目录会白烧尝试预算）：
   `cd $ORCA_ARTIFACTS_DIR` + 调 `python3 retrain.py --artifacts-dir "$ORCA_ARTIFACTS_DIR" ...`。
 
 **生成契约（scripts 解析的前提，必须逐字满足）**：
-- **进度行**：每 progress unit 必打一行 `epoch <cur>/<total> loss <v>`（epoch-based）或
-  `step <cur>/<total> loss <v>`（step-based）——禁裸 `epoch`/`step` 词的歧义行（tqdm 不算数）。
+- **机器进度（双 feed，每 progress unit，rank 0；用户测度为唯一权威，`loss` 非假设）**：
+  - **(a) 遥测行（stdout，eta/health/warmup 消费）**：`epoch <cur>/<total> <primary_metric> <v>`
+    （epoch-based）或 `step <cur>/<total> <primary_metric> <v>`（step-based）。`<primary_metric>`
+    = 用户主训练标量的**真名**（`loss`/`reward`/`gain`/…，逐字取自用户代码，禁写死 `loss`）。下游
+    结构化解析（`epoch|step` token + 分数 + 名 token + 尾数值），故名可是任意无空格 token。禁裸
+    `epoch`/`step` 词的歧义行（tqdm 不算数）。
+  - **(b) progress JSONL（图表 feed，live chart watcher 消费）**：每 progress unit 往
+    `$ORCA_ARTIFACTS_DIR/runs/retrain/progress.jsonl` 追加一行
+    `{"step": <cur>, "metrics": {"<name>": <float>, ...}}`。`metrics` = 该 unit 产出的**全部**标量
+    指标（用户训练 + 评估代码里有的全要，真名；`loss` 非特例，用户没 loss 就不写 loss）。append 模式 +
+    `json.dumps(row)+"\n"` + `flush()` + `is_main_process()` 守卫。launcher 每 attempt 清零此文件。
+    （完整契约同 ns_train_script 的 `train_supernet_script_generation.md` §3。）
 - **总进度**：以 `--epochs N`（或 `--max_steps N`）暴露；run_retrain.sh 里用 `--epochs "$EPOCHS"`、
   `EPOCHS=N` 变量形态亦可（eta.py 都解析）。
 - **final ckpt 固定写 `$ORCA_ARTIFACTS_DIR/runs/retrain/retrain_best.pth`**（status.sh /
   emit_result.py 的契约路径，不许漂移）。
+- **DataLoader 卫生（CUDA 训练机铁律，真实事故）**：retrain.py / finetune.py 里所有
+  `DataLoader` 一律 `num_workers=0` + `pin_memory=False`——`num_workers>0` 的 fork worker
+  在父进程已初始化 CUDA 后会崩（`CUDA initialization error`）；`pin_memory=True` 对 CUDA
+  tensor 报 `cannot be pinned`。禁改此默认。
 - **不许**在 retrain.py / finetune.py 里硬编码 supernet.py 的内部实现——只通过 manifest 暴露的
   API（`build_supernet` / `extract_subnet` 等）调。若 manifest 未暴露所需 API → fail loud（铁律 1），
   不要绕路改 supernet.py。
+- **用户测度自检（生成后必跑）**：grep `retrain.py` / `finetune.py` 的 optimizer 构造 + loss 调用
+  token——optimizer 类名 + loss 函数名必须与 `project_manifest.md` 的 Training And Evaluation section
+  记录一致，禁未声明替换。漂移 → 属训练逻辑层，按 3f self-heal（edit 后 append
+  `.ns_retrain_healed.txt`）+ 3g 重触 fidelity。metric 名 / 方向 / 变换忠实性属语义层，由 3g
+  `project-fidelity-verifier` 的 Evaluation-measure fidelity 维度覆盖。
 
 生成后 append 文件名到 `.ns_retrain_generated.txt`。
 
@@ -239,7 +268,7 @@ bash "$ORCA_AGENT_RESOURCES/scripts/warmup_poll.sh"
     （格式问题是 retrain.py 生成契约问题——若 log 确实不遵循 Step 3a 契约，按 3f 修 retrain.py
     使其打契约行，不烧本轮预算）。
   - **log 无内容 / mtime 不涨** → 真卡死 → agent 判定 `WARMUP_FAIL`（超时无进展，此信号由
-    agent 自拟——warmup_poll.sh 只输出 process-exit / loss-diverged）→ self-heal。
+    agent 自拟——warmup_poll.sh 只输出 process-exit / metric-diverged）→ self-heal。
 - `WARMUP_FAIL` → **self-heal**（见 3f）。
 
 > warmup 设计意图：前 1~2 个进度标记（epoch/step，见 3a 生成契约）出现 = 证明训练**能跑通**

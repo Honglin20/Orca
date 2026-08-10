@@ -114,11 +114,25 @@ Provide real-time training progress via periodic batch-level logging (rank 0 onl
 - **Primary approach (`tqdm`)**: Use `tqdm` progress bars via `disable=not is_main_process()`. For epoch-based training, wrap the batch iterator so each epoch displays a per-batch progress bar. For step-based training without an epoch concept, use a single `tqdm` bar tracking `global_step` up to the total training horizon. Include running metrics (e.g. loss, learning rate) in the bar's `postfix` or `description`.
 - **Fallback approach (`print`)**: If the user's original project environment is not suitable for `tqdm`, use a periodic `print` statement (e.g. `if global_step % args.log_interval == 0:`) instead.
 
-**CRITICAL — machine-parseable progress line (contract, mandatory)**. On top of the human-readable progress above, the generated script **must** print one line per completed progress unit (rank 0 only) in exactly one of these two formats:
-- epoch-based training: `epoch <cur>/<total> loss <value>` — e.g. `epoch 3/10 loss 0.4521`
-- step-based training: `step <cur>/<total> loss <value>` — e.g. `step 1200/6000 loss 0.4521`
+**CRITICAL — machine-parseable progress (contract, mandatory)**. On top of the human-readable progress above, the generated script **must** emit **two** machine feeds per completed progress unit (rank 0 only). Both are required — they serve different downstream consumers. **The user's original code is the sole authority for which metrics exist and what they are named; `loss` is merely a common example, never an assumption.**
 
-where `<cur>` starts at 1, `<total>` is the full training horizon, and `<value>` is the current loss as a plain float. This is the **log contract consumed by downstream `ns_run_train`** (warmup runnability check / per-unit timing / health checks all parse these lines); it must be satisfied verbatim. A `tqdm` bar alone does **not** satisfy the contract — the plain `epoch`/`step` line must be printed to stdout (e.g. via the same gated `print()` that updates the bar, once per epoch/step). Do not print other lines that contain the bare words `epoch`/`step` followed by digits in a different meaning (e.g. "epoch:3/10", "Epoch 3", or a save message like "saved supernet_epoch_0005.pth" — use "checkpoint epoch 5 saved" or a bracketed form instead), so that the downstream regex (`epoch[^0-9]*[0-9]+` / `step[^0-9]*[0-9]+`) cannot misparse. Expose the horizon as `--epochs N` (epoch-based) or `--max_steps N` (step-based) so downstream can read the total from the launcher script.
+**(a) Telemetry line (stdout)** — consumed by `ns_run_train` ETA / health / warmup (line-oriented, structurally regex-parsed). Print exactly one line per progress unit:
+- epoch-based: `epoch <cur>/<total> <primary_metric> <value>` — e.g. `epoch 3/10 loss 0.4521`, or `epoch 3/10 reward 1.83`
+- step-based: `step <cur>/<total> <primary_metric> <value>` — e.g. `step 1200/6000 psnr 28.4`
+
+`<cur>` starts at 1, `<total>` is the full horizon, `<value>` is a plain float, and `<primary_metric>` is the **user's primary training scalar under its real name** — whatever the user's original training code calls it (`loss`, `reward`, `gain`, `psnr`, …). Do **not** hardcode the literal word `loss` when the user's metric is named otherwise. The downstream consumers parse this line structurally (`(epoch|step)` token + `<n>/<n>` fraction + a single name token + a trailing numeric value), so the metric name may be any single whitespace-free token — but it must be the real name from the user's code, never a fabricated `loss`.
+
+A `tqdm` bar alone does **not** satisfy the contract — the plain `epoch`/`step` line must be printed to stdout once per progress unit (e.g. via the same gated `print()` that updates the bar). Do not print other lines that contain the bare words `epoch`/`step` followed by digits in a different meaning (e.g. "epoch:3/10", "Epoch 3", or a save message like "saved supernet_epoch_0005.pth" — use "checkpoint epoch 5 saved" or a bracketed form instead) so the downstream regex (`(epoch|step)[^0-9]*[0-9]+`) cannot misparse. Expose the horizon as `--epochs N` (epoch-based) or `--max_steps N` (step-based) so downstream can read the total from the launcher script.
+
+**(b) Progress JSONL (chart feed)** — consumed by `ns_run_train`'s live chart watcher (record-oriented, JSON-parsed; pushes every metric below to the frontend as a live multi-series curve). Append one JSON line per progress unit to `$ORCA_ARTIFACTS_DIR/runs/train/progress.jsonl`:
+
+```
+{"step": <cur>, "metrics": {"<name>": <float>, ...}}
+```
+
+- `step` = the same `<cur>` as the telemetry line (int).
+- `metrics` = **every scalar metric this progress unit produces** — the full set the user's original training AND evaluation code tracks (`loss`, `val_loss`, `val_accuracy`, `lr`, `reward`, `gain`, … — whatever exists in the user's code). Emit all of them, each under its real name. **Loss is not assumed and not special**: if the user's code logs `reward` and `gain` but no `loss`, emit `reward` and `gain` and nothing else. The chart plots each metric as its own series, so omitting a metric hides it from the user.
+- Open in append mode, write `json.dumps(row) + "\n"`, `flush()` after each write, and guard the write with `if is_main_process()`. The launcher truncates this file at the start of each attempt, so each attempt starts fresh.
 
 **CRITICAL: Guard all single-writer side effects with `if is_main_process()` so only rank 0 performs them.** Failure to do so causes race conditions or duplicate outputs across ranks. Operations that require this guard include:
 
@@ -140,6 +154,14 @@ Prefer decoupling dataset and data-loading logic (dataset class, transforms, col
 Keep supervised loss, auxiliary losses, validation metrics, and best-metric direction aligned with the user's original code unless distributed execution requires a mechanical adjustment.
 
 Expose dataset paths as CLI arguments (e.g. `--data_dir`), not hardcoded literals. When the user's data path under `<user_project_root>` can be identified, use its absolute path as the default. All generated data-loading functions must accept data paths as parameters; do not hardcode or derive paths from package locations inside function bodies.
+
+#### DataLoader Launch Hygiene (mandatory)
+
+On CUDA/NPU training boxes, a DataLoader with `num_workers>0` forks child processes; if the parent has already initialized CUDA, the forked workers crash (`CUDA initialization error`). `pin_memory=True` additionally errors on CUDA tensors (`CUDA tensors cannot be pinned`). Both are real-world incidents from actual supernet runs.
+
+- **`num_workers=0` by default**: all generated DataLoaders must default to zero worker processes (no forking). The launcher exposes `NUM_WORKERS` as an editable variable with default `0`; do not change this default. Only raise it when spawn-based parallelism is verified to work, with justification.
+- **`pin_memory=False`**: all generated DataLoaders must pass `pin_memory=False`; do not enable pin memory.
+- Both values are part of the launch contract, not style choices — a training run that dies in warmup on fork/pin errors burns the attempt budget.
 
 ### 5. Model Construction
 
@@ -493,6 +515,19 @@ if is_main_process():
     print(f"loss={avg_loss:.3e}  acc={avg_acc:.4f}")
 ```
 
+(`loss` / `acc` above are illustrative — use the user's real metric names and meters, as enumerated from the user's original code.)
+
+**Validation metrics flow to the live chart too.** After computing the aggregated validation metrics on rank 0 (the same `is_main_process()` gate), append them to the §3(b) progress JSONL under their real names so they appear on the live chart alongside the training metrics:
+
+```python
+if is_main_process():
+    with open(os.path.join(args.output_dir, "progress.jsonl"), "a", encoding="utf-8") as f:
+        f.write(json.dumps({"step": <cur>, "metrics": {"<val_metric_name>": avg_val, ...}}) + "\n")
+        f.flush()
+```
+
+`<val_metric_name>` is the user's real validation metric name (`val_accuracy`, `val_loss`, `mAP`, …), never a fabricated `loss`. Omit validation entries on progress units where no evaluation runs.
+
 The following pattern causes a multi-GPU deadlock and must be avoided:
 
 ```python
@@ -522,7 +557,7 @@ OUTPUT_DIR="runs/train"
 EPOCHS=100
 BATCH_SIZE=64
 LR=1e-3
-NUM_WORKERS=4
+NUM_WORKERS=0          # 禁 fork worker 碰 CUDA（DataLoader Launch Hygiene；勿改默认）
 EVAL_INTERVAL=1
 SEED=42
 MAX_GRAD_NORM=1.0
@@ -531,6 +566,9 @@ AMP=true
 # distributed launch options
 NNODES=1
 NPROC_PER_NODE=8
+# rendezvous 端口必须唯一：默认 29500 在多实例/残留进程并存时必撞 EADDRINUSE（真实事故）。
+# 每次启动随机一个端口；attempt 之间也换端口，避免 TIME_WAIT 撞车。
+MASTER_PORT=$((20000 + RANDOM % 20000))
 
 # ── Launch training ─────────────────────────────────────────────────
 AMP_FLAG=""
@@ -539,6 +577,7 @@ AMP_FLAG=""
 torchrun \
     --nnodes="$NNODES" \
     --nproc_per_node="$NPROC_PER_NODE" \
+    --master_port="$MASTER_PORT" \
     train_supernet.py \
     --data_dir "$DATA_DIR" \
     --output_dir "$OUTPUT_DIR" \
@@ -555,7 +594,7 @@ torchrun \
 
 After writing, mark executable: `chmod +x run_train_supernet.sh`.
 
-Before finalizing the launcher, cross-check every `--arg_name` in the `torchrun` invocation against the generated `train_supernet.py` argparse definitions. Every shell variable passed as a CLI flag must correspond to an argument the script actually accepts. Run `python train_supernet.py --help` (or inspect the argparse block) to confirm.
+Before finalizing the launcher, cross-check every `--arg_name` in the `torchrun` invocation against the generated `train_supernet.py` argparse definitions. Every shell variable passed as a CLI flag must correspond to an argument the script actually accepts. Run `python train_supernet.py --help` (or inspect the argparse block) to confirm. torchrun's own flags (`--nnodes`, `--nproc_per_node`, `--master_port`) are launcher-side and excluded from this cross-check.
 
 ## Validation
 

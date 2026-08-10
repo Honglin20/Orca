@@ -1,5 +1,5 @@
 ---
-description: nas-supernet 超网训练执行 agent（folder-agent）。**把训练跑到真正完成**：detach 后台 → warmup 确认跑通 → 自修 ≤3 次 → 写 `train_status.md`（跨唤醒真相源）→ CRON 定时自检（1~2h），未完成更新 MD + 重注册，完成（rc=0 + 进程退出 + ckpt 有效；**ckpt 存在 ≠ 完成**，中断残留续训）才输出 JSON；训练未完成前不产出节点 JSON（宿主不调 next），节点常驻执行中。确定性逻辑固化在 `scripts/`（status/launch/warmup/eta/update_status_md/emit_result/live_loss_watcher），agent 只做判断（self-heal / CRON / 收尾）。launch.sh 自动启动 live_loss_watcher 边训练边推实时 loss 曲线到前端。触碰训练逻辑 → 重触 project-fidelity-verifier（point-to-file 协议）。
+description: nas-supernet 超网训练执行 agent（folder-agent）。**把训练跑到真正完成**：detach 后台 → warmup 确认跑通 → 自修 ≤3 次 → 写 `train_status.md`（跨唤醒真相源）→ CRON 定时自检（1~2h），未完成更新 MD + 重注册，完成（rc=0 + 进程退出 + ckpt 有效；**ckpt 存在 ≠ 完成**，中断残留续训）才输出 JSON；训练未完成前不产出节点 JSON（宿主不调 next），节点常驻执行中。确定性逻辑固化在 `scripts/`（status/launch/warmup/eta/update_status_md/emit_result/progress_watcher），agent 只做判断（self-heal / CRON / 收尾）。launch.sh 自动启动 progress_watcher 边训练边推实时曲线（tail 生成契约 progress.jsonl `{"step":N,"metrics":{...}}`，**每指标一张独立图**——title 带真实指标名，同 title 重复推送 = 前端实时刷新）到前端。触碰训练逻辑 → 重触 project-fidelity-verifier（point-to-file 协议）。
 tools: [bash, read, edit, grep, glob, task, cron]
 ---
 # ns_run_train
@@ -31,15 +31,16 @@ tools: [bash, read, edit, grep, glob, task, cron]
 - `$ORCA_AGENT_RESOURCES`（orca spawn / orca_env.sh 注入）= 本 agent 资源目录，即本文件所在
   目录。**确定性逻辑全在 `scripts/`，只跑不读**（agent 不需要看脚本内容）：
   - `scripts/status.sh` —— 状态三合一判定（gate / 完成 / 存活）
-  - `scripts/health.sh` —— 健康检查（epoch / loss / log 尾部）
-  - `scripts/launch.sh` —— 尝试预算 + detach（wrapper 内自动启动 `live_loss_watcher.py`
-    实时推 loss 曲线；只跑不改，agent 无需干预）
+  - `scripts/health.sh` —— 健康检查（epoch / 主指标 / log 尾部）
+  - `scripts/launch.sh` —— 尝试预算 + detach（wrapper 内自动启动 `progress_watcher.py`
+    实时推曲线；只跑不改，agent 无需干预）
   - `scripts/warmup_poll.sh` —— warmup 单轮轮询（含 4min sleep）
   - `scripts/eta.py` —— 估时（落 `.train_eta.json`，信息用）
   - `scripts/update_status_md.sh` —— 写 `train_status.md`（artifacts 根下）
   - `scripts/emit_result.py` —— 最终 JSON（唯一产出）
-  - `scripts/live_loss_watcher.py` —— 边训练边推实时 loss 曲线（launch.sh 自动启动；
-    解析生成契约进度行 `epoch N/T loss V` / `step N/T loss V`，同 title 重复推送 = 前端实时刷新）
+  - `scripts/progress_watcher.py` —— 边训练边推实时曲线（launch.sh 自动启动；
+    tail 生成契约 progress.jsonl `{"step":N,"metrics":{...}}`，遍历 metrics **每指标推一张独立图**
+    （title 带真实指标名），同 title 重复推送 = 前端实时刷新；指标名取用户代码，消费端零硬编码）
 - `{{ subagents_root }}/project-fidelity-verifier.md` = fidelity-verifier subagent body
   （point-to-file 协议，Step 3e；render 期 inline 为绝对路径，cwd 无关）。
 
@@ -65,7 +66,7 @@ agent 本次 self-heal 的行为痕迹写到 marker 文件（deterministic 部�
 2. **ckpt 存在 ≠ 训练完成**：完成判定（status.sh 的 `TRAIN_COMPLETE`）= `.train_rc` 内容为 `0`
    **且训练进程已退出 且** ckpt 存在 **且** `torch.load` 可读（进程活着时 rc 可能是前次 attempt
    的 stale 值）。ckpt 在但未完成（中断过）→ **续训到真正完成**，不跳过。
-3. **报错自愈，不许放过**。warmup 失败（无 epoch 标记 / loss 发散 / 训练崩）→ **必须** 用 `read`
+3. **报错自愈，不许放过**。warmup 失败（无 epoch 标记 / 指标发散 / 训练崩）→ **必须** 用 `read`
    读日志尾部定位根因、用 `edit` **仅按下方白名单**修、重跑。最多 **3 次尝试**（含首次，尝试预算
    见 launch.sh）；耗尽仍失败 → 如实输出 `{"status":"failed"}`，**绝不带错下传**。
 4. **编辑白名单（prompt 软约束，tape 审计字段 healed_files/fidelity_retriggered）**，分两层：
@@ -122,7 +123,7 @@ bash "$ORCA_AGENT_RESOURCES/scripts/status.sh"
 bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
 ```
 
-- log 健康（进度标记在前进 + loss 有限，无 NaN/inf）→ **更新 MD（3c）+ 重注册 CRON（3f）+
+- log 健康（进度标记在前进 + 主指标有限，无 NaN/inf）→ **更新 MD（3c）+ 重注册 CRON（3f）+
   状态说明结束（3g）**（本步不产出 JSON）。
 - **假死判定（fail loud 防静默空等，统一措辞）**：
   - 有进度标记：本轮 log 的标记数 ≤ 上次 `train_status.md`（`$ORCA_ARTIFACTS_DIR/train_status.md`）
@@ -173,7 +174,7 @@ bash "$ORCA_AGENT_RESOURCES/scripts/warmup_poll.sh"
     （格式问题是上游生成契约问题，不是本次启动的 bug——本轮训练能跑就算过，格式问题留给
     ns_train_script 契约排查）。
   - **log 无内容 / mtime 不涨** → 真卡死 → agent 判定 `WARMUP_FAIL`（超时无进展，此信号由
-    agent 自拟——warmup_poll.sh 只输出 process-exit / loss-diverged）→ self-heal。
+    agent 自拟——warmup_poll.sh 只输出 process-exit / metric-diverged）→ self-heal。
 - `WARMUP_FAIL` → **self-heal**（见 3d）。
 
 > warmup 设计意图：前 1~2 个进度标记（epoch/step，见 ns_train_script 生成契约）出现 =

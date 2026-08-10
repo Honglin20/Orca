@@ -21,10 +21,12 @@ from pathlib import Path
 import pytest
 
 # Add both chart-script dirs to path (duplicate _common is identical in either).
+# ns_retrain first: it also carries the shared metric-harvester functions the
+# test below imports; both copies share the same discover_metric_info.
 _SEARCH_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "workflows" / "agents" / "ns_run_search" / "scripts"
 _RETRAIN_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "workflows" / "agents" / "ns_retrain" / "scripts"
-sys.path.insert(0, str(_RETRAIN_SCRIPTS_DIR))
 sys.path.insert(0, str(_SEARCH_SCRIPTS_DIR))
+sys.path.insert(0, str(_RETRAIN_SCRIPTS_DIR))
 
 from _common import (  # noqa: E402
     CHART_MARKER,
@@ -155,6 +157,44 @@ class TestDiscoverMetricInfo:
         assert info is not None
         assert info.name == "acc"
         assert info.field_path == ""
+
+    def test_nan_sentinels_do_not_flip_polarity(self) -> None:
+        """NaN acc encoded as float32 max (3.4e38) must not break sign heuristic.
+
+        Regression: 10 NaN rows mixed with valid negated accuracy used to make
+        ``all(v <= 0)`` False → negate_for_display wrongly False → chart showed
+        negative accuracy. Invalid overflow sentinels are filtered before polarity
+        detection.
+        """
+        vals = [-0.9884, -0.9876, -0.9891, 3.402823e38, 3.402823e38]
+        records = [{"objs": {"acc": v, "latency": 0.2}} for v in vals]
+        info = discover_metric_info(Path("/nonexistent"), records)
+        assert info is not None
+        assert info.name == "acc"
+        assert info.display_direction == "higher"
+        assert info.negate_for_display is True
+        # min over stored (smaller-is-better) = the most negative valid acc.
+        assert info.for_display(-0.9891) == pytest.approx(0.9891)
+
+    def test_large_magnitude_negated_metric_not_clipped(self) -> None:
+        """Legitimate metrics with magnitude > 1 (reward/BLEU) still negate.
+
+        The garbage filter must target overflow sentinels only, never real
+        higher-better metrics stored negated beyond +/-1.
+        """
+        vals = [-100.0, -95.0, -97.5]
+        records = [{"objs": {"acc": v, "latency": 0.2}} for v in vals]
+        info = discover_metric_info(Path("/nonexistent"), records)
+        assert info is not None
+        assert info.negate_for_display is True
+        assert info.for_display(-95.0) == pytest.approx(95.0)
+
+    def test_all_nan_falls_back_without_crash(self) -> None:
+        """All-garbage metric values: no crash, no false negation."""
+        records = [{"objs": {"acc": 3.402823e38, "latency": 0.2}} for _ in range(3)]
+        info = discover_metric_info(Path("/nonexistent"), records)
+        assert info is not None
+        assert info.negate_for_display is False
 
 
 # ---------------------------------------------------------------------------
@@ -319,3 +359,180 @@ class TestMetricInfoForDisplay:
             pareto_y_direction="min", display_direction="lower", negate_for_display=False,
         )
         assert info.for_display(0.05) == pytest.approx(0.05)
+
+
+# ---------------------------------------------------------------------------
+# Shared metric harvesters (best_val_metric_from_log / final_metric_from_json)
+# ---------------------------------------------------------------------------
+
+
+class TestSharedMetricHarvesters:
+    def _load_common(self):
+        """Load the ns_retrain _common module fresh (module cache was cleaned at import)."""
+        sys.path.insert(0, str(_RETRAIN_SCRIPTS_DIR))
+        try:
+            import _common
+            return _common
+        finally:
+            sys.path.remove(str(_RETRAIN_SCRIPTS_DIR))
+            # Pop the module cache so later tests resolving _quant_scripts/_common
+            # are not shadowed by the chart _common (same cross-dir hazard as
+            # module import at the top of this file).
+            sys.modules.pop("_common", None)
+
+    def test_best_val_metric_from_log_json_and_regex(self, tmp_path: Path) -> None:
+        common = self._load_common()
+        runs_train = tmp_path / "runs" / "train"
+        runs_train.mkdir(parents=True)
+        log = runs_train / "train.attempt1.log"
+        log.write_text(
+            '{"epoch": 3, "loss": 0.2, "test_acc": 0.93}\n'
+            '{"epoch": 6, "loss": 0.1, "test_acc": 0.95}\n'
+            "epoch 9/10 loss 0.05\n"
+            "eval test_acc=0.97 best=0.97\n",
+            encoding="utf-8",
+        )
+        # JSON key match picks 0.95 (max over test_acc JSON rows), regex fallback
+        # picks 0.97; higher direction → overall best = 0.97.
+        assert common.best_val_metric_from_log(tmp_path, "acc", "higher") == pytest.approx(0.97)
+
+    def test_best_val_metric_lower_direction(self, tmp_path: Path) -> None:
+        common = self._load_common()
+        runs_train = tmp_path / "runs" / "train"
+        runs_train.mkdir(parents=True)
+        (runs_train / "train.attempt1.log").write_text(
+            '{"epoch": 1, "val_loss": 0.9}\n{"epoch": 2, "val_loss": 0.4}\n',
+            encoding="utf-8",
+        )
+        assert common.best_val_metric_from_log(tmp_path, "loss", "lower") == pytest.approx(0.4)
+
+    def test_best_val_metric_missing_log(self, tmp_path: Path) -> None:
+        common = self._load_common()
+        assert common.best_val_metric_from_log(tmp_path, "acc", "higher") is None
+
+    def test_final_metric_from_json(self, tmp_path: Path) -> None:
+        common = self._load_common()
+        retrain = tmp_path / "runs" / "retrain"
+        retrain.mkdir(parents=True)
+        (retrain / "test_metrics.json").write_text(
+            json.dumps({"test_acc": 0.99, "loss": 0.01}), encoding="utf-8"
+        )
+        assert common.final_metric_from_json(tmp_path, "acc") == pytest.approx(0.99)
+
+    def test_final_metric_from_json_skips_loss(self, tmp_path: Path) -> None:
+        common = self._load_common()
+        retrain = tmp_path / "runs" / "retrain"
+        retrain.mkdir(parents=True)
+        (retrain / "test_metrics.json").write_text(
+            json.dumps({"loss": 0.01, "mAP": 0.7}), encoding="utf-8"
+        )
+        assert common.final_metric_from_json(tmp_path, "mAP") == pytest.approx(0.7)
+
+
+# ---------------------------------------------------------------------------
+# compare_table full-supernet metric semantics (problem 3 regression)
+# ---------------------------------------------------------------------------
+
+
+class TestCompareTableFullMetric:
+    def _run_compare(self, tmp_path: Path, selected_acc: str = "0.9892") -> dict:
+        """Run compare_table.main() with monkeypatched push_chart; return last push."""
+        import importlib.util
+
+        # Do NOT stub sys.modules["orca"]: compare_table imports only _common, and
+        # _common's `try: from orca.chart import render_chart` harmlessly degrades
+        # to render_chart=None when orca is absent. Stubbing "orca" here leaks a
+        # broken orca module into the shared sys.modules and breaks later tests
+        # (test_workflow_viz_audit_fixes) that import real orca code.
+        sys.path.insert(0, str(_RETRAIN_SCRIPTS_DIR))
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "compare_table_under_test",
+                str(_RETRAIN_SCRIPTS_DIR / "compare_table.py"),
+            )
+            ct = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(ct)
+        finally:
+            # compare_table.py itself inserts its script dir into sys.path at import;
+            # drop both our insertion and the module's, so no ns_retrain path leaks.
+            sys.path = [p for p in sys.path if p != str(_RETRAIN_SCRIPTS_DIR)]
+            # Same cross-dir cleanup: the module body imports _common, which must
+            # not linger in sys.modules for later quant/structure tests.
+            sys.modules.pop("_common", None)
+            sys.modules.pop("compare_table_under_test", None)
+
+        calls: list[dict] = []
+        ct.push_chart = lambda **kw: calls.append(kw)
+        old_argv = sys.argv
+        sys.argv = [
+            "compare_table",
+            "--artifacts-dir", str(tmp_path),
+            "--selected-latency-ms", "0.2558",
+            "--selected-acc", selected_acc,
+        ]
+        try:
+            ct.main()
+        finally:
+            sys.argv = old_argv
+        return calls[-1]
+
+    def test_uses_train_log_best_when_available(self, tmp_path: Path) -> None:
+        """Train log best validation → full_metric, not candidate extremes."""
+        # Copy NAS-format search data (with one NaN sentinel to prove filtering).
+        records = [
+            {"objs": {"acc": -0.9884, "latency": 0.2}, "pareto": True},
+            {"objs": {"acc": 3.402823e38, "latency": 0.5}, "pareto": False},
+            {"objs": {"acc": -0.9876, "latency": 0.3}, "pareto": True},
+        ]
+        for r in records:
+            (tmp_path / "search_results.jsonl").open("a").write(json.dumps(r) + "\n")
+        (tmp_path / "search_config.yaml").write_text(
+            'objs:\n  - "acc"\n  - "latency"\n'
+        )
+        # Train log present with real best acc.
+        runs_train = tmp_path / "runs" / "train"
+        runs_train.mkdir(parents=True)
+        (runs_train / "train.attempt1.log").write_text(
+            '{"epoch": 5, "test_acc": 0.9884}\n', encoding="utf-8"
+        )
+
+        pushed = self._run_compare(tmp_path)
+        acc_row = next(r for r in pushed["data"] if r["metric"] == "Acc")
+        assert acc_row["Full Supernet"] == "0.9884"
+        assert acc_row["Selected Subnet"] == "0.9892"
+        assert "train-log best validation" in pushed["caption"]
+
+    def test_fallback_to_search_best_when_log_missing(
+        self, tmp_path: Path
+    ) -> None:
+        """No train log → fallback to best search candidate (min negated), NaN filtered."""
+        records = [
+            {"objs": {"acc": -0.985, "latency": 0.2}, "pareto": True},
+            {"objs": {"acc": -0.989, "latency": 0.3}, "pareto": True},
+            {"objs": {"acc": 3.402823e38, "latency": 0.9}, "pareto": False},
+        ]
+        for r in records:
+            (tmp_path / "search_results.jsonl").open("a").write(json.dumps(r) + "\n")
+        (tmp_path / "search_config.yaml").write_text(
+            'objs:\n  - "acc"\n  - "latency"\n'
+        )
+
+        pushed = self._run_compare(tmp_path)
+        acc_row = next(r for r in pushed["data"] if r["metric"] == "Acc")
+        # min negated acc = -0.989 → for_display → 0.989 (NOT the NaN, NOT worst).
+        assert acc_row["Full Supernet"] == "0.989"
+        assert "search best candidate" in pushed["caption"]
+
+    def test_selected_not_double_negated(self, tmp_path: Path) -> None:
+        """selected_acc from select stdout is already natural; never negated again."""
+        records = [{"objs": {"acc": -0.98, "latency": 0.2}, "pareto": True}]
+        for r in records:
+            (tmp_path / "search_results.jsonl").open("a").write(json.dumps(r) + "\n")
+        (tmp_path / "search_config.yaml").write_text(
+            'objs:\n  - "acc"\n  - "latency"\n'
+        )
+
+        pushed = self._run_compare(tmp_path, selected_acc="0.9892")
+        acc_row = next(r for r in pushed["data"] if r["metric"] == "Acc")
+        assert acc_row["Selected Subnet"] == "0.9892"
+        assert not acc_row["Selected Subnet"].startswith("-")
