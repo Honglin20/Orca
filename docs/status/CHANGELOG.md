@@ -5,6 +5,18 @@
 
 ---
 
+## [2026-08-11] feat(opencode): in-session 权限审批闭环——`--auto` 固化 + `tool.execute.before` 桥
+
+opencode 家族（opencode/nga）此前无 web 审批/yolo 路径（纯 flag，DEFECT-1 headless `external_directory` 挂死）。
+**spike 证** `tool.execute.before` 对主+子代理都 fire、tolerates ≥10s await → 推翻"opencode 协议层不可能"误判。
+**Part A** opencode profile flags 加 `--auto`（堵 DEFECT-1）+ **Part B** `orca.ts` 加 `tool.execute.before` hook 桥接
+broker `/approval`（B1 双键 `ORCA_SESSION_ID || input.sessionID`；fail-open 不可达防 DEFECT-1 复发；deny=throw）。
+**铁律 cc/cac 零改动**（AC6 七文件 git-diff CLEAN；桥是新 SENDER 复用既有 `/approval` 契约）。SPEC 两轮 spec-review
+PASS（8 issue 闭环，B1 BLOCKER 伪码 sessionID 取源 + B2/B3 事实错全修）+ 两轮 code-reviewer 0 MUST-FIX。
+**test-agent 真机 headless**：AC3 yolo allow PASS / AC4 deny→throw 阻断 PASS（带逐字桥 throw 串 + agent 报告拒绝
+无重试）/ AC1 flag 固化 + 越界读 PASS（DEFECT-1 挂死 bare headless 不可复现——`--auto` 无害正确固化）。
+Commit: `4f6a6e3`。详见 [release note](../releases/2026-08-11-opencode-permission-bridge.md)。
+
 ## [2026-08-11] feat(workflow): nas-supernet-v2 新 workflow——in-session 友好 / 单卡非 DDP / 弱模型友好的 NAS supernet 全链
 
 新建 `nas-supernet-v2` workflow（8 agent + 0 terminate），根治 v1 四类问题：C1 entry 拆分（flatten + expand）/ C2 select 合并进 run_search + 失败安全网 / C3 search pipeline 3 子代理并行 + 共享 schema / C4 单设备默认（plain python3 + 条件 DDP + guarded sync_random_seed）/ C5 每节点固化校验脚本 / C6 单一 ns2_report reporter（零跨节点引用 + 磁盘判终态）。SPEC 21 issue 全闭环。Commit: `976e132`。详见 [release note](docs/releases/2026-08-11-nas-supernet-v2.md)。

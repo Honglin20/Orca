@@ -4,7 +4,7 @@
 
 ---
 
-## 当前：opencode in-session 权限审批闭环（--auto 固化 + tool.execute.before 桥）——实现完成，待 test-agent headless 实测
+## 历史：opencode in-session 权限审批闭环（--auto 固化 + tool.execute.before 桥）——完成 + spec-review/code-reviewer/test-agent 三闭环
 
 **任务**：SPEC `docs/specs/2026-08-11-opencode-permission-bridge.md`（两轮 spec-review PASS，全 issue 闭环）——
 opencode 家族（opencode/nga）补齐权限闭环：**Part A** `--auto` 固化进 profile default flags（堵 DEFECT-1
@@ -12,19 +12,19 @@ headless 原生权限 `external_directory` ask 挂死）+ **Part B** `orca.ts` �
 broker `/approval`（主 agent + Task 子代理覆盖；yolo/web 卡复用 broker 既有决策，桥是哑传输）。
 铁律：**cc/cac 零改动**（AC6 七文件 git-diff 全 CLEAN：broker/hook 脚本/routes/claude,ccr profile/active_runs/install_cmds）。
 
-**状态**：**实现完成 + 两轮 code-reviewer 闭环（0 MUST-FIX，🟢 全采纳）+ 单测全绿，待 test-agent headless 实测**：
+**状态**：**完成（commit `4f6a6e3`）+ spec-review 两轮 PASS（8 issue 闭环）+ code-reviewer 两轮 0 MUST-FIX + test-agent 真机 headless 闭环**：
 - Part A：`orca/profiles/builtin/opencode.py` flags 加 `"--auto"` + docstring B4 限制（`ORCA_OPENCODE_FLAGS` REPLACE 语义：固化仅救未设 env 者）。
 - Part B：`orca/iface/in_session/templates/opencode/orca.ts` 抽 5 个 exported 纯函数（`_decide`/`_askBroker`/`_brokerConfig`/`_resolveApprovalSessionId`/`_normalizeToolInput`）+ `tool.execute.before` hook；fail 语义逐字匹配 SPEC §4（不可达/异常 fail-open 防 DEFECT-1 复发；HTTP 错/坏响应 fail loud）；session 双键 `ORCA_SESSION_ID || input.sessionID`（B1 headless node 键 + 交互 host 键）。
-- 测试：Python 静态门 13 passed（CI 守门）+ node:test 行为表 39 passed（零依赖 node 24 type stripping；含 `_askBroker` 6 分类分支 + hook deny/不可达/no-sid early-return）；AC5 非回归 65 passed（cc/cac hook + broker + install）。
-- install：用户重跑 `tars install --target opencode|nga` 经 `_install_opencode`（`_atomic_write_with_backup`）更新 `orca.ts`（`_install_cc_nudge` 零改动）。
-
-**待办**：
-- [ ] test-agent headless 真机：AC1（`external_directory` 不挂）+ AC3（yolo on → 桥 allow）+ AC4（deny throw 阻断工具）。
-- [ ] close-out：test-agent 通过后写 release note + CHANGELOG（独立步骤，非本 commit 范围）。
+- 测试：Python 静态门 13 passed + node:test 行为表 39 passed + AC5 非回归 65 passed。
+- **test-agent 真机**：AC3 yolo allow PASS / AC4 deny→throw 阻断 PASS（逐字桥 throw 串 `orca: 工具 read 被审批拒绝（不要重试）` + agent 报告拒绝无重试）/ AC1 flag 固化 + 越界读 PASS。
 
 **必读**：
+- release note `docs/releases/2026-08-11-opencode-permission-bridge.md`。
 - SPEC `docs/specs/2026-08-11-opencode-permission-bridge.md`（§2 Part A / §3-4 Part B / §6 AC1-AC6）。
 - `orca/iface/in_session/templates/opencode/orca.ts`（approval bridge helpers + `tool.execute.before` hook）。
+- test-agent 证据：`/tmp/orca-AC3/ac3.out`、`/tmp/orca-AC4/stepB_summary.json`、`/tmp/orca-bridge/serve.log`。
+
+**遗留**（如实）：AC1 DEFECT-1 挂死在 bare headless opencode 1.18.13 不可复现（`external_directory` 非阻塞；`--auto` 无害正确固化，生产上下文仍适用）；版本 skew（测 1.18.13，translator 注释锁 1.14.22）；test-agent 副作用——误杀重启了用户 7428 的 `tars serve`（已重启 pid 1253781，用户可按需复核）；opencode↔nga family 自动探测不在本 goal 范围。
 
 ---
 
