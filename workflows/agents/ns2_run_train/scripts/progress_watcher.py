@@ -115,76 +115,81 @@ def _drain(
 def main() -> int:
     ap = argparse.ArgumentParser(description="Tail progress JSONL and push a live multi-metric line chart.")
     ap.add_argument("--progress", required=True,
-                    help="progress.jsonl 路径（相对 $ORCA_ARTIFACTS_DIR 或绝对）")
+                    help="progress.jsonl path (relative to $ORCA_ARTIFACTS_DIR or absolute)")
     ap.add_argument("--done-marker", required=True,
-                    help="本次 attempt 完成 marker（launch.sh wrapper 末尾写 .train_rc / .retrain_rc）")
-    ap.add_argument("--label", required=True, help="chart 分组键（dedup 维度 1）")
-    ap.add_argument("--title", required=True, help="chart 标题（dedup 维度 2，同 label 下唯一）")
-    ap.add_argument("--poll", type=float, default=5.0, help="轮询间隔秒数")
+                    help="attempt completion marker (launch.sh wrapper writes .train_rc / .retrain_rc)")
+    ap.add_argument("--label", required=True, help="chart group key (dedup dimension 1)")
+    ap.add_argument("--title", required=True, help="chart title (dedup dimension 2, unique per label)")
+    ap.add_argument("--poll", type=float, default=5.0, help="poll interval seconds")
     ap.add_argument("--max-idle", type=float, default=120.0,
-                    help="已推过点后 progress 无增长的退出兜底秒数")
+                    help="exit fallback seconds after no progress growth (post-first-point)")
     ap.add_argument("--max-wait", type=float, default=120.0,
-                    help="progress 文件未出现时等待超时秒数（超时 exit 0，不轰炸）")
+                    help="timeout seconds waiting for progress file to appear")
     args = ap.parse_args()
 
-    # 1. env 检查（缺任一 → stderr 一次 + exit 0；训练照跑，只是不推图）。
+    # 1. Determine mode: live (env + render_chart available) or static fallback.
     missing = [k for k in _REQUIRED_ENV if not os.environ.get(k)]
-    if missing:
-        sys.stderr.write(
-            f"[progress_watcher] 缺 ORCA_* env（{', '.join(missing)}）——"
-            "实时推送不可用，退出（不影响训练）\n"
-        )
-        return 0
+    render_chart = None
+    if not missing:
+        try:
+            from orca.chart import render_chart as _rc  # noqa: PLC0415
+            render_chart = _rc
+        except Exception:  # noqa: BLE001 -- fail-soft
+            pass
 
-    # 2. orca.chart 可用性（import 失败 → 同样静默退）。
-    try:
-        from orca.chart import render_chart  # noqa: PLC0415 -- 仅此处需要
-    except Exception:  # noqa: BLE001 -- fail-soft：缺包不阻断训练
-        sys.stderr.write("[progress_watcher] orca.chart 不可用——实时推送不可用，退出（不影响训练）\n")
-        return 0
+    live_mode = render_chart is not None
+    if not live_mode:
+        sys.stderr.write(
+            "[progress_watcher] live push unavailable"
+            f" ({'missing env: ' + ', '.join(missing) if missing else 'orca.chart import failed'})"
+            " — using static HTML fallback\n"
+        )
 
     progress_path = Path(args.progress)
     done_marker = Path(args.done_marker)
     start_mtime = done_marker.stat().st_mtime if done_marker.is_file() else 0.0
 
-    # series: metric 名 -> 该 metric 的 (x, y) 累计点（插入序保持，每指标一张独立图）。
     series: dict[str, list[tuple[float, float]]] = {}
-    last_growth = 0.0  # 0 = 尚无任何点（首点前不启用 idle 退出——首个 unit 可能极慢）
-    offset = 0  # 已消费的字节偏移（与 stat st_size 同基，二进制读）
-    tail = ""  # 半行缓冲：上次读到的不完整行（无 \n 结尾），下次拼接
+    last_growth = 0.0
+    offset = 0
+    tail = ""
     wait_started = time.monotonic()
 
     while True:
-        # 2a. done-marker 驱动退出（mtime 晚于本脚本启动 = 本次 attempt 真结束，
-        # 防前次 attempt 的 stale marker 让续训 watcher 一启动就退）。
-        # drain 末点：done-marker touch 与上次 poll 间最多隔一个 poll 周期（~5s），
-        # 这段时间 progress.jsonl 新写的点（往往是最后一个 epoch）必须先 drain 再推。
+        # 2a. done-marker exit (mtime later than script start = attempt finished).
         try:
             if done_marker.stat().st_mtime > start_mtime:
                 offset, tail, _ = _drain(progress_path, offset, tail, series)
-                _push(args, render_chart, series)  # 最后一次推图（失败也照退）
+                if live_mode:
+                    _push(args, render_chart, series)
+                else:
+                    _render_static_charts(args, series)
                 return 0
         except OSError:
             pass
 
-        # 2b/2c. 增量读新字节 → 半行缓冲拼接 → 解析 JSONL 行 → 累计点（DRY：_drain
-        # helper 与 done-marker 退出路径共用，零行为漂移）。
+        # 2b/2c. incremental read.
         offset, tail, new_point = _drain(progress_path, offset, tail, series)
 
-        # progress 文件缺失 → 等待（训练首次 append 创建稍晚）。
         if not progress_path.is_file():
             if time.monotonic() - wait_started > args.max_wait:
+                if not live_mode and series:
+                    _render_static_charts(args, series)
                 return 0
             time.sleep(args.poll)
             continue
 
         if new_point:
             last_growth = time.monotonic()
-            if not _push(args, render_chart, series):
-                return 0  # 断更：stderr 已写，退出（不影响训练）
+            if live_mode:
+                if not _push(args, render_chart, series):
+                    # Live socket broke mid-run — switch to static for final render.
+                    live_mode = False
 
-        # 2d. idle 兜底：仅对「已推过点」生效（首个 unit 可能超过 --max-idle）。
+        # 2d. idle fallback (only after first point).
         if last_growth and time.monotonic() - last_growth > args.max_idle:
+            if not live_mode and series:
+                _render_static_charts(args, series)
             return 0
 
         time.sleep(args.poll)
@@ -192,18 +197,14 @@ def main() -> int:
 
 def _push(args: argparse.Namespace, render_chart: object,
           series: dict[str, list[tuple[float, float]]]) -> bool:
-    """推一次每指标的独立曲线（同 label+title → 前端替换）。成功返 True；失败 → stderr 一次 + 返 False。
-
-    失败即断更（socket 断 / 守护退 / run 终态）——调用方 return 0，不重试轰炸。
-    """
+    """Push each metric as an independent live line chart. Returns True on success,
+    False on failure (caller switches to static fallback)."""
     if not series:
         return True
-    # 每指标一张独立图：同 label + 同 title → 前端替换（实时更新语义）；不同 title → 独立图。
-    # 指标名/种类不可预测（用户有什么推什么），故 title 带真实指标名，不做 loss/acc 假设。
     for name, pts in series.items():
         data = [{"x": x, "y": y} for x, y in pts]
         try:
-            render_chart(  # type: ignore[misc] -- render_chart 经 import 检查
+            render_chart(  # type: ignore[misc]
                 chart_type="line",
                 data=data,
                 label=args.label,
@@ -213,12 +214,87 @@ def _push(args: argparse.Namespace, render_chart: object,
                 x_label="step",
                 y_label=name,
             )
-        except Exception as exc:  # noqa: BLE001 -- fail-soft：socket 断（daemon 退 / run 终态）→ 断更
+        except Exception as exc:  # noqa: BLE001
             sys.stderr.write(
-                f"[progress_watcher] render_chart 失败：{exc}——实时推送断更，退出（不影响训练）\n"
+                f"[progress_watcher] render_chart failed: {exc} — switching to static fallback\n"
             )
             return False
     return True
+
+
+def _render_static_charts(
+    args: argparse.Namespace, series: dict[str, list[tuple[float, float]]]
+) -> None:
+    """Write each metric as a static HTML line chart when live push is unavailable.
+
+    Fail-soft: any rendering failure writes stderr + returns (never crashes training).
+    Output: ``$ORCA_ARTIFACTS_DIR/charts/progress_<safe_label>_<metric>.html`` (plotly)
+    or ``.png`` (matplotlib fallback).
+    """
+    if not series:
+        return
+
+    ad = Path(os.environ.get("ORCA_ARTIFACTS_DIR", "."))
+    charts_dir = ad / "charts"
+    try:
+        charts_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        sys.stderr.write(f"[progress_watcher] cannot create charts dir {charts_dir}\n")
+        return
+
+    safe_label = args.label.replace("/", "_").replace("\\", "_")
+
+    for name, pts in series.items():
+        safe_name = name.replace("/", "_").replace("\\", "_").replace(" ", "_")
+        data = [{"x": x, "y": y} for x, y in pts]
+        title = f"{args.title}: {name}"
+        out_stem = charts_dir / f"progress_{safe_label}_{safe_name}"
+
+        # Try plotly first (self-contained HTML).
+        try:
+            import plotly.graph_objects as go  # noqa: PLC0415
+
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=[d["x"] for d in data],
+                y=[d["y"] for d in data],
+                mode="lines+markers",
+                name=name,
+            ))
+            fig.update_layout(
+                title=title,
+                xaxis_title="step",
+                yaxis_title=name,
+                font=dict(size=12),
+            )
+            out = out_stem.with_suffix(".html")
+            fig.write_html(str(out), include_plotlyjs=True, full_html=True, auto_open=False)
+            sys.stderr.write(f"[progress_watcher] static chart: {out}\n")
+            continue
+        except ImportError:
+            pass  # plotly not installed → matplotlib fallback
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write(f"[progress_watcher] plotly failed for {name}: {exc}\n")
+
+        # Matplotlib PNG fallback.
+        try:
+            import matplotlib  # noqa: PLC0415
+
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt  # noqa: PLC0415
+
+            fig, ax = plt.subplots(figsize=(10, 5))
+            ax.plot([d["x"] for d in data], [d["y"] for d in data], "-o", linewidth=1.5, markersize=4)
+            ax.set_title(title)
+            ax.set_xlabel("step")
+            ax.set_ylabel(name)
+            fig.tight_layout()
+            out = out_stem.with_suffix(".png")
+            fig.savefig(str(out), dpi=120, bbox_inches="tight")
+            plt.close(fig)
+            sys.stderr.write(f"[progress_watcher] static chart: {out}\n")
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write(f"[progress_watcher] static render failed for {name}: {exc}\n")
 
 
 if __name__ == "__main__":
