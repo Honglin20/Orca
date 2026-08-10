@@ -5,7 +5,7 @@
 // 只持元数据数组（RunSummary[]），无 reducer / fold / 状态机——是目录列表，不是事件 fold。
 //
 // 生命周期（mockup + §6.2 + redesign §3.1）：
-//   - mount → ``refresh()`` + ~4s 轮询（client 节流 2s，§13 I-16）
+//   - mount → ``refresh()`` + ~8s 轮询（SPEC 2026-08-10 §3.5，client 节流 2s，§13 I-16）
 //   - unmount → ``runs = []`` 清空 + 停轮询（reviewer I-14：无残留）
 //   - WS ``run_changed``（控制帧，``kind==="control"``）→ action=deleted 乐观移除 / else refresh
 //   - deleteRun：乐观移除 + DELETE + 失败回滚
@@ -69,7 +69,9 @@ interface RunListState {
 }
 
 const REFRESH_THROTTLE_MS = 2000;
-const POLL_INTERVAL_MS = 4000;
+// SPEC 2026-08-10-home-list-lazy-index §3.5：4s→8s（保守拉长，不依赖 WS 重连可靠性前置确认；
+// WS run_changed 仍是主要增量源，8s 作断连兜底）。后端索引化后单次 refresh <300ms，轮询本身已轻。
+const POLL_INTERVAL_MS = 8000;
 
 // 单例：mount/unmount 多次复用同一 store。轮询在组件 effect 里启停（避免 orphan task）。
 let pollTimer: ReturnType<typeof setInterval> | null = null;

@@ -241,8 +241,16 @@ class RunManager:
         self._meta_cache: dict[tuple[str, float, int], tuple[int, int, int, dict | None]] = {}
         # SPEC §13.3 P0：持久派生缓存（cache 非 index，可删可重建，不违 R1/§9）。
         # 按runs_dir（每个注册项目）懒加载到内存；miss/hit 写回单条 entry。损坏 → warn + 重建。
-        # 结构：``{runs_dir: {"version":1, "entries": {<tape_name>: {mtime,size,count,oldest,newest,overview}}}}``。
+        # 结构：``{runs_dir: {"version":2, "entries": {<tape_name>: {mtime,size,count,oldest,newest,overview}}}}``。
+        # version=2（SPEC 2026-08-10-home-list-lazy-index §3.3）：旧 v1 entry 无 workflow_name /
+        # started_ts / ended_ts 三字段，version gate 一次性强失效重建。
         self._persistent_cache_by_runs_dir: dict[Path, dict] = {}
+        # SPEC 2026-08-10-home-list-lazy-index §3.3 批量写回（G2 前提）：discover_runs 期间
+        # ``_defer_persist=True``，compute 结果只更 in-memory dict + 标 dirty runs_dir，尾部
+        # per-runs_dir 单次 ``os.replace`` flush。单 tape 路径（get_run_extended_meta 等）
+        # ``_defer_persist=False`` 即时写（n=1 无 O(n²)）。
+        self._defer_persist: bool = False
+        self._dirty_runs_dirs: set[Path] = set()
         # SPEC §13.2 M-12：run_id → (project_id, tape_path, project_name) per-process 索引，
         # 每次 ``GET /api/runs?scope=all`` discovery 重建。``resolve_run_path`` miss 时查此索引。
         self._run_path_index: dict[str, tuple[str | None, Path, str | None]] = {}
@@ -1375,8 +1383,10 @@ class RunManager:
 
         步骤：
           1. 读注册表 → 拿到所有注册项目根。
-          2. 每个存在项目扫 ``runs/*.jsonl``（派生缓存 ``<project>/runs/.orca-meta-cache.json``
-             按 mtime/size 校验，P0）→ 抽 RunSummary（走 ``_summary_from_tape`` tape fold）。
+          2. 每个存在项目扫 ``runs/*.jsonl``（SPEC 2026-08-10-home-list-lazy-index §3.4：
+             ``os.scandir`` 一次枚举 + ``DirEntry.stat()`` + 派生缓存
+             ``<project>/runs/.orca-meta-cache.json`` 按 mtime/size 校验）→ 缓存命中走
+             ``_summary_from_overview`` 直构（零 fold）；miss 走 ``_summary_from_tape`` recompute。
           3. 合并内存 live run（in-process + attached）—— **hint 通道**：``status`` 取
              ``handle.status``（实时 hint），权威仍在 tape；``progress`` / ``cost`` / ``elapsed``
              仍走 ``replay_state(handle.tape)``。
@@ -1413,36 +1423,43 @@ class RunManager:
         seen_ids: set[str] = set()
 
         # --- attached 分支（注册项目 runs/*.jsonl）---
-        for pid, meta in registered.items():
-            root_str = meta.get("path")
-            name = meta.get("name") or "<unnamed>"
-            if not isinstance(root_str, str):
-                continue
-            root = Path(root_str)
-            runs_dir = root / RUNS_DIRNAME
-            if not runs_dir.is_dir():
-                continue  # 项目无 runs/ → skip（stale）
-            for tape_path in sorted(runs_dir.glob("*.jsonl")):
-                try:
-                    summary = self._summary_from_tape(
-                        tape_path, project_id=pid, project_name=name,
-                        source="attached",
+        # SPEC 2026-08-10-home-list-lazy-index §3.4：scandir 一次枚举 + DirEntry.stat() +
+        # 持久缓存命中→_summary_from_overview 直构（零 fold）；miss→_summary_from_tape。
+        # §3.3 批量写回：defer_persist 期间只更 in-memory + 标 dirty，尾部 per-runs_dir flush。
+        # **单线程前提**：``_defer_persist`` 是实例 flag，依赖 ``discover_runs`` 是 sync 且
+        # 单线程调用（asyncio 协作式，调用期无 await 让出）。不可并发 / 重入，否则 flag race。
+        self._defer_persist = True
+        try:
+            for pid, meta in registered.items():
+                root_str = meta.get("path")
+                name = meta.get("name") or "<unnamed>"
+                if not isinstance(root_str, str):
+                    continue
+                root = Path(root_str)
+                runs_dir = root / RUNS_DIRNAME
+                if not runs_dir.is_dir():
+                    continue  # 项目无 runs/ → skip（stale）
+                for tape_path, prestat in self._iter_runs_dir_tapes(runs_dir):
+                    summary = self._discover_one_tape(
+                        tape_path, prestat,
+                        project_id=pid, project_name=name,
                     )
-                except Exception:  # noqa: BLE001 — 坏 tape skip+warn（外层「discovery skip」语义）
-                    logger.warning(
-                        "discover_runs: tape 解析失败跳过 %s", tape_path, exc_info=True,
-                    )
-                    continue
-                if summary is None:
-                    continue
-                # 内存 live run 优先（status 更实时）；attached 同 tape 不重复入列表。
-                if summary.run_id in self._runs:
-                    continue
-                if summary.run_id in seen_ids:  # E2：显式 dedup（同 tape 多项目 glob 命中）
-                    continue
-                seen_ids.add(summary.run_id)
-                summaries.append(summary)
-                new_index[summary.run_id] = (pid, tape_path, name)
+                    if summary is None:
+                        continue
+                    # 内存 live run 优先（status 更实时）；attached 同 tape 不重复入列表。
+                    if summary.run_id in self._runs:
+                        continue
+                    if summary.run_id in seen_ids:  # E2：显式 dedup（同 tape 多项目命中）
+                        continue
+                    seen_ids.add(summary.run_id)
+                    summaries.append(summary)
+                    new_index[summary.run_id] = (pid, tape_path, name)
+        finally:
+            self._defer_persist = False
+            # per-runs_dir 单次 os.replace flush（G2：避免 O(n²) 累计重写）
+            for dirty_dir in self._dirty_runs_dirs:
+                self._flush_persistent_cache(dirty_dir)
+            self._dirty_runs_dirs.clear()
 
         # --- in-memory 分支（live 权威：无条件 overwrite summaries + new_index）---
         for handle in self._runs.values():
@@ -1502,7 +1519,7 @@ class RunManager:
                 )
             except Exception:  # noqa: BLE001 — 外层「discovery skip」语义
                 # 注：corrupt tape 已被 _summary_from_tape 内层 swallow + warn（N1），
-                # 此处仅兜底 _scan_tape_timebounds / RunSummary 构造等后段异常。
+                # 此处仅兜底 RunSummary 构造等后段异常。
                 logger.warning(
                     "legacy run %s tape 解析失败 skip：%s",
                     getattr(lm, "run_id", "?"), tape_path, exc_info=True,
@@ -1556,6 +1573,82 @@ class RunManager:
                 except (ValueError, OSError, RuntimeError):
                     continue
         return None, None
+
+    def _iter_runs_dir_tapes(
+        self, runs_dir: Path,
+    ) -> Iterator[tuple[Path, "os.stat_result | None"]]:
+        """SPEC 2026-08-10-home-list-lazy-index §3.4：单次 ``os.scandir`` 枚举 ``*.jsonl`` +
+        缓存的 ``DirEntry.stat()``（单次目录 syscall + 缓存 stat，替代 N 次 glob + Path.stat）。
+
+        两层 fail-soft（SPEC §4 I-5）：
+          - 目录级 scandir OSError（权限 / 非 dir）→ 降级 glob + ``_summary_from_tape``
+            （prestat=None，内部 stat），warn。
+          - per-entry ``DirEntry.stat()`` OSError（TOCTOU 删除 / 单文件权限）→ skip+warn 该
+            entry，**不降级整目录**（保持其余进度，避免 1354 重扫断崖）。
+        """
+        try:
+            entries = sorted(
+                (
+                    e for e in os.scandir(runs_dir)
+                    if e.name.endswith(".jsonl") and e.is_file()
+                ),
+                key=lambda e: e.name,
+            )
+        except OSError as e:
+            # 目录级 scandir 失败 → 降级 glob（prestat=None → _summary_from_tape 内部 stat）
+            logger.warning(
+                "discover_runs: scandir 失败降级 glob：%s（%s）", runs_dir, e,
+            )
+            for tape_path in sorted(runs_dir.glob("*.jsonl")):
+                yield (tape_path, None)
+            return
+        for entry in entries:
+            try:
+                st = entry.stat()
+            except OSError as e:
+                # per-entry stat 失败 → skip+warn 该 entry（I-5，不降级整目录）
+                logger.warning(
+                    "discover_runs: entry stat 失败 skip：%s（%s）", entry.path, e,
+                )
+                continue
+            yield (Path(entry.path), st)
+
+    def _discover_one_tape(
+        self,
+        tape_path: Path,
+        prestat: "os.stat_result | None",
+        *,
+        project_id: str | None,
+        project_name: str | None,
+    ) -> RunSummary | None:
+        """SPEC §3.4：持久缓存命中→``_summary_from_overview`` 直构（零 fold）；miss→
+        ``_summary_from_tape``（内部 recompute + 标 dirty）。
+
+        prestat 来自 ``DirEntry.stat()``（scandir 路径）或 None（glob 降级路径，走全量
+        ``_summary_from_tape``）。坏 tape / 解析异常 → warn + None（discovery skip 语义）。
+        """
+        if prestat is not None:
+            cached = self._persistent_cache_lookup(
+                tape_path, prestat.st_mtime, prestat.st_size,
+            )
+            if cached is not None:
+                count, _, _, overview_data = cached
+                overview = (overview_data or {}).get("overview") or {}
+                return self._summary_from_overview(
+                    tape_path.stem, count, overview,
+                    project_id=project_id, project_name=project_name,
+                    source="attached",
+                )
+        try:
+            return self._summary_from_tape(
+                tape_path, project_id=project_id, project_name=project_name,
+                source="attached",
+            )
+        except Exception:  # noqa: BLE001 — 坏 tape skip+warn（外层「discovery skip」语义）
+            logger.warning(
+                "discover_runs: tape 解析失败跳过 %s", tape_path, exc_info=True,
+            )
+            return None
 
     def _scan_meta_overview_cached(self, tape_path: Path) -> tuple[int, int, int, dict | None]:
         """SPEC §8.4a + §13.3 P0：三层派生缓存（in-memory → persistent → 重算）。
@@ -1621,23 +1714,34 @@ class RunManager:
             return None
 
     def _persistent_cache_loaded(self, runs_dir: Path) -> dict:
-        """加载（懒）runs_dir 对应的持久缓存。损坏 → 空 + warn。"""
+        """加载（懒）runs_dir 对应的持久缓存。损坏 / version 不符 → 空 + warn。
+
+        SPEC 2026-08-10-home-list-lazy-index §3.3 version gate：``raw.get("version") != 2``
+        → 视为空重建（旧 v1 entry 无 workflow_name / started_ts / ended_ts 三字段）。
+        """
         if runs_dir in self._persistent_cache_by_runs_dir:
             return self._persistent_cache_by_runs_dir[runs_dir]
         cache_path = runs_dir / ".orca-meta-cache.json"
-        data: dict = {"version": 1, "entries": {}}
+        data: dict = {"version": 2, "entries": {}}
         if cache_path.is_file():
             try:
                 raw = json.loads(cache_path.read_text(encoding="utf-8"))
                 if (
                     isinstance(raw, dict)
                     and isinstance(raw.get("entries"), dict)
+                    and raw.get("version") == 2  # §3.3 version gate（BLOCKER）
                 ):
                     data = raw
                 else:
                     logger.warning(
-                        "持久 meta cache 结构非法，视为空重建：%s", cache_path
+                        "持久 meta cache version 不符或结构非法，视为空重建：%s",
+                        cache_path,
                     )
+                    # 删除旧文件避免每个新进程重复 warn（与损坏路径对称）。
+                    try:
+                        cache_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
             except (OSError, json.JSONDecodeError) as e:
                 # 损坏 → warn + 空（cache 非 index，可重建，R1/§9）。
                 logger.warning(
@@ -1658,9 +1762,16 @@ class RunManager:
         size: int,
         result: tuple[int, int, int, dict | None],
     ) -> None:
-        """单条 entry 原子写回（tmp + os.replace）。失败 → warn 不阻断。"""
+        """单条 entry 更新 in-memory dict；按 ``_defer_persist`` 决定即时落盘或标 dirty。
+
+        SPEC 2026-08-10-home-list-lazy-index §3.3 批量写回（G2 前提）：discover_runs 期间
+        ``_defer_persist=True`` 仅更 in-memory + 标 dirty runs_dir，尾部 ``_flush_persistent_cache``
+        per-runs_dir 单次 ``os.replace``；单 tape 路径 ``_defer_persist=False`` 即时写（n=1）。
+        失败 → warn 不阻断（cache 是 perf 优化，非正确性来源）。
+        """
         runs_dir = tape_path.parent
         data = self._persistent_cache_loaded(runs_dir)
+        data["version"] = 2  # §3.3：写时带 version=2
         entries = data.setdefault("entries", {})
         entries[tape_path.name] = {
             "mtime": mtime,
@@ -1670,6 +1781,14 @@ class RunManager:
             "newest": result[2],
             "overview": result[3],
         }
+        if self._defer_persist:
+            self._dirty_runs_dirs.add(runs_dir)
+            return
+        self._flush_persistent_cache(runs_dir)
+
+    def _flush_persistent_cache(self, runs_dir: Path) -> None:
+        """单 runs_dir 持久缓存落盘（tmp + ``os.replace`` 原子写）。失败 → warn 不阻断。"""
+        data = self._persistent_cache_loaded(runs_dir)
         cache_path = runs_dir / ".orca-meta-cache.json"
         tmp = cache_path.with_name(cache_path.name + ".tmp")
         try:
@@ -1696,8 +1815,10 @@ class RunManager:
         - 空文件 / 刚创建的 live-pending（count==0）→ 返回 None（discovery 见 live 才有意义，
           纯空 tape 无 discovery 价值）。
 
-        progress 从 ``overview.agents``（node_status 派生）算 done/total；elapsed 从
-        workflow_started.timestamp 到终态事件 timestamp（或 now）算（code-reviewer M-3）。
+        SPEC 2026-08-10-home-list-lazy-index §3.2：``workflow_name`` / ``started_ts`` /
+        ``ended_ts`` 改从 ``_scan_meta_overview_cached`` 单遍 capture 的 overview 读（消除
+        ``_topology_workflow_name_from_tape`` / ``_scan_tape_timebounds`` 重扫）。派生复用
+        ``_summary_from_overview`` 公共构造器。
 
         ``warn_run_id``（可选）：caller 已知的 meta-level run_id（如 legacy ``lm.run_id``），
         仅用于 corrupt warn 锚点（含该值时消息同时含 run_id + tape path，便于稳定 grep）。
@@ -1720,12 +1841,37 @@ class RunManager:
                     "tape 概览扫描失败（视为 corrupt skip）：%s", tape_path, exc_info=True,
                 )
             return None
-        if count == 0:
-            # 0 有效事件（空 tape 或坏 tape）→ skip
-            return None
         overview = (overview_data or {}).get("overview") or {}
-        # workflow_name 从 overview.run_status 反推不可，扫 tape 取 workflow_started。
-        wf_name = _topology_workflow_name_from_tape(tape_path) or tape_path.stem
+        return self._summary_from_overview(
+            tape_path.stem, count, overview,
+            project_id=project_id, project_name=project_name, source=source,
+        )
+
+    @staticmethod
+    def _summary_from_overview(
+        run_id: str,
+        count: int,
+        overview: dict,
+        *,
+        project_id: str | None,
+        project_name: str | None,
+        source: str,
+    ) -> RunSummary | None:
+        """从 ``(count, overview)`` 派生 RunSummary——``_summary_from_tape`` 与 discovery
+        直构共用（SPEC 2026-08-10-home-list-lazy-index §3.2 / §3.4 step2）。
+
+        - ``count == 0`` → ``None``（discovery skip 语义；空 tape / 坏 tape）。
+        - overview 缺字段（理论仅 v1 残留，v2 强失效后不可能）→ fallback 不崩：
+          ``workflow_name``→``run_id``（= stem）、``elapsed``→``0.0``。
+        - in-memory 分支（live handle hint 语义）**不走本方法**（SPEC §3.4 step4，E10/N5）。
+        """
+        if count == 0:
+            return None
+        overview = overview or {}
+        # workflow_name：overview.workflow_name（fallback run_id=stem，SPEC §3.2）
+        wf_name = overview.get("workflow_name")
+        if not isinstance(wf_name, str) or not wf_name:
+            wf_name = run_id
         # status 映射：overview.run_status 是 workflow 级别字符串
         wf_status = overview.get("run_status") or "pending"
         status: RunStatus
@@ -1744,15 +1890,18 @@ class RunManager:
         total = len(agents)
         done = sum(1 for a in agents if isinstance(a, dict) and a.get("status") == "done")
         progress = f"{done}/{total}" if total > 0 else "?"
-        # started_at + elapsed：扫 tape 取 workflow_started.timestamp + 终态 timestamp
-        started_ts, ended_ts = _scan_tape_timebounds(tape_path)
+        # elapsed / started_at：从 overview 单遍 capture 的 started_ts / ended_ts 派生
+        # （SPEC §3.1；同款 isinstance 守卫防 corrupt timestamp 炸 overview）。
+        raw_started = overview.get("started_ts")
+        raw_ended = overview.get("ended_ts")
+        started_ts = float(raw_started) if isinstance(raw_started, (int, float)) else None
+        ended_ts = float(raw_ended) if isinstance(raw_ended, (int, float)) else None
         if started_ts is not None and ended_ts is not None:
             elapsed = max(0.0, ended_ts - started_ts)
         else:
             elapsed = 0.0
-        started_at = started_ts
         return RunSummary(
-            run_id=tape_path.stem,
+            run_id=run_id,
             workflow_name=wf_name,
             project_id=project_id,
             project_name=project_name,
@@ -1760,7 +1909,7 @@ class RunManager:
             progress=progress,
             cost=float(overview.get("cost_usd") or 0.0),
             elapsed=elapsed,
-            started_at=started_at,
+            started_at=started_ts,
             event_count=count,
             source=source,  # type: ignore[arg-type]
         )
@@ -2188,52 +2337,9 @@ def _topology_node_count_from_tape(tape: Tape | AttachedTape) -> int | None:
     return None
 
 
-def _topology_workflow_name_from_tape(tape_path: Path) -> str | None:
-    """扫 tape 取 ``workflow_started.data.workflow_name``（discovery 用，单遍）。
-
-    与 ``_topology_node_count_from_tape`` 类似但输入是 path（discovery 期无 handle）。
-    partial / 坏 tape → None（调用方降级到 stem）。
-    """
-    try:
-        for event in tape_reader_replay(tape_path, since_seq=0):
-            if event.type == "workflow_started":
-                wf_name = event.data.get("workflow_name")
-                if isinstance(wf_name, str) and wf_name:
-                    return wf_name
-                return None
-    except FileNotFoundError:
-        return None
-    except Exception:  # noqa: BLE001
-        return None
-    return None
-
-
-def _scan_tape_timebounds(tape_path: Path) -> tuple[float | None, float | None]:
-    """扫 tape 取 (workflow_started.timestamp, 终态事件 timestamp)（discovery 算 elapsed 用）。
-
-    终态事件 = ``workflow_completed`` / ``workflow_failed`` / ``workflow_cancelled``。
-    无终态事件 → ``ended=None``（调用方降级到 0.0 elapsed）。
-    partial / 坏 tape → ``(None, None)``。
-    """
-    started: float | None = None
-    ended: float | None = None
-    try:
-        for event in tape_reader_replay(tape_path, since_seq=0):
-            if started is None and event.type == "workflow_started":
-                ts = getattr(event, "timestamp", None)
-                if isinstance(ts, (int, float)):
-                    started = float(ts)
-            if event.type in (
-                "workflow_completed", "workflow_failed", "workflow_cancelled",
-            ):
-                ts = getattr(event, "timestamp", None)
-                if isinstance(ts, (int, float)):
-                    ended = float(ts)
-    except FileNotFoundError:
-        return (None, None)
-    except Exception:  # noqa: BLE001
-        return (None, None)
-    return (started, ended)
+# SPEC 2026-08-10-home-list-lazy-index §3.2：``_topology_workflow_name_from_tape`` /
+# ``_scan_tape_timebounds`` 已删除（零调用方）——三字段由 ``_scan_meta_overview`` 单遍
+# capture 进 overview（DRY），``_summary_from_overview`` 统一派生。
 
 
 # ── legacy ~/.orca/runs/ 兼容（铁律：web 禁 import cli，本处复刻 bg_runner 路径语义）──
@@ -2364,6 +2470,12 @@ BULK_EVENT_TYPES: frozenset[str] = frozenset(
 )
 _META_SEQ_RE = __import__("re").compile(r'"seq":\s*(\d+)')
 
+# 终态事件集（SPEC 2026-08-10-home-list-lazy-index §3.1）：``_scan_meta_overview`` 单遍
+# capture ``ended_ts`` 用（最末终态事件 timestamp，后值覆盖；与旧 ``_scan_tape_timebounds`` 同源）。
+_TERMINAL_EVENT_TYPES: frozenset[str] = frozenset(
+    {"workflow_completed", "workflow_failed", "workflow_cancelled"}
+)
+
 
 def _scan_meta_overview(path: Path) -> tuple[int, int, int, dict | None]:
     """单遍扫 tape 同时累计 ``(event_count, oldest_seq, newest_seq, overview_data)``。
@@ -2376,7 +2488,10 @@ def _scan_meta_overview(path: Path) -> tuple[int, int, int, dict | None]:
     跳过 json.loads（避免 Python stdlib json 的 ~500ms/60k 行开销）。只有 ``workflow_*`` /
     ``node_*`` / ``agent_usage`` / ``custom`` 进 full parse + fold。
 
-    overview_data 形如 ``{"overview": {agents, charts, cost_usd, run_status}}``。
+    overview_data 形如 ``{"overview": {agents, charts, cost_usd, run_status,
+    workflow_name, started_ts, ended_ts}}``。后三字段为 SPEC 2026-08-10-home-list-lazy-index
+    §3.1 单遍 capture，消除 discovery 期 ``_topology_workflow_name_from_tape`` /
+    ``_scan_tape_timebounds`` 的重扫（带类型守卫，防爆半径）。
     """
     count = 0
     oldest = 0
@@ -2387,6 +2502,12 @@ def _scan_meta_overview(path: Path) -> tuple[int, int, int, dict | None]:
     charts: list[dict] = []
     saw_topology = False
     cost = 0.0
+    # SPEC 2026-08-10-home-list-lazy-index §3.1：单遍顺手 capture 三字段，消除 #2 #3 重扫。
+    # 守卫必须（BLOCKER I-1/I-2）：非数值 timestamp 若 float() 抛异常，外层 except 会吞掉
+    # 整个 overview（agents/cost/status 一同丢失），爆炸半径远大于旧 _scan_tape_timebounds。
+    workflow_name: str | None = None
+    started_ts: float | None = None
+    ended_ts: float | None = None
     try:
         with open(path, "r", encoding="utf-8") as f:
             for raw in f:
@@ -2431,11 +2552,21 @@ def _scan_meta_overview(path: Path) -> tuple[int, int, int, dict | None]:
                 t = obj.get("type")
                 node = obj.get("node")
                 data = obj.get("data") or {}
+                ts = obj.get("timestamp")
 
                 if t == "workflow_started":
                     wf_status = "running"
+                    # started_ts：首个 ws 的有效 timestamp（与旧 _scan_tape_timebounds 的
+                    # ``if started is None`` 同源；守卫防爆）。
+                    if started_ts is None and isinstance(ts, (int, float)):
+                        started_ts = float(ts)
                     if not saw_topology:
                         saw_topology = True
+                        # workflow_name：首个 ws 的 name（不遍历后续 ws，与旧
+                        # _topology_workflow_name_from_tape 在首个 ws return 逐字对齐）。
+                        wf_name_raw = data.get("workflow_name")
+                        if isinstance(wf_name_raw, str) and wf_name_raw:
+                            workflow_name = wf_name_raw
                         topo = data.get("topology")
                         if isinstance(topo, dict):
                             nodes = topo.get("nodes")
@@ -2473,6 +2604,10 @@ def _scan_meta_overview(path: Path) -> tuple[int, int, int, dict | None]:
                                 "chart_type": str(chart.get("chart_type") or "chart"),
                             }
                         )
+                # ended_ts：最末终态事件 timestamp（后值覆盖，与旧 _scan_tape_timebounds 同源；
+                # 守卫防爆——非数值 timestamp 不 float()）。DRY：单点 capture 替代三分支重复。
+                if t in _TERMINAL_EVENT_TYPES and isinstance(ts, (int, float)):
+                    ended_ts = float(ts)
     except Exception:  # noqa: BLE001 — 读失败不应崩 /meta
         return (count, oldest, newest, None)
 
@@ -2491,5 +2626,9 @@ def _scan_meta_overview(path: Path) -> tuple[int, int, int, dict | None]:
         "charts": charts,
         "cost_usd": cost,
         "run_status": wf_status,
+        # SPEC 2026-08-10-home-list-lazy-index §3.1：capture 进 overview（消除 #2 #3 重扫）。
+        "workflow_name": workflow_name,
+        "started_ts": started_ts,
+        "ended_ts": ended_ts,
     }
     return (count, oldest, newest, {"overview": overview})

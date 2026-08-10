@@ -5,6 +5,33 @@
 
 ---
 
+## [2026-08-10] perf(web): 主页 run 列表懒加载——概要索引化 discovery（1354 tape 12s→18ms）
+
+`GET /api/runs?scope=all` 首屏 12s+ 根因：`_summary_from_tape` 每 tape 做 3 遍扫描
+（`_scan_meta_overview` + `_topology_workflow_name_from_tape` + `_scan_tape_timebounds`），
+后两者无缓存且重复扫同样行。**SPEC 2026-08-10-home-list-lazy-index 逐字实现**：
+① `_scan_meta_overview` 单遍 capture `workflow_name`/`started_ts`/`ended_ts`（带 isinstance
+守卫，BLOCKER I-1/I-2 防非数值 timestamp 炸 overview）；② 抽 `_summary_from_overview` 公共
+构造器 + 删两个死 helper（DRY）；③ persistent cache `v1→v2` version gate + 批量写回（defer
+期间只更 in-memory + 标 dirty，尾部 per-runs_dir 单次 `os.replace`，G2 可达）；④ `discover_runs`
+attached 分支改 `os.scandir` 一次枚举 + 缓存命中直构（零 fold）+ 两层 fail-soft；⑤ 前端
+`POLL_INTERVAL_MS` 4s→8s。实测：缓存命中 17ms / 冷启 91ms（1354 tape）；13540 tape 温路径
+365ms + R²=0.96（AC7）。code-reviewer 两轮闭环 0 MUST-FIX。Commit: 待 commit。详见
+[release note](../releases/2026-08-10-home-list-lazy-index.md)（待补）。
+
+## [2026-08-10] fix(nas-supernet): 防跨 run 误杀——训练进程 kill 全收敛到带归属门的 kill_train_group.sh
+
+同项目并发 run 共享 project-scoped artifacts 目录 → pid 文件 / status.sh 报的 pid 可能
+是**另一 run** 的训练 wrapper（名字级 cmdline 匹配不区分归属），3 处 kill 点（launch.sh
+残留清理 + agent Step 2 假死 + self-heal）会整组杀掉隔壁 run 的活训练。**修复**：新增
+`scripts/kill_train_group.sh` × 2（ns_run_train / ns_retrain 镜像）——`/proc/<pid>/environ`
+的 `ORCA_RUN_ID` 与当前比对，本 run 才整组杀；别的 run → `FOREIGN_RUN_ALIVE` 不杀 +
+exit 1；env 缺失 legacy 旧行为。launch.sh 残留清理与 agent.md（Step 2 假死 / self-heal）
+全部改调 helper；launch.sh FOREIGN abort 在尝试预算计数前（不烧预算）。**验证**：4 场景
+smoke（FOREIGN 不杀不烧预算 / 本 run stale 整组杀 / 无关进程不误杀 / legacy 旧行为）
+train+retrain 双份全过 + `tars validate` 0 error + tests/workflows 532 passed。
+Commit: 待 commit。详见 [release note](../releases/2026-08-10-launch-ownership-guard.md)。
+
 ## [2026-08-10] fix(in-session): web Log 显示假 elapsed——node 0s / workflow 0.077s
 
 Web Log 面板两类假值：① in-session `node_completed.data` 无 `elapsed`（契约

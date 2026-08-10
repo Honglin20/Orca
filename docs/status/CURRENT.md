@@ -4,6 +4,31 @@
 
 ---
 
+## 历史：launch.sh 防跨 run 误杀——已完成（训练进程 kill 全收敛到带归属门的 kill_train_group.sh）
+
+**任务**：同项目并发 run 共享 artifacts 目录（project-scoped），训练进程清理按 cmdline
+**名字级**匹配，3 处 kill 点（launch.sh 残留清理 + agent Step 2 假死 + self-heal）会
+`kill -- -PID` 整组杀掉隔壁 run 的活训练。
+
+**状态**：**完成 + review agent 一轮闭环（1 MUST-FIX 已修 + 3 minor 全修）**：新增
+`scripts/kill_train_group.sh` × 2（ns_run_train / ns_retrain 镜像）——`/proc/<pid>/environ`
+的 `ORCA_RUN_ID` 与当前比对，本 run 才整组杀；别的 run → `FOREIGN_RUN_ALIVE` 不杀 +
+exit 1；env 缺失 legacy 旧行为。launch.sh 残留清理与 agent.md（Step 2 假死 / self-heal）
+全部改调 helper（review 发现 Step 2 误认 ALIVE 杀隔壁是主路径，已堵）；launch.sh FOREIGN
+abort 在尝试预算计数前（不烧预算）。验证：4 场景 smoke（FOREIGN 不杀不烧预算 / 本 run
+stale 整组杀 / 无关进程不误杀 / legacy 旧行为）train+retrain 双份全过 + `tars validate`
+0 error + tests/workflows 532 passed。
+
+**必读**：
+- release note `docs/releases/2026-08-10-launch-ownership-guard.md`。
+- `workflows/agents/ns_run_train/scripts/kill_train_group.sh`（归属门契约）+ 同款 ns_retrain。
+
+**遗留**（另行决策）：共享目录的 run 间 liveness 判定仍互相可见（status.sh 误认他人训练
+为自己的 → 误报 ALIVE，但 kill 已被归属门拦住，安全）；彻底隔离需 run 级 artifacts 或
+引擎级并发守卫。kd-nas train-teacher 旧模型的裸 kill 未迁移（独立目录，无共享）。
+
+---
+
 ## 历史：in-session elapsed 真相修复——已完成 + review agent 闭环（web Log 0s / workflow 0.077s）
 
 **任务**：web Log 面板 in-session run 显示假 elapsed：node 全 `(0s)`（in-session
@@ -27,29 +52,31 @@
 
 ---
 
-## 当前（严重/设计错误，待修）：主页 run 列表随 tape 数量线性变慢——缺懒加载
+## 历史：主页 run 列表懒加载——概要索引化 discovery 已完成（1354 tape 12s→18ms）
 
-**现象**：`runs/` 有 1354 个 tape（120M，多为测试产物）时，`GET /api/runs?scope=all`
-首屏 **12s+** 才返回（discovery 全量扫描 + 逐 tape fold 概览），主页一直转圈卡死。
-诊断复现：`/api/runs` 其他端点均 <1s，唯 `scope=all` 慢；二层派生缓存（in-memory +
-`.orca-meta-cache.json`）**每次请求仍要对全部 1354 tape 逐个 stat + glob + 过滤**，
-且 legacy 分支对每个 meta 重扫 tape 路径，O(n) 全量开销不可豁免（缓存只省 fold 不省扫描）。
+**任务**：`GET /api/runs?scope=all` 在 1354 tape 时首屏 12s+（主页卡死）。根因
+`_summary_from_tape` 每 tape 做 3 遍扫描（`_scan_meta_overview` + 两个无缓存的
+`_topology_workflow_name_from_tape` / `_scan_tape_timebounds` 重扫同样行）。
 
-**设计判定**：这是**架构问题不是 bug**——违背「一条读路径」精神的懒加载契约：
-主页只需总览（run_id / workflow / status / progress），却在请求期做全量 tape 派生，
-把磁盘 IO 成本押在首屏关键路径上。修复 ≥3 文件且需改数据流，不允许 surgical 打补丁。
-
-**修复方向（待写设计稿）**：
-- 列表端点应基于**轻量总览层**（如 `.orca-meta-cache.json` 作为 index 直接读，mtime 增量
-  失效），不逐 tape stat/parse；或分页/增量返回 + 前端滚动加载。
-- 关键路径与全量派生解耦：总览快、详情才 fold。
-- 附带：清理历史测试产物（本次已手动清 1354 tape + 1456 个注册表测试项目，`projects.json`
-  仅剩 Orca；`/home/mozzie/tars-serve*.log` 为本次排查日志）。
+**状态**：**完成 + code-reviewer 两轮闭环（0 MUST-FIX）**：SPEC
+`2026-08-10-home-list-lazy-index.md` 逐字实现——① `_scan_meta_overview` 单遍 capture
+`workflow_name`/`started_ts`/`ended_ts`（带 isinstance 守卫，BLOCKER I-1/I-2 防非数值
+timestamp 炸 overview）；② 抽 `_summary_from_overview` 公共构造器 + 删两个死 helper（DRY）；
+③ persistent cache `v1→v2` version gate + 批量写回（defer 期间只更 in-memory + 标 dirty，
+尾部 per-runs_dir 单次 `os.replace`）；④ `discover_runs` attached 分支改 `os.scandir` 一次
+枚举 + 缓存命中直构（零 fold）+ 两层 fail-soft（目录级 scandir OSError→glob 降级 / per-entry
+stat OSError→skip+warn 不降级整目录）；⑤ 前端 `POLL_INTERVAL_MS` 4s→8s。验证：14 新测 + 493
+回归全绿（iface/web + events，非 Playwright）；实测 AC1 命中 17ms / AC2 冷启 91ms（1354 tape）/
+AC7 13540 tape 温路径 365ms + R²=0.96。
 
 **必读**：
-- `orca/iface/web/run_manager.py:discover_runs`（1373）+ `_scan_meta_overview_cached`（1560）。
-- `orca/iface/web/routes/runs.py:list_runs`（40，`scope=all` 全量路径）。
-- 复现数据：`/api/runs?scope=all` 12.3s（1354 tape）/ 1.2s（0 tape，本次清理后）。
+- SPEC `docs/specs/2026-08-10-home-list-lazy-index.md`（§3.1-§3.5 契约 + §4 fail-soft）。
+- `orca/iface/web/run_manager.py:_scan_meta_overview`（单遍 capture + 守卫）+ `_summary_from_overview`
+  （公共构造器）+ `discover_runs`（scandir 直构 + defer/flush）。
+
+---
+
+## 历史：in-session runs 解析——已完成
 
 **任务**：子代理 CWD 落子目录时 `orca status` 扫不到活跃 run（marker 在项目根 `runs/`，
 子代理 `cwd/runs` 空）。根因：`_write_orca_env` 没写项目根锚点 → tape/rundir 解析全走
