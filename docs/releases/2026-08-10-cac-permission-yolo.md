@@ -3,7 +3,7 @@
 **日期**: 2026-08-10
 **类型**: fix（in-session 权限审批：CAC 后端 PermissionRequest hook 拿不到 session 身份 → yolo/审批卡永不触发）
 **分支**: in-session-unified-backend
-**Commit**: <TBD>
+**Commit**: `6128777`
 
 ## 背景 / 根因
 

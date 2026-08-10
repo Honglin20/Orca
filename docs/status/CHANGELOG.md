@@ -15,7 +15,7 @@ CAC（CC 换皮、进程 `codeagentcli`）不注入 `CLAUDE_CODE_SESSION_ID`，p
 `data.host_session` → broker 双键命中）+ best-effort `try/except` 包裹（防 `UnicodeDecodeError` 崩 hook）。
 SPEC §3.1 + yolo R2 同步。验证：hook+install 30 passed + code-reviewer 一轮 0 MUST-FIX / 3 SHOULD-FIX 全修
 （fail-soft / DRY 漂移闸门 / inspection-verified 措辞）。**无 CAC 真机**，取值一致性靠 inspection 逐字段比对 +
-漂移闸门守恒常量（`sessionId` ASCII 故编码差不产生分歧）。Commit: <TBD>。详见
+漂移闸门守恒常量（`sessionId` ASCII 故编码差不产生分歧）。Commit: `6128777`。详见
 [release note](../releases/2026-08-10-cac-permission-yolo.md)。
 
 ## [2026-08-10] fix(web): 卡片事件数对齐 log + 图表数字段（双分支计数 + cache v2→v3）
