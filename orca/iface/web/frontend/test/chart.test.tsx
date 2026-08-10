@@ -736,6 +736,196 @@ describe("ChartGroup —— 响应式 grid + IntersectionObserver 懒挂（SPEC 
     // skeleton 已被 widget 取代
     expect(screen.queryAllByTestId("chart-skeleton").length).toBe(0);
   });
+
+  test("table 分区收尾：图-图-表（非 table 保原序在前，table 全部排最后）", async () => {
+    const TABLE_PAYLOAD = (title: string): ChartPayload => ({
+      chart_type: "table",
+      data: [{ a: 1 }],
+      label: "g1",
+      title,
+    });
+    render(
+      <ChartGroup
+        label="g1"
+        charts={[
+          { identity: "t1", payload: { ...LINE_PAYLOAD, label: "g1", title: "图1" } },
+          { identity: "t2", payload: TABLE_PAYLOAD("表1") },
+          { identity: "t3", payload: { ...LINE_PAYLOAD, label: "g1", title: "图2" } },
+          { identity: "t4", payload: TABLE_PAYLOAD("表2") },
+        ]}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getAllByTestId("chart-widget").length).toBe(4);
+    });
+    // 图-图-表-表：h4 title 顺序 = 非 table 原序 + table 原序（类内 filter 稳定）
+    const titles = Array.from(
+      document.querySelectorAll('[data-testid="chart-widget"] h4'),
+    ).map((el) => el.textContent);
+    expect(titles).toEqual(["图1", "图2", "表1", "表2"]);
+  });
+
+  test("table widget 独占整行：gridColumn 1 / -1，非 table 无该样式", async () => {
+    const TABLE_PAYLOAD: ChartPayload = {
+      chart_type: "table",
+      data: [{ a: 1 }],
+      label: "g1",
+      title: "表",
+    };
+    render(
+      <ChartGroup
+        label="g1"
+        charts={[
+          { identity: "t1", payload: { ...LINE_PAYLOAD, label: "g1", title: "图" } },
+          { identity: "t2", payload: TABLE_PAYLOAD },
+        ]}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getAllByTestId("chart-widget").length).toBe(2);
+    });
+    const group = screen.getByTestId("chart-group");
+    const gridContainer = group.querySelector(
+      'div[style*="grid-template-columns"]',
+    ) as HTMLElement | null;
+    expect(gridContainer).toBeTruthy();
+    const children = Array.from(gridContainer!.children) as HTMLElement[];
+    // 两个 grid item：图（无 span）+ 表（span 包装，gridColumn 1/-1）
+    expect(children.length).toBe(2);
+    const tableWrapper = children[1];
+    expect(tableWrapper.style.gridColumn).toBe("1 / -1");
+    // 图 item 直接是 LazyChartWidget 根节点，不带 gridColumn 样式
+    expect(children[0].style.gridColumn).toBe("");
+  });
+
+  test("全 table 组：全部独占整行且类内保序", async () => {
+    const TABLE_PAYLOAD = (title: string): ChartPayload => ({
+      chart_type: "table",
+      data: [{ a: 1 }],
+      label: "g1",
+      title,
+    });
+    render(
+      <ChartGroup
+        label="g1"
+        charts={[
+          { identity: "t1", payload: TABLE_PAYLOAD("表1") },
+          { identity: "t2", payload: TABLE_PAYLOAD("表2") },
+        ]}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getAllByTestId("chart-widget").length).toBe(2);
+    });
+    const group = screen.getByTestId("chart-group");
+    const gridContainer = group.querySelector(
+      'div[style*="grid-template-columns"]',
+    ) as HTMLElement | null;
+    const children = Array.from(gridContainer!.children) as HTMLElement[];
+    // 两个 table 各自独立一行（无并排）
+    expect(children.length).toBe(2);
+    expect(children[0].style.gridColumn).toBe("1 / -1");
+    expect(children[1].style.gridColumn).toBe("1 / -1");
+    const titles = Array.from(
+      document.querySelectorAll('[data-testid="chart-widget"] h4'),
+    ).map((el) => el.textContent);
+    expect(titles).toEqual(["表1", "表2"]);
+  });
+
+  test("全非 table 组：无 table 包装 div，全部直接进 grid", async () => {
+    render(
+      <ChartGroup
+        label="g1"
+        charts={[
+          { identity: "t1", payload: { ...LINE_PAYLOAD, label: "g1", title: "图1" } },
+          { identity: "t2", payload: { ...LINE_PAYLOAD, label: "g1", title: "图2" } },
+        ]}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getAllByTestId("chart-widget").length).toBe(2);
+    });
+    const group = screen.getByTestId("chart-group");
+    const gridContainer = group.querySelector(
+      'div[style*="grid-template-columns"]',
+    ) as HTMLElement | null;
+    const children = Array.from(gridContainer!.children) as HTMLElement[];
+    expect(children.length).toBe(2);
+    for (const child of children) {
+      expect(child.style.gridColumn).toBe("");
+    }
+    const titles = Array.from(
+      document.querySelectorAll('[data-testid="chart-widget"] h4'),
+    ).map((el) => el.textContent);
+    expect(titles).toEqual(["图1", "图2"]);
+  });
+
+  test("空 title 的 table：按 chart_type 分桶（identity=table#seq 路径），仍收尾独占整行", async () => {
+    render(
+      <ChartGroup
+        label="g1"
+        charts={[
+          { identity: "t1", payload: { ...LINE_PAYLOAD, label: "g1", title: "图" } },
+          { identity: "t2", payload: { chart_type: "table", data: [{ a: 1 }], label: "g1", title: "" } },
+        ]}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getAllByTestId("chart-widget").length).toBe(2);
+    });
+    const group = screen.getByTestId("chart-group");
+    const gridContainer = group.querySelector(
+      'div[style*="grid-template-columns"]',
+    ) as HTMLElement | null;
+    const children = Array.from(gridContainer!.children) as HTMLElement[];
+    // 图在前（无 span），空 title 表收尾且独占整行
+    expect(children.length).toBe(2);
+    expect(children[0].style.gridColumn).toBe("");
+    expect(children[1].style.gridColumn).toBe("1 / -1");
+    expect(screen.getAllByTestId("data-table").length).toBe(1);
+  });
+
+  test("折叠→展开后：顺序与整行样式保持（分区与 collapsed 无关）", async () => {
+    const TABLE_PAYLOAD: ChartPayload = {
+      chart_type: "table",
+      data: [{ a: 1 }],
+      label: "g1",
+      title: "表",
+    };
+    render(
+      <ChartGroup
+        label="g1"
+        charts={[
+          { identity: "t1", payload: { ...LINE_PAYLOAD, label: "g1", title: "图" } },
+          { identity: "t2", payload: TABLE_PAYLOAD },
+        ]}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getAllByTestId("chart-widget").length).toBe(2);
+    });
+    // 折叠 → 图表消失（click 在 waitFor 外，避免重试期间反复 toggle）
+    screen.getByTestId("chart-group-toggle").click();
+    await waitFor(() => {
+      expect(screen.queryAllByTestId("chart-widget").length).toBe(0);
+    });
+    // 展开 → 图-表顺序 + 表整行恢复
+    screen.getByTestId("chart-group-toggle").click();
+    await waitFor(() => {
+      expect(screen.getAllByTestId("chart-widget").length).toBe(2);
+    });
+    const group = screen.getByTestId("chart-group");
+    const gridContainer = group.querySelector(
+      'div[style*="grid-template-columns"]',
+    ) as HTMLElement | null;
+    const children = Array.from(gridContainer!.children) as HTMLElement[];
+    expect(children[0].style.gridColumn).toBe("");
+    expect(children[1].style.gridColumn).toBe("1 / -1");
+    const titles = Array.from(
+      document.querySelectorAll('[data-testid="chart-widget"] h4'),
+    ).map((el) => el.textContent);
+    expect(titles).toEqual(["图", "表"]);
+  });
 });
 
 describe("ScatterChartWidget —— size 字段（气泡图，SPEC §5.4 D3）", () => {

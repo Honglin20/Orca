@@ -13,9 +13,13 @@
 // 布局：响应式 grid ``repeat(auto-fit, minmax(300px, 1fr))``（SPEC §5.4）—— 容器宽度
 // 自适应；每列最小 300px，超出自动 wrap。chart widget 内部 ``aspect-[4/3]`` 限高。
 //
+// 表格独占整行（用户布局契约）：``chart_type === "table"`` 的 widget 不参与图片流——
+// 分区后排在最后（图…图→表…表，类内稳定序），并 ``gridColumn: 1 / -1`` 横跨整行，
+// 杜绝「图-表-图」同排。
+//
 // 懒挂：每 chart 包 ``LazyChartWidget``（IntersectionObserver + 300px skeleton）。
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { ChevronRight, ChevronDown } from "lucide-react";
 import type { ChartPayload } from "./types";
 import { LazyChartWidget } from "./LazyChartWidget";
@@ -25,6 +29,9 @@ const GRID_STYLE: React.CSSProperties = {
   gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
   gap: 12,
 };
+
+/** 表格独占一行：横跨全部 grid 列；minWidth 0 防超宽内容撑破 auto-fit 列。 */
+const TABLE_ROW_STYLE: React.CSSProperties = { gridColumn: "1 / -1", minWidth: 0 };
 
 interface ChartGroupItem {
   identity: string;
@@ -41,6 +48,17 @@ export function ChartGroup({
   // collapsed 仅 UI 交互态（非业务真相，铁律 2）——与 gate 状态不同，折叠是纯展示层
   const [collapsed, setCollapsed] = useState(false);
 
+  // 布局分区（纯展示层，不动 selectCharts 序）：非 table 图保持原序在前，table 收尾
+  // （类内 filter 保稳定序），配合 TABLE_ROW_STYLE 实现「图-图-表」自适应排布。
+  const { visuals, tables } = useMemo(() => {
+    const visuals: ChartGroupItem[] = [];
+    const tables: ChartGroupItem[] = [];
+    for (const c of charts) {
+      (c.payload.chart_type === "table" ? tables : visuals).push(c);
+    }
+    return { visuals, tables };
+  }, [charts]);
+
   return (
     <div
       className="rounded border orca-border orca-bg-surface"
@@ -56,16 +74,21 @@ export function ChartGroup({
         <span className="inline-flex items-center gap-1">
           {collapsed ? <ChevronRight size={14} strokeWidth={1.5} aria-hidden /> : <ChevronDown size={14} strokeWidth={1.5} aria-hidden />} {label}
         </span>
-        <span className="text-xs orca-text-faint">{charts.length} 图</span>
+        <span className="text-xs orca-text-faint">{charts.length} 项</span>
       </button>
       {!collapsed && (
         <div className="border-t orca-border p-3" style={GRID_STYLE}>
-          {charts.map((c) => (
+          {visuals.map((c) => (
             // SPEC audit-c E3/BLOCKER-1：key=identity（titled 跨 huge→full 稳定；无 title 允许 remount）
             <LazyChartWidget
               key={c.identity}
               payload={c.payload}
             />
+          ))}
+          {tables.map((c) => (
+            <div key={c.identity} style={TABLE_ROW_STYLE}>
+              <LazyChartWidget payload={c.payload} />
+            </div>
           ))}
         </div>
       )}
