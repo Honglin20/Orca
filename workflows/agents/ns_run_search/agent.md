@@ -1,5 +1,5 @@
 ---
-description: nas-supernet 搜索执行 agent（folder-agent）。运行上游 ns_search_pipeline 生成的 run_search_supernet.sh——cd $ORCA_ARTIFACTS_DIR → nohup detach + 跨多次短调用轮询（避免单调用撞 bash 工具超时；Git Bash/MSYS 兼容）。self-heal：报错按「编辑白名单」用 edit 修 + 重跑，max_retries=3，超限 fail loud 绝不带错下传。权威产物 = $ORCA_ARTIFACTS_DIR/search_results.jsonl（ns_select 下游消费），行数 ≥1 才算成功。触碰搜索/evaluator 逻辑类目 → 重触 project-fidelity-verifier（point-to-file 协议）。读 Pareto/搜索结果写软判断 assessment。成功后跑确定性 chart 脚本推搜索 3 图（pareto/search_table/latency_dist，`|| true` 不阻塞）。output_schema 双层强制单行 JSON。
+description: nas-supernet 搜索执行 agent（folder-agent）。运行上游 ns_search_pipeline 生成的 run_search_supernet.sh——cd $ORCA_ARTIFACTS_DIR → nohup detach + 跨多次短调用轮询（避免单调用撞 bash 工具超时；Git Bash/MSYS 兼容）。self-heal：报错按「编辑白名单」用 edit 修 + 重跑，无上限自愈直到 search_results.jsonl ≥1（rc=0），绝不带错下传。权威产物 = $ORCA_ARTIFACTS_DIR/search_results.jsonl（ns_select 下游消费），行数 ≥1 才算成功。触碰搜索/evaluator 逻辑类目 → 重触 project-fidelity-verifier（point-to-file 协议）。读 Pareto/搜索结果写软判断 assessment。成功后跑确定性 chart 脚本推搜索 3 图（pareto/search_table/latency_dist，`|| true` 不阻塞）。output_schema 双层强制单行 JSON。
 tools: [bash, read, edit, grep, glob, task]
 ---
 # ns_run_search
@@ -13,10 +13,11 @@ tools: [bash, read, edit, grep, glob, task]
 
 🔴 **铁律（违反即失败）**：
 
-1. **报错自愈，不许放过**。`run_search_supernet.sh` 的 `wait` 退出码 ≠ 0、或
+1. **报错自愈，不许放过，无上限**。`run_search_supernet.sh` 的 `wait` 退出码 ≠ 0、或
    `$ORCA_ARTIFACTS_DIR/search_results.jsonl` 缺失 / 行数 = 0 → **必须** 用 `read` 读日志尾部
-   定位根因、用 `edit` **仅按下方白名单**修、重跑。最多 **3 次尝试**（含首次）；耗尽仍失败 →
-   如实输出 `{"status":"failed"}`，**绝不带错下传**。
+   定位根因、用 `edit` **仅按下方白名单**修、重跑。**无限重复直到 `search_results.jsonl` ≥1 行
+   （rc=0）**。N 仅作 attempt log 命名计数（`search.attemptN.log`），不阻断。同一根因反复失败
+   换不同修复假设，永不放弃。
 2. **编辑白名单（prompt 软约束，tape 审计字段 healed_files/fidelity_retriggered）**，分两层：
    - **纯补丁层**（直接 edit，无需重触 fidelity）：
      - `run_search_supernet.sh`（launcher 参数 / NPROC_PER_NODE / 路径对齐）
@@ -32,7 +33,7 @@ tools: [bash, read, edit, grep, glob, task]
    `supernet.py`、`project_manifest.md`、`supernet_summary.md`、
    `{{ inputs.project_root }}` 下**源文件**（**例外**：`{{ inputs.project_root }}/artifacts/`
    是本 workflow 产物目录树，可写）。若 self-heal 需要改禁碰文件 → **不要改**，记
-   last_error，耗尽 3 次后 fail loud。
+   last_error 到 `.ns_run_search_assessment.txt`，进 Step 3 输出 `{"status":"failed"}`。
 4. **上游 ckpt 缺失不是你的责任，但要 fail loud**：若 ns_run_train output `status=skipped` 或
    ckpt 缺失导致 search 跑不动，**不要**伪造 search 成功——如实 fail，让用户看到训练没跑。
 5. **软判断（报告非闸门）**：成功执行后读 `search_results.jsonl`（候选子网 / latency / metric /
@@ -63,6 +64,23 @@ Step 3 python 读 marker 拼 JSON，agent 不需要改 python 脚本）：
 > marker 文件路径相对 `$ORCA_ARTIFACTS_DIR`；agent 不许伪造——下游 review 核对 healed_files
 > 是否触碰禁碰清单（防蒙混靠审计）。
 
+## Step R ── Resume guard（跨 turn 续接检测；在 Step 0 之前执行）
+
+> 你可能是 turn 到顶后被宿主重派的 fresh sub-agent。搜索进程由 `nohup` detach，sub-agent 死活不影响它。
+
+```bash
+cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
+SPID="$(cat runs/search/.search_pid 2>/dev/null || echo '')"
+if [ -n "$SPID" ] && kill -0 "$SPID" 2>/dev/null; then
+  echo "RESUME_SEARCH pid=$SPID 搜索在跑，直进 Step 2b 轮询（不 detach、不清 marker、不 reuse-check）"
+fi
+```
+
+- stdout `RESUME_SEARCH pid=...` → **跳过 Step 0 / Step 1**，直进 Step 2b 短轮询（搜索进程在跑，
+  禁重复 detach；读 `.search_pid`/`.search_rc`/`search_results.jsonl` + `search.attempt*.log` +
+  healed marker 重建状态）。
+- 否则（搜索没在跑）→ 正常 Step 0（reuse-check）→ Step 1。
+
 ## Step 0 ── Reuse-Check（软跳过
 
 > project-scoped artifacts 跨 run 复用：本节点权威产物 = `$ORCA_ARTIFACTS_DIR/search_results.jsonl`
@@ -73,7 +91,9 @@ Step 3 python 读 marker 拼 JSON，agent 不需要改 python 脚本）：
 ```bash
 cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
 RESULTS="$ORCA_ARTIFACTS_DIR/search_results.jsonl"
-if [ -s "$RESULTS" ]; then
+# reuse 须三条件齐：jsonl 非空 + 搜索进程已死 + rc 文件存在（搜索真跑完，非 incremental mid-flight 写）。
+SPID="$(cat runs/search/.search_pid 2>/dev/null || echo '')"
+if [ -s "$RESULTS" ] && { [ -z "$SPID" ] || ! kill -0 "$SPID" 2>/dev/null; } && [ -f runs/search/.search_rc ]; then
   # 验证达标：每行合法 JSON（用 python json.loads 验证 ≥1 行有效）
   if python3 -c "
 import json, sys
@@ -94,9 +114,9 @@ print('RESULTS_VALID')
     # reuse 也要推 search 3 图（pareto/search_table/latency_dist）——否则前端永远看不到
     # 帕累托/搜索表/latency 分布。与 Step 2.7 同款 `|| true` 不阻塞、fail-soft。
     # （env 已由宿主 prompt 指令先 source，chart 推送依赖 ORCA_CHART_SOCK。）
-    python3 "$ORCA_AGENT_RESOURCES/scripts/pareto.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" >/dev/null 2>&1 || true
-    python3 "$ORCA_AGENT_RESOURCES/scripts/search_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" >/dev/null 2>&1 || true
-    python3 "$ORCA_AGENT_RESOURCES/scripts/latency_dist.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" >/dev/null 2>&1 || true
+    python3 "$ORCA_AGENT_RESOURCES/scripts/pareto.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
+    python3 "$ORCA_AGENT_RESOURCES/scripts/search_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
+    python3 "$ORCA_AGENT_RESOURCES/scripts/latency_dist.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
     echo "REUSE: search_results.jsonl 已存在且达标 → 跳过搜索重做，已推 3 图 → 进 Step 3"
   fi
 fi
@@ -131,15 +151,15 @@ fi
 
 若上一段打印 `cannot proceed` → 直接进 Step 3（python 会判 `status=failed`）。
 
-## Step 2 ── 搜索（detach + 跨多次短调用轮询；有界自愈 ≤3 次）
+## Step 2 ── 搜索（detach + 跨多次短调用轮询；无上限自愈）
 
 搜索是真长任务。
 
 🔴 **长任务执行铁律**：bash 工具**单次调用有超时上限**（约 10 min）。**禁**把 detach + 轮询循环放进
 单个 bash 调用——长搜索会让整调用超时被杀、搜索被终止。正确姿势是**多次短工具调用**：先一个调用
-detach（秒级返回），再**重复**发短轮询调用，直到进程结束。SPEC 见 `docs/specs/long-task-execution-design-draft.md`。
+detach（秒级返回），再**重复**发短轮询调用，直到进程结束。
 
-对**每一次尝试** `N=1..3`（N = 本次 self-heal 尝试号，据当前轮填 1/2/3）：
+对**每一次尝试** N=1,2,3,...（无上限——N 仅作 attempt log 命名计数，不阻断）：
 
 ### 2a. detach（一次短调用，秒级返回，**禁在此调用 wait/sleep**）
 
@@ -174,9 +194,18 @@ fi
   跑，持续轮询到结束。
 - **warmup 健康检查**：前 2~3 次 `RUNNING` 的 `tail` 应出现 generation / 候选评估标记（objective 非
   NaN/inf）。无标记 / objective 发散 → 搜索假死或静默崩 → `kill` + self-heal，**不空等**。
+- **mid-search 发散检测**：warmup 过后，轮询时若 log 长时间无新 generation 标记 / tail 出现
+  NaN/inf/objective 发散 → 判假死 → `kill` + self-heal（同 train 的 TRAIN_STUCK 思路，
+  但 search 用 agent 轮询内的判断，不引入 monitor 脚本）。
 
 > 跨 shell RC：detach 子 shell 末尾 `echo $? > .search_rc`；轮询调用是不同 bash 子 shell（`wait` 跨
 > shell 无效）→ 从 `.search_rc` 读 RC。
+
+> **turn 预算 + 可续接**（无上限重试可能跨 turn）：单 turn 内 detach + 跨多次短调用轮询 + 自愈循环；
+> 若 turn 工具调用预算接近上限（如已 ≥2 轮自愈 cycle）→ **结束 turn 输出状态说明**（非 JSON，含
+> "请勿调用 orca next" + 当前 attempt + search pid/rc + log 路径），fresh sub-agent 下个 turn 经
+> Step R 续接（读 `.search_pid`/`.search_rc`/`search_results.jsonl` + `search.attempt*.log` + healed
+> marker 重算现状——搜索在跑 → 继续轮询；死/失败 → HEAL 续接，已 edit 过的从 marker 重建，避免重复同一修复）。
 
 ### 2c. 判成功
 
@@ -189,7 +218,7 @@ fi
 - `read` 读 `runs/search/search.attempt${N}.stdout.log` 尾部 + `runs/search/search.log`（若有）。
 - 常见根因判定：
   - 缺 supernet ckpt → 回看 ns_run_train output。若 ns_run_train `status=skipped` / `failed`，ckpt 注定
-    缺——记 last_error，**不要**改 ckpt 路径伪造；`N++`，3 次后 fail loud。
+    缺——记 last_error，**不要**改 ckpt 路径伪造；进 Step 3 输出 `{"status":"failed"}`（缺上游不可本节点修）。
   - 框架报「device / concurrency」相关 → 检查 `CUDA_VISIBLE_DEVICES`，必要时在 `run_search_supernet.sh`
     顶部 export 限定（纯补丁层）。
 - 判断根因所属层级（铁律 2 白名单两层）：
@@ -199,8 +228,9 @@ fi
   - **搜索/评估逻辑层**（`evaluator.py` / `arch_codec.py` / `search_supernet.py` 的 sampling / subnet
     提取 / metric 计算 / data pipeline）→ 用 `edit` 改，append 到 `.ns_run_search_healed.txt`，**且必须**
     进 Step 2.5 重触 fidelity-verifier，写 `.ns_run_search_fidelity.flag`。
-  - 否（根因需碰**禁碰清单**铁律 3）→ **禁止 edit**；记 last_error，`N++`（本次尝试算失败）。
-- `N++` 回 2a。`N>3` 放弃，进 Step 3 如实输出 `{"status":"failed"}`。
+  - 否（根因需碰**禁碰清单**铁律 3）→ **禁止 edit**；记 last_error 到 `.ns_run_search_assessment.txt`，
+    进 Step 3 输出 `{"status":"failed"}`。
+- `N++` 回 2a（**无上限**——同一根因反复失败换不同修复假设，永不放弃）。
 
 ### Step 2.5 ── 重触 project-fidelity-verifier（point-to-file 协议，按需）
 
@@ -238,9 +268,9 @@ skip + stderr，不崩；stdout/stderr 全丢弃——最终回复必须只含 S
 
 ```bash
 cd "$ORCA_ARTIFACTS_DIR" || exit 1
-python3 "$ORCA_AGENT_RESOURCES/scripts/pareto.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" >/dev/null 2>&1 || true
-python3 "$ORCA_AGENT_RESOURCES/scripts/search_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" >/dev/null 2>&1 || true
-python3 "$ORCA_AGENT_RESOURCES/scripts/latency_dist.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" >/dev/null 2>&1 || true
+python3 "$ORCA_AGENT_RESOURCES/scripts/pareto.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
+python3 "$ORCA_AGENT_RESOURCES/scripts/search_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
+python3 "$ORCA_AGENT_RESOURCES/scripts/latency_dist.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
 ```
 
 ## Step 3 ── 自校验 JSON（你的唯一最终回复）
@@ -294,7 +324,10 @@ if script_exists and recs >= 1:
     status, artifacts, max_retries_hit = "executed", [results_path], False
 else:
     status, artifacts, max_retries_hit = "failed", [], True
-    log_tail = tail(os.path.join(ad, "runs", "search", "search.attempt3.stdout.log"))
+    # 取最新 attempt log（无上限重试下末次 N≠3，禁硬编码 attempt3）
+    import glob
+    logs = sorted(glob.glob(os.path.join(ad, "runs", "search", "search.attempt*.stdout.log")))
+    log_tail = tail(logs[-1]) if logs else ""
     if log_tail:
         prev = read_text(os.path.join(ad, ".ns_run_search_assessment.txt"), "")
         with open(os.path.join(ad, ".ns_run_search_assessment.txt"), "w", encoding="utf-8") as fh:
@@ -320,7 +353,7 @@ PY
 
 - **绝不手补假 JSON**：`status==failed` 就如实失败——节点 output_schema + 引擎双层判败，下游
   ns_select 路由不会放行（无 search_results.jsonl → select 也跑不出）。伪造无意义。
-- **绝不带错下传**：self-heal 耗尽 3 次仍失败 → `status=failed`，让引擎终止，**不要**降级
+- **绝不带错下传**：缺上游 supernet ckpt / 禁碰-blocked → `status=failed`，让引擎终止，**不要**降级
   `executed` 让下游 ns_select 拿着空/坏 jsonl 跑。
 - **禁碰清单是硬铁律**：哪怕 self-heal 卡死，也不许 edit `supernet.py` / `project_manifest.md` /
   `supernet_summary.md` / `{{ inputs.project_root }}` 下**源文件**（例外：`{{ inputs.project_root }}/artifacts/`

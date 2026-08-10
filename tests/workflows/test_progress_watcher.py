@@ -156,3 +156,100 @@ class TestWatcherLivePush:
                     "--label", "x", "--title", "t", "--poll", "0.01",
                     "--max-idle", "60", "--max-wait", "0.05"]
         assert _NS["main"]() == 0
+
+
+class TestDoneMarkerDrainsFinalPoint:
+    """A2: done-marker exit must drain bytes written between last poll and marker touch."""
+
+    def test_drain_helper_parses_new_bytes(self):
+        """_drain reads new bytes, returns new_offset > old, new_point=True."""
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"step": 1, "metrics": {"loss": 0.1}}\n')
+            f.flush()
+            p = Path(f.name)
+        try:
+            series: dict = {}
+            offset, tail, new_point = _NS["_drain"](p, 0, "", series)
+            assert new_point is True
+            assert offset > 0
+            assert tail == ""
+            assert "loss" in series
+            assert series["loss"] == [(1.0, 0.1)]
+
+            # No new bytes → returns unchanged + False.
+            offset2, tail2, new2 = _NS["_drain"](p, offset, tail, series)
+            assert new2 is False
+            assert offset2 == offset
+        finally:
+            p.unlink()
+
+    def test_drain_half_line_buffer(self):
+        """_drain keeps incomplete trailing line as tail for next call."""
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            # First line complete, second line incomplete (no \n).
+            f.write('{"step": 1, "metrics": {"loss": 0.1}}\n{"step": 2, "metr')
+            f.flush()
+            p = Path(f.name)
+        try:
+            series: dict = {}
+            offset, tail, new_point = _NS["_drain"](p, 0, "", series)
+            assert new_point is True
+            assert "loss" in series  # first line parsed
+            assert tail == '{"step": 2, "metr'  # incomplete line kept
+
+            # Append rest of second line + newline.
+            with p.open("a") as f2:
+                f2.write('ics": {"loss": 0.05}}\n')
+            offset2, tail2, new2 = _NS["_drain"](p, offset, tail, series)
+            assert new2 is True
+            assert tail2 == ""
+            assert len(series["loss"]) == 2
+        finally:
+            p.unlink()
+
+    def test_final_point_drained_before_exit(self, tmp_path, env_ok, monkeypatch):
+        """Write point → start watcher → write second point + touch marker →
+        assert second point included in final push."""
+        import threading
+        import types
+
+        progress = tmp_path / "progress.jsonl"
+        marker = tmp_path / ".retrain_rc"
+        # Write initial point.
+        progress.write_text(
+            '{"step": 1, "metrics": {"loss": 0.1}}\n', encoding="utf-8"
+        )
+        calls: list[dict] = []
+        mod = types.ModuleType("orca.chart")
+        mod.render_chart = lambda **kw: calls.append(kw) or 1
+        monkeypatch.setitem(sys.modules, "orca.chart", mod)
+        monkeypatch.chdir(tmp_path)
+        sys.argv = ["watcher", "--progress", str(progress), "--done-marker", str(marker),
+                    "--label", "nas-supernet/retrain", "--title", "T",
+                    "--poll", "0.05", "--max-idle", "60", "--max-wait", "0.05"]
+        results: list[int] = []
+
+        def run():
+            results.append(_NS["main"]())
+
+        t = threading.Thread(target=run)
+        t.start()
+        # Wait for watcher to process initial point.
+        time.sleep(0.2)
+        # Write second point + touch marker immediately.
+        with progress.open("a") as f:
+            f.write('{"step": 2, "metrics": {"loss": 0.05}}\n')
+        marker.write_text("0", encoding="utf-8")
+        t.join(timeout=3)
+        assert not t.is_alive()
+        assert results == [0]
+        # The final push should include both step=1 and step=2.
+        all_data: list = []
+        for c in calls:
+            all_data.extend(c.get("data", []))
+        steps = {d["x"] for d in all_data}
+        assert 2.0 in steps, f"step=2 should be drained before final push; got steps={steps}"

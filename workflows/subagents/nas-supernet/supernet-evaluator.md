@@ -16,7 +16,8 @@ The caller will provide:
 
 1. **`<prepared_model>` path**: the flattened or optimized model file produced by earlier workflow steps (e.g., `<base_name>_flat.py` or `<base_name>_llm-optimized.py`), used as the reference for supernet generation.
 2. **`supernet.py` path**: the generated supernet file to evaluate.
-3. **`model_type`**: a model type label as defined in `.agents/skills/expand-to-supernet/references/model_type.json`.
+3. **`model_type`**: a model type label (e.g. cnn / isotropic_transformer / ...) — the caller passes this value; it names which model-type spec family to load.
+4. **`<specs_dir>`** (absolute path): the directory containing `general_specs.md` and per-model-type spec families. The caller writes this path into `$ORCA_ARTIFACTS_DIR/.supernet_specs_dir` and passes it in the prompt. If absent from the prompt, read it from `$ORCA_ARTIFACTS_DIR/.supernet_specs_dir`.
 
 Read both source files before beginning evaluation. You cannot interactively ask the caller — you return a single message and exit.
 
@@ -24,7 +25,11 @@ Read both source files before beginning evaluation. You cannot interactively ask
 
 ### 1. Load Specifications
 
-Read `.agents/skills/expand-to-supernet/references/supernet_specs/general_specs.md` — the authoritative spec for all supernet constraints. It cross-references the model-type-specific `{model_type}/spec.md` and `{model_type}/search_space.py`; load those as well.
+Resolve `<specs_dir>` (absolute path) from one of two sources (primary = caller prompt; fallback = marker file):
+- **Primary**: the `<specs_dir>` value passed in the caller's prompt.
+- **Fallback**: `Read $ORCA_ARTIFACTS_DIR/.supernet_specs_dir` (or `.supernet_specs_dir` relative to cwd) and use the path it contains.
+
+Then `Read <specs_dir>/general_specs.md` — the authoritative spec for all supernet constraints. It cross-references the model-type-specific `<specs_dir>/<model_type>/spec.md` and `<specs_dir>/<model_type>/search_space.py`; load those as well.
 
 ### 2. Evaluate
 

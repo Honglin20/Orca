@@ -58,6 +58,7 @@ def main() -> int:
         return 0
 
     pareto_field = find_field(records, PARETO_FIELDS)
+    has_pareto_field = bool(pareto_field)
     exclude_set = {info.latency_path, info.field_path, pareto_field, "objs", "gene", "cached"}
 
     # Dedup by architecture: search logs record every generation's full
@@ -123,28 +124,42 @@ def main() -> int:
 
     rows = list(seen.values())
 
-    # Only the Pareto front: the table shows non-dominated architectures, not the
-    # whole candidate pool (deduped rows that never hit the front are dropped).
-    rows = [r for r in rows if bool(r.get("pareto"))]
+    # Determine whether to show only the Pareto front or degrade to all deduped rows.
+    # Degradation triggers when: no recognizable pareto field in the jsonl, OR the
+    # field exists but no row has pareto=yes (all rows pareto=no / empty).
+    pareto_rows = [r for r in rows if bool(r.get("pareto"))]
+    degrade_to_all = not has_pareto_field or not pareto_rows
 
-    # Sort by display metric (best first); all rows are already on the front.
+    if not degrade_to_all:
+        rows = pareto_rows
+        title = "Search Results — Pareto Front"
+        caption = (
+            f"{len(rows)} Pareto-front architectures "
+            f"(deduped from {len(records)} records). Sorted by best {info.name}."
+        )
+    else:
+        title = "Search Results — All Architectures (no Pareto labels)"
+        caption = (
+            f"{len(rows)} architectures "
+            f"(deduped from {len(records)} records, sorted by best {info.name}). "
+            f"未识别 Pareto 标注（jsonl 无 PARETO_FIELDS 字段 / 无前沿行），展示全部去重架构。"
+        )
+
+    if info.negate_for_display:
+        caption += f" {info.name} values un-negated from NAS storage."
+
+    # Sort by display metric (best first).
     rows.sort(key=lambda r: _sort_key(r, info.name, best_first))
     for new_idx, row in enumerate(rows, start=1):
         row["#"] = new_idx
 
     columns = ["#", "arch", "latency_ms", info.name, "pareto"]
-    caption = (
-        f"{len(rows)} Pareto-front architectures "
-        f"(deduped from {len(records)} records). Sorted by best {info.name}."
-    )
-    if info.negate_for_display:
-        caption += f" {info.name} values un-negated from NAS storage."
 
     push_chart(
         artifacts_dir_path=ad,
         script_name="search_table",
         label="nas-supernet/search",
-        title="Search Results — Pareto Front",
+        title=title,
         chart_type="table",
         data=rows,
         columns=columns,

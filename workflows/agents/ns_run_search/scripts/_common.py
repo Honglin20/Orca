@@ -32,6 +32,7 @@ Design principles:
 from __future__ import annotations
 
 import json
+import math
 import re
 import subprocess
 import sys
@@ -209,6 +210,11 @@ def best_val_metric_from_log(
                         pass
 
         if val is not None:
+            # NaN/overflow sentinel filter: math.isfinite catches NaN/inf (IEEE-754
+            # abs(NaN)>=1e6 is False, so isfinite is essential); abs>=1e6 catches
+            # float32-max (3.4e38) overflow sentinels from failed evals.
+            if not math.isfinite(val) or abs(val) >= 1e6:
+                continue
             if best is None:
                 best = val
             elif display_direction == "higher" and val > best:

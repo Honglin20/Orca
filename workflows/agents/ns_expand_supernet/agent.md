@@ -270,10 +270,17 @@ body 里重复绝对项目路径。只记原始项目事实；NAS 决策 / 产�
 
 workflow 完成（含 validation）后，进 evaluator verification loop：
 
+0. **写 specs_dir marker**（确定性：bash 展开 `$ORCA_AGENT_RESOURCES` 可靠，不靠 LLM 转写）：
+   ```bash
+   printf '%s\n' "$ORCA_AGENT_RESOURCES/references/supernet_specs" > "$ORCA_ARTIFACTS_DIR/.supernet_specs_dir"
+   ```
+   subagent（由 host Task 工具 spawn，不继承 caller 的 `$ORCA_AGENT_RESOURCES` env）从此 marker 取 specs 目录绝对路径。调 evaluator 时 prompt 里传 `<specs_dir>` = `cat "$ORCA_ARTIFACTS_DIR/.supernet_specs_dir"` 的输出。
+
 1. **按协议调 `supernet-evaluator`**，inputs：
    - `<prepared_model>` 路径（Step 1–3 的 flattened 或 optimized model）。
    - `$ORCA_ARTIFACTS_DIR/supernet.py` 路径。
    - Step 4 的 `model_type` 分类。
+   - `<specs_dir>` = marker 文件内容的绝对路径（caller 用 `cat "$ORCA_ARTIFACTS_DIR/.supernet_specs_dir"` 取值再写入 prompt）。
 2. **If evaluator 返回 issues:**
    - 仔细读 feedback。每个 issue 含 severity（`[BLOCKER]` / `[MAJOR]` / `[MINOR]`）、symptom、reason、fix guidance。
    - 按 feedback 对 `supernet.py` 施 targeted fix。优先级 `[BLOCKER]` > `[MAJOR]` > `[MINOR]`。

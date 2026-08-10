@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-10] fix(nas-supernet): 图表正确性修复 + prompt 洁净 + train/retrain 监控改造（CRON→有界轮询+无上限自愈）+ search 无上限自愈
+
+四段改动（A/B/C/D）：A 图表正确性 6 项（search_table 降级不空表 / progress_watcher drain 末点 / metrics_bar 动态样本数 / best_val NaN 哨兵过滤 / 删 live_loss_watcher 死码 / chart stderr 可见）；B prompt 洁净 5 项（含 supernet-evaluator 资源路径运行时 bug 修复）；C 监控改造（新增 monitor_until_done.sh + agent.md 决策树 CRON→C-loop/HEAL-LOOP + launch.sh 删 3 次硬预算 + yaml 文案全清）；D search 无上限自愈（删 max_retries=3 + resume guard + Step 3 attempt3 硬编码修复）。待 test-agent E2E。详见 [release note](docs/releases/2026-08-10-nas-supernet-chart-cleanliness-monitoring.md)。
+
 ## [2026-08-10] perf(web): 主页 run 列表懒加载——概要索引化 discovery（1354 tape 12s→18ms）
 
 `GET /api/runs?scope=all` 首屏 12s+ 根因：`_summary_from_tape` 每 tape 做 3 遍扫描
@@ -16,8 +20,9 @@
 期间只更 in-memory + 标 dirty，尾部 per-runs_dir 单次 `os.replace`，G2 可达）；④ `discover_runs`
 attached 分支改 `os.scandir` 一次枚举 + 缓存命中直构（零 fold）+ 两层 fail-soft；⑤ 前端
 `POLL_INTERVAL_MS` 4s→8s。实测：缓存命中 17ms / 冷启 91ms（1354 tape）；13540 tape 温路径
-365ms + R²=0.96（AC7）。code-reviewer 两轮闭环 0 MUST-FIX。Commit: 待 commit。详见
-[release note](../releases/2026-08-10-home-list-lazy-index.md)（待补）。
+365ms + R²=0.96（AC7）；test-agent 真机 HTTP 层复测：命中 20.4ms / 冷启 97ms / 13540 tape 282ms
+（R²=0.9549）/ 字段 7/7 / 坏 tape+dedup+三分支回归全绿。code-reviewer 两轮闭环 0 MUST-FIX。
+Commit: `80ae386`。详见 [release note](../releases/2026-08-10-home-list-lazy-index.md)。
 
 ## [2026-08-10] fix(nas-supernet): 防跨 run 误杀——训练进程 kill 全收敛到带归属门的 kill_train_group.sh
 

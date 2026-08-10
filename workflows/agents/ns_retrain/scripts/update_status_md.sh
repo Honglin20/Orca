@@ -47,7 +47,7 @@ cat > retrain_status.md <<EOF
 - log: runs/retrain/retrain.attempt$ATTEMPT.log
 - $EPOCH_SUMMARY
 - last_check_at: $(date -Is 2>/dev/null || date)
-- next_check: 1~2h 后（CRON）
-- note: 训练完成前本节点不产出 JSON；CRON 到点自检，完成则输出 executed
+- next_check: monitor 轮询/turn 到顶换 sub-agent
+- note: 训练完成前本节点不产出 JSON；有界轮询 + 无上限自愈，完成则输出 executed
 EOF
 echo "MD_UPDATED"

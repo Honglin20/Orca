@@ -1,5 +1,5 @@
 name: nas-supernet
-description: "NAS supernet 全链流水线：张开超网 → 生成训练脚本 → 生成搜索 pipeline + select_architecture.py → 自愈执行训练/搜索 → 确定性选架构（target_latency 下 max-acc，缺则 Pareto knee）→ retrain 选定子网。7 agent 节点 + 3 terminate（全 fail-loud：model_type 不支持 / select 无候选 / retrain 失败）。ns_run_train / ns_retrain 走 in-session CRON 定时自检（节点常驻运行直到训练**真正完成**——rc=0 + ckpt 有效才认完成，中断残留 ckpt 续训；detach + warmup + CRON 1~2h 自检 + train_status.md / retrain_status.md 真相源，未完成不产出 JSON）；ns_retrain 额外含 retrain 脚本生成（AGENTS.md scaffold + fidelity 复查）。**可视化无单独 agent，全部固化进节点确定性脚本**：progress_watcher 边训练/重训 tail 生成契约 progress.jsonl `{\"step\":N,\"metrics\":{...}}` 边推实时多指标曲线（launch.sh 伴生启动，用户指标全推——loss/acc/gain 皆可，消费端零硬编码，hue=series，同 title 前端实时刷新）；搜索 3 图（pareto/search_table/latency_dist）由 ns_run_search 成功后推；最终对比图（metrics_bar/compare_table）由 ns_retrain 完成时推。fidelity-verifier / workflow-verifier / memory-verifier 三层闭环 + 确定性 Bash select + 模块化 auto-run/retrain + self-heal 白名单审计字段（healed_files / fidelity_retriggered）。"
+description: "NAS supernet 全链流水线：张开超网 → 生成训练脚本 → 生成搜索 pipeline + select_architecture.py → 自愈执行训练/搜索 → 确定性选架构（target_latency 下 max-acc，缺则 Pareto knee）→ retrain 选定子网。7 agent 节点 + 3 terminate（全 fail-loud：model_type 不支持 / select 无候选 / retrain 失败）。ns_run_train / ns_retrain 走**有界轮询 + 无上限自愈**（agent 在单 turn 内连续发 ~9min monitor 块全程监控直到训练真正完成，进程死/发散触发 HEAL-LOOP 无上限自愈，turn 到顶换 sub-agent 经 status.sh 真相源续接，无外部定时工具依赖；rc=0 + 进程退出 + ckpt 有效才认完成，中断残留续训，未完成不产出 JSON）；ns_retrain 额外含 retrain 脚本生成（AGENTS.md scaffold + fidelity 复查）。**可视化无单独 agent，全部固化进节点确定性脚本**：progress_watcher 边训练/重训 tail 生成契约 progress.jsonl `{\"step\":N,\"metrics\":{...}}` 边推实时多指标曲线（launch.sh 伴生启动，用户指标全推——loss/acc/gain 皆可，消费端零硬编码，hue=series，同 title 前端实时刷新）；搜索 3 图（pareto/search_table/latency_dist）由 ns_run_search 成功后推；最终对比图（metrics_bar/compare_table）由 ns_retrain 完成时推。fidelity-verifier / workflow-verifier / memory-verifier 三层闭环 + 确定性 Bash select + 模块化 auto-run/retrain + self-heal 白名单审计字段（healed_files / fidelity_retriggered）。"
 
 entry: ns_expand_supernet
 
@@ -140,14 +140,14 @@ nodes:
       - to: ns_run_train
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # Agent 4: ns_run_train（in-session CRON 定时自检——节点常驻到训练真正完成）
+  # Agent 4: ns_run_train（有界轮询 + 无上限自愈——节点常驻到训练真正完成）
   #   节点不 park / 不挂起 / 不提前输出：训练未完成前 agent 不产出节点 JSON，宿主不调
   #   next，节点保持执行中、run 保持活跃。流程：detach（nohup+setsid）→ warmup 确认跑通
-  #   （≥2 进度标记 + loss 有限）→ 自修 ≤3 次 → 写 $ORCA_ARTIFACTS_DIR/train_status.md
-  #   （跨唤醒真相源）→ CRON 工具注册 1~2h 定时自检 → 结束 turn（状态说明，非 JSON）。
-  #   CRON 到点唤醒 → 按 Step 1（status.sh）判定：未完成 → 更新 MD + 重注册 CRON；完成
-  #   （.train_rc==0 + 进程已退出 + ckpt 有效）→ 输出 executed JSON → 节点完成 → 下游继续。
-  #   中断残留 ckpt → 续训到真正完成。skipped=脚本不存在；failed=自愈耗尽（fail loud）。
+  #   （≥2 进度标记 + loss 有限）→ 有界轮询 monitor 块（~9min/块）全程监控 + 无上限自愈
+  #   HEAL-LOOP → 写 $ORCA_ARTIFACTS_DIR/train_status.md（跨 turn 真相源）→ turn 到顶
+  #   换 sub-agent 经 status.sh 续接。完成（.train_rc==0 + 进程已退出 + ckpt 有效）→
+  #   输出 executed JSON → 节点完成 → 下游继续。中断残留 ckpt → 续训到真正完成。
+  #   skipped=脚本不存在；failed=禁碰-blocked（根因需改 supernet.py 等禁碰文件）。
   #   status ∈ {executed, skipped, failed}——无 detached。
   # ═══════════════════════════════════════════════════════════════════════════
   - name: ns_run_train
@@ -159,13 +159,13 @@ nodes:
       type: object
       required: [status, artifacts, assessment, max_retries_hit, healed_files, fidelity_retriggered]
       properties:
-        status: {type: string, enum: [executed, skipped, failed], description: "executed=训练真正完成（.train_rc==0 + ckpt 有效，含续训完成）；skipped=run_train_supernet.sh 不存在（viability self-gate）；failed=自愈耗尽 3 次仍失败（绝不带错下传）。节点常驻运行：训练未完成前不产出 JSON，CRON 定时自检直到完成"}
+        status: {type: string, enum: [executed, skipped, failed], description: "executed=训练真正完成（.train_rc==0 + ckpt 有效，含续训完成）；skipped=run_train_supernet.sh 不存在（viability self-gate）；failed=禁碰-blocked（根因需改 supernet.py 等禁碰文件，绝不带错下传）。节点常驻运行：训练未完成前不产出 JSON，有界轮询 + 无上限自愈直到完成"}
         artifacts:
           type: array
           items: {type: string}
           description: "成功时 [supernet_ckpt_path]；skipped/failed 时 []"
         assessment: {type: string, description: "软判断（非闸门）：收敛曲线 / acc / divergence 摘要；failed 时含 last_error 日志尾部"}
-        max_retries_hit: {type: boolean, description: "true=3 次尝试耗尽仍失败"}
+        max_retries_hit: {type: boolean, description: "true=触碰禁碰/缺上游 ckpt 而非重试次数耗尽"}
         healed_files:
           type: array
           items: {type: string}
@@ -179,7 +179,7 @@ nodes:
   # ═══════════════════════════════════════════════════════════════════════════
   # Agent 5: ns_run_search（auto-run）
   #   执行 run_search_supernet.sh；权威产物 = $ORCA_ARTIFACTS_DIR/search_results.jsonl
-  #   （行数 ≥1 才算成功，ns_select 下游依赖）。self-heal max_retries=3 绝不带错下传。
+  #   （行数 ≥1 才算成功，ns_select 下游依赖）。无上限自愈直到 search_results.jsonl ≥1，绝不带错下传。
   # ═══════════════════════════════════════════════════════════════════════════
   - name: ns_run_search
     kind: agent
@@ -190,13 +190,13 @@ nodes:
       type: object
       required: [status, artifacts, assessment, max_retries_hit, healed_files, fidelity_retriggered]
       properties:
-        status: {type: string, enum: [executed, failed], description: "executed=RC=0+search_results.jsonl≥1 行；failed=自愈耗尽 3 次仍失败 / 脚本不存在（ns_run_search 无 skipped 分支——agent.md Step 3 python 无 skip 路径，脚本缺失即 failed）"}
+        status: {type: string, enum: [executed, failed], description: "executed=RC=0+search_results.jsonl≥1 行；failed=缺上游 supernet ckpt / 禁碰-blocked / 脚本不存在（ns_run_search 无 skipped 分支——agent.md Step 3 python 无 skip 路径，脚本缺失即 failed）"}
         artifacts:
           type: array
           items: {type: string}
           description: "成功时 [search_results.jsonl 路径]；failed 时 []"
         assessment: {type: string, description: "软判断：候选数 / Pareto size / best metric / latency 分布；failed 时含 last_error 日志尾部"}
-        max_retries_hit: {type: boolean, description: "true=3 次尝试耗尽仍失败"}
+        max_retries_hit: {type: boolean, description: "true=触碰禁碰/缺上游 ckpt 而非重试次数耗尽"}
         healed_files:
           type: array
           items: {type: string}
@@ -245,16 +245,15 @@ nodes:
       - to: terminate_select_failed
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # Agent 7: ns_retrain（in-session CRON 定时自检——节点常驻到重训真正完成）
+  # Agent 7: ns_retrain（有界轮询 + 无上限自愈——节点常驻到重训真正完成）
   #   节点不 park / 不挂起 / 不提前输出：训练未完成前 agent 不产出节点 JSON，宿主不调
   #   next，节点保持执行中、run 保持活跃。流程：按 AGENTS.md scaffold 生成 retrain 脚本
   #   （retrain.py / finetune.py / run_retrain.sh）→ fidelity 复查 → detach（nohup+setsid）
-  #   → warmup 确认跑通（≥2 进度标记 + loss 有限）→ 自修 ≤3 次 → 写
-  #   $ORCA_ARTIFACTS_DIR/retrain_status.md（跨唤醒真相源）→ CRON 工具注册 1~2h 定时自检 →
-  #   结束 turn（状态说明，非 JSON）。CRON 到点唤醒 → 按 Step 1（status.sh）判定：未完成 →
-  #   更新 MD + 重注册 CRON；完成（.retrain_rc==0 + 进程已退出 + ckpt 有效）→ 输出 executed JSON
-  #   → 节点完成 → 下游继续。中断残留 ckpt → 续训到真正完成。缺关键上游（AGENTS.md 等）→
-  #   failed（fail loud）。status ∈ {executed, failed}——无 detached。
+  #   → warmup 确认跑通（≥2 进度标记 + loss 有限）→ 有界轮询 monitor 块（~9min/块）全程监控
+  #   + 无上限自愈 HEAL-LOOP → 写 $ORCA_ARTIFACTS_DIR/retrain_status.md（跨 turn 真相源）
+  #   → turn 到顶换 sub-agent 经 status.sh 续接。完成（.retrain_rc==0 + 进程已退出 + ckpt 有效）
+  #   → 输出 executed JSON → 节点完成 → 下游继续。中断残留 ckpt → 续训到真正完成。
+  #   缺关键上游（AGENTS.md 等）→ failed（fail loud）。status ∈ {executed, failed}——无 detached。
   # ═══════════════════════════════════════════════════════════════════════════
   - name: ns_retrain
     kind: agent
@@ -265,13 +264,13 @@ nodes:
       type: object
       required: [status, artifacts, assessment, max_retries_hit, healed_files, fidelity_retriggered]
       properties:
-        status: {type: string, enum: [executed, failed], description: "executed=训练真正完成（.retrain_rc==0 + 进程已退出 + final ckpt 有效，含续训完成）；failed=自愈/尝试预算耗尽 3 次仍失败 / 缺关键上游（AGENTS.md 缺，ns_retrain 无 skipped 分支——agent.md 无 skip 路径，缺关键上游即 failed）。节点常驻运行：训练未完成前不产出 JSON，CRON 定时自检直到完成"}
+        status: {type: string, enum: [executed, failed], description: "executed=训练真正完成（.retrain_rc==0 + 进程已退出 + final ckpt 有效，含续训完成）；failed=禁碰-blocked / 缺关键上游（AGENTS.md 缺，ns_retrain 无 skipped 分支——agent.md 无 skip 路径，缺关键上游即 failed）。节点常驻运行：训练未完成前不产出 JSON，有界轮询 + 无上限自愈直到完成"}
         artifacts:
           type: array
           items: {type: string}
           description: "成功时 [final retrain ckpt 路径]；failed 时 []"
         assessment: {type: string, description: "软判断（非闸门）：final test acc / latency 对比 / supernet gap；failed 时含 last_error 日志尾部"}
-        max_retries_hit: {type: boolean, description: "true=3 次尝试耗尽仍失败"}
+        max_retries_hit: {type: boolean, description: "true=触碰禁碰/缺上游 ckpt 而非重试次数耗尽"}
         healed_files:
           type: array
           items: {type: string}
@@ -304,7 +303,7 @@ nodes:
   - name: terminate_retrain_failed
     kind: terminate
     status: failed
-    reason: "ns_retrain 未能产出 final 子网 ckpt（self-heal / 尝试预算耗尽 3 次仍失败 / AGENTS.md 缺 / supernet ckpt 缺）。回看 ns_retrain.output.assessment（含 last_error 日志尾部）与 $ORCA_ARTIFACTS_DIR/runs/retrain/ 日志定位 retrain 失败根因。"
+    reason: "ns_retrain 未能产出 final 子网 ckpt（禁碰-blocked / AGENTS.md 缺 / supernet ckpt 缺）。回看 ns_retrain.output.assessment（含 last_error 日志尾部）与 $ORCA_ARTIFACTS_DIR/runs/retrain/ 日志定位 retrain 失败根因。"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # outputs —— 终态（ns_retrain→$end）映射关键产物供 orchestrator / 下游消费。

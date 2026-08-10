@@ -4,6 +4,27 @@
 
 ---
 
+## 当前：nas-supernet 监控改造+图表修复+洁净——实现完成，待 test-agent E2E
+
+**任务**：SPEC `docs/specs/2026-08-10-nas-supernet-chart-cleanliness-monitoring.md`（两轮 spec-review pass）
+A/B/C/D 四段改动——图表正确性 6 项 + prompt 洁净 5 项 + train/retrain CRON→有界轮询+无上限自愈 +
+search 无上限自愈。
+
+**状态**：**实现 + 单测 + code-reviewer 闭环完成，待 test-agent E2E**：
+- A/B/C/D 全部实现，`tars validate` 0/0，bash -n 全过，ruff 干净，grep 门全过。
+- tests/workflows 559 passed + 3 skipped + 41 新测试（A1/A2/A4/C1/C2/镜像同步）。
+- code-reviewer 两轮闭环（implementation + test-coverage）。
+
+**必读**：
+- release note `docs/releases/2026-08-10-nas-supernet-chart-cleanliness-monitoring.md`。
+- SPEC `docs/specs/2026-08-10-nas-supernet-chart-cleanliness-monitoring.md`（契约逐条可验证）。
+- `workflows/agents/ns_run_train/scripts/monitor_until_done.sh`（有界轮询+cheap 活性+发散检测）。
+
+**待办**：
+- [ ] test-agent E2E（§4.3：playground/mnist_kd + opencode executor，headless 全链验证）。
+
+---
+
 ## 历史：launch.sh 防跨 run 误杀——已完成（训练进程 kill 全收敛到带归属门的 kill_train_group.sh）
 
 **任务**：同项目并发 run 共享 artifacts 目录（project-scoped），训练进程清理按 cmdline

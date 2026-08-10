@@ -50,6 +50,68 @@ def _is_number(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def _drain(
+    progress_path: Path,
+    offset: int,
+    tail: str,
+    series: dict[str, list[tuple[float, float]]],
+) -> tuple[int, str, bool]:
+    """Incremental read of new bytes from progress.jsonl + half-line buffer parse.
+
+    Appends parsed metric points into ``series`` (mutated in place). Returns
+    ``(new_offset, new_tail, new_point)`` where ``new_point=True`` if any metric
+    point was added. If the file is missing or has no new bytes beyond ``offset``,
+    returns the inputs unchanged + ``False``.
+
+    Shared by the done-marker exit path (drains final ~5s of points before the
+    last push) and the main poll loop (DRY: zero behavioral drift between paths).
+    """
+    try:
+        size = progress_path.stat().st_size
+    except OSError:
+        return offset, tail, False
+    if size <= offset:
+        return offset, tail, False
+
+    with progress_path.open("rb") as f:
+        f.seek(offset)
+        chunk_bytes = f.read(size - offset)
+    new_offset = size
+    chunk = chunk_bytes.decode("utf-8", errors="replace")
+
+    # Half-line buffer: join previous residue, split on \n; trailing partial stays as tail.
+    buf = tail + chunk
+    parts = buf.split("\n")
+    if buf.endswith("\n"):
+        new_tail = ""
+    else:
+        new_tail = parts.pop()  # last segment incomplete, keep for next call
+
+    new_point = False
+    for line in parts:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue  # malformed JSON (half-line residue / corruption) skip, don't crash
+        if not isinstance(row, dict):
+            continue
+        step = row.get("step")
+        metrics = row.get("metrics")
+        if not _is_number(step) or not isinstance(metrics, dict):
+            continue  # non-contract line (missing step / metrics not dict) skip
+        x = float(step)
+        for name, val in metrics.items():
+            if not _is_number(val):
+                continue  # non-numeric metric (string / null / nested) skip
+            series.setdefault(str(name), []).append((x, float(val)))
+            new_point = True
+
+    return new_offset, new_tail, new_point
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Tail progress JSONL and push a live multi-metric line chart.")
     ap.add_argument("--progress", required=True,
@@ -95,64 +157,31 @@ def main() -> int:
     while True:
         # 2a. done-marker 驱动退出（mtime 晚于本脚本启动 = 本次 attempt 真结束，
         # 防前次 attempt 的 stale marker 让续训 watcher 一启动就退）。
+        # drain 末点：done-marker touch 与上次 poll 间最多隔一个 poll 周期（~5s），
+        # 这段时间 progress.jsonl 新写的点（往往是最后一个 epoch）必须先 drain 再推。
         try:
             if done_marker.stat().st_mtime > start_mtime:
+                offset, tail, _ = _drain(progress_path, offset, tail, series)
                 _push(args, render_chart, series)  # 最后一次推图（失败也照退）
                 return 0
         except OSError:
             pass
 
-        # 2b. progress 文件缺失 → 等待（训练首次 append 创建稍晚）。
-        try:
-            size = progress_path.stat().st_size
-        except OSError:
+        # 2b/2c. 增量读新字节 → 半行缓冲拼接 → 解析 JSONL 行 → 累计点（DRY：_drain
+        # helper 与 done-marker 退出路径共用，零行为漂移）。
+        offset, tail, new_point = _drain(progress_path, offset, tail, series)
+
+        # progress 文件缺失 → 等待（训练首次 append 创建稍晚）。
+        if not progress_path.is_file():
             if time.monotonic() - wait_started > args.max_wait:
                 return 0
             time.sleep(args.poll)
             continue
 
-        # 2c. 增量读新字节 → 半行缓冲拼接 → 解析 JSONL 行 → 累计点。
-        if size > offset:
-            with progress_path.open("rb") as f:
-                f.seek(offset)
-                chunk_bytes = f.read(size - offset)
-            offset = size
-            chunk = chunk_bytes.decode("utf-8", errors="replace")
-
-            # 半行缓冲：拼接上次残留，按 \n 切；末尾无 \n 的不完整段留作下次 tail。
-            buf = tail + chunk
-            parts = buf.split("\n")
-            if buf.endswith("\n"):
-                tail = ""
-            else:
-                tail = parts.pop()  # 末段不完整，留存
-
-            new_point = False
-            for line in parts:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue  # 非法 JSON（半行残留 / 损坏）跳过，不崩
-                if not isinstance(row, dict):
-                    continue
-                step = row.get("step")
-                metrics = row.get("metrics")
-                if not _is_number(step) or not isinstance(metrics, dict):
-                    continue  # 非契约行（缺 step / metrics 非 dict）跳过
-                x = float(step)
-                for name, val in metrics.items():
-                    if not _is_number(val):
-                        continue  # 非数值 metric（字符串 / null / 嵌套）跳过
-                    series.setdefault(str(name), []).append((x, float(val)))
-                    new_point = True
-
-            if new_point:
-                last_growth = time.monotonic()
-                if not _push(args, render_chart, series):
-                    return 0  # 断更：stderr 已写，退出（不影响训练）
+        if new_point:
+            last_growth = time.monotonic()
+            if not _push(args, render_chart, series):
+                return 0  # 断更：stderr 已写，退出（不影响训练）
 
         # 2d. idle 兜底：仅对「已推过点」生效（首个 unit 可能超过 --max-idle）。
         if last_growth and time.monotonic() - last_growth > args.max_idle:

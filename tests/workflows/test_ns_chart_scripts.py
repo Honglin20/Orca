@@ -647,7 +647,7 @@ class TestSearchTable:
         assert rep["pareto"] == "yes"
 
     def test_only_pareto_rows_shown(self, tmp_path: Path):
-        """Non-pareto architectures are dropped — table shows the front only."""
+        """Non-pareto architectures with no pareto=yes rows → degrade to all (A1 fix)."""
         import importlib.util
         import types
 
@@ -684,4 +684,6 @@ class TestSearchTable:
         finally:
             sys.argv = old_argv
         pushed = calls[-1]
-        assert pushed["data"] == []
+        # A1 fix: all rows are pareto=no → degrade to showing all, NOT empty.
+        assert len(pushed["data"]) >= 1, "degradation should show all deduped rows, not empty"
+        assert "All Architectures" in pushed["title"]

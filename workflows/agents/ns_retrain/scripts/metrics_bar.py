@@ -93,7 +93,7 @@ def main() -> int:
     dir_label = info.display_direction
     caption = (
         f"同一项目指标 '{info.name}' 在 NAS 流水线各阶段的值（{dir_label}-is-better）。"
-        f"Supernet Eval = supernet 训练最好验证值；Search Best = 搜索 640 候选中最优；"
+        f"Supernet Eval = supernet 训练最好验证值；Search Best = 搜索 {len(records)} 候选中最优；"
         f"Selected Arch = 选定架构（select 产出）；Retrain Final = 重训后最终值。"
         f"共 {len(rows)}/4 阶段有数据。"
     )

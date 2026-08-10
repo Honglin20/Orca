@@ -1,36 +1,31 @@
 #!/bin/bash
-# launch.sh —— 尝试预算 + detach（一次短调用，秒级返回，禁 wait/sleep）。
-# 尝试预算（跨唤醒收敛）：N=1..3 记在 .train_attempt。所有"启动/重跑"共享预算——
-# warmup 失败自愈、假死重启、中断续训、rc==0 无 ckpt 重跑都会 N++。
-# N>3 仍无法跑到完成 → 不再 detach，输出 ATTEMPT_BUDGET_EXHAUSTED（agent 走 failed）。
+# launch.sh —— detach（一次短调用，秒级返回，禁 wait/sleep）。
+# attempt 记在 .train_attempt（仅 log 命名计数 + 审计，**无上限**——不阻断 detach）。
 # 依赖：ORCA_ARTIFACTS_DIR（orca spawn / orca_env.sh 注入）。
 set -e
 cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable" >&2; exit 1; }
 mkdir -p runs/train
 
-# N = 上次 attempt + 1（首启无记录 → N=1）。预算耗尽 → 不再 detach。
+# ── 残留进程归属判定（防跨 run 误杀，2026-08-10 v2）─────────────────────────
+# 同项目并发 run 共享 artifacts 目录（engine project-scoped `<project_root>/artifacts/<wf>`）
+# → `.train_pid` 里可能是**别的 run** 的训练 wrapper。统一走带 run 归属门的
+# kill_train_group.sh（与 agent Step 2 假死 / self-heal 同源）：本 run 残留才整组杀；
+# 别的 run 的活训练 → FOREIGN_RUN_ALIVE + exit 1 abort（不 kill；abort 在 attempt 计数
+# **之前**）。cmdline/PID 复用防误杀在脚本内。
+PREV_PID="$(cat runs/train/.train_pid 2>/dev/null || echo '')"
+if [ -n "$PREV_PID" ] \
+   && ! bash "$ORCA_AGENT_RESOURCES/scripts/kill_train_group.sh" "$PREV_PID"; then
+  exit 1
+fi
+
+# N = 上次 attempt + 1（首启无记录 → N=1）。无上限——仅 log 命名 + 审计计数。
 PREV="$(cat runs/train/.train_attempt 2>/dev/null || echo 0)"
 N=$((PREV + 1))
-if [ "$N" -gt 3 ]; then
-  echo "ATTEMPT_BUDGET_EXHAUSTED n=$N"
-  exit 0
-fi
 echo "$N" > runs/train/.train_attempt
 
-# 清本 run 审计痕迹（续训**不**删 ckpt，只清 marker；progress.jsonl 每 attempt 清零）。
-rm -f .ns_run_train_healed.txt .ns_run_train_fidelity.flag .ns_run_train_assessment.txt .ns_run_train_ckpt_resolved.txt runs/train/progress.jsonl
-
-# 清前次残留 wrapper（防御，防 attempt 叠加并发训练——真实事故：两层重试下多个 wrapper
-# 并存 → 端口撞 EADDRINUSE + ckpt 互踩）。正常流程只在 TRAIN_INCOMPLETE（无活进程）后才
-# 被调；若 .train_pid 记录的进程还活着 = 状态漂移（组杀未清干净），整组杀防第二份训练起来。
-# /proc cmdline 校验防 PID 复用误杀（Linux 训练机为既有假设）。
-PREV_PID="$(cat runs/train/.train_pid 2>/dev/null || echo '')"
-if [ -n "$PREV_PID" ] && kill -0 "$PREV_PID" 2>/dev/null \
-   && grep -q "run_train_supernet" "/proc/$PREV_PID/cmdline" 2>/dev/null; then
-  kill -- -"$PREV_PID" 2>/dev/null || kill "$PREV_PID" 2>/dev/null || true
-  for _ in 1 2 3 4 5; do kill -0 "$PREV_PID" 2>/dev/null || break; sleep 1; done
-  echo "KILLED_STALE_PID=$PREV_PID" >&2
-fi
+# 清本 run 审计痕迹（续训**不**删 ckpt，只清 marker；progress.jsonl 每 attempt 清零；
+# .train_rc 也要清——resume 时 stale rc 残留会让 monitor 每 60s 误判进程退出、旁路 cheap 活性）。
+rm -f .ns_run_train_healed.txt .ns_run_train_fidelity.flag .ns_run_train_assessment.txt .ns_run_train_ckpt_resolved.txt runs/train/progress.jsonl runs/train/.train_rc
 
 # detach：setsid 起新会话（wrapper 成进程组首领）——后续 kill -- -PID 能整组杀（含训练 python），
 # 防"只杀 wrapper、孤儿训练进程残留 → 下轮重复 detach"（铁律 6 盲区）。

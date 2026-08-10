@@ -197,8 +197,7 @@ fi
 生成 `latency_estimator.py` 时按 `{{ inputs.latency_script_path }}` 是否提供分支：
 
 - **未提供 `{{ inputs.latency_script_path }}`（默认）**：用 **nas-agent 内置 PyTorch latency**——
-  调 `measure_module_latency(subnet, dummy_input, device=..., warmup=..., repetitions=...)`，定义于
-  `nas-agent/nas_agent/latency/pytorch_latency_utils.py:94`（`@torch.inference_mode()` + `nn.Module`，
+  调 `measure_module_latency(subnet, dummy_input, device=..., warmup=..., repetitions=...)`（`@torch.inference_mode()` + `nn.Module`，
   **PyTorch 实现（非 onnx 路径）**）。参考实现见
   `$ORCA_AGENT_RESOURCES/references/supernet_workflow_examples/latency_estimator.py`。dummy_input
   构造 = latency_estimator 责任（按 manifest input shape）。
