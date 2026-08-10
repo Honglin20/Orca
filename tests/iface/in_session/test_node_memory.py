@@ -720,7 +720,6 @@ def test_daemon_next_passes_project_root_to_advance_step(tmp_path, monkeypatch):
     inst.tape = None
     inst.bus = None
     inst._pending_output = "OUT"
-    inst._start_ts = 0.0
 
     monkeypatch.setattr(daemon_mod, "advance_step", _fake_advance)
     monkeypatch.setattr(daemon_mod, "apply_step_result", _fake_apply)

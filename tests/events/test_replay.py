@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from orca.events.replay import (
-    _replay_state_and_inputs,
+    _replay_fold,
     apply_event,
     replay_state,
 )
@@ -682,7 +682,35 @@ def test_replay_tape_rich_with_all_phase11_event_types_no_crash(tmp_path):
     assert state1.context.get("a") == {"result": "ok-a"}
 
 
-# ── SPEC §3 O1a：_replay_state_and_inputs 单次遍历合并 ──────────────────────
+# ── SPEC §3 O1a：_replay_fold 单次遍历合并 ──────────────────────
+
+
+def test_replay_fold_captures_elapsed_anchors(tmp_path):
+    """``_replay_fold`` 捕获 elapsed 锚点：workflow_started_ts（首条 ws）+ node_started_ts（每 node 最后一条）。
+
+    in-session elapsed 派生（step.py）依赖这些锚点从 tape 差算（M5 不撒谎）——
+    recoverable 重 arm 重发 ``node_started`` → 取最后一条 = 当前 attempt 起点。
+    """
+    path = tmp_path / "fold_ts.jsonl"
+    _write_tape(path, [
+        {"type": "workflow_started", "timestamp": 100.0, "node": None,
+         "session_id": None,
+         "data": {"workflow_name": "wf_a", "inputs": {}}},
+        {"type": "node_started", "timestamp": 101.0, "node": "a",
+         "session_id": "s1", "data": {}},
+        {"type": "node_started", "timestamp": 202.0, "node": "a",   # 重 arm
+         "session_id": "s2", "data": {}},
+        {"type": "node_started", "timestamp": 303.0, "node": "b",
+         "session_id": "s3", "data": {}},
+    ])
+    tape = Tape(path, run_id="r1")
+    try:
+        fold = _replay_fold(tape)
+    finally:
+        tape.close()
+
+    assert fold.workflow_started_ts == 100.0
+    assert fold.node_started_ts == {"a": 202.0, "b": 303.0}   # 每 node 最后一条
 
 
 def _write_tape(path: Path, events: list[dict]) -> Tape:
@@ -696,13 +724,14 @@ def _write_tape(path: Path, events: list[dict]) -> Tape:
     return tape
 
 
-def test_replay_state_and_inputs_empty_tape(tmp_path):
+def test_replay_fold_empty_tape(tmp_path):
     """空 tape（文件不存在 / 无事件）→ 初始 state + 空 inputs（不 WARN）。"""
     path = tmp_path / "empty.jsonl"
     # 不创建文件 → replay() yield 不到任何事件。
     tape = Tape(path, run_id="r1")
     try:
-        state, inputs = _replay_state_and_inputs(tape)
+        fold = _replay_fold(tape)
+        state, inputs = fold.state, fold.inputs
     finally:
         tape.close()
 
@@ -712,7 +741,7 @@ def test_replay_state_and_inputs_empty_tape(tmp_path):
     assert inputs == {}
 
 
-def test_replay_state_and_inputs_no_workflow_started(tmp_path, caplog):
+def test_replay_fold_no_workflow_started(tmp_path, caplog):
     """tape 有事件但无 workflow_started → 静默返 {}（不 WARN，bootstrap 噪声修复）。"""
     path = tmp_path / "no_ws.jsonl"
     _write_tape(path, [
@@ -722,7 +751,8 @@ def test_replay_state_and_inputs_no_workflow_started(tmp_path, caplog):
     tape = Tape(path, run_id="r1")
     try:
         with caplog.at_level("WARNING"):
-            state, inputs = _replay_state_and_inputs(tape)
+            fold = _replay_fold(tape)
+            state, inputs = fold.state, fold.inputs
     finally:
         tape.close()
 
@@ -736,7 +766,7 @@ def test_replay_state_and_inputs_no_workflow_started(tmp_path, caplog):
     )
 
 
-def test_replay_state_and_inputs_dict_inputs(tmp_path):
+def test_replay_fold_dict_inputs(tmp_path):
     """workflow_started.data.inputs 为 dict → 返回该 dict（与 _inputs_from_tape 等价）。"""
     path = tmp_path / "ws_inputs.jsonl"
     _write_tape(path, [
@@ -748,7 +778,8 @@ def test_replay_state_and_inputs_dict_inputs(tmp_path):
     ])
     tape = Tape(path, run_id="r1")
     try:
-        state, inputs = _replay_state_and_inputs(tape)
+        fold = _replay_fold(tape)
+        state, inputs = fold.state, fold.inputs
     finally:
         tape.close()
 
@@ -760,7 +791,7 @@ def test_replay_state_and_inputs_dict_inputs(tmp_path):
     assert inputs == {"x": 1, "y": "foo"}
 
 
-def test_replay_state_and_inputs_non_dict_inputs_warns(tmp_path, caplog):
+def test_replay_fold_non_dict_inputs_warns(tmp_path, caplog):
     """workflow_started.data.inputs 非 dict（真异常）→ 返 {} + WARN（不静默吞）。"""
     path = tmp_path / "ws_bad_inputs.jsonl"
     _write_tape(path, [
@@ -771,7 +802,8 @@ def test_replay_state_and_inputs_non_dict_inputs_warns(tmp_path, caplog):
     tape = Tape(path, run_id="r1")
     try:
         with caplog.at_level("WARNING"):
-            state, inputs = _replay_state_and_inputs(tape)
+            fold = _replay_fold(tape)
+            state, inputs = fold.state, fold.inputs
     finally:
         tape.close()
 
@@ -786,7 +818,7 @@ def test_replay_state_and_inputs_non_dict_inputs_warns(tmp_path, caplog):
     )
 
 
-def test_replay_state_and_inputs_missing_inputs_key_warns(tmp_path, caplog):
+def test_replay_fold_missing_inputs_key_warns(tmp_path, caplog):
     """workflow_started 存在但 data 完全缺 inputs 字段 → 返 {} + WARN（与 _inputs_from_tape 一致）。"""
     path = tmp_path / "ws_no_inputs_key.jsonl"
     _write_tape(path, [
@@ -797,16 +829,16 @@ def test_replay_state_and_inputs_missing_inputs_key_warns(tmp_path, caplog):
     tape = Tape(path, run_id="r1")
     try:
         with caplog.at_level("WARNING"):
-            _, inputs = _replay_state_and_inputs(tape)
+            fold = _replay_fold(tape)
     finally:
         tape.close()
 
     # inputs 缺失 → dict.get 返 None → 非 dict → WARN + {}
-    assert inputs == {}
+    assert fold.inputs == {}
     assert any("workflow_started.data.inputs" in rec.message for rec in caplog.records)
 
 
-def test_replay_state_and_inputs_only_first_workflow_started_inputs(tmp_path):
+def test_replay_fold_only_first_workflow_started_inputs(tmp_path):
     """多条 workflow_started（罕见 retry 场景）→ 取首条 inputs（mirror _inputs_from_tape 早返）。"""
     path = tmp_path / "multi_ws.jsonl"
     _write_tape(path, [
@@ -819,15 +851,15 @@ def test_replay_state_and_inputs_only_first_workflow_started_inputs(tmp_path):
     ])
     tape = Tape(path, run_id="r1")
     try:
-        _, inputs = _replay_state_and_inputs(tape)
+        fold = _replay_fold(tape)
     finally:
         tape.close()
 
     # 取首条 ws 的 inputs（与 _inputs_from_tape 在首条 ws 即 return 等价）
-    assert inputs == {"first": True}
+    assert fold.inputs == {"first": True}
 
 
-def test_replay_state_and_inputs_snapshot_equivalence(tmp_path):
+def test_replay_fold_snapshot_equivalence(tmp_path):
     """SPEC §3 O1a 核心 AC：单次遍历 (state, inputs) 与拆分调用**逐字相等**（pure refactor）。
 
     构造富 tape（含 workflow_started + inputs + node 生命周期 + route），断言：
@@ -863,28 +895,28 @@ def test_replay_state_and_inputs_snapshot_equivalence(tmp_path):
     # 合并调用（新路径）
     tape_new = Tape(path, run_id="r1")
     try:
-        actual_state, actual_inputs = _replay_state_and_inputs(tape_new)
+        fold = _replay_fold(tape_new)
     finally:
         tape_new.close()
 
     # state 逐字相等（state 半侧的 pure refactor 守门；replay_state 是独立函数，
-    # 不调用 _replay_state_and_inputs，故对比有意义）
-    assert actual_state == expected_state, (
-        f"state 部分 mismatch：\nactual={actual_state}\nexpected={expected_state}"
+    # 不调用 _replay_fold，故对比有意义）
+    assert fold.state == expected_state, (
+        f"state 部分 mismatch：\nactual={fold.state}\nexpected={expected_state}"
     )
     # inputs 用固定 expected 值（不通过 helper 自身计算，对比会循环自证）。
     # 固定值守门确保 inputs 抽取的"首条 ws.data.inputs"语义不被回归。
-    assert actual_inputs == expected_inputs, (
-        f"inputs 部分 mismatch：\nactual={actual_inputs}\nexpected={expected_inputs}"
+    assert fold.inputs == expected_inputs, (
+        f"inputs 部分 mismatch：\nactual={fold.inputs}\nexpected={expected_inputs}"
     )
 
     # 终态断言（确认 snapshot 不是 trivially 空）
-    assert actual_state.status == "completed"
-    assert actual_state.workflow_name == "snap_wf"
-    assert actual_state.node_status == {"a": "done"}
+    assert fold.state.status == "completed"
+    assert fold.state.workflow_name == "snap_wf"
+    assert fold.state.node_status == {"a": "done"}
 
 
-def test_replay_state_and_inputs_idempotent(tmp_path):
+def test_replay_fold_idempotent(tmp_path):
     """重放两次结果相同（reducer 纯函数幂等，SPEC §6.0 铁律 2）。"""
     path = tmp_path / "idem.jsonl"
     _write_tape(path, [
@@ -897,20 +929,20 @@ def test_replay_state_and_inputs_idempotent(tmp_path):
     t1 = Tape(path, run_id="r1")
     t2 = Tape(path, run_id="r1")
     try:
-        s1, i1 = _replay_state_and_inputs(t1)
-        s2, i2 = _replay_state_and_inputs(t2)
+        fold1 = _replay_fold(t1)
+        fold2 = _replay_fold(t2)
     finally:
         t1.close()
         t2.close()
 
-    assert (s1, i1) == (s2, i2)  # 重放两次完全一致
+    assert (fold1.state, fold1.inputs) == (fold2.state, fold2.inputs)  # 重放两次完全一致
 
 
-def test_replay_state_and_inputs_first_ws_bad_second_ws_good(tmp_path, caplog):
+def test_replay_fold_first_ws_bad_second_ws_good(tmp_path, caplog):
     """首条 ws inputs 坏 + 后续 ws inputs 好 → 返 {}（mirror _inputs_from_tape 早返语义）。
 
     ``_inputs_from_tape`` 原实现：首条 ws 坏即早返 {}，看不到后续 ws。
-    ``_replay_state_and_inputs``：``ws_seen`` flag 在首条 ws 即锁定，后续 ws 不再读 inputs。
+    ``_replay_fold``：``ws_seen`` flag 在首条 ws 即锁定，后续 ws 不再读 inputs。
     两者语义一致 —— 此测试锁住该 invariant，防 ``ws_seen`` flag 写错（如忘记加 not）。
     """
     path = tmp_path / "ws_first_bad.jsonl"
@@ -925,12 +957,12 @@ def test_replay_state_and_inputs_first_ws_bad_second_ws_good(tmp_path, caplog):
     tape = Tape(path, run_id="r1")
     try:
         with caplog.at_level("WARNING"):
-            _, inputs = _replay_state_and_inputs(tape)
+            fold = _replay_fold(tape)
     finally:
         tape.close()
 
     # 首条 ws 坏 → 返 {}（即使后续 ws 有 dict inputs；mirror _inputs_from_tape 早返）
-    assert inputs == {}
+    assert fold.inputs == {}
     # 首条 ws 的 WARN 触发一次（不应因后续 ws 再次 WARN）
     ws_warns = [r for r in caplog.records if "workflow_started.data.inputs" in r.message]
     assert len(ws_warns) == 1, (

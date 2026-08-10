@@ -62,7 +62,6 @@ class InSessionDaemon:
         self.inputs = inputs or {}
         self._lock_fd: Any = None
         self._cleaned = False
-        self._start_ts = now_monotonic()
         self._pending_output: str | None = None   # observe 缓存（D-v4-1：不落盘）
         self._host_alive_ts = now_monotonic()
         self._pid_path = self.tape_path.with_suffix(self.tape_path.suffix + ".pid")
@@ -133,10 +132,11 @@ class InSessionDaemon:
         output = self._pending_output
         self._pending_output = None
         try:
+            # elapsed 由 advance_step 从 tape 时间戳差算（M5 不撒谎：daemon 长跑进程
+            # 虽可测 monotonic，但 tape 单一真相源统一派生，与 per-call CLI 路径一致）。
             result = advance_step(
                 self.tape, self.wf, output=output,
                 inputs=self.inputs, run_id=self.run_id,
-                elapsed=now_monotonic() - self._start_ts,
                 project_root=Path.cwd(),
             )
         except InSessionError as e:

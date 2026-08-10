@@ -5,6 +5,20 @@
 
 ---
 
+## [2026-08-10] fix(in-session): web Log 显示假 elapsed——node 0s / workflow 0.077s
+
+Web Log 面板两类假值：① in-session `node_completed.data` 无 `elapsed`（契约
+`data={output, elapsed}` 被违），LogStream 读 `d.elapsed` → 0s；② CLI `orca next`
+每次调用 `start_ts = now_monotonic()`，`workflow_completed.elapsed` 测成「最后一次
+next 调用耗时」（0.077s）。**修复**：`events/replay.py` 新增 `_replay_fold`（单遍历
+fold + 捕获 `workflow_started_ts` 首条 / `node_started_ts` 每 node 最后一条，O1a 不破；
+`_replay_state_and_inputs` 零调用方删除）；`advance_step` 移除 `elapsed` 参数、
+node/workflow elapsed 从 tape 时间戳差算（M5 不撒谎，daemon/cli 同步收权）；
+前端 `summarizeEvent` 增 `nodeElapsed` resolver（store D5 差补值回退，两路都无则省略
+括号不显示 0s）。**验证**：events+in_session+web（非 Playwright）1072 passed（8 失败
+stash 隔离证为改动前已有）+ 前端 tsc 干净 + 35 passed（1 flake 复跑过）。Commit: `HEAD`。详见
+[release note](../releases/2026-08-10-in-session-elapsed-truth.md)。
+
 ## [2026-08-10] fix(nas-supernet): 图表链路修复——progress 每指标一图 / compare_table NaN / search 3 图 reuse 补推
 
 真机跑 nas-supernet 全流程后修 5 类图表问题：① progress_watcher 每指标推独立图（不再 loss/acc 一张

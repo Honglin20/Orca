@@ -488,6 +488,31 @@ describe("selectors", () => {
     }
   });
 
+  // ── 5b. node_completed 摘要的 elapsed 回退：data 无 elapsed（in-session 老 tape）
+  //      → 用 store D5 派生值（node_completed.ts − node_started.ts 差补），不显示 0s 假值 ──
+  it("selectLog：node_completed 无 data.elapsed → timestamp 差补（不显示 0s）", () => {
+    useWorkflowStore.getState().loadFromEvents([
+      ev("workflow_started", { data: { workflow_name: "demo" } }),
+      ev("node_started", { node: "A" }),
+      ev("node_completed", { node: "A", data: { output: "ok" } }),
+    ]);
+    const lines = selectLog(useWorkflowStore.getState());
+    const nc = lines.find((l) => l.type === "node_completed");
+    // ev helper 时间戳递增 1s/seq → store 差补 elapsed = node_completed.ts − node_started.ts = 1s
+    expect(nc?.text).toContain("node completed (1s)");
+  });
+
+  it("selectLog：node_completed 有 data.elapsed → 优先用事件值（executor/新 in-session tape）", () => {
+    useWorkflowStore.getState().loadFromEvents([
+      ev("workflow_started", { data: { workflow_name: "demo" } }),
+      ev("node_started", { node: "A" }),
+      ev("node_completed", { node: "A", data: { output: "ok", elapsed: 42.5 } }),
+    ]);
+    const lines = selectLog(useWorkflowStore.getState());
+    const nc = lines.find((l) => l.type === "node_completed");
+    expect(nc?.text).toContain("node completed (42.5s)");
+  });
+
   // ── 6. selectAgents：fold 后 agents 行模型 ──
   it("selectAgents：fold 后输出 agent 行（status / elapsed）", () => {
     useWorkflowStore.getState().loadFromEvents([

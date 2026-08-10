@@ -668,18 +668,30 @@ export function setLogShowDebug(v: boolean): void {
   showDebug = v;
 }
 
-/** 单行摘要：每个 EventType 均有 readable 摘要，无 no-op fallback（SPEC §5.5 / §9 AC3）。 */
-export function summarizeEvent(e: WebEvent): string {
+/** 单行摘要：每个 EventType 均有 readable 摘要，无 no-op fallback（SPEC §5.5 / §9 AC3）。
+
+``nodeElapsed``：可选 resolver（``selectLog`` 传 store 的 ``state.nodes[node].elapsed``），
+供 ``node_completed`` 在 ``data.elapsed`` 缺失时回退（in-session 老 tape 的
+``node_completed.data`` 只含 output，无 elapsed —— store D5 已按 timestamp 差补算，
+摘要与 AgentsRail 同一策略）。两路都无（老 tape 缺 node_started）→ 省略耗时括号，
+不显示 0s 假值（fail loud 不撒谎，与 AgentsRail 隐藏策略一致）。
+ */
+export function summarizeEvent(
+  e: WebEvent,
+  nodeElapsed?: (node: string) => number | undefined
+): string {
   const d = e.data ?? {};
   const node = e.node ?? "-";
   const sess = e.session_id ? e.session_id.slice(0, 6) : "------";
-  const detail = eventDetail(e.type, d);
+  const detail = eventDetail(e.type, d, e, nodeElapsed);
   return `${node} [${sess}] ${detail}`.slice(0, 80);
 }
 
 function eventDetail(
   type: WebEvent["type"],
-  d: Record<string, unknown>
+  d: Record<string, unknown>,
+  e: WebEvent,
+  nodeElapsed?: (node: string) => number | undefined
 ): string {
   switch (type) {
     case "workflow_started":
@@ -694,8 +706,19 @@ function eventDetail(
       return `workflow resumed (replayed ${num(d.replayed_events)})`;
     case "node_started":
       return `node started`;
-    case "node_completed":
-      return `node completed (${num(d.elapsed)}s)`;
+    case "node_completed": {
+      // in-session 老 tape：data 无 elapsed → 用 store 派生值（node_completed.ts −
+      // node_started.ts 差补，与 AgentsRail 同策略）。data.elapsed 在时恒优先
+      // （executor 路径 / 新 in-session tape 的权威实测值）。
+      let elapsed: unknown = d.elapsed;
+      if (elapsed == null && nodeElapsed && e.node) {
+        elapsed = nodeElapsed(e.node);
+      }
+      if (elapsed == null) {
+        return `node completed`;  // 未知耗时：省略括号，不显示 0s 假值
+      }
+      return `node completed (${num(elapsed)}s)`;
+    }
     case "node_failed":
       return `node FAILED: ${str(d.message)}`;
     case "node_skipped":
@@ -782,6 +805,8 @@ function num(v: unknown): number {
 export function selectLog(state: WorkflowState): LogLine[] {
   // SPEC §P1：filter（classifyLogLevel 非 null）+ 默认隐藏 debug 级（route_taken）。
   // 一次遍历完成 filter + map，保留可恢复 debug 的能力（setLogShowDebug）。
+  // nodeElapsed resolver：store 的 D5 派生值（node_completed.ts − node_started.ts 差补），
+  // 供 LogStream 摘要对 in-session 老 tape（data 无 elapsed）回退 —— 不重复 fold，单一真相。
   const out: LogLine[] = [];
   for (const e of state.events) {
     const level = classifyLogLevel(e.type);
@@ -790,7 +815,7 @@ export function selectLog(state: WorkflowState): LogLine[] {
     out.push({
       seq: e.seq,
       type: e.type,
-      text: summarizeEvent(e),
+      text: summarizeEvent(e, (node) => state.nodes[node]?.elapsed),
       level,
     });
   }

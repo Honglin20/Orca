@@ -179,7 +179,7 @@ def replay_for_resume(
 
     - ``state`` ≡ ``replay_state(tape)``：调 events 层**公共** ``apply_event``
       reducer（不改签名，单向依赖铁律不违）。run 层不自造 fold。
-    - ``inputs`` ≡ ``_replay_state_and_inputs`` 语义（mirror events 层同名函数）：
+    - ``inputs`` ≡ ``_replay_fold`` 语义（mirror events 层同名函数）：
       首条 ``workflow_started.data.inputs``；非 dict / 缺键 → WARN + {}；
       无 ws → 静默 {}。**WARNING 必须保留**（E2，mirror
       ``orca/events/replay.py:88-93``），让「ws 坏」真异常可见。
@@ -203,7 +203,7 @@ def replay_for_resume(
     ws_seen = False
     for event in tape.replay():
         state = apply_event(state, event)
-        # inputs 抽取：首条 ws 即锁定（mirror _replay_state_and_inputs 早返语义）。
+        # inputs 抽取：首条 ws 即锁定（mirror _replay_fold 早返语义）。
         if event.type == "workflow_started" and not ws_seen:
             ws_seen = True
             raw = event.data.get("inputs")

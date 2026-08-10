@@ -26,20 +26,20 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import jsonschema
 
-from orca.events.replay import _replay_state_and_inputs
+from orca.events.replay import _replay_fold
 from orca.exec.error import ExecError
 from orca.exec.render import render_prompt, render_template
 from orca.run.lifecycle import (
     make_workflow_completed,
     make_workflow_failed,
     make_workflow_started,
-    now_monotonic,
 )
 from orca.run.memory import inject_memory_prompt
 from orca.run.orchestrator import Orchestrator
@@ -634,7 +634,6 @@ def advance_step(
     output: str | None = None,
     inputs: dict[str, Any] | None = None,
     run_id: str | None = None,
-    elapsed: float = 0.0,
     prompts_dir: Path | None = None,
     yaml_path: str | None = None,
     host_session: str | None = None,
@@ -658,7 +657,12 @@ def advance_step(
 
     v1 范围：仅 agent 节点（宿主 subagent 执行模型）；parallel / foreach / gate /
     ask_user 由 compile validator 在更上层 fail loud 拒绝（D2）。
-    ``elapsed`` 由 daemon 传真实 workflow 总耗时（M5：不撒谎）。
+    **elapsed 派生（M5：不撒谎）**：``node_completed.data.elapsed`` /
+    ``workflow_completed.data.elapsed`` 均从 tape 时间戳差算（``_replay_fold`` 捕获的
+    ``node_started_ts`` / ``workflow_started_ts`` → ``time.time()`` 差）。tape 是唯一真相源
+    ——in-session 宿主每次 ``orca next`` 是新进程，调用方无法跨调用测真实 run 总耗时
+    （2026-08-10 修复：此前 CLI per-call ``now_monotonic() - start_ts`` 测成「本次 next
+    调用耗时」，workflow_completed 落 0.077s 假值）。
     ``prompts_dir`` 给定时走 compact 交付（渲染后 prompt 落盘、StepResult.prompt_file 指针）；
     None 时 inline 回退（StepResult.prompt 全文，单测决策逻辑用）。
 
@@ -677,8 +681,10 @@ def advance_step(
     # 每步重传，且修掉非 entry 节点 {{ inputs.* }} 依赖 CLI 重传的隐患）。bootstrap 首调时
     # tape 无 workflow_started → inputs 返 {} → 自然 fallback 到 CLI 传入的 inputs。
     # 与 Orchestrator resume（SPEC B 后：``replay_for_resume``）同源——均调 events 层
-    # ``_replay_state_and_inputs`` / ``apply_event`` 同一 reducer fold 路径抽 inputs。
-    state, tape_inputs = _replay_state_and_inputs(tape)
+    # ``_replay_fold`` / ``apply_event`` 同一 reducer fold 路径抽 inputs + elapsed 锚点。
+    fold = _replay_fold(tape)
+    state = fold.state
+    tape_inputs = fold.inputs
     merged = {**tape_inputs, **(inputs or {})}  # CLI override 罕见但保留兼容
     inputs = _resolve_inputs(wf, merged)
     rid = run_id or getattr(tape, "run_id", "") or ""
@@ -729,16 +735,35 @@ def advance_step(
                 prompts_dir, project_root, no_memory,
                 workflows_root=_workflows_root_from_yaml(yaml_path),
             )
-        emits.append(Emit("node_completed", {"output": parsed}, node=pending))
+        # M5 不撒谎：node elapsed 从 tape 该 node 最后一条 node_started 时间戳差算
+        # （宿主 subagent 执行期真实 wall-clock 耗时；recoverable 重 arm 取最新 attempt
+        # 起点）。与 executor 路径 ``node_completed.data.elapsed``（exec/interface.py 契约
+        # data={output, elapsed}）对齐——in-session 不再缺字段，前端/tape 消费者统一读法。
+        node_elapsed: float | None = None
+        started_ts = fold.node_started_ts.get(pending)
+        if started_ts is not None:
+            node_elapsed = max(0.0, time.time() - started_ts)
+        nc_data: dict[str, Any] = {"output": parsed}
+        if node_elapsed is not None:
+            nc_data["elapsed"] = node_elapsed
+        emits.append(Emit("node_completed", nc_data, node=pending))
         # 用「历史 outputs + 本次 output」求下一 node（同 _next_node_for_resume 的入参形态）。
         outputs_acc = _outputs_acc_from_state(state)
         outputs_acc[pending] = {"output": parsed}
         nxt = Orchestrator._next_node_for_resume(wf, pending, outputs_acc)
         if nxt == END:
             emits.append(Emit("route_taken", {"from": pending, "to": END}))
-            t, d = make_workflow_completed(wf, _final_outputs(wf, outputs_acc, inputs, rid), elapsed=elapsed)
+            # M5 不撒谎：elapsed 从 tape workflow_started 时间戳差算（真实 run 总耗时，
+            # 非调用方 per-call 计时；见 advance_step docstring 2026-08-10 修复）。
+            wf_elapsed = (
+                max(0.0, time.time() - fold.workflow_started_ts)
+                if fold.workflow_started_ts is not None else 0.0
+            )
+            t, d = make_workflow_completed(
+                wf, _final_outputs(wf, outputs_acc, inputs, rid), elapsed=wf_elapsed,
+            )
             emits.append(Emit(t, d))
-            logger.info("workflow 完成（%s，elapsed=%.2fs）", rid, elapsed)
+            logger.info("workflow 完成（%s，elapsed=%.2fs）", rid, wf_elapsed)
             return StepResult(emits=emits, done=True, reason="completed")
         _check_agent_node(nodes.get(nxt), nxt)
         emits.append(Emit("route_taken", {"from": pending, "to": nxt}))

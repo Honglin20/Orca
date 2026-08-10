@@ -4,6 +4,29 @@
 
 ---
 
+## 历史：in-session elapsed 真相修复——已完成 + review agent 闭环（web Log 0s / workflow 0.077s）
+
+**任务**：web Log 面板 in-session run 显示假 elapsed：node 全 `(0s)`（in-session
+`node_completed.data` 无 elapsed，LogStream 读 `d.elapsed` → 0）+ `workflow completed
+(0.077s)`（CLI `orca next` per-call `start_ts` 测成最后一次调用耗时）。
+
+**状态**：**完成 + review agent 一轮闭环（0 MUST-FIX，2 MINOR 全修）**：
+- `events/replay.py` 新增 `_replay_fold`（单遍历 fold + 捕获 `workflow_started_ts` 首条 /
+  `node_started_ts` 每 node 最后一条；O1a 单遍历不破）；`_replay_state_and_inputs` 零调用方删除（E5）。
+- `advance_step` 移除 `elapsed` 参数，node/workflow elapsed 从 tape 时间戳差算（M5 不撒谎）；
+  daemon 删 `_start_ts`；cli 去 per-call 计时。
+- 前端 `summarizeEvent` 增 `nodeElapsed` resolver（store D5 差补值回退；两路都无省略括号不显示 0s）。
+- review 2 MINOR 修复：resolver 注释与实际一致（未知耗时省略而非 0s 假值）+ 死代码 wrapper 删除。
+- 验证：events+in_session+web（非 Playwright）1072 passed（8 失败 stash 隔离证为改动前已有）；
+  前端 tsc 干净 + 35 passed。
+
+**必读**：
+- release note `docs/releases/2026-08-10-in-session-elapsed-truth.md`。
+- `orca/events/replay.py:_replay_fold`（elapsed 锚点捕获契约）。
+- `orca/run/step.py:advance_step`（elapsed 派生 + M5 注释）。
+
+---
+
 ## 当前（严重/设计错误，待修）：主页 run 列表随 tape 数量线性变慢——缺懒加载
 
 **现象**：`runs/` 有 1354 个 tape（120M，多为测试产物）时，`GET /api/runs?scope=all`
@@ -43,6 +66,32 @@ markers 新增可选 `hint` 字段）全经它同源；`bg_runner` 零影响。c
 **必读**：
 - release note `docs/releases/2026-08-07-in-session-runs-resolution.md`。
 - `orca/runtime/_project.py:resolve_runs_dir`（两级解析契约 + 不回溯祖先约束）。
+
+---
+
+## 历史：launch hygiene 契约 + 残留进程清理——已完成（封死历史 run 训练启动失败事故类别）
+
+**任务**：他机弱模型实跑 nas-supernet 历史 run 复盘，训练反复死于确定性启动卫生问题：
+`num_workers=4` fork 崩 CUDA / `pin_memory=True` 报 cannot be pinned / torchrun 默认 29500
+端口 rendezvous EADDRINUSE / 残留 wrapper 叠加二次训练。判定：契约层该固化，非运行期
+LLM self-heal 范畴。
+
+**状态**：**完成**：生成契约新增 §4 DataLoader Launch Hygiene（`num_workers=0` +
+`pin_memory=False` 写死）+ launcher `NUM_WORKERS=0` + `MASTER_PORT` 随机（`$((20000 +
+RANDOM % 20000))`）+ torchrun 自身 flag 排除 cross-check；checklist 新增 [C]36/37（追加
+编号不重排 1-35）；`ns_retrain/agent.md` 加同款卫生铁律；`launch.sh` ×2 detach 前清残留
+wrapper（`/proc/<pid>/cmdline` 匹配 `run_train_supernet`/`run_retrain` 才组杀，防 PID 复用
+误杀）。验证：bash -n + 实测两场景（无关进程不误杀 / 残留整组杀）+ compile 212 passed +
+tests/workflows 506 passed（4 预存失败 stash 隔离验证与本改动无关，`_common.py:251`
+NameError 为用户 WIP）+ tars validate 过。
+
+**必读**：
+- release note `docs/releases/2026-08-10-launch-hygiene-contract.md`。
+- 生成契约 `workflows/agents/ns_train_script/references/workflows/train_supernet_script_generation.md` §4 + Run Launcher。
+- `workflows/agents/ns_run_train/scripts/launch.sh`（残留清理段）。
+
+**后续待定**（用户另行决策，未做）：单进程单卡改造（放弃，改动面大）；引擎轮询长任务
+替代 in-session CRON（ns_run_train/ns_retrain 仍走 CRON 模型）。
 
 ---
 

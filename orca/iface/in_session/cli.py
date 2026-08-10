@@ -74,7 +74,6 @@ from orca.iface.in_session.marker import (
 )
 from orca.run.lifecycle import (
     gen_run_id,
-    now_monotonic,
 )
 from orca.run._errors import INPUTS_VALIDATION_ERROR
 from orca.run.step import InSessionError, advance_step
@@ -884,7 +883,7 @@ def _read_workflow_inputs(tape_path: Path) -> dict:
     镜像 ``_read_workflow_name`` 的 tape 头扫描骨架（同一 ``workflow_started`` 事件）。
     无 ws / 损坏 / 无 inputs → ``{}``（调用方按「无 project_root」回落 per-run，不崩）。
 
-    本地 helper 而非 import ``orca.events.replay._replay_state_and_inputs``（私有）
+    本地 helper 而非 import ``orca.events.replay._replay_fold``（私有）
     或既有 ``inputs_from_tape``（已删，E5）——SPEC 2026-08-06 §2.1：next 路径 ``--inputs``
     默认 ``"{}"`` 拿不到原始 inputs，bootstrap/next 两处统一从 tape 读为单一真相源。
     """
@@ -1259,7 +1258,7 @@ def bootstrap(
         fd, _ = acquired
         try:
             result = asyncio.run(_advance_and_emit(
-                bus, wf_obj, tape, output=None, inputs=inp, run_id=run_id, elapsed=0.0,
+                bus, wf_obj, tape, output=None, inputs=inp, run_id=run_id,
                 prompts_dir=_prompts_dir_for(tape_path, run_id),
                 yaml_path=os.path.realpath(yaml_path),
                 host_session=_host_session_from_env(),
@@ -1499,10 +1498,9 @@ def next(
     # 在 flock 临界区内 open + advance + emit + marker RMW（N2：marker RMW 被 flock 串行化）。
     tape_obj = Tape(tape_path, run_id=run_id, resume=True)   # 半写恢复（I3.4）
     bus = EventBus(tape_obj)
-    start_ts = now_monotonic()
     try:
         result, compliance_failed, warn_count = asyncio.run(_next_in_critical_section(
-            bus, tape_obj, run_id, normalized_output, inp, start_ts, mpath,
+            bus, tape_obj, run_id, normalized_output, inp, mpath,
             _prompts_dir_for(tape_path, run_id),
             env_path=_env_file_path(tape_path, run_id),
             project_root=Path.cwd(),
@@ -1585,7 +1583,7 @@ def next(
 
 async def _advance_and_emit(
     bus: EventBus, wf, tape: Tape, *, output: str | None,
-    inputs: dict, run_id: str, elapsed: float, prompts_dir: Path | None = None,
+    inputs: dict, run_id: str, prompts_dir: Path | None = None,
     yaml_path: str | None = None,
     host_session: str | None = None,
     project_root: Path | None = None,
@@ -1600,7 +1598,7 @@ async def _advance_and_emit(
     ``project_root`` / ``no_memory`` 透传 advance_step + apply_step_result(node-memory SPEC §5)。
     """
     result = advance_step(
-        tape, wf, output=output, inputs=inputs, run_id=run_id, elapsed=elapsed,
+        tape, wf, output=output, inputs=inputs, run_id=run_id,
         prompts_dir=prompts_dir, yaml_path=yaml_path, host_session=host_session,
         project_root=project_root, no_memory=no_memory,
     )
@@ -1682,7 +1680,7 @@ def _derive_artifacts_dir(tape: Tape, run_id: str) -> Path:
 
 async def _next_in_critical_section(
     bus: EventBus, tape: Tape, run_id: str, output: str | None,
-    inputs: dict, start_ts: float, mpath: Path,
+    inputs: dict, mpath: Path,
     prompts_dir: Path | None = None,
     env_path: Path | None = None,
     project_root: Path | None = None,
@@ -1715,8 +1713,7 @@ async def _next_in_critical_section(
     wf = _load_wf_for_run(run_id, tape)
     result = advance_step(
         tape, wf, output=output, inputs=inputs, run_id=run_id,
-        elapsed=now_monotonic() - start_ts, prompts_dir=prompts_dir,
-        project_root=project_root, no_memory=no_memory,
+        prompts_dir=prompts_dir, project_root=project_root, no_memory=no_memory,
     )
     # B1 单次 write 原子化整批 [nc, rt, ns] / [nc, rt, workflow_completed]（共享 helper）。
     # apply_step_result 内部按 emits 写 node_completed 的记忆 MD(node-memory SPEC §3.2)。

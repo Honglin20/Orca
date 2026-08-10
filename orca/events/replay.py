@@ -21,6 +21,7 @@ session_id 与 RunState（SPEC §3.4）：
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from typing import Any
 
 from orca.schema import Event, RunState
@@ -28,6 +29,26 @@ from orca.schema import Event, RunState
 from orca.events.tape import Tape
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ReplayFold:
+    """``_replay_fold`` 的单次遍历产物：RunState + inputs + elapsed 锚点时间戳。
+
+    - ``workflow_started_ts``：**首条** ``workflow_started.timestamp``（workflow elapsed
+      锚点，与 inputs 抽取同取首条 ws 语义，罕见 retry 场景兼容）。
+    - ``node_started_ts``：每 node **最后一条** ``node_started.timestamp``（node elapsed
+      锚点；recoverable 重 arm 会重发 ``node_started`` → 最后一条 = 当前 attempt 起点）。
+
+    供 in-session 路径从 tape 时间戳差算 elapsed（tape 唯一真相源，M5 不撒谎）——
+    调用方 per-call 计时（如 ``orca next`` 每次新进程）会测成「本次调用耗时」而非
+    run 真实时长，不得再作为 elapsed 来源。
+    """
+
+    state: RunState
+    inputs: dict[str, Any]
+    workflow_started_ts: float | None = None
+    node_started_ts: dict[str, float] = field(default_factory=dict)
 
 
 def replay_state(tape: Tape, since_seq: int = 0) -> RunState:
@@ -41,15 +62,14 @@ def replay_state(tape: Tape, since_seq: int = 0) -> RunState:
     return state
 
 
-def _replay_state_and_inputs(
-    tape: Tape,
-) -> tuple[RunState, dict[str, Any]]:
-    """单次遍历 tape：既 fold ``RunState`` 又抽 ``workflow_started.data.inputs``。
+def _replay_fold(tape: Tape) -> ReplayFold:
+    """单次遍历 tape：fold RunState + 抽 inputs + 捕获 elapsed 锚点时间戳。
 
-    性能（SPEC §3 O1a，包 P3）：合并 ``advance_step`` 内部两次全 tape 遍历
-    （``replay_state(tape)`` + ``Orchestrator._inputs_from_tape(tape)``）为一次。
-    ``apply_event`` reducer 只存 ``workflow_name``（**不存 inputs**）→ inputs 必须
-    在本函数里顺手抽（不能从 RunState 取）。
+    性能（SPEC §3 O1a，包 P3）：合并 ``advance_step`` 内部多次全 tape 遍历
+    （``replay_state(tape)`` + ``Orchestrator._inputs_from_tape(tape)``）为一次，
+    顺带捕获 ``workflow_started_ts`` / ``node_started_ts``（elapsed 派生锚点，
+    零额外遍历）。``apply_event`` reducer 只存 ``workflow_name``（**不存 inputs**）→
+    inputs 必须在本函数里顺手抽（不能从 RunState 取）。
 
     结果与拆分调用**逐字相等**（pure refactor，零行为变化）：
       - ``state`` 部分 ≡ ``replay_state(tape)``（同一 reducer fold）。
@@ -62,7 +82,8 @@ def _replay_state_and_inputs(
 
     幂等：与 ``replay_state`` 同（reducer 纯函数 fold，重放两次结果相同）。
 
-    注 1：``_inputs_from_tape`` 改为薄封装调本函数取 inputs 部分（SPEC §3 O1a）。
+    注 1：``_inputs_from_tape`` 改为薄封装调本函数取 inputs 部分（SPEC §3 O1a）；
+    该 wrapper 零调用方后已删（E5 惯例），inputs 抽取语义直接在本函数内实现。
     注 2：**不接受 ``since_seq`` 参数**（与 ``replay_state`` 的差异）：state 部分天然
     支持增量重放，但 inputs 必须**从 tape 起始**全扫才能找到 ``workflow_started``
     （若 ``since_seq > seq(ws)`` 会静默错过 ws → inputs 返 {}，与 state 的增量语义
@@ -72,6 +93,8 @@ def _replay_state_and_inputs(
     state = RunState(run_id=tape.run_id, workflow_name="", status="pending")
     inputs: dict[str, Any] = {}
     ws_seen = False
+    workflow_started_ts: float | None = None
+    node_started_ts: dict[str, float] = {}
     for event in tape.replay():
         state = apply_event(state, event)
         # inputs 仅从首条 workflow_started 抽（mirror _inputs_from_tape 早返语义）；
@@ -79,6 +102,7 @@ def _replay_state_and_inputs(
         # 行为等价。
         if event.type == "workflow_started" and not ws_seen:
             ws_seen = True
+            workflow_started_ts = event.timestamp
             raw = event.data.get("inputs")
             if isinstance(raw, dict):
                 inputs = raw
@@ -91,7 +115,14 @@ def _replay_state_and_inputs(
                     "回退空 inputs（后续 render {{ inputs.* }} 可能 UndefinedError）",
                     getattr(tape, "path", "?"), type(raw).__name__,
                 )
-    return state, inputs
+        elif event.type == "node_started" and event.node:
+            node_started_ts[event.node] = event.timestamp
+    return ReplayFold(
+        state=state,
+        inputs=inputs,
+        workflow_started_ts=workflow_started_ts,
+        node_started_ts=node_started_ts,
+    )
 
 
 def apply_event(state: RunState, event: Event) -> RunState:

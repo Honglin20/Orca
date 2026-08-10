@@ -1092,7 +1092,7 @@ def test_advance_step_bootstrap_traverses_tape_once(tmp_path):
     """SPEC §3 O1a AC：``advance_step`` bootstrap 分支（pending）单次调用 tape 遍历 2→1。
 
     重构前：``replay_state(tape)`` + ``Orchestrator._inputs_from_tape(tape)`` = 2 次遍历。
-    重构后：``_replay_state_and_inputs(tape)`` = 1 次遍历。
+    重构后：``_replay_fold(tape)`` = 1 次遍历。
     """
     from orca.compile import load_workflow
     from orca.events.tape import Tape
@@ -1109,7 +1109,7 @@ def test_advance_step_bootstrap_traverses_tape_once(tmp_path):
     res = advance_step(tape, wf, run_id="r1", prompts_dir=None)
     assert res.node == "a", "bootstrap 应推到 entry 节点 a"
     # StepResult 形状断言：bootstrap 应 emit workflow_started + node_started(a) 两条
-    # （若 advance_step 在 _replay_state_and_inputs 之前 short-circuit 返回，emits 会空，
+    # （若 advance_step 在 _replay_fold 之前 short-circuit 返回，emits 会空，
     # 配合下方 calls==1 双锁，加速回归定位）。
     assert len(res.emits) == 2, (
         f"bootstrap 应 emit [workflow_started, node_started] 两条，实得 {len(res.emits)} 条"
@@ -1430,6 +1430,50 @@ def test_event_sequence_matches_expected_shape(cwd_tmp, wf_path):
     # seq 连续递增
     seqs = [e["seq"] for e in events]
     assert seqs == list(range(1, len(events) + 1))
+
+
+def test_in_session_elapsed_from_tape_timestamps(cwd_tmp, wf_path):
+    """M5 不撒谎：node/workflow elapsed 从 tape 时间戳差算（2026-08-10 修复）。
+
+    此前 CLI per-call ``now_monotonic() - start_ts`` 把 ``workflow_completed.elapsed``
+    测成「最后一次 next 调用耗时」（0.077s 假值）；in-session ``node_completed.data``
+    则完全缺 ``elapsed``。修复后（step.py 从 ``_replay_fold`` 锚点差算）：
+      - ``node_completed.data.elapsed`` ≈ ``nc.ts − ns.ts``（> 0，非 0s 假值）；
+      - ``workflow_completed.data.elapsed`` ≈ ``wc.ts − ws.ts``（真实 run 总耗时）。
+    """
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id, tape = boot["run_id"], boot["tape"]
+
+    _next(runner, tape, run_id, "--output", "out_a")
+    _next(runner, tape, run_id, "--output", "out_b")
+
+    lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
+    events = [json.loads(ln) for ln in lines]
+    by_seq = {e["seq"]: e for e in events}
+
+    ws = by_seq[1]   # workflow_started
+    wc = by_seq[8]   # workflow_completed（序列见 test_event_sequence_matches_expected_shape）
+    # node elapsed：≈ 事件 timestamp 差（±1s 容差：advance_step 内 time.time() 与
+    # tape.append 同钟，毫秒级差）
+    for ns_seq, nc_seq in ((2, 3), (5, 6)):
+        ns, nc = by_seq[ns_seq], by_seq[nc_seq]
+        elapsed = nc["data"]["elapsed"]
+        expect = nc["timestamp"] - ns["timestamp"]
+        assert isinstance(elapsed, (int, float)) and elapsed > 0, (
+            f"node_completed.elapsed 应存在且 >0，实得 {elapsed!r}"
+        )
+        assert abs(elapsed - expect) < 1.0, (
+            f"node_completed.elapsed {elapsed} 应≈时间戳差 {expect}"
+        )
+
+    # workflow elapsed：≈ wc.ts − ws.ts（真实 run 总耗时，非最后一次 next 调用耗时）
+    wf_elapsed = wc["data"]["elapsed"]
+    expect_wf = wc["timestamp"] - ws["timestamp"]
+    assert wf_elapsed > 0, f"workflow_completed.elapsed 应 >0，实得 {wf_elapsed!r}"
+    assert abs(wf_elapsed - expect_wf) < 1.0, (
+        f"workflow_completed.elapsed {wf_elapsed} 应≈时间戳差 {expect_wf}"
+    )
 
 
 # ── 补丁：state_corrupt / bootstrap busy / stop busy / status / no-marker / start ──
