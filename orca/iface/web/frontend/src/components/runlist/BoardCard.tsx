@@ -20,7 +20,7 @@
 // data-testid：根 ``board-card``；内层内容 wrapper 挂 ``run-item``（兼容 9b ——
 //   ``page.click("[data-testid=run-item]")`` 命中内层，事件冒泡到根触发 onOpen）。
 
-import { Trash2, AlertTriangle } from "lucide-react";
+import { Trash2, AlertTriangle, BarChart3 } from "lucide-react";
 import type { RunSummary } from "@/stores/run-list-store";
 import {
   STATUS_BAR_HEX,
@@ -168,11 +168,19 @@ export function BoardCard({
             等待 {fmtElapsed(run.elapsed)}
           </div>
         )}
-        {/* 第三行：耗时 · 事件数 · 相对时间（SPEC §4.2 去 cost） */}
-        <div className="orca-text-muted mt-2 flex items-center gap-x-3 gap-y-1 text-xs tabular-nums">
+        {/* 第三行：耗时 · 事件数 · 图表数 · 相对时间（SPEC §4.2 去 cost；图表数 §3.6 新增） */}
+        <div className="orca-text-muted mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs tabular-nums">
           <span>{fmtElapsed(run.elapsed)}</span>
           <span className="orca-text-faint">·</span>
           <span>{run.event_count ?? 0} 事件</span>
+          <span className="orca-text-faint">·</span>
+          <span
+            className="inline-flex items-center gap-1"
+            title="图表数（去重后）"
+          >
+            <BarChart3 size={12} strokeWidth={1.5} aria-hidden />
+            {run.chart_count ?? 0}
+          </span>
           <span className="orca-text-faint">·</span>
           <span>{fmtAgo(run.started_at)}</span>
         </div>

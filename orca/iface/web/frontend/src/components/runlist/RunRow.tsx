@@ -15,6 +15,7 @@
 
 import {
   Activity,
+  BarChart3,
   ExternalLink,
   Timer,
   Trash2,
@@ -105,6 +106,12 @@ export function RunRow({
             icon={Activity}
             value={String(run.event_count ?? 0)}
             label="事件数"
+          />
+          {/* SPEC 2026-08-10-card-event-log-align §3.6：图表数 metric（去重后，对齐 selectCharts） */}
+          <Metric
+            icon={BarChart3}
+            value={String(run.chart_count ?? 0)}
+            label="图表"
           />
         </span>
       </button>

@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -203,7 +204,11 @@ class RunSummary(BaseModel):
     cost: float = 0.0
     elapsed: float = 0.0
     started_at: float | None = None
+    # SPEC 2026-08-10-card-event-log-align §3.3：语义改全量→log 行数（对齐前端 LogStream
+    # 默认 showDebug=false 行数）。同名 ``RunMetaExtended.event_count`` 保持全量（huge 判定用）。
     event_count: int = 0
+    # SPEC §3.3：新增 chart_count = 前端 ``selectCharts`` 去重后图表数（非 huge / loadFull 后）。
+    chart_count: int = 0
     source: Literal["in-process", "attached", "legacy"] = "in-process"
 
 
@@ -241,9 +246,10 @@ class RunManager:
         self._meta_cache: dict[tuple[str, float, int], tuple[int, int, int, dict | None]] = {}
         # SPEC §13.3 P0：持久派生缓存（cache 非 index，可删可重建，不违 R1/§9）。
         # 按runs_dir（每个注册项目）懒加载到内存；miss/hit 写回单条 entry。损坏 → warn + 重建。
-        # 结构：``{runs_dir: {"version":2, "entries": {<tape_name>: {mtime,size,count,oldest,newest,overview}}}}``。
-        # version=2（SPEC 2026-08-10-home-list-lazy-index §3.3）：旧 v1 entry 无 workflow_name /
-        # started_ts / ended_ts 三字段，version gate 一次性强失效重建。
+        # 结构：``{runs_dir: {"version":3, "entries": {<tape_name>: {mtime,size,count,oldest,newest,overview}}}}``。
+        # version=3（SPEC 2026-08-10-card-event-log-align §3.5）：旧 v2 entry 无 log_event_count /
+        # chart_count 两字段，version gate 一次性强失效重建。v1/v2→v3 history 见
+        # ``_persistent_cache_loaded`` docstring。
         self._persistent_cache_by_runs_dir: dict[Path, dict] = {}
         # SPEC 2026-08-10-home-list-lazy-index §3.3 批量写回（G2 前提）：discover_runs 期间
         # ``_defer_persist=True``，compute 结果只更 in-memory dict + 标 dirty runs_dir，尾部
@@ -928,6 +934,18 @@ class RunManager:
         replay 的 O(3N) 退化。memoize key = ``(path, mtime, size)``，hit 时 O(1)。
 
         单一真相源仍是 tape；overview 是派生视图，与客户端 fold 同源（前端信任 + 可验）。
+
+        **SPEC 2026-08-10-card-event-log-align §3.3 双语义对照表（F10，防混淆）**：
+
+        | 字段位置 | 语义 | 用途 | 来源 |
+        |----------|------|------|------|
+        | ``RunSummary.event_count``（卡片） | **log 行数** | 主页卡片"事件数" | overview.log_event_count |
+        | ``RunMetaExtended.event_count``（本方法返） | **全量** | huge 判定（>50000）+ /meta 客户端 | _scan_meta_overview 全量 count |
+
+        同一 JSON key ``event_count`` 两处不同语义——**故意**（本方法的全量供 huge 判定 /
+        前端 byte_size 对账，RunSummary 的 log 行数供卡片显示）。前端 ``RunMetaExtended`` TS
+        的 ``overview`` 字段经 ``ServerOverview`` 类型加 optional ``log_event_count?`` /
+        ``chart_count?``（不用即忽略，不害）。
         """
         handle = self._runs.get(run_id)
         if handle is None:
@@ -1469,6 +1487,29 @@ class RunManager:
                 continue
             tp = _handle_tape_path(handle)
             project_id, project_name = self._lookup_project_for_handle(handle, tp)
+            # SPEC 2026-08-10-card-event-log-align §3.4：从 tape fold 取真实 log_event_count +
+            # chart_count（不再硬编码 0，G2）。**直调 ``_scan_meta_overview`` 不经 cache**（ISSUE-B）：
+            # live tape 每 poll mtime/size 变 → cache key 失效 → 缓存意义不大；直调避免每 8s
+            # poll 触发 ``.orca-meta-cache.json`` 持久 writeback（live run 持久 cache 永远 stale，
+            # 写入纯浪费 IO）。tape 不可 fold（无 path / live-pending / 坏 tape）→ fallback 0
+            # 不崩（既有 live-pending 语义）。status 仍取 handle.status hint（E10/N5 不变）。
+            event_count = 0
+            chart_count = 0
+            if tp is not None and tp.is_file():
+                try:
+                    _, _, _, overview_data = _scan_meta_overview(tp)
+                except Exception:  # noqa: BLE001 — live tape 读失败不应崩 discover
+                    logger.warning(
+                        "discover_runs: live run %s tape fold 失败，event/chart count 降级 0：%s",
+                        handle.run_id, tp, exc_info=True,
+                    )
+                    overview_data = None
+                if overview_data is not None:
+                    ov = overview_data.get("overview") or {}
+                    raw_lec = ov.get("log_event_count")
+                    raw_cc = ov.get("chart_count")
+                    event_count = raw_lec if isinstance(raw_lec, int) else 0
+                    chart_count = raw_cc if isinstance(raw_cc, int) else 0
             # E2：显式 dedup（理论上 attached 已被 skip-if-in-self._runs 兜底，此处防御
             # _runs 内部重复 handle 极端情况）。
             seen_ids.add(handle.run_id)
@@ -1483,7 +1524,8 @@ class RunManager:
                     cost=meta.cost,
                     elapsed=meta.elapsed,
                     started_at=handle.started_at,
-                    event_count=0,  # C1 perf 占位符（handle 不持有 event_count）
+                    event_count=event_count,  # log 行数（SPEC §3.4 修复，原 C1 占位符 0）
+                    chart_count=chart_count,
                     source="in-process" if isinstance(handle, InProcessRunHandle) else "attached",
                 )
             )
@@ -1716,20 +1758,24 @@ class RunManager:
     def _persistent_cache_loaded(self, runs_dir: Path) -> dict:
         """加载（懒）runs_dir 对应的持久缓存。损坏 / version 不符 → 空 + warn。
 
-        SPEC 2026-08-10-home-list-lazy-index §3.3 version gate：``raw.get("version") != 2``
-        → 视为空重建（旧 v1 entry 无 workflow_name / started_ts / ended_ts 三字段）。
+        SPEC 2026-08-10-home-list-lazy-index §3.3 + 2026-08-10-card-event-log-align §3.5
+        version gate：``raw.get("version") != 3`` → 视为空重建。
+          - v1 → 缺 workflow_name / started_ts / ended_ts 三字段。
+          - v2 → 缺 log_event_count / chart_count 两字段（卡片事件数=0 / 图表数=0 谬误）。
+          - v3（当前）= 含全字段 overview（agents/charts/cost_usd/run_status/workflow_name/
+            started_ts/ended_ts/log_event_count/chart_count）。
         """
         if runs_dir in self._persistent_cache_by_runs_dir:
             return self._persistent_cache_by_runs_dir[runs_dir]
         cache_path = runs_dir / ".orca-meta-cache.json"
-        data: dict = {"version": 2, "entries": {}}
+        data: dict = {"version": 3, "entries": {}}
         if cache_path.is_file():
             try:
                 raw = json.loads(cache_path.read_text(encoding="utf-8"))
                 if (
                     isinstance(raw, dict)
                     and isinstance(raw.get("entries"), dict)
-                    and raw.get("version") == 2  # §3.3 version gate（BLOCKER）
+                    and raw.get("version") == 3  # §3.5 version gate（v2→v3 五处之一）
                 ):
                     data = raw
                 else:
@@ -1771,7 +1817,7 @@ class RunManager:
         """
         runs_dir = tape_path.parent
         data = self._persistent_cache_loaded(runs_dir)
-        data["version"] = 2  # §3.3：写时带 version=2
+        data["version"] = 3  # §3.5：写时带 version=3（v2→v3 五处之一）
         entries = data.setdefault("entries", {})
         entries[tape_path.name] = {
             "mtime": mtime,
@@ -1861,9 +1907,16 @@ class RunManager:
         直构共用（SPEC 2026-08-10-home-list-lazy-index §3.2 / §3.4 step2）。
 
         - ``count == 0`` → ``None``（discovery skip 语义；空 tape / 坏 tape）。
-        - overview 缺字段（理论仅 v1 残留，v2 强失效后不可能）→ fallback 不崩：
+        - overview 缺字段（理论仅 v1/v2 残留，v3 强失效后不可能）→ fallback 不崩：
           ``workflow_name``→``run_id``（= stem）、``elapsed``→``0.0``。
         - in-memory 分支（live handle hint 语义）**不走本方法**（SPEC §3.4 step4，E10/N5）。
+
+        SPEC 2026-08-10-card-event-log-align §3.3：
+          - ``RunSummary.event_count`` ← ``overview.log_event_count``（**语义改全量→log 行数**）。
+          - ``RunSummary.chart_count`` ← ``overview.chart_count``。
+          - F3 fallback：overview 缺 ``log_event_count``（v2 残留，v3 gate 后理论不可达）→
+            用全量 ``count`` 作 best-effort + warn（over-count 方向 NEW-4，不静默）。本方法
+            是 ``@staticmethod`` 无 cache 访问、不能触发 recompute（F3）；v3 gate 守常态不触达。
         """
         if count == 0:
             return None
@@ -1900,6 +1953,26 @@ class RunManager:
             elapsed = max(0.0, ended_ts - started_ts)
         else:
             elapsed = 0.0
+        # SPEC §3.3 + F3：log_event_count 优先；缺字段用全量 count 作 best-effort + warn（over-count
+        # 方向 NEW-4；v3 gate 后理论不可达，但 cache 文件可能被外部降版——fail loud 不静默）。
+        raw_log_count = overview.get("log_event_count")
+        if isinstance(raw_log_count, int):
+            event_count = raw_log_count
+        else:
+            logger.warning(
+                "overview 缺 log_event_count（v2 残留？），降级用全量 count=%d（over-count）：run=%s",
+                count, run_id,
+            )
+            event_count = count
+        # SPEC §3.3：chart_count 缺字段 fallback 0 + warn。
+        raw_chart_count = overview.get("chart_count")
+        if isinstance(raw_chart_count, int):
+            chart_count = raw_chart_count
+        else:
+            logger.warning(
+                "overview 缺 chart_count（v2 残留？），降级为 0：run=%s", run_id
+            )
+            chart_count = 0
         return RunSummary(
             run_id=run_id,
             workflow_name=wf_name,
@@ -1910,7 +1983,8 @@ class RunManager:
             cost=float(overview.get("cost_usd") or 0.0),
             elapsed=elapsed,
             started_at=started_ts,
-            event_count=count,
+            event_count=event_count,
+            chart_count=chart_count,
             source=source,  # type: ignore[arg-type]
         )
 
@@ -2468,7 +2542,36 @@ _META_BULK_MARKERS = (
 BULK_EVENT_TYPES: frozenset[str] = frozenset(
     m.strip('"') for m in _META_BULK_MARKERS
 )
-_META_SEQ_RE = __import__("re").compile(r'"seq":\s*(\d+)')
+_META_SEQ_RE = re.compile(r'"seq":\s*(\d+)')
+
+# SPEC 2026-08-10-card-event-log-align §3.1：log 行数白名单 = 前端 ``classifyLogLevel``
+# （selectors.ts）非 null **且非 route_taken**（U1 同步契约，双向引用——前端是基准，不改）。
+# 26 个 = 9 info + 10 success + 6 error + 1 warning；``route_taken``（debug 级）排除。
+# ``_scan_meta_overview`` 单遍双分支（fast-path + full-parse）都查此白名单计 ``log_event_count``。
+# **改前端 ``classifyLogLevel`` 必须同步改这里**（AC5 单测集合相等守门）。
+_LOG_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        # info（9）：开始类生命周期
+        "workflow_started", "node_started", "foreach_started", "retry_started",
+        "validator_started", "wait_started", "human_decision_requested",
+        "interrupt_requested", "dialog_started",
+        # success（10）：完成类生命周期
+        "workflow_completed", "workflow_resumed", "node_completed",
+        "foreach_completed", "retry_succeeded", "validator_passed",
+        "wait_completed", "human_decision_resolved", "interrupt_resolved",
+        "dialog_ended",
+        # error（6）：失败类
+        "workflow_failed", "workflow_cancelled", "node_failed",
+        "retry_exhausted", "validator_failed", "error",
+        # warning（1）：跳过
+        "node_skipped",
+    }
+)
+# 同级 regex 提取 top-level ``type``（与 ``_META_SEQ_RE`` 同款 substring fast-path）。
+# 依赖 ``orca/events/tape.py`` payload key 顺序（seq, type, timestamp, node, session_id, data）
+# ——``type`` 恒在 ``data`` 之前 → ``search()`` 最左匹配恒命中 top-level type；data 内嵌套
+# ``"type"`` 键经 json.dumps 的 ``"`` escape 也不误匹配。**改 tape.py payload 构造须同步审查**。
+_META_TYPE_RE = re.compile(r'"type":\s*"(\w+)"')
 
 # 终态事件集（SPEC 2026-08-10-home-list-lazy-index §3.1）：``_scan_meta_overview`` 单遍
 # capture ``ended_ts`` 用（最末终态事件 timestamp，后值覆盖；与旧 ``_scan_tape_timebounds`` 同源）。
@@ -2494,6 +2597,11 @@ def _scan_meta_overview(path: Path) -> tuple[int, int, int, dict | None]:
     ``_scan_tape_timebounds`` 的重扫（带类型守卫，防爆半径）。
     """
     count = 0
+    # SPEC 2026-08-10-card-event-log-align §3.1：log 行数（白名单类型计数，对齐前端
+    # ``classifyLogLevel`` 非 null 且非 route_taken；双分支都计数，fast-path 不能漏）。
+    log_event_count = 0
+    # SPEC §3.2：chart 去重 identity set（对齐前端 ``selectCharts`` 的 byIdentity）。
+    seen_chart_ids: set[str] = set()
     oldest = 0
     newest = 0
     node_status: dict[str, str] = {}
@@ -2533,6 +2641,14 @@ def _scan_meta_overview(path: Path) -> tuple[int, int, int, dict | None]:
                             oldest = seq
                         if seq > newest:
                             newest = seq
+                        # SPEC §3.1 NEW-1：type check 放 ``if m:`` 块内、``count += 1`` 之后
+                        # ——使无 seq 的事件同时被 count 和 log_event_count 排除（与 full-parse
+                        # 的 ``if not isinstance(seq, int): continue`` 一致）。fast-path 用真实
+                        # type 查白名单，绕过 bulk substring 误判（如 _META_BULK_MARKERS 含 18 个
+                        # log 白名单类型走此路径，单 full-parse 计数会漏 ~70%）。
+                        tm = _META_TYPE_RE.search(stripped)
+                        if tm and tm.group(1) in _LOG_EVENT_TYPES:
+                            log_event_count += 1
                     continue
 
                 # Full parse for state-changing types
@@ -2553,6 +2669,10 @@ def _scan_meta_overview(path: Path) -> tuple[int, int, int, dict | None]:
                 node = obj.get("node")
                 data = obj.get("data") or {}
                 ts = obj.get("timestamp")
+                # SPEC §3.1：full-parse 分支也查白名单（与 fast-path 对称；8 个 overview-
+                # affecting 类型走此路径：workflow_* + node_*）。
+                if t in _LOG_EVENT_TYPES:
+                    log_event_count += 1
 
                 if t == "workflow_started":
                     wf_status = "running"
@@ -2597,11 +2717,26 @@ def _scan_meta_overview(path: Path) -> tuple[int, int, int, dict | None]:
                 elif t == "custom" and data.get("kind") == "chart":
                     chart = data.get("chart")
                     if isinstance(chart, dict):
+                        # SPEC §3.2 F4 + NEW-2 Option A：isinstance 守卫匹配前端
+                        # ``typeof === "string"``（``""`` 是 str → ""，不能用 ``str(... or ...)``：
+                        # Python ``"" or "x"`` 把空串当 falsy → 与 JS ``"" || "x"`` 行为一致但
+                        # identity 仍要保留空串语义——这里 identity 用 ``title or fallback`` 与
+                        # 前端 ``title || \`${chart_type}#${seq}\``` 对齐，""→fallback）。
+                        # 同款守卫供 charts list（huge 模式 meta overview）与 chart_count 共用（DRY）。
+                        label_raw = chart.get("label")
+                        title_raw = chart.get("title")
+                        ct_raw = chart.get("chart_type")
+                        label = label_raw if isinstance(label_raw, str) else "misc"
+                        title = title_raw if isinstance(title_raw, str) else ""
+                        chart_type = ct_raw if isinstance(ct_raw, str) else "chart"
+                        # identity：``title`` 非空 → title；否则 ``chart_type#seq``（前端 U1）。
+                        identity = title if title else f"{chart_type}#{seq}"
+                        seen_chart_ids.add(identity)
                         charts.append(
                             {
-                                "label": str(chart.get("label") or "misc"),
-                                "title": str(chart.get("title") or ""),
-                                "chart_type": str(chart.get("chart_type") or "chart"),
+                                "label": label,
+                                "title": title,
+                                "chart_type": chart_type,
                             }
                         )
                 # ended_ts：最末终态事件 timestamp（后值覆盖，与旧 _scan_tape_timebounds 同源；
@@ -2630,5 +2765,11 @@ def _scan_meta_overview(path: Path) -> tuple[int, int, int, dict | None]:
         "workflow_name": workflow_name,
         "started_ts": started_ts,
         "ended_ts": ended_ts,
+        # SPEC 2026-08-10-card-event-log-align §3.1 / §3.2：log 行数 + 去重图表数。
+        # ``log_event_count`` = log 白名单事件数（RunSummary.event_count 用此，**非全量 count**）；
+        # ``chart_count`` = ``selectCharts`` 去重后图表数（与 charts list 并存：list 给 huge
+        # 模式 meta overview 用、count 给卡片用）。
+        "log_event_count": log_event_count,
+        "chart_count": len(seen_chart_ids),
     }
     return (count, oldest, newest, {"overview": overview})

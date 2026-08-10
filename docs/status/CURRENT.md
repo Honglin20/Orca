@@ -4,6 +4,40 @@
 
 ---
 
+## 历史：卡片事件数对齐 log + 图表数字段——已完成 + code-reviewer 闭环（待 test-agent e2e）
+
+**任务**：SPEC `docs/specs/2026-08-10-card-event-log-align.md` v3（两轮 spec-review FAIL→PASS-ready）
+——主页卡片"事件数"在别处服务器显示 0（in-memory 分支硬编码 0）+ 语义错（全量而非 log 行数）+
+缺图表数字段。
+
+**状态**：**实现 + 12 单测（AC4-AC7 + F3 fallback + in-memory 异常路径）+ code-reviewer 一轮
+闭环（0 MUST-FIX，2 SHOULD-FIX 全修：AC4 fixture 精确匹配 SPEC + in-memory 异常路径补测）**。
+逐字实现 SPEC v3 五块契约：
+- §3.1 双分支 log_event_count（fast-path + full-parse 都查白名单；NEW-1 placement：fast-path
+  type check 放 `if m:` 块内 `count += 1` 之后）。新增 `_LOG_EVENT_TYPES`（26 类型，U1 ↔ 前端
+  `classifyLogLevel`）+ `_META_TYPE_RE` regex。
+- §3.2 chart_count 去重（isinstance 守卫匹配前端 `typeof === "string"`，F4 空 chart_type edge case；
+  NEW-2 Option A：charts list 与 chart_count 共用同款守卫，DRY）。
+- §3.3 RunSummary.event_count 语义改全量→log 行数 + 新增 chart_count；meta event_count 保持
+  全量（huge 判定依赖，双语义对照表 docstring）。
+- §3.4 in-memory 分支直调 `_scan_meta_overview`（不经 cache，ISSUE-B 避免 per-poll writeback）。
+- §3.5 cache version v2→v3 五处（default/gate/writeback stamp/两个 docstring）。
+- 前端 RunRow.tsx + BoardCard.tsx 加 chart_count metric；TS 类型同步。
+验证：tests/iface/web 非 Playwright 299 passed（297 旧 + 12 新）+ 前端 tsc 干净 + 535 vitest passed。
+
+**必读**：
+- SPEC `docs/specs/2026-08-10-card-event-log-align.md`（§3 五块契约 + §7 U1 同步）。
+- `orca/iface/web/run_manager.py:_scan_meta_overview`（双分支计数 + chart 去重）+ `_LOG_EVENT_TYPES`
+  （U1 白名单）+ `_summary_from_overview`（F3 fallback）+ `discover_runs`（§3.4 in-memory 直调）。
+
+**待办**（test-agent 后续）：
+- [ ] e2e AC1：拉几个真实 run，卡片事件数 vs log 面板行数零偏差（showDebug=false）。
+- [ ] e2e AC2：in-session 跑 run，主页卡片事件数 > 0（验证 §1.1 根因）。
+- [ ] e2e AC3：有图表的 run，卡片图表数 == 详情页图表数（非 huge / loadFull 后）。
+- [ ] release note（用户后续）。
+
+---
+
 ## 当前：nas-supernet 监控改造+图表修复+洁净——实现完成，待 test-agent E2E
 
 **任务**：SPEC `docs/specs/2026-08-10-nas-supernet-chart-cleanliness-monitoring.md`（两轮 spec-review pass）

@@ -5,6 +5,20 @@
 
 ---
 
+## [2026-08-10] fix(web): 卡片事件数对齐 log + 图表数字段（双分支计数 + cache v2→v3）
+
+主页卡片"事件数"在别处服务器显示 0（in-memory 分支硬编码 0）+ 语义错（全量而非 log 行数，
+含工具调用）+ 缺图表数。**SPEC 2026-08-10-card-event-log-align v3 逐字实现**：① `_scan_meta_overview`
+单遍双分支计 `log_event_count`（fast-path + full-parse 都查 `_LOG_EVENT_TYPES` 白名单 = 前端
+`classifyLogLevel` U1 同步；NEW-1 fast-path type check 放 `if m:` 块内 count+1 后）；② chart_count
+去重 + isinstance 守卫（F4 空 chart_type edge case；NEW-2 charts list 与 chart_count 共用 DRY）；
+③ `RunSummary.event_count` 语义改全量→log 行数 + 新增 chart_count；meta `event_count` 保持
+全量（双语义对照表）；④ in-memory 分支直调 `_scan_meta_overview` 不经 cache（ISSUE-B：避免 per-poll
+持久 writeback）；⑤ cache version v2→v3 五处。前端 RunRow/BoardCard 加 chart_count metric。验证：
+12 新单测（AC4-AC7 + F3 + 异常路径）+ 非 Playwright 299 passed + 前端 tsc/535 vitest 干净 +
+code-reviewer 一轮闭环 0 MUST-FIX / 2 SHOULD-FIX 全修。Commit: 待 commit。详见 SPEC
+[2026-08-10-card-event-log-align.md](../specs/2026-08-10-card-event-log-align.md)（release note 用户后续）。
+
 ## [2026-08-10] fix(nas-supernet): 图表正确性修复 + prompt 洁净 + train/retrain 监控改造（CRON→有界轮询+无上限自愈）+ search 无上限自愈
 
 四段改动（A/B/C/D）：A 图表正确性 6 项（search_table 降级不空表 / progress_watcher drain 末点 / metrics_bar 动态样本数 / best_val NaN 哨兵过滤 / 删 live_loss_watcher 死码 / chart stderr 可见）；B prompt 洁净 5 项（含 supernet-evaluator 资源路径运行时 bug 修复）；C 监控改造（新增 monitor_until_done.sh + agent.md 决策树 CRON→C-loop/HEAL-LOOP + launch.sh 删 3 次硬预算 + yaml 文案全清）；D search 无上限自愈（删 max_retries=3 + resume guard + Step 3 attempt3 硬编码修复）。待 test-agent E2E。详见 [release note](docs/releases/2026-08-10-nas-supernet-chart-cleanliness-monitoring.md)。

@@ -35,7 +35,12 @@ export interface RunSummary {
   cost?: number;
   elapsed?: number;
   started_at?: number | null;
+  // SPEC 2026-08-10-card-event-log-align §3.3：语义=LogStream 行数（前端 classifyLogLevel
+  // 非 null 且非 route_taken；后端 RunSummary.event_count 与之 U1 同步）。同名
+  // RunMetaExtended.event_count（/meta 响应）保持全量（huge 判定用）——双语义故意。
   event_count?: number;
+  // SPEC §3.3：图表数（去重后，对齐 selectCharts identity；非 huge / loadFull 后）。
+  chart_count?: number;
   source?: string;
 }
 

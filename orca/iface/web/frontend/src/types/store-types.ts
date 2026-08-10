@@ -134,6 +134,12 @@ export interface ServerOverview {
   charts: OverviewChart[];
   cost_usd: number;
   run_status: string;
+  // SPEC 2026-08-10-card-event-log-align §3.3 F8：huge 模式 meta overview 会带这两个 optional 字段
+  // （从 v3 cache 起；旧 v2 cache 经 version gate 重建后才有）。前端不用即忽略——``log_event_count``
+  // 后端语义=卡片 event_count 同口径（log 行数）；``chart_count`` 是去重数（前端 selectCharts
+  // huge 模式分支用原始 charts list 不去重，故 huge 模式下卡片 chart_count 可能 < 前端显示数）。
+  log_event_count?: number;
+  chart_count?: number;
 }
 
 // ── Loader 错误态（SPEC audit-c §4.1 INV-1 fail loud）──────────────────────────────

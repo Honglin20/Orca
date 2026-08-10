@@ -5,10 +5,10 @@
     elapsed / started_at / event_count / cost）与 tape 已知值全等——验证 §3.1 单遍 capture +
     §3.2 ``_summary_from_overview`` 派生正确（等价于旧 ``_topology_workflow_name_from_tape`` +
     ``_scan_tape_timebounds`` 的口径）。
-  - **AC5**：持久缓存 version gate——构造 v1 cache 文件 → ``_persistent_cache_loaded`` 返空
-    （version=2）+ warn。
+  - **AC5**：持久缓存 version gate——构造 v1/v2 cache 文件 → ``_persistent_cache_loaded`` 返空
+    （version=3）+ warn。
   - **§3.3 批量写回**：``discover_runs`` 期间 defer，尾部 per-runs_dir 单次 flush，落盘
-    ``version=2`` + entries 完整；二次 discovery 走缓存命中（直构，零 recompute）。
+    ``version=3`` + entries 完整；二次 discovery 走缓存命中（直构，零 recompute）。
   - **§3.4 scandir 直构**：缓存命中 → ``_summary_from_overview`` 直构（不调 ``_scan_meta_overview``）。
   - **§3.1 守卫（BLOCKER I-1/I-2）**：非数值 timestamp 不炸 overview（守卫缺失会让外层 except
     吞掉整个 overview，agents/cost/status 一同丢失）。
@@ -56,8 +56,13 @@ def _write_tape(path: Path, events: list[dict]) -> None:
 def test_summary_from_tape_fields_match_tape_values(tmp_path):
     """AC3：``_summary_from_tape`` 从单遍 capture 的 overview 派生 RunSummary，字段值与
     tape 已知值全等（workflow_name / status / progress / elapsed / started_at / cost /
-    event_count）。等价于旧 ``_topology_workflow_name_from_tape`` + ``_scan_tape_timebounds``
-    口径（同源 capture，验证 §3.1 等价性论证）。"""
+    event_count / chart_count）。等价于旧 ``_topology_workflow_name_from_tape`` +
+    ``_scan_tape_timebounds`` 口径（同源 capture，验证 §3.1 等价性论证）。
+
+    SPEC 2026-08-10-card-event-log-align §3.3：``event_count`` 语义改全量 → **log 行数**
+    （对齐前端 ``classifyLogLevel`` 非 null 且非 route_taken）。fixture 含 6 全量事件，
+    其中 ``agent_usage`` 不属 log 白名单 → log_event_count == 5（排除 agent_usage）。
+    """
     tape_path = tmp_path / "runs" / "run-abc.jsonl"
     _write_tape(
         tape_path,
@@ -88,7 +93,10 @@ def test_summary_from_tape_fields_match_tape_values(tmp_path):
     assert summary.progress == "1/2"  # n1 done / n2 pending
     assert summary.elapsed == pytest.approx(10.0)  # 1010.0 - 1000.0
     assert summary.started_at == pytest.approx(1000.0)
-    assert summary.event_count == 6
+    # SPEC §3.3：log 行数 = 5（排除 agent_usage；含 workflow_started/node_started×2/
+    # node_completed/workflow_completed）。全量 count = 6 由 meta event_count 字段持有（见 AC7）。
+    assert summary.event_count == 5
+    assert summary.chart_count == 0
     assert summary.cost == pytest.approx(0.5)
     assert summary.source == "attached"
 
@@ -231,11 +239,15 @@ def test_scan_meta_overview_workflow_name_non_str_guarded(tmp_path):
 
 
 def test_persistent_cache_v1_rejected_and_warns(tmp_path, caplog):
-    """AC5：构造 v1 cache 文件 → ``_persistent_cache_loaded`` 返空（version=2）+ warn。"""
+    """AC5：构造 v1 cache 文件 → ``_persistent_cache_loaded`` 返空（version=3）+ warn。
+
+    SPEC 2026-08-10-card-event-log-align §3.5：cache version v2→v3（v2 缺 log_event_count /
+    chart_count 字段）。v1 同样被拒（v1 缺 workflow_name / started_ts / ended_ts）。
+    """
     runs_dir = tmp_path / "runs"
     runs_dir.mkdir(parents=True)
     cache_path = runs_dir / ".orca-meta-cache.json"
-    # v1 结构（无 version=2，无新三字段）
+    # v1 结构（无 version=3，无新五字段）
     cache_path.write_text(
         json.dumps(
             {"version": 1, "entries": {"old.jsonl": {"mtime": 1.0, "size": 10,
@@ -247,8 +259,8 @@ def test_persistent_cache_v1_rejected_and_warns(tmp_path, caplog):
     manager = RunManager()
     with caplog.at_level(logging.WARNING, logger="orca.iface.web.run_manager"):
         data = manager._persistent_cache_loaded(runs_dir)
-    # version gate 触发 → 空重建（version=2 + 无 entries）
-    assert data["version"] == 2
+    # version gate 触发 → 空重建（version=3 + 无 entries）
+    assert data["version"] == 3
     assert data["entries"] == {}
     # warn 记录（含文件路径，便于稳定 grep）
     assert any(
@@ -257,11 +269,13 @@ def test_persistent_cache_v1_rejected_and_warns(tmp_path, caplog):
     )
 
 
-def test_persistent_cache_v2_accepted(tmp_path):
-    """AC5 配套：v2 cache 正常加载（不被 version gate 拒）。"""
+def test_persistent_cache_v2_also_rejected_for_v3_upgrade(tmp_path, caplog):
+    """SPEC 2026-08-10-card-event-log-align §3.5：v2 cache 也要被拒（v2 缺 log_event_count /
+    chart_count）——v2→v3 升级 gate 守门。"""
     runs_dir = tmp_path / "runs"
     runs_dir.mkdir(parents=True)
     cache_path = runs_dir / ".orca-meta-cache.json"
+    # v2 结构（缺 log_event_count / chart_count）
     entry = {
         "mtime": 1.0, "size": 10, "count": 2, "oldest": 1, "newest": 2,
         "overview": {"overview": {"agents": [], "charts": [], "cost_usd": 0.0,
@@ -270,22 +284,47 @@ def test_persistent_cache_v2_accepted(tmp_path):
                                   "ended_ts": 2.0}},
     }
     cache_path.write_text(
-        json.dumps({"version": 2, "entries": {"ok.jsonl": entry}}),
+        json.dumps({"version": 2, "entries": {"old.jsonl": entry}}),
+        encoding="utf-8",
+    )
+    manager = RunManager()
+    with caplog.at_level(logging.WARNING, logger="orca.iface.web.run_manager"):
+        data = manager._persistent_cache_loaded(runs_dir)
+    assert data["version"] == 3  # gate 拒 v2 → 空 v3 重建
+    assert data["entries"] == {}
+
+
+def test_persistent_cache_v3_accepted(tmp_path):
+    """AC5 配套：v3 cache 正常加载（不被 version gate 拒）。"""
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir(parents=True)
+    cache_path = runs_dir / ".orca-meta-cache.json"
+    entry = {
+        "mtime": 1.0, "size": 10, "count": 2, "oldest": 1, "newest": 2,
+        "overview": {"overview": {"agents": [], "charts": [], "cost_usd": 0.0,
+                                  "run_status": "completed",
+                                  "workflow_name": "wf", "started_ts": 1.0,
+                                  "ended_ts": 2.0,
+                                  # SPEC §3.5 v3 新增两字段
+                                  "log_event_count": 2, "chart_count": 0}},
+    }
+    cache_path.write_text(
+        json.dumps({"version": 3, "entries": {"ok.jsonl": entry}}),
         encoding="utf-8",
     )
     manager = RunManager()
     data = manager._persistent_cache_loaded(runs_dir)
-    assert data["version"] == 2
+    assert data["version"] == 3
     assert "ok.jsonl" in data["entries"]
 
 
 # ── §3.3 批量写回 + §3.4 scandir 直构（discover_runs 端到端）──────────────
 
 
-def test_discover_runs_writes_v2_cache_and_direct_constructs_on_hit(
+def test_discover_runs_writes_v3_cache_and_direct_constructs_on_hit(
     tmp_path, monkeypatch
 ):
-    """§3.3 + §3.4：``discover_runs`` 落盘 version=2 cache + entries 完整；二次 discovery
+    """§3.3 + §3.4：``discover_runs`` 落盘 version=3 cache + entries 完整；二次 discovery
     缓存命中走 ``_summary_from_overview`` 直构（不调 ``_scan_meta_overview`` recompute）。
 
     验证意图（非仅行为）：直构路径 zero-fold——patch ``_scan_meta_overview`` 为 raising stub，
@@ -323,11 +362,11 @@ def test_discover_runs_writes_v2_cache_and_direct_constructs_on_hit(
     assert by_id["run-2"].workflow_name == "wf_two"
     assert by_id["run-2"].elapsed == pytest.approx(5.0)
 
-    # 落盘 cache（version=2 + entries 完整 + defer 已 flush）
+    # 落盘 cache（version=3 + entries 完整 + defer 已 flush）
     cache_path = runs_dir / ".orca-meta-cache.json"
     assert cache_path.is_file(), "discover_runs 未落盘持久 cache"
     disk = json.loads(cache_path.read_text(encoding="utf-8"))
-    assert disk["version"] == 2
+    assert disk["version"] == 3
     assert set(disk["entries"].keys()) == {"run-1.jsonl", "run-2.jsonl"}
     # entries 含新三字段（capture 进 overview）
     ov1 = disk["entries"]["run-1.jsonl"]["overview"]["overview"]
@@ -414,7 +453,7 @@ def test_persistent_cache_writeback_immediate_when_not_deferred(tmp_path):
     cache_path = runs_dir / ".orca-meta-cache.json"
     assert cache_path.is_file(), "单 tape 路径未即时落盘"
     disk = json.loads(cache_path.read_text(encoding="utf-8"))
-    assert disk["version"] == 2
+    assert disk["version"] == 3
     assert "solo.jsonl" in disk["entries"]
     # defer 未开启 → 不标 dirty
     assert manager._dirty_runs_dirs == set()
