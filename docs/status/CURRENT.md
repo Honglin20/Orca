@@ -4,6 +4,30 @@
 
 ---
 
+## 当前：opencode in-session 权限审批闭环（--auto 固化 + tool.execute.before 桥）——实现完成，待 test-agent headless 实测
+
+**任务**：SPEC `docs/specs/2026-08-11-opencode-permission-bridge.md`（两轮 spec-review PASS，全 issue 闭环）——
+opencode 家族（opencode/nga）补齐权限闭环：**Part A** `--auto` 固化进 profile default flags（堵 DEFECT-1
+headless 原生权限 `external_directory` ask 挂死）+ **Part B** `orca.ts` 新增 `tool.execute.before` hook 桥接
+broker `/approval`（主 agent + Task 子代理覆盖；yolo/web 卡复用 broker 既有决策，桥是哑传输）。
+铁律：**cc/cac 零改动**（AC6 七文件 git-diff 全 CLEAN：broker/hook 脚本/routes/claude,ccr profile/active_runs/install_cmds）。
+
+**状态**：**实现完成 + 两轮 code-reviewer 闭环（0 MUST-FIX，🟢 全采纳）+ 单测全绿，待 test-agent headless 实测**：
+- Part A：`orca/profiles/builtin/opencode.py` flags 加 `"--auto"` + docstring B4 限制（`ORCA_OPENCODE_FLAGS` REPLACE 语义：固化仅救未设 env 者）。
+- Part B：`orca/iface/in_session/templates/opencode/orca.ts` 抽 5 个 exported 纯函数（`_decide`/`_askBroker`/`_brokerConfig`/`_resolveApprovalSessionId`/`_normalizeToolInput`）+ `tool.execute.before` hook；fail 语义逐字匹配 SPEC §4（不可达/异常 fail-open 防 DEFECT-1 复发；HTTP 错/坏响应 fail loud）；session 双键 `ORCA_SESSION_ID || input.sessionID`（B1 headless node 键 + 交互 host 键）。
+- 测试：Python 静态门 13 passed（CI 守门）+ node:test 行为表 39 passed（零依赖 node 24 type stripping；含 `_askBroker` 6 分类分支 + hook deny/不可达/no-sid early-return）；AC5 非回归 65 passed（cc/cac hook + broker + install）。
+- install：用户重跑 `tars install --target opencode|nga` 经 `_install_opencode`（`_atomic_write_with_backup`）更新 `orca.ts`（`_install_cc_nudge` 零改动）。
+
+**待办**：
+- [ ] test-agent headless 真机：AC1（`external_directory` 不挂）+ AC3（yolo on → 桥 allow）+ AC4（deny throw 阻断工具）。
+- [ ] close-out：test-agent 通过后写 release note + CHANGELOG（独立步骤，非本 commit 范围）。
+
+**必读**：
+- SPEC `docs/specs/2026-08-11-opencode-permission-bridge.md`（§2 Part A / §3-4 Part B / §6 AC1-AC6）。
+- `orca/iface/in_session/templates/opencode/orca.ts`（approval bridge helpers + `tool.execute.before` hook）。
+
+---
+
 ## 当前：nas-supernet-v2 新 workflow 实现——实现 + 自验完成，code-reviewer 后台运行中
 
 **任务**：SPEC `docs/specs/2026-08-11-nas-supernet-v2.md`（REVIEWED-PASS，21 issue 闭环）——

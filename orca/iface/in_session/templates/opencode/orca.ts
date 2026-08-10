@@ -242,6 +242,169 @@ function classifyTool(toolName: string, args: any): boolean {
   return true
 }
 
+// ── approval bridge（SPEC 2026-08-11-opencode-permission-bridge §3/§4/§5）──────────
+//
+// tool.execute.before 交互审批桥的纯逻辑：POST broker /approval → 据 behavior 放行/throw。
+// **哑传输**（D-v7-1 守门不变）：桥不做 Orca 业务判定（run 归属 / yolo / 审批决策全在 broker）。
+// run 归主由 broker active_runs.py 经 sessionID 双键（host_session / node_sessions）匹配。
+//
+// 纯函数（_decide / _brokerConfig / _normalizeToolInput / _resolveApprovalSessionId）抽出为
+// module scope + export，供 vitest 行为表单测（SPEC §8）。_askBroker 是唯一 IO 点（fetch）。
+
+// broker 调用结果分类（SPEC §4 失败语义）。_askBroker 把所有异常归类到这几种，
+// _decide 据此 + policy 决定放行/阻断。
+export type BrokerOutcome =
+  | { kind: "behavior"; behavior: string }   // 合法 JSON 响应，behavior 非空字符串
+  | { kind: "unreachable" }                   // fetch 网络错 / 连接拒（broker 不在线）
+  | { kind: "http-error"; status: number }    // 4xx/5xx（broker 活着但出错）
+  | { kind: "bad-response" }                  // 非 JSON / 缺 behavior（fail loud）
+  | { kind: "timeout" }                       // AbortController 超时
+  | { kind: "exception" }                     // 未预期异常
+
+export interface HookAction {
+  proceed: boolean         // true → return（放行）；false → throw（阻断）
+  throwMessage?: string    // proceed=false 时的 throw 文案
+}
+
+export interface BrokerConfig {
+  host: string
+  port: string
+  timeoutMs: number
+  timeoutPolicy: "allow" | "deny" | "ask"
+}
+
+// broker 连接 + 超时策略配置（SPEC §5）。硬编码默认 127.0.0.1:7428（与 ``tars serve`` 默认一致，
+// ``orca/iface/web/server.py:143-147``）；env 覆盖：``ORCA_HOST`` / ``ORCA_PORT`` /
+// ``ORCA_APPROVAL_TIMEOUT``（秒）/ ``ORCA_APPROVAL_TIMEOUT_POLICY``（allow|deny|ask）。
+// **headless executor overlay 不注连接 env**（``exec/env.py`` 只注 run 路由 env）→ 默认 7428 必须吻合。
+export function _brokerConfig(): BrokerConfig {
+  const env = (typeof process !== "undefined" && process.env) || {}
+  const host = env.ORCA_HOST || "127.0.0.1"
+  const port = env.ORCA_PORT || "7428"
+  const rawTimeout = env.ORCA_APPROVAL_TIMEOUT
+  let timeoutMs = 600000  // 默认 600s（与 CC hook 一致）
+  const parsed = Number(rawTimeout)
+  if (Number.isFinite(parsed) && parsed > 0) timeoutMs = parsed * 1000
+  const rawPolicy = (env.ORCA_APPROVAL_TIMEOUT_POLICY || "allow").trim().toLowerCase()
+  const timeoutPolicy: "allow" | "deny" | "ask" =
+    rawPolicy === "deny" || rawPolicy === "ask" ? rawPolicy : "allow"
+  return { host, port, timeoutMs, timeoutPolicy }
+}
+
+// session 解析（SPEC §3 B1 闭环）：ORCA_SESSION_ID（executor 注入的 orca-uuid == tape node
+// session_id；headless 命中 broker ``active_runs.py:221`` node 键 ``session_id in node_sessions``）
+// **||** input.sessionID（opencode 内部会话 id；交互模式命中 host 键——shell.env 钩子注
+// ``ORCA_HOST_SESSION_ID = input.sessionID`` → bootstrap 写 ``data.host_session``）。
+// translator 显式不复用 opencode 流里 sessionID（``translators/opencode.py:39-40``），故 headless
+// 必须取 ORCA_SESSION_ID（input.sessionID 在 tape 不存在 → resolver miss → 死桥）。两键不可合一为单源。
+export function _resolveApprovalSessionId(input: any): string | undefined {
+  const fromEnv = (typeof process !== "undefined" && process.env?.ORCA_SESSION_ID) || undefined
+  if (typeof fromEnv === "string" && fromEnv) return fromEnv
+  const fromInput = input?.sessionID
+  return typeof fromInput === "string" && fromInput ? fromInput : undefined
+}
+
+// tool_input 形状对齐 broker 期望（dict/list，非 dict/list → {}；与 ``approval_broker.py:283``
+// ``tool_input if isinstance(tool_input, (dict, list)) else {}`` 同款）。opencode args 在 output.args。
+export function _normalizeToolInput(args: any): Record<string, any> | any[] {
+  if (args && typeof args === "object") return args  // dict 或 list（typeof [] === "object"）
+  return {}
+}
+
+// 决策表（SPEC §4 失败语义 + §3 behavior 映射）。纯函数：据 broker 结果 + timeout policy
+// 决定放行/阻断。**headless fail-open 取舍**（§4 B5）：不可达/异常 fail-open（防 DEFECT-1 挂死）；
+// HTTP 错/坏响应 fail loud（broker 活着但坏 = 可疑，与 CC 一致）。
+export function _decide(
+  outcome: BrokerOutcome,
+  policy: "allow" | "deny" | "ask",
+  tool: string,
+): HookAction {
+  const t = tool || "<unknown>"
+  switch (outcome.kind) {
+    case "behavior":
+      // §3：只有 deny 阻断；allow / ask / 其他 → 放行（ask 交 opencode 原生 + ``--auto`` 兜底）。
+      if (outcome.behavior === "deny") {
+        return { proceed: false, throwMessage: `orca: 工具 ${t} 被审批拒绝（不要重试）` }
+      }
+      return { proceed: true }
+    case "unreachable":
+      // §4：broker 不在线 = web 审批层没了；退 ``--auto`` 放行（fail-open 优于挂死）。
+      return { proceed: true }
+    case "http-error":
+      // §4：broker 活着但出错 = 可疑，fail loud（与 CC hook 一致）。
+      return { proceed: false, throwMessage: `orca: 工具 ${t} 审批请求失败（broker HTTP ${outcome.status}）` }
+    case "bad-response":
+      // §4：非 JSON / 缺 behavior → fail loud（与 CC 一致）。
+      return { proceed: false, throwMessage: `orca: 工具 ${t} 审批响应非法（fail loud）` }
+    case "timeout":
+      // §4：按 policy——allow/ask → 放行；deny → 阻断。
+      if (policy === "deny") {
+        return { proceed: false, throwMessage: `orca: 工具 ${t} 审批超时（policy=deny）` }
+      }
+      return { proceed: true }
+    case "exception":
+      // §4：保守 fail-open，绝不挂 agent。
+      return { proceed: true }
+    default: {
+      // exhaustiveness 守门：TS 编译期保证所有 BrokerOutcome kind 已覆盖（新增 kind 未加
+      // case 时此赋值报错）；运行时兜底 fail-open（与 exception 一致，绝不挂 agent）。
+      const _exhaustive: never = outcome
+      void _exhaustive
+      return { proceed: true }
+    }
+  }
+}
+
+// POST /approval，把所有错误归类到 BrokerOutcome（不抛——_decide 统一决策）。
+// body 形状复用 CC hook（``templates/orca-permission-hook.py:230-235``）：
+// ``{session_id, tool, tool_input, hook_event: "PermissionRequest"}``。
+// broker 决策路径不读 hook_event（SPEC I-1，已核实）——它是标签。
+export async function _askBroker(
+  sid: string,
+  tool: string,
+  args: any,
+  cfg: BrokerConfig,
+): Promise<BrokerOutcome> {
+  const url = `http://${cfg.host}:${cfg.port}/approval`
+  const body = JSON.stringify({
+    session_id: sid,
+    tool: tool || "<unknown>",
+    tool_input: _normalizeToolInput(args),
+    hook_event: "PermissionRequest",
+  })
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), cfg.timeoutMs)
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+      signal: ctrl.signal,
+    })
+    if (!resp.ok) {
+      return { kind: "http-error", status: resp.status }
+    }
+    let parsed: any
+    try {
+      parsed = await resp.json()
+    } catch {
+      return { kind: "bad-response" }
+    }
+    const behavior = parsed?.behavior
+    if (typeof behavior === "string" && behavior) {
+      return { kind: "behavior", behavior }
+    }
+    return { kind: "bad-response" }  // 缺 behavior → fail loud
+  } catch (e: any) {
+    if (e?.name === "AbortError") return { kind: "timeout" }
+    // fetch 网络错（TypeError: fetch failed / 连接拒）→ unreachable（fail-open）。
+    if (e instanceof TypeError) return { kind: "unreachable" }
+    return { kind: "exception" }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 interface Marker {
   run_id: string
   // v3 §7.2：marker 精简到 3 字段（run_id/model/no_output_count）。tape_path/yaml/
@@ -408,6 +571,41 @@ export const OrcaPlugin = async (ctx: any) => {
         console.error("[orca] guard promptAsync failed:", e)
       } finally {
         if (sessionID) injectingGuard.delete(sessionID)
+      }
+    },
+
+    // tool.execute.before 交互审批桥（SPEC 2026-08-11-opencode-permission-bridge §3）。
+    // opencode 等价 CC 的 PermissionRequest：工具执行前 POST broker /approval → 据 behavior
+    // 放行/throw。**哑传输**（D-v7-1）：run 归属 / yolo / 审批决策全在 broker，桥只转发 + 动作。
+    //
+    // spike 实证（opencode 1.18.13）：``tool.execute.before: async (input, output) =>``，
+    // input = {tool, sessionID, callID}，**工具 args 在 output.args**（非 input）。deny = throw
+    // （官方唯一 deny 机制）。对主 agent 与 Task 子代理的工具调用都 fire（子代理带独立 sessionID）。
+    //
+    // fail 语义（SPEC §4）：broker 不可达/异常 → fail-open 放行（headless 防挂死）；HTTP 错/坏响应
+    // → throw（fail loud）；timeout → ``ORCA_APPROVAL_TIMEOUT_POLICY``；deny → throw。
+    // 详见 ``_decide`` 决策表。session 解析见 ``_resolveApprovalSessionId``（B1 双键契约）。
+    "tool.execute.before": async (input: any, output: any) => {
+      const sid = _resolveApprovalSessionId(input)
+      if (!sid) return  // 无 session 身份（手 CLI / 无 executor）→ fail-open 放行
+      const tool = input?.tool
+      const cfg = _brokerConfig()
+      let outcome: BrokerOutcome
+      try {
+        outcome = await _askBroker(sid, tool, output?.args, cfg)
+      } catch (e) {
+        // _askBroker 内部已归类（不应抛）；保守兜底 → fail-open（SPEC §4 未预期异常）。
+        console.error("[orca] approval bridge unexpected error (fail-open):", e)
+        return
+      }
+      const action = _decide(outcome, cfg.timeoutPolicy, tool)
+      if (!action.proceed) {
+        console.error(`[orca] approval 阻断 [${outcome.kind}]: ${action.throwMessage}`)
+        throw new Error(action.throwMessage ?? `orca: 工具 ${tool ?? "<unknown>"} 被阻断`)
+      }
+      // 放行。clean allow/ask 静默；fail-open 路径（unreachable/timeout-allow/exception）留痕。
+      if (outcome.kind !== "behavior") {
+        console.error(`[orca] approval ${outcome.kind} → fail-open 放行`)
       }
     },
   }
