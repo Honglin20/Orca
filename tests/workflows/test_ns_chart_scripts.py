@@ -536,3 +536,152 @@ class TestCompareTableFullMetric:
         acc_row = next(r for r in pushed["data"] if r["metric"] == "Acc")
         assert acc_row["Selected Subnet"] == "0.9892"
         assert not acc_row["Selected Subnet"].startswith("-")
+
+
+# ---------------------------------------------------------------------------
+# search_table: arch digest + per-arch dedup
+# ---------------------------------------------------------------------------
+
+
+class TestSearchTable:
+    def _load(self):
+        """Load the ns_run_search search_table module fresh (cache-safe)."""
+        import importlib.util
+
+        sys.path.insert(0, str(_SEARCH_SCRIPTS_DIR))
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "search_table_under_test",
+                str(_SEARCH_SCRIPTS_DIR / "search_table.py"),
+            )
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+        finally:
+            sys.path = [p for p in sys.path if p != str(_SEARCH_SCRIPTS_DIR)]
+            sys.modules.pop("_common", None)
+            sys.modules.pop("search_table_under_test", None)
+
+    def test_arch_digest_readable(self):
+        """arch dict renders as a readable per-stage digest, not '(see arch)'."""
+        st = self._load()
+        flat = {
+            "arch.layer_configs": {
+                "stage1": [
+                    {"choice": "res_conv", "config": {"hidden_channels": 32, "kernel_size": 3}},
+                    {"choice": "mnist_cnn", "config": {"kernel_size": 3}},
+                ],
+                "stage2": [{"choice": "mnist_cnn", "config": {"kernel_size": 5}}],
+            },
+            "arch.stage_depths": [2, 1],
+        }
+        digest = st._arch_digest(flat, set())
+        assert "stage1: res_conv(hidden_channels=32,kernel_size=3)+mnist_cnn(kernel_size=3)" in digest
+        assert "stage2: mnist_cnn(kernel_size=5)" in digest
+        assert digest != "(see arch)"
+
+    def test_arch_digest_fallback_no_arch(self):
+        """No arch keys -> falls back to scalar fields, else '(see arch)'."""
+        st = self._load()
+        assert st._arch_digest({"acc": -0.9}, {"acc", "objs", "gene"}) == "(see arch)"
+        digest = st._arch_digest({"foo": "bar"}, set())
+        assert digest == "foo=bar"
+
+    def test_layer_configs_str(self):
+        st = self._load()
+        lc = {
+            "stage1": [{"choice": "a", "config": {"kernel_size": 3}}],
+            "stage2": [{"choice": "b", "config": {"expand_channels": 64}}],
+        }
+        out = st._arch_layer_configs_to_str(lc)
+        assert out == "stage1: a(kernel_size=3); stage2: b(expand_channels=64)"
+
+    def test_main_dedups_by_arch(self, tmp_path: Path):
+        """640->deduped rows: same arch (across generations) kept once, pareto first."""
+        import importlib.util
+        import types
+
+        arch = {"layer_configs": {"stage1": [{"choice": "mnist_cnn", "config": {"kernel_size": 3}}]}, "stage_depths": [1, 1]}
+        arch2 = {"layer_configs": {"stage1": [{"choice": "res_conv", "config": {"hidden_channels": 16, "kernel_size": 3}}]}, "stage_depths": [1, 1]}
+        # 3 records: arch duplicated across generations (non-pareto then pareto), arch2 once.
+        recs = [
+            {"generation": 0, "gene": [0], "objs": {"acc": -0.95, "latency": 0.2}, "pareto": False, "arch": arch},
+            {"generation": 1, "gene": [0], "objs": {"acc": -0.95, "latency": 0.2}, "pareto": True, "arch": arch},
+            {"generation": 0, "gene": [1], "objs": {"acc": -0.93, "latency": 0.3}, "pareto": True, "arch": arch2},
+        ]
+        for r in recs:
+            (tmp_path / "search_results.jsonl").open("a").write(json.dumps(r) + "\n")
+        (tmp_path / "search_config.yaml").write_text('objs:\n  - "acc"\n  - "latency"\n')
+
+        orca_mod = types.ModuleType("orca")
+        orca_mod.chart = types.SimpleNamespace()
+        sys.modules["orca"] = orca_mod
+        calls: list[dict] = []
+        sys.path.insert(0, str(_SEARCH_SCRIPTS_DIR))
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "search_table_under_test2",
+                str(_SEARCH_SCRIPTS_DIR / "search_table.py"),
+            )
+            st = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(st)
+        finally:
+            sys.path = [p for p in sys.path if p != str(_SEARCH_SCRIPTS_DIR)]
+            sys.modules.pop("_common", None)
+            sys.modules.pop("search_table_under_test2", None)
+            sys.modules.pop("orca", None)
+        st.push_chart = lambda **kw: calls.append(kw)
+        old_argv = sys.argv
+        sys.argv = ["search_table", "--artifacts-dir", str(tmp_path)]
+        try:
+            st.main()
+        finally:
+            sys.argv = old_argv
+        pushed = calls[-1]
+        # arch deduped: 2 unique architectures, not 3 records.
+        assert len(pushed["data"]) == 2
+        # arch digest readable, no '(see arch)'.
+        assert all(r["arch"] != "(see arch)" for r in pushed["data"])
+        # The duplicated arch kept the pareto=True representative.
+        rep = next(r for r in pushed["data"] if r["arch"].startswith("stage1: mnist_cnn"))
+        assert rep["pareto"] == "yes"
+
+    def test_only_pareto_rows_shown(self, tmp_path: Path):
+        """Non-pareto architectures are dropped — table shows the front only."""
+        import importlib.util
+        import types
+
+        arch = {"layer_configs": {"stage1": [{"choice": "mnist_cnn", "config": {"kernel_size": 3}}]}, "stage_depths": [1, 1]}
+        recs = [
+            {"generation": 0, "gene": [0], "objs": {"acc": -0.95, "latency": 0.2}, "pareto": False, "arch": arch},
+        ]
+        for r in recs:
+            (tmp_path / "search_results.jsonl").open("a").write(json.dumps(r) + "\n")
+        (tmp_path / "search_config.yaml").write_text('objs:\n  - "acc"\n  - "latency"\n')
+
+        orca_mod = types.ModuleType("orca")
+        orca_mod.chart = types.SimpleNamespace()
+        sys.modules["orca"] = orca_mod
+        calls: list[dict] = []
+        sys.path.insert(0, str(_SEARCH_SCRIPTS_DIR))
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "search_table_under_test3",
+                str(_SEARCH_SCRIPTS_DIR / "search_table.py"),
+            )
+            st = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(st)
+        finally:
+            sys.path = [p for p in sys.path if p != str(_SEARCH_SCRIPTS_DIR)]
+            sys.modules.pop("_common", None)
+            sys.modules.pop("search_table_under_test3", None)
+            sys.modules.pop("orca", None)
+        st.push_chart = lambda **kw: calls.append(kw)
+        old_argv = sys.argv
+        sys.argv = ["search_table", "--artifacts-dir", str(tmp_path)]
+        try:
+            st.main()
+        finally:
+            sys.argv = old_argv
+        pushed = calls[-1]
+        assert pushed["data"] == []

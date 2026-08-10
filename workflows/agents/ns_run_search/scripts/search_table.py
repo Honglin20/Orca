@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""search_table.py -- Search results table for nas-supernet.
+"""search_table.py -- Search Pareto-front table for nas-supernet.
 
-Reads search_results.jsonl and pushes a ``table`` chart: one row per candidate with
-arch-config digest / latency / metric / Pareto flag. Columns are ordered for
-readability (Pareto candidates first, then by metric).
+Reads search_results.jsonl and pushes a ``table`` chart: one row per **Pareto-front
+architecture** (deduped across generations) with arch-config digest / latency /
+metric / Pareto flag. Columns are ordered for readability (by metric, best first).
 
 Metric values are un-negated for display if the NAS convention stores them as negated
 (all values <= 0). Fail-soft on missing/empty jsonl or undiscoverable fields.
@@ -43,7 +43,7 @@ def main() -> int:
     if not records:
         push_chart(
             artifacts_dir_path=ad, script_name="search_table", label="nas-supernet/search",
-            title="Search Results — All Candidates", chart_type="table", data=[],
+            title="Search Results — Pareto Front", chart_type="table", data=[],
             skip_reason="search_results.jsonl missing or empty",
         )
         return 0
@@ -52,7 +52,7 @@ def main() -> int:
     if info is None or not info.latency_path or not info.field_path:
         push_chart(
             artifacts_dir_path=ad, script_name="search_table", label="nas-supernet/search",
-            title="Search Results — All Candidates", chart_type="table", data=[],
+            title="Search Results — Pareto Front", chart_type="table", data=[],
             skip_reason=f"cannot identify metric/latency fields (info={info})",
         )
         return 0
@@ -60,8 +60,20 @@ def main() -> int:
     pareto_field = find_field(records, PARETO_FIELDS)
     exclude_set = {info.latency_path, info.field_path, pareto_field, "objs", "gene", "cached"}
 
-    rows: list[dict[str, Any]] = []
-    for idx, rec in enumerate(records, start=1):
+    # Dedup by architecture: search logs record every generation's full
+    # population, so the same gene/arch recurs across generations (parent kept +
+    # mutated offspring). Keep one row per distinct arch — prefer the Pareto
+    # entry, then the best metric value.
+    best_first = info.display_direction == "higher"
+
+    def _met_num(row: dict[str, Any]) -> float | None:
+        try:
+            return float(row[info.name])
+        except (ValueError, TypeError, KeyError):
+            return None
+
+    seen: dict[str, dict[str, Any]] = {}
+    for rec in records:
         flat = flatten_record(rec)
         lat_raw = flat.get(info.latency_path)
         lat = "-"
@@ -84,22 +96,47 @@ def main() -> int:
             met = _to_str(info.for_display(met_stored))
         is_pareto = _pareto_label(flat.get(pareto_field)) if pareto_field else ""
         arch_digest = _arch_digest(flat, exclude_set)
-        rows.append({
-            "#": idx,
+        if not arch_digest or arch_digest == "(see arch)":
+            continue  # no usable arch key -> skip (nothing to dedup or display)
+        row = {
             "arch": arch_digest,
             "latency_ms": lat,
             info.name: met,
             "pareto": is_pareto,
-        })
+        }
+        prev = seen.get(arch_digest)
+        if prev is None:
+            seen[arch_digest] = row
+            continue
+        # Keep the better representative: pareto over non-pareto, then best metric.
+        prev_pareto = bool(prev.get("pareto"))
+        cur_pareto = bool(is_pareto)
+        if cur_pareto and not prev_pareto:
+            seen[arch_digest] = row
+            continue
+        if cur_pareto == prev_pareto:
+            prev_met = _met_num(prev)
+            cur_met = _met_num(row)
+            if cur_met is not None and prev_met is not None:
+                if (best_first and cur_met > prev_met) or (not best_first and cur_met < prev_met):
+                    seen[arch_digest] = row
 
-    # Sort: Pareto candidates first, then by display metric (best first).
-    best_first = info.display_direction == "higher"
+    rows = list(seen.values())
+
+    # Only the Pareto front: the table shows non-dominated architectures, not the
+    # whole candidate pool (deduped rows that never hit the front are dropped).
+    rows = [r for r in rows if bool(r.get("pareto"))]
+
+    # Sort by display metric (best first); all rows are already on the front.
     rows.sort(key=lambda r: _sort_key(r, info.name, best_first))
     for new_idx, row in enumerate(rows, start=1):
         row["#"] = new_idx
 
     columns = ["#", "arch", "latency_ms", info.name, "pareto"]
-    caption = f"{len(rows)} candidates. Sorted: Pareto first, then best {info.name}."
+    caption = (
+        f"{len(rows)} Pareto-front architectures "
+        f"(deduped from {len(records)} records). Sorted by best {info.name}."
+    )
     if info.negate_for_display:
         caption += f" {info.name} values un-negated from NAS storage."
 
@@ -107,7 +144,7 @@ def main() -> int:
         artifacts_dir_path=ad,
         script_name="search_table",
         label="nas-supernet/search",
-        title="Search Results — All Candidates",
+        title="Search Results — Pareto Front",
         chart_type="table",
         data=rows,
         columns=columns,
@@ -143,6 +180,17 @@ def _to_str(val: Any) -> str:
 
 
 def _arch_digest(flat: dict[str, Any], exclude: set[str]) -> str:
+    """Human-readable architecture digest from a flattened record.
+
+    Prefers the structured ``arch`` keys (flattened as ``arch.layer_configs`` /
+    ``arch.stage_depths``) — rendered as ``stage1: a(k3)+b; stage2: c(k5)``.
+    Falls back to flattening non-arch scalar fields when no ``arch`` is present.
+    """
+    layer_configs = flat.get("arch.layer_configs")
+    if isinstance(layer_configs, dict):
+        digest = _arch_layer_configs_to_str(layer_configs)
+        if digest:
+            return digest
     parts: list[str] = []
     for key, val in flat.items():
         if key in _NON_ARCH_KEYS or key in exclude:
@@ -151,6 +199,41 @@ def _arch_digest(flat: dict[str, Any], exclude: set[str]) -> str:
             continue
         parts.append(f"{key}={_to_str(val)}")
     return ", ".join(parts) if parts else "(see arch)"
+
+
+def _arch_layer_configs_to_str(layer_configs: dict[str, Any]) -> str:
+    """Render the ``layer_configs`` dict as a short per-stage digest.
+
+    Example: ``stage1: res_conv(k3)+mnist_cnn; stage2: mnist_cnn(k5)``.
+    """
+    stage_parts: list[str] = []
+    for stage_name, layers in layer_configs.items():
+        if not isinstance(layers, list):
+            continue
+        layer_descs: list[str] = []
+        for layer in layers:
+            if not isinstance(layer, dict):
+                continue
+            choice = str(layer.get("choice", ""))
+            cfg = layer.get("config")
+            if isinstance(cfg, dict) and cfg:
+                # Render every scalar config key (k/h/e/… are project-specific;
+                # hardcoding a whitelist risks two distinct archs colliding when
+                # their differing params fall outside it). Stable order = sorted.
+                parts = []
+                for key in sorted(cfg):
+                    val = cfg[key]
+                    if isinstance(val, bool):
+                        continue
+                    if isinstance(val, (int, float)) and not isinstance(val, bool):
+                        parts.append(f"{key}={val}")
+                suffix = "(" + ",".join(parts) + ")" if parts else ""
+            else:
+                suffix = ""
+            layer_descs.append(f"{choice}{suffix}")
+        if layer_descs:
+            stage_parts.append(f"{stage_name}: {'+'.join(layer_descs)}")
+    return "; ".join(stage_parts)
 
 
 if __name__ == "__main__":
