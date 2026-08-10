@@ -33,18 +33,23 @@ broker `/approval`（主 agent + Task 子代理覆盖；yolo/web 卡复用 broke
 **任务**：SPEC `docs/specs/2026-08-11-nas-supernet-v2.md`（REVIEWED-PASS，21 issue 闭环）——
 新建 `nas-supernet-v2` workflow（8 agent + 0 terminate），根治 v1 四类问题。
 
-**状态**：**实现（976e132）+ review MUST-FIX/SHOULD-FIX 全修（de5878b）**：7 MUST-FIX + 10
-SHOULD-FIX + MINOR 全闭环。关键修复：MF-1 reporter rc 路径（success 永不触发 SHOWSTOPPER）/
-MF-2 固化门 || echo 吞错 / MF-5 AMP grep 行尾 $ / MF-7 verifier 与 v1 逐字相同。
-`tars validate` 0/0，v1 零改动，bash -n 全过，5 verifier diff≠v1。
+**状态**：**实现（976e132）+ review MUST-FIX/SHOULD-FIX 全修（de5878b）+ test-agent headless E2E（tiny_cnn, CPU, deepseek-v4-flash, run-2 `...020518-9a613e`）+ reporter E2E 缺陷修复（903f821）**：
+- **E2E 7/8 节点真机成功**（flatten→expand supernet.py→train_script→search_pipeline 3子代理+共享schema→run_train rc=0 loss有限→run_search 640候选/pareto=71/select填好→retrain rc=0/retrain_best.pth）。
+- **AC 真机 PASS**：AC1.1 tars validate 0/0 / AC2.1+2.2 单设备契约（无torchrun/AMP=false/`if is_distributed():`条件DDP/guarded sync_random_seed）/ AC2.3 loss有限无NaN/ckpts / AC6.1 ≥3弹性维度 / AC6.5 零DDP错。
+- **2 个 E2E 缺陷**：(1) ns2_report 节点失败——弱模型把渲染 prompt 当讨论文档输出闲聊非 JSON（SchemaValidationError）→**已修 903f821**（loud execution preamble）+**判终态逻辑验证 PASS**（对 run-2 artifacts 返回 status=success, selected_acc=0.625, pareto=71）。(2) AC6.3 chart events=0——`tars run --background` 不注 ORCA_CHART_SOCK，chart 脚本正确 fail-soft（需 `tars serve` 连接模式才推 tape，非脚本 bug）。
+- run-1 挂死根因 = 僵尸 opencode（PID 982146 kd-nas train-teacher 占 deepseek 并发）+ 无 wall-time 超时；清僵尸后 run-2 全链跑通。
 
 **必读**：
 - SPEC `docs/specs/2026-08-11-nas-supernet-v2.md`（§3 C1-C6 + §10 闭环日志）。
 - release note `docs/releases/2026-08-11-nas-supernet-v2.md`。
-- yaml `workflows/nas-supernet-v2.yaml`（8 节点拓扑 + 路由）。
+- yaml `workflows/nas-supernet-v2.yaml`（8 节点拓扑 + 路由）+ ns2_report 修复 `workflows/agents/ns2_report/agent.md`（loud preamble）。
+- E2E 证据：run-2 tape `runs/nas-supernet-v2-20260811-020518-9a613e.jsonl` + artifacts。
 
-**待办**：
-- [ ] test-agent headless 双项目 E2E（下一阶段）
+**待办**（验证收尾）：
+- [ ] reporter agent 级修复确认（spawn/resume ns2_report 对 run-2 artifacts → emit status=success JSON）。
+- [ ] AC6.3 图表 serve 模式确认（tars serve + post-hoc chart 脚本对 run-2 数据 → custom(chart) 出现）。
+- [ ] mini_resnet 第二项目 E2E。
+- [ ] 可选：引擎 node-level wall-time 超时（防 API stall 死锁）。
 
 ---
 

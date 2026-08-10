@@ -19,7 +19,7 @@ Commit: `4f6a6e3`。详见 [release note](../releases/2026-08-11-opencode-permis
 
 ## [2026-08-11] feat(workflow): nas-supernet-v2 新 workflow——in-session 友好 / 单卡非 DDP / 弱模型友好的 NAS supernet 全链
 
-新建 `nas-supernet-v2` workflow（8 agent + 0 terminate），根治 v1 四类问题：C1 entry 拆分（flatten + expand）/ C2 select 合并进 run_search + 失败安全网 / C3 search pipeline 3 子代理并行 + 共享 schema / C4 单设备默认（plain python3 + 条件 DDP + guarded sync_random_seed）/ C5 每节点固化校验脚本 / C6 单一 ns2_report reporter（零跨节点引用 + 磁盘判终态）。SPEC 21 issue 全闭环。Commit: `976e132`。详见 [release note](docs/releases/2026-08-11-nas-supernet-v2.md)。
+新建 `nas-supernet-v2` workflow（8 agent + 0 terminate），根治 v1 四类问题：C1 entry 拆分（flatten + expand）/ C2 select 合并进 run_search + 失败安全网 / C3 search pipeline 3 子代理并行 + 共享 schema / C4 单设备默认（plain python3 + 条件 DDP + guarded sync_random_seed）/ C5 每节点固化校验脚本 / C6 单一 ns2_report reporter（零跨节点引用 + 磁盘判终态）。SPEC 21 issue 全闭环。两轮 review 修 7 MUST-FIX + 10 SHOULD-FIX（`de5878b`，含 MF-1 reporter rc 路径 SHOWSTOPPER）。**test-agent headless E2E**（tiny_cnn, CPU, deepseek-v4-flash）：7/8 真机成功（AC2.1/2.2/2.3/6.1/6.5 PASS），ns2_report 弱模型 prompt 不执行致 SchemaError → **修（`903f821` loud preamble）+ 逻辑验证 PASS**；AC6.3 chart=0 系 `tars run --background` 缺 ORCA_CHART_SOCK（chart 脚本正确 fail-soft，需 serve 模式）。Commits: `976e132` `de5878b` `903f821`。详见 [release note](docs/releases/2026-08-11-nas-supernet-v2.md)。
 
 ## [2026-08-10] fix(web): 详情页返回主页导航——window.location 整页刷新 → SPA navigate
 
