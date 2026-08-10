@@ -16,7 +16,7 @@
 全量（双语义对照表）；④ in-memory 分支直调 `_scan_meta_overview` 不经 cache（ISSUE-B：避免 per-poll
 持久 writeback）；⑤ cache version v2→v3 五处。前端 RunRow/BoardCard 加 chart_count metric。验证：
 12 新单测（AC4-AC7 + F3 + 异常路径）+ 非 Playwright 299 passed + 前端 tsc/535 vitest 干净 +
-code-reviewer 一轮闭环 0 MUST-FIX / 2 SHOULD-FIX 全修。Commit: 待 commit。详见 SPEC
+code-reviewer 一轮闭环 0 MUST-FIX / 2 SHOULD-FIX 全修。Commit: `a234b94`。详见 SPEC
 [2026-08-10-card-event-log-align.md](../specs/2026-08-10-card-event-log-align.md)（release note 用户后续）。
 
 ## [2026-08-10] fix(nas-supernet): 图表正确性修复 + prompt 洁净 + train/retrain 监控改造（CRON→有界轮询+无上限自愈）+ search 无上限自愈
