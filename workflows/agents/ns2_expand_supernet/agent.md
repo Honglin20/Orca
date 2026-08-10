@@ -153,7 +153,8 @@ workflow 完成后，进 evaluator verification loop：
 
 完成 Step 1-4 后，跑固化校验脚本：
 ```bash
-bash "$ORCA_AGENT_RESOURCES/scripts/check_expand.sh" || echo "FAIL: check_expand"
+bash "$ORCA_AGENT_RESOURCES/scripts/check_expand.sh"
+  || { echo "FAIL" >&2; exit 1; }
 ```
 
 ## Guidelines

@@ -569,12 +569,12 @@ OUTPUT_DIR="runs/train"
 EPOCHS=100
 BATCH_SIZE=64
 LR=1e-3
-NUM_WORKERS=0          # DataLoader Launch Hygiene；勿改默认
+NUM_WORKERS=0          # DataLoader Launch Hygiene; do not change default
 EVAL_INTERVAL=1
 SEED=42
 MAX_GRAD_NORM=1.0
 SANDWICH_N_RANDOM=2
-AMP=false              # v2 默认关 AMP
+AMP=false              # AMP disabled by default (single-device)
 # Multi-GPU: replace the python3 line below with:
 #   torchrun --nproc_per_node=N train_supernet.py ... (same args)
 # The script auto-detects RANK env → is_distributed() → DDP wrap.

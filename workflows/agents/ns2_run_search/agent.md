@@ -20,7 +20,7 @@ tools: [bash, read, edit, grep, glob, task]
    换不同修复假设，永不放弃。
 2. **编辑白名单（prompt 软约束，tape 审计字段 healed_files/fidelity_retriggered）**，分两层：
    - **纯补丁层**（直接 edit，无需重触 fidelity）：
-     - `run_search_supernet.sh`（launcher 参数 / NPROC_PER_NODE / 路径对齐）
+     - `run_search_supernet.sh`（launcher 参数 / 路径对齐）
      - `search_config.yaml` 路径 / 参数对齐（含 `supernet_ckpt_path` / `search_results` 输出路径
        对齐到 `$ORCA_ARTIFACTS_DIR/search_results.jsonl`，ns2_retrain 下游依赖）
      - 明显 typo / import 路径错（Python `ImportError` / `ModuleNotFoundError`，可改任何 `.py`
@@ -33,7 +33,7 @@ tools: [bash, read, edit, grep, glob, task]
    `supernet.py`、`project_manifest.md`、`supernet_summary.md`、
    `{{ inputs.project_root }}` 下**源文件**（**例外**：`{{ inputs.project_root }}/artifacts/`
    是本 workflow 产物目录树，可写）。若 self-heal 需要改禁碰文件 → **不要改**，记
-   last_error 到 `.ns2_run_search_assessment.txt`，进 Step 3 输出 `{"status":"failed"}`。
+   last_error 到 `.ns_run_search_assessment.txt`，进 Step 3 输出 `{"status":"failed"}`。
 4. **上游 ckpt 缺失不是你的责任，但要 fail loud**：若 ns2_run_train output `status=skipped` 或
    ckpt 缺失导致 search 跑不动，**不要**伪造 search 成功——如实 fail，让用户看到训练没跑。
 5. **软判断（报告非闸门）**：成功执行后读 `search_results.jsonl`（候选子网 / latency / metric /
@@ -55,11 +55,11 @@ agent 本次 self-heal 的行为痕迹写到三个 marker 文件（deterministic
 Step 3 python 读 marker 拼 JSON，agent 不需要改 python 脚本）：
 
 - 每次 `edit` 改白名单内文件后：
-  `bash -c 'printf "%s\n" "<edited_file_relpath>" >> "$ORCA_ARTIFACTS_DIR/.ns2_run_search_healed.txt"'`
+  `bash -c 'printf "%s\n" "<edited_file_relpath>" >> "$ORCA_ARTIFACTS_DIR/.ns_run_search_healed.txt"'`
 - 跑完 Step 2.5 fidelity-verifier（无论结论 pass/fail）后：
-  `printf "true" > "$ORCA_ARTIFACTS_DIR/.ns2_run_search_fidelity.flag"`
+  `printf "true" > "$ORCA_ARTIFACTS_DIR/.ns_run_search_fidelity.flag"`
 - 软判断后（Step 2.6）：
-  `printf "%s" "<one-line assessment>" > "$ORCA_ARTIFACTS_DIR/.ns2_run_search_assessment.txt"`
+  `printf "%s" "<one-line assessment>" > "$ORCA_ARTIFACTS_DIR/.ns_run_search_assessment.txt"`
 
 > marker 文件路径相对 `$ORCA_ARTIFACTS_DIR`；agent 不许伪造——下游 review 核对 healed_files
 > 是否触碰禁碰清单（防蒙混靠审计）。
@@ -109,8 +109,8 @@ assert n >= 1, 'no valid records'
 print('RESULTS_VALID')
 " "$RESULTS" 2>/dev/null | grep -q RESULTS_VALID; then
     # 清旧 marker（rm-only；Step 3 python 对缺文件 read_text 默认 "false" / read_lines 默认 []）。
-    rm -f .ns2_run_search_healed.txt .ns2_run_search_fidelity.flag
-    printf 'reused existing search_results.jsonl: %s' "$RESULTS" > .ns2_run_search_assessment.txt
+    rm -f .ns_run_search_healed.txt .ns_run_search_fidelity.flag
+    printf 'reused existing search_results.jsonl: %s' "$RESULTS" > .ns_run_search_assessment.txt
     # reuse 也要推 search 3 图（pareto/search_table/latency_dist）——否则前端永远看不到
     # 帕累托/搜索表/latency 分布。与 Step 2.7 同款 `|| true` 不阻塞、fail-soft。
     # （env 已由宿主 prompt 指令先 source，chart 推送依赖 ORCA_CHART_SOCK。）
@@ -138,11 +138,11 @@ set +e
 cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
 
 # Clear stale markers from prior runs (idempotency).
-rm -f .ns2_run_search_healed.txt .ns2_run_search_fidelity.flag .ns2_run_search_assessment.txt
+rm -f .ns_run_search_healed.txt .ns_run_search_fidelity.flag .ns_run_search_assessment.txt
 
 if [ ! -f run_search_supernet.sh ]; then
   printf "FATAL: run_search_supernet.sh absent — ns2_search_pipeline did not produce it." \
-    > .ns2_run_search_assessment.txt
+    > .ns_run_search_assessment.txt
   echo "GATE: run_search_supernet.sh absent -> cannot proceed"
   # Step 3 python will judge status=failed (script absent + no results).
 else
@@ -224,12 +224,12 @@ fi
     顶部 export 限定（纯补丁层）。
 - 判断根因所属层级（铁律 2 白名单两层）：
   - **纯补丁层**（launcher / 路径 / import 错 / typo / `search_config.yaml` 输出路径对齐）→ 用 `edit`
-    改对应文件，把改动文件相对路径 append 到 `.ns2_run_search_healed.txt`（Step 0 marker 协议）。无需
+    改对应文件，把改动文件相对路径 append 到 `.ns_run_search_healed.txt`（Step 0 marker 协议）。无需
     重触 fidelity。
   - **搜索/评估逻辑层**（`evaluator.py` / `arch_codec.py` / `search_supernet.py` 的 sampling / subnet
-    提取 / metric 计算 / data pipeline）→ 用 `edit` 改，append 到 `.ns2_run_search_healed.txt`，**且必须**
-    进 Step 2.5 重触 fidelity-verifier，写 `.ns2_run_search_fidelity.flag`。
-  - 否（根因需碰**禁碰清单**铁律 3）→ **禁止 edit**；记 last_error 到 `.ns2_run_search_assessment.txt`，
+    提取 / metric 计算 / data pipeline）→ 用 `edit` 改，append 到 `.ns_run_search_healed.txt`，**且必须**
+    进 Step 2.5 重触 fidelity-verifier，写 `.ns_run_search_fidelity.flag`。
+  - 否（根因需碰**禁碰清单**铁律 3）→ **禁止 edit**；记 last_error 到 `.ns_run_search_assessment.txt`，
     进 Step 3 输出 `{"status":"failed"}`。
 - `N++` 回 2a（**无上限**——同一根因反复失败换不同修复假设，永不放弃）。
 
@@ -247,16 +247,16 @@ fi
                 按 md 规定的格式 return。
                 **report 首行**必须照原样回显你 Read 到的 md frontmatter 里的 sentinel 字段（格式见 md 顶部；不要猜，必须来自你 Read 的文件）。")
    ```
-   `Read` 失败（文件不存在）→ **不要**假装跑了；在 `.ns2_run_search_assessment.txt` 末尾追加
+   `Read` 失败（文件不存在）→ **不要**假装跑了；在 `.ns_run_search_assessment.txt` 末尾追加
    `" | fidelity-verifier subagent body not deployed; cannot retrigger"`，跳过本步。
-2. 把 verifier 结论（pass / fail + 理由）合并写进 `.ns2_run_search_assessment.txt`；
-   `printf "true" > .ns2_run_search_fidelity.flag`（**无论 verifier pass/fail**——重触了就标记 true，
+2. 把 verifier 结论（pass / fail + 理由）合并写进 `.ns_run_search_assessment.txt`；
+   `printf "true" > .ns_run_search_fidelity.flag`（**无论 verifier pass/fail**——重触了就标记 true，
    fail 则在 assessment 里如实说明）。
 
 ### Step 2.6 ── 软判断 assessment（成功后）
 
 `read` `$ORCA_ARTIFACTS_DIR/search_results.jsonl` + Pareto 分析（candidate 数 / Pareto front
-size / best metric / latency 分布），agent 自判一句话写进 `.ns2_run_search_assessment.txt`（例：
+size / best metric / latency 分布），agent 自判一句话写进 `.ns_run_search_assessment.txt`（例：
 "640 candidates, Pareto front size 12, max-acc 0.91 @ latency 4.2ms, target 5ms achievable"）。
 **不是**闸门——闸门是 RC=0 + jsonl ≥1 行。
 
@@ -357,13 +357,13 @@ else:
     logs = sorted(glob.glob(os.path.join(ad, "runs", "search", "search.attempt*.stdout.log")))
     log_tail = tail(logs[-1]) if logs else ""
     if log_tail:
-        prev = read_text(os.path.join(ad, ".ns2_run_search_assessment.txt"), "")
-        with open(os.path.join(ad, ".ns2_run_search_assessment.txt"), "w", encoding="utf-8") as fh:
+        prev = read_text(os.path.join(ad, ".ns_run_search_assessment.txt"), "")
+        with open(os.path.join(ad, ".ns_run_search_assessment.txt"), "w", encoding="utf-8") as fh:
             fh.write((prev + "\n" if prev else "") + "last_error:\n" + log_tail)
 
-healed_files = read_lines(os.path.join(ad, ".ns2_run_search_healed.txt"))
-fidelity_retriggered = read_text(os.path.join(ad, ".ns2_run_search_fidelity.flag"), "false") == "true"
-assessment = read_text(os.path.join(ad, ".ns2_run_search_assessment.txt"),
+healed_files = read_lines(os.path.join(ad, ".ns_run_search_healed.txt"))
+fidelity_retriggered = read_text(os.path.join(ad, ".ns_run_search_fidelity.flag"), "false") == "true"
+assessment = read_text(os.path.join(ad, ".ns_run_search_assessment.txt"),
                        "no assessment recorded" if status == "executed" else "")
 
 # ── select 5 字段（从 .selected_arch.json marker 读；失败安全网：总产合法 JSON）──

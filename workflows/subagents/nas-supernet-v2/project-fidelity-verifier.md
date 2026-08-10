@@ -1,10 +1,10 @@
 ---
 subagent: project-fidelity-verifier
-version: 1
+version: 2
 sentinel: PF8LK3
 ---
 
-**Output first line**: echo your frontmatter sentinel verbatim as `[subagent:project-fidelity-verifier v1 PF8LK3]` before anything else.
+**Output first line**: echo your frontmatter sentinel verbatim as `[subagent:project-fidelity-verifier v2 PF8LK3]` before anything else.
 
 # Project Fidelity Verifier
 

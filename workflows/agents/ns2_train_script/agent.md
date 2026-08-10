@@ -252,7 +252,7 @@ loss-metric helper / 自定义训练模块）须 port 进 `$ORCA_ARTIFACTS_DIR` 
     - Evaluation runs fixed max and min configs every eval interval.
     - (only when KD is enabled) KD between sampled subnets: the max subnet's outputs distill into smaller subnets via <loss>, with weight and warmup.
   - Training progress unit: <epoch or step>; training budget: <actual numbers, about 3x the original>, with scheduler settings adjusted to match.
-  - Always runs under torchrun DDP, with optional AMP and gradient clipping.
+  - Default launcher is single-process python3 (no torchrun, no DDP); DDP wraps conditionally `if is_distributed()` (multi-GPU via torchrun). AMP defaults to false.
   - The original logging framework is replaced by stdout/tqdm progress output.
   - Checkpoints use save_checkpoint_ddp with latest/best/snapshot files.
   - ...
@@ -329,8 +329,10 @@ context + Step 2 viability 决定 evaluation paradigm。
 
 - **固化脚本门（deterministic，生成后必跑）**：
   ```bash
-  bash "$ORCA_AGENT_RESOURCES/scripts/check_train_script.sh" || echo "FAIL: check_train_script"
-  bash "$ORCA_AGENT_RESOURCES/scripts/check_launcher.sh" run_train_supernet.sh || echo "FAIL: check_launcher"
+  bash "$ORCA_AGENT_RESOURCES/scripts/check_train_script.sh"
+  || { echo "FAIL" >&2; exit 1; }
+  bash "$ORCA_AGENT_RESOURCES/scripts/check_launcher.sh" run_train_supernet.sh
+  || { echo "FAIL" >&2; exit 1; }
   ```
   校验 py_compile + 条件 DDP（is_distributed guard）+ guarded sync_random_seed + launcher 卫生
   （无 torchrun + AMP=false + NUM_WORKERS=0）。失败 → fix-loop。

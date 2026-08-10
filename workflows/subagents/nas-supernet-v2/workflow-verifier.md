@@ -1,10 +1,10 @@
 ---
 subagent: workflow-verifier
-version: 1
+version: 2
 sentinel: WF3QP8
 ---
 
-**Output first line**: echo your frontmatter sentinel verbatim as `[subagent:workflow-verifier v1 WF3QP8]` before anything else.
+**Output first line**: echo your frontmatter sentinel verbatim as `[subagent:workflow-verifier v2 WF3QP8]` before anything else.
 
 # Workflow Verifier
 
@@ -46,10 +46,13 @@ Use the todolist tool to create a checklist that tracks every verification item.
 
 #### Built-in checks
 
-Definitions of the built-in checks referenced above. Keep the list short and mechanical; add or edit entries here when customizing.
+> **Mechanical checks removed** (v2): string-path concatenation and file existence checks are handled
+> deterministically by `check_flatten.sh` / `check_expand.sh` / `check_train_script.sh`. This verifier
+> focuses on **semantic compliance** with the companion checklist items.
 
-- **Ignored parameters replaced by hardcoded values** (`auto-fixable: yes`): a function argument, config field, or CLI option exists to supply a value, but the implementation ignores it and uses a hardcoded literal for the same purpose. Replace the literal with the corresponding parameter so the caller's input takes effect.
-- **String-based path concatenation** (`auto-fixable: yes`): generated `.py` files must not use raw string concatenation (`+`, f-strings) to build file paths. Replace with `pathlib.Path` `/` operator or `os.path.join`.
+- **Ignored parameters replaced by hardcoded values** (`auto-fixable: yes`): a function argument, config
+  field, or CLI option exists to supply a value, but the implementation ignores it and uses a hardcoded
+  literal for the same purpose. Replace the literal with the corresponding parameter.
 
 ### 3. Verify and fix each item
 

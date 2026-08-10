@@ -20,6 +20,11 @@ You are a code generation sub-agent. Your sole task: generate 2 files in `$ORCA_
 
 ## Procedure
 
+**Metric direction handling** (critical): read metric direction from `project_manifest.md` (higher-better
+or lower-better). When selecting max-acc under target, the script must respect the direction: for
+higher-better metrics, select the highest value; for lower-better, select the lowest. Do **not**
+negate or transform the metric — use the raw value with the correct comparison direction.
+
 1. **Read** `$ORCA_ARTIFACTS_DIR/search_record_schema.json` — **shared schema**. Your select_architecture.py must parse search_results.jsonl rows using the field names/types defined here. This schema is produced by the parent agent before dispatching you — it is the shared contract between evaluator (sibling B) and select (you).
 2. **Read** `$ORCA_ARTIFACTS_DIR/project_manifest.md` for metric name + direction (higher-better / lower-better).
 3. **Generate** `select_architecture.py`:

@@ -6,7 +6,7 @@ set -e
 cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable" >&2; exit 1; }
 mkdir -p runs/retrain
 
-# ── 残留进程归属判定（防跨 run 误杀，2026-08-10 v2）─────────────────────────
+# ── 残留进程归属判定（防跨 run 误杀）─────────────────────────
 # 同项目并发 run 共享 artifacts 目录（engine project-scoped `<project_root>/artifacts/<wf>`）
 # → `.retrain_pid` 里可能是**别的 run** 的训练 wrapper。统一走带 run 归属门的
 # kill_train_group.sh（与 agent Step 2 假死 / self-heal 同源）：本 run 残留才整组杀；
@@ -35,6 +35,6 @@ rm -f .ns_retrain_healed.txt .ns_retrain_assessment.txt .ns_retrain_ckpt_resolve
 # wrapper 末尾 `echo $? > .retrain_rc` 捕获脚本退出码——status.sh 完成判定的权威信号。
 # 训练前先启动 progress_watcher（同进程组：组杀一并清；done-marker 驱动退出；fail-soft
 # 绝不碰训练 rc）——tail progress.jsonl 边重训边推实时曲线到前端（每指标一张独立图）。
-setsid nohup bash -c 'python3 "$ORCA_AGENT_RESOURCES/scripts/progress_watcher.py" --progress "runs/retrain/progress.jsonl" --done-marker "runs/retrain/.retrain_rc" --label "nas-supernet/retrain" --title "Retrain Metrics (attempt '"$N"')" >/dev/null 2>&1 & bash run_retrain.sh > "runs/retrain/retrain.attempt'"$N"'.log" 2>&1; echo $? > runs/retrain/.retrain_rc' >/dev/null 2>&1 &
+setsid nohup bash -c 'python3 "$ORCA_AGENT_RESOURCES/scripts/progress_watcher.py" --progress "runs/retrain/progress.jsonl" --done-marker "runs/retrain/.retrain_rc" --label "nas-supernet-v2/retrain" --title "Retrain Metrics (attempt '"$N"')" >/dev/null 2>&1 & bash run_retrain.sh > "runs/retrain/retrain.attempt'"$N"'.log" 2>&1; echo $? > runs/retrain/.retrain_rc' >/dev/null 2>&1 &
 echo $! > runs/retrain/.retrain_pid
 echo "DETACHED pid=$(cat runs/retrain/.retrain_pid) attempt=$N"

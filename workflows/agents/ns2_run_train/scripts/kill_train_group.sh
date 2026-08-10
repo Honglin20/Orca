@@ -1,5 +1,5 @@
 #!/bin/bash
-# kill_train_group.sh <pid> —— 带 run 归属门的整组杀（防跨 run 误杀，2026-08-10）。
+# kill_train_group.sh <pid> —— 带 run 归属门的整组杀（防跨 run 误杀）。
 #
 # launch.sh 残留清理 + agent Step 2 假死 / self-heal 共用的**唯一**训练进程 kill 入口。
 # 背景：ORCA_ARTIFACTS_DIR 是 engine project-scoped（同项目并发 run 共享 `artifacts/<wf>/`），

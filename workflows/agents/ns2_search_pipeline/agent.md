@@ -201,18 +201,58 @@ fi
 
 ```bash
 cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL"; exit 1; }
-# 从 supernet.py 的 SearchSpace 提取 arch 维度，定义 jsonl schema
+# 从 supernet.py 的 SearchSpace 提取 arch 维度，定义 jsonl schema（确定性 introspection）
 python3 -c "
-import json
-# 从 supernet.py 的 SearchSpace 提取 elastic dims（depths / widths / kernel sizes / choices）
-# 输出 schema: {'arch_fields': {...}, 'metric_name': '...', 'metric_direction': '...'}
+import json, sys, ast
+
+# Parse supernet.py to extract SearchSpace elastic dimensions
+src = open('supernet.py').read()
+mod = compile(src, 'supernet.py', 'exec')
+ns = {}
+exec(mod, ns)
+
+search_space = ns.get('SearchSpace')
+if search_space is None:
+    print('FATAL: SearchSpace not found in supernet.py', file=sys.stderr)
+    sys.exit(1)
+
+ss = search_space()
+arch_fields = {}
+
+# Extract elastic dimensions from SearchSpace attributes
+for attr in dir(ss):
+    if attr.startswith('_'):
+        continue
+    val = getattr(ss, attr)
+    if isinstance(val, (list, tuple)) and len(val) > 0:
+        # Candidate list (e.g. stage_depth_candidates, width_candidates)
+        if all(isinstance(v, (list, tuple)) for v in val):
+            # Nested: stage_depth_candidates = [[1,2,3], [2,3,4]]
+            arch_fields[attr] = {'type': 'list_of_lists', 'values': [list(v) for v in val]}
+        elif all isinstance(val[0], (int, float, str)):
+            arch_fields[attr] = {'type': 'list', 'values': list(val)}
+
+# Read metric info from manifest
+metric_name = ''
+metric_direction = ''
+try:
+    manifest = open('project_manifest.md').read()
+    for line in manifest.split('\n'):
+        if 'higher-better' in line.lower():
+            metric_direction = 'higher-better'
+        if 'lower-better' in line.lower():
+            metric_direction = 'lower-better'
+except FileNotFoundError:
+    pass
+
 schema = {
-    'arch_fields': {},  # filled from SearchSpace inspection
-    'metric_name': '',  # from project_manifest.md
-    'metric_direction': '',  # higher-better / lower-better
+    'arch_fields': arch_fields,
+    'metric_name': metric_name,
+    'metric_direction': metric_direction,
     'latency_ms_field': 'latency_ms',
     'extra_fields': ['acc', 'params']
 }
+assert arch_fields, 'FATAL: no elastic dimensions found in SearchSpace'
 print(json.dumps(schema, indent=2))
 " > search_record_schema.json
 ```

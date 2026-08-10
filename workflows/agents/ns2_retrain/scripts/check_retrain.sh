@@ -21,7 +21,7 @@ done
 # ── 2. run_retrain.sh launcher hygiene ──────────────────────────────────
 if [ -s "run_retrain.sh" ]; then
   # AMP=false (v2 default)
-  grep -E '^[[:space:]]*AMP=false[[:space:]]*$' run_retrain.sh || {
+  grep -E '^[[:space:]]*AMP=false[[:space:]]' run_retrain.sh || {
     echo "FAIL: run_retrain.sh AMP default not false"
     FAIL=1
   }

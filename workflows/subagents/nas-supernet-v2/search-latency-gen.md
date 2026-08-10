@@ -16,6 +16,12 @@ You are a code generation sub-agent. Your sole task: generate `latency_estimator
 - `$ORCA_ARTIFACTS_DIR`: artifact directory (write output here).
 - `$ORCA_AGENT_RESOURCES/references/workflows/measure_latency_script_generation.md`: generation contract.
 - `$ORCA_ARTIFACTS_DIR/project_manifest.md`: project facts (metric direction, data env).
+
+**Non-Searchable Logic** (critical): the latency estimator must only measure the **searchable elastic
+subnets** extracted from the supernet. Non-searchable fixed components (stems, projections, final heads)
+are not part of the latency objective. When wrapping a user-provided latency script (`{{ inputs.latency_script_path }}`),
+it must be treated as an ONNX single-file contract — the estimator converts subnets to ONNX, calls the
+script, and parses the latency output. No fallback to FLOPs/MACs/params or any proxy measure.
 - `{{ inputs.latency_script_path }}`: if non-empty, user's external latency script (wrapping required, no proxy fallback).
 
 ## Procedure

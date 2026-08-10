@@ -58,8 +58,13 @@ fi
 INSPECT="$ARTIFACTS_DIR/inspect_supernet.py"
 if [ -s "$INSPECT" ]; then
   (cd "$ARTIFACTS_DIR" && python3 "$INSPECT" >/dev/null 2>&1) || {
-    echo "WARN: inspect_supernet.py failed to run (non-blocking)"
+    echo "FAIL: inspect_supernet.py failed to run"
+    exit 1
   }
+  echo "[check_expand] inspect_supernet.py runs OK"
+else
+  echo "FAIL: inspect_supernet.py missing"
+  exit 1
 fi
 
 # ── Result ──────────────────────────────────────────────────────────────

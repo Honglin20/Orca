@@ -54,11 +54,11 @@ agent 本次 self-heal 的行为痕迹写到 marker 文件（deterministic 部�
 `emit_result.py` 读 marker 拼 JSON，agent 不需要改 python 脚本）：
 
 - 每次 `edit` 改白名单内文件后：
-  `bash -c 'printf "%s\n" "<edited_file_relpath>" >> "$ORCA_ARTIFACTS_DIR/.ns2_run_train_healed.txt"'`
+  `bash -c 'printf "%s\n" "<edited_file_relpath>" >> "$ORCA_ARTIFACTS_DIR/.ns_run_train_healed.txt"'`
 - 跑完 Step 3f fidelity-verifier（无论结论 pass/fail）后：
-  `printf "true" > "$ORCA_ARTIFACTS_DIR/.ns2_run_train_fidelity.flag"`
+  `printf "true" > "$ORCA_ARTIFACTS_DIR/.ns_run_train_fidelity.flag"`
 - 软判断 / 完成前 assessment（Step 3d / 3b）：
-  `printf "%s" "<one-line assessment>" > "$ORCA_ARTIFACTS_DIR/.ns2_run_train_assessment.txt"`
+  `printf "%s" "<one-line assessment>" > "$ORCA_ARTIFACTS_DIR/.ns_run_train_assessment.txt"`
 
 > marker 文件路径相对 `$ORCA_ARTIFACTS_DIR`；agent 不许伪造——下游 review 核对 healed_files
 > 是否触碰禁碰清单（防蒙混靠审计）。
@@ -87,7 +87,7 @@ agent 本次 self-heal 的行为痕迹写到 marker 文件（deterministic 部�
    `supernet.py`、`project_manifest.md`、`supernet_summary.md`、
    `{{ inputs.project_root }}` 下**源文件**（**例外**：`{{ inputs.project_root }}/artifacts/`
    是本 workflow 产物目录树，可写）。若 self-heal 需要改禁碰文件 → **不要改**，记
-   last_error 到 `.ns2_run_train_assessment.txt`，进 Step 4 输出 `{"status":"failed"}`。
+   last_error 到 `.ns_run_train_assessment.txt`，进 Step 4 输出 `{"status":"failed"}`。
 6. **禁重复 detach**：`runs/train/.train_pid` 存在且 `kill -0` 活着 → 训练在跑，**禁止**再发
    detach（会起第二个训练进程，资源争用 + ckpt 互相覆盖）。只能健康检查 + C-loop 继续轮询。
 7. **monitor_until_done.sh 单块 ≤ bash 工具上限（~10min）**：禁在 monitor 块内 detach/kill。
@@ -212,7 +212,7 @@ bash "$ORCA_AGENT_RESOURCES/scripts/update_status_md.sh"
    - **训练逻辑层**（`train_supernet.py` / `evaluator.py` 的 loss / optimizer / sampling / KD / 数据管道）
      → edit，append healed，且必须重触 project-fidelity-verifier（Step 3e）+ 写 fidelity flag。
    - **根因需改禁碰清单**（`supernet.py` / `project_manifest.md` / `supernet_summary.md` / 源文件）
-     → **唯一 failed 路径**：禁碰，记 last_error 到 `.ns2_run_train_assessment.txt`，
+     → **唯一 failed 路径**：禁碰，记 last_error 到 `.ns_run_train_assessment.txt`，
      放弃自愈（不再 launch），进 Step 4 输出 `{"status":"failed"}`。
    - OOM 类：缩 batch=1 + ckpting + AMP 仍不缓解 → 大概率 supernet 容量（禁碰）→ failed hint。
 4. `launch.sh` 重启（优先 resume：脚本支持则从 ckpt 续，否则重头；`.train_attempt`++ 仅 log 命名计数，无上限）。
@@ -234,10 +234,10 @@ bash "$ORCA_AGENT_RESOURCES/scripts/update_status_md.sh"
                 按 md 规定的格式 return。
                 **report 首行**必须照原样回显你 Read 到的 md frontmatter 里的 sentinel 字段（格式见 md 顶部；不要猜，必须来自你 Read 的文件）。")
    ```
-   `Read` 失败（文件不存在）→ **不要**假装跑了；在 `.ns2_run_train_assessment.txt` 末尾追加
+   `Read` 失败（文件不存在）→ **不要**假装跑了；在 `.ns_run_train_assessment.txt` 末尾追加
    `" | fidelity-verifier subagent body not deployed; cannot retrigger"`，跳过本步。
-2. 把 verifier 结论（pass / fail + 理由）合并写进 `.ns2_run_train_assessment.txt`；
-   `printf "true" > .ns2_run_train_fidelity.flag`（**无论 verifier pass/fail**——重触了就标记 true，
+2. 把 verifier 结论（pass / fail + 理由）合并写进 `.ns_run_train_assessment.txt`；
+   `printf "true" > .ns_run_train_fidelity.flag`（**无论 verifier pass/fail**——重触了就标记 true，
    fail 则在 assessment 里如实说明）。
 
 ### C-loop ── 全程序轮询 + 无上限自愈，直到完成 / turn 到顶
@@ -280,7 +280,7 @@ bash "$ORCA_AGENT_RESOURCES/scripts/update_status_md.sh"
 > **可续接**：你可能是 turn 到顶后被宿主重派的 fresh sub-agent。每次进入本节点先走 Step 1
 > status.sh 从文件系统重算现状。TRAIN_ALIVE → 直接进 C-loop 继续轮询（**禁重复 detach**，铁律 6）。
 > 训练进程由 launch.sh setsid detach，sub-agent 死活不影响它。HEAL-LOOP 的自愈历史从
-> `train.attempt*.log` + `.ns2_run_train_healed.txt` + `train_status.md` 重建——读它们判断
+> `train.attempt*.log` + `.ns_run_train_healed.txt` + `train_status.md` 重建——读它们判断
 > "已修过什么、当前根因是否新"，避免重复同一失败修复（换假设，但不停）。
 
 ## Step 4 ── 自校验 JSON（**唯一产出节点 JSON 的时刻**）
@@ -300,13 +300,12 @@ emit_result 现有 else 分支自然出 failed）。deterministic 部分从真�
 
 ## 监督要点（fail loud）
 
-- **绝不手补假 JSON**：`status==failed` 就如实失败——节点 output_schema 校验 + 下游兜底，伪造无意义，
-  tape 审计 + marker 文件可追溯。
-- **绝不带错下传**：禁碰-blocked → `status=failed`。yaml 路由契约：failed 仍会路由到
-  ns2_run_search（单出边），由下游因缺 ckpt fail loud 兜底（`ns2_report`）——**不要**
-  降级 `executed` 让下游拿着坏 ckpt 跑。
+- **绝不手补假 JSON**：`status==failed` 就如实失败——节点 output_schema 校验 + 引擎判败路由
+  `ns2_report`（短路，正确归因 train_failed），伪造无意义，tape 审计 + marker 文件可追溯。
+- **绝不带错下传**：禁碰-blocked → `status=failed`。yaml 路由契约：failed 短路 `ns2_report`（不级联
+  到 search）——**不要**降级 `executed` 让下游拿着坏 ckpt 跑。
 - **未完成 ≠ 结束**：训练未完成时输出状态说明（非 JSON），**不要**把"训练中"写成 executed/skipped
-  提交（下游 ns2_run_search 缺 ckpt 会 fail loud，且 run 应该保持活跃到训练真正完成）。
+  提交（run 应该保持活跃到训练真正完成）。
 - **ckpt 在 ≠ 完成**：中断残留的 ckpt 必须续训，不能因"ckpt 存在"就输出 executed；完成判定必须
   三条件齐（rc=0 + 进程已退出 + ckpt 有效）——status.sh / emit_result.py 已实现，别手改逻辑。
 - **禁重复 detach**（铁律 6）：`status.sh` 输出 `TRAIN_ALIVE` → 走 Step 2，**禁**走 3a。
@@ -324,5 +323,5 @@ emit_result 现有 else 分支自然出 failed）。deterministic 部分从真�
 **训练完成 / 确定失败时，整段回复 = Step 4 `emit_result.py` 打印的那一行 JSON**（形如
 `{"status":"executed","artifacts":["/path/supernet_best.pth"],"assessment":"loss converged...","max_retries_hit":false,"healed_files":["run_train_supernet.sh"],"fidelity_retriggered":false}`）。
 节点 `output_schema` 要求它是合法 JSON 且 `status ∈ {executed, skipped, failed}`；
-`status==failed` → 下游缺 ckpt fail loud 兜底。**训练未完成时，整段回复 = 状态说明（含
+`status==failed` → 短路 `ns2_report`（正确归因 train_failed，不级联 search）。**训练未完成时，整段回复 = 状态说明（含
 "请勿调用 orca next"），宿主不会提交，节点保持执行中，等 monitor 轮询/turn 到顶换 sub-agent 续接。**

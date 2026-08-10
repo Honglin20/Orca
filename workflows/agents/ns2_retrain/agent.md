@@ -58,15 +58,15 @@ agent 本次生成 / self-heal 的行为痕迹写到 marker 文件（determinist
 `emit_result.py` 读 marker 拼 JSON，agent 不需要改 python 脚本）：
 
 - 生成 retrain.py / finetune.py / run_retrain.sh 后（只首次，跨唤醒不重生成）：
-  `printf "%s\n" "<generated_file_relpath>" >> "$ORCA_ARTIFACTS_DIR/.ns2_retrain_generated.txt"`
+  `printf "%s\n" "<generated_file_relpath>" >> "$ORCA_ARTIFACTS_DIR/.ns_retrain_generated.txt"`
 - 每次 `edit` 改白名单内文件后：
-  `bash -c 'printf "%s\n" "<edited_file_relpath>" >> "$ORCA_ARTIFACTS_DIR/.ns2_retrain_healed.txt"'`
+  `bash -c 'printf "%s\n" "<edited_file_relpath>" >> "$ORCA_ARTIFACTS_DIR/.ns_retrain_healed.txt"'`
 - 跑完 Step 3b / 3g fidelity-verifier（无论结论 pass/fail）后：
-  `printf "true" > "$ORCA_ARTIFACTS_DIR/.ns2_retrain_fidelity.flag"`
+  `printf "true" > "$ORCA_ARTIFACTS_DIR/.ns_retrain_fidelity.flag"`
   （**launch.sh 不清此 flag**——语义 = "对当前脚本已跑过 fidelity"；3b 首启在 launch 前写，
   覆盖写无 stale，跨 attempt / 跨 run 保留仍准确）
 - 软判断 / 完成前 assessment（Step 3a / 3b / 3d）：
-  `printf "%s" "<one-line assessment>" > "$ORCA_ARTIFACTS_DIR/.ns2_retrain_assessment.txt"`
+  `printf "%s" "<one-line assessment>" > "$ORCA_ARTIFACTS_DIR/.ns_retrain_assessment.txt"`
 
 > marker 文件路径相对 `$ORCA_ARTIFACTS_DIR`；agent 不许伪造——下游 review 核对 healed_files
 > 是否触碰禁碰清单（防蒙混靠审计）。
@@ -97,7 +97,7 @@ agent 本次生成 / self-heal 的行为痕迹写到 marker 文件（determinist
    `{{ inputs.project_root }}` 下**源文件**（**例外**：`{{ inputs.project_root }}/artifacts/`
    是本 workflow 产物目录树，可写）、上游节点产的 `select_architecture.py` /
    `search_config.yaml` / `run_train_supernet.sh` / `run_search_supernet.sh`。若 self-heal
-   需要改这些 → **不要改**，记 last_error 到 `.ns2_retrain_assessment.txt`，进 Step 4 输出 `{"status":"failed"}`。
+   需要改这些 → **不要改**，记 last_error 到 `.ns_retrain_assessment.txt`，进 Step 4 输出 `{"status":"failed"}`。
 6. **禁重复 detach**：`runs/retrain/.retrain_pid` 存在且 `kill -0` 活着 → 训练在跑，**禁止**再发
    detach（会起第二个训练进程，资源争用 + ckpt 互相覆盖）。只能健康检查 + C-loop 继续轮询。
 7. **monitor_until_done.sh 单块 ≤ bash 工具上限（~10min）**：禁在 monitor 块内 detach/kill。
@@ -191,6 +191,14 @@ artifacts 根解析，落错目录会白烧 attempt 计数）：
   `cd $ORCA_ARTIFACTS_DIR` + 调 `python3 retrain.py --artifacts-dir "$ORCA_ARTIFACTS_DIR" ...`。
 
 **生成契约（scripts 解析的前提，必须逐字满足）**：
+- **单设备默认（C4，生成 retrain.py + run_retrain.sh 时必守）**：
+  - `run_retrain.sh` launcher 用 **plain `python3`**（无 torchrun / NPROC_PER_NODE / MASTER_PORT）。
+    `AMP=false` 默认关。`NUM_WORKERS=0` 默认。多卡时用户改 `torchrun --nproc_per_node=N`。
+  - `retrain.py` 的 DDP wrap 改条件式：`if is_distributed():` 才 wrap DistributedDataParallel。
+    单设备（plain python3，无 RANK env）→ `is_distributed()=False` → 跳过 wrap。
+  - `sync_random_seed` 用 **guarded 版**：`if not is_distributed(): return random.SystemRandom().randrange(...)`
+    前置。禁无条件 `dist.broadcast`（单设备崩 `Default process group not initialized`）。
+  - `autocast(device, enabled=args.amp)`：AMP=false → nullcontext，与单设备正交。
 - **机器进度（双 feed，每 progress unit，rank 0；用户测度为唯一权威，`loss` 非假设）**：
   - **(a) 遥测行（stdout，eta/health/warmup 消费）**：`epoch <cur>/<total> <primary_metric> <v>`
     （epoch-based）或 `step <cur>/<total> <primary_metric> <v>`（step-based）。`<primary_metric>`
@@ -216,15 +224,15 @@ artifacts 根解析，落错目录会白烧 attempt 计数）：
 - **用户测度自检（生成后必跑）**：grep `retrain.py` / `finetune.py` 的 optimizer 构造 + loss 调用
   token——optimizer 类名 + loss 函数名必须与 `project_manifest.md` 的 Training And Evaluation section
   记录一致，禁未声明替换。漂移 → 属训练逻辑层，按 3f self-heal（edit 后 append
-  `.ns2_retrain_healed.txt`）+ 3g 重触 fidelity。metric 名 / 方向 / 变换忠实性属语义层，由 3g
+  `.ns_retrain_healed.txt`）+ 3g 重触 fidelity。metric 名 / 方向 / 变换忠实性属语义层，由 3g
   `project-fidelity-verifier` 的 Evaluation-measure fidelity 维度覆盖。
 
-生成后 append 文件名到 `.ns2_retrain_generated.txt`。
+生成后 append 文件名到 `.ns_retrain_generated.txt`。
 
 ### Step 3b ── fidelity-verifier 复查（首次生成后必跑，point-to-file 协议）
 
 对**首次生成**的 retrain.py / finetune.py 跑一次 fidelity 复查（首次触发也写
-`.ns2_retrain_fidelity.flag=true`）：
+`.ns_retrain_fidelity.flag=true`）：
 
 1. 调 host 内置通用 subagent（point-to-file 协议，subagent_type 填 host 内置通用类型如
    `general`；首轮 prompt 末尾按多轮续轮规则追加本轮 inputs）：
@@ -235,18 +243,19 @@ artifacts 根解析，落错目录会白烧 attempt 计数）：
                 按 md 规定的格式 return。
                 **report 首行**必须照原样回显你 Read 到的 md frontmatter 里的 sentinel 字段（格式见 md 顶部；不要猜，必须来自你 Read 的文件）。")
    ```
-   `Read` 失败（文件不存在）→ **不要**假装跑了；在 `.ns2_retrain_assessment.txt` 追加
+   `Read` 失败（文件不存在）→ **不要**假装跑了；在 `.ns_retrain_assessment.txt` 追加
    `" | fidelity-verifier subagent body not deployed; cannot review"`，跳过本步（不阻塞执行，
    但 tape 留痕）。
-2. 把 verifier 结论（pass / fail + 理由）写进 `.ns2_retrain_assessment.txt`；
-   `printf "true" > .ns2_retrain_fidelity.flag`（**无论 pass/fail**——跑过就标 true，fail 则据
+2. 把 verifier 结论（pass / fail + 理由）写进 `.ns_retrain_assessment.txt`；
+   `printf "true" > .ns_retrain_fidelity.flag`（**无论 pass/fail**——跑过就标 true，fail 则据
    verifier 建议重新生成脚本，再跑一次本步）。
 
 若 verifier fail 且建议改动属铁律 5 禁碰清单 → 不要改禁碰文件，记 last_error，进 Step 4 fail loud。
 
 **固化脚本门（3b 之后、3c 之前）**：
 ```bash
-bash "$ORCA_AGENT_RESOURCES/scripts/check_retrain.sh" || echo "FAIL: check_retrain"
+bash "$ORCA_AGENT_RESOURCES/scripts/check_retrain.sh"
+  || { echo "FAIL" >&2; exit 1; }
 ```
 校验 py_compile + launcher 卫生（无 torchrun + AMP=false + NUM_WORKERS=0）+ 条件 DDP。失败 → fix。
 
@@ -313,11 +322,11 @@ bash "$ORCA_AGENT_RESOURCES/scripts/update_status_md.sh"
    - **根因需改禁碰清单**（`supernet.py` / `project_manifest.md` / `supernet_summary.md` /
      `AGENTS.md` / 源文件 / `select_architecture.py` / `search_config.yaml` /
      `run_train_supernet.sh` / `run_search_supernet.sh`）
-     → **唯一 failed 路径**：禁碰，记 last_error 到 `.ns2_retrain_assessment.txt`，
+     → **唯一 failed 路径**：禁碰，记 last_error 到 `.ns_retrain_assessment.txt`，
      放弃自愈（不再 launch），进 Step 4 输出 `{"status":"failed"}`。
    - OOM 类：缩 batch=1 + ckpting + AMP 仍不缓解 → 大概率 supernet 容量（禁碰）→ failed hint。
    - 白名单内文件整体损坏需重建 → **允许 `write` 重写自产文件**（retrain.py / finetune.py /
-     run_retrain.sh，非禁碰清单），重建后照 3a 生成契约校验 + append 到 `.ns2_retrain_generated.txt`；
+     run_retrain.sh，非禁碰清单），重建后照 3a 生成契约校验 + append 到 `.ns_retrain_generated.txt`；
      改动属训练逻辑层 → 同"训练逻辑层"规则进 3g 重触 fidelity。
 4. `launch.sh` 重启（优先 resume：脚本支持则从 ckpt 续，否则重头；`.retrain_attempt`++ 仅 log 命名计数，无上限）。
 5. `warmup_poll.sh` 确认跑通 → 回 C-loop 继续轮询。
@@ -338,10 +347,10 @@ bash "$ORCA_AGENT_RESOURCES/scripts/update_status_md.sh"
                 按 md 规定的格式 return。
                 **report 首行**必须照原样回显你 Read 到的 md frontmatter 里的 sentinel 字段（格式见 md 顶部；不要猜，必须来自你 Read 的文件）。")
    ```
-   `Read` 失败（文件不存在）→ **不要**假装跑了；在 `.ns2_retrain_assessment.txt` 末尾追加
+   `Read` 失败（文件不存在）→ **不要**假装跑了；在 `.ns_retrain_assessment.txt` 末尾追加
    `" | fidelity-verifier subagent body not deployed; cannot retrigger"`，跳过本步。
-2. 把 verifier 结论（pass / fail + 理由）合并写进 `.ns2_retrain_assessment.txt`；
-   `printf "true" > .ns2_retrain_fidelity.flag`（**无论 verifier pass/fail**——重触了就标记 true，
+2. 把 verifier 结论（pass / fail + 理由）合并写进 `.ns_retrain_assessment.txt`；
+   `printf "true" > .ns_retrain_fidelity.flag`（**无论 verifier pass/fail**——重触了就标记 true，
    fail 则在 assessment 里如实说明）。
 
 ### C-loop ── 全程序轮询 + 无上限自愈，直到完成 / turn 到顶
@@ -384,7 +393,7 @@ bash "$ORCA_AGENT_RESOURCES/scripts/update_status_md.sh"
 > **可续接**：你可能是 turn 到顶后被宿主重派的 fresh sub-agent。每次进入本节点先走 Step 1
 > status.sh 从文件系统重算现状。RETRAIN_ALIVE → 直接进 C-loop 继续轮询（**禁重复 detach**，铁律 6）。
 > 训练进程由 launch.sh setsid detach，sub-agent 死活不影响它。HEAL-LOOP 的自愈历史从
-> `retrain.attempt*.log` + `.ns2_retrain_healed.txt` + `retrain_status.md` 重建——读它们判断
+> `retrain.attempt*.log` + `.ns_retrain_healed.txt` + `retrain_status.md` 重建——读它们判断
 > "已修过什么、当前根因是否新"，避免重复同一失败修复（换假设，但不停）。
 
 ### 3.5 ── 推送最终对比图表（训练真正完成时；`|| true` 不阻塞）

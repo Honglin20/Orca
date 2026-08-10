@@ -68,11 +68,11 @@ Each item below is a verifiable requirement from the companion workflow. Verify 
 **Verify**: Read the data processing and metric calculation logic in `train_supernet.py` and its generated helper files. Check for operations mixing `np.ndarray` with `torch.Tensor`, and ensure any tensor converted via `.numpy()` is first moved to CPU. Also verify that any tensor assigned as an attribute of an `nn.Module` uses `nn.Parameter` or `register_buffer`.
 **Anti-pattern**: `tensor.numpy()` without `.cpu()` first; mathematical operations combining `np.array` and `torch.Tensor`; assigning `self.my_tensor = torch.tensor(...)` inside an `nn.Module` without `register_buffer`.
 
-### [MAJOR] 8. Data Pipeline — DDP Sampler
+### [MAJOR] 8. Data Pipeline — DDP Sampler (when `is_distributed()`)
 **auto-fixable**: no
 **Section**: §4 Data Pipeline
-**Check**: For map-style datasets, `DistributedSampler` is used and `sampler.set_epoch(epoch)` is called at the beginning of each epoch. For iterable/streaming datasets, data is sharded across ranks.
-**Verify**: grep for `DistributedSampler` and `set_epoch`.
+**Check**: When `is_distributed()` (torchrun multi-GPU), for map-style datasets `DistributedSampler` is used and `sampler.set_epoch(epoch)` is called at the beginning of each epoch. On single-device (default), plain sampler is used—no `DistributedSampler` needed.
+**Verify**: If `is_distributed()` is used, grep for `DistributedSampler` and `set_epoch`. On single-device, verify plain sampler.
 
 ### [MAJOR] 9. No Hardcoded Paths In Data-Loading Code
 **auto-fixable**: no
@@ -140,12 +140,12 @@ Each item below is a verifiable requirement from the companion workflow. Verify 
 **Verify**: Read the training loop. Confirm clipping is between the last `backward()` and `scaler.step(optimizer)`.
 **Anti-pattern**: Clipping after each individual subnet's backward (too early); missing `scaler.unscale_` before clipping.
 
-### [CRITICAL] 18. Sandwich Sampling: DDP Sync
+### [CRITICAL] 18. Sandwich Sampling: Sync Random Seed (guarded)
 **auto-fixable**: no
 **Section**: §8 Sandwich Training Loop
-**Check**: Uses `sync_random_seed(device)` to broadcast a seed from rank 0, ensuring all ranks produce identical block choices and architecture configs from the same `rng` state each iteration.
-**Verify**: grep for `sync_random_seed`. Confirm it's called before `sample_sandwich_arch_configs` in the training loop.
-**Anti-pattern**: Each rank sampling independently without synchronization.
+**Check**: Uses `sync_random_seed(device)` with a **guarded** implementation: `if not is_distributed(): return random.SystemRandom().randrange(...)` (single-device local random). When `is_distributed()` (multi-GPU), broadcasts rank0 seed so all ranks produce identical block choices and configs.
+**Verify**: grep for `sync_random_seed`. Confirm it has `is_distributed()` guard (early return on single-device). Confirm it's called before `sample_sandwich_arch_configs`.
+**Anti-pattern**: Unconditional `dist.broadcast` (crashes on single-device when process group not initialized); each rank sampling independently without synchronization.
 
 ### [CRITICAL] 19. Sandwich Sampling: Config Construction
 **auto-fixable**: no
@@ -312,10 +312,9 @@ Items 28 through 37 verify `run_train_supernet.sh` and budget/hyperparameter coh
 **Anti-pattern**: `num_workers>0` on CUDA training boxes (fork worker crashes after CUDA init — real incident); `pin_memory=True` (CUDA tensors cannot be pinned — real incident).
 **Fix**: Set `num_workers=0`, `pin_memory=False` on every DataLoader; reset launcher default to `0`.
 
-### [CRITICAL] 37. Rendezvous Port Uniqueness
+### [N/A] 37. Rendezvous Port Uniqueness (multi-GPU only)
 **auto-fixable**: yes
 **Section**: Run Launcher
-**Check**: The launcher passes `--master_port="$MASTER_PORT"` where `MASTER_PORT` is randomized per invocation (e.g. `$((20000 + RANDOM % 20000))`), never the fixed default `29500`.
-**Verify**: grep for `master_port` and `MASTER_PORT` in `run_train_supernet.sh`. Confirm the port is derived from `RANDOM` (or an equivalent unique-per-run mechanism), not a hardcoded literal.
-**Anti-pattern**: Omitting `--master_port` (fixed default 29500 — collides across concurrent/stale instances, EADDRINUSE on the rendezvous — real incident); hardcoding a fixed port that reuse across attempts.
-**Fix**: Randomize `MASTER_PORT` per launch and pass `--master_port="$MASTER_PORT"`.
+**Check**: The default launcher uses plain `python3` (no torchrun, no MASTER_PORT needed). When switching to `torchrun --nproc_per_node=N` for multi-GPU, the user should set `--master_port` to a unique port. This item only applies to the torchrun path.
+**Verify**: Default launcher should NOT contain `MASTER_PORT` or `torchrun`. If torchrun is used, verify `--master_port` is set.
+**Anti-pattern**: Including `MASTER_PORT` / `torchrun` in the default single-device launcher.

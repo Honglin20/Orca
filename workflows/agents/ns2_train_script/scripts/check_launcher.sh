@@ -16,7 +16,7 @@ fi
 echo "[check_launcher] checking $LAUNCHER"
 
 # AMP=false must be an assignment line (not comment)
-grep -E '^[[:space:]]*AMP=false[[:space:]]*$' "$LAUNCHER" || {
+grep -E '^[[:space:]]*AMP=false[[:space:]]' "$LAUNCHER" || {
   echo "FAIL: AMP default not false (assignment line AMP=false missing)"
   exit 1
 }

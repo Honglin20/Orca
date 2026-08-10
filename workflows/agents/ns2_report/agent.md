@@ -27,11 +27,11 @@ tools: [bash, read]
 | 终态 | 判定条件（磁盘文件） | status | stage |
 |---|---|---|---|
 | `flatten_failed` | `<base>_flat.py` 或 `project_manifest.md` 缺/不达标，且 `supernet.py` 缺 | failed | flatten |
-| `unsupported` | `supernet_summary.md` 含 model_type = `No supported match`（或无 supported 标签），且 `.retrain_rc` 不存在 | failed | expand |
-| `retrain_failed` | `retrain_status.md` 存在 + `.retrain_rc` 存在且 ≠ 0 | failed | retrain |
+| `unsupported` | `supernet_summary.md` 含 model_type = `No supported match`（或无 supported 标签） | failed | expand |
+| `retrain_failed` | `retrain_status.md` 存在 + `runs/retrain/.retrain_rc` 存在且 ≠ 0 | failed | retrain |
 | `select_failed` | `search_results.jsonl` 存在 + `.select_attempt` marker 在 + `.selected_arch.json` 的 selected_arch 为 null/空 | failed | run_search |
-| `train_failed` | `train_status.md` 存在 + `.train_rc` 存在且 ≠ 0，且 `search_results.jsonl` 缺 | failed | run_train |
-| `success` | `.retrain_rc` == 0 + final retrain ckpt 存在 | success | retrain |
+| `train_failed` | `train_status.md` 存在 + `runs/train/.train_rc` 存在且 ≠ 0，且 `search_results.jsonl` 缺 | failed | run_train |
+| `success` | `runs/retrain/.retrain_rc` == 0 + final retrain ckpt 存在 | success | retrain |
 
 ## Workflow
 
@@ -64,9 +64,9 @@ def find_prepared_model():
             return os.path.basename(files[0])
     return ""
 
-# ── Read rc files ──
-train_rc = read_text(os.path.join(ad, ".train_rc"), None)
-retrain_rc = read_text(os.path.join(ad, ".retrain_rc"), None)
+# ── Read rc files (scripts write to runs/train/ and runs/retrain/ subdirs) ──
+train_rc = read_text(os.path.join(ad, "runs", "train", ".train_rc"), None)
+retrain_rc = read_text(os.path.join(ad, "runs", "retrain", ".retrain_rc"), None)
 
 # ── Read select data ──
 selected_arch = None
@@ -115,13 +115,13 @@ if not has_supernet and (not has_flat or not has_manifest):
     status, stage = "failed", "flatten"
     reason = "flatten failed: flat/optimized or manifest missing and supernet.py absent"
 
-# 2. unsupported
-elif has_summary and model_type == "No supported match" and retrain_rc is None:
+# 2. unsupported (first-match order covers stale rc from prior runs)
+elif has_summary and model_type == "No supported match":
     status, stage = "failed", "expand"
     reason = "model type not supported for NAS"
 
-# 3. retrain_failed
-elif retrain_rc is not None and retrain_rc != "0":
+# 3. retrain_failed (retrain_status.md exists + .retrain_rc != 0)
+elif retrain_rc is not None and retrain_rc != "0" and exists(os.path.join(ad, "retrain_status.md")):
     status, stage = "failed", "retrain"
     reason = f"retrain failed: .retrain_rc={retrain_rc}"
 
@@ -130,8 +130,8 @@ elif has_search_results and has_select_attempt and not selected_arch:
     status, stage = "failed", "run_search"
     reason = "select failed: no candidate selected (selected_arch is null)"
 
-# 5. train_failed
-elif train_rc is not None and train_rc != "0" and not has_search_results:
+# 5. train_failed (train_status.md exists + .train_rc != 0 + no search_results)
+elif train_rc is not None and train_rc != "0" and not has_search_results and exists(os.path.join(ad, "train_status.md")):
     status, stage = "failed", "run_train"
     reason = f"train failed: .train_rc={train_rc}"
 
@@ -154,9 +154,9 @@ if exists(retrain_status_path):
 
 # ── Read assessment from train/search if failed there ──
 if stage == "run_train":
-    final_metrics = read_text(os.path.join(ad, ".ns2_run_train_assessment.txt"), final_metrics)
+    final_metrics = read_text(os.path.join(ad, ".ns_run_train_assessment.txt"), final_metrics)
 elif stage == "run_search":
-    final_metrics = read_text(os.path.join(ad, ".ns2_run_search_assessment.txt"), final_metrics)
+    final_metrics = read_text(os.path.join(ad, ".ns_run_search_assessment.txt"), final_metrics)
 
 # ── charts_summary (best-effort: list chart output files) ──
 chart_files = []
@@ -210,7 +210,7 @@ PYEOF
 
 跑固化校验脚本（验证 JSON 合法 + 必填字段）：
 ```bash
-bash "$ORCA_AGENT_RESOURCES/scripts/check_report.sh" || echo "WARN: check_report failed"
+bash "$ORCA_AGENT_RESOURCES/scripts/check_report.sh" || { echo "FAIL" >&2; exit 1; }
 ```
 
 ## 输出

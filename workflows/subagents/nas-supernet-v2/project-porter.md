@@ -1,10 +1,10 @@
 ---
 subagent: project-porter
-version: 1
+version: 2
 sentinel: PT5NX2
 ---
 
-**Output first line**: echo your frontmatter sentinel verbatim as `[subagent:project-porter v1 PT5NX2]` before anything else.
+**Output first line**: echo your frontmatter sentinel verbatim as `[subagent:project-porter v2 PT5NX2]` before anything else.
 
 # Project Porter
 

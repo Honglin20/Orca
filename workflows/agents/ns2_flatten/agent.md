@@ -148,12 +148,13 @@ Markdown body 里项目文件路径**相对 `source_project_root`**（绝对根�
    signature）必须自己打开引用文件确认。
 2. **Create `project_manifest.md`:** `mkdir -p "$ORCA_ARTIFACTS_DIR"`，按上骨架写
    `$ORCA_ARTIFACTS_DIR/project_manifest.md`。
-3. **Write `.user_pkg` marker:** 从 manifest 提取用户项目顶层 Python 包名（模型入口文件
-   的本地 import 源），写 `$ORCA_ARTIFACTS_DIR/.user_pkg`（一行一包名）。下游固化脚本
-   读此 marker 做「生成代码禁 import 用户项目模块」检查。
+3. **Write `.user_pkg` marker:** 从原始项目源码提取用户项目顶层 Python 包名，写
+   `$ORCA_ARTIFACTS_DIR/.user_pkg`（一行一包名）。下游固化脚本读此 marker 做「生成代码禁
+   import 用户项目模块」检查。
    ```bash
-   # 从 flat file 的 import 行提取用户包名
-   grep -E '^\s*(from|import)\s+\w+' "<base>_flat.py" \
+   # 从原始项目源码（非 flat file——flat 已 inline 所有本地代码）提取用户包名：
+   # grep 模型入口文件 + 其本地 import 源文件，找非 stdlib/第三方的 import
+   grep -rhE '^\s*(from|import)\s+\w+' "{{ inputs.project_root }}"/{{ inputs.model_path }} 2>/dev/null \
      | sed -E 's/^\s*(from|import)\s+(\w+).*/\2/' \
      | sort -u | while read pkg; do
        python3 -c "import $pkg" 2>/dev/null || echo "$pkg"   # 非第三方 = 用户包
@@ -199,7 +200,8 @@ Markdown body 里项目文件路径**相对 `source_project_root`**（绝对根�
 
 完成 Step 1-3 后，跑固化校验脚本：
 ```bash
-bash "$ORCA_AGENT_RESOURCES/scripts/check_flatten.sh" || echo "FAIL: check_flatten"
+bash "$ORCA_AGENT_RESOURCES/scripts/check_flatten.sh"
+  || { echo "FAIL" >&2; exit 1; }
 ```
 校验失败 → 修 artifact 重跑。fix-loop 软约束：单步 fix loop 通常 ≤3 次；超限 → fail loud
 （`flatten_passed=false` + `prepared_model=""` + `error` 写明卡在哪步）。
