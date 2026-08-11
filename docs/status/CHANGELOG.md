@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-11] feat(schema): InputDef.enum —— workflow 输入枚举值校验（fail-loud at bootstrap）
+
+`InputDef.enum` 字段 + 三层校验点（schema 加载期 / cli bootstrap / orchestrator 镜像），让 workflow 作者声明单字段值域约束，bootstrap 期对值不在 enum 的字段 fail-loud。spec-reviewer 12 项闭环（B1/B2/B4/B7 必须修订均落地，B3/D8 defer）。B7 核心：cli `_validate_inputs` enum check 独立于 `_TYPE_MAP` 白名单（自定义 type + enum 也查）。首个应用：三版本 nas-supernet.yaml 的 `latency_unit` 加 `enum: [ms, us, s]`，笔误值 `"MS"` 不再烧到 ns2_run_search emit 才 node_failed。25 测试覆盖 AC1-AC8，`tars validate` 三版本均 0 error / 0 warning。Commit: `7b120ee`（framework+tests）+ `131b294`（yaml）。详见 [release note](docs/releases/2026-08-11-inputdef-enum.md)。
+
 ## [2026-08-11] fix(nas-supernet): HEAL 进程组杀搜索树 + report charts_summary 扫 charts/（v1+v2+v3）
 
 P1 ①：`ns{,2,3}_run_search` detach 改 `setsid`（PGID==leader PID，leader 自记 `.search_pid`），HEAL 死机改 `kill -- -<pgid>` 杀整组——根治旧 `nohup ... &` + `kill $!` 只杀 wrapper、python 搜索被 reparent 继续占 GPU 的 orphan。WSL 实测：组 A python 随组死、组 B（跨 run）+ daemon 替身存活（不跨项目、不碰 chart daemon，避开 `a06255a` 连锅端）。
