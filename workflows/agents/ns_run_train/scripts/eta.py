@@ -65,7 +65,7 @@ out = {
     "total_epochs": total or 0,
     "current_epoch": cur,
     "per_epoch_seconds": per_epoch,
-    "eta_minutes": int((total - cur) * per_epoch / 60)
+    "eta_minutes": int(max(0, total - cur) * per_epoch / 60)
     if (total and cur is not None and per_epoch)
     else None,
 }

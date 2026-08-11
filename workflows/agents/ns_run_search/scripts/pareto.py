@@ -103,7 +103,7 @@ def main() -> int:
     sel_lat = safe_float(args.selected_latency)
     sel_acc = safe_float(args.selected_acc)
     if sel_lat is not None and sel_acc is not None:
-        sel_display = info.for_display(sel_acc) if info.negate_for_display else sel_acc
+        sel_display = info.for_display(sel_acc)
         # F4: keep the `, {metric_name}={sel_display:.4f}` clause — only the literal `ms`
         # becomes `{unit}`. Pareto-marker parsing depends on this exact shape (see
         # ``_common._parse_selected_from_caption`` regex).

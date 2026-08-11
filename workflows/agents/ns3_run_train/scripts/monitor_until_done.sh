@@ -42,7 +42,7 @@ while [ "$SECONDS" -lt "$DEADLINE" ]; do
   # (b) 进程活着 → cheap 发散检测（不调 status.sh / 不 torch.load）
   CUR_SIZE="$(stat -c %s "$LOG" 2>/dev/null || stat -f %z "$LOG" 2>/dev/null || echo 0)"
   # NaN/error 词法 suspect（log 格式未契约化 → suspect 非闸门，agent 复核兜底）
-  if tail -n 50 "$LOG" 2>/dev/null | grep -Eqi '(^|[[:space:]:=,(])(nan|inf|overflow|out of memory|cuda error|runtime error|error)([[:space:],).:]|$)'; then
+  if tail -n 50 "$LOG" 2>/dev/null | grep -Eqi '(^|[[:space:]:=,(])(nan|inf|overflow|out of memory|cuda error|runtime[[:space:]]*error|traceback|exception|error[[:space:]]*:)([[:space:],).:]|$)'; then
     echo "TRAIN_STUCK nan-or-error-in-log"; exit 0
   fi
   if [ "$CUR_SIZE" -le "$LAST_SIZE" ]; then
