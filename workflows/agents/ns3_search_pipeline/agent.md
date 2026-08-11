@@ -216,62 +216,79 @@ Write `$ORCA_ARTIFACTS_DIR/search_record_schema.json`—defines the arch field n
 This is the shared contract between evaluator (produced by subagent B) and select_architecture.py (produced by subagent C).
 
 ```bash
-cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL"; exit 1; }
-# extract arch dimensions from supernet.py's SearchSpace to define the jsonl schema (deterministic introspection)
+cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
+# Extract arch dimensions from supernet.py's SearchSpace to define the jsonl schema (deterministic
+# introspection). The file is written INSIDE python only after all computation succeeds — do NOT use
+# `> search_record_schema.json` redirection: bash truncates the file before python starts, so any crash
+# during parsing (SyntaxError / exec failure) leaves a 0-byte file, which then fools the Step 0.5 resume
+# gate (`-s` non-empty check) and crashes downstream discover_latency_unit on an empty json.
 python3 -c "
-import json, sys, ast
+import json, sys, traceback
 
-# Parse supernet.py to extract SearchSpace elastic dimensions
-src = open('supernet.py').read()
-mod = compile(src, 'supernet.py', 'exec')
-ns = {}
-exec(mod, ns)
+# exec supernet.py to extract SearchSpace. __name__='not_main' skips its __main__ smoke block.
+try:
+    src = open('supernet.py').read()
+    ns = {'__name__': 'not_main'}
+    exec(compile(src, 'supernet.py', 'exec'), ns)
+except Exception as e:
+    print(f'FATAL: cannot exec supernet.py for introspection: {e}', file=sys.stderr)
+    traceback.print_exc()
+    sys.exit(1)
 
-search_space = ns.get('SearchSpace')
-if search_space is None:
+SearchSpace = ns.get('SearchSpace')
+if SearchSpace is None:
     print('FATAL: SearchSpace not found in supernet.py', file=sys.stderr)
     sys.exit(1)
 
-ss = search_space()
-arch_fields = {}
+try:
+    ss = SearchSpace()
+except Exception as e:
+    print(f'FATAL: SearchSpace() instantiation failed: {e}', file=sys.stderr)
+    sys.exit(1)
 
-# Extract elastic dimensions from SearchSpace attributes
+arch_fields = {}
 for attr in dir(ss):
     if attr.startswith('_'):
         continue
     val = getattr(ss, attr)
     if isinstance(val, (list, tuple)) and len(val) > 0:
-        # Candidate list (e.g. stage_depth_candidates, width_candidates)
         if all(isinstance(v, (list, tuple)) for v in val):
             # Nested: stage_depth_candidates = [[1,2,3], [2,3,4]]
             arch_fields[attr] = {'type': 'list_of_lists', 'values': [list(v) for v in val]}
-        elif all isinstance(val[0], (int, float, str)):
+        elif all(isinstance(v, (int, float, str)) for v in val):
             arch_fields[attr] = {'type': 'list', 'values': list(val)}
 
-# Read metric info from manifest
-metric_name = ''
+if not arch_fields:
+    print('FATAL: no elastic dimensions found in SearchSpace', file=sys.stderr)
+    sys.exit(1)
+
+# metric info (best-effort): downstream select_architecture.py derives metric name/direction from
+# search_config.yaml objs; the schema's metric_name/metric_direction are kept as backup — manifest is
+# free text with no reliable metric-name anchor, so metric_name is left empty.
 metric_direction = ''
 try:
-    manifest = open('project_manifest.md').read()
-    for line in manifest.split('\n'):
-        if 'higher-better' in line.lower():
+    for line in open('project_manifest.md').read().split('\n'):
+        low = line.lower()
+        if 'higher-better' in low:
             metric_direction = 'higher-better'
-        if 'lower-better' in line.lower():
+        elif 'lower-better' in low:
             metric_direction = 'lower-better'
 except FileNotFoundError:
     pass
 
 schema = {
     'arch_fields': arch_fields,
-    'metric_name': metric_name,
+    'metric_name': '',
     'metric_direction': metric_direction,
-    'latency_ms_field': 'latency_ms',
+    'latency_ms_field': 'latency',
     'latency_unit': '{{ inputs.latency_unit }}',
-    'extra_fields': ['acc', 'params']
+    'extra_fields': ['acc', 'params'],
 }
-assert arch_fields, 'FATAL: no elastic dimensions found in SearchSpace'
-print(json.dumps(schema, indent=2))
-" > search_record_schema.json
+# Write the file only after all computation succeeds (a crash leaves the old file / no file, never a 0-byte).
+with open('search_record_schema.json', 'w') as f:
+    json.dump(schema, f, indent=2)
+print(f'WROTE search_record_schema.json ({len(arch_fields)} arch_fields)')
+"
 ```
 
 **Dispatch 3 subagents to generate (point-to-file protocol)**—**for each, first check the RESUME flags; skip any with SKIP_*=true (artifacts already on disk)**:
