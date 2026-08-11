@@ -287,10 +287,10 @@ export interface WorkflowState {
   /** 懒加载：GET /api/runs/<id>/events → _refoldAndCommit。SPEC audit-c：失败 fail loud（写 loadError + 退避重试）。 */
   loadRun: (runId: string) => Promise<void>;
   /**
-   * SPEC web-attach §3 huge-mode 入口：先 GET /meta → 判 huge 分支。
-   * - huge=false：GET /events 全量 → loadFromEvents（同 loadRun 行为）。
-   * - huge=true：GET /events?tail=500 → loadFromEvents（tail fold）+ 设 serverOverview。
-   *   Conversation/Log 读 tail；上滚 IntersectionObserver → ``loadEarlierChunk`` 增量 prepend。
+   * SPEC web-attach §3 huge-mode 入口：先 GET /meta → 据 huge 置信息位。
+   * - huge 与否都 GET /events 全量 → loadFromEvents（用户偏好：huge 不弹 gate，直接加载）。
+   *   huge 标记仍置位（"大 run" 信息位），但 hugeFullyLoaded 恒 true → 占位/按钮分支不触发。
+   *   loadEarlierChunk/loadFull 留作 huge-tail 场景预留能力（当前未接 UI）。
    */
   loadRunWithMeta: (runId: string) => Promise<void>;
   /** huge 模式增量 prepend：fetch ``?since=oldest-M&limit=M`` → 与既有 events 合并 fold。 */
@@ -916,12 +916,11 @@ export const useWorkflowStore = create<WorkflowState>()(
     },
 
     /**
-     * SPEC web-attach §3 huge-mode 入口。先 GET /meta → 判 huge 分支。
+     * SPEC web-attach §3 huge-mode 入口。先 GET /meta → 据 meta.huge 置信息位。
      *
-     * - **非 huge**：GET /events 全量 → 同 loadRun fail-loud 路径。
-     * - **huge**：GET /events?tail=500 → tail fold + 设 serverOverview（overview selectors
-     *   信任服务端 fold，M3/M4）+ 记 oldest/newest 窗口边界。
-     * - ``/meta`` 失败 silent fallback 到 full 路径（INV-1 qualifier M9）；full 也失败 → 错误态。
+     * - **huge 与否皆全量**：GET /events → loadFromEvents + hugeFullyLoaded=true（用户偏好：
+     *   huge 不弹「加载全部」gate，直接全量加载）。huge 标记据 meta 置位仅作"大 run"信息。
+     * - ``/meta`` 失败 silent fallback（INV-1 qualifier M9）；full 也失败 → 错误态。
      * - ``writable=false``（attached run）：gate 模态禁提交。
      */
     loadRunWithMeta: async (runId) => {
@@ -946,37 +945,9 @@ export const useWorkflowStore = create<WorkflowState>()(
         }
       }
 
-      if (meta && meta.huge) {
-        // huge 模式：拉 tail=500 + serverOverview
-        try {
-          const tail = (await fetchEventsWithBackoff(
-            runId,
-            entry,
-            `/api/runs/${encodeURIComponent(runId)}/events?tail=500`
-          )) as WebEvent[];
-          if (get().activeRunId !== null && get().activeRunId !== runId) return;
-          if (moduleEpoch !== myEpoch) return;
-          set((state) => {
-            _refoldAndCommit(state, runId, tail, {
-              huge: true,
-              hugeFullyLoaded: false,
-              serverOverview: meta!.overview ?? null,
-              writable: meta!.writable,
-              oldestSeqInWindow:
-                tail.length > 0 ? tail[0].seq : meta!.oldest_seq,
-              newestSeqInWindow:
-                tail.length > 0 ? tail[tail.length - 1].seq : meta!.newest_seq,
-            });
-          });
-        } catch (err) {
-          writeLoadError(get, set, runId, myEpoch, err as LoadError);
-        } finally {
-          if (inflightLoads.get(runId)?.epoch === myEpoch) inflightLoads.delete(runId);
-        }
-        return;
-      }
-
-      // 非 huge（或 /meta 失败回退）：全量路径
+      // 全量路径（huge run 亦直接全量加载——不弹「加载全部」gate；用户偏好直接加载，
+      // 接受大 run 较慢的代价）。huge 标记仍据 meta 置位（信息位），但 hugeFullyLoaded
+      // 恒 true → ChartRenderer 占位/按钮分支（huge && !hugeFullyLoaded）永不触发。
       try {
         const events = (await fetchEventsWithBackoff(
           runId,
@@ -987,7 +958,7 @@ export const useWorkflowStore = create<WorkflowState>()(
         if (moduleEpoch !== myEpoch) return;
         set((state) => {
           _refoldAndCommit(state, runId, events, {
-            huge: false,
+            huge: meta?.huge ?? false,
             hugeFullyLoaded: true,
             serverOverview: null,
             writable: meta?.writable ?? true,
