@@ -195,14 +195,39 @@ elif stage == "run_search":
     final_metrics = read_text(os.path.join(ad, ".ns_run_search_assessment.txt"), final_metrics)
 
 # ── charts_summary (best-effort: list chart output files) ──
+# Chart scripts render static files to <ad>/charts/ (via _common.push_chart static fallback) and
+# append every result (pushed/rendered_static/skipped) to .nas-supernet_charts.jsonl. The old scan
+# of runs/{train,search,retrain} missed charts/ entirely AND falsely caught metrics files (e.g.
+# runs/retrain/test_metrics.json). Scan charts/ for rendered files; if none (live-pushed run with no
+# static fallback, or nothing rendered), fall back to the marker so live charts are still listed.
 chart_files = []
-for d in ("runs/train", "runs/search", "runs/retrain"):
-    chart_dir = os.path.join(ad, d)
-    if os.path.isdir(chart_dir):
-        for f in os.listdir(chart_dir):
-            if f.endswith(".png") or f.endswith(".html") or f.endswith(".json"):
-                chart_files.append(os.path.join(d, f))
-charts_summary = ", ".join(sorted(chart_files)) if chart_files else "no chart files found"
+charts_dir = os.path.join(ad, "charts")
+if os.path.isdir(charts_dir):
+    for f in sorted(os.listdir(charts_dir)):
+        if f.endswith(".png") or f.endswith(".html"):
+            chart_files.append(os.path.join("charts", f))
+if chart_files:
+    charts_summary = ", ".join(chart_files)
+else:
+    titles = []
+    seen = set()
+    marker = os.path.join(ad, ".nas-supernet_charts.jsonl")
+    if os.path.isfile(marker):
+        with open(marker, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(rec, dict) and rec.get("status") in ("pushed", "rendered_static"):
+                    t = rec.get("title", "")
+                    if t and t not in seen:
+                        seen.add(t)
+                        titles.append(t)
+    charts_summary = ("live charts: " + ", ".join(titles)) if titles else "no chart files found"
 
 # ── artifacts list ──
 artifacts = []

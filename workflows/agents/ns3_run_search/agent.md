@@ -181,9 +181,16 @@ For **each attempt** N=1,2,3,... (no limit — N only names the attempt log, nev
 cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable" >&2; exit 1; }
 mkdir -p runs/search
 rm -f runs/search/.search_pid runs/search/.search_rc
-nohup bash -c 'bash run_search_supernet.sh > "runs/search/search.attempt'"$N"'.stdout.log" 2>&1; echo $? > runs/search/.search_rc' >/dev/null 2>&1 &
-echo $! > runs/search/.search_pid
-echo "DETACHED pid=$(cat runs/search/.search_pid) attempt=$N"
+# setsid: the search runs in its own session/process group (PGID == session-leader PID, recorded by
+# the leader itself into .search_pid). On a dead-hang HEAL, `kill -- -<pgid>` kills the whole group
+# (wrapper + script + python + GPU workers), fixing the orphan where the old `nohup ... &` + `kill $!`
+# only killed the wrapper and left the reparented python search holding the GPU. Group isolation
+# verified: does not cross runs/projects and does not touch the chart daemon (fresh unique PGID).
+setsid bash -c 'echo "$$" > runs/search/.search_pid; bash run_search_supernet.sh > "runs/search/search.attempt'"$N"'.stdout.log" 2>&1; echo $? > runs/search/.search_rc' </dev/null >/dev/null 2>&1 &
+# race-free wait for the leader to record its PGID (if setsid had to fork, $! may be a transient
+# parent; trust only .search_pid).
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f runs/search/.search_pid ] && break; sleep 0.2; done
+echo "DETACHED pgid=$(cat runs/search/.search_pid 2>/dev/null || echo '?') attempt=$N"
 ```
 
 ### 2b. Short polling (**repeat** this call until stdout shows `DONE`; ≤5 min each, never hits the tool timeout)
@@ -213,6 +220,12 @@ fi
 - **Mid-search divergence detection**: after warmup, if the log shows no new generation markers for a long
   time / the tail shows NaN/inf/objective divergence → judge dead-hang → `kill` + self-heal (same
   TRAIN_STUCK idea as train, but search uses the agent's in-poll judgment, no monitor script).
+- **Kill the whole group on dead-hang** (🔴 never just `kill "$PID"` → the python search gets orphaned
+  and keeps holding the GPU): run
+  `kill -- -"$(cat runs/search/.search_pid 2>/dev/null)" 2>/dev/null || true` (negative PGID = kill the
+  whole process group: wrapper + script + python + GPU workers die together), then return to 2c self-heal.
+  Group isolation verified: does not cross runs/projects and does not touch the chart daemon. The
+  `kill -0 "$PID"` liveness check is unchanged (leader PID == PGID; leader alive ⇔ search running).
 
 > Cross-shell RC: the detach sub-shell writes `echo $? > .search_rc` at the end; polling calls are different
 > bash sub-shells (`wait` is ineffective across shells) → read RC from `.search_rc`.

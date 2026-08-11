@@ -168,9 +168,14 @@ detach（秒级返回），再**重复**发短轮询调用，直到进程结束�
 cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable" >&2; exit 1; }
 mkdir -p runs/search
 rm -f runs/search/.search_pid runs/search/.search_rc
-nohup bash -c 'bash run_search_supernet.sh > "runs/search/search.attempt'"$N"'.stdout.log" 2>&1; echo $? > runs/search/.search_rc' >/dev/null 2>&1 &
-echo $! > runs/search/.search_pid
-echo "DETACHED pid=$(cat runs/search/.search_pid) attempt=$N"
+# setsid: 搜索跑在独立 session/进程组（PGID == session-leader PID，由 leader 自记入 .search_pid）。
+# 死机 HEAL 用 `kill -- -<pgid>` 杀整组（wrapper + 脚本 + python + GPU worker），根治旧
+# `nohup ... &` + `kill $!` 只杀 wrapper、python 搜索被 reparent 继续占 GPU 的 orphan。
+# 进程组隔离已实测：不跨 run/项目、不碰 chart daemon（setsid 新组唯一 PGID）。
+setsid bash -c 'echo "$$" > runs/search/.search_pid; bash run_search_supernet.sh > "runs/search/search.attempt'"$N"'.stdout.log" 2>&1; echo $? > runs/search/.search_rc' </dev/null >/dev/null 2>&1 &
+# race-free 等 leader 记 PGID（setsid 若需 fork，$! 可能是瞬态父进程不可信；只认 .search_pid）
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f runs/search/.search_pid ] && break; sleep 0.2; done
+echo "DETACHED pgid=$(cat runs/search/.search_pid 2>/dev/null || echo '?') attempt=$N"
 ```
 
 ### 2b. 短轮询（**重复发**这个调用直到 stdout 出现 `DONE`；每次 ≤5 min，不撞工具超时）
@@ -198,6 +203,10 @@ fi
 - **mid-search 发散检测**：warmup 过后，轮询时若 log 长时间无新 generation 标记 / tail 出现
   NaN/inf/objective 发散 → 判假死 → `kill` + self-heal（同 train 的 TRAIN_STUCK 思路，
   但 search 用 agent 轮询内的判断，不引入 monitor 脚本）。
+- **判死机后杀整组**（🔴 禁只 `kill "$PID"` → 孤儿 python 继续占 GPU）：执行
+  `kill -- -"$(cat runs/search/.search_pid 2>/dev/null)" 2>/dev/null || true`（负 PGID = 杀整个进程组，
+  wrapper + 脚本 + python + GPU worker 一起死），再回 2c self-heal。进程组隔离已实测：不跨 run/项目、
+  不碰 chart daemon。`kill -0 "$PID"` 存活判定不变（leader PID == PGID；leader 存活 ⇔ 搜索在跑）。
 
 > 跨 shell RC：detach 子 shell 末尾 `echo $? > .search_rc`；轮询调用是不同 bash 子 shell（`wait` 跨
 > shell 无效）→ 从 `.search_rc` 读 RC。
