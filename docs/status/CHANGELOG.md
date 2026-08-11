@@ -5,7 +5,7 @@
 
 ---
 
-## [2026-08-12] feat(workflow): puzzle P1 契约层 + P2 算法脚本层实现完成（未 commit）
+## [2026-08-12] feat(workflow): puzzle decomposed-NAS workflow + mnist_trf 脚本级 E2E PASS 双 AC（`3a657d7`）
 
 Puzzle decomposed-NAS workflow（Bercovich 2025 范式）的 P1 + P2 逐字实现 `docs/specs/phase-puzzle-impl.md`。**P1**：6 agent.md（pz_expand / pz_build_library / pz_score / pz_select / pz_retrain / pz_report）+ 24 runner scripts（pz_build_library BLD_* 从 ns_run_train 拷贝改名 + pz_retrain RETRAIN_* 从 ns_retrain 拷贝改名）+ 3 verifier body（workflow / memory / project-fidelity，sentinels WF3QP8/MM4ZR6/PF8LK3）+ workflow-checklists。**P2**：9 预写确定性算法脚本（`_puzzle_scripts/`：puzzle_common / expand_model / bld / score / latency_table / mip_select[pulp grouped-knapsack] / build_selected / gkd_retrain / gate_report）+ smoke test（5 用例 CPU 全过）。通用：block_map + inputs 参数化，对任意 transformer 族模型都能跑，运行时不让 LLM 生成算法代码。复用库：nas_agent.blocks.* / nas_agent.latency / nas_agent.train.distillation。code-reviewer 闭环：2 Blocker（bld.py 补 bld_complete.pt marker / mip_select 加 --latency-unit + 删双行 stdout）+ 5 Major（agent.md 命令示例对齐脚本真实 argparse）+ 6 Minor 全修。`tars validate` 0 error / 0 warning。**commit 待用户确认**（E2E 通过后统一 commit）。详见 SPEC `docs/specs/phase-puzzle-impl.md` + 设计草稿 `docs/specs/puzzle-design-draft.md`。
 
