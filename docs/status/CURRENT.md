@@ -14,7 +14,12 @@
 
 **必读**：release note `docs/releases/2026-08-11-nas-supernet-latency-unit-and-subnet-display.md`；SPEC `docs/specs/2026-08-11-nas-supernet-latency-unit-and-subnet-display.md`；CHANGELOG 顶部索引。
 
-**遗留**：真机 E2E（in-session headless，`latency_unit: us` + 用户 script 验 4 图 label=us / compare 真测量 / `subnet_structure.md` / A6 fail-loud）未跑——属 test-agent 范围。
+**遗留 / 待办**：
+- ℹ️ **v3 P0 后修（已推送 `0ca1b3b`）**：2b20663 提交的 v3（`ns3_search_pipeline/agent.md`）schema-gen 带与 v2 同根的 SyntaxError（`elif all isinstance`）+ `>file` 截空 + `latency_ms_field` 错值——洁净审查未逮功能性 bug（v3 跑起来同样 "missing latency_unit"）。已移植 v2 修法（isinstance 修正 + write-on-success + `__name__` + fail-loud + 值 `'latency'`）修复并推送。
+- [x] **sentinel `full_supernet_latency.py`（ns/ns2/ns3）已提交 `5265e5c`**：2b20663 的 `default=""` 让 v1/v3 us-runs 回归；改 `default=None` sentinel（None→保旧行为 / 显式空串→强制 ms），三份 byte-identical + 81 测试过。
+- [ ] **Task 2（引擎）`latency_unit` 输入枚举**：`InputDef`(`extra="forbid"`) 不许 yaml 加 `enum`；需 `InputDef.enum` + `catalog.inputs_schema_list` 透出 + `cli._validate_inputs` + `orchestrator` 镜像 + 测试。超 latency-unit SPEC；入口覆盖（cli-only vs 三入口）待决。现状：笔误值（"MS"）过 bootstrap，烧到 ns2_run_search emit 才 node_failed。
+- [ ] **全面审计其他 v2 发现（未修，已定位 file:line）**：① ns2_run_search detach 无 `setsid`，HEAL `kill` 孤儿化搜索子进程占 GPU（P1）；② ns2_report `charts_summary` 漏扫 `charts/` → 永远 "no chart files found"（P1）；③ expand unsupported 跳 Step4 时 report 归因落 stage=report 非 expand（P1?）；④ ns2_run_search resume 丢 attempt N；⑤ ns2_retrain status.sh 写相对 ckpt；⑥ monitor_until_done error grep 过宽；⑦ pareto.py dormant 双 negate；⑧ eta.py 负值（P2）。
+- [ ] 真机 E2E（in-session headless `latency_unit: us` + 用户 script → 4 图 label=us / compare 真测量 / `subnet_structure.md` / A6 fail-loud）——属 test-agent 范围。
 
 ---
 

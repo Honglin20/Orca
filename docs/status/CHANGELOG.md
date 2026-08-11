@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-11] fix(nas-supernet): full_supernet_latency --latency-script-path default None sentinel（v1+v2+v3）
+
+2b20663 的 `default=""` 让 v1/v3 us-runs 回归（agent 调用点不传 `--latency-script-path` → 恒空串 → 走 ms 分支 → us/s 声明被错标成 ms）。改 `default=None` sentinel：None（未传）→ 尊重 `--latency-unit`/schema 保旧行为；显式空串 → 强制 ms（默认 PyTorch 路径恒 ms）。三份 byte-identical（blob b15fb9f），`test_ns_chart_scripts.py` 81 passed。`5265e5c`。
+
 ## [2026-08-11] feat(nas-supernet): latency 单位透传 + full-supernet 真测量 + 子网结构展示（v1+v2+v3）
 
 4 项：**A** `latency_unit` 输入（ms|us|s 默认 ms，不换算）端到端透传到 4 图 label/列名/caption（F4 caption 保留 metric 子句，正则三单位）；**B** `full_supernet_latency.py` 用搜索同款 estimator 测全展开超网真 latency，替换 compare_table 的 max(候选) 代理（"FP32 上限"）；**C** latency_dist 全 sentinel/全 0 合成占位柱 + 诊断 caption；**D** `subnet_profile.py` 物化选定子网写 `subnet_structure.md`（module repr + 逐层 params/shape 表）。
