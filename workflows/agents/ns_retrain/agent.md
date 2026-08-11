@@ -213,6 +213,10 @@ artifacts 根解析，落错目录会白烧 attempt 计数）：
 - **不许**在 retrain.py / finetune.py 里硬编码 supernet.py 的内部实现——只通过 manifest 暴露的
   API（`build_supernet` / `extract_subnet` 等）调。若 manifest 未暴露所需 API → fail loud（铁律 1），
   不要绕路改 supernet.py。
+- **progress.jsonl 写入自检（生成后必跑；本节点无 check_*.sh 兜底）**：grep
+  `retrain.py` / `finetune.py` 含 `progress.jsonl` + `json.dumps`——至少其一写了上方 (b) 契约的
+  chart feed（漏写 = retrain executed 但无实时图）。运行时强校验在 warmup_poll.sh 的
+  check_progress_contract.py（漏写 → WARMUP_FAIL reason=progress-contract → 3f self-heal）。
 - **用户测度自检（生成后必跑）**：grep `retrain.py` / `finetune.py` 的 optimizer 构造 + loss 调用
   token——optimizer 类名 + loss 函数名必须与 `project_manifest.md` 的 Training And Evaluation section
   记录一致，禁未声明替换。漂移 → 属训练逻辑层，按 3f self-heal（edit 后 append
@@ -391,7 +395,9 @@ bash "$ORCA_AGENT_RESOURCES/scripts/update_status_md.sh"
 ```bash
 cd "$ORCA_ARTIFACTS_DIR" || exit 1
 python3 "$ORCA_AGENT_RESOURCES/scripts/metrics_bar.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --selected-acc "{{ ns_select.output.selected_acc }}" > /dev/null || true
-python3 "$ORCA_AGENT_RESOURCES/scripts/compare_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --selected-latency-ms "{{ ns_select.output.selected_latency_ms }}" --selected-acc "{{ ns_select.output.selected_acc }}" > /dev/null || true
+python3 "$ORCA_AGENT_RESOURCES/scripts/compare_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --selected-latency "{{ ns_select.output.selected_latency }}" --selected-acc "{{ ns_select.output.selected_acc }}" --latency-unit "{{ ns_select.output.latency_unit }}" > /dev/null || true
+# subnet_profile.py：物化选定子网写 subnet_structure.md + 推 table chart。fail-soft。
+python3 "$ORCA_AGENT_RESOURCES/scripts/subnet_profile.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ ns_select.output.latency_unit }}" > /dev/null || true
 ```
 
 ## Step 4 ── 自校验 JSON（**唯一产出节点 JSON 的时刻**）

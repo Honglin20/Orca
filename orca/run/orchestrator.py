@@ -165,6 +165,23 @@ class Orchestrator:
                 raise ValueError(
                     f"必填 input {name!r}（type={idef.type}）未提供且无 default"
                 )
+        # SPEC §2.1 P0 / F1：跨字段 input 不变量（同 in-session bootstrap 校验，覆盖 ``tars
+        # run`` / TUI / daemon 入口）。default 已填后判定，否则 ``[advanced]`` 缺省字段会被
+        # 误判为「空」触发守卫。违反 → ValueError 直透（与 required-missing 同模式，启动前置
+        # 条件不满足，类比 argparse type=int 解析失败）。
+        for inv in wf.input_invariants:
+            trig_val = merged_inputs.get(inv.when_field)
+            if trig_val not in inv.when_in:
+                continue
+            for field in inv.require_nonempty:
+                val = merged_inputs.get(field)
+                if val is None or (isinstance(val, str) and not val.strip()) or val == []:
+                    raise ValueError(
+                        f"input invariant violated: {inv.message} "
+                        f"(when {inv.when_field!r}={trig_val!r}, "
+                        f"required non-empty: {inv.require_nonempty!r}, "
+                        f"but {field!r}={val!r})"
+                    )
         # gen run_id（若调用方未传，内部 gen；测试可注入固定 id）
         self.run_id = run_id or gen_run_id(wf.name)
         # point-to-file 协议：workflows_root 是 wf 的加载期元数据（load_workflow 绑定）。

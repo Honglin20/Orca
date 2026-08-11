@@ -20,10 +20,15 @@ inputs:
     type: string
     description: "[ask] 目标模型入口文件路径（相对 project_root 或绝对）。supernet 张开的起点——ns2_flatten flatten 此文件。项目内唯一锚点，必须用户给"
     required: true
-  target_latency_ms:
+  target_latency:
     type: number
-    description: "[ask] 选架构时延目标（毫秒）。ns2_run_search 调 select_architecture.py 时下传 --target-latency-ms：latency ≤ target 的 Pareto 前沿候选里选 max-acc。核心业务 KPI——NAS 无目标 = 瞎搜，必须用户给（本工作流恒提供 target，无 target 不开工）"
+    description: "[ask] 选架构时延目标（单位由 latency_unit 决定，默认 ms）。ns2_run_search 调 select_architecture.py 时下传 --target-latency：latency ≤ target 的 Pareto 前沿候选里选 max-acc。核心业务 KPI——NAS 无目标 = 瞎搜，必须用户给（本工作流恒提供 target，无 target 不开工）"
     required: true
+  latency_unit:
+    type: string
+    description: "[advanced] latency 测量值声明单位（ms|us|s，默认 ms）。全链路 label/列名/caption/比较按此单位；不换算数值（只标注）。默认 estimator 路径恒返回 ms——声明 us/s 必须同时给 latency_script_path（bootstrap fail-loud 守卫）"
+    required: false
+    default: "ms"
   latency_script_path:
     type: string
     description: "[advanced] 用户外部时延脚本路径（可选）。**提供则全链路时延唯一权威**——ns2_search_pipeline 生成 latency_estimator.py 时包装此脚本（onnx 单文件契约），search_config.yaml objs 的 latency objective + select_architecture.py 的 latency 来源全部同源于此，禁 fallback 到内置 PyTorch / FLOPs / 任何代理。未提供（默认）走 nas-agent 内置 PyTorch measure_module_latency"
@@ -34,6 +39,14 @@ inputs:
     description: "[default] 复现性种子（默认 0）。全 workflow 必填（contract §6 Tier A）；agent.md 经 {{ inputs.seed }} 下传到训练/搜索脚本 --seed，deterministic 路径全固定此 seed"
     required: false
     default: 0
+
+# 跨字段 input 不变量——bootstrap fail-loud 校验：
+# latency_unit∈{us,s} ⇒ latency_script_path 必须非空（默认 estimator 恒 ms，非 ms 声明必错标）。
+input_invariants:
+  - when_field: latency_unit
+    when_in: ["us", "s"]
+    require_nonempty: [latency_script_path]
+    message: "声明 latency_unit 为 us/s 时必须提供 latency_script_path（默认 PyTorch estimator 恒返回 ms，非 ms 声明必错标）"
 
 nodes:
   # ═══════════════════════════════════════════════════════════════════════════
@@ -207,7 +220,7 @@ nodes:
     model: "deepseek/deepseek-v4-flash"
     output_schema:
       type: object
-      required: [status, artifacts, assessment, max_retries_hit, healed_files, fidelity_retriggered, selected_arch, selected_acc, selected_latency_ms, pareto_size, select_reason]
+      required: [status, artifacts, assessment, max_retries_hit, healed_files, fidelity_retriggered, selected_arch, selected_acc, selected_latency, latency_unit, pareto_size, select_reason]
       properties:
         status: {type: string, enum: [executed, failed], description: "executed=RC=0+search_results.jsonl≥1 行；failed=缺上游 ckpt / 禁碰-blocked"}
         artifacts:
@@ -225,7 +238,8 @@ nodes:
           type: ["object", "null"]
           description: "选定的子网架构描述；无候选/select 失败时 null"
         selected_acc: {type: number, description: "选定子网 search 时的 metric；无候选时 0"}
-        selected_latency_ms: {type: number, description: "选定子网实测/估时延（毫秒）；无候选时 0"}
+        selected_latency: {type: number, description: "选定子网实测/估时延（单位 = latency_unit，默认 ms）；无候选时 0"}
+        latency_unit: {type: string, enum: [ms, us, s], description: "latency 单位（透传自 inputs.latency_unit，默认 ms）"}
         pareto_size: {type: integer, description: "Pareto 前沿大小；无候选时 0", minimum: 0}
         select_reason:
           type: string
@@ -282,14 +296,16 @@ nodes:
     model: "deepseek/deepseek-v4-flash"
     output_schema:
       type: object
-      required: [status, stage, reason, selected_arch, selected_acc, selected_latency_ms, pareto_size, supernet_path, output_dir, final_metrics, artifacts, charts_summary, error]
+      required: [status, stage, reason, selected_arch, selected_acc, selected_latency, latency_unit, subnet_structure, pareto_size, supernet_path, output_dir, final_metrics, artifacts, charts_summary, error]
       properties:
         status: {type: string, enum: [success, failed], description: "终态：success=全链完成；failed=某阶段失败"}
         stage: {type: string, enum: [flatten, expand, train_script, search_pipeline, run_train, run_search, retrain, report], description: "终态来源阶段"}
         reason: {type: string, description: "终态判定理由（简短）"}
         selected_arch: {description: "选定子网架构；无则 null", type: ["object", "null"]}
         selected_acc: {type: number, description: "选定子网 metric；无则 0"}
-        selected_latency_ms: {type: number, description: "选定子网时延；无则 0"}
+        selected_latency: {type: number, description: "选定子网时延（单位 = latency_unit）；无则 0"}
+        latency_unit: {type: string, enum: [ms, us, s], description: "latency 单位（透传自 inputs.latency_unit / schema，默认 ms）"}
+        subnet_structure: {type: string, description: "subnet_structure.md 相对路径（成功时由 ns2_retrain 推 subnet_profile.py 产出）；缺/materialize 失败 → 空串"}
         pareto_size: {type: integer, description: "Pareto 前沿大小", minimum: 0}
         supernet_path: {type: string, description: "supernet.py 路径；无则空串"}
         output_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR 绝对路径"}
@@ -315,7 +331,9 @@ outputs:
   reason: "{{ ns2_report.output.reason }}"
   selected_arch: "{{ ns2_report.output.selected_arch }}"
   selected_acc: "{{ ns2_report.output.selected_acc }}"
-  selected_latency_ms: "{{ ns2_report.output.selected_latency_ms }}"
+  selected_latency: "{{ ns2_report.output.selected_latency }}"
+  latency_unit: "{{ ns2_report.output.latency_unit }}"
+  subnet_structure: "{{ ns2_report.output.subnet_structure }}"
   pareto_size: "{{ ns2_report.output.pareto_size }}"
   supernet_path: "{{ ns2_report.output.supernet_path }}"
   output_dir: "{{ ns2_report.output.output_dir }}"

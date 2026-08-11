@@ -18,6 +18,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
+    discover_latency_unit,
     discover_metric_info,
     flatten_record,
     LATENCY_FIELDS,
@@ -36,8 +37,14 @@ _NON_ARCH_KEYS: frozenset[str] = frozenset(
 def main() -> int:
     ap = argparse.ArgumentParser(description="Push search results table chart.")
     ap.add_argument("--artifacts-dir", required=True)
+    ap.add_argument(
+        "--latency-unit", default="",
+        help="override latency unit (default: discover from search_record_schema.json)",
+    )
     args = ap.parse_args()
     ad = Path(args.artifacts_dir)
+    unit = args.latency_unit.strip() or discover_latency_unit(ad)
+    latency_col = f"latency_{unit}"
 
     records = read_jsonl(ad / "search_results.jsonl")
     if not records:
@@ -101,7 +108,7 @@ def main() -> int:
             continue  # no usable arch key -> skip (nothing to dedup or display)
         row = {
             "arch": arch_digest,
-            "latency_ms": lat,
+            latency_col: lat,
             info.name: met,
             "pareto": is_pareto,
         }
@@ -153,7 +160,7 @@ def main() -> int:
     for new_idx, row in enumerate(rows, start=1):
         row["#"] = new_idx
 
-    columns = ["#", "arch", "latency_ms", info.name, "pareto"]
+    columns = ["#", "arch", latency_col, info.name, "pareto"]
 
     push_chart(
         artifacts_dir_path=ad,

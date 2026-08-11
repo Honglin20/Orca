@@ -406,7 +406,10 @@ bash "$ORCA_AGENT_RESOURCES/scripts/update_status_md.sh"
 ```bash
 cd "$ORCA_ARTIFACTS_DIR" || exit 1
 python3 "$ORCA_AGENT_RESOURCES/scripts/metrics_bar.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --selected-acc "{{ ns2_run_search.output.selected_acc }}" > /dev/null || true
-python3 "$ORCA_AGENT_RESOURCES/scripts/compare_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --selected-latency-ms "{{ ns2_run_search.output.selected_latency_ms }}" --selected-acc "{{ ns2_run_search.output.selected_acc }}" > /dev/null || true
+python3 "$ORCA_AGENT_RESOURCES/scripts/compare_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --selected-latency "{{ ns2_run_search.output.selected_latency }}" --selected-acc "{{ ns2_run_search.output.selected_acc }}" --latency-unit "{{ ns2_run_search.output.latency_unit }}" > /dev/null || true
+# subnet_profile.py：物化选定子网写 subnet_structure.md（供 ns2_report 读）+ 推 table chart。
+# fail-soft：materialize 失败 → 不写 md + stderr + exit 0；reporter 把缺 md 当空串处理。
+python3 "$ORCA_AGENT_RESOURCES/scripts/subnet_profile.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ ns2_run_search.output.latency_unit }}" > /dev/null || true
 ```
 
 ## Step 4 ── 自校验 JSON（**唯一产出节点 JSON 的时刻**）

@@ -17,12 +17,12 @@ on the raw smaller-is-better values.
 Design principles:
 - pathlib only (no string path concatenation).
 - Fail-soft per chart: render_chart failure writes stderr + records "skipped"; never
-  crashes the orchestrator (design-charts H1).
+  crashes the orchestrator.
 - Static-file fallback: when the Orca chart socket is unavailable (headless / post-run
   rendering), push_chart writes a self-contained static file (plotly HTML, matplotlib
   PNG fallback) under ``<artifacts>/charts/<script_name>.{html,png}`` and records
   status="rendered_static" with the path. Lets runs whose charts were skipped after
-  completion be re-rendered from their own artifacts (design-charts H1). Static path
+  completion be re-rendered from their own artifacts. Static path
   supports chart_type subset {line, bar, pareto/scatter, table}; other live types
   (area/radar/heatmap) raise _UnsupportedChartType and are skipped loudly.
 - Metric name + direction discovered from search_config.yaml objs (authoritative) ->
@@ -53,6 +53,11 @@ except ImportError:
 
 # Marker file: each chart script appends one JSON line per chart result.
 CHART_MARKER = ".nas-supernet_charts.jsonl"
+
+# Latency unit whitelist: search_record_schema.json ``latency_unit`` must be
+# one of these; any other value (or missing key) falls back to ``"ms"`` (default path
+# is ms-only; non-ms declaration requires user latency script — enforced at bootstrap).
+LATENCY_UNITS: frozenset[str] = frozenset({"ms", "us", "s"})
 
 # Common latency field paths — includes NAS nested form ``objs.latency``.
 LATENCY_FIELDS: tuple[str, ...] = (
@@ -97,6 +102,10 @@ class MetricInfo:
         display_direction: Human-friendly direction for labels ("higher" or "lower").
         negate_for_display: True if stored values should be negated for display
             (i.e. the metric is a higher-better metric stored as negated).
+        latency_unit: Declared latency unit (``ms``/``us``/``s``) from
+            ``search_record_schema.json``. Labels/columns/captions carry
+            this unit. Default ``"ms"`` when schema is missing the key (back-compat with
+            older runs). Note: values are NOT converted across units.
     """
 
     name: str
@@ -105,6 +114,7 @@ class MetricInfo:
     pareto_y_direction: str
     display_direction: str
     negate_for_display: bool
+    latency_unit: str = "ms"
 
     def for_display(self, raw_value: float) -> float:
         """Convert a raw stored value to a human-friendly display value."""
@@ -323,6 +333,40 @@ def extract_numeric_values(records: list[dict[str, Any]], field_path: str) -> li
 # ---------------------------------------------------------------------------
 
 
+def discover_latency_unit(artifacts_dir: Path) -> str:
+    """Read the declared latency unit from ``search_record_schema.json``.
+
+    Schema key ``latency_unit`` (string enum ``ms``/``us``/``s``). Missing key
+    or non-whitelist value → ``"ms"`` (back-compat with older runs; illegal value also
+    falls back + stderr so the misconfig is observable). Pure function — no side effects
+    beyond the stderr warning on illegal values.
+
+    Note: ``latency_ms_field`` key name is **frozen** (kept as-is for
+    back-compat; only ``latency_unit`` was added). This function does NOT read or rewrite
+    ``latency_ms_field``.
+    """
+    schema_path = artifacts_dir / "search_record_schema.json"
+    if not schema_path.is_file():
+        return "ms"
+    try:
+        data = json.loads(schema_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return "ms"
+    if not isinstance(data, dict):
+        return "ms"
+    raw = data.get("latency_unit")
+    if not isinstance(raw, str):
+        return "ms"
+    unit = raw.strip().lower()
+    if unit not in LATENCY_UNITS:
+        sys.stderr.write(
+            f"[_common] search_record_schema.json latency_unit={raw!r} not in "
+            f"{sorted(LATENCY_UNITS)}; falling back to 'ms'\n"
+        )
+        return "ms"
+    return unit
+
+
 def _normalize_direction(raw: str) -> str:
     """Normalize various direction strings to ``"higher"`` or ``"lower"``."""
     s = raw.lower().strip()
@@ -387,6 +431,7 @@ def discover_metric_info(
         pareto_y_direction="min",  # NAS: all stored objectives smaller-is-better
         display_direction=display_direction,
         negate_for_display=negate,
+        latency_unit=discover_latency_unit(artifacts_dir),
     )
 
 
@@ -616,15 +661,16 @@ def _compute_pareto_front(
 
 
 def _parse_selected_from_caption(caption: str) -> tuple[float, float] | None:
-    """Best-effort extract selected (latency_ms, metric_display) from a pareto.py caption.
+    """Best-effort extract selected (latency, metric_display) from a pareto.py caption.
 
-    Matches ``"Selected arch: latency=X.XXms, <metric>=Y.YYYY."`` (case-insensitive).
-    The numeric groups use a strict ``\\d+(?:\\.\\d+)?`` pattern so the trailing
-    sentence period is NOT swallowed (``[\\d.]+`` would eat it and break float()).
-    Returns None if the caption does not carry selected coords.
+    Matches ``"Selected arch: latency=X.XX<unit>, <metric>=Y.YYYY."`` (case-insensitive)
+    where ``<unit>`` ∈ {ms, us, s}. The numeric groups use a strict
+    ``\\d+(?:\\.\\d+)?`` pattern so the trailing sentence period is NOT swallowed
+    (``[\\d.]+`` would eat it and break float()). Returns None if the caption does not
+    carry selected coords.
     """
     m = re.search(
-        r"selected arch:.*?latency\s*=\s*(\d+(?:\.\d+)?)\s*ms\s*,\s*\w+\s*=\s*(-?\d+(?:\.\d+)?)",
+        r"selected arch:.*?latency\s*=\s*(\d+(?:\.\d+)?)\s*(?:ms|us|s)\s*,\s*\w+\s*=\s*(-?\d+(?:\.\d+)?)",
         caption,
         re.IGNORECASE,
     )
@@ -883,7 +929,7 @@ def push_chart(
             different ``title`` → independent charts under one fold; same label +
             same title → front-end replaces (live-update semantic).
 
-    Fail-soft (design-charts H1): on missing/empty data → status="skipped". On
+    Fail-soft: on missing/empty data → status="skipped". On
     render_chart unavailable OR failure (e.g. Orca chart socket gone in headless /
     post-run rendering), falls back to a static file under
     ``<artifacts>/charts/<script_name>.{html,png}`` via ``_render_static`` and

@@ -30,6 +30,32 @@ class InputDef(BaseModel):
     description: str = ""
 
 
+class InputInvariant(BaseModel):
+    """跨字段 input 不变量（bootstrap 期 fail-loud 校验）。
+
+    用于编码依赖 input **值**（非声明）的前置条件。``InputDef.required`` + ``_validate_inputs``
+    只覆盖「字段存在 / type 对」，无法表达「字段 A 取某值时字段 B 必须非空」这类跨字段约束。
+
+    语义：``inputs[when_field] ∈ when_in`` 时，``require_nonempty`` 中每个字段必须存在且非空。
+    任一违反 → bootstrap fail-loud（``inputs_validation_error``），不进 tape/marker/state。
+
+    设计选择（Rule 7）：
+    - 结构化谓词（``when_field/when_in``）而非 Jinja2 字符串表达式——bootstrap 期零渲染依赖。
+    - OCP：新不变量类型（``require_equal``/``require_in`` 等）由扩 ``InputInvariant`` 字段实现，
+      不改 bootstrap 调用点。
+
+    注意：编译期静态校验字段名（如 ``when_field ∈ wf.inputs``）目前未实现——typo 会静默让
+    守卫永不触发。若日后需要，应在 ``orca/compile/validator.py`` 加 ``_check_*`` 校验。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    when_field: str  # 触发字段名（必须在 wf.inputs 声明）
+    when_in: list[str]  # 触发值集合（字段值 in 此集合 → 守卫生效）
+    require_nonempty: list[str]  # 守卫生效时必须存在且非空的字段名列表
+    message: str  # 失败时的错误描述（含语义说明 + 修复指引）
+
+
 class Route(BaseModel):
     """条件路由项。first-match-wins；`when=None` 表示兜底（catch-all）。"""
 
@@ -293,6 +319,9 @@ class Workflow(BaseModel):
     description: str = ""
     entry: str  # 起始 node 名（显式，唯一入口；不能是 parallel 组）
     inputs: dict[str, InputDef] = {}  # 工作流输入声明（可选）
+    # 跨字段 input 不变量（bootstrap 期 fail-loud 校验，SPEC §2.1 P0 / F1）。空 = 无约束。
+    # in-session 入口（``_validate_input_invariants``）+ ``Orchestrator.__init__`` 双路校验。
+    input_invariants: list[InputInvariant] = []
     nodes: list[AnnotatedNode]  # execute phase 节点（discriminated union）
     parallel: list[ParallelGroup] = []  # 静态并行组（顶层独立列表）
     outputs: dict[str, str] = {}  # 最终输出映射 {key: "{{ node.output.field }}"}

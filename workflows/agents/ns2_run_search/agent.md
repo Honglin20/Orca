@@ -114,9 +114,9 @@ print('RESULTS_VALID')
     # reuse 也要推 search 3 图（pareto/search_table/latency_dist）——否则前端永远看不到
     # 帕累托/搜索表/latency 分布。与 Step 2.7 同款 `|| true` 不阻塞、fail-soft。
     # （env 已由宿主 prompt 指令先 source，chart 推送依赖 ORCA_CHART_SOCK。）
-    python3 "$ORCA_AGENT_RESOURCES/scripts/pareto.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
-    python3 "$ORCA_AGENT_RESOURCES/scripts/search_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
-    python3 "$ORCA_AGENT_RESOURCES/scripts/latency_dist.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
+    python3 "$ORCA_AGENT_RESOURCES/scripts/pareto.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
+    python3 "$ORCA_AGENT_RESOURCES/scripts/search_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
+    python3 "$ORCA_AGENT_RESOURCES/scripts/latency_dist.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
     echo "REUSE: search_results.jsonl 已存在且达标 → 跳过搜索重做，已推 3 图 → 进 Step 2.8 select → Step 3"
   fi
 fi
@@ -269,9 +269,12 @@ skip + stderr，不崩；stdout/stderr 全丢弃——最终回复必须只含 S
 
 ```bash
 cd "$ORCA_ARTIFACTS_DIR" || exit 1
-python3 "$ORCA_AGENT_RESOURCES/scripts/pareto.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
-python3 "$ORCA_AGENT_RESOURCES/scripts/search_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
-python3 "$ORCA_AGENT_RESOURCES/scripts/latency_dist.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
+python3 "$ORCA_AGENT_RESOURCES/scripts/pareto.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
+python3 "$ORCA_AGENT_RESOURCES/scripts/search_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
+python3 "$ORCA_AGENT_RESOURCES/scripts/latency_dist.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
+# full_supernet_latency.py：测全展开超网真 latency，写 .full_supernet_latency.json
+# 供 ns2_retrain compare_table 优先使用。fail-soft：torch 缺/测失败 → 不写文件 + exit 0。
+python3 "$ORCA_AGENT_RESOURCES/scripts/full_supernet_latency.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" --latency-script-path "{{ inputs.latency_script_path }}" > /dev/null || true
 ```
 
 ### Step 2.8 ── 选架构（select_architecture.py；确定性，`|| true` 不阻塞 emit）
@@ -288,13 +291,14 @@ output_schema 失败 → recoverable 3 次重试 → escalate workflow_failed，
 cd "$ORCA_ARTIFACTS_DIR" || exit 1
 # 运行 select；成功 → stdout JSON 落 .selected_arch.json marker；失败 → 落 null sentinel
 if python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
-    --target-latency-ms "{{ inputs.target_latency_ms }}" \
+    --target-latency "{{ inputs.target_latency }}" \
+    --latency-unit "{{ inputs.latency_unit }}" \
     --search-results "$ORCA_ARTIFACTS_DIR/search_results.jsonl" \
     > "$ORCA_ARTIFACTS_DIR/.selected_arch.json" 2>"$ORCA_ARTIFACTS_DIR/.select_stderr.txt"; then
   echo "SELECT_OK"
 else
   # 失败安全网：写 falsy sentinel（禁 node_failed）
-  printf '%s\n' '{"selected_arch":null,"selected_acc":0,"selected_latency_ms":0,"pareto_size":0,"select_reason":"none"}' \
+  printf '%s\n' '{"selected_arch":null,"selected_acc":0,"selected_latency":0,"latency_unit":"{{ inputs.latency_unit }}","pareto_size":0,"select_reason":"none"}' \
     > "$ORCA_ARTIFACTS_DIR/.selected_arch.json"
   echo "SELECT_FAILED — wrote null sentinel to .selected_arch.json"
 fi
@@ -366,11 +370,12 @@ fidelity_retriggered = read_text(os.path.join(ad, ".ns_run_search_fidelity.flag"
 assessment = read_text(os.path.join(ad, ".ns_run_search_assessment.txt"),
                        "no assessment recorded" if status == "executed" else "")
 
-# ── select 5 字段（从 .selected_arch.json marker 读；失败安全网：总产合法 JSON）──
+# ── select 5 字段 + latency_unit（从 .selected_arch.json marker 读；失败安全网：总产合法 JSON）──
 select_defaults = {
     "selected_arch": None,
     "selected_acc": 0,
-    "selected_latency_ms": 0,
+    "selected_latency": 0,
+    "latency_unit": "{{ inputs.latency_unit }}",
     "pareto_size": 0,
     "select_reason": "none",
 }
@@ -382,6 +387,9 @@ try:
         for k, v in select_data.items():
             if k in select_defaults:
                 select_defaults[k] = v
+        # 读侧双认：新 .selected_arch.json 用 selected_latency；旧 run 仍可能写 selected_latency_ms。
+        if "selected_latency" not in select_data and "selected_latency_ms" in select_data:
+            select_defaults["selected_latency"] = select_data["selected_latency_ms"]
 except (FileNotFoundError, json.JSONDecodeError, ValueError):
     pass  # select 未跑 / marker 缺 → falsy defaults（禁 node_failed）
 
@@ -394,7 +402,8 @@ print(json.dumps({
     "fidelity_retriggered": fidelity_retriggered,
     "selected_arch": select_defaults["selected_arch"],
     "selected_acc": select_defaults["selected_acc"],
-    "selected_latency_ms": select_defaults["selected_latency_ms"],
+    "selected_latency": select_defaults["selected_latency"],
+    "latency_unit": select_defaults["latency_unit"],
     "pareto_size": select_defaults["pareto_size"],
     "select_reason": select_defaults["select_reason"],
 }))
@@ -417,7 +426,7 @@ PY
 ## 输出
 
 **整段回复 = Step 3 python 打印的那一行 JSON**（含 status/artifacts/assessment/max_retries_hit/healed_files/fidelity_retriggered
-+ select 5 字段 selected_arch/selected_acc/selected_latency_ms/pareto_size/select_reason）。
++ select 5 字段 selected_arch/selected_acc/selected_latency/latency_unit/pareto_size/select_reason）。
 节点 `output_schema` 要求它是合法 JSON 且 `status ∈ {executed, failed}`。
 select 崩 / 无候选 → emit falsy select 字段（`selected_arch=null, select_reason="none"`）→
 route guard `selected_arch and pareto_size>0` 判 falsy → ns2_report 归因 select_failed。

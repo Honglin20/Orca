@@ -5,6 +5,37 @@
 
 ---
 
+## [2026-08-11] feat(nas-supernet): latency 单位透传 + full-supernet 真测量 + 子网结构展示（v1+v2+v3）
+
+4 项：**A** `latency_unit` 输入（ms|us|s 默认 ms，不换算）端到端透传到 4 图 label/列名/caption（F4 caption 保留 metric 子句，正则三单位）；**B** `full_supernet_latency.py` 用搜索同款 estimator 测全展开超网真 latency，替换 compare_table 的 max(候选) 代理（"FP32 上限"）；**C** latency_dist 全 sentinel/全 0 合成占位柱 + 诊断 caption；**D** `subnet_profile.py` 物化选定子网写 `subnet_structure.md`（module repr + 逐层 params/shape 表）。
+F1（P0）框架加 `InputInvariant` model + bootstrap 校验（in-session cli + Orchestrator 双路）：`latency_unit∈{us,s}` + 空 `latency_script_path` → fail-loud（默认 estimator 恒 ms，非 ms 声明必错标）。F7 `selected_latency_ms→selected_latency` + `target_latency_ms→target_latency` 原子改名；schema 加 `latency_unit`（`latency_ms_field` key 不动 F5）+ 读侧双认兼容旧 run。v3（`ns3_*`，v2 翻译）同标准纳入：6 份 `_common.py` byte-identical + CI 闸门扩三版本。
+**自我 Review**：spec-reviewer 12 项闭环 + 逐 agent.md 洁净度审查 PASS（受众翻转通读，0 跨版本考古）+ `.py` SPEC breadcrumb 清零 + v3 独立洁净审查 PASS（2 处 `(C3/C4)` lint 残留已清）。
+验证：`test_ns_chart_scripts.py` 81 passed（A1-A6/B1-B4/C1-C3/D1-D5 + byte-identical 三版本闸门）+ yaml 语法 OK + ruff 干净。详见 [release note](../releases/2026-08-11-nas-supernet-latency-unit-and-subnet-display.md)。
+
+## [2026-08-11] fix(nas-supernet): progress.jsonl 契约校验闸门——warmup fail-loud + 静态防线（v1+v2 train+retrain）
+
+补训练/retrain 缺口：生成脚本漏写 progress.jsonl → 训练 executed 但无实时图且不 fail loud（warmup 只看 log 行不看 jsonl，watcher fail-soft）。
+**A** 新增 `check_progress_contract.py` ×4（字节同，fail-loud 校验 {step:number,metrics:dict<number>}，排除 bool）；4 份 `warmup_poll.sh` 收紧 WARMUP_OK = telemetry≥2 AND 契约过，失败 → `WARMUP_FAIL reason=progress-contract` → 现有 HEAL-LOOP 自愈（零新机制）。
+**B** 静态防线：v2 扩展 `check_train_script.sh`/`check_retrain.sh` + v1/v2 checklist 加 `[CRITICAL] 38` item（workflow-verifier 活契约）+ v1 retrain `agent.md` inline 自查。
+**自我 Review**：code-reviewer 0 MUST-FIX，2 SHOULD-FIX 全修（v1 版本残留 + step int→number 对齐 watcher）+ 3 NIT 采纳。
+验证：`test_check_progress_contract.py` 34 passed + 回归 39 passed + 6 个 .sh bash -n 全过 + tars validate 双 workflow 通过（真机 E2E 待 playground）。**已 commit `7fe4d25`**（纯 14 文件；CHANGELOG/CURRENT/ns_retrain bullet 留工作树随 latency-unit 后续）。详见 [release note](../releases/2026-08-11-progress-jsonl-contract-gate.md)。
+
+---
+
+## [2026-08-11] feat(nas-supernet): latency 单位透传 + full-supernet 真测量 + 子网结构展示（v1+v2 双份）
+
+按 SPEC `2026-08-11-nas-supernet-latency-unit-and-subnet-display.md`（spec-reviewer 12 项闭环后定稿）实现 4 项改动：
+**A** 新增 `latency_unit` 输入（ms|us|s，默认 ms，不换算数值）端到端透传到 4 图 label/列名/caption；
+**B** 新 `full_supernet_latency.py`（双份 byte-identical）用搜索同款 LatencyEstimator 测全展开超网真 latency，写 `.full_supernet_latency.json` 供 `compare_table.py` 优先使用；
+**C** `latency_dist.py` 全 sentinel/全 0 合成占位柱 + 诊断 caption 走正常 push_chart（F6 非 skip）；
+**D** 新 `subnet_profile.py`（双份）物化选定子网写 `subnet_structure.md` + 推 table chart。
+**F1（P0）**：框架新增 `InputInvariant` model + `_validate_input_invariants`（in-session + Orchestrator 双路），`latency_unit∈{us,s}` + 空 `latency_script_path` → bootstrap fail-loud。
+**F7**：`selected_latency_ms→selected_latency` + `target_latency_ms→target_latency` 15 点原子改名（含 schema 加 `latency_unit`、`latency_ms_field` key 不动 F5、读侧双认兼容旧 run）。4 份 `_common.py` byte-identical（md5 相等）+ CI 闸门。
+验证：`tars validate` 双 workflow 0/0 + dev-residue 清零 + ruff 干净 + `test_ns_chart_scripts.py` 79 passed（47 旧+32 新 A1-A6/B1-B4/C1-C3/D1-D5 + byte-identical 闸门 E1）。
+**未 commit**（用户暂停，待确认后提交）。详见 [release note](../releases/2026-08-11-nas-supernet-latency-unit-and-subnet-display.md)。
+
+---
+
 ## [2026-08-11] feat(opencode): in-session 权限审批闭环——`--auto` 固化 + `tool.execute.before` 桥
 
 opencode 家族（opencode/nga）此前无 web 审批/yolo 路径（纯 flag，DEFECT-1 headless `external_directory` 挂死）。

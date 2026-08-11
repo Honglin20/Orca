@@ -467,7 +467,7 @@ class TestCompareTableFullMetric:
         sys.argv = [
             "compare_table",
             "--artifacts-dir", str(tmp_path),
-            "--selected-latency-ms", "0.2558",
+            "--selected-latency", "0.2558",
             "--selected-acc", selected_acc,
         ]
         try:
@@ -687,3 +687,660 @@ class TestSearchTable:
         # A1 fix: all rows are pareto=no → degrade to showing all, NOT empty.
         assert len(pushed["data"]) >= 1, "degradation should show all deduped rows, not empty"
         assert "All Architectures" in pushed["title"]
+
+
+
+
+# ---------------------------------------------------------------------------
+# SPEC: latency_unit passthrough + full-supernet measurement + subnet structure
+# (docs/specs/2026-08-11-nas-supernet-latency-unit-and-subnet-display.md)
+# Acceptance: A1-A6 / B1-B4 / C1-C3 / D1-D5 / byte-identical CI gate (E1).
+# ---------------------------------------------------------------------------
+
+
+def _write_search_record_schema(ad: Path, latency_unit: str | None = "ms") -> None:
+    """Write a minimal search_record_schema.json with optional latency_unit."""
+    schema = {
+        "metric_name": "acc",
+        "metric_direction": "higher-better",
+        "latency_ms_field": "latency",
+    }
+    if latency_unit is not None:
+        schema["latency_unit"] = latency_unit
+    (ad / "search_record_schema.json").write_text(json.dumps(schema), encoding="utf-8")
+
+
+def _nas_records(ad: Path, lats: list[float], accs: list[float] | None = None) -> None:
+    """Write NAS-format search_results.jsonl with given latency values."""
+    if accs is None:
+        accs = [-0.9 - 0.01 * i for i in range(len(lats))]
+    for lat, acc in zip(lats, accs):
+        (ad / "search_results.jsonl").open("a").write(
+            json.dumps({"objs": {"acc": acc, "latency": lat}, "pareto": True}) + "\n"
+        )
+    (ad / "search_config.yaml").write_text("objs:\n  - \"acc\"\n  - \"latency\"\n")
+
+
+def _load_script_fresh(script_path: Path, mod_name: str):
+    """Load a chart script as a fresh module, cache-safe."""
+    import importlib.util
+    sys.path.insert(0, str(script_path.parent))
+    try:
+        spec = importlib.util.spec_from_file_location(mod_name, str(script_path))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    finally:
+        sys.path = [p for p in sys.path if p != str(script_path.parent)]
+        sys.modules.pop("_common", None)
+        sys.modules.pop(mod_name, None)
+
+
+def _load_common_cached():
+    """Load the chart _common fresh (cache-safe)."""
+    sys.path.insert(0, str(_SEARCH_SCRIPTS_DIR))
+    try:
+        import _common
+        return _common
+    finally:
+        sys.path.remove(str(_SEARCH_SCRIPTS_DIR))
+        sys.modules.pop("_common", None)
+
+
+class TestDiscoverLatencyUnit:
+    """SPEC A3 - discover_latency_unit: schema-driven unit discovery."""
+
+    def test_schema_us(self, tmp_path: Path) -> None:
+        _write_search_record_schema(tmp_path, "us")
+        common = _load_common_cached()
+        assert common.discover_latency_unit(tmp_path) == "us"
+
+    def test_schema_s(self, tmp_path: Path) -> None:
+        _write_search_record_schema(tmp_path, "s")
+        common = _load_common_cached()
+        assert common.discover_latency_unit(tmp_path) == "s"
+
+    def test_no_schema_file(self, tmp_path: Path) -> None:
+        common = _load_common_cached()
+        assert common.discover_latency_unit(tmp_path) == "ms"
+
+    def test_schema_missing_key(self, tmp_path: Path) -> None:
+        _write_search_record_schema(tmp_path, latency_unit=None)
+        common = _load_common_cached()
+        assert common.discover_latency_unit(tmp_path) == "ms"
+
+    def test_schema_illegal_value_falls_back_with_stderr(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _write_search_record_schema(tmp_path, "xyz")
+        common = _load_common_cached()
+        assert common.discover_latency_unit(tmp_path) == "ms"
+        captured = capsys.readouterr()
+        assert "not in" in captured.err
+
+
+class TestLatencyUnitLabelsA1A2:
+    """SPEC A1/A2 - unit appears in labels/columns; default -> ms."""
+
+    def _run(self, script: str, ad: Path, *extra: str) -> dict:
+        if script == "compare_table":
+            path = _RETRAIN_SCRIPTS_DIR / "compare_table.py"
+        else:
+            path = _SEARCH_SCRIPTS_DIR / f"{script}.py"
+        mod = _load_script_fresh(path, f"{script}_a1a2")
+        calls: list[dict] = []
+        mod.push_chart = lambda **kw: calls.append(kw)
+        old_argv = sys.argv
+        sys.argv = [script, "--artifacts-dir", str(ad), *extra]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        return calls[-1]
+
+    def test_a1_us_unit_propagates_to_all_chart_labels(self, tmp_path: Path) -> None:
+        """A1: latency_unit=us - latency_dist/pareto/search_table/compare_table carry us."""
+        _write_search_record_schema(tmp_path, "us")
+        _nas_records(tmp_path, [0.1, 0.2, 0.3])
+
+        ld = self._run("latency_dist", tmp_path, "--latency-unit", "us")
+        assert "us" in ld["x_label"]
+
+        pa = self._run("pareto", tmp_path, "--latency-unit", "us",
+                       "--selected-latency", "0.2", "--selected-acc", "0.9")
+        assert "us" in pa["x_label"]
+        assert "latency=0.20us" in pa["caption"]
+
+        st = self._run("search_table", tmp_path, "--latency-unit", "us")
+        assert "latency_us" in st["columns"]
+        assert all("latency_us" in row for row in st["data"])
+
+        ct = self._run("compare_table", tmp_path, "--latency-unit", "us",
+                       "--selected-latency", "0.2", "--selected-acc", "0.9")
+        assert any("us" in r["metric"] for r in ct["data"])
+
+    def test_a2_default_ms_when_schema_absent(self, tmp_path: Path) -> None:
+        """A2: no latency_unit declared -> ms everywhere (regression)."""
+        _nas_records(tmp_path, [0.1, 0.2])
+        pa = self._run("pareto", tmp_path,
+                       "--selected-latency", "0.1", "--selected-acc", "0.9")
+        assert "ms" in pa["x_label"]
+        assert "latency=0.10ms" in pa["caption"]
+
+
+class TestF7RenameCliBackcompat:
+    """SPEC F7/F4 - selected_latency_ms -> selected_latency CLI rename + caption keeps metric clause."""
+
+    def test_pareto_accepts_selected_latency_flag(self, tmp_path: Path) -> None:
+        _write_search_record_schema(tmp_path)
+        _nas_records(tmp_path, [0.1, 0.2])
+        mod = _load_script_fresh(_SEARCH_SCRIPTS_DIR / "pareto.py", "pareto_rename")
+        calls: list[dict] = []
+        mod.push_chart = lambda **kw: calls.append(kw)
+        old_argv = sys.argv
+        sys.argv = ["pareto", "--artifacts-dir", str(tmp_path),
+                    "--selected-latency", "0.15", "--selected-acc", "0.95"]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        assert "Selected arch: latency=0.15ms" in calls[-1]["caption"]
+        # F4: metric clause `, acc=<number>` is kept (only literal ms is parameterized).
+        # The value sign follows pareto.py's for_display rule for selected_acc (pre-existing).
+        assert "acc=" in calls[-1]["caption"]
+
+
+class TestLatencyDistDiagnosticC1C2C3:
+    """SPEC C1/C2/C3 - all-sentinel / all-zero / normal diagnostics (F6: push_chart not skip)."""
+
+    def _run(self, ad: Path) -> dict:
+        mod = _load_script_fresh(_SEARCH_SCRIPTS_DIR / "latency_dist.py", "latency_dist_diag")
+        calls: list[dict] = []
+        mod.push_chart = lambda **kw: calls.append(kw)
+        old_argv = sys.argv
+        sys.argv = ["latency_dist", "--artifacts-dir", str(ad)]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        return calls[-1]
+
+    def test_c1_all_sentinel_placeholder_bar(self, tmp_path: Path) -> None:
+        """C1/F6: all values NaN/overflow sentinel -> placeholder bar via push_chart (NOT skip)."""
+        _write_search_record_schema(tmp_path)
+        _nas_records(tmp_path, [3.402823e38, 3.402823e38])
+        pushed = self._run(tmp_path)
+        assert pushed.get("skip_reason", "") == ""
+        assert pushed["data"] == [{"bin": "(no valid data)", "count": 0}]
+        cap = pushed["caption"]
+        assert "NaN/overflow sentinels" in cap
+        assert "measurement likely failed" in cap
+
+    def test_c2_all_zero_placeholder_bar(self, tmp_path: Path) -> None:
+        """C2: every latency = 0.0 -> placeholder bar + timer-resolution diagnostic."""
+        _write_search_record_schema(tmp_path)
+        _nas_records(tmp_path, [0.0, 0.0, 0.0])
+        pushed = self._run(tmp_path)
+        assert pushed.get("skip_reason", "") == ""
+        assert pushed["data"] == [{"bin": "(no valid data)", "count": 0}]
+        cap = pushed["caption"]
+        assert "All latency values are 0.0" in cap
+        assert "timer resolution" in cap
+
+    def test_c3_normal_data_no_diagnostic(self, tmp_path: Path) -> None:
+        """C3: normal latency distribution -> no diagnostic strings in caption."""
+        _write_search_record_schema(tmp_path)
+        _nas_records(tmp_path, [0.1, 0.2, 0.3, 0.4])
+        pushed = self._run(tmp_path)
+        cap = pushed["caption"]
+        assert "NaN/overflow sentinels" not in cap
+        assert "timer resolution" not in cap
+        assert len(pushed["data"]) > 1
+
+
+class TestCompareTableFullSupernetLatencyB1B2B3:
+    """SPEC B1/B2/B3 - compare_table prefers .full_supernet_latency.json, proxy fallback."""
+
+    def _run_compare(self, ad: Path, sel_lat: str = "0.2", sel_acc: str = "0.95") -> dict:
+        mod = _load_script_fresh(_RETRAIN_SCRIPTS_DIR / "compare_table.py", "compare_b1b3")
+        calls: list[dict] = []
+        mod.push_chart = lambda **kw: calls.append(kw)
+        old_argv = sys.argv
+        sys.argv = ["compare_table", "--artifacts-dir", str(ad),
+                    "--selected-latency", sel_lat, "--selected-acc", sel_acc]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        return calls[-1]
+
+    def test_b2_prefers_full_supernet_latency_file(self, tmp_path: Path) -> None:
+        """B2: .full_supernet_latency.json present -> use its value + real-measurement caption."""
+        _write_search_record_schema(tmp_path)
+        _nas_records(tmp_path, [0.1, 0.2, 0.3])
+        (tmp_path / ".full_supernet_latency.json").write_text(
+            json.dumps({"latency": 0.45, "unit": "ms", "source": "estimator"}),
+            encoding="utf-8",
+        )
+        pushed = self._run_compare(tmp_path)
+        lat_row = next(r for r in pushed["data"] if r["metric"].startswith("Latency"))
+        assert lat_row["Full Supernet"] == "0.45"
+        assert "real measurement" in pushed["caption"]
+        assert ".full_supernet_latency.json" in pushed["caption"]
+
+    def test_b2_falls_back_to_proxy_when_file_missing(self, tmp_path: Path) -> None:
+        """B2: no .full_supernet_latency.json -> max(candidate) proxy + proxy caption."""
+        _write_search_record_schema(tmp_path)
+        _nas_records(tmp_path, [0.1, 0.2, 0.3])
+        pushed = self._run_compare(tmp_path)
+        lat_row = next(r for r in pushed["data"] if r["metric"].startswith("Latency"))
+        assert lat_row["Full Supernet"] == "0.3"
+        assert "proxy" in pushed["caption"]
+
+    def test_b3_proxy_filters_sentinel(self, tmp_path: Path) -> None:
+        """B3: 3.4e38 sentinel mixed in candidates -> proxy does not surface it."""
+        _write_search_record_schema(tmp_path)
+        _nas_records(tmp_path, [0.1, 3.402823e38, 0.2])
+        pushed = self._run_compare(tmp_path)
+        lat_row = next(r for r in pushed["data"] if r["metric"].startswith("Latency"))
+        assert lat_row["Full Supernet"] == "0.2"
+
+    def test_b1_zero_latency_is_legitimate_n6(self, tmp_path: Path) -> None:
+        """N6: latency=0.0 from estimator is legitimate (NOT filtered); file is used."""
+        _write_search_record_schema(tmp_path)
+        _nas_records(tmp_path, [0.1, 0.2])
+        (tmp_path / ".full_supernet_latency.json").write_text(
+            json.dumps({"latency": 0.0, "unit": "ms", "source": "estimator"}),
+            encoding="utf-8",
+        )
+        pushed = self._run_compare(tmp_path)
+        lat_row = next(r for r in pushed["data"] if r["metric"].startswith("Latency"))
+        assert lat_row["Full Supernet"] == "0"
+
+
+class TestFullSupernetLatencyFailSoftB4:
+    """SPEC B4 - torch/supernet missing -> no file + exit 0 (fail-soft N3)."""
+
+    def test_b4_no_supernet_writes_stderr_no_file(self, tmp_path: Path) -> None:
+        _write_search_record_schema(tmp_path, "ms")
+        mod = _load_script_fresh(
+            _SEARCH_SCRIPTS_DIR / "full_supernet_latency.py", "full_latency_b4",
+        )
+        old_argv = sys.argv
+        sys.argv = ["full_supernet_latency", "--artifacts-dir", str(tmp_path)]
+        try:
+            rc = mod.main()
+        finally:
+            sys.argv = old_argv
+        assert rc == 0
+        assert not (tmp_path / ".full_supernet_latency.json").is_file()
+
+
+class TestSelectLatencyUnitA4:
+    """SPEC A4/N1 - select --target-latency + --latency-unit behaves numerically identical
+    regardless of unit label (no value conversion; unit is metadata only).
+
+    Uses a fixture select_architecture.py matching the new contract (N1: real select is
+    runtime-generated, can't be tested directly).
+    """
+
+    @staticmethod
+    def _write_fixture_select(tmp_path: Path) -> Path:
+        fixture = tmp_path / "select_architecture.py"
+        fixture.write_text(
+            "import argparse, json\n"
+            "ap = argparse.ArgumentParser()\n"
+            "ap.add_argument('--target-latency', type=float)\n"
+            "ap.add_argument('--latency-unit', default='ms')\n"
+            "ap.add_argument('--search-results', required=True)\n"
+            "args = ap.parse_args()\n"
+            "best = None\n"
+            "for line in open(args.search_results):\n"
+            "    r = json.loads(line)\n"
+            "    lat = r['objs']['latency']\n"
+            "    if lat <= args.target_latency:\n"
+            "        acc = -r['objs']['acc']\n"
+            "        if best is None or acc > best[0]:\n"
+            "            best = (acc, lat, r['arch'])\n"
+            "if best is None:\n"
+            "    out = {'selected_arch': {}, 'selected_acc': 0, 'selected_latency': 0,\n"
+            "           'latency_unit': args.latency_unit, 'pareto_size': 0,\n"
+            "           'select_reason': 'none'}\n"
+            "else:\n"
+            "    out = {'selected_arch': best[2], 'selected_acc': best[0],\n"
+            "           'selected_latency': best[1], 'latency_unit': args.latency_unit,\n"
+            "           'pareto_size': 1, 'select_reason': 'max-acc-under-target'}\n"
+            "print(json.dumps(out))\n",
+            encoding="utf-8",
+        )
+        return fixture
+
+    def test_a4_same_value_same_selection_regardless_of_unit_label(self, tmp_path: Path) -> None:
+        """Numerical latency <= target is unit-agnostic - same selection, unit only differs as label."""
+        records = [
+            {"objs": {"acc": -0.90, "latency": 0.1}, "arch": {"d": 1}},
+            {"objs": {"acc": -0.95, "latency": 0.2}, "arch": {"d": 2}},
+            {"objs": {"acc": -0.93, "latency": 0.3}, "arch": {"d": 3}},
+        ]
+        for r in records:
+            (tmp_path / "search_results.jsonl").open("a").write(json.dumps(r) + "\n")
+        fixture = self._write_fixture_select(tmp_path)
+
+        import subprocess
+        r_us = subprocess.run(
+            ["python3", str(fixture), "--target-latency", "0.5", "--latency-unit", "us",
+             "--search-results", str(tmp_path / "search_results.jsonl")],
+            capture_output=True, text=True,
+        )
+        r_ms = subprocess.run(
+            ["python3", str(fixture), "--target-latency", "0.5", "--latency-unit", "ms",
+             "--search-results", str(tmp_path / "search_results.jsonl")],
+            capture_output=True, text=True,
+        )
+        assert r_us.returncode == 0 and r_ms.returncode == 0, \
+            f"us stderr={r_us.stderr!r}; ms stderr={r_ms.stderr!r}"
+        out_us = json.loads(r_us.stdout)
+        out_ms = json.loads(r_ms.stdout)
+        assert out_us["selected_arch"] == out_ms["selected_arch"]
+        assert out_us["selected_latency"] == out_ms["selected_latency"] == 0.2
+        assert out_us["latency_unit"] == "us"
+        assert out_ms["latency_unit"] == "ms"
+
+
+class TestF1BootstrapInvariantA6:
+    """SPEC A6/F1 - latency_unit in {us,s} + empty latency_script_path -> fail-loud."""
+
+    def test_a6_us_unit_without_script_rejected(self) -> None:
+        from orca.iface.in_session.cli import _validate_input_invariants
+        from orca.schema.workflow import InputInvariant
+        inv = InputInvariant(
+            when_field="latency_unit",
+            when_in=["us", "s"],
+            require_nonempty=["latency_script_path"],
+            message="non-ms unit requires user script",
+        )
+        ok, err = _validate_input_invariants(
+            {"latency_unit": "us", "latency_script_path": ""}, [inv],
+        )
+        assert not ok
+        assert "non-ms unit requires user script" in err
+        assert "latency_unit" in err and "us" in err
+
+    def test_a6_us_unit_with_script_passes(self) -> None:
+        from orca.iface.in_session.cli import _validate_input_invariants
+        from orca.schema.workflow import InputInvariant
+        inv = InputInvariant(
+            when_field="latency_unit", when_in=["us", "s"],
+            require_nonempty=["latency_script_path"], message="x",
+        )
+        ok, _ = _validate_input_invariants(
+            {"latency_unit": "us", "latency_script_path": "/x/onnx.py"}, [inv],
+        )
+        assert ok
+
+    def test_a6_ms_unit_without_script_passes(self) -> None:
+        """ms + no script is the default path - estimator returns ms natively."""
+        from orca.iface.in_session.cli import _validate_input_invariants
+        from orca.schema.workflow import InputInvariant
+        inv = InputInvariant(
+            when_field="latency_unit", when_in=["us", "s"],
+            require_nonempty=["latency_script_path"], message="x",
+        )
+        ok, _ = _validate_input_invariants(
+            {"latency_unit": "ms", "latency_script_path": ""}, [inv],
+        )
+        assert ok
+
+    def test_a6_orchestrator_invariant_path(self) -> None:
+        """Orchestrator.__init__ mirrors the invariant on tars run / TUI / daemon paths.
+
+        Constructs a real Workflow + invokes Orchestrator(...) — catches any future
+        drift in the Orchestrator's invariant loop (a hand-rolled mirror test would not).
+        """
+        from orca.schema.workflow import Workflow, InputDef, InputInvariant, AgentNode
+        from orca.run.orchestrator import Orchestrator
+        wf = Workflow(
+            name="test_wf",
+            entry="n",
+            inputs={
+                "latency_unit": InputDef(type="string", required=False, default="ms"),
+                "latency_script_path": InputDef(type="string", required=False, default=""),
+            },
+            input_invariants=[InputInvariant(
+                when_field="latency_unit", when_in=["us", "s"],
+                require_nonempty=["latency_script_path"], message="bad",
+            )],
+            nodes=[AgentNode(name="n", prompt="placeholder")],
+        )
+        # Violation: latency_unit=us + empty script -> ValueError raised by __init__.
+        with pytest.raises(ValueError, match="input invariant violated"):
+            Orchestrator(wf, bus=None, inputs={"latency_unit": "us", "latency_script_path": ""})
+
+
+class TestCheckReportShGate:
+    """Regression: check_report.sh required-field list must match ns2_report output_schema.
+
+    The reviewer caught a previous bug where the F7 rename updated ns2_report agent.md
+    to emit `selected_latency` but check_report.sh still required the old `selected_latency_ms`,
+    causing every reporter run to fail the deterministic gate. This test feeds a canonical
+    reporter JSON through check_report.sh and asserts it PASSES — catches future schema drift.
+    """
+
+    _REPORT_PATH = Path(__file__).resolve().parents[2] / "workflows" / "agents" / "ns2_report" / "scripts" / "check_report.sh"
+
+    def test_check_report_passes_with_new_schema_fields(self, tmp_path: Path) -> None:
+        """Reporter JSON with selected_latency/latency_unit/subnet_structure passes the gate."""
+        import subprocess
+        report = {
+            "status": "success",
+            "stage": "retrain",
+            "reason": "ok",
+            "selected_arch": {"d": 3},
+            "selected_acc": 0.95,
+            "selected_latency": 0.25,
+            "latency_unit": "ms",
+            "subnet_structure": "subnet_structure.md",
+            "pareto_size": 12,
+            "supernet_path": "supernet.py",
+            "output_dir": str(tmp_path),
+            "final_metrics": "acc=0.95",
+            "artifacts": ["supernet.py"],
+            "charts_summary": "no chart files found",
+            "error": "",
+        }
+        (tmp_path / ".report.json").write_text(json.dumps(report), encoding="utf-8")
+        env = {**__import__("os").environ, "ORCA_ARTIFACTS_DIR": str(tmp_path)}
+        result = subprocess.run(
+            ["bash", str(self._REPORT_PATH)],
+            capture_output=True, text=True, env=env, cwd=str(tmp_path),
+        )
+        assert result.returncode == 0, f"gate failed: {result.stdout}\n{result.stderr}"
+        assert "PASS" in result.stdout
+
+    def test_check_report_rejects_old_field_name_only(self, tmp_path: Path) -> None:
+        """Reporter JSON with ONLY the old `selected_latency_ms` (no `selected_latency`) fails the gate."""
+        import subprocess
+        report = {
+            "status": "success", "stage": "retrain", "reason": "ok",
+            "selected_arch": {"d": 3}, "selected_acc": 0.95,
+            "selected_latency_ms": 0.25,  # OLD name only
+            "pareto_size": 12, "supernet_path": "supernet.py",
+            "output_dir": str(tmp_path), "final_metrics": "", "artifacts": [],
+            "charts_summary": "", "error": "",
+            # Missing required new fields: latency_unit, subnet_structure, selected_latency.
+        }
+        (tmp_path / ".report.json").write_text(json.dumps(report), encoding="utf-8")
+        env = {**__import__("os").environ, "ORCA_ARTIFACTS_DIR": str(tmp_path)}
+        result = subprocess.run(
+            ["bash", str(self._REPORT_PATH)],
+            capture_output=True, text=True, env=env, cwd=str(tmp_path),
+        )
+        assert result.returncode != 0, "gate should reject JSON missing new required fields"
+        assert "FAIL" in result.stdout
+
+
+class TestParetoCaptionParseF4:
+    """SPEC F4 - _parse_selected_from_caption regex matches all 3 units."""
+
+    def test_ms_caption_parses(self) -> None:
+        common = _load_common_cached()
+        cap = "Selected arch: latency=0.25ms, acc=0.9500."
+        assert common._parse_selected_from_caption(cap) == (0.25, 0.95)
+
+    def test_us_caption_parses(self) -> None:
+        common = _load_common_cached()
+        cap = "Selected arch: latency=12.50us, acc=0.9500."
+        assert common._parse_selected_from_caption(cap) == (12.5, 0.95)
+
+    def test_s_caption_parses(self) -> None:
+        common = _load_common_cached()
+        cap = "Selected arch: latency=0.001s, acc=0.9500."
+        assert common._parse_selected_from_caption(cap) == (0.001, 0.95)
+
+    def test_metric_clause_is_kept_f4(self) -> None:
+        """F4: caption keeps `, {metric}={val:.4f}` clause (only literal ms -> unit)."""
+        cap = "Selected arch: latency=0.25us, my_metric=0.1234."
+        common = _load_common_cached()
+        assert common._parse_selected_from_caption(cap) == (0.25, 0.1234)
+
+
+class TestCommonPyByteIdenticalE1:
+    """SPEC E1/N5 - CI gate: all ns*_run_search/ns*_retrain _common.py byte-identical."""
+
+    def test_common_py_byte_identical_all_versions(self) -> None:
+        import hashlib
+        agents_dir = _SEARCH_SCRIPTS_DIR.parent.parent
+        sub_dirs = (
+            "ns_run_search", "ns2_run_search", "ns3_run_search",
+            "ns_retrain", "ns2_retrain", "ns3_retrain",
+        )
+        copies = [agents_dir / sub / "scripts" / "_common.py" for sub in sub_dirs]
+        for path in copies:
+            assert path.is_file(), f"missing _common.py: {path}"
+        hashes = {str(p): hashlib.md5(p.read_bytes()).hexdigest() for p in copies}
+        unique = set(hashes.values())
+        assert len(unique) == 1, (
+            f"all _common.py copies must be byte-identical (SPEC E1/N5); got {hashes}"
+        )
+
+
+class TestNewScriptsByteIdenticalAllVersions:
+    """SPEC E1 - chart scripts byte-identical across all nas-supernet versions."""
+
+    @staticmethod
+    def _assert_identical(sub_dirs, fname) -> None:
+        import hashlib
+        agents_dir = _SEARCH_SCRIPTS_DIR.parent.parent
+        copies = [agents_dir / sub / "scripts" / fname for sub in sub_dirs]
+        for path in copies:
+            assert path.is_file(), f"missing {fname}: {path}"
+        hashes = {str(p): hashlib.md5(p.read_bytes()).hexdigest() for p in copies}
+        unique = set(hashes.values())
+        assert len(unique) == 1, f"{fname} must be byte-identical across versions; got {hashes}"
+
+    def test_full_supernet_latency_identical(self) -> None:
+        self._assert_identical(
+            ("ns_run_search", "ns2_run_search", "ns3_run_search"), "full_supernet_latency.py"
+        )
+
+    def test_subnet_profile_identical(self) -> None:
+        self._assert_identical(
+            ("ns_retrain", "ns2_retrain", "ns3_retrain"), "subnet_profile.py"
+        )
+
+    def test_compare_table_identical(self) -> None:
+        self._assert_identical(
+            ("ns_retrain", "ns2_retrain", "ns3_retrain"), "compare_table.py"
+        )
+
+    def test_run_search_chart_scripts_identical(self) -> None:
+        for fname in ("latency_dist.py", "pareto.py", "search_table.py"):
+            self._assert_identical(
+                ("ns_run_search", "ns2_run_search", "ns3_run_search"), fname
+            )
+
+
+class TestSearchResultsUnconvertedA5:
+    """SPEC A5 - search_results.jsonl latency values NOT converted (unit is metadata)."""
+
+    def test_a5_extract_numeric_values_unchanged_across_units(self, tmp_path: Path) -> None:
+        """Same records + schema with latency_unit=ms vs us -> identical numeric values."""
+        common = _load_common_cached()
+        records = [{"objs": {"acc": -0.9, "latency": 0.123}, "pareto": True}]
+        _write_search_record_schema(tmp_path, "ms")
+        vals_ms = common.extract_numeric_values(records, "objs.latency")
+        _write_search_record_schema(tmp_path, "us")
+        vals_us = common.extract_numeric_values(records, "objs.latency")
+        assert vals_ms == vals_us == [0.123]
+
+
+class TestSubnetProfileStructureD1D2D3D4:
+    """SPEC D1-D4 - subnet_structure.md shape + content.
+
+    Uses the REAL v2 run-2 artifacts (supernet.py + .selected_arch.json + latency_estimator.py).
+    Skips if torch/nas_agent unavailable (subnet_profile.py is fail-soft there).
+    """
+
+    _REAL_AD = Path(__file__).resolve().parents[2] / "runs" / "nas-supernet-v2-20260811-020518-9a613e" / "artifacts"
+
+    def _has_torch(self) -> bool:
+        try:
+            import torch  # noqa: F401
+            from nas_agent.blocks.choice_layer import ChoiceLayer  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
+    def test_d1_d2_d3_d4_subnet_structure_md_shape(self, tmp_path: Path) -> None:
+        """D1-D4: end-to-end subnet_profile.py against real run-2 supernet.py."""
+        if not self._REAL_AD.is_dir():
+            pytest.skip(f"real artifacts dir absent: {self._REAL_AD}")
+        if not self._has_torch():
+            pytest.skip("torch/nas_agent unavailable - D tests need real supernet materialization")
+
+        import shutil
+        for fname in ("supernet.py", "latency_estimator.py", "search_config.yaml",
+                      "project_manifest.md"):
+            src = self._REAL_AD / fname
+            if src.is_file():
+                shutil.copy(src, tmp_path / fname)
+        shutil.copy(self._REAL_AD / ".selected_arch.json", tmp_path / ".selected_arch.json")
+        _write_search_record_schema(tmp_path, "ms")
+
+        mod = _load_script_fresh(_RETRAIN_SCRIPTS_DIR / "subnet_profile.py", "subnet_d1d4")
+        calls: list[dict] = []
+        mod.push_chart = lambda **kw: calls.append(kw)
+        old_argv = sys.argv
+        sys.argv = ["subnet_profile", "--artifacts-dir", str(tmp_path)]
+        try:
+            rc = mod.main()
+        finally:
+            sys.argv = old_argv
+        assert rc == 0
+
+        md_path = tmp_path / "subnet_structure.md"
+        assert md_path.is_file(), "subnet_structure.md must be written on success"
+        text = md_path.read_text(encoding="utf-8")
+
+        # D1: fixed section headers.
+        assert "# Selected Subnet Structure" in text
+        assert "== Module repr ==" in text
+        assert "== Per-layer ==" in text
+        assert "layer_name | type | params | out_shape" in text
+        # D2: repr contains str(subnet) (>=1 layer class name).
+        repr_section = text.split("== Module repr ==")[1].split("== Per-layer ==")[0]
+        assert any(tok in repr_section for tok in ("Conv", "Linear", "Pool", "Subnet", "Block"))
+        # D3: per-layer >=1 row; total_params positive int.
+        per_layer = text.split("== Per-layer ==")[1].strip().splitlines()
+        data_rows = [ln for ln in per_layer if "|" in ln and "layer_name" not in ln]
+        assert len(data_rows) >= 1
+        total_params_line = next(ln for ln in text.splitlines() if ln.startswith("- total_params:"))
+        total_params = int(total_params_line.split(":")[1].strip())
+        assert total_params > 0
+        # D4: weights line present.
+        weights_line = next(ln for ln in text.splitlines() if ln.startswith("- weights:"))
+        assert "weights:" in weights_line
+        # latency_unit passthrough.
+        assert "- latency_unit: ms" in text
+        # Chart push happened.
+        assert len(calls) >= 1

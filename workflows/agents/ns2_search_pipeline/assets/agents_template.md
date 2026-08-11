@@ -57,7 +57,7 @@ Objective Semantics:
 | Objective | Original Metric | Smaller-Is-Better Reason |
 |-----------|-----------------|--------------------------|
 | `acc` | validation accuracy | sign-flipped by evaluator |
-| `latency` | inference latency (ms) | naturally smaller-is-better |
+| `latency` | inference latency (unit = latency_unit) | naturally smaller-is-better |
 
 ### Key API Surface
 

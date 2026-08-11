@@ -1,5 +1,5 @@
 ---
-description: nas-supernet 架构选择 agent（folder-agent，确定性，零 LLM 判断）。运行 ns_search_pipeline 生成的 select_architecture.py 恰好一次——读 search_results.jsonl + target_latency_ms，按「target 下 max-acc；缺则 Pareto knee」策略选架构，stdout 打 JSON。agent 铁律：不许改脚本/不许自己重算/不许复述上游，把脚本 stdout JSON 作为唯一最终回复。$ORCA_ARTIFACTS_DIR 经 Git Bash 展开（orca spawn 注入）。脚本非 0 退出 → 原样上抛 fail loud。output_schema 强制 selected_arch 等 5 字段，路由守卫 selected_arch 未定义 → terminate_select_failed。
+description: nas-supernet 架构选择 agent（folder-agent，确定性，零 LLM 判断）。运行 ns_search_pipeline 生成的 select_architecture.py 恰好一次——读 search_results.jsonl + target_latency，按「target 下 max-acc；缺则 Pareto knee」策略选架构，stdout 打 JSON。agent 铁律：不许改脚本/不许自己重算/不许复述上游，把脚本 stdout JSON 作为唯一最终回复。$ORCA_ARTIFACTS_DIR 经 Git Bash 展开（orca spawn 注入）。脚本非 0 退出 → 原样上抛 fail loud。output_schema 强制 selected_arch 等字段，路由守卫 selected_arch 未定义 → terminate_select_failed。
 tools: [bash]
 ---
 # ns_select
@@ -35,18 +35,21 @@ search_results.jsonl`。**你的工作：运行下面命令恰好一次，把它
 cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable" >&2; exit 1; }
 
 python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
-  --target-latency-ms "{{ inputs.target_latency_ms }}" \
+  --target-latency "{{ inputs.target_latency }}" \
+  --latency-unit "{{ inputs.latency_unit }}" \
   --search-results "$ORCA_ARTIFACTS_DIR/search_results.jsonl"
 ```
 
 脚本契约（由 ns_search_pipeline 生成时保证，ns_select 不验证）：
-- 入参：`--target-latency-ms <number>`（用户 input，可能为空字符串——由脚本判 `pareto-knee`
-  兜底）；`--search-results <path>`（jsonl，每行一个候选子网记录）。
+- 入参：`--target-latency <number>`（用户 input，可能为空字符串——由脚本判 `pareto-knee`
+  兜底）；`--latency-unit <ms|us|s>`（默认 ms，**不换算数值**——单位仅作下游 label 标注）；
+  `--search-results <path>`（jsonl，每行一个候选子网记录）。
 - stdout：**单行 JSON**，含字段：
   - `selected_arch` (dict)：选定的子网架构描述（layer-wise 配置）。
   - `selected_acc` (number)：选定子网在 search 时的 metric（项目 metric 方向由脚本读 manifest
     判 higher/lower-better）。
-  - `selected_latency_ms` (number)：选定子网实测/估时延。
+  - `selected_latency` (number)：选定子网实测/估时延（单位 = latency_unit）。
+  - `latency_unit` (string)：透传自 input 的 latency 单位（ms/us/s）。
   - `pareto_size` (int)：Pareto 前沿大小。
   - `select_reason` (string)：枚举 `"max-acc-under-target"` / `"pareto-knee"` / `"none"`。
 - 退出码 0 = 成功；非 0 = 失败（缺输入 / 解析错 / 无候选）。
@@ -63,8 +66,8 @@ python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
 ## 输出
 
 **整段回复 = 脚本 stdout 的那一行 JSON**（形如
-`{"selected_arch":{"depth":3,"widths":[16,32,64]},"selected_acc":0.91,"selected_latency_ms":4.2,"pareto_size":12,"select_reason":"max-acc-under-target"}`）。
-节点 `output_schema` 要求它是合法 JSON 且 5 字段齐备 + `select_reason ∈ {max-acc-under-target,
+`{"selected_arch":{"depth":3,"widths":[16,32,64]},"selected_acc":0.91,"selected_latency":4.2,"latency_unit":"ms","pareto_size":12,"select_reason":"max-acc-under-target"}`）。
+节点 `output_schema` 要求它是合法 JSON 且字段齐备 + `select_reason ∈ {max-acc-under-target,
 pareto-knee, none}`。`selected_arch` 未定义 / 脚本非 0 → 引擎判 node 失败 → yaml 路由守卫触发
 terminate_select_failed。ns_retrain 引用 selected_arch 字段据此生成 retrain
 脚本。

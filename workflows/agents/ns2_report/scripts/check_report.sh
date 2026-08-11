@@ -21,7 +21,8 @@ with open(sys.argv[1], 'r') as f:
     data = json.load(f)
 
 required = ['status', 'stage', 'reason', 'selected_arch', 'selected_acc',
-            'selected_latency_ms', 'pareto_size', 'supernet_path', 'output_dir',
+            'selected_latency', 'latency_unit', 'subnet_structure',
+            'pareto_size', 'supernet_path', 'output_dir',
             'final_metrics', 'artifacts', 'charts_summary', 'error']
 missing = [k for k in required if k not in data]
 if missing:
@@ -36,6 +37,11 @@ stages = {'flatten', 'expand', 'train_script', 'search_pipeline', 'run_train',
           'run_search', 'retrain', 'report'}
 if data['stage'] not in stages:
     print(f'FAIL: stage must be one of {stages}, got {data[\"stage\"]}')
+    sys.exit(1)
+
+if data.get('latency_unit') not in ('ms', 'us', 's'):
+    lu = data.get('latency_unit')
+    print(f'FAIL: latency_unit must be one of ms/us/s, got {lu!r}')
     sys.exit(1)
 
 print('PASS: check_report')

@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
+    discover_latency_unit,
     discover_metric_info,
     flatten_record,
     init_marker,
@@ -32,12 +33,17 @@ from _common import (  # noqa: E402
 def main() -> int:
     ap = argparse.ArgumentParser(description="Push Pareto front scatter chart.")
     ap.add_argument("--artifacts-dir", required=True, help="$ORCA_ARTIFACTS_DIR")
-    ap.add_argument("--selected-latency-ms", default="")
+    ap.add_argument("--selected-latency", default="")
     ap.add_argument("--selected-acc", default="")
+    ap.add_argument(
+        "--latency-unit", default="",
+        help="override latency unit (default: discover from search_record_schema.json)",
+    )
     args = ap.parse_args()
 
     ad = Path(args.artifacts_dir)
     init_marker(ad)
+    unit = args.latency_unit.strip() or discover_latency_unit(ad)
 
     records = read_jsonl(ad / "search_results.jsonl")
     if not records:
@@ -94,12 +100,15 @@ def main() -> int:
     # Caption with selected-arch annotation.
     metric_label = info.name.replace("_", " ").title()
     caption_parts = [f"{len(data)} candidates; Pareto front computed by front-end."]
-    sel_lat = safe_float(args.selected_latency_ms)
+    sel_lat = safe_float(args.selected_latency)
     sel_acc = safe_float(args.selected_acc)
     if sel_lat is not None and sel_acc is not None:
         sel_display = info.for_display(sel_acc) if info.negate_for_display else sel_acc
+        # F4: keep the `, {metric_name}={sel_display:.4f}` clause — only the literal `ms`
+        # becomes `{unit}`. Pareto-marker parsing depends on this exact shape (see
+        # ``_common._parse_selected_from_caption`` regex).
         caption_parts.append(
-            f"Selected arch: latency={sel_lat:.2f}ms, {info.name}={sel_display:.4f}."
+            f"Selected arch: latency={sel_lat:.2f}{unit}, {info.name}={sel_display:.4f}."
         )
     dir_label = info.display_direction
     caption_parts.append(f"{info.name}: {dir_label}-is-better.")
@@ -117,7 +126,7 @@ def main() -> int:
         y="metric",
         pareto_x_direction="min",
         pareto_y_direction=pareto_y_dir,
-        x_label="Latency (ms, lower is better)",
+        x_label=f"Latency ({unit}, lower is better)",
         y_label=f"{metric_label} ({dir_label} is better)",
         caption=" ".join(caption_parts),
     )

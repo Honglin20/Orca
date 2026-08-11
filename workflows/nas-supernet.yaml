@@ -20,10 +20,15 @@ inputs:
     type: string
     description: "[ask] 目标模型入口文件路径（相对 project_root 或绝对）。supernet 张开的起点——ns_expand_supernet flatten 此文件生成 supernet.py。项目内唯一锚点，必须用户给"
     required: true
-  target_latency_ms:
+  target_latency:
     type: number
-    description: "[ask] 选架构时延目标（毫秒）。ns_select 调 select_architecture.py 时下传 --target-latency-ms：latency ≤ target 的 Pareto 前沿候选里选 max-acc。核心业务 KPI——NAS 无目标 = 瞎搜，必须用户给（本工作流恒提供 target，无 target 不开工）"
+    description: "[ask] 选架构时延目标（单位由 latency_unit 决定，默认 ms）。ns_select 调 select_architecture.py 时下传 --target-latency：latency ≤ target 的 Pareto 前沿候选里选 max-acc。核心业务 KPI——NAS 无目标 = 瞎搜，必须用户给（本工作流恒提供 target，无 target 不开工）"
     required: true
+  latency_unit:
+    type: string
+    description: "[advanced] latency 测量值声明单位（ms|us|s，默认 ms）。全链路 label/列名/caption/比较按此单位；不换算数值（只标注）。默认 estimator 路径恒返回 ms——声明 us/s 必须同时给 latency_script_path（bootstrap fail-loud 守卫）"
+    required: false
+    default: "ms"
   latency_script_path:
     type: string
     description: "[advanced] 用户外部时延脚本路径（可选）。**提供则全链路时延唯一权威**——ns_search_pipeline 生成 latency_estimator.py 时包装此脚本（onnx 单文件契约），search_config.yaml objs 的 latency objective + select_architecture.py 的 latency 来源全部同源于此，禁 fallback 到内置 PyTorch / FLOPs / 任何代理（见 ns_search_pipeline 用户测度权威铁律 + measure_latency_script_generation.md 用户脚本章节）。未提供（默认）走 nas-agent 内置 PyTorch measure_module_latency"
@@ -34,6 +39,14 @@ inputs:
     description: "[default] 复现性种子（默认 0）。全 workflow 必填（contract §6 Tier A）；agent.md 经 {{ inputs.seed }} 下传到训练/搜索脚本 --seed，deterministic 路径全固定此 seed"
     required: false
     default: 0
+
+# 跨字段 input 不变量——bootstrap fail-loud 校验：
+# latency_unit∈{us,s} ⇒ latency_script_path 必须非空（默认 estimator 恒 ms，非 ms 声明必错标）。
+input_invariants:
+  - when_field: latency_unit
+    when_in: ["us", "s"]
+    require_nonempty: [latency_script_path]
+    message: "声明 latency_unit 为 us/s 时必须提供 latency_script_path（默认 PyTorch estimator 恒返回 ms，非 ms 声明必错标）"
 
 nodes:
   # ═══════════════════════════════════════════════════════════════════════════
@@ -209,7 +222,7 @@ nodes:
   # ═══════════════════════════════════════════════════════════════════════════
   # Agent 6: ns_select（确定性 Bash，零 LLM 判断）
   #   运行 ns_search_pipeline 生成的 select_architecture.py 恰好一次——读 search_results.jsonl
-  #   + target_latency_ms，按「target 下 max-acc；缺则 Pareto knee」策略选架构，stdout 单行
+  #   + target_latency，按「target 下 max-acc；缺则 Pareto knee」策略选架构，stdout 单行
   #   JSON 作唯一最终回复。脚本非 0 / selected_arch 空兜底 → terminate_select_failed。
   #   路由守卫：selected_arch 非空 + pareto_size>0 → ns_retrain；catch-all → terminate_select_failed。
   #   （is defined 只测键存在，不测空——必须用真值判定）
@@ -221,7 +234,7 @@ nodes:
     model: "deepseek/deepseek-v4-flash"
     output_schema:
       type: object
-      required: [selected_arch, selected_acc, selected_latency_ms, pareto_size, select_reason]
+      required: [selected_arch, selected_acc, selected_latency, latency_unit, pareto_size, select_reason]
       properties:
         selected_arch:
           # 任务 spec：允许 object 或 null（无候选时）。
@@ -229,7 +242,8 @@ nodes:
           type: ["object", "null"]
           description: "选定的子网架构描述（layer-wise 配置）；无候选时为 {} 或 null"
         selected_acc: {type: number, description: "选定子网 search 时的 metric（项目 metric 方向由 select_architecture.py 读 manifest 判 higher/lower-better）"}
-        selected_latency_ms: {type: number, description: "选定子网实测/估时延（毫秒）"}
+        selected_latency: {type: number, description: "选定子网实测/估时延（单位 = latency_unit，默认 ms）"}
+        latency_unit: {type: string, enum: [ms, us, s], description: "latency 单位（透传自 inputs.latency_unit，默认 ms）"}
         pareto_size: {type: integer, description: "Pareto 前沿大小；无候选时 0", minimum: 0}
         select_reason:
           type: string
@@ -318,7 +332,8 @@ outputs:
   assessment: "{{ ns_retrain.output.assessment }}"
   selected_arch: "{{ ns_select.output.selected_arch }}"
   selected_acc: "{{ ns_select.output.selected_acc }}"
-  selected_latency_ms: "{{ ns_select.output.selected_latency_ms }}"
+  selected_latency: "{{ ns_select.output.selected_latency }}"
+  latency_unit: "{{ ns_select.output.latency_unit }}"
   pareto_size: "{{ ns_select.output.pareto_size }}"
   supernet_path: "{{ ns_expand_supernet.output.supernet_path }}"
   output_dir: "{{ ns_expand_supernet.output.output_dir }}"

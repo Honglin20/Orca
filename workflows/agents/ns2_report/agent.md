@@ -37,7 +37,7 @@ bash "$ORCA_AGENT_RESOURCES/scripts/check_report.sh"          # Step 2：校验 
 - `$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本 run 的 artifacts 目录。
   **先 `cd "$ORCA_ARTIFACTS_DIR"` 再执行任何命令**。
 - `{{ inputs.project_root }}`：用户项目根（恒定义）。
-- `{{ inputs.target_latency_ms }}`：用户目标时延（恒定义）。
+- `{{ inputs.target_latency }}`：用户目标时延（恒定义，单位 = `{{ inputs.latency_unit }}`，默认 ms）。
 
 ## 零跨节点 output 引用铁律
 
@@ -96,7 +96,8 @@ retrain_rc = read_text(os.path.join(ad, "runs", "retrain", ".retrain_rc"), None)
 # ── Read select data ──
 selected_arch = None
 selected_acc = 0
-selected_latency_ms = 0
+selected_latency = 0
+latency_unit = "ms"
 pareto_size = 0
 select_reason = "none"
 try:
@@ -105,11 +106,17 @@ try:
     if isinstance(sdata, dict):
         selected_arch = sdata.get("selected_arch")
         selected_acc = sdata.get("selected_acc", 0)
-        selected_latency_ms = sdata.get("selected_latency_ms", 0)
+        # 读侧双认：新 run 写 selected_latency；旧 run 可能写 selected_latency_ms。
+        selected_latency = sdata.get("selected_latency", sdata.get("selected_latency_ms", 0))
+        latency_unit = sdata.get("latency_unit", "ms")
         pareto_size = sdata.get("pareto_size", 0)
         select_reason = sdata.get("select_reason", "none")
 except (FileNotFoundError, json.JSONDecodeError, ValueError):
     pass
+
+# ── Read subnet structure path (produced by ns2_retrain via subnet_profile.py) ──
+subnet_structure_md = os.path.join(ad, "subnet_structure.md")
+subnet_structure = "subnet_structure.md" if os.path.isfile(subnet_structure_md) else ""
 
 # ── Read supernet info ──
 supernet_path = os.path.join(ad, "supernet.py") if exists(os.path.join(ad, "supernet.py")) else ""
@@ -213,7 +220,9 @@ report = {
     "reason": reason,
     "selected_arch": selected_arch,
     "selected_acc": selected_acc,
-    "selected_latency_ms": selected_latency_ms,
+    "selected_latency": selected_latency,
+    "latency_unit": latency_unit,
+    "subnet_structure": subnet_structure,
     "pareto_size": pareto_size,
     "supernet_path": supernet_path,
     "output_dir": ad,
@@ -247,7 +256,8 @@ bash "$ORCA_AGENT_RESOURCES/scripts/check_report.sh" || { echo "FAIL" >&2; exit 
 - `stage`：终态来源阶段（flatten/expand/train_script/search_pipeline/run_train/run_search/retrain/report）。
 - `reason`：终态判定理由。
 - `selected_arch`：选定子网架构（从 `.selected_arch.json` 读；无则 null）。
-- `selected_acc/selected_latency_ms/pareto_size`：从 `.selected_arch.json` 读。
+- `selected_acc/selected_latency/latency_unit/pareto_size`：从 `.selected_arch.json` 读（latency_unit 默认 ms）。
+- `subnet_structure`：`subnet_structure.md` 相对路径（ns2_retrain 推 subnet_profile.py 产出；缺/materialize 失败 → 空串）。
 - `supernet_path`：`$ORCA_ARTIFACTS_DIR/supernet.py` 或空串。
 - `output_dir`：`$ORCA_ARTIFACTS_DIR` 绝对路径。
 - `final_metrics`：retrain/train/search 的 assessment（失败路径取对应阶段的 assessment）。

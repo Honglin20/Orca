@@ -1,6 +1,9 @@
 """Online latency estimator for hierarchical supernets.
 
-Measures whole-architecture latency on-the-fly using PyTorch directly.
+Measures whole-architecture latency on-the-fly using PyTorch directly. Returns
+the raw latency value with no unit conversion; the unit is declared by the
+workflow's ``latency_unit`` input (default ``ms``; the built-in
+``measure_module_latency`` returns ``ms``, matching the default).
 """
 
 
@@ -28,9 +31,11 @@ class LatencyEstimator:
         self.supernet.to(torch.device("cpu"))
 
     def get_latency(self, arch_config: ArchConfig) -> float:
-        """Return estimated latency in ms for one sampled architecture.
+        """Return the raw estimated latency for one sampled architecture.
 
-        Extracts the active subnet and measures latency using PyTorch.
+        Extracts the active subnet and measures latency using PyTorch. The unit
+        is declared by the workflow's ``latency_unit`` (default ``ms``); the
+        value is returned as-is with no conversion.
         """
         self.supernet.set_sample_config(arch_config)
         subnet = self.supernet.get_active_subnet()
@@ -106,7 +111,9 @@ if __name__ == "__main__":
     for i in range(args.num_samples):
         arch_config = search_space.sample()
         latency = estimator.get_latency(arch_config)
-        print(f"[{i + 1}/{args.num_samples}] latency = {latency:.3f} ms")
+        # Unit is declared by the workflow's latency_unit (default ms) — see module
+        # docstring. Print the raw value without a unit suffix to avoid mislabeling.
+        print(f"[{i + 1}/{args.num_samples}] latency = {latency:.3f}")
         if latency < 0.0:
             raise AssertionError(f"Latency must be non-negative, got {latency}.")
     print(f"Checked {args.num_samples} sampled architectures.")

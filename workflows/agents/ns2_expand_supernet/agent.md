@@ -44,6 +44,7 @@ model_type、生成 `supernet.py`、精炼 `SearchSpace`、写 `supernet_summary
 ## Required Inputs
 
 - `{{ ns2_flatten.output.prepared_model }}`：上游产的 prepared model（必填）。
+- `{{ ns2_flatten.output.manifest_path }}`：上游产的 `project_manifest.md`（必填——block 选择的任务 context 来源）。
 - `$ORCA_ARTIFACTS_DIR`：产物目录。
 - `{{ inputs.project_root }}`：用户项目根。
 
@@ -131,6 +132,12 @@ assert 'SearchSpace' in ns or 'build_supernet' in ns, 'no SearchSpace/build_supe
 仅在本步开始时读 `$ORCA_AGENT_RESOURCES/references/workflows/supernet_generation.md`（**SKIP_GENERATION=true 则跳过本读 + 生成**）。
 按它从 `{{ ns2_flatten.output.prepared_model }}` 与 `model_type` 产
 `$ORCA_ARTIFACTS_DIR/supernet.py`。
+
+**用任务 context 指导 pre-built block 选择**：先读 `{{ ns2_flatten.output.manifest_path }}`
+（`project_manifest.md`）拿 task type / workload modality / 输入数据特性（sequence length、
+resolution）/ 部署约束 / 用户偏好，再按 `general_specs.md` 的筛选维度（Workload Modality /
+Input Data Profile / Hard Compatibility / Efficiency-Capacity / User Preferences）从
+metadata 短名单选 pre-built block。禁仅凭 block description 做通用选择。
 
 workflow 完成后（或 SKIP_GENERATION=true 时直进），进 evaluator verification loop：
 

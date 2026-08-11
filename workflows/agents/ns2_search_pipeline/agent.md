@@ -226,62 +226,77 @@ echo "RESUME flags: SKIP_SCHEMA=$SKIP_SCHEMA SKIP_A=$SKIP_A SKIP_B=$SKIP_B SKIP_
 名/类型/枚举。这是 evaluator（子代理 B 产）和 select_architecture.py（子代理 C 产）之间的共享契约。
 
 ```bash
-cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL"; exit 1; }
-# 从 supernet.py 的 SearchSpace 提取 arch 维度，定义 jsonl schema（确定性 introspection）
+cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
+# 从 supernet.py 的 SearchSpace 提取 arch 维度，定义 jsonl schema（确定性 introspection）。
+# 文件由 python 在全部计算成功后自写——禁用 `> search_record_schema.json` 重定向：它在 python
+# 启动前就截空文件，解析期任何崩溃（SyntaxError / exec supernet 失败）会留 0 字节文件，让 Step 0.5
+# resume 闸门（`-s` 判空）误判 + 下游 discover_latency_unit 读空 json 崩溃。
 python3 -c "
-import json, sys, ast
+import json, sys, traceback
 
-# Parse supernet.py to extract SearchSpace elastic dimensions
-src = open('supernet.py').read()
-mod = compile(src, 'supernet.py', 'exec')
-ns = {}
-exec(mod, ns)
+# exec supernet.py 提取 SearchSpace。__name__='not_main' 跳过其 __main__ smoke 块。
+try:
+    src = open('supernet.py').read()
+    ns = {'__name__': 'not_main'}
+    exec(compile(src, 'supernet.py', 'exec'), ns)
+except Exception as e:
+    print(f'FATAL: cannot exec supernet.py for introspection: {e}', file=sys.stderr)
+    traceback.print_exc()
+    sys.exit(1)
 
-search_space = ns.get('SearchSpace')
-if search_space is None:
+SearchSpace = ns.get('SearchSpace')
+if SearchSpace is None:
     print('FATAL: SearchSpace not found in supernet.py', file=sys.stderr)
     sys.exit(1)
 
-ss = search_space()
-arch_fields = {}
+try:
+    ss = SearchSpace()
+except Exception as e:
+    print(f'FATAL: SearchSpace() instantiation failed: {e}', file=sys.stderr)
+    sys.exit(1)
 
-# Extract elastic dimensions from SearchSpace attributes
+arch_fields = {}
 for attr in dir(ss):
     if attr.startswith('_'):
         continue
     val = getattr(ss, attr)
     if isinstance(val, (list, tuple)) and len(val) > 0:
-        # Candidate list (e.g. stage_depth_candidates, width_candidates)
         if all(isinstance(v, (list, tuple)) for v in val):
             # Nested: stage_depth_candidates = [[1,2,3], [2,3,4]]
             arch_fields[attr] = {'type': 'list_of_lists', 'values': [list(v) for v in val]}
-        elif all isinstance(val[0], (int, float, str)):
+        elif all(isinstance(v, (int, float, str)) for v in val):
             arch_fields[attr] = {'type': 'list', 'values': list(val)}
 
-# Read metric info from manifest
-metric_name = ''
+if not arch_fields:
+    print('FATAL: no elastic dimensions found in SearchSpace', file=sys.stderr)
+    sys.exit(1)
+
+# metric info（best-effort）：下游 select_architecture.py 从 search_config.yaml objs 推 metric 名/方向，
+# schema 的 metric_name/metric_direction 仅备用——manifest 自由文本无可靠 metric 名锚点，故 metric_name 留空。
 metric_direction = ''
 try:
-    manifest = open('project_manifest.md').read()
-    for line in manifest.split('\n'):
-        if 'higher-better' in line.lower():
+    for line in open('project_manifest.md').read().split('\n'):
+        low = line.lower()
+        if 'higher-better' in low:
             metric_direction = 'higher-better'
-        if 'lower-better' in line.lower():
+        elif 'lower-better' in low:
             metric_direction = 'lower-better'
 except FileNotFoundError:
     pass
 
 schema = {
     'arch_fields': arch_fields,
-    'metric_name': metric_name,
+    'metric_name': '',
     'metric_direction': metric_direction,
-    'latency_ms_field': 'latency_ms',
+    'latency_ms_field': 'latency',
     'latency_unit': '{{ inputs.latency_unit }}',
-    'extra_fields': ['acc', 'params']
+    'extra_fields': ['acc', 'params'],
 }
-assert arch_fields, 'FATAL: no elastic dimensions found in SearchSpace'
-print(json.dumps(schema, indent=2))
-" > search_record_schema.json
+# 仅在全部计算成功后写文件（崩溃留旧文件/无文件，绝不留 0 字节——避 P0 级联）。
+with open('search_record_schema.json', 'w') as f:
+    json.dump(schema, f, indent=2)
+print(f'WROTE search_record_schema.json ({len(arch_fields)} arch_fields)')
+"
 ```
 
 **派 3 子代理生成（point-to-file 协议）**——**每条先看 RESUME flags，SKIP_*=true 的跳过（产物已在盘）**：

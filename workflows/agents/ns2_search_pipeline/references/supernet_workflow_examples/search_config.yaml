@@ -17,7 +17,7 @@ latency_cfg:
   repetitions: 50
   batch_size: 1                   # Batch size for the dummy input during measurement.
 
-# Optional latency upper bound in milliseconds (ms).
+# Optional latency upper bound (unit = latency_unit, default ms).
 # Set to a number (e.g., 10.0) to reject over-latency candidates by assigning worst fitness without quality evaluation.
 # Set to null to disable the latency constraint.
 latency_constraint: null

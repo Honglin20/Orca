@@ -48,6 +48,7 @@ from orca.iface.cli.config import apply_kb_requirement, resolve_kb_dir
 from orca.compile import ConfigurationError, catalog, load_workflow
 from orca.events.bus import EventBus
 from orca.events.tape import Tape
+from orca.schema.workflow import InputInvariant
 from orca.iface.in_session._step_io import (
     _emit_workflow_failed,
     apply_step_result,
@@ -825,7 +826,41 @@ def _validate_inputs(
     return True, ""
 
 
+def _validate_input_invariants(
+    inputs: dict[str, Any], invariants: list[InputInvariant],
+) -> tuple[bool, str]:
+    """SPEC §2.1 P0 / F1：bootstrap 期跨字段 input 不变量校验。
 
+    ``_validate_inputs`` 只覆盖单字段（存在/type）；本函数校验 ``Workflow.input_invariants``
+    声明的跨字段约束（典型：``latency_unit ∈ {us, s}`` ⇒ ``latency_script_path`` 必须非空）。
+    在 ``_validate_inputs`` 通过后调用；不通过 → 同样的 ``inputs_validation_error`` 信封 + exit 1
+    （与单字段错误同 error_kind，TARS skill 已有处理）。
+
+    Args:
+        inputs: 用户传入的 inputs dict（default 已填充由 Orchestrator；这里 default 未填，
+            因此 ``[default]``/``[advanced]`` 缺省字段可能不在 dict——按缺失=空处理，符合
+            守卫语义「字段非空才放过」）。
+        invariants: ``wf.input_invariants`` 列表。
+
+    Returns:
+        ``(ok, error_message)``；``ok=False`` 时 ``error_message`` 指出违反的不变量 + 字段名。
+    """
+    for inv in invariants:
+        trig_val = inputs.get(inv.when_field)
+        # 触发字段未提供 / 值不在触发集合 → 不变量守卫未激活，跳过（保守：不报错）。
+        if trig_val not in inv.when_in:
+            continue
+        # 守卫生效：每个 require_nonempty 字段必须存在且非空（空串/None/空 list 视为空）。
+        for field in inv.require_nonempty:
+            val = inputs.get(field)
+            if val is None or (isinstance(val, str) and not val.strip()) or val == []:
+                return False, (
+                    f"invariant violated: {inv.message} "
+                    f"(when {inv.when_field!r}={trig_val!r}, "
+                    f"required non-empty: {inv.require_nonempty!r}, "
+                    f"but {field!r}={val!r})."
+                )
+    return True, ""
 
 
 def _resolve_wf_path(wf_arg: str) -> Path:
@@ -1185,6 +1220,18 @@ def bootstrap(
             "done": True,
             "error_kind": INPUTS_VALIDATION_ERROR,
             "reason": f"failed: inputs_validation_error: {inputs_err}",
+        }, ensure_ascii=False))
+        raise typer.Exit(1)
+
+    # SPEC §2.1 P0 / F1：跨字段 input 不变量校验（同属 bootstrap 期 fail-fast 层，紧随单字段
+    # 校验）。``wf.input_invariants`` 声明的跨字段约束（如 latency_unit∈{us,s} ⇒ script_path
+    # 必须非空）违反 → 同样的 ``inputs_validation_error`` 信封 + exit 1。
+    inv_ok, inv_err = _validate_input_invariants(inp, wf_obj.input_invariants)
+    if not inv_ok:
+        typer.echo(json.dumps({
+            "done": True,
+            "error_kind": INPUTS_VALIDATION_ERROR,
+            "reason": f"failed: inputs_validation_error: {inv_err}",
         }, ensure_ascii=False))
         raise typer.Exit(1)
 

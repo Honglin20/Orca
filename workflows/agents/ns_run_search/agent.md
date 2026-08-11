@@ -114,9 +114,10 @@ print('RESULTS_VALID')
     # reuse 也要推 search 3 图（pareto/search_table/latency_dist）——否则前端永远看不到
     # 帕累托/搜索表/latency 分布。与 Step 2.7 同款 `|| true` 不阻塞、fail-soft。
     # （env 已由宿主 prompt 指令先 source，chart 推送依赖 ORCA_CHART_SOCK。）
-    python3 "$ORCA_AGENT_RESOURCES/scripts/pareto.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
-    python3 "$ORCA_AGENT_RESOURCES/scripts/search_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
-    python3 "$ORCA_AGENT_RESOURCES/scripts/latency_dist.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
+    python3 "$ORCA_AGENT_RESOURCES/scripts/pareto.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
+    python3 "$ORCA_AGENT_RESOURCES/scripts/search_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
+    python3 "$ORCA_AGENT_RESOURCES/scripts/latency_dist.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
+    python3 "$ORCA_AGENT_RESOURCES/scripts/full_supernet_latency.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
     echo "REUSE: search_results.jsonl 已存在且达标 → 跳过搜索重做，已推 3 图 → 进 Step 3"
   fi
 fi
@@ -268,9 +269,12 @@ skip + stderr，不崩；stdout/stderr 全丢弃——最终回复必须只含 S
 
 ```bash
 cd "$ORCA_ARTIFACTS_DIR" || exit 1
-python3 "$ORCA_AGENT_RESOURCES/scripts/pareto.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
-python3 "$ORCA_AGENT_RESOURCES/scripts/search_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
-python3 "$ORCA_AGENT_RESOURCES/scripts/latency_dist.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
+python3 "$ORCA_AGENT_RESOURCES/scripts/pareto.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
+python3 "$ORCA_AGENT_RESOURCES/scripts/search_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
+python3 "$ORCA_AGENT_RESOURCES/scripts/latency_dist.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
+# full_supernet_latency.py：测全展开超网真 latency，写 .full_supernet_latency.json 供 ns_retrain compare_table 优先使用。
+# fail-soft：torch 缺/测失败 → 不写文件 + exit 0。
+python3 "$ORCA_AGENT_RESOURCES/scripts/full_supernet_latency.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
 ```
 
 ## Step 3 ── 自校验 JSON（你的唯一最终回复）

@@ -2,13 +2,16 @@
 """compare_table.py -- Full-supernet vs selected-subnet comparison table.
 
 Builds a 2-column comparison table (Full Supernet vs Selected Subnet) across:
-  - Parameters / FLOPs / Latency (ms) / Project metric
+  - Parameters / FLOPs / Latency (<unit>) / Project metric
 
 Data sources (best-effort, each row independent):
   - Full Supernet params/FLOPs: parsed from supernet_summary.md or inspect_supernet.py output.
   - Full Supernet metric: trained supernet's real best validation metric from the
     training log (fallback: best search candidate when the log is unavailable).
-  - Full Supernet latency: max latency across candidates.
+  - Full Supernet latency: REAL measurement from ``.full_supernet_latency.json``
+    (written by ``full_supernet_latency.py`` using the same
+    LatencyEstimator as the search). Fallback when that file is missing:
+    ``max(valid candidate latencies)`` proxy with sentinel filter + caption marker.
   - Selected Subnet latency/metric: from ns_select output (CLI args, already natural).
 
 Metric values are un-negated for display if NAS stores them negated.
@@ -17,6 +20,8 @@ Metric values are un-negated for display if NAS stores them negated.
 from __future__ import annotations
 
 import argparse
+import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -24,6 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
     best_val_metric_from_log,
+    discover_latency_unit,
     discover_metric_info,
     extract_numeric_values,
     push_chart,
@@ -37,10 +43,15 @@ from _common import (  # noqa: E402
 def main() -> int:
     ap = argparse.ArgumentParser(description="Push supernet-vs-subnet comparison table.")
     ap.add_argument("--artifacts-dir", required=True)
-    ap.add_argument("--selected-latency-ms", default="")
+    ap.add_argument("--selected-latency", default="")
     ap.add_argument("--selected-acc", default="")
+    ap.add_argument(
+        "--latency-unit", default="",
+        help="override latency unit (default: discover from search_record_schema.json)",
+    )
     args = ap.parse_args()
     ad = Path(args.artifacts_dir)
+    unit = args.latency_unit.strip() or discover_latency_unit(ad)
 
     records = read_jsonl(ad / "search_results.jsonl")
     info = discover_metric_info(ad, records)
@@ -56,12 +67,11 @@ def main() -> int:
     full_params = _parse_numeric(harvest, ("parameters", "params", "num_params", "param_count"))
     full_flops = _parse_numeric(harvest, ("flops", "gflops", "macs", "gmacs"))
 
-    # Full supernet latency proxy: max latency across candidates.
-    full_latency = None
-    if info and info.latency_path and records:
-        lats = extract_numeric_values(records, info.latency_path)
-        if lats:
-            full_latency = max(lats)
+    # Full supernet latency:
+    #   1. Prefer ``.full_supernet_latency.json`` (real measurement via search's estimator).
+    #   2. Fallback: ``max(valid candidate latencies)`` proxy — NaN/overflow sentinels
+    #      (float32 max from failed evals) filtered so they can never surface as 3.4e38.
+    full_latency, latency_source = _resolve_full_latency(ad, info, records)
 
     # Full supernet metric: the trained supernet's real best validation metric
     # (from the training log) — NOT a proxy over search candidates. Fallback when
@@ -82,7 +92,7 @@ def main() -> int:
                 full_metric = info.for_display(min(valid))
                 full_metric_source = "search best candidate (train log unavailable)"
 
-    sel_latency = safe_float(args.selected_latency_ms)
+    sel_latency = safe_float(args.selected_latency)
     # Selected metric comes from ns_select stdout — already natural
     # higher-is-better direction (select_architecture.py contract). Do NOT negate.
     sel_metric_raw = safe_float(args.selected_acc)
@@ -92,7 +102,7 @@ def main() -> int:
     rows: list[dict[str, str]] = []
     _add_row(rows, "Parameters", full_params, None)
     _add_row(rows, "FLOPs", full_flops, None)
-    _add_row(rows, "Latency (ms)", full_latency, sel_latency)
+    _add_row(rows, f"Latency ({unit})", full_latency, sel_latency)
     _add_row(rows, metric_label, full_metric, sel_metric)
 
     rows = [r for r in rows if r["Full Supernet"] != "-" or r["Selected Subnet"] != "-"]
@@ -106,6 +116,8 @@ def main() -> int:
         return 0
 
     caption = f"Full-open supernet vs selected subnet. Metric: {metric_name}."
+    if latency_source:
+        caption += f" Full Supernet latency = {latency_source}."
     if full_metric_source:
         caption += f" Full Supernet metric = {full_metric_source}."
     if info and info.negate_for_display:
@@ -123,6 +135,61 @@ def main() -> int:
         caption=caption,
     )
     return 0
+
+
+def _resolve_full_latency(
+    ad: Path, info, records: list[dict],
+) -> tuple[float | None, str]:
+    """Resolve full-supernet latency.
+
+    Returns ``(latency, source_description)``:
+      - ``.full_supernet_latency.json`` exists with finite latency ≥ 0 (0.0 is a
+        legitimate measurement) → ``(value, "real measurement via search LatencyEstimator
+        (.full_supernet_latency.json, source=<src>)")``.
+      - Missing/unreadable/non-finite → fallback to ``max(valid candidates)`` proxy with
+        sentinel filter; source notes "proxy max(candidate latencies)".
+      - No candidates / no valid → ``(None, "")``.
+    """
+    measured = _read_full_supernet_latency(ad)
+    if measured is not None:
+        val, src = measured
+        return val, f"real measurement via search LatencyEstimator (.full_supernet_latency.json, source={src})"
+
+    if info and info.latency_path and records:
+        lats = extract_numeric_values(records, info.latency_path)
+        # Filter NaN/overflow sentinels + non-finite; latency>=0 is LEGITIMATE
+        # (don't drop all-zero measurements — those are a separate diagnostic).
+        valid = [v for v in lats if math.isfinite(v) and v >= 0 and abs(v) < 1e6]
+        if valid:
+            return max(valid), "proxy max(candidate latencies) — .full_supernet_latency.json unavailable"
+    return None, ""
+
+
+def _read_full_supernet_latency(ad: Path) -> tuple[float, str] | None:
+    """Read ``.full_supernet_latency.json``; return ``(latency, source)`` or None.
+
+    File shape: ``{"latency": <num>, "unit": <str>, "source": <str>}``.
+    Accepts source ∈ {estimator, proxy}. Latency must be finite and ≥0 (0.0 valid;
+    caption annotation handles the 0.0 case at the caller side via source label).
+    Returns None on missing file / parse error / non-finite value.
+    """
+    path = ad / ".full_supernet_latency.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        val = float(data.get("latency"))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(val) or val < 0:
+        return None
+    src = str(data.get("source", "unknown"))
+    return val, src
 
 
 def _add_row(rows: list[dict[str, str]], metric: str, full: float | None, sel: float | None) -> None:

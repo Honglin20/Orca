@@ -1,0 +1,340 @@
+name: nas-supernet-v3
+description: "End-to-end NAS supernet pipeline: flatten a user PyTorch model, expand it into a supernet, generate training and search scripts, run training and search with self-healing, select the best subnet, retrain it, and report a single summary."
+
+entry: ns3_flatten
+
+# ─────────────────────────────────────────────────────────────────────────────
+# inputs——三档标签（contract §6）：[ask]=业务决策必填 / [advanced]=罕见
+# override 可选 / [default]=工程默认。seed 全 workflow 必有（contract §6 Tier A 子类）。
+#
+# `$ORCA_ARTIFACTS_DIR`（in-session 入口注入）：``project_root`` 非空绝对路径 →
+# ``<project_root>/artifacts/nas-supernet-v3/``（project-scoped，跨 run 复用 + 多 wf 隔离）；
+# 否则 per-run ``runs/<run_id>/artifacts/`` 回落。
+# ─────────────────────────────────────────────────────────────────────────────
+inputs:
+  project_root:
+    type: string
+    description: "[ask] 用户原始 PyTorch 项目根目录绝对路径。supernet 张开 / 训练 logic porting / fidelity 校验都以此为源项目锚点（agent.md 经 {{ inputs.project_root }} 引用）。必须用户给——代码里能 grep 出事实但项目根本身是意图/上下文边界。亦作 in-session project-scoped artifacts 解析锚点（绝对路径，否则 bootstrap fail loud）"
+    required: true
+  model_path:
+    type: string
+    description: "[ask] 目标模型入口文件路径（相对 project_root 或绝对）。supernet 张开的起点——ns3_flatten flatten 此文件。项目内唯一锚点，必须用户给"
+    required: true
+  target_latency:
+    type: number
+    description: "[ask] 选架构时延目标（单位由 latency_unit 决定，默认 ms）。ns3_run_search 调 select_architecture.py 时下传 --target-latency：latency ≤ target 的 Pareto 前沿候选里选 max-acc。核心业务 KPI——NAS 无目标 = 瞎搜，必须用户给（本工作流恒提供 target，无 target 不开工）"
+    required: true
+  latency_unit:
+    type: string
+    description: "[advanced] latency 测量值声明单位（ms|us|s，默认 ms）。全链路 label/列名/caption/比较按此单位；不换算数值（只标注）。默认 estimator 路径恒返回 ms——声明 us/s 必须同时给 latency_script_path（bootstrap fail-loud 守卫）"
+    required: false
+    default: "ms"
+  latency_script_path:
+    type: string
+    description: "[advanced] 用户外部时延脚本路径（可选）。**提供则全链路时延唯一权威**——ns3_search_pipeline 生成 latency_estimator.py 时包装此脚本（onnx 单文件契约），search_config.yaml objs 的 latency objective + select_architecture.py 的 latency 来源全部同源于此，禁 fallback 到内置 PyTorch / FLOPs / 任何代理。未提供（默认）走 nas-agent 内置 PyTorch measure_module_latency"
+    required: false
+    default: ""
+  seed:
+    type: int
+    description: "[default] 复现性种子（默认 0）。全 workflow 必填（contract §6 Tier A）；agent.md 经 {{ inputs.seed }} 下传到训练/搜索脚本 --seed，deterministic 路径全固定此 seed"
+    required: false
+    default: 0
+
+# 跨字段 input 不变量——bootstrap fail-loud 校验：
+# latency_unit∈{us,s} ⇒ latency_script_path 必须非空（默认 estimator 恒 ms，非 ms 声明必错标）。
+input_invariants:
+  - when_field: latency_unit
+    when_in: ["us", "s"]
+    require_nonempty: [latency_script_path]
+    message: "声明 latency_unit 为 us/s 时必须提供 latency_script_path（默认 PyTorch estimator 恒返回 ms，非 ms 声明必错标）"
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 1: ns3_flatten（entry）
+  #   把用户 PyTorch 模型 flatten + 施 mandatory supernet readiness 规则。
+  #   从 v1 ns_expand_supernet Step 0-3 拆出。产 prepared_model（flat/optimized）。
+  #   flatten_passed=false → 路由 ns3_report（fail loud）。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: ns3_flatten
+    kind: agent
+    agent: ns3_flatten
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [output_dir, prepared_model, flatten_passed, manifest_path, error, generated_artifacts]
+      properties:
+        output_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR 绝对路径"}
+        prepared_model: {type: string, description: "<base_name>_flat.py 或 <base_name>_llm-optimized.py；flatten_passed=false → 空串"}
+        flatten_passed: {type: boolean, description: "true=flatten + __main__ 跑通；false=fix-loop 超限 → 路由 ns3_report"}
+        manifest_path: {type: string, description: "project_manifest.md 路径"}
+        error: {type: string, description: "fail loud 时根因；成功→空串"}
+        generated_artifacts:
+          type: array
+          items: {type: string}
+          description: "相对 output_dir 的产物路径列表"
+      additionalProperties: false
+    routes:
+      - when: "ns3_flatten.output.flatten_passed != false"
+        to: ns3_expand_supernet
+      - to: ns3_report
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 2: ns3_expand_supernet
+  #   classify model_type + generate supernet.py + refine SearchSpace + summary。
+  #   从 v1 ns_expand_supernet Step 4-7 拆出。读 ns3_flatten.output.prepared_model。
+  #   model_type_supported=false → 路由 ns3_report。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: ns3_expand_supernet
+    kind: agent
+    agent: ns3_expand_supernet
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [output_dir, model_type, model_type_supported, supernet_path, prepared_model, fidelity_passed, workflow_verifier_passed, error, generated_artifacts]
+      properties:
+        output_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR 绝对路径"}
+        model_type: {type: string, description: "标签（cnn / isotropic_transformer / hierarchical_transformer / ...）或 'No supported match'"}
+        model_type_supported: {type: boolean, description: "true=命中 model_type.json 标签；false=不支持 → 路由 ns3_report"}
+        supernet_path: {type: string, description: "supernet.py 路径；不支持时为空串"}
+        prepared_model: {type: string, description: "从 ns3_flatten 继承的 prepared_model 路径"}
+        fidelity_passed: {type: boolean, description: "supernet-evaluator loop all-pass → true"}
+        workflow_verifier_passed: {type: boolean, description: "Step 6 workflow-verifier all-pass → true；unsupported stop → false"}
+        error: {type: string, description: "fail loud 时根因；成功→空串"}
+        generated_artifacts:
+          type: array
+          items: {type: string}
+          description: "相对 output_dir 的产物路径列表"
+      additionalProperties: false
+    routes:
+      - when: "ns3_expand_supernet.output.model_type_supported != false"
+        to: ns3_train_script
+      - to: ns3_report
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 3: ns3_train_script
+  #   读 expand 上游产物 + 用户训练代码 → 决定 supernet 训练 viability → porter 移植
+  #   → 生成 train_supernet.py + run_train_supernet.sh（单设备默认契约）。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: ns3_train_script
+    kind: agent
+    agent: ns3_train_script
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [output_dir, viable, reason, train_script_path, train_supernet_py_path, evaluation_paradigm, fidelity_passed, workflow_verifier_passed, error, generated_artifacts]
+      properties:
+        output_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR 绝对路径（与 expand 共享）"}
+        viable: {type: boolean, description: "supernet 训练是否可行；false 时下游 ns3_run_train 以 run_train_supernet.sh 文件不存在自门控 skip"}
+        reason: {type: string, description: "viability 决定的简短项目证据"}
+        train_script_path: {type: string, description: "run_train_supernet.sh 路径；viable=false → 空串"}
+        train_supernet_py_path: {type: string, description: "train_supernet.py 路径；viable=false → 空串"}
+        evaluation_paradigm: {type: string, enum: [validate, finetune, train_from_scratch], description: "评估范式"}
+        fidelity_passed: {type: boolean, description: "fidelity audit loop all-pass → true；viable=false → true（vacuous）"}
+        workflow_verifier_passed: {type: boolean, description: "workflow compliance loop all-pass → true；viable=false → true（vacuous）"}
+        error: {type: string, description: "fail loud 时根因；成功→空串"}
+        generated_artifacts:
+          type: array
+          items: {type: string}
+          description: "相对 output_dir 的产物路径列表"
+      additionalProperties: false
+    routes:
+      - to: ns3_search_pipeline
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 4: ns3_search_pipeline
+  #   读 train 上游产物 → 产 search_record_schema.json 共享 schema → 派 3 子代理并行生成
+  #   （latency_estimator / search-core 5 文件 / select+scaffold）→ 汇总 + 固化校验。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: ns3_search_pipeline
+    kind: agent
+    agent: ns3_search_pipeline
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [output_dir, latency_estimator_path, search_config_path, evaluator_path, run_search_script_path, select_architecture_path, agents_md_path, fidelity_passed, workflow_verifier_passed, error, generated_artifacts]
+      properties:
+        output_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR 绝对路径（与上游共享）"}
+        latency_estimator_path: {type: string, description: "latency_estimator.py 路径"}
+        search_config_path: {type: string, description: "search_config.yaml 路径"}
+        evaluator_path: {type: string, description: "evaluator.py 路径"}
+        run_search_script_path: {type: string, description: "run_search_supernet.sh 路径"}
+        select_architecture_path: {type: string, description: "select_architecture.py 路径"}
+        agents_md_path: {type: string, description: "AGENTS.md scaffold 路径（指引下游 ns3_retrain）"}
+        fidelity_passed: {type: boolean, description: "fidelity audit loop all-pass → true"}
+        workflow_verifier_passed: {type: boolean, description: "workflow compliance loop all-pass → true"}
+        error: {type: string, description: "fail loud 时根因；成功→空串"}
+        generated_artifacts:
+          type: array
+          items: {type: string}
+          description: "相对 output_dir 的产物路径列表"
+      additionalProperties: false
+    routes:
+      - to: ns3_run_train
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 5: ns3_run_train（有界轮询 + 无上限自愈——节点常驻到训练真正完成）
+  #   单卡执行训练（plain python，无 torchrun）。status ∈ {executed, skipped, failed}。
+  #   failed → 短路 ns3_report（正确归因 train_failed，不级联到 search）。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: ns3_run_train
+    kind: agent
+    agent: ns3_run_train
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [status, artifacts, assessment, max_retries_hit, healed_files, fidelity_retriggered]
+      properties:
+        status: {type: string, enum: [executed, skipped, failed], description: "executed=训练真正完成（.train_rc==0 + ckpt 有效）；skipped=run_train_supernet.sh 不存在；failed=禁碰-blocked"}
+        artifacts:
+          type: array
+          items: {type: string}
+          description: "成功时 [supernet_ckpt_path]；skipped/failed 时 []"
+        assessment: {type: string, description: "软判断：收敛曲线 / acc / divergence 摘要；failed 时含 last_error 日志尾部"}
+        max_retries_hit: {type: boolean, description: "true=触碰禁碰/缺上游 ckpt 而非重试次数耗尽"}
+        healed_files:
+          type: array
+          items: {type: string}
+          description: "本次 self-heal edit 过的文件相对路径（审计字段）"
+        fidelity_retriggered: {type: boolean, description: "true=本次触碰训练逻辑类目并重触 project-fidelity-verifier"}
+      additionalProperties: false
+    routes:
+      - when: "ns3_run_train.output.status == 'executed' or ns3_run_train.output.status == 'skipped'"
+        to: ns3_run_search
+      - to: ns3_report
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 6: ns3_run_search（合并 v1 ns_select：跑搜索 → 推 3 图 → 跑 select → emit）
+  #   执行 run_search_supernet.sh → 推搜索 3 图 → 运行 select_architecture.py → emit。
+  #   select 崩/rc≠0/无候选时 emit falsy select 字段（禁 node_failed）→ ns3_report 归因 select_failed。
+  #   selected_arch 真值 AND pareto_size>0 → ns3_retrain；catch-all → ns3_report。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: ns3_run_search
+    kind: agent
+    agent: ns3_run_search
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [status, artifacts, assessment, max_retries_hit, healed_files, fidelity_retriggered, selected_arch, selected_acc, selected_latency, latency_unit, pareto_size, select_reason]
+      properties:
+        status: {type: string, enum: [executed, failed], description: "executed=RC=0+search_results.jsonl≥1 行；failed=缺上游 ckpt / 禁碰-blocked"}
+        artifacts:
+          type: array
+          items: {type: string}
+          description: "成功时 [search_results.jsonl 路径]；failed 时 []"
+        assessment: {type: string, description: "软判断：候选数 / Pareto size / best metric / latency 分布"}
+        max_retries_hit: {type: boolean, description: "true=触碰禁碰/缺上游 ckpt"}
+        healed_files:
+          type: array
+          items: {type: string}
+          description: "本次 self-heal edit 过的文件相对路径"
+        fidelity_retriggered: {type: boolean, description: "true=本次触碰搜索/评估逻辑类目并重触 project-fidelity-verifier"}
+        selected_arch:
+          type: ["object", "null"]
+          description: "选定的子网架构描述；无候选/select 失败时 null"
+        selected_acc: {type: number, description: "选定子网 search 时的 metric；无候选时 0"}
+        selected_latency: {type: number, description: "选定子网实测/估时延（单位 = latency_unit，默认 ms）；无候选时 0"}
+        latency_unit: {type: string, enum: [ms, us, s], description: "latency 单位（透传自 inputs.latency_unit，默认 ms）"}
+        pareto_size: {type: integer, description: "Pareto 前沿大小；无候选时 0", minimum: 0}
+        select_reason:
+          type: string
+          enum: [max-acc-under-target, pareto-knee, none]
+          description: "max-acc-under-target / pareto-knee / none（无候选或 select 失败）"
+      additionalProperties: false
+    routes:
+      - when: "ns3_run_search.output.selected_arch and ns3_run_search.output.pareto_size > 0"
+        to: ns3_retrain
+      - to: ns3_report
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 7: ns3_retrain（有界轮询 + 无上限自愈——节点常驻到重训真正完成）
+  #   按 AGENTS.md scaffold 生成 retrain 脚本（单设备默认）→ fidelity 复查 → 执行。
+  #   读 ns3_run_search.output.selected_arch。status ∈ {executed, failed}。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: ns3_retrain
+    kind: agent
+    agent: ns3_retrain
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [status, artifacts, assessment, max_retries_hit, healed_files, fidelity_retriggered]
+      properties:
+        status: {type: string, enum: [executed, failed], description: "executed=重训真正完成（.retrain_rc==0 + final ckpt 有效）；failed=禁碰-blocked / 缺关键上游"}
+        artifacts:
+          type: array
+          items: {type: string}
+          description: "成功时 [final retrain ckpt 路径]；failed 时 []"
+        assessment: {type: string, description: "软判断：final test acc / latency 对比 / supernet gap"}
+        max_retries_hit: {type: boolean, description: "true=触碰禁碰/缺上游 ckpt"}
+        healed_files:
+          type: array
+          items: {type: string}
+          description: "本次 self-heal edit 过的文件相对路径"
+        fidelity_retriggered: {type: boolean, description: "true=首次生成后或 self-heal 改训练逻辑后跑过 project-fidelity-verifier"}
+      additionalProperties: false
+    routes:
+      - when: "ns3_retrain.output.status == 'executed'"
+        to: ns3_report
+      - to: ns3_report
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 8: ns3_report（唯一终端 reporter）
+  #   读磁盘状态文件判终态（零跨节点 output 引用）→ 结构化报告 → $end。
+  #   prompt 只引 {{ inputs.* }} + bash/read 读 $ORCA_ARTIFACTS_DIR 磁盘文件。
+  #   status ∈ {success, failed}。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: ns3_report
+    kind: agent
+    agent: ns3_report
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [status, stage, reason, selected_arch, selected_acc, selected_latency, latency_unit, subnet_structure, pareto_size, supernet_path, output_dir, final_metrics, artifacts, charts_summary, error]
+      properties:
+        status: {type: string, enum: [success, failed], description: "终态：success=全链完成；failed=某阶段失败"}
+        stage: {type: string, enum: [flatten, expand, train_script, search_pipeline, run_train, run_search, retrain, report], description: "终态来源阶段"}
+        reason: {type: string, description: "终态判定理由（简短）"}
+        selected_arch: {description: "选定子网架构；无则 null", type: ["object", "null"]}
+        selected_acc: {type: number, description: "选定子网 metric；无则 0"}
+        selected_latency: {type: number, description: "选定子网时延（单位 = latency_unit）；无则 0"}
+        latency_unit: {type: string, enum: [ms, us, s], description: "latency 单位（透传自 inputs.latency_unit / schema，默认 ms）"}
+        subnet_structure: {type: string, description: "subnet_structure.md 相对路径（成功时由 ns3_retrain 推 subnet_profile.py 产出）；缺/materialize 失败 → 空串"}
+        pareto_size: {type: integer, description: "Pareto 前沿大小", minimum: 0}
+        supernet_path: {type: string, description: "supernet.py 路径；无则空串"}
+        output_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR 绝对路径"}
+        final_metrics: {type: string, description: "retrain final metrics 摘要；无则空串"}
+        artifacts:
+          type: array
+          items: {type: string}
+          description: "关键产物路径列表"
+        charts_summary: {type: string, description: "$ORCA_ARTIFACTS_DIR 下 chart 产出文件列表（best-effort）"}
+        error: {type: string, description: "失败时根因；成功→空串"}
+      additionalProperties: false
+    routes:
+      - to: $end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# outputs —— 全读 ns3_report.output（失败路径上其他节点可能未跑 → 引用其 output
+# 会 StrictUndefined 崩。reporter 已从磁盘读填所需字段）。
+# ─────────────────────────────────────────────────────────────────────────────
+outputs:
+  result: "{{ ns3_report.output }}"
+  status: "{{ ns3_report.output.status }}"
+  stage: "{{ ns3_report.output.stage }}"
+  reason: "{{ ns3_report.output.reason }}"
+  selected_arch: "{{ ns3_report.output.selected_arch }}"
+  selected_acc: "{{ ns3_report.output.selected_acc }}"
+  selected_latency: "{{ ns3_report.output.selected_latency }}"
+  latency_unit: "{{ ns3_report.output.latency_unit }}"
+  subnet_structure: "{{ ns3_report.output.subnet_structure }}"
+  pareto_size: "{{ ns3_report.output.pareto_size }}"
+  supernet_path: "{{ ns3_report.output.supernet_path }}"
+  output_dir: "{{ ns3_report.output.output_dir }}"
+  artifacts: "{{ ns3_report.output.artifacts }}"

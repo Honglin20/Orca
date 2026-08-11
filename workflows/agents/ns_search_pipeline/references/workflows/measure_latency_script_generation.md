@@ -45,6 +45,13 @@ The `if __name__ == "__main__":` entry point in the generated script is strictly
 
 
 
+### Latency unit (no conversion — declaration only)
+
+The workflow input `latency_unit` (default `ms`) declares the unit of every latency value this estimator returns. The estimator MUST return the raw measured number with **no unit conversion** (no ×1000 / ÷1000); the unit is metadata recorded in `search_record_schema.json` (`latency_unit`), and downstream charts / selection / comparison label values in that unit.
+
+- Default path (built-in `measure_module_latency`): always returns `ms`. This matches `latency_unit=ms` (the default). Declaring `latency_unit ∈ {us, s}` on the default path would mislabel `ms` values, so the workflow bootstrap rejects that combination — a non-`ms` unit requires the user-script path below.
+- User-script path: the user's script defines the unit (microseconds, seconds, …). The user declares the matching `latency_unit`; the estimator stores the script's raw return value unchanged.
+
 ## User-provided latency script (when `latency_script_path` is given)
 
 When the workflow input `{{ inputs.latency_script_path }}` is provided, the user's script is the
@@ -70,14 +77,14 @@ fidelity rule in `ns_search_pipeline/agent.md`).
    IO tensor names / shapes / dtypes to what the user script expects **inside `latency_estimator.py`** —
    never modify the user script.
 4. Invoke the user script with the onnx path as a CLI arg (`subprocess.run([script, onnx_path], ...)`).
-5. Parse the **last stdout line** (or the script's return value) as the latency in ms.
+5. Parse the **last stdout line** (or the script's return value) as the raw latency value (do not convert; the unit is declared by the workflow's `latency_unit` — see "Latency unit" above).
 6. If the script exits non-zero → `raise` / explicit error (fail loud, never swallow). After measurement,
    `del subnet; empty_cache(self.device)`.
 
 ### User script contract (record in `latency_estimator.py` docstring/comments)
 
 - Input: onnx file path (CLI arg).
-- Output: latency in ms as the last stdout line or return value.
+- Output: raw latency value as the last stdout line or return value (unit declared via the workflow's `latency_unit`; see "Latency unit" above).
 - Exit code 0 = success; non-zero = failure.
 
 ### Validation (user-script path)

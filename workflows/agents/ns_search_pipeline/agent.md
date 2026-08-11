@@ -363,12 +363,16 @@ Handle the response:
 
 ```bash
 python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
-  --target-latency-ms <number> \
+  --target-latency <number> \
+  --latency-unit <ms|us|s> \
   --search-results "$ORCA_ARTIFACTS_DIR/search_results.jsonl"
 ```
 
 `$ORCA_ARTIFACTS_DIR` 经 Git Bash 展开；脚本内部路径用 `pathlib.Path` /
-`os.path`（铁律）。`--target-latency-ms` 缺省或 `<=0` 时走 pareto-knee 兜底。
+`os.path`（铁律）。`--target-latency` 缺省或 `<=0` 时走 pareto-knee 兜底。
+
+`--latency-unit` = latency 数值的声明单位（ms/us/s，默认 ms）。**不换算数值**——只用于标注。
+靶值 `latency <= target` 按声明单位数值直比。
 
 #### stdout 契约（强制单行 JSON，下游 `ns_select` 直接 echo 作唯一输出）
 
@@ -376,7 +380,8 @@ python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
 {
   "selected_arch": <dict>,
   "selected_acc": <number>,
-  "selected_latency_ms": <number>,
+  "selected_latency": <number>,
+  "latency_unit": <"ms"|"us"|"s">,
   "pareto_size": <int>,
   "select_reason": "max-acc-under-target|pareto-knee"
 }
@@ -392,8 +397,8 @@ python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
 
 `search_results.jsonl` 不存在 / 空 / 所有候选超 target → 二选一（实现时择一并注释清楚）：
 
-- emit `selected_arch={}`（空 dict）+ `selected_acc=0` + `selected_latency_ms=0` + `pareto_size=0`
-  + `select_reason: "none"`，退出码 0；或
+- emit `selected_arch={}`（空 dict）+ `selected_acc=0` + `selected_latency=0` + `latency_unit=<unit>`
+  + `pareto_size=0` + `select_reason: "none"`，退出码 0；或
 - 退出码非 0 + stderr 写明原因。
 
 下游 `ns_select` 路由守卫为「`selected_arch` 真值 **且** `pareto_size > 0`」双条件（yaml
@@ -406,20 +411,22 @@ python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
 - 解析 `search_config.yaml` `objs` 确定项目 metric 名 + 方向（larger-better 时 negate 让所有
   smaller-better，然后 max-acc-under-target = 在 latency ≤ target 内 min objective 等价于 max acc）。
 - 算 Pareto 前沿（latency + 主 metric 二维）；`pareto_size` = 前沿大小。
-- `target_latency_ms > 0`：`select_reason="max-acc-under-target"`——前沿内 latency ≤ target 的
+- `target_latency > 0`：`select_reason="max-acc-under-target"`——前沿内 latency ≤ target 的
   候选里选主 metric 最优（acc 最大）。
-- `target_latency_ms <= 0` / 缺省：`select_reason="pareto-knee"`——前沿 knee 点（实现时定具体
+- `target_latency <= 0` / 缺省：`select_reason="pareto-knee"`——前沿 knee 点（实现时定具体
   knee 算法，建议最大曲率 / 距对角线最远）。
 - **输出 `selected_acc` 须还原用户原方向**：内部 Pareto / 优化用 smaller-is-better（higher-better
   metric，即 larger-is-better，在 `search_results.jsonl` 内部 negate 存储），但报告进 stdout JSON 的
   `selected_acc` 必须 un-negate 回用户原值（higher-better metric 还原正值）——禁把内部 negated 值
   直接输出（见**用户测度权威铁律**）。
+- **`latency_unit` 透传**：从 `--latency-unit` 读（缺省 ms）写入 stdout JSON。**不换算 latency 数值**——
+  单位仅作下游 label/列名/caption 标注。
 - 用 `pathlib.Path` / `os.path`（铁律）；输出 JSON 用 `json.dumps(..., separators=(",", ":"))`
   单行；变量 / 注释英文。
 
 #### 校验
 
-- 写完跑 `python3 select_architecture.py --target-latency-ms <fixture> --search-results <fixture.jsonl>`
+- 写完跑 `python3 select_architecture.py --target-latency <fixture> --latency-unit ms --search-results <fixture.jsonl>`
   确认合法 JSON 输出 + 字段齐全 + 字段类型对。
 - **fixture 来源（禁读真 search_results.jsonl）**：fixture = 你手写的最小 synthetic record（5–10 条，
   覆盖 `latency ≤ target` / `latency > target` / 不同 acc / 无候选 4 类边界）。**禁**读真
