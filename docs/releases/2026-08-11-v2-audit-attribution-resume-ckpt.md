@@ -1,6 +1,7 @@
 # Release: v2 审计 S4b —— expand 归因 marker + resume attempt N + retrain ckpt 核验
 
 - 日期：2026-08-11
+- Commit：`9f8c301`
 - SPEC：[`docs/specs/2026-08-11-v2-audit-attribution-resume-ckpt.md`](../specs/2026-08-11-v2-audit-attribution-resume-ckpt.md)（spec-reviewer 双轮对抗 conditional-pass，14 项闭环：3 Blocker Q1/Q2/Q5-Q6 修订 ✓ + hardening Q3/Q4/Q7/Q8/Q9/Q10 ✓ + Q11 部分驳回 ✓ + Q12/Q13/Q14 驳回 ✓）
 - 关联：超 S4a `d768879`（同次 v2 审计的 3 项小修）；本 release 是另 3 项 SDD 项 ③④⑤。
 
