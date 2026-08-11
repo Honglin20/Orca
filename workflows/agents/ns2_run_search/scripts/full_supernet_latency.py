@@ -54,18 +54,20 @@ def main() -> int:
         help="override latency unit (default: discover from search_record_schema.json)",
     )
     ap.add_argument(
-        "--latency-script-path", default="",
-        help="user latency script path; non-empty => unit from --latency-unit/schema, "
-        "empty => 'ms' (default PyTorch path always returns ms). SPEC §3.3.",
+        "--latency-script-path", default=None,
+        help="user latency script path. SPEC §3.3: non-empty => unit from "
+        "--latency-unit/schema; explicitly empty => 'ms' (default PyTorch path always "
+        "returns ms). Omitted / legacy call site => respect --latency-unit/schema "
+        "(backward compat).",
     )
     args = ap.parse_args()
     ad = Path(args.artifacts_dir)
-    # SPEC §3.3 unit rule: default path (no user script) ALWAYS returns ms; only the
-    # user-script path may carry a non-ms unit. Gating on latency_script_path (not the
-    # declared latency_unit alone) prevents mislabeling ms as us/s when this script is
-    # invoked directly during dev/test. In normal workflow runs the F1 bootstrap
-    # invariant makes both paths agree.
-    if args.latency_script_path.strip():
+    # SPEC §3.3 unit rule. default=None (legacy call site unaware of the arg) OR non-empty
+    # (user-script path) => respect --latency-unit/schema; explicitly empty (default PyTorch
+    # path) => always ms. The None branch preserves old behavior for call sites that don't
+    # pass --latency-script-path, so this script stays byte-identical across nas-supernet
+    # versions without regressing legacy callers (CI gate: TestNewScriptsByteIdenticalAllVersions).
+    if args.latency_script_path is None or args.latency_script_path.strip():
         unit = args.latency_unit.strip() or discover_latency_unit(ad)
     else:
         unit = "ms"

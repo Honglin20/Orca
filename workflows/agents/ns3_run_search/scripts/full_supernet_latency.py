@@ -53,9 +53,24 @@ def main() -> int:
         "--latency-unit", default="",
         help="override latency unit (default: discover from search_record_schema.json)",
     )
+    ap.add_argument(
+        "--latency-script-path", default=None,
+        help="user latency script path. SPEC §3.3: non-empty => unit from "
+        "--latency-unit/schema; explicitly empty => 'ms' (default PyTorch path always "
+        "returns ms). Omitted / legacy call site => respect --latency-unit/schema "
+        "(backward compat).",
+    )
     args = ap.parse_args()
     ad = Path(args.artifacts_dir)
-    unit = args.latency_unit.strip() or discover_latency_unit(ad)
+    # SPEC §3.3 unit rule. default=None (legacy call site unaware of the arg) OR non-empty
+    # (user-script path) => respect --latency-unit/schema; explicitly empty (default PyTorch
+    # path) => always ms. The None branch preserves old behavior for call sites that don't
+    # pass --latency-script-path, so this script stays byte-identical across nas-supernet
+    # versions without regressing legacy callers (CI gate: TestNewScriptsByteIdenticalAllVersions).
+    if args.latency_script_path is None or args.latency_script_path.strip():
+        unit = args.latency_unit.strip() or discover_latency_unit(ad)
+    else:
+        unit = "ms"
 
     # Fail-soft wrapper: every failure mode writes stderr + exits 0.
     try:
