@@ -66,20 +66,40 @@ Step 3 python 读 marker 拼 JSON，agent 不需要改 python 脚本）：
 
 ## Step R ── Resume guard（跨 turn 续接检测；在 Step 0 之前执行）
 
-> 你可能是 turn 到顶后被宿主重派的 fresh sub-agent。搜索进程由 `nohup` detach，sub-agent 死活不影响它。
+> 你可能是 turn 到顶后被宿主重派的 fresh sub-agent。搜索进程由 `setsid` detach 进独立进程组，
+> sub-agent 死活不影响它。
+
+🔴 **两分支各自算 N，禁一刀切 max+1**（reviewer Q2 Blocker）：搜索在跑时 N = 当前在跑的 attempt 号
+（2b 立即用于 `tail` log）；搜索已死/未启时 N = max(既有号)+1（Step 2a 重 detach 不覆盖既有 log）。
+死 attempt log 残留场景下 max 号 ≠ 当前在跑号——一刀切 max+1 会 `tail` 不存在的 log → 误判假死 →
+`kill -- -<pgid>` 误杀在跑搜索。
 
 ```bash
 cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
 SPID="$(cat runs/search/.search_pid 2>/dev/null || echo '')"
 if [ -n "$SPID" ] && kill -0 "$SPID" 2>/dev/null; then
-  echo "RESUME_SEARCH pid=$SPID 搜索在跑，直进 Step 2b 轮询（不 detach、不清 marker、不 reuse-check）"
+  # ── 分支 A：RESUME_SEARCH（搜索在跑）── N = latest-mtime log 号（2b 立即用于 tail）
+  N=$(ls -t runs/search/search.attempt*.stdout.log 2>/dev/null | head -1 \
+    | sed -n 's/.*attempt\([0-9]*\)\.stdout\.log/\1/p')
+  N=${N:-1}
+  echo "RESUME_SEARCH pid=$SPID attempt=$N 搜索在跑，直进 Step 2b 轮询（不 detach、不清 marker、不 reuse-check）"
+else
+  # ── 分支 B：RESUME_HEAL（搜索已死/未启）── N = max(既有号)+1（Step 2a 重 detach 不覆盖既有 log）
+  LAST_N=$(ls runs/search/search.attempt*.stdout.log 2>/dev/null \
+    | sed -n 's/.*attempt\([0-9]*\)\.stdout\.log/\1/p' | sort -n | tail -1)
+  N=$(( ${LAST_N:-0} + 1 ))
+  echo "RESUME_HEAL new_attempt=$N 搜索未在跑，正常 Step 0 → Step 1 → Step 2a 重 detach"
 fi
 ```
 
-- stdout `RESUME_SEARCH pid=...` → **跳过 Step 0 / Step 1**，直进 Step 2b 短轮询（搜索进程在跑，
-  禁重复 detach；读 `.search_pid`/`.search_rc`/`search_results.jsonl` + `search.attempt*.log` +
-  healed marker 重建状态）。
-- 否则（搜索没在跑）→ 正常 Step 0（reuse-check）→ Step 1。
+- stdout `RESUME_SEARCH attempt=...` → **跳过 Step 0 / Step 1**，直进 Step 2b 短轮询（搜索进程在跑，
+  禁重复 detach；**2b 立即用此 N** `tail -8 search.attempt${N}.stdout.log` + 读 `.search_pid`/
+  `.search_rc`/`search_results.jsonl` + healed marker 重建状态）。
+- stdout `RESUME_HEAL new_attempt=...` → 正常 Step 0（reuse-check）→ Step 1，**Step 2a 用此 N 重 detach**
+  （写 `search.attempt${N}.stdout.log` 新 log，不覆盖既有 attempt1..attempt${N-1}）。
+- **N 仅作 log 命名计数**——与 `.ns_run_search_healed.txt` / `.ns_run_search_fidelity.flag` 脱钩
+  （healed marker 是 self-heal 行为痕迹，N 是 attempt 计数，独立）。Step R 不清 healed marker（续接保留）；
+  Step 0/1 走到时再清。
 
 ## Step 0 ── Reuse-Check（软跳过
 

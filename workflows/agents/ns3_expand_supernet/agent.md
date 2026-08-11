@@ -52,6 +52,10 @@ Execute the 5 steps in order.
 
 ```bash
 cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
+# Clear stale unsupported marker (rm protocol; always clear before reuse-check regardless of hit;
+# prevents cross-run/attempt residue — attempt1 unsupported → attempt2 re-judged supported would
+# otherwise leave a stale marker that makes ns3_report mis-attribute as unsupported).
+rm -f .ns_expand_unsupported.flag
 MISSING=""
 for f in supernet.py supernet_summary.md; do
   [ -s "$f" ] || MISSING="$MISSING $f"
@@ -91,7 +95,12 @@ fi
    - `Model Type`: a label from `model_type.json`, or `No supported match`.
    - `Confidence`: `high` / `medium` / `low`.
    - `Reason`: one concise sentence.
-5. **Stop unsupported NAS branches (fail loud):** if `Model Type` is not one of the `model_type.json` labels, keep the validated model artifact and **stop here** — do not proceed to Step 2 or beyond. Fail loud: the final JSON outputs `model_type_supported: false` + `supernet_path: ""` + `fidelity_passed: true` (vacuous) + `workflow_verifier_passed: false`.
+5. **Stop unsupported NAS branches (fail loud):** if `Model Type` is not one of the `model_type.json` labels, keep the validated model artifact and **stop here** — do not proceed to Step 2 or beyond. First drop the unsupported marker (**structured signal** for ns3_report to judge deterministically, bypassing the fragile substring match on LLM-generated free-text summary; Step 0 reuse-check already `rm`-cleared the stale value, so only a fresh unsupported branch writes here):
+   ```bash
+   printf 'true' > "$ORCA_ARTIFACTS_DIR/.ns_expand_unsupported.flag" 2>/dev/null \
+     || echo "WARN: .ns_expand_unsupported.flag write failed (non-blocking; emit JSON still fail-loud)" >&2
+   ```
+   The marker is a **best-effort acceleration signal** — a write failure (disk full / permission) **does not block** emitting JSON (violating fail-loud's "must give the engine a JSON" principle is worse; `model_type_supported: false` is itself the fail-loud main path). Fail loud: the final JSON outputs `model_type_supported: false` + `supernet_path: ""` + `fidelity_passed: true` (vacuous) + `workflow_verifier_passed: false`.
 
 ### Step 2: Generate Supernet
 

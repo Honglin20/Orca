@@ -56,7 +56,7 @@ After `cd "$ORCA_ARTIFACTS_DIR`, determine the terminal state in the following o
 | terminal state | condition (on-disk file) | status | stage |
 |---|---|---|---|
 | `flatten_failed` | `<base>_flat.py` or `project_manifest.md` missing/not up to spec, and `supernet.py` missing | failed | flatten |
-| `unsupported` | `supernet_summary.md` contains model_type = `No supported match` (or no supported label) | failed | expand |
+| `unsupported` | Double signal: `.ns_expand_unsupported.flag` content = `'true'` (structured marker, preferred) **OR** `supernet_summary.md` contains the `No supported match` substring (LLM free-text fallback) | failed | expand |
 | `retrain_failed` | `retrain_status.md` exists + `runs/retrain/.retrain_rc` exists and ≠ 0 | failed | retrain |
 | `select_failed` | `search_results.jsonl` exists + `.select_attempt` marker present + `.selected_arch.json`'s selected_arch is null/empty | failed | run_search |
 | `train_failed` | `train_status.md` exists + `runs/train/.train_rc` exists and ≠ 0, and `search_results.jsonl` missing | failed | run_train |
@@ -133,14 +133,23 @@ has_summary = exists(os.path.join(ad, "supernet_summary.md"))
 has_search_results = exists(os.path.join(ad, "search_results.jsonl"))
 has_select_attempt = os.path.isfile(os.path.join(ad, ".select_attempt"))
 
-# read model_type from summary
-model_type = ""
+# read unsupported marker (structured signal from ns3_expand; content check 'true', not isfile,
+# DRY with the fidelity flag convention). Best-effort acceleration signal: missing/non-'true'
+# falls back to the summary substring grep below (ground truth for in-flight runs predating the marker).
+unsupported_marker = read_text(os.path.join(ad, ".ns_expand_unsupported.flag"), "") == "true"
+
+# summary substring fallback (LLM-generated free text; the marker is the preferred signal because
+# the LLM may forget the literal "No supported match" phrase or phrase it differently).
+summary_has_unsupported = False
 if has_summary:
     summary = read_text(os.path.join(ad, "supernet_summary.md"), "")
     for line in summary.split("\n"):
         if "No supported match" in line:
-            model_type = "No supported match"
+            summary_has_unsupported = True
             break
+
+# double signal: marker (structured) OR summary substring (free-text fallback).
+unsupported = unsupported_marker or summary_has_unsupported
 
 status = "failed"
 stage = "report"
@@ -151,8 +160,8 @@ if not has_supernet and (not has_flat or not has_manifest):
     status, stage = "failed", "flatten"
     reason = "flatten failed: flat/optimized or manifest missing and supernet.py absent"
 
-# 2. unsupported (first-match order covers stale rc from prior runs)
-elif has_summary and model_type == "No supported match":
+# 2. unsupported (double signal: marker from expand + summary substring fallback for in-flight runs)
+elif unsupported:
     status, stage = "failed", "expand"
     reason = "model type not supported for NAS"
 

@@ -76,20 +76,44 @@ to modify the python script):
 ## Step R ── Resume Guard (cross-turn continuation detection; run before Step 0)
 
 > You may be a fresh sub-agent re-dispatched by the host after the turn budget was exhausted. The
-> search process is detached via `nohup`; whether the sub-agent lives or dies does not affect it.
+> search process is detached via `setsid` into its own process group; whether the sub-agent lives or
+> dies does not affect it.
+
+🔴 **Each branch computes N independently; never a one-size-fits-all max+1** (reviewer Q2 Blocker):
+when the search is running, N = the attempt number currently running (Step 2b uses it immediately to
+`tail` the log); when the search is dead/not started, N = max(existing number)+1 (Step 2a re-detach
+must not overwrite existing logs). When dead attempt logs linger, the max number ≠ the currently
+running number — a blanket max+1 would `tail` a non-existent log → falsely judge dead-hang → issue
+`kill -- -<pgid>` and kill a search that is actually running.
 
 ```bash
 cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
 SPID="$(cat runs/search/.search_pid 2>/dev/null || echo '')"
 if [ -n "$SPID" ] && kill -0 "$SPID" 2>/dev/null; then
-  echo "RESUME_SEARCH pid=$SPID search is running, go straight to Step 2b polling (no detach, no marker cleanup, no reuse-check)"
+  # ── Branch A: RESUME_SEARCH (search running) ── N = latest-mtime log number (Step 2b uses it immediately)
+  N=$(ls -t runs/search/search.attempt*.stdout.log 2>/dev/null | head -1 \
+    | sed -n 's/.*attempt\([0-9]*\)\.stdout\.log/\1/p')
+  N=${N:-1}
+  echo "RESUME_SEARCH pid=$SPID attempt=$N search is running, go straight to Step 2b polling (no detach, no marker cleanup, no reuse-check)"
+else
+  # ── Branch B: RESUME_HEAL (search dead/not started) ── N = max(existing number)+1 (Step 2a re-detach will not overwrite existing logs)
+  LAST_N=$(ls runs/search/search.attempt*.stdout.log 2>/dev/null \
+    | sed -n 's/.*attempt\([0-9]*\)\.stdout\.log/\1/p' | sort -n | tail -1)
+  N=$(( ${LAST_N:-0} + 1 ))
+  echo "RESUME_HEAL new_attempt=$N search not running, normal Step 0 → Step 1 → Step 2a re-detach"
 fi
 ```
 
-- stdout `RESUME_SEARCH pid=...` → **skip Step 0 / Step 1**, go straight to Step 2b short polling
-  (the search process is running; re-detach is forbidden; read `.search_pid`/`.search_rc`/`search_results.jsonl`
-  + `search.attempt*.log` + healed markers to rebuild state).
-- Otherwise (search not running) → normal Step 0 (reuse-check) → Step 1.
+- stdout `RESUME_SEARCH attempt=...` → **skip Step 0 / Step 1**, go straight to Step 2b short polling
+  (the search process is running; re-detach is forbidden; **Step 2b uses this N immediately** to
+  `tail -8 search.attempt${N}.stdout.log` + read `.search_pid`/`.search_rc`/`search_results.jsonl`
+  + healed markers to rebuild state).
+- stdout `RESUME_HEAL new_attempt=...` → normal Step 0 (reuse-check) → Step 1, and **Step 2a uses this N
+  to re-detach** (writing a new `search.attempt${N}.stdout.log`, not overwriting existing attempt1..attempt${N-1}).
+- **N only names the log** — it is decoupled from `.ns_run_search_healed.txt` /
+  `.ns_run_search_fidelity.flag` (the healed marker is a self-heal behavior trace; N is an attempt
+  counter; they are independent). Step R does not clear the healed marker (preserve on resume);
+  Step 0/1 will clear it when reached.
 
 ## Step 0 ── Reuse-Check (soft skip)
 

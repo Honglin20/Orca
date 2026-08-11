@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-11] fix(nas-supernet): v2 审计 S4b 三项 SDD——expand 归因 marker / resume attempt N / retrain ckpt 核验（v1+v2+v3）
+
+v2 审计 6 项中的 3 项 SDD 项（另 3 项 ⑧⑦⑥ 属 S4a `d768879`）。**③** expand unsupported 归因 marker 化（仅 v2+v3，v1 无 report 节点是 dead code；Step 0 rm 协议防跨 run/attempt 残留 + Step 1.5 unsupported 分支 `printf 'true'` best-effort 不阻塞 emit；report 双信号 marker OR summary 子串兜底，绕开 LLM 自由文本脆弱子串匹配，不违零跨节点 output 铁律）。**④** Step R 两分支重建 attempt N（RESUME_SEARCH=latest-mtime 号 / RESUME_HEAL=max+1，禁一刀切 max+1 误杀在跑搜索；v1+v2+v3 同改 + setsid 评注订正）。**⑤** retrain ckpt 相对路径核验 → verify-and-close（三版本 `status.sh` case-block 已绝对化 + `emit_result.py` `os.path.join(ad,...)`，零旁路写相对，零代码改动）。spec-reviewer conditional-pass 3 Blocker（Q1/Q2/Q5-Q6）+ hardening 全闭环。36 新测试（AC-③1/②2/③3 + 跨分支优先级 + AC-④1 a/b/c + 空 .search_pid + AC-④2）+ 81 chart 回归 + 58 struct 回归过；code-reviewer 闭环（0 Blocker / 2 建议 + 1 trivial 全补）。详见 [release note](docs/releases/2026-08-11-v2-audit-attribution-resume-ckpt.md)。
+
 ## [2026-08-11] fix(nas-supernet): v2 审计 S4a 三项小修——eta 负值/pareto 冗余/monitor grep 过宽（v1+v2+v3）
 
 v2 审计 6 项中的 3 项小修（另 3 项 ③④⑤ 属 S4b SDD）。**⑧** `eta.py`（6 份）`eta_minutes` 当 `cur>total`（resume 高 epoch）为负 → `max(0, total-cur)` clamp（old=-3/new=0）。**⑦** `pareto.py`（3 份）`sel_display` 外层 `if negate_for_display else` 冗余（`for_display` 内部已自分派）→ simplify（81 测试过）。**⑥** `monitor_until_done.sh`（6 份）error-grep 过宽（误抓 "error rate"/"no error"）且漏 RuntimeError/Traceback → 收紧（`error→error[:]`+`runtime[[:space:]]*error`+`traceback`/`exception`；行为对比 old 3 false-pos+4 false-neg → new 0/0）。`d768879`。

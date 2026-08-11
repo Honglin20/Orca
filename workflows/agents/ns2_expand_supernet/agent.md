@@ -59,6 +59,9 @@ model_type、生成 `supernet.py`、精炼 `SearchSpace`、写 `supernet_summary
 
 ```bash
 cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
+# 清旧 unsupported marker（rm 协议，无论 reuse 命中与否都先清；防跨 run/attempt 残留——
+# attempt1 unsupported → attempt2 重判 supported 时，旧 marker 会让 ns2_report 误归因 unsupported）。
+rm -f .ns_expand_unsupported.flag
 MISSING=""
 for f in supernet.py supernet_summary.md; do
   [ -s "$f" ] || MISSING="$MISSING $f"
@@ -101,8 +104,16 @@ fi
    - `Confidence`：`high` / `medium` / `low`。
    - `Reason`：一句简明句。
 5. **Stop unsupported NAS branches (fail loud):** 若 `Model Type` 不是 `model_type.json`
-   标签之一，保留已校验 model artifact，**stop here**——不进 Step 2 或后续。fail loud：
-   最终 JSON 输出 `model_type_supported: false` + `supernet_path: ""` +
+   标签之一，保留已校验 model artifact，**stop here**——不进 Step 2 或后续。先落 unsupported
+   marker（**结构化信号**，供 ns2_report 确定性判定，绕开「LLM 自由 summary 文本」脆弱子串匹配；
+   Step 0 reuse-check 已先 `rm` 清旧值，此处仅 fresh unsupported 分支才写）：
+   ```bash
+   printf 'true' > "$ORCA_ARTIFACTS_DIR/.ns_expand_unsupported.flag" 2>/dev/null \
+     || echo "WARN: .ns_expand_unsupported.flag write failed (non-blocking; emit JSON still fail-loud)" >&2
+   ```
+   marker 是 **best-effort 加速信号**——落盘失败（disk full / 权限）**不阻塞** emit JSON（违反
+   fail-loud 的「必须给引擎 JSON」原则更糟；`model_type_supported: false` 本就是 fail-loud 主路径）。
+   fail loud：最终 JSON 输出 `model_type_supported: false` + `supernet_path: ""` +
    `fidelity_passed: true`（vacuous）+ `workflow_verifier_passed: false`。
 
 ### Step 2: Generate Supernet
