@@ -106,11 +106,33 @@ fi
 
 ### Step 2: Generate Supernet
 
-仅在本步开始时读 `$ORCA_AGENT_RESOURCES/references/workflows/supernet_generation.md`。
+#### 🔴 节点内 resume（跨 stall-restart 续传，先做这段）
+
+本节点 evaluator/verifier 子代理重，deepseek 间歇 stall 会让外部 per-node 驱动 kill+重试本节点。
+Step 0 的 reuse 是**全有或全无**（supernet.py + summary 都在才跳过）。若 stall 发生在生成
+supernet.py 之后、写 summary 之前，restart 会白白重做昂贵的 supernet 生成。**为续传**，先查：
+
+```bash
+cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL"; exit 1; }
+SKIP_GENERATION=false
+# supernet.py 已在（上轮 stalled attempt 产的）+ 可 exec 出 SearchSpace/build_supernet → 跳过生成
+if [ -s supernet.py ] && python3 -c "
+import ast, sys
+src = open('supernet.py').read(); ast.parse(src)
+ns = {}; exec(compile(src, 'supernet.py', 'exec'), ns)
+assert 'SearchSpace' in ns or 'build_supernet' in ns, 'no SearchSpace/build_supernet'
+" 2>/dev/null; then SKIP_GENERATION=true; echo "RESUME: supernet.py 已在且达标 → 跳过 Step 2 生成，直进 evaluator loop（续传）"; fi
+```
+
+**仅当 `SKIP_GENERATION=false`** 才执行下面「读 supernet_generation.md + 从 prepared_model 产 supernet.py」生成段；`SKIP_GENERATION=true` 则跳过生成（supernet.py 盘上复用），直进下面的 evaluator verification loop。
+
+---
+
+仅在本步开始时读 `$ORCA_AGENT_RESOURCES/references/workflows/supernet_generation.md`（**SKIP_GENERATION=true 则跳过本读 + 生成**）。
 按它从 `{{ ns2_flatten.output.prepared_model }}` 与 `model_type` 产
 `$ORCA_ARTIFACTS_DIR/supernet.py`。
 
-workflow 完成后，进 evaluator verification loop：
+workflow 完成后（或 SKIP_GENERATION=true 时直进），进 evaluator verification loop：
 
 0. **写 specs_dir marker：**
    ```bash
