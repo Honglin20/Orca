@@ -5,6 +5,12 @@
 
 ---
 
+## [2026-08-11] fix(nas-supernet): HEAL 进程组杀搜索树 + report charts_summary 扫 charts/（v1+v2+v3）
+
+P1 ①：`ns{,2,3}_run_search` detach 改 `setsid`（PGID==leader PID，leader 自记 `.search_pid`），HEAL 死机改 `kill -- -<pgid>` 杀整组——根治旧 `nohup ... &` + `kill $!` 只杀 wrapper、python 搜索被 reparent 继续占 GPU 的 orphan。WSL 实测：组 A python 随组死、组 B（跨 run）+ daemon 替身存活（不跨项目、不碰 chart daemon，避开 `a06255a` 连锅端）。
+P1 ②：`ns{2,3}_report` `charts_summary` 改扫 `charts/`（静态文件真落处）+ 缺静态时回落 `.nas-supernet_charts.jsonl` marker（live-pushed run 也列标题，skipped 不计）——修漏扫 + 误抓 `runs/retrain/test_metrics.json`。4 场景 probe 过。
+验证：两 report heredoc（各 194 行）py_compile clean + pytest `test_ns_chart_scripts` 81 passed。`a57190b`。
+
 ## [2026-08-11] fix(nas-supernet): full_supernet_latency --latency-script-path default None sentinel（v1+v2+v3）
 
 2b20663 的 `default=""` 让 v1/v3 us-runs 回归（agent 调用点不传 `--latency-script-path` → 恒空串 → 走 ms 分支 → us/s 声明被错标成 ms）。改 `default=None` sentinel：None（未传）→ 尊重 `--latency-unit`/schema 保旧行为；显式空串 → 强制 ms（默认 PyTorch 路径恒 ms）。三份 byte-identical（blob b15fb9f），`test_ns_chart_scripts.py` 81 passed。`5265e5c`。
