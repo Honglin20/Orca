@@ -313,10 +313,37 @@ class _ZeroBlock(nn.Module):
 
     比 nn.Identity 更正确:Identity 让 residual 变 ``x + norm(x)``(加噪),零输出使
     ``x + 0 = x``(残差不变,块被真正旁路)。对 attention/ffn 均适用(in_dim==out_dim)。
+    接受 **kwargs:父层可能传 attention_mask/norm_factor 等(异构 forward 签名),忽略。
     """
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         return torch.zeros_like(x)
+
+
+class _KwargPassthrough(nn.Module):
+    """variant 签名适配器:把 inner 包成 ``forward(x, *args, **kwargs) -> inner(x)``。
+
+    父层(如 target 的 TransformerEncoderLayer)调 ``self_attn(src, attention_mask=...)``
+    带 kwargs;nas_agent 的 Elastic 核 / 自定义 variant 的 forward(x) 不收 → TypeError。
+    本包装忽略额外参,只把首参(输入 tensor)传给 inner。state_dict 加 ``inner.`` 前缀,
+    在存(BLD)/载(score/latency/build)两侧一致(都经 candidate_registry),无需改 load 逻辑。
+    """
+
+    def __init__(self, inner: nn.Module):
+        super().__init__()
+        self.inner = inner
+
+    def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        return self.inner(x)
+
+
+def _wrap(inner_factory: Callable[[Slot], nn.Module]) -> Callable[[Slot], nn.Module]:
+    """把 slot→module 工厂包成 slot→_KwargPassthrough(module)。"""
+
+    def _w(slot: Slot) -> nn.Module:
+        return _KwargPassthrough(inner_factory(slot))
+
+    return _w
 
 
 def _factory_no_op(slot: Slot) -> nn.Module:
@@ -331,17 +358,18 @@ def _factory_no_op(slot: Slot) -> nn.Module:
 # name -> (factory_fn, applicable slot_types)
 # 注意：``identity`` 是 passthrough（保留父块），不在 registry——由
 # ``is_passthrough()`` 单独判定，不在 build/score/latency 替换 slot。
+# 非 no_op 的 variant 经 _wrap 包 _KwargPassthrough(适配异构 forward 签名,如 attention_mask)。
 candidate_registry: dict[str, tuple[Callable[[Slot], nn.Module], set[str]]] = {
     # attention 候选（identity 走 PASSTHROUGH_VARIANTS 分支）
-    "random_synthesizer": (_factory_random_synthesizer, {"attention"}),
-    "relu_attention": (_factory_relu_attention, {"attention"}),
-    "fnet": (_factory_fnet, {"attention"}),
-    "softs_star": (_factory_softs_star, {"attention"}),
-    "vanilla": (_factory_vanilla, {"attention"}),
+    "random_synthesizer": (_wrap(_factory_random_synthesizer), {"attention"}),
+    "relu_attention": (_wrap(_factory_relu_attention), {"attention"}),
+    "fnet": (_wrap(_factory_fnet), {"attention"}),
+    "softs_star": (_wrap(_factory_softs_star), {"attention"}),
+    "vanilla": (_wrap(_factory_vanilla), {"attention"}),
     # ffn 候选（identity 走 PASSTHROUGH_VARIANTS 分支）
-    "ffn_75": (_factory_ffn_75, {"ffn"}),
-    "ffn_50": (_factory_ffn_50, {"ffn"}),
-    "linear": (_factory_linear, {"ffn"}),
+    "ffn_75": (_wrap(_factory_ffn_75), {"ffn"}),
+    "ffn_50": (_wrap(_factory_ffn_50), {"ffn"}),
+    "linear": (_wrap(_factory_linear), {"ffn"}),
     "no_op": (_factory_no_op, {"ffn", "attention"}),
 }
 
