@@ -26,6 +26,7 @@ inputs:
     required: true
   latency_unit:
     type: string
+    enum: [ms, us, s]
     description: "[advanced] latency 测量值声明单位（ms|us|s，默认 ms）。全链路 label/列名/caption/比较按此单位；不换算数值（只标注）。默认 estimator 路径恒返回 ms——声明 us/s 必须同时给 latency_script_path（bootstrap fail-loud 守卫）"
     required: false
     default: "ms"
