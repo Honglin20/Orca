@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-11] fix(nas-supernet): v2 审计 S4a 三项小修——eta 负值/pareto 冗余/monitor grep 过宽（v1+v2+v3）
+
+v2 审计 6 项中的 3 项小修（另 3 项 ③④⑤ 属 S4b SDD）。**⑧** `eta.py`（6 份）`eta_minutes` 当 `cur>total`（resume 高 epoch）为负 → `max(0, total-cur)` clamp（old=-3/new=0）。**⑦** `pareto.py`（3 份）`sel_display` 外层 `if negate_for_display else` 冗余（`for_display` 内部已自分派）→ simplify（81 测试过）。**⑥** `monitor_until_done.sh`（6 份）error-grep 过宽（误抓 "error rate"/"no error"）且漏 RuntimeError/Traceback → 收紧（`error→error[:]`+`runtime[[:space:]]*error`+`traceback`/`exception`；行为对比 old 3 false-pos+4 false-neg → new 0/0）。`d768879`。
+
 ## [2026-08-11] feat(schema): InputDef.enum —— workflow 输入枚举值校验（fail-loud at bootstrap）
 
 `InputDef.enum` 字段 + 三层校验点（schema 加载期 / cli bootstrap / orchestrator 镜像），让 workflow 作者声明单字段值域约束，bootstrap 期对值不在 enum 的字段 fail-loud。spec-reviewer 12 项闭环（B1/B2/B4/B7 必须修订均落地，B3/D8 defer）。B7 核心：cli `_validate_inputs` enum check 独立于 `_TYPE_MAP` 白名单（自定义 type + enum 也查）。首个应用：三版本 nas-supernet.yaml 的 `latency_unit` 加 `enum: [ms, us, s]`，笔误值 `"MS"` 不再烧到 ns2_run_search emit 才 node_failed。25 测试覆盖 AC1-AC8，`tars validate` 三版本均 0 error / 0 warning。Commit: `7b120ee`（framework+tests）+ `131b294`（yaml）。详见 [release note](docs/releases/2026-08-11-inputdef-enum.md)。
