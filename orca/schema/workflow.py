@@ -16,7 +16,7 @@
 from pathlib import Path
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class InputDef(BaseModel):
@@ -28,6 +28,58 @@ class InputDef(BaseModel):
     required: bool = True
     default: Any = None
     description: str = ""
+    # SPEC 2026-08-11-inputdef-enum §3.1：允许值集合（精确、大小写敏感匹配）。
+    # None=不约束（向后兼容）；非空 list=bootstrap 期对值做 ``in enum`` fail-loud。
+    # 标量 type 专用（str/int/float/bool）；dict/nested-list 值加载期拒（见 _enum_well_formed）。
+    enum: list[Any] | None = None
+
+    @field_validator("enum")
+    @classmethod
+    def _enum_well_formed(cls, v: list[Any] | None) -> list[Any] | None:
+        """SPEC §3.1 加载期 fail-loud（铁律 12，同 RetryPolicy.max_attempts ge=1 模式）。
+
+        - ``enum: []`` → 配置错（语义 = 任何值都非法），加载期暴露。不约束请省略字段。
+        - 非标量值（dict / nested-list）→ ``value in enum`` 对 dict 做相等比较语义模糊，
+          加载期拒（B4 采纳）。str/int/float/bool 标量放行。
+        """
+        if v is None:
+            return v  # 不约束（向后兼容）
+        if len(v) == 0:
+            raise ValueError(
+                "enum 不能为空 list；不约束则省略 enum 字段"
+                "（空 enum 语义 = 任何值都非法 = 配置错）"
+            )
+        non_scalars = [
+            val for val in v
+            if not isinstance(val, (str, int, float, bool))
+        ]
+        if non_scalars:
+            raise ValueError(
+                f"enum 仅支持标量值 (str/int/float/bool)；"
+                f"含非标量：{non_scalars!r}（dict/nested-list 做 ``in`` 比较语义模糊）"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _default_in_enum(self) -> "InputDef":
+        """SPEC §3.1 B2：default ∈ enum 自洽（仅当 ``default is not None`` 守卫）。
+
+        ``default`` 字段默认值 None 语义=无 default（pydantic 字段默认，非用户声明）。
+        ``InputDef(type="string", enum=["ms","us","s"])`` 隐式 default=None 不应触发
+        ``None not in enum`` 误报——``default is not None`` 守卫是 in-session 模式 default
+        安全的唯一网（CLI bootstrap 不构造 Orchestrator，schema 层是首道关）。
+
+        字段名（dict key）不在模型内可见——pydantic ValidationError 的 loc 会带
+        ``inputs.<name>`` 前缀，定位由错误路径补全。
+        """
+        if self.enum is None or self.default is None:
+            return self
+        if self.default not in self.enum:
+            raise ValueError(
+                f"default={self.default!r} 不在 enum={self.enum!r} 内"
+                "（default 与 enum 不自洽：省略字段走默认会恒违反 enum 守卫）"
+            )
+        return self
 
 
 class InputInvariant(BaseModel):

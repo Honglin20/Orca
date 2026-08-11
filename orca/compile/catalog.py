@@ -140,13 +140,17 @@ def find_workflow_yaml_path(name: str) -> str | None:
 
 
 def _inputs_to_schema(wf: Workflow) -> dict[str, dict[str, Any]]:
-    """wf.inputs → JSON-schema 友好的 ``{key: {type, required, description}}`` 字典。"""
+    """wf.inputs → JSON-schema 友好的 ``{key: {type, required, description, enum}}`` 字典。"""
     out: dict[str, dict[str, Any]] = {}
     for key, idef in wf.inputs.items():
         out[key] = {
             "type": idef.type,
             "required": idef.required,
             "description": idef.description,
+            # SPEC 2026-08-11-inputdef-enum §3.2 D2：始终透出 enum 键（None 透出 None）。
+            # 消费者（MCP describe_workflow → claude 选 inputs）``.get("enum")`` 单态，
+            # 避免「键在/不在」二态分支；值域提示让 LLM 选 inputs 时约束在合法集。
+            "enum": idef.enum,
         }
         if idef.default is not None:
             out[key]["default"] = idef.default
@@ -154,7 +158,7 @@ def _inputs_to_schema(wf: Workflow) -> dict[str, dict[str, Any]]:
 
 
 def inputs_schema_list(wf: Workflow) -> list[dict[str, Any]]:
-    """wf.inputs → ``[{name, type, description}, ...]`` 列表。
+    """wf.inputs → ``[{name, type, description, enum}, ...]`` 列表。
 
     给 ``orca <wf>``（不带 ``--inputs``）返回的 ``inputs_schema``：skill/LLM 选定 wf 后据此
     从用户意图抽 inputs（schema 是"启动 wf 时"才需要的信息，故不进 ``orca list``）。与
@@ -166,6 +170,9 @@ def inputs_schema_list(wf: Workflow) -> list[dict[str, Any]]:
             "name": key,
             "type": idef.type,
             "description": idef.description,
+            # SPEC 2026-08-11-inputdef-enum §3.2 D2：始终透出 enum 键（None 透出 None）。
+            # 消费者（cli._validate_inputs）统一 ``field_def.get("enum")``，无 enum 时 None。
+            "enum": idef.enum,
         }
         for key, idef in wf.inputs.items()
     ]

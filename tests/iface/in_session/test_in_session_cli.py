@@ -630,6 +630,152 @@ def test_validate_inputs_description_none_treated_as_required():
     assert "f" in err
 
 
+# ── InputDef.enum 校验（SPEC 2026-08-11-inputdef-enum §3.3 / §5 AC2 + AC3）──
+#
+# 覆盖：直调 _validate_inputs 验 enum 各路径（pass / typo / off-list / 自定义 type 仍查 /
+# enum-before-type 顺序）+ bootstrap CLI 真入口验 inputs_validation_error 信封（AC3）。
+# B7 核心：enum check 独立于 _TYPE_MAP 白名单（自定义 type + enum 也查 enum）。
+
+
+def _enum_schema(enum=None, ftype="string", desc="[advanced] unit"):
+    """构造单字段 schema dict，模拟 catalog.inputs_schema_list 输出（含 enum 键）。"""
+    return [{"name": "f", "type": ftype, "description": desc, "enum": enum}]
+
+
+def test_validate_inputs_enum_pass():
+    """AC2：value 在 enum 内 → (True, "")。"""
+    schema = _enum_schema(enum=["ms", "us", "s"])
+    ok, err = _validate_inputs({"f": "ms"}, schema)
+    assert ok is True
+    assert err == ""
+
+
+def test_validate_inputs_enum_fail_typo():
+    """AC2：``"MS"``（笔误大写）∉ [ms,us,s] → fail loud（大小写敏感，D4）。"""
+    schema = _enum_schema(enum=["ms", "us", "s"])
+    ok, err = _validate_inputs({"f": "MS"}, schema)
+    assert ok is False
+    assert "not in allowed enum" in err
+    assert "'MS'" in err
+    assert "['ms', 'us', 's']" in err
+
+
+def test_validate_inputs_enum_fail_offlist():
+    """AC2：``"foo"`` ∉ enum → fail loud（合法 type 但 off-list）。"""
+    schema = _enum_schema(enum=["ms", "us", "s"])
+    ok, err = _validate_inputs({"f": "foo"}, schema)
+    assert ok is False
+    assert "not in allowed enum" in err
+    assert "'foo'" in err
+
+
+def test_validate_inputs_enum_explicit_null_fails_loud():
+    """SPEC §7 边界：显式 ``latency_unit: null``（key 在、值 None）→ fail loud。
+
+    语义：用户显式要 null，违 enum 该拒（与「省略 key」走 default 区分）。cli 路径步 3
+    （required）放过（key 在），步 4（enum）捕 ``None not in enum`` → fail loud。
+    """
+    schema = _enum_schema(enum=["ms", "us", "s"])
+    ok, err = _validate_inputs({"f": None}, schema)
+    assert ok is False
+    assert "not in allowed enum" in err
+    assert "None" in err
+
+
+def test_validate_inputs_enum_none_passthrough():
+    """AC6：未声明 enum（None）→ 不查 enum，行为不变（向后兼容）。
+
+    旧 wf 的 ``inputs_schema_list`` 输出经 catalog §3.2 D2 透出 ``enum: None``；
+    cli ``field_def.get("enum")`` 为 None → enum check 跳过。
+    """
+    schema = _enum_schema(enum=None)
+    # 任意 string 值都过（enum 不约束；type=string 满足）。
+    ok, err = _validate_inputs({"f": "anything"}, schema)
+    assert ok is True
+    assert err == ""
+
+
+def test_validate_inputs_enum_custom_type_still_checked():
+    """AC2 / B7：自定义 type + enum → enum 仍查（不被 ``check_fn is None: continue`` 跳过）。
+
+    B7 重构核心：原 ``check_fn is None: continue`` 连 enum check 一起跳过——现 enum check
+    上移到 type check 之前，自定义 type（不在 _TYPE_MAP）的 enum 校验不被绕过。
+    """
+    schema = _enum_schema(ftype="custom", enum=["a", "b"])
+    # 自定义 type + 值 off-list → enum check fail loud。
+    ok, err = _validate_inputs({"f": "c"}, schema)
+    assert ok is False
+    assert "not in allowed enum" in err
+    assert "'c'" in err
+
+
+def test_validate_inputs_enum_custom_type_value_in_enum_pass():
+    """AC2 / B7 补：自定义 type + enum + 值在 enum → ok（enum 过 + type pass-through）。"""
+    schema = _enum_schema(ftype="custom", enum=["a", "b"])
+    ok, err = _validate_inputs({"f": "a"}, schema)
+    assert ok is True
+    assert err == ""
+
+
+def test_validate_inputs_enum_before_type():
+    """D7：值同时违反 enum + type → enum 错先报（enum 是更窄的值域约束）。
+
+    enum=["ms"] + value=42（既不在 enum，又是 int 非 string）→ 报 enum 错（含 'not in allowed enum'），
+    非 type 错（'expected type'）。证明 enum check 在 type check 之前。
+    """
+    schema = _enum_schema(enum=["ms", "us", "s"])
+    ok, err = _validate_inputs({"f": 42}, schema)
+    assert ok is False
+    # enum 错先报，不是 type 错。
+    assert "not in allowed enum" in err
+    assert "expected type" not in err
+
+
+def test_bootstrap_inputs_enum_violation_fails_loud(cwd_tmp, tmp_path):
+    """AC3：bootstrap CLI 真入口 → enum 违反 = inputs_validation_error 信封 + exit 1。
+
+    latency_unit="MS"（笔误大写）→ fail loud 在 gen run_id / 写 tape/marker 之前，
+    reply 含 error_kind=inputs_validation_error + 字段名 + 非法值 + 合法集合。
+    """
+    wf_yaml = """\
+name: cli_test_enum_wf
+description: 测 enum bootstrap fail-loud。
+entry: a
+inputs:
+  latency_unit:
+    type: string
+    enum: [ms, us, s]
+    description: "[advanced] unit"
+    required: false
+    default: "ms"
+nodes:
+  - name: a
+    kind: agent
+    executor: opencode
+    model: deepseek/deepseek-v4-flash
+    prompt: "工作。"
+    routes:
+      - to: $end
+"""
+    p = tmp_path / "enum_wf.yaml"
+    p.write_text(wf_yaml, encoding="utf-8")
+
+    runner = CliRunner()
+    bad_inputs = json.dumps({"latency_unit": "MS"})  # 笔误大写
+    result = runner.invoke(app, ["bootstrap", str(p), "--inputs", bad_inputs])
+    assert result.exit_code == 1, result.output
+    reply = json.loads(result.output.splitlines()[-1])
+    assert reply["done"] is True
+    assert reply["error_kind"] == "inputs_validation_error"
+    # 字段定位 + 非法值 + 合法集合都在 reason 里。
+    assert "latency_unit" in reply["reason"]
+    assert "'MS'" in reply["reason"]
+    assert "['ms', 'us', 's']" in reply["reason"]
+    # 不进 tape/marker/state（gen run_id 前 fail loud）。
+    assert "run_id" not in reply
+    assert "tape" not in reply
+
+
 # ── next 单次 write 原子化（B1）────────────────────────────────────────────────
 
 

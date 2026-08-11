@@ -165,6 +165,17 @@ class Orchestrator:
                 raise ValueError(
                     f"必填 input {name!r}（type={idef.type}）未提供且无 default"
                 )
+        # SPEC 2026-08-11-inputdef-enum §3.4：单字段 enum 值域校验（cli._validate_inputs 镜像，
+        # 覆盖 tars run / TUI / web 全新 bootstrap 入口；resume 经 from_tape→_bare_instance bypass
+        # __init__，复用 tape 中原始 bootstrap 已校验的 inputs；daemon.next 经 advance_step 推进、
+        # 不构造 Orchestrator，同样靠原始 CLI bootstrap 守——同 F1 invariant 镜像模式，非新覆盖空洞）。
+        # default 已填后判定，用户值与 default 值都被覆盖；违反 → ValueError 直透（同 required-missing）。
+        # 单字段错先于跨字段错（紧接 default-fill、在 invariant 镜像前），错误层次从窄到宽。
+        for name, idef in wf.inputs.items():
+            if idef.enum and merged_inputs.get(name) not in idef.enum:
+                raise ValueError(
+                    f"input {name!r} value {merged_inputs.get(name)!r} not in allowed enum {idef.enum!r}."
+                )
         # SPEC §2.1 P0 / F1：跨字段 input 不变量（同 in-session bootstrap 校验，覆盖 ``tars
         # run`` / TUI / daemon 入口）。default 已填后判定，否则 ``[advanced]`` 缺省字段会被
         # 误判为「空」触发守卫。违反 → ValueError 直透（与 required-missing 同模式，启动前置

@@ -775,11 +775,17 @@ def _validate_inputs(
 
     校验规则（SPEC AC）：
       - 未声明 ``type``（旧 wf loose-typed）→ **pass-through**（零回归）。
-      - ``type`` 不在 ``_TYPE_MAP`` 白名单（自定义 type）→ **pass-through**（YAGNI 不校验）。
+      - ``type`` 不在 ``_TYPE_MAP`` 白名单（自定义 type）→ type check 跳过（YAGNI），但 enum check
+        仍跑（SPEC 2026-08-11-inputdef-enum §3.3 / B7：enum 独立于 type 白名单）。
       - ``description`` 开头是 ``[default]`` / ``[advanced]`` 标签 → 缺省时不触发 required
         （SKILL 教主 session 省略此类字段，让 wf 用 default）。
       - 显式 ``type`` + 非标签字段 + 缺省 → ``inputs_validation_error``（fail loud + 字段名定位）。
+      - 字段值不在 ``enum`` 集合 → ``inputs_validation_error``（fail loud + 字段名 + 值 + 合法集）。
       - 显式 ``type`` + 给值但类型不对 → ``inputs_validation_error``（fail loud + 类型对比）。
+
+    字段处理顺序（SPEC 2026-08-11-inputdef-enum §3.3 / D7）：
+      enum check（值域约束更窄）先于 type check（类型约束更宽）——enum 错先报更精确，
+      且使 enum 不被 type 白名单 guard 跳过（B7 根因解除：自定义 type + enum 也查 enum）。
 
     **与 ``InputDef.required`` 字段的关系**（设计约束，code-reviewer 🟡#2 显式化）：
     ``inputs_schema_list``（``catalog.py:156-171``）**不透出** ``required`` 字段；本函数依赖
@@ -793,20 +799,16 @@ def _validate_inputs(
         ftype = field_def.get("type")
         desc = field_def.get("description") or ""
 
-        # 未声明 type → pass-through（旧 wf loose-typed 零回归）。
+        # 步 1：未声明 type → 整字段 pass-through（旧 wf loose-typed 零回归）。
         if not ftype:
             continue
-        # type 不在白名单 → pass-through（YAGNI：自定义 type 不校验）。
-        check_fn = _TYPE_MAP.get(ftype)
-        if check_fn is None:
-            continue
 
-        # description 开头 [default] / [advanced] 标签 → SKILL 教省略（不触发 required）。
+        # 步 2：description 开头 [default] / [advanced] 标签 → SKILL 教省略（不触发 required）。
         is_optional_tag = (
             desc.startswith("[default]") or desc.startswith("[advanced]")
         )
 
-        # required check（仅对显式 type + 非标签字段）。
+        # 步 3：required check（仅对显式 type + 非标签字段；省略 → fail loud + 字段名定位）。
         if name not in inputs:
             if is_optional_tag:
                 continue  # 省略合法（wf 用内置 default）
@@ -815,7 +817,24 @@ def _validate_inputs(
                 f" 若想省略走默认，在 description 开头加 [default] 或 [advanced] 标签。"
             )
 
-        # type check（value 存在）。
+        # 步 4：enum check（SPEC 2026-08-11-inputdef-enum §3.3 / B7）——独立于 type 白名单，
+        # 在 type check 之前（D7：enum 是值域约束更窄先报，且不被 type 白名单 guard 跳过）。
+        # ``latency_unit: "MS"``（笔误大写）在此 fail loud，不烧到 ns2_run_search emit。
+        # 精确匹配、大小写敏感（D4）；``enum_vals`` 为 None / 空时跳过（空 enum 已在 schema 层拒）。
+        enum_vals = field_def.get("enum")
+        if enum_vals:
+            value = inputs[name]
+            if value not in enum_vals:
+                return False, (
+                    f"input {name!r} value {value!r} not in allowed enum {enum_vals!r}."
+                )
+
+        # 步 5：type check（仅 ftype ∈ _TYPE_MAP；自定义 type → pass-through）。
+        # B7 重构点：原 ``if check_fn is None: continue`` 会连 enum check 一起跳过——现 enum check
+        # 已上移步 4，此处只 skip type check，自定义 type + enum 的 enum 校验不被绕过。
+        check_fn = _TYPE_MAP.get(ftype)
+        if check_fn is None:
+            continue  # 自定义 type 不做 type 校验（YAGNI）
         value = inputs[name]
         if not check_fn(value):
             return False, (

@@ -197,11 +197,78 @@ def test_input_def_defaults():
     assert d.required is True
     assert d.default is None
     assert d.description == ""
+    assert d.enum is None  # 默认不约束（向后兼容）
 
 
 def test_input_def_extra_forbid():
     with pytest.raises(ValidationError):
         InputDef(type="int", bogus=1)
+
+
+# ── InputDef.enum（SPEC 2026-08-11-inputdef-enum §3.1 / §5 AC1 + AC8）──
+
+
+def test_inputdef_enum_ok():
+    """AC1：``enum=["ms","us","s"]`` 构造 OK；enum 字段被存储。"""
+    d = InputDef(type="string", enum=["ms", "us", "s"])
+    assert d.enum == ["ms", "us", "s"]
+
+
+def test_inputdef_enum_empty_rejected():
+    """AC1：``enum=[]`` → ValidationError（空 list = 配置错，加载期 fail loud）。"""
+    with pytest.raises(ValidationError) as ei:
+        InputDef(type="string", enum=[])
+    assert "enum 不能为空 list" in str(ei.value)
+
+
+def test_inputdef_enum_scalar_only_rejected_dict():
+    """AC8 / B4：enum 含 dict → ValidationError（``in`` 对 dict 比较语义模糊）。"""
+    with pytest.raises(ValidationError) as ei:
+        InputDef(type="string", enum=["ms", {"x": 1}])
+    assert "非标量" in str(ei.value)
+
+
+def test_inputdef_enum_scalar_only_rejected_nested_list():
+    """AC8 / B4：enum 含 nested-list → ValidationError（同 dict 拒）。"""
+    with pytest.raises(ValidationError) as ei:
+        InputDef(type="string", enum=["ms", ["us"]])
+    assert "非标量" in str(ei.value)
+
+
+def test_inputdef_enum_default_not_in_enum_rejected():
+    """AC1 / B2：``default="ms"`` + ``enum=["us","s"]`` → ValidationError（default 不在 enum）。
+
+    default 与 enum 不自洽会让「省略字段走默认」路径恒违反 enum 守卫——加载期 fail loud。
+    """
+    with pytest.raises(ValidationError) as ei:
+        InputDef(type="string", default="ms", enum=["us", "s"])
+    assert "default=" in str(ei.value)
+    assert "enum=" in str(ei.value)
+
+
+def test_inputdef_enum_default_none_no_false_positive():
+    """AC1 / B2：``InputDef(type="string", enum=[...])`` 隐式 default=None 不触发误报。
+
+    ``default is not None`` 守卫是 in-session 模式 default 安全的唯一网——隐式 None 语义
+    = 无 default（非用户声明），不应触发 ``None not in enum`` 误报。
+    """
+    d = InputDef(type="string", enum=["ms", "us", "s"])
+    # 隐式 default=None；model_validator 不应报错（构造成功即证）。
+    assert d.default is None
+    assert d.enum == ["ms", "us", "s"]
+
+
+def test_inputdef_enum_none_backcompat():
+    """AC6：未声明 enum → enum is None（向后兼容；不约束）。"""
+    d = InputDef(type="string", default="ms")
+    assert d.enum is None
+
+
+def test_inputdef_enum_default_in_enum_ok():
+    """AC1 补：``default="ms"`` + ``enum=["ms","us","s"]`` 自洽，构造 OK。"""
+    d = InputDef(type="string", default="ms", enum=["ms", "us", "s"])
+    assert d.default == "ms"
+    assert d.enum == ["ms", "us", "s"]
 
 
 # ── Workflow 顶层结构 ──

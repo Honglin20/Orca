@@ -644,3 +644,121 @@ def test_foreach_continue_on_error_partial_failure_aggregation_visible_downstrea
     outputs = completed_ev.data["outputs"]
     assert outputs["count"] == "3"       # 总数 3
     assert outputs["succeeded"] == "2"   # 2 成功（item 0 / 2），1 失败（item 1）
+
+
+# ── InputDef.enum 镜像校验（SPEC 2026-08-11-inputdef-enum §3.4 / §5 AC4-AC6）──
+#
+# 直接构造 Orchestrator(wf, bus=None, inputs={...})，不调 run()——enum check 在 __init__
+# default-fill 后、invariant 镜像前抛 ValueError（同 test_a6_orchestrator_invariant_path 模式：
+# real Workflow + real Orchestrator，捕获 __init__ enum 循环任何未来漂移）。
+# bus=None：enum check 在 bus 任何使用之前 fire，无需真实 bus。
+
+
+def _enum_wf(enum=("ms", "us", "s"), default="ms") -> Workflow:
+    """单输入 enum 的最小 wf（latency_unit）。enum/default 可参数化覆盖各 AC。"""
+    return Workflow(
+        name="test_enum_wf",
+        entry="n",
+        inputs={
+            "latency_unit": InputDef(
+                type="string", required=False, default=default, enum=list(enum),
+            ),
+        },
+        nodes=[AgentNode(name="n", prompt="placeholder", routes=[Route(to="$end")])],
+    )
+
+
+def test_orchestrator_enum_violation_raises():
+    """AC4：``latency_unit="MS"``（笔误大写）→ __init__ 抛 ValueError（含字段名+非法值+合法集）。
+
+    覆盖 tars run / TUI / web 全新 bootstrap 入口（这些路径构造 Orchestrator；
+    daemon.next 经 advance_step 不构造 Orchestrator，靠原始 CLI bootstrap 守）。
+    """
+    wf = _enum_wf()
+    with pytest.raises(ValueError, match="not in allowed enum"):
+        Orchestrator(wf, bus=None, inputs={"latency_unit": "MS"})
+    # 进一步验证错误信息含定位三要素（字段名 + 非法值 + 合法集合）。
+    try:
+        Orchestrator(wf, bus=None, inputs={"latency_unit": "MS"})
+    except ValueError as e:
+        msg = str(e)
+        assert "latency_unit" in msg
+        assert "'MS'" in msg
+        assert "['ms', 'us', 's']" in msg
+
+
+def test_orchestrator_enum_default_ok():
+    """AC5：省略 latency_unit（走 default=ms）→ enum 遍历放过（ms ∈ enum），构造成功。
+
+    证明 default 填充后的 enum 校验放过合法 default——schema 层 default∈enum 守卫已保，
+    运行期再核一次（防 default 被覆盖等边角）。
+    """
+    wf = _enum_wf()
+    orch = Orchestrator(wf, bus=None)  # 省略 inputs → default="ms" 填充
+    assert orch.ctx.inputs["latency_unit"] == "ms"
+
+
+def test_orchestrator_enum_user_value_in_enum_ok():
+    """AC4 补：``latency_unit="us"`` ∈ enum → 构造 OK（enum 过；invariant 由其它 wf 守）。"""
+    wf = _enum_wf()
+    orch = Orchestrator(wf, bus=None, inputs={"latency_unit": "us"})
+    assert orch.ctx.inputs["latency_unit"] == "us"
+
+
+def test_orchestrator_enum_none_backcompat():
+    """AC6：未声明 enum 的 input → Orchestrator 不查 enum，行为不变（向后兼容）。"""
+    wf = Workflow(
+        name="test_no_enum_wf",
+        entry="n",
+        inputs={
+            "anything": InputDef(type="string", required=False, default=""),
+        },
+        nodes=[AgentNode(name="n", prompt="placeholder", routes=[Route(to="$end")])],
+    )
+    # 任意 string 值都过（enum=None 不约束）。
+    orch = Orchestrator(wf, bus=None, inputs={"anything": "whatever"})
+    assert orch.ctx.inputs["anything"] == "whatever"
+
+
+def test_orchestrator_enum_before_invariant_ordering():
+    """SPEC §3.4 决策：单字段 enum 错先于跨字段 invariant 错（错误层次从窄到宽）。
+
+    构造同时违反 enum（latency_unit="MS" 笔误）和 invariant（latency_unit∈{us,s} ⇒
+    latency_script_path 非空，这里同时给空 script）的 wf——应抛 enum 错（"not in allowed
+    enum"），证明 enum 循环在 invariant 循环之前。若未来有人误把 enum 循环移到 invariant
+    之后，此测试会 fail（错误形态从 enum 错变 invariant 错）。
+    """
+    from orca.schema.workflow import InputInvariant
+
+    wf = Workflow(
+        name="test_enum_before_inv",
+        entry="n",
+        inputs={
+            "latency_unit": InputDef(
+                type="string", required=False, default="ms", enum=["ms", "us", "s"],
+            ),
+            "latency_script_path": InputDef(type="string", required=False, default=""),
+        },
+        input_invariants=[InputInvariant(
+            when_field="latency_unit", when_in=["us", "s"],
+            require_nonempty=["latency_script_path"], message="bad",
+        )],
+        nodes=[AgentNode(name="n", prompt="placeholder", routes=[Route(to="$end")])],
+    )
+    # 同时违反 enum + invariant → enum 先报（"not in allowed enum"，非 "input invariant violated"）。
+    with pytest.raises(ValueError, match="not in allowed enum"):
+        Orchestrator(
+            wf, bus=None,
+            inputs={"latency_unit": "MS", "latency_script_path": ""},
+        )
+
+
+def test_orchestrator_enum_explicit_null_fails_loud():
+    """SPEC §7 边界：显式 ``latency_unit: None``（key 在、值 None）→ orchestrator fail loud。
+
+    与 ``test_validate_inputs_enum_explicit_null_fails_loud`` 对称——cli + orchestrator
+    双路径对显式 null 同样处理（None not in enum → ValueError）。
+    """
+    wf = _enum_wf()
+    with pytest.raises(ValueError, match="not in allowed enum"):
+        Orchestrator(wf, bus=None, inputs={"latency_unit": None})
