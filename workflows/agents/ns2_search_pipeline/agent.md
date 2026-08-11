@@ -194,7 +194,33 @@ fi
 > 本节点是**编排者**：不直接写 6 个生成文件，而是先产共享 schema → 派 3 子代理并行生成
 > → 汇总 + 固化校验 → fix-loop。子代理只管 point-to-file 生成，父拥有 fix-loop。
 
-**产共享 schema（dispatch B/C 前必做）**：
+#### 🔴 节点内 resume（跨 stall-restart 续传，先做这段）
+
+本节点 3 子代理重，deepseek 间歇 stall 会让外部 per-node 驱动 kill+重试本节点。**为不丢已写盘的子代理产物**，dispatch 前先跑下面检查——已在盘（上轮 stalled attempt 产的）的部分**跳过**（盘上复用），只重做缺失部分。这让本节点跨 stall 续传到完成。
+
+```bash
+cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
+SKIP_SCHEMA=false; SKIP_A=false; SKIP_B=false; SKIP_C=false
+# schema：存在 + 合法 JSON + 有 arch_fields → 跳过产 schema
+if [ -s search_record_schema.json ] && python3 -c "import json;d=json.load(open('search_record_schema.json'));assert d.get('arch_fields')" 2>/dev/null; then SKIP_SCHEMA=true; echo "RESUME: search_record_schema.json 已在且达标 → 跳过产 schema"; fi
+# 子代理 A（latency）：latency_estimator.py 存在 + py_compile 过 → 跳过 A
+if [ -s latency_estimator.py ] && python3 -m py_compile latency_estimator.py 2>/dev/null; then SKIP_A=true; echo "RESUME: latency_estimator.py 已在且达标 → 跳过子代理 A"; fi
+# 子代理 B（search-core）：evaluator.py + arch_codec.py + search_config.yaml + run_search_supernet.sh 全在 + py_compile 过 → 跳过 B
+if [ -s evaluator.py ] && [ -s arch_codec.py ] && [ -s search_config.yaml ] && [ -s run_search_supernet.sh ] \
+   && python3 -m py_compile evaluator.py arch_codec.py 2>/dev/null; then SKIP_B=true; echo "RESUME: search-core 4 文件已在且达标 → 跳过子代理 B"; fi
+# 子代理 C（select+scaffold）：select_architecture.py + AGENTS.md 在 + select --help rc=0 → 跳过 C
+if [ -s select_architecture.py ] && [ -s AGENTS.md ] && python3 select_architecture.py --help >/dev/null 2>&1; then SKIP_C=true; echo "RESUME: select_architecture.py + AGENTS.md 已在且达标 → 跳过子代理 C"; fi
+echo "RESUME flags: SKIP_SCHEMA=$SKIP_SCHEMA SKIP_A=$SKIP_A SKIP_B=$SKIP_B SKIP_C=$SKIP_C"
+```
+
+**据 flags 条件执行后续**（已在盘的部分跳过，缺失的才产/派）：
+- 产 schema：仅当 `SKIP_SCHEMA=false`。
+- 派子代理 A：仅当 `SKIP_A=false`。
+- 派子代理 B：仅当 `SKIP_B=false`。
+- 派子代理 C：仅当 `SKIP_C=false`。
+四部分都 SKIP_* = true 时，本节点已全完成，直进汇总 + 固化校验 + 输出 JSON（不再派任何子代理）。
+
+**产共享 schema（dispatch B/C 前必做；SKIP_SCHEMA=true 则跳过本段）**：
 
 写 `$ORCA_ARTIFACTS_DIR/search_record_schema.json`——定义 search_results.jsonl 行的 arch 字段
 名/类型/枚举。这是 evaluator（子代理 B 产）和 select_architecture.py（子代理 C 产）之间的共享契约。
@@ -250,6 +276,7 @@ schema = {
     'metric_name': metric_name,
     'metric_direction': metric_direction,
     'latency_ms_field': 'latency_ms',
+    'latency_unit': '{{ inputs.latency_unit }}',
     'extra_fields': ['acc', 'params']
 }
 assert arch_fields, 'FATAL: no elastic dimensions found in SearchSpace'
@@ -257,15 +284,18 @@ print(json.dumps(schema, indent=2))
 " > search_record_schema.json
 ```
 
-**派 3 子代理生成（point-to-file 协议）**：
+**派 3 子代理生成（point-to-file 协议）**——**每条先看 RESUME flags，SKIP_*=true 的跳过（产物已在盘）**：
 
-1. **子代理 A（latency）**：按协议调 `search-latency-gen`，inputs：
+1. **子代理 A（latency）**——**仅当 `SKIP_A=false`** 才派：按协议调 `search-latency-gen`，inputs：
    - `$ORCA_ARTIFACTS_DIR`、`{{ inputs.latency_script_path }}`
-2. **子代理 B（search-core）**：按协议调 `search-core-gen`，inputs：
-   - `$ORCA_ARTIFACTS_DIR/search_record_schema.json`（**共享 schema**）
+   - （`SKIP_A=true` → latency_estimator.py 已在盘，**跳过本条**，不调子代理）
+2. **子代理 B（search-core）**——**仅当 `SKIP_B=false`** 才派：按协议调 `search-core-gen`，inputs：
+   - `$ORCA_ARTIFACTS_DIR/search_record_schema.json`（**共享 schema**；若 `SKIP_SCHEMA=false` 则先产它）
    - `$ORCA_AGENT_RESOURCES/references/workflows/search_supernet_script_generation.md`
-3. **子代理 C（select+scaffold）**：按协议调 `search-select-scaffold-gen`，inputs：
+   - （`SKIP_B=true` → search-core 4 文件已在盘，**跳过本条**）
+3. **子代理 C（select+scaffold）**——**仅当 `SKIP_C=false`** 才派：按协议调 `search-select-scaffold-gen`，inputs：
    - `$ORCA_ARTIFACTS_DIR/search_record_schema.json`（**共享 schema**）
+   - （`SKIP_C=true` → select_architecture.py + AGENTS.md 已在盘，**跳过本条**）
 
 **fix-loop 归属**：父 ns2_search_pipeline 拥有 fix-loop。子代理 B/C 产文件后父跑
 `check_search_pipeline.sh`（5 文件存在 + 各 py_compile + select --help rc=0）→ 失败则父
@@ -450,12 +480,17 @@ Handle the response:
 
 ```bash
 python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
-  --target-latency-ms <number> \
+  --target-latency <number> \
+  --latency-unit <ms|us|s> \
   --search-results "$ORCA_ARTIFACTS_DIR/search_results.jsonl"
 ```
 
 `$ORCA_ARTIFACTS_DIR` 经 Git Bash 展开；脚本内部路径用 `pathlib.Path` /
-`os.path`（铁律）。`--target-latency-ms` 缺省或 `<=0` 时走 pareto-knee 兜底。
+`os.path`（铁律）。`--target-latency` 缺省或 `<=0` 时走 pareto-knee 兜底。
+
+`--latency-unit` = latency 数值的声明单位（ms/us/s，默认 ms）。
+**不换算数值**——只用于标注（label/列名/caption 按此单位）。靶值 `latency <= target`
+按声明单位数值直比。
 
 #### stdout 契约（强制单行 JSON，下游 `ns2_run_search` 直接 echo 作唯一输出）
 
@@ -463,7 +498,8 @@ python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
 {
   "selected_arch": <dict>,
   "selected_acc": <number>,
-  "selected_latency_ms": <number>,
+  "selected_latency": <number>,
+  "latency_unit": <"ms"|"us"|"s">,
   "pareto_size": <int>,
   "select_reason": "max-acc-under-target|pareto-knee"
 }
@@ -479,8 +515,8 @@ python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
 
 `search_results.jsonl` 不存在 / 空 / 所有候选超 target → 二选一（实现时择一并注释清楚）：
 
-- emit `selected_arch={}`（空 dict）+ `selected_acc=0` + `selected_latency_ms=0` + `pareto_size=0`
-  + `select_reason: "none"`，退出码 0；或
+- emit `selected_arch={}`（空 dict）+ `selected_acc=0` + `selected_latency=0` + `latency_unit=<unit>`
+  + `pareto_size=0` + `select_reason: "none"`，退出码 0；或
 - 退出码非 0 + stderr 写明原因。
 
 下游 `ns2_run_search` 路由守卫为「`selected_arch` 真值 **且** `pareto_size > 0`」双条件（yaml
@@ -493,20 +529,22 @@ python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
 - 解析 `search_config.yaml` `objs` 确定项目 metric 名 + 方向（larger-better 时 negate 让所有
   smaller-better，然后 max-acc-under-target = 在 latency ≤ target 内 min objective 等价于 max acc）。
 - 算 Pareto 前沿（latency + 主 metric 二维）；`pareto_size` = 前沿大小。
-- `target_latency_ms > 0`：`select_reason="max-acc-under-target"`——前沿内 latency ≤ target 的
+- `target_latency > 0`：`select_reason="max-acc-under-target"`——前沿内 latency ≤ target 的
   候选里选主 metric 最优（acc 最大）。
-- `target_latency_ms <= 0` / 缺省：`select_reason="pareto-knee"`——前沿 knee 点（实现时定具体
+- `target_latency <= 0` / 缺省：`select_reason="pareto-knee"`——前沿 knee 点（实现时定具体
   knee 算法，建议最大曲率 / 距对角线最远）。
 - **输出 `selected_acc` 须还原用户原方向**：内部 Pareto / 优化用 smaller-is-better（higher-better
   metric，即 larger-is-better，在 `search_results.jsonl` 内部 negate 存储），但报告进 stdout JSON 的
   `selected_acc` 必须 un-negate 回用户原值（higher-better metric 还原正值）——禁把内部 negated 值
   直接输出（见**用户测度权威铁律**）。
+- **`latency_unit` 透传**：从 `--latency-unit` 读（缺省 ms）写入 stdout JSON。
+  **不换算 latency 数值**——单位仅作下游 label/列名/caption 标注。
 - 用 `pathlib.Path` / `os.path`（铁律）；输出 JSON 用 `json.dumps(..., separators=(",", ":"))`
   单行；变量 / 注释英文。
 
 #### 校验
 
-- 写完跑 `python3 select_architecture.py --target-latency-ms <fixture> --search-results <fixture.jsonl>`
+- 写完跑 `python3 select_architecture.py --target-latency <fixture> --latency-unit ms --search-results <fixture.jsonl>`
   确认合法 JSON 输出 + 字段齐全 + 字段类型对。
 - **fixture 来源（禁读真 search_results.jsonl）**：fixture = 你手写的最小 synthetic record（5–10 条，
   覆盖 `latency ≤ target` / `latency > target` / 不同 acc / 无候选 4 类边界）。**禁**读真
