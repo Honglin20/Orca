@@ -27,9 +27,11 @@
 `orca puzzle --inputs '{...}'` 解析+启动 run+chart daemon+web UI+entry=pz_expand 全 OK(test run 已 stop 清理)。
 
 ### 待办
+- [ ] **target 自适应**(用户铁律:**不改 target 项目**,workflow 自适应——参考 nas-supernet):
+  - pz_expand 升级为 **LLM-assisted flatten**(nas-supernet ns_expand 范式):agent 读 target/model/model.py + train.py,在 `$ORCA_ARTIFACTS_DIR` 产出 `<base>_flat.py`(含 build_model 工厂 + `DUMMY_INPUT`[4 输入] + `__main__`)+ eval 包装 artifact(调 k-NN 逻辑,`fn(model)->float`)。**target/ 零改**。
+  - expand_model.py + latency_table/dummy/forward **扩多输入**(DUMMY_INPUT 支持 4 tensor,measure_latency 多 args,block 替换 parent 多输入 forward)。
+  - target eval_kind=embedding → score cosine distance / GKD cosine(已支持 eval_kind 分支)。
 - [ ] mnist_trf **in-session 全驱动**(orca next 逐节点,验 agent.md 编排;脚本级已证 AC)
-- [ ] **target 适配**:multi-input 模型(4 输入,dummy/latency/forward 需扩多输入)+ InfoNCE cosine 打分/GKD + model.py 补 build_model/DUMMY_INPUT/eval_model_acc(model)->float
-- [ ] code-reviewer delta 终审(进行中)+ 修反馈
 - [ ] 用户确认后 commit(global 规则)
 
 **必读**：SPEC `docs/specs/phase-puzzle-impl.md`；设计草稿 `docs/specs/puzzle-design-draft.md`；`workflows/puzzle.yaml`；fixture `/mnt/d/Projects/playground/mnist_trf/`。
