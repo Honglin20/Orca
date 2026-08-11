@@ -15,6 +15,13 @@
 - Puzzle 后: **acc=0.958**(Δ=0.031≤0.5 ✓)、**latency=0.453ms**(ratio=0.488≤0.5 ✓)
 - gate_status=pass / both-met。全链 expand→bld(48 variant)→score→latency→mip→build→gkd(4ep/1876step 真实数据)→gate
 
+### target 脚本级 E2E(已 PASS 2026-08-12,**workflow 自适应,target 源码零改**)
+- 路径:coder 产 `target/artifacts/puzzle/target_flat.py`(self-contained wrapper:4 输入打包单 tensor,state_dict 与 pre_trained.pth 零 missing)→ pipeline 经 wrapper 跑通
+- baseline: acc=0.0854(200-user k-NN scope,-5dB SNR), latency=0.448ms
+- Puzzle 后(全 attention no_op + 多 ffn no_op + GKD cosine KD): **acc=0.09**(Δ=0.0046≤0.5 ✓,略升)、**latency=0.197ms**(ratio=0.440≤0.5 ✓,降 56%)
+- gate_status=pass / both-met。eval_kind=embedding(cosine 打分/GKD)
+- 关键修复:`_KwargPassthrough` 包装 variant 适配 target 的 `self_attn(src, attention_mask=...)` 异构签名(commit 6834dec)
+
 ### 让 AC 可达的关键修复(集成期发现 + 修)
 1. **预训练 father 贯穿**:expand load_state_dict + 存 father_state_dict.pt;bld/score/build/gkd/latency 用 load_father_model(原全链随机 init)
 2. **latency 模型**:standalone 单块(加性)+ **实测 floor**(全 block→_ZeroBlock 整模 latency, latency_floor.json);mip: selected = floor + Σ chosen_block ≤ target
