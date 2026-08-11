@@ -36,6 +36,8 @@ const TABLE_ROW_STYLE: React.CSSProperties = { gridColumn: "1 / -1", minWidth: 0
 interface ChartGroupItem {
   identity: string;
   payload: ChartPayload;
+  /** huge 模式目录占位（serverOverview 清单，无 data）→ 渲染占位卡而非真实 widget。 */
+  placeholder?: boolean;
 }
 
 export function ChartGroup({
@@ -48,15 +50,21 @@ export function ChartGroup({
   // collapsed 仅 UI 交互态（非业务真相，铁律 2）——与 gate 状态不同，折叠是纯展示层
   const [collapsed, setCollapsed] = useState(false);
 
-  // 布局分区（纯展示层，不动 selectCharts 序）：非 table 图保持原序在前，table 收尾
-  // （类内 filter 保稳定序），配合 TABLE_ROW_STYLE 实现「图-图-表」自适应排布。
-  const { visuals, tables } = useMemo(() => {
+  // 布局分区（纯展示层，不动 selectCharts 序）：占位卡先行（huge 目录），非 table 图
+  // 保持原序在前，table 收尾（类内 filter 保稳定序），配合 TABLE_ROW_STYLE 实现
+  // 「图-图-表」自适应排布。
+  const { placeholders, visuals, tables } = useMemo(() => {
+    const placeholders: ChartGroupItem[] = [];
     const visuals: ChartGroupItem[] = [];
     const tables: ChartGroupItem[] = [];
     for (const c of charts) {
+      if (c.placeholder) {
+        placeholders.push(c);
+        continue;
+      }
       (c.payload.chart_type === "table" ? tables : visuals).push(c);
     }
-    return { visuals, tables };
+    return { placeholders, visuals, tables };
   }, [charts]);
 
   return (
@@ -78,6 +86,23 @@ export function ChartGroup({
       </button>
       {!collapsed && (
         <div className="border-t orca-border p-3" style={GRID_STYLE}>
+          {placeholders.map((c) => (
+            // huge 模式目录占位卡（SPEC web-attach §3 M3）：显示 chart_type + title，
+            // 点「加载全部」后 client-fold 替换为真实 widget。
+            <div
+              key={c.identity}
+              className="aspect-[4/3] w-full rounded border orca-border orca-bg-surface-2 flex flex-col items-center justify-center gap-1 p-2 text-center"
+              data-testid={`chart-placeholder-${c.identity}`}
+            >
+              <span className="text-[10px] uppercase tracking-wide orca-text-faint">
+                {c.payload.chart_type}
+              </span>
+              <span className="text-xs orca-text-muted">
+                {String((c.payload as { title?: string }).title ?? "") || c.identity}
+              </span>
+              <span className="text-[10px] orca-text-faint">加载全部后显示</span>
+            </div>
+          ))}
           {visuals.map((c) => (
             // SPEC audit-c E3/BLOCKER-1：key=identity（titled 跨 huge→full 稳定；无 title 允许 remount）
             <LazyChartWidget

@@ -7,7 +7,7 @@
 //   4. MINOR-5: 无 title chart dev warn-once-per-identity（spy 调用次数 === 1 跨多次 render）
 
 import { describe, expect, test, afterEach, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, fireEvent } from "@testing-library/react";
 import { useWorkflowStore, untitledChartWarned } from "@/stores/workflow-store";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { ChartErrorBoundary } from "@/components/chart/ChartErrorBoundary";
@@ -86,6 +86,92 @@ describe("SPEC audit-c C2 partition（INV-5 schema 漂移显形）", () => {
     render(<ChartRenderer nodeId="n1" />);
     expect(screen.queryByTestId("chart-schema-warning")).toBeNull();
     expect(screen.getAllByTestId("chart-widget").length).toBe(1);
+  });
+});
+
+describe("huge 模式：serverOverview 目录占位渲染（根治 773 误报）", () => {
+  test("huge 模式 → 无 schema warning + 渲染占位卡 + 有 load-full 按钮，无真实 widget", () => {
+    useWorkflowStore.setState({
+      loadStatus: "loaded",
+      huge: true,
+      hugeFullyLoaded: false,
+      activeRunId: "r-huge",
+      serverOverview: {
+        agents: [],
+        charts: [
+          { label: "g1", title: "loss", chart_type: "line" },
+          { label: "g1", title: "compare", chart_type: "table" },
+        ],
+        cost_usd: 0,
+        run_status: "running",
+      },
+    });
+    render(<ChartRenderer />);
+    // 目录占位不再是 schema 漂移（INV-5 只针对真实 payload）
+    expect(screen.queryByTestId("chart-schema-warning")).toBeNull();
+    expect(screen.getAllByTestId(/^chart-placeholder-/).length).toBe(2);
+    expect(screen.getByTestId("load-full-btn")).toBeInTheDocument();
+    expect(screen.getByTestId("huge-charts-placeholder")).toBeInTheDocument();
+    expect(screen.queryByTestId("chart-widget")).toBeNull();
+  });
+
+  test("点击 load full → 全量 client-fold → 占位消失 + 真实 chart 渲染", async () => {
+    useWorkflowStore.setState({
+      loadStatus: "loaded",
+      huge: true,
+      hugeFullyLoaded: false,
+      activeRunId: "r-huge",
+      serverOverview: {
+        agents: [],
+        charts: [{ label: "g1", title: "loss", chart_type: "line" }],
+        cost_usd: 0,
+        run_status: "running",
+      },
+      events: [],
+    });
+    const full: WebEvent[] = [
+      chartEvent("n1", { ...LINE_OK, label: "g1", title: "loss" }),
+    ];
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => full,
+    });
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+    render(<ChartRenderer />);
+    fireEvent.click(screen.getByTestId("load-full-btn"));
+    // loadFull 拉全量 → serverOverview 清 → client-fold → 真实 widget 出现
+    const widget = await screen.findByTestId("chart-widget", undefined, {
+      timeout: 2000,
+    });
+    expect(widget).toBeInTheDocument();
+    expect(screen.queryByTestId("load-full-btn")).toBeNull();
+    expect(screen.queryByTestId("huge-charts-placeholder")).toBeNull();
+    expect(screen.queryAllByTestId(/^chart-placeholder-/).length).toBe(0);
+    vi.unstubAllGlobals();
+  });
+
+  test("huge 占位与 tail 内真实 malformed 混存：占位不被算进 rejected", () => {
+    useWorkflowStore.setState({ loadStatus: "loaded" });
+    useWorkflowStore.setState({
+      huge: true,
+      hugeFullyLoaded: false,
+      activeRunId: "r-huge",
+      serverOverview: {
+        agents: [],
+        charts: [{ label: "g1", title: "loss", chart_type: "line" }],
+        cost_usd: 0,
+        run_status: "running",
+      },
+    });
+    // tail 内真实事件流里混一条缺 chart_type 的 custom（huge 模式 selectCharts 走目录，
+    // 不 client-fold；loadFull 后才会被 INV-5 抓到）
+    useWorkflowStore.getState().processEvent(
+      chartEvent("n1", { label: "g1", title: "bad", data: [{ x: 1 }] })
+    );
+    render(<ChartRenderer />);
+    // 占位（无 data）不 reject → 无 schema warning 误报
+    expect(screen.getAllByTestId(/^chart-placeholder-/).length).toBe(1);
+    expect(screen.queryByTestId("chart-schema-warning")).toBeNull();
   });
 });
 

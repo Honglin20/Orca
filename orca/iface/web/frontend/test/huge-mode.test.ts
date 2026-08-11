@@ -264,6 +264,26 @@ describe("huge-mode + writable (web-attach Step1)", () => {
     expect(groups[0].entries.length).toBe(2);
   });
 
+  it("selectCharts huge 模式占位 entry 带 placeholder:true（partition 不误 reject）", () => {
+    useWorkflowStore.setState({
+      huge: true,
+      hugeFullyLoaded: false,
+      serverOverview: {
+        agents: [],
+        charts: [
+          { label: "g1", title: "Chart A", chart_type: "line" },
+          { label: "g1", title: "Chart B", chart_type: "bar" },
+        ],
+        cost_usd: 0,
+        run_status: "running",
+      },
+    });
+    const { groups } = selectCharts(useWorkflowStore.getState());
+    const entries = groups[0].entries;
+    expect(entries.length).toBe(2);
+    expect(entries.every((e) => e.placeholder === true)).toBe(true);
+  });
+
   it("unloadRun 清 huge-mode 状态", async () => {
     useWorkflowStore.setState({
       huge: true,

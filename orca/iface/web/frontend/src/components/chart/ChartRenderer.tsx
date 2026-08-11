@@ -22,9 +22,10 @@ interface ChartRendererProps {
   nodeId?: string;
 }
 
-/** partition 输出：valid（cast 后）+ rejected（shape 异常）。 */
+/** partition 输出：valid（cast 后）+ placeholders（huge 目录占位）+ rejected（shape 异常）。 */
 interface PartitionOutput {
   valid: { identity: string; payload: ChartPayload }[];
+  placeholders: { identity: string; payload: ChartPayload }[];
   rejected: { seq: number; group: string }[];
 }
 
@@ -34,6 +35,10 @@ interface PartitionOutput {
  * - **不 dedup**（B3 round-5）：信任 selectCharts 的 byIdentity Map（selectors.ts:525）。
  * - **不扩 ChartPayload 加 seq**（C5：污染 chart 契约）。
  * - partition 内联 ``chart_type`` / ``data-is-array`` 校验，valid 直接 cast，rejected 收集。
+ * - **huge 模式目录占位（placeholder）不 reject**（SPEC web-attach §3 M3）：serverOverview
+ *   charts 清单只有 label/title/chart_type，无 data——不是 INV-5 schema 漂移，是服务端
+ *   fold 的目录。单独 placeholders 桶渲染占位卡 + load-full 恢复（根治「773 个 chart 数据
+ *   格式异常」误报）。
  * - **无 title chart dev warn-once-per-identity**（MINOR-5）：huge 模式 identity=
  *   ``chart_type#index`` vs full 模式 ``chart_type#seq``，跨 huge→full identity 变化 →
  *   React remount（允许）+ dev warn。模块级 ``untitledChartWarned: Set<identity>`` 防 spam。
@@ -43,9 +48,17 @@ function partitionCharts(
 ): { group: string; partitioned: PartitionOutput }[] {
   return groups.map(({ group, entries }) => {
     const valid: { identity: string; payload: ChartPayload }[] = [];
+    const placeholders: { identity: string; payload: ChartPayload }[] = [];
     const rejected: { seq: number; group: string }[] = [];
     for (const entry of entries) {
       const p = entry.payload as Record<string, unknown>;
+      if (entry.placeholder) {
+        placeholders.push({
+          identity: entry.identity,
+          payload: p as unknown as ChartPayload,
+        });
+        continue;
+      }
       if (!p || !p.chart_type || !Array.isArray(p.data)) {
         rejected.push({ seq: entry.seq, group });
         continue;
@@ -67,7 +80,7 @@ function partitionCharts(
         payload: p as unknown as ChartPayload,
       });
     }
-    return { group, partitioned: { valid, rejected } };
+    return { group, partitioned: { valid, placeholders, rejected } };
   });
 }
 
@@ -92,6 +105,10 @@ export function ChartRenderer({ nodeId }: ChartRendererProps) {
     (sum, g) => sum + g.partitioned.rejected.length,
     0
   );
+  const totalPlaceholders = partitioned.reduce(
+    (sum, g) => sum + g.partitioned.placeholders.length,
+    0
+  );
 
   if (filtered.length === 0) {
     return (
@@ -100,6 +117,10 @@ export function ChartRenderer({ nodeId }: ChartRendererProps) {
       </p>
     );
   }
+
+  // huge 模式（serverOverview 目录占位）→ 渲染目录 + load full 恢复入口
+  const huge = state.huge && !state.hugeFullyLoaded;
+  const loadFull = state.loadFull;
 
   return (
     <div className="space-y-4 p-3" data-testid="chart-renderer">
@@ -123,12 +144,36 @@ export function ChartRenderer({ nodeId }: ChartRendererProps) {
           </details>
         </div>
       )}
+      {huge && totalPlaceholders > 0 && (
+        <div
+          className="border orca-border orca-bg-surface rounded p-2 text-xs orca-text-muted"
+          data-testid="huge-charts-placeholder"
+        >
+          <p>
+            超大 run（huge 模式）：图表仅显示目录（{totalPlaceholders} 张），
+            完整数据需拉取全部事件。
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              if (state.activeRunId) void loadFull(state.activeRunId);
+            }}
+            data-testid="load-full-btn"
+            className="mt-1 rounded border orca-border px-2 py-0.5 orca-text-muted hover:orca-bg-surface-2"
+          >
+            加载全部（拉取完整事件，大 run 可能较慢）
+          </button>
+        </div>
+      )}
       {partitioned.map(({ group, partitioned: p }) =>
-        p.valid.length === 0 ? null : (
+        p.valid.length === 0 && p.placeholders.length === 0 ? null : (
           <ChartGroup
             key={group}
             label={group}
-            charts={p.valid}
+            charts={[
+              ...p.placeholders.map((x) => ({ ...x, placeholder: true })),
+              ...p.valid,
+            ]}
           />
         )
       )}

@@ -79,20 +79,30 @@ export function AgentsRail() {
   const selectedSession = useWorkflowStore((s) => s.selectedSession);
   const setSelectedNode = useWorkflowStore((s) => s.setSelectedNode);
   const setSelectedSession = useWorkflowStore((s) => s.setSelectedSession);
+  // huge 模式（SPEC web-attach §3 M3）：selectAgents huge 分支读 serverOverview 派生
+  // agent 清单——tail 窗口不含 workflow_started（topology 不在窗口），必须信任服务端 fold，
+  // 否则 AgentsRail 空白。
+  const huge = useWorkflowStore((s) => s.huge);
+  const serverOverview = useWorkflowStore((s) => s.serverOverview);
+  const hugeFullyLoaded = useWorkflowStore((s) => s.hugeFullyLoaded);
   const [showDag, setShowDag] = useState(false);
   // P3 方案 6：子 agent 折叠态（按 node id 记录展开；Set 重新分配触发 re-render）
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   // 构造 selectors 期望的最小 state shape（DRY：未来加字段时只改这里）。`as unknown as`
   // 是纯编译期类型断言（运行时无影响）：把只读字段子集与 WorkflowState 接口对齐。
-  // selectors 契约上只读 workflowDef/nodes/events/nodesIndex 这几个字段；若未来 selector
-  // 新读其它字段，需同步在此处补订阅——否则 zustand 不会在该字段变化时触发本组件 re-render
-  // （字段会 silent undefined，不会 fail loud，故契约靠人工同步）。
+  // selectors 契约上只读 workflowDef/nodes/events/nodesIndex/huge/serverOverview/
+  // hugeFullyLoaded 这几个字段；若未来 selector 新读其它字段，需同步在此处补订阅——否则
+  // zustand 不会在该字段变化时触发本组件 re-render（字段会 silent undefined，不会 fail
+  // loud，故契约靠人工同步）。
   const state = {
     workflowDef,
     nodes,
     events,
     nodesIndex,
+    huge,
+    serverOverview,
+    hugeFullyLoaded,
   } as unknown as Parameters<typeof selectAgentGroups>[0];
   const groups = selectAgentGroups(state);
 

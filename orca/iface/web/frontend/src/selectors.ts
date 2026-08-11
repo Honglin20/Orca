@@ -472,6 +472,12 @@ export interface ChartEntry {
   /** 原始 chart payload（ChartPayload shape 由 chart/types.ts 定义）。 */
   payload: unknown;
   /** 原始事件 seq，用于 D7 sort 后的稳定身份消歧。 */
+  /**
+   * huge 模式 serverOverview 目录占位（SPEC web-attach §3 M3）：payload 只有
+   * label/title/chart_type 清单，**无 data**——不是 schema 漂移，是服务端 fold 的
+   * 目录。ChartRenderer partition 据此不 reject（渲染为占位卡 + load full 恢复）。
+   */
+  placeholder?: boolean;
 }
 
 /** 提取单条 custom 事件的 chart payload（data.kind==="chart"）。非 chart → null。 */
@@ -503,6 +509,7 @@ export function selectCharts(state: WorkflowState): {
       node: null,
       group: c.label || "misc",
       identity: c.title || `${c.chart_type}#${i}`,
+      placeholder: true, // 目录占位：无 data，partition 不 reject（INV-5 只针对真实 payload）
       payload: {
         label: c.label,
         title: c.title,

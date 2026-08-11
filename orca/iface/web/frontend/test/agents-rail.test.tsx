@@ -101,6 +101,43 @@ describe("AgentsRail —— 行渲染 + 选中切换（D2）", () => {
   });
 });
 
+describe("AgentsRail —— huge 模式（SPEC web-attach §3 M3）", () => {
+  test("huge 模式：从 serverOverview 渲染 agent 行（无需 topology，根治空白）", () => {
+    useWorkflowStore.setState({
+      huge: true,
+      hugeFullyLoaded: false,
+      serverOverview: {
+        agents: [
+          { name: "n1", status: "running" },
+          { name: "n2", status: "pending" },
+        ],
+        charts: [],
+        cost_usd: 0,
+        run_status: "running",
+      },
+    });
+    render(<RailRoot active={false} />);
+    expect(screen.getByTestId("agent-row-n1")).toBeInTheDocument();
+    expect(screen.getByTestId("agent-row-n2")).toBeInTheDocument();
+    expect(screen.getByTestId("agent-status-n1").textContent).toBe("running");
+    expect(screen.getByTestId("agent-status-n2").textContent).toBe("pending");
+  });
+
+  test("huge 模式 + loadFull 后回退 client-fold（serverOverview 清）", () => {
+    // huge 模式 serverOverview
+    useWorkflowStore.setState({
+      huge: true,
+      hugeFullyLoaded: true, // 已 loadFull → selectAgents 回退 client-fold
+      serverOverview: null,
+    });
+    emitWorkflowStarted();
+    render(<RailRoot active={false} />);
+    // 从 topology client-fold → 行正常
+    expect(screen.getByTestId("agent-row-n1")).toBeInTheDocument();
+    expect(screen.getByTestId("agent-row-n2")).toBeInTheDocument();
+  });
+});
+
 describe("AgentsRail —— per-agent elapsed（D5 snap）", () => {
   test("running node：⏱Ns（live tick，selector 取 now - startedAt）", () => {
     emitWorkflowStarted();
