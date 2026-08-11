@@ -55,6 +55,27 @@ if [ -s "retrain.py" ]; then
   fi
 fi
 
+# ── 4. Progress JSONL write contract (chart feed, agent.md Step 3a) ─────
+# progress.jsonl 是 progress_watcher 的 chart feed。漏写 = retrain executed 但无实时图。
+# 静态早期信号；运行时强校验在 warmup_poll.sh 的 check_progress_contract.py。
+# retrain 可能生成 retrain.py 或 finetune.py，至少其一写 progress.jsonl 即可。
+if ls retrain.py finetune.py 2>/dev/null | grep -q .; then
+  PROGRESS_WRITER=0
+  for f in retrain.py finetune.py; do
+    [ -s "$f" ] || continue
+    if grep -q 'progress\.jsonl' "$f" 2>/dev/null && grep -q 'json\.dumps' "$f" 2>/dev/null; then
+      PROGRESS_WRITER=1
+      break
+    fi
+  done
+  if [ "$PROGRESS_WRITER" -eq 0 ]; then
+    echo "FAIL: retrain.py/finetune.py 均不写 progress.jsonl（缺 chart feed，需 json.dumps({\"step\":..,\"metrics\":..})）"
+    FAIL=1
+  else
+    echo "[check_retrain] progress.jsonl write contract OK"
+  fi
+fi
+
 # ── Result ──────────────────────────────────────────────────────────────
 if [ "$FAIL" -ne 0 ]; then
   echo "FAIL: check_retrain failed"

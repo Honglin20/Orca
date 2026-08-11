@@ -6,7 +6,9 @@
 #   WARMUP_FAIL reason=metric-diverged        progress.jsonl 任一指标 NaN/Infinity（用户指标不可
 #                                             预测——loss/reward/gain 皆可能，查结构化全量；文件
 #                                             缺失回落 prose 行结构化匹配）
-#   WARMUP_OK epoch_cnt>=2                    ≥2 个进度标记（epoch 或 step，可测每单位耗时）
+#   WARMUP_FAIL reason=progress-contract      progress.jsonl 缺/空/某行不符 {step:int,metrics:dict<number>}
+#                                             契约（telemetry≥2 时校验；漏写=生成代码 bug→HEAL-LOOP 修）
+#   WARMUP_OK epoch_cnt>=2                    ≥2 个进度标记（epoch 或 step，可测每单位耗时）+ progress.jsonl 契约过
 #   WARMUP_RUNNING epoch_cnt=<n>              还在跑但进度标记不足
 # LOG_MTIME / LOG_SIZE 供 agent 在"无进度标记"时判 log 是否在增长（格式未契约化兜底）。
 # 依赖：ORCA_ARTIFACTS_DIR（orca spawn / orca_env.sh 注入）+ bash/python3/GNU 或 BSD stat
@@ -60,7 +62,14 @@ if [ -n "$EPOCH_LINES" ]; then
   # 与真实进度行 epoch 5 去重一致）→ 数字排序去重
   EPOCH_CNT="$(printf '%s\n' "$EPOCH_LINES" | grep -oiE '(epoch|step)[^0-9]*[0-9]+' | grep -oiE '[0-9]+' | sed 's/^0*//' | grep -v '^$' | sort -un | wc -l)"
   if [ "$EPOCH_CNT" -ge 2 ]; then
-    echo "WARMUP_OK epoch_cnt=$EPOCH_CNT"
+    # 收紧：telemetry≥2 时 progress.jsonl 必按契约有合法行（§3(b) 每 unit 写）。
+    # 漏写/格式错 = 生成代码 bug → WARMUP_FAIL → HEAL-LOOP 修 train/retrain 脚本。
+    if python3 "$ORCA_AGENT_RESOURCES/scripts/check_progress_contract.py" --progress "$PROGRESS"; then
+      echo "WARMUP_OK epoch_cnt=$EPOCH_CNT"
+    else
+      echo "WARMUP_FAIL reason=progress-contract"
+      tail -8 "$LOG" 2>/dev/null
+    fi
   else
     echo "WARMUP_RUNNING epoch_cnt=$EPOCH_CNT"
   fi

@@ -49,6 +49,18 @@ if [ -s "run_train_supernet.sh" ]; then
   bash "$ORCA_AGENT_RESOURCES/scripts/check_launcher.sh" run_train_supernet.sh || FAIL=1
 fi
 
+# ── 5. Progress JSONL write contract (chart feed, §3(b)) ────────────────
+# progress.jsonl 是 progress_watcher 的 chart feed。漏写 = 训练 executed 但无实时图。
+# 静态早期信号；运行时强校验在 warmup_poll.sh 的 check_progress_contract.py。
+if ! grep -q 'progress\.jsonl' train_supernet.py 2>/dev/null; then
+  echo "FAIL: train_supernet.py 不写 progress.jsonl（缺 chart feed——progress_watcher 无数据可推）"
+  FAIL=1
+elif ! grep -q 'json\.dumps' train_supernet.py 2>/dev/null; then
+  echo "FAIL: train_supernet.py 引用 progress.jsonl 但未见 json.dumps（契约: json.dumps({\"step\":..,\"metrics\":..})）"
+  FAIL=1
+fi
+[ "$FAIL" -eq 0 ] && echo "[check_train_script] progress.jsonl write contract OK"
+
 # ── Result ──────────────────────────────────────────────────────────────
 if [ "$FAIL" -ne 0 ]; then
   echo "FAIL: check_train_script failed"

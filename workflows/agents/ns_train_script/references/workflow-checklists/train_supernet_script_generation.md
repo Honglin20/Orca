@@ -317,3 +317,10 @@ Items 28 through 37 verify `run_train_supernet.sh` and budget/hyperparameter coh
 **Verify**: grep for `master_port` and `MASTER_PORT` in `run_train_supernet.sh`. Confirm the port is derived from `RANDOM` (or an equivalent unique-per-run mechanism), not a hardcoded literal.
 **Anti-pattern**: Omitting `--master_port` (fixed default 29500 — collides across concurrent/stale instances, EADDRINUSE on the rendezvous — real incident); hardcoding a fixed port that reuse across attempts.
 **Fix**: Randomize `MASTER_PORT` per launch and pass `--master_port="$MASTER_PORT"`.
+
+### [CRITICAL] 38. Progress JSONL Write Loop (chart feed)
+**auto-fixable**: no
+**Section**: §3 Progress Driver (machine-parseable progress, feed b)
+**Check**: `train_supernet.py` writes the progress JSONL chart feed consumed by the live chart watcher (`progress_watcher.py`). Each progress unit (rank 0) appends exactly one line `{"step": <number>, "metrics": {"<name>": <float>, ...}}` to `$ORCA_ARTIFACTS_DIR/runs/train/progress.jsonl` via `json.dumps(row) + "\n"` + `flush()`, guarded by `if is_main_process()`. `metrics` contains every scalar metric the unit produces under its real name (`loss` is NOT assumed or special).
+**Verify**: grep `train_supernet.py` for `progress.jsonl` AND `json.dumps`. Confirm the write is inside the per-unit loop (not only at eval boundaries) and inside an `is_main_process()` gate. If `progress.jsonl` is absent from the script or written only inside the eval block, this item fails.
+**Anti-pattern**: No `progress.jsonl` write at all (training executes but the live chart has no data); writing the JSONL only at eval boundaries instead of every progress unit; emitting metrics under a fabricated `loss` name instead of the user's real metric names; writing outside an `is_main_process()` guard (multi-rank races).
