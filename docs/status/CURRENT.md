@@ -4,24 +4,42 @@
 
 ---
 
-## 当前：nas-supernet latency 单位透传 + full-supernet 真测量 + 子网结构展示——已提交（v1+v2+v3）
+## 当前：Puzzle workflow —— mnist_trf 脚本级 E2E PASS，待 in-session + target
 
-**任务**：用户反馈 4 个真机问题——① latency 单位被锁 ms（用户 µs 测度脚本被错标）；② compare_table Full Supernet latency 是 `max(候选)` 代理（"FP32 上限"）；③ latency_dist 别的服务器全 0；④ 选定子网结构从未展示。
+**任务**：实现 puzzle workflow（Bercovich 2025 decomposed NAS）并在 playground 两项目(mnist_trf / target)上 E2E 通过(ACC≤0.5 / LAT≥2×)。
 
-**状态**：**已提交**。SPEC（spec-reviewer 12 项闭环 Pass）→ coder 实现 → 洁净度审查（逐 agent.md 受众翻转通读 PASS）→ `.py` SPEC breadcrumb 清零 → v3（v2 翻译）独立洁净审查 PASS（2 处 `(C3/C4)` lint 残留已清）。`test_ns_chart_scripts.py` 81 passed + yaml 语法 OK + ruff 干净。
+**状态**：**mnist_trf 脚本级全链 PASS 双 AC;workflow orca bootstrap 通过;target 待适配**。
 
-**关键决策**：① 单位"声明不换算"——新增 `latency_unit` 输入端到端透传（默认 ms 向后兼容）；② F1 bootstrap 不变量：`latency_unit∈{us,s}` 必须搭配 `latency_script_path`（默认 estimator 恒 ms），否则 fail-loud；③ 子网展示用 `str(subnet)` module repr + 逐层结构化表；④ v3（ns3_*）是对 v2 的翻译，用户确认一起解决、同标准纳入提交。
+### mnist_trf 脚本级 E2E(已 PASS 2026-08-12)
+- baseline: acc=0.927, latency=0.928ms(d=96/4-block transformer, 455K params)
+- Puzzle 后: **acc=0.958**(Δ=0.031≤0.5 ✓)、**latency=0.453ms**(ratio=0.488≤0.5 ✓)
+- gate_status=pass / both-met。全链 expand→bld(48 variant)→score→latency→mip→build→gkd(4ep/1876step 真实数据)→gate
 
-**必读**：release note `docs/releases/2026-08-11-nas-supernet-latency-unit-and-subnet-display.md`；SPEC `docs/specs/2026-08-11-nas-supernet-latency-unit-and-subnet-display.md`；CHANGELOG 顶部索引。
+### 让 AC 可达的关键修复(集成期发现 + 修)
+1. **预训练 father 贯穿**:expand load_state_dict + 存 father_state_dict.pt;bld/score/build/gkd/latency 用 load_father_model(原全链随机 init)
+2. **latency 模型**:standalone 单块(加性)+ **实测 floor**(全 block→_ZeroBlock 整模 latency, latency_floor.json);mip: selected = floor + Σ chosen_block ≤ target
+3. **attention no_op**(_ZeroBlock 零输出真删块)+ 默认候选加入
+4. **GKD 真实训练数据**(--train_loader_fn)+ CE hard-label(原合成 calib batch=2 只 6 step)
+5. **100 reps 稳定测量**(expand/latency/gate)
+6. workflow 加 inputs: pretrained_ckpt / train_loader_fn;agent.md 透传 --father_state / --train_loader_fn
 
-**遗留 / 待办**：
-- ℹ️ **v3 P0 后修（已推送 `0ca1b3b`）**：2b20663 提交的 v3（`ns3_search_pipeline/agent.md`）schema-gen 带与 v2 同根的 SyntaxError（`elif all isinstance`）+ `>file` 截空 + `latency_ms_field` 错值——洁净审查未逮功能性 bug（v3 跑起来同样 "missing latency_unit"）。已移植 v2 修法（isinstance 修正 + write-on-success + `__name__` + fail-loud + 值 `'latency'`）修复并推送。
-- [x] **sentinel `full_supernet_latency.py`（ns/ns2/ns3）已提交 `5265e5c`**：2b20663 的 `default=""` 让 v1/v3 us-runs 回归；改 `default=None` sentinel（None→保旧行为 / 显式空串→强制 ms），三份 byte-identical + 81 测试过。
-- [x] **Task 2（引擎）`latency_unit` 输入枚举**：`InputDef.enum` 字段 + 三层校验（schema 加载期 / cli bootstrap / orchestrator 镜像）+ 三版本 yaml 应用。spec-reviewer 12 项闭环（B1/B2/B4/B7 落地，B3/D8 defer）。`7b120ee`（framework+tests）+ `131b294`（yaml），25 测试覆盖 AC1-AC8，`tars validate` 0 error / 0 warning。详见 release note `docs/releases/2026-08-11-inputdef-enum.md`。
-- [x] **v2 P1 两项已提交 `a57190b`**：① ns{,2,3}_run_search detach 改 setsid（PGID==leader，leader 自记 .search_pid）+ HEAL 死机 `kill -- -<pgid>` 杀整组——根治旧 `nohup`+`kill $!` 只杀 wrapper、python 搜索被 reparent 占 GPU 的 orphan；WSL 实测不跨 run/项目、不碰 chart daemon。② ns{2,3}_report `charts_summary` 改扫 `charts/`（静态文件真落处）+ 缺静态时回落 `.nas-supernet_charts.jsonl` marker，修漏扫 + 误抓 `runs/retrain/test_metrics.json`。验证：两 report heredoc py_compile clean + pytest 81 passed。
-- [x] **S4a 三项小修已提交 `d768879`**：⑧ eta 负值→`max(0,...)` clamp（6 份）/ ⑦ pareto 冗余外层条件删除（3 份）/ ⑥ monitor grep 收紧（bare `error`→`error[:]`、加 traceback/exception、runtime*error 捕 RuntimeError；6 份）。行为对比 ⑥：old 3 false-pos+4 false-neg → new 0/0。
-- [x] **S4b 三项 SDD 已提交**（SPEC `docs/specs/2026-08-11-v2-audit-attribution-resume-ckpt.md` + spec-reviewer conditional-pass 3 Blocker Q1/Q2/Q5-Q6 全闭环）：③ expand 归因 marker 化（**仅 v2+v3**，v1 无 report 节点是 dead code；Step 0 rm 协议防跨 run/attempt 残留 + Step 1.5 unsupported 分支 `printf 'true'` best-effort；report 双信号 marker OR summary 子串兜底）/ ④ Step R 两分支重建 N（RESUME_SEARCH=latest-mtime 号 / RESUME_HEAL=max+1，禁一刀切 max+1 误杀在跑搜索；v1+v2+v3 同改）/ ⑤ ckpt 相对路径核验 → verify-and-close（status.sh case-block 已绝对化 + emit_result.py os.path.join(ad)，零旁路写相对）。36 新测试 + 81 chart 回归 + 58 struct 回归过；code-reviewer 闭环（0 Blocker / 2 建议 + 1 trivial 全补）。详见 [release note](docs/releases/2026-08-11-v2-audit-attribution-resume-ckpt.md)。
-- [ ] 真机 E2E（in-session headless `latency_unit: us` + 用户 script → 4 图 label=us / compare 真测量 / `subnet_structure.md` / A6 fail-loud）——属 test-agent 范围。
+### orca in-session bootstrap(通过)
+`orca puzzle --inputs '{...}'` 解析+启动 run+chart daemon+web UI+entry=pz_expand 全 OK(test run 已 stop 清理)。
+
+### 待办
+- [ ] mnist_trf **in-session 全驱动**(orca next 逐节点,验 agent.md 编排;脚本级已证 AC)
+- [ ] **target 适配**:multi-input 模型(4 输入,dummy/latency/forward 需扩多输入)+ InfoNCE cosine 打分/GKD + model.py 补 build_model/DUMMY_INPUT/eval_model_acc(model)->float
+- [ ] code-reviewer delta 终审(进行中)+ 修反馈
+- [ ] 用户确认后 commit(global 规则)
+
+**必读**：SPEC `docs/specs/phase-puzzle-impl.md`；设计草稿 `docs/specs/puzzle-design-draft.md`；`workflows/puzzle.yaml`；fixture `/mnt/d/Projects/playground/mnist_trf/`。
+
+---
+
+## 遗留（nas-supernet，跨任务未决）
+
+- [ ] 真机 E2E(in-session headless `latency_unit: us` + 用户 script → 4 图 label=us / compare 真测量 / `subnet_structure.md` / A6 fail-loud)——属 test-agent 范围。
+- ℹ️ v3 P0 已修（`0ca1b3b`）；Task 2 enum 已提交（`7b120ee`+`131b294`）；v2 P1/P1（`a57190b`）；S4a（`d768879`）；S4b SDD 三项已提交。详见各 release note + CHANGELOG。
 
 ---
 

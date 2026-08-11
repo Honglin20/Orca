@@ -1,0 +1,335 @@
+name: puzzle
+description: "Puzzle decomposed-NAS 全链流水线(Bercovich 2025, ICML 范式): 识别可替换 block slot → BLD 块级蒸馏建库(每 (layer,variant) 独立模仿原块) → replace-1-block 打分 + per-variant latency 实测 → MIP grouped-knapsack 在 latency 预算下全局选逐层异构架构 → GKD 末段全局 KD 修块间兼容 → AC gate(精度损失≤0.5、时延降≥一半)。6 agent 节点 + 4 terminate(全 fail-loud:模型不可替换 / MIP 无候选 / GKD 失败 / AC 不达标)。非超网、非 predictor——逐层 block 类型异构替换(synthesizer/relu-attn/fnet 等 mixer 库)。pz_build_library / pz_retrain 走有界轮询 + 无上限自愈(单 turn 连续 ~9min monitor 块全程监控直到真正完成,进程死/发散触发 HEAL-LOOP 无上限自愈,turn 到顶换 sub-agent 经 status.sh 真相源续接;rc=0 + 进程退出 + ckpt 有效才认完成,中断残留续训,未完成不产出 JSON)。pz_select / pz_report 为确定性 Bash(zero-LLM)。可视化全固化进节点确定性脚本:progress_watcher 边训练 tail progress.jsonl 边推实时多指标曲线;pz_score 推 3 图(block_score/latency_dist/scatter);pz_report 推 baseline-vs-optimized metrics_bar。复用 nas-supernet v1 的 in-session 执行契约(orca CLI + chart daemon + artifact 约定 + fail-loud + self-heal 白名单审计字段 healed_files/fidelity_retriggered)。"
+
+entry: pz_expand
+
+# ─────────────────────────────────────────────────────────────────────────────
+# inputs —— 三档标签(contract §6):[ask]=业务决策必填 / [advanced]=罕见
+# override 可选 / [default]=工程默认。seed 全 workflow 必有(contract §6 Tier A 子类)。
+# $ORCA_ARTIFACTS_DIR(in-session 入口注入):project_root 非空绝对路径 →
+# <project_root>/artifacts/puzzle/(project-scoped,跨 run 复用 + 多 wf 隔离);
+# 否则 per-run runs/<run_id>/artifacts/ 回落。
+# ─────────────────────────────────────────────────────────────────────────────
+inputs:
+  project_root:
+    type: string
+    description: "[ask] 用户原始 PyTorch 项目根目录绝对路径。block slot 识别 / fidelity 校验 / GKD 重训都以源项目为锚点。亦作 in-session project-scoped artifacts 解析锚点(绝对路径,否则 bootstrap fail loud)"
+    required: true
+  model_path:
+    type: string
+    description: "[ask] 目标模型入口文件路径(相对 project_root 或绝对),含 build_model(**cfg) 工厂或可实例化的 nn.Module。pz_expand flatten 此文件生成 <base>_flat.py 并枚举可替换 sub-block。项目内唯一锚点,必须用户给"
+    required: true
+  pretrained_ckpt:
+    type: string
+    description: "[ask] 预训练父模型权重 .pt 路径(state_dict,相对 project_root 或绝对)。Puzzle 的 father/teacher/baseline 必须是预训练模型——pz_expand load_state_dict 此文件并保存 father_state_dict.pt 供全链(bld teacher / score 冻结模型 / gkd teacher / gate baseline)复用同一份权重。无预训练模型时 Puzzle 无的放矢(baseline=chance),必须用户给"
+    required: true
+  build_fn:
+    type: string
+    description: "[ask] model_path 内实例化模型的函数名(如 build_model),零参或接 build_cfg。pz_expand 调此函数得父模型用于 flatten / 基线测量 / BLD teacher。必须用户给(或与 model.py 的 build_model 默认契约一致)"
+    required: false
+    default: "build_model"
+  build_cfg:
+    type: string
+    description: "[advanced] 传给 build_fn 的 JSON kwargs(如 '{\"num_blocks\":4,\"embed_dim\":64}');空则零参调用"
+    required: false
+    default: ""
+  eval_fn:
+    type: string
+    description: "[ask] project_root 内评估函数名(如 evaluate / eval_model),返回 top-1 acc 或 loss。pz_expand 测基线 acc、pz_report 测最终 acc 都调它。InfoNCE/分类/回归皆可,方向由 manifest 判。必须用户给(精度 AC 的度量源)"
+    required: true
+  eval_kind:
+    type: string
+    enum: [classification, embedding, regression]
+    description: "[ask] 评估范式:classification=top-1 acc(higher-better,打分用 KL logits);embedding=度量学习如 InfoNCE/k-NN acc(higher-better,打分用 hidden cosine distance);regression=loss(lower-better)。决定 pz_score 打分指标 + pz_report ACC 方向。必须用户给"
+    required: true
+  train_loader_fn:
+    type: string
+    description: "[ask] 训练数据 loader 的 path::func(如 <project_root>/train.py::build_dataloader),零参调用返回 re-iterable DataLoader。pz_retrain 的 GKD **必须用真实训练数据**才能恢复精度——空串回退合成 calib(仅 dry-run,acc 恢复弱)。必须用户给"
+    required: true
+  target_latency:
+    type: number
+    description: "[ask] MIP latency 预算(单位由 latency_unit 决定,默认 ms)。pz_select 调 mip_select.py 下传 --target-latency:在 latency ≤ target 的可行解里 max-Σscore。为满足 LAT AC(时延降一半)应设为 ≤ baseline_latency/2;pz_report 另独立断言 latency_opt ≤ baseline/2。必须用户给(NAS 无目标 = 瞎搜)"
+    required: true
+  latency_unit:
+    type: string
+    enum: [ms, us, s]
+    description: "[advanced] latency 测量值声明单位(ms|us|s,默认 ms)。全链路 label/列名/caption/比较按此单位;不换算数值(只标注)。默认 estimator 路径恒返回 ms——声明 us/s 必须同时给 latency_script_path(bootstrap fail-loud 守卫)"
+    required: false
+    default: "ms"
+  latency_script_path:
+    type: string
+    description: "[advanced] 用户外部时延脚本路径(可选,格式 path::func)。提供则全链路时延唯一权威——pz_score 生成 latency 表时包装此脚本,select/report 的 latency 全部同源,禁 fallback 到内置 PyTorch / FLOPs / 任何代理。未提供(默认)走 nas-agent 内置 measure_module_latency(PyTorch median ms)"
+    required: false
+    default: ""
+  block_candidates:
+    type: string
+    description: "[advanced] 候选块配置 JSON。默认集:attention={identity,random_synthesizer,relu_attention,fnet,softs_star,vanilla};ffn={identity,ffn_75,ffn_50,linear,no_op}。可覆盖如 '{\"attention\":[\"identity\",\"fnet\",\"random_synthesizer\"],\"ffn\":[\"identity\",\"ffn_50\",\"no_op\"]}'"
+    required: false
+    default: ""
+  accuracy_tolerance:
+    type: number
+    description: "[advanced] ACC AC 容差:|acc_opt - acc_base| ≤ 此值(默认 0.5)。pz_report 硬断言"
+    required: false
+    default: 0.5
+  seed:
+    type: int
+    description: "[default] 复现性种子(默认 0)。全 workflow 必填(contract §6 Tier A);agent.md 经 {{ inputs.seed }} 下传到 BLD/GKD 脚本 --seed,deterministic 路径全固定此 seed"
+    required: false
+    default: 0
+
+# 跨字段 input 不变量——bootstrap fail-loud 校验:
+# latency_unit∈{us,s} ⇒ latency_script_path 必须非空(默认 estimator 恒 ms,非 ms 声明必错标)。
+input_invariants:
+  - when_field: latency_unit
+    when_in: ["us", "s"]
+    require_nonempty: [latency_script_path]
+    message: "声明 latency_unit 为 us/s 时必须提供 latency_script_path(默认 PyTorch estimator 恒返回 ms,非 ms 声明必错标)"
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 1: pz_expand(entry)
+  #   flatten 用户模型 → 识别可替换 sub-block slot(逐层 attention/ffn)→ 生成
+  #   block_map.json(slot 清单 + I/O shape)→ 实测父模型基线 acc + latency →
+  #   project_manifest.md。模型类型不可替换(无 attention/ffn sub-block)→ 路由
+  #   terminate_unsupported(fail loud,不烧后续 BLD/搜索算力)。
+  #   跑 workflow-verifier + memory-verifier(read+embed 协议)。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: pz_expand
+    kind: agent
+    agent: pz_expand
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [output_dir, model_type, model_type_supported, flat_model_path, block_map_path, baseline_metrics_path, baseline_acc, baseline_latency, latency_unit, fidelity_passed, workflow_verifier_passed, error, generated_artifacts]
+      properties:
+        output_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR 绝对路径"}
+        model_type: {type: string, description: "标签(isotropic_transformer / hierarchical_transformer / cross_fusion_transformer / cnn / 'No supported match')"}
+        model_type_supported: {type: boolean, description: "true=存在可替换 attention/ffn sub-block;false=不可替换 → 路由 terminate_unsupported"}
+        flat_model_path: {type: string, description: "<base_name>_flat.py 路径;不支持时空串"}
+        block_map_path: {type: string, description: "block_map.json 路径(逐层 slot 清单 + I/O shape)"}
+        baseline_metrics_path: {type: string, description: "baseline_metrics.json 路径(acc + latency)"}
+        baseline_acc: {type: number, description: "父模型基线 acc(eval_fn 测;方向由 eval_kind 决定);不可替换时为 0"}
+        baseline_latency: {type: number, description: "父模型基线 latency(单位 = latency_unit);不可替换时为 0"}
+        latency_unit: {type: string, enum: [ms, us, s], description: "latency 单位(透传自 inputs.latency_unit)"}
+        fidelity_passed: {type: boolean, description: "本节点无 fidelity-verifier 调用 → 恒 true(vacuous)"}
+        workflow_verifier_passed: {type: boolean, description: "workflow-verifier all-pass → true;unsupported stop → false"}
+        error: {type: string, description: "fail loud 时根因;成功→空串"}
+        generated_artifacts:
+          type: array
+          items: {type: string}
+          description: "相对 output_dir 的产物路径列表(至少 project_manifest.md / <base>_flat.py / block_map.json / baseline_metrics.json)"
+      additionalProperties: false
+    routes:
+      - when: "pz_expand.output.model_type_supported != false"
+        to: pz_build_library
+      - to: terminate_unsupported
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 2: pz_build_library(有界轮询 + 无上限自愈——节点常驻到 BLD 真正完成)
+  #   读 block_map + flat_model → 生成 bld.py(Blockwise Local Distillation:每个
+  #   (layer,variant) 候选块用 normalized MSE 蒸馏到模仿父块输出,冻结 teacher,
+  #   喂父激活;Decoupled BLD 降本)→ fidelity 复查 → detach 跑 → 有界轮询 monitor
+  #   + 无上限自愈 → 产出 block_library/<layer>_<variant>.pt + bld_summary.json。
+  #   未完成不产出 JSON;rc=0 + 进程退出 + 全 ckpt 有效才认完成。status ∈ {executed, failed}。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: pz_build_library
+    kind: agent
+    agent: pz_build_library
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [status, artifacts, assessment, max_retries_hit, healed_files, fidelity_retriggered]
+      properties:
+        status: {type: string, enum: [executed, failed], description: "executed=BLD 真正完成(.bld_rc==0 + 进程退出 + 全 (layer,variant) ckpt 有效);failed=禁碰-blocked / 缺上游(block_map/flat_model)。节点常驻:未完成前不产出 JSON,有界轮询 + 无上限自愈直到完成"}
+        artifacts:
+          type: array
+          items: {type: string}
+          description: "成功时 [block_library 目录 + bld_summary.json];failed 时 []"
+        assessment: {type: string, description: "软判断:候选块数 / 各 variant BLD loss 摘要 / 收敛;failed 时含 last_error 日志尾部"}
+        max_retries_hit: {type: boolean, description: "true=触碰禁碰/缺上游而非重试次数耗尽"}
+        healed_files:
+          type: array
+          items: {type: string}
+          description: "本次 self-heal edit 过的文件相对路径(审计字段,对照禁碰清单;应仅含 bld.py / run_bld.sh)"
+        fidelity_retriggered: {type: boolean, description: "true=本次改 BLD logic(loss/数据)并重触 project-fidelity-verifier"}
+      additionalProperties: false
+    routes:
+      - to: pz_score
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 3: pz_score(执行 replace-1-block 打分 + per-variant latency)
+  #   生成 score.py + latency_table.py → 对每个 (layer,variant):把该块替换进冻结
+  #   全模型,calibration 上算 block-distance 分(classification=KL logits;
+  #   embedding=hidden cosine distance;regression=output MSE)+ per-variant 实测
+  #   latency(nas-agent measure_module_latency 或包装用户 latency_script_path)→
+  #   scores.jsonl + latency_table.jsonl。无上限自愈直到产物 ≥1 行。推 3 图。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: pz_score
+    kind: agent
+    agent: pz_score
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [status, artifacts, assessment, max_retries_hit, healed_files, fidelity_retriggered]
+      properties:
+        status: {type: string, enum: [executed, failed], description: "executed=RC=0 + scores.jsonl 与 latency_table.jsonl 均 ≥1 行且 (layer,variant) 对齐;failed=缺上游 block_library / 禁碰-blocked / 脚本不存在"}
+        artifacts:
+          type: array
+          items: {type: string}
+          description: "成功时 [scores.jsonl, latency_table.jsonl];failed 时 []"
+        assessment: {type: string, description: "软判断:打分的 (layer,variant) 数 / 各 variant 平均分 / latency 分布;failed 时含 last_error 日志尾部"}
+        max_retries_hit: {type: boolean, description: "true=触碰禁碰/缺上游而非重试次数耗尽"}
+        healed_files:
+          type: array
+          items: {type: string}
+          description: "本次 self-heal edit 过的文件相对路径(应仅含 score.py / latency_table.py / run_score.sh)"
+        fidelity_retriggered: {type: boolean, description: "true=本次改 scoring logic 并重触 project-fidelity-verifier"}
+      additionalProperties: false
+    routes:
+      - to: pz_select
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 4: pz_select(确定性 Bash,zero-LLM)
+  #   运行 mip_select.py(pulp grouped-knapsack)恰好一次——读 scores.jsonl +
+  #   latency_table.jsonl + target_latency,max Σscore s.t. Σlatency ≤ target,
+  #   每层恰选一 variant;stdout 单行 JSON 作唯一最终回复。脚本非 0 / selected_arch
+  #   空 → terminate_select_failed。路由守卫:selected_arch 非空 + feasible。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: pz_select
+    kind: agent
+    agent: pz_select
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [selected_arch, total_score, selected_latency, latency_unit, feasible, select_reason]
+      properties:
+        selected_arch:
+          type: ["object", "null"]
+          description: "逐层 variant 赋值 {layer_idx: {attention: <variant>, ffn: <variant>}};无候选时 {} 或 null"
+        total_score: {type: number, description: "选定架构的 Σscore;无候选时 0"}
+        selected_latency: {type: number, description: "选定架构 Σlatency(单位 = latency_unit);无候选时 0"}
+        latency_unit: {type: string, enum: [ms, us, s], description: "latency 单位(透传)"}
+        feasible: {type: boolean, description: "true=Σlatency ≤ target_latency;false=超预算或无候选"}
+        select_reason:
+          type: string
+          enum: [mip-optimal, infeasible, none]
+          description: "mip-optimal=MIP 在预算内找到最优;infeasible=预算太紧无解;none=scores/latency 缺 fail-loud sentinel"
+      additionalProperties: false
+    routes:
+      - when: "pz_select.output.selected_arch and pz_select.output.feasible"
+        to: pz_retrain
+      - to: terminate_select_failed
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 5: pz_retrain(有界轮询 + 无上限自愈——节点常驻到 GKD 真正完成)
+  #   读 selected_arch + block_library → 生成 build_selected.py(实例化逐层异构
+  #   架构,从块库 load 各 variant 权重)+ gkd_retrain.py(末段全局 KD:cosine
+  #   hidden + KL logits[分类],KDWeightScheduler warmup)→ fidelity 复查 →
+  #   detach 跑 → 有界轮询 + 无上限自愈 → final_model.pt。baseline-vs-optimized
+  #   对比图归 pz_report 的 gate_report.py 负责(retrain 不重复)。
+  #   status ∈ {executed, failed}——无 detached。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: pz_retrain
+    kind: agent
+    agent: pz_retrain
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [status, artifacts, assessment, max_retries_hit, healed_files, fidelity_retriggered]
+      properties:
+        status: {type: string, enum: [executed, failed], description: "executed=GKD 真正完成(.retrain_rc==0 + 进程退出 + final ckpt 有效,含续训完成);failed=禁碰-blocked / 缺关键上游(selected_arch/block_library)。节点常驻:未完成前不产出 JSON,有界轮询 + 无上限自愈直到完成"}
+        artifacts:
+          type: array
+          items: {type: string}
+          description: "成功时 [final_model.pt 路径];failed 时 []"
+        assessment: {type: string, description: "软判断:GKD loss 收敛 / final eval acc 摘要;failed 时含 last_error 日志尾部"}
+        max_retries_hit: {type: boolean, description: "true=触碰禁碰/缺上游而非重试次数耗尽"}
+        healed_files:
+          type: array
+          items: {type: string}
+          description: "本次 self-heal edit 过的文件相对路径(应仅含 build_selected.py / gkd_retrain.py / run_retrain.sh)"
+        fidelity_retriggered: {type: boolean, description: "true=首次生成后或 self-heal 改 GKD logic 后跑过 project-fidelity-verifier"}
+      additionalProperties: false
+    routes:
+      - when: "pz_retrain.output.status == 'executed'"
+        to: pz_report
+      - to: terminate_retrain_failed
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 6: pz_report(确定性 Bash gate,zero-LLM)
+  #   测 final_model 的 acc + latency,对照 baseline_metrics → 断言
+  #   |acc_opt - acc_base| ≤ accuracy_tolerance(默认 0.5)且 latency_opt ≤ baseline/2。
+  #   写 final_report.md + gate_result.json,推 baseline-vs-optimized metrics_bar。
+  #   AC 任一不达标 → select_reason 映射 terminate_gate_failed。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: pz_report
+    kind: agent
+    agent: pz_report
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [gate_status, final_acc, final_latency, baseline_acc, baseline_latency, acc_delta, latency_ratio, latency_unit, gate_reason, report_path]
+      properties:
+        gate_status: {type: string, enum: [pass, fail], description: "pass=ACC 与 LAT 双 AC 达标;fail=任一不达标"}
+        final_acc: {type: number, description: "final_model 的 acc(eval_fn 测)"}
+        final_latency: {type: number, description: "final_model 的 latency(单位 = latency_unit)"}
+        baseline_acc: {type: number, description: "透传 baseline acc"}
+        baseline_latency: {type: number, description: "透传 baseline latency"}
+        acc_delta: {type: number, description: "|final_acc - baseline_acc|"}
+        latency_ratio: {type: number, description: "final_latency / baseline_latency(达标要求 ≤ 0.5)"}
+        latency_unit: {type: string, enum: [ms, us, s], description: "latency 单位(透传)"}
+        gate_reason:
+          type: string
+          enum: [both-met, acc-miss, latency-miss, both-miss]
+          description: "both-met=双达标;acc-miss=精度损失超容差;latency-miss=时延未降一半;both-miss=两者均未达"
+        report_path: {type: string, description: "final_report.md 路径"}
+      additionalProperties: false
+    routes:
+      - when: "pz_report.output.gate_status == 'pass'"
+        to: $end
+      - to: terminate_gate_failed
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Terminate 节点——status: failed;routes 必空;不作 entry / 不进 parallel。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: terminate_unsupported
+    kind: terminate
+    status: failed
+    reason: "pz_expand 判定用户模型无可替换 attention/ffn sub-block(model_type_supported=false)——Puzzle 异构替换无的放矢,expand 阶段即拒绝,不进 BLD/搜索。检查 model.py 是否为含 attention/FFN 子块的 transformer 族(或换 cnn+conv-block 候选路径)。"
+
+  - name: terminate_select_failed
+    kind: terminate
+    status: failed
+    reason: "pz_select 未能选出架构(mip_select.py 失败 / scores.jsonl 或 latency_table.jsonl 缺或空 / 预算太紧 infeasible / selected_arch 空)。回看 pz_score.output.assessment 与 $ORCA_ARTIFACTS_DIR/runs/score/ 日志,或放宽 target_latency。"
+
+  - name: terminate_retrain_failed
+    kind: terminate
+    status: failed
+    reason: "pz_retrain 未能产出 final_model ckpt(禁碰-blocked / 缺 selected_arch 或 block_library / GKD 发散)。回看 pz_retrain.output.assessment(含 last_error 日志尾部)与 $ORCA_ARTIFACTS_DIR/runs/retrain/ 日志定位 GKD 失败根因。"
+
+  - name: terminate_gate_failed
+    kind: terminate
+    status: failed
+    reason: "pz_report AC gate 不达标:精度损失 > accuracy_tolerance 或 时延未降到 baseline 的一半。回看 pz_report.output.gate_reason 与 final_report.md —— 若 acc-miss 考察 GKD 是否充分/候选块质量;若 latency-miss 考察 target_latency 是否 ≤ baseline/2 且 MIP 是否真在预算内选了架构。"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# outputs —— 终态(pz_report→$end)映射关键产物供 orchestrator / 下游消费。
+# ─────────────────────────────────────────────────────────────────────────────
+outputs:
+  result: "{{ pz_report.output }}"
+  gate_status: "{{ pz_report.output.gate_status }}"
+  final_acc: "{{ pz_report.output.final_acc }}"
+  final_latency: "{{ pz_report.output.final_latency }}"
+  baseline_acc: "{{ pz_report.output.baseline_acc }}"
+  baseline_latency: "{{ pz_report.output.baseline_latency }}"
+  acc_delta: "{{ pz_report.output.acc_delta }}"
+  latency_ratio: "{{ pz_report.output.latency_ratio }}"
+  selected_arch: "{{ pz_select.output.selected_arch }}"
+  output_dir: "{{ pz_expand.output.output_dir }}"
+  block_map: "{{ pz_expand.output.block_map_path }}"
