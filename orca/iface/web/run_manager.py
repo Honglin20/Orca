@@ -2353,7 +2353,12 @@ def _scan_terminal_type(path: Path) -> str | None:
     """read-only 扫 tape 找最末的终态事件类型（D3：不进 bus，仅 status 判定）。
 
     返回 ``"workflow_completed"`` / ``"workflow_failed"`` / ``"workflow_cancelled"``
-    或 None（无终态事件）。用于 ``attach_run`` 跳过终态 tape 的 follow task。
+    或 None（无终态事件 / 已被 ``workflow_resumed`` 重新激活）。用于 ``attach_run``
+    跳过终态 tape 的 follow task。
+
+    SPEC 2026-08-11 §2.4：``workflow_resumed`` 把 run 从 failed 翻回 running ——
+    扫到时清 ``last_terminal=None``（resume 重新激活 → 非终态），让 resumed run
+    被 attach_run 当活 run（起 follow + status=running）。
     """
     last_terminal: str | None = None
     try:
@@ -2364,6 +2369,8 @@ def _scan_terminal_type(path: Path) -> str | None:
                 "workflow_cancelled",
             ):
                 last_terminal = event.type
+            elif event.type == "workflow_resumed":
+                last_terminal = None   # SPEC 2026-08-11 §2.4：resume 重新激活 → 非终态
     except FileNotFoundError:
         return None
     return last_terminal
@@ -2374,6 +2381,9 @@ def _probe_head_and_terminal(path: Path) -> tuple[Event | None, str | None]:
 
     返回 ``(first_event, last_terminal_type)``。partial / 空 → ``(None, None)``。
     一遍扫描完成两个意图：首个有效事件 + 是否已到终态。
+
+    SPEC 2026-08-11 §2.4：``workflow_resumed`` 清 ``last_terminal=None``（resume
+    重新激活 → 非终态），与 ``_scan_terminal_type`` 语义一致（DRY：同模块同判定）。
     """
     first_event: Event | None = None
     last_terminal: str | None = None
@@ -2387,6 +2397,8 @@ def _probe_head_and_terminal(path: Path) -> tuple[Event | None, str | None]:
                 "workflow_cancelled",
             ):
                 last_terminal = event.type
+            elif event.type == "workflow_resumed":
+                last_terminal = None   # SPEC 2026-08-11 §2.4：resume 重新激活 → 非终态
     except FileNotFoundError:
         return (None, None)
     return (first_event, last_terminal)
@@ -2494,6 +2506,10 @@ OVERVIEW_AFFECTING_EVENT_TYPES: frozenset[str] = frozenset(
         "workflow_completed",
         "workflow_failed",
         "workflow_cancelled",
+        # SPEC 2026-08-11 §2.4：workflow_resumed 影响 run_status（failed→running 翻转），
+        # 须走 full-parse 分支（非 bulk count-only）。从 BULK 重分类至此（原本是 no-op reducer
+        # 时归 bulk 正确；resume-failed SPEC 赋予 status 翻转语义后须重分类）。
+        "workflow_resumed",
         "node_started",
         "node_completed",
         "node_failed",
@@ -2533,7 +2549,7 @@ _META_BULK_MARKERS = (
     '"interrupt_resolved"',
     '"human_decision_requested"',
     '"human_decision_resolved"',
-    '"workflow_resumed"',
+    # SPEC 2026-08-11 §2.4：workflow_resumed 移至 OVERVIEW_AFFECTING（影响 run_status）。
     # ``error`` 事件不影响 overview 派生（agents/charts/cost/run_status），只计 count/seq，
     # 显式归入 bulk 档（AC14 完备性：必须归入一档，避免契约 test 失败）。
     '"error"',
@@ -2702,6 +2718,14 @@ def _scan_meta_overview(path: Path) -> tuple[int, int, int, dict | None]:
                     wf_status = "failed"
                 elif t == "workflow_cancelled":
                     wf_status = "cancelled"
+                elif t == "workflow_resumed":
+                    # SPEC 2026-08-11 §2.4：对齐 reducer（§1.3）—— failed → running 翻转
+                    # （resume-failed 重新激活）；非 failed 状态 no-op（headless crash-resume
+                    # 时 status 本就 running；completed/cancelled 不应出现 resume，防御性不翻）。
+                    # 同步清 ended_ts（run 未结束，stale 终态时间戳不冻结 elapsed）。
+                    if wf_status == "failed":
+                        wf_status = "running"
+                        ended_ts = None
                 elif t == "node_started" and isinstance(node, str):
                     node_status[node] = "running"
                 elif t == "node_completed" and isinstance(node, str):

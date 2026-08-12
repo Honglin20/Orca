@@ -380,6 +380,12 @@ class Workflow(BaseModel):
     requires: list[str] = []  # 运行时依赖声明（plan sprightly-questing-donut §1.4）。含
     # ``"knowledge_base"`` → run 启动预检 KB 存在（``resolve_kb_dir`` 非空），缺则 fail-loud
     # （清晰指引 + searched 路径），不进 setup agent。默认空 = 无外部依赖。
+    # in-session recoverable 失败升格上限（per-node 连续 output_schema_mismatch /
+    # agent_blocked 次数）。撞上限 → workflow_failed（终态，可经 orca next --run-id resume）。
+    # 与 RetryPolicy.max_attempts（transient 失败，独立预算，line 104 同 ge=1 fail loud 模式）
+    # 正交。ge=1：0 会让升格判定退化（首次失败即升格语义应显式写 1，而非 0 偷偷触发）。
+    # SPEC 2026-08-11-resume-failed-and-configurable-escalation §1.1。
+    recoverable_max_attempts: int = Field(default=20, ge=1)
     # 运行时加载元数据（不进 YAML 契约，serialize 排除）：workflow yaml 所在目录，由
     # ``load_workflow`` 加载期绑定一次。run 层所有 RunContext 构造点从它推导
     # ``subagents_root = workflows_root / "subagents" / wf.name``（point-to-file 协议

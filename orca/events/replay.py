@@ -234,6 +234,17 @@ def apply_event(state: RunState, event: Event) -> RunState:
         # 按 seq last-wins）。本 reducer 保持 no-op 让 live/replay 同形（铁律 3）。
         return state
 
+    # SPEC 2026-08-11-resume-failed-and-configurable-escalation §1.3：workflow_resumed 从
+    # 下方 no-op 元组抽出为独立分支——resume-failed 时终态 failed → running 翻转（让 fold
+    # tape 的入口：web/status/list 看到 resume 后 run 重新活跃）。崩溃-resume（headless
+    # run_from_state）时 tape 无终态事件，status 本就是 running → 翻转 no-op，不破坏既有语义。
+    # 幂等：failed→running 后第二条 workflow_resumed 看到 running → no-op（SPEC §3.4 规则 8）。
+    # 不翻 cancelled/completed：cancelled 保持终态（用户主动 stop）；completed 无意义。
+    if t == "workflow_resumed":
+        if state.status == "failed":
+            return state.model_copy(update={"status": "running"})
+        return state
+
     # web-shell-v2 §3.2 B1 / D8：agent_step_started（liveness 心跳）+ unknown_event
     # （tape 级 escape hatch）MUST no-op——绝不投影进 RunState（仅 LogStream 渲染）。
     # unknown_event 透传整条 raw 行进 tape 便于排查协议漂移，但 RunState 不能被污染
@@ -249,24 +260,21 @@ def apply_event(state: RunState, event: Event) -> RunState:
         return state.model_copy(update={"current_node": to})
 
     # 已知但顶层 RunState 不投影的事件：foreach_* / human_decision_* / custom / error /
-    # phase 11 中断 + resume + retry + validator + wait + dialog 可观测事件。
+    # phase 11 中断 + retry + validator + wait + dialog 可观测事件。
     # 这些事件的语义留给前端 reducer（按 session_id 分组 / 自定义渲染）：
     # - foreach 输出随 node_completed 进 context；
     # - gate 决策、custom 渲染不进顶层状态；
     # - error 细节由 workflow_failed 分支承担状态转换（已处理）；
-    # - interrupt_*/prompt_rendered/workflow_resumed/retry_*/validator_*/wait_* 是可观测标记，
-    #   不改顶层状态（resume 后状态由已落盘的 node_completed/route_taken 重建，resumed 事件
-    #   本身不推进 node_status / current_node —— drive_loop 后续 dispatch 才推进；
-    #   retry/validator 的最终成败由它们包裹的 node_completed/node_failed 承担，retry_started/
-    #   validator_started 等本身不推进 node_status —— 否则同 node 多 attempt 会让 running/done
-    #   状态反复跳）。
+    # - interrupt_*/prompt_rendered/retry_*/validator_*/wait_* 是可观测标记，不改顶层状态
+    #   （resume 后状态由已落盘的 node_completed/route_taken 重建；retry/validator 的最终
+    #   成败由它们包裹的 node_completed/node_failed 承担）。
     # - dialog_*（SPEC §11.7 裁定 1）：dialog 是 post-run 可观测事件，唯一真相在 tape 的
     #   dialog_message 事件（不写 ctx.dialog_history）；不推进 node_status / current_node。
     # 保持 reducer 幂等 + 最小。
     if t in (
         "foreach_started", "foreach_item_started", "foreach_item_completed",
         "foreach_completed", "prompt_rendered",
-        "workflow_resumed", "retry_started", "retry_succeeded", "retry_exhausted",
+        "retry_started", "retry_succeeded", "retry_exhausted",
         "validator_started", "validator_passed", "validator_failed",
         "wait_started", "wait_completed",
         "dialog_started", "dialog_message", "dialog_ended",

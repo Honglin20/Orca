@@ -67,9 +67,12 @@ ERR_INTERNAL_ERROR = "internal_error"
 # 集合扩为 {output_schema_mismatch, agent_blocked}，共用 _recover_step_result + 升格 + 信封）。
 ERR_AGENT_BLOCKED = "agent_blocked"
 
-# SPEC 2026-07-23-in-session-error-management §2 P4：同节点连续 recoverable 失败上限。
-# 撞上限 → 升格 workflow_failed（防死循环）。对齐哨兵 MAX_ASK=3，不可配（YAGNI）。
-_RECOVERABLE_ESCALATE_AT = 3
+# SPEC 2026-08-11-resume-failed-and-configurable-escalation §2.1.B：recoverable 升格上限
+# 从硬编码 3 改为 workflow 级可配 ``Workflow.recoverable_max_attempts``（默认 20）。本常量仅
+# 是 schema default 的单一来源引用（``Field(default=_DEFAULT_RECOVERABLE_MAX_ATTEMPTS)``）；
+# 运行期一律读 ``wf.recoverable_max_attempts``（advance_step / _recover_step_result /
+# _render_failure_history / idempotent-replay 分支全部改读它，不再引本常量）。
+_DEFAULT_RECOVERABLE_MAX_ATTEMPTS = 20
 
 # SPEC 2026-08-04 §4.4：失败哨兵教学脚注（host contract，恒 append 到 agent 节点 prompt 末尾）。
 # 极简、不改节点任务指令语义（与 ask_user routing 脚注 / memory 注入同 host-contract append 模式）。
@@ -156,6 +159,10 @@ class StepResult:
     # warn=True → compliance 计数达 warn 阈值（cli 层注解，advance_step 本身不置位）。
     recoverable: bool = False
     warn: bool = False
+    # SPEC 2026-08-11 §2.1.C：resume failed run 时置位。CLI 据此重建 marker +
+    # reply 加 ``"resumed": True`` 标记。区别于 recoverable（recoverable = 节点产出坏但 run
+    # 一直存活；resumed = run 曾终态 failed，现已 re-arm 重新活跃）。
+    resumed: bool = False
     retry_count: int | None = None     # 本次是第几次重试（1-based）
     retry_budget: int | None = None    # 剩余重试次数（N - retry_count）
     error_kind: str | None = None      # recoverable/warn 的 error_kind（output_schema_mismatch / subagent_compliance）
@@ -186,7 +193,10 @@ def consecutive_failures(tape: Tape, node: str) -> list[dict]:
 
     派生谓词同 ``consecutive_fail_count``（E1 钉死）：遇 ``node_completed(任意节点)`` 归零；
     计 ``node_failed(node)`` 的 ``data``（缺字段 data → ``{}``，消费方 ``.get()`` 防御，AC11/13）。
-    正向单次扫描，物化 list O(k) 空间（k ≤ ``_RECOVERABLE_ESCALATE_AT-1`` = 2，N7 权衡可接受）。
+    正向单次扫描，物化 list O(k) 空间（k < ``wf.recoverable_max_attempts``，N7 权衡可接受）。
+
+    reset 边界（SPEC 2026-08-11 §2.1.D）：``workflow_resumed`` 也归零（resume = fresh start，
+    与 ``node_completed`` 同列）。resume 后计数器清零，与 ``StepResult.retry_count=0`` 一致。
 
     不进 reducer fold（``events/replay.py`` 零改边界）；``advance_step`` / ``_recover_step_result``
     在 recoverable 决策点调它。SSOT 在 tape。
@@ -194,6 +204,9 @@ def consecutive_failures(tape: Tape, node: str) -> list[dict]:
     records: list[dict] = []
     for event in tape.replay():
         if event.type == "node_completed":
+            records = []
+        elif event.type == "workflow_resumed":
+            # SPEC 2026-08-11 §2.1.D：resume = fresh start（失败计数清零，与 nc 同 reset 边界）。
             records = []
         elif event.type == "node_failed" and event.node == node:
             records.append(event.data or {})
@@ -510,18 +523,23 @@ def _kind_breakdown(records: list[dict]) -> str:
 
 def _render_failure_history(
     records: list[dict], retry_count: int, retry_budget: int,
+    max_attempts: int,
 ) -> str | None:
-    """kind-aware 有界文本块（SPEC 2026-08-04 §4.3）。
+    """kind-aware 有界文本块（SPEC 2026-08-04 §4.3 + 2026-08-11 §2.1.B 可配上限）。
 
     ``records`` 空 → 返 None（首 attempt 无块，AC2）。非空 → 返有界文本块（caller 传含本次的
-    records，``len ≤ _RECOVERABLE_ESCALATE_AT - 1``，m5）。``agent_blocked`` 显示 ``blocked_on``
+    records，``len < max_attempts``，m5）。``agent_blocked`` 显示 ``blocked_on``
     （fallback ``message``，N5）+ ``tried``；``output_schema_mismatch`` 显示 ``message``。
     纯文本拼接（不进 Jinja，防注入），作为 literal prepend。缺字段防御性 ``.get()``，永不崩（AC11/13）。
+
+    ``max_attempts`` 是 ``wf.recoverable_max_attempts`` 的透传值（纯函数，不引 wf——保持
+    纯度 + 依赖单向，SPEC 2026-08-11 §7）。显示在头部 ``retry_count/max_attempts`` 让 agent
+    知道升格阈值（可配后不再是固定 3）。
     """
     if not records:
         return None
     lines = [
-        f"## ⚠️ 本节点前序尝试失败（本次第 {retry_count}/{_RECOVERABLE_ESCALATE_AT} 次，"
+        f"## ⚠️ 本节点前序尝试失败（本次第 {retry_count}/{max_attempts} 次，"
         f"耗尽将终止 run）"
     ]
     for i, d in enumerate(records, 1):
@@ -546,8 +564,8 @@ def _recover_step_result(
 ) -> StepResult:
     """recoverable 自恢复（SPEC 2026-07-23 §4.2 + 2026-08-04 §4.3/§6 含本次 + 升格 kind）。
 
-    emit ``[node_failed, node_started]`` 重 arm 同节点；连续 ``_RECOVERABLE_ESCALATE_AT`` 次
-    未通过 → 升格 ``workflow_failed``。
+    emit ``[node_failed, node_started]`` 重 arm 同节点；连续 ``wf.recoverable_max_attempts``
+    次未通过 → 升格 ``workflow_failed``（SPEC 2026-08-11 §2.1.B：可配上限，默认 20）。
 
     计数语义（SPEC §4.3）：``count = consecutive_fail_count(tape, pending)`` 是**本次失败
     落 tape 前**的前序连续失败数；本次是第 ``count+1`` 次（1-based ``retry_count``）。
@@ -586,7 +604,7 @@ def _recover_step_result(
     # R-N2：含本次失败（从刚构造的 emits[0].data 取，本次尚未落 tape）。
     records_inclusive = consecutive_failures(tape, pending) + [emits[0].data]
 
-    if this_attempt >= _RECOVERABLE_ESCALATE_AT:
+    if this_attempt >= wf.recoverable_max_attempts:
         # 升格（E8 + m4/m6）：先 emit 本次 [nf, ns]，再追加 workflow_failed（tape 记录第 N 次真实失败）。
         breakdown = _kind_breakdown(records_inclusive)
         reason = (f"consecutive recoverable exhausted: 节点 {pending!r} 连续 "
@@ -601,8 +619,10 @@ def _recover_step_result(
                           error_kind=exc.error_kind)
 
     # 未升格 → 重 arm：重渲染 prompt（与正常 next 同形交付，compact/inline 由 prompts_dir 决定）。
-    retry_budget = _RECOVERABLE_ESCALATE_AT - this_attempt
-    failure_history = _render_failure_history(records_inclusive, this_attempt, retry_budget)
+    retry_budget = wf.recoverable_max_attempts - this_attempt
+    failure_history = _render_failure_history(
+        records_inclusive, this_attempt, retry_budget, wf.recoverable_max_attempts,
+    )
     ctx = _build_ctx(wf, _outputs_acc_from_state(state), inputs, rid,
                      workflows_root=workflows_root)
     prompt, prompt_file, rroot = _deliver(
@@ -611,13 +631,13 @@ def _recover_step_result(
         failure_history=failure_history,
     )
     hint = (
-        f"节点自报失败/产出不合 schema（第 {this_attempt}/{_RECOVERABLE_ESCALATE_AT} 次）。"
+        f"节点自报失败/产出不合 schema（第 {this_attempt}/{wf.recoverable_max_attempts} 次）。"
         f"重 arm 的 prompt 已含历次失败原因（含本次）——按你的判断重派（复用同 agent 或 fresh），"
         f"拿产出再 orca next --output（剩余 {retry_budget} 次）"
     )
     logger.info(
         "节点 %s recoverable 失败（第 %d/%d 次），重 arm（run=%s）",
-        pending, this_attempt, _RECOVERABLE_ESCALATE_AT, rid,
+        pending, this_attempt, wf.recoverable_max_attempts, rid,
     )
     return StepResult(
         emits=emits, done=False, node=pending,
@@ -652,7 +672,10 @@ def advance_step(
       - 重复无 output 调用（宿主丢失 prompt）：幂等重发 pending prompt，不 emit。
 
     幂等 / 终态：
-      - ``state.status`` 为终态（completed/failed/cancelled）→ 直接 ``{done, reason}``，不 emit。
+      - ``completed`` / ``cancelled`` → 直接 ``{done, reason}``，不 emit（幂等）。
+      - ``failed`` → SPEC 2026-08-11 §2.1.C resume 分支：re-arm 失败节点（= current_node），
+        emit ``[workflow_resumed, node_started]``，返 ``StepResult(resumed=True)``。无可定位
+        失败节点（current_node None / 非 agent）→ ``done=True, reason="failed_no_resumable_node"``。
       - ``output`` 给出但无 running 节点 → ``InSessionError``（状态腐败，fail loud）。
 
     v1 范围：仅 agent 节点（宿主 subagent 执行模型）；parallel / foreach / gate /
@@ -689,12 +712,55 @@ def advance_step(
     inputs = _resolve_inputs(wf, merged)
     rid = run_id or getattr(tape, "run_id", "") or ""
 
-    # 1. 已终态（重复调用 / crash 后重启撞终态）—— 幂等，不 emit。
-    if state.status in ("completed", "failed", "cancelled"):
+    # 1. 终态守卫（SPEC 2026-08-11 §2.1.A）：completed/cancelled 仍终态（幂等，不 emit）。
+    #    failed → 走 §2.1.C resume 分支（紧跟在 nodes 构造之后）。
+    if state.status in ("completed", "cancelled"):
         return StepResult(done=True, reason=f"already_{state.status}")
 
     nodes = _node_by_name(wf)
     emits: list[Emit] = []
+
+    # 1b. failed → resume 分支（SPEC 2026-08-11 §2.1.C）：re-arm 失败节点 = state.current_node。
+    #     emit [workflow_resumed, node_started]，返 StepResult(resumed=True)。marker 已被终态清，
+    #     cli 侧 _next_in_critical_section 重建（§2.2）。
+    if state.status == "failed":
+        target = state.current_node
+        node = nodes.get(target) if target else None
+        # 无可定位的失败节点（workflow 级失败 / current_node 已失效）→ done，不崩。
+        if node is None or getattr(node, "kind", None) != "agent":
+            return StepResult(done=True, reason="failed_no_resumable_node")
+        # 渲染 prompt：含本节点历次失败历史（resume 前从 tape 取；reset 边界在 emit 后生效，
+        # 而 advance_step 是 emit-only 纯函数——不写 tape，故同次调用内 consecutive_failures
+        # 看不到 workflow_resumed，读到的是 emit 前的旧失败。时序正确。）
+        records = consecutive_failures(tape, target)
+        failure_history = (
+            _render_failure_history(
+                records, retry_count=len(records),
+                retry_budget=wf.recoverable_max_attempts - len(records),
+                max_attempts=wf.recoverable_max_attempts,
+            ) if records else None
+        )
+        ctx = _build_ctx(wf, _outputs_acc_from_state(state), inputs, rid,
+                         workflows_root=_workflows_root_from_yaml(yaml_path))
+        prompt, prompt_file, rroot = _deliver(
+            node, ctx, prompts_dir, wf=wf, project_root=project_root,
+            no_memory=no_memory, failure_history=failure_history,
+        )
+        emits = [
+            Emit("workflow_resumed", {
+                "from_tape": str(getattr(tape, "path", "") or ""),
+                "resumed_node": target, "reason": "recovered_from_failure",
+                "replayed_events": 0,
+            }),
+            Emit("node_started", {"node": target}, node=target),
+        ]
+        logger.info("resume failed run（%s）从节点 %s 续跑", rid, target)
+        return StepResult(
+            emits=emits, done=False, node=target,
+            prompt=prompt, prompt_file=prompt_file, resources_root=rroot,
+            resumed=True, reason="recovered_from_failure",
+            retry_count=0, retry_budget=wf.recoverable_max_attempts,
+        )
 
     # 2. 首次（无 workflow_started）：起 workflow + entry 节点。
     if state.status == "pending":
@@ -789,9 +855,10 @@ def advance_step(
     # re-arm 路径的 ``this_attempt``（= re-arm 的 ``count_before + 1``），retry_count 直接用
     # ``count``（非 ``count+1``）、retry_budget 用 ``N-count``。
     count = consecutive_fail_count(tape, pending)
+    max_attempts = wf.recoverable_max_attempts
     failure_history = (
         _render_failure_history(
-            consecutive_failures(tape, pending), count, _RECOVERABLE_ESCALATE_AT - count,
+            consecutive_failures(tape, pending), count, max_attempts - count, max_attempts,
         )
         if count > 0 else None
     )

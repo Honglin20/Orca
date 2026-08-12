@@ -183,6 +183,15 @@ async def _watch_terminal(
 
     ``poll_interval``：测试可传短值加速；生产用默认 ``_WATCH_POLL_SECONDS``。
 
+    **SPEC 2026-08-11 §2.4 ``workflow_resumed`` 重新激活语义**：``workflow_resumed`` 是
+    resume-failed 引入的"翻回 running"事件。若守护仍用「见终态即退」启发式，resumed run
+    的新 daemon 首次 poll 从 offset 0 读到历史 ``[wf_failed, wf_resumed, node_started]``
+    会秒退 → 子代理 ``render_chart`` 连不上 socket → live web 图表全丢。改用**跨 poll 持久**
+    的 ``terminated`` 标志：终态事件置 True、``workflow_resumed`` 置 False（resume 取消终态）；
+    **chunk 末**（而非循环内即时）判退。关键时序：resume 时 ``next`` 先写完整 emit 序列再
+    respawn daemon（``cli.py:1566`` guard），新 daemon 首次 poll 同 chunk 读全序列 →
+    ``terminated`` 终值 False → 存活。真终态（chunk 内无后续 resume）→ 退（同旧行为）。
+
     **partial-line race 防护**：``last_size`` 仅推进到本次 chunk 的最后一个 ``\\n`` 之后；
     末尾不足一行（无 ``\\n``）的字节不推进 ``last_size``，下个 poll 重读。理由：POSIX
     ``write(2)`` 对普通文件**不保证原子性**（仅 PIPE_BUF 对管道保证），若 poll 落在 write
@@ -194,6 +203,9 @@ async def _watch_terminal(
     """
     deadline = time.monotonic() + ttl_seconds
     last_size = 0   # 首次从 0 起，扫已存在内容（边界鲁棒）
+    # SPEC 2026-08-11 §2.4：跨 poll 持久（init 于 while 之前）——同一 chunk 内可能
+    # 同时含 [wf_failed, wf_resumed]；chunk 末据终值判退，保证 resumed run 不被秒退。
+    terminated = False
 
     while True:
         if time.monotonic() > deadline:
@@ -232,8 +244,16 @@ async def _watch_terminal(
                     obj = json.loads(stripped)
                 except json.JSONDecodeError:
                     continue  # 完整行（含 \\n）却解析失败 → 损坏，跳过（不致命）
-                if obj.get("type") in _TERMINAL_EVENT_TYPES:
-                    return "terminal"
+                etype = obj.get("type")
+                if etype in _TERMINAL_EVENT_TYPES:
+                    terminated = True
+                elif etype == "workflow_resumed":
+                    # SPEC 2026-08-11 §2.4：resume 重新激活 → 取消终态。
+                    terminated = False
+            # chunk 末判退（非循环内即时返）：真终态（无后续 resume）→ 退；
+            # resumed run 的 [wf_failed, wf_resumed, ...] 同 chunk → terminated 终值 False → 存活。
+            if terminated:
+                return "terminal"
         await asyncio.sleep(poll_interval)
 
 

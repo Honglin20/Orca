@@ -136,6 +136,12 @@ def test_scan_meta_overview_handles_each_status_affecting_type(
             payload["data"] = {"kind": "exec", "message": "x"}
         elif event_type == "workflow_cancelled":
             payload["data"] = {"reason": "user"}
+        elif event_type == "workflow_resumed":
+            # SPEC 2026-08-11 §2.4：resume-failed 数据载荷（from_tape/resumed_node/reason）。
+            payload["data"] = {
+                "from_tape": "/tmp/x.jsonl", "resumed_node": "n1",
+                "reason": "recovered_from_failure", "replayed_events": 0,
+            }
         lines.append(json.dumps(payload))
 
     tape.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -154,6 +160,10 @@ def test_scan_meta_overview_handles_each_status_affecting_type(
     elif event_type == "workflow_started":
         assert overview["run_status"] == "running"
         assert overview["agents"] == [{"name": "n1", "status": "pending"}]
+    elif event_type == "workflow_resumed":
+        # SPEC 2026-08-11 §2.4：resume on non-failed tape = reducer no-op（status stays running）。
+        # failed→running flip 由专门单测覆盖（test_scan_meta_overview_resumed_flips_failed）。
+        assert overview["run_status"] == "running"
     elif event_type == "node_completed":
         assert overview["agents"] == [{"name": "n1", "status": "done"}]
     elif event_type == "node_failed":

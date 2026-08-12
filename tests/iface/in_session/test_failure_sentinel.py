@@ -65,10 +65,15 @@ from orca.schema.workflow import AgentNode, Route, Workflow
 
 
 def _wf_with_schema() -> Workflow:
-    """单节点 agent wf（a → $end），a 声明 output_schema 要求 {k: string}。"""
+    """单节点 agent wf（a → $end），a 声明 output_schema 要求 {k: string}。
+
+    ``recoverable_max_attempts=3``：SPEC 2026-08-11 §5——既有测试隐式编码阈值 3
+    （升格 / retry_budget=2），fixture 显式设值保持行为不变。
+    """
     return Workflow(
         name="sentinel_wf",
         entry="a",
+        recoverable_max_attempts=3,
         nodes=[
             AgentNode(
                 name="a",
@@ -600,15 +605,17 @@ def test_ac11_consecutive_fail_count_delegates_to_consecutive_failures(tmp_path)
 def test_ac11_render_failure_history_missing_fields_does_not_crash():
     """AC11：``_render_failure_history`` 对缺字段 data 不崩（防御 ``.get()``，AC13 同理）。"""
     # 完全空 dict
-    out = _render_failure_history([{}], retry_count=1, retry_budget=2)
+    out = _render_failure_history([{}], retry_count=1, retry_budget=2, max_attempts=3)
     assert out is not None
     assert "Attempt 1" in out
     # 缺 kind 但有 message
-    out2 = _render_failure_history([{"message": "partial"}], retry_count=1, retry_budget=2)
+    out2 = _render_failure_history(
+        [{"message": "partial"}], retry_count=1, retry_budget=2, max_attempts=3,
+    )
     assert "partial" in out2
     # agent_blocked 但缺 blocked_on（fallback message）
     out3 = _render_failure_history(
-        [{"kind": ERR_AGENT_BLOCKED, "message": "fb"}], retry_count=1, retry_budget=2,
+        [{"kind": ERR_AGENT_BLOCKED, "message": "fb"}], retry_count=1, retry_budget=2, max_attempts=3,
     )
     assert "blocked_on: fb" in out3
 
@@ -707,7 +714,7 @@ def test_ac13_consecutive_failures_missing_data_does_not_crash(tmp_path):
     breakdown = _kind_breakdown(records)
     assert "agent_blocked×1" in breakdown  # 第 1 条 {} → ``?``；第 2 条 → agent_blocked
     # ``_render_failure_history`` 对缺字段不崩
-    out = _render_failure_history(records, retry_count=1, retry_budget=2)
+    out = _render_failure_history(records, retry_count=1, retry_budget=2, max_attempts=3)
     assert out is not None and "Attempt 1" in out and "Attempt 2" in out
 
 

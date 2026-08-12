@@ -33,6 +33,7 @@ DAEMON_WF_YAML_WITH_SCHEMA = """\
 name: daemon_test_wf
 description: daemon 守门测试 wf（entry 带 output_schema）。
 entry: a
+recoverable_max_attempts: 3
 nodes:
   - name: a
     kind: agent

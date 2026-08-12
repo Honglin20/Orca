@@ -258,6 +258,56 @@ def test_watch_terminal_handles_partial_write_race(tmp_path):
     assert reason == "terminal", "守护漏检 partial-write 后的终态事件（last_size 推进错）"
 
 
+# ── _watch_terminal × workflow_resumed（SPEC 2026-08-11 §2.4）──────────────────
+#
+# resume-failed 引入的 workflow_resumed 翻回 running；下游终态判定须认它，否则
+# resumed run 的新 daemon 秒退于历史 wf_failed → live web 图表全丢（违背核心诉求）。
+
+
+def test_watch_terminal_resumed_run_survives(tmp_path):
+    """tape [ws, wf_failed, wf_resumed, ns] → 守护不退（resumed run 存活到 TTL）。
+
+    意图（AC8）：resume-failed 后 next 先写完整 emit 序列再 respawn daemon，新 daemon
+    首次 poll 从 offset 0 同 chunk 读全序列 → terminated 终值 False → 存活。若仍用
+    「见 wf_failed 即退」启发式，守护秒退 → 子代理 render_chart 连不上 socket →
+    live web 图表全丢（违背"resume 后如续跑"核心诉求）。
+    """
+    tape = tmp_path / "run.jsonl"
+    _write_event(tape, "workflow_started", 1)
+    _write_event(tape, "workflow_failed", 2)
+    _write_event(tape, "workflow_resumed", 3)
+    _write_event(tape, "node_started", 4)
+    reason = asyncio.run(_watch_terminal(tape, ttl_seconds=0.4, poll_interval=0.05))
+    assert reason == "ttl", "resumed run 的守护应存活到 TTL（非秒退于历史 wf_failed）"
+
+
+def test_watch_terminal_pure_failed_returns_terminal(tmp_path):
+    """tape [ws, wf_failed]（无后续 resume）→ 返 'terminal'（真终态，旧行为不变）。
+
+    回归守门：resume 归零不能破坏真终态的即时退出。
+    """
+    tape = tmp_path / "run.jsonl"
+    _write_event(tape, "workflow_started", 1)
+    _write_event(tape, "workflow_failed", 2)
+    reason = asyncio.run(_watch_terminal(tape, ttl_seconds=3, poll_interval=0.05))
+    assert reason == "terminal"
+
+
+def test_watch_terminal_resume_then_complete_returns_terminal(tmp_path):
+    """tape [ws, wf_failed, wf_resumed, wf_completed] → 返 'terminal'（resume 后真完成）。
+
+    意图：resume 取消终态后，后续真终态（wf_completed）重新触发退出——terminated 标志
+    被 wf_completed 重新置 True → chunk 末退。
+    """
+    tape = tmp_path / "run.jsonl"
+    _write_event(tape, "workflow_started", 1)
+    _write_event(tape, "workflow_failed", 2)
+    _write_event(tape, "workflow_resumed", 3)
+    _write_event(tape, "workflow_completed", 4)
+    reason = asyncio.run(_watch_terminal(tape, ttl_seconds=3, poll_interval=0.05))
+    assert reason == "terminal"
+
+
 # ── _FlockSafeTape._read_max_seq_from_disk 增量缓存 ──────────────────────────
 
 

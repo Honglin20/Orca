@@ -39,10 +39,15 @@ from orca.schema.workflow import AgentNode, Route, Workflow
 
 
 def _wf_with_schema() -> Workflow:
-    """单节点 agent wf（a → $end），a 声明 output_schema 要求 {k: string}。"""
+    """单节点 agent wf（a → $end），a 声明 output_schema 要求 {k: string}。
+
+    ``recoverable_max_attempts=3``：SPEC 2026-08-11 §5——既有测试隐式编码阈值 3
+    （升格 / retry_budget=2），fixture 显式设值保持行为不变。
+    """
     return Workflow(
         name="err_mgmt_wf",
         entry="a",
+        recoverable_max_attempts=3,
         nodes=[
             AgentNode(
                 name="a",
@@ -59,10 +64,13 @@ def _wf_with_schema() -> Workflow:
 
 def _two_node_wf() -> Workflow:
     """两节点线性 wf（a → b → $end），**两节点都有 schema**（便于构造「他节点 nc 重置」
-    + 多节点 recoverable 集成测试 —— b 也有 schema 才能让 b 也触发 output_schema_mismatch）。"""
+    + 多节点 recoverable 集成测试 —— b 也有 schema 才能让 b 也触发 output_schema_mismatch）。
+
+    ``recoverable_max_attempts=3``：对齐 ``_wf_with_schema``（SPEC 2026-08-11 §5）。"""
     return Workflow(
         name="err_mgmt_two_wf",
         entry="a",
+        recoverable_max_attempts=3,
         nodes=[
             AgentNode(
                 name="a",

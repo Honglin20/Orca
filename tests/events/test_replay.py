@@ -330,6 +330,10 @@ def test_known_noop_events_dont_mutate_state():
 
     注意：``human_decision_*`` / ``interrupt_*`` 不在此列——它们经 ADR §4.3 blocked
     派生修改 ``node_status``（见 ``test_human_decision_derives_blocked``）。
+    注意：``workflow_resumed`` 不在此列——SPEC 2026-08-11 §1.3 把它从无条件 no-op
+    改为条件翻转（failed → running）。在 pending/running/completed/cancelled state 仍
+    no-op，故本测试（pending state）不再覆盖它（由 ``test_reducer_workflow_resumed_flip``
+    专门覆盖全状态矩阵）。
     """
     s = _state()
     for t, data in [
@@ -338,7 +342,6 @@ def test_known_noop_events_dont_mutate_state():
         ("foreach_item_completed", {"index": 0, "output": "x"}),
         ("foreach_completed", {"count": 3, "succeeded": 3}),
         ("prompt_rendered", {"preview": "..."}),
-        ("workflow_resumed", {"from_tape": "x", "replayed_events": 0}),
         ("retry_started", {"attempt": 1, "max_attempts": 3}),
         ("retry_succeeded", {"attempt_total": 1}),
         ("retry_exhausted", {"attempts": 3}),

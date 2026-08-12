@@ -47,6 +47,7 @@ from orca.chart._paths import artifacts_dir_for_run, chart_sock_path
 from orca.iface.cli.config import apply_kb_requirement, resolve_kb_dir
 from orca.compile import ConfigurationError, catalog, load_workflow
 from orca.events.bus import EventBus
+from orca.events.replay import replay_state
 from orca.events.tape import Tape
 from orca.schema.workflow import InputInvariant
 from orca.iface.in_session._step_io import (
@@ -1608,6 +1609,10 @@ def next(
     reply: dict[str, Any] = {"done": result.done or compliance_failed}
     if result.node:
         reply["node"] = result.node
+    # SPEC 2026-08-11 §2.2：resume 标记（additive）——让主 session 知道这是 resume-failed 的
+    # re-arm，而非正常推进 / recoverable（run 曾终态 failed，现已重新活跃）。
+    if result.resumed:
+        reply["resumed"] = True
     prompt_text = _reply_prompt(result, env_file=_env_file_path(tape_path, run_id))
     # model-driven advance 补丁：每个 next 返回的 prompt 也附「驱动协议」，让模型继续自驱。
     if prompt_text:
@@ -1769,11 +1774,22 @@ async def _next_in_critical_section(
     （非终态 + 下一节点存在才写）。next 路径不重 mkdir（bootstrap 已建）。
     """
     from orca.run.step import StepResult
-    # marker 缺 → 调用方未 bootstrap 或 marker 已清；幂等吞 + warn（不 raise）。
+    # marker 缺 → 三种情况：failed 待 resume（marker 已被终态清）/ 已终态 cancelled|completed
+    # （同样清了 marker）/ 调用方未 bootstrap。SPEC 2026-08-11 §2.2：peek tape 区分——
+    # failed → 重建 marker；cancelled|completed → 诚实返 done:true + already_X（AC6，
+    # 旧逻辑返 no-marker done:false 误导宿主以为"需 bootstrap"）；其余 → no-marker。
     marker = read_marker(mpath)
     if marker is None:
-        logger.warning("next 找不到 %s 的激活 marker，无法推进（需先 bootstrap）", run_id)
-        return StepResult(done=False, reason="no-marker"), False, None
+        state = replay_state(tape)
+        if state.status == "failed":
+            marker = ActivationMarker(run_id=run_id, no_output_count=0)
+            # 下游 marker RMW（write_marker）持久化；此处先建对象让 compliance 计数有依托。
+            logger.info("resume: 重建激活 marker（run=%s）", run_id)
+        elif state.status in ("completed", "cancelled"):
+            return StepResult(done=True, reason=f"already_{state.status}"), False, None
+        else:
+            logger.warning("next 找不到 %s 的激活 marker，无法推进（需先 bootstrap）", run_id)
+            return StepResult(done=False, reason="no-marker"), False, None
 
     # wf 从 tape 反查（v3 §7.2：marker 不存 yaml）。
     wf = _load_wf_for_run(run_id, tape)
@@ -1827,10 +1843,27 @@ async def _next_in_critical_section(
 
     # marker RMW（N2）：flock 临界区内回写。终态 → 清 marker（不复用）。
     # recoverable（未升格）非终态 → write_marker 保活；升格（result.done=True）→ clear_marker。
+    # SPEC 2026-08-11 §2.2 E1（HIGH）：write_marker 包 try/except OSError——resume 后 tape 已有
+    # workflow_resumed（status=running），若 write_marker OSError → status=running + marker 缺
+    # → 下次 next 的重建条件 state.status=="failed" 不命中（已是 running）→ 不可自愈死锁。
+    # 补：emit workflow_failed（翻 running→failed，使下次 next 重建条件可重新触发，自愈）
+    # + clear_marker + 错误信封。既修 resume 死锁又补 pre-existing gap（任何 next marker 写失败都自愈）。
     if result.done or compliance_failed:
         clear_marker(mpath)
     else:
-        write_marker(mpath, marker)
+        try:
+            write_marker(mpath, marker)
+        except OSError as e:
+            logger.exception("next write_marker 失败")
+            await _emit_workflow_failed(
+                bus, "internal_error", f"write_marker failed: {e}", node=result.node,
+            )
+            clear_marker(mpath)
+            return (
+                StepResult(done=True, reason=f"failed: write_marker: {e}",
+                           error_kind="internal_error"),
+                True, None,
+            )
     return result, compliance_failed, warn_no_output_count
 
 
@@ -1902,8 +1935,6 @@ def status(
     保留兼容旧调用 / 主 session 既有测试）：``orca status --run-id <id>`` 或 ``orca status <id>``。
     两者同传且值不一致 → fail loud（BadParameter）。均省略 → 列全部活跃 run。
     """
-    from orca.events.replay import replay_state
-
     rid = _merge_run_id(run_id, run_id_opt)
 
     if rid is None:

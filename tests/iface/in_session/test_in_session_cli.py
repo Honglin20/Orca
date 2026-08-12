@@ -927,11 +927,11 @@ def test_failure_output_schema_mismatch(cwd_tmp, wf_path):
     retry_count:1, retry_budget:2``；0 退出；tape 末尾是 [node_failed, node_started]
     （无 workflow_failed）；marker 不清。
     """
-    # 改 wf：a 节点加 output_schema
+    # 改 wf：a 节点加 output_schema + recoverable_max_attempts=3（SPEC 2026-08-11 §5）
     yaml_text = AGENT_WF_YAML.replace(
         'prompt: "产出 step A 的输出。"',
         'prompt: "产出 step A 的输出。"\n    output_schema:\n      type: object\n      required: [k]',
-    )
+    ).replace('entry: a\n', 'entry: a\nrecoverable_max_attempts: 3\n')
     p = cwd_tmp / "wf_schema.yaml"
     p.write_text(yaml_text, encoding="utf-8")
 
@@ -1034,6 +1034,7 @@ def _schema_wf_path(cwd_tmp: Path) -> Path:
 name: cli_test_schema_wf
 description: 单节点带 output_schema 的 wf（AC2/AC4 守门测试用）。
 entry: a
+recoverable_max_attempts: 3
 nodes:
   - name: a
     kind: agent
@@ -2080,6 +2081,67 @@ def test_next_no_marker_returns_no_marker_reason(cwd_tmp, wf_path):
     reply = _next(runner, tape, run_id, "--output", "out_a")
     assert reply["done"] is False
     assert reply["reason"] == "no-marker"
+
+
+# ── AC6 诚实 reply：cancelled/completed run 的 next（SPEC 2026-08-11 §2.2）──────
+#
+# marker 被终态清；旧逻辑返 no-marker (done:false) 误导宿主以为"需 bootstrap"。
+# 扩展后 CLI 层 peek tape status → done:true + already_X（诚实 reply）。
+
+
+def test_next_on_completed_run_returns_already_completed(cwd_tmp, wf_path):
+    """AC6：completed run 的 next → done:true, reason:already_completed。
+
+    意图：completed 的 marker 已被终态清。旧逻辑（marker None → no-marker done:false）
+    误导宿主以为"需 bootstrap"。SPEC 2026-08-11 §2.2 扩展 gate：peek tape status →
+    completed → 返 done:true + already_completed（advance_step 不到，CLI 层显式返）。
+    """
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id, tape = boot["run_id"], boot["tape"]
+    # 跑到完成（a→b→$end；marker 被终态清）
+    _next(runner, tape, run_id, "--output", "out_a")
+    _next(runner, tape, run_id, "--output", "out_b")
+    # 前置确认 marker 已清
+    markers = list(cwd_tmp.glob("runs/orca-*.json"))
+    assert len(markers) == 0, "前置：completed 后 marker 应已清"
+    # 守门 tape 行数（AC6：emits == []，next 不应落任何事件）
+    tape_p = Path(tape)
+    lines_before = len(tape_p.read_text(encoding="utf-8").strip().split("\n"))
+    # 再 next → done:true, reason:already_completed（非 no-marker）
+    reply = _next(runner, tape, run_id, "--output", "ignored")
+    assert reply["done"] is True
+    assert reply["reason"] == "already_completed"
+    # tape 不变性：no emit（AC6 emits == [] 守门）
+    lines_after = len(tape_p.read_text(encoding="utf-8").strip().split("\n"))
+    assert lines_after == lines_before, "already_completed 不应追加 tape 事件"
+
+
+def test_next_on_cancelled_run_returns_already_cancelled(cwd_tmp, wf_path):
+    """AC6：cancelled run 的 next → done:true, reason:already_cancelled。
+
+    意图：cancelled 的 marker 已被 stop 清。旧逻辑返 no-marker (done:false) 误导。
+    SPEC 2026-08-11 §2.2 扩展 gate：peek tape status → cancelled → 返 done:true +
+    already_cancelled。
+    """
+    runner = CliRunner()
+    boot = _bootstrap(runner, wf_path)
+    run_id, tape = boot["run_id"], boot["tape"]
+    # stop → workflow_cancelled + marker 清
+    result = runner.invoke(app, ["stop", run_id])
+    assert result.exit_code == 0
+    markers = list(cwd_tmp.glob("runs/orca-*.json"))
+    assert len(markers) == 0, "前置：stop 后 marker 应已清"
+    # 守门 tape 行数（AC6：emits == []）
+    tape_p = Path(tape)
+    lines_before = len(tape_p.read_text(encoding="utf-8").strip().split("\n"))
+    # next → done:true, reason:already_cancelled
+    reply = _next(runner, tape, run_id, "--output", "ignored")
+    assert reply["done"] is True
+    assert reply["reason"] == "already_cancelled"
+    # tape 不变性：no emit（AC6 emits == [] 守门）
+    lines_after = len(tape_p.read_text(encoding="utf-8").strip().split("\n"))
+    assert lines_after == lines_before, "already_cancelled 不应追加 tape 事件"
 
 
 # ── marker 终态清理（v5 step 2b：start 命令已删，相关 start/cc_hooks 测试随之移除）──

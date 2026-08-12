@@ -420,3 +420,122 @@ def test_start_run_detect_ancestor_tape_lands_detect_root(tmp_path, monkeypatch)
     run_async(go())
 
 
+# ── _scan_terminal_type / _probe_head_and_terminal × workflow_resumed ──────
+# SPEC 2026-08-11 §2.4：resumed run（wf_failed 后跟 wf_resumed）须被判非终态，
+# 否则 attach_run 不起 follow + meta.status=failed（违背 AC10 web 可见 running）。
+
+
+def test_scan_terminal_type_resumed_returns_none(tmp_path):
+    """resumed tape [ws, wf_failed, wf_resumed, ns] → None（resume 重新激活 → 非终态）。"""
+    from orca.iface.web.run_manager import _scan_terminal_type
+    tape = tmp_path / "run.jsonl"
+    _write_tape_event(tape, 1, "workflow_started", {})
+    _write_tape_event(tape, 2, "workflow_failed", {})
+    _write_tape_event(tape, 3, "workflow_resumed", {})
+    _write_tape_event(tape, 4, "node_started", {})
+    assert _scan_terminal_type(tape) is None
+
+
+def test_scan_terminal_type_pure_failed_returns_type(tmp_path):
+    """纯 wf_failed（无后续 resume）→ 'workflow_failed'（旧行为不变）。"""
+    from orca.iface.web.run_manager import _scan_terminal_type
+    tape = tmp_path / "run.jsonl"
+    _write_tape_event(tape, 1, "workflow_started", {})
+    _write_tape_event(tape, 2, "workflow_failed", {})
+    assert _scan_terminal_type(tape) == "workflow_failed"
+
+
+def test_scan_terminal_type_resume_then_complete_returns_type(tmp_path):
+    """[wf_failed, wf_resumed, wf_completed] → 'workflow_completed'（resume 后真完成）。"""
+    from orca.iface.web.run_manager import _scan_terminal_type
+    tape = tmp_path / "run.jsonl"
+    _write_tape_event(tape, 1, "workflow_failed", {})
+    _write_tape_event(tape, 2, "workflow_resumed", {})
+    _write_tape_event(tape, 3, "workflow_completed", {})
+    assert _scan_terminal_type(tape) == "workflow_completed"
+
+
+def test_probe_head_and_terminal_resumed_returns_none_terminal(tmp_path):
+    """resumed tape → (first_event=ws, terminal=None)（attach_run 据 terminal=None 起 follow）。"""
+    from orca.iface.web.run_manager import _probe_head_and_terminal
+    tape = tmp_path / "run.jsonl"
+    _write_tape_event(tape, 1, "workflow_started", {})
+    _write_tape_event(tape, 2, "workflow_failed", {})
+    _write_tape_event(tape, 3, "workflow_resumed", {})
+    first, terminal = _probe_head_and_terminal(tape)
+    assert first is not None and first.type == "workflow_started"
+    assert terminal is None
+
+
+def test_probe_head_and_terminal_pure_failed_returns_terminal(tmp_path):
+    """纯 wf_failed → (first_event=ws, terminal='workflow_failed')。"""
+    from orca.iface.web.run_manager import _probe_head_and_terminal
+    tape = tmp_path / "run.jsonl"
+    _write_tape_event(tape, 1, "workflow_started", {})
+    _write_tape_event(tape, 2, "workflow_failed", {})
+    first, terminal = _probe_head_and_terminal(tape)
+    assert terminal == "workflow_failed"
+
+
+def test_probe_head_and_terminal_resume_then_complete_returns_terminal(tmp_path):
+    """[wf_failed, wf_resumed, wf_completed] → terminal='workflow_completed'（resume 后真完成）。
+
+    覆盖密度对齐 _scan_terminal_type（同模块两函数同三态覆盖）。
+    """
+    from orca.iface.web.run_manager import _probe_head_and_terminal
+    tape = tmp_path / "run.jsonl"
+    _write_tape_event(tape, 1, "workflow_failed", {})
+    _write_tape_event(tape, 2, "workflow_resumed", {})
+    _write_tape_event(tape, 3, "workflow_completed", {})
+    _, terminal = _probe_head_and_terminal(tape)
+    assert terminal == "workflow_completed"
+
+
+# ── _scan_meta_overview × workflow_resumed（SPEC 2026-08-11 §2.4）──────────────
+# run-list discovery 消费 _scan_meta_overview 的 run_status/ended_ts → resumed run
+# 在列表页显示 stale failed（违 AC10）。workflow_resumed 从 BULK 重分类至
+# OVERVIEW_AFFECTING，full-parse elif 认 failed→running 翻转 + 清 ended_ts。
+
+
+def test_scan_meta_overview_resumed_flips_failed_to_running(tmp_path):
+    """[ws, wf_failed, wf_resumed, ns] → run_status='running', ended_ts=None。
+
+    意图（AC10 列表页）：_scan_meta_overview 是 run-list discovery 的 status 来源。
+    resume-failed 前的 wf_failed 置 status=failed + ended_ts；wf_resumed 须翻回 running
+    + 清 ended_ts（run 未结束，不冻结 elapsed）。否则列表页显示 stale failed + 冻结时间。
+    """
+    from orca.iface.web.run_manager import _scan_meta_overview
+    tape = tmp_path / "run.jsonl"
+    _write_tape_event(tape, 1, "workflow_started", {"workflow_name": "wf"})
+    _write_tape_event(tape, 2, "workflow_failed", {"kind": "exec", "message": "x"})
+    _write_tape_event(tape, 3, "workflow_resumed",
+                      {"from_tape": str(tape), "resumed_node": "n1",
+                       "reason": "recovered_from_failure", "replayed_events": 0})
+    _write_tape_event(tape, 4, "node_started", {})
+    _, _, _, overview_data = _scan_meta_overview(tape)
+    assert overview_data is not None
+    overview = overview_data["overview"]
+    assert overview["run_status"] == "running", \
+        "resumed run 须翻回 running（列表页 status 诚实）"
+    assert overview["ended_ts"] is None, \
+        "resume 清 stale 终态时间戳（run 未结束，不冻结 elapsed）"
+
+
+def test_scan_meta_overview_resumed_on_running_is_noop(tmp_path):
+    """[ws, wf_resumed] → run_status='running'（headless crash-resume：非 failed 状态不翻）。
+
+    意图：对齐 reducer §1.3 —— wf_resumed 只翻 failed→running；running→running no-op。
+    """
+    from orca.iface.web.run_manager import _scan_meta_overview
+    tape = tmp_path / "run.jsonl"
+    _write_tape_event(tape, 1, "workflow_started", {"workflow_name": "wf"})
+    _write_tape_event(tape, 2, "workflow_resumed",
+                      {"from_tape": str(tape), "resumed_node": "n1",
+                       "reason": "crash", "replayed_events": 0})
+    _, _, _, overview_data = _scan_meta_overview(tape)
+    overview = overview_data["overview"]
+    assert overview["run_status"] == "running"
+
+
+
+

@@ -89,6 +89,13 @@ def scan_terminal(tape_path: Path) -> str | None:
         - 多类终态 → ``raise TapeContradictionError``。
         - 同类重复 → warn log ``[AUDIT] duplicate-terminal`` + 返该类型（不阻塞）。
 
+    SPEC 2026-08-11 §2.4：``workflow_resumed`` 是 resume-failed 的"重新激活"事件
+    （run 从 failed 翻回 running）。扫到时把 ``terminal_count`` / ``terminal_types_seen``
+    / ``last_terminal_type`` / ``last_seq`` 全部归零/清空 —— resume = 全新开始，历史终态
+    不计（否则 ``[wf_failed, wf_resumed, wf_failed]`` 会被误判 duplicate-terminal warn；
+    resumed run 会被 stop/status 误短路）。gc 路径不受影响（resumed run 有 marker →
+    ``_is_run_active`` True → 不收集），但 stop/status 须诚实。
+
     纯只读：不开 ``Tape(resume=True)``（自带截断副作用）、不开 ``EventBus``、不写文件。
     """
     terminal_count = 0
@@ -121,6 +128,12 @@ def scan_terminal(tape_path: Path) -> str | None:
                 terminal_types_seen.add(etype)
                 last_terminal_type = etype
                 last_seq = event.seq
+            elif etype == "workflow_resumed":
+                # SPEC 2026-08-11 §2.4：resume = 全新开始，历史终态不计。
+                terminal_count = 0
+                terminal_types_seen.clear()
+                last_terminal_type = None
+                last_seq = 0
 
     if len(terminal_types_seen) > 1:
         # 多类终态 = 真矛盾（状态字段语义冲突），fail loud。
