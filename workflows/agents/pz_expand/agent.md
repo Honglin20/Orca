@@ -213,6 +213,7 @@ training_and_evaluation:
   paradigm: <cross-entropy classification | metric learning | MSE regression | ...>
   loss: <用户原 loss 语义描述>
   metric: {name: <用户 metric 真名>, direction: higher-better|lower-better}
+  epochs: <int>                          # 基线训练 epochs（从用户 train 代码发现，如 Config.NUM_EPOCHS / argparse default）
   adapters_entry: puzzle_adapters.py     # 生成适配器文件（脚本经 --adapters 消费；eval/train/loss 全在内）
   forward_calling_convention: positional|dict|single   # 与 adapters.FORWARD_CALLING_CONVENTION 一致
   eval_noise_atol: <float>               # 与 adapters.EVAL_NOISE_ATOL 一致（含采样/检索的评估 ≥1e-2）

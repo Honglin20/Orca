@@ -198,8 +198,11 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
   ```
   `REPO_ROOT` 解析方式同 pz_expand Step 2（pathlib 探 `$ORCA_AGENT_RESOURCES` 的 workflows 父）。
   设 `NPROC_PER_NODE` 实测值（`python3 -c 'import torch; print(torch.cuda.device_count())'`）。
-  `EPOCHS` 变量形态可调（默认 1，GKD 是末段微调非从零训）。父权重加载由脚本内部经
-  `adapters.load_pretrained` 完成（launcher 不接父权重参数）。
+  **`EPOCHS` = 基线训练 epochs 的 50%**（GKD 末段 KD 微调通用规则：用基线训练量的一半恢复
+  block 替换引入的失配，足以收敛又不从头重训）。从 `$ORCA_ARTIFACTS_DIR/manifest.yaml` 的
+  `training_and_evaluation.epochs`（pz_expand 从用户 train 代码发现并记录）读基线 epochs `N`，
+  设 `EPOCHS = max(1, round(N * 0.5))`。manifest 缺 epochs → 回退默认 1（assessment 警告）。
+  父权重加载由脚本内部经 `adapters.load_pretrained` 完成（launcher 不接父权重参数）。
 
   **adapters 桥接（必读）**：launcher 经 `--adapters <path>` + `--manifest <path>` 桥接——脚本读
   adapters 拿 `kd_loss` / `task_loss` / `train_iter` / `extract_labels` / `forward_model` /
