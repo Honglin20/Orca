@@ -158,19 +158,26 @@ def _solve_mip(
 
     if pulp.LpStatus[status] != "Optimal":
         # 加性 latency 模型判 infeasible（target 过紧）。不返回空 arch 让 E2E 死在 select——
-        # 改返 **min-latency best-effort arch**（每 group 选 latency 最小 variant），让 pz_retrain
-        # GKD + pz_report gate **实测**裁决。理由：(a) 加性 ``floor + Σ block standalone`` 偏悲观，
-        # 块在整模 in-context 常比 standalone 和更省（实测全 no_op 真实 latency 优于加性估算）；
-        # (b) gate 的真实测量才是 LAT AC 权威，select 阶段不该用悲观的加性估算预死。
+        # 改返 **best-effort arch**让 pz_retrain GKD + pz_report gate 实测裁决。
+        # 🔴 保逻辑铁律：best-effort **排除 no_op**（no_op=跳过整块=删计算=改深度，破坏原模型
+        # 逻辑，非「同功能更快」）。只在仍做计算的功能候选（mixer 变体 / 剪枝 FFN 等）里选 latency
+        # 最小——这样每 block 仍履行职能、acc 应 ≈ baseline（真保逻辑），latency 降到功能替换可达。
+        # 若某 group 除 no_op 外无功能候选，退回 identity（保留原块，不动逻辑）。
         selected_arch: dict[str, dict[str, str]] = defaultdict(dict)
         total_score = 0.0
         chosen_block_latency = 0.0
         for gkey, members in groups.items():
             layer_idx, kind = gkey
-            m_min = min(members, key=lambda m: latency_map[m])
-            selected_arch[str(layer_idx)][kind] = m_min[2]
-            total_score += score_map[m_min]
-            chosen_block_latency += latency_map[m_min]
+            functional = [m for m in members if m[2] != "no_op"]
+            if not functional:
+                # 无功能候选 → identity（原块，保逻辑）
+                ident = [m for m in members if m[2] == "identity"]
+                m_pick = ident[0] if ident else min(members, key=lambda m: latency_map[m])
+            else:
+                m_pick = min(functional, key=lambda m: latency_map[m])
+            selected_arch[str(layer_idx)][kind] = m_pick[2]
+            total_score += score_map[m_pick]
+            chosen_block_latency += latency_map[m_pick]
         selected_latency = floor + chosen_block_latency
         return {
             "selected_arch": dict(selected_arch),
