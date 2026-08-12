@@ -591,7 +591,11 @@ def measure_whole_model_latency(
     if not times:
         raise RuntimeError("measure_whole_model_latency：无有效 timing 样本")
     times.sort()
-    return times[len(times) // 2] * 1000.0  # median ms
+    # min（非 median）——争用鲁棒：E2E 期 opencode/agent 占 CPU，median 被争用膨胀（实测 final
+    # 比 baseline 膨胀更多 → ratio 变差，致 LAT AC 假性 fail）。min 代表模型真实可达延迟（最快
+    # 一次 = 最少争用），使 baseline/final 同在争用-自由基线比较。warmup 后首几次可能 cache-hot，
+    # 故取 repetitions 次的 min（非首一两次）。
+    return times[0] * 1000.0  # min ms（争用鲁棒）
 
 
 # ── 父激活捕获（BLD teacher 信号）─────────────────────────────────────────────
