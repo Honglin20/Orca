@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-12] fix(puzzle-u5): code-review 闭环——BLOCKER enum 漂移 + slot→kind 残留 + 决策 ID 洁净 + no_op 非方 slot 收缩（`2f6d938`）
+
+Phase U5 洁净审查闭环：修全面 code-review 的 1 BLOCKER（puzzle.yaml pz_select select_reason enum 加 target-too-aggressive + infeasible_reason property，code-reviewer 复审抓出残留 BLOCKER——早警 emit 的诊断字段不在 properties 内被 additionalProperties:false 拒）+ 2 MAJOR（slot→kind 迁移残留含 Step 0 Reuse-Check r['slot']→r['kind']；pz_build_library/pz_retrain/pz_report agent.md 决策 ID 清零）+ 2 MINOR（is_candidate_valid_for_slot 加 no_op 非方 slot 收缩；脚本 runtime-facing raise/error/help 决策 ID 改 descriptive，保留 docstring SPEC 锚点）+ 2 可选（build_student_from_arch docstring 澄清三形态；_derive_slot_id fail-loud）。新测 test_puzzle_yaml_pz_select_schema_covers_mip_select_early_warning 锁 schema × 脚本 emit 契约（防 #1 两层漂移回归）。验收：tars 0/0 + pytest 57 passed + 18 skipped（env-gated）。详见 [release note](docs/releases/2026-08-12-puzzle-u5-code-review-closure.md)。
+
 ## [2026-08-12] chore(puzzle-u4): cleanup——删 5 个 deprecated inputs + expand_model.py + 下游 agent.md manifest 桥接补全 + DRY 注释清理（`eee7125`）
 
 Phase U4 cleanup（SPEC v2 §13/§14）：puzzle.yaml 删 5 个 `[DEPRECATED U3]` inputs（pretrained_ckpt / build_fn / eval_fn / train_loader_fn / accuracy_tolerance）；`eval_kind` 保留 `[ask]`（D6）；3 个下游 agent.md（pz_build_library / pz_score / pz_report）CLI args 改 manifest 桥接占位符 + pz_report 删 `--accuracy_tolerance`（D5 baseline-dependent 自动判）；terminate_gate_failed.reason 文案同步 D5；删 `expand_model.py` 整文件（v1 类名 regex slot 识别被 U2a LLM 自适应 + measure_baseline.py 取代，零生产 import）；puzzle_common / puzzle_blocks 注释删 dead `expand_model` 引用；test_puzzle_scripts_smoke.py 全链入口迁到 measure_baseline.py（+ helper `_bootstrap_measure_baseline`），删冗余 `test_expand_no_slot_exit_2`（intent 拆分：empty 输入校验归 measure_baseline 测，slot 识别召回归 evaluator recall 测）。Rule 7 surface：gate_report `--accuracy_tolerance` CLI 留作 backward-compat grace；决策 ID（D5/E14/E19/E22/E23）残留归 U5；测试 fixture DRY 不抽（2 处未触阈值）。验收：tars 0/0 + pytest 97 passed + 14 skipped（LLM-gated）+ code-reviewer 双轮 0 Blocker、所有 Major/Minor 采纳或 surface。详见 [release note](docs/releases/2026-08-12-puzzle-u4-cleanup.md)。
