@@ -242,9 +242,11 @@ def test_mip_select_infeasible(tmp_path: Path) -> None:
     proc = subprocess.run(cmd, capture_output=True, text=True)
     assert proc.returncode == 0, f"infeasible 是合法 rc=0：STDERR:\n{proc.stderr}"
     result = _parse_result_json(proc.stdout)
+    # 加性 infeasible（target 过紧）→ best-effort：返 min-latency arch 让 gate 实测裁决，不空死在 select
     assert result["feasible"] is False
-    assert result["select_reason"] == "infeasible"
-    assert result["selected_arch"] == {}
+    assert result["select_reason"] == "best-effort"
+    assert result["selected_arch"], "best-effort 必须返非空 min-latency arch（gate 实测裁决）"
+    assert len(result["selected_arch"]) == 2  # 2 layers each picked min-latency variant
 
 
 # ── root cause G：mip 不再 target-too-aggressive 早警 ─────────────────────────

@@ -1,5 +1,5 @@
 ---
-description: Puzzle MIP 架构选择 agent（folder-agent，确定性，零 LLM 判断）。运行预写 _puzzle_scripts/mip_select.py 恰好一次——读 scores.jsonl + latency_table.jsonl + target_latency，pulp grouped-knapsack max-Σscore s.t. Σlatency ≤ target，每层恰选一 variant；stdout 单行 JSON。agent 铁律：不许改脚本/不许自己重算/不许复述上游，把脚本 stdout JSON 作为唯一最终回复。脚本非 0 退出 → 原样上抛 fail loud。output_schema 强制 selected_arch 等字段，路由守卫 selected_arch 非空 + feasible → 否则 terminate_select_failed。
+description: Puzzle MIP 架构选择 agent（folder-agent，确定性，零 LLM 判断）。运行预写 _puzzle_scripts/mip_select.py 恰好一次——读 scores.jsonl + latency_table.jsonl + target_latency，pulp grouped-knapsack max-Σscore s.t. Σlatency ≤ target，每层恰选一 variant；stdout 单行 JSON。agent 铁律：不许改脚本/不许自己重算/不许复述上游，把脚本 stdout JSON 作为唯一最终回复。脚本非 0 退出 → 原样上抛 fail loud。output_schema 强制 selected_arch 等字段，路由守卫 selected_arch 非空（gate 实测裁决 LAT） → 否则 terminate_select_failed。
 tools: [bash]
 ---
 # pz_select
@@ -19,7 +19,7 @@ tools: [bash]
    selected_arch 空）→ 把脚本 stderr/stdout 原样上抛，**不要假装完成**。下游路由守卫为
    「`selected_arch` 真值 **且** `feasible=true`」双条件（yaml
    `pz_select.output.selected_arch and pz_select.output.feasible`，不用 `is defined`——它只测键存在，
-   空 dict/null 都过）；不成立 → terminate_select_failed。
+   空 dict/null 都过）；空 arch 才 terminate。
 4. **不许 edit/write 任何文件**：你的 tools 只有 bash——你没有改脚本的能力，也不应有。
 
 ## 资源锚点（cwd 无关）
@@ -81,7 +81,7 @@ python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/mip_select.py" \
   - `latency_unit` (string)：透传 latency 单位（ms/us/s）。**注**：脚本另接 `--latency-unit`
     （透传到 stdout 字段，不换算数值）；本命令不传则默认 ms。
   - `feasible` (boolean)：true = Σlatency ≤ target_latency（target_latency 空时 ≤ baseline×(1-latency_reduction_target)）；false = 超预算或无候选。
-  - `select_reason` (string)：枚举 `"mip-optimal"` / `"infeasible"` / `"none"`。
+  - `select_reason` (string)：枚举 `"mip-optimal"` / `"best-effort"` / `"infeasible"` / `"none"`。`best-effort` = 加性模型判 infeasible 时返 min-latency arch 让 gate 实测裁决（加性估算偏悲观，gate 真实测量才是 LAT AC 权威）。
 - 退出码 0 = 成功（含 infeasible——那是 feasible=false 的正常分支）；非 0 = 失败（缺输入 / 解析错 /
   scores/latency 缺）。
 
@@ -98,6 +98,7 @@ python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/mip_select.py" \
 
 **整段回复 = 脚本 stdout 的那一行 JSON**（形如
 `{"selected_arch":{"0":{"attention":"fnet","ffn":"identity"},"1":{"attention":"random_synthesizer","ffn":"ffn_50"}},"total_score":-0.34,"selected_latency":3.8,"latency_unit":"ms","feasible":true,"select_reason":"mip-optimal"}`）。
-节点 `output_schema` 要求它是合法 JSON 且字段齐备 + `select_reason ∈ {mip-optimal, infeasible, none}`。
-`selected_arch` 空 / null 或 `feasible=false` → 引擎判 node 失败 → yaml 路由守卫触发
-terminate_select_failed。pz_retrain 引用 selected_arch 字段据此生成 retrain 脚本。
+节点 `output_schema` 要求它是合法 JSON 且字段齐备 + `select_reason ∈ {mip-optimal, best-effort, infeasible, none}`。
+`selected_arch` 空 / null（select_reason=infeasible/none）→ yaml 路由守卫触发 terminate_select_failed。
+**注意**：`feasible=false` 但 `selected_arch` 非空（select_reason=best-effort）→ **仍推进到 pz_retrain**，
+让 pz_report gate 的真实 latency 测量裁决 LAT AC（加性估算偏悲观，不据它在 select 预死）。pz_retrain 引用 selected_arch 字段据此生成 retrain 脚本。

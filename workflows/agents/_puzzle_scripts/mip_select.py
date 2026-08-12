@@ -157,12 +157,27 @@ def _solve_mip(
     status = prob.solve(solver)
 
     if pulp.LpStatus[status] != "Optimal":
+        # 加性 latency 模型判 infeasible（target 过紧）。不返回空 arch 让 E2E 死在 select——
+        # 改返 **min-latency best-effort arch**（每 group 选 latency 最小 variant），让 pz_retrain
+        # GKD + pz_report gate **实测**裁决。理由：(a) 加性 ``floor + Σ block standalone`` 偏悲观，
+        # 块在整模 in-context 常比 standalone 和更省（实测全 no_op 真实 latency 优于加性估算）；
+        # (b) gate 的真实测量才是 LAT AC 权威，select 阶段不该用悲观的加性估算预死。
+        selected_arch: dict[str, dict[str, str]] = defaultdict(dict)
+        total_score = 0.0
+        chosen_block_latency = 0.0
+        for gkey, members in groups.items():
+            layer_idx, kind = gkey
+            m_min = min(members, key=lambda m: latency_map[m])
+            selected_arch[str(layer_idx)][kind] = m_min[2]
+            total_score += score_map[m_min]
+            chosen_block_latency += latency_map[m_min]
+        selected_latency = floor + chosen_block_latency
         return {
-            "selected_arch": {},
-            "total_score": 0.0,
-            "selected_latency": 0.0,
-            "feasible": False,
-            "select_reason": "infeasible",
+            "selected_arch": dict(selected_arch),
+            "total_score": float(total_score),
+            "selected_latency": float(selected_latency),
+            "feasible": bool(selected_latency <= target_latency + 1e-9),
+            "select_reason": "best-effort",
         }
 
     selected_arch: dict[str, dict[str, str]] = defaultdict(dict)

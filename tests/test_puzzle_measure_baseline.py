@@ -131,15 +131,17 @@ def test_measure_baseline_happy_4_smokes(tmp_path: Path) -> None:
     assert all(s["in_dim"] == 32 for s in bm["slots"])
 
 
-# ── root cause C：ckpt 宽松（from_scratch 不 fatal）──────────────────────────
+# ── root cause C：无可用预训练 → fail loud（BLD 需真 teacher）──────────────────
 
-def test_measure_baseline_ckpt_from_scratch_warns_not_fails(tmp_path: Path) -> None:
-    """adapters.load_pretrained 标记 from_scratch=True（如 ckpt 缺失）→ 不 fatal，
-    继续 baseline 测量（baseline 可能近随机 init；后续 AC 按 baseline 原样计算）。
+def test_measure_baseline_ckpt_from_scratch_fails_loud(tmp_path: Path) -> None:
+    """adapters.load_pretrained 标记 from_scratch=True（ckpt 缺/空/schema 严重不匹配）
+    → measure_baseline **fail loud**（rc!=0），不进 BLD/搜索。
+
+    理由：BLD 把候选块蒸馏去模仿 father(teacher) I/O；随机 init teacher 产垃圾 teacher
+    信号 → block_library 全错。用户须先训练预训练模型（如跑项目 train.py）再启动 puzzle。
 
     构造：adapters 的 _FATHER_CKPT 指向不存在的文件 → load_pretrained 返 from_scratch=True。
     """
-    import torch
     paths = write_flat_and_adapters(tmp_path, father_ckpt_path=tmp_path / "father.pth")
     # 不写 father.pth → adapters.load_pretrained 会 from_scratch
     ss_path = tmp_path / "search_space.yaml"
@@ -152,13 +154,13 @@ def test_measure_baseline_ckpt_from_scratch_warns_not_fails(tmp_path: Path) -> N
         "--search_space_path", str(ss_path),
         "--output_dir", str(out_dir),
     ])
-    assert rc == 0, (
-        f"from_scratch 应 WARN 不 fatal（root cause C：宽松 ckpt）\nSTDERR:\n{err}\nSTDOUT:\n{out}"
+    assert rc != 0, (
+        "from_scratch 应 fail loud（rc!=0）——无可用预训练权重不许进 BLD/搜索；"
+        f"STDERR:\n{err}\nSTDOUT:\n{out}"
     )
-    result = _parse_result_json(out)
-    assert result["ckpt_from_scratch"] is True
-    bm = json.loads((out_dir / "baseline_metrics.json").read_text())
-    assert bm["ckpt_load"]["from_scratch"] is True
+    assert "from_scratch" in err or "预训练" in err, (
+        f"fail-loud 信息应点名 from_scratch/预训练：STDERR:\n{err}"
+    )
 
 
 # ── E22：empty slots → exit 2 + terminate_unsupported ──────────────────────────

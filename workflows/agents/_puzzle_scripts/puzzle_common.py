@@ -220,11 +220,14 @@ def build_pretrained_model(adapters: Any) -> nn.Module:
             f"adapters.load_pretrained(model) 须返 _LoadResult，得到 {type(result).__name__}"
         )
     if result.from_scratch:
-        print(
-            f"[puzzle_common] WARN: adapters.load_pretrained 标记 from_scratch=True"
-            f"（missing={len(result.missing)}, unexpected={len(result.unexpected)}）"
-            f"——baseline 可能近随机 init，检查 ckpt 路径与 schema 对齐",
-            file=sys.stderr,
+        # 无可用预训练权重（ckpt 缺/空/schema 严重不匹配）→ fail loud，不进 BLD/搜索。
+        # 理由：BLD 把候选块蒸馏去模仿 father(teacher) 的 I/O；随机 init 的 teacher 产垃圾
+        # teacher 信号 → block_library 全错 → 后续 score/select/GKD 白跑。puzzle 需要真 teacher。
+        # 用户须先训练出一版预训练模型（如跑项目自身的 train.py）再启动 puzzle。
+        raise RuntimeError(
+            "adapters.load_pretrained 标记 from_scratch=True（无可用预训练权重：ckpt 缺/空/"
+            f"schema 严重不匹配，missing={len(result.missing)}, unexpected={len(result.unexpected)}）。"
+            "BLD 需要真实 teacher——先训练出预训练模型（如跑项目 train.py）再启动 puzzle。"
         )
     model.eval()
     return model

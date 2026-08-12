@@ -197,11 +197,13 @@ nodes:
         feasible: {type: boolean, description: "true=Σlatency ≤ target_latency(target_latency 空时 ≤ baseline×(1-latency_reduction_target));false=超预算或无候选"}
         select_reason:
           type: string
-          enum: [mip-optimal, infeasible, none]
-          description: "mip-optimal=MIP 在预算内找到最优;infeasible=预算太紧无解;none=scores/latency 缺 fail-loud sentinel"
+          enum: [mip-optimal, best-effort, infeasible, none]
+          description: "mip-optimal=MIP 在预算内找到最优;best-effort=加性模型判 infeasible 时返 min-latency arch 让 gate 实测裁决（加性估算偏悲观）;infeasible=scores/latency 缺 fail-loud sentinel（空 arch）;none=scores 缺 sentinel"
       additionalProperties: false
     routes:
-      - when: "pz_select.output.selected_arch and pz_select.output.feasible"
+      # selected_arch 非空即推进到 retrain——gate 的真实 latency 测量才是 LAT AC 权威，
+      # select 阶段不据（悲观的）加性 feasible 预死。空 arch / none 才 terminate。
+      - when: "pz_select.output.selected_arch"
         to: pz_retrain
       - to: terminate_select_failed
 
