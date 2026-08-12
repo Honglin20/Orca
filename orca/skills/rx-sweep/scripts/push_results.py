@@ -3,7 +3,7 @@
 
 构造 3 个 chart payload：
     1. pareto：latency_ms × accuracy，方向由 accuracy_kind 推。
-    2. bar：variant × accuracy，hue=kd。
+    2. bar：model × accuracy，hue=kd。
     3. table：全实验总表。
 
 推图策略：
@@ -32,7 +32,7 @@ MIN_KINDS = {"mse", "nmse", "ber", "db"}
 LABEL = "rx-sweep/results"
 TITLES = {
     "pareto": "Latency vs Accuracy (Pareto)",
-    "bar": "Accuracy by Variant",
+    "bar": "Accuracy by Model",
     "table": "All Experiments",
 }
 
@@ -69,6 +69,9 @@ def load_results(results_path: Path) -> list[dict[str, Any]]:
             raise ValueError(
                 f"{results_path}:{lineno} 顶层非 dict（实际 {type(row).__name__}）"
             )
+        # 向后兼容：旧 results.jsonl 行用 variant 字段；统一补 model 字段。
+        if not row.get("model") and row.get("variant"):
+            row["model"] = row["variant"]
         rows.append(row)
     return rows
 
@@ -102,12 +105,12 @@ def build_payloads(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         {
             "chart_type": "bar",
             "data": rows,
-            "x": "variant",
+            "x": "model",
             "y": "accuracy",
             "hue": "kd",
             "label": LABEL,
             "title": TITLES["bar"],
-            "x_label": "variant",
+            "x_label": "model",
             "y_label": "accuracy",
         },
         {
@@ -115,7 +118,7 @@ def build_payloads(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "data": rows,
             "columns": [
                 "exp_id",
-                "variant",
+                "model",
                 "kd",
                 "accuracy",
                 "latency_ms",

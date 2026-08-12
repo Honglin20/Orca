@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """gate_check.py —— rx-sweep 检验门脚本
 
-对单个 variant 跑 1 step 验正确：
-  1. 跑 `python <runner> --variant <v> [--kd --teacher-ckpt <p>] --epochs 1`
+对单个 model 跑 1 step 验正确：
+  1. 跑 `python <runner> --model <name> [--kd --teacher-ckpt <p>] --epochs 1`
      （设 CUDA_VISIBLE_DEVICES=<gpu>，默认 300s 超时）。
   2. 从 stdout 抓 [RX-GATE] key=val 行 + [RESULT]/loss 行。
-  3. 验 gate=PASS 且 variant 匹配请求且 io_in/io_out==[1,4,48,64,1]，
+  3. 验 gate=PASS 且 model 匹配请求且 io_in/io_out==[1,P,F,S,1]（P/F/S 从同一
+     GATE 行解析，与 runner 的 RxConfig 单一真相源一致——不硬编码维度，根治 64/32 漂移），
      并确认前向+反向没崩（有 [RESULT] 或 loss 行）。
-  4. stdout: [GATE-RESULT] variant=... passed=true|false reason=...
+  4. stdout: [GATE-RESULT] model=... passed=true|false reason=...
      exit 0 (passed) / 1 (failed)。
 
 被测工程崩（runner 崩 / gate FAIL）→ exit 1 + stdout 的 [GATE-RESULT]。
 本脚本自身崩（参数错 / 内部异常，区别于被测工程崩）→ exit 2 + stderr。
 
 契约：reference/contracts.md §3（GATE 格式）+ §5（脚本 CLI）。
-纯 stdlib + subprocess，不依赖 orca。
+纯 stdlib + subprocess，不依赖 orca / rx_models（维度从 GATE 行解析，无需 import 包）。
 """
 
 import argparse
@@ -25,9 +26,6 @@ import sys
 import traceback
 from pathlib import Path
 
-
-# 期望的 I/O shape（OFDM 接收机自编码器，contracts.md §1）
-_EXPECTED_IO = [1, 4, 48, 64, 1]
 
 # 子进程默认超时
 _TIMEOUT_DEFAULT = 300
@@ -57,7 +55,7 @@ def _parse_kv(payload: str) -> dict:
 
 
 def _parse_shape(s: str) -> list | None:
-    """解析 '[1,4,48,64,1]' → [1,4,48,64,1]。失败返回 None。"""
+    """解析 '[1,4,48,32,1]' → [1,4,48,32,1]。失败返回 None。"""
     s = s.strip().lstrip("[").rstrip("]")
     parts = [p.strip() for p in s.split(",") if p.strip()]
     out = []
@@ -67,6 +65,15 @@ def _parse_shape(s: str) -> list | None:
         except ValueError:
             return None
     return out
+
+
+def _parse_int(s: str) -> int | None:
+    """解析 '32' → 32。失败返回 None。"""
+    s = s.strip()
+    try:
+        return int(s)
+    except ValueError:
+        return None
 
 
 def _extract_gate(stdout: str) -> dict | None:
@@ -106,13 +113,13 @@ def _extract_crash_reason(stdout: str, stderr: str, rc: int) -> str:
 # 子进程
 # ---------------------------------------------------------------------------
 
-def _run_runner(python, runner_path, variant, kd, teacher_ckpt, gpu, timeout):
+def _run_runner(python, runner_path, model, kd, teacher_ckpt, gpu, timeout):
     """跑 runner 子进程。返回 (returncode, stdout, stderr, timed_out)。"""
     env = os.environ.copy()
     if gpu is not None:
         env["CUDA_VISIBLE_DEVICES"] = str(gpu)
 
-    cmd = [python, str(runner_path), "--variant", variant, "--epochs", "1"]
+    cmd = [python, str(runner_path), "--model", model, "--epochs", "1"]
     if kd:
         cmd.append("--kd")
     if teacher_ckpt:
@@ -141,7 +148,7 @@ def _run_runner(python, runner_path, variant, kd, teacher_ckpt, gpu, timeout):
 # 核心：跑一次检验
 # ---------------------------------------------------------------------------
 
-def check(project_root: Path, variant: str, kd: bool, teacher_ckpt,
+def check(project_root: Path, model: str, kd: bool, teacher_ckpt,
           gpu, runner: str, python: str, timeout: int):
     """跑一次检验。返回 (passed: bool, reason: str, detail: dict)。"""
 
@@ -150,7 +157,7 @@ def check(project_root: Path, variant: str, kd: bool, teacher_ckpt,
         return False, f"runner not found: {runner_path}", {"error": "runner_missing"}
 
     rc, stdout, stderr, timed_out = _run_runner(
-        python, runner_path, variant, kd, teacher_ckpt, gpu, timeout,
+        python, runner_path, model, kd, teacher_ckpt, gpu, timeout,
     )
 
     detail = {
@@ -172,21 +179,34 @@ def check(project_root: Path, variant: str, kd: bool, teacher_ckpt,
 
     # (b) 逐项校验 GATE 字段
     gate_flag = gate.get("gate", "").upper()
-    actual_variant = gate.get("variant", "")
+    actual_model = gate.get("model", "")
     io_in = _parse_shape(gate.get("io_in", ""))
     io_out = _parse_shape(gate.get("io_out", ""))
+
+    # 期望 io = [1, P, F, S, 1]：P/F/S 从同一 GATE 行解析（runner 的 RxConfig 单一
+    # 真相源 → GATE 行报的维度即期望维度），不在 gate_check 硬编码——根治 64/32 漂移。
+    p = _parse_int(gate.get("P", ""))
+    f = _parse_int(gate.get("F", ""))
+    s = _parse_int(gate.get("S", ""))
+    if None not in (p, f, s):
+        expected_io = [1, p, f, s, 1]
+    else:
+        expected_io = None
 
     reasons = []
     if gate_flag != "PASS":
         reasons.append(f"gate={gate_flag or '<missing>'}")
-    if actual_variant != variant:
+    if actual_model != model:
         reasons.append(
-            f"variant mismatch (got {actual_variant!r}, want {variant!r})"
+            f"model mismatch (got {actual_model!r}, want {model!r})"
         )
-    if io_in is None or io_in != _EXPECTED_IO:
-        reasons.append(f"io_in mismatch {io_in}")
-    if io_out is None or io_out != _EXPECTED_IO:
-        reasons.append(f"io_out mismatch {io_out}")
+    if expected_io is None:
+        reasons.append("GATE 行缺 P/F/S 维度字段（无法推期望 io）")
+    else:
+        if io_in is None or io_in != expected_io:
+            reasons.append(f"io_in mismatch {io_in} (expect {expected_io})")
+        if io_out is None or io_out != expected_io:
+            reasons.append(f"io_out mismatch {io_out} (expect {expected_io})")
 
     # (c) runner 非零退出（前向/反向崩）—— 仅当 gate=PASS 才算"应跑通却崩"
     if gate_flag == "PASS" and rc != 0:
@@ -214,8 +234,8 @@ def check(project_root: Path, variant: str, kd: bool, teacher_ckpt,
 def main() -> int:
     ap = argparse.ArgumentParser(description="rx-sweep 检验门")
     ap.add_argument("--project-root", required=True, help="工程根目录")
-    ap.add_argument("--variant", required=True,
-                    help="待验 variant，如 pure_cnn / pure_cnn_pilot")
+    ap.add_argument("--model", required=True,
+                    help="待验 rx_models 方案名，如 pure_cnn / feat_complex / model8_trf")
     ap.add_argument("--kd", action="store_true", help="蒸馏模式")
     ap.add_argument("--teacher-ckpt", default=None, help="teacher ckpt 路径")
     ap.add_argument("--gpu", default=None, help="CUDA_VISIBLE_DEVICES")
@@ -237,7 +257,7 @@ def main() -> int:
 
         passed, reason, _detail = check(
             project_root=project_root,
-            variant=args.variant,
+            model=args.model,
             kd=args.kd,
             teacher_ckpt=args.teacher_ckpt,
             gpu=args.gpu,
@@ -251,7 +271,7 @@ def main() -> int:
         return 2
 
     print(
-        f"[GATE-RESULT] variant={args.variant} "
+        f"[GATE-RESULT] model={args.model} "
         f"passed={'true' if passed else 'false'} reason={reason}"
     )
     return 0 if passed else 1

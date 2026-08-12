@@ -1,5 +1,14 @@
 """pure_cnn_model.py —— rx-sweep 纯 CNN 接收机模型族（交付物，拷进用户工程）。
 
+.. deprecated::
+    **本文件已由 ``rx_models/`` 包（``rx_models.pure_cnn``）取代**，仅为向后兼容保留。
+    新工程一律用 ``rx_models`` 包：``from rx_models import get_model, RxConfig`` →
+    ``get_model("pure_cnn", RxConfig(...))``。``rx_models`` 把维度收敛到 ``RxConfig``
+    单一真相源（根治本文件默认 ``num_symbols=64`` 与工程 ``beam_num=32`` 漂移的问题），
+    并提供 7 个方案（model8_trf / pure_cnn / cnn_trf_alt / feat_complex / feat_diff /
+    feat_fft / feat_adjbeam）。仅当用户远程工程已在用本文件时才保留它，不要给新工程
+    拷本文件——拷 ``scripts/models/rx_models/`` 整包（见 SKILL.md 阶段 1）。
+
 逐字实现 ``orca/skills/rx-sweep/reference/contracts.md`` §1 的接口契约::
 
     DUMMY_INPUT  = {"shape": [1, 4, 48, 64, 1], "dtype": "float32"}

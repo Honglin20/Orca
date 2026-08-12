@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """build_matrix.py —— 生成 rx-sweep 实验矩阵 JSON（contracts §6）。
 
-每 variant × {scratch, kd}（可选 model8_baseline 参考）。每条记录含：
-    exp_id / variant / kd(bool) / needs_teacher(kd=True 时 True)
+每 model × {scratch, kd}（可选 model8_baseline 参考）。每条记录含：
+    exp_id / model / kd(bool) / needs_teacher(kd=True 时 True)
 
 CLI：
     python build_matrix.py --out matrix.json \
-        [--variants pure_cnn,pure_cnn_pilot,pure_cnn_lmmse,pure_cnn_pilot_lmmse] \
+        [--models model8_trf,pure_cnn,cnn_trf_alt,feat_complex,feat_diff,feat_fft,feat_adjbeam] \
         [--modes scratch,kd] \
         [--include-baseline]
 
@@ -22,51 +22,48 @@ import json
 import sys
 from pathlib import Path
 
-# 4 个纯 CNN 族 variant（contracts §1）。
-DEFAULT_VARIANTS = (
+# rx_models 7 方案（contracts §1）：transformer / CNN 族 / feature engineering 族。
+DEFAULT_MODELS = (
+    "model8_trf",
     "pure_cnn",
-    "pure_cnn_pilot",
-    "pure_cnn_lmmse",
-    "pure_cnn_pilot_lmmse",
+    "cnn_trf_alt",
+    "feat_complex",
+    "feat_diff",
+    "feat_fft",
+    "feat_adjbeam",
 )
-# 已知 variant 名（contracts §1 + §6）：--variants 早校验用，防 typo 静默产矩阵。
-KNOWN_VARIANTS = {
-    "pure_cnn",
-    "pure_cnn_pilot",
-    "pure_cnn_lmmse",
-    "pure_cnn_pilot_lmmse",
-    "model8",
-}
+# 已知 model 名（contracts §1 + §6）：--models 早校验用，防 typo 静默产矩阵。
+KNOWN_MODELS = set(DEFAULT_MODELS)
 # 训练模式：scratch=从头训，kd=蒸馏（需 teacher）。
 DEFAULT_MODES = ("scratch", "kd")
 # model8 baseline 的 exp_id（仅作参考线，不蒸馏）。
 BASELINE_EXP_ID = "model8_baseline"
-BASELINE_VARIANT = "model8"
+BASELINE_MODEL = "model8"
 
 
 def build_entries(
-    variants: list[str], modes: list[str], include_baseline: bool
+    models: list[str], modes: list[str], include_baseline: bool
 ) -> list[dict]:
-    """按 §6 顺序构造矩阵条目：baseline（可选）→ 每个 variant × 每个模式。"""
+    """按 §6 顺序构造矩阵条目：baseline（可选）→ 每个 model × 每个模式。"""
     entries: list[dict] = []
 
     if include_baseline:
         entries.append(
             {
                 "exp_id": BASELINE_EXP_ID,
-                "variant": BASELINE_VARIANT,
+                "model": BASELINE_MODEL,
                 "kd": False,
                 "needs_teacher": False,
             }
         )
 
-    for variant in variants:
+    for model in models:
         for mode in modes:
             if mode == "scratch":
                 entries.append(
                     {
-                        "exp_id": f"{variant}_scratch",
-                        "variant": variant,
+                        "exp_id": f"{model}_scratch",
+                        "model": model,
                         "kd": False,
                         "needs_teacher": False,
                     }
@@ -74,8 +71,8 @@ def build_entries(
             elif mode == "kd":
                 entries.append(
                     {
-                        "exp_id": f"{variant}_kd",
-                        "variant": variant,
+                        "exp_id": f"{model}_kd",
+                        "model": model,
                         "kd": True,
                         "needs_teacher": True,
                     }
@@ -105,9 +102,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--out", required=True, help="输出矩阵 JSON 路径。")
     parser.add_argument(
-        "--variants",
+        "--models",
         default=None,
-        help=f"逗号分隔 variant 列表（默认：{','.join(DEFAULT_VARIANTS)}）。",
+        help=f"逗号分隔 model 列表（默认：{','.join(DEFAULT_MODELS)}）。",
     )
     parser.add_argument(
         "--modes",
@@ -121,15 +118,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    variants = parse_csv(args.variants, DEFAULT_VARIANTS)
+    models = parse_csv(args.models, DEFAULT_MODELS)
     modes = parse_csv(args.modes, DEFAULT_MODES)
 
-    # 校验 variant / mode 早失败（fail loud）。
-    bad_variants = [v for v in variants if v not in KNOWN_VARIANTS]
-    if bad_variants:
+    # 校验 model / mode 早失败（fail loud）。
+    bad_models = [m for m in models if m not in KNOWN_MODELS]
+    if bad_models:
         print(
-            f"[build_matrix] 错误：未知 variant {bad_variants}"
-            f"（已知：{sorted(KNOWN_VARIANTS)}）",
+            f"[build_matrix] 错误：未知 model {bad_models}"
+            f"（已知：{sorted(KNOWN_MODELS)}）",
             file=sys.stderr,
         )
         return 2
@@ -142,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    entries = build_entries(variants, modes, args.include_baseline)
+    entries = build_entries(models, modes, args.include_baseline)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

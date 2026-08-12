@@ -35,14 +35,27 @@ import time
 from pathlib import Path
 from typing import Any
 
-# ── variant → (pilot, lmmse) 映射（contracts §1）─────────────────────────────
-def variant_flags(variant: str) -> tuple[bool, bool]:
-    """据 variant 名推 (pilot, lmmse) 开关。model8 / pure_cnn 均无。"""
-    if variant == "model8" or variant == "pure_cnn":
+# ── model → (pilot, lmmse) 旧标志位推断 ──────────────────────────────────────
+def _infer_pilot_lmmse(model: str) -> tuple[bool, bool]:
+    """据 model 名推 (pilot, lmmse) 旧标志位。
+
+    新 rx_models 7 方案均无 pilot/lmmse 语义 → (False, False)。保留是为 results.jsonl
+    schema 稳定（pilot/lmmse 列），向后兼容旧 pure_cnn 族 variant 名（含 pilot/lmmse 子串）。
+    """
+    if model in ("model8", "pure_cnn"):
         return (False, False)
-    pilot = "pilot" in variant
-    lmmse = "lmmse" in variant
+    pilot = "pilot" in model
+    lmmse = "lmmse" in model
     return (pilot, lmmse)
+
+
+def _model_of(exp: dict[str, Any]) -> str:
+    """从实验条目取 model 名（优先 model 字段，fallback 旧 variant 字段做兼容）。"""
+    m = exp.get("model")
+    if m:
+        return m
+    # 向后兼容：旧 matrix.json 用 variant 字段。
+    return exp.get("variant", "")
 
 
 # 默认结构超参（contracts §1，与 pure_cnn_model.py 默认一致）。
@@ -108,10 +121,10 @@ def build_result_row(
     epochs: int,
 ) -> dict[str, Any]:
     """组装一行 results.jsonl（contracts §4 schema）。缺失数值字段用 None。"""
-    pilot, lmmse = variant_flags(exp["variant"])
+    pilot, lmmse = _infer_pilot_lmmse(_model_of(exp))
     return {
         "exp_id": exp["exp_id"],
-        "variant": exp["variant"],
+        "model": _model_of(exp),
         "pilot": pilot,
         "lmmse": lmmse,
         "kd": bool(exp.get("kd", False)),
@@ -145,14 +158,18 @@ def launch_experiment(
     teacher_ckpt: str | None,
     epochs: int,
     python: str,
+    tb_dir: str | None = None,
 ) -> tuple[subprocess.Popen, Path]:
     """启动一个实验子进程。返回 (popen, log_path)。"""
     log_path = project_root / f"{exp['exp_id']}.log"
-    cmd: list[str] = [python, runner, "--variant", exp["variant"], "--epochs", str(epochs)]
+    cmd: list[str] = [python, runner, "--model", _model_of(exp), "--epochs", str(epochs)]
     if exp.get("kd"):
         cmd.append("--kd")
         if teacher_ckpt:
             cmd.extend(["--teacher-ckpt", teacher_ckpt])
+    if tb_dir:
+        # 每实验写 <tb_dir>/<exp_id>/，tensorboard --logdir <tb_dir> 看所有实验训练曲线对比
+        cmd.extend(["--tb-dir", str(tb_dir)])
 
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu)
@@ -180,6 +197,7 @@ def run_sweep(
     epochs: int,
     python: str,
     poll: float,
+    tb_dir: str | None = None,
 ) -> int:
     """主调度循环。返回 0=全部调度完成（个别实验失败已记入 results）。"""
     # 1. 读矩阵（fail loud）。
@@ -252,6 +270,7 @@ def run_sweep(
                         teacher_ckpt=teacher_ckpt,
                         epochs=epochs,
                         python=python,
+                        tb_dir=tb_dir,
                     )
                 except OSError as e:
                     # 启动失败（runner 路径错 / python 找不到）→ FAIL_train，不阻断。
@@ -364,10 +383,17 @@ def main(argv: list[str] | None = None) -> int:
         "--epochs", type=int, default=3, help="训练轮数（默认 3）。"
     )
     parser.add_argument(
-        "--python", default="python", help="Python 解释器（默认 python）。"
+        "--python", default=sys.executable,
+        help="起实验的 python（默认本脚本的 sys.executable——保证子进程拿到同一解释器，"
+             "含 torch / tensorboard 等依赖；勿用裸 'python'，WSL 上可能解析到缺包的解释器）。",
     )
     parser.add_argument(
         "--poll", type=float, default=5.0, help="轮询间隔秒（默认 5）。"
+    )
+    parser.add_argument(
+        "--tb-dir", default=None,
+        help="TensorBoard 日志根目录：每实验写 <tb-dir>/<exp_id>/，"
+             "用 `tensorboard --logdir <tb-dir>` 看训练曲线对比。",
     )
     args = parser.parse_args(argv)
 
@@ -393,6 +419,7 @@ def main(argv: list[str] | None = None) -> int:
         epochs=args.epochs,
         python=args.python,
         poll=args.poll,
+        tb_dir=args.tb_dir,
     )
 
 
