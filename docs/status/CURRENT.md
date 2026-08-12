@@ -4,44 +4,29 @@
 
 ---
 
-## 当前：Puzzle U6 治本 + target E2E（分支 `puzzle-universal`）
+## 当前：Puzzle U6 治本 + target E2E（分支 `puzzle-universal`）—— 70% 目标结构性不可达，待用户定向
 
-**任务**：puzzle workflow 从「假设用户代码形态」翻转为「agent faithful 移植 + 确定性算法壳」（对齐 nas-supernet-v3 porter），并在 playground/target 上 headless 端到端验证（时延降 ≥70% + acc 不降）。
+### ✅ 已完成（通用 workflow 改进，8 commit）
 
-### ✅ 已完成（6 commit）
+- `00f5a3c` U6 治本：porter 化适配器（13 项 API）+ 废四硬契约 + mask-aware/方向感知/LAT 参数化。
+- `efb4387` latency 尺度修复：整模 latency batch-1（原 calib-batch 致 blocks 看似 7% → MIP 全 identity）。
+- `d13bda0`/`a92274f` revert 串改（噪声容差 + all-no_op）—— 立保逻辑铁律（不许删计算/改深度/gaming）。
+- `50a813a` GKD 微调 epochs = 基线训练 × 50%（通用规则）。
+- `162eb50` evaluate 向量化 loop metric（通用 G2，k=1 k-NN cdist+argmin ~100× 快）。
+- `94bdc7e` **early block-fraction feasibility 检查**：pz_expand 测 block-zero floor → max achievable reduction < target 则 exit 3 → terminate_latency_infeasible 早退（不烧 BLD）。target@70% 实测正确触发（exit 3）。
+- 100-epoch target 训练 → 可信基线 acc **0.9919** / latency 0.42ms。
 
-- **`00f5a3c` U6 治本**：porter 化适配器（puzzle_adapters.py 13 项 API）+ 废四硬契约（零参工厂/单参eval/双零strict-load/单tensor forward）+ 通用 bug 修复（mask-aware 候选 / latency floor 非方 slot / gate 方向感知 / LAT AC 参数化）。tars validate 0/0，96 tests。
-- **`efb4387` latency 尺度修复**：整模 latency 改 batch-1 per-inference（之前测 calib batch 64 致 blocks 看似只占 7% → MIP 全 identity 零优化）。
-- **`53e626a` MIP best-effort + 无预训练 fail loud**：加性 infeasible 时返 min-latency arch 让 gate 实测裁决（不空死 select）；无可用预训练 → fail loud（BLD 需真 teacher）。
-- **`f6762cb` latency 改 min（非 median）**：抗 CPU 争用（E2E 期 opencode 占 CPU，median 膨胀致 LAT AC 假性 fail；min 代表真实可达延迟）。
-- **`b1dad7c` LAT AC 加测量噪声容差**：对称 ACC AC 容差，--latency_noise_tol 默认 3%，吸收 min 残差噪声，70% 边界稳定判定。
+### 🔴 70% latency 对 target 结构性不可达（高精度实证）
 
-### ✅ target E2E 端到端跑通 + 串改已纠正
+- 500-rep min 测量：baseline 0.4201ms / all-block-zero floor 0.1362ms → **block 替换最大 reduction 67.57%** < 70%。
+- 非 block 开销 0.136ms（PositionalEncoding + 4 路 input_proj + output_proj + LayerNorm + residual）puzzle 碰不到。
+- 保 acc 雪上加霜：通用 mixer 候选（fnet/synthesizer）函数 ≠ 专用 block，BLD loss~1（没真模仿），任何非 identity 替换 acc 崩。
+- **非 bug、非 workflow 问题**——是 puzzle 范式（block-only 替换）+ 该模型 block 占比（68%）的物理边界。workflow 现自带 early-feasibility 诚实检测。
 
-- 端到端跑通：pz_expand→BLD(52 variants)→score→select→retrain→report(gate)（标准 opencode run + tars skill）。
-- 通用性：零 target 字面量；adaptations 忠实移植 4 输入 forward + InfoNCE + k-NN eval。
-- **用户纠正后纠正了两处「串改」**（`d13bda0` revert 噪声容差、`a92274f` best-effort 排除 no_op）：
-  保逻辑铁律——优化必须与原模型逻辑一致，不许删计算（no_op）/改深度，不许 gaming 容差。
+### ⏳ 待用户定向（70% on target 数学不可达，三种出路）
 
-### 🔴 暴露的更深问题（待解决）：BLD fidelity 不足
+1. 换 block 占比 >85% 的测试模型（纯 transformer，无重 input/output 投影）→ puzzle 70%+保 acc 可端到端 pass。
+2. 扩 puzzle 到结构化非 block 剪枝（动 input/output 投影）——不同算法，大改。
+3. 接受 68% 天花板 + 调 latency_reduction_target ≤0.65（workflow 现能端到端跑通到 gate）。
 
-- 忠实功能替换（fnet+linear，仍做计算）：latency 降 41%，但 **BLD-only acc 0.0013（vs baseline 0.067，崩到近随机）**。
-- 即 BLD 蒸馏的候选块**没忠实复刻原 block 的 I/O**——保了结构但没保逻辑。
-- 这是 puzzle 真正「保逻辑保 acc」的核心阻塞：需提升 BLD fidelity（候选容量 / 蒸馏收敛 / 候选设计）。当前候选对该模型（专用 attention/ffn）复刻不到位。
-- 结论：latency 目标（70%）不是真问题；**BLD 能否产出忠实于原 block 的替换块**才是「保逻辑」的关键。
-
-### 关键通用规则（从 target 失败提取，全部回灌 workflow）
-
-1. 整模 + per-block latency 必须**同尺度**（batch-1 per-inference），否则 MIP overhead 失真。
-2. latency 测量必须**抗 CPU 争用**（min 非 median）—— in-session headless E2E 必然争用。
-3. LAT AC 须有**测量噪声容差**（对称 ACC AC）——否则真~70% 边界目标被噪声偶判 fail。
-4. 加性 infeasible 不该预死 select —— gate 真实测量才是 LAT AC 权威。
-5. 无预训练 → fail loud（BLD 需真 teacher）。
-6. 多输入/dict batch 的 forward_model 须由 adapter 消化（禁脚本假设单 tensor）。
-
-### 遗留
-
-- E2E gate 在 70% 噪声边界（all-no_op 天花板）；要稳定 >70% 需扩展 puzzle 优化非 block 层（input/output 投影）或换 block-主导模型。
-- in-session 标准模式在 deepseek 上仍间歇 stall（autodriver 兜底）；生产建议可靠后端或 opencode per-call timeout。
-
-**必读**：`docs/specs/puzzle-u6-design-draft.md`；`workflows/agents/_puzzle_scripts/`（puzzle_common.build_latency_dummy/min + mip best-effort + from_scratch fail）。
+**必读**：`docs/specs/puzzle-u6-design-draft.md`；release notes `2026-08-12-puzzle-u4-cleanup.md` 起。
