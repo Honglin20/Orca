@@ -129,6 +129,309 @@ def test_measure_baseline_happy_4_smokes(tmp_path: Path) -> None:
     assert (paths["output_dir"] / "baseline_metrics.json").is_file()
     bm = json.loads((paths["output_dir"] / "block_map.json").read_text())
     assert all(s["in_dim"] == 32 for s in bm["slots"])
+    # 新增 floor + feasibility 字段（block-zero floor 早退可行性检查）
+    assert result["latency_target_feasible"] is True, (
+        f"默认 target=0.5，合成 transformer block 占主导，应 feasible\nSTDOUT:\n{out}"
+    )
+    assert result["max_achievable_reduction"] > 0, "max_reduction 应 > 0（block 非零占比）"
+    assert result["latency_floor"] > 0, "floor latency 应 > 0"
+    assert result["latency_floor"] < result["baseline_latency"], (
+        "floor（全 block 置零）应小于 baseline——合成模型 block 是主要开销"
+    )
+    # baseline_metrics.json 同样落盘新字段
+    bm_json = json.loads((paths["output_dir"] / "baseline_metrics.json").read_text())
+    assert bm_json["latency_floor"] == result["latency_floor"]
+    assert bm_json["max_achievable_reduction"] == result["max_achievable_reduction"]
+    assert bm_json["latency_target_feasible"] is True
+    assert bm_json["latency_reduction_target"] == 0.5  # argparse default
+    assert "latency_infeasible_reason" not in bm_json  # feasible → 无 reason
+
+
+# ── block-zero floor latency 单元（通用性：不假设 block 类）────────────────────
+
+def test_measure_block_zero_floor_latency_basic(tmp_path: Path) -> None:
+    """measure_block_zero_floor_latency：替换 slot 为零输出块后整模 latency < baseline。
+
+    意图（Rule 9）：验证 floor 测量逻辑本身——setattr 替换 slot 为 _FloorZeroModule
+    + forward 仍能跑（残差结构下零输出合法）+ floor_latency 数值合理（< baseline）。
+    """
+    import torch
+    paths = _setup_fixture(tmp_path)
+    import puzzle_common as pc
+    from search_space_io import load_search_space_yaml, to_block_map
+
+    slot_dicts, _ = load_search_space_yaml(paths["search_space"])
+    # 简化：直接用 path 构造 block_map（in/out_dim floor 测量不依赖）
+    for d in slot_dicts:
+        d["in_dim"] = 32
+        d["out_dim"] = 32
+    block_map = to_block_map(slot_dicts)
+
+    adapters = pc.load_puzzle_adapters(paths["adapters"])
+    device = torch.device("cpu")
+    model = pc.build_pretrained_model(adapters)
+    forward_fn = adapters.forward_model
+    dummy = pc.build_latency_dummy(adapters, device=device)
+    baseline = pc.measure_whole_model_latency(model, forward_fn, dummy, device)
+    floor = pc.measure_block_zero_floor_latency(adapters, block_map, device)
+
+    assert floor > 0, "floor latency 应 > 0（非 block 开销仍存在）"
+    assert floor < baseline, (
+        f"floor（block 全零）应 < baseline（{baseline}），得 {floor}——合成 fixture block 占主导"
+    )
+
+    # 调用后 baseline 模型不被污染（floor 函数内部应恢复 slot；即使不恢复也是独立实例）：
+    # 用 build_pretrained_model 重建一个 father，跑 forward 应不报错（验证 _FloorZeroModule
+    # 替换 + 恢复的 setattr 流程没破坏模型结构）。
+    fresh = pc.build_pretrained_model(adapters)
+    with torch.no_grad():
+        forward_fn(fresh, dummy)
+
+
+def test_floor_zero_module_handles_nonsquare_shape() -> None:
+    """_FloorZeroModule 对非方 slot（in_dim != out_dim）也返正确 shape 的零。
+
+    意图：通用性铁律——floor 测量不假设 in_dim==out_dim。构造 in=8 / out=16 的 slot，
+    替换后 _FloorZeroModule.forward 应返 (B, 16) 零张量（B = 输入 batch）。
+    """
+    import torch
+    import puzzle_common as pc
+
+    # captured output shape[1:] = (16,)（slot 输出 16 维，非方）
+    mod = pc._FloorZeroModule(out_shape_tail=(16,), dtype=torch.float32)
+    # 输入是 (4, 8)——非方 slot，in_dim=8 / out_dim=16
+    out = mod(torch.randn(4, 8))
+    assert out.shape == (4, 16), f"非方 slot：期望 (4, 16)，得 {out.shape}"
+    assert torch.all(out == 0)
+    # kwargs-only 调用也兼容（父层可能传 attn_mask 等）
+    out2 = mod(torch.randn(2, 8), attn_mask=torch.randn(2, 2))
+    assert out2.shape == (2, 16)
+
+
+def test_measure_block_zero_floor_empty_blockmap_raises(tmp_path: Path) -> None:
+    """空 block_map → fail loud（floor 无意义；unsupported 分支应在上游拦截）。"""
+    import torch
+    import puzzle_common as pc
+    paths = _setup_fixture(tmp_path)
+    adapters = pc.load_puzzle_adapters(paths["adapters"])
+    empty_bm = pc.BlockMap(slots=[])
+    with pytest.raises(RuntimeError, match="为空"):
+        pc.measure_block_zero_floor_latency(
+            adapters, empty_bm, torch.device("cpu")
+        )
+
+
+# ── 早退：latency 结构性不可达 → exit 3（区别于 unsupported 的 exit 2）─────────
+
+@pytest.mark.slow
+def test_measure_baseline_latency_infeasible_exit_3(tmp_path: Path) -> None:
+    """target=0.99 极端高 → block 占比达不到 → exit 3（latency_target_feasible=false）。
+
+    意图（Rule 9）：验证「结构性不可达」的早退分支——模型可替换 + smoke 全绿，但 block
+    替换物理上限 < target。区别于 exit 2（unsupported/异常）：exit 3 是已知分支，非异常。
+    """
+    paths = _setup_fixture(tmp_path)
+    paths["output_dir"].mkdir(parents=True, exist_ok=True)
+    rc, out, err = _run("measure_baseline.py", [
+        "--flat_path", str(paths["flat"]),
+        "--build_fn", "build_model",
+        "--adapters", str(paths["adapters"]),
+        "--search_space_path", str(paths["search_space"]),
+        "--latency_unit", "ms",
+        "--output_dir", str(paths["output_dir"]),
+        "--latency_reduction_target", "0.99",  # 极端高——block 占比达不到
+        "--seed", "0",
+    ])
+    assert rc == 3, (
+        f"target=0.99 应结构性不可达（exit 3），得 rc={rc}\nSTDERR:\n{err}\nSTDOUT:\n{out}"
+    )
+    result = _parse_result_json(out)
+    # 模型可替换、smoke 全绿——区别于 exit 2 unsupported
+    assert result["model_type_supported"] is True
+    assert result["smokes_passed"] == [
+        "ckpt-load", "forward-determinism",
+        "per-slot-identity-allclose", "eval-stability",
+    ]
+    assert result["latency_target_feasible"] is False
+    assert result["max_achievable_reduction"] < 0.99
+    assert result["latency_floor"] > 0
+    assert result["baseline_latency"] > result["latency_floor"]
+    assert "block 替换最大 reduction" in result["error"]
+    # baseline_metrics 落盘 reason
+    bm = json.loads((paths["output_dir"] / "baseline_metrics.json").read_text())
+    assert bm["latency_target_feasible"] is False
+    assert bm["latency_reduction_target"] == 0.99
+    assert "latency_infeasible_reason" in bm
+    assert "block 占比过低" in bm["latency_infeasible_reason"]
+    # 产物仍齐全（exit 3 不应跳过 artifact 写盘）
+    assert (paths["output_dir"] / "block_map.json").is_file()
+    assert (paths["output_dir"] / "search_space.yaml").is_file()
+
+
+@pytest.mark.slow
+def test_measure_baseline_latency_feasible_low_target_exit_0(tmp_path: Path) -> None:
+    """target=0.05 极低 → block 占比必超 → exit 0（latency_target_feasible=true）。
+
+    意图：feasibility 早退分支的反向 sanity——任何非零 block 占比都能过 0.05 目标。
+    """
+    paths = _setup_fixture(tmp_path)
+    paths["output_dir"].mkdir(parents=True, exist_ok=True)
+    rc, out, err = _run("measure_baseline.py", [
+        "--flat_path", str(paths["flat"]),
+        "--build_fn", "build_model",
+        "--adapters", str(paths["adapters"]),
+        "--search_space_path", str(paths["search_space"]),
+        "--output_dir", str(paths["output_dir"]),
+        "--latency_reduction_target", "0.05",
+        "--seed", "0",
+    ])
+    assert rc == 0, f"target=0.05 应 feasible（exit 0）\nSTDERR:\n{err}\nSTDOUT:\n{out}"
+    result = _parse_result_json(out)
+    assert result["latency_target_feasible"] is True
+    assert result["max_achievable_reduction"] >= 0.05
+
+
+# ── floor helper 分支：tuple output / 非 tensor raise / path 失败 ──────────────
+
+def test_capture_slot_output_shapes_handles_tuple_output(tmp_path: Path) -> None:
+    """slot forward 返回 tuple/list（如 attention 返 (out, attn_weights)）→ hook 取首元素 shape。"""
+    import torch
+    import torch.nn as nn
+    import puzzle_common as pc
+
+    class TupleSlot(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lin = nn.Linear(8, 16)
+        def forward(self, x):
+            out = self.lin(x)
+            return out, out.new_ones(out.shape)  # (out, attn_weights)
+
+    class Host(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.slot = TupleSlot()
+        def forward(self, x):
+            o, _ = self.slot(x)
+            return o.sum()
+
+    model = Host().eval()
+    forward_fn = lambda m, b: m(b)
+    shapes = pc._capture_slot_output_shapes(
+        model, ["slot"], torch.randn(2, 8), forward_fn, torch.device("cpu")
+    )
+    # tuple output → hook 取首元素 (B,16) → out_shape_tail=(16,)
+    assert shapes["slot"] == ((16,), torch.float32)
+
+
+def test_capture_slot_output_shapes_non_tensor_raises(tmp_path: Path) -> None:
+    """slot 输出非 tensor（如 list of int）→ fail loud（puzzle 契约 slot 输出须 tensor）。"""
+    import torch
+    import torch.nn as nn
+    import puzzle_common as pc
+
+    class WeirdSlot(nn.Module):
+        def forward(self, x):
+            return [1, 2, 3]  # 非 tensor
+
+    class Host(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.slot = WeirdSlot()
+        def forward(self, x):
+            # 必须真的调用 slot——否则 hook 不触发，测不到「非 tensor」分支
+            self.slot(x)
+            return x.sum()
+
+    model = Host().eval()
+    with pytest.raises(RuntimeError, match="非 tensor"):
+        pc._capture_slot_output_shapes(
+            model, ["slot"], torch.randn(2, 4),
+            lambda m, b: m(b), torch.device("cpu"),
+        )
+
+
+def test_capture_slot_output_shapes_missing_path_raises() -> None:
+    """slot path 在 model 中定位失败（get_submodule 抛 AttributeError）→ fail loud 点名。"""
+    import torch
+    import torch.nn as nn
+    import puzzle_common as pc
+
+    class Host(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.real = nn.Linear(4, 4)
+        def forward(self, x):
+            return self.real(x).sum()
+
+    model = Host().eval()
+    with pytest.raises(AttributeError, match="nonexistent"):
+        pc._capture_slot_output_shapes(
+            model, ["nonexistent.path"], torch.randn(2, 4),
+            lambda m, b: m(b), torch.device("cpu"),
+        )
+
+
+def test_measure_baseline_baseline_latency_zero_raises(tmp_path: Path) -> None:
+    """baseline_latency ≤ 0（latency_script_path 异常返回 0）→ fail loud raise（不静默写 max_reduction）。
+
+    subprocess 隔离 → monkeypatch 无效；改用真实的 latency_script_path 返 0 模拟异常。
+    """
+    paths = _setup_fixture(tmp_path)
+    paths["output_dir"].mkdir(parents=True, exist_ok=True)
+    # 写一个 latency 脚本始终返 0.0——measure_baseline 的 baseline 守卫应 raise（不写 max_reduction）
+    fake_latency = tmp_path / "fake_latency.py"
+    fake_latency.write_text(textwrap.dedent("""
+        def measure(model, batch):
+            return 0.0
+    """), encoding="utf-8")
+    rc, out, err = _run("measure_baseline.py", [
+        "--flat_path", str(paths["flat"]),
+        "--build_fn", "build_model",
+        "--adapters", str(paths["adapters"]),
+        "--search_space_path", str(paths["search_space"]),
+        "--output_dir", str(paths["output_dir"]),
+        "--latency_reduction_target", "0",
+        "--latency_script_path", f"{fake_latency}::measure",
+    ])
+    assert rc != 0, "baseline_latency=0 应 fail loud（rc!=0）"
+    assert "baseline_latency" in err and "非正" in err, (
+        f"stderr 应点名 baseline_latency 非正：\n{err}"
+    )
+
+
+# ── workflow 路由层：terminate_latency_infeasible first-match 路由验证 ──────────
+
+def test_puzzle_yaml_routes_cover_latency_infeasible_branch() -> None:
+    """静态校验 puzzle.yaml 的 pz_expand 路由：覆盖三个互斥分支（build_library /
+    infeasible / unsupported）+ terminate_latency_infeasible 节点存在。
+
+    意图（Rule 9）：验证路由 first-match 设计——
+    1. model_type_supported != false AND latency_target_feasible != false → build_library
+    2. model_type_supported != false → infeasible（说明 supported 但 feasible=false）
+    3. fallback → unsupported
+    """
+    from orca.compile.parser import load_workflow
+
+    yaml_path = _REPO / "workflows" / "puzzle.yaml"
+    wf = load_workflow(yaml_path)
+    pz_expand = next(n for n in wf.nodes if n.name == "pz_expand")
+    targets = [r.to for r in pz_expand.routes]
+    assert targets == ["pz_build_library", "terminate_latency_infeasible", "terminate_unsupported"], (
+        f"pz_expand 路由顺序/目标错误：{targets}"
+    )
+    # 双条件路由（first-match）—— compound expression 必须含两字段
+    first_when = pz_expand.routes[0].when or ""
+    assert "model_type_supported" in first_when and "latency_target_feasible" in first_when
+    # terminate_latency_infeasible 节点存在 + status=failed
+    terminators = {n.name: n for n in wf.nodes if n.kind == "terminate"}
+    assert "terminate_latency_infeasible" in terminators
+    # terminate 节点 status=failed（reason 字段含 block 占比过低提示）
+    infeasible = terminators["terminate_latency_infeasible"]
+    assert infeasible.status == "failed"
+    assert "block" in infeasible.reason and "latency_reduction_target" in infeasible.reason
+    # terminate 节点 routes 必空（contract）
+    assert not infeasible.routes
 
 
 # ── root cause C：无可用预训练 → fail loud（BLD 需真 teacher）──────────────────

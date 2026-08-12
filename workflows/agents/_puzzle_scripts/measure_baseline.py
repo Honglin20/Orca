@@ -46,6 +46,7 @@ from puzzle_common import (
     build_latency_dummy,
     build_pretrained_model,
     load_puzzle_adapters,
+    measure_block_zero_floor_latency,
     measure_whole_model_latency,
 )
 from search_space_io import (
@@ -56,6 +57,14 @@ from search_space_io import (
 
 # per-slot identity allclose 容差（slot-level 复现性，与 EVAL_NOISE_ATOL 语义不同）
 _ALLCLOSE_ATOL = 1e-5
+
+# exit code 约定：0 = 成功；2 = unsupported（空 slots / smoke 失败）；
+# 3 = latency 结构性不可达（block 替换最大 reduction < latency_reduction_target，早退不进 BLD）。
+# 区别：3 不是异常——模型可优化、smoke 全绿，只是目标过高；2 才是真 unsupported/异常。
+_EXIT_LATENCY_INFEASIBLE = 3
+
+# max_achievable_reduction 与 latency_reduction_target 比较的数值容差（避免浮点边界误判）。
+_FEASIBILITY_TOL = 1e-6
 
 
 # ── smoke 1: ckpt 宽松加载（root cause C）─────────────────────────────────────
@@ -281,6 +290,12 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--search_space_path", required=True, help="LLM 产的 search_space.yaml 绝对路径")
     p.add_argument("--latency_unit", default="ms", choices=["ms", "us", "s"])
     p.add_argument("--latency_script_path", default="", help="外部 latency 脚本 path::func")
+    p.add_argument(
+        "--latency_reduction_target", type=float, default=0.5,
+        help="时延降低目标比例（与 pz_select mip_select / gate_report 同源）。"
+             "measure_baseline 测 block-zero floor latency 后算 max_achievable_reduction"
+             " = 1 - floor/baseline；若 < target - 1e-6 → exit 3（结构性不可达，不进 BLD）",
+    )
     p.add_argument("--output_dir", required=True, help="产物输出目录绝对路径")
     p.add_argument("--seed", type=int, default=0, help="复现性种子")
     return p
@@ -374,23 +389,76 @@ def main(argv: list[str] | None = None) -> int:
             d["in_dim"] = in_dim
             d["out_dim"] = out_dim
 
+        # block_map 早建（floor 测量需要 slots 的 parent_module_path）
+        block_map = to_block_map(slot_dicts)
+
         # 8) latency（per-inference batch-1：与 per-block latency_table 同尺度，避免混 batch 缩放）
         latency_dummy = build_latency_dummy(adapters, device=device)
         baseline_latency = measure_whole_model_latency(
             model, forward_fn, latency_dummy, device, args.latency_script_path
         )
 
-        # 9) 写产物
-        block_map = to_block_map(slot_dicts)
+        # 9) block-zero floor latency + 可行性判定（早退：结构性不可达 → exit 3，不进 BLD）
+        #    floor = 全 block 置零后的整模 latency；max_reduction = 1 - floor/baseline
+        #    = block 替换能达到的物理上限。低于用户目标 → 此模型 block 占比过低，目标过高。
+        floor_latency = measure_block_zero_floor_latency(
+            adapters, block_map, device, args.latency_script_path
+        )
+        if baseline_latency <= 0:
+            raise RuntimeError(
+                f"baseline_latency={baseline_latency} 非正——无法算 max_achievable_reduction"
+                f"（检 latency 测量返回值）"
+            )
+        max_reduction = 1.0 - floor_latency / baseline_latency
+        # 争用噪声容错：floor 理论上 ≤ baseline（block 非负开销）；CPU 争用/min 残差噪声
+        # 可能让 floor 微超 baseline → max_reduction 微负。clamp 到 0 避免负值进下游显示/MIP。
+        # 不静默：在 infeasible reason 里如实标注「测量噪声」让 agent/用户感知。
+        measurement_noisy = max_reduction < 0
+        if measurement_noisy:
+            max_reduction = 0.0
+        latency_target_feasible = max_reduction >= (
+            args.latency_reduction_target - _FEASIBILITY_TOL
+        )
+
+        # 10) 写产物
         block_map_path = output_dir / "block_map.json"
         block_map.to_json(block_map_path)
 
         search_space_out = output_dir / "search_space.yaml"
         save_search_space_yaml(search_space_out, slot_dicts, candidates)
 
+        if latency_target_feasible:
+            reason = ""
+        elif measurement_noisy:
+            # floor > baseline：测量噪声 / 争用残差导致 max_reduction clamp 到 0。区别于
+            # 「block 占比过低」——此时 floor 数值本身不可信（理论 floor ≤ baseline），需重跑
+            # 或检 latency_script_path。
+            reason = (
+                f"测量噪声疑似：latency_floor={floor_latency:.4f} > baseline_latency="
+                f"{baseline_latency:.4f} {args.latency_unit}（理论上 floor ≤ baseline——CPU "
+                f"争用 / min 残差 / 外部 latency 脚本不稳定均可能触发）；max_reduction 钳为 0 "
+                f"< latency_reduction_target={args.latency_reduction_target:.4f}。建议重跑 "
+                f"measure_baseline（争用减弱），或检查 latency_script_path 的稳定性"
+            )
+        else:
+            # 通用表述（不假设 transformer）：「非 block 构件」泛指 embedding/投影/归一化/
+            # residual/cache 等任何 block 之外的算子——对 CNN/RNN/MoE 均中性。
+            reason = (
+                f"block 替换最大 reduction={max_reduction:.4f}（floor={floor_latency:.4f} / "
+                f"baseline={baseline_latency:.4f} {args.latency_unit}）< "
+                f"latency_reduction_target={args.latency_reduction_target:.4f}——"
+                f"该模型 block 占比过低（非 block 构件：embedding / 投影 / 归一化 / residual "
+                f"等占 {floor_latency/baseline_latency:.2%}）。需降 latency_reduction_target，"
+                f"或该模型 block 占比本身过低不适合 puzzle 流水线"
+            )
+
         baseline_metrics = {
             "baseline_acc": baseline_acc,
             "baseline_latency": baseline_latency,
+            "latency_floor": floor_latency,
+            "max_achievable_reduction": max_reduction,
+            "latency_target_feasible": latency_target_feasible,
+            "latency_reduction_target": args.latency_reduction_target,
             "latency_unit": args.latency_unit,
             "metric_direction": adapters.METRIC_DIRECTION,
             "metric_atol": eval_atol,
@@ -402,6 +470,8 @@ def main(argv: list[str] | None = None) -> int:
             "seed": args.seed,
             "smokes_passed": smokes_passed,
         }
+        if reason:
+            baseline_metrics["latency_infeasible_reason"] = reason
         baseline_metrics_path = output_dir / "baseline_metrics.json"
         with open(baseline_metrics_path, "w", encoding="utf-8") as f:
             json.dump(baseline_metrics, f, ensure_ascii=False, indent=2)
@@ -417,6 +487,9 @@ def main(argv: list[str] | None = None) -> int:
             "output_dir": str(output_dir),
             "model_type": _infer_model_type(block_map),
             "model_type_supported": True,
+            "latency_target_feasible": latency_target_feasible,
+            "max_achievable_reduction": max_reduction,
+            "latency_floor": floor_latency,
             "flat_model_path": str(flat_path),
             "block_map_path": str(block_map_path),
             "search_space_path": str(search_space_out),
@@ -427,14 +500,24 @@ def main(argv: list[str] | None = None) -> int:
             "fidelity_passed": True,
             "smokes_passed": smokes_passed,
             "ckpt_from_scratch": bool(load_result.from_scratch),
-            "error": "",
+            "error": reason,
             "generated_artifacts": generated,
         }
         print(f"BLOCK_MAP: {block_map_path}")
         print(f"SEARCH_SPACE: {search_space_out}")
         print(f"BASELINE_ACC: {baseline_acc}")
         print(f"BASELINE_LATENCY: {baseline_latency}")
+        print(f"FLOOR_LATENCY: {floor_latency}")
+        print(f"MAX_REDUCTION: {max_reduction}")
         print(f"RESULT_JSON: {json.dumps(result, ensure_ascii=False)}")
+
+        if not latency_target_feasible:
+            # 结构性不可达：模型可优化（smoke 全绿）、只是目标过高——区别于 exit 2 unsupported。
+            print(
+                f"[measure_baseline] LATENCY-INFEASIBLE: {reason}",
+                file=sys.stderr,
+            )
+            return _EXIT_LATENCY_INFEASIBLE
         return 0
     except Exception as e:
         tb = traceback.format_exc()

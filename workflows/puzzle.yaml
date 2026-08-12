@@ -1,5 +1,5 @@
 name: puzzle
-description: "Puzzle decomposed-NAS 全链流水线(Bercovich 2025, ICML 范式): 识别可替换 block slot → BLD 块级蒸馏建库(每 (layer,variant) 独立模仿原块) → replace-1-block 打分 + per-variant latency 实测 → MIP grouped-knapsack 在 latency 预算下全局选逐层异构架构 → GKD 末段全局 KD 修块间兼容 → AC gate(精度损失≤0.5、时延降≥一半)。6 agent 节点 + 4 terminate(全 fail-loud:模型不可替换 / MIP 无候选 / GKD 失败 / AC 不达标)。非超网、非 predictor——逐层 block 类型异构替换(synthesizer/relu-attn/fnet 等 mixer 库)。pz_build_library / pz_retrain 走有界轮询 + 无上限自愈(单 turn 连续 ~9min monitor 块全程监控直到真正完成,进程死/发散触发 HEAL-LOOP 无上限自愈,turn 到顶换 sub-agent 经 status.sh 真相源续接;rc=0 + 进程退出 + ckpt 有效才认完成,中断残留续训,未完成不产出 JSON)。pz_select / pz_report 为确定性 Bash(zero-LLM)。可视化全固化进节点确定性脚本:progress_watcher 边训练 tail progress.jsonl 边推实时多指标曲线;pz_score 推 3 图(block_score/latency_dist/scatter);pz_report 推 baseline-vs-optimized metrics_bar。复用 nas-supernet v1 的 in-session 执行契约(orca CLI + chart daemon + artifact 约定 + fail-loud + self-heal 白名单审计字段 healed_files/fidelity_retriggered)。"
+description: "Puzzle decomposed-NAS 全链流水线(Bercovich 2025, ICML 范式): 识别可替换 block slot → BLD 块级蒸馏建库(每 (layer,variant) 独立模仿原块) → replace-1-block 打分 + per-variant latency 实测 → MIP grouped-knapsack 在 latency 预算下全局选逐层异构架构 → GKD 末段全局 KD 修块间兼容 → AC gate(精度损失≤0.5、时延降≥一半)。6 agent 节点 + 5 terminate(全 fail-loud:模型不可替换 / latency 目标结构性不可达 / MIP 无候选 / GKD 失败 / AC 不达标)。非超网、非 predictor——逐层 block 类型异构替换(synthesizer/relu-attn/fnet 等 mixer 库)。pz_build_library / pz_retrain 走有界轮询 + 无上限自愈(单 turn 连续 ~9min monitor 块全程监控直到真正完成,进程死/发散触发 HEAL-LOOP 无上限自愈,turn 到顶换 sub-agent 经 status.sh 真相源续接;rc=0 + 进程退出 + ckpt 有效才认完成,中断残留续训,未完成不产出 JSON)。pz_select / pz_report 为确定性 Bash(zero-LLM)。可视化全固化进节点确定性脚本:progress_watcher 边训练 tail progress.jsonl 边推实时多指标曲线;pz_score 推 3 图(block_score/latency_dist/scatter);pz_report 推 baseline-vs-optimized metrics_bar。复用 nas-supernet v1 的 in-session 执行契约(orca CLI + chart daemon + artifact 约定 + fail-loud + self-heal 白名单审计字段 healed_files/fidelity_retriggered)。"
 
 entry: pz_expand
 
@@ -80,16 +80,18 @@ nodes:
     model: "deepseek/deepseek-v4-flash"
     output_schema:
       type: object
-      required: [output_dir, model_type, model_type_supported, flat_model_path, block_map_path, search_space_path, manifest_path, baseline_metrics_path, baseline_acc, baseline_latency, latency_unit, fidelity_passed, workflow_verifier_passed, error, generated_artifacts]
+      required: [output_dir, model_type, model_type_supported, latency_target_feasible, max_achievable_reduction, flat_model_path, block_map_path, search_space_path, manifest_path, baseline_metrics_path, baseline_acc, baseline_latency, latency_unit, fidelity_passed, workflow_verifier_passed, error, generated_artifacts]
       properties:
         output_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR 绝对路径"}
         model_type: {type: string, description: "标签(isotropic_transformer / hierarchical_transformer / cross_fusion_transformer / cnn / 'No supported match')"}
         model_type_supported: {type: boolean, description: "true=存在可替换 attention/ffn sub-block;false=不可替换 → 路由 terminate_unsupported"}
+        latency_target_feasible: {type: boolean, description: "true=block 替换最大 reduction ≥ latency_reduction_target(可达);false=结构性不可达(block 占比过低 / 目标过高) → 路由 terminate_latency_infeasible。default true 兼容旧路径(unsupported 时透传 true,路由只看 model_type_supported)"}
+        max_achievable_reduction: {type: number, description: "1 - latency_floor/baseline_latency(block 替换物理上限);default 0 兼容旧路径"}
         flat_model_path: {type: string, description: "<base_name>_flat.py 路径(LLM 自适应产);不支持时空串"}
         block_map_path: {type: string, description: "block_map.json 路径(逐层 slot 清单 + I/O shape;下游 bld/score/mip 既有格式)"}
         search_space_path: {type: string, description: "search_space.yaml 路径(LLM 产 slots+kind+证据+candidates;measure_baseline trace 回填 in/out_dim);不支持时空串"}
         manifest_path: {type: string, description: "manifest.yaml 路径(LLM 产 5 段项目事实;下游 agent 读→桥接 CLI args);不支持时空串"}
-        baseline_metrics_path: {type: string, description: "baseline_metrics.json 路径(acc + latency + smokes_passed)"}
+        baseline_metrics_path: {type: string, description: "baseline_metrics.json 路径(acc + latency + latency_floor + max_achievable_reduction + smokes_passed)"}
         baseline_acc: {type: number, description: "父模型基线 acc(adapters.evaluate 测;方向由 manifest metric.direction / adapters.METRIC_DIRECTION 决定);不可替换时为 0"}
         baseline_latency: {type: number, description: "父模型基线 latency(单位 = latency_unit);不可替换时为 0"}
         latency_unit: {type: string, enum: [ms, us, s], description: "latency 单位(透传自 inputs.latency_unit)"}
@@ -102,8 +104,15 @@ nodes:
           description: "相对 output_dir 的产物路径列表(至少 manifest.yaml / <base>_flat.py / search_space.yaml / block_map.json / baseline_metrics.json)"
       additionalProperties: false
     routes:
-      - when: "pz_expand.output.model_type_supported != false"
+      # 双检查 first-match：先判 model_type_supported(不可替换 → unsupported),
+      # 再判 latency_target_feasible(目标过高 → infeasible),都过才进 build_library。
+      # `!= false` 形式（非 `== true`）：与同 workflow 既有路由约定一致——兼容 null/
+      # 缺失字段当 truthy 透传（schema default latency_target_feasible=true，unsupported
+      # 路径 agent 也透传 true，让 model_type_supported 单条件裁决 unsupported 分支）。
+      - when: "pz_expand.output.model_type_supported != false and pz_expand.output.latency_target_feasible != false"
         to: pz_build_library
+      - when: "pz_expand.output.model_type_supported != false"
+        to: terminate_latency_infeasible
       - to: terminate_unsupported
 
   # ═══════════════════════════════════════════════════════════════════════════
@@ -285,6 +294,11 @@ nodes:
     kind: terminate
     status: failed
     reason: "pz_expand 判定用户模型无可替换 attention/ffn sub-block(model_type_supported=false)——Puzzle 异构替换无的放矢,expand 阶段即拒绝,不进 BLD/搜索。检查 model.py 是否为含 attention/FFN 子块的 transformer 族(或换 cnn+conv-block 候选路径)。"
+
+  - name: terminate_latency_infeasible
+    kind: terminate
+    status: failed
+    reason: "pz_expand measure_baseline 判 latency 目标结构性不可达(latency_target_feasible=false):block 替换能达到的最大 reduction(max_achievable_reduction = 1 - latency_floor/baseline_latency) < latency_reduction_target。模型本身可替换(model_type_supported=true)、smoke 全绿——只是 block 占比过低(非 block 开销:PositionalEncoding / input-output 投影 / LayerNorm / residual 占 floor 比重过高),puzzle 流水线对此模型即便跑完 BLD/score/select/retrain 也达不到 LAT AC。建议:(1) 降 latency_reduction_target(如 0.7→0.5);或 (2) 该模型 block 占比本身就低,不适合 puzzle 流水线(改用通道剪枝 / 量化等优化其他层)。回看 pz_expand.output.max_achievable_reduction + baseline_metrics.json 的 latency_floor / latency_infeasible_reason 确认数值。"
 
   - name: terminate_select_failed
     kind: terminate

@@ -445,7 +445,8 @@ def test_gkd_retrain_runs_with_adapter_losses(tmp_path: Path) -> None:
     proc = subprocess.run([sys.executable, str(_SCRIPTS_DIR / "measure_baseline.py"),
         "--flat_path", str(paths["flat"]), "--build_fn", "build_model",
         "--adapters", str(paths["adapters"]),
-        "--search_space_path", str(ss_path), "--output_dir", str(output_dir)],
+        "--search_space_path", str(ss_path), "--output_dir", str(output_dir),
+        "--latency_reduction_target", "0"],
         capture_output=True, text=True)
     assert proc.returncode == 0, f"measure_baseline 失败：\n{proc.stderr}"
     block_map_path = output_dir / "block_map.json"

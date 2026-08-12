@@ -1,0 +1,73 @@
+{
+  "status_dim": [
+    {
+      "testid": "board-column-completed",
+      "label": "已完成"
+    }
+  ],
+  "project_dim": [
+    {
+      "testid": "board-column-alpha-proj",
+      "label": "alpha-proj"
+    },
+    {
+      "testid": "board-column-beta-proj",
+      "label": "beta-proj"
+    }
+  ],
+  "workflow_dim": [
+    {
+      "testid": "board-column-wf-x",
+      "label": "wf-x"
+    },
+    {
+      "testid": "board-column-wf-y",
+      "label": "wf-y"
+    },
+    {
+      "testid": "board-column-wf-z",
+      "label": "wf-z"
+    }
+  ],
+  "time_dim": [
+    {
+      "testid": "board-column-today",
+      "label": "今天"
+    },
+    {
+      "testid": "board-column-yesterday",
+      "label": "昨天"
+    },
+    {
+      "testid": "board-column-week",
+      "label": "本周"
+    },
+    {
+      "testid": "board-column-earlier",
+      "label": "更早"
+    }
+  ],
+  "none_dim": [
+    {
+      "testid": "board-column-all",
+      "label": "全部"
+    }
+  ],
+  "none_after_reload": [
+    {
+      "testid": "board-column-all",
+      "label": "全部"
+    }
+  ],
+  "ac26": {
+    "rows_before_collapse_project": 4,
+    "rows_after_collapse_project": 2,
+    "stored_after_project_collapse": "[\"project:alpha-proj\"]",
+    "rows_in_status_dim": 4,
+    "rows_back_in_project_dim": 2,
+    "rows_after_reload_project": 2,
+    "stored_collapsed_final": "[\"project:alpha-proj\"]"
+  },
+  "groupby_stored_before_reload": "\"none\"",
+  "groupby_stored_after_reload": "\"none\""
+}

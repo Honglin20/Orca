@@ -598,6 +598,154 @@ def measure_whole_model_latency(
     return times[0] * 1000.0  # min ms（争用鲁棒）
 
 
+# ── block-zero floor latency（早退可行性检查：通用，不假设 block 类）─────────
+
+class _FloorZeroModule(nn.Module):
+    """Latency-floor 探测块：forward 返回与原 slot output 同 shape/dtype 的零张量。
+
+    用途：``measure_block_zero_floor_latency`` 把每个 slot 临时换成这种零输出块，
+    测「全部 block 置零」的整模 latency——block 替换能达到的物理地板（非 block 开销
+    全保留：PositionalEncoding / 投影 / LayerNorm / residual）。
+
+    通用性铁律：不假设 slot 类（attention/ffn/conv/moe/custom 均可），不假设 in_dim
+    ==out_dim（非方 slot 也合法）。shape/dtype 由一次真实 forward 捕获（``out_shape_tail``
+    存 shape[1:]，batch dim 据运行时首 tensor 输入动态决定）。
+
+    ``forward`` 收 ``*args, **kwargs``：父层可能传 attn_mask / 位置编码等异构签名，全部
+    忽略——floor 测量只关心输出 shape 对齐 + 零计算开销。返回 single tensor（puzzle 契约：
+    ``return_arity=single``；tuple/list 输出的 slot 不在可替换 slot 范畴）。
+    """
+
+    def __init__(self, out_shape_tail: tuple[int, ...], dtype: torch.dtype):
+        super().__init__()
+        self._out_tail = tuple(int(d) for d in out_shape_tail)
+        self._dtype = dtype
+
+    def forward(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        first: torch.Tensor | None = None
+        for a in args:
+            if isinstance(a, torch.Tensor):
+                first = a
+                break
+        if first is None:
+            for v in kwargs.values():
+                if isinstance(v, torch.Tensor):
+                    first = v
+                    break
+        batch = int(first.shape[0]) if first is not None and first.dim() > 0 else 1
+        device = first.device if first is not None else torch.device("cpu")
+        return torch.zeros(batch, *self._out_tail, dtype=self._dtype, device=device)
+
+
+def _capture_slot_output_shapes(
+    model: nn.Module,
+    slot_paths: list[str],
+    batch: Any,
+    forward_fn: Callable[[nn.Module, Any], Any],
+    device: torch.device,
+) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
+    """forward 一次，hook 抓每个 slot 的 output shape[1:] + dtype（用于 floor 块构造）。"""
+    model.eval().to(device)
+    captured: dict[str, tuple[tuple[int, ...], torch.dtype]] = {}
+    handles: list[Any] = []
+
+    def make_hook(path: str):
+        def hook(_mod: nn.Module, _inputs: tuple, output: Any):
+            if path in captured:
+                return
+            out_t = output[0] if isinstance(output, (tuple, list)) else output
+            if not isinstance(out_t, torch.Tensor):
+                raise RuntimeError(
+                    f"floor 探测：slot {path!r} 输出非 tensor（{type(out_t).__name__}）——"
+                    f"puzzle 契约 slot 须输出 tensor 才能测 block-zero floor"
+                )
+            captured[path] = (tuple(int(d) for d in out_t.shape[1:]), out_t.dtype)
+        return hook
+
+    try:
+        for path in slot_paths:
+            try:
+                mod = model.get_submodule(path)
+            except AttributeError as e:
+                raise AttributeError(
+                    f"floor 探测：slot path {path!r} 定位失败（get_submodule）：{e}"
+                ) from e
+            handles.append(mod.register_forward_hook(make_hook(path)))
+        with torch.no_grad():
+            forward_fn(model, batch)
+    finally:
+        for h in handles:
+            h.remove()
+    missing = [p for p in slot_paths if p not in captured]
+    if missing:
+        raise RuntimeError(
+            f"floor 探测：未捕获 slot output shape：{missing[:3]}（共 {len(missing)} 个）"
+        )
+    return captured
+
+
+def measure_block_zero_floor_latency(
+    adapters: Any,
+    block_map: "BlockMap",
+    device: torch.device,
+    latency_script_path: str = "",
+    repetitions: int = 100,
+    warmup: int = 30,
+) -> float:
+    """测「全部 block 置零」的整模 latency——block 替换的物理地板。
+
+    构造：``build_pretrained_model(adapters)`` 建一份新的 father 模型（不动 baseline 模型）
+    → 对 ``block_map.slots`` 每个 ``parent_module_path`` 路径的子模块，先用一次 forward hook
+    抓 output shape[1:] + dtype，再 ``setattr`` 替换为 ``_FloorZeroModule``（forward 返零、
+    零计算开销）→ ``measure_whole_model_latency`` 测整模 latency。
+
+    通用性（不假设 block 类型）：任意 nn.Module 都适用；非方 slot（in_dim != out_dim）也合法
+    ——``_FloorZeroModule`` 用 captured output shape，不关心 in_dim。残差结构下零输出合法
+    （``x + 0 = x``）。
+
+    fail loud（Rule 12）：ZeroModule 替换后若 forward 崩（如 slot 输出非 tensor / 路径定位
+    失败）→ raise，不静默（让 measure_baseline 据此报错，不进 BLD）。
+
+    返回 floor latency（ms，与 ``measure_whole_model_latency`` 同尺度：per-inference batch-1）。
+    """
+    if not block_map.slots:
+        raise RuntimeError(
+            "measure_block_zero_floor_latency：block_map.slots 为空——无可替换 slot，"
+            "floor 无意义（应在上游 unsupported 分支拦截）"
+        )
+
+    # 独立 father 模型实例（不动 baseline 模型的 slot 引用）
+    model = build_pretrained_model(adapters)
+    model.eval().to(device)
+    forward_fn = adapters.forward_model
+    dummy = build_latency_dummy(adapters, device=device)
+
+    slot_paths = [slot.parent_module_path for slot in block_map.slots]
+
+    # 1) 一次真实 forward 抓每个 slot 的 output shape[1:] + dtype
+    shapes = _capture_slot_output_shapes(model, slot_paths, dummy, forward_fn, device)
+
+    # 2) setattr 替换每个 slot 为 _FloorZeroModule
+    originals: dict[str, nn.Module] = {}
+    for path in slot_paths:
+        out_tail, dtype = shapes[path]
+        zero_mod = _FloorZeroModule(out_tail, dtype).to(device).eval()
+        originals[path] = replace_slot(model, path, zero_mod)
+
+    # 3) 测整模 floor latency（替换后的 forward 若崩 → fail loud 上抛）
+    try:
+        floor_latency = measure_whole_model_latency(
+            model, forward_fn, dummy, device, latency_script_path,
+            repetitions=repetitions, warmup=warmup,
+        )
+    finally:
+        # 恢复原模块（best-effort；本函数 caller 之后不再用此 model 实例，但保干净）
+        for path, orig in originals.items():
+            replace_slot(model, path, orig)
+
+    return floor_latency
+
+
 # ── 父激活捕获（BLD teacher 信号）─────────────────────────────────────────────
 
 def capture_parent_activations(

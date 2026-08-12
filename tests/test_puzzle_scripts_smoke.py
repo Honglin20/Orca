@@ -69,11 +69,21 @@ def _bootstrap_measure_baseline(tmp_path: Path, output_dir: Path, num_blocks: in
         "--latency_unit", "ms",
         "--output_dir", str(output_dir),
         "--seed", "0",
+        # 下游 stage 测试不关心 latency 可行性（合成 fixture 太小、block 占比波动大）；
+        # target=0 让 feasibility 检查恒过（max_reduction >= 0 - tol 恒成立），专注于
+        # 下游 stage 各脚本本身的行为。
+        "--latency_reduction_target", "0",
     ])
     result = _parse_result_json(out)
     assert result["model_type_supported"] is True, (
         f"measure_baseline bootstrap 失败：{result}\nSTDERR:\n{err}"
     )
+    # 弱烟雾断言（target=0 bypass → feasibility 应过 + floor 字段落盘）——防 floor 逻辑
+    # 彻底坏掉时静默回归。下游 stage 测试本不关心 feasibility，但 bootstrap 应产出可信基线。
+    assert result.get("latency_target_feasible") is True, (
+        f"target=0 应 feasible（max_reduction >= 0 - tol 恒成立），得 {result.get('latency_target_feasible')}"
+    )
+    assert result.get("latency_floor", 0) > 0, "floor latency 应 > 0"
     return {
         "flat": paths["flat"],
         "adapters": paths["adapters"],

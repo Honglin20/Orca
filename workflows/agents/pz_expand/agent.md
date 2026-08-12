@@ -326,31 +326,53 @@ python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/measure_baseline.py" \
   --search_space_path "$ORCA_ARTIFACTS_DIR/search_space.yaml" \
   --latency_unit "{{ inputs.latency_unit }}" \
   --latency_script_path "{{ inputs.latency_script_path }}" \
+  --latency_reduction_target "{{ inputs.latency_reduction_target }}" \
   --seed "{{ inputs.seed }}" \
   --output_dir "$ORCA_ARTIFACTS_DIR"
 ```
 
 脚本契约（你只跑不验证，脚本能跑就信它的产物 + smoke 结果）：
 - 入参：`--adapters` + `--manifest` + `--flat_path` + `--build_fn` + `--search_space_path` +
-  `--output_dir` + latency/seed 参数（脚本经 `adapters.load_pretrained` 读父权重，经
-  `adapters.evaluate` 测 acc，`adapters.EVAL_NOISE_ATOL` 控 stability 容差——默认读 adapters；
-  可选 `--eval_stability_atol` 覆盖 override）。所有项目相关性收敛到适配器。
+  `--output_dir` + latency/seed 参数 + `--latency_reduction_target`（脚本经
+  `adapters.load_pretrained` 读父权重，经 `adapters.evaluate` 测 acc，
+  `adapters.EVAL_NOISE_ATOL` 控 stability 容差——默认读 adapters；可选 `--eval_stability_atol`
+  覆盖 override）。所有项目相关性收敛到适配器。
 - 产物（落 `--output_dir`）：
   - `block_map.json`：逐层 slot 清单（从 search_space 转，in_dim/out_dim 已 trace 回填）。
   - `search_space.yaml`：回写版（in_dim/out_dim 已 trace 回填）。
-  - `baseline_metrics.json`：`{baseline_acc, baseline_latency, latency_unit, metric_direction,
-    ckpt_from_scratch, seed, smokes_passed}`（acc 方向由 `adapters.METRIC_DIRECTION`，非 `eval_kind`）。
+  - `baseline_metrics.json`：`{baseline_acc, baseline_latency, latency_floor,
+    max_achievable_reduction, latency_target_feasible, latency_reduction_target, latency_unit,
+    metric_direction, ckpt_from_scratch, seed, smokes_passed}`（acc 方向由
+    `adapters.METRIC_DIRECTION`，非 `eval_kind`）。**latency_floor** = 全 block 置零后的整模
+    latency；**max_achievable_reduction** = `1 - floor/baseline`（block 替换物理上限）；
+    **latency_target_feasible** = `max_achievable_reduction >= latency_reduction_target - 1e-6`。
   - `father_state_dict.pt`：adapters.load_pretrained 后保存的统一父权重（供下游复用）。
 - 4 道 smoke（任一失败 → exit 2 + stderr 点名哪道 smoke）：**ckpt 宽松加载**（走
   `adapters.load_pretrained` 返 `_LoadResult`；非双零不 fatal 仅 WARN + 记 `ckpt_from_scratch`；
   flatten 阶段对齐 ns3）、**forward-determinism**（`adapters.forward_model(model, batch)` 两次
   torch.equal）、**eval-stability**（`adapters.evaluate(model)` 跑两次，atol 读
   `adapters.EVAL_NOISE_ATOL`）、**per-slot identity allclose**（hook 每个 slot forward 两次逐元素 allclose）。
-- exit 0 = 成功（slot ≥ 1 + 4 smoke 全绿）；exit 2 = 空 slots（unsupported）或 smoke 失败 →
-  你判 `model_type_supported=false` 路由 `terminate_unsupported`，或按 smoke 失败信号回 Step 1
-  修 flat/search_space/adapters 后重跑。
+- exit 码约定（三态）：
+  - **exit 0** = 成功（slot ≥ 1 + 4 smoke 全绿 + latency 目标可达）→ 进 Step 3。
+  - **exit 2** = 空 slots（unsupported）或 smoke 失败 → 判 `model_type_supported=false` 路由
+    `terminate_unsupported`，或按 smoke 失败信号回 Step 1 修 flat/search_space/adapters 后重跑。
+  - **exit 3 = latency 结构性不可达**（模型可优化、smoke 全绿、但 block 替换最大 reduction <
+    `latency_reduction_target`——该模型 block 占比过低）→ **不**回 Step 1 修，**不**判
+    unsupported；按下方「exit 3 处理」emit `latency_target_feasible=false` + 路由
+    `terminate_latency_infeasible`。区别于 exit 2：模型**能**被 puzzle 优化（只是用户目标过高）。
 
 **Step 2 完成判定**：脚本 exit 0 + 四个产物都存在 + flat model `python -m py_compile` 过。
+
+**exit 3 处理（latency 结构性不可达）**：脚本 exit 3 时（模型可替换 + smoke 全绿但 block 占比过低）：
+1. 读 `$ORCA_ARTIFACTS_DIR/baseline_metrics.json` 的 `max_achievable_reduction` 与
+   `latency_infeasible_reason`。
+2. 按 output_schema emit：`model_type_supported: true`（模型可优化，不是 unsupported）+
+   `latency_target_feasible: false` + `max_achievable_reduction`（透传）+ `error` 写明
+   「block 替换最大 reduction X% < 目标 Y%；需降 latency_reduction_target 或该模型 block
+   占比过低不适合 puzzle」。
+3. 引擎路由 `terminate_latency_infeasible`（yaml 路由守卫：先判 model_type_supported，
+   再判 latency_target_feasible）。
+4. **不**进 Step 3，**不**回 Step 1 修——这是结构性的，非 bug。
 
 **smoke 失败的 self-heal**：
 - ckpt 加载失败（`load_pretrained` raise / from_scratch=true 且你不预期）：多半 `adapters.load_pretrained`
@@ -442,6 +464,8 @@ baseline_metrics 禁改；flat/search_space/manifest/project_manifest.md/puzzle_
   "output_dir": "<$ORCA_ARTIFACTS_DIR 绝对路径>",
   "model_type": "<isotropic_transformer / hierarchical_transformer / cross_fusion_transformer / cnn / 'No supported match'>",
   "model_type_supported": <bool>,
+  "latency_target_feasible": <bool>,
+  "max_achievable_reduction": <number>,
   "flat_model_path": "<$ORCA_ARTIFACTS_DIR/<base>_flat.py 路径；不支持时空串>",
   "block_map_path": "<$ORCA_ARTIFACTS_DIR/block_map.json 路径>",
   "search_space_path": "<$ORCA_ARTIFACTS_DIR/search_space.yaml 路径；不支持时空串>",
@@ -459,13 +483,19 @@ baseline_metrics 禁改；flat/search_space/manifest/project_manifest.md/puzzle_
 
 字段语义（tape 审计字段）：
 
+- `latency_target_feasible`：measure_baseline 的 block-zero floor 检查通过（max_achievable_reduction
+  ≥ latency_reduction_target）→ `true`；结构性不可达 → `false`（路由 `terminate_latency_infeasible`）。
+  默认 `true`（兼容旧路径：model_type_supported=false 时仍透传 true，路由只看 model_type_supported）。
+- `max_achievable_reduction`：`1 - latency_floor/baseline_latency`（block 替换物理上限）。
 - `error`：fail loud 时写明根因（如 `inputs.project_root` / `inputs.model_path` 缺 / 不可访问 /
-  measure_baseline.py exit 非 0 非 2——写明 stderr 尾部；smoke 经 ≤2 fix-loop 仍不收敛——写明
-  `strict-load-convergence-failed` 等分类 + 卡在哪道 smoke；model_type 不支持**不**写 error，是
+  measure_baseline.py exit 非 0/2/3——写明 stderr 尾部；smoke 经 ≤2 fix-loop 仍不收敛——写明
+  `strict-load-convergence-failed` 等分类 + 卡在哪道 smoke；latency 结构性不可达——写明
+  「block 替换最大 reduction X% < 目标 Y%」；model_type 不支持**不**写 error，是
   `model_type_supported: false` 的正常 fail loud 分支）。成功时为空串。
 - `model_type_supported: false` → 引擎路由 `terminate_unsupported`（fail loud）。此时其它字段
   按实际填（`flat_model_path` 可留 Step 1 产的、`block_map_path=""`、`search_space_path` 留 Step 1
   产的空 slots 版、`manifest_path` 留 Step 1 产的、`baseline_acc=0`、`baseline_latency=0`、
+  `latency_target_feasible=true`（vacuous——unsupported 路径不测 floor）、`max_achievable_reduction=0`、
   `fidelity_passed=true`（vacuous——空 slots 路径不跑 smoke）、`workflow_verifier_passed=false`
   （未跑 Step 3 workflow loop）、`error` 留空——unsupported 是已知分支非异常）。
 - `fidelity_passed`：本节点**无** `project-fidelity-verifier` 调用（无 porting 发生）→ 恒 `true`
