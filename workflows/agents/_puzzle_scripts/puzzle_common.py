@@ -1,23 +1,26 @@
-"""puzzle_common.py —— Puzzle workflow P2 算法脚本层共享 helper。
+"""puzzle_common.py —— Puzzle workflow 算法脚本层共享 helper。
 
 无 LLM、无网络、确定性。fail loud（错误抛异常 + 调用方 exit 2）。
 
 核心契约：
-  - ``Slot`` dataclass：逐字按 SPEC P2.1（不自加字段）。
+  - ``Slot`` dataclass：可替换 sub-block slot（SPEC v2 §4.1，kind 开放标签）。
   - ``BlockMap``：slot 列表 + JSON 读写。
-  - ``candidate_registry``：name -> (factory_fn, applicable_slot_types)；
-    factory 签名 ``factory(slot: Slot) -> nn.Module``，输出 shape 必须与
-    ``[B, L, slot.out_dim]`` 对齐（输入 ``[B, L, slot.in_dim]``）。
+  - ``candidate_registry``：``load_catalog()`` 读 ``candidate_catalog.yaml`` 产
+    ``{name: CatalogEntry}``；factory 签名 ``factory(slot: Slot) -> nn.Module``，
+    输出末维 = ``slot.out_dim``（外部维度固定不可搜索，铁律）。
+  - ``load_catalog`` / ``get_candidate``：catalog loader API（取代硬编码 registry）。
   - ``load_flat_model``：动态加载 flat model 文件并调 build_fn。
   - ``capture_parent_activations``：forward hook 抓每个 slot 的 (in, out) 作
     BLD teacher 信号。
-  - ``build_calib_loader``：合成随机张量 DataLoader（通用，不硬编码数据集）。
+  - ``build_calib_loader``：合成随机张量 DataLoader（通用，不硬编码数据集；
+    TODO(U3)：E14 修正——改真实数据 sample，拿不到 fail-loud）。
 
 兄弟 import（禁 sys.path 魔改）：同目录脚本 ``from puzzle_common import ...``。
 """
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 import json
 import sys
@@ -29,23 +32,41 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
+# 候选块实现库（puzzle_blocks）由 load_catalog 函数内 lazy import（避免循环）。
+# builtin factory 字符串形如 ``puzzle_blocks::make_<name>``。
+
 
 # ── Slot / BlockMap ───────────────────────────────────────────────────────────
 
 @dataclass
 class Slot:
-    """一个可替换的 transformer sub-block slot。
+    """一个可替换的 transformer sub-block slot（SPEC v2 §4.1）。
 
-    逐字按 SPEC P2.1 字段，不自加。
+    ``kind`` 替代 v1 的 ``slot_type``（E3，开放标签 attention/ffn/conv/moe/custom）。
+    新增字段：return_arity（E15）/original_intermediate（E7 ratio 基准）/
+    activation（E23，ffn required）/ffn_struct（E6 结构验证）/mask_load_bearing（E8）。
+    ``parent_module_path`` 保留脚本侧字段名（search_space.yaml 的 ``path`` 是 loader 别名）。
     """
     layer_idx: int
-    slot_type: str            # "attention" | "ffn"
+    kind: str                 # E3：开放标签（attention/ffn/conv/moe/custom）
     in_dim: int
     out_dim: int
     num_heads: int
     head_dim: int
-    source_class: str         # 原块类名（溯源用）
+    source_class: str         # 原块类名（溯源 + 结构验证用）
     parent_module_path: str   # ``model.get_submodule(path)`` 可定位
+    # E15：输出 arity——multi-return slot 拒绝 single-output 候选
+    return_arity: str = "single"
+    # E7：FFN 原中间维（ratio 基准，非 in_dim）；非 ffn slot 为 None
+    original_intermediate: int | None = None
+    # E23：FFN 激活（gelu/relu/silu/...）；ffn factory required，null → raise
+    activation: str | None = None
+    # E6：FFN 结构类型 standard/bypass/glu/dual；非 standard → 禁剪枝候选。
+    # TODO(U2/U3)：expand_model._infer_ffn_meta 占位返回 "standard"，U2 LLM 须 refine
+    ffn_struct: str = "standard"
+    # E8：父层是否传 functionally-load-bearing kwargs（attention_mask 等）
+    # TODO(U3)：is_valid 据此对 mask_load_bearing slot 收缩到 identity
+    mask_load_bearing: bool = False
 
 
 @dataclass
@@ -215,29 +236,10 @@ def get_module_dummy_input(flat_module_path: str | Path) -> dict[str, Any]:
     return di
 
 
-# ── 候选块 factory ────────────────────────────────────────────────────────────
-
-class _VanillaMHSA(nn.Module):
-    """vanilla MHSA 包装：``nn.MultiheadAttention`` forward 三参 → 单参。"""
-
-    def __init__(self, embed_dim: int, num_heads: int):
-        super().__init__()
-        if embed_dim % num_heads != 0:
-            raise ValueError(
-                f"vanilla MHSA: embed_dim={embed_dim} 必须能被 num_heads={num_heads} 整除"
-            )
-        self.attn = nn.MultiheadAttention(
-            embed_dim=embed_dim, num_heads=num_heads, batch_first=True
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out, _ = self.attn(x, x, x, need_weights=False)
-        return out
-
-
-# ── passthrough 候选（SPEC puzzle-design-draft §2.2/§2.3）──────────────────────
-# identity 候选 = "原块冻结（基线，不换）"——build/score/latency 遇到时 NOT 替换
-# slot，保留父块。与 no_op（nn.Identity 跳过整块，ffn 专用）严格区分。
+# ── passthrough 候选（SPEC v2 §3：identity = 保留 father-loaded 模块）──────────
+# identity 候选 = 不替换 slot 的架构与权重——保留 father-loaded 模块（架构来自
+# flat.build_fn，权重来自 father_state_dict）。build/score/latency 遇到时 NOT 替换
+# slot。与 no_op（零输出块，residual 不变）严格区分。
 PASSTHROUGH_VARIANTS: set[str] = {"identity"}
 
 
@@ -246,142 +248,157 @@ def is_passthrough(variant: str) -> bool:
     return variant in PASSTHROUGH_VARIANTS
 
 
-def _factory_random_synthesizer(slot: Slot) -> nn.Module:
-    from nas_agent.blocks.random_synthesizer import ElasticRandomSynthesizerCore
+# ── candidate catalog loader（SPEC v2 §5，取代硬编码 registry）─────────────────
 
-    return ElasticRandomSynthesizerCore(
-        super_num_heads=max(slot.num_heads, 1),
-        global_dim=slot.in_dim,
-        head_dim=max(slot.head_dim, 1),
-        max_seq_len=512,
-    )
+# 第一版开放 kind 标签（D4：builtin 只覆盖 attention/ffn；conv/moe/custom 仅 identity）。
+_ALL_KINDS: tuple[str, ...] = ("attention", "ffn", "conv", "moe", "custom")
+_CATALOG_PATH = Path(__file__).resolve().parent / "candidate_catalog.yaml"
 
 
-def _factory_relu_attention(slot: Slot) -> nn.Module:
-    from nas_agent.blocks.relu_attention import ElasticReluAttentionCore
+@dataclass
+class CatalogEntry:
+    """candidate catalog 单条目（SPEC v2 §5.1）。
 
-    return ElasticReluAttentionCore(
-        super_num_heads=max(slot.num_heads, 1),
-        global_dim=slot.in_dim,
-        head_dim=max(slot.head_dim, 1),
-    )
-
-
-def _factory_fnet(slot: Slot) -> nn.Module:
-    from nas_agent.blocks.fnet_fourier_mixer import ElasticFNetFourierTransform
-
-    return ElasticFNetFourierTransform()
-
-
-def _factory_softs_star(slot: Slot) -> nn.Module:
-    from nas_agent.blocks.softs_star_mixer import ElasticSOFTSSTARMixer
-
-    return ElasticSOFTSSTARMixer(
-        super_core_dim=slot.in_dim,
-        global_dim=slot.in_dim,
-    )
-
-
-def _factory_vanilla(slot: Slot) -> nn.Module:
-    return _VanillaMHSA(embed_dim=slot.in_dim, num_heads=max(slot.num_heads, 1))
-
-
-def _factory_ffn_pristine(slot: Slot, ratio: float) -> nn.Module:
-    """FFN 剪枝候选：Linear-GELU-Linear，中间维 = in_dim * ratio。"""
-    intermediate = max(1, int(round(slot.in_dim * ratio)))
-    return nn.Sequential(
-        nn.Linear(slot.in_dim, intermediate),
-        nn.GELU(),
-        nn.Linear(intermediate, slot.out_dim),
-    )
-
-
-def _factory_ffn_75(slot: Slot) -> nn.Module:
-    return _factory_ffn_pristine(slot, 0.75)
-
-
-def _factory_ffn_50(slot: Slot) -> nn.Module:
-    return _factory_ffn_pristine(slot, 0.50)
-
-
-def _factory_linear(slot: Slot) -> nn.Module:
-    return nn.Linear(slot.in_dim, slot.out_dim)
-
-
-class _ZeroBlock(nn.Module):
-    """零输出 no_op:forward 返回 zeros_like(input)——真·删块(residual 不变,latency≈0)。
-
-    比 nn.Identity 更正确:Identity 让 residual 变 ``x + norm(x)``(加噪),零输出使
-    ``x + 0 = x``(残差不变,块被真正旁路)。对 attention/ffn 均适用(in_dim==out_dim)。
-    接受 **kwargs:父层可能传 attention_mask/norm_factor 等(异构 forward 签名),忽略。
+    - ``factory``：``functools.partial`` 绑定 params 后、再经 ``_wrap`` 包
+      ``_KwargPassthrough`` 的统一 ``factory(slot) -> nn.Module``。passthrough
+      候选（identity）factory=None（永不实例化）。
+    - ``kinds``：适用 kind 集合（按 catalog 的 ``kind`` list）。
+    - ``requires_ffn_struct``：FFN 结构约束（如 ffn_75 要求 ["standard"]）；
+      TODO(U3)：is_valid_ffn_prune 消费此字段收缩剪枝候选（E6）。本 phase 仅承载声明。
+    - ``mask_aware``：TODO(U3)：mask_load_bearing slot 的 is_valid 消费（E8）。本 phase 仅承载声明。
     """
+    name: str
+    kinds: set[str]
+    source: str                       # builtin | passthrough | user
+    factory: Callable[[Slot], nn.Module] | None
+    params: dict[str, Any]
+    align: str
+    trainable: bool
+    mask_aware: bool
+    requires_ffn_struct: list[str]
+    description: str
 
-    def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-        return torch.zeros_like(x)
 
+def _resolve_builtin_factory(spec: str, params: dict[str, Any]) -> Callable[[Slot], nn.Module]:
+    """``puzzle_blocks::make_<name>`` + params → 统一 factory(slot)。
 
-class _KwargPassthrough(nn.Module):
-    """variant 签名适配器:把 inner 包成 ``forward(x, *args, **kwargs) -> inner(x)``。
-
-    父层(如 target 的 TransformerEncoderLayer)调 ``self_attn(src, attention_mask=...)``
-    带 kwargs;nas_agent 的 Elastic 核 / 自定义 variant 的 forward(x) 不收 → TypeError。
-    本包装忽略额外参,只把首参(输入 tensor)传给 inner。state_dict 加 ``inner.`` 前缀,
-    在存(BLD)/载(score/latency/build)两侧一致(都经 candidate_registry),无需改 load 逻辑。
+    用 ``functools.partial`` 绑定 params（E4），再经 ``puzzle_blocks._wrap`` 包
+    ``_KwargPassthrough``（适配异构父层 forward 签名，统一所有 builtin）。
     """
+    import puzzle_blocks  # lazy import，断循环
 
-    def __init__(self, inner: nn.Module):
-        super().__init__()
-        self.inner = inner
-
-    def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-        return self.inner(x)
-
-
-def _wrap(inner_factory: Callable[[Slot], nn.Module]) -> Callable[[Slot], nn.Module]:
-    """把 slot→module 工厂包成 slot→_KwargPassthrough(module)。"""
-
-    def _w(slot: Slot) -> nn.Module:
-        return _KwargPassthrough(inner_factory(slot))
-
-    return _w
-
-
-def _factory_no_op(slot: Slot) -> nn.Module:
-    if slot.in_dim != slot.out_dim:
+    if "::" not in spec:
+        raise ValueError(f"builtin factory 须为 'module::func' 形态，得到 {spec!r}")
+    mod_name, func_name = spec.split("::", 1)
+    if mod_name != "puzzle_blocks":
         raise ValueError(
-            f"no_op 候选要求 in_dim==out_dim（slot {slot.parent_module_path}: "
-            f"{slot.in_dim}!={slot.out_dim}）"
+            f"builtin factory 模块必须是 puzzle_blocks（catalog 契约），得到 {mod_name!r}"
         )
-    return _ZeroBlock()
+    fn = getattr(puzzle_blocks, func_name, None)
+    if not callable(fn):
+        raise AttributeError(f"puzzle_blocks 无 callable {func_name!r}（catalog 引用）")
+    bound: Callable[[Slot], nn.Module] = (
+        functools.partial(fn, **params) if params else fn
+    )
+    return puzzle_blocks._wrap(bound)
 
 
-# name -> (factory_fn, applicable slot_types)
-# 注意：``identity`` 是 passthrough（保留父块），不在 registry——由
-# ``is_passthrough()`` 单独判定，不在 build/score/latency 替换 slot。
-# 非 no_op 的 variant 经 _wrap 包 _KwargPassthrough(适配异构 forward 签名,如 attention_mask)。
-candidate_registry: dict[str, tuple[Callable[[Slot], nn.Module], set[str]]] = {
-    # attention 候选（identity 走 PASSTHROUGH_VARIANTS 分支）
-    "random_synthesizer": (_wrap(_factory_random_synthesizer), {"attention"}),
-    "relu_attention": (_wrap(_factory_relu_attention), {"attention"}),
-    "fnet": (_wrap(_factory_fnet), {"attention"}),
-    "softs_star": (_wrap(_factory_softs_star), {"attention"}),
-    "vanilla": (_wrap(_factory_vanilla), {"attention"}),
-    # ffn 候选（identity 走 PASSTHROUGH_VARIANTS 分支）
-    "ffn_75": (_wrap(_factory_ffn_75), {"ffn"}),
-    "ffn_50": (_wrap(_factory_ffn_50), {"ffn"}),
-    "linear": (_wrap(_factory_linear), {"ffn"}),
-    "no_op": (_factory_no_op, {"ffn", "attention"}),
-}
+def load_catalog(path: str | Path | None = None) -> dict[str, CatalogEntry]:
+    """读 candidate_catalog.yaml → ``{name: CatalogEntry}``。
 
-# 候选名 → 适用 slot_types（含 passthrough）。parse_block_candidates 用。
-_CANDIDATE_APPLICABILITY: dict[str, set[str]] = {
-    "identity": {"attention", "ffn"},  # passthrough
-    **{k: v[1] for k, v in candidate_registry.items()},
-}
+    builtin：``puzzle_blocks::make_<name>`` + params → ``functools.partial`` + ``_wrap``。
+    passthrough（identity）：factory=None（is_passthrough 短路，永不实例化）。
+    fail loud：YAML 缺文件 / 条目缺字段 / factory 不可解析 → raise。
+    """
+    import yaml  # 顶层依赖已声明（runtime 必须）
+
+    p = Path(path) if path else _CATALOG_PATH
+    if not p.is_file():
+        raise FileNotFoundError(f"candidate_catalog.yaml 不存在：{p}")
+    with open(p, encoding="utf-8") as f:
+        raw = yaml.safe_load(f)
+    if not isinstance(raw, list):
+        raise ValueError(f"{p} 顶层须为 list（每条候选一个 dict），得到 {type(raw).__name__}")
+
+    catalog: dict[str, CatalogEntry] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError(f"{p} 条目须为 dict，得到 {type(item).__name__}：{item!r}")
+        try:
+            name = item["name"]
+            kinds_list = item["kind"]
+            source = item["source"]
+        except KeyError as e:
+            raise ValueError(f"{p} 候选条目缺字段 {e}：{item!r}") from e
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"{p} 候选 name 须为非空 str：{item!r}")
+        if not isinstance(kinds_list, list) or not all(
+            isinstance(k, str) for k in kinds_list
+        ):
+            raise ValueError(f"{p} 候选 {name!r} kind 须为 list[str]")
+        params = item.get("params", {}) or {}
+        if not isinstance(params, dict):
+            raise ValueError(f"{p} 候选 {name!r} params 须为 dict")
+        factory: Callable[[Slot], nn.Module] | None
+        if source == "passthrough":
+            factory = None
+            if name not in PASSTHROUGH_VARIANTS:
+                raise ValueError(
+                    f"{p} source=passthrough 但 name={name!r} 不在 PASSTHROUGH_VARIANTS"
+                )
+        elif source == "builtin":
+            spec = item.get("factory")
+            if not isinstance(spec, str):
+                raise ValueError(f"{p} builtin 候选 {name!r} 缺 factory 字符串")
+            factory = _resolve_builtin_factory(spec, params)
+        else:
+            raise ValueError(f"{p} 候选 {name!r} source 须为 builtin|passthrough，得到 {source!r}")
+        catalog[name] = CatalogEntry(
+            name=name,
+            kinds=set(kinds_list),
+            source=source,
+            factory=factory,
+            params=params,
+            align=str(item.get("align", "passthrough")),
+            trainable=bool(item.get("trainable", True)),
+            mask_aware=bool(item.get("mask_aware", False)),
+            requires_ffn_struct=list(item.get("requires_ffn_struct", [])),
+            description=str(item.get("description", "")),
+        )
+
+    # E1：identity 必入 catalog（每 slot 候选列表的 MIP floor 锚）
+    for pt in PASSTHROUGH_VARIANTS:
+        if pt not in catalog:
+            raise ValueError(f"{p} 缺 passthrough 候选 {pt!r}（E1：identity 必入 catalog）")
+        if catalog[pt].factory is not None:
+            raise ValueError(f"{p} passthrough 候选 {pt!r} 必须无 factory")
+    return catalog
+
+
+# 模块级 catalog（load_catalog 一次性加载；puzzle_blocks 无运行时反向依赖，无循环）。
+candidate_registry: dict[str, CatalogEntry] = load_catalog()
+
+
+def get_candidate(name: str, catalog: dict[str, CatalogEntry] | None = None) -> CatalogEntry:
+    """按名查 catalog 条目；未注册 fail loud。"""
+    c = catalog if catalog is not None else candidate_registry
+    if name not in c:
+        raise ValueError(
+            f"候选 {name!r} 未在 catalog 注册（可用：{sorted(c)}）"
+        )
+    return c[name]
 
 
 def get_default_candidates() -> dict[str, list[str]]:
-    """默认候选集（SPEC §2.2-2.3）。"""
+    """默认候选集（SPEC v2 §5.4 / D4）。
+
+    attention/ffn 给 builtin 全集；conv/moe/custom 仅 identity（框架预留）。
+    每个 kind 列表都含 identity（E1：MIP floor 锚）。
+
+    注：no_op 工厂要求 in_dim==out_dim（puzzle_blocks.make_zero）；对非方 slot，
+    U1 阶段会在 bld 调 factory 时 fail-loud（exit 2）。U3 的 is_valid 上线后会
+    自动按 slot 形状收缩候选，而非杀整链。
+    """
     return {
         "attention": [
             "identity",
@@ -393,14 +410,22 @@ def get_default_candidates() -> dict[str, list[str]]:
             "no_op",
         ],
         "ffn": ["identity", "ffn_75", "ffn_50", "linear", "no_op"],
+        "conv": ["identity"],
+        "moe": ["identity"],
+        "custom": ["identity"],
     }
 
 
 def parse_block_candidates(raw: str | None) -> dict[str, list[str]]:
-    """解析 inputs.block_candidates（JSON 或空）→ {attention: [...], ffn: [...]}。
+    """解析 inputs.block_candidates（JSON 或空）→ ``{kind: [candidate, ...]}``。
 
-    空 → 默认集；非空 JSON 必须是 dict 且 attention/ffn 字段为 list[str]。
-    fail loud：非法 JSON / 缺字段 / 候选名未注册 / 候选不适用 slot_type → raise。
+    kind-keyed dict（动态 key，非硬编码 attention/ffn）——适配 SPEC v2 §4 开放 kind。
+    空 → 默认集（get_default_candidates）。非空 JSON 须为非空 dict。
+
+    fail loud（E1/E3/E4）：
+    - 非法 JSON / 非 dict / kind 值非 list[str] → raise
+    - 候选名未注册 / 候选不适用该 kind → raise
+    - 某 kind 列表缺 identity（E1：identity 必入每 slot 候选）→ raise
     """
     if not raw or not raw.strip():
         return get_default_candidates()
@@ -410,22 +435,32 @@ def parse_block_candidates(raw: str | None) -> dict[str, list[str]]:
         raise ValueError(f"block_candidates 非 JSON：{raw!r}（{e}）") from e
     if not isinstance(parsed, dict):
         raise ValueError(f"block_candidates 须为 JSON object，得到 {type(parsed).__name__}")
+    if not parsed:
+        raise ValueError("block_candidates 须为非空 dict（至少一个 kind key）")
+
     out: dict[str, list[str]] = {}
-    for key in ("attention", "ffn"):
-        val = parsed.get(key)
+    for kind, val in parsed.items():
         if not isinstance(val, list) or not all(isinstance(v, str) for v in val):
-            raise ValueError(f"block_candidates.{key} 须为 list[str]")
+            raise ValueError(f"block_candidates.{kind} 须为 list[str]")
+        if not val:
+            raise ValueError(f"block_candidates.{kind} 须为非空 list[str]")
         for name in val:
-            applic = _CANDIDATE_APPLICABILITY.get(name)
-            if applic is None:
-                raise ValueError(f"候选 {name!r} 未注册（registry ∪ PASSTHROUGH_VARIANTS）")
-            if key not in applic:
+            # identity 也由 load_catalog 载入（source=passthrough），故统一查表。
+            entry = candidate_registry.get(name)
+            if entry is None:
                 raise ValueError(
-                    f"候选 {name!r} 不适用于 {key} slot（适用集：{applic}）"
+                    f"候选 {name!r} 未在 catalog 注册（可用：{sorted(candidate_registry)}）"
                 )
-        out[key] = val
-    if "attention" not in out or "ffn" not in out:
-        raise ValueError("block_candidates 必须同时含 attention + ffn 两个 key")
+            if kind not in entry.kinds:
+                raise ValueError(
+                    f"候选 {name!r} 不适用于 kind={kind!r}（适用集：{sorted(entry.kinds)}）"
+                )
+        # E1：identity 必入每 kind 候选列表
+        if "identity" not in val:
+            raise ValueError(
+                f"block_candidates.{kind} 缺 identity（E1：identity 必入每 slot 候选）"
+            )
+        out[kind] = val
     return out
 
 
@@ -549,14 +584,14 @@ def capture_parent_activations(
 
 # ── slot key / variant 文件名 ─────────────────────────────────────────────────
 
-def slot_key(layer_idx: int, slot_type: str) -> str:
-    """统一 slot 唯一 key（jsonl/gkd 复用）。"""
-    return f"L{layer_idx}_{slot_type}"
+def slot_key(layer_idx: int, kind: str) -> str:
+    """统一 slot 唯一 key（jsonl/gkd 复用）。``kind`` 替代 v1 的 slot_type（E3）。"""
+    return f"L{layer_idx}_{kind}"
 
 
-def variant_file_name(layer_idx: int, slot_type: str, variant: str) -> str:
+def variant_file_name(layer_idx: int, kind: str, variant: str) -> str:
     """block_library 内单 variant 权重文件名。"""
-    return f"L{layer_idx}_{slot_type}_{variant}.pt"
+    return f"L{layer_idx}_{kind}_{variant}.pt"
 
 
 def split_parent_path(parent_module_path: str) -> tuple[str, str]:
@@ -717,24 +752,24 @@ def build_student_from_arch(
     ) else {}
     chosen: dict[tuple[int, str], str] = {}
     for layer_str, slot_dict in arch.items():
-        for slot_type, variant in slot_dict.items():
-            chosen[(int(layer_str), slot_type)] = str(variant)
+        for kind, variant in slot_dict.items():
+            chosen[(int(layer_str), kind)] = str(variant)
 
     lib = Path(block_library_dir).resolve()
     for slot in block_map.slots:
-        key = (slot.layer_idx, slot.slot_type)
+        key = (slot.layer_idx, slot.kind)
         if key not in chosen:
             continue
         variant = chosen[key]
         if is_passthrough(variant):
             continue  # 保留父块，不替换
-        factory, applicable = candidate_registry[variant]
-        if slot.slot_type not in applicable:
+        entry = get_candidate(variant)
+        if slot.kind not in entry.kinds:
             raise ValueError(
-                f"variant {variant!r} 不适用 slot_type={slot.slot_type}"
+                f"variant {variant!r} 不适用 kind={slot.kind!r}"
             )
-        new_module = factory(slot).to(device).eval()
-        ckpt_path = lib / variant_file_name(slot.layer_idx, slot.slot_type, variant)
+        new_module = entry.factory(slot).to(device).eval()
+        ckpt_path = lib / variant_file_name(slot.layer_idx, slot.kind, variant)
         if ckpt_path.is_file():
             ckpt = torch.load(
                 ckpt_path, map_location=device, weights_only=False

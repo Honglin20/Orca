@@ -366,21 +366,21 @@ def test_mip_select_infeasible(tmp_path: Path) -> None:
     """MIP 预算太紧 → feasible=false, select_reason=infeasible, selected_arch={}。"""
     scores_path = tmp_path / "scores.jsonl"
     latency_path = tmp_path / "latency_table.jsonl"
-    # 2 组（layer,slot_type），每组 2 variant；latency 都很大
+    # 2 组（layer,kind），每组 2 variant；latency 都很大
     with open(scores_path, "w") as f:
         for layer in (0, 1):
-            for slot in ("attention", "ffn"):
+            for kind in ("attention", "ffn"):
                 for v in ("identity", "other"):
                     f.write(json.dumps({
-                        "layer": layer, "slot": slot, "variant": v,
+                        "layer": layer, "kind": kind, "variant": v,
                         "score": -0.5 if v != "identity" else 0.0, "valid": True,
                     }) + "\n")
     with open(latency_path, "w") as f:
         for layer in (0, 1):
-            for slot in ("attention", "ffn"):
+            for kind in ("attention", "ffn"):
                 for v in ("identity", "other"):
                     f.write(json.dumps({
-                        "layer": layer, "slot": slot, "variant": v,
+                        "layer": layer, "kind": kind, "variant": v,
                         "latency_ms": 100.0,
                     }) + "\n")
     # 4 组 × 100ms = 400ms 最低；target=10ms → 必 infeasible
@@ -403,8 +403,13 @@ def test_mip_select_infeasible(tmp_path: Path) -> None:
     assert result["selected_arch"] == {}
 
 
-def test_score_preserves_parent_state(tmp_path: Path) -> None:
-    """score.py 跑完后，父模型 state_dict 不变（replace_slot 还原不变量）。"""
+def test_score_runs_and_identity_passthrough_score_is_zero(tmp_path: Path) -> None:
+    """score.py 跑通 + identity（passthrough）variant 的 score == 0（自比距离为 0）。
+
+    注：真正的「父模型 state_dict 还原不变量」需要 score.py 暴露内部 replace_slot/还原
+    API 做前后哈希对比——本测试降级为 rc==0 + identity score==0 校验（间接证明 finally
+    还原没崩）。完整的 state_dict 不变量测试留待 score.py 暴露内部 API 后补。
+    """
     model_path = tmp_path / "model.py"
     model_path.write_text(_TINY_MODEL_PY, encoding="utf-8")
     output_dir = tmp_path / "out"
@@ -431,11 +436,10 @@ def test_score_preserves_parent_state(tmp_path: Path) -> None:
         "--output_dir", str(output_dir),
     ])
 
-    # 载入父模型 → 取 state_dict 哈希
+    # 载入父模型（触发 flat model 可 import 校验，并 warm cache）
     sys.path.insert(0, str(_SCRIPTS_DIR))
     from puzzle_common import load_flat_model  # type: ignore
-    parent_before = load_flat_model(flat_model_path, "build_model", "")
-    sd_before = {k: v.clone() for k, v in parent_before.state_dict().items()}
+    load_flat_model(flat_model_path, "build_model", "")
 
     # 跑 score
     _run("score.py", [
@@ -448,16 +452,8 @@ def test_score_preserves_parent_state(tmp_path: Path) -> None:
         "--output_dir", str(output_dir),
     ])
 
-    # 跑完后再载入父模型 → 对比
-    # 关键：score 内部用同一 model 对象做 in-place replace_slot；还原失败会污染。
-    # 用新进程重 load 不够（那会重置）——我们信任 score.py 内部 finally 还原；
-    # 这里改为：score 跑完后立即在同一进程内复测 forward 数值是否稳定。
-    parent_after = load_flat_model(flat_model_path, "build_model", "")
-    sd_after = parent_after.state_dict()
-    # 重建后的随机权重 != before（重新初始化），所以不能直接比 state_dict；
-    # 改测 score 进程内是否抛异常（进程内 finally 还原出错会 rc=2）。score 已 rc=0。
-    # 真正的不变量测试需要 score.py 暴露一个内部 API——这里降级为 rc==0 校验 +
-    # scores.jsonl 非空校验（间接证明 score 没崩在还原失败上）。
+    # 跑完后：score 已 rc=0（进程内 finally 还原出错会 rc=2）。校验 scores.jsonl
+    # 非空 + identity variant 的 score == 0（passthrough 自比距离为 0）。
     scores_path = output_dir / "scores.jsonl"
     assert scores_path.is_file()
     rows = [l for l in scores_path.read_text().splitlines() if l.strip()]
@@ -470,34 +466,48 @@ def test_score_preserves_parent_state(tmp_path: Path) -> None:
 
 
 def test_parse_block_candidates_unit() -> None:
-    """block_candidates JSON 解析的 happy + 5 种 fail-loud 分支（纯函数）。"""
+    """block_candidates JSON 解析的 happy + fail-loud 分支（kind-keyed + E1）。"""
     sys.path.insert(0, str(_SCRIPTS_DIR))
     from puzzle_common import parse_block_candidates  # type: ignore
 
-    # 空 → 默认集
+    # 空 → 默认集（5 kind，每个都含 identity）
     d = parse_block_candidates("")
     assert "identity" in d["attention"]
     assert "ffn_50" in d["ffn"]
+    assert d["conv"] == ["identity"]
+    assert d["moe"] == ["identity"]
+    assert d["custom"] == ["identity"]
 
-    # 合法 JSON
-    d = parse_block_candidates('{"attention": ["identity", "fnet"], "ffn": ["no_op"]}')
-    assert d == {"attention": ["identity", "fnet"], "ffn": ["no_op"]}
+    # 合法 kind-keyed JSON（每 kind 都含 identity，E1）
+    d = parse_block_candidates(
+        '{"attention": ["identity", "fnet"], "ffn": ["identity", "no_op"]}'
+    )
+    assert d == {"attention": ["identity", "fnet"], "ffn": ["identity", "no_op"]}
 
-    # 5 种 raise 分支
+    # conv/moe/custom 只含 identity 也合法（D4）
+    d = parse_block_candidates('{"conv": ["identity"]}')
+    assert d == {"conv": ["identity"]}
+
+    # raise 分支
     with pytest.raises(ValueError):
         parse_block_candidates("not json")
     with pytest.raises(ValueError):
         parse_block_candidates("[1,2,3]")  # 非 dict
     with pytest.raises(ValueError):
-        parse_block_candidates('{"attention": ["identity"]}')  # 缺 ffn
+        parse_block_candidates("{}")  # 空 dict
     with pytest.raises(ValueError):
-        parse_block_candidates('{"attention": [123], "ffn": ["no_op"]}')  # 非 str
+        parse_block_candidates('{"attention": [123], "ffn": ["identity"]}')  # 非 str
     with pytest.raises(ValueError):
         parse_block_candidates(
-            '{"attention": ["nonexistent_variant"], "ffn": ["no_op"]}'
+            '{"attention": ["nonexistent_variant"], "ffn": ["identity"]}'
         )  # 未注册
     with pytest.raises(ValueError):
         parse_block_candidates(
-            '{"attention": ["identity"], "ffn": ["random_synthesizer"]}'
-        )  # 不适用 slot_type
+            '{"attention": ["identity"], "ffn": ["random_synthesizer", "identity"]}'
+        )  # 不适用 kind
+    # E1：某 kind 列表缺 identity → raise
+    with pytest.raises(ValueError, match="identity"):
+        parse_block_candidates('{"attention": ["fnet"], "ffn": ["identity"]}')
+    with pytest.raises(ValueError, match="identity"):
+        parse_block_candidates('{"attention": ["identity"], "ffn": ["no_op"]}')
 

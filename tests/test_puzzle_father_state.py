@@ -243,10 +243,10 @@ def test_build_student_from_arch_identity_retains_father_weights(tmp_path):
     father_state_path = tmp_path / "father_state.pt"
     torch.save(father_model.state_dict(), father_state_path)
 
-    # 2) 构造 block_map:单层单 attention + 单 ffn(用 Slot dataclass)
+    # 2) 构造 block_map:单层单 attention + 单 ffn(用 Slot dataclass，kind 替代 slot_type)
     slot_att = pc.Slot(
         layer_idx=0,
-        slot_type="attention",
+        kind="attention",
         in_dim=8,
         out_dim=8,
         num_heads=4,
@@ -256,13 +256,15 @@ def test_build_student_from_arch_identity_retains_father_weights(tmp_path):
     )
     slot_ffn = pc.Slot(
         layer_idx=0,
-        slot_type="ffn",
+        kind="ffn",
         in_dim=8,
         out_dim=8,
         num_heads=0,
         head_dim=0,
         source_class="FeedForward",
         parent_module_path="block.ffn",
+        original_intermediate=16,
+        activation="gelu",
     )
     block_map = pc.BlockMap(slots=[slot_att, slot_ffn])
 

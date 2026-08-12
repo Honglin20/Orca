@@ -16,11 +16,12 @@ SCRIPTS = REPO / "workflows" / "agents" / "_puzzle_scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import puzzle_common as pc  # noqa: E402
+import puzzle_blocks as pb  # noqa: E402
 
 
 # ── _ZeroBlock ───────────────────────────────────────────────────────────────
 def test_zero_block_preserves_shape_dtype_device_and_is_zero():
-    blk = pc._ZeroBlock()
+    blk = pb._ZeroBlock()
     for shape in [(2, 5, 8), (1, 16), (3, 4, 7, 9)]:
         x = torch.randn(*shape, dtype=torch.float32)
         y = blk(x)
@@ -35,14 +36,14 @@ def test_factory_no_op_requires_equal_io_dim():
         in_dim = 8
         out_dim = 8
         parent_module_path = "x"
-    assert isinstance(pc._factory_no_op(_S()), pc._ZeroBlock)
+    assert isinstance(pb.make_zero(_S()), pb._ZeroBlock)
 
     class _S2:
         in_dim = 8
         out_dim = 16
         parent_module_path = "x"
     with pytest.raises(ValueError):
-        pc._factory_no_op(_S2())
+        pb.make_zero(_S2())
 
 
 # ── load_father_model missing-ratio gate ────────────────────────────────────
@@ -96,8 +97,8 @@ def test_load_father_model_raises_on_missing_file(tmp_path):
 # ── mip_select floor-missing raise ──────────────────────────────────────────
 def test_mip_raises_when_no_floor_and_no_baseline():
     import mip_select as ms
-    scores = [{"layer": 0, "slot": "attention", "variant": "identity", "score": 0.0, "valid": True}]
-    latency = [{"layer": 0, "slot": "attention", "variant": "identity", "latency_ms": 0.05}]
+    scores = [{"layer": 0, "kind": "attention", "variant": "identity", "score": 0.0, "valid": True}]
+    latency = [{"layer": 0, "kind": "attention", "variant": "identity", "latency_ms": 0.05}]
     with pytest.raises(ValueError, match="latency_floor"):
         ms._solve_mip(scores, latency, target_latency=0.4,
                       baseline_whole_latency=None, measured_floor=None)

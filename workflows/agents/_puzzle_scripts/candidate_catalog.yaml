@@ -1,0 +1,124 @@
+# candidate_catalog.yaml —— Puzzle builtin 候选块目录（取代硬编码 registry）。
+#
+# 每条 builtin：name/kind(list)/source/factory(params 绑定)/align/trainable/
+# mask_aware/requires_ffn_struct/description。
+# - factory 形如 ``puzzle_blocks::make_<name>``；loader 用 functools.partial 绑定
+#   params，再统一 _wrap 包 _KwargPassthrough。
+# - identity 是 passthrough（保留 father-loaded 模块），source=passthrough，无 factory。
+# - D4：conv/moe/custom 仅 identity 适用（框架预留，未来加 builtin 时扩本文件）。
+# - E1：identity 必入每 slot 候选列表（puzzle_common.parse_block_candidates 把关）。
+# - E8：所有 builtin 默认 mask_aware=false（mask_load_bearing slot 只留 identity）。
+
+# ── attention 候选（D4 builtin 集）──────────────────────────────────────────
+- name: fnet
+  kind: [attention]
+  source: builtin
+  factory: puzzle_blocks::make_fnet
+  params: {}
+  align: passthrough
+  trainable: false
+  mask_aware: false
+  requires_ffn_struct: []
+  description: "零参数 2D-DFT mixer；forward(x) 单参；mask-blind"
+
+- name: random_synthesizer
+  kind: [attention]
+  source: builtin
+  factory: puzzle_blocks::make_random_synthesizer
+  params: {}
+  align: passthrough
+  trainable: true
+  mask_aware: false
+  requires_ffn_struct: []
+  description: "无 QK 的学习型 random mix 矩阵，参数省"
+
+- name: relu_attention
+  kind: [attention]
+  source: builtin
+  factory: puzzle_blocks::make_relu_attention
+  params: {}
+  align: passthrough
+  trainable: true
+  mask_aware: false
+  requires_ffn_struct: []
+  description: "ReLU(logits)/L 替 softmax"
+
+- name: softs_star
+  kind: [attention]
+  source: builtin
+  factory: puzzle_blocks::make_softs_star
+  params: {}
+  align: passthrough
+  trainable: true
+  mask_aware: false
+  requires_ffn_struct: []
+  description: "SOFTS STAR 聚合-重分配（L 线性）"
+
+- name: vanilla
+  kind: [attention]
+  source: builtin
+  factory: puzzle_blocks::make_vanilla
+  params: {}
+  align: passthrough
+  trainable: true
+  mask_aware: false
+  requires_ffn_struct: []
+  description: "标准 MHSA（对照基线）"
+
+# ── ffn 候选（D4 builtin 集；E6/E7：剪枝相对 original_intermediate，仅 standard）──
+- name: ffn_75
+  kind: [ffn]
+  source: builtin
+  factory: puzzle_blocks::make_ffn
+  params: {ratio: 0.75}
+  align: passthrough
+  trainable: true
+  mask_aware: false
+  requires_ffn_struct: [standard]
+  description: "FFN 中间维 ×0.75（相对 original_intermediate）；激活对齐 slot"
+
+- name: ffn_50
+  kind: [ffn]
+  source: builtin
+  factory: puzzle_blocks::make_ffn
+  params: {ratio: 0.5}
+  align: passthrough
+  trainable: true
+  mask_aware: false
+  requires_ffn_struct: [standard]
+  description: "FFN 中间维 ×0.5（相对 original_intermediate）；激活对齐 slot"
+
+- name: linear
+  kind: [ffn]
+  source: builtin
+  factory: puzzle_blocks::make_linear
+  params: {}
+  align: passthrough
+  trainable: true
+  mask_aware: false
+  requires_ffn_struct: [standard]
+  description: "单 Linear 替代 FFN（激进剪枝）；仅 standard"
+
+# ── 跨 kind 候选 ────────────────────────────────────────────────────────────
+- name: no_op
+  kind: [attention, ffn]
+  source: builtin
+  factory: puzzle_blocks::make_zero
+  params: {}
+  align: passthrough
+  trainable: false
+  mask_aware: false
+  requires_ffn_struct: []
+  description: "零输出块（in_dim==out_dim，residual 不变，latency≈0）"
+
+# ── identity：适用所有 kind（passthrough 铁律 §3；E1 必入每 slot）──────────────
+- name: identity
+  kind: [attention, ffn, conv, moe, custom]
+  source: passthrough
+  factory: null
+  params: {}
+  align: passthrough
+  trainable: false
+  mask_aware: false
+  requires_ffn_struct: []
+  description: "保留 father-loaded 模块（不替换 slot 架构与权重）"

@@ -1,7 +1,7 @@
 """build_selected.py —— Puzzle P2.7：实例化异构架构。
 
-读 selected_arch + block_library + flat_model，逐层把 attention/ffn slot 换成
-选定 variant（载块库权重）；identity（passthrough）保留父块（SPEC §2.2/§2.3）。
+读 selected_arch + block_library + flat_model，逐层把各 kind slot 换成选定
+variant（载块库权重）；identity（passthrough）保留父块（SPEC v2 §3）。
 
 输出 ``selected_model.pt``（完整 state_dict，可独立 eval）。
 stdout：``SELECTED_MODEL: <path>`` / ``RESULT_JSON: {...}``。
@@ -70,11 +70,11 @@ def main(argv: list[str] | None = None) -> int:
         model.eval().to(device)
 
         # 校验：selected_arch 中所有 chosen 都被处理（build_student_from_arch 会
-        # 在 variant 不适用 / ckpt 缺时 raise，这里仅做 layer/slot 覆盖性检查）
+        # 在 variant 不适用 / ckpt 缺时 raise，这里仅做 layer/kind 覆盖性检查）
         chosen_keys = {
-            (int(L), st) for L, d in arch.items() for st in d
+            (int(L), k) for L, d in arch.items() for k in d
         }
-        bm_keys = {(s.layer_idx, s.slot_type) for s in block_map.slots}
+        bm_keys = {(s.layer_idx, s.kind) for s in block_map.slots}
         unknown = chosen_keys - bm_keys
         if unknown:
             raise RuntimeError(
@@ -83,8 +83,8 @@ def main(argv: list[str] | None = None) -> int:
 
         replaced: list[str] = []
         for L, d in arch.items():
-            for st, v in d.items():
-                replaced.append(f"L{L}_{st}={v}")
+            for kind, v in d.items():
+                replaced.append(f"L{L}_{kind}={v}")
 
         selected_model_path = output_dir / "selected_model.pt"
         torch.save(

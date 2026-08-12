@@ -34,6 +34,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from puzzle_blocks import ACTIVATION_CLASS_TO_NAME as _ACTIVATION_CLASS_TO_NAME
 from puzzle_common import (
     BlockMap,
     Slot,
@@ -112,6 +113,36 @@ def _infer_num_heads(mod: nn.Module, fallback_dim: int) -> tuple[int, int]:
     return nh, hd
 
 
+# 激活类 → 名称：puzzle_blocks 的公开反向映射（activation 真相源；E23 activation 推断）。
+# import 见文件顶部（puzzle_blocks 不反向依赖，无环）。
+
+
+def _infer_ffn_meta(mod: nn.Module) -> tuple[int | None, str | None, str]:
+    """从 ffn 模块推断 (original_intermediate, activation_name, ffn_struct)。
+
+    standard Linear-Act-Linear：取首个 Linear 的 out_features 作中间维（E7 ratio
+    基准），激活模块映射为名称（E23）。识别不到 → (None, None, "standard")，
+    由 pz_expand LLM 在 search_space.yaml refine（U2）。
+
+    TODO(U2/U3)：ffn_struct 恒返回 "standard" 是占位（仅靠类名/结构命中即标 standard），
+    非确定性确认结论。U3 的 is_valid_ffn_prune 据此字段决定剪枝候选放行——bypass/GLU
+    FFN 若未被 U2 LLM refine，会被误标 standard → 剪枝候选 silent 放行（E6 风险）。
+    U2 SPEC 须要求 LLM 输出 ffn_struct 时附结构证据。
+    """
+    linears = [m for m in mod.modules() if isinstance(m, nn.Linear)]
+    intermediate: int | None = None
+    if linears:
+        # standard FFN：fc1.out_features = 中间维（首个 Linear）
+        intermediate = int(linears[0].out_features)
+    act_name: str | None = None
+    for m in mod.modules():
+        matched = _ACTIVATION_CLASS_TO_NAME.get(type(m))
+        if matched is not None:
+            act_name = matched
+            break
+    return intermediate, act_name, "standard"
+
+
 # ── trace 捕获 I/O shape ──────────────────────────────────────────────────────
 
 def _trace_slot_shapes(
@@ -120,7 +151,7 @@ def _trace_slot_shapes(
     dummy_input: torch.Tensor,
     device: torch.device,
 ) -> dict[str, tuple[int, int]]:
-    """对每个 (path, slot_type) 跑一次 forward，hook 抓 in/out 最后一维。
+    """对每个 (path, kind) 跑一次 forward，hook 抓 in/out 最后一维。
 
     返回 ``{path: (in_dim, out_dim)}``。
     """
@@ -142,7 +173,7 @@ def _trace_slot_shapes(
         return hook
 
     try:
-        for path, _slot_type in slot_paths:
+        for path, _kind in slot_paths:
             try:
                 mod = model.get_submodule(path)
             except AttributeError as e:
@@ -258,10 +289,10 @@ def build_block_map(
         return BlockMap(slots=[])
 
     # 抓 I/O shape
-    slot_paths = [(s.parent_module_path, s.slot_type) for s in slots]
+    slot_paths = [(s.parent_module_path, s.kind) for s in slots]
     shapes = _trace_slot_shapes(model, slot_paths, dummy_input, device)
 
-    # 回填 in_dim/out_dim/num_heads/head_dim
+    # 回填 in_dim/out_dim/num_heads/head_dim + ffn meta（E7/E23）
     finalized: list[Slot] = []
     for s in slots:
         in_dim, out_dim = shapes[s.parent_module_path]
@@ -269,21 +300,29 @@ def build_block_map(
             orig_mod = model.get_submodule(s.parent_module_path)
         except AttributeError:
             orig_mod = None
-        if orig_mod is not None and s.slot_type == "attention":
+        original_intermediate: int | None = None
+        activation: str | None = None
+        ffn_struct = "standard"
+        if orig_mod is not None and s.kind == "attention":
             nh, hd = _infer_num_heads(orig_mod, in_dim)
         else:
             nh = max(1, in_dim // 4)
             hd = max(1, in_dim // nh)
+            if orig_mod is not None and s.kind == "ffn":
+                original_intermediate, activation, ffn_struct = _infer_ffn_meta(orig_mod)
         finalized.append(
             Slot(
                 layer_idx=s.layer_idx,
-                slot_type=s.slot_type,
+                kind=s.kind,
                 in_dim=in_dim,
                 out_dim=out_dim,
                 num_heads=nh,
                 head_dim=hd,
                 source_class=s.source_class,
                 parent_module_path=s.parent_module_path,
+                original_intermediate=original_intermediate,
+                activation=activation,
+                ffn_struct=ffn_struct,
             )
         )
     return BlockMap(slots=finalized)
@@ -297,7 +336,7 @@ def _add_slot_if_match(
         slots.append(
             Slot(
                 layer_idx=layer_idx,
-                slot_type="attention",
+                kind="attention",
                 in_dim=-1,  # 待 trace 回填
                 out_dim=-1,
                 num_heads=-1,
@@ -310,7 +349,7 @@ def _add_slot_if_match(
         slots.append(
             Slot(
                 layer_idx=layer_idx,
-                slot_type="ffn",
+                kind="ffn",
                 in_dim=-1,
                 out_dim=-1,
                 num_heads=0,
@@ -511,8 +550,8 @@ def main(argv: list[str] | None = None) -> int:
 
 def _infer_model_type(block_map: BlockMap) -> str:
     """从 block_map 推个粗标签（agent.md 可改写）。"""
-    n_att = sum(1 for s in block_map.slots if s.slot_type == "attention")
-    n_ffn = sum(1 for s in block_map.slots if s.slot_type == "ffn")
+    n_att = sum(1 for s in block_map.slots if s.kind == "attention")
+    n_ffn = sum(1 for s in block_map.slots if s.kind == "ffn")
     if n_att >= 2 and n_ffn >= 2:
         return "isotropic_transformer"
     if n_att >= 1:
@@ -541,12 +580,12 @@ def _render_manifest(
         "",
         "## Slots",
         "",
-        "| layer_idx | slot_type | in_dim | out_dim | num_heads | head_dim | source_class | parent_module_path |",
+        "| layer_idx | kind | in_dim | out_dim | num_heads | head_dim | source_class | parent_module_path |",
         "|---|---|---|---|---|---|---|---|",
     ]
     for s in block_map.slots:
         lines.append(
-            f"| {s.layer_idx} | {s.slot_type} | {s.in_dim} | {s.out_dim} | "
+            f"| {s.layer_idx} | {s.kind} | {s.in_dim} | {s.out_dim} | "
             f"{s.num_heads} | {s.head_dim} | {s.source_class} | "
             f"`{s.parent_module_path}` |"
         )

@@ -28,7 +28,7 @@ from puzzle_common import (
     BlockMap,
     Slot,
     build_calib_loader,
-    candidate_registry,
+    get_candidate,
     get_module_dummy_input,
     is_passthrough,
     load_father_model,
@@ -64,15 +64,15 @@ def _score_variant(
         # identity = 保留父块 → 输出与 parent_outputs 完全一致 → distance=0
         return 0.0, True
 
-    factory, applicable = candidate_registry[variant]
-    if slot.slot_type not in applicable:
+    entry = get_candidate(variant)
+    if slot.kind not in entry.kinds:
         return 0.0, False
 
     # 载入 variant 权重
     if not ckpt_path.is_file():
         raise FileNotFoundError(f"variant ckpt 不存在：{ckpt_path}")
 
-    variant_module = factory(slot).to(device).eval()
+    variant_module = entry.factory(slot).to(device).eval()
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     sd = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
     load_variant_state_dict(variant_module, sd, variant, strict_unexpected=True)
@@ -173,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
         with open(scores_path, "w", encoding="utf-8") as fout:
             for slot in block_map.slots:
                 # 找该 slot 的所有 variant ckpt
-                prefix = f"L{slot.layer_idx}_{slot.slot_type}_"
+                prefix = f"L{slot.layer_idx}_{slot.kind}_"
                 ckpt_files = sorted(block_library_dir.glob(f"{prefix}*.pt"))
                 if not ckpt_files:
                     raise FileNotFoundError(
@@ -195,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     row = {
                         "layer": slot.layer_idx,
-                        "slot": slot.slot_type,
+                        "kind": slot.kind,
                         "variant": variant,
                         "score": score,
                         "valid": valid,

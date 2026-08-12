@@ -29,8 +29,8 @@ from puzzle_common import (
     BlockMap,
     Slot,
     build_calib_loader,
-    candidate_registry,
     capture_parent_activations,
+    get_candidate,
     get_module_dummy_input,
     is_passthrough,
     load_father_model,
@@ -65,12 +65,12 @@ def _train_one_variant(
     返回 ``(final_loss, trained_block_module)``。identity/no_op 不训练
     （由 caller 短路，不会进到这里）。
     """
-    factory, applicable = candidate_registry[variant]
-    if slot.slot_type not in applicable:
+    entry = get_candidate(variant)
+    if slot.kind not in entry.kinds:
         raise ValueError(
-            f"variant {variant!r} 不适用 slot_type={slot.slot_type}"
+            f"variant {variant!r} 不适用 kind={slot.kind!r}"
         )
-    block_module = factory(slot).to(device).train()
+    block_module = entry.factory(slot).to(device).train()
 
     in_t = parent_in.to(device)
     target = parent_out.to(device)
@@ -117,7 +117,7 @@ def _train_one_variant(
                         "metrics": {
                             "loss": last_loss,
                             "layer": slot.layer_idx,
-                            "slot": slot.slot_type,
+                            "kind": slot.kind,
                             "variant": variant,
                         },
                     }
@@ -186,14 +186,14 @@ def main(argv: list[str] | None = None) -> int:
         saved_ckpts: list[str] = []
 
         for slot in block_map.slots:
-            variant_list = candidates.get(slot.slot_type, [])
+            variant_list = candidates.get(slot.kind, [])
             if not variant_list:
                 raise ValueError(
-                    f"slot_type={slot.slot_type} 无候选变体（block_candidates 配置缺）"
+                    f"kind={slot.kind!r} 无候选变体（block_candidates 配置缺）"
                 )
             parent_in, parent_out = activations[slot.parent_module_path]
             for variant in variant_list:
-                fname = variant_file_name(slot.layer_idx, slot.slot_type, variant)
+                fname = variant_file_name(slot.layer_idx, slot.kind, variant)
                 ckpt_path = block_library_dir / fname
                 if is_passthrough(variant):
                     # identity = 保留父块（passthrough），不训不存权重；
@@ -204,14 +204,14 @@ def main(argv: list[str] | None = None) -> int:
                             "variant": variant,
                             "passthrough": True,
                             "layer": slot.layer_idx,
-                            "slot": slot.slot_type,
+                            "kind": slot.kind,
                         },
                         ckpt_path,
                     )
                     summary["variants"].append(
                         {
                             "layer": slot.layer_idx,
-                            "slot": slot.slot_type,
+                            "kind": slot.kind,
                             "variant": variant,
                             "final_loss": 0.0,
                             "trained": False,
@@ -236,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
                         "state_dict": _state_dict_clean(trained_block),
                         "variant": variant,
                         "layer": slot.layer_idx,
-                        "slot": slot.slot_type,
+                        "kind": slot.kind,
                         "slot_in_dim": slot.in_dim,
                         "slot_out_dim": slot.out_dim,
                     },
@@ -245,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
                 summary["variants"].append(
                     {
                         "layer": slot.layer_idx,
-                        "slot": slot.slot_type,
+                        "kind": slot.kind,
                         "variant": variant,
                         "final_loss": final_loss,
                         "trained": True,

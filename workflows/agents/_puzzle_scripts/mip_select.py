@@ -3,13 +3,13 @@
 形式化（SPEC §4 / P2.6）：
     max  Σ score[l, v] · x[l, v]
     s.t. Σ latency[l, v] · x[l, v] ≤ target_latency
-         Σ_v x[l, v] = 1  ∀ layer-group l   （每 (layer,slot_type) 组恰选一个）
+         Σ_v x[l, v] = 1  ∀ layer-group l   （每 (layer,kind) 组恰选一个）
          x[l, v] ∈ {0, 1}
 
-分组键：``(layer_idx, slot_type)``。每组恰选一 variant。
+分组键：``(layer_idx, kind)``（kind 替代 v1 slot_type，E3）。每组恰选一 variant。
 
 stdout 单行 JSON：``{selected_arch, total_score, selected_latency, feasible, select_reason}``。
-- selected_arch: ``{layer_idx: {slot_type: variant_name}}``
+- selected_arch: ``{layer_idx: {kind: variant_name}}``
 - select_reason: ``mip-optimal`` / ``infeasible`` / ``none``
 
 scores/latency 缺 → exit 2。
@@ -74,26 +74,26 @@ def _solve_mip(
     """
     import pulp
 
-    # 组装 (layer, slot, variant) -> score / latency
+    # 组装 (layer, kind, variant) -> score / latency
     score_map: dict[tuple[int, str, str], float] = {}
     valid_map: dict[tuple[int, str, str], bool] = {}
     for r in scores_rows:
-        key = (int(r["layer"]), str(r["slot"]), str(r["variant"]))
+        key = (int(r["layer"]), str(r["kind"]), str(r["variant"]))
         score_map[key] = float(r["score"])
         valid_map[key] = bool(r.get("valid", True))
     latency_map: dict[tuple[int, str, str], float] = {}
     for r in latency_rows:
-        key = (int(r["layer"]), str(r["slot"]), str(r["variant"]))
+        key = (int(r["layer"]), str(r["kind"]), str(r["variant"]))
         latency_map[key] = _extract_latency(r)
 
-    # 分组（layer, slot_type 为组键）
+    # 分组（(layer, kind) 为组键——kind 替代 v1 slot_type，E3）
     groups: dict[tuple[int, str], list[tuple[int, str, str]]] = defaultdict(list)
     for key in score_map:
         if not valid_map.get(key, True):
             continue
         if key not in latency_map:
             raise ValueError(
-                f"(layer={key[0]}, slot={key[1]}, variant={key[2]}) 在 latency 表缺"
+                f"(layer={key[0]}, kind={key[1]}, variant={key[2]}) 在 latency 表缺"
             )
         groups[(key[0], key[1])].append(key)
 
@@ -118,8 +118,8 @@ def _solve_mip(
             ident = [m for m in members if m[2] == "identity"]
             if not ident:
                 raise ValueError(
-                    f"组 (layer={gkey[0]}, slot={gkey[1]}) 无 identity variant——"
-                    "latency 模型需 identity 作 baseline 参照"
+                    f"组 (layer={gkey[0]}, kind={gkey[1]}) 无 identity variant——"
+                    "latency 模型需 identity 作 baseline 参照（E1）"
                 )
             identity_sum += latency_map[ident[0]]
         floor = baseline_whole_latency - identity_sum
@@ -175,8 +175,8 @@ def _solve_mip(
     chosen_block_latency = 0.0
     for m, var in x.items():
         if var.value() is not None and var.value() > 0.5:
-            layer_idx, slot_type, variant = m
-            selected_arch[str(layer_idx)][slot_type] = variant
+            layer_idx, kind, variant = m
+            selected_arch[str(layer_idx)][kind] = variant
             total_score += score_map[m]
             chosen_block_latency += latency_map[m]
 

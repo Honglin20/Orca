@@ -29,8 +29,8 @@ import torch.nn as nn
 from puzzle_common import (
     BlockMap,
     build_calib_loader,
-    candidate_registry,
     capture_parent_activations,
+    get_candidate,
     get_module_dummy_input,
     is_passthrough,
     load_external_callable,
@@ -93,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
 
         with open(latency_path, "w", encoding="utf-8") as fout:
             for slot in block_map.slots:
-                prefix = f"L{slot.layer_idx}_{slot.slot_type}_"
+                prefix = f"L{slot.layer_idx}_{slot.kind}_"
                 ckpt_files = sorted(block_library_dir.glob(f"{prefix}*.pt"))
                 if not ckpt_files:
                     raise FileNotFoundError(
@@ -111,10 +111,10 @@ def main(argv: list[str] | None = None) -> int:
                         # identity = 保留父块 → 测父块单块 latency
                         variant_module = model.get_submodule(slot.parent_module_path)
                     else:
-                        factory, applicable = candidate_registry[variant]
-                        if slot.slot_type not in applicable:
+                        entry = get_candidate(variant)
+                        if slot.kind not in entry.kinds:
                             continue
-                        variant_module = factory(slot).to(device).eval()
+                        variant_module = entry.factory(slot).to(device).eval()
                         ckpt = torch.load(
                             ckpt_path, map_location=device, weights_only=False
                         )
@@ -130,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
                         json.dumps(
                             {
                                 "layer": slot.layer_idx,
-                                "slot": slot.slot_type,
+                                "kind": slot.kind,
                                 "variant": variant,
                                 latency_field: latency_val,
                                 "unit": args.latency_unit,
@@ -153,9 +153,10 @@ def main(argv: list[str] | None = None) -> int:
         # ── 浬 floor:全 block → no_op(零输出)的整模 latency(非 block 固定开销)──
         # 用实测 floor 而非 baseline−Σidentity(后者因 standalone 欠计上下文成本而高估)。
         # mip_select 据此算 selected_whole = floor + Σ chosen_block。
-        from puzzle_common import _factory_no_op, replace_slot
+        from puzzle_blocks import make_zero
+        from puzzle_common import replace_slot
         for slot in block_map.slots:
-            zblk = _factory_no_op(slot).to(device).eval()
+            zblk = make_zero(slot).to(device).eval()
             replace_slot(model, slot.parent_module_path, zblk)
         whole_input_floor = torch.randn(
             *list(dummy_meta["shape"]),
