@@ -160,7 +160,11 @@ def train_iter(device=None) -> Iterator[batch]: ...   # 训练数据（同上，
 def extract_labels(batch) -> torch.Tensor | None: ... # 从 native batch 抽标签（无监督任务返 None）
 def kd_loss(s_out, t_out, labels=None) -> Tensor: ... # faithful 移植用户任务 KD（cosine / KL / MSE / 任务 loss，不写死）
 def task_loss(s_out, labels) -> Tensor | None: ...    # 硬标签监督（移植用户任务 loss；非分类返 None）
-def evaluate(model) -> float: ...                     # faithful 移植用户 eval 协议（含 device / 检索 / metric / 方向）
+def evaluate(model) -> float: ...                     # faithful 移植用户 eval 协议（含 device / 检索 / metric / 方向）。
+                                                      # 🔴 向量化 loop metric：用户 eval 若是逐样本 Python loop（如 k-NN 逐样本
+                                                      #   topk+.item / 逐样本 forward），且存在**语义恒等**的批量化写法（如 k=1 k-NN
+                                                      #   的 cdist+argmin == loop topk(k=1)），**必须向量化**——否则 BLD/score/GKD/gate
+                                                      #   反复调 evaluate 会从分钟级爆到小时级。faithful 指语义不变，非逐字保 loop。
 METRIC_DIRECTION: str = "higher-better"               # "higher-better" | "lower-better"（从用户 metric 语义判定）
 EVAL_NOISE_ATOL: float = 1e-9                         # eval-stability 容差（含采样/检索的评估 ≥1e-2，纯确定性 1e-9）
 def load_pretrained(model) -> "_LoadResult": ...      # ckpt 加载（剥 module./_orig_mod./ema./多字段 dict 前缀 + train_from_scratch 兜底）
