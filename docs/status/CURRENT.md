@@ -4,28 +4,23 @@
 
 ---
 
-## 当前：Puzzle workflow —— 双项目脚本级 E2E PASS，in-session 部分验证
+## 当前：Puzzle universal 重构（SPEC v2，分支 `puzzle-universal`）
 
-**任务**：实现 puzzle workflow（Bercovich 2025 decomposed NAS）并在 playground 两项目(mnist_trf / target)上 E2E 通过(ACC≤0.5 / LAT≥2×),in-session 模式可执行。
+**任务**：把 puzzle workflow 从"假设标准写法"重构为"任意 transformer 工程自适应"——SPEC v2 `docs/specs/puzzle-universal-design-draft.md`，分 Phase U0-U5。v1 已 PASS（tag `puzzle-v1-pre-universal` 保护，见 CHANGELOG）作对照。
 
 ### ✅ 已完成
 
-- **workflow 完整实现**(`workflows/puzzle.yaml` + 6 agent `pz_*` + 4 terminate + 9 算法脚本 `_puzzle_scripts/` + 3 verifier 体 + checklist)。对齐 nas-supernet v1 in-session 契约。`tars validate` 0/0;19 单测过;code-reviewer 闭环。
-- **mnist_trf 脚本级 E2E PASS 双 AC**:acc 0.927→**0.958**(Δ0.031≤0.5)、latency 0.928→**0.453ms**(降 51%)。fixture 在 `/mnt/d/Projects/playground/mnist_trf/`(d=96/4-block transformer,分类)。
-- **target 脚本级 E2E PASS 双 AC(workflow 自适应,target 源码零改)**:coder 产 wrapper adapter `target/artifacts/puzzle/target_flat.py`(4 输入打包单 tensor,state_dict 与 pre_trained.pth 零 missing);acc 0.085→**0.09**(Δ0.005≤0.5)、latency 0.448→**0.197ms**(降 56%)。eval_kind=embedding(cosine 打分/GKD)。
-- **in-session 机制验证**:bootstrap(chart daemon + web UI)→ pz_expand 子代理执行 emit JSON → `orca next` 接受 + 路由 pz_build_library → 闭环跑通。
-- **关键修复**:① 预训练 father 贯穿(load_father_model);② latency 模型(standalone 单块 + 实测 floor);③ attention no_op(_ZeroBlock);④ GKD 真实训练数据 + CE/cosine;⑤ 100 reps 稳定测量;⑥ `_KwargPassthrough` 适配异构 forward 签名(target attention_mask)。
-- **commits**(`in-session-unified-backend`):`3a657d7`(workflow+mnist) / `6834dec`(KwargPassthrough+target) / `fcc4a12`+`95201e1`+`70fa724`(docs)。
+- **Phase U0**：tag `puzzle-v1-pre-universal` 保护 + 新分支 `puzzle-universal`。
+- **Phase U1（契约层迁移，`50c79c4`）**：Slot `slot_type`→`kind`（开放标签，E3）+ 5 新字段（return_arity/original_intermediate/activation/ffn_struct/mask_load_bearing）；新增 `candidate_catalog.yaml` + `puzzle_blocks.py`（公开 make_* 工厂库）取代硬编码 registry；`load_catalog`/`functools.partial`/`_wrap` 统一 factory(slot)（E4）；`make_ffn` 修正 E7（intermediate=original_intermediate×ratio）+ E23；bld/score/latency/build/mip/expand 全 dispatch 迁移，jsonl `"slot"`→`"kind"`，MIP 算法零改动；D4（conv/moe/custom 仅 identity）+ E1（identity 必入每 slot）。验收：`tars validate` 0/0 + 44 测试全过。
 
-### ⏳ 未完成
+### ⏳ 未完成（后续 Phase）
 
-- [ ] **mnist_trf in-session 全驱动**:仅驱动到 pz_expand→pz_build_library 路由(机制已证);BLD/GKD 长跑节点跨轮 bounded-polling 未驱动(token 重),且 mnist block_library 是 wrapping 前旧产物需重建。
-- [ ] **pz_expand 自适应重构(用户愿景,未实现)**:目前 target 用手写 adapter;真正 LLM-flatten(镜像 ns_expand Step 1:读项目→产 self-contained flat + manifest[eval 入口/ckpt/train/data/paradigm]→ fidelity smoke[load 预训练 ckpt 进 flat 验证]+ eval smoke + 不便跑派 verifier)未做。设计已落 `docs/specs/puzzle-design-draft.md` §9-10。
-- [ ] **输入契约对齐 nas-supernet(未做)**:现仍要求 build_fn/eval_fn/eval_kind/train_loader_fn/pretrained_ckpt 为 [ask];应收缩到 project_root/model_path/target_latency/latency_unit/latency_script_path/accuracy_tolerance/seed,其余 agent 发现写 manifest(design-draft §9)。
-- [ ] mnist_trf fixture + target adapter **纳入 orca 仓**(tests/e2e_puzzle/fixtures/)保可复现(现仅在 playground/ 仓外)。
-- [ ] 用户确认后 commit 余下(global 规则:未问不动——已 commit 的不含上述未完成项)。
+- [ ] **Phase U2**：pz_expand 重构——LLM 判断（flat/manifest/search_space 生成 + kind 识别带确定性证据，删 regex）+ `measure_baseline.py` 拆分 + 4 道 smoke（strict-load/forward-determinism/eval-stability/per-slot identity allclose）+ block-map/search-space evaluator（`subagents/puzzle/`）+ manifest.yaml schema + output_schema 扩 required（search_space_path/manifest_path，E10）+ evaluator fixture suite（E18）。
+- [ ] **Phase U3**：下游迁移——bld calib 改真实数据（E14）；is_valid_ffn_prune（E6）+ mask_load_bearing is_valid（E8）；gkd argparse 5 args 改 manifest-discovered；identity allclose 支持。
+- [ ] **Phase U4**：两项目 E2E 重跑（mnist_trf / target），target 不再靠手写 adapter。
+- [ ] **Phase U5**：code-reviewer 洁净审查闭环。
 
-**必读**：SPEC `docs/specs/phase-puzzle-impl.md`；设计草稿 `docs/specs/puzzle-design-draft.md`(§5.2.2 自适应路径 / §9 输入对齐 / §10 pz_expand 重构)；`workflows/puzzle.yaml`；fixture `/mnt/d/Projects/playground/mnist_trf/` + `/mnt/d/Projects/playground/target/artifacts/puzzle/target_flat.py`。
+**必读**：SPEC v2 `docs/specs/puzzle-universal-design-draft.md`（§4 search_space schema / §5 catalog / §6 kind 识别 / §9 pz_expand 重构 / §15 迁移表）；v1 设计 `docs/specs/puzzle-design-draft.md`；`workflows/agents/_puzzle_scripts/`（puzzle_common.py Slot + load_catalog / puzzle_blocks.py / candidate_catalog.yaml）。
 
 ---
 

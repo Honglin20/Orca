@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-12] feat(puzzle-u1): 通用契约层迁移——Slot kind 化 + candidate catalog + dispatch 迁移（`50c79c4`）
+
+Phase U1（SPEC v2 §4/§5/§15/§17，闭环 E1/E3/E4/E6/E7/E8/E15/E23）：Slot dataclass `slot_type`→`kind`（开放标签）+ 5 新字段；新增 `candidate_catalog.yaml` + `puzzle_blocks.py`（公开 make_* 工厂库）取代硬编码 registry；`load_catalog`/`functools.partial`/`_wrap` 统一 factory(slot)（E4）；`make_ffn` 修正 E7（intermediate=original_intermediate×ratio）+ E23（activation required）；bld/score/latency/build/mip/expand 全 dispatch 迁移，jsonl `"slot"`→`"kind"`，MIP 算法零改动；依赖环切断（puzzle_blocks 零运行时反向依赖）。code-reviewer 两轮闭环（实现 + 测试覆盖），新增 `tests/test_puzzle_catalog.py`（25 用例，E7 ratio 数学/E23 fail-loud/load_catalog 全分支）。验收：`tars validate` 0/0 + 44 测试全过 + grep slot_type 零业务残留。详见 [release note](docs/releases/2026-08-12-puzzle-u1-contract-migration.md)。
+
 ## [2026-08-12] feat(workflow): puzzle decomposed-NAS workflow + mnist_trf 脚本级 E2E PASS 双 AC（`3a657d7`）
 
 Puzzle decomposed-NAS workflow（Bercovich 2025 范式）的 P1 + P2 逐字实现 `docs/specs/phase-puzzle-impl.md`。**P1**：6 agent.md（pz_expand / pz_build_library / pz_score / pz_select / pz_retrain / pz_report）+ 24 runner scripts（pz_build_library BLD_* 从 ns_run_train 拷贝改名 + pz_retrain RETRAIN_* 从 ns_retrain 拷贝改名）+ 3 verifier body（workflow / memory / project-fidelity，sentinels WF3QP8/MM4ZR6/PF8LK3）+ workflow-checklists。**P2**：9 预写确定性算法脚本（`_puzzle_scripts/`：puzzle_common / expand_model / bld / score / latency_table / mip_select[pulp grouped-knapsack] / build_selected / gkd_retrain / gate_report）+ smoke test（5 用例 CPU 全过）。通用：block_map + inputs 参数化，对任意 transformer 族模型都能跑，运行时不让 LLM 生成算法代码。复用库：nas_agent.blocks.* / nas_agent.latency / nas_agent.train.distillation。code-reviewer 闭环：2 Blocker（bld.py 补 bld_complete.pt marker / mip_select 加 --latency-unit + 删双行 stdout）+ 5 Major（agent.md 命令示例对齐脚本真实 argparse）+ 6 Minor 全修。`tars validate` 0 error / 0 warning。**commit 待用户确认**（E2E 通过后统一 commit）。详见 SPEC `docs/specs/phase-puzzle-impl.md` + 设计草稿 `docs/specs/puzzle-design-draft.md`。
