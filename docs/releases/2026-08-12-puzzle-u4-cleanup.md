@@ -81,7 +81,7 @@ SPEC v2 §14 明确 `eval_kind` 保留 `[ask]`（D6：用户必给，enum 三选
 
 ## Commit SHA
 
-（commit 后回填）
+`eee7125`
 
 ## 相关文件（绝对路径）
 
