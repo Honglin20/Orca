@@ -141,7 +141,11 @@ def _build_argparser() -> argparse.ArgumentParser:
         "--block_candidates", default="",
         help="候选块 JSON；空 → 默认集",
     )
-    p.add_argument("--epochs", type=int, default=3)
+    p.add_argument(
+        "--epochs", type=int, default=100,
+        help="BLD 每 variant 蒸馏 epochs。默认 100（target 实证：3 epochs 候选 loss~1 未收敛"
+             "→ student acc 崩；100 epochs 同函数候选 loss 0.02-0.21 忠实模仿，acc 恢复）。",
+    )
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--seed", type=int, default=0)
     return p
