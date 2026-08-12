@@ -13,7 +13,7 @@ baseline（pre_trained.pth，CPU batch-1）：**acc 0.072 / latency 4.616ms / 58
 | AC | 要求 | 结果 | 说明 |
 |---|---|---|---|
 | LAT | ≤ baseline/2 = 2.3ms | ✅ 0.59ms | 搜索空间张开成功，子网可大幅收缩 |
-| ACC | 恶化 ≤ 3% (vs 7.2%) | ❌ 0.16% | **CPU 预算所限**：train+retrain 各 50 step 无法逼近 baseline。非 workflow bug（见 G2） |
+| ACC | 恶化 ≤ 3% (vs 7.2%) | ❌ 0.16% | **CPU 算力硬限**：train+retrain 各 50 step 无法逼近 baseline。追训 supernet 到 300 step（6× 量），val_acc 仅 0.0012→0.0014，loss 在 ~10.14 平台化——决定性证据：InfoNCE(LR 1e-5) 从 scratch 在 CPU 预算内收敛不到 baseline（baseline 本身 ~100-epoch 级）。非 workflow bug（见 G2） |
 | 超网 depth/内部宽度 > baseline | — | ✅ | depth_candidates (2,4,6) max 6>4；num_heads (2,4,6,8) max 8>4；ffn_dim (128,256,512) max 512>256。supernet-evaluator BLOCKER 满足 |
 | 端到端完成 | — | ✅ | 9 节点全过，done:true |
 
