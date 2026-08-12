@@ -1,0 +1,13 @@
+case_id: 01_conv_as_attention
+primary_evaluator: block-map-evaluator
+flat_relpath: flats/conv_attn_flat.py
+expect: FLAG
+expected_severity: MAJOR
+must_mention_one_of:
+- conv
+- attention
+- qk
+- kind
+- softmax
+- scaling
+description: slot L0_attn declared attention but the module source is a Conv1d mixer

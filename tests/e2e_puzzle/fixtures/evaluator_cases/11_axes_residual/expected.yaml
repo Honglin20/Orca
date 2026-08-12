@@ -1,0 +1,10 @@
+case_id: 11_axes_residual
+primary_evaluator: search-space-evaluator
+flat_relpath: flats/clean_flat.py
+expect: FLAG
+expected_severity: MINOR
+must_mention_one_of:
+- axes
+- deprecated
+- removed
+description: slot carries the removed axes field

@@ -46,9 +46,9 @@ path = f"{d}/file.py"                # 禁：f-string 拼接
 
 ## Subagent 调用协议（point-to-file）
 
-本节点调以下子 agent（**全名**，禁简写）：`workflow-verifier`、`memory-verifier`。它们的
-body 存 `{{ subagents_root }}/<name>.md`（render 期 inline 为绝对路径，cwd 无关）。host 无需
-注册——子 agent 自读 body + 执行。
+本节点调以下子 agent（**全名**，禁简写）：`block-map-evaluator`、`search-space-evaluator`、
+`workflow-verifier`、`memory-verifier`。它们的 body 存 `{{ subagents_root }}/<name>.md`
+（render 期 inline 为绝对路径，cwd 无关）。host 无需注册——子 agent 自读 body + 执行。
 
 调用 `<name>`（首轮）：
 `Task(subagent_type=<host 内置通用类型>, prompt="先完整 Read {{ subagents_root }}/<name>.md，严格按其 Procedure 执行本轮任务。本轮 inputs：<具体 inputs>。按 md 规定的格式 return。**report 首行**必须照原样回显你 Read 到的 md frontmatter 里的 sentinel 字段（格式见 md 顶部；不要猜，不要从本 prompt 推——必须来自你 Read 的文件）。")`
@@ -285,7 +285,34 @@ python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/measure_baseline.py" \
 - per-slot identity allclose 失败：father-loaded 模块输出不可复现（non-persistent buffer / runtime
   cache 丢失）。检查 flat 是否漏 register_buffer。fix-loop ≤ 2 次仍失败 → fail loud。
 
-### Step 3: Workflow-Verifier + Memory-Verifier
+### Step 3: Search-Space Evaluators + Workflow-Verifier + Memory-Verifier
+
+#### Step 3.0: Search-Space Evaluators（slot 划分 + schema 审查）
+
+Step 2 跑通后（block_map.json + 回填版 search_space.yaml 都在）才进本步——evaluator 审的是
+最终 search_space + block_map 的 slot 划分与 schema 合规。**evaluator 是只读审查者，不改文件**，
+你按其 findings 自己改 search_space 后重跑。**两个 evaluator 各审各的，不要合并调用**：
+
+1. **按协议调 `block-map-evaluator`**（审 slot path 定位 / I/O shape / identity 入候选 /
+   return_arity 一致 / kind 标签是否被 forward 源码确定性证据支持 / mask-bearing slot 是否选了
+   mask-blind 候选），inputs：
+   - `search_space.yaml`: `$ORCA_ARTIFACTS_DIR/search_space.yaml`
+   - flat model: `$ORCA_ARTIFACTS_DIR/<base>_flat.py`
+   - `manifest.yaml`: `$ORCA_ARTIFACTS_DIR/manifest.yaml`
+   - candidate catalog: `<repo>/workflows/agents/_puzzle_scripts/candidate_catalog.yaml`（绝对路径）
+2. **按协议调 `search-space-evaluator`**（审 slot 必填字段 / id+path 唯一 / kind 合法 /
+   candidate 注册有效 / user factory 可解析 / eval_kind 与输出 shape 自洽 / 无 `axes` 残留），
+   inputs 同上（不读 flat 源码，但要 catalog + manifest）。
+3. **Handle evaluator response（两个独立 fix-loop）：**
+   - 返 `LGTM` → 该 evaluator 通过。
+   - 返 bullet 列表 → 读每条 `[BLOCKER]`/`[MAJOR]`/`[MINOR]` finding 的 `[Fix]`，改
+     `search_space.yaml`（flat/manifest 也按 finding 改）。`[BLOCKER]`/`[MAJOR]` 必须修；`[MINOR]`
+     尽量修。改后若动了 slot 的 path/kind/layer_idx 等结构性字段 → **重跑 Step 2 measure_baseline**
+     （重新 trace shape + 落 block_map）；否则直接重写 search_space。**按协议续轮**再调对应
+     evaluator，首轮 prompt 末尾追加 `<上一轮完整 report 原文> + Fixed:<简述改了哪些 finding>`。
+     Repeat 直到两个 evaluator 都 `LGTM`（fix-loop ≤ 3 轮；超限 fail loud）。
+
+#### Step 3.1: Workflow-Verifier
 
 1. **按协议调 `workflow-verifier`**，inputs：
    - **Workflow**: `$ORCA_AGENT_RESOURCES/references/workflow-checklists/puzzle.yaml.md`
@@ -296,9 +323,12 @@ python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/measure_baseline.py" \
    - `unresolved` → 读每个 unresolved item，对 artifact 施 suggested fix，重验，
      **按协议（point-to-file verifier loop 续轮）**再调 `workflow-verifier`，首轮 prompt 末尾
      追加 `Fixed: [ids]`。Repeat 直到 `all-pass`。
-3. **按协议调 `memory-verifier`**，inputs `$ORCA_ARTIFACTS_DIR` + `{{ inputs.project_root }}`。
-   读 report；若任何更正暴露你产物的不一致 → 修产物（measure_baseline 产的 block_map /
-   baseline_metrics 禁改；flat/search_space/manifest/project_manifest.md 可改）。
+
+#### Step 3.2: Memory-Verifier
+
+**按协议调 `memory-verifier`**，inputs `$ORCA_ARTIFACTS_DIR` + `{{ inputs.project_root }}`。
+读 report；若任何更正暴露你产物的不一致 → 修产物（measure_baseline 产的 block_map /
+baseline_metrics 禁改；flat/search_space/manifest/project_manifest.md 可改）。
 
 ## Validation
 

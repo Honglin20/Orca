@@ -1,0 +1,11 @@
+case_id: 06_mask_blind_on_mask_slot
+primary_evaluator: block-map-evaluator
+flat_relpath: flats/clean_flat.py
+expect: FLAG
+expected_severity: MAJOR
+must_mention_one_of:
+- mask
+- fnet
+- blind
+- mask_aware
+description: mask_load_bearing=true slot offers fnet (mask_aware=false)

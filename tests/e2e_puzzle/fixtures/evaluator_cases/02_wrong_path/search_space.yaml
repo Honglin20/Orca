@@ -1,0 +1,35 @@
+slots:
+- id: L0_attn
+  path: blocks.0.nonexistent
+  kind: attention
+  layer_idx: 0
+  source_class: TinyAttention
+  forward_arity: single
+  return_arity: single
+  mask_load_bearing: false
+  num_heads: 4
+  head_dim: 8
+  in_dim: -1
+  out_dim: -1
+  kind_evidence: 'forward: matmul(Q, K^T) * scale + softmax over scores'
+- id: L0_ffn
+  path: blocks.0.ffn
+  kind: ffn
+  layer_idx: 0
+  source_class: FeedForward
+  forward_arity: single
+  return_arity: single
+  original_intermediate: 64
+  activation: gelu
+  ffn_struct: standard
+  in_dim: -1
+  out_dim: -1
+  kind_evidence: 'forward: Linear(fc1) -> GELU -> Linear(fc2)'
+candidates:
+  attention:
+  - identity
+  - vanilla
+  - fnet
+  ffn:
+  - identity
+  - ffn_50

@@ -1,0 +1,12 @@
+case_id: 10_unknown_candidate
+primary_evaluator: search-space-evaluator
+flat_relpath: flats/clean_flat.py
+expect: FLAG
+expected_severity: BLOCKER
+must_mention_one_of:
+- bogus
+- candidate
+- register
+- catalog
+- unknown
+description: candidates.attention references bogus_block which is not in the catalog

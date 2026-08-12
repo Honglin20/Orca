@@ -1,0 +1,16 @@
+case_id: 05_eval_kind_mislabel
+primary_evaluator: search-space-evaluator
+flat_relpath: flats/embedding_flat.py
+expect: FLAG
+expected_severity: MAJOR
+must_mention_one_of:
+- eval_kind
+- classification
+- embedding
+- logits
+- hidden
+- metric
+- k-nn
+- paradigm
+description: manifest eval_kind=classification but loss=InfoNCE, metric=k-NN accuracy,
+  output=[2,16] hidden -- embedding paradigm

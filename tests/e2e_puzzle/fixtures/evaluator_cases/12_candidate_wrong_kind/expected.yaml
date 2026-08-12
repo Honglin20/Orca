@@ -1,0 +1,12 @@
+case_id: 12_candidate_wrong_kind
+primary_evaluator: block-map-evaluator
+flat_relpath: flats/clean_flat.py
+expect: FLAG
+expected_severity: MAJOR
+must_mention_one_of:
+- ffn_50
+- candidate
+- applic
+- kind
+- attention
+description: candidates.attention lists ffn_50 (an ffn-only candidate)
