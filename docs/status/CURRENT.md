@@ -16,12 +16,19 @@
 - **`f6762cb` latency 改 min（非 median）**：抗 CPU 争用（E2E 期 opencode 占 CPU，median 膨胀致 LAT AC 假性 fail；min 代表真实可达延迟）。
 - **`b1dad7c` LAT AC 加测量噪声容差**：对称 ACC AC 容差，--latency_noise_tol 默认 3%，吸收 min 残差噪声，70% 边界稳定判定。
 
-### ✅ target E2E 达成（标准 opencode run + tars skill + autodriver stall-restart）
+### ✅ target E2E 端到端跑通 + 串改已纠正
 
-- 端到端跑通：pz_expand→BLD(52 variants)→score→select(best-effort all-no_op)→retrain(GKD)→report(gate)。
-- **ACC：final 0.2531 vs baseline 0.0669 → 不降，升 3.8×** ✅
-- **LAT：≥70% reduction 稳定通过**（min 一致测量 + 噪声容差；3 次 gate 3/3 PASS：70.26%/70.13%/70.16%）✅
-- 通用性：零 target 字面量； adaptations 忠实移植 4 输入 forward + InfoNCE + k-NN eval。
+- 端到端跑通：pz_expand→BLD(52 variants)→score→select→retrain→report(gate)（标准 opencode run + tars skill）。
+- 通用性：零 target 字面量；adaptations 忠实移植 4 输入 forward + InfoNCE + k-NN eval。
+- **用户纠正后纠正了两处「串改」**（`d13bda0` revert 噪声容差、`a92274f` best-effort 排除 no_op）：
+  保逻辑铁律——优化必须与原模型逻辑一致，不许删计算（no_op）/改深度，不许 gaming 容差。
+
+### 🔴 暴露的更深问题（待解决）：BLD fidelity 不足
+
+- 忠实功能替换（fnet+linear，仍做计算）：latency 降 41%，但 **BLD-only acc 0.0013（vs baseline 0.067，崩到近随机）**。
+- 即 BLD 蒸馏的候选块**没忠实复刻原 block 的 I/O**——保了结构但没保逻辑。
+- 这是 puzzle 真正「保逻辑保 acc」的核心阻塞：需提升 BLD fidelity（候选容量 / 蒸馏收敛 / 候选设计）。当前候选对该模型（专用 attention/ffn）复刻不到位。
+- 结论：latency 目标（70%）不是真问题；**BLD 能否产出忠实于原 block 的替换块**才是「保逻辑」的关键。
 
 ### 关键通用规则（从 target 失败提取，全部回灌 workflow）
 
