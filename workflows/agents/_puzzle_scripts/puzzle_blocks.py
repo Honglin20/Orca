@@ -49,7 +49,8 @@ def resolve_activation(name: str) -> type[nn.Module]:
     return cls
 
 
-# 公开反向映射：激活类 → 名称（expand_model 的 activation 推断消费，DRY 单一真相源）。
+# 公开反向映射：激活类 → 名称（puzzle activation 命名的 DRY 单一真相源；
+# test_puzzle_catalog 验证其与 _ACTIVATION_MAP 对偶）。
 ACTIVATION_CLASS_TO_NAME: dict[type, str] = {cls: name for name, cls in _ACTIVATION_MAP.items()}
 
 

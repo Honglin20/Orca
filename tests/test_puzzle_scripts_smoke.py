@@ -1,8 +1,12 @@
-"""test_puzzle_scripts_smoke.py —— Puzzle P2.10 端到端链路 smoke test。
+"""test_puzzle_scripts_smoke.py —— Puzzle 端到端链路 smoke test。
 
 不接真 fixture——在测试文件内定义最小合成 transformer（2 层 SimpleAttention +
-SimpleFFN），跑全链：expand→bld(2 variant, 1 epoch)→score→mip→build→gkd(1
-epoch, CPU)→gate，断言每步产物文件存在 + AC 字段类型正确。
+SimpleFFN），跑全链：measure_baseline（v1 expand_model 已退役）→bld(2 variant, 1
+epoch)→score→mip→build→gkd(1 epoch, CPU)→gate，断言每步产物文件存在 + AC 字段类型正确。
+
+`pz_expand` 生产链路 = LLM 自适应 flatten + 写 search_space.yaml + 跑 measure_baseline.py。
+本测试以合成 flat 文件 + 合成 search_space.yaml 模拟 LLM 产物，再调 measure_baseline.py
+完成确定性基线测量，下游 bld/score/mip/build/gkd/gate 跑真实预写脚本。
 
 用 tempfile.TemporaryDirectory 作 output_dir。torch CPU 可用。
 """
@@ -106,6 +110,7 @@ _TINY_MODEL_PY = textwrap.dedent(
     def evaluate(model):
         model.eval()
         with torch.no_grad():
+            torch.manual_seed(0)
             x = torch.randn(*DUMMY_INPUT["shape"])
             logits = model(x)
             # proxy acc: mean max-softmax confidence
@@ -138,7 +143,7 @@ def _parse_result_json(stdout: str) -> dict:
     """从 stdout 解析结果 JSON。
 
     支持两种格式：
-    1. 末行 ``RESULT_JSON: {...}`` （expand/bld/score/build/gkd 等有 KEY:value 遥测的脚本）
+    1. 末行 ``RESULT_JSON: {...}`` （measure_baseline/bld/score/build/gkd 等有 KEY:value 遥测的脚本）
     2. 单行 JSON（mip_select/gate_report 等 zero-LLM 确定性脚本的直接转发 stdout）
     """
     lines = [ln for ln in stdout.splitlines() if ln.strip()]
@@ -155,12 +160,92 @@ def _parse_result_json(stdout: str) -> dict:
     raise AssertionError(f"stdout 无法解析 JSON：\n{stdout}")
 
 
+def _search_space_payload(num_blocks: int = 2) -> dict:
+    """合成 search_space dict（模拟 pz_expand LLM 产物；in_dim/out_dim 留 -1 待 trace）。"""
+    slots = []
+    for i in range(num_blocks):
+        slots.append({
+            "id": f"L{i}_attention", "path": f"blocks.{i}.attn", "kind": "attention",
+            "layer_idx": i, "source_class": "SimpleAttention",
+            "forward_arity": "single", "return_arity": "single",
+            "mask_load_bearing": False, "num_heads": 4, "head_dim": 8,
+            "in_dim": -1, "out_dim": -1,
+            "kind_evidence": "forward 含 matmul(Q,K^T) 缩放 + softmax",
+        })
+        slots.append({
+            "id": f"L{i}_ffn", "path": f"blocks.{i}.ffn", "kind": "ffn",
+            "layer_idx": i, "source_class": "FeedForward",
+            "forward_arity": "single", "return_arity": "single",
+            "mask_load_bearing": False,
+            "original_intermediate": 64, "activation": "gelu", "ffn_struct": "standard",
+            "in_dim": -1, "out_dim": -1,
+            "kind_evidence": "Linear(fc1)->GELU->Linear(fc2) standard 结构",
+        })
+    return {
+        "slots": slots,
+        "candidates": {"attention": ["identity", "fnet", "no_op"],
+                       "ffn": ["identity", "ffn_50", "no_op"]},
+    }
+
+
+def _bootstrap_measure_baseline(
+    tmp_path: Path, output_dir: Path, num_blocks: int = 2
+) -> dict[str, Path]:
+    """模拟 pz_expand LLM 产物 + 跑 measure_baseline.py 完成基线测量。
+
+    生产路径下 pz_expand agent（LLM）产 ``<base>_flat.py`` + ``search_space.yaml``，
+    再调预写脚本 ``measure_baseline.py`` 做确定性基线测量。本 helper 用合成 flat 文件
+    + 合成 search_space.yaml 替代 LLM 产物，调同一脚本完成 setup，让下游 bld/score/...
+    能跑真实预写脚本。
+
+    返回路径 dict：flat / block_map / baseline_metrics / search_space / father_state。
+    """
+    import importlib.util
+    import torch  # type: ignore
+    import yaml  # type: ignore
+
+    flat_path = output_dir / "model_flat.py"
+    flat_path.write_text(_TINY_MODEL_PY, encoding="utf-8")
+
+    # 预训练 father ckpt：build 模型 → save state_dict（strict-load 必双零）
+    sys.path.insert(0, str(output_dir))
+    spec = importlib.util.spec_from_file_location("_tiny_flat_bootstrap", flat_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    father_ckpt = tmp_path / "father.pth"
+    torch.save(mod.build_model().state_dict(), father_ckpt)
+
+    ss_path = output_dir / "search_space.yaml"
+    with open(ss_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(_search_space_payload(num_blocks), f, allow_unicode=True, sort_keys=False)
+
+    rc, out, err = _run("measure_baseline.py", [
+        "--flat_path", str(flat_path),
+        "--build_fn", "build_model",
+        "--build_cfg", "",
+        "--father_ckpt", str(father_ckpt),
+        "--eval_fn", "evaluate",
+        "--eval_kind", "classification",
+        "--search_space_path", str(ss_path),
+        "--latency_unit", "ms",
+        "--output_dir", str(output_dir),
+        "--seed", "0",
+    ])
+    result = _parse_result_json(out)
+    assert result["model_type_supported"] is True, (
+        f"measure_baseline bootstrap 失败：{result}\nSTDERR:\n{err}"
+    )
+    return {
+        "flat": flat_path,
+        "block_map": output_dir / "block_map.json",
+        "baseline_metrics": output_dir / "baseline_metrics.json",
+        "search_space": output_dir / "search_space.yaml",
+        "father_state": output_dir / "father_state_dict.pt",
+    }
+
+
 @pytest.mark.slow
 def test_puzzle_full_chain_cpu(tmp_path: Path) -> None:
-    # 写 tiny model 作 model_path
-    model_path = tmp_path / "model.py"
-    model_path.write_text(_TINY_MODEL_PY, encoding="utf-8")
-
     output_dir = tmp_path / "out"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -173,24 +258,12 @@ def test_puzzle_full_chain_cpu(tmp_path: Path) -> None:
     build_args = ["--build_fn", "build_model", "--build_cfg", ""]
     eval_args = ["--eval_fn", "evaluate", "--eval_kind", "classification"]
 
-    # 1. expand
-    rc, out, _ = _run("expand_model.py", [
-        "--project_root", str(tmp_path),
-        "--model_path", str(model_path),
-        *build_args,
-        *eval_args,
-        "--latency_unit", "ms",
-        "--output_dir", str(output_dir),
-        "--seed", "0",
-    ])
-    result = _parse_result_json(out)
-    assert result["model_type_supported"] is True
-    block_map_path = output_dir / "block_map.json"
-    flat_model_path = output_dir / "model_flat.py"
-    baseline_metrics_path = output_dir / "baseline_metrics.json"
-    assert block_map_path.is_file()
-    assert flat_model_path.is_file()
-    assert baseline_metrics_path.is_file()
+    # 1. measure_baseline（v1 expand_model.py 已退役；pz_expand LLM 产 flat + search_space，
+    #    预写脚本 measure_baseline.py 跑确定性基线测量 + 4 道 smoke）
+    paths = _bootstrap_measure_baseline(tmp_path, output_dir, num_blocks=2)
+    block_map_path = paths["block_map"]
+    flat_model_path = paths["flat"]
+    baseline_metrics_path = paths["baseline_metrics"]
     with open(block_map_path) as f:
         bm = json.load(f)
     assert len(bm["slots"]) >= 4, f"期望至少 4 个 slot（2 layer × 2 type），得到 {len(bm['slots'])}"
@@ -202,7 +275,7 @@ def test_puzzle_full_chain_cpu(tmp_path: Path) -> None:
         "--flat_model", str(flat_model_path),
         *build_args,
         "--block_candidates", block_candidates,
-        "--calib_loader_fn", f"{model_path}::build_calib_loader",
+        "--calib_loader_fn", f"{flat_model_path}::build_calib_loader",
         "--epochs", "1",
         "--output_dir", str(output_dir),
     ])
@@ -281,7 +354,9 @@ def test_puzzle_full_chain_cpu(tmp_path: Path) -> None:
     progress = (output_dir / "runs" / "retrain" / "progress.jsonl").read_text().splitlines()
     assert len(progress) >= 1
 
-    # 8. gate_report
+    # 8. gate_report（D5 baseline-dependent ACC AC：脚本 _acc_pass 无条件按 baseline
+    #    高/低自动选阈值；--accuracy_tolerance 是 dead 兼容入参（argparse 消费、main body
+    #    不读），launcher 不传以保持契约清晰）
     rc, out, _ = _run("gate_report.py", [
         "--final_model", str(final_model_path),
         "--baseline_metrics", str(baseline_metrics_path),
@@ -291,7 +366,6 @@ def test_puzzle_full_chain_cpu(tmp_path: Path) -> None:
         "--block_library", str(block_library_dir),
         *eval_args,
         "--latency_unit", "ms",
-        "--accuracy_tolerance", "0.5",
         "--output_dir", str(output_dir),
     ])
     gate_result_path = output_dir / "gate_result.json"
@@ -311,64 +385,10 @@ def test_puzzle_full_chain_cpu(tmp_path: Path) -> None:
     assert isinstance(gate["report_path"], str) and gate["report_path"]
 
 
-# ── 辅助：构造无 attention/ffn 的纯 CNN 模型（测 expand_model fail-loud 路径）────
-
-_NO_SLOT_MODEL_PY = textwrap.dedent(
-    """
-    import torch
-    import torch.nn as nn
-
-    DUMMY_INPUT = {"shape": [2, 1, 28, 28], "dtype": "float32"}
-
-    class TinyCNN(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.conv1 = nn.Conv2d(1, 8, 3)
-            self.conv2 = nn.Conv2d(8, 16, 3)
-            self.fc = nn.Linear(16 * 24 * 24, 10)
-
-        def forward(self, x):
-            x = torch.relu(self.conv1(x))
-            x = torch.relu(self.conv2(x))
-            x = x.flatten(1)
-            return self.fc(x)
-
-    def build_model():
-        return TinyCNN()
-
-    def evaluate(model):
-        model.eval()
-        with torch.no_grad():
-            x = torch.randn(*DUMMY_INPUT["shape"])
-            return float(model(x).softmax(-1).max().item())
-    """
-)
-
-
-def test_expand_no_slot_exit_2(tmp_path: Path) -> None:
-    """无 attention/ffn slot 的模型 → expand_model exit 2 + model_type_supported=false。"""
-    model_path = tmp_path / "cnn.py"
-    model_path.write_text(_NO_SLOT_MODEL_PY, encoding="utf-8")
-    output_dir = tmp_path / "out"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    cmd = [
-        sys.executable, str(_SCRIPTS_DIR / "expand_model.py"),
-        "--project_root", str(tmp_path),
-        "--model_path", str(model_path),
-        "--build_fn", "build_model",
-        "--eval_fn", "evaluate",
-        "--eval_kind", "classification",
-        "--output_dir", str(output_dir),
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    assert proc.returncode == 2, (
-        f"无 slot 模型应 exit 2，得 rc={proc.returncode}\nSTDERR:\n{proc.stderr}"
-    )
-    result = _parse_result_json(proc.stdout)
-    assert result["model_type_supported"] is False
-    assert result["baseline_acc"] == 0.0
-    assert result["error"], "应给出 fail loud 根因"
+# ── MIP infeasible 路径（v1 expand_model fail-loud 路径已退役；empty-slots
+#    输入校验由 test_puzzle_measure_baseline.py::test_measure_baseline_empty_slots_exit_2
+#    覆盖；旧的「确定性 slot 识别算法拒绝 CNN」intent 已架构性迁到 LLM pz_expand +
+#    evaluator 审查层，其召回由 test_puzzle_evaluator_recall.py 测）。
 
 
 def test_mip_select_infeasible(tmp_path: Path) -> None:
@@ -419,21 +439,13 @@ def test_score_runs_and_identity_passthrough_score_is_zero(tmp_path: Path) -> No
     API 做前后哈希对比——本测试降级为 rc==0 + identity score==0 校验（间接证明 finally
     还原没崩）。完整的 state_dict 不变量测试留待 score.py 暴露内部 API 后补。
     """
-    model_path = tmp_path / "model.py"
-    model_path.write_text(_TINY_MODEL_PY, encoding="utf-8")
     output_dir = tmp_path / "out"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 复用全链的前两步（expand + bld）
-    _run("expand_model.py", [
-        "--project_root", str(tmp_path),
-        "--model_path", str(model_path),
-        "--build_fn", "build_model",
-        "--eval_fn", "evaluate",
-        "--eval_kind", "classification",
-        "--output_dir", str(output_dir),
-    ])
-    block_map_path = output_dir / "block_map.json"
-    flat_model_path = output_dir / "model_flat.py"
+    # 复用全链的前两步（measure_baseline + bld）
+    paths = _bootstrap_measure_baseline(tmp_path, output_dir, num_blocks=2)
+    block_map_path = paths["block_map"]
+    flat_model_path = paths["flat"]
     _run("bld.py", [
         "--block_map", str(block_map_path),
         "--flat_model", str(flat_model_path),
@@ -441,7 +453,7 @@ def test_score_runs_and_identity_passthrough_score_is_zero(tmp_path: Path) -> No
         "--block_candidates",
         json.dumps({"attention": ["identity", "fnet"],
                     "ffn": ["identity", "ffn_50"]}),
-        "--calib_loader_fn", f"{model_path}::build_calib_loader",
+        "--calib_loader_fn", f"{flat_model_path}::build_calib_loader",
         "--epochs", "1",
         "--output_dir", str(output_dir),
     ])

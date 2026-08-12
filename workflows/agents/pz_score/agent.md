@@ -102,11 +102,11 @@ fi
 python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/score.py" \
   --block_map "$ORCA_ARTIFACTS_DIR/block_map.json" \
   --flat_model "$ORCA_ARTIFACTS_DIR/<base>_flat.py" \
-  --build_fn "{{ inputs.build_fn }}" \
+  --build_fn "<manifest.yaml 的 model.build_entry，agent 读 manifest 桥接>" \
   --build_cfg "{{ inputs.build_cfg }}" \
   --block_library "$ORCA_ARTIFACTS_DIR/block_library" \
   --father_state "$ORCA_ARTIFACTS_DIR/father_state_dict.pt" \
-  --eval_fn "{{ inputs.eval_fn }}" \
+  --eval_fn "<manifest.yaml 的 training_and_evaluation.evaluation_entry，agent 读 manifest 桥接>" \
   --eval_kind "{{ inputs.eval_kind }}" \
   --output_dir "$ORCA_ARTIFACTS_DIR" \
   --seed {{ inputs.seed }}
@@ -114,7 +114,7 @@ python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/score.py" \
 python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/latency_table.py" \
   --block_map "$ORCA_ARTIFACTS_DIR/block_map.json" \
   --flat_model "$ORCA_ARTIFACTS_DIR/<base>_flat.py" \
-  --build_fn "{{ inputs.build_fn }}" \
+  --build_fn "<manifest.yaml 的 model.build_entry，agent 读 manifest 桥接>" \
   --block_library "$ORCA_ARTIFACTS_DIR/block_library" \
   --father_state "$ORCA_ARTIFACTS_DIR/father_state_dict.pt" \
   --latency_unit "{{ inputs.latency_unit }}" \

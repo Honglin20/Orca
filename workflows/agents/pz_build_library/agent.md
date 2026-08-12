@@ -177,7 +177,7 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
   python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/bld.py" \
     --block_map "$ORCA_ARTIFACTS_DIR/block_map.json" \
     --flat_model "$ORCA_ARTIFACTS_DIR/<base_name>_flat.py" \
-    --build_fn "{{ inputs.build_fn }}" \
+    --build_fn "<manifest.yaml 的 model.build_entry，agent 读 manifest 桥接>" \
     --build_cfg "{{ inputs.build_cfg }}" \
     --father_state "$ORCA_ARTIFACTS_DIR/father_state_dict.pt" \
     --calib_loader_fn "<manifest.yaml 的 data_and_environment.data_loader_entry，"

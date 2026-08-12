@@ -1,5 +1,5 @@
 ---
-description: Puzzle AC gate agent（folder-agent，确定性，零 LLM 判断）。运行预写 _puzzle_scripts/gate_report.py 恰好一次——读 final_model + baseline_metrics + eval_fn + latency_unit，测 final acc + latency，断言 |acc_delta| ≤ accuracy_tolerance（默认 0.5）且 latency_ratio ≤ 0.5（时延降一半）。写 final_report.md + gate_result.json + 推 baseline-vs-optimized metrics_bar（label puzzle/report）。stdout 单行 JSON 作唯一最终回复。AC 任一不达标 → gate_status=fail → terminate_gate_failed。不许改脚本/不许复述上游。
+description: Puzzle AC gate agent（folder-agent，确定性，零 LLM 判断）。运行预写 _puzzle_scripts/gate_report.py 恰好一次——读 final_model + baseline_metrics + eval_fn + latency_unit，测 final acc + latency，断言 ACC AC（baseline-dependent：baseline_acc≥0.5 用绝对 0.5；<0.5 用相对 10%）且 latency_ratio ≤ 0.5（时延降一半）。写 final_report.md + gate_result.json + 推 baseline-vs-optimized metrics_bar（label puzzle/report）。stdout 单行 JSON 作唯一最终回复。AC 任一不达标 → gate_status=fail → terminate_gate_failed。不许改脚本/不许复述上游。
 tools: [bash]
 ---
 # pz_report
@@ -44,27 +44,30 @@ python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/gate_report.py" \
   --final_model "$ORCA_ARTIFACTS_DIR/runs/retrain/final_model.pt" \
   --baseline_metrics "$ORCA_ARTIFACTS_DIR/baseline_metrics.json" \
   --flat_model "$ORCA_ARTIFACTS_DIR/<base_name>_flat.py" \
-  --build_fn "{{ inputs.build_fn }}" \
+  --build_fn "<manifest.yaml 的 model.build_entry，agent 读 manifest 桥接>" \
   --build_cfg "{{ inputs.build_cfg }}" \
   --block_map "$ORCA_ARTIFACTS_DIR/block_map.json" \
   --block_library "$ORCA_ARTIFACTS_DIR/block_library" \
-  --eval_fn "{{ inputs.eval_fn }}" \
+  --eval_fn "<manifest.yaml 的 training_and_evaluation.evaluation_entry，agent 读 manifest 桥接>" \
   --eval_kind "{{ inputs.eval_kind }}" \
   --latency_unit "{{ inputs.latency_unit }}" \
   --latency_script_path "{{ inputs.latency_script_path }}" \
-  --accuracy_tolerance "{{ inputs.accuracy_tolerance }}" \
   --output_dir "$ORCA_ARTIFACTS_DIR"
 ```
 
 脚本契约（预写，pz_report 不验证）：
-- 入参：如上。`--accuracy_tolerance` 默认 0.5（ACC AC 容差）；`--latency_script_path` 与 pz_expand
-  同源（保证 latency 测量一致）。
+- 入参：如上。`--build_fn` / `--eval_fn` 由你（agent）读 `$ORCA_ARTIFACTS_DIR/manifest.yaml` 桥接
+  （`model.build_entry` / `training_and_evaluation.evaluation_entry`）——manifest 缺字段 → fail loud
+  （不进 gate）。ACC AC 由脚本内置 D5 baseline-dependent 容差自动判（不再接 `--accuracy_tolerance`）；
+  `--latency_script_path` 与 pz_expand 同源（保证 latency 测量一致）。
 - 行为：
   1. 加载 final_model + 调 eval_fn 测 final acc + measure_module_latency / latency_script_path 测
          final latency。
   2. 读 baseline_metrics.json 取 baseline acc + latency。
-  3. 断言 AC：
-     - **ACC**：`|final_acc - baseline_acc| ≤ accuracy_tolerance`（默认 0.5）。
+  3. 断言 AC（baseline-dependent 容差）：
+     - **ACC**：`baseline_acc ≥ 0.5` 用绝对容差 0.5；`baseline_acc < 0.5` 用相对 10%
+       （`final_acc ≥ baseline_acc * 0.9`）。脚本 `_acc_pass` 自动选阈值，输出
+       `acc_tolerance_kind` + `acc_threshold` 字段供审计。
      - **LAT**：`final_latency ≤ baseline_latency / 2`（即 `latency_ratio ≤ 0.5`，时延降一半）。
   4. 写 `final_report.md`（人读）+ `gate_result.json`（机器读，含 acc_delta / latency_ratio 字段）。
   5. 推 baseline-vs-optimized metrics_bar（label `puzzle/report`，ACC + LAT 双指标对比；fail-soft，

@@ -19,24 +19,9 @@ inputs:
     type: string
     description: "[ask] 目标模型入口文件路径(相对 project_root 或绝对),含 build_model(**cfg) 工厂或可实例化的 nn.Module。pz_expand flatten 此文件生成 <base>_flat.py 并枚举可替换 sub-block。项目内唯一锚点,必须用户给"
     required: true
-  pretrained_ckpt:
-    type: string
-    description: "[advanced][DEPRECATED U3] 预训练父权重 .pt 路径——pz_expand U2a 起从源码发现并写进 manifest.yaml + 落 father_state_dict.pt；下游全部读 father_state_dict.pt。本 input 仅留作 v1 expand_model.py 路径 + 校验锚（U4 E2E 重跑后退役）。默认空串；新链路（puzzle-universal）禁依赖。"
-    required: false
-    default: ""
-  build_fn:
-    type: string
-    description: "[advanced][DEPRECATED U3] model_path 内实例化函数名——pz_expand U2a 起从源码发现 build_entry 写进 manifest.yaml；下游 agent 读 manifest 桥接（pz_build_library/pz_retrain 不再消费本 input）。留作 v1 expand_model.py 路径 + 测试兼容，U4 重跑后退役。"
-    required: false
-    default: "build_model"
   build_cfg:
     type: string
     description: "[advanced] 传给 build_fn 的 JSON kwargs(如 '{\"num_blocks\":4,\"embed_dim\":64}');空则零参调用"
-    required: false
-    default: ""
-  eval_fn:
-    type: string
-    description: "[advanced][DEPRECATED U3] project_root 内评估函数名——pz_expand U2a 起从源码发现 evaluation_entry 写进 manifest.yaml；下游 agent（pz_retrain / pz_report）读 manifest 桥接。留作 v1 expand_model.py 路径 + 测试兼容，U4 重跑后退役。"
     required: false
     default: ""
   eval_kind:
@@ -44,11 +29,6 @@ inputs:
     enum: [classification, embedding, regression]
     description: "[ask] 评估范式:classification=top-1 acc(higher-better,打分用 KL logits);embedding=度量学习如 InfoNCE/k-NN acc(higher-better,打分用 hidden cosine distance);regression=loss(lower-better)。决定 pz_score 打分指标 + pz_report ACC 方向。必须用户给"
     required: true
-  train_loader_fn:
-    type: string
-    description: "[advanced][DEPRECATED U3] 训练数据 loader 的 path::func——pz_expand U2a 起从源码发现 data_loader_entry 写进 manifest.yaml；pz_retrain agent 读 manifest 桥接（不再消费本 input）。留作 v1 路径 + 测试兼容，U4 重跑后退役。"
-    required: false
-    default: ""
   target_latency:
     type: number
     description: "[ask] MIP latency 预算(单位由 latency_unit 决定,默认 ms)。pz_select 调 mip_select.py 下传 --target-latency:在 latency ≤ target 的可行解里 max-Σscore。为满足 LAT AC(时延降一半)应设为 ≤ baseline_latency/2;pz_report 另独立断言 latency_opt ≤ baseline/2。必须用户给(NAS 无目标 = 瞎搜)"
@@ -69,11 +49,6 @@ inputs:
     description: "[advanced] 候选块配置 JSON。默认集:attention={identity,random_synthesizer,relu_attention,fnet,softs_star,vanilla};ffn={identity,ffn_75,ffn_50,linear,no_op}。可覆盖如 '{\"attention\":[\"identity\",\"fnet\",\"random_synthesizer\"],\"ffn\":[\"identity\",\"ffn_50\",\"no_op\"]}'"
     required: false
     default: ""
-  accuracy_tolerance:
-    type: number
-    description: "[advanced][DEPRECATED U3] 旧 ACC 绝对容差——U3 D5 改为 baseline-dependent（acc_base≥0.5 用绝对 0.5；<0.5 用相对 10%）。gate_report 仍接此 arg 但仅作兼容，实际 AC 由 D5 自动判。U4 重跑后退役。"
-    required: false
-    default: 0.5
   seed:
     type: int
     description: "[default] 复现性种子(默认 0)。全 workflow 必填(contract §6 Tier A);agent.md 经 {{ inputs.seed }} 下传到 BLD/GKD 脚本 --seed,deterministic 路径全固定此 seed"
@@ -268,9 +243,9 @@ nodes:
   # ═══════════════════════════════════════════════════════════════════════════
   # Agent 6: pz_report(确定性 Bash gate,zero-LLM)
   #   测 final_model 的 acc + latency,对照 baseline_metrics → 断言
-  #   |acc_opt - acc_base| ≤ accuracy_tolerance(默认 0.5)且 latency_opt ≤ baseline/2。
-  #   写 final_report.md + gate_result.json,推 baseline-vs-optimized metrics_bar。
-  #   AC 任一不达标 → select_reason 映射 terminate_gate_failed。
+  #   ACC AC(baseline-dependent 容差:baseline_acc≥0.5 用绝对 0.5;<0.5 用相对 10%)
+  #   且 latency_opt ≤ baseline/2。写 final_report.md + gate_result.json,推
+  #   baseline-vs-optimized metrics_bar。AC 任一不达标 → terminate_gate_failed。
   # ═══════════════════════════════════════════════════════════════════════════
   - name: pz_report
     kind: agent
@@ -321,7 +296,7 @@ nodes:
   - name: terminate_gate_failed
     kind: terminate
     status: failed
-    reason: "pz_report AC gate 不达标:精度损失 > accuracy_tolerance 或 时延未降到 baseline 的一半。回看 pz_report.output.gate_reason 与 final_report.md —— 若 acc-miss 考察 GKD 是否充分/候选块质量;若 latency-miss 考察 target_latency 是否 ≤ baseline/2 且 MIP 是否真在预算内选了架构。"
+    reason: "pz_report AC gate 不达标:精度损失超 baseline-dependent 容差(baseline_acc≥0.5 用绝对 0.5;<0.5 用相对 10%)或时延未降到 baseline 的一半。回看 pz_report.output.gate_reason 与 final_report.md —— 若 acc-miss 考察 GKD 是否充分/候选块质量;若 latency-miss 考察 target_latency 是否 ≤ baseline/2 且 MIP 是否真在预算内选了架构。"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # outputs —— 终态(pz_report→$end)映射关键产物供 orchestrator / 下游消费。

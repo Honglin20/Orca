@@ -144,8 +144,8 @@ def _extract_state_dict(ckpt: Any) -> dict[str, torch.Tensor]:
     """从 torch.load 的结果抽取 state_dict，解 wrapper 形态。
 
     形如 ``{state_dict: {...}, ...}`` 的 wrapper（无 blocks./patch_embed. 等模型层键
-    出现在顶层）→ 取内层；否则认为是裸 state_dict 原样返回。与 expand_model.py 的
-    ``# 2a)`` 段逻辑一致（DRY：father 权重加载在 expand/bld/score/build/gkd 共用）。
+    出现在顶层）→ 取内层；否则认为是裸 state_dict 原样返回。father 权重加载在
+    measure_baseline / bld / score / build_selected / gkd / gate 共用此 helper（DRY）。
     """
     if (
         isinstance(ckpt, dict)
