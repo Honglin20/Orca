@@ -244,7 +244,8 @@ def main(argv: list[str] | None = None) -> int:
             with open(args.baseline_metrics, encoding="utf-8") as f:
                 baseline_whole = float(json.load(f)["baseline_latency"])
 
-        # U6 root cause G：删 target-too-aggressive 早警；target 缺省 → reduction 推导软目标。
+        # target_latency 缺省时由 baseline × (1 - latency_reduction_target) 推导软目标
+        # （不再发 target-too-aggressive 早警，LAT AC 由 gate 实测裁决）。
         if args.target_latency is not None:
             target_latency = float(args.target_latency)
         elif baseline_whole is not None:

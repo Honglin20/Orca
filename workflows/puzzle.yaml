@@ -4,8 +4,8 @@ description: "Puzzle decomposed-NAS 全链流水线(Bercovich 2025, ICML 范式)
 entry: pz_expand
 
 # ─────────────────────────────────────────────────────────────────────────────
-# inputs —— 三档标签(contract §6):[ask]=业务决策必填 / [advanced]=罕见
-# override 可选 / [default]=工程默认。seed 全 workflow 必有(contract §6 Tier A 子类)。
+# inputs —— 三档标签:[ask]=业务决策必填 / [advanced]=罕见
+# override 可选 / [default]=工程默认。seed 全 workflow 必有(工程默认,全节点下传)。
 # $ORCA_ARTIFACTS_DIR(in-session 入口注入):project_root 非空绝对路径 →
 # <project_root>/artifacts/puzzle/(project-scoped,跨 run 复用 + 多 wf 隔离);
 # 否则 per-run runs/<run_id>/artifacts/ 回落。
@@ -52,7 +52,7 @@ inputs:
     default: ""
   seed:
     type: int
-    description: "[default] 复现性种子(默认 0)。全 workflow 必填(contract §6 Tier A);agent.md 经 {{ inputs.seed }} 下传到 BLD/GKD 脚本 --seed,deterministic 路径全固定此 seed"
+    description: "[default] 复现性种子(默认 0)。全 workflow 必填(工程默认);agent.md 经 {{ inputs.seed }} 下传到 BLD/GKD 脚本 --seed,deterministic 路径全固定此 seed"
     required: false
     default: 0
 
@@ -298,7 +298,7 @@ nodes:
   - name: terminate_latency_infeasible
     kind: terminate
     status: failed
-    reason: "pz_expand measure_baseline 判 latency 目标结构性不可达(latency_target_feasible=false):block 替换能达到的最大 reduction(max_achievable_reduction = 1 - latency_floor/baseline_latency) < latency_reduction_target。模型本身可替换(model_type_supported=true)、smoke 全绿——只是 block 占比过低(非 block 开销:PositionalEncoding / input-output 投影 / LayerNorm / residual 占 floor 比重过高),puzzle 流水线对此模型即便跑完 BLD/score/select/retrain 也达不到 LAT AC。建议:(1) 降 latency_reduction_target(如 0.7→0.5);或 (2) 该模型 block 占比本身就低,不适合 puzzle 流水线(改用通道剪枝 / 量化等优化其他层)。回看 pz_expand.output.max_achievable_reduction + baseline_metrics.json 的 latency_floor / latency_infeasible_reason 确认数值。"
+    reason: "pz_expand measure_baseline 判 latency 目标结构性不可达(latency_target_feasible=false):block 替换能达到的最大 reduction(max_achievable_reduction = 1 - latency_floor/baseline_latency) < latency_reduction_target。模型本身可替换(model_type_supported=true)、smoke 全绿——只是 block 占比过低(非 block 构件:位置编码 / 输入输出投影 / 归一化 / 残差连接等结构性开销 占 floor 比重过高),puzzle 流水线对此模型即便跑完 BLD/score/select/retrain 也达不到 LAT AC。建议:(1) 降 latency_reduction_target(如 0.7→0.5);或 (2) 该模型 block 占比本身就低,不适合 puzzle 流水线(改用通道剪枝 / 量化等优化其他层)。回看 pz_expand.output.max_achievable_reduction + baseline_metrics.json 的 latency_floor / latency_infeasible_reason 确认数值。"
 
   - name: terminate_select_failed
     kind: terminate

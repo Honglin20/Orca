@@ -143,8 +143,8 @@ def _build_argparser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--epochs", type=int, default=100,
-        help="BLD 每 variant 蒸馏 epochs。默认 100（target 实证：3 epochs 候选 loss~1 未收敛"
-             "→ student acc 崩；100 epochs 同函数候选 loss 0.02-0.21 忠实模仿，acc 恢复）。",
+        help="BLD 每 variant 蒸馏 epochs。默认 100（欠蒸馏会让候选块不收敛 → 替换后 acc 崩；"
+             "需按项目训练量级蒸馏，agent 据此参数 + manifest.training.epochs 设定）。",
     )
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--seed", type=int, default=0)

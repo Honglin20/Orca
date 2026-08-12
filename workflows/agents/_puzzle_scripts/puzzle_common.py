@@ -604,8 +604,8 @@ class _FloorZeroModule(nn.Module):
     """Latency-floor 探测块：forward 返回与原 slot output 同 shape/dtype 的零张量。
 
     用途：``measure_block_zero_floor_latency`` 把每个 slot 临时换成这种零输出块，
-    测「全部 block 置零」的整模 latency——block 替换能达到的物理地板（非 block 开销
-    全保留：PositionalEncoding / 投影 / LayerNorm / residual）。
+    测「全部 block 置零」的整模 latency——block 替换能达到的物理地板（非 block 构件
+    全保留：位置编码 / 输入输出投影 / 归一化 / 残差等结构性开销）。
 
     通用性铁律：不假设 slot 类（attention/ffn/conv/moe/custom 均可），不假设 in_dim
     ==out_dim（非方 slot 也合法）。shape/dtype 由一次真实 forward 捕获（``out_shape_tail``
