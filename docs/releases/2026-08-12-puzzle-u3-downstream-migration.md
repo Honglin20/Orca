@@ -83,7 +83,7 @@ SPEC §12.1 D5 内部矛盾：formula `δ = max(0.5, 0.1·acc_base)` 与示例�
 
 ## Commit SHAs
 
-（commit 后回填）
+- `6987418` —— feat(puzzle-u3): 下游脚本迁移 + 算法增强（E14/E6/E8/§16.4/E19/E24/D5/E12/DRY）
 
 ## 不动（任务 9 清理 phase 做）
 

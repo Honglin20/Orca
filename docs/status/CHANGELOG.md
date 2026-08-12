@@ -5,7 +5,7 @@
 
 ---
 
-## [2026-08-12] feat(puzzle-u3): 下游脚本迁移 + 算法增强（E14 BLD calib 真实数据 + E6/E8 is_valid + §16.4 identity allclose + E19 manifest 桥接 + E24 dict/list fail-loud + D5 baseline-dependent ACC AC + E12 LAT 早警 + measure_latency DRY）（commit 待回填）
+## [2026-08-12] feat(puzzle-u3): 下游脚本迁移 + 算法增强（E14 BLD calib 真实数据 + E6/E8 is_valid + §16.4 identity allclose + E19 manifest 桥接 + E24 dict/list fail-loud + D5 baseline-dependent ACC AC + E12 LAT 早警 + measure_latency DRY）（`6987418`）
 
 Phase U3（SPEC v2 §8/§12/§15/§17，闭环 E5/E6/E8/E11/E12/E14/E19/E24）：bld.py calib 改真实数据（`build_real_calib_loader`，删 OOD randn，required `--calib_loader_fn`，agent 从 manifest 桥接）；`is_valid_ffn_prune` + `is_candidate_valid_for_slot`（cross-kind + E6 + E8）在 bld/score/build_selected 三处过滤；build_selected 加 §16.4 全 identity 跨模型 allclose；gkd_retrain `_flatten_model_output`（dict/list → raise，E24）；gate_report D5 baseline-dependent ACC AC（acc_base≥0.5 绝对 0.5，<0.5 相对 10%）；mip_select E12 LAT 早警（target>baseline/2 → infeasible + select_reason=target-too-aggressive）；measure_whole_model_latency DRY 抽到 puzzle_common；puzzle.yaml 退役 5 个 inputs（标 [DEPRECATED U3]，U4 删）。Rule 7 surface：D5 SPEC formula 与示例内部矛盾→按示例 + 用户 intent 落地 baseline-dependent。验收：tars 0/0 + pytest 98 passed（含 17 新测试）+ code-reviewer 2🟡+4🟢 全修。详见 [release note](docs/releases/2026-08-12-puzzle-u3-downstream-migration.md)。
 
