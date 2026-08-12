@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-13] feat(nas-supernet-v3): target E2E 全链跑通 + 通用规则提取（commit 待回填）
+
+WSL headless（opencode+deepseek per-node driver）把 nas-supernet-v3 全 9 节点在 playground/target（CrossFusion 4-输入 transformer，InfoNCE+k-NN，CPU）端到端跑完（done:true，~5.3h）。baseline acc 0.072/latency 4.616ms；选中子网 latency **0.59ms（7.8× 提速，LAT AC 远超满足）**，acc 0.0016（CPU 预算 50+50 step 所限，ACC AC 未达——算力硬限非 workflow bug）。提取 7 条通用规则并落地：**G1 已应用**——train/retrain 两模板都加 `--max_train_steps`（全局 step cap，修 train agent 未加而 retrain agent 自加的判断不一致，让 CPU/CI 可行）；G2 loop-based metric 向量化（porter 职责）；G3 driver db-wal stall 与长执行节点不兼容；G4 verifier 子代理 deepseek stall-prone；G5 生成节点疑似启动完整执行留孤儿进程（待查）；G6 v3 无 synthesizer attention（架构决策待用户定）；G7 driver source_env /bin/sh 不支持 source bashism（已修）。tars validate 0 错。详见 [release note](docs/releases/2026-08-13-nas-supernet-v3-target-e2e.md)。
+
 ## [2026-08-12] docs(puzzle-universal): SPEC v2 落盘 + 整体收尾——通用化重构设计草稿（spec-reviewer 25 issue 闭环 + D5 formula 修正 + target 验证按用户指示跳过）
 
 `docs/specs/puzzle-universal-design-draft.md`（17 章）：通用性核心 / nas-supernet 可迁移边界 / identity 铁律（father-loaded） / search_space+catalog schema / kind 自适应 / FFN 通用化 / 节点数据流 / pz_expand 重构+4 smoke / 四层 verifier / 复用清单 / AC+边界 / SDD 计划 / §17 review 追溯。经 spec-reviewer 对抗式 review（25 issue 全闭环）+ 6 用户决策（D1 保留 decomposed / D2 原地重构 / D3 LLM 发现+用户覆盖 / D4 conv-moe 仅 identity / D5 ACC 相对容差+floor / D6 eval_kind 作 [ask]）。target E2E 验证按用户指示跳过（环境 deepseek 余额 0 + 无 ANTHROPIC key），U2a spike 已证 LLM flatten 可行（Claude 代跑），留作余额恢复后补验。

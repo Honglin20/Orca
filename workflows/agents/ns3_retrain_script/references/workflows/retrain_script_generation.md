@@ -56,6 +56,7 @@ Use a stable base CLI for the retrain runtime:
 - `--amp`: Enable AMP.
 - `--lr`: Learning rate; default from the user's original training config.
 - `--max_grad_norm`
+- `--max_train_steps`: Global optimizer-step budget cap (default `0` = unlimited); when `> 0`, short-circuit the batch loop at `global_step >= max_train_steps`, still run the end-of-progress-unit eval + checkpoint for the partial unit, then break the outer loop. Mandatory for CPU/CI feasibility; expose as launcher `MAX_TRAIN_STEPS` (default `0`). Orthogonal to `--epochs`/`--max_steps`.
 - `--seed`
 - `--resume`: Resume from `<output_dir>/retrain_latest.pth` if present.
 - `--supernet_ckpt` (finetune-from-supernet only): path to the trained supernet checkpoint used to initialize the subnet.

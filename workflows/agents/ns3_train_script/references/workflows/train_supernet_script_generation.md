@@ -31,6 +31,7 @@ Use a stable base CLI for NAS training runtime:
 - `--lr`: Learning rate; default from the user's original training config
 - `--max_grad_norm`
 - `--sandwich_n_random`: Number of random subnets sampled per sandwich step; default `2`
+- `--max_train_steps`: Global optimizer-step budget cap (counts every optimizer step regardless of epoch-vs-step progress unit); default `0` = unlimited. When `> 0`, the training loop short-circuits the moment `global_step >= max_train_steps`: break out of the batch loop, still run the end-of-progress-unit eval + checkpoint for the partial progress unit, then break the outer loop. This cap is mandatory to support CPU/CI runs whose full epoch×3 sandwich schedule would take many hours; it is orthogonal to `--epochs`/`--max_steps` (the horizon) and composes with them. Expose it in the launcher as `MAX_TRAIN_STEPS` (default `0`) so operators can bound a run without editing the horizon.
 - `--seed`
 
 KD arguments (See Distillation for details):
