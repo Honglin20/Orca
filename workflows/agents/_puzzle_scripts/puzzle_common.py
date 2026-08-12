@@ -528,6 +528,33 @@ def is_candidate_valid_for_slot(
 
 # ── 整模 latency 测量（DRY：measure_baseline + gate_report 复用）──────────────
 
+def build_latency_dummy(adapters, device=None) -> Any:
+    """构造**单样本（batch=1）per-inference** 输入用于整模 latency 测量。
+
+    为何 batch-1（非 calib batch）：整模 latency 必须与 per-block latency（latency_table 用
+    slot 单样本主路张量测）**同尺度**——都用 per-inference（batch 1）。若整模用 calib batch（如 64
+    样本）而 block 用单样本，MIP 的 ``overhead = baseline_whole − Σ identity_block`` 会混入 batch
+    缩放因子成垃圾值，导致「block 看似只占零头 → 全 identity 无优化」的假象。batch-1 是标准 NAS 延迟语义。
+
+    实现：取 ``adapters.calib_iter()`` 首个 batch（保证与 ``adapters.forward_model`` 期望的
+    native 格式一致——dict / list / Tensor 皆可），再把首维（batch dim）切到 1。这比从 DUMMY_INPUT
+    合成更稳：不依赖 FORWARD_CALLING_CONVENTION 与 forward_model 实际签名一致（adapter 生成期可能
+    标错 convention），直接复用 calib batch 的真实结构。
+    """
+    batch = next(iter(adapters.calib_iter(device=device)))
+
+    def _to_batch1(b):
+        if isinstance(b, dict):
+            return {k: _to_batch1(v) for k, v in b.items()}
+        if isinstance(b, (list, tuple)):
+            return type(b)(_to_batch1(x) for x in b)
+        if isinstance(b, torch.Tensor):
+            return b[:1].to(device) if device is not None else b[:1]
+        return b
+
+    return _to_batch1(batch)
+
+
 def measure_whole_model_latency(
     model: nn.Module,
     forward_fn: Callable[[nn.Module, Any], Any],

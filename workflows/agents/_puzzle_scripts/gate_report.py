@@ -30,6 +30,7 @@ import torch
 
 from puzzle_common import (
     BlockMap,
+    build_latency_dummy,
     build_student_from_arch,
     load_puzzle_adapters,
     measure_whole_model_latency,
@@ -160,15 +161,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         final_metric = float(final_metric_raw)
 
-        # latency（U6：measure_whole_model_latency 经 forward_fn + batch）
-        try:
-            lat_batch = next(iter(adapters.calib_iter(device=device)))
-        except StopIteration as e:
-            raise RuntimeError(
-                "adapters.calib_iter() 返回空——gate_report 无 latency batch"
-            ) from e
+        # latency（per-inference batch-1：与 baseline measure_baseline + per-block latency_table 同尺度）
+        lat_dummy = build_latency_dummy(adapters, device=device)
         final_latency = measure_whole_model_latency(
-            student, adapters.forward_model, lat_batch, device, args.latency_script_path
+            student, adapters.forward_model, lat_dummy, device, args.latency_script_path
         )
 
         metric_delta = abs(final_metric - baseline_metric)

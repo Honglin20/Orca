@@ -43,6 +43,7 @@ import torch.nn as nn
 
 from puzzle_common import (
     _LoadResult,
+    build_latency_dummy,
     build_pretrained_model,
     load_puzzle_adapters,
     measure_whole_model_latency,
@@ -373,9 +374,10 @@ def main(argv: list[str] | None = None) -> int:
             d["in_dim"] = in_dim
             d["out_dim"] = out_dim
 
-        # 8) latency（U6：measure_whole_model_latency 经 forward_fn + batch）
+        # 8) latency（per-inference batch-1：与 per-block latency_table 同尺度，避免混 batch 缩放）
+        latency_dummy = build_latency_dummy(adapters, device=device)
         baseline_latency = measure_whole_model_latency(
-            model, forward_fn, batch, device, args.latency_script_path
+            model, forward_fn, latency_dummy, device, args.latency_script_path
         )
 
         # 9) 写产物
