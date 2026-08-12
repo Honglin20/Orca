@@ -1,22 +1,20 @@
-"""gate_report.py —— Puzzle P2.9：AC gate 终态断言。
+"""gate_report.py —— Puzzle AC gate 终态断言（U6 适配器）。
 
-读 final_model + baseline_metrics + eval_fn → 测 final acc + latency →
-``gate_result.json``：
-  - ACC AC（SPEC v2 §12.1 D5）：相对容差 + 绝对 floor，baseline-dependent：
-    - acc_base ≥ 0.5：绝对容差 0.5（final ≥ acc_base − 0.5；高 baseline 保绝对）
-    - acc_base < 0.5：相对容差 10%（final ≥ 0.9·acc_base；低 baseline 比例保护）
-  - LAT AC：latency_ratio = final_latency / baseline_latency ≤ 0.5
-  - gate_status = pass if acc_met AND lat_met
-  - gate_reason: both-met / acc-miss / latency-miss / both-miss
+U6 改造：
+  - root cause I：读 ``adapters.METRIC_DIRECTION``（higher-better / lower-better）。
+    higher-better：``final ≥ baseline − tol``（精度「不降太多」）。
+    lower-better：``final ≤ baseline × (1 + tol)``（loss「不升太多」）。
+    ACC 容差 baseline-dependent（高 baseline 绝对 0.5 / 低 baseline 相对 10%）——
+    tol 量级按 metric 方差（用户 §16.9 intent）。
+  - LAT AC 参数化（coordinator）：``--latency_reduction_target``（默认 0.5），
+    判 ``latency_ratio ≤ (1 - reduction)``。如 reduction=0.7 → 要求 ratio ≤ 0.3。
+  - root cause J：落盘 ``final_status.json``（统一终态，对齐 ns3_report first-match）。
+  - root cause A/K/H：读 ``adapters.evaluate(model)``；不再 resolve_eval_fn / eval_kind 分支。
 
-写 ``final_report.md``。
-stdout：``GATE_STATUS: <pass|fail>`` / ``RESULT_JSON: {...}``。
+读 final_model + baseline_metrics + adapters → 测 final acc + latency →
+``gate_result.json`` + ``final_report.md`` + ``final_status.json``。
 
-注：D5 SPEC 文字「``δ = max(0.5, 0.1·acc_base)`` 取更严者」与具体示例
-（mnist 0.97 → final≥0.47；target 0.085 → final≥0.0765）内部不一致——示例
-匹配 baseline-dependent 规则（高 baseline 绝对、低 baseline 相对），与用户
-显式 intent「低 baseline 比例保护，高 baseline 绝对容差」一致。本实现按示例
-（baseline-dependent）落地。
+stdout：单行 JSON（pz_report 是 zero-LLM 确定性节点）。
 """
 
 from __future__ import annotations
@@ -33,80 +31,90 @@ import torch
 from puzzle_common import (
     BlockMap,
     build_student_from_arch,
-    get_module_dummy_input,
+    load_puzzle_adapters,
     measure_whole_model_latency,
-    resolve_eval_fn,
+    write_final_status,
 )
 
-# D5 容差参数（SPEC v2 §12.1）
+# ACC 容差参数（SPEC v2 §12.1，baseline-dependent）
 _ACC_ABS_TOL = 0.5      # 高 baseline 绝对容差 floor
-_ACC_REL_FACTOR = 0.1   # 低 baseline 相对容差（final ≥ acc_base·(1−rel_factor)）
-_ACC_BASELINE_BOUNDARY = 0.5  # 高低 baseline 分界（= abs tol floor）
+_ACC_REL_FACTOR = 0.1   # 低 baseline 相对容差
+_ACC_BASELINE_BOUNDARY = 0.5  # 高低 baseline 分界
 
 
-def _acc_threshold(acc_base: float) -> tuple[float, str]:
-    """D5 baseline-dependent：返回 (final_acc 下限, 容差种类)。
+def _acc_threshold_higher_better(acc_base: float) -> tuple[float, str]:
+    """higher-better metric：返回 (final_acc 下限, 容差种类)。
 
-    - acc_base ≥ 0.5：绝对容差 → threshold = acc_base − 0.5（保留 floor 保护）
-    - acc_base < 0.5：相对容差 → threshold = acc_base·0.9（比例保护，近随机会 fail）
-
-    理由（vs SPEC 文字「max(0.5, 0.1·acc_base)」）：SPEC 的公式与示例内部矛盾
-    （mnist 用 abs 0.47，target 用 rel 0.0765——max 公式对两者都给 0.5 abs）。
-    本规则与 SPEC §0 D5 intent + §12.1 示例一致。
-
-    Boundary cliff（已知设计特征，非 bug）：baseline=0.500 → threshold=0.0
-    （绝对，可降到 0% pass）；baseline=0.499 → threshold=0.4491（相对，仅允许 10%
-    降）。0.001 baseline 差异导致 threshold 跳跃——这是 baseline-dependent 切换的
-    固有特征。SPEC formula 修订（消除 max 文字矛盾）应同步消除该 cliff；当前实现
-    忠实匹配示例 + 用户 intent。
+    - acc_base ≥ 0.5：绝对容差 → threshold = acc_base − 0.5（保留 floor 保护）。
+    - acc_base < 0.5：相对容差 → threshold = acc_base·0.9（比例保护）。
     """
     if acc_base >= _ACC_BASELINE_BOUNDARY:
         return acc_base - _ACC_ABS_TOL, "absolute"
     return acc_base * (1.0 - _ACC_REL_FACTOR), "relative"
 
 
-def _acc_pass(acc_base: float, acc_opt: float) -> tuple[bool, str, float]:
-    """D5：返回 (是否达标, 容差种类, 阈值)。"""
-    threshold, kind = _acc_threshold(acc_base)
+def _acc_pass_higher_better(acc_base: float, acc_opt: float) -> tuple[bool, str, float]:
+    threshold, kind = _acc_threshold_higher_better(acc_base)
     return acc_opt >= threshold, kind, threshold
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Puzzle P2.9 gate report")
+def _lower_better_pass(base: float, final: float, rel_tol: float) -> bool:
+    """lower-better metric pass：``final ≤ base × (1 + rel_tol)``。"""
+    return final <= base * (1.0 + rel_tol)
+
+
+def _build_argparser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Puzzle U6 gate report")
     parser.add_argument("--final_model", required=True, help="final_model.pt 路径")
     parser.add_argument("--baseline_metrics", required=True)
-    parser.add_argument("--flat_model", required=True)
+    parser.add_argument("--flat_model", required=True, help="flat model .py（架构源）")
     parser.add_argument("--build_fn", required=True)
     parser.add_argument("--build_cfg", default="")
     parser.add_argument("--block_map", required=True)
     parser.add_argument("--block_library", required=True)
-    parser.add_argument("--eval_fn", required=True)
     parser.add_argument(
-        "--eval_kind",
-        required=True,
-        choices=["classification", "embedding", "regression"],
+        "--adapters", required=True,
+        help="puzzle_adapters.py 路径（U6 §2.1：脚本唯一项目接口）",
+    )
+    parser.add_argument(
+        "--manifest", default="",
+        help="manifest.yaml 路径（metadata 用；脚本不解析）",
     )
     parser.add_argument("--latency_unit", default="ms", choices=["ms", "us", "s"])
     parser.add_argument("--latency_script_path", default="")
     parser.add_argument(
-        "--accuracy_tolerance",
-        type=float,
-        default=0.5,
-        help="[DEPRECATED, 被 baseline-dependent 容差取代] 旧绝对容差入参，"
-        "保留仅为兼容 yaml/launcher 不破坏——实际 ACC AC 由 _acc_pass 按 baseline "
-        "高/低自动选绝对 0.5 或相对 10%（baseline≥0.5 用绝对 0.5 / <0.5 用相对 10%）",
+        "--latency_reduction_target", type=float, default=0.5,
+        help="LAT AC 参数化（与 mip_select 同源）：要求时延降幅比例（0.5=降一半）。"
+        "判 latency_ratio ≤ (1 - reduction)",
+    )
+    parser.add_argument(
+        "--metric_rel_tol_lower_better", type=float, default=0.1,
+        help="lower-better metric 相对容差（final ≤ baseline × (1 + tol)）；默认 10%",
+    )
+    parser.add_argument(
+        "--accuracy_tolerance", type=float, default=0.5,
+        help="[兼容] 高 baseline 绝对容差 floor（baseline ≥ 0.5 时用 abs tol = 此值）",
     )
     parser.add_argument("--output_dir", required=True)
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_argparser().parse_args(argv)
+    global _ACC_ABS_TOL
+    _ACC_ABS_TOL = float(args.accuracy_tolerance)
 
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        adapters = load_puzzle_adapters(args.adapters)
         with open(args.baseline_metrics, encoding="utf-8") as f:
             baseline = json.load(f)
-        baseline_acc = float(baseline["baseline_acc"])
+        baseline_metric = float(baseline["baseline_acc"])  # 通用 metric（acc/loss/...）
         baseline_latency = float(baseline["baseline_latency"])
+        # metric_direction 优先读 adapters；baseline_metrics 的记法兼容（审计回填）
+        metric_direction = adapters.METRIC_DIRECTION
 
         final_ckpt = torch.load(
             args.final_model, map_location="cpu", weights_only=False
@@ -119,28 +127,24 @@ def main(argv: list[str] | None = None) -> int:
         block_map = BlockMap.from_json(args.block_map)
         device = torch.device("cpu")
 
-        # student = build_student_from_arch 不传 father_state_path：final_model.pt 的
-        # state_dict（由 gkd_retrain 保存的完整 student.state_dict()）会覆盖 base arch，
-        # 其中 identity（passthrough）slot 的权重经 build_selected → gkd 链已携带预训练
-        # father 权重。本节点不构建 baseline father——baseline acc/latency 直接读
-        # baseline_metrics.json（pz_expand 用预训练 father 测得）。
+        # student = build_student_from_arch（不传 father_state_path：final_model 的
+        # state_dict 会覆盖 base arch；identity slot 的父权重经 build_selected→gkd 已注入）
         student = build_student_from_arch(
-            flat_model_path=args.flat_model,
-            build_fn=args.build_fn,
-            build_cfg=args.build_cfg,
+            adapters=adapters,
             block_map=block_map,
             selected_arch=final_ckpt,
             block_library_dir=Path(args.block_library).resolve(),
             device=device,
+            flat_model_path=args.flat_model,
+            build_fn=args.build_fn,
+            build_cfg=args.build_cfg,
         )
         if not final_state_dict:
             raise RuntimeError(
                 f"{args.final_model} state_dict 为空——final_model 损坏,"
                 f"无法 gate（禁用随机 init student 假装通过）"
             )
-        missing, unexpected = student.load_state_dict(
-            final_state_dict, strict=False
-        )
+        missing, unexpected = student.load_state_dict(final_state_dict, strict=False)
         if unexpected:
             raise RuntimeError(
                 f"final_model state_dict 有 {len(unexpected)} 个 unexpected key："
@@ -148,35 +152,62 @@ def main(argv: list[str] | None = None) -> int:
             )
         student.eval().to(device)
 
-        eval_fn = resolve_eval_fn(args.eval_fn, args.flat_model)
-        final_acc_raw = eval_fn(student)
-        if not isinstance(final_acc_raw, (int, float)):
-            raise TypeError(f"eval_fn 返回非数值：{type(final_acc_raw).__name__}")
-        final_acc = float(final_acc_raw)
+        # U6 root cause A/K/H：evaluate 经 adapters（不再 resolve_eval_fn / eval_kind）
+        final_metric_raw = adapters.evaluate(student)
+        if isinstance(final_metric_raw, bool) or not isinstance(final_metric_raw, (int, float)):
+            raise TypeError(
+                f"adapters.evaluate 返回非数值：{type(final_metric_raw).__name__}"
+            )
+        final_metric = float(final_metric_raw)
 
-        dummy_meta = get_module_dummy_input(args.flat_model)
-        shape = list(dummy_meta["shape"])
-        dtype = getattr(torch, str(dummy_meta.get("dtype", "float32")))
-        dummy_input = torch.randn(*shape, dtype=dtype)
+        # latency（U6：measure_whole_model_latency 经 forward_fn + batch）
+        try:
+            lat_batch = next(iter(adapters.calib_iter(device=device)))
+        except StopIteration as e:
+            raise RuntimeError(
+                "adapters.calib_iter() 返回空——gate_report 无 latency batch"
+            ) from e
         final_latency = measure_whole_model_latency(
-            student, dummy_input, device, args.latency_script_path
+            student, adapters.forward_model, lat_batch, device, args.latency_script_path
         )
 
-        acc_delta = abs(final_acc - baseline_acc)
+        metric_delta = abs(final_metric - baseline_metric)
         latency_ratio = (
             final_latency / baseline_latency if baseline_latency > 0 else float("inf")
         )
-        # D5：ACC AC 相对容差 + floor（baseline-dependent）
-        acc_met, acc_tol_kind, acc_threshold = _acc_pass(baseline_acc, final_acc)
-        lat_met = latency_ratio <= 0.5
-        if acc_met and lat_met:
+
+        # U6 root cause I：方向感知
+        if metric_direction == "higher-better":
+            metric_met, metric_tol_kind, metric_threshold = _acc_pass_higher_better(
+                baseline_metric, final_metric
+            )
+            metric_pass_formula = (
+                f"final({final_metric:.4f}) ≥ threshold({metric_threshold:.4f}) "
+                f"[{metric_tol_kind} tol]"
+            )
+        else:  # lower-better
+            rel_tol = float(args.metric_rel_tol_lower_better)
+            metric_met = _lower_better_pass(baseline_metric, final_metric, rel_tol)
+            metric_tol_kind = "relative-lower"
+            metric_threshold = baseline_metric * (1.0 + rel_tol)
+            metric_pass_formula = (
+                f"final({final_metric:.4f}) ≤ baseline×(1+{rel_tol})="
+                f"{metric_threshold:.4f}"
+            )
+
+        # LAT AC 参数化（coordinator）：ratio ≤ (1 - reduction)
+        reduction = max(0.0, min(1.0, float(args.latency_reduction_target)))
+        lat_ratio_threshold = 1.0 - reduction
+        lat_met = latency_ratio <= lat_ratio_threshold
+
+        if metric_met and lat_met:
             gate_reason = "both-met"
             gate_status = "pass"
-        elif not acc_met and not lat_met:
+        elif not metric_met and not lat_met:
             gate_reason = "both-miss"
             gate_status = "fail"
-        elif not acc_met:
-            gate_reason = "acc-miss"
+        elif not metric_met:
+            gate_reason = "metric-miss"
             gate_status = "fail"
         else:
             gate_reason = "latency-miss"
@@ -184,14 +215,18 @@ def main(argv: list[str] | None = None) -> int:
 
         gate_result = {
             "gate_status": gate_status,
-            "final_acc": final_acc,
+            "metric_direction": metric_direction,
+            "final_metric": final_metric,
+            "baseline_metric": baseline_metric,
+            "metric_delta": metric_delta,
+            "metric_tolerance_kind": metric_tol_kind,
+            "metric_threshold": metric_threshold,
+            "metric_pass_formula": metric_pass_formula,
             "final_latency": final_latency,
-            "baseline_acc": baseline_acc,
             "baseline_latency": baseline_latency,
-            "acc_delta": acc_delta,
-            "acc_tolerance_kind": acc_tol_kind,
-            "acc_threshold": acc_threshold,
             "latency_ratio": latency_ratio,
+            "latency_ratio_threshold": lat_ratio_threshold,
+            "latency_reduction_target": reduction,
             "latency_unit": args.latency_unit,
             "gate_reason": gate_reason,
             "report_path": "",
@@ -199,14 +234,29 @@ def main(argv: list[str] | None = None) -> int:
 
         report_path = output_dir / "final_report.md"
         with open(report_path, "w", encoding="utf-8") as f:
-            f.write(_render_report(gate_result, acc_tol_kind, acc_threshold))
+            f.write(_render_report(gate_result))
         gate_result["report_path"] = str(report_path)
 
         gate_result_path = output_dir / "gate_result.json"
         with open(gate_result_path, "w", encoding="utf-8") as f:
             json.dump(gate_result, f, ensure_ascii=False, indent=2)
 
-        # stdout：单行 JSON（pz_report 是 zero-LLM 确定性节点，stdout 直接转发为节点 output）
+        # U6 root cause J：统一终态 final_status.json（同 schema 给 Wave 2 terminate 路径用）
+        write_final_status(
+            output_dir,
+            stage="pz_report",
+            status=gate_status,
+            reason=gate_reason,
+            metrics={
+                "baseline_metric": baseline_metric,
+                "final_metric": final_metric,
+                "baseline_latency": baseline_latency,
+                "final_latency": final_latency,
+                "latency_ratio": latency_ratio,
+                "metric_direction": metric_direction,
+            },
+        )
+
         print(json.dumps(gate_result, ensure_ascii=False))
         return 0
     except Exception as e:
@@ -215,23 +265,26 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 
-def _render_report(
-    g: dict[str, Any], acc_tol_kind: str, acc_threshold: float
-) -> str:
+def _render_report(g: dict[str, Any]) -> str:
     return (
         "# Puzzle Final Report\n\n"
         f"- gate_status: **{g['gate_status']}**\n"
-        f"- gate_reason: `{g['gate_reason']}`\n\n"
+        f"- gate_reason: `{g['gate_reason']}`\n"
+        f"- metric_direction: `{g['metric_direction']}`\n\n"
         "## Metrics\n\n"
         "| metric | baseline | final | delta / ratio |\n"
         "|---|---|---|---|\n"
-        f"| accuracy | {g['baseline_acc']:.4f} | {g['final_acc']:.4f} "
-        f"| Δ={g['acc_delta']:.4f} ({acc_tol_kind} tol, threshold={acc_threshold:.4f}) |\n"
+        f"| metric ({g['metric_direction']}) | {g['baseline_metric']:.4f} "
+        f"| {g['final_metric']:.4f} | Δ={g['metric_delta']:.4f} "
+        f"({g['metric_tolerance_kind']} tol, threshold={g['metric_threshold']:.4f}) |\n"
         f"| latency ({g['latency_unit']}) | {g['baseline_latency']:.4f} "
-        f"| {g['final_latency']:.4f} | ratio={g['latency_ratio']:.4f} (≤0.5) |\n\n"
+        f"| {g['final_latency']:.4f} | ratio={g['latency_ratio']:.4f} "
+        f"(≤{g['latency_ratio_threshold']:.4f}, reduction_target="
+        f"{g['latency_reduction_target']:.2f}) |\n\n"
         "## Verdict\n\n"
         + (
-            "AC 双达标（精度损失在容差内 + 时延降达一半）。"
+            f"AC 双达标（metric 方向 {g['metric_direction']} 容差内 + 时延降幅 "
+            f"{g['latency_reduction_target']:.0%} 达成）。"
             if g["gate_status"] == "pass"
             else f"AC 未达标（{g['gate_reason']}）。"
         )

@@ -1,15 +1,15 @@
-"""gkd_retrain.py —— Puzzle P2.8：末段全局 KD 重训。
+"""gkd_retrain.py —— Puzzle 末段全局 KD 重训（U6 适配器架构）。
 
-读 selected_model + flat_model（teacher，冻结）：
-  - 端到端 KD：``cosine_kd_loss``（hidden）+ ``logits_kd_loss``（分类才有，
-    ``KDWeightScheduler`` warmup）
+U6 改造（root cause A/K/D）：
+  - 删 ``_flatten_model_output`` / ``is_classification`` / 写死 ``cross_entropy`` /
+    ``logits_kd_loss`` 分支：KD loss 走 ``adapters.kd_loss(s_out, t_out, labels)``，
+    硬标签监督走 ``adapters.task_loss(s_out, labels)``（None 则无）。
+  - forward 走 ``adapters.forward_model(model, batch)``（不再假设单 tensor）。
+  - 训练数据走 ``adapters.train_iter()``；labels 走 ``adapters.extract_labels(batch)``。
 
-注：SPEC ``phase-puzzle-impl.md:97`` 提"逐层 cosine KD"，但权威设计草稿
-``puzzle-design-draft.md:126`` §4(g) 仅写 ``cosine(hidden)``——两份 SPEC 自相
-矛盾（Rule 7）。选 design-draft 路径：对模型最终输出做 cosine + (分类) logits
-KD。理由：(a) design-draft 是跨阶段权威 BUILD vs REUSE 表；(b) 嵌入族模型最终
-输出本身就是 hidden，cosine 末层即可修块间失配；(c) 逐层 hook 显著复杂化，
-YAGNI。
+读 selected_model + flat/adapters（teacher，冻结）：
+  - 端到端 KD：``adapters.kd_loss``（agent 按任务移植正确 KD：cosine/KL/MSE/任务 loss）。
+  - 可选硬标签监督：``adapters.task_loss``（agent 移植用户任务 loss；非监督返 None）。
 
   - 写 ``runs/retrain/progress.jsonl``：``{"step":N,"metrics":{...}}``
   - 输出 ``runs/retrain/final_model.pt``（= retrain_best.pth 契约路径）
@@ -24,91 +24,40 @@ import json
 import sys
 import traceback
 from pathlib import Path
-from typing import Any
 
 import torch
 
 from puzzle_common import (
     BlockMap,
-    build_calib_loader,
+    build_pretrained_model,
     build_student_from_arch,
-    get_module_dummy_input,
-    load_external_callable,
-    load_father_model,
-    load_variant_state_dict,
+    load_puzzle_adapters,
 )
 
 
-def _flatten_model_output(out: Any) -> torch.Tensor:
-    """把模型 forward 输出规约为单 tensor（cosine/logits KD loss 的契约输入）。
-
-    SPEC §11 E24：GKD 的 KD loss 假设输出是单 tensor 或 tuple(tensor, ...)；
-    dict / list 输出需 flat.py 加 output-flattening adapter（写入 pz_expand 契约）。
-    本函数是 fail-loud 关卡——flat.py 漏 adapter 时让 GKD 显式崩，而非静默拿错 tensor。
-
-    - tensor → 原样返回。
-    - tuple/list → 取首个元素（须为 tensor）；空序列 → raise。
-    - dict → raise（语义不明：取 'logits'/'hidden'/[0] 都可能错，要 flat 适配）。
-    """
-    if isinstance(out, torch.Tensor):
-        return out
-    if isinstance(out, (tuple, list)):
-        if not out:
-            raise RuntimeError(
-                "模型 forward 返回空 tuple/list——无法取主 tensor（GKD KD loss 契约）"
-            )
-        first = out[0]
-        if not isinstance(first, torch.Tensor):
-            raise RuntimeError(
-                f"模型 forward tuple/list 首元素非 tensor（{type(first).__name__}）"
-                f"——flat.py 须加 output-flattening adapter"
-            )
-        return first
-    if isinstance(out, dict):
-        raise RuntimeError(
-            f"模型 forward 返回 dict（keys={list(out.keys())[:5]}）——"
-            f"GKD KD loss 契约要求单 tensor 输入。flat.py 须加 output-flattening adapter"
-            f"（按任务语义挑主 tensor 暴露为顶层 forward 返回值）"
-        )
-    raise RuntimeError(
-        f"模型 forward 返回非 tensor/tuple/list/dict（{type(out).__name__}）"
-        f"——GKD KD loss 契约无法消费"
-    )
-
-
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Puzzle P2.8 GKD 末段重训")
+    parser = argparse.ArgumentParser(description="Puzzle U6 GKD 末段重训")
     parser.add_argument("--selected_model", required=True, help="selected_model.pt 路径")
-    parser.add_argument("--flat_model", required=True, help="flat_model.py（teacher）")
+    parser.add_argument("--flat_model", required=True, help="flat_model.py（架构源）")
     parser.add_argument("--build_fn", required=True)
     parser.add_argument("--build_cfg", default="")
     parser.add_argument("--block_map", required=True)
     parser.add_argument("--block_library", required=True)
-    parser.add_argument("--eval_fn", required=True)
     parser.add_argument(
-        "--eval_kind",
-        required=True,
-        choices=["classification", "embedding", "regression"],
+        "--adapters", required=True,
+        help="puzzle_adapters.py 路径（U6 §2.1：脚本唯一项目接口）",
+    )
+    parser.add_argument(
+        "--manifest", default="",
+        help="manifest.yaml 路径（metadata 用；脚本不解析）",
     )
     parser.add_argument("--output_dir", required=True)
-    parser.add_argument(
-        "--father_state",
-        default="",
-        help="预训练父模型权重 .pt 路径（expand 保存的 father_state_dict.pt）。"
-        "GKD teacher 必须预训练；identity slot 的 student 基座也走 father 权重"
-        "——空串回退随机 init（仅 dry-run 兼容）",
-    )
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument(
-        "--train_loader_fn", default="",
-        help="真实训练数据 loader 的 path::func(如 proj/train.py::build_dataloader),"
-        "零参调用返回 re-iterable DataLoader。GKD **必须用真实训练数据**才能恢复精度——"
-        "空串回退合成 calib(仅 dry-run 兼容,acc 恢复弱)",
+        "--task_loss_weight", type=float, default=1.0,
+        help="硬标签监督权重（与 KD 并列；0 = 纯 KD；adapters.task_loss 返 None 时无影响）",
     )
-    parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--hard_label_weight", type=float, default=1.0,
-                        help="分类任务 CE hard-label 权重(与 KD 并列;0=纯 KD)")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args(argv)
 
@@ -120,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     final_model_path = runs_dir / "final_model.pt"
 
     try:
+        adapters = load_puzzle_adapters(args.adapters)
         selected_ckpt = torch.load(
             args.selected_model, map_location="cpu", weights_only=False
         )
@@ -131,126 +81,78 @@ def main(argv: list[str] | None = None) -> int:
         block_map = BlockMap.from_json(args.block_map)
         device = torch.device("cpu")
 
-        # teacher = father（预训练,冻结）
-        teacher = load_father_model(
-            args.flat_model, args.build_fn, args.build_cfg, args.father_state
-        )
+        # teacher = father（预训练，冻结）—— U6：adapters.build_model + load_pretrained
+        teacher = build_pretrained_model(adapters)
         teacher.eval().to(device)
         for p in teacher.parameters():
             p.requires_grad_(False)
 
-        # student = 共享 helper 重建异构架构。father_state 注入使 identity slot
-        # 基座为预训练父权重（路径 A，兜底）；非 identity slot 由 factory + variant
-        # ckpt 覆盖。下方 selected_state_dict 覆盖是主路径（路径 B）——build_selected
-        # 已注入 father 权重并保存进 selected_model.pt,这里 load 回来覆盖 identity slot
-        # 的训练续承（GKD 续训的起点）。
+        # student = 共享 helper 重建异构架构（U6：经 adapters 注入 father 权重）。
         student = build_student_from_arch(
-            flat_model_path=args.flat_model,
-            build_fn=args.build_fn,
-            build_cfg=args.build_cfg,
+            adapters=adapters,
             block_map=block_map,
             selected_arch=selected_ckpt,
             block_library_dir=Path(args.block_library).resolve(),
             device=device,
-            father_state_path=args.father_state,
+            flat_model_path=args.flat_model,
+            build_fn=args.build_fn,
+            build_cfg=args.build_cfg,
         )
         # 载 selected_model.pt 的整体 state_dict（含未被替换模块的父权重）
         if selected_state_dict:
             missing, unexpected = student.load_state_dict(
                 selected_state_dict, strict=False
             )
-            # 允许少量 missing（factory 重建的 variant 块参数已在 build 时载入），
-            # 但 unexpected 必须为 0（否则 selected_state_dict 与 student schema 不一致）。
             if unexpected:
                 raise RuntimeError(
                     f"selected_model state_dict 有 {len(unexpected)} 个 unexpected "
                     f"key（schema 不一致）：{list(unexpected)[:5]}"
                 )
             if missing:
-                # 不 raise（variant 块的 factory 初始化权重在 build_selected 时已载入），
-                # 但记录到 stderr 供 fidelity-verifier 审计追溯。
                 print(
                     f"WARN: load_state_dict missing {len(missing)} keys "
                     f"(variant factory init): {list(missing)[:5]}",
                     file=sys.stderr,
                 )
-        # GKD 阶段 student.train():student 是被优化对象,BN 统计需更新 + dropout 提供正则;
-        # teacher 才是 eval(冻结)。纯 eval 会让 BN 用随机 running stats,放大 cosine loss 噪声。
         student.to(device).train()
 
-        dummy_meta = get_module_dummy_input(args.flat_model)
-        # 优先用真实训练数据(GKD 恢复精度的关键);空串回退合成 calib(仅 dry-run)
-        train_loader = None
-        if args.train_loader_fn:
-            loader_fn = load_external_callable(args.train_loader_fn)
-            train_loader = loader_fn()
-            if not hasattr(train_loader, "__iter__"):
-                raise TypeError(
-                    f"train_loader_fn {args.train_loader_fn!r} 未返回可迭代 DataLoader"
-                )
-        if train_loader is None:
-            print(
-                "WARN: 未提供 --train_loader_fn,GKD 回退合成 calib 数据——"
-                "acc 恢复会显著偏弱(仅 dry-run 用)",
-                file=sys.stderr,
-            )
-            train_loader = build_calib_loader(
-                teacher, dummy_meta, batch_size=2, device=device
-            )
+        # U6 root cause D：KD loss + 硬标签监督全走适配器（删 is_classification / 写死 CE）。
+        kd_loss_fn = adapters.kd_loss
+        task_loss_fn = adapters.task_loss
+        forward_fn = adapters.forward_model
+        extract_labels_fn = adapters.extract_labels
 
-        from nas_agent.train.distillation import (
-            KDWeightScheduler,
-            cosine_kd_loss,
-            logits_kd_loss,
-        )
-
-        is_classification = args.eval_kind == "classification"
-        kd_sched = KDWeightScheduler(
-            target_weight=1.0, start=0, warmup_length=max(1, args.epochs // 2)
-        )
         opt = torch.optim.Adam(
             (p for p in student.parameters() if p.requires_grad), lr=args.lr
         )
 
         step = 0
-        import torch.nn.functional as _F
         with open(progress_path, "a", encoding="utf-8") as flog:
             for ep in range(args.epochs):
-                kd_w = kd_sched.get_weight(ep)
-                for batch in train_loader:
-                    if isinstance(batch, (list, tuple)):
-                        inp = batch[0]
-                        labels = batch[1] if len(batch) > 1 else None
-                    else:
-                        inp = batch
-                        labels = None
-                    inp = inp.to(device)
-                    if labels is not None:
-                        labels = labels.to(device)
+                for batch in adapters.train_iter(device=device):
                     with torch.no_grad():
-                        t_out = _flatten_model_output(teacher(inp))
-                    s_out = _flatten_model_output(student(inp))
-                    loss_cos = cosine_kd_loss(s_out, t_out)
-                    loss = loss_cos
-                    loss_logits_val = 0.0
-                    if is_classification:
-                        loss_logits = logits_kd_loss(s_out, t_out)
-                        loss = loss + kd_w * loss_logits
-                        loss_logits_val = float(loss_logits.item())
-                        # hard-label CE(真实标签,分类任务 acc 恢复的关键监督)
-                        if labels is not None and args.hard_label_weight > 0:
-                            loss_ce = _F.cross_entropy(s_out, labels)
-                            loss = loss + args.hard_label_weight * loss_ce
+                        t_out = forward_fn(teacher, batch)
+                    s_out = forward_fn(student, batch)
+                    labels = extract_labels_fn(batch)
+                    loss_kd = kd_loss_fn(s_out, t_out, labels=labels)
+                    loss = loss_kd
+                    loss_task_val = 0.0
+                    # 硬标签监督（适配器自决适用性；task_loss 返 None 则跳过）
+                    if labels is not None and args.task_loss_weight > 0:
+                        task_loss = task_loss_fn(s_out, labels)
+                        if task_loss is not None:
+                            loss = loss + args.task_loss_weight * task_loss
+                            loss_task_val = float(task_loss.item())
                     opt.zero_grad(set_to_none=True)
                     loss.backward()
                     opt.step()
                     step += 1
                     metrics = {
                         "loss": float(loss.item()),
-                        "kd_cos": float(loss_cos.item()),
+                        "kd": float(loss_kd.item()),
                     }
-                    if is_classification:
-                        metrics["kd_logits"] = loss_logits_val
+                    if loss_task_val > 0:
+                        metrics["task"] = loss_task_val
                     flog.write(
                         json.dumps({"step": step, "metrics": metrics}) + "\n"
                     )

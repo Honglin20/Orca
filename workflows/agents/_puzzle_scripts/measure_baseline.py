@@ -1,12 +1,20 @@
-"""measure_baseline.py —— Puzzle U2a：确定性测量 + 4 道 fidelity smoke（SPEC v2 §9）。
+"""measure_baseline.py —— Puzzle U6：确定性测量 + fidelity smoke（适配器架构）。
+
+U6 范式（SPEC puzzle-u6-design-draft §3）：脚本不再假设任何用户代码形态——所有项目
+相关性由 ``adapters`` 暴露的能力 API 消化（forward_model / calib_iter / evaluate /
+load_pretrained / METRIC_DIRECTION / EVAL_NOISE_ATOL）。
 
 职责（确定性，fail loud）——pz_expand 的「测量」部分（判断由 LLM 做）：
   1. 读 LLM 产的 ``search_space.yaml`` → slot 声明（path/kind/证据）。
-  2. 4 道 smoke（§9.2）：
-     - **strict-load**（E5/BLK-1）：father_ckpt load_state_dict missing/unexpected 必须双零。
-     - **forward-determinism**（E25）：同输入 forward 两次 ``torch.equal``。
-     - **eval-stability**（E25）：eval_fn 跑两次 acc 一致。
-     - **per-slot identity allclose**（E5）：hook 每个 slot，forward 两次逐元素 allclose。
+  2. fidelity smoke（SPEC U6 §3 改造）：
+     - **ckpt 宽松**（root cause C）：删 strict-load 双零硬 raise；加载走
+       ``adapters.load_pretrained``，记 ``_LoadResult`` 进 baseline_metrics（前缀剥离 /
+       多字段 dict / module./_orig_mod./ema 由适配器负责，脚本不假设 schema）。
+       ckpt 非双零不 fatal（WARN + 记录）；flatten 阶段对齐 ns3 只跑前向 dummy smoke。
+     - **forward-determinism**：``adapters.forward_model(model, batch)`` 两次 torch.equal。
+     - **eval-stability**（root cause B）：``adapters.evaluate(model)`` 跑两次，atol 读
+       ``adapters.EVAL_NOISE_ATOL``（不再硬编码 1e-9）。
+     - **per-slot identity allclose**：hook 每个 slot，forward 两次逐元素 allclose。
   3. trace 每个 slot 的 in/out 末维 → 回填 search_space.yaml + 落 block_map.json。
   4. 测 baseline acc + latency → baseline_metrics.json。
 
@@ -34,11 +42,10 @@ import torch
 import torch.nn as nn
 
 from puzzle_common import (
-    _extract_state_dict,
-    get_module_dummy_input,
-    load_flat_model,
+    _LoadResult,
+    build_pretrained_model,
+    load_puzzle_adapters,
     measure_whole_model_latency,
-    resolve_eval_fn,
 )
 from search_space_io import (
     load_search_space_yaml,
@@ -46,52 +53,42 @@ from search_space_io import (
     to_block_map,
 )
 
-# per-slot identity allclose 容差（§9.2 / §16.4）
+# per-slot identity allclose 容差（slot-level 复现性，与 EVAL_NOISE_ATOL 语义不同）
 _ALLCLOSE_ATOL = 1e-5
-# eval-stability acc 容差（两次 eval 完全相等几乎不可能，留极小 float 漂移窗）
-_EVAL_STABILITY_ATOL = 1e-9
 
 
-# ── smoke 1: strict-load（E5/BLK-1）───────────────────────────────────────────
+# ── smoke 1: ckpt 宽松加载（root cause C）─────────────────────────────────────
 
-def strict_load_father(
-    model: nn.Module, father_ckpt: Path
-) -> dict[str, torch.Tensor]:
-    """load father ckpt → load_state_dict(strict=False) → missing/unexpected 双零。
+def load_father_ckptrck(model: nn.Module, adapters: Any) -> _LoadResult:
+    """通过 ``adapters.load_pretrained(model)`` 注入预训练权重，返回 ``_LoadResult``。
 
-    SPEC §9.2.1：father 是全链 teacher，missing 污染 BLD/score/gkd——零容忍。
-    比 puzzle_common.load_father_model 的 20% 阈值更严（本节点是 fidelity 关卡）。
+    U6 root cause C：脚本不再做 strict-load 双零硬门——前缀剥离 / 多字段 dict /
+    module./_orig_mod./ema. 由适配器消化。结果记入 baseline_metrics；
+    ``from_scratch=True`` 时 WARN（baseline 可能近随机 init）但不 fatal（对齐 ns3）。
     """
-    if not father_ckpt.is_file():
-        raise FileNotFoundError(
-            f"father_ckpt 不存在：{father_ckpt}（pz_expand 契约必给预训练父权重）"
+    result = adapters.load_pretrained(model)
+    if not isinstance(result, _LoadResult):
+        # _LoadResult 是 NamedTuple（duck-typed 兼容：支持属性访问即可）
+        if not (hasattr(result, "missing") and hasattr(result, "unexpected")
+                and hasattr(result, "from_scratch")):
+            raise TypeError(
+                f"adapters.load_pretrained 须返 _LoadResult，得到 {type(result).__name__}"
+            )
+    if result.from_scratch:
+        print(
+            f"[measure_baseline] WARN: adapters.load_pretrained 标记 from_scratch=True"
+            f"（missing={len(result.missing)}, unexpected={len(result.unexpected)}）"
+            f"——baseline 可能近随机 init。后续 AC 判定按 baseline 原样计算",
+            file=sys.stderr,
         )
-    ckpt = torch.load(father_ckpt, map_location="cpu", weights_only=False)
-    state = _extract_state_dict(ckpt)
-    if not isinstance(state, dict):
-        raise TypeError(
-            f"father_ckpt 解出的 state_dict 非 dict: {type(state).__name__}（{father_ckpt}）"
-        )
-    missing, unexpected = model.load_state_dict(state, strict=False)
-    if missing:
-        raise RuntimeError(
-            f"strict-load smoke 失败：missing {len(missing)} keys（须双零）。"
-            f"前 8: {missing[:8]}。检查 flat.py 的 state_dict schema 是否与 ckpt 对齐"
-            f"（reparenting / 前缀 / 模块结构）——确定性 hint：diff missing keys 与 flat 的"
-            f" state_dict 找 exact prefix mismatch。"
-        )
-    if unexpected:
-        raise RuntimeError(
-            f"strict-load smoke 失败：unexpected {len(unexpected)} keys（须双零）。"
-            f"前 8: {unexpected[:8]}"
-        )
-    return state
+    return result
 
 
 # ── smoke 2 + 4: forward-determinism + per-slot identity allclose ─────────────
 
 def _hook_slot_outputs(
-    model: nn.Module, paths: list[str], dummy_input: torch.Tensor, device: torch.device
+    model: nn.Module, paths: list[str], batch: Any,
+    forward_fn: Any, device: torch.device,
 ) -> dict[str, torch.Tensor]:
     """forward 一次，hook 抓每个 slot path 的 output tensor（detach）。"""
     model.eval().to(device)
@@ -104,7 +101,6 @@ def _hook_slot_outputs(
                 return
             out_t = output[0] if isinstance(output, (tuple, list)) else output
             captured[path] = out_t.detach()
-
         return hook
 
     try:
@@ -117,7 +113,7 @@ def _hook_slot_outputs(
                 ) from e
             handles.append(mod.register_forward_hook(make_hook(path)))
         with torch.no_grad():
-            model(dummy_input.to(device))
+            forward_fn(model, batch)
     finally:
         for h in handles:
             h.remove()
@@ -132,49 +128,41 @@ def _hook_slot_outputs(
 def forward_determinism_and_identity_allclose(
     model: nn.Module,
     slot_paths: list[str],
-    dummy_input: torch.Tensor,
+    batch: Any,
+    forward_fn: Any,
     device: torch.device,
 ) -> None:
     """smoke 2 + smoke 4 合并跑（两次 forward 复用）。
 
     - smoke 2（forward-determinism）：whole-output torch.equal（捕获未固定 RNG）。
     - smoke 4（per-slot identity allclose）：每个 slot 两次 forward output 逐元素 allclose
-      （§16.4 真实机制——验证 father-loaded 模块在 zero intervention 下输出稳定可复现，
-      即 identity 候选的行为承诺）。atol = _ALLCLOSE_ATOL。
+      （father-loaded 模块在 zero intervention 下输出稳定可复现——identity 契约的前置条件）。
     """
     model.eval().to(device)
     with torch.no_grad():
-        out1 = model(dummy_input.to(device))
-        out2 = model(dummy_input.to(device))
-    # smoke 2：whole-output（tuple/tensor 都支持）
-    if isinstance(out1, (tuple, list)):
-        if len(out1) != len(out2):
-            raise RuntimeError(
-                f"forward-determinism smoke 失败：两次 forward 输出 arity 不一致"
-                f"（{len(out1)} vs {len(out2)}）"
-            )
-        for i, (a, b) in enumerate(zip(out1, out2)):
-            if not torch.equal(a, b):
-                raise RuntimeError(
-                    f"forward-determinism smoke 失败：第 {i} 个输出 torch.equal=False"
-                    f"（forward 内含未固定 RNG / 无序算子）"
-                )
-    else:
-        if not torch.equal(out1, out2):
-            raise RuntimeError(
-                "forward-determinism smoke 失败：torch.equal=False"
-                "（forward 内含未固定 RNG / 无序算子）"
-            )
+        out1 = forward_fn(model, batch)
+        out2 = forward_fn(model, batch)
 
-    # smoke 4：per-slot identity allclose（hook 两次 forward 的 slot outputs）。
-    # 语义澄清：本 smoke 验证 father-loaded 模块在 zero-intervention 下逐 slot 输出可复现
-    # ——这是 §16.4 identity 契约的前置必要条件（father 自身可复现）。完整的 §16.4 AC
-    # （identity-passthrough student vs father 的跨模型 allclose）在下游 build_selected 节点，
-    # 需 selected_arch；本节点无 selected_arch，只验证前置条件。
+    def _equal(a: Any, b: Any, i: int | None = None) -> bool:
+        if isinstance(a, (tuple, list)) and isinstance(b, (tuple, list)):
+            if len(a) != len(b):
+                return False
+            return all(_equal(x, y) for x, y in zip(a, b))
+        if isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor):
+            return torch.equal(a, b)
+        return False
+
+    if not _equal(out1, out2):
+        label = "whole-output" if not isinstance(out1, (tuple, list)) else "tuple output"
+        raise RuntimeError(
+            f"forward-determinism smoke 失败：{label} torch.equal=False"
+            f"（forward 内含未固定 RNG / 无序算子）"
+        )
+
     if not slot_paths:
-        return  # 无 slot 时跳过（但调用方应在有 slot 时才到这）
-    cap1 = _hook_slot_outputs(model, slot_paths, dummy_input, device)
-    cap2 = _hook_slot_outputs(model, slot_paths, dummy_input, device)
+        return
+    cap1 = _hook_slot_outputs(model, slot_paths, batch, forward_fn, device)
+    cap2 = _hook_slot_outputs(model, slot_paths, batch, forward_fn, device)
     for path in slot_paths:
         a, b = cap1[path], cap2[path]
         if not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
@@ -187,38 +175,38 @@ def forward_determinism_and_identity_allclose(
             raise RuntimeError(
                 f"per-slot identity allclose smoke 失败：slot {path!r} 两次 forward"
                 f" max|Δ|={max_diff:.2e} > atol={_ALLCLOSE_ATOL:.0e}（father-loaded 模块"
-                f" 在 zero intervention 下逐 slot 输出不可复现——这是 identity 契约的"
-                f" 前置条件；检查 flat 是否漏 register_buffer / 含未固定 RNG）"
+                f" 在 zero intervention 下逐 slot 输出不可复现——检查 flat 是否漏 register_buffer"
+                f" / 含未固定 RNG）"
             )
 
 
-# ── smoke 3: eval-stability（E25）─────────────────────────────────────────────
+# ── smoke 3: eval-stability（root cause B：atol 读 adapters.EVAL_NOISE_ATOL）──
 
 def eval_stability(
-    model: nn.Module, eval_fn_name: str, flat_model_path: Path
+    model: nn.Module, adapters: Any, atol: float
 ) -> float:
-    """eval_fn 跑两次 → acc 一致（捕获 train-mode 泄漏 / 未 seed workers）。返回 acc。"""
-    fn = resolve_eval_fn(eval_fn_name, flat_model_path)
-    acc1 = fn(model)
-    acc2 = fn(model)
+    """``adapters.evaluate(model)`` 跑两次 → acc 一致（atol 读 EVAL_NOISE_ATOL）。"""
+    acc1 = adapters.evaluate(model)
+    acc2 = adapters.evaluate(model)
     for acc in (acc1, acc2):
-        # bool 是 int 子类——显式排除（eval_fn 误返 True/False 会静默通过类型检查）
         if isinstance(acc, bool) or not isinstance(acc, (int, float)):
             raise TypeError(
-                f"eval_fn {eval_fn_name!r} 返回非数值：{type(acc).__name__}"
+                f"adapters.evaluate 返回非数值：{type(acc).__name__}"
             )
-    if abs(float(acc1) - float(acc2)) > _EVAL_STABILITY_ATOL:
+    if abs(float(acc1) - float(acc2)) > atol:
         raise RuntimeError(
             f"eval-stability smoke 失败：两次 eval acc 不一致（{acc1} vs {acc2}，"
-            f"Δ > {_EVAL_STABILITY_ATOL:.0e}）——eval_fn 内 train-mode 泄漏 / 未 seed workers / RNG"
+            f"Δ > {atol:.0e}）——evaluate 含未固定 RNG / 采样路径； adapters.EVAL_NOISE_ATOL"
+            f" 需放大到能容下评估协议噪声"
         )
     return float(acc1)
 
 
-# ── trace slot I/O shape（回填 search_space）───────────────────────────────────
+# ── trace slot I/O shape ──────────────────────────────────────────────────────
 
 def trace_slot_shapes(
-    model: nn.Module, slot_paths: list[str], dummy_input: torch.Tensor, device: torch.device
+    model: nn.Module, slot_paths: list[str], batch: Any,
+    forward_fn: Any, device: torch.device,
 ) -> dict[str, tuple[int, int]]:
     """hook 每个 slot 抓 in/out 末维 → ``{path: (in_dim, out_dim)}``。"""
     model.eval().to(device)
@@ -233,8 +221,6 @@ def trace_slot_shapes(
             if isinstance(in_t, (list, tuple)):
                 in_t = in_t[0]
             out_t = output[0] if isinstance(output, (tuple, list)) else output
-            # fail loud：in_dim/out_dim 是 slot 必填（下游 factory 依赖）——非 tensor 或零维
-            # 不能静默写 -1 污染 search_space。
             if not isinstance(in_t, torch.Tensor) or in_t.dim() < 1:
                 raise RuntimeError(
                     f"trace slot {path!r} 的输入非 ≥1D tensor（{type(in_t).__name__}）——"
@@ -246,7 +232,6 @@ def trace_slot_shapes(
                     f"puzzle 契约 slot 须输出 tensor，无法 trace out_dim"
                 )
             captured[path] = (int(in_t.shape[-1]), int(out_t.shape[-1]))
-
         return hook
 
     try:
@@ -259,7 +244,7 @@ def trace_slot_shapes(
                 ) from e
             handles.append(mod.register_forward_hook(make_hook(path)))
         with torch.no_grad():
-            model(dummy_input.to(device))
+            forward_fn(model, batch)
     finally:
         for h in handles:
             h.remove()
@@ -271,24 +256,26 @@ def trace_slot_shapes(
     return captured
 
 
-# ── latency ────────────────────────────────────────────────────────────────────
-# 整模 latency 测量统一走 puzzle_common.measure_whole_model_latency（DRY：与
-# gate_report 共享同一份逻辑，本节点不再持本地副本）。
-
+# ── CLI ────────────────────────────────────────────────────────────────────────
 
 def _build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Puzzle U2a measure_baseline：4 道 smoke + baseline 测量 + shape trace"
+        description="Puzzle U6 measure_baseline：适配器架构 + 4 道 smoke + baseline 测量"
     )
-    p.add_argument("--flat_path", required=True, help="LLM 产的 flat model .py 绝对路径")
+    p.add_argument("--flat_path", required=True, help="flat model .py（架构源：build_model + DUMMY_INPUT）")
     p.add_argument("--build_fn", required=True, help="flat 内 build 函数名")
     p.add_argument("--build_cfg", default="", help="build_fn 的 JSON kwargs（空则零参）")
-    p.add_argument("--father_ckpt", required=True, help="预训练父权重 .pt（state_dict）绝对路径")
-    p.add_argument("--eval_fn", required=True, help="评估函数名（或 path::func）")
     p.add_argument(
-        "--eval_kind", required=True,
-        choices=["classification", "embedding", "regression"],
-        help="评估范式（sanity check 用）",
+        "--adapters", required=True,
+        help="puzzle_adapters.py 路径（U6 §2.1：脚本唯一项目接口）",
+    )
+    p.add_argument(
+        "--manifest", default="",
+        help="manifest.yaml 路径（metadata 用；脚本不解析，agent 桥接）",
+    )
+    p.add_argument(
+        "--eval_stability_atol", type=float, default=None,
+        help="[override] 默认读 adapters.EVAL_NOISE_ATOL；显式传入则覆盖（agent 不应常规使用）",
     )
     p.add_argument("--search_space_path", required=True, help="LLM 产的 search_space.yaml 绝对路径")
     p.add_argument("--latency_unit", default="ms", choices=["ms", "us", "s"])
@@ -304,9 +291,15 @@ def main(argv: list[str] | None = None) -> int:
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     flat_path = Path(args.flat_path).resolve()
-    father_ckpt = Path(args.father_ckpt).resolve()
 
     try:
+        adapters = load_puzzle_adapters(args.adapters)
+        eval_atol = (
+            args.eval_stability_atol
+            if args.eval_stability_atol is not None
+            else float(adapters.EVAL_NOISE_ATOL)
+        )
+
         # 1) 读 search_space.yaml（LLM 产物）
         slot_dicts, candidates = load_search_space_yaml(args.search_space_path)
 
@@ -333,53 +326,59 @@ def main(argv: list[str] | None = None) -> int:
             print(f"RESULT_JSON: {json.dumps(result, ensure_ascii=False)}")
             return 2
 
-        # 2) 加载 flat model
-        model = load_flat_model(flat_path, args.build_fn, args.build_cfg)
+        # 2) 加载 flat model（架构骨架）+ 注入预训练权重（适配器）
+        #    adapters.build_model 是项目接口；flat.build_model 是架构真相源——
+        #    二者应产等价架构（adapter 内部典型地 from <flat> import build_model）。
+        #    这里走 adapters.build_model()（SPEC §2.1 canonical），load_pretrained 注入权重。
+        model = build_pretrained_model(adapters)
         if not isinstance(model, nn.Module):
             raise TypeError(
-                f"{args.build_fn} 返回非 nn.Module：{type(model).__name__}"
+                f"adapters.build_model() 返回非 nn.Module：{type(model).__name__}"
             )
 
-        # 3) smoke 1: strict-load father（零 missing/unexpected）
-        strict_load_father(model, father_ckpt)
-        # 保存统一 father_state_dict 供下游 bld/score/build/gkd 复用同一份预训练权重。
-        # 用 model.state_dict() 而非入参 ckpt——strict-load 已保证零 missing/unexpected，
-        # 故 model.state_dict() 与 father ckpt 全覆盖且 schema = flat 模型 schema（下游复用所需）。
+        # 3) smoke 1: ckpt 宽松加载（root cause C）
+        load_result = load_father_ckptrck(model, adapters)
         father_state_path = output_dir / "father_state_dict.pt"
         torch.save(model.state_dict(), father_state_path)
-        smokes_passed = ["strict-load"]
+        smokes_passed = ["ckpt-load"]
 
-        # dummy input（DUMMY_INPUT 声明真实 I/O 维度）
-        dummy_meta = get_module_dummy_input(flat_path)
-        shape = list(dummy_meta["shape"])
-        dtype = getattr(torch, str(dummy_meta.get("dtype", "float32")))
-        dummy_input = torch.randn(*shape, dtype=dtype)
+        # 4) 准备 native batch：取 calib_iter 首个 batch（U6：不再假设单 tensor）
         device = torch.device("cpu")
         model.eval().to(device)
+        forward_fn = adapters.forward_model
+        try:
+            calib_iter = adapters.calib_iter(device=device)
+            batch = next(iter(calib_iter))
+        except StopIteration as e:
+            raise RuntimeError(
+                "adapters.calib_iter() 返回空迭代——无法取 baseline batch（检 manifest 数据入口）"
+            ) from e
 
-        # 4) smoke 2 + smoke 4（两次 forward 复用）
+        # 5) smoke 2 + smoke 4（两次 forward 复用）
         slot_paths = [str(d["path"]) for d in slot_dicts]
-        forward_determinism_and_identity_allclose(model, slot_paths, dummy_input, device)
+        forward_determinism_and_identity_allclose(
+            model, slot_paths, batch, forward_fn, device
+        )
         smokes_passed.append("forward-determinism")
         smokes_passed.append("per-slot-identity-allclose")
 
-        # 5) smoke 3: eval-stability + 取 acc
-        baseline_acc = eval_stability(model, args.eval_fn, flat_path)
+        # 6) smoke 3: eval-stability（root cause B：atol 读 EVAL_NOISE_ATOL）
+        baseline_acc = eval_stability(model, adapters, eval_atol)
         smokes_passed.append("eval-stability")
 
-        # 6) trace slot I/O shape → 回填 slot_dicts
-        shapes = trace_slot_shapes(model, slot_paths, dummy_input, device)
+        # 7) trace slot I/O shape → 回填 slot_dicts
+        shapes = trace_slot_shapes(model, slot_paths, batch, forward_fn, device)
         for d in slot_dicts:
             in_dim, out_dim = shapes[str(d["path"])]
             d["in_dim"] = in_dim
             d["out_dim"] = out_dim
 
-        # 7) latency
+        # 8) latency（U6：measure_whole_model_latency 经 forward_fn + batch）
         baseline_latency = measure_whole_model_latency(
-            model, dummy_input, device, args.latency_script_path
+            model, forward_fn, batch, device, args.latency_script_path
         )
 
-        # 8) 写产物：block_map.json + baseline_metrics.json + 更新 search_space.yaml
+        # 9) 写产物
         block_map = to_block_map(slot_dicts)
         block_map_path = output_dir / "block_map.json"
         block_map.to_json(block_map_path)
@@ -391,8 +390,13 @@ def main(argv: list[str] | None = None) -> int:
             "baseline_acc": baseline_acc,
             "baseline_latency": baseline_latency,
             "latency_unit": args.latency_unit,
-            "eval_kind": args.eval_kind,
-            "eval_fn": args.eval_fn,
+            "metric_direction": adapters.METRIC_DIRECTION,
+            "metric_atol": eval_atol,
+            "ckpt_load": {
+                "missing_count": len(load_result.missing),
+                "unexpected_count": len(load_result.unexpected),
+                "from_scratch": bool(load_result.from_scratch),
+            },
             "seed": args.seed,
             "smokes_passed": smokes_passed,
         }
@@ -400,7 +404,6 @@ def main(argv: list[str] | None = None) -> int:
         with open(baseline_metrics_path, "w", encoding="utf-8") as f:
             json.dump(baseline_metrics, f, ensure_ascii=False, indent=2)
 
-        # 9) stdout
         generated = [
             str(flat_path),
             str(father_state_path),
@@ -421,6 +424,7 @@ def main(argv: list[str] | None = None) -> int:
             "latency_unit": args.latency_unit,
             "fidelity_passed": True,
             "smokes_passed": smokes_passed,
+            "ckpt_from_scratch": bool(load_result.from_scratch),
             "error": "",
             "generated_artifacts": generated,
         }

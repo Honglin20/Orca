@@ -19,9 +19,9 @@ Slot-level semantic checks (kind evidence, mask-bearing candidates, return-arity
 The caller provides absolute paths to:
 
 1. **`search_space.yaml`** — the producer's search-space declaration (the artifact under audit).
-2. **`manifest.yaml`** — the project facts. Use its `training_and_evaluation.eval_kind`, its recorded model `outputs` shape, its paradigm / loss / metric fields, and its `evaluation_entry` to sanity-check the evaluation paradigm.
+2. **`manifest.yaml`** — the project facts. Use its `training_and_evaluation.metric.direction` and `paradigm` / `loss` / `metric.name` fields plus its recorded model `outputs` shape to sanity-check the evaluation paradigm (the `eval_kind` / `evaluation_entry` / `data_loader_entry` fields are not used; the adapter `puzzle_adapters.py` exposes the same semantics via `METRIC_DIRECTION` / `FORWARD_CALLING_CONVENTION` / `evaluate`).
 3. **Candidate catalog** — the framework `candidate_catalog.yaml` that registers every legal candidate name, the kinds each applies to, and whether the candidate is `mask_aware`. A candidate name absent from this catalog is invalid.
-4. **Flat model** (read-only cross-reference, used only for the eval_kind sanity check in step 7 when the manifest alone is ambiguous — to confirm whether the model exposes a classification head or emits a hidden vector). Per-slot structural and source-evidence checks (path resolution, kind evidence, shape, return-arity, mask-bearing candidates) are the block-map-evaluator's job and stay out of scope here.
+4. **Flat model** (read-only cross-reference, used only for the paradigm sanity check in step 7 when the manifest alone is ambiguous — to confirm whether the model exposes a classification head or emits a hidden vector). Per-slot structural and source-evidence checks (path resolution, kind evidence, shape, return-arity, mask-bearing candidates) are the block-map-evaluator's job and stay out of scope here.
 
 If any mandatory input file (1–3) is missing or unreadable, return immediately with status `unresolved` and state which path is missing. Never infer registrations or paradigms from filenames.
 
@@ -69,23 +69,25 @@ For each user-registered candidate `{name, factory, applies_to, ...}`:
 - `factory` must be `<file_path>::<callable>`. A missing `::`, a non-existent file, or a callable name that does not exist in that file is `[BLOCKER]`.
 - `applies_to` must list at least one legal kind, and every kind it lists must correspond to a slot kind that actually appears in `slots:` (a user candidate registered for a kind nobody declared is dead configuration — flag it `[MINOR]`, since it does not break the search but signals a stale entry).
 
-### 7. eval_kind sanity
+### 7. Evaluation paradigm sanity
 
-Cross-check the evaluation paradigm declared in `manifest.yaml` (`training_and_evaluation.eval_kind`) against the rest of the manifest's paradigm signals (the `paradigm` line, the `loss`, the `metric.name`, the recorded model `outputs` shape) and, when those still leave it ambiguous, the flat model source (does it expose a classification head, or emit a hidden vector?):
+Cross-check the evaluation paradigm declared in `manifest.yaml` (the `training_and_evaluation.metric.direction` (`higher-better` / `lower-better`), the `paradigm` line, the `loss`, the `metric.name`, and the recorded model `outputs` shape) and, when those still leave it ambiguous, the flat model source (does it expose a classification head, or emit a hidden vector?):
 
-- **classification** — the model output must be class logits: a last dimension equal to the number of classes, and the eval function must return a scalar accuracy-like metric in `[0, 1]` (or a percentage). A classification declaration paired with a hidden-vector output, or with a retrieval metric (k-NN accuracy, cosine recall), or with a metric-learning / InfoNCE loss, is `[MAJOR]` — those signals describe an embedding paradigm, not classification.
-- **embedding** — the model output must be a hidden representation (a vector per sample, consumed by a retrieval / k-NN / cosine metric), not class logits. An embedding declaration paired with an output that is clearly class logits over a small class count, or with a cross-entropy classification loss and a plain accuracy metric, is `[MAJOR]`.
-- **regression** — the model output must be a scalar or a small per-sample vector consumed by an MSE / MAE-style metric. A regression declaration paired with a class-logits output is `[MAJOR]`.
+- **classification (higher-better)** — the model output must be class logits: a last dimension equal to the number of classes, and the eval must return a scalar accuracy-like metric in `[0, 1]` (or a percentage). A classification declaration paired with a hidden-vector output, or with a retrieval / cosine-recall metric, or with a contrastive / metric-learning loss, is `[MAJOR]` — those signals describe an embedding paradigm, not classification.
+- **embedding / metric learning** — the model output must be a hidden representation (a vector per sample, consumed by a retrieval / similarity metric), not class logits. An embedding declaration paired with an output that is clearly class logits over a small class count, or with a cross-entropy classification loss and a plain accuracy metric, is `[MAJOR]`.
+- **regression (lower-better)** — the model output must be a scalar or a small per-sample vector consumed by an MSE / MAE-style metric. A regression declaration paired with a class-logits output is `[MAJOR]`.
 
-When the manifest and the flat source together do not record enough to disambiguate (for example `model.outputs` is blank and the flat exposes no obvious head), do not raise a finding — note it as deferred. Never guess the paradigm from the eval function name alone.
+The `metric.direction` must be consistent with the paradigm and the metric name: accuracy / top-k / recall → higher-better; loss / error / perplexity → lower-better. A direction that contradicts the metric semantics is `[MAJOR]`.
+
+When the manifest and the flat source together do not record enough to disambiguate (for example `model.outputs` is blank and the flat exposes no obvious head), do not raise a finding — note it as deferred. Never guess the paradigm from the adapter source alone.
 
 ### 8. Deprecated fields
 
-The `axes` field was removed from the slot schema (the candidate list itself now defines what the search explores). Any slot still carrying an `axes` key is `[MINOR]`. Other unknown extra keys on a slot are not by themselves findings — flag them only if they shadow or contradict a required field.
+The `axes` field was removed from the slot schema (the candidate list itself now defines what the search explores). Any slot still carrying an `axes` key is `[MINOR]`. The retired manifest fields `eval_kind` / `evaluation_entry` / `data_loader_entry` lingering anywhere in `search_space.yaml` or `manifest.yaml` are `[MINOR]` — they are now expressed by `puzzle_adapters.py` + `metric.direction` / `forward_calling_convention`. Other unknown extra keys on a slot are not by themselves findings — flag them only if they shadow or contradict a required field.
 
 ### 9. Cross-document consistency
 
-The `eval_kind` recorded in `search_space.yaml` (if the producer duplicated it there) must match the one in `manifest.yaml`. A mismatch is `[BLOCKER]` — two sources of truth for the evaluation paradigm will desync downstream agents.
+The `metric.direction` / `forward_calling_convention` recorded in `manifest.yaml` must match what `puzzle_adapters.py` actually exposes (`METRIC_DIRECTION` / `FORWARD_CALLING_CONVENTION`). A mismatch is `[BLOCKER]` — two sources of truth for the evaluation paradigm or forward convention will desync downstream agents.
 
 ## Compile Feedback
 

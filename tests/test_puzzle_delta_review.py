@@ -1,10 +1,9 @@
-"""code-reviewer 要求的 delta 微测试:_ZeroBlock 形状 / load_father_model missing 比例阈值 /
-mip_select floor 缺失 raise。与 test_puzzle_father_state.py 互补。
+"""code-reviewer 要求的 delta 微测试：_ZeroBlock 形状 / mip_select floor 缺失 raise /
+build_pretrained_model 宽松加载 / U6 select_reason enum 收缩。
 """
 from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -46,7 +45,8 @@ def test_factory_no_op_requires_equal_io_dim():
         pb.make_zero(_S2())
 
 
-# ── load_father_model missing-ratio gate ────────────────────────────────────
+# ── U6：build_pretrained_model（替代 load_father_model missing-ratio gate）────
+
 def _write_flat_with_build(tmp: Path) -> Path:
     flat = tmp / "flat_for_test.py"
     flat.write_text(
@@ -67,31 +67,62 @@ def build_model():
     return flat
 
 
-def test_load_father_model_raises_on_large_missing(tmp_path):
-    flat = _write_flat_with_build(tmp_path)
-    # 只给 a 的权重(3 个 Linear 中 1 个 → ~67% missing)> 20% → raise
-    sd = {"a.weight": torch.zeros(4, 4), "a.bias": torch.zeros(4)}
-    ckpt = tmp_path / "father.pt"
-    torch.save(sd, ckpt)
-    with pytest.raises(RuntimeError, match="严重不齐"):
-        pc.load_father_model(str(flat), "build_model", "", str(ckpt))
+def test_build_pretrained_model_accepts_full_load(tmp_path):
+    """adapters.load_pretrained 双零 missing/unexpected → from_scratch=False。
 
-
-def test_load_father_model_accepts_small_missing(tmp_path):
+    U6：不再做 missing-ratio raise（root cause C：宽松）；from_scratch 标志记录到 baseline。
+    """
+    import importlib.util
+    import textwrap
     flat = _write_flat_with_build(tmp_path)
-    m = pc.load_flat_model(str(flat), "build_model", "")
-    sd = m.state_dict()  # 全量 → 0 missing,接受
-    ckpt = tmp_path / "father.pt"
-    torch.save(sd, ckpt)
-    out = pc.load_father_model(str(flat), "build_model", "", str(ckpt))
+    sys.path.insert(0, str(tmp_path))
+    spec = importlib.util.spec_from_file_location("_f_load", flat)
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    sd = mod.build_model().state_dict()
+    father = tmp_path / "father.pt"
+    torch.save(sd, father)
+
+    adapters_py = tmp_path / "puzzle_adapters.py"
+    adapters_py.write_text(textwrap.dedent(f"""
+        import importlib.util, torch, torch.nn.functional as F
+        from torch.utils.data import DataLoader, TensorDataset
+        from collections import namedtuple
+        _LoadResult = namedtuple("_LoadResult", ["missing", "unexpected", "from_scratch"])
+        _spec = importlib.util.spec_from_file_location("_f", r"{flat}")
+        _flat = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_flat)
+        build_model = _flat.build_model; DUMMY_INPUT = _flat.DUMMY_INPUT
+        FORWARD_CALLING_CONVENTION = "single"
+        METRIC_DIRECTION = "higher-better"
+        EVAL_NOISE_ATOL = 1e-6
+        def forward_model(m, b):
+            x = b[0] if isinstance(b, (tuple, list)) else b
+            return m(x)
+        def calib_iter(device=None):
+            x = torch.randn(4, 4); return iter(DataLoader(TensorDataset(x), batch_size=2))
+        def train_iter(device=None):
+            x = torch.randn(8, 4); y = torch.randint(0, 10, (8,))
+            return iter(DataLoader(TensorDataset(x, y), batch_size=4))
+        def extract_labels(b):
+            return b[1] if isinstance(b, (tuple, list)) and len(b) >= 2 else None
+        def kd_loss(s, t, labels=None):
+            s = s[0] if isinstance(s, (tuple, list)) else s
+            t = t[0] if isinstance(t, (tuple, list)) else t
+            return F.kl_div(F.log_softmax(s, -1), F.softmax(t, -1), reduction="batchmean")
+        def task_loss(s, l):
+            return None if l is None else F.cross_entropy(s, l)
+        def evaluate(m):
+            m.eval()
+            with torch.no_grad():
+                return float(m(torch.randn(*DUMMY_INPUT["shape"])).abs().mean().item())
+        def load_pretrained(m):
+            ck = torch.load(r"{father}", map_location="cpu", weights_only=False)
+            mi, un = m.load_state_dict(ck, strict=False)
+            return _LoadResult(list(mi), list(un), len(mi) > 0.5 * len(m.state_dict()))
+    """), encoding="utf-8")
+    adapters = pc.load_puzzle_adapters(adapters_py)
+    out = pc.build_pretrained_model(adapters)
     assert isinstance(out, nn.Module)
     assert not out.training  # eval
-
-
-def test_load_father_model_raises_on_missing_file(tmp_path):
-    flat = _write_flat_with_build(tmp_path)
-    with pytest.raises(FileNotFoundError):
-        pc.load_father_model(str(flat), "build_model", "", str(tmp_path / "nope.pt"))
 
 
 # ── mip_select floor-missing raise ──────────────────────────────────────────
@@ -104,7 +135,7 @@ def test_mip_raises_when_no_floor_and_no_baseline():
                       baseline_whole_latency=None, measured_floor=None)
 
 
-# ── U5 #4：no_op 非方 slot 收缩（is_candidate_valid_for_slot）─────────────────
+# ── U5 #4：no_op 非方 slot 收缩 ──────────────────────────────────────────────
 def _slot(**kw):
     defaults = dict(
         layer_idx=0, kind="attention", in_dim=32, out_dim=32, num_heads=0, head_dim=0,
@@ -115,52 +146,56 @@ def _slot(**kw):
 
 
 def test_is_candidate_valid_for_slot_rejects_no_op_on_non_square_slot():
-    """no_op（零输出块）要求 in_dim == out_dim（make_zero 契约）。
-
-    非方 slot 的 no_op 被 is_candidate_valid_for_slot 判 invalid——收缩候选而非
-    在 factory 期 raise 崩整链（intent：候选枚举处统一过滤，BLD/score/build_selected
-    不再触 factory 的 square-dims guard）。
-    """
-    # 方 slot：no_op valid（与 identity 同列 MIP floor 候选）
     assert pc.is_candidate_valid_for_slot("no_op", _slot(in_dim=32, out_dim=32)) is True
-    # 非方 slot：no_op 被 valid 拒
     assert pc.is_candidate_valid_for_slot("no_op", _slot(in_dim=32, out_dim=24)) is False
-    # 非方 slot 上 identity 仍 valid（passthrough 铁律，与 dims 无关）
     assert pc.is_candidate_valid_for_slot("identity", _slot(in_dim=32, out_dim=24)) is True
-    # 非方 ffn slot 的 no_op 同样被拦（square 检查在 cross-kind 之前，对所有 kind 生效）
     assert pc.is_candidate_valid_for_slot(
         "no_op", _slot(kind="ffn", ffn_struct="standard", in_dim=32, out_dim=24)
     ) is False
 
 
-# ── U5 #1 BLOCKER 回归守卫：puzzle.yaml pz_select schema × mip_select.py emit 契约 ─
-def test_puzzle_yaml_pz_select_schema_covers_mip_select_early_warning():
-    """pz_select output_schema 必须覆盖 mip_select.py 所有 emit 路径的字段集。
+# ── U6 #G：mip_select select_reason enum 收缩 + 新增 reduction 参数 ──────────
 
-    U5 #1 BLOCKER 的两层契约（任一破坏 → schema 校验 fail → node_failed catch-all，
-    E12 早警 intent 被 silently 击落）：
-      (a) select_reason enum ⊇ {target-too-aggressive}（原 BLOCKER：enum 漂移）。
-      (b) properties ⊇ {infeasible_reason}（残留 BLOCKER：早警路径 emit 的诊断字段，
-          additionalProperties:false 会拒——第一轮修复只加 enum 未加 property，被
-          code-reviewer 复审抓出）。本测试锁这两层，防同类漂移回归。
+def test_mip_select_cli_has_latency_reduction_target():
+    """U6：mip_select 加 --latency_reduction_target（默认 0.5）+ --target-latency 改可选。"""
+    import mip_select as ms
+    parser = ms._build_argparser()
+    actions = {a.dest: a for a in parser._actions}
+    assert "latency_reduction_target" in actions
+    assert actions["latency_reduction_target"].default == 0.5
+    # target_latency 不再 required（root cause G：可由 reduction 推导）
+    assert actions["target_latency"].required is False
+
+
+def test_mip_select_no_longer_emits_target_too_aggressive():
+    """U6：select_reason enum 收缩到 mip-optimal/infeasible/none。
+
+    旧路径 ``target-too-aggressive`` 早警 + ``infeasible_reason`` 字段已退役
+    （root cause G）；puzzle.yaml schema 的同步更新是 Wave 2 范围。
+    本测试扫描代码字符串字面量（非 docstring）。
     """
-    import yaml
-    wf = yaml.safe_load((REPO / "workflows" / "puzzle.yaml").read_text(encoding="utf-8"))
-    pz_select = next(n for n in wf["nodes"] if n["name"] == "pz_select")
-    props = pz_select["output_schema"]["properties"]
-    # (a) enum 覆盖所有 script emit 的 select_reason 值
-    enum = props["select_reason"]["enum"]
-    emitted_reasons = {"mip-optimal", "infeasible", "none", "target-too-aggressive"}
-    assert emitted_reasons.issubset(set(enum)), \
-        f"select_reason enum 缺脚本 emit 值：{emitted_reasons - set(enum)}"
-    # (b) 早警路径（target-too-aggressive）emit 的字段集 ⊆ schema properties
-    #     （mip_select.py 早警块独立编写，曾漏 infeasible_reason → additionalProperties:false 拒）
-    early_warning_keys = {
-        "selected_arch", "total_score", "selected_latency", "feasible",
-        "select_reason", "latency_unit", "infeasible_reason",
-    }
-    missing = early_warning_keys - set(props.keys())
-    assert not missing, f"早警 emit 字段未在 schema properties：{missing}"
-    # additionalProperties:false 强约束——required ⊆ properties 是必要前提
-    assert set(pz_select["output_schema"]["required"]).issubset(set(props.keys()))
-    assert pz_select["output_schema"]["additionalProperties"] is False
+    import ast
+    import importlib
+    ms = importlib.import_module("mip_select")
+    src_path = Path(ms.__file__)
+    tree = ast.parse(src_path.read_text(encoding="utf-8"))
+    string_lits: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            string_lits.add(node.value)
+    # 代码字符串字面量中不应有 target-too-aggressive / infeasible_reason（
+    # docstring 是 ast.Expr->Constant，也会进 string_lits——但 docstring 文本不含
+    # 这两个精确值；精确值只在旧代码的 return dict 里出现）
+    assert "target-too-aggressive" not in string_lits, (
+        "U6 应删 target-too-aggressive 字符串字面量（root cause G）"
+    )
+    assert "infeasible_reason" not in string_lits
+
+
+def test_gate_report_cli_has_latency_reduction_target():
+    """U6：gate_report 加 --latency_reduction_target（默认 0.5），判 ratio ≤ (1 - reduction)。"""
+    import gate_report as gr
+    parser = gr._build_argparser()
+    actions = {a.dest: a for a in parser._actions}
+    assert "latency_reduction_target" in actions
+    assert actions["latency_reduction_target"].default == 0.5

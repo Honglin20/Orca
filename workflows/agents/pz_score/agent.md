@@ -1,5 +1,5 @@
 ---
-description: Puzzle replace-1-block 打分执行 agent（folder-agent）。跑预写 _puzzle_scripts/score.py + latency_table.py → 对每个 (layer,kind,variant) 把该块替换进冻结全模型，calibration 上算 block-distance 分（classification=KL logits；embedding=hidden cosine distance；regression=output MSE）+ per-variant 实测 latency → scores.jsonl + latency_table.jsonl。推 3 图（block_score_bar / latency_dist / score_vs_latency_scatter，label `puzzle/score`）。无上限自愈直到产物 ≥1 行且 (layer,variant) 对齐。触碰 scoring logic → 重触 project-fidelity-verifier。禁碰 block_map / flat_model / block_library / 源项目。pathlib 铁律。
+description: Puzzle replace-1-block 打分执行 agent（folder-agent）。跑预写 _puzzle_scripts/score.py + latency_table.py → 对每个 (layer,kind,variant) 把该块替换进冻结全模型，calibration 上算 block-distance 分（由 adapters.kd_loss 决定，不再写死 KL/cosine/MSE 分支）+ per-variant 实测 latency → scores.jsonl + latency_table.jsonl。推 3 图（block_score_bar / latency_dist / score_vs_latency_scatter，label `puzzle/score`）。无上限自愈直到产物 ≥1 行且 (layer,variant) 对齐。触碰 scoring logic → 重触 project-fidelity-verifier。禁碰 block_map / flat_model / block_library / 源项目。pathlib 铁律。
 tools: [bash, read, edit, grep, glob, task]
 ---
 # pz_score
@@ -18,10 +18,9 @@ score.py / latency_table.py 本体禁 edit → fail loud）。
 - `$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本 run artifacts 目录。
 - `$ORCA_AGENT_RESOURCES`（orca spawn 注入）= 本 agent 资源目录。
 - `workflows/agents/_puzzle_scripts/score.py` = 预写 replace-1-block 打分脚本。读 block_library +
-  flat_model + block_map + calib loader + `--eval_kind`，per (layer,kind,variant) 替换单块进冻结
-  全模型，calibration 上算 block-distance 分（classification → KL logits；embedding → hidden
-  cosine；regression → output MSE）。输出 `scores.jsonl`：`{layer, kind, variant, score, valid}`，
-  score = `-distance`（越大越好）。
+  flat_model + block_map + adapters，per (layer,kind,variant) 替换单块进冻结全模型，calibration
+  上经 `adapters.kd_loss` 算 block-distance 分（agent 移植的正确 distance；不再写死 KL/cosine/MSE
+  分支）。输出 `scores.jsonl`：`{layer, kind, variant, score, valid}`，score = `-distance`（越大越好）。
 - `workflows/agents/_puzzle_scripts/latency_table.py` = 预写 latency 实测脚本。per (layer,kind,variant)
   调 `measure_module_latency` 或包装用户 `latency_script_path`。输出 `latency_table.jsonl`：
   `{layer, kind, variant, latency_ms}`（单位 = `latency_unit` 标注，不换算）。
@@ -37,8 +36,8 @@ score.py / latency_table.py 本体禁 edit → fail loud）。
 Step 1 前确认都已知（缺任一 → fail loud）：
 
 - 上游产物：`block_map.json` + `<base>_flat.py` + `baseline_metrics.json` + `block_library/` +
-  `bld_summary.json`（任一缺 → fail loud，`status=failed`，assessment 写明缺哪个）。
-- `{{ inputs.eval_kind }}`：classification / embedding / regression（决定 score.py 打分指标分支）。
+  `bld_summary.json` + `puzzle_adapters.py` + `manifest.yaml`（任一缺 → fail loud，`status=failed`，
+  assessment 写明缺哪个）。distance 分支由 `adapters.kd_loss` 决定（agent 移植用户任务正确 distance）。
 - `{{ inputs.latency_unit }}` / `{{ inputs.latency_script_path }}`：latency 单位 + 可选用户脚本。
 - `{{ inputs.seed }}`：复现性种子。
 - `$ORCA_ARTIFACTS_DIR`：产物目录。
@@ -67,6 +66,8 @@ Step 1 前确认都已知（缺任一 → fail loud）：
    `baseline_metrics.json`、`project_manifest.md`、`block_library/*.pt`、`bld_summary.json`、
    `_puzzle_scripts/score.py` / `latency_table.py`（预写脚本）、
    `{{ inputs.project_root }}` 下源文件（例外 `artifacts/`）。
+   `puzzle_adapters.py` 是 pz_expand 生成产物——若 self-heal 定位根因在 adapters（如 distance 公式
+   错），可改并重触 project-fidelity-verifier（生成产物非预写脚本）。
 5. **产物 ≥1 行 + 对齐**：scores.jsonl 和 latency_table.jsonl 各 ≥1 行；每 (layer,kind,variant)
    在两边都出现。否则 fail loud。
 6. 你的**最终回复**只能是 Step 4 那个 `emit_result.py` 打印的**单行 JSON**。
@@ -105,9 +106,8 @@ python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/score.py" \
   --build_fn "<manifest.yaml 的 model.build_entry，agent 读 manifest 桥接>" \
   --build_cfg "{{ inputs.build_cfg }}" \
   --block_library "$ORCA_ARTIFACTS_DIR/block_library" \
-  --father_state "$ORCA_ARTIFACTS_DIR/father_state_dict.pt" \
-  --eval_fn "<manifest.yaml 的 training_and_evaluation.evaluation_entry，agent 读 manifest 桥接>" \
-  --eval_kind "{{ inputs.eval_kind }}" \
+  --adapters "$ORCA_ARTIFACTS_DIR/puzzle_adapters.py" \
+  --manifest "$ORCA_ARTIFACTS_DIR/manifest.yaml" \
   --output_dir "$ORCA_ARTIFACTS_DIR" \
   --seed {{ inputs.seed }}
 
@@ -115,8 +115,10 @@ python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/latency_table.py" \
   --block_map "$ORCA_ARTIFACTS_DIR/block_map.json" \
   --flat_model "$ORCA_ARTIFACTS_DIR/<base>_flat.py" \
   --build_fn "<manifest.yaml 的 model.build_entry，agent 读 manifest 桥接>" \
+  --build_cfg "{{ inputs.build_cfg }}" \
   --block_library "$ORCA_ARTIFACTS_DIR/block_library" \
-  --father_state "$ORCA_ARTIFACTS_DIR/father_state_dict.pt" \
+  --adapters "$ORCA_ARTIFACTS_DIR/puzzle_adapters.py" \
+  --manifest "$ORCA_ARTIFACTS_DIR/manifest.yaml" \
   --latency_unit "{{ inputs.latency_unit }}" \
   --latency_script_path "{{ inputs.latency_script_path }}" \
   --output_dir "$ORCA_ARTIFACTS_DIR"

@@ -1,24 +1,20 @@
-"""puzzle_common.py —— Puzzle workflow 算法脚本层共享 helper。
+"""puzzle_common.py —— Puzzle workflow 算法脚本层共享 helper（U6 适配器架构）。
 
-无 LLM、无网络、确定性。fail loud（错误抛异常 + 调用方 exit 2）。
+U6 范式翻转（SPEC puzzle-u6-design-draft §2）：脚本不再假设任何用户代码形态，
+所有项目相关性收敛到 agent 在 pz_expand 移植生成的 ``puzzle_adapters.py``。本模块
+提供 ``load_puzzle_adapters`` 加载器 + 校验，以及若干项目无关的算法 helper。
 
-核心契约：
-  - ``Slot`` dataclass：可替换 sub-block slot（SPEC v2 §4.1，kind 开放标签）。
-  - ``BlockMap``：slot 列表 + JSON 读写。
-  - ``candidate_registry``：``load_catalog()`` 读 ``candidate_catalog.yaml`` 产
-    ``{name: CatalogEntry}``；factory 签名 ``factory(slot: Slot) -> nn.Module``，
-    输出末维 = ``slot.out_dim``（外部维度固定不可搜索，铁律）。
-  - ``load_catalog`` / ``get_candidate``：catalog loader API（取代硬编码 registry）。
-  - ``load_flat_model``：动态加载 flat model 文件并调 build_fn。
-  - ``capture_parent_activations``：forward hook 抓每个 slot 的 (in, out) 作
-    BLD teacher 信号。
-  - ``build_calib_loader``：合成随机张量 DataLoader（latency / score 等只需 I/O
-    shape 的场景用；**禁** 给 BLD teacher 信号用——会 OOD）。
-  - ``build_real_calib_loader``：调外部 loader_fn 抽首个 batch 真实数据（E14，
-    BLD teacher 信号的正确来源）。
+核心契约（确定性，fail loud）：
+  - ``Slot`` / ``BlockMap``：可替换 sub-block slot（SPEC v2 §4.1，kind 开放标签）。
+  - ``load_puzzle_adapters(path)``：动态加载 puzzle_adapters.py 并校验能力 API
+    （SPEC U6 §2.1）。脚本唯一项目接口。
+  - ``_LoadResult``：ckpt 加载结果（missing/unexpected/from_scratch）。
+  - ``candidate_registry`` / ``load_catalog`` / ``get_candidate``：catalog loader API。
   - ``is_valid_ffn_prune`` / ``is_candidate_valid_for_slot``：E6/E8 结构验证器。
-  - ``measure_whole_model_latency``：整模 latency 测量（DRY：measure_baseline +
-    gate_report 复用）。
+  - ``capture_parent_activations``：forward hook 抓每个 slot 的 (in, out) 作 BLD teacher
+    信号——经 ``adapters.forward_model(model, batch)`` 喂模型（不再假设单 tensor）。
+  - ``measure_whole_model_latency``：整模 latency（DRY：measure_baseline + gate_report）。
+  - ``build_student_from_arch``：从 selected_arch + block_library 重建异构 student。
 
 兄弟 import（禁 sys.path 魔改）：同目录脚本 ``from puzzle_common import ...``。
 """
@@ -29,13 +25,13 @@ import functools
 import importlib.util
 import json
 import sys
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator, NamedTuple
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
 
 # 候选块实现库（puzzle_blocks）由 load_catalog 函数内 lazy import（避免循环）。
 # builtin factory 字符串形如 ``puzzle_blocks::make_<name>``。
@@ -48,9 +44,7 @@ class Slot:
     """一个可替换的 transformer sub-block slot（SPEC v2 §4.1）。
 
     ``kind`` 替代 v1 的 ``slot_type``（E3，开放标签 attention/ffn/conv/moe/custom）。
-    新增字段：return_arity（E15）/original_intermediate（E7 ratio 基准）/
-    activation（E23，ffn required）/ffn_struct（E6 结构验证）/mask_load_bearing（E8）。
-    ``parent_module_path`` 保留脚本侧字段名（search_space.yaml 的 ``path`` 是 loader 别名）。
+    字段语义详见 SPEC v2 §4.1；本 dataclass 仅承载结构信息，与项目 forward 签名无关。
     """
     layer_idx: int
     kind: str                 # E3：开放标签（attention/ffn/conv/moe/custom）
@@ -60,19 +54,11 @@ class Slot:
     head_dim: int
     source_class: str         # 原块类名（溯源 + 结构验证用）
     parent_module_path: str   # ``model.get_submodule(path)`` 可定位
-    # E2：输入 arity（single/multi）——记录字段，evaluator 审 mask_load_bearing 一致性
     forward_arity: str = "single"
-    # E15：输出 arity——multi-return slot 拒绝 single-output 候选
     return_arity: str = "single"
-    # E7：FFN 原中间维（ratio 基准，非 in_dim）；非 ffn slot 为 None
     original_intermediate: int | None = None
-    # E23：FFN 激活（gelu/relu/silu/...）；ffn factory required，null → raise
     activation: str | None = None
-    # E6：FFN 结构类型 standard/bypass/glu/dual；非 standard → 禁剪枝候选
-    # （is_valid_ffn_prune 消费，bld/score/build_selected 在枚举时过滤）。
     ffn_struct: str = "standard"
-    # E8：父层是否传 functionally-load-bearing kwargs（attention_mask 等）
-    # （is_candidate_valid_for_slot 消费，mask-bearing slot 拒绝 mask-blind candidate）。
     mask_load_bearing: bool = False
 
 
@@ -99,7 +85,152 @@ class BlockMap:
         return cls(slots=slots)
 
 
-# ── flat model 动态加载 ────────────────────────────────────────────────────────
+# ── ckpt 加载结果（U6 §2.1 _LoadResult）─────────────────────────────────────────
+
+class _LoadResult(NamedTuple):
+    """``adapters.load_pretrained(model)`` 的返回契约（SPEC U6 §2.1）。
+
+    - ``missing`` / ``unexpected``：load_state_dict(strict=False) 的结果，供脚本记录。
+    - ``from_scratch``：适配器判定本次 load 实质未恢复预训练权重（如 ckpt 缺失 /
+      schema 完全不齐 → 适配器选择 from-scratch）。脚本据此标注 baseline_metrics。
+    """
+    missing: list[str]
+    unexpected: list[str]
+    from_scratch: bool
+
+
+# ── 适配器能力 API 加载层（SPEC U6 §2.1，脚本唯一项目接口）────────────────────────
+
+# 脚本依赖的适配器能力（缺则 fail loud）。每条 (name, kind, required)。
+# kind: "callable" | "str_const" | "float_const" | "dict_const"
+_ADAPTER_REQUIRED_CAPABILITIES: tuple[tuple[str, str], ...] = (
+    ("build_model", "callable"),
+    ("FORWARD_CALLING_CONVENTION", "str_const"),
+    ("forward_model", "callable"),
+    ("calib_iter", "callable"),
+    ("train_iter", "callable"),
+    ("extract_labels", "callable"),
+    ("kd_loss", "callable"),
+    ("task_loss", "callable"),
+    ("evaluate", "callable"),
+    ("METRIC_DIRECTION", "str_const"),
+    ("EVAL_NOISE_ATOL", "float_const"),
+    ("load_pretrained", "callable"),
+    ("DUMMY_INPUT", "dict_const"),
+)
+
+_ALLOWED_FORWARD_CONVENTIONS: frozenset[str] = frozenset({"positional", "dict", "single"})
+_ALLOWED_METRIC_DIRECTIONS: frozenset[str] = frozenset({"higher-better", "lower-better"})
+
+
+def load_puzzle_adapters(path: str | Path) -> Any:
+    """从 ``path`` import puzzle_adapters.py 模块，校验能力 API，返回模块对象。
+
+    SPEC U6 §2.1：脚本的唯一项目接口。模块须暴露下列能力（签名稳定）：
+      - ``build_model() -> nn.Module``：零参实例化（agent 把 config 烧进去）。
+      - ``FORWARD_CALLING_CONVENTION``：``"positional"|"dict"|"single"``。
+      - ``forward_model(model, batch) -> output``：按 convention 调 model(...)。
+      - ``calib_iter(device=None) -> Iterator[batch]``：真实 calib 数据。
+      - ``train_iter(device=None) -> Iterator[batch]``：真实训练数据（含 labels）。
+      - ``extract_labels(batch) -> Tensor | None``：从 native batch 抽标签。
+      - ``kd_loss(s_out, t_out, labels=None) -> Tensor``：项目正确的 KD loss。
+      - ``task_loss(s_out, labels) -> Tensor | None``：硬标签监督（None 则无）。
+      - ``evaluate(model) -> float``：移植用户 eval 协议。
+      - ``METRIC_DIRECTION``：``"higher-better"|"lower-better"``。
+      - ``EVAL_NOISE_ATOL``：float，eval-stability 容差。
+      - ``load_pretrained(model) -> _LoadResult``：宽松 ckpt 加载。
+      - ``DUMMY_INPUT``：dict，真实 I/O 维度声明。
+
+    缺关键能力 → fail loud（点名缺哪个）。文件目录加入 sys.path（让 adapter 的本地
+    import 可解，如 ``from flat_model import build_model``）。
+    """
+    p = Path(path).resolve()
+    if not p.is_file():
+        raise FileNotFoundError(f"puzzle_adapters 文件不存在：{p}")
+    here = str(p.parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    spec = importlib.util.spec_from_file_location("_puzzle_adapters", p)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法为 {p} 构建 module spec")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # 校验：逐项检查能力存在 + 类型对（fail loud 点名缺哪个）。
+    for name, kind in _ADAPTER_REQUIRED_CAPABILITIES:
+        if not hasattr(mod, name):
+            raise AttributeError(
+                f"puzzle_adapters {p.name} 缺能力 {name!r}（SPEC U6 §2.1 契约）"
+            )
+        val = getattr(mod, name)
+        if kind == "callable":
+            if not callable(val):
+                raise TypeError(
+                    f"puzzle_adapters.{name} 须为 callable，得到 {type(val).__name__}"
+                )
+        elif kind == "str_const":
+            if not isinstance(val, str):
+                raise TypeError(
+                    f"puzzle_adapters.{name} 须为 str，得到 {type(val).__name__}"
+                )
+        elif kind == "float_const":
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                raise TypeError(
+                    f"puzzle_adapters.{name} 须为 float，得到 {type(val).__name__}"
+                )
+        elif kind == "dict_const":
+            if not isinstance(val, dict):
+                raise TypeError(
+                    f"puzzle_adapters.{name} 须为 dict，得到 {type(val).__name__}"
+                )
+
+    fc = mod.FORWARD_CALLING_CONVENTION
+    if fc not in _ALLOWED_FORWARD_CONVENTIONS:
+        raise ValueError(
+            f"puzzle_adapters.FORWARD_CALLING_CONVENTION={fc!r} 非法"
+            f"（允许：{sorted(_ALLOWED_FORWARD_CONVENTIONS)}）"
+        )
+    md = mod.METRIC_DIRECTION
+    if md not in _ALLOWED_METRIC_DIRECTIONS:
+        raise ValueError(
+            f"puzzle_adapters.METRIC_DIRECTION={md!r} 非法"
+            f"（允许：{sorted(_ALLOWED_METRIC_DIRECTIONS)}）"
+        )
+    return mod
+
+
+def build_pretrained_model(adapters: Any) -> nn.Module:
+    """``adapters.build_model()`` + ``adapters.load_pretrained(model)``。
+
+    脚本创建预训练 father/teacher 的统一入口。U6：脚本不再做 strict-load 双零硬门——
+    load 的前缀剥离 / 多字段 dict / module./_orig_mod./ema. 由适配器消化，结果记入
+    baseline_metrics（``_LoadResult``）。
+    """
+    model = adapters.build_model()
+    if not isinstance(model, nn.Module):
+        raise TypeError(
+            f"adapters.build_model() 返回非 nn.Module：{type(model).__name__}"
+        )
+    result = adapters.load_pretrained(model)
+    if not isinstance(result, _LoadResult) and not (
+        hasattr(result, "missing") and hasattr(result, "unexpected")
+        and hasattr(result, "from_scratch")
+    ):
+        raise TypeError(
+            f"adapters.load_pretrained(model) 须返 _LoadResult，得到 {type(result).__name__}"
+        )
+    if result.from_scratch:
+        print(
+            f"[puzzle_common] WARN: adapters.load_pretrained 标记 from_scratch=True"
+            f"（missing={len(result.missing)}, unexpected={len(result.unexpected)}）"
+            f"——baseline 可能近随机 init，检查 ckpt 路径与 schema 对齐",
+            file=sys.stderr,
+        )
+    model.eval()
+    return model
+
+
+# ── flat model 动态加载（仍保留：flat 是架构源；adapter 是项目接口）─────────────
 
 def load_flat_model(
     flat_path: str | Path,
@@ -108,9 +239,9 @@ def load_flat_model(
 ) -> nn.Module:
     """动态 import flat model 文件并调 ``build_fn(**build_cfg_kwargs)``。
 
-    build_cfg 为 JSON 字符串（来自 workflow inputs.build_cfg），空串 → 零参调用。
-    flat_path 文件目录加入 sys.path（让其本地 import 可解）。
-    fail loud：文件不存在 / 无 build_fn / 调用失败 → raise。
+    U6：脚本主要通过 ``adapters.build_model()`` 实例化；本 helper 保留给
+    ``build_student_from_arch`` 等需要直接重建架构骨架的路径（flat 与 adapter 共存，
+    adapter 内部典型地 ``from <flat> import build_model``）。
     """
     p = Path(flat_path).resolve()
     if not p.is_file():
@@ -140,93 +271,11 @@ def load_flat_model(
     return fn(**cfg_kwargs)
 
 
-def _extract_state_dict(ckpt: Any) -> dict[str, torch.Tensor]:
-    """从 torch.load 的结果抽取 state_dict，解 wrapper 形态。
-
-    形如 ``{state_dict: {...}, ...}`` 的 wrapper（无 blocks./patch_embed. 等模型层键
-    出现在顶层）→ 取内层；否则认为是裸 state_dict 原样返回。father 权重加载在
-    measure_baseline / bld / score / build_selected / gkd / gate 共用此 helper（DRY）。
-    """
-    if (
-        isinstance(ckpt, dict)
-        and "state_dict" in ckpt
-        and not any(k.startswith(("blocks.", "patch_embed.")) for k in ckpt.keys())
-    ):
-        return ckpt["state_dict"]
-    return ckpt
-
-
-def load_father_model(
-    flat_path: str | Path,
-    build_fn: str,
-    build_cfg: str | None,
-    father_state_path: str | Path | None,
-) -> nn.Module:
-    """加载 flat model + 预训练父权重（Puzzle father/teacher/baseline 契约）。
-
-    Puzzle 的 father/teacher/baseline 必须是预训练模型——bld 的冻结 teacher、
-    score 的冻结全模型、gkd 的 teacher 都靠本函数注入同一份预训练权重。
-
-    - father_state_path 为空/None → 回退 load_flat_model（随机 init）+ stderr WARN
-      （向后兼容；Puzzle 契约要求预训练 father，空串走随机只留给 dry-run fixture
-      等非关键路径，生产路径必须给值）。
-    - father_state_path 非空但文件不存在 → raise FileNotFoundError（fail loud——
-      father ckpt 缺即 baseline=chance，Puzzle 无的放矢，禁静默降级）。
-    - 文件存在 → torch.load + ``_extract_state_dict`` 解 wrapper +
-      ``load_state_dict(strict=False)``（missing/unexpected 走 stderr WARN，不 raise
-      ——flat model schema 与 ckpt 可能有不相关键）+ ``.eval()``。
-    """
-    model = load_flat_model(flat_path, build_fn, build_cfg)
-    if not father_state_path:
-        print(
-            "[puzzle_common] WARN: father_state_path 空 → 用随机初始化 father"
-            "（向后兼容；Puzzle 契约要求预训练 father,检查 --father_state 透传）",
-            file=sys.stderr,
-        )
-        model.eval()
-        return model
-    p = Path(father_state_path)
-    if not p.is_file():
-        raise FileNotFoundError(
-            f"father_state 文件不存在: {p}（Puzzle father/teacher/baseline 必须预训练）"
-        )
-    ckpt = torch.load(p, map_location="cpu", weights_only=False)
-    state = _extract_state_dict(ckpt)
-    if not isinstance(state, dict):
-        raise TypeError(
-            f"father_state 解出的 state_dict 非 dict: {type(state).__name__}（{p}）"
-        )
-    missing, unexpected = model.load_state_dict(state, strict=False)
-    total_keys = len(model.state_dict())
-    # 大面积 missing → father 权重与 flat_model schema 严重不齐,baseline 会 silent 退化为
-    # 近随机 init,后续 score/gkd/gate 全失真而 gate 仍可能"通过"。>20% 即 raise(Rule 12)。
-    if total_keys and len(missing) > 0.2 * total_keys:
-        raise RuntimeError(
-            f"father_state_dict 与 flat_model 严重不齐:{len(missing)}/{total_keys} keys missing "
-            f"({100*len(missing)/total_keys:.0f}%)。检查 --father_state / --build_fn/--build_cfg "
-            f"是否匹配预训练模型的架构。missing 前 8: {missing[:8]}"
-        )
-    if missing:
-        print(
-            f"[puzzle_common] WARN: father load_state_dict missing keys: "
-            f"{missing[:8]}（共 {len(missing)} 个,<20% 可接受）",
-            file=sys.stderr,
-        )
-    if unexpected:
-        print(
-            f"[puzzle_common] WARN: father load_state_dict unexpected keys: "
-            f"{unexpected[:8]}（共 {len(unexpected)} 个）",
-            file=sys.stderr,
-        )
-    model.eval()
-    return model
-
-
 def get_module_dummy_input(flat_module_path: str | Path) -> dict[str, Any]:
     """从 flat model 文件读 ``DUMMY_INPUT``（含 shape/dtype）。
 
-    puzzle 不接外部数据集——合成 calibration 输入靠 DUMMY_INPUT 声明真实 I/O 维度。
-    fail loud：无 DUMMY_INPUT / 无 shape → raise。
+    U6：DUMMY_INPUT 也可由 adapter 提供（``adapters.DUMMY_INPUT``）；本 helper 仍读 flat
+    文件，给 ``build_student_from_arch`` 等内部路径用。fail loud：无 DUMMY_INPUT → raise。
     """
     p = Path(flat_module_path).resolve()
     here = str(p.parent)
@@ -244,9 +293,7 @@ def get_module_dummy_input(flat_module_path: str | Path) -> dict[str, Any]:
 
 
 # ── passthrough 候选（SPEC v2 §3：identity = 保留 father-loaded 模块）──────────
-# identity 候选 = 不替换 slot 的架构与权重——保留 father-loaded 模块（架构来自
-# flat.build_fn，权重来自 father_state_dict）。build/score/latency 遇到时 NOT 替换
-# slot。与 no_op（零输出块，residual 不变）严格区分。
+
 PASSTHROUGH_VARIANTS: set[str] = {"identity"}
 
 
@@ -255,29 +302,18 @@ def is_passthrough(variant: str) -> bool:
     return variant in PASSTHROUGH_VARIANTS
 
 
-# ── candidate catalog loader（SPEC v2 §5，取代硬编码 registry）─────────────────
+# ── candidate catalog loader（SPEC v2 §5）──────────────────────────────────────
 
-# 第一版开放 kind 标签（D4：builtin 只覆盖 attention/ffn；conv/moe/custom 仅 identity）。
 _ALL_KINDS: tuple[str, ...] = ("attention", "ffn", "conv", "moe", "custom")
 _CATALOG_PATH = Path(__file__).resolve().parent / "candidate_catalog.yaml"
 
 
 @dataclass
 class CatalogEntry:
-    """candidate catalog 单条目（SPEC v2 §5.1）。
-
-    - ``factory``：``functools.partial`` 绑定 params 后、再经 ``_wrap`` 包
-      ``_KwargPassthrough`` 的统一 ``factory(slot) -> nn.Module``。passthrough
-      候选（identity）factory=None（永不实例化）。
-    - ``kinds``：适用 kind 集合（按 catalog 的 ``kind`` list）。
-    - ``requires_ffn_struct``：FFN 结构约束（如 ffn_75 要求 ["standard"]）；
-      is_candidate_valid_for_slot 消费此字段对非 standard FFN 收缩剪枝候选（E6）。
-    - ``mask_aware``：is_candidate_valid_for_slot 消费——mask_load_bearing slot
-      拒绝 mask_aware=False 的候选（E8，只留 identity）。
-    """
+    """candidate catalog 单条目（SPEC v2 §5.1）。"""
     name: str
     kinds: set[str]
-    source: str                       # builtin | passthrough | user
+    source: str
     factory: Callable[[Slot], nn.Module] | None
     params: dict[str, Any]
     align: str
@@ -287,11 +323,13 @@ class CatalogEntry:
     description: str
 
 
-def _resolve_builtin_factory(spec: str, params: dict[str, Any]) -> Callable[[Slot], nn.Module]:
+def _resolve_builtin_factory(
+    spec: str, params: dict[str, Any], mask_aware: bool = False
+) -> Callable[[Slot], nn.Module]:
     """``puzzle_blocks::make_<name>`` + params → 统一 factory(slot)。
 
-    用 ``functools.partial`` 绑定 params（E4），再经 ``puzzle_blocks._wrap`` 包
-    ``_KwargPassthrough``（适配异构父层 forward 签名，统一所有 builtin）。
+    ``mask_aware=True`` 时用 ``puzzle_blocks._wrap_mask``（保留 attn_mask kwarg，
+    SPEC U6 §3 root cause F），否则用 ``puzzle_blocks._wrap``（剥 kwargs）。
     """
     import puzzle_blocks  # lazy import，断循环
 
@@ -308,17 +346,13 @@ def _resolve_builtin_factory(spec: str, params: dict[str, Any]) -> Callable[[Slo
     bound: Callable[[Slot], nn.Module] = (
         functools.partial(fn, **params) if params else fn
     )
-    return puzzle_blocks._wrap(bound)
+    wrapper = puzzle_blocks._wrap_mask if mask_aware else puzzle_blocks._wrap
+    return wrapper(bound)
 
 
 def load_catalog(path: str | Path | None = None) -> dict[str, CatalogEntry]:
-    """读 candidate_catalog.yaml → ``{name: CatalogEntry}``。
-
-    builtin：``puzzle_blocks::make_<name>`` + params → ``functools.partial`` + ``_wrap``。
-    passthrough（identity）：factory=None（is_passthrough 短路，永不实例化）。
-    fail loud：YAML 缺文件 / 条目缺字段 / factory 不可解析 → raise。
-    """
-    import yaml  # 顶层依赖已声明（runtime 必须）
+    """读 candidate_catalog.yaml → ``{name: CatalogEntry}``。"""
+    import yaml
 
     p = Path(path) if path else _CATALOG_PATH
     if not p.is_file():
@@ -358,7 +392,8 @@ def load_catalog(path: str | Path | None = None) -> dict[str, CatalogEntry]:
             spec = item.get("factory")
             if not isinstance(spec, str):
                 raise ValueError(f"{p} builtin 候选 {name!r} 缺 factory 字符串")
-            factory = _resolve_builtin_factory(spec, params)
+            mask_aware_flag = bool(item.get("mask_aware", False))
+            factory = _resolve_builtin_factory(spec, params, mask_aware=mask_aware_flag)
         else:
             raise ValueError(f"{p} 候选 {name!r} source 须为 builtin|passthrough，得到 {source!r}")
         catalog[name] = CatalogEntry(
@@ -374,7 +409,6 @@ def load_catalog(path: str | Path | None = None) -> dict[str, CatalogEntry]:
             description=str(item.get("description", "")),
         )
 
-    # E1：identity 必入 catalog（每 slot 候选列表的 MIP floor 锚）
     for pt in PASSTHROUGH_VARIANTS:
         if pt not in catalog:
             raise ValueError(f"{p} 缺 passthrough 候选 {pt!r}（identity 必入 catalog）")
@@ -383,7 +417,6 @@ def load_catalog(path: str | Path | None = None) -> dict[str, CatalogEntry]:
     return catalog
 
 
-# 模块级 catalog（load_catalog 一次性加载；puzzle_blocks 无运行时反向依赖，无循环）。
 candidate_registry: dict[str, CatalogEntry] = load_catalog()
 
 
@@ -398,15 +431,7 @@ def get_candidate(name: str, catalog: dict[str, CatalogEntry] | None = None) -> 
 
 
 def get_default_candidates() -> dict[str, list[str]]:
-    """默认候选集（SPEC v2 §5.4 / D4）。
-
-    attention/ffn 给 builtin 全集；conv/moe/custom 仅 identity（框架预留）。
-    每个 kind 列表都含 identity（E1：MIP floor 锚）。
-
-    注：no_op 工厂要求 in_dim==out_dim（puzzle_blocks.make_zero）；非方 slot 由
-    ``is_candidate_valid_for_slot`` 据形状收缩候选（no_op 被判 invalid，不进
-    BLD/score/build_selected 枚举），不在 factory 期 fail-loud 崩整链。
-    """
+    """默认候选集（SPEC v2 §5.4 / D4）。"""
     return {
         "attention": [
             "identity",
@@ -415,6 +440,7 @@ def get_default_candidates() -> dict[str, list[str]]:
             "fnet",
             "softs_star",
             "vanilla",
+            "masked_vanilla",
             "no_op",
         ],
         "ffn": ["identity", "ffn_75", "ffn_50", "linear", "no_op"],
@@ -425,16 +451,7 @@ def get_default_candidates() -> dict[str, list[str]]:
 
 
 def parse_block_candidates(raw: str | None) -> dict[str, list[str]]:
-    """解析 inputs.block_candidates（JSON 或空）→ ``{kind: [candidate, ...]}``。
-
-    kind-keyed dict（动态 key，非硬编码 attention/ffn）——适配 SPEC v2 §4 开放 kind。
-    空 → 默认集（get_default_candidates）。非空 JSON 须为非空 dict。
-
-    fail loud（E1/E3/E4）：
-    - 非法 JSON / 非 dict / kind 值非 list[str] → raise
-    - 候选名未注册 / 候选不适用该 kind → raise
-    - 某 kind 列表缺 identity（E1：identity 必入每 slot 候选）→ raise
-    """
+    """解析 inputs.block_candidates（JSON 或空）→ ``{kind: [candidate, ...]}``。"""
     if not raw or not raw.strip():
         return get_default_candidates()
     try:
@@ -453,7 +470,6 @@ def parse_block_candidates(raw: str | None) -> dict[str, list[str]]:
         if not val:
             raise ValueError(f"block_candidates.{kind} 须为非空 list[str]")
         for name in val:
-            # identity 也由 load_catalog 载入（source=passthrough），故统一查表。
             entry = candidate_registry.get(name)
             if entry is None:
                 raise ValueError(
@@ -463,7 +479,6 @@ def parse_block_candidates(raw: str | None) -> dict[str, list[str]]:
                 raise ValueError(
                     f"候选 {name!r} 不适用于 kind={kind!r}（适用集：{sorted(entry.kinds)}）"
                 )
-        # E1：identity 必入每 kind 候选列表
         if "identity" not in val:
             raise ValueError(
                 f"block_candidates.{kind} 缺 identity（identity 必入每 kind 候选）"
@@ -475,15 +490,7 @@ def parse_block_candidates(raw: str | None) -> dict[str, list[str]]:
 # ── candidate-slot 结构验证器（SPEC v2 §5.2 E6/E8）─────────────────────────────
 
 def is_valid_ffn_prune(slot: Slot) -> bool:
-    """E6：FFN 剪枝候选（ffn_75/ffn_50/linear）仅适用 ``slot.ffn_struct='standard'``。
-
-    bypass/GLU/dual 等非标准 FFN 结构禁剪枝——剪枝会静默破坏结构（如 bypass 的
-    残差路径被截断、GLU 的门控被丢弃）。返回 False → 该 slot 的 ffn_75/ffn_50/linear
-    被 ``is_candidate_valid_for_slot`` 过滤，候选自动收缩到 {identity, no_op}。
-
-    注：本函数只判 slot 侧的结构许可；候选侧的 ``requires_ffn_struct`` 约束由
-    ``is_candidate_valid_for_slot`` 联合判定。
-    """
+    """E6：FFN 剪枝候选仅适用 ``slot.ffn_struct='standard'``。"""
     return slot.ffn_struct == "standard"
 
 
@@ -496,157 +503,65 @@ def is_candidate_valid_for_slot(
 
     返回 False 表示该 candidate 不适用此 slot，应在枚举处被过滤（不进 BLD/score/
     build_selected）。规则：
-      - passthrough（identity）：永远 valid（SPEC §3 铁律——保留父块不破坏结构）。
-      - 跨 kind 适用性：``slot.kind not in entry.kinds`` → False（attention 候选
-        不适用 ffn slot，反之亦然——catalog ``kind`` list 是 single source of truth）。
-      - E6：entry.requires_ffn_struct 非空 → ``slot.ffn_struct`` 必须在
-        ``entry.requires_ffn_struct`` 中（非 standard FFN 拒绝剪枝候选
-        ffn_75/ffn_50/linear，自动收缩到 {identity, no_op}）。
+      - passthrough（identity）：永远 valid。
+      - no_op（零输出块）要求 in_dim == out_dim；非方 slot 在此收缩候选，避免 factory
+        在 BLD/score 期 raise 崩整链。
+      - 跨 kind 适用性：``slot.kind not in entry.kinds`` → False。
+      - E6：entry.requires_ffn_struct 非空 → ``slot.ffn_struct`` 必须在其中。
       - E8：slot.mask_load_bearing=True 且 entry.mask_aware=False → 拒绝
-        （mask-bearing slot 选 mask-blind 候选会丢 mask 语义，只留 identity）。
-
-    本函数是 candidate-slot 结构校验的 single source of truth——下游
-    bld/score/build_selected 应在枚举 / 防御性关卡处统一调它。
-    fail loud：name 未在 catalog 注册 → raise（经 get_candidate）。
+        （mask-bearing slot 至少能选 mask_aware 候选 + identity）。
     """
     entry = get_candidate(name, catalog)
     if entry.source == "passthrough":
-        return True  # identity 永远 valid（SPEC §3 铁律）
-    # no_op（零输出块）要求 in_dim == out_dim（puzzle_blocks.make_zero 契约）；
-    # 非方 slot 在此收缩候选，避免 factory 在 BLD/score 期 raise 崩整链。
+        return True
     if name == "no_op" and slot.in_dim != slot.out_dim:
         return False
-    # 跨 kind 适用性（catalog 的 kinds × slot.kind）
     if slot.kind not in entry.kinds:
         return False
-    # E6：FFN 剪枝结构约束（catalog 的 requires_ffn_struct × slot.ffn_struct）
     if entry.requires_ffn_struct:
-        # 进入此分支已保证 slot.kind == 'ffn'（entry.requires_ffn_struct 非空
-        # 意味 entry 适用 ffn，跨 kind 检查上面已过）
         if slot.ffn_struct not in entry.requires_ffn_struct:
-            return False  # 非 standard FFN 拒绝剪枝（bypass/GLU/dual）
-    # E8：mask-bearing slot 拒绝 mask-blind candidate
+            return False
     if slot.mask_load_bearing and not entry.mask_aware:
         return False
     return True
-
-
-# ── 合成 calibration DataLoader ────────────────────────────────────────────────
-
-class _TensorDataset(Dataset):
-    """每样本一个张量（per_sample_shape）；DataLoader 在 batch 维 stack。
-
-    不存预 batch 的张量，避免 DataLoader 再 stack 一层（之前 bug）。
-    """
-
-    def __init__(self, samples: list[torch.Tensor]):
-        self.samples = samples
-
-    def __len__(self) -> int:
-        return len(self.samples)
-
-    def __getitem__(self, idx: int) -> torch.Tensor:
-        return self.samples[idx]
-
-
-def build_calib_loader(
-    model: nn.Module,
-    dummy_input: dict[str, Any] | None = None,
-    batch_size: int = 2,
-    num_batches: int = 2,
-    device: torch.device | None = None,
-) -> DataLoader:
-    """合成随机张量 DataLoader（通用，不硬编码数据集）。
-
-    dummy_input 形如 ``{"shape": [B, ...], "dtype": "float32"}``（取自 flat model
-    的 ``DUMMY_INPUT``）。``shape[1:]`` 作单样本形状；DataLoader 把 ``batch_size``
-    个样本 stack 成 ``[batch_size, *per_sample_shape]``。共生成
-    ``num_batches * batch_size`` 个样本。
-    """
-    if dummy_input is None:
-        raise ValueError("build_calib_loader 需要 dummy_input（DUMMY_INPUT 声明）")
-    shape = list(dummy_input["shape"])
-    if not shape:
-        raise ValueError(f"DUMMY_INPUT.shape 空：{dummy_input!r}")
-    dtype_name = str(dummy_input.get("dtype", "float32"))
-    dtype = getattr(torch, dtype_name)
-    per_sample_shape = shape[1:]  # 去掉 batch 维
-    n_samples = max(1, num_batches) * max(1, batch_size)
-    samples = [torch.randn(*per_sample_shape, dtype=dtype) for _ in range(n_samples)]
-    if device is not None:
-        samples = [s.to(device) for s in samples]
-    return DataLoader(_TensorDataset(samples), batch_size=batch_size, shuffle=False)
-
-
-def build_real_calib_loader(
-    loader_fn_str: str,
-    device: torch.device | None = None,
-) -> DataLoader:
-    """调外部 ``loader_fn_str`` (path::func) → 抽首个 batch 真实数据 → 包装为 DataLoader。
-
-    SPEC v2 §9.1 E14 修正：BLD teacher 信号必须来自真实数据 sample（非 ``torch.randn``
-    OOD——candidates 学 noise→teacher_on_noise 在真实数据上全错）。manifest.yaml 的
-    ``data_and_environment.data_loader_entry`` 经 agent 桥接为本函数入参（脚本不解析
-    manifest，E9）。
-
-    契约：``loader_fn_str`` 形如 ``"proj/train.py::build_dataloader"``，零参调用返回
-    re-iterable DataLoader。本函数取首个 batch 物化到 ``_TensorDataset``（便于
-    ``capture_parent_activations`` 重复 forward + 多 variant 共享同一份 teacher 信号）。
-
-    fail loud（Rule 12）：
-      - loader_fn 不可调用 / 未返回可迭代 → raise
-      - 空 DataLoader（无 batch）→ raise（禁静默回退 randn）
-      - 首个 batch 非 tensor → raise（puzzle 契约 slot 输入须 tensor）
-    """
-    fn = load_external_callable(loader_fn_str)
-    full_loader = fn()
-    if not hasattr(full_loader, "__iter__"):
-        raise TypeError(
-            f"{loader_fn_str!r} 未返回可迭代 DataLoader（real-data calib 契约）"
-        )
-    try:
-        first_batch = next(iter(full_loader))
-    except StopIteration as e:
-        raise RuntimeError(
-            f"{loader_fn_str!r} 返回空 DataLoader——无法抽真实 calib 数据。"
-            f"manifest.data_and_environment.data_loader_entry 必须指向非空数据集"
-        ) from e
-    inp = first_batch[0] if isinstance(first_batch, (list, tuple)) else first_batch
-    if not isinstance(inp, torch.Tensor):
-        raise TypeError(
-            f"{loader_fn_str!r} 首个 batch 非 tensor（{type(inp).__name__}）——"
-            f"real-data calib 契约要求 tensor 输入"
-        )
-    inp = inp.to(device) if device is not None else inp
-    # 拆为单样本再 stack 回原 batch（_TensorDataset 契约；保留原 batch 形状）
-    samples = [inp[i] for i in range(inp.shape[0])]
-    return DataLoader(
-        _TensorDataset(samples), batch_size=inp.shape[0], shuffle=False
-    )
 
 
 # ── 整模 latency 测量（DRY：measure_baseline + gate_report 复用）──────────────
 
 def measure_whole_model_latency(
     model: nn.Module,
-    dummy_input: torch.Tensor,
+    forward_fn: Callable[[nn.Module, Any], Any],
+    batch: Any,
     device: torch.device,
     latency_script_path: str = "",
+    repetitions: int = 100,
+    warmup: int = 30,
 ) -> float:
-    """整模 forward latency（默认 ``measure_module_latency`` PyTorch median ms；
-    ``latency_script_path`` 提供则包装外部 script）。
+    """整模 forward latency（默认 median ms；``latency_script_path`` 提供则包装外部 script）。
 
-    DRY：从 measure_baseline.py + gate_report.py 抽出（两处原本各持一份）。
+    U6：``forward_fn(model, batch)`` 由调用方传入（典型为 ``adapters.forward_model``），
+    本函数不再假设 ``model(single_tensor)``。``batch`` 是 native batch（来自
+    ``adapters.calib_iter()`` 的首个 batch，或据 ``adapters.DUMMY_INPUT`` 合成）。
+
+    ``latency_script_path`` 形如 ``path::func``，签名 ``fn(model, batch) -> float``
+    （agent 在 adapter 同目录生成的 latency 测量脚本，项目可定义自己的计时协议）。
     """
     if latency_script_path:
         fn = load_external_callable(latency_script_path)
-        return float(fn(model, dummy_input))
-    from nas_agent.latency import measure_module_latency
-    return float(
-        measure_module_latency(
-            model, dummy_input, device, repetitions=100, warmup=30
-        )
-    )
+        return float(fn(model, batch))
+    model.eval().to(device)
+    with torch.no_grad():
+        for _ in range(max(1, warmup)):
+            forward_fn(model, batch)
+        times: list[float] = []
+        for _ in range(max(1, repetitions)):
+            t0 = time.perf_counter()
+            forward_fn(model, batch)
+            times.append(time.perf_counter() - t0)
+    if not times:
+        raise RuntimeError("measure_whole_model_latency：无有效 timing 样本")
+    times.sort()
+    return times[len(times) // 2] * 1000.0  # median ms
 
 
 # ── 父激活捕获（BLD teacher 信号）─────────────────────────────────────────────
@@ -654,13 +569,17 @@ def measure_whole_model_latency(
 def capture_parent_activations(
     model: nn.Module,
     block_map: BlockMap,
-    calib_loader: DataLoader,
+    calib_iter: Iterator[Any],
+    forward_fn: Callable[[nn.Module, Any], Any],
     device: torch.device,
 ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
     """用 forward hooks 捕获每个 slot 的 (input, output)。
 
-    返回 ``{parent_module_path: (in_tensor, out_tensor)}``。取首个非空 batch。
-    fail loud：任何 slot 的 module path 在 model 中无法定位 → raise。
+    U6：``forward_fn(model, batch)`` 由适配器提供（处理多输入/dict batch）；``calib_iter``
+    是 ``adapters.calib_iter()`` 返回的迭代器。返回 ``{parent_module_path: (in, out)}``。
+
+    hook 抓的是 slot 模块自身的 input/output（slot 内部契约，与整模 forward 签名无关）——
+    主数据路径张量作为 teacher 信号。fail loud：任何 slot path 无法定位 → raise。
     """
     model.eval().to(device)
     targets: dict[str, nn.Module] = {}
@@ -679,18 +598,26 @@ def capture_parent_activations(
     def make_hook(path: str):
         def hook(_mod: nn.Module, inputs: tuple, output: Any):
             if path in captured:
-                return  # 已抓到，保留首个
-            in_t = inputs[0] if isinstance(inputs, tuple) and inputs else inputs
-            if not isinstance(in_t, torch.Tensor):
-                # 非张量输入（如 tuple）→ 取首个张量
-                in_t = inputs[0] if isinstance(inputs, tuple) else inputs
-            if isinstance(output, tuple):
+                return
+            in_t: Any
+            if isinstance(inputs, tuple) and inputs:
+                in_t = inputs[0]
+            elif isinstance(inputs, (list, tuple)) and inputs:
+                in_t = inputs[0]
+            else:
+                in_t = inputs
+            if isinstance(in_t, (tuple, list)):
+                in_t = in_t[0] if in_t else inputs
+            if isinstance(output, (tuple, list)):
                 out_t = output[0]
             elif isinstance(output, torch.Tensor):
                 out_t = output
             else:
                 out_t = output
-            captured[path] = (in_t.detach(), out_t.detach())
+            captured[path] = (
+                in_t.detach() if isinstance(in_t, torch.Tensor) else in_t,
+                out_t.detach() if isinstance(out_t, torch.Tensor) else out_t,
+            )
         return hook
 
     for path, mod in targets.items():
@@ -698,14 +625,8 @@ def capture_parent_activations(
 
     try:
         with torch.no_grad():
-            for batch in calib_loader:
-                if isinstance(batch, (list, tuple)):
-                    inp = batch[0]
-                else:
-                    inp = batch
-                inp = inp.to(device)
-                model(inp)
-                # 全部 slot 抓到就停（贪首个 batch）
+            for batch in calib_iter:
+                forward_fn(model, batch)
                 if len(captured) == len(targets):
                     break
     finally:
@@ -723,7 +644,7 @@ def capture_parent_activations(
 # ── slot key / variant 文件名 ─────────────────────────────────────────────────
 
 def slot_key(layer_idx: int, kind: str) -> str:
-    """统一 slot 唯一 key（jsonl/gkd 复用）。``kind`` 替代 v1 的 slot_type（E3）。"""
+    """统一 slot 唯一 key。"""
     return f"L{layer_idx}_{kind}"
 
 
@@ -756,50 +677,10 @@ def replace_slot(
     return original
 
 
-# ── eval_fn 解析 ──────────────────────────────────────────────────────────────
-
-def resolve_eval_fn(
-    eval_fn: str, flat_model_path: str | Path
-) -> Callable[[nn.Module], float]:
-    """解析 eval_fn：``path::func`` 外部文件，或 flat module 内函数名。
-
-    返回 ``fn(model) -> float``（acc 或 loss，方向由 eval_kind 决定）。
-    fail loud：找不到 / 不是 callable → raise。
-    """
-    if "::" in eval_fn:
-        ext_path, func = eval_fn.split("::", 1)
-        p = Path(ext_path).resolve()
-        if not p.is_file():
-            raise FileNotFoundError(f"eval_fn 文件不存在：{p}")
-        here = str(p.parent)
-        if here not in sys.path:
-            sys.path.insert(0, here)
-        spec = importlib.util.spec_from_file_location("_puzzle_eval_ext", p)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        fn = getattr(mod, func, None)
-    else:
-        fp = Path(flat_model_path).resolve()
-        here = str(fp.parent)
-        if here not in sys.path:
-            sys.path.insert(0, here)
-        spec = importlib.util.spec_from_file_location("_puzzle_flat_eval", fp)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        fn = getattr(mod, eval_fn, None)
-    if not callable(fn):
-        raise AttributeError(f"eval_fn {eval_fn!r} 不是 callable")
-    return fn
-
-
 # ── 外部 callable 解析（path::func，DRY：expand/latency_table/gate 复用）──────
 
 def load_external_callable(path_func: str) -> Callable:
-    """解析 ``path::func`` 字符串 → callable。
-
-    文件目录加入 sys.path（让其本地 import 可解）。fail loud：
-    缺 ``::`` / 文件不存在 / 不是 callable → raise。
-    """
+    """解析 ``path::func`` 字符串 → callable。"""
     if "::" not in path_func:
         raise ValueError(f"需 'path::func' 形态，得到 {path_func!r}")
     ext_path, func = path_func.split("::", 1)
@@ -829,14 +710,9 @@ def load_variant_state_dict(
     *,
     strict_unexpected: bool = True,
 ) -> None:
-    """载入 variant 的 state_dict；fail loud 检查 missing/unexpected。
-
-    - missing keys 非空 → raise（factory 与 ckpt schema 不对齐）
-    - unexpected keys 非空 → raise（``strict_unexpected=True``，默认；
-      `` False`` 时仅 stderr WARN——仅留给 BLD 刚训完即存的同源路径）
-    """
+    """载入 variant 的 state_dict；fail loud 检查 missing/unexpected。"""
     if not sd:
-        return  # passthrough / 零参数 variant 的空 state_dict
+        return
     missing, unexpected = module.load_state_dict(sd, strict=False)
     if missing:
         raise RuntimeError(
@@ -859,38 +735,42 @@ def load_variant_state_dict(
 # ── 从 selected_arch 重建异构 student（DRY：build/gkd/gate 复用）──────────────
 
 def build_student_from_arch(
-    flat_model_path: str | Path,
-    build_fn: str,
-    build_cfg: str,
+    adapters: Any,
     block_map: "BlockMap",
     selected_arch: dict,
     block_library_dir: str | Path,
     device: torch.device,
-    father_state_path: str | Path | None = None,
+    flat_model_path: str | Path | None = None,
+    build_fn: str | None = None,
+    build_cfg: str | None = None,
 ) -> nn.Module:
     """通用：从 selected_arch + block_library 重建异构 student 模型。
+
+    U6：基座通过 ``adapters.build_model()`` 实例化 + ``adapters.load_pretrained(model)``
+    注入预训练父权重（identity slot 保留 father 权重）。若 ``flat_model_path`` 提供，
+    则优先用 ``load_flat_model`` 构建架构骨架（与 adapter 共享同一架构类），再走
+    ``adapters.load_pretrained`` 注入权重——这条路径用于兼容 ``build_student_from_arch``
+    的精细架构控制（flat 文件是架构真相源）。
 
     - identity（passthrough）：跳过替换，保留父块。
     - 其他 variant：factory 实例化 + load ckpt（``load_variant_state_dict`` 严格）。
     - no_op / 零参 variant：照常 factory，空 state_dict 跳过 load。
 
-    father_state_path 非空 → base arch 用 ``load_father_model`` 注入预训练父权重，
-    使 identity（passthrough）slot 保留的是 father 权重而非随机初始化。空/None →
-    回退 ``load_flat_model``（随机 init；适用于其后还会用 selected/final state_dict
-    覆盖的 student 场景，如 gkd/gate）。
-
     ``selected_arch`` 接受两种 dict 形态（自动 unwrap ``selected_arch`` 键）：
       - mip_select 结果：``{"selected_arch": {layer: {kind: variant}}, ...}``。
-      - 裸架构：``{layer: {kind: variant}}``（如 selected_model.pt / final_model.pt
-        顶层即该子字典的 ckpt）。
-    非 dict（None / falsy）→ 空架构（全 passthrough，仅由 father/flat base 决定）。
+      - 裸架构：``{layer: {kind: variant}}``。
     """
-    if father_state_path:
-        model = load_father_model(
-            flat_model_path, build_fn, build_cfg, father_state_path
-        )
+    if flat_model_path and build_fn:
+        model = load_flat_model(flat_model_path, build_fn, build_cfg or "")
     else:
-        model = load_flat_model(flat_model_path, build_fn, build_cfg)
+        model = adapters.build_model()
+    if not isinstance(model, nn.Module):
+        raise TypeError(
+            f"build_student_from_arch：build 出非 nn.Module（{type(model).__name__}）"
+        )
+    # 注入预训练父权重（U6：load_pretrained 由适配器消化前缀/schema 差异）。
+    adapters.load_pretrained(model)
+
     arch = selected_arch.get("selected_arch", selected_arch) if isinstance(
         selected_arch, dict
     ) else {}
@@ -906,7 +786,7 @@ def build_student_from_arch(
             continue
         variant = chosen[key]
         if is_passthrough(variant):
-            continue  # 保留父块，不替换
+            continue
         entry = get_candidate(variant)
         if slot.kind not in entry.kinds:
             raise ValueError(
@@ -922,3 +802,32 @@ def build_student_from_arch(
             load_variant_state_dict(new_module, sd, variant, strict_unexpected=True)
         replace_slot(model, slot.parent_module_path, new_module)
     return model
+
+
+# ── final_status.json 统一终态（SPEC U6 §5，DRY：gate_report + 未来 terminate）──
+
+def write_final_status(
+    output_dir: str | Path,
+    stage: str,
+    status: str,
+    reason: str,
+    metrics: dict[str, Any] | None = None,
+) -> str:
+    """落盘 ``final_status.json``（first-match 状态机字段，对齐 ns3_report）。
+
+    ``stage``：触发的节点名（如 ``pz_report`` / ``terminate_*``）。
+    ``status``：``pass`` / ``fail`` / ``skipped``。
+    ``reason``：人读诊断（terminate 路径保留具体原因）。
+    ``metrics``：可选，关键指标（baseline/final acc/latency 等）。
+    """
+    p = Path(output_dir) / "final_status.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "stage": stage,
+        "status": status,
+        "reason": reason,
+        "metrics": metrics or {},
+    }
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return str(p)

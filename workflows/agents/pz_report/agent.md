@@ -1,5 +1,5 @@
 ---
-description: Puzzle AC gate agent（folder-agent，确定性，零 LLM 判断）。运行预写 _puzzle_scripts/gate_report.py 恰好一次——读 final_model + baseline_metrics + eval_fn + latency_unit，测 final acc + latency，断言 ACC AC（baseline-dependent：baseline_acc≥0.5 用绝对 0.5；<0.5 用相对 10%）且 latency_ratio ≤ 0.5（时延降一半）。写 final_report.md + gate_result.json + 推 baseline-vs-optimized metrics_bar（label puzzle/report）。stdout 单行 JSON 作唯一最终回复。AC 任一不达标 → gate_status=fail → terminate_gate_failed。不许改脚本/不许复述上游。
+description: Puzzle AC gate agent（folder-agent，确定性，零 LLM 判断）。运行预写 _puzzle_scripts/gate_report.py 恰好一次——读 final_model + baseline_metrics + adapters + latency_unit，测 final acc + latency（经 adapters.evaluate，方向由 adapters.METRIC_DIRECTION），断言 ACC AC（baseline-dependent：baseline_acc≥0.5 用绝对 0.5；<0.5 用相对 10%；lower-better metric 用 final≤baseline×(1+tol)）且 LAT AC `final_latency ≤ baseline × (1 - latency_reduction_target)`（默认 0.5，可配）。写 final_report.md + gate_result.json + 推 baseline-vs-optimized metrics_bar（label puzzle/report）。stdout 单行 JSON 作唯一最终回复。AC 任一不达标 → gate_status=fail → terminate_gate_failed。不许改脚本/不许复述上游。
 tools: [bash]
 ---
 # pz_report
@@ -48,43 +48,45 @@ python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/gate_report.py" \
   --build_cfg "{{ inputs.build_cfg }}" \
   --block_map "$ORCA_ARTIFACTS_DIR/block_map.json" \
   --block_library "$ORCA_ARTIFACTS_DIR/block_library" \
-  --eval_fn "<manifest.yaml 的 training_and_evaluation.evaluation_entry，agent 读 manifest 桥接>" \
-  --eval_kind "{{ inputs.eval_kind }}" \
+  --adapters "$ORCA_ARTIFACTS_DIR/puzzle_adapters.py" \
+  --manifest "$ORCA_ARTIFACTS_DIR/manifest.yaml" \
   --latency_unit "{{ inputs.latency_unit }}" \
   --latency_script_path "{{ inputs.latency_script_path }}" \
+  --latency_reduction_target "{{ inputs.latency_reduction_target }}" \
   --output_dir "$ORCA_ARTIFACTS_DIR"
 ```
 
 脚本契约（预写，pz_report 不验证）：
-- 入参：如上。`--build_fn` / `--eval_fn` 由你（agent）读 `$ORCA_ARTIFACTS_DIR/manifest.yaml` 桥接
-  （`model.build_entry` / `training_and_evaluation.evaluation_entry`）——manifest 缺字段 → fail loud
-  （不进 gate）。ACC AC 由脚本内置 baseline-dependent 容差自动判（不再接 `--accuracy_tolerance`）；
-  `--latency_script_path` 与 pz_expand 同源（保证 latency 测量一致）。
+- 入参：`--adapters` + `--manifest`（无 `--eval_fn` / `--eval_kind`）。`--build_fn`
+  由你读 manifest 桥接。`--latency_script_path` 与 pz_expand 同源（保证 latency 测量一致）。
+  `--latency_reduction_target`（默认 0.5）= LAT AC 比例：传 0.7 则要求 final_latency ≤ baseline×0.7。
 - 行为：
-  1. 加载 final_model + 调 eval_fn 测 final acc + measure_module_latency / latency_script_path 测
-         final latency。
+  1. 加载 final_model + 经 `adapters.evaluate(model)` 测 final acc（方向由 `adapters.METRIC_DIRECTION`）+
+     measure_module_latency / latency_script_path 测 final latency。
   2. 读 baseline_metrics.json 取 baseline acc + latency。
-  3. 断言 AC（baseline-dependent 容差）：
-     - **ACC**：`baseline_acc ≥ 0.5` 用绝对容差 0.5；`baseline_acc < 0.5` 用相对 10%
-       （`final_acc ≥ baseline_acc * 0.9`）。脚本 `_acc_pass` 自动选阈值，输出
-       `acc_tolerance_kind` + `acc_threshold` 字段供审计。
-     - **LAT**：`final_latency ≤ baseline_latency / 2`（即 `latency_ratio ≤ 0.5`，时延降一半）。
+  3. 断言 AC（方向感知 + baseline-dependent 容差）：
+     - **ACC**：higher-better 时 `baseline_acc ≥ 0.5` 用绝对容差 0.5、`< 0.5` 用相对 10%
+       （`final_acc ≥ baseline_acc * 0.9`）；lower-better metric 用 `final ≤ baseline × (1 + tol)`
+       （`--metric_rel_tol_lower_better` 默认 0.1）。脚本 `_acc_pass` 自动选阈值 + 方向，输出
+       `acc_tolerance_kind` / `acc_threshold` / `metric_direction` 字段供审计。
+     - **LAT**：`final_latency ≤ baseline_latency × (1 - latency_reduction_target)`（默认降一半，
+       传 0.7 则要求降 70%）。
   4. 写 `final_report.md`（人读）+ `gate_result.json`（机器读，含 acc_delta / latency_ratio 字段）。
   5. 推 baseline-vs-optimized metrics_bar（label `puzzle/report`，ACC + LAT 双指标对比；fail-soft，
      ORCA_CHART_SOCK 缺 → skip + stderr，不崩）。
 - stdout：**单行 JSON**，含字段：
   - `gate_status` (string)：`pass` / `fail`。pass = ACC 与 LAT 双 AC 达标；fail = 任一不达标。
-  - `final_acc` (number)：final_model 的 acc（eval_fn 测）。
+  - `final_acc` (number)：final_model 的 acc（`adapters.evaluate` 测）。
   - `final_latency` (number)：final_model 的 latency（单位 = latency_unit）。
   - `baseline_acc` (number)：透传 baseline acc。
   - `baseline_latency` (number)：透传 baseline latency。
   - `acc_delta` (number)：`|final_acc - baseline_acc|`。
-  - `latency_ratio` (number)：`final_latency / baseline_latency`（达标要求 ≤ 0.5）。
+  - `latency_ratio` (number)：`final_latency / baseline_latency`（达标要求 ≤ `1 - latency_reduction_target`）。
   - `latency_unit` (string)：透传 ms/us/s。
   - `gate_reason` (string)：枚举 `"both-met"` / `"acc-miss"` / `"latency-miss"` / `"both-miss"`。
   - `report_path` (string)：`final_report.md` 路径。
 - 退出码 0 = 成功（含 gate fail——那是 gate_status=fail 的正常分支）；非 0 = 失败（final_model 缺 /
-  eval_fn 崩 / 测量失败）。
+  adapters.evaluate 崩 / 测量失败）。
 
 ## 监督要点（fail loud）
 

@@ -1,16 +1,24 @@
-"""latency_table.py —— Puzzle P2.5：per (layer, kind, variant) 单块 latency 实测。
+"""latency_table.py —— Puzzle per (layer, kind, variant) 单块 latency 实测（U6 适配器）。
 
-**standalone 单块 latency 模型**(Design A):对每 (layer, kind, variant),测该块**独立**
-forward 的 latency。单块 latency 可靠且**加性**——Σ 单块 ≈ block 对整模的贡献(实测:8 块
-×~0.07ms ≈ 0.56ms ≈ baseline_whole − floor)。整模 latency = floor(非 block) + Σ block,
-其中 floor = baseline_whole − Σ identity_block(mip_select 算)。
+**standalone 单块 latency 模型**(Design A)：对每 (layer, kind, variant)，测该块**独立**
+forward 的 latency。单块 latency 可靠且**加性**——Σ 单块 ≈ block 对整模的贡献。
+整模 latency = floor(非 block) + Σ block，其中 floor = baseline_whole − Σ identity_block
+（mip_select 算）。
 
-避免「整模 replace-1-block」测量的非加性(单块 no_op 在上下文里只显省 0.03ms,但全 drop
-省 0.6ms——dispatch/缓存交互使 per-swap savings 不可加)。单块隔离测量去掉上下文耦合,
+U6 改造：
+  - root cause A/K：parent 激活捕获 + floor latency 整模 forward 走
+    ``adapters.forward_model(model, batch)``（不再 ``model(single_tensor)``）。
+  - root cause E：主循环 + floor 循环都过 ``is_candidate_valid_for_slot``；
+    非方 slot 的 floor 用「原块实测 latency」兜底，**禁** ``make_zero`` 对非方 slot raise。
+    具体地：floor 循环遍历 slot，valid-for-zero（in_dim==out_dim）的 slot 替 ``make_zero``；
+    非方 slot 保留原块（其 latency 计入 floor 实测，反映真实非 block overhead）。
+
+避免「整模 replace-1-block」测量的非加性（单块 no_op 在上下文里只显省 0.03ms，但全 drop
+省 0.6ms——dispatch/缓存交互使 per-swap savings 不可加）。单块隔离测量去掉上下文耦合，
 加性成立。
 
-- passthrough(identity):测原父块单块 latency。
-- latency_script_path → 包装它;否则 nas-agent measure_module_latency(100 reps 稳定)。
+- passthrough(identity)：测原父块单块 latency。
+- latency_script_path → 包装它；否则 PyTorch median ms（100 reps 稳定）。
 
 输出 ``latency_table.jsonl``：``{layer, kind, variant, latency_<unit>, unit}``。
 """
@@ -28,14 +36,16 @@ import torch.nn as nn
 
 from puzzle_common import (
     BlockMap,
-    build_calib_loader,
+    build_pretrained_model,
     capture_parent_activations,
     get_candidate,
-    get_module_dummy_input,
+    is_candidate_valid_for_slot,
     is_passthrough,
     load_external_callable,
-    load_father_model,
+    load_puzzle_adapters,
     load_variant_state_dict,
+    measure_whole_model_latency,
+    replace_slot,
 )
 
 
@@ -45,25 +55,45 @@ def _measure_block_latency(
     device: torch.device,
     latency_script_path: str,
 ) -> float:
-    """测单块 latency:默认 PyTorch median ms(100 reps 稳定);latency_script_path → 包装。"""
+    """测单块 latency（standalone）。
+
+    单块 latency 的输入是 slot 抓到的 main-path 张量（非 native batch），所以这里
+    仍走 ``module(sample_input)``（block 自身契约：单 tensor 主路径）。
+    """
     if latency_script_path:
         fn = load_external_callable(latency_script_path)
         return float(fn(variant_module, sample_input))
-    from nas_agent.latency import measure_module_latency
-    return float(measure_module_latency(variant_module, sample_input, device, repetitions=100, warmup=30))
+    import time
+    variant_module.eval().to(device)
+    with torch.no_grad():
+        for _ in range(30):
+            variant_module(sample_input)
+        times: list[float] = []
+        for _ in range(100):
+            t0 = time.perf_counter()
+            variant_module(sample_input)
+            times.append(time.perf_counter() - t0)
+    times.sort()
+    return times[len(times) // 2] * 1000.0
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Puzzle P2.5 latency 表(单块 standalone)")
+    parser = argparse.ArgumentParser(description="Puzzle U6 latency 表（单块 standalone）")
     parser.add_argument("--block_map", required=True)
-    parser.add_argument("--flat_model", required=True)
+    parser.add_argument("--flat_model", required=True, help="flat model .py（架构源）")
     parser.add_argument("--build_fn", required=True)
     parser.add_argument("--build_cfg", default="")
     parser.add_argument("--block_library", required=True)
-    parser.add_argument("--father_state", default="",
-                        help="father state_dict(latency 是 shape 级与权重无关,但加载保证块在真实形状)")
+    parser.add_argument(
+        "--adapters", required=True,
+        help="puzzle_adapters.py 路径（U6 §2.1：脚本唯一项目接口）",
+    )
+    parser.add_argument(
+        "--manifest", default="",
+        help="manifest.yaml 路径（metadata 用；脚本不解析）",
+    )
     parser.add_argument("--latency_unit", default="ms", choices=["ms", "us", "s"],
-                        help="latency 单位(仅标注,不换算数值)")
+                        help="latency 单位（仅标注，不换算数值）")
     parser.add_argument("--latency_script_path", default="")
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--seed", type=int, default=0)
@@ -77,19 +107,21 @@ def main(argv: list[str] | None = None) -> int:
     latency_field = f"latency_{args.latency_unit}"
 
     try:
+        adapters = load_puzzle_adapters(args.adapters)
         block_map = BlockMap.from_json(args.block_map)
         if not block_map.slots:
             raise ValueError("block_map 无 slot")
 
-        model = load_father_model(
-            args.flat_model, args.build_fn, args.build_cfg, args.father_state
-        )
+        # U6：teacher 走 adapters；不再 load_father_model
+        model = build_pretrained_model(adapters)
         device = torch.device("cpu")
         model.eval().to(device)
 
-        dummy_meta = get_module_dummy_input(args.flat_model)
-        calib_loader = build_calib_loader(model, dummy_meta, batch_size=1, device=device)
-        activations = capture_parent_activations(model, block_map, calib_loader, device)
+        # U6 root cause A/K：calib 走 adapters.calib_iter，forward 走 adapters.forward_model
+        calib_iter = adapters.calib_iter(device=device)
+        activations = capture_parent_activations(
+            model, block_map, calib_iter, adapters.forward_model, device
+        )
 
         with open(latency_path, "w", encoding="utf-8") as fout:
             for slot in block_map.slots:
@@ -107,8 +139,12 @@ def main(argv: list[str] | None = None) -> int:
                 for ckpt_path in ckpt_files:
                     variant = ckpt_path.stem[len(prefix):]
 
+                    # U6 root cause E：主循环也过 is_candidate_valid_for_slot——
+                    # 结构不匹配的 variant（如 mask-blind × mask slot）跳过不打分。
+                    if not is_candidate_valid_for_slot(variant, slot):
+                        continue
+
                     if is_passthrough(variant):
-                        # identity = 保留父块 → 测父块单块 latency
                         variant_module = model.get_submodule(slot.parent_module_path)
                     else:
                         entry = get_candidate(variant)
@@ -144,28 +180,48 @@ def main(argv: list[str] | None = None) -> int:
         result = {
             "status": "executed",
             "artifacts": [str(latency_path)],
-            "assessment": f"latency 表完成(单块 standalone,unit={args.latency_unit})",
+            "assessment": f"latency 表完成（单块 standalone, unit={args.latency_unit}）",
             "max_retries_hit": False,
             "healed_files": [],
             "fidelity_retriggered": False,
         }
 
-        # ── 浬 floor:全 block → no_op(零输出)的整模 latency(非 block 固定开销)──
-        # 用实测 floor 而非 baseline−Σidentity(后者因 standalone 欠计上下文成本而高估)。
-        # mip_select 据此算 selected_whole = floor + Σ chosen_block。
+        # ── floor：全 block → no_op(零输出) 的整模 latency ──────────────────────
+        # U6 root cause E：floor 循环也过 is_candidate_valid_for_slot；
+        # 非方 slot（in_dim != out_dim）的 floor 用「原块实测 latency」兜底——
+        # 禁 make_zero 对非方 slot raise（保留原块，其 latency 计入 floor）。
         from puzzle_blocks import make_zero
-        from puzzle_common import replace_slot
+        floor_replaced_zero: list[str] = []
+        floor_kept_original: list[str] = []
         for slot in block_map.slots:
-            zblk = make_zero(slot).to(device).eval()
-            replace_slot(model, slot.parent_module_path, zblk)
-        whole_input_floor = torch.randn(
-            *list(dummy_meta["shape"]),
-            dtype=getattr(torch, str(dummy_meta.get("dtype", "float32"))),
+            can_zero = is_candidate_valid_for_slot("no_op", slot)
+            if can_zero and slot.in_dim == slot.out_dim:
+                zblk = make_zero(slot).to(device).eval()
+                replace_slot(model, slot.parent_module_path, zblk)
+                floor_replaced_zero.append(slot.parent_module_path)
+            else:
+                # 非方 slot：保留原块（其 latency 计入 floor，反映真实非 block overhead）
+                floor_kept_original.append(slot.parent_module_path)
+
+        # floor 整模 forward 走 adapters.forward_model（U6：不再 model(dummy_input)）
+        calib_iter2 = adapters.calib_iter(device=device)
+        try:
+            floor_batch = next(iter(calib_iter2))
+        except StopIteration as e:
+            raise RuntimeError(
+                "adapters.calib_iter() 返回空——latency_table floor 无 batch"
+            ) from e
+        floor_latency = measure_whole_model_latency(
+            model, adapters.forward_model, floor_batch, device, args.latency_script_path
         )
-        floor_latency = _measure_block_latency(model, whole_input_floor, device, args.latency_script_path)
         floor_path = output_dir / "latency_floor.json"
         with open(floor_path, "w", encoding="utf-8") as ff:
-            json.dump({"floor_latency": floor_latency, "unit": args.latency_unit}, ff)
+            json.dump({
+                "floor_latency": floor_latency,
+                "unit": args.latency_unit,
+                "replaced_zero_slots": floor_replaced_zero,
+                "kept_original_slots": floor_kept_original,
+            }, ff, ensure_ascii=False, indent=2)
         result["artifacts"].append(str(floor_path))
         print(f"LATENCY_TABLE: {latency_path}")
         print(f"RESULT_JSON: {json.dumps(result, ensure_ascii=False)}")

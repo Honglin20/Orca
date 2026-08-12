@@ -75,6 +75,81 @@ class _VanillaMHSA(nn.Module):
         return out
 
 
+class _MaskedMHSA(nn.Module):
+    """mask-aware vanilla MHSA（U6 §3 root cause F）：接受 attn_mask 的 MHSA 变体。
+
+    causal / padding 兼容：父层 forward 传 ``attn_mask`` / ``attention_mask`` /
+    ``key_padding_mask`` / ``mask`` 等常见 mask kwarg 时，本模块把它转交
+    ``nn.MultiheadAttention`` 的 ``attn_mask`` 入参（标准 MHSA 的 mask 语义）。
+    agent 移植时若用户的 mask 语义非标准（如 custom boolean 取反），应在 adapter 内
+    适配——本 builtin 仅提供「能接 mask kwarg 的 vanilla MHSA」这一通用候选。
+    """
+
+    def __init__(self, embed_dim: int, num_heads: int):
+        super().__init__()
+        if embed_dim % num_heads != 0:
+            raise ValueError(
+                f"masked MHSA: embed_dim={embed_dim} 必须能被 num_heads={num_heads} 整除"
+            )
+        self.attn = nn.MultiheadAttention(
+            embed_dim=embed_dim, num_heads=num_heads, batch_first=True
+        )
+
+    def forward(self, x: torch.Tensor, attn_mask: Any = None) -> torch.Tensor:
+        out, _ = self.attn(x, x, x, attn_mask=attn_mask, need_weights=False)
+        return out
+
+
+class _MaskPassthrough(nn.Module):
+    """mask-aware variant 签名适配器：从父层 kwargs 抽常见 mask key 转给 inner。
+
+    与 ``_KwargPassthrough``（剥 kwargs）对偶：本包装识别父层 forward 传的 mask-like
+    kwarg（attn_mask / attention_mask / mask / key_padding_mask），把首匹配项作为
+    ``attn_mask=`` 传给 inner 的 forward。无 mask kwarg 时按 ``inner(x)`` 调用
+    （兼容 mask-bearing slot 在无 mask 输入时的退化路径）。
+    """
+
+    _MASK_KEYS: tuple[str, ...] = (
+        "attn_mask", "attention_mask", "mask", "key_padding_mask",
+    )
+
+    def __init__(self, inner: nn.Module):
+        super().__init__()
+        self.inner = inner
+
+    def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+        mask: Any = None
+        for k in self._MASK_KEYS:
+            if k in kwargs and kwargs[k] is not None:
+                mask = kwargs[k]
+                break
+        if mask is not None:
+            return self.inner(x, attn_mask=mask)
+        return self.inner(x)
+
+
+def _wrap(
+    inner_factory: Callable[["Slot"], nn.Module]
+) -> Callable[["Slot"], nn.Module]:
+    """把 slot→module 工厂包成 slot→_KwargPassthrough(module)（统一适配异构签名）。"""
+
+    def _w(slot: "Slot") -> nn.Module:
+        return _KwargPassthrough(inner_factory(slot))
+
+    return _w
+
+
+def _wrap_mask(
+    inner_factory: Callable[["Slot"], nn.Module]
+) -> Callable[["Slot"], nn.Module]:
+    """mask-aware wrapper：包成 _MaskPassthrough（保留 attn_mask kwarg）。"""
+
+    def _w(slot: "Slot") -> nn.Module:
+        return _MaskPassthrough(inner_factory(slot))
+
+    return _w
+
+
 class _ZeroBlock(nn.Module):
     """零输出 no_op:forward 返回 zeros_like(input)——真·删块(residual 不变,latency≈0)。
 
@@ -102,17 +177,6 @@ class _KwargPassthrough(nn.Module):
 
     def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
         return self.inner(x)
-
-
-def _wrap(
-    inner_factory: Callable[["Slot"], nn.Module]
-) -> Callable[["Slot"], nn.Module]:
-    """把 slot→module 工厂包成 slot→_KwargPassthrough(module)（统一适配异构签名）。"""
-
-    def _w(slot: "Slot") -> nn.Module:
-        return _KwargPassthrough(inner_factory(slot))
-
-    return _w
 
 
 # ── builtin factory（签名统一：factory(slot, **params) -> nn.Module）──────────
@@ -157,6 +221,18 @@ def make_softs_star(slot: "Slot") -> nn.Module:
 
 def make_vanilla(slot: "Slot") -> nn.Module:
     return _VanillaMHSA(embed_dim=slot.in_dim, num_heads=max(slot.num_heads, 1))
+
+
+def make_masked_vanilla(slot: "Slot") -> nn.Module:
+    """mask-aware vanilla MHSA（U6 §3 root cause F）。
+
+    与 ``make_vanilla`` 同构（标准 MHSA），但经 ``_wrap_mask`` 包成
+    ``_MaskPassthrough`` —— 父层 forward 传 ``attn_mask`` / ``attention_mask`` /
+    ``key_padding_mask`` / ``mask`` 等常见 mask kwarg 时转交 ``nn.MultiheadAttention``。
+    用于 mask_load_bearing slot（causal/padding 场景），避免 mask-bearing slot
+    在 catalog 全 mask-blind 时塌缩成 identity。
+    """
+    return _MaskedMHSA(embed_dim=slot.in_dim, num_heads=max(slot.num_heads, 1))
 
 
 def make_ffn(slot: "Slot", ratio: float) -> nn.Module:

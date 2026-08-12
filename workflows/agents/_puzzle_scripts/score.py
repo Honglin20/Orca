@@ -1,11 +1,12 @@
-"""score.py —— Puzzle P2.4：replace-1-block 打分。
+"""score.py —— Puzzle replace-1-block 打分（U6 适配器架构）。
 
 对每 (layer, kind, variant)：把该 slot 替换成 variant（载块库权重），其余冻结
-父模型，calibration set 上算 block-distance 分：
-  - classification → ``logits_kd_loss``（KL）vs 父 logits
-  - embedding → hidden cosine distance ``1 - cos(h_var, h_parent)``
-  - regression → output MSE
-score = -distance（越大越好）。
+父模型，calibration set 上算 block-distance 分。U6 改造（root cause A/K/D）：
+  - forward 走 ``adapters.forward_model(model, batch)``（不再假设单 tensor）。
+  - distance 统一走 ``adapters.kd_loss(s_out, t_out)`` —— agent 据任务移植正确 KD
+    （KL/cosine/MSE/任务 loss），脚本删 ``eval_kind`` 分支与硬编码 logits_kd_loss。
+  - calib 数据走 ``adapters.calib_iter()``。
+  - score = -distance（越大越好）。
 
 输出 ``scores.jsonl``：``{layer, kind, variant, score, valid}``。
 stdout：``SCORES: <path>`` / ``RESULT_JSON: {...}``。
@@ -18,32 +19,20 @@ import json
 import sys
 import traceback
 from pathlib import Path
-from typing import Any
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 from puzzle_common import (
     BlockMap,
     Slot,
-    build_calib_loader,
+    build_pretrained_model,
     get_candidate,
-    get_module_dummy_input,
     is_candidate_valid_for_slot,
     is_passthrough,
-    load_father_model,
+    load_puzzle_adapters,
     load_variant_state_dict,
     replace_slot,
 )
-
-
-def _cosine_distance(a: torch.Tensor, b: torch.Tensor) -> float:
-    """hidden cosine distance = 1 - cos(a, b)，flatten 后均值。"""
-    a_f = a.reshape(-1, a.shape[-1]).float()
-    b_f = b.reshape(-1, b.shape[-1]).float()
-    cos = F.cosine_similarity(a_f, b_f, dim=-1)
-    return float((1.0 - cos).mean().item())
 
 
 def _score_variant(
@@ -51,22 +40,20 @@ def _score_variant(
     slot: Slot,
     variant: str,
     ckpt_path: Path,
-    calib_inputs: list[torch.Tensor],
+    calib_batches: list,
     parent_outputs: list[torch.Tensor],
-    eval_kind: str,
+    forward_fn,
+    kd_loss_fn,
     device: torch.device,
 ) -> tuple[float, bool]:
     """replace-1-block 打分；返回 (score, valid)。invalid variant → valid=False。
 
-    - passthrough（identity）：不替换 slot，score = -0 = 0（parent 自比距离为 0）。
-    - 其他 variant：载块库权重替换后 forward，算 distance = score 负值。
+    - passthrough（identity）：不替换 slot，score = 0（parent 自比 distance 为 0）。
+    - 其他 variant：载块库权重替换后 forward，distance = ``adapters.kd_loss(s_out, t_out)``。
     """
     if is_passthrough(variant):
-        # identity = 保留父块 → 输出与 parent_outputs 完全一致 → distance=0
         return 0.0, True
 
-    # E6/E8：结构不匹配的 variant（如 bypass FFN 选 ffn_75、mask slot 选 mask-blind）
-    # 标 valid=False 不打分——下游 mip_select 据 valid 字段过滤。
     if not is_candidate_valid_for_slot(variant, slot):
         return 0.0, False
 
@@ -74,7 +61,6 @@ def _score_variant(
     if slot.kind not in entry.kinds:
         return 0.0, False
 
-    # 载入 variant 权重
     if not ckpt_path.is_file():
         raise FileNotFoundError(f"variant ckpt 不存在：{ckpt_path}")
 
@@ -89,57 +75,45 @@ def _score_variant(
         total_dist = 0.0
         n = 0
         with torch.no_grad():
-            for inp, parent_out in zip(calib_inputs, parent_outputs):
-                inp = inp.to(device)
-                parent_out = parent_out.to(device)
+            for batch, parent_out in zip(calib_batches, parent_outputs):
                 try:
-                    var_out = model(inp)
+                    var_out = forward_fn(model, batch)
                 except Exception as e:
                     raise RuntimeError(
                         f"variant {variant!r} forward 失败：{e}"
                     ) from e
-                if isinstance(var_out, tuple):
-                    var_out = var_out[0]
-                if eval_kind == "classification":
-                    from nas_agent.train.distillation import logits_kd_loss
-                    d = float(logits_kd_loss(var_out, parent_out).item())
-                elif eval_kind == "embedding":
-                    d = _cosine_distance(var_out, parent_out)
-                else:  # regression
-                    d = float(F.mse_loss(var_out, parent_out).item())
+                # kd_loss 处理 model 输出形态（tuple/dict/单 tensor）——agent 移植时消化
+                d = float(kd_loss_fn(var_out, parent_out).item())
                 total_dist += d
                 n += 1
         score = -(total_dist / max(1, n))  # score = -distance（越大越好）
         return score, True
     finally:
-        # 还原（不变量：parent 模型不可被 variant 打分污染）
         replace_slot(model, slot.parent_module_path, original)
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Puzzle P2.4 replace-1-block 打分")
-    parser.add_argument("--block_map", required=True)
-    parser.add_argument("--flat_model", required=True)
-    parser.add_argument("--build_fn", required=True)
-    parser.add_argument("--build_cfg", default="")
-    parser.add_argument("--block_library", required=True, help="block_library 目录")
-    parser.add_argument("--eval_fn", required=True)
-    parser.add_argument(
-        "--eval_kind",
-        required=True,
-        choices=["classification", "embedding", "regression"],
+def _build_argparser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Puzzle U6 replace-1-block 打分")
+    p.add_argument("--block_map", required=True)
+    p.add_argument("--flat_model", required=True, help="flat model .py 路径（架构源）")
+    p.add_argument("--build_fn", required=True)
+    p.add_argument("--build_cfg", default="")
+    p.add_argument("--block_library", required=True, help="block_library 目录")
+    p.add_argument(
+        "--adapters", required=True,
+        help="puzzle_adapters.py 路径（U6 §2.1：脚本唯一项目接口）",
     )
-    parser.add_argument("--output_dir", required=True)
-    parser.add_argument(
-        "--father_state",
-        default="",
-        help="预训练父模型权重 .pt 路径（expand 保存的 father_state_dict.pt）。"
-        "replace-1-block 的冻结全模型 = father,必须预训练——空串回退随机 init"
-        "（仅 dry-run 兼容）",
+    p.add_argument(
+        "--manifest", default="",
+        help="manifest.yaml 路径（metadata 用；脚本不解析）",
     )
-    parser.add_argument("--seed", type=int, default=0)
-    args = parser.parse_args(argv)
+    p.add_argument("--output_dir", required=True)
+    p.add_argument("--seed", type=int, default=0)
+    return p
 
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_argparser().parse_args(argv)
     torch.manual_seed(args.seed)
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -147,38 +121,40 @@ def main(argv: list[str] | None = None) -> int:
     block_library_dir = Path(args.block_library).resolve()
 
     try:
+        adapters = load_puzzle_adapters(args.adapters)
         block_map = BlockMap.from_json(args.block_map)
         if not block_map.slots:
             raise ValueError("block_map 无 slot")
 
-        # replace-1-block 的冻结全模型 = father,必须预训练
-        model = load_father_model(
-            args.flat_model, args.build_fn, args.build_cfg, args.father_state
-        )
+        # replace-1-block 的冻结全模型 = father（预训练）
+        model = build_pretrained_model(adapters)
         device = torch.device("cpu")
         model.eval().to(device)
         for p in model.parameters():
             p.requires_grad_(False)
 
-        dummy_meta = get_module_dummy_input(args.flat_model)
-        calib_loader = build_calib_loader(model, dummy_meta, batch_size=2, device=device)
-        calib_inputs: list[torch.Tensor] = []
+        # U6 root cause A/K：calib 走 adapters.calib_iter（不再假设单 tensor batch）
+        calib_batches: list = []
         parent_outputs: list[torch.Tensor] = []
         with torch.no_grad():
-            for batch in calib_loader:
-                inp = batch[0] if isinstance(batch, (list, tuple)) else batch
-                inp = inp.to(device)
-                calib_inputs.append(inp)
-                out = model(inp)
-                if isinstance(out, tuple):
-                    out = out[0]
+            for batch in adapters.calib_iter(device=device):
+                calib_batches.append(batch)
+                out = adapters.forward_model(model, batch)
+                # kd_loss 期望与 student 输出同形态；parent_out 用 forward_model 原始返回
+                # （若返回 tuple/list，kd_loss 内部由 agent 移植处理）
+                if isinstance(out, (tuple, list)):
+                    out = out[0] if out else out
                 parent_outputs.append(out.detach())
+                if len(calib_batches) >= 2:
+                    break  # 两个 batch 够打分
+        if not calib_batches:
+            raise RuntimeError(
+                "adapters.calib_iter() 返回空——score 无 calib 数据（检 manifest 数据入口）"
+            )
 
-        # score 接 --block_library 作真相，候选集 = 目录里所有 ckpt 对应 variant
         n_valid = 0
         with open(scores_path, "w", encoding="utf-8") as fout:
             for slot in block_map.slots:
-                # 找该 slot 的所有 variant ckpt
                 prefix = f"L{slot.layer_idx}_{slot.kind}_"
                 ckpt_files = sorted(block_library_dir.glob(f"{prefix}*.pt"))
                 if not ckpt_files:
@@ -187,16 +163,16 @@ def main(argv: list[str] | None = None) -> int:
                         f"ckpts（prefix={prefix}）"
                     )
                 for ckpt_path in ckpt_files:
-                    # variant 名 = 文件名去前缀和 .pt
                     variant = ckpt_path.stem[len(prefix):]
                     score, valid = _score_variant(
                         model=model,
                         slot=slot,
                         variant=variant,
                         ckpt_path=ckpt_path,
-                        calib_inputs=calib_inputs,
+                        calib_batches=calib_batches,
                         parent_outputs=parent_outputs,
-                        eval_kind=args.eval_kind,
+                        forward_fn=adapters.forward_model,
+                        kd_loss_fn=adapters.kd_loss,
                         device=device,
                     )
                     row = {
@@ -213,9 +189,7 @@ def main(argv: list[str] | None = None) -> int:
         result = {
             "status": "executed",
             "artifacts": [str(scores_path)],
-            "assessment": (
-                f"打分完成：{n_valid} 个 valid (layer,kind,variant)"
-            ),
+            "assessment": f"打分完成：{n_valid} 个 valid (layer,kind,variant)",
             "max_retries_hit": False,
             "healed_files": [],
             "fidelity_retriggered": False,

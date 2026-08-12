@@ -1,5 +1,5 @@
 ---
-description: Puzzle decomposed-NAS 入口 agent（folder-agent）—— 读用户 PyTorch 模型源码自适应产 flat.py + manifest.yaml + search_space.yaml（逐层可替换 attention/ffn slot + kind 确定性证据 + 候选引用 catalog）→ 调 measure_baseline.py 跑 4 道 fidelity smoke + 测基线 acc/latency + trace slot I/O shape → 调 workflow-verifier + memory-verifier。无 attention/ffn slot（空 search_space）→ model_type_supported=false fail loud 路由 terminate_unsupported（不烧后续 BLD/搜索算力）。pathlib 铁律 + 禁碰源项目文件（例外 artifacts/）。
+description: Puzzle decomposed-NAS 入口 agent（folder-agent）—— 读用户 PyTorch 模型源码 faithful 移植产单个 puzzle_adapters.py（13 项能力 API：build_model / forward_model / calib_iter / train_iter / extract_labels / kd_loss / task_loss / evaluate / load_pretrained / METRIC_DIRECTION / EVAL_NOISE_ATOL / FORWARD_CALLING_CONVENTION / DUMMY_INPUT）+ flat.py + manifest.yaml + search_space.yaml（逐层可替换 attention/ffn slot + kind 确定性证据 + 候选引用 catalog）→ 调 measure_baseline.py 跑 4 道 fidelity smoke + 测基线 acc/latency + trace slot I/O shape → 调 workflow-verifier + memory-verifier。无 attention/ffn slot（空 search_space）→ model_type_supported=false fail loud 路由 terminate_unsupported（不烧后续 BLD/搜索算力）。pathlib 铁律 + 禁碰源项目文件（例外 artifacts/）。
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # pz_expand
@@ -14,9 +14,10 @@ measure_baseline.py 跑 fidelity smoke + 测基线，全部产物落 `$ORCA_ARTI
 
 | 你做（LLM 判断） | 脚本做（确定性执行） |
 |---|---|
-| 读源码 → flat.py（self-contained，必要时 reparenting 适配 state_dict schema） | measure_baseline.py：load father + 4 道 smoke + 测 acc/latency + trace slot I/O shape |
-| 识别逐层可替换 slot + 判 kind + 给**确定性证据** | search_space.yaml 的 in_dim/out_dim 由脚本 trace 回填（你留 -1） |
-| 写 manifest.yaml（5 段项目事实）+ search_space.yaml（slots + kind + 证据 + candidates） | block_map.json 由脚本从 search_space 生成（下游既有格式） |
+| 读源码 → flat.py（self-contained，必要时 reparenting 适配 state_dict schema） | measure_baseline.py：经 adapters 加载 father + 4 道 smoke + 测 acc/latency + trace slot I/O shape |
+| 读源码 → **puzzle_adapters.py**（faithful 移植用户数据/eval/loss/ckpt 逻辑，暴露适配器 API） | search_space.yaml 的 in_dim/out_dim 由脚本 trace 回填（你留 -1） |
+| 识别逐层可替换 slot + 判 kind + 给**确定性证据** | block_map.json 由脚本从 search_space 生成（下游既有格式） |
+| 写 manifest.yaml（5 段项目事实，含 adapters_entry / metric.direction / forward_calling_convention）+ search_space.yaml | |
 
 ## 资源锚点（cwd 无关）
 
@@ -74,23 +75,25 @@ Step 1 前确认都已知（缺任一 → fail loud，output_schema `error` 字�
 
 - `{{ inputs.project_root }}`：用户原始 PyTorch 项目根（必填）。
 - `{{ inputs.model_path }}`：目标模型入口文件（必填，相对 `project_root` 的路径或绝对路径）。
-- `{{ inputs.eval_kind }}`：评估范式 classification/embedding/regression（必填；用户最懂任务输出
-  语义）。你读源码时须核对此声明与 manifest 记录的评估范式一致——不一致即 fail loud。
 - `{{ inputs.latency_unit }}`：latency 单位 ms/us/s（默认 ms）。
 - `{{ inputs.latency_script_path }}`：用户外部时延脚本（可选；us/s 声明时必填）。
+- `{{ inputs.latency_reduction_target }}`：时延降低目标比例（[advanced]，默认 0.5；下传 pz_select /
+  pz_report 的 mip_select / gate_report 经各自 launcher 用）。
 - `{{ inputs.seed }}`：复现性种子（默认 0）。
 - `$ORCA_ARTIFACTS_DIR`：本节点产物目录（orca spawn 注入；不存在则 `mkdir -p`）。
 
-**你从源码自行发现**（非 user input）：`build_fn`（实例化模型的函数名）、`eval_fn`（评估
-函数入口）、`pretrained_ckpt`（预训练父权重 .pt 路径）。发现结果写进 manifest.yaml + 下传
-measure_baseline.py 的 CLI args。
+**你从源码自行发现并写进 `puzzle_adapters.py` / manifest.yaml**（非 user input）：
+`build_model()`（零参实例化，agent 把 config 烧进去）、`pretrained_ckpt`（预训练父权重 .pt 路径）、
+`forward` calling convention（positional / dict / single）、用户 Dataset 构造、eval 协议（含
+metric direction）、KD / task loss、ckpt 前缀 schema。脚本不假设任何用户代码形态，
+全部项目相关性收敛到适配器。
 
 ## Pipeline Memory
 
 两份跨 session 文档落 `$ORCA_ARTIFACTS_DIR`：
 
 - **`manifest.yaml`**：原始项目事实（5 段，YAML——确定性可解析）。下游 agent 读它桥接 CLI args
-  （eval_fn / build_fn / father_state / data loader 入口）。骨架见 Step 1 的 **Manifest Schema**。
+  （build_fn / adapters_entry / metric.direction 等）。骨架见 Step 1 的 **Manifest Schema**。
 - **`project_manifest.md`**：跨 session 人读导航索引（YAML frontmatter `source_project_root`；
   body sections：**Project Overview** / **Model** / **Training And Evaluation** / **Data And
   Environment** / **Relevant Source Files**）。当作导航索引非 ground truth——codegen 决策前必须
@@ -113,7 +116,7 @@ measure_baseline.py 的 CLI args。
 ```bash
 cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
 MISSING=""
-for f in manifest.yaml search_space.yaml block_map.json baseline_metrics.json; do
+for f in manifest.yaml search_space.yaml block_map.json baseline_metrics.json puzzle_adapters.py; do
   [ -s "$f" ] || MISSING="$MISSING $f"
 done
 FLAT="$(ls *_flat.py 2>/dev/null | head -1)"
@@ -142,35 +145,90 @@ fi
 
 ### Step 1: Discover Project, Flatten Model, Write Manifest + Search Space
 
+#### 适配器契约（agent 移植用户代码到单份 puzzle_adapters.py）
+
+**你（LLM）必须生成单份 `puzzle_adapters.py` 落 `$ORCA_ARTIFACTS_DIR`**，暴露以下 13 项 API
+（签名稳定；实现 = agent 读用户源码 faithful 移植）：
+
+```python
+# puzzle_adapters.py —— 脚本唯一项目接口
+def build_model() -> nn.Module: ...                  # 零参实例化（agent 把 config 烧进去；网络构造抬成零参）
+FORWARD_CALLING_CONVENTION: str = "positional"        # "positional" | "dict" | "single"
+def forward_model(model, batch) -> output:            # 按 convention 调 model(...)，处理多输入 / dict batch
+def calib_iter(device=None) -> Iterator[batch]: ...   # calib 数据（faithful 移植用户 Dataset 构造 + collate）
+def train_iter(device=None) -> Iterator[batch]: ...   # 训练数据（同上，含 labels）
+def extract_labels(batch) -> torch.Tensor | None: ... # 从 native batch 抽标签（无监督任务返 None）
+def kd_loss(s_out, t_out, labels=None) -> Tensor: ... # faithful 移植用户任务 KD（cosine / KL / MSE / 任务 loss，不写死）
+def task_loss(s_out, labels) -> Tensor | None: ...    # 硬标签监督（移植用户任务 loss；非分类返 None）
+def evaluate(model) -> float: ...                     # faithful 移植用户 eval 协议（含 device / 检索 / metric / 方向）
+METRIC_DIRECTION: str = "higher-better"               # "higher-better" | "lower-better"（从用户 metric 语义判定）
+EVAL_NOISE_ATOL: float = 1e-9                         # eval-stability 容差（含采样/检索的评估 ≥1e-2，纯确定性 1e-9）
+def load_pretrained(model) -> "_LoadResult": ...      # ckpt 加载（剥 module./_orig_mod./ema./多字段 dict 前缀 + train_from_scratch 兜底）
+DUMMY_INPUT: dict = {"shape": [...], "dtype": "float32"}  # 真实 I/O 维度（多输入用 list of shape + convention）
+```
+
+faithful 移植对齐 `project-porter.md`「faithful mover」契约：
+- **保留**：用户公式 / 常数 / 符号 / 特征索引 / 控制流 / 随机性语义；KD / task loss 公式逐字搬。
+- **允许的机械适配**：重写项目内 import 为同级 import、参数化硬编码路径、device 用传入或
+  `resolve_device`、剥 DDP/rank/barrier 保留计算、把网络构造抬成 `build_model()` 零参。
+- **禁止**：简化、近似、替换相似工具、丢「看起来不重要」的项、写死 `cross_entropy`/`cosine`
+  替代用户 loss、为单 tensor forward 拼接/丢弃多输入。
+
+**逐项移植要点**：
+- `forward_model(model, batch)` 据 `FORWARD_CALLING_CONVENTION` 把 batch 喂进 `model(...)`：
+  `positional` → `model(*batch_inputs)`（多输入照原签名顺序）；`dict` → `model(**batch_dict)`；
+  `single` → `model(batch)`。batch 解包逻辑由你移植（用户原 forward 怎么取多输入 / dict key 全保留）。
+- `kd_loss` / `task_loss` 按用户任务移植正确 loss：度量学习就移植对比/相似度 loss；分类就移植
+  KL/CE；回归就移植 MSE——**不写死**。`task_loss` 非监督任务返 None。
+- `load_pretrained` 处理 `module.` / `_orig_mod.` / `ema.` / 多字段 dict 前缀剥离，返回
+  `_LoadResult(missing, unexpected, from_scratch)`（脚本侧不再双零硬断言，非双零仅 WARN + 记
+  `ckpt_from_scratch`；前缀剥离 / 多字段 dict 由适配器负责）。
+- `EVAL_NOISE_ATOL` 据评估协议噪声推：含采样 / 检索 / 未 seed 路径 std≈√(p(1−p)/N)
+  （N≈1000 ~1e-2），atol 须 ≥ 该量级；纯确定性 eval 才用 1e-9。
+- `METRIC_DIRECTION` 从用户 metric 语义判定（accuracy / top-k / recall → higher-better；
+  loss / error / perplexity → lower-better）。
+- `DUMMY_INPUT` 多输入用 list of shape + 同 `FORWARD_CALLING_CONVENTION` 指示解包方式。
+- 数据路径用绝对路径 / 相对 project_root 的 pathlib 解析（pathlib 铁律）。
+
+**fidelity**：移植即改动用户逻辑——按 Step 3.0 协议调 `block-map-evaluator` /
+`search-space-evaluator` 时附上 `puzzle_adapters.py` 路径供审查；发现移植错误（forward convention
+错 / metric 方向错 / loss 公式错）→ 修适配器后重跑。project-fidelity-verifier 的「移植忠实度」
+审查对象是 `puzzle_adapters.py`（下游节点调它时复核）。
+
 #### Manifest Schema（manifest.yaml，5 段 YAML）
 
 ```yaml
 project_overview:
   task_type: image classification | metric learning | regression | ...
   purpose: 一句话任务目标
-  entry_points: {train: train.py, eval: train.py::eval_model}
+  entry_points: {train: <...>, eval: <...>}
 model:
-  location: model/model.py
-  build_entry: build_model            # 实例化函数名（你发现，下传 measure_baseline --build_fn）
-  forward_signature: "forward(self, x1, x2, x3, x4, src_mask=None)"
-  inputs: "[B,10,128],[B,4,128],[B,1,64],[B,1,64]"   # 真实输入 shape
-  outputs: "[B,16]"                                    # 真实输出 shape
-  state_dict_schema_note: 裸 CrossFusion 键（无 net. 前缀，需 reparenting 适配）
+  location: <model 文件>
+  build_entry: build_model            # flat.py 内零参实例化函数名（agent 发现，下传 --build_fn）
+  forward_signature: "forward(self, <...>)"   # 用户原 forward 签名（多输入照原样记录）
+  inputs: "[<...>,<...>]"             # 真实输入 shape（多输入 list 形态）
+  outputs: "[<...>]"                  # 真实输出 shape
+  state_dict_schema_note: <前缀说明，若有 reparenting 则记>
 training_and_evaluation:
-  paradigm: InfoNCE metric learning | cross-entropy classification | MSE regression
-  loss: InfoNCELoss(temperature=0.07) | CrossEntropyLoss | ...
-  metric: {name: k-NN accuracy, direction: higher-better}
-  eval_kind: embedding              # 必须与 inputs.eval_kind 一致（不符即 fail loud）
-  evaluation_entry: train.py::eval_model   # 评估函数（你发现，下传 measure_baseline --eval_fn）
-  pretrained_ckpt: pre_trained.pth  # 预训练父权重相对 project_root 路径（你发现，下传 --father_ckpt）
+  paradigm: <cross-entropy classification | metric learning | MSE regression | ...>
+  loss: <用户原 loss 语义描述>
+  metric: {name: <用户 metric 真名>, direction: higher-better|lower-better}
+  adapters_entry: puzzle_adapters.py     # 生成适配器文件（脚本经 --adapters 消费；eval/train/loss 全在内）
+  forward_calling_convention: positional|dict|single   # 与 adapters.FORWARD_CALLING_CONVENTION 一致
+  eval_noise_atol: <float>               # 与 adapters.EVAL_NOISE_ATOL 一致（含采样/检索的评估 ≥1e-2）
+  pretrained_ckpt: <相对 project_root 路径>  # 父权重（脚本经 adapters.load_pretrained 读）
 data_and_environment:
   dataset: <名称/位置>
-  data_loader_entry: train.py::build_dataloader   # 真实数据 loader 入口（必记；下游 calib 用）
   preprocessing: <归一化 / 采样 / packing>
 relevant_source_files:
-  - {path: model/model.py, symbol: CrossFusion, purpose: 主模型}
-  - {path: train.py, symbol: eval_model, purpose: 评估函数}
+  - {path: <...>, symbol: <...>, purpose: <...>}
 ```
+
+**schema 要点**：
+- 删字段：`evaluation_entry` / `data_loader_entry` / `eval_kind`（用户接口语义在 adapters）。
+  `eval_nondeterministic` 由 `eval_noise_atol`（带量级的数值字段）替代。
+- 新增字段：`adapters_entry` / `metric.direction` / `forward_calling_convention` / `eval_noise_atol`。
+- `model.inputs` / `outputs` 支持多输入 list 形态。
 
 #### Search Space Schema（search_space.yaml，slots + candidates）
 
@@ -200,16 +258,20 @@ attention slot 加 `num_heads`/`head_dim`；ffn slot 加 `original_intermediate`
 读 `{{ inputs.model_path }}` 源码后，产 self-contained `<base>_flat.py`（`<base_name>` 从语义
 模型类型/主类名推，snake_case）。flatten 的两条常见自适应：
 
-1. **多输入 → 单输入打包**：puzzle 单输入 forward 契约。若原模型 `forward(self, x1, x2, ...)`
-   多输入，在 flat 里写一个 wrapper 把多路输入按固定顺序 flatten 拼成一根 1D 向量，
-   `forward(packed)` 内切回多路喂原逻辑。flat 必须暴露 `build_model() -> nn.Module`（零参）。
+1. **多输入 forward 不打包**：flat 的 forward **保留原签名**（原模型 `forward(self,
+   x1, x2, ...)` 几输入就几输入）——**禁止**把多路输入拼成 1D 向量 hack（会破坏 forward 语义，
+   且 fidelity smoke 查不出）。多输入 forward 的 batch 解包由 `puzzle_adapters.forward_model`
+   据 `FORWARD_CALLING_CONVENTION` 处理，flat 不掺和。flat 必须暴露 `build_model() -> nn.Module`
+   （零参）。`DUMMY_INPUT` 多输入用 `{"shapes": [shape1, shape2, ...], "dtype": "float32",
+   "convention": "positional|dict|single"}`（与 adapters 的 `FORWARD_CALLING_CONVENTION` 对齐）。
 2. **state_dict 前缀对齐**：若预训练 ckpt 是裸模型键（如 `encoder_layer1.self_attn.W.weight`，
    无 `net.` 前缀），但 `self.net = OriginalModel()` 会加 `net.` 前缀 → strict-load 失败。解法
    （reparenting）：把原模型的每个顶层 child 原名挂到 wrapper 上（`for name, mod in
    original.named_children(): setattr(self, name, mod)`），state_dict 键与原模型零差异。
+   `module.` / `_orig_mod.` / `ema.` / 多字段 dict 前缀剥离由 `adapters.load_pretrained` 处理。
 
-flat 必须含：`build_model()`（零参，返回 wrapper）、`DUMMY_INPUT = {"shape": [...], "dtype":
-"float32"}`（真实 I/O 维度声明）、`__main__` block（实例化 + forward + print 输出 shape）。
+flat 必须含：`build_model()`（零参，返回 wrapper）、`DUMMY_INPUT`（真实 I/O 维度声明，多输入
+用 shapes list + convention）、`__main__` block（实例化 + forward + print 输出 shape）。
 标准库 / 第三方 import 保留为 import；本地项目代码 inline。
 
 #### Procedure
@@ -217,13 +279,20 @@ flat 必须含：`build_model()`（零参，返回 wrapper）、`DUMMY_INPUT = {
 1. **Collect task context:** 用 Read / Grep / Bash 直接探 `{{ inputs.project_root }}`（目标
    模型源、constructor、forward signature、评估函数、预训练 ckpt 位置、数据 loader 入口）。
    禁 bulk-read 整个项目；只读 flatten + manifest + slot 识别所需的文件。直接探只产结构摘要——
-   本 skill 直接依赖的细节（目标模型源、forward、eval_fn）必须自己打开引用文件确认。
+   本 skill 直接依赖的细节（目标模型源、forward、eval 协议、Dataset 构造、loss 定义）必须自己
+   打开引用文件确认。
 2. **Write `manifest.yaml`:** 按上 **Manifest Schema** 从已验证发现写
-   `$ORCA_ARTIFACTS_DIR/manifest.yaml`。`eval_kind` 须与 `{{ inputs.eval_kind }}` 一致——不符
-   即 fail loud（output_schema `error` 写明冲突）。后续 procedure 期间持续按规则更新它。
-3. **Write `<base>_flat.py`:** 按上 **Flatten 自适应关键点**产 flat 文件，跑 `python <base>_flat.py`
+   `$ORCA_ARTIFACTS_DIR/manifest.yaml`（含 `adapters_entry: puzzle_adapters.py` /
+   `metric.direction` / `forward_calling_convention` / `eval_noise_atol`）。后续 procedure
+   期间持续按规则更新它。
+3. **Generate `puzzle_adapters.py`:** 按 **适配器契约** 读用户源码（forward / Dataset / eval /
+   loss / ckpt），faithful 移植生成单份 `$ORCA_ARTIFACTS_DIR/puzzle_adapters.py`，暴露 13 项 API。
+   manifest 的 `training_and_evaluation.adapters_entry` 指向该文件。metric 方向 / eval 噪声容差 /
+   forward convention 在 manifest 与 adapters 两处须一致（不符即 fail loud）。`python -m py_compile`
+   验证语法。
+4. **Write `<base>_flat.py`:** 按上 **Flatten 自适应关键点**产 flat 文件，跑 `python <base>_flat.py`
    的 `__main__` 验证可独立运行（forward 产正确输出 shape）。fix-loop 软约束 ≤3 次；超限 fail loud。
-4. **Write `search_space.yaml`:** 识别逐层可替换 attention/ffn slot（按 **kind 判定 + 证据**），
+5. **Write `search_space.yaml`:** 识别逐层可替换 attention/ffn slot（按 **kind 判定 + 证据**），
    按 **Search Space Schema** 写 slots（含 `kind_evidence`）+ candidates。无任何 attention/ffn
    slot 的模型 → slots 写空 list（`slots: []`）——measure_baseline 的确定性 post-check 会判
    unsupported。ffn slot 的 `activation`/`ffn_struct`/`original_intermediate` 必须从源码填真实值
@@ -246,10 +315,9 @@ for parent in p.parents:
 python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/measure_baseline.py" \
   --flat_path "$ORCA_ARTIFACTS_DIR/<base>_flat.py" \
   --build_fn "<manifest.yaml 的 model.build_entry>" \
-  --build_cfg "" \
-  --father_ckpt "<project_root>/<manifest.yaml 的 training_and_evaluation.pretrained_ckpt 绝对路径>" \
-  --eval_fn "<manifest.yaml 的 training_and_evaluation.evaluation_entry>" \
-  --eval_kind "{{ inputs.eval_kind }}" \
+  --build_cfg "{{ inputs.build_cfg }}" \
+  --adapters "$ORCA_ARTIFACTS_DIR/puzzle_adapters.py" \
+  --manifest "$ORCA_ARTIFACTS_DIR/manifest.yaml" \
   --search_space_path "$ORCA_ARTIFACTS_DIR/search_space.yaml" \
   --latency_unit "{{ inputs.latency_unit }}" \
   --latency_script_path "{{ inputs.latency_script_path }}" \
@@ -258,30 +326,40 @@ python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/measure_baseline.py" \
 ```
 
 脚本契约（你只跑不验证，脚本能跑就信它的产物 + smoke 结果）：
-- 入参：如上（`--build_fn`/`--eval_fn`/`--father_ckpt` 取自你 Step 1 写进 manifest 的发现值；
-  manifest.yaml 在 `$ORCA_ARTIFACTS_DIR`，你直接读它填 CLI args）。
+- 入参：`--adapters` + `--manifest` + `--flat_path` + `--build_fn` + `--search_space_path` +
+  `--output_dir` + latency/seed 参数（脚本经 `adapters.load_pretrained` 读父权重，经
+  `adapters.evaluate` 测 acc，`adapters.EVAL_NOISE_ATOL` 控 stability 容差——默认读 adapters；
+  可选 `--eval_stability_atol` 覆盖 override）。所有项目相关性收敛到适配器。
 - 产物（落 `--output_dir`）：
   - `block_map.json`：逐层 slot 清单（从 search_space 转，in_dim/out_dim 已 trace 回填）。
   - `search_space.yaml`：回写版（in_dim/out_dim 已 trace 回填）。
-  - `baseline_metrics.json`：`{baseline_acc, baseline_latency, latency_unit, eval_kind, eval_fn,
-    seed, smokes_passed}`。
-  - `father_state_dict.pt`：strict-load 后保存的统一父权重（供下游 bld/score/build/gkd 复用）。
-- 4 道 smoke（任一失败 → exit 2 + stderr 点名哪道 smoke）：**strict-load**（father ckpt missing/
-  unexpected 双零）、**forward-determinism**（同输入 forward 两次 torch.equal）、
-  **eval-stability**（eval_fn 跑两次 acc 一致）、**per-slot identity allclose**（hook 每个 slot
-  forward 两次逐元素 allclose）。
+  - `baseline_metrics.json`：`{baseline_acc, baseline_latency, latency_unit, metric_direction,
+    ckpt_from_scratch, seed, smokes_passed}`（acc 方向由 `adapters.METRIC_DIRECTION`，非 `eval_kind`）。
+  - `father_state_dict.pt`：adapters.load_pretrained 后保存的统一父权重（供下游复用）。
+- 4 道 smoke（任一失败 → exit 2 + stderr 点名哪道 smoke）：**ckpt 宽松加载**（走
+  `adapters.load_pretrained` 返 `_LoadResult`；非双零不 fatal 仅 WARN + 记 `ckpt_from_scratch`；
+  flatten 阶段对齐 ns3）、**forward-determinism**（`adapters.forward_model(model, batch)` 两次
+  torch.equal）、**eval-stability**（`adapters.evaluate(model)` 跑两次，atol 读
+  `adapters.EVAL_NOISE_ATOL`）、**per-slot identity allclose**（hook 每个 slot forward 两次逐元素 allclose）。
 - exit 0 = 成功（slot ≥ 1 + 4 smoke 全绿）；exit 2 = 空 slots（unsupported）或 smoke 失败 →
   你判 `model_type_supported=false` 路由 `terminate_unsupported`，或按 smoke 失败信号回 Step 1
-  修 flat/search_space 后重跑。
+  修 flat/search_space/adapters 后重跑。
 
 **Step 2 完成判定**：脚本 exit 0 + 四个产物都存在 + flat model `python -m py_compile` 过。
 
 **smoke 失败的 self-heal**：
-- strict-load 失败（missing/unexpected 非零）：stderr 给 missing keys 提示。回 Step 1 对照 diff
-  修 flat 的 state_dict schema（多半是 reparenting 没做 / 前缀错）。fix-loop ≤ 2 次仍失败 →
-  fail loud（output_schema `error` 写 `strict-load-convergence-failed` + missing keys）。
-- forward-determinism / eval-stability 失败：flat 模型 forward 含未固定 RNG 或 eval_fn 有 sampling
-  未 seed。修 flat（固定 RNG）/ 标注 eval_fn 的 sampling seed。fix-loop ≤ 2 次仍失败 → fail loud。
+- ckpt 加载失败（`load_pretrained` raise / from_scratch=true 且你不预期）：多半 `adapters.load_pretrained`
+  前缀剥离逻辑错（`module.`/`_orig_mod.`/`ema.`/多字段 dict 未处理）。回 Step 1 修 `puzzle_adapters.py`
+  的 `load_pretrained`。非双零不 fatal，记 `ckpt_from_scratch=true` 是合法路径（无预训练 ckpt 的
+  from-scratch 项目也允许跑 puzzle）。fix-loop ≤ 2 次仍失败 → fail loud。
+- forward-determinism 失败：flat 或 adapters.forward_model 含未固定 RNG 或无序算子。修 flat 或
+  adapters（固定 RNG）。fix-loop ≤ 2 次仍失败 → fail loud。
+- eval-stability 失败：读 `adapters.EVAL_NOISE_ATOL` 是否覆盖了评估协议噪声量级——若 eval 含
+  采样 / 检索 / 未 seed 路径，atol 须 ≥√(p(1−p)/N)（N≈1000 用 1e-2）。扩 atol 重跑（改 adapters 的
+  `EVAL_NOISE_ATOL` + manifest 的 `eval_noise_atol` 同步），或 `--eval_stability_atol <v>` CLI
+  override 重跑。**禁**为过 smoke 静默给 `puzzle_adapters.py` 的 evaluate 加 seed 改变用户 eval
+   语义（反模式）。确为确定性但两次仍非逐位一致 → 按超 1e-9 浮点漂移处理。fix-loop ≤ 2 次仍
+  失败 → fail loud。
 - per-slot identity allclose 失败：father-loaded 模块输出不可复现（non-persistent buffer / runtime
   cache 丢失）。检查 flat 是否漏 register_buffer。fix-loop ≤ 2 次仍失败 → fail loud。
 
@@ -301,8 +379,8 @@ Step 2 跑通后（block_map.json + 回填版 search_space.yaml 都在）才进�
    - `manifest.yaml`: `$ORCA_ARTIFACTS_DIR/manifest.yaml`
    - candidate catalog: `<repo>/workflows/agents/_puzzle_scripts/candidate_catalog.yaml`（绝对路径）
 2. **按协议调 `search-space-evaluator`**（审 slot 必填字段 / id+path 唯一 / kind 合法 /
-   candidate 注册有效 / user factory 可解析 / eval_kind 与输出 shape 自洽 / 无 `axes` 残留），
-   inputs 同上（不读 flat 源码，但要 catalog + manifest）。
+   candidate 注册有效 / user factory 可解析 / 评估范式与 metric.direction + 输出 shape 自洽 /
+   无 `axes` 残留），inputs 同上（不读 flat 源码，但要 catalog + manifest）。
 3. **Handle evaluator response（两个独立 fix-loop）：**
    - 返 `LGTM` → 该 evaluator 通过。
    - 返 bullet 列表 → 读每条 `[BLOCKER]`/`[MAJOR]`/`[MINOR]` finding 的 `[Fix]`，改
@@ -328,7 +406,7 @@ Step 2 跑通后（block_map.json + 回填版 search_space.yaml 都在）才进�
 
 **按协议调 `memory-verifier`**，inputs `$ORCA_ARTIFACTS_DIR` + `{{ inputs.project_root }}`。
 读 report；若任何更正暴露你产物的不一致 → 修产物（measure_baseline 产的 block_map /
-baseline_metrics 禁改；flat/search_space/manifest/project_manifest.md 可改）。
+baseline_metrics 禁改；flat/search_space/manifest/project_manifest.md/puzzle_adapters.py 可改）。
 
 ## Validation
 
@@ -391,6 +469,7 @@ baseline_metrics 禁改；flat/search_space/manifest/project_manifest.md 可改�
 - `workflow_verifier_passed`：Step 3 的 `workflow-verifier` 返 `all-pass` → `true`；unsupported
   stop → `false`；其它按实际。
 - `generated_artifacts`：至少含 `manifest.yaml`、`project_manifest.md`、`<base>_flat.py`、
-  `search_space.yaml`、`block_map.json`、`baseline_metrics.json`（或 unsupported 时按实际产出的子集）。
+  `puzzle_adapters.py`、`search_space.yaml`、`block_map.json`、
+  `baseline_metrics.json`（或 unsupported 时按实际产出的子集）。
 
 伪造无意义——output_schema + validator 双层兜底，必须真跑出 artifact 才过。

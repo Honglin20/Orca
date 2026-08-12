@@ -12,7 +12,7 @@ tools: [bash]
 
 🔴 **铁律（违反即失败）**：
 
-1. **运行下面命令恰好一次**，不许改脚本、不许加参数、不许自己重算或重写结果。
+1. **按下方命令跑一次**；`target_latency` 空时脚本自动走 reduction 软目标（按 `baseline × (1 - latency_reduction_target)` 推导），这是正常分支不是缺参。不许改脚本、不许自己重算或重写结果。
 2. 你的回复**只能**是脚本的真实 stdout（一行 JSON）。**不要**在 stdout 前后加注释、解释、
    复述上游、或你的判断——这是节点 output_schema 直接消费的 JSON。
 3. 脚本非 0 退出（mip_select.py 崩 / scores.jsonl 或 latency_table.jsonl 缺 / 预算太紧 infeasible /
@@ -41,17 +41,27 @@ for parent in p.parents:
         print(parent.parent); break
 ")"
 
+# target_latency 为空（默认 [advanced] 可选）时省略 --target-latency，
+# 让 mip_select.py 按 baseline×(1-latency_reduction_target) 推导软目标。
+TARGET_LAT_ARG=""
+if [ -n "{{ inputs.target_latency }}" ]; then
+  TARGET_LAT_ARG="--target-latency {{ inputs.target_latency }}"
+fi
+
 python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/mip_select.py" \
   --scores "$ORCA_ARTIFACTS_DIR/scores.jsonl" \
   --latency-table "$ORCA_ARTIFACTS_DIR/latency_table.jsonl" \
-  --target-latency "{{ inputs.target_latency }}" \
-  --baseline-metrics "$ORCA_ARTIFACTS_DIR/baseline_metrics.json"
+  --baseline-metrics "$ORCA_ARTIFACTS_DIR/baseline_metrics.json" \
+  --latency_reduction_target "{{ inputs.latency_reduction_target }}" \
+  $TARGET_LAT_ARG
 ```
 
 脚本契约（预写，pz_select 不验证）：
 - 入参：`--scores <path>`（jsonl，每行 `{layer,kind,variant,score,valid}`）；
   `--latency-table <path>`（jsonl，每行 `{layer,kind,variant,latency_ms}`）；
-  `--target-latency <number>`（用户 input,MIP 整模 latency 预算硬约束）;
+  `--target-latency <number>`（[advanced] 用户 input，MIP 整模 latency 预算硬约束；空串时脚本按
+  `baseline × (1 - latency_reduction_target)` 推导软目标，与 gate LAT AC 同源）；
+  `--latency_reduction_target <float>`（默认 0.5；target_latency 空时作 MIP 软目标比例）；
   `--baseline-metrics <path>`（baseline_metrics.json,提供整模 baseline_latency,
   使 MIP 用整模 latency 模型 `overhead + Σ chosen_block` 与 gate LAT AC 同尺度）。
 - MIP 形式化（pulp grouped-knapsack,整模 latency 尺度）：
@@ -68,11 +78,10 @@ python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/mip_select.py" \
     `{layer_idx: {attention: <variant>, ffn: <variant>}}`；无候选时 `{}` 或 `null`。
   - `total_score` (number)：选定架构的 Σscore；无候选时 0。
   - `selected_latency` (number)：选定架构 Σlatency（单位 = latency_unit）；无候选时 0。
-  - `latency_unit` (string)：透传 latency 单位（ms/us/s）。**注**：脚本不接 --latency-unit 参数，
-    unit 仅作 label 标注，由上游 scores/latency_table 的 latency_ms 字段名体现；本字段从
-    `{{ inputs.latency_unit }}` 由脚本内部读 manifest / 或留默认 ms。具体以脚本 stdout 为准。
-  - `feasible` (boolean)：true = Σlatency ≤ target_latency；false = 超预算或无候选。
-  - `select_reason` (string)：枚举 `"mip-optimal"` / `"infeasible"` / `"none"` / `"target-too-aggressive"`。
+  - `latency_unit` (string)：透传 latency 单位（ms/us/s）。**注**：脚本另接 `--latency-unit`
+    （透传到 stdout 字段，不换算数值）；本命令不传则默认 ms。
+  - `feasible` (boolean)：true = Σlatency ≤ target_latency（target_latency 空时 ≤ baseline×(1-latency_reduction_target)）；false = 超预算或无候选。
+  - `select_reason` (string)：枚举 `"mip-optimal"` / `"infeasible"` / `"none"`。
 - 退出码 0 = 成功（含 infeasible——那是 feasible=false 的正常分支）；非 0 = 失败（缺输入 / 解析错 /
   scores/latency 缺）。
 
@@ -89,6 +98,6 @@ python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/mip_select.py" \
 
 **整段回复 = 脚本 stdout 的那一行 JSON**（形如
 `{"selected_arch":{"0":{"attention":"fnet","ffn":"identity"},"1":{"attention":"random_synthesizer","ffn":"ffn_50"}},"total_score":-0.34,"selected_latency":3.8,"latency_unit":"ms","feasible":true,"select_reason":"mip-optimal"}`）。
-节点 `output_schema` 要求它是合法 JSON 且字段齐备 + `select_reason ∈ {mip-optimal, infeasible, none, target-too-aggressive}`。
+节点 `output_schema` 要求它是合法 JSON 且字段齐备 + `select_reason ∈ {mip-optimal, infeasible, none}`。
 `selected_arch` 空 / null 或 `feasible=false` → 引擎判 node 失败 → yaml 路由守卫触发
 terminate_select_failed。pz_retrain 引用 selected_arch 字段据此生成 retrain 脚本。

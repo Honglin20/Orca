@@ -65,6 +65,17 @@
   requires_ffn_struct: []
   description: "标准 MHSA（对照基线）"
 
+- name: masked_vanilla
+  kind: [attention]
+  source: builtin
+  factory: puzzle_blocks::make_masked_vanilla
+  params: {}
+  align: passthrough
+  trainable: true
+  mask_aware: true
+  requires_ffn_struct: []
+  description: "mask-aware 标准 MHSA（causal/padding 兼容）；父层传 attn_mask/attention_mask/key_padding_mask/mask 时转交 nn.MultiheadAttention；mask_load_bearing slot 的非 identity 候选"
+
 # ── ffn 候选（D4 builtin 集；E6/E7：剪枝相对 original_intermediate，仅 standard）──
 - name: ffn_75
   kind: [ffn]

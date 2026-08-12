@@ -179,22 +179,22 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
     --flat_model "$ORCA_ARTIFACTS_DIR/<base_name>_flat.py" \
     --build_fn "<manifest.yaml 的 model.build_entry，agent 读 manifest 桥接>" \
     --build_cfg "{{ inputs.build_cfg }}" \
-    --father_state "$ORCA_ARTIFACTS_DIR/father_state_dict.pt" \
-    --calib_loader_fn "<manifest.yaml 的 data_and_environment.data_loader_entry，"
-                       "agent 读 manifest 桥接；相对 project_root 或 path::func 绝对>" \
+    --adapters "$ORCA_ARTIFACTS_DIR/puzzle_adapters.py" \
+    --manifest "$ORCA_ARTIFACTS_DIR/manifest.yaml" \
     --output_dir "$ORCA_ARTIFACTS_DIR" \
     --seed {{ inputs.seed }}
   ```
   其中 `REPO_ROOT` 解析方式同 pz_expand Step 2（pathlib 探 `$ORCA_AGENT_RESOURCES` 的 workflows 父）。
   设 `NPROC_PER_NODE` 实测值（`python3 -c 'import torch; print(torch.cuda.device_count())'`；
-  CPU-only → 1）。
+  CPU-only → 1）。父权重加载由 bld.py 内部经 `adapters.load_pretrained` 完成（launcher 不接
+  父权重参数；father_state_dict.pt 由 pz_expand 落盘，bld.py 也可直接读 ckpt 路径）。
 
-  **calib 数据桥接（必读）**：bld.py 的 `--calib_loader_fn` 必填——BLD teacher 信号
-  必须来自真实数据 sample（torch.randn OOD 会让 candidate 学 noise→teacher，真实数据上
-  全错）。你（agent）读 `$ORCA_ARTIFACTS_DIR/manifest.yaml` 的
-  `data_and_environment.data_loader_entry`，按相对 `{{ inputs.project_root }}` 或绝对
-  path::func 填入此 arg。manifest 缺此字段 → 进 Step 4 输出 `{"status":"failed"}`，
-  assessment 写明 `manifest.data_and_environment.data_loader_entry 缺——calib 数据契约（BLD teacher 须真实数据）`。
+  **adapters 桥接（必读）**：bld.py 经 `--adapters` 指向 expand 生成的 `puzzle_adapters.py`
+  （其 `calib_iter` faithful 移植了用户 Dataset 构造，其 `forward_model` 处理多输入/dict batch，
+  其 `load_pretrained` 处理 ckpt 前缀剥离）。BLD teacher 信号必须来自真实数据 sample
+  （torch.randn OOD 会让 candidate 学 noise→teacher，真实数据上全错）。manifest 缺
+  `training_and_evaluation.adapters_entry` → 进 Step 4 输出 `{"status":"failed"}`，
+  assessment 写明 `manifest.training_and_evaluation.adapters_entry 缺——calib 数据契约（BLD teacher 须真实数据）`。
 
 **生成契约（scripts 解析的前提，必须逐字满足）**：
 - **机器进度（双 feed，每 progress unit，rank 0；bld.py 预写脚本内部已实现）**：
@@ -211,7 +211,7 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
 - **block_library 子目录**：bld.py 在 `$ORCA_ARTIFACTS_DIR/block_library/` 下写
   `L<layer>_<slot>_<variant>.pt` per (layer,slot,variant)。
 - **bld_summary.json**：bld.py 在 `$ORCA_ARTIFACTS_DIR/bld_summary.json` 写每 variant 最终 BLD loss。
-- **DataLoader 卫生（CUDA 训练机铁律，真实事故）**：bld.py 预写脚本已遵守 `num_workers=0` +
+- **DataLoader 卫生（CUDA 训练机铁律：num_workers=0 + pin_memory=False）**：bld.py 预写脚本已遵守 `num_workers=0` +
   `pin_memory=False`——你不在 launcher 里 override。
 
 生成后 append 文件名到 `.pz_build_library_generated.txt`。

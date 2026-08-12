@@ -1,4 +1,4 @@
-"""mip_select.py —— Puzzle P2.6：pulp grouped-knapsack MIP 选架构。
+"""mip_select.py —— Puzzle pulp grouped-knapsack MIP 选架构（U6 适配器）。
 
 形式化（SPEC §4 / P2.6）：
     max  Σ score[l, v] · x[l, v]
@@ -8,9 +8,15 @@
 
 分组键：``(layer_idx, kind)``（kind 替代 v1 slot_type，E3）。每组恰选一 variant。
 
+U6 改造（root cause G + LAT AC 参数化）：
+  - 删 ``target-too-aggressive`` 早警硬 terminate：MIP 只报 feasibility，LAT AC 由 gate 判。
+  - ``--target-latency`` 改可选（空 → ``baseline × (1 - latency_reduction_target)``
+    软目标；默认 reduction=0.5 → baseline×0.5）。
+  - ``--latency_reduction_target`` 与 gate 同源：specifies 要求的时延降幅比例（0.5 = 降一半）。
+  - select_reason enum 收缩到 ``mip-optimal`` / ``infeasible`` / ``none``。
+
 stdout 单行 JSON：``{selected_arch, total_score, selected_latency, feasible, select_reason}``。
 - selected_arch: ``{layer_idx: {kind: variant_name}}``
-- select_reason: ``mip-optimal`` / ``infeasible`` / ``none`` / ``target-too-aggressive``
 
 scores/latency 缺 → exit 2。
 """
@@ -63,18 +69,15 @@ def _solve_mip(
     baseline_whole_latency: float | None = None,
     measured_floor: float | None = None,
 ) -> dict[str, Any]:
-    """pulp grouped-knapsack 求解(Design A:standalone 单块 + floor overhead)。
+    """pulp grouped-knapsack 求解(Design A: standalone 单块 + floor overhead)。
 
-    latency_table 报的是**单块 standalone** latency(可靠且加性)。整模 latency 模型:
+    整模 latency 模型：
         selected_whole ≈ floor + Σ chosen_block_latency
-        floor = baseline_whole − Σ identity_block_latency(非 block 固定开销:
-        patch_embed/head/norm/residual 等;实测 ≈ 全 block drop 后的整模 latency)。
-    约束 selected_whole ≤ target(=baseline_whole/2 对接 LAT AC)。
-    baseline_whole_latency 必须给(从 baseline_metrics.json);缺则回退纯 block-sum。
+    约束 selected_whole ≤ target。baseline_whole_latency 必须给（从 baseline_metrics.json）；
+    缺则回退纯 block-sum。
     """
     import pulp
 
-    # 组装 (layer, kind, variant) -> score / latency
     score_map: dict[tuple[int, str, str], float] = {}
     valid_map: dict[tuple[int, str, str], bool] = {}
     for r in scores_rows:
@@ -86,7 +89,6 @@ def _solve_mip(
         key = (int(r["layer"]), str(r["kind"]), str(r["variant"]))
         latency_map[key] = _extract_latency(r)
 
-    # 分组（(layer, kind) 为组键——kind 替代 v1 slot_type，E3）
     groups: dict[tuple[int, str], list[tuple[int, str, str]]] = defaultdict(list)
     for key in score_map:
         if not valid_map.get(key, True):
@@ -106,10 +108,7 @@ def _solve_mip(
             "select_reason": "none",
         }
 
-    # floor = 非 block 固定开销。优先实测(全 block→no_op 整模 latency, latency_floor.json);
-    # 缺则用 baseline_whole − Σ identity 单块估算(因 standalone 欠计上下文会偏高,偏保守)。
-    # 两者都缺 → raise(target_latency 是整模尺度,floor=0 会让约束 silent 退化为纯 block-sum,
-    # 几乎恒可行,破坏 Design A 整模尺度模型——Rule 12 fail loud)。
+    # floor = 非 block 固定开销。优先实测；缺则用 baseline − Σ identity 估算；都缺 → raise。
     if measured_floor is not None:
         floor = measured_floor
     elif baseline_whole_latency is not None:
@@ -125,16 +124,15 @@ def _solve_mip(
         floor = baseline_whole_latency - identity_sum
         if floor < 0:
             print(
-                f"WARN: floor 估算为负({floor:.4f},identity 单块 standalone 偏大),clamp 到 0",
+                f"WARN: floor 估算为负({floor:.4f}, identity 单块 standalone 偏大), clamp 到 0",
                 file=sys.stderr,
             )
             floor = 0.0
     else:
         raise ValueError(
             "mip_select 缺 latency_floor.json 与 baseline_metrics——无法建立整模 latency "
-            "模型。latency_table 必须产 latency_floor.json,或传 --baseline-metrics。"
+            "模型。latency_table 必须产 latency_floor.json, 或传 --baseline-metrics。"
         )
-    # Σ chosen_block ≤ target − floor
     effective_target = target_latency - floor
 
     prob = pulp.LpProblem("puzzle_select", pulp.LpMaximize)
@@ -145,14 +143,11 @@ def _solve_mip(
                 f"x_{m[0]}_{m[1]}_{m[2]}", cat=pulp.LpBinary
             )
 
-    # 目标：max Σ score · x
     prob += pulp.lpSum(score_map[m] * x[m] for m in x)
 
-    # 约束 1：每组恰选一
     for gkey, members in groups.items():
         prob += pulp.lpSum(x[m] for m in members) == 1, f"one_per_L{gkey[0]}_{gkey[1]}"
 
-    # 约束 2：floor + Σ chosen_block ≤ target(整模尺度)
     prob += (
         pulp.lpSum(latency_map[m] * x[m] for m in x) <= effective_target,
         "latency_budget",
@@ -180,7 +175,7 @@ def _solve_mip(
             total_score += score_map[m]
             chosen_block_latency += latency_map[m]
 
-    selected_latency = floor + chosen_block_latency  # 整模估计
+    selected_latency = floor + chosen_block_latency
 
     return {
         "selected_arch": dict(selected_arch),
@@ -191,18 +186,29 @@ def _solve_mip(
     }
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Puzzle P2.6 MIP grouped-knapsack")
+def _build_argparser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Puzzle U6 MIP grouped-knapsack")
     parser.add_argument("--scores", required=True, help="scores.jsonl 路径")
     parser.add_argument("--latency-table", required=True, help="latency_table.jsonl 路径")
-    parser.add_argument("--target-latency", type=float, required=True)
+    parser.add_argument(
+        "--target-latency", type=float, default=None,
+        help="显式 latency 预算；空（默认）→ 由 baseline × (1 - latency_reduction_target) 推导",
+    )
+    parser.add_argument(
+        "--latency_reduction_target", type=float, default=0.5,
+        help="LAT AC 参数化（与 gate_report 同源）：要求时延降幅比例（0.5 = 降一半）。"
+        "--target-latency 缺省时按 baseline × (1 - reduction) 取软目标",
+    )
     parser.add_argument("--baseline-metrics", default="",
-                        help="baseline_metrics.json 路径(提供则用整模 latency 模型: "
-                        "overhead + Σ chosen_block,与 gate 同尺度;空则回退纯 block-sum)")
+                        help="baseline_metrics.json 路径（提供则用整模 latency 模型）")
     parser.add_argument("--latency-unit", default="ms", choices=["ms", "us", "s"],
                         help="latency 单位（透传到输出字段，不换算数值）")
     parser.add_argument("--output_dir", required=True)
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_argparser().parse_args(argv)
 
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -216,37 +222,24 @@ def main(argv: list[str] | None = None) -> int:
             with open(args.baseline_metrics, encoding="utf-8") as f:
                 baseline_whole = float(json.load(f)["baseline_latency"])
 
-        # E12 LAT 早警：target_latency > baseline_latency/2 → LAT AC 结构性不可达。
-        # 放在 mip_select（而非 gate）的原因：(1) mip_select 已有 target+baseline 同框；
-        # (2) 早 fail 省 build_selected + gkd_retrain（最长的 GKD 分钟~小时级）；(3) 具体
-        # select_reason=target-too-aggressive 让下游 assessment 标注根因；路由守卫仍走
-        # terminate_select_failed 兜底（selected_arch 空 + feasible=false 双条件不成立）。
-        # 缺 baseline_metrics 时跳过（不强制—— degraded 模式留给纯 block-sum 回退）。
-        if baseline_whole is not None:
-            lat_early_threshold = baseline_whole / 2.0
-            if args.target_latency > lat_early_threshold:
-                early = {
-                    "selected_arch": {},
-                    "total_score": 0.0,
-                    "selected_latency": 0.0,
-                    "feasible": False,
-                    "select_reason": "target-too-aggressive",
-                    "latency_unit": args.latency_unit,
-                    "infeasible_reason": (
-                        f"LAT 早警：target_latency={args.target_latency:.4f} "
-                        f"> baseline_latency/2={lat_early_threshold:.4f}（baseline="
-                        f"{baseline_whole:.4f}）——LAT AC 要求 latency_opt ≤ baseline/2，"
-                        f"目标预算已超 AC 上限，结构性不可达；禁浪费 build_selected/retrain 算力。"
-                        f"调高 target_latency 或换更小模型"
-                    ),
-                }
-                arch_path = output_dir / "selected_arch.json"
-                with open(arch_path, "w", encoding="utf-8") as f:
-                    json.dump(early, f, ensure_ascii=False, indent=2)
-                print(json.dumps(early, ensure_ascii=False))
-                return 0
+        # U6 root cause G：删 target-too-aggressive 早警；target 缺省 → reduction 推导软目标。
+        if args.target_latency is not None:
+            target_latency = float(args.target_latency)
+        elif baseline_whole is not None:
+            reduction = max(0.0, min(1.0, float(args.latency_reduction_target)))
+            target_latency = baseline_whole * (1.0 - reduction)
+            print(
+                f"[mip_select] target_latency 缺省 → baseline({baseline_whole:.4f}) "
+                f"× (1 - reduction({reduction})) = {target_latency:.4f}",
+                file=sys.stderr,
+            )
+        else:
+            raise ValueError(
+                "mip_select 需 --target-latency 或 --baseline-metrics（给 baseline 才能按 "
+                "latency_reduction_target 推导软目标）"
+            )
 
-        # 实测 floor(优先):latency_table 产出 latency_floor.json(与 latency_table.jsonl 同目录)
+        # 实测 floor（优先）：latency_table 产出 latency_floor.json
         measured_floor = None
         floor_path = Path(args.latency_table).resolve().parent / "latency_floor.json"
         if floor_path.is_file():
@@ -261,16 +254,16 @@ def main(argv: list[str] | None = None) -> int:
             measured_floor = float(fd["floor_latency"])
 
         result = _solve_mip(
-            scores_rows, latency_rows, args.target_latency, baseline_whole, measured_floor
+            scores_rows, latency_rows, target_latency, baseline_whole, measured_floor
         )
         result["latency_unit"] = args.latency_unit
+        result["target_latency"] = target_latency
+        result["latency_reduction_target"] = float(args.latency_reduction_target)
 
-        # 落 selected_arch.json（持久化，便于 build_selected 读）
         arch_path = output_dir / "selected_arch.json"
         with open(arch_path, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
 
-        # stdout：单行 JSON（pz_select 是 zero-LLM 确定性节点，stdout 直接转发为节点 output）
         print(json.dumps(result, ensure_ascii=False))
         return 0
     except Exception as e:

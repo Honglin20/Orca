@@ -1,5 +1,5 @@
 ---
-description: Puzzle GKD（Global Knowledge Distillation）末段重训执行 agent（folder-agent，长跑）。**把 GKD 跑到真正完成**：生成 run_retrain.sh launcher（调预写 _puzzle_scripts/build_selected.py 实例化异构架构 + _puzzle_scripts/gkd_retrain.py 端到端 KD）→ fidelity 复查 → detach 后台 → warmup 确认跑通 → 有界轮询 monitor 块全程监控（~9min/块，进程死/发散触发无上限自愈 HEAL-LOOP）→ 写 retrain_status.md（跨唤醒真相源），turn 到顶换 sub-agent 经 status.sh 真相源续接，完成（.retrain_rc==0 + 进程退出 + final_model.pt 有效；**ckpt 存在 ≠ 完成**，中断残留续训）才输出 JSON；GKD 未完成前不产出节点 JSON（宿主不调 next），节点常驻执行中。确定性逻辑固化在 scripts/（status/launch/warmup/eta/update_status_md/emit_result/progress_watcher/monitor_until_done），agent 只做判断（生成 / self-heal / 轮询 / 收尾）。launch.sh 自动启动 progress_watcher 边重训边推实时曲线。触碰 GKD 训练逻辑（gkd_retrain.py 的 cosine/logits KD / 数据管道）→ 重触 project-fidelity-verifier（point-to-file 协议）。build_selected.py / gkd_retrain.py 是预写脚本，禁 edit——有 bug → fail loud。
+description: Puzzle GKD（Global Knowledge Distillation）末段重训执行 agent（folder-agent，长跑）。**把 GKD 跑到真正完成**：生成 run_retrain.sh launcher（调预写 _puzzle_scripts/build_selected.py 实例化异构架构 + _puzzle_scripts/gkd_retrain.py 端到端 KD，KD/task loss 由 adapters.kd_loss / task_loss 决定）→ fidelity 复查 → detach 后台 → warmup 确认跑通 → 有界轮询 monitor 块全程监控（~9min/块，进程死/发散触发无上限自愈 HEAL-LOOP）→ 写 retrain_status.md（跨唤醒真相源），turn 到顶换 sub-agent 经 status.sh 真相源续接，完成（.retrain_rc==0 + 进程退出 + final_model.pt 有效；**ckpt 存在 ≠ 完成**，中断残留续训）才输出 JSON；GKD 未完成前不产出节点 JSON（宿主不调 next），节点常驻执行中。确定性逻辑固化在 scripts/（status/launch/warmup/eta/update_status_md/emit_result/progress_watcher/monitor_until_done），agent 只做判断（生成 / self-heal / 轮询 / 收尾）。launch.sh 自动启动 progress_watcher 边重训边推实时曲线。触碰 GKD 训练逻辑（gkd_retrain.py 的 KD / 数据管道）或 puzzle_adapters.py 的 KD/task loss → 重触 project-fidelity-verifier（point-to-file 协议）。build_selected.py / gkd_retrain.py 是预写脚本，禁 edit——有 bug → fail loud。
 tools: [bash, read, write, edit, grep, glob, task]
 ---
 # pz_retrain
@@ -50,11 +50,11 @@ tools: [bash, read, write, edit, grep, glob, task]
 - `{{ pz_select.output.selected_arch }}` = 上游选定架构（Jinja 渲染，dict；生成 run_retrain.sh 的
   架构来源）。
 - `workflows/agents/_puzzle_scripts/build_selected.py` = 预写脚本：读 selected_arch + block_library +
-  flat_model，逐层把 attention/ffn slot 换成选定 variant（载块库权重），identity 保留父权重 →
-  实例化异构架构 `selected_model.pt`。
-- `workflows/agents/_puzzle_scripts/gkd_retrain.py` = 预写脚本：读 selected_model + flat_model
-  （teacher，冻结）+ 用户 train data，端到端 KD（`cosine_kd_loss` 逐层 hidden + `logits_kd_loss`
-  分类才有，`KDWeightScheduler` warmup）→ `final_model.pt`。
+  flat_model + adapters，逐层把 attention/ffn slot 换成选定 variant（载块库权重），identity 保留
+  父权重（经 `adapters.load_pretrained`）→ 实例化异构架构 `selected_model.pt`。
+- `workflows/agents/_puzzle_scripts/gkd_retrain.py` = 预写脚本：读 selected_model + flat/adapters
+  （teacher，冻结）+ adapters.train_iter 数据，端到端 KD（`adapters.kd_loss` + 可选
+  `adapters.task_loss`，agent 移植正确 loss 公式）→ `final_model.pt`。
 
 ## 行为痕迹 marker 文件（生成 / self-heal 期间维护，约定）
 
@@ -84,8 +84,9 @@ tools: [bash, read, write, edit, grep, glob, task]
    - **纯补丁层**（直接 edit，无需重触 fidelity）：
      - `run_retrain.sh`（launcher 参数 / NPROC_PER_NODE / 路径对齐）
      - 明显 typo / import 路径错（仅限 run_retrain.sh 内）
-   - **训练逻辑层**：在 `gkd_retrain.py` 里（cosine/logits KD / KDWeightScheduler / 数据管道）——
-     禁 edit（预写脚本，铁律 5b）。根因在 gkd_retrain.py → fail loud。
+   - **训练逻辑层**：在 `gkd_retrain.py` 里（KD 经 `adapters.kd_loss` / task_loss 经
+     `adapters.task_loss` / 数据管道经 `adapters.train_iter`）——禁 edit（预写脚本，铁律 5b）。
+     根因在 gkd_retrain.py → fail loud。
 5. **禁碰清单（硬铁律，违反=架构破坏，唯一 failed 触发）**：以下文件**只许 read，禁 edit/write**——
    `block_map.json`、`<base>_flat.py`、`baseline_metrics.json`、`project_manifest.md`、
    `bld_summary.json`、`block_library/*.pt`、`scores.jsonl`、`latency_table.jsonl`、
@@ -99,9 +100,11 @@ tools: [bash, read, write, edit, grep, glob, task]
 8. 你的**最终回复**只能是 Step 4 那个 `emit_result.py` 打印的**单行 JSON**（仅 GKD 完成/确定
    失败时）——节点 `output_schema` 校验，非 JSON 直接 node_failed。**未完成时**最终回复 =
    状态说明（含"请勿调用 orca next"字样），宿主不会提交它。
-9. **用户测度权威（生成 run_retrain.sh 时）**：gkd_retrain.py 的 KD loss / 数据流 / metric 名 /
-   metric 方向由预写脚本忠实实现（cosine hidden + KL logits[分类]），**你不在 launcher 里 override**。
-   下游 `pz_report` 的 ACC AC（|acc_delta| ≤ tolerance）依赖 final_model 的 acc 由 eval_fn 测。
+9. **用户测度权威（生成 run_retrain.sh 时）**：KD loss / task loss / 数据流 / metric 方向由
+   `puzzle_adapters.py` 忠实移植（agent 已在 pz_expand 按用户任务移植正确 KD / task loss），
+   gkd_retrain.py 经 `adapters.kd_loss` / `adapters.task_loss` 调用——**你不在 launcher 里 override
+   也不重写 loss 公式**。下游 `pz_report` 的 ACC AC（方向感知公式）依赖 final_model 的 acc 由
+   `adapters.evaluate` 测、方向由 `adapters.METRIC_DIRECTION` 判。
 
 ## 决策树总览（每次进入本节点都从头走）
 
@@ -174,7 +177,8 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
     --build_fn "<manifest.yaml 的 model.build_entry>" \
     --build_cfg "{{ inputs.build_cfg }}" \
     --block_library "$ORCA_ARTIFACTS_DIR/block_library" \
-    --father_state "$ORCA_ARTIFACTS_DIR/father_state_dict.pt" \
+    --adapters "$ORCA_ARTIFACTS_DIR/puzzle_adapters.py" \
+    --manifest "$ORCA_ARTIFACTS_DIR/manifest.yaml" \
     --output_dir "$ORCA_ARTIFACTS_DIR"
 
   # 2. GKD 末段重训
@@ -185,31 +189,28 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
     --build_cfg "{{ inputs.build_cfg }}" \
     --block_map "$ORCA_ARTIFACTS_DIR/block_map.json" \
     --block_library "$ORCA_ARTIFACTS_DIR/block_library" \
-    --father_state "$ORCA_ARTIFACTS_DIR/father_state_dict.pt" \
-    --eval_fn "<manifest.yaml 的 training_and_evaluation.evaluation_entry>" \
-    --eval_kind "{{ inputs.eval_kind }}" \
-    --train_loader_fn "<manifest.yaml 的 data_and_environment.data_loader_entry>" \
+    --adapters "$ORCA_ARTIFACTS_DIR/puzzle_adapters.py" \
+    --manifest "$ORCA_ARTIFACTS_DIR/manifest.yaml" \
     --output_dir "$ORCA_ARTIFACTS_DIR" \
     --epochs "$EPOCHS" \
-    --hard_label_weight 1.0 \
+    --task_loss_weight 1.0 \
     --seed {{ inputs.seed }}
   ```
   `REPO_ROOT` 解析方式同 pz_expand Step 2（pathlib 探 `$ORCA_AGENT_RESOURCES` 的 workflows 父）。
   设 `NPROC_PER_NODE` 实测值（`python3 -c 'import torch; print(torch.cuda.device_count())'`）。
-  `EPOCHS` 变量形态可调（默认 1，GKD 是末段微调非从零训）。
+  `EPOCHS` 变量形态可调（默认 1，GKD 是末段微调非从零训）。父权重加载由脚本内部经
+  `adapters.load_pretrained` 完成（launcher 不接父权重参数）。
 
-  **manifest 桥接（必读）**：5 个 CLI args（`--build_fn` / `--eval_fn` / `--father_state`
-  / `--train_loader_fn` / `--eval_kind`）由你（agent）从 `$ORCA_ARTIFACTS_DIR/manifest.yaml`
-  + `{{ inputs.eval_kind }}` 桥接——脚本本身不解析 manifest（manifest 消费者是 agent）。
+  **adapters 桥接（必读）**：launcher 经 `--adapters <path>` + `--manifest <path>` 桥接——脚本读
+  adapters 拿 `kd_loss` / `task_loss` / `train_iter` / `extract_labels` / `forward_model` /
+  `evaluate`（13 项 API）；`--build_fn` 保留作 flat 实例化入口。
   - `--build_fn` ← `manifest.model.build_entry`
-  - `--eval_fn` ← `manifest.training_and_evaluation.evaluation_entry`
-  - `--train_loader_fn` ← `manifest.data_and_environment.data_loader_entry`
-  - `--father_state` ← 固定 `$ORCA_ARTIFACTS_DIR/father_state_dict.pt`（pz_expand 已落盘）
-  - `--eval_kind` ← `{{ inputs.eval_kind }}`（用户 [ask]，与 manifest 须一致）
-  manifest 缺任一字段 → 进 Step 4 输出 `{"status":"failed"}`，assessment 写明缺哪个。
-  **dict/list 模型输出**：gkd_retrain.py 的 `_flatten_model_output` 对 dict 直接
-  raise——flat.py 须按 pz_expand 契约加 output-flattening adapter（暴露单 tensor 为顶层
-  forward 返回）。
+  - `--adapters` ← 固定 `$ORCA_ARTIFACTS_DIR/puzzle_adapters.py`（pz_expand 生成）
+  - `--manifest` ← 固定 `$ORCA_ARTIFACTS_DIR/manifest.yaml`
+  manifest 缺 `training_and_evaluation.adapters_entry` → 进 Step 4 输出 `{"status":"failed"}`，
+  assessment 写明缺哪个。
+  **输出展平**：gkd_retrain.py 不再自带 `_flatten_model_output`——多输出/dict 输出由
+  `adapters.kd_loss` / `task_loss` 直接消费原始输出（agent 移植时处理），launcher 不操心。
 
 **生成契约（scripts 解析的前提，必须逐字满足）**：
 - **机器进度（双 feed，每 progress unit，rank 0；gkd_retrain.py 预写脚本内部已实现）**：
@@ -221,8 +222,8 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
 - **DataLoader 卫生**：gkd_retrain.py 已遵守 `num_workers=0` + `pin_memory=False`。
 - **progress.jsonl 写入自检**：grep `gkd_retrain.py` 含 `progress.jsonl` + `json.dumps`（预写脚本
   保证，你只 grep 确认）。
-- **用户测度自检**：gkd_retrain.py 的 KD loss 逻辑（cosine + KL）由预写脚本忠实实现，你不在
-  launcher override。
+- **用户测度自检**：gkd_retrain.py 的 KD / task loss 经 `adapters.kd_loss` / `adapters.task_loss`
+  调用（agent 在 pz_expand 按用户任务移植正确公式），你不在 launcher override 也不重写公式。
 
 生成后 append 文件名到 `.pz_retrain_generated.txt`。
 
@@ -234,7 +235,7 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
 ```
 Task(subagent_type=<host 内置通用类型>,
      prompt="先完整 Read {{ subagents_root }}/project-fidelity-verifier.md，严格按其 Procedure 执行本轮任务。
-             本轮 inputs：<task: verify whether my generated run_retrain.sh launcher faithfully calls build_selected.py + gkd_retrain.py with correct args (selected_arch / block_library / teacher / KD loss / data pipeline), given project_manifest.md + selected_arch + bld_summary.json> + <my generated launcher full content> + Context: pz_retrain Step 3b first-time review。
+             本轮 inputs：<task: verify whether my generated run_retrain.sh launcher faithfully calls build_selected.py + gkd_retrain.py with correct args (selected_arch / block_library / adapters / manifest / KD loss / data pipeline), given project_manifest.md + selected_arch + bld_summary.json> + <my generated launcher full content> + Context: pz_retrain Step 3b first-time review。
              按 md 规定的格式 return。
              **report 首行**必须照原样回显你 Read 到的 md frontmatter 里的 sentinel 字段。")
 ```
@@ -301,7 +302,7 @@ bash "$ORCA_AGENT_RESOURCES/scripts/update_status_md.sh"
 ```
 Task(subagent_type=<host 内置通用类型>,
      prompt="先完整 Read {{ subagents_root }}/project-fidelity-verifier.md，严格按其 Procedure 执行本轮任务。
-             本轮 inputs：<task: re-verify whether my run_retrain.sh launcher edits drift from intended GKD semantics (cosine hidden KD + KL logits warmup, teacher frozen, data pipeline)> + <my latest healed diff context> + Fixed:[<healed file list this round>] + Context: pz_retrain self-heal。
+             本轮 inputs：<task: re-verify whether my run_retrain.sh launcher edits drift from intended GKD semantics (KD via adapters.kd_loss + optional task_loss via adapters.task_loss, teacher frozen, data pipeline via adapters.train_iter)> + <my latest healed diff context> + Fixed:[<healed file list this round>] + Context: pz_retrain self-heal。
              按 md 规定的格式 return。
              **report 首行**必须照原样回显你 Read 到的 md frontmatter 里的 sentinel 字段。")
 ```

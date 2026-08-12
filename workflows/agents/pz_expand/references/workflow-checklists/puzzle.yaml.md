@@ -37,13 +37,21 @@ Each item below is a verifiable requirement extracted from the puzzle workflow's
 **Verify**: Read `search_space.yaml`; for each slot confirm `kind_evidence` is non-empty and consistent with `kind`; confirm `identity` ∈ each candidates list.
 **Anti-pattern**: slot without `kind_evidence` (kind claim unverified); attention slot whose evidence does not mention matmul/scaling; ffn slot without `activation` / `ffn_struct`; candidates list missing `identity`.
 
-### [CRITICAL] 5. manifest.yaml Has All 5 Sections And eval_kind Matches
+### [CRITICAL] 5. manifest.yaml Has All 5 Sections And Records Adapter Entry
 **auto-fixable**: yes
 **Section**: Workflow / Pipeline Memory
-**Check**: `manifest.yaml` parses as YAML with the 5 top-level keys: `project_overview` / `model` / `training_and_evaluation` / `data_and_environment` / `relevant_source_files`. `training_and_evaluation.eval_kind` must equal `inputs.eval_kind`. The `training_and_evaluation.evaluation_entry`, `training_and_evaluation.pretrained_ckpt`, and `model.build_entry` are the discovered bridges measure_baseline consumes.
-**Verify**: `python3 -c "import yaml; d=yaml.safe_load(open('manifest.yaml')); assert all(k in d for k in ['project_overview','model','training_and_evaluation','data_and_environment','relevant_source_files'])"`.
-**Anti-pattern**: section collapsed/missing; `eval_kind` conflicts with `inputs.eval_kind`; `evaluation_entry` / `pretrained_ckpt` / `build_entry` blank.
-**Fix**: append the missing section / reconcile `eval_kind` / fill the discovered entry fields.
+**Check**: `manifest.yaml` parses as YAML with the 5 top-level keys: `project_overview` / `model` / `training_and_evaluation` / `data_and_environment` / `relevant_source_files`. `training_and_evaluation.adapters_entry` (`puzzle_adapters.py`), `training_and_evaluation.metric.direction` (`higher-better` | `lower-better`), `training_and_evaluation.forward_calling_convention`, and `model.build_entry` are the bridges measure_baseline / bld / score / gkd / gate_report consume (all via `--adapters` + `--manifest`). The retired `eval_kind` / `evaluation_entry` / `data_loader_entry` fields must not appear.
+**Verify**: `python3 -c "import yaml; d=yaml.safe_load(open('manifest.yaml')); assert all(k in d for k in ['project_overview','model','training_and_evaluation','data_and_environment','relevant_source_files']); t=d['training_and_evaluation']; assert 'adapters_entry' in t and 'metric' in t and 'direction' in t['metric']; assert 'eval_kind' not in t and 'evaluation_entry' not in t and 'data_loader_entry' not in d['data_and_environment']"`.
+**Anti-pattern**: section collapsed/missing; retired `eval_kind` / `evaluation_entry` / `data_loader_entry` lingering; `adapters_entry` / `metric.direction` / `forward_calling_convention` blank.
+**Fix**: append the missing section / drop retired fields / fill `adapters_entry` + `metric.direction` + `forward_calling_convention`.
+
+### [CRITICAL] 5b. puzzle_adapters.py Exists And Exposes The 13 API
+**auto-fixable**: no
+**Section**: Workflow / Step 1 (adapter generation)
+**Check**: `puzzle_adapters.py` exists under `$ORCA_ARTIFACTS_DIR` and is importable in isolation. It must expose all 13 API: `build_model()`, `FORWARD_CALLING_CONVENTION` ("positional"|"dict"|"single"), `forward_model(model, batch)`, `calib_iter(device=None)`, `train_iter(device=None)`, `extract_labels(batch)`, `kd_loss(s_out, t_out, labels=None)`, `task_loss(s_out, labels)`, `evaluate(model)`, `METRIC_DIRECTION` ("higher-better"|"lower-better"), `EVAL_NOISE_ATOL` (float), `load_pretrained(model)`, `DUMMY_INPUT` (dict; multi-input uses list of shapes + convention). The downstream scripts (measure_baseline / bld / score / latency_table / build_selected / gkd_retrain / gate_report) consume this module via `--adapters <path>`. `manifest.yaml.training_and_evaluation.adapters_entry` must equal `puzzle_adapters.py`.
+**Verify**: `python -m py_compile puzzle_adapters.py`; grep module for the 13 names; confirm `manifest.yaml` `adapters_entry: puzzle_adapters.py`.
+**Anti-pattern**: adapter split across multiple files (e.g. separate data/eval files); a single `puzzle_adapters.py` with all 13 API is required; adapter missing any of the 13 API; `kd_loss` / `task_loss` hardcoded to CE / cosine (must faithful-port user's task loss); `load_pretrained` not handling `module.` / `_orig_mod.` / `ema.` prefix stripping; `FORWARD_CALLING_CONVENTION` absent while `forward_model` assumes single-tensor.
+**Fix**: regenerate `puzzle_adapters.py` per the adapter contract in pz_expand/agent.md.
 
 ### [MAJOR] 6. pathlib Used For Paths
 **auto-fixable**: yes
