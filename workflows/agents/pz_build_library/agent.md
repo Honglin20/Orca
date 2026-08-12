@@ -181,6 +181,7 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
     --build_cfg "{{ inputs.build_cfg }}" \
     --adapters "$ORCA_ARTIFACTS_DIR/puzzle_adapters.py" \
     --manifest "$ORCA_ARTIFACTS_DIR/manifest.yaml" \
+    --epochs "$EPOCHS" \
     --output_dir "$ORCA_ARTIFACTS_DIR" \
     --seed {{ inputs.seed }}
   ```
@@ -188,6 +189,10 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
   设 `NPROC_PER_NODE` 实测值（`python3 -c 'import torch; print(torch.cuda.device_count())'`；
   CPU-only → 1）。父权重加载由 bld.py 内部经 `adapters.load_pretrained` 完成（launcher 不接
   父权重参数；father_state_dict.pt 由 pz_expand 落盘，bld.py 也可直接读 ckpt 路径）。
+  **`EPOCHS` = manifest 的项目训练 epochs**（与 GKD 同源）：读 `$ORCA_ARTIFACTS_DIR/manifest.yaml`
+  的 `training_and_evaluation.epochs`（pz_expand 从用户 train 代码发现并记录），作 BLD 每 variant
+  蒸馏轮次。BLD 必须按项目原本训练量级蒸馏，否则候选欠收敛（loss~1）→ 替换 acc 崩。manifest
+  缺 epochs → 回退 bld.py 默认（assessment 警告）。
 
   **adapters 桥接（必读）**：bld.py 经 `--adapters` 指向 expand 生成的 `puzzle_adapters.py`
   （其 `calib_iter` faithful 移植了用户 Dataset 构造，其 `forward_model` 处理多输入/dict batch，
