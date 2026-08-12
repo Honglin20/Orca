@@ -64,6 +64,10 @@ Verify each aspect against the "Full-Model Scope & Component Boundary" rules in 
 - Follow the model-type-specific `ArchConfig` schema when checking layer entries:
   - Isotropic Transformer uses `arch_config.layers_config` in layer order.
   - CNN / Hierarchical Transformer use `arch_config.layer_configs[stage_name]` in `SearchSpace.stage_names` order.
+- **Search space strictly exceeds the baseline on depth and internal width `[BLOCKER]`**: the supernet must open strictly *beyond* the user model so sandwich training can sample subnets both smaller and larger than baseline; a space capped at the baseline leaves no room above it. Compare every searchable candidate tuple against the **actual** structural values read from `<prepared_model>` (do not assume the baseline sits at the "central value" of the candidates):
+  - **Depth**: `max(depth_candidates)` must be **strictly greater** than the prepared model's actual depth. For staged models (CNN / hierarchical transformer), `max(stage_depth_candidates[i])` must be strictly greater than the prepared model's block count in **each** searchable stage. A candidate set whose maximum equals the baseline (e.g. baseline depth 4 with `depth_candidates=(2,3,4)`) is `[BLOCKER]`.
+  - **Internal width** (searchable internal dimensions only): for transformers, `num_heads` and `ffn_dim`; for CNN, bottleneck widths such as `expand_channels` / `mid_channels`. For each such field, `max(candidates)` must be **strictly greater** than the prepared model's actual value for that field. A candidate set capped at the baseline value is `[BLOCKER]`.
+  - **Out of scope**: the main residual width (`global_dim` for isotropic, `stage_widths` for CNN, `stage_emb_dims` for hierarchical) is **fixed by design and not searched** — do not flag it for failing to expand.
 
 #### Elastic* API
 
