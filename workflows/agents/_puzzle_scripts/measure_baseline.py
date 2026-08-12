@@ -325,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
                 "latency_unit": args.latency_unit,
                 "fidelity_passed": False,
                 "smokes_passed": [],
-                "error": "empty search_space.slots (terminate_unsupported, E22)",
+                "error": "empty search_space.slots (terminate_unsupported)",
                 "generated_artifacts": [str(flat_path)],
             }
             print(f"BASELINE_ACC: 0")

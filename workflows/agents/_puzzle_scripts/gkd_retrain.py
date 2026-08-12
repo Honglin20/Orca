@@ -55,23 +55,23 @@ def _flatten_model_output(out: Any) -> torch.Tensor:
     if isinstance(out, (tuple, list)):
         if not out:
             raise RuntimeError(
-                "E24：模型 forward 返回空 tuple/list——无法取主 tensor（GKD KD loss 契约）"
+                "模型 forward 返回空 tuple/list——无法取主 tensor（GKD KD loss 契约）"
             )
         first = out[0]
         if not isinstance(first, torch.Tensor):
             raise RuntimeError(
-                f"E24：模型 forward tuple/list 首元素非 tensor（{type(first).__name__}）"
+                f"模型 forward tuple/list 首元素非 tensor（{type(first).__name__}）"
                 f"——flat.py 须加 output-flattening adapter"
             )
         return first
     if isinstance(out, dict):
         raise RuntimeError(
-            f"E24：模型 forward 返回 dict（keys={list(out.keys())[:5]}）——"
+            f"模型 forward 返回 dict（keys={list(out.keys())[:5]}）——"
             f"GKD KD loss 契约要求单 tensor 输入。flat.py 须加 output-flattening adapter"
             f"（按任务语义挑主 tensor 暴露为顶层 forward 返回值）"
         )
     raise RuntimeError(
-        f"E24：模型 forward 返回非 tensor/tuple/list/dict（{type(out).__name__}）"
+        f"模型 forward 返回非 tensor/tuple/list/dict（{type(out).__name__}）"
         f"——GKD KD loss 契约无法消费"
     )
 

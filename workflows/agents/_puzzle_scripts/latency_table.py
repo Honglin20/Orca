@@ -1,6 +1,6 @@
-"""latency_table.py —— Puzzle P2.5：per (layer, slot, variant) 单块 latency 实测。
+"""latency_table.py —— Puzzle P2.5：per (layer, kind, variant) 单块 latency 实测。
 
-**standalone 单块 latency 模型**(Design A):对每 (layer, slot, variant),测该块**独立**
+**standalone 单块 latency 模型**(Design A):对每 (layer, kind, variant),测该块**独立**
 forward 的 latency。单块 latency 可靠且**加性**——Σ 单块 ≈ block 对整模的贡献(实测:8 块
 ×~0.07ms ≈ 0.56ms ≈ baseline_whole − floor)。整模 latency = floor(非 block) + Σ block,
 其中 floor = baseline_whole − Σ identity_block(mip_select 算)。
@@ -12,7 +12,7 @@ forward 的 latency。单块 latency 可靠且**加性**——Σ 单块 ≈ bloc
 - passthrough(identity):测原父块单块 latency。
 - latency_script_path → 包装它;否则 nas-agent measure_module_latency(100 reps 稳定)。
 
-输出 ``latency_table.jsonl``：``{layer, slot, variant, latency_<unit>, unit}``。
+输出 ``latency_table.jsonl``：``{layer, kind, variant, latency_<unit>, unit}``。
 """
 
 from __future__ import annotations

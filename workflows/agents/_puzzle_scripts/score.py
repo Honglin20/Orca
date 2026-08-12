@@ -1,13 +1,13 @@
 """score.py —— Puzzle P2.4：replace-1-block 打分。
 
-对每 (layer, slot, variant)：把该 slot 替换成 variant（载块库权重），其余冻结
+对每 (layer, kind, variant)：把该 slot 替换成 variant（载块库权重），其余冻结
 父模型，calibration set 上算 block-distance 分：
   - classification → ``logits_kd_loss``（KL）vs 父 logits
   - embedding → hidden cosine distance ``1 - cos(h_var, h_parent)``
   - regression → output MSE
 score = -distance（越大越好）。
 
-输出 ``scores.jsonl``：``{layer, slot, variant, score, valid}``。
+输出 ``scores.jsonl``：``{layer, kind, variant, score, valid}``。
 stdout：``SCORES: <path>`` / ``RESULT_JSON: {...}``。
 """
 
@@ -214,7 +214,7 @@ def main(argv: list[str] | None = None) -> int:
             "status": "executed",
             "artifacts": [str(scores_path)],
             "assessment": (
-                f"打分完成：{n_valid} 个 valid (layer,slot,variant)"
+                f"打分完成：{n_valid} 个 valid (layer,kind,variant)"
             ),
             "max_retries_hit": False,
             "healed_files": [],

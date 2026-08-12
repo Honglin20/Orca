@@ -1,5 +1,5 @@
 ---
-description: Puzzle replace-1-block 打分执行 agent（folder-agent）。跑预写 _puzzle_scripts/score.py + latency_table.py → 对每个 (layer,slot,variant) 把该块替换进冻结全模型，calibration 上算 block-distance 分（classification=KL logits；embedding=hidden cosine distance；regression=output MSE）+ per-variant 实测 latency → scores.jsonl + latency_table.jsonl。推 3 图（block_score_bar / latency_dist / score_vs_latency_scatter，label `puzzle/score`）。无上限自愈直到产物 ≥1 行且 (layer,variant) 对齐。触碰 scoring logic → 重触 project-fidelity-verifier。禁碰 block_map / flat_model / block_library / 源项目。pathlib 铁律。
+description: Puzzle replace-1-block 打分执行 agent（folder-agent）。跑预写 _puzzle_scripts/score.py + latency_table.py → 对每个 (layer,kind,variant) 把该块替换进冻结全模型，calibration 上算 block-distance 分（classification=KL logits；embedding=hidden cosine distance；regression=output MSE）+ per-variant 实测 latency → scores.jsonl + latency_table.jsonl。推 3 图（block_score_bar / latency_dist / score_vs_latency_scatter，label `puzzle/score`）。无上限自愈直到产物 ≥1 行且 (layer,variant) 对齐。触碰 scoring logic → 重触 project-fidelity-verifier。禁碰 block_map / flat_model / block_library / 源项目。pathlib 铁律。
 tools: [bash, read, edit, grep, glob, task]
 ---
 # pz_score
@@ -18,13 +18,13 @@ score.py / latency_table.py 本体禁 edit → fail loud）。
 - `$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本 run artifacts 目录。
 - `$ORCA_AGENT_RESOURCES`（orca spawn 注入）= 本 agent 资源目录。
 - `workflows/agents/_puzzle_scripts/score.py` = 预写 replace-1-block 打分脚本。读 block_library +
-  flat_model + block_map + calib loader + `--eval_kind`，per (layer,slot,variant) 替换单块进冻结
+  flat_model + block_map + calib loader + `--eval_kind`，per (layer,kind,variant) 替换单块进冻结
   全模型，calibration 上算 block-distance 分（classification → KL logits；embedding → hidden
-  cosine；regression → output MSE）。输出 `scores.jsonl`：`{layer, slot, variant, score, valid}`，
+  cosine；regression → output MSE）。输出 `scores.jsonl`：`{layer, kind, variant, score, valid}`，
   score = `-distance`（越大越好）。
-- `workflows/agents/_puzzle_scripts/latency_table.py` = 预写 latency 实测脚本。per (layer,slot,variant)
+- `workflows/agents/_puzzle_scripts/latency_table.py` = 预写 latency 实测脚本。per (layer,kind,variant)
   调 `measure_module_latency` 或包装用户 `latency_script_path`。输出 `latency_table.jsonl`：
-  `{layer, slot, variant, latency_ms}`（单位 = `latency_unit` 标注，不换算）。
+  `{layer, kind, variant, latency_ms}`（单位 = `latency_unit` 标注，不换算）。
 - `{{ subagents_root }}/project-fidelity-verifier.md` = fidelity-verifier subagent body（point-to-file
   协议，Step 3）。
 
@@ -67,7 +67,7 @@ Step 1 前确认都已知（缺任一 → fail loud）：
    `baseline_metrics.json`、`project_manifest.md`、`block_library/*.pt`、`bld_summary.json`、
    `_puzzle_scripts/score.py` / `latency_table.py`（预写脚本）、
    `{{ inputs.project_root }}` 下源文件（例外 `artifacts/`）。
-5. **产物 ≥1 行 + 对齐**：scores.jsonl 和 latency_table.jsonl 各 ≥1 行；每 (layer,slot,variant)
+5. **产物 ≥1 行 + 对齐**：scores.jsonl 和 latency_table.jsonl 各 ≥1 行；每 (layer,kind,variant)
    在两边都出现。否则 fail loud。
 6. 你的**最终回复**只能是 Step 4 那个 `emit_result.py` 打印的**单行 JSON**。
 
@@ -83,8 +83,8 @@ if [ -s scores.jsonl ] && [ -s latency_table.jsonl ]; then
 import json
 s = [json.loads(l) for l in open('scores.jsonl') if l.strip()]
 t = [json.loads(l) for l in open('latency_table.jsonl') if l.strip()]
-sk = {(r['layer'], r['slot'], r['variant']) for r in s}
-tk = {(r['layer'], r['slot'], r['variant']) for r in t}
+sk = {(r['layer'], r['kind'], r['variant']) for r in s}
+tk = {(r['layer'], r['kind'], r['variant']) for r in t}
 assert sk == tk, f'misaligned: {sk ^ tk}'
 print('SCORE_REUSE_VALID')
 " 2>/dev/null | grep -q SCORE_REUSE_VALID; then
@@ -131,8 +131,8 @@ cd "$ORCA_ARTIFACTS_DIR" && bash run_score.sh
 ```
 
 产物：
-- `scores.jsonl`：`{layer, slot, variant, score, valid}` per (layer,slot,variant)。
-- `latency_table.jsonl`：`{layer, slot, variant, latency_ms}` per (layer,slot,variant)。
+- `scores.jsonl`：`{layer, kind, variant, score, valid}` per (layer,kind,variant)。
+- `latency_table.jsonl`：`{layer, kind, variant, latency_ms}` per (layer,kind,variant)。
 
 推 3 图（fail-soft，`|| true` 不阻塞；脚本内部用 `orca.chart.render_chart`，label `puzzle/score`）：
 score.py / latency_table.py 内部已实现 chart 推送（block_score_bar / latency_dist /
@@ -159,7 +159,7 @@ Task(subagent_type=<host 内置通用类型>,
 ## Validation
 
 - scores.jsonl + latency_table.jsonl 各 ≥1 行。
-- 每 (layer,slot,variant) 在 scores 和 latency_table 都出现（对齐）。
+- 每 (layer,kind,variant) 在 scores 和 latency_table 都出现（对齐）。
 - valid 字段（score.py 内部标 true/false；false = 该 variant 评估崩或 NaN）允许存在——下游 mip_select
   会过滤。
 - 校验失败 → 按白名单自修 launcher 重跑；同一根因反复失败 → fail loud。

@@ -198,16 +198,16 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
   设 `NPROC_PER_NODE` 实测值（`python3 -c 'import torch; print(torch.cuda.device_count())'`）。
   `EPOCHS` 变量形态可调（默认 1，GKD 是末段微调非从零训）。
 
-  **E19 manifest 桥接（必读）**：5 个 CLI args（`--build_fn` / `--eval_fn` / `--father_state`
+  **manifest 桥接（必读）**：5 个 CLI args（`--build_fn` / `--eval_fn` / `--father_state`
   / `--train_loader_fn` / `--eval_kind`）由你（agent）从 `$ORCA_ARTIFACTS_DIR/manifest.yaml`
-  + `{{ inputs.eval_kind }}` 桥接——脚本本身不解析 manifest（E9：manifest 消费者是 agent）。
+  + `{{ inputs.eval_kind }}` 桥接——脚本本身不解析 manifest（manifest 消费者是 agent）。
   - `--build_fn` ← `manifest.model.build_entry`
   - `--eval_fn` ← `manifest.training_and_evaluation.evaluation_entry`
   - `--train_loader_fn` ← `manifest.data_and_environment.data_loader_entry`
   - `--father_state` ← 固定 `$ORCA_ARTIFACTS_DIR/father_state_dict.pt`（pz_expand 已落盘）
   - `--eval_kind` ← `{{ inputs.eval_kind }}`（用户 [ask]，与 manifest 须一致）
   manifest 缺任一字段 → 进 Step 4 输出 `{"status":"failed"}`，assessment 写明缺哪个。
-  **dict/list 模型输出（E24）**：gkd_retrain.py 的 `_flatten_model_output` 对 dict 直接
+  **dict/list 模型输出**：gkd_retrain.py 的 `_flatten_model_output` 对 dict 直接
   raise——flat.py 须按 pz_expand 契约加 output-flattening adapter（暴露单 tensor 为顶层
   forward 返回）。
 

@@ -377,7 +377,7 @@ def load_catalog(path: str | Path | None = None) -> dict[str, CatalogEntry]:
     # E1：identity 必入 catalog（每 slot 候选列表的 MIP floor 锚）
     for pt in PASSTHROUGH_VARIANTS:
         if pt not in catalog:
-            raise ValueError(f"{p} 缺 passthrough 候选 {pt!r}（E1：identity 必入 catalog）")
+            raise ValueError(f"{p} 缺 passthrough 候选 {pt!r}（identity 必入 catalog）")
         if catalog[pt].factory is not None:
             raise ValueError(f"{p} passthrough 候选 {pt!r} 必须无 factory")
     return catalog
@@ -403,9 +403,9 @@ def get_default_candidates() -> dict[str, list[str]]:
     attention/ffn 给 builtin 全集；conv/moe/custom 仅 identity（框架预留）。
     每个 kind 列表都含 identity（E1：MIP floor 锚）。
 
-    注：no_op 工厂要求 in_dim==out_dim（puzzle_blocks.make_zero）；对非方 slot，
-    U1 阶段会在 bld 调 factory 时 fail-loud（exit 2）。U3 的 is_valid 上线后会
-    自动按 slot 形状收缩候选，而非杀整链。
+    注：no_op 工厂要求 in_dim==out_dim（puzzle_blocks.make_zero）；非方 slot 由
+    ``is_candidate_valid_for_slot`` 据形状收缩候选（no_op 被判 invalid，不进
+    BLD/score/build_selected 枚举），不在 factory 期 fail-loud 崩整链。
     """
     return {
         "attention": [
@@ -466,7 +466,7 @@ def parse_block_candidates(raw: str | None) -> dict[str, list[str]]:
         # E1：identity 必入每 kind 候选列表
         if "identity" not in val:
             raise ValueError(
-                f"block_candidates.{kind} 缺 identity（E1：identity 必入每 slot 候选）"
+                f"block_candidates.{kind} 缺 identity（identity 必入每 kind 候选）"
             )
         out[kind] = val
     return out
@@ -512,6 +512,10 @@ def is_candidate_valid_for_slot(
     entry = get_candidate(name, catalog)
     if entry.source == "passthrough":
         return True  # identity 永远 valid（SPEC §3 铁律）
+    # no_op（零输出块）要求 in_dim == out_dim（puzzle_blocks.make_zero 契约）；
+    # 非方 slot 在此收缩候选，避免 factory 在 BLD/score 期 raise 崩整链。
+    if name == "no_op" and slot.in_dim != slot.out_dim:
+        return False
     # 跨 kind 适用性（catalog 的 kinds × slot.kind）
     if slot.kind not in entry.kinds:
         return False
@@ -598,20 +602,20 @@ def build_real_calib_loader(
     full_loader = fn()
     if not hasattr(full_loader, "__iter__"):
         raise TypeError(
-            f"{loader_fn_str!r} 未返回可迭代 DataLoader（E14 calib 数据契约）"
+            f"{loader_fn_str!r} 未返回可迭代 DataLoader（real-data calib 契约）"
         )
     try:
         first_batch = next(iter(full_loader))
     except StopIteration as e:
         raise RuntimeError(
-            f"{loader_fn_str!r} 返回空 DataLoader——无法抽真实 calib 数据（E14）。"
+            f"{loader_fn_str!r} 返回空 DataLoader——无法抽真实 calib 数据。"
             f"manifest.data_and_environment.data_loader_entry 必须指向非空数据集"
         ) from e
     inp = first_batch[0] if isinstance(first_batch, (list, tuple)) else first_batch
     if not isinstance(inp, torch.Tensor):
         raise TypeError(
             f"{loader_fn_str!r} 首个 batch 非 tensor（{type(inp).__name__}）——"
-            f"E14 calib 契约要求 tensor 输入"
+            f"real-data calib 契约要求 tensor 输入"
         )
     inp = inp.to(device) if device is not None else inp
     # 拆为单样本再 stack 回原 batch（_TensorDataset 契约；保留原 batch 形状）
@@ -874,6 +878,12 @@ def build_student_from_arch(
     使 identity（passthrough）slot 保留的是 father 权重而非随机初始化。空/None →
     回退 ``load_flat_model``（随机 init；适用于其后还会用 selected/final state_dict
     覆盖的 student 场景，如 gkd/gate）。
+
+    ``selected_arch`` 接受两种 dict 形态（自动 unwrap ``selected_arch`` 键）：
+      - mip_select 结果：``{"selected_arch": {layer: {kind: variant}}, ...}``。
+      - 裸架构：``{layer: {kind: variant}}``（如 selected_model.pt / final_model.pt
+        顶层即该子字典的 ckpt）。
+    非 dict（None / falsy）→ 空架构（全 passthrough，仅由 father/flat base 决定）。
     """
     if father_state_path:
         model = load_father_model(

@@ -102,3 +102,65 @@ def test_mip_raises_when_no_floor_and_no_baseline():
     with pytest.raises(ValueError, match="latency_floor"):
         ms._solve_mip(scores, latency, target_latency=0.4,
                       baseline_whole_latency=None, measured_floor=None)
+
+
+# ── U5 #4：no_op 非方 slot 收缩（is_candidate_valid_for_slot）─────────────────
+def _slot(**kw):
+    defaults = dict(
+        layer_idx=0, kind="attention", in_dim=32, out_dim=32, num_heads=0, head_dim=0,
+        source_class="Attn", parent_module_path="block.attn",
+    )
+    defaults.update(kw)
+    return pc.Slot(**defaults)
+
+
+def test_is_candidate_valid_for_slot_rejects_no_op_on_non_square_slot():
+    """no_op（零输出块）要求 in_dim == out_dim（make_zero 契约）。
+
+    非方 slot 的 no_op 被 is_candidate_valid_for_slot 判 invalid——收缩候选而非
+    在 factory 期 raise 崩整链（intent：候选枚举处统一过滤，BLD/score/build_selected
+    不再触 factory 的 square-dims guard）。
+    """
+    # 方 slot：no_op valid（与 identity 同列 MIP floor 候选）
+    assert pc.is_candidate_valid_for_slot("no_op", _slot(in_dim=32, out_dim=32)) is True
+    # 非方 slot：no_op 被 valid 拒
+    assert pc.is_candidate_valid_for_slot("no_op", _slot(in_dim=32, out_dim=24)) is False
+    # 非方 slot 上 identity 仍 valid（passthrough 铁律，与 dims 无关）
+    assert pc.is_candidate_valid_for_slot("identity", _slot(in_dim=32, out_dim=24)) is True
+    # 非方 ffn slot 的 no_op 同样被拦（square 检查在 cross-kind 之前，对所有 kind 生效）
+    assert pc.is_candidate_valid_for_slot(
+        "no_op", _slot(kind="ffn", ffn_struct="standard", in_dim=32, out_dim=24)
+    ) is False
+
+
+# ── U5 #1 BLOCKER 回归守卫：puzzle.yaml pz_select schema × mip_select.py emit 契约 ─
+def test_puzzle_yaml_pz_select_schema_covers_mip_select_early_warning():
+    """pz_select output_schema 必须覆盖 mip_select.py 所有 emit 路径的字段集。
+
+    U5 #1 BLOCKER 的两层契约（任一破坏 → schema 校验 fail → node_failed catch-all，
+    E12 早警 intent 被 silently 击落）：
+      (a) select_reason enum ⊇ {target-too-aggressive}（原 BLOCKER：enum 漂移）。
+      (b) properties ⊇ {infeasible_reason}（残留 BLOCKER：早警路径 emit 的诊断字段，
+          additionalProperties:false 会拒——第一轮修复只加 enum 未加 property，被
+          code-reviewer 复审抓出）。本测试锁这两层，防同类漂移回归。
+    """
+    import yaml
+    wf = yaml.safe_load((REPO / "workflows" / "puzzle.yaml").read_text(encoding="utf-8"))
+    pz_select = next(n for n in wf["nodes"] if n["name"] == "pz_select")
+    props = pz_select["output_schema"]["properties"]
+    # (a) enum 覆盖所有 script emit 的 select_reason 值
+    enum = props["select_reason"]["enum"]
+    emitted_reasons = {"mip-optimal", "infeasible", "none", "target-too-aggressive"}
+    assert emitted_reasons.issubset(set(enum)), \
+        f"select_reason enum 缺脚本 emit 值：{emitted_reasons - set(enum)}"
+    # (b) 早警路径（target-too-aggressive）emit 的字段集 ⊆ schema properties
+    #     （mip_select.py 早警块独立编写，曾漏 infeasible_reason → additionalProperties:false 拒）
+    early_warning_keys = {
+        "selected_arch", "total_score", "selected_latency", "feasible",
+        "select_reason", "latency_unit", "infeasible_reason",
+    }
+    missing = early_warning_keys - set(props.keys())
+    assert not missing, f"早警 emit 字段未在 schema properties：{missing}"
+    # additionalProperties:false 强约束——required ⊆ properties 是必要前提
+    assert set(pz_select["output_schema"]["required"]).issubset(set(props.keys()))
+    assert pz_select["output_schema"]["additionalProperties"] is False

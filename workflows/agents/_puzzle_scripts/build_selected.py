@@ -81,13 +81,13 @@ def _verify_all_identity_allclose(
         student_out = student_out[0]
     if not isinstance(father_out, torch.Tensor) or not isinstance(student_out, torch.Tensor):
         raise RuntimeError(
-            "§16.4 allidentity allclose 失败：father/student forward 非 tensor"
-            "（dict/list 输出需 flat.py 加 output-flattening adapter，E24）"
+            "allidentity allclose 失败：father/student forward 非 tensor"
+            "（dict/list 输出需 flat.py 加 output-flattening adapter）"
         )
     if not torch.allclose(student_out, father_out, atol=_ALL_IDENTITY_ALLCLOSE_ATOL):
         max_diff = (student_out - father_out).abs().max().item()
         raise RuntimeError(
-            f"§16.4 allidentity allclose 失败：全 identity 架构 student 应等价 father，"
+            f"allidentity allclose 失败：全 identity 架构 student 应等价 father，"
             f"但 forward max|Δ|={max_diff:.2e} > atol={_ALL_IDENTITY_ALLCLOSE_ATOL:.0e}"
             f"（identity 零侵入承诺被破坏——检查 build_student_from_arch 的 father 权重注入路径、"
             f"或 flat model schema 与 father_state_dict 是否对齐）"

@@ -10,7 +10,7 @@
 
 stdout 单行 JSON：``{selected_arch, total_score, selected_latency, feasible, select_reason}``。
 - selected_arch: ``{layer_idx: {kind: variant_name}}``
-- select_reason: ``mip-optimal`` / ``infeasible`` / ``none``
+- select_reason: ``mip-optimal`` / ``infeasible`` / ``none`` / ``target-too-aggressive``
 
 scores/latency 缺 → exit 2。
 """
@@ -119,7 +119,7 @@ def _solve_mip(
             if not ident:
                 raise ValueError(
                     f"组 (layer={gkey[0]}, kind={gkey[1]}) 无 identity variant——"
-                    "latency 模型需 identity 作 baseline 参照（E1）"
+                    "latency 模型需 identity 作 baseline 参照"
                 )
             identity_sum += latency_map[ident[0]]
         floor = baseline_whole_latency - identity_sum
@@ -219,7 +219,8 @@ def main(argv: list[str] | None = None) -> int:
         # E12 LAT 早警：target_latency > baseline_latency/2 → LAT AC 结构性不可达。
         # 放在 mip_select（而非 gate）的原因：(1) mip_select 已有 target+baseline 同框；
         # (2) 早 fail 省 build_selected + gkd_retrain（最长的 GKD 分钟~小时级）；(3) 具体
-        # reason 让 pz_select agent 路由 terminate_latency_too_aggressive 而非通用 fail。
+        # select_reason=target-too-aggressive 让下游 assessment 标注根因；路由守卫仍走
+        # terminate_select_failed 兜底（selected_arch 空 + feasible=false 双条件不成立）。
         # 缺 baseline_metrics 时跳过（不强制—— degraded 模式留给纯 block-sum 回退）。
         if baseline_whole is not None:
             lat_early_threshold = baseline_whole / 2.0
@@ -232,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
                     "select_reason": "target-too-aggressive",
                     "latency_unit": args.latency_unit,
                     "infeasible_reason": (
-                        f"E12 LAT 早警：target_latency={args.target_latency:.4f} "
+                        f"LAT 早警：target_latency={args.target_latency:.4f} "
                         f"> baseline_latency/2={lat_early_threshold:.4f}（baseline="
                         f"{baseline_whole:.4f}）——LAT AC 要求 latency_opt ≤ baseline/2，"
                         f"目标预算已超 AC 上限，结构性不可达；禁浪费 build_selected/retrain 算力。"

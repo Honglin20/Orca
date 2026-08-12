@@ -167,11 +167,11 @@ def make_ffn(slot: "Slot", ratio: float) -> nn.Module:
     """
     if slot.activation is None:
         raise ValueError(
-            f"ffn slot {slot.parent_module_path} 缺 activation（E23 required）"
+            f"ffn slot {slot.parent_module_path} 缺 activation（activation required）"
         )
     if slot.original_intermediate is None:
         raise ValueError(
-            f"ffn slot {slot.parent_module_path} 缺 original_intermediate（E7 ratio 基准）"
+            f"ffn slot {slot.parent_module_path} 缺 original_intermediate（ratio 基准，须非 None）"
         )
     act_cls = resolve_activation(slot.activation)
     intermediate = max(1, int(round(slot.original_intermediate * ratio)))

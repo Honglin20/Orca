@@ -154,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         "--calib_loader_fn",
         required=True,
         help="真实数据 loader 的 path::func（如 proj/train.py::build_dataloader），"
-        "零参调用返回 re-iterable DataLoader。BLD teacher 信号必须来自真实数据（E14 修正——"
+        "零参调用返回 re-iterable DataLoader。BLD teacher 信号必须来自真实数据（"
         "torch.randn OOD 会让 candidate 学 noise→teacher，真实数据上全错）。"
         "agent 从 manifest.data_and_environment.data_loader_entry 桥接此 arg",
     )

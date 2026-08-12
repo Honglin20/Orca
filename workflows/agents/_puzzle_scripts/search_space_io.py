@@ -198,5 +198,14 @@ def to_block_map(slot_dicts: list[dict[str, Any]]) -> BlockMap:
 
 
 def _derive_slot_id(d: dict[str, Any]) -> str:
-    """``L{layer_idx}_{kind}``（与 puzzle_common.slot_key 一致）。"""
-    return f"L{d.get('layer_idx', 0)}_{d.get('kind', 'slot')}"
+    """``L{layer_idx}_{kind}``（与 puzzle_common.slot_key 一致）。
+
+    fail loud：``kind`` 缺失 → raise（search_space 契约要求每 slot 有合法 kind；
+    缺 kind 是 schema 违例，不用误导性 fallback 掩盖——``'slot'`` 是 v1 已退役
+    字段名，作 fallback 会双重误导）。
+    """
+    if "kind" not in d:
+        raise ValueError(
+            f"search_space slot 缺 kind 字段（无法派生 id；slot dict={d!r}）"
+        )
+    return f"L{d.get('layer_idx', 0)}_{d['kind']}"

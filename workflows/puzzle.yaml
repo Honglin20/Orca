@@ -196,8 +196,11 @@ nodes:
         feasible: {type: boolean, description: "true=Σlatency ≤ target_latency;false=超预算或无候选"}
         select_reason:
           type: string
-          enum: [mip-optimal, infeasible, none]
-          description: "mip-optimal=MIP 在预算内找到最优;infeasible=预算太紧无解;none=scores/latency 缺 fail-loud sentinel"
+          enum: [mip-optimal, infeasible, none, target-too-aggressive]
+          description: "mip-optimal=MIP 在预算内找到最优;infeasible=预算太紧无解;none=scores/latency 缺 fail-loud sentinel;target-too-aggressive=target_latency > baseline/2 结构性不可达（LAT AC 早警，路由守卫仍走 terminate_select_failed 兜底）"
+        infeasible_reason:
+          type: ["string", "null"]
+          description: "仅 select_reason=target-too-aggressive 携带的诊断文案（结构性不可达解释 + 调参建议）;其余 reason 省略（null/缺省）"
       additionalProperties: false
     routes:
       - when: "pz_select.output.selected_arch and pz_select.output.feasible"

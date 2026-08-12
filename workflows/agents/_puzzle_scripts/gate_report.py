@@ -92,9 +92,9 @@ def main(argv: list[str] | None = None) -> int:
         "--accuracy_tolerance",
         type=float,
         default=0.5,
-        help="[DEPRECATED, 被 D5 baseline-dependent 容差取代] 旧绝对容差入参，"
+        help="[DEPRECATED, 被 baseline-dependent 容差取代] 旧绝对容差入参，"
         "保留仅为兼容 yaml/launcher 不破坏——实际 ACC AC 由 _acc_pass 按 baseline "
-        "高/低自动选绝对 0.5 或相对 10%（SPEC v2 §12.1 D5）",
+        "高/低自动选绝对 0.5 或相对 10%（baseline≥0.5 用绝对 0.5 / <0.5 用相对 10%）",
     )
     parser.add_argument("--output_dir", required=True)
     args = parser.parse_args(argv)
@@ -226,7 +226,7 @@ def _render_report(
         "| metric | baseline | final | delta / ratio |\n"
         "|---|---|---|---|\n"
         f"| accuracy | {g['baseline_acc']:.4f} | {g['final_acc']:.4f} "
-        f"| Δ={g['acc_delta']:.4f} (D5 {acc_tol_kind} tol, threshold={acc_threshold:.4f}) |\n"
+        f"| Δ={g['acc_delta']:.4f} ({acc_tol_kind} tol, threshold={acc_threshold:.4f}) |\n"
         f"| latency ({g['latency_unit']}) | {g['baseline_latency']:.4f} "
         f"| {g['final_latency']:.4f} | ratio={g['latency_ratio']:.4f} (≤0.5) |\n\n"
         "## Verdict\n\n"

@@ -58,7 +58,7 @@ python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/gate_report.py" \
 脚本契约（预写，pz_report 不验证）：
 - 入参：如上。`--build_fn` / `--eval_fn` 由你（agent）读 `$ORCA_ARTIFACTS_DIR/manifest.yaml` 桥接
   （`model.build_entry` / `training_and_evaluation.evaluation_entry`）——manifest 缺字段 → fail loud
-  （不进 gate）。ACC AC 由脚本内置 D5 baseline-dependent 容差自动判（不再接 `--accuracy_tolerance`）；
+  （不进 gate）。ACC AC 由脚本内置 baseline-dependent 容差自动判（不再接 `--accuracy_tolerance`）；
   `--latency_script_path` 与 pz_expand 同源（保证 latency 测量一致）。
 - 行为：
   1. 加载 final_model + 调 eval_fn 测 final acc + measure_module_latency / latency_script_path 测
