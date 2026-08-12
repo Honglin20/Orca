@@ -86,12 +86,7 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--latency_reduction_target", type=float, default=0.5,
         help="LAT AC 参数化（与 mip_select 同源）：要求时延降幅比例（0.5=降一半）。"
-        "判 latency_ratio ≤ (1 - reduction) × (1 + latency_noise_tol)",
-    )
-    parser.add_argument(
-        "--latency_noise_tol", type=float, default=0.03,
-        help="LAT AC 测量噪声容差（默认 3%）：latency 实测有固有噪声（min 已降噪仍有残差），"
-        "tol 对称于 ACC AC 的容差，只吸收测量噪声不放宽业务目标。判 ratio ≤ (1-reduction)×(1+tol)",
+        "判 latency_ratio ≤ (1 - reduction)",
     )
     parser.add_argument(
         "--metric_rel_tol_lower_better", type=float, default=0.1,
@@ -196,15 +191,10 @@ def main(argv: list[str] | None = None) -> int:
                 f"{metric_threshold:.4f}"
             )
 
-        # LAT AC（参数化 + 测量噪声容差）：
-        # 理想阈值 ratio ≤ (1 - reduction)。但 latency 实测有固有噪声（min 测量已降噪，仍有残差，
-        # E2E 期 CPU 争用 + 单次 forward 计时抖动 ~2-3%）。ACC AC 已有 baseline-dependent 容差，
-        # LAT AC 须对称地容忍测量噪声，否则真~70% reduction（卡在阈值）会被噪声偶判 fail。
-        # 实判 ratio ≤ (1 - reduction) × (1 + latency_noise_tol)。tol 只吸收测量噪声，不放宽业务目标。
+        # LAT AC 参数化（coordinator）：ratio ≤ (1 - reduction)
         reduction = max(0.0, min(1.0, float(args.latency_reduction_target)))
         lat_ratio_threshold = 1.0 - reduction
-        lat_noise_tol = max(0.0, float(args.latency_noise_tol))
-        lat_met = latency_ratio <= lat_ratio_threshold * (1.0 + lat_noise_tol)
+        lat_met = latency_ratio <= lat_ratio_threshold
 
         if metric_met and lat_met:
             gate_reason = "both-met"
