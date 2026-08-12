@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-12] docs(puzzle-universal): SPEC v2 落盘 + 整体收尾——通用化重构设计草稿（spec-reviewer 25 issue 闭环 + D5 formula 修正 + target 验证按用户指示跳过）
+
+`docs/specs/puzzle-universal-design-draft.md`（17 章）：通用性核心 / nas-supernet 可迁移边界 / identity 铁律（father-loaded） / search_space+catalog schema / kind 自适应 / FFN 通用化 / 节点数据流 / pz_expand 重构+4 smoke / 四层 verifier / 复用清单 / AC+边界 / SDD 计划 / §17 review 追溯。经 spec-reviewer 对抗式 review（25 issue 全闭环）+ 6 用户决策（D1 保留 decomposed / D2 原地重构 / D3 LLM 发现+用户覆盖 / D4 conv-moe 仅 identity / D5 ACC 相对容差+floor / D6 eval_kind 作 [ask]）。target E2E 验证按用户指示跳过（环境 deepseek 余额 0 + 无 ANTHROPIC key），U2a spike 已证 LLM flatten 可行（Claude 代跑），留作余额恢复后补验。
+
 ## [2026-08-12] fix(puzzle-u5): code-review 闭环——BLOCKER enum 漂移 + slot→kind 残留 + 决策 ID 洁净 + no_op 非方 slot 收缩（`2f6d938`）
 
 Phase U5 洁净审查闭环：修全面 code-review 的 1 BLOCKER（puzzle.yaml pz_select select_reason enum 加 target-too-aggressive + infeasible_reason property，code-reviewer 复审抓出残留 BLOCKER——早警 emit 的诊断字段不在 properties 内被 additionalProperties:false 拒）+ 2 MAJOR（slot→kind 迁移残留含 Step 0 Reuse-Check r['slot']→r['kind']；pz_build_library/pz_retrain/pz_report agent.md 决策 ID 清零）+ 2 MINOR（is_candidate_valid_for_slot 加 no_op 非方 slot 收缩；脚本 runtime-facing raise/error/help 决策 ID 改 descriptive，保留 docstring SPEC 锚点）+ 2 可选（build_student_from_arch docstring 澄清三形态；_derive_slot_id fail-loud）。新测 test_puzzle_yaml_pz_select_schema_covers_mip_select_early_warning 锁 schema × 脚本 emit 契约（防 #1 两层漂移回归）。验收：tars 0/0 + pytest 57 passed + 18 skipped（env-gated）。详见 [release note](docs/releases/2026-08-12-puzzle-u5-code-review-closure.md)。
