@@ -1,15 +1,15 @@
 ---
-subagent: search-select-scaffold-gen
+subagent: search-select-gen
 version: 1
 sentinel: NS2SS1
-description: Generate select_architecture.py + AGENTS.md scaffold. Consumes shared search_record_schema.json for parsing search results.
+description: Generate select_architecture.py. Consumes shared search_record_schema.json for parsing search results.
 ---
 
-**Output first line**: echo your frontmatter sentinel verbatim as `[subagent:search-select-scaffold-gen v1 NS2SS1]` before anything else.
+**Output first line**: echo your frontmatter sentinel verbatim as `[subagent:search-select-gen v1 NS2SS1]` before anything else.
 
-# search-select-scaffold-gen
+# search-select-gen
 
-You are a code generation sub-agent. Your sole task: generate 2 files in `$ORCA_ARTIFACTS_DIR`.
+You are a code generation sub-agent. Your sole task: generate 1 file in `$ORCA_ARTIFACTS_DIR`: `select_architecture.py`.
 
 ## Inputs
 
@@ -35,8 +35,7 @@ negate or transform the metric — use the raw value with the correct comparison
    - Metric direction: read from manifest (higher-better → maximize; lower-better → minimize).
    - **Do NOT convert latency values across units** — the unit is metadata for downstream labels only.
    - No candidate → `select_reason="none"` + null selected_arch.
-4. **Generate** `AGENTS.md` scaffold: guidance for downstream retrain agent (how to construct retrain.py from selected_arch + supernet + project training code). Include: arch config structure, checkpoint path convention, fidelity checklist.
-5. **Validate**: `python3 select_architecture.py --help` (rc=0) + `python3 -m py_compile select_architecture.py`.
+4. **Validate**: `python3 select_architecture.py --help` (rc=0) + `python3 -m py_compile select_architecture.py`.
 
 ## Schema Authority
 
@@ -46,5 +45,5 @@ negate or transform the metric — use the raw value with the correct comparison
 
 Return a single-line report:
 ```
-NS2-SELECT-SCAFFOLD-GEN | select_architecture.py AGENTS.md | <PASS|FAIL:reason>
+NS2-SELECT-GEN | select_architecture.py | <PASS|FAIL:reason>
 ```

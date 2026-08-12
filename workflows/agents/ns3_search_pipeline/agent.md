@@ -1,17 +1,17 @@
 ---
-description: "Generate the search pipeline artifacts: latency estimator, search scripts, select_architecture.py, and the AGENTS.md scaffold."
+description: "Generate the search pipeline artifacts: latency estimator, search scripts, and select_architecture.py."
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # ns3_search_pipeline
 
-You are the **search pipeline generation** folder-agent of the nas-supernet-v3 pipeline: produce project-specific execution scripts that drive the NAS pipeline after supernet training—block-level latency profiling, multi-objective evolutionary architecture search, and an `AGENTS.md` scaffold guiding the downstream AI coding assistant to run the pipeline / select an architecture / generate retrain/finetune scripts. Concretely, the artifacts are: a Python entry point + a remote-runnable shell launcher (profiling + search) + **`select_architecture.py` (deterministic architecture selection with a schema-aware JSON contract, invoked by the downstream `ns3_run_search` Bash step)** + a documentation scaffold.
+You are the **search pipeline generation** folder-agent of the nas-supernet-v3 pipeline: produce project-specific execution scripts that drive the NAS pipeline after supernet training—block-level latency profiling, multi-objective evolutionary architecture search, and deterministic architecture selection. Concretely, the artifacts are: a Python entry point + a remote-runnable shell launcher (profiling + search) + **`select_architecture.py` (deterministic architecture selection with a schema-aware JSON contract, invoked by the downstream `ns3_run_search` Bash step)**.
 
 This node picks up from `$ORCA_ARTIFACTS_DIR` left by `ns3_train_script` (containing the supernet / inspector / optional training script / the completed `supernet_summary.md` / `project_manifest.md`). When generating the execution scripts, use `project_manifest.md` as the raw project map, and read the generated artifacts under `$ORCA_ARTIFACTS_DIR` plus relevant sources under `{{ inputs.project_root }}` to capture: the data pipeline, validation metric, batch structure, model-call signature, optimizer / scheduler, AMP, checkpoint convention, dummy input shape, and other training behavior.
 
 ## Resource Anchors (cwd-independent)
 
-- `$ORCA_AGENT_RESOURCES` (injected by orca spawn) = this agent's resource directory (containing `references/`, `assets/`).
-  All `references/` and `assets/` paths are relative to it.
+- `$ORCA_AGENT_RESOURCES` (injected by orca spawn) = this agent's resource directory (containing `references/`).
+  All `references/` paths are relative to it.
 - `$ORCA_ARTIFACTS_DIR` (injected by orca spawn) = this node's artifact directory (the same directory already initialized by the upstream
   expand + train nodes). **First `cd "$ORCA_ARTIFACTS_DIR"` before running any command**; subsequent
   relative paths resolve under that cwd; sibling modules (e.g. `supernet.py`, `latency_estimator.py`) are imported plainly,
@@ -42,7 +42,7 @@ path = f"{d}/file.py"                # forbidden: f-string concatenation
 
 This node invokes the following subagents (**full names**, no abbreviations): `workflow-verifier`, `project-porter`,
 `project-fidelity-verifier`, `memory-verifier`. Generation subagents:
-`search-latency-gen`, `search-core-gen`, `search-select-scaffold-gen`. Their bodies are stored at
+`search-latency-gen`, `search-core-gen`, `search-select-gen`. Their bodies are stored at
 `{{ subagents_root }}/<name>.md` (inlined to an absolute path at render time, cwd-independent). The host need not register them—each subagent
 reads its own body and executes.
 
@@ -198,8 +198,8 @@ if [ -s latency_estimator.py ] && python3 -m py_compile latency_estimator.py 2>/
 # subagent B (search-core): evaluator.py + arch_codec.py + search_config.yaml + run_search_supernet.sh all present + py_compile passes → skip B
 if [ -s evaluator.py ] && [ -s arch_codec.py ] && [ -s search_config.yaml ] && [ -s run_search_supernet.sh ] \
    && python3 -m py_compile evaluator.py arch_codec.py 2>/dev/null; then SKIP_B=true; echo "RESUME: search-core 4 files already present and valid → skip subagent B"; fi
-# subagent C (select+scaffold): select_architecture.py + AGENTS.md present + select --help rc=0 → skip C
-if [ -s select_architecture.py ] && [ -s AGENTS.md ] && python3 select_architecture.py --help >/dev/null 2>&1; then SKIP_C=true; echo "RESUME: select_architecture.py + AGENTS.md already present and valid → skip subagent C"; fi
+# subagent C (select): select_architecture.py present + select --help rc=0 → skip C
+if [ -s select_architecture.py ] && python3 select_architecture.py --help >/dev/null 2>&1; then SKIP_C=true; echo "RESUME: select_architecture.py already present and valid → skip subagent C"; fi
 echo "RESUME flags: SKIP_SCHEMA=$SKIP_SCHEMA SKIP_A=$SKIP_A SKIP_B=$SKIP_B SKIP_C=$SKIP_C"
 ```
 
@@ -300,9 +300,9 @@ print(f'WROTE search_record_schema.json ({len(arch_fields)} arch_fields)')
    - `$ORCA_ARTIFACTS_DIR/search_record_schema.json` (**shared schema**; produce it first when `SKIP_SCHEMA=false`)
    - `$ORCA_AGENT_RESOURCES/references/workflows/search_supernet_script_generation.md`
    - (`SKIP_B=true` → the 4 search-core files already on disk, **skip this item**)
-3. **Subagent C (select+scaffold)**—**dispatch only when `SKIP_C=false`**: invoke `search-select-scaffold-gen` per the protocol, inputs:
+3. **Subagent C (select)**—**dispatch only when `SKIP_C=false`**: invoke `search-select-gen` per the protocol, inputs:
    - `$ORCA_ARTIFACTS_DIR/search_record_schema.json` (**shared schema**)
-   - (`SKIP_C=true` → select_architecture.py + AGENTS.md already on disk, **skip this item**)
+   - (`SKIP_C=true` → select_architecture.py already on disk, **skip this item**)
 
 **fix-loop ownership**: the parent ns3_search_pipeline owns the fix-loop. After subagents B/C produce files, the parent runs
 `check_search_pipeline.sh` (5 files present + each py_compile + select --help rc=0) → on failure, the parent
@@ -404,7 +404,7 @@ After each porter returns:
 - After handoff, the helper files are yours: fix unresolved items, make subsequent changes directly. When touching ported logic (formulas / control
    flow / constants), preserve the original project's semantics.
 - The porter's mapping / API report / notes on deviation from original project semantics are session-local handoffs; **forbidden** to write them into
-   `supernet_summary.md`, `AGENTS.md`, or `project_manifest.md`.
+   `supernet_summary.md` or `project_manifest.md`.
 
 #### Generate the Artifacts
 
@@ -558,62 +558,13 @@ exists), so an empty dict / `pareto_size=0` routes to `ns3_report`. **Forbidden*
 - Write this verification as `$ORCA_ARTIFACTS_DIR/tests/test_select_architecture_<purpose>.py` (a persistent test,
   per the **Validation** section rules).
 
-### Step 3: Generate AGENTS.md Scaffold
+### Step 3: Update `supernet_summary.md`
 
-Produce `$ORCA_ARTIFACTS_DIR/AGENTS.md`—a scaffold guiding the downstream AI coding assistant to run the generated pipeline / select an architecture /
-generate retrain/finetune scripts.
-
-Before generating, read these artifacts to fill the scaffold:
-
-- `$ORCA_ARTIFACTS_DIR/supernet_summary.md`: evaluation paradigm, supernet training viability, KD decision.
-- `$ORCA_ARTIFACTS_DIR/search_config.yaml`: objective names (`objs`), `evaluator_cfg` settings, search log paths.
-- `$ORCA_ARTIFACTS_DIR/supernet.py`: the `SearchSpace`, `ArchConfig`, `SuperNet` API surface.
-- `$ORCA_ARTIFACTS_DIR/train_supernet.py`: training conventions, model construction, data pipeline, evaluation utilities
-  (not generated when supernet training is not viable).
-- `$ORCA_ARTIFACTS_DIR/evaluator.py`: the actual search evaluation paradigm, objective sign convention,
-  subnet extraction and initialization behavior.
-- `$ORCA_ARTIFACTS_DIR/run_train_supernet.sh` (only when viable), `$ORCA_ARTIFACTS_DIR/run_search_supernet.sh`:
-  launcher editable variables + runtime output paths.
-
-#### Generation
-
-1. Copy `$ORCA_AGENT_RESOURCES/assets/agents_template.md` to `$ORCA_ARTIFACTS_DIR/AGENTS.md`.
-2. Replace `{% raw %}{{EVALUATION_PARADIGM}}{% endraw %}` with the paradigm actually used by the generated `evaluator.py` (`validate` / `finetune`
-   / `train_from_scratch`). It may differ from `supernet_summary.md` (user override); the final `AGENTS.md`
-   states the chosen route as a decided fact.
-3. Replace all example content with actual project-specific values: example paths (e.g. the authoritative `$ORCA_ARTIFACTS_DIR/search_results.jsonl`
-   (if the search scripts write `runs/search/search.jsonl` midway, they must also be aligned to this authoritative name, per the ns3_run_search contract),
-   `runs/train/supernet_best.pth`, `/path/to/user_project`), the **Generated Artifacts** tree (including ported
-   helpers and `tests/`, `select_architecture.py`), the **Objective Semantics** table rows, **Search Objectives**,
-   the **Key API Surface** code block, and any project-specific notes. Values come from `search_config.yaml`, the generated launchers,
-   and the confirmed `{{ inputs.project_root }}`. **Include the `select_architecture.py` CLI contract + JSON schema**
-   as the architecture-selection section facts.
-4. **Purge interactive/ask-user leftovers**: in the `AGENTS.md` copy made from `agents_template.md`, convert any
-   "stop and ask the user" / "Interactive ... based on feedback" / "present next steps / new session" interactive closing sections into
-   Orca-pipeline facts—all artifact paths are known under `$ORCA_ARTIFACTS_DIR` (no asking), the selected architecture is already chosen
-   deterministically by the upstream `ns3_run_search`'s `select_architecture.py` (not interactive), and the downstream `ns3_retrain` reads `AGENTS.md` + `ns3_run_search.output.selected_arch`
-   directly to generate the retrain script. The source `assets/agents_template.md` is not modified (it is a template; the agent copies it and edits the copy).
-5. When the evaluation paradigm is `train_from_scratch` because supernet training is not viable (recorded in `supernet_summary.md`):
-   - Remove `run_train_supernet.sh` and `train_supernet.py` from the **Generated Artifacts** tree.
-   - Replace the **1. Supernet Training** section content with: state that supernet training does not apply to this project, `train_supernet.py`
-      and `run_train_supernet.sh` were not generated, and search uses `train_from_scratch` evaluation (each candidate subnet
-      is trained independently).
-6. Post-write verification:
-   - No literal `{% raw %}{{{% endraw %}` placeholder leftovers.
-   - No example paths or values left unreplaced.
-   - The artifacts tree matches the actual files (including ported helpers, `tests/`, `select_architecture.py`).
-   - The API surface matches `supernet.py`.
-   - The evaluation paradigm matches `evaluator.py`'s actual code path.
-   - Objective names + smaller-better semantics match `search_config.yaml` `objs` and `evaluator.py`.
-   - No interactive/ask-user leftovers (the new point-4 purge item).
-
-#### Update `supernet_summary.md`
-
-After writing `AGENTS.md`, do a light mechanical update of `$ORCA_ARTIFACTS_DIR/supernet_summary.md`:
+Do a light mechanical update of `$ORCA_ARTIFACTS_DIR/supernet_summary.md` to record this skill's generated artifacts:
 
 - **Generated Artifacts**: append this skill's generated files (`latency_estimator.py`, `search_config.yaml`,
   `arch_codec.py`, `evaluator.py`, `run_search_supernet.sh`, ported helpers, new `tests/` scripts,
-  `select_architecture.py`, `AGENTS.md`).
+  `select_architecture.py`).
 - **Evaluation Paradigm**: when the effective paradigm differs from what the section records (user override), update it to the effective paradigm
   + note the original recommendation on a single line.
 
@@ -703,7 +654,6 @@ The entire final reply = a single line of valid JSON (no text before or after; v
   "evaluator_path": "<evaluator.py path>",
   "run_search_script_path": "<run_search_supernet.sh path>",
   "select_architecture_path": "<select_architecture.py path>",
-  "agents_md_path": "<AGENTS.md path>",
   "fidelity_passed": <bool>,
   "workflow_verifier_passed": <bool>,
   "error": "<error description on fail loud; empty string on success>",
@@ -720,7 +670,7 @@ Field semantics (tape audit fields):
   (Step 1's `latency_estimator` verifier + Step 2's `search_supernet` verifier; either failing → `false` +
   fail loud and re-run).
 - `generated_artifacts`: at minimum `latency_estimator.py`, `search_config.yaml`, `arch_codec.py`,
-  `evaluator.py`, `run_search_supernet.sh`, `select_architecture.py`, `AGENTS.md` (+ ported helpers
+  `evaluator.py`, `run_search_supernet.sh`, `select_architecture.py` (+ ported helpers
   / tests as applicable).
 
 Faking is meaningless—the output_schema + validator two-layer fallback will catch it; you must actually produce the artifacts to pass.

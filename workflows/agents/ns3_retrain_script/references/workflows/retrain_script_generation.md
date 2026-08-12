@@ -26,10 +26,9 @@ Build the script from the upstream artifacts, the user's own training code, and 
 
 Read these to fill the script (cwd-independent under `$ORCA_ARTIFACTS_DIR`):
 
-- `AGENTS.md` — the scaffold written by `ns3_search_pipeline`. Its **Final Weight Acquisition** section holds the two-branch strategy, subnet-extraction reference, script requirements, launcher skeleton, and validation steps. It is the primary guide; this workflow refines it into exact contracts.
 - `supernet_summary.md` — supernet training viability (the strategy signal), evaluation paradigm, KD decision, generated-artifact list.
 - `project_manifest.md` — the original project's training/evaluation semantics, data/environment details, and the navigation index of key source files. Use it as the map before opening files under the Original Project Root.
-- `supernet.py` — the `SearchSpace`, `ArchConfig`, `SuperNet` API surface (`build_supernet` / `set_sample_config` / `get_active_subnet`, etc.). Call the supernet ONLY through the APIs the manifest/scaffold expose; never hardcode its internals.
+- `supernet.py` — the `SearchSpace`, `ArchConfig`, `SuperNet` API surface (`build_supernet` / `set_sample_config` / `get_active_subnet`, etc.). Call the supernet ONLY through the APIs the manifest exposes; never hardcode its internals.
 - `train_supernet.py` (present only when viability is `Yes`) — training conventions, data pipeline, AMP, checkpoint policy to mirror.
 - `evaluator.py` — the subnet-extraction and weight-initialization behavior actually used during search; mirror its extraction route for the retrain script.
 - `{{ inputs.project_root }}` — the original project training code: training budget, optimizer, scheduler, initialization, loss/metric formulas.
@@ -67,7 +66,7 @@ Expose project-derived training and runtime arguments from the user's project, s
 
 The **default launcher is single-process `python`** (no torchrun, no DDP wrap). When launched with `torchrun --nproc_per_node=N` (multi-GPU), `RANK` env is present → `is_distributed()=True` → DDP wrap activates automatically.
 
-Do not infer the target GPU/NPU runtime from the current machine. The generated script is intended for a remote training server, so device and backend selection must remain runtime-configurable through the launcher, environment, and `nas_agent.train`.
+Do not infer the target GPU/NPU runtime from the current machine. The generated script is intended for a remote training server, so device and backend selection must remain runtime-configurable through the launcher, environment, and `nas_agent.train`. Restrict visible devices through `CUDA_VISIBLE_DEVICES` (GPU) or `ASCEND_RT_VISIBLE_DEVICES` (NPU) in the launcher / environment; never hardcode device indices.
 
 **Single-device path (default):** plain `python retrain.py` (no `RANK` env) → `setup_distributed()` does **not** `init_process_group` → `is_distributed()=False` → `get_world_size()=1` / `is_main_process()=True` / `barrier()` no-op.
 
@@ -77,7 +76,7 @@ Use `nas_agent.train.distributed` to configure distributed setup, device resolut
 
 **DDP wrap is conditional (when `is_distributed()`):** Only wrap in `DistributedDataParallel` when `is_distributed()` returns True. On single-device, skip DDP entirely.
 
-**AMP usage rule:** Use `autocast()` and `grad_scaler()` from `nas_agent.train.distributed`. Keep the autocast enable flag independent from `scaler.is_enabled()`: `autocast(device, enabled=args.amp)`. `autocast(device, enabled=False)` is a nullcontext—orthogonal to single-device.
+**AMP usage rule:** Use `autocast()` and `grad_scaler()` from `nas_agent.train.distributed`. Keep the autocast enable flag independent from `scaler.is_enabled()`: `autocast(device, enabled=args.amp)`. `autocast(device, enabled=False)` is a nullcontext—orthogonal to single-device. Ascend NPU may use bf16 autocast without loss scaling, so `grad_scaler()` can be disabled on NPU; the autocast enable flag stays driven by `args.amp` regardless.
 
 Use this template unless the user's project has stricter distributed conventions that must be preserved:
 
@@ -205,7 +204,7 @@ Strategy-specific extraction:
 - **`finetune-from-supernet`**: call `build_selected_subnet(device, supernet_ckpt=args.supernet_ckpt)` — the subnet inherits trained supernet weights as initialization. Put this inheritance logic in `finetune.py` and import it from `retrain.py`, so the weight-injection seam is isolated.
 - **`train-from-scratch`**: call `build_selected_subnet(device, supernet_ckpt=None)` — do NOT load the supernet checkpoint. After extraction, **re-initialize** the subnet weights using the same initialization logic as the search evaluator's `train_from_scratch` path (see `evaluator.py`) and any project-specific initialization from the original project.
 
-Mirror `evaluator.py`'s concrete extraction and initialization logic; adapt it for the retrain script. Do not hardcode `supernet.py` internals — call only the manifest/scaffold-exposed APIs. If a needed API is not exposed, fail loud (do not work around `supernet.py`).
+Mirror `evaluator.py`'s concrete extraction and initialization logic; adapt it for the retrain script. Do not hardcode `supernet.py` internals — call only the manifest-exposed APIs. If a needed API is not exposed, fail loud (do not work around `supernet.py`).
 
 ### 6. Optimizer, Scheduler, AMP, And Gradient Clipping
 

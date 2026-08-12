@@ -87,7 +87,7 @@ The agent's behavioral trail for patch-layer self-heal is written to marker file
      would bypass the upstream fidelity/workflow-verifier closed loop. Fail loud instead.
 5. **Forbidden-touch list (hard iron rule, violation = architecture breakage, failed trigger)**: the following files are **read-only, edit/write prohibited** —
    `retrain.py`, `finetune.py`, `run_retrain.sh` is the ONLY editable generated file (patch layer only, iron rule 4); also forbidden:
-   `supernet.py`, `project_manifest.md`, `supernet_summary.md`, `AGENTS.md`, `select_architecture.py`, `search_config.yaml`,
+   `supernet.py`, `project_manifest.md`, `supernet_summary.md`, `select_architecture.py`, `search_config.yaml`,
    `run_train_supernet.sh`, `run_search_supernet.sh`, **source files** under `{{ inputs.project_root }}`
    (**exception**: `{{ inputs.project_root }}/artifacts/` is this workflow's artifact directory tree, writable). If self-heal
    requires changing these → **don't**, record last_error in `.ns_retrain_assessment.txt`, go to Step 4 and output `{"status":"failed"}`.

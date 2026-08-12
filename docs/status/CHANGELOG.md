@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-13] refactor(nas-supernet-v3): 删 AGENTS.md——信息无损融进对应节点（commit 待回填）
+
+AGENTS.md 是 nas-agent 时代手动 runbook 残留（人 `ln -s AGENTS.md CLAUDE.md; claude` 读它手动跑搜索/选型/retrain），v3 workflow 已全自动化该阶段 → AGENTS.md 与节点重复。**彻底删除**（不生成/不读取/删 template）：ns3_search_pipeline 删 Step 3 AGENTS.md 生成体（保留 supernet_summary 更新 + memory-verifier 作为新 Step 3）+ check_search_pipeline 去 AGENTS.md（7→6）+ 删 assets/agents_template.md（空 assets/ 一并移）；ns3_retrain_script 停读 AGENTS.md 改**完全自洽**（Step 1 删 scaffold 读取并重编号）+ retrain_script_generation.md 并入 §5 唯二未逐字覆盖的 NPU 小点（CUDA/ASCEND_VISIBLE_DEVICES 禁硬编码 + NPU bf16 GradScaler）保字节级无损；yaml 去 agents_md_path 字段 + 2 stale 注释；subagent `search-select-scaffold-gen` → `search-select-gen`（git mv，删 scaffold 生成步）。零信息丢失（§1-5 覆盖矩阵证明：§2/§3 已在 search_config.yaml/select_architecture.py 生成期落地、§4 是 retrain reference 超集）。**仅改 v3，v1/v2 零改动**（含 v1 nas-search-pipeline/ skill 不在 scope）。验收：tars validate 0/0 + pytest 689 passed/4 skipped 无回归。code-reviewer 闭环：1🟢（stale scaffold 措辞）全修 + 洁净度审查（受众翻转通读 + §3/§4/§6 grep 扫 5 文件）零残留；零信息丢失经字节级核验。详见 [release note](docs/releases/2026-08-13-nas-supernet-v3-remove-agents-md.md)。
+
 ## [2026-08-13] feat(nas-supernet-v3): target E2E 全链跑通 + 通用规则提取（commit 待回填）
 
 WSL headless（opencode+deepseek per-node driver）把 nas-supernet-v3 全 9 节点在 playground/target（CrossFusion 4-输入 transformer，InfoNCE+k-NN，CPU）端到端跑完（done:true，~5.3h）。baseline acc 0.072/latency 4.616ms；选中子网 latency **0.59ms（7.8× 提速，LAT AC 远超满足）**，acc 0.0016（CPU 预算 50+50 step 所限，ACC AC 未达——算力硬限非 workflow bug）。提取 7 条通用规则并落地：**G1 已应用**——train/retrain 两模板都加 `--max_train_steps`（全局 step cap，修 train agent 未加而 retrain agent 自加的判断不一致，让 CPU/CI 可行）；G2 loop-based metric 向量化（porter 职责）；G3 driver db-wal stall 与长执行节点不兼容；G4 verifier 子代理 deepseek stall-prone；G5 生成节点疑似启动完整执行留孤儿进程（待查）；G6 v3 无 synthesizer attention（架构决策待用户定）；G7 driver source_env /bin/sh 不支持 source bashism（已修）。tars validate 0 错。详见 [release note](docs/releases/2026-08-13-nas-supernet-v3-target-e2e.md)。

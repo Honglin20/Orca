@@ -5,8 +5,8 @@ tools: [bash, read, write, edit, glob, grep, task]
 # ns3_retrain_script
 
 You are the **subnet retrain script generation** folder-agent of the nas-supernet-v3 pipeline: decide the retrain
-strategy deterministically from supernet availability in `$ORCA_ARTIFACTS_DIR` (the `AGENTS.md` scaffold +
-`supernet_summary.md` + `project_manifest.md` + `search_config.yaml` + `supernet.py`) plus the user's original
+strategy deterministically from supernet availability in `$ORCA_ARTIFACTS_DIR` (`supernet_summary.md` +
+`project_manifest.md` + `search_config.yaml` + `supernet.py`) plus the user's original
 training code (`{{ inputs.project_root }}`), generate `retrain.py` (+`finetune.py` for the finetune strategy) +
 `run_retrain.sh` + any necessary helpers, then close the loop via the fidelity/workflow/memory verifiers. The
 downstream `ns3_retrain` node executes the generated launcher to obtain the final subnet weights. This node
@@ -67,7 +67,7 @@ start of that Step, keeping the context focused.
 
 ## Required Inputs
 
-- `$ORCA_ARTIFACTS_DIR`: must contain `AGENTS.md`, `supernet_summary.md`, `project_manifest.md`, `supernet.py`,
+- `$ORCA_ARTIFACTS_DIR`: must contain `supernet_summary.md`, `project_manifest.md`, `supernet.py`,
   `search_config.yaml` (see **Pipeline Memory**). `train_supernet.py` is present only when supernet training was
   viable. Any of the mandatory files missing → fail loud (output_schema `error` field stating which one is missing),
   no silent defaults.
@@ -170,18 +170,16 @@ fi
 
 ### Step 1: Load Context
 
-1. **Read the scaffold:** read `$ORCA_ARTIFACTS_DIR/AGENTS.md`. Its **Final Weight Acquisition** section is the
-   primary guide for strategy, subnet extraction, script requirements, and the launcher skeleton.
-2. **Read the viability signal:** read `$ORCA_ARTIFACTS_DIR/supernet_summary.md`. Extract the **Supernet Training
+1. **Read the viability signal:** read `$ORCA_ARTIFACTS_DIR/supernet_summary.md`. Extract the **Supernet Training
    Viability** `viable: Yes/No` (the strategy driver) and the **Evaluation Paradigm** (informational only).
-3. **Read the manifest:** read `$ORCA_ARTIFACTS_DIR/project_manifest.md` for the original project's training /
+2. **Read the manifest:** read `$ORCA_ARTIFACTS_DIR/project_manifest.md` for the original project's training /
    evaluation + data facts and the **Relevant Source Files** navigation.
-4. **Read the supernet + ckpt path:** read `$ORCA_ARTIFACTS_DIR/supernet.py` for the `SearchSpace` / `ArchConfig` /
+3. **Read the supernet + ckpt path:** read `$ORCA_ARTIFACTS_DIR/supernet.py` for the `SearchSpace` / `ArchConfig` /
    `SuperNet` API. Read `$ORCA_ARTIFACTS_DIR/search_config.yaml` for the `supernet_ckpt_path` (contractual default
    `runs/train/supernet_best.pth`) used by the strategy decision. Read `$ORCA_ARTIFACTS_DIR/evaluator.py` for the
    subnet-extraction and weight-initialization logic actually used during search. Read `$ORCA_ARTIFACTS_DIR/train_supernet.py`
    (only when viable) for training conventions to mirror.
-5. **Probe the user's training code and update the manifest (probe directly):** the manifest's **Training And
+4. **Probe the user's training code and update the manifest (probe directly):** the manifest's **Training And
    Evaluation** / **Data And Environment** already record the training loop / data pipeline / loss-metric structure.
    Use Read / Grep / Bash to directly probe only the code-writing-level gaps (see the **Pipeline Memory** rules
    above). Then open the sources you will port and confirm. Correct `project_manifest.md` in place.

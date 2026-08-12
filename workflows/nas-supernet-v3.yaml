@@ -147,7 +147,7 @@ nodes:
   # ═══════════════════════════════════════════════════════════════════════════
   # Agent 4: ns3_search_pipeline
   #   读 train 上游产物 → 产 search_record_schema.json 共享 schema → 派 3 子代理并行生成
-  #   （latency_estimator / search-core 5 文件 / select+scaffold）→ 汇总 + 固化校验。
+  #   （latency_estimator / search-core 5 文件 / select）→ 汇总 + 固化校验。
   # ═══════════════════════════════════════════════════════════════════════════
   - name: ns3_search_pipeline
     kind: agent
@@ -156,7 +156,7 @@ nodes:
     model: "deepseek/deepseek-v4-flash"
     output_schema:
       type: object
-      required: [output_dir, latency_estimator_path, search_config_path, evaluator_path, run_search_script_path, select_architecture_path, agents_md_path, fidelity_passed, workflow_verifier_passed, error, generated_artifacts]
+      required: [output_dir, latency_estimator_path, search_config_path, evaluator_path, run_search_script_path, select_architecture_path, fidelity_passed, workflow_verifier_passed, error, generated_artifacts]
       properties:
         output_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR 绝对路径（与上游共享）"}
         latency_estimator_path: {type: string, description: "latency_estimator.py 路径"}
@@ -164,7 +164,6 @@ nodes:
         evaluator_path: {type: string, description: "evaluator.py 路径"}
         run_search_script_path: {type: string, description: "run_search_supernet.sh 路径"}
         select_architecture_path: {type: string, description: "select_architecture.py 路径"}
-        agents_md_path: {type: string, description: "AGENTS.md scaffold 路径（指引下游 ns3_retrain）"}
         fidelity_passed: {type: boolean, description: "fidelity audit loop all-pass → true"}
         workflow_verifier_passed: {type: boolean, description: "workflow compliance loop all-pass → true"}
         error: {type: string, description: "fail loud 时根因；成功→空串"}
@@ -253,7 +252,7 @@ nodes:
       - to: ns3_report
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # Agent 7: ns3_retrain_script（纯生成节点——读 AGENTS.md scaffold + supernet 可用性 → 生成 retrain 脚本）
+  # Agent 7: ns3_retrain_script（纯生成节点——读 supernet 可用性 → 生成 retrain 脚本）
   #   决定 retrain_strategy（supernet viable=Yes 且 ckpt 存在→finetune-from-supernet；否则 train-from-scratch fallback）。
   #   fidelity + workflow-verifier 闭环。产出 retrain.py(+finetune.py)+run_retrain.sh。不执行训练。
   #   无 status 字段，无条件单出边到 ns3_retrain（靠脚本存在 self-gate）。

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # check_search_pipeline.sh — deterministic gate for ns3_search_pipeline artifacts.
-# Checks: 5 files exist + each py_compile + select_architecture.py --help rc=0 + shared schema present.
+# Checks: 6 files exist + each py_compile + select_architecture.py --help rc=0 + shared schema present.
 set -euo pipefail
 
 ARTIFACTS_DIR="${ORCA_ARTIFACTS_DIR:-$(pwd)}"
@@ -10,13 +10,13 @@ cd "$ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
 echo "[check_search_pipeline] artifacts_dir=$ARTIFACTS_DIR"
 
 # ── 1. Required files exist ─────────────────────────────────────────────
-for f in latency_estimator.py evaluator.py arch_codec.py search_config.yaml run_search_supernet.sh select_architecture.py AGENTS.md; do
+for f in latency_estimator.py evaluator.py arch_codec.py search_config.yaml run_search_supernet.sh select_architecture.py; do
   if [ ! -s "$f" ]; then
     echo "FAIL: $f missing or empty"
     FAIL=1
   fi
 done
-[ "$FAIL" -eq 0 ] && echo "[check_search_pipeline] all 7 files exist OK"
+[ "$FAIL" -eq 0 ] && echo "[check_search_pipeline] all 6 files exist OK"
 
 # ── 2. py_compile each .py ──────────────────────────────────────────────
 for f in latency_estimator.py evaluator.py arch_codec.py select_architecture.py; do
