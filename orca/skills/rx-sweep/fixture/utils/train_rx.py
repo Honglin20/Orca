@@ -25,6 +25,11 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:  # tensorboard 未装 → 跳过 TB 日志（fail-soft，不阻断训练）
+    SummaryWriter = None
+
 # fixture 自包含：把 fixture 根目录加进 sys.path，使 model8_baseline / pure_cnn_model / kd_helper 可 import
 _FIXTURE_ROOT = Path(__file__).resolve().parent.parent
 if str(_FIXTURE_ROOT) not in sys.path:
@@ -65,6 +70,9 @@ def parse_args(argv=None):
     p.add_argument("--exp-id", default=None, help="实验 ID（影响 [RESULT] 的 exp_id 字段）")
     p.add_argument("--data", default=None,
                    help="可选：data/gen.py 生成的 .pt 路径；未给用内联 torch.randn 合成")
+    p.add_argument("--tb-dir", default=None,
+                   help="TensorBoard 日志根目录（每实验写 <tb-dir>/<exp_id>/，"
+                        "用 tensorboard --logdir <tb-dir> 看训练曲线）")
     return p.parse_args(argv)
 
 
@@ -207,6 +215,12 @@ def main(argv=None):
         )
         return 1
 
+    # 2.5) TensorBoard writer（可选：--tb-dir 给了且 tensorboard 装了才开）
+    exp_id = args.exp_id or args.variant
+    writer = None
+    if args.tb_dir and SummaryWriter is not None:
+        writer = SummaryWriter(str(Path(args.tb_dir) / exp_id))
+
     # 3) 合成数据
     x, y = make_synthetic_data(device, n=TRAIN_BATCH, data_path=args.data)
 
@@ -235,6 +249,8 @@ def main(argv=None):
         optimizer.step()
         final_loss_val = float(loss.item())
         print(f"[train] epoch={ep} loss_avg={final_loss_val:.4f}", flush=True)
+        if writer is not None:
+            writer.add_scalar("train/loss", final_loss_val, ep)
 
     # epochs=0 时也跑一次前向拿 loss
     if args.epochs <= 0:
@@ -255,6 +271,12 @@ def main(argv=None):
     with torch.no_grad():
         _ = model(dummy_one)
     latency_ms = (time.time() - t0) * 1000.0
+
+    # 7.5) TensorBoard：末尾写 accuracy / latency 标量，关 writer
+    if writer is not None:
+        writer.add_scalar("result/accuracy", accuracy, args.epochs)
+        writer.add_scalar("result/latency_ms", latency_ms, args.epochs)
+        writer.close()
 
     # 8) [RESULT] 行（contracts §4）
     exp_id = args.exp_id or args.variant
