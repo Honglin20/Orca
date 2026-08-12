@@ -2,13 +2,21 @@
 
 读 final_model + baseline_metrics + eval_fn → 测 final acc + latency →
 ``gate_result.json``：
-  - acc_delta = |final_acc - baseline_acc|
-  - latency_ratio = final_latency / baseline_latency
-  - gate_status = pass if acc_delta ≤ accuracy_tolerance AND latency_ratio ≤ 0.5
+  - ACC AC（SPEC v2 §12.1 D5）：相对容差 + 绝对 floor，baseline-dependent：
+    - acc_base ≥ 0.5：绝对容差 0.5（final ≥ acc_base − 0.5；高 baseline 保绝对）
+    - acc_base < 0.5：相对容差 10%（final ≥ 0.9·acc_base；低 baseline 比例保护）
+  - LAT AC：latency_ratio = final_latency / baseline_latency ≤ 0.5
+  - gate_status = pass if acc_met AND lat_met
   - gate_reason: both-met / acc-miss / latency-miss / both-miss
 
 写 ``final_report.md``。
 stdout：``GATE_STATUS: <pass|fail>`` / ``RESULT_JSON: {...}``。
+
+注：D5 SPEC 文字「``δ = max(0.5, 0.1·acc_base)`` 取更严者」与具体示例
+（mnist 0.97 → final≥0.47；target 0.085 → final≥0.0765）内部不一致——示例
+匹配 baseline-dependent 规则（高 baseline 绝对、低 baseline 相对），与用户
+显式 intent「低 baseline 比例保护，高 baseline 绝对容差」一致。本实现按示例
+（baseline-dependent）落地。
 """
 
 from __future__ import annotations
@@ -26,22 +34,41 @@ from puzzle_common import (
     BlockMap,
     build_student_from_arch,
     get_module_dummy_input,
-    load_external_callable,
+    measure_whole_model_latency,
     resolve_eval_fn,
 )
 
+# D5 容差参数（SPEC v2 §12.1）
+_ACC_ABS_TOL = 0.5      # 高 baseline 绝对容差 floor
+_ACC_REL_FACTOR = 0.1   # 低 baseline 相对容差（final ≥ acc_base·(1−rel_factor)）
+_ACC_BASELINE_BOUNDARY = 0.5  # 高低 baseline 分界（= abs tol floor）
 
-def _measure_latency(
-    model,
-    dummy_input: torch.Tensor,
-    device: torch.device,
-    latency_script_path: str,
-) -> float:
-    if latency_script_path:
-        fn = load_external_callable(latency_script_path)
-        return float(fn(model, dummy_input))
-    from nas_agent.latency import measure_module_latency
-    return float(measure_module_latency(model, dummy_input, device, repetitions=100, warmup=30))
+
+def _acc_threshold(acc_base: float) -> tuple[float, str]:
+    """D5 baseline-dependent：返回 (final_acc 下限, 容差种类)。
+
+    - acc_base ≥ 0.5：绝对容差 → threshold = acc_base − 0.5（保留 floor 保护）
+    - acc_base < 0.5：相对容差 → threshold = acc_base·0.9（比例保护，近随机会 fail）
+
+    理由（vs SPEC 文字「max(0.5, 0.1·acc_base)」）：SPEC 的公式与示例内部矛盾
+    （mnist 用 abs 0.47，target 用 rel 0.0765——max 公式对两者都给 0.5 abs）。
+    本规则与 SPEC §0 D5 intent + §12.1 示例一致。
+
+    Boundary cliff（已知设计特征，非 bug）：baseline=0.500 → threshold=0.0
+    （绝对，可降到 0% pass）；baseline=0.499 → threshold=0.4491（相对，仅允许 10%
+    降）。0.001 baseline 差异导致 threshold 跳跃——这是 baseline-dependent 切换的
+    固有特征。SPEC formula 修订（消除 max 文字矛盾）应同步消除该 cliff；当前实现
+    忠实匹配示例 + 用户 intent。
+    """
+    if acc_base >= _ACC_BASELINE_BOUNDARY:
+        return acc_base - _ACC_ABS_TOL, "absolute"
+    return acc_base * (1.0 - _ACC_REL_FACTOR), "relative"
+
+
+def _acc_pass(acc_base: float, acc_opt: float) -> tuple[bool, str, float]:
+    """D5：返回 (是否达标, 容差种类, 阈值)。"""
+    threshold, kind = _acc_threshold(acc_base)
+    return acc_opt >= threshold, kind, threshold
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -61,7 +88,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--latency_unit", default="ms", choices=["ms", "us", "s"])
     parser.add_argument("--latency_script_path", default="")
-    parser.add_argument("--accuracy_tolerance", type=float, default=0.5)
+    parser.add_argument(
+        "--accuracy_tolerance",
+        type=float,
+        default=0.5,
+        help="[DEPRECATED, 被 D5 baseline-dependent 容差取代] 旧绝对容差入参，"
+        "保留仅为兼容 yaml/launcher 不破坏——实际 ACC AC 由 _acc_pass 按 baseline "
+        "高/低自动选绝对 0.5 或相对 10%（SPEC v2 §12.1 D5）",
+    )
     parser.add_argument("--output_dir", required=True)
     args = parser.parse_args(argv)
 
@@ -124,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         shape = list(dummy_meta["shape"])
         dtype = getattr(torch, str(dummy_meta.get("dtype", "float32")))
         dummy_input = torch.randn(*shape, dtype=dtype)
-        final_latency = _measure_latency(
+        final_latency = measure_whole_model_latency(
             student, dummy_input, device, args.latency_script_path
         )
 
@@ -132,7 +166,8 @@ def main(argv: list[str] | None = None) -> int:
         latency_ratio = (
             final_latency / baseline_latency if baseline_latency > 0 else float("inf")
         )
-        acc_met = acc_delta <= args.accuracy_tolerance
+        # D5：ACC AC 相对容差 + floor（baseline-dependent）
+        acc_met, acc_tol_kind, acc_threshold = _acc_pass(baseline_acc, final_acc)
         lat_met = latency_ratio <= 0.5
         if acc_met and lat_met:
             gate_reason = "both-met"
@@ -154,6 +189,8 @@ def main(argv: list[str] | None = None) -> int:
             "baseline_acc": baseline_acc,
             "baseline_latency": baseline_latency,
             "acc_delta": acc_delta,
+            "acc_tolerance_kind": acc_tol_kind,
+            "acc_threshold": acc_threshold,
             "latency_ratio": latency_ratio,
             "latency_unit": args.latency_unit,
             "gate_reason": gate_reason,
@@ -162,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
 
         report_path = output_dir / "final_report.md"
         with open(report_path, "w", encoding="utf-8") as f:
-            f.write(_render_report(gate_result, args.accuracy_tolerance))
+            f.write(_render_report(gate_result, acc_tol_kind, acc_threshold))
         gate_result["report_path"] = str(report_path)
 
         gate_result_path = output_dir / "gate_result.json"
@@ -178,7 +215,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 
-def _render_report(g: dict[str, Any], tolerance: float) -> str:
+def _render_report(
+    g: dict[str, Any], acc_tol_kind: str, acc_threshold: float
+) -> str:
     return (
         "# Puzzle Final Report\n\n"
         f"- gate_status: **{g['gate_status']}**\n"
@@ -187,7 +226,7 @@ def _render_report(g: dict[str, Any], tolerance: float) -> str:
         "| metric | baseline | final | delta / ratio |\n"
         "|---|---|---|---|\n"
         f"| accuracy | {g['baseline_acc']:.4f} | {g['final_acc']:.4f} "
-        f"| Δ={g['acc_delta']:.4f} (tol={tolerance}) |\n"
+        f"| Δ={g['acc_delta']:.4f} (D5 {acc_tol_kind} tol, threshold={acc_threshold:.4f}) |\n"
         f"| latency ({g['latency_unit']}) | {g['baseline_latency']:.4f} "
         f"| {g['final_latency']:.4f} | ratio={g['latency_ratio']:.4f} (≤0.5) |\n\n"
         "## Verdict\n\n"

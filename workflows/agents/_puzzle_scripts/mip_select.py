@@ -216,6 +216,35 @@ def main(argv: list[str] | None = None) -> int:
             with open(args.baseline_metrics, encoding="utf-8") as f:
                 baseline_whole = float(json.load(f)["baseline_latency"])
 
+        # E12 LAT 早警：target_latency > baseline_latency/2 → LAT AC 结构性不可达。
+        # 放在 mip_select（而非 gate）的原因：(1) mip_select 已有 target+baseline 同框；
+        # (2) 早 fail 省 build_selected + gkd_retrain（最长的 GKD 分钟~小时级）；(3) 具体
+        # reason 让 pz_select agent 路由 terminate_latency_too_aggressive 而非通用 fail。
+        # 缺 baseline_metrics 时跳过（不强制—— degraded 模式留给纯 block-sum 回退）。
+        if baseline_whole is not None:
+            lat_early_threshold = baseline_whole / 2.0
+            if args.target_latency > lat_early_threshold:
+                early = {
+                    "selected_arch": {},
+                    "total_score": 0.0,
+                    "selected_latency": 0.0,
+                    "feasible": False,
+                    "select_reason": "target-too-aggressive",
+                    "latency_unit": args.latency_unit,
+                    "infeasible_reason": (
+                        f"E12 LAT 早警：target_latency={args.target_latency:.4f} "
+                        f"> baseline_latency/2={lat_early_threshold:.4f}（baseline="
+                        f"{baseline_whole:.4f}）——LAT AC 要求 latency_opt ≤ baseline/2，"
+                        f"目标预算已超 AC 上限，结构性不可达；禁浪费 build_selected/retrain 算力。"
+                        f"调高 target_latency 或换更小模型"
+                    ),
+                }
+                arch_path = output_dir / "selected_arch.json"
+                with open(arch_path, "w", encoding="utf-8") as f:
+                    json.dump(early, f, ensure_ascii=False, indent=2)
+                print(json.dumps(early, ensure_ascii=False))
+                return 0
+
         # 实测 floor(优先):latency_table 产出 latency_floor.json(与 latency_table.jsonl 同目录)
         measured_floor = None
         floor_path = Path(args.latency_table).resolve().parent / "latency_floor.json"

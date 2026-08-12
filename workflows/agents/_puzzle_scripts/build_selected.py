@@ -20,7 +20,78 @@ import torch
 from puzzle_common import (
     BlockMap,
     build_student_from_arch,
+    get_module_dummy_input,
+    is_candidate_valid_for_slot,
+    is_passthrough,
+    load_father_model,
 )
+
+
+# §16.4 全 identity 架构 allclose 容差（验证 identity 零侵入完整性）
+_ALL_IDENTITY_ALLCLOSE_ATOL = 1e-5
+
+
+def _is_all_identity_arch(arch: dict) -> bool:
+    """selected_arch 的每个 slot 都选了 identity（passthrough）。
+
+    语义：全 identity 架构 = 不替换任何 slot → student 必须等价于 father。
+    任一 slot 选了非 identity → 有意替换了块，输出会变，allclose AC 不适用。
+    """
+    if not arch:
+        return False
+    for _, slot_dict in arch.items():
+        for _, variant in slot_dict.items():
+            if not is_passthrough(str(variant)):
+                return False
+    return True
+
+
+def _verify_all_identity_allclose(
+    student: torch.nn.Module,
+    flat_model_path: str,
+    build_fn: str,
+    build_cfg: str,
+    father_state_path: str,
+) -> None:
+    """§16.4 完整 AC：全 identity selected_arch → student forward 必须与 father-loaded
+    全模型 forward ``torch.allclose``。
+
+    语义：identity 候选承诺零侵入（SPEC §3 铁律）——若所有 slot 都选 identity，
+    student 实际就是 father 本身（架构 + 权重经 build_student_from_arch 的 father
+    注入路径）。本 check 是该承诺的跨模型真实验证（非 per-slot 近似）。
+
+    非 father_state 路径 / 非 all-identity → 跳过（不适用，不强制 allclose）。
+    """
+    if not father_state_path:
+        return  # father_state 缺 → student 是随机 init（路径 B 由 selected_state_dict 覆盖）；本 check 不适用
+    father = load_father_model(flat_model_path, build_fn, build_cfg, father_state_path)
+    father.eval()
+    student.eval()
+    dummy_meta = get_module_dummy_input(flat_model_path)
+    shape = list(dummy_meta["shape"])
+    dtype = getattr(torch, str(dummy_meta.get("dtype", "float32")))
+    dummy_input = torch.randn(*shape, dtype=dtype)
+    with torch.no_grad():
+        father_out = father(dummy_input)
+        student_out = student(dummy_input)
+    # tuple/list 取首 tensor（与下游 gkd/gate 一致）
+    if isinstance(father_out, (tuple, list)):
+        father_out = father_out[0]
+    if isinstance(student_out, (tuple, list)):
+        student_out = student_out[0]
+    if not isinstance(father_out, torch.Tensor) or not isinstance(student_out, torch.Tensor):
+        raise RuntimeError(
+            "§16.4 allidentity allclose 失败：father/student forward 非 tensor"
+            "（dict/list 输出需 flat.py 加 output-flattening adapter，E24）"
+        )
+    if not torch.allclose(student_out, father_out, atol=_ALL_IDENTITY_ALLCLOSE_ATOL):
+        max_diff = (student_out - father_out).abs().max().item()
+        raise RuntimeError(
+            f"§16.4 allidentity allclose 失败：全 identity 架构 student 应等价 father，"
+            f"但 forward max|Δ|={max_diff:.2e} > atol={_ALL_IDENTITY_ALLCLOSE_ATOL:.0e}"
+            f"（identity 零侵入承诺被破坏——检查 build_student_from_arch 的 father 权重注入路径、"
+            f"或 flat model schema 与 father_state_dict 是否对齐）"
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -79,6 +150,41 @@ def main(argv: list[str] | None = None) -> int:
         if unknown:
             raise RuntimeError(
                 f"selected_arch 中有未匹配 block_map slot 的项：{sorted(unknown)[:3]}"
+            )
+
+        # E6/E8：防御性 is_valid 校验——MIP 应已据 score.py 的 valid 字段过滤，但
+        # build_selected 是 identity 完整性关卡，再核一遍 selected_arch 的每个非
+        # identity variant 对 slot 是否结构有效。无效选 → raise（fail loud，不让
+        # 结构破坏的架构进 gkd）。
+        for L, d in arch.items():
+            for kind, variant in d.items():
+                vname = str(variant)
+                # 找对应的 slot（layer_idx + kind 唯一定位）
+                matched = [
+                    s for s in block_map.slots
+                    if s.layer_idx == int(L) and s.kind == kind
+                ]
+                if not matched:
+                    continue  # 上方 unknown check 已拦
+                slot = matched[0]
+                if is_passthrough(vname):
+                    continue  # identity 永远 valid
+                if not is_candidate_valid_for_slot(vname, slot):
+                    raise RuntimeError(
+                        f"selected_arch L{L}_{kind}={vname} 对 slot 结构无效"
+                        f"（ffn_struct={slot.ffn_struct!r}, mask_load_bearing="
+                        f"{slot.mask_load_bearing}）——score.py 应已标 valid=False，"
+                        f"MIP 不该选它；检查 mip_select 的 valid 过滤路径"
+                    )
+
+        # §16.4 完整 AC：全 identity 架构 → student forward 必须与 father allclose
+        if _is_all_identity_arch(arch):
+            _verify_all_identity_allclose(
+                student=model,
+                flat_model_path=args.flat_model,
+                build_fn=args.build_fn,
+                build_cfg=args.build_cfg,
+                father_state_path=args.father_state,
             )
 
         replaced: list[str] = []

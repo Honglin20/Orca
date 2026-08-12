@@ -30,6 +30,7 @@ from puzzle_common import (
     build_calib_loader,
     get_candidate,
     get_module_dummy_input,
+    is_candidate_valid_for_slot,
     is_passthrough,
     load_father_model,
     load_variant_state_dict,
@@ -63,6 +64,11 @@ def _score_variant(
     if is_passthrough(variant):
         # identity = 保留父块 → 输出与 parent_outputs 完全一致 → distance=0
         return 0.0, True
+
+    # E6/E8：结构不匹配的 variant（如 bypass FFN 选 ffn_75、mask slot 选 mask-blind）
+    # 标 valid=False 不打分——下游 mip_select 据 valid 字段过滤。
+    if not is_candidate_valid_for_slot(variant, slot):
+        return 0.0, False
 
     entry = get_candidate(variant)
     if slot.kind not in entry.kinds:

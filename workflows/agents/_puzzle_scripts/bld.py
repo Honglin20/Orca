@@ -28,10 +28,11 @@ import torch.nn.functional as F
 from puzzle_common import (
     BlockMap,
     Slot,
-    build_calib_loader,
+    build_real_calib_loader,
     capture_parent_activations,
     get_candidate,
     get_module_dummy_input,
+    is_candidate_valid_for_slot,
     is_passthrough,
     load_father_model,
     parse_block_candidates,
@@ -149,6 +150,14 @@ def main(argv: list[str] | None = None) -> int:
         help="预训练父模型权重 .pt 路径（expand 保存的 father_state_dict.pt）。"
         "Puzzle 的 teacher 必须预训练——空串回退随机 init（仅 dry-run 兼容）",
     )
+    parser.add_argument(
+        "--calib_loader_fn",
+        required=True,
+        help="真实数据 loader 的 path::func（如 proj/train.py::build_dataloader），"
+        "零参调用返回 re-iterable DataLoader。BLD teacher 信号必须来自真实数据（E14 修正——"
+        "torch.randn OOD 会让 candidate 学 noise→teacher，真实数据上全错）。"
+        "agent 从 manifest.data_and_environment.data_loader_entry 桥接此 arg",
+    )
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args(argv)
 
@@ -175,7 +184,9 @@ def main(argv: list[str] | None = None) -> int:
             p.requires_grad_(False)
 
         dummy_meta = get_module_dummy_input(args.flat_model)
-        calib_loader = build_calib_loader(model, dummy_meta, batch_size=2, device=device)
+        # E14 修正：BLD teacher 信号必须来自真实数据（torch.randn OOD 会让 candidate
+        # 学 noise→teacher，真实数据上全错）。agent 从 manifest 桥接 --calib_loader_fn。
+        calib_loader = build_real_calib_loader(args.calib_loader_fn, device=device)
 
         # 捕获 parent activations
         activations = capture_parent_activations(model, block_map, calib_loader, device)
@@ -191,8 +202,21 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(
                     f"kind={slot.kind!r} 无候选变体（block_candidates 配置缺）"
                 )
+            # E6/E8：catalog × slot 结构联合过滤——非 standard FFN 拒绝剪枝候选、
+            # mask-bearing slot 拒绝 mask-blind candidate。无效 candidate 不进 BLD
+            # （不训不存），候选收缩到该 slot 的 valid 子集（含 identity 兜底）。
+            valid_variants = [
+                v for v in variant_list if is_candidate_valid_for_slot(v, slot)
+            ]
+            if not valid_variants:
+                raise ValueError(
+                    f"slot {slot.parent_module_path!r} (kind={slot.kind!r}, "
+                    f"ffn_struct={slot.ffn_struct!r}, mask_load_bearing="
+                    f"{slot.mask_load_bearing}) 经 is_valid 过滤后无 valid 候选——"
+                    f"catalog 配置与 slot 结构不匹配（每 slot 至少须留 identity 兜底）"
+                )
             parent_in, parent_out = activations[slot.parent_module_path]
-            for variant in variant_list:
+            for variant in valid_variants:
                 fname = variant_file_name(slot.layer_idx, slot.kind, variant)
                 ckpt_path = block_library_dir / fname
                 if is_passthrough(variant):
@@ -263,8 +287,7 @@ def main(argv: list[str] | None = None) -> int:
         # Write completion marker (status.sh / emit_result.py 契约路径).
         # BLD produces a block library, not a single model — this marker carries
         # summary metadata so downstream runners can validate via torch.load.
-        runs_dir = output_dir / "runs" / "bld"
-        runs_dir.mkdir(parents=True, exist_ok=True)
+        # runs_dir 已在 main() 开头创建（与 progress_path 同源）。
         torch.save(
             {"state_dict": {"bld_complete": torch.tensor([1.0])}, "summary": summary},
             runs_dir / "bld_complete.pt",

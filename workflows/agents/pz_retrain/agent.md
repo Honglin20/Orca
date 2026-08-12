@@ -171,7 +171,7 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
     --selected_arch "$ORCA_ARTIFACTS_DIR/selected_arch.json" \
     --block_map "$ORCA_ARTIFACTS_DIR/block_map.json" \
     --flat_model "$ORCA_ARTIFACTS_DIR/<base_name>_flat.py" \
-    --build_fn "{{ inputs.build_fn }}" \
+    --build_fn "<manifest.yaml 的 model.build_entry>" \
     --build_cfg "{{ inputs.build_cfg }}" \
     --block_library "$ORCA_ARTIFACTS_DIR/block_library" \
     --father_state "$ORCA_ARTIFACTS_DIR/father_state_dict.pt" \
@@ -181,14 +181,14 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
   python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/gkd_retrain.py" \
     --selected_model "$ORCA_ARTIFACTS_DIR/selected_model.pt" \
     --flat_model "$ORCA_ARTIFACTS_DIR/<base_name>_flat.py" \
-    --build_fn "{{ inputs.build_fn }}" \
+    --build_fn "<manifest.yaml 的 model.build_entry>" \
     --build_cfg "{{ inputs.build_cfg }}" \
     --block_map "$ORCA_ARTIFACTS_DIR/block_map.json" \
     --block_library "$ORCA_ARTIFACTS_DIR/block_library" \
     --father_state "$ORCA_ARTIFACTS_DIR/father_state_dict.pt" \
-    --eval_fn "{{ inputs.eval_fn }}" \
+    --eval_fn "<manifest.yaml 的 training_and_evaluation.evaluation_entry>" \
     --eval_kind "{{ inputs.eval_kind }}" \
-    --train_loader_fn "{{ inputs.train_loader_fn }}" \
+    --train_loader_fn "<manifest.yaml 的 data_and_environment.data_loader_entry>" \
     --output_dir "$ORCA_ARTIFACTS_DIR" \
     --epochs "$EPOCHS" \
     --hard_label_weight 1.0 \
@@ -197,6 +197,19 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
   `REPO_ROOT` 解析方式同 pz_expand Step 2（pathlib 探 `$ORCA_AGENT_RESOURCES` 的 workflows 父）。
   设 `NPROC_PER_NODE` 实测值（`python3 -c 'import torch; print(torch.cuda.device_count())'`）。
   `EPOCHS` 变量形态可调（默认 1，GKD 是末段微调非从零训）。
+
+  **E19 manifest 桥接（必读）**：5 个 CLI args（`--build_fn` / `--eval_fn` / `--father_state`
+  / `--train_loader_fn` / `--eval_kind`）由你（agent）从 `$ORCA_ARTIFACTS_DIR/manifest.yaml`
+  + `{{ inputs.eval_kind }}` 桥接——脚本本身不解析 manifest（E9：manifest 消费者是 agent）。
+  - `--build_fn` ← `manifest.model.build_entry`
+  - `--eval_fn` ← `manifest.training_and_evaluation.evaluation_entry`
+  - `--train_loader_fn` ← `manifest.data_and_environment.data_loader_entry`
+  - `--father_state` ← 固定 `$ORCA_ARTIFACTS_DIR/father_state_dict.pt`（pz_expand 已落盘）
+  - `--eval_kind` ← `{{ inputs.eval_kind }}`（用户 [ask]，与 manifest 须一致）
+  manifest 缺任一字段 → 进 Step 4 输出 `{"status":"failed"}`，assessment 写明缺哪个。
+  **dict/list 模型输出（E24）**：gkd_retrain.py 的 `_flatten_model_output` 对 dict 直接
+  raise——flat.py 须按 pz_expand 契约加 output-flattening adapter（暴露单 tensor 为顶层
+  forward 返回）。
 
 **生成契约（scripts 解析的前提，必须逐字满足）**：
 - **机器进度（双 feed，每 progress unit，rank 0；gkd_retrain.py 预写脚本内部已实现）**：

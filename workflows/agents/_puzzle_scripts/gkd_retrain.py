@@ -24,6 +24,7 @@ import json
 import sys
 import traceback
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -32,9 +33,47 @@ from puzzle_common import (
     build_calib_loader,
     build_student_from_arch,
     get_module_dummy_input,
+    load_external_callable,
     load_father_model,
     load_variant_state_dict,
 )
+
+
+def _flatten_model_output(out: Any) -> torch.Tensor:
+    """把模型 forward 输出规约为单 tensor（cosine/logits KD loss 的契约输入）。
+
+    SPEC §11 E24：GKD 的 KD loss 假设输出是单 tensor 或 tuple(tensor, ...)；
+    dict / list 输出需 flat.py 加 output-flattening adapter（写入 pz_expand 契约）。
+    本函数是 fail-loud 关卡——flat.py 漏 adapter 时让 GKD 显式崩，而非静默拿错 tensor。
+
+    - tensor → 原样返回。
+    - tuple/list → 取首个元素（须为 tensor）；空序列 → raise。
+    - dict → raise（语义不明：取 'logits'/'hidden'/[0] 都可能错，要 flat 适配）。
+    """
+    if isinstance(out, torch.Tensor):
+        return out
+    if isinstance(out, (tuple, list)):
+        if not out:
+            raise RuntimeError(
+                "E24：模型 forward 返回空 tuple/list——无法取主 tensor（GKD KD loss 契约）"
+            )
+        first = out[0]
+        if not isinstance(first, torch.Tensor):
+            raise RuntimeError(
+                f"E24：模型 forward tuple/list 首元素非 tensor（{type(first).__name__}）"
+                f"——flat.py 须加 output-flattening adapter"
+            )
+        return first
+    if isinstance(out, dict):
+        raise RuntimeError(
+            f"E24：模型 forward 返回 dict（keys={list(out.keys())[:5]}）——"
+            f"GKD KD loss 契约要求单 tensor 输入。flat.py 须加 output-flattening adapter"
+            f"（按任务语义挑主 tensor 暴露为顶层 forward 返回值）"
+        )
+    raise RuntimeError(
+        f"E24：模型 forward 返回非 tensor/tuple/list/dict（{type(out).__name__}）"
+        f"——GKD KD loss 契约无法消费"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -143,7 +182,6 @@ def main(argv: list[str] | None = None) -> int:
         # 优先用真实训练数据(GKD 恢复精度的关键);空串回退合成 calib(仅 dry-run)
         train_loader = None
         if args.train_loader_fn:
-            from puzzle_common import load_external_callable
             loader_fn = load_external_callable(args.train_loader_fn)
             train_loader = loader_fn()
             if not hasattr(train_loader, "__iter__"):
@@ -190,12 +228,8 @@ def main(argv: list[str] | None = None) -> int:
                     if labels is not None:
                         labels = labels.to(device)
                     with torch.no_grad():
-                        t_out = teacher(inp)
-                        if isinstance(t_out, tuple):
-                            t_out = t_out[0]
-                    s_out = student(inp)
-                    if isinstance(s_out, tuple):
-                        s_out = s_out[0]
+                        t_out = _flatten_model_output(teacher(inp))
+                    s_out = _flatten_model_output(student(inp))
                     loss_cos = cosine_kd_loss(s_out, t_out)
                     loss = loss_cos
                     loss_logits_val = 0.0

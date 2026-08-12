@@ -21,11 +21,12 @@ inputs:
     required: true
   pretrained_ckpt:
     type: string
-    description: "[ask] 预训练父模型权重 .pt 路径(state_dict,相对 project_root 或绝对)。Puzzle 的 father/teacher/baseline 必须是预训练模型——pz_expand load_state_dict 此文件并保存 father_state_dict.pt 供全链(bld teacher / score 冻结模型 / gkd teacher / gate baseline)复用同一份权重。无预训练模型时 Puzzle 无的放矢(baseline=chance),必须用户给。过渡期注：pz_expand agent 已改为从源码发现此路径写进 manifest.yaml 并下传 measure_baseline；本 input 留作 v1 expand_model.py 路径 + 校验锚，下游迁移完成后退役"
-    required: true
+    description: "[advanced][DEPRECATED U3] 预训练父权重 .pt 路径——pz_expand U2a 起从源码发现并写进 manifest.yaml + 落 father_state_dict.pt；下游全部读 father_state_dict.pt。本 input 仅留作 v1 expand_model.py 路径 + 校验锚（U4 E2E 重跑后退役）。默认空串；新链路（puzzle-universal）禁依赖。"
+    required: false
+    default: ""
   build_fn:
     type: string
-    description: "[ask] model_path 内实例化模型的函数名(如 build_model),零参或接 build_cfg。pz_expand 调此函数得父模型用于 flatten / 基线测量 / BLD teacher。必须用户给(或与 model.py 的 build_model 默认契约一致)。过渡期注：pz_expand agent 已改为从源码发现 build_entry 写进 manifest.yaml；本 input 留作 v1 路径 + 下游节点消费，迁移完成后退役"
+    description: "[advanced][DEPRECATED U3] model_path 内实例化函数名——pz_expand U2a 起从源码发现 build_entry 写进 manifest.yaml；下游 agent 读 manifest 桥接（pz_build_library/pz_retrain 不再消费本 input）。留作 v1 expand_model.py 路径 + 测试兼容，U4 重跑后退役。"
     required: false
     default: "build_model"
   build_cfg:
@@ -35,8 +36,9 @@ inputs:
     default: ""
   eval_fn:
     type: string
-    description: "[ask] project_root 内评估函数名(如 evaluate / eval_model),返回 top-1 acc 或 loss。pz_expand 测基线 acc、pz_report 测最终 acc 都调它。InfoNCE/分类/回归皆可,方向由 manifest 判。必须用户给(精度 AC 的度量源)。过渡期注：pz_expand agent 已改为从源码发现 evaluation_entry 写进 manifest.yaml；本 input 留作下游 pz_report/gate 消费，迁移完成后退役"
-    required: true
+    description: "[advanced][DEPRECATED U3] project_root 内评估函数名——pz_expand U2a 起从源码发现 evaluation_entry 写进 manifest.yaml；下游 agent（pz_retrain / pz_report）读 manifest 桥接。留作 v1 expand_model.py 路径 + 测试兼容，U4 重跑后退役。"
+    required: false
+    default: ""
   eval_kind:
     type: string
     enum: [classification, embedding, regression]
@@ -44,8 +46,9 @@ inputs:
     required: true
   train_loader_fn:
     type: string
-    description: "[ask] 训练数据 loader 的 path::func(如 <project_root>/train.py::build_dataloader),零参调用返回 re-iterable DataLoader。pz_retrain 的 GKD **必须用真实训练数据**才能恢复精度——空串回退合成 calib(仅 dry-run,acc 恢复弱)。必须用户给"
-    required: true
+    description: "[advanced][DEPRECATED U3] 训练数据 loader 的 path::func——pz_expand U2a 起从源码发现 data_loader_entry 写进 manifest.yaml；pz_retrain agent 读 manifest 桥接（不再消费本 input）。留作 v1 路径 + 测试兼容，U4 重跑后退役。"
+    required: false
+    default: ""
   target_latency:
     type: number
     description: "[ask] MIP latency 预算(单位由 latency_unit 决定,默认 ms)。pz_select 调 mip_select.py 下传 --target-latency:在 latency ≤ target 的可行解里 max-Σscore。为满足 LAT AC(时延降一半)应设为 ≤ baseline_latency/2;pz_report 另独立断言 latency_opt ≤ baseline/2。必须用户给(NAS 无目标 = 瞎搜)"
@@ -68,7 +71,7 @@ inputs:
     default: ""
   accuracy_tolerance:
     type: number
-    description: "[advanced] ACC AC 容差:|acc_opt - acc_base| ≤ 此值(默认 0.5)。pz_report 硬断言"
+    description: "[advanced][DEPRECATED U3] 旧 ACC 绝对容差——U3 D5 改为 baseline-dependent（acc_base≥0.5 用绝对 0.5；<0.5 用相对 10%）。gate_report 仍接此 arg 但仅作兼容，实际 AC 由 D5 自动判。U4 重跑后退役。"
     required: false
     default: 0.5
   seed:

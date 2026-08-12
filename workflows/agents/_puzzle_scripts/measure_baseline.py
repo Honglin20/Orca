@@ -37,6 +37,7 @@ from puzzle_common import (
     _extract_state_dict,
     get_module_dummy_input,
     load_flat_model,
+    measure_whole_model_latency,
     resolve_eval_fn,
 )
 from search_space_io import (
@@ -271,24 +272,9 @@ def trace_slot_shapes(
 
 
 # ── latency ────────────────────────────────────────────────────────────────────
+# 整模 latency 测量统一走 puzzle_common.measure_whole_model_latency（DRY：与
+# gate_report 共享同一份逻辑，本节点不再持本地副本）。
 
-def measure_latency(
-    model: nn.Module,
-    dummy_input: torch.Tensor,
-    device: torch.device,
-    latency_unit: str,
-    latency_script_path: str,
-) -> float:
-    """默认 ``measure_module_latency``（PyTorch ms）；``latency_script_path`` 提供则包装。"""
-    if latency_script_path:
-        from puzzle_common import load_external_callable
-        fn = load_external_callable(latency_script_path)
-        return float(fn(model, dummy_input))
-    from nas_agent.latency import measure_module_latency
-    return float(measure_module_latency(model, dummy_input, device, repetitions=100, warmup=30))
-
-
-# ── main ──────────────────────────────────────────────────────────────────────
 
 def _build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -389,8 +375,8 @@ def main(argv: list[str] | None = None) -> int:
             d["out_dim"] = out_dim
 
         # 7) latency
-        baseline_latency = measure_latency(
-            model, dummy_input, device, args.latency_unit, args.latency_script_path
+        baseline_latency = measure_whole_model_latency(
+            model, dummy_input, device, args.latency_script_path
         )
 
         # 8) 写产物：block_map.json + baseline_metrics.json + 更新 search_space.yaml

@@ -12,8 +12,13 @@
   - ``load_flat_model``：动态加载 flat model 文件并调 build_fn。
   - ``capture_parent_activations``：forward hook 抓每个 slot 的 (in, out) 作
     BLD teacher 信号。
-  - ``build_calib_loader``：合成随机张量 DataLoader（通用，不硬编码数据集；
-    TODO(U3)：E14 修正——改真实数据 sample，拿不到 fail-loud）。
+  - ``build_calib_loader``：合成随机张量 DataLoader（latency / score 等只需 I/O
+    shape 的场景用；**禁** 给 BLD teacher 信号用——会 OOD）。
+  - ``build_real_calib_loader``：调外部 loader_fn 抽首个 batch 真实数据（E14，
+    BLD teacher 信号的正确来源）。
+  - ``is_valid_ffn_prune`` / ``is_candidate_valid_for_slot``：E6/E8 结构验证器。
+  - ``measure_whole_model_latency``：整模 latency 测量（DRY：measure_baseline +
+    gate_report 复用）。
 
 兄弟 import（禁 sys.path 魔改）：同目录脚本 ``from puzzle_common import ...``。
 """
@@ -63,11 +68,11 @@ class Slot:
     original_intermediate: int | None = None
     # E23：FFN 激活（gelu/relu/silu/...）；ffn factory required，null → raise
     activation: str | None = None
-    # E6：FFN 结构类型 standard/bypass/glu/dual；非 standard → 禁剪枝候选。
-    # TODO(U2/U3)：expand_model._infer_ffn_meta 占位返回 "standard"，U2 LLM 须 refine
+    # E6：FFN 结构类型 standard/bypass/glu/dual；非 standard → 禁剪枝候选
+    # （is_valid_ffn_prune 消费，bld/score/build_selected 在枚举时过滤）。
     ffn_struct: str = "standard"
     # E8：父层是否传 functionally-load-bearing kwargs（attention_mask 等）
-    # TODO(U3)：is_valid 据此对 mask_load_bearing slot 收缩到 identity
+    # （is_candidate_valid_for_slot 消费，mask-bearing slot 拒绝 mask-blind candidate）。
     mask_load_bearing: bool = False
 
 
@@ -266,8 +271,9 @@ class CatalogEntry:
       候选（identity）factory=None（永不实例化）。
     - ``kinds``：适用 kind 集合（按 catalog 的 ``kind`` list）。
     - ``requires_ffn_struct``：FFN 结构约束（如 ffn_75 要求 ["standard"]）；
-      TODO(U3)：is_valid_ffn_prune 消费此字段收缩剪枝候选（E6）。本 phase 仅承载声明。
-    - ``mask_aware``：TODO(U3)：mask_load_bearing slot 的 is_valid 消费（E8）。本 phase 仅承载声明。
+      is_candidate_valid_for_slot 消费此字段对非 standard FFN 收缩剪枝候选（E6）。
+    - ``mask_aware``：is_candidate_valid_for_slot 消费——mask_load_bearing slot
+      拒绝 mask_aware=False 的候选（E8，只留 identity）。
     """
     name: str
     kinds: set[str]
@@ -466,6 +472,61 @@ def parse_block_candidates(raw: str | None) -> dict[str, list[str]]:
     return out
 
 
+# ── candidate-slot 结构验证器（SPEC v2 §5.2 E6/E8）─────────────────────────────
+
+def is_valid_ffn_prune(slot: Slot) -> bool:
+    """E6：FFN 剪枝候选（ffn_75/ffn_50/linear）仅适用 ``slot.ffn_struct='standard'``。
+
+    bypass/GLU/dual 等非标准 FFN 结构禁剪枝——剪枝会静默破坏结构（如 bypass 的
+    残差路径被截断、GLU 的门控被丢弃）。返回 False → 该 slot 的 ffn_75/ffn_50/linear
+    被 ``is_candidate_valid_for_slot`` 过滤，候选自动收缩到 {identity, no_op}。
+
+    注：本函数只判 slot 侧的结构许可；候选侧的 ``requires_ffn_struct`` 约束由
+    ``is_candidate_valid_for_slot`` 联合判定。
+    """
+    return slot.ffn_struct == "standard"
+
+
+def is_candidate_valid_for_slot(
+    name: str,
+    slot: Slot,
+    catalog: dict[str, CatalogEntry] | None = None,
+) -> bool:
+    """candidate-slot 联合结构校验（SPEC v2 §5.2，E6 + E8 + 跨 kind 适用性）。
+
+    返回 False 表示该 candidate 不适用此 slot，应在枚举处被过滤（不进 BLD/score/
+    build_selected）。规则：
+      - passthrough（identity）：永远 valid（SPEC §3 铁律——保留父块不破坏结构）。
+      - 跨 kind 适用性：``slot.kind not in entry.kinds`` → False（attention 候选
+        不适用 ffn slot，反之亦然——catalog ``kind`` list 是 single source of truth）。
+      - E6：entry.requires_ffn_struct 非空 → ``slot.ffn_struct`` 必须在
+        ``entry.requires_ffn_struct`` 中（非 standard FFN 拒绝剪枝候选
+        ffn_75/ffn_50/linear，自动收缩到 {identity, no_op}）。
+      - E8：slot.mask_load_bearing=True 且 entry.mask_aware=False → 拒绝
+        （mask-bearing slot 选 mask-blind 候选会丢 mask 语义，只留 identity）。
+
+    本函数是 candidate-slot 结构校验的 single source of truth——下游
+    bld/score/build_selected 应在枚举 / 防御性关卡处统一调它。
+    fail loud：name 未在 catalog 注册 → raise（经 get_candidate）。
+    """
+    entry = get_candidate(name, catalog)
+    if entry.source == "passthrough":
+        return True  # identity 永远 valid（SPEC §3 铁律）
+    # 跨 kind 适用性（catalog 的 kinds × slot.kind）
+    if slot.kind not in entry.kinds:
+        return False
+    # E6：FFN 剪枝结构约束（catalog 的 requires_ffn_struct × slot.ffn_struct）
+    if entry.requires_ffn_struct:
+        # 进入此分支已保证 slot.kind == 'ffn'（entry.requires_ffn_struct 非空
+        # 意味 entry 适用 ffn，跨 kind 检查上面已过）
+        if slot.ffn_struct not in entry.requires_ffn_struct:
+            return False  # 非 standard FFN 拒绝剪枝（bypass/GLU/dual）
+    # E8：mask-bearing slot 拒绝 mask-blind candidate
+    if slot.mask_load_bearing and not entry.mask_aware:
+        return False
+    return True
+
+
 # ── 合成 calibration DataLoader ────────────────────────────────────────────────
 
 class _TensorDataset(Dataset):
@@ -511,6 +572,77 @@ def build_calib_loader(
     if device is not None:
         samples = [s.to(device) for s in samples]
     return DataLoader(_TensorDataset(samples), batch_size=batch_size, shuffle=False)
+
+
+def build_real_calib_loader(
+    loader_fn_str: str,
+    device: torch.device | None = None,
+) -> DataLoader:
+    """调外部 ``loader_fn_str`` (path::func) → 抽首个 batch 真实数据 → 包装为 DataLoader。
+
+    SPEC v2 §9.1 E14 修正：BLD teacher 信号必须来自真实数据 sample（非 ``torch.randn``
+    OOD——candidates 学 noise→teacher_on_noise 在真实数据上全错）。manifest.yaml 的
+    ``data_and_environment.data_loader_entry`` 经 agent 桥接为本函数入参（脚本不解析
+    manifest，E9）。
+
+    契约：``loader_fn_str`` 形如 ``"proj/train.py::build_dataloader"``，零参调用返回
+    re-iterable DataLoader。本函数取首个 batch 物化到 ``_TensorDataset``（便于
+    ``capture_parent_activations`` 重复 forward + 多 variant 共享同一份 teacher 信号）。
+
+    fail loud（Rule 12）：
+      - loader_fn 不可调用 / 未返回可迭代 → raise
+      - 空 DataLoader（无 batch）→ raise（禁静默回退 randn）
+      - 首个 batch 非 tensor → raise（puzzle 契约 slot 输入须 tensor）
+    """
+    fn = load_external_callable(loader_fn_str)
+    full_loader = fn()
+    if not hasattr(full_loader, "__iter__"):
+        raise TypeError(
+            f"{loader_fn_str!r} 未返回可迭代 DataLoader（E14 calib 数据契约）"
+        )
+    try:
+        first_batch = next(iter(full_loader))
+    except StopIteration as e:
+        raise RuntimeError(
+            f"{loader_fn_str!r} 返回空 DataLoader——无法抽真实 calib 数据（E14）。"
+            f"manifest.data_and_environment.data_loader_entry 必须指向非空数据集"
+        ) from e
+    inp = first_batch[0] if isinstance(first_batch, (list, tuple)) else first_batch
+    if not isinstance(inp, torch.Tensor):
+        raise TypeError(
+            f"{loader_fn_str!r} 首个 batch 非 tensor（{type(inp).__name__}）——"
+            f"E14 calib 契约要求 tensor 输入"
+        )
+    inp = inp.to(device) if device is not None else inp
+    # 拆为单样本再 stack 回原 batch（_TensorDataset 契约；保留原 batch 形状）
+    samples = [inp[i] for i in range(inp.shape[0])]
+    return DataLoader(
+        _TensorDataset(samples), batch_size=inp.shape[0], shuffle=False
+    )
+
+
+# ── 整模 latency 测量（DRY：measure_baseline + gate_report 复用）──────────────
+
+def measure_whole_model_latency(
+    model: nn.Module,
+    dummy_input: torch.Tensor,
+    device: torch.device,
+    latency_script_path: str = "",
+) -> float:
+    """整模 forward latency（默认 ``measure_module_latency`` PyTorch median ms；
+    ``latency_script_path`` 提供则包装外部 script）。
+
+    DRY：从 measure_baseline.py + gate_report.py 抽出（两处原本各持一份）。
+    """
+    if latency_script_path:
+        fn = load_external_callable(latency_script_path)
+        return float(fn(model, dummy_input))
+    from nas_agent.latency import measure_module_latency
+    return float(
+        measure_module_latency(
+            model, dummy_input, device, repetitions=100, warmup=30
+        )
+    )
 
 
 # ── 父激活捕获（BLD teacher 信号）─────────────────────────────────────────────

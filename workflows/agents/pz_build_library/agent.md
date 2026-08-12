@@ -180,12 +180,21 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
     --build_fn "{{ inputs.build_fn }}" \
     --build_cfg "{{ inputs.build_cfg }}" \
     --father_state "$ORCA_ARTIFACTS_DIR/father_state_dict.pt" \
+    --calib_loader_fn "<manifest.yaml 的 data_and_environment.data_loader_entry，"
+                       "agent 读 manifest 桥接；相对 project_root 或 path::func 绝对>" \
     --output_dir "$ORCA_ARTIFACTS_DIR" \
     --seed {{ inputs.seed }}
   ```
   其中 `REPO_ROOT` 解析方式同 pz_expand Step 2（pathlib 探 `$ORCA_AGENT_RESOURCES` 的 workflows 父）。
   设 `NPROC_PER_NODE` 实测值（`python3 -c 'import torch; print(torch.cuda.device_count())'`；
   CPU-only → 1）。
+
+  **E14 calib 数据桥接（必读）**：bld.py 的 `--calib_loader_fn` 必填——BLD teacher 信号
+  必须来自真实数据 sample（torch.randn OOD 会让 candidate 学 noise→teacher，真实数据上
+  全错）。你（agent）读 `$ORCA_ARTIFACTS_DIR/manifest.yaml` 的
+  `data_and_environment.data_loader_entry`，按相对 `{{ inputs.project_root }}` 或绝对
+  path::func 填入此 arg。manifest 缺此字段 → 进 Step 4 输出 `{"status":"failed"}`，
+  assessment 写明 `manifest.data_and_environment.data_loader_entry 缺——E14 calib 数据契约`。
 
 **生成契约（scripts 解析的前提，必须逐字满足）**：
 - **机器进度（双 feed，每 progress unit，rank 0；bld.py 预写脚本内部已实现）**：

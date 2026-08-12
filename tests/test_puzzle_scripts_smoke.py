@@ -110,6 +110,14 @@ _TINY_MODEL_PY = textwrap.dedent(
             logits = model(x)
             # proxy acc: mean max-softmax confidence
             return float(logits.softmax(-1).max(dim=-1).values.mean().item())
+
+
+    def build_calib_loader():
+        # 测试用 randn calib（合成模型无真实数据集）；生产路径走 manifest 桥接真实 loader（E14）
+        from torch.utils.data import DataLoader, TensorDataset
+        x = torch.randn(*DUMMY_INPUT["shape"])
+        ds = TensorDataset(x)
+        return DataLoader(ds, batch_size=x.shape[0])
     """
 )
 
@@ -194,6 +202,7 @@ def test_puzzle_full_chain_cpu(tmp_path: Path) -> None:
         "--flat_model", str(flat_model_path),
         *build_args,
         "--block_candidates", block_candidates,
+        "--calib_loader_fn", f"{model_path}::build_calib_loader",
         "--epochs", "1",
         "--output_dir", str(output_dir),
     ])
@@ -432,6 +441,7 @@ def test_score_runs_and_identity_passthrough_score_is_zero(tmp_path: Path) -> No
         "--block_candidates",
         json.dumps({"attention": ["identity", "fnet"],
                     "ffn": ["identity", "ffn_50"]}),
+        "--calib_loader_fn", f"{model_path}::build_calib_loader",
         "--epochs", "1",
         "--output_dir", str(output_dir),
     ])
