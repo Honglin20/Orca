@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-12] feat(puzzle-u2b): block-map/search-space evaluator + fixture suite + recall AC（`a308784`）
+
+Phase U2b（SPEC v2 §10/§16.6/§16.7/§17，闭环 E18）：建 U2a 产物的审查层。两个 point-to-file 只读 evaluator subagent——`block-map-evaluator`（审 slot path/shape/identity/return_arity/kind 确定性证据/mask-blind 候选，severity BLOCKER/MAJOR/MINOR）+ `search-space-evaluator`（审 schema 合规：字段/id+path 唯一/kind 合法/candidate 注册/factory 可解析/eval_kind sanity/无 axes 残留），职责正交，输出对齐 supernet-evaluator 协议。Fixture suite 12 case（11 seeded error + 1 clean baseline）+ 4 自包含 flat 变体 + 确定性生成器。Recall AC 测试两层：deterministic 完整性层（always runs，24 用例全过）+ LLM recall 层（env-gated，断言 block-map ≥0.90 / search-space ==1.0；driver 支持 anthropic+opencode，runtime 故障 skip 不 fail）。pz_expand Step 3.0 接触发点（measure_baseline 后、workflow-verifier 前，独立 fix-loop）。code-reviewer 复审 2B+5Maj+5Min 闭环（sentinel 剥首行/故障检测/异常覆盖/sys.path 隔离/补 case 12）。验收：tars 0/0 + 24 完整性测试过；recall 层本环境无 key+余额 0 skip，U4 复测。详见 [release note](docs/releases/2026-08-12-puzzle-u2b-evaluators.md)。
+
 ## [2026-08-12] feat(puzzle-u2a): pz_expand LLM 自适应重构 + target spike PASS + measure_baseline 4 道 smoke
 
 Phase U2a（SPEC v2 §6/§9/§3/§14，闭环 E5/E10/E13/E18/E22/E25）：pz_expand 从「跑确定性 expand_model.py（类名 regex）」改为「LLM 自适应产 flat+manifest+search_space + 跑 measure_baseline.py」。target spike PASS（LLM 读 model.py 自适应产 target flat，reparenting 避前缀，strict-load `pre_trained.pth` 零 missing，0 fix-loop——Claude 代 deepseek，U4 验真）。新增 `measure_baseline.py`（4 道 fidelity smoke：strict-load 双零 / forward-determinism / eval-stability / per-slot identity allclose + 测 acc/latency + trace slot I/O 回填 search_space）+ `search_space_io.py`（yaml↔Slot 映射 + candidates 校验）；Slot 加 forward_arity（E2）；agent.md 全文重写为 LLM 自适应 + manifest/search_space schema + kind 确定性证据；puzzle.yaml output_schema 加 search_space_path/manifest_path 必填（E10）。code-reviewer 闭环（2 Blocker 测试缺口补齐 + 8 Major，含 smoke 3/4 fail-loud 独立测试 + 空 candidates fail loud + trace 非 tensor fail loud + smoke 4 语义澄清 + input 双轨 NOTE）。验收：`tars validate` 0/0 + 44 测试全过。详见 [release note](docs/releases/2026-08-12-puzzle-u2a-pz-expand.md)。
