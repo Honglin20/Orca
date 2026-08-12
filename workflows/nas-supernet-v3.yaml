@@ -249,13 +249,44 @@ nodes:
       additionalProperties: false
     routes:
       - when: "ns3_run_search.output.selected_arch and ns3_run_search.output.pareto_size > 0"
-        to: ns3_retrain
+        to: ns3_retrain_script
       - to: ns3_report
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # Agent 7: ns3_retrain（有界轮询 + 无上限自愈——节点常驻到重训真正完成）
-  #   按 AGENTS.md scaffold 生成 retrain 脚本（单设备默认）→ fidelity 复查 → 执行。
-  #   读 ns3_run_search.output.selected_arch。status ∈ {executed, failed}。
+  # Agent 7: ns3_retrain_script（纯生成节点——读 AGENTS.md scaffold + supernet 可用性 → 生成 retrain 脚本）
+  #   决定 retrain_strategy（supernet viable=Yes 且 ckpt 存在→finetune-from-supernet；否则 train-from-scratch fallback）。
+  #   fidelity + workflow-verifier 闭环。产出 retrain.py(+finetune.py)+run_retrain.sh。不执行训练。
+  #   无 status 字段，无条件单出边到 ns3_retrain（靠脚本存在 self-gate）。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: ns3_retrain_script
+    kind: agent
+    agent: ns3_retrain_script
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [output_dir, retrain_strategy, strategy_reason, retrain_script_path, retrain_py_path, fidelity_passed, workflow_verifier_passed, error, generated_artifacts]
+      properties:
+        output_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR 绝对路径（与上游共享）"}
+        retrain_strategy: {type: string, enum: [finetune-from-supernet, train-from-scratch], description: "重训策略；supernet viable=Yes 且 ckpt 存在→finetune-from-supernet，否则 train-from-scratch fallback"}
+        strategy_reason: {type: string, description: "策略决定的简短证据（viability + ckpt 存在性）"}
+        retrain_script_path: {type: string, description: "run_retrain.sh 路径"}
+        retrain_py_path: {type: string, description: "retrain.py 路径（主入口）"}
+        fidelity_passed: {type: boolean, description: "fidelity audit loop all-pass → true"}
+        workflow_verifier_passed: {type: boolean, description: "workflow compliance loop all-pass → true"}
+        error: {type: string, description: "fail loud 时根因；成功→空串"}
+        generated_artifacts:
+          type: array
+          items: {type: string}
+          description: "相对 output_dir 的产物路径列表"
+      additionalProperties: false
+    routes:
+      - to: ns3_retrain
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 8: ns3_retrain（有界轮询 + 无上限自愈——节点常驻到重训真正完成）
+  #   执行 ns3_retrain_script 产出的 run_retrain.sh（单设备默认）。脚本缺失→failed（上游未产出）。
+  #   self-heal 仅补丁层（run_retrain.sh），训练逻辑 fail loud。status ∈ {executed, failed}。
   # ═══════════════════════════════════════════════════════════════════════════
   - name: ns3_retrain
     kind: agent
@@ -277,7 +308,7 @@ nodes:
           type: array
           items: {type: string}
           description: "本次 self-heal edit 过的文件相对路径"
-        fidelity_retriggered: {type: boolean, description: "true=首次生成后或 self-heal 改训练逻辑后跑过 project-fidelity-verifier"}
+        fidelity_retriggered: {type: boolean, description: "恒 false（fidelity 归上游 ns3_retrain_script，执行节点不重触）"}
       additionalProperties: false
     routes:
       - when: "ns3_retrain.output.status == 'executed'"
@@ -285,7 +316,7 @@ nodes:
       - to: ns3_report
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # Agent 8: ns3_report（唯一终端 reporter）
+  # Agent 9: ns3_report（唯一终端 reporter）
   #   读磁盘状态文件判终态（零跨节点 output 引用）→ 结构化报告 → $end。
   #   prompt 只引 {{ inputs.* }} + bash/read 读 $ORCA_ARTIFACTS_DIR 磁盘文件。
   #   status ∈ {success, failed}。

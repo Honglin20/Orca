@@ -25,10 +25,8 @@ echo "$N" > runs/retrain/.retrain_attempt
 
 # 清本 run 审计痕迹（续训**不**删 ckpt，只清 marker；progress.jsonl 每 attempt 清零；
 # .retrain_rc 也要清——resume 时 stale rc 残留会让 monitor 每 60s 误判进程退出、旁路 cheap 活性；
-# `.ns_retrain_generated.txt` 保留——生成产物跨 attempt 复用，不重新生成；
-# `.ns_retrain_fidelity.flag` **不清**——3b 首启 fidelity 在 launch 前已写，清掉会让成功路径
-# fidelity_retriggered 失真；flag 是覆盖写（`printf "true" >`），无 stale，语义 = "对当前脚本已跑过 fidelity"）。
-rm -f .ns_retrain_healed.txt .ns_retrain_assessment.txt .ns_retrain_ckpt_resolved.txt runs/retrain/progress.jsonl runs/retrain/.retrain_rc
+# `.ns_retrain_exec_healed.txt` 每 attempt 清——执行期补丁痕迹重新记）。
+rm -f .ns_retrain_exec_healed.txt .ns_retrain_assessment.txt .ns_retrain_ckpt_resolved.txt runs/retrain/progress.jsonl runs/retrain/.retrain_rc
 
 # detach：setsid 起新会话（wrapper 成进程组首领）——后续 kill -- -PID 能整组杀（含训练 python），
 # 防"只杀 wrapper、孤儿训练进程残留 → 下轮重复 detach"（铁律 6 盲区）。

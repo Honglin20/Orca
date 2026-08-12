@@ -27,6 +27,7 @@
 
 ## 遗留（nas-supernet，跨任务未决）
 
+- ✅ v3 retrain 拆分——ns3_retrain_script（纯生成）+ ns3_retrain（执行），策略定死二元（commit 待回填，见 CHANGELOG + release `2026-08-12-nas-supernet-v3-retrain-split.md`）。
 - [ ] 真机 E2E(in-session headless `latency_unit: us` + 用户 script → 4 图 label=us / compare 真测量 / `subnet_structure.md` / A6 fail-loud)——属 test-agent 范围。
 - ℹ️ v3 P0 已修（`0ca1b3b`）；Task 2 enum 已提交（`7b120ee`+`131b294`）；v2 P1/P1（`a57190b`）；S4a（`d768879`）；S4b SDD 三项已提交。详见各 release note + CHANGELOG。
 

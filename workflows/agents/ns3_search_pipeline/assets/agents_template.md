@@ -162,9 +162,14 @@ You can select multiple candidates (increase `-n`) and retrain each one independ
 
 ## Final Weight Acquisition
 
-After selecting one or more subnet architectures, generate a retrain/finetune script and launcher to obtain the final model weights. The approach depends on the evaluation paradigm used during search.
+After selecting one or more subnet architectures, generate a retrain script and launcher to obtain the final model weights. The approach is a deterministic binary decision driven by **supernet availability** — not by the search-time evaluation paradigm.
 
-Active evaluator route for this project: **{{EVALUATION_PARADIGM}}**
+Search-time evaluation paradigm for this project (informational only, does NOT drive the retrain strategy): **{{EVALUATION_PARADIGM}}**
+
+**Strategy decision:** read the **Supernet Training Viability** section of `supernet_summary.md` (`viable: Yes` / `viable: No`) and check whether the supernet checkpoint file exists (path = `supernet_ckpt_path` in `search_config.yaml`, default `runs/train/supernet_best.pth`).
+
+- **Branch (a) `finetune-from-supernet`** — when viability is `Yes` **AND** the supernet ckpt exists. Generate a finetune script that inherits supernet weights and incrementally fine-tunes the extracted subnet.
+- **Branch (b) `train-from-scratch`** — the fallback, when viability is `No` **OR** the supernet ckpt is absent. Generate a train-from-scratch script that re-initializes the subnet and trains with a full budget.
 
 **Reference code:**
 
@@ -215,41 +220,30 @@ def extract_subnet(
     return subnet
 ```
 
-For the `train_from_scratch` paradigm, skip the checkpoint loading and **re-initialize weights** after extraction, using the same initialization as the original project and the search evaluator's `train_from_scratch` path (see `evaluator.py` for the reset logic used during search).
+For branch (b) `train-from-scratch`, skip the checkpoint loading and **re-initialize weights** after extraction, using the same initialization as the original project and the search evaluator's `train_from_scratch` path (see `evaluator.py` for the reset logic used during search).
 
 Refer to `evaluator.py` for the concrete subnet extraction and initialization logic used during search, and adapt it for the retrain script.
 
-### Paradigm: `validate`
+### Branch (a): `finetune-from-supernet` (supernet available)
 
-**Context:** The supernet was trained with sandwich sampling and weight-sharing quality is reliable. During search, subnets were evaluated by directly running the validation loop (no subnet extraction or training was done).
+**Context:** Supernet training was viable and a trained supernet checkpoint exists. During search, subnets were evaluated by inheriting supernet weights (either validating directly or short-finetuning) to rank architectures.
 
-**Goal:** Generate a **finetune script** that inherits supernet weights and finetunes the extracted subnet to obtain the final model.
+**Goal:** Generate a **finetune script** that inherits supernet weights and incrementally fine-tunes the extracted subnet to obtain the final model.
 
 **Key points:**
 - Load the supernet checkpoint and extract the subnet with inherited weights
-- Since search only validated (no per-candidate training), finetuning now adapts the inherited weights to the specific subnet topology
+- Finetuning adapts the inherited weights to the specific subnet topology
 - Use the data pipeline, loss, optimizer, scheduler, and validation metric from `train_supernet.py` and the original project
-- Training budget: reference the original project's training configuration; use a moderate number of epochs (not a full from-scratch budget, but enough to adapt the shared weights)
+- Training budget: reference the original project's training configuration; use a moderate number of epochs (enough to adapt the shared weights, not a full from-scratch budget)
 - Use full evaluation (entire validation set, no subsampling)
-
-### Paradigm: `finetune`
-
-**Context:** The supernet was trained but direct validation was unreliable. During search, each candidate was short-finetuned with a small training budget to rank architectures.
-
-**Goal:** Generate a **finetune script** that inherits supernet weights and finetunes with a **larger training budget** than what was used during search.
-
-**Key points:**
-- Load the supernet checkpoint and extract the subnet with inherited weights
-- Training budget: reference the original project's training configuration and use a substantially larger budget than `evaluator_cfg.epochs` (search used a short-train budget for ranking)
 - **Alternative starting point**: besides inheriting weights from the supernet, the finetune script can also load a per-candidate checkpoint saved during search (configured via `evaluator_cfg.save_dir`). Checkpoint directory layout: `{save_dir}/{arch_id}/best.pth`, where `arch_id` is the first 8 hex digits of the MD5 hash of the serialized architecture
-- Use the same data pipeline, loss, optimizer, scheduler, and metric conventions from `train_supernet.py` / original project
-- Adjust the LR scheduler configuration to match the new (larger) training horizon
+- Adjust the LR scheduler configuration to match the training horizon
 
-### Paradigm: `train_from_scratch`
+### Branch (b): `train-from-scratch` (supernet not available — fallback)
 
-**Context:** No trained supernet checkpoint was used during search. Each candidate was trained from scratch with a small budget during search to rank architectures.
+**Context:** Supernet training was not viable, or no trained supernet checkpoint is available. During search, each candidate was trained from scratch with a small budget to rank architectures.
 
-**Goal:** Generate a **train-from-scratch script** that re-initializes the subnet weights and trains with a **larger training budget** than what was used during search.
+**Goal:** Generate a **train-from-scratch script** that re-initializes the subnet weights and trains with a **full training budget**.
 
 **Key points:**
 - Extract the subnet **without** loading a supernet checkpoint
@@ -266,9 +260,9 @@ The generated retrain/finetune script should:
 2. **Default to single-device execution**: no DDP/torchrun unless explicitly requested
 3. **Use `nas_agent.train` helpers**: `resolve_device`, `autocast`, `grad_scaler`, `empty_cache` for device-agnostic execution
 4. **NPU compatibility**: see the NPU Compatibility section at the end of this document
-5. **Expose CLI arguments**: `--arch_file`, `--supernet_ckpt` (if applicable), `--data_dir`, `--output_dir`, `--device`, `--epochs`, `--batch_size`, `--num_workers`, `--amp`, `--resume`
-6. **Checkpoint saving**: save `subnet_best.pth` on validation improvement and `subnet_latest.pth` regularly
-7. **Include a shell launcher** (`run_retrain_pareto.sh`)
+5. **Expose CLI arguments**: `--supernet_ckpt` (branch (a) only), `--data_dir`, `--output_dir`, `--device`, `--epochs`, `--batch_size`, `--num_workers`, `--amp`, `--resume`, `--max_grad_norm`, `--seed`. The selected architecture is injected as a Jinja-rendered literal (`SELECTED_ARCH = {{ ns3_run_search.output.selected_arch }}`), not a CLI argument.
+6. **Checkpoint saving**: save `retrain_best.pth` on validation improvement and `retrain_latest.pth` regularly; the final best ckpt is always at `<output_dir>/retrain_best.pth` (default `runs/retrain/retrain_best.pth`, the cross-node contract path consumed by the downstream executor)
+7. **Include a shell launcher** (`run_retrain.sh`)
 
 ### Launcher Skeleton
 
@@ -277,19 +271,20 @@ The generated retrain/finetune script should:
 set -euo pipefail
 
 # ── Editable variables ──────────────────────────────────────────────
-ARCH_FILE="runs/retrain/selected/arch_42.json"
-SUPERNET_CKPT="runs/train/supernet_best.pth"       # remove if train_from_scratch
+SUPERNET_CKPT="runs/train/supernet_best.pth"       # branch (a) finetune-from-supernet only; remove for branch (b) train-from-scratch
 DATA_DIR="/path/to/dataset"
-OUTPUT_DIR="runs/retrain/selected"
+OUTPUT_DIR="runs/retrain"
 DEVICE="auto"
-EPOCHS=100
+EPOCHS=100                  # read from the original project training budget (do not guess)
 BATCH_SIZE=64
-NUM_WORKERS=4
-AMP=true
+NUM_WORKERS=0               # DataLoader Launch Hygiene; do not change default
+AMP=false                   # single-device default
 
 # ── Retrain the selected subnet ─────────────────────────────────────
-python retrain_pareto.py \
-    --arch_file "$ARCH_FILE" \
+AMP_FLAG=""
+[ "$AMP" = true ] && AMP_FLAG="--amp"
+
+python3 retrain.py \
     --supernet_ckpt "$SUPERNET_CKPT" \
     --data_dir "$DATA_DIR" \
     --output_dir "$OUTPUT_DIR" \
@@ -297,20 +292,20 @@ python retrain_pareto.py \
     --epochs "$EPOCHS" \
     --batch_size "$BATCH_SIZE" \
     --num_workers "$NUM_WORKERS" \
-    $([ "$AMP" = true ] && echo "--amp")
+    $AMP_FLAG
 ```
 
 ### Retrain Script Validation
 
 This stage happens after search has completed and the user has selected one or more architectures, so validation should exercise the generated retrain/finetune route against the selected architecture instead of stopping at static checks.
 
-- `python -m py_compile retrain_pareto.py`
-- `bash -n run_retrain_pareto.sh`
-- Load `ARCH_FILE`, construct the generated `ArchConfig`, instantiate `SearchSpace` and `SuperNet`, and verify subnet extraction follows the same route as `evaluator.py`
+- `python -m py_compile retrain.py` (+ `finetune.py` if generated)
+- `bash -n run_retrain.sh`
+- Construct the generated `ArchConfig` from the rendered selected architecture, instantiate `SearchSpace` and `SuperNet`, and verify subnet extraction follows the same route as `evaluator.py`
 - Verify the script imports only sibling generated modules, standard library modules, installed third-party packages, and `nas_agent`; it must not require the original project to be importable at runtime
 - **Device placement consistency:** review the generated `.py` file for device placement consistency before running any smoke test. Verify that all tensors participating in the same operation reside on the same device. Common violations include: constructor `__init__` performing cross-tensor computation before `.to(device)` is called, auxiliary tensors created without matching the model's device, and input/target tensors not moved to the model's device before use.
 - Run a single-device smoke test using the selected architecture and the real retrain/finetune code path. Prefer a tiny real-data run when the dataset is available, such as one epoch with one to two batches or an equivalent `--max_*_batches` debug setting. If the real dataset is unavailable, use synthetic inputs matching the generated validation shapes to exercise subnet extraction, forward, loss, optimizer step, validation metric computation, and checkpoint writing.
-- If the user explicitly asks for an actual short retrain/finetune run, execute the launcher with a reduced budget and verify it writes the expected `subnet_latest.pth` and, when validation is configured, `subnet_best.pth`. Do not run a full production retraining schedule unless the user explicitly requests it.
+- If the user explicitly asks for an actual short retrain/finetune run, execute the launcher with a reduced budget and verify it writes the expected `retrain_latest.pth` and, when validation is configured, `retrain_best.pth`. Do not run a full production retraining schedule unless the user explicitly requests it.
 
 ---
 

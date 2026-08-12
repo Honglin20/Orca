@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-12] feat(nas-supernet-v3): retrain 拆分——ns3_retrain_script（纯生成）+ ns3_retrain（执行）（commit 待回填）
+
+ns3_retrain（v3）混了生成 + 执行两个正交职责，生成期校验弱于 ns3_train_script（无 workflow.md/checklist/workflow-verifier 闭环/fidelity 循环/持久化 self-check）。拆成纯生成节点 **ns3_retrain_script**（镜像 train_script 全套校验：fidelity + workflow-verifier 双闭环 all-pass + 34 项 checklist + check_retrain_script.sh/check_launcher.sh）+ 瘦身 **ns3_retrain**（只执行/监控/补丁自愈）。策略定死二元 `retrain_strategy` = f(supernet viable=Yes 且 ckpt 存在)→finetune-from-supernet / 否则 train-from-scratch，**不绑 evaluation_paradigm**（纯确定性判定）。执行期 self-heal 收窄到补丁层（run_retrain.sh），训练逻辑 fail loud 回生成节点保护 fidelity 闭环。agents_template.md Final Weight Acquisition 三 paradigm→两 branch + Script Requirements/Launcher/Validation 段对齐新契约（修 code-reviewer 抓的 ckpt 名/output dir/arch_file silent-break 漂移）。yaml 加 ns3_retrain_script 节点（无 status/无条件单出边）+ 路由。emit_result.py/launch.sh marker 适配 + 删 check_retrain.sh。**仅改 v3，v1/v2 零改动**（code-reviewer 核验）。验收：tars validate 0/0 + pytest 687 passed（含 test_check_retrain_script 18 含 2 DDP/sync_random_seed 负例）+ code-reviewer 1🟡+4🟢 全修。详见 [release note](docs/releases/2026-08-12-nas-supernet-v3-retrain-split.md)。
+
 ## [2026-08-12] feat(puzzle-u2b): block-map/search-space evaluator + fixture suite + recall AC（`a308784`）
 
 Phase U2b（SPEC v2 §10/§16.6/§16.7/§17，闭环 E18）：建 U2a 产物的审查层。两个 point-to-file 只读 evaluator subagent——`block-map-evaluator`（审 slot path/shape/identity/return_arity/kind 确定性证据/mask-blind 候选，severity BLOCKER/MAJOR/MINOR）+ `search-space-evaluator`（审 schema 合规：字段/id+path 唯一/kind 合法/candidate 注册/factory 可解析/eval_kind sanity/无 axes 残留），职责正交，输出对齐 supernet-evaluator 协议。Fixture suite 12 case（11 seeded error + 1 clean baseline）+ 4 自包含 flat 变体 + 确定性生成器。Recall AC 测试两层：deterministic 完整性层（always runs，24 用例全过）+ LLM recall 层（env-gated，断言 block-map ≥0.90 / search-space ==1.0；driver 支持 anthropic+opencode，runtime 故障 skip 不 fail）。pz_expand Step 3.0 接触发点（measure_baseline 后、workflow-verifier 前，独立 fix-loop）。code-reviewer 复审 2B+5Maj+5Min 闭环（sentinel 剥首行/故障检测/异常覆盖/sys.path 隔离/补 case 12）。验收：tars 0/0 + 24 完整性测试过；recall 层本环境无 key+余额 0 skip，U4 复测。详见 [release note](docs/releases/2026-08-12-puzzle-u2b-evaluators.md)。
