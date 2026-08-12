@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-12] feat(puzzle-u2a): pz_expand LLM 自适应重构 + target spike PASS + measure_baseline 4 道 smoke
+
+Phase U2a（SPEC v2 §6/§9/§3/§14，闭环 E5/E10/E13/E18/E22/E25）：pz_expand 从「跑确定性 expand_model.py（类名 regex）」改为「LLM 自适应产 flat+manifest+search_space + 跑 measure_baseline.py」。target spike PASS（LLM 读 model.py 自适应产 target flat，reparenting 避前缀，strict-load `pre_trained.pth` 零 missing，0 fix-loop——Claude 代 deepseek，U4 验真）。新增 `measure_baseline.py`（4 道 fidelity smoke：strict-load 双零 / forward-determinism / eval-stability / per-slot identity allclose + 测 acc/latency + trace slot I/O 回填 search_space）+ `search_space_io.py`（yaml↔Slot 映射 + candidates 校验）；Slot 加 forward_arity（E2）；agent.md 全文重写为 LLM 自适应 + manifest/search_space schema + kind 确定性证据；puzzle.yaml output_schema 加 search_space_path/manifest_path 必填（E10）。code-reviewer 闭环（2 Blocker 测试缺口补齐 + 8 Major，含 smoke 3/4 fail-loud 独立测试 + 空 candidates fail loud + trace 非 tensor fail loud + smoke 4 语义澄清 + input 双轨 NOTE）。验收：`tars validate` 0/0 + 44 测试全过。详见 [release note](docs/releases/2026-08-12-puzzle-u2a-pz-expand.md)。
+
 ## [2026-08-12] feat(puzzle-u1): 通用契约层迁移——Slot kind 化 + candidate catalog + dispatch 迁移（`50c79c4`）
 
 Phase U1（SPEC v2 §4/§5/§15/§17，闭环 E1/E3/E4/E6/E7/E8/E15/E23）：Slot dataclass `slot_type`→`kind`（开放标签）+ 5 新字段；新增 `candidate_catalog.yaml` + `puzzle_blocks.py`（公开 make_* 工厂库）取代硬编码 registry；`load_catalog`/`functools.partial`/`_wrap` 统一 factory(slot)（E4）；`make_ffn` 修正 E7（intermediate=original_intermediate×ratio）+ E23（activation required）；bld/score/latency/build/mip/expand 全 dispatch 迁移，jsonl `"slot"`→`"kind"`，MIP 算法零改动；依赖环切断（puzzle_blocks 零运行时反向依赖）。code-reviewer 两轮闭环（实现 + 测试覆盖），新增 `tests/test_puzzle_catalog.py`（25 用例，E7 ratio 数学/E23 fail-loud/load_catalog 全分支）。验收：`tars validate` 0/0 + 44 测试全过 + grep slot_type 零业务残留。详见 [release note](docs/releases/2026-08-12-puzzle-u1-contract-migration.md)。

@@ -55,6 +55,8 @@ class Slot:
     head_dim: int
     source_class: str         # 原块类名（溯源 + 结构验证用）
     parent_module_path: str   # ``model.get_submodule(path)`` 可定位
+    # E2：输入 arity（single/multi）——记录字段，evaluator 审 mask_load_bearing 一致性
+    forward_arity: str = "single"
     # E15：输出 arity——multi-return slot 拒绝 single-output 候选
     return_arity: str = "single"
     # E7：FFN 原中间维（ratio 基准，非 in_dim）；非 ffn slot 为 None

@@ -12,12 +12,13 @@
 
 - **Phase U0**：tag `puzzle-v1-pre-universal` 保护 + 新分支 `puzzle-universal`。
 - **Phase U1（契约层迁移，`50c79c4`）**：Slot `slot_type`→`kind`（开放标签，E3）+ 5 新字段（return_arity/original_intermediate/activation/ffn_struct/mask_load_bearing）；新增 `candidate_catalog.yaml` + `puzzle_blocks.py`（公开 make_* 工厂库）取代硬编码 registry；`load_catalog`/`functools.partial`/`_wrap` 统一 factory(slot)（E4）；`make_ffn` 修正 E7（intermediate=original_intermediate×ratio）+ E23；bld/score/latency/build/mip/expand 全 dispatch 迁移，jsonl `"slot"`→`"kind"`，MIP 算法零改动；D4（conv/moe/custom 仅 identity）+ E1（identity 必入每 slot）。验收：`tars validate` 0/0 + 44 测试全过。
+- **Phase U2a（pz_expand 重构主体 + target spike）**：target spike PASS（LLM 自适应产 target flat，strict-load 零 missing，0 fix-loop——Claude 代 deepseek，U4 验真）；新增 `measure_baseline.py`（4 道 fidelity smoke：strict-load/forward-determinism/eval-stability/per-slot identity allclose + 测 acc/latency + trace slot I/O 回填）；新增 `search_space_io.py`（yaml↔Slot 映射 + candidates 校验）；Slot 加 forward_arity（E2）；pz_expand/agent.md 全文重写为 LLM 自适应（Step 0-3 + manifest/search_space schema + kind 确定性证据）；puzzle.yaml output_schema 加 search_space_path/manifest_path 必填（E10）；11 新测试（4 smoke fail-loud 全覆盖）。验收：tars 0/0 + 44 测试全过。详见 release note。
 
 ### ⏳ 未完成（后续 Phase）
 
-- [ ] **Phase U2**：pz_expand 重构——LLM 判断（flat/manifest/search_space 生成 + kind 识别带确定性证据，删 regex）+ `measure_baseline.py` 拆分 + 4 道 smoke（strict-load/forward-determinism/eval-stability/per-slot identity allclose）+ block-map/search-space evaluator（`subagents/puzzle/`）+ manifest.yaml schema + output_schema 扩 required（search_space_path/manifest_path，E10）+ evaluator fixture suite（E18）。
-- [ ] **Phase U3**：下游迁移——bld calib 改真实数据（E14）；is_valid_ffn_prune（E6）+ mask_load_bearing is_valid（E8）；gkd argparse 5 args 改 manifest-discovered；identity allclose 支持。
-- [ ] **Phase U4**：两项目 E2E 重跑（mnist_trf / target），target 不再靠手写 adapter。
+- [ ] **Phase U2b**：block-map-evaluator + search-space-evaluator（`subagents/puzzle/`）+ evaluator fixture suite（E18，§16.6/16.7 recall AC）。
+- [ ] **Phase U3**：下游迁移——bld calib 改真实数据（E14）；is_valid_ffn_prune（E6）+ mask_load_bearing is_valid（E8）；gkd/score/build argparse 5 args 改 manifest-discovered；identity allclose 跨模型验证（§16.4 完整 AC）；measure_latency DRY 提到 puzzle_common；清理 expand_model.py（v1 路径退役）+ puzzle.yaml inputs 退役 build_fn/eval_fn/pretrained_ckpt。
+- [ ] **Phase U4**：两项目 E2E 重跑（mnist_trf / target），target 不再靠手写 adapter；deepseek 专项 spike 复核。
 - [ ] **Phase U5**：code-reviewer 洁净审查闭环。
 
 **必读**：SPEC v2 `docs/specs/puzzle-universal-design-draft.md`（§4 search_space schema / §5 catalog / §6 kind 识别 / §9 pz_expand 重构 / §15 迁移表）；v1 设计 `docs/specs/puzzle-design-draft.md`；`workflows/agents/_puzzle_scripts/`（puzzle_common.py Slot + load_catalog / puzzle_blocks.py / candidate_catalog.yaml）。

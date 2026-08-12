@@ -21,11 +21,11 @@ inputs:
     required: true
   pretrained_ckpt:
     type: string
-    description: "[ask] 预训练父模型权重 .pt 路径(state_dict,相对 project_root 或绝对)。Puzzle 的 father/teacher/baseline 必须是预训练模型——pz_expand load_state_dict 此文件并保存 father_state_dict.pt 供全链(bld teacher / score 冻结模型 / gkd teacher / gate baseline)复用同一份权重。无预训练模型时 Puzzle 无的放矢(baseline=chance),必须用户给"
+    description: "[ask] 预训练父模型权重 .pt 路径(state_dict,相对 project_root 或绝对)。Puzzle 的 father/teacher/baseline 必须是预训练模型——pz_expand load_state_dict 此文件并保存 father_state_dict.pt 供全链(bld teacher / score 冻结模型 / gkd teacher / gate baseline)复用同一份权重。无预训练模型时 Puzzle 无的放矢(baseline=chance),必须用户给。过渡期注：pz_expand agent 已改为从源码发现此路径写进 manifest.yaml 并下传 measure_baseline；本 input 留作 v1 expand_model.py 路径 + 校验锚，下游迁移完成后退役"
     required: true
   build_fn:
     type: string
-    description: "[ask] model_path 内实例化模型的函数名(如 build_model),零参或接 build_cfg。pz_expand 调此函数得父模型用于 flatten / 基线测量 / BLD teacher。必须用户给(或与 model.py 的 build_model 默认契约一致)"
+    description: "[ask] model_path 内实例化模型的函数名(如 build_model),零参或接 build_cfg。pz_expand 调此函数得父模型用于 flatten / 基线测量 / BLD teacher。必须用户给(或与 model.py 的 build_model 默认契约一致)。过渡期注：pz_expand agent 已改为从源码发现 build_entry 写进 manifest.yaml；本 input 留作 v1 路径 + 下游节点消费，迁移完成后退役"
     required: false
     default: "build_model"
   build_cfg:
@@ -35,7 +35,7 @@ inputs:
     default: ""
   eval_fn:
     type: string
-    description: "[ask] project_root 内评估函数名(如 evaluate / eval_model),返回 top-1 acc 或 loss。pz_expand 测基线 acc、pz_report 测最终 acc 都调它。InfoNCE/分类/回归皆可,方向由 manifest 判。必须用户给(精度 AC 的度量源)"
+    description: "[ask] project_root 内评估函数名(如 evaluate / eval_model),返回 top-1 acc 或 loss。pz_expand 测基线 acc、pz_report 测最终 acc 都调它。InfoNCE/分类/回归皆可,方向由 manifest 判。必须用户给(精度 AC 的度量源)。过渡期注：pz_expand agent 已改为从源码发现 evaluation_entry 写进 manifest.yaml；本 input 留作下游 pz_report/gate 消费，迁移完成后退役"
     required: true
   eval_kind:
     type: string
@@ -101,24 +101,26 @@ nodes:
     model: "deepseek/deepseek-v4-flash"
     output_schema:
       type: object
-      required: [output_dir, model_type, model_type_supported, flat_model_path, block_map_path, baseline_metrics_path, baseline_acc, baseline_latency, latency_unit, fidelity_passed, workflow_verifier_passed, error, generated_artifacts]
+      required: [output_dir, model_type, model_type_supported, flat_model_path, block_map_path, search_space_path, manifest_path, baseline_metrics_path, baseline_acc, baseline_latency, latency_unit, fidelity_passed, workflow_verifier_passed, error, generated_artifacts]
       properties:
         output_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR 绝对路径"}
         model_type: {type: string, description: "标签(isotropic_transformer / hierarchical_transformer / cross_fusion_transformer / cnn / 'No supported match')"}
         model_type_supported: {type: boolean, description: "true=存在可替换 attention/ffn sub-block;false=不可替换 → 路由 terminate_unsupported"}
-        flat_model_path: {type: string, description: "<base_name>_flat.py 路径;不支持时空串"}
-        block_map_path: {type: string, description: "block_map.json 路径(逐层 slot 清单 + I/O shape)"}
-        baseline_metrics_path: {type: string, description: "baseline_metrics.json 路径(acc + latency)"}
+        flat_model_path: {type: string, description: "<base_name>_flat.py 路径(LLM 自适应产);不支持时空串"}
+        block_map_path: {type: string, description: "block_map.json 路径(逐层 slot 清单 + I/O shape;下游 bld/score/mip 既有格式)"}
+        search_space_path: {type: string, description: "search_space.yaml 路径(LLM 产 slots+kind+证据+candidates;measure_baseline trace 回填 in/out_dim);不支持时空串"}
+        manifest_path: {type: string, description: "manifest.yaml 路径(LLM 产 5 段项目事实;下游 agent 读→桥接 CLI args);不支持时空串"}
+        baseline_metrics_path: {type: string, description: "baseline_metrics.json 路径(acc + latency + smokes_passed)"}
         baseline_acc: {type: number, description: "父模型基线 acc(eval_fn 测;方向由 eval_kind 决定);不可替换时为 0"}
         baseline_latency: {type: number, description: "父模型基线 latency(单位 = latency_unit);不可替换时为 0"}
         latency_unit: {type: string, enum: [ms, us, s], description: "latency 单位(透传自 inputs.latency_unit)"}
-        fidelity_passed: {type: boolean, description: "本节点无 fidelity-verifier 调用 → 恒 true(vacuous)"}
+        fidelity_passed: {type: boolean, description: "本节点无 fidelity-verifier 调用 → 恒 true(vacuous);4 道 smoke 由 measure_baseline 跑(smokes_passed 字段审计)"}
         workflow_verifier_passed: {type: boolean, description: "workflow-verifier all-pass → true;unsupported stop → false"}
         error: {type: string, description: "fail loud 时根因;成功→空串"}
         generated_artifacts:
           type: array
           items: {type: string}
-          description: "相对 output_dir 的产物路径列表(至少 project_manifest.md / <base>_flat.py / block_map.json / baseline_metrics.json)"
+          description: "相对 output_dir 的产物路径列表(至少 manifest.yaml / <base>_flat.py / search_space.yaml / block_map.json / baseline_metrics.json)"
       additionalProperties: false
     routes:
       - when: "pz_expand.output.model_type_supported != false"
