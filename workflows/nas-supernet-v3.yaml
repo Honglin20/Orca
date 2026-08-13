@@ -1,5 +1,5 @@
 name: nas-supernet-v3
-description: "End-to-end NAS supernet pipeline: flatten a user PyTorch model, expand it into a supernet, generate training and search scripts, run training and search with self-healing, select the best subnet, retrain it, and report a single summary."
+description: "超网 NAS 全链流水线（v3）：把用户的 PyTorch 模型展开成超网，从零训练后搜索选定最优子网，再重训出最终模型。无需预训练权重，适合有训练资源、从零全局搜架构的场景。"
 
 entry: ns3_flatten
 

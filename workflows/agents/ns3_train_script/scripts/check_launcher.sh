@@ -39,4 +39,13 @@ grep -q 'python3.*train_supernet.py' "$LAUNCHER" || {
   exit 1
 }
 
+# KD warmup variables (when KD enabled): nonzero defaults. Only checked when the
+# variable is actually present (retrain launchers may legitimately omit KD vars).
+for v in KD_WARMUP_START KD_WARMUP_LENGTH; do
+  if grep -qE "^[[:space:]]*${v}=0[[:space:]]*(#.*)?$" "$LAUNCHER"; then
+    echo "FAIL: $v=0 in launcher (delayed start + nonzero ramp required per §8 KD Weight Warmup)"
+    exit 1
+  fi
+done
+
 echo "PASS: check_launcher ($LAUNCHER)"

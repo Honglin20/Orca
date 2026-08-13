@@ -61,6 +61,28 @@ elif ! grep -q 'json\.dumps' train_supernet.py 2>/dev/null; then
 fi
 [ "$FAIL" -eq 0 ] && echo "[check_train_script] progress.jsonl write contract OK"
 
+# ── 6. KD warmup defaults nonzero (when KD enabled) ──────────────────────
+# KD enabled ⟺ train_supernet.py exposes --kd_warmup_start / --kd_warmup_length.
+# Both argparse defaults must not be literal 0 (delayed start + nonzero ramp, §8 KD Weight Warmup).
+# "≈ 1/4 of budget" is a semantic judgment → workflow-verifier checklist; this gate only catches the
+# deterministic bad default (0).
+if grep -q 'kd_warmup_start\|kd_warmup_length' train_supernet.py 2>/dev/null; then
+  python3 -c "
+import re, sys
+src = open('train_supernet.py').read()
+bad = []
+for arg in ('kd_warmup_start', 'kd_warmup_length'):
+    m = re.search(rf\"add_argument\(\s*['\\\"]--{arg}['\\\"].*?default\s*=\s*([^,\n\)]+)\", src, re.DOTALL)
+    if m and re.fullmatch(r'0(\.0)?', m.group(1).strip()):
+        bad.append('--' + arg)
+if bad:
+    print('FAIL: KD warmup argparse default is literal 0 for: ' + ', '.join(bad))
+    sys.exit(1)
+print('KD_WARMUP_DEFAULTS_OK')
+" || FAIL=1
+  [ "$FAIL" -eq 0 ] && echo "[check_train_script] KD warmup defaults nonzero OK"
+fi
+
 # ── Result ──────────────────────────────────────────────────────────────
 if [ "$FAIL" -ne 0 ]; then
   echo "FAIL: check_train_script failed"

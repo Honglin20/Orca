@@ -36,8 +36,8 @@ Use a stable base CLI for NAS training runtime:
 
 KD arguments (See Distillation for details):
 - `--kd_weight`: KD loss coefficient; default `1.0`
-- `--kd_warmup_start`: Training progress value at which KD begins, measured in the same unit as `--eval_interval`; default `0`
-- `--kd_warmup_length`: Duration over which the KD weight ramps from `0` to `--kd_weight`, in the same unit; must default to a nonzero value (see KD Weight Warmup for how to compute it).
+- `--kd_warmup_start`: Training progress value at which KD begins, measured in the same unit as `--eval_interval`; default ≈ 1/4 of the training budget (see KD Weight Warmup), never `0`
+- `--kd_warmup_length`: Duration over which the KD weight ramps from `0` to `--kd_weight`, in the same unit; default ≈ 1/4 of the training budget (see KD Weight Warmup), never `0`
 
 Expose project-derived training and runtime arguments from the user's project, such as dataset/config paths, training budget, batch size, worker count, optimizer and scheduler hyperparameters, augmentation flags, validation controls, and task options. Preserve the user's defaults where they exist, but allow CLI overrides for remote runs.
 
@@ -299,7 +299,12 @@ Use `KDWeightScheduler` from `nas_agent.train.distillation` to schedule the effe
 - `--kd_warmup_start`: when KD begins (e.g. epoch or step).
 - `--kd_warmup_length`: duration to linearly ramp from `0` to `--kd_weight`, starting at `--kd_warmup_start`. The ramp spans `[start, start + warmup_length]`.
 
-Default `--kd_warmup_length` to a value appropriate for the training budget. For example, roughly 5% of the budget, a few epochs, or a comparably small global_step count for step-based training. Never default it to `0`. Early in training the teacher is still undertrained, so applying KD at that time hurts performance instead of helping.
+Default both `--kd_warmup_start` and `--kd_warmup_length` to values appropriate for the training budget. As empirical starting points, set each to roughly **1/4 of the training budget** (e.g. `epochs // 4` for epoch-based, or `max_steps // 4` for step-based):
+
+- `--kd_warmup_start` ≈ 1/4 of the budget delays KD until the shared weights — and therefore the max-subnet teacher — have first converged under the supervised loss for a substantial fraction of training.
+- `--kd_warmup_length` ≈ 1/4 of the budget gives a long, gentle ramp from `0` to `--kd_weight` across `[start, start + length]`, so the still-imperfect teacher's signal does not abruptly dominate once it kicks in.
+
+Never default either to `0`. Starting KD at step 0 injects noisy gradients from an untrained teacher that destabilize convergence, and a zero-length ramp jumps KD to full weight instantaneously.
 
 ```python
 from nas_agent.train.distillation import KDWeightScheduler

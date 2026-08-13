@@ -133,6 +133,27 @@ Following it, produce `$ORCA_ARTIFACTS_DIR/supernet.py` from `{{ ns3_flatten.out
 
 **Use task context to guide pre-built block selection**: first read `{{ ns3_flatten.output.manifest_path }}` (`project_manifest.md`) for the task type / workload modality / input data characteristics (sequence length, resolution) / deployment constraints / user preferences, then pick the pre-built block from the metadata shortlist according to the `general_specs.md` filtering dimensions (Workload Modality / Input Data Profile / Hard Compatibility / Efficiency-Capacity / User Preferences). Do not make a generic choice based only on the block description.
 
+### Record baseline marker (`.baseline.json`) — required for the search-space contract gate
+
+After `supernet.py` is produced (both fresh generation and `SKIP_GENERATION=true` resume), record the prepared model's **actual** structural values that the search space must sandwich. These come from `{{ ns3_flatten.output.prepared_model }}` (read its source; do **not** copy the supernet's own candidate values):
+
+- **depth**: the real layer count. Isotropic → one int; staged (cnn / hierarchical) → one per stage, keyed by `SearchSpace.stage_names`.
+- **internal width**: the real value of each searchable internal-width field (e.g. `num_heads`, `ffn_dim` for transformers; `expand_channels` / `mid_channels` for CNN) — only the fields you actually made searchable.
+
+Write `$ORCA_ARTIFACTS_DIR/.baseline.json`:
+
+```json
+// isotropic
+{"depth": 4, "internal_dims": {"ffn_dim": 1024, "num_heads": 8}}
+// staged
+{"stage_depths": {"stage1": 2, "stage2": 3},
+ "stage_internal_dims": {"stage1": {"ffn_dim": 256}, "stage2": {"ffn_dim": 512}}}
+```
+
+Stage keys must match `SearchSpace.stage_names`. If no internal-width field is searchable, `internal_dims` / `stage_internal_dims` may be `{}`.
+
+The `check_expand.sh` Validation gate now runs `check_search_space.py`, which reads this marker + `supernet.py` and fail-louds if any dimension is not a proper sandwich (baseline present + some candidate above + some candidate below). If it fails, fix the candidate ranges in `supernet.py` (or correct a wrong baseline) and re-run Validation — do not bypass.
+
 After the workflow completes (or go straight in when SKIP_GENERATION=true), enter the evaluator verification loop:
 
 0. **Write the specs_dir marker:**
