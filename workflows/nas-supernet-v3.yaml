@@ -53,7 +53,7 @@ nodes:
   # ═══════════════════════════════════════════════════════════════════════════
   # Agent 1: ns3_flatten（entry）
   #   把用户 PyTorch 模型 flatten + 施 mandatory supernet readiness 规则。
-  #   从 v1 ns_expand_supernet Step 0-3 拆出。产 prepared_model（flat/optimized）。
+  #   产 prepared_model（flat/optimized）。
   #   flatten_passed=false → 路由 ns3_report（fail loud）。
   # ═══════════════════════════════════════════════════════════════════════════
   - name: ns3_flatten
@@ -83,7 +83,7 @@ nodes:
   # ═══════════════════════════════════════════════════════════════════════════
   # Agent 2: ns3_expand_supernet
   #   classify model_type + generate supernet.py + refine SearchSpace + summary。
-  #   从 v1 ns_expand_supernet Step 4-7 拆出。读 ns3_flatten.output.prepared_model。
+  #   读 ns3_flatten.output.prepared_model。
   #   model_type_supported=false → 路由 ns3_report。
   # ═══════════════════════════════════════════════════════════════════════════
   - name: ns3_expand_supernet

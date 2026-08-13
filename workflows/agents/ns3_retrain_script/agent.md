@@ -150,13 +150,7 @@ loss↔acc swaps, or arbitrarily negating / inverting transformations.
 **Deterministic check + validation (no blind skip)**: run before Step 1 starts:
 
 ```bash
-cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
-if [ -s retrain.py ] && [ -s run_retrain.sh ]; then
-  if python3 -c "import ast; ast.parse(open('retrain.py').read())" 2>/dev/null \
-     && grep -q "retrain" run_retrain.sh; then
-    echo "REUSE: retrain.py + run_retrain.sh already exist and pass validation → skip generation, go straight to emitting the output JSON"
-  fi
-fi
+bash "$ORCA_AGENT_RESOURCES/scripts/reuse_check.sh"
 ```
 
 - If qualifying (both artifacts present + `retrain.py` syntax OK + `run_retrain.sh` references it) → skip Steps 1-3

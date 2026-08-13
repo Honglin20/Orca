@@ -162,14 +162,7 @@ metric names/directions/transformations, loss↔acc swaps, or arbitrarily negati
 **Deterministic check + validation (no blind skip)**: run before Step 1 starts:
 
 ```bash
-cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
-if [ -s train_supernet.py ] && [ -s run_train_supernet.sh ]; then
-  # validation: train_supernet.py syntax OK + run_train_supernet.sh references it
-  if python3 -c "import ast; ast.parse(open('train_supernet.py').read())" 2>/dev/null \
-     && grep -q "train_supernet" run_train_supernet.sh; then
-    echo "REUSE: train_supernet.py + run_train_supernet.sh already exist and pass validation → skip Step 1-3, go straight to emitting the output JSON"
-  fi
-fi
+bash "$ORCA_AGENT_RESOURCES/scripts/reuse_check.sh"
 ```
 
 - If qualifying (both artifacts present + `train_supernet.py` syntax OK + `run_train_supernet.sh` references

@@ -115,13 +115,7 @@ scratch) → until truly complete; the only failed = a patch-layer-unfixable roo
 ## Step 0 ── Self-gate on upstream-generated scripts
 
 ```bash
-cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
-if [ ! -s retrain.py ] || [ ! -s run_retrain.sh ]; then
-  printf "%s" "upstream ns3_retrain_script did not produce retrain.py/run_retrain.sh" > "$ORCA_ARTIFACTS_DIR/.ns_retrain_assessment.txt"
-  echo "MISSING_UPSTREAM_SCRIPTS"
-else
-  echo "OK"
-fi
+bash "$ORCA_AGENT_RESOURCES/scripts/self_gate.sh"
 ```
 
 - `MISSING_UPSTREAM_SCRIPTS` → go straight to Step 4 and output `{"status":"failed"}`.
@@ -292,11 +286,7 @@ the final reply must contain only `emit_result.py`'s output. (source the env per
 depends on ORCA_CHART_SOCK. The Jinja-rendered values = the selected coordinates from upstream ns3_run_search, copy the numeric strings verbatim.)
 
 ```bash
-cd "$ORCA_ARTIFACTS_DIR" || exit 1
-python3 "$ORCA_AGENT_RESOURCES/scripts/metrics_bar.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --selected-acc "{{ ns3_run_search.output.selected_acc }}" > /dev/null || true
-python3 "$ORCA_AGENT_RESOURCES/scripts/compare_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --selected-latency "{{ ns3_run_search.output.selected_latency }}" --selected-acc "{{ ns3_run_search.output.selected_acc }}" --latency-unit "{{ ns3_run_search.output.latency_unit }}" > /dev/null || true
-# subnet_profile.py: materializes the selected subnet, writes subnet_structure.md (read by ns3_report) + pushes a table chart. fail-soft.
-python3 "$ORCA_AGENT_RESOURCES/scripts/subnet_profile.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ ns3_run_search.output.latency_unit }}" > /dev/null || true
+bash "$ORCA_AGENT_RESOURCES/scripts/push_final_charts.sh" "{{ ns3_run_search.output.selected_acc }}" "{{ ns3_run_search.output.selected_latency }}" "{{ ns3_run_search.output.latency_unit }}"
 ```
 
 ## Step 4 ── Self-validating JSON (**the only moment that produces the node JSON**)

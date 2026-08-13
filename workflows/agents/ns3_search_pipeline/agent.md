@@ -154,23 +154,7 @@ and original transform** (a higher-better acc is shown as a positive value; a dB
 **Deterministic check + verification (no blind skip)**: execute before Step 1:
 
 ```bash
-cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
-MISSING=""
-for f in select_architecture.py search_config.yaml evaluator.py arch_codec.py; do
-  [ -s "$f" ] || MISSING="$MISSING $f"
-done
-if [ -z "$MISSING" ]; then
-  # verify: all four .py files parse OK + search_config.yaml is valid YAML (via python yaml.safe_load)
-  if python3 -c "
-import ast, yaml, sys
-for p in ('select_architecture.py', 'evaluator.py', 'arch_codec.py'):
-    ast.parse(open(p).read())
-yaml.safe_load(open('search_config.yaml'))
-print('PIPELINE_VALID')
-" 2>/dev/null | grep -q PIPELINE_VALID; then
-    echo "REUSE: all four search pipeline artifacts exist and pass validation → skip Steps 1-3, proceed directly to emitting the output JSON"
-  fi
-fi
+bash "$ORCA_AGENT_RESOURCES/scripts/reuse_check.sh"
 ```
 
 - Passes (all four artifacts present + .py syntax OK + valid YAML) → skip Steps 1-3 and emit per the existing output_schema:
@@ -184,23 +168,12 @@ fi
 > This node is the **orchestrator**: it does not write the 6 generated files directly, but first produces the shared schema → dispatches 3 subagents to generate in parallel
 > → consolidates + finalizes verification → fix-loop. Subagents only do point-to-file generation; the parent owns the fix-loop.
 
-#### 🔴 Node-level resume (cross stall-restart continuation, do this first)
+#### Node-level resume (do this first)
 
-This node's 3 subagents are heavy; deepseek's intermittent stalls will make the external per-node driver kill+retry this node. **To avoid losing already-written subagent artifacts**, run the check below before dispatch—skip (reuse from disk) the parts already on disk (produced by a stalled attempt of a previous round), redoing only the missing parts. This lets the node resume across stalls to completion.
+Skip (reuse from disk) the parts already on disk, redoing only the missing parts:
 
 ```bash
-cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
-SKIP_SCHEMA=false; SKIP_A=false; SKIP_B=false; SKIP_C=false
-# schema: exists + valid JSON + has arch_fields → skip producing the schema
-if [ -s search_record_schema.json ] && python3 -c "import json;d=json.load(open('search_record_schema.json'));assert d.get('arch_fields')" 2>/dev/null; then SKIP_SCHEMA=true; echo "RESUME: search_record_schema.json already present and valid → skip producing the schema"; fi
-# subagent A (latency): latency_estimator.py exists + py_compile passes → skip A
-if [ -s latency_estimator.py ] && python3 -m py_compile latency_estimator.py 2>/dev/null; then SKIP_A=true; echo "RESUME: latency_estimator.py already present and valid → skip subagent A"; fi
-# subagent B (search-core): evaluator.py + arch_codec.py + search_config.yaml + run_search_supernet.sh all present + py_compile passes → skip B
-if [ -s evaluator.py ] && [ -s arch_codec.py ] && [ -s search_config.yaml ] && [ -s run_search_supernet.sh ] \
-   && python3 -m py_compile evaluator.py arch_codec.py 2>/dev/null; then SKIP_B=true; echo "RESUME: search-core 4 files already present and valid → skip subagent B"; fi
-# subagent C (select): select_architecture.py present + select --help rc=0 → skip C
-if [ -s select_architecture.py ] && python3 select_architecture.py --help >/dev/null 2>&1; then SKIP_C=true; echo "RESUME: select_architecture.py already present and valid → skip subagent C"; fi
-echo "RESUME flags: SKIP_SCHEMA=$SKIP_SCHEMA SKIP_A=$SKIP_A SKIP_B=$SKIP_B SKIP_C=$SKIP_C"
+bash "$ORCA_AGENT_RESOURCES/scripts/resume_check.sh"
 ```
 
 **Conditionally execute the rest based on the flags** (skip the parts already on disk; only produce / dispatch the missing):
@@ -217,78 +190,7 @@ This is the shared contract between evaluator (produced by subagent B) and selec
 
 ```bash
 cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
-# Extract arch dimensions from supernet.py's SearchSpace to define the jsonl schema (deterministic
-# introspection). The file is written INSIDE python only after all computation succeeds — do NOT use
-# `> search_record_schema.json` redirection: bash truncates the file before python starts, so any crash
-# during parsing (SyntaxError / exec failure) leaves a 0-byte file, which then fools the Step 0.5 resume
-# gate (`-s` non-empty check) and crashes downstream discover_latency_unit on an empty json.
-python3 -c "
-import json, sys, traceback
-
-# exec supernet.py to extract SearchSpace. __name__='not_main' skips its __main__ smoke block.
-try:
-    src = open('supernet.py').read()
-    ns = {'__name__': 'not_main'}
-    exec(compile(src, 'supernet.py', 'exec'), ns)
-except Exception as e:
-    print(f'FATAL: cannot exec supernet.py for introspection: {e}', file=sys.stderr)
-    traceback.print_exc()
-    sys.exit(1)
-
-SearchSpace = ns.get('SearchSpace')
-if SearchSpace is None:
-    print('FATAL: SearchSpace not found in supernet.py', file=sys.stderr)
-    sys.exit(1)
-
-try:
-    ss = SearchSpace()
-except Exception as e:
-    print(f'FATAL: SearchSpace() instantiation failed: {e}', file=sys.stderr)
-    sys.exit(1)
-
-arch_fields = {}
-for attr in dir(ss):
-    if attr.startswith('_'):
-        continue
-    val = getattr(ss, attr)
-    if isinstance(val, (list, tuple)) and len(val) > 0:
-        if all(isinstance(v, (list, tuple)) for v in val):
-            # Nested: stage_depth_candidates = [[1,2,3], [2,3,4]]
-            arch_fields[attr] = {'type': 'list_of_lists', 'values': [list(v) for v in val]}
-        elif all(isinstance(v, (int, float, str)) for v in val):
-            arch_fields[attr] = {'type': 'list', 'values': list(val)}
-
-if not arch_fields:
-    print('FATAL: no elastic dimensions found in SearchSpace', file=sys.stderr)
-    sys.exit(1)
-
-# metric info (best-effort): downstream select_architecture.py derives metric name/direction from
-# search_config.yaml objs; the schema's metric_name/metric_direction are kept as backup — manifest is
-# free text with no reliable metric-name anchor, so metric_name is left empty.
-metric_direction = ''
-try:
-    for line in open('project_manifest.md').read().split('\n'):
-        low = line.lower()
-        if 'higher-better' in low:
-            metric_direction = 'higher-better'
-        elif 'lower-better' in low:
-            metric_direction = 'lower-better'
-except FileNotFoundError:
-    pass
-
-schema = {
-    'arch_fields': arch_fields,
-    'metric_name': '',
-    'metric_direction': metric_direction,
-    'latency_ms_field': 'latency',
-    'latency_unit': '{{ inputs.latency_unit }}',
-    'extra_fields': ['acc', 'params'],
-}
-# Write the file only after all computation succeeds (a crash leaves the old file / no file, never a 0-byte).
-with open('search_record_schema.json', 'w') as f:
-    json.dump(schema, f, indent=2)
-print(f'WROTE search_record_schema.json ({len(arch_fields)} arch_fields)')
-"
+python3 "$ORCA_AGENT_RESOURCES/scripts/generate_schema.py" --latency-unit "{{ inputs.latency_unit }}"
 ```
 
 **Dispatch 3 subagents to generate (point-to-file protocol)**—**for each, first check the RESUME flags; skip any with SKIP_*=true (artifacts already on disk)**:

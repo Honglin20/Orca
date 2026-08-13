@@ -84,33 +84,12 @@ reply to track progress.
 **Deterministic check + validation (no blind skipping)**:
 
 ```bash
-cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
-FLAT_OK=false
-for f in *_flat.py *_llm-optimized.py; do
-  [ -s "$f" ] || continue
-  if python3 -c "
-import ast, sys
-src = open(sys.argv[1]).read()
-ast.parse(src)
-mod = compile(src, sys.argv[1], 'exec')
-ns = {}
-exec(mod, ns)
-print('FLAT_VALID')
-" "$f" 2>/dev/null | grep -q FLAT_VALID; then
-    FLAT_OK=true
-    break
-  fi
-done
-MANIFEST_OK=false
-[ -s "project_manifest.md" ] && MANIFEST_OK=true
-if [ "$FLAT_OK" = true ] && [ "$MANIFEST_OK" = true ]; then
-  echo "REUSE: flat/optimized + manifest exist and pass → skip Steps 1-3, go straight to emitting the output JSON"
-fi
+bash "$ORCA_AGENT_RESOURCES/scripts/reuse_check.sh"
 ```
 
-- Pass → skip Steps 1-3 and emit per the existing output_schema: `flatten_passed=true` +
+- Exit 0 (`REUSE` printed) → skip Steps 1-3 and emit per the existing output_schema: `flatten_passed=true` +
   `prepared_model` read as the real path from disk + `manifest_path` + `error=""`.
-- Missing / not passing → run Steps 1-3 as usual.
+- Non-zero exit → run Steps 1-3 as usual.
 
 ### Step 1: Discover Project And Flatten Model
 
@@ -166,14 +145,7 @@ absolute root is already in the frontmatter).
    package name per line). Downstream pinning scripts read this marker to enforce the
    "generated code must not import user project modules" check.
    ```bash
-   # Extract user package names from the original project source (not the flat file —
-   # the flat file has inlined all local code):
-   # grep the model entry file + its local import source files, find non-stdlib/third-party imports
-   grep -rhE '^\s*(from|import)\s+\w+' "{{ inputs.project_root }}"/{{ inputs.model_path }} 2>/dev/null \
-     | sed -E 's/^\s*(from|import)\s+(\w+).*/\2/' \
-     | sort -u | while read pkg; do
-       python3 -c "import $pkg" 2>/dev/null || echo "$pkg"   # not importable as third-party = user package
-     done > "$ORCA_ARTIFACTS_DIR/.user_pkg" || true
+   bash "$ORCA_AGENT_RESOURCES/scripts/extract_user_pkg.sh" "{{ inputs.project_root }}/{{ inputs.model_path }}"
    # missing marker → downstream check skips (no block) + warn
    ```
 4. **Flatten local dependencies and save a runnable, device-portable file:**

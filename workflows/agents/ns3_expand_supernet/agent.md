@@ -51,37 +51,11 @@ Execute the 5 steps in order.
 > This node's authoritative artifacts = `supernet.py` + `supernet_summary.md`. **Do not check** flat/optimized (those belong to ns3_flatten).
 
 ```bash
-cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
-# Clear stale unsupported marker (rm protocol; always clear before reuse-check regardless of hit;
-# prevents cross-run/attempt residue — attempt1 unsupported → attempt2 re-judged supported would
-# otherwise leave a stale marker that makes ns3_report mis-attribute as unsupported).
-rm -f .ns_expand_unsupported.flag
-MISSING=""
-for f in supernet.py supernet_summary.md; do
-  [ -s "$f" ] || MISSING="$MISSING $f"
-done
-if [ -z "$MISSING" ]; then
-  if python3 -c "
-import ast, sys
-src = open(sys.argv[1]).read()
-ast.parse(src)
-mod = compile(src, sys.argv[1], 'exec')
-ns = {}
-exec(mod, ns)
-assert 'SearchSpace' in ns or 'build_supernet' in ns, 'no SearchSpace/build_supernet'
-print('SUPERNET_VALID')
-  " supernet.py 2>/dev/null | grep -q SUPERNET_VALID; then
-    echo "REUSE: supernet.py + summary already exist and pass the bar → skip Step 1-4, go straight to output JSON"
-    # Deterministic sidecar (fail-soft): push the SearchSpace table chart to the
-    # frontend even on reuse, so the table is visible for reused runs too.
-    # (env is sourced first per host prompt instructions; chart pushes depend on ORCA_CHART_SOCK.)
-    python3 "$ORCA_AGENT_RESOURCES/scripts/search_space_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
-  fi
-fi
+bash "$ORCA_AGENT_RESOURCES/scripts/reuse_check.sh"
 ```
 
-- Passes the bar → skip Step 1-4, read `supernet_path` / `prepared_model` / `model_type` (read from the summary) from disk to fill the output, with `model_type_supported=true` + `error=""`.
-- Missing / below the bar → execute Step 1-4 as usual.
+- Exit 0 (`REUSE` printed) → skip Step 1-4, read `supernet_path` / `prepared_model` / `model_type` (read from the summary) from disk to fill the output, with `model_type_supported=true` + `error=""`.
+- Non-zero exit → execute Step 1-4 as usual.
 
 ### Step 1: Classify Model for NAS
 
@@ -108,34 +82,27 @@ fi
 
 ### Step 2: Generate Supernet
 
-#### 🔴 Node-local resume (resume across stall-restart; do this first)
+#### Node-local resume (do this first)
 
-This node's evaluator/verifier subagents are heavy, and deepseek's intermittent stalls make the external per-node driver kill+retry this node. The Step 0 reuse is **all-or-nothing** (both supernet.py and the summary must exist to skip). If a stall happens after generating supernet.py but before writing the summary, a restart would needlessly redo the expensive supernet generation. **To enable resume**, check first:
+Step 0 reuse is all-or-nothing (both `supernet.py` and the summary must exist to skip). If `supernet.py` already exists but the summary is missing, skip re-generating it:
 
 ```bash
-cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL"; exit 1; }
-SKIP_GENERATION=false
-# supernet.py already exists (produced by a previous stalled attempt) + can exec SearchSpace/build_supernet → skip generation
-if [ -s supernet.py ] && python3 -c "
-import ast, sys
-src = open('supernet.py').read(); ast.parse(src)
-ns = {}; exec(compile(src, 'supernet.py', 'exec'), ns)
-assert 'SearchSpace' in ns or 'build_supernet' in ns, 'no SearchSpace/build_supernet'
-" 2>/dev/null; then SKIP_GENERATION=true; echo "RESUME: supernet.py already exists and passes the bar → skip Step 2 generation, go straight to evaluator loop (resume)"; fi
+bash "$ORCA_AGENT_RESOURCES/scripts/resume_check.sh"
 ```
 
-Execute the generation section below ("read supernet_generation.md + produce supernet.py from the prepared_model") **only when `SKIP_GENERATION=false`**; if `SKIP_GENERATION=true`, skip generation (reuse supernet.py on disk) and go straight to the evaluator verification loop below.
+- Exit 0 (`RESUME` printed) → skip the generation section below, reuse `supernet.py` on disk, and go straight to the evaluator verification loop below.
+- Non-zero exit → execute the generation section below.
 
 ---
 
-Only at the start of this step, read `$ORCA_AGENT_RESOURCES/references/workflows/supernet_generation.md` (skip this read + generation when **`SKIP_GENERATION=true`**).
+Only at the start of this step, read `$ORCA_AGENT_RESOURCES/references/workflows/supernet_generation.md` (skip this read + generation when the resume check above printed `RESUME`).
 Following it, produce `$ORCA_ARTIFACTS_DIR/supernet.py` from `{{ ns3_flatten.output.prepared_model }}` and `model_type`.
 
 **Use task context to guide pre-built block selection**: first read `{{ ns3_flatten.output.manifest_path }}` (`project_manifest.md`) for the task type / workload modality / input data characteristics (sequence length, resolution) / deployment constraints / user preferences, then pick the pre-built block from the metadata shortlist according to the `general_specs.md` filtering dimensions (Workload Modality / Input Data Profile / Hard Compatibility / Efficiency-Capacity / User Preferences). Do not make a generic choice based only on the block description.
 
 ### Record baseline marker (`.baseline.json`) — required for the search-space contract gate
 
-After `supernet.py` is produced (both fresh generation and `SKIP_GENERATION=true` resume), record the prepared model's **actual** structural values that the search space must sandwich. These come from `{{ ns3_flatten.output.prepared_model }}` (read its source; do **not** copy the supernet's own candidate values):
+After `supernet.py` is produced (both fresh generation and resume), record the prepared model's **actual** structural values that the search space must sandwich. These come from `{{ ns3_flatten.output.prepared_model }}` (read its source; do **not** copy the supernet's own candidate values):
 
 - **depth**: the real layer count. Isotropic → one int; staged (cnn / hierarchical) → one per stage, keyed by `SearchSpace.stage_names`.
 - **internal width**: the real value of each searchable internal-width field (e.g. `num_heads`, `ffn_dim` for transformers; `expand_channels` / `mid_channels` for CNN) — only the fields you actually made searchable.
@@ -154,7 +121,7 @@ Stage keys must match `SearchSpace.stage_names`. If no internal-width field is s
 
 The `check_expand.sh` Validation gate now runs `check_search_space.py`, which reads this marker + `supernet.py` and fail-louds if any dimension is not a proper sandwich (baseline present + some candidate above + some candidate below). If it fails, fix the candidate ranges in `supernet.py` (or correct a wrong baseline) and re-run Validation — do not bypass.
 
-After the workflow completes (or go straight in when SKIP_GENERATION=true), enter the evaluator verification loop:
+After the workflow completes (or go straight in when the resume check printed `RESUME`), enter the evaluator verification loop:
 
 0. **Write the specs_dir marker:**
    ```bash

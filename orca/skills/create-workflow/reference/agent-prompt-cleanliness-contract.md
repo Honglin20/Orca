@@ -55,7 +55,9 @@
 - **中文迁移 / 版本考古**（`迁移自 KD-NAS phase-2`、`前身是`、`前作`、`v3 已嵌入 setup 节点`）——已在 `writing-style.md` §1/§8 列禁；
 - **SPEC / phase / ADR 编号**（`SPEC phase-14`、`ADR-007`、`v5 §4.3`、`SPEC 2026-07-23 §3.3`）；
 - **spec-review 评审记录泄漏**（`spec-review 改了` / `spec_review 结论`）；
-- **测试项目名硬编码**（`MNIST=accuracy 0.98`、`CIFAR baseline=92.x%`）——测试 fixture 只作 workflow inputs 喂入，绝不写进 prompt（见 §5）。
+- **测试项目名硬编码**（`MNIST=accuracy 0.98`、`CIFAR baseline=92.x%`）——测试 fixture 只作 workflow inputs 喂入，绝不写进 prompt（见 §5）；
+- **事故复盘 / 运行时基础设施叙事**（`deepseek's intermittent stalls make the external per-node driver kill+retry this node`、`produced by a previous stalled attempt`、`resume across stall-restart`）——解释**运行时环境**（模型卡顿 / 驱动 kill+retry / 上轮中断）的"为什么"叙述，对执行 agent 零可执行价值：它不是指令，是事故复盘。落 commit / release-note，不落 prompt；
+- **确定性代码内联在 agent.md**（多行 bash / `python3 -c` 的循环·分支·assert 逻辑）——可机械执行的确定性逻辑应抽到 `scripts/<name>.sh`，agent.md 只留 `bash "$ORCA_AGENT_RESOURCES/scripts/<name>.sh"` 一行调用（对齐 `writing-style.md` §3「能确定性的沉到脚本」）。**单行 operational 命令**（`jq` / `ruff` / `python <file>`）允许内联，不算违规。
 
 > 考古类残留的完整宽口径 grep 表见 [`writing-style.md`](writing-style.md) §8 A 类（A 类 = 命中即 FAIL 的开发考古）。本契约 §3+§4 与它口径一致，两处合起来用。
 
@@ -98,7 +100,9 @@ workflow 的 agent prompt 永远用**泛化抽象**：
 > 你写的 agent.md body 是 LLM 运行时指令，最终读者是执行 agent，不是 reviewer。禁开发期残留：
 > plan/issue 编号（`§9.1`、`（I10）`、`BLK-3`）、Orca 引擎源码路径（`orca/exec/...`，但 `orca/skills/...`
 > 可保留）、内部 examples 路径、英文/中文迁移出处（`analogue of` / `迁移自`）、测试项目名硬编码
-> （`MNIST=...`）、SPEC/ADR/phase 编号。设计理由放 commit。详见
+> （`MNIST=...`）、SPEC/ADR/phase 编号、运行时基础设施叙事（`deepseek 卡顿` / `driver kill+retry` 等
+> 事故复盘）。确定性代码（多行 bash/python 逻辑）抽到 `scripts/`，body 只留
+> `bash "$ORCA_AGENT_RESOURCES/scripts/<name>.sh"` 一行调用。设计理由放 commit。详见
 > `orca/skills/create-workflow/reference/agent-prompt-cleanliness-contract.md`。
 
 ## §8 审查法——受众翻转通读（真正的裁决）

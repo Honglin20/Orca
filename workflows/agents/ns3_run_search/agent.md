@@ -79,7 +79,7 @@ to modify the python script):
 > search process is detached via `setsid` into its own process group; whether the sub-agent lives or
 > dies does not affect it.
 
-🔴 **Each branch computes N independently; never a one-size-fits-all max+1** (reviewer Q2 Blocker):
+🔴 **Each branch computes N independently; never a one-size-fits-all max+1**:
 when the search is running, N = the attempt number currently running (Step 2b uses it immediately to
 `tail` the log); when the search is dead/not started, N = max(existing number)+1 (Step 2a re-detach
 must not overwrite existing logs). When dead attempt logs linger, the max number ≠ the currently
@@ -87,21 +87,7 @@ running number — a blanket max+1 would `tail` a non-existent log → falsely j
 `kill -- -<pgid>` and kill a search that is actually running.
 
 ```bash
-cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
-SPID="$(cat runs/search/.search_pid 2>/dev/null || echo '')"
-if [ -n "$SPID" ] && kill -0 "$SPID" 2>/dev/null; then
-  # ── Branch A: RESUME_SEARCH (search running) ── N = latest-mtime log number (Step 2b uses it immediately)
-  N=$(ls -t runs/search/search.attempt*.stdout.log 2>/dev/null | head -1 \
-    | sed -n 's/.*attempt\([0-9]*\)\.stdout\.log/\1/p')
-  N=${N:-1}
-  echo "RESUME_SEARCH pid=$SPID attempt=$N search is running, go straight to Step 2b polling (no detach, no marker cleanup, no reuse-check)"
-else
-  # ── Branch B: RESUME_HEAL (search dead/not started) ── N = max(existing number)+1 (Step 2a re-detach will not overwrite existing logs)
-  LAST_N=$(ls runs/search/search.attempt*.stdout.log 2>/dev/null \
-    | sed -n 's/.*attempt\([0-9]*\)\.stdout\.log/\1/p' | sort -n | tail -1)
-  N=$(( ${LAST_N:-0} + 1 ))
-  echo "RESUME_HEAL new_attempt=$N search not running, normal Step 0 → Step 1 → Step 2a re-detach"
-fi
+bash "$ORCA_AGENT_RESOURCES/scripts/resume_guard.sh"
 ```
 
 - stdout `RESUME_SEARCH attempt=...` → **skip Step 0 / Step 1**, go straight to Step 2b short polling
@@ -124,37 +110,7 @@ fi
 **Deterministic check + verification (no blind skip)**: run before the Step 1 pre-checks:
 
 ```bash
-cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
-RESULTS="$ORCA_ARTIFACTS_DIR/search_results.jsonl"
-# reuse requires all three: jsonl non-empty + search process dead + rc file exists (search really finished, not an incremental mid-flight write).
-SPID="$(cat runs/search/.search_pid 2>/dev/null || echo '')"
-if [ -s "$RESULTS" ] && { [ -z "$SPID" ] || ! kill -0 "$SPID" 2>/dev/null; } && [ -f runs/search/.search_rc ]; then
-  # verify it meets the bar: every line is valid JSON (use python json.loads to verify ≥1 valid line)
-  if python3 -c "
-import json, sys
-n = 0
-with open(sys.argv[1], 'r', encoding='utf-8', errors='replace') as f:
-    for line in f:
-        line = line.strip()
-        if not line:
-            continue
-        json.loads(line)   # raise on invalid
-        n += 1
-assert n >= 1, 'no valid records'
-print('RESULTS_VALID')
-" "$RESULTS" 2>/dev/null | grep -q RESULTS_VALID; then
-    # clear stale markers (rm-only; the Step 3 python defaults read_text to "false" / read_lines to [] for missing files).
-    rm -f .ns_run_search_healed.txt .ns_run_search_fidelity.flag
-    printf 'reused existing search_results.jsonl: %s' "$RESULTS" > .ns_run_search_assessment.txt
-    # reuse also pushes the search 3 charts (pareto/search_table/latency_dist) — otherwise the frontend never
-    # sees the Pareto/search table/latency distribution. Same `|| true` as Step 2.7, non-blocking, fail-soft.
-    # (env is sourced first per host prompt instructions; chart pushes depend on ORCA_CHART_SOCK.)
-    python3 "$ORCA_AGENT_RESOURCES/scripts/pareto.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
-    python3 "$ORCA_AGENT_RESOURCES/scripts/search_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
-    python3 "$ORCA_AGENT_RESOURCES/scripts/latency_dist.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
-    echo "REUSE: search_results.jsonl exists and meets the bar → skip search redo, pushed 3 charts → proceed to Step 2.8 select → Step 3"
-  fi
-fi
+bash "$ORCA_AGENT_RESOURCES/scripts/reuse_check.sh" "{{ inputs.latency_unit }}"
 ```
 
 - Meets the bar (`search_results.jsonl` ≥1 valid-JSON line) → skip the Step 1 / Step 2 search redo, but
@@ -170,20 +126,7 @@ fi
 ## Step 1 ── Pre-checks (deterministic, run once)
 
 ```bash
-set +e
-cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
-
-# Clear stale markers from prior runs (idempotency).
-rm -f .ns_run_search_healed.txt .ns_run_search_fidelity.flag .ns_run_search_assessment.txt
-
-if [ ! -f run_search_supernet.sh ]; then
-  printf "FATAL: run_search_supernet.sh absent — ns3_search_pipeline did not produce it." \
-    > .ns_run_search_assessment.txt
-  echo "GATE: run_search_supernet.sh absent -> cannot proceed"
-  # Step 3 python will judge status=failed (script absent + no results).
-else
-  echo "GATE: run_search_supernet.sh exists -> proceed to search"
-fi
+bash "$ORCA_AGENT_RESOURCES/scripts/precheck.sh"
 ```
 
 If the block above prints `cannot proceed` → go straight to Step 3 (the python will judge `status=failed`).
@@ -330,13 +273,7 @@ doesn't crash; stdout/stderr fully discarded — the final reply must contain on
 (env is sourced first per host prompt instructions; chart pushes depend on ORCA_CHART_SOCK.)
 
 ```bash
-cd "$ORCA_ARTIFACTS_DIR" || exit 1
-python3 "$ORCA_AGENT_RESOURCES/scripts/pareto.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
-python3 "$ORCA_AGENT_RESOURCES/scripts/search_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
-python3 "$ORCA_AGENT_RESOURCES/scripts/latency_dist.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
-# full_supernet_latency.py: measure the fully-expanded supernet's real latency, writes .full_supernet_latency.json
-# for ns3_retrain's compare_table to prefer. fail-soft: torch missing/measurement fails → no file written + exit 0.
-python3 "$ORCA_AGENT_RESOURCES/scripts/full_supernet_latency.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" --latency-unit "{{ inputs.latency_unit }}" > /dev/null || true
+bash "$ORCA_AGENT_RESOURCES/scripts/push_charts.sh" "{{ inputs.latency_unit }}"
 ```
 
 ### Step 2.8 ── Select architecture (select_architecture.py; deterministic, `|| true` non-blocking for emit)
@@ -352,21 +289,7 @@ bypassing ns3_report). On failure, Step 3 emits falsy select fields
 reads `.selected_arch.json` from disk and correctly attributes select_failed.
 
 ```bash
-cd "$ORCA_ARTIFACTS_DIR" || exit 1
-# Run select; success → its stdout JSON lands in .selected_arch.json marker; failure → write null sentinel
-if python3 "$ORCA_ARTIFACTS_DIR/select_architecture.py" \
-    --target-latency "{{ inputs.target_latency }}" \
-    --latency-unit "{{ inputs.latency_unit }}" \
-    --search-results "$ORCA_ARTIFACTS_DIR/search_results.jsonl" \
-    > "$ORCA_ARTIFACTS_DIR/.selected_arch.json" 2>"$ORCA_ARTIFACTS_DIR/.select_stderr.txt"; then
-  echo "SELECT_OK"
-else
-  # failure safety net: write falsy sentinel (node_failed forbidden)
-  printf '%s\n' '{"selected_arch":null,"selected_acc":0,"selected_latency":0,"latency_unit":"{{ inputs.latency_unit }}","pareto_size":0,"select_reason":"none"}' \
-    > "$ORCA_ARTIFACTS_DIR/.selected_arch.json"
-  echo "SELECT_FAILED — wrote null sentinel to .selected_arch.json"
-fi
-printf 'true' > "$ORCA_ARTIFACTS_DIR/.select_attempt"
+bash "$ORCA_AGENT_RESOURCES/scripts/select.sh" "{{ inputs.target_latency }}" "{{ inputs.latency_unit }}"
 ```
 
 ## Step 3 ── Self-validated JSON (your only final reply)
@@ -377,101 +300,7 @@ take the single line of JSON it prints to stdout verbatim as your final reply. T
 parts (healed_files / fidelity_retriggered / assessment) are read by python from the Step 0 marker files.
 
 ```bash
-python3 - <<'PY'
-import json, os
-
-ad = os.environ["ORCA_ARTIFACTS_DIR"]
-
-def read_text(path, default=""):
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            return f.read().strip()
-    except FileNotFoundError:
-        return default
-
-def read_lines(path):
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            return [ln.strip() for ln in f if ln.strip()]
-    except FileNotFoundError:
-        return []
-
-def tail(path, n=20):
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.read().splitlines()
-        return "\n".join(lines[-n:])
-    except FileNotFoundError:
-        return ""
-
-results_path = os.path.join(ad, "search_results.jsonl")
-recs = 0
-try:
-    with open(results_path, "r", encoding="utf-8", errors="replace") as fh:
-        for _ in fh:
-            recs += 1
-except FileNotFoundError:
-    pass
-
-script_path = os.path.join(ad, "run_search_supernet.sh")
-script_exists = os.path.exists(script_path)
-
-if script_exists and recs >= 1:
-    status, artifacts, max_retries_hit = "executed", [results_path], False
-else:
-    status, artifacts, max_retries_hit = "failed", [], True
-    # take the latest attempt log (with unlimited retries the last N≠3, so no hardcoded attempt3)
-    import glob
-    logs = sorted(glob.glob(os.path.join(ad, "runs", "search", "search.attempt*.stdout.log")))
-    log_tail = tail(logs[-1]) if logs else ""
-    if log_tail:
-        prev = read_text(os.path.join(ad, ".ns_run_search_assessment.txt"), "")
-        with open(os.path.join(ad, ".ns_run_search_assessment.txt"), "w", encoding="utf-8") as fh:
-            fh.write((prev + "\n" if prev else "") + "last_error:\n" + log_tail)
-
-healed_files = read_lines(os.path.join(ad, ".ns_run_search_healed.txt"))
-fidelity_retriggered = read_text(os.path.join(ad, ".ns_run_search_fidelity.flag"), "false") == "true"
-assessment = read_text(os.path.join(ad, ".ns_run_search_assessment.txt"),
-                       "no assessment recorded" if status == "executed" else "")
-
-# ── select 5 fields + latency_unit (read from the .selected_arch.json marker; failure safety net: always valid JSON) ──
-select_defaults = {
-    "selected_arch": None,
-    "selected_acc": 0,
-    "selected_latency": 0,
-    "latency_unit": "{{ inputs.latency_unit }}",
-    "pareto_size": 0,
-    "select_reason": "none",
-}
-selected_path = os.path.join(ad, ".selected_arch.json")
-try:
-    with open(selected_path, "r", encoding="utf-8") as f:
-        select_data = json.loads(f.read().strip())
-    if isinstance(select_data, dict):
-        for k, v in select_data.items():
-            if k in select_defaults:
-                select_defaults[k] = v
-        # read-side dual recognition: new .selected_arch.json uses selected_latency; old runs may still write selected_latency_ms.
-        if "selected_latency" not in select_data and "selected_latency_ms" in select_data:
-            select_defaults["selected_latency"] = select_data["selected_latency_ms"]
-except (FileNotFoundError, json.JSONDecodeError, ValueError):
-    pass  # select not run / marker missing → falsy defaults (node_failed forbidden)
-
-print(json.dumps({
-    "status": status,
-    "artifacts": artifacts,
-    "assessment": assessment,
-    "max_retries_hit": max_retries_hit,
-    "healed_files": healed_files,
-    "fidelity_retriggered": fidelity_retriggered,
-    "selected_arch": select_defaults["selected_arch"],
-    "selected_acc": select_defaults["selected_acc"],
-    "selected_latency": select_defaults["selected_latency"],
-    "latency_unit": select_defaults["latency_unit"],
-    "pareto_size": select_defaults["pareto_size"],
-    "select_reason": select_defaults["select_reason"],
-}))
-PY
+python3 "$ORCA_AGENT_RESOURCES/scripts/emit_result.py" --latency-unit "{{ inputs.latency_unit }}"
 ```
 
 ## Supervision Points (fail loud)
