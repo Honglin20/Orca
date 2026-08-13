@@ -70,8 +70,12 @@ ns = {}
 exec(mod, ns)
 assert 'SearchSpace' in ns or 'build_supernet' in ns, 'no SearchSpace/build_supernet'
 print('SUPERNET_VALID')
-" supernet.py 2>/dev/null | grep -q SUPERNET_VALID; then
+  " supernet.py 2>/dev/null | grep -q SUPERNET_VALID; then
     echo "REUSE: supernet.py + summary already exist and pass the bar → skip Step 1-4, go straight to output JSON"
+    # Deterministic sidecar (fail-soft): push the SearchSpace table chart to the
+    # frontend even on reuse, so the table is visible for reused runs too.
+    # (env is sourced first per host prompt instructions; chart pushes depend on ORCA_CHART_SOCK.)
+    python3 "$ORCA_AGENT_RESOURCES/scripts/search_space_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
   fi
 fi
 ```
@@ -170,6 +174,18 @@ After completing Step 1-4, run the hardened validation script:
 ```bash
 bash "$ORCA_AGENT_RESOURCES/scripts/check_expand.sh"
   || { echo "FAIL" >&2; exit 1; }
+```
+
+### Push SearchSpace table chart (deterministic sidecar, non-blocking)
+
+After the search space is fixed and validated, push it to the frontend as a table
+chart (label `nas-supernet/search-space`). Deterministic script, `|| true`
+fail-soft — missing supernet.py / chart socket down never blocks the node.
+(env is sourced first per host prompt instructions; chart pushes depend on ORCA_CHART_SOCK.)
+
+```bash
+cd "$ORCA_ARTIFACTS_DIR" || exit 1
+python3 "$ORCA_AGENT_RESOURCES/scripts/search_space_table.py" --artifacts-dir "$ORCA_ARTIFACTS_DIR" > /dev/null || true
 ```
 
 ## Guidelines
