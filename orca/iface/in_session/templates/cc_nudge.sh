@@ -393,7 +393,7 @@ def _run_stop() -> int:
         "若上一个节点的子代理已完成，请把它的产出作为 --output 调 "
         "orca next --run-id <run_id> --output '<产出>' 推进；"
         "若 workflow 已结束或要中止，先 orca stop <run_id>。"
-        "（Orca nudge：提醒，Orca 不会自动推进。）"
+        "如果接下来要执行长时间任务（如训练），请先预估耗时并设定定时提醒。"
     )
     # 输出 decision:block JSON（CC Stop hook 协议：block = force continuation）。
     print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))

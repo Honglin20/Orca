@@ -464,7 +464,7 @@ export const OrcaPlugin = async (ctx: any) => {
           `【Orca nudge】你还有活跃的 Orca run：${ids.join(", ")}。\n` +
           "若上一个节点的子代理已完成，请把它的产出作为 --output 调下面命令推进；" +
           "若 workflow 已结束或要中止，先 `orca stop <run_id>`。\n" +
-          "（这是提醒，Orca 不会自动推进。）\n" +
+          "如果接下来要执行长时间任务（如训练），请先预估耗时并设定定时提醒。\n" +
           `  orca next --run-id <run_id> --output '<子代理产出>'`
         // model 解析：要求 "provider/name" 形态；marker.model 缺/无斜杠/空 → 回退默认
         // （防空 providerID/modelID 产非法 model 对象）。
