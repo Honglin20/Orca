@@ -67,12 +67,31 @@ optimized_flat.build_model() 权重无关；`selected_model.pt`（= 父⊕BLD，
 ## 验收
 
 - `tars validate workflows/puzzle.yaml` 0 error。
-- pytest：`test_puzzle_materialize.py`（3 slow：key 对齐+自包含 / 幂等 / identity allclose）全过；
+- pytest：`test_puzzle_materialize.py`（4 项：key 对齐+自包含 / 幂等 / identity allclose / dispatcher 全 variant key 对齐）全过；
   `test_puzzle_scripts_smoke.py::test_puzzle_full_chain_cpu`（全链含 materialize）过；
   `test_puzzle_u3_migration.py` gkd/gate 测试同步新 args 后 29 passed；`test_puzzle_delta_review` /
   `test_puzzle_father_state` 无回归。
 - target playground 产物实测：materialize 产 optimized_flat（fnet+linear 内联），key 对齐 build_student_from_arch，
-  standalone forward（项目真实 4 输入）通过，`load_model` strict 载 fresh selected_model 通过，幂等 md5 一致。
+  standalone forward（子进程 exit 0，项目真实 4 输入）通过，`load_model` strict 载 fresh selected_model 通过，幂等 md5 一致。
+
+## code-reviewer 闭环（审查 → 修复）
+
+必修（全修）：
+- **BLOCKER-1**：forward_selfcheck 契约（subprocess standalone）vs 实现（in-process）不一致 → 改回真子进程
+  `python optimized_flat.py`（干净子进程 exit 0 为权威 forward_selfcheck），in-process 降级 `forward_inprocess_detail`
+  诊断；optimized_flat **始终**发 `__main__`（flat 有则用其项目真实 forward 签名，无则发通用单输入 fallback）。
+- **MAJOR-2**：build_cfg 未透传 optimized_flat.build_model() → bake 成模块级 `_BUILD_CFG`，build_model 零参用之
+  （消除 zero-arg 默认 vs 训练 cfg 不一致致 strict load 失败）。
+- **MAJOR-1**：dispatcher 10 variant 只测 2 → 新增 `test_dispatcher_all_variants_match_puzzle_blocks_keys`
+  （exec 生成的 dispatcher，逐 variant 比 state_dict keys vs catalog factory，不依赖 e2e）。
+- MINOR-3：`_load_optimized_module` 复用 `puzzle_common.load_optimized_flat`（自检与下游同加载路径）。
+- MINOR-4：脚本 docstring 去 `docs/plans/<date>` 日期锚点。
+
+延后（当前 verified scope 内不构成 bug，记此处待后续）：
+- MAJOR-3：`_inline_module_source` 的 `needed_imports` 硬编码（blocks 实测纯 torch + typing.Any，自检兜底）→ 未来按 AST 扫引用名按需生成 import。
+- MAJOR-4：`_rewire_flat_build_fn` 全文正则替换（现 flats 的 build_fn 名出现在字符串 lookup key 的概率低）→ 未来改 AST NodeTransformer 节点级改名。
+- MAJOR-5：dispatcher 与 `puzzle_blocks.make_*` 的数据化 spec 驱动（消除三处手工同步）→ MAJOR-1 测试已兜底漂移。
+- MAJOR-6：`puzzle.yaml` description 单行过长（历史，本次仅顺延）→ 未来拆短 + 引用 spec。
 
 ## 交付形态
 
