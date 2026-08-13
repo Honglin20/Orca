@@ -144,7 +144,7 @@ def test_bootstrap_all_workflows(wf_name: str) -> None:
         assert boot.node, f"{wf_name} bootstrap 未给首节点名"
         assert boot.prompt, f"{wf_name} bootstrap 未给首节点 prompt"
         # 首节点 prompt 应含「Orca 节点执行」驱动协议头（TARS skill 投影的同一信封）
-        assert "Orca 节点执行" in boot.prompt or "task 工具派" in boot.prompt, (
+        assert "Orca 节点执行" in boot.prompt or "派一个子代理" in boot.prompt, (
             f"{wf_name} 首节点 prompt 缺驱动协议头；prompt_head={boot.prompt[:200]!r}"
         )
     finally:

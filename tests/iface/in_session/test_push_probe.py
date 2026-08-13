@@ -341,11 +341,11 @@ def test_doctor_without_probe_push_has_no_push_chain_probe(doctor_iso, monkeypat
     assert "push_chain_probe" not in reply, (
         "无 --probe-push 时不应追加 push_chain_probe（零副作用铁律）"
     )
-    # 现有 6 check 一字不改。
-    assert len(reply["checks"]) == 6
+    # 现有 7 check 一字不改（approval_broker = SPEC §8 N12 心跳检查）。
+    assert len(reply["checks"]) == 7
     assert [c["name"] for c in reply["checks"]] == [
         "skill_install", "cli_imports_ok", "diag_switch",
-        "advance_hook", "sidechain_backend", "sidechain_daemon",
+        "advance_hook", "sidechain_backend", "sidechain_daemon", "approval_broker",
     ]
 
 

@@ -135,7 +135,7 @@ def _env_file_path(tape_path: Path, run_id: str) -> Path:
 def _build_pointer(result: Any, *, env_file: Path | None = None) -> str:
     """把 StepResult(prompt_file, resources_root) 拼成 host-facing 指针文本。
 
-    主 session 收到这句即知：派 task 子代理、读哪个文件、可选资源目录。子代理读文件执行，
+    主 session 收到这句即知：派子代理、读哪个文件、可选资源目录。子代理读文件执行，
     其输出即本节点输出（仍经 plugin 的 ToolPart.state.output 提取 → next --output）。
 
     ``env_file`` 非空（in-session 生产路径恒传）→ 追加一行 ``source`` 指针：子代理照抄这一行
@@ -143,7 +143,7 @@ def _build_pointer(result: Any, *, env_file: Path | None = None) -> str:
     **自己 run 的** socket → 守护写 tape；``$ORCA_AGENT_RESOURCES`` 也可被 folder-agent 引用。
     """
     lines = [
-        "【Orca 节点执行】请用 task 工具派一个子代理执行本节点，不要自己直接回答。",
+        "【Orca 节点执行】派一个子代理执行本节点，不要自己直接回答。",
         f"完整节点指令已写入：{result.prompt_file}",
         "请子代理先 Read 该文件，按其要求执行；子代理的输出即本节点的输出。",
     ]
@@ -2498,6 +2498,10 @@ def doctor(
     SPEC §5 D3 新增 ``sidechain_daemon`` 可选 check（hard=False）：对每个活跃 run 调
     ``_sidechain_daemon_alive`` 探针。**覆盖守护死亡**（pidfile 残 / pid 死 / cmdline 不匹配）；
     **不覆盖守护存活但持续 iterate 失败**（§8#4：YAGNI 不做 socket 查询，靠 daemon log）。
+
+    SPEC §8 N12 新增 ``approval_broker`` 可选 check（hard=False）：探 ``tars serve`` 的
+    ``/approval/snapshot`` 心跳。serve 离线 → ``fail``（in-session workflow 仍可跑，权限请求
+    退化为 CC 原生 prompt）；不因此 fail ``ok``。
     """
     _setup_logging(log_level)
 

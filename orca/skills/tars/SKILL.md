@@ -3,7 +3,7 @@ name: tars
 description: >-
   TARS —— 在主 session 里把用户的一句话意图自动匹配到已注册的 workflow 并驱动完成。
   调 `orca list` 选 workflow → `orca <wf>` 拿 inputs_schema → 据此抽 inputs →
-  `orca <wf> --inputs` 启动 → 派 Task 子代理逐节点执行 → `orca next --run-id --output`
+  `orca <wf> --inputs` 启动 → 派子代理逐节点执行 → `orca next --run-id --output`
   循环到 `done:true`。底层用 orca CLI 引擎。
 allowed-tools: Bash, Read, Write
 ---
@@ -12,7 +12,7 @@ allowed-tools: Bash, Read, Write
 
 <purpose>
 你是 TARS，运行在主 session 里。底层引擎是 Orca——它把一个多 agent 工作流拆成一串节点，
-每个节点是一段给子代理的指令。**你的职责是驱动**：启动 workflow、读每步指令、派 Task 子代理执行、
+每个节点是一段给子代理的指令。**你的职责是驱动**：启动 workflow、读每步指令、派子代理执行、
 把产出回传推进到下一步，直到完成。
 
 你不直接做节点里的工作（那是子代理的活），你只负责**调度 + 传递产出**。
@@ -91,7 +91,7 @@ orca <wf-name> --inputs '<inputs JSON>'
 
 **驱动循环**（核心，严格照做）：
 
-1. 用 **Task 工具派一个子代理**执行当前节点：子代理 Read 节点指令文件（prompt 里给了路径）做完，
+1. **派一个子代理**执行当前节点：子代理 Read 节点指令文件（prompt 里给了路径）做完，
    它的最终消息就是这步产出。🔴 **你自己不许 Read 节点指令文件**（撑爆上下文）——派子代理读。
 2. 子代理返回后，**先检查它的最终消息是不是 ask-user 哨兵**（见下【哨兵处理】）：
    - 是哨兵 → 走哨兵小循环：问用户 → 恢复**同一**子代理 → 拿真实产出。
@@ -128,8 +128,8 @@ orca <wf-name> --inputs '<inputs JSON>'
    `dict["_sentinel"] == "orca_ask_user_v1"` 才是哨兵；任一步失败 → 当真实产出。
 2. **问用户**：CC 用原生 `AskUserQuestion`（question / options / context）；opencode 在主聊天问
    （带 options 编号），读下一轮用户回复作答。
-3. **恢复同一子代理**（不重派，上下文不丢）：**Task 调用返回时立刻记下 task_id**
-   （CC 的 `agentId` / opencode 的 `ses_xxx`）。拿不到 task_id（Task 早失败 / 返回格式异常）→
+3. **恢复同一子代理**（不重派，上下文不丢）：**派子代理的调用返回时立刻记下 task_id**
+   （CC 的 `agentId` / opencode 的 `ses_xxx`）。拿不到 task_id（子代理早失败 / 返回格式异常）→
    走【失败处理】fail loud，**不重派新子代理假装续跑**（会丢上下文、违反「同一子代理」）。
    - CC：`SendMessage(task_id, "<用户答案>\n请基于此答案继续，不要重做已完成的工作。")`
    - opencode：`Task(task_id="ses_xxx", subagent_type=<spawn 时同一个>, prompt="<用户答案>\n请基于此答案继续，不要重做已完成的工作。")`
@@ -145,10 +145,10 @@ orca <wf-name> --inputs '<inputs JSON>'
 
 - `"recoverable": true` → 节点产出不合 `output_schema`（非 JSON / 缺字段 / 类型错）**或**子代理自报失败
   哨兵（信封 ``error_kind == "agent_blocked"``，同走 recoverable 重派分支）。**重 arm 的 prompt 已由
-  引擎注入历次失败原因（含本次）**——主 session 不再手动注入（见 2026-08-04 SPEC §4.3）。按你的判断
+  引擎注入历次失败原因（含本次）**——主 session 不再手动注入。按你的判断
   重派（同 session 用 SendMessage 复用同一子代理；跨 session 续跑则派 fresh 子代理），拿产出再
   `orca next --output`。连续 3 次未过 engine 自动终态。
-- `"warn": true` → 连续多次 next 没派子代理 / 没回传 output 的提醒。正常派 Task 推进即可，或主动 `orca stop`。
+- `"warn": true` → 连续多次 next 没派子代理 / 没回传 output 的提醒。正常派子代理推进即可，或主动 `orca stop`。
 
 ## 单引号转义
 
@@ -193,10 +193,10 @@ orca next --run-id <run_id> --output 'it'\''s a good film'
 - [ ] `orca <wf>`（不带 --inputs）拿 inputs_schema
 - [ ] 据标签抽 inputs：`[ask]` 没给才问（集中一轮）、`[infer]` 自己找、`[default]`/`[advanced]` 省略
 - [ ] `orca <wf> --inputs` 启动拿到 run_id
-- [ ] 每节点：派 Task 子代理读指令 → **检查最终消息是否哨兵** → 真实产出原样作 --output → `orca next --run-id`
+- [ ] 每节点：派子代理读指令 → **检查最终消息是否哨兵** → 真实产出原样作 --output → `orca next --run-id`
 - [ ] 哨兵：捕获 task_id → 问用户 → 恢复**同一**子代理 → 循环到真实产出；连续 ≥3 次（MAX_ASK）fail loud；**哨兵绝不进 next**
 - [ ] `recoverable`：重 arm prompt 已含失败历史（引擎注入）→ 按判断重派（复用/fresh）→ `orca next --output`；连续 3 次自动终态
-- [ ] `warn`：正常派 Task 推进或主动 `orca stop`
+- [ ] `warn`：正常派子代理推进或主动 `orca stop`
 - [ ] 单引号产出正确转义（`'\''`）
 - [ ] 循环到 `done:true` 后停止并总结
 - [ ] 失败时读 reason 告知用户，不静默重启

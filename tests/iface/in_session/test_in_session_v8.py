@@ -102,10 +102,11 @@ def _install_fake_entry_skill(
 
 
 def test_doctor_json_structure(doctor_iso, monkeypatch):
-    """doctor 输出 JSON {ok, diag, report, checks} + 6 项 checks。
+    """doctor 输出 JSON {ok, diag, report, checks} + 7 项 checks。
 
     顺序：skill_install / cli_imports_ok（硬）在前，diag_switch / advance_hook /
-    sidechain_backend（SPEC §P4）/ sidechain_daemon（SPEC §5 D3）（可选）在后。
+    sidechain_backend（SPEC §P4）/ sidechain_daemon（SPEC §5 D3）/ approval_broker
+    （SPEC §8 N12）（可选）在后。
     """
     monkeypatch.delenv("ORCA_DIAGNOSE", raising=False)
     reply = _run_doctor()
@@ -114,18 +115,20 @@ def test_doctor_json_structure(doctor_iso, monkeypatch):
     assert isinstance(reply["diag"], bool)
     assert isinstance(reply["report"], str) and len(reply["report"]) > 0
     assert isinstance(reply["checks"], list)
-    assert len(reply["checks"]) == 6
+    assert len(reply["checks"]) == 7
     names = [c["name"] for c in reply["checks"]]
     # FU-2：entry_hook 已删（transform step 4 整删后 PROBE_ENTRY 心跳永不再写，dead）。
     # SPEC §P4：sidechain_backend（hard=False，B2 路径诊断）。
     # SPEC §5 D3：sidechain_daemon（hard=False，per-active-run liveness 探针；覆盖死亡，
     # 不覆盖持续 iterate 失败 §8#4）。
     assert names == ["skill_install", "cli_imports_ok", "diag_switch",
-                     "advance_hook", "sidechain_backend", "sidechain_daemon"]
+                     "advance_hook", "sidechain_backend", "sidechain_daemon",
+                     "approval_broker"]
     # 每条 check 带 hard 字段（review 🟡#5：替代硬编码 name tuple 防 typo 静默丢失硬检查）
     hard_expected = {"skill_install": True, "cli_imports_ok": True,
                      "diag_switch": False, "advance_hook": False,
-                     "sidechain_backend": False, "sidechain_daemon": False}
+                     "sidechain_backend": False, "sidechain_daemon": False,
+                     "approval_broker": False}
     for c in reply["checks"]:
         assert set(c.keys()) == {"name", "status", "detail", "hard"}, (
             f"check {c['name']} 字段漂移：{set(c.keys())}"
@@ -1092,7 +1095,7 @@ def test_bootstrap_and_next_return_pointer_and_write_prompt_file(cwd_tmp, wf_pat
     """compact 交付契约（2026-07-08，替代 Bug G 的 prepend 形态）。
 
     bootstrap + next 不再把整段渲染后 prompt 经 .prompt 注入主 session；改为：
-      1. ``.prompt`` = host-facing **指针**（"用 task 工具派子代理"+"完整指令已写入 <path>"）。
+      1. ``.prompt`` = host-facing **指针**（"派子代理"+"完整指令已写入 <path>"）。
       2. ``.prompt_file`` = 渲染后 prompt 落盘路径，文件含渲染全文（含上游 output 插值）。
     两种 agent 形态渲染无差别（compile 已扁平化）；plugin 仍读 .prompt（指针文本）。
     """
@@ -1104,8 +1107,8 @@ def test_bootstrap_and_next_return_pointer_and_write_prompt_file(cwd_tmp, wf_pat
     boot_reply = json.loads(boot.output.splitlines()[-1])
     assert boot_reply.get("prompt_file"), "compact：bootstrap 必须返 .prompt_file"
     pointer = boot_reply["prompt"]
-    assert "task 工具" in pointer and "完整节点指令已写入" in pointer, (
-        "bootstrap .prompt 必须是 host-facing 指针（含 task 工具 + 文件路径提示）"
+    assert "子代理" in pointer and "完整节点指令已写入" in pointer, (
+        "bootstrap .prompt 必须是 host-facing 指针（含派子代理提示 + 文件路径提示）"
     )
     entry_file = Path(boot_reply["prompt_file"])
     assert entry_file.is_file(), f"compact prompt 文件未落盘：{entry_file}"
@@ -1120,7 +1123,7 @@ def test_bootstrap_and_next_return_pointer_and_write_prompt_file(cwd_tmp, wf_pat
     assert nxt.exit_code == 0
     nxt_reply = json.loads(nxt.output.splitlines()[-1])
     assert nxt_reply.get("prompt_file"), "compact：next 必须返 .prompt_file"
-    assert "task 工具" in nxt_reply["prompt"], "next .prompt 必须是指针"
+    assert "子代理" in nxt_reply["prompt"], "next .prompt 必须是指针"
     b_file = Path(nxt_reply["prompt_file"])
     assert b_file.is_file() and b_file.name == "b.md", (
         f"next compact prompt 文件按节点名命名：<prompts_dir>/b.md，实得 {b_file}"
@@ -1136,10 +1139,10 @@ def test_build_pointer_is_single_source():
     from orca.iface.in_session.cli import _build_pointer
     from orca.run.step import StepResult
 
-    # 有 resources_root：指针含 task 工具 + 子代理 + 文件路径 + 资源目录
+    # 有 resources_root：指针含派子代理提示 + 文件路径 + 资源目录
     r = StepResult(node="x", prompt_file="/abs/path/x.md", resources_root="/agents/x")
     p = _build_pointer(r)
-    assert "task 工具" in p and "子代理" in p
+    assert "子代理" in p
     assert "/abs/path/x.md" in p
     assert "/agents/x" in p
 
