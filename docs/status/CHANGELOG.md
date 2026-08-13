@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-13] feat(in-session): nudge 提醒改为"长任务先预估耗时并设定定时提醒"（commit `ca0d500`）
+
+Stop（cc/cac `cc_nudge.sh`）与 idle（opencode `orca.ts`）两条 nudge 提醒的收尾句由"Orca 不会自动推进"改为"如果接下来要执行长时间任务（如训练），请先预估耗时并设定定时提醒"——把 hook 从被动唠叨变成行动建议，agent 跑训练卡住时可自设定时兜底；同步更新 `cc_stop_golden.json` 字节级 golden。相关测试 3 passed（golden 回归 + opencode idle 文案 + tool.execute.after 守门）。
+
 ## [2026-08-13] feat(puzzle): pz_materialize 节点 —— optimized_flat 自包含最优架构交付件（commit 待回填）
 
 在 pz_select 与 pz_retrain 间插确定性节点 `pz_materialize`，产 `<base>_optimized_flat.py`（= 原 flat 架构类逐字 + 选中 variant 块源整模块 AST 内联 + build_model setattr 覆盖 + load_model）。**optimized_flat 成为 GKD/gate/交付的唯一执行基底**（正确性由构造保证，消除"训练时重建 vs 交付件重建"分叉）；gkd_retrain/gate_report 严格走 optimized_flat（删 build_student_from_arch 旧路径，--optimized_flat required）。权重链：optimized_flat 全生命周期单次 strict load（GKD 起点载 selected_model.pt[父⊕BLD]，交付载 final_model.pt）。死不变量：optimized_flat.build_model() state_dict keys 逐 key+shape 对齐 build_student_from_arch（live reference）+ in-process forward + 自包含（仅 torch）+ 幂等。新增 `materialize_optimized.py`（确定性装配 + 自检 + --check-only self-heal）+ `pz_materialize/agent.md` + `puzzle_common.load_optimized_flat` + `terminate_materialize_failed`；puzzle.yaml 7 agent + 6 terminate。验收：tars validate 0 error；test_puzzle_materialize（3 slow）+ full_chain_cpu + u3_migration（29）+ delta_review + father_state 全过无回归；target 产物实测 key 对齐 + standalone 4-输入 forward + load_model strict + 幂等 md5 全绿。详见 [release note](docs/releases/2026-08-13-puzzle-materialize-optimized-flat.md)。
