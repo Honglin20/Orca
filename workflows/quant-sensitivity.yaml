@@ -1,5 +1,5 @@
 name: quant-sensitivity
-description: "对 PyTorch 模型做低精度敏感层分析：输入 FP 模型+校准数据，四选一方法（mse/layer_stats/ptq_binary_sensitivity/mix_precision_search）输出敏感层排名与可视化，供下游 PTQ/混精决策。底层调 ts_quant.analyze_low_precision_sensitive_layers。"
+description: "低精度敏感层分析：四选一方法（mse/layer_stats/ptq_binary_sensitivity/mix_precision_search）输出敏感层排名与可视化。需校准数据，只分析不改模型，供下游 PTQ/混精决策。"
 entry: sensitivity_analyzer
 
 inputs:

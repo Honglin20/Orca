@@ -1,5 +1,5 @@
 name: quant-qat
-description: "对 PyTorch 模型做量化感知训练（QAT）+ CAGE 后校正：输入 FP 模型+训练/校准数据，对比 rtn / duquantpp 两种训练态 fake-quant 方案，fake-quant 后短训恢复精度（teacher-student distillation-style QAT，可选 CAGE 后校正 W←W−lr·λ·(W−Q(W))），输出每方案训练前/后精度恢复 + 收敛曲线 + bake 最佳 q_model。与 quant-ptq-sweep（训练后量化）互补。底层调 ts_quant.prepare_trainable_fakequant_model + prepare_trainable_qat。"
+description: "量化感知训练（QAT）：对比两种 fake-quant 训练方案，短训恢复精度（可选 CAGE 后校正），bake 最佳量化模型。需训练/校准数据，与 quant-ptq-sweep（不需训练的 PTQ）互补。"
 entry: qat_trainer
 
 inputs:

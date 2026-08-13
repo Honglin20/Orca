@@ -1,5 +1,5 @@
 name: agent-struct-exploration
-description: "LLM agent 驱动的模型结构搜索：迭代改写模型结构（AST 级）、实测时延与精度，循环逼近目标（降时延保精度）。输入模型定义 + 训练命令 + 目标时延；输出最优结构 champion（model.py 快照 + final_report）。不依赖超网，结构由 agent 直接改。"
+description: "LLM agent 直接改写模型结构做搜索：迭代改写 AST 级结构、实测时延与精度，循环逼近降时延保精度的目标。需训练/测试命令 + 目标时延，不依赖超网，结构由 agent 直接改。"
 
 entry: setup
 

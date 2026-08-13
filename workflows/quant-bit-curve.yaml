@@ -1,5 +1,5 @@
 name: quant-bit-curve
-description: "对 PyTorch 模型做混合精度 Pareto 位宽-精度曲线搜索：输入 FP 模型+校准/评估数据，在精度约束下对比位宽/格式选择（INT8/W4A8/INT4/MX4/MX8，全 mxint 基），输出 Pareto 前沿（最低平均位宽下最高精度）+ 格式分布可视化 + bake 最佳混合精度模型。与 quant-ptq-sweep（固定位宽对比 PTQ 算法）互补。底层调 ts_quant.search_mix_precision(strategy=m0_pareto)。"
+description: "混合精度位宽-精度曲线搜索：在精度约束下对比位宽/格式选择（INT8/W4A8/INT4/MX4/MX8），输出 Pareto 前沿 + 格式分布可视化 + bake 最佳混合精度模型。需校准/评估数据，与 quant-ptq-sweep（固定位宽）互补。"
 entry: bit_curve_searcher
 
 inputs:

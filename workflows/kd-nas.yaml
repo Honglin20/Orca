@@ -1,5 +1,5 @@
 name: kd-nas
-description: "通过知识蒸馏（KD）串行迭代搜索更优的轻量化模型结构：每轮派生一个 student → KD 蒸馏 → 实测 latency/accuracy → 决策（达标或预算耗尽即终止）。teacher 用用户默认 lr/epochs 训；全程 metrics 推 web。train_teacher 走 deferred training via cron（多天训练解耦）：三分支 Step 0（reuse / resume-pending / fresh-launch）+ warmup 估时 + cron 注册 + park detached。1 terminate（deferred success：train_teacher detached 后 cron 接力重跑）。"
+description: "知识蒸馏（KD）驱动的模型结构搜索：每轮蒸馏出一个 student 结构，实测时延/精度后迭代决策，直到达标或预算耗尽。需训练（teacher 用用户默认配置训练、student 蒸馏），适合想要比超网 NAS 更省资源的渐进式搜索。"
 
 entry: flatten
 

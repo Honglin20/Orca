@@ -1,5 +1,5 @@
 name: puzzle
-description: "Puzzle decomposed-NAS 全链流水线(Bercovich 2025, ICML 范式): 识别可替换 block slot → BLD 块级蒸馏建库(每 (layer,variant) 独立模仿原块) → replace-1-block 打分 + per-variant latency 实测 → MIP grouped-knapsack 在 latency 预算下全局选逐层异构架构 → materialize 产出 optimized_flat 自包含最优架构(GKD/gate/交付的唯一执行基底,正确性由构造保证) → GKD 末段全局 KD 修块间兼容 → AC gate(精度损失≤0.5、时延降≥一半)。7 agent 节点 + 6 terminate(全 fail-loud:模型不可替换 / latency 目标结构性不可达 / MIP 无候选 / materialize 失败 / GKD 失败 / AC 不达标)。非超网、非 predictor——逐层 block 类型异构替换(synthesizer/relu-attn/fnet 等 mixer 库)。pz_build_library / pz_retrain 走有界轮询 + 无上限自愈(单 turn 连续 ~9min monitor 块全程监控直到真正完成,进程死/发散触发 HEAL-LOOP 无上限自愈,turn 到顶换 sub-agent 经 status.sh 真相源续接;rc=0 + 进程退出 + ckpt 有效才认完成,中断残留续训,未完成不产出 JSON)。pz_select / pz_report 为确定性 Bash(zero-LLM);pz_materialize 为确定性装配 + LLM verify(脚本整模块内联产 optimized_flat + 死不变量自检[key 对齐 build_student_from_arch + standalone forward]+ workflow-verifier + 仅 optimized_flat.py 白名单 self-heal)。可视化全固化进节点确定性脚本:progress_watcher 边训练 tail progress.jsonl 边推实时多指标曲线;pz_score 推 3 图(block_score/latency_dist/scatter);pz_report 推 baseline-vs-optimized metrics_bar。复用 nas-supernet v1 的 in-session 执行契约(orca CLI + chart daemon + artifact 约定 + fail-loud + self-heal 白名单审计字段 healed_files/fidelity_retriggered)。"
+description: "分解式 NAS：把预训练模型逐层替换成异构轻量块，块级蒸馏建库后用 MIP 在时延预算下全局选最优结构。需要预训练模型（不训练超网、直接复用权重），适合已有预训练模型、要快速降时延的场景。"
 
 entry: pz_expand
 

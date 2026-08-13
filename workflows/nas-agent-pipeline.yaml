@@ -1,5 +1,5 @@
 name: nas-agent-pipeline
-description: "[DEPRECATED] 使用 workflows/nas-supernet.yaml 获取 NAS 能力。"
+description: "[DEPRECATED] 已废弃，改用 workflows/nas-supernet.yaml。"
 entry: model_optimizer
 
 inputs:

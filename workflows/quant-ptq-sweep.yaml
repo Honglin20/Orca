@@ -1,5 +1,5 @@
 name: quant-ptq-sweep
-description: "对 PyTorch 模型做粗粒度 PTQ 扫描：lightweight 模式沿 4 条累积路径线性叠加技术（Smooth/QuaRot/AutoRound/纯求解派，~12 候选，line 累积曲线）；full 模式按 SDK 合法表全枚举位宽×预变换×求解×后处理组合（~45-75 候选，heatmap 矩阵）。默认 teacher-student mse 评估 + bake 最佳量化模型 state_dict。底层调 ts_quant.quantize_model + build_teacher_student_eval_fn + SmoothQuant/QuaRot 插件。"
+description: "训练后量化（PTQ）扫描：沿累积路径线性叠加 Smooth/QuaRot/AutoRound 等技术对比候选，bake 最佳量化模型。需校准数据、不需训练，与 quant-qat（需训练的量化感知训练）互补。"
 entry: ptq_sweeper
 
 inputs:

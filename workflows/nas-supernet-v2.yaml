@@ -1,5 +1,5 @@
 name: nas-supernet-v2
-description: "NAS supernet v2 全链流水线（in-session 友好 / 单卡非 DDP 默认 / 弱模型友好）：flatten → expand supernet → 生成训练脚本 → 生成搜索 pipeline（3 子代理并行）→ 自愈执行训练/搜索 → select 合并进 run_search → retrain 选定子网 → 单一 reporter 终端。8 agent 节点 + 0 terminate（全部路由收敛到 ns2_report reporter）。训练默认 plain python（单设备，AMP=false）；多卡时 torchrun --nproc_per_node=N 触发 is_distributed() 自动 DDP wrap。select 崩/无候选时 emit falsy JSON（禁 node_failed）→ ns2_report 正确归因。ns2_report 零跨节点 output 引用（读磁盘状态文件判终态）。"
+description: "超网 NAS 全链流水线（v2）：把用户的 PyTorch 模型展开成超网，从零训练后搜索选定最优子网，再重训出最终模型。无需预训练权重；相对 v1 单卡非 DDP 友好、弱模型友好。"
 
 entry: ns2_flatten
 
