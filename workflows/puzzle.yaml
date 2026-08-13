@@ -1,5 +1,5 @@
 name: puzzle
-description: "Puzzle decomposed-NAS 全链流水线(Bercovich 2025, ICML 范式): 识别可替换 block slot → BLD 块级蒸馏建库(每 (layer,variant) 独立模仿原块) → replace-1-block 打分 + per-variant latency 实测 → MIP grouped-knapsack 在 latency 预算下全局选逐层异构架构 → GKD 末段全局 KD 修块间兼容 → AC gate(精度损失≤0.5、时延降≥一半)。6 agent 节点 + 5 terminate(全 fail-loud:模型不可替换 / latency 目标结构性不可达 / MIP 无候选 / GKD 失败 / AC 不达标)。非超网、非 predictor——逐层 block 类型异构替换(synthesizer/relu-attn/fnet 等 mixer 库)。pz_build_library / pz_retrain 走有界轮询 + 无上限自愈(单 turn 连续 ~9min monitor 块全程监控直到真正完成,进程死/发散触发 HEAL-LOOP 无上限自愈,turn 到顶换 sub-agent 经 status.sh 真相源续接;rc=0 + 进程退出 + ckpt 有效才认完成,中断残留续训,未完成不产出 JSON)。pz_select / pz_report 为确定性 Bash(zero-LLM)。可视化全固化进节点确定性脚本:progress_watcher 边训练 tail progress.jsonl 边推实时多指标曲线;pz_score 推 3 图(block_score/latency_dist/scatter);pz_report 推 baseline-vs-optimized metrics_bar。复用 nas-supernet v1 的 in-session 执行契约(orca CLI + chart daemon + artifact 约定 + fail-loud + self-heal 白名单审计字段 healed_files/fidelity_retriggered)。"
+description: "Puzzle decomposed-NAS 全链流水线(Bercovich 2025, ICML 范式): 识别可替换 block slot → BLD 块级蒸馏建库(每 (layer,variant) 独立模仿原块) → replace-1-block 打分 + per-variant latency 实测 → MIP grouped-knapsack 在 latency 预算下全局选逐层异构架构 → materialize 产出 optimized_flat 自包含最优架构(GKD/gate/交付的唯一执行基底,正确性由构造保证) → GKD 末段全局 KD 修块间兼容 → AC gate(精度损失≤0.5、时延降≥一半)。7 agent 节点 + 6 terminate(全 fail-loud:模型不可替换 / latency 目标结构性不可达 / MIP 无候选 / materialize 失败 / GKD 失败 / AC 不达标)。非超网、非 predictor——逐层 block 类型异构替换(synthesizer/relu-attn/fnet 等 mixer 库)。pz_build_library / pz_retrain 走有界轮询 + 无上限自愈(单 turn 连续 ~9min monitor 块全程监控直到真正完成,进程死/发散触发 HEAL-LOOP 无上限自愈,turn 到顶换 sub-agent 经 status.sh 真相源续接;rc=0 + 进程退出 + ckpt 有效才认完成,中断残留续训,未完成不产出 JSON)。pz_select / pz_report 为确定性 Bash(zero-LLM);pz_materialize 为确定性装配 + LLM verify(脚本整模块内联产 optimized_flat + 死不变量自检[key 对齐 build_student_from_arch + standalone forward]+ workflow-verifier + 仅 optimized_flat.py 白名单 self-heal)。可视化全固化进节点确定性脚本:progress_watcher 边训练 tail progress.jsonl 边推实时多指标曲线;pz_score 推 3 图(block_score/latency_dist/scatter);pz_report 推 baseline-vs-optimized metrics_bar。复用 nas-supernet v1 的 in-session 执行契约(orca CLI + chart daemon + artifact 约定 + fail-loud + self-heal 白名单审计字段 healed_files/fidelity_retriggered)。"
 
 entry: pz_expand
 
@@ -210,11 +210,51 @@ nodes:
           description: "mip-optimal=MIP 在预算内找到最优;best-effort=加性模型判 infeasible 时返 min-latency arch 让 gate 实测裁决（加性估算偏悲观）;infeasible=scores/latency 缺 fail-loud sentinel（空 arch）;none=scores 缺 sentinel"
       additionalProperties: false
     routes:
-      # selected_arch 非空即推进到 retrain——gate 的真实 latency 测量才是 LAT AC 权威，
-      # select 阶段不据（悲观的）加性 feasible 预死。空 arch / none 才 terminate。
+      # selected_arch 非空即推进到 materialize——先产 optimized_flat（GKD/gate/交付的唯一
+      # 执行基底），再进 retrain。gate 的真实 latency 测量才是 LAT AC 权威，select 阶段
+      # 不据（悲观的）加性 feasible 预死。空 arch / none 才 terminate。
       - when: "pz_select.output.selected_arch"
-        to: pz_retrain
+        to: pz_materialize
       - to: terminate_select_failed
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 4.5: pz_materialize(确定性装配 + LLM verify + 受限 self-heal)
+  #   读 selected_arch + flat + block_map → build_selected 合成 selected_model.pt
+  #   (父⊕BLD)→materialize_optimized.py 装配 <base>_optimized_flat.py(自包含最优架构:
+  #   flat 类逐字 + 选中 variant 块源内联 + build_model setattr 覆盖 + load_model + flat
+  #   __main__ 自检)。脚本自带死不变量自检: optimized_flat.build_model() state_dict keys
+  #   逐 key+shape 对齐 build_student_from_arch(= build_selected 产 selected_model.pt 的同一
+  #   逻辑)+ standalone forward 子进程。自检过→workflow-verifier(架构/slot 合规)→executed。
+  #   自检失败→仅 edit optimized_flat.py 补全内联边界 case→--check-only 重验(≤2 轮)→
+  #   仍失败 terminate_materialize_failed。optimized_flat 是 GKD/gate/交付的唯一执行基底
+  #   (正确性由构造保证:被训练/被测/被交付的是同一文件,不再有重建分叉)。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: pz_materialize
+    kind: agent
+    agent: pz_materialize
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [status, optimized_flat_path, selected_model_path, key_alignment_passed, forward_selfcheck_passed, workflow_verifier_passed, artifacts, assessment, error]
+      properties:
+        status: {type: string, enum: [executed, failed], description: "executed=optimized_flat 生成 + key 对齐 + standalone forward 自检 + workflow-verifier 全过;failed=缺上游 / 预写脚本 bug / self-heal ≤2 轮仍失败"}
+        optimized_flat_path: {type: string, description: "<base>_optimized_flat.py 路径(自包含最优架构,GKD/gate/交付的唯一执行基底);failed 时空串"}
+        selected_model_path: {type: string, description: "selected_model.pt 路径(build_selected 合成的父⊕BLD 权重,GKD 起点);failed 时空串"}
+        key_alignment_passed: {type: boolean, description: "true=optimized_flat.build_model() state_dict keys 逐 key+shape 对齐 build_student_from_arch(死不变量,过此门则 final_model strict 可载)"}
+        forward_selfcheck_passed: {type: boolean, description: "true=python optimized_flat.py 子进程 exit 0(standalone forward 用项目真实签名通过)"}
+        workflow_verifier_passed: {type: boolean, description: "true=workflow-verifier 判架构/slot 合规(替换 slot 运行时类=variant,identity 零侵入,非-slot 参数不变)"}
+        artifacts:
+          type: array
+          items: {type: string}
+          description: "成功时 [optimized_flat_path, selected_model_path];failed 时 []"
+        assessment: {type: string, description: "软判断:用到的 variant / 内联模块 / self-heal 轮数 / verifier 结论;failed 时含 last_error"}
+        error: {type: string, description: "fail loud 时根因;成功→空串"}
+      additionalProperties: false
+    routes:
+      - when: "pz_materialize.output.status == 'executed'"
+        to: pz_retrain
+      - to: terminate_materialize_failed
 
   # ═══════════════════════════════════════════════════════════════════════════
   # Agent 5: pz_retrain(有界轮询 + 无上限自愈——节点常驻到 GKD 真正完成)
@@ -305,6 +345,11 @@ nodes:
     status: failed
     reason: "pz_select 未能选出架构(mip_select.py 失败 / scores.jsonl 或 latency_table.jsonl 缺或空 / 预算太紧 infeasible / selected_arch 空)。回看 pz_score.output.assessment 与 $ORCA_ARTIFACTS_DIR/runs/score/ 日志,或放宽 latency_reduction_target / 给定 target_latency。"
 
+  - name: terminate_materialize_failed
+    kind: terminate
+    status: failed
+    reason: "pz_materialize 未能产出可用的 optimized_flat.py(缺上游 selected_arch/flat/block_map / build_selected 合成 selected_model.pt 失败 / key 对齐或 standalone forward 自检不过且 self-heal ≤2 轮仍未修 / 预写脚本 materialize_optimized.py|build_selected.py 本身 bug / workflow-verifier 判架构不合规)。回看 pz_materialize.output.assessment(含 key_alignment_detail / forward_selfcheck_detail / last_error)与 $ORCA_ARTIFACTS_DIR/<base>_optimized_flat.py。key 对齐失败几乎必是装配逻辑/构造镜像 bug(预写脚本层)——fail loud 上报 P2。"
+
   - name: terminate_retrain_failed
     kind: terminate
     status: failed
@@ -328,5 +373,6 @@ outputs:
   acc_delta: "{{ pz_report.output.acc_delta }}"
   latency_ratio: "{{ pz_report.output.latency_ratio }}"
   selected_arch: "{{ pz_select.output.selected_arch }}"
+  optimized_flat_path: "{{ pz_materialize.output.optimized_flat_path }}"
   output_dir: "{{ pz_expand.output.output_dir }}"
   block_map: "{{ pz_expand.output.block_map_path }}"

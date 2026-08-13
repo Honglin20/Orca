@@ -4,7 +4,26 @@
 
 ---
 
-## 当前：Puzzle U6 治本 + target E2E（分支 `puzzle-universal`）—— 70% 目标结构性不可达，待用户定向
+## 当前：Puzzle pz_materialize 节点（分支 `puzzle-universal`）—— 实现完成，待 code-review + commit
+
+### ✅ 已完成（optimized_flat 自包含最优架构交付件）
+
+- 新节点 `pz_materialize`（pz_select → pz_retrain 之间）：产 `<base>_optimized_flat.py`（flat 类逐字 + variant 块整模块 AST 内联 + build_model setattr + load_model）。**optimized_flat = GKD/gate/交付唯一执行基底**（正确性由构造保证）。
+- `materialize_optimized.py`（确定性装配 + 自检）：key 对齐 build_student_from_arch + in-process forward + 自包含（仅 torch）+ 幂等 + `--check-only` self-heal。
+- `gkd_retrain.py`/`gate_report.py` 严格走 optimized_flat（删 build_student_from_arch 旧路径，--optimized_flat required）；build_selected 上移 materialize；`puzzle_common.load_optimized_flat`。
+- puzzle.yaml 7 agent + 6 terminate（增 terminate_materialize_failed）；pz_retrain/pz_report agent.md 同步。
+- 验收：tars validate 0 error；test_puzzle_materialize(3) + full_chain_cpu + u3_migration(29) + delta_review + father_state 全过无回归；target 产物实测全绿（key 对齐 + 4-输入 standalone forward + load_model strict + 幂等 md5）。
+
+### ⏳ 待办
+
+- code-reviewer 洁净审查闭环（依赖铁律 / fail loud / DRY / prompt 洁净）。
+- commit（release note + CHANGELOG 已就绪，SHA 待回填）。
+
+**必读**：`docs/plans/2026-08-13-puzzle-materialize-optimized-flat.md`；release `docs/releases/2026-08-13-puzzle-materialize-optimized-flat.md`。
+
+---
+
+## 历史：Puzzle U6 治本 + target E2E —— 70% 目标结构性不可达，待用户定向
 
 ### ✅ 已完成（通用 workflow 改进，8 commit）
 

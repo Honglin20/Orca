@@ -143,3 +143,42 @@ grep 找你记得的（§3）；受众翻转抓你忘了的（§4）。**两者�
 - §4 全部类别（无括号 issue 编号、迁移词、SPEC/ADR 编号等）；
 - §6 测试夹具硬编码（`MNIST` / `accuracy=0.98` / `/home/me/mnist`）——deterministic 检测误报率太高，刻意不抓，通读是唯一兜底；
 - **prompt-adjacent references/ prose**（lint 不扫 references/，但这些文件 agent 运行时会读，必须人工通读洁净）——这是最易漏的盲区：作者以为「references/ 是数据」就放过，实则里面塞了 `run 6c2ebe` / `audit-found` / `ln(10)` / `MNIST` / `CONTRACTS §6` 等考古。
+
+## §10 用户输入权威——从错误提取的运行时规则（agent 该恪守什么）
+
+§1-§9 讲「agent.md body 不该写什么」（开发期残留）。本节讲互补的另一面——「该恪守什么」：一条
+从真实漂移错误中提取的通用运行时规则。**当某类错误在一个 workflow 复现，提取通用规则写进本节，
+让未来所有 agent 天然遵循——而不是逐 workflow 打补丁、针对具体错误定制。**
+
+### 规则：用户提供的范式 / 数据 / 脚本 / 指标是不可替代权威
+
+凡是 agent 要 port / 复用 / 包装**用户原项目的逻辑**（训练范式、loss / optimizer / scheduler、
+评价 metric 的名 / 方向 / 变换、数据管道、用户提供的脚本如 latency / 评测 / 数据处理脚本），
+都必须把它当作**不可替代权威逐字保留**，不得擅自替换为 agent 自选的"更标准 / 更可复现"的代理。
+
+典型漂移（从中提取本规则的错误样本，**是 illustrative，不是让 agent 照单全收的定制清单**）：
+
+- 用确定性更强的代理测度替换用户测度（如 FLOPs / MACs / params 替换用户提供的时延脚本）；
+- 擅自换训练范式构件（optimizer 类、loss 公式 / 常量、scheduler）；
+- 改变用户的评价标准（把 higher-better metric 取负展示、还原用户刻意施加的 dB / 归一化变换、
+  loss↔acc 互换）。
+
+允许的改造仅限"为达成 workflow 目标所必需"的结构性变换（如 NAS 的 subnet 采样 / 共享权重
+forward / 预算压缩；量化的精度约束），**不得触及用户测度本身**。
+
+### 打造 agent 时如何落地（通用三件套）
+
+当 agent 涉及用户逻辑 port / 包装时，在 agent.md 落这三层——缺一就容易漂移：
+
+1. **铁律 + 用户输入清单**：生成前要求 agent 显式列举「用户输入清单」（从 manifest / 用户源码
+   提取，缺字段则补全），声明逐字保留 + 改造边界（哪些是 NAS 化 / 量化等必需改造）。
+2. **fidelity 审计维度**：在 fidelity-verifier 类 subagent 加一个维度，专门查"是否擅自替换了
+   用户的范式 / 测度 / 脚本 / 指标方向"。
+3. **deterministic 自检**：生成后用机械检查（grep / 解析结构化配置）拦"引入了用户未声明的代理"
+   这类可机器判定的漂移；语义层（方向 / 变换忠实性）归 fidelity 审计——deterministic 自检只做可
+   机械验证的，不 overclaim。
+
+> 判据：规则要从具体错误**抽象**到"用户输入即权威"这一层，可跨 workflow 复用；具体错误样本（如
+> FLOPs 代时延）只作 illustrative，不作硬编码定制。`nas-supernet` workflow（生成节点
+> `ns_train_script` / `ns_search_pipeline` / `ns_retrain` + `project-fidelity-verifier`）是本通用
+> 规则在 NAS 场景的落地样本。

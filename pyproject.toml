@@ -62,6 +62,8 @@ markers = [
     # integration：真 spawn claude 的烟雾测试。CI 默认不跑（-m "not integration"）；
     # 本地 ``pytest -m integration`` 可选跑（需 claude CLI + API key）。SPEC §7.10 / §12。
     "integration: 真 spawn claude 的集成测试（慢 / 需 API key，CI skip）",
+    # slow：CPU 慢的算法链路 smoke（如 puzzle _puzzle_scripts 全链）。
+    "slow: CPU 慢的算法链路 smoke（puzzle scripts 全链等）",
 ]
 filterwarnings = [
     # 第三方库弃用噪音（非本项目代码可修）：websockets 14+ 的 legacy 模块 + uvicorn 的

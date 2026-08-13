@@ -53,7 +53,7 @@ from orca.events.tape import Tape, read_last_complete_lines
 logger = logging.getLogger(__name__)
 
 # SPEC §3.1 in-session 衔接：守护自退 TTL 兜底（防泄漏）。72h 覆盖天级长训练
-# （nas-supernet ns_run_train / ns_retrain 边训练边推实时 loss 曲线，见 live_loss_watcher）；
+# （nas-supernet ns_run_train / ns_retrain 边训练边推实时多指标曲线，见 progress_watcher）；
 # 真实运行通常由 ``_watch_terminal`` 在终态事件时早退。CLI ``--ttl`` 可覆盖（测试用短值）。
 _DEFAULT_TTL_SECONDS = 72 * 3600
 

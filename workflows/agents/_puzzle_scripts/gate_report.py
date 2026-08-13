@@ -29,9 +29,8 @@ from typing import Any
 import torch
 
 from puzzle_common import (
-    BlockMap,
     build_latency_dummy,
-    build_student_from_arch,
+    load_optimized_flat,
     load_puzzle_adapters,
     measure_whole_model_latency,
     write_final_status,
@@ -68,11 +67,10 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Puzzle U6 gate report")
     parser.add_argument("--final_model", required=True, help="final_model.pt 路径")
     parser.add_argument("--baseline_metrics", required=True)
-    parser.add_argument("--flat_model", required=True, help="flat model .py（架构源）")
-    parser.add_argument("--build_fn", required=True)
-    parser.add_argument("--build_cfg", default="")
-    parser.add_argument("--block_map", required=True)
-    parser.add_argument("--block_library", required=True)
+    parser.add_argument(
+        "--optimized_flat", required=True,
+        help="<base>_optimized_flat.py（pz_materialize 产出；student 执行基底）",
+    )
     parser.add_argument(
         "--adapters", required=True,
         help="puzzle_adapters.py 路径（U6 §2.1：脚本唯一项目接口）",
@@ -122,35 +120,21 @@ def main(argv: list[str] | None = None) -> int:
         )
         if not isinstance(final_ckpt, dict) or not final_ckpt.get("selected_arch"):
             raise ValueError(f"{args.final_model} 缺 selected_arch 字段")
-        selected_arch = final_ckpt["selected_arch"]
         final_state_dict = final_ckpt.get("state_dict", {})
-
-        block_map = BlockMap.from_json(args.block_map)
-        device = torch.device("cpu")
-
-        # student = build_student_from_arch（不传 father_state_path：final_model 的
-        # state_dict 会覆盖 base arch；identity slot 的父权重经 build_selected→gkd 已注入）
-        student = build_student_from_arch(
-            adapters=adapters,
-            block_map=block_map,
-            selected_arch=final_ckpt,
-            block_library_dir=Path(args.block_library).resolve(),
-            device=device,
-            flat_model_path=args.flat_model,
-            build_fn=args.build_fn,
-            build_cfg=args.build_cfg,
-        )
         if not final_state_dict:
             raise RuntimeError(
                 f"{args.final_model} state_dict 为空——final_model 损坏,"
                 f"无法 gate（禁用随机 init student 假装通过）"
             )
-        missing, unexpected = student.load_state_dict(final_state_dict, strict=False)
-        if unexpected:
-            raise RuntimeError(
-                f"final_model state_dict 有 {len(unexpected)} 个 unexpected key："
-                f"{list(unexpected)[:5]}"
-            )
+
+        device = torch.device("cpu")
+
+        # student = optimized_flat.build_model()（唯一执行基底）+ strict 载 final_model.pt。
+        # materialize 自检已保证 optimized_flat 与 build_student_from_arch 逐 key 对齐 →
+        # final_model（GKD 在同结构上训练产出）strict 可载。
+        opt_flat = load_optimized_flat(args.optimized_flat)
+        student = opt_flat.build_model()
+        student.load_state_dict(final_state_dict, strict=True)
         student.eval().to(device)
 
         # U6 root cause A/K/H：evaluate 经 adapters（不再 resolve_eval_fn / eval_kind）

@@ -274,6 +274,31 @@ def load_flat_model(
     return fn(**cfg_kwargs)
 
 
+def load_optimized_flat(path: str | Path) -> Any:
+    """动态 import ``<base>_optimized_flat.py``（pz_materialize 产出的自包含最优架构）。
+
+    optimized_flat 是 GKD / gate / 交付的唯一执行基底（SPEC materialize plan）：暴露
+    ``build_model() -> nn.Module``（权重无关的最优异构架构）+ ``load_model(ckpt)``。
+    本 helper 校验 ``build_model`` 存在；目录入 sys.path 让其本地 import（若有）可解。
+    """
+    p = Path(path).resolve()
+    if not p.is_file():
+        raise FileNotFoundError(f"optimized_flat 文件不存在：{p}")
+    here = str(p.parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    spec = importlib.util.spec_from_file_location("_puzzle_optimized_flat", p)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法为 {p} 构建 module spec")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    if not callable(getattr(mod, "build_model", None)):
+        raise AttributeError(
+            f"{p} 无 callable build_model（optimized_flat 契约：须暴露 build_model）"
+        )
+    return mod
+
+
 def get_module_dummy_input(flat_module_path: str | Path) -> dict[str, Any]:
     """从 flat model 文件读 ``DUMMY_INPUT``（含 shape/dtype）。
 

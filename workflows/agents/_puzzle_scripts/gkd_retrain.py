@@ -1,15 +1,13 @@
-"""gkd_retrain.py —— Puzzle 末段全局 KD 重训（U6 适配器架构）。
+"""gkd_retrain.py —— Puzzle 末段全局 KD 重训（optimized_flat 执行基底）。
 
-U6 改造（root cause A/K/D）：
-  - 删 ``_flatten_model_output`` / ``is_classification`` / 写死 ``cross_entropy`` /
-    ``logits_kd_loss`` 分支：KD loss 走 ``adapters.kd_loss(s_out, t_out, labels)``，
-    硬标签监督走 ``adapters.task_loss(s_out, labels)``（None 则无）。
-  - forward 走 ``adapters.forward_model(model, batch)``（不再假设单 tensor）。
-  - 训练数据走 ``adapters.train_iter()``；labels 走 ``adapters.extract_labels(batch)``。
+materialize 改造（docs/plans/2026-08-13-puzzle-materialize-optimized-flat.md）：
+  - student 构造**严格走 optimized_flat**：``load_optimized_flat(path).build_model()``，
+    再 strict 载 selected_model.pt（= 父⊕BLD 合成权重）——不再 ``build_student_from_arch``
+    运行时重建。optimized_flat 是 GKD/gate/交付的唯一执行基底（正确性由构造保证）。
+  - KD loss / task loss / forward / 数据 全走 ``adapters``（U6 root cause D 不变）。
 
-读 selected_model + flat/adapters（teacher，冻结）：
-  - 端到端 KD：``adapters.kd_loss``（agent 按任务移植正确 KD：cosine/KL/MSE/任务 loss）。
-  - 可选硬标签监督：``adapters.task_loss``（agent 移植用户任务 loss；非监督返 None）。
+读 optimized_flat + selected_model + adapters（teacher，冻结）→ 端到端 KD → final_model.pt。
+final_model.pt 与 optimized_flat.build_model() 同结构（strict 可载）——交付即此文件 + 权重。
 
   - 写 ``runs/retrain/progress.jsonl``：``{"step":N,"metrics":{...}}``
   - 输出 ``runs/retrain/final_model.pt``（= retrain_best.pth 契约路径）
@@ -28,21 +26,19 @@ from pathlib import Path
 import torch
 
 from puzzle_common import (
-    BlockMap,
     build_pretrained_model,
-    build_student_from_arch,
+    load_optimized_flat,
     load_puzzle_adapters,
 )
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Puzzle U6 GKD 末段重训")
-    parser.add_argument("--selected_model", required=True, help="selected_model.pt 路径")
-    parser.add_argument("--flat_model", required=True, help="flat_model.py（架构源）")
-    parser.add_argument("--build_fn", required=True)
-    parser.add_argument("--build_cfg", default="")
-    parser.add_argument("--block_map", required=True)
-    parser.add_argument("--block_library", required=True)
+    parser = argparse.ArgumentParser(description="Puzzle GKD 末段重训（optimized_flat 基底）")
+    parser.add_argument("--selected_model", required=True, help="selected_model.pt 路径（父⊕BLD）")
+    parser.add_argument(
+        "--optimized_flat", required=True,
+        help="<base>_optimized_flat.py（pz_materialize 产出；student 执行基底）",
+    )
     parser.add_argument(
         "--adapters", required=True,
         help="puzzle_adapters.py 路径（U6 §2.1：脚本唯一项目接口）",
@@ -77,46 +73,27 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(f"{args.selected_model} 缺 selected_arch 字段")
         selected_arch = selected_ckpt["selected_arch"]
         selected_state_dict = selected_ckpt.get("state_dict", {})
+        if not selected_state_dict:
+            raise RuntimeError(
+                f"{args.selected_model} state_dict 为空——无从 GKD（缺合成权重）"
+            )
 
-        block_map = BlockMap.from_json(args.block_map)
         device = torch.device("cpu")
 
-        # teacher = father（预训练，冻结）—— U6：adapters.build_model + load_pretrained
+        # teacher = father（预训练，冻结）—— adapters.build_model + load_pretrained
         teacher = build_pretrained_model(adapters)
         teacher.eval().to(device)
         for p in teacher.parameters():
             p.requires_grad_(False)
 
-        # student = 共享 helper 重建异构架构（U6：经 adapters 注入 father 权重）。
-        student = build_student_from_arch(
-            adapters=adapters,
-            block_map=block_map,
-            selected_arch=selected_ckpt,
-            block_library_dir=Path(args.block_library).resolve(),
-            device=device,
-            flat_model_path=args.flat_model,
-            build_fn=args.build_fn,
-            build_cfg=args.build_cfg,
-        )
-        # 载 selected_model.pt 的整体 state_dict（含未被替换模块的父权重）
-        if selected_state_dict:
-            missing, unexpected = student.load_state_dict(
-                selected_state_dict, strict=False
-            )
-            if unexpected:
-                raise RuntimeError(
-                    f"selected_model state_dict 有 {len(unexpected)} 个 unexpected "
-                    f"key（schema 不一致）：{list(unexpected)[:5]}"
-                )
-            if missing:
-                print(
-                    f"WARN: load_state_dict missing {len(missing)} keys "
-                    f"(variant factory init): {list(missing)[:5]}",
-                    file=sys.stderr,
-                )
+        # student = optimized_flat.build_model()（唯一执行基底）+ strict 载 selected_model.pt。
+        # key 对齐已由 pz_materialize 自检保证（optimized_flat vs build_student_from_arch）。
+        opt_flat = load_optimized_flat(args.optimized_flat)
+        student = opt_flat.build_model()
+        student.load_state_dict(selected_state_dict, strict=True)
         student.to(device).train()
 
-        # U6 root cause D：KD loss + 硬标签监督全走适配器（删 is_classification / 写死 CE）。
+        # KD loss + 硬标签监督全走适配器（U6 root cause D 不变）。
         kd_loss_fn = adapters.kd_loss
         task_loss_fn = adapters.task_loss
         forward_fn = adapters.forward_model
@@ -162,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "state_dict": {k: v.cpu() for k, v in student.state_dict().items()},
                 "selected_arch": selected_arch,
+                "optimized_flat": str(Path(args.optimized_flat).resolve().name),
                 "epochs": args.epochs,
                 "final_step": step,
             },
@@ -171,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
         result = {
             "status": "executed",
             "artifacts": [str(final_model_path)],
-            "assessment": f"GKD 完成：{args.epochs} epoch / {step} step",
+            "assessment": f"GKD 完成：{args.epochs} epoch / {step} step（optimized_flat 基底）",
             "max_retries_hit": False,
             "healed_files": [],
             "fidelity_retriggered": False,

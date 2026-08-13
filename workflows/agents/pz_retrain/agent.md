@@ -8,9 +8,10 @@ tools: [bash, read, write, edit, grep, glob, task]
 
 上游已完成：pz_expand 产 block_map / flat_model / baseline_metrics / project_manifest，pz_build_library
 产 block_library + bld_summary.json，pz_score 产 scores / latency_table，pz_select 产
-`selected_arch`（见资源锚点）。**你的工作：生成 `run_retrain.sh` launcher（调预写
-`build_selected.py` + `gkd_retrain.py`），fidelity 复查，把它跑到"真正完成"——报错就按白名单自修
-（仅 run_retrain.sh 的 launcher 参数 / 路径；build_selected.py / gkd_retrain.py 本体禁 edit → fail loud），
+`selected_arch`，**pz_materialize 产 `<base>_optimized_flat.py` + `selected_model.pt`（父⊕BLD）**（见资源锚点）。
+**你的工作：生成 `run_retrain.sh` launcher（调预写 `gkd_retrain.py`——student 严格走 optimized_flat，
+不再调 build_selected），fidelity 复查，把它跑到"真正完成"——报错就按白名单自修
+（仅 run_retrain.sh 的 launcher 参数 / 路径；gkd_retrain.py 本体禁 edit → fail loud），
 修到 GKD 完整跑完产出真 final ckpt `runs/retrain/final_model.pt`，再回显真实 JSON。**
 你不是在描述/总结上游；你生成 launcher、跑它、按白名单修、再跑。
 
@@ -47,14 +48,13 @@ tools: [bash, read, write, edit, grep, glob, task]
   - `scripts/check_progress_contract.py` —— progress.jsonl 契约校验
 - `{{ subagents_root }}/project-fidelity-verifier.md` = fidelity-verifier subagent body
   （point-to-file 协议，Step 3b / 3g；render 期 inline 为绝对路径，cwd 无关）。
-- `{{ pz_select.output.selected_arch }}` = 上游选定架构（Jinja 渲染，dict；生成 run_retrain.sh 的
-  架构来源）。
-- `workflows/agents/_puzzle_scripts/build_selected.py` = 预写脚本：读 selected_arch + block_library +
-  flat_model + adapters，逐层把 attention/ffn slot 换成选定 variant（载块库权重），identity 保留
-  父权重（经 `adapters.load_pretrained`）→ 实例化异构架构 `selected_model.pt`。
-- `workflows/agents/_puzzle_scripts/gkd_retrain.py` = 预写脚本：读 selected_model + flat/adapters
-  （teacher，冻结）+ adapters.train_iter 数据，端到端 KD（`adapters.kd_loss` + 可选
-  `adapters.task_loss`，agent 移植正确 loss 公式）→ `final_model.pt`。
+- `{{ pz_select.output.selected_arch }}` = 上游选定架构（Jinja 渲染，dict）。
+- `{{ pz_materialize.output.optimized_flat_path }}` = 上游 pz_materialize 产出的自包含最优架构
+  `<base>_optimized_flat.py`（student 唯一执行基底；GKD 经 `load_optimized_flat` 用它建 student）。
+- `workflows/agents/_puzzle_scripts/gkd_retrain.py` = 预写脚本：读 **optimized_flat** +
+  selected_model（父⊕BLD，已由 pz_materialize 经 build_selected 合成）+ adapters（teacher，冻结）+
+  adapters.train_iter 数据，端到端 KD（`adapters.kd_loss` + 可选 `adapters.task_loss`）→ `final_model.pt`。
+  student 构造**严格走 optimized_flat.build_model()**（不再 build_student_from_arch 运行时重建）。
 
 ## 行为痕迹 marker 文件（生成 / self-heal 期间维护，约定）
 
@@ -88,9 +88,10 @@ tools: [bash, read, write, edit, grep, glob, task]
      `adapters.task_loss` / 数据管道经 `adapters.train_iter`）——禁 edit（预写脚本，铁律 5b）。
      根因在 gkd_retrain.py → fail loud。
 5. **禁碰清单（硬铁律，违反=架构破坏，唯一 failed 触发）**：以下文件**只许 read，禁 edit/write**——
-   `block_map.json`、`<base>_flat.py`、`baseline_metrics.json`、`project_manifest.md`、
-   `bld_summary.json`、`block_library/*.pt`、`scores.jsonl`、`latency_table.jsonl`、
-   `selected_arch.json`、`_puzzle_scripts/build_selected.py` / `gkd_retrain.py`（预写脚本）、
+   `block_map.json`、`<base>_flat.py`、`<base>_optimized_flat.py`（pz_materialize 产物，student 基底）、
+   `baseline_metrics.json`、`project_manifest.md`、`bld_summary.json`、`block_library/*.pt`、
+   `scores.jsonl`、`latency_table.jsonl`、`selected_arch.json`、`selected_model.pt`、
+   `puzzle_adapters.py`、`_puzzle_scripts/gkd_retrain.py`（预写脚本）、
    `{{ inputs.project_root }}` 下**源文件**（**例外**：`{{ inputs.project_root }}/artifacts/`
    是本 workflow 产物目录树，可写）。若 self-heal 需要改这些 → **不要改**，记 last_error 到
    `.pz_retrain_assessment.txt`，进 Step 4 输出 `{"status":"failed"}`。
@@ -154,12 +155,13 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
 ### 3a. 生成 run_retrain.sh（仅 `run_retrain.sh` 不存在时；首次/跨 run 首启）
 
 先按铁律 1 检查上游契约：`block_map.json` / `<base>_flat.py` / `baseline_metrics.json` /
-`project_manifest.md` / `block_library/` / `bld_summary.json` 任一缺 → 直接进 Step 4 输出
-`{"status":"failed"}`，assessment 写明缺哪个文件。
+`project_manifest.md` / `block_library/` / `bld_summary.json` / **`<base>_optimized_flat.py`** /
+**`selected_model.pt`** 任一缺 → 直接进 Step 4 输出 `{"status":"failed"}`，assessment 写明缺哪个文件。
 
-据 project_manifest.md + selected_arch + block_map，用 `write` 生成**到 `$ORCA_ARTIFACTS_DIR/` 根**：
+据 project_manifest.md + optimized_flat + selected_model，用 `write` 生成**到 `$ORCA_ARTIFACTS_DIR/` 根**：
 
-- `run_retrain.sh`：launcher。`cd $ORCA_ARTIFACTS_DIR` + 调预写脚本：
+- `run_retrain.sh`：launcher。`cd $ORCA_ARTIFACTS_DIR` + 调预写 GKD 脚本（student 严格走
+  optimized_flat；build_selected 已由上游 pz_materialize 完成，本节点不重调）：
   ```bash
   REPO_ROOT="$(python3 -c "
   from pathlib import Path, os
@@ -169,26 +171,10 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
           print(parent.parent); break
   ")"
 
-  # 1. 实例化异构架构（selected_arch.json 是 mip_select.py 的产出文件路径，非内联 JSON）
-  python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/build_selected.py" \
-    --selected_arch "$ORCA_ARTIFACTS_DIR/selected_arch.json" \
-    --block_map "$ORCA_ARTIFACTS_DIR/block_map.json" \
-    --flat_model "$ORCA_ARTIFACTS_DIR/<base_name>_flat.py" \
-    --build_fn "<manifest.yaml 的 model.build_entry>" \
-    --build_cfg "{{ inputs.build_cfg }}" \
-    --block_library "$ORCA_ARTIFACTS_DIR/block_library" \
-    --adapters "$ORCA_ARTIFACTS_DIR/puzzle_adapters.py" \
-    --manifest "$ORCA_ARTIFACTS_DIR/manifest.yaml" \
-    --output_dir "$ORCA_ARTIFACTS_DIR"
-
-  # 2. GKD 末段重训
+  # GKD 末段重训（optimized_flat 基底 + selected_model 起点 = 父⊕BLD）
   python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/gkd_retrain.py" \
     --selected_model "$ORCA_ARTIFACTS_DIR/selected_model.pt" \
-    --flat_model "$ORCA_ARTIFACTS_DIR/<base_name>_flat.py" \
-    --build_fn "<manifest.yaml 的 model.build_entry>" \
-    --build_cfg "{{ inputs.build_cfg }}" \
-    --block_map "$ORCA_ARTIFACTS_DIR/block_map.json" \
-    --block_library "$ORCA_ARTIFACTS_DIR/block_library" \
+    --optimized_flat "$ORCA_ARTIFACTS_DIR/<base_name>_optimized_flat.py" \
     --adapters "$ORCA_ARTIFACTS_DIR/puzzle_adapters.py" \
     --manifest "$ORCA_ARTIFACTS_DIR/manifest.yaml" \
     --output_dir "$ORCA_ARTIFACTS_DIR" \
@@ -206,8 +192,10 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
 
   **adapters 桥接（必读）**：launcher 经 `--adapters <path>` + `--manifest <path>` 桥接——脚本读
   adapters 拿 `kd_loss` / `task_loss` / `train_iter` / `extract_labels` / `forward_model` /
-  `evaluate`（13 项 API）；`--build_fn` 保留作 flat 实例化入口。
-  - `--build_fn` ← `manifest.model.build_entry`
+  `evaluate`（13 项 API）。student 架构经 `--optimized_flat` 入（脚本 `load_optimized_flat` 建 student），
+  不再接 `--build_fn` / `--flat_model` / `--block_map` / `--block_library`（架构已 bake 进 optimized_flat）。
+  - `--optimized_flat` ← `$ORCA_ARTIFACTS_DIR/<base>_optimized_flat.py`（pz_materialize 产出）
+  - `--selected_model` ← `$ORCA_ARTIFACTS_DIR/selected_model.pt`（pz_materialize 经 build_selected 合成）
   - `--adapters` ← 固定 `$ORCA_ARTIFACTS_DIR/puzzle_adapters.py`（pz_expand 生成）
   - `--manifest` ← 固定 `$ORCA_ARTIFACTS_DIR/manifest.yaml`
   manifest 缺 `training_and_evaluation.adapters_entry` → 进 Step 4 输出 `{"status":"failed"}`，

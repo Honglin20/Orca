@@ -43,11 +43,7 @@ for parent in p.parents:
 python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/gate_report.py" \
   --final_model "$ORCA_ARTIFACTS_DIR/runs/retrain/final_model.pt" \
   --baseline_metrics "$ORCA_ARTIFACTS_DIR/baseline_metrics.json" \
-  --flat_model "$ORCA_ARTIFACTS_DIR/<base_name>_flat.py" \
-  --build_fn "<manifest.yaml 的 model.build_entry，agent 读 manifest 桥接>" \
-  --build_cfg "{{ inputs.build_cfg }}" \
-  --block_map "$ORCA_ARTIFACTS_DIR/block_map.json" \
-  --block_library "$ORCA_ARTIFACTS_DIR/block_library" \
+  --optimized_flat "$ORCA_ARTIFACTS_DIR/<base_name>_optimized_flat.py" \
   --adapters "$ORCA_ARTIFACTS_DIR/puzzle_adapters.py" \
   --manifest "$ORCA_ARTIFACTS_DIR/manifest.yaml" \
   --latency_unit "{{ inputs.latency_unit }}" \
@@ -57,9 +53,11 @@ python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/gate_report.py" \
 ```
 
 脚本契约（预写，pz_report 不验证）：
-- 入参：`--adapters` + `--manifest`（无 `--eval_fn` / `--eval_kind`）。`--build_fn`
-  由你读 manifest 桥接。`--latency_script_path` 与 pz_expand 同源（保证 latency 测量一致）。
-  `--latency_reduction_target`（默认 0.5）= LAT AC 比例：传 0.7 则要求 final_latency ≤ baseline×0.7。
+- 入参：`--optimized_flat`（pz_materialize 产出的 student 执行基底）+ `--adapters` + `--manifest`。
+  student 架构经 optimized_flat.build_model() 建 + strict 载 final_model.pt（不再 build_student_from_arch
+  重建，也不接 `--flat_model`/`--build_fn`/`--block_map`/`--block_library`）。`--latency_script_path`
+  与 pz_expand 同源（保证 latency 测量一致）。`--latency_reduction_target`（默认 0.5）= LAT AC 比例：
+  传 0.7 则要求 final_latency ≤ baseline×0.7。
 - 行为：
   1. 加载 final_model + 经 `adapters.evaluate(model)` 测 final acc（方向由 `adapters.METRIC_DIRECTION`）+
      measure_module_latency / latency_script_path 测 final latency。

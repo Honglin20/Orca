@@ -474,10 +474,20 @@ def test_gkd_retrain_runs_with_adapter_losses(tmp_path: Path) -> None:
     assert proc.returncode == 0, f"build_selected 失败：\n{proc.stderr}"
     selected_model = output_dir / "selected_model.pt"
 
+    # materialize 产 optimized_flat（gkd 的 student 执行基底）
+    proc = subprocess.run([sys.executable, str(_SCRIPTS_DIR / "materialize_optimized.py"),
+        "--flat_model", str(paths["flat"]), "--build_fn", "build_model", "--build_cfg", "",
+        "--selected_arch", str(selected_arch), "--block_map", str(block_map_path),
+        "--selected_model", str(selected_model), "--adapters", str(paths["adapters"]),
+        "--block_library", str(block_lib), "--output_dir", str(output_dir), "--base_name", "tiny"],
+        capture_output=True, text=True)
+    assert proc.returncode == 0, f"materialize 失败：\n{proc.stderr}"
+    optimized_flat = output_dir / "tiny_optimized_flat.py"
+
     proc = subprocess.run([sys.executable, str(_SCRIPTS_DIR / "gkd_retrain.py"),
-        "--selected_model", str(selected_model), "--block_map", str(block_map_path),
-        "--flat_model", str(paths["flat"]), "--build_fn", "build_model",
-        "--adapters", str(paths["adapters"]), "--block_library", str(block_lib),
+        "--selected_model", str(selected_model),
+        "--optimized_flat", str(optimized_flat),
+        "--adapters", str(paths["adapters"]),
         "--epochs", "1", "--output_dir", str(output_dir)],
         capture_output=True, text=True)
     assert proc.returncode == 0, f"gkd_retrain 失败：\n{proc.stderr}"

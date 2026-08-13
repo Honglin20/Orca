@@ -174,30 +174,49 @@ def test_puzzle_full_chain_cpu(tmp_path: Path) -> None:
         "--block_map", str(block_map_path),
         *build_args,
         "--block_library", str(block_library_dir),
+        "--adapters", str(adapters_path),
         "--output_dir", str(output_dir),
     ])
     selected_model_path = output_dir / "selected_model.pt"
     assert selected_model_path.is_file()
 
-    # 7. gkd_retrain
+    # 6.5 materialize（产 optimized_flat 自包含最优架构；key 对齐 + standalone forward 自检）
+    optimized_flat_path = output_dir / "tiny_optimized_flat.py"
+    _, mat_out, _ = _run("materialize_optimized.py", [
+        "--flat_model", str(flat_model_path),
+        "--build_fn", "build_model",
+        "--build_cfg", "",
+        "--selected_arch", str(selected_arch_path),
+        "--block_map", str(block_map_path),
+        "--selected_model", str(selected_model_path),
+        "--adapters", str(adapters_path),
+        "--block_library", str(block_library_dir),
+        "--output_dir", str(output_dir),
+        "--base_name", "tiny",
+    ])
+    mat_result = _parse_result_json(mat_out)
+    assert mat_result["status"] == "executed", f"materialize 自检失败：{mat_result}"
+    assert mat_result["key_alignment_passed"] is True
+    assert mat_result["forward_selfcheck_passed"] is True
+    assert optimized_flat_path.is_file()
+
+    # 7. gkd_retrain（student 严格走 optimized_flat）
     _run("gkd_retrain.py", [
         "--selected_model", str(selected_model_path),
-        "--block_map", str(block_map_path),
-        *build_args,
-        "--block_library", str(block_library_dir),
+        "--optimized_flat", str(optimized_flat_path),
+        "--adapters", str(adapters_path),
         "--epochs", "1",
         "--output_dir", str(output_dir),
     ])
     final_model_path = output_dir / "runs" / "retrain" / "final_model.pt"
     assert final_model_path.is_file()
 
-    # 8. gate_report（latency_reduction_target 默认 0.5；evaluation 经 adapters）
+    # 8. gate_report（optimized_flat 基底 + adapters.evaluate；latency_reduction_target 默认 0.5）
     _run("gate_report.py", [
         "--final_model", str(final_model_path),
         "--baseline_metrics", str(baseline_metrics_path),
-        "--block_map", str(block_map_path),
-        *build_args,
-        "--block_library", str(block_library_dir),
+        "--optimized_flat", str(optimized_flat_path),
+        "--adapters", str(adapters_path),
         "--latency_unit", "ms",
         "--output_dir", str(output_dir),
     ])

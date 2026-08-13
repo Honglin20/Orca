@@ -170,6 +170,7 @@ Tier B 项读代码无果时，agent **不要**造假（`torch.randn` / 复用 t
    ```
    - 退出码非 0 → 读 stderr，**自己改**，再验。循环直到 0 error。warnings 可接受但要跟用户提一句。
    - **agent prompt 洁净检查（创建完/改完 workflow 必做）**：跑 `tars validate`（含 `_check_prompt_dev_residue` lint，warning 不阻断）+ 按 [reference/agent-prompt-cleanliness-contract.md](reference/agent-prompt-cleanliness-contract.md) 做受众翻转通读——确认 agent.md body 无 plan/issue/源码路径/测试项目名等开发期残留，warning 清零。
+   - **用户输入权威检查（agent 涉及 port / 包装用户逻辑时必做）**：若节点要 port / 复用 / 包装用户原项目的训练范式 / 评价 metric / 数据管道 / 用户脚本，按 [reference/agent-prompt-cleanliness-contract.md](reference/agent-prompt-cleanliness-contract.md) §10 落地「用户输入权威三件套」（铁律+清单 / fidelity 维度 / deterministic 自检）——从错误抽象通用规则，而非针对具体错误定制。
    - （`orca` 是 in-session shell，无 validate 子命令；校验一律走 `tars validate`。）
    - `tars validate` 现含**引用合规校验**（除结构校验外）：① 自引用（节点 prompt/command/values 禁引用自身 `.output`，render 期会崩）；② output_schema 字段对齐（strict schema 下字段拼写错必报）；③ 文件夹 agent scripts 路径存在性（`$ORCA_AGENT_RESOURCES/scripts/<f>` 必须真实存在）；④ input 三档标签（`description` 缺 `[ask]`/`[infer]`/`[default]`/`[advanced]` 起头 → warning）。前 3 条 error 阻断，第 4 条 warning 不阻断但会显示。
    - validate 通过后**必跑 input 三档 checklist**（详 SPEC §6）：

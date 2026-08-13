@@ -1,6 +1,6 @@
 # 2026-08-12 · nas-supernet-v3 retrain 拆分：ns3_retrain_script + ns3_retrain
 
-> commit SHA 待回填（用户 commit 后补入 CHANGELOG）。
+> commit SHA 待回填（已 commit 为 `bd05ce9`，用户 commit U3 时统一回填三处文档）。
 
 ## 背景
 

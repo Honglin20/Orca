@@ -160,6 +160,34 @@ target_latency = baseline_latency / 2   # 直接对接 LAT AC
 - **数据**:CPU 上 2327-user k-NN 较慢(全程全网),GKD 训练也用 train.py 的 InfoNCE loop。
 - 结论:target 是 **multi-input + InfoNCE** 模型,P4 工作量 > mnist_trf(单输入 + 分类)。mnist E2E 先行验证 workflow,再扩 multi-input 支持 + 适配 target。
 
+### 5.2.2 自适应路径(2026-08-12 用户指导:不改 target 源码 + 镜像 nas-supernet)
+**铁律**:`target/` 源码零改;adapter 全写 `$ORCA_ARTIFACTS_DIR`(workflow 自己的树,如 nas-supernet)。
+**手段 = 镜像 nas-supernet ns_expand 的 LLM 自适应 flatten**(非确定性 expand_model.py):
+- pz_expand agent 读 target/model.py + train.py → 在 artifacts 产 self-contained `target_flat.py`:
+  - 复制 CrossFusion + 依赖类;加 **Wrapper** 把 4 输入打包成单 tensor(state_dict keys 与 pre_trained.pth 一致 → load 零 missing)。
+  - `build_model() + DUMMY_INPUT{shape:[1,1920]} + __main__` 自检 block。
+  - `eval_model(model)->float`(k-NN,用传入 model)+ `build_dataloader()`(pack 4 路→单 tensor)。
+- **fidelity smoke**:load pre_trained.pth 进 flat → 零 missing/unexpected(否则 fail loud)。
+- **eval smoke**:加载原模型跑 eval → 与 manifest 记录的 baseline 一致。
+- 不便确定性跑的(如多输入 forward)→ 派 agent/verifier 审查(ns_expand 模式)。
+- manifest 驱动下游:eval 入口 / ckpt 路径 / train 入口 / data / eval_kind 全在 manifest,下游脚本读 manifest(非 workflow inputs)。
+
+## 9. 输入契约对齐 nas-supernet(2026-08-12 用户指导)
+当前 puzzle.yaml 要求 `build_fn/eval_fn/eval_kind/train_loader_fn/pretrained_ckpt` 为 [ask]——违背自适应。**收缩到与 nas-supernet 一致**:
+- `[ask]`: project_root / model_path / target_latency(+ accuracy_tolerance 作精度目标)
+- `[advanced]`: latency_unit / latency_script_path / block_candidates
+- `[default]`: seed
+- 删除 build_fn/eval_fn/eval_kind/train_loader_fn/pretrained_ckpt 作 user input——由 pz_expand agent **发现**写进 manifest,下游读 manifest。
+
+## 10. pz_expand 自适应重构(镜像 ns_expand Step 1)
+1. **Discover**:读 project → manifest(model 结构/训练 eval paradigm/loss/metric/ckpt 路径/eval 入口/train 入口/data)。
+2. **Flatten**:产 self-contained flat + `__main__`(build_model + DUMMY_INPUT)。
+3. **Fidelity smoke**:load 预训练 ckpt 进 flat → 零 missing(fail loud 校验)。
+4. **Eval smoke**:加载原模型跑 eval → 与 manifest baseline 一致;不便跑→派 verifier。
+5. **block_map + 搜索空间张开**:基于 flat + 知识库(block 类型 + depth via no_op + 每层 width via ffn 剪枝)。
+6. **baseline 实测**:acc(eval_fn)+ latency(measure 或 wrap latency_script_path)。
+7. workflow-verifier + memory-verifier 闭环(point-to-file)。
+
 ### 5.3 mnist_trf fixture 契约(P3,待建 `tests/e2e_puzzle/fixtures/mnist_trf/`)
 - `model.py`: PatchEmbed(Conv2d 1→embed_dim, kernel 3, stride 2 → flatten [B, num_patches, embed_dim]) + N×`TransformerBlock`(MHSA + FFN + 2 LayerNorm + residual) + mean-pool + Linear(embed_dim, 10)。
 - 保留 `build_model(**cfg)` 工厂 + `KNOBS={"num_blocks","embed_dim","num_heads","d_ff"}` + `DUMMY_INPUT={"shape":[1,1,28,28]}`,使 train.py/eval.py 零改。
