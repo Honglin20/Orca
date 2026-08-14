@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import functools
 import importlib.util
+import inspect
 import json
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -34,7 +36,8 @@ import torch
 import torch.nn as nn
 
 # 候选块实现库（puzzle_blocks）由 load_catalog 函数内 lazy import（避免循环）。
-# builtin factory 字符串形如 ``puzzle_blocks::make_<name>``。
+# builtin factory 字符串形如 ``puzzle_blocks::make_<name>`` 或
+# ``transformer_layer_variants::make_<name>_layer``（catalog 契约）。
 
 
 # ── Slot / BlockMap ───────────────────────────────────────────────────────────
@@ -43,7 +46,8 @@ import torch.nn as nn
 class Slot:
     """一个可替换的 transformer sub-block slot（SPEC v2 §4.1）。
 
-    ``kind`` 替代 v1 的 ``slot_type``（E3，开放标签 attention/ffn/conv/moe/custom）。
+    ``kind`` 替代 v1 的 ``slot_type``（E3，开放标签 attention/ffn/conv/moe/custom/
+    transformer_layer——后者为 layer 粒度，design draft §2.1）。
     字段语义详见 SPEC v2 §4.1；本 dataclass 仅承载结构信息，与项目 forward 签名无关。
     """
     layer_idx: int
@@ -60,6 +64,11 @@ class Slot:
     activation: str | None = None
     ffn_struct: str = "standard"
     mask_load_bearing: bool = False
+    # transformer_layer kind 专用（design draft §2.1）：max_seq_len = mixer 序列上界
+    # （random_synthesizer 等 mixing-matrix 变体需 pz_baseline trace 原层输入序列长度回填）；
+    # norm_type = 原层 norm 类型（溯源记录**非** dispatch 依据，变体自带 norm 不强制照搬）。
+    max_seq_len: int | None = None
+    norm_type: str | None = None
 
 
 @dataclass
@@ -332,7 +341,6 @@ def is_passthrough(variant: str) -> bool:
 
 # ── candidate catalog loader（SPEC v2 §5）──────────────────────────────────────
 
-_ALL_KINDS: tuple[str, ...] = ("attention", "ffn", "conv", "moe", "custom")
 _CATALOG_PATH = Path(__file__).resolve().parent / "candidate_catalog.yaml"
 
 
@@ -351,29 +359,58 @@ class CatalogEntry:
     description: str
 
 
+# builtin factory 源模块白名单（catalog 契约边界）。新加 builtin 源在此登记。
+_ALLOWED_BUILTIN_MODULES: tuple[str, ...] = ("puzzle_blocks", "transformer_layer_variants")
+
+# factory 自包含异构父层签名适配的源模块（不需外层 _wrap/_wrap_mask）。
+#
+# 设计选择（为什么按**模块名**而非 per-entry ``wrapped: bool`` catalog 字段）：
+# builtin 源模块天然按 forward 签名契约组织——同一模块的所有 factory 共享同一套
+# 父层签名契约（puzzle_blocks = 单块 ``forward(x)``；transformer_layer_variants =
+# 整层 ``forward(x, src_mask=None, *args, **kwargs)`` 自含 ``_extract_mask``）。模块名
+# 是该契约的自然 key，per-entry 字段会引入冗余（每条 entry 都要标同值）+ yaml schema
+# 扩展成本。**假设**：未来 builtin 模块仍按"每模块一种 wrap 策略"组织；若某模块混用
+# wrap/no-wrap factory（YAGNI 当前无此例），改为 per-entry 字段。
+_NO_WRAP_BUILTIN_MODULES: frozenset[str] = frozenset({"transformer_layer_variants"})
+
+
 def _resolve_builtin_factory(
     spec: str, params: dict[str, Any], mask_aware: bool = False
 ) -> Callable[[Slot], nn.Module]:
-    """``puzzle_blocks::make_<name>`` + params → 统一 factory(slot)。
+    """``module::func`` + params → 统一 factory(slot)。
 
-    ``mask_aware=True`` 时用 ``puzzle_blocks._wrap_mask``（保留 attn_mask kwarg，
-    SPEC U6 §3 root cause F），否则用 ``puzzle_blocks._wrap``（剥 kwargs）。
+    源模块白名单（``_ALLOWED_BUILTIN_MODULES``）：
+      - ``puzzle_blocks``：单块候选（attention/ffn），forward(x) 不收 kwargs → 用
+        ``_wrap``（剥 kwargs）或 ``_wrap_mask``（保留 attn_mask kwarg，mask-aware）包成
+        ``_KwargPassthrough``/``_MaskPassthrough`` 适配异构父层签名。
+      - ``transformer_layer_variants``：layer 变体（transformer_layer kind），forward
+        自包含 ``(x, src_mask=None, *args, **kwargs)`` → **不 wrap**（layer 自处理异构
+        父层签名，design draft §4.4）。``mask_aware`` 标志对 layer 变体无 wrapping 效果
+        （catalog 仍记录语义：vanilla_layer 真 attn_mask，mask-blind 变体由 MIP acc 惩罚）。
     """
     import puzzle_blocks  # lazy import，断循环
 
     if "::" not in spec:
         raise ValueError(f"builtin factory 须为 'module::func' 形态，得到 {spec!r}")
     mod_name, func_name = spec.split("::", 1)
-    if mod_name != "puzzle_blocks":
+    if mod_name not in _ALLOWED_BUILTIN_MODULES:
         raise ValueError(
-            f"builtin factory 模块必须是 puzzle_blocks（catalog 契约），得到 {mod_name!r}"
+            f"builtin factory 模块必须是 puzzle_blocks 或 transformer_layer_variants"
+            f"（catalog 契约），得到 {mod_name!r}"
         )
-    fn = getattr(puzzle_blocks, func_name, None)
+    if mod_name == "transformer_layer_variants":
+        import transformer_layer_variants  # lazy import，断循环
+        src_module = transformer_layer_variants
+    else:
+        src_module = puzzle_blocks
+    fn = getattr(src_module, func_name, None)
     if not callable(fn):
-        raise AttributeError(f"puzzle_blocks 无 callable {func_name!r}（catalog 引用）")
+        raise AttributeError(f"{mod_name} 无 callable {func_name!r}（catalog 引用）")
     bound: Callable[[Slot], nn.Module] = (
         functools.partial(fn, **params) if params else fn
     )
+    if mod_name in _NO_WRAP_BUILTIN_MODULES:
+        return bound
     wrapper = puzzle_blocks._wrap_mask if mask_aware else puzzle_blocks._wrap
     return wrapper(bound)
 
@@ -459,7 +496,7 @@ def get_candidate(name: str, catalog: dict[str, CatalogEntry] | None = None) -> 
 
 
 def get_default_candidates() -> dict[str, list[str]]:
-    """默认候选集（SPEC v2 §5.4 / D4）。"""
+    """默认候选集（SPEC v2 §5.4 / D4；transformer_layer = design draft §2.2）。"""
     return {
         "attention": [
             "identity",
@@ -475,6 +512,18 @@ def get_default_candidates() -> dict[str, list[str]]:
         "conv": ["identity"],
         "moe": ["identity"],
         "custom": ["identity"],
+        # layer 粒度（design draft §2.2）：候选 = 完整 transformer encoder layer 变体
+        # （attn 变体 + 标准 FFN + 2×LN + 2×residual）。identity 必入（MIP floor 锚）。
+        # F1：no_op_layer 不入候选——整层 passthrough = 删层 = 改深度，违反「禁 gaming」铁律
+        # （L5 E2E 紧预算下 MIP 全选 no_op_layer 删层）。_NoOpLayer 仅供 §6.7 floor 直接 import。
+        "transformer_layer": [
+            "identity",
+            "vanilla_layer",
+            "random_synthesizer_layer",
+            "relu_attention_layer",
+            "fnet_layer",
+            "softs_star_layer",
+        ],
     }
 
 
@@ -532,12 +581,17 @@ def is_candidate_valid_for_slot(
     返回 False 表示该 candidate 不适用此 slot，应在枚举处被过滤（不进 BLD/score/
     build_selected）。规则：
       - passthrough（identity）：永远 valid。
-      - no_op（零输出块）要求 in_dim == out_dim；非方 slot 在此收缩候选，避免 factory
-        在 BLD/score 期 raise 崩整链。
+      - no_op 要求 in_dim == out_dim；非方 slot 在此收缩候选，避免 factory 在
+        BLD/score 期 raise 崩整链。（F1：no_op_layer 已退出候选集——本函数不再校验它，
+        get_candidate("no_op_layer") 对默认 catalog 直接 raise，与「永不回候选集」一致。）
       - 跨 kind 适用性：``slot.kind not in entry.kinds`` → False。
       - E6：entry.requires_ffn_struct 非空 → ``slot.ffn_struct`` 必须在其中。
       - E8：slot.mask_load_bearing=True 且 entry.mask_aware=False → 拒绝
         （mask-bearing slot 至少能选 mask_aware 候选 + identity）。
+        **例外**：``slot.kind == "transformer_layer"`` 跳过 E8（design draft L13）——
+        layer 变体 forward 自包含 mask 适配（``_extract_mask`` 抽 attn_mask/src_mask），
+        mask-blind 变体（fnet/synthesizer/softs）在 mask-bearing slot 的精度损失由
+        MIP acc 自然惩罚（不硬过滤）。
     """
     entry = get_candidate(name, catalog)
     if entry.source == "passthrough":
@@ -549,7 +603,11 @@ def is_candidate_valid_for_slot(
     if entry.requires_ffn_struct:
         if slot.ffn_struct not in entry.requires_ffn_struct:
             return False
-    if slot.mask_load_bearing and not entry.mask_aware:
+    if (
+        slot.mask_load_bearing
+        and not entry.mask_aware
+        and slot.kind != "transformer_layer"
+    ):
         return False
     return True
 
@@ -583,27 +641,138 @@ def build_latency_dummy(adapters, device=None) -> Any:
     return _to_batch1(batch)
 
 
+# ── 外部 latency 脚本（ONNX 单文件契约，SPEC phase-puzzle-impl P2.5）───────────
+
+_DEFAULT_ONNX_OPSET = 18
+
+
+def _native_batch_to_export_args(
+    batch: Any, convention: str
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """native batch → ``(args, kwargs)``，供 ``torch.onnx.export`` 按 convention 拆解。
+
+    U6 契约：``FORWARD_CALLING_CONVENTION ∈ {single, positional, dict}``。``batch`` 是
+    ``adapters.calib_iter()`` 首个 batch（或 ``build_latency_dummy`` 的 batch-1 切片），
+    即 ``adapters.forward_model(model, batch)`` 期望的 native 格式。此处把它拆成
+    ``model.forward`` 的真实入参（仅用于 ONNX 导出，非 forward 调用）：
+
+    - ``single``：batch 是单 tensor（或 ``(tensor[, labels])`` 取首个）→ ``args=(tensor,)``。
+    - ``positional``：batch 是 tensor 序列 → ``args=tuple(...)``。
+    - ``dict``：batch 是 dict → ``kwargs={...}``。
+
+    fail loud：batch 结构与 convention 不符 → raise（点名 convention，不静默猜）。
+    """
+    if convention == "dict":
+        if not isinstance(batch, dict):
+            raise TypeError(
+                f"FORWARD_CALLING_CONVENTION='dict' 但 batch 非 dict："
+                f"{type(batch).__name__}——ONNX 导出无法拆 kwargs"
+            )
+        return (), {k: v for k, v in batch.items()}
+    if convention == "single":
+        x = batch[0] if isinstance(batch, (tuple, list)) else batch
+        return (x,), {}
+    # positional（默认）
+    if isinstance(batch, (tuple, list)):
+        return tuple(batch), {}
+    return (batch,), {}
+
+
+def _export_onnx_single_file(
+    module: nn.Module,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    onnx_path: Path,
+    opset: int,
+) -> Path:
+    """把 ``module`` 导出为**单文件** ONNX（内联 params，禁 external data）。
+
+    确定性：``module`` 已 eval/上 device 由调用方保证；``torch.no_grad()`` 下
+    ``torch.onnx.export``。puzzle 模型均 <2GB（CPU transformer）→ 默认不写 ``.data``
+    外挂即满足单文件契约。任何导出异常 fail loud 上抛。
+    """
+    onnx_path.parent.mkdir(parents=True, exist_ok=True)
+    export_kwargs: dict[str, Any] = dict(
+        opset_version=opset,
+        do_constant_folding=True,
+        dynamo=True,
+    )
+    if kwargs:
+        export_kwargs["kwargs"] = kwargs
+    with torch.no_grad():
+        torch.onnx.export(module, args, str(onnx_path), **export_kwargs)
+    return onnx_path
+
+
+def _call_external_latency(fn: Callable, onnx_path: Path, device: torch.device) -> float:
+    """调 ``fn(onnx_path)``（可选 ``fn(onnx_path, device=...)``）→ float。
+
+    对齐 model-flatten 的 provider 契约：脚本签名 ``fn(onnx_path) -> float``，若声明了
+    ``device`` 形参则传 ``str(device)``（"cpu"/"cuda"/"npu"）。返回值经 float() 收敛，
+    任何异常原样上抛（fail loud，不编造数值）。
+    """
+    params = inspect.signature(fn).parameters
+    if "device" in params:
+        return float(fn(str(onnx_path), device=str(device)))
+    return float(fn(str(onnx_path)))
+
+
+def measure_module_latency_via_onnx_script(
+    module: nn.Module,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    device: torch.device,
+    latency_script_path: str,
+    onnx_path: str | Path | None = None,
+    opset: int = _DEFAULT_ONNX_OPSET,
+) -> float:
+    """ONNX 单文件契约（SPEC P2.5）：导出 module → 单文件 ONNX → 调 ``fn(onnx_path)`` → float。
+
+    ``latency_script_path`` 形如 ``path::func``，用户脚本签名 ``fn(onnx_path) -> float``
+    （可选 ``device`` kwarg）。用户脚本是时延唯一权威——禁 fallback 到内置 PyTorch /
+    FLOPs / 任何代理。
+
+    ``onnx_path`` 缺省 → 临时目录 ``model.onnx``（测量瞬时，测完即删）；显式给定则落到
+    指定路径（便于排查）。任何 export / import / 调用 / 解析异常 fail loud 上抛。
+    """
+    fn = load_external_callable(latency_script_path)
+    module.eval().to(device)
+    if onnx_path is not None:
+        p = Path(onnx_path)
+        _export_onnx_single_file(module, args, kwargs, p, opset)
+        return _call_external_latency(fn, p, device)
+    with tempfile.TemporaryDirectory(prefix="puzzle_onnx_") as td:
+        p = Path(td) / "model.onnx"
+        _export_onnx_single_file(module, args, kwargs, p, opset)
+        return _call_external_latency(fn, p, device)
+
+
 def measure_whole_model_latency(
     model: nn.Module,
     forward_fn: Callable[[nn.Module, Any], Any],
     batch: Any,
     device: torch.device,
     latency_script_path: str = "",
+    convention: str = "single",
     repetitions: int = 100,
     warmup: int = 30,
 ) -> float:
-    """整模 forward latency（默认 median ms；``latency_script_path`` 提供则包装外部 script）。
+    """整模 forward latency（默认 PyTorch min-ms；``latency_script_path`` 提供则走 ONNX 契约）。
 
     U6：``forward_fn(model, batch)`` 由调用方传入（典型为 ``adapters.forward_model``），
     本函数不再假设 ``model(single_tensor)``。``batch`` 是 native batch（来自
     ``adapters.calib_iter()`` 的首个 batch，或据 ``adapters.DUMMY_INPUT`` 合成）。
 
-    ``latency_script_path`` 形如 ``path::func``，签名 ``fn(model, batch) -> float``
-    （agent 在 adapter 同目录生成的 latency 测量脚本，项目可定义自己的计时协议）。
+    ``latency_script_path`` 形如 ``path::func``——**ONNX 单文件契约**（SPEC P2.5）：
+    本函数把 ``batch`` 按 ``convention``（``adapters.FORWARD_CALLING_CONVENTION``）拆成
+    ``model.forward`` 入参 → 导出单文件 ONNX → 调 ``fn(onnx_path)`` 得 float（用户脚本
+    是时延唯一权威）。**非** ``fn(model, batch)``。
     """
     if latency_script_path:
-        fn = load_external_callable(latency_script_path)
-        return float(fn(model, batch))
+        args, kwargs = _native_batch_to_export_args(batch, convention)
+        return measure_module_latency_via_onnx_script(
+            model, args, kwargs, device, latency_script_path
+        )
     model.eval().to(device)
     with torch.no_grad():
         for _ in range(max(1, warmup)):
@@ -662,6 +831,31 @@ class _FloorZeroModule(nn.Module):
         return torch.zeros(batch, *self._out_tail, dtype=self._dtype, device=device)
 
 
+class _FloorLayer(nn.Module):
+    """Latency-floor 探测块（layer 粒度）：forward 返回首个 tensor 输入 x（layer-passthrough）。
+
+    design draft §6.7：layer 是 residual unit（``x = x + attn(...)``），整层 ``return 0``
+    会破坏 residual stream → 该层输出恒零 → 后续层输入全零崩溃；``return x`` 则层被旁路
+    （latency≈0），保 residual stream 完整。区别于 block 粒度 ``_FloorZeroModule``：block 在
+    residual 内，零输出 = 贡献零（``x + 0 = x``）；layer 的 residual 在层内，整层零输出非法。
+
+    无需预捕获 output shape：passthrough 直接 return input，shape/dtype 从运行时输入取。
+    ``forward`` 收 ``*args, **kwargs``：父层可能传 attn_mask / 位置编码等异构签名，全部忽略
+    ——floor 测量只关心零计算开销 + residual stream 不崩。
+    """
+
+    def forward(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        for a in args:
+            if isinstance(a, torch.Tensor):
+                return a
+        for v in kwargs.values():
+            if isinstance(v, torch.Tensor):
+                return v
+        raise RuntimeError(
+            "_FloorLayer.forward 未收到 tensor 输入——layer-passthrough 无输入无法 return x"
+        )
+
+
 def _capture_slot_output_shapes(
     model: nn.Module,
     slot_paths: list[str],
@@ -717,19 +911,26 @@ def measure_block_zero_floor_latency(
     repetitions: int = 100,
     warmup: int = 30,
 ) -> float:
-    """测「全部 block 置零」的整模 latency——block 替换的物理地板。
+    """测「全部 slot 退化为 floor 块」的整模 latency——slot 替换的物理地板。
 
     构造：``build_pretrained_model(adapters)`` 建一份新的 father 模型（不动 baseline 模型）
-    → 对 ``block_map.slots`` 每个 ``parent_module_path`` 路径的子模块，先用一次 forward hook
-    抓 output shape[1:] + dtype，再 ``setattr`` 替换为 ``_FloorZeroModule``（forward 返零、
-    零计算开销）→ ``measure_whole_model_latency`` 测整模 latency。
+    → 对 ``block_map.slots`` 每个 ``parent_module_path`` 路径的子模块按 ``slot.kind`` 替换为
+    对应 floor 块 → ``measure_whole_model_latency`` 测整模 latency。
 
-    通用性（不假设 block 类型）：任意 nn.Module 都适用；非方 slot（in_dim != out_dim）也合法
-    ——``_FloorZeroModule`` 用 captured output shape，不关心 in_dim。残差结构下零输出合法
-    （``x + 0 = x``）。
+    §6.7 kind-specific floor 语义（design draft）：
+      - ``transformer_layer`` → ``_FloorLayer``（**layer-passthrough**，``forward`` 返输入 x）。
+        layer 是 residual unit（``x = x + attn(...)``），整层 ``return 0`` 破坏 residual stream
+        → 后续层输入全零崩溃；``return x`` 则层被旁路（latency≈0），保 residual stream 完整。
+        passthrough 直接 return input，**不需捕获 output shape**。
+      - 其他 kind（attention/ffn/conv/moe/custom）→ ``_FloorZeroModule``（**zero**，block 语义）。
+        block 在 residual 内，零输出 = 贡献零（``x + 0 = x``），残差保留——block 粒度 zero 合法。
+        ``_FloorZeroModule`` 用一次 forward hook 抓的 output shape[1:] + dtype 构造。
 
-    fail loud（Rule 12）：ZeroModule 替换后若 forward 崩（如 slot 输出非 tensor / 路径定位
-    失败）→ raise，不静默（让 measure_baseline 据此报错，不进 BLD）。
+    通用性（不假设 block 类型）：任意 nn.Module 都适用；非方 slot（in_dim != out_dim）的 block
+    floor 用 captured output shape，不关心 in_dim。
+
+    fail loud（Rule 12）：floor 块替换后若 forward 崩（如 slot 输出非 tensor / 路径定位失败）
+    → raise，不静默（让 measure_baseline 据此报错，不进 BLD）。
 
     返回 floor latency（ms，与 ``measure_whole_model_latency`` 同尺度：per-inference batch-1）。
     """
@@ -745,14 +946,23 @@ def measure_block_zero_floor_latency(
     forward_fn = adapters.forward_model
     dummy = build_latency_dummy(adapters, device=device)
 
-    slot_paths = [slot.parent_module_path for slot in block_map.slots]
+    # §6.7 按 kind 分派 floor 语义：layer → passthrough，block → zero。
+    layer_paths = [s.parent_module_path for s in block_map.slots
+                   if s.kind == "transformer_layer"]
+    block_paths = [s.parent_module_path for s in block_map.slots
+                   if s.kind != "transformer_layer"]
 
-    # 1) 一次真实 forward 抓每个 slot 的 output shape[1:] + dtype
-    shapes = _capture_slot_output_shapes(model, slot_paths, dummy, forward_fn, device)
+    # 1) 仅 block 粒度 slot 需捕获 output shape（_FloorZeroModule 用 captured shape 构造）；
+    #    layer 粒度 passthrough 直接 return input，不需 output shape。
+    shapes: dict[str, tuple[tuple[int, ...], torch.dtype]] = {}
+    if block_paths:
+        shapes = _capture_slot_output_shapes(model, block_paths, dummy, forward_fn, device)
 
-    # 2) setattr 替换每个 slot 为 _FloorZeroModule
+    # 2) setattr 替换：layer → _FloorLayer（passthrough），block → _FloorZeroModule（zero）
     originals: dict[str, nn.Module] = {}
-    for path in slot_paths:
+    for path in layer_paths:
+        originals[path] = replace_slot(model, path, _FloorLayer().to(device).eval())
+    for path in block_paths:
         out_tail, dtype = shapes[path]
         zero_mod = _FloorZeroModule(out_tail, dtype).to(device).eval()
         originals[path] = replace_slot(model, path, zero_mod)
@@ -761,6 +971,7 @@ def measure_block_zero_floor_latency(
     try:
         floor_latency = measure_whole_model_latency(
             model, forward_fn, dummy, device, latency_script_path,
+            convention=adapters.FORWARD_CALLING_CONVENTION,
             repetitions=repetitions, warmup=warmup,
         )
     finally:

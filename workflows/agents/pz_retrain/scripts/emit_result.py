@@ -2,7 +2,7 @@
 """emit_result.py —— pz_retrain 最终 JSON（**唯一产出节点 JSON 的时刻**）。
 
 status 推导优先级（互斥，先命中先定）：
-1. block_map.json 不存在 → failed（上游 pz_expand 缺失——前置错误）
+1. block_map.json 不存在 → failed（上游 pz_baseline 缺失——前置错误）
 2. GKD **真正完成**（.retrain_rc==0 且进程已退出 且 ckpt 存在 + torch.load 可读）→ executed
 3. 否则 → failed（尝试预算耗尽 / self-heal 耗尽；附 last attempt log tail）
 

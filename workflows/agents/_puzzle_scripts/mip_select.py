@@ -163,6 +163,9 @@ def _solve_mip(
         # 逻辑，非「同功能更快」）。只在仍做计算的功能候选（mixer 变体 / 剪枝 FFN 等）里选 latency
         # 最小——这样每 block 仍履行职能、acc 应 ≈ baseline（真保逻辑），latency 降到功能替换可达。
         # 若某 group 除 no_op 外无功能候选，退回 identity（保留原块，不动逻辑）。
+        # F1：transformer_layer kind 已无 no_op_layer 候选（退出候选集），故 ``!= "no_op"`` 对
+        # layer group 不会误伤——其成员只剩 identity（保原层）+ 5 真 attention 变体（替 attention
+        # 机制，均履行层职能），全部视为 functional，选 latency 最小者即「同功能更快」。
         selected_arch: dict[str, dict[str, str]] = defaultdict(dict)
         total_score = 0.0
         chosen_block_latency = 0.0

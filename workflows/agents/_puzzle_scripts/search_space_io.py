@@ -23,8 +23,11 @@ import yaml
 
 from puzzle_common import BlockMap, Slot, parse_block_candidates
 
-# SPEC §6.2：开放 kind 标签（D4 builtin 只覆盖 attention/ffn）。
-_ALLOWED_KINDS: tuple[str, ...] = ("attention", "ffn", "conv", "moe", "custom")
+# SPEC §6.2：开放 kind 标签（D4 builtin 只覆盖 attention/ffn；transformer_layer =
+# layer 粒度，design draft §2.1）。
+_ALLOWED_KINDS: tuple[str, ...] = (
+    "attention", "ffn", "conv", "moe", "custom", "transformer_layer",
+)
 
 # YAML 必填 slot 字段（path/kind/layer_idx 是识别核心；其余可由 measure_baseline 回填或默认）。
 _REQUIRED_SLOT_FIELDS: tuple[str, ...] = ("id", "path", "kind", "layer_idx")
@@ -151,6 +154,11 @@ def save_search_space_yaml(
         for key in ("original_intermediate", "activation", "ffn_struct"):
             if key in d:
                 out[key] = d[key]
+        # transformer_layer 字段（design draft §2.1）：max_seq_len（mixer 序列上界，pz_baseline
+        # trace 回填）+ norm_type（原层 norm 溯源，非 dispatch 依据）。仅非 None 落盘。
+        for key in ("max_seq_len", "norm_type"):
+            if d.get(key) is not None:
+                out[key] = d[key]
         # traced shapes
         out["in_dim"] = d.get("in_dim", -1)
         out["out_dim"] = d.get("out_dim", -1)
@@ -192,6 +200,13 @@ def to_block_map(slot_dicts: list[dict[str, Any]]) -> BlockMap:
                 activation=(str(d["activation"]) if d.get("activation") else None),
                 ffn_struct=str(d.get("ffn_struct", "standard")),
                 mask_load_bearing=bool(d.get("mask_load_bearing", False)),
+                # transformer_layer 字段（design draft §2.1）：mixer 序列上界 + 原层 norm 溯源
+                max_seq_len=(
+                    int(d["max_seq_len"])
+                    if d.get("max_seq_len") is not None
+                    else None
+                ),
+                norm_type=(str(d["norm_type"]) if d.get("norm_type") else None),
             )
         )
     return BlockMap(slots=slots)

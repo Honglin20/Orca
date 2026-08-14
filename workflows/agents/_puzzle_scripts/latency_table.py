@@ -18,7 +18,7 @@ U6 改造：
 加性成立。
 
 - passthrough(identity)：测原父块单块 latency。
-- latency_script_path → 包装它；否则 PyTorch median ms（100 reps 稳定）。
+- latency_script_path → ONNX 单文件契约（导出单块 → fn(onnx_path)）；否则 PyTorch median ms（100 reps 稳定）。
 
 输出 ``latency_table.jsonl``：``{layer, kind, variant, latency_<unit>, unit}``。
 """
@@ -41,9 +41,9 @@ from puzzle_common import (
     get_candidate,
     is_candidate_valid_for_slot,
     is_passthrough,
-    load_external_callable,
     load_puzzle_adapters,
     load_variant_state_dict,
+    measure_module_latency_via_onnx_script,
     measure_whole_model_latency,
     replace_slot,
 )
@@ -59,10 +59,14 @@ def _measure_block_latency(
 
     单块 latency 的输入是 slot 抓到的 main-path 张量（非 native batch），所以这里
     仍走 ``module(sample_input)``（block 自身契约：单 tensor 主路径）。
+
+    ``latency_script_path`` 提供 → **ONNX 单文件契约**（SPEC P2.5）：把单块导出为单文件
+    ONNX → 调 ``fn(onnx_path)`` 得 float（用户脚本唯一权威，非 ``fn(model, batch)``）。
     """
     if latency_script_path:
-        fn = load_external_callable(latency_script_path)
-        return float(fn(variant_module, sample_input))
+        return measure_module_latency_via_onnx_script(
+            variant_module, (sample_input,), {}, device, latency_script_path
+        )
     import time
     variant_module.eval().to(device)
     with torch.no_grad():
@@ -186,22 +190,38 @@ def main(argv: list[str] | None = None) -> int:
             "fidelity_retriggered": False,
         }
 
-        # ── floor：全 block → no_op(零输出) 的整模 latency ──────────────────────
-        # U6 root cause E：floor 循环也过 is_candidate_valid_for_slot；
-        # 非方 slot（in_dim != out_dim）的 floor 用「原块实测 latency」兜底——
-        # 禁 make_zero 对非方 slot raise（保留原块，其 latency 计入 floor）。
+        # ── floor：全 slot 退化为 floor 块的整模 latency（§6.7 kind-specific）────────
+        # U6 root cause E：floor 循环对 block 粒度（attention/ffn/...）过 is_candidate_valid_for_slot
+        # （no_op 仍注册在 catalog）；非方 slot 用「原块实测 latency」兜底——禁 make_zero 对非方
+        # slot raise（保留原块，其 latency 计入 floor）。
+        # §6.7 floor 语义 kind-specific：transformer_layer → passthrough（return x，保 residual
+        # stream）；其他 kind → zero（block 在 residual 内，x+0=x 合法）。
+        # F1：no_op_layer 已退出 catalog（不作 MIP 候选）。layer 粒度 floor **不经 catalog 校验**——
+        # make_no_op_layer 经直接 import（transformer_layer_variants），仅校验 in_dim==out_dim
+        # （make_no_op_layer 构造要求；非方 layer slot 保留原块）。
         from puzzle_blocks import make_zero
+        from transformer_layer_variants import make_no_op_layer
         floor_replaced_zero: list[str] = []
         floor_kept_original: list[str] = []
         for slot in block_map.slots:
-            can_zero = is_candidate_valid_for_slot("no_op", slot)
-            if can_zero and slot.in_dim == slot.out_dim:
-                zblk = make_zero(slot).to(device).eval()
-                replace_slot(model, slot.parent_module_path, zblk)
-                floor_replaced_zero.append(slot.parent_module_path)
+            if slot.kind == "transformer_layer":
+                # §6.7 layer floor：make_no_op_layer 直接 import（不经 catalog——no_op_layer
+                # 已退出候选集）。仅校验 in_dim==out_dim（构造要求 + 残差直通合法）。
+                if slot.in_dim != slot.out_dim:
+                    floor_kept_original.append(slot.parent_module_path)
+                    continue
+                # layer residual unit：passthrough（return x）保 residual stream，非 zero
+                floor_mod = make_no_op_layer(slot).to(device).eval()
             else:
-                # 非方 slot：保留原块（其 latency 计入 floor，反映真实非 block overhead）
-                floor_kept_original.append(slot.parent_module_path)
+                # block 粒度 floor：no_op 仍注册在 catalog（block zero 合法作 MIP 候选）。
+                if not is_candidate_valid_for_slot("no_op", slot) or slot.in_dim != slot.out_dim:
+                    # 非方 slot / 结构不匹配：保留原块（其 latency 计入 floor）
+                    floor_kept_original.append(slot.parent_module_path)
+                    continue
+                # block 在 residual 内：zero（x + 0 = x）合法
+                floor_mod = make_zero(slot).to(device).eval()
+            replace_slot(model, slot.parent_module_path, floor_mod)
+            floor_replaced_zero.append(slot.parent_module_path)
 
         # floor 整模 forward 走 adapters.forward_model（U6：不再 model(dummy_input)）
         calib_iter2 = adapters.calib_iter(device=device)
@@ -212,7 +232,8 @@ def main(argv: list[str] | None = None) -> int:
                 "adapters.calib_iter() 返回空——latency_table floor 无 batch"
             ) from e
         floor_latency = measure_whole_model_latency(
-            model, adapters.forward_model, floor_batch, device, args.latency_script_path
+            model, adapters.forward_model, floor_batch, device, args.latency_script_path,
+            convention=adapters.FORWARD_CALLING_CONVENTION,
         )
         floor_path = output_dir / "latency_floor.json"
         with open(floor_path, "w", encoding="utf-8") as ff:

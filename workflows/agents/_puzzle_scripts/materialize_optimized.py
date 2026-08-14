@@ -4,10 +4,12 @@
 （父⊕BLD 合成权重）→ 装配 ``<base>_optimized_flat.py``：
 
   ① flat 架构类源逐字照抄（build_fn 工厂重命名为 ``_puzzle_flat_build``，__main__ 剥离）。
-  ② 选中 variant 涉及的块源**整模块内联**（puzzle_blocks 的 wrapper helper 经 AST 抽取；
-     用到的 nas_agent.blocks 模块 + primitive_blocks 整文件内联，剥离包内 import、跨模块去重）。
-  ③ ``_build_variant`` dispatcher 精确镜像 ``puzzle_blocks.make_*`` + catalog 包装语义
-     （_KwargPassthrough / _MaskPassthrough）→ state_dict key 与 ``build_student_from_arch`` 对齐。
+  ② 选中 layer variant 涉及的**去 elastic 原生 layer 类**内联（``transformer_layer_variants`` 的
+     layer 骨架 + attention cores + helper 经 AST 抽取；``resolve_activation`` + ``_ACTIVATION_MAP``
+     从 ``puzzle_blocks`` AST 抽取）——不经 nas_agent Elastic*Core，不经整模块内联。
+  ③ ``_build_variant`` dispatcher 镜像 ``transformer_layer_variants.make_*_layer``（构造整层
+     ``_PreLNTransformerLayer(slot, <attention_core>)``，不经 ``_KwargPassthrough``——layer 自包含
+     forward 处理异构父层签名）→ state_dict key 与 ``build_student_from_arch`` 对齐。
   ④ ``build_model()`` = ``_puzzle_flat_build()`` + 确定性 setattr 循环换 slot。
   ⑤ ``load_model(ckpt)`` strict load；``__main__`` 自检（build + load + forward DUMMY_INPUT）。
 
@@ -26,8 +28,6 @@ from __future__ import annotations
 
 import argparse
 import ast
-import importlib
-import importlib.util
 import inspect
 import json
 import re
@@ -38,35 +38,37 @@ from pathlib import Path
 
 import torch
 
-# ── variant → 构造镜像（必须与 puzzle_blocks.make_* + candidate_catalog.yaml 包装一致）──────
+# ── layer variant → 构造镜像（design draft §4.2 + §6.4；对齐 transformer_layer_variants.make_*_layer）─
 # key 对齐自检会兜底：任何漂移在装配期 fail loud。
-# 每条：(factory_kind, params)。factory_kind 在 _build_variant 模板里分派。
+# 每条：(factory_kind, params)。factory_kind 在 _variant_dispatcher_src 分派。
+# layer 粒度：候选 = 完整 transformer encoder layer（attn 变体 + 标准 FFN + 2×LN + 2×residual），
+# 维度全部从 slot 注入（L11 零硬编码；softs_star 的 core_dim 是算法超参例外）。
+# ⚠ 同步契约：softs_star 的 core_dim 须与 candidate_catalog.yaml 的 params.core_dim 一致
+# （+ transformer_layer_variants.make_softs_star_layer 签名默认）。三者（本表 / catalog / factory
+# 默认）漂移由 _check_key_alignment 的 shape_mismatch 在装配期 fail loud 兜底；改 catalog 须同步本表。
 _VARIANT_CONSTRUCTION: dict[str, tuple[str, dict]] = {
-    "fnet": ("fnet", {}),
-    "random_synthesizer": ("random_synthesizer", {}),
-    "relu_attention": ("relu_attention", {}),
-    "softs_star": ("softs_star", {}),
-    "vanilla": ("vanilla", {}),
-    "masked_vanilla": ("masked_vanilla", {}),
-    "ffn_75": ("ffn", {"ratio": 0.75}),
-    "ffn_50": ("ffn", {"ratio": 0.5}),
-    "linear": ("linear", {}),
-    "no_op": ("zero", {}),
+    "vanilla_layer": ("vanilla_layer", {}),
+    "random_synthesizer_layer": ("random_synthesizer_layer", {}),
+    "relu_attention_layer": ("relu_attention_layer", {}),
+    "fnet_layer": ("fnet_layer", {}),
+    "softs_star_layer": ("softs_star_layer", {"core_dim": 64}),
+    "no_op_layer": ("no_op_layer", {}),
 }
 
-# variant → (nas_agent.blocks 模块名, 需要的类名列表)。None = 仅用 inlined wrapper + nn。
-_VARIANT_MODULES: dict[str, tuple[str, tuple[str, ...]]] = {
-    "random_synthesizer": ("nas_agent.blocks.random_synthesizer", ("ElasticRandomSynthesizerCore",)),
-    "relu_attention": ("nas_agent.blocks.relu_attention", ("ElasticReluAttentionCore",)),
-    "fnet": ("nas_agent.blocks.fnet_fourier_mixer", ("ElasticFNetFourierTransform",)),
-    "softs_star": ("nas_agent.blocks.softs_star_mixer", ("ElasticSOFTSSTARMixer",)),
-}
+# 从 transformer_layer_variants.py AST 抽取的类 + helper（去 elastic 原生 layer 变体源，design draft §4）。
+# optimized_flat 内联这些后 dispatcher 直接构造整层；所有 layer variant 共享同一份源（去重由调用方保证）。
+_LAYER_VARIANT_DEFS: tuple[str, ...] = (
+    "_MASK_KEYS", "_extract_mask",
+    "_StandardFFN",
+    "_VanillaAttention", "_RandomSynthesizerAttention", "_ReluAttention",
+    "_FNetMixer", "_SoftsStarMixer",
+    "_PreLNTransformerLayer",
+    "_NoOpLayer",
+)
 
-# 从 puzzle_blocks.py 抽取的 wrapper/helper 顶级定义名（AST 抽取，DRY，免漂移）。
+# 从 puzzle_blocks.py AST 抽取的 helper（layer 变体 _StandardFFN 用；AST 抽取，DRY，免漂移）。
 _PUZZLE_BLOCKS_HELPERS: tuple[str, ...] = (
     "_ACTIVATION_MAP", "resolve_activation",
-    "_VanillaMHSA", "_MaskedMHSA", "_MaskPassthrough",
-    "_ZeroBlock", "_KwargPassthrough",
 )
 
 # ── flat 源处理 ────────────────────────────────────────────────────────────────
@@ -174,42 +176,12 @@ def _extract_top_level_defs(source: str, names: tuple[str, ...]) -> str:
     return "\n\n\n".join(segs)
 
 
-def _inline_module_source(module_name: str) -> tuple[str, set[str], list[str]]:
-    """import 模块 → AST 只抽 top-level ClassDef/FunctionDef/常量 Assign → 返回 (源体, 需置顶 import, __future__)。
-
-    整文件内联会带入模块级 demo 代码（如 ``super_block = ElasticFNetFourierMixerBlock(...)``），
-    在 import 期执行并命中尚未定义的名字。AST 过滤只留定义与常量，丢掉模块级可执行语句
-    （Call-Assign / Expr / If / Import 等）。import 由装配器统一置顶（torch/math/typing/Parameter）。
-    """
-    mod = importlib.import_module(module_name)
-    full = inspect.getsource(mod)
-    futures, _ = _hoist_future(full)
-    tree = ast.parse(full)
-    segs: list[str] = []
-    for node in tree.body:
-        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-            segs.append(textwrap.dedent(ast.get_source_segment(full, node)))
-        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-            # 丢模块级可执行赋值（demo 实例化 ``x = Foo(...)``），保留常量（dict/list/literal）
-            val = node.value
-            if isinstance(val, ast.Call):
-                continue
-            segs.append(textwrap.dedent(ast.get_source_segment(full, node)))
-        # Import / ImportFrom(non-future) / Expr / If / For … 全丢（import 统一置顶）
-    needed_imports = {
-        "import torch", "import torch.nn as nn", "import torch.nn.functional as F",
-        "import math", "from typing import Any", "from torch.nn.parameter import Parameter",
-    }
-    body = "\n\n\n".join(s for s in segs if s)
-    return body, needed_imports, futures
-
-
 # ── optimized_flat 内容生成 ─────────────────────────────────────────────────────
 
 _HEADER = '''"""{{BASE}}_optimized_flat.py — Puzzle 最优架构（self-contained, standalone）。
 
 由 materialize_optimized.py 确定性生成（docs/plans/2026-08-13-puzzle-materialize-optimized-flat.md）。
-架构 = 原 {{BASE}}_flat 的架构类 + selected_arch 选中的 slot 替换为 variant 块（块源内联）。
+架构 = 原 {{BASE}}_flat 的架构类 + selected_arch 选中的 transformer_layer slot 替换为 layer 变体（去 elastic 原生 layer 源内联）。
 依赖：仅 torch + stdlib——不依赖用户项目源、不依赖 _puzzle_scripts/、不依赖 run artifacts。
 
 权重加载（单次 strict load_state_dict）：
@@ -220,89 +192,84 @@ _HEADER = '''"""{{BASE}}_optimized_flat.py — Puzzle 最优架构（self-contai
 
 
 def _variant_dispatcher_src(used_variants: set[str]) -> str:
-    """生成 _build_variant dispatcher（仅含用到的分支；精确镜像 puzzle_blocks.make_*）。
+    """生成 _build_variant dispatcher（layer 粒度，镜像 transformer_layer_variants.make_*_layer）。
 
-    所有分支以 ``elif`` 生成，首分支后处理改 ``if``——支持任意 variant 子集（如只用了
-    no_op 时不能只剩孤 ``elif``）。
+    构造**完整 transformer layer**（``_PreLNTransformerLayer(slot, <attention_core>)``）——
+    layer forward 自包含 ``(x, src_mask=None, *args, **kwargs)``，故不经 ``_KwargPassthrough``
+    （区别于 v2 单块候选）。``no_op_layer`` 早返回 ``_NoOpLayer``（passthrough，非 attn+ffn 骨架）。
+
+    slot 在 optimized_flat 是 dict（``_BLOCK_MAP_SLOTS``），包成 ``SimpleNamespace`` 给内联 layer 类
+    用（它们按属性访问 ``slot.in_dim``/``original_intermediate``/``activation``/``max_seq_len``，
+    对齐 ``transformer_layer_variants`` slot 契约）。attention core 维度从 SimpleNamespace 取。
     """
-    branches: list[str] = []
+    attn_branches: list[str] = []  # 设 attn 后落到 return _PreLNTransformerLayer(s, attn)
+    has_early_return = False       # no_op_layer 早返回（无 attn）
     for v in sorted(used_variants):
         kind, params = _VARIANT_CONSTRUCTION[v]
-        if kind == "fnet":
-            branches.append(
-                '    elif variant == "fnet":\n'
-                "        inner = ElasticFNetFourierTransform()\n"
+        if kind == "vanilla_layer":
+            attn_branches.append(
+                '    elif variant == "vanilla_layer":\n'
+                "        attn = _VanillaAttention(in_dim, num_heads)\n"
             )
-        elif kind == "random_synthesizer":
-            branches.append(
-                '    elif variant == "random_synthesizer":\n'
-                "        inner = ElasticRandomSynthesizerCore(\n"
-                "            super_num_heads=num_heads, global_dim=in_dim,\n"
-                "            head_dim=head_dim, max_seq_len=512,\n"
-                "        )\n"
+        elif kind == "random_synthesizer_layer":
+            attn_branches.append(
+                '    elif variant == "random_synthesizer_layer":\n'
+                "        max_seq_len = s.max_seq_len\n"
+                "        if not max_seq_len or int(max_seq_len) <= 0:\n"
+                "            raise ValueError(\n"
+                "                f'random_synthesizer_layer: slot {s.parent_module_path} 缺 '\n"
+                "                f'max_seq_len（须 pz_baseline trace 原层输入序列长度回填，禁 fallback）'\n"
+                "            )\n"
+                "        attn = _RandomSynthesizerAttention(in_dim, num_heads, head_dim, int(max_seq_len))\n"
             )
-        elif kind == "relu_attention":
-            branches.append(
-                '    elif variant == "relu_attention":\n'
-                "        inner = ElasticReluAttentionCore(\n"
-                "            super_num_heads=num_heads, global_dim=in_dim, head_dim=head_dim,\n"
-                "        )\n"
+        elif kind == "relu_attention_layer":
+            attn_branches.append(
+                '    elif variant == "relu_attention_layer":\n'
+                "        attn = _ReluAttention(in_dim, num_heads, head_dim)\n"
             )
-        elif kind == "softs_star":
-            branches.append(
-                '    elif variant == "softs_star":\n'
-                "        inner = ElasticSOFTSSTARMixer(super_core_dim=in_dim, global_dim=in_dim)\n"
+        elif kind == "fnet_layer":
+            attn_branches.append(
+                '    elif variant == "fnet_layer":\n'
+                "        attn = _FNetMixer()\n"
             )
-        elif kind == "vanilla":
-            branches.append(
-                '    elif variant == "vanilla":\n'
-                "        inner = _VanillaMHSA(embed_dim=in_dim, num_heads=num_heads)\n"
+        elif kind == "softs_star_layer":
+            # max(1, int(core_dim)) 钳制对齐 factory（transformer_layer_variants.make_softs_star_layer）。
+            core_dim = max(1, int(params["core_dim"]))
+            attn_branches.append(
+                '    elif variant == "softs_star_layer":\n'
+                f"        attn = _SoftsStarMixer(in_dim, {core_dim})\n"
             )
-        elif kind == "masked_vanilla":
-            branches.append(
-                '    elif variant == "masked_vanilla":\n'
-                "        return _MaskPassthrough(_MaskedMHSA(embed_dim=in_dim, num_heads=num_heads))\n"
+        elif kind == "no_op_layer":
+            has_early_return = True
+            attn_branches.append(
+                '    elif variant == "no_op_layer":\n'
+                "        return _NoOpLayer(s)\n"
             )
-        elif kind == "ffn":
-            ratio = params["ratio"]
-            branches.append(
-                f'    elif variant == "ffn_{int(round(ratio * 100))}":\n'
-                f"        inner = _make_ffn(slot, {ratio!r})\n"
-            )
-        elif kind == "linear":
-            branches.append(
-                '    elif variant == "linear":\n'
-                "        inner = nn.Linear(in_dim, out_dim)\n"
-            )
-        elif kind == "zero":
-            branches.append(
-                '    elif variant == "no_op":\n'
-                "        inner = _ZeroBlock()\n"
-            )
-    make_ffn = (
-        "def _make_ffn(slot, ratio):\n"
-        "    inter = max(1, int(round(slot['original_intermediate'] * ratio)))\n"
-        "    act = resolve_activation(slot['activation'])\n"
-        "    return nn.Sequential(\n"
-        "        nn.Linear(slot['in_dim'], inter), act(), nn.Linear(inter, slot['out_dim']),\n"
-        "    )\n\n\n"
-    )
-    if not branches:
+    if not attn_branches:
         # 无非-identity variant（全 identity）→ _build_variant 永不被调用，留 fail-loud 桩。
-        return make_ffn + (
+        return (
             "def _build_variant(variant, slot):\n"
             "    raise ValueError('无 variant（全 identity 架构不该走到 _build_variant）')\n"
         )
     # 首分支 elif → if
-    branches[0] = branches[0].replace("    elif ", "    if ", 1)
-    return make_ffn + (
+    attn_branches[0] = attn_branches[0].replace("    elif ", "    if ", 1)
+    # 仅当存在设 attn 的分支时才落 return _PreLNTransformerLayer(s, attn)（no_op-only 时该行不可达）。
+    final_return = ""
+    if has_early_return and len(attn_branches) == 1:
+        # 唯一分支是 no_op（早返回）：else raise 后无须 _PreLNTransformerLayer 落地。
+        pass
+    else:
+        final_return = "    return _PreLNTransformerLayer(s, attn)\n"
+    return (
         "def _build_variant(variant, slot):\n"
-        "    in_dim = slot['in_dim']; out_dim = slot['out_dim']\n"
-        "    num_heads = max(slot['num_heads'], 1); head_dim = max(slot['head_dim'], 1)\n"
-        + "".join(branches)
+        "    s = SimpleNamespace(**slot)\n"
+        "    in_dim = s.in_dim\n"
+        "    num_heads = max(s.num_heads, 1)\n"
+        "    head_dim = max(s.head_dim, 1)\n"
+        + "".join(attn_branches)
         + "    else:\n"
         "        raise ValueError(f'未知 variant {variant!r}')\n"
-        "    return _KwargPassthrough(inner)\n"
+        + final_return
     )
 
 
@@ -498,6 +465,9 @@ def _needed_slot_fields(block_map_path: Path) -> list[dict]:
         "layer_idx", "kind", "parent_module_path",
         "in_dim", "out_dim", "num_heads", "head_dim",
         "activation", "original_intermediate",
+        # layer 粒度（design draft §2.1）：random_synthesizer_layer 等 mixing-matrix 变体的
+        # 序列上界（pz_baseline trace 原层输入序列长度回填，禁 fallback——spec-reviewer LV-7）。
+        "max_seq_len",
     ]
     out = []
     for s in slots:
@@ -535,6 +505,8 @@ def main(argv: list[str] | None = None) -> int:
             ).state_dict()
             mod = _load_optimized_module(out_path)
             key_ok, key_detail = _check_key_alignment(mod, reference_state, "build_student_from_arch")
+            # 快路径：check-only 故意只跑 key 对齐 + standalone 子进程（权威两门），省 in-process 诊断
+            # （_check_forward_inprocess 仅诊断，非硬门；agent 手动 edit 后重验只需两道硬门）。
             fwd_ok, fwd_detail = _check_forward_subprocess(sys.executable, out_path)
             result = {
                 "status": "executed" if (key_ok and fwd_ok) else "failed",
@@ -576,37 +548,31 @@ def main(argv: list[str] | None = None) -> int:
         if unknown:
             raise ValueError(f"selected_arch 含未支持的 variant：{sorted(unknown)}")
 
-        # 需要内联的 nas_agent 模块
-        needed_modules: list[str] = []
-        need_primitive = False
-        for v in used_variants:
-            if v in _VARIANT_MODULES:
-                mod_name, _classes = _VARIANT_MODULES[v]
-                if mod_name not in needed_modules:
-                    needed_modules.append(mod_name)
-                need_primitive = True
-        if need_primitive:
-            needed_modules.append("nas_agent.blocks.primitive_blocks")
-
-        # 抽 puzzle_blocks helper
+        # 抽 puzzle_blocks helper（resolve_activation + _ACTIVATION_MAP，layer 变体 _StandardFFN 用）。
+        # future hoist：puzzle_blocks 的 ``from __future__ import annotations`` 须并入 optimized_flat 顶。
         import puzzle_blocks as _pb
         pb_src = inspect.getsource(_pb)
+        pb_futures, pb_src = _hoist_future(pb_src)
+        all_futures |= set(pb_futures)
         helpers_src = _extract_top_level_defs(pb_src, _PUZZLE_BLOCKS_HELPERS)
 
-        # 内联 nas_agent 模块源
+        # 抽 transformer_layer_variants 类 + helper（去 elastic 原生 layer 变体源，design draft §4）。
+        # 所有 layer variant 共享同一份源；命名抽取（_extract_top_level_defs）避免内联 factory
+        # ``make_*_layer``（dispatcher 取而代之）+ 模块级 smoke 代码。future 同理 hoist。
+        import transformer_layer_variants as _tlv
+        tlv_src = inspect.getsource(_tlv)
+        tlv_futures, tlv_src = _hoist_future(tlv_src)
+        all_futures |= set(tlv_futures)
+        layer_defs_src = _extract_top_level_defs(tlv_src, _LAYER_VARIANT_DEFS)
+
+        # optimized_flat 顶置 import：layer 类用 torch/nn/F/Any；dispatcher 用 SimpleNamespace
+        # （slot dict → 属性访问 wrapper，对齐内联 layer 类的 slot 契约）。math 不需要——layer 变体
+        # 用 torch.pi（非 math.pi），flat 若用 math 会自带 import（Section 1 逐字照抄）。
         keep_imports: set[str] = {
             "import torch", "import torch.nn as nn",
-            "import torch.nn.functional as F", "import math", "from typing import Any",
-            "import sys",
+            "import torch.nn.functional as F", "from typing import Any",
+            "from types import SimpleNamespace", "import sys",
         }
-        inlined_blocks: list[str] = []
-        for mod_name in needed_modules:
-            body, mods, mod_futures = _inline_module_source(mod_name)
-            all_futures |= set(mod_futures)
-            inlined_blocks.append(
-                f"# ── inlined: {mod_name} ──\n" + body
-            )
-            keep_imports |= mods
 
         base = args.base_name or re.sub(r"_flat$", "", flat_path.stem)
         header = _HEADER.replace("{{BASE}}", base)
@@ -636,32 +602,25 @@ def main(argv: list[str] | None = None) -> int:
             + "# ════════════════════════════════════════════════════════════════\n"
             + flat_src.rstrip() + "\n\n\n"
             + "# ════════════════════════════════════════════════════════════════\n"
-            + "# Section 2: variant wrapper helpers（AST 抽取自 puzzle_blocks.py）\n"
+            + "# Section 2: helper（resolve_activation/_ACTIVATION_MAP ← puzzle_blocks.py）\n"
+            + "#         + 去 elastic 原生 layer 变体类（← transformer_layer_variants.py）\n"
             + "# ════════════════════════════════════════════════════════════════\n"
             + helpers_src + "\n\n\n"
-        )
-        if inlined_blocks:
-            optimized += (
-                "# ════════════════════════════════════════════════════════════════\n"
-                "# Section 3: 内联块类源（nas_agent.blocks，整文件，包内 import 已剥离）\n"
-                "# ════════════════════════════════════════════════════════════════\n"
-                + "\n\n".join(inlined_blocks).rstrip() + "\n\n\n"
-            )
-        optimized += (
-            "# ════════════════════════════════════════════════════════════════\n"
-            "# Section 4: variant 构造 dispatcher（镜像 puzzle_blocks.make_*）\n"
-            "# ════════════════════════════════════════════════════════════════\n"
+            + layer_defs_src + "\n\n\n"
+            + "# ════════════════════════════════════════════════════════════════\n"
+            + "# Section 3: variant 构造 dispatcher（镜像 transformer_layer_variants.make_*_layer）\n"
+            + "# ════════════════════════════════════════════════════════════════\n"
             + _variant_dispatcher_src(used_variants) + "\n\n"
         )
         optimized += (
             "# ════════════════════════════════════════════════════════════════\n"
-            "# Section 5: selected_arch 应用 + build_model + load_model + __main__\n"
+            "# Section 4: selected_arch 应用 + build_model + load_model + __main__\n"
             "# ════════════════════════════════════════════════════════════════\n"
             + _APPLY_AND_BUILD.format(sel_arch=repr(arch),
                                       slots=repr(slots),
                                       build_cfg=repr(build_cfg_kwargs))
         )
-        # Section 6: standalone __main__——flat 有 __main__ 则用其（项目真实 forward 签名，
+        # Section 5: standalone __main__——flat 有 __main__ 则用其（项目真实 forward 签名，
         # rewire 后测最优模型）；否则发通用 fallback（单输入 DUMMY_INPUT，兜底合成 fixture）。
         # forward_selfcheck 经子进程跑此 __main__（真 standalone 证明，review BLOCKER-1）。
         if flat_main.strip():
@@ -673,7 +632,7 @@ def main(argv: list[str] | None = None) -> int:
         optimized += (
             "\n\n\n"
             "# ════════════════════════════════════════════════════════════════\n"
-            f"# Section 6: standalone 自检（{main_note}）\n"
+            f"# Section 5: standalone 自检（{main_note}）\n"
             "# ════════════════════════════════════════════════════════════════\n"
             + main_block + "\n"
         )
@@ -719,7 +678,7 @@ def main(argv: list[str] | None = None) -> int:
             "status": "executed" if (key_ok and fwd_ok) else "failed",
             "optimized_flat_path": str(out_path),
             "used_variants": sorted(used_variants),
-            "inlined_modules": needed_modules,
+            "inlined_sources": ["puzzle_blocks::helpers", "transformer_layer_variants::defs"],
             "key_alignment_passed": bool(key_ok),
             "key_alignment_detail": key_detail,
             "forward_selfcheck_passed": bool(fwd_ok),

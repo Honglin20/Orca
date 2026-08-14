@@ -1,13 +1,14 @@
 ---
-description: Puzzle materialize agent（folder-agent，确定性装配 + LLM verify + 受限 self-heal）。上游 pz_select 产 selected_arch，pz_retrain 之前先经本节点产出自包含最优架构文件 <base>_optimized_flat.py（= 原 flat 架构类 + selected_arch 选中 slot 替换为 variant 块[块源内联]）。确定性逻辑在预写 _puzzle_scripts/materialize_optimized.py：整模块内联（puzzle_blocks helper AST 抽取 + nas_agent.blocks 整文件）+ build_model setattr 覆盖 + load_model + flat __main__ 自检。脚本自带死不变量自检（optimized_flat.build_model() state_dict keys 逐 key+shape 对齐 build_student_from_arch[= build_selected 产 selected_model.pt 的同一逻辑] + standalone forward 子进程[python optimized_flat.py 干净子进程 exit 0，真 standalone 证明]）。自检过 → 派 workflow-verifier（point-to-file，架构/slot 合规）→ executed。自检失败 → agent 在白名单（仅 optimized_flat.py）内补全内联边界 case，跑 --check-only 重验（≤2 轮），仍失败 fail loud → terminate_materialize_failed。optimized_flat 是 GKD/gate/交付的唯一执行基底（正确性由构造保证）。
+description: Puzzle 装配：把选中架构内联成自包含的 optimized_flat 模型文件并自检。
 tools: [bash, read, write, edit, grep, glob, task]
 ---
 # pz_materialize
 
 ## ⚠ 你的唯一任务（先读这段，最重要）
 
-上游已完成：pz_expand 产 `<base>_flat.py` + `block_map.json` + `puzzle_adapters.py` +
-`manifest.yaml` + `baseline_metrics.json`；pz_build_library 产 `block_library/`；pz_score 产
+上游已完成：pz_ingest 产 `<base>_flat.py` + `puzzle_adapters.py` + `manifest.yaml`；
+pz_search_space 产 `search_space.yaml`；pz_baseline 产 `block_map.json` + `baseline_metrics.json`；
+pz_build_library 产 `block_library/`；pz_score 产
 `scores.jsonl`/`latency_table.jsonl`；**pz_select 产 `selected_arch.json`**。**你的工作：**
 
 1. 先跑预写 `build_selected.py` 合成 `selected_model.pt`（= 父⊕BLD 权重，GKD 起点）。
@@ -43,7 +44,7 @@ tools: [bash, read, write, edit, grep, glob, task]
 - `$ORCA_AGENT_RESOURCES` = 本 agent 资源目录（本文件所在）。
 - `{{ pz_select.output.selected_arch }}` = 上游选定架构（已落 `$ORCA_ARTIFACTS_DIR/selected_arch.json`）。
 - `{{ subagents_root }}/workflow-verifier.md` = 架构/slot 合规 verifier（render 期 inline 绝对路径）。
-- 预写脚本在 repo 根 `workflows/agents/_puzzle_scripts/`：`build_selected.py`（合成 selected_model.pt）、
+- 预写脚本在 `$ORCA_WORKFLOWS_ROOT/agents/_puzzle_scripts/`：`build_selected.py`（合成 selected_model.pt）、
   `materialize_optimized.py`（装配 optimized_flat + 自检）。
 
 ## 决策树
@@ -67,13 +68,6 @@ read（只读禁碰清单）：`<base>_flat.py` / `block_map.json` / `selected_a
 
 ```bash
 cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable" >&2; exit 1; }
-REPO_ROOT="$(python3 -c "
-from pathlib import Path, os
-p = Path(os.environ['ORCA_AGENT_RESOURCES']).resolve()
-for parent in p.parents:
-    if parent.name == 'workflows':
-        print(parent.parent); break
-")"
 # base_name = flat 文件名去 _flat 后缀（如 model_flat → model；cross_fusion_flat → cross_fusion）
 BASE_NAME="$(python3 -c "
 import os,re
@@ -84,7 +78,7 @@ assert flats,'no <base>_flat.py found'
 print(re.sub(r'_flat$','',flats[0].stem))
 ")"
 
-python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/build_selected.py" \
+python3 "$ORCA_WORKFLOWS_ROOT/agents/_puzzle_scripts/build_selected.py" \
   --selected_arch "$ORCA_ARTIFACTS_DIR/selected_arch.json" \
   --block_map "$ORCA_ARTIFACTS_DIR/block_map.json" \
   --flat_model "$ORCA_ARTIFACTS_DIR/${BASE_NAME}_flat.py" \
@@ -100,7 +94,7 @@ python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/build_selected.py" \
 ## Step 3 ── 装配 optimized_flat + 自检（materialize_optimized）
 
 ```bash
-python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/materialize_optimized.py" \
+python3 "$ORCA_WORKFLOWS_ROOT/agents/_puzzle_scripts/materialize_optimized.py" \
   --flat_model "$ORCA_ARTIFACTS_DIR/${BASE_NAME}_flat.py" \
   --build_fn "<manifest.yaml 的 model.build_entry>" \
   --selected_arch "$ORCA_ARTIFACTS_DIR/selected_arch.json" \
@@ -125,7 +119,7 @@ python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/materialize_optimized.py" \
 
 每轮：edit optimized_flat.py（append marker 到 `.pz_materialize_healed.txt`）→ 跑 check-only：
 ```bash
-python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/materialize_optimized.py" \
+python3 "$ORCA_WORKFLOWS_ROOT/agents/_puzzle_scripts/materialize_optimized.py" \
   --flat_model "$ORCA_ARTIFACTS_DIR/${BASE_NAME}_flat.py" \
   --build_fn "<manifest.yaml 的 model.build_entry>" \
   --selected_arch "$ORCA_ARTIFACTS_DIR/selected_arch.json" \

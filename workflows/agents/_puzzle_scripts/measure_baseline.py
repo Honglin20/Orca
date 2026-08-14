@@ -395,7 +395,8 @@ def main(argv: list[str] | None = None) -> int:
         # 8) latency（per-inference batch-1：与 per-block latency_table 同尺度，避免混 batch 缩放）
         latency_dummy = build_latency_dummy(adapters, device=device)
         baseline_latency = measure_whole_model_latency(
-            model, forward_fn, latency_dummy, device, args.latency_script_path
+            model, forward_fn, latency_dummy, device, args.latency_script_path,
+            convention=adapters.FORWARD_CALLING_CONVENTION,
         )
 
         # 9) block-zero floor latency + 可行性判定（早退：结构性不可达 → exit 3，不进 BLD）

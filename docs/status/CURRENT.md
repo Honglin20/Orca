@@ -4,48 +4,27 @@
 
 ---
 
-## 当前：Puzzle pz_materialize 节点（分支 `puzzle-universal`）—— 实现完成，待 code-review + commit
+## 当前：Puzzle layer-variant 搜索空间重构（分支 `puzzle-universal`）
 
-### ✅ 已完成（optimized_flat 自包含最优架构交付件）
+### 目标（用户 /goal 2026-08-13）
+搜索空间粒度 block（self_attn/ffn 子块）→ layer（整个 transformer encoder layer）。候选 = transformer layer 计算方式变体（nas-agent attention 去 elastic 原生）。只寻优 attention 机制，不寻优 ffn/depth/width。节点内参考 ns3 编排范式。general workflow（结构特征识别禁类名）。agent.md 洁净契约。验收：target E2E pretrain 90%+ / 时延优化 / 精度损失<1%。
 
-- 新节点 `pz_materialize`（pz_select → pz_retrain 之间）：产 `<base>_optimized_flat.py`（flat 类逐字 + variant 块整模块 AST 内联 + build_model setattr + load_model）。**optimized_flat = GKD/gate/交付唯一执行基底**（正确性由构造保证）。
-- `materialize_optimized.py`（确定性装配 + 自检）：key 对齐 build_student_from_arch + in-process forward + 自包含（仅 torch）+ 幂等 + `--check-only` self-heal。
-- `gkd_retrain.py`/`gate_report.py` 严格走 optimized_flat（删 build_student_from_arch 旧路径，--optimized_flat required）；build_selected 上移 materialize；`puzzle_common.load_optimized_flat`。
-- puzzle.yaml 7 agent + 6 terminate（增 terminate_materialize_failed）；pz_retrain/pz_report agent.md 同步。
-- 验收：tars validate 0 error；test_puzzle_materialize(3) + full_chain_cpu + u3_migration(29) + delta_review + father_state 全过无回归；target 产物实测全绿（key 对齐 + 4-输入 standalone forward + load_model strict + 幂等 md5）。
+### 状态：L1/L2/L3 完成，L3b/L3c 进行中（background coder）
 
-### ⏳ 待办
+- ✅ design draft `docs/specs/puzzle-layer-variant-design-draft.md`（spec-reviewer 闭环 2 BLOCKER + 14 issue + 决策 L1-L14，doc agent 修订定稿）。
+- ✅ **L1**：transformer_layer_variants.py（去 elastic 6 变体）+ Slot 加 max_seq_len/norm_type + catalog transformer_layer kind + _resolve_builtin_factory 多模块（layer 不 wrap）+ 33 单测。
+- ✅ **L2**：puzzle.yaml 拆 pz_expand→pz_ingest/pz_search_space/pz_baseline + 3 agent.md（产品说明书体）+ transformer_layer_pattern.json + transformer-layer-evaluator + gate 脚本。tars validate 0 error + 37 gate 单测。
+- ✅ **L3**：materialize_optimized.py 重写 layer 粒度（dispatcher 构造 _PreLNTransformerLayer，不 _KwargPassthrough）+ 15 单测。L1+L3 集成 73 passed。
+- ⏳ **L3b**：§6.7 floor（puzzle_common _FloorLayer layer-passthrough + latency_table floor 循环）+ test_puzzle_materialize 协调。
+- ⏳ **L3c**：gate_report.py ACC AC L12（高 baseline 相对容差 max(baseline−0.5, baseline×0.99)）+ puzzle.yaml 同步。
 
-- code-reviewer 洁净审查闭环（依赖铁律 / fail loud / DRY / prompt 洁净）。
-- commit（release note + CHANGELOG 已就绪，SHA 待回填）。
+### 待办
+- L4：tars validate + 洁净审查（grep 过程描述/target 字面量）+ 全单测（含 score/mip/gkd layer 适配确认）。
+- L5：target E2E（opencode run + tars skill + orca CLI，auto-restart driver 应对 deepseek stall）。pretrain pre_trained.pth（baseline 0.9919）。AC：final≥0.9819（L12）+ latency≤baseline×0.5。
+- L6：code-reviewer 洁净闭环 + A1 技术债（is_candidate_valid_for_slot OCP，catalog 元数据迁移）+ release/CHANGELOG。
+- defer：§6.1 bld mask 传递（target src_mask=None 不触发，mask-bearing 项目后加）。
 
-**必读**：`docs/plans/2026-08-13-puzzle-materialize-optimized-flat.md`；release `docs/releases/2026-08-13-puzzle-materialize-optimized-flat.md`。
+### ⚠️ 前置：未提交工作区
+puzzle 现状（pz_materialize + 洁净）modified 未 commit + 本轮 layer 重构全 untracked。Phase L6 统一 commit。
 
----
-
-## 历史：Puzzle U6 治本 + target E2E —— 70% 目标结构性不可达，待用户定向
-
-### ✅ 已完成（通用 workflow 改进，8 commit）
-
-- `00f5a3c` U6 治本：porter 化适配器（13 项 API）+ 废四硬契约 + mask-aware/方向感知/LAT 参数化。
-- `efb4387` latency 尺度修复：整模 latency batch-1（原 calib-batch 致 blocks 看似 7% → MIP 全 identity）。
-- `d13bda0`/`a92274f` revert 串改（噪声容差 + all-no_op）—— 立保逻辑铁律（不许删计算/改深度/gaming）。
-- `50a813a` GKD 微调 epochs = 基线训练 × 50%（通用规则）。
-- `162eb50` evaluate 向量化 loop metric（通用 G2，k=1 k-NN cdist+argmin ~100× 快）。
-- `94bdc7e` **early block-fraction feasibility 检查**：pz_expand 测 block-zero floor → max achievable reduction < target 则 exit 3 → terminate_latency_infeasible 早退（不烧 BLD）。target@70% 实测正确触发（exit 3）。
-- 100-epoch target 训练 → 可信基线 acc **0.9919** / latency 0.42ms。
-
-### 🔴 70% latency 对 target 结构性不可达（高精度实证）
-
-- 500-rep min 测量：baseline 0.4201ms / all-block-zero floor 0.1362ms → **block 替换最大 reduction 67.57%** < 70%。
-- 非 block 开销 0.136ms（PositionalEncoding + 4 路 input_proj + output_proj + LayerNorm + residual）puzzle 碰不到。
-- 保 acc 雪上加霜：通用 mixer 候选（fnet/synthesizer）函数 ≠ 专用 block，BLD loss~1（没真模仿），任何非 identity 替换 acc 崩。
-- **非 bug、非 workflow 问题**——是 puzzle 范式（block-only 替换）+ 该模型 block 占比（68%）的物理边界。workflow 现自带 early-feasibility 诚实检测。
-
-### ⏳ 待用户定向（70% on target 数学不可达，三种出路）
-
-1. 换 block 占比 >85% 的测试模型（纯 transformer，无重 input/output 投影）→ puzzle 70%+保 acc 可端到端 pass。
-2. 扩 puzzle 到结构化非 block 剪枝（动 input/output 投影）——不同算法，大改。
-3. 接受 68% 天花板 + 调 latency_reduction_target ≤0.65（workflow 现能端到端跑通到 gate）。
-
-**必读**：`docs/specs/puzzle-u6-design-draft.md`；release notes `2026-08-12-puzzle-u4-cleanup.md` 起。
+**必读**：`docs/specs/puzzle-layer-variant-design-draft.md`（L1-L14 决策 + §5 节点 + §6 内核适配 + §9 验收）。

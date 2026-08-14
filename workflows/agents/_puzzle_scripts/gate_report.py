@@ -2,10 +2,11 @@
 
 U6 改造：
   - root cause I：读 ``adapters.METRIC_DIRECTION``（higher-better / lower-better）。
-    higher-better：``final ≥ baseline − tol``（精度「不降太多」）。
+    higher-better ACC 容差 L12 baseline-dependent（design §0 L12，闭环 LV-1 BLOCKER）：
+    baseline ≥ 0.5 → ``final ≥ max(baseline−0.5, baseline×0.99)``（取严，等价精度损失 <1%）；
+    baseline < 0.5 → ``final ≥ baseline×0.9``（比例保护，近随机 baseline 不被绝对容差放过）。
     lower-better：``final ≤ baseline × (1 + tol)``（loss「不升太多」）。
-    ACC 容差 baseline-dependent（高 baseline 绝对 0.5 / 低 baseline 相对 10%）——
-    tol 量级按 metric 方差（用户 §16.9 intent）。
+    gate AC = 验收 AC（单一真相源，禁双标准）。
   - LAT AC 参数化（coordinator）：``--latency_reduction_target``（默认 0.5），
     判 ``latency_ratio ≤ (1 - reduction)``。如 reduction=0.7 → 要求 ratio ≤ 0.3。
   - root cause J：落盘 ``final_status.json``（统一终态，对齐 ns3_report first-match）。
@@ -36,21 +37,34 @@ from puzzle_common import (
     write_final_status,
 )
 
-# ACC 容差参数（SPEC v2 §12.1，baseline-dependent）
-_ACC_ABS_TOL = 0.5      # 高 baseline 绝对容差 floor
-_ACC_REL_FACTOR = 0.1   # 低 baseline 相对容差
-_ACC_BASELINE_BOUNDARY = 0.5  # 高低 baseline 分界
+# L12 ACC 容差（design `puzzle-layer-variant-design-draft.md` §0 L12，闭环
+# spec-reviewer LV-1 BLOCKER）。**gate AC = 验收 AC**：单一真相源，禁双标准
+# （不再并存 v2 D5 绝对容差 0.5 与 <1% 验收）。
+_ACC_ABS_TOL = 0.5              # 高 baseline 绝对容差（L12 max() 的绝对分支）
+_ACC_REL_FACTOR_HIGH = 0.01     # 高 baseline 相对容差（精度损失 <1%）
+_ACC_REL_FACTOR_LOW = 0.1       # 低 baseline 比例保护（近随机 baseline 不被绝对容差放过）
+_ACC_BASELINE_BOUNDARY = 0.5    # 高低 baseline 分界
 
 
 def _acc_threshold_higher_better(acc_base: float) -> tuple[float, str]:
     """higher-better metric：返回 (final_acc 下限, 容差种类)。
 
-    - acc_base ≥ 0.5：绝对容差 → threshold = acc_base − 0.5（保留 floor 保护）。
-    - acc_base < 0.5：相对容差 → threshold = acc_base·0.9（比例保护）。
+    L12（design §0 L12，闭环 spec-reviewer LV-1 BLOCKER）：
+    - acc_base ≥ 0.5：threshold = max(acc_base − 0.5, acc_base × 0.99)
+      绝对容差 0.5 与相对 1% 取严。target 0.9919→max(0.4919, 0.9819)=0.9819
+      （等价精度损失 <1%，与验收单一真相源对齐，不再 v2 final≥0.4919 歧义）。
+    - acc_base < 0.5：threshold = acc_base × 0.9（比例保护；近随机 baseline
+      0.085→0.0765，不被绝对容差放过）。
+
+    Note：默认 ``_ACC_ABS_TOL=0.5`` 时，对 accuracy ∈ [0.5, 1.0] 绝对支恒被相对支
+    取严（baseline−0.5 > baseline×0.99 ⟺ baseline>50，accuracy 域外）——max() 是防御性
+    floor：``--accuracy_tolerance`` CLI 调小（如 0）才让绝对支激活收紧 gate。
     """
     if acc_base >= _ACC_BASELINE_BOUNDARY:
-        return acc_base - _ACC_ABS_TOL, "absolute"
-    return acc_base * (1.0 - _ACC_REL_FACTOR), "relative"
+        abs_thr = acc_base - _ACC_ABS_TOL
+        rel_thr = acc_base * (1.0 - _ACC_REL_FACTOR_HIGH)
+        return max(abs_thr, rel_thr), "l12-strict"
+    return acc_base * (1.0 - _ACC_REL_FACTOR_LOW), "proportional"
 
 
 def _acc_pass_higher_better(acc_base: float, acc_opt: float) -> tuple[bool, str, float]:
@@ -92,7 +106,10 @@ def _build_argparser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--accuracy_tolerance", type=float, default=0.5,
-        help="[兼容] 高 baseline 绝对容差 floor（baseline ≥ 0.5 时用 abs tol = 此值）",
+        help="[advanced] 高 baseline 绝对容差 floor（baseline ≥ 0.5 时 L12 max() 的绝对分支："
+        "threshold = max(baseline − accuracy_tolerance, baseline × 0.99)）。默认 0.5 时"
+        "该支对 accuracy ∈ [0.5,1.0] 恒被相对支（baseline×0.99）取严（防御性 floor，no-op）；"
+        "调小（如 0）才激活收紧 gate（要求 final 近 baseline）",
     )
     parser.add_argument("--output_dir", required=True)
     return parser
@@ -148,7 +165,8 @@ def main(argv: list[str] | None = None) -> int:
         # latency（per-inference batch-1：与 baseline measure_baseline + per-block latency_table 同尺度）
         lat_dummy = build_latency_dummy(adapters, device=device)
         final_latency = measure_whole_model_latency(
-            student, adapters.forward_model, lat_dummy, device, args.latency_script_path
+            student, adapters.forward_model, lat_dummy, device, args.latency_script_path,
+            convention=adapters.FORWARD_CALLING_CONVENTION,
         )
 
         metric_delta = abs(final_metric - baseline_metric)

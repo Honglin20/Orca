@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "kind": "transformer_layer",
+  "version": 1,
+  "description": "Knowledge base for identifying a replaceable transformer encoder layer by forward structural evidence (no class-name matching). First-version scope: standard serial Pre-LN / Post-LN transformer (2 norm + 2 residual + 1 attn + 1 FFN). Family extension (Parallel / GAU single-norm topologies, cnn/rnn/moe blocks) adds new pattern JSON files alongside this one (OCP).",
+  "structural_signature": {
+    "attention": {
+      "matmul_qkt_scaled": true,
+      "normalization": ["softmax", "relu"],
+      "non_standard_fallback": "When matmul(Q, K^T) is not directly observable (linear attention reorders matmul(K, V) before Q; SOFTS-style attention_matrix_applied_to_value), accept the indirect evidence output = matmul(<seq-mix matrix>, value_proj(x)) — a trainable or computable seq-mixing matrix applied to the value projection."
+    },
+    "ffn": {
+      "linear_act_linear": true,
+      "note": "Linear -> activation -> Linear dominant. activation ∈ {relu, gelu, silu, ...}. Non-standard FFN structures (bypass / GLU / dual) are recorded but do not change layer kind."
+    },
+    "norm_count_min": 2,
+    "residual_count_min": 2,
+    "layout": ["pre_ln", "post_ln"]
+  },
+  "evidence_template": "forward = {attn} -> {norm1}({res}+{drop}) -> {ffn} -> {norm2}({res}+{drop})",
+  "evidence_concrete_examples": [
+    "Post-LN: forward = attn(src) -> norm1(x + dropout(attn_out)) -> ffn -> norm2(x + dropout(ffn_out))",
+    "Pre-LN: forward = x + attn(norm1(x)) -> x + ffn(norm2(x))"
+  ],
+  "must_extract": [
+    "num_heads",
+    "head_dim",
+    "original_intermediate",
+    "activation",
+    "norm_type",
+    "max_seq_len",
+    "mask_load_bearing"
+  ],
+  "field_extraction_rules": {
+    "num_heads": "Read from the layer's attention submodule constructor (e.g. nn.MultiheadAttention(embed_dim, num_heads) -> read num_heads).",
+    "head_dim": "embed_dim / num_heads (computed); record the per-head dimension.",
+    "original_intermediate": "Read from the FFN submodule's first Linear out_features (the intermediate expansion dimension).",
+    "activation": "Read the activation module used between the two FFN Linears (relu / gelu / silu / ...). Verbatim from source.",
+    "norm_type": "layernorm / rmsnorm / ... — the layer's norm module type. Source-of-record only (does not drive variant selection — first-version variants are uniformly Pre-LN with nn.LayerNorm per design L14).",
+    "max_seq_len": "Leave -1 in the declaration; pz_baseline traces the real input sequence length at runtime and writes it back. Forbidden to fallback to a constant (e.g. 512) — a fallback over-parameterizes the mixing matrix for short-sequence projects and breaks BLD optimization (the hardcoded-512 case for a seq=16 project allocates a 2.6M-parameter matrix where the real mixer needs ~16 entries).",
+    "mask_load_bearing": "pz_baseline traces at runtime whether src_mask / attn_mask actually received a non-None value. Leave false in the declaration; signature presence of a mask kwarg alone is not load-bearing (design L13)."
+  },
+  "reject_when": [
+    "Pure attention submodule with no FFN (do not enter slots — this is a sub-block, not a layer).",
+    "Pure FFN submodule with no attention (same — sub-block).",
+    "No residual combination (no `x = x + ...` pattern).",
+    "Single-norm topology: Parallel residual (FlashFormer / GPT-J style `x = x + attn(l) + ffn(l)` sharing one norm) or GAU (Gated Attention Unit, single norm + gate). First version does not support these — leave slots: [] and emit model_type_supported=false. Family extension adds parallel_block / gau_block layouts here (OCP)."
+  ],
+  "candidate_contract": {
+    "identity_mandatory": "Every transformer_layer slot's candidate list must contain `identity` (preserve the father-loaded layer — MIP floor anchor).",
+    "catalog_reference": "$ORCA_WORKFLOWS_ROOT/agents/_puzzle_scripts/candidate_catalog.yaml registers builtin layer variants (vanilla_layer / random_synthesizer_layer / relu_attention_layer / fnet_layer / softs_star_layer / no_op_layer). User-registered candidates use {name, factory, applies_to, params} with factory = `<file>::<callable>`.",
+    "mask_handling": "Layer-variant forward uniformly accepts mask via _extract_mask (positional / attn_mask / src_mask / attention_mask / mask / key_padding_mask). vanilla_layer truly uses attn_mask (nn.MultiheadAttention); score-less mixers (fnet / random_synthesizer / relu_attention / softs_star) accept but ignore. mask_load_bearing is runtime-traced, not signature-static (design L13)."
+  },
+  "layer_evidence_required": "Each slot carries a `layer_evidence` string filled from `evidence_template` with concrete structural facts observed in this layer's forward (Pre-LN vs Post-LN, attn mechanism, FFN activation, norm/residual counts). Class names are not evidence — structural facts are."
+}

@@ -1,5 +1,5 @@
 ---
-description: Puzzle replace-1-block 打分执行 agent（folder-agent）。跑预写 _puzzle_scripts/score.py + latency_table.py → 对每个 (layer,kind,variant) 把该块替换进冻结全模型，calibration 上算 block-distance 分（由 adapters.kd_loss 决定，不再写死 KL/cosine/MSE 分支）+ per-variant 实测 latency → scores.jsonl + latency_table.jsonl。推 3 图（block_score_bar / latency_dist / score_vs_latency_scatter，label `puzzle/score`）。无上限自愈直到产物 ≥1 行且 (layer,variant) 对齐。触碰 scoring logic → 重触 project-fidelity-verifier。禁碰 block_map / flat_model / block_library / 源项目。pathlib 铁律。
+description: Puzzle 打分：逐块替换测 block-distance 分与实测延迟，产出 scores.jsonl + latency_table.jsonl。
 tools: [bash, read, edit, grep, glob, task]
 ---
 # pz_score
@@ -7,8 +7,8 @@ tools: [bash, read, edit, grep, glob, task]
 ## ⚠ 你的唯一任务（先读这段，最重要）
 
 上游 `pz_build_library` 已在 `$ORCA_ARTIFACTS_DIR` 产出 `block_library/` 目录（per-variant 蒸馏块）
-+ `bld_summary.json`。上游 `pz_expand` 产出 `block_map.json` + `<base>_flat.py` +
-`baseline_metrics.json`。**你的工作：跑预写 `_puzzle_scripts/score.py` + `_puzzle_scripts/latency_table.py`
++ `bld_summary.json`。上游 `pz_baseline` 产出 `block_map.json` + `baseline_metrics.json`
+（`<base>_flat.py` 由 `pz_ingest` 产出，共享 artifacts 目录）。**你的工作：跑预写 `_puzzle_scripts/score.py` + `_puzzle_scripts/latency_table.py`
 → 产 `scores.jsonl` + `latency_table.jsonl`，推 3 图**。你**不是**在写打分算法——replace-1-block
 逻辑全在预写脚本里（对任意 transformer 族模型通用）。报错就按白名单自修（仅 launcher 路径 / import；
 score.py / latency_table.py 本体禁 edit → fail loud）。
@@ -17,11 +17,11 @@ score.py / latency_table.py 本体禁 edit → fail loud）。
 
 - `$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本 run artifacts 目录。
 - `$ORCA_AGENT_RESOURCES`（orca spawn 注入）= 本 agent 资源目录。
-- `workflows/agents/_puzzle_scripts/score.py` = 预写 replace-1-block 打分脚本。读 block_library +
+- `$ORCA_WORKFLOWS_ROOT/agents/_puzzle_scripts/score.py` = 预写 replace-1-block 打分脚本。读 block_library +
   flat_model + block_map + adapters，per (layer,kind,variant) 替换单块进冻结全模型，calibration
   上经 `adapters.kd_loss` 算 block-distance 分（agent 移植的正确 distance；不再写死 KL/cosine/MSE
   分支）。输出 `scores.jsonl`：`{layer, kind, variant, score, valid}`，score = `-distance`（越大越好）。
-- `workflows/agents/_puzzle_scripts/latency_table.py` = 预写 latency 实测脚本。per (layer,kind,variant)
+- `$ORCA_WORKFLOWS_ROOT/agents/_puzzle_scripts/latency_table.py` = 预写 latency 实测脚本。per (layer,kind,variant)
   调 `measure_module_latency` 或包装用户 `latency_script_path`。输出 `latency_table.jsonl`：
   `{layer, kind, variant, latency_ms}`（单位 = `latency_unit` 标注，不换算）。
 - `{{ subagents_root }}/project-fidelity-verifier.md` = fidelity-verifier subagent body（point-to-file
@@ -38,7 +38,9 @@ Step 1 前确认都已知（缺任一 → fail loud）：
 - 上游产物：`block_map.json` + `<base>_flat.py` + `baseline_metrics.json` + `block_library/` +
   `bld_summary.json` + `puzzle_adapters.py` + `manifest.yaml`（任一缺 → fail loud，`status=failed`，
   assessment 写明缺哪个）。distance 分支由 `adapters.kd_loss` 决定（agent 移植用户任务正确 distance）。
-- `{{ inputs.latency_unit }}` / `{{ inputs.latency_script_path }}`：latency 单位 + 可选用户脚本。
+- `{{ inputs.latency_unit }}` / `{{ inputs.latency_script_path }}`：latency 单位 + 可选用户脚本
+  （**ONNX 单文件契约** `path::func`，签名 `fn(onnx_path) -> float`；latency_table 把模型/单块导出
+  单文件 ONNX 后调 `fn(onnx_path)`）。
 - `{{ inputs.seed }}`：复现性种子。
 - `$ORCA_ARTIFACTS_DIR`：产物目录。
 
@@ -66,7 +68,7 @@ Step 1 前确认都已知（缺任一 → fail loud）：
    `baseline_metrics.json`、`project_manifest.md`、`block_library/*.pt`、`bld_summary.json`、
    `_puzzle_scripts/score.py` / `latency_table.py`（预写脚本）、
    `{{ inputs.project_root }}` 下源文件（例外 `artifacts/`）。
-   `puzzle_adapters.py` 是 pz_expand 生成产物——若 self-heal 定位根因在 adapters（如 distance 公式
+   `puzzle_adapters.py` 是 pz_ingest 生成产物——若 self-heal 定位根因在 adapters（如 distance 公式
    错），可改并重触 project-fidelity-verifier（生成产物非预写脚本）。
 5. **产物 ≥1 行 + 对齐**：scores.jsonl 和 latency_table.jsonl 各 ≥1 行；每 (layer,kind,variant)
    在两边都出现。否则 fail loud。
@@ -77,22 +79,10 @@ Step 1 前确认都已知（缺任一 → fail loud）：
 ### Step 0: Reuse-Check
 
 ```bash
-cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
-if [ -s scores.jsonl ] && [ -s latency_table.jsonl ]; then
-  # 校验对齐
-  if python3 -c "
-import json
-s = [json.loads(l) for l in open('scores.jsonl') if l.strip()]
-t = [json.loads(l) for l in open('latency_table.jsonl') if l.strip()]
-sk = {(r['layer'], r['kind'], r['variant']) for r in s}
-tk = {(r['layer'], r['kind'], r['variant']) for r in t}
-assert sk == tk, f'misaligned: {sk ^ tk}'
-print('SCORE_REUSE_VALID')
-" 2>/dev/null | grep -q SCORE_REUSE_VALID; then
-    echo "REUSE: scores + latency_table 齐且对齐 → 跳过 Step 1-3，直进 输出 JSON"
-  fi
-fi
+bash "$ORCA_AGENT_RESOURCES/scripts/reuse_check.sh"
 ```
+
+输出 `SCORE_REUSE_VALID` → 跳过 Step 1-3 直进输出 JSON；无输出 → 照常执行 Step 1-3。
 
 ### Step 1: 生成 run_score.sh（仅缺失时）
 
@@ -100,7 +90,7 @@ fi
 `$ORCA_ARTIFACTS_DIR/run_score.sh`：
 
 ```bash
-python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/score.py" \
+python3 "$ORCA_WORKFLOWS_ROOT/agents/_puzzle_scripts/score.py" \
   --block_map "$ORCA_ARTIFACTS_DIR/block_map.json" \
   --flat_model "$ORCA_ARTIFACTS_DIR/<base>_flat.py" \
   --build_fn "<manifest.yaml 的 model.build_entry，agent 读 manifest 桥接>" \
@@ -111,7 +101,7 @@ python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/score.py" \
   --output_dir "$ORCA_ARTIFACTS_DIR" \
   --seed {{ inputs.seed }}
 
-python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/latency_table.py" \
+python3 "$ORCA_WORKFLOWS_ROOT/agents/_puzzle_scripts/latency_table.py" \
   --block_map "$ORCA_ARTIFACTS_DIR/block_map.json" \
   --flat_model "$ORCA_ARTIFACTS_DIR/<base>_flat.py" \
   --build_fn "<manifest.yaml 的 model.build_entry，agent 读 manifest 桥接>" \
@@ -123,8 +113,6 @@ python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/latency_table.py" \
   --latency_script_path "{{ inputs.latency_script_path }}" \
   --output_dir "$ORCA_ARTIFACTS_DIR"
 ```
-
-`REPO_ROOT` 解析方式同 pz_expand Step 2（pathlib 探 `$ORCA_AGENT_RESOURCES` 的 workflows 父）。
 
 ### Step 2: 跑 run_score.sh + 推 3 图
 

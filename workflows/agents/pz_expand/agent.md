@@ -1,7 +1,14 @@
 ---
-description: Puzzle decomposed-NAS 入口 agent（folder-agent）—— 读用户 PyTorch 模型源码 faithful 移植产单个 puzzle_adapters.py（13 项能力 API：build_model / forward_model / calib_iter / train_iter / extract_labels / kd_loss / task_loss / evaluate / load_pretrained / METRIC_DIRECTION / EVAL_NOISE_ATOL / FORWARD_CALLING_CONVENTION / DUMMY_INPUT）+ flat.py + manifest.yaml + search_space.yaml（逐层可替换 attention/ffn slot + kind 确定性证据 + 候选引用 catalog）→ 调 measure_baseline.py 跑 4 道 fidelity smoke + 测基线 acc/latency + trace slot I/O shape → 调 workflow-verifier + memory-verifier。无 attention/ffn slot（空 search_space）→ model_type_supported=false fail loud 路由 terminate_unsupported（不烧后续 BLD/搜索算力）。pathlib 铁律 + 禁碰源项目文件（例外 artifacts/）。
+description: Puzzle 入口：读用户 PyTorch 模型源码，产出 flat 模型 + 项目 manifest + 搜索空间，并测父模型基线 acc/latency，判定是否可做异构块替换。
 tools: [bash, read, write, edit, glob, grep, task]
 ---
+> ⚠ **SUPERSEDED (2026-08-13)** — This node is **no longer in `workflows/puzzle.yaml`**.
+> The puzzle workflow was split (2026-08-13 layer-variant refactor) into three
+> single-responsibility nodes: `pz_ingest` (flatten + adapters + manifest),
+> `pz_search_space` (transformer-layer slot declaration), and `pz_baseline`
+> (measure_baseline + floor reachability). This file is kept as historical
+> reference only; nothing in the live workflow references it. Do not invoke it.
+
 # pz_expand
 
 你是 puzzle 流水线的 **expand** folder-agent：读用户原始 PyTorch 模型
@@ -25,8 +32,8 @@ measure_baseline.py 跑 fidelity smoke + 测基线，全部产物落 `$ORCA_ARTI
   所有 `references/` 与 `scripts/` 路径相对于它。
 - `$ORCA_ARTIFACTS_DIR`（orca spawn 注入）= 本节点产物目录。
   **先 `cd "$ORCA_ARTIFACTS_DIR"` 再执行任何命令**；后续相对路径在该 cwd 下解析。
-- `workflows/agents/_puzzle_scripts/measure_baseline.py` = 预写确定性脚本（相对 repo 根；agent
-  用绝对路径调）。它读 search_space.yaml + flat + father ckpt，跑 4 道 smoke + 测基线 + trace
+- `$ORCA_WORKFLOWS_ROOT/agents/_puzzle_scripts/measure_baseline.py` = 预写确定性脚本。它读
+  search_space.yaml + flat + father ckpt，跑 4 道 smoke + 测基线 + trace
   slot 形状 + 落 block_map.json。**你只跑它，禁改它**。
 - `{{ inputs.project_root }}`：用户原始 PyTorch 项目根。
 - **禁**读 `$ORCA_AGENT_RESOURCES/references/workflow-checklists/` 下任何文件——这些只供
@@ -76,7 +83,9 @@ Step 1 前确认都已知（缺任一 → fail loud，output_schema `error` 字�
 - `{{ inputs.project_root }}`：用户原始 PyTorch 项目根（必填）。
 - `{{ inputs.model_path }}`：目标模型入口文件（必填，相对 `project_root` 的路径或绝对路径）。
 - `{{ inputs.latency_unit }}`：latency 单位 ms/us/s（默认 ms）。
-- `{{ inputs.latency_script_path }}`：用户外部时延脚本（可选；us/s 声明时必填）。
+- `{{ inputs.latency_script_path }}`：用户外部时延脚本（可选；us/s 声明时必填）。**ONNX 单文件契约**
+  `path::func`，脚本签名 `fn(onnx_path) -> float`（可选 `device` kwarg）——puzzle 先把模型/单块
+  导出为单文件 ONNX 再调 `fn(onnx_path)`，用户脚本是时延唯一权威。
 - `{{ inputs.latency_reduction_target }}`：时延降低目标比例（[advanced]，默认 0.5；下传 pz_select /
   pz_report 的 mip_select / gate_report 经各自 launcher 用）。
 - `{{ inputs.seed }}`：复现性种子（默认 0）。
@@ -114,32 +123,13 @@ metric direction）、KD / task loss、ckpt 前缀 schema。脚本不假设任�
 **确定性查 + 验证（禁盲目跳过）**：在 Step 1 开始前执行：
 
 ```bash
-cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
-MISSING=""
-for f in manifest.yaml search_space.yaml block_map.json baseline_metrics.json puzzle_adapters.py; do
-  [ -s "$f" ] || MISSING="$MISSING $f"
-done
-FLAT="$(ls *_flat.py 2>/dev/null | head -1)"
-[ -n "$FLAT" ] || MISSING="$MISSING <base>_flat.py"
-if [ -z "$MISSING" ]; then
-  if python3 -c "
-import ast, json, sys, yaml
-ast.parse(open(sys.argv[1]).read())
-slots = yaml.safe_load(open('search_space.yaml'))['slots']
-assert isinstance(slots, list), 'slots not list'
-bm = json.load(open('block_map.json'))['slots']
-assert len(slots) == len(bm) and len(slots) >= 1, 'slots mismatch/empty'
-print('EXPAND_VALID')
-" "$FLAT" 2>/dev/null | grep -q EXPAND_VALID; then
-    echo "REUSE: 5 产物齐且达标 → 跳过 Step 1-3，直进 输出 JSON"
-  fi
-fi
+bash "$ORCA_AGENT_RESOURCES/scripts/reuse_check.sh"
 ```
 
-- 达标（五产物齐 + flat 可 parse + search_space 与 block_map 的 slot 数一致且 ≥1）→ 跳过
-  Step 1-3，按既有 output_schema emit：`model_type_supported=true` + 从 disk 读真实路径 +
-  `error=""` + `generated_artifacts` 列既有产物。
-- 不存在 / 不达标 → 照常执行 Step 1-3。
+- 脚本 stdout 输出 `REUSE_VALID`（五产物齐 + flat 可 parse + search_space 与 block_map 的
+  slot 数一致且 ≥1）→ 跳过 Step 1-3，按既有 output_schema emit：`model_type_supported=true` +
+  从 disk 读真实路径 + `error=""` + `generated_artifacts` 列既有产物。
+- 无输出（产物缺 / 不达标）→ 照常执行 Step 1-3。
 - **空 slots + 历史 unsupported**：若 search_space.yaml 在但 slots 列表为空（上次 run 判
   unsupported），照常进 Step 1 重判（**不**因文件存在就盲目跳过 unsupported 分支）。
 
@@ -305,19 +295,11 @@ flat 必须含：`build_model()`（零参，返回 wrapper）、`DUMMY_INPUT`（
 
 ### Step 2: Run measure_baseline.py（预写脚本，只跑不改）
 
-跑预写确定性脚本一次。脚本路径相对 repo 根：
+跑预写确定性脚本一次：
 
 ```bash
 cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: ORCA_ARTIFACTS_DIR unreachable"; exit 1; }
-REPO_ROOT="$(python3 -c "
-from pathlib import Path
-import os
-p = Path(os.environ['ORCA_AGENT_RESOURCES']).resolve()
-for parent in p.parents:
-    if parent.name == 'workflows':
-        print(parent.parent); break
-")"
-python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/measure_baseline.py" \
+python3 "$ORCA_WORKFLOWS_ROOT/agents/_puzzle_scripts/measure_baseline.py" \
   --flat_path "$ORCA_ARTIFACTS_DIR/<base>_flat.py" \
   --build_fn "<manifest.yaml 的 model.build_entry>" \
   --build_cfg "{{ inputs.build_cfg }}" \
@@ -332,21 +314,6 @@ python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/measure_baseline.py" \
 ```
 
 脚本契约（你只跑不验证，脚本能跑就信它的产物 + smoke 结果）：
-- 入参：`--adapters` + `--manifest` + `--flat_path` + `--build_fn` + `--search_space_path` +
-  `--output_dir` + latency/seed 参数 + `--latency_reduction_target`（脚本经
-  `adapters.load_pretrained` 读父权重，经 `adapters.evaluate` 测 acc，
-  `adapters.EVAL_NOISE_ATOL` 控 stability 容差——默认读 adapters；可选 `--eval_stability_atol`
-  覆盖 override）。所有项目相关性收敛到适配器。
-- 产物（落 `--output_dir`）：
-  - `block_map.json`：逐层 slot 清单（从 search_space 转，in_dim/out_dim 已 trace 回填）。
-  - `search_space.yaml`：回写版（in_dim/out_dim 已 trace 回填）。
-  - `baseline_metrics.json`：`{baseline_acc, baseline_latency, latency_floor,
-    max_achievable_reduction, latency_target_feasible, latency_reduction_target, latency_unit,
-    metric_direction, ckpt_from_scratch, seed, smokes_passed}`（acc 方向由
-    `adapters.METRIC_DIRECTION`，非 `eval_kind`）。**latency_floor** = 全 block 置零后的整模
-    latency；**max_achievable_reduction** = `1 - floor/baseline`（block 替换物理上限）；
-    **latency_target_feasible** = `max_achievable_reduction >= latency_reduction_target - 1e-6`。
-  - `father_state_dict.pt`：adapters.load_pretrained 后保存的统一父权重（供下游复用）。
 - 4 道 smoke（任一失败 → exit 2 + stderr 点名哪道 smoke）：**ckpt 宽松加载**（走
   `adapters.load_pretrained` 返 `_LoadResult`；非双零不 fatal 仅 WARN + 记 `ckpt_from_scratch`；
   flatten 阶段对齐 ns3）、**forward-determinism**（`adapters.forward_model(model, batch)` 两次
@@ -404,7 +371,7 @@ Step 2 跑通后（block_map.json + 回填版 search_space.yaml 都在）才进�
    - `search_space.yaml`: `$ORCA_ARTIFACTS_DIR/search_space.yaml`
    - flat model: `$ORCA_ARTIFACTS_DIR/<base>_flat.py`
    - `manifest.yaml`: `$ORCA_ARTIFACTS_DIR/manifest.yaml`
-   - candidate catalog: `<repo>/workflows/agents/_puzzle_scripts/candidate_catalog.yaml`（绝对路径）
+   - candidate catalog: `$ORCA_WORKFLOWS_ROOT/agents/_puzzle_scripts/candidate_catalog.yaml`（绝对路径）
 2. **按协议调 `search-space-evaluator`**（审 slot 必填字段 / id+path 唯一 / kind 合法 /
    candidate 注册有效 / user factory 可解析 / 评估范式与 metric.direction + 输出 shape 自洽 /
    无 `axes` 残留），inputs 同上（不读 flat 源码，但要 catalog + manifest）。

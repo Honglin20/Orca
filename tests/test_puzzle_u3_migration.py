@@ -319,16 +319,98 @@ def test_bld_e6_filter_bypass_ffn_rejects_prune(tmp_path: Path) -> None:
 # ── root cause I：gate_report 方向感知 ────────────────────────────────────────
 
 def test_gate_metric_direction_higher_better_thresholds() -> None:
-    """higher-better：高 baseline 绝对 0.5；低 baseline 相对 10%。"""
+    """L12（design §0 L12，闭环 LV-1 BLOCKER）：高 baseline max(abs-0.5, rel-1%)；低 baseline 10% 比例保护。"""
     gate = _import("gate_report")
+    # 高 baseline：max(0.97-0.5, 0.97×0.99) = max(0.47, 0.9603) = 0.9603（mnist）
     threshold, kind = gate._acc_threshold_higher_better(0.97)
-    assert kind == "absolute"
-    assert threshold == pytest.approx(0.47, abs=1e-6)
-    assert gate._acc_pass_higher_better(0.97, 0.47)[0] is True
-    assert gate._acc_pass_higher_better(0.97, 0.469)[0] is False
+    assert kind == "l12-strict"
+    assert threshold == pytest.approx(0.9603, abs=1e-6)
+    assert gate._acc_pass_higher_better(0.97, 0.9603)[0] is True
+    assert gate._acc_pass_higher_better(0.97, 0.9602)[0] is False
+    # 低 baseline：0.085 × 0.9 = 0.0765（近随机，比例保护）
     threshold_low, kind_low = gate._acc_threshold_higher_better(0.085)
-    assert kind_low == "relative"
+    assert kind_low == "proportional"
     assert threshold_low == pytest.approx(0.0765, abs=1e-6)
+
+
+def test_gate_acc_threshold_l12_target_and_boundary_cases() -> None:
+    """L12 AC 公式：target/边界全覆盖（单一真相源 = 验收 AC）。
+
+    验证 LV-1 BLOCKER 修复——v2 D5 绝对容差让 target 0.9919 pass 阈值仅 0.4919，
+    改 L12 后必须 0.9819（等价精度损失 <1%）。
+    """
+    gate = _import("gate_report")
+    # target 0.9919 → max(0.4919, 0.9919×0.99=0.981981) = 0.981981（≈0.9819，等价 <1%）
+    t, kind = gate._acc_threshold_higher_better(0.9919)
+    assert kind == "l12-strict"
+    assert t == pytest.approx(0.981981, abs=1e-6)
+    # 0.99 → max(0.49, 0.9801) = 0.9801（相对分支取严）
+    t, _ = gate._acc_threshold_higher_better(0.99)
+    assert t == pytest.approx(0.9801, abs=1e-6)
+    # 0.6 → max(0.1, 0.594) = 0.594（相对分支取严）
+    t, _ = gate._acc_threshold_higher_better(0.6)
+    assert t == pytest.approx(0.594, abs=1e-6)
+    # 理论上限 1.0 → max(0.5, 0.99) = 0.99（相对分支取严）
+    t, _ = gate._acc_threshold_higher_better(1.0)
+    assert t == pytest.approx(0.99, abs=1e-6)
+    # 边界 0.5：max(0, 0.495) = 0.495（相对分支取严；≥0.5 入高 baseline 路径）。
+    # 注意 0.5 处是有意 regime-switch：0.5→0.495（1% 跌幅）vs 0.499→0.4491（10% 跌幅），
+    # 阈值不连续是 L12 高/低 baseline 双策略的设计语义，非 bug。
+    t, k = gate._acc_threshold_higher_better(0.5)
+    assert k == "l12-strict"
+    assert t == pytest.approx(0.495, abs=1e-6)
+    # 边界 0.499：<0.5 走比例保护 → 0.499×0.9 = 0.4491
+    t, k = gate._acc_threshold_higher_better(0.499)
+    assert k == "proportional"
+    assert t == pytest.approx(0.4491, abs=1e-6)
+
+
+def test_gate_acc_threshold_default_relative_dominates_for_accuracy() -> None:
+    """默认 _ACC_ABS_TOL=0.5 时，对 accuracy ∈ [0.5, 1.0] 相对支（×0.99）恒取严。
+
+    数学：baseline−0.5 > baseline×0.99 ⟺ baseline > 50（accuracy 域外）→ 绝对支永不取严。
+    这是 design L12 max() 在 accuracy 域的「防御性 floor」语义——绝对支只在
+    --accuracy_tolerance CLI override 调小时激活（见 override 测试）。
+    钉死该不变式，防未来误改 _ACC_ABS_TOL 期望生效却不报警。
+    """
+    gate = _import("gate_report")
+    assert gate._ACC_ABS_TOL == 0.5  # 防御性 floor 默认值，被 max() 包住
+    for baseline in (0.5, 0.6, 0.7, 0.8, 0.9, 0.97, 0.99, 0.9919, 1.0):
+        threshold, kind = gate._acc_threshold_higher_better(baseline)
+        assert kind == "l12-strict"
+        # 相对支取严 = 阈值 == baseline × 0.99（不是 baseline − 0.5）
+        assert threshold == pytest.approx(baseline * 0.99, abs=1e-6), (
+            f"baseline={baseline} 应走相对支（×0.99），实际 threshold={threshold}"
+        )
+
+
+def test_gate_acc_threshold_accuracy_tolerance_override_tightens(monkeypatch) -> None:
+    """--accuracy_tolerance CLI override 调小时绝对支激活收紧 gate（证明 CLI 非 no-op）。
+
+    main() 经 ``global _ACC_ABS_TOL`` 注入 CLI 值（gate_report.py:113-114）。默认 0.5
+    时绝对支恒被相对支取严；调小到 ``--accuracy_tolerance 0`` 时 max(0.97, 0.9603)=0.97，
+    要求 final 精确等于 baseline——收紧 gate。
+    """
+    gate = _import("gate_report")
+    # 默认：baseline=0.97 → max(0.47, 0.9603) = 0.9603（相对支取严）
+    assert gate._acc_threshold_higher_better(0.97)[0] == pytest.approx(0.9603)
+    # 模拟 --accuracy_tolerance 0：max(0.97, 0.9603) = 0.97（绝对支取严，收紧）
+    monkeypatch.setattr(gate, "_ACC_ABS_TOL", 0.0)
+    t, kind = gate._acc_threshold_higher_better(0.97)
+    assert kind == "l12-strict"
+    assert t == pytest.approx(0.97, abs=1e-6)
+    # 收紧后 final=0.965（默认 0.9603 阈值下 pass）现在 fail
+    assert gate._acc_pass_higher_better(0.97, 0.965)[0] is False
+
+
+def test_acc_pass_higher_better_returns_full_tuple_contract() -> None:
+    """_acc_pass_higher_better 返回 (bool, kind, threshold)；threshold==threshold 函数返回值。"""
+    gate = _import("gate_report")
+    passed, kind, thr = gate._acc_pass_higher_better(0.97, 0.965)
+    assert passed is True
+    assert kind == "l12-strict"
+    expected_thr, _ = gate._acc_threshold_higher_better(0.97)
+    assert thr == pytest.approx(expected_thr, abs=1e-6)
 
 
 def test_gate_metric_direction_lower_better_pass() -> None:

@@ -278,6 +278,69 @@ def test_mip_select_infeasible(tmp_path: Path) -> None:
     assert len(result["selected_arch"]) == 2  # 2 layers each picked min-latency variant
 
 
+def test_mip_select_best_effort_transformer_layer_picks_functional_variant(tmp_path: Path) -> None:
+    """F1：transformer_layer group best-effort 选 min-latency **功能**候选（非删层）。
+
+    意图（Rule 9）：F1 后 transformer_layer 候选集 = identity + 5 真 attention 变体（每个都履行
+    层职能），无 no_op_layer（删层）。极紧 target 触发 best-effort 时，``!= "no_op"`` 过滤对
+    layer group 是结构性 no-op（无成员名 "no_op"）→ 全部成员视为 functional → 选 latency 最小者。
+    锁定：best-effort 产出真 attention 变体（fnet_layer，min latency），**非** identity 兜底也
+    **非** no_op_layer 删层（候选集根本无它）。把 F1 契约在 MIP 层端到端闭环。
+    """
+    scores_path = tmp_path / "scores.jsonl"
+    latency_path = tmp_path / "latency_table.jsonl"
+    # 候选 = identity + vanilla_layer + fnet_layer（无 no_op_layer——F1 退出候选集）
+    variants = ("identity", "vanilla_layer", "fnet_layer")
+    score_of = {"identity": 0.0, "vanilla_layer": -0.5, "fnet_layer": -0.3}
+    latency_of = {"identity": 100.0, "vanilla_layer": 80.0, "fnet_layer": 50.0}
+    with open(scores_path, "w") as f:
+        for layer in (0, 1):
+            for v in variants:
+                f.write(json.dumps({
+                    "layer": layer, "kind": "transformer_layer", "variant": v,
+                    "score": score_of[v], "valid": True,
+                }) + "\n")
+    with open(latency_path, "w") as f:
+        for layer in (0, 1):
+            for v in variants:
+                f.write(json.dumps({
+                    "layer": layer, "kind": "transformer_layer", "variant": v,
+                    "latency_ms": latency_of[v],
+                }) + "\n")
+    # baseline=210, Σidentity=2×100=200 → floor=10；target=5 → effective_target=-5（不可达 → best-effort）
+    (tmp_path / "baseline_metrics.json").write_text(
+        json.dumps({"baseline_latency": 210.0, "latency_unit": "ms"})
+    )
+    cmd = [
+        sys.executable, str(_SCRIPTS_DIR / "mip_select.py"),
+        "--scores", str(scores_path),
+        "--latency-table", str(latency_path),
+        "--target-latency", "5.0",
+        "--baseline-metrics", str(tmp_path / "baseline_metrics.json"),
+        "--output_dir", str(tmp_path),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    assert proc.returncode == 0, f"best-effort 是合法 rc=0：STDERR:\n{proc.stderr}"
+    result = _parse_result_json(proc.stdout)
+    assert result["select_reason"] == "best-effort"
+    assert result["feasible"] is False
+    arch = result["selected_arch"]
+    assert len(arch) == 2, f"best-effort 应覆盖全部 2 layer：{arch}"
+    functional = set(variants)
+    for layer, slot_map in arch.items():
+        chosen = slot_map["transformer_layer"]
+        assert chosen in functional, (
+            f"layer {layer}: best-effort 应选功能候选（{functional}），得 {chosen!r}"
+        )
+        assert chosen != "no_op_layer", (
+            f"F1 违规：layer {layer} 选了 no_op_layer（删层）——候选集不应有它"
+        )
+        # min-latency 功能候选 = fnet_layer（50 < 80 < 100），证 best-effort 真选最快功能变体
+        assert chosen == "fnet_layer", (
+            f"layer {layer}: 应选 min-latency 功能候选 fnet_layer，得 {chosen!r}"
+        )
+
+
 # ── root cause G：mip 不再 target-too-aggressive 早警 ─────────────────────────
 
 def test_mip_select_no_target_too_aggressive_early_terminate(tmp_path: Path) -> None:

@@ -1,12 +1,13 @@
 ---
-description: Puzzle GKD（Global Knowledge Distillation）末段重训执行 agent（folder-agent，长跑）。**把 GKD 跑到真正完成**：生成 run_retrain.sh launcher（调预写 _puzzle_scripts/build_selected.py 实例化异构架构 + _puzzle_scripts/gkd_retrain.py 端到端 KD，KD/task loss 由 adapters.kd_loss / task_loss 决定）→ fidelity 复查 → detach 后台 → warmup 确认跑通 → 有界轮询 monitor 块全程监控（~9min/块，进程死/发散触发无上限自愈 HEAL-LOOP）→ 写 retrain_status.md（跨唤醒真相源），turn 到顶换 sub-agent 经 status.sh 真相源续接，完成（.retrain_rc==0 + 进程退出 + final_model.pt 有效；**ckpt 存在 ≠ 完成**，中断残留续训）才输出 JSON；GKD 未完成前不产出节点 JSON（宿主不调 next），节点常驻执行中。确定性逻辑固化在 scripts/（status/launch/warmup/eta/update_status_md/emit_result/progress_watcher/monitor_until_done），agent 只做判断（生成 / self-heal / 轮询 / 收尾）。launch.sh 自动启动 progress_watcher 边重训边推实时曲线。触碰 GKD 训练逻辑（gkd_retrain.py 的 KD / 数据管道）或 puzzle_adapters.py 的 KD/task loss → 重触 project-fidelity-verifier（point-to-file 协议）。build_selected.py / gkd_retrain.py 是预写脚本，禁 edit——有 bug → fail loud。
+description: Puzzle 末段蒸馏重训（GKD）：把选中异构架构蒸馏回原精度，产出 final_model。
 tools: [bash, read, write, edit, grep, glob, task]
 ---
 # pz_retrain
 
 ## ⚠ 你的唯一任务（先读这段，最重要）
 
-上游已完成：pz_expand 产 block_map / flat_model / baseline_metrics / project_manifest，pz_build_library
+上游已完成：pz_ingest 产 flat_model / puzzle_adapters / manifest / project_manifest，
+pz_search_space 产 search_space，pz_baseline 产 block_map / baseline_metrics，pz_build_library
 产 block_library + bld_summary.json，pz_score 产 scores / latency_table，pz_select 产
 `selected_arch`，**pz_materialize 产 `<base>_optimized_flat.py` + `selected_model.pt`（父⊕BLD）**（见资源锚点）。
 **你的工作：生成 `run_retrain.sh` launcher（调预写 `gkd_retrain.py`——student 严格走 optimized_flat，
@@ -32,26 +33,13 @@ tools: [bash, read, write, edit, grep, glob, task]
 
 - `$ORCA_ARTIFACTS_DIR`（orca spawn / orca_env.sh 注入）= 本 run 的 artifacts 目录。
 - `$ORCA_AGENT_RESOURCES`（orca spawn / orca_env.sh 注入）= 本 agent 资源目录，即本文件所在
-  目录。**确定性逻辑全在 `scripts/`，只跑不读**（agent 不需要看脚本内容）：
-  - `scripts/status.sh` —— 状态二合一判定（完成 / 存活）
-  - `scripts/health.sh` —— 健康检查（epoch / 主指标 / log 尾部）
-  - `scripts/launch.sh` —— detach（wrapper 内自动启动 `progress_watcher.py`
-    实时推曲线；label `puzzle/retrain`；只跑不改，agent 无需干预）
-  - `scripts/warmup_poll.sh` —— warmup 单轮轮询（含 4min sleep）
-  - `scripts/eta.py` —— 估时（落 `runs/retrain/.retrain_eta.json`，信息用）
-  - `scripts/update_status_md.sh` —— 写 `retrain_status.md`（artifacts 根下）
-  - `scripts/emit_result.py` —— 最终 JSON（唯一产出）
-  - `scripts/progress_watcher.py` —— 边重训边推实时曲线（launch.sh 自动启动；
-    tail 生成契约 progress.jsonl `{"step":N,"metrics":{...}}`，遍历 metrics **每指标推一张独立图**）
-  - `scripts/monitor_until_done.sh` —— 有界轮询块（~9min/调用）
-  - `scripts/kill_train_group.sh` —— 带 run 归属门的整组杀
-  - `scripts/check_progress_contract.py` —— progress.jsonl 契约校验
+   目录。**确定性逻辑全在 `scripts/`，只跑不读**（agent 不需要看脚本内容）。
 - `{{ subagents_root }}/project-fidelity-verifier.md` = fidelity-verifier subagent body
   （point-to-file 协议，Step 3b / 3g；render 期 inline 为绝对路径，cwd 无关）。
 - `{{ pz_select.output.selected_arch }}` = 上游选定架构（Jinja 渲染，dict）。
 - `{{ pz_materialize.output.optimized_flat_path }}` = 上游 pz_materialize 产出的自包含最优架构
   `<base>_optimized_flat.py`（student 唯一执行基底；GKD 经 `load_optimized_flat` 用它建 student）。
-- `workflows/agents/_puzzle_scripts/gkd_retrain.py` = 预写脚本：读 **optimized_flat** +
+- `$ORCA_WORKFLOWS_ROOT/agents/_puzzle_scripts/gkd_retrain.py` = 预写脚本：读 **optimized_flat** +
   selected_model（父⊕BLD，已由 pz_materialize 经 build_selected 合成）+ adapters（teacher，冻结）+
   adapters.train_iter 数据，端到端 KD（`adapters.kd_loss` + 可选 `adapters.task_loss`）→ `final_model.pt`。
   student 构造**严格走 optimized_flat.build_model()**（不再 build_student_from_arch 运行时重建）。
@@ -102,7 +90,7 @@ tools: [bash, read, write, edit, grep, glob, task]
    失败时）——节点 `output_schema` 校验，非 JSON 直接 node_failed。**未完成时**最终回复 =
    状态说明（含"请勿调用 orca next"字样），宿主不会提交它。
 9. **用户测度权威（生成 run_retrain.sh 时）**：KD loss / task loss / 数据流 / metric 方向由
-   `puzzle_adapters.py` 忠实移植（agent 已在 pz_expand 按用户任务移植正确 KD / task loss），
+   `puzzle_adapters.py` 忠实移植（agent 已在 pz_ingest 按用户任务移植正确 KD / task loss），
    gkd_retrain.py 经 `adapters.kd_loss` / `adapters.task_loss` 调用——**你不在 launcher 里 override
    也不重写 loss 公式**。下游 `pz_report` 的 ACC AC（方向感知公式）依赖 final_model 的 acc 由
    `adapters.evaluate` 测、方向由 `adapters.METRIC_DIRECTION` 判。
@@ -163,16 +151,8 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
 - `run_retrain.sh`：launcher。`cd $ORCA_ARTIFACTS_DIR` + 调预写 GKD 脚本（student 严格走
   optimized_flat；build_selected 已由上游 pz_materialize 完成，本节点不重调）：
   ```bash
-  REPO_ROOT="$(python3 -c "
-  from pathlib import Path, os
-  p = Path(os.environ['ORCA_AGENT_RESOURCES']).resolve()
-  for parent in p.parents:
-      if parent.name == 'workflows':
-          print(parent.parent); break
-  ")"
-
   # GKD 末段重训（optimized_flat 基底 + selected_model 起点 = 父⊕BLD）
-  python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/gkd_retrain.py" \
+  python3 "$ORCA_WORKFLOWS_ROOT/agents/_puzzle_scripts/gkd_retrain.py" \
     --selected_model "$ORCA_ARTIFACTS_DIR/selected_model.pt" \
     --optimized_flat "$ORCA_ARTIFACTS_DIR/<base_name>_optimized_flat.py" \
     --adapters "$ORCA_ARTIFACTS_DIR/puzzle_adapters.py" \
@@ -182,11 +162,10 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
     --task_loss_weight 1.0 \
     --seed {{ inputs.seed }}
   ```
-  `REPO_ROOT` 解析方式同 pz_expand Step 2（pathlib 探 `$ORCA_AGENT_RESOURCES` 的 workflows 父）。
   设 `NPROC_PER_NODE` 实测值（`python3 -c 'import torch; print(torch.cuda.device_count())'`）。
   **`EPOCHS` = 基线训练 epochs 的 50%**（GKD 末段 KD 微调通用规则：用基线训练量的一半恢复
   block 替换引入的失配，足以收敛又不从头重训）。从 `$ORCA_ARTIFACTS_DIR/manifest.yaml` 的
-  `training_and_evaluation.epochs`（pz_expand 从用户 train 代码发现并记录）读基线 epochs `N`，
+  `training_and_evaluation.epochs`（pz_ingest 从用户 train 代码发现并记录）读基线 epochs `N`，
   设 `EPOCHS = max(1, round(N * 0.5))`。manifest 缺 epochs → 回退默认 1（assessment 警告）。
   父权重加载由脚本内部经 `adapters.load_pretrained` 完成（launcher 不接父权重参数）。
 
@@ -196,7 +175,7 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
   不再接 `--build_fn` / `--flat_model` / `--block_map` / `--block_library`（架构已 bake 进 optimized_flat）。
   - `--optimized_flat` ← `$ORCA_ARTIFACTS_DIR/<base>_optimized_flat.py`（pz_materialize 产出）
   - `--selected_model` ← `$ORCA_ARTIFACTS_DIR/selected_model.pt`（pz_materialize 经 build_selected 合成）
-  - `--adapters` ← 固定 `$ORCA_ARTIFACTS_DIR/puzzle_adapters.py`（pz_expand 生成）
+  - `--adapters` ← 固定 `$ORCA_ARTIFACTS_DIR/puzzle_adapters.py`（pz_ingest 生成）
   - `--manifest` ← 固定 `$ORCA_ARTIFACTS_DIR/manifest.yaml`
   manifest 缺 `training_and_evaluation.adapters_entry` → 进 Step 4 输出 `{"status":"failed"}`，
   assessment 写明缺哪个。
@@ -214,7 +193,7 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
 - **progress.jsonl 写入自检**：grep `gkd_retrain.py` 含 `progress.jsonl` + `json.dumps`（预写脚本
   保证，你只 grep 确认）。
 - **用户测度自检**：gkd_retrain.py 的 KD / task loss 经 `adapters.kd_loss` / `adapters.task_loss`
-  调用（agent 在 pz_expand 按用户任务移植正确公式），你不在 launcher override 也不重写公式。
+  调用（agent 在 pz_ingest 按用户任务移植正确公式），你不在 launcher override 也不重写公式。
 
 生成后 append 文件名到 `.pz_retrain_generated.txt`。
 

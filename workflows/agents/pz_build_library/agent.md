@@ -1,13 +1,14 @@
 ---
-description: Puzzle BLD（Blockwise Local Distillation）执行 agent（folder-agent，长跑）。**把 BLD 跑到真正完成**：生成 run_bld.sh launcher（调预写 _puzzle_scripts/bld.py）→ detach 后台 → warmup 确认跑通 → 有界轮询 monitor 块全程监控（~9min/块，进程死/发散触发无上限自愈 HEAL-LOOP）→ 写 bld_status.md（跨唤醒真相源），turn 到顶换 sub-agent 经 status.sh 真相源续接，完成（.bld_rc==0 + 进程退出 + bld_complete.pt 有效；**ckpt 存在 ≠ 完成**，中断残留续训）才输出 JSON；BLD 未完成前不产出节点 JSON（宿主不调 next），节点常驻执行中。确定性逻辑固化在 scripts/（status/launch/warmup/eta/update_status_md/emit_result/progress_watcher/monitor_until_done），agent 只做判断（生成 launcher / self-heal / 轮询 / 收尾）。launch.sh 自动启动 progress_watcher 边跑边推实时曲线（tail 生成契约 progress.jsonl `{"step":N,"metrics":{...}}`，每指标一张独立图）。触碰 BLD 训练逻辑（bld.py 的 normalized MSE / 数据管道）→ 重触 project-fidelity-verifier（point-to-file 协议）。bld.py 是预写脚本，禁 edit——有 bug → fail loud。
+description: Puzzle 块级蒸馏（BLD）：把每个候选块蒸馏到模仿父块输出，产出 block_library 权重库。
 tools: [bash, read, edit, grep, glob, task]
 ---
 # pz_build_library
 
 ## ⚠ 你的唯一任务（先读这段，最重要）
 
-上游 `pz_expand` 已在 `$ORCA_ARTIFACTS_DIR` 产出 `block_map.json` + `<base>_flat.py` +
-`baseline_metrics.json` + `project_manifest.md`。**你的工作：生成 `run_bld.sh` launcher（调
+上游 `pz_baseline` 已在 `$ORCA_ARTIFACTS_DIR` 产出 `block_map.json` + `baseline_metrics.json`
+（`<base>_flat.py` / `puzzle_adapters.py` / `manifest.yaml` / `project_manifest.md` 由更上游
+`pz_ingest` 产出，`search_space.yaml` 由 `pz_search_space` 产出，共享 artifacts 目录）。**你的工作：生成 `run_bld.sh` launcher（调
 预写 `_puzzle_scripts/bld.py`），把它跑到"真正完成"**——报错就按白名单自修（仅 run_bld.sh 的
 launcher 参数 / 路径 / import 层；bld.py 本体是预写脚本禁改，有 bug → fail loud），修到 BLD 完整
 跑完产出真 ckpt `runs/bld/bld_complete.pt`，再回显真实 JSON。
@@ -30,27 +31,12 @@ launcher 参数 / 路径 / import 层；bld.py 本体是预写脚本禁改，有
 ## 资源锚点（cwd 无关）
 
 - `$ORCA_ARTIFACTS_DIR`（orca spawn / orca_env.sh 注入）= 本 run 的 artifacts 目录，上游
-  pz_expand 落产物处，跨节点共享。
+  pz_ingest / pz_search_space / pz_baseline 落产物处，跨节点共享。
 - `$ORCA_AGENT_RESOURCES`（orca spawn / orca_env.sh 注入）= 本 agent 资源目录，即本文件所在
-  目录。**确定性逻辑全在 `scripts/`，只跑不读**（agent 不需要看脚本内容）：
-  - `scripts/status.sh` —— 状态三合一判定（gate / 完成 / 存活）
-  - `scripts/health.sh` —— 健康检查（epoch / 主指标 / log 尾部）
-  - `scripts/launch.sh` —— detach（wrapper 内自动启动 `progress_watcher.py`
-    实时推曲线；只跑不改，agent 无需干预）
-  - `scripts/warmup_poll.sh` —— warmup 单轮轮询（含 4min sleep）
-  - `scripts/eta.py` —— 估时（落 `.bld_eta.json`，信息用）
-  - `scripts/update_status_md.sh` —— 写 `bld_status.md`（artifacts 根下）
-  - `scripts/emit_result.py` —— 最终 JSON（唯一产出）
-  - `scripts/progress_watcher.py` —— 边跑边推实时曲线（launch.sh 自动启动；
-    tail 生成契约 progress.jsonl `{"step":N,"metrics":{...}}`，遍历 metrics **每指标推一张独立图**
-    （title 带真实指标名），同 title 重复推送 = 前端实时刷新；指标名取用户代码，消费端零硬编码）
-  - `scripts/monitor_until_done.sh` —— 有界轮询块（~9min/调用）：cheap 活性 + 发散检测，
-    进程退出委托 status.sh 判定，NaN/log-stalled 输出 BLD_STUCK；stdout 五态互斥（C-loop 消费）
-  - `scripts/kill_train_group.sh` —— 带 run 归属门的整组杀
-  - `scripts/check_progress_contract.py` —— progress.jsonl 契约校验（warmup_poll 调）
+   目录。**确定性逻辑全在 `scripts/`，只跑不读**（agent 不需要看脚本内容）。
 - `{{ subagents_root }}/project-fidelity-verifier.md` = fidelity-verifier subagent body
   （point-to-file 协议，Step 3e；render 期 inline 为绝对路径，cwd 无关）。
-- `workflows/agents/_puzzle_scripts/bld.py` = 预写 BLD 算法脚本（相对 repo 根）：读 block_map +
+- `$ORCA_WORKFLOWS_ROOT/agents/_puzzle_scripts/bld.py` = 预写 BLD 算法脚本：读 block_map +
   flat_model，对每 (layer_idx, slot, variant) 实例化候选块，冻结 parent 作 teacher，normalized MSE
   `MSE(o_p,o_c)/MSE(o_p,0)` 蒸馏到收敛，save `block_library/L<layer>_<slot>_<variant>.pt`，最后
   聚合写 `bld_summary.json` + `runs/bld/bld_complete.pt` 完成契约 marker。**你只跑它，禁改它。**
@@ -174,7 +160,7 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
 
 - `run_bld.sh`：launcher。`cd $ORCA_ARTIFACTS_DIR` + 调预写 BLD 脚本：
   ```bash
-  python3 "$REPO_ROOT/workflows/agents/_puzzle_scripts/bld.py" \
+  python3 "$ORCA_WORKFLOWS_ROOT/agents/_puzzle_scripts/bld.py" \
     --block_map "$ORCA_ARTIFACTS_DIR/block_map.json" \
     --flat_model "$ORCA_ARTIFACTS_DIR/<base_name>_flat.py" \
     --build_fn "<manifest.yaml 的 model.build_entry，agent 读 manifest 桥接>" \
@@ -185,12 +171,11 @@ bash "$ORCA_AGENT_RESOURCES/scripts/health.sh"
     --output_dir "$ORCA_ARTIFACTS_DIR" \
     --seed {{ inputs.seed }}
   ```
-  其中 `REPO_ROOT` 解析方式同 pz_expand Step 2（pathlib 探 `$ORCA_AGENT_RESOURCES` 的 workflows 父）。
   设 `NPROC_PER_NODE` 实测值（`python3 -c 'import torch; print(torch.cuda.device_count())'`；
   CPU-only → 1）。父权重加载由 bld.py 内部经 `adapters.load_pretrained` 完成（launcher 不接
-  父权重参数；father_state_dict.pt 由 pz_expand 落盘，bld.py 也可直接读 ckpt 路径）。
+  父权重参数；father_state_dict.pt 由 pz_baseline 落盘，bld.py 也可直接读 ckpt 路径）。
   **`EPOCHS` = manifest 的项目训练 epochs**（与 GKD 同源）：读 `$ORCA_ARTIFACTS_DIR/manifest.yaml`
-  的 `training_and_evaluation.epochs`（pz_expand 从用户 train 代码发现并记录），作 BLD 每 variant
+  的 `training_and_evaluation.epochs`（pz_ingest 从用户 train 代码发现并记录），作 BLD 每 variant
   蒸馏轮次。BLD 必须按项目原本训练量级蒸馏，否则候选欠收敛（loss~1）→ 替换 acc 崩。manifest
   缺 epochs → 回退 bld.py 默认（assessment 警告）。
 

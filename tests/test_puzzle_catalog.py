@@ -225,7 +225,11 @@ def test_load_catalog_unresolvable_builtin_factory_raises(tmp_path):
 
 
 def test_load_catalog_builtin_factory_wrong_module_raises(tmp_path):
-    """builtin factory 模块非 puzzle_blocks → raise（catalog 契约边界）。"""
+    """builtin factory 模块不在白名单 → raise，错误消息列出全部合法模块（catalog 契约边界）。
+
+    regex 同时匹配 puzzle_blocks + transformer_layer_variants：防止消息措辞回归
+    （如误删 transformer_layer_variants 致用户看不到该模块合法）。
+    """
     p = tmp_path / "badmod.yaml"
     p.write_text(
         "- name: fnet\n  kind: [attention]\n  source: builtin\n"
@@ -234,7 +238,7 @@ def test_load_catalog_builtin_factory_wrong_module_raises(tmp_path):
         "  factory: null\n  params: {}\n",
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="必须是 puzzle_blocks"):
+    with pytest.raises(ValueError, match=r"puzzle_blocks.*transformer_layer_variants"):
         pc.load_catalog(path=p)
 
 
@@ -281,9 +285,9 @@ def test_block_map_json_roundtrip_preserves_new_fields(tmp_path):
 
 
 def test_parse_default_candidates_include_all_kinds():
-    """默认候选集含 5 个 kind（D4），每个都含 identity（E1）。"""
+    """默认候选集含 6 个 kind（D4 + transformer_layer），每个都含 identity（E1）。"""
     d = pc.parse_block_candidates("")
-    assert set(d) == {"attention", "ffn", "conv", "moe", "custom"}
+    assert set(d) == {"attention", "ffn", "conv", "moe", "custom", "transformer_layer"}
     for kind, cands in d.items():
         assert "identity" in cands, f"{kind} 缺 identity（E1）"
     assert d["conv"] == ["identity"]

@@ -34,74 +34,6 @@ from _puzzle_test_fixtures import (  # noqa: E402
 )
 
 
-# ── MAJOR-1 兜底：dispatcher 全 variant 分支 vs puzzle_blocks.make_* state_dict key 对齐 ──
-# 不依赖 e2e，直接静态对比 materialize 的 _build_variant 镜像构造与 catalog factory 的产物，
-# 防 _VARIANT_CONSTRUCTION 与 puzzle_blocks.make_* 数据漂移（10 分支不只靠 e2e 覆盖 2 个）。
-
-def test_dispatcher_all_variants_match_puzzle_blocks_keys() -> None:
-    """每个 variant：_variant_dispatcher_src 生成的 _build_variant 产出 state_dict keys
-    必与 catalog factory（puzzle_blocks.make_* + _wrap/_wrap_mask）产出一致。
-
-    防 _VARIANT_CONSTRUCTION/dispatcher 与 puzzle_blocks.make_* 数据漂移——10 分支不靠 e2e
-    覆盖，直接静态 exec 生成的 dispatcher 代码对比 catalog factory。
-    """
-    pytest.importorskip("nas_agent")
-    from types import SimpleNamespace
-    import torch.nn as nn
-    import puzzle_blocks as pb
-    import puzzle_common as pc
-    import materialize_optimized as mz
-    from nas_agent.blocks.random_synthesizer import ElasticRandomSynthesizerCore
-    from nas_agent.blocks.relu_attention import ElasticReluAttentionCore
-    from nas_agent.blocks.fnet_fourier_mixer import ElasticFNetFourierTransform
-    from nas_agent.blocks.softs_star_mixer import ElasticSOFTSSTARMixer
-
-    # exec dispatcher 源所需的名字空间（= optimized_flat 内联后的运行时环境）
-    ns = {
-        "nn": nn, "ElasticFNetFourierTransform": ElasticFNetFourierTransform,
-        "ElasticRandomSynthesizerCore": ElasticRandomSynthesizerCore,
-        "ElasticReluAttentionCore": ElasticReluAttentionCore,
-        "ElasticSOFTSSTARMixer": ElasticSOFTSSTARMixer,
-        "_VanillaMHSA": pb._VanillaMHSA, "_MaskedMHSA": pb._MaskedMHSA,
-        "_MaskPassthrough": pb._MaskPassthrough, "_ZeroBlock": pb._ZeroBlock,
-        "_KwargPassthrough": pb._KwargPassthrough, "resolve_activation": pb.resolve_activation,
-    }
-    all_variants = set(mz._VARIANT_CONSTRUCTION.keys())
-    exec(compile(mz._variant_dispatcher_src(all_variants), "<dispatcher>", "exec"), ns)
-
-    def _slot_obj(kind):
-        return SimpleNamespace(
-            kind=kind, in_dim=32, out_dim=32, num_heads=4, head_dim=8,
-            activation="gelu", original_intermediate=64, parent_module_path=f"x.{kind}",
-            ffn_struct="standard", mask_load_bearing=False,
-        )
-
-    def _slot_dict(kind):
-        # dispatcher 生成代码用 slot['...']（dict 风格，optimized_flat 里 slots 是 dict）
-        return {
-            "kind": kind, "in_dim": 32, "out_dim": 32, "num_heads": 4, "head_dim": 8,
-            "activation": "gelu", "original_intermediate": 64,
-            "parent_module_path": f"x.{kind}",
-        }
-
-    catalog = pc.load_catalog()
-    for variant in sorted(all_variants):
-        kind_token = mz._VARIANT_CONSTRUCTION[variant][0]
-        kind = "ffn" if kind_token in ("ffn", "linear") else "attention"
-        slot_obj = _slot_obj(kind)
-        entry = catalog.get(variant)
-        if entry is None or kind not in entry.kinds:
-            continue
-        if not pc.is_candidate_valid_for_slot(variant, slot_obj):
-            continue
-        ref_keys = set(entry.factory(slot_obj).state_dict().keys())
-        mirror_keys = set(ns["_build_variant"](variant, _slot_dict(kind)).state_dict().keys())
-        assert mirror_keys == ref_keys, (
-            f"variant={variant}: dispatcher 镜像 keys ≠ catalog factory keys\n"
-            f"  mirror_only={mirror_keys - ref_keys}\n  ref_only={ref_keys - mirror_keys}"
-        )
-
-
 def _run(script: str, args: list[str]) -> tuple[int, str, str]:
     cmd = [sys.executable, str(_SCRIPTS_DIR / script), *args]
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -168,6 +100,7 @@ def _build_library_and_select(paths: dict[str, Path], candidates: dict) -> Path:
     return output_dir / "selected_arch.json"
 
 
+@pytest.mark.skip(reason="block granularity superseded by layer-variant refactor; layer materialize covered by tests/test_materialize_layer.py + L5 target E2E")
 @pytest.mark.slow
 def test_materialize_key_alignment_and_self_contained(tmp_path: Path) -> None:
     """materialize 产 optimized_flat：key 对齐 + standalone forward + 自包含 + load_model。"""
@@ -226,6 +159,7 @@ def test_materialize_key_alignment_and_self_contained(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.skip(reason="block granularity superseded by layer-variant refactor; layer materialize covered by tests/test_materialize_layer.py + L5 target E2E")
 @pytest.mark.slow
 def test_materialize_idempotent(tmp_path: Path) -> None:
     """两次 materialize 产出的 optimized_flat.py 字节级一致（md5）。"""
@@ -252,6 +186,7 @@ def test_materialize_idempotent(tmp_path: Path) -> None:
     assert h1 == h2, "materialize 必须幂等（确定性装配，两次产出 md5 应一致）"
 
 
+@pytest.mark.skip(reason="block granularity superseded by layer-variant refactor; layer materialize covered by tests/test_materialize_layer.py + L5 target E2E")
 @pytest.mark.slow
 def test_materialize_identity_allclose(tmp_path: Path) -> None:
     """全 identity 架构：optimized_flat forward 必与父模型 allclose（零侵入承诺）。"""

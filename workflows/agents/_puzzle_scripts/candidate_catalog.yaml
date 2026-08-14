@@ -2,12 +2,24 @@
 #
 # 每条 builtin：name/kind(list)/source/factory(params 绑定)/align/trainable/
 # mask_aware/requires_ffn_struct/description。
-# - factory 形如 ``puzzle_blocks::make_<name>``；loader 用 functools.partial 绑定
-#   params，再统一 _wrap 包 _KwargPassthrough。
+# - factory 形如 ``<module>::make_<name>``，``<module>`` ∈ {puzzle_blocks, transformer_layer_variants}。
+#   puzzle_blocks::make_* 经 functools.partial 绑 params 后再统一 _wrap/_wrap_mask 包
+#   _KwargPassthrough/_MaskPassthrough（单块候选适配异构父层签名）。
+#   transformer_layer_variants::make_*_layer **不 wrap**（layer 变体 forward 自包含
+#   ``(x, src_mask=None, *args, **kwargs)``，design draft §4.4 / L13）。
 # - identity 是 passthrough（保留 father-loaded 模块），source=passthrough，无 factory。
 # - D4：conv/moe/custom 仅 identity 适用（框架预留，未来加 builtin 时扩本文件）。
 # - E1：identity 必入每 slot 候选列表（puzzle_common.parse_block_candidates 把关）。
-# - E8：所有 builtin 默认 mask_aware=false（mask_load_bearing slot 只留 identity）。
+# - E8：所有 builtin 默认 mask_aware=false（mask_load_bearing slot 只留 identity）；
+#   例外 transformer_layer kind——L13 mask 自适配，E8 不硬过滤。
+# - no_op vs no_op_layer **语义不同**（禁混淆）：no_op = block 粒度零输出块
+#   （``_ZeroBlock`` forward 返 zeros，用于 attention/ffn kind，残差流内 ``x+0=x``，
+#   合法作 MIP 候选）；no_op_layer = layer 粒度纯残差直通（``_NoOpLayer`` forward 返 x，
+#   整层被旁路 = 删整层 = 改深度，违反 puzzle「禁删计算/改深度」铁律）。
+#   **no_op_layer 不作 MIP 候选**（F1 修复，L5 E2E 暴露：latency_reduction_target=0.5 紧预算下
+#   MIP 为所有 layer 选 no_op_layer 删整层，GKD 重训投影恢复 acc 但架构是删层非 attention
+#   替换）。``_NoOpLayer``/``make_no_op_layer`` 保留供 §6.7 floor 经直接 import
+#   （latency_table / measure_baseline 的 _FloorLayer），不经 catalog。
 
 # ── attention 候选（D4 builtin 集）──────────────────────────────────────────
 - name: fnet
@@ -122,9 +134,75 @@
   requires_ffn_struct: []
   description: "零输出块（in_dim==out_dim，residual 不变，latency≈0）"
 
+# ── transformer_layer 候选（design draft §4.2，去 elastic 原生 layer 变体）─────
+# 候选 = 完整 transformer encoder layer（attn 变体 + 标准 FFN + 2×LayerNorm + 2×residual，
+# Pre-LN）。factory 形如 ``transformer_layer_variants::make_*_layer``；loader **不 wrap**
+# （layer forward 自包含 mask 适配）。维度全部从 slot 注入（L11），**禁硬编码**——
+# softs_star_layer 的 core_dim 是算法超参（非项目维度，L11 例外，catalog 默认 + 可 user override）。
+# L13：mask_aware 标志仅记录语义（vanilla_layer 真 attn_mask），不触发 E8 硬过滤
+# （transformer_layer kind 由 is_candidate_valid_for_slot 跳过 E8）。
+- name: vanilla_layer
+  kind: [transformer_layer]
+  source: builtin
+  factory: transformer_layer_variants::make_vanilla_layer
+  params: {}
+  align: passthrough
+  trainable: true
+  mask_aware: true
+  requires_ffn_struct: []
+  description: "标准 MHSA 完整 layer（Pre-LN：x+attn(norm1)+ffn(norm2)）；nn.MultiheadAttention 真用 attn_mask"
+
+- name: random_synthesizer_layer
+  kind: [transformer_layer]
+  source: builtin
+  factory: transformer_layer_variants::make_random_synthesizer_layer
+  params: {}
+  align: passthrough
+  trainable: true
+  mask_aware: false
+  requires_ffn_struct: []
+  description: "学习型 token 混合矩阵 layer（无 QK）；max_seq_len 须 slot 提供（mixing matrix 上界，禁 fallback）"
+
+- name: relu_attention_layer
+  kind: [transformer_layer]
+  source: builtin
+  factory: transformer_layer_variants::make_relu_attention_layer
+  params: {}
+  align: passthrough
+  trainable: true
+  mask_aware: false
+  requires_ffn_struct: []
+  description: "ReLU(logits)/L 归一 attention layer（替 softmax）"
+
+- name: fnet_layer
+  kind: [transformer_layer]
+  source: builtin
+  factory: transformer_layer_variants::make_fnet_layer
+  params: {}
+  align: passthrough
+  trainable: false
+  mask_aware: false
+  requires_ffn_struct: []
+  description: "零参 2D-DFT mixer layer（mask-blind；BLD 不优化无参 mixer）"
+
+- name: softs_star_layer
+  kind: [transformer_layer]
+  source: builtin
+  factory: transformer_layer_variants::make_softs_star_layer
+  params: {core_dim: 64}
+  align: passthrough
+  trainable: true
+  mask_aware: false
+  requires_ffn_struct: []
+  description: "SOFTS STAR 聚合-重分配 layer；core_dim=算法超参（非项目维度，L11 例外）"
+
+# F1：no_op_layer 已退出候选集（整层 passthrough = 删层 = 改深度，违反「禁 gaming」铁律）。
+# transformer_layer kind 候选只剩 identity（保原层）+ 5 真 attention 变体（替 attention 机制，
+# 不删计算）。_NoOpLayer/make_no_op_layer 保留供 §6.7 floor 经直接 import，不经 catalog。
+
 # ── identity：适用所有 kind（passthrough 铁律 §3；E1 必入每 slot）──────────────
 - name: identity
-  kind: [attention, ffn, conv, moe, custom]
+  kind: [attention, ffn, conv, moe, custom, transformer_layer]
   source: passthrough
   factory: null
   params: {}
