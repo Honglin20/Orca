@@ -1,0 +1,62 @@
+# Generated supernet import path. The fixed search runner imports this
+# module to construct SearchSpace and candidate supernets.
+search_space: "supernet.SearchSpace"
+
+# Generated architecture codec
+arch_codec: "arch_codec.ArchCodec"
+
+# Generated worker-side sub-network evaluator
+evaluator: "evaluator.CandidateEvaluator"
+
+# Generated latency estimator. Measures latency on-the-fly using PyTorch directly.
+latency_estimator: "latency_estimator.LatencyEstimator"
+
+# Latency measurement settings consumed by the generated LatencyEstimator.
+latency_cfg:
+  warmup: 10
+  repetitions: 50
+  batch_size: 1                   # Batch size for the dummy input during measurement.
+
+# Optional latency upper bound in milliseconds (ms).
+# Set to a number (e.g., 10.0) to reject over-latency candidates by assigning worst fitness without quality evaluation.
+# Set to null to disable the latency constraint.
+latency_constraint: null
+
+# Objective names in the exact order optimized by EvoX Algorithm.
+# All objectives are smaller-is-better. The evaluator must return all keys
+# listed here except the special "latency" key, which is supplied by the
+# latency estimator.
+objs:
+  - "acc"
+  - "latency"
+
+# Search log. SearchLogger writes a human-readable .log here and a
+# structured .jsonl (same stem) consumed later by select_architecture.
+search_log_path: "./runs/search/search.log"
+
+# Default scheduling dynamically detects visible GPUs/NPUs. Restrict devices
+# with the runtime's visible-device environment variable, such as
+# CUDA_VISIBLE_DEVICES or the NPU equivalent.
+# This starts one worker process per visible device when concurrency=1.
+# Each worker evaluates a single candidate model at a time on its assigned device.
+concurrency: 1
+
+# NSGA-II search schedule.
+# Cap population_size at the number of distinct choice paths
+# (len(branch_choices) ** num_slots) when that is smaller: the initial
+# population is drawn randomly and must stay within the real search space.
+population_size: 32
+num_generations: 20
+
+# Project-specific evaluator settings copied from generated `<output_dir>/train_supernet.py`
+# and, only if needed, user project files.
+evaluator_cfg:
+  # Supernet checkpoint produced by the upstream KD training run
+  # (`train_supernet.py` executed by psu_run_train). The evaluator loads it
+  # strictly once and runs zero-training validation — the only evaluation
+  # paradigm. No optimizer / training-budget fields belong here.
+  supernet_ckpt_path: "./runs/train/supernet_best.pth"
+  data_dir: "<dataset_root>"
+  batch_size: 128
+  num_workers: 8
+  amp: true

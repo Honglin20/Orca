@@ -1,0 +1,1941 @@
+{
+ "audits": [
+  {
+   "contract_changes": [
+    {
+     "change": "重写为 PSU 口径：需 pretrained_ckpt（预训练原模型）；训练=冻结 teacher（原模型独立实例）KD 蒸馏、只训变体分支；choice-only 搜索（每层在 original 冻结分支+变体块中选）；retrain=finetune-from-supernet+同一冻结 teacher。删『无需预训练权重/从零全局搜架构』表述",
+     "item": "workflow.description（yaml:2）"
+    },
+    {
+     "change": "新增 pretrained_ckpt（[ask] string，required=true，相对 project_root 或绝对）：预训练原模型 ckpt——expand 权重继承+gate E、run_train/retrain 的 teacher 加载锚点。project_root/model_path/target_latency/latency_unit/latency_script_path/seed 六字段与 input_invariants 原样保留（时延铁律轴不变）",
+     "item": "inputs"
+    },
+    {
+     "change": "字段零变化；agent.md 增：manifest 记录 pretrained_ckpt 路径与 state_dict 键结构（供 expand 权重继承与 teacher 加载）",
+     "item": "psu_flatten.output_schema"
+    },
+    {
+     "change": "新增 required boolean original_equivalence_passed（gate E：全 original 路径 forward ≡ 预训练原模型逐张量对齐，确定性脚本执行，一条 gate 同时锁权重继承/freeze 分组/choice 容器）；fidelity_passed 描述改指 PSU 版 supernet-evaluator；model_type/model_type_supported/supernet_path 等字段保留（支持集是否收缩见 open_questions）",
+     "item": "psu_expand_supernet.output_schema"
+    },
+    {
+     "change": "首条 when 改为 `model_type_supported != false and original_equivalence_passed != false` → psu_train_script；else psu_report（gate E 失败在 report 可归因，不与 model_type 不支持混淆）。其余 8 条路由（含 run_train skipped→search、reporter 单终端）不变",
+     "item": "psu_expand_supernet.routes"
+    },
+    {
+     "change": "viable/reason 语义重定义：=数据管道+eval 入口可移植且 pretrained_ckpt 可加载（不再是用户训练 loop 移植判定）；evaluation_paradigm 删 train_from_scratch（建议改 training_paradigm=kd_distill 固定值或 enum 收缩）；train_script_path/train_supernet_py_path 字段名保留，内容=KD trainer：teacher 冻结实例、hidden cosine+logits KL、非 slot 模块冻结只训变体分支、每 step 采样一条 choice 路径",
+     "item": "psu_train_script.output_schema"
+    },
+    {
+     "change": "字段零变化（latency_estimator/search_config/evaluator/run_search/select 五路径）；产物语义变：search_record_schema.json 的 arch 字段=per-layer choice only（无 depth/num_heads/ffn_dim 字段），evaluator 采样=set_sample_config(choice)；引用 3 子代理不变（search-core-gen 轻改版）",
+     "item": "psu_search_pipeline.output_schema"
+    },
+    {
+     "change": "字段零变化（status/artifacts/assessment/max_retries_hit/healed_files/fidelity_retriggered）；assessment 描述改 KD loss 项/变体分支收敛视角；supernet_ckpt 语义=KD 训后超网 ckpt（含继承的冻结 original 权重）",
+     "item": "psu_run_train.output_schema"
+    },
+    {
+     "change": "字段零变化；selected_arch 内容=per-layer choice 向量（schema 驱动）；select_reason enum 与 Pareto+max-acc-under-target 结构不变",
+     "item": "psu_run_search.output_schema"
+    },
+    {
+     "change": "retrain_strategy enum 收缩为 [finetune-from-supernet]（删 train-from-scratch fallback）；strategy_reason 改述=supernet ckpt 存在+teacher 就绪证据；retrain.py 生成内容=finetune-from-supernet+同一冻结 teacher 的 KD",
+     "item": "psu_retrain_script.output_schema"
+    },
+    {
+     "change": "psu_retrain 字段零变化；psu_report 字段零变化（stage 枚举名不变），reason/报告内容口径改 PSU（expand 失败细因含 original_equivalence；final_metrics 含 KD 收敛信息）",
+     "item": "psu_retrain / psu_report.output_schema"
+    },
+    {
+     "change": "全部映射原样保留（reporter 磁盘单源读法不变）",
+     "item": "outputs"
+    },
+    {
+     "change": "ns3_*→psu_* 机械重命名（9 节点+对应 agent.md）；subagent 集 8 个全保留零增删：supernet-evaluator/project-fidelity-verifier/project-porter/memory-verifier 改版，search-core-gen 轻改，search-latency-gen/search-select-gen/workflow-verifier 原样",
+     "item": "命名与 subagent 集"
+    }
+   ],
+   "files": [
+    {
+     "change": "description 重写（删 from-scratch 叙事）；inputs 新增 pretrained_ckpt（[ask] required）；psu_expand_supernet 增 required 字段 original_equivalence_passed + 首条路由加 gate E 条件；psu_train_script 的 evaluation_paradigm 删 train_from_scratch、viable/reason 语义重定义（数据管道/eval/ckpt 就绪，非用户训练 loop 移植）；psu_retrain_script 的 retrain_strategy enum 收缩为 [finetune-from-supernet]；节点/agent 名 ns3_*→psu_*。inputs 其余六字段、input_invariants、outputs 映射、其余路由原样",
+     "evidence": "nas-supernet-v3.yaml:2（无需预训练权重/从零训练描述）, :94-114（expand schema+routes）, :128-137（viable/evaluation_paradigm）, :267-271（retrain_strategy enum）",
+     "path": "workflows/nas-supernet-v3.yaml",
+     "verdict": "modify"
+    },
+    {
+     "change": "五处结构性改写：(1) 67-70 维度展开断言整段反转为维度钉死 gate（depth 无候选=原层数、num_heads/ffn_dim 单值元组=原层实测值，任何维度 >1 候选即 BLOCKER）；(2) 59-66 ArchConfig 示例改 choice-only（仅 per-layer choice，删 depth/stage_depths/config 维度示例）；(3) 104-105 分支数上限 ≤3 删，换 PSU 分支池契约（每 slot 恰一个 original 冻结分支 + workflow 钉死变体块集，保留 I/O contract/参数隔离/choice 可搜索断言）；(4) 72-100/116-117 Elastic* 弹性维度断言收缩为 ChoiceLayer 容器契约（set_sample_config 仅 choice、get_active_subnet 分支解析+无别名导出、参数计=active 分支）；(5) 119 default=max arch 改 default=全 original 路径；145-149 __main__ 增 pretrained_ckpt 加载+全 original 路径与原模型逐张量等价断言（gate E 确定性落点）+freeze 分组断言（original 分支与非 slot 模块 requires_grad=False）；151-156 stage-container 章节按支持集决策收缩",
+     "evidence": "supernet-evaluator.md:67-70（strictly exceeds baseline BLOCKER）, :104（at most 3 branches）, :119（Default=max arch）, :145-149（__main__ 无权重等价断言）, :160（model-type spec 优先级）",
+     "path": "workflows/subagents/nas-supernet-v3/supernet-evaluator.md",
+     "verdict": "modify"
+    },
+    {
+     "change": "(1) 13 行 KD teacher 从括号示例升为一等审计对象：teacher 必须为独立冻结的原模型实例（原架构+pretrained_ckpt 权重+eval mode，不从 supernet 抽取、不受 injection seam 改写）；(2) 21 行 Intended behavior 示例删 from-scratch training，换 PSU 范式声明（KD 蒸馏/只训变体分支/每 step 采样 choice 路径——KD loss 归 new-by-design 不按 deviation 上报）；(3) 27-33 Training semantics 比对对象重划：数据管道/eval 入口/（若复用）optimizer·scheduler 按 source 比对，训练 loop 本体不再是移植审计对象；(4) 34-36 metric/latency 保真检查原样保留",
+     "evidence": "project-fidelity-verifier.md:13（teacher 仅括号示例）, :21（from-scratch 示例）, :27-33（训练语义按源 loop 比对）, :48（deviation 分类框架保留）",
+     "path": "workflows/subagents/nas-supernet-v3/project-fidelity-verifier.md",
+     "verdict": "modify"
+    },
+    {
+     "change": "职责范围收缩声明：PSU 训练 loop（KD）由 workflow 生成、永不入 porter 产物；scope 示例从 RL/rollout 换 PSU 能力清单（构建 train/val loader、迭代 batch、计算用户 metric、从 pretrained_ckpt 构建冻结 teacher）；增一条规则——teacher 的原模型构造保真移植、不做 injection seam（seam 仅用于 evaluator 的候选子网注入与数据管道）",
+     "evidence": "project-porter.md:19-21（capability list RL 示例）, :28（injection seam 一刀切规则）",
+     "path": "workflows/subagents/nas-supernet-v3/project-porter.md",
+     "verdict": "modify"
+    },
+    {
+     "change": "轻改：evaluator 生成说明钉死 choice-only 口径——采样=set_sample_config(per-layer choice only)，无 depth/width 维度采样；arch_codec 编解码仅 choice 向量（字段仍以 search_record_schema.json 为权威）；ckpt 路径 runs/train/supernet_best.pth 保留（语义=KD 训后超网）。实际契约变化主要在上游 generation contract reference（审计对象外）",
+     "evidence": "search-core-gen.md:27-34（samples subnets 未钉口径，依赖 schema 传递）",
+     "path": "workflows/subagents/nas-supernet-v3/search-core-gen.md",
+     "verdict": "modify"
+    },
+    {
+     "change": "",
+     "evidence": "search-latency-gen.md:20-25（searchable 子网测时延/固定组件排除/ONNX 单文件契约——逐条适配 PSU choice 子网无需改字）",
+     "path": "workflows/subagents/nas-supernet-v3/search-latency-gen.md",
+     "verdict": "keep"
+    },
+    {
+     "change": "",
+     "evidence": "search-select-gen.md:33-37（max-acc-under-target/Pareto knee/metric direction/单位透传——selected_arch 为 schema 驱动 dict，内容变 choice 向量无需改 md）",
+     "path": "workflows/subagents/nas-supernet-v3/search-select-gen.md",
+     "verdict": "keep"
+    },
+    {
+     "change": "",
+     "evidence": "workflow-verifier.md:42-56（companion checklist 驱动 + Built-in 单项——md 本体无维度/from-scratch 假设；PSU 维度项落在 companion checklists，审训对象外）",
+     "path": "workflows/subagents/nas-supernet-v3/workflow-verifier.md",
+     "verdict": "keep"
+    },
+    {
+     "change": "31-44 决策一致性检查集换 PSU 口径：training viability 语义改（数据管道/eval/ckpt 就绪，非 train_supernet.py 存在性）；KD 从『用户项目 KD』升为 PSU 范式断言（teacher 冻结/loss 项/只训变体分支）；增权重继承（original 分支=pretrained_ckpt 值）与 choice-only 空间两项一致性检查；跨文档一致性维度加 pretrained_ckpt/teacher 口径",
+     "evidence": "memory-verifier.md:31-34（NAS decisions 一致性按 v3 决策集：evaluation paradigm/train_supernet.py 存在性）, :43-44",
+     "path": "workflows/subagents/nas-supernet-v3/memory-verifier.md",
+     "verdict": "modify"
+    }
+   ],
+   "gate_findings": [
+    {
+     "action": "整段替换为维度钉死反向 gate：depth 无候选（固定=原层数）、num_heads/ffn_dim 单值元组且必须等于原层实测值；任何维度出现 >1 候选即 [BLOCKER]",
+     "location": "workflows/subagents/nas-supernet-v3/supernet-evaluator.md:67-70",
+     "problem": "『Search space strictly exceeds the baseline on depth and internal width [BLOCKER]』——max(depth_candidates) 必须严格大于原模型、num_heads/ffn_dim 候选 max 须超实测值，直接强制维度展开（轴 A 正面冲突）"
+    },
+    {
+     "action": "改为 choice-only ArchConfig（仅 per-layer choice 字段）；is_valid 检查收缩为『维度值与原层实测一致』对齐断言",
+     "location": "workflows/subagents/nas-supernet-v3/supernet-evaluator.md:59-66",
+     "problem": "SearchSpace/ArchConfig 检查以 depth/stage_depths + per-layer choice+config（含 num_heads/ffn_dim）为示例，并要求候选笛卡尔积全有效——隐含多值维度候选设计；is_valid_*_block 以 embed_dim%num_heads 为例（维度钉死后退化）"
+    },
+    {
+     "action": "分支数上限删除，替换为 PSU 分支池契约：每 slot 恰一个 original（冻结）+ workflow 钉死的变体块集合；保留 I/O contract 兼容、参数隔离、choice 可搜索三项断言",
+     "location": "workflows/subagents/nas-supernet-v3/supernet-evaluator.md:104-105",
+     "problem": "『Branch pool size: at most 3 branches（1 user-derived + ≤2 pre-built）』——PSU 分支池 {original, vanilla, random_synthesizer, relu_attention, fnet, softs_star} ≥6 分支，照此规则每层必被 [MAJOR] 打回"
+    },
+    {
+     "action": "Elastic* 章节收缩为 ChoiceLayer 容器契约：分支为固定形状块（维度=原层值，无 super_*/sample_* 维度参数）；set_sample_config 仅收 choice；get_active_subnet 保深拷贝/无别名/无 Elastic 前缀导出断言；参数计=active 分支之和",
+     "location": "workflows/subagents/nas-supernet-v3/supernet-evaluator.md:72-100,116-117",
+     "problem": "Elastic* API 全套断言假设弹性维度存在：super_* 最大容量构造（超候选 max=BLOCKER）、sample_* 切片、elastic_num_params 按宽度动态缩放——PSU 无维度弹性，分支为固定形状块，整套断言失效或误报"
+    },
+    {
+     "action": "改为 default config = 每 slot 选 original（gate E 的前置条件）",
+     "location": "workflows/subagents/nas-supernet-v3/supernet-evaluator.md:119",
+     "problem": "『Default = max arch（depth 建到最大）』——PSU 深度无候选，正确默认应是全 original 路径（gate E 等价性检查的运行前提）"
+    },
+    {
+     "action": "__main__ 增三段确定性断言：加载 inputs.pretrained_ckpt → 全 original 配置 forward 与原模型逐张量比对（eval mode + 钉容差，超限 raise）；freeze 分组断言（original 分支 + 非 slot 模块 requires_grad=False、变体分支 True）；继承权重抽查（original 分支参数值 ≡ ckpt 对应值）",
+     "location": "workflows/subagents/nas-supernet-v3/supernet-evaluator.md:145-149",
+     "problem": "__main__ demo 只做 supernet vs 导出子网自一致比对——teacher/预训练权重缺位：无 pretrained_ckpt 加载、无全 original 路径与预训练原模型的等价断言（gate E 无落点）、无 freeze 分组断言"
+    },
+    {
+     "action": "示例改为 PSU 范式声明：KD 蒸馏（teacher=冻结预训练原模型、只训变体分支、每 step 采样 choice 路径）——KD loss 归 new-by-design，不按 deviation 上报",
+     "location": "workflows/subagents/nas-supernet-v3/project-fidelity-verifier.md:21",
+     "problem": "Intended behavior 示例含 『from-scratch training』——from-scratch 训练假设（轴 B/C 下 PSU 恒 KD finetune 变体分支）"
+    },
+    {
+     "action": "比对对象重划：数据管道/eval 入口/（若复用）optimizer·scheduler 仍按 source 逐项比对；训练 loop 本体移出移植审计；KD loss 与 teacher 归 intended behavior",
+     "location": "workflows/subagents/nas-supernet-v3/project-fidelity-verifier.md:27-33",
+     "problem": "Training semantics 审计按原项目训练 loop 逐项比对（loss/batch unpack/optimizer 粒度）——PSU 训练 loop 是 workflow 生成的 KD、无原项目对应物，照此审计必把 KD 范式误报为 semantic deviation"
+    },
+    {
+     "action": "升级为一等审计项：teacher 实例化必须为独立冻结原模型（原架构 + pretrained_ckpt 权重 + eval mode + requires_grad=False），验证仅存在于训练脚本而非从 supernet 抽取",
+     "location": "workflows/subagents/nas-supernet-v3/project-fidelity-verifier.md:13",
+     "problem": "KD teacher 仅作为『非搜索空间辅助网络须保原架构』的括号示例存在——teacher 缺位假设（轴 C 下 teacher 是 PSU 训练范式的核心契约，非边缘案例）"
+    },
+    {
+     "action": "删 train_from_scratch；建议改为固定 training_paradigm=kd_distill（或 enum 收缩 [validate, finetune]，finetune=KD 变体分支训练）",
+     "location": "workflows/nas-supernet-v3.yaml:135",
+     "problem": "ns3_train_script.evaluation_paradigm enum 含 train_from_scratch——from-scratch 训练假设"
+    },
+    {
+     "action": "enum 收缩为 [finetune-from-supernet]（或删字段）；strategy_reason 改述为 supernet ckpt 存在 + teacher 就绪证据；retrain.py 生成内容=finetune + 同一冻结 teacher KD",
+     "location": "workflows/nas-supernet-v3.yaml:270",
+     "problem": "ns3_retrain_script.retrain_strategy enum 含 train-from-scratch fallback——与轴 D（retrain 恒 finetune-from-supernet + 同一冻结 teacher KD）冲突"
+    },
+    {
+     "action": "节点语义重写：训练范式固定为 KD（不再读用户训练代码定 viability）；viable/reason 重定义为数据管道/eval 入口可移植 + pretrained_ckpt 可加载；porter 引用范围收缩到数据管道/eval/teacher 构造",
+     "location": "workflows/nas-supernet-v3.yaml:117-137（ns3_train_script 节点注释+schema）",
+     "problem": "节点语义=『读用户训练代码→决定 supernet 训练 viability→porter 移植』——teacher 缺位 + 用户训练 loss 移植假设（PSU 训练范式由 workflow 固定为 KD）"
+    },
+    {
+     "action": "决策集改为 PSU：choice-only 空间、pretrained 权重继承、KD 范式（teacher 冻结/loss 项/只训变体分支）、retrain 恒 finetune-from-supernet",
+     "location": "workflows/subagents/nas-supernet-v3/memory-verifier.md:31-34",
+     "problem": "NAS decisions 一致性检查按 v3 决策集展开：training viability=『train_supernet.py 是否存在』、evaluation paradigm=evaluator 类名——KD 仅作用户项目事实核对；无权重继承/choice-only/teacher 冻结决策项"
+    }
+   ],
+   "node": "workflow 级契约（nas-supernet-v3.yaml + 8 subagents）",
+   "open_questions": [
+    "PSU 支持集是否 transformer-only？分支池全为 transformer 变体块（synthesizer/fnet/softs_star 是注意力变体）——cnn/hierarchical model_type 收缩与否影响 model_type_supported 判定、supernet-evaluator stage-container 章节（:151-156）与 specs 家族范围，需设计定夺",
+    "pretrained_ckpt 的粒度：纯 state_dict 还是完整训练 ckpt（含 optimizer/scheduler/epoch）？影响 teacher/权重继承加载逻辑与 inputs 字段描述（建议要求纯 state_dict 或声明接受 torch.load 兼容格式）",
+    "gate E 挂载形式：supernet.py __main__ 内嵌（eval-mode 逐张量比对，随 evaluator loop 一起跑）vs check_expand.sh 独立确定性脚本——按 deterministic-over-model-mediated 原则建议脚本化，但挂载点、逐张量容差（atol/rtol）与『逐张量』范围（logits+hidden states？）需设计决定",
+    "viable=false 的 skip→search 路径保留还是改 fail loud（PSU 下未 KD 训练超网的搜索 metric 无意义，风险#4）",
+    "evaluation_paradigm 字段去留：删字段换固定 training_paradigm=kd_distill vs 仅 enum 收缩 [validate, finetune] 保留——前者更符合范式固定的事实，后者改动最小"
+   ],
+   "risks": [
+    "最大风险不在 9 个审计对象而在其权威上游：supernet-evaluator 的真权威是 specs_dir 家族（general_specs.md + {model_type}/spec.md），且 model-type spec 优先级高于 general_specs（supernet-evaluator.md:160）——只改 md 不改 specs，维度展开『strictly exceeds』等旧规则仍会覆盖 PSU 反转后的 gate",
+    "companion checklists / generation contract references（search_supernet_script_generation.md、train_supernet_script_generation.md 等）仍是 v3 从零训练+维度展开口径：workflow-verifier 全靠 checklist 驱动（workflow-verifier.md:42-45），漏改 checklist 则 PSU 产物被旧标准打回或——更糟——旧维度项全部 PASS 造成漏检",
+    "gate E 数值对齐工程细节：flatten 可能重命名模块 → pretrained state_dict 键与 prepared_model 不匹配（继承失败需显式 fail loud 非 silent partial load）；eval mode/确定性 kernel/容差选择不当会造成假阳假阴——需钉死 eval-mode forward + 明确逐张量容差 + 失败即 fail loud",
+    "ns3_run_train 的 skipped→search 路径在 PSU 下产出无意义 metric（未 KD 训练的变体分支=随机块，search/pareto/select 全链空转）——保留则需显式定义 search-only 语义，否则应改 fail loud",
+    "fork 重命名连带面：ns3_*→psu_* 涉及 9 个 agent.md、agent: 引用、artifacts 目录名（<project_root>/artifacts/nas-supernet-v3/ 路径解析）与 e2e 测试——yaml 改名之外还有一层机械工程量，漏改会造成 artifacts 目录冲突或 agent 找不到"
+   ],
+   "summary": "9 节点编排骨架（生成/执行分离、有界轮询、self-heal、reporter 收敛）与 8 个 subagent 岗位在五条变化轴下全部成立，零新增/删除 subagent——fork 是 modify 型不是重构型。保留比例：8 个 subagent 中 3 个原样保留（search-latency-gen/search-select-gen/workflow-verifier，分别对应时延铁律、select 结构、清单驱动验收三条\"不变轴\"），5 个 modify（supernet-evaluator 改动最重，project-fidelity-verifier 次之，project-porter/memory-verifier/search-core-gen 轻改）。yaml 改动集中三点：inputs 增 pretrained_ckpt、psu_expand_supernet 挂 gate E 新字段+路由条件、psu_train_script/psu_retrain_script 的 from-scratch 枚举与 viability 语义收缩。最大的隐患不在本批文件本身，而在其权威上游（specs_dir 家族与 companion checklists）——supernet-evaluator.md:160 规定 model-type spec 优先于 general_specs，只改 md 不改 specs 则 PSU 反转后的维度 gate 会被旧 spec 覆盖。"
+  },
+  {
+   "contract_changes": [
+    {
+     "item": "output_schema（6 字段）",
+     "change": "不变：output_dir/prepared_model/flatten_passed/manifest_path/error/generated_artifacts 全保留，PSU 无需新增 flatten 级字段（pretrained_ckpt 在 expand/retrain 消费）"
+    },
+    {
+     "item": "routes",
+     "change": "结构不变（flatten_passed != false → 下游；else → report），目标改名为 psu_expand_supernet / psu_report（agent.md:11,235 与 yaml:79-81 同步）"
+    },
+    {
+     "item": "agent.md 步骤",
+     "change": "①Step 2/3 加 PSU 硬约束：mandatory readiness 仅限输出等价 + 预训练权重可加载的规则，禁止改计算/参数结构的重写（pre-norm 转换、norm 类型替换、downsample 替换）；②Step 2 文件清单收窄为 PSU 版 supernet_readiness（drop cnn.md，transformer_common/hierarchical 瘦身）；③manifest skeleton（agent.md:99-128）在 Model/Training And Evaluation 段增记预训练 checkpoint 事实（ckpt 路径、state_dict key 布局、用户项目加载权重的入口代码），供 psu_expand 权重继承与 psu_train_script teacher 构造消费；④Required Inputs 本身不变（project_root/model_path/ORCA_ARTIFACTS_DIR），pretrained_ckpt 不进 flatten"
+    },
+    {
+     "item": "subagent 引用",
+     "change": "memory-verifier 协议不变（agent.md:39-46,205-209）；仅 {{ subagents_root }} 解析到 puzzle-supernet fork 的 subagents 目录"
+    },
+    {
+     "item": "workflow 级（入口节点相关）",
+     "change": "inputs 新增 pretrained_ckpt（[ask] 档，权重继承 + teacher + retrain 共用）；v3 yaml:2 描述『无需预训练权重…从零全局搜架构』整体翻转为『预训练权重继承 + 冻结原模型 teacher KD』叙事，不得残留在任何节点 prompt"
+    }
+   ],
+   "files": [
+    {
+     "change": "①节点/链路改名 ns3_flatten→psu_flatten、ns3_expand_supernet→psu_expand_supernet、ns3_report→psu_report（:7-11,:235）；subagents_root 指向 puzzle-supernet fork。②Step 2/3（:170-192）加 PSU 硬约束：mandatory readiness 仅限『输出逐张量等价 + 预训练 state_dict 可原样加载』的规则，显式禁止改变计算/参数结构的重写（pre-norm 转换、norm 类型替换、downsample 模块替换），因 original 分支须继承父权重并通过 expand 的 gate E。③manifest skeleton（:99-128）Model/Training And Evaluation 段增记：预训练 checkpoint 路径、用户项目加载权重的方式（state_dict key 布局/加载入口），供 psu_expand（axis B）与 psu_train_script（axis C teacher 构造）消费。④Step 2 readiness 清单改为 PSU 瘦身版（见 readiness 文件条目）",
+     "evidence": "agent.md:7-11,53-61,99-128,170-192,235",
+     "path": "workflows/agents/ns3_flatten/agent.md",
+     "verdict": "modify"
+    },
+    {
+     "change": "",
+     "evidence": "check_flatten.sh:14-74（无 depth/num_heads/ffn_dim 断言；sections 列表 :69）",
+     "path": "workflows/agents/ns3_flatten/scripts/check_flatten.sh",
+     "verdict": "keep"
+    },
+    {
+     "change": "",
+     "evidence": "reuse_check.sh:11-35",
+     "path": "workflows/agents/ns3_flatten/scripts/reuse_check.sh",
+     "verdict": "keep"
+    },
+    {
+     "change": "",
+     "evidence": "extract_user_pkg.sh:9-15",
+     "path": "workflows/agents/ns3_flatten/scripts/extract_user_pkg.sh",
+     "verdict": "keep"
+    },
+    {
+     "change": "PSU 下 flatten 不需要这份镜像：flatten 的 Step 1-3 从不读取它（agent.md 对 references/ 仅 :16 泛化提一句），唯一读者是 expand 且读的是 expand 自己的同字节副本（diff -rq 为空）。瘦身=整目录从 psu_flatten 删除；PSU 的 choice-only 改写（去 depth/num_heads/ffn_dim 候选、加权重继承/freeze 契约）归属 psu_expand 的知识库改写",
+     "evidence": "agent.md:173（唯一 assets 读取点）；grep agent.md 无 supernet_specs/model_type/inspect_supernet 引用；diff -rq ns3_flatten/references ns3_expand_supernet/references = 空",
+     "path": "workflows/agents/ns3_flatten/references/model_type.json",
+     "verdict": "delete"
+    },
+    {
+     "change": "核心通篇假设 elastic 维度展开+权重切片（weight slicing、super_*/sample_*、depth max 默认），PSU 全部不成立；且本节点不读它——删",
+     "evidence": "general_specs.md:17,99-121,146-147,278",
+     "path": "workflows/agents/ns3_flatten/references/supernet_specs/general_specs.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "stage_depth_candidates/kernel_size/expand_channels 维度搜索叙事，PSU choice-only 不搜维度；flatten 不读——删",
+     "evidence": "cnn/spec.md:126-137",
+     "path": "workflows/agents/ns3_flatten/references/supernet_specs/cnn/spec.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "ArchConfig.stage_depths + 维度候选元组 schema 示例，PSU 下错误示范；flatten 不读——删",
+     "evidence": "cnn/search_space.py:12,76-81,86-117",
+     "path": "workflows/agents/ns3_flatten/references/supernet_specs/cnn/search_space.py",
+     "verdict": "delete"
+    },
+    {
+     "change": "depth_candidates/num_heads/ffn_dim 搜索规则，PSU 固定这些维度——删",
+     "evidence": "isotropic_transformer/spec.md:65-71",
+     "path": "workflows/agents/ns3_flatten/references/supernet_specs/isotropic_transformer/spec.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "depth 字段 + num_heads/ffn_dim 候选元组，PSU 应为固定 depth + 单值元组——删（PSU 版在 psu_expand 重写）",
+     "evidence": "isotropic_transformer/search_space.py:11,60,65-70",
+     "path": "workflows/agents/ns3_flatten/references/supernet_specs/isotropic_transformer/search_space.py",
+     "verdict": "delete"
+    },
+    {
+     "change": "stage_depth_candidates/num_heads/ffn_dim scaling rule，PSU 不搜维度——删",
+     "evidence": "hierarchical_transformer/spec.md:122-133",
+     "path": "workflows/agents/ns3_flatten/references/supernet_specs/hierarchical_transformer/spec.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "stage_depths + 维度候选 schema，同上——删",
+     "evidence": "hierarchical_transformer/search_space.py:13,77-82,87-117",
+     "path": "workflows/agents/ns3_flatten/references/supernet_specs/hierarchical_transformer/search_space.py",
+     "verdict": "delete"
+    },
+    {
+     "change": "expand 的 supernet 生成 workflow 文档，flatten 不读；PSU 改写归 psu_expand——删",
+     "evidence": "supernet_generation.md:68（width/depth 维度校验）；agent.md 无引用",
+     "path": "workflows/agents/ns3_flatten/references/workflows/supernet_generation.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "search space refinement（深度/宽度候选调优循环）在 PSU choice-only 下大幅失效；flatten 不读——删（PSU 若保留 refine 流程归 psu_expand 重写）",
+     "evidence": "search_space_refinement.md:20,42,57-60,109",
+     "path": "workflows/agents/ns3_flatten/references/workflows/search_space_refinement.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "10 条 CRITICAL/MAJOR 全部围绕维度候选/深度展开的 inspector 断言，PSU 无此对象；flatten 不读——删",
+     "evidence": "search_space_refinement.md(checklist):34,40-42",
+     "path": "workflows/agents/ns3_flatten/references/workflow-checklists/search_space_refinement.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "min/max num_heads/ffn_dim 极值测量示例，PSU 无维度候选——删",
+     "evidence": "isotropic_transformer.py:21-26,54",
+     "path": "workflows/agents/ns3_flatten/references/inspect_supernet_examples/isotropic_transformer.py",
+     "verdict": "delete"
+    },
+    {
+     "change": "同上，stage 维度打印示例——删",
+     "evidence": "hierarchical_transformer.py:20-27,83-89",
+     "path": "workflows/agents/ns3_flatten/references/inspect_supernet_examples/hierarchical_transformer.py",
+     "verdict": "delete"
+    },
+    {
+     "change": "kernel_size/expand_channels 极值示例——删",
+     "evidence": "cnn.py:19-20,73-78",
+     "path": "workflows/agents/ns3_flatten/references/inspect_supernet_examples/cnn.py",
+     "verdict": "delete"
+    },
+    {
+     "change": "optional 优化规则（safe/tradeoff），flatten Step 2 只读 supernet_readiness/，此文件从不被读；且 RMSNorm 替换等改计算会破坏 gate E——删",
+     "evidence": "agent.md:173（唯一 assets 引用）；general_rules.md:37（requires retraining）",
+     "path": "workflows/agents/ns3_flatten/assets/optimize_rules/general_rules.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "optional 规则，从不被 flatten 读；Remove Position Embeddings/GAP Head 改参数结构破坏权重继承——删",
+     "evidence": "agent.md:173；vision_transformer_rules.md:3",
+     "path": "workflows/agents/ns3_flatten/assets/optimize_rules/cv/vision_transformer_rules.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "自称 destructive 结构重排 + full retraining（from-scratch 假设），与 PSU 五变化轴正面冲突；且从不被 flatten 读——删",
+     "evidence": "isotropic_to_hierarchy_rules.md:3,13,18",
+     "path": "workflows/agents/ns3_flatten/assets/optimize_rules/cv/isotropic_to_hierarchy_rules.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "optional 规则从不被读；GAP head 替换改参数结构——删",
+     "evidence": "agent.md:173；vision_cnn_rules.md:9-22",
+     "path": "workflows/agents/ns3_flatten/assets/optimize_rules/cv/vision_cnn_rules.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "示例实现（无 flatten 侧引用）；PSU 变体分支由 nas-agent blocks 池提供——删",
+     "evidence": "window_attention_block.py:11",
+     "path": "workflows/agents/ns3_flatten/assets/optimize_rules/cv/window_attention_block.py",
+     "verdict": "delete"
+    },
+    {
+     "change": "optional 规则从不被读；RoPE 替换『breaks exact numerical equivalence』+ Requires retraining——删",
+     "evidence": "language_model_decoder_rules.md:11,71",
+     "path": "workflows/agents/ns3_flatten/assets/optimize_rules/nlp/language_model_decoder_rules.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "optional 规则从不被 flatten 读——删",
+     "evidence": "agent.md:173",
+     "path": "workflows/agents/ns3_flatten/assets/optimize_rules/telecom/signal_processing_transformer_rules.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "同上——删",
+     "evidence": "agent.md:173",
+     "path": "workflows/agents/ns3_flatten/assets/optimize_rules/telecom/telecom_transformer_rules.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "同上——删",
+     "evidence": "agent.md:173",
+     "path": "workflows/agents/ns3_flatten/assets/optimize_rules/telecom/wireless_link_scheduling_transformer_rules.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "同上——删",
+     "evidence": "agent.md:173",
+     "path": "workflows/agents/ns3_flatten/assets/optimize_rules/telecom/multi_axis_attention_rules.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "PSU 前提（axis A）分支集全是 transformer token-mixer（vanilla/synthesizer/relu_attention/fnet/softs_star），无 CNN slot 概念；且本文件 4 条规则中 3 条（BN→GroupNorm :8、Stage Downsample 重构 :36-103、Clean Residual :108-130）改参数结构/计算，与 axis B 权重继承 + axis E 等价 gate 直接冲突。若设计确认 PSU 不支持 CNN 则整删；若保留 CNN 需重写为输出等价子集",
+     "evidence": "cnn.md:8,36-103,108-130,138",
+     "path": "workflows/agents/ns3_flatten/assets/optimize_rules/supernet_readiness/cnn.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "①删 Transformer BatchNorm Replacement 规则（:5-26）：rationale 基于弹性维度下 BN 统计失效（PSU 无维度展开，不成立），且换 norm 类型 = 丢 running-stat + 改 state_dict key，破坏父权重加载与 gate E。②删 Pre-Norm Residual Standardization（:30-66）：改前向计算 → original 分支输出 ≠ 预训练原模型，gate E 按构造不可能通过；PSU 的互换性契约只是张量 I/O 级（choice 分支参数隔离、无切片），post-norm original 与 pre-norm 变体分支可共存。③保留 Dropout/DropPath Removal 但重写 rationale（:74 的『supernet 已把 depth 作为一Search维度』『weight-sliced…elastic width』在 PSU 均为假）：改为 KD 只训变体分支参数 + 冻结 teacher、随机算子干扰逐张量对齐 gate；规则本身 eval 等价、无参数，与 axis B/E 兼容",
+     "evidence": "transformer_common.md:9,30-66,74",
+     "path": "workflows/agents/ns3_flatten/assets/optimize_rules/supernet_readiness/transformer_common.md",
+     "verdict": "modify"
+    },
+    {
+     "change": "保留：BLC 布局适配在 block forward 原地改 I/O、不加包装模块、校验要求复现原模型输出，与 axis B（state_dict 布局不变）+ axis E（输出等价）兼容，且 PSU 变体分支（nas-agent blocks）同用 BLC 布局，互换性仍需要它",
+     "evidence": "isotropic_transformer.md:24,26-29",
+     "path": "workflows/agents/ns3_flatten/assets/optimize_rules/supernet_readiness/isotropic_transformer.md",
+     "verdict": "keep"
+    },
+    {
+     "change": "保留 Spatial Layout Conversion（:7-29，reshape-only 零成本、保输出）；删 Convolutional Stage Downsampling 规则（:33-56）：把 PatchMerging 替换成 TransformerStageDownsample2d 是参数结构替换 → 父 ckpt 无法加载 + gate E 失败；PSU 下 downsample 模块属非 slot 固定模块，保持原样冻结",
+     "evidence": "hierarchical_transformer.md:23-28 vs :33-56（规则2替换模块）",
+     "path": "workflows/agents/ns3_flatten/assets/optimize_rules/supernet_readiness/hierarchical_transformer.md",
+     "verdict": "modify"
+    }
+   ],
+   "gate_findings": [
+    {
+     "action": "删除（本节点不读；PSU 重写归 psu_expand）",
+     "location": "workflows/agents/ns3_flatten/references/supernet_specs/isotropic_transformer/spec.md:65-71 + search_space.py:11,60,65-70",
+     "problem": "维度展开假设：depth_candidates / num_heads / ffn_dim 候选元组是搜索维度——PSU axis A 固定 depth=原层数、num_heads/ffn_dim=原层实测单值"
+    },
+    {
+     "action": "删除；若 PSU 保留 CNN（待定）需按 choice-only 重写",
+     "location": "workflows/agents/ns3_flatten/references/supernet_specs/cnn/spec.md:126-137 + cnn/search_space.py:12,76-81,86-117",
+     "problem": "维度展开假设：stage_depth_candidates、kernel_size、expand_channels 候选搜索 + active prefix 采样"
+    },
+    {
+     "action": "删除；同上",
+     "location": "workflows/agents/ns3_flatten/references/supernet_specs/hierarchical_transformer/spec.md:122-133 + search_space.py:13,77-82,87-117",
+     "problem": "维度展开假设：per-stage depth 候选 + num_heads/ffn_dim 随 stage_emb_dim 等比缩放规则"
+    },
+    {
+     "action": "删除",
+     "location": "workflows/agents/ns3_flatten/references/supernet_specs/general_specs.md:17,99-121,146-147,278",
+     "problem": "维度展开+权重切片总纲：『elastic widths & depth』核心约束、Searchable Dimensions 清单、weight-slicing 值规则、super_num_heads/super_ffn_dim 弹性签名、『depth 建满为默认』"
+    },
+    {
+     "action": "删除；psu_expand 的分类定义改为 slot/choice 语义",
+     "location": "workflows/agents/ns3_flatten/references/model_type.json:3",
+     "problem": "维度展开叙事：isotropic 标签定义称 depth『making overall depth highly flexible』"
+    },
+    {
+     "action": "删除",
+     "location": "workflows/agents/ns3_flatten/references/workflows/supernet_generation.md:68",
+     "problem": "维度展开校验：要求 elastic_num_params 在不同 width/depth 配置下取不同值（PSU 维度固定，此断言无对象）"
+    },
+    {
+     "action": "删除（checklist 整文件）；PSU 若保留 refine 循环需按 choice-only 重写清单",
+     "location": "workflows/agents/ns3_flatten/references/workflows/search_space_refinement.md:20,42,57-60 + workflow-checklists/search_space_refinement.md:34,40-42",
+     "problem": "维度展开 checklist：CRITICAL 条目断言 inspector 必须打印 depth candidates、构造 max-depth ArchConfig trace、min/max 维度极值参数对比"
+    },
+    {
+     "action": "删除",
+     "location": "workflows/agents/ns3_flatten/references/inspect_supernet_examples/{isotropic_transformer,hierarchical_transformer,cnn}.py:21-27,54 / :20-27,83-89 / :19-20,73-78",
+     "problem": "维度展开示例字段：min/max num_heads/ffn_dim/kernel_size 极值构建 + depth candidates 打印"
+    },
+    {
+     "action": "删除",
+     "location": "workflows/agents/ns3_flatten/assets/optimize_rules/cv/isotropic_to_hierarchy_rules.md:3,13,18",
+     "problem": "from-scratch 训练假设：自称『destructive…requires full retraining』，并授权改写 depth/dim 拓扑参数（depth=12→depths=[2,5,5,2]）"
+    },
+    {
+     "action": "删除（flatten 不读 optional 规则）",
+     "location": "workflows/agents/ns3_flatten/assets/optimize_rules/nlp/language_model_decoder_rules.md:11,71",
+     "problem": "from-scratch/等价破坏假设：RoPE 替换『breaks exact numerical equivalence』、另一规则『Requires retraining』"
+    },
+    {
+     "action": "删规则（PSU 分支参数隔离、无切片，post/pre-norm 混支只要求张量 I/O 互换）",
+     "location": "workflows/agents/ns3_flatten/assets/optimize_rules/supernet_readiness/transformer_common.md:5-26",
+     "problem": "维度展开假设驱动的 mandatory 规则：BN→LayerNorm 替换的理由是『weight-sharing supernets where architecture dimensions vary per sample』——PSU choice-only 无维度变化；且替换丢 running-stat、改 state_dict key，直接破坏 axis B 权重继承与 axis E 等价 gate"
+    },
+    {
+     "action": "删规则；original 分支按父层原样冻结，变体分支各按自身结构",
+     "location": "workflows/agents/ns3_flatten/assets/optimize_rules/supernet_readiness/transformer_common.md:30-66",
+     "problem": "计算改写规则与 gate E 冲突：post-norm→pre-norm 转换改变前向数学，original 分支即使加载父权重输出也不等于预训练原模型——axis E『全 original 路径 ≡ 预训练原模型输出』按构造不可能通过"
+    },
+    {
+     "action": "删除（文件级 verdict=delete，取决于 CNN 支持开放问题）",
+     "location": "workflows/agents/ns3_flatten/assets/optimize_rules/supernet_readiness/cnn.md:36-103,108-130",
+     "problem": "结构改写 mandatory 规则：CNNStageDownsample2d 重构（加 self.downsample、删 strided conv/shortcut projection）与 post-residual 激活/norm 删除均改参数结构与计算 → 破坏 axis B/E"
+    },
+    {
+     "action": "删规则（:33-56）；保留 :7-29 Spatial Layout Conversion（reshape-only 输出等价）",
+     "location": "workflows/agents/ns3_flatten/assets/optimize_rules/supernet_readiness/hierarchical_transformer.md:33-56",
+     "problem": "结构替换规则与 axis B/E 冲突：PatchMerging→TransformerStageDownsample2d 统一替换改模块类型与参数"
+    },
+    {
+     "action": "重写 description/rationale，规则行为不变（删除全部 nn.Dropout*/DropPath 及其构造参数）",
+     "location": "workflows/agents/ns3_flatten/assets/optimize_rules/supernet_readiness/transformer_common.md:74 + cnn.md:138",
+     "problem": "维度展开+权重切片 rationale（规则本身 PSU 仍需要）：『supernet already searches depth as a first-class dimension…every training step already runs a genuinely variable-depth architecture』『weight-sliced supernet already exercises a different subset…through elastic width』——PSU 无深度搜索、无切片，两条理由均为假"
+    },
+    {
+     "action": "keep 原样",
+     "location": "scripts/check_flatten.sh / reuse_check.sh / extract_user_pkg.sh（全文）+ agent.md 全文",
+     "problem": "teacher 缺位假设：专项排查结论——flatten 三个脚本与 agent.md 无任何训练范式/teacher 断言（训练无关：只查 __main__ 可跑、AST、user-pkg 导入、manifest 章节、pathlib）；check_flatten.sh 无任何 depth/num_heads/ffn_dim 维度断言"
+    }
+   ],
+   "node": "psu_flatten（fork 自 ns3_flatten，puzzle-supernet 入口节点）",
+   "open_questions": [
+    "PSU 是否支持 CNN / hierarchical 模型？axis A 的分支集（original/vanilla/random_synthesizer/relu_attention/fnet/softs_star）全是 transformer token-mixer，无 CNN slot 概念——若确认 transformer-only，cnn readiness 规则与 cnn spec 族整体删除、Step 2 匹配面收窄；hierarchical 保留 layout 规则即可（downsample 保持原样冻结）",
+    "psu_flatten 是否加一个入口级 fail-loud 冒烟检查：pretrained_ckpt state_dict 能否按用户项目的加载方式 load 进 <base>_flat.py（提前暴露 key mismatch，而不是等到 psu_expand 的 gate E）？价值高但超出五变化轴的字面范围，需设计确认（若做，建议放 check_flatten.sh 或其旁路脚本，deterministic 实现）",
+    "PSU 变体分支是否全部来自 nas-agent blocks 池且均为 BLC/BHWC 布局？若是，isotropic/hierarchical 的布局适配规则保留为 mandatory 是对的；若存在非 BLC 布局的自定义变体分支，互换性契约需要在 psu_expand spec 里重新定义"
+   ],
+   "risks": [
+    "最大风险：v3 readiness 规则与 axis B/E 的结构性冲突——若 pre-norm 转换、BN→GroupNorm/LayerNorm、downsample 替换等 mandatory 规则被原样带入 psu_flatten，则对任何 post-norm 或含 BN 的原模型（如原始 BERT/post-norm ViT），父权重无法原样加载、gate E『全 original 路径 ≡ 预训练原模型输出』按构造不可能通过。必须在 fork 时同步修剪 readiness 规则集，不能只改 expand",
+    "镜像去重的单向依赖：本审计把 flatten 侧 references/ 与 optional optimize_rules 全删后，psu_expand 必须保留并 PSU 化重写自己那份 supernet_specs/workflows/checklists 副本（choice-only + 权重继承 + freeze 契约），否则知识库将整体丢失",
+    "Dropout 规则 rationale 若不重写会误导运行时 LLM：规则行为正确但理由（深度搜索/权重切片）在 PSU 为假，违背『agent prompt 是运行时指令』的洁净契约",
+    "check_flatten.sh 的 __main__ 运行检查用随机初始化——PSU 下若后续把『ckpt 可加载』做进 flatten（见开放问题），需注意 flat 文件不 import 用户包的约束与 ckpt 加载代码的交互（加载逻辑应内联或走 torch.load，不得 import 用户项目模块）"
+   ],
+   "summary": "32 个文件：keep 4 / modify 3 / delete 25。flatten 的执行核心（agent.md 步骤骨架 + 3 个 scripts + 4 个 readiness 规则文件中的 isotropic 适配规则）与训练范式无关，PSU 基本原样保留；25 个删除全部是两类死重：①references/ 下 14 个 supernet_specs/model_type/inspect_examples/workflows/checklist 文件是 ns3_expand_supernet 知识库的逐字节镜像（diff -rq 为空），而 flatten 的 agent.md 除 :173 读 assets/optimize_rules/supernet_readiness/ 外从不读取 references/ 任何文件；②assets/optimize_rules 下 10 个 cv/nlp/telecom/general optional 优化规则是 model-optimizer 血统残留，同样无人引用，且多处显式 from-scratch/破坏性假设。真正的 PSU 实质改动集中在 supernet_readiness 四文件与 agent.md Step 2/3：v3 的 mandatory readiness 规则里 pre-norm 转换、BatchNorm 替换、downsample 替换都改计算/参数结构，与 axis B（original 分支继承父权重）+ axis E（全 original 路径 ≡ 预训练原模型输出）结构性冲突，必须修剪为仅输出等价 + ckpt 兼容的子集。check_flatten.sh 全文核查无任何维度相关断言（只查 __main__ 跑通/AST/user-pkg 导入/manifest 五章节），PSU 可原样保留。"
+  },
+  {
+   "contract_changes": [
+    {
+     "change": "+ {{ inputs.pretrained_ckpt }}（必填）——权重继承、等价 gate、teacher 构建的共同权重源；model_path/target_latency/latency_unit/seed/project_root/input_invariants 不变",
+     "item": "workflow inputs"
+    },
+    {
+     "change": "字段形状保留（output_dir/model_type/model_type_supported/supernet_path/prepared_model/error/generated_artifacts）；fidelity_passed 语义改为 PSU evaluator PASS 且建议拆出新增 equivalence_passed: bool（等价 gate 结果，供 psu_train_script/psu_report 确定性判定）；model_type 标签集随 model_type.json 收缩",
+     "item": "output_schema"
+    },
+    {
+     "change": "结构不变：model_type_supported != false → psu_train_script，否则 psu_report（nas-supernet-v3.yaml:111-114 平移）；若新增 equivalence_passed 可将其并入 fail-loud 条件",
+     "item": "routes"
+    },
+    {
+     "change": "Step 1 保留（标签收缩）；Step 2 重写（新 transformer_layer spec + pretrained_ckpt 继承/冻结 + .baseline.json pin 化 + 等价 gate wiring + PSU evaluator 循环）；Step 3 精简为分支集合 refine；Step 4 summary 增分支集/冻结分组/等价结果/预训练来源；Validation 仍调 check_expand.sh（内部第 5 检查换 check_equivalence.py）",
+     "item": "agent.md 步骤"
+    },
+    {
+     "change": "supernet-evaluator → PSU fork（subagents/puzzle-supernet/supernet-evaluator.md）：删 sandwich-BLOCKER 与 ≤3 分支断言，加 original 分支必含/父权重继承/冻结分组/等价 marker 检查；workflow-verifier + memory-verifier 复用，但随附 checklist（workflow-checklists/search_space_refinement.md）必须同步 choice-only 化",
+     "item": "subagent 引用"
+    },
+    {
+     "change": "新增 references/supernet_specs/transformer_layer/{spec.md,search_space.py}（choice-only：每 transformer 层槽=ChoiceLayer、分支={original(冻结+父权重),vanilla,random_synthesizer,relu_attention,fnet,softs_star}、num_heads/ffn_dim 单值钉原层实测值、depth=原层数）",
+     "item": "新增文件（spec 族）"
+    },
+    {
+     "change": "新增 scripts/check_equivalence.py（确定性等价 gate：全 original config vs 预训练原模型逐张量对齐 + requires_grad 分组断言），产物 .equivalence.json 供 report；新增 .pretrained_ckpt marker；.baseline.json 语义从 sandwich 锚改 pin 锚",
+     "item": "新增文件（gate）"
+    },
+    {
+     "change": "label nas-supernet/search-space 与 marker .nas-supernet_charts.jsonl 改名（如 puzzle-supernet/*）须与 psu_run_search 图表脚本、psu_report 的 charts/ 收敛逻辑全链一致",
+     "item": "图表契约"
+    }
+   ],
+   "files": [
+    {
+     "change": "大改：(a) L40-43 Required Inputs 增 {{ inputs.pretrained_ckpt }}；(b) L103-122 .baseline.json 段从 sandwich 锚改 pin 锚（原层数+每层 num_heads/ffn_dim 实测值），L105 'must sandwich' 与 L122 sandwich gate 描述删除；(c) L98-101 块选择从 nas_agent metadata shortlist 改为 PSU 变体池（puzzle transformer_layer_variants/candidate_catalog），original 分支必含；(d) L126-129 specs_dir marker 指向新 transformer_layer spec 族；(e) L130-136 改调 PSU fork 版 evaluator；(f) Step 2 增权重继承/冻结分组指令与 .pretrained_ckpt marker + 等价 gate wiring；(g) L151-157 summary 增分支集/冻结分组/等价结果/预训练来源段；(h) L185-208 输出字段语义更新（fidelity_passed 或新 equivalence_passed）",
+     "evidence": "agent.md:40-43,98-101,103-122,126-136,151-157,185-208",
+     "path": "workflows/agents/ns3_expand_supernet/agent.md",
+     "verdict": "modify"
+    },
+    {
+     "change": "检查 0-4（存在性/ast/SearchSpace 暴露/user-pkg/inspect 可跑）保留；L73-84 第 5 检查（check_search_space.py sandwich 调用）替换为新 check_equivalence.py：supernet 置全 original config + 从 pretrained_ckpt 构建预训练原模型、同输入 forward、逐张量对齐（PREMISE E），顺带断言 freeze 分组（非 slot 模块与 original 分支 requires_grad=False、变体分支 True）与 choice 契约（每 slot 分支集含 original）",
+     "evidence": "check_expand.sh:73-84",
+     "path": "workflows/agents/ns3_expand_supernet/scripts/check_expand.sh",
+     "verdict": "modify"
+    },
+    {
+     "change": "整脚本即 depth+internal-width sandwich 三断言，PSU 维度单值钉原层值 ⇒ 按构造永真失败（用户点名不需要）。其 SearchSpace 加载器（L42-69）已被 check_expand.sh/search_space_table.py 各自实现；替换物 = check_equivalence.py + check_expand.sh 内联 choice 检查",
+     "evidence": "check_search_space.py:115-125,143-219,1-31",
+     "path": "workflows/agents/ns3_expand_supernet/scripts/check_search_space.py",
+     "verdict": "delete"
+    },
+    {
+     "change": "",
+     "evidence": "reuse_check.sh:13-28",
+     "path": "workflows/agents/ns3_expand_supernet/scripts/reuse_check.sh",
+     "verdict": "keep"
+    },
+    {
+     "change": "",
+     "evidence": "resume_check.sh:11-14",
+     "path": "workflows/agents/ns3_expand_supernet/scripts/resume_check.sh",
+     "verdict": "keep"
+    },
+    {
+     "change": "",
+     "evidence": "supernet_bar.sh:8-17",
+     "path": "workflows/agents/ns3_expand_supernet/scripts/supernet_bar.sh",
+     "verdict": "keep"
+    },
+    {
+     "change": "L116-174 _extract_rows 从 staged/isotropic 维度候选网格改为 slot×branch 行（dims 固定值列、无 depth/config 候选展开）；L50 列定义与 L48 label 'nas-supernet/search-space'、L47 marker '.nas-supernet_charts.jsonl' 改名须与 psu_run_search/psu_report 图表收敛全链一致",
+     "evidence": "search_space_table.py:47-50,116-174",
+     "path": "workflows/agents/ns3_expand_supernet/scripts/search_space_table.py",
+     "verdict": "modify"
+    },
+    {
+     "change": "深度改写。保留骨架：Full-Model Scope & Component Boundary（L59-75）、Non-Searchable Model Logic（L77-87）、Topology Preservation（L89-97）、ChoiceLayer 分支容器规则（L246-257，去 slicing）、SuperNet API 骨架、Self-Check/输出要求框架。删除/替换：L16-23 'elastic widths & depth'+weight slicing 核心约束、L99-108 可搜索维度清单、L110-122 Weight Slicing guidelines、L125-232 整个 Elastic* API（super_*/sample_*/切片导出）、L281-299 sample_* 重映射、L340-355 弹性自检项。新增：choice-only SearchSpace/ArchConfig schema（set_sample_config 只剩 choice 维）、original 分支规则（父层原样、继承 pretrained_ckpt 权重、冻结）、freeze 分组、变体分支=固定维度 nn.Module 且构造参数钉原层实测值、默认 config=全 original、demo 增全 original 等价验证（L357-375）",
+     "evidence": "general_specs.md:16-23,59-97,99-122,125-232,237-257,261-330,340-375",
+     "path": "workflows/agents/ns3_expand_supernet/references/supernet_specs/general_specs.md",
+     "verdict": "modify"
+    },
+    {
+     "change": "删除，可用段落（Block I/O at global_dim L22-30、fixed components 位置 L12、choice 必为搜索维 L69）并入新增的 transformer_layer/spec.md（choice-only：无 depth_candidates、num_heads/ffn_dim 单值钉原层、original 分支必含）",
+     "evidence": "isotropic_transformer/spec.md:46-49,62-71,22-30",
+     "path": "workflows/agents/ns3_expand_supernet/references/supernet_specs/isotropic_transformer/spec.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "删除；新 spec 族配新 canonical 示例：layer_configs 每分支维度字段为单值元组（(8,) 式）或无维度字段、无 depth_candidates、sample() 只采每 slot choice、validate() 校验 original∈分支集",
+     "evidence": "isotropic_transformer/search_space.py:60,65-70,72-95",
+     "path": "workflows/agents/ns3_expand_supernet/references/supernet_specs/isotropic_transformer/search_space.py",
+     "verdict": "delete"
+    },
+    {
+     "change": "删除（PSU v1 不搜 conv 维度；stage_depth/kernel_size/expand_channels 全部弹性维度展开，与 choice-only 前提冲突）",
+     "evidence": "cnn/spec.md:96-113,121-152",
+     "path": "workflows/agents/ns3_expand_supernet/references/supernet_specs/cnn/spec.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "删除（stage_depth_candidates/stage_layer_configs 弹性候选网格，同上）",
+     "evidence": "cnn/search_space.py:76-81,86-117",
+     "path": "workflows/agents/ns3_expand_supernet/references/supernet_specs/cnn/search_space.py",
+     "verdict": "delete"
+    },
+    {
+     "change": "删除（v1 无 stage depth / num_heads / ffn_dim 搜索；若后续支持层级 transformer 再按 choice-only 重写）",
+     "evidence": "hierarchical_transformer/spec.md:86-107,116-147",
+     "path": "workflows/agents/ns3_expand_supernet/references/supernet_specs/hierarchical_transformer/spec.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "删除（同上）",
+     "evidence": "hierarchical_transformer/search_space.py:77-82,87-118",
+     "path": "workflows/agents/ns3_expand_supernet/references/supernet_specs/hierarchical_transformer/search_space.py",
+     "verdict": "delete"
+    },
+    {
+     "change": "L24-28 块元数据加载（jq '.{model_type}' nas_agent/blocks/metadata.json）改为 PSU 变体池（puzzle _puzzle_scripts/transformer_layer_variants.py / candidate_catalog.yaml，维度钉原层值约束写入流程）；L40-43 shortlist 选择同步改；L65-71 验证保留（multi-sample consistency 在 choice-only 下仍成立），增等价 gate 步骤引用；ruff 流程保留",
+     "evidence": "supernet_generation.md:24-28,40-43,45-71",
+     "path": "workflows/agents/ns3_expand_supernet/references/workflows/supernet_generation.md",
+     "verdict": "modify"
+    },
+    {
+     "change": "refine 对象从候选值范围改为分支集合增删：L92-94 候选范围调整/value preference guidelines 段删除；L107-115 Refinement Rules 的 candidate tuples/depth/width ranges 改为 branch 池编辑；L117-132 Pre-built Block Replacement 段改造保留（→ 变体替换，重跑等价 gate + evaluator）；用户反馈环与 inspector 复用机制保留",
+     "evidence": "search_space_refinement.md:20,88-94,105-132",
+     "path": "workflows/agents/ns3_expand_supernet/references/workflows/search_space_refinement.md",
+     "verdict": "modify"
+    },
+    {
+     "change": "item 4（L34 depth/width candidates 打印）改分支集+固定 dims 打印；item 5（L40-42 min/max 形状代表块）改每分支单 config（dims 固定后 min/max 退化）；item 6/7（L46-56 硬编码形状+官方时延助手）机制保留；item 8（L59-64 latency 并排打印）保留；item 9（L68-70 块替换一致性）改变体替换+等价 gate 重跑；新增 original 分支必含/冻结标记检查项",
+     "evidence": "search_space_refinement.md(workflow-checklists):34,40-42,46-64,68-70",
+     "path": "workflows/agents/ns3_expand_supernet/references/workflow-checklists/search_space_refinement.md",
+     "verdict": "modify"
+    },
+    {
+     "change": "删除（cnn 族 v1 不保留）",
+     "evidence": "cnn.py:73-78,94-98",
+     "path": "workflows/agents/ns3_expand_supernet/references/inspect_supernet_examples/cnn.py",
+     "verdict": "delete"
+    },
+    {
+     "change": "删除（hierarchical 族 v1 不保留）",
+     "evidence": "hierarchical_transformer.py:83-89,104-107",
+     "path": "workflows/agents/ns3_expand_supernet/references/inspect_supernet_examples/hierarchical_transformer.py",
+     "verdict": "delete"
+    },
+    {
+     "change": "改造成 choice-only inspector 模板（或并入新 transformer_layer 族示例）：L9-31 build_extreme_configs 维度 min/max 改为每分支固定单 config；L54 depth candidates 打印删；保留分支枚举+params/latency 测量骨架",
+     "evidence": "isotropic_transformer.py:9-31,54,63",
+     "path": "workflows/agents/ns3_expand_supernet/references/inspect_supernet_examples/isotropic_transformer.py",
+     "verdict": "modify"
+    },
+    {
+     "change": "标签收缩：cnn 标签删除；isotropic_transformer 保留（或并为单一 transformer 标签），hierarchical_transformer 去留见 open questions；unsupported 路由机制（agent.md Step 1 + .ns_expand_unsupported.flag）保留联动",
+     "evidence": "model_type.json:2-4",
+     "path": "workflows/agents/ns3_expand_supernet/references/model_type.json",
+     "verdict": "modify"
+    },
+    {
+     "change": "本节点 agent.md 零引用（grep 证实只有 legacy pytorch-model-optimizer/SKILL.md 引用）——fork 不带；conv-norm bias/RMSNorm 等 tradeoff 改写与 PSU 拓扑保持+等价前提冲突",
+     "evidence": "grep 'optimize_rules' ns3_expand_supernet/agent.md 无命中; general_rules.md:3-52",
+     "path": "workflows/agents/ns3_expand_supernet/assets/optimize_rules/general_rules.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "同上，本节点零引用的镜像死重",
+     "evidence": "telecom_transformer_rules.md:5-45",
+     "path": "workflows/agents/ns3_expand_supernet/assets/optimize_rules/telecom/telecom_transformer_rules.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "同上",
+     "evidence": "multi_axis_attention_rules.md:5-88",
+     "path": "workflows/agents/ns3_expand_supernet/assets/optimize_rules/telecom/multi_axis_attention_rules.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "同上；且序列降/升采样破坏原拓扑，与 PSU 前提冲突",
+     "evidence": "signal_processing_transformer_rules.md:5-33",
+     "path": "workflows/agents/ns3_expand_supernet/assets/optimize_rules/telecom/signal_processing_transformer_rules.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "同上",
+     "evidence": "wireless_link_scheduling_transformer_rules.md:5-60",
+     "path": "workflows/agents/ns3_expand_supernet/assets/optimize_rules/telecom/wireless_link_scheduling_transformer_rules.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "属 psu_flatten 职责（ns3_flatten/agent.md:170-181 消费 supernet_readiness/）；expand 侧镜像删除、flatten fork 侧保留——注意 flatten 侧 Dropout Removal 规则的理由文案（'supernet already searches depth'）在 PSU 下不成立需改写，但那是 flatten 审计范围",
+     "evidence": "transformer_common.md:5-93; ns3_flatten/agent.md:172-177",
+     "path": "workflows/agents/ns3_expand_supernet/assets/optimize_rules/supernet_readiness/transformer_common.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "同上，flatten 侧资产",
+     "evidence": "isotropic_transformer.md:5-29",
+     "path": "workflows/agents/ns3_expand_supernet/assets/optimize_rules/supernet_readiness/isotropic_transformer.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "同上",
+     "evidence": "hierarchical_transformer.md:5-55",
+     "path": "workflows/agents/ns3_expand_supernet/assets/optimize_rules/supernet_readiness/hierarchical_transformer.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "同上",
+     "evidence": "cnn.md:4-157",
+     "path": "workflows/agents/ns3_expand_supernet/assets/optimize_rules/supernet_readiness/cnn.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "本节点零引用；GAP 头替换破坏原模型结构，与 PSU 等价前提冲突",
+     "evidence": "vision_cnn_rules.md:5-38",
+     "path": "workflows/agents/ns3_expand_supernet/assets/optimize_rules/cv/vision_cnn_rules.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "本节点零引用；isotropic→hierarchy 服务的层级转换",
+     "evidence": "window_attention_block.py:1-13,168-218",
+     "path": "workflows/agents/ns3_expand_supernet/assets/optimize_rules/cv/window_attention_block.py",
+     "verdict": "delete"
+    },
+    {
+     "change": "本节点零引用；移除位置嵌入/GAP 头均为破坏性改写，与 PSU 拓扑保持冲突",
+     "evidence": "vision_transformer_rules.md:5-65",
+     "path": "workflows/agents/ns3_expand_supernet/assets/optimize_rules/cv/vision_transformer_rules.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "本节点零引用；且该破坏性结构改造（深度=12→[2,5,5,2]）与 PSU depth 钉原层数直接冲突",
+     "evidence": "isotropic_to_hierarchy_rules.md:5-29",
+     "path": "workflows/agents/ns3_expand_supernet/assets/optimize_rules/cv/isotropic_to_hierarchy_rules.md",
+     "verdict": "delete"
+    },
+    {
+     "change": "本节点零引用；RoPE 替换/去 bias 均破坏逐张量等价前提",
+     "evidence": "language_model_decoder_rules.md:5-93",
+     "path": "workflows/agents/ns3_expand_supernet/assets/optimize_rules/nlp/language_model_decoder_rules.md",
+     "verdict": "delete"
+    }
+   ],
+   "gate_findings": [
+    {
+     "action": "删除脚本；替换为 check_equivalence.py（全 original 等价）+ check_expand.sh 内联 choice/pin 检查",
+     "location": "scripts/check_search_space.py:115-125,143-219",
+     "problem": "核心三断言 _sandwich_errors（baseline∈candidates、存在 candidate>baseline、存在<baseline）作用于 depth + 全部 internal-width 字段；PSU 维度单值钉原层值 ⇒ 两条永真失败，整个 gate 按构造不可通过（用户点名：校验 depth 扩展没必要）"
+    },
+    {
+     "action": "第 5 检查改为调用 check_equivalence.py + choice 契约检查；文案同步换",
+     "location": "scripts/check_expand.sh:73-84",
+     "problem": "检查 #5 'search-space contract (depth + internal-width sandwich vs baseline)' 将维度展开作为硬 gate"
+    },
+    {
+     "action": ".baseline.json 保留但语义 pin 化（候选必须==原层实测值），消费方改为 pin 校验与 check_equivalence.py",
+     "location": "agent.md:103-122",
+     "problem": ".baseline.json 记录段以 sandwich 为唯一目的（L105 'values that the search space must sandwich'、L122 'fail-louds if any dimension is not a proper sandwich'）"
+    },
+    {
+     "action": "Required Inputs 增 pretrained_ckpt；Step 2 增继承/冻结指令；等价 gate 写入 Validation 段",
+     "location": "agent.md:40-43,185-201",
+     "problem": "from-scratch 假设：Required Inputs 与 Output 无 pretrained_ckpt，权重继承（PREMISE B）与等价 gate（PREMISE E）在节点契约中无落点"
+    },
+    {
+     "action": "换为 choice-only 核心约束（分支容器 + 固定维度 + original 分支冻结继承），切片语句全删",
+     "location": "references/supernet_specs/general_specs.md:16-23",
+     "problem": "核心约束 'variation only through elastic widths & depth' + 'active subnetwork realized by weight slicing'"
+    },
+    {
+     "action": "删除维度搜索与切片指导；新增 choice-only 构造规则（变体构造参数=原层实测值）",
+     "location": "references/supernet_specs/general_specs.md:99-122",
+     "problem": "Searchable Dimensions 清单（width/heads/depth/kernel）+ Weight Slicing guidelines（对齐倍数、组合数上限 1000、候选范围围绕 baseline 展开）全部基于维度展开"
+    },
+    {
+     "action": "删除 Elastic* API 段；分支=固定维度 nn.Module，get_active_subnet 保留但导出语义=分支选择+deep-copy（无切片）",
+     "location": "references/supernet_specs/general_specs.md:125-232,281-299,340-355",
+     "problem": "整个 Elastic* API（super_*/sample_*/weight slicing/get_active_subnet 切片导出）与 Self-Check 中的 sample_* 重映射、kernel 候选断言基于切片范式"
+    },
+    {
+     "action": "改为：original 分支=父层原样（必含、冻结、继承权重），其余=变体池分支；上限改按变体池清单",
+     "location": "references/supernet_specs/general_specs.md:237-244",
+     "problem": "分支上限 ≤3（1 user-derived + ≤2 pre-built）与 PSU 分支集 {original, vanilla, random_synthesizer, relu_attention, fnet, softs_star}（6 个）冲突；'One Elastic block based on user model' 的语义在新范式下应转为 original 分支"
+    },
+    {
+     "action": "默认 config 改为全 original 路径（等价 gate 的前置条件）；层数=原层数",
+     "location": "references/supernet_specs/general_specs.md:277-278",
+     "problem": "'Default to the maximum architecture / depth to its built maximum' —— 超网按最大维度容器构造、从零训练假设"
+    },
+    {
+     "action": "输出要求增：全 original config forward vs 预训练原模型逐张量对比（等价 gate 的生成期自检形式）",
+     "location": "references/supernet_specs/general_specs.md:357-375",
+     "problem": "输出要求 demo 无任何等价验证（只有 supernet vs subnet 对比），from-scratch 假设"
+    },
+    {
+     "action": "随族删除；Block I/O 与 fixed components 段并入新增 transformer_layer/spec.md",
+     "location": "references/supernet_specs/isotropic_transformer/spec.md:46-49,62-71",
+     "problem": "Elastic Depth（前缀激活）+ depth_candidates（原层数为中心值）+ num_heads/ffn_dim 候选值偏好——全是维度展开指导"
+    },
+    {
+     "action": "两族删除；后续支持层级模型再按 choice-only 重写",
+     "location": "references/supernet_specs/cnn/spec.md:96-113,121-152; hierarchical_transformer/spec.md:86-107,116-147",
+     "problem": "两族搜索空间 spec 全为 elastic 维度（kernel_size 奇数值、expand_channels/mid_channels、stage_depth、num_heads/ffn_dim 候选）"
+    },
+    {
+     "action": "三个示例删除；新 transformer_layer/search_space.py 作 canonical 示例（分支集含 original、维度单值、sample 只采 choice）",
+     "location": "references/supernet_specs/*/search_space.py（isotropic:60,65-70,72-95; cnn:76-117; hierarchical:77-118）",
+     "problem": "三份 canonical 示例代码的 depth_candidates/stage_depth_candidates/维度候选元组 + sample() 深度/维度采样逻辑"
+    },
+    {
+     "action": "改为从 PSU 变体池（puzzle _puzzle_scripts/transformer_layer_variants.py + candidate_catalog.yaml）取分支，并写明维度钉原层实测值；来源最终归属见 open questions",
+     "location": "references/workflows/supernet_generation.md:24-28",
+     "problem": "分支来源 = jq nas_agent/blocks/metadata.json 按 model_type 过滤（无 '维度钉原层值' 表达，且 PSU 分支集来自 puzzle 变体池而非 nas_agent 元数据）"
+    },
+    {
+     "action": "refine 对象改分支集合；替换段改造保留并绑定等价 gate + evaluator 重查",
+     "location": "references/workflows/search_space_refinement.md:92-94,107-115",
+     "problem": "refinement 以候选范围/值偏好为指导（adjusting candidate ranges、depth/width ranges、value preference guidelines）——choice-only 下无值可调"
+    },
+    {
+     "action": "checklist 改为分支枚举 + 每分支单 config 的 params/latency 校验 + original 分支存在性检查",
+     "location": "references/workflow-checklists/search_space_refinement.md:34,40-42,46-64",
+     "problem": "item 4 要求打印 depth/width candidates；item 5 要求 min/max 形状代表块（维度极值枚举）；item 6/7/8 按候选 config 网格测时延——均维度展开"
+    },
+    {
+     "action": "示例改 per-branch 单 config；cnn/hierarchical 两示例删除",
+     "location": "references/inspect_supernet_examples/isotropic_transformer.py:9-31,54; cnn.py; hierarchical_transformer.py",
+     "problem": "build_extreme_configs 按维度 min/max 构造代表块 + 打印 depth candidates——维度展开假设"
+    },
+    {
+     "action": "提取逻辑改 slot×branch（dims 固定列）；label/marker 改名与 run_search/report 联动",
+     "location": "scripts/search_space_table.py:50,116-174",
+     "problem": "表列 [stage,block,depth,fixed,config] 与 staged/isotropic 双形状候选网格提取基于维度展开"
+    },
+    {
+     "action": "cnn 标签删除；hierarchical 去留需拍板（open question）；分类+fail-loud 机制保留",
+     "location": "references/model_type.json:2",
+     "problem": "cnn 标签引导 flatten/expand 走 CNN 弹性范式，PSU v1 不支持"
+    },
+    {
+     "action": "PSU fork 版删超越断言与分支上限断言，新增：每 slot original 分支必含、original 分支权重==父 state_dict、freeze 分组正确、等价 marker 存在且 PASS",
+     "location": "workflows/subagents/nas-supernet-v3/supernet-evaluator.md:67-70,104（本节点 Step 2 循环直接依赖，跨文件同步项）",
+     "problem": "'Search space strictly exceeds the baseline on depth and internal width [BLOCKER]' 直接判死 PSU（维度钉原值=max=min=baseline）；'at most 3 branches [MAJOR]' 判死 6 分支集——两个断言都会误杀 PSU 产物"
+    },
+    {
+     "action": "保留排除语义并补注：teacher 由下游训练节点从 pretrained_ckpt 构建；expand 在 summary 记录 teacher 权重来源，防止 KD 链路 teacher 缺位",
+     "location": "references/supernet_specs/general_specs.md:74",
+     "problem": "teacher 缺位语境：'external teacher model 不进 supernet' 在 PSU 仍成立，但原文未区分'不进 supernet'与'不在管线内'——PSU teacher=独立冻结预训练原模型实例，是下游 KD 的必需组件"
+    }
+   ],
+   "node": "psu_expand_supernet（fork 自 ns3_expand_supernet）",
+   "open_questions": [
+    "cnn / hierarchical_transformer 两族 PSU 第一版是否保留？（建议：都删，v1 只做 transformer 层槽；hierarchical transformer 模型的层槽理论上仍可 choice-only，但 stage 骨架处理复杂度上升，是否 v1 支持需用户拍板）",
+    "变体分支来源二选一：import puzzle _puzzle_scripts/transformer_layer_variants.py（已有 5 变体 + catalog + identity 语义）还是 nas_agent.blocks + '维度钉原层值'约束？决定 supernet_generation.md §1 与新 spec 的引用方式，也决定 PSU 与 puzzle 的代码共享边界",
+    "output_schema 是否拆出 equivalence_passed 新字段还是复用 fidelity_passed 改语义？（前者更 fail-loud 但牵连 route 条件与 psu_train_script/psu_report 的引用；建议拆新字段）",
+    "PSU（ns3 9 节点 fork）与现有 puzzle workflow（pz_*，已按 transformer_layer 粒度拆 ingest/search_space/baseline/build_library）是否共享 _puzzle_scripts 与 subagents/puzzle 资源？若不共享，变体实现将出现第三份镜像——与本次审计发现的 ns3 双节点镜像问题同构，需在设计 draft 里定归属",
+    "等价 gate 的逐张量判定标准：逐元素 allclose（atol/rtol 取值）还是 hidden cosine + logits KL 阈值？以及 eval 模式 + dtype/device 归一（CPU vs CUDA vs NPU 数值容差差异）需设计决策",
+    "teacher 实例构建落点确认：psu_train_script / psu_run_train 从 pretrained_ckpt 构建冻结 teacher（PREMISE C/D），expand 节点仅记录来源——该跨节点契约需在 train_script/run_train 审计中对照确认"
+   ],
+   "risks": [
+    "spec / gate / evaluator 三处必须同步换血：只改 spec 与 check 脚本、不 fork supernet-evaluator（其 L67-70 sandwich BLOCKER、L104 ≤3 分支 MAJOR）会让 PSU 合法产物在 Step 2 验证循环被无限打回",
+    "check_equivalence.py 的确定性等价涉及构建原模型 + 加载 pretrained_ckpt + flat 重排后的 state_dict 键位映射——映射错位会产生假阴性/假阳性；gate 应显式报告未匹配键并 fail loud，不能静默跳过",
+    "freeze 分组漏配不会暴露在 forward 等价上（eval 前向不读 requires_grad）——requires_grad 断言必须进确定性 gate（check_equivalence.py），不能只依赖 LLM 生成纪律或 evaluator 目测",
+    "图表契约跨节点共享：search_space_table.py 的 marker '.nas-supernet_charts.jsonl'（L47）与 label 'nas-supernet/search-space'（L48）被 run_search 图表脚本与 report 收敛逻辑共用——fork 改名若单点改会断 psu_report 图表汇总",
+    "变体双来源风险：puzzle 变体池与 nas_agent.blocks 若混用，'维度钉原层实测值'没有现成 metadata 字段可表达——新 spec 必须显式规定变体构造参数从 .baseline.json/原层读取，否则生成 LLM 会退回默认超参",
+    "删除 22 个文件 + 新增 spec 族意味着这不是'改几个字段'的 fork：工作量集中在 general_specs.md 重写与 evaluator fork；残留旧断言（如 Self-Check 清单里的 sample_*/kernel 项、checklist 的 depth candidates 项）是 最可能的回归点，需在 fork 完成后全文 grep depth_candidates/num_heads 候选/sandwich 清零验证"
+   ],
+   "summary": "34 个文件（跳过 __pycache__）：keep 3（约 9%）、modify 9（约 26%）、delete 22（约 65%）。改动集中在三条轴：(1) supernet_specs 三族 spec 全部围绕 elastic 维度展开——判定为删除旧三族（isotropic 的 Block I/O 段落并入新族）、新增 choice-only 的 transformer_layer spec 族，general_specs.md 深度改写（保留组件边界/非搜索逻辑/拓扑保持/输出要求骨架，删 Elastic*/切片/维度搜索全部内容，加 original 分支+权重继承+freeze 分组）；(2) 确定性 gate 从「depth+internal-width sandwich」契约整体替换为「全 original 路径 forward ≡ 预训练原模型」等价 gate（PREMISE E 落点 = check_expand.sh 第 5 检查换成新 check_equivalence.py，顺带断言 freeze 分组）；(3) 分支来源从 nas_agent/blocks/metadata.json 换成 puzzle 变体池（_puzzle_scripts/transformer_layer_variants.py 已有 vanilla/random_synthesizer/relu_attention/fnet/softs_star）。编排骨架（reuse/resume/bar 脚本、evaluator-verification 循环、refinement 用户反馈环、unsupported fail-loud 路由、图表 sidecar、output_schema 字段形状）全部保留。目录级冗余已用 diff 证实：ns3_flatten 与本节点逐字节镜像 26 个文件，其中本节点的 assets/optimize_rules 13 个文件全部零引用（真实消费者是 ns3_flatten Step 2 的 supernet_readiness/，且 general/telecom/cv/nlp 9 个文件在 ns3 两节点均无人引用、仅 legacy pytorch-model-optimizer SKILL.md 引用）——fork 时 psu_expand_supernet 不带 assets/。最大风险：subagents/nas-supernet-v3/supernet-evaluator.md 的 strictly-exceeds-baseline BLOCKER（L67-70）与 ≤3 分支 MAJOR（L104）断言会直接误杀 PSU 产物（维度钉原值、分支集 6 个），必须与 spec 同步 fork。"
+  },
+  {
+   "node": "ns3_train_script (PSU: psu_train_script)",
+   "summary": "7 个文件中 1 个 keep（reuse_check.sh 范式无关）、6 个 modify、0 个 delete；骨架保留率约 55-60%——编排范式（DDP 条件包裹、save_checkpoint_ddp、launcher hygiene、telemetry/progress.jsonl 双 feed、porter/verifier 循环、persistent tests、reuse gate）原样保留。改动集中在训练范式反转的三处：(1) KD 从「可选的 sandwich 内蒸馏（max 子网当 teacher、随训练进行、需 warmup 防未训 teacher）」反转为「固定范式：独立冻结预训练原模型 teacher + hidden cosine/logits KL + 只训变体分支」，v3 整个 KD 启用决策框架与 KD-warmup 非零 gate 的前提全部死亡；(2) 维度展开采样（stage_depth_candidates max/min sandwich、elastic 参数 rng.choice）全部塌缩为每 step 单条 choice 路径采样；(3) viability 判定（RL/GAN/自引用 → from-scratch 回退）与 evaluation_paradigm 的 train_from_scratch 分支在 PSU 固定范式下失去存在基础，max/min eval 配置与 best-ckpt 选择基准需重新定义。porter 分工保留但移植范围从「训练逻辑」收窄为「数据管线 + 评估入口」。无目录级冗余（本节点不镜像 supernet_specs；workflows/ 与 workflow-checklists/ 是 agent/verifier 各读一份的设计分工，非冗余）。",
+   "files": [
+    {
+     "path": "workflows/agents/ns3_train_script/agent.md",
+     "verdict": "modify",
+     "change": "(1) frontmatter description（L2）'porting the user's training logic, deciding training viability' → 收窄为 'porting data+evaluation logic, generating the fixed-paradigm KD distillation training script with pretrained weight inheritance'。(2) User-Paradigm Authority Iron Rule（L120-153）：权威范围从 loss/optimizer/scheduler/训练控制流收窄为数据流 + 评估入口/测度（metric name/direction/transformation 保留）；训练 loss 一条改为 PSU 固定 KD recipe（冻结 teacher + hidden cosine + logits KL + 只训变体分支）；'Forbidden substitutions' 中 loss 公式/optimizer 类禁改条目改为只约束数据与 eval 测度，新增禁止项：解冻非 slot 模块、把 teacher 参数放进 optimizer、绕过 path 采样。(3) Step 2 viability 段（L196-210）：删除 RL/GAN/自引用三条 not-viable 判据与 from-scratch 回退（PSU teacher 冻结不依赖 student，KD loss 恒可微）；Step 3 WARNING 文案（L326-328 'search pipeline will evaluate candidates by training each subnet from scratch'）整段删除。(4) Porting Project Logic（L216-248）：移植对象从 'data pipeline / loss-metric helpers / custom training modules'（L219-220）收窄为 'data pipeline / evaluation function / 其余 eval 相关 helpers'；0/1/N porter 决策结构保留。(5) Step 1.4 探查清单（L93-97）：删 'loss/metric call signatures and formulas'（训练 loss 不再移植），保留 dataloader batch 结构 / eval 函数 / ckpt API；optimizer/scheduler 视 open question 决定去留。(6) fidelity 模板固定行（L266-277）重写：'User loss verbatim' 行 → 'loss = fixed KD recipe (frozen pretrained teacher, hidden cosine + logits KL, variant-branch params only)'；'Sandwich-sampled ... max/min/N random' 行 → 'per-step sampled choice path distillation (set_sample_config 仅 choice 维)'；'(only when KD is enabled)' 行 → 固定 KD 描述；新增固定行：pretrained 权重继承（original 分支父权重 / 变体分支随机 / 非 slot 冻结）+ teacher 独立实例冻结。(7) Step 3 'Knowledge Distillation' 段（L332-333）从 Yes/No 启用决策 → 固定 recipe 记录（loss 组成 + 权重 + teacher ckpt 来源）。(8) Required Inputs（L71-77）新增 `{{ inputs.pretrained_ckpt }}`；ckpt 路径契约段（L109-116）补 teacher 实例同源加载 pretrained_ckpt。(9) Validation 的 user-paradigm self-check（L364-377）：删 optimizer/loss token grep（loss 非移植），保留 evaluation-path self-check（eval 入口 + metric 名 grep）；新增确定性检查：`--pretrained_ckpt` 存在、freeze 分组（requires_grad_(False)）存在、optimizer 只接收 trainable 过滤后的参数、teacher eval()+no_grad。(10) Output JSON（L414-427）：`viable`/`reason` 字段随 viability 分支删除（或降级）；`evaluation_paradigm` 枚举删 `train_from_scratch`（见 contract_changes）。(11) 全文 ns3_ 前缀引用改 psu_。",
+     "evidence": "workflows/agents/ns3_train_script/agent.md:2,120-153,196-210,216-248,266-277,317-344,364-377,414-427"
+    },
+    {
+     "path": "workflows/agents/ns3_train_script/references/evaluation_paradigm.md",
+     "verdict": "modify",
+     "change": "近乎重写但保留文件（Step 3 懒加载它 + 下游 search_pipeline/retrain_script 消费同名概念）。(1) 删 `train_from_scratch` 段（L5）——from-scratch 回退前提死亡。(2) `validate` 段（L7-11）：删 'KD enabled during supernet training, which generally improves weight-sharing quality'（L11，KD 已是常量，不再是差异化因子）；补 PSU 语境：choice-only 空间维度全钉死 + 强制 KD + 权重继承使 inherited-weight 直接评估成为默认。(3) `finetune` 段（L13-19）：删 'Large depth or branch variance creating significant capacity gaps between max and min subnets'（L17，depth 固定、无 max/min）；删 'KD not enabled and task loss alone...'（L18，KD 恒启用）；保留 cross-dataset 场景（L19，仍是真实分支）——若设计决定枚举塌缩为单一值则本文件可降级为一段说明（见 open_questions）。",
+     "evidence": "workflows/agents/ns3_train_script/references/evaluation_paradigm.md:5,7-11,13-19"
+    },
+    {
+     "path": "workflows/agents/ns3_train_script/references/workflows/train_supernet_script_generation.md",
+     "verdict": "modify",
+     "change": "改动最重的文件。(1) §1 CLI（L33-40）：删 `--sandwich_n_random`、`--kd_warmup_start/length` 的 v3 语义；KD 参数改为固定 recipe 参数（如 `--kd_hidden_weight` / `--kd_logits_weight`，warmup 视重推导结果定）；新增 `--pretrained_ckpt`（teacher + 权重继承同源）。(2) Source Evidence L11 'inspector defines for each elastic parameter which end is max/min' → 改为 'inspector 定义每个 slot 的分支集合与全 original 路径'。(3) §5 Model Construction（L175-184）：新增权重继承小节——SuperNet 构造后加载 pretrained_ckpt：original 分支继承父权重、变体分支保持随机初始化、非 slot 模块 requires_grad_(False)；独立 teacher 实例 = prepared_model + pretrained_ckpt，冻结 eval。(4) §6（L88 模板 `optim.AdamW(model.parameters(), ...)`、L190 3× budget）：optimizer 只接收 variant-branch trainable 参数（过滤后传入）；3× 预算规则的 sandwich 收敛论据失效，改为按变体分支 KD 蒸馏重推导（默认倍数待设计，见 open_questions）。(5) §8 Distillation（L264-291）整体替换：删「是否启用 KD」决策框架、四条 Do-not-enable、max-subnet-as-teacher 机制、按输出类型选 loss 的推荐表 → 固定 recipe：冻结 teacher 前向 no_grad + hidden cosine + logits KL（`cosine_kd_loss` / `logits_kd_loss` 助手仍可用）。(6) KD Weight Warmup（L293-322）：'max-subnet teacher is trained alongside, early outputs essentially random'（L295）前提反转——teacher 预训练冻结恒可信，但 student 变体分支随机初始化，warmup 若保留需换论据（risk 项）。(7) Choice Sampling（L324-378）重写：删 stage_depth_candidates max/min、elastic 参数 `{k: rng.choice(v)}` 维度采样 → `sample_choice_path(search_space, rng)` 每 step 对每个 slot 从 {original, vanilla, random_synthesizer, relu_attention, fnet, softs_star} 采一条路径；sync_random_seed 跨 rank 同步保留（L386）。(8) Training Example（L380-492）：sandwich 三段循环（max/min/random + teacher_outputs=max_outputs.detach() L451）→ 单路径 KD 循环（teacher 前向一次 no_grad + student 路径前向 + KD loss backward）；梯度裁剪时机语义保留。(9) §9 Evaluation（L494-508）+ best-ckpt 基准（L558 'max config's validation metric'）：max/min 固定配置死亡 → 重新定义 eval 路径集（如全 original 路径 sanity + 采样路径均值）与 supernet_best.pth 选择基准（见 open_questions）；AverageMeter/DDP 聚合段（L510-560）原样保留。(10) L128/L136 `ns_run_train` 改 `psu_run_train`（顺便修 v2 残留命名）。(11) telemetry primary metric（L132 'user's primary training scalar'）→ PSU 训练标量为 KD loss（kd_loss/total_loss），结构契约不变。",
+     "evidence": "workflows/agents/ns3_train_script/references/workflows/train_supernet_script_generation.md:11,33-40,88,128-136,175-184,190,264-322,324-378,446-451,494-508,558"
+    },
+    {
+     "path": "workflows/agents/ns3_train_script/references/workflow-checklists/train_supernet_script_generation.md",
+     "verdict": "modify",
+     "change": "(1) Item 1 CLI 契约（L17-22）：`--sandwich_n_random`/`--kd_warmup_start`/`--kd_warmup_length` → 替换为 choice-path 采样参数 + 固定 KD recipe 参数 + `--pretrained_ckpt`。(2) Item 12（L98-103）optimizer/scheduler 类须匹配用户项目——若设计定为 PSU 固定 optimizer 则删除，若保留移植则保留（open question）。(3) Item 17（L136-141）'after ALL sandwich losses (max + min + random) have called backward' → 'after the per-path KD loss backward'（时机语义不变）。(4) Item 19（L153-161）sandwich config 构造（depth max/min、elastic 参数采样）→ 替换为 choice-path 构造断言：每 slot 从固定分支集采样、无 depth/elastic 维采样、全用传入 rng。(5) Item 20（L162-169）固定 eval block choice + max/min 配置 → 全 original 路径 + 新 eval 协议。(6) Item 22（L195-201）KD 启用条件四条 + warmup 非零默认 → 删除启用决策半边；warmup 非零断言视重推导定；新增 KD 固定项断言（teacher 冻结 no_grad、shape guard 保留、loss 类型=hidden cosine/logits KL）。(7) Item 25（L218-223）best ckpt 用 max config metric → 新基准。(8) Item 28（L246-250）3× budget → 新倍数规则。(9) Item 30（L263-268）launcher 变量集：SANDWICH_N_RANDOM/KD_WARMUP_* → 新变量 + PRETRAINED_CKPT。(10) 新增 2-3 个 PSU 专项 item：权重继承正确性（original 分支父权重/变体随机/非 slot 冻结）、optimizer 参数集只含 trainable 变体参数、teacher 独立实例冻结（三项均可静态 grep 验证）。Item 21/27/38 等编排类原样保留。",
+     "evidence": "workflows/agents/ns3_train_script/references/workflow-checklists/train_supernet_script_generation.md:17-22,98-103,136-141,153-161,162-169,195-201,218-223,246-250,263-268"
+    },
+    {
+     "path": "workflows/agents/ns3_train_script/scripts/check_train_script.sh",
+     "verdict": "modify",
+     "change": "(1) 删 §6 KD warmup 非零默认 gate（L64-84）——其注释明言依据 'delayed start + nonzero ramp, §8 KD Weight Warmup'，而 §8 的论据（max-subnet teacher 随训练进行、早期随机）在 PSU 反转为预训练冻结 teacher；若设计保留 warmup 作为 student 侧稳定手段，则 gate 保留但重写依据，不能原样继承。(2) 新增 PSU 专项静态 gate（补位删除的检查）：grep `--pretrained_ckpt` argparse 定义存在；grep `requires_grad_(False)`（freeze 分组存在）；grep teacher 冻结模式（`no_grad` 或 `.eval()` 组合）；optimizer 构造行不含裸 `model.parameters()`（应经 trainable 过滤）。§1-§5（py_compile / 条件 DDP / guarded sync_random_seed / launcher hygiene / progress.jsonl 契约）原样保留。",
+     "evidence": "workflows/agents/ns3_train_script/scripts/check_train_script.sh:64-84"
+    },
+    {
+     "path": "workflows/agents/ns3_train_script/scripts/check_launcher.sh",
+     "verdict": "modify",
+     "change": "(1) 删 KD_WARMUP_START/KD_WARMUP_LENGTH 非零 gate（L42-49）——与 check_train_script.sh §6 同一死亡前提（§8 未训 teacher warmup 论据）；若 warmup 重推导保留则同步更新。(2) L37 python3 入口 grep 与 AMP/NUM_WORKERS/torchrun hygiene 检查原样保留。注意：此脚本被本节点与 retrain launcher 共用（L43 注释自述 'retrain launchers may legitimately omit KD vars'），改动需与 psu_retrain_script 审计员的结论对齐。",
+     "evidence": "workflows/agents/ns3_train_script/scripts/check_launcher.sh:42-49"
+    },
+    {
+     "path": "workflows/agents/ns3_train_script/scripts/reuse_check.sh",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "workflows/agents/ns3_train_script/scripts/reuse_check.sh:10-16（存在性 + ast.parse + launcher 引用检查，范式无关）"
+    }
+   ],
+   "gate_findings": [
+    {
+     "location": "workflows/agents/ns3_train_script/agent.md:196-210,326-328,435-436",
+     "problem": "viability 判定（RL/GAN/自引用 → not viable）+ WARNING 'The search pipeline will evaluate candidates by training each subnet from scratch' + 下游以 run_train_supernet.sh 不存在自门控 skip——整套是 from-scratch 训练假设：teacher 冻结不依赖 student、KD loss 恒可微，三条判据在 PSU 固定范式下无一成立，from-scratch 回退分支（retrain 恒为 finetune-from-supernet + KD）不存在。",
+     "action": "删除 Step 2 viability 三判据 + Step 3 WARNING 文案 + output_schema `viable`/`reason` 字段；psu_run_train 的 self-gate 从 '脚本不存在则 skip' 改为 '训练为本 workflow 必经节点'（与 psu_run_train 审计对齐）。"
+    },
+    {
+     "location": "workflows/agents/ns3_train_script/references/workflows/train_supernet_script_generation.md:324-378（§8 Choice Sampling）+ workflow-checklists/train_supernet_script_generation.md:153-161（Item 19）",
+     "problem": "采样契约基于维度展开：`search_space.stage_depth_candidates` 取 max/min、每 elastic 参数 `rng.choice(v)`、sandwich 构造 (max_config, min_config, random_configs)——PSU depth 固定、num_heads/ffn_dim 单值，无任何维度可采样；校验 'max config: all depths max, all elastic params max' 将恒失败或恒空转。",
+     "action": "整体替换为 `sample_choice_path(search_space, rng)`：每 step 每 slot 从 {original, vanilla, random_synthesizer, relu_attention, fnet, softs_star} 采一分支（维度钉原层值）；Item 19 断言改为 choice-only 构造 + 无 depth/elastic 采样调用。"
+    },
+    {
+     "location": "workflows/agents/ns3_train_script/references/workflows/train_supernet_script_generation.md:494-508,558（§9 Evaluation max/min 固定配置 + best-ckpt 用 max config metric）+ workflow-checklists:162-169（Item 20）,218-223（Item 25）",
+     "problem": "eval 采样与 best-ckpt 基准全部锚在维度展开语义（'every stage depth at its maximum/minimum; all elastic block parameters at max/min'）——choice-only 空间无 max/min 配置，`supernet_best.pth` 选择基准悬空，直接影响下游 psu_search_pipeline 的 supernet_ckpt_path 消费。",
+     "action": "重定义 eval 路径集（建议：全 original 路径 sanity 对齐 teacher + 采样路径或 vanilla 路径的质量信号）与 best-ckpt 基准（建议：固定 eval 路径集均值或 designated 路径 metric）；Item 20/25 断言同步改写。"
+    },
+    {
+     "location": "workflows/agents/ns3_train_script/references/workflows/train_supernet_script_generation.md:264-322（§8 Distillation + KD Weight Warmup）+ agent.md:266-277 模板 '(only when KD is enabled)' 行 + workflow-checklists:195-201（Item 22）",
+     "problem": "KD 缺位假设：v3 把 KD 当可选增强，四条 Do-not-enable 以 '项目内找不到合适 teacher/student 张量' 为由允许无 KD 训练，且 teacher=max subnet 随训练进行（'early in training the teacher's outputs are essentially random'）——PSU teacher 恒存在（预训练原模型独立冻结实例）、KD 恒启用，启用决策框架与 '未训 teacher' 论据整体作废。",
+     "action": "§8 Distillation 决策框架替换为固定 recipe 小节（冻结 teacher 前向 no_grad + hidden cosine + logits KL）；KD Weight Warmup 小节删除或以 student 侧（变体分支随机初始化）论据重推导；fidelity 模板 '(only when KD is enabled)' 行改固定 KD 描述；Item 22 删启用决策断言、保留/改写 shape guard 与 scheduler 断言。"
+    },
+    {
+     "location": "workflows/agents/ns3_train_script/scripts/check_train_script.sh:64-84（§6）+ scripts/check_launcher.sh:42-49 + workflow-checklists:198-199 + workflows/train_supernet_script_generation.md:39-40,307",
+     "problem": "三处确定性 gate 强制 --kd_warmup_start/--kd_warmup_length 默认非零（'never 0'），唯一论据是 sandwich teacher 早期随机会注入噪声梯度——PSU teacher 预训练冻结，KD 从 step 0 语义上成立；基于死亡假设的硬 gate 会错误拦截合法的 kd_warmup 默认 0 配置。",
+     "action": "删除两脚本中的 warmup 非零 gate + checklist 两条非零断言 + CLI 'never 0' 约束；若设计保留 student 侧 warmup，以新论据重立 gate 并区分 start（可 0）与 ramp。"
+    },
+    {
+     "location": "workflows/agents/ns3_train_script/agent.md:120-153（User-Paradigm Authority Iron Rule）+ :364-377（user-paradigm self-check）+ workflow-checklists:98-103（Item 12）",
+     "problem": "用户训练范式权威铁律断言 loss/optimizer/scheduler 必须逐字移植（'switching optimizer classes ... changing loss formulas ... forbidden'），self-check 逐条 grep optimizer/loss token 对 manifest——PSU 训练 loss 是 PSU 固定 KD recipe 而非用户 loss，from-scratch 训练逻辑移植的整体前提死亡（数据加载/eval 移植仍需要）。",
+     "action": "铁律收窄为数据流 + 评估测度权威（metric name/direction/transformation/eval 入口逐字移植保留）；训练侧改为 PSU 固定范式条款（KD recipe + freeze 分组 + 变体参数 only + path 采样）；self-check 删 optimizer/loss token grep，保留 eval-path grep，新增 pretrained/freeze/teacher 冻结确定性检查；Item 12 视 optimizer 去留决定（open question）。"
+    },
+    {
+     "location": "workflows/agents/ns3_train_script/agent.md:414-427 + workflows/nas-supernet-v3.yaml:131,135（output_schema）+ references/evaluation_paradigm.md:5",
+     "problem": "output_schema 的 `evaluation_paradigm` 枚举含 `train_from_scratch`，其定义（'supernet training not viable ... trains from scratch, then validates'）纯 from-scratch 假设；`viable` 字段（L131）同样挂在已删的 viability 分支上——schema 层约束会强制 agent 在 PSU 中捏造一个无意义的范式标签。",
+     "action": "枚举删 `train_from_scratch`（保留 validate/finetune 或塌缩为单值，见 open_questions）；删 `viable`/`reason` 字段；`train_script_path`/`train_supernet_py_path` 的 'viable=false → 空串' 语义随字段删除同步清理；下游 psu_search_pipeline / psu_retrain_script 对该枚举的读取点同步改。"
+    },
+    {
+     "location": "workflows/agents/ns3_train_script/references/workflows/train_supernet_script_generation.md:11,175-184,190 + workflow-checklists:246-250（Item 28）",
+     "problem": "Source Evidence L11（inspector 为每个 elastic 参数定义 max/min 端）与 §5 Model Construction（裸 SearchSpace()+SuperNet() 构造、无权重加载）、§6 L190（3× 预算 = sandwich 多子网共享权重收敛所需）——分别基于维度展开前提、无预训练前提、from-scratch sandwich 前提；PSU 需要预训练权重继承 + 只训变体分支，预算论据换底。",
+     "action": "L11 改为 inspector 定义 slot 分支集合与全 original 路径；§5 新增权重继承小节（original 分支父权重/变体随机/非 slot 冻结 + teacher 独立实例）；Item 28 的 3× 断言替换为重推导的预算规则。"
+    }
+   ],
+   "contract_changes": [
+    {
+     "item": "output_schema（nas-supernet-v3.yaml:126-143 → psu fork）",
+     "change": "删 `viable` + `reason`（viability 分支死亡）；`evaluation_paradigm` 枚举删 `train_from_scratch`（保留 [validate, finetune] 或塌缩为固定值——需设计定夺）；其余字段（train_script_path / train_supernet_py_path / fidelity_passed / workflow_verifier_passed / error / generated_artifacts）保留，'viable=false → 空串' 语义删除。"
+    },
+    {
+     "item": "新增 input 引用 pretrained_ckpt（PSU 轴 B）",
+     "change": "agent.md Required Inputs（L71-77）新增 `{{ inputs.pretrained_ckpt }}`（workflow inputs 层新增由 yaml 审计统一处理）；生成脚本 CLI 新增 `--pretrained_ckpt`，一源两用：teacher 独立冻结实例构造 + supernet original 分支权重继承校验源；ckpt 路径契约段（L109-116）补 teacher 加载同源声明。"
+    },
+    {
+     "item": "agent.md 步骤结构",
+     "change": "Step 0（reuse）不变；Step 1 探查清单收窄（删 loss 公式探查）；Step 2 删 viability 判定子步骤、'Porting Project Logic' 移植范围收窄为 data+eval、fidelity 模板固定行重写为 KD 范式断言（权重继承/freeze 分组/变体参数 only/冻结 teacher/path 采样）；Step 3 删 WARNING 文案、'Knowledge Distillation' 段从 Yes/No 决策改固定 recipe 记录（loss 组成 + 权重 + teacher ckpt）。"
+    },
+    {
+     "item": "User-Paradigm Authority Iron Rule（agent.md:120-153）",
+     "change": "更名并收窄为 Data & Evaluation Paradigm Authority：用户权威 = 数据管线 + 评估入口/测度名/方向/变换；训练范式条款整体替换为 PSU 固定 KD 范式铁律（禁解冻非 slot 模块 / 禁 teacher 进 optimizer / 禁绕过 path 采样 / 禁换 KD loss 组成）。"
+    },
+    {
+     "item": "routes / 下游契约",
+     "change": "本节点 route 单出 psu_search_pipeline 不变；但下游 psu_run_train 的 'run_train_supernet.sh 不存在 → GATE_SKIP' 自门控随 viable 字段删除需重设计（训练为必经节点）；telemetry 行 + progress.jsonl 双 feed 契约（psu_run_train warmup/chart watcher 消费）格式不变，仅 primary metric 语义从用户训练标量变为 KD loss 标量。"
+    },
+    {
+     "item": "supernet_ckpt 路径契约（agent.md:109-116）",
+     "change": "路径默认值 runs/train/supernet_best.pth 保留，但 'best' 的选择基准从 max config metric 重定义（gate_findings 第 3 条）；下游 supernet_ckpt_path 消费不变。"
+    },
+    {
+     "item": "subagent 引用",
+     "change": "四个 subagent（project-porter / project-fidelity-verifier / workflow-verifier / memory-verifier）全部保留、无增删；project-porter 的 inputs 描述（source scope）从训练逻辑收窄为数据/评估逻辑；workflow-verifier 消费的 checklist 同步改写（checklist 文件 verdict 项）。"
+    },
+    {
+     "item": "确定性 gate 脚本",
+     "change": "check_train_script.sh 删 KD warmup gate、新增 pretrained/freeze/teacher 冻结/trainable 过滤四项静态 grep；check_launcher.sh 删 KD_WARMUP 非零 gate、launcher 变量集换血（PRETRAINED_CKPT 等）——与 psu_retrain_script 共用 check_launcher.sh 的改动需跨节点对齐。"
+    }
+   ],
+   "risks": [
+    "best-ckpt 基准悬空是最大链路风险：supernet_best.pth 是 psu_search_pipeline 的 supernet_ckpt_path 契约消费物，max config 基准删除后若不先立新基准（全 original 路径 sanity / 采样路径均值等），搜索阶段拿到的 ckpt 语义未定义——须在 fork 设计稿中先定，不能留到生成期。",
+    "KD warmup gate 不能无脑删：v3 论据（teacher 随机）死了，但 PSU 的 student 侧（变体分支随机初始化）早期输出同样随机，hidden cosine 早期梯度可能噪声大；直接删 gate + 默认 0 可能引入早期不稳定，需以 student 侧论据重推导后再定删/改。",
+    "全 original 路径 eval 恒等于 teacher 输出（gate E 锁死），作为 eval 信号对变体分支质量零信息量——eval 协议若不包含变体路径，训练期完全看不到搜索质量的代理信号，best-ckpt 与收敛判断都失真。",
+    "check_launcher.sh 被 retrain launcher 复用（脚本注释自述），本节点的 gate 改动若与 psu_retrain_script 审计结论不一致会在 fork 时互相覆盖——需跨节点合并裁决。",
+    "optimizer 只接收 trainable 变体参数后，DDP find_unused_parameters=True 仍必须保留（一条 choice path 只激活每 slot 一条分支），但 DDP 对全冻结 original 分支参数的梯度规约有边界情况（参数在 optimizer 中不存在但参与 module 注册）——生成期 smoke test 需覆盖 DDP 路径下 path 切换。"
+   ],
+   "open_questions": [
+    "KD loss 组成与监督任务 loss 并存性：前提写 'loss 如 hidden cosine + logits KL'（'如'=示例），是否还叠加用户原任务 loss？决定 CLI 参数集（kd_hidden_weight/kd_logits_weight/是否 task_loss_weight）与 fidelity 模板措辞。",
+    "evaluation_paradigm 枚举去留：塌缩为固定 validate（choice-only + 强制 KD + 权重继承下 finetune 的主要论据已死，仅 cross-dataset 场景存活）还是保留 [validate, finetune] 二值？影响 psu_search_pipeline 的 evaluator 数据加载配置分支。",
+    "optimizer/scheduler 是否仍从用户项目移植（checklist Item 12 + self-check 去留）：PSU 只训变体分支，用户 optimizer 超参（为全模型调的）未必适配；可选 '固定默认（如 AdamW）+ 暴露 CLI' 或 '沿用移植'。",
+    "训练预算默认倍数：3× sandwich 规则失效后，变体分支 KD 蒸馏的默认预算（1× 原项目？独立步数默认？）需要定一个可写进 checklist 的机械规则。",
+    "训练期 eval 协议：评估哪些路径（全 original sanity + vanilla + N 采样？）与 best-ckpt 基准如何从这些路径聚合——直接决定 checklist Item 20/25 改写内容。",
+    "viability 字段删除是否彻底：是否保留一个降级 gate（如 pretrained_ckpt 加载失败 → fail loud error 字段）替代原 viable 分支的兜底作用，还是完全依赖上游 expand 的 gate E。"
+   ]
+  },
+  {
+   "node": "ns3_search_pipeline（fork 目标 psu_search_pipeline）",
+   "summary": "14 个文件（跳过 __pycache__）：5 keep / 8 modify / 1 delete，约 2/3 可原样或近原样继承。改动集中三点：(1) evaluator 训练范式整体退场是最大改点——PSU 搜索期子网评估=零训练、直接 supernet 权重推理，v3 的 validate 路径恰好就是正确形状，因此改法是\"删多余路径\"而非重写：evaluator_training_loop_guide.md 整份删除，workflow 文档三范式契约、checklist 训练范式条目（14/16-20/25/26 等）、agent.md 的 paradigm override 输入与 NPU foreach 段全部退场；(2) arch_codec.py 示例需 choice-only 重写（删 depth 段/param 段/padding 机制，gene=每 slot 一个分支索引）；search_config.yaml 的框架固定键与维度无关，字段格式完全兼容，只动 evaluator_cfg 示例注释；(3) teacher 在 v3 此节点本就缺位（仅 workflow 文档 line 48 一处提及 \"KD decision\"），且 PSU 搜索期评估不需要 teacher——无需引入，只需反向加一行守卫防止把 KD loss/teacher 接进搜索目标。节点内 references/workflows/（生成契约，gen subagent 消费）与 references/workflow-checklists/（verifier 检查单，agent.md:27-28 禁 agent 读）是两种角色非镜像冗余，fork 两者都要；真正的冗余是跨代谱系（nas-search-pipeline→ns→ns2→ns3 四份近拷贝，fork 将成第五份），属既定 fork 约定，固定框架 nas_agent/search/ 是引用非拷贝，结构健康。",
+   "files": [
+    {
+     "path": "workflows/agents/ns3_search_pipeline/agent.md",
+     "verdict": "modify",
+     "change": "① 删 lines 77-79 evaluation paradigm override 输入（validate/finetune/train_from_scratch 枚举）——PSU 钉死零训练 validate；② lines 328/470-472 fidelity 模板与 supernet_summary 更新中的 paradigm 选择叙事改为固定值；③ 删 lines 524-545 NPU foreach 整段（其适用对象是 evaluator 的 finetune/train_from_scratch 训练路径，本节点将不再生成任何训练代码）；④ 全文 ns3_train_script/ns3_run_search/ns3_run_train/ns3_retrain → psu_* 机械改名（含 lines 110-114 ckpt 契约段，契约本身 runs/train/supernet_best.pth 保留，生产者换成 psu_run_train 的 KD 训练脚本）；⑤ line 210 '5 files present' 与 check 脚本实际 6 files 对齐。其余（Step 0/0.5 编排、reuse/resume、select CLI+stdout 契约、User-Measure Authority、时延铁律、output_schema 10 字段）全部不变",
+     "evidence": "agent.md:77-79（paradigm override 三枚举）、:328（fidelity 模板 paradigm 行）、:524-545（foreach 段以 evaluator 训练路径为适用对象）、:110-114（ckpt 跨节点契约）、:210（5 files vs 脚本 6 files）"
+    },
+    {
+     "path": "workflows/agents/ns3_search_pipeline/references/workflows/search_supernet_script_generation.md",
+     "verdict": "modify",
+     "change": "① §1 lines 82-87 布局规则（staged: depth first / isotropic: global depth first / depth-search padding 约定）替换为 choice-only 规则：gene = 每 transformer layer slot 一个分支索引基因，无 depth 段、无 padding 概念、无 branch-local param 段；② lines 89-156 两段维度枚举示例替换为分支枚举示例（{original, vanilla, random_synthesizer, relu_attention, fnet, softs_star}，ArchConfig 每 slot {'choice': ...}，config 维度钉原层值不出现）；③ §2 lines 189-204 三范式收敛为唯一 validate（零训练、set_sample_config 后直接 supernet 推理），删 line 204 对 evaluator_training_loop_guide.md 的引用；④ §3 lines 243-256 evaluator_cfg 范式矩阵删 finetune/scratch 两支（budget/scheduler/save_dir 段全删）；⑤ line 296 预算-超参 coherence 校验子句删（保留 val 预算缩减子句）；⑥ line 48 'KD decision' 改为常量陈述（PSU 恒为 KD、teacher=原模型）+ 新增一行：搜索期 metric = 用户原始验证指标，KD loss/teacher 不得进入 evaluator。Dynamic Execution Principle（lines 16-27，nas_agent/search 固定框架、NSGA-II、serialize_arch 缓存）逐字保留",
+     "evidence": "search_supernet_script_generation.md:82-87（depth-first 布局规则）、:89-156（stage_depth_candidates/ffn_dim/num_heads 枚举示例）、:189-204（三范式）、:243-256（finetune/scratch evaluator_cfg）、:296（budget coherence）、:48（KD decision）"
+    },
+    {
+     "path": "workflows/agents/ns3_search_pipeline/references/workflows/measure_latency_script_generation.md",
+     "verdict": "modify",
+     "change": "仅一处实质改：line 62 stale 引用 'ns_search_pipeline/agent.md'（v1 节点名）改为 psu 节点名。其余（whole-architecture latency、非搜索动态逻辑冻结、latency_unit 只声明不换算、ONNX 单文件契约、set_sample_config/get_active_subnet 流程）PSU 全兼容——choice-only 的 ArchConfig 在这套 API 下原样工作",
+     "evidence": "measure_latency_script_generation.md:62（stale ns_search_pipeline 引用）、:34-39（get_latency 流程 PSU 不变）、:74-80（ONNX 单文件契约不变）"
+    },
+    {
+     "path": "workflows/agents/ns3_search_pipeline/references/workflow-checklists/search_supernet_script_generation.md",
+     "verdict": "modify",
+     "change": "大删 + 两处改写：① item 2（28-38）depth-first 布局断言改为 per-slot choice-index 断言；② item 3（40-45）'Depth Padding' 整条删（PSU 无 depth 搜索，用户明确点名不必要）；③ item 6（67-72）保留'单范式'检查但枚举改为唯一 validate；④ item 13（118-126）收敛为 validate 流检查 + 新增反断言：evaluator 禁出现 optimizer/scheduler/scaler/训练循环/ckpt 保存；⑤ items 14/15/16-20/25/26（128-136、138-142、144-181、220-227、229-233）整块删——均为 finetune/train_from_scratch 专属（per-candidate ckpt、reset_module、DDP/AMP/foreach/资源生命周期、范式字段矩阵、budget coherence），16 的 no-DDP 半条与 20 的 del+empty_cache 可并进改写后的 13。items 1/4/5/7-12/21-24/27-28（API/格式/导入路径/objs-latency 顺序/launcher 契约）维度无关，逐条保留",
+     "evidence": "search_supernet_script_generation.md(checklist):28-38（item2 depth 断言）、:40-45（item3 depth padding）、:67-72（item6 范式枚举）、:118-126（item13 三范式流）、:128-181（items14-20 训练范式专属块）、:220-233（items25-26）"
+    },
+    {
+     "path": "workflows/agents/ns3_search_pipeline/references/workflow-checklists/measure_latency_script_generation.md",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "measure_latency_script_generation.md(checklist):11-77 全部 9 条均为 sibling import/measure_module_latency/构造签名/arch_hash/get_latency 五步/dummy input/CLI smoke/冻结动态逻辑/API 一致性——全部 PSU 中立"
+    },
+    {
+     "path": "workflows/agents/ns3_search_pipeline/references/evaluator_training_loop_guide.md",
+     "verdict": "delete",
+     "change": "",
+     "evidence": "evaluator_training_loop_guide.md:1-3（自述仅补充 finetune/train_from_scratch）、:11-14（两范式差异）、:16-163（评估流+训练循环示例：optimizer/scheduler/AMP/reset_module/arch_info.json ckpt）、:194-211（RL/GAN/SSL 训练期辅助网）"
+    },
+    {
+     "path": "workflows/agents/ns3_search_pipeline/references/supernet_workflow_examples/arch_codec.py",
+     "verdict": "modify",
+     "change": "类 API（ArchCodec(search_space)/get_gene_space/gene_to_arch/_to_integer_gene）保留，body 重写为 choice-only：__init__ 读 PSU SearchSpace 的分支列表（如 layer_choices），gene_len=slot 数，bounds=[0, len(branches)-1]；删 depth 基因段（92-95、146-151）、param-key union 机制（73-80、105-120、170-177）、padding/active_depth 条件（163-167）、stage_depths 构造（182-184）。这是'候选集从维度枚举变 choice 枚举'的落点文件；具体字段名待 pz_expand 的 SearchSpace 契约定（见 open_questions）",
+     "evidence": "arch_codec.py:69-120（stage_block_choices/all_param_keys/stage_depth_candidates 机制）、:146-151（depth 基因解码）、:163-180（active_depth/padding/param clamp）、:182-185（stage_depths 入 ArchConfig）"
+    },
+    {
+     "path": "workflows/agents/ns3_search_pipeline/references/supernet_workflow_examples/search_config.yaml",
+     "verdict": "modify",
+     "change": "框架固定键（search_space/arch_codec/evaluator/latency_estimator/latency_cfg/objs/latency_constraint/search_log_path/concurrency/population_size/num_generations/evaluator_cfg）全部保留——候选集不活在 config 里而活在 SearchSpace+codec bounds，字段格式完全兼容。改：lines 51-53 注释（'validate/finetune' → PSU 唯一零训练 validate；supernet ckpt = KD 训练产物）；删 lines 59-63 finetune/scratch 示例字段（lr/weight_decay/epochs）",
+     "evidence": "search_config.yaml:50-63（evaluator_cfg 注释与 finetune/scratch 示例字段）、:1-46（框架固定键 PSU 不变）"
+    },
+    {
+     "path": "workflows/agents/ns3_search_pipeline/references/supernet_workflow_examples/evaluator.py",
+     "verdict": "modify",
+     "change": "validate 流（set_sample_config → supernet.eval() → 推理 → negate 返回）就是 PSU 形状，保留。改：① docstring lines 8-10 删 finetune/train_from_scratch 指针；② line 50 load_checkpoint strict=False → strict=True（PSU 静默部分继承会直接污染候选排序，且 expand 节点的 E-gate 已证明全 ckpt 可加载；前提是 psu_run_train 存全模块 state dict，见 open_questions）；③ line 67 banner 的 paradigm=validate token 可留可删（单范式）",
+     "evidence": "evaluator.py:8-10（docstring 三范式指针）、:50（load_checkpoint strict=False）、:69-93（validate 流 PSU 原样）"
+    },
+    {
+     "path": "workflows/agents/ns3_search_pipeline/references/supernet_workflow_examples/latency_estimator.py",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "latency_estimator.py:40-41（set_sample_config/get_active_subnet choice-only 下原样）、:59-79（dummy input/arch_hash/measure_module_latency/cleanup PSU 中立）；仅 line 1 docstring 'hierarchical supernets' 措辞可选更新"
+    },
+    {
+     "path": "workflows/agents/ns3_search_pipeline/scripts/generate_schema.py",
+     "verdict": "modify",
+     "change": "反射逻辑（遍历 SearchSpace 公有 list/tuple 属性 → arch_fields）choice 兼容：分支列表落 type='list' values=[分支名]，单值钉定元组落 list_of_lists（无害元数据）。改：line 46 注释示例（stage_depth_candidates → branch_choices）、line 52 FATAL 文案 'no elastic dimensions' → 'no searchable choice fields'（纯措辞）。line 75 extra_fields ['acc','params'] 硬编码为 v3 既有 wart，可顺手改为从 objs 读 metric 名（可选）",
+     "evidence": "generate_schema.py:44-49（反射逻辑 choice 兼容）、:46（dimension-era 注释）、:52（措辞）、:75（extra_fields 硬编码）"
+    },
+    {
+     "path": "workflows/agents/ns3_search_pipeline/scripts/check_search_pipeline.sh",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "check_search_pipeline.sh:13-64 全部为文件存在性/py_compile/--help/schema-arch_fields/torchrun 禁令——无维度或训练假设；line 2 注释节点名随 fork 机械改"
+    },
+    {
+     "path": "workflows/agents/ns3_search_pipeline/scripts/reuse_check.sh",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "reuse_check.sh:11-26 四工件存在性+ast.parse+YAML 校验，PSU 中立"
+    },
+    {
+     "path": "workflows/agents/ns3_search_pipeline/scripts/resume_check.sh",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "resume_check.sh:10-22 SKIP_SCHEMA/A/B/C 磁盘状态判定，PSU 中立"
+    }
+   ],
+   "gate_findings": [
+    {
+     "location": "workflows/agents/ns3_search_pipeline/references/workflow-checklists/search_supernet_script_generation.md:28-38 (item 2)",
+     "problem": "CRITICAL 校验断言 gene 布局'depth genes first（staged 每 stage 一个 / isotropic 全局一个）+ 基因长度=最大激活子网'——维度展开假设，PSU 无 depth 搜索",
+     "action": "改写为：每 transformer layer slot 一个 choice-index 基因，gene_len=slot 数，bounds=[0, |branches|-1]；'candidate index not value' 断言保留"
+    },
+    {
+     "location": "workflows/agents/ns3_search_pipeline/references/workflow-checklists/search_supernet_script_generation.md:40-45 (item 3)",
+     "problem": "'Depth Padding — Inactive Layers Ignored' 整条校验针对 depth-search 超网的 padding slot——用户明确点名：校验 depth 扩展之类的 gate 在 PSU 没必要",
+     "action": "整条删除（PSU depth 固定=原层数，不存在 inactive layer slot）"
+    },
+    {
+     "location": "workflows/agents/ns3_search_pipeline/references/workflows/search_supernet_script_generation.md:82-87",
+     "problem": "编码布局规范枚举 staged（depth first→stage 离散字段→layer 分支+param）/ isotropic（global depth first→layer）/ 'For depth-search supernets, reserve gene slots up to max depth' padding 约定",
+     "action": "替换为 choice-only 规范：单一 layer-choice 段，无 depth 段、无 padding、无 branch-local param 段（num_heads/ffn_dim 钉原层值不进基因）"
+    },
+    {
+     "location": "workflows/agents/ns3_search_pipeline/references/workflows/search_supernet_script_generation.md:89-156",
+     "problem": "两段完整示例基于维度枚举（stage_depth_candidates=((1,2),(1,2,3))、ffn_dim/num_heads 候选元组、genes_per_layer=1+2、inactive layer zeroed padding）",
+     "action": "替换为分支枚举示例：gene 每层一个索引，解码为 {'choice': branch_name}（分支集 {original, vanilla, random_synthesizer, relu_attention, fnet, softs_star, ...}），max-depth/padding 示例整段删"
+    },
+    {
+     "location": "workflows/agents/ns3_search_pipeline/references/supernet_workflow_examples/arch_codec.py:69-120,146-185",
+     "problem": "示例 codec 的 stage_depth_candidates 解码、all_param_keys union、per-stage bounds、active_depth padding、param clamp 机制全部建立在维度展开上",
+     "action": "choice-only 重写（保留类 API 与 _to_integer_gene）；字段名以 pz_expand 产出的 PSU SearchSpace契约为准"
+    },
+    {
+     "location": "workflows/agents/ns3_search_pipeline/references/workflows/search_supernet_script_generation.md:189-204 + 243-256 + 296",
+     "problem": "evaluator 三范式契约：finetune='抽取子网短训'、train_from_scratch='重初始化从头训'（from-scratch 训练假设），连带 evaluator_cfg 的 lr/epochs/scheduler/save_dir 规范与 budget-hyperparameter coherence 校验",
+     "action": "收敛为唯一 validate 范式（零训练：set_sample_config 后直接 supernet 权重推理）；删 finetune/scratch 两支全部契约与预算校验，保留 val 预算缩减子句"
+    },
+    {
+     "location": "workflows/agents/ns3_search_pipeline/references/evaluator_training_loop_guide.md:1-211",
+     "problem": "整份文档 = finetune/train_from_scratch 的训练循环实现指南（optimizer/scheduler/AMP/reset_module/per-candidate ckpt/arch_info.json）+ RL/GAN/SSL 训练期辅助网规范——from-scratch 训练假设的文档化载体",
+     "action": "整文件 delete；这是本节点最大单一改点。评估期仍有意义的极小残留（RL 项目零训练 rollout 验证需移植 env）可压缩数行并入 workflow 文档 §2 Data And Metric Semantics"
+    },
+    {
+     "location": "workflows/agents/ns3_search_pipeline/agent.md:77-79 + 328",
+     "problem": "节点输入层暴露 evaluation paradigm override（validate/finetune/train_from_scratch），fidelity 模板首行同一枚举——把'子网要不要训练'当成运行时选择",
+     "action": "删 override 输入；fidelity 模板 paradigm 行钉死 'validate (zero-training, direct supernet weight inference)'"
+    },
+    {
+     "location": "workflows/agents/ns3_search_pipeline/agent.md:524-545",
+     "problem": "NPU foreach 兼容段的适用范围自述为 'including evaluator.py\\'s finetune / train_from_scratch paths'——训练代码生成假设；PSU 本节点不再生成任何训练代码",
+     "action": "整段删除（optimizer/clip_grad 不再出现于本节点产物；上游 psu_train_script 节点自有同款规则）"
+    },
+    {
+     "location": "workflows/agents/ns3_search_pipeline/references/workflow-checklists/search_supernet_script_generation.md:128-181 (items 14,15,16-20) + 220-233 (items 25,26)",
+     "problem": "7 条 CRITICAL/MAJOR 校验限 finetune/train_from_scratch：per-candidate ckpt 三件套、train_from_scratch reset_module、DDP/AMP-grad_scaler/foreach/资源生命周期/内存清理、evaluator_cfg 范式字段矩阵、budget coherence",
+     "action": "整块删除；在改写后的 item 13 中新增反向断言：evaluator 不得出现 optimizer/scheduler/grad_scaler/训练循环/ckpt 写盘（no-DDP 与 del+empty_cache 半条并入 validate 流检查）"
+    },
+    {
+     "location": "workflows/agents/ns3_search_pipeline/references/supernet_workflow_examples/search_config.yaml:59-63 + supernet_workflow_examples/evaluator.py:8-10",
+     "problem": "示例残留：config 注释示范 lr/weight_decay/epochs（finetune/scratch 专用字段），evaluator docstring 指向 evaluator_training_loop_guide.md 三范式",
+     "action": "config 删三行示例字段；evaluator docstring 改为单一零训练验证说明"
+    },
+    {
+     "location": "workflows/agents/ns3_search_pipeline/references/workflows/search_supernet_script_generation.md:48",
+     "problem": "teacher 缺位假设的唯一直接痕迹：从 supernet_summary.md 读 'KD decision'（当作上游可能为 No 的决策）。PSU 下 KD 恒为 Yes（teacher=原模型），且需明确 teacher 只存在于 train/retrain——搜索期 evaluator 不得引入 teacher 或 KD loss",
+     "action": "改写为常量陈述 + 新增守卫行：搜索期 quality metric = 用户原始验证指标，在 choice 路径子网上直接推理计算；冻结 teacher 实例/KD loss 禁止进入 evaluator"
+    },
+    {
+     "location": "workflows/agents/ns3_search_pipeline/scripts/generate_schema.py:46,52",
+     "problem": "注释示例与 FATAL 文案为维度时代措辞（'stage_depth_candidates = [[1,2,3],[2,3,4]]'、'no elastic dimensions found'）；反射逻辑本身 choice 兼容（分支列表正常落 type='list'）",
+     "action": "纯措辞更新（示例改 branch_choices、报错改 'no searchable choice fields'），逻辑不动"
+    }
+   ],
+   "contract_changes": [
+    {
+     "item": "inputs",
+     "change": "删 evaluation paradigm override（agent.md:77-79）；其余全部保留：project_root / latency_script_path / latency_unit / target_latency / seed / input_invariants（时延铁律与 inputs 契约 PSU 不变）"
+    },
+    {
+     "item": "output_schema",
+     "change": "零字段变化：output_dir / latency_estimator_path / search_config_path / evaluator_path / run_search_script_path / select_architecture_path / fidelity_passed / workflow_verifier_passed / error / generated_artifacts 照抄"
+    },
+    {
+     "item": "agent.md 步骤",
+     "change": "Step 2 'Porting Project Logic' 收缩：porter 只移植 data/val pipeline + metric 计算（无训练语义/optimizer/scheduler 移植）；fidelity 模板 paradigm 行钉 validate；NPU foreach 段删；全文 ns3_* 节点名 → psu_*（含 lines 110-114 ckpt 契约段，runs/train/supernet_best.pth 路径本身保留，生产者换成 psu_run_train 的 KD 训练脚本）；line 210 '5 files' 对齐 check 脚本 6 files"
+    },
+    {
+     "item": "subagent 引用",
+     "change": "search-latency-gen / search-core-gen / search-select-gen 随 fork 复制到新 subagents 目录（agent.md:43-47 经 {{ subagents_root }} 解析），复制时修三处 v3 既有矛盾：search-core-gen.md:34 'multi-GPU via torchrun' 与 workflow §4 + check 脚本 torchrun 禁令冲突；search-latency-gen.md:20-24 'fixed components (stems/heads) 不计入 latency 目标' 与 whole-architecture latency 规则冲突（PSU 下 target_latency 对标原模型端到端时延，必须 whole-arch）；search-core-gen.md:31-32 'evaluator 写 search_results.jsonl' 旧叙事（实际固定框架 SearchLogger 写）。project-porter / project-fidelity-verifier / workflow-verifier / memory-verifier 直接复用"
+    },
+    {
+     "item": "routes / 下游契约",
+     "change": "不变：select_architecture.py stdout 单行 JSON（selected_arch/selected_acc/selected_latency/latency_unit/pareto_size/select_reason）与 psu_run_search 路由守卫（selected_arch truthy and pareto_size>0，勿用 is defined）逐字保留；Pareto + max-acc-under-target 结构 PSU 前提明确不变"
+    },
+    {
+     "item": "search_record_schema.json 共享契约",
+     "change": "生成机制（generate_schema.py 反射）不变；arch_fields 内容自然从维度候选变为 choice 枚举（如 branch_choices: {type: list, values: [original, vanilla, ...]}）；仍是 subagent B(evaluator/codec) 与 C(select) 的共享契约，schema authority 条款照抄"
+    }
+   ],
+   "risks": [
+    "weight-sharing 排序可靠性：PSU 分支集高度异构（fnet/relu_attention vs 标准 attention），v3 自身判据（workflow 文档 line 194：'heterogeneous block types / large capacity variance → 推荐 finetune'）在这种场景会放弃直接 validate——PSU 前提钉死搜索期零训练。缓解：KD 单路采样使每分支独立对 teacher 学过 + 冻结 original 分支提供保底候选（全 original ≈ 预训练模型精度），但若变体分支欠训，搜索排序信噪比可能塌——最大实证风险，需 E2E 实测验证",
+    "1:1 fork 会原样带入 v3 四处既有自相矛盾/stale：search-core-gen.md:34 torchrun 提示（vs 三处 torchrun 禁令）、search-latency-gen.md:20-24 fixed-components-不计-latency（vs whole-arch 规则）、agent.md:210 '5 files'（vs 脚本 6 files）、search-core-gen.md:31-32 evaluator-写-jsonl 旧叙事——fork 副本不修则 verifier 循环内耗甚至生成错误 estimator",
+    "generate_schema.py:20-26 用 exec(supernet.py) 内省 SearchSpace：要求 PSU 的 SearchSpace 保持纯数据类、模块级零副作用且构造不需 pretrained_ckpt（ckpt 只能是 SuperNet 的构造参数）——pz_expand 侧契约须保证，否则此 gate 在 PSU 上直接炸",
+    "evaluator.py:50 strict=False：PSU 下静默部分权重继承会直接污染候选排序（错排整个搜索），建议翻 strict=True；成立前提是 psu_run_train 保存全模块 state dict（含冻结参数）——跨节点确认点，未确认前翻转有反向破坏风险"
+   ],
+   "open_questions": [
+    "evaluator 是否需要显式'禁 teacher/KD loss 进入搜索目标'守卫（本审计建议在 workflow 文档 §2 加一行；还是靠 PSD 前提文档隐式约束即可）",
+    "supernet_summary.md 的 'Evaluation Paradigm' 段落：PSU 下钉死 validate 还是整个字段退出 summary 契约（归 psu_train_script / psu_expand 节点审计定，本节点只是消费方）",
+    "strict=True 翻转的前提确认：psu_run_train 的 ckpt 保存约定是否保证全模块 state dict（含冻结 original 分支与非 slot 模块）",
+    "分支集形状：所有 transformer layer slot 统一一份 branch_choices，还是 per-slot 列表（某些变体对特定层不适用）——决定 PSU SearchSpace 字段名/形状，进而决定 arch_codec 示例与 schema 反射的具体写法；由 pz_expand 的产出契约定，本节点只消费"
+   ]
+  },
+  {
+   "node": "psu_run_train (fork 自 ns3_run_train)",
+   "summary": "12 个文件（agent.md + 11 scripts）几乎全部保留：11/12 原样 keep，仅 agent.md 需改（节点改名/上游交叉引用/OOM 归因提示），launch.sh 需改 1 处硬编码 chart label（\"nas-supernet-v3/train\"）。全节点 grep 证实零维度展开校验（无 depth/num_heads/ffn_dim/candidates 断言）、零 teacher 缺位假设——progress_watcher.py 与 check_progress_contract.py 对指标名零硬编码（逐指标各推一张图，{\"step\",\"metrics\"} 契约对 KD loss + acc 完全兼容）；launch.sh/warmup_poll.sh 无 from-scratch 训练语义（launch.sh:28 续训保留 ckpt 只清 marker）。节点契约（output_schema 6 字段、failed 短路 report 的 routes、有界轮询/HEAL-LOOP 范式）结构不变，改动集中在节点名、上游引用名和工件命名联动。最大结构性注意点：本目录与 ns3_retrain/scripts 镜像 10 个共享脚本，且 marker 文件名 .ns_run_train_assessment.txt 被 ns3_report/scripts/emit_report.py:141 跨节点读取——fork 时两处联动。",
+   "files": [
+    {
+     "path": "workflows/agents/ns3_run_train/agent.md",
+     "verdict": "modify",
+     "change": "节点级改名与交叉引用，编排范式逐字保留：(1) :2 frontmatter description 与 :5 标题 ns3_run_train→psu_run_train、'nas-supernet-v3 supernet training'→PSU 表述；(2) :9 上游 ns3_train_script→psu_train_script；(3) :303/:305/:326 ns3_report→psu_report（failed 短路路由语义不变）；(4) :216 OOM 归因提示重写——'likely supernet capacity (forbidden)→failed hint' 基于 ns3 维度展开容量假设，PSU 容量由设计固定（原模型+变体分支），OOM 更可能是 teacher+supernet 显存共驻，提示改为先排查 batch/AMP/teacher co-residency 再归因；(5) :85-88/:213/:311-313 禁碰清单工件名（supernet.py/project_manifest.md/supernet_summary.md）对齐 PSU flatten/expand 产物名（若沿用同名则零改）；(6) :56/:58/:60/:89/:214/:237-239/:282 marker 名 .ns_run_train_* 随全局命名决策联动；(7) :84/:211 训练逻辑白名单 'loss/optimizer/sampling/KD/data pipeline in train_supernet.py / evaluator.py' 保留（KD 在 PSU 是核心，已天然在列，可选把 KD 细化为 hidden cosine + logits KL + teacher 冻结表述）。有界轮询/HEAL-LOOP/铁律/Step 决策树全部逐字保留。",
+     "evidence": "agent.md:2,5,9,84,216,303; 禁碰清单 agent.md:86-88; marker 约定 agent.md:56-60"
+    },
+    {
+     "path": "workflows/agents/ns3_run_train/scripts/status.sh",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "status.sh:12 gate=run_train_supernet.sh 文件存在性；:27-42 ckpt 路径解析读 search_config.yaml::supernet_ckpt_path；:44-51 完成判定 rc=0+进程退出+torch.load 可读——全部与训练范式无关，纯进程/文件系统判定"
+    },
+    {
+     "path": "workflows/agents/ns3_run_train/scripts/launch.sh",
+     "verdict": "modify",
+     "change": ":35 progress_watcher 启动参数 --label \"nas-supernet-v3/train\" → PSU label（如 \"puzzle-supernet/train\"，chart 分组键，用户可见）。其余逐字保留：:28 续训保留 ckpt 只清 marker/progress.jsonl/.train_rc（无 from-scratch 语义）；:35 run_train_supernet.sh 训练命令名随全局工件命名决策（沿用则零改）；:15-19 残留进程归属门复用 kill_train_group.sh。",
+     "evidence": "launch.sh:35（唯一硬编码 workflow 身份字符串）；launch.sh:28（ckpt 保留证据）"
+    },
+    {
+     "path": "workflows/agents/ns3_run_train/scripts/health.sh",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "health.sh:18-19 主指标行匹配为结构化正则 'epoch|step n/N <name> <value>'——不依赖字面 loss，kd_loss/acc 均匹配；:23-27 发散检测对 progress.jsonl 全量指标查 NaN/Infinity（指标不可预测前提）；:6 注释引用 ns_train_script 生成契约文档仅开发者注释，可选改指 psu 版"
+    },
+    {
+     "path": "workflows/agents/ns3_run_train/scripts/warmup_poll.sh",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "warmup_poll.sh:38-42 发散检测结构化全量（progress.jsonl 优先、prose 回落）；:60-75 WARMUP_OK 判据=≥2 个进度标记+progress 契约过，指标名无关；:67 调 check_progress_contract.py；:34 sleep 240 贴 bash 上限设计不变"
+    },
+    {
+     "path": "workflows/agents/ns3_run_train/scripts/monitor_until_done.sh",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "monitor_until_done.sh:18-25 有界 9min 块/cheap 活性；:33-40 进程退出委托 status.sh；:45 NaN/error 词法 suspect（注释明示 suspect 非闸门、agent 复核兜底）；:48-53 log 停滞计数——全与训练内容解耦"
+    },
+    {
+     "path": "workflows/agents/ns3_run_train/scripts/eta.py",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "eta.py:28-38 解析 --epochs/^EPOCHS=/--max_steps/^MAX_STEPS=，与上游生成契约 EPOCHS=100 + --epochs \"$EPOCHS\"（train_supernet_script_generation.md:575,595）吻合；:39-46 回落 search_config.yaml epochs:——信息性 fail-soft，PSU 生成契约保持 launcher 参数形态即零改"
+    },
+    {
+     "path": "workflows/Orca/workflows/agents/ns3_run_train/scripts/kill_train_group.sh",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "kill_train_group.sh:27-30 cmdline 门匹配 *run_train_supernet*（工件名沿用则零改，改名必须同步此处否则残留进程不再被整组杀）；:33-39 ORCA_RUN_ID run 归属判定防跨 run 误杀——通用机制不变"
+    },
+    {
+     "path": "workflows/agents/ns3_run_train/scripts/progress_watcher.py",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "progress_watcher.py:13-15 明示指标名/种类不可预测、零硬编码 metric 名；:106-109 遍历 metrics dict 每数值项独立成图——PSU 的 kd_loss+acc 天然两张 live 图；:44-50 _REQUIRED_ENV + fail-soft 铁律不变；label 由 launch.sh 传入非脚本内硬编码"
+    },
+    {
+     "path": "workflows/agents/ns3_run_train/scripts/check_progress_contract.py",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "check_progress_contract.py:5-6 契约 '每行={step:number, metrics:{name:number}}'——只约束结构不约束指标名，KD 指标直接兼容；:34-37 _is_number 排除 bool；:47-93 fail-loud 逐行校验（step/metrics/数值）与训练范式无关"
+    },
+    {
+     "path": "workflows/agents/ns3_run_train/scripts/emit_result.py",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "emit_result.py:102-107 status 推导（skipped/executed/failed）纯文件系统判定；:80-94 ckpt 解析 marker 优先+search_config.yaml::supernet_ckpt_path 回落；:115-126 输出 6 字段与 yaml output_schema 逐字对齐（nas-supernet-v3.yaml:188-204）；:52-59 torch.load 兼容 {state_dict:...} 包装与裸 state_dict 两种形态"
+    },
+    {
+     "path": "workflows/agents/ns3_run_train/scripts/update_status_md.sh",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "update_status_md.sh:14-39 epoch 从 log 用 '(?:epoch|step)[^0-9]*([0-9]+)' 重算（与训练内容解耦）；:41-52 train_status.md 跨唤醒真相源结构不变；标题行含 ns_run_train 字样仅为 md 内容措辞，可选改 psu"
+    }
+   ],
+   "gate_findings": [
+    {
+     "location": "workflows/agents/ns3_run_train/agent.md:107",
+     "problem": "'resume (re-run the script; resume if supported, otherwise from scratch)' —— from-scratch 措辞出现在收敛保证段。非 from-scratch 训练范式假设（是续训失败的重启回落，语义委托给生成脚本），PSU 下 KD 重启（重载 pretrained + 重初始化变体分支）同样成立，不构成 gate",
+     "action": "保留语义；可选把 'from scratch' 措辞改为 'cold restart' 避免与 from-scratch 训练范式混淆（纯措辞，非必改）"
+    },
+    {
+     "location": "workflows/agents/ns3_run_train/agent.md:150",
+     "problem": "Step 3 引言同款 'resumes from ckpt if supported, otherwise from scratch' —— 同上，脚本委托语义",
+     "action": "保留（同 :107 处理）"
+    },
+    {
+     "location": "workflows/agents/ns3_run_train/agent.md:217",
+     "problem": "HEAL-LOOP 第 4 步 'resume preferred: continue from ckpt if the script supports it, otherwise from scratch' —— 同上；PSU 续训语义 = 从 supernet ckpt 恢复变体分支参数 + teacher/pretrained 常量重载，由 psu_train_script 生成物保证，本节点无假设",
+     "action": "保留（同 :107 处理）"
+    },
+    {
+     "location": "workflows/agents/ns3_run_train/agent.md:216",
+     "problem": "OOM 自愈归因提示：'shrinking batch=1 + ckpting + AMP still not relieved → likely supernet capacity (forbidden) → failed hint'。该归因基于 ns3 维度展开超网容量不可治愈的前提；PSU 容量由设计固定（原模型 + 冻结非 slot 模块 + 变体分支），OOM 根因更可能是 teacher+supernet 双驻显存或 batch/AMP 配置——沿旧提示会把可愈的显存问题误判为 failed",
+     "action": "重写该行提示：先排查 teacher 显存共驻（no_grad/eval/共享 embedding）、batch/grad-accum/AMP；capacity 归因降级为最后假设（PSU 下若确属分支数容量问题，根因在 psu_train_script 生成契约而非本 run 可愈）"
+    },
+    {
+     "location": "workflows/agents/ns3_run_train/scripts/monitor_until_done.sh:45",
+     "problem": "词法 suspect 扫描 '(nan|inf|overflow|out of memory|cuda error|runtime error|traceback|exception|error:)' —— 非维度/from-scratch/teacher 类 gate，但 PSU 指标若命名含 error（如 kl_error:/hidden_cos_error）会被词法误报 TRAIN_STUCK。设计上 suspect 非闸门（agent.md C-loop *STUCK* → 复核后判慢 epoch 可继续），有 agent 复核兜底",
+     "action": "保留脚本不动；在 psu_train_script 生成契约里约束日志指标行避免裸 'error:' 词形（或在 agent.md C-loop 分支注明 KD 指标名含 error 时以复核为准——现有 *STUCK* double-check 分支已覆盖，零改可选）"
+    },
+    {
+     "location": "（维度展开专项·阴性结论）workflows/agents/ns3_run_train/ 全部 12 文件",
+     "problem": "无任何基于 depth/num_heads/ffn_dim/candidates 的校验、断言、schema 约束或示例字段（grep depth|num_heads|ffn|dim|candidate 零命中，唯一 head 命中是 progress_watcher.py:121-122 argparse help 'dedup dimension' 指图表去重维度，与搜索维度无关）",
+     "action": "无需删除任何维度类 gate——执行节点与搜索空间解耦的前提在 ns3 已成立，PSU 直接继承"
+    }
+   ],
+   "contract_changes": [
+    {
+     "item": "output_schema（psu yaml）",
+     "change": "6 字段（status/artifacts/assessment/max_retries_hit/healed_files/fidelity_retriggered）原样保留，enum 与语义不变；descriptions 可把 'supernet 训练' 表述换成 PSU（choice-only KD 蒸馏）语境，纯文案"
+    },
+    {
+     "item": "routes（psu yaml）",
+     "change": "结构不变：executed|skipped → psu_run_search；catch-all → psu_report（failed 短路正确归因 train_failed）。只换节点名"
+    },
+    {
+     "item": "agent.md 上游引用",
+     "change": "ns3_train_script→psu_train_script（:9）；ns3_report→psu_report（:303/:305/:326）；{{ inputs.project_root }} 等输入引用不变（PSU 新增 pretrained_ckpt input 本节点不直接消费——train 脚本消费、E-gate 在 expand 已锁，无需引用）"
+    },
+    {
+     "item": "subagent 引用",
+     "change": "{{ subagents_root }}/project-fidelity-verifier.md（:47/:231）形式不变，但需在 subagents/puzzle-supernet/ 部署 PSU 版 verifier——语义从 '与原项目训练语义漂移' 改写为 '与 KD 蒸馏语义漂移（teacher 冻结、只训变体分支、hidden cosine+logits KL）'；未部署时 agent.md:236-237 已有 '不假装运行、assessment 记录' 兜底"
+    },
+    {
+     "item": "跨节点 marker 契约",
+     "change": ".ns_run_train_assessment.txt 被 ns3_report/scripts/emit_report.py:141 读取作 final_metrics——PSU fork 若改名 marker 前缀必须同步 psu_report/emit_report.py；沿用则零改（见 open_questions 命名决策）"
+    },
+    {
+     "item": "工件名契约（沿用则零改）",
+     "change": "run_train_supernet.sh（status.sh:12/launch.sh:35/kill_train_group.sh:28/eta.py:25）、search_config.yaml::supernet_ckpt_path（status.sh:34/emit_result.py:88）、runs/train/supernet_best.pth 默认值（status.sh:30/emit_result.py:83）、runs/train/progress.jsonl（launch.sh:28 等）——均为 psu_train_script/psu_search_pipeline 生成物名，命名决策需全链一致"
+    },
+    {
+     "item": "psu_train_script 生成契约需保形的 3 个消费点",
+     "change": "(1) launcher 参数 EPOCHS=/--epochs 形态（eta.py:28-38 解析，否则 ETA unknown——fail-soft）；(2) progress.jsonl 每进度单元一行 {step,metrics}（check_progress_contract.py 契约+warmup OK 判据）；(3) prose 进度行 'epoch|step n/N <metric> <value>' 形态（health.sh:19/warmup_poll.sh:49 的兜底正则，KD 指标名天然兼容只要保持该行形）"
+    }
+   ],
+   "risks": [
+    "镜像同步负担：本目录与 ns3_retrain/scripts 近逐字镜像 10 个共享脚本（diff 证实仅 TRAIN_→RETRAIN_ 词形+env var 名差异），PSU fork 为 psu_run_train+psu_retrain 双拷贝——任何脚本修复必须双写，漏一边产生静默行为漂移（结构性冗余，1:1 fork 前提下继承，不建议此时抽象共享）",
+    "工件改名不彻底的破坏点：若 PSU 改训练脚本名而漏改 kill_train_group.sh:28 cmdline 门（*run_train_supernet*），残留进程将不匹配门 → exit 0 不杀 → 孤儿训练 + 重复 detach（破坏铁律 6），且无报错静默发生",
+    "monitor_until_done.sh:45 词法 error 扫描对 PSU 指标名含 error 词形（kl_error 等）会误报 TRAIN_STUCK——已有 agent 复核兜底，但 psu_train_script 生成契约应约束指标行词形，避免每轮 C-loop 都进复核分支浪费轮询块",
+    "status.sh:44-51/emit_result.py:104 完成判定的 torch.load 在训练机上每 60s 不执行（monitor cheap 路径已避开），但进程退出瞬间会 load 全量 supernet ckpt——PSU ckpt 含 ChoiceLayer 多分支参数体积更大，退出判定的 load 耗时增加属可接受（一次性）"
+   ],
+   "open_questions": [
+    "PSU 工件与 marker 命名全局决策：沿用 ns3 名称（run_train_supernet.sh / train_supernet.py / supernet.py / search_config.yaml::supernet_ckpt_path / supernet_best.pth / .ns_run_train_* markers / runs/train/）还是全套 psu_*？推荐沿用（1:1 fork 最小漂移，本节点 7 个脚本+agent.md+psu_report/emit_report.py 零联动改），代价是 artifacts 里残留 ns 字样；若改需一次性同步 kill_train_group.sh:28、status.sh、launch.sh、eta.py、emit_result.py、agent.md、psu_report",
+    "PSU 版 project-fidelity-verifier 的归属与改写深度：run_train 只引用 {{ subagents_root }}/project-fidelity-verifier.md，verifier 语义改写（KD/teacher 冻结/只训变体分支的漂移判定）应落在 subagents/puzzle-supernet/ 的 fork 审计里——需指定负责节点（建议随 psu_train_script 或独立 subagents 审计）",
+    "agent.md:216 OOM 归因提示重写程度（本审计标为 modify 必改项）：是否连带把 'supernet capacity (forbidden)' 说法改为指向 psu_train_script 生成契约的 capacity 规划问题，需与 psu_train_script 审计员对齐措辞"
+   ]
+  },
+  {
+   "node": "psu_run_search（源节点 ns3_run_search）",
+   "summary": "该节点是\"执行 + select + 图表\"层，与 PSU 五条变化轴几乎完全正交：搜索轮询/自愈骨架（resume_guard/Step 2 detach-poll/precheck/reuse_check）、select 结构（max-acc-under-target）、emit 契约（12 字段）、3 张图表全部经 search_record_schema.json / search_config.yaml objs 做 schema 发现，不感知 depth/num_heads/ffn_dim——12 个文件 7 个可原样保留（~70% keep，delete 0）。真正的语义伤员只有 1 个：full_supernet_latency.py 的\"full-open = 每段最大深度 + 每个弹性维全开\"定义（轴 A 直接杀死，且若不改，fail-soft 会让 PSU 里默认 all-original 路径的时延被错标为\"全开超网时延\"静默流入 compare_table）。其余改动集中在 ns3→psu 引用改名（agent.md/precheck/push_charts）、agent.md 禁碰清单补 pretrained_ckpt、search_table.py 文档示例刷新。teacher/from-scratch 假设在本节点为零（grep 全目录仅 full_supernet_latency 的 depth 叙述命中；KD/蒸馏/teacher 零命中）——run_search 在搜索期直接评候选子网，teacher 天然不进场。目录级冗余说明：_common.py 是 ns/ns2/ns3 六目录 + ns*_expand_supernet 镜像的 byte-identical 副本（tests/workflows/test_ns_chart_scripts.py:1207-1224 SPEC E1 门禁），PSU 应作为第 4 份镜像加入该集合；full_supernet_latency.py 同受跨版本 byte-identical 门禁（同测试 :1241-1244），PSU 改语义后必须显式决定测试集合归属，不能无声分叉。",
+   "files": [
+    {
+     "path": "workflows/agents/ns3_run_search/agent.md",
+     "verdict": "modify",
+     "change": "① 全部节点引用改名：L9/L10 ns3_search_pipeline→psu_search_pipeline、L29 ns3_retrain→psu_retrain、L42/L220-222 ns3_run_train→psu_run_train、L119/L282/L328-329 ns3_report→psu_report、L249 Context 字符串；② 禁碰清单（L36-39、L313-315）增补 inputs.pretrained_ckpt 指向的预训练权重文件为 read-only（PSU 新输入，用户权重绝不可写）；③ 行为标记文件名 .ns_run_search_* 是否随 fork 改名待定（若改名必须与 precheck.sh/reuse_check.sh/emit_result.py 四处原子同步）；④ Step 2.7 说明（L267-277）按 full_supernet_latency.py 的去留决定是否仍称'3 图 + full-supernet 测量'。执行/轮询/自愈/Step 2.5 fidelity/Step 2.8 select 全部步骤结构不动，白名单文件名（evaluator.py/arch_codec.py/search_supernet.py/run_search_supernet.sh/search_config.yaml）不变。",
+     "evidence": "agent.md:9,29,42,220,249,276,292,328; 禁碰清单 :36-39,313-315"
+    },
+    {
+     "path": "workflows/agents/ns3_run_search/scripts/_common.py",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "_common.py:380-435 discover_metric_info（search_config.yaml objs + records 驱动，无维度假设）; :336-367 discover_latency_unit（schema 键驱动）"
+    },
+    {
+     "path": "workflows/agents/ns3_run_search/scripts/pareto.py",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "pareto.py:44-132（读 jsonl + CLI 传 selected 坐标 + 方向发现；无 arch 字段假设）"
+    },
+    {
+     "path": "workflows/agents/ns3_run_search/scripts/latency_dist.py",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "latency_dist.py:38-88（latency 路径 schema 发现 + NaN/全 0 诊断分支，choice-only 下直方图可能聚少数 bin，属数据形态非脚本缺陷）"
+    },
+    {
+     "path": "workflows/agents/ns3_run_search/scripts/search_table.py",
+     "verdict": "modify",
+     "change": "仅文档/示例刷新，逻辑不动：_arch_digest 渲染器对 {slot: [{choice, config}]} 通用（PSU 下 config 钉死为空 → 渲染成 'slot0: original; slot1: vanilla'，天然兼容）；改 L207-209 docstring 中 'arch.stage_depths / stage1: a(k3)+b' 维度展开示例为 slot-choice 示例，同步 L226-229 _arch_layer_configs_to_str 示例行。若 fork 决定图表 label 改名（nas-supernet/search→puzzle-supernet/search），L52/61/91/121/143 处 label 一并改（见 open_questions）。",
+     "evidence": "search_table.py:204-258（_arch_digest/_arch_layer_configs_to_str 通用渲染）; :207-209 docstring 维度叙事"
+    },
+    {
+     "path": "workflows/agents/ns3_run_search/scripts/full_supernet_latency.py",
+     "verdict": "modify",
+     "change": "本节点唯一语义级修改：① 删 L5-7/L148-154 的 'every stage at max depth, every elastic dim at max' + stage_depth_candidates 叙述与注释——PSU 无维度可全开；② max_arch = supernet.arch_config（默认即全开）假设死亡：PSU 超网默认 arch 大概率是 all-original（权重继承默认路径），照抄会把预训练原模型时延错标成'全开超网时延'写入 .full_supernet_latency.json（L103-106），下游 psu_retrain compare_table 拿它当上界——错且 fail-soft 无告警。改为从 choice-only search space 显式构造 per-slot 最慢分支 arch（新 SearchSpace spec 需暴露各 slot 分支或其单测时延，仍复用同一 LatencyEstimator 保时延铁律同源）；若 psu_retrain 的 compare_table 决定改用 baseline 节点的原模型实测时延作锚点，则整脚本删除（见 open_questions）。③ 测试归属：本文件现受跨版本 byte-identical CI 门禁约束，PSU 改语义后必须在 tests/workflows/test_ns_chart_scripts.py:1241-1244 显式排除或单列，不能无声分叉。",
+     "evidence": "full_supernet_latency.py:5-7,148-154（max-depth/弹性维/stage_depth_candidates）; :103-106（写入 .full_supernet_latency.json）; 消费方 agents/ns*_retrain/scripts/compare_table.py:71,146-176"
+    },
+    {
+     "path": "workflows/agents/ns3_run_search/scripts/emit_result.py",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "emit_result.py:45-60（run_search_supernet.sh 存在 + jsonl≥1 行判 executed）; :69-95（标记文件 + select 5 字段读取，无维度/teacher 假设）"
+    },
+    {
+     "path": "workflows/agents/ns3_run_search/scripts/precheck.sh",
+     "verdict": "modify",
+     "change": "L14 FATAL 消息 'ns3_search_pipeline did not produce it' → psu_search_pipeline（该文本经 .ns_run_search_assessment.txt 流入最终 assessment，错名会误导上游归因）；若标记改名决策落地，L11 的三个 .ns_run_search_* 同步改。门逻辑本身（run_search_supernet.sh 存在性 gate）PSU 不变。",
+     "evidence": "precheck.sh:11-20"
+    },
+    {
+     "path": "workflows/agents/ns3_run_search/scripts/reuse_check.sh",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "reuse_check.sh:17-41（jsonl≥1 有效行 + 进程死 + .search_rc 存在 → REUSE，并补推 3 图；纯状态判定无搜索空间假设）"
+    },
+    {
+     "path": "workflows/agents/ns3_run_search/scripts/resume_guard.sh",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "resume_guard.sh:11-24（.search_pid 存活 → RESUME_SEARCH / 否则 RESUME_HEAL，N 独立计算；纯进程状态机）"
+    },
+    {
+     "path": "workflows/agents/ns3_run_search/scripts/select.sh",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "select.sh:13-25（调上游生成的 select_architecture.py --target-latency/--latency-unit/--search-results + 失败写 null 哨兵；PSU 前提明确保留 Pareto + max-acc-under-target select 结构）"
+    },
+    {
+     "path": "workflows/agents/ns3_run_search/scripts/push_charts.sh",
+     "verdict": "modify",
+     "change": "L15-17 第 4 个调用（full_supernet_latency.py）随该脚本去留联动：重定义则保留调用原样、仅把注释里 ns3_retrain 改 psu_retrain；删除则删掉该调用块，本文件退化为纯 keep。前 3 个图表调用不变。",
+     "evidence": "push_charts.sh:12-17"
+    }
+   ],
+   "gate_findings": [
+    {
+     "location": "workflows/agents/ns3_run_search/scripts/full_supernet_latency.py:148-154",
+     "problem": "max_arch = supernet.arch_config 依赖『超网默认 arch_config = 全开最大架构（每段 max depth + 首选 max config）』+ 注释直接引用 SearchSpace.stage_depth_candidates——纯维度展开假设。PSU 无 depth_candidates、num_heads/ffn_dim 单值，ChoiceLayer 容器默认路径大概率是 all-original（权重继承默认），照抄会把原模型时延错标为'全开超网时延'且 fail-soft 静默无错。",
+     "action": "重定义 max_arch 为从 choice-only SearchSpace 显式构造的 per-slot 最慢分支 arch（仍走同一 LatencyEstimator 保时延同源）；或若 psu_retrain compare_table 改用 baseline 原模型实测时延作对比锚点，则整脚本删除并同步删 push_charts.sh L15-17 调用。"
+    },
+    {
+     "location": "workflows/agents/ns3_run_search/scripts/full_supernet_latency.py:5-7",
+     "problem": "docstring 定义 'fully-expanded supernet — every stage at max depth, every elastic dim at max'——维度展开叙事，PSU 语义下不存在该概念。",
+     "action": "随上一条一并改写为 choice-only 语义（上界 = 每 slot 最慢分支）或随脚本删除。"
+    },
+    {
+     "location": "workflows/agents/ns3_run_search/scripts/search_table.py:207-209",
+     "problem": "docstring 示例引用 arch.stage_depths / 'stage1: a(k3)+b' 维度展开形态（仅文档叙事，运行时渲染器对 slot-choice 记录通用兼容，非断言）。",
+     "action": "示例改为 'slot0: original; slot1: vanilla' 形态，逻辑零改动。"
+    },
+    {
+     "location": "workflows/agents/ns3_run_search/（全节点 grep depth|num_heads|ffn|teacher|distill|scratch）",
+     "problem": "teacher 缺位 / from-scratch 训练假设：零命中——本节点搜索期直接评候选子网（RC=0 + jsonl≥1 行为唯一 gate），与 KD teacher 无耦合，PSU 下无需新增 teacher 相关校验。",
+     "action": "无需行动（正向确认，非缺陷）；唯一残留维度假设即上两条 full_supernet_latency。"
+    }
+   ],
+   "contract_changes": [
+    {
+     "item": "workflow yaml 节点定义",
+     "change": "ns3_run_search → psu_run_search（name/agent 字段）；上游路由条件不变（psu_run_train status ∈ {executed, skipped} → psu_run_search）；出边条件原样保留：`selected_arch and pareto_size > 0` → psu_retrain_script，catch-all → psu_report（nas-supernet-v3.yaml:249-252）。"
+    },
+    {
+     "item": "output_schema（12 字段）",
+     "change": "字段名/类型/enum 全部不变（status/artifacts/assessment/max_retries_hit/healed_files/fidelity_retriggered + selected_arch/selected_acc/selected_latency/latency_unit/pareto_size/select_reason）；仅 selected_arch 的 description 更新为『选定子网 per-slot 分支 choice 向量（维度固定为原层实测值）』；select_reason enum [max-acc-under-target, pareto-knee, none] 不变。"
+    },
+    {
+     "item": "agent.md 步骤",
+     "change": "Step 0/1/2/2.5/2.6/2.8 步骤结构零变化；Step 2a-2c 自愈白名单两层（pure-patch vs 搜索/评估逻辑）保持；改动仅：上游节点名 ns3_*→psu_*（L9/29/42/119/220/249/282/328）、禁碰清单增补 pretrained_ckpt 权重文件只读、Step 2.7 文案按 full_supernet_latency 去留微调、标记文件名按改名决策。"
+    },
+    {
+     "item": "subagent 引用",
+     "change": "{{ subagents_root }}/project-fidelity-verifier.md 引用与 point-to-file 协议原样保留；白名单点名文件（evaluator.py/arch_codec.py/search_supernet.py）与上游产物名（run_search_supernet.sh/search_config.yaml/select_architecture.py/search_record_schema.json/latency_estimator.py/inspect_supernet.py）假定 psu_search_pipeline 1:1 同名产出——需与该节点审计结论对表。"
+    },
+    {
+     "item": "artifacts 子树",
+     "change": "$ORCA_ARTIFACTS_DIR 根从 <project_root>/artifacts/nas-supernet-v3/ 换成 puzzle-supernet 命名子树 → 与 ns3 产物天然隔离，reuse_check 首跑必 NO_REUSE（预期行为），.ns_run_search_* / .nas-supernet_charts.jsonl 标记不会跨 wf 冲突。"
+    },
+    {
+     "item": "CI byte-identical 门禁",
+     "change": "tests/workflows/test_ns_chart_scripts.py:1207-1224（_common.py 六目录镜像）与 :1241-1244（full_supernet_latency.py 跨版本）需显式决定 psu_run_search 是否入集：_common.py 入集（keep 结论支持）；full_supernet_latency.py 因语义修改必须排除或单列。"
+    }
+   ],
+   "risks": [
+    "标记文件改名若只改部分文件会静默丢审计字段：precheck.sh:11 清理旧名、emit_result.py:69-72 读旧名 → agent.md 写新名时 healed_files/fidelity_retriggered 变空数组且无任何报错（违反 fail loud 精神）。改名必须 agent.md + precheck.sh + reuse_check.sh + emit_result.py 四处原子落地。",
+    "full_supernet_latency.py 若原样照抄进 PSU：脚本对 PSU 超网大概率仍能跑通（fail-soft 兜底一切异常），但产出的是 all-original 路径时延、标成 'full supernet latency' 进 psu_retrain compare_table 当上界——错值无告警，是最典型的静默错误。",
+    "启动器名耦合链：precheck.sh:13 的存在性 gate、emit_result.py:54 的 executed 判定、agent.md Step 2a 的执行命令三处硬编码 run_search_supernet.sh——一旦 psu_search_pipeline 改了生成脚本名，三处必须同步，否则节点永远 failed（fail loud，可定位，但浪费轮次）。",
+    "choice-only 下候选时延可能大量同值（维度钉死 → 分支间时延差是唯一来源），latency_dist 直方图与 Pareto 前沿可能退化（少数 bin / 小前沿）；现有诊断分支只覆盖全 sentinel/全 0.0，不覆盖'合法但高度聚簇'，属可接受的数据形态而非缺陷，但 Step 2.6 软判断的示例文案（'640 candidates, Pareto front size 12'）对新空间分布无参照意义。"
+   ],
+   "open_questions": [
+    "full_supernet_latency 的 PSU 语义拍板：A) 重定义为 per-slot 最慢分支上界（本节点改 full_supernet_latency.py + push_charts.sh 保留调用）；B) 删除（对比锚点改用 baseline 节点已实测的原模型时延，psu_retrain compare_table 同步去行）。推荐 A——保留『同一 LatencyEstimator 实测』的时延铁律同源性，且对用户有'最差 choice 组合有多慢'的直观价值；但需 psu_expand_supernet 的 SearchSpace spec 暴露 slot→分支清单。",
+    "行为标记与图表 label 命名：.ns_run_search_* 标记名与 'nas-supernet/search' chart label 是否随 fork 改名（psu_* / puzzle-supernet/search）？保留 = 脚本字节不动、跨版本镜像策略零成本；改名 = 可读性/产品一致性更好但触碰 4+3 个文件。倾向：标记名改名（agent.md 本来就要重写）、chart label 保留（_common.py 字节不动，前端分组键稳定）。",
+    "PSU 搜索期评估器指标定义：候选子网直接测任务指标（teacher 不进场，本节点零改动，推荐）还是 KD-aware 评估（学生质量需 teacher 参与则搜索脚本语义变化波及本节点 Step 2.6 文案与 warmup 健康检查描述）？属 psu_search_pipeline 设计决策，需对表。"
+   ]
+  },
+  {
+   "node": "retrain_script (源 workflows/agents/ns3_retrain_script → fork 目标 psu_retrain_script)",
+   "summary": "6/6 文件保留，0 删除，1 keep + 5 modify：编排骨架（verifier 双闭环、porter 委派、progress.jsonl/final-ckpt 契约、launcher 卫生 gate）1:1 成立，不动。改动集中三处：(1) strategy 确定性二进制塌缩——PSU 前提 D 已把 retrain 钉死为 finetune-from-supernet + 冻结 teacher KD，train-from-scratch fallback 语义上不成立（丢弃前提 B 权重继承与前提 C 蒸馏，等于退回 v3 范式；若选中路径恰为全 original，from-scratch 等于从随机初始化重训父模型），应改为缺 ckpt 即 fail loud；(2) 冻结 teacher KD 注入——workflow §8 明文 \"no KD\" 且训练循环模板无 teacher forward，fidelity 模板断言 user loss 逐字保留，均与前提 D 冲突，需加 teacher 构造/冻结/KD loss（镜像 psu_train_script 实现）+ designed-deviation 声明；(3) teacher ckpt 接线——CLI/launcher/reuse/静态 gate 均无 --teacher_ckpt/TEACHER_CKPT/finetune.py 强制存在。无任何维度展开 gate 需删（本节点唯一 depth/width 出现处是反硬编码断言，仍有效）。",
+   "files": [
+    {
+     "path": "workflows/agents/ns3_retrain_script/agent.md",
+     "verdict": "modify",
+     "change": "① L183-198 Strategy Decision 二进制塌缩：删 train-from-scratch 分支，改为常量 finetune-from-supernet + 冻结 teacher KD；supernet ckpt 缺失/viable=No → fail loud（error 字段），不再 fallback。② L156-160 Step 0 reuse 的策略推导行「finetune.py present → finetune-from-supernet; absent → train-from-scratch」删掉 absent 分支，并要求 reuse 覆盖 finetune.py。③ L113-142 User-Paradigm 铁律加 PSU 豁免：训练 loss 由冻结 teacher KD（hidden cosine + logits KL，前提 C/D）替换 user 原监督 loss，为声明的 designed deviation；user 范式权威保留于 eval metric（逐字 port 不变）/数据流/optimizer/scheduler。④ L242-251 fidelity 模板：L243 loss 行加 KD 豁免、L245 策略行改单值并新增 teacher 行（teacher=pretrained 原模型实例、冻结、loss 镜像 train_supernet 侧实现），否则 fidelity verifier 会把 KD 判为 loss drift。⑤ L68-77 Required Inputs 增 teacher 来源（{{ inputs.pretrained_ckpt }} + 上游已 port 的原模型构建 artifact）；L76-77 {{ ns3_run_search.output.selected_arch }} → {{ psu_run_search.output.selected_arch }}，语义注明为 per-slot choice dict（前提 A）。⑥ L171-175 evaluator.py/train_supernet.py「only when viable」→ 恒读（KD loss 镜像来源）。⑦ L354/L367-369 output JSON：retrain_strategy enum 删 train-from-scratch；strategy_reason 改记 ckpt+teacher 存在性证据。⑧ L2/L7-13 节点自述文案同步（策略决定→KD finetune+teacher 载入）。sub-agent 四件套（project-porter/fidelity/workflow/memory-verifier）与调用协议不动。",
+     "evidence": "agent.md:183-198（strategy 二进制）, agent.md:156-160（reuse 推导）, agent.md:120/136-138（loss 逐字+禁改 loss 公式）, agent.md:243/245（fidelity 模板）, agent.md:76-77（ns3_run_search Jinja）, agent.md:354/367-369（enum）, agent.md:174-175（only when viable）"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain_script/references/workflows/retrain_script_generation.md",
+     "verdict": "modify",
+     "change": "改动最重的文件。① L7-21 Strategy Decision 全节（本 workflow 的 spine）塌缩：删 L18-19 双分支定义，替换为常量策略 + ckpt 缺失 fail loud；strategy_reason 语义同步。② L61-62 CLI：--supernet_ckpt 由策略条件改为恒存在，新增 --teacher_ckpt（默认渲染 {{ inputs.pretrained_ckpt }}）；不引入 --kd_warmup_* 系参数（v3 warmup 理由是 sandwich 共享权重 teacher 早期未训练，PSU 冻结 teacher 从 step 0 即训练好，见 risks）。③ L27-38 Source Evidence 增 teacher 构建来源；L32 train_supernet.py「present only when viability is Yes」改恒存在（KD loss 镜像源）。④ L174-207 §5：SELECTED_ARCH 注明 per-slot choice dict；L202-207 策略分叉删 train-from-scratch 半段，finetune.py 职责扩展为「subnet 继承 + teacher 实例化/冻结 + KD loss seam」。⑤ L215-217 budget 规则删策略二分（只留 moderate finetune budget）。⑥ L270-301 §8 核心翻转：L270 「no sandwich sampling, no KD」→「fixed subnet + 冻结 teacher KD（与 supernet 训练同一 loss）」；循环模板加 teacher no_grad forward + kd_loss 调用；可训练参数集（全子网 vs 沿续 freeze 分组）见 open_questions。⑦ L329-338 launcher skeleton：删「for train-from-scratch drop SUPERNET_CKPT」注释，增 TEACHER_CKPT 变量。⑧ L380-386 验证：L384 strategy coherence 塌缩为文件集恒定校验；L386 smoke test 增 teacher forward + KD loss 计算。",
+     "evidence": "retrain_script_generation.md:7-21, 61-62, 174-207, 215-217, 270（'Retrain trains **one fixed subnet** (no sandwich sampling, no KD)'）, 272-300（模板无 teacher）, 329/338, 383-386"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain_script/references/workflow-checklists/retrain_script_generation.md",
+     "verdict": "modify",
+     "change": "与 workflow 文档成对锁步更新：① Item 1（L20-22）：--supernet_ckpt「iff finetune-from-supernet」→ 恒存在；新增 --teacher_ckpt 必需断言；L22 anti-pattern 删 from-scratch 案例。② Item 2 Strategy Coherence（L24-29）整项塌缩，改写为 KD Coherence：teacher 从 pretrained ckpt 构造、requires_grad_(False)+eval、forward 在 no_grad 下、KD loss 与 train_supernet.py 镜像一致、best-ckpt 仍按 user metric 选。③ Item 4（L39-44）：删 train-from-scratch 再初始化半段，保留 finetune 继承断言。④ Item 27（L196）：删「train-from-scratch uses a full budget」策略二分。⑤ Item 28（L209）：SUPERNET_CKPT 由条件改恒存在 + 增 TEACHER_CKPT 变量断言。⑥ Item 3（L34-36）SELECTED_ARCH 语义注释改 per-slot choice dict（断言本身保留——反硬编码仍有效）。其余 20+ 项（DDP/rank-gate/checkpoint/progress.jsonl/launcher 卫生）不动。",
+     "evidence": "retrain_script_generation.md(checklist):20-22, 24-29, 39-44, 196, 209, 34-36"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain_script/scripts/check_retrain_script.sh",
+     "verdict": "modify",
+     "change": "轻改：① L5-6 注释「finetune.py is conditionally generated (finetune-from-supernet strategy only) and may be absent」→ 恒生成；L26-32 条件 py_compile 改为强制存在+编译（策略常量后 finetune.py 是 teacher/KD seam，缺失即不完整产物集）。② L66-68 「Either retrain.py or finetune.py writing progress.jsonl satisfies」可保留但建议收紧为 retrain.py 必写。③ 建议新增 §5 静态 gate（与 progress.jsonl gate 同级）：grep teacher 实例化 + requires_grad_(False)/eval + no_grad forward + KD loss 调用 token——teacher 缺位是 PSU 专属失败模式（脚本跑通但产出无蒸馏模型），值得确定性兜底。④ §2 DDP/sync_random_seed 检查不动（编排范式不变）。",
+     "evidence": "check_retrain_script.sh:5-6, 26-32, 64-82, 34-57"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain_script/scripts/check_launcher.sh",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "check_launcher.sh:20-41（AMP=false/无 torchrun/NUM_WORKERS=0/python3 retrain.py 入口——全部属于 PSU 保留的时延与 launch 铁律）"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain_script/scripts/reuse_check.sh",
+     "verdict": "modify",
+     "change": "L10-16 reuse 条件增 finetune.py 存在（+ ast.parse）——策略常量后 finetune.py 恒为权威产物之一，缺它即半套产物被误 reuse（teacher/KD seam 缺位）。L2-3 注释同步。无任何 from-scratch/维度逻辑需删。",
+     "evidence": "reuse_check.sh:2-3, 10-16"
+    }
+   ],
+   "gate_findings": [
+    {
+     "location": "agent.md:183-198（Strategy Decision）+ agent.md:354/367-369（output enum）+ nas-supernet-v3.yaml:270（schema enum）",
+     "problem": "from-scratch 训练假设：确定性二进制含 train-from-scratch fallback（viable=No 或 ckpt 缺失时触发）。PSU 前提 D 已钉死 retrain = finetune-from-supernet + 同一冻结 teacher KD；from-scratch 会同时丢弃前提 B（original 分支父权重继承）与前提 C/D（蒸馏）——选中路径含 original 分支时等于从随机初始化重训父模型已训练过的部分，且无 teacher 的纯监督训练退回 v3 范式，与 fork 存在理由矛盾。",
+     "action": "策略塌缩为常量 finetune-from-supernet（+teacher KD）；ckpt 缺失/viable=No → fail loud 写 error 字段（不静默降级）。yaml 与 agent.md 的 retrain_strategy enum 删 train-from-scratch。"
+    },
+    {
+     "location": "agent.md:156-160（Step 0 reuse 推导）+ reuse_check.sh:10-16（reuse 条件）",
+     "problem": "from-scratch 假设残留于 reuse 路径：从磁盘文件集推导策略（finetune.py 缺席 → train-from-scratch），半套产物（无 finetune.py，即无 teacher/KD seam）可被判定合格而跳过再生成。",
+     "action": "删 absent→train-from-scratch 推导；reuse_check.sh 增 finetune.py 存在性+语法为必要条件。"
+    },
+    {
+     "location": "workflows/retrain_script_generation.md:270（§8）+ :272-300（训练循环模板）",
+     "problem": "teacher 缺位假设：明文「Retrain trains one fixed subnet (no sandwich sampling, no KD)」，循环模板仅 criterion(outputs, targets) 监督 loss，无 teacher 构造/冻结/no_grad forward/KD loss——直接照抄生成的 retrain.py 会产出无蒸馏脚本，违背前提 D。",
+     "action": "§8 改写为：固定子网 + 冻结 teacher（独立 pretrained 原模型实例，requires_grad_(False)+eval+no_grad forward）+ KD loss（hidden cosine + logits KL，镜像 train_supernet.py 的 supernet-KD 实现，不自创）；teacher 构造放 finetune.py seam。"
+    },
+    {
+     "location": "agent.md:120/136-138（User-Paradigm 铁律）+ agent.md:243（fidelity 模板）",
+     "problem": "teacher 缺位假设：铁律要求 user loss 逐字保留、禁止改 loss 公式/常数，fidelity 模板首行同样断言「User loss ... taken verbatim ... changing the loss formula or constants is forbidden」——与前提 D 的 KD 替换直接冲突，project-fidelity-verifier 会把 KD loss 判为 drift，fix-loop 空转。",
+     "action": "加 PSU designed-deviation 声明行：训练 loss = 冻结 teacher KD（teacher 身份/损失形式/镜像来源），user 范式权威收缩到 eval metric（逐字 port 不变）/数据流/optimizer/scheduler；best-ckpt 选择仍用 user metric 与方向。"
+    },
+    {
+     "location": "workflows/retrain_script_generation.md:61-62（--supernet_ckpt 条件存在）+ :329/338（launcher 骨架 train-from-scratch 注释）+ workflow-checklists item 1:20-22 / item 2:24-29 / item 4:39-44 / item 28:209",
+     "problem": "from-scratch 假设贯穿 CLI/launcher/checklist：--supernet_ckpt 与 SUPERNET_CKPT 按策略条件出现、item 4 断言 from-scratch 需显式再初始化、item 2 校验文件集缺席模式、item 28 条件变量。PSU 下这些条件分支全部恒真，且无一处要求 teacher ckpt。",
+     "action": "supernet ckpt 参数恒存在；新增 --teacher_ckpt/TEACHER_CKPT 必需断言；item 2 改写为 KD Coherence（teacher 冻结+KD loss 镜像+user metric 选 best）；item 4 删 from-scratch 再初始化半段。"
+    },
+    {
+     "location": "workflow-checklists item 27:196 + workflows/retrain_script_generation.md:215-217（budget 策略二分）",
+     "problem": "from-scratch 训练假设：budget 规则按策略二分（finetune=moderate / from-scratch=full）。",
+     "action": "删策略二分，保留单条 moderate finetune budget 规则（budget 仍读原项目训练码、禁沿用 search 期缩减 budget、全量验证集）。"
+    },
+    {
+     "location": "check_retrain_script.sh:5-6, 26-32",
+     "problem": "from-scratch 假设：finetune.py 被定义为「conditionally generated (finetune-from-supernet strategy only) and may be absent」的可选编译目标——PSU 下它是 teacher/KD seam 的恒定载体，可选语义会放过半套产物。",
+     "action": "finetune.py 改为强制存在+py_compile；建议新增 teacher/KD 静态存在 gate（grep teacher 冻结与 KD loss token）。"
+    },
+    {
+     "location": "全节点（维度展开专项排查结论）",
+     "problem": "用户点名的「维度展开校验（depth/num_heads/ffn_dim 候选断言）」在本节点不存在——grep 全目录仅 checklist item 3:36 anti-pattern 提及 'layer widths/depths'，属反硬编码断言（禁止手写拓扑、必须用渲染的 selected arch dict），与维度搜索无关且 PSU 下仍必要。",
+     "action": "无需删除任何维度 gate；仅 item 3 的 SELECTED_ARCH 语义注释改为 per-slot choice dict（分支名→每 slot 选项，维度钉原层值），断言本体保留。"
+    }
+   ],
+   "contract_changes": [
+    {
+     "item": "output_schema（yaml + agent.md Output 节）",
+     "change": "retrain_strategy enum 由 [finetune-from-supernet, train-from-scratch] 收缩为 [finetune-from-supernet]（或删字段保常量语义）；strategy_reason 改为记录 supernet ckpt + teacher(pretrained) ckpt 存在性证据（兼作 fail loud 时的根因行）；其余字段（output_dir/retrain_script_path/retrain_py_path/fidelity_passed/workflow_verifier_passed/error/generated_artifacts）不变。"
+    },
+    {
+     "item": "routes",
+     "change": "结构不变：psu_run_search（selected_arch and pareto_size>0）→ psu_retrain_script → 无条件单出边 → psu_retrain（脚本存在 self-gate）。上游 selected_arch 语义变为 per-slot choice dict（每 slot 选分支名，无 depth/width 维度），本节点消费方式（Jinja 渲染 SELECTED_ARCH 字面量）不变。"
+    },
+    {
+     "item": "Required Inputs / inputs 引用",
+     "change": "新增 teacher 来源引用：{{ inputs.pretrained_ckpt }}（fork 新增 workflow input，前提 B）+ 上游产出的可 import 原模型构建产物（porter port 或复用 flatten/gate 侧产物，见 open_questions）；supernet_summary.md 的「KD decision 归 ns3_train_script」表述改为「KD 为 PSU 固定前提，train 侧只记录实现细节」。"
+    },
+    {
+     "item": "agent.md 步骤",
+     "change": "Step 1 增 teacher 来源读取（pretrained_ckpt + 原模型构建 artifact + train_supernet.py KD loss 镜像，恒读不再 only-when-viable）；Step 2 Strategy Decision 塌缩为常量+fail loud；Step 0 reuse 条件增 finetune.py；fidelity 模板增 teacher/KD designed-deviation 行。"
+    },
+    {
+     "item": "生成的 retrain 产物契约（对下游 psu_retrain）",
+     "change": "retrain.py CLI 增 --teacher_ckpt；finetune.py 由「权重继承模块」扩展为「继承 + teacher 构造/冻结 + KD loss seam」且恒生成；run_retrain.sh 增 TEACHER_CKPT 变量、SUPERNET_CKPT 恒存在；final-ckpt 契约（runs/retrain/retrain_best.pth）与 progress.jsonl 契约（每进度单位一行 {step,metrics}，user 真实 metric 名）不变。"
+    },
+    {
+     "item": "subagent 引用",
+     "change": "不变：project-porter / project-fidelity-verifier / workflow-verifier / memory-verifier 四件套及 point-to-file 调用协议；teacher 原模型逻辑经 project-porter port（或复用上游已 port 产物），自包含规则（禁 import 用户项目）不变。"
+    },
+    {
+     "item": "节点/Jinja 重命名",
+     "change": "ns3_run_search→psu_run_search（agent.md:76/229、workflow doc:174/185、checklist item 3:34）、ns3_retrain→psu_retrain（agent.md:12/105-109、workflow doc:52/248、checklist item 20:149）、ns3_train_script→psu_train_script（agent.md:86/292）等机械重命名。"
+    },
+    {
+     "item": "目录级冗余说明",
+     "change": "本节点 references/workflows/ 与 references/workflow-checklists/ 两份 retrain_script_generation.md 是有意成对文档（后者仅 workflow-verifier 消费，agent.md:29-30 禁 agent 读），非可消除冗余，但 PSU 改动必须锁步同步（checklist item 1/2/4/27/28 镜像 workflow 的 Strategy/§5/§6/Launcher 节）。跨节点：check_launcher.sh 与 ns3_train_script 的近乎相同（diff 仅参数化+入口名+train 侧多 KD warmup 块），按每节点 script 目录约定各自保留 fork 副本，不做跨节点合并。"
+    }
+   ],
+   "risks": [
+    "误抄 train 侧 KD warmup 机制：ns3_train_script/check_launcher.sh:41-49 有 KD_WARMUP_START/LENGTH≠0 硬 gate、train 文档要求 warmup≈1/4 budget——其理由（sandwich 共享权重 teacher 早期随机）在 PSU 冻结 teacher 下不成立（step 0 即训练好）；fork 时不得把 warmup 参数/gate 带入 psu_retrain_script，否则蒸馏信号被无谓延迟且 gate 语义错误。",
+    "v3 train 侧 KD 指南明令「model-agnostic final outputs only，禁止 hidden-state/feature KD」（train_supernet_script_generation.md:275）；PSU 前提 C 的 hidden cosine 与之表面冲突。fork 文档需写明豁免依据（teacher=parent 同拓扑、hidden states 逐层天然对齐、无需 adapter），否则 workflow-verifier/生成 agent 会按旧禁令拒发 hidden cosine loss。",
+    "fidelity verifier 未收到 KD designed-deviation 声明时会把 KD loss 判为 loss-formula drift → fix-loop 空转甚至把 KD 改回监督 loss（语义回退）；声明行是必改项不是可选润色。",
+    "from-scratch 判定若残留在 reuse/self-heal 路径：上游 ckpt 缺失时静默降级为无继承无蒸馏训练，产出与 PSU 目标无关的模型且节点仍报 executed——必须以 fail loud 替代 fallback（本节点 error 字段 + psu_retrain 的 max_retries_hit 语义联动）。"
+   ],
+   "open_questions": [
+    "PSU retrain finetune 的可训练参数集：全子网 finetune，还是沿续 supernet 训练的 freeze 分组（只训 variant 分支参数、original 分支持续冻结）？premise D 未钉死。注意 teacher≡原模型时训练 original 分支参数=向自身蒸馏（无信号），倾向沿续 freeze 分组，但需 design draft 裁决——影响 optimizer param groups、KD 语义与 checklist 断言写法。",
+    "teacher 实例构建来源：本节点经 project-porter 从 {{ inputs.model_path }}+pretrained_ckpt 重新 port，还是复用上游（psu_flatten / gate E 对齐检查器）已生成的可 import 原模型 artifact？后者更符合「上游产物复用」但需确认上游契约会暴露该 artifact（需与 flatten/expand 节点审计结论对齐）。",
+    "supernet 训练 viability（Yes/No）机制在 PSU 是否保留：若 PSU 恒 viable=Yes（pretrained 继承使 supernet 结构性必然存在），本节点 Step 1.1 读取 + strategy_reason 的 viability 证据可整体删除（归 psu_train_script 审计，影响此处文案）。",
+    "KD loss 实现复用路径：nas_agent.train.distillation（cosine_kd_loss + logits_kd_loss 逐层组合）是否直接满足 hidden cosine + logits KL，还是 psu_train_script 会生成项目特定 kd_loss helper 供本节点 import 镜像？决定本节点「镜像 train 侧实现」条款的具体指向。"
+   ]
+  },
+  {
+   "node": "psu_retrain (source: workflows/agents/ns3_retrain)",
+   "summary": "ns3_retrain 是纯执行节点，17/18 个文件原样可 fork（约 95% 行级保留），唯一实质逻辑改动集中在 subnet_profile.py 的 _build_arch_config（ns3 的 stage_depths+layer_configs 维度展开布局特判 → PSU choice-per-slot 布局）。该节点没有任何 depth/num_heads/ffn_dim 候选断言、没有 teacher 缺位假设——grep 全目录仅 subnet_profile.py:154-163 命中维度字段；KD 在 agent.md:79/86/227 中已被正确归为 training-logic fail-loud 边界，PSU 把 KD 变成核心范式后该边界措辞依然成立，零改动。改动第二集中点是机械改名 sweep（节点名/marker 前缀/chart label，pz fork 已有 .pz_retrain_* 先例）加 forbidden-touch 增补 pretrained_ckpt。目录级冗余说明：_common.py 在 ns 系 6 个节点目录各镜像一份、progress_watcher.py 在 5 个目录镜像，这是 repo 既有 folder-agent 自包含约定（pz fork 同样镜像），PSU 沿用镜像即可、不必抽公共库。",
+   "files": [
+    {
+     "path": "workflows/agents/ns3_retrain/agent.md",
+     "verdict": "modify",
+     "change": "改名 sweep：ns3_retrain_script→psu_retrain_script（行 2,9,14,34,70,197,227,306,322）、ns3_run_search→psu_run_search（行 50,286,289）、ns3_report→psu_report（行 313,335）、marker .ns_retrain_*→.psu_retrain_*（行 59-61,79,93,225,230,278）；铁律 5 forbidden-touch list 增 {{ inputs.pretrained_ckpt }}（行 88-93，teacher 权重只读，现规则只护 project_root 下源码）；'otherwise from scratch' 措辞改为 re-finetune from supernet init（行 113,165,233）；编排模型/铁律 1-8/HEAL-LOOP/C-loop/Step 0-4 全部原样保留",
+     "evidence": "agent.md:9,50,90-92,113,165,289"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain/scripts/_common.py",
+     "verdict": "modify",
+     "change": "CHART_MARKER '.nas-supernet_charts.jsonl' 改 psu 名（行 55；该 marker 被 ns3_report/emit_report.py:162 读取，psu_report 必须同步）；docstring 行 1 改 PSU；objs/objs.latency/Pareto/latency_unit 发现逻辑与静态渲染 fallback 原样保留（choice-only 搜索仍产同构 search_results.jsonl）；run_inspect_supernet 依赖 inspect_supernet.py 沿名（行 1041，跨节点契约）",
+     "evidence": "_common.py:55,383-435,1035-1054"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain/scripts/check_progress_contract.py",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "check_progress_contract.py:6 （{step,metrics} 契约与指标种类无关，KD 遥测同构通过；仅 docstring 引上游文档名，随全局 sweep）"
+    },
+    {
+     "path": "workflows/Orca/workflows/agents/ns3_retrain/scripts/compare_table.py",
+     "verdict": "modify",
+     "change": "chart label 'nas-supernet/comparison'→psu（行 112,130）；其余（supernet_summary.md/inspect_supernet.py/.full_supernet_latency.json 读取、NaN/overflow sentinel 过滤、四行对比表结构）原样——PSU 下 'Full Supernet vs Selected Subnet' 语义仍成立",
+     "evidence": "compare_table.py:112,130,64-74"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain/scripts/emit_result.py",
+     "verdict": "modify",
+     "change": "marker 路径 .ns_retrain_ckpt_resolved.txt/.ns_retrain_assessment.txt/.ns_retrain_exec_healed.txt→.psu_retrain_*（行 84,112-119）+ docstring 上游名（行 5,14）；JSON 七字段与 status 推导逻辑零改（output_schema 不变的前提）",
+     "evidence": "emit_result.py:84,116-128"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain/scripts/eta.py",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "eta.py:25-52 （按文件名读 run_retrain.sh/retrain.py/finetune.py 的 --epochs/--max_steps，PSU 沿用同名产物即零改）"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain/scripts/health.sh",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "health.sh:19-20 （进度行结构化匹配不依赖字面 loss/指标名，KD finetune 遥测直接适用；全文件无节点名/维度字段）"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain/scripts/kill_train_group.sh",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "kill_train_group.sh:27-29 （cmdline 归属门匹配 'run_retrain' 脚本文本 + ORCA_RUN_ID 比对，PSU 沿用 run_retrain.sh 名即零改）"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain/scripts/launch.sh",
+     "verdict": "modify",
+     "change": "chart label 'nas-supernet-v3/retrain'→psu（行 36）；marker 清理列表改名（行 29）；detach/setsid/attempt 计数/FOREIGN 归属门逻辑原样",
+     "evidence": "launch.sh:29,36"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain/scripts/metrics_bar.py",
+     "verdict": "modify",
+     "change": "chart label 'nas-supernet-v3/metrics'→psu（行 52,65,99,121）；四阶段聚合逻辑原样——PSU 下 Supernet Eval=KD 超网训练日志最佳验证指标，Search Best/Selected/Retrain Final 语义不变",
+     "evidence": "metrics_bar.py:52,74-94"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain/scripts/monitor_until_done.sh",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "monitor_until_done.sh:32-55 （cheap 活性+NaN/error 词法+stall 计数，无维度/训练范式假设；仅行 21 注释含 'ns_retrain'，随全局 sweep）"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain/scripts/progress_watcher.py",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "progress_watcher.py:100-109 （零硬编码 metric 名，逐指标独立推图；label 由 launch.sh 传入，docstring 行 30 示例随 sweep）"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain/scripts/push_final_charts.sh",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "push_final_charts.sh:14-17 （fail-soft 编排三个图表脚本；仅行 16 注释 'ns3_report' 随全局 sweep）"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain/scripts/self_gate.sh",
+     "verdict": "modify",
+     "change": "assessment marker 名 .ns_retrain_assessment.txt→.psu_retrain_*（行 11）+ 失败文案 'ns3_retrain_script'→'psu_retrain_script'（行 2,11）",
+     "evidence": "self_gate.sh:10-15"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain/scripts/status.sh",
+     "verdict": "modify",
+     "change": "marker .ns_retrain_ckpt_resolved.txt/.ns_retrain_assessment.txt→.psu_retrain_*（行 21-22,41-42）；rc/pid/torch.load 三条件完成判定逻辑零改",
+     "evidence": "status.sh:15-47"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain/scripts/subnet_profile.py",
+     "verdict": "modify",
+     "change": "（1）_build_arch_config 删 stage_depths/layer_configs 特判分支（行 160-164），改为 PSU choice-per-slot 布局的 ArchConfig 构造/kwargs 透传——depth 钉死原层数、无 per-layer 维候选后该特判是死代码兼误导；（2）_compute_macs 行 241 与 _shapes_via_forward 行 303 的 28x28 MNIST dummy 硬编码→从 project_manifest.md 读 input_size（缺失时 fail-soft 回落并 stderr 标注）；（3）label 'nas-supernet/subnet'→psu（行 355）+ docstring 上游名（行 4）；（4）行 123-148 的 SearchSpace/SuperNet/ArchConfig + set_sample_config→get_active_subnet 依赖保留，需 psu supernet.py 契约钉死同名符号",
+     "evidence": "subnet_profile.py:151-166,241,303,123-148"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain/scripts/update_status_md.sh",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "update_status_md.sh:14-52 （epoch 从 log 重算+写 retrain_status.md；行 42 标题 'ns_retrain' 字样随全局 sweep，无逻辑依赖）"
+    },
+    {
+     "path": "workflows/agents/ns3_retrain/scripts/warmup_poll.sh",
+     "verdict": "keep",
+     "change": "",
+     "evidence": "warmup_poll.sh:36-74 （WARMUP_* 判据+progress 契约闸门，指标名无关；全文件无节点名/维度字段）"
+    }
+   ],
+   "gate_findings": [
+    {
+     "location": "workflows/agents/ns3_retrain/scripts/subnet_profile.py:160-164 (_build_arch_config)",
+     "problem": "canonical 布局特判 {stage_depths: [...], layer_configs: {...}} 是 ns3 维度展开搜索的 arch 序列化格式——stage_depths 即 depth 候选维度、layer_configs 携带每层 width/配置候选。PSU choice-only（depth=原层数、num_heads/ffn_dim=原层值、只搜每 slot 分支选择）下该分支永不命中=死代码，且暗示存在维度维搜索会误导维护",
+     "action": "删除 stage_depths/layer_configs 特判分支，仅保留通用 ArchConfigCls(**selected_arch) 透传或按 PSU choice-per-slot 布局（如 {choices: {slot_i: branch_name}}）显式构造；具体形态等 psu_select/psu_run_search 的 selected_arch schema 定稿"
+    },
+    {
+     "location": "workflows/agents/ns3_retrain/agent.md:113,165,233 (Resume 措辞)",
+     "problem": "'resume from ckpt if the script supports it, otherwise from scratch' 三处基于 from-scratch retrain 假设。PSU retrain=finetune-from-supernet+冻结 teacher KD（轴 D），无 ckpt resume 时重启是从超网继承权重重新 finetune，绝非 from-scratch 初始化",
+     "action": "改写为 'rerun run_retrain.sh (resumes from ckpt if supported; otherwise restarts the finetune from supernet-inherited init)'——语义修正防 agent 误判重启代价/产出"
+    },
+    {
+     "location": "workflows/agents/ns3_retrain/scripts/subnet_profile.py:241,303",
+     "problem": "torch.zeros(1, in_channels, 28, 28) 两处硬编码 MNIST 输入空间尺寸——非搜索维度展开，但对 PSU 目标场景（teacher=任意预训练原模型，输入尺寸任意）产生静默错误的 MACs/out_shape（fail-soft 无告警）",
+     "action": "input H/W 改从 project_manifest.md 读取（PSU ingest/expand 已实测原模型，manifest 应携带 input_size）；缺失时保留现值但 stderr 显式标注 assumed 28x28"
+    },
+    {
+     "location": "全节点目录（grep depth|num_heads|ffn_dim|teacher 验证）",
+     "problem": "无——本节点不存在任何 depth/num_heads/ffn_dim 候选断言、维度展开校验或 teacher 缺位假设（grep 全目录仅 subnet_profile.py:154-163 命中维度字段；KD 仅出现在 agent.md fail-loud 边界措辞中且该措辞在 PSU 下依然正确）",
+     "action": "无需删除任何维度 gate；用户点名的『校验 depth 扩展之类的 gate』在此节点不存在，别在 fork 时凭空新增"
+    }
+   ],
+   "contract_changes": [
+    {
+     "item": "routes",
+     "change": "镜像 nas-supernet-v3.yaml:312-315：psu_retrain.output.status=='executed'→psu_report；catch-all→psu_report（failed 显式路由，不降级 executed）"
+    },
+    {
+     "item": "output_schema",
+     "change": "零改：[status, artifacts, assessment, max_retries_hit, healed_files, fidelity_retriggered]（emit_result.py:121-128 逐字产出，additionalProperties:false 保持；fidelity_retriggered 恒 false 语义不变——fidelity 归 psu_retrain_script）"
+    },
+    {
+     "item": "Jinja 上游引用 (agent.md:50,289)",
+     "change": "{{ ns3_run_search.output.selected_acc/selected_latency/latency_unit }}→{{ psu_run_search.output.* }}（仅 Step 3.5 最终对比图用，数值语义不变）"
+    },
+    {
+     "item": "marker 文件前缀",
+     "change": ".ns_retrain_exec_healed.txt/.ns_retrain_assessment.txt/.ns_retrain_ckpt_resolved.txt→.psu_retrain_*（agent.md:59-61 / status.sh:21-42 / launch.sh:29 / emit_result.py:84-119 / self_gate.sh:11 同步；pz fork 已有 .pz_retrain_* 先例）"
+    },
+    {
+     "item": "chart label/marker",
+     "change": "launch.sh:36 'nas-supernet-v3/retrain'、metrics_bar 'nas-supernet-v3/metrics'、compare_table 'nas-supernet/comparison'、subnet_profile:355 'nas-supernet/subnet'→psu label；_common.py:55 CHART_MARKER '.nas-supernet_charts.jsonl' 改名需与 psu_report/emit_report.py:162 的读取端同步"
+    },
+    {
+     "item": "forbidden-touch list (agent.md:88-93)",
+     "change": "保留 supernet.py/project_manifest.md/supernet_summary.md/select_architecture.py/search_config.yaml/run_train_supernet.sh/run_search_supernet.sh（前提 psu 生成节点沿名）；新增 {{ inputs.pretrained_ckpt }}（teacher 原模型权重只读——现规则只护 project_root 下源码，pretrained_ckpt 路径在 project_root 外时无保护）"
+    },
+    {
+     "item": "上游产物名契约（本节点脚本硬读清单）",
+     "change": "PSU 生成节点必须沿用或同步改本节点 reader：retrain.py/finetune.py/run_retrain.sh、runs/retrain/{retrain_best.pth,progress.jsonl,.retrain_rc,.retrain_pid,.retrain_attempt,retrain.attempt*.log,test_metrics.json}、search_results.jsonl、search_config.yaml(objs 列表 smaller-is-better 约定)、search_record_schema.json(latency_unit)、.selected_arch.json、supernet.py、project_manifest.md、supernet_summary.md、inspect_supernet.py、.full_supernet_latency.json"
+    },
+    {
+     "item": "supernet.py 符号契约 (subnet_profile.py:123-148)",
+     "change": "钉进 psu_search_pipeline/psu_retrain_script 生成契约：supernet.py 必须暴露 SearchSpace/SuperNet/ArchConfig 且 set_sample_config(choice-only config)→get_active_subnet() 可物化可 load retrain ckpt 的子网；符号若改名则 subnet_profile._materialize 需连带改"
+    },
+    {
+     "item": "subagent 引用",
+     "change": "无变化——本节点不引用任何 subagent（tools 含 task 仅备用），steps 全部自含脚本驱动"
+    }
+   ],
+   "open_questions": [
+    "PSU selected_arch JSON 的确切 schema（每 slot branch choice 的字段名/层级，如 {choices: {slot_i: branch_name}} vs 扁平 dict）——决定 subnet_profile._build_arch_config 的替换实现，需 psu_select/psu_run_search 设计先行定稿",
+    "PSU supernet.py 是否保留 SearchSpace/SuperNet/ArchConfig 符号集与 get_active_subnet 语义——决定 subnet_profile 是 10 行小改还是物化路径重写（建议保留符号以最小化 fork diff）",
+    "compare_table 是否增加 'Original (teacher)' 列（PSU 核心叙事=变体路径 vs 原模型；会牵动 psu_report 的表结构），还是维持 1:1 fork 先不加",
+    "marker/chart-label 改名幅度：全量 .psu_ 前缀（pz fork 先例、但 chart marker 需 psu_report 同步）还是保留 .ns3 原名换取最小 diff（同 artifacts 目录下 ns3 与 psu 并发跑时 marker 会互踩，建议改名）"
+   ],
+   "risks": [
+    "get_active_subnet 在 ChoiceLayer supernet 上的语义未定：物化子网须能直接 load retrain ckpt（original 分支=父权重、变体分支=finetune 后权重、非 slot 模块冻结）。若 psu supernet.py 不实现，Step 3.5 fail-soft 静默跳过（push_final_charts.sh:17 >/dev/null 连 stderr 都丢弃）→ psu_report.subnet_structure 空串，弱化报告且无任何告警",
+    "pretrained_ckpt 不在现有 forbidden-touch 覆盖内（铁律 5 只护 project_root 下源码与列名产物，路径在 project_root 外时零保护）——patch-layer 自愈存在误改 teacher 权重的理论窗口，fork 时必须显式增补",
+    "subnet_profile 的 params/MACs/out_shape 对任意输入尺寸模型（PSU 目标场景）产生静默错误数值：28x28 dummy 算错 MACs、_read_project_dims 缺 manifest 时回落 10/1 默认类数算错 head 参数——全部 fail-soft 不报错，report 消费者无从分辨"
+   ]
+  },
+  {
+   "contract_changes": [
+    {
+     "item": "output_schema 字段集",
+     "change": "结构不变（15 字段全保留，PSU 下同构）。仅两处 description 语义更新：selected_arch 改为「选定 choice 路径（每 slot 一个分支选择，depth/num_heads/ffn_dim 钉原层值不再搜索）」（yaml ns3 版 :335 描述仍写子网架构维度语义）；supernet_path/final_metrics 描述不变。"
+    },
+    {
+     "item": "stage enum",
+     "change": "建议保留 {flatten, expand, train_script, search_pipeline, run_train, run_search, retrain, report}——slug 本就是节点名缩写（expand 已是 ns3_expand_supernet 的缩写），与 PSU 9 节点一一对应；若 fork 决定改 expand→expand_supernet，yaml:333 / check_report.sh:36-37 / agent.md:87 三处必须同步。"
+    },
+    {
+     "item": "routes",
+     "change": "不变：psu_report 仍 route $end，8 个上游节点失败/完成路由全部收敛到 psu_report（yaml :81/:114/:208/:252/:314-315 同构改名 psu_* 即可）。outputs 区（yaml :358-371）psu_report.output.* 同步改名。"
+    },
+    {
+     "item": "agent.md 步骤",
+     "change": "终态表加 expand-gate-E/崩溃行（supernet.py 缺失 + flat/manifest 齐备 + 无 unsupported marker → failed/expand）；unsupported 行条件与 reason 重签（0 transformer_layer slot 语义 + psu 命名 marker）；修正两处 stale 数字（4 failure modes→5，13 fields→15）。"
+    },
+    {
+     "item": "跨节点 marker 文件名契约",
+     "change": "三处硬编码跟随 fork 级命名表统一：.ns_expand_unsupported.flag（写点 psu_expand_supernet）、.ns_run_train_assessment.txt / .ns_run_search_assessment.txt（写点 psu_run_train / psu_run_search）、.nas-supernet_charts.jsonl（写点 psu _common.py CHART_MARKER）。建议 fork 统一 psu 前缀一次改齐。"
+    },
+    {
+     "item": "subagent 引用",
+     "change": "无——本节点 tools 仅 bash+read，无 subagent/共享脚本依赖（对照 pz_report 已长出 run.sh + _puzzle_scripts/gate_report.py 依赖；PSU 1:1 fork 保持 ns3 的无依赖形态，不引入）。"
+    }
+   ],
+   "files": [
+    {
+     "change": "① :34 'success + 4 failure modes' → 实为 5 个失败模式（flatten_failed/unsupported/retrain_failed/select_failed/train_failed），fork 时修正；② :59 终态表 unsupported 行：条件（.ns_expand_unsupported.flag + supernet_summary.md 含 'No supported match'）与 psu_expand_supernet 重签——marker 换 psu 命名、substring 短语对齐 psu expand 实际产出、reason 'model type not supported for NAS' 改为 'no transformer_layer slot (unsupported)' 语义；③ :56-63 终态表补一行 expand 失败归因（supernet.py 缺失 + flat/manifest 齐备 + 无 unsupported marker → stage=expand，对应 PSU 新 gate E 失败/expand 崩溃）；④ :83 'output_schema enforces 13 fields' → 实为 15 字段（yaml:330 / check_report.sh:23-26），修正；⑤ :87 stage 枚举与 check_report.sh/yaml 三处同步（见 contract_changes 的 slug 决策）",
+     "evidence": "agent.md:34 ('success + 4 failure modes' vs 表中 5 个失败态)；agent.md:59 (unsupported 行引 .ns_expand_unsupported.flag + 'No supported match'，ns3 语义=model_type.json 维度展开支持未命中)；agent.md:83 ('13 fields' vs 实际 15)；agent.md:56-63 表缺 expand 崩溃/gate-E 行（emit_report.py:93-131 无此分支）；agent.md:87 (stage 枚举)",
+     "path": "workflows/agents/ns3_report/agent.md",
+     "verdict": "modify"
+    },
+    {
+     "change": "",
+     "evidence": "check_report.sh:23-26 required 15 字段 == emit_report.py:194-210 report dict 全部键 == nas-supernet-v3.yaml:330 output_schema.required，PSU 下同构；check_report.sh:36-37 stage 枚举 == yaml:333 == PSU 9 节点链（slug 决策见 contract_changes，若改名则此两行随之）；grep depth|num_heads|ffn|teacher|distill|KD 全目录 0 命中，纯结构校验。nit：:10 注释 'from stdin or from .report.json marker' 的 stdin 路径不存在（pz fork 版已改为 'written by emit_report.py'），fork 拷贝时可顺手清",
+     "path": "workflows/agents/ns3_report/scripts/check_report.sh",
+     "verdict": "keep"
+    },
+    {
+     "change": "① :78 .ns_expand_unsupported.flag → psu 命名 marker，与 psu_expand_supernet 写点（ns3_expand_supernet/agent.md:78-79）同步改名；② :82-88 'No supported match' substring 兜底短语按 psu expand 的 summary 实际契约重签（保留 marker 优先 + substring 兜底的双信号设计）；③ :93-131 首匹配链补 expand 崩溃/gate-E 失败分支：has_flat+has_manifest 且无 supernet.py 且无 unsupported marker → stage='expand'（现落 default 'unknown terminal state'/stage=report，PSU 新 gate E 使该态成为设计内失败模式；若 psu_expand 落结构化失败 marker 如 .psu_expand_gate.json 则优先读之）；④ :140-143 .ns_run_train_assessment.txt/.ns_run_search_assessment.txt 跟随 psu_run_train/psu_run_search 的实际文件名（写点 ns3_run_search/scripts/select.sh 同族 + agent.md:71）；⑤ :162 chart marker .nas-supernet_charts.jsonl → psu _common.py 的 CHART_MARKER 新值（ns3_retrain/scripts/_common.py:55 为 .nas-supernet_charts.jsonl）同步；可选：:56 select_reason 读了但 report dict 未用（死读，fork 时删或透出）；:180-192 artifacts 列表可选补 runs/train/ 的 KD 训后超网 ckpt（见 open_questions）",
+     "evidence": "emit_report.py:78 (marker 路径硬编码 ns 命名)；emit_report.py:82-88 ('No supported match' substring)；emit_report.py:93-95+123-131 (expand 崩溃落 default 'unknown terminal state'——retrain_rc None 时 :123 elif 不中，回 :93 初始值)；emit_report.py:140-143 (ns 命名 assessment 文件)；emit_report.py:162 (ns 命名 chart marker)；emit_report.py:40-56 (.selected_arch.json 键原样透传，selected_arch 在 PSU=每 slot 分支 choice 向量，无需改逻辑)；emit_report.py:123-131 (success=retrain_rc==0+runs/retrain/*.pth，KD/finetune 范式无关)；emit_report.py:180-192 (artifacts 不含 runs/train 超网 ckpt)",
+     "path": "workflows/agents/ns3_report/scripts/emit_report.py",
+     "verdict": "modify"
+    }
+   ],
+   "gate_findings": [
+    {
+     "action": "机制保留（结构化 marker 优先 + substring 兜底，双信号设计本身正确），只换语义：marker 改 psu 命名，触发条件重签 psu_expand_supernet 侧（如 0 个 transformer_layer slot / 无可 ChoiceLayer 化的层），reason 文案去掉 'model type not supported for NAS'。无需删除任何 depth/heads/ffn 候选校验——本节点本就不含（grep 实证 0 命中），reporter 对 selected_arch/pareto_size 只透传不断言维度结构。",
+     "location": "workflows/agents/ns3_report/agent.md:59 + scripts/emit_report.py:76-91",
+     "problem": "unsupported 双信号（.ns_expand_unsupported.flag 内容 'true' + supernet_summary.md 含 'No supported match' substring）的语义根植于 ns3 expand 的 model_type.json 维度展开支持分类（ns3_expand_supernet/agent.md:73/78/192）——PSU 不再展开任何维度（depth/num_heads/ffn_dim 钉原层值），'按 model_type 判可展开' 这层校验在 PSU 无意义；PSU 的 unsupported 只剩『0 个 transformer_layer slot』一种。"
+    },
+    {
+     "action": "emit_report.py 加显式 expand 失败分支（stage='expand'，reason 指向 gate E/expand 崩溃，若 psu_expand 落结构化失败 marker 则优先读 marker）；agent.md 终态表同步加行。check_report.sh 枚举已含 'expand' 无需改。",
+     "location": "workflows/agents/ns3_report/scripts/emit_report.py:93-131（首匹配链）",
+     "problem": "无 expand 崩溃分支：flatten 成功（flat+manifest 齐备）但 expand 未产出 supernet.py 且无 unsupported marker 时（= PSU 轴 E 新硬 gate 失败：权重继承/freeze 分组/choice 容器不匹配，或 expand 崩溃），落入 default 'unknown terminal state' / stage='report'——PSU 设计内的失败模式被归因为未知，终态可读性丢失。非维度校验，但它是新 gate E 的 reporter 落点，属本节点唯一实质逻辑缺口。"
+    },
+    {
+     "action": "无需动作（对照性记录，证伪『reporter 含 from-scratch/teacher 假设』：grep depth|num_heads|ffn|dim|teacher|distill|KD|from-scratch 于 ns3_report 全目录 0 命中）。",
+     "location": "workflows/agents/ns3_report/scripts/emit_report.py:123-143",
+     "problem": "（反面确认，非缺陷）from-scratch 训练与 teacher 缺位假设：不存在——success 判定只看 retrain_rc==0 + final ckpt 存在（:123-131），final_metrics 是 retrain_status.md 自由文本截断透传（:134-143），KD 状态文本天然兼容；reporter 全程无 teacher 引用，轴 B/C/D 对本节点零逻辑影响。"
+    }
+   ],
+   "node": "psu_report (audit of workflows/agents/ns3_report, the report node PSU forks from)",
+   "open_questions": [
+    "stage slug：保留 'expand' 还是随节点名改 'expand_supernet'？改则 yaml schema 枚举 / check_report.sh:36-37 / agent.md 表三处联动；建议保留 slug 避免 churn（expand 本就是 expand_supernet 的缩写）。",
+    "artifacts 列表是否补 KD 训后超网 ckpt（runs/train/*.pth）？ns3 只列 retrain ckpt；PSU 的超网 ckpt（original 冻结继承 + 变体分支 KD 权重）是 retrain 的起点与核心新产物，对下游消费有价值——设计取舍。",
+    "psu_expand_supernet 在 gate E 失败时是否落结构化 marker（如 .psu_expand_gate.json 含逐张量对齐误差）供 reporter 确定性归因？与 expand 节点审计联动——若只有 supernet.py 缺席这一隐式信号，归因只能到 stage=expand 一级，reason 无法区分 gate-E 失败与 expand 崩溃。"
+   ],
+   "risks": [
+    "marker 文件名漂移是本节点最高概率的 fork bug：emit_report.py 硬编码 3 组跨节点 marker 名（.ns_expand_unsupported.flag / .ns_run_*_assessment.txt / .nas-supernet_charts.jsonl），且这些路径读失败全部 fail-soft（read_text 默认值），fork 若只改写点不改读点（或反之），失败归因会静默退化为 'unknown terminal state' 而不报错。缓解：fork 级命名表一次改齐 + 一次全链失败路径演练。",
+    "'No supported match' substring 兜底依赖 psu_expand LLM 自由文本措辞——ns3 已知脆弱点（marker 优先即为此），PSU 重签 expand summary 契约时两信号必须同表，否则兜底分支成死代码或误报。",
+    "现状即有：expand 崩溃（非 unsupported）落 'unknown terminal state'/stage=report，PSU gate E 使该路径概率显著升高（权重继承/冻结分组/逐张量对齐都是新增失败面），不补归因分支会直接压在 web 终态展示上。"
+   ],
+   "summary": "ns3_report 是 9 节点里最\"稳\"的节点，预估 ~90% 保留。它被刻意设计成范式无关：终态判定只读 rc/status 磁盘文件（.train_rc/.retrain_rc/train_status.md/retrain_status.md/search_results.jsonl/.selected_arch.json），selected_arch/pareto_size 原样透传不解析——grep 实证全目录 0 处 depth/num_heads/ffn/teacher/distill/KD 引用，choice-only 搜索空间（轴 A）与 KD/预训练继承（轴 B/C/D）对 reporter 逻辑零影响，阶段枚举与产物文件名集合与 PSU 9 节点链（psu_flatten→...→psu_report）一一同构。改动集中三点：(1) expand 阶段失败归因缺口——PSU 新硬 gate E（全 original 路径 forward ≡ 预训练原模型）失败/expand 崩溃时（flat+manifest 齐备但 supernet.py 缺失且无 unsupported marker）现落 default \"unknown terminal state\"/stage=report，需加显式 expand 分支；(2) unsupported 双信号的语义重签——从 ns3 的 model_type.json 维度展开支持分类换为 \"0 个 transformer_layer slot\"；(3) 三处 ns→psu 命名空间的跨节点 marker 机械改名。check_report.sh 纯结构校验（15 必填字段 + status/stage 枚举），PSU 下同构，keep 原样。目录级冗余：ns3_report 自包含（无 references/、无 run.sh、无共享脚本依赖），无冗余可删——对照 ns2_report/agent.md:198-200 还内嵌着一份近似 emit_report 副本（v2 遗留），ns3 的 scripts/ 抽取是正确形态，fork 不得回退。"
+  }
+ ],
+ "selection": {
+  "workflow": {
+   "picked": "run2",
+   "cross_checked": true
+  },
+  "flatten": {
+   "picked": "run2",
+   "cross_checked": true
+  },
+  "expand_supernet": {
+   "picked": "run2",
+   "cross_checked": false
+  },
+  "train_script": {
+   "picked": "run1",
+   "cross_checked": false
+  },
+  "search_pipeline": {
+   "picked": "run2",
+   "cross_checked": false
+  },
+  "run_train": {
+   "picked": "run2",
+   "cross_checked": true
+  },
+  "run_search": {
+   "picked": "run2",
+   "cross_checked": true
+  },
+  "retrain_script": {
+   "picked": "run2",
+   "cross_checked": true
+  },
+  "retrain": {
+   "picked": "run2",
+   "cross_checked": true
+  },
+  "report": {
+   "picked": "run2",
+   "cross_checked": true
+  }
+ }
+}
