@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-18] feat(workflows): puzzle-supernet——choice-only 超网组件搜索 workflow（commit `6b89820`）
+
+以 nas-supernet-v3 为基底 1:1 fork 出 9 节点流水线（`psu_flatten`→`psu_report` 唯一终端 reporter）：choice-only 超网（层数/头数/FFN 维度钉原模型值，每层槽 original 冻结分支 + 注意力变体二选）、预训练权重继承 + original 等价 gate、冻结原模型 teacher KD 只训变体分支、零训练验证搜索选组件（搜组件不搜超参）、物化选定子网 finetune-from-supernet。E2E mnist_trf 9/9 节点通过（LAT 0.699ms≤0.7 / ACC 0.9297≥0.9177 / gate E 56 键零漂移，20 张真实图表落盘）。P7 收尾按节点派 10 个审查 agent 复审洁净度（9 节点 + 8 subagents 清单），39 处开发期残留（设计论证 / 派单字母标签 / 事故复盘 / 版本考古 / 悬空引擎引用）全修；顺带修复 2 个环境耦合测试（search_table HTML 断言绑定 stdlib 兜底渲染器——plotly 装机时走 JS 嵌数据层，PYTHONPATH shim 强制确定性走 pure-html floor）。88 测试全绿；`tars validate` 0 error 0 warning。详见 [release note](../releases/2026-08-18-puzzle-supernet-workflow.md)。
+
 ## [2026-08-13] feat(in-session): nudge 提醒改为"长任务先预估耗时并设定定时提醒"（commit `ca0d500`）
 
 Stop（cc/cac `cc_nudge.sh`）与 idle（opencode `orca.ts`）两条 nudge 提醒的收尾句由"Orca 不会自动推进"改为"如果接下来要执行长时间任务（如训练），请先预估耗时并设定定时提醒"——把 hook 从被动唠叨变成行动建议，agent 跑训练卡住时可自设定时兜底；同步更新 `cc_stop_golden.json` 字节级 golden。相关测试 3 passed（golden 回归 + opencode idle 文案 + tool.execute.after 守门）。
