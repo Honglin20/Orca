@@ -96,3 +96,14 @@ final_report.md
 
 # rx-sweep skill 本地 scratch 日志（fixture 运行产物）
 orca/skills/rx-sweep/fixture/*.log
+
+# 本地一次性文档/脚本（开发期计划草稿、历史 spec、一次性调试脚本，运行不需要）
+AGENTS.md
+docs/plans/2026-07-20-skip-to-agent-phase14.md
+docs/plans/2026-07-23-orca-home-directory-layout.md
+docs/plans/2026-08-04-skip-to-agent.md
+docs/specs/2026-08-10-nas-supernet-chart-cleanliness-monitoring.md
+docs/specs/2026-08-11-inputdef-enum.md
+docs/specs/2026-08-11-nas-supernet-v2.md
+scripts/e2e_tape_peek.py
+scripts/kb_graph.py
