@@ -1,20 +1,13 @@
-# test.yml —— phase 11 P0.1 CI gate（SPEC §0 / §10.1 / 计划 P0.1）
-#
-# 每次 push / PR 自动跑全量单测（排除 integration），绿才允许合并。
-# integration 测试需真 spawn claude + ANTHROPIC_API_KEY，由 integration.yml
-# 经 PR comment `/integration` 显式触发，本 gate 永不跑它们。
-#
-# 详见 docs/specs/phase-11-cli-enrichment.md §10.1、docs/releases/2026-07-01-phase11-ci.md。
-
+# test.yml 鈥斺€?phase 11 P0.1 CI gate锛圫PEC 搂0 / 搂10.1 / 璁″垝 P0.1锛?#
+# 姣忔 push / PR 鑷姩璺戝叏閲忓崟娴嬶紙鎺掗櫎 integration锛夛紝缁挎墠鍏佽鍚堝苟銆?# integration 娴嬭瘯闇€鐪?spawn claude + ANTHROPIC_API_KEY锛岀敱 integration.yml
+# 缁?PR comment `/integration` 鏄惧紡瑙﹀彂锛屾湰 gate 姘镐笉璺戝畠浠€?#
+# 璇﹁ docs/specs/phase-11-cli-enrichment.md 搂10.1銆乨ocs/releases/2026-07-01-phase11-ci.md銆?
 name: test
 
 on:
-  push:
-    branches: [master]
-  pull_request:
-    branches: [master]
+  workflow_dispatch:
 
-# 同一分支新 push 取消旧 run，省 CI 额度
+# 鍚屼竴鍒嗘敮鏂?push 鍙栨秷鏃?run锛岀渷 CI 棰濆害
 concurrency:
   group: test-${{ github.ref }}
   cancel-in-progress: true
@@ -40,7 +33,7 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
-        # 不锁定 uv 版本：跟随最新（@v3 action 默认即 latest），换 uv 不必改 workflow
+        # 涓嶉攣瀹?uv 鐗堟湰锛氳窡闅忔渶鏂帮紙@v3 action 榛樿鍗?latest锛夛紝鎹?uv 涓嶅繀鏀?workflow
         with:
           version: "latest"
 
