@@ -259,7 +259,7 @@ output_schema validates it, and non-JSON directly `node_failed`):
 
 Field semantics:
 
-- `ingest_passed: false` → the engine routes to `terminate_ingest_failed` (fail
+- `ingest_passed: false` → the engine routes to `pz_report` (terminal reporter, fail
   loud). In that case, paths may be the partially-produced subset, `error`
   states the root cause (which step it is stuck on, which gate failed).
 - `error` on fail loud names the root cause (missing input / `py_compile`

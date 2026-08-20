@@ -76,8 +76,8 @@ agent 本次生成 / self-heal 的行为痕迹写到 marker 文件（determinist
      - 明显 typo / import 路径错（Python `ImportError` / `ModuleNotFoundError`，可改 `run_bld.sh` 内
        的路径——**禁碰清单除外**，铁律 5）
    - **bld.py 是预写脚本，禁 edit**：若根因定位到 `bld.py` 的 loss / 候选块构造 / 数据管道 bug
-     → **不修**，记 last_error，进 Step 4 输出 `{"status":"failed"}`（fail loud——预写脚本 bug 是
-     P2 层问题，不在 P1 自愈 scope）。
+     → **不修**，记 last_error，进 Step 4 输出 `{"status":"failed"}`（fail loud——预写脚本 bug
+     属算法层，不在本节点自愈 scope）。
 5. **禁碰清单（硬铁律，违反=架构破坏，唯一 failed 触发）**：以下文件**只许 read，禁 edit/write**——
    `block_map.json`、`<base>_flat.py`、`baseline_metrics.json`、`project_manifest.md`、
    `_puzzle_scripts/bld.py`（预写脚本）、
@@ -296,7 +296,7 @@ bash "$ORCA_AGENT_RESOURCES/scripts/monitor_until_done.sh"
      放弃自愈（不再 launch），进 Step 4 输出 `{"status":"failed"}`。
    - **根因在 bld.py 预写脚本**（loss 公式错 / 候选块构造 bug / 数据管道错）→ bld.py 禁 edit，
      记 last_error（含 stderr 尾部 + 你定位到的 bld.py 具体行号 / 函数名），放弃自愈，进 Step 4
-     输出 `{"status":"failed"}`。fail loud——预写脚本 bug 是 P2 算法层问题。
+     输出 `{"status":"failed"}`。fail loud——预写脚本 bug 属算法层，不在本节点自愈 scope。
    - OOM 类：缩 batch=1 + ckpting + AMP 仍不缓解 → 大概率模型容量（flat_model 禁碰）→ failed hint。
 4. `launch.sh` 重启（优先 resume：脚本支持则从 ckpt 续，否则重头；`.bld_attempt`++ 仅 log 命名计数，无上限）。
 5. `warmup_poll.sh` 确认跑通 → 回 C-loop 继续轮询。

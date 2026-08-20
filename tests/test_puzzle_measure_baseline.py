@@ -809,19 +809,21 @@ def test_measure_whole_model_latency_onnx_contract(tmp_path: Path) -> None:
     assert val == 7.75
 
 
-# ── workflow 路由层：terminate_latency_infeasible first-match 路由验证 ──────────
+# ── workflow 路由层：失败分支收敛到终端 reporter pz_report（in-session 只支持 agent 节点）──
 
 def test_puzzle_yaml_routes_cover_latency_infeasible_branch() -> None:
-    """静态校验 puzzle.yaml 的 pz_baseline 路由：覆盖三个互斥分支（build_library /
-    infeasible / unsupported）+ terminate_latency_infeasible 节点存在。
+    """静态校验 puzzle.yaml 的 pz_baseline 路由：成功分支（build_library）/ 失败分支
+    统一收敛到终端 reporter pz_report（in-session 模式只支持 kind: agent 节点，
+    terminate 节点会在路由时抛 unsupported_node_kind 崩 run——ns3 模式）。
 
     意图（Rule 9）：验证路由 first-match 设计——
     1. model_type_supported != false AND latency_target_feasible != false → build_library
-    2. model_type_supported != false → infeasible（说明 supported 但 feasible=false）
-    3. fallback → unsupported
+    2. fallback → pz_report（reporter 读 baseline_metrics.json 区分 latency infeasible /
+       unsupported / smoke 失败）
 
     历史：原 pz_expand 节点拆分为 pz_ingest + pz_search_space + pz_baseline 后
     （2026-08-13 layer-variant 重构），该路由 first-match 合约由 pz_baseline 继承。
+    2026-08-13 reporter 优化：删全部 terminate 节点，失败分支 → pz_report。
     """
     from orca.compile.parser import load_workflow
 
@@ -829,21 +831,25 @@ def test_puzzle_yaml_routes_cover_latency_infeasible_branch() -> None:
     wf = load_workflow(yaml_path)
     pz_baseline = next(n for n in wf.nodes if n.name == "pz_baseline")
     targets = [r.to for r in pz_baseline.routes]
-    assert targets == ["pz_build_library", "terminate_latency_infeasible", "terminate_unsupported"], (
+    assert targets == ["pz_build_library", "pz_report"], (
         f"pz_baseline 路由顺序/目标错误：{targets}"
     )
     # 双条件路由（first-match）—— compound expression 必须含两字段
     first_when = pz_baseline.routes[0].when or ""
     assert "model_type_supported" in first_when and "latency_target_feasible" in first_when
-    # terminate_latency_infeasible 节点存在 + status=failed
-    terminators = {n.name: n for n in wf.nodes if n.kind == "terminate"}
-    assert "terminate_latency_infeasible" in terminators
-    # terminate 节点 status=failed（reason 字段含 layer 占比过低提示 + 减速目标）
-    infeasible = terminators["terminate_latency_infeasible"]
-    assert infeasible.status == "failed"
-    assert "layer" in infeasible.reason and "latency_reduction_target" in infeasible.reason
-    # terminate 节点 routes 必空（contract）
-    assert not infeasible.routes
+    # 全 workflow 无 terminate 节点（in-session 只支持 agent；ns3 reporter 模式）
+    terminators = {n.name for n in wf.nodes if n.kind == "terminate"}
+    assert not terminators, f"puzzle.yaml 不应有 terminate 节点（in-session 崩 run）：{terminators}"
+    # pz_report 是唯一终端 reporter：路由到 $end 无条件（reporter 判终态，非 gate 路由）
+    pz_report = next(n for n in wf.nodes if n.name == "pz_report")
+    assert [r.to for r in pz_report.routes] == ["$end"], (
+        f"pz_report 应无条件路由 $end：{[r.to for r in pz_report.routes]}"
+    )
+    # reporter output_schema 带 status/stage（终态判定字段）
+    schema = pz_report.output_schema or {}
+    assert schema.get("type") == "object"
+    props = schema.get("properties", {})
+    assert "status" in props and "stage" in props and "reason" in props
 
 
 # ── root cause C：无可用预训练 → fail loud（BLD 需真 teacher）──────────────────

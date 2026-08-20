@@ -58,7 +58,7 @@ Step 1 前确认都已知（缺任一 → fail loud）：
 1. **先确认上游产物**（铁律 5）：block_map / flat_model / baseline_metrics / block_library 任一
    缺 → 进 Step 4 输出 `{"status":"failed"}`。
 2. **预写脚本禁 edit**：`score.py` / `latency_table.py` 是预写算法脚本，**禁 edit**。根因在脚本
-   bug → fail loud（P2 算法层问题）。
+   bug → fail loud（算法层问题，不在本节点自愈 scope）。
 3. **编辑白名单**（prompt 软约束，tape 审计字段 healed_files / fidelity_retriggered）：
    - **纯补丁层**（直接 edit，无需重触 fidelity）：
      - `run_score.sh`（launcher 路径 / 参数对齐）—— agent 生成的 launcher。

@@ -259,7 +259,7 @@ bash "$ORCA_AGENT_RESOURCES/scripts/update_status_md.sh"
      project_manifest / 源文件）→ **唯一 failed 路径**：禁碰，记 last_error，放弃自愈，进 Step 4 failed。
    - **根因在 build_selected.py / gkd_retrain.py 预写脚本**（KD loss 公式错 / 数据管道 bug /
      build_selected 实例化错）→ 预写脚本禁 edit，记 last_error（含 stderr 尾部 + 具体行号 / 函数名），
-     放弃自愈，进 Step 4 输出 `{"status":"failed"}`。fail loud——预写脚本 bug 是 P2 算法层问题。
+     放弃自愈，进 Step 4 输出 `{"status":"failed"}`。fail loud——预写脚本 bug 属算法层，不在本节点自愈 scope。
    - OOM 类：缩 batch=1 + ckpting + AMP 仍不缓解 → 大概率模型容量（flat_model 禁碰）→ failed hint。
 4. `launch.sh` 重启（优先 resume）。
 5. `warmup_poll.sh` 确认跑通 → 回 C-loop 继续轮询。
@@ -319,8 +319,9 @@ status 推导（emit_result.py 内部）：`failed`（block_map.json 缺——�
 ## 监督要点（fail loud）
 
 - **绝不手补假 JSON**：`status==failed` 就如实失败——节点 output_schema 校验 + 下游兜底。
-- **绝不带错下传**：禁碰-blocked / 预写脚本 bug → `status=failed`。yaml 路由契约：failed 走 catch-all
-  `terminate_retrain_failed`（显式路由）——**不要**降级 `executed` 让下游拿着坏 ckpt 跑。
+- **绝不带错下传**：禁碰-blocked / 预写脚本 bug → `status=failed`，yaml 路由到终端 reporter
+  `pz_report`（其 emit_report.py 读磁盘判 retrain 失败阶段）——**不要**降级 `executed` 让下游
+  拿着坏 ckpt 跑。
 - **未完成 ≠ 结束**：GKD 未完成时输出状态说明（非 JSON），**不要**把"GKD 中"写成 executed。
 - **ckpt 在 ≠ 完成**：完成判定三条件齐（rc=0 + 进程已退出 + ckpt 有效）——status.sh / emit_result.py
   已实现。
@@ -341,5 +342,5 @@ status 推导（emit_result.py 内部）：`failed`（block_map.json 缺——�
 **GKD 完成 / 确定失败时，整段回复 = Step 4 `emit_result.py` 打印的那一行 JSON**（形如
 `{"status":"executed","artifacts":["/path/final_model.pt"],"assessment":"GKD converged: final acc 0.94 vs baseline 0.97","max_retries_hit":false,"healed_files":["run_retrain.sh"],"fidelity_retriggered":true}`）。
 节点 `output_schema` 要求它是合法 JSON 且 `status ∈ {executed, failed}`；
-`status==failed` → 显式路由 `terminate_retrain_failed`。**GKD 未完成时，整段回复 = 状态说明
+`status==failed` → 路由 `pz_report`（终端 reporter 报 retrain 失败）。**GKD 未完成时，整段回复 = 状态说明
 （含"请勿调用 orca next"），宿主不会提交，节点保持执行中。**

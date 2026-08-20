@@ -61,8 +61,7 @@ needed) for the four structural features in the knowledge base
 - **FFN**: `Linear -> activation -> Linear` dominant. No FFN → reject `[BLOCKER]`.
 - **2× norm**: at least two distinct normalization calls in the layer's
   forward (Pre-LN or Post-LN). Fewer than two → reject `[BLOCKER]`
-  (`reject_when`: single-norm topology — Parallel / GAU — first version
-  unsupported).
+  (`reject_when`: single-norm topology — Parallel / GAU — unsupported).
 - **2× residual**: at least two `x = x + ...` residual additions. Fewer than
   two → reject `[BLOCKER]`.
 
@@ -144,9 +143,9 @@ signature:
   upstream actually passes a non-None value at runtime → the slot is
   mask-load-bearing (the placeholder will be flipped to `true` by
   `pz_baseline` runtime trace). This is consistent regardless of declared
-  candidate mask-awareness — design L13 does not hard-filter mask-blind
-  variants on mask-bearing slots (the layer variant's forward accepts but may
-  ignore mask; precision loss is naturally penalized by MIP acc).
+  candidate mask-awareness — mask-blind variants are not hard-filtered on
+  mask-bearing slots (the layer variant's forward accepts but may ignore
+  mask; precision loss is naturally penalized by MIP acc).
 - A layer whose forward does not accept any mask kwarg, but a mask-aware
   candidate (e.g. `masked_vanilla_layer`) is in the candidate list → `[MINOR]`
   (the mask-aware machinery is dead code for this slot; harmless but signals
@@ -161,10 +160,10 @@ flag it here too so the producer sees the structural problem in context.)
 
 ### 8. Kind legal
 
-Each slot's `kind` must be `transformer_layer` (first version — the only
-supported layer-granularity kind). Any other value is `[BLOCKER]`. Legacy
-block-granularity kinds (`attention` / `ffn` / `conv` / `moe` / `custom`) on
-a layer-granularity slot is `[BLOCKER]` (granularity mismatch).
+Each slot's `kind` must be `transformer_layer` (the only supported
+layer-granularity kind). Any other value is `[BLOCKER]`. Sub-block kinds
+(`attention` / `ffn` / `conv` / `moe` / `custom`) on a layer-granularity slot
+is `[BLOCKER]` (granularity mismatch).
 
 ## Compile Feedback
 

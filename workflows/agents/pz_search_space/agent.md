@@ -126,18 +126,17 @@ and `__init__` and mark each `nn.Module` submodule whose forward exhibits the
 - **2× norm + 2× residual** combination (Pre-LN or Post-LN).
 
 Granularity stops at the **whole layer** (do not descend into attn / ffn
-sub-blocks — this is the key difference from block-granularity v2). Only the
-combined layer (attn+norm+ffn+norm) enters `slots`; a pure-attn or pure-ffn
-sub-block does **not**.
+sub-blocks). Only the combined layer (attn+norm+ffn+norm) enters `slots`; a
+pure-attn or pure-ffn sub-block does **not**.
 
-**Known limitation (first version, declared in the knowledge base
-`reject_when`)**: **Parallel residual** (FlashFormer / GPT-J style
-`x = x + attn(l) + ffn(l)` sharing one norm) and **GAU** (Gated Attention Unit,
-single norm + gate) — i.e. single-norm topologies — are **not supported** in
-the first version. When such a topology is detected, leave `slots: []` and emit
-`model_type_supported=false` (fail loud). Family extension (adding
-`parallel_block` / `gau_block` layouts to `transformer_layer_pattern.json`)
-is a future OCP step.
+**Known limitation (declared in the knowledge base `reject_when`)**:
+**Parallel residual** (FlashFormer / GPT-J style `x = x + attn(l) + ffn(l)`
+sharing one norm) and **GAU** (Gated Attention Unit, single norm + gate) — i.e.
+single-norm topologies — are **not supported**. When such a topology is
+detected, leave `slots: []` and emit `model_type_supported=false` (fail loud).
+The candidate catalog only registers single-norm-unaware layouts; extending to
+`parallel_block` / `gau_block` means adding the layout to
+`transformer_layer_pattern.json` plus the matching variants to the catalog.
 
 For each identified slot, extract the fields named in the knowledge base
 `must_extract`: `num_heads`, `head_dim`, `original_intermediate`, `activation`,
@@ -218,7 +217,7 @@ fields, legal `kind`, unique `id` / `path`, candidate catalog registration,
 `identity` mandatory per kind) and additionally verifies that every
 `transformer_layer` slot carries the layer-specific fields named in the
 knowledge base `must_extract`. Empty `slots: []` is a valid declaration
-(`model_type_supported=false` → `terminate_unsupported`); the gate fails only
+(`model_type_supported=false` → `pz_report`); the gate fails only
 on structural / schema violations. On failure → fix-loop Step 1–2; over the
 soft constraint → fail loud.
 
@@ -251,8 +250,8 @@ output_schema validates it, and non-JSON directly `node_failed`):
 
 Field semantics:
 
-- `model_type_supported: false` → the engine routes to `terminate_unsupported`
-  (fail loud). Reached either because no transformer_layer slot was found
+- `model_type_supported: false` → the engine routes to `pz_report` (terminal
+  reporter, fail loud). Reached either because no transformer_layer slot was found
   (legitimate unsupported branch — `error` empty, `slot_count: 0`) or because
   the `check_search_space.sh` gate failed after the fix-loop exhausted
   (`error` states the root cause).

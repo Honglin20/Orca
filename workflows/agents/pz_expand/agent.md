@@ -322,11 +322,11 @@ python3 "$ORCA_WORKFLOWS_ROOT/agents/_puzzle_scripts/measure_baseline.py" \
 - exit 码约定（三态）：
   - **exit 0** = 成功（slot ≥ 1 + 4 smoke 全绿 + latency 目标可达）→ 进 Step 3。
   - **exit 2** = 空 slots（unsupported）或 smoke 失败 → 判 `model_type_supported=false` 路由
-    `terminate_unsupported`，或按 smoke 失败信号回 Step 1 修 flat/search_space/adapters 后重跑。
+    `pz_report`（终端 reporter 报 unsupported），或按 smoke 失败信号回 Step 1 修 flat/search_space/adapters 后重跑。
   - **exit 3 = latency 结构性不可达**（模型可优化、smoke 全绿、但 block 替换最大 reduction <
     `latency_reduction_target`——该模型 block 占比过低）→ **不**回 Step 1 修，**不**判
     unsupported；按下方「exit 3 处理」emit `latency_target_feasible=false` + 路由
-    `terminate_latency_infeasible`。区别于 exit 2：模型**能**被 puzzle 优化（只是用户目标过高）。
+    `pz_report`（终端 reporter 报 latency infeasible）。区别于 exit 2：模型**能**被 puzzle 优化（只是用户目标过高）。
 
 **Step 2 完成判定**：脚本 exit 0 + 四个产物都存在 + flat model `python -m py_compile` 过。
 
@@ -337,7 +337,7 @@ python3 "$ORCA_WORKFLOWS_ROOT/agents/_puzzle_scripts/measure_baseline.py" \
    `latency_target_feasible: false` + `max_achievable_reduction`（透传）+ `error` 写明
    「block 替换最大 reduction X% < 目标 Y%；需降 latency_reduction_target 或该模型 block
    占比过低不适合 puzzle」。
-3. 引擎路由 `terminate_latency_infeasible`（yaml 路由守卫：先判 model_type_supported，
+3. 引擎路由 `pz_report`（yaml 路由守卫：先判 model_type_supported，
    再判 latency_target_feasible）。
 4. **不**进 Step 3，**不**回 Step 1 修——这是结构性的，非 bug。
 
@@ -411,7 +411,7 @@ baseline_metrics 禁改；flat/search_space/manifest/project_manifest.md/puzzle_
   超限 → fail loud（output_schema `error` 字段写明卡在哪步 + `model_type_supported: false` +
   `workflow_verifier_passed: false`）。
 - measure_baseline.py 报 exit 2（空 slots 或 smoke 失败经 ≤2 fix-loop 仍不收敛）= 正常 fail loud
-  分支：照实 emit `model_type_supported=false`，路由 `terminate_unsupported`。
+  分支：照实 emit `model_type_supported=false`，路由 `pz_report`（终端 reporter）。
 
 ## Guidelines
 
@@ -451,7 +451,7 @@ baseline_metrics 禁改；flat/search_space/manifest/project_manifest.md/puzzle_
 字段语义（tape 审计字段）：
 
 - `latency_target_feasible`：measure_baseline 的 block-zero floor 检查通过（max_achievable_reduction
-  ≥ latency_reduction_target）→ `true`；结构性不可达 → `false`（路由 `terminate_latency_infeasible`）。
+  ≥ latency_reduction_target）→ `true`；结构性不可达 → `false`（路由 `pz_report`）。
   默认 `true`（兼容旧路径：model_type_supported=false 时仍透传 true，路由只看 model_type_supported）。
 - `max_achievable_reduction`：`1 - latency_floor/baseline_latency`（block 替换物理上限）。
 - `error`：fail loud 时写明根因（如 `inputs.project_root` / `inputs.model_path` 缺 / 不可访问 /
@@ -459,7 +459,7 @@ baseline_metrics 禁改；flat/search_space/manifest/project_manifest.md/puzzle_
   `strict-load-convergence-failed` 等分类 + 卡在哪道 smoke；latency 结构性不可达——写明
   「block 替换最大 reduction X% < 目标 Y%」；model_type 不支持**不**写 error，是
   `model_type_supported: false` 的正常 fail loud 分支）。成功时为空串。
-- `model_type_supported: false` → 引擎路由 `terminate_unsupported`（fail loud）。此时其它字段
+- `model_type_supported: false` → 引擎路由 `pz_report`（终端 reporter，fail loud）。此时其它字段
   按实际填（`flat_model_path` 可留 Step 1 产的、`block_map_path=""`、`search_space_path` 留 Step 1
   产的空 slots 版、`manifest_path` 留 Step 1 产的、`baseline_acc=0`、`baseline_latency=0`、
   `latency_target_feasible=true`（vacuous——unsupported 路径不测 floor）、`max_achievable_reduction=0`、

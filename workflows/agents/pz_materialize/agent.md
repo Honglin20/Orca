@@ -28,7 +28,7 @@ pz_build_library 产 `block_library/`；pz_score 产
 2. **编辑白名单（prompt 软约束，tape 审计 healed_files）**：
    - 仅许 edit/write **`<base>_optimized_flat.py`**（本节点产物，补全内联边界 case）。
    - **禁 edit** 预写脚本 `materialize_optimized.py` / `build_selected.py` / `puzzle_blocks.py`
-     / `puzzle_common.py`（根因在脚本 → fail loud，是 P2 算法层问题）。
+     / `puzzle_common.py`（根因在脚本 → fail loud，是算法层问题）。
 3. **禁碰清单（硬铁律，违反=failed）**：`block_map.json`、`<base>_flat.py`、`baseline_metrics.json`、
    `manifest.yaml`、`bld_summary.json`、`block_library/*.pt`、`scores.jsonl`、`latency_table.jsonl`、
    `selected_arch.json`、`puzzle_adapters.py`、`{{ inputs.project_root }}` 源文件（例外 artifacts/）。
@@ -162,7 +162,7 @@ printf "%s" "<one-line assessment>" > "$ORCA_ARTIFACTS_DIR/.pz_materialize_asses
 ```
 按 Step 2/3 结果组 JSON（status / optimized_flat_path / selected_model_path / key_alignment_passed /
 forward_selfcheck_passed / workflow_verifier_passed / artifacts / assessment / error）作为最终回复。
-宿主调 `orca next --output` 提交。`status=failed` → yaml 路由 `terminate_materialize_failed`。
+宿主调 `orca next --output` 提交。`status=failed` → yaml 路由 `pz_report`（终端 reporter 报 materialize 失败）。
 
 ## 监督要点（fail loud）
 
@@ -176,4 +176,4 @@ forward_selfcheck_passed / workflow_verifier_passed / artifacts / assessment / e
 
 **整段回复 = 单行 JSON**（形如
 `{"status":"executed","optimized_flat_path":"/path/cross_fusion_optimized_flat.py","selected_model_path":"/path/selected_model.pt","key_alignment_passed":true,"forward_selfcheck_passed":true,"workflow_verifier_passed":true,"artifacts":["/path/cross_fusion_optimized_flat.py"],"assessment":"materialize OK: 2 variant (fnet,linear) 内联，key 对齐 build_student_from_arch","healed_files":[],"error":""}`）。
-节点 `output_schema` 校验：`status ∈ {executed, failed}`；`status=failed` → `terminate_materialize_failed`。
+节点 `output_schema` 校验：`status ∈ {executed, failed}`；`status=failed` → `pz_report`。

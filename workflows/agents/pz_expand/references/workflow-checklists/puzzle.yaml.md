@@ -11,7 +11,7 @@ Each item below is a verifiable requirement extracted from the puzzle workflow's
 ### [CRITICAL] 1. block_map.json Exists And Has ≥1 Slot
 **auto-fixable**: no
 **Section**: Workflow / Step 2 (measure_baseline.py)
-**Check**: `block_map.json` exists under `$ORCA_ARTIFACTS_DIR` and parses as JSON with at least one slot entry. An empty slot list means the model has no replaceable attention/ffn sub-block → `model_type_supported=false` → `terminate_unsupported`. The workflow-verifier only audits artifacts that exist; if the file is absent the caller's pz_expand run already failed loud.
+**Check**: `block_map.json` exists under `$ORCA_ARTIFACTS_DIR` and parses as JSON with at least one slot entry. An empty slot list means the model has no replaceable attention/ffn sub-block → `model_type_supported=false` → routed to terminal reporter `pz_report` (reports unsupported). The workflow-verifier only audits artifacts that exist; if the file is absent the caller's pz_expand run already failed loud.
 **Verify**: Read `block_map.json`; confirm it is a JSON object with a `slots` array containing ≥1 slot. Each slot must carry `{layer_idx, kind, in_dim, out_dim, parent_module_path, ...}` (`kind` ∈ {attention, ffn, conv, moe, custom}).
 **Anti-pattern**: empty `[]` slot list emitted without `model_type_supported=false`; slot missing `kind` or `layer_idx`; legacy `slot_type` field instead of `kind`.
 

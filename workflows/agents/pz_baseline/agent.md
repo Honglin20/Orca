@@ -130,7 +130,7 @@ re-validate them yourself. Script contract (exit code tristate):
 - **exit 0** = success (slot ≥ 1 + 4 smokes green + latency target reachable)
   → Step 2.
 - **exit 2** = empty slots (unsupported) or smoke failure → either emit
-  `model_type_supported=false` routing `terminate_unsupported`, or per the
+  `model_type_supported=false` routing `pz_report` (terminal reporter), or per the
   smoke signal fix the upstream `puzzle_adapters.py` (forward convention /
   load_pretrained prefix stripping / eval noise atol) at pz_ingest and re-run
   the workflow (cross-node self-heal — operator deletes the upstream pz_ingest
@@ -153,8 +153,9 @@ both exist + flat model `py_compile` passes.
    `max_achievable_reduction` (passthrough) + `error` stating "layer replacement
    max reduction X% < target Y%; lower `latency_reduction_target` or this
    model's layer proportion is too low for puzzle".
-3. The engine routes to `terminate_latency_infeasible` (yaml route guard:
-   model_type_supported first, then latency_target_feasible).
+3. The engine routes to `pz_report` (yaml route guard:
+   model_type_supported first, then latency_target_feasible; the terminal reporter
+   reads `baseline_metrics.json` to distinguish latency-infeasible vs unsupported).
 4. Do **not** enter Step 2; do **not** re-enter Step 1 — this is structural,
    not a bug.
 
@@ -223,10 +224,10 @@ output_schema validates it, and non-JSON directly `node_failed`):
 Field semantics (tape audit fields):
 
 - `model_type_supported`: exit 0 / 3 → `true`; exit 2 (smoke failed after the
-  self-heal bound) → `false` → routes to `terminate_unsupported`.
+  self-heal bound) → `false` → routes to `pz_report` (terminal reporter).
 - `latency_target_feasible`: `measure_baseline.py` layer-floor check passes
   (`max_achievable_reduction ≥ latency_reduction_target`) → `true`; exit 3
-  structural unreachable → `false` → routes to `terminate_latency_infeasible`.
+  structural unreachable → `false` → routes to `pz_report` (terminal reporter).
   Default `true` (the smoke-failure path transparently passes `true`; routing
   decides via `model_type_supported` alone).
 - `max_achievable_reduction`: `1 - latency_floor/baseline_latency` (layer-
