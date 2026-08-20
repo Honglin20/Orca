@@ -69,3 +69,30 @@ examples/kd-nas-demo/artifacts/
 # 旧 artifact 目录（可重生成，不入库）
 kd-nas-artifacts/
 llm_artifacts/
+
+# E2E 一次性验证 scratch（driver/monitor/截图/stdout dump，硬编码本机路径，可重生成）
+_e2e_artifacts/
+_e2e_playground
+
+# 演示 / 本地实验目录（不入库）
+.dsh-demo/
+data/
+pi/
+ruflo/
+tmp/
+tmp*
+
+# mnist_kd 示例运行产物 + 旧备份（可重生成）
+examples/mnist_kd/artifacts/
+examples/mnist_kd/artifacts.bak.*/
+kd-nas-artifacts.prior*-bak/
+kd-nas-demo-artifacts/
+
+# kb 概念图 / 一次性报告（本地生成物）
+kb_concept.png
+kb_concept.svg
+kb_graph.html
+final_report.md
+
+# rx-sweep skill 本地 scratch 日志（fixture 运行产物）
+orca/skills/rx-sweep/fixture/*.log
