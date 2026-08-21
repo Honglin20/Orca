@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-21] feat(in-session): script 节点 pass-through——确定性判定从 agent 节点解放（commit `d62e8d6` + `45b0608`）
+
+in-session 三入口（bootstrap/next/daemon）支持 `kind: script`：一次调用内同步执行连续 script 链（ns 先行 emit 对齐 headless / at-least-once / max_iter 防环），路由按 `output.exit_code`/`output.json.*` 确定性分叉，回复带 `auto_executed` 摘要（成功+失败信封，tail 取末 500）。纯增量：schema/compile/exec 零改动，全 agent workflow 逐字节不变；D2 顺带修路由 `{{ inputs.* }}` in-session 裸崩。SPEC 三轮对抗评审闭环（45 项）；单测 39 例 + 子集 927 绿；E2E 真执行全过（CLI 直驱 10 场景 + opencode+deepseek 全链路，SIGKILL at-least-once 实证）。详见 [release note](../releases/2026-08-21-in-session-script-node.md)。
+
 ## [2026-08-18] feat(workflows): puzzle-supernet——choice-only 超网组件搜索 workflow（commit `6b89820`）
 
 以 nas-supernet-v3 为基底 1:1 fork 出 9 节点流水线（`psu_flatten`→`psu_report` 唯一终端 reporter）：choice-only 超网（层数/头数/FFN 维度钉原模型值，每层槽 original 冻结分支 + 注意力变体二选）、预训练权重继承 + original 等价 gate、冻结原模型 teacher KD 只训变体分支、零训练验证搜索选组件（搜组件不搜超参）、物化选定子网 finetune-from-supernet。E2E mnist_trf 9/9 节点通过（LAT 0.699ms≤0.7 / ACC 0.9297≥0.9177 / gate E 56 键零漂移，20 张真实图表落盘）。P7 收尾按节点派 10 个审查 agent 复审洁净度（9 节点 + 8 subagents 清单），39 处开发期残留（设计论证 / 派单字母标签 / 事故复盘 / 版本考古 / 悬空引擎引用）全修；顺带修复 2 个环境耦合测试（search_table HTML 断言绑定 stdlib 兜底渲染器——plotly 装机时走 JS 嵌数据层，PYTHONPATH shim 强制确定性走 pure-html floor）。88 测试全绿；`tars validate` 0 error 0 warning。详见 [release note](../releases/2026-08-18-puzzle-supernet-workflow.md)。
