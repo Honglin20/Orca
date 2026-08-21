@@ -336,6 +336,29 @@ def test_inline_stdout_tail_limit_500(tmp_path):
     bus.close()
 
 
+def test_inline_tail_takes_end_segment_not_head(tmp_path):
+    """§2.4.5 回归（E2E D-1）：tail 取**末** 500 字符（Unix tail 语义——长输出的
+    verdict/error 在末尾），非前 500。600 个 H/E（头）+ 尾部标记（首尾可区分），
+    前 115 个字符必须被截掉。"""
+    node = ScriptNode(
+        name="s",
+        command="head -c 600 /dev/zero | tr '\\0' 'H'; printf 'TAIL-MARKER-END'; "
+                "head -c 600 /dev/zero | tr '\\0' 'E' >&2; printf 'STDERR-TAIL-END' >&2",
+        routes=[Route(to="$end")],
+    )
+    (output, summary), tape, bus = _run_inline(tmp_path, node)
+    # 头尾可区分前提：stdout = 600×H + 15 标记，stderr = 600×E + 15 标记
+    assert output["stdout"] == "H" * 600 + "TAIL-MARKER-END"
+    assert output["stderr"] == "E" * 600 + "STDERR-TAIL-END"
+    assert len(summary["stdout_tail"]) == 500
+    assert summary["stdout_tail"].endswith("TAIL-MARKER-END")
+    assert summary["stdout_tail"] == "H" * 485 + "TAIL-MARKER-END"
+    assert len(summary["stderr_tail"]) == 500
+    assert summary["stderr_tail"].endswith("STDERR-TAIL-END")
+    assert summary["stderr_tail"] == "E" * 485 + "STDERR-TAIL-END"
+    bus.close()
+
+
 # ── 共享循环：advance_with_scripts（§2.5，fake executor 注入）────────────────
 
 

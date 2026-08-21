@@ -236,7 +236,8 @@ async def fail_in_session(
 # ── in-session script 内联执行（SPEC 2026-08-21-in-session-script-node §2.4/§2.5）──
 
 
-# §2.4.5：auto_executed 摘要的 stdout/stderr tail 截断上限（完整 output 只在 tape，web 可查）。
+# §2.4.5：auto_executed 摘要的 stdout/stderr tail 截断上限——取**末** N 字符（Unix tail
+# 语义：长输出的 verdict/error 在末尾；完整 output 只在 tape，web 可查）。
 _AUTO_EXEC_TAIL_LIMIT = 500
 
 
@@ -289,7 +290,7 @@ async def execute_script_inline(
     返回 ``(output, summary)``：``output`` = nc.data.output（``{stdout, stderr, exit_code[,
     json]}``，供调用方 / 测试消费——路由不再经它，nc 已落 tape 由 ``advance_after_script``
     重放取）；``summary`` = §2.4.5 auto_executed 摘要条目 ``{node, exit_code, elapsed,
-    stdout_tail, stderr_tail}``（tail ≤ ``_AUTO_EXEC_TAIL_LIMIT``）。
+    stdout_tail, stderr_tail}``（tail = 输出**末** ``_AUTO_EXEC_TAIL_LIMIT`` 字符）。
 
     批次间崩溃（nc/nf 未落）→ tape 停留 ns(S)，下次不带 --output 的 next 重执行（§2.6-C）。
     """
@@ -337,8 +338,8 @@ async def execute_script_inline(
         "node": node.name,
         "exit_code": output.get("exit_code"),
         "elapsed": elapsed,
-        "stdout_tail": (output.get("stdout") or "")[:_AUTO_EXEC_TAIL_LIMIT],
-        "stderr_tail": (output.get("stderr") or "")[:_AUTO_EXEC_TAIL_LIMIT],
+        "stdout_tail": (output.get("stdout") or "")[-_AUTO_EXEC_TAIL_LIMIT:],
+        "stderr_tail": (output.get("stderr") or "")[-_AUTO_EXEC_TAIL_LIMIT:],
     }
     return output, summary
 
