@@ -5,6 +5,10 @@
 的 ``StepResult`` 落成 tape 事件 + 构造给宿主的回复信封。失败路径统一以
 ``InSessionError.error_kind`` 为分类轴（SPEC §2.5），单一真相源（取代 daemon 旧 isinstance 粗分）。
 
+SPEC 2026-08-21-in-session-script-node §2.4/§2.5 扩展：``execute_script_inline``（script 节点
+就地内联执行，ns 先行 / nc|nf 各自成批 / 丢弃尾随 error 事件）+ ``advance_with_scripts``
+（三入口共享驱动循环：advance → 内联 script 链 → 停在 agent / 终态，D3 max_iter 上限）。
+
 副作用边界（spec-reviewer issue8，钉死）：helper **只做 emit + 返信封**。marker 清理 /
 echo / exit 归调用方——cli 顺序 ``emit → clear_marker → echo → exit(1)``，daemon 无 marker。
 
@@ -20,12 +24,26 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from orca.events.bus import EventBus
-from orca.run.lifecycle import make_workflow_failed
+from orca.run.lifecycle import make_workflow_failed, resolve_max_iter
 from orca.run.memory import write_node_memory
+from orca.run.step import (
+    ERR_INTERNAL_ERROR,
+    ERR_SCRIPT_TIMEOUT,
+    InSessionError,
+    advance_after_script,
+    advance_step,
+    inline_script_ctx,
+    merged_inputs_for,
+)
+
+if TYPE_CHECKING:
+    from orca.events.tape import Tape
+    from orca.schema.workflow import ScriptNode, Workflow
 
 logger = logging.getLogger(__name__)
 
@@ -198,10 +216,215 @@ async def fail_in_session(
       emit 本身吞错仅 log（tape 可能已坏，仍要返信封给调用方）。
     - 信封：``{done:True, error_kind, reason:"failed: <msg>"}``（**新字段 ``error_kind``**，
       供主 session/监控拿结构化分类；与 tape ``data.kind`` 同值，**字段名不同**——B4/B7 陷阱）。
+    - **``auto_executed``（SPEC 2026-08-21-in-session-script-node §2.7）**：失败信封同样附
+      已成功执行的 script 摘要（「不显性化 ≠ 不可见」）。注入通道钉死一种：共享循环把已成功
+      条目挂到 ``InSessionError.auto_executed`` 属性，本函数单点读取（bootstrap / next /
+      daemon 三个失败出口共用）。零成功条目（属性缺省 / 空）→ 字段省略。
 
     副作用边界：只 emit + 返信封；marker 清理 / echo / exit 归调用方（cli 顺序
     ``fail_in_session → clear_marker → echo → exit(1)``；daemon 无 marker）。
     """
     error_kind = _classify_in_session_error(exc)
     await _emit_workflow_failed(bus, error_kind, str(exc), node=node)
-    return {"done": True, "error_kind": error_kind, "reason": f"failed: {exc}"}
+    reply = {"done": True, "error_kind": error_kind, "reason": f"failed: {exc}"}
+    auto_executed = getattr(exc, "auto_executed", None)
+    if auto_executed:
+        reply["auto_executed"] = list(auto_executed)
+    return reply
+
+
+# ── in-session script 内联执行（SPEC 2026-08-21-in-session-script-node §2.4/§2.5）──
+
+
+# §2.4.5：auto_executed 摘要的 stdout/stderr tail 截断上限（完整 output 只在 tape，web 可查）。
+_AUTO_EXEC_TAIL_LIMIT = 500
+
+
+def _node_by_name(wf: Workflow) -> dict[str, Any]:
+    return {n.name: n for n in wf.nodes}
+
+
+def _raise_script_failure(node_name: str, nf_data: dict[str, Any]) -> None:
+    """§2.6 错误映射：script ``node_failed``（ExecError 路径）→ in-session taxonomy。
+
+    - ``phase == "timeout"`` → ``ERR_SCRIPT_TIMEOUT``（终态 fail loud）。
+    - 其余（spawn / render 等）→ ``internal_error``（消息含 phase，终态 fail loud）。
+    非零退出码**不走本函数**（ScriptExecutor 正常 nc，业务结果由路由分叉）。
+    """
+    phase = nf_data.get("phase", "")
+    message = nf_data.get("message", "script 执行失败")
+    if phase == "timeout":
+        raise InSessionError(
+            f"script 节点 {node_name!r} 超时失败：{message}",
+            error_kind=ERR_SCRIPT_TIMEOUT,
+        )
+    raise InSessionError(
+        f"script 节点 {node_name!r} 执行失败（phase={phase!r}）：{message}",
+        error_kind=ERR_INTERNAL_ERROR,
+    )
+
+
+async def execute_script_inline(
+    bus: EventBus, tape: Tape, wf: Workflow, node: ScriptNode, *,
+    run_id: str, inputs: dict[str, Any], yaml_path: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """§2.4：就地（同一次调用内）执行一个 script 节点，逐批 emit 事件。
+
+    事件流（D1=a，与 headless 逐条 emit 同形）：
+      - 首 yield ``node_started`` → **立即** ``emit_batch([ns])``（ns 先落 tape：script 执行
+        期间被杀的崩溃态可达，§2.6-C 窗口 i 可恢复）；
+      - ``node_completed`` → ``emit_batch([nc])``；
+      - ``node_failed``（ExecError 路径）→ ``emit_batch([nf])``，executor 尾随的 ``error``
+        事件**丢弃不 emit**（headless 同语义：``executor_adapter`` 在 node_failed 即 raise，
+        ``error`` 从不落 tape；reducer 对 ``error`` no-op，丢弃零状态影响）→ 随后按 §2.6
+        映射 raise ``InSessionError``。
+      - emit 保留 executor 产出的 session_id / timestamp / node / data（session_id 是 web 按
+        session 分组的依据）。
+
+    ctx / executor（§2.4.1/§2.4.2）：``RunContext`` 经 ``step.inline_script_ctx`` 公开出口
+    构造（``inputs`` = 共享循环的 ``merged_inputs``，**非** CLI 原始 ``--inputs``）；
+    ``make_executor(node, runs_dir=tape.path.parent, workflows_root=<yaml_path 父目录>)``，
+    ``yaml_path`` None → 回落 ``wf.workflows_root``。
+
+    返回 ``(output, summary)``：``output`` = nc.data.output（``{stdout, stderr, exit_code[,
+    json]}``，供调用方 / 测试消费——路由不再经它，nc 已落 tape 由 ``advance_after_script``
+    重放取）；``summary`` = §2.4.5 auto_executed 摘要条目 ``{node, exit_code, elapsed,
+    stdout_tail, stderr_tail}``（tail ≤ ``_AUTO_EXEC_TAIL_LIMIT``）。
+
+    批次间崩溃（nc/nf 未落）→ tape 停留 ns(S)，下次不带 --output 的 next 重执行（§2.6-C）。
+    """
+    from orca.exec.factory import make_executor
+
+    ctx, workflows_root = inline_script_ctx(
+        wf, tape, inputs=inputs, run_id=run_id, yaml_path=yaml_path,
+    )
+    executor = make_executor(
+        node, runs_dir=tape.path.parent, workflows_root=workflows_root,
+    )
+
+    output: dict[str, Any] | None = None
+    elapsed: float | None = None
+    failed_data: dict[str, Any] | None = None
+    async for event in executor.exec(node, ctx):
+        if event.type == "error":
+            # executor 尾随 error 事件丢弃（§2.4.3，headless 同语义）。
+            continue
+        await bus.emit_batch([{
+            "type": event.type,
+            "data": event.data,
+            "node": event.node,
+            "session_id": event.session_id,
+            "timestamp": event.timestamp,
+        }])
+        if event.type == "node_completed":
+            output = event.data.get("output")
+            elapsed = event.data.get("elapsed")
+        elif event.type == "node_failed":
+            failed_data = event.data
+    if failed_data is not None:
+        _raise_script_failure(node.name, failed_data)
+    if output is None:
+        # executor 生命周期违约（无 nc 无 nf，interface 契约外）——fail loud 兜底。
+        raise InSessionError(
+            f"script 节点 {node.name!r} 的 executor 未产出 node_completed（生命周期违约）",
+            error_kind=ERR_INTERNAL_ERROR,
+        )
+    logger.info(
+        "inline script 完成（run=%s, node=%s, exit_code=%s, elapsed=%.3fs）",
+        run_id, node.name, output.get("exit_code"), elapsed or 0.0,
+    )
+    summary = {
+        "node": node.name,
+        "exit_code": output.get("exit_code"),
+        "elapsed": elapsed,
+        "stdout_tail": (output.get("stdout") or "")[:_AUTO_EXEC_TAIL_LIMIT],
+        "stderr_tail": (output.get("stderr") or "")[:_AUTO_EXEC_TAIL_LIMIT],
+    }
+    return output, summary
+
+
+async def advance_with_scripts(
+    bus: EventBus, tape: Tape, wf: Workflow, *,
+    output: str | None, cli_inputs: dict[str, Any], run_id: str,
+    prompts_dir: Path | None = None, yaml_path: str | None = None,
+    host_session: str | None = None, project_root: Path | None = None,
+    no_memory: bool = False,
+    on_script_chain_start: Callable[[], None] | None = None,
+) -> tuple[Any, dict[str, Any], list[dict[str, Any]]]:
+    """§2.5 驱动循环（cli bootstrap / cli next / daemon next 三入口共享）。
+
+    流程：
+      1. ``merged_inputs = merged_inputs_for(tape, wf, cli_inputs)``（M1 单一口径：tape 真相源
+         + CLI override + default 填充；向 execute_script_inline / advance_after_script /
+         resolve_max_iter 全程透传同一值）。
+      2. ``advance_step``（现行为）→ ``apply_step_result``（批 emit）。
+      3. ``on_script_chain_start``（D4 round-3：仅 cli ``next`` 注入的守护前置 ensure 回调；
+         首步 advance 判出 ``node_kind=="script"`` 且非终态时、进 script 循环**前**调用一次。
+         bootstrap / daemon 不传 → 零行为）。
+      4. script 循环（D3 上限 = ``resolve_max_iter(wf, merged_inputs)``，防 script 路由成环
+         撞 flock 死锁）：``execute_script_inline``（ns / nc|nf 各自成批 emit）→
+         ``advance_after_script``（rt + ns(next) | workflow_completed）→ ``apply_step_result``。
+         循环停在 agent 节点（返其 prompt 交付）或终态。
+
+    失败路径（§2.5）：循环内任一步 raise ``InSessionError`` → 把已成功条目挂到异常的
+    ``auto_executed`` 属性后 re-raise → 调用方现有 ``except InSessionError`` 走
+    ``fail_in_session`` 单点（emit workflow_failed + 失败信封注入 auto_executed）。
+    node_failed 不重试、不 recoverable（§0 非目标）。
+
+    返回 ``(result, reply, auto_executed)``：``result`` = 循环**最终** StepResult（合规计数 /
+    marker RMW / env 写均取它判定，§2.5）；``reply`` = 末次 ``apply_step_result`` 的基础信封
+    （daemon 直接返它 + auto_executed；cli 自建富信封可丢弃）；``auto_executed`` = 按执行
+    顺序的成功摘要条目（零条 → 空列表，调用方据此省略字段，§2.7）。
+    """
+    merged_inputs = merged_inputs_for(tape, wf, cli_inputs)
+    result = advance_step(
+        tape, wf, output=output, inputs=merged_inputs, run_id=run_id,
+        prompts_dir=prompts_dir, yaml_path=yaml_path, host_session=host_session,
+        project_root=project_root, no_memory=no_memory,
+    )
+    reply = await apply_step_result(
+        bus, result, wf=wf, run_id=run_id, no_memory=no_memory, project_root=project_root,
+    )
+    auto_executed: list[dict[str, Any]] = []
+    nodes = _node_by_name(wf)
+    if (not result.done) and result.node_kind == "script":
+        if on_script_chain_start is not None:
+            on_script_chain_start()
+        # 非法 iterations（显式声明却非数值）→ 包成 InSessionError 走 workflow_failed 信封，
+        # 与 headless 同契约（orchestrator 捕获 → workflow_failed，``lifecycle.resolve_max_iter``
+        # fail loud 注释明示）——否则 ValueError 裸穿 except InSessionError 面（tape 悬留、无信封）。
+        try:
+            max_scripts = resolve_max_iter(wf, merged_inputs)
+        except (ValueError, TypeError) as e:
+            raise InSessionError(
+                f"max_iter 解析失败（inputs.iterations 非法）：{e}",
+                error_kind=ERR_INTERNAL_ERROR,
+            ) from e
+        while (not result.done) and result.node_kind == "script":
+            try:
+                if len(auto_executed) >= max_scripts:
+                    # D3：内联 script 执行数撞上限（疑似路由成环）——fail loud 终态。
+                    raise InSessionError(
+                        "内联 script 执行数撞 max_iter 上限（疑似路由成环）",
+                        error_kind=ERR_INTERNAL_ERROR,
+                    )
+                _output, summary = await execute_script_inline(
+                    bus, tape, wf, nodes[result.node], run_id=run_id,
+                    inputs=merged_inputs, yaml_path=yaml_path,
+                )
+                auto_executed.append(summary)
+                result = advance_after_script(
+                    tape, wf, result.node, inputs=merged_inputs, run_id=run_id,
+                    prompts_dir=prompts_dir, project_root=project_root,
+                    no_memory=no_memory, yaml_path=yaml_path,
+                )
+                reply = await apply_step_result(
+                    bus, result, wf=wf, run_id=run_id, no_memory=no_memory,
+                    project_root=project_root,
+                )
+            except InSessionError as e:
+                # §2.7：失败信封同样报备已成功条目（挂属性 → fail_in_session 单点读取）。
+                if auto_executed:
+                    e.auto_executed = list(auto_executed)
+                raise
+    return result, reply, auto_executed

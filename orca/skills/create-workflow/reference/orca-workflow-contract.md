@@ -41,6 +41,13 @@
 ### script —— `ScriptNode`
 `command`（必填，Jinja2 shell）、`parse_json`（默认 false）、`timeout`。输出 `{stdout, stderr, exit_code}`（+`json`）。
 
+> **in-session 三契约（SPEC 2026-08-21）**：① script 节点在 in-session 路径会被
+> **at-least-once 重执行**（CLI 崩溃后续跑重跑该节点），必须幂等或自守单实例；
+> ② **bootstrap 期执行的 script 链（含 entry 链）不应推图**——chart 守护在 advance
+> 之后才 spawn，`render_chart` raise 会被当业务结果走兜底路由；③ `inputs.iterations`
+> 同时是**单次调用内联 script 链长度上限**——声明小值的 workflow 长 script 链会撞顶
+> `workflow_failed(internal_error)`。
+
 ### set —— `SetNode`
 `values: dict[str, str]`（必填，`{key: Jinja2 表达式}`）。无 token、无 shell，纯求值存输出。
 

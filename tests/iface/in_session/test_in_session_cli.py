@@ -969,12 +969,16 @@ def test_failure_output_schema_mismatch(cwd_tmp, wf_path):
 
 
 def test_failure_unsupported_node_kind(cwd_tmp):
-    """script 节点（非 agent）→ workflow_failed(unsupported_node_kind)。"""
-    yaml_text = AGENT_WF_YAML.replace("kind: agent", "kind: script", 1).replace(
+    """set 节点（非 agent/script）→ workflow_failed(unsupported_node_kind)。
+
+    SPEC 2026-08-21-in-session-script-node §5.4：script 节点落地后合法（pass-through），
+    fixture 换仍不支持的 ``kind: set``（+ 必填 ``values``）；断言不变（仍 fail loud）。
+    """
+    yaml_text = AGENT_WF_YAML.replace("kind: agent", "kind: set", 1).replace(
         '    executor: opencode\n    model: deepseek/deepseek-v4-flash\n    prompt: "产出 step A 的输出。"',
-        '    command: "echo a"',
+        '    values:\n      k: "1"',
     )
-    p = cwd_tmp / "wf_script.yaml"
+    p = cwd_tmp / "wf_set.yaml"
     p.write_text(yaml_text, encoding="utf-8")
 
     runner = CliRunner()

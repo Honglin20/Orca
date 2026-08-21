@@ -574,10 +574,12 @@ def test_first_run_body_literal_strip_frontmatter(tmp_path):
 
 
 def test_cli_next_no_memory_flag_passthrough(tmp_path, monkeypatch):
-    """``orca next --no-memory`` flag → 真传到 advance_step(no_memory=True) + apply_step_result。
+    """``orca next --no-memory`` flag → 真传到共享驱动循环（no_memory=True + project_root）。
 
-    SPEC §5 CLI flag 是契约面。本测试从 typer CliRunner 进,捕获 advance_step 调用 kwargs,
-    断言 ``no_memory=True`` / ``project_root=Path.cwd()`` 真传到。守 cli.py:963→1118→1143 透传链。
+    SPEC §5 CLI flag 是契约面。本测试从 typer CliRunner 进,捕获 ``advance_with_scripts``
+    调用 kwargs（SPEC 2026-08-21 §2.5 起 next 主体接共享循环,其内部再传
+    advance_step/apply_step_result）,断言 ``no_memory=True`` / ``project_root=Path.cwd()``
+    真传到。守 cli next → _next_in_critical_section → advance_with_scripts 透传链。
     """
     from typer.testing import CliRunner
     from orca.iface.in_session import cli as cli_mod
@@ -587,20 +589,16 @@ def test_cli_next_no_memory_flag_passthrough(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     runs_dir = tmp_path / "runs"
     runs_dir.mkdir()
-    # 写最小 tape(workflow_started + node_started)和 marker,让 _load_wf_for_run / read_marker 通过
-    # 但更稳的做法是直接 mock advance_step + apply_step_result,绕开 tape 准备
+    # 写最小 tape(workflow_started)和 marker,让 _load_wf_for_run / read_marker 通过
+    # 但更稳的做法是直接 mock 共享循环,绕开 tape 推进
     captured: dict = {}
 
-    async def _fake_apply(bus, result, **kwargs):
-        captured.update(kwargs)
-        return {"done": False}
-
-    def _fake_advance(tape, wf, **kwargs):
+    async def _fake_loop(bus, tape, wf, *, output, cli_inputs, run_id, **kwargs):
         captured.update(kwargs)
         from orca.run.step import StepResult
-        return StepResult(done=False, node="a")
+        return StepResult(done=False, node="a"), {"done": False}, []
 
-    # marker 必须存在(否则 _next_in_critical_section 返 no-marker,advance_step 不调)
+    # marker 必须存在(否则 _next_in_critical_section 返 no-marker,循环不调)
     run_id = "r-cli-test"
     tape_path = runs_dir / f"{run_id}.jsonl"
     tape_path.write_text(
@@ -615,10 +613,9 @@ def test_cli_next_no_memory_flag_passthrough(tmp_path, monkeypatch):
     write_marker(marker_path(runs_dir, run_id),
                  ActivationMarker(run_id=run_id, model="m", no_output_count=0))
 
-    # mock wf 加载(_load_wf_for_run 返 None 名 wf 会让流程异常;但 advance_step 被 mock 了)
+    # mock wf 加载(_load_wf_for_run 返 None 名 wf 会让流程异常;但共享循环被 mock 了)
     monkeypatch.setattr(cli_mod, "_load_wf_for_run", lambda rid, tape: object())
-    monkeypatch.setattr(cli_mod, "advance_step", _fake_advance)
-    monkeypatch.setattr(cli_mod, "apply_step_result", _fake_apply)
+    monkeypatch.setattr(cli_mod, "advance_with_scripts", _fake_loop)
 
     runner = CliRunner()
     result = runner.invoke(app, [
@@ -658,21 +655,16 @@ def test_cli_bootstrap_no_memory_flag_passthrough(tmp_path, monkeypatch):
 
     captured: dict = {}
 
-    async def _fake_apply(bus, result, **kwargs):
-        captured.update(kwargs)
-        return {"done": False}
-
-    def _fake_advance(tape, wf, **kwargs):
+    async def _fake_loop(bus, tape, wf, *, output, cli_inputs, run_id, **kwargs):
         captured.update(kwargs)
         from orca.run.step import StepResult
-        return StepResult(done=False, node="a")
+        return StepResult(done=False, node="a"), {"done": False}, []
 
     # bootstrap 不需要 marker,但会 spawn 守护 → mock 掉避免 detach 进程
     monkeypatch.setattr(cli_mod, "_spawn_chart_daemon", lambda *a, **kw: None)
     monkeypatch.setattr(cli_mod, "_wait_for_sock", lambda *a, **kw: True)
     monkeypatch.setattr(cli_mod, "_spawn_sidechain_daemon", lambda *a, **kw: None)
-    monkeypatch.setattr(cli_mod, "advance_step", _fake_advance)
-    monkeypatch.setattr(cli_mod, "apply_step_result", _fake_apply)
+    monkeypatch.setattr(cli_mod, "advance_with_scripts", _fake_loop)
     # _default_tape_path 指 tmp_path,避免污染真实 runs/
     monkeypatch.setattr(cli_mod, "_default_tape_path", lambda rid: tmp_path / "runs" / f"{rid}.jsonl")
 
@@ -690,10 +682,11 @@ def test_cli_bootstrap_no_memory_flag_passthrough(tmp_path, monkeypatch):
 
 
 def test_daemon_next_passes_project_root_to_advance_step(tmp_path, monkeypatch):
-    """daemon.next() 调 advance_step + apply_step_result 都传 project_root(架构对称)。
+    """daemon.next() 调共享驱动循环传 project_root(架构对称)。
 
     守 SPEC §6「避免 two-path 分叉」:daemon 路径不能只写不注入(写 MD 但 prompt 不含记忆段
-    会让 MD 单向积累,违背特性目的)。
+    会让 MD 单向积累,违背特性目的)。SPEC 2026-08-21 §2.5 起 daemon.next 接
+    ``advance_with_scripts``（内部再传 advance_step/apply_step_result）。
     """
     from orca.iface.in_session import daemon as daemon_mod
     from orca.iface.in_session.daemon import InSessionDaemon
@@ -703,14 +696,10 @@ def test_daemon_next_passes_project_root_to_advance_step(tmp_path, monkeypatch):
 
     captured: dict = {}
 
-    def _fake_advance(tape, wf_arg, **kwargs):
+    async def _fake_loop(bus, tape, wf_arg, *, output, cli_inputs, run_id, **kwargs):
         captured.update(kwargs)
         from orca.run.step import StepResult
-        return StepResult(done=False, node="a")
-
-    async def _fake_apply(bus, result, **kwargs):
-        captured.update(kwargs)
-        return {"done": False}
+        return StepResult(done=False, node="a"), {"done": False}, []
 
     # 构造 daemon:绕开 __init__ 的 flock / Tape / signal 注册(单测只验 kwargs 透传)
     inst = InSessionDaemon.__new__(InSessionDaemon)
@@ -721,8 +710,7 @@ def test_daemon_next_passes_project_root_to_advance_step(tmp_path, monkeypatch):
     inst.bus = None
     inst._pending_output = "OUT"
 
-    monkeypatch.setattr(daemon_mod, "advance_step", _fake_advance)
-    monkeypatch.setattr(daemon_mod, "apply_step_result", _fake_apply)
+    monkeypatch.setattr(daemon_mod, "advance_with_scripts", _fake_loop)
     import asyncio
     asyncio.run(inst.next())
 

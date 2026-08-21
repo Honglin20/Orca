@@ -52,7 +52,7 @@ from orca.events.tape import Tape
 from orca.schema.workflow import InputInvariant
 from orca.iface.in_session._step_io import (
     _emit_workflow_failed,
-    apply_step_result,
+    advance_with_scripts,
     fail_in_session,
     merge_recoverable_envelope,
 )
@@ -78,7 +78,7 @@ from orca.run.lifecycle import (
     gen_run_id,
 )
 from orca.run._errors import INPUTS_VALIDATION_ERROR
-from orca.run.step import InSessionError, advance_step
+from orca.run.step import InSessionError
 
 logger = logging.getLogger(__name__)
 
@@ -1105,11 +1105,18 @@ def _echo_busy_reply() -> None:
     bootstrap / next / stop 三命令在 ``_try_acquire_flock`` 返 None（LOCK_NB 撞锁）时调本
     helper 统一信封形态：``{done: False, reason: "busy", retry_after_ms: 500}``。主 session
     据 ``retry_after_ms`` 等待后**重试同一 next**（不重派子代理 / 不重发 prompt）。
+
+    ``hint``（SPEC 2026-08-21-in-session-script-node §2.6-C U1=a）：通用提示（不做持有者
+    探测）——长 script 执行期间 next 持 flock，撞锁的 next/stop 等待即可；确需中止时 kill
+    持锁的 next 进程（flock 随进程释放；孤儿子进程限制见 §2.6-C B6）。
     """
     typer.echo(json.dumps({
         "done": False,
         "reason": "busy",
         "retry_after_ms": _BUSY_RETRY_AFTER_MS,
+        "hint": (
+            "锁可能被正在执行 script 的 next 持有；中止请 kill 该 next 进程，锁随进程释放。"
+        ),
     }))
 
 
@@ -1120,10 +1127,11 @@ def _echo_busy_reply() -> None:
 
 # ── 失败 taxonomy / 信封拼装（SPEC §2.5 表，F6 闭环）─────────────────────────
 #
-# ``_classify_in_session_error`` / ``_emit_workflow_failed`` / ``apply_step_result`` /
+# ``_classify_in_session_error`` / ``_emit_workflow_failed`` / ``advance_with_scripts`` /
 # ``fail_in_session`` 已抽到 ``iface/in_session/_step_io.py``（v5 §8 step 5b：daemon + cli
 # 两路共享 IO 边界，单一分类轴 ``InSessionError.error_kind``）。本模块 import 复用：
-#   - ``apply_step_result``：成功路径 emit_batch + 基础信封（bootstrap/next 成功）。
+#   - ``advance_with_scripts``：共享驱动循环（advance_step + 内联 script 链，SPEC
+#     2026-08-21 §2.5——bootstrap/next 的推进主体）。
 #   - ``fail_in_session``：失败路径 emit workflow_failed + 错误信封（bootstrap/next except）。
 #   - ``_emit_workflow_failed``：合规计数 / marker 写失败（字面 error_kind，非 InSessionError）。
 # 分类函数 ``_classify_in_session_error`` 是 helper 内部实现（``fail_in_session`` 调用），
@@ -1324,7 +1332,7 @@ def bootstrap(
             return
         fd, _ = acquired
         try:
-            result = asyncio.run(_advance_and_emit(
+            result, auto_executed = asyncio.run(_advance_and_emit(
                 bus, wf_obj, tape, output=None, inputs=inp, run_id=run_id,
                 prompts_dir=_prompts_dir_for(tape_path, run_id),
                 yaml_path=os.path.realpath(yaml_path),
@@ -1333,7 +1341,7 @@ def bootstrap(
                 no_memory=no_memory,
             ))
         except InSessionError as e:
-            # bootstrap 失败 = 配置坏（如 entry 不是 agent 节点），fail loud。
+            # bootstrap 失败 = 配置坏（如 entry 是不支持的节点类型），fail loud。
             # fail_in_session：emit workflow_failed（tape data.kind = error_kind）+ 返
             # 含 ``error_kind`` 的错误信封（v5 §8 step 5b，SPEC §2.3 信封契约）。
             reply = asyncio.run(fail_in_session(bus, e))
@@ -1348,30 +1356,33 @@ def bootstrap(
 
         # 写激活 marker（仍在 advisory lock 内；B-5 闭环：包 try，失败 emit workflow_failed
         # 不留「tape 有 ws+ns 但无 marker」的不可恢复态）。
-        try:
-            write_marker(mpath, ActivationMarker(
-                run_id=run_id, model=model, no_output_count=0,
-            ))
-        except OSError as e:
-            # marker 写失败（磁盘满 / 权限）→ tape 已 emit ws+ns 但 next 无 marker → 不可恢复。
-            # fail loud：另开 tape 写 workflow_failed（best effort）+ 非 0 退出。
-            logger.exception("bootstrap 写激活 marker 失败")
+        # B8（SPEC 2026-08-21 §2.5）：共享循环返回终态（entry script 直通 $end 等）→ 不写
+        # marker（无节点要驱动；run 不进活跃列表属已知取舍，排查走 tape 路径）。
+        if not result.done:
             try:
-                tape2 = Tape(tape_path, run_id=run_id, resume=True)
-                bus2 = EventBus(tape2)
+                write_marker(mpath, ActivationMarker(
+                    run_id=run_id, model=model, no_output_count=0,
+                ))
+            except OSError as e:
+                # marker 写失败（磁盘满 / 权限）→ tape 已 emit ws+ns 但 next 无 marker → 不可恢复。
+                # fail loud：另开 tape 写 workflow_failed（best effort）+ 非 0 退出。
+                logger.exception("bootstrap 写激活 marker 失败")
                 try:
-                    asyncio.run(_emit_workflow_failed(
-                        bus2, "internal_error", f"write_marker failed: {e}",
-                    ))
-                finally:
-                    bus2.close()
-            except Exception:
-                logger.exception("marker 失败后 workflow_failed 也失败")
-            typer.echo(json.dumps({
-                "done": True, "error_kind": "internal_error",
-                "reason": f"failed: write_marker: {e}",
-            }, ensure_ascii=False))
-            raise typer.Exit(1)
+                    tape2 = Tape(tape_path, run_id=run_id, resume=True)
+                    bus2 = EventBus(tape2)
+                    try:
+                        asyncio.run(_emit_workflow_failed(
+                            bus2, "internal_error", f"write_marker failed: {e}",
+                        ))
+                    finally:
+                        bus2.close()
+                except Exception:
+                    logger.exception("marker 失败后 workflow_failed 也失败")
+                typer.echo(json.dumps({
+                    "done": True, "error_kind": "internal_error",
+                    "reason": f"failed: write_marker: {e}",
+                }, ensure_ascii=False))
+                raise typer.Exit(1)
     finally:
         # SPEC §3 O2：bootstrap_lock 释放在 write_marker 之后、spawn daemons 之前。
         # 释放后第二个 bootstrap 能立刻进 dupe check（看到本 run 的 marker → fail loud），
@@ -1384,13 +1395,28 @@ def bootstrap(
     # ── 以下在 bootstrap_lock **外**（SPEC §3 O2）：run_id 派生路径，不参与 dupe 判定 ──
     # 变量 run_id / tape_path / result 在锁内已赋值；非 early-exit 路径（return / raise Exit）
     # 才会到达此处，故变量必已初始化（dupe check / busy / InSessionError / write_marker 失败
-    # 都已 early-exit，本块仅在「marker 已落 + workflow_started 已 emit」时跑）。
+    # 都已 early-exit，本块仅在「workflow_started 已 emit」时跑——marker 在 B8 终态下不落）。
     #
     # code-reviewer 🟡#3：``assert`` 守门，防未来新增「锁内不 raise 的 return」漏赋变量
     # 导致锁外 NameError（fail loud 在断言，而非 NameError 在 chart_sock_path(run_id)）。
     assert run_id, "O2 invariant: post-lock code requires run_id set inside lock"
     assert tape_path is not None, "O2 invariant: post-lock code requires tape_path set"
     assert result is not None, "O2 invariant: post-lock code requires result set"
+
+    # B8（SPEC 2026-08-21-in-session-script-node §2.5）：共享循环返回终态（entry script 直通
+    # $end 等）→ 短路锁外全套动作——不注册项目 / 不写 env 文件 / 不 spawn chart/sidechain
+    # 守护 / 不开 web / 不 mkdir artifacts，仅拼终态回复（run 不进 web 列表属已知取舍：排查
+    # 走 tape 路径；下次任一 bootstrap 会再注册本项目）。
+    if result.done:
+        terminal_reply: dict[str, Any] = {
+            "run_id": run_id, "tape": str(tape_path), "done": True,
+        }
+        if result.reason:
+            terminal_reply["reason"] = result.reason
+        if auto_executed:
+            terminal_reply["auto_executed"] = auto_executed
+        typer.echo(json.dumps(terminal_reply, ensure_ascii=False))
+        return
 
     # SPEC §13 D4：注册本项目到 ~/.orca/projects.json——web 列表 discovery + 详情懒挂载
     # 都依赖注册表，in-session run 不注册则在 web 不可见。fail-open（见 helper docstring）。
@@ -1505,6 +1531,10 @@ def bootstrap(
         reply["node"] = result.node
     if web_url:
         reply["web_url"] = web_url
+    # SPEC 2026-08-21 §2.7：auto_executed 摘要（仅当本次调用成功完成 ≥1 个 script——如
+    # entry script 链后停在 agent；失败信封由 fail_in_session 单点注入）。
+    if auto_executed:
+        reply["auto_executed"] = auto_executed
     prompt_text = _reply_prompt(result, env_file=env_path)
     # model-driven advance 补丁：entry prompt 后附「驱动协议」，模型据此自调 next --output。
     if prompt_text:
@@ -1566,7 +1596,7 @@ def next(
     tape_obj = Tape(tape_path, run_id=run_id, resume=True)   # 半写恢复（I3.4）
     bus = EventBus(tape_obj)
     try:
-        result, compliance_failed, warn_count = asyncio.run(_next_in_critical_section(
+        result, compliance_failed, warn_count, auto_executed = asyncio.run(_next_in_critical_section(
             bus, tape_obj, run_id, normalized_output, inp, mpath,
             _prompts_dir_for(tape_path, run_id),
             env_path=_env_file_path(tape_path, run_id),
@@ -1642,6 +1672,10 @@ def next(
     # 升格（连续 recoverable 撞上限）：result.done=True + error_kind → 终态失败，surface error_kind。
     elif result.done and result.error_kind and "error_kind" not in reply:
         reply["error_kind"] = result.error_kind
+    # SPEC 2026-08-21 §2.7：auto_executed 摘要（仅当本次调用成功完成 ≥1 个 script；顺序 =
+    # 执行顺序。失败信封由 fail_in_session 单点注入，不在此拼）。
+    if auto_executed:
+        reply["auto_executed"] = auto_executed
     typer.echo(json.dumps(reply, ensure_ascii=False))
     # 终态失败统一非 0 退出（SPEC §2.5 失败语义）：
     #   - compliance_failed：撞 HARD 上限（marker 计数路径）。
@@ -1660,23 +1694,22 @@ async def _advance_and_emit(
     project_root: Path | None = None,
     no_memory: bool = False,
 ):
-    """调 advance_step + emit_batch（单次 write 原子化，B1）。
+    """bootstrap 主体：共享驱动循环（advance + 内联 script 链）→ ``(result, auto_executed)``。
 
-    emit 经 ``apply_step_result``（共享 helper）；返 ``result`` 供 bootstrap 命令拼富信封
-    （run_id/tape/prompt_file/驱动协议）。helper 返的基础信封在此丢弃（bootstrap 自建）。
+    SPEC 2026-08-21-in-session-script-node §2.5：bootstrap 经 ``advance_with_scripts``
+    （entry=script 时一次调用内联跑完整条 script 链，停在 agent 节点 / 终态；B8 终态短路
+    由 bootstrap 命令层做）。emit / 基础信封在共享循环内；bootstrap 命令用 ``result`` 拼
+    富信封（run_id/tape/prompt_file/驱动协议）、用 ``auto_executed`` 拼 §2.7 摘要。
 
     ``host_session`` 透传给 advance_step（仅 pending 首节点分支写 tape，SPEC §4.1 emit 真链）。
-    ``project_root`` / ``no_memory`` 透传 advance_step + apply_step_result(node-memory SPEC §5)。
+    ``project_root`` / ``no_memory`` 透传共享循环（advance + apply 的 node-memory SPEC §5）。
     """
-    result = advance_step(
-        tape, wf, output=output, inputs=inputs, run_id=run_id,
+    result, _base_reply, auto_executed = await advance_with_scripts(
+        bus, tape, wf, output=output, cli_inputs=inputs, run_id=run_id,
         prompts_dir=prompts_dir, yaml_path=yaml_path, host_session=host_session,
         project_root=project_root, no_memory=no_memory,
     )
-    await apply_step_result(
-        bus, result, wf=wf, run_id=run_id, no_memory=no_memory, project_root=project_root,
-    )   # emit_batch + 记忆写入（基础信封丢弃，bootstrap 命令自建富信封）
-    return result
+    return result, auto_executed
 
 
 def _read_workflow_yaml_path(tape_path: Path) -> str | None:
@@ -1758,17 +1791,20 @@ async def _next_in_critical_section(
     no_memory: bool = False,
     artifacts_dir: Path | None = None,
 ):
-    """flock 临界区内的 next 主体：advance + emit_batch + marker RMW（N2）+ 合规计数 (F11)
-    + per-node env 文件重写（in-session chart/资源/产物 衔接）。
+    """flock 临界区内的 next 主体：共享驱动循环（advance + 内联 script 链）+ marker RMW（N2）
+    + 合规计数 (F11) + per-node env 文件重写（in-session chart/资源/产物 衔接）。
 
-    返回 ``(result, compliance_failed, warn_no_output_count)``：
+    返回 ``(result, compliance_failed, warn_no_output_count, auto_executed)``：
       - ``compliance_failed=True``：撞 ``_COMPLIANCE_HARD``，已 emit workflow_failed（终态）。
       - ``warn_no_output_count`` 非 None：达 ``_COMPLIANCE_WARN`` 但未到 HARD，回 warn 信封
         （run 存活；SPEC §4.1(b)），供 ``next`` 命令拼 warn 信封字段。
+      - ``auto_executed``：本次调用成功内联执行的 script 摘要条目（SPEC 2026-08-21 §2.7，
+        零条 → 空列表 → 回复字段省略）。
 
-    ``env_path`` 给定时（生产路径恒传）：在 ``apply_step_result`` 之后、按下一节点身份重写
+    ``env_path`` 给定时（生产路径恒传）：在共享循环之后、按最终下一节点身份重写
     ``runs/<run_id>/orca_env.sh``（ORCA_NODE / ORCA_SESSION_ID / ORCA_AGENT_RESOURCES 按新节点）。
-    终态（done/compliance_failed）不写 —— 无下一节点，env 文件保留前值（run 即将结束）。
+    终态（done/compliance_failed）或最终节点是 script（B3）不写 —— 前者无下一节点、后者 env
+    由 executor spawn overlay 注入。
 
     ``artifacts_dir``（P8）per-run 常量：与 ``env_path`` 同条件透传给 ``_write_orca_env``
     （非终态 + 下一节点存在才写）。next 路径不重 mkdir（bootstrap 已建）。
@@ -1786,27 +1822,38 @@ async def _next_in_critical_section(
             # 下游 marker RMW（write_marker）持久化；此处先建对象让 compliance 计数有依托。
             logger.info("resume: 重建激活 marker（run=%s）", run_id)
         elif state.status in ("completed", "cancelled"):
-            return StepResult(done=True, reason=f"already_{state.status}"), False, None
+            return StepResult(done=True, reason=f"already_{state.status}"), False, None, []
         else:
             logger.warning("next 找不到 %s 的激活 marker，无法推进（需先 bootstrap）", run_id)
-            return StepResult(done=False, reason="no-marker"), False, None
+            return StepResult(done=False, reason="no-marker"), False, None, []
 
     # wf 从 tape 反查（v3 §7.2：marker 不存 yaml）。
     wf = _load_wf_for_run(run_id, tape)
-    result = advance_step(
-        tape, wf, output=output, inputs=inputs, run_id=run_id,
+
+    # D4（SPEC 2026-08-21 §2.5，round-3 钉死口径）：守护**前置 ensure**——仅 next 临界区、
+    # 首步 advance 判出 node_kind=script 且非终态时、进 script 循环前调用（保证循环内 script
+    # 推图时守护在线）。经 ``on_script_chain_start`` 注入共享循环（ensure 逻辑不进循环本体、
+    # 不适用 bootstrap〔守护仍按现状锁外 spawn〕与 daemon〔无守护概念〕）；在 flock 临界区内，
+    # 与尾部 ensure 同款 probe+respawn 幂等语义，重复调用无害。
+    def _ensure_daemons_before_scripts() -> None:
+        _ensure_chart_daemon(run_id, Path(tape.path))
+        _ensure_sidechain_daemon(run_id, Path(tape.path))
+
+    # SPEC 2026-08-21 §2.5：next 主体接共享循环（advance_step + 内联 script 链，M1
+    # merged_inputs 全程单口径；script 链在循环内就地执行，停在 agent / 终态）。B1 批 emit /
+    # node-memory 写在循环内的 apply_step_result；recoverable 路径 emits=[nf, ns]（升格含
+    # workflow_failed）同样批量原子写。
+    result, _base_reply, auto_executed = await advance_with_scripts(
+        bus, tape, wf, output=output, cli_inputs=inputs, run_id=run_id,
         prompts_dir=prompts_dir, project_root=project_root, no_memory=no_memory,
-    )
-    # B1 单次 write 原子化整批 [nc, rt, ns] / [nc, rt, workflow_completed]（共享 helper）。
-    # apply_step_result 内部按 emits 写 node_completed 的记忆 MD(node-memory SPEC §3.2)。
-    # recoverable 路径的 emits = [nf, ns]（升格时含 workflow_failed）也经此批量原子写。
-    await apply_step_result(
-        bus, result, wf=wf, run_id=run_id, no_memory=no_memory, project_root=project_root,
+        on_script_chain_start=_ensure_daemons_before_scripts,
     )
 
     # 合规计数（D-v7-6 / F11 / SPEC 2026-07-23 §3）：无 output 且无 emits（branch 4
     # idempotent-replay）→ +1；有 output → 清零（含 recoverable：output 给了只是坏，非没派活）。
     # ≥ HARD → emit workflow_failed（终态）；≥ WARN 但 < HARD → warn 信封（run 存活，不 emit）。
+    # SPEC 2026-08-21 §2.5：判定取共享循环结束后的**最终** result（窗口 i 恢复首步 emits=[]
+    # 的中间 result 不参与计数——script 链执行后最终 emits 非空 → 不增 no_output_count）。
     compliance_failed = False
     warn_no_output_count: int | None = None
     if output is not None:
@@ -1827,7 +1874,14 @@ async def _next_in_critical_section(
     # in-session chart/资源 env 文件：非终态 + 下一节点存在 → 按下一节点身份重写。
     # 终态时不写（无下一节点；守护会由 tape 终态事件自退，env 文件不再被 source）。
     # recoverable 重 arm 时 result.node=pending（非 None）+ 非终态 → 按（同）节点重写 env（新 session_id）。
-    if env_path is not None and not (result.done or compliance_failed) and result.node:
+    # B3（SPEC 2026-08-21 §2.5）：最终节点是 script 不写（node_kind != "script"，None 视同
+    # agent 照写）——script 节点 env 由 executor spawn overlay 注入，env 文件是给子代理 source 的。
+    if (
+        env_path is not None
+        and not (result.done or compliance_failed)
+        and result.node
+        and result.node_kind != "script"
+    ):
         _write_orca_env(
             env_path,
             run_id=run_id,
@@ -1862,9 +1916,9 @@ async def _next_in_critical_section(
             return (
                 StepResult(done=True, reason=f"failed: write_marker: {e}",
                            error_kind="internal_error"),
-                True, None,
+                True, None, [],
             )
-    return result, compliance_failed, warn_no_output_count
+    return result, compliance_failed, warn_no_output_count, auto_executed
 
 
 def _merge_run_id(run_id: str | None, run_id_opt: str | None) -> str | None:

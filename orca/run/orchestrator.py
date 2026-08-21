@@ -553,11 +553,17 @@ class Orchestrator:
 
     @staticmethod
     def _next_node_for_resume(
-        wf: Workflow, last_done: str | None, outputs_acc: dict[str, Any]
+        wf: Workflow, last_done: str | None, outputs_acc: dict[str, Any],
+        inputs: dict[str, Any] | None = None,
     ) -> str:
         """对 ``last_done`` 的 routes 求值下一 node（resume 起点）。
 
         ``last_done=None``（无任何 node 完成）→ ``wf.entry``。
+
+        ``inputs``（D2，SPEC 2026-08-21-in-session-script-node §4）：路由求值 ctx 的 inputs。
+        默认 ``None`` ≡ ``{}``（现行为，向后兼容——daemon / 既有调用方零改动）。in-session
+        分支 3（``advance_step``）与 ``advance_after_script`` 两调用点传 ``merged_inputs``
+        （§2.5 M1），修复路由 ``when`` 引用 ``{{ inputs.* }}`` 时 ctx inputs={} 的既有裸崩分叉。
         """
         if last_done is None:
             return wf.entry
@@ -575,7 +581,7 @@ class Orchestrator:
         from orca.exec.context import RunContext
 
         ctx = RunContext(
-            inputs={}, outputs=dict(outputs_acc), run_id="", task=None,
+            inputs=inputs or {}, outputs=dict(outputs_acc), run_id="", task=None,
         )
         return resolve(routes, outputs_acc.get(last_done, {}).get("output"), ctx).to
 
