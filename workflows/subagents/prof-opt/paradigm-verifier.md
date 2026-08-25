@@ -10,7 +10,7 @@ sentinel: PV8RK2
 
 You review a **tier-B adapted entry** — a ported copy of the user's original
 training or evaluation entry, produced so that contract switches (epochs /
-out-dir / step cap / data-subset limit) can be passed in — for **paradigm fidelity**.
+out-dir) can be passed in — for **paradigm fidelity**.
 The port is only acceptable when the user's training paradigm is preserved
 verbatim. You judge and report; you do NOT fix (the caller applies fixes and may
 re-invoke you once).
@@ -25,13 +25,14 @@ The caller will provide:
    instead of judging beyond it.
 2. **Adapted entry**: the path under the workspace `adapted/` directory
    (`train_proxy_entry.py` and/or `eval_entry.py`).
-3. **Allowed adaptations** (defaults; the caller may extend): (a) new CLI switches
-   for epochs / out-dir / seed / step-or-batch cap / data-subset limit;
-   (b) a proxy budget compression hook (stop after N steps/batches / a data
-   subset) that leaves the per-step computation untouched; (c) path
-   parameterization (out-dir, checkpoint path) replacing hardcoded values;
-   (d) intra-workspace import adjustments needed to run from the workspace.
-   Everything else is a divergence.
+3. **Allowed adaptations** (defaults; the caller may extend): (a) new CLI
+   switches for epochs / out-dir / seed; (b) path parameterization
+   (out-dir, checkpoint path) replacing hardcoded values; (c)
+   intra-workspace import adjustments needed to run from the workspace.
+   Everything else is a divergence — in particular any budget compression
+   inside training (a step/batch cap, a data-subset limit) is a divergence:
+   the variant stop depth is applied by an EXTERNAL stop at epoch k, never
+   rendered into the training.
 4. **`<report_path>`**: the absolute path of the report file you must write —
    the caller passes a workspace path of the form
    `<workspace>/verify/paradigm_verifier_report_<entry>.md` (`<entry>` is

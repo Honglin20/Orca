@@ -21,22 +21,26 @@ training/eval step.
 - `$ORCA_AGENT_RESOURCES` (injected by `orca spawn`) = this agent's resources
   directory; the terminal-state table, field assembly, write-back algorithm
   and chart spec live at
-  `$ORCA_AGENT_RESOURCES/references/report_format.md` — read it at Step 1
-  and follow it exactly.
+  `$ORCA_AGENT_RESOURCES/references/report_format.md` — read it BEFORE
+  Step 0 (the harvest table Step 0 acts on lives in it) and follow it
+  exactly.
 - `{{ inputs.project_root }}` = the user's project root (write-back target
   neighborhood; originals always read-only).
 - `{{ inputs.write_back }}` = whether the success path writes files back.
 - `{{ inputs.accuracy_budget }}` = final budget for the gap verdict.
 - `{{ inputs.full_train_epoch_cap }}` = the full-training epoch cap (empty
-  string = uncapped) — the Fairness Note derives the EFFECTIVE full-budget
-  epoch count from it (see the references file).
+  string = uncapped) — the cap already took effect at the contract stage
+  and is recorded in `contracts.json` `full_train_budget.epochs`; the
+  Fairness Note cites that recorded value (see the references file).
 - `{{ inputs.report_dir }}` = report archive directory RELATIVE to
   `{{ inputs.project_root }}` (default `docs/prof-opt`; empty string = skip
   archiving). At the END of the builder, copy the run's human-readable
   deliverables into it: `prof_opt_report.md`, the `charts/` files, and
   `baseline_status.md` — created if missing, existing files at the same name
-  are never overwritten (suffix the copy with the run id instead). This is a
-  terminal one-time user-side write, same class as the write-back.
+  are never overwritten (suffix the copy with the run id instead — the run
+  id is `$ORCA_RUN_ID`, the engine-injected run identity the workspace
+  `.run_lock` records; a run-metadata value, not tied to the chart env).
+  This is a terminal one-time user-side write, same class as the write-back.
 
 ## Zero cross-node output reference hard rule
 
@@ -55,7 +59,8 @@ This node dispatches **no subagents**. All work is done directly.
 
 ## Lazy Loading
 
-Read `$ORCA_AGENT_RESOURCES/references/report_format.md` when Step 1 begins.
+Read `$ORCA_AGENT_RESOURCES/references/report_format.md` BEFORE Step 0
+begins (Step 0's terminal harvest already follows its harvest table).
 Read workspace ledger files (`history.jsonl`, `best.json`,
 `rounds/*/proposals.json`, `contracts.json`, `baseline/*`, `final/*`,
 `BASELINE.lock`) only as the format document instructs.
@@ -83,8 +88,9 @@ it never pretends the baseline finished).
 
 Write `$ORCA_ARTIFACTS_DIR/report_builder.py` implementing the format
 document mechanically (terminal-state table → field assembly), then run it
-in derive-only mode first if you need to iterate (the document's sections
-run in order: state → write-back → charts → markdown → JSON). The builder:
+(the document's sections run in order: state → write-back → charts →
+markdown → JSON; re-runs are safe — the builder is idempotent). The
+builder:
 
 - reads ONLY workspace state (plus the user project tree for the write-back
   diff — read-only there except the new files it writes);

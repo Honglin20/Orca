@@ -140,7 +140,7 @@ PY
 
 1. **Locate** the training entry from the manifest / user request; open it and its
    local imports yourself. Extract the argparse (or equivalent) mapping for:
-   ① epochs ③ out-dir, plus seed when supported.
+   epochs / out-dir, plus seed when supported.
    Also identify the **per-epoch metric log format**. The training contract is
    complete only when you can write a regular expression with named groups
    `epoch` and `metric` that extracts one metric for every completed epoch from
@@ -190,13 +190,17 @@ PY
    there is no workaround in this pipeline). Otherwise
    `interpreter.flags_check = "pass"`.
 6. **Tier decision:**
-   - **Tier A** — ①③ all parameterized → template the user entry directly.
+   - **Tier A** — epochs / out-dir all parameterized → template the user
+     entry directly.
    - **Tier B** — some switches missing or the output rule is not predictable →
      write `adapted/train_proxy_entry.py`: a VERBATIM port of the user's
      training paradigm (loss / optimizer / scheduler / dataset & loader / metric /
      logging cadence) where the ONLY changes are (a) new CLI switches for the
-     missing contract parameters (epochs / out-dir), (b) paths parameterized
-     to accept out-dir. Do not simplify, substitute, reorder, or drop anything
+     missing contract parameters (epochs / out-dir / seed), (b) path
+     parameterization (out-dir, checkpoint path) replacing hardcoded
+     values, (c) intra-workspace import adjustments
+     needed to run from the workspace — the same default list
+     paradigm-verifier judges against. Do not simplify, substitute, reorder, or drop anything
      behavioral. User files stay untouched — the adapted entry lives only in
      the workspace and imports the user's modules exactly as the original
      entry does.
@@ -213,14 +217,12 @@ PY
    - `"runs_minimal_budget"` — the 2-epoch run completed (EXPECTED good
      case: proves the entry executes under the injection header AND yields
      ≥ 2 epoch metric lines);
-   - `"runs_epochs_zero_rejected"` — kept as a valid classification when
-     the full quick-run is prohibitively expensive BUT an epochs=0 probe
-     ran: this weaker evidence leaves the epoch-line format UNPROVEN → in
-     that case you must still obtain two real epoch lines from some source
-     (a log the user provides) or `viable=false` with
-     `per_epoch_metric_unavailable`;
    - anything else → the entry cannot run: fix the adapted entry (tier B) or
-     declare tier C.
+     declare tier C. That includes a quick-run the project cannot afford at
+     ≥ 2 epochs — `viable=false` with the cost named in the reason (fail
+     loud, never downgrade: the 2-epoch run is the ONLY proof of the
+     epoch-line format and the checkpoint behavior, and no weaker probe
+     exists in this pipeline).
    Record in the same evidence file (the second use of the run):
    - `epoch_lines_matched`: the number of epoch metric lines the pattern
      extracted (must equal the rendered epoch count for a clean run —
@@ -235,10 +237,11 @@ PY
 
 ### Step 3: Eval Contract (discovery + tier + dual-checkpoint probe)
 
-1. **Locate** the evaluation entry; extract ⑤ checkpoint path switch, the metric
-   extraction rule (stdout regex, or output file + JSON key), and the metric
-   direction (confirm the manifest's `higher-better`/`lower-better` against the
-   code — accuracy-like → higher_better, loss-like → lower_better).
+1. **Locate** the evaluation entry; extract the checkpoint path switch, the
+   metric extraction rule (stdout regex, or output file + JSON key), and the
+   metric direction (confirm the manifest's `higher-better`/`lower-better`
+   against the code — accuracy-like → higher_better, loss-like →
+   lower_better).
 2. **Tier decision** exactly like Step 2 (tier B → `adapted/eval_entry.py`, same
    verbatim-port rule; tier C only when the metric cannot be extracted or the ckpt
    cannot be threaded).

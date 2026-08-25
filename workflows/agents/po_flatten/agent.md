@@ -13,9 +13,7 @@ user's PyTorch project (`{{ inputs.project_root }}` with model definition
 - the shared deterministic scripts (`scripts/`) and the import-injection pair
   (`orca_inject/`) every run template needs;
 - the structural anchor lock (`BASELINE.lock`) + single-writer run lock;
-- proof that the shadow resolves, constructs, and exports (and, when a pretrained
-  checkpoint is provided, that it is loadable — reference-only, never a training
-  starting point).
+- proof that the shadow resolves, constructs, and exports.
 
 Downstream nodes connect variants to the user's ORIGINAL training/eval entries with
 the shadow injected in front of the model imports — everything you get wrong here
@@ -97,7 +95,7 @@ output `error` field):
   absolute); must exist.
 - `{{ inputs.fresh_start }}` (true/false), `{{ inputs.profile_script_path }}`
   (empty = built-in estimator), `{{ inputs.seed }}`.
-- No pretrained-checkpoint input exists (removed): training in this pipeline
+- No pretrained-checkpoint input exists: training in this pipeline
   always starts from a fixed-seed random initialization; every checkpoint
   argument below is the empty string.
 
@@ -198,7 +196,7 @@ fail loud (`flatten_passed=false`).
 
    ```bash
    bash "$ORCA_AGENT_RESOURCES/scripts/extract_user_pkg.sh" \
-     "{{ inputs.project_root }}/{{ inputs.model_path }}"
+     "{{ inputs.project_root }}" "{{ inputs.model_path }}"
    ```
 
 ### Step 3: Build The Shadow Copy + Structural Anchor Lock

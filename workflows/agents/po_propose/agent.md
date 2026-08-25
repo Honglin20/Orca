@@ -29,14 +29,10 @@ that survives its re-dispatch budget makes the node `failed`.
   round. Repair quotas (per variant): structure repairs ≤ 2, latency
   re-rechecks ≤ 2 — both tracked in `variants/<vid>/repair_trace.json`.
 - Shared deterministic scripts are deployed at `$ORCA_ARTIFACTS_DIR/scripts/`
-  by the entry node; use only that path:
+  by the entry node; verify that on entry (fails loud when the entry stage
+  is incomplete):
   ```bash
-  cd "$ORCA_ARTIFACTS_DIR" || { echo "FATAL: workspace unreachable" >&2; exit 2; }
-  for f in analyze.py predict_delta.py history_lib.py experiment_ledger.py \
-           emit_result.py check_bottleneck.py; do
-    [ -f "$ORCA_ARTIFACTS_DIR/scripts/$f" ] || {
-      echo "FATAL: scripts/$f not deployed — entry stage incomplete" >&2; exit 2; }
-  done
+  bash "$ORCA_AGENT_RESOURCES/scripts/check_prerequisites.sh"
   ```
 
 ## Path Handling Rules

@@ -225,10 +225,10 @@ if mode != "--reuse-check":
             if not entry.is_file():
                 problems.append(f"{section} tier B but adapted entry missing: {entry}")
 
-    # dry-run / dual-ckpt / export evidence (measured, not asserted)
+    # quick-run / dual-ckpt / export evidence (measured, not asserted)
     for ev, must in (
-        ("contract_work/train_dryrun.json", lambda d: d.get("status") in
-            ("runs_epochs_zero_rejected", "runs_minimal_budget")),
+        ("contract_work/train_quickrun.json", lambda d:
+            d.get("status") == "runs_minimal_budget"),
         ("contract_work/eval_dual_ckpt.json", lambda d: d.get("moved") is True),
         ("contract_work/export_check.json", lambda d: d.get("loaded") is True),
         ("contract_work/proxy_budget_selection.json", lambda d: bool(d.get("rationale"))),

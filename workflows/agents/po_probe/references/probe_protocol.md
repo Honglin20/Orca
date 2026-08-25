@@ -21,8 +21,9 @@ Gate parameters used here (direction-normalized by `metric_direction` from
   `baseline_k_acc`.
 
 For `higher_better` metrics "worse than the line" means value < line; for
-`lower_better` it means value > line. All comparisons are computed by a
-python one-liner reading the JSON values — never by mental arithmetic.
+`lower_better` it means value > line. All comparisons are computed by the
+shared verdict script reading the recorded JSON values — never by mental
+arithmetic.
 
 **Fairness invariant (iron rule)**: every training (baseline, variant,
 winner) renders the SAME template with the SAME full effective epochs,
@@ -57,9 +58,9 @@ Four quadrants, act per table:
      `probe_insufficient`) → done, skip;
    - `variants/<vid>/eval/proxy.json` exists but the history row is still
      `latency_pass` → reconcile first (see below), then re-derive;
-   - `variants/<vid>/stop_status.json` exists but the history row is still
-     `latency_pass` → the training already terminated; resume at the curve
-     extraction (never re-detach);
+   - `variants/<vid>/train/stop_status.json` exists but the history row is
+     still `latency_pass` → the training already terminated; resume at the
+     curve extraction (never re-detach);
    - a pid file under `variants/<vid>/train/` with a live group → the step
      is in flight: poll it with `stop_at_epoch.sh` (never re-launch);
    - otherwise → start at the train step.
@@ -186,18 +187,18 @@ payload; history is the ledger — after reconciliation they must agree.
 8. **Promote check** (scripted; BOTH gates when the eval ran, curve alone
    otherwise):
    ```bash
-   python3 -c "import json; \
-   c = json.load(open('$ORCA_ARTIFACTS_DIR/variants/<VID>/metrics/epoch_compare.json')); \
-   b = <baseline curve metric at k>; d = '<metric_direction>'; slack = 1.0 * <accuracy_budget>; \
-   line = b - slack if d == 'higher_better' else b + slack; \
-   curve_ok = c['pass'] is True; \
-   ev = json.load(open('$ORCA_ARTIFACTS_DIR/variants/<VID>/eval/proxy.json'))['metric_value'] \
-        if <proxy.json exists> else None; \
-   ba = <baseline_k_acc from baseline/baseline_k_acc.json> if <ckpt_per_epoch and baseline_k_acc exists> else None; \
-   eval_ok = True if ev is None or ba is None else (ev >= ba - slack if d == 'higher_better' else ev <= ba + slack); \
-   promoted = curve_ok and eval_ok; \
-   print(json.dumps({'curve_pass': curve_ok, 'eval_acc': ev, 'eval_pass': eval_ok, 'line': line, 'promoted': promoted}))"
+   python3 "$ORCA_ARTIFACTS_DIR/scripts/verdict_decide.py" promote \
+     --artifacts "$ORCA_ARTIFACTS_DIR" --vid <VID> \
+     --budget "<accuracy-budget>"
    ```
+   Prints `{'curve_pass', 'eval_acc', 'eval_pass', 'line', 'promoted'}`: the
+   promote line is recomputed from the anchor RECORDED in
+   `variants/<VID>/metrics/epoch_compare.json` (`baseline_metric`) and the
+   direction from `contracts.json` — never by mental arithmetic or
+   hand-copied values. The eval gate applies only when both the variant
+   eval (`variants/<VID>/eval/proxy.json` `metric_value`) and the baseline
+   anchor (`baseline/baseline_k_acc.json` `baseline_k_acc`) exist; either
+   absent → curve-only judgment.
    outcome = `promoted` if true else `probe_insufficient`.
 
 ## History row + results line (after each terminal outcome)

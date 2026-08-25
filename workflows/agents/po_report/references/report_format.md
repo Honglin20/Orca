@@ -4,7 +4,7 @@ The report node is the single terminal reporter: every path (success and
 every failure mode) converges here. **Zero cross-node output references** —
 the terminal state is derived ONLY from the workspace on disk. Paths are
 relative to the workspace root (`$ORCA_ARTIFACTS_DIR`) unless absolute. Angle-bracket
-placeholders (`<project-root>`, `<write-back>`, `<accuracy-budget>`) are
+placeholders (`<project-root>`, `<write-back>`) are
 runtime values from your node prompt's input anchors — substitute the actual
 values.
 
@@ -58,7 +58,7 @@ proposable), the loop ended with no winner.
 
 **Inner attribution for row 7** (within the incomplete round `R`,
 `rounds/<RRR>/`; the proposal loop — propose, implement, latency recheck —
-closed inside ONE node, so the old implement/verify split no longer exists):
+closed inside ONE node):
 
 - `rounds/<RRR>/proposals.json` missing → stage `propose`;
 - else some proposal vid has NONE of the three closure states — no
@@ -185,6 +185,10 @@ Before rendering charts, invoke the two deterministic shared scripts:
 `experiment_ledger.py --artifacts <workspace>` and
 `dashboard_snapshot.py --artifacts <workspace>`. Their failure is NOT
 best-effort: an unreadable ledger or dashboard is a report-builder failure.
+Also finalize the live training-curve chart (best-effort, never blocks the
+report): `push_curves.py --artifacts <workspace> --title "(final)"` — the
+terminal push so the final curve state is visible even if the daemon saw no
+mid-run poll; a successful push appends the `.chart_push.log` audit line.
 
 Write into `charts/`, one self-contained HTML file per chart (inline SVG,
 stdlib-only rendering — no external dependencies):
@@ -227,7 +231,7 @@ stdlib-only rendering — no external dependencies):
 Sections: Terminal State (status/stage/reason) · Per-Round Table (round,
 proposals, verdict outcome counts, promoted vids, round best makespan) ·
 **Stop-Status Disclosure** (mechanical counts over every
-`variants/<vid>/stop_status.json`: `killed` vs `natural_done`, and how many
+`variants/<vid>/train/stop_status.json`: `killed` vs `natural_done`, and how many
 record `monitor_failed: true` — the probe monitor's exercise disclosure) ·
 Winner (vid, change signature, lineage chain) · **Fairness Note** (one
 short paragraph: the baseline and every variant were trained FROM SCRATCH —

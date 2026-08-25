@@ -28,8 +28,10 @@ use the SAME `full_train_budget` from `contracts.json`).
      (the workspace's baseline was trained under a different budget —
      never silently compared).
 4. Stage:
-   - `final/final_acc.json` exists → done: re-emit from disk (Step 5 of
-     the node; nothing to re-run);
+   - `final/final_acc.json` exists with a NON-NULL `within_budget` → done:
+     re-emit from disk (Step 5 of the node; nothing to re-run); exists with
+     `within_budget: null` (a crash between the write and the verdict
+     backfill) → re-run the scripted judgement (step 4) and backfill it;
    - `final/.train_rc` exists with 0 AND the pid is gone AND the promised
      checkpoint exists → training done: go to the symmetric final check,
      then the final evaluation;
@@ -151,14 +153,17 @@ early-stopping projects are out of scope — see `contracts.json` `reason`).
    "baseline_full_acc": <number>, "baseline_full_acc_source": "baseline",
    "full_train_budget": <verbatim from contracts.json>,
    "within_budget": <bool>, "metric_direction": "<direction>"}`.
-4. Budget judgement (scripted; anchor = the resolved `baseline_full_acc`):
+4. Budget judgement (scripted; anchor = the resolved `baseline_full_acc`).
+   Write `final/final_acc.json` FIRST with `"within_budget": null`, then:
    ```bash
-   python3 -c "import json; \
-   f = <final metric>; b = <baseline_full_acc>; d = '<metric_direction>'; \
-   budget = <accuracy_budget>; \
-   ok = f >= b - budget if d == 'higher_better' else f <= b + budget; \
-   print(json.dumps({'within_budget': ok}))"
+   python3 "$ORCA_ARTIFACTS_DIR/scripts/verdict_decide.py" final-budget \
+     --artifacts "$ORCA_ARTIFACTS_DIR" \
+     --budget "<accuracy-budget>"
    ```
+   It reads `final_acc` / `baseline_full_acc` / `metric_direction` back from
+   the file and prints `{"within_budget": <bool>}` — overwrite the null with
+   that value. The direction-normalized comparison is scripted, never
+   hand-derived.
 5. Copy the winner structure (referenced, never re-measured):
    `variants/$WINNER/onnx/model.onnx` → `final/model.onnx`
    (`base/model.onnx` is the same structure after the round-end advance;
@@ -166,8 +171,10 @@ early-stopping projects are out of scope — see `contracts.json` `reason`).
 
 ## Idempotency notes
 
-- `final/final_acc.json` present on entry → do not re-run anything; emit
-  from disk.
+- `final/final_acc.json` present on entry with a NON-NULL `within_budget` →
+  do not re-run anything; emit from disk. Present with `within_budget:
+  null` (a crash between the write and the verdict backfill) → re-run the
+  scripted judgement (step 4) and backfill it — idempotent.
 - A live pid is never re-launched; a dead attempt without rc counts as one
   attempt and is relaunched after the log-tail check.
 - All file writes under `final/` are overwrite-safe (status/checkpoint/

@@ -20,7 +20,10 @@ compare (--at-epoch + at_epoch/baseline_path outputs), stop_at_epoch
 (process-group kill at epoch k, actual-depth re-parse, idempotence, pid
 attribution, shared metric_curve parse), check_bottleneck (closed schema +
 referential order-preserving subset), push_curves (best-effort live-chart
-sidecar with 5s socket timeouts and an append-only audit log).
+sidecar with 5s socket timeouts and an append-only audit log). v4
+cleanliness-fix round: verdict_decide (the promote / final-budget gates
+read only the anchors the workspace RECORDED), extract_user_pkg fail-loud
+project-root/model-path resolution, po_propose check_prerequisites.
 """
 from __future__ import annotations
 
@@ -1064,8 +1067,8 @@ def _contracts_workspace(tmp_path: Path, *, probe_body: str | None = None,
         '"<<python>>" exporter.py --out <<out>> --seed <<seed>>\n', encoding="utf-8")
 
     cw = art / "contract_work"
-    (cw / "train_dryrun.json").write_text(
-        json.dumps({"status": "runs_epochs_zero_rejected"}), encoding="utf-8")
+    (cw / "train_quickrun.json").write_text(
+        json.dumps({"status": "runs_minimal_budget"}), encoding="utf-8")
     (cw / "eval_dual_ckpt.json").write_text(
         json.dumps({"metric_seed0": 0.1, "metric_seed1": 0.6, "moved": True,
                     "ckpt_container": "bare"}), encoding="utf-8")
@@ -1090,6 +1093,18 @@ def test_check_contracts_gate_passes_consistent_workspace(tmp_path: Path):
     proc = _run_contracts_gate(art)
     assert proc.returncode == 0, proc.stderr
     assert "PASS" in proc.stderr
+
+
+def test_check_contracts_gate_rejects_retired_quickrun_status(tmp_path: Path):
+    """The quick-run evidence speaks ONLY the v4 classification set: a
+    downgraded epochs-zero verdict is not a completed 2-epoch measurement
+    and must fail the gate (fail loud, never silently accepted)."""
+    art = _contracts_workspace(tmp_path)
+    (art / "contract_work" / "train_quickrun.json").write_text(
+        json.dumps({"status": "runs_epochs_zero_rejected"}), encoding="utf-8")
+    proc = _run_contracts_gate(art)
+    assert proc.returncode == 1
+    assert "train_quickrun.json" in proc.stderr
 
 
 def test_check_contracts_gate_enforces_token_budget_consistency(tmp_path: Path):
@@ -2700,3 +2715,324 @@ def test_eval_at_k_degradation_mechanics(tmp_path: Path):
                           direction="higher_better", budget=0.01, at_epoch=1,
                           baseline_path=str(base))
     assert out_fail["pass"] is False      # same face, honest fail
+
+
+# ── verdict_decide (cleanliness round): scripted promote / final-budget gates ──
+
+from verdict_decide import final_budget, promote  # noqa: E402
+
+_VERDICT_SH = _SCRIPTS / "verdict_decide.py"
+
+
+def _probe_ws(tmp_path: Path, *, compare: dict, proxy: dict | None,
+              k_acc: dict | None, direction: str = "higher_better") -> Path:
+    art = tmp_path / "ws"
+    (art / "variants" / "r1-01" / "metrics").mkdir(parents=True)
+    (art / "variants" / "r1-01" / "metrics" / "epoch_compare.json").write_text(
+        json.dumps(compare), encoding="utf-8")
+    if proxy is not None:
+        (art / "variants" / "r1-01" / "eval").mkdir(parents=True)
+        (art / "variants" / "r1-01" / "eval" / "proxy.json").write_text(
+            json.dumps(proxy), encoding="utf-8")
+    if k_acc is not None:
+        (art / "baseline").mkdir(parents=True)
+        (art / "baseline" / "baseline_k_acc.json").write_text(
+            json.dumps(k_acc), encoding="utf-8")
+    (art / "contracts.json").write_text(json.dumps(
+        {"eval": {"metric_direction": direction}}), encoding="utf-8")
+    return art
+
+
+def test_verdict_promote_dual_gate_pass(tmp_path: Path):
+    """Both gates green -> promoted; the line is recomputed from the anchor
+    RECORDED in epoch_compare.json (baseline_metric), never hand-copied."""
+    art = _probe_ws(tmp_path,
+                    compare={"at_epoch": 1, "baseline_metric": 0.85,
+                             "baseline_path": "baseline/baseline_metrics.jsonl",
+                             "pass": True},
+                    proxy={"vid": "r1-01", "metric_value": 0.84, "k": 1},
+                    k_acc={"baseline_k_acc": 0.86, "k": 1})
+    out = promote(art, "r1-01", slack=0.05)
+    assert out["curve_pass"] is True
+    assert out["eval_acc"] == 0.84
+    assert out["eval_pass"] is True          # 0.84 >= 0.86 - 0.05
+    assert out["line"] == pytest.approx(0.80)  # 0.85 - 0.05
+    assert out["promoted"] is True
+
+
+def test_verdict_promote_eval_gate_blocks(tmp_path: Path):
+    art = _probe_ws(tmp_path,
+                    compare={"at_epoch": 1, "baseline_metric": 0.85, "pass": True},
+                    proxy={"vid": "r1-01", "metric_value": 0.70, "k": 1},
+                    k_acc={"baseline_k_acc": 0.86, "k": 1})
+    out = promote(art, "r1-01", slack=0.05)
+    assert out["curve_pass"] is True
+    assert out["eval_pass"] is False           # 0.70 < 0.86-0.05
+    assert out["promoted"] is False
+
+
+def test_verdict_promote_curve_only_when_eval_files_absent(tmp_path: Path):
+    """No proxy.json (eval never ran / degraded) and no baseline_k_acc.json
+    -> the eval gate is vacuously true; the curve alone decides."""
+    art = _probe_ws(tmp_path,
+                    compare={"at_epoch": 1, "baseline_metric": 0.85, "pass": True},
+                    proxy=None, k_acc=None)
+    out = promote(art, "r1-01", slack=0.05)
+    assert out["eval_acc"] is None
+    assert out["eval_pass"] is True
+    assert out["promoted"] is True
+    # curve alone failing still fails the promote
+    art2 = _probe_ws(tmp_path / "b",
+                     compare={"at_epoch": 1, "baseline_metric": 0.85,
+                              "pass": False}, proxy=None, k_acc=None)
+    assert promote(art2, "r1-01", slack=0.05)["promoted"] is False
+
+
+def test_verdict_promote_asymmetric_single_gate_branches(tmp_path: Path):
+    """Either eval-side file alone absent -> still curve-only judgment (the
+    gate needs BOTH numbers to apply); a present eval number is still
+    echoed, never fabricated away."""
+    # eval present, baseline k-ckpt anchor absent
+    art = _probe_ws(tmp_path,
+                    compare={"at_epoch": 1, "baseline_metric": 0.85, "pass": True},
+                    proxy={"vid": "r1-01", "metric_value": 0.84, "k": 1},
+                    k_acc=None)
+    out = promote(art, "r1-01", slack=0.05)
+    assert out["eval_acc"] == 0.84
+    assert out["eval_pass"] is True
+    assert out["promoted"] is True
+    # baseline anchor present, eval absent
+    art2 = _probe_ws(tmp_path / "b",
+                     compare={"at_epoch": 1, "baseline_metric": 0.85, "pass": True},
+                     proxy=None, k_acc={"baseline_k_acc": 0.86, "k": 1})
+    out2 = promote(art2, "r1-01", slack=0.05)
+    assert out2["eval_acc"] is None
+    assert out2["eval_pass"] is True
+    assert out2["promoted"] is True
+
+
+@pytest.mark.parametrize("proxy_text,error_kw", [
+    ('{"vid": "r1-01", "metric_value": "oops", "k": 1}', "metric_value"),
+    ("{not json", "proxy.json"),
+])
+def test_verdict_promote_fails_loud_on_present_but_malformed_eval(
+        tmp_path: Path, proxy_text: str, error_kw: str):
+    """A present-but-unreadable eval anchor FAILS — it must never silently
+    downgrade the judgment to curve-only (the _optional_number contract)."""
+    art = _probe_ws(tmp_path,
+                    compare={"at_epoch": 1, "baseline_metric": 0.85, "pass": True},
+                    proxy=None, k_acc=None)
+    (art / "variants" / "r1-01" / "eval").mkdir(parents=True)
+    (art / "variants" / "r1-01" / "eval" / "proxy.json").write_text(
+        proxy_text, encoding="utf-8")
+    with pytest.raises(ValueError, match=error_kw):
+        promote(art, "r1-01", slack=0.05)
+
+
+def test_verdict_promote_lower_better_line_direction(tmp_path: Path):
+    art = _probe_ws(tmp_path,
+                    compare={"at_epoch": 2, "baseline_metric": 0.20, "pass": True},
+                    proxy={"vid": "r1-01", "metric_value": 0.23, "k": 2},
+                    k_acc={"baseline_k_acc": 0.21, "k": 2},
+                    direction="lower_better")
+    out = promote(art, "r1-01", slack=0.05)
+    assert out["line"] == pytest.approx(0.25)   # b + slack for lower_better
+    assert out["eval_pass"] is True             # 0.23 <= 0.21 + 0.05
+    assert out["promoted"] is True
+
+
+@pytest.mark.parametrize("compare,error_kw", [
+    ({"baseline_metric": 0.85}, "pass"),                       # no boolean pass
+    ({"pass": "true", "baseline_metric": 0.85}, "pass"),       # string, not bool
+    ({"pass": True}, "baseline_metric"),                       # anchor missing
+])
+def test_verdict_promote_fails_loud_on_malformed_compare(tmp_path: Path, compare,
+                                                         error_kw):
+    art = _probe_ws(tmp_path, compare=compare, proxy=None, k_acc=None)
+    with pytest.raises(ValueError, match=error_kw):
+        promote(art, "r1-01", slack=0.05)
+
+
+def test_verdict_cli_fails_loud_missing_files_and_bad_budget(tmp_path: Path):
+    art = tmp_path / "empty-ws"
+    art.mkdir()
+    proc = subprocess.run(
+        [sys.executable, str(_VERDICT_SH), "promote",
+         "--artifacts", str(art), "--vid", "r1-01", "--budget", "0.05"],
+        capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 2
+    assert "epoch_compare.json" in proc.stderr
+
+    proc_neg = subprocess.run(
+        [sys.executable, str(_VERDICT_SH), "promote",
+         "--artifacts", str(art), "--vid", "r1-01", "--budget", "-1"],
+        capture_output=True, text=True, timeout=60)
+    assert proc_neg.returncode == 2
+    assert "--budget" in proc_neg.stderr
+
+
+def test_verdict_final_budget_both_directions(tmp_path: Path):
+    art = tmp_path / "final-ws"
+    (art / "final").mkdir(parents=True)
+    (art / "final" / "final_acc.json").write_text(json.dumps(
+        {"vid": "r1-01", "final_acc": 0.90, "baseline_full_acc": 0.92,
+         "metric_direction": "higher_better", "within_budget": None}),
+        encoding="utf-8")
+    assert final_budget(art, slack=0.05) == {"within_budget": True}
+    assert final_budget(art, slack=0.01) == {"within_budget": False}
+
+    (art / "final" / "final_acc.json").write_text(json.dumps(
+        {"vid": "r1-01", "final_acc": 2.1, "baseline_full_acc": 2.0,
+         "metric_direction": "lower_better", "within_budget": None}),
+        encoding="utf-8")
+    assert final_budget(art, slack=0.05) == {"within_budget": False}
+    assert final_budget(art, slack=0.2) == {"within_budget": True}
+
+
+def test_verdict_final_budget_cli_fails_loud_on_bad_inputs(tmp_path: Path):
+    """The final verdict's inputs are hand-assembled by the full-train agent
+    — a hyphen slip in the direction or a non-numeric metric is exactly the
+    transcription error class the script exists to catch (exit 2, never a
+    guessed verdict)."""
+    art = tmp_path / "fw"
+    (art / "final").mkdir(parents=True)
+    final = art / "final" / "final_acc.json"
+    base = {"vid": "r1-01", "final_acc": 0.90, "baseline_full_acc": 0.92,
+            "metric_direction": "higher_better", "within_budget": None}
+
+    def run_cli():
+        return subprocess.run(
+            [sys.executable, str(_VERDICT_SH), "final-budget",
+             "--artifacts", str(art), "--budget", "0.05"],
+            capture_output=True, text=True, timeout=60)
+
+    final.write_text(json.dumps(dict(base, metric_direction="higher-better")),
+                     encoding="utf-8")
+    proc = run_cli()
+    assert proc.returncode == 2
+    assert "metric_direction" in proc.stderr
+
+    final.write_text(json.dumps(dict(base, final_acc="n/a")), encoding="utf-8")
+    proc = run_cli()
+    assert proc.returncode == 2
+    assert "final_acc" in proc.stderr
+
+    final.write_text(json.dumps(dict(base, baseline_full_acc=None)),
+                     encoding="utf-8")
+    proc = run_cli()
+    assert proc.returncode == 2
+    assert "baseline_full_acc" in proc.stderr
+
+    final.unlink()
+    proc = run_cli()
+    assert proc.returncode == 2
+    assert "final_acc.json" in proc.stderr
+
+
+# ── extract_user_pkg (cleanliness round): fail-loud path resolution ───────────
+
+_EXTRACT_SH = (_REPO / "workflows" / "agents" / "po_flatten" / "scripts"
+               / "extract_user_pkg.sh")
+
+_ENTRY_BODY = "import os\nimport json\nfrom mymodel import layers\n"
+
+
+def _run_extract(artifacts: Path, project_root: Path, model_path: str):
+    env = dict(os.environ)
+    env["ORCA_ARTIFACTS_DIR"] = str(artifacts)
+    return subprocess.run(["bash", str(_EXTRACT_SH), str(project_root),
+                           model_path],
+                          capture_output=True, text=True, timeout=60, env=env)
+
+
+def test_extract_user_pkg_resolves_relative_model_path(tmp_path: Path):
+    """model_path is resolved AGAINST the project root by the script (the
+    caller never concatenates); stdlib names are filtered, user-owned
+    (non-importable) names land in .user_pkg."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "model.py").write_text(_ENTRY_BODY, encoding="utf-8")
+    art = tmp_path / "art"
+    art.mkdir()
+    proc = _run_extract(art, proj, "model.py")
+    assert proc.returncode == 0, proc.stderr
+    assert (art / ".user_pkg").read_text(encoding="utf-8") == "mymodel\n"
+
+
+def test_extract_user_pkg_accepts_absolute_model_path(tmp_path: Path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    entry = elsewhere / "model.py"
+    entry.write_text(_ENTRY_BODY, encoding="utf-8")
+    art = tmp_path / "art"
+    art.mkdir()
+    proc = _run_extract(art, tmp_path / "proj-root-unused", str(entry))
+    assert proc.returncode == 0, proc.stderr
+    assert (art / ".user_pkg").read_text(encoding="utf-8") == "mymodel\n"
+
+
+def test_extract_user_pkg_fails_loud_on_missing_entry(tmp_path: Path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    art = tmp_path / "art"
+    art.mkdir()
+    proc = _run_extract(art, proj, "gone.py")
+    assert proc.returncode == 2
+    assert "model entry not found" in proc.stderr
+
+
+def test_extract_user_pkg_empty_marker_on_zero_imports(tmp_path: Path):
+    """Zero import lines is the ONE legitimate empty-marker case: WARN on
+    stderr (disclosed, not silent), marker still written, exit 0."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "model.py").write_text("# no imports here\n", encoding="utf-8")
+    art = tmp_path / "art"
+    art.mkdir()
+    proc = _run_extract(art, proj, "model.py")
+    assert proc.returncode == 0, proc.stderr
+    assert "WARN: no import lines" in proc.stderr
+    assert (art / ".user_pkg").read_text(encoding="utf-8") == ""
+
+
+# ── po_propose check_prerequisites (cleanliness round) ────────────────────────
+
+_PREREQ_SH = (_REPO / "workflows" / "agents" / "po_propose" / "scripts"
+              / "check_prerequisites.sh")
+_PREREQ_FILES = ("analyze.py", "predict_delta.py", "history_lib.py",
+                 "experiment_ledger.py", "emit_result.py", "check_bottleneck.py")
+
+
+def _run_prereq(ws: Path):
+    env = dict(os.environ)
+    env["ORCA_ARTIFACTS_DIR"] = str(ws)
+    return subprocess.run(["bash", str(_PREREQ_SH)],
+                          capture_output=True, text=True, timeout=60, env=env)
+
+
+def test_check_prerequisites_passes_on_deployed_workspace(tmp_path: Path):
+    ws = tmp_path / "ws"
+    (ws / "scripts").mkdir(parents=True)
+    for name in _PREREQ_FILES:
+        (ws / "scripts" / name).write_text("# deployed\n", encoding="utf-8")
+    proc = _run_prereq(ws)
+    assert proc.returncode == 0, proc.stderr
+    assert "prerequisites: ok" in proc.stderr
+
+
+def test_check_prerequisites_fails_loud_when_entry_stage_incomplete(tmp_path: Path):
+    ws = tmp_path / "ws"
+    (ws / "scripts").mkdir(parents=True)
+    for name in _PREREQ_FILES[1:]:
+        (ws / "scripts" / name).write_text("# deployed\n", encoding="utf-8")
+    proc = _run_prereq(ws)                    # analyze.py missing
+    assert proc.returncode == 2
+    assert "analyze.py not deployed" in proc.stderr
+
+
+def test_check_prerequisites_fails_loud_without_artifacts_env():
+    env = {k: v for k, v in os.environ.items() if k != "ORCA_ARTIFACTS_DIR"}
+    proc = subprocess.run(["bash", str(_PREREQ_SH)], capture_output=True,
+                          text=True, timeout=60, env=env)
+    assert proc.returncode != 0
+    assert "ORCA_ARTIFACTS_DIR not set" in proc.stderr
