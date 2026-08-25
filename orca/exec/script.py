@@ -67,6 +67,7 @@ class ScriptExecutor(Executor):
         runs_dir: Path | None = None,
         workflows_root: Path | None = None,
         registry: ProcessRegistry | None = None,
+        artifacts_dir: str | None = None,
     ) -> None:
         # phase-13 §2：chart ingestor sock 父目录（``runs/<run_id>.sock`` 寻址用）。
         # None == 不注 ``ORCA_CHART_SOCK`` env（向后兼容，script 端 render_chart fail loud）。
@@ -74,6 +75,12 @@ class ScriptExecutor(Executor):
         # plan 2026-08-04 kd-nas headless fix：workflow yaml 所在目录绝对路径（cwd 无关定位
         # workflow 级共享资源）。None == 不注（向后兼容）。与 ClaudeExecutor 对称（§11 #9）。
         self._workflows_root = workflows_root
+        # 2026-08-26 in-session script 节点 fix（plan 2026-08-25 prof-opt-v4 §10）：
+        # 显式 ``ORCA_ARTIFACTS_DIR`` 覆盖（绝对路径 str）——in-session 路径由 iface 层
+        # 按 tape inputs.project_root 派生 project-scoped 值传入（与 agent 节点
+        # ``orca_env.sh`` 同语义；executor 自身不读 tape，project_root 感知留在 iface 层
+        # 显式传参）。None == 既有 per-run 派生（headless ``tars run`` 语义字节不变）。
+        self._artifacts_dir = artifacts_dir
         # phase-11-process §1.2（ADR §4.7）：DI 注入 ProcessRegistry。
         # production 用 ``get_default_registry()``；测试可注入独立实例。
         self._registry: ProcessRegistry = registry or get_default_registry()
@@ -104,7 +111,13 @@ class ScriptExecutor(Executor):
             chart_sock = _resolve_chart_sock_path(self._runs_dir, ctx.run_id)
             # P8（plan 2026-07-21 §Phase 4-A）：注入产物权威目录，script 内 workflow 脚本据
             # ``$ORCA_ARTIFACTS_DIR`` 写产物（替代 workflow 自建 ``llm_artifacts/``）。
-            artifacts_dir = _resolve_artifacts_dir(self._runs_dir, ctx.run_id)
+            # 2026-08-26 in-session fix：显式覆盖（project-scoped）优先；None → per-run
+            # 派生（headless 语义不变，见 __init__ 注释）。
+            artifacts_dir = (
+                self._artifacts_dir
+                if self._artifacts_dir is not None
+                else _resolve_artifacts_dir(self._runs_dir, ctx.run_id)
+            )
             spawn_env = _build_spawn_env(
                 node.name, ctx.run_id, session_id, chart_sock, artifacts_dir,
                 workflows_root=str(self._workflows_root.resolve()) if self._workflows_root else "",

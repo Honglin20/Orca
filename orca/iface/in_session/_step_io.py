@@ -284,8 +284,14 @@ async def execute_script_inline(
 
     ctx / executor（§2.4.1/§2.4.2）：``RunContext`` 经 ``step.inline_script_ctx`` 公开出口
     构造（``inputs`` = 共享循环的 ``merged_inputs``，**非** CLI 原始 ``--inputs``）；
-    ``make_executor(node, runs_dir=tape.path.parent, workflows_root=<yaml_path 父目录>)``，
-    ``yaml_path`` None → 回落 ``wf.workflows_root``。
+    ``make_executor(node, runs_dir=tape.path.parent, workflows_root=<yaml_path 父目录>,
+    artifacts_dir=<project-scoped 派生>)``，``yaml_path`` None → 回落 ``wf.workflows_root``。
+    ``artifacts_dir`` 经 ``_artifacts.resolve_artifacts_dir`` 从 tape 派生（inputs 含非空
+    **绝对** ``project_root`` → ``<proj>/artifacts/<wf>/``，否则 per-run 回落——无
+    project_root 时派生值与 per-run 恒等，故无条件传参保持单代码路径）——与 agent 节点
+    ``orca_env.sh`` 同真相源（2026-08-26 修复，plan prof-opt-v4 §10：此前 script spawn
+    env 恒 per-run，同一 workflow 内 agent/script 两节点看到两个产物目录，script 节点
+    exit 127 找不到 agent 部署的 scripts）。
 
     返回 ``(output, summary)``：``output`` = nc.data.output（``{stdout, stderr, exit_code[,
     json]}``，供调用方 / 测试消费——路由不再经它，nc 已落 tape 由 ``advance_after_script``
@@ -295,12 +301,26 @@ async def execute_script_inline(
     批次间崩溃（nc/nf 未落）→ tape 停留 ns(S)，下次不带 --output 的 next 重执行（§2.6-C）。
     """
     from orca.exec.factory import make_executor
+    from orca.iface.in_session._artifacts import resolve_artifacts_dir
 
     ctx, workflows_root = inline_script_ctx(
         wf, tape, inputs=inputs, run_id=run_id, yaml_path=yaml_path,
     )
+    # 派生 raise（相对 project_root 的坏 tape）包成 InSessionError——daemon 是长活进程，
+    # 裸 ValueError 穿透 except InSessionError 面 = daemon 崩 + 无 workflow_failed 终态。
+    try:
+        artifacts_dir, _is_project_scoped = resolve_artifacts_dir(
+            Path(tape.path), run_id,
+        )
+    except ValueError as e:
+        raise InSessionError(
+            f"script 节点 {node.name!r} 的 artifacts 目录派生失败（坏 tape "
+            f"project_root）：{e}",
+            error_kind=ERR_INTERNAL_ERROR,
+        ) from e
     executor = make_executor(
         node, runs_dir=tape.path.parent, workflows_root=workflows_root,
+        artifacts_dir=str(artifacts_dir),
     )
 
     output: dict[str, Any] | None = None

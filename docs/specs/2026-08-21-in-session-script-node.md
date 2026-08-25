@@ -80,6 +80,7 @@ async def execute_script_inline(bus, tape, wf, node: ScriptNode, *, run_id,
 
 1. **ctx 构造**：`RunContext` 直构（`inputs=merged_inputs`（§2.5 同源派生，**不是** CLI 原始 `--inputs`）、`outputs=<state→outputs_acc 转换结果>`、`run_id`、`subagents_root` 同 `_build_ctx` 逻辑）。**state→outputs_acc 转换**（`{"output": raw}` 包装，`orca/run/resume.py:228-235` 的 `_outputs_acc_from_state` 是 run 层私有）**禁止 iface import**——随 `_build_ctx` 公开化一并提供（推荐：step.py 公开包装函数），或在 helper 内明示内联该单行转换。二选一：step.py 公开化（推荐）或 helper 内直构 + 内联转换。
 2. **executor**：`make_executor(node, runs_dir=tape.path.parent, workflows_root=<yaml_path 父目录>)`；`yaml_path` 为 None（daemon/老 tape）→ 回落 `wf.workflows_root`（`step.py:274-275` `_build_ctx` 同款回落）。
+   **Addendum（2026-08-26，随 plan 2026-08-25 prof-opt-v4 §10 签收，加法——列举的既有参数全部保留）**：调用形态增可选参 `artifacts_dir=str(<派生值>)`——script 节点 spawn env 的 `ORCA_ARTIFACTS_DIR` 经 in-session 层从 tape 派生注入（`_artifacts.resolve_artifacts_dir`：inputs 含非空绝对 `project_root` → `<project_root>/artifacts/<wf_name>/`，否则 per-run 回落，与 agent 节点 `orca_env.sh` 同一真相源）。script 节点是该派生的**第四个消费者**（bootstrap env 写入 / next 重写 / agent env 之后），接同一真相源而非复制；无 `project_root` 时派生值与 per-run 恒等，故无条件传参（单代码路径）。派生对相对 `project_root` 的 raise（坏 tape 才可达）由 helper 包 `InSessionError(internal_error)` fail loud。
 3. **事件流式逐批 emit（D1=a，与 headless 逐条 emit 同形）**：消费 `executor.exec(node, ctx)` async generator——
    - 首 yield `node_started` → **立即 `emit_batch([ns])`**（ns 先落 tape：script 执行期间被杀的崩溃态可达，§2.6-C）；
    - 正常完成 yield `node_completed` → `emit_batch([nc])`；

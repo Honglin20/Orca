@@ -27,6 +27,7 @@ from unittest import mock
 import pytest
 from typer.testing import CliRunner
 
+from orca.chart._paths import artifacts_dir_for_run
 from orca.events.bus import EventBus
 from orca.events.tape import Tape
 from orca.iface.in_session._step_io import (
@@ -38,6 +39,7 @@ from orca.iface.in_session._step_io import (
 from orca.iface.in_session.cli import app
 from orca.run.orchestrator import Orchestrator
 from orca.run.step import (
+    ERR_INTERNAL_ERROR,
     ERR_SCRIPT_TIMEOUT,
     ERR_STATE_CORRUPT,
     ERR_UNSUPPORTED_NODE_KIND,
@@ -357,6 +359,105 @@ def test_inline_tail_takes_end_segment_not_head(tmp_path):
     assert summary["stderr_tail"].endswith("STDERR-TAIL-END")
     assert summary["stderr_tail"] == "E" * 485 + "STDERR-TAIL-END"
     bus.close()
+
+
+# ── ORCA_ARTIFACTS_DIR 派生注入（2026-08-26 D-1 修复，plan prof-opt-v4 §10.6）──
+
+
+def _run_inline_seeded(
+    tmp_path, node: ScriptNode, wf: Workflow, ws_inputs: dict, *, run_id: str,
+):
+    """真实 ``execute_script_inline`` + 预置 ws 的 tape（ws 是 artifacts 派生输入）。"""
+
+    async def _seed(bus: EventBus) -> None:
+        await bus.emit(
+            "workflow_started", {"workflow_name": wf.name, "inputs": ws_inputs},
+        )
+
+    tape = Tape(tmp_path / "inl.jsonl", run_id=run_id, resume=True)
+    bus = EventBus(tape)
+    asyncio.run(_seed(bus))
+    out = asyncio.run(execute_script_inline(
+        bus, tape, wf, node, run_id=run_id, inputs=ws_inputs,
+    ))
+    return out, tape, bus
+
+
+def _wf_as_project_scoped(command: str) -> Workflow:
+    """A(agent) → S(script) → $end（plan §10.6 T-I1 fixture 形）。"""
+    return Workflow(
+        name="wf-a", entry="a",
+        nodes=[
+            AgentNode(name="a", executor="opencode", model="d/d",
+                      prompt="do A", routes=[Route(to="s")]),
+            ScriptNode(name="s", command=command, routes=[Route(to="$end")]),
+        ],
+    )
+
+
+def test_inline_script_sees_project_scoped_artifacts_dir(tmp_path):
+    """T-I1（D-1 复现→修复证明）：script 节点看到 agent 节点部署的同一目录。
+
+    fixture 与缺陷同构：ws 含绝对 ``project_root`` + 哨兵脚本只预置在
+    project-scoped ``<proj>/artifacts/wf-a/scripts/``（per-run 目录**无**该文件）——
+    修复前 spawn env 恒 per-run → ``bash`` exit 127（No such file or directory）；
+    修复后 script 经 ``$ORCA_ARTIFACTS_DIR`` 寻址到哨兵 → exit 0。
+    """
+    proj = tmp_path / "proj"
+    scripts_dir = proj / "artifacts" / "wf-a" / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (scripts_dir / "gate.sh").write_text(
+        'echo "GATE-OK project-scoped"\n', encoding="utf-8",
+    )
+    wf = _wf_as_project_scoped('bash "$ORCA_ARTIFACTS_DIR/scripts/gate.sh"')
+    node = next(n for n in wf.nodes if n.name == "s")
+    run_id = "r-d1"
+    # fixture 自证区分力：哨兵只在 project-scoped 侧，per-run 派生路径下不存在
+    per_run_gate = (artifacts_dir_for_run(tmp_path, run_id) / "scripts" / "gate.sh")
+    assert not per_run_gate.exists()
+
+    (output, summary), tape, bus = _run_inline_seeded(
+        tmp_path, node, wf, {"project_root": str(proj)}, run_id=run_id,
+    )
+    assert output["exit_code"] == 0, output["stderr"]
+    assert "GATE-OK project-scoped" in output["stdout"]
+    assert "No such file or directory" not in output["stderr"]
+    bus.close()
+
+
+def test_inline_script_artifacts_dir_per_run_without_project_root(tmp_path):
+    """T-I2（per-run 回归钉）：ws 无 ``project_root`` → ORCA_ARTIFACTS_DIR 与修复前逐字节一致。
+
+    非 project-scoped workflow 零回归：派生值回落 per-run
+    ``runs/<run_id>/artifacts``，与修复前 exec 层派生同函数同参同 resolve。
+    """
+    wf = _wf_as_project_scoped('printf "%s" "$ORCA_ARTIFACTS_DIR"')
+    node = next(n for n in wf.nodes if n.name == "s")
+    run_id = "r-i2"
+    (output, summary), tape, bus = _run_inline_seeded(
+        tmp_path, node, wf, {"seed": 1}, run_id=run_id,
+    )
+    assert output["exit_code"] == 0, output["stderr"]
+    expected = str(artifacts_dir_for_run(tmp_path, run_id).resolve())
+    assert output["stdout"] == expected
+    bus.close()
+
+
+def test_inline_script_relative_project_root_wrapped_internal_error(tmp_path):
+    """T-I3（防御面）：坏 tape（相对 ``project_root``）→ InSessionError(internal_error)。
+
+    派生 raise 本身仅坏 tape 可达（bootstrap 写 ws 前已校验），但 daemon 是长活进程——
+    裸 ValueError 穿透 ``except InSessionError`` 面 = daemon 崩 + 无 workflow_failed
+    终态；helper 必须包成 fail loud 信封。
+    """
+    wf = _wf_as_project_scoped("echo x")
+    node = next(n for n in wf.nodes if n.name == "s")
+    with pytest.raises(InSessionError) as ei:
+        _run_inline_seeded(
+            tmp_path, node, wf, {"project_root": "relative/proj"}, run_id="r-i3",
+        )
+    assert ei.value.error_kind == ERR_INTERNAL_ERROR
+    assert "project_root" in str(ei.value)
 
 
 # ── 共享循环：advance_with_scripts（§2.5，fake executor 注入）────────────────

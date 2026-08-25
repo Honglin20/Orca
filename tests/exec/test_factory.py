@@ -43,6 +43,20 @@ def test_dispatch_script_to_script_executor():
     assert isinstance(exe, ScriptExecutor)
 
 
+def test_dispatch_script_passes_artifacts_dir():
+    """script 分支透传 ``artifacts_dir``（2026-08-26 in-session fix，plan prof-opt-v4 §10）。
+
+    make_executor 是单一分派点——显式覆盖（in-session project-scoped 派生）必须经
+    factory 到达 ScriptExecutor；agent 分支忽略此参（构造面由 ClaudeExecutor 自证）。
+    """
+    exe = make_executor(
+        ScriptNode(name="s", command="echo hi"),
+        artifacts_dir="/abs/proj/artifacts/wf-a",
+    )
+    assert isinstance(exe, ScriptExecutor)
+    assert exe._artifacts_dir == "/abs/proj/artifacts/wf-a"
+
+
 def test_dispatch_set_to_set_executor():
     exe = make_executor(SetNode(name="st", values={"a": "1"}))
     assert isinstance(exe, SetExecutor)
