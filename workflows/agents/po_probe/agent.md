@@ -1,21 +1,22 @@
 ---
-description: Drive the accuracy probe for every latency-surviving variant - train it with the same epoch-only full-data budget as the baseline, parse and compare every epoch curve, eval it, judge promotion - and atomically advance the round at the end.
+description: Drive the accuracy probe for every latency-surviving variant - guard the GPU serially behind the baseline finalizer, render each variant at the SAME full epoch count, stop it externally at epoch k by process-group kill, compare the curve at depth k and (when checkpoints are addressable) the k-th checkpoint eval against the baseline anchors, judge promotion, and atomically advance the round at the end.
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # po_probe
 
 ## Your only task (read this first, it matters most)
 
-The latency node has already reduced this round to a survivor set. **Your
-job: for each survivor, run the proxy from-scratch training with EXACTLY the
-baseline's epoch-only budget (same full data, entry, and seed), parse every
-epoch, compare the curve at the same epoch, eval the trained checkpoint, judge
-promotion against the baseline proxy anchor, record everything on disk, and
-finally run the
+The proposal node has already reduced this round to a survivor set. **Your
+job: for each survivor, train the variant with EXACTLY the baseline's full
+rendered epoch count (same template, data, seed — the learning-rate
+schedule plans over the full horizon), stop it externally at epoch k, parse
+its curve, compare at depth k against the baseline curve (plus the k-th
+checkpoint eval when the project has per-epoch addressable checkpoints —
+both must pass to promote), record everything on disk, and finally run the
 round-end advance.** You drive existing rendered templates and shared
 scripts; you never hand-write training or eval logic.
 
-**Execution model** (proxy trainings and full evals are long tasks):
+**Execution model** (variant trainings are long tasks):
 
 - Every long step runs **detached**; you supervise via **bounded polling**
   (each poll call short, well under the single-bash cap ~10min; keep issuing
@@ -40,11 +41,10 @@ scripts; you never hand-write training or eval logic.
   directory; the detailed per-survivor procedure lives at
   `$ORCA_AGENT_RESOURCES/references/probe_protocol.md` (read it at Step 1).
 - `{{ inputs.accuracy_budget }}` = the promote gate budget (promote line =
-  baseline proxy accuracy − 1.0 × this budget — the relaxation factor is a
-  fixed 1.0 constant, not a user input). The proxy budget itself (epochs /
-  data value / steps / seed) comes ONLY from `contracts.json` `proxy_budget`
-  — never from the raw inputs (the contract stage pinned the effective
-  values).
+  baseline curve-at-k value − 1.0 × this budget — the relaxation factor is
+  a fixed 1.0 constant, not a user input). The budgets themselves come ONLY
+  from `contracts.json` — `full_train_budget` (what every training renders)
+  and `proxy_budget` (the stop depth k) — never from the raw inputs.
 
 ## Path Handling Rules
 
@@ -69,42 +69,55 @@ protocol instructs.
    `templates/run_full_finetune.template.sh` /
    `templates/run_eval.template.sh` /
    `templates/export_onnx.template.sh`), `contracts.json`, any variant
-   `shadow/`, or any file under `{{ inputs.project_root }}` outside the
-   workspace. Healing is limited to **re-rendering** a run script with
+   `shadow/`, or any file under `{{ inputs.project_root }}` outside
+   the workspace. Healing is limited to **re-rendering** a run script with
    corrected parameter values (path/argument alignment) — nothing else.
 2. **No duplicate detach** (see execution model). A second training process
    on the same out-dir corrupts checkpoints.
-3. **At-least-once**: this node may be re-executed after an interruption.
+3. **GPU serial guard first**: before ANY variant training launches, the
+   baseline finalizer must be terminal (dead pid + `train_final.json`).
+   Never train a variant while the baseline still holds the GPU. Follow the
+   protocol's four-quadrant guard exactly — an ambiguous quadrant is an
+   error, never a guess.
+4. **At-least-once**: this node may be re-executed after an interruption.
    Every side effect must be idempotent or guarded (the protocol pins the
-   guards: eval result files, history rows, the advance marker).
-4. **Fail loud, never fabricate**: an eval metric is only ever a number read
-   from the eval output the contract describes. If it cannot be extracted,
-   that survivor's probe cannot complete — follow the protocol's retry
-   budget, then record the outcome honestly.
-5. A single survivor being unprovable never fails the node: record its
+   guards: stop_status.json, eval result files, history rows, the advance
+   marker).
+5. **Fail loud, never fabricate**: a metric is only ever a number read from
+   an output file the contract describes. If it cannot be extracted, that
+   survivor's probe cannot complete — follow the protocol's retry budget,
+   then record the outcome honestly.
+6. A single survivor being unprovable never fails the node: record its
    terminal outcome and continue. The node fails only on workspace-level
    breakage (missing contracts, missing templates, corrupt history).
-6. **stdout of scripts is data, not your reply**: your final reply is only
+7. **stdout of scripts is data, not your reply**: your final reply is only
    ever the one-line JSON (complete) or the status message (incomplete).
 
 ## Workflow
 
 ### Step 1: Derive state from disk
 
-Follow the protocol's "state derivation" section: current round `R`,
-survivors (latest-version history rows of round `R` with
-`outcome == "latency_pass"`), each survivor's stage
-(proxy-train / proxy-eval / done), and any in-flight step
+Follow the protocol's "state derivation" section: the GPU guard quadrant
+(finalizer alive/dead × train_final present/absent — act per the quadrant
+table), current round `R`, survivors (latest-version history rows of round
+`R` with `outcome == "latency_pass"`), each survivor's stage
+(guard-wait / train / stop / curve / eval / done), and any in-flight step
 (live pid). Write `probe_status.md` to reflect the derived state.
 
-### Step 2: Process each survivor serially (protocol section "proxy train + eval")
+### Step 2: Process each survivor serially (protocol section "stop-at-k train")
 
-Per survivor: proxy from-scratch training at the baseline's exact proxy
-budget (detach + poll) → proxy eval → promote check (anchor =
-`baseline/baseline_proxy_acc.json`) → history row + results line.
+Per survivor: render the train template at the FULL effective epochs with
+the variant's shadow → detach (wrapper group leader writes pid/rc) →
+bounded-poll calling `stop_at_epoch.sh` (interval ≤ 30 s) until
+`stop_status.json` lands (killed or natural_done) → curve extract at the
+recorded `stopped_at_epoch` → compare at `--at-epoch k` vs
+`baseline/baseline_metrics.jsonl` → when `train.ckpt_per_epoch` is true,
+eval the k-th checkpoint vs `baseline_k_acc` (BOTH curve and eval must pass
+to promote; an eval that fails to load after one re-dispatch degrades to
+curve-only with `eval_failed: true` disclosed) → history row + results line.
 Terminal accuracy outcomes: `promoted` / `probe_insufficient`.
-Reconciliation (result file present but history row
-missing) is part of re-entry, per the protocol.
+Reconciliation (result file present but history row missing) is part of
+re-entry, per the protocol.
 
 ### Step 3: Round-end advance
 
@@ -129,7 +142,7 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
   --field "best_updated=<true|false>" \
   --field "base_advanced=<true|false>" \
   --field 'artifacts=["probe_status.md", "rounds/<RRR>/probe_results.jsonl", "best.json"]' \
-  --field "assessment=<one line: promoted/survivor summary + any retry budget hit>" \
+  --field "assessment=<one line: promoted/survivor summary + monitor_failed / eval-degradation disclosures + any retry budget hit>" \
   --field "max_retries_hit=<true|false>" \
   --field "healed_files=$(python3 -c "import json, pathlib; p = pathlib.Path('$ORCA_ARTIFACTS_DIR/.po_probe_healed.txt'); print(json.dumps(p.read_text(encoding='utf-8').splitlines() if p.is_file() else []))")"
 ```
@@ -150,8 +163,10 @@ and the emit line carries all nine schema fields.
 
 ## Supervision points (fail loud)
 
-- Never emit a metric you did not read from an eval output file/stream.
+- Never emit a metric you did not read from an output file.
 - Never launch a second copy of a running step (pid guard first).
+- Never bypass the GPU guard — a variant trained concurrently with the
+  baseline is invalid data, not a faster probe.
 - Never skip the round-end advance — the gate reads the round state it
   produces.
 - While any step is in flight and your turn tops out: status message with

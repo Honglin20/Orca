@@ -4,9 +4,9 @@ The report node is the single terminal reporter: every path (success and
 every failure mode) converges here. **Zero cross-node output references** —
 the terminal state is derived ONLY from the workspace on disk. Paths are
 relative to the workspace root (`$ORCA_ARTIFACTS_DIR`) unless absolute. Angle-bracket
-placeholders (`<project-root>`, `<write-back>`, `<accuracy-budget>`,
-`<full-train-epoch-cap>`) are runtime
-values from your node prompt's input anchors — substitute the actual values.
+placeholders (`<project-root>`, `<write-back>`, `<accuracy-budget>`) are
+runtime values from your node prompt's input anchors — substitute the actual
+values.
 
 Build the report with ONE python script you write at entry:
 `$ORCA_ARTIFACTS_DIR/report_builder.py` (English identifiers, `pathlib`,
@@ -16,13 +16,24 @@ mechanically, is safe to re-run (write-back is idempotent by the same-content
 rule), and prints the final single-line JSON on stdout. Your reply is that
 line verbatim.
 
+## 0. Terminal harvest (before the state table)
+
+Read `baseline/finalizer.pid`: dead → pass (the baseline's terminal state is
+whatever `baseline/train_final.json` says); alive → wait ≤ 60 s for the
+terminal state, then kill the baseline training group (`baseline/train.pid`),
+the finalizer group, and every in-flight variant group
+(`variants/*/train/train.pid`, dead pids skipped) — and record
+`"aborted at terminal"` for the `reason` (disclosed, never hidden). The
+harvested-kill disclosure does NOT change `status`/`stage`; the state table
+below still derives them from disk.
+
 ## 1. Terminal-state table (first match wins)
 
 | # | disk condition | status | stage |
 |---|---|---|---|
 | 1 | `project_manifest.md` OR `shadow/` OR `BASELINE.lock` missing | failed | flatten |
 | 2 | `contracts.json` missing, or its recorded viability flag is false | failed | contract |
-| 3 | `baseline/baseline_proxy_acc.json` missing, OR `baseline_status.md` exists and does not record the chain as fully successful | failed | baseline |
+| 3 | the baseline early chain is incomplete (`base/bottleneck_report.json` or `baseline/train.rendered.sh` missing), OR `baseline_status.md` records the chain as failed, OR `baseline/train_final.json` exists with `status: failed` (three-state read of the baseline training terminal: failed → attribute via its `stage`; missing → the loop ended before the baseline finished — not itself a failure, disclosed under `baseline.ref_acc`) | failed | baseline |
 | 4 | `rounds/` has no numeric directory | failed | propose |
 | 5 | `final/` exists AND `final/final_acc.json` missing | failed | full-train |
 | 6 | `final/final_acc.json` exists AND its `within_budget` is true | success | full-train |
@@ -43,12 +54,17 @@ failure: rounds ran, nothing was ever promoted (or nothing was even
 proposable), the loop ended with no winner.
 
 **Inner attribution for row 7** (within the incomplete round `R`,
-`rounds/<RRR>/`):
+`rounds/<RRR>/`; the proposal loop — propose, implement, latency recheck —
+closed inside ONE node, so the old implement/verify split no longer exists):
 
 - `rounds/<RRR>/proposals.json` missing → stage `propose`;
-- else some proposal vid has neither `variants/<vid>/DONE` nor a terminal
-  outcome in its latest history row → stage `implement`;
-- else some DONE vid lacks `variants/<vid>/verdict.json` → stage `verify`;
+- else some proposal vid has NONE of the three closure states — no
+  `variants/<vid>/DONE` marker, no `variants/<vid>/verdict.json`, no
+  terminal outcome in its latest history row → stage `propose` (the loop
+  died between proposals and implementations);
+- else some DONE vid lacks `variants/<vid>/verdict.json` (and its latest
+  history row is not terminal) → stage `propose` (died before/at the
+  latency recheck);
 - else some survivor (latest history `outcome == "latency_pass"`) lacks a
   terminal accuracy outcome → stage `probe`;
 - otherwise (nothing outstanding, yet the round never advanced) → stage
@@ -56,26 +72,32 @@ proposable), the loop ended with no winner.
 
 `reason` (one or two sentences): for success, the winner and the final
 budget verdict; for failures, what the matched row's condition shows (e.g.
-"baseline chain incomplete: no self-probe anchor", "round 2 stopped in the
-verify stage: 2 completed variants without verdicts").
+"baseline training failed at the final check: actual epochs < rendered",
+"round 2 stopped inside the proposal loop: 2 DONE variants without
+verdicts").
 
 ## 2. Field assembly
 
-- `status` / `stage` / `reason`: from the table above.
+- `status` / `stage` / `reason`: from the table above (plus the harvest
+  disclosure when it fired).
 - `winner`: when `best.json` exists — `{"vid", "change_sig", "lineage"}`;
   `change_sig` from the vid's latest history row; `lineage` = the parent
   chain: walk `parent_vid` links backwards through history (oldest first,
   ending with the winner vid; a null parent ends the walk). No `best.json`
   → `null`.
-- `baseline`: `proxy_acc` from `baseline/baseline_proxy_acc.json` (null only
-  if absent); `ref_acc` = the effective full-budget baseline anchor, in
-  priority order: (a) `baseline/baseline_ref.json`'s `baseline_ref_acc` when
-  it is a number (the user-provided reference), (b)
-  `baseline/baseline_full_acc.json`'s `baseline_full_acc` (the auto-trained
-  anchor), (c) null; `makespan` = the
-  ORIGINAL baseline makespan, sourced in priority order: (a) any round-1
-  history row's `base_at_proposal.makespan_cycles`, (b) any round-1
-  `verdicts.jsonl` line's `base_makespan_cycles`, (c) the current
+- `baseline`: `proxy_acc` = the baseline FULL curve's metric at epoch k
+  (k = `contracts.json` `proxy_budget.epochs`; read
+  `baseline/baseline_metrics.jsonl`'s epoch-k row; curve shallower than k,
+  file missing, or no epoch-k row → null AND a disclosure in `reason`).
+  `ref_acc` = the baseline full-training anchor, three-state read of
+  `baseline/baseline_full_acc.json`: `baseline/train_final.json` missing →
+  null + disclosure ("baseline training never reached a terminal state" —
+  includes the aborted-at-terminal case); `train_final.status == "failed"`
+  → null + attribution (quote its `stage`); `done` → read
+  `baseline_full_acc` from the file (never from anywhere else). `makespan` =
+  the ORIGINAL baseline makespan, sourced in priority order: (a) any
+  round-1 history row's `base_at_proposal.makespan_cycles`, (b) any
+  round-1 `verdicts.jsonl` line's `base_makespan_cycles`, (c) the current
   `base/profile/profile_summary.json` (valid only when no round ever
   advanced — no winner was ever promoted).
 - `pretrained_ref_acc`: number from `baseline/pretrained_ref.json` when that
@@ -86,8 +108,7 @@ verify stage: 2 completed variants without verdicts").
 - `final`: `acc` from `final/final_acc.json` (0 when absent); `makespan`
   from `best.json` (referenced, never re-measured; 0 when absent);
   `gap` = anchor − final.acc for `higher_better`, final.acc − anchor for
-  `lower_better`, where anchor = the same effective value as
-  `baseline.ref_acc` when present, else the `baseline_full_acc` recorded
+  `lower_better`, where anchor = the `baseline_full_acc` recorded
   INSIDE `final/final_acc.json` (the full-train stage pinned the anchor it
   judged against; 0 gap when either side is absent);
   `within_budget` = the `within_budget` recorded in `final/final_acc.json`
@@ -97,7 +118,10 @@ verify stage: 2 completed variants without verdicts").
   `rounds/<NNN>/proposals.json`.
 - `history_path`: absolute path of `history.jsonl`.
 - `write_back`: `{done, files, conflicts}` — `{false, [], []}` unless
-  section 3 ran.
+  section 3 ran. On terminal states with NO promoted variant (no
+  `best.json`), the zero-write-back form is the honest outcome — the
+  Write-Back section of the report states "no promoted variant — nothing to
+  write back" instead of implying a skip.
 - `charts_summary`: comma-joined chart file names, or the exact fixed string
   `none (no rounds recorded)` — no free-form wording (section 4 pins when).
 - `artifacts`: absolute paths of the key products that exist: this report's
@@ -141,7 +165,7 @@ new files are written beside the originals.
      exists with identical content → count as written (idempotent).
 3. **Deletions**: files the lock covers whose path is ABSENT from the final
    shadow tree → conflict entry `<relpath>: deleted in optimized structure
-   (not written back)`. (The current playbook only edits files in place, so
+   (not written back)`. (The structural levers only edit files in place, so
    this normally never triggers — report it honestly if it ever does.)
 4. **Verify**: after writing, re-read every written file and compare bytes
    with its shadow source; a mismatch → delete that partial file (it is
@@ -199,26 +223,27 @@ stdlib-only rendering — no external dependencies):
 
 Sections: Terminal State (status/stage/reason) · Per-Round Table (round,
 proposals, verdict outcome counts, promoted vids, round best makespan) ·
+**Stop-Status Disclosure** (mechanical counts over every
+`variants/<vid>/stop_status.json`: `killed` vs `natural_done`, and how many
+record `monitor_failed: true` — the probe monitor's exercise disclosure) ·
 Winner (vid, change signature, lineage chain) · **Fairness Note** (one
-short paragraph: the baseline and every variant were trained FROM SCRATCH at
-the SAME proxy budget — single source `contracts.json` `proxy_budget`; the
-final verdict compares against the full-budget baseline anchor, ref-input or
-auto-trained, both at the same full budget and seed. **The full-budget epoch
-count cited here is the EFFECTIVE value, never the raw argparse count**:
-effective epochs = `min(<full-train-epoch-cap> or ∞, contracts.json
-train.train_epochs_full)`. Derive it mechanically, in order: (a)
-`baseline/baseline_full_acc.json`'s `epochs` (the actual trained value) when
-that file exists; (b) otherwise compute the min from the
-`<full-train-epoch-cap>` input (empty = uncapped) and `contracts.json`
-`train.train_epochs_full`. Citing `train_epochs_full` directly while a cap is
-set overstates the trained budget — forbidden. When the cached anchor's
-recorded `epochs` differs from this run's effective epochs (stale cache,
-reused by design), state BOTH values in the note.) · Baseline vs Final
-(baseline makespan / proxy accuracy / reference anchor, final makespan /
-accuracy / gap / budget verdict; add a "pretrained reference" line — path
-only, explicitly non-gating — when `readiness.json` records a provided
-pretrained ckpt) · Write-Back (written files, conflicts,
-deletions, informational skips of shadow-synthesized files) ·
+short paragraph: the baseline and every variant were trained FROM SCRATCH —
+the baseline at the full budget, every variant rendered at the SAME full
+epoch count and stopped externally at epoch k; both budgets from the single
+source `contracts.json` (`full_train_budget` + `proxy_budget`). **The
+epoch count cited here is `full_train_budget.epochs` read from
+`contracts.json` — the EFFECTIVE value the anchor's fingerprint carries,
+never the raw argparse count**; when the anchor file's recorded
+`full_train_budget` differs from the current contracts (a stale anchor
+should already have failed the fingerprint check upstream — if you are
+looking at one, say so), state BOTH values.) · Baseline vs Final
+(baseline makespan / curve-at-k proxy accuracy / full-training anchor,
+final makespan / accuracy / gap / budget verdict; add a "pretrained
+reference" line — path only, explicitly non-gating — when `readiness.json`
+records a provided pretrained ckpt) · Write-Back (written files, conflicts,
+deletions, informational skips of shadow-synthesized files; on a
+no-promotion terminal: the explicit "no promoted variant — nothing to
+write back" line) ·
 **Enablement Note**: written files carry NEW names — switching
 the model import to the new file name is the user's one-time action; the
 original files are untouched.

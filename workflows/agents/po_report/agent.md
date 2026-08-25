@@ -62,6 +62,20 @@ Read workspace ledger files (`history.jsonl`, `best.json`,
 
 ## Workflow
 
+### Step 0: Terminal harvest (before anything else)
+
+The baseline full training and its finalizer are detached; the loop may
+reach you while they are still running. Read `baseline/finalizer.pid` and
+act per the format document's harvest table: pid dead → pass; pid alive →
+bounded-wait ≤ 60 s for `baseline/train_final.json` to land (still within
+one short bash call; if your turn tops out, status message with
+`do not call orca next` and re-enter); alive at the deadline with no
+terminal state → **abort at terminal**: kill the baseline training group
+(pid from `baseline/train.pid`), the finalizer group, and every in-flight
+variant group (`variants/*/train/train.pid` — skip dead pids), then
+disclose `"aborted at terminal"` in the `reason` (the report states what
+was killed; it never pretends the baseline finished).
+
 ### Step 1: Derive the terminal state from disk
 
 Write `$ORCA_ARTIFACTS_DIR/report_builder.py` implementing the format
@@ -95,10 +109,21 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/dashboard_snapshot.py" \
   --artifacts "$ORCA_ARTIFACTS_DIR"
 ```
 
-`charts/rounds_makespan_trend.html` and `charts/verdict_distribution.html`
-(inline-SVG, stdlib-only), the best-effort live push when the chart env is
-present, `dashboard.json` + self-contained `dashboard.html`, and
-`prof_opt_report.md` at the workspace root per the format document.
+**Finalize the live training-curve chart** (the terminal push, so the
+final curve state is visible even if the daemon saw no mid-run poll):
+
+```bash
+python3 "$ORCA_ARTIFACTS_DIR/scripts/push_curves.py" \
+  --artifacts "$ORCA_ARTIFACTS_DIR" --title "(final)" || true
+```
+
+(best-effort: failure never changes the report; a successful push appends
+the `.chart_push.log` audit line). Then `charts/rounds_makespan_trend.html`
+and `charts/verdict_distribution.html` (inline-SVG, stdlib-only — the
+per-round makespan trend doubles as the best-effort live trend chart), the
+best-effort live push of both when the chart env is present, `dashboard.json`
++ self-contained `dashboard.html`, and `prof_opt_report.md` at the
+workspace root per the format document.
 
 ### Step 4: Validate and relay
 

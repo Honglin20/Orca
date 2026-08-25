@@ -1,5 +1,5 @@
 ---
-description: Discover and empirically verify the three entry contracts (training / evaluation / export) that connect optimization variants to the user's original pipeline, adapt entries when a contract switch is missing, and render the parameterized run templates every downstream node executes.
+description: Discover and empirically verify the three entry contracts (training / evaluation / export) that connect optimization variants to the user's original pipeline, adapt entries when a contract switch is missing, pin both training budgets (full-epoch fingerprint + probe stop depth k) and the checkpoint addressability, reject early-stopping projects at the gate, and render the parameterized run templates every downstream node executes.
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # po_contract
@@ -9,18 +9,33 @@ a shadow copy of the model code; your job is to connect that shadow to the user'
 ORIGINAL training / evaluation / export entries WITHOUT touching a single user file:
 
 - discover how each entry is invoked and which contract switches exist
-  (epochs / out-dir / step truncation / data-subset limit for training;
-  checkpoint path for evaluation; output path + determinism for export);
+  (epochs / out-dir for training; checkpoint path for evaluation; output
+  path + determinism for export);
 - decide the adaptation tier per entry and, when switches are missing, port the
   user's entry into an adapted entry under the workspace (verbatim paradigm, only
   the missing switches parameterized);
-- fix the **proxy training budget** (data-subset value / epochs / steps / seed)
-  in `contracts.json` — the single source the baseline and every variant render
-  verbatim (fairness invariant: same budget, trained from scratch);
+- pin **two budgets** in `contracts.json` — `full_train_budget` (the full
+  effective epoch count + seed: the value-level fingerprint the baseline
+  full training, every variant render, and the winner full training must
+  share) and `proxy_budget` (the variant stop depth k) — the single sources
+  downstream nodes render verbatim (fairness invariant);
+- pin the **checkpoint addressability** (`train.ckpt_output_rule` +
+  `train.ckpt_per_epoch`) from measured quick-run behavior;
+- **best-effort early-stopping rejection**: a project whose training stops
+  before the rendered epoch count makes every epoch-aligned comparison
+  unfair — detect what you can (argparse/config scan + quick-run
+  observation) and reject with an honest attribution; what you cannot
+  detect is caught strictly at the baseline final check;
 - MEASURE everything you claim — a contract that was not exercised end-to-end is
   not a contract;
 - leave behind `contracts.json` + four run templates, so downstream nodes only pick
   parameters and never hand-copy plumbing.
+
+**Admission clause (this document is its single source)**: the workflow
+description and the `reason` field of `contracts.json` both carry it —
+训练须按给定轮数精确执行，自带 early-stopping 的项目不在本 workflow 范围。
+Copy this sentence verbatim into the top-level `reason` you assemble; the
+validation gate checks for it as a constant substring.
 
 Everything runs through the deployed shared scripts at
 `$ORCA_ARTIFACTS_DIR/scripts/` (assert_shadow / render_run /
@@ -78,9 +93,14 @@ bash "$ORCA_AGENT_RESOURCES/scripts/check_contracts.sh" --reuse-check
 
 - Exit 0 (REUSE) → read the fields back out of `contracts.json` and go straight to
   Output (fill every output_schema field from disk, `error=""`).
-- Exit 1 → continue with Step 1. Exit 2 → fail loud (`viable=false` +
-  `error` naming the environment problem). Missing `readiness/readiness.json`
-  means flatten did not complete → fail loud (`viable=false`, reason names it).
+- Exit 1 naming missing version fields ("predates the current workflow
+  version") → the workspace was built by an older contract stage: fail loud
+  with `viable=false` and `reason` quoting the fresh_start guidance (the
+  contracts are never partially patched onto an old workspace).
+- Exit 1 (sha drift) → continue with Step 1 (rebuild). Exit 2 → fail loud
+  (`viable=false` + `error` naming the environment problem). Missing
+  `readiness/readiness.json` means flatten did not complete → fail loud
+  (`viable=false`, reason names it).
 
 ### Step 1: Snapshot The Project (pre-measurement)
 
@@ -116,68 +136,102 @@ print(f"snapshot: {len(snap)} files -> {out}")
 PY
 ```
 
-### Step 2: Train Contract (discovery + tier + dry-run)
+### Step 2: Train Contract (discovery + tier + quick-run)
 
 1. **Locate** the training entry from the manifest / user request; open it and its
    local imports yourself. Extract the argparse (or equivalent) mapping for:
-   ① epochs ③ out-dir ④ step/batch truncation (flag name and semantics, or
-   "absent") ⑥ **data-subset / limit knobs** (any EXISTING adjustable parameter
-   that reduces the training data volume or the number of samples/batches per
-   epoch — e.g. a max-samples / subset / limit / fraction flag; never invent a
-   new one), plus seed when supported.
+   ① epochs ③ out-dir, plus seed when supported.
    Also identify the **per-epoch metric log format**. The training contract is
    complete only when you can write a regular expression with named groups
    `epoch` and `metric` that extracts one metric for every completed epoch from
    the training log. Record it as `train.epoch_metric_extraction.pattern` and
-   prove it against at least two epoch lines produced by the dry-run (or a
-   minimal one-epoch run). If the project emits no per-epoch metric, adapt the
+   prove it against the epoch lines the quick-run (item 6) produces. The
+   pattern MUST anchor the metric group with an end-of-line or non-digit
+   boundary — a pattern that can stop mid-number (0.1234 truncated to 0.12)
+   silently corrupts every curve; the gate functionally tests this on a
+   canonical sample. If the project emits no per-epoch metric, adapt the
    logging cadence in a Tier-B entry without changing training behavior; if
    that is impossible, set `viable=false` with reason
    `per_epoch_metric_unavailable` — later epoch-aligned comparison must not
    silently compare different budgets.
-2. **Checkpoint output rule.** Determine where the entry writes its checkpoint.
-   A rule that embeds a fresh timestamp/random directory per run is NOT predictable
-   → for tier A that is a contract failure (no predictable output path); port it
-   away in a tier-B adapted entry (fixed filename under out-dir).
+2. **Checkpoint output rule + addressability.** Determine where the entry
+   writes its checkpoint. A rule that embeds a fresh timestamp/random
+   directory per run is NOT predictable → for tier A that is a contract
+   failure (no predictable output path); port it away in a tier-B adapted
+   entry (fixed filename under out-dir). The rule is recorded as
+   `train.ckpt_output_rule` (a literal pattern with an `{out_dir}`
+   placeholder; a trailing `*` glob means newest match). Addressability
+   (`train.ckpt_per_epoch`, boolean) is decided by the quick-run's OBSERVED
+   behavior in item 6: one checkpoint file per epoch (glob rule matching
+   exactly N files for N epochs, in epoch write order) → `true`; a single
+   rolling/overwritten file or an undecidable mix → `false`. When `true`,
+   the k-th checkpoint is addressable as the k-th glob match in write
+   order — downstream k-epoch evals depend on this, so it is measured,
+   never assumed.
 3. **Pin `train_epochs_full`** from the argparse default / constants — a mechanical
    fact, never a guess.
-4. **Interpreter flag scan.** Grep the entry (and its shebang / any `python`
+4. **Best-effort early-stopping scan** (admission clause enforcement at the
+   gate): grep the entry + its config files for early-stopping mechanisms —
+   an early-stopping / patience / min-delta / val-triggered break flag or
+   config, a `break` out of the epoch loop on a validation condition, a
+   scheduler-with-early-stop wrapper. THEN observe the quick-run (item 6):
+   if the training ends before the rendered epoch count with a
+   stop-condition message, that is the decisive evidence. Detected by
+   EITHER scan or observation → `viable=false` with reason
+   `early_stopping_detected: <mechanism + evidence>` — do not try to
+   parameterize the stopping away; the workflow's admission clause is a
+   scope boundary, not a repair target. Not detected → record
+   `"early_stopping_check": "pass"` in the quick-run evidence (an honest
+   best-effort, not a guarantee — the baseline final check catches what the
+   scan missed).
+5. **Interpreter flag scan.** Grep the entry (and its shebang / any `python`
    subprocess it spawns) for `-S` / `-E` interpreter flags. Found → `viable=false`
    with reason "interpreter flag -S/-E disables the shadow injection" (fail loud;
    there is no workaround in this pipeline). Otherwise
    `interpreter.flags_check = "pass"`.
-5. **Tier decision:**
-   - **Tier A** — ①③ (and ④⑥ when present and needed) all parameterized →
-     template the user entry directly.
+6. **Tier decision:**
+   - **Tier A** — ①③ all parameterized → template the user entry directly.
    - **Tier B** — some switches missing or the output rule is not predictable →
      write `adapted/train_proxy_entry.py`: a VERBATIM port of the user's
      training paradigm (loss / optimizer / scheduler / dataset & loader / metric /
      logging cadence) where the ONLY changes are (a) new CLI switches for the
-     missing contract parameters (epochs / out-dir / step truncation / data
-     subset), (b) an optional proxy budget cap (max steps / max batches / data
-     subset), (c) paths parameterized to accept out-dir. Do not simplify,
-     substitute, reorder, or drop anything behavioral. User files stay untouched —
-     the adapted entry lives only in the workspace and imports the user's modules
-     exactly as the original entry does.
+     missing contract parameters (epochs / out-dir), (b) paths parameterized
+     to accept out-dir. Do not simplify, substitute, reorder, or drop anything
+     behavioral. User files stay untouched — the adapted entry lives only in
+     the workspace and imports the user's modules exactly as the original
+     entry does.
    - **Tier C** — the training logic is so entangled that parameterizing it would
      change behavior → `viable=false`, reason `training_prerequisites_missing`,
      name the coupling in `reason`.
-6. **Dry-run (mandatory measurement).** Render the probe template (Step 5 defines
-   the file; you may write the template now) with `epochs=0` (or 1 when 0 is
-   syntactically invalid), `out_dir=contract_work/dryrun_train/`,
-   `seed={{ inputs.seed }}` (plus the data-subset value when a knob is declared —
-   a small value keeps the dry-run cheap), execute it, and
-   classify into `contract_work/train_dryrun.json` as an object whose `"status"`
-   key is exactly one of:
-   - `"runs_epochs_zero_rejected"` — the entry is runnable and cleanly rejects
-     epochs=0 (this is the EXPECTED good case: proves argparse wiring + entry
-     executes under the injection header);
-   - `"runs_minimal_budget"` — a minimal budget actually completed;
+7. **Quick-run (mandatory measurement, ONE run, TWO uses).** Render the
+   train template (Step 5 defines the file; you may write it now) with
+   `epochs=2` (≥ 2 required — one run must prove BOTH the epoch-line format
+   AND the checkpoint behavior), `out_dir=contract_work/quickrun_train/`,
+   `seed={{ inputs.seed }}`, execute it, and classify into
+   `contract_work/train_quickrun.json` as an object whose `"status"` key is
+   exactly one of:
+   - `"runs_minimal_budget"` — the 2-epoch run completed (EXPECTED good
+     case: proves the entry executes under the injection header AND yields
+     ≥ 2 epoch metric lines);
+   - `"runs_epochs_zero_rejected"` — kept as a valid classification when
+     the full quick-run is prohibitively expensive BUT an epochs=0 probe
+     ran: this weaker evidence leaves the epoch-line format UNPROVEN → in
+     that case you must still obtain two real epoch lines from some source
+     (a log the user provides) or `viable=false` with
+     `per_epoch_metric_unavailable`;
    - anything else → the entry cannot run: fix the adapted entry (tier B) or
      declare tier C.
-   Also verify in the same evidence file: `out_dir_effective` (files landed under
-   the out-dir you passed) and `ckpt_output_example` (the concrete path the rule
-   predicts for that out-dir — this is the rule downstream nodes rely on).
+   Record in the same evidence file (the second use of the run):
+   - `epoch_lines_matched`: the number of epoch metric lines the pattern
+     extracted (must equal the rendered epoch count for a clean run —
+     best-effort assert actual == rendered; a mismatch with no
+     early-stopping message is investigated before proceeding);
+   - `ckpt_files`: the checkpoint files that appeared under the out-dir
+     (names + count) — the measured basis of `ckpt_per_epoch`;
+   - `early_stopping_check`: `"pass"` or the detection from item 4;
+   - `out_dir_effective` and `ckpt_output_example` (the concrete path the
+     rule predicts for that out-dir — this is the rule downstream nodes
+     rely on).
 
 ### Step 3: Eval Contract (discovery + tier + dual-checkpoint probe)
 
@@ -276,22 +330,27 @@ prompt is Jinja2-rendered and such a token would be parsed as a prompt
 variable); the renderer prepends the injection header and the shadow assertion,
 so never hand-copy `PYTHONPATH`/env plumbing into a template:
 
-- `templates/run_probe_finetune.template.sh` — proxy-budget from-scratch
-  training:
+- `templates/run_full_finetune.template.sh` — the ONE training pipeline:
   `<<python>> <train entry> <epochs flag> <<epochs>> <out flag> <<out_dir>> <seed flag> <<seed>>`
-  (never include data-subset or truncation tokens: the coarse budget is
-  epoch-only and always uses the complete dataset). Training starts from the
-  entry's own fixed-seed random initialization — there is NO checkpoint token.
-- `templates/run_full_finetune.template.sh` — same entry and switches, NO
-  data-subset token (full training uses the complete dataset), no truncation
-  flag.
+  (+ `<<vid>>` when the entry accepts an identifier). Variants are NOT
+  rendered at a smaller epoch count — every training (baseline, every
+  variant, the final winner) renders the SAME full effective epochs from
+  THIS template; the variant probe depth is an EXTERNAL stop at epoch k,
+  applied by the probe stage, never a template value. Training always uses
+  the complete dataset and starts from the entry's own fixed-seed random
+  initialization — there is NO checkpoint token and no data/truncation
+  token.
+- `templates/run_probe_finetune.template.sh` — kept as a second file for
+  downstream naming compatibility; it MUST be byte-identical to
+  `run_full_finetune.template.sh` (the validation gate asserts identity —
+  one training pipeline, two names).
 - `templates/run_eval.template.sh` — `<<python>> <eval entry> <ckpt flag> <<ckpt>> ... > <<log>> 2>&1`
   (metric extraction happens on `<<log>>` afterwards).
 - `templates/export_onnx.template.sh` — `<<python>> <export entry> --out <<out>> --seed <<seed>>`
   (or the pinned user-script argv with the same tokens).
 
 Tier-B entries point at `adapted/*.py`; tier-A at the user's original entry paths.
-Validation of the templates IS the Step 2-4 measurements: every dry-run above must
+Validation of the templates IS the Step 2-4 measurements: every quick-run above must
 have been produced by rendering these exact template files (not ad-hoc commands).
 
 ### Step 6: Injection Environment Disclosure
@@ -320,24 +379,40 @@ have been produced by rendering these exact template files (not ad-hoc commands)
 2. Re-run the eval dry-run once after any merge so the measured evidence reflects
    the merged injection.
 
-### Step 7: Proxy Budget Selection (single source of the fairness invariant)
+### Step 7: Budget Selection (the two fairness fingerprints)
 
-Mechanical, record as `proxy_budget` in contracts.json (never re-derived
-downstream) — the baseline and every variant render these values VERBATIM:
+Mechanical, recorded in contracts.json (never re-derived downstream) —
+downstream nodes render these values VERBATIM.
 
-- `epochs`: `{{ inputs.probe_epochs }}` empty → `min(1, train_epochs_full)`;
-  non-empty numeric → `min(int("{{ inputs.probe_epochs }}"), train_epochs_full)`.
-- `dataset_knob` / `data_value` / `max_steps`: always `null`. The coarse
-  comparison is **epoch-only**: a candidate differs from the baseline only in
-  the number of epochs; data, sampler, seed, loss, optimizer, and training
-  entry stay identical. Never spend a data-subset or step-cap knob on proxy
-  comparisons, even when the project has one.
-- `seed`: `{{ inputs.seed }}` (from-scratch training is seeded per render).
+**`full_train_budget`** (the full-training value-level fingerprint — the
+baseline full training, every variant render, and the winner full training
+must carry IDENTICAL values):
+
+- `epochs` = `min(int("{{ inputs.full_train_epoch_cap }}"),
+  train_epochs_full)` when `{{ inputs.full_train_epoch_cap }}` is non-empty;
+  else `train_epochs_full` (the project's full count, uncapped).
+- `seed` = `{{ inputs.seed }}`.
+- `data` = `{"dataset_knob": null, "data_value": null}` — always the null
+  pair: full-data training is a pinned VALUE, not an omission (the gate
+  enforces the pair; a recorded knob here would silently change the
+  budget's meaning).
+
+**`proxy_budget`** (the variant stop depth):
+
+- `epochs` = k: `{{ inputs.probe_epochs }}` empty → `min(1,
+  full_train_budget.epochs)`; non-empty numeric →
+  `min(int("{{ inputs.probe_epochs }}"), full_train_budget.epochs)`.
+  Variants render at `full_train_budget.epochs` and are stopped at epoch k
+  externally — k only caps the comparison depth.
+- `dataset_knob` / `data_value` / `max_steps`: always `null`.
+- `seed` = `{{ inputs.seed }}` (same value as the full budget).
+
+`probe_cap_mechanism` is always `"stop-at-k"`.
 
 Write the selection rationale to `contract_work/proxy_budget_selection.json`:
-`{"dataset_knob": null, "data_value": null, "max_steps": null,
-"rationale": "epoch-only fairness invariant"}`.
-`probe_cap_mechanism` is always `epochs-only`.
+`{"probe_k": <k>, "full_epochs": <effective full epochs>,
+"rationale": "stop-at-k fairness invariant: full-epoch render + external
+stop at k; full_train_budget is the value-level fingerprint"}`.
 
 ### Step 8: Post-Snapshot + Exemptions
 
@@ -410,17 +485,17 @@ evidence files (deterministic snippet or a small python script you write under
 ```json
 {
   "viable": true,
-  "reason": "<tier decision + measurement summary, one sentence>",
+  "reason": "<tier decision + measurement summary; MUST contain the admission clause sentence verbatim — 训练须按给定轮数精确执行，自带 early-stopping 的项目不在本 workflow 范围>",
   "interpreter": {"sys_executable": "<abs>", "flags_check": "pass"},
   "shadow": {"shadow_root": "<abs>", "shadow_pkgs": ["..."]},
   "model_facts": {"module": "...", "factory": "...", "args": [], "kwargs": {},
                   "container_key": null, "dummy_inputs": [{"name": "...", "shape": [], "dtype": "float32"}]},
   "train": {"tier": "A", "entry": "<abs entry or adapted entry>", "entry_sha256": "...",
             "flags": {"epochs": "--epochs",
-                      "out_dir": "--out-dir", "seed": "--seed",
-                      "max_steps": "--max-steps|null", "data_knob": "--limit|null"},
-            "ckpt_output_rule": "<literal pattern under out-dir, with an {out_dir} placeholder; a trailing * glob means newest match>",
-            "epoch_metric_extraction": {"kind": "stdout_regex", "pattern": "<named groups epoch and metric>"},
+                      "out_dir": "--out-dir", "seed": "--seed"},
+            "ckpt_output_rule": "<literal pattern under out-dir, with an {out_dir} placeholder; a trailing * glob means newest match; per-epoch addressable forms are per-epoch glob patterns>",
+            "ckpt_per_epoch": true,
+            "epoch_metric_extraction": {"kind": "stdout_regex", "pattern": "<named groups epoch and metric; the metric group anchored by an end-of-line/non-digit boundary>"},
             "train_epochs_full": 100},
   "eval": {"tier": "A", "entry": "<abs>", "entry_sha256": "...",
            "flags": {"ckpt": "--ckpt"},
@@ -428,16 +503,22 @@ evidence files (deterministic snippet or a small python script you write under
            "metric_extraction": {"kind": "stdout_regex|json", "pattern": "...", "json_pointer": "..."},
            "metric_direction": "higher_better"},
   "export": {"entry": "<abs>", "entry_sha256": "...", "generated": true, "argv_facts": "..."},
+  "full_train_budget": {"epochs": 10, "seed": 0,
+                        "data": {"dataset_knob": null, "data_value": null}},
   "proxy_budget": {"epochs": 1, "dataset_knob": null, "data_value": null,
                    "max_steps": null, "seed": 0},
-  "probe_cap_mechanism": "epochs-only",
+  "probe_cap_mechanism": "stop-at-k",
   "exemptions": [],
   "sitecustomize_merge": {"found": false, "path": "", "merged": false}
 }
 ```
 
-(`model_facts` verbatim from `readiness/readiness.json`; sha256 fields recomputed
-at assembly time via hashlib — the gate re-checks them.)
+The `reason` admission clause is copied VERBATIM from the Admission clause
+paragraph near the top of this document (this document is its single
+source; the gate checks the constant substring, and a test pins this
+document and the gate together). (`model_facts` verbatim from
+`readiness/readiness.json`; sha256 fields recomputed at assembly time via
+hashlib — the gate re-checks them.)
 
 ## Guidelines
 
@@ -463,8 +544,8 @@ run the emitter and reply with its stdout verbatim:
   --field export_script="$ORCA_ARTIFACTS_DIR/templates/export_onnx.template.sh" \
   --field metric_direction=higher_better \
   --field train_epochs_full=<int> \
-  --field proxy_budget='{"epochs": <int>, "dataset_knob": "<flag|null>", "data_value": <value|null>, "max_steps": <int|null>, "seed": <int>}' \
-  --field probe_cap_mechanism="flag:--max-steps" \
+  --field proxy_budget='{"epochs": <k>, "dataset_knob": null, "data_value": null, "max_steps": null, "seed": <int>}' \
+  --field probe_cap_mechanism="stop-at-k" \
   --field exemptions='[...]' \
   --field error="" \
   --field generated_artifacts='["contracts.json", "templates/", "adapted/", "contract_work/", "verify/paradigm_verifier_report_train.md", ...]'
