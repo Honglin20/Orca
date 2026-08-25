@@ -2598,6 +2598,8 @@ def test_run_latency_recheck_migration_regression(tmp_path: Path):
     assert out4["verdicts_count"] == 2 and out4["latency_pass_count"] == 1
     assert json.loads((art / "variants" / "r1-01" / "verdict.json")
                       .read_text(encoding="utf-8")) == _T8_PASS_VERDICT
+    assert json.loads((art / "variants" / "r1-02" / "verdict.json")
+                      .read_text(encoding="utf-8")) == _T8_MISMATCH_VERDICT
 
 
 def test_run_latency_recheck_reconciles_missing_history_rows(tmp_path: Path):
