@@ -2509,3 +2509,81 @@ def test_run_latency_recheck_reconciles_missing_history_rows(tmp_path: Path):
     latest = history_lib.read_latest(hist)
     assert latest["r1-01"]["outcome"] == "latency_pass"
     assert latest["r1-02"]["outcome"] == "structural_mismatch"
+
+
+# ── T12: admission clause single source (E3-07 dual pin) ──────────────────────
+
+def test_admission_clause_single_source():
+    """The admission clause's canonical home is po_contract/agent.md;
+    check_contracts.sh embeds a constant substring and the yaml description
+    carries the one-sentence version. All three must stay in textual sync —
+    editing either side alone breaks this pin (never a silent drift)."""
+    import re
+
+    sh = (_REPO / "workflows" / "agents" / "po_contract" / "scripts"
+          / "check_contracts.sh").read_text(encoding="utf-8")
+    m = re.search(r'ADMISSION_CLAUSE = "([^"]+)"', sh)
+    assert m, "check_contracts.sh lost its ADMISSION_CLAUSE constant"
+    clause = m.group(1)
+
+    agent_md = (_REPO / "workflows" / "agents" / "po_contract" / "agent.md"
+                ).read_text(encoding="utf-8")
+    assert clause in agent_md, (
+        f"the admission clause {clause!r} drifted: po_contract/agent.md (the "
+        "canonical source) no longer contains the gate's constant verbatim")
+
+    yaml_text = (_REPO / "workflows" / "prof-opt.yaml").read_text(encoding="utf-8")
+    assert clause in yaml_text, (
+        "the workflow description lost its one-sentence admission clause")
+
+
+# ── T14: eval@k degradation mechanics (D-V4-4 mechanical layer) ───────────────
+
+def test_eval_at_k_degradation_mechanics(tmp_path: Path):
+    """An eval@k that cannot load degrades to curve-only judgment. The
+    mechanical layer this test pins: the history row records the degradation
+    WITHOUT a fabricated eval number, and the degraded input face (a
+    curve-only pinned-depth compare) still yields a decision. The re-dispatch
+    control flow itself (retry once, then degrade) lives in the probe agent
+    protocol and is exercised by E2E."""
+    import metric_curve as mc
+
+    # degraded row: eval failed to load -> flagged, eval_acc omitted
+    hist = tmp_path / "history.jsonl"
+    history_lib.append_probe(hist, "r1-01", proxy_acc=0.83,
+                             promote_gate="pass", outcome="promoted",
+                             eval_failed=True)
+    stored = history_lib.read_rows(hist)[0]
+    assert stored["eval_failed"] is True
+    assert "eval_acc" not in stored       # no fabricated number on degradation
+    assert "eval_skipped_no_epoch_ckpt" not in stored  # ckpts EXIST here
+
+    # the addressable-but-skipped counterpart (curve-only by design)
+    hist2 = tmp_path / "h2.jsonl"
+    history_lib.append_probe(hist2, "r1-02", proxy_acc=0.80,
+                             promote_gate="pass", outcome="promoted",
+                             eval_skipped_no_epoch_ckpt=True)
+    stored2 = history_lib.read_rows(hist2)[0]
+    assert stored2["eval_skipped_no_epoch_ckpt"] is True
+    assert "eval_failed" not in stored2    # a design skip is not a failure
+
+    # the degraded judgment input face: with NO eval at all, the pinned-depth
+    # curve compare alone decides (higher_better, epoch 1, within budget)
+    def curve(path: Path, points):
+        path.write_text("".join(
+            json.dumps({"epoch": e, "metric": m}) + "\n" for e, m in points),
+            encoding="utf-8")
+
+    base = tmp_path / "base.jsonl"
+    cand = tmp_path / "cand.jsonl"
+    curve(base, [(1, 0.85), (2, 0.9)])
+    curve(cand, [(1, 0.83)])
+    out = mc.compare(mc.load_curve(base), mc.load_curve(cand),
+                     direction="higher_better", budget=0.05, at_epoch=1,
+                     baseline_path=str(base))
+    assert out["pass"] is True            # 0.85 - 0.83 <= 0.05
+    assert out["at_epoch"] == 1
+    out_fail = mc.compare(mc.load_curve(base), mc.load_curve(cand),
+                          direction="higher_better", budget=0.01, at_epoch=1,
+                          baseline_path=str(base))
+    assert out_fail["pass"] is False      # same face, honest fail
