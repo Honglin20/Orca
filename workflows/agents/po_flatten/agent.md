@@ -449,12 +449,17 @@ Validation gate.
 ## Output (output_schema mandates JSON)
 
 Your ENTIRE final reply = exactly one line of valid JSON (no text before or after,
-no code fences) — produce it by running the emitter and replying with its stdout
-verbatim:
+no code fences) — produce it by running the emitter, validating what you captured,
+and replying with the captured stdout:
+
+**Never hand-type the JSON. Single-quoted keys, `True/False/None`, trailing
+commas are Python dict repr — NOT JSON; the output gate rejects them. The ONLY
+valid final reply is the emitter command's stdout, pasted verbatim, byte for
+byte.**
 
 ```bash
 EMIT_PY="${ORCA_PYTHON:-python3}"   # set in Step 2; python3 fallback covers the REUSE path
-"$EMIT_PY" "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
+OUT="$("$EMIT_PY" "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
   --field flatten_passed=true \
   --field shadow_root="$ORCA_ARTIFACTS_DIR/shadow" \
   --field shadow_pkgs='["<pkg1>", ...]' \
@@ -462,10 +467,19 @@ EMIT_PY="${ORCA_PYTHON:-python3}"   # set in Step 2; python3 fallback covers the
   --field manifest_path="$ORCA_ARTIFACTS_DIR/project_manifest.md" \
   --field baseline_lock_path="$ORCA_ARTIFACTS_DIR/BASELINE.lock" \
   --field error="" \
-  --field generated_artifacts='["project_manifest.md", ".user_pkg", "shadow/", "readiness/readiness.json", "verify/memory_verifier_report.md", ...]'
+  --field generated_artifacts='["project_manifest.md", ".user_pkg", "shadow/", "readiness/readiness.json", "verify/memory_verifier_report.md", ...]' \
+)"
+printf '%s' "$OUT" | "$EMIT_PY" -c 'import json,sys; json.loads(sys.stdin.read())'
 ```
+
+Mechanical self-check, in this exact order: **capture → validate the captured
+value → reply the captured value**. The `printf … | json.loads` line validates
+`$OUT` — the value the emitter actually printed, not a re-typed copy. If it
+exits 0, your final reply is `$OUT` pasted byte for byte (no reformatting, no
+re-typing, no hand-assembly). If it fails, re-run the emitter and capture again
+— never hand-patch the captured value.
 
 On fail loud, the same emitter with `flatten_passed=false`, `shadow_root=""`,
 `shadow_pkgs=[]`, `model_module=""`, `baseline_lock_path=""`, and `error` carrying
-the root cause. `generated_artifacts` lists paths relative to `$ORCA_ARTIFACTS_DIR`
-(the actual subset produced).
+the root cause — same capture → validate → reply procedure. `generated_artifacts`
+lists paths relative to `$ORCA_ARTIFACTS_DIR` (the actual subset produced).
