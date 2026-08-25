@@ -203,6 +203,10 @@ def test_history_cli_requires_and_passes_null_budget(tmp_path: Path):
 
 # ── gate_decide ───────────────────────────────────────────────────────────────
 
+_GATE_BASE_MAKESPAN = 200  # fixture baseline; ratios below derive their
+# absolute thresholds from it (latency_reduction_min r -> target = base*(1-r))
+
+
 def _gate_artifacts(tmp_path: Path, *, rounds: dict[int, bool],
                     history_rows: list[dict], best: dict | None) -> Path:
     art = tmp_path / "gate-artifacts"
@@ -212,6 +216,10 @@ def _gate_artifacts(tmp_path: Path, *, rounds: dict[int, bool],
         (d / "proposals.json").write_text(
             json.dumps({"round": rnd, "exhausted": exhausted, "proposals": []}),
             encoding="utf-8")
+    # decide() derives the absolute threshold from the baseline report on disk
+    (art / "base").mkdir(parents=True, exist_ok=True)
+    (art / "base" / "bottleneck_report.json").write_text(
+        json.dumps({"makespan_cycles": _GATE_BASE_MAKESPAN}), encoding="utf-8")
     hist = art / "history.jsonl"
     with open(hist, "w", encoding="utf-8") as fh:
         for row in history_rows:
@@ -234,7 +242,7 @@ _NO_PROMO_R1 = [
 def test_gate_full_train_on_target_met(tmp_path: Path):
     art = _gate_artifacts(tmp_path, rounds={1: False}, history_rows=_PROMOTED_R1,
                           best={"vid": "r1-01", "makespan_cycles": 100, "proxy_acc": 0.9})
-    out = decide(art, target_makespan=100, max_rounds=5, stall_rounds=2)
+    out = decide(art, latency_reduction_min=0.5, max_rounds=5, stall_rounds=2)
     assert out["decision"] == "full-train"
     assert out["best"]["vid"] == "r1-01"
 
@@ -242,7 +250,7 @@ def test_gate_full_train_on_target_met(tmp_path: Path):
 def test_gate_loops_when_budget_remains(tmp_path: Path):
     art = _gate_artifacts(tmp_path, rounds={1: False}, history_rows=_NO_PROMO_R1,
                           best=None)
-    out = decide(art, target_makespan=50, max_rounds=5, stall_rounds=2)
+    out = decide(art, latency_reduction_min=0.75, max_rounds=5, stall_rounds=2)
     assert out["decision"] == "loop"
     assert out["stall"] == 1
     assert out["best"] is None
@@ -251,14 +259,14 @@ def test_gate_loops_when_budget_remains(tmp_path: Path):
 def test_gate_best_effort_when_exhausted_with_best(tmp_path: Path):
     art = _gate_artifacts(tmp_path, rounds={1: True}, history_rows=_PROMOTED_R1,
                           best={"vid": "r1-01", "makespan_cycles": 100, "proxy_acc": 0.9})
-    out = decide(art, target_makespan=50, max_rounds=5, stall_rounds=2)
+    out = decide(art, latency_reduction_min=0.75, max_rounds=5, stall_rounds=2)
     assert out["decision"] == "full-train-best-effort"
 
 
 def test_gate_finish_failed_when_no_promoted_anywhere(tmp_path: Path):
     art = _gate_artifacts(tmp_path, rounds={1: True}, history_rows=_NO_PROMO_R1,
                           best=None)
-    out = decide(art, target_makespan=50, max_rounds=5, stall_rounds=2)
+    out = decide(art, latency_reduction_min=0.75, max_rounds=5, stall_rounds=2)
     assert out["decision"] == "finish-failed"
 
 
@@ -267,7 +275,7 @@ def test_gate_hard_cap_with_best_is_best_effort(tmp_path: Path):
                           history_rows=_PROMOTED_R1 + [
                               {"vid": "r2-01", "round": 2, "outcome": "probe_insufficient"}],
                           best={"vid": "r1-01", "makespan_cycles": 100, "proxy_acc": 0.9})
-    out = decide(art, target_makespan=50, max_rounds=2, stall_rounds=5)
+    out = decide(art, latency_reduction_min=0.75, max_rounds=2, stall_rounds=5)
     assert out["decision"] == "full-train-best-effort"  # cap + best present
 
 
@@ -277,7 +285,7 @@ def test_gate_target_met_wins_over_everything(tmp_path: Path):
     art = _gate_artifacts(tmp_path, rounds={1: False, 2: False},
                           history_rows=_PROMOTED_R1,
                           best={"vid": "r1-01", "makespan_cycles": 100, "proxy_acc": 0.9})
-    out = decide(art, target_makespan=100, max_rounds=2, stall_rounds=1)
+    out = decide(art, latency_reduction_min=0.5, max_rounds=2, stall_rounds=1)
     assert out["decision"] == "full-train"
 
 
@@ -286,7 +294,7 @@ def test_gate_hard_cap_never_loops_at_max_rounds(tmp_path: Path):
                           history_rows=_NO_PROMO_R1 + [
                               {"vid": "r2-01", "round": 2, "outcome": "probe_insufficient"}],
                           best=None)
-    out = decide(art, target_makespan=50, max_rounds=2, stall_rounds=5)
+    out = decide(art, latency_reduction_min=0.75, max_rounds=2, stall_rounds=5)
     assert out["round"] == 2
     assert out["decision"] != "loop"
     assert out["decision"] == "finish-failed"
@@ -302,7 +310,7 @@ def test_gate_stall_resets_on_promoted_round(tmp_path: Path):
     art = _gate_artifacts(tmp_path, rounds={1: False, 2: False, 3: False},
                           history_rows=rows,
                           best={"vid": "r2-01", "makespan_cycles": 90, "proxy_acc": 0.8})
-    out = decide(art, target_makespan=50, max_rounds=5, stall_rounds=2)
+    out = decide(art, latency_reduction_min=0.75, max_rounds=5, stall_rounds=2)
     assert out["decision"] == "loop"
     assert out["stall"] == 1  # r3 had no promotion, r2 reset the counter
 
@@ -311,7 +319,7 @@ def test_gate_fails_loud_without_proposals(tmp_path: Path):
     art = tmp_path / "empty-artifacts"
     (art / "rounds" / "001").mkdir(parents=True)
     with pytest.raises(FileNotFoundError):
-        decide(art, target_makespan=50, max_rounds=5, stall_rounds=2)
+        decide(art, latency_reduction_min=0.75, max_rounds=5, stall_rounds=2)
 
 
 # ── advance_round ─────────────────────────────────────────────────────────────
@@ -1017,8 +1025,8 @@ def _contracts_workspace(tmp_path: Path, *, probe_body: str | None = None,
     def sha(p: Path) -> str:
         return hashlib.sha256(p.read_bytes()).hexdigest()
 
-    budget = budget or {"epochs": 1, "dataset_knob": "--limit",
-                        "data_value": 2000, "max_steps": 500, "seed": 0}
+    budget = budget or {"epochs": 1, "dataset_knob": None,
+                        "data_value": None, "max_steps": None, "seed": 0}
     contracts = {
         "viable": True, "reason": "tier A, measured",
         "interpreter": {"sys_executable": sys.executable, "flags_check": "pass"},
@@ -1033,6 +1041,9 @@ def _contracts_workspace(tmp_path: Path, *, probe_body: str | None = None,
                             "seed": "--seed", "max_steps": "--max-steps",
                             "data_knob": budget["dataset_knob"]},
                   "ckpt_output_rule": "{out_dir}/model.pth",
+                  "epoch_metric_extraction": {
+                      "kind": "stdout_regex",
+                      "pattern": r"epoch (?P<epoch>\d+) metric=(?P<metric>[0-9.]+)"},
                   "train_epochs_full": 10},
         "eval": {"tier": "A", "entry": str(art / "eval.py"),
                  "entry_sha256": sha(art / "eval.py"),
@@ -1044,7 +1055,7 @@ def _contracts_workspace(tmp_path: Path, *, probe_body: str | None = None,
                    "entry_sha256": sha(art / "exporter.py"),
                    "generated": False, "argv_facts": "pinned"},
         "proxy_budget": budget,
-        "probe_cap_mechanism": "flag:--max-steps",
+        "probe_cap_mechanism": "epochs-only",
         "exemptions": [],
         "sitecustomize_merge": {"found": False, "path": "", "merged": False},
     }
@@ -1052,7 +1063,7 @@ def _contracts_workspace(tmp_path: Path, *, probe_body: str | None = None,
 
     probe = probe_body or (
         '"<<python>>" train.py --epochs <<epochs>> --out-dir <<out_dir>> '
-        '--seed <<seed>> --limit <<data_value>> --max-steps <<max_steps>>\n')
+        '--seed <<seed>>\n')
     full = full_body or (
         '"<<python>>" train.py --epochs <<epochs>> --out-dir <<out_dir>> '
         '--seed <<seed>>\n')
@@ -1098,8 +1109,9 @@ def test_check_contracts_gate_enforces_token_budget_consistency(tmp_path: Path):
     # knob pinned but the probe template dropped the data token -> the
     # fairness invariant (same budget rendered) would silently break
     art = _contracts_workspace(
-        tmp_path, probe_body='"<<python>>" train.py --epochs <<epochs>> '
-        '--out-dir <<out_dir>> --seed <<seed>> --max-steps <<max_steps>>\n')
+        tmp_path,
+        budget={"epochs": 1, "dataset_knob": "--limit", "data_value": 2000,
+                "max_steps": None, "seed": 0})
     proc = _run_contracts_gate(art)
     assert proc.returncode == 1
     assert "lacks <<data_value>>" in proc.stderr
@@ -1107,8 +1119,9 @@ def test_check_contracts_gate_enforces_token_budget_consistency(tmp_path: Path):
     # max_steps pinned but the token vanished -> truncation would silently
     # disappear (render_run drops unused --set values)
     art2 = _contracts_workspace(
-        tmp_path / "b", probe_body='"<<python>>" train.py --epochs <<epochs>> '
-        '--out-dir <<out_dir>> --seed <<seed>> --limit <<data_value>>\n')
+        tmp_path / "b",
+        budget={"epochs": 1, "dataset_knob": None, "data_value": None,
+                "max_steps": 500, "seed": 0})
     proc2 = _run_contracts_gate(art2)
     assert proc2.returncode == 1
     assert "lacks" in proc2.stderr and "<<max_steps>>" in proc2.stderr
@@ -1117,8 +1130,8 @@ def test_check_contracts_gate_enforces_token_budget_consistency(tmp_path: Path):
     # data token -> every render would fail on the unreplaced token
     art3 = _contracts_workspace(
         tmp_path / "c",
-        budget={"epochs": 1, "dataset_knob": None, "data_value": None,
-                "max_steps": None, "seed": 0})
+        probe_body='"<<python>>" train.py --epochs <<epochs>> '
+        '--out-dir <<out_dir>> --seed <<seed>> --limit <<data_value>>\n')
     proc3 = _run_contracts_gate(art3)
     assert proc3.returncode == 1
     assert "carries <<data_value>>" in proc3.stderr
@@ -1128,7 +1141,10 @@ def test_check_contracts_gate_enforces_token_budget_consistency(tmp_path: Path):
     art4 = _contracts_workspace(
         tmp_path / "d",
         budget={"epochs": 1, "dataset_knob": "--limit", "data_value": 2000,
-                "max_steps": None, "seed": 0})
+                "max_steps": None, "seed": 0},
+        probe_body='"<<python>>" train.py --epochs <<epochs>> '
+        '--out-dir <<out_dir>> --seed <<seed>> --limit <<data_value>> '
+        '--max-steps <<max_steps>>\n')
     proc4 = _run_contracts_gate(art4)
     assert proc4.returncode == 1
     assert "carries" in proc4.stderr and "<<max_steps>>" in proc4.stderr
@@ -1136,7 +1152,10 @@ def test_check_contracts_gate_enforces_token_budget_consistency(tmp_path: Path):
 
 def test_check_contracts_gate_forbids_ckpt_token_in_training_templates(tmp_path: Path):
     art = _contracts_workspace(
-        tmp_path, probe_body='"<<python>>" train.py --epochs <<epochs>> '
+        tmp_path,
+        budget={"epochs": 1, "dataset_knob": "--limit", "data_value": 2000,
+                "max_steps": 500, "seed": 0},
+        probe_body='"<<python>>" train.py --epochs <<epochs>> '
         '--out-dir <<out_dir>> --seed <<seed>> --limit <<data_value>> '
         '--max-steps <<max_steps>> --resume <<ckpt>>\n')
     proc = _run_contracts_gate(art)
@@ -1203,7 +1222,7 @@ def _run_baseline_chain(art: Path) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env["ORCA_ARTIFACTS_DIR"] = str(art)
     return subprocess.run(
-        ["bash", str(_BASELINE_SH), "--target-makespan", "100", "--seed", "0"],
+        ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5", "--seed", "0"],
         capture_output=True, text=True, timeout=120, env=env)
 
 
@@ -1320,7 +1339,7 @@ def test_baseline_chain_worker_logs_are_per_attempt(tmp_path: Path):
     env = dict(os.environ)
     env["ORCA_ARTIFACTS_DIR"] = str(art)
     proc = subprocess.run(
-        ["bash", str(_BASELINE_SH), "--target-makespan", "100", "--seed", "0",
+        ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5", "--seed", "0",
          "--poll-max-secs", "0"],
         capture_output=True, text=True, timeout=120, env=env)
     assert proc.returncode in (0, 1)
