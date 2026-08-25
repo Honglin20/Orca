@@ -1,5 +1,7 @@
 # Prof-Opt v2 重构设计草稿 (SDD)
 
+> **[SUPERSEDED]** 本稿已由 [`prof-opt-v4-design-draft.md`](prof-opt-v4-design-draft.md)（v3.1）取代（2026-08-25）。其 D-N10（基线完整训练非阻塞 + epoch 对齐）经用户再次拍板**采纳**并升级为 v4 的核心机制（D-V4-1/2/2b）；review-agent / 硬件知识库 / mfu_adapter 四层链 / full_train live 监控早停维持**搁置**（共识范围外，v4 草稿 D-V4-13）。v2 搁置物状态：`placeholder_profiler.py` + `mfu_benchmark.py` 保留在 `_po_scripts/`（无 v4 消费者，占位待真 profiler 接入再定）。
+
 > 跨阶段设计议题，prof-opt v2 各 phase SPEC 撰写前必读。
 > **定位**：对已交付的 `workflows/prof-opt.yaml`（v3.5 从头训练范式，10 节点全 agent）做**重构**——不是新 workflow、不是 ns3/psu fork。问题域不变（profiling 证据驱动的模型结构优化闭环），变化集中在三点：① 接**真 profiler**（用户外部 `mfu_benchmark.py`，6613/1951 NPU）；② 提案从"纯机械准入"升级为"**业务逻辑约束 + 多角度对抗校验**"；③ 沉淀**全局硬件适配知识库**（哪些结构更符合当前硬件）。
 > **与 v3.5 关系**：骨架资产（shadow/contract/proxy 公平对比/写回/回边循环）全部继承；节点从 10 收缩到 9（propose+implement 合并），新增 2 个 subagent（profiling-agent / review-agent），propose 降级为 subagent；placeholder profiler 退役、真 MFU 数据接入。逐条 keep/retire/new 见 §7。
