@@ -2,17 +2,24 @@
 # check_contracts.sh — po_contract gate. Two modes:
 #
 #   --reuse-check : exit 0 (REUSE) iff contracts.json exists, parses, is
-#                   viable AND every recorded entry sha256 still matches the
-#                   file on disk. Any drift -> exit 1 (contracts must be
-#                   rebuilt; sha drift is never silently accepted). Template
-#                   presence/token checks run in GATE mode only — a missing
-#                   template on the reuse path fails loud downstream at the
-#                   baseline chain's artifact check, never silently. Hard
-#                   errors -> 2.
+#                   viable, carries the CURRENT workflow version's fields
+#                   (full_train_budget / train.ckpt_per_epoch /
+#                   probe_cap_mechanism=stop-at-k — an older workspace fails
+#                   loud with a fresh_start hint) AND every recorded entry
+#                   sha256 still matches the file on disk. Any drift -> exit 1
+#                   (contracts must be rebuilt; sha drift is never silently
+#                   accepted). Template presence/token checks run in GATE mode
+#                   only — a missing template on the reuse path fails loud
+#                   downstream at the baseline chain's artifact check, never
+#                   silently. Hard errors -> 2.
 #   (default)     : full validation gate for the finished contract stage —
-#                   schema completeness, entry sha anti-drift, template token
-#                   contract, tier-B adapted-entry presence, numeric fields,
-#                   dry-run/dual-ckpt/export evidence, interpreter flag check.
+#                   schema completeness (incl. v4: ckpt addressability, the
+#                   full_train_budget value-level fingerprint, the admission
+#                   clause in `reason`, stop-at-k cap mechanism, the single
+#                   identical probe/full training pipeline), entry sha
+#                   anti-drift, template token contract, tier-B adapted-entry
+#                   presence, numeric fields, dry-run/dual-ckpt/export
+#                   evidence, interpreter flag check.
 #                   Fail -> exit 1 (fix and re-run); hard errors -> 2.
 #
 # Environment: ORCA_ARTIFACTS_DIR (required).
@@ -30,6 +37,11 @@ from pathlib import Path
 art = Path(sys.argv[1])
 mode = sys.argv[2]  # "gate" | "--reuse-check"
 problems = []
+
+# E3-07: the admission clause's canonical home is the po_contract agent
+# document; this constant substring is what the recorded contracts.json
+# `reason` must carry verbatim (a test pins sh <-> agent.md textual sync).
+ADMISSION_CLAUSE = "训练须按给定轮数精确执行"
 
 def sha(p: Path) -> str:
     h = hashlib.sha256()
@@ -73,7 +85,8 @@ if mode != "--reuse-check":
             problems.append(f"contracts.json missing section '{section}'")
     if isinstance(c.get("train"), dict):
         for key in ("tier", "entry", "entry_sha256", "flags", "ckpt_output_rule",
-                    "epoch_metric_extraction", "train_epochs_full"):
+                    "ckpt_per_epoch", "epoch_metric_extraction",
+                    "train_epochs_full"):
             if key not in c["train"]:
                 problems.append(f"train contract missing '{key}'")
         if c["train"].get("tier") not in ("A", "B"):
@@ -81,6 +94,13 @@ if mode != "--reuse-check":
         if not isinstance(c["train"].get("train_epochs_full"), int) \
                 or c["train"].get("train_epochs_full", 0) < 1:
             problems.append("train.train_epochs_full must be an int >= 1")
+        # ckpt addressability: the rule stays a glob/pattern string; the
+        # boolean is what finalizer/probe branch on (k-th ckpt eval vs
+        # curve-only judgment)
+        if not isinstance(c["train"].get("ckpt_per_epoch"), bool):
+            problems.append("train.ckpt_per_epoch must be a boolean "
+                            "(true: per-epoch addressable ckpts / false: rolling "
+                            "or undecidable)")
         epoch_rule = c["train"].get("epoch_metric_extraction")
         pattern = epoch_rule.get("pattern") if isinstance(epoch_rule, dict) else None
         if not isinstance(pattern, str) or not pattern:
@@ -94,6 +114,49 @@ if mode != "--reuse-check":
             else:
                 if "epoch" not in regex.groupindex or "metric" not in regex.groupindex:
                     problems.append("train.epoch_metric_extraction.pattern needs named groups epoch and metric")
+                else:
+                    # boundary anchor (best-effort functional check on a
+                    # canonical sample): the char right after a matched metric
+                    # must not be a digit — a pattern that can stop mid-number
+                    # (0.1234 truncated to 0.12) silently corrupts every curve
+                    sample = "epoch 1 metric=0.1234567890\n"
+                    m = regex.search(sample)
+                    if m:
+                        end = m.end("metric")
+                        if end < len(sample) and sample[end].isdigit():
+                            problems.append(
+                                "train.epoch_metric_extraction.pattern can match "
+                                "a metric followed by another digit (mid-number "
+                                "truncation) — anchor the metric group with an "
+                                "end-of-line/non-digit boundary")
+    # admission clause (E3-07): the single-source sentence lives in the
+    # po_contract agent document; this constant substring must appear in the
+    # recorded top-level reason
+    if not isinstance(c.get("reason"), str) \
+            or ADMISSION_CLAUSE not in c.get("reason", ""):
+        problems.append(f"contracts.json top-level reason must contain the "
+                        f"admission clause {ADMISSION_CLAUSE!r}")
+    # full training budget: the value-level fairness fingerprint (baseline
+    # and every full-budget render must carry identical values)
+    fbt = c.get("full_train_budget")
+    if not isinstance(fbt, dict):
+        problems.append("contracts.json missing 'full_train_budget' "
+                        "(epochs/seed/data fingerprint)")
+    else:
+        for key in ("epochs", "seed", "data"):
+            if key not in fbt:
+                problems.append(f"full_train_budget missing '{key}'")
+        if not isinstance(fbt.get("epochs"), int) or fbt.get("epochs", 0) < 1:
+            problems.append("full_train_budget.epochs must be an int >= 1")
+        if not isinstance(fbt.get("seed"), int):
+            problems.append("full_train_budget.seed must be an int")
+        fdata = fbt.get("data")
+        if not isinstance(fdata, dict) \
+                or fdata.get("dataset_knob") is not None \
+                or fdata.get("data_value") is not None:
+            problems.append("full_train_budget.data must be the null pair "
+                            "{dataset_knob: null, data_value: null} (full-data "
+                            "training, value-level fingerprint)")
     if isinstance(c.get("eval"), dict):
         for key in ("tier", "entry", "entry_sha256", "flags", "ckpt_container",
                     "metric_extraction", "metric_direction"):
@@ -138,8 +201,9 @@ if mode != "--reuse-check":
         if pb.get("dataset_knob") is not None or pb.get("data_value") is not None \
                 or pb.get("max_steps") is not None:
             problems.append("proxy_budget must be epoch-only: dataset_knob/data_value/max_steps are null")
-        if c.get("probe_cap_mechanism") != "epochs-only":
-            problems.append("probe_cap_mechanism must be epochs-only")
+        if c.get("probe_cap_mechanism") != "stop-at-k":
+            problems.append("probe_cap_mechanism must be stop-at-k "
+                            "(full-epoch render + external stop at epoch k)")
         # the knob declared in the budget must be the one recorded in train.flags
         train_knob = (c.get("train") or {}).get("flags", {}).get("data_knob")
         if pb.get("dataset_knob") != (train_knob or None):
@@ -239,6 +303,38 @@ if mode != "--reuse-check":
         if pb_max_steps is None and has_ms_token:
             problems.append("templates/run_probe_finetune.template.sh carries "
                             "<<max_steps>> although proxy_budget.max_steps is null")
+
+    # v4 single training pipeline: baseline, every variant, and the winner
+    # all render at FULL epochs (the probe depth is an external stop), so the
+    # probe/full template pair — if kept as two files — must be byte-identical
+    # (same data pipeline; a divergence would silently break the fairness
+    # invariant depending on which template a node happened to render)
+    probe_tpl = art / "templates" / "run_probe_finetune.template.sh"
+    full_tpl = art / "templates" / "run_full_finetune.template.sh"
+    if probe_tpl.is_file() and full_tpl.is_file():
+        if probe_tpl.read_bytes() != full_tpl.read_bytes():
+            problems.append("templates/run_probe_finetune.template.sh and "
+                            "run_full_finetune.template.sh differ — v4 has ONE "
+                            "training pipeline (full-epoch render + external "
+                            "stop-at-k); regenerate both from the same source")
+
+# ── v4 field presence on the REUSE path (a v3.x workspace lacks them) ────────
+if mode == "--reuse-check":
+    missing_v4 = []
+    if not isinstance(c.get("full_train_budget"), dict):
+        missing_v4.append("full_train_budget")
+    if not isinstance((c.get("train") or {}).get("ckpt_per_epoch"), bool):
+        missing_v4.append("train.ckpt_per_epoch")
+    if c.get("probe_cap_mechanism") != "stop-at-k":
+        missing_v4.append("probe_cap_mechanism=stop-at-k")
+    if missing_v4:
+        for key in missing_v4:
+            print(f"check_contracts: FAIL recorded contracts.json predates the "
+                  f"current workflow version (missing {key})", file=sys.stderr)
+        print("check_contracts: the reusable workspace was built by an older "
+              "contract stage — re-run with fresh_start=true to rebuild the "
+              "contracts from scratch (never partially patched)", file=sys.stderr)
+        sys.exit(1)
 
 # ── entry sha anti-drift (both modes — the pinned drift guard) ───────────────
 for section in ("train", "eval", "export"):

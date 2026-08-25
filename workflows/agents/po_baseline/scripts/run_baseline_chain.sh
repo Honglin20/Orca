@@ -1,59 +1,85 @@
 #!/usr/bin/env bash
-# run_baseline_chain.sh — po_baseline seven-step chain driver.
+# run_baseline_chain.sh — po_baseline non-blocking chain driver.
 #
 # Steps (each idempotent: the step's product file existing = done, re-entry
 # skips it; the product is the authority, baseline_status.md is the view):
-#   1 reference-cross-check : compare <<reference_onnx>> vs the shadow export
-#                            (shape/op-set); mismatch -> WARNING, never blocking.
-#                            Runs the export first when base/model.onnx is absent.
-#   2 export + snapshot     : snapshot the pristine shadow -> baseline/original_shadow/
-#                            (the untouched round-0 structure the final stage may
-#                            retrain at full budget), then render + run the export
-#                            template -> base/model.onnx
-#   3 profile               : four profiling artifacts -> base/profile/
-#   4 analyze               : scripts/analyze.py -> base/bottleneck_report.json
-#   5 baseline ref          : write baseline/baseline_ref.json from the
-#                            --baseline-ref-acc input (empty -> explicit null
-#                            marker; the final stage then auto-trains the
-#                            baseline at full budget)
-#   6 baseline proxy train  : zero-structure-change FROM-SCRATCH training at the
-#                            SAME contracts.json proxy_budget every variant gets
-#                            (fairness invariant: identical budget fields), then
-#                            extract EVERY epoch metric -> baseline/baseline_metrics.jsonl,
-#                            eval -> baseline/baseline_proxy_acc.json (the
-#                            promotion anchor). ALWAYS detached + polled.
-#                            The product-exists skip first re-verifies the
-#                            anchor's recorded proxy_budget against the
-#                            CURRENT contracts.json — mismatch fails loud
-#                            (a stale anchor voids fair comparison).
-#   7 target check          : baseline makespan must be strictly WORSE than the
-#                            target, otherwise the loop has no headroom -> fail
-#                            loud with guidance.
+#   1 export + pristine snapshot : snapshot the pristine shadow ->
+#                                 baseline/original_shadow/ (the round-0
+#                                 structure anchor for the write-back diff),
+#                                 then render + run the export template ->
+#                                 base/model.onnx
+#   2 profile                    : four profiling artifacts -> base/profile/
+#                                 (custom --profile-script runs detached +
+#                                 polled via --worker-step 2)
+#   3 analyze                    : scripts/analyze.py -> base/bottleneck_report.json
+#   4 full-train launch          : render the train contract template at the
+#                                 FULL effective epochs (--out
+#                                 baseline/train.rendered.sh), wipe any partial
+#                                 out-dir (training always starts from
+#                                 scratch), detach a wrapper whose group leader
+#                                 writes its own pid/rc and does NOT exec:
+#                                   setsid bash -c 'echo $$ > train.pid;
+#                                     bash train.rendered.sh > train.attemptN.log 2>&1;
+#                                     echo $? > train.rc'
+#   5 finalizer launch           : detach this script's --finalizer mode
+#                                 (setsid, baseline/finalizer.pid + .log)
+#   6 liveness confirmation      : train pid alive + finalizer pid alive +
+#                                 train log appeared (each /proc cmdline
+#                                 attribution-checked). Re-entry equivalence:
+#                                 alive OR train_final.json already written —
+#                                 done -> confirmed; failed -> emit failed
+#                                 (stage attribution); finalizer dead without
+#                                 a terminal state -> fail loud.
+#   7 emit gate                  : baseline/business_logic.md exists and is
+#                                 non-empty (the business-logic-analyst
+#                                 subagent's product) — absent -> the chain
+#                                 emits the agent-internal "running" line and
+#                                 the node re-invokes later.
 #
-# Long steps (6 always; 3 when --profile-script is provided) run detached in
-# their own session (setsid): this script re-invokes itself with --worker-step N.
-# Each detach logs to its OWN per-attempt file (worker log naming below) so a
-# first-attempt failure scene is never overwritten by a retry. A single
-# invocation polls a detached step at most --poll-max-secs (default 480,
-# keeping one bash call under ~10 min); still running -> stdout JSON status
-# "running" and the AGENT simply re-invokes this script later. Crash guard:
-# a step that died without an rc file is re-detached at most 3 times, then fail
-# loud. No second live worker is ever started while one is alive (pid check).
+# The chain NEVER waits for the training to finish (non-blocking baseline):
+# `executed` = early chain passed + double liveness confirmed +
+# business_logic.md on disk — training completion is the detached finalizer's
+# job, not this node's.
 #
-# rc aggregation: first step whose rc != 0 stops the chain -> stdout JSON
-# status "failed" with "baseline step N: <reason>" folded into `error`; all
-# done -> "executed". stdout: ALWAYS exactly one JSON line whose fields are
-# EXACTLY the node output_schema field set (the agent forwards the executed /
-# failed line VERBATIM — an extra key would be rejected by
-# additionalProperties:false); all logs to stderr/files. The mid-poll
-# "running" line is agent-internal only (status not in the schema enum) and is
-# never a final node output.
+# ── finalizer (this script re-invoked with --finalizer) ──────────────────────
+# Self-contained detached guardian (the node has emitted by now; nobody drives
+# it, so it must finish the baseline on its own). Every finalizer.log line
+# starts with an ISO8601 UTC timestamp (`date -u +%FT%TZ`):
+#   poll loop (every cycle): incremental curve extract (FULL re-derive from
+#     the CURRENT attempt's train log, atomically replace
+#     baseline/baseline_metrics.jsonl only when content changed) +
+#     push_curves.py sidecar (best-effort) + alive heartbeat line (with the
+#     curve point count)
+#   train rc written, rc != 0      -> train_final{failed, rc, stage: train}
+#   train group dead WITHOUT rc    -> crash: re-launch <= 3 attempts (per-
+#                                     attempt log naming; partial out-dir
+#                                     wiped — from-scratch training), then
+#                                     train_final{failed, stage: relaunch_exhausted}
+#   train rc == 0 -> finalize chain (a stage line per step):
+#     final check   : extract --expected-epochs <full effective value>;
+#                     actual != rendered -> train_final{failed, stage:
+#                     final_check} — the message points at the admission
+#                     clause (trainings must execute the rendered epoch count
+#                     exactly; early-stopping projects are out of scope)
+#     full eval     : last ckpt eval -> baseline/baseline_full_acc.json
+#                     {acc, ckpt, full_train_budget fingerprint}
+#     k eval        : (train.ckpt_per_epoch) k-th ckpt eval ->
+#                     baseline/baseline_k_acc.json {acc, k, ckpt, fingerprint}
+#     terminal mark : baseline/train_final.json {status: done, rc: 0, stage}
+#   any internal failure -> best-effort train_final{failed, rc, stage} then exit
+#
+# rc aggregation: first failing step -> stdout JSON status "failed" with
+# "baseline step N: <reason>" folded into `error`; all done -> "executed".
+# stdout: ALWAYS exactly one JSON line whose fields are EXACTLY the node
+# output_schema field set (the executed / failed line is the agent's final
+# reply VERBATIM; additionalProperties:false would reject an extra key). The
+# mid-poll "running" line is agent-internal only (not in the schema enum) and
+# is never a final node output. All logs to stderr/files.
 #
 # Usage:
 #   run_baseline_chain.sh --latency-reduction-min F --seed N
-#                         [--baseline-ref-acc NUM] [--profile-script PATH]
-#                         [--reference-onnx PATH] [--poll-max-secs S]
-#                         [--worker-step N]
+#                         [--profile-script PATH] [--poll-max-secs S]
+#                         [--worker-step 2 | --finalizer]
 # Environment: ORCA_ARTIFACTS_DIR (required). The user project root comes
 # ONLY from readiness/readiness.json — the engine already exports a
 # same-purpose project-root env var (it resolves to the Orca repository
@@ -64,16 +90,15 @@ set -uo pipefail
 ART="${ORCA_ARTIFACTS_DIR:?FATAL: ORCA_ARTIFACTS_DIR not set (run_baseline_chain.sh)}"
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
-TARGET=""; SEED="0"; PROFILE_SCRIPT=""; REFERENCE=""; POLL_MAX_SECS=480; WORKER_STEP=""; BASELINE_REF_ACC=""
+TARGET=""; SEED="0"; PROFILE_SCRIPT=""; POLL_MAX_SECS=480; WORKER_STEP=""; FINALIZER=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --latency-reduction-min) TARGET="${2:?}"; shift 2 ;;
     --seed)              SEED="${2:?}"; shift 2 ;;
-    --baseline-ref-acc)  BASELINE_REF_ACC="${2:?}"; shift 2 ;;
     --profile-script)    PROFILE_SCRIPT="${2:?}"; shift 2 ;;
-    --reference-onnx)    REFERENCE="${2:?}"; shift 2 ;;
     --poll-max-secs)     POLL_MAX_SECS="${2:?}"; shift 2 ;;
     --worker-step)       WORKER_STEP="${2:?}"; shift 2 ;;
+    --finalizer)         FINALIZER="1"; shift ;;
     *) echo "FATAL: unknown arg $1" >&2; exit 2 ;;
   esac
 done
@@ -100,28 +125,29 @@ except Exception as exc:
 }
 
 for f in contracts.json readiness/readiness.json \
-         templates/export_onnx.template.sh templates/run_probe_finetune.template.sh \
-         templates/run_eval.template.sh scripts/render_run.sh scripts/analyze.py; do
+         templates/export_onnx.template.sh templates/run_full_finetune.template.sh \
+         templates/run_eval.template.sh scripts/render_run.sh scripts/analyze.py \
+         scripts/metric_curve.py scripts/push_curves.py; do
   [ -f "$f" ] || { echo "FATAL: upstream artifact missing: $ART/$f (contract stage incomplete)" >&2; exit 2; }
 done
 
 PY="$(read_contract 'c["interpreter"]["sys_executable"]')"
-# sole source of the user project root: readiness.json (never any
-# project-root env var — the engine owns that name, see the header comment)
 PROJ_ROOT="$(python3 -c '
 import json
 from pathlib import Path
 print(json.loads(Path("readiness/readiness.json").read_text(encoding="utf-8"))["project_root"])')"
 SHADOW_DIR="$ART/shadow"
 SHADOW_PKGS="$(read_contract '",".join(c["shadow"]["shadow_pkgs"])')"
-# proxy budget: the single source of the fairness invariant — the baseline and
-# every variant render these exact values (never re-derived here)
-PB_EPOCHS="$(read_contract 'c["proxy_budget"]["epochs"]')"
-PB_DATA_KNOB="$(read_contract 'c["proxy_budget"].get("dataset_knob") or ""')"
-PB_DATA_VALUE="$(read_contract 'c["proxy_budget"].get("data_value") if c["proxy_budget"].get("data_value") is not None else ""')"
-PB_MAX_STEPS="$(read_contract 'c["proxy_budget"].get("max_steps") if c["proxy_budget"].get("max_steps") is not None else ""')"
-PB_SEED="$(read_contract 'c["proxy_budget"]["seed"]')"
+# full training budget: the single value-level fingerprint the baseline and
+# every later full-budget render must share (fairness invariant)
+FULL_EPOCHS="$(read_contract 'c["full_train_budget"]["epochs"]')"
+FULL_SEED="$(read_contract 'c["full_train_budget"]["seed"]')"
+# probe stop depth k (from the contract's proxy_budget — one source on disk)
+PROBE_K="$(read_contract 'c["proxy_budget"]["epochs"]')"
+CKPT_PER_EPOCH="$(read_contract 'c["train"]["ckpt_per_epoch"]')"
 command -v "$PY" >/dev/null 2>&1 || [ -x "$PY" ] || { echo "FATAL: interpreter not found: $PY" >&2; exit 2; }
+python3 -c "import sys; sys.exit(0 if int('$FULL_EPOCHS') >= 1 else 1)" \
+  || { echo "FATAL: contracts.json full_train_budget.epochs must be an int >= 1" >&2; exit 2; }
 
 render() { # render <template> <out> [extra --set k=v ...]
   local tpl="$1" out="$2"; shift 2
@@ -152,7 +178,7 @@ else:
 PY
 }
 
-resolve_ckpt() { # resolve_ckpt <out_dir> -> prints the concrete ckpt path per the recorded rule
+resolve_ckpt() { # resolve_ckpt <out_dir> -> prints the LAST ckpt path per the recorded rule
   python3 - "$1" <<'PY'
 import glob, json, os, sys
 from pathlib import Path
@@ -171,64 +197,44 @@ else:
 PY
 }
 
+resolve_kth_ckpt() { # resolve_kth_ckpt <out_dir> <k> -> the k-th ckpt in write order
+  # per-epoch ckpts are written sequentially, so mtime-ascending order IS
+  # epoch order; the k-th epoch's ckpt is index k-1
+  python3 - "$1" "$2" <<'PY'
+import glob, json, os, sys
+from pathlib import Path
+rule = json.loads(Path("contracts.json").read_text(encoding="utf-8"))["train"]["ckpt_output_rule"]
+pattern = rule.replace("{out_dir}", sys.argv[1])
+k = int(sys.argv[2])
+if "*" not in pattern:
+    raise SystemExit("FATAL: per-epoch ckpt addressing needs a glob ckpt_output_rule")
+hits = sorted(glob.glob(pattern), key=os.path.getmtime)
+if len(hits) < k:
+    raise SystemExit(f"FATAL: ckpt rule glob matched {len(hits)} files < k={k}: {pattern}")
+print(hits[k - 1])
+PY
+}
+
 # ── step bodies (each returns rc; product-exists short-circuits) ─────────────
 step_export() {
-  # pristine shadow snapshot FIRST: this chain runs before any round can advance,
-  # so shadow/ still holds the untouched round-0 structure the final stage may
-  # need to retrain at full budget
+  # pristine shadow snapshot FIRST: the round-0 structure anchor the final
+  # write-back diff re-verifies against (kept even though the baseline now
+  # trains here at full budget — the anchor is structural, not a spare copy)
   if [ ! -d "$ART/baseline/original_shadow" ]; then
     python3 -c "import shutil; shutil.copytree(
         '$ART/shadow', '$ART/baseline/original_shadow',
         ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.git'))" >&2 || return 1
-    echo "[chain] step2: pristine shadow snapshotted -> baseline/original_shadow" >&2
+    echo "[chain] step1: pristine shadow snapshotted -> baseline/original_shadow" >&2
   fi
-  [ -s "$ART/base/model.onnx" ] && { echo "[chain] step2 export: product exists, skip" >&2; return 0; }
+  [ -s "$ART/base/model.onnx" ] && { echo "[chain] step1 export: product exists, skip" >&2; return 0; }
   render "$ART/templates/export_onnx.template.sh" "$ART/base/.export.rendered.sh" \
     --set out="$ART/base/model.onnx" --set seed="$SEED" >&2 || return 1
   bash "$ART/base/.export.rendered.sh" >&2 || return 1
   [ -s "$ART/base/model.onnx" ] || { echo "FATAL: export produced no base/model.onnx" >&2; return 1; }
 }
 
-step_reference() {
-  [ -f "$ART/baseline/reference_check.json" ] && return 0
-  if [ -z "$REFERENCE" ]; then
-    printf '{"skipped": true, "reason": "no reference onnx provided"}\n' > "$ART/baseline/reference_check.json"
-    return 0
-  fi
-  [ -f "$REFERENCE" ] || { echo "FATAL: reference onnx not found: $REFERENCE" >&2; return 1; }
-  step_export || return 1
-  python3 - "$REFERENCE" "$ART/base/model.onnx" "$ART/baseline/reference_check.json" <<'PY' || return 1
-import json, sys
-from pathlib import Path
-import onnx
-
-def facts(path):
-    m = onnx.load(str(path))
-    ops = {}
-    for n in m.graph.node:
-        ops[n.op_type] = ops.get(n.op_type, 0) + 1
-    io = [(i.name, [d.dim_value or d.dim_param for d in i.type.tensor_type.shape.dim])
-          for i in list(m.graph.input) + list(m.graph.output)]
-    return ops, io
-
-ref_ops, ref_io = facts(sys.argv[1])
-base_ops, base_io = facts(sys.argv[2])
-diffs = []
-for op in sorted(set(ref_ops) | set(base_ops)):
-    if ref_ops.get(op, 0) != base_ops.get(op, 0):
-        diffs.append(f"op {op}: reference {ref_ops.get(op, 0)} vs shadow {base_ops.get(op, 0)}")
-if ref_io != base_io:
-    diffs.append("graph input/output shapes differ")
-Path(sys.argv[3]).write_text(json.dumps({
-    "match": not diffs, "diffs": diffs,
-    "reference": sys.argv[1], "shadow_export": sys.argv[2]}, indent=2), encoding="utf-8")
-if diffs:
-    print(f"WARN: reference onnx differs from the shadow export (NOT blocking): {diffs}", file=sys.stderr)
-PY
-}
-
 step_profile_inline() {
-  [ -s "$ART/base/profile/profile_summary.json" ] && { echo "[chain] step3 profile: product exists, skip" >&2; return 0; }
+  [ -s "$ART/base/profile/profile_summary.json" ] && { echo "[chain] step2 profile: product exists, skip" >&2; return 0; }
   local prof="$PROFILE_SCRIPT"
   [ -n "$prof" ] || prof="$ART/scripts/placeholder_profiler.py"
   [ -f "$prof" ] || { echo "FATAL: profiling script not found: $prof (custom profiler is the sole authority — no fallback)" >&2; return 1; }
@@ -239,185 +245,298 @@ step_profile_inline() {
 }
 
 step_analyze() {
-  [ -s "$ART/base/bottleneck_report.json" ] && { echo "[chain] step4 analyze: product exists, skip" >&2; return 0; }
+  [ -s "$ART/base/bottleneck_report.json" ] && { echo "[chain] step3 analyze: product exists, skip" >&2; return 0; }
   "$PY" "$ART/scripts/analyze.py" --profile-dir "$ART/base/profile" >&2 || return 1
   [ -s "$ART/base/bottleneck_report.json" ] || { echo "FATAL: analyze produced no report" >&2; return 1; }
 }
 
-step_baseline_ref() {
-  [ -s "$ART/baseline/baseline_ref.json" ] && return 0
-  if [ -n "$BASELINE_REF_ACC" ]; then
-    # validate BEFORE writing: a non-numeric input would land as invalid JSON
-    # and only explode much later (final stage) — fail loud here instead
-    python3 -c 'import sys; float(sys.argv[1])' "$BASELINE_REF_ACC" 2>/dev/null \
-      || { echo "FATAL: --baseline-ref-acc is not a number: '$BASELINE_REF_ACC'" >&2; return 1; }
-    printf '{"baseline_ref_acc": %s, "source": "input"}\n' \
-      "$BASELINE_REF_ACC" > "$ART/baseline/baseline_ref.json"
-  else
-    printf '{"baseline_ref_acc": null, "source": "not-provided (auto-trained at the final stage when needed)"}\n' \
-      > "$ART/baseline/baseline_ref.json"
+# ── full-training launch (step 4; also the finalizer's crash re-launch) ──────
+TRAIN_DIR="$ART/baseline"
+TRAIN_RENDERED="$TRAIN_DIR/train.rendered.sh"
+TRAIN_OUT="$TRAIN_DIR/train.out"
+TRAIN_PID="$TRAIN_DIR/train.pid"
+TRAIN_RC="$TRAIN_DIR/train.rc"
+TRAIN_ATTEMPTS="$TRAIN_DIR/.train_attempts"
+FINALIZER_PID="$TRAIN_DIR/finalizer.pid"
+FINALIZER_LOG="$TRAIN_DIR/finalizer.log"
+TRAIN_FINAL="$TRAIN_DIR/train_final.json"
+
+pid_alive_owned() { # pid_alive_owned <pidfile> <expect-substr>
+  local pidfile="$1" expect="$2" pid cmd
+  [ -s "$pidfile" ] || return 1
+  pid="$(cat "$pidfile" 2>/dev/null || echo 0)"
+  [ "$pid" -gt 0 ] 2>/dev/null || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || return 1
+  case "$cmd" in *"$expect"*) return 0 ;; *) return 1 ;; esac
+}
+
+train_attempt_log() { echo "$TRAIN_DIR/train.attempt$(cat "$TRAIN_ATTEMPTS" 2>/dev/null || echo 1).log"; }
+
+launch_full_train() { # render (idempotent) + wipe partial out-dir + detach wrapper
+  mkdir -p "$TRAIN_DIR"
+  render "$ART/templates/run_full_finetune.template.sh" "$TRAIN_RENDERED" \
+    --set vid=baseline --set epochs="$FULL_EPOCHS" \
+    --set out_dir="$TRAIN_OUT" --set seed="$FULL_SEED" >&2 || return 1
+  # from-scratch training: a partial out-dir from a dead attempt would leave
+  # mixed-attempt checkpoints under the glob rule — wipe before every launch
+  if [ -e "$TRAIN_OUT" ]; then
+    echo "[chain] wiping partial training out-dir (from-scratch resume rule): $TRAIN_OUT" >&2
+    rm -rf "$TRAIN_OUT"
   fi
+  mkdir -p "$TRAIN_OUT"
+  local attempts log
+  attempts=$(( $(cat "$TRAIN_ATTEMPTS" 2>/dev/null || echo 0) + 1 ))
+  echo "$attempts" > "$TRAIN_ATTEMPTS"
+  log="$TRAIN_DIR/train.attempt${attempts}.log"
+  rm -f "$TRAIN_RC"
+  # wrapper group leader does NOT exec: pid and rc each have their own writer
+  # (a killed group leaves rc absent = distinguishable from a failed run)
+  setsid bash -c '
+      echo $$ > "$1"; shift
+      bash "$1" > "$2" 2>&1
+      echo $? > "$3"
+    ' bash "$TRAIN_PID" "$TRAIN_RENDERED" "$log" "$TRAIN_RC" \
+    </dev/null >>"$TRAIN_DIR/wrapper.attempt${attempts}.log" 2>&1 &
+  local i
+  # launch confirmed = wrapper alive OR already finished (a fast-crashing or
+  # fast-completing train legitimately exits before this check; rc present
+  # means the wrapper ran — that is the finalizer's business now, not a
+  # launch failure)
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    { pid_alive_owned "$TRAIN_PID" "bash" || [ -s "$TRAIN_RC" ]; } && break
+    sleep 0.3
+  done
+  { pid_alive_owned "$TRAIN_PID" "bash" || [ -s "$TRAIN_RC" ]; } \
+    || { echo "FATAL: full-train wrapper did not come alive (see $TRAIN_DIR/wrapper.attempt${attempts}.log)" >&2; return 1; }
+  echo "[chain] full-train detached (attempt $attempts, pid $(cat "$TRAIN_PID"), epochs=$FULL_EPOCHS seed=$FULL_SEED)" >&2
 }
 
-step_proxy_worker() { # long body — runs only inside the detached worker
-  local out_dir="$ART/baseline/proxy_train"
-  mkdir -p "$out_dir"
-  # render with the proxy_budget values verbatim (no ckpt — from-scratch training);
-  # data_value / max_steps are set only when the contract recorded them
-  local render_args=(
-    --set vid=baseline --set epochs="$PB_EPOCHS"
-    --set out_dir="$out_dir" --set seed="$PB_SEED")
-  [ -n "$PB_DATA_VALUE" ] && render_args+=(--set data_value="$PB_DATA_VALUE")
-  [ -n "$PB_MAX_STEPS" ] && render_args+=(--set max_steps="$PB_MAX_STEPS")
-  render "$ART/templates/run_probe_finetune.template.sh" "$out_dir/.run.rendered.sh" \
-    "${render_args[@]}" >&2 || return 1
-  bash "$out_dir/.run.rendered.sh" > "$out_dir/train.log" 2>&1 || return 1
-  "$PY" "$ART/scripts/metric_curve.py" extract \
-    --contract "$ART/contracts.json" --log "$out_dir/train.log" \
-    --out "$ART/baseline/baseline_metrics.jsonl" \
-    --expected-epochs "$PB_EPOCHS" >&2 || return 1
-  local ckpt
-  ckpt="$(resolve_ckpt "$out_dir")" || return 1
-  render "$ART/templates/run_eval.template.sh" "$out_dir/.eval.rendered.sh" \
-    --set ckpt="$ckpt" --set log="$ART/baseline/proxy_eval.log" >&2 || return 1
-  bash "$out_dir/.eval.rendered.sh" >> "$ART/baseline/proxy_eval.log" 2>&1 || return 1
-  local acc
-  acc="$(extract_metric "$ART/baseline/proxy_eval.log")" || return 1
-  printf '{"proxy_acc": %s, "ckpt": "%s", "proxy_budget": %s}\n' \
-    "$acc" "$ckpt" "$(read_contract 'json.dumps(c["proxy_budget"], sort_keys=True)')" \
-    > "$ART/baseline/baseline_proxy_acc.json"
+launch_finalizer() { # detach this script's --finalizer mode (own session);
+  # the wrapper leader writes its own pid then execs the finalizer (same pid)
+  mkdir -p "$TRAIN_DIR"
+  setsid bash -c 'echo $$ > "$1"; shift; exec "$@"' \
+    bash "$FINALIZER_PID" "$SELF" --finalizer \
+    --latency-reduction-min "$TARGET" --seed "$SEED" \
+    </dev/null >>"$FINALIZER_LOG" 2>&1 &
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    pid_alive_owned "$FINALIZER_PID" "--finalizer" && break
+    sleep 0.3
+  done
+  pid_alive_owned "$FINALIZER_PID" "--finalizer" || { echo "FATAL: finalizer did not come alive (see $FINALIZER_LOG)" >&2; return 1; }
+  echo "[chain] finalizer detached (pid $(cat "$FINALIZER_PID"))" >&2
 }
 
-verify_anchor_budget() { # the promotion anchor is only reusable when it was
-  # trained under the CURRENT contracts.json proxy_budget — a stale anchor
-  # (budget rebuilt since) voids the fairness invariant: variants get the
-  # current budget, the anchor did not. Field-wise comparison; any mismatch
-  # fails loud with rebuild guidance — never a silent skip, never auto-deleted.
-  python3 - <<'PY'
+step_train_launch() {
+  if [ -f "$TRAIN_RC" ] || pid_alive_owned "$TRAIN_PID" "bash" || [ -f "$TRAIN_FINAL" ]; then
+    echo "[chain] step4 train launch: already launched (rc file, live pid, or terminal state present), skip" >&2
+    return 0
+  fi
+  launch_full_train
+}
+
+step_finalizer_launch() {
+  if pid_alive_owned "$FINALIZER_PID" "--finalizer" || [ -f "$TRAIN_FINAL" ]; then
+    echo "[chain] step5 finalizer: already running or terminal, skip" >&2
+    return 0
+  fi
+  launch_finalizer
+}
+
+verify_full_acc_fingerprint() { # train_final done but the anchor must carry the
+  # CURRENT full_train_budget — a stale anchor (budget rebuilt since) voids
+  # the fairness invariant exactly like the old proxy anchor did
+  python3 - "$TRAIN_DIR/baseline_full_acc.json" <<'PY'
 import json, sys
 from pathlib import Path
 def _load(path, what):
     try:
         return json.loads(Path(path).read_text(encoding="utf-8"))
     except Exception as exc:
-        sys.exit(f"FATAL: {what} unreadable ({path}: {exc}) — the anchor's "
-                 "training budget cannot be re-verified. Delete "
-                 "baseline/baseline_proxy_acc.json and re-run to rebuild "
-                 "the anchor.")
-anchor = _load("baseline/baseline_proxy_acc.json", "baseline proxy anchor")
-recorded = anchor.get("proxy_budget") if isinstance(anchor, dict) else None
-current = _load("contracts.json", "contracts.json")["proxy_budget"]
-if not isinstance(recorded, dict):
-    sys.exit(f"FATAL: baseline_proxy_acc.json records no proxy_budget "
-             f"(got {recorded!r}) — the anchor's training budget is unknown, "
-             "fair comparison is void. Delete baseline/baseline_proxy_acc.json "
-             "and re-run to rebuild the anchor.")
+        sys.exit(f"FATAL: {what} unreadable ({path}: {exc}) — the full-training "
+                 "anchor cannot be re-verified. Delete baseline/train_final.json "
+                 "and baseline/baseline_full_acc.json and re-run.")
+current = json.loads(Path("contracts.json").read_text(encoding="utf-8"))["full_train_budget"]
+anchor = _load(sys.argv[1], "baseline full-acc anchor")
+recorded = anchor.get("full_train_budget")
 if recorded != current:
-    diff = "; ".join(
-        f"{k}: anchor={recorded.get(k)!r} vs current={current.get(k)!r}"
-        for k in sorted(set(recorded) | set(current))
-        if recorded.get(k) != current.get(k))
-    sys.exit("FATAL: the baseline proxy anchor was trained under a different "
-             f"proxy_budget ({diff}) — fair comparison is void. Delete "
-             "baseline/baseline_proxy_acc.json and re-run to rebuild the "
-             "anchor (the file is not deleted automatically).")
+    sys.exit("FATAL: baseline_full_acc.json was trained under a different "
+             "full_train_budget — fair comparison is void. Delete "
+             "baseline/train_final.json and baseline/baseline_full_acc.json "
+             "and re-run (never auto-deleted).")
 PY
 }
 
-step_target_check() {
-  # Relative target: the ratio itself is validated at argument parsing; here we
-  # only confirm the baseline makespan is readable (the gate derives the
-  # absolute threshold as baseline x (1 - ratio) at decision time).
-  local makespan
-  makespan="$(python3 -c '
-import json
-from pathlib import Path
-print(json.loads(Path("base/profile/profile_summary.json").read_text(encoding="utf-8"))["makespan_cycles"])')" \
-    || { echo "FATAL: cannot read base/profile/profile_summary.json" >&2; return 1; }
-  echo "[chain] step7 target check: baseline makespan $makespan readable; relative reduction target $TARGET (derived threshold = $makespan x (1 - $TARGET) at gate time)" >&2
+# ── finalizer mode (detached guardian; see the header contract) ──────────────
+fin_log() { # fin_log <message> — every line starts with an ISO8601 UTC stamp
+  echo "$(date -u +%FT%TZ) $*" >> "$FINALIZER_LOG"
 }
 
-# ── detach + bounded poll for long steps ─────────────────────────────────────
-worker_rc_file() { echo "$STAMPS/step$1/rc"; }
-worker_pid_file() { echo "$STAMPS/step$1/pid"; }
-# per-attempt worker log: a re-detach after a crash must never overwrite the
-# previous attempt's failure scene (first-attempt evidence stays diagnosable)
-worker_log_file() { # worker_log_file <step> <attempt>
-  case "$1" in
-    3) echo "$STAMPS/step$1/profile_worker.attempt$2.log" ;;
-    *) echo "$STAMPS/step$1/train_worker.attempt$2.log" ;;
-  esac
+write_train_final() { # write_train_final <status> <rc-or-null> <stage> [message]
+  python3 - "$TRAIN_FINAL" "$1" "$2" "$3" "${4:-}" <<'PY'
+import json, os, sys, tempfile
+status = {"status": sys.argv[2], "rc": None if sys.argv[3] == "null" else int(sys.argv[3]),
+          "stage": sys.argv[4]}
+if sys.argv[5]:
+    status["message"] = sys.argv[5]
+path = sys.argv[1]
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    json.dump(status, fh, sort_keys=True)
+os.replace(tmp, path)
+PY
+  fin_log "stage=train_final status=$1 stage_name=$3 msg=${4:-}"
 }
 
-worker_alive() { # worker_alive <step>
-  local pidfile pid
-  pidfile="$(worker_pid_file "$1")"
-  [ -f "$pidfile" ] || return 1
-  pid="$(cat "$pidfile" 2>/dev/null || echo 0)"
-  [ "$pid" -gt 0 ] && kill -0 "$pid" 2>/dev/null
-}
-
-detach_worker() { # detach_worker <step>
-  local n="$1" stamp="$STAMPS/step$1" attempts log
-  mkdir -p "$stamp"
-  attempts="$(cat "$stamp/attempts" 2>/dev/null || echo 0)"
-  attempts=$((attempts + 1)); echo "$attempts" > "$stamp/attempts"
-  if [ "$attempts" -gt 3 ]; then
-    echo "FATAL: baseline step $n died without finishing $((attempts - 1)) times — see $stamp/*.attempt*.log. Not re-detaching." >&2
-    return 1
-  fi
-  log="$(worker_log_file "$n" "$attempts")"
-  local cmd
-  cmd="$(printf '%q ' bash "$SELF" --worker-step "$n" --latency-reduction-min "$TARGET" --seed "$SEED")"
-  [ -n "$PROFILE_SCRIPT" ] && cmd="$cmd $(printf '%q ' --profile-script "$PROFILE_SCRIPT")"
-  [ -n "$REFERENCE" ] && cmd="$cmd $(printf '%q ' --reference-onnx "$REFERENCE")"
-  # setsid: own session/process group so the worker survives this bash call; the
-  # worker writes its own rc file on exit (worker-step dispatch below).
-  setsid bash -c 'echo $$ > "$1"; shift; exec "$@"' \
-    bash "$stamp/pid" $cmd </dev/null >>"$log" 2>&1 &
-  # race-free wait for the pid file
-  local i
-  for i in 1 2 3 4 5 6 7 8 9 10; do [ -s "$stamp/pid" ] && break; sleep 0.3; done
-  echo "[chain] step$n detached (attempt $attempts, pid $(cat "$stamp/pid" 2>/dev/null || echo '?'))" >&2
-}
-
-run_long_step() { # run_long_step <step> ; returns 0 done, 1 failed, 2 still running
-  local n="$1" rcfile rc elapsed=0
-  rcfile="$(worker_rc_file "$n")"
-  if [ -f "$rcfile" ]; then
-    rc="$(cat "$rcfile" 2>/dev/null || echo 1)"
-    [ "$rc" -eq 0 ] && return 0
-    echo "FATAL: baseline step $n worker failed rc=$rc (see $STAMPS/step$n/*.attempt*.log)" >&2
-    return 1
-  fi
-  if ! worker_alive "$n"; then
-    detach_worker "$n" || return 1
+incremental_curve() { # full re-derive from the CURRENT attempt log; atomic
+  # replace only on content change (idempotent pushes see a stable file)
+  local log tmp
+  log="$(train_attempt_log)"
+  [ -s "$log" ] || return 0
+  tmp="$TRAIN_DIR/.baseline_metrics.tmp"
+  if "$PY" "$ART/scripts/metric_curve.py" extract \
+      --contract "$ART/contracts.json" --log "$log" --out "$tmp" >/dev/null 2>&1; then
+    if [ ! -s "$TRAIN_DIR/baseline_metrics.jsonl" ] || ! cmp -s "$tmp" "$TRAIN_DIR/baseline_metrics.jsonl"; then
+      mv -f "$tmp" "$TRAIN_DIR/baseline_metrics.jsonl"
+    else
+      rm -f "$tmp"
+    fi
   else
-    echo "[chain] step$n worker already running (pid $(cat "$(worker_pid_file "$n")")) — no second detach" >&2
+    rm -f "$tmp"   # early-state log (no epoch line yet) — next cycle retries
   fi
-  while [ "$elapsed" -lt "$POLL_MAX_SECS" ]; do
-    [ -f "$rcfile" ] && break
-    sleep 10; elapsed=$((elapsed + 10))
-  done
-  if [ -f "$rcfile" ]; then
-    rc="$(cat "$rcfile" 2>/dev/null || echo 1)"
-    [ "$rc" -eq 0 ] && return 0
-    echo "FATAL: baseline step $n worker failed rc=$rc (see $STAMPS/step$n/*.attempt*.log)" >&2
-    return 1
-  fi
-  echo "[chain] step$n still running after ${POLL_MAX_SECS}s — re-invoke this script to continue polling" >&2
-  return 2
 }
 
-# ── worker dispatch (synchronous single-step execution) ──────────────────────
+curve_points() {
+  python3 -c '
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+print(sum(1 for line in p.read_text(encoding="utf-8").splitlines() if line.strip()) if p.is_file() else 0)
+' "$TRAIN_DIR/baseline_metrics.jsonl" 2>/dev/null || echo 0
+}
+
+finalizer_main() {
+  mkdir -p "$TRAIN_DIR"
+  # already terminal (crash between train_final write and finalizer exit)
+  [ -f "$TRAIN_FINAL" ] && { fin_log "finalizer: train_final already present — exiting"; exit 0; }
+  fin_log "finalizer alive: polling full-train (epochs=$FULL_EPOCHS seed=$FULL_SEED k=$PROBE_K)"
+  local relaunches=0
+  while true; do
+    if [ -s "$TRAIN_RC" ]; then
+      local rc; rc="$(cat "$TRAIN_RC")"
+      fin_log "stage=train_exit rc=$rc"
+      if [ "$rc" -ne 0 ]; then
+        write_train_final failed "$rc" train
+        exit 0
+      fi
+      break   # rc == 0 -> finalize chain below
+    fi
+    if ! pid_alive_owned "$TRAIN_PID" "bash"; then
+      # died without an rc file: crash scene (kill -9 / OOM). Re-launch <= 3.
+      relaunches=$((relaunches + 1))
+      if [ "$relaunches" -gt 3 ]; then
+        fin_log "stage=relaunch_exhausted attempts=$relaunches"
+        write_train_final failed null relaunch_exhausted
+        exit 0
+      fi
+      fin_log "stage=relaunch attempt=$relaunches (train group died without rc)"
+      # sub-command output silenced: finalizer.log lines start ISO8601 only
+      launch_full_train >/dev/null 2>&1 || {
+        write_train_final failed null relaunch_failed; exit 0; }
+    fi
+    incremental_curve
+    "$PY" "$ART/scripts/push_curves.py" --artifacts "$ART" >/dev/null 2>&1 || true
+    fin_log "alive curve_points=$(curve_points)"
+    sleep 10
+  done
+
+  # ── rc == 0: finalize chain (a stage line per step) ───────────────────────
+  fin_log "stage=final_check expected_epochs=$FULL_EPOCHS"
+  if ! "$PY" "$ART/scripts/metric_curve.py" extract \
+      --contract "$ART/contracts.json" --log "$(train_attempt_log)" \
+      --out "$TRAIN_DIR/baseline_metrics.jsonl" \
+      --expected-epochs "$FULL_EPOCHS" >/dev/null 2>&1; then
+    fin_log "stage=final_check verdict=failed (actual epochs != rendered $FULL_EPOCHS)"
+    write_train_final failed 0 final_check \
+      "final check failed: the training log does not carry exactly the rendered $FULL_EPOCHS epochs — 训练须按给定轮数精确执行，自带 early-stopping 的项目不在 workflow 范围（准入条款见 contracts.json reason）"
+    exit 0
+  fi
+  "$PY" "$ART/scripts/push_curves.py" --artifacts "$ART" >/dev/null 2>&1 || true
+
+  fin_log "stage=full_eval"
+  local ckpt acc
+  ckpt="$(resolve_ckpt "$TRAIN_OUT")" || {
+    fin_log "stage=full_eval verdict=failed (last ckpt unresolvable)"
+    write_train_final failed 0 full_eval; exit 0; }
+  render "$ART/templates/run_eval.template.sh" "$TRAIN_DIR/.full_eval.rendered.sh" \
+    --set ckpt="$ckpt" --set log="$TRAIN_DIR/full_eval.log" >/dev/null 2>&1 || {
+    write_train_final failed 0 full_eval; exit 0; }
+  bash "$TRAIN_DIR/.full_eval.rendered.sh" >>"$TRAIN_DIR/full_eval.log" 2>&1 || {
+    fin_log "stage=full_eval verdict=failed (eval run rc != 0)"
+    write_train_final failed 0 full_eval; exit 0; }
+  acc="$(extract_metric "$TRAIN_DIR/full_eval.log")" || {
+    write_train_final failed 0 full_eval; exit 0; }
+  python3 - "$TRAIN_DIR/baseline_full_acc.json" "$acc" "$ckpt" <<'PY'
+import json, os, sys, tempfile
+from pathlib import Path
+budget = json.loads(Path("contracts.json").read_text(encoding="utf-8"))["full_train_budget"]
+doc = {"baseline_full_acc": float(sys.argv[2]), "ckpt": sys.argv[3],
+       "full_train_budget": budget}
+path = sys.argv[1]
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    json.dump(doc, fh, sort_keys=True)
+os.replace(tmp, path)
+PY
+  fin_log "stage=full_eval acc=$acc ckpt=$ckpt"
+
+  if [ "$CKPT_PER_EPOCH" = "True" ]; then
+    fin_log "stage=k_eval k=$PROBE_K"
+    local kckpt kacc
+    kckpt="$(resolve_kth_ckpt "$TRAIN_OUT" "$PROBE_K")" || {
+      write_train_final failed 0 k_eval; exit 0; }
+    render "$ART/templates/run_eval.template.sh" "$TRAIN_DIR/.k_eval.rendered.sh" \
+      --set ckpt="$kckpt" --set log="$TRAIN_DIR/k_eval.log" >/dev/null 2>&1 || {
+      write_train_final failed 0 k_eval; exit 0; }
+    bash "$TRAIN_DIR/.k_eval.rendered.sh" >>"$TRAIN_DIR/k_eval.log" 2>&1 || {
+      write_train_final failed 0 k_eval; exit 0; }
+    kacc="$(extract_metric "$TRAIN_DIR/k_eval.log")" || {
+      write_train_final failed 0 k_eval; exit 0; }
+    python3 - "$TRAIN_DIR/baseline_k_acc.json" "$kacc" "$kckpt" "$PROBE_K" <<'PY'
+import json, os, sys, tempfile
+from pathlib import Path
+budget = json.loads(Path("contracts.json").read_text(encoding="utf-8"))["full_train_budget"]
+doc = {"baseline_k_acc": float(sys.argv[2]), "ckpt": sys.argv[3], "k": int(sys.argv[4]),
+       "full_train_budget": budget}
+path = sys.argv[1]
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    json.dump(doc, fh, sort_keys=True)
+os.replace(tmp, path)
+PY
+    fin_log "stage=k_eval acc=$kacc k=$PROBE_K ckpt=$kckpt"
+  else
+    fin_log "stage=k_eval skipped (train.ckpt_per_epoch false — probe judges on the curve alone)"
+  fi
+
+  write_train_final done 0 done
+  fin_log "finalizer: baseline finalized (status=done)"
+  exit 0
+}
+
+if [ -n "$FINALIZER" ]; then
+  finalizer_main
+fi
+
+# ── worker dispatch (synchronous single-step execution: profile only) ───────
 if [ -n "$WORKER_STEP" ]; then
   rc=0
   case "$WORKER_STEP" in
-    3) step_profile_inline || rc=$? ;;
-    6) step_proxy_worker || rc=$? ;;
+    2) step_profile_inline || rc=$? ;;
     *) echo "FATAL: --worker-step $WORKER_STEP is not a long step" >&2; exit 2 ;;
   esac
-  echo "$rc" > "$(worker_rc_file "$WORKER_STEP")"
+  echo "$rc" > "$STAMPS/step$WORKER_STEP/rc"
   echo "[worker] step$WORKER_STEP finished rc=$rc" >&2
   exit "$rc"
 fi
@@ -431,22 +550,22 @@ write_status() { # write_status <state-vector description...>
     echo ""
     echo "| step | name | state | product |"
     echo "|---|---|---|---|"
-    echo "| 1 | reference-cross-check | $1 | baseline/reference_check.json |"
-    echo "| 2 | export + pristine snapshot | $2 | base/model.onnx + baseline/original_shadow/ |"
-    echo "| 3 | profile | $3 | base/profile/ |"
-    echo "| 4 | analyze | $4 | base/bottleneck_report.json |"
-    echo "| 5 | baseline-ref | $5 | baseline/baseline_ref.json |"
-    echo "| 6 | baseline-proxy-train | $6 | baseline/baseline_proxy_acc.json |"
-    echo "| 7 | target-check | $7 | - |"
+    echo "| 1 | export + pristine snapshot | $1 | base/model.onnx + baseline/original_shadow/ |"
+    echo "| 2 | profile | $2 | base/profile/ |"
+    echo "| 3 | analyze | $3 | base/bottleneck_report.json |"
+    echo "| 4 | full-train launch (non-blocking) | $4 | baseline/train.rendered.sh + train.pid |"
+    echo "| 5 | finalizer launch | $5 | baseline/finalizer.pid + finalizer.log |"
+    echo "| 6 | liveness confirmation | $6 | - |"
+    echo "| 7 | emit gate (business_logic.md) | $7 | baseline/business_logic.md |"
     echo ""
-    echo "latency_reduction_min: $TARGET; proxy_budget: epochs=$PB_EPOCHS data=${PB_DATA_KNOB:-none}=${PB_DATA_VALUE:-n/a} max_steps=${PB_MAX_STEPS:-none} seed=$PB_SEED; profile_script: ${PROFILE_SCRIPT:-built-in estimator}"
+    echo "finalizer tail: $(tail -n 2 "$FINALIZER_LOG" 2>/dev/null | tr '\n' ' ')"
+    echo "full_train_budget: epochs=$FULL_EPOCHS seed=$FULL_SEED; probe k=$PROBE_K; ckpt_per_epoch=$CKPT_PER_EPOCH; profile_script: ${PROFILE_SCRIPT:-built-in estimator}"
   } > "$ART/baseline_status.md"
 }
 
 emit() { # emit <status> <error> — the stdout line is EXACTLY the node
   # output_schema field set (additionalProperties:false): the executed / failed
-  # line is the agent's final reply VERBATIM, so any extra key (a bare step
-  # number, say) would be rejected downstream. The failing step number is
+  # line is the agent's final reply VERBATIM. The failing step number is
   # folded into <error> as "baseline step N: ...".
   python3 -c '
 import json, sys
@@ -461,15 +580,6 @@ def num(path, key):
         return v if isinstance(v, (int, float)) else 0
     except Exception:
         return 0
-def nullable(path, key):
-    p = art / path
-    if not p.is_file():
-        return None
-    try:
-        v = json.loads(p.read_text(encoding="utf-8")).get(key)
-        return v if isinstance(v, (int, float)) else None
-    except Exception:
-        return None
 def produced(probe, rel):  # schema: path fields are "" for products not produced
     return str(art / rel) if (art / probe).exists() else ""
 generated = [rel for probe, rel in [
@@ -477,23 +587,27 @@ generated = [rel for probe, rel in [
     ("base/profile/profile_summary.json", "base/profile/"),
     ("base/bottleneck_report.json", "base/bottleneck_report.json"),
     ("baseline/original_shadow", "baseline/original_shadow/"),
-    ("baseline/reference_check.json", "baseline/reference_check.json"),
-    ("baseline/baseline_ref.json", "baseline/baseline_ref.json"),
-    ("baseline/baseline_proxy_acc.json", "baseline/baseline_proxy_acc.json"),
+    ("baseline/train.rendered.sh", "baseline/train.rendered.sh"),
+    ("baseline/train.pid", "baseline/train.pid"),
+    ("baseline/finalizer.pid", "baseline/finalizer.pid"),
     ("baseline/baseline_metrics.jsonl", "baseline/baseline_metrics.jsonl"),
+    ("baseline/baseline_full_acc.json", "baseline/baseline_full_acc.json"),
+    ("baseline/baseline_k_acc.json", "baseline/baseline_k_acc.json"),
+    ("baseline/train_final.json", "baseline/train_final.json"),
+    ("baseline/business_logic.md", "baseline/business_logic.md"),
     ("baseline_status.md", "baseline_status.md"),
 ] if (art / probe).exists()]
 print(json.dumps({
     "status": sys.argv[1], "error": sys.argv[2],
     "makespan_cycles": num("base/profile/profile_summary.json", "makespan_cycles"),
-    "baseline_proxy_acc": num("baseline/baseline_proxy_acc.json", "proxy_acc"),
-    "baseline_ref_acc": nullable("baseline/baseline_ref.json", "baseline_ref_acc"),
     "base_onnx": produced("base/model.onnx", "base/model.onnx"),
+    "baseline_metrics": produced("baseline/baseline_metrics.jsonl",
+                                 "baseline/baseline_metrics.jsonl"),
+    "business_logic_path": produced("baseline/business_logic.md",
+                                    "baseline/business_logic.md"),
     "profile_dir": produced("base/profile/profile_summary.json", "base/profile"),
     "bottleneck_report": produced("base/bottleneck_report.json",
                                   "base/bottleneck_report.json"),
-    "baseline_metrics": produced("baseline/baseline_metrics.jsonl",
-                                 "baseline/baseline_metrics.jsonl"),
     "generated_artifacts": generated,
 }))' "$1" "$2"
 }
@@ -502,44 +616,100 @@ print(json.dumps({
 S1=pending S2=pending S3=pending S4=pending S5=pending S6=pending S7=pending
 fail_step=0 fail_err=""
 
-step_reference || { fail_step=1; fail_err="reference cross-check (or its prerequisite shadow export) failed — root cause in the chain stderr of this invocation"; }
-[ "$fail_step" -eq 0 ] && { S1=done; step_export || { fail_step=2; fail_err="shadow export failed"; }; }
-[ "$fail_step" -eq 0 ] && { S2=done
+step_export || { fail_step=1; fail_err="shadow export failed"; }
+[ "$fail_step" -eq 0 ] && { S1=done
   if [ -s "$ART/base/profile/profile_summary.json" ]; then
-    S3=done; echo "[chain] step3 profile: product exists, skip" >&2
+    S2=done; echo "[chain] step2 profile: product exists, skip" >&2
   elif [ -n "$PROFILE_SCRIPT" ]; then
-    # custom profiler = potentially long -> detached + polled
-    rc=0; run_long_step 3 || rc=$?
-    if [ "$rc" -eq 2 ]; then S3=running; write_status done done running "$S4" "$S5" "$S6" "$S7"
-      emit running ""; exit 0
-    elif [ "$rc" -ne 0 ]; then fail_step=3; fail_err="profiling failed (worker logs: baseline/.stamps/step3/*.attempt*.log)"; fi
-  else
-    step_profile_inline || { fail_step=3; fail_err="profiling failed (root cause in the chain stderr of this invocation)"; }
-  fi; }
-[ "$fail_step" -eq 0 ] && { S3=done; step_analyze || { fail_step=4; fail_err="bottleneck analysis failed"; }; }
-[ "$fail_step" -eq 0 ] && { S4=done; step_baseline_ref || { fail_step=5; fail_err="baseline reference accuracy record failed"; }; }
-[ "$fail_step" -eq 0 ] && { S5=done
-  if [ -s "$ART/baseline/baseline_proxy_acc.json" ]; then
-    ANCHOR_ERR="$STAMPS/anchor_verify.err"
-    if verify_anchor_budget 2>"$ANCHOR_ERR"; then
-      S6=done; echo "[chain] step6 proxy train: product exists, skip" >&2
+    # custom profiler = potentially long -> detached + polled (legacy mechanism)
+    rc=0
+    if [ -f "$STAMPS/step2/rc" ]; then
+      wrc="$(cat "$STAMPS/step2/rc")"
+      [ "$wrc" -eq 0 ] || { fail_step=2; fail_err="profiling failed (worker logs: baseline/.stamps/step2/*.log)"; }
     else
-      # capture the verifier's detail so the emitted error (forwarded
-      # verbatim as the node output) is self-contained; echo keeps it on
-      # stderr for the node transcript as well
-      detail="$(tr '\n' ' ' < "$ANCHOR_ERR" 2>/dev/null)"
-      detail="${detail#FATAL: }"
-      [ -n "$detail" ] || detail="anchor verification failed without a message"
-      echo "FATAL: $detail" >&2
-      fail_step=6; fail_err="existing baseline proxy anchor is not reusable ($detail) — fair comparison void; delete baseline/baseline_proxy_acc.json and re-run to rebuild the anchor (never auto-deleted)"
+      mkdir -p "$STAMPS/step2"
+      attempts="$(cat "$STAMPS/step2/attempts" 2>/dev/null || echo 0)"
+      attempts=$((attempts + 1)); echo "$attempts" > "$STAMPS/step2/attempts"
+      log="$STAMPS/step2/profile_worker.attempt${attempts}.log"
+      cmd="$(printf '%q ' bash "$SELF" --worker-step 2 --latency-reduction-min "$TARGET" --seed "$SEED")"
+      cmd="$cmd $(printf '%q ' --profile-script "$PROFILE_SCRIPT")"
+      setsid bash -c 'echo $$ > "$1"; shift; exec "$@"' \
+        bash "$STAMPS/step2/pid" $cmd </dev/null >>"$log" 2>&1 &
+      elapsed=0
+      while [ "$elapsed" -lt "$POLL_MAX_SECS" ]; do
+        [ -f "$STAMPS/step2/rc" ] && break
+        sleep 10; elapsed=$((elapsed + 10))
+      done
+      if [ -f "$STAMPS/step2/rc" ]; then
+        wrc="$(cat "$STAMPS/step2/rc")"
+        [ "$wrc" -eq 0 ] || { fail_step=2; fail_err="profiling failed (worker logs: baseline/.stamps/step2/*.log)"; }
+      else
+        S2=running; write_status "$S1" running "$S3" "$S4" "$S5" "$S6" "$S7"
+        emit running "baseline step 2: profile worker still running — re-invoke to continue polling"
+        exit 0
+      fi
     fi
   else
-    rc=0; run_long_step 6 || rc=$?
-    if [ "$rc" -eq 2 ]; then S6=running; write_status "$S1" "$S2" "$S3" "$S4" "$S5" running "$S7"
-      emit running ""; exit 0
-    elif [ "$rc" -ne 0 ]; then fail_step=6; fail_err="baseline proxy training failed (worker logs: baseline/.stamps/step6/*.attempt*.log)"; fi
+    step_profile_inline || { fail_step=2; fail_err="profiling failed (root cause in the chain stderr of this invocation)"; }
   fi; }
-[ "$fail_step" -eq 0 ] && { S6=done; step_target_check || { fail_step=7; fail_err="target check failed: cannot read the baseline makespan from base/profile/profile_summary.json — the relative latency target is derived at gate time from this value"; }; }
+[ "$fail_step" -eq 0 ] && { S2=done; step_analyze || { fail_step=3; fail_err="bottleneck analysis failed"; }; }
+[ "$fail_step" -eq 0 ] && { S3=done; step_train_launch || { fail_step=4; fail_err="full training launch failed"; }; }
+[ "$fail_step" -eq 0 ] && { S4=done; step_finalizer_launch || { fail_step=5; fail_err="finalizer launch failed"; }; }
+[ "$fail_step" -eq 0 ] && { S5=done
+  # liveness confirmation with re-entry equivalence (alive OR train_final)
+  if [ -f "$TRAIN_FINAL" ]; then
+    T_STATUS="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$TRAIN_FINAL")"
+    if [ "$T_STATUS" = "done" ]; then
+      if verify_full_acc_fingerprint 2>"$STAMPS/fingerprint.err"; then
+        S6=done   # training finished, terminal state recorded, anchor fresh
+        echo "[chain] step6 liveness: train_final=done and anchor fingerprint verified" >&2
+      else
+        detail="$(tr '\n' ' ' < "$STAMPS/fingerprint.err" 2>/dev/null | head -c 200)"
+        fail_step=6; fail_err="stale full-training anchor ($detail)"
+      fi
+    else
+      T_STAGE="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("stage","?"))' "$TRAIN_FINAL")"
+      T_MSG="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("message",""))' "$TRAIN_FINAL")"
+      fail_step=6; fail_err="baseline full training failed (train_final stage: $T_STAGE${T_MSG:+ — $T_MSG}; see baseline/finalizer.log)"
+    fi
+  elif pid_alive_owned "$TRAIN_PID" "bash" && pid_alive_owned "$FINALIZER_PID" "--finalizer"; then
+    # wait briefly for the train log to appear (interpreter startup latency)
+    logwait=0
+    while [ "$logwait" -lt 15 ]; do
+      [ -s "$(train_attempt_log)" ] && break
+      sleep 1; logwait=$((logwait + 1))
+    done
+    if [ -s "$(train_attempt_log)" ]; then
+      S6=done
+      echo "[chain] step6 liveness: train pid + finalizer pid alive, train log present — confirmed (non-blocking: NOT waiting for completion)" >&2
+    else
+      write_status "$S1" "$S2" "$S3" "$S4" "$S5" running "$S7"
+      emit running "baseline step 6: workers alive but train log not yet on disk — re-invoke"
+      exit 0
+    fi
+  elif pid_alive_owned "$FINALIZER_PID" "--finalizer"; then
+    # train group gone but the finalizer is still running: either the
+    # training just ended (rc present — the finalizer is finalizing) or it
+    # crashed without rc (the finalizer owns the relaunch). Both transient.
+    write_status "$S1" "$S2" "$S3" "$S4" "$S5" running "$S7"
+    if [ -s "$TRAIN_RC" ]; then
+      emit running "baseline step 6: training ended (rc=$(cat "$TRAIN_RC" 2>/dev/null)), finalizer finalizing — re-invoke"
+    else
+      emit running "baseline step 6: train group dead without rc, finalizer alive (relaunch in progress) — re-invoke"
+    fi
+    exit 0
+  else
+    fail_step=6; fail_err="finalizer exited without a terminal state (no train_final.json, finalizer pid dead) — see baseline/finalizer.log"
+  fi; }
+[ "$fail_step" -eq 0 ] && { S6=done
+  # emit gate: the business-logic document is a HARD precondition of executed
+  if [ -s "$ART/baseline/business_logic.md" ]; then
+    S7=done
+  else
+    S7=running; write_status "$S1" "$S2" "$S3" "$S4" "$S5" "$S6" running
+    emit running "baseline step 7: business_logic.md not yet on disk (business-logic-analyst in flight) — re-invoke"
+    exit 0
+  fi; }
 
 if [ "$fail_step" -ne 0 ]; then
   eval "S$fail_step=failed"

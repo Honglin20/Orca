@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# run_verify.sh — batch L0 (latency gate) verification for every DONE variant.
+# run_latency_recheck.sh — batch latency re-verification for every DONE variant.
 #
-# For each variants/<vid>/ with a DONE marker and no verdict.json:
+# Runs INSIDE the po_propose node (the implement → recheck → repair loop's
+# measurement step). For each variants/<vid>/ with a DONE marker and no
+# verdict.json:
 #   1. two-layer declaration check (file / graph) against the CURRENT base
 #      (base shadow, base onnx);
 #   2. re-profile the variant onnx with the pinned profiler;
@@ -16,14 +18,17 @@
 # verdict file — the per-round jsonl is an append-only audit stream and is
 # NOT re-derived by reconciliation (nothing downstream consumes it).
 #
-# Idempotent: a variant with an existing verdict.json is skipped.
+# Idempotent: a variant with an existing verdict.json is skipped (verdict.json
+# presence IS the skip key — the node deletes a rejected variant's verdict.json
+# before sending it back for repair and a fresh recheck).
 # Per-variant eliminations (structural_mismatch / unsupported_op /
 # latency_fail) are legitimate verdicts, not script failures.
-# stdout: single-line JSON (the node output). Logs to stderr.
+# stdout: single-line JSON (consumed by the po_propose node as an info line —
+# latency_pass_count feeds its output). Logs to stderr.
 # rc 0 = executed; rc 2 = hard error (missing artifacts / infrastructure).
 set -euo pipefail
 
-ART="${ORCA_ARTIFACTS_DIR:?FATAL: ORCA_ARTIFACTS_DIR not set (run_verify.sh)}"
+ART="${ORCA_ARTIFACTS_DIR:?FATAL: ORCA_ARTIFACTS_DIR not set (run_latency_recheck.sh)}"
 SCRIPTS="$ART/scripts"
 PROFILER=""
 MIN_IMP="100"

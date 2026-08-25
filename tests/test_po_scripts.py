@@ -988,9 +988,12 @@ _CONTRACTS_SH = _REPO / "workflows" / "agents" / "po_contract" / "scripts" / "ch
 
 def _contracts_workspace(tmp_path: Path, *, probe_body: str | None = None,
                          full_body: str | None = None,
-                         budget: dict | None = None) -> Path:
-    """Minimal workspace satisfying the po_contract gate: contracts.json with
-    a pinned proxy_budget, four templates, measured evidence, real entries."""
+                         budget: dict | None = None,
+                         full_train_budget: dict | None = None) -> Path:
+    """Minimal workspace satisfying the po_contract v4 gate: contracts.json
+    with a pinned epoch-only proxy_budget + full_train_budget fingerprint,
+    four templates (probe/full byte-identical by default), measured evidence,
+    real entries."""
     import hashlib
 
     art = tmp_path / "art"
@@ -1006,7 +1009,9 @@ def _contracts_workspace(tmp_path: Path, *, probe_body: str | None = None,
     budget = budget or {"epochs": 1, "dataset_knob": None,
                         "data_value": None, "max_steps": None, "seed": 0}
     contracts = {
-        "viable": True, "reason": "tier A, measured",
+        "viable": True,
+        "reason": "tier A, measured; 训练须按给定轮数精确执行，自带 "
+                  "early-stopping 项目不在范围",
         "interpreter": {"sys_executable": sys.executable, "flags_check": "pass"},
         "shadow": {"shadow_root": str(art / "shadow"), "shadow_pkgs": ["pkg"]},
         "model_facts": {"module": "pkg.model", "factory": "build",
@@ -1018,11 +1023,15 @@ def _contracts_workspace(tmp_path: Path, *, probe_body: str | None = None,
                   "flags": {"epochs": "--epochs", "out_dir": "--out-dir",
                             "seed": "--seed", "max_steps": "--max-steps",
                             "data_knob": budget["dataset_knob"]},
-                  "ckpt_output_rule": "{out_dir}/model.pth",
+                  "ckpt_output_rule": "{out_dir}/epoch_*.pth",
+                  "ckpt_per_epoch": True,
                   "epoch_metric_extraction": {
                       "kind": "stdout_regex",
                       "pattern": r"epoch (?P<epoch>\d+) metric=(?P<metric>[0-9.]+)"},
                   "train_epochs_full": 10},
+        "full_train_budget": full_train_budget or {
+            "epochs": 2, "seed": 0,
+            "data": {"dataset_knob": None, "data_value": None}},
         "eval": {"tier": "A", "entry": str(art / "eval.py"),
                  "entry_sha256": sha(art / "eval.py"),
                  "flags": {"ckpt": "--ckpt"}, "ckpt_container": "bare",
@@ -1033,7 +1042,7 @@ def _contracts_workspace(tmp_path: Path, *, probe_body: str | None = None,
                    "entry_sha256": sha(art / "exporter.py"),
                    "generated": False, "argv_facts": "pinned"},
         "proxy_budget": budget,
-        "probe_cap_mechanism": "epochs-only",
+        "probe_cap_mechanism": "stop-at-k",
         "exemptions": [],
         "sitecustomize_merge": {"found": False, "path": "", "merged": False},
     }
@@ -1042,9 +1051,9 @@ def _contracts_workspace(tmp_path: Path, *, probe_body: str | None = None,
     probe = probe_body or (
         '"<<python>>" train.py --epochs <<epochs>> --out-dir <<out_dir>> '
         '--seed <<seed>>\n')
-    full = full_body or (
-        '"<<python>>" train.py --epochs <<epochs>> --out-dir <<out_dir>> '
-        '--seed <<seed>>\n')
+    # v4 single training pipeline: the full template defaults to the SAME
+    # bytes as the probe template (the gate asserts identity)
+    full = probe if full_body is None else full_body
     (art / "templates" / "run_probe_finetune.template.sh").write_text(
         probe, encoding="utf-8")
     (art / "templates" / "run_full_finetune.template.sh").write_text(
@@ -1152,98 +1161,188 @@ def test_check_contracts_gate_rejects_value_without_knob(tmp_path: Path):
     assert "data_value set but dataset_knob" in proc.stderr
 
 
-# ── run_baseline_chain step6: stale-anchor proxy-budget re-verification ──────
+def test_check_contracts_gate_validates_v4_fields(tmp_path: Path):
+    def rewrite(art: Path, mutate):
+        contracts = json.loads((art / "contracts.json").read_text(encoding="utf-8"))
+        mutate(contracts)
+        (art / "contracts.json").write_text(json.dumps(contracts), encoding="utf-8")
+
+    # full_train_budget.data must be the null pair (value-level fingerprint:
+    # a recorded knob would silently change the budget meaning)
+    art = _contracts_workspace(
+        tmp_path / "a",
+        full_train_budget={"epochs": 2, "seed": 0,
+                           "data": {"dataset_knob": "--limit", "data_value": 1}})
+    proc = _run_contracts_gate(art)
+    assert proc.returncode == 1
+    assert "full_train_budget.data" in proc.stderr
+
+    # missing ckpt_per_epoch -> ckpt addressability undecidable downstream
+    art = _contracts_workspace(tmp_path / "b")
+    rewrite(art, lambda c: c["train"].pop("ckpt_per_epoch"))
+    proc = _run_contracts_gate(art)
+    assert proc.returncode == 1
+    assert "ckpt_per_epoch" in proc.stderr
+
+    # top-level reason must carry the admission clause (E3-07 consumer side)
+    art = _contracts_workspace(tmp_path / "c")
+    rewrite(art, lambda c: c.update(reason="tier A, measured"))
+    proc = _run_contracts_gate(art)
+    assert proc.returncode == 1
+    assert "admission clause" in proc.stderr
+
+    # probe/full templates must be byte-identical (ONE training pipeline)
+    art = _contracts_workspace(
+        tmp_path / "d",
+        full_body='"<<python>>" train.py --epochs <<epochs>> --out-dir <<out_dir>> '
+                  '--seed <<seed>> --extra-flag 1\n')
+    proc = _run_contracts_gate(art)
+    assert proc.returncode == 1
+    assert "differ" in proc.stderr and "same source" in proc.stderr
+
+    # wrong cap mechanism
+    art = _contracts_workspace(tmp_path / "e")
+    rewrite(art, lambda c: c.update(probe_cap_mechanism="epochs-only"))
+    proc = _run_contracts_gate(art)
+    assert proc.returncode == 1
+    assert "stop-at-k" in proc.stderr
+
+    # metric pattern that can truncate mid-number (boundary anchor check)
+    art = _contracts_workspace(tmp_path / "f")
+    rewrite(art, lambda c: c["train"].update(epoch_metric_extraction={
+        "kind": "stdout_regex",
+        "pattern": r"epoch (?P<epoch>\d+) metric=(?P<metric>[0-9.]{4})"}))
+    proc = _run_contracts_gate(art)
+    assert proc.returncode == 1
+    assert "truncation" in proc.stderr
+
+    # control: the unmutated v4 workspace passes (already asserted by the
+    # passes-consistent test; guard the fixture itself here)
+    assert _run_contracts_gate(_contracts_workspace(tmp_path / "ok")).returncode == 0
+
+
+def test_check_contracts_reuse_rejects_pre_v4_contracts(tmp_path: Path):
+    """A reusable workspace built before this workflow version lacks the v4
+    fields — the reuse gate must fail loud with the fresh_start hint instead
+    of failing cryptically downstream."""
+    art = _contracts_workspace(tmp_path)
+    env = dict(os.environ)
+    env["ORCA_ARTIFACTS_DIR"] = str(art)
+
+    def reuse():
+        return subprocess.run(["bash", str(_CONTRACTS_SH), "--reuse-check"],
+                              capture_output=True, text=True, timeout=60, env=env)
+
+    # current-version contracts + matching shas -> REUSE
+    assert reuse().returncode == 0
+
+    # strip full_train_budget: a pre-v4 contracts.json
+    contracts = json.loads((art / "contracts.json").read_text(encoding="utf-8"))
+    contracts.pop("full_train_budget")
+    contracts["train"].pop("ckpt_per_epoch")
+    (art / "contracts.json").write_text(json.dumps(contracts), encoding="utf-8")
+    proc = reuse()
+    assert proc.returncode == 1
+    assert "predates the current workflow version" in proc.stderr
+    assert "fresh_start" in proc.stderr
+
+
+# ── run_baseline_chain (v4): non-blocking baseline + finalizer guardian ──────
 
 _BASELINE_SH = _REPO / "workflows" / "agents" / "po_baseline" / "scripts" / "run_baseline_chain.sh"
 
+_BL_MD = ("[subagent:business-logic-analyst v1 TEST]\n## 任务语义\nclassify\n"
+          "## 输入输出\nx->y\n## 架构动机\nwhy\n"
+          "## 逐模块职责与物理意义\nper module\n## 训练目标与指标方向\nacc higher\n")
 
-def _baseline_workspace(tmp_path: Path, anchor_budget: dict) -> Path:
-    """Workspace whose steps 1-5 products all exist, so the chain reaches the
-    step6 product-exists branch with a promotion anchor (baseline_proxy_acc.json)
-    already recorded under `anchor_budget`."""
+
+def _baseline_ws(tmp_path: Path, *, full_epochs: int = 2, probe_k: int = 1,
+                 ckpt_per_epoch: bool = True, train_body: str | None = None,
+                 with_business_logic: bool = True) -> Path:
+    """Deployed-layout workspace whose early chain (steps 1-3) products exist;
+    the chain therefore goes straight to the full-train + finalizer launches.
+    The train template's stdout IS the training log (epoch lines, matching the
+    contracts extraction pattern); ckpt files land in <<out_dir>> per the
+    ckpt_output_rule glob."""
     art = tmp_path / "art"
-    for sub in ("baseline", "base/profile", "templates", "scripts",
-                "readiness", "shadow/pkg"):
-        art.joinpath(sub).mkdir(parents=True)
-    (art / "shadow" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
-
-    budget = {"epochs": 1, "dataset_knob": "--limit", "data_value": 2000,
-              "max_steps": 500, "seed": 0}
-    (art / "contracts.json").write_text(json.dumps({
-        "interpreter": {"sys_executable": sys.executable},
-        "shadow": {"shadow_pkgs": ["pkg"]},
-        "proxy_budget": budget,
-    }), encoding="utf-8")
-    (art / "readiness" / "readiness.json").write_text(
-        json.dumps({"project_root": str(tmp_path)}), encoding="utf-8")
-    for name in ("export_onnx.template.sh", "run_probe_finetune.template.sh",
-                 "run_eval.template.sh"):
-        (art / "templates" / name).write_text("echo template\n", encoding="utf-8")
-    for src in ("render_run.sh", "analyze.py"):
+    proj = tmp_path / "proj"
+    (art / "scripts").mkdir(parents=True)
+    (art / "orca_inject").mkdir(parents=True)
+    proj.mkdir()
+    for src in ("render_run.sh", "assert_shadow.py", "metric_curve.py",
+                "push_curves.py", "analyze.py"):
         shutil.copy(_SCRIPTS / src, art / "scripts" / src)
-
-    (art / "baseline" / "reference_check.json").write_text(
-        json.dumps({"skipped": True}), encoding="utf-8")
+    shutil.copy(_SCRIPTS / "orca_inject" / "header.env",
+                art / "orca_inject" / "header.env")
+    shutil.copy(_SCRIPTS / "orca_inject" / "sitecustomize.py",
+                art / "orca_inject" / "sitecustomize.py")
+    (art / "shadow" / "pkg").mkdir(parents=True)
+    (art / "shadow" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (art / "base" / "profile").mkdir(parents=True)
     (art / "base" / "model.onnx").write_bytes(b"onnx-bytes")
     (art / "base" / "profile" / "profile_summary.json").write_text(
         json.dumps({"makespan_cycles": 500}), encoding="utf-8")
-    (art / "base" / "bottleneck_report.json").write_text("{}", encoding="utf-8")
-    (art / "baseline" / "baseline_ref.json").write_text(
-        json.dumps({"baseline_ref_acc": 0.9, "source": "input"}), encoding="utf-8")
-    (art / "baseline" / "baseline_proxy_acc.json").write_text(
-        json.dumps({"proxy_acc": 0.5, "ckpt": "unused",
-                    "proxy_budget": anchor_budget}), encoding="utf-8")
+    (art / "base" / "bottleneck_report.json").write_text(
+        json.dumps({"makespan_cycles": 500, "hot_patterns": []}), encoding="utf-8")
+    (art / "baseline").mkdir()
+    if with_business_logic:
+        (art / "baseline" / "business_logic.md").write_text(_BL_MD, encoding="utf-8")
+
+    rule = "{out_dir}/epoch_*.pth" if ckpt_per_epoch else "{out_dir}/model.pth"
+    (art / "contracts.json").write_text(json.dumps({
+        "interpreter": {"sys_executable": sys.executable},
+        "shadow": {"shadow_pkgs": ["pkg"]},
+        "full_train_budget": {"epochs": full_epochs, "seed": 0,
+                              "data": {"dataset_knob": None, "data_value": None}},
+        "proxy_budget": {"epochs": probe_k, "dataset_knob": None,
+                         "data_value": None, "max_steps": None, "seed": 0},
+        "train": {"ckpt_output_rule": rule, "ckpt_per_epoch": ckpt_per_epoch,
+                  "epoch_metric_extraction": {
+                      "kind": "stdout_regex",
+                      "pattern": r"epoch (?P<epoch>\d+) loss=(?P<metric>[0-9.]+)"}},
+        "eval": {"metric_extraction": {"kind": "stdout_regex",
+                                       "pattern": r"acc=([0-9.]+)"}},
+    }), encoding="utf-8")
+    (art / "readiness").mkdir()
+    (art / "readiness" / "readiness.json").write_text(
+        json.dumps({"project_root": str(proj)}), encoding="utf-8")
+
+    ckpt_line = ("for e in $(seq 1 <<epochs>>); do "
+                 "touch '<<out_dir>>/epoch_'$e'.pth'; done\n" if ckpt_per_epoch
+                 else "touch '<<out_dir>>/model.pth'\n")
+    body = train_body or (
+        "for e in $(seq 1 <<epochs>>); do echo \"epoch $e loss=0.$e\"; sleep 1.2; done\n"
+        + ckpt_line)
+    (art / "templates").mkdir()
+    (art / "templates" / "export_onnx.template.sh").write_text("echo export\n",
+                                                               encoding="utf-8")
+    (art / "templates" / "run_full_finetune.template.sh").write_text(body,
+                                                                     encoding="utf-8")
+    (art / "templates" / "run_eval.template.sh").write_text(
+        "echo 'ckpt <<ckpt>> acc=0.9'\n", encoding="utf-8")
     return art
 
 
-def _run_baseline_chain(art: Path) -> subprocess.CompletedProcess:
+def _run_baseline_chain(art: Path, timeout: int = 120) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env["ORCA_ARTIFACTS_DIR"] = str(art)
     return subprocess.run(
         ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5", "--seed", "0"],
-        capture_output=True, text=True, timeout=120, env=env)
+        capture_output=True, text=True, timeout=timeout, env=env)
 
 
-def test_baseline_chain_skip_reverifies_anchor_budget(tmp_path: Path):
-    budget = {"epochs": 1, "dataset_knob": "--limit", "data_value": 2000,
-              "max_steps": 500, "seed": 0}
+def _wait_for(path: Path, timeout_s: float = 40) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if path.is_file():
+            return True
+        time.sleep(0.5)
+    return False
 
-    # anchor recorded under the current budget -> the skip stands, chain done
-    art = _baseline_workspace(tmp_path / "fresh", anchor_budget=budget)
-    proc = _run_baseline_chain(art)
-    assert proc.returncode == 0, proc.stderr
-    assert json.loads(proc.stdout)["status"] == "executed"
-    assert "step6 proxy train: product exists, skip" in proc.stderr
 
-    # stale anchor (budget rebuilt since: epochs + max_steps drifted) ->
-    # fail loud at step6 with per-field diff and rebuild guidance
-    art2 = _baseline_workspace(
-        tmp_path / "stale",
-        anchor_budget={**budget, "epochs": 3, "max_steps": None})
-    proc2 = _run_baseline_chain(art2)
-    assert proc2.returncode == 1
-    payload = json.loads(proc2.stdout)
-    assert payload["status"] == "failed"
-    assert payload["error"].startswith("baseline step 6:")
-    assert "different proxy_budget" in payload["error"]  # self-contained error
-    assert "different proxy_budget" in proc2.stderr
-    assert "epochs" in proc2.stderr and "max_steps" in proc2.stderr
-    assert "Delete baseline/baseline_proxy_acc.json" in proc2.stderr
-    # never auto-deleted: rebuilding the anchor is a deliberate user action
-    assert (art2 / "baseline" / "baseline_proxy_acc.json").is_file()
-
-    # corrupt anchor (truncated mid-write) -> its own fail-loud attribution,
-    # never misreported as a budget drift
-    art3 = _baseline_workspace(tmp_path / "corrupt", anchor_budget=budget)
-    (art3 / "baseline" / "baseline_proxy_acc.json").write_text(
-        '{"proxy_acc": 0.5, "ck', encoding="utf-8")
-    proc3 = _run_baseline_chain(art3)
-    assert proc3.returncode == 1
-    payload3 = json.loads(proc3.stdout)
-    assert payload3["error"].startswith("baseline step 6:")
-    assert "unreadable" in payload3["error"] and "unreadable" in proc3.stderr
-    assert "different proxy_budget" not in proc3.stderr
-    assert "Delete baseline/baseline_proxy_acc.json" in proc3.stderr
+def _train_final(art: Path) -> dict:
+    return json.loads((art / "baseline" / "train_final.json").read_text(
+        encoding="utf-8"))
 
 
 # the po_baseline node output schema — DERIVED from workflows/prof-opt.yaml,
@@ -1262,74 +1361,239 @@ def _po_baseline_schema_fields() -> set[str]:
     return props
 
 
-def test_baseline_chain_stdout_line_is_schema_shaped(tmp_path: Path):
-    budget = {"epochs": 1, "dataset_knob": "--limit", "data_value": 2000,
-              "max_steps": 500, "seed": 0}
-    schema_fields = _po_baseline_schema_fields()
-
-    # executed line: exactly the schema fields, products listed, no extras
-    art = _baseline_workspace(tmp_path / "ok", anchor_budget=budget)
+def test_baseline_chain_nonblocking_emit_and_finalizer_products(tmp_path: Path):
+    """executed does NOT wait for the training: the chain emits while the
+    training pid is still alive and train_final is absent; the detached
+    finalizer then delivers the curve (incrementally, one poll cycle at a
+    time), both accuracy anchors, and the terminal marker on its own."""
+    # 6s per epoch: epoch 1 lands mid-training (before the finalizer's 10s
+    # poll boundary), so the INCREMENTAL curve is observable; the whole run
+    # (12s) still outlives the chain's emit (~7s)
+    art = _baseline_ws(
+        tmp_path, full_epochs=2, probe_k=1, ckpt_per_epoch=True,
+        train_body="for e in $(seq 1 <<epochs>>); do sleep 6; "
+                   'echo "epoch $e loss=0.$e"; done\n'
+                   "for e in $(seq 1 <<epochs>>); do "
+                   "touch '<<out_dir>>/epoch_'$e'.pth'; done\n")
     proc = _run_baseline_chain(art)
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)
+    schema_fields = _po_baseline_schema_fields()
     assert set(payload) == schema_fields
+    assert payload["status"] == "executed"
     assert payload["error"] == ""
-    assert payload["base_onnx"] == "base/model.onnx"   # relative to $ORCA_ARTIFACTS_DIR
-    assert payload["profile_dir"] == "base/profile"
+    assert payload["base_onnx"].endswith("base/model.onnx")
     assert payload["makespan_cycles"] == 500
-    assert payload["baseline_proxy_acc"] == 0.5        # schema type: number
-    assert payload["baseline_ref_acc"] == 0.9
-    assert "base/model.onnx" in payload["generated_artifacts"]
-    assert "baseline/baseline_proxy_acc.json" in payload["generated_artifacts"]
+    assert payload["business_logic_path"].endswith("baseline/business_logic.md")
 
-    # explicit null marker (no user-provided ref acc) -> null, never 0
-    (art / "baseline" / "baseline_ref.json").write_text(
-        json.dumps({"baseline_ref_acc": None,
-                    "source": "not-provided (auto-trained at the final stage when needed)"}),
-        encoding="utf-8")
-    proc_null = _run_baseline_chain(art)
-    assert proc_null.returncode == 0, proc_null.stderr
-    assert json.loads(proc_null.stdout)["baseline_ref_acc"] is None
+    # NON-BLOCKING PROOF: at emit time the training is still running
+    train_pid = int((art / "baseline" / "train.pid").read_text(encoding="utf-8"))
+    assert subprocess.run(["kill", "-0", str(train_pid)],
+                          capture_output=True).returncode == 0
+    assert not (art / "baseline" / "train_final.json").exists()
 
-    # failed line (step 3: profiling script not deployed): the failure must
-    # still be forwardable verbatim — step number folded into error,
-    # absent-product paths empty strings, no step key
-    art2 = _baseline_workspace(tmp_path / "broken", anchor_budget=budget)
-    (art2 / "base" / "profile" / "profile_summary.json").unlink()
-    proc2 = _run_baseline_chain(art2)
+    # incremental curve: epoch 1 on disk while rc is still absent (the
+    # finalizer's mid-training poll wrote it — not the final extract)
+    deadline = time.monotonic() + 30
+    saw_incremental = False
+    while time.monotonic() < deadline:
+        curve_file = art / "baseline" / "baseline_metrics.jsonl"
+        if curve_file.is_file():
+            points = curve_file.read_text(encoding="utf-8").splitlines()
+            if points and not (art / "baseline" / "train.rc").exists():
+                saw_incremental = True
+                assert json.loads(points[0]) == {"epoch": 1, "metric": 0.1}
+                break
+        time.sleep(0.5)
+    assert saw_incremental, "no incremental curve point observed mid-training"
+
+    # the finalizer finishes the baseline on its own
+    assert _wait_for(art / "baseline" / "train_final.json", timeout_s=60), \
+        (art / "baseline" / "finalizer.log").read_text(encoding="utf-8")[-2000:]
+    final = _train_final(art)
+    assert final["status"] == "done" and final["rc"] == 0 and final["stage"] == "done"
+
+    # rendered at FULL epochs (fairness: stop-at-k happens downstream, never
+    # here) — the fixture template consumes the epoch count via `seq 1 N`
+    rendered = (art / "baseline" / "train.rendered.sh").read_text(encoding="utf-8")
+    assert "seq 1 2" in rendered
+
+    # accuracy anchors carry the value-level budget fingerprint
+    full_acc = json.loads((art / "baseline" / "baseline_full_acc.json").read_text(
+        encoding="utf-8"))
+    assert full_acc["baseline_full_acc"] == 0.9
+    assert full_acc["full_train_budget"] == {"epochs": 2, "seed": 0,
+                                             "data": {"dataset_knob": None,
+                                                      "data_value": None}}
+    k_acc = json.loads((art / "baseline" / "baseline_k_acc.json").read_text(
+        encoding="utf-8"))
+    assert k_acc["baseline_k_acc"] == 0.9 and k_acc["k"] == 1
+    assert k_acc["full_train_budget"] == full_acc["full_train_budget"]
+
+    # finalizer.log: every line starts ISO8601 UTC; heartbeat + stage lines
+    lines = (art / "baseline" / "finalizer.log").read_text(
+        encoding="utf-8").splitlines()
+    assert lines
+    iso = __import__("re").compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z ")
+    assert all(iso.match(line) for line in lines)
+    assert any("alive curve_points=" in line for line in lines)
+    assert any("stage=final_check" in line for line in lines)
+
+    # final curve: the full two-epoch curve (3 lines would mean re-parse drift)
+    curve = (art / "baseline" / "baseline_metrics.jsonl").read_text(
+        encoding="utf-8").splitlines()
+    assert len(curve) == 2
+    assert json.loads(curve[-1]) == {"epoch": 2, "metric": 0.2}
+
+    # re-entry: chain re-invocation with a fresh anchor is a clean executed
+    proc2 = _run_baseline_chain(art)
+    assert proc2.returncode == 0, proc2.stderr
+    assert json.loads(proc2.stdout)["status"] == "executed"
+
+
+def test_baseline_chain_running_until_business_logic_lands(tmp_path: Path):
+    """business_logic.md is a HARD precondition of executed: absent -> the
+    agent-internal running line; once on disk (and the finalizer terminal),
+    a re-invocation emits executed."""
+    art = _baseline_ws(tmp_path, full_epochs=1, with_business_logic=False)
+    proc = _run_baseline_chain(art)
+    payload = json.loads(proc.stdout)
+    assert payload["status"] == "running"
+    assert "business_logic.md not yet on disk" in payload["error"]
+
+    (art / "baseline" / "business_logic.md").write_text(_BL_MD, encoding="utf-8")
+    assert _wait_for(art / "baseline" / "train_final.json", timeout_s=60)
+    proc2 = _run_baseline_chain(art)
+    assert proc2.returncode == 0, proc2.stderr
+    assert json.loads(proc2.stdout)["status"] == "executed"
+
+
+def test_baseline_chain_rejects_stale_full_acc_fingerprint(tmp_path: Path):
+    """verify_anchor_budget paradigm, v4 form: a done train_final whose
+    baseline_full_acc.json was recorded under a DIFFERENT full_train_budget
+    fails loud (never silently reused), with rebuild guidance."""
+    art = _baseline_ws(tmp_path, full_epochs=1)
+    _run_baseline_chain(art)   # launch; the finalizer delivers the terminal state
+    assert _wait_for(art / "baseline" / "train_final.json", timeout_s=60)
+    # rebuild the budget since the anchor was recorded (simulating a
+    # contract-stage re-run with a different epoch cap)
+    contracts = json.loads((art / "contracts.json").read_text(encoding="utf-8"))
+    contracts["full_train_budget"]["epochs"] = 5
+    (art / "contracts.json").write_text(json.dumps(contracts), encoding="utf-8")
+    proc = _run_baseline_chain(art)
+    assert proc.returncode == 1
+    payload = json.loads(proc.stdout)
+    assert payload["status"] == "failed"
+    assert payload["error"].startswith("baseline step 6:")
+    assert "stale full-training anchor" in payload["error"]
+    # never auto-deleted: rebuilding is a deliberate action
+    assert (art / "baseline" / "baseline_full_acc.json").is_file()
+
+
+def test_baseline_chain_final_check_failure_points_at_admission_clause(tmp_path: Path):
+    """A training that runs fewer epochs than rendered (the early-stopping
+    breach) is a final_check FAILURE whose message points at the admission
+    clause — never a silent partial comparison."""
+    art = _baseline_ws(
+        tmp_path, full_epochs=2, ckpt_per_epoch=False,
+        train_body='echo "epoch 1 loss=0.1"\ntouch \'<<out_dir>>/model.pth\'\n')
+    _run_baseline_chain(art)   # timing-dependent first line; terminal state below is what counts
+    assert _wait_for(art / "baseline" / "train_final.json", timeout_s=60)
+    final = _train_final(art)
+    assert final["status"] == "failed"
+    assert final["stage"] == "final_check"
+    assert "训练须按给定轮数精确执行" in final.get("message", "")
+
+    proc2 = _run_baseline_chain(art)
     assert proc2.returncode == 1
-    payload2 = json.loads(proc2.stdout)
-    assert set(payload2) == schema_fields
-    assert payload2["status"] == "failed"
-    assert payload2["error"].startswith("baseline step ")
-    assert payload2["profile_dir"] == ""          # product not produced
-    assert payload2["makespan_cycles"] == 0
-    assert "base/profile/" not in payload2["generated_artifacts"]
+    payload = json.loads(proc2.stdout)
+    assert payload["status"] == "failed"
+    assert "baseline step 6" in payload["error"]
+    assert "final_check" in payload["error"]
+    assert "训练须按给定轮数精确执行" in payload["error"]
+    # no anchors from a failed finalization
+    assert not (art / "baseline" / "baseline_full_acc.json").exists()
 
 
-def test_baseline_chain_worker_logs_are_per_attempt(tmp_path: Path):
-    """F1 (E2E round 3): a re-detached worker must never overwrite the previous
-    attempt's log — the first-attempt failure scene stays diagnosable."""
-    budget = {"epochs": 1, "dataset_knob": "--limit", "data_value": 2000,
-              "max_steps": 500, "seed": 0}
-    art = _baseline_workspace(tmp_path / "detach", anchor_budget=budget)
-    (art / "baseline" / "baseline_proxy_acc.json").unlink()  # force step 6
+def test_baseline_chain_worker_failure_recorded_as_train_stage(tmp_path: Path):
+    art = _baseline_ws(
+        tmp_path, full_epochs=1,
+        train_body='echo "epoch 1 loss=0.1"\ntouch \'<<out_dir>>/model.pth\'\nexit 3\n')
+    _run_baseline_chain(art)
+    assert _wait_for(art / "baseline" / "train_final.json", timeout_s=60)
+    final = _train_final(art)
+    assert final["status"] == "failed" and final["stage"] == "train"
+    assert final["rc"] == 3
+
+
+def test_baseline_chain_relaunches_crashed_training_with_per_attempt_logs(tmp_path: Path):
+    """A training group killed without an rc file (crash scene) is re-launched
+    by the finalizer (<= 3 attempts), each attempt logging to its OWN file;
+    the final state is still a clean done."""
+    art = _baseline_ws(tmp_path, full_epochs=1)
+    proc = _run_baseline_chain(art)
+    assert proc.returncode == 0, proc.stderr
+
+    # crash the training group behind the finalizer's back (no rc written)
+    train_pid = int((art / "baseline" / "train.pid").read_text(encoding="utf-8"))
+    subprocess.run(["kill", "-KILL", f"-{train_pid}"], capture_output=True)
+
+    assert _wait_for(art / "baseline" / "train_final.json", timeout_s=60), \
+        (art / "baseline" / "finalizer.log").read_text(encoding="utf-8")[-2000:]
+    final = _train_final(art)
+    assert final["status"] == "done"
+    attempts = int((art / "baseline" / ".train_attempts").read_text(
+        encoding="utf-8").strip())
+    assert attempts == 2                                   # crash + relaunch
+    assert (art / "baseline" / "train.attempt1.log").is_file()
+    assert (art / "baseline" / "train.attempt2.log").is_file()
+    # the curve comes from the CURRENT attempt (attempt 2), re-derived whole
+    curve = (art / "baseline" / "baseline_metrics.jsonl").read_text(
+        encoding="utf-8").splitlines()
+    assert len(curve) == 1 and json.loads(curve[0])["epoch"] == 1
+
+
+def test_check_business_logic_gate(tmp_path: Path):
+    """The five-section + sentinel gate: the fixture document passes; each
+    violation class (missing section, empty section, wrong sentinel) fails."""
+    art = tmp_path / "art"
+    (art / "baseline").mkdir(parents=True)
+    doc = art / "baseline" / "business_logic.md"
+    doc.write_text(_BL_MD, encoding="utf-8")
     env = dict(os.environ)
     env["ORCA_ARTIFACTS_DIR"] = str(art)
-    proc = subprocess.run(
-        ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5", "--seed", "0",
-         "--poll-max-secs", "0"],
-        capture_output=True, text=True, timeout=120, env=env)
-    assert proc.returncode in (0, 1)
-    # poll window 0: this invocation returns right after the detach — whether
-    # it reports "running" or the fast-crashing fixture worker's "failed" is a
-    # race; both prove the detach happened. The pinned contract is the
-    # per-attempt log naming.
-    payload = json.loads(proc.stdout)
-    assert payload["status"] in ("running", "failed")
-    stamps = art / "baseline" / ".stamps" / "step6"
-    assert (stamps / "attempts").read_text(encoding="utf-8").strip() == "1"
-    assert (stamps / "train_worker.attempt1.log").is_file()  # per-attempt name in use
+    sh = _REPO / "workflows" / "agents" / "po_baseline" / "scripts" / "check_business_logic.sh"
+
+    def run():
+        return subprocess.run(["bash", str(sh)], capture_output=True, text=True,
+                              timeout=30, env=env)
+
+    assert run().returncode == 0
+
+    # missing section
+    doc.write_text(_BL_MD.replace("## 训练目标与指标方向\nacc higher\n", ""),
+                   encoding="utf-8")
+    proc = run()
+    assert proc.returncode == 1
+    assert "训练目标与指标方向" in proc.stderr
+
+    # empty section (bare heading, no body)
+    doc.write_text(_BL_MD.replace("per module", ""), encoding="utf-8")
+    proc = run()
+    assert proc.returncode == 1
+    assert "逐模块职责与物理意义" in proc.stderr
+
+    # wrong sentinel (document not authored by the subagent)
+    doc.write_text("no sentinel\n" + _BL_MD, encoding="utf-8")
+    proc = run()
+    assert proc.returncode == 1
+    assert "sentinel" in proc.stderr
+
+    # absent document
+    doc.unlink()
+    proc = run()
+    assert proc.returncode == 1
+    assert "not found" in proc.stderr
 
 
 # ── po_flatten reuse gate: fresh_start wipes the whole reusable workspace ─────
@@ -2073,3 +2337,175 @@ def test_push_curves_ack_timeout_never_hangs(tmp_path: Path):
     assert not (art / ".chart_push.log").exists()  # failed push -> no audit
     assert proc.stderr                             # ...but visible on stderr
     thread.join(timeout=10)
+
+
+# ── run_latency_recheck (D-V4-10): v3.5 batch-verify semantics, zero drift ───
+
+_RECHECK_SH = _REPO / "workflows" / "agents" / "po_propose" / "scripts" / "run_latency_recheck.sh"
+
+# CALIBRATED expectations (the v3.5 reference script produced byte-identical
+# values on this exact fixture; regenerate alongside any torch/onnx/profiler
+# upgrade): base (GELU tiny) = 712 cycles, variant (ReLU tiny) = 568.
+_T8_OP_DELTA = {"Add": -1, "Div": -1, "Erf": -1, "Mul": -2, "Relu": 1}
+_T8_PREDICTED = -144
+_T8_PASS_VERDICT = {
+    "vid": "r1-01", "round": 1, "structural_check": "pass",
+    "makespan_cycles": 568, "base_makespan_cycles": 712,
+    "improvement_cycles": 144, "required_improvement_cycles": 100,
+    "pred_actual_ratio": 1.0, "latency_gate": "pass",
+    "predicted_delta_cycles": -144, "outcome": "latency_pass",
+}
+_T8_MISMATCH_VERDICT = {
+    "vid": "r1-02", "round": 1, "structural_check": "fail",
+    "mismatch_layers": ["graph: ops Add,Div,Erf,Mul,Relu"],
+    "makespan_cycles": None, "base_makespan_cycles": None,
+    "improvement_cycles": None, "required_improvement_cycles": None,
+    "pred_actual_ratio": None, "latency_gate": None,
+    "predicted_delta_cycles": -144, "outcome": "structural_mismatch",
+}
+
+
+def _recheck_workspace(tmp_path: Path) -> Path:
+    """GELU->ReLU variant fixture: one variant whose declaration matches the
+    real onnx graphs (latency-pass path) and one declaring an empty op_delta
+    (graph-layer structural-mismatch path)."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("onnx")
+    import placeholder_profiler  # noqa: E402
+
+    art = tmp_path / "art"
+    (art / "scripts").mkdir(parents=True)
+    for src in ("diff_check.py", "history_lib.py", "emit_result.py",
+                "placeholder_profiler.py"):
+        shutil.copy(_SCRIPTS / src, art / "scripts" / src)
+
+    class Tiny(torch.nn.Module):
+        def __init__(self, act):
+            super().__init__()
+            self.fc1 = torch.nn.Linear(64, 64)
+            self.act = act
+            self.fc2 = torch.nn.Linear(64, 64)
+
+        def forward(self, x):
+            return self.fc2(self.act(self.fc1(x)))
+
+    def export(model, path):
+        model.eval()
+        torch.onnx.export(model, torch.randn(1, 64), str(path),
+                          input_names=["x"], output_names=["out"],
+                          opset_version=17, do_constant_folding=True)
+
+    torch.manual_seed(0)
+    (art / "base").mkdir()
+    export(Tiny(torch.nn.GELU()), art / "base" / "model.onnx")
+    base_ms = placeholder_profiler.profile(
+        art / "base" / "model.onnx", art / "base" / "profile")["makespan_cycles"]
+    # calibration guard: if the pricing ever drifts, the hardcoded verdicts
+    # above are void -> fail loud with the recalibration hint
+    assert base_ms == 712, (
+        f"calibration drift: base makespan {base_ms} != 712 — regenerate the "
+        "T8 expectations (run the fixture once against the reference script)")
+
+    (art / "shadow" / "pkg").mkdir(parents=True)
+    (art / "shadow" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    hist = art / "history.jsonl"
+    for seq, vid in enumerate(("r1-01", "r1-02"), 1):
+        vdir = art / "variants" / vid
+        (vdir / "onnx").mkdir(parents=True)
+        torch.manual_seed(0)
+        export(Tiny(torch.nn.ReLU()), vdir / "onnx" / "model.onnx")
+        shutil.copytree(art / "shadow", vdir / "shadow")
+        declared = _T8_OP_DELTA if vid == "r1-01" else {}
+        (vdir / "declaration.json").write_text(json.dumps({
+            "vid": vid, "edited_files": [], "op_delta": declared,
+            "predicted_delta_cycles": _T8_PREDICTED}), encoding="utf-8")
+        (vdir / "DONE").write_text("", encoding="utf-8")
+        history_lib.append_implemented(
+            hist, vid, round=1, seq=seq, parent_vid=None,
+            change_sig=f"activation:gelu->relu:{vid}", probe_epochs=1,
+            probe_max_steps=None, probe_data_value=None,
+            target_modules=["act"], predicted_delta_cycles=_T8_PREDICTED,
+            base_at_proposal={"vid": None, "makespan_cycles": 712})
+    (art / "rounds" / "001").mkdir(parents=True)
+    (art / "contracts.json").write_text(json.dumps(
+        {"interpreter": {"sys_executable": sys.executable}}), encoding="utf-8")
+    return art
+
+
+def _run_recheck(art: Path) -> subprocess.CompletedProcess:
+    env = dict(os.environ)
+    env["ORCA_ARTIFACTS_DIR"] = str(art)
+    return subprocess.run(
+        ["bash", str(_RECHECK_SH),
+         "--profiler", str(art / "scripts" / "placeholder_profiler.py"),
+         "--min-improvement", "100", "--min-pct", "1", "--min-ratio", "0.5"],
+        capture_output=True, text=True, timeout=300, env=env)
+
+
+def test_run_latency_recheck_migration_regression(tmp_path: Path):
+    """The batch verify semantics are IDENTICAL to the reference behavior on
+    the same fixture: two-layer declaration check, re-profile, gate math
+    (144 >= max(100, 1% x 712) with ratio 1.0), typed history rows, and the
+    calibrated verdict JSONs."""
+    art = _recheck_workspace(tmp_path)
+    proc = _run_recheck(art)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["status"] == "executed"
+    assert out["verdicts_count"] == 2
+    assert out["latency_pass_count"] == 1
+    assert out["summary"] == "2 verdicts [latency_pass=1 structural_mismatch=1]"
+    assert out["verdicts_path"] == str(art / "rounds" / "001" / "verdicts.jsonl")
+    assert json.loads((art / "variants" / "r1-01" / "verdict.json")
+                      .read_text(encoding="utf-8")) == _T8_PASS_VERDICT
+    assert json.loads((art / "variants" / "r1-02" / "verdict.json")
+                      .read_text(encoding="utf-8")) == _T8_MISMATCH_VERDICT
+
+    latest = history_lib.read_latest(art / "history.jsonl")
+    assert latest["r1-01"]["outcome"] == "latency_pass"
+    assert latest["r1-01"]["makespan_cycles"] == 568
+    assert latest["r1-01"]["pred_actual_ratio"] == 1.0
+    assert latest["r1-02"]["outcome"] == "structural_mismatch"
+    # verdicts.jsonl is an append-only audit stream of both verdicts
+    rows = [json.loads(line) for line in
+            (art / "rounds" / "001" / "verdicts.jsonl").read_text(
+                encoding="utf-8").splitlines() if line.strip()]
+    assert [r["vid"] for r in rows] == ["r1-01", "r1-02"]
+
+    # skip key = verdict.json presence: a re-run over settled verdicts is a no-op
+    proc2 = _run_recheck(art)
+    assert proc2.returncode == 0, proc2.stderr
+    assert json.loads(proc2.stdout)["verdicts_count"] == 0
+
+    # the repair-loop pin: deleting a rejected variant's verdict re-opens it
+    # for a FRESH recheck (the node does exactly this before re-verifying a
+    # repaired variant)
+    (art / "variants" / "r1-02" / "verdict.json").unlink()
+    proc3 = _run_recheck(art)
+    assert proc3.returncode == 0, proc3.stderr
+    out3 = json.loads(proc3.stdout)
+    assert out3["verdicts_count"] == 1
+    assert json.loads((art / "variants" / "r1-02" / "verdict.json")
+                      .read_text(encoding="utf-8")) == _T8_MISMATCH_VERDICT
+
+
+def test_run_latency_recheck_reconciles_missing_history_rows(tmp_path: Path):
+    """Crash window between the verdict write and the history append: the
+    reconciliation pass re-appends the L0 row from the verdict file."""
+    art = _recheck_workspace(tmp_path)
+    proc = _run_recheck(art)
+    assert proc.returncode == 0, proc.stderr
+
+    # strip the L0 fields, simulating the crash-before-append state
+    hist = art / "history.jsonl"
+    rows = [r for r in history_lib.read_rows(hist)
+            if "structural_check" not in r]
+    hist.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+    proc2 = _run_recheck(art)
+    assert proc2.returncode == 0, proc2.stderr
+    out2 = json.loads(proc2.stdout)
+    assert "reconciled" in out2["summary"]
+    latest = history_lib.read_latest(hist)
+    assert latest["r1-01"]["outcome"] == "latency_pass"
+    assert latest["r1-02"]["outcome"] == "structural_mismatch"
