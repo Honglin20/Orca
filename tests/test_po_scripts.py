@@ -1,20 +1,26 @@
 """test_po_scripts.py — unit tests for the prof-opt shared deterministic scripts.
 
 Covers: history_lib (builder field sets + R3 dedup branches + joint retry
-budget), gate_decide (all four decisions + hard cap + stall reset),
-advance_round (r1->r2 base/shadow double replacement + round-number
-idempotency key), analyze (fixture-driven hot patterns / pipeline breakdown /
-cost table + strict unknown-key failure), predict_delta (per-shape-class row
-pricing incl. the small-site E2E regression + params normalization
-idempotency), the placeholder profiler's delta-direction
+budget + v4 probe-row eval annotations), gate_decide (all four decisions +
+hard cap + stall reset), advance_round (r1->r2 base/shadow double replacement
++ round-number idempotency key), analyze (fixture-driven hot patterns /
+pipeline breakdown / cost table + strict unknown-key failure), predict_delta
+(per-shape-class row pricing incl. the small-site E2E regression + params
+normalization idempotency), the placeholder profiler's delta-direction
 guarantee (minimal GELU vs ReLU export), render_run (<<k>> token chain:
---set substitution incl. special-char values, builtin/header tokens, fail-loud
-on unreplaced tokens and non-identifier --set keys), the check_contracts
-gate (fairness-invariant token/budget enforcement incl. the knob/value
-symmetric pair), run_baseline_chain's step6 stale-anchor proxy-budget
-re-verification + schema-shaped stdout line (verbatim-forwardable), the
-po_flatten reuse gate's fresh_start whole-workspace wipe, and deploy_scripts'
-orphan-script retirement.
+--set substitution incl. special-char values, builtin/header tokens, the
+PYTHONUNBUFFERED header token, fail-loud on unreplaced tokens and
+non-identifier --set keys), the check_contracts gate (fairness-invariant
+token/budget enforcement incl. the knob/value symmetric pair),
+run_baseline_chain's step6 stale-anchor proxy-budget re-verification +
+schema-shaped stdout line (verbatim-forwardable), the po_flatten reuse gate's
+fresh_start whole-workspace wipe, and deploy_scripts' orphan-script
+retirement. v4 additions: gate_node syntax fix, metric_curve pinned-depth
+compare (--at-epoch + at_epoch/baseline_path outputs), stop_at_epoch
+(process-group kill at epoch k, actual-depth re-parse, idempotence, pid
+attribution, shared metric_curve parse), check_bottleneck (closed schema +
+referential order-preserving subset), push_curves (best-effort live-chart
+sidecar with 5s socket timeouts and an append-only audit log).
 """
 from __future__ import annotations
 
@@ -54,7 +60,9 @@ def test_history_builder_field_sets(tmp_path: Path):
         latency_gate="pass", pred_actual_ratio=0.9, outcome="latency_pass")
     history_lib.append_probe(
         hist, "r1-01", proxy_acc=0.83,
-        promote_gate="pass", outcome="promoted")
+        promote_gate="pass", outcome="promoted",
+        eval_skipped_no_epoch_ckpt=False, monitor_failed=False,
+        eval_acc=0.91, eval_failed=False)
 
     rows = history_lib.read_rows(hist)
     assert len(rows) == 3
@@ -792,40 +800,6 @@ def test_build_change_sig_is_canonical():
         build_change_sig("activation", "Erf-4", [])
 
 
-# ── perturb_ckpt ──────────────────────────────────────────────────────────────
-
-def test_perturb_ckpt_deterministic_and_container_aware(tmp_path: Path):
-    torch = pytest.importorskip("torch")
-    from perturb_ckpt import perturb
-
-    model = torch.nn.Linear(8, 8)
-    wrapped = {"model": model.state_dict(), "epoch": 3}
-    src = tmp_path / "base.pth"
-    torch.save(wrapped, str(src))
-
-    a = perturb(src, tmp_path / "a.pth", "model", num_tensors=1, noise=0.5, seed=11)
-    b = perturb(src, tmp_path / "b.pth", "model", num_tensors=1, noise=0.5, seed=11)
-    sd_a = torch.load(str(tmp_path / "a.pth"), map_location="cpu", weights_only=False)
-    sd_b = torch.load(str(tmp_path / "b.pth"), map_location="cpu", weights_only=False)
-    assert sd_a["epoch"] == 3                          # sibling untouched
-    assert torch.equal(sd_a["model"]["bias"], sd_b["model"]["bias"])   # deterministic seed
-    assert not torch.equal(sd_a["model"]["bias"], wrapped["model"]["bias"])
-    assert torch.equal(sd_a["model"]["weight"], wrapped["model"]["weight"])  # 1 of 2 keys
-    assert a["perturbed_keys"] == ["bias"]             # sorted key order, deterministic
-
-
-def test_perturb_ckpt_bare_container(tmp_path: Path):
-    torch = pytest.importorskip("torch")
-    from perturb_ckpt import perturb
-
-    src = tmp_path / "bare.pth"
-    torch.save(torch.nn.Linear(4, 4).state_dict(), str(src))
-    out = perturb(src, tmp_path / "p.pth", None, num_tensors=1, noise=1.0, seed=0)
-    assert out["perturbed_keys"] == ["bias"]
-    got = torch.load(str(tmp_path / "p.pth"), map_location="cpu", weights_only=False)
-    assert set(got) == {"bias", "weight"}
-
-
 # ── gen_export_onnx ───────────────────────────────────────────────────────────
 
 _CONTRACTS = {
@@ -941,6 +915,10 @@ def test_render_run_substitutes_body_builtin_and_header_tokens(tmp_path: Path):
     assert f"--data {art}/data" in rendered       # builtin <<artifacts>>
     assert "--out-dir contract_work/dryrun_train/" in rendered
     assert 'PY="python3"' in rendered             # builtin <<python>>, token gone
+    # D-V4-16: the header layer forces unbuffered python — the baseline
+    # finalizer re-parses the training log incrementally per poll cycle, and
+    # a block-buffered epoch line would starve the live curve
+    assert "export PYTHONUNBUFFERED=1" in rendered
     # header tokens rendered with the probed pathsep, none left anywhere
     assert "ORCA_SHADOW_DIR='/tmp/shadow'" in rendered
     assert "ORCA_RUN_PROJECT_ROOT='/tmp/proj'" in rendered
@@ -1443,6 +1421,9 @@ def test_deploy_scripts_retires_orphan_scripts(tmp_path: Path):
     (art / "orca_inject").mkdir(parents=True)
     (art / "scripts" / "make_variant_ckpt.py").write_text("# retired", encoding="utf-8")
     (art / "scripts" / "legacy_sweep.sh").write_text("# retired", encoding="utf-8")
+    # perturb_ckpt.py is a REAL v4 retirement (D-V4-14): a reused v3.5
+    # workspace must not keep executing it after the upgrade
+    (art / "scripts" / "perturb_ckpt.py").write_text("# retired in v4", encoding="utf-8")
     (art / "scripts" / "notes.txt").write_text("not a script", encoding="utf-8")
 
     env = {k: v for k, v in os.environ.items() if k != "ORCA_PYTHON"}
@@ -1453,9 +1434,10 @@ def test_deploy_scripts_retires_orphan_scripts(tmp_path: Path):
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)
     assert payload["scripts_dir"] == str(art / "scripts")
-    assert payload["orphans_removed"] == 2          # both .py and .sh globs swept
+    assert payload["orphans_removed"] == 3          # .py and .sh globs swept
     assert not (art / "scripts" / "make_variant_ckpt.py").exists()  # retired
     assert not (art / "scripts" / "legacy_sweep.sh").exists()       # retired
+    assert not (art / "scripts" / "perturb_ckpt.py").exists()       # retired in v4
     assert (art / "scripts" / "notes.txt").is_file()                # non-script kept
     # the deployed script set equals the shipped set
     shipped = sorted(p.name for p in _SCRIPTS.glob("*.[ps][yh]"))
@@ -1467,3 +1449,627 @@ def test_deploy_scripts_retires_orphan_scripts(tmp_path: Path):
                            text=True, timeout=60, env=env)
     assert proc2.returncode == 0, proc2.stderr
     assert json.loads(proc2.stdout)["orphans_removed"] == 0
+
+
+# ── v4 shared layer: gate_node syntax, metric_curve@k, stop_at_epoch ─────────
+
+def test_gate_node_sh_parses_after_quote_fix():
+    """D-V4-15: the --max-rounds argument had a transposed quote/paren
+    (`"$MAXR)"` instead of `"$MAXR")"`) — the whole wrapper failed bash -n,
+    so every gate decision fell to the hardcoded fallback emitter."""
+    proc = subprocess.run(["bash", "-n", str(_SCRIPTS / "gate_node.sh")],
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    src = (_SCRIPTS / "gate_node.sh").read_text(encoding="utf-8")
+    assert '--max-rounds "$MAXR")"' in src   # paren outside the quotes
+
+
+def test_metric_curve_compare_pins_depth_and_reports_anchor(tmp_path: Path):
+    import metric_curve as mc
+
+    def curve(path: Path, points):
+        path.write_text("".join(
+            json.dumps({"epoch": e, "metric": m}) + "\n" for e, m in points),
+            encoding="utf-8")
+
+    base = tmp_path / "base.jsonl"
+    cand = tmp_path / "cand.jsonl"
+    curve(base, [(1, 0.5), (2, 0.6), (3, 0.7)])
+    curve(cand, [(1, 0.5), (2, 0.55), (3, 0.8)])
+
+    # no --at-epoch: unchanged behavior (latest COMMON epoch) + the new
+    # unconditional fields (at_epoch mirrors the depth actually compared,
+    # baseline_path records the anchor; the v3.5 `epoch` key STAYS —
+    # additive change, existing consumers keep working)
+    out = mc.compare(mc.load_curve(base), mc.load_curve(cand),
+                     direction="higher_better", budget=0.2,
+                     baseline_path=str(base))
+    assert out["epoch"] == 3 and out["at_epoch"] == 3
+    assert out["epoch"] == out["at_epoch"]
+    assert out["baseline_path"] == str(base)
+    assert out["pass"] is True          # candidate BETTER at depth 3
+
+    # pinned depth: both curves have MORE points than k=2 — the comparison
+    # must happen AT 2, not silently slide to the deeper common epoch
+    at2 = mc.compare(mc.load_curve(base), mc.load_curve(cand),
+                     direction="higher_better", budget=0.01, at_epoch=2,
+                     baseline_path=str(base))
+    assert at2["at_epoch"] == 2 and at2["baseline_metric"] == 0.6
+    assert at2["normalized_loss"] == 0.6 - 0.55
+    assert at2["pass"] is False         # 0.05 > 0.01 budget at depth 2
+
+    # either curve lacking the k-th point fails loud — never a fallback to a
+    # shallower (unfair) depth
+    shallow = tmp_path / "shallow.jsonl"
+    curve(shallow, [(1, 0.5), (2, 0.55)])
+    with pytest.raises(mc.MetricCurveError, match="candidate curve lacks epoch 3"):
+        mc.compare(mc.load_curve(base), mc.load_curve(shallow),
+                   direction="higher_better", budget=0.1, at_epoch=3)
+    base_short = tmp_path / "base_short.jsonl"
+    curve(base_short, [(1, 0.5)])
+    with pytest.raises(mc.MetricCurveError, match="baseline curve lacks epoch 2"):
+        mc.compare(mc.load_curve(base_short), mc.load_curve(cand),
+                   direction="higher_better", budget=0.1, at_epoch=2)
+
+    # CLI surface: --at-epoch flows through, output keys as the probe asserts
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "metric_curve.py"), "compare",
+         "--baseline", str(base), "--candidate", str(cand),
+         "--direction", "higher_better", "--budget", "0.01",
+         "--at-epoch", "2"],
+        capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["at_epoch"] == 2 and payload["epoch"] == 2
+    assert payload["baseline_path"] == str(base)
+
+
+def test_history_probe_row_optional_eval_fields(tmp_path: Path):
+    """D-V4-18: probe rows carry optional eval/monitor annotations — written
+    only when passed, rejected when unknown, and NEVER part of the dedup
+    config fingerprint (an eval annotation must not reopen a same-config
+    probe_insufficient sig)."""
+    hist = tmp_path / "history.jsonl"
+    row = history_lib.append_probe(
+        hist, "r1-01", proxy_acc=0.83, promote_gate="pass", outcome="promoted",
+        eval_skipped_no_epoch_ckpt=True, monitor_failed=False,
+        eval_acc=0.9, eval_failed=False)
+    assert row["eval_skipped_no_epoch_ckpt"] is True
+    assert row["eval_acc"] == 0.9
+    stored = history_lib.read_rows(hist)[0]
+    assert set(stored) >= set(history_lib.PROBE_FIELDS)
+    assert stored["monitor_failed"] is False
+
+    # omitted optionals stay OUT of the row (old rows coexist harmlessly)
+    hist2 = tmp_path / "h2.jsonl"
+    history_lib.append_probe(hist2, "r1-01", proxy_acc=0.5,
+                             promote_gate="fail", outcome="probe_insufficient")
+    assert "eval_acc" not in history_lib.read_rows(hist2)[0]
+
+    # unknown fields still fail loud (closed field set)
+    with pytest.raises(TypeError):
+        history_lib.append_probe(hist2, "r1-02", proxy_acc=0.5,
+                                 promote_gate="fail", outcome="probe_insufficient",
+                                 eval_bonus=1)
+
+    # fingerprint unchanged: same probe config + eval annotations -> blocked
+    hist3 = tmp_path / "h3.jsonl"
+    _write_sig_history(hist3, "act:swap:m", ["probe_insufficient"],
+                       probe_max_steps=None, probe_data_value=None)
+    history_lib.append_probe(hist3, "r1-01", proxy_acc=0.4,
+                             promote_gate="fail", outcome="probe_insufficient",
+                             eval_failed=True)
+    state = history_lib.dedup_state(hist3, "act:swap:m", 1, None, None)
+    assert state["blocked"] is True
+    reopened = history_lib.dedup_state(hist3, "act:swap:m", 2, None, None)
+    assert reopened["blocked"] is False
+
+
+# ── stop_at_epoch (D-V4-3): stop-at-k process-group kill ──────────────────────
+
+_STOP_SH = _SCRIPTS / "stop_at_epoch.sh"
+
+
+def _stop_ws(tmp_path: Path, *, pattern: str | None = None) -> Path:
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True)
+    rule = {"kind": "stdout_regex",
+            "pattern": pattern or r"epoch (?P<epoch>\d+) loss=(?P<metric>[0-9.]+)"}
+    (ws / "contracts.json").write_text(json.dumps(
+        {"train": {"epoch_metric_extraction": rule}}), encoding="utf-8")
+    return ws
+
+
+def _write_worker(ws: Path, body: str) -> Path:
+    worker = ws / "worker.py"
+    worker.write_text(body, encoding="utf-8")
+    return worker
+
+
+# the wrapper form the probe node pins: group leader writes pid/rc and does
+# NOT exec (pid/rc each have their own writer); start_new_session = setsid
+def _launch_worker(ws: Path, worker: Path, log: Path):
+    pid, rc = ws / "pid", ws / "rc"
+    return subprocess.Popen(
+        ["bash", "-c",
+         f'echo $$ > "{pid}"; python3 "{worker}" "{log}"; echo $? > "{rc}"'],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True)
+
+
+def _kill_group(ws: Path):
+    pid_file = ws / "pid"
+    if pid_file.is_file():
+        pid = pid_file.read_text(encoding="utf-8").strip()
+        if pid.isdigit():
+            subprocess.run(["kill", "-KILL", f"-{pid}"], capture_output=True)
+
+
+def _run_stop(ws: Path, log: Path, stop_epoch: int, *extra: str):
+    return subprocess.run(
+        ["bash", str(_STOP_SH), "--log", str(log),
+         "--contract", str(ws / "contracts.json"),
+         "--stop-epoch", str(stop_epoch), "--pid-file", str(ws / "pid"),
+         *extra],
+        capture_output=True, text=True, timeout=60)
+
+
+def test_stop_at_epoch_kills_group_and_reparses_actual_depth(tmp_path: Path):
+    """The core kill protocol: TERM -> graceful handler writes MORE epochs ->
+    the frozen-log re-parse reports the ACTUAL trained depth (3), never the
+    stop epoch (1) — understating the comparison depth is the false-reject
+    bug D-V4-3 exists to prevent."""
+    ws = _stop_ws(tmp_path)
+    log = ws / "train.log"
+    worker = _write_worker(ws, f'''
+import signal, sys, time
+def w(line):
+    with open({str(log)!r}, "a") as fh:
+        fh.write(line)
+w("epoch 1 loss=0.5\\n")
+def on_term(signum, frame):
+    w("epoch 2 loss=0.45\\n")
+    w("epoch 3 loss=0.40\\n")
+    sys.exit(0)
+signal.signal(signal.SIGTERM, on_term)
+time.sleep(120)
+''')
+    _launch_worker(ws, worker, log)
+    for _ in range(50):
+        if log.is_file() and "epoch 1" in log.read_text(encoding="utf-8"):
+            break
+        time.sleep(0.1)
+
+    proc = _run_stop(ws, log, 1, "--expect", "worker.py")
+    assert proc.returncode == 0, proc.stderr
+    status = json.loads(proc.stdout)
+    assert status["status"] == "killed"
+    assert status["stopped_at_epoch"] == 3    # actual parsed depth, NOT k=1
+    assert status["rc"] is None               # killed branch: rc stays null
+    on_disk = json.loads((ws / "stop_status.json").read_text(encoding="utf-8"))
+    assert on_disk == status
+
+    # idempotent: a second call replays the terminal record verbatim (never
+    # kills again — the group is gone, a reused pid must not be signalled)
+    proc2 = _run_stop(ws, log, 1)
+    assert proc2.returncode == 0, proc2.stderr
+    assert json.loads(proc2.stdout) == status
+
+
+def test_stop_at_epoch_escalates_to_kill_after_grace(tmp_path: Path):
+    """A TERM-immune worker survives the 10s grace -> KILL takes the group."""
+    ws = _stop_ws(tmp_path)
+    log = ws / "train.log"
+    worker = _write_worker(ws, f'''
+import signal, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with open({str(log)!r}, "a") as fh:
+    fh.write("epoch 1 loss=0.5\\n")
+time.sleep(300)
+''')
+    _launch_worker(ws, worker, log)
+    for _ in range(50):
+        if log.is_file() and "epoch 1" in log.read_text(encoding="utf-8"):
+            break
+        time.sleep(0.1)
+
+    started = time.monotonic()
+    proc = _run_stop(ws, log, 1, "--expect", "worker.py")
+    elapsed = time.monotonic() - started
+    assert proc.returncode == 0, proc.stderr
+    status = json.loads(proc.stdout)
+    assert status["status"] == "killed"
+    assert status["stopped_at_epoch"] == 1
+    assert elapsed >= 10          # the grace window really elapsed
+    assert elapsed < 45           # ...but KILL ended it, no unbounded hang
+
+
+def test_stop_at_epoch_natural_done_records_rc_and_monitor_flag(tmp_path: Path):
+    """Worker finished on its own: natural_done + rc; epochs BEYOND k mark
+    monitor_failed (the kill never landed) while an exact-k finish does not."""
+    ws = _stop_ws(tmp_path)
+    log = ws / "train.log"
+    worker = _write_worker(ws, f'''
+with open({str(log)!r}, "a") as fh:
+    fh.write("epoch 1 loss=0.5\\nepoch 2 loss=0.45\\nepoch 3 loss=0.4\\n")
+''')
+    _launch_worker(ws, worker, log)
+    for _ in range(100):
+        if (ws / "rc").is_file():
+            break
+        time.sleep(0.1)
+
+    proc = _run_stop(ws, log, 1)
+    assert proc.returncode == 0, proc.stderr
+    status = json.loads(proc.stdout)
+    assert status["status"] == "natural_done"
+    assert status["stopped_at_epoch"] == 3
+    assert status["rc"] == 0
+    assert status["monitor_failed"] is True   # ran to 3, kill depth was 1
+
+    # exact-depth finish: 1 epoch trained, stop depth 1 -> no monitor flag
+    ws2 = _stop_ws(tmp_path / "exact")
+    log2 = ws2 / "train.log"
+    worker2 = _write_worker(ws2, f'''
+with open({str(log2)!r}, "a") as fh:
+    fh.write("epoch 1 loss=0.5\\n")
+''')
+    _launch_worker(ws2, worker2, log2)
+    for _ in range(100):
+        if (ws2 / "rc").is_file():
+            break
+        time.sleep(0.1)
+    proc2 = _run_stop(ws2, log2, 1)
+    status2 = json.loads(proc2.stdout)
+    assert status2["status"] == "natural_done"
+    assert status2["monitor_failed"] is False
+
+
+def test_stop_at_epoch_waits_below_depth_and_fails_loud_on_orphans(tmp_path: Path):
+    # below the stop depth + group alive -> waiting (caller keeps polling);
+    # a not-yet-created log is the same waiting state at epoch 0
+    ws = _stop_ws(tmp_path)
+    log = ws / "train.log"
+    worker = _write_worker(ws, f'''
+import time
+time.sleep(3)
+with open({str(log)!r}, "a") as fh:
+    fh.write("epoch 1 loss=0.5\\n")
+time.sleep(60)
+''')
+    _launch_worker(ws, worker, log)
+    time.sleep(0.5)
+    proc = _run_stop(ws, log, 1)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"status": "waiting", "max_epoch": 0}
+    _kill_group(ws)
+
+    # dead group without rc and without stop_status -> fail loud (crash
+    # scene, no terminal state to fabricate)
+    ws2 = _stop_ws(tmp_path / "crash")
+    log2 = ws2 / "train.log"
+    log2.write_text("epoch 1 loss=0.5\n", encoding="utf-8")
+    dead = subprocess.Popen(["bash", "-c", "exit 0"], start_new_session=True)
+    dead.wait()
+    (ws2 / "pid").write_text(str(dead.pid), encoding="utf-8")
+    proc2 = _run_stop(ws2, log2, 1)
+    assert proc2.returncode == 2
+    assert "without an rc file" in proc2.stderr
+
+
+def test_stop_at_epoch_refuses_foreign_pid(tmp_path: Path):
+    """/proc cmdline attribution: a pid file naming an unrelated live group
+    must NEVER be signalled (pid reuse / wrong pid file)."""
+    ws = _stop_ws(tmp_path)
+    log = ws / "train.log"
+    log.write_text("epoch 1 loss=0.5\n", encoding="utf-8")
+    foreign = subprocess.Popen(["sleep", "300"], start_new_session=True)
+    try:
+        (ws / "pid").write_text(str(foreign.pid), encoding="utf-8")
+        proc = _run_stop(ws, log, 1)
+        assert proc.returncode == 2
+        assert "refusing to kill" in proc.stderr
+        assert foreign.poll() is None      # the foreign process survived
+    finally:
+        foreign.kill()
+        foreign.wait()
+
+
+def test_stop_at_epoch_rejects_pattern_and_shares_metric_curve_surface(tmp_path: Path):
+    """E3-06: --pattern is not an argument (single source), and the epoch
+    parse shares metric_curve extract's implementation — same depths under
+    the same contract, same drift when the pattern changes, same error
+    surface when the contract lacks the pattern."""
+    # --pattern rejected with a pointed message
+    proc = subprocess.run(
+        ["bash", str(_STOP_SH), "--log", "x", "--contract", "c.json",
+         "--stop-epoch", "1", "--pid-file", "p", "--pattern", "p"],
+        capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 2
+    assert "--pattern is not accepted" in proc.stderr
+
+    log = tmp_path / "train.log"
+    log.write_text("epoch 1 loss=0.5\nepoch 2 loss=0.45\nepoch 3 loss=0.4\n"
+                   "acc 1 metric=0.9\n", encoding="utf-8")
+
+    def extract_depth(ws: Path) -> int:
+        out = ws / "extract.jsonl"
+        proc = subprocess.run(
+            [sys.executable, str(_SCRIPTS / "metric_curve.py"), "extract",
+             "--contract", str(ws / "contracts.json"), "--log", str(log),
+             "--out", str(out)],
+            capture_output=True, text=True, timeout=60)
+        assert proc.returncode == 0, proc.stderr
+        rows = [json.loads(line) for line in
+                out.read_text(encoding="utf-8").splitlines() if line.strip()]
+        return max(r["epoch"] for r in rows)
+
+    def stop_depth(ws: Path) -> int:
+        # finished worker (rc written) -> natural_done exposes the parsed depth
+        (ws / "rc").write_text("0", encoding="utf-8")
+        done = subprocess.Popen(["bash", "-c", "exit 0"], start_new_session=True)
+        done.wait()
+        (ws / "pid").write_text(str(done.pid), encoding="utf-8")
+        proc = _run_stop(ws, log, 1)
+        assert proc.returncode == 0, proc.stderr
+        return json.loads(proc.stdout)["stopped_at_epoch"]
+
+    ws = _stop_ws(tmp_path / "a")
+    assert extract_depth(ws) == 3 and stop_depth(ws) == 3
+
+    # pattern change: both sides switch TOGETHER (the extra 'acc' line only
+    # matches the second pattern — the shared parse must agree on 1 vs 3)
+    ws2 = _stop_ws(tmp_path / "b", pattern=r"acc (?P<epoch>\d+) metric=(?P<metric>[0-9.]+)")
+    assert extract_depth(ws2) == 1 and stop_depth(ws2) == 1
+
+    # contract lacking the pattern: the SAME error surface, both exit 2
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    (bad / "contracts.json").write_text(json.dumps({"train": {}}), encoding="utf-8")
+    proc_stop = _run_stop(bad, log, 1)
+    assert proc_stop.returncode == 2
+    proc_ext = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "metric_curve.py"), "extract",
+         "--contract", str(bad / "contracts.json"), "--log", str(log),
+         "--out", str(tmp_path / "x.jsonl")],
+        capture_output=True, text=True, timeout=60)
+    assert proc_ext.returncode == 2
+    surface = "lacks train.epoch_metric_extraction.pattern"
+    assert surface in proc_stop.stderr and surface in proc_ext.stderr
+
+
+# ── check_bottleneck (SPEC §5): closed schema + referential subset ───────────
+
+def _bneck_ws(tmp_path: Path) -> Path:
+    art = tmp_path / "art"
+    (art / "base").mkdir(parents=True)
+    (art / "base" / "bottleneck_report.json").write_text(json.dumps({
+        "makespan_cycles": 310, "hot_patterns": [
+            {"pattern_id": "P1", "op_type": "Erf", "count": 3,
+             "total_cycles": 150, "share": 0.5},
+            {"pattern_id": "P2", "op_type": "MatMul", "count": 1,
+             "total_cycles": 100, "share": 0.34},
+            {"pattern_id": "P3", "op_type": "Add", "count": 1,
+             "total_cycles": 40, "share": 0.14},
+        ]}), encoding="utf-8")
+    return art
+
+
+def _bneck_doc(art: Path, entries: list[dict], **extra) -> Path:
+    doc = {"base_report": "base/bottleneck_report.json",
+           "summary": "erf chain dominates the critical path",
+           "top_bottlenecks": entries}
+    doc.update(extra)
+    path = art / "base" / "bottleneck_analysis.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return path
+
+
+def _entry(pid: str, op: str, cycles: int, **over) -> dict:
+    entry = {"name": pid, "op_type": op, "cycles": cycles,
+             "analysis": "gelu-erf chain, swappable for relu"}
+    entry.update(over)
+    return entry
+
+
+def test_check_bottleneck_accepts_order_preserving_subset(tmp_path: Path):
+    """A SKIPPED selection is legal (subset, not prefix): P1+P3 in base rank
+    order, numbers referenced verbatim."""
+    from check_bottleneck import check
+    art = _bneck_ws(tmp_path)
+    path = _bneck_doc(art, [_entry("P1", "Erf", 150), _entry("P3", "Add", 40)])
+    result = check(path, art)
+    assert result["ok"] is True and result["entries"] == 2
+
+    # CLI surface (the node-side validation call form)
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "check_bottleneck.py"),
+         "--artifacts", str(art), "--analysis", str(path)],
+        capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["ok"] is True
+
+
+def test_check_bottleneck_rejects_drift_and_fabrication(tmp_path: Path):
+    from check_bottleneck import CheckError, check
+    art = _bneck_ws(tmp_path)
+
+    # rank-order violation: P3 before P1
+    with pytest.raises(CheckError, match="rank order"):
+        check(_bneck_doc(art, [_entry("P3", "Add", 40), _entry("P1", "Erf", 150)]), art)
+    # fabricated pattern_id
+    with pytest.raises(CheckError, match="not a pattern_id"):
+        check(_bneck_doc(art, [_entry("P9", "Erf", 150)]), art)
+    # referential drift: cycles re-typed by the analyst
+    with pytest.raises(CheckError, match="total_cycles"):
+        check(_bneck_doc(art, [_entry("P1", "Erf", 999)]), art)
+    with pytest.raises(CheckError, match="op_type"):
+        check(_bneck_doc(art, [_entry("P1", "Softmax", 150)]), art)
+    # cycles column must follow the base rank order (out-of-rank selection
+    # is rejected — with a desc-sorted base report this is also what keeps
+    # the analysis's cycle column non-increasing)
+    with pytest.raises(CheckError, match="rank order"):
+        check(_bneck_doc(art, [_entry("P3", "Add", 40), _entry("P2", "MatMul", 100)]), art)
+    # closed schema: unknown keys at both levels
+    with pytest.raises(CheckError, match="unknown top-level keys"):
+        check(_bneck_doc(art, [], fabricated="x"), art)
+    with pytest.raises(CheckError, match="unknown keys"):
+        check(_bneck_doc(art, [_entry("P1", "Erf", 150, confidence=0.9)]), art)
+    # missing base report
+    doc_path = _bneck_doc(art, [_entry("P1", "Erf", 150)])
+    (art / "base" / "bottleneck_report.json").unlink()
+    with pytest.raises(CheckError, match="base_report"):
+        check(doc_path, art)
+
+
+# ── push_curves (D-V4-2b): best-effort live-chart sidecar ─────────────────────
+
+def _push_env(art: Path, sock: Path | None) -> dict[str, str]:
+    env = dict(os.environ)
+    env["ORCA_ARTIFACTS_DIR"] = str(art)
+    env["ORCA_NODE"] = "po_baseline"
+    env["ORCA_SESSION_ID"] = "s-test"
+    if sock is not None:
+        env["ORCA_CHART_SOCK"] = str(sock)
+    else:
+        env.pop("ORCA_CHART_SOCK", None)
+    return env
+
+
+def _push(art: Path, sock: Path | None, *extra: str):
+    return subprocess.run(
+        [sys.executable, str(_SCRIPTS / "push_curves.py"), *extra],
+        capture_output=True, text=True, timeout=60, env=_push_env(art, sock))
+
+
+def _chart_server(sock_path: Path, replies: int, silent: bool = False):
+    """Tiny chart-daemon stub: records received payloads, acks each (or goes
+    silent to pin the ack-timeout path). Returns (thread, messages)."""
+    import socket
+    import threading
+
+    # AF_UNIX: the socket file survives close() — unlink before rebinding
+    sock_path.unlink(missing_ok=True)
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(sock_path))
+    srv.listen(4)
+    srv.settimeout(30)
+    messages: list[dict] = []
+
+    def serve():
+        for _ in range(replies):
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            with conn:
+                data = b""
+                while not data.endswith(b"\n"):
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                if data:
+                    messages.append(json.loads(data))
+                if not silent:
+                    conn.sendall(b'{"ok": true, "seq": 1}\n')
+        srv.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return thread, messages
+
+
+def _push_ws(tmp_path: Path) -> Path:
+    art = tmp_path / "art"
+    (art / "baseline").mkdir(parents=True)
+    (art / "variants" / "r1-01").mkdir(parents=True)
+    (art / "baseline" / "baseline_metrics.jsonl").write_text(
+        '{"epoch": 1, "metric": 0.4}\n{"epoch": 2, "metric": 0.5}\n',
+        encoding="utf-8")
+    (art / "variants" / "r1-01" / "metrics.jsonl").write_text(
+        '{"epoch": 1, "metric": 0.45}\n', encoding="utf-8")
+    return art
+
+
+def test_push_curves_missing_sock_is_silent_exit_zero(tmp_path: Path):
+    art = _push_ws(tmp_path)
+    proc = _push(art, None)
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+    assert not (art / ".chart_push.log").exists()   # no push -> no audit line
+
+
+def test_push_curves_pushes_one_chart_and_audits(tmp_path: Path):
+    art = _push_ws(tmp_path)
+    sock = tmp_path / "chart.sock"
+    thread, messages = _chart_server(sock, replies=1)
+
+    proc = _push(art, sock)
+    assert proc.returncode == 0, proc.stderr
+    thread.join(timeout=10)
+    assert len(messages) == 1
+    msg = messages[0]
+    payload = msg["payload"]
+    assert payload["chart_type"] == "line"
+    assert payload["x"] == "epoch" and payload["y"] == "metric"
+    assert payload["hue"] == "vid"
+    vids = {row["vid"] for row in payload["data"]}
+    assert vids == {"baseline", "r1-01"}
+
+    audit_lines = (art / ".chart_push.log").read_text(
+        encoding="utf-8").splitlines()
+    assert len(audit_lines) == 1
+    audit = json.loads(audit_lines[0])
+    assert audit["baseline_epochs"] == 2
+    assert {"vid": "baseline", "epochs": 2} in audit["curves"]
+    assert {"vid": "r1-01", "epochs": 1} in audit["curves"]
+    assert "ts" in audit
+
+    # idempotent: a second push carries the IDENTICAL title+data (front-end
+    # replacement semantics — the curve never duplicates), audit APPENDS
+    thread2, messages2 = _chart_server(sock, replies=1)
+    proc2 = _push(art, sock)
+    assert proc2.returncode == 0, proc2.stderr
+    thread2.join(timeout=10)
+    assert len(messages2) == 1
+    assert messages2[0]["payload"]["data"] == payload["data"]
+    assert messages2[0]["payload"]["title"] == payload["title"]
+    assert len((art / ".chart_push.log").read_text(
+        encoding="utf-8").splitlines()) == 2
+
+
+def test_push_curves_title_suffix_and_half_written_rows(tmp_path: Path):
+    art = _push_ws(tmp_path)
+    # half-written tail row (flush mid-write) must be skipped, not crash
+    with open(art / "baseline" / "baseline_metrics.jsonl", "a",
+              encoding="utf-8") as fh:
+        fh.write('{"epoch": 3, "met')
+    sock = tmp_path / "chart.sock"
+    thread, messages = _chart_server(sock, replies=1)
+    proc = _push(art, sock, "--title", "(final)")
+    assert proc.returncode == 0, proc.stderr
+    thread.join(timeout=10)
+    payload = messages[0]["payload"]
+    assert payload["title"].endswith("(final)")
+    baseline_rows = [r for r in payload["data"] if r["vid"] == "baseline"]
+    assert len(baseline_rows) == 2                    # truncated row skipped
+    audit = json.loads((art / ".chart_push.log").read_text(
+        encoding="utf-8").splitlines()[0])
+    assert audit["baseline_epochs"] == 2
+
+
+def test_push_curves_ack_timeout_never_hangs(tmp_path: Path):
+    """A chart daemon that accepts but never acks must be abandoned within
+    the 5s hard timeout — the sidecar exits 0, the worker never waits."""
+    art = _push_ws(tmp_path)
+    sock = tmp_path / "chart.sock"
+    thread, _ = _chart_server(sock, replies=1, silent=True)
+    started = time.monotonic()
+    proc = _push(art, sock)
+    elapsed = time.monotonic() - started
+    assert proc.returncode == 0, proc.stderr       # best-effort: never fatal
+    assert elapsed < 30
+    assert not (art / ".chart_push.log").exists()  # failed push -> no audit
+    assert proc.stderr                             # ...but visible on stderr
+    thread.join(timeout=10)

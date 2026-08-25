@@ -14,7 +14,7 @@ done
 
 rc=0
 OUT="$(python3 "$ART/scripts/gate_decide.py" --artifacts "$ART" \
-  --latency-reduction-min "$TARGET" --max-rounds "$MAXR)" || rc=$?
+  --latency-reduction-min "$TARGET" --max-rounds "$MAXR")" || rc=$?
 if [ "$rc" -eq 0 ]; then
   python3 "$ART/scripts/emit_result.py" --json "$OUT" --field 'error='
 else

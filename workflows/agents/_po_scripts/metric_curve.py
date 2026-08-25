@@ -3,8 +3,12 @@
 
 The script is deliberately independent of the training framework.  A workflow
 contract supplies a regular expression containing named groups ``epoch`` and
-``metric``.  Comparison is always at the latest *common* epoch, never at two
-different training budgets.
+``metric``.  Comparison is at the latest *common* epoch by default, never at
+two different training budgets; ``compare --at-epoch k`` pins the comparison
+depth to epoch k instead (either curve lacking the k-th point fails loud —
+comparing at two different depths is exactly the unfairness this tool exists
+to prevent). The emitted ``at_epoch`` always records the depth actually
+compared, and ``baseline_path`` records which curve anchored the comparison.
 """
 from __future__ import annotations
 
@@ -75,19 +79,35 @@ def load_curve(path: Path) -> list[dict[str, int | float]]:
 
 def compare(baseline: list[dict[str, int | float]],
             candidate: list[dict[str, int | float]],
-            *, direction: str, budget: float) -> dict[str, Any]:
+            *, direction: str, budget: float,
+            at_epoch: int | None = None,
+            baseline_path: str = "") -> dict[str, Any]:
     if direction not in {"higher_better", "lower_better"}:
         raise MetricCurveError(
             "direction must be higher_better or lower_better, got "
             f"{direction!r}")
     if budget < 0:
         raise MetricCurveError("accuracy budget must be >= 0")
+    if at_epoch is not None and at_epoch < 1:
+        raise MetricCurveError(f"--at-epoch must be >= 1, got {at_epoch}")
     base_epochs = {int(row["epoch"]): float(row["metric"]) for row in baseline}
     cand_epochs = {int(row["epoch"]): float(row["metric"]) for row in candidate}
     common = sorted(set(base_epochs) & set(cand_epochs))
     if not common:
         raise MetricCurveError("baseline and candidate share no epoch")
-    epoch = common[-1]
+    if at_epoch is None:
+        epoch = common[-1]
+    else:
+        # pinned depth: BOTH curves must carry the k-th point — a missing
+        # point is a fail-loud contract breach, never a silent fallback to a
+        # shallower (unfair) comparison depth
+        for name, curve in (("baseline", base_epochs), ("candidate", cand_epochs)):
+            if at_epoch not in curve:
+                raise MetricCurveError(
+                    f"{name} curve lacks epoch {at_epoch} "
+                    f"(has up to {max(curve)}) — pinned-depth comparison "
+                    f"cannot proceed at a different depth")
+        epoch = at_epoch
     base = base_epochs[epoch]
     cand = cand_epochs[epoch]
     # Positive loss always means the candidate is worse after normalization.
@@ -95,6 +115,8 @@ def compare(baseline: list[dict[str, int | float]],
     passed = loss <= budget
     return {
         "epoch": epoch,
+        "at_epoch": epoch,          # depth actually compared (== epoch)
+        "baseline_path": baseline_path,  # which curve anchored the comparison
         "baseline_metric": base,
         "candidate_metric": cand,
         "normalized_loss": loss,
@@ -134,6 +156,10 @@ def main() -> int:
     cmp.add_argument("--direction", required=True,
                      choices=["higher_better", "lower_better"])
     cmp.add_argument("--budget", required=True, type=float)
+    cmp.add_argument("--at-epoch", type=int,
+                     help="pin the comparison depth to epoch k (either curve "
+                          "lacking the k-th point fails loud); default = "
+                          "latest common epoch")
 
     ns = ap.parse_args()
     try:
@@ -156,7 +182,9 @@ def main() -> int:
         else:
             result = compare(load_curve(Path(ns.baseline)),
                              load_curve(Path(ns.candidate)),
-                             direction=ns.direction, budget=ns.budget)
+                             direction=ns.direction, budget=ns.budget,
+                             at_epoch=ns.at_epoch,
+                             baseline_path=str(ns.baseline))
             print(json.dumps(result, sort_keys=True))
         return 0
     except MetricCurveError as exc:

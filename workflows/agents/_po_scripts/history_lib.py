@@ -19,6 +19,9 @@ Dedup side (mechanical rules — no LLM judgement):
     probe_insufficient is retryable iff the proxy config (probe_epochs /
                       probe_max_steps / probe_data_value) differs from the
                       current config — the same fields the proxy budget pins.
+    v4 probe rows carry optional outcome annotations (eval_acc /
+                      eval_failed / eval_skipped_no_epoch_ckpt /
+                      monitor_failed); they never enter the config fingerprint.
 """
 from __future__ import annotations
 
@@ -39,7 +42,17 @@ LATENCY_FIELDS = (
     "structural_check", "makespan_cycles", "latency_gate",
     "pred_actual_ratio", "outcome",
 )
-PROBE_FIELDS = ("proxy_acc", "promote_gate", "outcome")
+# probe-row optional annotations (v4): written only when applicable, read via
+# .get() — old rows without them coexist harmlessly. They are OUTCOME
+# annotations, deliberately NOT part of the dedup config fingerprint (which
+# stays probe_epochs / probe_max_steps / probe_data_value from the IMPL row).
+PROBE_FIELDS = (
+    "proxy_acc", "promote_gate", "outcome",
+    "eval_skipped_no_epoch_ckpt",  # true: no per-epoch ckpt -> curve-only judgment
+    "monitor_failed",              # true: worker ran past k naturally (kill missed)
+    "eval_acc",                    # eval@k metric (ckpt-addressable projects only)
+    "eval_failed",                 # true: k-th ckpt eval failed to load (degraded)
+)
 
 PERMANENT_OUTCOMES = frozenset({"promoted", "unsupported_op"})
 JOINT_RETRY_OUTCOMES = frozenset({"structural_mismatch", "variant_broken"})
@@ -143,12 +156,31 @@ def append_latency(path: str | Path, vid: str, *, structural_check: str,
 
 
 def append_probe(path: str | Path, vid: str, *, proxy_acc: float | None,
-                 promote_gate: str, outcome: str) -> dict:
-    """Proxy row (po_probe). outcome: promoted | probe_insufficient."""
-    fields = {
+                 promote_gate: str, outcome: str,
+                 eval_skipped_no_epoch_ckpt: bool | None = None,
+                 monitor_failed: bool | None = None,
+                 eval_acc: float | None = None,
+                 eval_failed: bool | None = None) -> dict:
+    """Proxy row (po_probe). outcome: promoted | probe_insufficient.
+
+    proxy_acc is ALWAYS the training-curve metric at epoch k (the v4 probe
+    comparison anchor); a checkpoint-eval metric, when the project has
+    addressable per-epoch ckpts, goes to eval_acc instead. The optional
+    annotations are written only when passed (None = omitted from the row):
+    eval_skipped_no_epoch_ckpt / monitor_failed / eval_failed explain a
+    degraded or suspicious judgment path; unknown fields still fail loud."""
+    fields: dict[str, Any] = {
         "proxy_acc": proxy_acc,
         "promote_gate": promote_gate, "outcome": outcome,
     }
+    if eval_skipped_no_epoch_ckpt is not None:
+        fields["eval_skipped_no_epoch_ckpt"] = eval_skipped_no_epoch_ckpt
+    if monitor_failed is not None:
+        fields["monitor_failed"] = monitor_failed
+    if eval_acc is not None:
+        fields["eval_acc"] = eval_acc
+    if eval_failed is not None:
+        fields["eval_failed"] = eval_failed
     return _append(Path(path), vid, fields, PROBE_FIELDS, "append_probe")
 
 
