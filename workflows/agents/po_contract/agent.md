@@ -52,8 +52,8 @@ gen_export_onnx / emit_result) — do NOT reference workflow source paths.
   container_key/dummy_inputs), `project_manifest.md` (entry points, metric
   direction, data environment), `shadow/` + `shadow_pkgs`.
 - `{{ inputs.project_root }}` (read-only), `{{ inputs.probe_epochs }}`
-  (empty = derive), `{{ inputs.seed }}`. The proxy step cap is a fixed
-  constant (500), not a user input.
+  (empty = derive), `{{ inputs.full_train_epoch_cap }}` (empty = uncapped),
+  `{{ inputs.seed }}`.
 
 ## Path Handling Iron Rules
 

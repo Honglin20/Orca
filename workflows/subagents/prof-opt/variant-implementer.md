@@ -55,7 +55,11 @@ The caller will provide:
    path handling in any helper: `pathlib`. Re-read the changed region and
    confirm every declared site was applied.
 4. **Write `declaration.json`** — the machine-checked mirror of the
-   proposal, proposal fields copied VERBATIM:
+   proposal: the identity fields (`change_sig` / `lever` / `change_spec` /
+   `target_modules` / `op_delta` / `edited_files` /
+   `predicted_delta_cycles` / `prediction_basis`) copied VERBATIM from the
+   proposal; `round` and `seq` DERIVED from the vid (`r{round}-{seq:02d}`),
+   never guessed:
    ```json
    {"vid": "r1-01", "round": 1, "seq": 1, "change_sig": "<verbatim>",
     "lever": "<verbatim>", "change_spec": "<verbatim>",

@@ -217,17 +217,19 @@ turn while it lives; only then run the recheck. Empty input (placeholder
 estimator, CPU-bound) → no wait.
 
 Run the recheck (thresholds EXPLICIT on the call line — the pinned gate
-math: improvement ≥ max(100 cycles, 1% × base) AND actual/predicted ≥ 0.5):
+math: improvement ≥ max(100 cycles, 1% × base) AND actual/predicted ≥ 0.5).
+The profiler argument is conditional: pass the user's real profiler only
+when the input is non-empty — with the empty input the script's own default
+(the deployed placeholder estimator) applies:
 
 ```bash
 bash "$ORCA_AGENT_RESOURCES/scripts/run_latency_recheck.sh" \
-  --profiler "{{ inputs.profile_script_path }}" \
+  $( [ -n "{{ inputs.profile_script_path }}" ] && printf '%q ' --profiler "{{ inputs.profile_script_path }}" ) \
   --min-improvement 100 --min-pct 1 --min-ratio 0.5
 ```
 
-(`--profiler` with the empty input defaults to the deployed placeholder
-estimator inside the script.) Its stdout is an INFO line (not the node
-output): `latency_pass_count` and `summary` feed this node's fields.
+Its stdout is an INFO line (not the node output): `latency_pass_count` and
+`summary` feed this node's fields.
 
 **Repair loop** (≤ 2 per variant, judged from `repair_trace.json`): a
 variant whose verdict is `structural_mismatch` or `latency_fail` →

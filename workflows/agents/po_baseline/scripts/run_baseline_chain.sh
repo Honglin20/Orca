@@ -262,6 +262,9 @@ FINALIZER_LOG="$TRAIN_DIR/finalizer.log"
 TRAIN_FINAL="$TRAIN_DIR/train_final.json"
 
 pid_alive_owned() { # pid_alive_owned <pidfile> <expect-substr>
+  # attribution check: the pid must be alive AND its /proc cmdline must
+  # reference the expected artifact (a reused pid from an unrelated process
+  # must never be mistaken for our worker — D-V4-2)
   local pidfile="$1" expect="$2" pid cmd
   [ -s "$pidfile" ] || return 1
   pid="$(cat "$pidfile" 2>/dev/null || echo 0)"
@@ -304,10 +307,10 @@ launch_full_train() { # render (idempotent) + wipe partial out-dir + detach wrap
   # means the wrapper ran — that is the finalizer's business now, not a
   # launch failure)
   for i in 1 2 3 4 5 6 7 8 9 10; do
-    { pid_alive_owned "$TRAIN_PID" "bash" || [ -s "$TRAIN_RC" ]; } && break
+    { pid_alive_owned "$TRAIN_PID" "train.rendered.sh" || [ -s "$TRAIN_RC" ]; } && break
     sleep 0.3
   done
-  { pid_alive_owned "$TRAIN_PID" "bash" || [ -s "$TRAIN_RC" ]; } \
+  { pid_alive_owned "$TRAIN_PID" "train.rendered.sh" || [ -s "$TRAIN_RC" ]; } \
     || { echo "FATAL: full-train wrapper did not come alive (see $TRAIN_DIR/wrapper.attempt${attempts}.log)" >&2; return 1; }
   echo "[chain] full-train detached (attempt $attempts, pid $(cat "$TRAIN_PID"), epochs=$FULL_EPOCHS seed=$FULL_SEED)" >&2
 }
@@ -329,7 +332,7 @@ launch_finalizer() { # detach this script's --finalizer mode (own session);
 }
 
 step_train_launch() {
-  if [ -f "$TRAIN_RC" ] || pid_alive_owned "$TRAIN_PID" "bash" || [ -f "$TRAIN_FINAL" ]; then
+  if [ -f "$TRAIN_RC" ] || pid_alive_owned "$TRAIN_PID" "train.rendered.sh" || [ -f "$TRAIN_FINAL" ]; then
     echo "[chain] step4 train launch: already launched (rc file, live pid, or terminal state present), skip" >&2
     return 0
   fi
@@ -432,7 +435,7 @@ finalizer_main() {
       fi
       break   # rc == 0 -> finalize chain below
     fi
-    if ! pid_alive_owned "$TRAIN_PID" "bash"; then
+    if ! pid_alive_owned "$TRAIN_PID" "train.rendered.sh"; then
       # died without an rc file: crash scene (kill -9 / OOM). Re-launch <= 3.
       relaunches=$((relaunches + 1))
       if [ "$relaunches" -gt 3 ]; then
@@ -446,23 +449,30 @@ finalizer_main() {
         write_train_final failed null relaunch_failed; exit 0; }
     fi
     incremental_curve
-    "$PY" "$ART/scripts/push_curves.py" --artifacts "$ART" >/dev/null 2>&1 || true
+    "$PY" "$ART/scripts/push_curves.py" --artifacts "$ART" \
+      >/dev/null 2>>"$TRAIN_DIR/.chart_push.err" || true
     fin_log "alive curve_points=$(curve_points)"
     sleep 10
   done
 
   # ── rc == 0: finalize chain (a stage line per step) ───────────────────────
   fin_log "stage=final_check expected_epochs=$FULL_EPOCHS"
+  # tmp + atomic replace (same write discipline as the incremental cycle —
+  # a concurrent curve reader never sees a half-written file)
   if ! "$PY" "$ART/scripts/metric_curve.py" extract \
       --contract "$ART/contracts.json" --log "$(train_attempt_log)" \
-      --out "$TRAIN_DIR/baseline_metrics.jsonl" \
-      --expected-epochs "$FULL_EPOCHS" >/dev/null 2>&1; then
+      --out "$TRAIN_DIR/.baseline_metrics.final.tmp" \
+      --expected-epochs "$FULL_EPOCHS" >/dev/null 2>&1 \
+      || ! mv -f "$TRAIN_DIR/.baseline_metrics.final.tmp" \
+                "$TRAIN_DIR/baseline_metrics.jsonl"; then
+    rm -f "$TRAIN_DIR/.baseline_metrics.final.tmp"
     fin_log "stage=final_check verdict=failed (actual epochs != rendered $FULL_EPOCHS)"
     write_train_final failed 0 final_check \
       "final check failed: the training log does not carry exactly the rendered $FULL_EPOCHS epochs — 训练须按给定轮数精确执行，自带 early-stopping 的项目不在 workflow 范围（准入条款见 contracts.json reason）"
     exit 0
   fi
-  "$PY" "$ART/scripts/push_curves.py" --artifacts "$ART" >/dev/null 2>&1 || true
+  "$PY" "$ART/scripts/push_curves.py" --artifacts "$ART" \
+    >/dev/null 2>>"$TRAIN_DIR/.chart_push.err" || true
 
   fin_log "stage=full_eval"
   local ckpt acc
@@ -477,7 +487,7 @@ finalizer_main() {
     write_train_final failed 0 full_eval; exit 0; }
   acc="$(extract_metric "$TRAIN_DIR/full_eval.log")" || {
     write_train_final failed 0 full_eval; exit 0; }
-  python3 - "$TRAIN_DIR/baseline_full_acc.json" "$acc" "$ckpt" <<'PY'
+  python3 - "$TRAIN_DIR/baseline_full_acc.json" "$acc" "$ckpt" <<'PY' || { write_train_final failed 0 full_eval; exit 0; }
 import json, os, sys, tempfile
 from pathlib import Path
 budget = json.loads(Path("contracts.json").read_text(encoding="utf-8"))["full_train_budget"]
@@ -503,7 +513,7 @@ PY
       write_train_final failed 0 k_eval; exit 0; }
     kacc="$(extract_metric "$TRAIN_DIR/k_eval.log")" || {
       write_train_final failed 0 k_eval; exit 0; }
-    python3 - "$TRAIN_DIR/baseline_k_acc.json" "$kacc" "$kckpt" "$PROBE_K" <<'PY'
+    python3 - "$TRAIN_DIR/baseline_k_acc.json" "$kacc" "$kckpt" "$PROBE_K" <<'PY' || { write_train_final failed 0 k_eval; exit 0; }
 import json, os, sys, tempfile
 from pathlib import Path
 budget = json.loads(Path("contracts.json").read_text(encoding="utf-8"))["full_train_budget"]
@@ -621,25 +631,36 @@ step_export || { fail_step=1; fail_err="shadow export failed"; }
   if [ -s "$ART/base/profile/profile_summary.json" ]; then
     S2=done; echo "[chain] step2 profile: product exists, skip" >&2
   elif [ -n "$PROFILE_SCRIPT" ]; then
-    # custom profiler = potentially long -> detached + polled (legacy mechanism)
+    # custom profiler = potentially long -> detached + polled (legacy
+    # mechanism). Re-entry guard: a LIVE worker (pid attribution-checked) is
+    # polled, never re-detached — a second worker would double the profile
+    # run and race the pid/rc files.
     rc=0
     if [ -f "$STAMPS/step2/rc" ]; then
       wrc="$(cat "$STAMPS/step2/rc")"
       [ "$wrc" -eq 0 ] || { fail_step=2; fail_err="profiling failed (worker logs: baseline/.stamps/step2/*.log)"; }
     else
       mkdir -p "$STAMPS/step2"
-      attempts="$(cat "$STAMPS/step2/attempts" 2>/dev/null || echo 0)"
-      attempts=$((attempts + 1)); echo "$attempts" > "$STAMPS/step2/attempts"
-      log="$STAMPS/step2/profile_worker.attempt${attempts}.log"
-      cmd="$(printf '%q ' bash "$SELF" --worker-step 2 --latency-reduction-min "$TARGET" --seed "$SEED")"
-      cmd="$cmd $(printf '%q ' --profile-script "$PROFILE_SCRIPT")"
-      setsid bash -c 'echo $$ > "$1"; shift; exec "$@"' \
-        bash "$STAMPS/step2/pid" $cmd </dev/null >>"$log" 2>&1 &
-      elapsed=0
-      while [ "$elapsed" -lt "$POLL_MAX_SECS" ]; do
-        [ -f "$STAMPS/step2/rc" ] && break
-        sleep 10; elapsed=$((elapsed + 10))
-      done
+      if pid_alive_owned "$STAMPS/step2/pid" "--worker-step"; then
+        elapsed=0
+        while [ "$elapsed" -lt "$POLL_MAX_SECS" ]; do
+          [ -f "$STAMPS/step2/rc" ] && break
+          sleep 10; elapsed=$((elapsed + 10))
+        done
+      else
+        attempts="$(cat "$STAMPS/step2/attempts" 2>/dev/null || echo 0)"
+        attempts=$((attempts + 1)); echo "$attempts" > "$STAMPS/step2/attempts"
+        log="$STAMPS/step2/profile_worker.attempt${attempts}.log"
+        cmd="$(printf '%q ' bash "$SELF" --worker-step 2 --latency-reduction-min "$TARGET" --seed "$SEED")"
+        cmd="$cmd $(printf '%q ' --profile-script "$PROFILE_SCRIPT")"
+        setsid bash -c 'echo $$ > "$1"; shift; exec "$@"' \
+          bash "$STAMPS/step2/pid" $cmd </dev/null >>"$log" 2>&1 &
+        elapsed=0
+        while [ "$elapsed" -lt "$POLL_MAX_SECS" ]; do
+          [ -f "$STAMPS/step2/rc" ] && break
+          sleep 10; elapsed=$((elapsed + 10))
+        done
+      fi
       if [ -f "$STAMPS/step2/rc" ]; then
         wrc="$(cat "$STAMPS/step2/rc")"
         [ "$wrc" -eq 0 ] || { fail_step=2; fail_err="profiling failed (worker logs: baseline/.stamps/step2/*.log)"; }
@@ -672,7 +693,7 @@ step_export || { fail_step=1; fail_err="shadow export failed"; }
       T_MSG="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("message",""))' "$TRAIN_FINAL")"
       fail_step=6; fail_err="baseline full training failed (train_final stage: $T_STAGE${T_MSG:+ — $T_MSG}; see baseline/finalizer.log)"
     fi
-  elif pid_alive_owned "$TRAIN_PID" "bash" && pid_alive_owned "$FINALIZER_PID" "--finalizer"; then
+  elif pid_alive_owned "$TRAIN_PID" "train.rendered.sh" && pid_alive_owned "$FINALIZER_PID" "--finalizer"; then
     # wait briefly for the train log to appear (interpreter startup latency)
     logwait=0
     while [ "$logwait" -lt 15 ]; do

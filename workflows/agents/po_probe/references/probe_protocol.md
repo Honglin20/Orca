@@ -129,11 +129,14 @@ payload; history is the ledger — after reconciliation they must agree.
    - **Retry budget**: `rc != 0` (failed training) or the script's hard
      errors (attribution refusal, crash scene) → read the log tail, fix
      ONLY by re-rendering with corrected parameter values (the heal
-     whitelist), wipe the partial out-dir, relaunch (attempt counter in
-     `probe_status.md`). After 2 failed retries → terminal
-     `probe_insufficient` (`proxy_acc=null`, `promote_gate="fail"`),
-     `max_retries_hit=true`, next survivor. Record heals under
-     `.po_probe_healed.txt`.
+     whitelist), wipe the PARTIAL CHECKPOINT ARTIFACTS the train contract's
+     output rule predicts under the out-dir (never the control files
+     `train.pid` / `rc` / `train.log` / `train.rendered.sh` — a from-scratch
+     relaunch re-creates the checkpoints, the control files must survive),
+     relaunch (attempt counter in `probe_status.md`). After 2 failed
+     retries → terminal `probe_insufficient` (`proxy_acc=null`,
+     `promote_gate="fail"`), `max_retries_hit=true`, next survivor. Record
+     heals under `.po_probe_healed.txt`.
    - **While waiting**: push the live curves each poll cycle (best-effort
      sidecar, never fatal):
      ```bash

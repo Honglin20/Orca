@@ -109,7 +109,8 @@ def append_implemented(path: str | Path, vid: str, *, round: int, seq: int,
                        predicted_delta_cycles: int,
                        base_at_proposal: dict,
                        implemented: bool = True) -> dict:
-    """First row of a vid (po_implement). outcome stays unset unless broken.
+    """First row of a vid (the proposal node's mechanical write after the
+    implementer subagent returns). outcome stays unset unless broken.
 
     The probe_* fields carry the proxy budget the variant trained under
     (verbatim from contracts.json proxy_budget) — they are the dedup config
@@ -133,8 +134,9 @@ def append_implemented(path: str | Path, vid: str, *, round: int, seq: int,
 
 def append_outcome(path: str | Path, vid: str, outcome: str) -> dict:
     """Terminal outcome emitted before any latency/probe stage ran
-    (po_implement pre-check failures: variant_broken /
-    structural_mismatch)."""
+    (implementation pre-check failures: variant_broken /
+    structural_mismatch — written by the proposal node right after the
+    implemented=False row)."""
     if outcome not in JOINT_RETRY_OUTCOMES:
         raise HistoryError(f"append_outcome only accepts {sorted(JOINT_RETRY_OUTCOMES)}, got {outcome!r}")
     return _append(Path(path), vid, {"outcome": outcome},
@@ -144,7 +146,8 @@ def append_outcome(path: str | Path, vid: str, outcome: str) -> dict:
 def append_latency(path: str | Path, vid: str, *, structural_check: str,
                    makespan_cycles: int | None, latency_gate: str | None,
                    pred_actual_ratio: float | None, outcome: str) -> dict:
-    """L0 row (po_verify). outcome: latency_pass (process) or one of the
+    """L0 row (the batch latency recheck inside the proposal node).
+    outcome: latency_pass (process) or one of the
     terminal L0 eliminations structural_mismatch / unsupported_op /
     latency_fail."""
     fields = {

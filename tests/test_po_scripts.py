@@ -1553,6 +1553,97 @@ def test_baseline_chain_relaunches_crashed_training_with_per_attempt_logs(tmp_pa
     assert len(curve) == 1 and json.loads(curve[0])["epoch"] == 1
 
 
+def test_baseline_chain_relaunch_budget_is_three(tmp_path: Path):
+    """Beyond 3 crash relaunches the finalizer gives up honestly:
+    train_final{failed, stage: relaunch_exhausted} — never an infinite
+    relaunch loop, never a fabricated terminal."""
+    art = _baseline_ws(
+        tmp_path, full_epochs=1,
+        train_body='echo "epoch 1 loss=0.1" & sleep 300\n'
+                   "touch '<<out_dir>>/model.pth'\n")
+
+    def crash_train():
+        pid_file = art / "baseline" / "train.pid"
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if pid_file.is_file():
+                pid = pid_file.read_text(encoding="utf-8").strip()
+                if pid.isdigit() and subprocess.run(
+                        ["kill", "-0", pid], capture_output=True).returncode == 0:
+                    subprocess.run(["kill", "-KILL", f"-{pid}"],
+                                   capture_output=True)
+                    return True
+            time.sleep(0.3)
+        return False
+
+    _run_baseline_chain(art)
+    # kill every relaunched attempt as it comes up (1 initial + 3 relaunches)
+    for _ in range(4):
+        assert crash_train()
+        # let the finalizer notice the crash and relaunch (poll cycle ~10s)
+        deadline = time.monotonic() + 25
+        while time.monotonic() < deadline:
+            attempts = int((art / "baseline" / ".train_attempts").read_text(
+                encoding="utf-8").strip())
+            if attempts >= 4 or (art / "baseline" / "train_final.json").is_file():
+                break
+            time.sleep(0.5)
+
+    assert _wait_for(art / "baseline" / "train_final.json", timeout_s=60), \
+        (art / "baseline" / "finalizer.log").read_text(encoding="utf-8")[-2000:]
+    final = _train_final(art)
+    assert final["status"] == "failed"
+    assert final["stage"] == "relaunch_exhausted"
+    assert int((art / "baseline" / ".train_attempts").read_text(
+        encoding="utf-8").strip()) == 4
+
+
+def test_baseline_chain_custom_profiler_reentry_never_double_detaches(tmp_path: Path):
+    """The custom-profiler path runs detached + polled; a re-invocation while
+    the worker is alive must POLL it, never detach a second copy (a second
+    profiler would double the run and race the pid/rc files)."""
+    art = _baseline_ws(tmp_path, full_epochs=1)
+    # remove the pre-made profile product so step 2 actually detaches
+    for f in ("profile_summary.json", "taskgraph.json", "ops.csv", "schedule.json"):
+        p = art / "base" / "profile" / f
+        if p.is_file():
+            p.unlink()
+    profiler = art / "fake_profiler.py"
+    profiler.write_text(
+        "import argparse, json, sys, time\n"
+        "ap = argparse.ArgumentParser()\n"
+        "ap.add_argument('--onnx'); ap.add_argument('--out-dir'); ap.add_argument('--seed')\n"
+        "ns = ap.parse_args()\n"
+        "time.sleep(6)   # long enough to straddle the re-invocation\n"
+        "from pathlib import Path\n"
+        "out = Path(ns.out_dir); out.mkdir(parents=True, exist_ok=True)\n"
+        "doc = {'schema_version': 1, 'makespan_cycles': 500}\n"
+        "(out / 'profile_summary.json').write_text(json.dumps(doc))\n"
+        "for name in ('taskgraph.json', 'ops.csv', 'schedule.json'):\n"
+        "    (out / name).write_text('{}')\n", encoding="utf-8")
+
+    env = dict(os.environ)
+    env["ORCA_ARTIFACTS_DIR"] = str(art)
+    base_cmd = ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
+                "--seed", "0", "--profile-script", str(profiler),
+                "--poll-max-secs", "0"]
+    first = subprocess.run(base_cmd, capture_output=True, text=True,
+                           timeout=60, env=env)
+    payload = json.loads(first.stdout)
+    assert payload["status"] == "running"          # detached, poll window 0
+    stamps = art / "baseline" / ".stamps" / "step2"
+    attempts_after_first = int((stamps / "attempts").read_text(encoding="utf-8"))
+    pid_after_first = (stamps / "pid").read_text(encoding="utf-8")
+
+    # immediate re-invocation: the SAME worker is polled, no second detach
+    second = subprocess.run(base_cmd, capture_output=True, text=True,
+                            timeout=60, env=env)
+    assert json.loads(second.stdout)["status"] == "running"
+    assert int((stamps / "attempts").read_text(encoding="utf-8")) \
+        == attempts_after_first          # no attempt increment on re-entry
+    assert (stamps / "pid").read_text(encoding="utf-8") == pid_after_first
+
+
 def test_check_business_logic_gate(tmp_path: Path):
     """The five-section + sentinel gate: the fixture document passes; each
     violation class (missing section, empty section, wrong sentinel) fails."""
@@ -2247,11 +2338,13 @@ def _chart_server(sock_path: Path, replies: int, silent: bool = False):
 def _push_ws(tmp_path: Path) -> Path:
     art = tmp_path / "art"
     (art / "baseline").mkdir(parents=True)
-    (art / "variants" / "r1-01").mkdir(parents=True)
+    # variant curve at the PRODUCTION path the probe protocol writes
+    # (variants/<vid>/metrics/metrics.jsonl — same as dashboard_snapshot)
+    (art / "variants" / "r1-01" / "metrics").mkdir(parents=True)
     (art / "baseline" / "baseline_metrics.jsonl").write_text(
         '{"epoch": 1, "metric": 0.4}\n{"epoch": 2, "metric": 0.5}\n',
         encoding="utf-8")
-    (art / "variants" / "r1-01" / "metrics.jsonl").write_text(
+    (art / "variants" / "r1-01" / "metrics" / "metrics.jsonl").write_text(
         '{"epoch": 1, "metric": 0.45}\n', encoding="utf-8")
     return art
 
@@ -2487,6 +2580,24 @@ def test_run_latency_recheck_migration_regression(tmp_path: Path):
     assert out3["verdicts_count"] == 1
     assert json.loads((art / "variants" / "r1-02" / "verdict.json")
                       .read_text(encoding="utf-8")) == _T8_MISMATCH_VERDICT
+
+    # empty profiler input (the workflow default): the script's own
+    # placeholder default applies — an omitted --profiler is NOT a hard
+    # error and produces the SAME verdicts (regression: the empty-string
+    # argument used to die at argparse)
+    for vid in ("r1-01", "r1-02"):
+        (art / "variants" / vid / "verdict.json").unlink()
+    env = dict(os.environ)
+    env["ORCA_ARTIFACTS_DIR"] = str(art)
+    proc4 = subprocess.run(["bash", str(_RECHECK_SH),
+                            "--min-improvement", "100", "--min-pct", "1",
+                            "--min-ratio", "0.5"],
+                           capture_output=True, text=True, timeout=300, env=env)
+    assert proc4.returncode == 0, proc4.stderr
+    out4 = json.loads(proc4.stdout)
+    assert out4["verdicts_count"] == 2 and out4["latency_pass_count"] == 1
+    assert json.loads((art / "variants" / "r1-01" / "verdict.json")
+                      .read_text(encoding="utf-8")) == _T8_PASS_VERDICT
 
 
 def test_run_latency_recheck_reconciles_missing_history_rows(tmp_path: Path):

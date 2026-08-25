@@ -2,7 +2,8 @@
 """push_curves.py — best-effort live-chart sidecar for the training curves.
 
 Reads the baseline curve (``baseline/baseline_metrics.jsonl``) plus every
-variant curve on disk (``variants/<vid>/metrics.jsonl``) and pushes ONE live
+variant curve on disk (``variants/<vid>/metrics/metrics.jsonl`` — the
+probe protocol's extraction output) and pushes ONE live
 line chart over the chart socket: hue = baseline/vid, x = epoch, y = metric.
 Same label+title on every push -> the front end REPLACES the previous chart
 (the live-update semantics), so calling this repeatedly is idempotent for the
@@ -76,7 +77,7 @@ def collect(artifacts: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]
         for vdir in sorted(variants_dir.iterdir()):
             if not vdir.is_dir():
                 continue
-            rows = _load_curve(vdir / "metrics.jsonl", vdir.name)
+            rows = _load_curve(vdir / "metrics" / "metrics.jsonl", vdir.name)
             if rows:
                 data.extend(rows)
                 curves.append({"vid": vdir.name, "epochs": len(rows)})

@@ -72,9 +72,12 @@ one short bash call; if your turn tops out, status message with
 `do not call orca next` and re-enter); alive at the deadline with no
 terminal state → **abort at terminal**: kill the baseline training group
 (pid from `baseline/train.pid`), the finalizer group, and every in-flight
-variant group (`variants/*/train/train.pid` — skip dead pids), then
-disclose `"aborted at terminal"` in the `reason` (the report states what
-was killed; it never pretends the baseline finished).
+variant group (`variants/*/train/train.pid`) — each kill GUARDED by a
+/proc cmdline attribution check first (the pid must reference
+`train.rendered.sh` / `--finalizer` respectively; a reused or unrelated pid
+is skipped and listed in the disclosure, never signalled), then disclose
+`"aborted at terminal"` in the `reason` (the report states what was killed;
+it never pretends the baseline finished).
 
 ### Step 1: Derive the terminal state from disk
 

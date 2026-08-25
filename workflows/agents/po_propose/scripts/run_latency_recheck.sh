@@ -30,7 +30,10 @@ set -euo pipefail
 
 ART="${ORCA_ARTIFACTS_DIR:?FATAL: ORCA_ARTIFACTS_DIR not set (run_latency_recheck.sh)}"
 SCRIPTS="$ART/scripts"
-PROFILER=""
+# profiler default lives HERE (an empty --profiler-style omission must never
+# be a hard error): the deployed placeholder estimator is the default the
+# workflow's empty profile_script_path input means
+PROFILER="$SCRIPTS/placeholder_profiler.py"
 MIN_IMP="100"
 MIN_PCT="1"
 MIN_RATIO="0.5"

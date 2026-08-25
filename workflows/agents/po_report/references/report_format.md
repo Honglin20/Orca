@@ -22,7 +22,10 @@ Read `baseline/finalizer.pid`: dead → pass (the baseline's terminal state is
 whatever `baseline/train_final.json` says); alive → wait ≤ 60 s for the
 terminal state, then kill the baseline training group (`baseline/train.pid`),
 the finalizer group, and every in-flight variant group
-(`variants/*/train/train.pid`, dead pids skipped) — and record
+(`variants/*/train/train.pid`). Every kill is attribution-GUARDED: the pid's
+/proc cmdline must reference `train.rendered.sh` (training wrappers) or
+`--finalizer` (finalizer) before signalling — a dead, reused, or unrelated
+pid is skipped and named in the disclosure instead of killed. Record
 `"aborted at terminal"` for the `reason` (disclosed, never hidden). The
 harvested-kill disclosure does NOT change `status`/`stage`; the state table
 below still derives them from disk.
