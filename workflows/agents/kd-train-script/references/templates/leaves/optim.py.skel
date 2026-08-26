@@ -1,0 +1,34 @@
+"""optim.py — optimizer + scheduler leaf (kd-train-script codegen target).
+
+Self-contained contract (CONTRACTS §1):
+
+* Required callables:
+    - ``build_optimizer(params, lr)``         → ``Optimizer | None``
+    - ``build_scheduler(optimizer, epochs)``  → ``LRScheduler | None``
+* Return ``None`` when the user's ``train.py`` does not define one — the
+  engine falls back to ``Adam(params, lr=lr)`` and no scheduler.  Do **not**
+  invent one if the user has none.
+* Scheduler step cadence must match the user's: the engine calls
+  ``scheduler.step()`` **per epoch**; if the user's train.py stepped per
+  batch, port it as a per-epoch equivalent or document the deviation.
+* Self-contained: whitelisted standard scientific stack (torch / torchvision
+  / torchaudio / numpy / scipy / sklearn / PIL) + stdlib.
+
+The kd-train-script agent ports the user's optimizer / scheduler verbatim.
+"""
+
+
+def build_optimizer(params, lr):
+    """User's optimizer constructor (same class, same hyperparameters).  Port
+    verbatim.  Return None when the user's train.py defines none."""
+    raise NotImplementedError(
+        "kd-train-script: port the user's build_optimizer body into optim.py"
+    )
+
+
+def build_scheduler(optimizer, epochs):
+    """User's scheduler constructor.  Port verbatim.  Return None when the
+    user's train.py defines none."""
+    raise NotImplementedError(
+        "kd-train-script: port the user's build_scheduler body into optim.py"
+    )

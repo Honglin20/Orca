@@ -9,6 +9,7 @@
 //   - gate.options 空 → textarea 自由文本（输入作为 answer）
 
 import { useEffect, useState } from "react";
+import { MessageSquare } from "lucide-react";
 import type { GateState } from "@/types/store-types";
 import { postGateRespond } from "./post-gate-respond";
 import { GateObserveOnlyNotice, useGateWritable } from "./gate-writable";
@@ -54,12 +55,12 @@ export function AskGate({ gate }: { gate: GateState }) {
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
       data-testid="gate-dialog"
     >
-      <div className="w-full max-w-xl rounded-lg bg-white shadow-xl" data-testid="ask-gate">
-        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
-          <h2 className="text-base font-semibold text-slate-900">💬 Agent 提问</h2>
+      <div className="w-full max-w-xl rounded-lg orca-bg-surface shadow-xl" data-testid="ask-gate">
+        <div className="flex items-center justify-between border-b orca-border px-5 py-3">
+          <h2 className="text-base font-semibold orca-text inline-flex items-center gap-1.5"><MessageSquare size={16} strokeWidth={1.5} aria-hidden /> Agent 提问</h2>
         </div>
         <div className="px-5 py-4">
-          <p className="mb-3 text-sm text-slate-700" data-testid="gate-prompt">
+          <p className="mb-3 text-sm orca-text-muted" data-testid="gate-prompt">
             {gate.prompt}
           </p>
           {hasOptions ? (
@@ -69,8 +70,8 @@ export function AskGate({ gate }: { gate: GateState }) {
                   key={opt}
                   className={`flex cursor-pointer items-center gap-2 rounded border px-3 py-1.5 text-sm ${
                     selected === opt
-                      ? "border-indigo-400 bg-indigo-50 text-indigo-900"
-                      : "border-slate-200 hover:bg-slate-50"
+                      ? "border-orca-accent bg-[rgb(var(--accent)/0.08)] orca-accent"
+                      : "orca-border hover:orca-bg-surface-2"
                   }`}
                 >
                   <input
@@ -87,7 +88,7 @@ export function AskGate({ gate }: { gate: GateState }) {
             </div>
           ) : (
             <textarea
-              className="w-full rounded border border-slate-200 p-2 text-sm focus:border-indigo-400 focus:outline-none disabled:opacity-50"
+              className="w-full rounded border orca-border p-2 text-sm focus:border-[rgb(var(--accent))] focus:outline-none disabled:opacity-50"
               rows={3}
               placeholder="输入回答…"
               value={text}
@@ -97,18 +98,18 @@ export function AskGate({ gate }: { gate: GateState }) {
             />
           )}
           {error && (
-            <p className="mt-2 text-xs text-red-600" data-testid="gate-error">
+            <p className="mt-2 text-xs text-orca-failed" data-testid="gate-error">
               提交失败：{error}
             </p>
           )}
           <GateObserveOnlyNotice />
         </div>
-        <div className="flex justify-end gap-2 border-t border-slate-200 px-5 py-3">
+        <div className="flex justify-end gap-2 border-t orca-border px-5 py-3">
           <button
             type="button"
             disabled={submitting || !writable}
             onClick={handleSubmit}
-            className="rounded bg-indigo-600 px-3 py-1.5 text-sm text-white hover:bg-indigo-700 disabled:opacity-50"
+            className="rounded orca-bg-accent px-3 py-1.5 text-sm text-white hover:bg-[rgb(var(--accent)/0.9)] disabled:opacity-50"
             data-testid="gate-submit"
           >
             {submitting ? "提交中…" : "提交回答"}

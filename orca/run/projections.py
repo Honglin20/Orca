@@ -12,8 +12,9 @@
     ``node_status``，与 ``replay_state`` 的 incremental reducer 同源——保证增量消费
     （live TUI）与 batch 重放（replay_state）输出一致。
   - **其他 projection 独立 fold**：``node_usage`` / ``node_session_ids`` / ``node_iter``
-    是 RunState 之外的派生视图（RunState 顶层只有单 ``usage: UsageSummary``，无 per-node
-    breakdown / session 序列），故本模块独立 fold；算法仍是单一权威（消费层不许复制）。
+    是 RunState 之外的派生视图（SPEC B B3 后 RunState 顶层不再放 usage 归集字段，统一派生
+    自本模块；无 per-node breakdown / session 序列），故本模块独立 fold；算法仍是单一权威
+    （消费层不许复制）。
   - **纯函数**：同样输入同样输出，不依赖全局状态 / 不发事件 / 不改状态。
 
 依赖单向：本模块依赖 ``orca.schema`` + ``orca.events.replay``；不依赖 ``orca.run.*``

@@ -13,6 +13,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChartPayload } from "./types";
 import { ChartWidget } from "./ChartWidget";
+import { ChartErrorBoundary } from "./ChartErrorBoundary";
 
 interface LazyChartWidgetProps {
   payload: ChartPayload;
@@ -49,14 +50,18 @@ export function LazyChartWidget({ payload }: LazyChartWidgetProps) {
     return (
       <div
         ref={ref}
-        className="aspect-[4/3] w-full animate-pulse rounded bg-slate-100"
+        className="aspect-[4/3] w-full animate-pulse rounded orca-bg-surface-2"
         data-testid="chart-skeleton"
       />
     );
   }
   return (
     <div ref={ref}>
-      <ChartWidget payload={payload} />
+      {/* SPEC audit-c §4.2 M16：ErrorBoundary 包在 LazyChartWidget 内、ChartWidget 外。
+          IO 已 disconnect（无循环重挂），仅 chart 进入视口后才需 boundary。 */}
+      <ChartErrorBoundary>
+        <ChartWidget payload={payload} />
+      </ChartErrorBoundary>
     </div>
   );
 }

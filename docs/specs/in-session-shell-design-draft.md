@@ -160,6 +160,13 @@ CC 的 `PostToolUse(Task)`（产 output）与 `Stop`（推进 next）是**两个
 
 ### 2.5 next 入参契约 + 失败 taxonomy（F5/F6/F10/F11 + 子 session 过滤）
 
+> ⚠️ **被修订（2026-07-23）**：本节「失败 taxonomy」原规定**所有** `InSessionError` 统一 emit
+> `workflow_failed`（终态）、不 emit `node_failed`。经 [`2026-07-23-in-session-error-management.md`](./2026-07-23-in-session-error-management.md)
+> 修订为**分级**：`output_schema_mismatch` 改为 **recoverable**（emit `[node_failed, node_started]`
+> 重 arm，run 存活，连续 3 次升格才终态）；`subagent_compliance` 改为 **≥3 warn / ≥10 hard**
+> 双阈值。`render_error` / `state_corrupt` / `unsupported_node_kind` / `internal_error` 仍
+> irrecoverable（统一 `workflow_failed`）。**凡与本节字面冲突处，以修订 SPEC 为准。**
+
 **output 来源（按宿主，喂 CLI 前 flatten 成 str）**：
 - **CC**：见 §2.4.1（cache 文件）。
 - **opencode**（F10 闭环，D-v7-4）：plugin 在 `session.idle` 时经 `client.session.message` 拉本**主** session 消息，找最后一条 assistant message 上**最近一个 `ToolPart` 满足 `tool==="task" && state.status==="completed"`** → 取 `state.output` → **剥 `task_id:` 首行 + 解 `<task_result>…</task_result>` 内文** → 作 `--output`。**禁止取 assistant text**（spike 实测后者是叙事改写如"子代理返回了 SUBMARKER"，非结构化 output）。无 task ToolPart（模型自干）→ 不传 `--output` → 合规计数器路径。

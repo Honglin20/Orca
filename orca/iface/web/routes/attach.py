@@ -1,15 +1,19 @@
-"""attach.py —— POST /api/runs/attach + GET /api/health（SPEC web-attach §2.1 / §5）。
+"""attach.py —— POST /api/runs/attach + GET /api/health + POST /api/shutdown
+（SPEC web-attach §2.1 / §5 + SPEC tars-close §2）。
 
-回答「web 怎么 attach 一个外部 run？」「同 host 既有 orca server 怎么探测？」：
+回答「web 怎么 attach 一个外部 run？」「同 host 既有 orca server 怎么探测？」「怎么优雅
+关掉一个 orca server？」：
   - ``POST /api/runs/attach`` body ``{tape_path, run_id?}`` → 安全校验（§6）→
     ``manager.attach_run`` → ``{run_id, status}``。安全 / 碰撞 / 幂等失败映射到 HTTP：
     ``PermissionError`` → 403；``FileNotFoundError`` → 404；``ValueError(run_id_collision)``
     → 409；其它 → 500 fail loud。
-  - ``GET /api/health`` → ``{app:"orca", version, pid}``。``orca open`` / 端口探测用它判定
-    「既有 server 是 orca」。
+  - ``GET /api/health`` → ``{app:"orca", version, pid, runs_dir_fp}``。``orca open`` / 端口探测
+    用它判定「既有 server 是 orca」+ ``runs_dir_fp`` 判定是否**同项目**（spec-review B1/B3）。
+  - ``POST /api/shutdown`` → loopback-only 触发 ``uvicorn.Server.should_exit``（``tars close``
+    跨平台优雅关闭；句柄 None → 500；非 loopback → 403；SPEC tars-close §2）。
 
 依赖单向：本模块依赖 ``orca.iface.web.run_manager`` + ``orca.__init__.__version__`` +
-fastapi，不含编排逻辑（attach_run 才是注册入口）。
+fastapi，不含编排逻辑（attach_run 才是注册入口）。shutdown 端点零 cli import（只读 app.state）。
 """
 
 from __future__ import annotations
@@ -17,13 +21,20 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 import orca
+from orca.iface.web._identity import orca_home_fingerprint
 
 if TYPE_CHECKING:
     from orca.iface.web.run_manager import RunManager
+
+
+# ``/api/shutdown`` loopback 白名单（SPEC tars-close §2）。
+# 含 IPv4-mapped IPv6（``::ffff:127.0.0.1``）：dual-stack socket 常把 IPv4 client 报成该形式，
+# 不收会假阳性 403（spec-review major）。
+_LOOPBACK_CLIENTS = {"127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"}
 
 
 class AttachRequest(BaseModel):
@@ -74,15 +85,47 @@ def build_router(manager: RunManager) -> APIRouter:
 
     @router.get("/health")
     async def health() -> dict[str, Any]:
-        """health 探测（SPEC §5）：``{app:"orca", version, pid}``。
+        """health 探测（SPEC §5 + §13.1 U-2）。
 
-        ``orca open`` / 端口探测用它判定「同 port 既有 server 是 orca」（否/不可达 → 起新
-        serve）。返回 ``app`` 永远是 ``"orca"``（唯一身份），其它 server 不会返此形状。
+        身份指纹 = ``sha1(ORCA_HOME)[:12]``（D1 / U-2，身份与存储路径解耦）。
+        **兼容期同发**两字段：
+          - ``orca_home_fp``（新权威）：``sha1(ORCA_HOME)[:12]``。
+          - ``runs_dir_fp``（兼容）：值 = ``orca_home_fp``（旧 client 比对此字段，下版本删）。
+
+        client（``commands.py::_runs_dir_fp``）迁移到 ``orca_home_fp`` 后，同用户所有项目
+        共享指纹 → 单端口复用（D13）。
         """
+        fp = orca_home_fingerprint()
         return {
             "app": "orca",
             "version": orca.__version__,
             "pid": os.getpid(),
+            "orca_home_fp": fp,
+            "runs_dir_fp": fp,  # 兼容期：旧 client 比对此字段（值=orca_home_fp）
         }
+
+    @router.post("/shutdown")
+    async def shutdown(request: Request) -> dict[str, Any]:
+        """``tars close`` 的服务端句柄：loopback-only 触发 ``uvicorn.Server.should_exit``。
+
+        机制（SPEC tars-close §2）：
+          - **loopback 白名单**：非本地 → 403（与 _auth no-op 并存；shutdown 非破坏但限制
+            调用面）。``::ffff:127.0.0.1`` 是 IPv4-mapped IPv6（dual-stack 假阳性）。
+          - **句柄 None → 500**：``app.state.uvicorn_server`` 必由 ``run_server`` /
+            ``_serve_and_run_inprocess`` wire（B1 两处）；未 wire 说明 lifecycle 异常，fail loud。
+          - **置位 ``should_exit``**：uvicorn main serve loop 在下一 iteration 检查 → 进
+            lifespan shutdown（tape flush / run 清理）；handler return 后响应完整发出
+            （spec-review 驳回「响应截断」质疑）。
+
+        依赖单向：只读 ``app.state`` + stdlib，零 cli import。
+        """
+        client = request.client.host if request.client else ""
+        if client not in _LOOPBACK_CLIENTS:
+            raise HTTPException(403, "shutdown only allowed from loopback")
+        srv = getattr(request.app.state, "uvicorn_server", None)
+        if srv is None:
+            raise HTTPException(500, "uvicorn server handle not wired")
+        srv.should_exit = True
+        return {"shutting_down": True, "pid": os.getpid()}
 
     return router

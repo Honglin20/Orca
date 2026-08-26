@@ -1,7 +1,7 @@
 # create-workflow skill benchmark
 
 > 评测 create-workflow skill 的用例集：每个 case **钉死输入 + 预期输出**，且每个预期产物
-> 都经 `orca validate` 校验通过（格式 + 语义正确）。schema 演化让某 case 失效时，守门测试先红。
+> 都经 `tars validate` 校验通过（格式 + 语义正确）。schema 演化让某 case 失效时，守门测试先红。
 
 ## scope（这个 skill 管什么）
 
@@ -19,7 +19,7 @@
 cases/<NN>-<slug>/
   case.md               # 场景 + 输入（NL / 内联素材）+ 预期不变量
   expected/
-    workflow.yaml       # 钉死的预期产物（经 orca validate）— agent-pool-only case 无此文件
+    workflow.yaml       # 钉死的预期产物（经 tars validate）— agent-pool-only case 无此文件
     agents/             # 预期 agent md（workflow 用 agent: 引用时必有，与 workflow.yaml 同级）
       <name>.md
       <name>/agent.md   # 文件夹 agent（含 scripts/ 资源）

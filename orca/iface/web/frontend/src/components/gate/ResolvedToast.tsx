@@ -34,6 +34,11 @@ export function ResolvedToast() {
 
   return (
     <div
+      // P0b 白名单（intentional inverse）：``bg-slate-900`` 是 white-on-dark toast 强对比
+      // 浮层（同 LogStream live badge / AgentsRail DAG overlay），不属于 surface scale，
+      // 不替换为 ``orca-*`` token。``text-amber-300`` 是 dark 背景上的高亮 emphasis，
+      // 同离 surface scale（与 LogStream LEVEL_TEXT_COLOR.warning 同语义独立真相源）。
+      // P3 暗色机制收口时统一复核。
       className="fixed bottom-4 left-1/2 z-[60] -translate-x-1/2 rounded-lg bg-slate-900 px-4 py-2 text-sm text-white shadow-lg"
       data-testid="resolved-toast"
       role="status"

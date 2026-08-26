@@ -56,15 +56,30 @@ def make_workflow_started(
     run_id: str,
     wf: Workflow,
     inputs: dict,
+    yaml_path: str | None = None,
+    host_session: str | None = None,
 ) -> tuple[str, dict]:
     """构造 ``workflow_started`` 的 (type, data)（SPEC §3.4 data payload）。
 
-    data: ``{inputs, node_count, entry, workflow_name, topology}``。
+    data: ``{inputs, node_count, entry, workflow_name, topology, yaml_path?,
+    host_session}``。
 
     ``topology``（phase 9c）：静态 DAG 拓扑摘要，让前端 DAG 在第一个事件即能布局
     （无需等 ``route_taken`` 增量拼边）。设计决策：拓扑进 tape（单一真相源），live 和
     历史 run replay 都从事件拿，无第二数据源 / 额外 endpoint。摘要含 node name+kind、
     routes（from→to）、parallel 组（name+branches）—— **非完整 yaml**，保持 payload 小。
+
+    ``yaml_path``（v3 §7.2）：bootstrap 期记入 tape（canonical realpath），让后续 per-call
+    CLI（``next``）能从 tape 反查 wf yaml——marker 不再存 yaml（desync 向量），tape 是唯一
+    真相源。daemon / 无 yaml 场景传 None（键省略）。
+
+    ``host_session``（host-session-binding v2）：启动 run 的**宿主 session id**（CC
+    ``CLAUDE_CODE_SESSION_ID`` / opencode plugin 注入的 ``ORCA_HOST_SESSION_ID``），
+    bootstrap emit 时写入。tape-only 单一真相源（同 ``yaml_path`` 先例）——marker **不复存**
+    （避免 desync）；nudge（cc_nudge.sh / orca.ts）读 tape 首行派生，只对当前 session 自己
+    的活跃 run 提醒，杜绝跨 session 串台。无 env（手 CLI / 未注入）→ None（fail-safe：该 run
+    不被任何 session 认领，nudge 跳过）。**键恒写入**（``str | null`` 契约，区别于 yaml_path
+    的条件写——host_session 归属是 nudge 过滤的核心字段，显式 None 比「键缺失」更清晰）。
     """
     data = {
         "inputs": dict(inputs),
@@ -72,7 +87,10 @@ def make_workflow_started(
         "entry": wf.entry,
         "workflow_name": wf.name,
         "topology": _topology_summary(wf),
+        "host_session": host_session,
     }
+    if yaml_path:
+        data["yaml_path"] = str(yaml_path)
     return "workflow_started", data
 
 

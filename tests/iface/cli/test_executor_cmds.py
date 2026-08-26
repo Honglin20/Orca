@@ -504,6 +504,9 @@ class TestExecutorShow:
         assert "← default" in result.output
         # opencode default flags 含 --dangerously-skip-permissions
         assert "--dangerously-skip-permissions" in result.output
+        # --auto 兜底 opencode 原生权限 ask（external_directory 等），堵 DEFECT-1 headless 挂死
+        #（SPEC 2026-08-11-opencode-permission-bridge §2）
+        assert "--auto" in result.output
 
     def test_show_marks_project_source(self):
         config_mod.save_config(

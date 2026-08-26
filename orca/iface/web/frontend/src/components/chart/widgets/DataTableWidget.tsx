@@ -4,24 +4,25 @@
 // 保留列序（payload.columns 优先，否则取 data[0] keys）+ 数据行数 == payload.data 长度。
 
 import type { ChartPayload } from "../types";
+import { ChartCaption } from "../ChartCaption";
 
 export function DataTableWidget({ payload }: { payload: ChartPayload }) {
-  const { data, title, columns } = payload;
+  const { data, title, columns, caption } = payload;
 
   // 列序：优先 payload.columns；否则从首行 keys 派生
   const cols = columns && columns.length > 0 ? columns : data[0] ? Object.keys(data[0]) : [];
 
   return (
     <div data-testid="chart-widget">
-      {title && <h4 className="mb-2 text-xs font-medium text-slate-700">{title}</h4>}
-      <div className="overflow-auto rounded border border-slate-200">
+      {title && <h4 className="orca-text-muted mb-2 text-xs font-medium">{title}</h4>}
+      <div className="overflow-auto rounded border orca-border">
         <table className="w-full text-xs" data-testid="data-table">
-          <thead className="bg-slate-50">
+          <thead className="orca-bg-surface-2">
             <tr>
               {cols.map((col) => (
                 <th
                   key={col}
-                  className="border-b border-slate-200 px-2 py-1 text-left font-medium text-slate-600"
+                  className="border-b orca-border px-2 py-1 text-left font-medium orca-text-muted"
                 >
                   {col}
                 </th>
@@ -30,9 +31,9 @@ export function DataTableWidget({ payload }: { payload: ChartPayload }) {
           </thead>
           <tbody>
             {data.map((row, i) => (
-              <tr key={i} className="even:bg-slate-50/50">
+              <tr key={i} className="even:orca-bg-surface-2">
                 {cols.map((col) => (
-                  <td key={col} className="px-2 py-1 text-slate-700">
+                  <td key={col} className="px-2 py-1 orca-text-muted">
                     {String(row[col] ?? "")}
                   </td>
                 ))}
@@ -41,6 +42,7 @@ export function DataTableWidget({ payload }: { payload: ChartPayload }) {
           </tbody>
         </table>
       </div>
+      {caption && <ChartCaption text={caption} />}
     </div>
   );
 }

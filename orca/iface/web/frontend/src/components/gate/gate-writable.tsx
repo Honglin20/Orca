@@ -26,7 +26,7 @@ export function GateObserveOnlyNotice() {
   if (writable) return null;
   return (
     <p
-      className="mt-2 text-xs text-amber-700"
+      className="mt-2 text-xs text-orca-skipped"
       data-testid="gate-observe-only"
     >
       observe-only（attached run）—— 请在该 run 自己的 shell 作答

@@ -1,0 +1,340 @@
+name: nas-supernet
+description: "超网 NAS 全链流水线（v1）：把用户的 PyTorch 模型展开成超网，从零训练后搜索选定最优子网，再重训出最终模型。无需预训练权重，适合有训练资源、从零全局搜架构的场景。"
+
+entry: ns_expand_supernet
+
+# ─────────────────────────────────────────────────────────────────────────────
+# inputs——三档标签（contract §6）：[ask]=业务决策必填 / [advanced]=罕见
+# override 可选 / [default]=工程默认。seed 全 workflow必有（contract §6 Tier A 子类）。
+#
+# `$ORCA_ARTIFACTS_DIR`（in-session 入口注入）：``project_root`` 非空绝对路径 →
+# ``<project_root>/artifacts/nas-supernet/``（project-scoped，跨 run 复用 + 多 wf 隔离）；
+# 否则 per-run ``runs/<run_id>/artifacts/`` 回落（见 SPEC 2026-08-06 §2.1）。
+# ─────────────────────────────────────────────────────────────────────────────
+inputs:
+  project_root:
+    type: string
+    description: "[ask] 用户原始 PyTorch 项目根目录绝对路径。supernet 张开 / 训练 logic porting / fidelity 校验都以此为源项目锚点（agent.md 经 {{ inputs.project_root }} 引用）。必须用户给——代码里能 grep 出事实但项目根本身是意图/上下文边界。亦作 in-session project-scoped artifacts 解析锚点（绝对路径，否则 bootstrap fail loud）"
+    required: true
+  model_path:
+    type: string
+    description: "[ask] 目标模型入口文件路径（相对 project_root 或绝对）。supernet 张开的起点——ns_expand_supernet flatten 此文件生成 supernet.py。项目内唯一锚点，必须用户给"
+    required: true
+  target_latency:
+    type: number
+    description: "[ask] 选架构时延目标（单位由 latency_unit 决定，默认 ms）。ns_select 调 select_architecture.py 时下传 --target-latency：latency ≤ target 的 Pareto 前沿候选里选 max-acc。核心业务 KPI——NAS 无目标 = 瞎搜，必须用户给（本工作流恒提供 target，无 target 不开工）"
+    required: true
+  latency_unit:
+    type: string
+    enum: [ms, us, s]
+    description: "[advanced] latency 测量值声明单位（ms|us|s，默认 ms）。全链路 label/列名/caption/比较按此单位；不换算数值（只标注）。默认 estimator 路径恒返回 ms——声明 us/s 必须同时给 latency_script_path（bootstrap fail-loud 守卫）"
+    required: false
+    default: "ms"
+  latency_script_path:
+    type: string
+    description: "[advanced] 用户外部时延脚本路径（可选）。**提供则全链路时延唯一权威**——ns_search_pipeline 生成 latency_estimator.py 时包装此脚本（onnx 单文件契约），search_config.yaml objs 的 latency objective + select_architecture.py 的 latency 来源全部同源于此，禁 fallback 到内置 PyTorch / FLOPs / 任何代理（见 ns_search_pipeline 用户测度权威铁律 + measure_latency_script_generation.md 用户脚本章节）。未提供（默认）走 nas-agent 内置 PyTorch measure_module_latency"
+    required: false
+    default: ""
+  seed:
+    type: int
+    description: "[default] 复现性种子（默认 0）。全 workflow 必填（contract §6 Tier A）；agent.md 经 {{ inputs.seed }} 下传到训练/搜索脚本 --seed，deterministic 路径全固定此 seed"
+    required: false
+    default: 0
+
+# 跨字段 input 不变量——bootstrap fail-loud 校验：
+# latency_unit∈{us,s} ⇒ latency_script_path 必须非空（默认 estimator 恒 ms，非 ms 声明必错标）。
+input_invariants:
+  - when_field: latency_unit
+    when_in: ["us", "s"]
+    require_nonempty: [latency_script_path]
+    message: "声明 latency_unit 为 us/s 时必须提供 latency_script_path（默认 PyTorch estimator 恒返回 ms，非 ms 声明必错标）"
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 1: ns_expand_supernet（entry）
+  #   把用户 PyTorch 模型 flatten + 施 mandatory supernet readiness 规则 + 张开成
+  #   supernet.py + 精炼 SearchSpace；不支持模型类型 → output.model_type_supported=false
+  #   → 路由 terminate_unsupported（fail loud，不烧后续训练/搜索算力）。
+  #   调 supernet-evaluator / workflow-verifier / memory-verifier（read+embed 协议）。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: ns_expand_supernet
+    kind: agent
+    agent: ns_expand_supernet
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [output_dir, model_type, model_type_supported, supernet_path, prepared_model, fidelity_passed, workflow_verifier_passed, error, generated_artifacts]
+      properties:
+        output_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR 绝对路径"}
+        model_type: {type: string, description: "Step 4 标签（cnn / isotropic_transformer / hierarchical_transformer / ...）或 'No supported match'"}
+        model_type_supported: {type: boolean, description: "true=命中 model_type.json 标签；false=不支持 → 路由 terminate_unsupported"}
+        supernet_path: {type: string, description: "supernet.py 路径；不支持时为空串"}
+        prepared_model: {type: string, description: "<base_name>_flat.py 或 <base_name>_llm-optimized.py"}
+        fidelity_passed: {type: boolean, description: "本节点无 fidelity-verifier 调用 → 恒 true（vacuous）"}
+        workflow_verifier_passed: {type: boolean, description: "Step 6 workflow-verifier all-pass → true；unsupported stop → false"}
+        error: {type: string, description: "fail loud 时根因；成功→空串"}
+        generated_artifacts:
+          type: array
+          items: {type: string}
+          description: "相对 output_dir 的产物路径列表（至少 project_manifest.md / supernet_summary.md / <base_name>_flat.py / supernet.py）"
+      additionalProperties: false
+    routes:
+      # model_type_supported=false（Step 4 判不可分类 / supernet 自测不过）→ 短路 terminate_unsupported
+      - when: "ns_expand_supernet.output.model_type_supported != false"
+        to: ns_train_script
+      # catch-all 放最后（contract §3 / validator._check_route_fallback_last）
+      - to: terminate_unsupported
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 2: ns_train_script
+  #   读 expand 上游产物 + 用户训练代码 → 决定 supernet 训练 viability（RL/GAN/momentum-
+  #   encoder 类不可行→skip）→ porter 移植训练逻辑 → 生成 train_supernet.py + run_train_supernet.sh
+  #   → fidelity-verifier + workflow-verifier + memory-verifier 三 loop 闭环。
+  #   下游 ns_run_train 以 run_train_supernet.sh 文件存在性为权威 viability gate。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: ns_train_script
+    kind: agent
+    agent: ns_train_script
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [output_dir, viable, reason, train_script_path, train_supernet_py_path, evaluation_paradigm, fidelity_passed, workflow_verifier_passed, error, generated_artifacts]
+      properties:
+        output_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR 绝对路径（与 expand 共享）"}
+        viable: {type: boolean, description: "supernet 训练是否可行；false 时下游 ns_run_train 以 run_train_supernet.sh 文件不存在自门控 skip"}
+        reason: {type: string, description: "viability 决定的简短项目证据"}
+        train_script_path: {type: string, description: "run_train_supernet.sh 路径；viable=false → 空串"}
+        train_supernet_py_path: {type: string, description: "train_supernet.py 路径；viable=false → 空串"}
+        evaluation_paradigm: {type: string, enum: [validate, finetune, train_from_scratch], description: "评估范式"}
+        fidelity_passed: {type: boolean, description: "fidelity audit loop all-pass → true；viable=false（无 audit）→ true（vacuous）"}
+        workflow_verifier_passed: {type: boolean, description: "workflow compliance loop all-pass → true；viable=false → true（vacuous）"}
+        error: {type: string, description: "fail loud 时根因；成功→空串（viable=false 不算 error，是正常分支）"}
+        generated_artifacts:
+          type: array
+          items: {type: string}
+          description: "相对 output_dir 的产物路径列表"
+      additionalProperties: false
+    routes:
+      - to: ns_search_pipeline
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 3: ns_search_pipeline
+  #   读 train 上游产物 + 用户项目 → 生成 latency_estimator.py（默认 nas-agent PyTorch
+  #   measure_module_latency，或包装用户 latency_script_path——提供则全链路时延唯一权威，禁 FLOPs/代理替代）+ search 脚本（evaluator /
+  #   arch_codec / search_config / run_search_supernet.sh）+ select_architecture.py
+  #   （schema-aware JSON 契约）+ AGENTS.md scaffold；Non-Searchable Logic + NPU foreach=False。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: ns_search_pipeline
+    kind: agent
+    agent: ns_search_pipeline
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [output_dir, latency_estimator_path, search_config_path, evaluator_path, run_search_script_path, select_architecture_path, agents_md_path, fidelity_passed, workflow_verifier_passed, error, generated_artifacts]
+      properties:
+        output_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR 绝对路径（与上游共享）"}
+        latency_estimator_path: {type: string, description: "latency_estimator.py 路径"}
+        search_config_path: {type: string, description: "search_config.yaml 路径"}
+        evaluator_path: {type: string, description: "evaluator.py 路径"}
+        run_search_script_path: {type: string, description: "run_search_supernet.sh 路径"}
+        select_architecture_path: {type: string, description: "select_architecture.py 路径（确定性选架构，下游 ns_select Bash 调用）"}
+        agents_md_path: {type: string, description: "AGENTS.md scaffold 路径（指引下游 ns_retrain）"}
+        fidelity_passed: {type: boolean, description: "Step 2 fidelity audit loop all-pass → true"}
+        workflow_verifier_passed: {type: boolean, description: "Step 1+2 两个 workflow compliance loop 都 all-pass → true"}
+        error: {type: string, description: "fail loud 时根因；成功→空串"}
+        generated_artifacts:
+          type: array
+          items: {type: string}
+          description: "相对 output_dir 的产物路径列表"
+      additionalProperties: false
+    routes:
+      - to: ns_run_train
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 4: ns_run_train（有界轮询 + 无上限自愈——节点常驻到训练真正完成）
+  #   节点不 park / 不挂起 / 不提前输出：训练未完成前 agent 不产出节点 JSON，宿主不调
+  #   next，节点保持执行中、run 保持活跃。流程：detach（nohup+setsid）→ warmup 确认跑通
+  #   （≥2 进度标记 + loss 有限）→ 有界轮询 monitor 块（~9min/块）全程监控 + 无上限自愈
+  #   HEAL-LOOP → 写 $ORCA_ARTIFACTS_DIR/train_status.md（跨 turn 真相源）→ turn 到顶
+  #   换 sub-agent 经 status.sh 续接。完成（.train_rc==0 + 进程已退出 + ckpt 有效）→
+  #   输出 executed JSON → 节点完成 → 下游继续。中断残留 ckpt → 续训到真正完成。
+  #   skipped=脚本不存在；failed=禁碰-blocked（根因需改 supernet.py 等禁碰文件）。
+  #   status ∈ {executed, skipped, failed}——无 detached。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: ns_run_train
+    kind: agent
+    agent: ns_run_train
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [status, artifacts, assessment, max_retries_hit, healed_files, fidelity_retriggered]
+      properties:
+        status: {type: string, enum: [executed, skipped, failed], description: "executed=训练真正完成（.train_rc==0 + ckpt 有效，含续训完成）；skipped=run_train_supernet.sh 不存在（viability self-gate）；failed=禁碰-blocked（根因需改 supernet.py 等禁碰文件，绝不带错下传）。节点常驻运行：训练未完成前不产出 JSON，有界轮询 + 无上限自愈直到完成"}
+        artifacts:
+          type: array
+          items: {type: string}
+          description: "成功时 [supernet_ckpt_path]；skipped/failed 时 []"
+        assessment: {type: string, description: "软判断（非闸门）：收敛曲线 / acc / divergence 摘要；failed 时含 last_error 日志尾部"}
+        max_retries_hit: {type: boolean, description: "true=触碰禁碰/缺上游 ckpt 而非重试次数耗尽"}
+        healed_files:
+          type: array
+          items: {type: string}
+          description: "本次 self-heal edit 过的文件相对路径（审计字段，对照禁碰清单）"
+        fidelity_retriggered: {type: boolean, description: "true=本次触碰训练逻辑类目并重触 project-fidelity-verifier"}
+      additionalProperties: false
+    routes:
+      # 训练完成（executed）/ 脚本缺失（skipped）→ 下游；failed 由下游 ns_run_search 缺 ckpt 兜底。
+      - to: ns_run_search
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 5: ns_run_search（auto-run）
+  #   执行 run_search_supernet.sh；权威产物 = $ORCA_ARTIFACTS_DIR/search_results.jsonl
+  #   （行数 ≥1 才算成功，ns_select 下游依赖）。无上限自愈直到 search_results.jsonl ≥1，绝不带错下传。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: ns_run_search
+    kind: agent
+    agent: ns_run_search
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [status, artifacts, assessment, max_retries_hit, healed_files, fidelity_retriggered]
+      properties:
+        status: {type: string, enum: [executed, failed], description: "executed=RC=0+search_results.jsonl≥1 行；failed=缺上游 supernet ckpt / 禁碰-blocked / 脚本不存在（ns_run_search 无 skipped 分支——agent.md Step 3 python 无 skip 路径，脚本缺失即 failed）"}
+        artifacts:
+          type: array
+          items: {type: string}
+          description: "成功时 [search_results.jsonl 路径]；failed 时 []"
+        assessment: {type: string, description: "软判断：候选数 / Pareto size / best metric / latency 分布；failed 时含 last_error 日志尾部"}
+        max_retries_hit: {type: boolean, description: "true=触碰禁碰/缺上游 ckpt 而非重试次数耗尽"}
+        healed_files:
+          type: array
+          items: {type: string}
+          description: "本次 self-heal edit 过的文件相对路径"
+        fidelity_retriggered: {type: boolean, description: "true=本次触碰搜索/评估逻辑类目并重触 project-fidelity-verifier"}
+      additionalProperties: false
+    routes:
+      - to: ns_select
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 6: ns_select（确定性 Bash，零 LLM 判断）
+  #   运行 ns_search_pipeline 生成的 select_architecture.py 恰好一次——读 search_results.jsonl
+  #   + target_latency，按「target 下 max-acc；缺则 Pareto knee」策略选架构，stdout 单行
+  #   JSON 作唯一最终回复。脚本非 0 / selected_arch 空兜底 → terminate_select_failed。
+  #   路由守卫：selected_arch 非空 + pareto_size>0 → ns_retrain；catch-all → terminate_select_failed。
+  #   （is defined 只测键存在，不测空——必须用真值判定）
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: ns_select
+    kind: agent
+    agent: ns_select
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [selected_arch, selected_acc, selected_latency, latency_unit, pareto_size, select_reason]
+      properties:
+        selected_arch:
+          # 任务 spec：允许 object 或 null（无候选时）。
+          # 两者在 when 真值判定下都 falsy → catch-all terminate_select_failed 兜底。
+          type: ["object", "null"]
+          description: "选定的子网架构描述（layer-wise 配置）；无候选时为 {} 或 null"
+        selected_acc: {type: number, description: "选定子网 search 时的 metric（项目 metric 方向由 select_architecture.py 读 manifest 判 higher/lower-better）"}
+        selected_latency: {type: number, description: "选定子网实测/估时延（单位 = latency_unit，默认 ms）"}
+        latency_unit: {type: string, enum: [ms, us, s], description: "latency 单位（透传自 inputs.latency_unit，默认 ms）"}
+        pareto_size: {type: integer, description: "Pareto 前沿大小；无候选时 0", minimum: 0}
+        select_reason:
+          type: string
+          enum: [max-acc-under-target, pareto-knee, none]
+          description: "max-acc-under-target=target_latency 下选 max acc；pareto-knee=无 target 走 knee；none=无候选 fail-loud sentinel"
+      additionalProperties: false
+    routes:
+      # 真值判定：selected_arch 空对象/null 都 falsy + pareto_size>0 双条件。
+      # 不用 `is defined`（只测键存在，空 dict/null 都过）。
+      - when: "ns_select.output.selected_arch and ns_select.output.pareto_size > 0"
+        to: ns_retrain
+      # catch-all 放最后：脚本失败 / 无候选 / select_reason='none' 都落此。
+      - to: terminate_select_failed
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 7: ns_retrain（有界轮询 + 无上限自愈——节点常驻到重训真正完成）
+  #   节点不 park / 不挂起 / 不提前输出：训练未完成前 agent 不产出节点 JSON，宿主不调
+  #   next，节点保持执行中、run 保持活跃。流程：按 AGENTS.md scaffold 生成 retrain 脚本
+  #   （retrain.py / finetune.py / run_retrain.sh）→ fidelity 复查 → detach（nohup+setsid）
+  #   → warmup 确认跑通（≥2 进度标记 + loss 有限）→ 有界轮询 monitor 块（~9min/块）全程监控
+  #   + 无上限自愈 HEAL-LOOP → 写 $ORCA_ARTIFACTS_DIR/retrain_status.md（跨 turn 真相源）
+  #   → turn 到顶换 sub-agent 经 status.sh 续接。完成（.retrain_rc==0 + 进程已退出 + ckpt 有效）
+  #   → 输出 executed JSON → 节点完成 → 下游继续。中断残留 ckpt → 续训到真正完成。
+  #   缺关键上游（AGENTS.md 等）→ failed（fail loud）。status ∈ {executed, failed}——无 detached。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: ns_retrain
+    kind: agent
+    agent: ns_retrain
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [status, artifacts, assessment, max_retries_hit, healed_files, fidelity_retriggered]
+      properties:
+        status: {type: string, enum: [executed, failed], description: "executed=训练真正完成（.retrain_rc==0 + 进程已退出 + final ckpt 有效，含续训完成）；failed=禁碰-blocked / 缺关键上游（AGENTS.md 缺，ns_retrain 无 skipped 分支——agent.md 无 skip 路径，缺关键上游即 failed）。节点常驻运行：训练未完成前不产出 JSON，有界轮询 + 无上限自愈直到完成"}
+        artifacts:
+          type: array
+          items: {type: string}
+          description: "成功时 [final retrain ckpt 路径]；failed 时 []"
+        assessment: {type: string, description: "软判断（非闸门）：final test acc / latency 对比 / supernet gap；failed 时含 last_error 日志尾部"}
+        max_retries_hit: {type: boolean, description: "true=触碰禁碰/缺上游 ckpt 而非重试次数耗尽"}
+        healed_files:
+          type: array
+          items: {type: string}
+          description: "本次 self-heal edit 过的文件相对路径（应仅含 retrain.py / finetune.py / run_retrain.sh）"
+        fidelity_retriggered: {type: boolean, description: "true=首次生成后或 self-heal 改训练逻辑后跑过 project-fidelity-verifier"}
+      additionalProperties: false
+    routes:
+      # executed → $end（可视化已分散到各节点确定性脚本：训练/重训实时多指标曲线由
+      # progress_watcher tail progress.jsonl 边训练边推（用户指标全推，hue=series），搜索 3 图
+      # 由 ns_run_search 推，最终对比图由 ns_retrain Step 3.5 推——无单独可视化 agent 节点）。
+      # failed → terminate_retrain_failed（引擎对 AgentNode 的 output.status 不自动判失败，
+      # 故 failed 必须显式路由，否则 workflow_completed 误成功）。
+      - when: "ns_retrain.output.status == 'executed'"
+        to: $end
+      - to: terminate_retrain_failed
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Terminate 节点——status: failed；routes 必空；不作 entry / 不进 parallel。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: terminate_unsupported
+    kind: terminate
+    status: failed
+    reason: "ns_expand_supernet 判定用户模型类型不在 supported NAS architecture 标签内（model_type_supported=false）——supernet 张开阶段就拒绝，不进后续训练/搜索。检查 model.py 是否为单族参数化 body（CNN / isotropic / hierarchical Transformer），或换用其它优化路径。"
+
+  - name: terminate_select_failed
+    kind: terminate
+    status: failed
+    reason: "ns_select 未能选出架构（select_architecture.py 失败 / search_results.jsonl 缺或空 / 所有候选都超 target_latency / pareto_size=0）。回看 ns_run_search.output.assessment 与 $ORCA_ARTIFACTS_DIR/runs/search/ 日志定位搜索是否真产出候选。"
+
+  - name: terminate_retrain_failed
+    kind: terminate
+    status: failed
+    reason: "ns_retrain 未能产出 final 子网 ckpt（禁碰-blocked / AGENTS.md 缺 / supernet ckpt 缺）。回看 ns_retrain.output.assessment（含 last_error 日志尾部）与 $ORCA_ARTIFACTS_DIR/runs/retrain/ 日志定位 retrain 失败根因。"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# outputs —— 终态（ns_retrain→$end）映射关键产物供 orchestrator / 下游消费。
+# 核心交付（retrain ckpt + 选定架构）来自 ns_retrain / ns_select；可视化无单独节点——
+# 实时多指标曲线由 progress_watcher tail progress.jsonl 边训练边推（用户指标全推），搜索 3 图由 ns_run_search 推，
+# 最终对比图由 ns_retrain Step 3.5 推（全部经 orca.chart → tape custom(chart) → 三壳渲染）。
+# ─────────────────────────────────────────────────────────────────────────────
+outputs:
+  result: "{{ ns_retrain.output }}"
+  status: "{{ ns_retrain.output.status }}"
+  artifacts: "{{ ns_retrain.output.artifacts }}"
+  assessment: "{{ ns_retrain.output.assessment }}"
+  selected_arch: "{{ ns_select.output.selected_arch }}"
+  selected_acc: "{{ ns_select.output.selected_acc }}"
+  selected_latency: "{{ ns_select.output.selected_latency }}"
+  latency_unit: "{{ ns_select.output.latency_unit }}"
+  pareto_size: "{{ ns_select.output.pareto_size }}"
+  supernet_path: "{{ ns_expand_supernet.output.supernet_path }}"
+  output_dir: "{{ ns_expand_supernet.output.output_dir }}"

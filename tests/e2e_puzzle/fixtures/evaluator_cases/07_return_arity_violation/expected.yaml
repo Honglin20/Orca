@@ -1,0 +1,12 @@
+case_id: 07_return_arity_violation
+primary_evaluator: block-map-evaluator
+flat_relpath: flats/multi_return_flat.py
+expect: FLAG
+expected_severity: BLOCKER
+must_mention_one_of:
+- return_arity
+- multi
+- single
+- arity
+- output
+description: return_arity=multi slot offered single-output candidates

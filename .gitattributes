@@ -1,0 +1,34 @@
+# 跨平台行尾规范（review MINOR#1）：shell 脚本 / 模板资产锁 LF，避免 core.autocrlf 在
+# Windows 工作区把 ``cc_nudge.sh`` / ``orca.ts`` 等落成 CRLF——bash heredoc 定界符带 ``\r``
+# 时虽侥幸自洽（定界符 / 闭合行同形），但依赖「bash 不剥 ``\r``」非显式假设。锁 LF 从源头消除。
+*.sh           text eol=lf
+*.ts           text eol=lf
+*.py           text eol=lf
+*.json         text eol=lf
+*.jsonl        text eol=lf
+*.yaml         text eol=lf
+*.yml          text eol=lf
+*.md           text eol=lf
+orcainstr      text eol=lf
+prompt.txt     text eol=lf
+
+# 前端 / 配置 / 资产：补全首次 CRLF 噪声暴露的扩展名（同源根治）。
+*.tsx          text eol=lf
+*.css          text eol=lf
+*.html         text eol=lf
+*.js           text eol=lf
+*.mjs          text eol=lf
+*.cjs          text eol=lf
+*.svg          text eol=lf
+*.toml         text eol=lf
+*.lock         text eol=lf
+*.txt          text eol=lf
+
+# 二进制资产不强制行尾转换。
+*.png          binary
+*.jpg          binary
+*.jpeg         binary
+*.gif          binary
+*.ico          binary
+*.webp         binary
+*.pdf          binary

@@ -19,6 +19,7 @@
     "@xyflow/react": "^12.11.1",
     "immer": "^11.1.8",
     "katex": "^0.17.0",
+    "lucide-react": "^0.460.0",
     "prismjs": "^1.30.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

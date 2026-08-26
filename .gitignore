@@ -27,11 +27,83 @@ htmlcov/
 .idea/
 .vscode/
 
-# External reference repos (read-only design references, not Orca code)
-references/
+# External reference repos (read-only design references, not Orca code).
+# 锚定根目录：只忽略 <repo-root>/references/（外部只读参考），不要误伤
+# workflows/agents/<agent>/references/（folder-agent 的 skill 资源——速查/模板/checklist，
+# 是 agent 的核心交付物，必须跟踪）。
+/references/
 
 # Codegraph local index
 .codegraph/
 
 # Runtime tape output (orca run/serve 写入)
 runs/
+
+# 本地第三方 skill 安装产物（如 fireworks-tech-graph），跨机器不可移植
+.agents/
+skills-lock.json
+
+# workflows/ = 内置 workflow 源（随包版本化；teams install 部署到 ~/.orca/workflows 全局可见）。
+# 项目级 workflow 放各自项目的 ./workflows（该项目自己的 gitignore 管）。
+
+# 本地 E2E scratch 脚本（test-agent 一次性验证，硬编码本机路径）
+e2e_check.sh
+e2e_clean.sh
+
+# 项目级 Orca 派生缓存（node-memory：.orca/memory/<wf>/<node>.md 是 tape 的派生缓存，
+# 跨机器不可移植；tape 在用户级 ~/.orca/runs 是真相源）。SPEC §0.4 / §2.1。
+.orca/
+
+# NAS / KD 实验工件（kd-nas workflow 运行产物：带时间戳、含 .onnx/.pt ckpt、可重生成，不入库）。
+# 只忽略运行产物目录；docs/plans、docs/releases 仍跟踪。
+demo_run/
+demo_target/
+quant_params/
+
+# nas-agent 本地私有代码，不入库、不推送到远程
+/nas-agent/
+
+# KD-NAS 项目级 artifact 根（teacher/student model、ONNX、ckpt、ledger；可重生成，随项目走）。
+# 每个项目的 artifacts/kd-nas 由该项目的 .gitignore 管理（本 repo 只忽略 demo 项目的）。
+examples/kd-nas-demo/artifacts/
+# 旧 artifact 目录（可重生成，不入库）
+kd-nas-artifacts/
+llm_artifacts/
+
+# E2E 一次性验证 scratch（driver/monitor/截图/stdout dump，硬编码本机路径，可重生成）
+_e2e_artifacts/
+_e2e_playground
+
+# 演示 / 本地实验目录（不入库）
+.dsh-demo/
+data/
+pi/
+ruflo/
+tmp/
+tmp*
+
+# mnist_kd 示例运行产物 + 旧备份（可重生成）
+examples/mnist_kd/artifacts/
+examples/mnist_kd/artifacts.bak.*/
+kd-nas-artifacts.prior*-bak/
+kd-nas-demo-artifacts/
+
+# kb 概念图 / 一次性报告（本地生成物）
+kb_concept.png
+kb_concept.svg
+kb_graph.html
+final_report.md
+
+# rx-sweep skill 本地 scratch 日志（fixture 运行产物）
+orca/skills/rx-sweep/fixture/*.log
+
+# 本地一次性文档/脚本（开发期计划草稿、历史 spec、一次性调试脚本，运行不需要）
+AGENTS.md
+docs/plans/2026-07-20-skip-to-agent-phase14.md
+docs/plans/2026-07-23-orca-home-directory-layout.md
+docs/plans/2026-08-04-skip-to-agent.md
+docs/specs/2026-08-10-nas-supernet-chart-cleanliness-monitoring.md
+docs/specs/2026-08-11-inputdef-enum.md
+docs/specs/2026-08-11-nas-supernet-v2.md
+scripts/e2e_tape_peek.py
+scripts/kb_graph.py

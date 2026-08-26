@@ -13,9 +13,10 @@
 - 模板渲染、输出摘取在 exec/ 阶段做
 """
 
+from pathlib import Path
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class InputDef(BaseModel):
@@ -27,6 +28,84 @@ class InputDef(BaseModel):
     required: bool = True
     default: Any = None
     description: str = ""
+    # SPEC 2026-08-11-inputdef-enum §3.1：允许值集合（精确、大小写敏感匹配）。
+    # None=不约束（向后兼容）；非空 list=bootstrap 期对值做 ``in enum`` fail-loud。
+    # 标量 type 专用（str/int/float/bool）；dict/nested-list 值加载期拒（见 _enum_well_formed）。
+    enum: list[Any] | None = None
+
+    @field_validator("enum")
+    @classmethod
+    def _enum_well_formed(cls, v: list[Any] | None) -> list[Any] | None:
+        """SPEC §3.1 加载期 fail-loud（铁律 12，同 RetryPolicy.max_attempts ge=1 模式）。
+
+        - ``enum: []`` → 配置错（语义 = 任何值都非法），加载期暴露。不约束请省略字段。
+        - 非标量值（dict / nested-list）→ ``value in enum`` 对 dict 做相等比较语义模糊，
+          加载期拒（B4 采纳）。str/int/float/bool 标量放行。
+        """
+        if v is None:
+            return v  # 不约束（向后兼容）
+        if len(v) == 0:
+            raise ValueError(
+                "enum 不能为空 list；不约束则省略 enum 字段"
+                "（空 enum 语义 = 任何值都非法 = 配置错）"
+            )
+        non_scalars = [
+            val for val in v
+            if not isinstance(val, (str, int, float, bool))
+        ]
+        if non_scalars:
+            raise ValueError(
+                f"enum 仅支持标量值 (str/int/float/bool)；"
+                f"含非标量：{non_scalars!r}（dict/nested-list 做 ``in`` 比较语义模糊）"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _default_in_enum(self) -> "InputDef":
+        """SPEC §3.1 B2：default ∈ enum 自洽（仅当 ``default is not None`` 守卫）。
+
+        ``default`` 字段默认值 None 语义=无 default（pydantic 字段默认，非用户声明）。
+        ``InputDef(type="string", enum=["ms","us","s"])`` 隐式 default=None 不应触发
+        ``None not in enum`` 误报——``default is not None`` 守卫是 in-session 模式 default
+        安全的唯一网（CLI bootstrap 不构造 Orchestrator，schema 层是首道关）。
+
+        字段名（dict key）不在模型内可见——pydantic ValidationError 的 loc 会带
+        ``inputs.<name>`` 前缀，定位由错误路径补全。
+        """
+        if self.enum is None or self.default is None:
+            return self
+        if self.default not in self.enum:
+            raise ValueError(
+                f"default={self.default!r} 不在 enum={self.enum!r} 内"
+                "（default 与 enum 不自洽：省略字段走默认会恒违反 enum 守卫）"
+            )
+        return self
+
+
+class InputInvariant(BaseModel):
+    """跨字段 input 不变量（bootstrap 期 fail-loud 校验）。
+
+    用于编码依赖 input **值**（非声明）的前置条件。``InputDef.required`` + ``_validate_inputs``
+    只覆盖「字段存在 / type 对」，无法表达「字段 A 取某值时字段 B 必须非空」这类跨字段约束。
+
+    语义：``inputs[when_field] ∈ when_in`` 时，``require_nonempty`` 中每个字段必须存在且非空。
+    任一违反 → bootstrap fail-loud（``inputs_validation_error``），不进 tape/marker/state。
+
+    设计选择（Rule 7）：
+    - 结构化谓词（``when_field/when_in``）而非 Jinja2 字符串表达式——bootstrap 期零渲染依赖。
+    - OCP：新不变量类型（``require_equal``/``require_in`` 等）由扩 ``InputInvariant`` 字段实现，
+      不改 bootstrap 调用点。
+
+    注意：编译期静态校验字段名（如 ``when_field ∈ wf.inputs``）目前未实现——typo 会静默让
+    守卫永不触发。若日后需要，应在 ``orca/compile/validator.py`` 加 ``_check_*`` 校验。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    when_field: str  # 触发字段名（必须在 wf.inputs 声明）
+    when_in: list[str]  # 触发值集合（字段值 in 此集合 → 守卫生效）
+    require_nonempty: list[str]  # 守卫生效时必须存在且非空的字段名列表
+    message: str  # 失败时的错误描述（含语义说明 + 修复指引）
 
 
 class Route(BaseModel):
@@ -138,6 +217,11 @@ class AgentNode(Node):
     output_schema: dict | None = None  # None=自由文本；{...}=结构化 JSON schema
     retry: RetryPolicy | None = None  # None=不重试（向后兼容）；见 RetryPolicy
     validator: ValidatorConfig | None = None  # None=不校验（向后兼容）；见 ValidatorConfig
+    # 【node-memory】True = 引擎在节点完成后把 output 覆盖写到
+    # ``<project_root>/.orca/memory/<wf.name>/<node.name>.md``，下次渲染 prompt 时
+    # 注入「上一轮记忆 + 复用协议」让 agent 自决复用/重跑。opt-in（默认 False）。
+    # 仅 in-session shell 路径生效（scope：SPEC §0.9）；派生缓存（tape 才是真相源）。
+    memory: bool = False
 
 
 class ScriptNode(Node):
@@ -276,19 +360,49 @@ class Workflow(BaseModel):
     所有结构合法性（entry 存在且非组、name 唯一含组名、routes 引用合法、parallel 组
     结构、死锁检测）由 compile/ 层校验。
 
-    phase-10 v4：``setup`` 是 setup phase（可选，空 list = 无 setup）。三壳消费范式不同
-    （TUI/Web 实跑 setup agent + ask_user/gate；MCP 主 session 替 setup agent 跑，结果
-    作为 ``setup_outputs`` 传给 ``start_workflow`` 跳过 setup phase 实际执行）。
-    execute phase（``nodes``）的 agent **不配 ask_user/gate 工具**（compile validator 强制）。
+    execute phase（``nodes``）的 agent **不配 ask_user/gate 工具**（compile validator 强制，
+    铁律 7：execute phase 永不中断）。setup phase 已在 in-session v5 §6.1 删除——主 session
+    经 ``orca next --output`` 直接产 output，旧 ``setup:`` 段由 ``extra="forbid"`` 拒绝（fail loud）。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     name: str
     description: str = ""
-    setup: list[AgentNode] = []  # 【phase-10 v4】setup phase（可选；空 list = 无 setup）
     entry: str  # 起始 node 名（显式，唯一入口；不能是 parallel 组）
     inputs: dict[str, InputDef] = {}  # 工作流输入声明（可选）
+    # 跨字段 input 不变量（bootstrap 期 fail-loud 校验，SPEC §2.1 P0 / F1）。空 = 无约束。
+    # in-session 入口（``_validate_input_invariants``）+ ``Orchestrator.__init__`` 双路校验。
+    input_invariants: list[InputInvariant] = []
     nodes: list[AnnotatedNode]  # execute phase 节点（discriminated union）
     parallel: list[ParallelGroup] = []  # 静态并行组（顶层独立列表）
     outputs: dict[str, str] = {}  # 最终输出映射 {key: "{{ node.output.field }}"}
+    requires: list[str] = []  # 运行时依赖声明（plan sprightly-questing-donut §1.4）。含
+    # ``"knowledge_base"`` → run 启动预检 KB 存在（``resolve_kb_dir`` 非空），缺则 fail-loud
+    # （清晰指引 + searched 路径），不进 setup agent。默认空 = 无外部依赖。
+    # in-session recoverable 失败升格上限（per-node 连续 output_schema_mismatch /
+    # agent_blocked 次数）。撞上限 → workflow_failed（终态，可经 orca next --run-id resume）。
+    # 与 RetryPolicy.max_attempts（transient 失败，独立预算，line 104 同 ge=1 fail loud 模式）
+    # 正交。ge=1：0 会让升格判定退化（首次失败即升格语义应显式写 1，而非 0 偷偷触发）。
+    # SPEC 2026-08-11-resume-failed-and-configurable-escalation §1.1。
+    recoverable_max_attempts: int = Field(default=20, ge=1)
+    # 运行时加载元数据（不进 YAML 契约，serialize 排除）：workflow yaml 所在目录，由
+    # ``load_workflow`` 加载期绑定一次。run 层所有 RunContext 构造点从它推导
+    # ``subagents_root = workflows_root / "subagents" / wf.name``（point-to-file 协议
+    # SPEC §3.2/§4）——确定性路径只在加载期解析，运行期零参数透传（修复 in-session
+    # ``orca next`` / daemon 漏传 yaml_path 导致 subagents_root 为空的历史 bug）。
+    workflows_root: Path | None = Field(default=None, exclude=True)
+
+    @field_validator("requires")
+    @classmethod
+    def _requires_whitelist(cls, v: list[str]) -> list[str]:
+        """plan §1.4：requires 白名单校验。typo（如 ``knowlegde_base``）会被 pydantic 默默接受、
+        precheck 永不触发——fail-loud 承诺被静默禁用。未知 token → 校验失败（fail loud）。
+        """
+        known = {"knowledge_base"}
+        unknown = [t for t in v if t not in known]
+        if unknown:
+            raise ValueError(
+                f"requires 含未知 token {unknown}；已知：{sorted(known)}（typo 会让预检静默失效）"
+            )
+        return v

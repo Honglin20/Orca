@@ -21,12 +21,34 @@ session_id 与 RunState（SPEC §3.4）：
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
+from typing import Any
 
 from orca.schema import Event, RunState
 
 from orca.events.tape import Tape
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ReplayFold:
+    """``_replay_fold`` 的单次遍历产物：RunState + inputs + elapsed 锚点时间戳。
+
+    - ``workflow_started_ts``：**首条** ``workflow_started.timestamp``（workflow elapsed
+      锚点，与 inputs 抽取同取首条 ws 语义，罕见 retry 场景兼容）。
+    - ``node_started_ts``：每 node **最后一条** ``node_started.timestamp``（node elapsed
+      锚点；recoverable 重 arm 会重发 ``node_started`` → 最后一条 = 当前 attempt 起点）。
+
+    供 in-session 路径从 tape 时间戳差算 elapsed（tape 唯一真相源，M5 不撒谎）——
+    调用方 per-call 计时（如 ``orca next`` 每次新进程）会测成「本次调用耗时」而非
+    run 真实时长，不得再作为 elapsed 来源。
+    """
+
+    state: RunState
+    inputs: dict[str, Any]
+    workflow_started_ts: float | None = None
+    node_started_ts: dict[str, float] = field(default_factory=dict)
 
 
 def replay_state(tape: Tape, since_seq: int = 0) -> RunState:
@@ -38,6 +60,69 @@ def replay_state(tape: Tape, since_seq: int = 0) -> RunState:
     for event in tape.replay(since_seq):
         state = apply_event(state, event)
     return state
+
+
+def _replay_fold(tape: Tape) -> ReplayFold:
+    """单次遍历 tape：fold RunState + 抽 inputs + 捕获 elapsed 锚点时间戳。
+
+    性能（SPEC §3 O1a，包 P3）：合并 ``advance_step`` 内部多次全 tape 遍历
+    （``replay_state(tape)`` + ``Orchestrator._inputs_from_tape(tape)``）为一次，
+    顺带捕获 ``workflow_started_ts`` / ``node_started_ts``（elapsed 派生锚点，
+    零额外遍历）。``apply_event`` reducer 只存 ``workflow_name``（**不存 inputs**）→
+    inputs 必须在本函数里顺手抽（不能从 RunState 取）。
+
+    结果与拆分调用**逐字相等**（pure refactor，零行为变化）：
+      - ``state`` 部分 ≡ ``replay_state(tape)``（同一 reducer fold）。
+      - ``inputs`` 部分 ≡ ``Orchestrator._inputs_from_tape(tape)`` 语义：
+        * tape 无 ``workflow_started``（bootstrap 首调正常态）→ 静默返 {}，**不** WARN；
+        * tape 有 ``workflow_started`` 但 ``data.inputs`` 缺/非 dict → 返 {} + WARN
+          （真异常：残行截断 / 旧版 tape / 手改坏）；
+        * 正常 → 返**首条** ``workflow_started.data.inputs``（与 ``_inputs_from_tape``
+          在首条 ws 即 return 一致；后续 ws 不覆盖，罕见 retry 场景兼容）。
+
+    幂等：与 ``replay_state`` 同（reducer 纯函数 fold，重放两次结果相同）。
+
+    注 1：``_inputs_from_tape`` 改为薄封装调本函数取 inputs 部分（SPEC §3 O1a）；
+    该 wrapper 零调用方后已删（E5 惯例），inputs 抽取语义直接在本函数内实现。
+    注 2：**不接受 ``since_seq`` 参数**（与 ``replay_state`` 的差异）：state 部分天然
+    支持增量重放，但 inputs 必须**从 tape 起始**全扫才能找到 ``workflow_started``
+    （若 ``since_seq > seq(ws)`` 会静默错过 ws → inputs 返 {}，与 state 的增量语义
+    矛盾）。当前所有调用方（``advance_step`` / ``_inputs_from_tape``）都需全扫，
+    故砍 ``since_seq`` 防 footgun（YAGNI）。
+    """
+    state = RunState(run_id=tape.run_id, workflow_name="", status="pending")
+    inputs: dict[str, Any] = {}
+    ws_seen = False
+    workflow_started_ts: float | None = None
+    node_started_ts: dict[str, float] = {}
+    for event in tape.replay():
+        state = apply_event(state, event)
+        # inputs 仅从首条 workflow_started 抽（mirror _inputs_from_tape 早返语义）；
+        # 后续 ws（罕见，retry 场景）忽略 —— 与 _inputs_from_tape 在首条 ws 即 return
+        # 行为等价。
+        if event.type == "workflow_started" and not ws_seen:
+            ws_seen = True
+            workflow_started_ts = event.timestamp
+            raw = event.data.get("inputs")
+            if isinstance(raw, dict):
+                inputs = raw
+            else:
+                # workflow_started 存在但 inputs 缺/坏 → 真异常，WARNING（mirror
+                # _inputs_from_tape：保持两种「取不到」的可观测区分，bootstrap 首调
+                # 的「无 ws」则不 WARN）。
+                logger.warning(
+                    "Tape %s 的 workflow_started.data.inputs 缺失或非 dict（实得 %r），"
+                    "回退空 inputs（后续 render {{ inputs.* }} 可能 UndefinedError）",
+                    getattr(tape, "path", "?"), type(raw).__name__,
+                )
+        elif event.type == "node_started" and event.node:
+            node_started_ts[event.node] = event.timestamp
+    return ReplayFold(
+        state=state,
+        inputs=inputs,
+        workflow_started_ts=workflow_started_ts,
+        node_started_ts=node_started_ts,
+    )
 
 
 def apply_event(state: RunState, event: Event) -> RunState:
@@ -100,8 +185,19 @@ def apply_event(state: RunState, event: Event) -> RunState:
         return state.model_copy(update={"node_status": node_status})
 
     if t == "node_skipped":
+        # SPEC B B2 / I-REPLAY-3：补 ``context[node] = None``（raw=None，mirror
+        # ``node_completed`` 存 raw 的约定；R1 形状裁定）。``_outputs_acc_from_state``
+        # （resume.py:175）会对 ``state.context[N]`` 再包壳 ``{"output": raw}``；
+        # 故 reducer 必须存 raw（= None），不能存 dict——否则 resume 路径得
+        # ``{"output": {"output": None, ...}}``，与 live 的 ``{"output": None}`` 发散。
+        # 此分支让「光凭事件序列重建 outputs_acc」成立（I-REPLAY-3）。老 tape（含
+        # node_skipped 但 reducer 老行为不写 context）重放时新 reducer 自动补
+        # context[N]=None（I-BCOMPAT-5，零迁移）。
         node_status = {**state.node_status, node: "skipped"}
-        return state.model_copy(update={"node_status": node_status})
+        context = {**state.context, node: None}
+        return state.model_copy(
+            update={"node_status": node_status, "context": context}
+        )
 
     # ADR §4.3：blocked 派生（不入 tape，由 gate/interrupt 事件 fold 派生）。
     # node 当前 None / running 且收到 human_decision_requested / interrupt_requested
@@ -132,10 +228,21 @@ def apply_event(state: RunState, event: Event) -> RunState:
     if t in ("agent_message", "agent_thinking", "agent_tool_call",
              "agent_tool_result", "agent_usage"):
         # session 级流式细节不进 RunState（留给前端按 session_id 分组，phase 6）。
-        # agent_usage 可聚合进 usage（覆盖语义，幂等），但累加会破坏幂等（同事件应用两次=翻倍），
-        # 故此处仅在顶层 usage 存在时覆盖为最新一次的快照；phase 5 的 orchestrator 负责
-        # 跨 session 聚合。phase 3 不进 RunState，保持 reducer 纯粹幂等。
-        # → 显式 no-op：不修改 state（session 细节不入顶层状态）。
+        # **SPEC B B3 契约对齐**：``agent_usage`` 显式 no-op——session 级 usage 不进
+        # 顶层 RunState（``RunState.usage`` 字段已删，B3）。usage 派生统一走
+        # ``orca.run.projections.node_usage``（batch fold，per-node breakdown，幂等：
+        # 按 seq last-wins）。本 reducer 保持 no-op 让 live/replay 同形（铁律 3）。
+        return state
+
+    # SPEC 2026-08-11-resume-failed-and-configurable-escalation §1.3：workflow_resumed 从
+    # 下方 no-op 元组抽出为独立分支——resume-failed 时终态 failed → running 翻转（让 fold
+    # tape 的入口：web/status/list 看到 resume 后 run 重新活跃）。崩溃-resume（headless
+    # run_from_state）时 tape 无终态事件，status 本就是 running → 翻转 no-op，不破坏既有语义。
+    # 幂等：failed→running 后第二条 workflow_resumed 看到 running → no-op（SPEC §3.4 规则 8）。
+    # 不翻 cancelled/completed：cancelled 保持终态（用户主动 stop）；completed 无意义。
+    if t == "workflow_resumed":
+        if state.status == "failed":
+            return state.model_copy(update={"status": "running"})
         return state
 
     # web-shell-v2 §3.2 B1 / D8：agent_step_started（liveness 心跳）+ unknown_event
@@ -153,24 +260,21 @@ def apply_event(state: RunState, event: Event) -> RunState:
         return state.model_copy(update={"current_node": to})
 
     # 已知但顶层 RunState 不投影的事件：foreach_* / human_decision_* / custom / error /
-    # phase 11 中断 + resume + retry + validator + wait + dialog 可观测事件。
+    # phase 11 中断 + retry + validator + wait + dialog 可观测事件。
     # 这些事件的语义留给前端 reducer（按 session_id 分组 / 自定义渲染）：
     # - foreach 输出随 node_completed 进 context；
     # - gate 决策、custom 渲染不进顶层状态；
     # - error 细节由 workflow_failed 分支承担状态转换（已处理）；
-    # - interrupt_*/prompt_rendered/workflow_resumed/retry_*/validator_*/wait_* 是可观测标记，
-    #   不改顶层状态（resume 后状态由已落盘的 node_completed/route_taken 重建，resumed 事件
-    #   本身不推进 node_status / current_node —— drive_loop 后续 dispatch 才推进；
-    #   retry/validator 的最终成败由它们包裹的 node_completed/node_failed 承担，retry_started/
-    #   validator_started 等本身不推进 node_status —— 否则同 node 多 attempt 会让 running/done
-    #   状态反复跳）。
+    # - interrupt_*/prompt_rendered/retry_*/validator_*/wait_* 是可观测标记，不改顶层状态
+    #   （resume 后状态由已落盘的 node_completed/route_taken 重建；retry/validator 的最终
+    #   成败由它们包裹的 node_completed/node_failed 承担）。
     # - dialog_*（SPEC §11.7 裁定 1）：dialog 是 post-run 可观测事件，唯一真相在 tape 的
     #   dialog_message 事件（不写 ctx.dialog_history）；不推进 node_status / current_node。
     # 保持 reducer 幂等 + 最小。
     if t in (
         "foreach_started", "foreach_item_started", "foreach_item_completed",
         "foreach_completed", "prompt_rendered",
-        "workflow_resumed", "retry_started", "retry_succeeded", "retry_exhausted",
+        "retry_started", "retry_succeeded", "retry_exhausted",
         "validator_started", "validator_passed", "validator_failed",
         "wait_started", "wait_completed",
         "dialog_started", "dialog_message", "dialog_ended",

@@ -3,7 +3,7 @@ name: create-workflow
 description: >-
   生成或转换一个 Orca workflow（YAML + agent md）。当用户想新建一个多 agent 编排、
   或把已有的一堆 agent prompt / 别的格式的 workflow 转成 Orca 形态时使用。
-  产出后自动跑 orca validate 自校验（0 error 才算完成），画草 DAG 报告给用户，
+  产出后自动跑 tars validate 自校验（0 error 才算完成），画草 DAG 报告给用户，
   直接落盘到用户指定路径或默认 ./workflows/。
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep
 ---
@@ -50,7 +50,7 @@ allowed-tools: Read, Write, Edit, Bash, Glob, Grep
 
 🔴 **铁律：同一 workflow 内常混用 inline + agent-ref**——用户给的 agent 角色 md 用 `agent:` 引用，prompt 片段 / skill 起草的补全节点保持**内联**。**绝不**把 skill 起草的节点或 prompt 片段也落成 agent md + `agent:` 引用（那是过度物化）。区分关键：**角色 md = 可复用人设**（"你是研究员…"）；**prompt 片段 = 单次任务指令**（"调研 X，输出要点"）。
 
-🔴 **名称一致性铁律**：`agent: <name>` 里的 `<name>` 必须**逐字等于**落盘的 agent 文件/文件夹名（`agents/<name>.md` 或 `agents/<name>/agent.md`）。拼写、前后缀（如 `analyze` vs `analyzer`）、单复数必须**两端一致**——不一致则 resolver 找不到、`orca validate` 直接失败。落盘前自查节点 `agent:` 值与写出的文件路径同名。
+🔴 **名称一致性铁律**：`agent: <name>` 里的 `<name>` 必须**逐字等于**落盘的 agent 文件/文件夹名（`agents/<name>.md` 或 `agents/<name>/agent.md`）。拼写、前后缀（如 `analyze` vs `analyzer`）、单复数必须**两端一致**——不一致则 resolver 找不到、`tars validate` 直接失败。落盘前自查节点 `agent:` 值与写出的文件路径同名。
 
 > executor 默认按用户环境（项目约定 opencode + deepseek-v4-flash；用户没指定就默认 opencode）。
 
@@ -85,6 +85,76 @@ allowed-tools: Read, Write, Edit, Bash, Glob, Grep
 - 只有**文件夹 agent**才迁移脚本到 `agents/<name>/scripts/` + `$ORCA_AGENT_RESOURCES` 引用（H1）。
 - 判据：用户说"串脚本/跑脚本"且脚本无 agent 人设 → script 节点链；用户说"封成 agent 跑某脚本"→ 文件夹 agent。
 
+**H8 `description` 可区分（tars 靠它选 wf）**：
+- 🔴 `description` 用**一两句话**说清这个 workflow 的**功能与目的**——它是 `orca list` 里 tars 语义匹配意图、用户识别 wf 的唯一信息。
+- 生成前先 `orca list` 看现有 description，确保新的与它们**有明确区别**。
+- 若与某个已有 workflow **无明确区别**（描述撞车或只是换皮）→ **问用户**本质区别（1-2 个业务问题，参上文「模糊就问业务」），据此写可区分的 description，**不要**闷头生成含糊或撞车的描述。
+
+## input 定义准则（三档原则）
+
+> 权威 SPEC：`docs/specs/workflow-input-design-principle.md`。**inputs 只放「下游 agent 无法执行 / 会失控」的必须项**；其余按性质下沉到 Tier B（代码事实，agent 推断）或 Tier C（工程默认，固化）。
+
+**判定总纲**：代码里能 grep 出来的是事实（→ Tier B）；代码里不存在的是意图（→ Tier A）。会静默产出错误交付物的回退路径必须 fail loud / 问用户（**永不 silent default**）。
+
+### 三档分类 + 标签约定（每个 input 的 `description` 以标签起头，供 in-session 编排器/tars skill 读取）
+
+| 档 | 标签 | 性质 | 应放在 |
+|---|---|---|---|
+| **Tier A** | `[ask]` | 业务决策（意图/预算/KPI/硬件/模型入口/业务命令）；agent 读不到、缺它 workflow 会失控 | **input**（必填） |
+| **Tier B** | `[infer]` | 代码事实（agent 读用户代码可得）；缺失走 **ask-user 哨兵**（绝不造假） | **setup 节点 `output_schema` 字段**（不是 input） |
+| **Tier C** | `[default]` | 有合理工程默认，99% 用户不该决策 | **固化**：yaml `default` / agent.md 模板 / 脚本默认 |
+| **Tier C 子集** | `[advanced]` | 罕见 override，固化默认，文档可见但不暴露为主 input | yaml `default`（带 [advanced] 标签） |
+
+**Tier A 子类（必填 input 的判据）**：模型入口（`model_path` / `teacher_model_path`）/ 业务命令原样执行（`train_command` / `test_command`）/ 业务 KPI（`target_latency_ms` / `accuracy_target` / `accuracy_gap_db` / `accuracy_tolerance`）/ 预算闸门（`max_rounds` / `max_evals`，被确定性脚本消费非 LLM 自决）/ 目标硬件（`target_hardware` / `device`）/ 复现性底座（`seed`，默认 0，**全部 workflow 必须有**）。
+
+**Tier B 典型项**（setup 节点 infer-once + propagate，下游 `{{ setup.output.X }}` 取）：`project_root` / `build_fn` / `dummy_input` / `model_family` / 数据 loader dotted-path（`calib_data_ref` / `train_data_ref` / `eval_data_ref`）/ 评估函数（`eval_fn_ref`）/ 训练超参（`lr` / `batch_size` / `epochs`，**注意**：默认值是 smoke 不是生产，需 `smoke` 开关）。
+
+**Tier C 典型项**（固化，绝不作 input）：`output_dir`（走引擎注入的 `$ORCA_ARTIFACTS_DIR`）/ `iterations`（由 `max_rounds × 每轮节点数` 自动算；用户要覆盖用 `--max-iter` CLI）/ 算法开关预设（`mode` / `recipes` / `scheme` / `bit_width(s)` / `granularity` / `method` / `ratio` / `bake` / `cage` / `proxy_dataset_spec`）/ 工程路径（`*_scripts_dir` / `kb_cache_dir`，落 setup output 字段向后传）。
+
+### 反向判据（满足任一条 → 强制下沉，否决 KEEP 作 input）
+
+- 能在 `model.py` / `train.py` / `config.yaml` grep 到 → Tier B（infer）
+- 改它需要懂 workflow 内部 → Tier C（固化）
+- 留空有合理默认且非业务 KPI → Tier C
+- 与代码事实会漂移（用户改代码忘改 input）→ **必须** Tier B
+
+### 「向后传」的唯一可靠模式：infer-once + propagate
+
+在 setup 节点集中推断一次，写进 `output_schema`，下游用 Jinja `{{ setup.output.X }}` 取。**严禁「每个 agent 各自重新自找」同一事实**（违反 DRY、自找不一致时远端崩、破坏复现）。黄金模板：`workflows/agent-struct-exploration.yaml` 的 `setup` 节点（`project_root`/`build_fn`/`dummy_input`/`struct_scripts_dir` 全下沉为 output 字段）。
+
+### Tier B 缺失：ask-user 哨兵（绝不造假）
+
+Tier B 项读代码无果时，agent **不要**造假（`torch.randn` / 复用 train 当 eval / 静默默认空 loader / 套常见 shape 默认），以**最终消息**返回轻量哨兵 JSON：
+
+```json
+{"_orca_ask_user": "<一句话问题>",
+ "options": ["<候选 1>", "<候选 2>"],
+ "context": "<已 grep 过什么、看到了什么、缺哪项>",
+ "_sentinel": "orca_ask_user_v1"}
+```
+
+（**两键必填**：`_orca_ask_user` + `_sentinel:"orca_ask_user_v1"`；TARS skill strict 识别魔键 → 问用户 → SendMessage/Task(task_id) 恢复**同一**子 agent → MAX_ASK=3 兜底；哨兵**不进 `orca next`**，引擎零改动。详 `docs/specs/agent-ask-user-sentinel.md`。）
+
+**每个含 Tier B 项的 agent.md 必加「## 缺失必填输入时（严禁造假）—— ask-user 哨兵」段**（紧贴 `## 输出` 之前）：列本节点 Tier B 项 + 不造假禁令 + 哨兵 JSON 示例 + 会被恢复说明 + fail_loud fallback。
+
+### 生成模板时的默认动作
+
+- workflow YAML 默认**只含 Tier A inputs**（含 `seed` 默认 0）；
+- Tier B 写成 setup 节点 `output_schema` 字段 + agent.md「读代码→哨兵→fail loud」段；
+- Tier C 固化：`output_dir` 走 `$ORCA_ARTIFACTS_DIR`、`iterations` 不作 input、算法开关固化默认；
+- 每个 input 的 `description` 以 `[ask]` / `[infer]` / `[default]` / `[advanced]` 标签起头。
+
+## 产物写作规范（去考古化 + 普适性）
+
+> 权威参考：`reference/writing-style.md`（与本 SKILL.md 同目录）。**产物是产品说明书，不是设计日志。**
+
+生成 workflow/agent 时，写作语气遵守三条底线（详 `reference/writing-style.md`）：
+1. **受众是使用者（LLM 执行者 + 复用者），不是作者本人**。开发考古（迁移自哪、约束来自哪个 spec issue、某版本嵌入哪个节点）放 `docs/specs/` 或 commit，**绝不进** `agent.md` / `SKILL.md` / yaml。
+2. **description / prompt / agent.md 只答 what-input-output，不答 why-history**。NAS 系列是正面样板（`workflows/agents/nas-select/agent.md` 55 行），kd 系列是反面教材（满篇 `BLK-X` / `§X` / 迁移自）。
+3. **红线 > 解释，契约 > 口头约束**：不该做的用 `❌ 违反即失败` 列；关键正确性用 `output_schema` / `when` 做成引擎硬检查。
+
+🔴 **考古自检（生成后 grep 产物）**：命中 `[A-Z]+-[0-9]+`（开发编号 BLK/BUG/HI/U/LO 等，含单字母前缀如 U-1/P-5）/ `迁移自` / `analogue of` / `leaves off` / `前作` / `前身是` / `v[0-9]+ 已嵌入` / `spec-review` / `spec_review` / `plan [a-z-]+ §` / `SPEC 20[0-9]{2}-` = FAIL。**宽口径兜底**（无连字符开发编号，标准正则 `[A-Z]+-[0-9]+` 抓不到）：额外 grep `P[0-9]|Increment [A-Z]|code-reviewer|review #[0-9]|SR[0-9]|finalize 20[0-9]{2}|演进历史|前身是`，命中按 §1 判据删/留。引用仓库内真实文件的章节（`CONTRACTS.md §N`、`agent-ask-user-sentinel.md §N`、`workflow §N`、`checklist item N`）是精确导航，**允许**。详 `reference/writing-style.md` §8/§9。例外：`docs/specs/`、CHANGELOG、release note、**跨 agent 的 `CONTRACTS.md`**（如 `workflows/agents/_kd_scripts/CONTRACTS.md`）。
+
 ## 产出过程（通用，非死步骤）
 
 0. **素材就近读、别派探索子任务**：契约参考 + crib 例子就在本 skill 同目录（`reference/` + `examples/`），**直接 `Read` 它们**——不要 spawn explore/search 子任务去翻用户代码库（慢且无关）。用户提供的素材在 `assets/` 或指定路径，`Read` 即可。
@@ -96,10 +166,24 @@ allowed-tools: Read, Write, Edit, Bash, Glob, Grep
      非交互/headless 环境下任何 y/n 确认都无法应答，会卡死——故**全程不阻塞等待确认**。
 3. **强制自校验**（不可跳过）：对**最终路径**的 yaml 跑
    ```bash
-   orca validate <最终yaml路径>
+   tars validate <最终yaml路径>
    ```
    - 退出码非 0 → 读 stderr，**自己改**，再验。循环直到 0 error。warnings 可接受但要跟用户提一句。
-   - 拿不到 `orca` 命令就退而用 `teams validate`（同入口）。
+   - **agent prompt 洁净检查（创建完/改完 workflow 必做）**：跑 `tars validate`（含 `_check_prompt_dev_residue` lint，warning 不阻断）+ 按 [reference/agent-prompt-cleanliness-contract.md](reference/agent-prompt-cleanliness-contract.md) 做受众翻转通读——确认 agent.md body 无 plan/issue/源码路径/测试项目名等开发期残留，warning 清零。
+   - **用户输入权威检查（agent 涉及 port / 包装用户逻辑时必做）**：若节点要 port / 复用 / 包装用户原项目的训练范式 / 评价 metric / 数据管道 / 用户脚本，按 [reference/agent-prompt-cleanliness-contract.md](reference/agent-prompt-cleanliness-contract.md) §10 落地「用户输入权威三件套」（铁律+清单 / fidelity 维度 / deterministic 自检）——从错误抽象通用规则，而非针对具体错误定制。
+   - （`orca` 是 in-session shell，无 validate 子命令；校验一律走 `tars validate`。）
+   - `tars validate` 现含**引用合规校验**（除结构校验外）：① 自引用（节点 prompt/command/values 禁引用自身 `.output`，render 期会崩）；② output_schema 字段对齐（strict schema 下字段拼写错必报）；③ 文件夹 agent scripts 路径存在性（`$ORCA_AGENT_RESOURCES/scripts/<f>` 必须真实存在）；④ input 三档标签（`description` 缺 `[ask]`/`[infer]`/`[default]`/`[advanced]` 起头 → warning）。前 3 条 error 阻断，第 4 条 warning 不阻断但会显示。
+   - validate 通过后**必跑 input 三档 checklist**（详 SPEC §6）：
+     - [ ] 每个 input 归类到 Tier A 四子类之一（模型入口/业务命令/KPI/硬件/seed），否则下沉
+     - [ ] Tier B 项有 setup 节点 `output_schema` 字段承接（infer-once + propagate，链不破）
+     - [ ] Tier B 项在 agent.md 有「读代码→哨兵→fail loud」契约段
+     - [ ] `output_dir` 不作 input（走 `$ORCA_ARTIFACTS_DIR`）
+     - [ ] `iterations` 不作 input（自动算 / 用户 `--max-iter` 覆盖）
+     - [ ] 算法开关 / 预设（mode/recipes/scheme/bit_width/bake/granularity 等）都不作 input（固化）
+     - [ ] 业务 KPI 不缺（latency / accuracy / max_rounds / target_hardware 至少齐其相关项）
+     - [ ] **workflow 有 `seed`（默认 0）**
+     - [ ] 每个 input 的 `description` 以 `[ask]`/`[infer]`/`[default]`/`[advanced]` 标签起头
+     - [ ] 移除任何 input 时，同步更新所有引用 `{{ inputs.X }}` 的 agent.md Jinja（避免 StrictUndefined 崩）
 4. **画草 DAG 报告给用户**（非阻塞，已落盘）：节点名 + 箭头，不美化。parallel 用括号组，`$end` 收尾。例：
    ```
    finder → [researcher_a | researcher_b] → merger → $end
@@ -115,10 +199,12 @@ YAML 字段名、`kind`、`executor` 等是固定契约（见参考，别改）�
 ## 契约在哪
 
 完整字段表 / routes 语义 / agent md 格式 / validate 错误类别 / 12 条正确性 cheatsheet 在：
-**`reference/orca-workflow-contract.md`**（与本 SKILL.md 同目录）。生成前读它，schema 改了只动那个文件。
+**`reference/orca-workflow-contract.md`**（结构 / 字段契约）。
+产物写作语气规范（去考古化 + 普适性）在：**`reference/writing-style.md`**（语气 / 受众）。
+两文件并列，生成前都读。schema 改了只动 contract，语气规范改了只动 writing-style。
 
 <success_criteria>
-- [ ] 产出的 YAML 通过 `orca validate`（0 error）
+- [ ] 产出的 YAML 通过 `tars validate`（0 error）
 - [ ] 每个可达路径都终止（`$end` 或 `terminate`）
 - [ ] workflow 有 `outputs`（H4）
 - [ ] skill 起草的节点保持**内联**；只有用户给的/外部转换的 agent 才用 `agent:` 引用（铁律）
@@ -126,4 +212,8 @@ YAML 字段名、`kind`、`executor` 等是固定契约（见参考，别改）�
 - [ ] 合并节点按是否需推理选 `set`/`agent`，且引用 `<组>.output.outputs.<分支>`（H2）
 - [ ] 校验/重试用原生 `validator`/`retry` 字段，非手搓编排（H3）
 - [ ] 已落盘到最终路径 + 画了草 DAG 报告（非阻塞）
+- [ ] `description` 一两句说清功能目的，且与 `orca list` 现有 workflow 有明确区别（无区别则问了用户）（H8）
+- [ ] **input 三档**：每个 input 归 Tier A 四子类之一，`description` 以 `[ask]`/`[infer]`/`[default]`/`[advanced]` 标签起头；Tier B 下沉为 setup output；Tier C 固化（`output_dir`→`$ORCA_ARTIFACTS_DIR`、`iterations` 不作 input、算法开关固化）；workflow 有 `seed` 默认 0；含 Tier B 的 agent.md 有「读代码→哨兵→fail loud」段
+- [ ] 产物无开发考古引用：grep workflow.yaml + `agents/*.md` + SKILL.md，命中 `[A-Z]+-[0-9]+`（开发编号，含单字母前缀如 U-1/P-5）/ `迁移自` / `analogue of` / `leaves off` / `前作` / `前身是` / `v[0-9]+ 已嵌入` / `spec-review` / `spec_review` / `plan [a-z-]+ §` / `SPEC 20[0-9]{2}-` 任一 = FAIL；宽口径兜底 grep `P[0-9]|Increment [A-Z]|code-reviewer|review #[0-9]|SR[0-9]|finalize 20[0-9]{2}|演进历史|前身是`，命中按 §1 判据删/留（引用真实文件章节 §N 是导航，允许；`docs/specs/`、CHANGELOG、release note、跨 agent `CONTRACTS.md` 例外）
+- [ ] description / agent.md 写产品说明书语气（what/input/output），无迁移出处、版本嵌入、spec issue 编号；红线用 ❌ 列举
 </success_criteria>

@@ -605,8 +605,14 @@ def test_single_runs_registry():
 
     # 反向断言：不存在第二个 ``_runs``-like 字段（如 ``_attached_runs`` / ``_run_views``）
     other_regs = re.findall(r"self\.(_\w*runs?\w*)\s*:\s*dict", src)
-    # 允许 ``_runs`` 一个；其它形态（``_runs_dir`` 不是 dict，跳过）
-    dict_regs = [name for name in other_regs if name != "_runs"]
+    # 允许 ``_runs`` + ``_run_path_index``（SPEC §13.2 M-12 discovery per-process 索引，
+    # 是 tape 路径缓存非 run 数据真相源，不违反「单一 registry」铁律）
+    # + ``_persistent_cache_by_runs_dir``（SPEC §13.3 P0 派生缓存，cache 非 index）。
+    dict_regs = [
+        name
+        for name in other_regs
+        if name not in ("_runs", "_run_path_index", "_persistent_cache_by_runs_dir")
+    ]
     assert not dict_regs, f"发现并行 registry dict: {dict_regs}"
 
 
@@ -684,3 +690,83 @@ def test_perf_fixture_gen_and_meta(tmp_path):
         await manager.shutdown()
 
     run_async(go())
+
+
+# ── health runs_dir_fp（spec-review B1/B3，SPEC §5a）────────────────────────────
+
+
+def test_health_endpoint_exposes_runs_dir_fp(tmp_path):
+    """``GET /api/health`` 返回 ``orca_home_fp``（权威）+ ``runs_dir_fp``（兼容期同值）。
+
+    SPEC §13.1 U-2：兼容期同发两字段，值 = ``orca_home_fingerprint()``。
+    用 FastAPI TestClient（真 ASGI，非 mock）打到真实 health handler——验证 ``_identity`` →
+    ``attach.health`` 真链路（mock 测试无法验证指纹真流过端点）。
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from orca.iface.web._identity import orca_home_fingerprint
+    from orca.iface.web.routes import build_attach_router
+
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    manager = RunManager(max_concurrent=2, runs_dir=runs_dir)
+    app = FastAPI()
+    app.include_router(build_attach_router(manager))
+    client = TestClient(app)
+
+    r = client.get("/api/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["app"] == "orca"
+    assert body["pid"] == os.getpid()
+    expected_fp = orca_home_fingerprint()
+    # orca_home_fp（新权威）+ runs_dir_fp（兼容期同值）
+    assert body["orca_home_fp"] == expected_fp
+    assert body["runs_dir_fp"] == expected_fp
+    assert len(body["orca_home_fp"]) == 12
+    # 无明文项目目录泄漏
+    assert str(runs_dir.resolve()) not in r.text
+
+
+def test_runs_dir_fp_deterministic_and_distinct(tmp_path):
+    """同 runs_dir → 同 fp；不同 runs_dir → 不同 fp（client/server 比对基础）。"""
+    from orca.iface.web._identity import runs_dir_fingerprint
+
+    a = tmp_path / "runsA"
+    b = tmp_path / "runsB"
+    a.mkdir()
+    b.mkdir()
+    assert runs_dir_fingerprint(a) == runs_dir_fingerprint(a)  # 确定性
+    assert runs_dir_fingerprint(a) != runs_dir_fingerprint(b)  # 区分性
+    assert len(runs_dir_fingerprint(a)) == 12
+
+
+# ── 绝对路径形态安全样例（spec-review H3：client 现以绝对路径 POST）──────────────
+
+
+def test_resolve_tape_path_accepts_valid_absolute_under_runs_dir(tmp_path):
+    """合法**绝对**路径（runs_dir 下）→ 通过。
+
+    client（``_open_run``）现一律 ``tape.resolve()`` 绝对路径 POST；server 的 ``resolve_tape_path``
+    须仍接受 runs_dir 下的绝对路径（非仅相对）。
+    """
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    tape = runs_dir / "ok.jsonl"
+    tape.write_text("{}", encoding="utf-8")
+    manager = _make_manager_with_runs_dir(tmp_path, runs_dir)
+    resolved = manager.resolve_tape_path(str(tape.resolve()))
+    assert resolved == tape.resolve()
+
+
+def test_resolve_tape_path_rejects_absolute_outside_runs_dir(tmp_path):
+    """**绝对**路径在 runs_dir 外（无 allowlist）→ PermissionError（边界检查对绝对路径同样生效）。"""
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text("{}", encoding="utf-8")
+    manager = _make_manager_with_runs_dir(tmp_path, runs_dir)
+    with pytest.raises(PermissionError):
+        manager.resolve_tape_path(str(outside.resolve()))
+

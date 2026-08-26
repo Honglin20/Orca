@@ -1,0 +1,10 @@
+case_id: 09_duplicate_id
+primary_evaluator: search-space-evaluator
+flat_relpath: flats/clean_flat.py
+expect: FLAG
+expected_severity: BLOCKER
+must_mention_one_of:
+- duplicate
+- id
+- unique
+description: two slots share id L0_attn

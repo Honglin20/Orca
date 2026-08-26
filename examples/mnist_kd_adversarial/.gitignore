@@ -1,0 +1,10 @@
+# torchvision 自动下载的 MNIST 数据
+data/
+# 训练 checkpoint（每次重新训产生，不入库）
+*.pt
+# ONNX 导出（含 torch.onnx 的 external data 副产物）
+*.onnx
+*.onnx.data
+# Python 缓存
+__pycache__/
+*.pyc

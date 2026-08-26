@@ -8,8 +8,8 @@
   - **逐条 flush**：连续 5 个 tool call 并发（``asyncio.gather``），server 必须逐条 flush
     应答，不批量 / 不丢（规避 opencode #21516：客户端不等 reply 批量发时 server 必须配合）。
 
-v4 更新（2026-07-07）：期望 9 工具（Discovery 4 + Lifecycle 3 + History 2）；start_workflow
-E2E 用 catalog 模式（cwd 指向含 ``workflows/`` 的 tmp_path）。
+in-session v5 §6.2：期望 8 工具（Discovery 3 + Lifecycle 3 + History 2，删 get_agent_prompt）；
+start_workflow E2E 用 catalog 模式（cwd 指向含 ``workflows/`` 的 tmp_path）。
 """
 
 from __future__ import annotations
@@ -26,12 +26,11 @@ from tests.iface.mcp.conftest import (
 # demo_linear 路径（项目根 examples/demo_linear.yaml）。
 DEMO_LINEAR = str(Path(__file__).resolve().parents[3] / "examples" / "demo_linear.yaml")
 
-# v4 期望的 9 工具名（Discovery 4 + Lifecycle 3 + History 2）。
+# 期望的 8 工具名（Discovery 3 + Lifecycle 3 + History 2，in-session v5 §6.2 删 get_agent_prompt）。
 _EXPECTED_TOOLS = {
     "list_workflows",
     "describe_workflow",
     "list_agents",
-    "get_agent_prompt",
     "start_workflow",
     "get_task_status",
     "cancel_task",
@@ -41,7 +40,7 @@ _EXPECTED_TOOLS = {
 
 
 def test_e2e_concurrent_list_tools_all_receive_full_tool_list(tmp_path):
-    """E2E-5：并发 5 个 list_tools，每个都收到完整 9 工具（不批量 / 不丢）。
+    """E2E-5：并发 5 个 list_tools，每个都收到完整 8 工具（不批量 / 不丢）。
 
     SPEC §6.3 E2E-5：规避 opencode #21516，server 必须逐条 flush 应答。
     """
@@ -59,7 +58,7 @@ def test_e2e_concurrent_list_tools_all_receive_full_tool_list(tmp_path):
     assert len(tool_sets) == 5, f"应收到 5 个 reply，实得 {len(tool_sets)}"
     for i, names in enumerate(tool_sets):
         assert _EXPECTED_TOOLS.issubset(names), (
-            f"reply {i} 应含 9 工具，实得 {names}（缺 {_EXPECTED_TOOLS - names}）"
+            f"reply {i} 应含 8 工具，实得 {names}（缺 {_EXPECTED_TOOLS - names}）"
         )
 
 

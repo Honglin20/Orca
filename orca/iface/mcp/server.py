@@ -1,15 +1,23 @@
-"""server.py —— MCP server v4（9 工具 + setup/execute 分相 + Result 信封）。
+"""server.py —— MCP server v4（8 工具 + Result 信封）。
+
+**BREAKING (in-session v5 §6.2, step 5a)**：删 ``get_agent_prompt`` 工具，
+``start_workflow`` 删 ``setup_outputs`` 参数。setup phase 全栈已删，旧 MCP 客户端
+不再调 ``get_agent_prompt``；``start_workflow`` 不再接收 ``setup_outputs``。YAML 含
+``setup:`` 段会被 pydantic ``extra="forbid"`` 拒绝（fail loud）。详见 release note
+``docs/releases/2026-07-15-in-session-step5a-setup-removal.md``。
 
 回答「外部 MCP 客户端（Claude Code / opencode / Cursor）怎么把 Orca workflow 当工具调？」：
-单 ``RunManager`` + ``FastMCP`` + 9 工具（Discovery 4 + Lifecycle 3 + History 2），
+单 ``RunManager`` + ``FastMCP`` + 8 工具（Discovery 3 + Lifecycle 3 + History 2），
 stdio JSON-RPC。所有 tool 秒级返回（§0.1 第三条 HandleId pattern）。
 
-v4 vs 旧 6-tool 设计（2026-07-07 重写）：
+v4 vs 旧 6-tool 设计（2026-07-07 重写）+ in-session v5 §6.2 精简：
   - 删 ``resolve_gate``（execute phase 永不中断，无 needs_decision 状态）
-  - 加 ``list_workflows`` / ``describe_workflow`` / ``get_agent_prompt`` / ``get_task_history``
-  - ``start_workflow`` 改为 name-based（catalog 查找）+ ``setup_outputs`` 参数
+  - 加 ``list_workflows`` / ``describe_workflow`` / ``get_task_history``
+  - ``start_workflow`` name-based（catalog 查找）
   - 全部 tool 返回 ``Result`` 信封（``{ok, data?, error?, _hint?}``），error.kind 取
     ``ErrorKind`` 值（ADR §4.1，**无 layer 字段**）
+  - in-session v5 §6.2：删 ``get_agent_prompt`` + ``start_workflow`` 删 ``setup_outputs``
+    （setup phase 全栈删除）
 
 设计规则（SPEC §0.1 八条铁律 / §1.4 单例 / §1.3 stdin EOF 双行为）：
   - **单进程单 RunManager**：``run_mcp_server`` 构造后立刻 ``_assert_runmanager_singleton``。
@@ -17,14 +25,13 @@ v4 vs 旧 6-tool 设计（2026-07-07 重写）：
     ``manager.start_run``（非阻塞后台 task）。
   - **Result 信封**：所有 tool 返 ``Result``；MCP 序列化为 ``{ok, data?, error?, _hint?}``。
     error.kind 是 ``ErrorKind`` 值（ADR §4.1 决策 1.3/1.4）。
-  - **三重杠杆防跳过 setup**（§2.8）：list_workflows 标 ``has_setup`` / start_workflow
-    强校验 setup_required / tool description 引导。
   - **stdio flush 兜底**：``transport.FlushingStdoutWriter`` 留作纵深防御 + 单测 mock。
   - **stdin EOF 双行为**：无 --with-web → run_stdio 返回即 drain + 退出；有 --with-web
     → run_stdio 返回后进 daemon 模式等 idle/signal（§1.3）。
 
 依赖单向：本模块依赖 ``orca.iface.web.run_manager``（RunManager）+
-``orca.iface.mcp.{transport, hints, catalog, agent_catalog, setup_phase, tape_index}`` +
+``orca.iface.mcp.{transport, hints, tape_index}`` +
+``orca.compile.catalog``（workflow 发现/加载/描述）+
 ``orca.exec.result``（Result/Error/ErrorKind）+ mcp SDK（FastMCP / stdio_server）。
 不含编排/gate 决策逻辑——manager 才是托管入口。
 """
@@ -37,6 +44,7 @@ import inspect
 import logging
 from typing import TYPE_CHECKING, Any
 
+from orca.compile import catalog
 from orca.exec.error_kinds import ErrorKind
 from orca.exec.result import Error, Result
 from orca.iface.mcp.hints import (
@@ -44,12 +52,8 @@ from orca.iface.mcp.hints import (
     after_start,
     by_status,
     for_describe_workflow,
-    for_get_agent_prompt,
     for_get_task_history,
     for_list_workflows,
-    for_setup_outputs_invalid as for_setup_invalid,
-    for_setup_outputs_mismatch as for_setup_mismatch,
-    for_setup_required,
     unknown_task,
 )
 from orca.iface.mcp.transport import FlushingStdoutWriter  # noqa: F401 — 纵深防御，单测/SPEC §4.4 引用
@@ -129,7 +133,7 @@ def _err(
 
 
 class OrcaMcpServer:
-    """单 RunManager + FastMCP + 9 工具注册（SPEC §1.4 / §2 v4）。
+    """单 RunManager + FastMCP + 8 工具注册（SPEC §1.4 / §2 v4）。
 
     用法::
 
@@ -143,37 +147,30 @@ class OrcaMcpServer:
     ``dict``（``_result_to_dict`` 序列化的 Result 信封）。
     """
 
-    # ── Discovery 组（4 个）────────────────────────────────────────────────────
+    # ── Discovery 组（3 个）────────────────────────────────────────────────────
 
     async def tool_list_workflows(self) -> dict[str, Any]:
         """List available workflows in the catalog (read-only, instant).
 
         Scans project-local ``workflows/`` + user-global ``~/.orca/workflows/``.
-        Each entry includes ``has_setup`` flag.
-
-        **三重杠杆 A**：if ``has_setup=true``, you MUST collect ``setup_outputs``
-        before calling start_workflow. Call ``describe_workflow(name=...)`` next.
+        Each entry includes ``inputs_schema`` for picking a workflow + extracting
+        inputs in one command. Call ``describe_workflow(name=...)`` next for
+        full input metadata.
         """
-        from orca.iface.mcp.catalog import list_workflows
-
-        workflows = list_workflows()
+        workflows = catalog.list_workflows()
         return _ok({"workflows": workflows}, hint=for_list_workflows())
 
     async def tool_describe_workflow(self, name: str) -> dict[str, Any]:
         """Get detailed metadata for one workflow (without starting it).
 
-        Returns ``{name, description, inputs_schema, setup, has_setup,
-        estimated_runtime}``. The ``setup`` field (when ``has_setup=true``)
-        lists setup agent metadata: ``[{name, description, output_schema}]``.
+        Returns ``{name, description, inputs_schema}``. ``inputs_schema`` is a
+        dict ``{key: {type, required, description}}`` for filling ``start_workflow``.
 
         Decision flow:
-          - ``has_setup=false`` + inputs complete → call start_workflow
-          - ``has_setup=true`` → for each setup agent, call get_agent_prompt,
-            collect outputs, then start_workflow with setup_outputs
+          - inputs complete → call start_workflow
+          - inputs incomplete → ask user for missing fields, then start_workflow
         """
-        from orca.iface.mcp.catalog import describe_workflow, find_workflow_by_name
-
-        wf = find_workflow_by_name(name)
+        wf = catalog.find_workflow_by_name(name)
         if wf is None:
             return _err(
                 ErrorKind.BUSINESS_CONFIG,
@@ -181,10 +178,9 @@ class OrcaMcpServer:
                 "Call list_workflows to see available names.",
                 hint="Call list_workflows to discover available workflows.",
             )
-        detail = describe_workflow(wf)
+        detail = catalog.describe_workflow(wf)
         inputs_complete = _inputs_complete(wf)
         hint = for_describe_workflow(
-            has_setup=detail["has_setup"],
             inputs_complete=inputs_complete,
             name=name,
         )
@@ -234,166 +230,42 @@ class OrcaMcpServer:
             )
         return _ok({"agents": items})
 
-    async def tool_get_agent_prompt(
-        self, name: str, workflow: str | None = None
-    ) -> dict[str, Any]:
-        """Borrow a setup agent's prompt text (for MCP setup phase).
-
-        **MCP setup phase flow**:
-        1. Call this tool to get the setup agent's prompt.
-        2. Use the prompt as your operating context; ask the user questions
-           per the prompt using your own tools.
-        3. Collect the structured output per the agent's output_schema.
-        4. Pass it as ``setup_outputs[<agent_name>]`` to start_workflow.
-
-        Args:
-            name: setup agent name (from describe_workflow's setup list).
-            workflow: workflow name (to resolve workflow-local agents).
-
-        Returns ``{name, prompt, description, _hint}``. The prompt is
-        backend-agnostic (no "use Read tool" — writes "read the user's file").
-        """
-        from orca.iface.mcp.agent_catalog import get_setup_agent_prompt
-        from orca.iface.mcp.catalog import find_workflow_by_name
-        from orca.schema.workflow import AgentNode
-
-        # 优先从 workflow.setup 找（catalog 模式）
-        if workflow is not None:
-            wf = find_workflow_by_name(workflow)
-            if wf is None:
-                return _err(
-                    ErrorKind.BUSINESS_CONFIG,
-                    f"Workflow '{workflow}' not found.",
-                    hint="Call list_workflows to discover workflows.",
-                )
-            for agent_node in (wf.setup or []):
-                if agent_node.name == name:
-                    out = get_setup_agent_prompt(agent_node)
-                    if out is None:
-                        return _err(
-                            ErrorKind.BUSINESS_CONFIG,
-                            f"Setup agent '{name}' has no prompt available "
-                            "(neither inline nor resolvable).",
-                            hint="Check the workflow YAML setup section.",
-                        )
-                    return _ok(out, hint=for_get_agent_prompt(name))
-            return _err(
-                ErrorKind.BUSINESS_CONFIG,
-                f"Setup agent '{name}' not found in workflow '{workflow}'.",
-                hint="Call describe_workflow to list setup agents.",
-            )
-
-        # 无 workflow 参数 → 从 agent pool 直接查（自由 prompt 借用）
-        from pathlib import Path
-
-        from orca.compile.agents import (
-            AgentHandle,
-            AgentNotFound,
-            LocalPoolResolver,
-            ResolveContext,
-        )
-
-        cwd = Path.cwd()
-        ctx = ResolveContext(
-            workflow_dir=cwd, cwd=cwd, extra_roots=()
-        )
-        resolver = LocalPoolResolver()
-        try:
-            handle: AgentHandle = resolver.resolve(name, context=ctx)
-        except AgentNotFound as e:
-            return _err(
-                ErrorKind.BUSINESS_CONFIG,
-                str(e),
-                hint="Call list_agents to see available agents.",
-            )
-        return _ok(
-            {
-                "name": name,
-                "prompt": handle.prompt,
-                "description": handle.meta.description,
-            },
-            hint=for_get_agent_prompt(name),
-        )
-
     # ── Lifecycle 组（3 个）────────────────────────────────────────────────────
 
     async def tool_start_workflow(
         self,
         name: str,
         inputs: dict | None = None,
-        setup_outputs: dict | None = None,
         task: str | None = None,
         max_iter: int | None = None,
     ) -> dict[str, Any]:
         """Start an Orca workflow, returns task_id immediately (non-blocking).
 
-        **Before starting**:
-        1. Call ``describe_workflow(name=...)`` — check ``has_setup``.
-        2. If ``has_setup=true``, collect ``setup_outputs`` via ``get_agent_prompt``
-           for each setup agent first.
-        3. ``setup_outputs`` keys must match setup agent names exactly.
+        **Before starting**: call ``describe_workflow(name=...)`` to see required
+        inputs, then ask the user for any missing fields.
 
         **After starting**: call ``get_task_status(task_id=...)`` to poll.
         Long-running: do NOT poll more than once per turn. End your turn after polling.
 
         Args:
             name: workflow name (from list_workflows).
-            inputs: execute phase inputs.
-            setup_outputs: setup phase outputs (key = setup agent name).
+            inputs: workflow inputs.
             task: sugar for ``inputs.task``.
             max_iter: override max_iterations.
-
-        ``setup_outputs`` 经校验后透传 ``RunManager.start_run`` → orchestrator 包成
-        ``{agent: {"output": ...}}`` 注入 ``RunContext.setup``，render 暴露为
-        ``{{ setup.<agent>.output.<field> }}``。
         """
-        from orca.iface.mcp.catalog import find_workflow
-        from orca.iface.mcp.setup_phase import (
-            SetupOutputsMismatch,
-            SetupOutputsInvalid,
-            SetupRequired,
-            validate_setup_outputs,
-        )
-
-        # 1. catalog 反查（DRY：单次扫描同时拿 Workflow + yaml_path）
-        found = find_workflow(name)
+        # catalog 反查（DRY：单次扫描同时拿 Workflow + yaml_path）
+        found = catalog.find_workflow(name)
         if found is None:
             return _err(
                 ErrorKind.BUSINESS_CONFIG,
                 f"Workflow '{name}' not found in catalog.",
                 hint="Call list_workflows to discover available workflows.",
             )
-        wf, yaml_path = found
+        _wf, yaml_path = found
 
-        # 2. setup phase 校验（三重杠杆 B，§2.8）——校验失败在 manager 之前拦截。
-        # 返回值 validated 是规范化后的 setup_outputs（无 setup phase → 空 dict），
-        # 透传给 start_run 注入 runtime context（phase-10 技术债回填）。
-        try:
-            validated = validate_setup_outputs(wf.setup or [], setup_outputs)
-        except SetupRequired as e:
-            return _err(
-                ErrorKind.BUSINESS_CONFIG,
-                str(e),
-                hint=for_setup_required(e.agent_names),
-            )
-        except SetupOutputsMismatch as e:
-            return _err(
-                ErrorKind.BUSINESS_CONFIG,
-                str(e),
-                hint=for_setup_mismatch(e.expected, e.actual),
-            )
-        except SetupOutputsInvalid as e:
-            return _err(
-                ErrorKind.BUSINESS_CONFIG,
-                str(e),
-                hint=for_setup_invalid(e.agent_name, e.detail),
-            )
-
-        # 3. 启动 run（非阻塞，HandleId pattern）。validated setup_outputs 透传注入
-        # runtime context（orchestrator 包成 {agent: {"output": ...}} 存 ctx.setup，
-        # render 暴露为 {{ setup.<agent>.output.<field> }}）。
+        # 启动 run（非阻塞，HandleId pattern）。
         run_id = await self._manager.start_run(
-            yaml_path, inputs, task, max_iter, validated
+            yaml_path, inputs, task, max_iter
         )
         return _ok(
             {"task_id": run_id, "status": "running"},
@@ -538,7 +410,7 @@ class OrcaMcpServer:
         self._register_tools()
 
     def _register_tools(self) -> None:
-        """注册 9 工具到 FastMCP（SPEC §2.1 v4）。
+        """注册 8 工具到 FastMCP（SPEC §2.1 v4 + in-session v5 §6.2 精简）。
 
         ``FastMCP.add_tool(fn, name, description=...)``：fn 的类型注解自动派生 inputSchema，
         description 来自 tool docstring（含强指令，§2.6）。bound method 直接传——FastMCP
@@ -548,7 +420,6 @@ class OrcaMcpServer:
             (self.tool_list_workflows, "list_workflows"),
             (self.tool_describe_workflow, "describe_workflow"),
             (self.tool_list_agents, "list_agents"),
-            (self.tool_get_agent_prompt, "get_agent_prompt"),
             (self.tool_start_workflow, "start_workflow"),
             (self.tool_get_task_status, "get_task_status"),
             (self.tool_cancel_task, "cancel_task"),

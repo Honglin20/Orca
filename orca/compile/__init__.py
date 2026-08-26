@@ -11,7 +11,12 @@
 run/exec/events/iface。
 """
 
-from orca.compile.parser import load_workflow
+from orca.compile.parser import load_workflow, load_workflow_with_warnings
 from orca.compile.validator import ConfigurationError, ValidationResult
 
-__all__ = ["load_workflow", "ConfigurationError", "ValidationResult"]
+__all__ = [
+    "load_workflow",
+    "load_workflow_with_warnings",
+    "ConfigurationError",
+    "ValidationResult",
+]

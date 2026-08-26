@@ -8,8 +8,9 @@
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
 
 export function ChartsView() {
+  // P5b：容器底色用 --app-bg（与三栏统一，明暗自适应）。
   return (
-    <div data-testid="charts-view" className="h-full overflow-auto">
+    <div data-testid="charts-view" className="orca-bg-app h-full overflow-auto">
       <ChartRenderer />
     </div>
   );

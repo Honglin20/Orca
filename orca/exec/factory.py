@@ -59,6 +59,8 @@ def make_executor(
     bus: WaitHandleRegistry | None = None,
     *,
     runs_dir: Path | None = None,
+    workflows_root: Path | None = None,
+    artifacts_dir: str | None = None,
 ) -> Executor:
     """按 ``node.kind`` 分派到对应 Executor 实例（SPEC §7.8 / phase 11 §5.4 / §9.7.4 / phase-13 §2）。
 
@@ -81,6 +83,17 @@ def make_executor(
     phase-13 §11 #9（executor-agnostic）：script 与 agent 两路径对称需要 chart 路由
     （agent spawn 的 Bash 工具会再 spawn script，沿 env 链继承）。
 
+    ``workflows_root``（plan 2026-08-04 kd-nas headless fix）：**agent + script 分支对称透传**——
+    spawn 时注入 ``ORCA_WORKFLOWS_ROOT`` env，agent.md / workflow 脚本据此 cwd 无关定位 workflow
+    级共享资源目录（如 ``$ORCA_WORKFLOWS_ROOT/agents/_kd_scripts``）。None == 不注（向后兼容）。
+    orchestrator 从 ``load_workflow(yaml_path).parent`` 透传（run 启动期由 CLI / RunManager 解析）。
+
+    ``artifacts_dir``（2026-08-26 in-session script fix，plan 2026-08-25 prof-opt-v4 §10）：
+    **仅 script 分支透传**——显式 ``ORCA_ARTIFACTS_DIR`` 覆盖（绝对路径 str），in-session
+    路径按 tape inputs.project_root 派生 project-scoped 值（与 agent 节点 ``orca_env.sh``
+    同语义）。None == 既有 per-run 派生（headless ``tars run`` 语义字节不变）；agent 分支
+    忽略此参（in-session agent 由宿主 session 执行，不走 executor spawn env）。
+
     TerminateNode 是纯渲染节点（无子进程 / 无 wait handle），不需要 bus / agent_tools_server；
     orchestrator 据 ``node_completed.data.status`` 分发 workflow 级终态事件。
 
@@ -96,6 +109,7 @@ def make_executor(
             get_profile(node.executor),
             agent_tools_server,
             runs_dir=runs_dir,
+            workflows_root=workflows_root,
         )
 
     if isinstance(node, ScriptNode):
@@ -104,7 +118,11 @@ def make_executor(
         # phase-13 §11 #9（executor-agnostic）：与 ClaudeExecutor 路径对称——script 子进程
         # 也接 ``runs_dir``，spawn 时合入 chart env overlay，让 script 内
         # ``orca.chart.render_chart`` 推图到正确 run 的 ingestor。None == 向后兼容。
-        return ScriptExecutor(runs_dir=runs_dir)
+        # plan 2026-08-04：workflows_root 同款对称透传（ORCA_WORKFLOWS_ROOT）。
+        # 2026-08-26：artifacts_dir 显式覆盖仅 in-session 传入（见 docstring）。
+        return ScriptExecutor(
+            runs_dir=runs_dir, workflows_root=workflows_root, artifacts_dir=artifacts_dir,
+        )
 
     if isinstance(node, SetNode):
         from orca.exec.set_node import SetExecutor

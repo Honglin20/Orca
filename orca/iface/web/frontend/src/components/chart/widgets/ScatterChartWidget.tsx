@@ -5,6 +5,7 @@
 
 import {
   CartesianGrid,
+  Cell,
   Legend,
   ResponsiveContainer,
   Scatter,
@@ -22,19 +23,34 @@ import {
   LEGEND_STYLE,
   PALETTE,
   getAxisTick,
+  getCursor,
   getGridProps,
   getTooltipStyle,
+  getTooltipTextStyle,
+  getXAxisLabelProp,
+  getXAxisLabelValue,
+  getYAxisLabelProp,
+  getYAxisLabelValue,
 } from "../chartTheme";
 import { computeNiceTicks, extractNumericValues, formatTick } from "../axisUtils";
+import { ChartCaption } from "../ChartCaption";
 
 export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
-  const { data, x, y, hue, size, title } = payload;
+  const { data, x, y, hue, color, size, title, caption } = payload;
   const xKey = x ?? "x";
   const yKey = y ?? "y";
   const sizeKey = size; // undefined → 等径散点
   const gridProps = getGridProps();
   const axisTick = getAxisTick();
   const tooltipStyle = getTooltipStyle();
+  // P5a：Scatter cursor 统一为细虚竖线（原 strokeDasharray 单值缺 stroke/strokeWidth）。
+  const tooltipCursor = getCursor(true);
+  const tooltipTextStyle = getTooltipTextStyle();
+  // 轴标签：x_label/y_label 优先，空回退字段名（与 XAxis/YAxis name 同源 → tooltip label 也用之）。
+  const xAxisLabel = getXAxisLabelProp(payload);
+  const yAxisLabel = getYAxisLabelProp(payload);
+  const xAxisName = getXAxisLabelValue(payload);
+  const yAxisName = getYAxisLabelValue(payload);
 
   const allXValues = extractNumericValues(data, xKey);
   const allYValues = extractNumericValues(data, yKey);
@@ -68,7 +84,7 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
 
     return (
       <div data-testid="chart-widget">
-        <h4 className="mb-2 text-xs font-medium text-slate-700">{title}</h4>
+        <h4 className="orca-text-muted mb-2 text-xs font-medium">{title}</h4>
         <div className="aspect-[4/3] w-full">
           <ResponsiveContainer width="100%" height="100%" minHeight={200} minWidth={300}>
             <ScatterChart margin={CHART_MARGIN}>
@@ -76,23 +92,30 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
               <XAxis
                 dataKey={xKey}
                 tick={axisTick}
-                name={xKey}
+                name={xAxisName}
                 type="number"
                 domain={xConfig.domain}
                 ticks={xConfig.ticks}
                 tickFormatter={formatTick}
+                label={xAxisLabel}
               />
               <YAxis
                 dataKey={yKey}
                 tick={axisTick}
-                name={yKey}
+                name={yAxisName}
                 type="number"
                 domain={yConfig.domain}
                 ticks={yConfig.ticks}
                 tickFormatter={formatTick}
+                label={yAxisLabel}
               />
               <ZAxis dataKey={zAxisConfig.dataKey} range={zAxisConfig.range} />
-              <Tooltip contentStyle={tooltipStyle} cursor={{ strokeDasharray: "3 3" }} />
+              <Tooltip
+                contentStyle={tooltipStyle}
+                cursor={tooltipCursor}
+                labelStyle={tooltipTextStyle}
+                itemStyle={tooltipTextStyle}
+              />
               <Legend wrapperStyle={LEGEND_STYLE} />
               {hueValues.map((val, i) => (
                 <Scatter
@@ -108,6 +131,7 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
             </ScatterChart>
           </ResponsiveContainer>
         </div>
+        {caption && <ChartCaption text={caption} />}
       </div>
     );
   }
@@ -116,7 +140,7 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
 
   return (
     <div data-testid="chart-widget">
-      <h4 className="mb-2 text-xs font-medium text-slate-700">{title}</h4>
+      <h4 className="orca-text-muted mb-2 text-xs font-medium">{title}</h4>
       <div className="aspect-[4/3] w-full">
         <ResponsiveContainer width="100%" height="100%" minHeight={200} minWidth={300}>
           <ScatterChart margin={CHART_MARGIN}>
@@ -124,33 +148,51 @@ export function ScatterChartWidget({ payload }: { payload: ChartPayload }) {
             <XAxis
               dataKey={xKey}
               tick={axisTick}
-              name={xKey}
+              name={xAxisName}
               type="number"
               domain={xConfig.domain}
               ticks={xConfig.ticks}
               tickFormatter={formatTick}
+              label={xAxisLabel}
             />
             <YAxis
               dataKey={yKey}
               tick={axisTick}
-              name={yKey}
+              name={yAxisName}
               type="number"
               domain={yConfig.domain}
               ticks={yConfig.ticks}
               tickFormatter={formatTick}
+              label={yAxisLabel}
             />
             <ZAxis dataKey={zAxisConfig.dataKey} range={zAxisConfig.range} />
-            <Tooltip contentStyle={tooltipStyle} cursor={{ strokeDasharray: "3 3" }} />
+            <Tooltip
+              contentStyle={tooltipStyle}
+              cursor={tooltipCursor}
+              labelStyle={tooltipTextStyle}
+              itemStyle={tooltipTextStyle}
+            />
             <Scatter
               data={scatterData}
               fill={PALETTE[0]}
               fillOpacity={sizeKey ? BOX_FILL_OPACITY : undefined}
               stroke={PALETTE[0]}
               strokeWidth={BOX_STROKE_WIDTH}
-            />
+            >
+              {/* color：per-point 着色（hue 优先，hue 块已 return；此处仅单 series 生效）。
+                  每行 color 字段值是合法 CSS 色串，缺席回退 PALETTE[0]。color 空 → 无 Cell 子节点，
+                  走上方 fill={PALETTE[0]} 统一色（零回归）。 */}
+              {color
+                ? data.map((d, i) => {
+                    const c = String(d[color] ?? PALETTE[0]);
+                    return <Cell key={i} fill={c} stroke={c} />;
+                  })
+                : null}
+            </Scatter>
           </ScatterChart>
         </ResponsiveContainer>
       </div>
+      {caption && <ChartCaption text={caption} />}
     </div>
   );
 }

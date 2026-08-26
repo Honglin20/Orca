@@ -8,15 +8,17 @@
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `name` | str | 是 | 全局唯一标识 |
-| `description` | str | 否 | 人类可读描述 |
+| `description` | str | 否 | 一两句话说清功能与目的；是 `orca list` 里 tars 选 wf 的语义依据，须与现有 workflow 有明确区别（无区别则问用户区分） |
 | `entry` | str | 是 | 入口**节点**名（不能是 parallel 组名） |
 | `inputs` | dict[str, InputDef] | 否 | 声明 workflow 输入 |
 | `nodes` | list[Node] | 是 | 执行阶段节点（按 `kind` 判别联合） |
 | `parallel` | list[ParallelGroup] | 否 | 静态并行组（与节点共享命名空间） |
 | `outputs` | dict[str, str] | 否 | `{key: Jinja2 模板}`，终态输出映射 |
-| `setup` | list[AgentNode] | 否 | setup 阶段 agent（跑在 entry 前；`ask_user`/`gate` 工具**只**允许在此） |
 
-`InputDef`：`type`（`string`/`int`/`boolean`/`list`）、`required`（默认 true）、`default`、`description`。
+> **无 `setup` 字段**（in-session v5 §6.2 删除 setup phase 全栈）。YAML 含 `setup:` 段会被
+> pydantic `extra="forbid"` 拒绝（fail loud）。主 session 经 `orca next --output` 直接产 output。
+
+`InputDef`：`type`（`string`/`int`/`boolean`/`list`）、`required`（默认 true）、`default`、`description`（**必须以 `[ask]`/`[infer]`/`[default]`/`[advanced]` 标签起头**——三档原则见下方 §6）。
 
 ## 2. 节点 kind
 
@@ -39,6 +41,13 @@
 ### script —— `ScriptNode`
 `command`（必填，Jinja2 shell）、`parse_json`（默认 false）、`timeout`。输出 `{stdout, stderr, exit_code}`（+`json`）。
 
+> **in-session 三契约（SPEC 2026-08-21）**：① script 节点在 in-session 路径会被
+> **at-least-once 重执行**（CLI 崩溃后续跑重跑该节点），必须幂等或自守单实例；
+> ② **bootstrap 期执行的 script 链（含 entry 链）不应推图**——chart 守护在 advance
+> 之后才 spawn，`render_chart` raise 会被当业务结果走兜底路由；③ `inputs.iterations`
+> 同时是**单次调用内联 script 链长度上限**——声明小值的 workflow 长 script 链会撞顶
+> `workflow_failed(internal_error)`。
+
 ### set —— `SetNode`
 `values: dict[str, str]`（必填，`{key: Jinja2 表达式}`）。无 token、无 shell，纯求值存输出。
 
@@ -52,7 +61,7 @@
 `status`（`success`/`failed`，必填）、`reason`、`outputs`。约束：`routes` 必空、不能是 `entry`、不能在 `parallel.branches`。
 
 ### （无 gate/dialog/ask_user 节点）
-这些是**工具**不是节点 kind。`ask_user`/`gate` 只能挂在 setup 阶段 agent；Dialog 是 TUI 跑完按 `d` 触发，不在 YAML 契约里。
+这些是**工具**不是节点 kind。**execute phase agent 禁用 `ask_user`/`gate`**（compile validator 强制，铁律 7：execute phase 永不中断）；Dialog 是 TUI 跑完按 `d` 触发，不在 YAML 契约里。setup phase 已在 in-session v5 §6.2 删除——不再有可挂中断工具的阶段。
 
 ### parallel 组（顶层 `parallel:` 列表项，非节点）
 `name`（必填）、`branches`（≥2 个节点名，无重复、无组名）、`failure_mode`、`routes`（全分支完成后求值）。组聚合输出可达：`<group>.output.outputs.<branch>.stdout`。
@@ -78,18 +87,92 @@
 
 frontmatter 识别字段：`description`、`model`、`tools`。body 即 prompt（Jinja2，可引用 `{{ inputs.* }}` 和 `{{ <上游节点>.output }}`）。节点用 `agent: <name>` 时 inline `prompt` 留空，resolver 从 MD body 填。
 
-## 5. validate 错误类别（`orca validate <yaml>`）
+## 5. validate 错误类别（`tars validate <yaml>`）
 
-`validate_workflow`（`validator.py:96`）聚合全部检查一次性抛 `ConfigurationError`（errors 阻断，warnings 不阻断）。主要类别：
+`validate_workflow`（`validator.py`）聚合全部检查一次性抛 `ConfigurationError`（errors 阻断，warnings 不阻断）。主要类别：
 
 - **结构**：节点缺 `name` / 重名（含 parallel 组）；`entry` 不存在或指向组；`route.to` 引用未知目标；`parallel.branches` <2 / 引用未定义节点 / 重复；catch-all route 未放最后；`foreach.source` 首段非真实节点；`terminate` 约束违反。
 - **图**：从 `entry` 不可达任何终止节点（死路）；孤儿节点不可达（warning）。
-- **模板**：Jinja2 语法错 / 引用未声明根（根必须是节点名 / `workflow` / `inputs` / `setup`）；引用未声明 input key（warning）。
+- **模板（浅校验）**：Jinja2 语法错 / 引用未声明根（根必须是节点名 / `workflow` / `inputs`）；引用未声明 input key（warning）。
+- **模板（引用合规深度校验）**：
+  - 自引用：节点 `prompt`/`command`/`values`（含 foreach body）引用 `<self>.output[.X]` → error（这些字段在节点跑之前渲染，自身无 output）。`route.when` / `route.output` / `workflow.outputs` 在节点跑后评估，引用自身 output 合法。`{% raw %}` 包裹的提及 Jinja2 parse 为 Const 文本，不进 AST ref 集合，天然免疫。
+  - output_schema 字段对齐：模板引用 `{{ X.output.foo }}`，X 的 `output_schema` 设了 `additionalProperties: false`，但 `foo` 不在 `properties` → error（拼错必崩）。跳过：X 无 schema / schema 未关 additionalProperties / ScriptNode `parse_json:true` 的 `output.json.<X>`（运行时解析）/ `X.output` 整段引用（无字段）。
+  - 文件夹/文件 agent scripts 存在性：节点 prompt（resolver 物化的 body）引用 `$ORCA_AGENT_RESOURCES/scripts/<file>`，但 `<resources_root>/scripts/<file>` 不存在 → error。内联 prompt（无 `agent:` 引用，`resources_root=None`）不查。
+- **input 三档标签（warning）**：`inputs.<name>.description` 不以 `[ask]`/`[infer]`/`[default]`/`[advanced]` 起头 → warning（contract §6 强制标签）。
 - **能力**：execute 阶段 agent `tools` 含 `ask_user`/`gate`；profile 校验（executor / output_schema 等）。
 
 此外 pydantic schema 层先拦：`extra="forbid"` 拒未知字段；判别联合拒未知 `kind`；`RetryPolicy.max_attempts≥1`、`ValidatorConfig.criteria` 非空等。
 
-## 6. 正确性 cheatsheet（生成后必过）
+## 6. input 三档原则与标签约定（权威：`docs/specs/workflow-input-design-principle.md`）
+
+**inputs 只放「下游 agent 无法执行 / 会失控」的必须项**。判定总纲：**代码里能 grep 出来的是事实（→ Tier B）；代码里不存在的是意图（→ Tier A）。会静默产出错误交付物的回退路径必须 fail loud / 问用户（永不 silent default）。**
+
+### 三档分类 + 标签约定
+
+每个 input 的 `description` 以标签起头（供 in-session 编排器/tars skill 读取）：
+
+| 标签 | 档 | 性质 | 应放在 |
+|---|---|---|---|
+| `[ask]` | Tier A | 业务决策（意图/预算/KPI/硬件/模型入口/业务命令） | **input**（必填） |
+| `[infer]` | Tier B | 代码事实（agent 读用户代码可得）；缺失走 **ask-user 哨兵** | **setup 节点 `output_schema`**（不是 input） |
+| `[default]` | Tier C | 有合理工程默认，99% 用户不该决策 | 固化（yaml default / agent.md / 脚本默认） |
+| `[advanced]` | Tier C 子集 | 罕见 override，固化默认 | yaml default（带 [advanced] 标签） |
+
+### Tier A 子类（必填 input 的判据）
+
+模型入口（`model_path`/`teacher_model_path`）/ 业务命令原样执行（`train_command`/`test_command`/`teacher_train_command`）/ 业务 KPI（`target_latency_ms`/`accuracy_target`/`accuracy_gap_db`/`avg_bit_budget`/`accuracy_tolerance`）/ 预算闸门（`max_rounds`/`max_evals`，被确定性脚本消费非 LLM 自决）/ 目标硬件（`target_hardware`/`device`）/ 复现性底座（`seed` 默认 0，**全部 workflow 必须有**）。
+
+### Tier B 典型项（setup 节点 infer-once + propagate，下游 `{{ setup.output.X }}` 取）
+
+`project_root` / `build_fn` / `dummy_input` / `model_family` / 数据 loader dotted-path（`calib_data_ref`/`train_data_ref`/`eval_data_ref`）/ 评估函数（`eval_fn_ref`，多候选歧义必走哨兵）/ 训练超参（`lr`/`batch_size`/`epochs`，默认值是 smoke 不是生产）。
+
+### Tier C 典型项（固化，绝不作 input）
+
+- `output_dir` → 走引擎注入的 `$ORCA_ARTIFACTS_DIR`（接口路径 `<abs>/runs/<run_id>/artifacts/`，由 `orca.exec.env.build_env_overlay` 注入）；setup 节点优先 `OUTPUT_DIR="${ORCA_ARTIFACTS_DIR:-<fallback>}/"`。
+- `iterations` → 不作 input（引擎兜底 100；长 run 用户用 `--max-iter` CLI 覆盖）。
+- 算法开关 / 预设 → 固化默认（`mode`/`recipes`/`scheme`/`bit_width(s)`/`candidate_format_space`/`bit_objective`/`granularity`/`method`/`ratio`/`low_bits`/`high_bits`/`bake`/`cage`/`proxy_dataset_spec`）。
+- 工程路径 → 落 setup output 字段向后传（`*_scripts_dir`/`kb_cache_dir`），下游 `{{ setup.output.X }}` 取（不字符串拼根）。
+
+### 反向判据（满足任一条 → 强制下沉）
+
+- 能在 `model.py`/`train.py`/`config.yaml` grep 到 → Tier B
+- 改它需要懂 workflow 内部 → Tier C
+- 留空有合理默认且非业务 KPI → Tier C
+- 与代码事实会漂移（用户改代码忘改 input）→ **必须** Tier B
+
+### Tier B 缺失：ask-user 哨兵（绝不造假）
+
+读代码无果时，agent 以**最终消息**返回轻量哨兵 JSON（**两键必填**：`_orca_ask_user` + `_sentinel:"orca_ask_user_v1"`；可选 `options`/`context`）：
+
+```json
+{"_orca_ask_user": "<一句话问题>",
+ "options": ["<候选 1>", "<候选 2>"],
+ "context": "<已 grep 过什么、看到了什么、缺哪项>",
+ "_sentinel": "orca_ask_user_v1"}
+```
+
+TARS skill strict 识别魔键 → 问用户 → SendMessage/Task(task_id) 恢复**同一**子 agent → MAX_ASK=3 兜底；哨兵**不进 `orca next`**（output_schema `additionalProperties:false` 会拒，引擎零改动）。详 `docs/specs/agent-ask-user-sentinel.md`。
+
+**每个含 Tier B 项的 agent.md 必加「## 缺失必填输入时（严禁造假）—— ask-user 哨兵」段**（紧贴 `## 输出` 之前）：列本节点 Tier B 项 + 不造假禁令 + 哨兵 JSON 示例 + 会被恢复说明 + fail_loud fallback。
+
+### infer-once + propagate 黄金模板
+
+`workflows/agent-struct-exploration.yaml` 的 `setup` 节点：`project_root`/`build_fn`/`dummy_input`/`struct_scripts_dir` 全下沉为 output_schema 字段，下游 `{{ setup.output.X }}` 取，**不**各自重新自找（违反 DRY、自找不一致时远端崩、破坏复现）。
+
+### input 三档 checklist（生成/改 workflow 后必跑）
+
+- [ ] 每个 input 归类到 Tier A 四子类之一，否则下沉
+- [ ] Tier B 项有 setup 节点 output_schema 字段承接（infer-once + propagate，链不破）
+- [ ] Tier B 项在 agent.md 有「读代码→哨兵→fail loud」契约段
+- [ ] `output_dir` 不作 input（走 `$ORCA_ARTIFACTS_DIR`）
+- [ ] `iterations` 不作 input（自动算）
+- [ ] 算法开关 / 预设都不作 input（固化）
+- [ ] 业务 KPI 不缺（latency / accuracy / max_rounds / target_hardware 至少齐其相关项）
+- [ ] **全部 workflow 有 `seed`（默认 0）**
+- [ ] 每个 input 的 `description` 以标签起头
+- [ ] 移除任何 input 时，同步更新所有引用 `{{ inputs.X }}` 的 agent.md Jinja（避免 StrictUndefined 崩）
+
+## 7. 正确性 cheatsheet（生成后必过）
 
 1. 有 `name`/`entry`/`nodes`，所有顶层节点命名且全局唯一（含 parallel 组）。
 2. `entry` 引用节点非组。
@@ -101,5 +184,5 @@ frontmatter 识别字段：`description`、`model`、`tools`。body 即 prompt�
 8. `foreach.body` 只能是 agent/script；`source` 首段必须是真实节点名。
 9. `AgentNode` 上 `agent:` 与 `prompt:` 互斥。
 10. `parallel` 组 `branches`：≥2、全是已定义节点名、无重复、不自路由。
-11. Jinja2 必须能解析且引用真实根（节点名 / `workflow` / `inputs` / `setup`；`when` 里可用 `output`；foreach body 里可用 `item_var`/`index_var`）。
-12. **跑 `orca validate <yaml>` 验证**，对聚合 error 列表 fix-loop。
+11. Jinja2 必须能解析且引用真实根（节点名 / `workflow` / `inputs`；`when` 里可用 `output`；foreach body 里可用 `item_var`/`index_var`）。
+12. **跑 `tars validate <yaml>` 验证**，对聚合 error 列表 fix-loop。

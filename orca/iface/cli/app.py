@@ -398,9 +398,13 @@ class OrcaApp(App):
         *,
         gate_port: int | None = None,
         tape_path: Path | None = None,
+        workflows_root: Path | None = None,
     ) -> None:
         super().__init__()
         self.wf = wf
+        # plan 2026-08-04 kd-nas headless fix：workflow yaml 所在目录，透传给 Orchestrator
+        # → executor 注入 ORCA_WORKFLOWS_ROOT env（agent.md cwd 无关定位共享资源目录）。
+        self._workflows_root = workflows_root
         self._inputs = inputs or {}
         self._task = task
         self._max_iter = max_iter
@@ -643,6 +647,7 @@ class OrcaApp(App):
                 task=self._task, max_iter=self._max_iter, run_id=self.run_id,
                 interrupt_handler=self.interrupt_handler,
                 agent_tools_server=self.agent_tools_server,
+                workflows_root=self._workflows_root,
             )
             self._orchestrator = orch
             state = await orch.run()
@@ -1057,6 +1062,8 @@ class OrcaApp(App):
         handler = DialogHandler(get_profile("claude"), self.bus)
         # 最小 ctx：dialog handler 仅用 run_id（spawn env overlay 路由用）。outputs/inputs 不参与
         # dialog 逻辑（agent_output 已显式传入），故空 dict 足够。
+        # subagents_root 保持空串：dialog 是 post-run Q&A，不渲染原 agent.md body
+        # （DialogHandler spawn 的是通用追问 agent，不引 {{ subagents_root }}）。
         ctx = RunContext(
             inputs=self._inputs, outputs={}, run_id=self.run_id, task=self._task,
         )

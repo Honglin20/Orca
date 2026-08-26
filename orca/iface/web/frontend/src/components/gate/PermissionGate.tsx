@@ -6,6 +6,7 @@
 // 不清 store.gate / 不关弹窗。弹窗关闭只能由 backend emit human_decision_resolved（store.gate→null）触发。
 
 import { useState } from "react";
+import { Lock, Wrench } from "lucide-react";
 import type { GateState } from "@/types/store-types";
 import { postGateRespond } from "./post-gate-respond";
 import { GateObserveOnlyNotice, useGateWritable } from "./gate-writable";
@@ -14,10 +15,13 @@ import { GateObserveOnlyNotice, useGateWritable } from "./gate-writable";
 type PermissionAnswer = "allow" | "deny" | "edit" | "skip";
 
 const BUTTONS: { answer: PermissionAnswer; label: string; className: string }[] = [
-  { answer: "allow", label: "批准执行", className: "bg-emerald-600 text-white hover:bg-emerald-700" },
-  { answer: "deny", label: "拒绝", className: "bg-red-600 text-white hover:bg-red-700" },
-  { answer: "edit", label: "编辑后批准", className: "bg-slate-200 text-slate-700 hover:bg-slate-300" },
-  { answer: "skip", label: "跳过", className: "bg-slate-200 text-slate-700 hover:bg-slate-300" },
+  // P0：语义色走 ``orca.*`` palette（done=emerald / failed=red）；edit/skip 中性 surface。
+  // hover 用 ``/90`` 透明度（Tailwind v3 palette hex 支持 alpha modifier），
+  // 视觉上等同 emerald-700/red-700「更深一档」的语义。
+  { answer: "allow", label: "批准执行", className: "bg-orca-done text-white hover:bg-orca-done/90" },
+  { answer: "deny", label: "拒绝", className: "bg-orca-failed text-white hover:bg-orca-failed/90" },
+  { answer: "edit", label: "编辑后批准", className: "orca-bg-surface-2 orca-text-muted hover:orca-bg-surface" },
+  { answer: "skip", label: "跳过", className: "orca-bg-surface-2 orca-text-muted hover:orca-bg-surface" },
 ];
 
 export function PermissionGate({ gate }: { gate: GateState }) {
@@ -54,35 +58,35 @@ export function PermissionGate({ gate }: { gate: GateState }) {
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
       data-testid="gate-dialog"
     >
-      <div className="w-full max-w-2xl rounded-lg bg-white shadow-xl" data-testid="permission-gate">
-        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
-          <h2 className="text-base font-semibold text-slate-900">🔒 权限请求</h2>
+      <div className="w-full max-w-2xl rounded-lg orca-bg-surface shadow-xl" data-testid="permission-gate">
+        <div className="flex items-center justify-between border-b orca-border px-5 py-3">
+          <h2 className="text-base font-semibold orca-text inline-flex items-center gap-1.5"><Lock size={16} strokeWidth={1.5} aria-hidden /> 权限请求</h2>
         </div>
         <div className="px-5 py-4">
-          <p className="mb-3 text-sm text-slate-700">
+          <p className="mb-3 text-sm orca-text-muted">
             节点 <span className="font-mono font-medium">{node}</span> 的 Claude 想调用工具：
           </p>
-          <div className="rounded border border-slate-200 bg-slate-50 p-3">
-            <div className="mb-1 text-xs text-slate-500">工具</div>
-            <div className="font-mono text-sm font-medium text-slate-900" data-testid="gate-tool">
-              🔧 {tool}
+          <div className="rounded border orca-border orca-bg-surface-2 p-3">
+            <div className="mb-1 text-xs orca-text-faint">工具</div>
+            <div className="font-mono text-sm font-medium orca-text inline-flex items-center gap-1.5" data-testid="gate-tool">
+              <Wrench size={13} strokeWidth={1.5} aria-hidden /> {tool}
             </div>
-            <div className="mt-2 mb-1 text-xs text-slate-500">参数</div>
+            <div className="mt-2 mb-1 text-xs orca-text-faint">参数</div>
             <pre
-              className="max-h-48 overflow-auto rounded bg-white p-2 font-mono text-xs text-slate-700"
+              className="max-h-48 overflow-auto rounded orca-bg-surface p-2 font-mono text-xs orca-text-muted"
               data-testid="gate-tool-input"
             >
               {JSON.stringify(toolInput, null, 2)}
             </pre>
           </div>
           {error && (
-            <p className="mt-2 text-xs text-red-600" data-testid="gate-error">
+            <p className="mt-2 text-xs text-orca-failed" data-testid="gate-error">
               提交失败：{error}
             </p>
           )}
           <GateObserveOnlyNotice />
         </div>
-        <div className="flex justify-end gap-2 border-t border-slate-200 px-5 py-3">
+        <div className="flex justify-end gap-2 border-t orca-border px-5 py-3">
           {BUTTONS.map((b) => (
             <button
               key={b.answer}

@@ -1,7 +1,7 @@
 """test_skills_bundle.py —— 随包 skill 产物守门。
 
 防回归：确保 ``orca/skills/create-workflow/`` 下的 SKILL.md / reference / examples
-随包打进 wheel 并能被 ``importlib.resources`` 定位（``teams skill install`` 据此拷贝）。
+随包打进 wheel 并能被 ``importlib.resources`` 定位（``tars skill install`` 据此拷贝）。
 若 pyproject 打包规则漂移漏文件，此测试先红。
 """
 

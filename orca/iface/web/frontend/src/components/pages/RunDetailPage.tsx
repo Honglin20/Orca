@@ -4,7 +4,7 @@
 //   - 左 AgentsRail（agents 列表 + DAG 浮层挂点）
 //   - 中 tabs [会话 | 图表]（gate 模态浮于其上，§5.6）
 //   - 右 LogStream（常驻最右，虚拟化 live）
-// 顶 TopBar（status + elapsed + cost）。**无** Replay 控件（SPEC §3.1 / §8）。
+// 顶 TopBar（status + elapsed；P5a 已去 cost UI）。**无** Replay 控件（SPEC §3.1 / §8）。
 //
 // **D5 bundle split**：ConversationView（含 react-markdown 全家桶 ~2MB）/ ChartsView
 // （recharts ~400KB）/ WorkflowGraph（xyflow ~250KB）各自 ``React.lazy`` 拆独立 chunk。
@@ -14,9 +14,13 @@
 // 关键（铁律 1 + 5）：
 //   - useRunEvents(runId)：mount → 懒加载 GET /events；unmount → unloadRun
 //   - useWebSocket(runId)：mount → subscribe；重连发 resume（D6）+ resume 失败 fallback
+//
+// SPEC audit-c §4.1：订阅 loadStatus/retryCount，按渲染表（idle/loading×2/error/loaded）
+// 决定中央区域——error 显示 RunLoadError + 重试按钮；loading + retryCount>0 叠加 retry-banner。
 
 import { Suspense, lazy, useCallback, useState } from "react";
 import { useParams } from "react-router-dom";
+import { Loader2 } from "lucide-react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { useRunEvents } from "@/hooks/use-run-events";
 import { useWebSocket } from "@/hooks/use-websocket";
@@ -26,6 +30,7 @@ import { useWorkflowStore } from "@/stores/workflow-store";
 import { TopBar } from "@/components/layout/TopBar";
 import { AgentsRail } from "@/components/layout/AgentsRail";
 import { LogStream } from "@/components/detail/LogStream";
+import { RunLoadError } from "@/components/pages/RunLoadError";
 
 // D5：重依赖 view 懒挂——独立 chunk，首屏不加载。
 const ConversationView = lazy(() =>
@@ -55,11 +60,15 @@ export function RunDetailPage() {
   const status = useWorkflowStore((s) => s.status);
   useElapsedTickActive(status === "running");
 
+  // SPEC audit-c §4.1：订阅 loadStatus / retryCount / loadError（UI 交互态）
+  const loadStatus = useWorkflowStore((s) => s.loadStatus);
+  const retryCount = useWorkflowStore((s) => s.retryCount);
+
   const [tab, setTab] = useState<Tab>("conversation");
   const selectedNode = useWorkflowStore((s) => s.selectedNode);
 
   if (!runId) {
-    return <p className="p-4 text-sm text-slate-500">缺少 runId</p>;
+    return <p className="orca-text-muted p-4 text-sm">缺少 runId</p>;
   }
 
   return (
@@ -69,51 +78,77 @@ export function RunDetailPage() {
         <Panel defaultSize={18} minSize={12} maxSize={30}>
           <AgentsRail />
         </Panel>
-        <PanelResizeHandle className="w-px bg-slate-200" />
+        {/* 分隔条：8px 透明 hit 区 + 1px surface-2 中线，hover 强调色（替代原 w-px surface-2 不可见不可拽）。 */}
+        <PanelResizeHandle className="group relative w-2 cursor-col-resize">
+          <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-[rgb(var(--surface-2))] transition-colors group-hover:bg-[rgb(var(--accent))]" />
+        </PanelResizeHandle>
         <Panel defaultSize={56} minSize={30}>
           <div className="flex h-full flex-col">
-            <div className="flex border-b border-slate-200 bg-slate-50">
-              {(
-                [
-                  ["conversation", "会话"],
-                  ["charts", "图表"],
-                ] as const
-              ).map(([t, label]) => (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => setTab(t)}
-                  className={`px-4 py-2 text-sm ${
-                    tab === t
-                      ? "border-b-2 border-slate-900 font-medium text-slate-900"
-                      : "text-slate-500 hover:text-slate-700"
-                  }`}
-                  data-testid={`tab-${t}`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            <div className="flex-1 overflow-auto">
-              <Suspense fallback={<TabFallback label="加载会话…" />}>
-                {tab === "conversation" && (
-                  <ConversationView
-                    nodeId={selectedNode}
-                    onChartClick={() => setTab("charts")}
-                  />
+            {/* SPEC audit-c §4.1 渲染表：error 终态 → RunLoadError（中央区直接替换） */}
+            {loadStatus === "error" ? (
+              <RunLoadError runId={runId} />
+            ) : (
+              <>
+                <div className="orca-bg-app orca-border flex border-b">
+                  {(
+                    [
+                      ["conversation", "会话"],
+                      ["charts", "图表"],
+                    ] as const
+                  ).map(([t, label]) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setTab(t)}
+                      className={`px-4 py-2 text-sm ${
+                        tab === t
+                          ? "orca-bg-surface orca-accent orca-border-accent border-b-2 font-medium"
+                          : "orca-text-muted hover:orca-text"
+                      }`}
+                      data-testid={`tab-${t}`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {/* SPEC audit-c BLOCKER-3：loading + retryCount>0 叠加非阻塞 retry-banner（无重试按钮） */}
+                {loadStatus === "loading" && retryCount > 0 && (
+                  <div
+                    className="orca-border border-b orca-bg-surface px-3 py-1 text-xs orca-text-faint"
+                    data-testid="retry-banner"
+                  >
+                    重试中 第 {retryCount} 次…
+                  </div>
                 )}
-                {tab === "charts" && <ChartsView />}
-              </Suspense>
-            </div>
+                <div className="flex-1 overflow-auto">
+                  {/* SPEC audit-c M18：idle（首 mount）与 loading 同视觉（骨架），不闪烁空白 */}
+                  {loadStatus === "loaded" ? (
+                    <Suspense fallback={<TabFallback label="加载会话…" />}>
+                      {tab === "conversation" && (
+                        <ConversationView
+                          nodeId={selectedNode}
+                          onChartClick={() => setTab("charts")}
+                        />
+                      )}
+                      {tab === "charts" && <ChartsView />}
+                    </Suspense>
+                  ) : (
+                    <TabFallback label="加载中…" />
+                  )}
+                </div>
+              </>
+            )}
           </div>
         </Panel>
-        <PanelResizeHandle className="w-px bg-slate-200" />
+        <PanelResizeHandle className="group relative w-2 cursor-col-resize">
+          <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-[rgb(var(--surface-2))] transition-colors group-hover:bg-[rgb(var(--accent))]" />
+        </PanelResizeHandle>
         <Panel defaultSize={26} minSize={15}>
           <div
-            className="flex h-full flex-col border-l border-slate-200"
+            className="flex h-full flex-col"
             data-testid="log-panel"
           >
-            <div className="border-b border-slate-200 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+            <div className="orca-border orca-text-muted border-b px-3 py-2 text-xs font-semibold uppercase tracking-wide">
               Log
             </div>
             <div className="flex-1 overflow-hidden">
@@ -129,10 +164,11 @@ export function RunDetailPage() {
 function TabFallback({ label }: { label: string }) {
   return (
     <div
-      className="flex h-full items-center justify-center text-sm text-slate-400"
+      className="orca-text-faint flex h-full items-center justify-center gap-2 text-sm"
       data-testid="tab-fallback"
     >
-      <span className="animate-pulse">{label}</span>
+      <Loader2 size={14} strokeWidth={1.5} className="animate-spin" aria-hidden />
+      <span>{label}</span>
     </div>
   );
 }

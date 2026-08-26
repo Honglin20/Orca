@@ -52,8 +52,15 @@ function resetStore() {
     workflowElapsed: null,
     reasoningTokens: 0,
     lastSeqSeen: 0,
+    nodesIndex: {},
+    seenSeqs: new Set<number>(),
     selectedNode: null,
+    selectedSession: null,
     activeRunId: null,
+    loadStatus: "loaded",
+    loadError: null,
+    retryCount: 0,
+    historyLoadError: false,
   });
 }
 

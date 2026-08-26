@@ -36,6 +36,7 @@ export type ConvEntry =
   | { kind: "chart-ref"; event: WebEvent }
   | { kind: "custom-generic"; event: WebEvent }
   | { kind: "node-divider"; event: WebEvent }
+  | { kind: "node-output"; event: WebEvent }
   | { kind: "node-error"; event: WebEvent }
   | { kind: "status-line"; event: WebEvent }
   | { kind: "step-marker"; event: WebEvent }
@@ -59,10 +60,11 @@ const STATUS_LINE_TYPES = new Set<WebEvent["type"]>([
   "foreach_completed",
 ]);
 
-/** 节点生命周期分隔（细，dim）。 */
+/** 节点生命周期分隔（细，dim）。
+ *  注：``node_completed`` 已升格为 ``node-output`` block（B1：显示 output 文字），
+ *  不再作 divider——完成信号由 output 本身承担；边界感留给 node_started / node_skipped。 */
 const NODE_DIVIDER_TYPES = new Set<WebEvent["type"]>([
   "node_started",
-  "node_completed",
   "node_skipped",
 ]);
 
@@ -190,6 +192,11 @@ export function buildEntries(events: WebEvent[]): ConvEntry[] {
       } else {
         entries.push({ kind: "custom-generic", event: e });
       }
+      continue;
+    }
+    if (e.type === "node_completed") {
+      // B1：升格为 output block，不再作 divider（否则 data.output 文字被丢弃）。
+      entries.push({ kind: "node-output", event: e });
       continue;
     }
     if (NODE_DIVIDER_TYPES.has(e.type)) {

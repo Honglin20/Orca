@@ -22,13 +22,13 @@ function NodeShellBase({
   const color = NODE_STATUS_HEX[status] ?? NODE_STATUS_HEX.pending;
   return (
     <div
-      className="relative rounded-md border-2 bg-white px-3 py-2 shadow-sm"
+      className="relative rounded-md border-2 orca-bg-surface px-3 py-2 shadow-sm"
       style={{ borderColor: color, minWidth: 160 }}
       data-testid={`node-${data.name}`}
       data-status={status}
     >
       {/* kind 标签（左上角小字） */}
-      <span className="absolute -top-2 left-2 rounded bg-slate-100 px-1 text-[10px] uppercase text-slate-500">
+      <span className="absolute -top-2 left-2 rounded orca-bg-surface-2 px-1 text-[10px] uppercase orca-text-faint">
         {kindLabel}
       </span>
       {/* 状态点（右上角） */}
@@ -37,7 +37,7 @@ function NodeShellBase({
         style={{ backgroundColor: color }}
         data-testid={`node-${data.name}-dot`}
       />
-      <div className="font-mono text-sm font-medium text-slate-800">
+      <div className="font-mono text-sm font-medium orca-text">
         {data.name}
       </div>
       {children}

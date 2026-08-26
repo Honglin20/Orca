@@ -66,13 +66,17 @@ export interface LastResolved {
   answer: string;
 }
 
-// ── WS 客户端 → 后端消息（subscribe/unsubscribe/gate_response/resume）──────────────────
-// 对齐 orca/iface/web/ws_handler.py _dispatch 接收的 msg 形状 + D6 resume 扩展。
+// ── WS 客户端 → 后端消息（subscribe/unsubscribe/gate_response/resume/approval_*）────────
+// 对齐 orca/iface/web/ws_handler.py _dispatch 接收的 msg 形状 + D6 resume 扩展
+// + SPEC in-session-permission-hook §4.3 approval 反向通道。
 export type WsClientMessage =
   | { type: "subscribe"; run_id: string }
   | { type: "unsubscribe" }
   | { type: "gate_response"; gate_id: string; answer: string }
-  | { type: "resume"; run_id: string; since: number };
+  | { type: "resume"; run_id: string; since: number }
+  | { type: "request_approval_snapshot" }
+  | { type: "approval_respond"; approval_id: string; answer: "allow" | "deny" }
+  | { type: "approval_yolo"; yolo: boolean };
 
 // ── RunMeta（懒加载列表项，元数据，SPEC §0.1 铁律 2）──────────────────────────────
 // 后置 chunk 才用（RunsListPage 已删；保留供未来「runs 列表后置」复用）。
@@ -84,6 +88,31 @@ export interface RunMeta {
   cost: number;
   elapsed: number;
   error: string | null;
+}
+
+// ── Node 会话倒排索引（SPEC web-presentation-refinement §P2 / P0-6）──────────────────
+// 派生字段：``Record<nodeId, NodeSessionIndex>``。store 四路径（refold / loadFromEvents /
+// loadEarlierChunk / loadFull）+ processEvent in-order 增量路径都维护，保一致。
+//
+// 用途：``selectNodeSessions`` 直接读此索引渲染会话选择器（``All(N) | main(M) | ses_xxx(cnt)``）
+// —— **不全量 filter state.events**（避免每次 render O(N) 扫 family_detect 4226 事件）。
+// ``selectConversation`` 仍 filter state.events（事件 retrieval 必须扫，但单 session ~208
+// vs 全 4224 量级差距是性能主因）。
+//
+// Spike 实证（e3b8ad：runs/agent-struct-exploration-...e3b8ad.jsonl，2026-07-17）：
+//   - family_detect 65 distinct session = 64 sub-agent session + 1 "main"（session_id=null
+//     归 "main"，含 node_started/node_completed 2 事件）
+//   - **循环回边重入 session_id 变化**（SPEC §P2 决策 §4 前置 spike 答案）：是的，循环每轮
+//     生成新 session_id（prefix ses_0914 有 5 distinct、ses_0913 有 8 distinct …），故循环节
+//     点不同 ITERATION 可经 session 维度区分（不塌缩一流）。
+//   - ses_090e74f4... 208 事件全部 agent_* 进 conversation。
+export interface NodeSessionIndex {
+  /** distinct session_id 列表（插入顺序 = 首事件 seq 升序；"main" 在合适位置按首事件时序）。 */
+  sessions: string[];
+  /** 每 session 的 conversation 类事件数（key=sessionId 含 "main" 哨兵；null session_id 归 "main"）。 */
+  sessionEventCounts: Record<string, number>;
+  /** 每 session 首事件 timestamp（key=sessionId；selectNodeSessions 排序 / display 用）。 */
+  sessionFirstTs: Record<string, number>;
 }
 
 // ── Huge-mode server overview（SPEC web-attach §3 / M3/M4）──────────────────────────
@@ -105,7 +134,21 @@ export interface ServerOverview {
   charts: OverviewChart[];
   cost_usd: number;
   run_status: string;
+  // SPEC 2026-08-10-card-event-log-align §3.3 F8：huge 模式 meta overview 会带这两个 optional 字段
+  // （从 v3 cache 起；旧 v2 cache 经 version gate 重建后才有）。前端不用即忽略——``log_event_count``
+  // 后端语义=卡片 event_count 同口径（log 行数）；``chart_count`` 是去重数（前端 selectCharts
+  // huge 模式分支用原始 charts list 不去重，故 huge 模式下卡片 chart_count 可能 < 前端显示数）。
+  log_event_count?: number;
+  chart_count?: number;
 }
+
+// ── Loader 错误态（SPEC audit-c §4.1 INV-1 fail loud）──────────────────────────────
+// 四处 loader（loadRun / loadRunWithMeta / loadFull / loadEarlierChunk）失败时写入
+// store 错误态，UI 渲染错误组件 + 重试入口（不再 console.error + return 静默吞）。
+export type LoadError =
+  | { kind: "http"; status: number; message: string }
+  | { kind: "network"; message: string }
+  | { kind: "parse"; message: string };
 
 // ── /api/runs/<id>/meta 完整响应（SPEC web-attach §3）──────────────────────────────
 export interface RunMetaExtended {

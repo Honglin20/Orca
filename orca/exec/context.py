@@ -63,20 +63,19 @@ class RunContext:
     # 原语（web 端从 tape 重放 dialog_message 构造 ctx 时用）。当前 CLI 路径保持空 tuple，
     # 不构成第二真相源（反 AgentHarness 多 store 漂移，本项目顶层铁律）。
     dialog_history: tuple[dict[str, Any], ...] = ()
-    # phase-10 技术债回填：setup phase outputs（MCP 壳主 session 替 setup agent 跑完收集）。
-    # 形状 ``{agent_name: {"output": {field: value}}}``（跟随 node outputs 约定，render
-    # ``_namespace`` 暴露为 ``{{ setup.<agent>.output.<field> }}``）。默认空 dict = 无 setup phase
-    # （向后兼容，绝大多数 workflow 不受影响）。**注入点是 Orchestrator.__init__**（唯一）。
-    # 边界：resume 模式不支持 setup workflow（见 RunManager.start_run）；TUI/Web 自动执行
-    # setup agent 未实现（本字段目前仅由 MCP setup_outputs 驱动）。
-    setup: dict[str, Any] = field(default_factory=dict)
+    # point-to-file subagent 协议（SPEC subagent-point-to-file-design-draft §3.2/§4）：
+    # workflow 子 agent md body 所在目录的**绝对路径字符串**，由 orchestrator 在 run 期经
+    # ``workflows_root / "subagents" / wf.name`` 解析后透传到 render 层。agent.md body 用
+    # ``{{ subagents_root }}/<name>.md`` 引用，render 期被替换为绝对路径——shell 无关、cwd 无关。
+    # 默认空串 = 该 workflow 无 subagents 目录（如 quant-*）；agent.md 不应在此场景引用
+    # ``{{ subagents_root }}``，render 层对「引用了但值为空串」fail loud（SPEC §7 末）。
+    subagents_root: str = ""
 
     def with_locals(self, locals_: dict[str, Any]) -> RunContext:
         """派生带 locals 的新 frozen 实例（foreach body 用，注入 item / _index）。
 
         用 ``dataclasses.replace``（与 ``with_guidance`` / ``with_dialog_turn`` 一致），
-        自动携带所有既有字段（含 ``setup``）——手工列字段会在新加字段时漏传（review
-        发现的历史 bug：setup phase + foreach body 引用 ``{{ setup.* }}`` 曾静默拿空 dict）。
+        自动携带所有既有字段——手工列字段会在新加字段时漏传（历史 bug 模式）。
         不 mutate：返回新 dataclass 实例（frozen 语义）。普通 node 不调用此方法。
         """
         return dataclasses.replace(self, locals=dict(locals_))

@@ -1,0 +1,20 @@
+project_overview:
+  task_type: image classification
+  purpose: toy classification baseline
+model:
+  location: model.py
+  build_entry: build_model
+  forward_signature: forward(self, x)
+  inputs: '[2,8,32]'
+  outputs: '[2,10]'
+training_and_evaluation:
+  paradigm: cross-entropy classification
+  loss: CrossEntropyLoss
+  metric:
+    name: accuracy
+    direction: higher-better
+  eval_kind: classification
+  evaluation_entry: train.py::eval_model
+data_and_environment:
+  dataset: toy
+relevant_source_files: []

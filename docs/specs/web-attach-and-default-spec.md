@@ -13,7 +13,7 @@
 - **D1 单 run 加载**：attach 一次一个 tape，不扫盘。
 - **D2 read-only 开 tape**：attacher **绝不** `Tape(resume=True)`（那是 append 模式，会抢外部写者 flock + 污染 seq）；用新 `tape_reader.replay(path)`（`open(mode="r")` 只读流式 yield Event）。
 - **D3 stream-on-demand（不 bulk replay）**：attach 注册 handle + 起 follow task；**不在 attach 时 bulk replay 全 tape**。client 经 `GET /events?...`（按 seq/窗口）拉取 → 服务端从 tape **流式 emit 到该 run 的 bus**（单写入路径 `bus.emit`），客户端 fold。
-- **D4 `orca run` web 默认生命周期**：in-process orchestrator（同 `POST /api/run`）+ 临时 serve（默认 7428，被占 → `GET /api/health` 探测：是 orca 则复用，否/不可达 → 选空闲端口起新 serve）+ `webbrowser.open(/runs/<id>)`（in-process 走 bus，不 attach）+ 阻塞到终态 + **WS 事件驱动计时器**（任一 WS connect/disconnect 重置；`now - last_ws_disconnect_at > N(默认15s, env ORCA_WEB_AUTOEXIT_SECONDS) AND run.terminal` → 退；`--stay` 保留）。
+- **D4 `orca run` web 默认生命周期**：in-process orchestrator（同 `POST /api/run`）+ 临时 serve（默认 7428，被占 → `GET /api/health` 探测：是 orca 则复用，否/不可达 → 选空闲端口起新 serve）+ `webbrowser.open(/runs/<id>)`（in-process 走 bus，不 attach）+ 阻塞到终态 + **WS 事件驱动计时器**（任一 WS connect/disconnect 重置；`now - last_ws_disconnect_at > N(默认15s, env ORCA_WEB_AUTOEXIT_SECONDS) AND run.terminal AND 无非终态 in-process run` → 退；`--stay` 保留）。第三 conjunct 由 SPEC D finding 1 / I-1 引入——防 auto-exit 撕掉 `POST /api/run` 起的并发 run B。
 - **D5 TUI 保留 opt-in**（`--tui`）；`--background` 不变。
 - **D6 RunHandle 双实现 + 单 registry**：`_runs: dict[str, RunView]`；`RunView` 只读协议 `{run_id, bus, state, status, source}`；`InProcessRunHandle(wf, gate_handler, chart_ingestor, ...)` 与 `AttachedRunHandle(bus, follow_task, terminal, source="attached")` 两实现。`_meta_from_handle`/`_teardown_handle` 对 attach 形态分支（`wf=None` 容错、跳过 sock unlink）。
 
@@ -76,7 +76,7 @@
   1. **端口**：探测 7428 `GET /api/health`（§5）；是 orca → 复用（把 run 注册进既有 server 的 RunManager）；否/不可达 → 选空闲端口起新 in-process serve。`--port` 显式指定且被占 → fail loud。
   2. in-process `RunManager.start_run(...)`（同 `POST /api/run`，run 在本进程；走 bus，不 attach）。
   3. `webbrowser.open(http://127.0.0.1:<port>/runs/<run_id>)`。
-  4. **WS 事件驱动 auto-exit**：服务端维护 `last_ws_disconnect_at`；任一 WS connect/disconnect 重置计时；`now - last_ws_disconnect_at > N(15s, env ORCA_WEB_AUTOEXIT_SECONDS) AND run.terminal` → 退。`--stay` 永不自动退。
+  4. **WS 事件驱动 auto-exit**：服务端维护 `last_ws_disconnect_at`；任一 WS connect/disconnect 重置计时；`now - last_ws_disconnect_at > N(15s, env ORCA_WEB_AUTOEXIT_SECONDS) AND run.terminal AND manager 内无非终态 in-process run` → 退。`--stay` 永不自动退。第三 conjunct 见 SPEC D finding 1（防撕并发 run B）。
   5. 退出码同既有（0/1/2）。
 - `--tui`：旧 Textual TUI（opt-in，保留）。`--background`：既有 detached headless（不变；监控走 `orca open`）。
 
@@ -84,8 +84,12 @@
 
 ## 5. Y2 — `orca open` + `/orca open`（Step2；弃 MCP，U2）
 
-- **`GET /api/health`** → `{app:"orca", version, pid}`（D4/D6 探测用；既有 server 加此路由）。
-- **`orca open <run_id> [--tape <path>]` CLI**：① 探测默认端口 `GET /api/health`；是 orca → 复用；否/不可达 → 后台起 `orca serve`（空闲端口）。② 解析 tape 路径（`runs/<run_id>.jsonl` 或 `--tape`）→ `POST /api/runs/attach`。③ `webbrowser.open(/runs/<run_id>)`。
+- **`GET /api/health`** → `{app:"orca", version, pid, runs_dir_fp}`（D4/D6 探测用；既有 server 加此路由）。`runs_dir_fp = sha1(resolve(runs_dir))[:12]`（见 §5a）——client 据此判定 server 是否**同项目**。用指纹非明文：health 默认 bind `0.0.0.0` 网络可达，明文项目目录是信息泄漏；sha1 不可逆。**缺该字段（旧 server）→ client 视为 foreign → 安全降级到 spawn**（升级窗口期可能留孤儿，用户感知后手动 `pkill -f 'tars serve'`）。
+- **`orca open <run_id> [--tape <path>]` CLI**：① 探测默认端口 `GET /api/health`；是 orca 且 `runs_dir_fp` **匹配本项目** → 复用；否则（foreign orca / 非 orca / 不可达）按 per-project 登记文件 `<runs_dir>/.orca-web.json`（`{port, runs_dir_fp}`）找本项目 server（读后仍 probe+指纹校验，registry 仅 hint、探测权威），无则空闲端口后台起 `orca serve` 并登记。② 解析 tape 路径（`runs/<run_id>.jsonl` 或 `--tape`）→ **绝对路径化** → `POST /api/runs/attach`（跨进程不能相对——server CWD 可能不同）。③ `webbrowser.open(/runs/<run_id>)`。
+
+### 5a. 项目身份指纹（spec-review B1/B3）
+
+`runs_dir_fp`（`orca/iface/web/_identity.py:runs_dir_fingerprint`）= `sha1(str(resolve(runs_dir)))[:12]`，client（`orca open` 的 `_runs_dir_fp`）与 server（health 端点）同算法 → 同项目一致。12 hex = 48bit，birthday paradox 对 ≤10^6 项目碰撞概率 < 10^-8。**隐私 threat note**：指纹不可逆推路径，但同项目多次 bootstrap 指纹稳定，bind `0.0.0.0` 时内网被动观察者可跨 session 关联同项目（缓解 follow-up：fp 仅 loopback/header 下返回，或默认 bind 127.0.0.1）。registry 不存 pid（`Popen.pid` 可能是 `tars` wrapper pid，潜在错误数据；探测权威，pid 不 gate）。
 - **`/orca open <run_id>` slash 命令**（opencode plugin，`messages.transform` 入口，同 `/orca run` 派发）：marker → 调 `orca open` CLI（哑传输，零业务逻辑，grep 守门）。
 - in-session 跑时宿主驱动 run（daemon 写 tape），web 经 attach tail-follow 当观察窗。
 - **MCP 工具 `open_run` 不在本 SPEC**（in-session 无 MCP 注册面）；单独立项 phase-X。

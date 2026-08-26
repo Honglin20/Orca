@@ -9,6 +9,15 @@
    / ``chart_sock`` 4 个 keyword 参数，缺省空串 → 不注 → backward compat（既有调用方
    ``build_env_overlay(prefixes)`` 不破）。ClaudeExecutor spawn 时显式传入，沿 subprocess
    链自然继承到 script；script 的 ``orca.chart.render_chart`` 从 env 读身份（铁律 #2）。
+3. **产物目录注入**（P8 / plan 2026-07-21 §Phase 4-A）：``artifacts_dir`` keyword，非空 →
+   注 ``ORCA_ARTIFACTS_DIR``。workflow 脚本据此定位权威产物目录（替代 workflow 自建
+   ``llm_artifacts/<model>/...`` 的混乱两套 run_id）。
+4. **workflow 源根注入**（plan 2026-08-04 kd-nas headless fix）：``workflows_root`` keyword，
+   非空 → 注 ``ORCA_WORKFLOWS_ROOT``。agent.md 据此定位 workflow 级共享资源目录
+   （如 ``$ORCA_WORKFLOWS_ROOT/agents/_kd_scripts``），cwd 无关——``tars run`` 从用户项目
+   目录起跑时，agent CWD ≠ Orca 仓库根，``workflows/agents/_kd_scripts`` 这类 cwd-relative
+   查找会失败。``workflows_root`` = workflow yaml 所在目录绝对路径（dev: ``<repo>/workflows``，
+   安装态：``~/.orca/workflows``），由 ``load_workflow(yaml_path).parent`` 在 run 启动期解析。
 
 **为何抽出来**：原 ``orca.exec.claude.executor._build_env_overlay`` /
 ``orca.exec.validator._build_env_overlay`` / ``orca.gates.dialog._build_env_overlay`` 三处实现
@@ -32,6 +41,9 @@ def build_env_overlay(
     session_id: str = "",
     chart_sock: str = "",
     agent_resources: str = "",
+    artifacts_dir: str = "",
+    kb_dir: str = "",
+    workflows_root: str = "",
 ) -> dict[str, str]:
     """从 ``os.environ`` 取前缀匹配的 env 变量，作为子进程 overlay（SPEC phase-4 §2.6）。
 
@@ -46,14 +58,31 @@ def build_env_overlay(
         agent_resources: phase-14 agent 资源目录绝对路径（``node.resources_root``，文件夹
             agent 的根目录，含 scripts/refs）。空串 → 不注；非空 → 子进程 ``ORCA_AGENT_RESOURCES``，
             agent 的 Bash 工具据此 ``$ORCA_AGENT_RESOURCES/scripts/x.sh`` 引用 agent 自带资源。
+        artifacts_dir: P8（plan 2026-07-21 §Phase 4-A）workflow 产物权威目录绝对路径
+            （``<runs_dir>/<run_id>/artifacts/``，``orca.chart._paths.artifacts_dir_for_run`` 派生）。
+            空串 → 不注（向后兼容）；非空 → 子进程 ``ORCA_ARTIFACTS_DIR``，workflow 脚本据此
+            ``os.environ["ORCA_ARTIFACTS_DIR"]`` 写产物，替代 workflow 自建 ``llm_artifacts/``。
+        kb_dir: plan sprightly-questing-donut §1.2 workflow 知识库根目录绝对路径（由
+            ``orca.iface.cli.config.resolve_kb_dir`` 解析：env > config > ``~/.orca/knowledge_base``
+            > ``cwd/knowledge_base``）。空串 → 不注（workflow 不需要 KB / 未解析到）；非空 → 子进程
+            ``ORCA_KB_DIR``，workflow 脚本 + agent prompt 据 ``$ORCA_KB_DIR`` 定位 KB（替代裸相对
+            ``knowledge_base/``，解决换项目跑找不到 KB 的可移植性问题）。
+        workflows_root: plan 2026-08-04 kd-nas headless fix —— workflow yaml 所在目录绝对路径
+            （dev: ``<repo>/workflows``；安装态：``~/.orca/workflows``）。空串 → 不注（向后兼容）；
+            非空 → 子进程 ``ORCA_WORKFLOWS_ROOT``，agent.md 据此 cwd-无关地定位 workflow 级共享
+            资源目录（如 ``$ORCA_WORKFLOWS_ROOT/agents/_kd_scripts``）。替代 agent.md 各自 hardcode
+            ``workflows/agents/_kd_scripts`` 的 cwd-relative 查找（``tars run`` 从用户项目起跑时
+            agent CWD ≠ Orca 仓库根，cwd-relative 会 fail）。OCP：通用 env 名，新 workflow 出现
+            共享资源目录时零 executor 改动（agent.md 自己派生子路径）。
 
     Returns:
         ``{key: value}`` dict，传入 ``SpawnConfig.env_overlay``。子进程继承这些变量（如
         ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_BASE_URL`` for ccr 中转；``ORCA_RUN_ID`` 等
-        for phase-13 chart 路由）。
+        for phase-13 chart 路由；``ORCA_ARTIFACTS_DIR`` for P8 产物目录）。
 
     phase-13 backward compat：4 个 ORCA_* keyword 全部缺省（空串）时，行为与重构前完全
-    一致（仅 prefix 透传）。ClaudeExecutor 显式传入时启用 chart 路由。
+    一致（仅 prefix 透传）。ClaudeExecutor 显式传入时启用 chart 路由。P8 同样：``artifacts_dir``
+    缺省（空串）→ 不注（旧调用方零回归），executor 显式传入时启用产物目录注入。
     """
     overlay: dict[str, str] = {}
     for key, value in os.environ.items():
@@ -71,4 +100,14 @@ def build_env_overlay(
     # phase-14：agent 资源目录（文件夹 agent 的根），agent Bash 工具据 $ORCA_AGENT_RESOURCES 引用 scripts/refs。
     if agent_resources:
         overlay["ORCA_AGENT_RESOURCES"] = agent_resources
+    # P8：workflow 产物权威目录，workflow 脚本据 $ORCA_ARTIFACTS_DIR 写产物（替代 llm_artifacts/）。
+    if artifacts_dir:
+        overlay["ORCA_ARTIFACTS_DIR"] = artifacts_dir
+    # plan sprightly-questing-donut §1.2：KB 根目录，workflow 脚本/agent 据 $ORCA_KB_DIR 定位 KB。
+    if kb_dir:
+        overlay["ORCA_KB_DIR"] = kb_dir
+    # plan 2026-08-04 kd-nas headless fix：workflow 源根（yaml 所在目录），agent.md 据
+    # $ORCA_WORKFLOWS_ROOT cwd-无关定位共享资源目录（_kd_scripts / _struct_scripts / 未来 _quant_scripts）。
+    if workflows_root:
+        overlay["ORCA_WORKFLOWS_ROOT"] = workflows_root
     return overlay

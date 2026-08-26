@@ -1,0 +1,7 @@
+case_id: 08_clean_baseline
+primary_evaluator: both
+flat_relpath: flats/clean_flat.py
+expect: LGTM
+expected_severity: null
+must_mention_one_of: []
+description: canonical clean search_space + manifest; both evaluators must LGTM

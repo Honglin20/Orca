@@ -1,0 +1,58 @@
+name: spike_ask_user
+description: "Spike workflow（P3:0-b）：2 节点最小闭环，节点 A 缺 calib loader 时返回 ask-user 哨兵问用户，节点 B 消费 A 的真实 output。仅供 tests/spike_ask_user/ 用。契约见 docs/specs/agent-ask-user-sentinel.md。"
+
+entry: data_finder
+
+inputs:
+  project_root:
+    type: string
+    description: "[default] 用户项目根（spike 中通常留空，agent 会主动缺校准 loader）"
+    required: false
+    default: ""
+
+nodes:
+  # ─────────────────────────────────────────────────────────────
+  # 节点 A：故意缺必填项（calib loader dotted-path）。
+  # agent.md 指示它「读代码无果则返回哨兵，会被恢复，绝不造假」。
+  # driver 用 sentinel 检测 + SendMessage/Task(task_id) 恢复。
+  # ─────────────────────────────────────────────────────────────
+  - name: data_finder
+    kind: agent
+    executor: claude
+    agent: data-finder
+    output_schema:
+      type: object
+      required: [calib_loader, source]
+      properties:
+        calib_loader:
+          type: string
+          description: "校准 loader 的 dotted-path（如 myproj.data:load_calib）"
+        source:
+          type: string
+          description: "user=用户答的 | inferred=agent 推断的"
+      additionalProperties: false
+    routes:
+      - to: data_consumer
+
+  # ─────────────────────────────────────────────────────────────
+  # 节点 B：消费节点 A 的真实 output，证明闭环成立（哨兵不进 orca next）。
+  # ─────────────────────────────────────────────────────────────
+  - name: data_consumer
+    kind: agent
+    executor: claude
+    agent: data-consumer
+    output_schema:
+      type: object
+      required: [summary]
+      properties:
+        summary:
+          type: string
+          description: "一句简短摘要，证明拿到了 calib_loader"
+      additionalProperties: false
+    routes:
+      - to: $end
+
+outputs:
+  calib_loader: "{{ data_finder.output.calib_loader }}"
+  source: "{{ data_finder.output.source }}"
+  summary: "{{ data_consumer.output.summary }}"

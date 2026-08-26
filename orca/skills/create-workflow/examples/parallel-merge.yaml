@@ -1,5 +1,5 @@
 # 抄作业用：分叉+合并（diamond）。entry 跑完 → parallel 组并行两分支 → set 汇聚 → $end。
-# 内联 prompt，无外部 agent md 依赖，可直接 orca validate。
+# 内联 prompt，无外部 agent md 依赖，可直接 tars validate。
 name: parallel-merge
 description: "分叉+合并并行范式（entry→parallel 组并行两分支→set 汇聚→$end）"
 entry: starter

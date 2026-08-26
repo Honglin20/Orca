@@ -12,8 +12,7 @@ workflow，不依赖交互界面。daemon 持续持锁（I3.3a：pid 探活 + �
 宿主存活检测（孤儿锁反向）+ cleanup（atexit/SIGTERM 幂等）。
 
 不在此模块：
-  - 主 UX 路径（``cli.py bootstrap/next/stop/status/start``，per-call CLI 形态）
-  - CC hook 脚本模板（``templates/cc_hooks.py``，``cli.py start`` 生成）
+  - 主 UX 路径（``cli.py bootstrap/next/stop/status``，per-call CLI 形态）
   - opencode plugin 模板（``templates/opencode/``，零业务逻辑哑传输）
 """
 
@@ -33,8 +32,9 @@ import requests
 
 from orca.events.bus import EventBus
 from orca.events.tape import Tape
-from orca.run.lifecycle import make_workflow_failed, now_monotonic
-from orca.run.step import InSessionError, advance_step
+from orca.iface.in_session._step_io import advance_with_scripts, fail_in_session
+from orca.run.lifecycle import now_monotonic
+from orca.run.step import InSessionError
 
 if TYPE_CHECKING:
     from orca.schema.workflow import Workflow
@@ -62,7 +62,6 @@ class InSessionDaemon:
         self.inputs = inputs or {}
         self._lock_fd: Any = None
         self._cleaned = False
-        self._start_ts = now_monotonic()
         self._pending_output: str | None = None   # observe 缓存（D-v4-1：不落盘）
         self._host_alive_ts = now_monotonic()
         self._pid_path = self.tape_path.with_suffix(self.tape_path.suffix + ".pid")
@@ -115,42 +114,44 @@ class InSessionDaemon:
         return {"ok": True}
 
     async def next(self) -> dict[str, Any]:
-        """推进：委托 advance_step(output=cached) 一次原子决策 → 逐条 emit → 清缓存。
+        """推进：共享驱动循环（advance + 内联 script 链）一次原子推进 → 清缓存。
+
+        SPEC 2026-08-21-in-session-script-node §2.5/§10：``next`` 接 ``advance_with_scripts``
+        （script 节点就地内联执行，一次调用跑完整条 script 链停在 agent / 终态；
+        daemon 路径 ``cli_inputs ≡ self.inputs``）。B4：``except InSessionError`` 扩为包住
+        **整个共享循环**（advance + apply + 内联执行；原状只包 advance_step）——循环内任一步
+        失败都走 ``fail_in_session`` 单点（含 auto_executed 属性注入，§2.7）。reply 拼
+        ``auto_executed``（E-3；零条 → 字段省略）。
 
         advance_step 内部三分支（bootstrap/advance/idempotent-replay），见 SPEC §2.1。
+        emit 经循环内 ``apply_step_result`` 单次 write 原子化（v5 §8 step 5b：反旧逐条 emit——
+        SIGTERM 落批内 N 与 N+1 之间会留半截 tape → resume state_corrupt；铁律 12）。
+
+        SPEC 2026-07-23-in-session-error-management §6（计划 S6/E5）：
+          - **recoverable（output_schema_mismatch）自动复用**：advance_step 自捕
+            RecoverableInSessionError → 返 StepResult(recoverable=True)（不外抛）→ 本方法的
+            ``except InSessionError`` **不触发** recoverable；apply_step_result 返 recoverable 信封。
+            故 daemon 路径零改即支持 recoverable 重 arm（与 cli 同源 advance_step）。
+          - **compliance 不降级**：daemon 无 marker / 无 no_output_count 计数器（compliance 是
+            cli 层 marker RMW 注解），daemon 的死循环风险由 ``_host_stale(idle_timeout_s)`` 兜底
+            （已知接受，非回归——daemon 从未有过 compliance 计数）。
         """
         output = self._pending_output
         self._pending_output = None
         try:
-            result = advance_step(
-                self.tape, self.wf, output=output,
-                inputs=self.inputs, run_id=self.run_id,
-                elapsed=now_monotonic() - self._start_ts,
+            # elapsed 由 advance_step 从 tape 时间戳差算（M5 不撒谎：daemon 长跑进程
+            # 虽可测 monotonic，但 tape 单一真相源统一派生，与 per-call CLI 路径一致）。
+            _result, reply, auto_executed = await advance_with_scripts(
+                self.bus, self.tape, self.wf,
+                output=output, cli_inputs=self.inputs, run_id=self.run_id,
+                project_root=Path.cwd(),
             )
-            for emit in result.emits:                   # 原子批量 emit（反例 A 消除）
-                await self.bus.emit(emit.type, emit.data, node=emit.node)
         except InSessionError as e:
-            return await self._fail(e)
+            return await fail_in_session(self.bus, e)
+        if auto_executed:
+            reply["auto_executed"] = auto_executed
         self._host_alive_ts = now_monotonic()
-        reply: dict[str, Any] = {"done": result.done}
-        if result.node:
-            reply["node"] = result.node
-        if result.prompt:
-            reply["prompt"] = result.prompt
-        if result.reason:
-            reply["reason"] = result.reason
         return reply
-
-    async def _fail(self, exc: Exception) -> dict[str, Any]:
-        """fail loud：落 ``workflow_failed`` 终态到 tape（单真相源），再返错误信封。"""
-        error_type = "in_session_error" if isinstance(exc, InSessionError) else "internal_error"
-        logger.exception("next 推进失败，emit workflow_failed (run=%s)", self.run_id)
-        try:
-            t, d = make_workflow_failed(error_type, str(exc))
-            await self.bus.emit(t, d)
-        except Exception:
-            logger.exception("emit workflow_failed 也失败（tape 可能已坏）")
-        return {"done": True, "reason": f"failed: {exc}"}
 
     # ── opencode 前端：SSE 订阅自驱动（Demo 5 验证形态）───────────────────
     def run_opencode(

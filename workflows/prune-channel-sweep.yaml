@@ -1,0 +1,81 @@
+name: prune-channel-sweep
+description: "结构化通道剪枝扫描：沿一组稀疏度比例按卷积权重 L1 范数排序剪输出通道，可选短微调恢复精度，评估每候选精度与 FLOPs 加速比，bake 最佳剪枝模型。需校准数据（微调可选），只动结构、不动数值精度，与量化系列互补。"
+entry: prune_sweeper
+
+inputs:
+  # ── inputs 标签约定（description 前缀，供 in-session 编排器 / tars skill 读取）──
+  #   [ask]      业务决策 / KPI / 硬件 / 预算，用户意图未给则启动前集中询问
+  #   [default]  有合理默认，不问；高级用户可直接覆盖
+  # project_root 已下沉给 prune_sweeper 节点运行时推断（从 model_path 向上走）；
+  # output_dir 已下沉到引擎注入的 $ORCA_ARTIFACTS_DIR（agent 读 env，缺则 fallback）。
+  model_path:
+    type: string
+    description: "[ask] 用户 PyTorch 模型入口文件路径（可实例化 FP 模型，如 model.py）。项目内唯一锚点，必须用户给"
+    required: true
+  target_hardware:
+    type: string
+    description: "[ask] 目标硬件：cuda / npu / cpu。空 → 脚本 resolve_device 自动探测（cuda 优先，cpu 兜底）"
+    required: false
+    default: ""
+  target_compression_ratio:
+    type: string
+    description: "[ask] 业务压缩 KPI——目标理论 FLOPs 压缩比（如 0.5 = 砍掉 50% FLOPs）。下传脚本做候选过滤：仅留理论压缩比 ≥ 此值的候选再按精度选 best。空 = 无硬目标，扫描全网格选精度最高者（剪枝无目标=瞎剪，建议给）"
+    required: false
+    default: ""
+  seed:
+    type: string
+    description: "[default] 随机种子（贯穿 torch / numpy / random，复现性底座）"
+    required: false
+    default: "0"
+
+# ── 已下沉（不再 input，见 docs/specs/workflow-input-design-principle.md §5）──
+#   project_root / eval_data_ref / eval_fn_ref / train_data_ref → Tier B
+#     （agent 读用户代码 infer-once + 哨兵；project_root 从 model_path 向上走）
+#   criterion / ratios / finetune_steps / bake → Tier C（脚本 argparse 默认，固化）
+#   output_dir → Tier C（引擎注入 $ORCA_ARTIFACTS_DIR）
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════
+  # 单 agent：生成 adapter.py（适配异构模型 + eval/train loader + eval_fn）
+  # → 调 run_prune_sweep.py（结构化通道剪枝扫描 + 蒸馏式短微调 +
+  #   bake 最佳 mask 模型 + 落盘 mask 元数据 + render_chart 可视化）
+  # → 回显 JSON 摘要。candidates_evaluated ≥ 1 是 output_schema 硬护栏
+  # （散文复述 / 没真跑扫描 candidates=0 → output_schema_mismatch → node_failed）。
+  # ═══════════════════════════════════════════════════════════════
+  - name: prune_sweeper
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: prune-channel-sweeper
+    output_schema:
+      type: object
+      required:
+        [output_dir, report_path, model_path, best_ratio, best_metric, best_theoretical_speedup, candidates_evaluated, metric_kind, finetuned]
+      properties:
+        output_dir: {type: string, description: "本 run 产物根目录绝对路径"}
+        report_path: {type: string, description: "report.json 绝对路径（全候选明细 + best）"}
+        model_path: {type: string, description: "原始模型入口路径（provenance，回显 input）"}
+        baked_model_path: {type: string, description: "bake 出的最佳剪枝模型 state_dict 路径（best_pruned_model.pt）；bake=false 或失败时为空串"}
+        mask_meta_path: {type: string, description: "逐层 mask 元数据 JSON 路径（pruning_mask.json，供下游物理裁剪脚本消费）"}
+        best_ratio: {type: number, description: "最佳候选的稀疏度比例（0-1）"}
+        best_metric: {type: number, description: "最佳候选的评估指标值"}
+        best_theoretical_speedup: {type: number, description: "最佳候选的理论 FLOPs 加速比（≥1.0；1.0=未压缩）"}
+        candidates_evaluated: {type: integer, minimum: 1, description: "实际评估的候选数（护栏：≥1，0=没真跑扫描）"}
+        metric_kind: {type: string, description: "评估指标类型（业务 eval_fn 名 / 'mse' fallback）"}
+        finetuned: {type: boolean, description: "是否做了短微调（false=未提供 train_loader，仅剪枝后直接 eval）"}
+      additionalProperties: false
+    routes:
+      - to: $end
+
+outputs:
+  output_dir: "{{ prune_sweeper.output.output_dir }}"
+  report_path: "{{ prune_sweeper.output.report_path }}"
+  model_path: "{{ prune_sweeper.output.model_path }}"
+  baked_model_path: "{{ prune_sweeper.output.baked_model_path }}"
+  mask_meta_path: "{{ prune_sweeper.output.mask_meta_path }}"
+  best_ratio: "{{ prune_sweeper.output.best_ratio }}"
+  best_metric: "{{ prune_sweeper.output.best_metric }}"
+  best_theoretical_speedup: "{{ prune_sweeper.output.best_theoretical_speedup }}"
+  candidates_evaluated: "{{ prune_sweeper.output.candidates_evaluated }}"
+  metric_kind: "{{ prune_sweeper.output.metric_kind }}"
+  finetuned: "{{ prune_sweeper.output.finetuned }}"

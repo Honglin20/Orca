@@ -2,9 +2,11 @@
 //
 // 六条铁律对应：
 //   - **单 store + 单 fold**（铁律 4 / SPEC §3.1）：全前端唯一 ``create()``。state = reducer(events)
-//     在 **seq 升序**应用（D7 seq-indexed sorted map，非 append-list）；tiebreaker max(seq) 胜
-//     （保 ChartsView(T)==ChartsView(sort(T))==ChartsView(reverse(T))）。
-//   - **fold 幂等**（铁律 4 / §3.2.3）：seq-indexed Map 去重——同事件应用 N 次状态一致。
+//     在 **seq 升序**应用（D7 seq-sorted events array + ``seenSeqs: Set<number>`` O(1) 索引，
+//     非 append-list）；tiebreaker max(seq) 胜（保 ChartsView(T)==ChartsView(sort(T))==ChartsView(reverse(T))）。
+//   - **fold 幂等**（铁律 4 / §3.2.3）：seq 升序 apply + ``seenSeqs: Set<number>`` O(1)
+//     去重（SPEC audit-c C4；**dev-mode ``__foldTwiceForInvariantCheck`` canary** 检测
+//     累加型 handler 非幂等漂移，INV-2 显式承认当前 reducer 幂等靠调用方 seq 去重）。
 //   - **events 是缓存非真相**（铁律 2）：真相在后端 tape，前端 events 只是当前 run 的缓存，
 //     切走（unloadRun）就清。
 //   - **D8 unknown_event/agent_usage reducer no-op**：unknown_event/agent_step_started/agent_usage
@@ -16,24 +18,192 @@
 
 import { create } from "zustand";
 import { immer } from "zustand/middleware/immer";
+import { enableMapSet } from "immer";
 import type { EventType, WebEvent } from "@/types/events";
 import type {
   GateState,
   LastResolved,
+  LoadError,
+  NodeSessionIndex,
   NodeState,
   RunMetaExtended,
   ServerOverview,
   WorkflowStatus,
 } from "@/types/store-types";
 import type { WorkflowTopology } from "@/types/topology";
+import { CONVERSATION_TYPES } from "@/conversation-types";
+
+// SPEC audit-c B1：immer 对 Set<number> draft 的支持必须在模块加载时启用一次。
+// 否则 seenSeqs Set 的 add/has/new Set 反映不到 next state（静默失效）。
+enableMapSet();
+
+// ── 模块级 abort registry（SPEC audit-c §4.1 重试取消；Map 非 WeakMap，C3）──────────
+// runId 是 string 不可能是 WeakMap 键；故 Map + 显式 delete（unloadRun / load 覆盖）。
+interface InflightEntry {
+  abort: AbortController;
+  timer: ReturnType<typeof setTimeout> | null;
+  epoch: number;
+}
+const inflightLoads = new Map<string, InflightEntry>();
+
+// ── 模块级 moduleEpoch counter（SPEC audit-c C4，**非 store 字段**）──────────────────
+// 防 A→B→A 同 runId 不同实例串话：第一次 load(A) 的迟到 fetch 在切回 A 后 resolve，
+// 仅靠 activeRunId===A 校验会通过（同 runId），moduleEpoch 区分同 runId 不同实例。
+let moduleEpoch = 0;
+
+// ── 模块级 INV-7 warn-once Set（SPEC audit-c §3 INV-7 E6）──────────────────────────
+// 记 `runId::seq`，drop 时 add + warn-once（同 seq 第二次 drop 不重复 warn）；unloadRun 清。
+const droppedSeqs = new Set<string>();
+
+// ── 模块级 untitled-chart warn-once Set（SPEC audit-c §4.2 MINOR-5）─────────────────
+// partition 对无 title chart 跨多次 re-render 仅 warn 一次（防 spam）；unloadRun/unmount 清。
+// 放在 store 模块以与 droppedSeqs 一致管理生命周期，ChartRenderer import 共享。
+export const untitledChartWarned = new Set<string>();
+export function _resetUntitledChartWarnings(): void {
+  untitledChartWarned.clear();
+}
+
+/** iterate 整个 Map abort + clearTimeout + delete（SPEC audit-c C2/E9 abort-all-entries）。 */
+function abortAllInflight(): void {
+  for (const [, entry] of inflightLoads) {
+    entry.abort.abort();
+    if (entry.timer !== null) clearTimeout(entry.timer);
+  }
+  inflightLoads.clear();
+}
+
+/**
+ * SPEC audit-c §4.1 fetchWithBackoff：3 次指数退避（1s/2s/4s）+ retryCount 进 store
+ * 驱动 reactive banner（E4）+ 退避期 loadStatus 保持 loading（BLOCKER-3）。
+ *
+ * 每次 attempt（含 retry fetch）必带 `{signal}`（G2/C12），AbortController 来自当前
+ * entry；切 run / unloadRun → abortAllInflight → in-flight fetch 立即 reject AbortError。
+ *
+ * @returns parsed JSON（array）或 throw LoadError（caller 写错误态）
+ */
+async function fetchEventsWithBackoff(
+  runId: string,
+  entry: InflightEntry,
+  url: string,
+  opts: { expectArray: boolean } = { expectArray: true }
+): Promise<unknown> {
+  const MAX_ATTEMPTS = 3;
+  const backoffs = [1000, 2000, 4000];
+  let lastError: LoadError | null = null;
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    if (attempt > 0) {
+      // 退避 timer 同步绑到 entry（C1），让 abort-all 能 clearTimeout pending 退避；
+      // **监听 abort signal**——clearTimeout 不唤醒 await，必须 signal reject 才能让
+      // loader 闭包释放（否则 loader 永久悬挂 + 闭包内存泄漏）。SPEC audit-c C1 round-5
+      // 「entry.timer = timer」要求字面已落实，此 listener 补「await 必须能被 abort 唤醒」。
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(resolve, backoffs[attempt - 1]);
+        entry.timer = t;
+        entry.abort.signal.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(t);
+            reject(new DOMException("aborted", "AbortError"));
+          },
+          { once: true }
+        );
+      });
+      entry.timer = null;
+      if (entry.abort.signal.aborted) {
+        throw { kind: "network", message: "aborted" } as LoadError;
+      }
+      // retryCount 进 store 驱动 reactive banner（E4）
+      useWorkflowStore.setState({ retryCount: attempt });
+    }
+    try {
+      const resp = await fetch(url, { signal: entry.abort.signal });
+      if (!resp.ok) {
+        lastError = {
+          kind: "http",
+          status: resp.status,
+          message: `HTTP ${resp.status}`,
+        };
+        if (attempt < MAX_ATTEMPTS - 1) {
+          console.warn(
+            `[orca] loadEvents ${runId} 失败 HTTP ${resp.status}，重试中 第 ${attempt + 1} 次`
+          );
+          continue;
+        }
+        throw lastError;
+      }
+      let parsed: unknown;
+      try {
+        parsed = await resp.json();
+      } catch (err) {
+        lastError = {
+          kind: "parse",
+          message: `resp.json() 解析失败: ${(err as Error).message ?? String(err)}`,
+        };
+        if (attempt < MAX_ATTEMPTS - 1) {
+          console.warn(
+            `[orca] loadEvents ${runId} parse 失败，重试中 第 ${attempt + 1} 次`
+          );
+          continue;
+        }
+        throw lastError;
+      }
+      if (opts.expectArray && !Array.isArray(parsed)) {
+        lastError = {
+          kind: "parse",
+          message: `响应非 array (got ${typeof parsed})`,
+        };
+        if (attempt < MAX_ATTEMPTS - 1) {
+          console.warn(
+            `[orca] loadEvents ${runId} 响应非 array，重试中 第 ${attempt + 1} 次`
+          );
+          continue;
+        }
+        throw lastError;
+      }
+      return parsed;
+    } catch (err) {
+      // AbortError（来自 abort signal）→ 直接抛，不重试
+      if ((err as Error)?.name === "AbortError") {
+        throw { kind: "network", message: "aborted" } as LoadError;
+      }
+      // 已是 LoadError（http/parse）→ continue 或 throw
+      if (
+        err &&
+        typeof err === "object" &&
+        "kind" in err &&
+        (err.kind === "http" || err.kind === "parse")
+      ) {
+        lastError = err as LoadError;
+        if (attempt < MAX_ATTEMPTS - 1) continue;
+        throw lastError;
+      }
+      // 真·network 错误（fetch reject）→ 退避重试
+      lastError = {
+        kind: "network",
+        message: (err as Error)?.message ?? String(err),
+      };
+      if (attempt < MAX_ATTEMPTS - 1) {
+        console.warn(
+          `[orca] loadEvents ${runId} 网络错误，重试中 第 ${attempt + 1} 次：${lastError.message}`
+        );
+        continue;
+      }
+      throw lastError;
+    }
+  }
+  // 不可达（for 循环必 throw 或 return），TS 收敛
+  throw lastError ?? { kind: "network", message: "unreachable" };
+}
 
 // ── store state 形状（业务派生 + UI 交互态 + actions，SPEC §3.1）──────────────
 export interface WorkflowState {
   // === 业务真相派生物（从 events fold）===
   /**
-   * seq-indexed sorted event map（D7）。key = seq（全局唯一）。**非 append-list**：
-   * 插入即排序（ Map 维持插入顺序，但本 store 在 fold 前 sort by seq 保证升序 apply）。
-   * 这是 D7 的核心——fold 不依赖事件到达顺序，只依赖 seq 顺序。
+   * events 数组（升序）+ ``seenSeqs: Set<number>`` 索引（SPEC audit-c C4：O(1) 去重，
+   * 替代旧 ``events.some`` O(N) 扫描；序无关不变式 D7 仍由 sort + refold 保证）。
+   * **非 append-list**：插入即排序（fold 前 sort by seq 保证升序 apply）。fold 不依赖
+   * 事件到达顺序，只依赖 seq 顺序。
    */
   events: WebEvent[];
   /** 派生：节点状态（fold 产出，last-writer-wins 幂等）。 */
@@ -55,9 +225,40 @@ export interface WorkflowState {
   reasoningTokens: number;
   /** 派生：最后已见 seq（D6 WS resume 用）。 */
   lastSeqSeen: number;
+  /**
+   * 派生：node × session 倒排索引（SPEC web-presentation-refinement §P2 / P0-6）。
+   * 四路径（refold / loadFromEvents / loadEarlierChunk / loadFull）+ in-order 增量 fold 路径
+   * 都维护，保一致（selectNodeSessions 直接读此索引渲染会话选择器，不全量 filter events）。
+   */
+  nodesIndex: Record<string, NodeSessionIndex>;
+  /**
+   * SPEC audit-c §4.4：seq 去重 Set（O(1) 替代 events.some O(N) 扫描，INV-3 长 run 不卡）。
+   * **重建收进 refold 末尾**（N1）：所有走 refold 路径（loadFromEvents / loadEarlierChunk /
+   * loadFull）自动一致；in-order 增量分支显式 add。requires immer ``enableMapSet()``。
+   */
+  seenSeqs: Set<number>;
+
+  // === Loader 错误态（SPEC audit-c §4.1；UI 交互态，非 fold 派生）===
+  /**
+   * ``idle``（首 mount，M18）/ ``loading``（fetch + 退避期）/ ``loaded`` / ``error``。
+   * **退避期保持 loading**（BLOCKER-3）——不加 retrying，retryCount>0 叠加非阻塞 banner。
+   */
+  loadStatus: "idle" | "loading" | "loaded" | "error";
+  /** loader 终态失败时写入（INV-1 fail loud，不再 console.error+return）。 */
+  loadError: LoadError | null;
+  /** 退避重试计数（进 store，E4：驱动 reactive retry-banner）。 */
+  retryCount: number;
+  /** loadEarlierChunk 失败单开关（M14；非 N 个 chunk 计数）。 */
+  historyLoadError: boolean;
 
   // === UI 交互态（非业务真相，铁律 2）===
   selectedNode: string | null;
+  /**
+   * 当前选中会话（SPEC §P2 P1-3 联动）：``"all"`` = 聚合该 node 全 session（旧行为零回归）；
+   * 具体 sessionId = 仅该 session；``null`` = 未选（初始 / unloadRun）。
+   * ``setSelectedNode`` 同步设为该 node 第一个 sub session（无 sub → ``"all"``）。
+   */
+  selectedSession: string | "all" | null;
   /** 当前懒加载的 run（loadRun 设，unloadRun 清；null = 未持有任何 run）。 */
   activeRunId: string | null;
 
@@ -83,13 +284,13 @@ export interface WorkflowState {
   processEvent: (event: WebEvent) => void;
   /** 全量 fold：重置派生态 → 逐条 processEvent（seq 升序）。用于初始加载 + WS 全量重拉。 */
   loadFromEvents: (events: WebEvent[]) => void;
-  /** 懒加载：GET /api/runs/<id>/events → loadFromEvents。失败 fail loud。 */
+  /** 懒加载：GET /api/runs/<id>/events → _refoldAndCommit。SPEC audit-c：失败 fail loud（写 loadError + 退避重试）。 */
   loadRun: (runId: string) => Promise<void>;
   /**
-   * SPEC web-attach §3 huge-mode 入口：先 GET /meta → 判 huge 分支。
-   * - huge=false：GET /events 全量 → loadFromEvents（同 loadRun 行为）。
-   * - huge=true：GET /events?tail=500 → loadFromEvents（tail fold）+ 设 serverOverview。
-   *   Conversation/Log 读 tail；上滚 IntersectionObserver → ``loadEarlierChunk`` 增量 prepend。
+   * SPEC web-attach §3 huge-mode 入口：先 GET /meta → 据 huge 置信息位。
+   * - huge 与否都 GET /events 全量 → loadFromEvents（用户偏好：huge 不弹 gate，直接加载）。
+   *   huge 标记仍置位（"大 run" 信息位），但 hugeFullyLoaded 恒 true → 占位/按钮分支不触发。
+   *   loadEarlierChunk/loadFull 留作 huge-tail 场景预留能力（当前未接 UI）。
    */
   loadRunWithMeta: (runId: string) => Promise<void>;
   /** huge 模式增量 prepend：fetch ``?since=oldest-M&limit=M`` → 与既有 events 合并 fold。 */
@@ -98,16 +299,23 @@ export interface WorkflowState {
   loadFull: (runId: string) => Promise<void>;
   /** 卸载当前 run 的派生态（懒加载红线：切走清，不累积）。 */
   unloadRun: () => void;
-  /** UI 交互态 setter（非业务真相）。 */
+  /**
+   * UI 交互态 setter（非业务真相）。SPEC §P2 P1-3：同步联动设 selectedSession = 该 node
+   * 第一个 sub session（依赖 nodesIndex；无 sub → ``"all"``；node=null → selectedSession=null）。
+   */
   setSelectedNode: (node: string | null) => void;
+  /** SPEC §P2：切当前 node 的会话（"all"=聚合；具体 sessionId=仅该 session）。 */
+  setSelectedSession: (sid: string | "all" | null) => void;
 }
 
 // ── eventHandlers 表（唯一状态计算路径，SPEC §3.1）──────────────────────────────
 // 覆盖全部 39 个 EventType（对齐 orca/schema/event.py EventType Literal）。每条只做派生：
 // 改 status/nodes/gate/cost——不拼接（保证幂等：同事件 N 次应用结果一致）。
 //
-// PRECONDITION: handler 只由 foldEvent 调用——幂等靠 store 顶层 seq 去重保证，handler
-// 自身不做去重（cost 累加依赖此前提）。
+// PRECONDITION: handler 只由 foldEvent 调用——幂等靠 store 顶层 ``seenSeqs`` seq 去重保证，
+// handler 自身不做去重（cost 累加依赖此前提）。SPEC audit-c §4.3 加 dev-mode canary
+// （``__foldTwiceForInvariantCheck``）：对同一 event apply 两次比较派生快照，任何变化
+// = handler 非幂等 = warn。**漂移 canary 非证明全幂等**（G3）；prod no-op（N3）。
 //
 // D8：unknown_event / agent_step_started 在 reducer 层 MUST no-op（绝不投影 RunState/视图）。
 type Handler = (
@@ -128,6 +336,8 @@ type FoldDraft = {
   workflowElapsed: number | null;
   reasoningTokens: number;
   lastSeqSeen: number;
+  // 注：nodesIndex 不在 FoldDraft —— 它由 indexConversationEvent 维护（refold /
+  // processEvent 调用），不进 handler 表（handlers 只算 nodes/gate/cost 等核心派生）。
 };
 
 // node-level helper：确保 node 槽存在并 merge patch（last-writer-wins 幂等）。
@@ -138,6 +348,53 @@ function patchNode(
 ): void {
   const cur = nodes[name];
   nodes[name] = cur ? { ...cur, ...patch } : { status: "pending", ...patch };
+}
+
+// ── nodesIndex 维护（SPEC §P2 / P0-6）──────────────────────────────────────────
+// 倒排索引：每 node → { sessions, sessionEventCounts, sessionFirstTs }。仅统计
+// CONVERSATION_TYPES 事件（与 selectConversation 输出集对齐；过程事件 count 一致）。
+//
+// **null session_id → "main"**（SPEC §P2 接口契约）。workflow_failed 特例：top-level
+// e.node 为 null，但 data.node 是责任 node → 索引到 data.node（与 selectConversation 一致）。
+const MAIN_SESSION = "main";
+
+/**
+ * 增量 patch nodesIndex：把单条 conversation 事件计入索引（refold / 增量 fold 共用）。
+ *
+ * 幂等性靠上层 seq 去重保证（同 seq 事件不会被 fold 两次）；本函数本身是「+1 计数」非幂等。
+ *
+ * @param index mutable nodesIndex（immer draft 或 fresh object）
+ * @param event 必须是 CONVERSATION_TYPES 事件；非此集合应跳过（调用方判断）
+ */
+function indexConversationEvent(
+  index: Record<string, NodeSessionIndex>,
+  event: WebEvent
+): void {
+  // 目标 node：优先 e.node；workflow_failed 以 data.node 关联（eventMatchesNode 同语义，
+  // 但此处需取出 targetNode 字符串做索引 key，不能直接用 boolean helper）
+  let targetNode = event.node;
+  if (!targetNode && event.type === "workflow_failed") {
+    const dn = event.data?.node;
+    if (typeof dn === "string") targetNode = dn;
+  }
+  if (!targetNode) return; // workflow 级无 node 事件不索引（不属于任何 agent）
+  const sid = event.session_id ?? MAIN_SESSION;
+  let entry = index[targetNode];
+  if (!entry) {
+    entry = {
+      sessions: [],
+      sessionEventCounts: {},
+      sessionFirstTs: {},
+    };
+    index[targetNode] = entry;
+  }
+  if (!(sid in entry.sessionEventCounts)) {
+    entry.sessions.push(sid);
+    entry.sessionEventCounts[sid] = 0;
+    entry.sessionFirstTs[sid] = event.timestamp;
+  }
+  entry.sessionEventCounts[sid] += 1;
+  // firstTs 保持首次写入（refold 按 seq 升序 fold → 首次 = 最早；增量 in-order 也最早）
 }
 
 const eventHandlers: Record<EventType, Handler> = {
@@ -180,11 +437,21 @@ const eventHandlers: Record<EventType, Handler> = {
   },
   node_completed: (s, d, e) => {
     if (!e.node) return;
-    const elapsed = Number(d.elapsed);
+    const dataElapsed = Number(d.elapsed);
+    const hasDataElapsed = d.elapsed != null && Number.isFinite(dataElapsed);
+    // in-session 路径 node_completed.data 只含 output（无 elapsed）→ 用事件 timestamp
+    // 差补算（node_completed.ts − node_started.ts，均 epoch 秒 → 差为真实耗时秒数）。
+    // 标准 executor 路径优先取 data.elapsed（executor 用 time.monotonic 实测，更精确）。
+    // 两路都无（缺 startedAt，如老 tape 重放）→ undefined，AgentsRail 不显示（fail loud 不撒谎）。
+    const startedAt = s.nodes[e.node]?.startedAt;
+    const tsElapsed =
+      startedAt != null && e.timestamp != null
+        ? Math.max(0, e.timestamp - startedAt)
+        : undefined;
     patchNode(s.nodes, e.node, {
       status: "done",
       output: d.output,
-      elapsed: Number.isFinite(elapsed) ? elapsed : undefined,
+      elapsed: hasDataElapsed ? dataElapsed : tsElapsed,
     });
   },
   node_failed: (s, _d, e) => {
@@ -243,6 +510,11 @@ const eventHandlers: Record<EventType, Handler> = {
     const [done, total] = cur.progress.split("/").map(Number);
     if (Number.isFinite(done) && Number.isFinite(total)) {
       cur.progress = `${done + 1}/${total}`;
+    } else {
+      // SPEC audit-c M4：silent skip → warn（progress 形异常开发者可见）+ 保留原值
+      console.warn(
+        `[orca] foreach_item_completed progress 形异常 seq=${e.seq} progress="${cur.progress}"`
+      );
     }
   },
   foreach_completed: (s, _d, e) => {
@@ -352,10 +624,11 @@ function foldEvent(state: FoldDraft, event: WebEvent): void {
  * 故 out-of-order 到达时不能增量 fold——必须从 sorted events 全量重 fold。
  *
  * 性能：每次 processEvent 触发 refold → O(N) 派生 + O(N log N) sort（仅 out-of-order 时）。
- * 1000 事件下 ~10k ops/事件，可接受；更大规模可加 Set<seq> 索引 + 增量 patch（YAGNI）。
+ * 1000 事件下 ~10k ops/事件，可接受；P2 引入 in-order 增量 fold 后，WS 常态 in-order
+ * 到达的事件不再触发 refold（仅 out-of-order / loadEarlierChunk 触发）。
  */
 function refold(state: WorkflowState): void {
-  // 重置派生（保留 UI 交互态 selectedNode / activeRunId / events 数组本身）
+  // 重置派生（保留 UI 交互态 selectedNode / selectedSession / activeRunId / events 数组本身）
   state.nodes = {};
   state.gate = null;
   state.lastResolved = null;
@@ -367,11 +640,21 @@ function refold(state: WorkflowState): void {
   state.workflowElapsed = null;
   state.reasoningTokens = 0;
   state.lastSeqSeen = 0;
+  state.nodesIndex = {};
   // 在 draft 上逐条 fold（events 已 sort，故按数组顺序 apply 即 seq 升序）
   for (const e of state.events) {
     foldEvent(state, e);
     if (e.seq > state.lastSeqSeen) state.lastSeqSeen = e.seq;
+    // nodesIndex 维护（P0-6 四路径之一：refold 全量重建）
+    if (CONVERSATION_TYPES.has(e.type)) {
+      indexConversationEvent(state.nodesIndex, e);
+    }
   }
+  // SPEC audit-c N1：seenSeqs 重建收进 refold 末尾——所有走 refold 路径
+  // （loadFromEvents / loadEarlierChunk / loadFull）自动一致。否则 loadEarlierChunk
+  // 走 set+refold 但 seenSeqs 不动 → 后续 WS resume 推 chunk 区间重复事件 has 返 false
+  // → events 数组重复。
+  state.seenSeqs = new Set(state.events.map((e) => e.seq));
 }
 
 /** 把派生字段重置到初始（DRY：loadFromEvents / unloadRun 共用）。 */
@@ -387,6 +670,112 @@ function resetDerived(s: WorkflowState): void {
   s.workflowElapsed = null;
   s.reasoningTokens = 0;
   s.lastSeqSeen = 0;
+  s.nodesIndex = {};
+  s.seenSeqs = new Set();
+}
+
+// ── SPEC audit-c §4.5 _refoldAndCommit（E7 私有 helper，loader 共用）──────────────────
+// loaders 把 fold 累积到单次 set 同时提交（activeRunId + events + 派生 + loadStatus="loaded"），
+// **不**调 public loadFromEvents（E7：public loadFromEvents 是 triggerResumeFallback 专用，
+// 不翻 loadStatus）。loadStatus 翻转与 events 写入在同一 set 内（INV-7 互补，N5/C12 原子性）。
+//
+// **caller 责任**：写时双重校验（``activeRunId===runId && moduleEpoch===myEpoch``）已在
+// caller 端完成；本 helper 只负责单次原子提交。
+function _refoldAndCommit(
+  state: WorkflowState,
+  runId: string,
+  events: WebEvent[],
+  patch: Partial<WorkflowState>
+): void {
+  state.events = [...events].sort((a, b) => a.seq - b.seq);
+  refold(state); // 内部已重建 seenSeqs（N1）
+  state.activeRunId = runId;
+  for (const [k, v] of Object.entries(patch)) {
+    // immer draft 上设任意字段（patch 仅含 huge/serverOverview/窗口边界/loadStatus 等）
+    (state as unknown as Record<string, unknown>)[k] = v;
+  }
+  state.loadStatus = "loaded";
+  state.loadError = null;
+  state.retryCount = 0;
+}
+
+// ── SPEC audit-c §4.3 dev-mode 自检 helper（B3，C3 handler 表不变式 canary）──────────
+// 仅 ``import.meta.env.DEV`` 启用，prod no-op（N3）。
+// 语义：对同一 event 连续 apply 两次（强制绕过 seq 去重），比较前后 state 派生快照——
+// 任何派生字段变化 = handler 非幂等 = warn。**漂移 canary，非证明全幂等**（G3）。
+type FoldableSnapshot = Pick<
+  WorkflowState,
+  | "nodes"
+  | "gate"
+  | "lastResolved"
+  | "workflowName"
+  | "status"
+  | "cost"
+  | "workflowDef"
+  | "workflowStartedAt"
+  | "workflowElapsed"
+  | "reasoningTokens"
+  | "lastSeqSeen"
+  | "nodesIndex"
+>;
+
+export function __foldTwiceForInvariantCheck(event: WebEvent): void {
+  if (!import.meta.env.DEV) return; // prod no-op（N3）
+  setImmediateSnapshot(__foldTwiceRun.bind(null, event));
+}
+
+function __foldTwiceRun(event: WebEvent): void {
+  // 在临时 draft state 上 apply 两次，比较快照
+  const baseline = useWorkflowStore.getState();
+  const before = snapshot(baseline);
+  // apply 一次（强制绕过 seq 去重——直接调 foldEvent）
+  const s1: WorkflowState = JSON.parse(JSON.stringify(baseline));
+  // 注：immer 下我们用 plain JSON clone；Set/Map 不进 handler，clone 不影响 fold 结果
+  foldEvent(s1 as unknown as FoldDraft, event);
+  if (CONVERSATION_TYPES.has(event.type)) {
+    indexConversationEvent(s1.nodesIndex, event);
+  }
+  const after1 = snapshot(s1);
+  // apply 第二次（绕过 seq 去重）
+  foldEvent(s1 as unknown as FoldDraft, event);
+  if (CONVERSATION_TYPES.has(event.type)) {
+    indexConversationEvent(s1.nodesIndex, event);
+  }
+  const after2 = snapshot(s1);
+  if (!shallowEqSnapshot(after1, after2)) {
+    console.warn(
+      `[orca] handler 非幂等 canary：type=${event.type} seq=${event.seq} 两次 apply 派生不一致`,
+      { before, after1, after2 }
+    );
+  }
+  void before; // 抑制 unused
+}
+
+function snapshot(s: WorkflowState): FoldableSnapshot {
+  return {
+    nodes: s.nodes,
+    gate: s.gate,
+    lastResolved: s.lastResolved,
+    workflowName: s.workflowName,
+    status: s.status,
+    cost: s.cost,
+    workflowDef: s.workflowDef,
+    workflowStartedAt: s.workflowStartedAt,
+    workflowElapsed: s.workflowElapsed,
+    reasoningTokens: s.reasoningTokens,
+    lastSeqSeen: s.lastSeqSeen,
+    nodesIndex: s.nodesIndex,
+  };
+}
+
+function shallowEqSnapshot(a: FoldableSnapshot, b: FoldableSnapshot): boolean {
+  // nodesIndex / nodes 是嵌套对象——deep 比较用 JSON（canary 用，性能非关键）
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+// microtask 排程（避免同步调用污染当前 set 上下文）
+function setImmediateSnapshot(fn: () => void): void {
+  Promise.resolve().then(fn);
 }
 
 /** 单 store（铁律 4：全前端唯一 create()）。 */
@@ -404,8 +793,11 @@ export const useWorkflowStore = create<WorkflowState>()(
     workflowElapsed: null,
     reasoningTokens: 0,
     lastSeqSeen: 0,
+    nodesIndex: {},
+    seenSeqs: new Set<number>(),
 
     selectedNode: null,
+    selectedSession: null,
     activeRunId: null,
 
     // huge-mode + writable（SPEC web-attach §3 / M3）
@@ -416,22 +808,67 @@ export const useWorkflowStore = create<WorkflowState>()(
     newestSeqInWindow: 0,
     hugeFullyLoaded: true, // 非 huge 模式视同已 full load
 
+    // SPEC audit-c §4.1：loader 错误态（UI 交互态，非 fold 派生，M19）
+    loadStatus: "idle", // 初始 idle（M18）
+    loadError: null,
+    retryCount: 0,
+    historyLoadError: false,
+
     processEvent: (event) => {
       set((state) => {
-        // ── 幂等 guard：同 seq 已存在则跳过 ──
-        if (state.events.some((e) => e.seq === event.seq)) {
+        // ── SPEC audit-c §3 INV-7：loadStatus !== "loaded" 拒收 WS 增量 ──
+        // 防 loading/idle/error 期 WS 推事件污染部分 fold；drop + warn-once（E6）。
+        // **defer-RESUME（E1 BLOCKER）**：loaded 后发 sendResume since=lastSeqSeen 由
+        // server 重放补全窗口事件（不依赖 plain subscribe，subscribe forward-only）。
+        if (state.loadStatus !== "loaded") {
+          const key = `${state.activeRunId ?? "<null>"}::${event.seq}`;
+          if (!droppedSeqs.has(key)) {
+            droppedSeqs.add(key);
+            console.warn(
+              `[orca] INV-7 drop event seq=${event.seq} loadStatus=${state.loadStatus} run=${state.activeRunId}`
+            );
+          }
+          return;
+        }
+        // ── 幂等 guard：seenSeqs O(1) 查（SPEC audit-c C4 替代 events.some O(N) 扫）──
+        if (state.seenSeqs.has(event.seq)) {
           return;
         }
 
-        // D7 seq 升序 fold：插入后保持 events 按 seq 升序，然后 refold 全量派生。
-        // 不能增量 fold（handlers 必须在 seq 升序上跑，如 node_started 不能晚于
-        // node_completed）；故每次插入后 refold。性能可接受（见 refold 注释）。
-        state.events.push(event);
-        state.events.sort((a, b) => a.seq - b.seq);
-        refold(state);
+        // P0-5 轻量增量 fold（SPEC §P2 方案 3）：WS 常态 in-order 到达 → 只 fold 新事件，
+        // patch nodes/nodesIndex，不全量 refold。out-of-order（WS resume 重放乱序 /
+        // loadEarlierChunk prepend 历史）→ 既有全量 refold。
+        //
+        // D7 幂等不变：in-order 增量是 seq 升序 fold 的特例（handlers 在升序上 apply），
+        // 单测证等价（test/store.test.ts）。
+        //
+        // 注：``state.events`` 已是 seq 升序数组（refold/loadFromEvents 后保持）。
+        // 若 ``event.seq > lastSeqSeen`` → event 是新最大值 → push 到末尾仍保升序，无需 sort。
+        if (event.seq > state.lastSeqSeen) {
+          state.events.push(event);
+          foldEvent(state, event);
+          state.lastSeqSeen = event.seq;
+          state.seenSeqs.add(event.seq); // O(1)（C4）
+          // nodesIndex 增量 patch（P0-6 四路径之一：in-order 增量）
+          if (CONVERSATION_TYPES.has(event.type)) {
+            indexConversationEvent(state.nodesIndex, event);
+          }
+        } else {
+          // out-of-order：插入 + sort + 全量 refold（含 nodesIndex + seenSeqs 重建）
+          state.events.push(event);
+          state.events.sort((a, b) => a.seq - b.seq);
+          refold(state);
+        }
       });
     },
 
+    /**
+     * 全量 refold 公共 action（D7：序无关）。
+     *
+     * **SPEC audit-c E7 显式不变量**：本 action 是 WS resume-fallback
+     * （use-websocket ``triggerResumeFallback``）专用，**签名与 loadStatus 行为保持不变
+     * （不 touch loadStatus）**——loaders 走私有 ``_refoldAndCommit`` helper，不调本 action。
+     */
     loadFromEvents: (events) => {
       // 重置 events 数组 → sort + refold（D7：序无关）。
       set((state) => {
@@ -440,119 +877,160 @@ export const useWorkflowStore = create<WorkflowState>()(
       });
     },
 
+    /**
+     * SPEC audit-c §4.1：懒加载入口（fail loud）。
+     *
+     * - HTTP 非 200 / 网络错误 / parse 失败 → 3 次指数退避（1s/2s/4s）+ retryCount 进 store
+     *   驱动 reactive banner；3 次失败翻 ``error`` 终态 + 写 loadError（INV-1/INV-4）。
+     * - 退避期 loadStatus 保持 ``loading``（BLOCKER-3），retryCount>0 叠加 retry-banner。
+     * - AbortController + moduleEpoch 双校验防 A→B→A 陈旧 fetch 污染（N2）。
+     * - 原子提交：所有状态（activeRunId + events + 派生 + loadStatus）单 set 同时写（INV-4）。
+     */
     loadRun: async (runId) => {
+      // moduleEpoch++ BEFORE abortAllInflight（E9 钉死顺序，evaluator 已证顺序无关）
+      moduleEpoch++;
+      const myEpoch = moduleEpoch;
+      abortAllInflight();
+      const entry: InflightEntry = { abort: new AbortController(), timer: null, epoch: myEpoch };
+      inflightLoads.set(runId, entry);
+      // 入口 reset retryCount=0（E4，防 B 继承 A）+ historyLoadError（DRY，m2 对齐 loadRunWithMeta）
+      set({ loadStatus: "loading", loadError: null, retryCount: 0, historyLoadError: false });
+
       try {
-        const resp = await fetch(`/api/runs/${encodeURIComponent(runId)}/events`);
-        if (!resp.ok) {
-          console.error(`[orca] loadRun ${runId} 失败 HTTP ${resp.status}`);
-          return;
-        }
-        const events = (await resp.json()) as WebEvent[];
+        const events = (await fetchEventsWithBackoff(
+          runId,
+          entry,
+          `/api/runs/${encodeURIComponent(runId)}/events`
+        )) as WebEvent[];
+        // 写时双重校验（N2/C2）：activeRunId + moduleEpoch
+        if (get().activeRunId !== null && get().activeRunId !== runId) return;
+        if (moduleEpoch !== myEpoch) return;
         set((state) => {
-          state.activeRunId = runId;
+          _refoldAndCommit(state, runId, events, {});
         });
-        get().loadFromEvents(events);
       } catch (err) {
-        console.error(`[orca] loadRun ${runId} 网络错误`, err);
+        writeLoadError(get, set, runId, myEpoch, err as LoadError);
+      } finally {
+        if (inflightLoads.get(runId)?.epoch === myEpoch) inflightLoads.delete(runId);
       }
     },
 
     /**
-     * SPEC web-attach §3 huge-mode 入口。先 GET /meta → 判 huge 分支。
+     * SPEC web-attach §3 huge-mode 入口。先 GET /meta → 据 meta.huge 置信息位。
      *
-     * - **非 huge**：GET /events 全量 → loadFromEvents（同 loadRun）。
-     * - **huge**：GET /events?tail=500 → loadFromEvents（tail fold 进 Conversation/Log）+
-     *   设 serverOverview（overview selectors 信任服务端 fold，M3/M4）+ 记 oldest/newest
-     *   窗口边界（供 IntersectionObserver ``loadEarlierChunk`` 增量 prepend 用）。
-     * - ``writable=false``（attached run）：selectors 仍按 fold 工作，gate 模态据此禁提交。
+     * - **huge 与否皆全量**：GET /events → loadFromEvents + hugeFullyLoaded=true（用户偏好：
+     *   huge 不弹「加载全部」gate，直接全量加载）。huge 标记据 meta 置位仅作"大 run"信息。
+     * - ``/meta`` 失败 silent fallback（INV-1 qualifier M9）；full 也失败 → 错误态。
+     * - ``writable=false``（attached run）：gate 模态禁提交。
      */
     loadRunWithMeta: async (runId) => {
+      moduleEpoch++;
+      const myEpoch = moduleEpoch;
+      abortAllInflight();
+      const entry: InflightEntry = { abort: new AbortController(), timer: null, epoch: myEpoch };
+      inflightLoads.set(runId, entry);
+      set({ loadStatus: "loading", loadError: null, retryCount: 0, historyLoadError: false });
+
+      // /meta silent fallback（INV-1 qualifier M9）：失败仅 console.warn + meta=null
       let meta: RunMetaExtended | null = null;
       try {
         const mresp = await fetch(
-          `/api/runs/${encodeURIComponent(runId)}/meta`
+          `/api/runs/${encodeURIComponent(runId)}/meta`,
+          { signal: entry.abort.signal }
         );
         if (mresp.ok) meta = (await mresp.json()) as RunMetaExtended;
       } catch (err) {
-        console.warn(`[orca] loadRunWithMeta ${runId} /meta 失败，回退 full`, err);
-      }
-      if (meta && meta.huge) {
-        // huge 模式：拉 tail=500 + 设 serverOverview
-        try {
-          const resp = await fetch(
-            `/api/runs/${encodeURIComponent(runId)}/events?tail=500`
-          );
-          if (!resp.ok) {
-            console.error(
-              `[orca] loadRunWithMeta huge ${runId} tail 拉取失败 HTTP ${resp.status}`
-            );
-            return;
-          }
-          const tail = (await resp.json()) as WebEvent[];
-          set((state) => {
-            state.activeRunId = runId;
-            state.huge = true;
-            state.hugeFullyLoaded = false;
-            state.serverOverview = meta!.overview ?? null;
-            state.writable = meta!.writable;
-            state.oldestSeqInWindow =
-              tail.length > 0 ? tail[0].seq : meta!.oldest_seq;
-            state.newestSeqInWindow =
-              tail.length > 0 ? tail[tail.length - 1].seq : meta!.newest_seq;
-          });
-          get().loadFromEvents(tail);
-        } catch (err) {
-          console.error(`[orca] loadRunWithMeta huge ${runId} 网络错误`, err);
+        if ((err as Error)?.name !== "AbortError") {
+          console.warn(`[orca] loadRunWithMeta ${runId} /meta 失败，回退 full`, err);
         }
-        return;
       }
-      // 非 huge（或 /meta 失败回退）：原有 loadRun 全量路径
-      set((state) => {
-        state.huge = false;
-        state.hugeFullyLoaded = true;
-        state.serverOverview = null;
-        state.writable = meta?.writable ?? true;
-      });
-      await get().loadRun(runId);
+
+      // 全量路径（huge run 亦直接全量加载——不弹「加载全部」gate；用户偏好直接加载，
+      // 接受大 run 较慢的代价）。huge 标记仍据 meta 置位（信息位），但 hugeFullyLoaded
+      // 恒 true → ChartRenderer 占位/按钮分支（huge && !hugeFullyLoaded）永不触发。
+      try {
+        const events = (await fetchEventsWithBackoff(
+          runId,
+          entry,
+          `/api/runs/${encodeURIComponent(runId)}/events`
+        )) as WebEvent[];
+        if (get().activeRunId !== null && get().activeRunId !== runId) return;
+        if (moduleEpoch !== myEpoch) return;
+        set((state) => {
+          _refoldAndCommit(state, runId, events, {
+            huge: meta?.huge ?? false,
+            hugeFullyLoaded: true,
+            serverOverview: null,
+            writable: meta?.writable ?? true,
+          });
+        });
+      } catch (err) {
+        writeLoadError(get, set, runId, myEpoch, err as LoadError);
+      } finally {
+        if (inflightLoads.get(runId)?.epoch === myEpoch) inflightLoads.delete(runId);
+      }
     },
 
     /**
      * huge 模式增量 prepend：fetch ``?since=max(0, oldest-M)&limit=M`` → 与既有 events
      * 合并 fold（O(window)，不重算全 tape）。返回 true 表示拉到新事件（窗口向上扩展）。
      *
-     * 到达 ``oldest_seq == 1`` 时返回 false（已到顶，无更多历史）。
+     * SPEC audit-c §4.1：免退避重试（C6：历史拉取非关键 load），失败仅 set
+     * ``historyLoadError=true`` + UI banner；同窗口节流（M14）；下次成功自动清。
+     * **写时双重校验**（C2 BLOCKER）：loadEarlierChunk(A) 在飞 + 切 B + A chunk
+     * late-resolve 时丢弃，不污染 B。
      */
     loadEarlierChunk: async (runId, chunkSize) => {
       const state0 = get();
       if (!state0.huge) return false;
       if (state0.oldestSeqInWindow <= 1) return false; // 已到顶
       const since = Math.max(0, state0.oldestSeqInWindow - 1 - chunkSize);
+      const originatingEpoch = moduleEpoch; // 持当前 epoch（C2 写时校验）
+      // 复用同 runId 的 inflight entry（若无则新建临时）——loadEarlierChunk 不重置 retryCount
+      let entry = inflightLoads.get(runId);
+      if (!entry) {
+        entry = { abort: new AbortController(), timer: null, epoch: originatingEpoch };
+        inflightLoads.set(runId, entry);
+      }
       try {
         const resp = await fetch(
-          `/api/runs/${encodeURIComponent(runId)}/events?since=${since}&limit=${chunkSize}`
+          `/api/runs/${encodeURIComponent(runId)}/events?since=${since}&limit=${chunkSize}`,
+          { signal: entry.abort.signal }
         );
         if (!resp.ok) {
-          console.warn(
-            `[orca] loadEarlierChunk ${runId} HTTP ${resp.status}（忽略）`
-          );
+          // 免退避，banner-only（M14/C6）；节流：同窗口已 true 则不重复 set
+          if (!get().historyLoadError) {
+            set({ historyLoadError: true });
+          }
+          console.warn(`[orca] loadEarlierChunk ${runId} HTTP ${resp.status}（忽略）`);
           return false;
         }
         const chunk = (await resp.json()) as WebEvent[];
+        if (!Array.isArray(chunk)) {
+          if (!get().historyLoadError) set({ historyLoadError: true });
+          return false;
+        }
         if (chunk.length === 0) return false;
+        // 写时双重校验（C2 BLOCKER）：activeRunId + moduleEpoch 都一致才写
+        if (get().activeRunId !== runId) return false;
+        if (moduleEpoch !== originatingEpoch) return false;
         set((state) => {
-          // 合并：旧 events + chunk（processEvent 内部 seq 去重，安全）
+          // 合并：旧 events + chunk（seenSeqs/refold 内部 seq 去重，安全）
           const merged = [...state.events, ...chunk];
           merged.sort((a, b) => a.seq - b.seq);
           state.events = merged;
-          refold(state);
+          refold(state); // 末尾重建 seenSeqs（N1）
           state.oldestSeqInWindow = Math.min(
             state.oldestSeqInWindow,
             chunk[0].seq
           );
+          state.historyLoadError = false; // 下次成功自动清（M14）
         });
         return true;
       } catch (err) {
-        console.warn(`[orca] loadEarlierChunk ${runId} 网络错误`, err);
+        if ((err as Error)?.name === "AbortError") return false;
+        if (!get().historyLoadError) set({ historyLoadError: true });
+        console.warn(`[orca] loadEarlierChunk ${runId} 网络错误（忽略）`, err);
         return false;
       }
     },
@@ -560,31 +1038,49 @@ export const useWorkflowStore = create<WorkflowState>()(
     /**
      * huge 模式 ``load full``：拉全量 events → client-fold + clear serverOverview（M4：
      * 客户端可经此校验服务端 overview 派生与 client-fold 一致）。``hugeFullyLoaded=true``。
+     *
+     * SPEC audit-c §4.1：失败**不清 serverOverview**（保留原 huge 状态）+ 写错误态；
+     * 原子提交同 loadRun/loadRunWithMeta。
      */
     loadFull: async (runId) => {
+      moduleEpoch++;
+      const myEpoch = moduleEpoch;
+      abortAllInflight();
+      const entry: InflightEntry = { abort: new AbortController(), timer: null, epoch: myEpoch };
+      inflightLoads.set(runId, entry);
+      set({ loadStatus: "loading", loadError: null, retryCount: 0, historyLoadError: false });
+
       try {
-        const resp = await fetch(
+        const events = (await fetchEventsWithBackoff(
+          runId,
+          entry,
           `/api/runs/${encodeURIComponent(runId)}/events`
-        );
-        if (!resp.ok) {
-          console.error(`[orca] loadFull ${runId} HTTP ${resp.status}`);
-          return;
-        }
-        const events = (await resp.json()) as WebEvent[];
+        )) as WebEvent[];
+        if (get().activeRunId !== null && get().activeRunId !== runId) return;
+        if (moduleEpoch !== myEpoch) return;
         set((state) => {
-          state.hugeFullyLoaded = true;
-          state.serverOverview = null; // clear → selectors 回退 client-fold（M4 可验）
+          // 保留 huge=true（loadFull 在 huge 模式触发）；只清 serverOverview + hugeFullyLoaded=true
+          _refoldAndCommit(state, runId, events, {
+            hugeFullyLoaded: true,
+            serverOverview: null,
+          });
         });
-        get().loadFromEvents(events);
       } catch (err) {
-        console.error(`[orca] loadFull ${runId} 网络错误`, err);
+        writeLoadError(get, set, runId, myEpoch, err as LoadError);
+      } finally {
+        if (inflightLoads.get(runId)?.epoch === myEpoch) inflightLoads.delete(runId);
       }
     },
 
     unloadRun: () => {
+      // SPEC audit-c §4.1：abort-all + Map.delete + 复位错误态 + 清 warn-once Sets（E6/MINOR-5）
+      abortAllInflight();
+      droppedSeqs.clear();
+      untitledChartWarned.clear();
       set((state) => {
         state.activeRunId = null;
         state.selectedNode = null;
+        state.selectedSession = null;
         resetDerived(state);
         state.events = [];
         // huge-mode 状态清空（避免下一 run 残留）
@@ -594,15 +1090,68 @@ export const useWorkflowStore = create<WorkflowState>()(
         state.oldestSeqInWindow = 0;
         state.newestSeqInWindow = 0;
         state.hugeFullyLoaded = true;
+        // loader 错误态复位（M18）
+        state.loadStatus = "idle";
+        state.loadError = null;
+        state.retryCount = 0;
+        state.historyLoadError = false;
       });
     },
 
     setSelectedNode: (node) =>
       set((state) => {
         state.selectedNode = node;
+        // SPEC §P2 P1-3 联动：selectedSession = 该 node 第一个 sub session（依赖 nodesIndex）；
+        // 无 sub → "all"；node=null → null。让 ConversationView 默认显示单个 sub（症状 #3/#5
+        // 缓解：buildEntries 输入 ~208 而非 4224）。
+        if (node === null) {
+          state.selectedSession = null;
+          return;
+        }
+        const idx = state.nodesIndex[node];
+        if (!idx) {
+          state.selectedSession = "all";
+          return;
+        }
+        // sessions 已按首事件 seq 升序；跳过 "main"，第一个非 main 即最旧 sub（稳定默认）
+        const firstSub = idx.sessions.find((s) => s !== MAIN_SESSION);
+        state.selectedSession = firstSub ?? "all";
+      }),
+
+    setSelectedSession: (sid) =>
+      set((state) => {
+        state.selectedSession = sid;
       }),
   }))
 );
 
 // 导出 handler 表 keys 给测试断言（覆盖全部 EventType）
 export const HANDLED_EVENT_TYPES = Object.keys(eventHandlers);
+
+// ── SPEC audit-c §4.1 writeLoadError：loader 终态失败时写错误态（fail loud，INV-1）──────
+// 写时双重校验（activeRunId + moduleEpoch）：切到别的 run 或同 runId 不同实例 → 不写错误态
+// （保留当前 run 的状态，不被陈旧失败覆盖）。
+// 注：set 参数类型用 immer StoreApi['setState'] 的宽松联合（避免与 zustand-immer 重载冲突）。
+type GetState = () => WorkflowState;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type SetFn = (...args: any[]) => void;
+
+function writeLoadError(
+  get: GetState,
+  set: SetFn,
+  expectedRunId: string,
+  expectedEpoch: number,
+  err: LoadError
+): void {
+  // 切到别的 run / 同 runId 不同实例 → 不写错误态（保留当前 run 的状态）
+  const cur = get();
+  if (cur.activeRunId !== null && cur.activeRunId !== expectedRunId) return;
+  if (moduleEpoch !== expectedEpoch) return;
+  if (err.kind === "network" && err.message === "aborted") return; // abort 不算失败
+  console.warn(`[orca] loader 终态失败 run=${expectedRunId}`, err);
+  set({
+    loadStatus: "error",
+    loadError: err,
+    // retryCount 保留终态值（drives 最终错误信息「重试 N 次后失败」），下次 invocation reset=0
+  });
+}

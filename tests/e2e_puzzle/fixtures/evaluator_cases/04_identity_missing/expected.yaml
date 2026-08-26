@@ -1,0 +1,9 @@
+case_id: 04_identity_missing
+primary_evaluator: block-map-evaluator
+flat_relpath: flats/clean_flat.py
+expect: FLAG
+expected_severity: BLOCKER
+must_mention_one_of:
+- identity
+- candidate
+description: candidates.attention omits identity

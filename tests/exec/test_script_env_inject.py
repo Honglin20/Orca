@@ -21,7 +21,7 @@ from unittest.mock import patch
 import pytest
 
 from orca.chart._limits import SOCK_PATH_MAX
-from orca.chart._paths import chart_sock_path
+from orca.chart._paths import artifacts_dir_for_run, chart_sock_path
 from orca.exec.context import RunContext
 from orca.exec.script import (
     ScriptExecutor,
@@ -111,8 +111,8 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-async def _collect(node, ctx, *, runs_dir=None) -> list[Event]:
-    exe = ScriptExecutor(runs_dir=runs_dir)
+async def _collect(node, ctx, *, runs_dir=None, artifacts_dir=None) -> list[Event]:
+    exe = ScriptExecutor(runs_dir=runs_dir, artifacts_dir=artifacts_dir)
     return [ev async for ev in exe.exec(node, ctx)]
 
 
@@ -212,6 +212,48 @@ def test_script_executor_deep_runs_dir_still_injects_chart_sock(tmp_path):
     assert "ORCA_RUN_ID=deep-run" in stdout
     assert "ORCA_NODE=s" in stdout
     assert f"ORCA_CHART_SOCK={expected_sock}" in stdout
+
+
+# ── ORCA_ARTIFACTS_DIR 注入（2026-08-26 in-session script fix，plan prof-opt-v4 §10.6）──
+
+
+def test_script_executor_artifacts_dir_override_injected(tmp_path):
+    """T-E1：显式 ``artifacts_dir`` → 子进程 ``ORCA_ARTIFACTS_DIR`` 逐字节 == override 值。
+
+    D-1 修复注入点的机械面：in-session 路径按 tape project_root 派生 project-scoped
+    目录传入后，script 子进程必须看到**该**目录（非 per-run 派生）——哨兵脚本寻址
+    （``$ORCA_ARTIFACTS_DIR/scripts/gate_node.sh``）依赖此 env。
+    """
+    override = str(tmp_path / "proj" / "artifacts" / "wf-a")
+    # fixture 自证区分力：override 必须与 per-run 派生值不同（否则断言零检出力）
+    assert override != str(artifacts_dir_for_run(tmp_path, "ovr-run").resolve())
+    node = ScriptNode(name="s", command="env")
+    ctx = _ctx(run_id="ovr-run")
+    events = _run(_collect(node, ctx, runs_dir=tmp_path, artifacts_dir=override))
+
+    completed = [e for e in events if e.type == "node_completed"][0]
+    stdout = completed.data["output"]["stdout"]
+    env_lines = {line.split("=", 1)[0]: line.split("=", 1)[1]
+                 for line in stdout.splitlines() if "=" in line}
+    assert env_lines["ORCA_ARTIFACTS_DIR"] == override
+
+
+def test_script_executor_artifacts_dir_none_defaults_per_run(tmp_path):
+    """T-E2：``artifacts_dir`` 缺省 None → per-run 派生逐字节不变（headless 零回归钉）。
+
+    默认构造 = headless ``tars run`` 路径（orchestrator 不传新参）——``ORCA_ARTIFACTS_DIR``
+    必须等于 ``artifacts_dir_for_run(runs_dir, run_id).resolve()``（与修复前字节一致）。
+    """
+    node = ScriptNode(name="s", command="env")
+    ctx = _ctx(run_id="def-run")
+    events = _run(_collect(node, ctx, runs_dir=tmp_path, artifacts_dir=None))
+
+    completed = [e for e in events if e.type == "node_completed"][0]
+    stdout = completed.data["output"]["stdout"]
+    expected = str(artifacts_dir_for_run(tmp_path, "def-run").resolve())
+    env_lines = {line.split("=", 1)[0]: line.split("=", 1)[1]
+                 for line in stdout.splitlines() if "=" in line}
+    assert env_lines["ORCA_ARTIFACTS_DIR"] == expected
 
 
 # ── 既有 ScriptExecutor 行为零回归（构造方式 backward compat）────────────────

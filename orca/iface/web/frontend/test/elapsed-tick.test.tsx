@@ -26,12 +26,16 @@ afterEach(() => {
   cleanup();
   __testReset();
   useWorkflowStore.getState().unloadRun();
+  // SPEC audit-c: 测试 setup 默认进入 loaded 让 processEvent 可驱动（INV-7 不拦）
+  useWorkflowStore.setState({ loadStatus: "loaded" });
   vi.restoreAllMocks();
 });
 
 beforeEach(() => {
   __testReset();
   useWorkflowStore.getState().unloadRun();
+  // SPEC audit-c: 测试 setup 默认进入 loaded 让 processEvent 可驱动（INV-7 不拦）
+  useWorkflowStore.setState({ loadStatus: "loaded" });
 });
 
 describe("useElapsedTickActive —— 单一 timer 引用计数", () => {
@@ -86,6 +90,8 @@ describe("useElapsedNow —— tick 触发订阅者 re-render", () => {
 describe("selectWorkflowElapsed —— D5 snap 语义", () => {
   test("idle → null", () => {
     useWorkflowStore.getState().unloadRun();
+  // SPEC audit-c: 测试 setup 默认进入 loaded 让 processEvent 可驱动（INV-7 不拦）
+  useWorkflowStore.setState({ loadStatus: "loaded" });
     const s = useWorkflowStore.getState();
     expect(selectWorkflowElapsed(s, 1000)).toBeNull();
   });
@@ -205,6 +211,43 @@ describe("selectNodeElapsed —— D5 per-node snap", () => {
     });
     const s = useWorkflowStore.getState();
     expect(selectNodeElapsed(s, "n1", 9999)).toBe(80);
+  });
+
+  test("completed node 无 data.elapsed（in-session 路径）→ timestamp 差补算", () => {
+    // in-session 路径 node_completed.data 只含 output，无 elapsed ——
+    // 用 node_completed.timestamp(280) − node_started.timestamp(200) = 80 补算。
+    useWorkflowStore.getState().processEvent({
+      seq: 1,
+      type: "node_started",
+      timestamp: 200,
+      node: "n1",
+      session_id: "n1",
+      data: {},
+    });
+    useWorkflowStore.getState().processEvent({
+      seq: 2,
+      type: "node_completed",
+      timestamp: 280,
+      node: "n1",
+      session_id: "n1",
+      data: { output: "ok" },
+    });
+    const s = useWorkflowStore.getState();
+    expect(selectNodeElapsed(s, "n1", 9999)).toBe(80);
+  });
+
+  test("completed node 无 data.elapsed 且无 startedAt（老 tape）→ null（不撒谎）", () => {
+    // 缺 node_started（腐 tape / 手改）→ 无法补算 → null，AgentsRail 不显示。
+    useWorkflowStore.getState().processEvent({
+      seq: 1,
+      type: "node_completed",
+      timestamp: 280,
+      node: "n1",
+      session_id: "n1",
+      data: { output: "ok" },
+    });
+    const s = useWorkflowStore.getState();
+    expect(selectNodeElapsed(s, "n1", 9999)).toBeNull();
   });
 
   test("unknown node → null", () => {

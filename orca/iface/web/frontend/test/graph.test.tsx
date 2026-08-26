@@ -174,12 +174,12 @@ describe("graph-layout: markTakenEdges（route_taken 高亮）", () => {
 });
 
 describe("constants: NODE_STATUS_HEX（5 色，SPEC §1.5）", () => {
-  it("5 色映射齐全", () => {
+  it("5 色映射齐全（Y1：与 orca.* palette 同源 hex）", () => {
     expect(NODE_STATUS_HEX.pending).toMatch(/^#/)
-    expect(NODE_STATUS_HEX.running).toBe("#3B82F6"); // 蓝
-    expect(NODE_STATUS_HEX.done).toBe("#22C55E"); // 绿
-    expect(NODE_STATUS_HEX.failed).toBe("#EF4444"); // 红
-    expect(NODE_STATUS_HEX.blocked).toBe("#F59E0B"); // 黄
-    expect(NODE_STATUS_HEX.pending).toBe("#9CA3AF"); // 灰
+    expect(NODE_STATUS_HEX.running).toBe("#5b8db8"); // 钢蓝 = orca.running / --accent
+    expect(NODE_STATUS_HEX.done).toBe("#10b981"); // emerald = orca.done
+    expect(NODE_STATUS_HEX.failed).toBe("#ef4444"); // red = orca.failed
+    expect(NODE_STATUS_HEX.blocked).toBe("#a78bfa"); // violet = orca.skipped（与 statusColor 同源）
+    expect(NODE_STATUS_HEX.pending).toBe("#94a3b8"); // slate-400 = orca.pending
   });
 });

@@ -7,8 +7,14 @@ usage 在 step_finish；错误是 error 事件。故走 ``TerminalContract(mode=
 调用约定（实测）：
   - prompt 是**位置参数**（yargs，flag 可在前）：``opencode run <prompt> --format json ...``
   - profile 用 ``prompt_channel="argv"``（走 runner.py:231 既有分支，prompt 进 argv 末尾）。
-  - flags = ``("run", "--format", "json", "--dangerously-skip-permissions")``。
+  - flags = ``("run", "--format", "json", "--dangerously-skip-permissions", "--auto")``。
+  - ``--dangerously-skip-permissions`` 跳工具权限；``--auto`` 兜底 opencode **原生权限** ask
+    （``external_directory`` / ``doom_loop`` 等），堵 DEFECT-1 headless 挂死（SPEC
+    2026-08-11-opencode-permission-bridge §2）。
   - ``--model <provider/model>`` 经 executor 的 extra_args 注入（与 claude 的 --model 一致路径）。
+  - flags 经 ``ORCA_OPENCODE_FLAGS`` **整体替换**（``resolve_flags`` REPLACES，``profiles/base.py:112``）：
+    固化 ``--auto`` 仅救未设该 env 的用户；自定义时务必包含 ``--dangerously-skip-permissions``
+    与 ``--auto``（否则 headless 会挂在原生权限 ask）。
 
 capabilities 保守（v1 实情）：mcp_tools=False（暂不透传 mcp config）、structured_output=
 "prompt_injection"（非 native，靠 prompt 引导）、checkpoint_resume=False、usage_tracking=True
@@ -57,6 +63,7 @@ PROFILE = CliProfile(
         "--format",
         "json",
         "--dangerously-skip-permissions",
+        "--auto",
     ),
     prompt_channel="argv",  # prompt 是位置参数，进 argv 末尾（runner.py:231 既有分支）
     mcp_flag_template=None,  # opencode v1 不透传 mcp config

@@ -1,0 +1,605 @@
+name: kd-nas
+description: "知识蒸馏（KD）驱动的模型结构搜索：每轮蒸馏出一个 student 结构，实测时延/精度后迭代决策，直到达标或预算耗尽。需训练（teacher 用用户默认配置训练、student 蒸馏），适合想要比超网 NAS 更省资源的渐进式搜索。"
+
+entry: flatten
+
+# KB 根目录探测（apply_kb_requirement 解析 → 注入 ORCA_KB_DIR；迭代轮 gen_student 读 KB 技术点）。
+requires: [knowledge_base]
+
+inputs:
+  # ── inputs 标签约定（description 前缀，供 in-session 编排器/tars skill 读取）──
+  #   [ask]      Tier A：业务决策（意图/预算/KPI/硬件/模型入口/业务命令），用户意图未给则启动前集中询问
+  #   [advanced] Tier C：工程默认（固化，不问；罕见 override）
+  #
+  # 铁律：latency_provider 必填无默认（编译期 validator 强制 required⇒无 default），
+  # 用户必须给真部署硬件的 latency 脚本——ONNXRT-CPU 测对 NPU 部署是误导。
+
+  baseline_model_path:
+    type: string
+    description: "[ask] 用户 PyTorch 模型入口文件（任意 .py / yaml / config 入口；flatten agent 会展平成 KD 变体契约 build_model + DUMMY_INPUT + KNOBS，不再要求用户自带契约）"
+    required: true
+  user_train_script:
+    type: string
+    description: "[ask] 用户原 train.py 路径（含 compute_loss + build_dataloader），kd-train-script 读后产 4 叶子（loss/data/eval/optim.py，自包含拷贝用户逻辑，不 import 用户项目）+ run_config.yaml；同时提取 teacher 默认 lr/epochs 供 train_teacher 用"
+    required: true
+  target_latency_us:
+    type: string
+    description: "[ask] latency 目标阈值(us)；student latency ≤ 此值（经用户 latency_provider 实测）才算达标"
+    required: true
+  accuracy_baseline:
+    type: string
+    description: "[ask] 精度基线（用户提供的绝对值，如 NMSE=0.02 / SNR=20）。student 精度须达此基线（方向由 kind 决定）"
+    required: true
+  accuracy_baseline_kind:
+    type: string
+    description: "[ask] 精度方向（用户一开始声明，绝不靠符号 auto 猜——防 dB 反向错误）：nmse/mse/ber/db（越低越好，best=min）| snr/acc（越高越好，best=max）"
+    required: true
+  latency_provider:
+    type: string
+    description: "[ask] 用户 latency 测量脚本 `path::func`（真部署硬件 NPU/GPU 实测）。所有 latency 测量必用此脚本——无默认、不可省"
+    required: true
+  max_rounds:
+    type: string
+    description: "[ask] 最大迭代轮数（寻优预算）；耗尽即终止走 finalize。默认 10。**注意**：引擎节点访问上限兜底 100；KD 每轮 3 节点（gen_student+distill+decide）+ 前置 6（flatten/setup/gen_teacher/gen_train_script/train_script_verify/train_teacher）+ finalize 1 = max_rounds×3+7，故 max_rounds > 31 时须配合 `--max-iter <max_rounds*3+10>` CLI 覆盖，否则 MaxIterationsError 会在 finalize 前终止"
+    required: false
+    default: "10"
+  metrics_template:
+    type: string
+    description: "[advanced] 可选 metrics 摘取模板 JSON（schema：{source_log, metrics:[{name,regex,chart_type,x,y}]}）；空=只推 loss 曲线。train_teacher / distill 末尾的 metrics_tail 读"
+    required: false
+    default: ""
+  device:
+    type: string
+    description: "[advanced] ONNX 导出 + latency 测量 + 训练设备：auto（默认 cuda→npu→cpu）/ cuda / npu / cpu"
+    required: false
+    default: "auto"
+  full_epochs:
+    type: string
+    description: "[advanced] 每轮蒸馏 epoch 数（默认 50；非 proxy）"
+    required: false
+    default: "50"
+  seed:
+    type: string
+    description: "[advanced] 复现种子（默认 0）"
+    required: false
+    default: "0"
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════
+  # flatten（入口·LLM + 脚本混合）：把用户任意 PyTorch 模型入口展平成 KD 变体契约 .py
+  # （build_model + DUMMY_INPUT + KNOBS）+ __main__ 跑「正确性 + latency」→ 产 baseline_contract_path
+  # + baseline_latency_us（latency_provider 在此阶段就生效）。flatten 不推 web 图（单柱 baseline bar
+  #   与 setup baseline_seed_table 冗余）；baseline 信息由 setup 的 baseline_seed_table 承载。
+  #   flat 契约落 ${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/（project-scoped artifacts 子目录，
+  #   与 setup kd_artifacts_dir=${PROJECT_ROOT}/artifacts/kd-nas/ 同根合流，跨 run 持久）。
+  # ═══════════════════════════════════════════════════════════════
+  - name: flatten
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: model-flatten
+    output_schema:
+      type: object
+      required: [baseline_contract_path, project_root, model_name, flat_artifacts_dir, baseline_latency_us, viz_status]
+      properties:
+        baseline_contract_path: {type: string, description: "展平产出的契约 .py 绝对路径（build_model + DUMMY_INPUT + KNOBS；经 validate_contract.py PASS）"}
+        project_root: {type: string, description: "从 baseline_model_path 向上推断的 project_root 绝对路径（低置信时带后缀）"}
+        model_name: {type: string, description: "推断的 <base_name>"}
+        flat_artifacts_dir: {type: string, description: "flatten 产物目录绝对路径（${PROJECT_ROOT}/artifacts/kd-nas/models/baseline/；project-scoped artifacts 子目录，与 setup kd_artifacts_dir 同根合流，跨 run 持久）"}
+        baseline_latency_us: {type: number, description: "flatten __main__ 测出的默认 cfg latency 中位数（latency_provider 真测；setup 透传作 baseline 参考线，不再重测）"}
+        viz_status:
+          type: object
+          required: [env_status, charts]
+          additionalProperties: false
+          description: "本节点 web 推送状态（dumb copy 自 viz_kd_stage / metrics_tail stdout）。失败值（env_missing/generic 等）合法产出；缺字段=节点 fail（agent 未遵守契约）。viz 为 sidecar：失败值不阻断主流程。"
+          properties:
+            env_status: {type: string, enum: [ok, env_loaded_from_file, env_missing, import_failed, generic, skipped]}
+            charts:
+              type: object
+              description: "{图名: {pushed: bool, reason: str}}；全 pushed=true 即成功。"
+              additionalProperties:
+                type: object
+                required: [pushed, reason]
+                additionalProperties: false
+                properties:
+                  pushed: {type: boolean}
+                  reason: {type: string}
+    routes:
+      - to: setup
+
+  # ═══════════════════════════════════════════════════════════════
+  # setup（一次性·幂等）：探测 shared infra 路径 + seed baseline champion + device 探测。
+  # **不含 teacher 训练**（teacher 训练属 train_teacher 节点）。所有下游专用路径字段作为顶层 output 一次给齐。
+  # ═══════════════════════════════════════════════════════════════
+  - name: setup
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: kd-setup
+    output_schema:
+      type: object
+      required: [kd_artifacts_dir, per_run_artifacts_dir, project_root, kd_scripts_dir, struct_scripts_dir, ledger_path, champions_path, checkpoints_dir, student_models_dir, scripts_dir, onnx_dir, meta_dir, reports_dir, worktree_root, device, concurrency, baseline_latency_us, baseline_accuracy, viz_status]
+      properties:
+        kd_artifacts_dir: {type: string, description: "稳定 artifact 根（末尾带 /）。跨 run 持久，project-scoped 子目录 <project>/artifacts/kd-nas/"}
+        per_run_artifacts_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR（per-run；env_anchor 用）"}
+        project_root: {type: string}
+        kd_scripts_dir: {type: string, description: "_kd_scripts 绝对路径（distill/decide 调脚本用）"}
+        struct_scripts_dir: {type: string, description: "_struct_scripts 绝对路径（finalize export_onnx 用）"}
+        ledger_path: {type: string, description: "ledger.jsonl 绝对路径（跨 run 真相源）"}
+        champions_path: {type: string, description: "champions.jsonl 绝对路径（champion ratchet 轨迹，setup seed baseline）"}
+        checkpoints_dir: {type: string, description: "<kd_artifacts_dir>checkpoints/（末尾带 /）"}
+        student_models_dir: {type: string, description: "<kd_artifacts_dir>models/students/（末尾带 /）"}
+        scripts_dir: {type: string, description: "<kd_artifacts_dir>scripts/（末尾带 /）"}
+        onnx_dir: {type: string, description: "<kd_artifacts_dir>onnx/（末尾带 /）"}
+        meta_dir: {type: string, description: "<kd_artifacts_dir>meta/（末尾带 /）"}
+        reports_dir: {type: string, description: "<kd_artifacts_dir>reports/（末尾带 /）"}
+        worktree_root: {type: string, description: "<kd_artifacts_dir>.worktrees/（末尾带 /）"}
+        device: {type: string, description: "gpu_probe 解析的 resolved device（cuda:0/npu:0/cpu）；gpu_probe fail-soft 时 fallback inputs.device（含 auto）"}
+        concurrency: {type: integer, description: "串行版恒 1（防误用并发蒸馏池）"}
+        baseline_latency_us: {type: number, description: "flatten.output.baseline_latency_us 透传"}
+        baseline_accuracy: {type: number, description: "inputs.accuracy_baseline 透传"}
+        viz_status:
+          type: object
+          required: [env_status, charts]
+          additionalProperties: false
+          description: "本节点 web 推送状态（dumb copy 自 viz_kd_stage / metrics_tail stdout）。失败值（env_missing/generic 等）合法产出；缺字段=节点 fail（agent 未遵守契约）。viz 为 sidecar：失败值不阻断主流程。"
+          properties:
+            env_status: {type: string, enum: [ok, env_loaded_from_file, env_missing, import_failed, generic, skipped]}
+            charts:
+              type: object
+              description: "{图名: {pushed: bool, reason: str}}；全 pushed=true 即成功。"
+              additionalProperties:
+                type: object
+                required: [pushed, reason]
+                additionalProperties: false
+                properties:
+                  pushed: {type: boolean}
+                  reason: {type: string}
+    routes:
+      - to: gen_teacher
+
+  # ═══════════════════════════════════════════════════════════════
+  # gen_teacher（复用 teacher-gen）：纯调参派生 teacher（深×3/宽×2 wrapper）+ latency 真测 +
+  # validate_teacher 双重 PASS。末尾 viz_kd_stage --stage teacher 推 teacher vs baseline bar。
+  # ═══════════════════════════════════════════════════════════════
+  - name: gen_teacher
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: teacher-gen
+    output_schema:
+      type: object
+      required: [teacher_model_path, teacher_latency_us, project_root, depth_axis, width_axis, viz_status]
+      properties:
+        teacher_model_path: {type: string, description: "teacher wrapper .py 绝对路径（委托 baseline.build_model；双重硬校验 PASS）"}
+        teacher_latency_us: {type: number, description: "teacher __main__ 实测 latency 中位数（latency_provider 真测；train_teacher 透传进 teacher_cache/meta）"}
+        project_root: {type: string, description: "透传 flatten.output.project_root"}
+        depth_axis: {type: string, description: "识别的深度轴 knob 名（gen_student 首轮缩层用）"}
+        width_axis: {type: string, description: "识别的宽度轴 knob 名"}
+        viz_status:
+          type: object
+          required: [env_status, charts]
+          additionalProperties: false
+          description: "本节点 web 推送状态（dumb copy 自 viz_kd_stage / metrics_tail stdout）。失败值（env_missing/generic 等）合法产出；缺字段=节点 fail（agent 未遵守契约）。viz 为 sidecar：失败值不阻断主流程。"
+          properties:
+            env_status: {type: string, enum: [ok, env_loaded_from_file, env_missing, import_failed, generic, skipped]}
+            charts:
+              type: object
+              description: "{图名: {pushed: bool, reason: str}}；全 pushed=true 即成功。"
+              additionalProperties:
+                type: object
+                required: [pushed, reason]
+                additionalProperties: false
+                properties:
+                  pushed: {type: boolean}
+                  reason: {type: string}
+    routes:
+      - to: gen_train_script
+
+  # ═══════════════════════════════════════════════════════════════
+  # gen_train_script（kd-train-script codegen）：产 4 叶子（user/{loss,data,eval,optim}.py）
+  # + run_config.yaml + run.sh（人类用）+ 提 teacher 默认 lr/epochs。叶子从固定引擎
+  # `_kd_scripts/train_pipeline.py`（`KDTrainer`）消费；本节点**不产单体 train_pipeline.py**。
+  # train_pipeline_path 字段切指向该固定引擎入口（下游 5 调用点 inline flag 调）。
+  # AST 检测：读用户 train.py 时扫 GAN/RL/DDP，命中 fail loud + `--force-template` override。
+  # 叶子白名单 = 标准科学计算包（torch/torchvision/numpy/scipy/sklearn/PIL）+ stdlib；禁用户项目模块。
+  # 反造假：data.py/eval.py 严禁 torch.rand/randint/numpy.random 作数据/标签源；用户数据不可得 → fail loud + ask-user。
+  # 校验栈（执行顺序）：L1 逐叶子 py_compile+AST / L2 引擎 smoke / L3 fidelity_check（数值等价 + AST 自包含
+  # + AST 签名 + 反造假 + kind 方向硬校验） / **L4-semantic project-fidelity-verifier 收敛环**（MAX_TURNS=3，
+  # ID 化 Resumed Re-Check；覆盖 L3 不展开 module-level helper / 不比 transform 内容 / 不比 optim kwargs 的语义层）/
+  # L4-mechanical workflow-verifier（机械层 4 叶子并行 review）。L3 FAIL 立即 fail loud 不进 L4-semantic。
+  # ═══════════════════════════════════════════════════════════════
+  - name: gen_train_script
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: kd-train-script
+    output_schema:
+      type: object
+      required: [train_pipeline_path, leaves_dir, run_config_path, run_sh_path, teacher_default_lr, teacher_default_epochs]
+      properties:
+        train_pipeline_path: {type: string, description: "固定引擎入口绝对路径（_kd_scripts/train_pipeline.py；下游 inline flag 调，本节点不产单体脚本）"}
+        leaves_dir: {type: string, description: "叶子目录绝对路径（$ORCA_ARTIFACTS_DIR/user/；含 loss.py / data.py / eval.py / optim.py）"}
+        run_config_path: {type: string, description: "run_config.yaml 绝对路径（$ORCA_ARTIFACTS_DIR/run_config.yaml；teacher 模板，distill 每轮 read→patch kd_config）"}
+        run_sh_path: {type: string, description: "run.sh 绝对路径（$ORCA_ARTIFACTS_DIR/run.sh；人类手动专用，节点不走此）"}
+        teacher_default_lr: {type: number, description: "从 user_train_script 提取的用户默认 lr（train_teacher 用，非硬编码 1e-3）"}
+        teacher_default_epochs: {type: integer, description: "从 user_train_script 提取的用户默认 epochs（train_teacher 用，非硬编码 1）"}
+    routes:
+      - to: train_script_verify
+
+  # ═══════════════════════════════════════════════════════════════
+  # train_script_verify（独立二闸，**report-only**）：校验 4 叶子（loss/data/eval/optim.py）契约 +
+  # AST 自包含 + AST 签名 + kind 方向硬校验 + fidelity_check 数值等价 + 反造假 + 引擎 smoke（合成 model+ckpt
+  # 跑 --mode teacher/eval 一 epoch）+ **step 3.5 project-fidelity-verifier（语义静态比对，一次性全量
+  # report-only）**+ step 4 workflow-verifier（机械层 4 叶子并行 review，report-only；spawn prompt 带
+  # step 3.5 的 Accepted IDs）。
+  # 任一 spawn 崩 / Unresolved / Static Fidelity 非 pass → verified=false fail loud 阻塞（配置错误非业务波动）。
+  # 二闸独立性：发现即 fail loud 暴露 gen 节点漏判 / 叙述假 pass；auto-fix 留给 gen 节点（有完整上下文）。
+  # ═══════════════════════════════════════════════════════════════
+  - name: train_script_verify
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: train-script-verify
+    output_schema:
+      type: object
+      required: [verified, issues]
+      properties:
+        verified: {type: boolean, description: "true=校验全过；false=issues 非空 fail loud 阻塞（不进 train_teacher）"}
+        issues:
+          type: array
+          description: "校验失败的 issue 列表（空=通过）"
+          items: {type: string}
+    routes:
+      - to: train_teacher
+
+  # ═══════════════════════════════════════════════════════════════
+  # train_teacher（独立节点，deferred training via cron——多天训练解耦）：三分支 Step 0
+  # （reuse：teacher_cache+meta+ckpt + sha256 匹配 → executed / resume-pending：.train_teacher_pid
+  # 活着 → 重估 + 重 cron → detached / fresh-launch：wrapper 串 train_pipeline --mode teacher +
+  # teacher_setup nohup detach + warmup 测每 epoch 耗时 + 估剩余 T + cron 注册 → detached）。
+  # warmup 失败 → fail loud（teacher_cache 缺整个循环无意义，不走 catch）。
+  # status=detached → terminate_train_teacher_pending（非失败）；executed → gen_student。
+  # ═══════════════════════════════════════════════════════════════
+  - name: train_teacher
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: train-teacher
+    output_schema:
+      type: object
+      required: [status, teacher_cache, teacher_meta, teacher_ckpt, teacher_latency_us, teacher_accuracy, teacher_accuracy_known, viz_status]
+      properties:
+        status: {type: string, enum: [executed, failed, detached], description: "executed=teacher_cache+meta+ckpt 产出（含 reuse 既有 cache）；failed=warmup 失败 / 进程死且 cache 缺（→ 路由 terminate_train_teacher_failed → workflow_failed）；detached=训练 wrapper 已 nohup detach + warmup 测过每 epoch 耗时 + cron 已注册定时重跑——节点主动 park，非失败"}
+        teacher_cache: {type: string, description: "teacher_cache.pt 绝对路径；detached / failed 时空串（distill --teacher_cache 用）"}
+        teacher_meta: {type: string, description: "teacher_meta.json 绝对路径；detached / failed 时空串（含 teacher_model_hash + teacher_ckpt_sha256 + teacher_latency_us 透传）"}
+        teacher_ckpt: {type: string, description: "teacher ckpt 绝对路径；detached / failed 时空串（train_pipeline --mode teacher 产出）"}
+        teacher_latency_us: {type: number, description: "gen_teacher.output.teacher_latency_us 透传（非自测）"}
+        teacher_accuracy: {type: number, description: "teacher 真实精度（train_pipeline --mode eval 实测；executed 但 eval 缺/失败=0.0；detached / failed 时 0.0）"}
+        teacher_accuracy_known: {type: boolean, description: "true=eval 命中真值；false=未知（图表/总表标 unknown）；detached / failed 时 false"}
+        assessment: {type: string, description: "状态对应摘要：executed=teacher trained / reused / detached 估时 / failed 根因"}
+        viz_status:
+          type: object
+          required: [env_status, charts]
+          additionalProperties: false
+          description: "本节点 web 推送状态（dumb copy 自 viz_kd_stage / metrics_tail stdout）。失败值（env_missing/generic 等）合法产出；缺字段=节点 fail（agent 未遵守契约）。viz 为 sidecar：失败值不阻断主流程。"
+          properties:
+            env_status: {type: string, enum: [ok, env_loaded_from_file, env_missing, import_failed, generic, skipped]}
+            charts:
+              type: object
+              description: "{图名: {pushed: bool, reason: str}}；全 pushed=true 即成功。"
+              additionalProperties:
+                type: object
+                required: [pushed, reason]
+                additionalProperties: false
+                properties:
+                  pushed: {type: boolean}
+                  reason: {type: string}
+    routes:
+      # detached → 终态 terminate_train_teacher_pending（**非失败**：训练后台跑着 + cron 已注册）。
+      # cron 到点重跑 workflow → 新 run 的 train_teacher Step 0 三分支按训练状态自动收敛。
+      - when: "train_teacher.output.status == 'detached'"
+        to: terminate_train_teacher_pending
+      # failed → terminate_train_teacher_failed（warmup 失败 / 进程死且 cache 缺 / 参数缺）。
+      # 引擎对 AgentNode 的 output.status 不自动判失败——必须显式路由，否则 failed 仍 workflow_completed。
+      - when: "train_teacher.output.status == 'failed'"
+        to: terminate_train_teacher_failed
+      # executed → 下游 gen_student。
+      - to: gen_student
+
+  # ═══════════════════════════════════════════════════════════════
+  # 一轮（循环体 3 节点）—— 循环回到 gen_student 由 decide 的 route 控制
+  # ═══════════════════════════════════════════════════════════════
+
+  # Step 1：gen_student（LLM 整文件改写）：首轮固定规则（缩1层+FFN→pointwise）/ 迭代轮 KB+perf。
+  # DUMMY_INPUT 字节级 deterministic 校验 + validate_contract PASS（3 strikes → catch FAIL_build）。
+  - name: gen_student
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: gen-student
+    output_schema:
+      type: object
+      required: [student_model_path, round, hypothesis, direction_id, knobs, status, viz_status]
+      properties:
+        student_model_path: {type: string, description: "models/students/r<round>_student_model.py 绝对路径"}
+        round: {type: integer, description: "本轮轮次（ledger student 行数 + 1）"}
+        hypothesis: {type: string, description: "本轮结构假设一句话（首轮固定规则 / 迭代轮 KB+perf 驱动）"}
+        direction_id: {type: string, description: "首轮: scale_1_layer | ffn_pointwise；迭代轮: KB direction Dx | off_catalog:fingerprint"}
+        knobs: {type: string, description: "student.KNOBS 的 JSON 串（省 distill 重复加载）"}
+        status: {type: string, enum: [OK, FAIL_build], description: "OK=validate PASS；FAIL_build=catch 协议（3 strikes 过不了）"}
+        fail_reason: {type: string, description: "status=FAIL_build 时填，否则空串"}
+        viz_status:
+          type: object
+          required: [env_status, charts]
+          additionalProperties: false
+          description: "本节点 web 推送状态（dumb copy 自 viz_kd_stage / metrics_tail stdout）。失败值（env_missing/generic 等）合法产出；缺字段=节点 fail（agent 未遵守契约）。viz 为 sidecar：失败值不阻断主流程。"
+          properties:
+            env_status: {type: string, enum: [ok, env_loaded_from_file, env_missing, import_failed, generic, skipped]}
+            charts:
+              type: object
+              description: "{图名: {pushed: bool, reason: str}}；全 pushed=true 即成功。"
+              additionalProperties:
+                type: object
+                required: [pushed, reason]
+                additionalProperties: false
+                properties:
+                  pushed: {type: boolean}
+                  reason: {type: string}
+    routes:
+      - to: distill
+
+  # Step 2：distill（单 student KD）：tune_latency → FAIL_latency 跳训练 → distill 训练（read→patch run_config.yaml 的 kd_config 字段）→ eval。
+  # catch 协议：训练/eval rc≠0 → status=FAIL_train，agent 退 0 → decide 落账 continue。
+  - name: distill
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: distill
+    output_schema:
+      type: object
+      required: [round, student_model_path, accepted_cfg, cfg_hash, latency_us, latency_us_std, accuracy, met_latency, met_accuracy, ckpt, tune_status, status, viz_status]
+      properties:
+        round: {type: integer}
+        student_model_path: {type: string}
+        accepted_cfg: {type: object, description: "tune_latency 产出的 accepted cfg（JSON object；distill build_cfg 来源 + ledger 审计）"}
+        cfg_hash: {type: string, description: "accepted_cfg sha256 前 16（ledger 去重 + audit）"}
+        latency_us: {type: number, description: "tune_latency 实测 latency 中位数（FAIL_* 时填 best_effort）"}
+        latency_us_std: {type: number, description: "latency std（重复测量）"}
+        accuracy: {type: number, description: "eval 实测 accuracy；FAIL_* 时 -1"}
+        accuracy_kind: {type: string, description: "eval STUDENT_ACCURACY_KIND；FAIL_* 时空串"}
+        met_latency: {type: boolean, description: "latency ≤ target"}
+        met_accuracy: {type: boolean, description: "accuracy 达 baseline（方向按 kind）"}
+        ckpt: {type: string, description: "student ckpt 路径；FAIL_* 时空串"}
+        tune_status: {type: string, enum: [ACCEPTED, FAIL_latency]}
+        status: {type: string, enum: [SUCCESS, FAIL_latency, FAIL_train, FAIL_build], description: "tune_status↔status 映射：SUCCESS↔ACCEPTED / FAIL_latency↔FAIL_latency / FAIL_train↔ACCEPTED / FAIL_build=gen_student FAIL_build 早退（catch 协议）"}
+        fail_reason: {type: string, description: "FAIL_* 时填 rc + stderr 尾 300 字"}
+        viz_status:
+          type: object
+          required: [env_status, charts]
+          additionalProperties: false
+          description: "本节点 web 推送状态（dumb copy 自 viz_kd_stage / metrics_tail stdout）。失败值（env_missing/generic 等）合法产出；缺字段=节点 fail（agent 未遵守契约）。viz 为 sidecar：失败值不阻断主流程。"
+          properties:
+            env_status: {type: string, enum: [ok, env_loaded_from_file, env_missing, import_failed, generic, skipped]}
+            charts:
+              type: object
+              description: "{图名: {pushed: bool, reason: str}}；全 pushed=true 即成功。"
+              additionalProperties:
+                type: object
+                required: [pushed, reason]
+                additionalProperties: false
+                properties:
+                  pushed: {type: boolean}
+                  reason: {type: string}
+    routes:
+      - to: decide
+
+  # Step 3：decide（新写，KD 专版 reducer min-latency）：kd_reducer.py append ledger + champion ratchet +
+  # continue_loop 决策。失败 student 也落账 continue（除非 max_rounds）。
+  - name: decide
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: decide
+    output_schema:
+      type: object
+      required: [round, continue_loop, champion_id, champion_latency_us, champion_accuracy, viz_status]
+      properties:
+        round: {type: integer}
+        continue_loop: {type: boolean, description: "true=未达标且未耗尽预算 → 继续循环；false=终止走 finalize"}
+        champion_id: {type: string, description: "当前全局 champion id（min-latency ratchet + FIFO tiebreak）"}
+        champion_latency_us: {type: number}
+        champion_accuracy: {type: number}
+        terminate_reason: {type: string, description: "continue_loop=false 时的原因（target_met / max_rounds / 空串）"}
+        viz_status:
+          type: object
+          required: [env_status, charts]
+          additionalProperties: false
+          description: "本节点 web 推送状态（dumb copy 自 viz_kd_stage / metrics_tail stdout）。失败值（env_missing/generic 等）合法产出；缺字段=节点 fail（agent 未遵守契约）。viz 为 sidecar：失败值不阻断主流程。"
+          properties:
+            env_status: {type: string, enum: [ok, env_loaded_from_file, env_missing, import_failed, generic, skipped]}
+            charts:
+              type: object
+              description: "{图名: {pushed: bool, reason: str}}；全 pushed=true 即成功。"
+              additionalProperties:
+                type: object
+                required: [pushed, reason]
+                additionalProperties: false
+                properties:
+                  pushed: {type: boolean}
+                  reason: {type: string}
+    routes:
+      # 循环机制：DAG 内 back-route（条件 cycle）。continue_loop=true → 回 gen_student 开下一轮；
+      # false → 出循环走 finalize。route 由 router 纯函数求值（确定性控制流，非 LLM 自驱）。
+      - when: "decide.output.continue_loop"
+        to: gen_student
+      - to: finalize
+
+  # ═══════════════════════════════════════════════════════════════
+  # finalize（KD 专版 inline prompt）：champion=baseline 兜底（不重蒸馏）+ eval + ONNX + latency
+  # + final_report.md + 终态可视化。champion 是真 student 时用 champion ckpt 跑 eval（不重训，省 GPU）。
+  # ═══════════════════════════════════════════════════════════════
+  - name: finalize
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    tools: [bash, read, write, glob, grep]
+    output_schema:
+      type: object
+      required: [final_model, final_onnx, final_latency_us, final_accuracy, final_report, viz_status]
+      properties:
+        final_model: {type: string, description: "champion student_model_path；champion=baseline 时填 baseline_contract_path"}
+        final_onnx: {type: string, description: "final.onnx 绝对路径；champion=baseline 时空串（跳过导出）"}
+        final_latency_us: {type: number}
+        final_accuracy: {type: number}
+        final_report: {type: string, description: "final_report.md 绝对路径"}
+        viz_status:
+          type: object
+          required: [env_status, charts]
+          additionalProperties: false
+          description: "本节点 web 推送状态（dumb copy 自 viz_kd_stage / metrics_tail stdout）。失败值（env_missing/generic 等）合法产出；缺字段=节点 fail（agent 未遵守契约）。viz 为 sidecar：失败值不阻断主流程。"
+          properties:
+            env_status: {type: string, enum: [ok, env_loaded_from_file, env_missing, import_failed, generic, skipped]}
+            charts:
+              type: object
+              description: "{图名: {pushed: bool, reason: str}}；全 pushed=true 即成功。"
+              additionalProperties:
+                type: object
+                required: [pushed, reason]
+                additionalProperties: false
+                properties:
+                  pushed: {type: boolean}
+                  reason: {type: string}
+    prompt: |
+      你是 kd-nas 串行版的 **收尾 + 终态可视化**：调 finalize_kd.py（确定性后端）跑 champion eval/ONNX/latency
+      + 写 final_report.md（champion=baseline 兜底跳过 student 命令）+ 调 viz_kd_stage 推终态图。
+
+      ## 输入（Jinja 已渲染）
+      - champion：`{{ decide.output.champion_id }}` / terminate_reason `{{ decide.output.terminate_reason }}`
+      - ledger：`{{ setup.output.ledger_path }}` / champions：`{{ setup.output.champions_path }}`
+      - baseline/teacher latency / accuracy / target / kind / latency_provider / device / seed 等
+      - kd_scripts_dir：`{{ setup.output.kd_scripts_dir }}`（finalize_kd.py + viz_kd_stage.py 所在）
+
+      ## 执行（fail loud）
+
+      ### Step 1：调 finalize_kd.py（确定性后端：champion 查 / eval / ONNX / latency / final_report.md）
+
+      ```bash
+      KD_SCRIPTS_DIR="{{ setup.output.kd_scripts_dir }}"
+      FIN_OUT="$(python3 "$KD_SCRIPTS_DIR/finalize_kd.py" \
+        --ledger "{{ setup.output.ledger_path }}" \
+        --champions "{{ setup.output.champions_path }}" \
+        --champion_id "{{ decide.output.champion_id }}" \
+        --terminate_reason "{{ decide.output.terminate_reason }}" \
+        --baseline_contract_path "{{ flatten.output.baseline_contract_path }}" \
+        --train_pipeline_path "{{ gen_train_script.output.train_pipeline_path }}" \
+        --baseline_latency_us "{{ setup.output.baseline_latency_us }}" \
+        --baseline_accuracy "{{ setup.output.baseline_accuracy }}" \
+        --teacher_latency_us "{{ gen_teacher.output.teacher_latency_us }}" \
+        --target_latency_us "{{ inputs.target_latency_us }}" \
+        --accuracy_baseline "{{ inputs.accuracy_baseline }}" \
+        --accuracy_baseline_kind "{{ inputs.accuracy_baseline_kind }}" \
+        --kd_artifacts_dir "{{ setup.output.kd_artifacts_dir }}" \
+        --struct_scripts_dir "{{ setup.output.struct_scripts_dir }}" \
+        --kd_scripts_dir "$KD_SCRIPTS_DIR" \
+        --device "{{ setup.output.device }}" --seed "{{ inputs.seed }}" \
+        --latency_provider "{{ inputs.latency_provider }}" \
+        --project_root "{{ setup.output.project_root }}" \
+        --per_run_artifacts_dir "{{ setup.output.per_run_artifacts_dir }}" \
+        --teacher_meta "{{ train_teacher.output.teacher_meta }}" 2>&1)"
+      FIN_RC=$?
+      echo "$FIN_OUT"
+      if [ $FIN_RC -ne 0 ]; then
+        echo "FAIL: finalize_kd.py rc=$FIN_RC（champion eval/ONNX/latency 异常？final_report 写不出？）" >&2
+        exit 2
+      fi
+      CHAMPION_IS_BASELINE="$(echo "$FIN_OUT" | grep '^CHAMPION_IS_BASELINE:' | awk '{print $2}')"
+      CHAMP_STUDENT="$(echo "$FIN_OUT" | grep '^CHAMPION_STUDENT:' | cut -d' ' -f2-)"
+      FINAL_LATENCY="$(echo "$FIN_OUT" | grep '^FINAL_LATENCY_US:' | awk '{print $2}')"
+      FINAL_ACCURACY="$(echo "$FIN_OUT" | grep '^FINAL_ACCURACY:' | awk '{print $2}')"
+      FINAL_ONNX="$(echo "$FIN_OUT" | grep '^FINAL_ONNX:' | cut -d' ' -f2-)"
+      FINAL_REPORT="$(echo "$FIN_OUT" | grep '^FINAL_REPORT:' | cut -d' ' -f2-)"
+      echo "PARSED step1: CHAMPION_IS_BASELINE=$CHAMPION_IS_BASELINE FINAL_LATENCY=$FINAL_LATENCY FINAL_REPORT=$FINAL_REPORT"
+      ```
+
+      ### Step 2：viz_kd_stage --stage final（终态对比 bar + champion 汇总表 dumb copy 进 viz_status）
+
+      ```bash
+      VIZ_STDOUT=$(python3 "$KD_SCRIPTS_DIR/viz_kd_stage.py" \
+        --stage final \
+        --champions "{{ setup.output.champions_path }}" \
+        --ledger "{{ setup.output.ledger_path }}" \
+        --baseline_latency_us "{{ setup.output.baseline_latency_us }}" \
+        --teacher_latency_us "{{ gen_teacher.output.teacher_latency_us }}" \
+        --champion_latency_us "$FINAL_LATENCY" \
+        --baseline_accuracy "{{ setup.output.baseline_accuracy }}" \
+        --target_latency_us "{{ inputs.target_latency_us }}" \
+        --accuracy_baseline_kind "{{ inputs.accuracy_baseline_kind }}" \
+        --teacher_meta "{{ train_teacher.output.teacher_meta }}" \
+        --env_anchor "{{ setup.output.per_run_artifacts_dir }}" \
+        || true)
+      ```
+
+      ### Step 3：emit 最终 JSON（python json.dumps 防 injection / 结构保证）
+
+      末条消息 = 下面 ``python3`` stdout（合法 JSON 对象）。**禁止手写 ````` ```json ````` 模板填值**
+      （易漏逗号 / 括号 → JSON 畸形 fail）。
+
+      ```bash
+      # argv: 1=CHAMP_STUDENT 2=FINAL_ONNX 3=FINAL_LATENCY 4=FINAL_ACCURACY
+      #       5=FINAL_REPORT 6=VIZ_STDOUT（viz_kd_stage raw stdout）
+      python3 -c '
+      import json, sys
+      # viz 是 sidecar：失败值不阻断主流程，但字段必产出（schema required: env_status+charts）
+      try:
+          o = json.loads(sys.argv[6])
+          viz = {"env_status": o.get("viz_env_status", "generic"),
+                 "charts": o.get("charts", {})}
+      except (ValueError, TypeError) as e:
+          sys.stderr.write(f"[finalize] VIZ_STDOUT parse failed ({e!r}); fallback to generic\n")
+          viz = {"env_status": "generic", "charts": {}}
+      print(json.dumps({
+        "final_model": sys.argv[1],
+        "final_onnx": sys.argv[2],
+        "final_latency_us": float(sys.argv[3]),
+        "final_accuracy": float(sys.argv[4]),
+        "final_report": sys.argv[5],
+        "viz_status": viz,
+      }))
+      ' "$CHAMP_STUDENT" "$FINAL_ONNX" "$FINAL_LATENCY" "$FINAL_ACCURACY" "$FINAL_REPORT" "$VIZ_STDOUT"
+      ```
+    routes:
+      - to: $end
+
+  # ═══════════════════════════════════════════════════════════════
+  # Terminate: teacher training deferred via cron（**非失败**终态）
+  #   train_teacher 选 detached 分支时触达——teacher 训练分钟～小时级，单 agent 节点无法 open
+  #   那么久。本 terminate 用 status=success（Orca TerminateNode 只有 success/failed 两态）+
+  #   reason 文案明示"teacher training deferred，cron 接力重跑"，避免被误判 workflow 失败。
+  #   cron 到点 `orca kd-nas --inputs ...` 重跑 → 新 run 的 train_teacher Step 0 三分支收敛：
+  #   cache 好 → reuse → gen_student；仍在跑 → resume-pending 重估 + 重 cron；进程死且 cache 缺
+  #   → fresh-launch 重启。
+  # ═══════════════════════════════════════════════════════════════
+  - name: terminate_train_teacher_pending
+    kind: terminate
+    status: success
+    reason: "train_teacher detached：teacher 训练 wrapper（train_pipeline --mode teacher + teacher_setup）已 nohup 后台运行 + warmup 已测每 epoch 耗时并估剩余时间 + cron 已注册定时重跑 workflow。非失败——多天训练解耦模式（deferred training via cron）。下次 cron 触发启动新 run 时，train_teacher Step 0 三分支会按训练实际状态自动收敛（reuse teacher_cache / resume-pending 重估 + 重 cron / fresh-launch 重启）。<kd_artifacts_dir>/checkpoints/.train_teacher_pid 有后台进程 PID，<kd_artifacts_dir>/meta/.train_teacher_eta.txt 有估时，<kd_artifacts_dir>/.cron_rerun_train_teacher.sh 是 cron 重跑脚本。"
+
+  - name: terminate_train_teacher_failed
+    kind: terminate
+    status: failed
+    reason: "train_teacher 未能产出 teacher_cache（warmup 失败 / wrapper 退出 rc≠0 / baseline_contract 缺 / teacher_default_lr/epochs 上游没产出）。teacher_cache 缺整个 KD 循环无意义。回看 train_teacher.output.assessment（含 last_error / log tail）与 <kd_artifacts_dir>/runs/teacher/train.log + <kd_artifacts_dir>/meta/teacher_setup.log 定位失败根因。"
+
+outputs:
+  result: "{{ finalize.output }}"
+  champion: "{{ decide.output.champion_id }}"
+  final_latency_us: "{{ finalize.output.final_latency_us }}"
+  final_accuracy: "{{ finalize.output.final_accuracy }}"
+  final_report: "{{ finalize.output.final_report }}"
+  final_onnx: "{{ finalize.output.final_onnx }}"
+  kd_artifacts_dir: "{{ setup.output.kd_artifacts_dir }}"
+  ledger_path: "{{ setup.output.ledger_path }}"
+  terminate_reason: "{{ decide.output.terminate_reason }}"
+  rounds_explored: "{{ decide.output.round }}"
+  baseline_latency_us: "{{ setup.output.baseline_latency_us }}"
+  teacher_latency_us: "{{ gen_teacher.output.teacher_latency_us }}"

@@ -36,8 +36,14 @@ dependencies = [
 ]
 
 [project.scripts]
-# CLI 入口（phase 7 SPEC §5.2）：``orca run/validate/list``。
-orca = "orca.iface.cli.commands:main"
+# CLI 入口（SPEC v3 §2 / §3）：两个二进制，命令族分家不重叠。
+# - ``orca`` = in-session 7 命令（list/<wf>/next/status/stop/open/doctor），LLM-facing。
+#   四前端（CC/opencode/NGA/CAC）都调这一套（SPEC §2 铁律）。
+# - ``tars`` = 后端/headless 命令（run/serve/ps/logs/wait/resume/install/validate/
+#   mcp/executor/skill/list/open），operator 用。命令名可经 env ``ORCA_BACKEND_CMD``
+#   变量化（默认 tars；SPEC §3.2）。旧入口名 ``teams`` 已退役（2026-07-16 改名）。
+orca = "orca.iface.in_session.cli:main"
+tars = "orca.iface.cli.commands:main"
 
 [dependency-groups]
 # 仅开发/测试期依赖（uv sync 自动安装）。
@@ -56,6 +62,8 @@ markers = [
     # integration：真 spawn claude 的烟雾测试。CI 默认不跑（-m "not integration"）；
     # 本地 ``pytest -m integration`` 可选跑（需 claude CLI + API key）。SPEC §7.10 / §12。
     "integration: 真 spawn claude 的集成测试（慢 / 需 API key，CI skip）",
+    # slow：CPU 慢的算法链路 smoke（如 puzzle _puzzle_scripts 全链）。
+    "slow: CPU 慢的算法链路 smoke（puzzle scripts 全链等）",
 ]
 filterwarnings = [
     # 第三方库弃用噪音（非本项目代码可修）：websockets 14+ 的 legacy 模块 + uvicorn 的

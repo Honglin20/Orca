@@ -54,6 +54,64 @@ def _json_safe(obj: Any) -> Any:
     return repr(obj)
 
 
+def read_last_complete_lines(
+    path: Path, start_offset: int, end_offset: int,
+) -> tuple[list[str] | None, int]:
+    """读 ``path`` 的 ``[start_offset, end_offset)`` 字节，返（完整行列表，推进后的 offset）。
+
+    SPEC §5 S7 抽出的公共 helper：``chart_daemon._FlockSafeTape._read_max_seq_from_disk`` /
+    ``chart_daemon._watch_terminal`` / ``sidechain_ingestor._derive_current_node`` 三处的
+    「binary-mode read + ``rfind(b"\\n")`` partial-line race 防护 + decode」DRY，**零行为变化**
+    （B2 multibyte 回归测试守住）。
+
+    **partial-line race 防护**（POSIX ``write(2)`` 对普通文件不保证原子性）：仅推进到 chunk
+    中最后一个 ``\\n`` 之后；末尾 partial 字节下次重读。否则若 poll 落在 write 中途
+    （已写 N 字节但行尾 ``\\n`` 未写），chunk 是 partial JSON，``last_offset = cur_size`` 会
+    丢这行 —— 终态事件 / max_seq 可能永远丢失。
+
+    **binary-mode + byte offsets**（B2-VRFY local patch）：text-mode ``seek(字节)`` /
+    ``read(字符)`` 混算，多字节 UTF-8 tape 上 offset 漂移到 continuation byte →
+    ``UnicodeDecodeError`` 传播。本 helper 一律 ``open(..., "rb")`` + ``seek(start_offset)``
+    + ``read(end_offset - start_offset)``，按字节算 offset，``decode(errors="replace")``。
+
+    Args:
+        path: tape 文件路径。
+        start_offset: 起点**字节**偏移（含）。
+        end_offset: 终点**字节**偏移（不含，通常 = ``path.stat().st_size``）。
+
+    Returns:
+        ``(lines, new_offset)``：
+          - ``lines``：按 ``\\n`` split 后的字符串列表（含可能的空串，调用方按需 strip）。
+            **``None`` 表示「无新完整行 / 读失败」** —— 调用方应保留旧缓存 + 不推进 offset
+            （等下次重读）。空列表 ``[]`` 仅出现在 ``end_offset <= start_offset`` 时
+            （调用方视为「无新内容」，与 None 区分：None 是「有新字节但无完整行」）。
+          - ``new_offset``：推进到的字节偏移；与 ``start_offset`` 相等表示未推进（partial
+            或读失败）。
+
+    Notes:
+      - 调用方应先 ``stat()`` 拿 ``end_offset`` 并自行处理 shrink（``end_offset <
+        start_offset`` 时重置自己的缓存再调用本函数）。
+      - OSError（含 FileNotFoundError）→ ``(None, start_offset)``，调用方决策（沿用缓存 / 重置）。
+    """
+    if end_offset <= start_offset:
+        return [], start_offset
+    try:
+        with open(path, "rb") as f:
+            f.seek(start_offset)
+            raw = f.read(end_offset - start_offset)
+    except OSError:
+        return None, start_offset
+
+    last_nl = raw.rfind(b"\n")
+    if last_nl < 0:
+        # 整段 partial；不推进 offset，下次重读。
+        return None, start_offset
+    complete_bytes = raw[: last_nl + 1]
+    new_offset = start_offset + last_nl + 1
+    chunk = complete_bytes.decode("utf-8", errors="replace")
+    return chunk.split("\n"), new_offset
+
+
 class Tape:
     """append-only JSONL，编排层唯一真相源。永不驱逐，永不重写。
 

@@ -2,7 +2,7 @@
 
 回答「长跑 workflow 怎么不占终端？」：``daemonize`` fork 出一个脱离终端的子进程，
 父进程立即返回 run_id + pid；子进程 ``setsid`` 后重定向 stdin/stdout/stderr 到日志文件，
-再次 exec ``orca run <yaml>``（不带 ``--background``）—— 子进程跑的就是普通的 foreground run，
+再次 exec ``tars run <yaml>``（不带 ``--background``）—— 子进程跑的就是普通的 foreground run，
 只是 parentless 且 stdio 落到日志文件。
 
 设计（SPEC §8.2 + 决策 D2）：
@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 from orca.run.lifecycle import gen_run_id
+from orca.runtime import RUNS_DIRNAME
 
 logger = __import__("logging").getLogger(__name__)
 
@@ -148,10 +149,12 @@ def log_path(run_id: str) -> Path:
 def default_tape_path(run_id: str) -> Path:
     """默认 tape 路径（与 OrcaApp / commands._resolve_tape_path 约定一致）。
 
-    返回 ``runs/<run_id>.jsonl``（CWD 相对，production 用户在 repo 根跑，写到 ./runs/）。
+    返回 ``<RUNS_DIRNAME>/<run_id>.jsonl``（CWD 相对，production 用户在 repo 根跑，写到
+    ``./runs/``）。``RUNS_DIRNAME`` 与 discovery 扫描根（``run_manager.discover_runs``）、
+    MCP artifacts 输出目录（``mcp_tools.server``）共享单一真相源（run-visibility §4.1 E / G4）。
     child process 经 env 拿同一 run_id，OrcaApp 看到 env 用同一 tape_path —— 三处一致。
     """
-    return Path("runs") / f"{run_id}.jsonl"
+    return Path(RUNS_DIRNAME) / f"{run_id}.jsonl"
 
 
 # ── metadata 原子读写 ─────────────────────────────────────────────────────────
@@ -247,36 +250,40 @@ def _assert_unix() -> None:
     if not hasattr(os, "fork"):
         raise RuntimeError(
             "background mode 需要 os.fork（Unix-only）；当前平台不支持。"
-            "请在 Linux/macOS 跑 ``orca run --background``。"
+            "请在 Linux/macOS 跑 ``tars run --background``。"
         )
 
 
 def build_child_argv(yaml_path: Path, extra_argv: list[str]) -> list[str]:
     """构造 detached child 重新 exec 的 argv。
 
-    child 重跑 ``orca run <yaml> [extra...]``（**不带** ``--background``），
+    child 重跑 ``tars run <yaml> [extra...]``（**不带** ``--background``），
     经 ``ENV_BG_RUN_ID`` 拿到同一 run_id，故 OrcaApp 用同一 tape_path（确定性）。
 
-    ``extra_argv`` 是父 ``orca run`` 收到的非 ``--background`` flag（如 ``-i`` / ``--max-iter``），
+    ``extra_argv`` 是父 ``tars run`` 收到的非 ``--background`` flag（如 ``-i`` / ``--max-iter``），
     原样透传给 child（保留用户全部 run 参数）。调用方已剥掉 ``--background``。
 
     入口选择（鲁棒性，两者都跑 ``orca.iface.cli.commands:main``）：
-      1. 优先 ``orca`` console script（``shutil.which``，pip install 后在 venv bin）—— 真安装态，
-         跑起来就是用户日常的 ``orca run``。
-      2. fallback ``python -m orca.iface.cli.commands`` —— 模块入口稳定，``orca`` 不在 PATH
-         时（dev ``pip install -e .`` 的某些场景 / 容器）也能跑。**不**用 ``python -m orca``
-         （orca 包无 ``__main__.py``，``-m orca`` 报 ``'orca' is a package``）。
+      1. 优先 ``tars`` console script（``shutil.which``，pip install 后在 venv bin）—— 真安装态，
+         跑起来就是用户日常的 ``tars run``（有 ``run`` 子命令）。
+      2. fallback ``python -m orca.iface.cli.commands`` —— 模块入口稳定，``tars`` 不在 PATH
+         时（dev ``pip install -e .`` 的某些场景 / 容器）也能跑。
+
+    **不**用 ``shutil.which("orca")``：``orca`` 是 in-session CLI（``orca bootstrap`` /
+    ``orca next`` / ...），**没有** ``run`` 子命令；旧实现误用 ``orca`` 会让 ``run`` 被当作
+    wf-name 进入 bootstrap 分支，``-i`` 选项无对应 → ``No such option: -i`` 崩（BUG-2）。
+    workflow 启动 CLI 永远是 ``tars run``（见 CLAUDE.md「TARS 是 SKILL」段）。
     """
     import shutil
 
-    orca_script = shutil.which("orca")
-    if orca_script is not None:
-        return [orca_script, "run", str(yaml_path), *extra_argv]
+    tars_script = shutil.which("tars")
+    if tars_script is not None:
+        return [tars_script, "run", str(yaml_path), *extra_argv]
     # fallback：直接跑含 main 的模块（不依赖 console script 安装态）。
-    # 记 warning 让运维可定位「为何 detached child 用了 python -m 而非 orca 脚本」
+    # 记 warning 让运维可定位「为何 detached child 用了 python -m 而非 tars 脚本」
     # （通常是 PATH 不含 venv/bin，或 pip install -e . 未跑过——fail-loud 信号，铁律 4）。
     logger.warning(
-        "build_child_argv: orca console script 不在 PATH，fallback 到 "
+        "build_child_argv: tars console script 不在 PATH，fallback 到 "
         "``python -m orca.iface.cli.commands``（sys.executable=%s）。"
         "若 detached child 启动失败，检查 PATH 是否含 venv/bin。",
         sys.executable,
@@ -297,7 +304,7 @@ def daemonize(
     redirect_stdio_fn: Callable[[Path], None] | None = None,
     time_fn: Callable[[], float] = time.time,
 ) -> int:
-    """fork 出 detached child 跑 ``orca run <yaml>``；父进程立即返回 child pid。
+    """fork 出 detached child 跑 ``tars run <yaml>``；父进程立即返回 child pid。
 
     步骤（parent / child 分支）：
       1. 写 metadata（status=running）到 ``~/.orca/runs/<run_id>.json``。
@@ -306,8 +313,8 @@ def daemonize(
          a. ``setsid`` 脱离 controlling terminal（变 session leader）。
          b. 重定向 fd 0/1/2 到 ``~/.orca/runs/<run_id>/log``。
          c. 设 ``ENV_BG_RUN_ID=<run_id>`` env（OrcaApp 读 env 复用 run_id）。
-         d. ``execv`` 重启成 ``python -m orca run <yaml>`` —— 当前进程镜像被替换，
-            从此 child 就是普通的 foreground ``orca run``（只是 parentless + stdio 落日志）。
+         d. ``execv`` 重启成 ``python -m orca.iface.cli.commands run <yaml>`` —— 当前进程镜像被替换，
+            从此 child 就是普通的 foreground ``tars run``（只是 parentless + stdio 落日志）。
 
     **可测 seam**：所有副作用原语（``fork_fn`` / ``setsid_fn`` / ``execv_fn`` /
     ``redirect_stdio_fn`` / ``time_fn``）都是可注入的 callable。单测：
@@ -356,7 +363,7 @@ def daemonize(
     # 3c. env 传 run_id（OrcaApp 读 env 复用，不重新 gen，保确定性一致）。
     os.environ[ENV_BG_RUN_ID] = run_id
 
-    # 3d. execv：当前进程镜像替换成 ``python -m orca run <yaml>``。
+    # 3d. execv：当前进程镜像替换成 ``python -m orca.iface.cli.commands run <yaml>``。
     #     execv 成功则本函数永不 return（进程镜像已被替换）；失败才 return/raise。
     argv = build_child_argv(yaml_path, extra_argv)
     execv_fn(argv[0], argv)

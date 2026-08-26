@@ -159,7 +159,24 @@ def test_get_run_unknown_404(tmp_path):
     run_async(go())
 
 
-# ── POST /api/run（SPEC §3.3）─────────────────────────────────────────────
+# ── POST /api/run（SPEC §3.3 + §13.2 B-1：body 必填 project_path）─────────
+
+
+def _make_project(tmp_path) -> str:
+    """造一个注册合法的项目根（含 workflows/）+ 注册到注册表，返回 abs path str。
+
+    SPEC §13.2 B-1：POST /api/run body 必填 project_path；register_project 要求 path
+    含 workflows/ 或 .orca/config.json（M-16）。
+    """
+    import os
+
+    from orca.runtime import register_project
+
+    project = tmp_path / "proj"
+    (project / "workflows").mkdir(parents=True, exist_ok=True)
+    os.environ["ORCA_HOME"] = str(tmp_path / "orca-home")
+    register_project(project)
+    return str(project)
 
 
 def test_post_run_starts_queued(tmp_path, yaml_path):
@@ -167,10 +184,14 @@ def test_post_run_starts_queued(tmp_path, yaml_path):
     from tests.iface.web.conftest import make_manager
 
     manager = make_manager(tmp_path)
+    project_path = _make_project(tmp_path)
 
     async def go():
         async with _client_factory(manager) as client:
-            resp = await client.post("/api/run", json={"yaml_path": str(yaml_path)})
+            resp = await client.post(
+                "/api/run",
+                json={"yaml_path": str(yaml_path), "project_path": project_path},
+            )
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "queued"
@@ -185,10 +206,17 @@ def test_post_run_bad_yaml_400(tmp_path):
     from tests.iface.web.conftest import make_manager
 
     manager = make_manager(tmp_path)
+    project_path = _make_project(tmp_path)
 
     async def go():
         async with _client_factory(manager) as client:
-            resp = await client.post("/api/run", json={"yaml_path": str(tmp_path / "nope.yaml")})
+            resp = await client.post(
+                "/api/run",
+                json={
+                    "yaml_path": str(tmp_path / "nope.yaml"),
+                    "project_path": project_path,
+                },
+            )
         assert resp.status_code == 400
         await manager.shutdown()
 
@@ -200,12 +228,16 @@ def test_post_run_invalid_yaml_400(tmp_path):
     from tests.iface.web.conftest import make_manager
 
     manager = make_manager(tmp_path)
+    project_path = _make_project(tmp_path)
     bad = tmp_path / "bad.yaml"
     bad.write_text("name: x\nentry: nope\n", encoding="utf-8")  # entry 指向不存在的 node
 
     async def go():
         async with _client_factory(manager) as client:
-            resp = await client.post("/api/run", json={"yaml_path": str(bad)})
+            resp = await client.post(
+                "/api/run",
+                json={"yaml_path": str(bad), "project_path": project_path},
+            )
         assert resp.status_code == 400
         await manager.shutdown()
 

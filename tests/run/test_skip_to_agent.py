@@ -630,3 +630,115 @@ def test_skip_to_parallel_group_target(tmp_path):
     routes_taken = [e for e in events if e.type == "route_taken"]
     skip_route = next(r for r in routes_taken if r.data["from"] == "starter")
     assert skip_route.data["to"] == "grp"
+
+
+# ── SPEC B B2 / I-REPLAY-3：live 与 resume 视图逐字相等 ───────────────────────
+
+
+def test_skip_live_vs_resume_render_identical(tmp_path):
+    """SPEC B B2 / I-REPLAY-3 端到端：skip A 后下游 ``{{ a.output }}``（**不带**
+    ``| default`` 兜底）的渲染结果，在 live 与 from_tape resume 两条路径下**逐字相等**
+    （二者都渲染为 ``None``）。
+
+    - live：跑 a→b（a 被 skip，b prompt 引用 ``{{ a.output }}``），记录 b 的 prompt。
+    - resume：手构造同形状 tape（含 ``node_skipped(A)``），from_tape 后跑 b，记录 b 的 prompt。
+    - 断言两 prompt 相等（B2 后 reducer 派生 ``context[A]=None``，经包壳 ``{"output":None}``
+      与 live ``outputs_acc[A]={"output":None}`` 逐字相等）。
+    """
+    wf_yaml = tmp_path / "wf.yaml"
+    wf_yaml.write_text(yaml.safe_dump({
+        "name": "b2_render_parity",
+        "entry": "a",
+        "nodes": [
+            # a 有兜底 route（when=None）让 skip 容错命中 → b
+            {"name": "a", "kind": "agent", "prompt": "do A",
+             "routes": [{"to": "b"}]},
+            # b 引用 {{ a.output }}（**不带** | default 兜底，验证 B2 形状对齐）
+            {"name": "b", "kind": "agent",
+             "prompt": "got a={{ a.output }}",
+             "routes": [{"to": "$end"}]},
+        ],
+    }), encoding="utf-8")
+    wf = load_workflow(str(wf_yaml))
+
+    # ── live 路径：真跑 a→b，a 被 skip ──────────────────────────────────────────
+    live_tape = Tape(tmp_path / "live.jsonl", run_id="r1")
+    live_bus = EventBus(live_tape)
+    live_handler = InterruptHandler(live_bus)
+    live_exec = _RecordingAgentExecutor()
+    live_orig = _patch_factory_to_fake(live_exec)
+
+    async def live_scenario():
+        await live_handler.start()
+        try:
+            orch = _make_orch(wf, live_bus, tmp_path, live_handler)
+            ireq = InterruptRequest(
+                id="i1", node="a", run_id="r1", session_id="sa",
+                elapsed_at_request=0.5,
+            )
+            orch.request_interrupt(ireq, answer=("skip", None))
+            drive = asyncio.create_task(orch._drive_loop())
+            await asyncio.wait_for(drive, timeout=5.0)
+        finally:
+            await live_handler.stop()
+            _restore_factory(live_orig)
+            live_bus.close()
+
+    run_async(live_scenario())
+    # b 被跑（a 被 skip），prompt 记录到 live_exec.prompts。
+    assert live_exec.spawned == ["b"], f"live 应仅 spawn b，实得 {live_exec.spawned}"
+    live_prompt = live_exec.prompts[0]
+
+    # ── resume 路径：手构造含 node_skipped(a) 的 tape，from_tape 后跑 b ─────────
+    import json
+    resume_tape_path = tmp_path / "resume.jsonl"
+    resume_events = [
+        {"seq": 1, "type": "workflow_started", "timestamp": 1.0, "node": None,
+         "session_id": None,
+         "data": {"inputs": {}, "node_count": 2, "entry": "a",
+                  "workflow_name": "b2_render_parity", "topology": {}}},
+        {"seq": 2, "type": "node_started", "timestamp": 1.0,
+         "node": "a", "session_id": "sa", "data": {"kind": "agent"}},
+        {"seq": 3, "type": "interrupt_requested", "timestamp": 1.0,
+         "node": "a", "session_id": "sa",
+         "data": {"id": "i1", "node": "a"}},
+        {"seq": 4, "type": "interrupt_resolved", "timestamp": 1.0,
+         "node": "a", "session_id": "sa",
+         "data": {"id": "i1", "action": "skip", "guidance": None, "source": "test"}},
+        {"seq": 5, "type": "node_skipped", "timestamp": 1.0,
+         "node": "a", "session_id": "sa", "data": {"reason": "user_interrupt_skip"}},
+        # 故意不写 route_taken（让 from_tape 走 skipped-window fallback，复现 live 路径）
+    ]
+    resume_tape_path.write_text(
+        "\n".join(json.dumps(e) for e in resume_events) + "\n", encoding="utf-8",
+    )
+
+    resume_tape = Tape(resume_tape_path, run_id="r1", resume=True)
+    resume_bus = EventBus(resume_tape)
+    resume_orch = Orchestrator.from_tape(resume_tape_path, resume_bus, wf)
+    # B1 skipped-window：a 处于 skipped 终态 → fallback；router skip_tolerant 命中
+    # 兜底 route → b。
+    assert resume_orch._resume_start_node == "b"
+    # B2：outputs_acc[a] = {"output": None}（与 live 逐字相等）。
+    assert resume_orch._resume_initial_outputs["a"] == {"output": None}
+
+    resume_exec = _RecordingAgentExecutor()
+    resume_orig = _patch_factory_to_fake(resume_exec)
+    try:
+        run_async(resume_orch.run_from_state())
+    finally:
+        _restore_factory(resume_orig)
+        resume_bus.close()
+    assert resume_exec.spawned == ["b"], (
+        f"resume 应仅 spawn b，实得 {resume_exec.spawned}"
+    )
+    resume_prompt = resume_exec.prompts[0]
+
+    # I-REPLAY-3 核心：两条路径的 b prompt 逐字相等（都渲染 a.output = None）。
+    assert resume_prompt == live_prompt, (
+        f"live 与 resume 的 b prompt 应逐字相等（B2 形状对齐）：\n"
+        f"  live  = {live_prompt!r}\n"
+        f"  resume = {resume_prompt!r}"
+    )
+    # 二者都含 ``got a=None``（jinja2 渲染 None 为 "None" 字面量）。
+    assert "got a=None" in live_prompt

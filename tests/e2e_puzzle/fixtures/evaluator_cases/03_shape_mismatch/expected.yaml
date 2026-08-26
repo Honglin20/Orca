@@ -1,0 +1,12 @@
+case_id: 03_shape_mismatch
+primary_evaluator: block-map-evaluator
+flat_relpath: flats/clean_flat.py
+expect: FLAG
+expected_severity: BLOCKER
+must_mention_one_of:
+- dim
+- shape
+- mismatch
+- '32'
+- '64'
+description: slot L0_attn declares in_dim/out_dim=64 but the real module is dim=32

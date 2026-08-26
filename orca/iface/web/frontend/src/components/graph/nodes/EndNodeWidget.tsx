@@ -8,7 +8,7 @@ function EndNodeWidgetBase({ data }: NodeProps) {
   const d = data as WorkflowNodeData;
   return (
     <div
-      className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-slate-400 bg-slate-100 text-[9px] text-slate-500"
+      className="flex h-6 w-6 items-center justify-center rounded-full border-2 orca-border orca-bg-surface-2 text-[9px] orca-text-faint"
       data-testid={`node-${d.name}`}
     >
       end

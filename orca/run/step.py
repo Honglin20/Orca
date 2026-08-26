@@ -26,20 +26,22 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import jsonschema
 
-from orca.events.replay import replay_state
+from orca.events.replay import _replay_fold
 from orca.exec.error import ExecError
 from orca.exec.render import render_prompt, render_template
 from orca.run.lifecycle import (
     make_workflow_completed,
+    make_workflow_failed,
     make_workflow_started,
-    now_monotonic,
 )
+from orca.run.memory import inject_memory_prompt
 from orca.run.orchestrator import Orchestrator
 from orca.run.resume import _outputs_acc_from_state
 
@@ -61,6 +63,35 @@ ERR_RENDER_ERROR = "render_error"
 ERR_UNSUPPORTED_NODE_KIND = "unsupported_node_kind"
 ERR_STATE_CORRUPT = "state_corrupt"
 ERR_INTERNAL_ERROR = "internal_error"
+# SPEC 2026-08-04 §3：子代理自报失败哨兵（orca_node_failed_v1）→ recoverable（v1 recoverable
+# 集合扩为 {output_schema_mismatch, agent_blocked}，共用 _recover_step_result + 升格 + 信封）。
+ERR_AGENT_BLOCKED = "agent_blocked"
+# SPEC 2026-08-21-in-session-script-node §2.6：script 超时专属 error_kind（in-session taxonomy
+# 扩展）。spawn/render 失败仍走 internal_error（消息含 phase）——映射在 iface 层
+# ``_step_io.execute_script_inline``（step 只产常量，不 import exec.script/factory，§4）。
+ERR_SCRIPT_TIMEOUT = "script_timeout"
+
+# SPEC 2026-08-11-resume-failed-and-configurable-escalation §2.1.B：recoverable 升格上限
+# 从硬编码 3 改为 workflow 级可配 ``Workflow.recoverable_max_attempts``（默认 20）。本常量仅
+# 是 schema default 的单一来源引用（``Field(default=_DEFAULT_RECOVERABLE_MAX_ATTEMPTS)``）；
+# 运行期一律读 ``wf.recoverable_max_attempts``（advance_step / _recover_step_result /
+# _render_failure_history / idempotent-replay 分支全部改读它，不再引本常量）。
+_DEFAULT_RECOVERABLE_MAX_ATTEMPTS = 20
+
+# SPEC 2026-08-04 §4.4：失败哨兵教学脚注（host contract，恒 append 到 agent 节点 prompt 末尾）。
+# 极简、不改节点任务指令语义（与 ask_user routing 脚注 / memory 注入同 host-contract append 模式）。
+# 无 schema 节点若无此脚注，agent 不发哨兵直接回 plain 失败文本 → 引擎无抓手静默当成功（§9 R1）。
+_FAILURE_SENTINEL_FOOTER = (
+    "[Orca 失败协议] 若你无法完成本节点（遇阻 / 缺前置 / 执行出错），不要硬编造产出。\n"
+    '返回恰好这个 JSON 作为最终消息：{"blocked_on": "<具体卡点>", '
+    '"tried": ["<已试步骤>"],\n'
+    '"reason": "<可选诊断>", "_sentinel": "orca_node_failed_v1"}'
+)
+
+# ingest 限长常量（SPEC §4.1）。
+_SENTINEL_STR_LIMIT = 200
+_SENTINEL_TRIED_MAX_ITEMS = 5
+_SENTINEL_TRIED_ITEM_LIMIT = 120
 
 
 class InSessionError(Exception):
@@ -73,6 +104,38 @@ class InSessionError(Exception):
     def __init__(self, message: str, *, error_kind: str = ERR_INTERNAL_ERROR):
         super().__init__(message)
         self.error_kind = error_kind
+
+
+class RecoverableInSessionError(InSessionError):
+    """可恢复的节点产出错误（SPEC 2026-07-23 §3 + 2026-08-04 §3 扩 ``agent_blocked``）。
+
+    与 plain ``InSessionError`` 的区别：``advance_step`` 在 ``output is not None`` 分支
+    **自捕** 此子类 —— 不 re-raise，而是 emit ``[node_failed, node_started]`` 重 arm 同节点、
+    返 ``StepResult(recoverable=True)``（run 存活，决策权交主 session）。连续 N 次未通过才
+    升格 ``workflow_failed``（终态）。
+
+    ``error_kind`` 取值（2026-08-04 §3 扩）：``output_schema_mismatch``（默认，向后兼容既有 raise）
+    或 ``agent_blocked``（子代理自报失败哨兵，raise 处显式传）。render_error / state_corrupt /
+    unsupported_node_kind / internal_error 仍 plain ``InSessionError`` = irrecoverable。
+
+    ``blocked_on`` / ``tried`` 仅 ``agent_blocked`` 携带（哨兵结构字段，``_node_failed_data``
+    additively 读，``output_schema_mismatch`` 路径不传 = 既有 4 字段形态不变）。
+
+    因属 ``InSessionError`` 子类，``cli.next`` 的 ``except InSessionError`` 仍能兜底捕获（防御：
+    正常路径 advance_step 自捕不外抛，但若未来调用方直接调 ``_parse_output`` 仍走旧 fail 路径）。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_kind: str = ERR_OUTPUT_SCHEMA_MISMATCH,
+        blocked_on: str | None = None,
+        tried: list[str] | None = None,
+    ):
+        super().__init__(message, error_kind=error_kind)
+        self.blocked_on = blocked_on
+        self.tried = tried
 
 
 @dataclass
@@ -95,6 +158,24 @@ class StepResult:
     prompt_file: str | None = None   # compact：渲染后 prompt 落盘路径（指针交付，主 session 只过指针）
     resources_root: str | None = None  # compact：agent 资源目录绝对路径（指针里附给子代理按需 Read）
     reason: str | None = None        # done=True 时的终止原因 / 错误说明
+    # SPEC 2026-07-23-in-session-error-management §4.1：recoverable / warn 信封字段。
+    # recoverable=True → 节点产出不合 schema 但 run 存活（重 arm 同节点，主 session 反馈重派）；
+    # warn=True → compliance 计数达 warn 阈值（cli 层注解，advance_step 本身不置位）。
+    recoverable: bool = False
+    warn: bool = False
+    # SPEC 2026-08-11 §2.1.C：resume failed run 时置位。CLI 据此重建 marker +
+    # reply 加 ``"resumed": True`` 标记。区别于 recoverable（recoverable = 节点产出坏但 run
+    # 一直存活；resumed = run 曾终态 failed，现已 re-arm 重新活跃）。
+    resumed: bool = False
+    retry_count: int | None = None     # 本次是第几次重试（1-based）
+    retry_budget: int | None = None    # 剩余重试次数（N - retry_count）
+    error_kind: str | None = None      # recoverable/warn 的 error_kind（output_schema_mismatch / subagent_compliance）
+    hint: str | None = None            # 给主 session 的恢复指引
+    # SPEC 2026-08-21-in-session-script-node §2.1：下一个节点的 kind（"agent" | "script"）。
+    # None ≡ "agent"（默认；旧调用方 / 全 agent workflow 零感知，纯增量红线 §5.2）。
+    # == "script" 时 prompt / prompt_file / resources_root 恒 None（script 无 prompt，
+    # 由 iface 层共享循环就地内联执行，§2.5）。
+    node_kind: str | None = None
 
 
 def _running_node(state: Any) -> str | None:
@@ -115,17 +196,117 @@ def _node_by_name(wf: Workflow) -> dict[str, Any]:
     return {n.name: n for n in wf.nodes}
 
 
-def _build_ctx(wf: Workflow, outputs_acc: dict[str, Any], inputs: dict[str, Any],
-               run_id: str) -> RunContext:
-    from orca.exec.context import RunContext
+def consecutive_failures(tape: Tape, node: str) -> list[dict]:
+    """当前节点在 tape 末尾的**连续** recoverable 失败 ``node_failed.data`` 记录
+    （SPEC 2026-08-04 §4.3，AC13）。
 
+    派生谓词同 ``consecutive_fail_count``（E1 钉死）：遇 ``node_completed(任意节点)`` 归零；
+    计 ``node_failed(node)`` 的 ``data``（缺字段 data → ``{}``，消费方 ``.get()`` 防御，AC11/13）。
+    正向单次扫描，物化 list O(k) 空间（k < ``wf.recoverable_max_attempts``，N7 权衡可接受）。
+
+    reset 边界（SPEC 2026-08-11 §2.1.D）：``workflow_resumed`` 也归零（resume = fresh start，
+    与 ``node_completed`` 同列）。resume 后计数器清零，与 ``StepResult.retry_count=0`` 一致。
+
+    不进 reducer fold（``events/replay.py`` 零改边界）；``advance_step`` / ``_recover_step_result``
+    在 recoverable 决策点调它。SSOT 在 tape。
+    """
+    records: list[dict] = []
+    for event in tape.replay():
+        if event.type == "node_completed":
+            records = []
+        elif event.type == "workflow_resumed":
+            # SPEC 2026-08-11 §2.1.D：resume = fresh start（失败计数清零，与 nc 同 reset 边界）。
+            records = []
+        elif event.type == "node_failed" and event.node == node:
+            records.append(event.data or {})
+    return records
+
+
+def consecutive_fail_count(tape: Tape, node: str) -> int:
+    """当前节点在 tape 末尾的**连续** recoverable 失败次数（SPEC 2026-07-23 §4.3，AC9）。
+
+    DRY delegate（2026-08-04 §4.3 / AC11）：``return len(consecutive_failures(...))`` ——
+    单一扫描实现，谓词与 ``consecutive_failures`` 完全一致（避免双实现漂移）。
+    """
+    return len(consecutive_failures(tape, node))
+
+
+def _coerce_str(x: Any, *, limit: int = _SENTINEL_STR_LIMIT) -> str | None:
+    """ingest helper：哨兵字段 str 化 + 截断（SPEC 2026-08-04 §4.1 m3）。
+
+    None / 空串 → None（sentinel ``blocked_on`` 缺/空时认畸形，``_node_failed_data`` 据此省字段）。
+    非 str → ``str()`` 化；超 ``limit`` 截断。确定性非 LLM。
+    """
+    if x is None:
+        return None
+    s = x if isinstance(x, str) else str(x)
+    s = s[:limit]
+    return s or None
+
+
+def _coerce_tried(
+    x: Any,
+    *,
+    max_items: int = _SENTINEL_TRIED_MAX_ITEMS,
+    item_limit: int = _SENTINEL_TRIED_ITEM_LIMIT,
+) -> list[str] | None:
+    """ingest helper：哨兵 ``tried`` list 化 + 元素 str 化 + 截断（SPEC 2026-08-04 §4.1 m3）。
+
+    None → None；非 list → ``[str(x)]``；元素非 str → ``str()`` 化；``≤ max_items`` 项 × 每项
+    ``≤ item_limit`` 字符。空 list / coerce 后空 → None（``_node_failed_data`` 据此省字段）。
+    确定性非 LLM，永不崩（AC11）。
+    """
+    if x is None:
+        return None
+    items = x if isinstance(x, list) else [x]
+    coerced = [str(it)[:item_limit] for it in items[:max_items]]
+    return coerced or None
+
+
+def _build_ctx(
+    wf: Workflow,
+    outputs_acc: dict[str, Any],
+    inputs: dict[str, Any],
+    run_id: str,
+    *,
+    workflows_root: Path | None = None,
+) -> RunContext:
+    """in-session 路径的 RunContext 构造（mirror orchestrator._make_ctx 的子集）。
+
+    point-to-file 协议（SPEC §3.2）：``workflows_root`` 由 ``advance_step`` 经
+    ``yaml_path`` 父目录透传；解析 ``workflows_root / "subagents" / wf.name`` 为存在
+    目录 → 返绝对路径字符串，否则空串（无 subagents 的 workflow 走空串分支，§3.3）。
+    """
+    from orca.exec.context import RunContext
+    from orca.run.orchestrator import _compute_subagents_root
+
+    if workflows_root is None:
+        workflows_root = wf.workflows_root
     return RunContext(
         inputs=inputs, outputs=outputs_acc, run_id=run_id, task=None,
+        subagents_root=_compute_subagents_root(workflows_root, wf.name),
     )
+
+
+def _workflows_root_from_yaml(yaml_path: str | None) -> Path | None:
+    """yaml_path → workflows_root 解析（point-to-file 协议 SPEC §3.2 in-session 透传）。
+
+    yaml_path 是 workflow yaml 的绝对路径；workflows_root = yaml 所在目录（与 orchestrator
+    ``__init__`` 同源 ``yaml_path.parent``）。None / 空串 → None（向后兼容：daemon 未传
+    yaml_path 的旧 caller，subagents_root 落空串，render 层 fail loud 兜底）。
+    """
+    if not yaml_path:
+        return None
+    return Path(yaml_path).resolve().parent
 
 
 def _parse_output(raw: str, node: Any) -> Any:
     """按 node.output_schema 解析宿主回捕的文本输出；无 schema 视为裸字符串。
+
+    失败哨兵检测（SPEC 2026-08-04 §3，M3 钉死）：**首先** try ``json.loads(raw)`` → 若 dict
+    且 ``_sentinel=="orca_node_failed_v1"`` → raise ``RecoverableInSessionError(error_kind=
+    ERR_AGENT_BLOCKED, ...)``（哨兵优先于 schema 校验，且 peek 在 ``if not schema`` 早返**之前**
+    ——无 schema 节点也要检测，否则哨兵静默失效）。peek 成功的解析结果复用给 schema 路径（m7）。
 
     声明了 output_schema 时做两段校验（确定性，非 LLM validator）：
       1. JSON 解析失败 → ``output_schema_mismatch``（非 JSON）。
@@ -135,34 +316,51 @@ def _parse_output(raw: str, node: Any) -> Any:
     子代理"自我纠正"发生在它自己 turn 内（rendered prompt 文件写明 schema 要求）；
     Orca 层产不对就 fail loud，不做重试循环（in-session 主 session 自己当判官）。
     """
+    # peek：失败哨兵优先于 schema 校验（M3）。peek 成功的解析结果复用给 schema 路径（m7，避免双解析）。
+    peek_ok = True
+    try:
+        peeked = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        peek_ok = False
+        peeked = None
+    if peek_ok and isinstance(peeked, dict) and peeked.get("_sentinel") == "orca_node_failed_v1":
+        blocked_on = _coerce_str(peeked.get("blocked_on"))
+        tried = _coerce_tried(peeked.get("tried"))
+        reason = _coerce_str(peeked.get("reason"))
+        msg = blocked_on or reason or "malformed sentinel: missing or empty blocked_on"
+        raise RecoverableInSessionError(
+            msg, error_kind=ERR_AGENT_BLOCKED,
+            blocked_on=blocked_on, tried=tried,
+        )
+
     schema = getattr(node, "output_schema", None)
     if not schema:
         return raw
-    try:
-        parsed = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        # 结构化预期但拿到非 JSON —— fail loud（route 求值会缺字段，不如早炸）。
-        raise InSessionError(
+
+    if not peek_ok:
+        # 结构化预期但拿到非 JSON —— recoverable（SPEC 2026-07-23 §3）：advance_step
+        # 自捕 RecoverableInSessionError → 重 arm 同节点 + 回反馈信封，主 session 重派。
+        raise RecoverableInSessionError(
             f"节点 {node.name!r} 声明了 output_schema 但宿主输出非 JSON：{raw[:80]!r}",
-            error_kind=ERR_OUTPUT_SCHEMA_MISMATCH,
         )
+    parsed = peeked  # m7：复用 peek 结果（避免双解析）
+
     # 字段校验：jsonschema>=4.0（pyproject 已声明，exec/ result_extractor 同款用法）。
     # 必须同时 catch SchemaError：compile 层不校验 output_schema 形状，用户 YAML 写错
     # （如 required 非字符串、type 拼错）会让 validate 抛 SchemaError（非 ValidationError
     # 子类）——只 catch ValidationError 会逃逸成脏崩溃（review 🔴，D-v8.x-2 初衷）。
+    # 三处均 recoverable（SPEC §3）：产出不合 schema 由主 session 反馈子代理重派修正。
     try:
         jsonschema.validate(parsed, schema)
     except jsonschema.ValidationError as e:
         path = ".".join(str(p) for p in e.absolute_path) or "<root>"
-        raise InSessionError(
+        raise RecoverableInSessionError(
             f"节点 {node.name!r} 输出不满足 output_schema：{e.message}（路径 {path}）",
-            error_kind=ERR_OUTPUT_SCHEMA_MISMATCH,
         )
     except jsonschema.SchemaError as e:
-        # schema 自身畸形 → fail loud（归类 output_schema_mismatch，消息区分语义）。
-        raise InSessionError(
+        # schema 自身畸形 → 同归 recoverable（error_kind=output_schema_mismatch，消息区分语义）。
+        raise RecoverableInSessionError(
             f"节点 {node.name!r} 的 output_schema 自身畸形：{e.message}",
-            error_kind=ERR_OUTPUT_SCHEMA_MISMATCH,
         )
     return parsed
 
@@ -206,13 +404,39 @@ def _write_prompt_file(prompts_dir: Path, node_name: str, rendered: str) -> Path
     return final
 
 
-def _deliver(node: Any, ctx: Any, prompts_dir: Path | None) -> tuple[str | None, str | None, str | None]:
+def _deliver(
+    node: Any, ctx: Any, prompts_dir: Path | None,
+    *,
+    wf: Any | None = None,
+    project_root: Path | None = None,
+    no_memory: bool = False,
+    failure_history: str | None = None,
+) -> tuple[str | None, str | None, str | None]:
     """渲染 prompt 并按交付模式产出 ``(prompt, prompt_file, resources_root)``。
 
     - ``prompts_dir`` 给定（compact，生产路径）：写文件，返 ``(None, <path>, resources_root)``。
     - ``prompts_dir=None``（inline 回退，单测决策逻辑用）：返 ``(rendered, None, None)``。
+
+    【node-memory】``wf`` / ``project_root`` / ``no_memory`` 给定且 ``node.memory=True`` 时,
+    在渲染后、写文件前调 ``inject_memory_prompt`` 把上一轮 MD body + 复用协议拼到 rendered
+    末尾(SPEC §4.1)。三 kwarg 默认值保 ``_deliver(node, ctx, prompts_dir)`` 旧调用形态不破
+    (单测 inline 路径 / 非记忆节点零行为变更)。
+
+    【failure_history + 教学脚注（2026-08-04 §4.3/§4.4）】渲染后顺序钉死：
+    ``rendered = _render_or_fail(...)`` →（``memory=True`` 时）``inject_memory_prompt`` →
+    （``failure_history`` 非 None 时）``failure_history + "\\n\\n" + rendered``（prepend，含本次失败）
+    →（恒）append ``_FAILURE_SENTINEL_FOOTER``（host contract，首 attempt + 重 arm 均带）。
+    最终 prompt = ``[失败历史?] + [节点 prompt + 记忆?] + [哨兵教学脚注]``。
+
+    调用者（m1 / V2-3）：``advance_step`` 内 bootstrap + next-node 两处保 ``failure_history=None``；
+    ``_recover_step_result`` + ``advance_step`` 幂等重发分支传计算值。
     """
     rendered = _render_or_fail(node, ctx)
+    if getattr(node, "memory", False) and not no_memory and wf is not None and project_root is not None:
+        rendered = inject_memory_prompt(node, wf, rendered, project_root=project_root)
+    if failure_history:
+        rendered = failure_history + "\n\n" + rendered
+    rendered = rendered + "\n\n" + _FAILURE_SENTINEL_FOOTER
     if prompts_dir is not None:
         path = _write_prompt_file(prompts_dir, node.name, rendered)
         return None, str(path), getattr(node, "resources_root", None)
@@ -263,6 +487,220 @@ def _resolve_inputs(wf: Workflow, inputs: dict[str, Any] | None) -> dict[str, An
     return resolved
 
 
+# ── in-session script pass-through 公开化出口（SPEC 2026-08-21 §2.4/§2.5）─────────
+#
+# iface 层共享循环（``_step_io.advance_with_scripts`` / ``execute_script_inline``）需要
+# 本模块的 ctx 构造 / inputs 派生 / outputs_acc 包装，但「iface→run 的私有 import 禁止
+# 不变」（§4）——故在此提供**公开包装函数**（SPEC §2.4.1 推荐方案）：私有实现保持单一
+# 真相源（旧内部调用方 / 既有测试 import 不动），公开出口仅薄委托，零行为变更。
+
+
+def merged_inputs_for(
+    tape: Tape, wf: Workflow, cli_inputs: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """§2.5 M1：共享循环的 ``merged_inputs`` 派生（单一口径公开出口）。
+
+    ``_resolve_inputs(wf, {**_replay_fold(tape).inputs, **cli_inputs})`` —— tape 是 inputs
+    真相源（CLI ``--inputs`` 默认 ``{}``），default 填充后向 execute_script_inline（ctx +
+    command 渲染）/ advance_after_script（路由 when + ``_final_outputs``）/ resolve_max_iter
+    **全程透传同一值**（禁止任何一处改用 CLI 原始 inputs，§2.5 M1）。
+    """
+    return _resolve_inputs(wf, {**_replay_fold(tape).inputs, **(cli_inputs or {})})
+
+
+def inline_script_ctx(
+    wf: Workflow, tape: Tape, *, inputs: dict[str, Any], run_id: str,
+    yaml_path: str | None = None,
+) -> tuple[Any, Path | None]:
+    """§2.4.1/§2.4.2：iface ``execute_script_inline`` 的 ``(RunContext, workflows_root)`` 出口。
+
+    - ctx：``RunContext`` 直构（``outputs`` = state→outputs_acc 包装（resume 层私有
+      ``_outputs_acc_from_state`` 经本模块同款私有调用，iface 不越层 import）、
+      ``subagents_root`` 同 ``_build_ctx`` 逻辑）。
+    - workflows_root：``yaml_path`` 父目录；None（daemon / 老 tape）→ 回落
+      ``wf.workflows_root``（``_build_ctx`` 同款回落）——喂 ``make_executor`` 的
+      ``workflows_root``（script spawn 注 ``ORCA_WORKFLOWS_ROOT``）。
+    """
+    fold = _replay_fold(tape)
+    workflows_root = _workflows_root_from_yaml(yaml_path)
+    if workflows_root is None:
+        workflows_root = wf.workflows_root
+    ctx = _build_ctx(
+        wf, _outputs_acc_from_state(fold.state), inputs, run_id,
+        workflows_root=workflows_root,
+    )
+    return ctx, workflows_root
+
+
+def _node_failed_data(exc: RecoverableInSessionError) -> dict[str, Any]:
+    """构造 ``node_failed`` 的 data（SPEC 2026-07-23 §4.2 + 2026-08-04 §4.2 additive 扩展）。
+
+    下限 4 字段 ``{kind, error_type, message, phase}``（复用 executor 形态 ``exec/interface.py:15``，
+    故意不共享 ErrorKind 枚举——失败本体不同）。``kind`` / ``error_type`` 改读 ``exc.error_kind``
+    （M1：非硬编码，support ``agent_blocked``）。``phase`` 按 kind 区分（agent_self_report /
+    output_validation）。
+
+    ``agent_blocked`` **additively** 携带可选结构字段（N5 钉死）：
+      - ``blocked_on`` 非空时存；缺/空时**省略**（不存 None），``message`` 已含 malformed 提示。
+      - ``tried`` 非空时存；缺则省略。
+    ``output_schema_mismatch`` 不带这两个字段（向后兼容，不变）。reducer 对 node_failed 只置
+    ``node_status[node]=failed``，不读 data 字段（C1 不变量，纯可观测）。
+    """
+    is_blocked = exc.error_kind == ERR_AGENT_BLOCKED
+    data: dict[str, Any] = {
+        "kind": exc.error_kind,
+        "error_type": exc.error_kind,
+        "message": str(exc),
+        "phase": "agent_self_report" if is_blocked else "output_validation",
+    }
+    if is_blocked:
+        # N5：blocked_on 缺/空（_coerce_str 返 None）→ 省略字段；tried 同理。
+        if getattr(exc, "blocked_on", None):
+            data["blocked_on"] = exc.blocked_on
+        if getattr(exc, "tried", None):
+            data["tried"] = exc.tried
+    return data
+
+
+def _kind_breakdown(records: list[dict]) -> str:
+    """统计 records 中各 error_kind 出现次数，返 ``"kind1×N, kind2×M"`` 文本（m4/m6）。
+
+    用于升格 reason 让主 session 一眼看清混合 kind 分布（如 ``output_schema_mismatch×2,
+    agent_blocked×1``）。缺 kind 字段 → ``?``。
+    """
+    counts: dict[str, int] = {}
+    for d in records:
+        k = d.get("kind") or d.get("error_type") or "?"
+        counts[k] = counts.get(k, 0) + 1
+    return ", ".join(f"{k}×{n}" for k, n in counts.items())
+
+
+def _render_failure_history(
+    records: list[dict], retry_count: int, retry_budget: int,
+    max_attempts: int,
+) -> str | None:
+    """kind-aware 有界文本块（SPEC 2026-08-04 §4.3 + 2026-08-11 §2.1.B 可配上限）。
+
+    ``records`` 空 → 返 None（首 attempt 无块，AC2）。非空 → 返有界文本块（caller 传含本次的
+    records，``len < max_attempts``，m5）。``agent_blocked`` 显示 ``blocked_on``
+    （fallback ``message``，N5）+ ``tried``；``output_schema_mismatch`` 显示 ``message``。
+    纯文本拼接（不进 Jinja，防注入），作为 literal prepend。缺字段防御性 ``.get()``，永不崩（AC11/13）。
+
+    ``max_attempts`` 是 ``wf.recoverable_max_attempts`` 的透传值（纯函数，不引 wf——保持
+    纯度 + 依赖单向，SPEC 2026-08-11 §7）。显示在头部 ``retry_count/max_attempts`` 让 agent
+    知道升格阈值（可配后不再是固定 3）。
+    """
+    if not records:
+        return None
+    lines = [
+        f"## ⚠️ 本节点前序尝试失败（本次第 {retry_count}/{max_attempts} 次，"
+        f"耗尽将终止 run）"
+    ]
+    for i, d in enumerate(records, 1):
+        kind = d.get("kind", "?")
+        lines.append(f"\n### Attempt {i} — failed [{kind}]")
+        if kind == ERR_AGENT_BLOCKED:
+            blocked_on = d.get("blocked_on") or d.get("message", "")
+            lines.append(f"blocked_on: {blocked_on}")
+            tried = d.get("tried") or []
+            if tried:
+                lines.append("tried: [" + ", ".join(str(t) for t in tried) + "]")
+        else:
+            lines.append(str(d.get("message", "")))
+    return "\n".join(lines)
+
+
+def _recover_step_result(
+    tape: Tape, wf: Workflow, exc: RecoverableInSessionError, pending: str,
+    state: Any, inputs: dict[str, Any], rid: str,
+    prompts_dir: Path | None, project_root: Path | None, no_memory: bool,
+    workflows_root: Path | None = None,
+) -> StepResult:
+    """recoverable 自恢复（SPEC 2026-07-23 §4.2 + 2026-08-04 §4.3/§6 含本次 + 升格 kind）。
+
+    emit ``[node_failed, node_started]`` 重 arm 同节点；连续 ``wf.recoverable_max_attempts``
+    次未通过 → 升格 ``workflow_failed``（SPEC 2026-08-11 §2.1.B：可配上限，默认 20）。
+
+    计数语义（SPEC §4.3）：``count = consecutive_fail_count(tape, pending)`` 是**本次失败
+    落 tape 前**的前序连续失败数；本次是第 ``count+1`` 次（1-based ``retry_count``）。
+      - ``count+1 < N``：emit ``[nf, ns]`` + 重渲染 prompt + 返 ``StepResult(recoverable=True,
+        retry_count=count+1, retry_budget=N-(count+1))``（run 存活，marker 不清）。
+      - ``count+1 >= N``：升格——emit 顺序 ``nf → ns → workflow_failed``（E8 钉死：第 N 次失败
+        真实记录后再终态，保 ``count 重建 = retry_count`` 不变量）；返 ``done=True``。
+
+    R-N2（含本次失败）：``records = consecutive_failures(tape, pending) + [本次 nf_emit.data]``
+    ——本次 ``node_failed`` emit 构造**后**、emit_batch 落 tape **前**计算（从 ``Emit.data`` 取，
+    不从 tape 取）。本次是最 relevant 的失败，fresh agent 必须看到（L1 哑管道下主 session 被禁注入，
+    引擎是唯一能把本次失败放进 agent prompt 的实体）。下一次失败时 ``consecutive_fail_count``
+    已含本次（已落 tape），不重复计数。
+
+    m4/m6（升格 kind）：``make_workflow_failed(exc.error_kind, ...)``；reason 含 ``_kind_breakdown``
+    （如 ``output_schema_mismatch×2, agent_blocked×1``）；升格 ``StepResult.error_kind=exc.error_kind``
+    （非固定 schema_mismatch，本次 kind 即升格 kind）。
+
+    重渲染用 ``_outputs_acc_from_state(state)``：pending 未 completed（emit 的是 nf 而非 nc），
+    其坏 output 不进 context → 上下文与首次 arm 一致（确定性把手，P3）。
+
+    Corner case（code-reviewer 🟢）：未升格分支调 ``_deliver`` 重渲染 prompt 时，若节点 prompt
+    自身有 Jinja 错 / 引用上游缺字段（render_error），``_render_or_fail`` 抛 ``InSessionError(render_error)``
+    —— 已构的 ``[nf, ns]`` emits 被丢弃，异常透传到 cli ``except InSessionError`` → ``fail_in_session``
+    emit ``workflow_failed(render_error)``。即「合法升格被 render_error 短路为 irrecoverable fail loud」
+    （render_error 本质 wf-author bug，重跑也修不了；SPEC §3 明示 render_error 全 irrecoverable）。
+    此场景下本次 nf 未落 tape，count 不变量不成立 —— 可接受，因 render_error 永远进 irrecoverable 终态、不再循环。
+    """
+    nodes = _node_by_name(wf)
+    count = consecutive_fail_count(tape, pending)
+    this_attempt = count + 1
+    emits: list[Emit] = [
+        Emit("node_failed", _node_failed_data(exc), node=pending),
+        Emit("node_started", {"node": pending}, node=pending),
+    ]
+    # R-N2：含本次失败（从刚构造的 emits[0].data 取，本次尚未落 tape）。
+    records_inclusive = consecutive_failures(tape, pending) + [emits[0].data]
+
+    if this_attempt >= wf.recoverable_max_attempts:
+        # 升格（E8 + m4/m6）：先 emit 本次 [nf, ns]，再追加 workflow_failed（tape 记录第 N 次真实失败）。
+        breakdown = _kind_breakdown(records_inclusive)
+        reason = (f"consecutive recoverable exhausted: 节点 {pending!r} 连续 "
+                  f"{this_attempt} 次失败（{breakdown}）")
+        t, d = make_workflow_failed(exc.error_kind, reason, node=pending)
+        emits.append(Emit(t, d))
+        logger.warning(
+            "节点 %s 连续 %d 次 recoverable 失败，升格 workflow_failed（run=%s）",
+            pending, this_attempt, rid,
+        )
+        return StepResult(emits=emits, done=True, reason=reason,
+                          error_kind=exc.error_kind)
+
+    # 未升格 → 重 arm：重渲染 prompt（与正常 next 同形交付，compact/inline 由 prompts_dir 决定）。
+    retry_budget = wf.recoverable_max_attempts - this_attempt
+    failure_history = _render_failure_history(
+        records_inclusive, this_attempt, retry_budget, wf.recoverable_max_attempts,
+    )
+    ctx = _build_ctx(wf, _outputs_acc_from_state(state), inputs, rid,
+                     workflows_root=workflows_root)
+    prompt, prompt_file, rroot = _deliver(
+        nodes[pending], ctx, prompts_dir,
+        wf=wf, project_root=project_root, no_memory=no_memory,
+        failure_history=failure_history,
+    )
+    hint = (
+        f"节点自报失败/产出不合 schema（第 {this_attempt}/{wf.recoverable_max_attempts} 次）。"
+        f"重 arm 的 prompt 已含历次失败原因（含本次）——按你的判断重派（复用同 agent 或 fresh），"
+        f"拿产出再 orca next --output（剩余 {retry_budget} 次）"
+    )
+    logger.info(
+        "节点 %s recoverable 失败（第 %d/%d 次），重 arm（run=%s）",
+        pending, this_attempt, wf.recoverable_max_attempts, rid,
+    )
+    return StepResult(
+        emits=emits, done=False, node=pending,
+        prompt=prompt, prompt_file=prompt_file, resources_root=rroot,
+        recoverable=True, retry_count=this_attempt, retry_budget=retry_budget,
+        error_kind=exc.error_kind, reason=str(exc), hint=hint,
+    )
+
+
 def advance_step(
     tape: Tape,
     wf: Workflow,
@@ -270,10 +708,14 @@ def advance_step(
     output: str | None = None,
     inputs: dict[str, Any] | None = None,
     run_id: str | None = None,
-    elapsed: float = 0.0,
     prompts_dir: Path | None = None,
+    yaml_path: str | None = None,
+    host_session: str | None = None,
+    project_root: Path | None = None,
+    no_memory: bool = False,
 ) -> StepResult:
-    """单步推进（纯决策：读 tape 现状 → 决定 emits + 回复；不写 tape）。
+    """单步推进（决策 + recoverable 自恢复；emit-only——不写 tape，但走既有 ``_deliver``
+    写 prompt 文件，与 pre-SPEC 行为一致，非新副作用）。
 
     调用契约（宿主侧）：
       - 首次：``advance_step()`` 无 output → 返回 entry 节点 prompt（emit
@@ -284,42 +726,117 @@ def advance_step(
       - 重复无 output 调用（宿主丢失 prompt）：幂等重发 pending prompt，不 emit。
 
     幂等 / 终态：
-      - ``state.status`` 为终态（completed/failed/cancelled）→ 直接 ``{done, reason}``，不 emit。
+      - ``completed`` / ``cancelled`` → 直接 ``{done, reason}``，不 emit（幂等）。
+      - ``failed`` → SPEC 2026-08-11 §2.1.C resume 分支：re-arm 失败节点（= current_node），
+        emit ``[workflow_resumed, node_started]``，返 ``StepResult(resumed=True)``。无可定位
+        失败节点（current_node None / 非 agent）→ ``done=True, reason="failed_no_resumable_node"``。
       - ``output`` 给出但无 running 节点 → ``InSessionError``（状态腐败，fail loud）。
 
     v1 范围：仅 agent 节点（宿主 subagent 执行模型）；parallel / foreach / gate /
     ask_user 由 compile validator 在更上层 fail loud 拒绝（D2）。
-    ``elapsed`` 由 daemon 传真实 workflow 总耗时（M5：不撒谎）。
+    **elapsed 派生（M5：不撒谎）**：``node_completed.data.elapsed`` /
+    ``workflow_completed.data.elapsed`` 均从 tape 时间戳差算（``_replay_fold`` 捕获的
+    ``node_started_ts`` / ``workflow_started_ts`` → ``time.time()`` 差）。tape 是唯一真相源
+    ——in-session 宿主每次 ``orca next`` 是新进程，调用方无法跨调用测真实 run 总耗时
+    （2026-08-10 修复：此前 CLI per-call ``now_monotonic() - start_ts`` 测成「本次 next
+    调用耗时」，workflow_completed 落 0.077s 假值）。
     ``prompts_dir`` 给定时走 compact 交付（渲染后 prompt 落盘、StepResult.prompt_file 指针）；
     None 时 inline 回退（StepResult.prompt 全文，单测决策逻辑用）。
+
+    ``host_session``（host-session-binding v2）：宿主 session id，**仅 ``state.status=="pending"``
+    首节点分支透传给 ``make_workflow_started``**（写入 tape 的归属字段，单一真相源）。next
+    路径（非 pending）**不传**——``workflow_started`` 在 bootstrap 已 emit，next 不重发
+    （emit 真链 §4.1：host_session 经 lifecycle←step←cli 三点穿，不在 cli.py emit）。
+
+    【node-memory】``project_root`` / ``no_memory`` 透传 ``_deliver``:节点 ``memory=True`` 且
+    ``not no_memory`` 时,渲染后注入「上一轮记忆 + 复用协议」(SPEC §4.1)。``project_root=None``
+    时即使 ``memory=True`` 也不注入(回归旧形态,保单测 inline 路径不破)。
     """
-    state = replay_state(tape)
-    # tape 是 inputs 真相源（workflow_started.data.inputs）：next 不传 --inputs 时从 tape
-    # 恢复（deterministic —— 模型不必每步重传，且修掉非 entry 节点 {{ inputs.* }} 依赖 CLI
-    # 重传的隐患）。bootstrap 首调时 tape 无 workflow_started → _inputs_from_tape 返 {} →
-    # 自然 fallback 到 CLI 传入的 inputs。与 Orchestrator resume（_inputs_from_tape）同源。
-    tape_inputs = Orchestrator._inputs_from_tape(tape)
+    # SPEC §3 O1a（包 P3）：单次遍历 tape 既 fold RunState 又抽 workflow_started.data.inputs
+    # （reducer 只存 workflow_name、不存 inputs → 必须在同一次遍历里顺手抽）。
+    # tape 是 inputs 真相源：next 不传 --inputs 时从 tape 恢复（deterministic —— 模型不必
+    # 每步重传，且修掉非 entry 节点 {{ inputs.* }} 依赖 CLI 重传的隐患）。bootstrap 首调时
+    # tape 无 workflow_started → inputs 返 {} → 自然 fallback 到 CLI 传入的 inputs。
+    # 与 Orchestrator resume（SPEC B 后：``replay_for_resume``）同源——均调 events 层
+    # ``_replay_fold`` / ``apply_event`` 同一 reducer fold 路径抽 inputs + elapsed 锚点。
+    fold = _replay_fold(tape)
+    state = fold.state
+    tape_inputs = fold.inputs
     merged = {**tape_inputs, **(inputs or {})}  # CLI override 罕见但保留兼容
     inputs = _resolve_inputs(wf, merged)
     rid = run_id or getattr(tape, "run_id", "") or ""
 
-    # 1. 已终态（重复调用 / crash 后重启撞终态）—— 幂等，不 emit。
-    if state.status in ("completed", "failed", "cancelled"):
+    # 1. 终态守卫（SPEC 2026-08-11 §2.1.A）：completed/cancelled 仍终态（幂等，不 emit）。
+    #    failed → 走 §2.1.C resume 分支（紧跟在 nodes 构造之后）。
+    if state.status in ("completed", "cancelled"):
         return StepResult(done=True, reason=f"already_{state.status}")
 
     nodes = _node_by_name(wf)
     emits: list[Emit] = []
 
+    # 1b. failed → resume 分支（SPEC 2026-08-11 §2.1.C）：re-arm 失败节点 = state.current_node。
+    #     emit [workflow_resumed, node_started]，返 StepResult(resumed=True)。marker 已被终态清，
+    #     cli 侧 _next_in_critical_section 重建（§2.2）。
+    if state.status == "failed":
+        target = state.current_node
+        node = nodes.get(target) if target else None
+        # 无可定位的失败节点（workflow 级失败 / current_node 已失效）→ done，不崩。
+        if node is None or getattr(node, "kind", None) != "agent":
+            return StepResult(done=True, reason="failed_no_resumable_node")
+        # 渲染 prompt：含本节点历次失败历史（resume 前从 tape 取；reset 边界在 emit 后生效，
+        # 而 advance_step 是 emit-only 纯函数——不写 tape，故同次调用内 consecutive_failures
+        # 看不到 workflow_resumed，读到的是 emit 前的旧失败。时序正确。）
+        records = consecutive_failures(tape, target)
+        failure_history = (
+            _render_failure_history(
+                records, retry_count=len(records),
+                retry_budget=wf.recoverable_max_attempts - len(records),
+                max_attempts=wf.recoverable_max_attempts,
+            ) if records else None
+        )
+        ctx = _build_ctx(wf, _outputs_acc_from_state(state), inputs, rid,
+                         workflows_root=_workflows_root_from_yaml(yaml_path))
+        prompt, prompt_file, rroot = _deliver(
+            node, ctx, prompts_dir, wf=wf, project_root=project_root,
+            no_memory=no_memory, failure_history=failure_history,
+        )
+        emits = [
+            Emit("workflow_resumed", {
+                "from_tape": str(getattr(tape, "path", "") or ""),
+                "resumed_node": target, "reason": "recovered_from_failure",
+                "replayed_events": 0,
+            }),
+            Emit("node_started", {"node": target}, node=target),
+        ]
+        logger.info("resume failed run（%s）从节点 %s 续跑", rid, target)
+        return StepResult(
+            emits=emits, done=False, node=target,
+            prompt=prompt, prompt_file=prompt_file, resources_root=rroot,
+            resumed=True, reason="recovered_from_failure",
+            retry_count=0, retry_budget=wf.recoverable_max_attempts,
+        )
+
     # 2. 首次（无 workflow_started）：起 workflow + entry 节点。
     if state.status == "pending":
         entry = wf.entry
-        _check_agent_node(nodes.get(entry), entry)
+        _check_in_session_node(nodes.get(entry), entry)
         logger.info("workflow 启动（%s，entry=%s）", rid, entry)
-        t, d = make_workflow_started(rid, wf, inputs)
+        # host_session 仅在此 bootstrap 分支透传（写 workflow_started.data，tape 唯一真相源）；
+        # next 路径（非 pending）不 emit workflow_started → 不需要传（SPEC §4.1 emit 真链）。
+        t, d = make_workflow_started(rid, wf, inputs, yaml_path=yaml_path, host_session=host_session)
         emits.append(Emit(t, d))
+        # SPEC 2026-08-21 §2.2.1：entry 是 script → 本批只 emit workflow_started（**不** emit
+        # node_started——ns/nc 由 executor 产出、iface helper 逐批 emit）。窗口 0（ws/ns 批间隙
+        # 被杀）fail loud 且不可逆，§2.6-C 已知限制。
+        if getattr(nodes[entry], "kind", None) == "script":
+            return StepResult(emits=emits, done=False, node=entry, node_kind="script")
         emits.append(Emit("node_started", {"node": entry}, node=entry))
-        ctx = _build_ctx(wf, {}, inputs, rid)
-        prompt, prompt_file, rroot = _deliver(nodes[entry], ctx, prompts_dir)
+        ctx = _build_ctx(wf, {}, inputs, rid,
+                         workflows_root=_workflows_root_from_yaml(yaml_path))
+        prompt, prompt_file, rroot = _deliver(
+            nodes[entry], ctx, prompts_dir,
+            wf=wf, project_root=project_root, no_memory=no_memory,
+        )
         return StepResult(emits=emits, done=False, node=entry,
                           prompt=prompt, prompt_file=prompt_file, resources_root=rroot)
 
@@ -332,23 +849,74 @@ def advance_step(
                 "advance(output=...) 但 tape 中无 running 节点（状态腐败 / 重复完成）",
                 error_kind=ERR_STATE_CORRUPT,
             )
-        parsed = _parse_output(output, nodes[pending])
-        emits.append(Emit("node_completed", {"output": parsed}, node=pending))
+        # SPEC 2026-08-21 §2.2.4 防宿主劫持守卫：pending 是 script 时宿主的 --output 没有
+        # 合法来源（script 产出由引擎执行产生；崩溃续跑期宿主拿到的仍是旧 agent prompt），
+        # 任何到达此分支的 --output 都是异常路径 → state_corrupt fail loud。恢复路径：不带
+        # --output 重调 → 分支 4 → 共享循环重执行 script（at-least-once，§2.6-C 窗口 i）。
+        if getattr(nodes[pending], "kind", None) == "script":
+            raise InSessionError(
+                f"节点 {pending!r} 是 script 节点，产出由引擎执行产生，宿主无权代交卷；"
+                "请调 `orca next --run-id <id>`（不带 --output）让引擎重执行",
+                error_kind=ERR_STATE_CORRUPT,
+            )
+        try:
+            parsed = _parse_output(output, nodes[pending])
+        except RecoverableInSessionError as e:
+            # SPEC 2026-07-23 §4.2：自捕 recoverable（不 re-raise）→ 重 arm 同节点，
+            # 返 StepResult(recoverable=True)（run 存活）。连续 N 次升格 workflow_failed。
+            # 不外抛 → cli 的 except InSessionError 不触发 recoverable；cli 走正常 result 路径。
+            return _recover_step_result(
+                tape, wf, e, pending, state, inputs, rid,
+                prompts_dir, project_root, no_memory,
+                workflows_root=_workflows_root_from_yaml(yaml_path),
+            )
+        # M5 不撒谎：node elapsed 从 tape 该 node 最后一条 node_started 时间戳差算
+        # （宿主 subagent 执行期真实 wall-clock 耗时；recoverable 重 arm 取最新 attempt
+        # 起点）。与 executor 路径 ``node_completed.data.elapsed``（exec/interface.py 契约
+        # data={output, elapsed}）对齐——in-session 不再缺字段，前端/tape 消费者统一读法。
+        node_elapsed: float | None = None
+        started_ts = fold.node_started_ts.get(pending)
+        if started_ts is not None:
+            node_elapsed = max(0.0, time.time() - started_ts)
+        nc_data: dict[str, Any] = {"output": parsed}
+        if node_elapsed is not None:
+            nc_data["elapsed"] = node_elapsed
+        emits.append(Emit("node_completed", nc_data, node=pending))
         # 用「历史 outputs + 本次 output」求下一 node（同 _next_node_for_resume 的入参形态）。
         outputs_acc = _outputs_acc_from_state(state)
         outputs_acc[pending] = {"output": parsed}
-        nxt = Orchestrator._next_node_for_resume(wf, pending, outputs_acc)
+        # D2（SPEC 2026-08-21 §4）：inputs 透传——修复路由 when 引用 {{ inputs.* }} 时
+        # in-session RouteError 裸崩的既有分叉（原 ctx inputs={}）。
+        nxt = Orchestrator._next_node_for_resume(wf, pending, outputs_acc, inputs=inputs)
         if nxt == END:
             emits.append(Emit("route_taken", {"from": pending, "to": END}))
-            t, d = make_workflow_completed(wf, _final_outputs(wf, outputs_acc, inputs, rid), elapsed=elapsed)
+            # M5 不撒谎：elapsed 从 tape workflow_started 时间戳差算（真实 run 总耗时，
+            # 非调用方 per-call 计时；见 advance_step docstring 2026-08-10 修复）。
+            wf_elapsed = (
+                max(0.0, time.time() - fold.workflow_started_ts)
+                if fold.workflow_started_ts is not None else 0.0
+            )
+            t, d = make_workflow_completed(
+                wf, _final_outputs(wf, outputs_acc, inputs, rid), elapsed=wf_elapsed,
+            )
             emits.append(Emit(t, d))
-            logger.info("workflow 完成（%s，elapsed=%.2fs）", rid, elapsed)
+            logger.info("workflow 完成（%s，elapsed=%.2fs）", rid, wf_elapsed)
             return StepResult(emits=emits, done=True, reason="completed")
-        _check_agent_node(nodes.get(nxt), nxt)
+        # SPEC 2026-08-21 §2.2.2 分支 3 尾部 kind 分流：nxt 是 script → 只追加
+        # route_taken 后返回（不 emit ns、不 deliver——ns/nc 由 executor 产出、iface
+        # helper 逐批 emit，共享循环接管）；agent → 现行为逐字不变。
+        if getattr(nodes.get(nxt), "kind", None) == "script":
+            emits.append(Emit("route_taken", {"from": pending, "to": nxt}))
+            return StepResult(emits=emits, done=False, node=nxt, node_kind="script")
+        _check_in_session_node(nodes.get(nxt), nxt)
         emits.append(Emit("route_taken", {"from": pending, "to": nxt}))
         emits.append(Emit("node_started", {"node": nxt}, node=nxt))
-        ctx = _build_ctx(wf, outputs_acc, inputs, rid)
-        prompt, prompt_file, rroot = _deliver(nodes[nxt], ctx, prompts_dir)
+        ctx = _build_ctx(wf, outputs_acc, inputs, rid,
+                         workflows_root=_workflows_root_from_yaml(yaml_path))
+        prompt, prompt_file, rroot = _deliver(
+            nodes[nxt], ctx, prompts_dir,
+            wf=wf, project_root=project_root, no_memory=no_memory,
+        )
         return StepResult(emits=emits, done=False, node=nxt,
                           prompt=prompt, prompt_file=prompt_file, resources_root=rroot)
 
@@ -358,22 +926,124 @@ def advance_step(
             "advance() 无 output 但 tape 中无 running 节点（workflow_started 后未起节点？）",
             error_kind=ERR_STATE_CORRUPT,
         )
-    ctx = _build_ctx(wf, _outputs_acc_from_state(state), inputs, rid)
-    prompt, prompt_file, rroot = _deliver(nodes[pending], ctx, prompts_dir)
+    # SPEC 2026-08-21 §2.2.3：pending 是 script → 无 prompt 可重发，返回 node_kind="script" +
+    # emits=[]（语义 = 调用方重新执行该 script，at-least-once，§2.6-C 窗口 i 恢复路径；tape 允许
+    # 同节点重复 node_started，reducer 幂等）。合规计数只看共享循环**最终** result（§2.5），
+    # 此中间 emits=[] 不触发计数。
+    if getattr(nodes[pending], "kind", None) == "script":
+        return StepResult(emits=[], done=False, node=pending, node_kind="script")
+    # M2 / V2-2：count > 0 时注入 tape 重建的失败历史（cross-session resume，AC10）。
+    # 此分支 ``count`` 在所有 emits 落 tape **之后**取值——已含触发上次 re-arm 的那次失败
+    # （与 re-arm 路径「本次 nf 未落 tape、count 只含 prior」语义不同）。故 ``count`` 恰等于
+    # re-arm 路径的 ``this_attempt``（= re-arm 的 ``count_before + 1``），retry_count 直接用
+    # ``count``（非 ``count+1``）、retry_budget 用 ``N-count``。
+    count = consecutive_fail_count(tape, pending)
+    max_attempts = wf.recoverable_max_attempts
+    failure_history = (
+        _render_failure_history(
+            consecutive_failures(tape, pending), count, max_attempts - count, max_attempts,
+        )
+        if count > 0 else None
+    )
+    ctx = _build_ctx(wf, _outputs_acc_from_state(state), inputs, rid,
+                     workflows_root=_workflows_root_from_yaml(yaml_path))
+    prompt, prompt_file, rroot = _deliver(
+        nodes[pending], ctx, prompts_dir,
+        wf=wf, project_root=project_root, no_memory=no_memory,
+        failure_history=failure_history,
+    )
     return StepResult(emits=[], done=False, node=pending,
                       prompt=prompt, prompt_file=prompt_file, resources_root=rroot)
 
 
-def _check_agent_node(node: Any, name: str) -> None:
-    """v1 只支持 agent 节点（宿主 subagent 执行模型）。其余 fail loud。"""
+def _check_in_session_node(node: Any, name: str) -> None:
+    """in-session 支持 agent / script 节点（script 自 SPEC 2026-08-21 起放行；调用方据
+    ``StepResult.node_kind`` 分流——本守卫只拒真正不支持的 kind）。其余 fail loud。
+
+    原 ``_check_agent_node`` 更名（SPEC §2.2：守卫保留仅对 script 放行，错误文案更新为
+    「仅支持 agent/script」）。
+    """
     if node is None:
         raise InSessionError(
             f"节点 {name!r} 不在 workflow.nodes 中",
             error_kind=ERR_UNSUPPORTED_NODE_KIND,
         )
-    if getattr(node, "kind", None) != "agent":
+    if getattr(node, "kind", None) not in ("agent", "script"):
         raise InSessionError(
-            f"in-session shell v1 仅支持 agent 节点，{name!r} 是 {getattr(node,'kind',None)!r}"
-            "（parallel/foreach/script/gate 请用 orca run / TUI / Web）",
+            f"in-session shell 仅支持 agent/script 节点，{name!r} 是 "
+            f"{getattr(node, 'kind', None)!r}"
+            "（parallel/foreach/wait/set/terminate/gate 请用 orca run / TUI / Web）",
             error_kind=ERR_UNSUPPORTED_NODE_KIND,
         )
+
+
+def advance_after_script(
+    tape: Tape,
+    wf: Workflow,
+    script_name: str,
+    *,
+    inputs: dict[str, Any],
+    run_id: str,
+    prompts_dir: Path | None = None,
+    project_root: Path | None = None,
+    no_memory: bool = False,
+    yaml_path: str | None = None,
+) -> StepResult:
+    """script 节点 nc 已落 tape 后的路由推进（SPEC 2026-08-21 §2.3，纯决策 emit-only）。
+
+    前置条件：``script_name`` 的 ``node_completed`` **已落 tape**（调用方在 executor nc
+    emit 之后调用）。行为镜像 ``advance_step`` 分支 3 尾部（nc 已在 tape 故不重复 emit）：
+
+    1. ``_replay_fold`` 取最新 state；``outputs_acc`` 含 script 产出。
+    2. ``Orchestrator._next_node_for_resume``（同分支 3 函数，DRY；``inputs`` = 共享循环
+       的 ``merged_inputs``，§2.5-D2）。
+    3. ``$end`` → ``[route_taken, workflow_completed]``（payload = ``_final_outputs``（分支 3
+       同函数同源）、elapsed 从 tape ``workflow_started`` 时间戳差算，M5 同款）→ ``done=True``。
+    4. agent → ``[rt, node_started]`` + 与分支 3 尾部逐形镜像的交付（``_deliver`` 无
+       failure_history）——StepResult 置齐 prompt / prompt_file / resources_root 三字段。
+    5. script → ``[rt]`` → ``node_kind="script"``（共享循环继续内联执行）。
+    6. 其余 kind → ``unsupported_node_kind`` fail loud。
+    """
+    fold = _replay_fold(tape)
+    state = fold.state
+    outputs_acc = _outputs_acc_from_state(state)
+    rid = run_id or getattr(tape, "run_id", "") or ""
+    nodes = _node_by_name(wf)
+    nxt = Orchestrator._next_node_for_resume(wf, script_name, outputs_acc, inputs=inputs)
+
+    if nxt == END:
+        emits = [Emit("route_taken", {"from": script_name, "to": END})]
+        # M5 不撒谎：elapsed 从 tape workflow_started 时间戳差算（与 advance_step END 分支同式）。
+        wf_elapsed = (
+            max(0.0, time.time() - fold.workflow_started_ts)
+            if fold.workflow_started_ts is not None else 0.0
+        )
+        t, d = make_workflow_completed(
+            wf, _final_outputs(wf, outputs_acc, inputs, rid), elapsed=wf_elapsed,
+        )
+        emits.append(Emit(t, d))
+        logger.info("workflow 完成（%s，elapsed=%.2fs）", rid, wf_elapsed)
+        return StepResult(emits=emits, done=True, reason="completed")
+
+    nxt_kind = getattr(nodes.get(nxt), "kind", None)
+    if nxt_kind == "agent":
+        emits = [
+            Emit("route_taken", {"from": script_name, "to": nxt}),
+            Emit("node_started", {"node": nxt}, node=nxt),
+        ]
+        ctx = _build_ctx(wf, outputs_acc, inputs, rid,
+                         workflows_root=_workflows_root_from_yaml(yaml_path))
+        prompt, prompt_file, rroot = _deliver(
+            nodes[nxt], ctx, prompts_dir,
+            wf=wf, project_root=project_root, no_memory=no_memory,
+        )
+        return StepResult(emits=emits, done=False, node=nxt,
+                          prompt=prompt, prompt_file=prompt_file, resources_root=rroot)
+    if nxt_kind == "script":
+        return StepResult(
+            emits=[Emit("route_taken", {"from": script_name, "to": nxt})],
+            done=False, node=nxt, node_kind="script",
+        )
+    # agent/script 之外（含 nxt 不在 nodes → None kind）→ 守卫 fail loud。
+    _check_in_session_node(nodes.get(nxt), nxt)
+    raise AssertionError("unreachable: _check_in_session_node 应已 raise")

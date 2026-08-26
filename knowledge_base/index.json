@@ -1,0 +1,63 @@
+{
+  "version": 2,
+  "description": "外挂知识库索引。族检测由 LLM 做（读 model.py），命中族 + common 才加载；每个 agent 只取它声明的切片；run 内每文件只读一次。v2：新增 wireless_receiver 三层族（Family→Direction→RAW）+ common.ascend_constraints 硬件过滤层；agent_slices 改为 load-if-exists 语义，兼容单层族(cnn/transformer)与三层族(wireless_receiver)。",
+  "load_policy": "family_llm_detected + direction_tag_selected + per_agent_slice(load_if_exists) + run_cached",
+  "common": {
+    "files": {
+      "principles": "common/principles.md",
+      "latency_heuristics": "common/latency_heuristics.md",
+      "primitives": "common/primitives.md",
+      "ascend_constraints": "common/ascend_constraints.md"
+    }
+  },
+  "families": {
+    "transformer": {
+      "files": {
+        "primitives": "families/transformer/primitives.md",
+        "patterns": "families/transformer/patterns.md",
+        "latency_moves": "families/transformer/latency_moves.md",
+        "failures": "families/transformer/failures.md"
+      }
+    },
+    "cnn": {
+      "files": {
+        "primitives": "families/cnn/primitives.md",
+        "patterns": "families/cnn/patterns.md",
+        "latency_moves": "families/cnn/latency_moves.md",
+        "failures": "families/cnn/failures.md"
+      }
+    },
+    "wireless_receiver": {
+      "detect_hints": "OFDM 时频网格输入(num_ports×num_subcarriers×num_symbols) / Conv-over-freq 特征提取 / symbol 或 subcarrier 轴 attention / 输出 LLR 或 CSI / alpha=sqrt(mean(inp²)·2) 功率归一化。命中即本族。",
+      "files": {
+        "primitives": "families/wireless_receiver/primitives.md",
+        "latency_moves": "families/wireless_receiver/latency_moves.md",
+        "failures": "families/wireless_receiver/failures.md"
+      },
+      "tiers": {
+        "meta": "families/wireless_receiver/meta.json",
+        "directions_dir": "families/wireless_receiver/directions/",
+        "raw_dir": "families/wireless_receiver/raw/"
+      }
+    }
+  },
+  "direction_selection": {
+    "applies_to": "带 tiers 的族（当前仅 wireless_receiver）",
+    "policy": "标签规则化筛为主、LLM 判定为辅：读 tiers.meta，按 ascend/latency_tier/risk/physics/attention 标签筛出 2–4 个相关 direction 作为 {selected}，再让 LLM 在命中集合内组合变异。ascend==hostile 默认排除。",
+    "stage_match": "latency_tier 按 workflow 当前阶段匹配：fusion → structural → arch → quant",
+    "raw_binding": "每个命中 direction 同时注入其 directions/<id>.md 与 raw/ 中对应 M#/D# 的实现示例（每方向 ≥1 份，带变异提示）"
+  },
+  "agent_slices": {
+    "hypothesizer": ["common.ascend_constraints", "common.principles", "common.latency_heuristics", "{family}.primitives", "{family}.latency_moves", "{family}.directions/{selected}"],
+    "engineer": ["common.ascend_constraints", "{family}.patterns", "{family}.primitives", "{family}.directions/{selected}", "{family}.raw/{selected}"],
+    "analyst_read": ["common.ascend_constraints", "common.principles", "{family}.failures"]
+  },
+  "slice_semantics": {
+    "load_if_exists": "每个 token 解析为路径，文件/目录存在则加载、不存在则跳过。以此兼容单层族(cnn/transformer 无 tiers，directions/{selected} 与 raw/{selected} 自动空)与三层族(wireless_receiver)。",
+    "tokens": {
+      "{family}": "当前命中族，可多族取并集",
+      "{selected}": "direction_selection 产出的命中 direction id 列表；无 tiers 的族为空"
+    }
+  },
+  "note": "新增族：在 families/<name>/ 下放 base md(primitives/latency_moves/failures) + 可选 tiers(directions/ raw/ meta.json) + 在本 index families 注册。单层族只有 base 文件无 tiers；三层族多出方向/RAW 两层，靠 direction_selection + meta 标签规则化检索（少依赖 LLM，适配弱 LLM）。族检测靠 LLM，无需指纹表。"
+}

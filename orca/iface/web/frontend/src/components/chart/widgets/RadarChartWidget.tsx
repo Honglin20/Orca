@@ -26,20 +26,26 @@ import {
   LEGEND_STYLE,
   PALETTE,
   getAxisTick,
+  getCursor,
   getGridStroke,
   getTooltipStyle,
+  getTooltipTextStyle,
 } from "../chartTheme";
 import { computeNiceTicks, extractNumericValues } from "../axisUtils";
 import { pivotByHue } from "../pivot";
+import { ChartCaption } from "../ChartCaption";
 
 export function RadarChartWidget({ payload }: { payload: ChartPayload }) {
-  const { data, x, y, hue, title } = payload;
+  const { data, x, y, hue, title, caption } = payload;
   // 默认维度列 dimension、值列 value（与 AgentHarness 雷达图惯例一致）
   const xKey = x ?? "dimension";
   const yKey = y ?? "value";
   const gridStroke = getGridStroke();
   const axisTick = getAxisTick();
   const tooltipStyle = getTooltipStyle();
+  // P5a：Radar 归 line 类（细虚竖线 cursor；RadarChart cursor 实为十字辅助线，统一即可）。
+  const tooltipCursor = getCursor(true);
+  const tooltipTextStyle = getTooltipTextStyle();
 
   if (hue) {
     // hue 多系列：(维度, hue, 值) → 宽格式（每维度一行，各 hue 值作列）
@@ -51,7 +57,7 @@ export function RadarChartWidget({ payload }: { payload: ChartPayload }) {
 
     return (
       <div data-testid="chart-widget">
-        <h4 className="mb-2 text-xs font-medium text-slate-700">{title}</h4>
+        <h4 className="orca-text-muted mb-2 text-xs font-medium">{title}</h4>
         <div className="aspect-square w-full max-w-[400px] mx-auto">
           <ResponsiveContainer width="100%" height="100%" minHeight={200} minWidth={300}>
             <RadarChart data={pivotedData} cx="50%" cy="50%" outerRadius="75%">
@@ -65,7 +71,12 @@ export function RadarChartWidget({ payload }: { payload: ChartPayload }) {
                 domain={yConfig.domain}
                 ticks={yConfig.ticks}
               />
-              <Tooltip contentStyle={tooltipStyle} />
+              <Tooltip
+                contentStyle={tooltipStyle}
+                cursor={tooltipCursor}
+                labelStyle={tooltipTextStyle}
+                itemStyle={tooltipTextStyle}
+              />
               <Legend wrapperStyle={LEGEND_STYLE} />
               {hueValues.map((val, i) => {
                 const color = PALETTE[i % PALETTE.length];
@@ -84,6 +95,7 @@ export function RadarChartWidget({ payload }: { payload: ChartPayload }) {
             </RadarChart>
           </ResponsiveContainer>
         </div>
+        {caption && <ChartCaption text={caption} />}
       </div>
     );
   }
@@ -93,7 +105,7 @@ export function RadarChartWidget({ payload }: { payload: ChartPayload }) {
 
   return (
     <div data-testid="chart-widget">
-      <h4 className="mb-2 text-xs font-medium text-slate-700">{title}</h4>
+      <h4 className="orca-text-muted mb-2 text-xs font-medium">{title}</h4>
       <div className="aspect-square w-full max-w-[400px] mx-auto">
         <ResponsiveContainer width="100%" height="100%" minHeight={200} minWidth={300}>
           <RadarChart data={data} cx="50%" cy="50%" outerRadius="75%">
@@ -107,7 +119,12 @@ export function RadarChartWidget({ payload }: { payload: ChartPayload }) {
               domain={yConfig.domain}
               ticks={yConfig.ticks}
             />
-            <Tooltip contentStyle={tooltipStyle} />
+            <Tooltip
+              contentStyle={tooltipStyle}
+              cursor={tooltipCursor}
+              labelStyle={tooltipTextStyle}
+              itemStyle={tooltipTextStyle}
+            />
             <Radar
               dataKey={yKey}
               stroke={PALETTE[0]}
@@ -118,6 +135,7 @@ export function RadarChartWidget({ payload }: { payload: ChartPayload }) {
           </RadarChart>
         </ResponsiveContainer>
       </div>
+      {caption && <ChartCaption text={caption} />}
     </div>
   );
 }

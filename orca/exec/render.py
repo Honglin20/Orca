@@ -47,27 +47,47 @@ def _namespace(ctx: RunContext) -> dict[str, Any]:
     - 每个 node 的 output：以 node 名为 key 放顶层（``ctx.outputs`` 展开），
       支持 ``{{ optimizer.output.structure }}`` 这种点路径（``outputs["optimizer"]
       = {"output": {...}}``，故 ``{{ optimizer.output.structure }}`` 取得到）
-    - ``setup``：setup phase outputs（``{{ setup.<agent>.output.<field> }}``），
-      形状 ``{agent_name: {"output": {...}}}``（与 node outputs 同形）。无 setup phase → 空 dict。
     - ``locals``：foreach body 注入的局部变量（``{{ item }}`` / ``{{ _index }}``）
       摊到顶层；普通 node ``locals`` 为空 dict（无影响）。
+    - ``subagents_root``（point-to-file 协议，SPEC §3.2/§4）：顶层暴露 ctx.subagents_root
+      字符串。agent.md body 用 ``{{ subagents_root }}/<name>.md`` 引用，由 render 期 inline。
     """
     ns: dict[str, Any] = {"inputs": dict(ctx.inputs)}
     # ctx.outputs 的 key（node 名）直接做顶层变量，value（{"output": raw} dict）原样暴露
     ns.update(ctx.outputs)
-    # setup phase outputs：暴露为 setup 根（{{ setup.<agent>.output.<field> }}）。
-    # 无 setup phase 时 ctx.setup 为空 dict，不影响现有模板。
-    ns["setup"] = ctx.setup
     # ctx.locals 摊顶层（foreach body 的 item / _index；普通 node 为空，update 无影响）
     ns.update(ctx.locals)
+    # point-to-file subagent 协议：subagents_root inline（SPEC §3.2，shell 无关）。
+    ns["subagents_root"] = ctx.subagents_root
     return ns
+
+
+# 模板是否引用 ``subagents_root`` 的静态探测（SPEC §7 末 fail loud 触发条件）。
+# 文本级 ``in`` 子串足以判定：``{{ subagents_root }}`` / ``{{ subagents_root }}/x`` 等
+# 命中；其它变量名天然不命中（``subagents_root`` 是 SPEC 钉死的命名）。
+_SUBAGENTS_ROOT_TOKEN = "subagents_root"
 
 
 def render_template(template: str, ctx: RunContext) -> str:
     """渲染 Jinja2 模板（通用入口，SPEC §7.9）。
 
     失败（未定义变量 / 语法错）raise ``ExecError(phase="render")``（fail loud，SPEC §6）。
+
+    **point-to-file fail loud（SPEC §7 末）**：模板引用了 ``{{ subagents_root }}`` 但
+    ``ctx.subagents_root == ""`` → 该 workflow 期望子 agent body 目录但解析失败（yaml 不在
+    repo ``workflows/`` 下且未 ``tars install``）。fail loud 而非静默渲染空串让子 agent
+    Read 失败。``StrictUndefined`` 兜不到此场景（字段默认空串是合法值）。
     """
+    if _SUBAGENTS_ROOT_TOKEN in template and not ctx.subagents_root:
+        raise ExecError(
+            phase="render",
+            message=(
+                "模板引用了 {{ subagents_root }} 但 RunContext.subagents_root 为空——"
+                "该 workflow 期望子 agent body 目录但未解析。检查 workflow yaml 是否在"
+                " repo workflows/ 目录内（dev 态零 install 依赖）；若 yaml 在 repo 外，"
+                "需先 `tars install` 把 subagents/ 部署到 ~/.orca/workflows/subagents/。"
+            ),
+        )
     try:
         tpl = _ENV.from_string(template)
         return tpl.render(**_namespace(ctx))

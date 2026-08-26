@@ -4,7 +4,8 @@
 opencode**（FakeRunner 喂 NDJSON 行）。
 
 验证 events 模式核心契约（C9）：
-  - 无 result 终止行时，``node_completed.output`` = 所有 text 事件拼接的最终答案。
+  - 无 result 终止行时，``node_completed.output`` = **末条** text 事件（契约：agent
+    最终消息即 result；中间叙述不进 result——P5）。
   - ``agent_usage`` 透传到事件流（每 step_finish 一条）。
   - 错误路径：opencode error 事件 → ``is_error`` → node_failed（fail loud）。
   - prompt_channel=argv 时 prompt 进 argv 末尾（FakeRunner 不真 spawn，但 SpawnConfig 已带）。
@@ -96,14 +97,15 @@ def _load_fixture() -> list[str]:
     return [ln for ln in OPENCODE_FIXTURE.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
 
-# ── node_completed.output = 拼接的最终答案（events 模式核心契约）─────────────
+# ── node_completed.output = 末条 agent_message（events 模式核心契约 / P5）──────
 
 
-def test_opencode_node_completed_output_is_concatenated_text(monkeypatch):
-    """events 模式无 result 终止行：最终答案 = 所有 agent_message.data["text"] 拼接。
+def test_opencode_node_completed_output_is_last_text_event(monkeypatch):
+    """events 模式无 result 终止行：最终答案 = **末条** ``agent_message.data["text"]``（P5）。
 
-    fixture 的两条 text 事件文本拼起来即 node_completed.output（经 extract_and_validate，
-    无 output_schema 时原样返回）。
+    契约：agent 最终消息即 JSON result，中间 text 是叙述——不应拼接（否则中间叙述里的
+    ``[...]`` / ``{...}`` 字面量会被 result_extractor 平衡块兜底误抓为 result）。fixture
+    有 2 条 text 事件，取末条经 ``extract_and_validate``（无 output_schema 时原样返回）。
     """
     lines = _load_fixture()
     patch_runner_with_lines(monkeypatch, lines, exit_code=0)
@@ -114,9 +116,9 @@ def test_opencode_node_completed_output_is_concatenated_text(monkeypatch):
     assert events[0].type == "node_started"
     completed = [e for e in events if e.type == "node_completed"]
     assert len(completed) == 1
-    # 两条 text 事件拼接（fixture 第一段 + 第二段）
+    # 末条 agent_message（fixture 第二段）；旧「全串接」语义已废（P5）。
     text_events = [e for e in events if e.type == "agent_message"]
-    expected_output = "".join(e.data["text"] for e in text_events)
+    expected_output = text_events[-1].data["text"]
     assert completed[0].data["output"] == expected_output
     assert completed[0].data["output"]  # 非空
 

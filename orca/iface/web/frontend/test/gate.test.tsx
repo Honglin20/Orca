@@ -52,6 +52,8 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   useWorkflowStore.getState().unloadRun();
+  // SPEC audit-c: 测试 setup 默认进入 loaded 让 processEvent 可驱动（INV-7 不拦）
+  useWorkflowStore.setState({ loadStatus: "loaded" });
 });
 
 describe("GateDialog — source 分派", () => {

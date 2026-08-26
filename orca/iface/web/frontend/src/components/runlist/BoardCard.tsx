@@ -1,0 +1,190 @@
+// components/runlist/BoardCard.tsx —— 看板单卡（SPEC web-board-cardgrid §3.3/§3.4 + §2 速查表）。
+//
+// 视觉契约（§3.3 状态只画一遍 + §3.4 失败/待决策提级）：
+//   - 容器：``rounded border orca-bg-surface shadow-sm px-3 py-2.5 pl-4`` + 左侧状态竖条（STATUS_BAR_HEX）。
+//     状态**只画一遍**：左竖条 = 唯一状态色锚点 + 行内文字 label（STATUS_TEXT 色 + STATUS_LABEL 文案）。
+//   - selected → ``ring-1 ring-orca-accent/40 bg-[rgb(var(--accent)/0.06)]``。
+//   - blocked → 左竖条紫 + 紫边 ``ring-1 ring-inset ring-orca-skipped/30`` + 第二行「⚠ 等待 <elapsed>」。
+//   - failed → 左竖条红 + 整卡淡红边 ``border-orca-failed/40`` + 淡红底 ``bg-orca-failed/5``（§3.1 例外放行）。
+//   - 圆角 rounded；阴影 shadow-sm；字号 text-sm/xs。
+//
+// 内容（全部来自现有 RunSummary，零新字段）：
+//   - 第一行：内联状态 label（STATUS_LABEL + STATUS_TEXT）+ workflow_name（truncate text-sm font-medium）。
+//   - 第二行（running/queued）：进度条 progress（按字符串解析百分比；失败 indeterminate pulse）。
+//   - 第二行（blocked）：⚠ 等待 <elapsed>（紫）。
+//   - 第三行：fmtElapsed(elapsed) · {event_count} 事件 · fmtAgo(started_at)（SPEC §4.2 去 cost）。
+//
+// 交互：整卡 click → onOpen；hover 右上显 delete-btn（size=16，命中区≥32px）；hover 左上显 run-checkbox；
+//       卡片 selected 时 ring 强调。
+//
+// data-testid：根 ``board-card``；内层内容 wrapper 挂 ``run-item``（兼容 9b ——
+//   ``page.click("[data-testid=run-item]")`` 命中内层，事件冒泡到根触发 onOpen）。
+
+import { Trash2, AlertTriangle, BarChart3 } from "lucide-react";
+import type { RunSummary } from "@/stores/run-list-store";
+import {
+  STATUS_BAR_HEX,
+  STATUS_LABEL,
+  STATUS_TEXT,
+  statusToRunStatus,
+} from "@/components/layout/status-badge";
+import { fmtAgo, fmtElapsed } from "./format-helpers";
+
+interface Props {
+  run: RunSummary;
+  selected: boolean;
+  onToggleSelect: (shiftKey: boolean) => void;
+  onOpen: () => void;
+  onDelete: () => void;
+}
+
+/** 解析 progress 字符串为 0..1 比例。失败/空/越界/未知分子 → null（indeterminate）。
+ *  backend 契约（run_manager.py）：``progress = "done/total"`` | ``"?"`` | ``"?/total"``。
+ *  另兼容历史/外部 ``"xx%"`` 与裸数（视为百分数）。 */
+function parseProgress(p: string | undefined | null): number | null {
+  if (!p) return null;
+  const s = String(p).trim();
+  if (!s) return null;
+  // backend 真实格式 "done/total"（如 "3/7"）或 "?/total"。
+  const frac = s.match(/^(\d+|\?)\s*\/\s*(\d+)$/);
+  if (frac) {
+    if (frac[1] === "?") return null; // 分子未知 → indeterminate
+    const d = Number.parseInt(frac[1], 10);
+    const t = Number.parseInt(frac[2], 10);
+    return t > 0 ? Math.min(1, d / t) : null;
+  }
+  if (s === "?") return null;
+  if (s.endsWith("%")) {
+    const n = Number.parseFloat(s.slice(0, -1));
+    if (Number.isNaN(n)) return null;
+    return Math.min(1, Math.max(0, n / 100));
+  }
+  const n = Number.parseFloat(s);
+  if (Number.isNaN(n)) return null;
+  if (n < 0 || n > 100) return null; // 越界不合理 → indeterminate
+  return n / 100; // 裸数视为百分数
+}
+
+export function BoardCard({
+  run,
+  selected,
+  onToggleSelect,
+  onOpen,
+  onDelete,
+}: Props) {
+  const rs = statusToRunStatus(run.status);
+  const isBlocked = rs === "blocked";
+  // SPEC §3.4/§4.1 隐含冲突 surface（code-reviewer 🟡）：failed 桶（group-runs accept）
+  // 与 KPI 失败计数均含 cancelled，但卡片视觉提级（红边/红底）仅对 rs==="failed"——
+  // cancelled 保持中性灰条（STATUS_BAR_HEX.cancelled=#94a3b8）+ label「已取消」。
+  // 设计意图：cancelled 严重性低于 failed，灰条传达「非真失败」是有价值信号。
+  // KPI「失败 N」含 cancelled 是分桶口径（计数/过滤/分桶统一），视觉口径区分严重性。
+  const isFailed = rs === "failed";
+  const isRunning = rs === "running" || rs === "queued";
+  const progress = isRunning ? parseProgress(run.progress) : null;
+  return (
+    <div
+      data-testid="board-card"
+      role="group"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen();
+        }
+      }}
+      className={`group relative cursor-pointer rounded border orca-bg-surface px-3 py-2.5 pl-4 text-left shadow-sm transition-opacity hover:orca-bg-surface-2 ${
+        isFailed ? "border-orca-failed/40 bg-orca-failed/5" : "orca-border"
+      } ${selected ? "ring-1 ring-orca-accent/40 bg-[rgb(var(--accent)/0.06)]" : ""} ${
+        isBlocked ? "ring-1 ring-inset ring-orca-skipped/30" : ""
+      }`}
+    >
+      {/* 状态竖条（行内 hex 来自 STATUS_BAR_HEX，§1.2 约定允许）。w-1=4px。 */}
+      <div
+        className="absolute inset-y-0 left-0 w-1 rounded-l"
+        style={{ backgroundColor: STATUS_BAR_HEX[rs] }}
+      />
+      {/* hover 左上：run-checkbox（与列表共享 selection） */}
+      <input
+        type="checkbox"
+        data-testid="run-checkbox"
+        aria-label={`选择 ${run.run_id.slice(0, 8)}`}
+        checked={selected}
+        onChange={(e) => onToggleSelect((e.nativeEvent as MouseEvent).shiftKey)}
+        onClick={(e) => e.stopPropagation()}
+        className={`absolute left-1.5 top-1.5 h-4 w-4 transition-opacity ${
+          selected ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+        }`}
+      />
+      {/* hover 右上：删除按钮（size=16，命中区≥32px，与 RunRow 同档） */}
+      <button
+        type="button"
+        data-testid="delete-btn"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
+        title="删除"
+        aria-label="删除 run"
+        className="absolute right-1.5 top-1.5 inline-flex min-h-[32px] min-w-[32px] items-center justify-center rounded text-[rgb(var(--text-faint)/0.8)] opacity-0 transition-colors hover:bg-orca-failed/10 hover:text-orca-failed group-hover:opacity-100 group-focus-within:opacity-100"
+      >
+        <Trash2 size={16} strokeWidth={1.5} aria-hidden />
+      </button>
+      {/*
+        内层 run-item 标记（兼容 9b：``page.click("[data-testid=run-item]")`` 命中此 div，
+        事件冒泡到外层根触发 onOpen）。同时是布局容器。
+      */}
+      <div data-testid="run-item">
+        {/* 第一行：内联状态 label + workflow 名（§3.3 状态只画一遍） */}
+        <div className="flex items-center gap-2 pr-8">
+          <span className={`text-xs font-medium ${STATUS_TEXT[rs]}`}>
+            {STATUS_LABEL[rs]}
+          </span>
+          <span className="truncate text-sm font-medium orca-text">
+            {run.workflow_name}
+          </span>
+        </div>
+        <div className="orca-text-muted mt-0.5 truncate text-xs">
+          {run.project_name || "—"}
+        </div>
+        {/* 第二行：running/queued → 进度条；blocked → 等待时长 */}
+        {isRunning && (
+          <div className="orca-bg-surface-2 mt-2 h-1.5 overflow-hidden rounded">
+            {progress !== null ? (
+              <div
+                className="bg-orca-accent h-full rounded transition-[width] duration-300"
+                style={{ width: `${Math.round(progress * 100)}%` }}
+              />
+            ) : (
+              // 解析失败 / 缺失 → indeterminate pulse 占满
+              <div className="bg-orca-accent/60 h-full w-full animate-pulse rounded" />
+            )}
+          </div>
+        )}
+        {isBlocked && (
+          <div className="mt-2 inline-flex items-center gap-1 text-xs text-orca-skipped">
+            <AlertTriangle size={12} strokeWidth={1.5} aria-hidden />
+            等待 {fmtElapsed(run.elapsed)}
+          </div>
+        )}
+        {/* 第三行：耗时 · 事件数 · 图表数 · 相对时间（SPEC §4.2 去 cost；图表数 §3.6 新增） */}
+        <div className="orca-text-muted mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs tabular-nums">
+          <span>{fmtElapsed(run.elapsed)}</span>
+          <span className="orca-text-faint">·</span>
+          <span>{run.event_count ?? 0} 事件</span>
+          <span className="orca-text-faint">·</span>
+          <span
+            className="inline-flex items-center gap-1"
+            title="图表数（去重后）"
+          >
+            <BarChart3 size={12} strokeWidth={1.5} aria-hidden />
+            {run.chart_count ?? 0}
+          </span>
+          <span className="orca-text-faint">·</span>
+          <span>{fmtAgo(run.started_at)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}

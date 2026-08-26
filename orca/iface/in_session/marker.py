@@ -1,23 +1,24 @@
-"""marker.py —— in-session shell 的激活标记（SPEC §5 / §2.4）。
+"""marker.py —— in-session shell 的激活标记（SPEC v3 §7.2，m11 精简）。
 
-回答「宿主怎么知道本 session 当前有没有活跃 Orca run？以及 run_id / tape_path /
-yaml / model 怎么跨 hook/plugin 调用传递？」：靠**一个 session/run 作用域的 JSON
-标记文件**（`<rundir>/orca-<key>.json`），CLI ``bootstrap`` 写、``next`` 读改、
-``stop`` 清，hook/plugin 透传。
+回答「宿主怎么知道本 session 当前有没有活跃 Orca run？run_id / model / 合规计数
+怎么跨 per-call CLI 传递？」：靠**一个 run 作用域的 JSON 标记文件**
+（`<rundir>/orca-<run_id>.json`），CLI ``bootstrap`` 写、``next`` 读改、``stop`` 清。
 
-设计（SPEC §5 + spec-review r2 N1/N2 + F13/F14）：
-  - **owner key**：opencode = sessionID（plugin 据此过滤子 session idle，D-v7-5）；
-    CC = run_id（CC hook 脚本不感知 sessionID，以 run_id 为锚）。``bootstrap`` 的
-    ``--owner`` 决定文件名，默认 = run_id（CC 路兼容）。
-  - **realpath canonical**（N1）：bootstrap 的幂等键 = ``(owner, os.path.realpath(yaml))``；
-    同 owner + 同 realpath(yaml) 视为同一 run，复用 run_id 不重发 ``workflow_started``。
+v3 精简（§7.2，删 desync 向量）：
+  - **只留 ``{run_id, model, no_output_count}``**。删 ``tape_path`` / ``yaml`` /
+    ``session_id`` / ``owner``——run_id 可派生 tape_path（``<rundir>/<run_id>.jsonl``），
+    yaml 运行时从 tape 的 ``workflow_started.data.workflow_name`` 反查 catalog；留着这些
+    字段只会制造多真相源（tape 被移 → marker 悬空 → desync）。
+  - **文件名固定 ``orca-<run_id>.json``**：``next``/``stop`` 用 ``marker_path(rundir, run_id)``
+    O(1) 定位（删 ``find_marker_by_run_id`` 扫描）。
   - **原子写**（F13）：``write(tmp) + os.replace(tmp, final)``；读容忍半写
     （``try/except JSONDecodeError → warn + None``，半写态不崩）。
   - **RMW 在 tape flock 临界区内**（N2）：marker 无独立锁，``next`` 持 tape flock 期间
     读改写 marker，串行化保证 ``no_output_count`` 不丢更新。
-  - **字段**：``{run_id, tape_path, yaml, model, session_id, no_output_count}``。
 
-依赖单向：仅依赖标准库 + ``orca.schema``（无），不反向调 run/events。
+并发安全：run_id 全局唯一 → 每 run 独立 marker+tape，多 session / 一 session 多 wf 天然隔离。
+
+依赖单向：仅依赖标准库，不反向调 run/events/schema。
 """
 
 from __future__ import annotations
@@ -33,28 +34,25 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ActivationMarker:
-    """一条激活标记（run_id / tape_path / yaml canonical / model / session_id / 合规计数）。
+    """一条激活标记（run_id / model / 合规计数）。
 
-    ``yaml`` / ``tape_path`` 存 **canonical realpath** 字符串（N1：软链 / 相对路径
-    归一，幂等键稳定）。``no_output_count`` 是 subagent 合规计数（D-v7-6，F11 闭环）。
+    v3 §7.2：仅这 3 字段。``tape_path`` / ``yaml`` / ``session_id`` / ``owner`` 已删——
+    它们是 desync 向量（run_id 是唯一句柄，其余运行时派生）。``no_output_count`` 是
+    subagent 合规计数（D-v7-6，F11 闭环）：连续 N 次 next 无 output → workflow_failed。
     """
 
     run_id: str
-    tape_path: str          # canonical realpath
-    yaml: str               # canonical realpath
-    owner: str              # 文件名 key（opencode=sessionID / CC=run_id）
     model: str | None = None
-    session_id: str | None = None
     no_output_count: int = 0
 
 
-def marker_path(rundir: Path | str, owner: str) -> Path:
-    """标记文件路径：``<rundir>/orca-<owner>.json``。
+def marker_path(rundir: Path | str, run_id: str) -> Path:
+    """标记文件路径：``<rundir>/orca-<run_id>.json``（v3 §7.2 固定命名，O(1) 定位）。
 
-    ``owner`` 由调用方决定：opencode 传 sessionID（plugin 据此过滤子 session idle），
-    CC 传 run_id（hook 脚本不感知 sessionID）。
+    ``run_id`` 是唯一句柄：bootstrap 用它建 marker，next/stop 据它 O(1) 直定位（不再扫描）。
+    run_id 含 ``-``/字母数字，安全作文件名；非字母数字字符替换为 ``_`` 兜底（防御性）。
     """
-    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in owner)
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in run_id)
     return Path(rundir) / f"orca-{safe}.json"
 
 
@@ -73,8 +71,9 @@ def write_marker(path: Path, marker: ActivationMarker) -> None:
 def read_marker(path: Path) -> ActivationMarker | None:
     """读标记；容忍半写（F13）：try/except JSONDecodeError → warn + 返 None。
 
-    返 None 表示「无标记 / 半写 / 损坏」——调用方按「本 session 无活跃 run」处理
-    （passthrough），不崩。
+    返 None 表示「无标记 / 半写 / 损坏」——调用方按「本 run 无活跃 marker」处理
+    （passthrough），不崩。字段多余/缺失容忍：只取 ``ActivationMarker`` 声明的 3 字段，
+    忽略历史残留（旧版 marker 含 tape_path/yaml 等），避免加字段即破读。
     """
     if not path.exists():
         return None
@@ -84,30 +83,23 @@ def read_marker(path: Path) -> ActivationMarker | None:
         # 半写态 / 损坏：warn + passthrough（SPEC §2.4 容忍半写）
         logger.warning("激活标记 %s 读失败（可能半写）：%s", path, e)
         return None
+    if not isinstance(obj, dict):
+        logger.warning("激活标记 %s 顶层非 object：%r", path, type(obj).__name__)
+        return None
+    # 只取已知字段（容忍历史残留 / 字段缺失）。缺 run_id → 视为损坏。
+    run_id = obj.get("run_id")
+    if not run_id:
+        logger.warning("激活标记 %s 缺 run_id 字段", path)
+        return None
     try:
-        return ActivationMarker(**obj)
-    except TypeError as e:
-        # 字段缺失（旧版标记 / 手改坏）：warn + passthrough
-        logger.warning("激活标记 %s 字段不匹配：%s", path, e)
+        return ActivationMarker(
+            run_id=str(run_id),
+            model=obj.get("model"),
+            no_output_count=int(obj.get("no_output_count", 0)),
+        )
+    except (TypeError, ValueError) as e:
+        logger.warning("激活标记 %s 字段类型异常：%s", path, e)
         return None
-
-
-def find_marker_by_run_id(rundir: Path | str, run_id: str) -> Path | None:
-    """在 ``rundir`` 内线性扫 ``orca-*.json``，返回第一条 ``run_id`` 匹配的标记路径。
-
-    用于 ``next``/``stop`` 仅凭 ``--run-id`` 定位标记（SPEC §2.1 next 契约只含
-    ``--tape --run-id``，无 marker key）。一个 run 通常只有一个标记，扫描成本 O(1)。
-
-    返 None 表示无匹配（调用方降级为「无标记合规计数」/ warn，不崩）。
-    """
-    base = Path(rundir)
-    if not base.exists():
-        return None
-    for p in sorted(base.glob("orca-*.json")):
-        m = read_marker(p)
-        if m is not None and m.run_id == run_id:
-            return p
-    return None
 
 
 def clear_marker(path: Path) -> None:

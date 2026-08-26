@@ -2,7 +2,7 @@
 // （SPEC web-attach §3 / §8 AC10/11/12）。
 //
 // 断言意图（Rule 9）：
-//   1. **loadRunWithMeta**：huge=true → tail=500 + serverOverview 设；huge=false → 全量 fold
+//   1. **loadRunWithMeta**：huge=true → 直接全量 fold（用户偏好：huge 不弹 gate 直接加载）；huge=false → 全量 fold
 //   2. **loadEarlierChunk**：增量 prepend 合并 seq 去重 + 更新 oldestSeqInWindow
 //   3. **loadFull**：清 serverOverview + hugeFullyLoaded=true（selectors 回退 client-fold）
 //   4. **unloadRun** 清 huge-mode 状态
@@ -18,10 +18,11 @@ import type { WebEvent } from "@/types/events";
 describe("huge-mode + writable (web-attach Step1)", () => {
   beforeEach(() => resetStore());
 
-  it("loadRunWithMeta：huge=true → tail=500 + serverOverview 设", async () => {
-    const tail: WebEvent[] = [
-      makeEvent("workflow_started", { seq: 999, data: { workflow_name: "big" } }),
-      makeEvent("node_started", { seq: 1000, node: "A" }),
+  it("loadRunWithMeta：huge=true → 直接全量加载（不弹 gate；用户偏好 huge 直接加载）", async () => {
+    const full: WebEvent[] = [
+      makeEvent("workflow_started", { seq: 1, data: { workflow_name: "big" } }),
+      makeEvent("node_started", { seq: 2, node: "A" }),
+      makeEvent("node_completed", { seq: 3, node: "A", data: { output: "ok" } }),
     ];
     const meta = {
       run_id: "r-big",
@@ -44,8 +45,9 @@ describe("huge-mode + writable (web-attach Step1)", () => {
       if (url.endsWith("/meta")) {
         return Promise.resolve({ ok: true, json: async () => meta });
       }
-      if (url.includes("?tail=500")) {
-        return Promise.resolve({ ok: true, json: async () => tail });
+      // huge 现直接走全量 /events（不再 ?tail=500 + 占位 gate）
+      if (url.endsWith("/events")) {
+        return Promise.resolve({ ok: true, json: async () => full });
       }
       return Promise.resolve({ ok: false, status: 404 });
     });
@@ -54,14 +56,13 @@ describe("huge-mode + writable (web-attach Step1)", () => {
     await useWorkflowStore.getState().loadRunWithMeta("r-big");
 
     const s = useWorkflowStore.getState();
-    expect(s.huge).toBe(true);
-    expect(s.hugeFullyLoaded).toBe(false);
+    expect(s.huge).toBe(true); // 信息位仍据 meta 置位
+    expect(s.hugeFullyLoaded).toBe(true); // 直接全量 → 已 loaded，不走占位/按钮 gate
     expect(s.writable).toBe(false); // attached run
-    expect(s.serverOverview).toEqual(meta.overview);
+    expect(s.serverOverview).toBeNull(); // 不再走 serverOverview fold
     expect(s.activeRunId).toBe("r-big");
-    expect(s.events.length).toBe(2);
-    expect(s.oldestSeqInWindow).toBe(999);
-    expect(s.newestSeqInWindow).toBe(1000);
+    expect(s.events.length).toBe(3);
+    expect(s.events.map((e) => e.seq)).toEqual([1, 2, 3]);
     vi.unstubAllGlobals();
   });
 
@@ -105,31 +106,20 @@ describe("huge-mode + writable (web-attach Step1)", () => {
   });
 
   it("loadEarlierChunk：增量 prepend 合并 + oldestSeqInWindow 更新", async () => {
-    // 先 setup huge 模式：tail = [seq 100..101]
+    // huge 现直接全量加载（loadRunWithMeta 不再产 tail 态），故 loadEarlierChunk 的
+    // tail 场景在此显式构造：loadFromEvents + setState huge/window 边界。
     const tail: WebEvent[] = [
       makeEvent("workflow_started", { seq: 100, data: { workflow_name: "x" } }),
       makeEvent("node_started", { seq: 101, node: "A" }),
     ];
-    const meta = {
-      run_id: "r",
-      status: "running" as const,
-      source: "attached" as const,
-      event_count: 101,
-      byte_size: 5000,
-      oldest_seq: 1,
-      newest_seq: 101,
-      writable: false,
+    useWorkflowStore.getState().loadFromEvents(tail);
+    useWorkflowStore.setState({
       huge: true,
-      overview: { agents: [], charts: [], cost_usd: 0, run_status: "running" },
-    };
-    const fetchMock = vi.fn().mockImplementation((url: string) => {
-      if (url.endsWith("/meta")) return Promise.resolve({ ok: true, json: async () => meta });
-      if (url.includes("?tail=500")) return Promise.resolve({ ok: true, json: async () => tail });
-      return Promise.resolve({ ok: false, status: 404 });
+      hugeFullyLoaded: false,
+      oldestSeqInWindow: 100,
+      newestSeqInWindow: 101,
+      activeRunId: "r",
     });
-    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
-    await useWorkflowStore.getState().loadRunWithMeta("r");
-    vi.unstubAllGlobals();
 
     // 再 prepend chunk：seq 90..99（10 条）
     const chunk: WebEvent[] = [];
@@ -264,6 +254,26 @@ describe("huge-mode + writable (web-attach Step1)", () => {
     expect(groups[0].entries.length).toBe(2);
   });
 
+  it("selectCharts huge 模式占位 entry 带 placeholder:true（partition 不误 reject）", () => {
+    useWorkflowStore.setState({
+      huge: true,
+      hugeFullyLoaded: false,
+      serverOverview: {
+        agents: [],
+        charts: [
+          { label: "g1", title: "Chart A", chart_type: "line" },
+          { label: "g1", title: "Chart B", chart_type: "bar" },
+        ],
+        cost_usd: 0,
+        run_status: "running",
+      },
+    });
+    const { groups } = selectCharts(useWorkflowStore.getState());
+    const entries = groups[0].entries;
+    expect(entries.length).toBe(2);
+    expect(entries.every((e) => e.placeholder === true)).toBe(true);
+  });
+
   it("unloadRun 清 huge-mode 状态", async () => {
     useWorkflowStore.setState({
       huge: true,
@@ -287,6 +297,7 @@ describe("huge-mode + writable (web-attach Step1)", () => {
     expect(s.writable).toBe(true);
     expect(s.oldestSeqInWindow).toBe(0);
     expect(s.activeRunId).toBeNull();
+    expect(s.loadStatus).toBe("idle"); // SPEC audit-c M18
   });
 
   // ── AC §8.12 selector AST 守门：所有 selectX 第一参数 = state（单 store 入参） ──

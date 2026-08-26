@@ -1,0 +1,12 @@
+case_id: 02_wrong_path
+primary_evaluator: block-map-evaluator
+flat_relpath: flats/clean_flat.py
+expect: FLAG
+expected_severity: BLOCKER
+must_mention_one_of:
+- path
+- nonexistent
+- resolve
+- submodule
+- not found
+description: slot path blocks.0.nonexistent does not resolve in the flat model

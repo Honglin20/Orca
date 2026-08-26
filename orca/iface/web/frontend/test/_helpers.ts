@@ -64,7 +64,13 @@ export function makeEvent(
   };
 }
 
-/** 重置 store 到初始（每个测试独立）。 */
+/**
+ * 重置 store 到初始（每个测试独立）。
+ *
+ * SPEC audit-c：默认 ``loadStatus="loaded"`` 让 ``processEvent`` 可直接驱动（多数 store /
+ * selector / chart 测试只需 fold 行为，不需测试 loadStatus 状态机）。测试 INV-7 拒收 /
+ * loader 状态机时显式 setState 到 idle/loading/error。
+ */
 export function resetStore(): void {
   useWorkflowStore.setState({
     events: [],
@@ -79,7 +85,21 @@ export function resetStore(): void {
     workflowElapsed: null,
     reasoningTokens: 0,
     lastSeqSeen: 0,
+    nodesIndex: {},
+    seenSeqs: new Set<number>(),
     selectedNode: null,
+    selectedSession: null,
     activeRunId: null,
+    // SPEC audit-c：默认 loaded 让 processEvent 可驱动（INV-7 不拦）
+    loadStatus: "loaded",
+    loadError: null,
+    retryCount: 0,
+    historyLoadError: false,
+    huge: false,
+    hugeFullyLoaded: true,
+    serverOverview: null,
+    writable: true,
+    oldestSeqInWindow: 0,
+    newestSeqInWindow: 0,
   });
 }

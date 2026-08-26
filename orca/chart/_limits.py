@@ -27,7 +27,7 @@ ACK_TIMEOUT_SECONDS: float = 10.0
 # 超过 → ``render_chart`` fail loud，建议用户改 ``ORCA_RUNS_DIR`` 到短路径。
 SOCK_PATH_MAX: int = 90
 
-# SPEC §4.1 / types.ts：允许的 chart_type 集合（7 种）。``frozenset`` 防误改。
+# SPEC §4.1 / types.ts：允许的 chart_type 集合（8 种）。``frozenset`` 防误改。
 ALLOWED_CHART_TYPES: frozenset[str] = frozenset({
     "line",
     "bar",
@@ -36,6 +36,7 @@ ALLOWED_CHART_TYPES: frozenset[str] = frozenset({
     "pareto",
     "radar",
     "table",
+    "heatmap",
 })
 
 # SPEC §7.2 / types.ts：pareto_direction 允许值（仅 ``max`` / ``min`` / 空）。

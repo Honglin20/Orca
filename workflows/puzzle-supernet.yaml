@@ -1,0 +1,383 @@
+name: puzzle-supernet
+description: "预训练模型的超网组件搜索流水线：把用户的 PyTorch transformer 模型张开成 choice-only 超网（层数/头数/FFN 维度全部钉原模型值，每个层槽只在 original 冻结分支 + 注意力变体块中选），用冻结的原模型 teacher 做 KD 蒸馏只训变体分支，零训练验证搜索选出好组件（搜组件不搜超参），再物化选定子网 finetune 出最终模型。需要预训练 ckpt（权重继承 + teacher 同源）。"
+
+entry: psu_flatten
+
+# ─────────────────────────────────────────────────────────────────────────────
+# inputs——三档标签（contract §6）：[ask]=业务决策必填 / [advanced]=罕见
+# override 可选 / [default]=工程默认。seed 全 workflow 必有（contract §6 Tier A 子类）。
+#
+# `$ORCA_ARTIFACTS_DIR`（in-session 入口注入）：``project_root`` 非空绝对路径 →
+# ``<project_root>/artifacts/puzzle-supernet/``（project-scoped，跨 run 复用 + 多 wf 隔离）；
+# 否则 per-run ``runs/<run_id>/artifacts/`` 回落。
+# ─────────────────────────────────────────────────────────────────────────────
+inputs:
+  project_root:
+    type: string
+    description: "[ask] 用户原始 PyTorch 项目根目录绝对路径。supernet 张开 / 训练 logic porting / fidelity 校验都以此为源项目锚点（agent.md 经 {{ inputs.project_root }} 引用）。必须用户给——代码里能 grep 出事实但项目根本身是意图/上下文边界。亦作 in-session project-scoped artifacts 解析锚点（绝对路径，否则 bootstrap fail loud）"
+    required: true
+  model_path:
+    type: string
+    description: "[ask] 目标模型入口文件路径（相对 project_root 或绝对）。supernet 张开的起点——psu_flatten flatten 此文件。项目内唯一锚点，必须用户给"
+    required: true
+  pretrained_ckpt:
+    type: string
+    description: "[ask] 预训练原模型 ckpt 路径（相对 project_root 或绝对；torch.load 可载即可，接受 {state_dict:...} 包装或裸 state_dict）。全链唯一权重源：original 分支继承父权重 + 等价 gate（全 original 路径 ≡ 预训练原模型）+ train/retrain 的冻结 teacher 构造全部锚定此文件，全链只读。必须用户给"
+    required: true
+  target_latency:
+    type: number
+    description: "[ask] 选架构时延目标（单位由 latency_unit 决定，默认 ms）。psu_run_search 调 select_architecture.py 时下传 --target-latency：latency ≤ target 的 Pareto 前沿候选里选 max-acc。核心业务 KPI——NAS 无目标 = 瞎搜，必须用户给（本工作流恒提供 target，无 target 不开工）"
+    required: true
+  latency_unit:
+    type: string
+    enum: [ms, us, s]
+    description: "[advanced] latency 测量值声明单位（ms|us|s，默认 ms）。全链路 label/列名/caption/比较按此单位；不换算数值（只标注）。默认 estimator 路径恒返回 ms——声明 us/s 必须同时给 latency_script_path（bootstrap fail-loud 守卫）"
+    required: false
+    default: "ms"
+  latency_script_path:
+    type: string
+    description: "[advanced] 用户外部时延脚本路径（可选）。**提供则全链路时延唯一权威**——psu_search_pipeline 生成 latency_estimator.py 时包装此脚本（onnx 单文件契约），search_config.yaml objs 的 latency objective + select_architecture.py 的 latency 来源全部同源于此，禁 fallback 到内置 PyTorch / FLOPs / 任何代理。未提供（默认）走 nas-agent 内置 PyTorch measure_module_latency"
+    required: false
+    default: ""
+  seed:
+    type: int
+    description: "[default] 复现性种子（默认 0）。全 workflow 必填（contract §6 Tier A）；agent.md 经 {{ inputs.seed }} 下传到训练/搜索脚本 --seed，deterministic 路径全固定此 seed"
+    required: false
+    default: 0
+
+# 跨字段 input 不变量——bootstrap fail-loud 校验：
+# latency_unit∈{us,s} ⇒ latency_script_path 必须非空（默认 estimator 恒 ms，非 ms 声明必错标）。
+input_invariants:
+  - when_field: latency_unit
+    when_in: ["us", "s"]
+    require_nonempty: [latency_script_path]
+    message: "声明 latency_unit 为 us/s 时必须提供 latency_script_path（默认 PyTorch estimator 恒返回 ms，非 ms 声明必错标）"
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 1: psu_flatten（entry）
+  #   把用户 PyTorch 模型 flatten + 施 mandatory supernet readiness 规则。
+  #   产 prepared_model（flat/optimized）。
+  #   flatten_passed=false → 路由 psu_report（fail loud）。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: psu_flatten
+    kind: agent
+    agent: psu_flatten
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [output_dir, prepared_model, flatten_passed, manifest_path, error, generated_artifacts]
+      properties:
+        output_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR 绝对路径"}
+        prepared_model: {type: string, description: "<base_name>_flat.py 或 <base_name>_llm-optimized.py；flatten_passed=false → 空串"}
+        flatten_passed: {type: boolean, description: "true=flatten + __main__ 跑通；false=fix-loop 超限 → 路由 psu_report"}
+        manifest_path: {type: string, description: "project_manifest.md 路径"}
+        error: {type: string, description: "fail loud 时根因；成功→空串"}
+        generated_artifacts:
+          type: array
+          items: {type: string}
+          description: "相对 output_dir 的产物路径列表"
+      additionalProperties: false
+    routes:
+      - when: "psu_flatten.output.flatten_passed != false"
+        to: psu_expand_supernet
+      - to: psu_report
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 2: psu_expand_supernet
+  #   classify model_type + generate supernet.py + refine SearchSpace + summary。
+  #   读 psu_flatten.output.prepared_model + inputs.pretrained_ckpt（权重继承 + 等价 gate）。
+  #   model_type_supported=false 或 original_equivalence_passed=false → 路由 psu_report。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: psu_expand_supernet
+    kind: agent
+    agent: psu_expand_supernet
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [output_dir, model_type, model_type_supported, original_equivalence_passed, supernet_path, prepared_model, fidelity_passed, workflow_verifier_passed, error, generated_artifacts]
+      properties:
+        output_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR 绝对路径"}
+        model_type: {type: string, description: "标签（transformer_layer——唯一支持族）或 'No supported match'"}
+        model_type_supported: {type: boolean, description: "true=命中 model_type.json 标签；false=不支持 → 路由 psu_report"}
+        original_equivalence_passed: {type: boolean, description: "等价 gate：全 original 路径 forward ≡ 预训练原模型输出（逐张量对齐，确定性脚本执行，结果无论 pass/fail 落盘 .equivalence.json）→ true；false=权重继承/freeze 分组/choice 容器任一被破坏 → 路由 psu_report"}
+        supernet_path: {type: string, description: "supernet.py 路径；不支持时为空串"}
+        prepared_model: {type: string, description: "从 psu_flatten 继承的 prepared_model 路径"}
+        fidelity_passed: {type: boolean, description: "supernet-evaluator loop all-pass → true"}
+        workflow_verifier_passed: {type: boolean, description: "workflow-verifier loop all-pass → true；unsupported stop → false"}
+        error: {type: string, description: "fail loud 时根因；成功→空串"}
+        generated_artifacts:
+          type: array
+          items: {type: string}
+          description: "相对 output_dir 的产物路径列表"
+      additionalProperties: false
+    routes:
+      - when: "psu_expand_supernet.output.model_type_supported != false and psu_expand_supernet.output.original_equivalence_passed != false"
+        to: psu_train_script
+      - to: psu_report
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 3: psu_train_script
+  #   读 expand 上游产物 + 用户项目 → 判定训练前置（数据管道/eval 入口可移植 +
+  #   pretrained_ckpt 可加载）→ porter 移植数据/eval → 生成固定 KD 范式训练脚本
+  #   train_supernet.py + run_train_supernet.sh（冻结 teacher 蒸馏只训变体分支）。
+  #   viable=false → 路由 psu_report 归因 training_prerequisites_missing。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: psu_train_script
+    kind: agent
+    agent: psu_train_script
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [output_dir, viable, reason, train_script_path, train_supernet_py_path, evaluation_paradigm, fidelity_passed, workflow_verifier_passed, error, generated_artifacts]
+      properties:
+        output_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR 绝对路径（与 expand 共享）"}
+        viable: {type: boolean, description: "训练前置是否就绪：数据管道 + eval 入口可移植 且 pretrained_ckpt 可加载 → true；false=前置缺失（脚本不产出，路由 psu_report 归因 training_prerequisites_missing）"}
+        reason: {type: string, description: "viable 判定的简短项目证据（数据管道 / eval 入口 / ckpt 加载）"}
+        train_script_path: {type: string, description: "run_train_supernet.sh 路径；viable=false → 空串"}
+        train_supernet_py_path: {type: string, description: "train_supernet.py 路径（KD 蒸馏训练脚本）；viable=false → 空串"}
+        evaluation_paradigm: {type: string, enum: [validate], description: "搜索期评估范式：零训练 validate（KD 蒸馏后的继承权重直接推理，子网评估不训练）"}
+        fidelity_passed: {type: boolean, description: "fidelity audit loop all-pass → true；viable=false → true（vacuous）"}
+        workflow_verifier_passed: {type: boolean, description: "workflow compliance loop all-pass → true；viable=false → true（vacuous）"}
+        error: {type: string, description: "fail loud 时根因；成功→空串"}
+        generated_artifacts:
+          type: array
+          items: {type: string}
+          description: "相对 output_dir 的产物路径列表"
+      additionalProperties: false
+    routes:
+      - when: "psu_train_script.output.viable != false"
+        to: psu_search_pipeline
+      - to: psu_report
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 4: psu_search_pipeline
+  #   读 train 上游产物 → 产 search_record_schema.json 共享 schema → 派 3 子代理并行生成
+  #   （latency_estimator / search-core 5 文件 / select）→ 汇总 + 固化校验。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: psu_search_pipeline
+    kind: agent
+    agent: psu_search_pipeline
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [output_dir, latency_estimator_path, search_config_path, evaluator_path, run_search_script_path, select_architecture_path, fidelity_passed, workflow_verifier_passed, error, generated_artifacts]
+      properties:
+        output_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR 绝对路径（与上游共享）"}
+        latency_estimator_path: {type: string, description: "latency_estimator.py 路径"}
+        search_config_path: {type: string, description: "search_config.yaml 路径"}
+        evaluator_path: {type: string, description: "evaluator.py 路径"}
+        run_search_script_path: {type: string, description: "run_search_supernet.sh 路径"}
+        select_architecture_path: {type: string, description: "select_architecture.py 路径"}
+        fidelity_passed: {type: boolean, description: "fidelity audit loop all-pass → true"}
+        workflow_verifier_passed: {type: boolean, description: "workflow compliance loop all-pass → true"}
+        error: {type: string, description: "fail loud 时根因；成功→空串"}
+        generated_artifacts:
+          type: array
+          items: {type: string}
+          description: "相对 output_dir 的产物路径列表"
+      additionalProperties: false
+    routes:
+      - to: psu_run_train
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 5: psu_run_train（有界轮询 + 无上限自愈——节点常驻到训练真正完成）
+  #   单卡执行 KD 蒸馏训练（plain python，无 torchrun）。status ∈ {executed, failed}。
+  #   failed → 短路 psu_report（正确归因 train_failed，不级联到 search）。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: psu_run_train
+    kind: agent
+    agent: psu_run_train
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [status, artifacts, assessment, max_retries_hit, healed_files, fidelity_retriggered]
+      properties:
+        status: {type: string, enum: [executed, failed], description: "executed=训练真正完成（.train_rc==0 + ckpt 有效）；failed=禁碰-blocked / 缺关键上游（训练为必经节点，无 skip 态）"}
+        artifacts:
+          type: array
+          items: {type: string}
+          description: "成功时 [supernet_ckpt_path]；failed 时 []"
+        assessment: {type: string, description: "软判断：收敛曲线 / acc / divergence 摘要；failed 时含 last_error 日志尾部"}
+        max_retries_hit: {type: boolean, description: "true=触碰禁碰/缺上游 ckpt 而非重试次数耗尽"}
+        healed_files:
+          type: array
+          items: {type: string}
+          description: "本次 self-heal edit 过的文件相对路径（审计字段）"
+        fidelity_retriggered: {type: boolean, description: "true=本次触碰训练逻辑类目并重触 project-fidelity-verifier"}
+      additionalProperties: false
+    routes:
+      - when: "psu_run_train.output.status == 'executed'"
+        to: psu_run_search
+      - to: psu_report
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 6: psu_run_search（跑搜索 → 补评 anchor 候选 → 推 3 图 → 跑 select → emit）
+  #   执行 run_search_supernet.sh → 推搜索 3 图 → append_anchor_candidates.py 幂等补评
+  #   all-original + 每 slot 单换 vanilla 共 L+1 条 → 运行 select_architecture.py → emit。
+  #   select 崩/rc≠0/无候选时 emit falsy select 字段（禁 node_failed）→ psu_report 归因 select_failed。
+  #   selected_arch 真值 AND pareto_size>0 → psu_retrain；catch-all → psu_report。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: psu_run_search
+    kind: agent
+    agent: psu_run_search
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [status, artifacts, assessment, max_retries_hit, healed_files, fidelity_retriggered, selected_arch, selected_acc, selected_latency, latency_unit, pareto_size, select_reason]
+      properties:
+        status: {type: string, enum: [executed, failed], description: "executed=RC=0+search_results.jsonl≥1 行；failed=缺上游 ckpt / 禁碰-blocked"}
+        artifacts:
+          type: array
+          items: {type: string}
+          description: "成功时 [search_results.jsonl 路径]；failed 时 []"
+        assessment: {type: string, description: "软判断：候选数 / Pareto size / best metric / latency 分布"}
+        max_retries_hit: {type: boolean, description: "true=触碰禁碰/缺上游 ckpt"}
+        healed_files:
+          type: array
+          items: {type: string}
+          description: "本次 self-heal edit 过的文件相对路径"
+        fidelity_retriggered: {type: boolean, description: "true=本次触碰搜索/评估逻辑类目并重触 project-fidelity-verifier"}
+        selected_arch:
+          type: ["object", "null"]
+          description: "选定的 per-slot 分支 choice 向量（每 slot 一个分支名，维度钉原层实测值）；无候选/select 失败时 null"
+        selected_acc: {type: number, description: "选定子网 search 时的 metric；无候选时 0"}
+        selected_latency: {type: number, description: "选定子网实测/估时延（单位 = latency_unit，默认 ms）；无候选时 0"}
+        latency_unit: {type: string, enum: [ms, us, s], description: "latency 单位（透传自 inputs.latency_unit，默认 ms）"}
+        pareto_size: {type: integer, description: "Pareto 前沿大小；无候选时 0", minimum: 0}
+        select_reason:
+          type: string
+          enum: [max-acc-under-target, pareto-knee, none]
+          description: "max-acc-under-target / pareto-knee / none（无候选或 select 失败）"
+      additionalProperties: false
+    routes:
+      - when: "psu_run_search.output.selected_arch and psu_run_search.output.pareto_size > 0"
+        to: psu_retrain_script
+      - to: psu_report
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 7: psu_retrain_script（纯生成节点——生成恒 finetune-from-supernet 的 retrain 脚本）
+  #   retrain_strategy 恒 finetune-from-supernet：物化选定子网 + 从超网 ckpt 按 selected
+  #   choice 提取分支权重 strict 载入 + 冻结 teacher KD 微调（freeze 沿续只训选中路径变体参数）。
+  #   supernet ckpt / teacher ckpt 缺失 → fail loud（error 字段），无 from-scratch 回退。
+  #   fidelity + workflow-verifier 闭环。产出 retrain.py+finetune.py+run_retrain.sh。不执行训练。
+  #   无 status 字段，无条件单出边到 psu_retrain（靠脚本存在 self-gate）。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: psu_retrain_script
+    kind: agent
+    agent: psu_retrain_script
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [output_dir, retrain_strategy, strategy_reason, retrain_script_path, retrain_py_path, fidelity_passed, workflow_verifier_passed, error, generated_artifacts]
+      properties:
+        output_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR 绝对路径（与上游共享）"}
+        retrain_strategy: {type: string, enum: [finetune-from-supernet], description: "恒为 finetune-from-supernet：物化选定子网 + 从超网 ckpt 提取分支权重载入 + 冻结 teacher KD 微调；无 from-scratch 回退"}
+        strategy_reason: {type: string, description: "恒 finetune 的证据行（supernet ckpt + teacher/pretrained ckpt 存在性）"}
+        retrain_script_path: {type: string, description: "run_retrain.sh 路径"}
+        retrain_py_path: {type: string, description: "retrain.py 路径（主入口）"}
+        fidelity_passed: {type: boolean, description: "fidelity audit loop all-pass → true"}
+        workflow_verifier_passed: {type: boolean, description: "workflow compliance loop all-pass → true"}
+        error: {type: string, description: "fail loud 时根因；成功→空串"}
+        generated_artifacts:
+          type: array
+          items: {type: string}
+          description: "相对 output_dir 的产物路径列表"
+      additionalProperties: false
+    routes:
+      - to: psu_retrain
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 8: psu_retrain（有界轮询 + 无上限自愈——节点常驻到重训真正完成）
+  #   执行 psu_retrain_script 产出的 run_retrain.sh（单设备默认）。脚本缺失→failed（上游未产出）。
+  #   self-heal 仅补丁层（run_retrain.sh），训练逻辑 fail loud。status ∈ {executed, failed}。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: psu_retrain
+    kind: agent
+    agent: psu_retrain
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [status, artifacts, assessment, max_retries_hit, healed_files, fidelity_retriggered]
+      properties:
+        status: {type: string, enum: [executed, failed], description: "executed=重训真正完成（.retrain_rc==0 + final ckpt 有效）；failed=禁碰-blocked / 缺关键上游"}
+        artifacts:
+          type: array
+          items: {type: string}
+          description: "成功时 [final retrain ckpt 路径]；failed 时 []"
+        assessment: {type: string, description: "软判断：final test acc / latency 对比 / supernet gap"}
+        max_retries_hit: {type: boolean, description: "true=触碰禁碰/缺上游 ckpt"}
+        healed_files:
+          type: array
+          items: {type: string}
+          description: "本次 self-heal edit 过的文件相对路径"
+        fidelity_retriggered: {type: boolean, description: "恒 false（fidelity 归上游 psu_retrain_script，执行节点不重触）"}
+      additionalProperties: false
+    routes:
+      - when: "psu_retrain.output.status == 'executed'"
+        to: psu_report
+      - to: psu_report
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Agent 9: psu_report（唯一终端 reporter）
+  #   读磁盘状态文件判终态（零跨节点 output 引用）→ 结构化报告 → $end。
+  #   prompt 只引 {{ inputs.* }} + bash/read 读 $ORCA_ARTIFACTS_DIR 磁盘文件。
+  #   status ∈ {success, failed}。
+  # ═══════════════════════════════════════════════════════════════════════════
+  - name: psu_report
+    kind: agent
+    agent: psu_report
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    output_schema:
+      type: object
+      required: [status, stage, reason, selected_arch, selected_acc, selected_latency, latency_unit, subnet_structure, pareto_size, supernet_path, output_dir, final_metrics, artifacts, charts_summary, error]
+      properties:
+        status: {type: string, enum: [success, failed], description: "终态：success=全链完成；failed=某阶段失败"}
+        stage: {type: string, enum: [flatten, expand, train_script, search_pipeline, run_train, run_search, retrain, report], description: "终态来源阶段"}
+        reason: {type: string, description: "终态判定理由（简短）"}
+        selected_arch: {description: "选定子网 per-slot 分支 choice 向量（每 slot 一个分支名，维度钉原层实测值）；无则 null", type: ["object", "null"]}
+        selected_acc: {type: number, description: "选定子网 metric；无则 0"}
+        selected_latency: {type: number, description: "选定子网时延（单位 = latency_unit）；无则 0"}
+        latency_unit: {type: string, enum: [ms, us, s], description: "latency 单位（透传自 inputs.latency_unit / schema，默认 ms）"}
+        subnet_structure: {type: string, description: "subnet_structure.md 相对路径（成功时由 psu_retrain 推 subnet_profile.py 产出）；缺/materialize 失败 → 空串"}
+        pareto_size: {type: integer, description: "Pareto 前沿大小", minimum: 0}
+        supernet_path: {type: string, description: "supernet.py 路径；无则空串"}
+        output_dir: {type: string, description: "$ORCA_ARTIFACTS_DIR 绝对路径"}
+        final_metrics: {type: string, description: "retrain final metrics 摘要；无则空串"}
+        artifacts:
+          type: array
+          items: {type: string}
+          description: "关键产物路径列表"
+        charts_summary: {type: string, description: "$ORCA_ARTIFACTS_DIR 下 chart 产出文件列表（best-effort）"}
+        error: {type: string, description: "失败时根因；成功→空串"}
+      additionalProperties: false
+    routes:
+      - to: $end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# outputs —— 全读 psu_report.output（失败路径上其他节点可能未跑 → 引用其 output
+# 会 StrictUndefined 崩。reporter 已从磁盘读填所需字段）。
+# ─────────────────────────────────────────────────────────────────────────────
+outputs:
+  result: "{{ psu_report.output }}"
+  status: "{{ psu_report.output.status }}"
+  stage: "{{ psu_report.output.stage }}"
+  reason: "{{ psu_report.output.reason }}"
+  selected_arch: "{{ psu_report.output.selected_arch }}"
+  selected_acc: "{{ psu_report.output.selected_acc }}"
+  selected_latency: "{{ psu_report.output.selected_latency }}"
+  latency_unit: "{{ psu_report.output.latency_unit }}"
+  subnet_structure: "{{ psu_report.output.subnet_structure }}"
+  pareto_size: "{{ psu_report.output.pareto_size }}"
+  supernet_path: "{{ psu_report.output.supernet_path }}"
+  output_dir: "{{ psu_report.output.output_dir }}"
+  artifacts: "{{ psu_report.output.artifacts }}"

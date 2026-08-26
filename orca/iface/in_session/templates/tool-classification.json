@@ -1,0 +1,41 @@
+{
+  "$comment": "PostToolUse 事后告警守卫的工具分类单一真相源（SPEC docs/specs/posttooluse-rogue-guard.md §5）。cc_nudge.sh 与 orca.ts 启动时各 read 一次，做传输层分类（区分 hint 投递目标），非编排状态机判断（D-v7-1 不禁；判例 §3 注脚 P2）。CI grep 守门：白名单字面量在 *.sh / *.ts 各出现 ≤1 次（只读资产引用，非硬编码副本）。",
+  "writing_tools": [
+    "Write",
+    "Edit",
+    "NotebookEdit",
+    "write",
+    "edit"
+  ],
+  "bash_tools": [
+    "Bash",
+    "PowerShell",
+    "bash"
+  ],
+  "readonly_bash_prefixes": [
+    "orca",
+    "cat",
+    "head",
+    "tail",
+    "grep",
+    "rg",
+    "find",
+    "ls",
+    "git status",
+    "git log",
+    "git diff",
+    "git show"
+  ],
+  "compound_separators": [
+    ";",
+    "&&",
+    "||",
+    "|",
+    "&",
+    "\n",
+    ">",
+    ">>"
+  ],
+  "$comment_guard_reason_template": "PostToolUse 事后告警的 canonical 文案模板（SPEC §6）。cc_nudge.sh（PostToolUse 分支）与 orca.ts（tool.execute.after 钩子）启动时各 read 本文件，按 {run_id} / {tool} 占位符填充后注入。两家族共享同一份文案，防跨语言漂移（review 🟡#3）。注：{tool} 直接取 tool_name 原值（不友好化，SPEC §6 注脚 E9）。",
+  "guard_reason_template": "【Orca 守卫·事后提醒】检测到你在活跃 run（{run_id}）期间自己用了 {tool}。编排期主 session 不该下场做节点工作——那是子代理的活。建议：改派 Task 子代理完成此步，或把已有产出作为 --output 调 orca next --run-id {run_id} 推进。本提醒不阻止（动作已执行）；若这是必要的调试/解锁操作，忽略即可。"
+}

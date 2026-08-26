@@ -24,10 +24,17 @@ import {
   NEUTRAL,
   PALETTE,
   getAxisTick,
+  getCursor,
   getGridProps,
   getTooltipStyle,
+  getTooltipTextStyle,
+  getXAxisLabelProp,
+  getXAxisLabelValue,
+  getYAxisLabelProp,
+  getYAxisLabelValue,
 } from "../chartTheme";
 import { computeNiceTicks, formatTick } from "../axisUtils";
+import { ChartCaption } from "../ChartCaption";
 
 /** 计算非支配前沿（Pareto front）。迁移自 AgentHarness，逐字保留。 */
 function findParetoFront(
@@ -59,7 +66,7 @@ function findParetoFront(
 }
 
 export function ParetoChartWidget({ payload }: { payload: ChartPayload }) {
-  const { data, x, y, title, pareto_direction, pareto_x_direction, pareto_y_direction } =
+  const { data, x, y, title, caption, pareto_direction, pareto_x_direction, pareto_y_direction } =
     payload;
   const xKey = x ?? "x";
   const yKey = y ?? "y";
@@ -68,6 +75,15 @@ export function ParetoChartWidget({ payload }: { payload: ChartPayload }) {
   const gridProps = getGridProps();
   const axisTick = getAxisTick();
   const tooltipStyle = getTooltipStyle();
+  // P5a：Pareto 主结构是散点+线（ComposedChart）但语义偏柱状（高亮整列）→ 归 false。
+  // 用统一 getCursor(false) 极淡灰填充替代原 strokeDasharray（避免与散点 stroke 视觉冲突）。
+  const tooltipCursor = getCursor(false);
+  const tooltipTextStyle = getTooltipTextStyle();
+  // 轴标签：x_label/y_label 优先，空回退字段名。
+  const xAxisLabel = getXAxisLabelProp(payload);
+  const yAxisLabel = getYAxisLabelProp(payload);
+  const xAxisName = getXAxisLabelValue(payload);
+  const yAxisName = getYAxisLabelValue(payload);
 
   const points = data.map((d) => ({
     x: Number(d[xKey]),
@@ -91,7 +107,7 @@ export function ParetoChartWidget({ payload }: { payload: ChartPayload }) {
 
   return (
     <div data-testid="chart-widget">
-      <h4 className="mb-2 text-xs font-medium text-slate-700">{title}</h4>
+      <h4 className="orca-text-muted mb-2 text-xs font-medium">{title}</h4>
       <div className="aspect-[4/3] w-full">
         <ResponsiveContainer width="100%" height="100%" minHeight={200} minWidth={300}>
           <ComposedChart margin={CHART_MARGIN}>
@@ -99,23 +115,30 @@ export function ParetoChartWidget({ payload }: { payload: ChartPayload }) {
             <XAxis
               dataKey="x"
               tick={axisTick}
-              name={xKey}
+              name={xAxisName}
               type="number"
               domain={xConfig.domain}
               ticks={xConfig.ticks}
               tickFormatter={formatTick}
+              label={xAxisLabel}
             />
             <YAxis
               dataKey="y"
               tick={axisTick}
-              name={yKey}
+              name={yAxisName}
               type="number"
               domain={yConfig.domain}
               ticks={yConfig.ticks}
               tickFormatter={formatTick}
+              label={yAxisLabel}
             />
             <ZAxis range={[40, 200]} />
-            <Tooltip contentStyle={tooltipStyle} cursor={{ strokeDasharray: "3 3" }} />
+            <Tooltip
+              contentStyle={tooltipStyle}
+              cursor={tooltipCursor}
+              labelStyle={tooltipTextStyle}
+              itemStyle={tooltipTextStyle}
+            />
             <Legend wrapperStyle={LEGEND_STYLE} />
             <Scatter name="Dominated" data={dominatedData} fill={NEUTRAL} fillOpacity={0.5} />
             <Scatter name="Pareto Front" data={frontData} fill={PALETTE[0]} fillOpacity={0.85} />
@@ -134,6 +157,7 @@ export function ParetoChartWidget({ payload }: { payload: ChartPayload }) {
           </ComposedChart>
         </ResponsiveContainer>
       </div>
+      {caption && <ChartCaption text={caption} />}
     </div>
   );
 }
