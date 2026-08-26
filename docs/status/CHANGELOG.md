@@ -5,6 +5,14 @@
 
 ---
 
+## [2026-08-26] feat(workflows): prof-opt v4 重构——基线完整训练非阻塞 + propose 子代理内闭环 + profiling 子代理化（commit `86ccf99..9ae6438`，13 commits）
+
+10→8 节点：基线完整训练后台跑（finalizer 守护收尾曲线/双锚/终检 + GPU 串行守卫 + push_curves live 图）；po_propose 三子代理内闭环（瓶颈富化[referential]→结构级提案[业务逻辑×SOTA 禁超参 ≤3/轮]→实现+时延打回 ≤2），删 po_implement/po_verify；business-logic-analyst 五段业务逻辑文档；变体 stop-at-k（同 epochs 渲染+进程组杀+@k 对齐比较）；full_train 锚=基线终值删补训路径；D-V4-20 profiling 子代理化（profile_script_path 退役→npu 三参；mfu-analyzer 子代理[mfu_benchmark.py 文件名锁定] + mfu_adapter 确定性转换[并行 cycles→四件套]，placeholder 模式不变）。SPEC 3 轮对抗（65+ 项回卷，UD-1/2/3 拍板）+ 计划 2 轮 + 134 单测绿 + **18 份 prompt 文件逐一独立 reviewer 全 CLEAN**（verify/cleanliness/）+ E2E 2 轮真执行（mnist success 写回逐字节==winner / gate 零解堵自然过）；随任务落地 3 项引擎/skill 修复（script 节点 project-scoped artifacts、tars 逐字传递铁律、reuse_check TypeError）。mfu 模式 E2E 归属用户真机。详见 [release note](../releases/2026-08-26-prof-opt-v4-refactor.md)。
+
+## [2026-08-21] feat(workflows): prof-opt——profiling 证据驱动的模型结构优化闭环（v3.5 从头训练范式；commit `86ccf99`）
+
+10 节点全 agent DAG + po_gate→po_propose 回边循环：瓶颈分析定位到操作 → playbook 三杠杆提案（脚本算收益）→ L0 时延证伪（两层声明校验+重 profile）→ L2 同预算从头训练公平对比（公平不变量机械可比）→ 叠加轮 → winner 完整训练（自动满训基线锚）→ 终局 shadow diff 写回（用户原文件零改动）。LLM 只当提案器、裁决全归确定性脚本（16 共享脚本 + 70 单测）；meta-path-finder 注入连接用户原训练脚本（Tier A/B/C 契约适配，porter 逐字移植）。SDD 全流程：草稿三轮对抗审查（2 个机制级 blocker 实测证死换道）+ P0 回边探针 + 四轮洁净度复审 + E2E 三轮迭代（R3 两项目双验收线全达：target 完整闭环 success / mnist_kd 合法 exhausted）。详见 [release note](../releases/2026-08-21-prof-opt-workflow.md)。
+
 ## [2026-08-21] feat(in-session): script 节点 pass-through——确定性判定从 agent 节点解放（commit `d62e8d6` + `45b0608`）
 
 in-session 三入口（bootstrap/next/daemon）支持 `kind: script`：一次调用内同步执行连续 script 链（ns 先行 emit 对齐 headless / at-least-once / max_iter 防环），路由按 `output.exit_code`/`output.json.*` 确定性分叉，回复带 `auto_executed` 摘要（成功+失败信封，tail 取末 500）。纯增量：schema/compile/exec 零改动，全 agent workflow 逐字节不变；D2 顺带修路由 `{{ inputs.* }}` in-session 裸崩。SPEC 三轮对抗评审闭环（45 项）；单测 39 例 + 子集 927 绿；E2E 真执行全过（CLI 直驱 10 场景 + opencode+deepseek 全链路，SIGKILL at-least-once 实证）。详见 [release note](../releases/2026-08-21-in-session-script-node.md)。
