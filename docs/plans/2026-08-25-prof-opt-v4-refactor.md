@@ -1,11 +1,12 @@
 # 实施计划 - prof-opt v4 重构（v3.5 10 节点 → v4 8 节点）
 
-PLAN_STATUS: READY
+PLAN_STATUS: READY（第 2 轮修订带两项签收前置：§10.4 Step R1 的 factory.py 扩项 + SPEC addendum 双批复；PLAN_CONFLICT 增 P8 待回卷）
 
 > 契约（权威）：`docs/specs/prof-opt-v4-spec.md`；语义权威：`docs/specs/prof-opt-v4-design-draft.md` v3.1（D-V4-1~19 + 附 A）。
 > 现状基线：commit `86ccf99`（v3.5 全部产物已入库——已实读对账：yaml 10 节点 / `_po_scripts` 21 文件 / po_* 10 目录 / subagents 2 文件 / test_po_*.py 3 文件）。**已知基线事实：测试面实跑 13 红 / 46 绿（v3.5 遗留测试-脚本漂移），Step 0 清偿。**
 > 本计划只覆盖实现 + 单测；E2E（SPEC §7）由后续 test-agent 独立执行，逐节点洁净审查（SPEC §6）是独立 Phase——两者只在本计划 §8 留衔接面。
 > **PLAN_CONFLICT：§2.5 列 P1-P6 六处计划与 SPEC 的偏差/沉默点**（eval@k 单测载体 / §6 grep 范围与豁免 / §7 latency_reduction_min default 句 / experiment_ledger v4 角色 / 配额轨迹载体 / **history IMPL 行写入归属——不补则 advance_round 永不推进**），均已给默认处置并上报——非静默偏离。
+> **第 2 轮修订（2026-08-26，E2E 回退）**：D-1 [PLAN_ISSUE] po_gate script 节点 in-session exit 127 的引擎侧修复 + D-2 [MINOR_FIX] po_flatten Output 强化，见 **§10**。§1 硬边界的可改面在 §10.5 显式扩充（含一项待编排者批的边界外文件）；**P7**（SPEC 2026-08-21 §2.4.2 addendum，§10.2，随签收批）+ **PLAN_CONFLICT-P8**（SPEC §7"强制 loop 至少一轮"断言回卷，§10.7）。
 
 ---
 
@@ -300,3 +301,330 @@ PLAN_STATUS: READY
 - **轮 2**：Q1-Q14 **14/14 闭环**；新发现 1 BLOCKER（R2-1 IMPL 行写入职责随 po_implement 退役孤儿化——advance_round 按 round 过滤、dedup 按 change_sig，两字段仅 IMPL 行携带，planner 独立 grep 坐实）+ 1 MAJOR（R2-2 chain 重入终态）+ 7 MINOR → 全部修订（P6 + #10 重入状态机等）。
 - **轮 3**：R2-1~R2-9 **9/9 闭环**；新发现 2 MAJOR（R3-1 terminal-skip 须两步 append / R3-2 协议拆分线）+ 3 MINOR + 2 附注；终判 **稳态收敛 = 是，CONDITIONAL——补两处后可交付，无需第四轮**。两处修订按轮 3 给出的修复文本逐字执行（含 3 MINOR + 2 附注），未再跑第四轮对抗（3 轮上限），特此披露。
 - 密度：三轮均满足"每条验收标准 ≥1 质疑或显式无疑问+理由"（轮 2/3 密度清单在案）；问题密度单调下降 14 → 9+1 → 5，无跨轮反弹。
+
+---
+
+## 10. E2E 回退修订（第 2 轮，2026-08-26）——D-1 引擎侧修复 + D-2 顺手修
+
+> 触发：v4 E2E 第 1 轮（test-agent，2026-08-26）回退两缺陷。D-1 [PLAN_ISSUE]：po_gate script
+> 节点 in-session 下必现 exit 127（编排者缺陷报告引 tape seq 26-27 `bash: /mnt/d/Projects/Orca/runs/<run_id>/artifacts/scripts/gate_node.sh:
+> No such file or directory`；复核订正：127+stderr 落盘记录在 mnist 磁带 `runs/prof-opt-20260826-*ec553c*.jsonl`
+> seq 18-19，target 侧为 ns 后无 nc 的 11 分钟停摆 + 解堵 symlink 建链时间戳推断——两项目独立复现成立，
+> target 侧属推断非落盘记录）。D-2 [MINOR_FIX]：po_flatten 首试宿主输出 Python dict 非 JSON
+> （output_schema_mismatch，重派后成功，浪费一轮 LLM 执行；target 磁带 seq 3 落盘
+> `node_failed po_flatten kind=output_schema_mismatch`，宿主输出为单引号 Python dict）。
+> 本节为增量修订：主计划 §1-§9 已交付并 commit（7861a89..2de195e + 24eb711/fa3b686），本轮只做
+> 修复 + 复测，**不重开已闭环项**。
+
+### 10.1 D-1 根因（引擎实读证据链，2026-08-26 master 实态）
+
+同一 workflow 内 agent 节点与 script 节点看到**两个不同的 `ORCA_ARTIFACTS_DIR`**，唯一真相源在
+in-session 入口、script pass-through 没接上：
+
+1. **agent 节点（project-scoped，v3.5 E2E 验证过的形态）**：bootstrap 经
+   `cli.py:1442 _resolve_artifacts_dir(tape_path, run_id)`（`cli.py:964-996`：inputs 含非空**绝对**
+   `project_root` + wf_name → `<project_root>/artifacts/<wf_name>/`，否则 per-run 回落）→
+   `cli.py:1489 _write_orca_env(artifacts_dir=…)` 写 `runs/<run_id>/orca_env.sh`
+   （`cli.py:516 export ORCA_ARTIFACTS_DIR=…`）；`next` 路径 `cli.py:1894 → _derive_artifacts_dir
+   (cli.py:1774-1781)` 同源重写。po_flatten（agent）据此让 `deploy_scripts.sh`（L13
+   `ART="${ORCA_ARTIFACTS_DIR:?…}"`，L15 `mkdir -p "$ART/scripts"`）部署到
+   **`<project_root>/artifacts/prof-opt/scripts/`**。
+2. **script 节点（per-run，d62e8d6 引入的断裂）**：in-session script pass-through 经
+   `_step_io.py:302-304 make_executor(node, runs_dir=tape.path.parent, workflows_root=…)` →
+   `factory.py:115 ScriptExecutor(runs_dir, workflows_root)` → `script.py:107 artifacts_dir =
+   _resolve_artifacts_dir(self._runs_dir, ctx.run_id)` → `script.py:246 artifacts_dir_for_run` =
+   **run-scoped** `runs/<run_id>/artifacts`（exec 层派生从不读 tape inputs，无 project-scoped 感知）。
+   po_gate 的 command（`prof-opt.yaml:332-333 bash "$ORCA_ARTIFACTS_DIR/scripts/gate_node.sh"`）在该
+   env 下指向 per-run 目录 → 文件不存在 → exit 127。
+3. **为何主计划漏掉**：§2.1「po_gate 零改动」基于 v3.5 E2E 已验证形态；`d62e8d6`（v3.5 E2E 之后、
+   v4 计划之前合入）把 script 节点的执行主体从宿主 agent（继承 orca_env.sh）换成引擎 executor
+   （自建 spawn env），env 契约断裂点恰在两轮 E2E 之间——计划期未对账引擎 commit 面，接缝漏检。
+
+参考实现：驱动会话引擎修复尝试 diff（WSL `/home/mozzie/e2e_v4/pollution_driver_engine_diff.patch`，
+已实读核证其接缝选择与本节一致）。
+
+### 10.2 修复落点裁决：(a) 引擎侧（选定）；(b) workflow 侧（驳回）
+
+**裁决：(a) 引擎侧——script 节点 spawn env 的 artifacts 派生与 agent 节点对齐（单一真相源）。**
+
+理由：
+- **单一真相源**：project-scoped 派生逻辑已存在（`cli.py:964`，SPEC 2026-08-06 §2.1 拍板），agent
+  节点（orca_env.sh）、bootstrap mkdir、next 重写三处已统一吃它；script 节点是**第四个消费者漏接**，
+  修复 = 把同一派生接到第四个消费点，不是新语义。(b) 则把 `<project_root>/artifacts/<wf_name>/`
+  路径约定第二次手写进 yaml——同一 workflow 内 agent 看 env、script 看硬编码路径，两真相源，恰是本
+  项目顶层铁律（单 tape 唯一真相源）要根治的形态。
+- **通用性**（编排者铁律：修复只落通用逻辑、禁项目特判）：(a) 对**一切**有 `project_root` input
+  的 workflow 的 script 节点生效（通用规则）；(b) 是 prof-opt 单点路径改写（项目特判味道），且每个
+  未来 project-scoped workflow 的 script 节点都会重踩 127。
+- **回归面实测近零**：`grep 'kind:\s*script' workflows/` **唯一命中 = prof-opt.yaml:331**——本仓库
+  生产 workflow 目录中 script 节点是 prof-opt 独有。repo 其余 `kind: script` 载体（`examples/*.yaml`
+  21 处、`tests/e2e_phase12/`、`orca/skills/create-workflow/{examples,benchmark}`）**均无
+  `project_root` input**，且用户安装面 `~/.orca/workflows`（catalog 第二搜索路径，不可 grep）同理由
+  下条恒等论证覆盖：headless（`tars run`）路径 `make_executor` 不传新参 → 默认 None → per-run 派生
+  **字节不变**（`orca/run/orchestrator.py:964-970` 调用点零改动；`tests/run/test_orchestrator.py:302`
+  fake `**kwargs` 吞参不受影响）；in-session 无 `project_root` input 的 workflow → 新派生返回值与
+  既有 per-run 派生**恒等**（`cli.py:996 artifacts_dir_for_run(tape_path.parent, run_id).resolve()`
+  与 `script.py:246` 同函数同参同 resolve），env 字节一致。
+- (b) 的全部收益（零引擎改动）只在"完全不动引擎"这一条，代价是永久性双真相源 + 每个未来 script
+  节点重复踩坑。驳回。
+
+**落地形态（沿 make_executor 既例加可选参，与 runs_dir[phase-13]/workflows_root[2026-08-04] 同模式）**：
+
+```
+cli.py _resolve_artifacts_dir + _read_workflow_name/_read_workflow_inputs/_TAPE_HEAD_SCAN_LIMIT
+  ↓ 下沉（逐字搬移，零语义变更）
+iface/in_session/_artifacts.py（新模块，公开名 resolve_artifacts_dir / read_workflow_name /
+  read_workflow_inputs / TAPE_HEAD_SCAN_LIMIT；cli.py re-import 私有名 alias——cli 内部调用点
+  [cli.py:1043/1442/1757/1781] 与既有测试 import 路径零改）
+_step_io.execute_script_inline：
+  artifacts_dir, _ = resolve_artifacts_dir(Path(tape.path), run_id)   # 与 agent 节点同一真相源
+  make_executor(node, runs_dir=…, workflows_root=…, artifacts_dir=str(artifacts_dir))
+factory.make_executor：keyword artifacts_dir: str|None = None，仅 script 分支透传
+exec/script.ScriptExecutor：__init__ 增 artifacts_dir: str|None = None；exec() 内
+  artifacts_dir = self._artifacts_dir if self._artifacts_dir is not None
+                 else _resolve_artifacts_dir(self._runs_dir, ctx.run_id)   # None == headless 语义不变
+```
+
+- **无条件传参**（非 project-scoped 也传）：无 `project_root` 时派生值与 per-run 恒等（上证），
+  单代码路径胜于按 `is_project_scoped` 分叉构造。
+- **防御 wrap**：`resolve_artifacts_dir` 对相对 `project_root` raise ValueError；bootstrap 在写 ws
+  事件**之前**已校验（`cli.py:1442` 先于 `cli.py:1707` advance），故 script 执行期该 raise 仅坏 tape
+  可达——但 daemon 是长活进程，裸 ValueError 穿透 `except InSessionError` 面 = daemon 崩 + 无
+  workflow_failed 终态。`execute_script_inline` 内包成 `InSessionError(ERR_INTERNAL_ERROR)`
+  （一行 try/except，fail loud 姿势正确化）。
+- **SPEC 衔接注记（P7，随签收批）**：SPEC `2026-08-21-in-session-script-node.md` §2.4.2（L82）以
+  逐字形态钉 `make_executor(node, runs_dir=…, workflows_root=…)` 调用，本修复加一个可选参（加法，
+  列举的既有参数全部保留）。该 SPEC 已过确认闸——按 SDD 时序，addendum（一行：spawn env 的
+  artifacts_dir 经 in-session 层从 tape 派生注入）须由编排者**签收本计划时一并批准**（与 §10.5
+  factory 批复同一动作），先契约后实现；`docs/specs/` 不在 coder 可改面。
+
+### 10.3 文件级改动清单（第 2 轮新增）
+
+| # | 文件 | 动作 | 改什么 | 为什么 |
+|---|---|---|---|---|
+| R1 | `orca/iface/in_session/_artifacts.py` | **new** | 从 cli.py 逐字下沉 `_read_workflow_name` / `_read_workflow_inputs` / `_resolve_artifacts_dir` / `_TAPE_HEAD_SCAN_LIMIT`（公开名 + 保留 tuple 返回契约与相对路径 raise 语义） | project-scoped 派生 SSOT；agent env 写入与 script spawn env 两消费者共用，禁复制 |
+| R2 | `orca/iface/in_session/cli.py` | modify | 删三 helper 本体 + 常量定义，re-import 私有名 alias（docstring 注明下沉去向） | cli 内部调用点与 `tests/iface/in_session/test_resolve_artifacts_dir*.py` 的 `from …cli import _resolve_artifacts_dir` import 路径零改（两测试文件不动仍绿） |
+| R3 | `orca/exec/script.py` | modify | `ScriptExecutor.__init__` 增 `artifacts_dir: str | None = None`（docstring：in-session project-scoped 覆盖；None == per-run 派生，headless 语义字节不变）；`exec()` 内 override 优先 | 注入点在 executor 构造期（与 runs_dir/workflows_root 同位），exec 层不读 tape——project_root 感知留在 iface 层显式传参 |
+| R4 | `orca/exec/factory.py` | modify（**边界外一项，待编排者批**，见 §10.5） | `make_executor` 增 keyword `artifacts_dir: str|None = None`，仅 script 分支透传（docstring 同既例格式） | make_executor 是单一分派点（OCP）；直构 ScriptExecutor 绕开 factory 会造第二构造点 |
+| R5 | `orca/iface/in_session/_step_io.py` | modify | `execute_script_inline` 派生 `resolve_artifacts_dir(Path(tape.path), run_id)` 并无条件传 `artifacts_dir=str(…)`；ValueError 包 `InSessionError(ERR_INTERNAL_ERROR)`；docstring 注 2026-08-26 修复注记 | D-1 修复本体：script spawn env 与 agent orca_env.sh 同真相源；防御 wrap 防 daemon 裸崩 |
+| R6 | `workflows/agents/po_flatten/agent.md` | modify（D-2） | Output 段强化（§10.4-R2 逐字落点） | D-2：首轮宿主手打 Python dict 被拒 |
+| R7 | `tests/exec/test_script_env_inject.py` | modify | T-E1/T-E2 两用例（§10.6 表） | 引擎单测：override 生效 + None 默认回归钉 |
+| R8 | `tests/iface/in_session/test_in_session_script.py` | modify | T-I1/T-I2/T-I3 三用例（§10.6 表） | D-1 最小真机复现→修复证明 + per-run 回归钉 + 防御面 |
+
+**不动（声明性确认）**：`workflows/prof-opt.yaml`（po_gate command 原样——`$ORCA_ARTIFACTS_DIR`
+引用即修复后语义）、`_po_scripts/gate_node.sh`、其余 po_* 全部、
+`tests/iface/in_session/test_resolve_artifacts_dir.py` + `test_resolve_artifacts_dir_integration.py`
+（re-import 保 import 路径，零改动仍绿 = 搬移纯度守门）、`tests/exec/test_script.py`（None 默认字节
+不变）、`tests/test_po_*.py`（引擎修复不触 workflow 面）。
+
+### 10.4 实施步骤（有序）
+
+**Step R1 —— D-1 引擎修复 + 单测（一个 commit）**
+**前置条件（编排者签收本计划时必须显式裁决，缺一不开工）**：① §10.5 factory.py 扩项批复；
+② P7 SPEC addendum 批复（同动作）。两者任一被驳 → 按 §10.5 fallback 改走直构方案并同步修订本节，
+禁静默越界。
+做什么：§10.3 R1-R5 + R7 + R8（引擎与测试同批——中间态"有参数无消费者/有派生无注入"无独立价值）。
+内序：R1/R2 下沉先行（cli 回归绿证纯度）→ R3/R4 加参（默认 None，既有 `tests/exec/` 绿证向后
+兼容）→ R5 注入 + R7/R8 新用例。
+对应验收：D-1 修复（po_gate exit 0）；§10.2 三条零回归论证落地为测试钉。
+完成判据：`wsl bash -c "cd /mnt/d/Projects/Orca && .venv/bin/python -m pytest tests/exec/test_script.py
+tests/exec/test_script_env_inject.py tests/exec/test_factory.py
+tests/iface/in_session/test_in_session_script.py
+tests/iface/in_session/test_resolve_artifacts_dir.py tests/iface/in_session/test_resolve_artifacts_dir_integration.py -q"`
+全绿（含 5 新用例；两 resolve_artifacts 文件零改动仍绿；`test_factory.py` 覆盖 R4 改动的 script
+分派面）+ `tests/iface/in_session/` 全目录绿（daemon/marker 等旁证，daemon 路径同走
+`execute_script_inline`）+ `tests/run/test_orchestrator.py` 绿（headless fake 注入面回归）。
+
+**Step R2 —— D-2 po_flatten Output 强化（一个 commit）**
+做什么（R6 落点，对齐 po_baseline L165-168 的 anti-paraphrase 措辞模式）：
+- Output 段头部增硬约束句：**"Never hand-type the JSON. Single-quoted keys, `True/False/None`,
+  trailing commas are Python dict repr — NOT JSON; the output gate rejects them. The ONLY valid
+  final reply is the emitter command's stdout, pasted verbatim, byte for byte."**
+- 增机械自检，**语义钉死为"捕获 → 校验捕获值 → 回复捕获值"**（防"重打副本再校验"绕过根因）：
+  `OUT="$("$EMIT_PY" "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" --field …)"` →
+  `printf '%s' "$OUT" | "$EMIT_PY" -c 'import json,sys; json.loads(sys.stdin.read())'` → 校验过 →
+  回复 `$OUT` 原文。校验失败 = 重跑 emitter，**禁手工修补捕获值**。
+对应验收：D-2（首轮即合法 JSON）。
+完成判据：`tars validate workflows/prof-opt.yaml` 0 error 0 warning；§8 词表 grep（收窄范围）0 命中；
+`tests/test_po_scripts.py` 全绿（不触脚本，回归确认）。
+
+**Step R3 —— E2E 复测（test-agent 独立执行，范围见 §10.7）**
+
+### 10.5 边界声明（第 2 轮扩充，显式上报）
+
+- 编排者授权面：`orca/exec/script.py` + `orca/iface/in_session/`（选 (a) 时），禁碰
+  `orca/iface/cli/`、`orca/skills/`。**本计划用满并申请扩一项**：`orca/exec/factory.py` 加一个
+  keyword 参 + script 分支透传（约 4 行 + docstring）。理由：(i) make_executor 是 exec 层单一分派
+  点，沿 runs_dir/workflows_root 既例加可选参是既定扩展模式；(ii) 不扩则唯一 in-boundary 替代 =
+  `execute_script_inline` 直构 `ScriptExecutor`（绕 factory 造第二构造点 + 偏离 SPEC 2026-08-21
+  §2.4.2 钉的 make_executor 调用形态）——更差的架构换边界合规，不值。**并行任务冲突面实证**：
+  create-workflow skill v2 触碰 `orca/skills/` + `orca/iface/cli/` + `tests/iface/cli/` +
+  `tests/test_skill_{benchmark,v1_checks}.py`（git status 实读），不含 `orca/exec/` 与
+  `tests/exec/`、`tests/iface/in_session/`。**编排者驳回时的 fallback**：仅直构方案（上述 (ii)）+
+  SPEC §2.4.2 文本偏差同步上报。(b) 已按铁律驳回，不构成 fallback 选项。
+- 测试落点：`tests/exec/` + `tests/iface/in_session/`（两目录均非并行任务面）。
+- **"workflows/ 面不变"的解读（显式化）**：按编排语境 = D-1 不落 workflow 侧（yaml/节点结构零改）；
+  D-2 修法方向编排者已明示 = `po_flatten/agent.md` Output **指引文本**强化（非结构/schema 改动），
+  本计划据此纳入 R6。若本意是连 agent.md 也禁碰 → D-2 无落点，上报重裁。
+
+### 10.6 测试策略（第 2 轮）
+
+> 跑法沿 §5：WSL `.venv` pytest。新用例全部真 subprocess（沿 `test_script_env_inject.py` 既有
+> 手法：`env` 命令打印子进程 env 断言）。
+
+| # | 测试 | 文件 | 验证意图 |
+|---|---|---|---|
+| T-E1 | override 生效 | tests/exec/test_script_env_inject.py | `ScriptExecutor(artifacts_dir="/abs/x/artifacts/wf")` 真子进程 `ORCA_ARTIFACTS_DIR` == override 值（D-1 注入点机械面） |
+| T-E2 | None 默认回归钉 | 同上 | 默认构造 → `ORCA_ARTIFACTS_DIR == str(artifacts_dir_for_run(runs_dir, run_id).resolve())`（headless/per-run 语义字节不变——零回归的机械证明） |
+| T-I1 | D-1 真机复现→修复 | tests/iface/in_session/test_in_session_script.py | fixture：tape ws 含 `workflow_name: wf-a` + inputs `project_root=<abs tmp>`；预置哨兵脚本 `<proj>/artifacts/wf-a/scripts/gate.sh`；workflow A→S(script `bash "$ORCA_ARTIFACTS_DIR/scripts/gate.sh"`)→$end；**真实 `execute_script_inline`**（真 spawn）→ exit 0 + stdout 断言。此 fixture 与缺陷同构（修前 env 恒 per-run → 哨兵不在 → 127）；"修前 127"的落盘旁证 = 第 1 轮 mnist 磁带 `ec553c` seq 18-19（真 127 + 同款 stderr），不设机械 red 步骤——意图级证明「script 节点看到 agent 节点部署的同一目录」 |
+| T-I2 | per-run 回归钉 | 同上 | ws **无** `project_root` input → script 子进程 `ORCA_ARTIFACTS_DIR` == per-run 派生值（与修复前字节一致——非 project-scoped workflow 零回归） |
+| T-I3 | 防御面 | 同上 | ws 含**相对** `project_root`（构造坏 tape）→ `InSessionError(error_kind=internal_error)`，非裸 ValueError（daemon 长 liveliness 姿势） |
+| T-M1 | 搬移纯度守门 | tests/iface/in_session/test_resolve_artifacts_dir.py + _integration.py | **零改动**仍绿（15 单测 + 5 集成测试函数：project-scoped 正路径 / 相对 fail loud / per-run 回落 / marker 后失败信封 / per-run 字面钉）——helper 下沉逐字、cli re-import 保路径的机械证明 |
+
+既有 workflow script 节点回归检查（§10.2 裁决依据的落实验收）：`grep -rn 'kind:\s*script'
+workflows/` 唯一命中 prof-opt.yaml:331 → 其 E2E 复测即 §10.7；repo 其余 `kind: script` 载体
+（examples/ tests/ skills/）与 `~/.orca/workflows` 无 `project_root` input，由 T-I2 恒等论证覆盖；
+headless 路径由 T-E2 钉；`tests/run/test_orchestrator.py` 全 script wf 用 fake make_executor 注入
+（SPEC §1 基线事实）不受新参影响——R1 完成判据补跑该文件绿。
+
+### 10.7 E2E 复测范围（Step R3，test-agent）
+
+**inputs 钉值**（沿 SPEC §7 L124 + §8 下游 2 + P3 修正）：`full_train_epoch_cap=2, probe_epochs=1,
+max_rounds=2, latency_reduction_min` 显式传 **0.3~0.5**（SPEC §7 钉区间；P3：required 无 default
+必显式；区间内任取一值对断言无影响——判定序推演见 §10.10 轮 3 附注 2，test-agent 在 E2E 报告
+记录实际取值以便复现）, `fresh_start=true`；WSL + claude 后端 + tars skill（项目例外约定）；**驱动事实（编排者
+钉）**：fresh_start 必须 true（工作区有第 1 轮残留）——适用于 §A mnist 全链。§B spot-check 的
+`fresh_start=false` 是对该钉值的**显式例外申请**：其机制正是骑第 1 轮残留走 reuse 短路（残留是
+成本上限的来源，非污染源）；编排者可否决 → spot-check 整体撤销（豁免理由已备），不影响 §A。
+
+**PLAN_CONFLICT-P8（SPEC §7 loop 断言 vs 判定序事实，上报编排者回卷，禁静默偏离）**：SPEC
+`prof-opt-v4-spec.md` L124 钉 `latency_reduction_min` 0.3~0.5 的理由是"**强制 loop 至少一轮**，
+防 round 1 即 full-train 空转验收"。代码级事实使该目的在 placeholder 场景不可达：`gate_decide.py:111`
+loop 分支要求 `not exhausted`，而 placeholder 下 round 1 即 exhausted（memory + 第 1 轮 mnist 两跑
+佐证均未走 loop）。**计划侧默认处置**：inputs 仍按 SPEC 传 0.3~0.5（区间照钉）；E2E 断言把 loop
+从硬要求降为观察项（§10.7-A 断言 2 + 观察项段）。**建议 SPEC §7 回卷**：loop 断言改两层表述
+（硬 = exit 0 + decision 合法 + 路由机械映射；loop = 真 profiler 场景的增益证据）。
+
+**环境前置（.run_lock staleness，adversary 轮 2 N2/N6 补）**：单写者锁属他 run 且
+`pid alive ∨ heartbeat_age < LOCK_STALE_S(1800s)` → flatten Step 0 直接 exit 3
+（`reuse_check.sh:71-82`）。**§A 操作性定义"干净环境" = E2E 前手工删除
+`<project_root>/artifacts/prof-opt/` 整目录（含 .run_lock 与第 1 轮全部残留）**——这是 E2E
+环境准备语义（agent 运行期的 "Never wipe by hand" 约束 agent 不约束 test-agent 备场）；不删目录
+则须距第 1 轮最后心跳 ≥30min 且旧 pid 已死（自然 stale 接管）。**§B spot-check 前置**：bootstrap
+前查 `.run_lock`——pid dead 且 heartbeat_age ≥ 1800s 才开工；不满足 → 等待或直接按豁免收场。
+
+**A. mnist_kd —— 全链复跑（主验证线，D-1+D-2 同场）**：
+- 干净环境（操作性定义见上）、**无任何 symlink/手工 workaround**（第 1 轮曾以
+  `runs/<run_id>/artifacts` → project-scoped 的 symlink 解堵——本轮证明 gate 自然收口）。
+- 断言清单（硬断言全部机械可判）：
+  1. 【硬】po_gate 节点 `exit_code == 0`（非 127），tape 无 `gate_node.sh: No such file or directory`；
+  2. 【硬】`po_gate.output.json.decision` 在场 ∈ {full-train, loop, full-train-best-effort,
+     finish-failed} 且**路由 == decision 值的机械映射**（full-train/full-train-best-effort →
+     po_full_train；loop → po_propose；其余 → po_report；`prof-opt.yaml:338-343` first-match-wins）
+     ——"gate 自然收口"的证明主体是 **exit 0 + 合法 decision + 路由一致性**，**不是**"必须走 loop"；
+  3. 【硬】`runs/<run_id>/artifacts` 下**无**手工造的 scripts 副本/symlink，且 project-scoped
+     工作区（`<project_root>/artifacts/prof-opt/`）内**无任何手工 workaround 痕迹**（symlink /
+     手工复制的 scripts）——备场已删整目录，**任何在场痕迹均属本轮运行期所为**（adversary 轮 2
+     N6 + 轮 3 N7：查两侧才具检出力，且不带"第 1 轮"限定词——该限定词被备场删目录空洞化）；
+  4. 【硬】终态：po_report node_completed + workflow_completed；mnist_kd 在 placeholder profiler
+     下合法终态（v3.5 判据沿袭：exhausted 真伪看 `filtered_count`，memory 钉死）；
+  5. 【硬·D-2 观察点】po_flatten 首轮 dispatch 即 node_completed，tape 无该节点的
+     output_schema_mismatch 重派记录（LLM 行为非完全确定——若偶发复现则报 defect 而非静默）；
+  6. 【硬】E2E 质量底线（CLAUDE.md）：逐 agent 抽查产出契约（report 字段语义 / 图表数据真实非空）。
+- **观察项（非断言）**：loop 回边是否走过。**不可作硬断言的代码级依据（adversary 轮 1 BLOCKER
+  复核确认）**：`gate_decide.py:102-122` 判定序下 loop 分支（L111）要求 `not exhausted`，而
+  placeholder profiler 下 round 1 即 exhausted（memory 钉死）→ loop 在本钉定配置下结构性不可达；
+  第 1 轮真机佐证：mnist 两跑（`ec553c`/`62a2ef`）均未走 loop（成功跑 round 1 直接 full-train）。
+  若复跑意外走出 loop（如 LLM 提案质量致 round 1 非 exhausted）→ 如实记录为增益证据，不据此判负。
+
+**B. target —— 全链不复跑（裁定维持）+ gate-only spot-check（默认执行，B.1 修正后新增）**：
+- 第 1 轮 target 的 gate 通过**对修复语义零证明力**（adversary 真机取证订正原草案 B.1）：gate 首试
+  ns 后停摆 11 分钟 → `runs/prof-opt-20260826-004219-124142/artifacts` → project-scoped 的解堵
+  symlink 建于 02:57:36 → gate 02:57:41 exit 0（建链后 5 秒）；mnist 成功跑 `62a2ef` 的 symlink
+  更是先于一切节点预建——第 1 轮所有 gate 通过都可被"symlink 解堵 + 未打补丁引擎"完全解释。
+- 全链不复跑的三条理由（重构后）：
+  1. 8 断言对 **fix 无关面**仍构成有效证明：D-1 修复只改 script 子进程看到的
+     `ORCA_ARTIFACTS_DIR`；gate 下游的 agent 链（full-train/report/写回）env 契约 v3.5 起未变，
+     target 第 1 轮对这些面的验证继续有效；
+  2. 修复语义（project-scoped 派生 + 注入）是 project-root **通用**逻辑，由 T-E1/E2 + T-I1/I2
+     单测钉死 + §A mnist 全链（engine→gate→terminal 真机）证明——target 复跑对其无增量；
+  3. 全链成本（fresh_start=true 完整重训 + 全节点 LLM 执行）与剩余信息量不成比例。
+- **gate-only spot-check（默认纳入本轮 E2E，补 target 侧 gate 语义证据）**：fresh_start=**false**
+  复用第 1 轮工作区（reuse 门机械短路：flatten REUSE / contract viable / baseline train_final
+  已写 / propose DONE 幂等 / probe 状态盘面在），驱动至**首个 po_gate** 即断言后收手：exit 0 +
+  decision 在场 + 路由机械映射 + 无 symlink。**成本上限：≤6 个 LLM 节点执行**；超出（reuse 链
+  意外断裂致重训/重实现）→ 中止并按上述三条理由豁免，如实记录中止原因——豁免是显式裁量不是静默。
+
+### 10.8 风险与回退（第 2 轮）
+
+1. **factory.py 批复 / SPEC addendum 批复被拒**（最可能的政策风险，Step R1 显式前置）：fallback =
+   直构 ScriptExecutor（§10.5，SPEC §2.4.2 文本偏差同步上报）。fail-loud 点：前置条件缺一不开工，
+   不静默越界。
+2. **helper 下沉引入 cli 行为漂移**：R1/R2 是逐字搬移 + re-import；T-M1（两测试文件零改动仍绿）+
+   `tests/iface/in_session/` 全目录绿守门；回退单位 = **步骤 commit**（Step R1 引擎批与 Step R2
+   agent.md 批各自独立 revert；revert R1 后缺陷回到"已知 127"状态——可接受的无害退化，R6
+  （D-2 文本强化）无引擎耦合，可独立留存）。
+3. **E2E 复跑假阴性风险**（adversary 轮 1 BLOCKER 已消解）：A 段硬断言全部机械可判且不依赖 loop
+   走向（判定序依据 `gate_decide.py:102-122` 复核确认）；spot-check 成本上限 + 显式中止路径防
+   预算失控。再爆新缺陷按 severity 路由（minor → coder；plan 级 → 再回本环）。D-2 的 prompt
+   强化对 LLM 首试行为是概率性改善非机械保证——若复跑仍 mismatch，属 prompt 韧性问题非本修复
+   失败，如实上报。
+
+### 10.10 对抗审查记录（第 2 轮 plan-adversary 内环）
+
+- **轮 1**（2026-08-26）：1 BLOCKER + 1 MAJOR + 6 MINOR + 2 显式无疑问（Q1 修复方向 / Q4 防御
+  wrap）。关键发现与处置：
+  - **Q6.1 [BLOCKER]** A.2 原"回边真实走过 ≥1 次"硬断言在钉定配置下必假阴性（`gate_decide.py:102-122`
+    判定序：loop 需 `not exhausted`，placeholder 下 round 1 即 exhausted；第 1 轮 mnist 两跑均未走
+    loop）→ **已修订**：A.2 改"decision 在场 + 路由机械映射"硬断言，loop 降观察项并附代码级依据。
+  - **Q6.2 [MAJOR]** 原 B.1"target 第 1 轮已构成修复后语义真机证据"被 symlink 时间戳取证证伪
+    （建链 02:57:36 → gate 过 02:57:41；`62a2ef` 建链先于一切节点）→ **已修订**：B.1 撤除，理由
+    重构为 fix-无关面 + 通用逻辑单测/mnist 证明 + 成本；target gate-only spot-check 从可选升级为
+    默认执行（含成本上限与显式中止路径）。
+  - Q2 [MINOR] "生产 workflow 唯一 script 节点"声明收窄至本仓库 workflows/，其余载体 + `~/.orca/`
+    面由恒等论证覆盖 → 已修订 §10.2。
+  - Q3 [MINOR] READY 与"待批"并存张力 + "(b) 仅存档"不自洽 → Step R1 挂显式前置条件（factory +
+    SPEC addendum 双批复）；(b) 从 fallback 链移除 → 已修订 §10.4/§10.5。
+  - Q5 [MINOR] D-2 自检句若校验"重打副本"即绕过根因 → 自检语义钉死"捕获→校验捕获值→回复捕获值"
+    → 已修订 Step R2。
+  - Q6.3 [MINOR] seq 引用失准（127 落盘在 mnist `ec553c` seq 18-19；target 侧为推断）→ 已修订
+    §10 序言。
+  - Q7 [MINOR] T-M1 集成测试计数 3→5；T-I1"修前即 127"无机械 red 步 → 改引真机磁带旁证 → 已修订
+    §10.6。
+  - Q8 [MINOR] SPEC addendum 时序倒置（先实现后补契约违 SDD）→ addendum 批复并入编排者签收动作
+    （Step R1 前置）→ 已修订 P7。
+- **轮 2**（2026-08-26）：第 1 轮 8 项验尸 = 7 全闭环 + Q6.2 半闭环；新发现 2 MAJOR + 4 MINOR，
+  无新 BLOCKER。处置：
+  - **N1 [MAJOR]** §10.7 原 inputs 只写"<显式传值>"静默丢了 SPEC §7 L124 钉的 0.3~0.5 区间，且
+    loop 降观察项是对 SPEC"强制 loop 至少一轮"的实质偏离未登记 → **已修订**：inputs 恢复钉
+    0.3~0.5；新增 **PLAN_CONFLICT-P8**（SPEC §7 回卷建议：loop 断言两层表述）+ 头部索引。
+  - **N2 [MAJOR]** spot-check/A 段均缺 `.run_lock` staleness 前置（他 run 锁 + age<1800s →
+    flatten Step 0 exit 3，`reuse_check.sh:71-82`）→ **已修订**：新增"环境前置"块——§A"干净
+    环境"操作性定义 = 删 `<project_root>/artifacts/prof-opt/` 整目录（E2E 备场语义）；§B 前置 =
+    查锁 pid dead ∧ age ≥ 1800s。
+  - N3 [MINOR] Step R1 判据补 `tests/exec/test_factory.py`（R4 改动面的直接测试）→ 已修订。
+  - N4 [MINOR] §10.8-2 回退表述与两 commit 分批矛盾 → 改"步骤 commit 各自独立 revert"→ 已修订。
+  - N5 [MINOR] 头部 READY 无条件视图 → 头部改"READY（两项签收前置 + P8）"→ 已修订。
+  - N6 [MINOR] "干净环境"无操作性定义 + 断言 3 对旧 symlink 无检出力 → 环境前置块 + 断言 3 扩查
+    project-scoped 侧 → 已修订。
+  - 验尸通过项（无疑问+理由）：D-1 修复正确性（行号逐比对一致）、D-2 分层诚实性、T-* 载体与计数
+    （15+5 独立复核吻合）、A 段断言 5 可判性（`output_schema_mismatch` = tape `node_failed`
+    `data.kind/error_type`，`orca/run/step.py:550-555`）、spot-check 收手语义（无锁残留阻塞）。
+
+- **轮 3**（终轮，2026-08-26）：N1-N6 **6/6 闭环**（验尸通过，N6 主体闭环遗留独立为 N7）；新发现
+  **0 BLOCKER / 0 MAJOR / 1 MINOR（N7）+ 2 附注**；密度单调收敛 8 → 6 → 1，无跨轮反弹，
+  **稳态达成**。处置：
+  - N7 [MINOR] 断言 3 的"第 1 轮残留"限定词被 §A 备场删目录空洞化（恒真零检出力）→ 改"无任何
+    手工 workaround 痕迹；备场已删整目录，任何在场痕迹均属本轮运行期所为"→ 已修订。
+  - 附注 1：头部 L8 索引未含 P7/P8 全貌 → 头部第 2 轮修订行补 P7 + P8 → 已修订。
+  - 附注 2（无疑问+理由）：0.3~0.5 区间内取值对断言无影响（placeholder exhausted 下走
+    `gate_decide.py` L115/L119 与该值无关；L102 full-train 分支被断言 2 四值兜底）→ 采纳其建议：
+    inputs 钉值行注明"任取一值 + E2E 报告记录实际取值"→ 已修订。钉单一值反而违 SPEC（区间是
+    SPEC 原文），不采纳。
+
+### 10.9 规模标注（第 2 轮）
+
+**medium**。引擎 5 文件（1 新模块 + 4 小改，核心逻辑逐字搬移 + ~15 行新接线）+ 1 agent.md 段落强化
++ 2 测试文件 5 用例 + E2E 复测一轮（mnist_kd 全链 + target 裁量豁免）。判断依据：跨 exec/iface 两层
+但改动面窄、有三重零回归论证（唯一 script 节点 / headless 默认不变 / per-run 恒等）、测试钉法机械
+可判。
