@@ -53,7 +53,7 @@ time).
 
 `Task(subagent_type=<host built-in generic type>, prompt="First fully Read {{ subagents_root }}/<name>.md, strictly follow its Method for this task. This task's inputs: <specific inputs per the md's Inputs section>. Return in the format the md specifies. The **first line of the report** must verbatim echo the sentinel field from the frontmatter of the md you Read (format at the top of the md; don't guess, don't infer from this prompt — it must come from the file you Read).")`
 
-**Failure matrix, uniform across all three subagents** — for each dispatch:
+**Failure matrix, uniform across every subagent this node dispatches** — for each dispatch:
 (a) the returned first line is not the sentinel, (b) the promised product is
 missing on disk, or (c) the node-side validation gate fails → re-dispatch
 ONCE with the failure quoted in the prompt. Second failure → `error`

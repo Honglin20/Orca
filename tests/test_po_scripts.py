@@ -3608,7 +3608,8 @@ def test_extract_user_pkg_empty_marker_on_zero_imports(tmp_path: Path):
 _PREREQ_SH = (_REPO / "workflows" / "agents" / "po_propose" / "scripts"
               / "check_prerequisites.sh")
 _PREREQ_FILES = ("analyze.py", "predict_delta.py", "history_lib.py",
-                 "experiment_ledger.py", "emit_result.py", "check_bottleneck.py")
+                 "experiment_ledger.py", "emit_result.py", "check_bottleneck.py",
+                 "mfu_adapter.py", "mfu_benchmark.py")
 
 
 def _run_prereq(ws: Path):
