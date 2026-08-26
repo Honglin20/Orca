@@ -14,7 +14,10 @@ non-identifier --set keys), the check_contracts gate (fairness-invariant
 token/budget enforcement incl. the knob/value symmetric pair),
 run_baseline_chain's step6 stale-anchor proxy-budget re-verification +
 schema-shaped stdout line (verbatim-forwardable), the po_flatten reuse gate's
-fresh_start whole-workspace wipe, and deploy_scripts' orphan-script
+fresh_start whole-workspace wipe + two-state BASELINE.lock failure copy
+(matching lock reaches REUSE — the str.read_text regression; readable
+mismatch = promotion-history guidance pointing at fresh_start; corrupt lock =
+real error), and deploy_scripts' orphan-script
 retirement. v4 additions: gate_node syntax fix, metric_curve pinned-depth
 compare (--at-epoch + at_epoch/baseline_path outputs), stop_at_epoch
 (process-group kill at epoch k, actual-depth re-parse, idempotence, pid
@@ -1775,6 +1778,140 @@ def test_reuse_check_rejects_fresh_foreign_lock(tmp_path: Path):
     assert "owned by another live run" in proc.stderr
     assert json.loads((art / ".run_lock").read_text(encoding="utf-8"))["run_id"] \
         == "other-live-run"   # not taken over, not refreshed
+
+
+def _write_baseline_lock(art: Path) -> None:
+    """A BASELINE.lock whose py_files_sha256 anchors the CURRENT shadow tree
+    (what Step 3 of po_flatten writes on a zero-promotion workspace)."""
+    import hashlib
+    shadow = art / "shadow"
+    py = {str(p.relative_to(shadow)).replace("\\", "/"):
+          hashlib.sha256(p.read_bytes()).hexdigest()
+          for p in sorted(shadow.rglob("*.py"))}
+    (art / "BASELINE.lock").write_text(
+        json.dumps({"model_path": "model.py", "pretrained_ckpt": "",
+                    "ckpt_sha256": "", "py_files_sha256": py}), encoding="utf-8")
+
+
+def _reusable_ws(tmp_path: Path) -> Path:
+    """Minimal workspace whose BASELINE.lock fully matches the shadow tree and
+    whose reuse products are complete — the state a healthy zero-promotion
+    second run arrives at the gate with."""
+    art = tmp_path / "art"
+    art.mkdir()
+    (art / "shadow" / "pkg").mkdir(parents=True)
+    (art / "shadow" / "pkg" / "model.py").write_text("# model v0\n", encoding="utf-8")
+    (art / "project_manifest.md").write_text("# manifest\n", encoding="utf-8")
+    (art / "readiness").mkdir()
+    (art / "readiness" / "readiness.json").write_text(
+        json.dumps({"constructible": True, "exportable": True,
+                    "pretrained_loadable": True, "definition_located": True}),
+        encoding="utf-8")
+    _write_baseline_lock(art)
+    return art
+
+
+def _reuse_env(art: Path) -> dict[str, str]:
+    env = dict(os.environ)
+    env["ORCA_ARTIFACTS_DIR"] = str(art)
+    env["ORCA_RUN_ID"] = "reuse-test-run"
+    return env
+
+
+def test_reuse_check_matching_lock_reaches_reuse(tmp_path: Path):
+    """Regression (E2E round 3, D-B): the lock-verifier heredoc called
+    .read_text() on a plain str (sys.argv[1]), so EVERY fresh_start=0 run on a
+    workspace with an existing BASELINE.lock crashed exit 3 with a bogus
+    'unreadable' verdict — REUSE was unreachable. A fully consistent lock must
+    be read (and matched) all the way to the reuse verdict."""
+    art = _reusable_ws(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        capture_output=True, text=True, timeout=60, env=_reuse_env(art))
+    assert proc.returncode == 0, proc.stderr
+    assert "REUSE" in proc.stdout
+    assert "unreadable" not in proc.stderr
+
+
+def test_reuse_check_mismatch_is_promotion_history_guidance(tmp_path: Path):
+    """The readable-but-mismatched state is DESIGN BEHAVIOR on a workspace
+    with a promotion history: after a round advanced, the shadow tree moved
+    forward while BASELINE.lock still anchors the original baseline. The
+    failure copy must say exactly that (cross-run reuse holds only for
+    zero-promotion workspaces) and point at fresh_start=true — not a cryptic
+    anchor error."""
+    art = _reusable_ws(tmp_path)
+    # the promoted round replaced the shadow model; the lock still anchors v0
+    (art / "shadow" / "pkg" / "model.py").write_text(
+        "# model v1 (promoted)\n", encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        capture_output=True, text=True, timeout=60, env=_reuse_env(art))
+    assert proc.returncode == 3
+    assert "does not match" in proc.stderr
+    assert "promotion history" in proc.stderr
+    assert "zero promotions" in proc.stderr
+    assert "fresh_start=true" in proc.stderr
+    assert "unreadable" not in proc.stderr   # states stay distinguishable
+
+
+def test_reuse_check_corrupt_lock_is_a_real_error(tmp_path: Path):
+    """The complementary state: a lock that EXISTS but cannot be parsed is a
+    REAL error (corruption / unreadable file) — the copy must say so and must
+    NOT dress it up as a reuse mismatch (a fresh_start hint would point away
+    from the actual fault)."""
+    art = _reusable_ws(tmp_path)
+    (art / "BASELINE.lock").write_text("{not json", encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        capture_output=True, text=True, timeout=60, env=_reuse_env(art))
+    assert proc.returncode == 3
+    assert "unreadable/corrupt" in proc.stderr
+    assert "real error" in proc.stderr
+    assert "fresh_start" not in proc.stderr
+    assert "promotion history" not in proc.stderr
+
+
+@pytest.mark.parametrize("corrupt_body", [
+    "[]",                                            # top level not an object
+    '{"model_path": "model.py", "pretrained_ckpt": "", "ckpt_sha256": "",'
+    ' "py_files_sha256": null}',                     # anchor map not a mapping
+])
+def test_reuse_check_structurally_corrupt_lock_is_not_a_mismatch(
+        tmp_path: Path, corrupt_body: str):
+    """Review F1: a PARSABLE but structurally corrupt lock must land in the
+    unreadable/corrupt state too — without the type guard it either crashed
+    the verifier heredoc ('lock verification crashed', exit 2) or, worse,
+    degraded into a char-wise set() comparison and got narrated as promotion
+    history (a type-corrupt lock misclassified as design behavior)."""
+    art = _reusable_ws(tmp_path)
+    (art / "BASELINE.lock").write_text(corrupt_body, encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        capture_output=True, text=True, timeout=60, env=_reuse_env(art))
+    assert proc.returncode == 3
+    assert "unreadable/corrupt" in proc.stderr
+    assert "not a valid anchor object" in proc.stderr
+    assert "fresh_start" not in proc.stderr
+    assert "promotion history" not in proc.stderr
+
+
+def test_reuse_check_missing_anchor_map_is_mismatch_not_corrupt(tmp_path: Path):
+    """A lock whose py_files_sha256 KEY is absent (vs present-but-wrong-type)
+    is deliberately NOT the corrupt state: the comparisons degrade safely and
+    the fresh_start rebuild hint is the right recovery — pin that boundary so
+    a future guard tightening/loosening cannot drift silently."""
+    art = _reusable_ws(tmp_path)
+    (art / "BASELINE.lock").write_text(
+        json.dumps({"model_path": "model.py", "pretrained_ckpt": "",
+                    "ckpt_sha256": ""}), encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        capture_output=True, text=True, timeout=60, env=_reuse_env(art))
+    assert proc.returncode == 3
+    assert "does not match" in proc.stderr
+    assert "fresh_start=true" in proc.stderr
+    assert "unreadable/corrupt" not in proc.stderr
 
 
 # ── deploy_scripts: orphan retirement (defensive, upgrade-safe) ───────────────

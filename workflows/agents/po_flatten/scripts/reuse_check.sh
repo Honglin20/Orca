@@ -10,8 +10,11 @@
 #      rebuilds from scratch.
 #   3. BASELINE.lock matches the current key inputs (structural anchor:
 #      model_path + pretrained_ckpt[optional] + shadow *.py checksums + ckpt
-#      checksum when a ckpt is anchored). Mismatch -> exit 3 (a stale workspace
-#      must NOT be silently reused).
+#      checksum when a ckpt is anchored). Failure -> exit 3, two distinguishable
+#      states: unreadable/corrupt lock = REAL error; readable-but-mismatched =
+#      usually design behavior on a workspace with a promotion history (the
+#      shadow moved forward, the lock still anchors the original baseline —
+#      cross-run reuse holds only for zero-promotion workspaces) -> fresh_start.
 #   4. shadow tree + project_manifest.md + readiness/readiness.json exist and
 #      readiness is all-pass -> REUSE (skip the workflow steps).
 #
@@ -135,9 +138,21 @@ def sha(p: Path) -> str:
     return h.hexdigest()
 
 try:
-    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    lock = json.loads(Path(lock_path).read_text(encoding="utf-8"))
+    # a parsable but structurally corrupt lock (top level not an object /
+    # py_files_sha256 not a mapping) would crash the comparisons below or
+    # misclassify as a mismatch — it is the same real-error state.
+    # key-missing / non-str values deliberately fall through to mismatch:
+    # fresh_start rebuild is the right recovery there too
+    if not isinstance(lock, dict) or not isinstance(lock.get("py_files_sha256", {}), dict):
+        print(json.dumps({"match": False, "unreadable": True,
+                          "why": "BASELINE.lock corrupt: not a valid anchor object"}))
+        sys.exit(0)
 except Exception as exc:
-    print(json.dumps({"match": False, "why": f"BASELINE.lock unreadable: {exc}"}))
+    # discriminator: the lock EXISTS but cannot be read/parsed (real error),
+    # as opposed to a readable lock whose content no longer matches
+    print(json.dumps({"match": False, "unreadable": True,
+                      "why": f"BASELINE.lock unreadable: {exc}"}))
     sys.exit(0)
 
 why = []
@@ -172,9 +187,16 @@ print(json.dumps({"match": not why, "why": why}))
 PY
 )" || { echo "FATAL: lock verification crashed" >&2; exit 2; }
 
+if [[ "$LOCK_VERDICT" == *'"unreadable": true'* ]]; then
+  # state 1 — the lock EXISTS but cannot be read/parsed: a REAL error (corrupt
+  # or unreadable lock), not a reuse decision. Never dress it up as a mismatch
+  # (the fresh_start hint would point away from the actual fault).
+  echo "FATAL: BASELINE.lock exists but is unreadable/corrupt — this is a real error, not a reuse mismatch. $LOCK_VERDICT" >&2
+  exit 3
+fi
 if [[ "$LOCK_VERDICT" != *'"match": true'* ]]; then
   echo "FATAL: BASELINE.lock does not match current key inputs. $LOCK_VERDICT" >&2
-  echo "HINT: the structural anchor (model file / pretrained checkpoint / shadow copy) changed — re-run with fresh_start=true to rebuild the workspace from scratch." >&2
+  echo "HINT: most often this is design behavior on a workspace with a promotion history: after a round advanced, the shadow tree moved forward while BASELINE.lock still anchors the original baseline — cross-run reuse only holds for a workspace with zero promotions (or the model/ckpt/shadow anchor truly changed). Re-run with fresh_start=true to rebuild the workspace from scratch." >&2
   exit 3
 fi
 

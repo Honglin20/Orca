@@ -150,7 +150,7 @@ Exit code mapping (the script logs details to stderr):
   file exists on disk).
 - `1` (`NO_REUSE`) → continue with Step 1.
 - `3` (fail-loud conflict: another live run / structural anchor changed /
-  missing profiler script) → emit `flatten_passed=false` with the stderr message in
+  missing profiler script / unreadable-or-corrupt BASELINE.lock) → emit `flatten_passed=false` with the stderr message in
   `error` (mention `fresh_start` when the anchor changed). Do not attempt repairs.
 - `2` → hard environment error → `flatten_passed=false` + `error`.
 
