@@ -50,11 +50,21 @@ inputs:
     description: "[advanced] 终态报告落档目录（相对 project_root，默认 docs/prof-opt）。po_report 终态把 run 报告与关键记录复制到该目录（与写回同为终态一次性用户侧写入）；空串 = 不落档，只留在工作区"
     required: false
     default: "docs/prof-opt"
-  profile_script_path:
+  npu_chip:
     type: string
-    description: "[advanced] 外部 profiling 函数脚本路径（默认空 = 用内置估算器 placeholder_profiler.py，直接产出四件套契约）。非空时为全链唯一权威（禁回落内置）：onnx 进 → 四件套出（taskgraph / ops.csv / schedule / summary，单位 cycles），不支持算子必须显式报错退出。提供后路径不存在即刻失败"
+    description: "[advanced] profiling 模式开关（默认空 = placeholder 本地估算模式：内置估算器 placeholder_profiler.py 直接产出四件套，无需 NPU 环境）。非空 = mfu 真评测模式：profiling 统一经 mfu-analyzer 子代理执行部署件 scripts/mfu_benchmark.py（真评测），原始产物由确定性 mfu_adapter.py 逐字段转换为四件套——判定数字全部机械提取。合法值仅芯片型号 6613 / 1951；非空且非枚举值启动即失败（入口校验 fail loud），绝不静默回落 placeholder"
     required: false
     default: ""
+  npu_precision:
+    type: string
+    description: "[advanced] mfu 评测数据精度（仅 npu_chip 非空的 mfu 模式消费；placeholder 模式忽略）。枚举 INT8 / INT16 / AMP，默认 INT8；mfu 模式下非法值启动即失败"
+    required: false
+    default: "INT8"
+  npu_core_num:
+    type: integer
+    description: "[advanced] mfu 评测并行核数（仅 npu_chip 非空的 mfu 模式消费；placeholder 模式忽略）。枚举 1 / 2 / 4，默认 1；mfu 模式下非法值启动即失败"
+    required: false
+    default: 1
   max_rounds:
     type: integer
     description: "[advanced] 最大优化轮数（默认 5）。硬帽：达到后永不回边循环，直接进入终态判定"

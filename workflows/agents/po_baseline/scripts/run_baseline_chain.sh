@@ -8,9 +8,23 @@
 #                                 structure anchor for the write-back diff),
 #                                 then render + run the export template ->
 #                                 base/model.onnx
-#   2 profile                    : four profiling artifacts -> base/profile/
-#                                 (custom --profile-script runs detached +
-#                                 polled via --worker-step 2)
+#   2 profile (dual-mode)        : four profiling artifacts -> base/profile/
+#                                 - placeholder mode (--npu-chip empty): the
+#                                   built-in estimator runs inline (unchanged)
+#                                 - mfu mode (--npu-chip 6613/1951): the raw
+#                                   evaluation products under
+#                                   base/profile/<onnx_stem>/ are produced by
+#                                   the mfu-analyzer SUBAGENT (the chain never
+#                                   runs the evaluation itself), then converted
+#                                   by scripts/mfu_adapter.py. States when the
+#                                   four-piece is absent:
+#                                     raw products present -> adapt (this step)
+#                                     report w/o raw       -> FATAL no-fallback
+#                                     neither              -> waiting (rc 3):
+#                                       the chain emits "running" telling the
+#                                       agent to dispatch mfu-analyzer, then
+#                                       re-invoke; the placeholder estimator is
+#                                       NEVER run in mfu mode
 #   3 analyze                    : scripts/analyze.py -> base/bottleneck_report.json
 #   4 full-train launch          : render the train contract template at the
 #                                 FULL effective epochs (--out
@@ -78,8 +92,10 @@
 #
 # Usage:
 #   run_baseline_chain.sh --latency-reduction-min F --seed N
-#                         [--profile-script PATH] [--poll-max-secs S]
-#                         [--worker-step 2 | --finalizer]
+#                         [--npu-chip 6613|1951|"" --npu-precision INT8|INT16|AMP
+#                          --npu-core-num 1|2|4] [--finalizer]
+#   (--npu-chip empty = placeholder estimation mode; non-empty = mfu
+#    real-evaluation mode — precision/core-num are validated only in mfu mode)
 # Environment: ORCA_ARTIFACTS_DIR (required). The user project root comes
 # ONLY from readiness/readiness.json — the engine already exports a
 # same-purpose project-root env var (it resolves to the Orca repository
@@ -90,14 +106,14 @@ set -uo pipefail
 ART="${ORCA_ARTIFACTS_DIR:?FATAL: ORCA_ARTIFACTS_DIR not set (run_baseline_chain.sh)}"
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
-TARGET=""; SEED="0"; PROFILE_SCRIPT=""; POLL_MAX_SECS=480; WORKER_STEP=""; FINALIZER=""
+TARGET=""; SEED="0"; NPU_CHIP=""; NPU_PRECISION="INT8"; NPU_CORE_NUM="1"; FINALIZER=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --latency-reduction-min) TARGET="${2:?}"; shift 2 ;;
     --seed)              SEED="${2:?}"; shift 2 ;;
-    --profile-script)    PROFILE_SCRIPT="${2:?}"; shift 2 ;;
-    --poll-max-secs)     POLL_MAX_SECS="${2:?}"; shift 2 ;;
-    --worker-step)       WORKER_STEP="${2:?}"; shift 2 ;;
+    --npu-chip)          NPU_CHIP="${2:?}"; shift 2 ;;
+    --npu-precision)     NPU_PRECISION="${2:?}"; shift 2 ;;
+    --npu-core-num)      NPU_CORE_NUM="${2:?}"; shift 2 ;;
     --finalizer)         FINALIZER="1"; shift ;;
     *) echo "FATAL: unknown arg $1" >&2; exit 2 ;;
   esac
@@ -105,6 +121,23 @@ done
 [ -n "$TARGET" ] || { echo "FATAL: --latency-reduction-min is required" >&2; exit 2; }
 python3 -c "import sys; r=float('$TARGET'); sys.exit(0 if 0.0 < r < 1.0 else 1)" \
   || { echo "FATAL: --latency-reduction-min must be a number in (0, 1), got '$TARGET'" >&2; exit 2; }
+# profiling mode validation (the entry reuse gate rejects the same inputs, this
+# is the defensive second pin): chip decides the mode, precision/cores are
+# consumed only in mfu mode
+case "$NPU_CHIP" in
+  ""|6613|1951) ;;
+  *) echo "FATAL: --npu-chip must be empty or 6613/1951, got '$NPU_CHIP'" >&2; exit 2 ;;
+esac
+if [ -n "$NPU_CHIP" ]; then
+  case "$NPU_PRECISION" in
+    INT8|INT16|AMP) ;;
+    *) echo "FATAL: --npu-precision must be INT8/INT16/AMP, got '$NPU_PRECISION' (mfu mode)" >&2; exit 2 ;;
+  esac
+  case "$NPU_CORE_NUM" in
+    1|2|4) ;;
+    *) echo "FATAL: --npu-core-num must be 1/2/4, got '$NPU_CORE_NUM' (mfu mode)" >&2; exit 2 ;;
+  esac
+fi
 cd "$ART" || { echo "FATAL: artifacts dir unreachable: $ART" >&2; exit 2; }
 
 STAMPS="$ART/baseline/.stamps"
@@ -233,12 +266,34 @@ step_export() {
   [ -s "$ART/base/model.onnx" ] || { echo "FATAL: export produced no base/model.onnx" >&2; return 1; }
 }
 
-step_profile_inline() {
+step_profile() { # rc 0 = four-piece on disk; rc 3 = mfu waiting state (agent
+  # must dispatch the mfu-analyzer subagent, then re-invoke); rc 1 = failed
+  # (PROFILE_FAIL_DETAIL then carries the specific cause into the emit line)
   [ -s "$ART/base/profile/profile_summary.json" ] && { echo "[chain] step2 profile: product exists, skip" >&2; return 0; }
-  local prof="$PROFILE_SCRIPT"
-  [ -n "$prof" ] || prof="$ART/scripts/placeholder_profiler.py"
-  [ -f "$prof" ] || { echo "FATAL: profiling script not found: $prof (custom profiler is the sole authority — no fallback)" >&2; return 1; }
-  "$PY" "$prof" --onnx "$ART/base/model.onnx" --out-dir "$ART/base/profile" --seed "$SEED" >&2 || return 1
+  if [ -z "$NPU_CHIP" ]; then
+    local prof="$ART/scripts/placeholder_profiler.py"
+    [ -f "$prof" ] || { echo "FATAL: profiling script not found: $prof" >&2; return 1; }
+    "$PY" "$prof" --onnx "$ART/base/model.onnx" --out-dir "$ART/base/profile" --seed "$SEED" >&2 || return 1
+  else
+    local adapter="$ART/scripts/mfu_adapter.py"
+    [ -f "$adapter" ] || { echo "FATAL: $adapter not deployed (entry stage incomplete) — mfu mode cannot adapt the raw evaluation products" >&2; PROFILE_FAIL_DETAIL="mfu_adapter not deployed"; return 1; }
+    if ls "$ART"/base/profile/*/schedule_result.json >/dev/null 2>&1; then
+      local errout
+      errout="$("$PY" "$adapter" --profile-dir "$ART/base/profile" 2>&1)" || {
+        echo "$errout" >&2
+        PROFILE_FAIL_DETAIL="mfu_adapter failed: $(printf '%s' "$errout" | tail -n 1)"
+        return 1
+      }
+      echo "$errout" >&2
+    elif [ -s "$ART/base/profile/mfu_bottleneck_report.md" ]; then
+      echo "FATAL: mfu-analyzer reported but left no usable raw products under base/profile/ (see base/profile/mfu_bottleneck_report.md) — no placeholder fallback in mfu mode" >&2
+      PROFILE_FAIL_DETAIL="mfu-analyzer reported but left no usable raw products under base/profile/ (see base/profile/mfu_bottleneck_report.md) — no placeholder fallback in mfu mode"
+      return 1
+    else
+      echo "[chain] step2 profile: awaiting mfu-analyzer raw products (dispatch mfu-analyzer: onnx=base/model.onnx profile_dir=base/profile report=base/profile/mfu_bottleneck_report.md chip=$NPU_CHIP precision=$NPU_PRECISION core_num=$NPU_CORE_NUM)" >&2
+      return 3
+    fi
+  fi
   for f in taskgraph.json ops.csv schedule.json profile_summary.json; do
     [ -s "$ART/base/profile/$f" ] || { echo "FATAL: profiler did not produce $f" >&2; return 1; }
   done
@@ -539,18 +594,6 @@ if [ -n "$FINALIZER" ]; then
   finalizer_main
 fi
 
-# ── worker dispatch (synchronous single-step execution: profile only) ───────
-if [ -n "$WORKER_STEP" ]; then
-  rc=0
-  case "$WORKER_STEP" in
-    2) step_profile_inline || rc=$? ;;
-    *) echo "FATAL: --worker-step $WORKER_STEP is not a long step" >&2; exit 2 ;;
-  esac
-  echo "$rc" > "$STAMPS/step$WORKER_STEP/rc"
-  echo "[worker] step$WORKER_STEP finished rc=$rc" >&2
-  exit "$rc"
-fi
-
 # ── status view ───────────────────────────────────────────────────────────────
 write_status() { # write_status <state-vector description...>
   {
@@ -569,7 +612,7 @@ write_status() { # write_status <state-vector description...>
     echo "| 7 | emit gate (business_logic.md) | $7 | baseline/business_logic.md |"
     echo ""
     echo "finalizer tail: $(tail -n 2 "$FINALIZER_LOG" 2>/dev/null | tr '\n' ' ')"
-    echo "full_train_budget: epochs=$FULL_EPOCHS seed=$FULL_SEED; probe k=$PROBE_K; ckpt_per_epoch=$CKPT_PER_EPOCH; profile_script: ${PROFILE_SCRIPT:-built-in estimator}"
+    echo "full_train_budget: epochs=$FULL_EPOCHS seed=$FULL_SEED; probe k=$PROBE_K; ckpt_per_epoch=$CKPT_PER_EPOCH; profile mode: ${NPU_CHIP:+mfu (chip=$NPU_CHIP precision=$NPU_PRECISION core_num=$NPU_CORE_NUM)}${NPU_CHIP:-placeholder estimator}"
   } > "$ART/baseline_status.md"
 }
 
@@ -625,53 +668,25 @@ print(json.dumps({
 # ── chain execution ──────────────────────────────────────────────────────────
 S1=pending S2=pending S3=pending S4=pending S5=pending S6=pending S7=pending
 fail_step=0 fail_err=""
+PROFILE_FAIL_DETAIL=""
 
 step_export || { fail_step=1; fail_err="shadow export failed"; }
 [ "$fail_step" -eq 0 ] && { S1=done
-  if [ -s "$ART/base/profile/profile_summary.json" ]; then
-    S2=done; echo "[chain] step2 profile: product exists, skip" >&2
-  elif [ -n "$PROFILE_SCRIPT" ]; then
-    # custom profiler = potentially long -> detached + polled (legacy
-    # mechanism). Re-entry guard: a LIVE worker (pid attribution-checked) is
-    # polled, never re-detached — a second worker would double the profile
-    # run and race the pid/rc files.
-    rc=0
-    if [ -f "$STAMPS/step2/rc" ]; then
-      wrc="$(cat "$STAMPS/step2/rc")"
-      [ "$wrc" -eq 0 ] || { fail_step=2; fail_err="profiling failed (worker logs: baseline/.stamps/step2/*.log)"; }
+  rc2=0; step_profile || rc2=$?
+  if [ "$rc2" -eq 3 ]; then
+    # mfu waiting state: the raw evaluation products are the mfu-analyzer
+    # SUBAGENT's product, not the chain's — hand control back to the agent
+    # (which dispatches the analyzer) and expect a re-invocation
+    S2=running; write_status "$S1" running "$S3" "$S4" "$S5" "$S6" "$S7"
+    emit running "baseline step 2: awaiting mfu-analyzer raw products — dispatch the mfu-analyzer subagent (onnx=base/model.onnx, profile_dir=base/profile, report=base/profile/mfu_bottleneck_report.md), then re-invoke"
+    exit 0
+  elif [ "$rc2" -ne 0 ]; then
+    fail_step=2
+    if [ -n "$PROFILE_FAIL_DETAIL" ]; then
+      fail_err="profiling failed — $PROFILE_FAIL_DETAIL"
     else
-      mkdir -p "$STAMPS/step2"
-      if pid_alive_owned "$STAMPS/step2/pid" "--worker-step"; then
-        elapsed=0
-        while [ "$elapsed" -lt "$POLL_MAX_SECS" ]; do
-          [ -f "$STAMPS/step2/rc" ] && break
-          sleep 10; elapsed=$((elapsed + 10))
-        done
-      else
-        attempts="$(cat "$STAMPS/step2/attempts" 2>/dev/null || echo 0)"
-        attempts=$((attempts + 1)); echo "$attempts" > "$STAMPS/step2/attempts"
-        log="$STAMPS/step2/profile_worker.attempt${attempts}.log"
-        cmd="$(printf '%q ' bash "$SELF" --worker-step 2 --latency-reduction-min "$TARGET" --seed "$SEED")"
-        cmd="$cmd $(printf '%q ' --profile-script "$PROFILE_SCRIPT")"
-        setsid bash -c 'echo $$ > "$1"; shift; exec "$@"' \
-          bash "$STAMPS/step2/pid" $cmd </dev/null >>"$log" 2>&1 &
-        elapsed=0
-        while [ "$elapsed" -lt "$POLL_MAX_SECS" ]; do
-          [ -f "$STAMPS/step2/rc" ] && break
-          sleep 10; elapsed=$((elapsed + 10))
-        done
-      fi
-      if [ -f "$STAMPS/step2/rc" ]; then
-        wrc="$(cat "$STAMPS/step2/rc")"
-        [ "$wrc" -eq 0 ] || { fail_step=2; fail_err="profiling failed (worker logs: baseline/.stamps/step2/*.log)"; }
-      else
-        S2=running; write_status "$S1" running "$S3" "$S4" "$S5" "$S6" "$S7"
-        emit running "baseline step 2: profile worker still running — re-invoke to continue polling"
-        exit 0
-      fi
+      fail_err="profiling failed (root cause in the chain stderr of this invocation)"
     fi
-  else
-    step_profile_inline || { fail_step=2; fail_err="profiling failed (root cause in the chain stderr of this invocation)"; }
   fi; }
 [ "$fail_step" -eq 0 ] && { S2=done; step_analyze || { fail_step=3; fail_err="bottleneck analysis failed"; }; }
 [ "$fail_step" -eq 0 ] && { S3=done; step_train_launch || { fail_step=4; fail_err="full training launch failed"; }; }

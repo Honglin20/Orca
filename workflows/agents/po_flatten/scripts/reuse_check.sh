@@ -18,23 +18,28 @@
 #   4. shadow tree + project_manifest.md + readiness/readiness.json exist and
 #      readiness is all-pass -> REUSE (skip the workflow steps).
 #
-# Also validates: profile_script_path (arg 4), when non-empty, must exist.
+# Also validates the profiling-mode inputs AT STARTUP: npu_chip (arg 4) —
+# empty (placeholder estimation mode) or a legal chip model (6613 / 1951,
+# mfu real-evaluation mode); when the chip selects mfu mode, NPU_PRECISION /
+# NPU_CORE_NUM (env-passed by the caller) must be legal too. An illegal value
+# fails here (exit 3) instead of surfacing mid-run when the profiling step
+# first consumes it.
 #
 # Exit codes: 0 = REUSE (skip steps)
 #             1 = NO_REUSE (run the steps; also returned after fresh-start wipe)
 #             2 = hard environment error
 #             3 = fail-loud conflict (live other run / baseline-lock mismatch /
-#                 missing profile script) -> flatten_passed=false
+#                 illegal profiling-mode inputs) -> flatten_passed=false
 #
-# Usage: reuse_check.sh <model_path> <pretrained_ckpt> <fresh_start:0|1> <profile_script_path>
+# Usage: reuse_check.sh <model_path> <pretrained_ckpt> <fresh_start:0|1> <npu_chip>
 #   (<pretrained_ckpt> may be empty: reference-only, recorded in the lock only
 #    when provided)
 set -euo pipefail
 
-MODEL_PATH="${1:?usage: reuse_check.sh <model_path> <pretrained_ckpt> <fresh_start:0|1> <profile_script_path>}"
+MODEL_PATH="${1:?usage: reuse_check.sh <model_path> <pretrained_ckpt> <fresh_start:0|1> <npu_chip>}"
 CKPT="${2-}"
 FRESH_START="${3:-0}"
-PROFILE_SCRIPT="${4:-}"
+NPU_CHIP="${4:-}"
 
 ART="${ORCA_ARTIFACTS_DIR:?FATAL: ORCA_ARTIFACTS_DIR not set (reuse_check.sh)}"
 RUN_ID="${ORCA_RUN_ID:-unknown-run}"
@@ -86,10 +91,33 @@ PY
 fi
 heartbeat
 
-# ── external profiler path guard (pinned: non-empty = the only authority) ────
-if [ -n "$PROFILE_SCRIPT" ] && [ ! -f "$PROFILE_SCRIPT" ]; then
-  echo "FATAL: profile_script_path does not exist: $PROFILE_SCRIPT (it is the sole profiling authority when provided; no fallback is allowed)" >&2
-  exit 3
+# ── profiling-mode guard (pinned: mode is decided HERE, at startup) ──────────
+# empty chip = placeholder estimation mode; 6613/1951 = mfu real-evaluation
+# mode. Anything else is a typo'd input that would only blow up mid-run at the
+# profiling step — fail it now, loud and early. In mfu mode the two consumed
+# knobs are gated the same way (the chain re-pins them defensively).
+case "$NPU_CHIP" in
+  ""|6613|1951) ;;
+  *)
+    echo "FATAL: npu_chip must be empty (placeholder estimation mode) or one of 6613/1951 (mfu real-evaluation mode), got: '$NPU_CHIP'" >&2
+    exit 3
+    ;;
+esac
+if [ -n "$NPU_CHIP" ]; then
+  case "${NPU_PRECISION:-INT8}" in
+    INT8|INT16|AMP) ;;
+    *)
+      echo "FATAL: npu_precision must be INT8/INT16/AMP (mfu mode), got: '${NPU_PRECISION:-}'" >&2
+      exit 3
+      ;;
+  esac
+  case "${NPU_CORE_NUM:-1}" in
+    1|2|4) ;;
+    *)
+      echo "FATAL: npu_core_num must be 1/2/4 (mfu mode), got: '${NPU_CORE_NUM:-}'" >&2
+      exit 3
+      ;;
+  esac
 fi
 
 # ── 2. fresh start wipe ──────────────────────────────────────────────────────

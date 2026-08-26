@@ -23,7 +23,11 @@ The caller will provide:
    a row, the profiling four-piece set under `base/profile/`
    (`taskgraph.json` / `ops.csv` / `schedule.json` / `profile_summary.json`).
    `baseline/business_logic.md` may also be cited when present (what a
-   bottleneck means for the model's semantics).
+   bottleneck means for the model's semantics). When
+   `base/profile/mfu_bottleneck_report.md` is present (mfu real-evaluation
+   mode), read it as QUALITATIVE context for your analysis text — none of
+   its numbers enter the closed schema's fields (every mechanical value
+   still comes from the mechanical report).
 2. **`<analysis_path>`**: the absolute path of the analysis you must write —
    the caller passes `<output_dir>/base/bottleneck_analysis.json`.
 

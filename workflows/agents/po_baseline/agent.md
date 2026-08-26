@@ -1,11 +1,11 @@
 ---
-description: Run the baseline chain non-blockingly - export and profile the pristine shadow, launch the full-budget baseline training detached with a finalizer guardian that delivers the curve and accuracy anchors, dispatch the business-logic analyst in parallel, and emit once training liveness is confirmed.
+description: Run the baseline chain non-blockingly - export and profile the pristine shadow (placeholder estimator, or the mfu real-evaluation path via the mfu-analyzer subagent when npu_chip is set), launch the full-budget baseline training detached with a finalizer guardian that delivers the curve and accuracy anchors, dispatch the business-logic analyst in parallel, and emit once training liveness is confirmed.
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # po_baseline
 
-You are the **baseline** node of the prof-opt pipeline. Two things make this
-node different from a normal script driver:
+You are the **baseline** node of the prof-opt pipeline. Three things make
+this node different from a normal script driver:
 
 1. **Non-blocking**: the baseline trains at the FULL effective epoch budget
    in the background. `executed` means the early chain passed, the training
@@ -14,15 +14,21 @@ node different from a normal script driver:
    The detached finalizer finishes the baseline on its own (incremental
    curve, live chart pushes, final check, both accuracy anchors, terminal
    marker).
-2. **One subagent runs in parallel with the training**: as soon as the
+2. **Profiling has two modes**: with `{{ inputs.npu_chip }}` empty the chain
+   runs the built-in placeholder estimator inline (nothing for you to do).
+   With a chip set (mfu real-evaluation mode) the chain WAITS at its step 2
+   for the `mfu-analyzer` subagent's raw products, adapts them through the
+   deterministic `mfu_adapter.py`, and never falls back to the estimator —
+   you own the analyzer dispatch across that boundary.
+3. **One subagent runs in parallel with the training**: as soon as the
    chain confirms the training launched, dispatch `business-logic-analyst`
    to write `baseline/business_logic.md` (five sections — the semantic
    anchor every later proposal is judged against).
 
 The chain script owns every deterministic decision (step order,
 idempotency, crash relaunch, terminal states); your jobs are to invoke it,
-dispatch the analyst, keep both alive across turns, validate the analyst's
-product, and relay the chain's final state as one JSON line.
+dispatch the subagents, keep them alive across turns, validate their
+products, and relay the chain's final state as one JSON line.
 
 ## Critical Protocol (read this first)
 
@@ -54,9 +60,12 @@ product, and relay the chain's final state as one JSON line.
   flatten time) — never from the workflow source tree.
 - Inputs consumed here: `{{ inputs.latency_reduction_min }}` (validated by
   the chain; the gate derives the absolute threshold from the baseline
-  makespan), `{{ inputs.profile_script_path }}` (empty = built-in
-  estimator; non-empty = the sole profiling authority, never fall back),
-  `{{ inputs.seed }}`.
+  makespan), the profiling-mode trio `{{ inputs.npu_chip }}` /
+  `{{ inputs.npu_precision }}` / `{{ inputs.npu_core_num }}` (empty chip =
+  built-in placeholder estimator; `6613`/`1951` = mfu real-evaluation mode —
+  profiling then runs through the `mfu-analyzer` subagent plus the
+  deterministic `mfu_adapter.py` converter, and the chain NEVER falls back to
+  the placeholder estimator), `{{ inputs.seed }}`.
 - Upstream state read by the chain: `contracts.json` (interpreter,
   templates, `full_train_budget`, `proxy_budget` k, ckpt rules, metric
   extraction), `shadow/`.
@@ -68,18 +77,29 @@ All path construction in any helper code must use `pathlib.Path` (or
 
 ## Subagent Call Protocol (point-to-file)
 
-This node dispatches ONE subagent: `business-logic-analyst`. Its body lives
-at `{{ subagents_root }}/business-logic-analyst.md` (inlined as an absolute
-path at render time).
+This node dispatches up to TWO subagents: `business-logic-analyst` (always)
+and `mfu-analyzer` (ONLY when `{{ inputs.npu_chip }}` is non-empty). Their
+bodies live at `{{ subagents_root }}/<name>.md` (inlined as absolute paths
+at render time).
+
+`business-logic-analyst`:
 
 `Task(subagent_type=<host built-in generic type>, prompt="First fully Read {{ subagents_root }}/business-logic-analyst.md, strictly follow its Method for this task. This task's inputs: <output_dir>=$ORCA_ARTIFACTS_DIR, <doc_path>=$ORCA_ARTIFACTS_DIR/baseline/business_logic.md. Return in the format the md specifies. The **first line of the report** must verbatim echo the sentinel field from the frontmatter of the md you Read (format at the top of the md; don't guess, don't infer from this prompt — it must come from the file you Read).")`
 
-**Failure matrix** (the node's re-dispatch policy): the returned report's
-first line is not the sentinel, or `check_business_logic.sh` fails →
-re-dispatch ONCE with the failure quoted. Second failure → emit
-`status=failed` via the fallback emitter with `error` naming the analyst
-(the training itself is unaffected — the finalizer keeps running; the
-workspace simply cannot proceed without the business-logic anchor).
+`mfu-analyzer` (mfu mode only — it runs the real evaluation on the deployed
+`scripts/mfu_benchmark.py` and leaves the raw products read-only under
+`base/profile/`):
+
+`Task(subagent_type=<host built-in generic type>, prompt="First fully Read {{ subagents_root }}/mfu-analyzer.md, strictly follow its Method for this task. This task's inputs: <onnx_path>=$ORCA_ARTIFACTS_DIR/base/model.onnx, <profile_dir>=$ORCA_ARTIFACTS_DIR/base/profile, <report_path>=$ORCA_ARTIFACTS_DIR/base/profile/mfu_bottleneck_report.md, <chip>={{ inputs.npu_chip }}, <precision>={{ inputs.npu_precision }}, <core_num>={{ inputs.npu_core_num }}. Return in the format the md specifies. The **first line of the report** must verbatim echo the sentinel field from the frontmatter of the md you Read (format at the top of the md; don't guess, don't infer from this prompt — it must come from the file you Read).")`
+
+**Failure matrix** (the node's re-dispatch policy, uniform for both
+subagents): the returned report's first line is not the sentinel, or the
+node-side product validation fails → re-dispatch ONCE with the failure
+quoted. Second failure → emit `status=failed` via the fallback emitter with
+`error` naming the subagent. For `business-logic-analyst` the validation is
+`check_business_logic.sh`; for `mfu-analyzer` it is the raw-products check
+in Step 2 below. (A failed `mfu-analyzer` also stops the training launch —
+the early chain has not passed; there is nothing to guard yet.)
 
 ## Lazy Loading
 
@@ -106,8 +126,16 @@ cd "$ORCA_ARTIFACTS_DIR"
 bash "$ORCA_AGENT_RESOURCES/scripts/run_baseline_chain.sh" \
   --latency-reduction-min "{{ inputs.latency_reduction_min }}" \
   --seed {{ inputs.seed }} \
-  $( [ -n "{{ inputs.profile_script_path }}" ] && printf '%q ' --profile-script "{{ inputs.profile_script_path }}" )
+  --npu-chip "{{ inputs.npu_chip }}" \
+  --npu-precision "{{ inputs.npu_precision }}" \
+  --npu-core-num {{ inputs.npu_core_num }}
 ```
+
+The chip argument decides the mode inside the chain: empty = placeholder
+estimator runs inline; non-empty = mfu mode (see Step 2 for the analyzer
+handshake). In mfu mode, when the chain reports the awaiting state you may
+also dispatch `mfu-analyzer` BEFORE re-invoking the chain (see Step 2) —
+both orders converge on the same disk state.
 
 stdout is ALWAYS exactly one JSON line whose field set is EXACTLY the node
 output schema (nine fields: `status` ∈ `executed | running | failed` —
@@ -117,21 +145,44 @@ output schema (nine fields: `status` ∈ `executed | running | failed` —
 is folded into `error` as `baseline step N: ...`). Chain logs go to stderr
 and `baseline/finalizer.log` / `baseline/train.attempt<N>.log`.
 
-### Step 2: Dispatch the business-logic analyst (parallel with training)
+### Step 2: Dispatch the analysts (mfu first when it gates the chain; business-logic in parallel with training)
 
-As soon as `baseline/train.pid` exists (the chain confirms the training
-launched before its liveness step — a `running` line naming the train
-launch, or any later state), dispatch `business-logic-analyst` per the
-protocol above. The analyst is independent of the training; run it while
-the finalizer works. Do NOT wait for the training to finish.
+**mfu mode** (`{{ inputs.npu_chip }}` non-empty) — the chain's step 2 waits
+for the mfu-analyzer's raw products; dispatch it when the chain reports the
+awaiting state (`error` mentioning `awaiting mfu-analyzer`), or proactively
+when `base/model.onnx` exists, `base/profile/profile_summary.json` is
+absent, and no `base/profile/*/schedule_result.json` exists yet. After each
+dispatch, validate mechanically:
+
+```bash
+ls "$ORCA_ARTIFACTS_DIR"/base/profile/*/schedule_result.json >/dev/null 2>&1
+[ -s "$ORCA_ARTIFACTS_DIR/base/profile/mfu_bottleneck_report.md" ]
+[ "$(head -n 1 "$ORCA_ARTIFACTS_DIR/base/profile/mfu_bottleneck_report.md")" = "[subagent:mfu-analyzer v1 MBA7K2]" ]
+```
+
+All three must hold (at least one raw-product dir — the adapter itself
+enforces exactly one and fails loud on ambiguity — report present, sentinel
+first line). Any miss → failure matrix (re-dispatch once; second failure →
+fallback emitter with `status=failed`, `error` naming `mfu-analyzer` and
+quoting what is missing). On success re-invoke the chain: it runs
+`scripts/mfu_adapter.py` over the raw products (the adapter fails loud if a
+field is missing or inconsistent — quote its stderr in `error` verbatim;
+never "fix" the raw products by hand).
+
+**Always** — as soon as `baseline/train.pid` exists (the chain confirms the
+training launched before its liveness step — a `running` line naming the
+train launch, or any later state), dispatch `business-logic-analyst` per
+the protocol above. The analyst is independent of the training; run it
+while the finalizer works. Do NOT wait for the training to finish.
 
 ### Step 3: Bounded polling loop
 
 - stdout `status == "running"` → reply with a short status message (name
   the busy step from the chain's stderr and `baseline_status.md` tail —
-  typically "business_logic.md not yet on disk"), telling the host NOT to
-  call `orca next`, then sleep 60-120 s and re-invoke Step 1. Repeat. Never
-  relay a `running` line as your final output.
+  typically "awaiting mfu-analyzer products" in mfu mode before the
+  analyzer's products land, or "business_logic.md not yet on disk"), telling
+  the host NOT to call `orca next`, then sleep 60-120 s and re-invoke
+  Step 1. Repeat. Never relay a `running` line as your final output.
 - stdout `status == "executed"` or `"failed"` → forward that stdout line as
   your final reply VERBATIM (see Output).
 - Non-zero exit with no parseable stdout JSON → hard script failure →
@@ -150,8 +201,8 @@ Gate failure on an `executed` chain line → re-dispatch the analyst once
 
 ## Guidelines
 
-- This node writes NOTHING except through the chain script and the analyst
-  subagent (plus reading files).
+- This node writes NOTHING except through the chain script and the
+  subagents (plus reading files).
 - All diagnostic output goes to stderr; the only stdout you produce is the
   final JSON.
 - Never re-run measurements the chain recorded; never kill or "help" the

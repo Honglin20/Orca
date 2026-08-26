@@ -45,7 +45,9 @@ paths.
 
 This node dispatches THREE subagents, in order: `bottleneck-analyst` (Step
 2), `structure-proposer` (Step 3), `variant-implementer` (Step 4, once per
-proposal, plus once per repair pass). Bodies live at
+proposal, plus once per repair pass) — plus `mfu-analyzer` (Step 5, once
+per profiled variant, ONLY when `{{ inputs.npu_chip }}` is non-empty).
+Bodies live at
 `{{ subagents_root }}/<name>.md` (inlined as an absolute path at render
 time).
 
@@ -204,24 +206,62 @@ infrastructure (scripts/workspace) or the subagent failure matrix.
 
 ### Step 5: Batch latency recheck (+ repair loop)
 
-**True-profiler guard**: when `{{ inputs.profile_script_path }}` is
-non-empty the recheck measures REAL latency — GPU contention with the
-still-running baseline training would corrupt it. First wait for the
+**mfu guard (real measurements)**: when `{{ inputs.npu_chip }}` is non-empty
+the recheck consumes REAL evaluation numbers — contention with the
+still-running baseline training would corrupt them. First wait for the
 baseline worker to exit: poll `baseline/train_final.json` (terminal) or
 `baseline/finalizer.pid` (dead) — bounded-wait with a status message per
-turn while it lives; only then run the recheck. Empty input (placeholder
+turn while it lives; only then profile/recheck. Empty chip (placeholder
 estimator, CPU-bound) → no wait.
+
+**Per-variant profiling, dual mode** — for every variant with a `DONE`
+marker and no `verdict.json`:
+
+- **placeholder mode** (chip empty): nothing to pre-do — the recheck
+  profiles inline with the deployed estimator.
+- **mfu mode** (chip non-empty): dispatch `mfu-analyzer` per variant with
+  inputs `<onnx_path>=$ORCA_ARTIFACTS_DIR/variants/<VID>/onnx/model.onnx`,
+  `<profile_dir>=$ORCA_ARTIFACTS_DIR/variants/<VID>/profile`,
+  `<report_path>=$ORCA_ARTIFACTS_DIR/variants/<VID>/profile/mfu_bottleneck_report.md`,
+  `<chip>={{ inputs.npu_chip }}`, `<precision>={{ inputs.npu_precision }}`,
+  `<core_num>={{ inputs.npu_core_num }}`. On return validate mechanically
+  (at least one raw-product dir — the adapter itself enforces exactly one
+  and fails loud on ambiguity — report present, sentinel first line):
+
+  ```bash
+  ls "$ORCA_ARTIFACTS_DIR"/variants/<VID>/profile/*/schedule_result.json >/dev/null 2>&1
+  [ -s "$ORCA_ARTIFACTS_DIR/variants/<VID>/profile/mfu_bottleneck_report.md" ]
+  [ "$(head -n 1 "$ORCA_ARTIFACTS_DIR/variants/<VID>/profile/mfu_bottleneck_report.md")" = "[subagent:mfu-analyzer v1 MBA7K2]" ]
+  ```
+
+  then convert the raw products with the deterministic adapter (it fails
+  loud on any missing/inconsistent field — quote its stderr in `error`
+  verbatim; never hand-edit raw products):
+
+  ```bash
+  python3 "$ORCA_ARTIFACTS_DIR/scripts/mfu_adapter.py" \
+    --profile-dir "$ORCA_ARTIFACTS_DIR/variants/<VID>/profile"
+  ```
+
+  The analyzer's failure matrix follows the uniform one: missing
+  products/sentinel → re-dispatch ONCE with the failure quoted; second
+  failure → `error` names `mfu-analyzer` for that vid; the node emits
+  `failed`. (An evaluation that failed on the service side still produces a
+  report — that state fails the product check exactly the same way.)
 
 Run the recheck (thresholds EXPLICIT on the call line — the pinned gate
 math: improvement ≥ max(100 cycles, 1% × base) AND actual/predicted ≥ 0.5).
-The profiler argument is conditional: pass the user's real profiler only
-when the input is non-empty — with the empty input the script's own default
-(the deployed placeholder estimator) applies:
+Placeholder mode runs the inline profiler (the script's own default);
+mfu mode passes `--pre-profiled` (the four-piece produced above) and inline
+profiling is disabled inside the script:
 
 ```bash
+# placeholder mode
 bash "$ORCA_AGENT_RESOURCES/scripts/run_latency_recheck.sh" \
-  $( [ -n "{{ inputs.profile_script_path }}" ] && printf '%q ' --profiler "{{ inputs.profile_script_path }}" ) \
   --min-improvement 100 --min-pct 1 --min-ratio 0.5
+# mfu mode
+bash "$ORCA_AGENT_RESOURCES/scripts/run_latency_recheck.sh" \
+  --pre-profiled --min-improvement 100 --min-pct 1 --min-ratio 0.5
 ```
 
 Its stdout is an INFO line (not the node output): `latency_pass_count` and
@@ -232,6 +272,11 @@ variant whose verdict is `structural_mismatch` or `latency_fail` →
 1. **delete its verdict first** (verdict.json presence IS the recheck's
    skip key — a fresh recheck requires a fresh verdict):
    `rm "$ORCA_ARTIFACTS_DIR/variants/<VID>/verdict.json"`;
+   in mfu mode ALSO wipe this vid's stale profile evidence so the next pass
+   re-measures from scratch (the analyzer reuses an existing complete
+   result otherwise): delete `variants/<VID>/profile/` entirely, then
+   after the repair dispatch `mfu-analyzer` again and re-run the adapter
+   exactly as above;
 2. re-dispatch `variant-implementer` with
    `<repair_directive>=structural:<file-layer finding>` or
    `latency:<verdict summary>`;

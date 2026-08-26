@@ -93,8 +93,9 @@ output `error` field):
 - `{{ inputs.project_root }}` — absolute path, must exist and be readable.
 - `{{ inputs.model_path }}` — model definition file (relative to project root or
   absolute); must exist.
-- `{{ inputs.fresh_start }}` (true/false), `{{ inputs.profile_script_path }}`
-  (empty = built-in estimator), `{{ inputs.seed }}`.
+- `{{ inputs.fresh_start }}` (true/false), `{{ inputs.npu_chip }}`
+  (empty = placeholder estimation mode; `6613`/`1951` = mfu real-evaluation
+  mode; anything else fails Step 0), `{{ inputs.seed }}`.
 - No pretrained-checkpoint input exists: training in this pipeline
   always starts from a fixed-seed random initialization; every checkpoint
   argument below is the empty string.
@@ -132,9 +133,10 @@ ran" — the Step 0 gate decides what to skip).
 
 ```bash
 cd "$ORCA_ARTIFACTS_DIR" || { mkdir -p "$ORCA_ARTIFACTS_DIR" && cd "$ORCA_ARTIFACTS_DIR"; }
+NPU_PRECISION="{{ inputs.npu_precision }}" NPU_CORE_NUM="{{ inputs.npu_core_num }}" \
 bash "$ORCA_AGENT_RESOURCES/scripts/reuse_check.sh" \
   "{{ inputs.model_path }}" "" \
-  "{{ '1' if inputs.fresh_start else '0' }}" "{{ inputs.profile_script_path }}"
+  "{{ '1' if inputs.fresh_start else '0' }}" "{{ inputs.npu_chip }}"
 ```
 
 Exit code mapping (the script logs details to stderr):
@@ -150,7 +152,8 @@ Exit code mapping (the script logs details to stderr):
   file exists on disk).
 - `1` (`NO_REUSE`) → continue with Step 1.
 - `3` (fail-loud conflict: another live run / structural anchor changed /
-  missing profiler script / unreadable-or-corrupt BASELINE.lock) → emit `flatten_passed=false` with the stderr message in
+  illegal profiling-mode inputs (npu_chip / npu_precision / npu_core_num) /
+  unreadable-or-corrupt BASELINE.lock) → emit `flatten_passed=false` with the stderr message in
   `error` (mention `fresh_start` when the anchor changed). Do not attempt repairs.
 - `2` → hard environment error → `flatten_passed=false` + `error`.
 

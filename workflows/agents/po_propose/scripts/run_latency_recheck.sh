@@ -6,7 +6,16 @@
 # verdict.json:
 #   1. two-layer declaration check (file / graph) against the CURRENT base
 #      (base shadow, base onnx);
-#   2. re-profile the variant onnx with the pinned profiler;
+#   2. profile the variant onnx — TWO mutually exclusive modes:
+#        default          : re-profile inline with the pinned profiler
+#                           (the deployed placeholder estimator unless
+#                           --profiler says otherwise)
+#        --pre-profiled   : trust the four-piece ALREADY under
+#                           variants/<vid>/profile/ (mfu mode: the node
+#                           dispatched mfu-analyzer + ran mfu_adapter.py per
+#                           variant before this call). Inline profiling is
+#                           DISABLED; a variant without a four-piece is a
+#                           hard error, never an inline re-profile
 #   3. latency gate: improvement >= max(min_improvement_cycles,
 #      min_improvement_pct% x base) AND actual/predicted improvement
 #      ratio >= min_pred_actual_ratio.
@@ -30,22 +39,29 @@ set -euo pipefail
 
 ART="${ORCA_ARTIFACTS_DIR:?FATAL: ORCA_ARTIFACTS_DIR not set (run_latency_recheck.sh)}"
 SCRIPTS="$ART/scripts"
-# profiler default lives HERE (an empty --profiler-style omission must never
-# be a hard error): the deployed placeholder estimator is the default the
-# workflow's empty profile_script_path input means
+# profiler default lives HERE (an omitted --profiler must never be a hard
+# error): the deployed placeholder estimator is the default the workflow's
+# empty npu_chip (placeholder estimation mode) means
 PROFILER="$SCRIPTS/placeholder_profiler.py"
+PROFILER_SET=0
+PRE_PROFILED=0
 MIN_IMP="100"
 MIN_PCT="1"
 MIN_RATIO="0.5"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --profiler)        PROFILER="${2:?--profiler needs a value}"; shift 2 ;;
+    --profiler)        PROFILER="${2:?--profiler needs a value}"; PROFILER_SET=1; shift 2 ;;
+    --pre-profiled)    PRE_PROFILED=1; shift ;;
     --min-improvement) MIN_IMP="${2:?--min-improvement needs a value}"; shift 2 ;;
     --min-pct)         MIN_PCT="${2:?--min-pct needs a value}"; shift 2 ;;
     --min-ratio)       MIN_RATIO="${2:?--min-ratio needs a value}"; shift 2 ;;
     *) echo "FATAL: unknown arg $1" >&2; exit 2 ;;
   esac
 done
+if [ "$PRE_PROFILED" -eq 1 ] && [ "$PROFILER_SET" -eq 1 ]; then
+  echo "FATAL: --pre-profiled and --profiler are mutually exclusive (pre-profiled mode reads the variant's existing four-piece; inline profiling is disabled)" >&2
+  exit 2
+fi
 
 # ── pinned interpreter (from contracts.json) ─────────────────────────────────
 # diff_check's graph layer needs onnx — only the interpreter pinned in
@@ -68,8 +84,12 @@ command -v "$PY" >/dev/null 2>&1 || [ -x "$PY" ] || {
 for f in diff_check.py history_lib.py emit_result.py; do
   [ -f "$SCRIPTS/$f" ] || { echo "FATAL: $SCRIPTS/$f not deployed — entry stage incomplete" >&2; exit 2; }
 done
-[ -n "$PROFILER" ] && [ -f "$PROFILER" ] || {
-  echo "FATAL: profiler script not found: '$PROFILER'" >&2; exit 2; }
+# an explicitly empty --profiler value means "the default estimator" (never a
+# hard error); in pre-profiled mode no profiler runs at all, so its presence
+# is not required either
+[ -n "$PROFILER" ] || PROFILER="$SCRIPTS/placeholder_profiler.py"
+if [ "$PRE_PROFILED" -eq 0 ] && [ ! -f "$PROFILER" ]; then
+  echo "FATAL: profiler script not found: '$PROFILER'" >&2; exit 2; fi
 for req in "$ART/base/profile/profile_summary.json" "$ART/base/model.onnx" "$ART/shadow" "$ART/rounds"; do
   [ -e "$req" ] || { echo "FATAL: base reference missing: $req (baseline stage incomplete)" >&2; exit 2; }
 done
@@ -215,13 +235,24 @@ PYEOF
     continue
   fi
 
-  # ---- re-profile ----
-  prof_rc=0
-  "$PY" "$PROFILER" --onnx "$vonnx" --out-dir "$vdir/profile" \
-      > "$vdir/profile.stdout.json" 2> "$vdir/profile.stderr.log" || prof_rc=$?
-  if [ "$prof_rc" -ne 0 ]; then
-    if grep -q '^unsupported:' "$vdir/profile.stderr.log" 2>/dev/null; then
-      verdict="$("$PY" - "$vid" "$ROUND" "$vdir/profile.stderr.log" "$predicted" <<'PYEOF'
+  # ---- profile: inline (placeholder/custom) or the pre-profiled four-piece ----
+  var_ms=""
+  if [ "$PRE_PROFILED" -eq 1 ]; then
+    # mfu mode: the four-piece was produced per-variant by the node
+    # (mfu-analyzer subagent + mfu_adapter.py) BEFORE this call — never
+    # re-profile inline here
+    if [ ! -s "$vdir/profile/profile_summary.json" ]; then
+      echo "FATAL: pre-profiled mode: $vid has no four-piece under variants/$vid/profile/ — profile it first (dispatch mfu-analyzer + run scripts/mfu_adapter.py --profile-dir variants/$vid/profile), inline profiling is disabled in this mode" >&2
+      exit 2
+    fi
+    var_ms="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["makespan_cycles"])' "$vdir/profile/profile_summary.json")"
+  else
+    prof_rc=0
+    "$PY" "$PROFILER" --onnx "$vonnx" --out-dir "$vdir/profile" \
+        > "$vdir/profile.stdout.json" 2> "$vdir/profile.stderr.log" || prof_rc=$?
+    if [ "$prof_rc" -ne 0 ]; then
+      if grep -q '^unsupported:' "$vdir/profile.stderr.log" 2>/dev/null; then
+        verdict="$("$PY" - "$vid" "$ROUND" "$vdir/profile.stderr.log" "$predicted" <<'PYEOF'
 import json, sys
 vid, rnd, predicted = sys.argv[1], int(sys.argv[2]), int(sys.argv[4])
 ops = [l.split(":", 1)[1].strip() for l in open(sys.argv[3], encoding="utf-8")
@@ -234,15 +265,16 @@ print(json.dumps({"vid": vid, "round": rnd, "structural_check": "pass",
                   "outcome": "unsupported_op"}))
 PYEOF
 )"
-      write_verdict "$vid" "$verdict"
-      NEW_COUNT=$((NEW_COUNT + 1)); record_outcome_count unsupported_op
-      echo "verdict $vid: unsupported_op" >&2
-      continue
+        write_verdict "$vid" "$verdict"
+        NEW_COUNT=$((NEW_COUNT + 1)); record_outcome_count unsupported_op
+        echo "verdict $vid: unsupported_op" >&2
+        continue
+      fi
+      echo "FATAL: profiler exited $prof_rc for $vid without an unsupported-op diagnosis" >&2
+      exit 2
     fi
-    echo "FATAL: profiler exited $prof_rc for $vid without an unsupported-op diagnosis" >&2
-    exit 2
+    var_ms="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["makespan_cycles"])' "$vdir/profile/profile_summary.json")"
   fi
-  var_ms="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["makespan_cycles"])' "$vdir/profile/profile_summary.json")"
 
   # ---- latency gate ----
   gate_rc=0

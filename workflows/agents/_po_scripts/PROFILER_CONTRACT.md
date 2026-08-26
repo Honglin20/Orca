@@ -1,10 +1,11 @@
 # Profiler Contract (v1)
 
 External contract for the profile function. `placeholder_profiler.py` is the
-reference implementation; a real profiler replaces it via the workflow input
-`profile_script_path` and MUST satisfy this document exactly. Field sets are
-closed: consumers validate and fail loud on unknown keys, so do not add keys
-without versioning `schema_version`.
+reference implementation; in mfu real-evaluation mode the deterministic
+`mfu_adapter.py` converter produces these artifacts from the raw
+`mfu_benchmark.py` products and MUST satisfy this document exactly. Field
+sets are closed: consumers validate and fail loud on unknown keys, so do not
+add keys without versioning `schema_version`.
 
 ## CLI
 
