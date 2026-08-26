@@ -72,4 +72,70 @@
 
 **FINDING-1 闭环确认：已修复。未解决项：无。**
 
+前轮判定（被 §五 D-V4-20 复验取代）：VERDICT: CLEAN
+
+## 五、D-V4-20 复验（2026-08-26，code `6da08d7` + spec 回卷 `de2a723`，range `3d57c24..de2a723`）
+
+**范围**：`git diff 3d57c24..de2a723 -- workflows/agents/po_propose/`（agent.md 5 hunks + run_latency_recheck.sh 5 hunks）逐 hunk 审；同 range 的 spec/草稿/yaml 对照（SPEC §2 inputs 14 个、§3 propose dispatch 清单、§4 po_propose 行 D-V4-20 增量、§5 mfu-analyzer 行、§6 词表更新）。当前文件 317 行。
+
+### 5.1 逐 hunk 受众翻转表
+
+| hunk | 位置 | 内容 | 裁决 |
+|---|---|---|---|
+| 1 | agent.md:46-49 | Subagent Protocol 增 mfu-analyzer 条目（Step 5、per profiled variant、ONLY when `{{ inputs.npu_chip }}` non-empty） | CLEAN。条件显式、路径同 `{{ subagents_root }}` 机制；但暴露 F-D20-1（L56 计数残留） |
+| 2 | agent.md:209-215 | 守卫改 **mfu guard**：条件源 `npu_chip` 非空；poll train_final.json / finalizer.pid；空 chip 不等 | CLEAN。操作性 why（REAL numbers 被竞态污染）保留；"only then profile/recheck" 覆盖双模；无 profile_script_path 残留 |
+| 3 | agent.md:217-250 | 逐 DONE 变体双模 profiling：placeholder 免前置；mfu = dispatch mfu-analyzer（六输入）→ 3 条单行机械校验 → adapter 转换 → 失败矩阵重述 | CLEAN。校验块为**三条独立单行命令**（ls 探测 / `[ -s ]` / 首行哨兵比对），无循环/分支/exit 控制流——契约 §4 单行 operational 允许类，非 FINDING-1 同类；哨兵字面量与 mfu-analyzer.md L7/L135 **逐字一致**；六输入名与 mfu-analyzer.md Inputs 表（L24-29）逐一对应；"never hand-edit raw products" = 原始产物只读 ✅；"evaluation that failed on the service side still produces a report" 是 H5 的**行为式描述**（未引内部规则编号——正确处理） |
+| 4 | agent.md:252-265 | recheck 双调用形态：placeholder 裸调用 / mfu `--pre-profiled`，阈值实参均显式 | CLEAN。旧的条件参数组装 `$( [ -n ] && printf ... --profiler ... )` 随 profile_script_path 退役**整体删除**——比旧版更净；两模式各一条单命令 |
+| 5 | agent.md:270-279 | 修复环增 mfu 分支：rm verdict + **整删 profile/** → 修复后重派 analyzer + 重跑 adapter | CLEAN。wipe 的 why（analyzer 复用既有完整结果，与 mfu-analyzer.md L72 自述一致）+ 顺序 wipe→implementer→analyzer→adapter→recheck 无歧义；修复配额 ≤2 不变、analyzer 重派受统一失败矩阵约束 |
+| 6 | run_latency_recheck.sh 全部 hunks（代码资产，按更严 prose 标准顺检） | 双模注释块 / `--pre-profiled` 解析 + 互斥 fail loud / pre-profiled 缺四件套 hard error（文案指明先 dispatch analyzer + adapter）/ 显式空 `--profiler` 回落默认 / 分支重排 | CLEAN。注释全 operational（谁产四件套、两模式语义、为何互斥）；旧 "profile_script_path input" 注释措辞已随改 "empty npu_chip"；无任何残留词 |
+
+### 5.2 SPEC §4 po_propose 行 D-V4-20 增量一致性核对
+
+| # | 要求（SPEC §4 行 + 草稿 D-V4-20） | agent.md 落点 | 结论 |
+|---|---|---|---|
+| 1 | GPU 守卫条件源 profile_script_path → `npu_chip` 非空（placeholder 空不等） | L209-215 | ✅ |
+| 2 | mfu 模式 = 逐 DONE 变体 dispatch mfu-analyzer（variants/<vid>/onnx + profile/ + 报告路径 + 三参） | L217-229（`<onnx_path>`/`<profile_dir>`/`<report_path>`/`<chip>`/`<precision>`/`<core_num>`，与 mfu-analyzer.md Inputs 逐字对应） | ✅ |
+| 3 | `mfu_adapter.py` 产该 vid 四件套 | L241-244（部署件路径 `$ORCA_ARTIFACTS_DIR/scripts/mfu_adapter.py`；脚本实在 `_po_scripts/`，stderr 原文进 error） | ✅（引 F-D20-2 守卫未增补） |
+| 4 | recheck 对该 vid 跳过内联 profile 只做门判定；`--pre-profiled` 与 `--profiler` 互斥 | L254-265 + 脚本互斥检查（同 commit 落地） | ✅ |
+| 5 | 打回修复重测 = 重派 mfu-analyzer + 删旧四件套 | L272-279（rm verdict + 整删 profile/ + 重派 + adapter） | ✅ |
+| 6 | placeholder 模式行为完全不变 | L220-221 + L259-261（无前置、无守卫等待、裸调用） | ✅ |
+| 7 | mfu-analyzer 失败矩阵同款（评测失败按 H5 出报告；产物缺失重派 1 次 → error） | L246-250（矩阵自足重述 + H5 行为式描述） | ✅ |
+| 8 | Subagent Protocol 增 mfu-analyzer[仅 npu_chip 非空] | L46-49 | ✅（措辞残留见 F-D20-1） |
+| 9 | 阈值实参 100/1/0.5 调用行显式（两模式均持） | L260-264 | ✅ |
+| 10 | inputs 14 个（npu 三参 [advanced] 枚举校验） | `{{ inputs.npu_chip/npu_precision/npu_core_num }}` 模板引用；yaml 同 commit 落地（退役 profile_script_path、增三参 + 枚举 fail loud 描述） | ✅ |
+
+盘面核对：`workflows/subagents/prof-opt/mfu-analyzer.md` + `_po_scripts/mfu_adapter.py` 均在 ✅。
+
+### 5.3 词表复扫（SPEC §6 更新后口径）
+
+- 词表变更：**增** `profile_script_path`（退役）、**移** `mfu_adapter`（自 D-V4-20 起为正式交付物）。
+- po_propose 全目录（agent.md + scripts/ + references/）Grep：`profile_script_path` **0 命中**；全词表 + 补充词表（v3/v4/po_implement/po_verify/mnist/cifar/R2-/D-V4/懒补训/epoch-only 等）唯一命中 = `references/structural-levers.md:121` 的 "MobileNetV3"——`v3` 子串**误报**（合法模型名，契约 §4 自注 ResNet-50/ViT-14 同类不伤，且 references 属本轮范围外文件）。**有效命中 = 0** ✅。
+
+### 5.4 Findings（D-V4-20 增量）
+
+**F-D20-1（低 · 增量未波及汇总面）**
+- 位置：`agent.md:56`（"**Failure matrix, uniform across all three subagents**"）；关联 `agent.md:2`（frontmatter description 仅枚举三 subagent，未提条件性 profiling dispatch）。
+- 问题：D-V4-20 新增第四个（条件性）dispatch 目标，失败矩阵标题的 "all three" 计数成陈旧表述。执行无歧义——Step 5 L246 自足重述 "follows the uniform one" 并展开同款矩阵——属措辞级不一致，非语义缺陷。
+- 建议修法（一行级）：L56 改 "uniform across every subagent this node dispatches"；description 酌情补一短语（如 ", profiling each variant through the mfu-analyzer subagent when an NPU chip is configured"）。或 waive。
+
+**F-D20-2（低 · 部署前置守卫未随增补）**
+- 位置：`scripts/check_prerequisites.sh:17-19`（六文件清单未含 mfu_adapter.py / mfu_benchmark.py）；关联 `agent.md:242`（新增节点直调 `$ORCA_ARTIFACTS_DIR/scripts/mfu_adapter.py`）与 mfu-analyzer.md L37（依赖部署件 mfu_benchmark.py）。
+- 问题：守卫自述目的为"进入即验部署完整、绝不对半部署工作区作业"，但 mfu 模式新增的两个部署件依赖未入清单——缺件要到 Step 5 调用点才 fail loud。正确性无损（调用点同样 fail loud），完备性缺口。
+- 建议修法：清单增补两文件（无条件列入最简；或按 npu_chip 非空条件列）。
+
+两项均低严重度、非阻塞；不影响 D-V4-20 语义正确性与 fail-loud 底线。前四轮全部既有结论（§一-§四）在本次增量后继续有效——D-V4-20 未触碰 Step 0-4/6 及 Validation 的任何已审语义。
+
+上轮判定（被 §六 终验取代）：VERDICT: ISSUES (2)
+
+## 六、终验（2026-08-26，commit `fc6bb89`）
+
+`git show fc6bb89` 逐 hunk（3 文件，4+/3-）：
+
+- **F-D20-1 闭环 ✅**：`agent.md:56` 改 "**Failure matrix, uniform across every subagent this node dispatches**"——与建议修法逐字一致，数量词去三化，无新残留。关联点 frontmatter description（L2）按 §5.4 "或 waive" 选项保持不动——description 本就不含计数表述、作为摘要仍准确，非未闭环项。
+- **F-D20-2 闭环 ✅**：`check_prerequisites.sh:16-17` 清单增补 `mfu_adapter.py mfu_benchmark.py`（无条件列入，建议的最简形态）；`bash -n` 通过；两文件均实在 `_po_scripts/`（deploy_scripts.sh glob 全量部署源）——placeholder 模式下不会误报缺件，无新问题。
+- **测试联动 ✅**：`tests/test_po_scripts.py` `_PREREQ_FILES` fixture 同步增补两文件（与脚本清单一致；协调方报告 123 passed + tars validate 通过）。
+- **无越界改动**：commit 仅含上述三处，agent.md 其余 315 行未动——§一~§五 全部既有结论继续有效。
+
+**累计六轮审查（初审 → 24eb711 复验 → D-V4-20 增量复验 → fc6bb89 终验）全部 findings 闭环；未解决项：无。**
+
 VERDICT: CLEAN

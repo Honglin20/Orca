@@ -71,3 +71,22 @@ VERDICT: ISSUES (3)
 - **回归面复查**：更新后 agent.md 残留词表 grep（含增补 `removed` / `when a pretrained`）= **0 命中**；改动为纯删除/换签名，无新残留引入、无契约面变更（v3.5 §3.1 语义不动，标准场景行为不变）；`extract_user_pkg.sh` 其余调用方仅 ns3_flatten / psu_flatten（各自 workflow 独立副本，不在本文件审查范围）。
 
 VERDICT: CLEAN
+
+---
+
+## ⑤ D-V4-20 复验（2026-08-26，增量 `6da08d7`；核验区间 `3d57c24..de2a723`，HEAD = `de2a723`，po_flatten 工作区干净）
+
+**背景**：D-V4-20（profiling 子代理化，用户拍板）——`profile_script_path` input 退役 → `npu_chip`（空 = placeholder 估算模式 / `6613`/`1951` = mfu 真评测模式）+ `npu_precision` / `npu_core_num` 两旋钮；po_flatten 侧改动 = Step 0 第 4 参换轨 + 启动期枚举守卫。逐 hunk 审：
+
+| hunk | 位置 | 内容 | 受众翻转结论 |
+|---|---|---|---|
+| 1 | agent.md:96-98（Required Inputs） | `profile_script_path`（empty = built-in estimator）→ `npu_chip`（empty = placeholder estimation mode；`6613`/`1951` = mfu real-evaluation mode；anything else fails Step 0） | PASS——自包含产品式语义，交叉引用 Step 0 真实成立（exit 3）；与 `workflows/prof-opt.yaml:53-65` input description 及草稿 D-V4-20（`prof-opt-v4-design-draft.md:45/213`）逐项一致（枚举/默认/启动即失败） |
+| 2 | agent.md:136-139（Step 0 调用行） | 前缀 `NPU_PRECISION/NPU_CORE_NUM` env + 第 4 参 `{{ inputs.npu_chip }}` | PASS——可执行；三个 `{{ inputs.npu_* }}` 均为 yaml 真实 input；脚本侧 env 消费带防御默认（INT8/1），调用方显式传值优先 |
+| 3 | agent.md:154-156（exit-3 映射） | "missing profiler script" → "illegal profiling-mode inputs (npu_chip / npu_precision / npu_core_num)" | PASS——与脚本三个 FATAL 分支（chip 枚举 / precision 枚举 / core_num 枚举）逐一对应；退役措辞随机制同步删除，无悬空 |
+| 4-5 | reuse_check.sh（守卫替换） | 旧 profiler 存在性守卫 → profiling-mode 守卫：`case` 枚举 空/6613/1951，chip 非空时连带 INT8/INT16/AMP 与 1/2/4，非法 exit 3 且 stderr 带实际值 | PASS——fail loud、启动期早拒（"fail it now, loud and early" 为运行时行为陈述非事故复盘）；注释为脚本受众非 prompt prose；`tests/test_po_scripts.py:2282-2318` `test_reuse_check_npu_chip_enum_gate` 全分支覆盖（合法三值 / 非法含尾空格 typo `6613·` / mfu 模式 FP4、core 3） |
+
+**增补词表 grep**（原词表 + `profile_script_path`）：agent.md **0 命中**——退役 input 名全文清除（含旧 exit-3 措辞）。残留的 `profiler` 字样仅 L85/L449 的 `PROFILER_CONTRACT.md` 懒加载边界（D-V4-20 下该契约仍存在、仍是下游业务，语义未过期）；`npu` 仅出现在上述三处新内容。（注：grep 调试中 `npu` 子串会误命中 "i**npu**t"，已人工滤除。）
+
+**契约一致性**：D-V4-20 已回卷 `prof-opt-v4-design-draft.md`（:45 决策表 + :213 变更记录）与 `prof-opt-v4-spec.md` §1（mfu_benchmark/mfu_adapter/PROFILER_CONTRACT 条目）；yaml inputs 三增一退役与 agent.md 引用面吻合。无越权字段、无 v4 已删机制措辞回流（`mfu` 相关词为 D-V4-20 重新引入的现行机制名，属 operational，不计残留）。
+
+VERDICT: CLEAN
