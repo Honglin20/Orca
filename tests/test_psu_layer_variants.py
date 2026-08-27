@@ -23,7 +23,7 @@ import torch
 
 REPO = Path(__file__).resolve().parents[1]
 SNAPSHOT = (
-    REPO / "workflows" / "agents" / "psu_expand_supernet" / "assets" / "layer_variants"
+    REPO / "workflows" / "puzzle-supernet" / "agents" / "psu_expand_supernet" / "assets" / "layer_variants"
     / "transformer_layer_variants.py"
 )
 

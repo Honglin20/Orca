@@ -26,7 +26,7 @@ pytest.importorskip("yaml")
 pytest.importorskip("nas_agent")
 
 _REPO = Path(__file__).resolve().parents[1]
-_SCRIPTS_DIR = _REPO / "workflows" / "agents" / "_puzzle_scripts"
+_SCRIPTS_DIR = _REPO / "workflows" / "puzzle" / "agents" / "_puzzle_scripts"
 sys.path.insert(0, str(_SCRIPTS_DIR))
 sys.path.insert(0, str(_REPO / "tests"))
 
@@ -827,7 +827,7 @@ def test_puzzle_yaml_routes_cover_latency_infeasible_branch() -> None:
     """
     from orca.compile.parser import load_workflow
 
-    yaml_path = _REPO / "workflows" / "puzzle.yaml"
+    yaml_path = _REPO / "workflows" / "puzzle" / "workflow.yaml"
     wf = load_workflow(yaml_path)
     pz_baseline = next(n for n in wf.nodes if n.name == "pz_baseline")
     targets = [r.to for r in pz_baseline.routes]

@@ -39,6 +39,11 @@ from orca.schema.workflow import AgentNode, ForeachNode, Workflow
 REPO = Path(__file__).resolve().parents[2]
 WF_DIR = REPO / "workflows"
 AGENTS_DIR = WF_DIR / "agents"
+# TODO(layout, 2026-08-27 批 D 显式冻结): 本契约模块仍按**旧平铺布局**解析
+# （WF_DIR/<wf>.yaml + 全局 agents/ 池）。workflows/ 已迁移 per-wf 自包含目录
+# （<wf>/workflow.yaml + <wf>/agents/），上述路径断链——修复需随真机 E2E 重跑验证
+# （超无人值守单批范围，SPEC 批 D 裁决不修）。详见仓库根 LAYOUT_MIGRATION_REPORT.md
+# 待用户决策区。修复时: WF_DIR/<wf>/workflow.yaml + AGENTS_DIR 按各 wf 目录解析。
 
 
 def _rel(path: Path) -> str:

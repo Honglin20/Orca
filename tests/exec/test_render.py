@@ -247,13 +247,13 @@ def test_render_template_subagents_root_inlined_when_set():
     """
     ctx = RunContext(
         inputs={}, outputs={}, run_id="r1",
-        subagents_root="/abs/path/to/workflows/subagents/nas-supernet",
+        subagents_root="/abs/path/to/workflows/nas-supernet/subagents",
     )
     out = render_template(
         "Read {{ subagents_root }}/supernet-evaluator.md", ctx
     )
     assert out == (
-        "Read /abs/path/to/workflows/subagents/nas-supernet/supernet-evaluator.md"
+        "Read /abs/path/to/workflows/nas-supernet/subagents/supernet-evaluator.md"
     )
 
 

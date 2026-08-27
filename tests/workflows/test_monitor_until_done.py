@@ -14,9 +14,9 @@ from pathlib import Path
 import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
-_TRAIN_SCRIPTS = _REPO / "workflows" / "agents" / "ns_run_train" / "scripts"
-_RETRAIN_SCRIPTS = _REPO / "workflows" / "agents" / "ns_retrain" / "scripts"
-_SEARCH_SCRIPTS = _REPO / "workflows" / "agents" / "ns_run_search" / "scripts"
+_TRAIN_SCRIPTS = _REPO / "workflows" / "nas-supernet" / "agents" / "ns_run_train" / "scripts"
+_RETRAIN_SCRIPTS = _REPO / "workflows" / "nas-supernet" / "agents" / "ns_retrain" / "scripts"
+_SEARCH_SCRIPTS = _REPO / "workflows" / "nas-supernet" / "agents" / "ns_run_search" / "scripts"
 
 
 # ---------------------------------------------------------------------------
@@ -167,30 +167,30 @@ class TestMonitorStructure:
 
 class TestAgentMdStaticGates:
     def test_train_no_cron_in_tools(self):
-        content = (_REPO / "workflows" / "agents" / "ns_run_train" / "agent.md").read_text()
+        content = (_REPO / "workflows" / "nas-supernet" / "agents" / "ns_run_train" / "agent.md").read_text()
         assert "cron" not in content.lower(), \
             "cron (case-insensitive) must be completely removed from ns_run_train agent.md"
 
     def test_retrain_no_cron_in_tools(self):
-        content = (_REPO / "workflows" / "agents" / "ns_retrain" / "agent.md").read_text()
+        content = (_REPO / "workflows" / "nas-supernet" / "agents" / "ns_retrain" / "agent.md").read_text()
         assert "cron" not in content.lower(), \
             "cron (case-insensitive) must be completely removed from ns_retrain agent.md"
 
     def test_yaml_no_cron(self):
         """nas-supernet.yaml should not contain 'cron' (case-insensitive)."""
-        content = (_REPO / "workflows" / "nas-supernet.yaml").read_text()
+        content = (_REPO / "workflows" / "nas-supernet" / "workflow.yaml").read_text()
         assert "cron" not in content.lower(), \
             "nas-supernet.yaml must not reference CRON"
 
     def test_yaml_no_3_attempt(self):
         """nas-supernet.yaml should not contain '3 次' or 'max_retries=3'."""
-        content = (_REPO / "workflows" / "nas-supernet.yaml").read_text()
+        content = (_REPO / "workflows" / "nas-supernet" / "workflow.yaml").read_text()
         assert "3 次" not in content
         assert "max_retries=3" not in content
 
     def test_search_no_3_attempt(self):
         """ns_run_search agent.md should not contain '最多 3 次' or 'N>3 放弃'."""
-        content = (_REPO / "workflows" / "agents" / "ns_run_search" / "agent.md").read_text()
+        content = (_REPO / "workflows" / "nas-supernet" / "agents" / "ns_run_search" / "agent.md").read_text()
         assert "最多 3 次" not in content
         assert "N>3 放弃" not in content
         assert "max_retries=3" not in content
@@ -295,7 +295,7 @@ class TestChartPushStderrVisible:
 
     def test_search_agent_no_stderr_suppression(self):
         """ns_run_search agent.md chart calls should not have '2>&1'."""
-        content = (_REPO / "workflows" / "agents" / "ns_run_search" / "agent.md").read_text()
+        content = (_REPO / "workflows" / "nas-supernet" / "agents" / "ns_run_search" / "agent.md").read_text()
         # Find chart script call lines.
         chart_lines = [l for l in content.split("\n")
                       if ("pareto.py" in l or "search_table.py" in l or "latency_dist.py" in l)
@@ -307,7 +307,7 @@ class TestChartPushStderrVisible:
 
     def test_retrain_agent_no_stderr_suppression(self):
         """ns_retrain agent.md Step 3.5 chart calls should not have '2>&1'."""
-        content = (_REPO / "workflows" / "agents" / "ns_retrain" / "agent.md").read_text()
+        content = (_REPO / "workflows" / "nas-supernet" / "agents" / "ns_retrain" / "agent.md").read_text()
         chart_lines = [l for l in content.split("\n")
                       if ("metrics_bar.py" in l or "compare_table.py" in l)
                       and "python3" in l]

@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-STRUCT_SCRIPTS = REPO / "workflows" / "agents" / "_struct_scripts"
+STRUCT_SCRIPTS = REPO / "workflows" / "agent-struct-exploration" / "agents" / "_struct_scripts"
 
 
 # ───────────────────────── helpers ─────────────────────────
@@ -250,7 +250,7 @@ class TestVizStructP7:
 ])
 def test_cli_flags_exposed(script_rel, args, required_flags):
     """P7：所有脚本 CLI 暴露 --device / --seed（+ export 的 external-data）。"""
-    script_path = REPO / "workflows" / "agents" / script_rel
+    script_path = STRUCT_SCRIPTS.parent / script_rel
     r = subprocess.run(
         ["python3", str(script_path), "--help"],
         capture_output=True, text=True, timeout=10,
@@ -265,7 +265,7 @@ def test_cli_flags_exposed(script_rel, args, required_flags):
 
 def test_struct_workflow_has_six_nodes():
     """P7：struct workflow 11→6 节点（不是 7；plan headline off-by-one）。"""
-    nodes = _yaml_nodes(REPO / "workflows" / "agent-struct-exploration.yaml")
+    nodes = _yaml_nodes(REPO / "workflows" / "agent-struct-exploration" / "workflow.yaml")
     expected = ["setup", "hypothesizer", "engineer", "evaluator", "curator", "finalize"]
     assert nodes == expected, f"struct nodes mismatch: {nodes}"
 
@@ -276,7 +276,7 @@ def test_struct_workflow_has_six_nodes():
 
 def test_struct_setup_node_exposes_path_fields():
     """P9b：新增 struct_scripts_dir（原 input 下沉为 setup output）。"""
-    yaml_text = (REPO / "workflows" / "agent-struct-exploration.yaml").read_text(encoding="utf-8")
+    yaml_text = (REPO / "workflows" / "agent-struct-exploration" / "workflow.yaml").read_text(encoding="utf-8")
     required_fields = [
         "output_dir:", "snapshots_dir:", "worktree_root:",
         "ledger_path:", "champions_path:",
@@ -300,7 +300,7 @@ def test_no_string_concat_output_dir_in_agent_md():
     pattern = re.compile(
         r"\{\{\s*(?!setup\.output\.output_dir)[\w.]+\.output\.output_dir\s*\}\}[a-zA-Z_/.]"
     )
-    agent_dir = REPO / "workflows" / "agents"
+    agent_dir = REPO / "workflows"  # per-wf 布局：全树扫 agent.md
     for agent_md in agent_dir.rglob("agent.md"):
         if "struct-" in str(agent_md):
             text = agent_md.read_text(encoding="utf-8")
@@ -315,7 +315,7 @@ def test_no_string_concat_output_dir_in_agent_md():
 # 未来同类 slim 改动漏改 Jinja 时，本测试当场红（render 期 StrictUndefined 才崩太晚）。
 @pytest.mark.parametrize(
     "wf_path",
-    sorted((REPO / "workflows").glob("*.yaml")),
+    sorted((REPO / "workflows").glob("*/workflow.yaml")),
     ids=lambda p: p.name,
 )
 def test_no_jinja_ref_to_undeclared_input(wf_path):
@@ -334,7 +334,7 @@ def test_no_jinja_ref_to_undeclared_input(wf_path):
     # 关联 agent.md（workflows/agents/<wf-relevant>/*.md）；保守起见扫所有 agent.md
     # 中的「同 workflow input 引用」——按 yaml 的 agent: <name> 字段定位更准但成本高，
     # 此处采用「扫所有 struct/quant/nas agent.md，过滤掉 declared 不在当前 wf 的」。
-    agent_dir = REPO / "workflows" / "agents"
+    agent_dir = REPO / "workflows"  # per-wf 布局：全树扫 agent.md
     for agent_md in agent_dir.rglob("agent.md"):
         text = agent_md.read_text(encoding="utf-8")
         for ref in ref_pattern.findall(text):

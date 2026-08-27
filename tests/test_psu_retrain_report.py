@@ -36,22 +36,23 @@ import sys
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[1]
-_EMIT_REPORT = _REPO / "workflows" / "agents" / "psu_report" / "scripts" / "emit_report.py"
+_EMIT_REPORT = _REPO / "workflows" / "puzzle-supernet" / "agents" / "psu_report" / "scripts" / "emit_report.py"
 _ANCHOR = (
     _REPO
     / "workflows"
+    / "puzzle-supernet"
     / "agents"
     / "psu_run_search"
     / "scripts"
     / "append_anchor_candidates.py"
 )
-_RETRAIN_SCRIPT_AGENT = _REPO / "workflows" / "agents" / "psu_retrain_script"
+_RETRAIN_SCRIPT_AGENT = _REPO / "workflows" / "puzzle-supernet" / "agents" / "psu_retrain_script"
 _CHECK_RETRAIN_SCRIPT = _RETRAIN_SCRIPT_AGENT / "scripts" / "check_retrain_script.sh"
 _TRAIN_WATCHER = (
-    _REPO / "workflows" / "agents" / "psu_run_train" / "scripts" / "progress_watcher.py"
+    _REPO / "workflows" / "puzzle-supernet" / "agents" / "psu_run_train" / "scripts" / "progress_watcher.py"
 )
 _RETRAIN_WATCHER = (
-    _REPO / "workflows" / "agents" / "psu_retrain" / "scripts" / "progress_watcher.py"
+    _REPO / "workflows" / "puzzle-supernet" / "agents" / "psu_retrain" / "scripts" / "progress_watcher.py"
 )
 
 

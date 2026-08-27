@@ -61,10 +61,16 @@ def test_resolve_explicit_env_missing_returns_empty(monkeypatch, tmp_path):
 
 
 def test_resolve_implicit_cwd_knowledge_base(monkeypatch, tmp_path):
-    """无 env/config → 回退 cwd/knowledge_base（仓库根 fallback）。"""
+    """无 env/config → 回退 cwd/knowledge_base（cwd fallback 语义）。
+
+    批 D 后仓库根不再有 knowledge_base/（KB 已入 workflows/agent-struct-exploration/），
+    改在 tmp cwd 合成该形态——测的是 fallback **语义**，与仓库真源布局解耦。
+    """
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "fake_home")  # 屏蔽 ~/.orca
-    # 用真实仓库根（tests/iface/cli/ 下 3 级 → parents[3] = repo root，有 knowledge_base/）
-    monkeypatch.chdir(Path(__file__).resolve().parents[3])
+    kb_dir = tmp_path / "knowledge_base"
+    kb_dir.mkdir()
+    (kb_dir / "index.json").write_text("{}", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
     kb = resolve_kb_dir()
     assert kb.endswith("knowledge_base")
 

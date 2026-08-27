@@ -48,7 +48,7 @@ from pathlib import Path
 import pytest
 
 _REPO = Path(__file__).resolve().parents[1]
-_SCRIPTS = _REPO / "workflows" / "agents" / "_po_scripts"
+_SCRIPTS = _REPO / "workflows" / "prof-opt" / "agents" / "_po_scripts"
 sys.path.insert(0, str(_SCRIPTS))
 
 import history_lib  # noqa: E402
@@ -1220,7 +1220,7 @@ def test_render_run_rejects_non_identifier_set_key(tmp_path: Path):
 
 # ── check_contracts gate (fairness-invariant token/budget enforcement) ───────
 
-_CONTRACTS_SH = _REPO / "workflows" / "agents" / "po_contract" / "scripts" / "check_contracts.sh"
+_CONTRACTS_SH = _REPO / "workflows" / "prof-opt" / "agents" / "po_contract" / "scripts" / "check_contracts.sh"
 
 
 def _contracts_workspace(tmp_path: Path, *, probe_body: str | None = None,
@@ -1498,7 +1498,7 @@ def test_check_contracts_reuse_rejects_pre_v4_contracts(tmp_path: Path):
 
 # ── run_baseline_chain (v4): non-blocking baseline + finalizer guardian ──────
 
-_BASELINE_SH = _REPO / "workflows" / "agents" / "po_baseline" / "scripts" / "run_baseline_chain.sh"
+_BASELINE_SH = _REPO / "workflows" / "prof-opt" / "agents" / "po_baseline" / "scripts" / "run_baseline_chain.sh"
 
 _BL_MD = ("[subagent:business-logic-analyst v1 TEST]\n## 任务语义\nclassify\n"
           "## 输入输出\nx->y\n## 架构动机\nwhy\n"
@@ -1594,7 +1594,7 @@ def _train_final(art: Path) -> dict:
         encoding="utf-8"))
 
 
-# the po_baseline node output schema — DERIVED from workflows/prof-opt.yaml,
+# the po_baseline node output schema — DERIVED from workflows/prof-opt/workflow.yaml,
 # never hand-copied: the chain's stdout line is the agent's final reply
 # VERBATIM, so its field set must be EXACTLY the schema's in BOTH directions
 # (additionalProperties:false rejects extra keys; a schema edit must not
@@ -1602,7 +1602,7 @@ def _train_final(art: Path) -> dict:
 def _po_baseline_schema_fields() -> set[str]:
     import yaml
     wf = yaml.safe_load(
-        (_REPO / "workflows" / "prof-opt.yaml").read_text(encoding="utf-8"))
+        (_REPO / "workflows" / "prof-opt" / "workflow.yaml").read_text(encoding="utf-8"))
     schema = next(n for n in wf["nodes"]
                   if n["name"] == "po_baseline")["output_schema"]
     props = set(schema["properties"])
@@ -1618,7 +1618,7 @@ def test_workflow_inputs_retire_script_path_add_npu_trio():
     them (flat gate / baseline chain / propose recheck)."""
     import yaml
     wf = yaml.safe_load(
-        (_REPO / "workflows" / "prof-opt.yaml").read_text(encoding="utf-8"))
+        (_REPO / "workflows" / "prof-opt" / "workflow.yaml").read_text(encoding="utf-8"))
     inputs = wf["inputs"]
     assert "profile_script_path" not in inputs
     assert len(inputs) == 14
@@ -1632,7 +1632,7 @@ def test_workflow_inputs_retire_script_path_add_npu_trio():
         "po_propose": ("npu_chip", "npu_precision", "npu_core_num"),
     }
     for agent, keys in consumers.items():
-        body = (_REPO / "workflows" / "agents" / agent / "agent.md") \
+        body = (_REPO / "workflows" / "prof-opt" / "agents" / agent / "agent.md") \
             .read_text(encoding="utf-8")
         for key in keys:
             assert f"{{{{ inputs.{key} }}}}" in body, (agent, key)
@@ -2036,7 +2036,7 @@ def test_check_business_logic_gate(tmp_path: Path):
     doc.write_text(_BL_MD, encoding="utf-8")
     env = dict(os.environ)
     env["ORCA_ARTIFACTS_DIR"] = str(art)
-    sh = _REPO / "workflows" / "agents" / "po_baseline" / "scripts" / "check_business_logic.sh"
+    sh = _REPO / "workflows" / "prof-opt" / "agents" / "po_baseline" / "scripts" / "check_business_logic.sh"
 
     def run():
         return subprocess.run(["bash", str(sh)], capture_output=True, text=True,
@@ -2072,7 +2072,7 @@ def test_check_business_logic_gate(tmp_path: Path):
 
 # ── po_flatten reuse gate: fresh_start wipes the whole reusable workspace ─────
 
-_REUSE_SH = _REPO / "workflows" / "agents" / "po_flatten" / "scripts" / "reuse_check.sh"
+_REUSE_SH = _REPO / "workflows" / "prof-opt" / "agents" / "po_flatten" / "scripts" / "reuse_check.sh"
 
 
 def test_reuse_check_fresh_start_wipes_all_but_run_lock(tmp_path: Path):
@@ -2990,7 +2990,7 @@ def test_push_curves_ack_timeout_never_hangs(tmp_path: Path):
 
 # ── run_latency_recheck (D-V4-10): v3.5 batch-verify semantics, zero drift ───
 
-_RECHECK_SH = _REPO / "workflows" / "agents" / "po_propose" / "scripts" / "run_latency_recheck.sh"
+_RECHECK_SH = _REPO / "workflows" / "prof-opt" / "agents" / "po_propose" / "scripts" / "run_latency_recheck.sh"
 
 # CALIBRATED expectations (the v3.5 reference script produced byte-identical
 # values on this exact fixture; regenerate alongside any torch/onnx/profiler
@@ -3256,19 +3256,19 @@ def test_admission_clause_single_source():
     editing either side alone breaks this pin (never a silent drift)."""
     import re
 
-    sh = (_REPO / "workflows" / "agents" / "po_contract" / "scripts"
+    sh = (_REPO / "workflows" / "prof-opt" / "agents" / "po_contract" / "scripts"
           / "check_contracts.sh").read_text(encoding="utf-8")
     m = re.search(r'ADMISSION_CLAUSE = "([^"]+)"', sh)
     assert m, "check_contracts.sh lost its ADMISSION_CLAUSE constant"
     clause = m.group(1)
 
-    agent_md = (_REPO / "workflows" / "agents" / "po_contract" / "agent.md"
+    agent_md = (_REPO / "workflows" / "prof-opt" / "agents" / "po_contract" / "agent.md"
                 ).read_text(encoding="utf-8")
     assert clause in agent_md, (
         f"the admission clause {clause!r} drifted: po_contract/agent.md (the "
         "canonical source) no longer contains the gate's constant verbatim")
 
-    yaml_text = (_REPO / "workflows" / "prof-opt.yaml").read_text(encoding="utf-8")
+    yaml_text = (_REPO / "workflows" / "prof-opt" / "workflow.yaml").read_text(encoding="utf-8")
     assert clause in yaml_text, (
         "the workflow description lost its one-sentence admission clause")
 
@@ -3539,7 +3539,7 @@ def test_verdict_final_budget_cli_fails_loud_on_bad_inputs(tmp_path: Path):
 
 # ── extract_user_pkg (cleanliness round): fail-loud path resolution ───────────
 
-_EXTRACT_SH = (_REPO / "workflows" / "agents" / "po_flatten" / "scripts"
+_EXTRACT_SH = (_REPO / "workflows" / "prof-opt" / "agents" / "po_flatten" / "scripts"
                / "extract_user_pkg.sh")
 
 _ENTRY_BODY = "import os\nimport json\nfrom mymodel import layers\n"
@@ -3605,7 +3605,7 @@ def test_extract_user_pkg_empty_marker_on_zero_imports(tmp_path: Path):
 
 # ── po_propose check_prerequisites (cleanliness round) ────────────────────────
 
-_PREREQ_SH = (_REPO / "workflows" / "agents" / "po_propose" / "scripts"
+_PREREQ_SH = (_REPO / "workflows" / "prof-opt" / "agents" / "po_propose" / "scripts"
               / "check_prerequisites.sh")
 _PREREQ_FILES = ("analyze.py", "predict_delta.py", "history_lib.py",
                  "experiment_ledger.py", "emit_result.py", "check_bottleneck.py",

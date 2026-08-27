@@ -21,7 +21,7 @@ import pytest
 
 _WATCHER = (
     Path(__file__).resolve().parents[2]
-    / "workflows" / "agents" / "ns_retrain" / "scripts" / "progress_watcher.py"
+    / "workflows" / "nas-supernet" / "agents" / "ns_retrain" / "scripts" / "progress_watcher.py"
 )
 
 _NS: dict = {}

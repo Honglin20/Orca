@@ -17,7 +17,7 @@ import subprocess
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[1]
-_AGENT = _REPO / "workflows" / "agents" / "psu_train_script"
+_AGENT = _REPO / "workflows" / "puzzle-supernet" / "agents" / "psu_train_script"
 _CHECK = _AGENT / "scripts" / "check_train_script.sh"
 _LAUNCHER_CHECK = _AGENT / "scripts" / "check_launcher.sh"
 

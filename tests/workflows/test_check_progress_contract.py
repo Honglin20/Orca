@@ -13,12 +13,13 @@ from pathlib import Path
 import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
-_AGENTS = _REPO / "workflows" / "agents"
+_AGENTS = _REPO / "workflows"
+_AGENT_WF = {"ns_run_train": "nas-supernet", "ns2_run_train": "nas-supernet-v2", "ns_retrain": "nas-supernet", "ns2_retrain": "nas-supernet-v2"}
 _DIRS = ["ns_run_train", "ns2_run_train", "ns_retrain", "ns2_retrain"]
 
 
 def _check_script(d: str) -> Path:
-    return _AGENTS / d / "scripts" / "check_progress_contract.py"
+    return _AGENTS / _AGENT_WF[d] / "agents" / d / "scripts" / "check_progress_contract.py"
 
 
 def _run(check_py: Path, progress: Path | str) -> subprocess.CompletedProcess:
@@ -141,19 +142,19 @@ class TestWarmupGate:
 
     @pytest.mark.parametrize("d", _DIRS)
     def test_warmup_calls_contract_check(self, d):
-        content = (_AGENTS / d / "scripts" / "warmup_poll.sh").read_text(encoding="utf-8")
+        content = (_AGENTS / _AGENT_WF[d] / "agents" / d / "scripts" / "warmup_poll.sh").read_text(encoding="utf-8")
         assert "check_progress_contract.py" in content
         assert "WARMUP_FAIL reason=progress-contract" in content
 
     @pytest.mark.parametrize("d", _DIRS)
     def test_warmup_uses_progress_var(self, d):
         # 路径前缀差异（runs/train vs runs/retrain）由 $PROGRESS 变量承载，调用处统一。
-        content = (_AGENTS / d / "scripts" / "warmup_poll.sh").read_text(encoding="utf-8")
+        content = (_AGENTS / _AGENT_WF[d] / "agents" / d / "scripts" / "warmup_poll.sh").read_text(encoding="utf-8")
         assert 'check_progress_contract.py" --progress "$PROGRESS"' in content
 
     @pytest.mark.parametrize("d", _DIRS)
     def test_warmup_bash_n(self, d):
-        warmup = _AGENTS / d / "scripts" / "warmup_poll.sh"
+        warmup = _AGENTS / _AGENT_WF[d] / "agents" / d / "scripts" / "warmup_poll.sh"
         r = subprocess.run(["bash", "-n", str(warmup)], capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
 
@@ -161,7 +162,7 @@ class TestWarmupGate:
         # 控制流意图（code-reviewer NIT #2）：契约校验必须在 EPOCH_CNT>=2 块内，
         # 过早校验会误杀早期训练。锁行序：gate < check < WARMUP_OK。
         for d in _DIRS:
-            lines = (_AGENTS / d / "scripts" / "warmup_poll.sh").read_text(encoding="utf-8").splitlines()
+            lines = (_AGENTS / _AGENT_WF[d] / "agents" / d / "scripts" / "warmup_poll.sh").read_text(encoding="utf-8").splitlines()
             i_gate = next(i for i, ln in enumerate(lines) if "EPOCH_CNT" in ln and "-ge 2" in ln)
             i_check = next(i for i, ln in enumerate(lines) if "check_progress_contract.py" in ln)
             i_ok = next(i for i, ln in enumerate(lines) if "WARMUP_OK epoch_cnt=" in ln)
@@ -182,18 +183,18 @@ class TestStaticChecks:
     """静态防线：v2 check_*.sh 含 progress.jsonl 段；v1/v2 checklist 含 item 38。"""
 
     def test_v2_check_train_script_has_progress_jsonl(self):
-        content = (_AGENTS / "ns2_train_script" / "scripts" / "check_train_script.sh").read_text(encoding="utf-8")
+        content = (_AGENTS / "nas-supernet-v2" / "agents" / "ns2_train_script" / "scripts" / "check_train_script.sh").read_text(encoding="utf-8")
         assert "progress.jsonl" in content
         assert "json.dumps" in content
 
     def test_v2_check_retrain_has_progress_jsonl(self):
-        content = (_AGENTS / "ns2_retrain" / "scripts" / "check_retrain.sh").read_text(encoding="utf-8")
+        content = (_AGENTS / "nas-supernet-v2" / "agents" / "ns2_retrain" / "scripts" / "check_retrain.sh").read_text(encoding="utf-8")
         assert "progress.jsonl" in content
         assert "json.dumps" in content
 
     def test_v2_check_retrain_bash_n(self):
         r = subprocess.run(
-            ["bash", "-n", str(_AGENTS / "ns2_retrain" / "scripts" / "check_retrain.sh")],
+            ["bash", "-n", str(_AGENTS / "nas-supernet-v2" / "agents" / "ns2_retrain" / "scripts" / "check_retrain.sh")],
             capture_output=True,
             text=True,
         )
@@ -201,7 +202,7 @@ class TestStaticChecks:
 
     def test_v2_check_train_script_bash_n(self):
         r = subprocess.run(
-            ["bash", "-n", str(_AGENTS / "ns2_train_script" / "scripts" / "check_train_script.sh")],
+            ["bash", "-n", str(_AGENTS / "nas-supernet-v2" / "agents" / "ns2_train_script" / "scripts" / "check_train_script.sh")],
             capture_output=True,
             text=True,
         )
@@ -210,7 +211,7 @@ class TestStaticChecks:
     @pytest.mark.parametrize("wf", ["ns_train_script", "ns2_train_script"])
     def test_checklist_has_progress_jsonl_item(self, wf):
         content = (
-            _AGENTS / wf / "references" / "workflow-checklists" / "train_supernet_script_generation.md"
+            _AGENTS / ("nas-supernet" if wf == "ns_train_script" else "nas-supernet-v2") / "agents" / wf / "references" / "workflow-checklists" / "train_supernet_script_generation.md"
         ).read_text(encoding="utf-8")
         assert "Progress JSONL Write Loop" in content
         assert "CRITICAL" in content

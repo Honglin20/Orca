@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-PSU_EXPAND = REPO / "workflows" / "agents" / "psu_expand_supernet"
+PSU_EXPAND = REPO / "workflows" / "puzzle-supernet" / "agents" / "psu_expand_supernet"
 CHECK_EQUIV = PSU_EXPAND / "scripts" / "check_equivalence.py"
 CHECK_EXPAND_SH = PSU_EXPAND / "scripts" / "check_expand.sh"
 sys.path.insert(0, str(REPO / "tests"))

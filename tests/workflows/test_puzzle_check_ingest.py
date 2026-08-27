@@ -26,7 +26,7 @@ import pytest
 pytest.importorskip("yaml")
 
 _REPO = Path(__file__).resolve().parents[2]
-_GATE = _REPO / "workflows" / "agents" / "pz_ingest" / "scripts" / "check_ingest.sh"
+_GATE = _REPO / "workflows" / "puzzle" / "agents" / "pz_ingest" / "scripts" / "check_ingest.sh"
 
 
 # ---------------------------------------------------------------------------

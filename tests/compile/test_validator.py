@@ -18,7 +18,7 @@ from orca.schema import Workflow
 
 # repo root（tests/compile/test_validator.py → parents[2]）
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_REAL_WORKFLOWS = sorted(str(p) for p in (_REPO_ROOT / "workflows").glob("*.yaml"))
+_REAL_WORKFLOWS = sorted(str(p) for p in (_REPO_ROOT / "workflows").glob("*/workflow.yaml"))
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────

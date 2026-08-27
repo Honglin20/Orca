@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-CHECK_FLATTEN_SH = REPO / "workflows" / "agents" / "psu_flatten" / "scripts" / "check_flatten.sh"
+CHECK_FLATTEN_SH = REPO / "workflows" / "puzzle-supernet" / "agents" / "psu_flatten" / "scripts" / "check_flatten.sh"
 sys.path.insert(0, str(REPO / "tests"))
 
 from _psu_test_fixtures import run_script, write_toy_flatten_artifacts  # noqa: E402

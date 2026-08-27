@@ -22,7 +22,7 @@ import pytest
 
 # 把 _quant_scripts/ 加进 sys.path
 # tests/workflows/test_quant_device.py → parents[2] = repo root
-_QUANT_SCRIPTS = Path(__file__).resolve().parents[2] / "workflows" / "agents" / "_quant_scripts"
+_QUANT_SCRIPTS = Path(__file__).resolve().parents[2] / "workflows" / "quant-ptq-sweep" / "agents" / "_quant_scripts"
 sys.path.insert(0, str(_QUANT_SCRIPTS))
 
 torch = pytest.importorskip("torch")
@@ -238,7 +238,7 @@ def _load_run_bit_curve_module():
     """按文件路径 import run_bit_curve.py 模块（ts_quant 缺也能 import）。"""
     script = (
         Path(__file__).resolve().parents[2]
-        / "workflows" / "agents" / "bit-curve-searcher" / "scripts" / "run_bit_curve.py"
+        / "workflows" / "quant-bit-curve" / "agents" / "bit-curve-searcher" / "scripts" / "run_bit_curve.py"
     )
     import importlib.util
     spec = importlib.util.spec_from_file_location("_run_bit_curve_under_test", script)

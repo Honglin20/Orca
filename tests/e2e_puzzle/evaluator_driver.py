@@ -29,8 +29,8 @@ import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SUBAGENTS_DIR = REPO_ROOT / "workflows" / "subagents" / "puzzle"
-CATALOG_PATH = REPO_ROOT / "workflows" / "agents" / "_puzzle_scripts" / "candidate_catalog.yaml"
+SUBAGENTS_DIR = REPO_ROOT / "workflows" / "puzzle" / "subagents"
+CATALOG_PATH = REPO_ROOT / "workflows" / "puzzle" / "agents" / "_puzzle_scripts" / "candidate_catalog.yaml"
 
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
 OPENCODE_MODEL = "deepseek/deepseek-v4-flash"

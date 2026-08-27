@@ -21,8 +21,8 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-STRUCT_SCRIPTS = REPO / "workflows" / "agents" / "_struct_scripts"
-KB = REPO / "knowledge_base"
+STRUCT_SCRIPTS = REPO / "workflows" / "agent-struct-exploration" / "agents" / "_struct_scripts"
+KB = REPO / "workflows" / "agent-struct-exploration" / "knowledge_base"
 
 
 def _load_dc():

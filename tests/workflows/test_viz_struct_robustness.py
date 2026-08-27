@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-STRUCT_SCRIPTS = REPO / "workflows" / "agents" / "_struct_scripts"
+STRUCT_SCRIPTS = REPO / "workflows" / "agent-struct-exploration" / "agents" / "_struct_scripts"
 
 
 # ── helper：mock orca.chart + orca.chart._env，force-reload viz_struct ─────

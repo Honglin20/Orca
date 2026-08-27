@@ -29,11 +29,11 @@ import pytest
 pytest.importorskip("yaml")
 
 _REPO = Path(__file__).resolve().parents[2]
-_PUZZLE_SCRIPTS = _REPO / "workflows" / "agents" / "_puzzle_scripts"
+_PUZZLE_SCRIPTS = _REPO / "workflows" / "puzzle" / "agents" / "_puzzle_scripts"
 sys.path.insert(0, str(_PUZZLE_SCRIPTS))
 
 _GATE = (
-    _REPO / "workflows" / "agents" / "pz_search_space" / "scripts" / "check_search_space.py"
+    _REPO / "workflows" / "puzzle" / "agents" / "pz_search_space" / "scripts" / "check_search_space.py"
 )
 
 

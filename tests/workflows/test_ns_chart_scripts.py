@@ -23,8 +23,8 @@ import pytest
 # Add both chart-script dirs to path (duplicate _common is identical in either).
 # ns_retrain first: it also carries the shared metric-harvester functions the
 # test below imports; both copies share the same discover_metric_info.
-_SEARCH_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "workflows" / "agents" / "ns_run_search" / "scripts"
-_RETRAIN_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "workflows" / "agents" / "ns_retrain" / "scripts"
+_SEARCH_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "workflows" / "nas-supernet" / "agents" / "ns_run_search" / "scripts"
+_RETRAIN_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "workflows" / "nas-supernet" / "agents" / "ns_retrain" / "scripts"
 sys.path.insert(0, str(_SEARCH_SCRIPTS_DIR))
 sys.path.insert(0, str(_RETRAIN_SCRIPTS_DIR))
 
@@ -1126,7 +1126,7 @@ class TestCheckReportShGate:
     reporter JSON through check_report.sh and asserts it PASSES — catches future schema drift.
     """
 
-    _REPORT_PATH = Path(__file__).resolve().parents[2] / "workflows" / "agents" / "ns2_report" / "scripts" / "check_report.sh"
+    _REPORT_PATH = Path(__file__).resolve().parents[2] / "workflows" / "nas-supernet-v2" / "agents" / "ns2_report" / "scripts" / "check_report.sh"
 
     def test_check_report_passes_with_new_schema_fields(self, tmp_path: Path) -> None:
         """Reporter JSON with selected_latency/latency_unit/subnet_structure passes the gate."""
@@ -1204,17 +1204,27 @@ class TestParetoCaptionParseF4:
         assert common._parse_selected_from_caption(cap) == (0.25, 0.1234)
 
 
+_NS_SUB_WF = {
+    "ns_": "nas-supernet", "ns2": "nas-supernet-v2", "ns3": "nas-supernet-v3",
+}
+
+
+def _ns_scripts_dir(sub: str) -> Path:
+    """per-wf 布局下 ns*/ns2*/ns3* agent 的 scripts 目录（副本分属三个 wf，不能平铺推导）。"""
+    wf = _NS_SUB_WF[sub[:3]]
+    return _SEARCH_SCRIPTS_DIR.parents[3] / wf / "agents" / sub / "scripts"
+
+
 class TestCommonPyByteIdenticalE1:
     """SPEC E1/N5 - CI gate: all ns*_run_search/ns*_retrain _common.py byte-identical."""
 
     def test_common_py_byte_identical_all_versions(self) -> None:
         import hashlib
-        agents_dir = _SEARCH_SCRIPTS_DIR.parent.parent
         sub_dirs = (
             "ns_run_search", "ns2_run_search", "ns3_run_search",
             "ns_retrain", "ns2_retrain", "ns3_retrain",
         )
-        copies = [agents_dir / sub / "scripts" / "_common.py" for sub in sub_dirs]
+        copies = [_ns_scripts_dir(sub) / "_common.py" for sub in sub_dirs]
         for path in copies:
             assert path.is_file(), f"missing _common.py: {path}"
         hashes = {str(p): hashlib.md5(p.read_bytes()).hexdigest() for p in copies}
@@ -1230,8 +1240,7 @@ class TestNewScriptsByteIdenticalAllVersions:
     @staticmethod
     def _assert_identical(sub_dirs, fname) -> None:
         import hashlib
-        agents_dir = _SEARCH_SCRIPTS_DIR.parent.parent
-        copies = [agents_dir / sub / "scripts" / fname for sub in sub_dirs]
+        copies = [_ns_scripts_dir(sub) / fname for sub in sub_dirs]
         for path in copies:
             assert path.is_file(), f"missing {fname}: {path}"
         hashes = {str(p): hashlib.md5(p.read_bytes()).hexdigest() for p in copies}

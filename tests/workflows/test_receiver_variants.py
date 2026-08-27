@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-KBDIR = REPO / "knowledge_base" / "families" / "receiver"
+KBDIR = REPO / "workflows" / "agent-struct-exploration" / "knowledge_base" / "families" / "receiver"
 
 # 全部 10 个变体，回归覆盖整池（不含第二批 inception/resnext/se/dualpath）。
 VARIANTS = [

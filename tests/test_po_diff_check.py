@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 _REPO = Path(__file__).resolve().parents[1]
-_SCRIPTS = _REPO / "workflows" / "agents" / "_po_scripts"
+_SCRIPTS = _REPO / "workflows" / "prof-opt" / "agents" / "_po_scripts"
 sys.path.insert(0, str(_SCRIPTS))
 
 import diff_check  # noqa: E402

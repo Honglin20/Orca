@@ -23,7 +23,7 @@ pytest.importorskip("torch")
 pytest.importorskip("nas_agent")
 
 _REPO = Path(__file__).resolve().parents[1]
-_SCRIPTS_DIR = _REPO / "workflows" / "agents" / "_puzzle_scripts"
+_SCRIPTS_DIR = _REPO / "workflows" / "puzzle" / "agents" / "_puzzle_scripts"
 
 
 def _import_puzzle_common():

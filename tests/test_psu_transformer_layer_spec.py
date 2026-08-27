@@ -17,8 +17,8 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-SPEC_DIR = REPO / "workflows" / "agents" / "psu_expand_supernet" / "references" / "supernet_specs" / "transformer_layer"
-CHECK_CHOICE = REPO / "workflows" / "agents" / "psu_expand_supernet" / "scripts" / "check_choice_contract.py"
+SPEC_DIR = REPO / "workflows" / "puzzle-supernet" / "agents" / "psu_expand_supernet" / "references" / "supernet_specs" / "transformer_layer"
+CHECK_CHOICE = REPO / "workflows" / "puzzle-supernet" / "agents" / "psu_expand_supernet" / "scripts" / "check_choice_contract.py"
 sys.path.insert(0, str(REPO / "tests"))
 
 from _psu_test_fixtures import write_toy_expand_artifacts  # noqa: E402
