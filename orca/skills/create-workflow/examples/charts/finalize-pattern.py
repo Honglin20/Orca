@@ -3,7 +3,7 @@
 
 在 workflow 终态节点（如 select/finalize）调用，读全部历史数据，
 做离线聚合计算，推终态报告图。同 label 但 title 与 live 图不同。
-真实用法见 workflows/agents/nas-select/scripts/push_funnel.py。
+真实用法见 workflows/nas-agent-pipeline/agents/nas-select/scripts/push_funnel.py。
 """
 
 from __future__ import annotations

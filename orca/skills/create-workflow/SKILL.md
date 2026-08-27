@@ -12,7 +12,8 @@ allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Task, AskUserQuestion
 
 <purpose>
 把用户的意图（自然语言描述）**或**已有素材（一个文件夹里的 agent md / 别的 workflow / 散落的 prompt）
-归一化成一个可跑的 Orca workflow（YAML + 必要的 `agents/*.md`），需要时配运行时图表。
+归一化成一个可跑的 Orca workflow——per-workflow 自包含目录（`workflow.yaml` + 必要的
+`agents/`），需要时配运行时图表。
 skill 自己消化 Orca 契约，用户不碰 schema、不选 agent 声明方式、不写 routes。
 
 两个入口：
@@ -30,12 +31,31 @@ skill 自己消化 Orca 契约，用户不碰 schema、不选 agent 声明方式
 - **批量指令**：用户说「这 N 个一批」「剩下的跳过讨论」→ 跳过的是**讨论 gate**，
   🔴 **落盘 + 校验 + 审查闭环不跳**（讨论可跳，审查不可跳）。
 - **推翻已确认设计**：更新 design.md 对应节（标 rev N），重走该 agent 的落盘 + 闭环。
-- 落盘路径**不属于 gate**：用户指定路径优先，否则默认 `./workflows/<name>.yaml` 直接写
-  最终路径，写完告知（不阻塞问路径）。
+- 落盘路径**不属于 gate**：用户指定路径优先，否则默认 `./workflows/<name>/workflow.yaml`
+  （per-workflow 目录，见「产出布局」）直接写最终路径，写完告知（不阻塞问路径）。
+
+## 产出布局（per-workflow 目录）
+
+每个 workflow 一个自包含目录（目录名 = workflow `name`），默认 `./workflows/`：
+
+```
+./workflows/<name>/
+  workflow.yaml          # 编排拓扑
+  agents/                # 本 workflow 专属 agent 池（不跨 workflow 共享）
+    <agent>.md           # 文件 agent
+    <agent>/agent.md     # 文件夹 agent（scripts/ 资源随行）
+    <agent>/scripts/...
+  subagents/             # sub-agent 定义 md（有则落此）
+  <name>-design.md       # 开发期设计文档（见「断点续传」；内容绝不进 agent.md / yaml）
+```
+
+引用的资产全部收进本目录——用户提供的 agent md 原样复制进来落 `agents/`，不留目录外。
+本文及 reference 各处写的 `agents/<agent>...` 相对路径，一律以 workflow.yaml 所在的
+workflow 目录为基准。
 
 ## 断点续传（design.md）
 
-开工先找 `<workflow_dir>/<name>-design.md`（默认落点；gate 1 时可应用户要求改指它处）：
+开工先找 `./workflows/<name>/<name>-design.md`（默认落点 = workflow 目录内；gate 1 时可应用户要求改指它处）：
 
 - **存在** → 读「进度」节，向用户报告当前 Stage + 下一步，从断点继续；
 - **不存在** → 新建，随阶段渐进写。结构：

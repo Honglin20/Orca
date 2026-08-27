@@ -1,8 +1,11 @@
 """test_skill_benchmark.py —— create-workflow skill benchmark 守门。
 
-benchmark（``orca/skills/create-workflow/benchmark/cases/``）钉死了每个 case 的预期产物。
-本测试对**每个** ``expected/workflow.yaml`` 跑 ``load_workflow``（含全部 validate 检查），
-schema 演化让某 case 失效时先红——skill 教用户产出的样板本身不能坏。
+benchmark（``orca/skills/create-workflow/benchmark/cases/``）钉死了每个 case 的预期产物
+（per-workflow 目录形态：``expected/<wf-name>/workflow.yaml`` + 同级 ``agents/``，
+``<wf-name>`` 取 yaml 的 ``name`` 字段）。
+本测试对**每个** ``expected/<wf-name>/workflow.yaml`` 跑 ``load_workflow``（含全部
+validate 检查），schema 演化让某 case 失效时先红——skill 教用户产出的样板本身不能坏。
+例外：case 14（agent-pool-only，无 workflow.yaml）的 ``expected/agents/`` 保持平铺。
 
 额外检查 folder-agent 资产迁移不变量（case 11/16）：脚本已迁移 + agent.md 用
 ``$ORCA_AGENT_RESOURCES`` 引用（skill→文件夹 agent 的核心转换规则）。
@@ -30,12 +33,19 @@ def _benchmark_dir() -> Path:
     return Path(str(files("orca.skills"))) / "create-workflow" / "benchmark" / "cases"
 
 
+def _expected_wf_dirs(case_dir: Path) -> list[Path]:
+    """case 的 expected 下全部 per-wf workflow.yaml（``expected/<wf-name>/workflow.yaml``）。
+
+    目录名按 yaml ``name`` 字段在迁移时命名，此处以 glob 发现为准（不硬编码 wf 名）。
+    """
+    return sorted((case_dir / "expected").glob("*/workflow.yaml"))
+
+
 def _workflow_cases() -> list[tuple[str, Path]]:
-    """所有带 expected/workflow.yaml 的 case。"""
+    """所有带 expected/<wf-name>/workflow.yaml 的 case（case 14 无 workflow，不在此列）。"""
     out = []
     for case_dir in sorted(_benchmark_dir().iterdir()):
-        yml = case_dir / "expected" / "workflow.yaml"
-        if yml.exists():
+        for yml in _expected_wf_dirs(case_dir):
             out.append((case_dir.name, yml))
     return out
 
@@ -49,13 +59,20 @@ def test_benchmark_workflow_validates(case_name: str, yaml_path: Path):
     """每个 benchmark 预期 workflow 必须 0 error 通过 validate（含 agent 解析）。"""
     wf = load_workflow(yaml_path)  # 抛 ConfigurationError 即红
     assert wf.name, f"{case_name}: workflow 加载出空 name"
+    # 目录命名契约：expected/<wf-name>/ 的目录名 == yaml name 字段（README 声明的布局）。
+    assert wf.name == yaml_path.parent.name, (
+        f"{case_name}: 目录名 {yaml_path.parent.name!r} != yaml name {wf.name!r}"
+    )
 
 
 def test_agent_pool_only_case_has_no_workflow():
-    """case 14（只造 agent 池）不应有 workflow.yaml，且必有 agent md。"""
+    """case 14（只造 agent 池）不应有 workflow.yaml（含 per-wf 目录层），且 expected 保持平铺 agents/。"""
     case = _benchmark_dir() / "14-agent-pool-only"
-    assert not (case / "expected" / "workflow.yaml").exists()
-    agents = list((case / "expected" / "agents").glob("*.md"))
+    expected = case / "expected"
+    assert not (expected / "workflow.yaml").exists()
+    assert not _expected_wf_dirs(case), "pool-only case 不应有 per-wf 目录层"
+    assert not list(expected.glob("*/agents")), "pool-only case 不应有半迁移的 agents 目录层"
+    agents = list((expected / "agents").glob("*.md"))
     assert len(agents) >= 3, f"期望 ≥3 个 agent md，实际 {len(agents)}"
 
 
@@ -63,7 +80,9 @@ def test_agent_pool_only_case_has_no_workflow():
 def test_folder_agent_asset_migration(slug: str):
     """skill→文件夹 agent 的核心转换：脚本迁移到 agents/<name>/scripts/ + agent.md 用 $ORCA_AGENT_RESOURCES 引用。"""
     case = _benchmark_dir() / slug
-    agents_dir = case / "expected" / "agents"
+    wf_dirs = _expected_wf_dirs(case)
+    assert wf_dirs, f"{slug}: 缺 expected/<wf-name>/workflow.yaml"
+    agents_dir = wf_dirs[0].parent / "agents"
     # 找到那个文件夹 agent（含 agent.md + scripts/）
     folder_agents = [d for d in agents_dir.iterdir() if (d / "agent.md").exists()]
     assert folder_agents, f"{slug}: 缺文件夹 agent"
@@ -108,14 +127,15 @@ def _manifest_count(proc: subprocess.CompletedProcess, unit: str) -> int:
 
 
 def test_case17_charts_positive_control():
-    """正控守门：case 17 expected/ 跑 check_charts —— exit 0 且清单 ≥1 call site。
+    """正控守门：case 17 的 per-wf expected 目录跑 check_charts —— exit 0 且清单 ≥1 call site。
 
     check_charts 对零 call site（无图表 workflow）是合法 exit 0，故必须靠清单计数做正控：
     bench_plot.py 忘写 render_chart 时这里红（而非 vacuous pass）。
     """
-    expected = _benchmark_dir() / "17-chart-integration" / "expected"
-    assert (expected / "workflow.yaml").is_file(), "case 17 必有 workflow.yaml（golden validate 前提）"
-    proc = _run_check("check_charts.py", expected)
+    case = _benchmark_dir() / "17-chart-integration"
+    wf_dirs = _expected_wf_dirs(case)
+    assert wf_dirs, "case 17 必有 expected/<wf-name>/workflow.yaml（golden validate 前提）"
+    proc = _run_check("check_charts.py", wf_dirs[0].parent)
     assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     assert _manifest_count(proc, "call sites") >= 1
 

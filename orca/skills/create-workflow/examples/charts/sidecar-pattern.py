@@ -2,7 +2,7 @@
 """sidecar-pattern.py —— 模式 B 样板：独立轮询脚本。
 
 被 agent 周期调用，读外部进程产的 jsonl 文件，推图（同 label+title → 替换=实时更新）。
-真实用法见 workflows/agents/nas-train-runner/scripts/tail_metrics.py。
+真实用法见 workflows/nas-agent-pipeline/agents/nas-train-runner/scripts/tail_metrics.py。
 """
 
 from __future__ import annotations

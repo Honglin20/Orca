@@ -2,7 +2,7 @@
 """inline-pattern.py —— 模式 A 样板：脚本内直接推图。
 
 这是一个精简的教学样板，展示如何在 Python 脚本末尾添加 render_chart 调用。
-真实用法见 workflows/agents/quant-qat/scripts/run_qat.py（QAT 训练 inline 推图）。
+真实用法见 workflows/quant-qat/agents/qat-trainer/scripts/run_qat.py（QAT 训练 inline 推图）。
 """
 
 from __future__ import annotations
