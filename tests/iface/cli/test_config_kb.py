@@ -9,25 +9,35 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 import pytest
 
 from orca.compile import ConfigurationError
-from orca.iface.cli.config import apply_kb_requirement, resolve_kb_dir
+from orca.iface.cli.config import (
+    _INJECTED_KB_ENV,
+    apply_kb_requirement,
+    resolve_kb_dir,
+)
 
 
 class _WF:
-    """轻量 workflow 替身（只需 .requires 属性）。"""
-    def __init__(self, requires: list[str]):
+    """轻量 workflow 替身（.requires + .workflows_root——per-wf KB 来源解析用）。"""
+    def __init__(self, requires: list[str], workflows_root=None):
         self.requires = requires
+        self.workflows_root = workflows_root
 
 
 @pytest.fixture(autouse=True)
 def _clean_kb_env(monkeypatch):
-    """每个测试前清 ORCA_KB_DIR，防 shell 残留污染。"""
+    """每个测试前后清 ORCA_KB_DIR + 注入标记集，防 shell / 跨测试残留污染
+    （teardown 清集合：apply 直写 os.environ 不经 monkeypatch，标记集会跨测试存活）。"""
     monkeypatch.delenv("ORCA_KB_DIR", raising=False)
+    _INJECTED_KB_ENV.clear()
+    yield
+    _INJECTED_KB_ENV.clear()
 
 
 # ── resolve_kb_dir ────────────────────────────────────────────
@@ -95,3 +105,110 @@ def test_apply_unknown_requires_token_passes(monkeypatch):
     monkeypatch.delenv("ORCA_KB_DIR", raising=False)
     apply_kb_requirement(_WF(["something_else"]))  # 不抛、不写 env
     assert "ORCA_KB_DIR" not in os.environ
+
+
+# ── per-wf 来源（plan 2026-08-27 批 C，SPEC 步骤 2.3 R4'）────────────────────
+
+
+def _make_per_wf_kb(wf_root) -> Path:
+    """造 per-wf KB fixture：``wf_root/knowledge_base/index.json``（判据含 index.json）。"""
+    kb = Path(wf_root) / "knowledge_base"
+    kb.mkdir(parents=True)
+    (kb / "index.json").write_text("{}", encoding="utf-8")
+    return kb
+
+
+def test_resolve_per_wf_kb_over_home_install_point(monkeypatch, tmp_path):
+    """R4' ①：wf 带 per-wf KB → 优先于 ~/.orca/knowledge_base（隐式 install 部署点）。"""
+    home = tmp_path / "fake_home"
+    (home / ".orca" / "knowledge_base").mkdir(parents=True)  # home 部署点同时存在
+    monkeypatch.setattr("pathlib.Path.home", lambda: home)
+    wf_root = tmp_path / "wfs" / "struct-exploration"
+    per_wf = _make_per_wf_kb(wf_root)
+
+    out = resolve_kb_dir(_WF(["knowledge_base"], workflows_root=wf_root))
+
+    assert out == str(per_wf.resolve())
+
+
+def test_resolve_per_wf_kb_requires_index_json(monkeypatch, tmp_path):
+    """per-wf 判据含 index.json：目录在但无 index.json → 不当 KB（防任意同名目录误命中）。"""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "fake_home")
+    monkeypatch.chdir(tmp_path)  # cwd 无 knowledge_base → 全 miss
+    wf_root = tmp_path / "wfs" / "struct-exploration"
+    (wf_root / "knowledge_base").mkdir(parents=True)  # 无 index.json
+
+    assert resolve_kb_dir(_WF(["knowledge_base"], workflows_root=wf_root)) == ""
+
+
+def test_resolve_explicit_env_not_overridden_by_per_wf(monkeypatch, tmp_path):
+    """R4' ②：用户显式 env ORCA_KB_DIR（目录存在）→ 权威，不被 per-wf KB 覆盖。"""
+    explicit = tmp_path / "explicit_kb"
+    explicit.mkdir()
+    (explicit / "index.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("ORCA_KB_DIR", str(explicit))
+    wf_root = tmp_path / "wfs" / "struct-exploration"
+    _make_per_wf_kb(wf_root)
+
+    out = resolve_kb_dir(_WF(["knowledge_base"], workflows_root=wf_root))
+
+    assert out == str(explicit.resolve())
+
+
+def test_resolve_explicit_env_bad_path_still_empty_with_per_wf(monkeypatch, tmp_path):
+    """显式 env 坏路径 + per-wf KB 存在 → 仍返 ""（显式来源权威、fail loud，
+    不静默回退到 per-wf 隐式来源——与「config/env 显式坏路径不回退」契约同款）。"""
+    monkeypatch.setenv("ORCA_KB_DIR", str(tmp_path / "does_not_exist"))
+    wf_root = tmp_path / "wfs" / "struct-exploration"
+    _make_per_wf_kb(wf_root)
+
+    out = resolve_kb_dir(_WF(["knowledge_base"], workflows_root=wf_root))
+
+    assert out == ""
+
+
+def test_resolve_config_overrides_per_wf(monkeypatch, tmp_path):
+    """config knowledge_base_dir > per-wf KB（探测序钉死：per-wf 在 config 之后——
+    用户显式 config 覆盖随 workflow 走的 KB）。"""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "fake_home")
+    monkeypatch.chdir(tmp_path)  # 项目级 config = tmp_path/.orca/config.json
+    cfg_kb = tmp_path / "cfg_kb"
+    cfg_kb.mkdir()
+    cfg_dir = tmp_path / ".orca"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.json").write_text(
+        json.dumps({"knowledge_base_dir": str(cfg_kb)}), encoding="utf-8"
+    )
+    wf_root = tmp_path / "wfs" / "struct-exploration"
+    _make_per_wf_kb(wf_root)
+
+    out = resolve_kb_dir(_WF(["knowledge_base"], workflows_root=wf_root))
+
+    assert out == str(cfg_kb.resolve())
+
+
+def test_apply_then_second_wf_resolves_own_per_wf_kb(monkeypatch, tmp_path):
+    """R4' ③：同进程串行两个 wf——① 无 per-wf KB（命中 ~/.orca 触发 env 注入），
+    ② 有 per-wf KB → 解析到自己的 per-wf KB，而非注入残留被误判为用户显式 env。
+
+    这是 ``_INJECTED_KB_ENV`` 防护的行为锁：若读 env 时不忽略注入串，第二个 resolve
+    会返回 home 部署点（注入残留以最高优先遮蔽 per-wf 来源）。
+    """
+    home = tmp_path / "fake_home"
+    home_kb = home / ".orca" / "knowledge_base"
+    home_kb.mkdir(parents=True)
+    monkeypatch.setattr("pathlib.Path.home", lambda: home)
+    monkeypatch.chdir(tmp_path)  # cwd 无 knowledge_base
+    monkeypatch.delenv("ORCA_KB_DIR", raising=False)
+
+    # wf1：无 per-wf KB → apply 命中 ~/.orca 并注入 os.environ
+    wf1 = _WF(["knowledge_base"], workflows_root=tmp_path / "wfs" / "wf-no-kb")
+    apply_kb_requirement(wf1)
+    assert os.environ["ORCA_KB_DIR"] == str(home_kb.resolve())
+    assert str(home_kb.resolve()) in _INJECTED_KB_ENV  # 注入已标记
+
+    # wf2：有 per-wf KB → resolve 忽略注入残留，解析到自己的 per-wf KB
+    wf2_root = tmp_path / "wfs" / "wf-with-kb"
+    per_wf2 = _make_per_wf_kb(wf2_root)
+    out = resolve_kb_dir(_WF(["knowledge_base"], workflows_root=wf2_root))
+    assert out == str(per_wf2.resolve())

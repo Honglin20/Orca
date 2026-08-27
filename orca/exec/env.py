@@ -63,8 +63,9 @@ def build_env_overlay(
             空串 → 不注（向后兼容）；非空 → 子进程 ``ORCA_ARTIFACTS_DIR``，workflow 脚本据此
             ``os.environ["ORCA_ARTIFACTS_DIR"]`` 写产物，替代 workflow 自建 ``llm_artifacts/``。
         kb_dir: plan sprightly-questing-donut §1.2 workflow 知识库根目录绝对路径（由
-            ``orca.iface.cli.config.resolve_kb_dir`` 解析：env > config > ``~/.orca/knowledge_base``
-            > ``cwd/knowledge_base``）。空串 → 不注（workflow 不需要 KB / 未解析到）；非空 → 子进程
+            ``orca.iface.cli.config.resolve_kb_dir`` 解析：env > config > per-workflow
+            ``<wf-dir>/knowledge_base`` > ``~/.orca/knowledge_base`` > ``cwd/knowledge_base``）。
+            空串 → 不注（workflow 不需要 KB / 未解析到）；非空 → 子进程
             ``ORCA_KB_DIR``，workflow 脚本 + agent prompt 据 ``$ORCA_KB_DIR`` 定位 KB（替代裸相对
             ``knowledge_base/``，解决换项目跑找不到 KB 的可移植性问题）。
         workflows_root: workflow yaml 所在目录绝对路径

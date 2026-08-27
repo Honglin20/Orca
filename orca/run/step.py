@@ -274,8 +274,9 @@ def _build_ctx(
     """in-session 路径的 RunContext 构造（mirror orchestrator._make_ctx 的子集）。
 
     point-to-file 协议（SPEC §3.2）：``workflows_root`` 由 ``advance_step`` 经
-    ``yaml_path`` 父目录透传；解析 ``workflows_root / "subagents" / wf.name`` 为存在
-    目录 → 返绝对路径字符串，否则空串（无 subagents 的 workflow 走空串分支，§3.3）。
+    ``yaml_path`` 父目录透传；双形态解析（``orca.compile.layout.resolve_subagents_dir``：
+    per-wf ``subagents/`` 直接含 md / 旧平铺 ``subagents/<wf.name>/``）命中 → 返绝对路径
+    字符串，否则空串（无 subagents 的 workflow 走空串分支，§3.3）。
     """
     from orca.exec.context import RunContext
     from orca.run.orchestrator import _compute_subagents_root

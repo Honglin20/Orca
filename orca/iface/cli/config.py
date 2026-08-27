@@ -47,7 +47,8 @@
 
   ``knowledge_base_dir``（plan sprightly-questing-donut §1.3，**独立于 ``CONFIG_FIELDS``**）：
   KB 根目录自定义路径（字符串标量），同 ``sidechain`` 是路径解析维度，project 覆盖 user。由
-  ``resolve_kb_dir`` 读取（env > config > ``~/.orca/knowledge_base`` > ``cwd/knowledge_base``），
+  ``resolve_kb_dir`` 读取（env > config > per-workflow ``<wf-dir>/knowledge_base`` >
+  ``~/.orca/knowledge_base`` > ``cwd/knowledge_base``；per-wf 来源见该函数 docstring），
   解析结果作 exec spawn 的 ``ORCA_KB_DIR`` transport。
 
 **shell env 快照**：首次 ``bootstrap_config()`` 前抓 ``ORCA_*`` env 快照，供 ``executor show`` 区分
@@ -195,7 +196,7 @@ def sidechain_family(cfg: dict[str, Any]) -> str | None:
     return fam if isinstance(fam, str) else None
 
 
-def resolve_kb_dir() -> str:
+def resolve_kb_dir(wf=None) -> str:
     """解析 workflow 知识库（KB）根目录绝对路径（KB 可移植发现，plan sprightly-questing-donut §1.2）。
 
     回答「换项目跑 struct-exploration 时，``knowledge_base/`` 裸相对路径找不到怎么办」：KB 根
@@ -206,19 +207,31 @@ def resolve_kb_dir() -> str:
     优先级（**first-existing**）::
 
         shell env ORCA_KB_DIR  >  config knowledge_base_dir(project>user)  >
+        per-workflow <wf-dir>/knowledge_base（含 index.json）  >
         ~/.orca/knowledge_base（``orca install`` 部署点）  >  <cwd>/knowledge_base（仓库根 fallback）
 
     - **显式来源（env / config）权威**：设了就用；指向的目录**不存在 → 返回 ""**（不静默回退到
       隐式来源——让 run 启动预检 fail-loud 暴露「用户配了错路径」，而非悄悄用错 KB）。
+    - **per-wf 来源（2026-08 per-dir 布局，SPEC R4'）**：``wf`` 透传且
+      ``wf.workflows_root/knowledge_base/index.json`` 存在（判据含 index.json，防误把任意
+      同名目录当 KB）→ 用它。**探测在 config 之后**：用户显式 config 覆盖随 workflow 走的
+      KB。``wf=None``（caller 拿不到 wf 上下文）→ 跳过本来源，其余来源照常（记录型退化，
+      非吞错——caller 显式不传）。
     - **隐式来源（install 部署点 / 仓库根）**：best-effort first-existing，全 miss → ""。
     - 全 miss → 返回 ""，由 caller（workflow 声明 ``requires:[knowledge_base]`` 时）fail-loud。
+
+    进程级 env 泄漏防护（R4'）：env 值 ∈ ``_INJECTED_KB_ENV``（本进程 ``apply_kb_requirement``
+    隐式命中注入过的字串）→ **忽略该 env 项**，从 config 起完整重走解析链——否则长驻进程
+    （web / in-session）上次注入的值会以「用户显式 env」的最高优先遮蔽下一 workflow 的
+    per-wf KB。已知窄竞态：用户真显式 export 的值恰与注入字串相同会被误判为注入 →
+    该 env 项被忽略、从 config 起重走解析链（接受，SPEC 声明）。
 
     路径解析维度（同 ``sidechain``）：**不进** ``CONFIG_FIELDS`` / ``apply_config_env`` / env 注入；
     本函数是唯一解析点（DRY），caller 直读。
     """
-    # 1. 显式：shell env ORCA_KB_DIR（用户 export / 上层 orca 进程注入）
+    # 1. 显式：shell env ORCA_KB_DIR（用户 export；值系本进程注入 → 忽略，见 docstring R4'）
     env_kb = os.environ.get("ORCA_KB_DIR", "").strip()
-    if env_kb:
+    if env_kb and env_kb not in _INJECTED_KB_ENV:
         p = Path(env_kb)
         return str(p.resolve()) if p.is_dir() else ""
     # 2. 显式：config knowledge_base_dir（project > user，load_merged_config 已合并）
@@ -226,11 +239,24 @@ def resolve_kb_dir() -> str:
     if isinstance(cfg_kb, str) and cfg_kb.strip():
         p = Path(cfg_kb.strip())
         return str(p.resolve()) if p.is_dir() else ""
-    # 3-4. 隐式：install 部署点 > 仓库根（best-effort first-existing）
+    # 3. 隐式：per-wf KB（wf.workflows_root/knowledge_base 含 index.json；getattr 防
+    #    程序化 wf 替身无该属性）。wf=None → 跳过（caller 无 wf 上下文的记录型退化）。
+    wf_root = getattr(wf, "workflows_root", None)
+    if wf_root is not None:
+        per_wf = Path(wf_root) / "knowledge_base"
+        if (per_wf / "index.json").is_file():
+            return str(per_wf.resolve())
+    # 4-5. 隐式：install 部署点 > 仓库根（best-effort first-existing）
     for candidate in (Path.home() / ".orca" / "knowledge_base", Path.cwd() / "knowledge_base"):
         if candidate.is_dir():
             return str(candidate.resolve())
     return ""
+
+
+# R4' 进程级 env 泄漏防护：本进程 ``apply_kb_requirement`` 隐式命中注入过的 KB 路径集合。
+# ``resolve_kb_dir`` 读 env 时值 ∈ 此集合 → 忽略该 env 项（详见其 docstring）。模块级
+# （非进程全局 env）——只影响本模块的解析判断，不触碰其他进程。
+_INJECTED_KB_ENV: set[str] = set()
 
 
 def apply_kb_requirement(wf) -> None:
@@ -241,8 +267,11 @@ def apply_kb_requirement(wf) -> None:
     而非像旧版 setup agent 静默继续。
 
     - 无 ``knowledge_base`` 依赖 → no-op（绝大多数 workflow 不碰 KB，零回归）。
-    - 有依赖 + ``resolve_kb_dir`` 解析到 → 写 ``os.environ["ORCA_KB_DIR"]`` 作 exec spawn transport
-      （executor/script 读 os.environ，不经构造参数穿透，避免 exec→iface 反向依赖）。
+    - 有依赖 + ``resolve_kb_dir(wf)`` 解析到（wf 透传 → per-wf KB 来源参与解析）→ 写
+      ``os.environ["ORCA_KB_DIR"]`` 作 exec spawn transport（executor/script 读
+      os.environ，不经构造参数穿透，避免 exec→iface 反向依赖）。**不提前写 env**：注入
+      发生在 resolve 之后，且仅当注入前 env 无「用户显式值」时把注入字串记入
+      ``_INJECTED_KB_ENV``（R4' 防长驻进程下次误判显式）。
     - 有依赖 + 解析不到 → ``ConfigurationError``（fail loud，含 searched 路径 + 修复指引）。
 
     raise ``ConfigurationError`` 而非 ask-user 哨兵：KB 缺失是环境/安装缺口（用户该去装/配），不是
@@ -253,7 +282,7 @@ def apply_kb_requirement(wf) -> None:
     """
     if "knowledge_base" not in getattr(wf, "requires", []):
         return
-    kb = resolve_kb_dir()
+    kb = resolve_kb_dir(wf)
     if not kb:
         # lazy import：避免 config import 期拉 orca.compile 全树（config 被 bootstrap 早期加载）。
         from orca.compile import ConfigurationError
@@ -262,13 +291,19 @@ def apply_kb_requirement(wf) -> None:
                 "知识库（knowledge_base）未找到：本 workflow 声明 requires:[knowledge_base]，"
                 "但 KB 根目录解析失败，无法继续。\n"
                 "  搜索顺序：env ORCA_KB_DIR > config knowledge_base_dir(project>user) > "
-                "~/.orca/knowledge_base > <cwd>/knowledge_base\n"
-                "  修复任一：① 跑 `orca install`（部署内置 KB 到 ~/.orca/knowledge_base）；"
+                "per-workflow <wf-dir>/knowledge_base > ~/.orca/knowledge_base > "
+                "<cwd>/knowledge_base\n"
+                "  修复任一：① 跑 `orca install`（部署内置 KB）；"
                 "② 在 ~/.orca/config.json 设 \"knowledge_base_dir\": \"<KB 绝对路径>\"；"
                 "③ export ORCA_KB_DIR=<KB 绝对路径>。"
             ],
             warnings=[],
         )
+    prev = os.environ.get("ORCA_KB_DIR", "").strip()
+    if not (prev and prev not in _INJECTED_KB_ENV):
+        # 注入前 env 无用户显式值（无值，或值系上次注入）→ 本次写入是隐式注入，记入
+        # 标记集防长驻进程下次 resolve 误判显式（R4'）。已知窄竞态见 resolve_kb_dir docstring。
+        _INJECTED_KB_ENV.add(kb)
     os.environ["ORCA_KB_DIR"] = kb  # exec spawn transport（ClaudeExecutor/ScriptExecutor 读 os.environ）
 
 

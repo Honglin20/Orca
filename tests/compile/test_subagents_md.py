@@ -123,6 +123,37 @@ def test_check_subagents_md_no_directory_skipped(tmp_path):
     assert result.errors == []
 
 
+# ── 双形态（plan 2026-08-27 批 C：validator 委托 layout.resolve_subagents_dir）──
+
+
+def test_check_subagents_md_per_dir_layout(tmp_path):
+    """per-wf 形态：``workflows_root/subagents/`` 直接含 md（与 workflow.yaml 同目录）
+    → 被发现并校验（缺 frontmatter 的 md 报 error——证明校验真跑在 per-wf 目录上）。"""
+    sub = tmp_path / "subagents"
+    sub.mkdir()
+    (sub / "helper.md").write_text("# Helper\nbody without frontmatter", encoding="utf-8")
+    result = ValidationResult()
+    _check_subagents_md(_wf_with_name("demo-wf"), tmp_path, result)
+    assert len(result.errors) == 1
+    assert "helper.md" in result.errors[0]
+    assert "frontmatter" in result.errors[0]
+
+
+def test_check_subagents_md_legacy_misfire_regression(tmp_path):
+    """误命中回归（validator 侧）：旧平铺形态 ``subagents/`` 存在但无直接 md（md 在
+    二级 ``<wf>/``）→ 校验跑在 ``subagents/<wf>/`` 的 md 上。用**缺 frontmatter 的坏 md**
+    断言出 error——「校验真跑在 legacy 目录」可证伪：若公式误判壳目录为 per-wf 形态
+    （md_files 为空 → 漏校验）或误报，本测试都红。"""
+    legacy = tmp_path / "subagents" / "demo-wf"
+    legacy.mkdir(parents=True)
+    (legacy / "helper.md").write_text("# Helper\nbody without frontmatter", encoding="utf-8")
+    result = ValidationResult()
+    _check_subagents_md(_wf_with_name("demo-wf"), tmp_path, result)
+    assert len(result.errors) == 1
+    assert "helper.md" in result.errors[0]
+    assert "frontmatter" in result.errors[0]
+
+
 def test_check_subagents_md_referencing_missing_dir_error(tmp_path):
     """模板引用 ``{{ subagents_root }}`` 但目录不存在 → load 期 error（fail 前移）。
 

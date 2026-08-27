@@ -53,6 +53,50 @@ def test_compute_subagents_root_empty_wf_name(tmp_path):
     assert _compute_subagents_root(tmp_path, "") == ""
 
 
+# ── 双形态（plan 2026-08-27 批 C：orca.compile.layout 单一真相源）──────────────
+
+
+def test_compute_subagents_root_per_dir_layout(tmp_path):
+    """新形态（per-wf）：``workflow_dir/subagents/`` 直接含 *.md → 返回该目录。
+
+    subagents/ 与 workflow.yaml 同目录（自包含布局）；wf_name 不参与路径。
+    """
+    sub = tmp_path / "subagents"
+    sub.mkdir()
+    (sub / "helper.md").write_text("---\nsubagent: helper\n---\nbody", encoding="utf-8")
+    out = _compute_subagents_root(tmp_path, "demo-wf")
+    assert out == str(sub)
+
+
+def test_compute_subagents_root_legacy_misfire_regression(tmp_path):
+    """误命中回归：旧平铺形态 ``root/subagents/`` 存在但无直接 md（md 在二级 <wf>/ 内）
+    → 必须返回 ``root/subagents/<wf>``，不能把壳目录 subagents/ 误判为新形态。
+
+    若公式只查 ``sub.is_dir()`` 判新形态，本用例会返回无 md 的 subagents/ 壳目录。
+    """
+    legacy = tmp_path / "subagents" / "nas-supernet"
+    legacy.mkdir(parents=True)
+    (legacy / "helper.md").write_text("body", encoding="utf-8")
+    out = _compute_subagents_root(tmp_path, "nas-supernet")
+    assert out == str(legacy)
+
+
+def test_compute_subagents_root_empty_subagents_shell(tmp_path):
+    """subagents/ 目录存在但既无直接 md 也无 <wf>/ 子目录 → 空串（双形态均未命中）。"""
+    (tmp_path / "subagents").mkdir()
+    assert _compute_subagents_root(tmp_path, "demo-wf") == ""
+
+
+def test_compute_subagents_root_per_dir_md_wins_when_both(tmp_path):
+    """双形态并存（subagents/ 直接有 md 且 <wf>/ 子目录也在）→ 新形态优先（先判直接 md）。"""
+    sub = tmp_path / "subagents"
+    legacy = sub / "demo-wf"
+    legacy.mkdir(parents=True)
+    (legacy / "old.md").write_text("body", encoding="utf-8")
+    (sub / "new.md").write_text("body", encoding="utf-8")
+    assert _compute_subagents_root(tmp_path, "demo-wf") == str(sub)
+
+
 # ── 6 处 RunContext 构造点 ─────────────────────────────────────────────────────
 
 

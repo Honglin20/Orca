@@ -387,10 +387,11 @@ class Workflow(BaseModel):
     # SPEC 2026-08-11-resume-failed-and-configurable-escalation §1.1。
     recoverable_max_attempts: int = Field(default=20, ge=1)
     # 运行时加载元数据（不进 YAML 契约，serialize 排除）：workflow yaml 所在目录，由
-    # ``load_workflow`` 加载期绑定一次。run 层所有 RunContext 构造点从它推导
-    # ``subagents_root = workflows_root / "subagents" / wf.name``（point-to-file 协议
-    # SPEC §3.2/§4）——确定性路径只在加载期解析，运行期零参数透传（修复 in-session
-    # ``orca next`` / daemon 漏传 yaml_path 导致 subagents_root 为空的历史 bug）。
+    # ``load_workflow`` 加载期绑定一次。run 层所有 RunContext 构造点从它经双形态公式
+    # （``orca.compile.layout.resolve_subagents_dir``）推导 ``subagents_root``
+    # （point-to-file 协议 SPEC §3.2/§4）——确定性路径只在加载期解析，运行期零参数
+    # 透传（修复 in-session ``orca next`` / daemon 漏传 yaml_path 导致 subagents_root
+    # 为空的历史 bug）。
     workflows_root: Path | None = Field(default=None, exclude=True)
 
     @field_validator("requires")

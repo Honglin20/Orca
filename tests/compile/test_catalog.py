@@ -219,3 +219,67 @@ def test_setup_yaml_rejected_by_extra_forbid(catalog_dir):
     legacy_path = catalog_dir / "legacy.yaml"
     with pytest.raises(ConfigurationError):
         load_workflow(legacy_path)
+
+
+# ── per-wf 双形态（plan 2026-08-27 批 C：layout.scan_workflow_yamls）──────────
+
+
+def test_list_workflows_per_dir_layout(catalog_dir):
+    """per-wf 形态：``<wf-dir>/workflow.yaml`` 被扫描列出（name 按 yaml 内 name 字段，非目录名）。"""
+    bundled = catalog_dir / "bundled"
+    bundled.mkdir()
+    (bundled / "workflow.yaml").write_text(SIMPLE_WF, encoding="utf-8")
+
+    result = list_workflows()
+
+    assert len(result) == 1
+    # 目录名 bundled ≠ name simple：匹配语义不变（yaml 内 name 字段）
+    assert result[0]["name"] == "simple"
+
+
+def test_list_workflows_dual_layout_flat_first_wins(catalog_dir):
+    """双形态混存 + 同 name → 平铺优先（scan 列表序即优先级，first-wins 取平铺那份）。"""
+    (catalog_dir / "flat.yaml").write_text(SIMPLE_WF, encoding="utf-8")
+    bundled = catalog_dir / "bundled"
+    bundled.mkdir()
+    (bundled / "workflow.yaml").write_text(
+        SIMPLE_WF.replace(
+            "description: 简单 workflow",
+            "description: from per-dir",
+        ),
+        encoding="utf-8",
+    )
+
+    result = list_workflows()
+
+    assert len(result) == 1  # 同 name first-wins（不是两份）
+    assert result[0]["description"] == "简单 workflow"  # 平铺先见，胜出
+
+
+def test_list_workflows_dual_layout_both_listed(catalog_dir):
+    """双形态混存 + 不同 name → 平铺与 per-wf 两个 workflow 都列出（互不遮蔽）。"""
+    (catalog_dir / "flat.yaml").write_text(SIMPLE_WF, encoding="utf-8")
+    bundled = catalog_dir / "bundled"
+    bundled.mkdir()
+    (bundled / "workflow.yaml").write_text(
+        SIMPLE_WF.replace("name: simple", "name: per-dir-wf"),
+        encoding="utf-8",
+    )
+
+    result = list_workflows()
+
+    assert {item["name"] for item in result} == {"simple", "per-dir-wf"}
+
+
+def test_find_workflow_by_name_per_dir_layout(catalog_dir):
+    """find_workflow 同款双形态：按 name 找到 per-wf 形态并返回其 yaml 路径。"""
+    bundled = catalog_dir / "bundled"
+    bundled.mkdir()
+    (bundled / "workflow.yaml").write_text(SIMPLE_WF, encoding="utf-8")
+
+    wf = find_workflow_by_name("simple")
+    assert wf is not None
+    assert wf.name == "simple"
+    path = find_workflow_yaml_path("simple")
+    assert path is not None
+    assert path.endswith("workflow.yaml")

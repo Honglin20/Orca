@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from orca.compile import ConfigurationError, load_workflow
+from orca.compile.layout import scan_workflow_yamls
 from orca.schema.workflow import Workflow
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,7 @@ def list_workflows() -> list[dict[str, Any]]:
         if not d.is_dir():
             continue
         try:
-            yaml_paths = sorted(d.glob("*.yaml"))
+            yaml_paths = scan_workflow_yamls(d)
         except OSError:
             continue
         for yaml_path in yaml_paths:
@@ -107,7 +108,7 @@ def find_workflow(name: str) -> tuple[Workflow, str] | None:
         if not d.is_dir():
             continue
         try:
-            yaml_paths = sorted(d.glob("*.yaml"))
+            yaml_paths = scan_workflow_yamls(d)
         except OSError:
             continue
         for yaml_path in yaml_paths:

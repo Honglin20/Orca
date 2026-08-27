@@ -15,7 +15,7 @@
 
 **任务**：workflows/ 平铺 → per-wf 自包含目录（`<wf>/workflow.yaml + agents/ + subagents/ + knowledge_base/ + scripts/`）；双形态加载兼容；kd-nas 净删除；create-workflow skill 同步；web 显示 sub-agents + 脚本资产。
 **SPEC**：`C:\Users\mozzie\.claude\plans\crystalline-chasing-dewdrop.md`（PASS）｜**计划**：`docs/plans/2026-08-27-workflow-per-dir-layout-plan.md`（READY）
-**Phase**：Phase 3 实现——**批 A 完成**（commit `a379375`，v2 固化 + 基线 `.layout_baseline_list.txt` 源态口径 15 wf 含 kd-nas；注意 `orca list` CLI 混扫安装态多 po-probe 尸体，diff 一律用源态口径）；**批 B 完成**（kd-nas 净删除：58 文件删 + 混合测试改判 test_struct_kd_p7/test_receiver_variants 保留 kd 外用例 + e2e_redesign 契约 kd 条目清零 + 注释死例换 _po_scripts；源态 catalog 14 wf；deferred 待批 D/H 裁决：knowledge_base kd 专属卡死链 / workflows 内 KD-NAS 大写死例文本 / examples/kd-nas-demo README 死链）
+**Phase**：Phase 3 实现——**批 A 完成**（commit `a379375`，v2 固化 + 基线 `.layout_baseline_list.txt` 源态口径 15 wf 含 kd-nas；注意 `orca list` CLI 混扫安装态多 po-probe 尸体，diff 一律用源态口径）；**批 B 完成**（kd-nas 净删除：58 文件删 + 混合测试改判 test_struct_kd_p7/test_receiver_variants 保留 kd 外用例 + e2e_redesign 契约 kd 条目清零 + 注释死例换 _po_scripts；源态 catalog 14 wf；deferred 待批 D/H 裁决：knowledge_base kd 专属卡死链 / workflows 内 KD-NAS 大写死例文本 / examples/kd-nas-demo README 死链）；**批 C 完成**（加载层双形态：新 `orca/compile/layout.py` 单一真相源〔`scan_workflow_yamls` 平铺优先 + `resolve_subagents_dir` 双形态含误命中守卫 any(*.md)〕由 catalog/orchestrator/validator 三处 import 复用；KB per-wf 来源〔R4'：env > config > per-wf〔判据含 index.json〕> ~/.orca > cwd + `_INJECTED_KB_ENV` 防进程级 env 伪显式〕；render/validator 错误文案双形态化；单测四组 +14 用例；code-reviewer 3 轮 CLEAN；源态探针 14 wf 与批 A 基线逐字段一致〔除批 B 删的 kd-nas〕，平铺源态行为零变化）
 **基线 diff 口径**：源态直扫（load_workflow 逐 yaml），勿直接 diff `orca list` 输出
 **无人值守**：计划外问题 fail loud 停下写 `LAYOUT_MIGRATION_REPORT.md`；pytest/tars 走 WSL .venv；不 push
 

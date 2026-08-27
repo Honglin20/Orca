@@ -83,9 +83,11 @@ def render_template(template: str, ctx: RunContext) -> str:
             phase="render",
             message=(
                 "模板引用了 {{ subagents_root }} 但 RunContext.subagents_root 为空——"
-                "该 workflow 期望子 agent body 目录但未解析。检查 workflow yaml 是否在"
-                " repo workflows/ 目录内（dev 态零 install 依赖）；若 yaml 在 repo 外，"
-                "需先 `tars install` 把 subagents/ 部署到 ~/.orca/workflows/subagents/。"
+                "该 workflow 期望子 agent body 目录但未解析。subagents/ 应与 "
+                "workflow.yaml 同目录（per-wf 形态，即 <wf-dir>/subagents/）；旧平铺"
+                "形态则位于 workflows/subagents/<wf-name>/。请检查 workflow yaml 所在"
+                "布局（dev 态 yaml 需在 workflows/ 布局内）；已安装环境需先 "
+                "`tars install` 部署。"
             ),
         )
     try:

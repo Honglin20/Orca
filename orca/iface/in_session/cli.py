@@ -487,7 +487,7 @@ def _write_orca_env(
         export ORCA_CHART_SOCK=<chart_sock_path(run_id)>
         export ORCA_AGENT_RESOURCES=<folder-agent resources_root>   # 或 ``unset`` 清 stale
         export ORCA_ARTIFACTS_DIR=<runs/<run_id>/artifacts/>        # P8 权威产物目录
-        export ORCA_KB_DIR=<resolve_kb_dir()>                       # plan §1.2 KB 根（空则不注）
+        export ORCA_KB_DIR=<resolve_kb_dir(wf)>                     # plan §1.2 KB 根（空则不注；wf 透传启用 per-wf 来源）
 
     ``resources_root`` 非空（folder-agent）→ ``export``；为 None（inline-prompt 节点）→
     ``unset ORCA_AGENT_RESOURCES`` 清潜在 stale（同一 shell 内前一次 source 的残留）。
@@ -1407,7 +1407,8 @@ def bootstrap(
         sock_path=sock_path,
         resources_root=result.resources_root,
         artifacts_dir=artifacts_dir,
-        kb_dir=resolve_kb_dir(),
+        # wf_obj 透传 → per-wf KB 来源参与解析（R4'；bootstrap :1145 已加载，零额外 I/O）。
+        kb_dir=resolve_kb_dir(wf_obj),
     )
     _spawn_chart_daemon(run_id, tape_path)
     if not _wait_for_sock(sock_path):
@@ -1812,7 +1813,8 @@ async def _next_in_critical_section(
             # P8：artifacts_dir per-run 常量（bootstrap 已 mkdir）；next 不重 mkdir。
             # 调用方（next CLI）恒传非 None（派生自 tape_path + run_id）。
             artifacts_dir=artifacts_dir or _derive_artifacts_dir(tape, run_id),
-            kb_dir=resolve_kb_dir(),
+            # wf 透传 → per-wf KB 来源参与解析（R4'；:1751 已从 tape 反查加载，零额外 I/O）。
+            kb_dir=resolve_kb_dir(wf),
         )
 
     # marker RMW（N2）：flock 临界区内回写。终态 → 清 marker（不复用）。
