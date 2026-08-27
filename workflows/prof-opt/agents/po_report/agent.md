@@ -26,21 +26,25 @@ training/eval step.
   exactly.
 - `{{ inputs.project_root }}` = the user's project root (write-back target
   neighborhood; originals always read-only).
-- `{{ inputs.write_back }}` = whether the success path writes files back.
-- `{{ inputs.accuracy_budget }}` = final budget for the gap verdict.
+- The success path ALWAYS writes files back (write-back is a fixed
+  behavior, not an input).
 - `{{ inputs.full_train_epoch_cap }}` = the full-training epoch cap (empty
   string = uncapped) — the cap already took effect at the contract stage
   and is recorded in `contracts.json` `full_train_budget.epochs`; the
   Fairness Note cites that recorded value (see the references file).
-- `{{ inputs.report_dir }}` = report archive directory RELATIVE to
-  `{{ inputs.project_root }}` (default `docs/prof-opt`; empty string = skip
-  archiving). At the END of the builder, copy the run's human-readable
-  deliverables into it: `prof_opt_report.md`, the `charts/` files, and
-  `baseline_status.md` — created if missing, existing files at the same name
+- The report archive directory is fixed at `docs/prof-opt` relative to
+  `{{ inputs.project_root }}`. At the END of the builder, copy the run's
+  human-readable deliverables into it: `prof_opt_report.md`, the `charts/`
+  files, `baseline_status.md`, and the rule-table mirror
+  `accuracy_rules.md` — created if missing, existing files at the same name
   are never overwritten (suffix the copy with the run id instead — the run
   id is `$ORCA_RUN_ID`, the engine-injected run identity the workspace
   `.run_lock` records; a run-metadata value, not tied to the chart env).
   This is a terminal one-time user-side write, same class as the write-back.
+- The accuracy budget for the final gap verdict is read from the frozen
+  origin anchor (`base/origin_anchor.json`), never from a raw input. The
+  anchor's baseline makespan / target line / budget also fill the report's
+  baseline block.
 
 ## Zero cross-node output reference hard rule
 
@@ -93,18 +97,47 @@ markdown → JSON; re-runs are safe — the builder is idempotent). The
 builder:
 
 - reads ONLY workspace state (plus the user project tree for the write-back
-  diff — read-only there except the new files it writes);
+  diff and the rule merge — read-only there except the new files it writes);
 - is safe to re-run (write-back is idempotent: identical content at the
   target counts as written, different content is never overwritten);
+- opens the report's first section with the two disclosure blocks:
+  `profile_mode.json` verbatim (the profiling configuration every number in
+  the report was measured under) and the deployed scripts' `.VERSION`
+  manifest stamp (`scripts/.VERSION`);
+- reads `base/origin_anchor.json` for the baseline block (original baseline
+  makespan, frozen target line, accuracy budget) and counts
+  `zero_improvement_rounds` from history: rounds that ran an advance (a
+  `direction.json` exists) whose round has NO `advanced` history row — the
+  count is informational (report prose), never a schema field;
+- reads the last round's `proposals.json` (`exhausted`, always false, and
+  the rationale) and `accuracy_rules.json` as report material;
 - prints the final single-line JSON on stdout; everything else goes to
   stderr.
 
-### Step 2: Write-back (inside the builder, conditional)
+### Step 2: Write-back (inside the builder, success path)
 
-Only on `status == success` AND `{{ inputs.write_back }}` true: the format
-document's write-back section (lock re-verification → final-shadow diff →
-new-file names `<stem>_prof_optimized<suffix>` → conflict entries →
-byte-verification). The user's existing files are never modified.
+On `status == success`: the format document's write-back section (lock
+re-verification → final-shadow diff → new-file names
+`<stem>_prof_optimized<suffix>` → conflict entries → byte-verification).
+The user's existing files are never modified.
+
+### Step 2b: Rule merge (inside the builder, ALWAYS)
+
+Regardless of status — a failed run's measured lessons are the most
+valuable ones — run the terminal rule handoff:
+
+```bash
+python3 "$ORCA_ARTIFACTS_DIR/scripts/rules_pool.py" merge \
+  --artifacts "$ORCA_ARTIFACTS_DIR" --project-root "{{ inputs.project_root }}"
+```
+
+It overwrites the project mirror
+`{{ inputs.project_root }}/docs/prof-opt/accuracy_rules.json` with the
+workspace rules and merges them into the cross-run pool (model-hash keyed
+evidence, confirm/refute bookkeeping). Best-effort: a disclosed failure
+never changes the report status. Then write the human-readable table mirror
+`docs/prof-opt/accuracy_rules.md` (one row per rule: pattern / direction /
+generality / confidence / evidence rounds / gap / statement).
 
 ### Step 3: Charts + human report (inside the builder)
 

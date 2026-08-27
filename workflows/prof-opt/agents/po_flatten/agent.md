@@ -93,9 +93,15 @@ output `error` field):
 - `{{ inputs.project_root }}` — absolute path, must exist and be readable.
 - `{{ inputs.model_path }}` — model definition file (relative to project root or
   absolute); must exist.
-- `{{ inputs.fresh_start }}` (true/false), `{{ inputs.npu_chip }}`
-  (empty = placeholder estimation mode; `6613`/`1951` = mfu real-evaluation
-  mode; anything else fails Step 0), `{{ inputs.seed }}`.
+- `{{ inputs.fresh_start }}` (true/false), `{{ inputs.seed }}`.
+- Profiling mode is NOT an input: it is resolved from the environment once at
+  entry. Optional env vars `ORCA_PO_NPU_CHIP` (`6613`/`1951`, illegal values
+  fail loud), `ORCA_PO_NPU_PRECISION` (`INT8`/`INT16`/`AMP`, default `INT8`),
+  `ORCA_PO_NPU_CORES` (`1`/`2`/`4`, default `1`); without them an `npu-smi`
+  on PATH selects mfu mode (chip parsed from its model column), otherwise
+  the built-in placeholder estimator runs. The result is written once to
+  `$ORCA_ARTIFACTS_DIR/profile_mode.json` — every downstream profiling
+  consumer reads that file, never the env.
 - No pretrained-checkpoint input exists: training in this pipeline
   always starts from a fixed-seed random initialization; every checkpoint
   argument below is the empty string.
@@ -133,29 +139,41 @@ ran" — the Step 0 gate decides what to skip).
 
 ```bash
 cd "$ORCA_ARTIFACTS_DIR" || { mkdir -p "$ORCA_ARTIFACTS_DIR" && cd "$ORCA_ARTIFACTS_DIR"; }
-NPU_PRECISION="{{ inputs.npu_precision }}" NPU_CORE_NUM="{{ inputs.npu_core_num }}" \
 bash "$ORCA_AGENT_RESOURCES/scripts/reuse_check.sh" \
   "{{ inputs.model_path }}" "" \
-  "{{ '1' if inputs.fresh_start else '0' }}" "{{ inputs.npu_chip }}"
+  "{{ '1' if inputs.fresh_start else '0' }}"
 ```
 
 Exit code mapping (the script logs details to stderr):
 
-- `0` (`REUSE`) → skip Steps 1-6 and the Validation step. Re-derive the output
-  fields mechanically from disk: `shadow_root="$ORCA_ARTIFACTS_DIR/shadow"`;
-  `shadow_pkgs` = top-level entries of `shadow/` (directories by name, `*.py` files
-  without the suffix, sorted); `model_module` = `{{ inputs.model_path }}` with the
-  `.py` suffix stripped and path separators replaced by `.` (package layout is
-  preserved inside the shadow, so this is the import-qualified name);
-  `manifest_path`, `baseline_lock_path` from disk. Then go straight to Output
-  (include `verify/memory_verifier_report.md` in `generated_artifacts` when that
-  file exists on disk).
+- `0` (`REUSE`) → the workspace is reusable (structural anchor matches AND the
+  re-resolved profiling mode matches the recorded `profile_mode.json` on the
+  measurement-config fields). Do ALL of the following before emitting:
+  1. **Redeploy the shared tooling** (Step 1's script, idempotent full
+     overwrite + version stamp refresh — a reused workspace upgrades to the
+     current script set instead of running stale deployed copies). A nonzero
+     exit → `flatten_passed=false` with the stderr in `error`.
+  2. **Keep the workspace's `accuracy_rules.json` as-is** (in-run rules are
+     the workspace truth; re-seeding would overwrite them — never seed here).
+  3. Re-derive the output fields mechanically from disk:
+     `shadow_root="$ORCA_ARTIFACTS_DIR/shadow"`;
+     `shadow_pkgs` = top-level entries of `shadow/` (directories by name,
+     `*.py` files without the suffix, sorted); `model_module` =
+     `{{ inputs.model_path }}` with the `.py` suffix stripped and path
+     separators replaced by `.` (package layout is preserved inside the
+     shadow, so this is the import-qualified name); `manifest_path`,
+     `baseline_lock_path` from disk. Then go straight to Output (include
+     `verify/memory_verifier_report.md` in `generated_artifacts` when that
+     file exists on disk).
 - `1` (`NO_REUSE`) → continue with Step 1.
 - `3` (fail-loud conflict: another live run / structural anchor changed /
-  illegal profiling-mode inputs (npu_chip / npu_precision / npu_core_num) /
-  unreadable-or-corrupt BASELINE.lock) → emit `flatten_passed=false` with the stderr message in
-  `error` (mention `fresh_start` when the anchor changed). Do not attempt repairs.
-- `2` → hard environment error → `flatten_passed=false` + `error`.
+  unreadable-or-corrupt BASELINE.lock) → emit `flatten_passed=false` with the
+  stderr message in `error` (mention `fresh_start` when the anchor changed).
+  Do not attempt repairs.
+- `2` → hard environment error (including a profiling-mode mismatch vs the
+  recorded `profile_mode.json` — cycles measured under a different
+  configuration cannot be compared across runs) → `flatten_passed=false` +
+  `error` carrying the stderr guidance (the remedy is `fresh_start=true`).
 
 `{{ inputs.fresh_start }}` = true → the gate wipes the ENTIRE reusable workspace
 (every entry under `$ORCA_ARTIFACTS_DIR` except the `.run_lock` single-writer
@@ -164,21 +182,35 @@ the gate and the validation gate) and reports `NO_REUSE`; you then rebuild
 shadow / lock / manifest /
 readiness from scratch. The wipe is deliberately whole-workspace, not a pinned
 path list: leftovers from an older run (even files this version no longer knows)
-would silently false-gate the rebuild checks. Never wipe by hand.
+would silently false-gate the rebuild checks. The project-side rule mirror and
+the global rule pool are OUTSIDE the workspace and survive the wipe — the fresh
+path re-seeds the workspace rules from them (Step 3b). Never wipe by hand.
 
-### Step 1: Deploy The Shared Tooling
+### Step 1: Deploy The Shared Tooling + Resolve The Profiling Mode
 
-Deploy the canonical shared scripts into the workspace (idempotent; safe to re-run).
-After this step, reference ALL shared scripts as `$ORCA_ARTIFACTS_DIR/scripts/<x>`,
-never the workflow source path:
+Deploy the canonical shared scripts into the workspace (idempotent; safe to
+re-run). After this step, reference ALL shared scripts as
+`$ORCA_ARTIFACTS_DIR/scripts/<x>`, never the workflow source path:
 
 ```bash
 bash "$PO_SCRIPTS/deploy_scripts.sh"
 ```
 
-stdout is one JSON line (`scripts_dir` / `orca_inject_dir` / counters); verify
-`orca_inject_dir` points at `$ORCA_ARTIFACTS_DIR/orca_inject`. Non-zero exit →
-fail loud (`flatten_passed=false`).
+stdout is one JSON line (`scripts_dir` / `orca_inject_dir` / counters /
+`manifest`); verify `orca_inject_dir` points at `$ORCA_ARTIFACTS_DIR/orca_inject`.
+Non-zero exit → fail loud (`flatten_passed=false`).
+
+Then resolve the profiling mode ONCE (fresh path only — REUSE verified it in
+Step 0 and keeps the recorded file):
+
+```bash
+bash "$ORCA_ARTIFACTS_DIR/scripts/resolve_profile_mode.sh"
+```
+
+stdout is one JSON line (`mode` / `chip` / `precision` / `core_num` /
+`resolved_by`), written verbatim to `$ORCA_ARTIFACTS_DIR/profile_mode.json`.
+An illegal env enum or an unparseable npu-smi chip exits 2 — fail loud
+(`flatten_passed=false`), never fall back silently.
 
 ### Step 2: Survey The Project (manifest + user package marker + interpreter)
 
@@ -307,6 +339,26 @@ move or edit.
    (Set `PO_MODEL_PATH="{{ inputs.model_path }}"` and `PO_CKPT=""`
    in the environment of that snippet; the empty `PO_CKPT` means no reference
    checkpoint and the lock records the empty anchor.)
+
+7. **Seed the accuracy rules** (fresh path only — the REUSE branch keeps the
+   workspace's existing rules):
+
+   ```bash
+   [ -f "$ORCA_ARTIFACTS_DIR/accuracy_rules.json" ] || \
+   python3 "$ORCA_ARTIFACTS_DIR/scripts/rules_pool.py" seed \
+     --artifacts "$ORCA_ARTIFACTS_DIR" --project-root "{{ inputs.project_root }}"
+   ```
+
+   The seed composes, by priority: the project mirror
+   `{{ inputs.project_root }}/docs/prof-opt/accuracy_rules.json` (this
+   project's measured lessons, verbatim), pool entries measured on this very
+   model (model-hash keyed), entries confirmed general across models, and —
+   one confidence level down and marked `borrowed` — plausibly-general
+   entries. stdout is one JSON line (source counts); missing mirror/pool or
+   bad rows are disclosed on stderr and degrade to an empty/partial seed
+   (best-effort asset, never a failure). A run exit 2 here names the refusal
+   reason — treat `seed refused` as a state inconsistency (the file should
+   not exist on the fresh path) and fail loud.
 
 ### Step 4: Prove Shadow Resolution
 

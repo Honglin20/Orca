@@ -1,5 +1,5 @@
 ---
-description: Run the baseline chain non-blockingly - export and profile the pristine shadow (placeholder estimator, or the mfu real-evaluation path via the mfu-analyzer subagent when npu_chip is set), launch the full-budget baseline training detached with a finalizer guardian that delivers the curve and accuracy anchors, dispatch the business-logic analyst in parallel, and emit once training liveness is confirmed.
+description: Run the baseline chain non-blockingly - export and profile the pristine shadow (placeholder estimator, or the mfu real-evaluation path via the mfu-analyzer subagent when profile_mode.json selects mfu), freeze the immutable origin anchors (target line + accuracy budget) from the first profile, launch the full-budget baseline training detached with a finalizer guardian that delivers the curve and accuracy anchors, dispatch the business-logic analyst in parallel, and emit once training liveness is confirmed.
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # po_baseline
@@ -14,16 +14,23 @@ this node different from a normal script driver:
    The detached finalizer finishes the baseline on its own (incremental
    curve, live chart pushes, final check, both accuracy anchors, terminal
    marker).
-2. **Profiling has two modes**: with `{{ inputs.npu_chip }}` empty the chain
-   runs the built-in placeholder estimator inline (nothing for you to do).
-   With a chip set (mfu real-evaluation mode) the chain WAITS at its step 2
-   for the `mfu-analyzer` subagent's raw products, adapts them through the
-   deterministic `mfu_adapter.py`, and never falls back to the estimator —
-   you own the analyzer dispatch across that boundary.
+2. **Profiling mode comes from disk**: `$ORCA_ARTIFACTS_DIR/profile_mode.json`
+   (resolved once at the entry node) selects placeholder (estimator inline)
+   or mfu (the chain WAITS at its step 2 for the `mfu-analyzer` subagent's
+   raw products, adapts them through the deterministic `mfu_adapter.py`, and
+   never falls back to the estimator — you own the analyzer dispatch across
+   that boundary; the chip/precision/core_num the analyzer needs are read
+   from that same file).
 3. **One subagent runs in parallel with the training**: as soon as the
    chain confirms the training launched, dispatch `business-logic-analyst`
    to write `baseline/business_logic.md` (five sections — the semantic
    anchor every later proposal is judged against).
+
+You also own the ONE-TIME origin-anchor freeze: right after the chain's
+first profile succeeds, `base/origin_anchor.json` records the baseline
+makespan, the frozen latency target line, and the accuracy budget. The
+anchor is immutable for the workspace's lifetime — every later gate,
+advance, and verdict reads it and never recomputes it.
 
 The chain script owns every deterministic decision (step order,
 idempotency, crash relaunch, terminal states); your jobs are to invoke it,
@@ -58,14 +65,13 @@ products, and relay the chain's final state as one JSON line.
   `bash "$ORCA_AGENT_RESOURCES/scripts/check_business_logic.sh"`.
 - Shared scripts execute from `$ORCA_ARTIFACTS_DIR/scripts/` (deployed at
   flatten time) — never from the workflow source tree.
-- Inputs consumed here: `{{ inputs.latency_reduction_min }}` (validated by
-  the chain; the gate derives the absolute threshold from the baseline
-  makespan), the profiling-mode trio `{{ inputs.npu_chip }}` /
-  `{{ inputs.npu_precision }}` / `{{ inputs.npu_core_num }}` (empty chip =
-  built-in placeholder estimator; `6613`/`1951` = mfu real-evaluation mode —
-  profiling then runs through the `mfu-analyzer` subagent plus the
-  deterministic `mfu_adapter.py` converter, and the chain NEVER falls back to
-  the placeholder estimator), `{{ inputs.seed }}`.
+- Inputs consumed here: `{{ inputs.latency_reduction_min }}` and
+  `{{ inputs.accuracy_budget }}` (the origin-anchor freeze values — frozen
+  ONCE from the first profile and never re-derived), `{{ inputs.seed }}`.
+  The profiling mode (placeholder / mfu and its chip / precision / core_num)
+  comes from `$ORCA_ARTIFACTS_DIR/profile_mode.json` — resolved once at the
+  entry node; the chain re-reads it and fails loud when it is missing or
+  carries an unknown mode.
 - Upstream state read by the chain: `contracts.json` (interpreter,
   templates, `full_train_budget`, `proxy_budget` k, ckpt rules, metric
   extraction), `shadow/`.
@@ -78,9 +84,9 @@ All path construction in any helper code must use `pathlib.Path` (or
 ## Subagent Call Protocol (point-to-file)
 
 This node dispatches up to TWO subagents: `business-logic-analyst` (always)
-and `mfu-analyzer` (ONLY when `{{ inputs.npu_chip }}` is non-empty). Their
-bodies live at `{{ subagents_root }}/<name>.md` (inlined as absolute paths
-at render time).
+and `mfu-analyzer` (ONLY when `profile_mode.json` records `"mode": "mfu"`).
+Their bodies live at `{{ subagents_root }}/<name>.md` (inlined as absolute
+paths at render time).
 
 `business-logic-analyst`:
 
@@ -88,9 +94,10 @@ at render time).
 
 `mfu-analyzer` (mfu mode only — it runs the real evaluation on the deployed
 `scripts/mfu_benchmark.py` and leaves the raw products read-only under
-`base/profile/`):
+`base/profile/`; read `profile_mode.json` first and substitute its
+`chip` / `precision` / `core_num` values into the dispatch):
 
-`Task(subagent_type=<host built-in generic type>, prompt="First fully Read {{ subagents_root }}/mfu-analyzer.md, strictly follow its Method for this task. This task's inputs: <onnx_path>=$ORCA_ARTIFACTS_DIR/base/model.onnx, <profile_dir>=$ORCA_ARTIFACTS_DIR/base/profile, <report_path>=$ORCA_ARTIFACTS_DIR/base/profile/mfu_bottleneck_report.md, <chip>={{ inputs.npu_chip }}, <precision>={{ inputs.npu_precision }}, <core_num>={{ inputs.npu_core_num }}. Return in the format the md specifies. The **first line of the report** must verbatim echo the sentinel field from the frontmatter of the md you Read (format at the top of the md; don't guess, don't infer from this prompt — it must come from the file you Read).")`
+`Task(subagent_type=<host built-in generic type>, prompt="First fully Read {{ subagents_root }}/mfu-analyzer.md, strictly follow its Method for this task. This task's inputs: <onnx_path>=$ORCA_ARTIFACTS_DIR/base/model.onnx, <profile_dir>=$ORCA_ARTIFACTS_DIR/base/profile, <report_path>=$ORCA_ARTIFACTS_DIR/base/profile/mfu_bottleneck_report.md, <chip>=<profile_mode.json chip>, <precision>=<profile_mode.json precision>, <core_num>=<profile_mode.json core_num>. Return in the format the md specifies. The **first line of the report** must verbatim echo the sentinel field from the frontmatter of the md you Read (format at the top of the md; don't guess, don't infer from this prompt — it must come from the file you Read).")`
 
 **Failure matrix** (the node's re-dispatch policy, uniform for both
 subagents): the returned report's first line is not the sentinel, or the
@@ -119,23 +126,41 @@ missing → emit `status="failed"` with
 `error="baseline prerequisites missing: <list> (contract stage did not complete)"`
 and stop.
 
-### Step 1: Invoke The Chain
+### Step 1: Invoke The Chain + Freeze The Origin Anchor
 
 ```bash
 cd "$ORCA_ARTIFACTS_DIR"
 bash "$ORCA_AGENT_RESOURCES/scripts/run_baseline_chain.sh" \
   --latency-reduction-min "{{ inputs.latency_reduction_min }}" \
-  --seed {{ inputs.seed }} \
-  --npu-chip "{{ inputs.npu_chip }}" \
-  --npu-precision "{{ inputs.npu_precision }}" \
-  --npu-core-num {{ inputs.npu_core_num }}
+  --seed {{ inputs.seed }}
 ```
 
-The chip argument decides the mode inside the chain: empty = placeholder
-estimator runs inline; non-empty = mfu mode (see Step 2 for the analyzer
-handshake). In mfu mode, when the chain reports the awaiting state you may
-also dispatch `mfu-analyzer` BEFORE re-invoking the chain (see Step 2) —
-both orders converge on the same disk state.
+The profiling mode inside the chain comes from `profile_mode.json`:
+placeholder = estimator runs inline; mfu = analyzer handshake (see Step 2).
+In mfu mode, when the chain reports the awaiting state you may also dispatch
+`mfu-analyzer` BEFORE re-invoking the chain — both orders converge on the
+same disk state.
+
+**After EVERY chain invocation that reports a non-failed state, run the
+anchor-freeze check** (mechanical, idempotent — once the anchor exists it is
+a no-op):
+
+```bash
+if [ -s "$ORCA_ARTIFACTS_DIR/base/profile/profile_summary.json" ] && \
+   [ ! -f "$ORCA_ARTIFACTS_DIR/base/origin_anchor.json" ]; then
+  python3 "$ORCA_ARTIFACTS_DIR/scripts/analyze.py" \
+    --profile-dir "$ORCA_ARTIFACTS_DIR/base/profile" --freeze-origin \
+    --latency-reduction-min {{ inputs.latency_reduction_min }} \
+    --accuracy-budget {{ inputs.accuracy_budget }} || exit 1
+fi
+```
+
+The freeze writes `base/origin_anchor.json` exactly once: baseline makespan,
+`target_cycles = int(baseline x (1 - latency_reduction_min)) + 1`, and the
+accuracy budget. A non-zero exit means an illegal value range or an existing
+anchor with DIFFERENT content — the anchor is immutable; quote the stderr
+(it names the `fresh_start` remedy) in `error` and emit `status=failed`.
+Never edit or delete the anchor by hand.
 
 stdout is ALWAYS exactly one JSON line whose field set is EXACTLY the node
 output schema (nine fields: `status` ∈ `executed | running | failed` —
@@ -147,7 +172,7 @@ and `baseline/finalizer.log` / `baseline/train.attempt<N>.log`.
 
 ### Step 2: Dispatch the analysts (mfu first when it gates the chain; business-logic in parallel with training)
 
-**mfu mode** (`{{ inputs.npu_chip }}` non-empty) — the chain's step 2 waits
+**mfu mode** (`profile_mode.json` mode is `mfu`) — the chain's step 2 waits
 for the mfu-analyzer's raw products; dispatch it when the chain reports the
 awaiting state (`error` mentioning `awaiting mfu-analyzer`), or proactively
 when `base/model.onnx` exists, `base/profile/profile_summary.json` is

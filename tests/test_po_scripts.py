@@ -1,39 +1,27 @@
 """test_po_scripts.py — unit tests for the prof-opt shared deterministic scripts.
 
-Covers: history_lib (builder field sets + R3 dedup branches + joint retry
-budget + v4 probe-row eval annotations), gate_decide (all four decisions +
-hard cap + stall reset), advance_round (r1->r2 base/shadow double replacement
-+ round-number idempotency key), analyze (fixture-driven hot patterns /
-pipeline breakdown / cost table + strict unknown-key failure), predict_delta
-(per-shape-class row pricing incl. the small-site E2E regression + params
-normalization idempotency), the placeholder profiler's delta-direction
-guarantee (minimal GELU vs ReLU export), render_run (<<k>> token chain:
---set substitution incl. special-char values, builtin/header tokens, the
-PYTHONUNBUFFERED header token, fail-loud on unreplaced tokens and
-non-identifier --set keys), the check_contracts gate (fairness-invariant
-token/budget enforcement incl. the knob/value symmetric pair),
-run_baseline_chain's step6 stale-anchor proxy-budget re-verification +
-schema-shaped stdout line (verbatim-forwardable), the po_flatten reuse gate's
-fresh_start whole-workspace wipe + two-state BASELINE.lock failure copy
-(matching lock reaches REUSE — the str.read_text regression; readable
-mismatch = promotion-history guidance pointing at fresh_start; corrupt lock =
-real error), and deploy_scripts' orphan-script
-retirement. v4 additions: gate_node syntax fix, metric_curve pinned-depth
-compare (--at-epoch + at_epoch/baseline_path outputs), stop_at_epoch
-(process-group kill at epoch k, actual-depth re-parse, idempotence, pid
-attribution, shared metric_curve parse), check_bottleneck (closed schema +
-referential order-preserving subset), push_curves (best-effort live-chart
-sidecar with 5s socket timeouts and an append-only audit log). v4
-cleanliness-fix round: verdict_decide (the promote / final-budget gates
-read only the anchors the workspace RECORDED), extract_user_pkg fail-loud
-project-root/model-path resolution, po_propose check_prerequisites.
-mfu-profiling round: mfu_adapter (raw mfu_benchmark products -> contract
-four-piece with canonical makespan = parallel_cycles, fail-loud matrix,
-idempotency, onnx override), the reuse gate's npu_chip enum, the baseline
-chain's mfu handshake (awaiting mfu-analyzer -> adapt -> executed; report
-without raw products = fatal no-fallback; illegal npu args), the recheck's
---pre-profiled mode (pre-profiled makespan verbatim, never inline), and the
-workflow input-set pin (script-path input retired, npu trio added).
+Covers: history_lib (builder field sets + dedup branches + joint retry
+budget + probe-row eval annotations with the gap field), gate_decide (the
+sequential-gate decision order + round cap + torn-workspace invariant),
+advance_round (latency/accuracy dual mode, the (round, mode) idempotency
+key, torn-write repair, direction.json failed-sigs), analyze (fixture-driven
+hot patterns / pipeline breakdown / cost table + strict unknown-key failure
++ the frozen origin anchor), predict_delta (per-shape-class row pricing
+incl. the small-site E2E regression + params normalization idempotency),
+the placeholder profiler's delta-direction guarantee, render_run (<<k>>
+token chain), check_contracts (fairness-invariant token/budget enforcement),
+run_baseline_chain (non-blocking baseline + finalizer guardian; profiling
+mode from profile_mode.json), the po_flatten reuse gate (fresh_start
+whole-workspace wipe + lock states + profiling-mode consistency), and
+deploy_scripts' orphan retirement + version stamp. Shared-layer coverage:
+metric_curve pinned-depth compare, stop_at_epoch (process-group kill at
+epoch k), check_bottleneck, push_curves, verdict_decide (anchor-budget
+promote/final-budget gates), extract_user_pkg, and po_propose
+check_prerequisites. The v5 recheck section pins the mode-conditioned gate
+(placeholder/mfu from profile_mode.json; strict-improvement vs incumbent in
+the latency phase, the frozen target line in the recovery phase). v5
+mechanics (round_state, rules_pool, resolve_profile_mode, gate_node stamp
+wiring, smoke) live in test_po_v5.py.
 """
 from __future__ import annotations
 
@@ -1851,33 +1839,44 @@ def _po_baseline_schema_fields() -> set[str]:
     return props
 
 
-def test_workflow_inputs_retire_script_path_add_npu_trio():
-    """The input set after the profiling re-route: the script-path input is
-    GONE (every {{ inputs.X }} reference died with it — a dangling Jinja ref
-    crashes the render), replaced by the npu trio with the pinned defaults.
-    The trio's Jinja references must exist in the agent bodies that consume
-    them (flat gate / baseline chain / propose recheck)."""
+def test_workflow_inputs_pin_v5_eight_input_set():
+    """The input set after the sequential-gating redesign: exactly 8 inputs,
+    field-for-field pinned (the retired six — npu trio / write_back /
+    report_dir / probe_epochs — must stay gone; every {{ inputs.X }} Jinja
+    reference that died with them must not reappear, a dangling ref crashes
+    the render)."""
     import yaml
     wf = yaml.safe_load(
         (_REPO / "workflows" / "prof-opt" / "workflow.yaml").read_text(encoding="utf-8"))
     inputs = wf["inputs"]
-    assert "profile_script_path" not in inputs
-    assert len(inputs) == 14
-    assert inputs["npu_chip"]["default"] == ""
-    assert inputs["npu_precision"]["default"] == "INT8"
-    assert inputs["npu_core_num"]["default"] == 1
-
-    consumers = {
-        "po_flatten": ("npu_chip",),
-        "po_baseline": ("npu_chip", "npu_precision", "npu_core_num"),
-        "po_propose": ("npu_chip", "npu_precision", "npu_core_num"),
+    assert set(inputs) == {"project_root", "model_path", "latency_reduction_min",
+                           "accuracy_budget", "seed", "max_rounds", "fresh_start",
+                           "full_train_epoch_cap"}
+    pinned = {
+        "project_root": ("string", True, None),
+        "model_path": ("string", True, None),
+        "latency_reduction_min": ("number", True, None),
+        "accuracy_budget": ("number", True, None),
+        "seed": ("integer", False, 0),
+        "max_rounds": ("integer", False, 100),
+        "fresh_start": ("boolean", False, False),
+        "full_train_epoch_cap": ("string", False, ""),
     }
-    for agent, keys in consumers.items():
-        body = (_REPO / "workflows" / "prof-opt" / "agents" / agent / "agent.md") \
-            .read_text(encoding="utf-8")
-        for key in keys:
-            assert f"{{{{ inputs.{key} }}}}" in body, (agent, key)
-        assert "{{ inputs.profile_script_path }}" not in body, agent
+    for name, (typ, required, default) in pinned.items():
+        assert inputs[name]["type"] == typ, name
+        assert inputs[name]["required"] is required, name
+        if default is not None:
+            assert inputs[name]["default"] == default, name
+
+    for retired in ("profile_script_path", "npu_chip", "npu_precision",
+                    "npu_core_num", "write_back", "report_dir", "probe_epochs"):
+        assert retired not in inputs, retired
+
+    # the anchors the freeze consumes are referenced in the baseline body
+    body = (_REPO / "workflows" / "prof-opt" / "agents" / "po_baseline" / "agent.md") \
+        .read_text(encoding="utf-8")
+    assert "{{ inputs.latency_reduction_min }}" in body
+    assert "{{ inputs.accuracy_budget }}" in body
 
 
 def test_baseline_chain_nonblocking_emit_and_finalizer_products(tmp_path: Path):

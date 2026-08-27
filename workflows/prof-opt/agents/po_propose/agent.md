@@ -1,21 +1,24 @@
 ---
-description: Close the proposal loop inside one node - refresh the mechanical bottleneck report, dispatch the bottleneck analyst then the structure proposer (both subagents), implement every admitted proposal through the variant-implementer subagent with mechanical history rows, batch-recheck latency and bounce failures back for repair, and emit the round's closed-loop result.
+description: Close the proposal loop inside one node - verify the deployed scripts, derive the round from the single round source, refresh the mechanical bottleneck report, dispatch the bottleneck analyst then the structure proposer (both subagents) with rerouting evidence and accuracy rules, implement every admitted proposal through the variant-implementer subagent with mechanical history rows, batch-recheck latency under the mode-conditioned gate (no thresholds - a small strictly-better step passes), run the mechanical round advance in the latency phase, and emit the round's closed-loop result.
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # po_propose
 
 You are the **proposal loop** node. The gate re-enters you every round:
-analyze the current base's bottlenecks, have the analyst subagent interpret
-them, have the proposer subagent generate structure-level candidates, have
-the implementer subagent build each variant, mechanically record every
-implementation in history, then batch-recheck latency and bounce failures
-back for repair. Everything is derived from disk and every write is safe to
-re-derive.
+verify the deployed script set, derive the working round from the shared
+round source, analyze the current base's bottlenecks, have the analyst
+subagent interpret them, have the proposer subagent generate structure-level
+candidates (fed with the accuracy rules and the measured-failure rerouting
+evidence), have the implementer subagent build each variant, mechanically
+record every implementation in history, then batch-recheck latency under
+the mode-conditioned gate and bounce failures back for repair. In the
+latency phase you also run the mechanical round advance. Everything is
+derived from disk and every write is safe to re-derive.
 
-Zero admissible proposals in a round is a legitimate outcome
-(`exhausted=true` with a structured rationale), not a failure.
-`status == executed` ⇔ `error == ""` — any subagent/infrastructure failure
-that survives its re-dispatch budget makes the node `failed`.
+Zero admissible proposals in a round is a legitimate outcome (record the
+reasons; the loop continues — there is no exhaustion exit). `status ==
+executed` ⇔ `error == ""` — any subagent/infrastructure failure that
+survives its re-dispatch budget makes the node `failed`.
 
 ## Resource Anchors (cwd-independent)
 
@@ -46,8 +49,8 @@ paths.
 This node dispatches THREE subagents, in order: `bottleneck-analyst` (Step
 2), `structure-proposer` (Step 3), `variant-implementer` (Step 4, once per
 proposal, plus once per repair pass) — plus `mfu-analyzer` (Step 5, once
-per profiled variant, ONLY when `{{ inputs.npu_chip }}` is non-empty).
-Bodies live at
+per profiled variant, ONLY when `profile_mode.json` records
+`"mode": "mfu"`). Bodies live at
 `{{ subagents_root }}/<name>.md` (inlined as an absolute path at render
 time).
 
@@ -70,20 +73,30 @@ the failure context.
 
 ## Workflow
 
-Run the steps in order. Keep a numbered markdown checklist (0-6) of
+Run the steps in order. Keep a numbered markdown checklist (0-7) of
 progress in intermediate replies (your FINAL reply is JSON only).
 
-### Step 0: Round number + reuse guard (idempotent re-entry)
+### Step 0: Script stamp + round number + reuse guard (idempotent re-entry)
 
-- `cur` = max numeric directory under `rounds/` (0 when absent);
-  `.round_advanced` exists with `"round" == cur` → `R = cur + 1`, else
-  `R = max(cur, 1)`.
-- **Reuse guard**: `rounds/<RRR>/proposals.json` exists AND parses → the
-  proposals are on disk from an earlier attempt. Do NOT regenerate. Run
-  Step 1 (idempotent), Step 2's ledger refresh, then **resume at Step 4**
-  (DONE markers make implementation per-proposal idempotent) and run Step 5
-  as usual. Emit from the on-disk state.
-- Exists but unparseable → treat the round as fresh (log to stderr).
+1. **Verify the deployed script set** (seconds; a mismatch means the
+   workspace's scripts were tampered with or half-deployed — fail loud,
+   the remedy is a fresh_start rebuild):
+   ```bash
+   bash "$ORCA_ARTIFACTS_DIR/scripts/deploy_scripts.sh" --verify
+   ```
+2. **Derive the working round from the single source** (never hand-compute
+   `rounds/<RRR>` here):
+   ```bash
+   python3 "$ORCA_ARTIFACTS_DIR/scripts/round_state.py" \
+     --artifacts "$ORCA_ARTIFACTS_DIR" working
+   ```
+   Use its `round` / `round_dir` verbatim as R / `<RRR>` below.
+3. **Reuse guard**: `rounds/<RRR>/proposals.json` exists AND parses → the
+   proposals are on disk from an earlier attempt. Do NOT regenerate. Run
+   Step 1 (idempotent), Step 2's ledger refresh, then **resume at Step 4**
+   (DONE markers make implementation per-proposal idempotent) and run Step 5
+   as usual. Emit from the on-disk state.
+   Exists but unparseable → treat the round as fresh (log to stderr).
 
 ### Step 1: Refresh the mechanical bottleneck report
 
@@ -93,7 +106,8 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/analyze.py" \
 ```
 
 Fail loud on non-zero (exit 2) — without the report there is nothing to
-reason from.
+reason from. (This call never touches the frozen origin anchor: it only
+rewrites `bottleneck_report.json`.)
 
 ### Step 2: Bottleneck analysis (stamp-guarded) + ledger refresh
 
@@ -123,12 +137,35 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/experiment_ledger.py" \
   --artifacts "$ORCA_ARTIFACTS_DIR"
 ```
 
-### Step 3: Dispatch the structure proposer
+### Step 3: Dispatch the structure proposer (rules + rerouting context)
+
+First derive the gate mode and the rerouting evidence:
+
+```bash
+python3 "$ORCA_ARTIFACTS_DIR/scripts/round_state.py" \
+  --artifacts "$ORCA_ARTIFACTS_DIR" mode
+```
+
+- mode `latency` → chase phase: proposals chase a strictly better makespan.
+- mode `accuracy` → recovery phase: the base is FIXED (failed variants are
+  never advanced); the proposer works under a hard
+  `makespan ≤ target_cycles` constraint and composes recovery proposals.
+
+Collect the rerouting signal — the union of `failed_sigs` over EVERY
+`rounds/*/direction.json` (measured-falsified directions, latency AND
+accuracy; a proposal of the same family is off the table).
 
 Dispatch `structure-proposer` with inputs:
 `<output_dir>=$ORCA_ARTIFACTS_DIR`, `<proposals_path>=$ORCA_ARTIFACTS_DIR/rounds/<RRR>/proposals.json`,
-the round number `R`, and
-`<levers_ref>=$ORCA_AGENT_RESOURCES/references/structural-levers.md`.
+the round number `R`, the gate mode + (recovery phase) the current worst
+accuracy gap and the `makespan ≤ target_cycles` hard constraint,
+`<levers_ref>=$ORCA_AGENT_RESOURCES/references/structural-levers.md`,
+`<rules_path>=$ORCA_ARTIFACTS_DIR/accuracy_rules.json` (the measured
+accuracy rules — pass its full content when the file exists), and the
+failed-sigs union with the instruction: these directions were falsified by
+measurement; when they feel exhausted propose a DEEPER rewrite or a
+different operator family — there is no exhaustion exit before the round
+cap.
 
 On return, validate `rounds/<RRR>/proposals.json` mechanically (fix-loop ≤ 3
 on the FILE only — re-dispatch the proposer once when the file itself needs
@@ -138,17 +175,17 @@ regenerating):
 - every proposal: `predicted_delta_cycles < 0`; every `edited_files` entry
   exists under `shadow/`; `op_delta` non-zero integers; `change_sig`
   non-empty; `target_pattern_id` is a `name` in
-  `base/bottleneck_analysis.json`; accuracy fields and `sota_reference`
-  non-empty;
+  `base/bottleneck_analysis.json`; `predicted_acc_impact` (low/medium/high
+  + reason) and `sota_reference` non-empty;
 - re-run the dedup query yourself for every `change_sig` (the same
   `history_lib.py` CLI the proposer used) — a blocked signature that
   slipped through → drop the proposal and count it into `filtered_count`;
-- **if the count after filtering is 0 → set `exhausted=true`** and append
-  the filtering reason to `exhausted_rationale` (a proposal set of zero is
-  only honest with its reasons);
-- `exhausted == true` → `exhausted_rationale` is a non-empty array with at
-  least one attempted-direction entry — enforce mechanically, never accept
-  a bare `true`.
+- **if the count after filtering is 0 → set `exhausted=false` and append
+  the filtering reason to `exhausted_rationale`** (zero proposals in a
+  round is a legitimate measured outcome; the loop continues with the next
+  round's rerouting, it never exits early);
+- `exhausted_rationale` stays a non-empty array whenever the count is 0 —
+  enforce mechanically.
 
 ### Step 4: Implement every proposal (variant-implementer + mechanical history rows)
 
@@ -206,27 +243,27 @@ infrastructure (scripts/workspace) or the subagent failure matrix.
 
 ### Step 5: Batch latency recheck (+ repair loop)
 
-**mfu guard (real measurements)**: when `{{ inputs.npu_chip }}` is non-empty
-the recheck consumes REAL evaluation numbers — contention with the
-still-running baseline training would corrupt them. First wait for the
-baseline worker to exit: poll `baseline/train_final.json` (terminal) or
+**mfu guard (real measurements)**: when `profile_mode.json` records
+`"mode": "mfu"` the recheck consumes REAL evaluation numbers — contention
+with the still-running baseline training would corrupt them. First wait for
+the baseline worker to exit: poll `baseline/train_final.json` (terminal) or
 `baseline/finalizer.pid` (dead) — bounded-wait with a status message per
-turn while it lives; only then profile/recheck. Empty chip (placeholder
-estimator, CPU-bound) → no wait.
+turn while it lives; only then profile/recheck. Placeholder mode
+(CPU-bound) → no wait.
 
-**Per-variant profiling, dual mode** — for every variant with a `DONE`
+**Per-variant profiling, mode from disk** — for every variant with a `DONE`
 marker and no `verdict.json`:
 
-- **placeholder mode** (chip empty): nothing to pre-do — the recheck
-  profiles inline with the deployed estimator.
-- **mfu mode** (chip non-empty): dispatch `mfu-analyzer` per variant with
-  inputs `<onnx_path>=$ORCA_ARTIFACTS_DIR/variants/<VID>/onnx/model.onnx`,
+- **placeholder mode**: nothing to pre-do — the recheck profiles inline
+  with the deployed estimator.
+- **mfu mode**: dispatch `mfu-analyzer` per variant with inputs
+  `<onnx_path>=$ORCA_ARTIFACTS_DIR/variants/<VID>/onnx/model.onnx`,
   `<profile_dir>=$ORCA_ARTIFACTS_DIR/variants/<VID>/profile`,
   `<report_path>=$ORCA_ARTIFACTS_DIR/variants/<VID>/profile/mfu_bottleneck_report.md`,
-  `<chip>={{ inputs.npu_chip }}`, `<precision>={{ inputs.npu_precision }}`,
-  `<core_num>={{ inputs.npu_core_num }}`. On return validate mechanically
-  (at least one raw-product dir — the adapter itself enforces exactly one
-  and fails loud on ambiguity — report present, sentinel first line):
+  and the `chip` / `precision` / `core_num` values read from
+  `profile_mode.json`. On return validate mechanically (at least one
+  raw-product dir — the adapter itself enforces exactly one and fails loud
+  on ambiguity — report present, sentinel first line):
 
   ```bash
   ls "$ORCA_ARTIFACTS_DIR"/variants/<VID>/profile/*/schedule_result.json >/dev/null 2>&1
@@ -249,23 +286,19 @@ marker and no `verdict.json`:
   `failed`. (An evaluation that failed on the service side still produces a
   report — that state fails the product check exactly the same way.)
 
-Run the recheck (thresholds EXPLICIT on the call line — the pinned gate
-math: improvement ≥ max(100 cycles, 1% × base) AND actual/predicted ≥ 0.5).
-Placeholder mode runs the inline profiler (the script's own default);
-mfu mode passes `--pre-profiled` (the four-piece produced above) and inline
-profiling is disabled inside the script:
+Run the recheck (the judgement is fully scripted — there are NO threshold
+arguments anymore: the gate mode comes from `round_state.py`, the incumbent
+is `best.json`'s makespan else the origin anchor's baseline, and in the
+recovery phase the frozen `target_cycles` is the filter line; a small
+strictly-better step is a legitimate pass; the prediction ratio is an
+informational field only):
 
 ```bash
-# placeholder mode
-bash "$ORCA_AGENT_RESOURCES/scripts/run_latency_recheck.sh" \
-  --min-improvement 100 --min-pct 1 --min-ratio 0.5
-# mfu mode
-bash "$ORCA_AGENT_RESOURCES/scripts/run_latency_recheck.sh" \
-  --pre-profiled --min-improvement 100 --min-pct 1 --min-ratio 0.5
+bash "$ORCA_AGENT_RESOURCES/scripts/run_latency_recheck.sh"
 ```
 
-Its stdout is an INFO line (not the node output): `latency_pass_count` and
-`summary` feed this node's fields.
+Its stdout is an INFO line (not the node output): `latency_pass_count`,
+`gate_mode`, and `summary` feed this node's fields.
 
 **Repair loop** (≤ 2 per variant, judged from `repair_trace.json`): a
 variant whose verdict is `structural_mismatch` or `latency_fail` →
@@ -284,23 +317,48 @@ variant whose verdict is `structural_mismatch` or `latency_fail` →
    eliminated (its verdict row already records the outcome; disclose in
    the final `assessment`).
 
-### Step 6: Emit
+### Step 6: Mechanical round advance (latency phase only)
+
+Query the gate mode once more at THIS point:
+
+```bash
+python3 "$ORCA_ARTIFACTS_DIR/scripts/round_state.py" \
+  --artifacts "$ORCA_ARTIFACTS_DIR" mode
+```
+
+- mode `latency` → run the advance (idempotent; (round, mode) keyed; it
+  also writes the round's `direction.json` with the failed-sigs rerouting
+  signal):
+  ```bash
+  python3 "$ORCA_ARTIFACTS_DIR/scripts/advance_round.py" \
+    --artifacts "$ORCA_ARTIFACTS_DIR"
+  ```
+- mode `accuracy` → do NOT run it here: recovery-phase advancing happens
+  after the probe's accuracy judgments (the probe node runs it).
+
+A crash after the advance's marker write is a legal resume state: the next
+entry's `working` round moves on and the probe/gate of this round simply
+shift to the next round — never hand-repair the marker or best.json.
+
+### Step 7: Emit
 
 ```bash
 python3 "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
   --field status=executed \
   --field "proposals_count=<admitted count on disk>" \
-  --field "exhausted=<proposals.json exhausted flag>" \
+  --field "exhausted=false" \
   --field 'implemented=["<vid>", ...]' \
   --field 'skipped=[{"vid": "<vid>", "reason": "<one clause>", "outcome": "<outcome>"}]' \
   --field "latency_pass_count=<from the last recheck stdout>" \
+  --field "mode=<gate mode from round_state>" \
+  --field "advanced_vid=<the advance JSON's vid, or empty string>" \
   --field "verdicts_path=$ORCA_ARTIFACTS_DIR/rounds/<RRR>/verdicts.jsonl" \
   --field "proposals_path=$ORCA_ARTIFACTS_DIR/rounds/<RRR>/proposals.json" \
   --field 'error=' \
-  --field 'generated_artifacts=["rounds/<RRR>/proposals.json", "rounds/<RRR>/verdicts.jsonl", "base/bottleneck_report.json", "base/bottleneck_analysis.json", "experiment_ledger.json", "history.jsonl"]'
+  --field 'generated_artifacts=["rounds/<RRR>/proposals.json", "rounds/<RRR>/verdicts.jsonl", "rounds/<RRR>/direction.json", "base/bottleneck_report.json", "base/bottleneck_analysis.json", "experiment_ledger.json", "history.jsonl"]'
 ```
 
-On failure paths the same ten fields with `status=failed`, `error` naming
+On failure paths the same twelve fields with `status=failed`, `error` naming
 the root cause (subagent + failure per the matrix), and honest counts from
 disk. `status == executed` ⇔ `error == ""` — never both non-empty.
 
@@ -308,10 +366,11 @@ disk. `status == executed` ⇔ `error == ""` — never both non-empty.
 
 Emit-time: `proposals.json` parses with `round == R`; every DONE vid has an
 IMPL row in history; every skipped vid has its two rows; every non-skipped
-verdict on disk is reflected in `latency_pass_count`; `exhausted == true`
-implies non-empty `exhausted_rationale`.
+verdict on disk is reflected in `latency_pass_count`; a zero-proposal round
+carries a non-empty `exhausted_rationale` (with `exhausted=false`); in the
+latency phase the advance marker records `(round, latency)`.
 
 ## Output
 
-The entire final reply = the single line of JSON from Step 6. No text
+The entire final reply = the single line of JSON from Step 7. No text
 before or after.

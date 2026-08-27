@@ -16,6 +16,12 @@ mechanically, is safe to re-run (write-back is idempotent by the same-content
 rule), and prints the final single-line JSON on stdout. Your reply is that
 line verbatim.
 
+The report's FIRST section is a disclosure block carrying two verbatim
+records: `profile_mode.json` (the profiling configuration every number in
+this report was measured under — mode / chip / precision / core_num /
+resolved_by) and the deployed scripts' version stamp (`scripts/.VERSION`
+manifest hash). No judgement, just provenance.
+
 ## 0. Terminal harvest (before the state table)
 
 Read `baseline/finalizer.pid`: dead → pass (the baseline's terminal state is
@@ -98,11 +104,11 @@ verdicts").
   includes the aborted-at-terminal case); `train_final.status == "failed"`
   → null + attribution (quote its `stage`); `done` → read
   `baseline_full_acc` from the file (never from anywhere else). `makespan` =
-  the ORIGINAL baseline makespan, sourced in priority order: (a) any
-  round-1 history row's `base_at_proposal.makespan_cycles`, (b) any
-  round-1 `verdicts.jsonl` line's `base_makespan_cycles`, (c) the current
-  `base/profile/profile_summary.json` (valid only when no round ever
-  advanced — no winner was ever promoted).
+  `base/origin_anchor.json`'s `baseline_makespan_cycles` — the frozen
+  ORIGINAL baseline (the anchor never moves with advances); when the
+  anchor file is absent (pre-baseline terminal) fall back to the current
+  `base/profile/profile_summary.json` with an explicit disclosure that the
+  value is un-anchored.
 - `pretrained_ref_acc`: number from `baseline/pretrained_ref.json` when that
   file exists and parses with a numeric `value`; null otherwise. Reference
   only — never a gate. (No stage of this workflow currently writes that
@@ -132,7 +138,7 @@ verdicts").
   `dashboard.html`, final checkpoint / onnx when present, the charts directory.
 - `error`: "" on success; the matched failure cause otherwise.
 
-## 3. Write-back (ONLY when status == success AND the `<write-back>` input is true)
+## 3. Write-back (when status == success — write-back is a fixed behavior)
 
 The write-back source is the FINAL global shadow (`shadow/` — after the last
 round-end advance it is the winner's full tree) diffed against the user's
@@ -194,9 +200,9 @@ Write into `charts/`, one self-contained HTML file per chart (inline SVG,
 stdlib-only rendering — no external dependencies):
 
 - `rounds_makespan_trend.html` — line chart; x = round 1..R, y = that
-  round's reference makespan: the round's best promoted makespan (history
-  rows of the round with `outcome == "promoted"`, minimum) or, when nothing
-  promoted, the round's base makespan (any row of the round's
+  round's reference makespan: the round's best advanced makespan (history
+  rows of the round with `outcome == "advanced"`, minimum) or, when nothing
+  advanced, the round's base makespan (any row of the round's
   `base_at_proposal.makespan_cycles`).
 - `verdict_distribution.html` — bar chart; latest-version outcome → count
   over all vids in history.
@@ -226,9 +232,30 @@ stdlib-only rendering — no external dependencies):
   (+ `; live pushed` when the live push succeeded, `; live push unavailable`
   otherwise).
 
+## 4b. Accuracy-rule merge (ALWAYS, before the markdown)
+
+Hand the workspace's `accuracy_rules.json` to the two permanent homes —
+regardless of the terminal status (a failed run's measured lessons are the
+most valuable ones):
+
+```bash
+python3 "$ORCA_ARTIFACTS_DIR/scripts/rules_pool.py" merge \
+  --artifacts "$ORCA_ARTIFACTS_DIR" --project-root "<project-root>"
+```
+
+It overwrites the project mirror `<project-root>/docs/prof-opt/
+accuracy_rules.json` with the workspace rules and merges them into the
+cross-run pool. Best-effort: on any disclosed failure, say so in `reason`
+and continue. Then write the human-readable table mirror
+`<project-root>/docs/prof-opt/accuracy_rules.md` (one row per rule:
+pattern / direction / generality / confidence / evidence rounds / gap /
+statement).
+
 ## 5. prof_opt_report.md (human-readable, workspace root)
 
-Sections: Terminal State (status/stage/reason) · Per-Round Table (round,
+Sections: Profiling Disclosure (profile_mode.json verbatim + scripts
+.VERSION stamp) · Terminal State (status/stage/reason) · Per-Round Table
+(round,
 proposals, verdict outcome counts, promoted vids, round best makespan) ·
 **Stop-Status Disclosure** (mechanical counts over every
 `variants/<vid>/train/stop_status.json`: `killed` vs `natural_done`, and how many
@@ -245,9 +272,17 @@ never the raw argparse count**; when the anchor file's recorded
 should already have failed the fingerprint check upstream — if you are
 looking at one, say so), state BOTH values.) · Baseline vs Final
 (baseline makespan / curve-at-k proxy accuracy / full-training anchor,
-final makespan / accuracy / gap / budget verdict; add a "pretrained
-reference" line — path only, explicitly non-gating — when `readiness.json`
-records a provided pretrained ckpt) · Write-Back (written files, conflicts,
+final makespan / accuracy / gap / budget verdict — the baseline side of
+the table reads `base/origin_anchor.json` (original baseline makespan /
+frozen target line / accuracy budget); add a "pretrained reference" line —
+path only, explicitly non-gating — when `readiness.json` records a provided
+pretrained ckpt; add a "zero-improvement rounds" count line: rounds that
+ran an advance (a `rounds/<NNN>/direction.json` exists) whose round has NO
+`advanced` history row — derive it from HISTORY rows (reading
+direction.json files alone would double-count, they are overwritten within
+a round) · Accuracy Rules (the run's rule file summary: rule count, the
+highest-confidence harmful/benign patterns, the merge outcome and the
+mirror paths) · Write-Back (written files, conflicts,
 deletions, informational skips of shadow-synthesized files; on a
 no-promotion terminal: the explicit "no promoted variant — nothing to
 write back" line) ·

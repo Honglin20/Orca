@@ -51,9 +51,9 @@ gen_export_onnx / emit_result) — do NOT reference workflow source paths.
   (`python` = the working interpreter, `model_facts` = module/factory/args/kwargs/
   container_key/dummy_inputs), `project_manifest.md` (entry points, metric
   direction, data environment), `shadow/` + `shadow_pkgs`.
-- `{{ inputs.project_root }}` (read-only), `{{ inputs.probe_epochs }}`
-  (empty = derive), `{{ inputs.full_train_epoch_cap }}` (empty = uncapped),
-  `{{ inputs.seed }}`.
+- `{{ inputs.project_root }}` (read-only), `{{ inputs.full_train_epoch_cap }}`
+  (empty = uncapped), `{{ inputs.seed }}`. The probe stop depth k has no
+  input: it is derived mechanically from the full training budget.
 
 ## Path Handling Iron Rules
 
@@ -402,11 +402,10 @@ must carry IDENTICAL values):
 
 **`proxy_budget`** (the variant stop depth):
 
-- `epochs` = k: `{{ inputs.probe_epochs }}` empty → `min(1,
-  full_train_budget.epochs)`; non-empty numeric →
-  `min(int("{{ inputs.probe_epochs }}"), full_train_budget.epochs)`.
-  Variants render at `full_train_budget.epochs` and are stopped at epoch k
-  externally — k only caps the comparison depth.
+- `epochs` = k: `min(1, full_train_budget.epochs)` — mechanically derived
+  from the full budget, with no user override. Variants render at
+  `full_train_budget.epochs` and are stopped at epoch k externally — k only
+  caps the comparison depth.
 - `dataset_knob` / `data_value` / `max_steps`: always `null`.
 - `seed` = `{{ inputs.seed }}` (same value as the full budget).
 

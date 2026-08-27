@@ -153,21 +153,30 @@ early-stopping projects are out of scope — see `contracts.json` `reason`).
    "baseline_full_acc": <number>, "baseline_full_acc_source": "baseline",
    "full_train_budget": <verbatim from contracts.json>,
    "within_budget": <bool>, "metric_direction": "<direction>"}`.
-4. Budget judgement (scripted; anchor = the resolved `baseline_full_acc`).
-   Write `final/final_acc.json` FIRST with `"within_budget": null`, then:
+4. Budget judgement (scripted; anchor = the resolved `baseline_full_acc`,
+   budget = the FROZEN origin anchor's `accuracy_budget` — there is no
+   budget argument anymore). Write `final/final_acc.json` FIRST with
+   `"within_budget": null`, then:
    ```bash
    python3 "$ORCA_ARTIFACTS_DIR/scripts/verdict_decide.py" final-budget \
-     --artifacts "$ORCA_ARTIFACTS_DIR" \
-     --budget "<accuracy-budget>"
+     --artifacts "$ORCA_ARTIFACTS_DIR"
    ```
    It reads `final_acc` / `baseline_full_acc` / `metric_direction` back from
-   the file and prints `{"within_budget": <bool>}` — overwrite the null with
-   that value. The direction-normalized comparison is scripted, never
-   hand-derived.
-5. Copy the winner structure (referenced, never re-measured):
+   the file and the budget from `base/origin_anchor.json`, and prints
+   `{"within_budget": <bool>}` — overwrite the null with that value. The
+   direction-normalized comparison is scripted, never hand-derived.
+5. **Terminal rule extraction** (within budget or not): dispatch
+   `accuracy-analyst` with the final training's measured outcome, the
+   winner's lineage `change_sig`, and the current workspace
+   `accuracy_rules.json`; validate the returned file with
+   `rules_pool.py check --artifacts "$ORCA_ARTIFACTS_DIR"` (re-dispatch
+   once on failure, then drop bad rows and disclose). The report node
+   performs the terminal merge — nothing to merge here.
+6. Copy the winner structure (referenced, never re-measured):
    `variants/$WINNER/onnx/model.onnx` → `final/model.onnx`
    (`base/model.onnx` is the same structure after the round-end advance;
    either source is valid — copy from the variant for a stable provenance).
+(Absorbed into step 5 above.)
 
 ## Idempotency notes
 

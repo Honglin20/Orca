@@ -1,24 +1,28 @@
 # Probe Protocol
 
-Per-survivor accuracy probe procedure (stop-at-k). Paths are relative to
-the workspace root (`$ORCA_ARTIFACTS_DIR`) unless absolute. `RRR` =
-current round zero-padded to 3 digits.
-
-Angle-bracket placeholders (`<project-root>`, `<accuracy-budget>`) are
-runtime values from your node prompt's input anchors — substitute the
-actual values when you run the commands.
+Per-survivor accuracy probe procedure (stop-at-k), executed only in the
+accuracy phase (the node prompt's Step 0 decides the phase via
+`round_state.py` — in the latency phase the node passes through without
+touching this protocol). Paths are relative to the workspace root
+(`$ORCA_ARTIFACTS_DIR`) unless absolute. `RRR` = current round zero-padded
+to 3 digits.
 
 Gate parameters used here (direction-normalized by `metric_direction` from
 `contracts.json`):
 
 - stop depth `k` = `contracts.json` `proxy_budget.epochs` — read from disk.
 - full effective epochs `E` = `contracts.json` `full_train_budget.epochs`.
-- promote line (curve gate): `baseline_curve_at_k − 1.0 ×
-  <accuracy-budget>` where `baseline_curve_at_k` = the baseline curve's
-  metric at epoch k (from `baseline/baseline_metrics.jsonl`).
+- accuracy budget = `base/origin_anchor.json` `accuracy_budget` — the
+  FROZEN origin anchor; never a raw input, never recomputed here.
+- curve gate line: `baseline_curve_at_k − 1.0 × accuracy_budget` where
+  `baseline_curve_at_k` = the baseline curve's metric at epoch k (from
+  `baseline/baseline_metrics.jsonl`).
 - eval gate (only when `train.ckpt_per_epoch` is true): variant k-th ckpt
   eval must be within the same budget of `baseline/baseline_k_acc.json`'s
   `baseline_k_acc`.
+- `gap` = the WORST of the two gate gaps in budget units (higher = further
+  from the line); pass ⇔ gap ≤ accuracy_budget. The scripted verdict
+  computes it — never by hand.
 
 For `higher_better` metrics "worse than the line" means value < line; for
 `lower_better` it means value > line. All comparisons are computed by the
@@ -46,16 +50,27 @@ Four quadrants, act per table:
 | dead | `status: failed` | **error route**: emit `status=failed`, assessment names `train_final.stage`. |
 | dead | missing | **fail loud**: the finalizer exited without a terminal state (assessment names `baseline/finalizer.log`); never proceed on an unknown baseline. |
 
+## Training set (mechanical, no timing inference)
+
+Resolved by the NODE's Step 0 from history; restated here because re-entry
+re-derives it:
+
+- `best.json` vid has NO probe row in history (any version) → **first
+  entry**: train only that vid.
+- otherwise → **recovery round**: train the current round's survivor set =
+  latest history rows with `round == round_state current` and
+  `outcome == "latency_pass"`, excluding vids whose latest row is already a
+  terminal probe row (`accuracy_pass` / `accuracy_fail` /
+  `probe_insufficient` — all three count as already trained).
+
 ## State derivation (every entry, including re-entry)
 
 1. Run the GPU guard. Still waiting → status message; terminal-done →
    continue.
-2. `R` = maximum numeric directory under `rounds/`.
-3. Survivors = vids whose LATEST history row has `round == R` and
-   `outcome == "latency_pass"`.
-4. Per survivor, the stage:
-   - history row already terminal (`outcome` in `promoted` /
-     `probe_insufficient`) → done, skip;
+2. Confirm the training set per the rule above.
+3. Per survivor, the stage:
+   - history row already terminal (`outcome` in `accuracy_pass` /
+     `accuracy_fail` / `probe_insufficient`) → done, skip;
    - `variants/<vid>/eval/proxy.json` exists but the history row is still
      `latency_pass` → reconcile first (see below), then re-derive;
    - `variants/<vid>/train/stop_status.json` exists but the history row is
@@ -64,7 +79,7 @@ Four quadrants, act per table:
    - a pid file under `variants/<vid>/train/` with a live group → the step
      is in flight: poll it with `stop_at_epoch.sh` (never re-launch);
    - otherwise → start at the train step.
-5. Write `probe_status.md`: round, survivor list, per-survivor stage,
+4. Write `probe_status.md`: round, training-set list, per-vid stage,
    in-flight pids, attempt counts, timestamp. Truncate the heal ledger
    `.po_probe_healed.txt` on node entry (it reports THIS entry's heals only).
 
@@ -136,8 +151,8 @@ payload; history is the ledger — after reconciliation they must agree.
      relaunch re-creates the checkpoints, the control files must survive),
      relaunch (attempt counter in `probe_status.md`). After 2 failed
      retries → terminal `probe_insufficient` (`proxy_acc=null`,
-     `promote_gate="fail"`), `max_retries_hit=true`, next survivor. Record
-     heals under `.po_probe_healed.txt`.
+     `promote_gate="fail"`, no gap), `max_retries_hit=true`, next vid.
+     Record heals under `.po_probe_healed.txt`.
    - **While waiting**: push the live curves each poll cycle (best-effort
      sidecar, never fatal):
      ```bash
@@ -161,13 +176,14 @@ payload; history is the ledger — after reconciliation they must agree.
      --baseline "$ORCA_ARTIFACTS_DIR/baseline/baseline_metrics.jsonl" \
      --candidate "$ORCA_ARTIFACTS_DIR/variants/<VID>/metrics/metrics.jsonl" \
      --direction "<contracts.json eval.metric_direction>" \
-     --budget "<accuracy-budget>" \
+     --budget "<base/origin_anchor.json accuracy_budget>" \
      --at-epoch <k>
    ```
    Either curve lacking epoch k fails loud (never silently compare at a
    different depth). Persist this JSON as
    `variants/<VID>/metrics/epoch_compare.json` — its `at_epoch` must equal
-   k and its `baseline_path` names the anchor.
+   k, its `baseline_path` names the anchor, and its `normalized_loss` is
+   the curve gate's gap.
 7. **k-th checkpoint eval** (only when `contracts.json`
    `train.ckpt_per_epoch` is true): resolve the k-th checkpoint from the
    variant's train out-dir (the k-th match of `train.ckpt_output_rule` in
@@ -180,26 +196,28 @@ payload; history is the ledger — after reconciliation they must agree.
    ONCE (re-render, new log); still failing → **degrade to curve-only
    judgment** with `eval_failed: true`, `eval_acc: null`, and the
    degradation disclosed in the history row and the assessment — the probe
-   is not lost, only less strict.
+   is not lost, only less strict (its gap is then the curve gap alone).
    When `ckpt_per_epoch` is false → curve-only by design: set
    `eval_skipped_no_epoch_ckpt: true` in the history row (disclosed, not an
    error).
-8. **Promote check** (scripted; BOTH gates when the eval ran, curve alone
-   otherwise):
+8. **Accuracy verdict** (scripted; BOTH gates when the eval ran, curve
+   alone otherwise; the budget comes from the origin anchor — there is no
+   budget argument anymore):
    ```bash
    python3 "$ORCA_ARTIFACTS_DIR/scripts/verdict_decide.py" promote \
-     --artifacts "$ORCA_ARTIFACTS_DIR" --vid <VID> \
-     --budget "<accuracy-budget>"
+     --artifacts "$ORCA_ARTIFACTS_DIR" --vid <VID>
    ```
-   Prints `{'curve_pass', 'eval_acc', 'eval_pass', 'line', 'promoted'}`: the
-   promote line is recomputed from the anchor RECORDED in
-   `variants/<VID>/metrics/epoch_compare.json` (`baseline_metric`) and the
-   direction from `contracts.json` — never by mental arithmetic or
-   hand-copied values. The eval gate applies only when both the variant
-   eval (`variants/<VID>/eval/proxy.json` `metric_value`) and the baseline
-   anchor (`baseline/baseline_k_acc.json` `baseline_k_acc`) exist; either
-   absent → curve-only judgment.
-   outcome = `promoted` if true else `probe_insufficient`.
+   Prints `{'curve_pass', 'eval_acc', 'eval_pass', 'line',
+   'accuracy_pass', 'gap'}`: the line is recomputed from the anchor
+   RECORDED in `variants/<VID>/metrics/epoch_compare.json`
+   (`baseline_metric`) and the direction from `contracts.json` — never by
+   mental arithmetic or hand-copied values. `gap` is the WORST gate gap;
+   `accuracy_pass` ⇔ gap ≤ the frozen budget. The eval gate applies only
+   when both the variant eval (`variants/<VID>/eval/proxy.json`
+   `metric_value`) and the baseline anchor
+   (`baseline/baseline_k_acc.json` `baseline_k_acc`) exist; either absent →
+   curve-only judgment.
+   outcome = `accuracy_pass` if true else `accuracy_fail`.
 
 ## History row + results line (after each terminal outcome)
 
@@ -208,7 +226,8 @@ python3 -c "import sys; sys.path.insert(0, '$ORCA_ARTIFACTS_DIR/scripts'); \
 from history_lib import append_probe; \
 append_probe('$ORCA_ARTIFACTS_DIR/history.jsonl', '<VID>', \
 proxy_acc=<the CURVE metric at k — always the curve value, never the eval value>, \
-promote_gate='<pass|fail>', outcome='<promoted|probe_insufficient>', \
+promote_gate='<pass|fail>', outcome='<accuracy_pass|accuracy_fail|probe_insufficient>', \
+gap=<the verdict's gap, or omit for probe_insufficient>, \
 eval_acc=<eval metric or None>, \
 eval_failed=<true only when the k-ckpt eval could not run>, \
 eval_skipped_no_epoch_ckpt=<true only when ckpt_per_epoch is false>, \
@@ -222,7 +241,7 @@ of the row.) Then the results line:
 python3 -c "import json, pathlib; \
 p = pathlib.Path('$ORCA_ARTIFACTS_DIR/rounds/<RRR>/probe_results.jsonl'); \
 row = {'vid': '<VID>', 'proxy_acc': <curve-at-k or None>, 'eval_acc': <or None>, \
-'promote_gate': '<pass|fail>', 'outcome': '<outcome>', \
+'promote_gate': '<pass|fail>', 'outcome': '<outcome>', 'gap': <or None>, \
 'stop_status': '<killed|natural_done>', 'stopped_at_epoch': <N>, \
 'monitor_failed': <bool>}; \
 p.parent.mkdir(parents=True, exist_ok=True); \
@@ -233,24 +252,47 @@ Append the results line ONLY when creating the outcome fresh (not during
 reconciliation of a line that already exists — check the file for the vid
 first).
 
-## Round-end advance
+## Rule extraction (after the whole training set is terminal)
 
-When every survivor of round `R` has a terminal outcome in history:
+Dispatch `accuracy-analyst` (node prompt's protocol) with: this round's
+probe rows (vid / gap / accuracy_pass / proxy_acc), each vid's lineage
+`change_sig` (its latest history row), and the current
+`$ORCA_ARTIFACTS_DIR/accuracy_rules.json`. The analyst returns an UPDATED
+rule file (same schema). Validate mechanically:
+
+```bash
+python3 "$ORCA_ARTIFACTS_DIR/scripts/rules_pool.py" check \
+  --artifacts "$ORCA_ARTIFACTS_DIR"
+```
+
+A failed check → re-dispatch the analyst ONCE with the failing rows quoted;
+still failing → delete only the offending rows, disclose them in the
+assessment, continue (the rules are an incremental asset; a bad row never
+blocks the round).
+
+## Round-end advance (accuracy phase)
+
+After the training set is terminal AND the rule extraction is settled:
 
 ```bash
 python3 "$ORCA_ARTIFACTS_DIR/scripts/advance_round.py" --artifacts "$ORCA_ARTIFACTS_DIR"
 ```
 
-- `base_advanced` = true iff `.round_advanced` now records round `R`
-  (a no-op return with `advanced:false` and a matching marker round still
-  means the advance is in effect).
-- `best_updated` = the `best_updated` flag from the advance JSON.
+- In the accuracy phase only an `accuracy_pass` vid at or under the frozen
+  `target_cycles` advances (smallest gap wins); a round with none keeps the
+  base FIXED — the failed directions land in the round's `direction.json`
+  (`failed_sigs`) as the next round's rerouting signal.
+- `base_advanced` = true iff `.round_advanced` now records the current
+  round for the accuracy mode (a no-op return with a matching (round,
+  mode) marker still means the advance is in effect).
+- `best_updated` / `advanced_vid` = the corresponding fields from the
+  advance JSON.
 - A non-zero exit is a workspace-level failure: emit `status=failed` with
   the cause stated in `assessment` and all count fields 0 (this node's
   output schema has no error field — the assessment carries the cause).
 
 ## Assessment marker
 
-Keep a one-line human summary in `.po_probe_assessment.txt` (promotions,
-retry hits, monitor_failed and eval-degradation disclosures). It feeds the
-`assessment` output field.
+Keep a one-line human summary in `.po_probe_assessment.txt` (mode,
+accuracy passes, retry hits, monitor_failed and eval-degradation and
+rule-extraction disclosures). It feeds the `assessment` output field.

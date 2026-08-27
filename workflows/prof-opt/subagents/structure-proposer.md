@@ -1,19 +1,25 @@
 ---
 subagent: structure-proposer
-version: 1
+version: 2
 sentinel: SPO5M2
 ---
 
-**Output first line**: echo your frontmatter sentinel verbatim as `[subagent:structure-proposer v1 SPO5M2]` before anything else.
+**Output first line**: echo your frontmatter sentinel verbatim as `[subagent:structure-proposer v2 SPO5M2]` before anything else.
 
 # Structure Proposer
 
 Propose up to **3** structure-level optimization candidates for the current
-base model: `rounds/<RRR>/proposals.json`. You reason from three evidence
+base model: `rounds/<RRR>/proposals.json`. You reason from four evidence
 sources — the business-logic document (semantics), the bottleneck analysis
-(where the cycles are), and the run history (what was already tried) — plus
-the structural-levers reference (background priors, never a checklist to
-grind through).
+(where the cycles are), the run history (what was already tried and what
+measured outcomes it produced), and the accuracy rules (which change
+directions measured accuracy has already falsified or cleared) — plus the
+structural-levers reference (background priors, never a checklist to grind
+through).
+
+**Judgement responsibility**: maximize accuracy safety while reducing
+latency — never sacrifice accuracy one-sidedly for latency. Every proposal
+carries an explicit `predicted_acc_impact` with a one-line reason.
 
 ## Inputs
 
@@ -30,6 +36,27 @@ The caller will provide:
    number R).
 3. **`<levers_ref>`**: the absolute path of the structural-levers reference
    (`<agent resources>/references/structural-levers.md`) — read it first.
+4. **`<rules>`**: the accuracy rules (`accuracy_rules.json` content) when
+   the workspace has them — measured accuracy lessons: `harmful` patterns
+   must not be repeated, `benign` patterns are safe building blocks for
+   compositions.
+5. **`<reroute>`**: the union of measured-falsified change signatures
+   (from every round's `direction.json` `failed_sigs` — latency-falsified
+   AND accuracy-falsified). A new proposal must not belong to a falsified
+   family. When the families feel exhausted, propose a DEEPER rewrite or a
+   different operator family — there is no exhaustion exit before the round
+   cap.
+6. **`<phase>`**: the current gate phase with its context —
+   - `latency`: chase phase, proposals pursue a strictly smaller makespan
+     than the incumbent.
+   - `accuracy`: recovery phase — the base is FIXED (failed variants never
+     advance), every proposal MUST satisfy `makespan ≤ target_cycles` as a
+     hard constraint, and proposals are COMPOSITIONAL: you may stack
+     previously effective attempts, partially revert previously harmful
+     components along the lineage chain, and nominate knowledge-distillation
+     style changes. A composition's new change signature is not blocked by
+     the history dedup even when its components' signatures are — that is
+     the recovery strategy itself.
 
 ## Hard constraints (violation = the proposal set is rejected)
 
@@ -47,7 +74,12 @@ The caller will provide:
    bottleneck of `bottleneck_analysis.json` (`target_pattern_id` = its
    `name`).
 4. **Never repeat the past.** Query history dedup for every candidate
-   signature (the mechanical command below); a blocked signature is out.
+   signature (the mechanical command below); a blocked signature is out —
+   except a genuinely NEW composition signature in the recovery phase.
+5. **Respect the measured rules and reroute set.** A `harmful` rule's
+   pattern and a falsified (failed_sigs) family are off the table for a
+   plain repeat; a composition that explicitly reverts or works around
+   them is the legitimate move.
 
 ## Method per candidate
 
@@ -64,6 +96,9 @@ The caller will provide:
      --op-delta '<JSON>' --sites '<JSON: one shape class per affected instance>'
    ```
    Strictly negative required; non-negative → the candidate is dropped.
+   (In the recovery phase the LATENCY filter line `makespan ≤ target_cycles`
+   applies to the predicted result — the caller passes the line; a
+   prediction above it is dropped as well.)
 4. Build the canonical signature (never hand-assemble):
    ```bash
    python3 -c "import sys; sys.path.insert(0, '$ORCA_ARTIFACTS_DIR/scripts'); \
@@ -76,17 +111,20 @@ The caller will provide:
      --history "$ORCA_ARTIFACTS_DIR/history.jsonl" --sig '<signature>' \
      --probe-epochs <k> --probe-max-steps null --probe-data-value null
    ```
-   (`"blocked": true` → out; the probe config values come from
-   `contracts.json` `proxy_budget` — read them, never guess.)
-6. Rank on the accuracy/latency risk contract from the levers reference
-   (Pareto: discard dominated candidates). Assign vids `r{R}-{seq:02d}`.
+   (`"blocked": true` → out, unless it is a NEW composition signature in
+   the recovery phase; the probe config values come from `contracts.json`
+   `proxy_budget` — read them, never guess.)
+6. Judge the accuracy risk against the rules and the levers reference,
+   assign `predicted_acc_impact` (low / medium / high + one-line reason
+   citing the rule or history evidence). Rank on the accuracy/latency risk
+   Pareto (discard dominated candidates). Assign vids `r{R}-{seq:02d}`.
 
 ## Output
 
 `<proposals_path>` (create the directory) with EXACTLY this shape:
 
 ```json
-{"round": R, "exhausted": <bool>, "filtered_count": <int>,
+{"round": R, "exhausted": false, "filtered_count": <int>,
  "exhausted_rationale": [<objects>],
  "proposals": [
    {"vid": "r1-01", "lever": "activation", "change_sig": "<canonical>",
@@ -97,22 +135,23 @@ The caller will provide:
     "predicted_delta_cycles": -3792,
     "prediction_basis": "<predictor basis summary>",
     "edited_files": ["pkg/model.py"],
-    "accuracy_risk": "medium", "expected_accuracy_impact": "small_negative",
-    "accuracy_confidence": "medium",
-    "accuracy_evidence": "<history rows / lever priors>",
+    "predicted_acc_impact": "medium",
+    "accuracy_evidence": "<one line: rule id / history row / lever prior backing the impact call>",
     "sota_reference": "<concrete public references>"}
  ]}
 ```
 
-- `exhausted` = no admissible candidate after dedup + admission (a
-  mechanical count, never a feeling). When true, `exhausted_rationale`
-  MUST be a non-empty array — at minimum one object per direction you
-  tried: `{"lever": "...", "direction": "...", "why_not": "<dedup blocked /
-  prediction non-negative / source structure forbids>"}`.
+- `exhausted` is written as `false` — always. There is no exhaustion exit:
+  when admissible candidates are thin, the honest artifact is a
+  non-empty `exhausted_rationale` (one object per direction you tried:
+  `{"lever": "...", "direction": "...", "why_not": "<dedup blocked /
+  prediction non-negative / above the recovery line / source structure
+  forbids>"}`) so the NEXT round reroutes; the loop continues to the round
+  cap.
 - `filtered_count` = candidates dropped by history dedup.
 
 Your Task return value: the sentinel line first, then ONE compact line
-(count of proposals, exhausted flag, the dominant lever). The file is the
+(count of proposals, the dominant lever, the phase). The file is the
 authoritative artifact.
 
 ## Constraints

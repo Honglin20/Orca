@@ -1,5 +1,5 @@
 name: prof-opt
-description: "硬件 profiling 证据驱动的模型结构优化闭环：在用户项目旁的影子工作区内，围绕实测瓶颈算子经瓶颈分析与业务逻辑推理自动提出结构修改，基线完整训练在后台非阻塞运行并逐轮推送精度曲线，变体按同一完整轮数渲染、到第 k 轮外部停止做同深度公平对比，先时延证伪再精度证伪、按轮迭代直至时延达标且精度损失在预算内；用户原文件全程只读，胜出结构最终以新文件名写回项目。训练须按给定轮数精确执行——自带 early-stopping 的项目不在本 workflow 范围。"
+description: "硬件 profiling 证据驱动的模型结构优化闭环：在用户项目旁的影子工作区内，围绕实测瓶颈算子经瓶颈分析与业务逻辑推理自动提出结构修改，基线完整训练在后台非阻塞运行并逐轮推送精度曲线，变体按同一完整轮数渲染、到第 k 轮外部停止做同深度公平对比；时延链式推进达标后粗训过精度门、精度不过进恢复轮（底座固定、组合式提案、时延达标线为硬约束），双达标进完整训练；轮数硬帽内无其它出口；实测精度教训按规则沉淀进项目镜像与跨 run 规则池，供后续轮与后续 run 提案复用。用户原文件全程只读，胜出结构最终以新文件名写回项目。训练须按给定轮数精确执行——自带 early-stopping 的项目不在本 workflow 范围。"
 
 entry: po_flatten
 
@@ -7,21 +7,25 @@ entry: po_flatten
 # inputs——三档标签：[ask]=业务决策必填 / [advanced]=罕见 override 可选 /
 # [default]=工程默认。seed 全 workflow 必有。
 #
-# 通用性原则（v2）：时延/精度达标线一律是"相对基线"的无量纲量，由用户按
+# 通用性原则：时延/精度达标线一律是"相对基线"的无量纲量，由用户按
 # 项目给定（[ask]），workflow 内不出现 dB / 百分比 / 绝对 cycles 等项目量纲。
+# 达标线与预算在基线建立时冻结为 origin 锚（不可变；修改需 fresh_start）。
 #
 # `$ORCA_ARTIFACTS_DIR`（入口注入）：`project_root` 非空绝对路径 →
 # `<project_root>/artifacts/prof-opt/`（project-scoped，跨 run 复用 + 多 wf 隔离）。
 #
 # 时延量纲：全链统一整数 cycles（profiling 四件套原生量纲）。
+# profiling 模式（placeholder 本地估算 / mfu 真评测）由入口节点经环境变量
+# ORCA_PO_NPU_* 与 npu-smi 自动解析，落盘 profile_mode.json，下游一律读盘。
 #
-# 跨节点共享确定性脚本：入口节点一次性部署到 `$ORCA_ARTIFACTS_DIR/scripts/`，
-# 其余节点一律经该路径执行（不直引 workflow 源目录）。
+# 跨节点共享确定性脚本：入口节点每次进入都幂等部署到
+# `$ORCA_ARTIFACTS_DIR/scripts/` 并维护版本戳 .VERSION，其余节点一律经该
+# 路径执行（不直引 workflow 源目录）。
 # ─────────────────────────────────────────────────────────────────────────────
 inputs:
   project_root:
     type: string
-    description: "[ask] 用户 PyTorch 项目根目录绝对路径。结构优化的全部勘察 / 影子复制 / 训练评估连接都以它为源项目锚点（agent.md 经 {{ inputs.project_root }} 引用）；亦作工作区解析锚点——workflow 工作区固定在其 artifacts/prof-opt/ 子树（跨 run 复用）。必须用户给（绝对路径，否则启动失败）"
+    description: "[ask] 用户 PyTorch 项目根目录绝对路径。结构优化的全部勘察 / 影子复制 / 训练评估连接都以它为源项目锚点（agent.md 经 {{ inputs.project_root }} 引用）；亦作工作区解析锚点——workflow 工作区固定在其 artifacts/prof-opt/ 子树。必须用户给（绝对路径，否则启动失败）"
     required: true
   model_path:
     type: string
@@ -29,62 +33,32 @@ inputs:
     required: true
   latency_reduction_min:
     type: number
-    description: "[ask] 时延达标线：相对基线 makespan 的最小降低比例（无量纲，0-1 开区间；如 0.5 = 最终时延至少降 50%）。达标判定 = best.makespan ≤ 基线 makespan × (1 − 本值)。项目自定义——不同项目的降幅期望不同，本 workflow 不预设任何项目量纲"
+    description: "[ask] 时延达标线：相对原始基线 makespan 的最小降低比例（无量纲，0-1 开区间；如 0.5 = 最终时延至少降 50%）。达标线在基线建立时冻结为 origin 锚（base/origin_anchor.json 的 target_cycles），此后结构推进永不重锚。达标判定 = best.makespan ≤ target_cycles"
     required: true
   accuracy_budget:
     type: number
-    description: "[ask] 精度预算：相对基线评估指标的最大可接受损失（无量纲，按指标方向归一；如 0.02 = 最多掉 2 个百分点 / 0.1 = 最多差 0.1 个指标单位——具体量纲由项目指标自带）。变体晋升线 / 终局达标线共用此值。必须用户给"
+    description: "[ask] 精度预算：相对基线评估指标的最大可接受损失（无量纲，按指标方向归一；具体量纲由项目指标自带）。同样冻结进 origin 锚；粗训精度门与终局 full-train 判定共用。必须用户给"
     required: true
   seed:
     type: integer
     description: "[default] 复现性种子（默认 0）。导出 / 从头训练随机初始化 / 预算渲染等 seed 消费环节全链固定此值，并记入 full_train_budget 值级指纹"
     required: false
     default: 0
-  write_back:
-    type: boolean
-    description: "[ask] 终态成功后是否把胜出结构写回用户项目（默认 true）。写回 = 按原目录结构生成 <原名>_prof_optimized.<ext> 新文件，绝不覆盖既有文件（同名冲突只报告）；false = 只出报告不落新文件"
-    required: false
-    default: true
-  report_dir:
-    type: string
-    description: "[advanced] 终态报告落档目录（相对 project_root，默认 docs/prof-opt）。po_report 终态把 run 报告与关键记录复制到该目录（与写回同为终态一次性用户侧写入）；空串 = 不落档，只留在工作区"
-    required: false
-    default: "docs/prof-opt"
-  npu_chip:
-    type: string
-    description: "[advanced] profiling 模式开关（默认空 = placeholder 本地估算模式：内置估算器 placeholder_profiler.py 直接产出四件套，无需 NPU 环境）。非空 = mfu 真评测模式：profiling 统一经 mfu-analyzer 子代理执行部署件 scripts/mfu_benchmark.py（真评测），原始产物由确定性 mfu_adapter.py 逐字段转换为四件套——判定数字全部机械提取。合法值仅芯片型号 6613 / 1951；非空且非枚举值启动即失败（入口校验 fail loud），绝不静默回落 placeholder"
-    required: false
-    default: ""
-  npu_precision:
-    type: string
-    description: "[advanced] mfu 评测数据精度（仅 npu_chip 非空的 mfu 模式消费；placeholder 模式忽略）。枚举 INT8 / INT16 / AMP，默认 INT8；mfu 模式下非法值启动即失败"
-    required: false
-    default: "INT8"
-  npu_core_num:
-    type: integer
-    description: "[advanced] mfu 评测并行核数（仅 npu_chip 非空的 mfu 模式消费；placeholder 模式忽略）。枚举 1 / 2 / 4，默认 1；mfu 模式下非法值启动即失败"
-    required: false
-    default: 1
   max_rounds:
     type: integer
-    description: "[advanced] 最大优化轮数（默认 5）。硬帽：达到后永不回边循环，直接进入终态判定"
+    description: "[advanced] 轮数硬帽（默认 100）。唯一循环出口之一：达到后永不回边，直接进入终态判定；无任何时间帽 / 平台早退（平台期的答案是换路径探索，不是停机）"
     required: false
-    default: 5
-  probe_epochs:
-    type: string
-    description: "[advanced] 变体短训停止深度 k（默认空）。变体与基线同模板渲染同一完整轮数、学习率全程同规划，仅由 stop-at-k 机制在第 k 轮外部停止后按曲线第 k 点对比。空 = 由契约阶段按项目全量训练轮数机械推定（通常 1）；非空数字 = 用户覆盖，实际值受完整训练生效轮数封顶。生效值记入 contracts.json 的 proxy_budget（基线与变体共用的唯一预算来源），下游一律读盘"
-    required: false
-    default: ""
-  full_train_epoch_cap:
-    type: string
-    description: "[advanced] 完整训练轮数上限（默认空 = 不截断）。非空 = 实际轮数取 min(本值, 项目全量训练轮数)——基线完整训练与 winner 完整训练共用的唯一预算阀（生效值记入 contracts.json 的 full_train_budget 值级指纹，两侧渲染逐字段一致），非针对特定项目的特判"
-    required: false
-    default: ""
+    default: 100
   fresh_start:
     type: boolean
-    description: "[advanced] 丢弃工作区既有可复用状态、从零重建（默认 false）。结构锚（模型文件）变化导致锁校验失败时的重置开关；true 会清空工作区内全部既有内容（仅保留 .run_lock 单写者锁——本运行自有、心跳持续刷新、从不擦除）后重跑入口节点"
+    description: "[advanced] 丢弃工作区既有可复用状态、从零重建（默认 false）。结构锚（模型文件）或 profiling 模式变化导致锁校验失败时的重置开关，修改达标线 / 精度预算同样需要它（origin 锚不可变）；true 会清空工作区内全部既有内容（仅保留 .run_lock）后重跑入口节点。注意：项目镜像与全局规则池不受影响（fresh_start 后 flatten 会重新回种）"
     required: false
     default: false
+  full_train_epoch_cap:
+    type: string
+    description: "[advanced] 完整训练轮数上限（默认空 = 不截断）。非空 = 实际轮数取 min(本值, 项目全量训练轮数)——基线完整训练与 winner 完整训练共用的唯一预算阀（生效值记入 contracts.json 的 full_train_budget 值级指纹），真机长训练的成本保护"
+    required: false
+    default: ""
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 节点形态：8 节点 = 7 个 agent + 1 个 script（po_gate）。agent 内确定性逻辑
@@ -175,10 +149,10 @@ nodes:
         train_epochs_full: {type: integer, description: "项目全量训练轮数（argparse 机械事实）；viable=false 时 0"}
         proxy_budget:
           type: object
-          description: "变体停止深度 k 的预算记录——epoch 计数与 seed 由契约钉死，基线曲线与变体曲线在第 k 点对齐比较的唯一依据"
+          description: "变体停止深度 k 的预算记录——k 纯机械推定（自动推定，不可覆盖），epoch 计数与 seed 由契约钉死，基线曲线与变体曲线在第 k 点对齐比较的唯一依据"
           required: [epochs, dataset_knob, data_value, max_steps, seed]
           properties:
-            epochs: {type: integer, description: "变体停止深度 k（用户覆盖 × 完整训练生效轮数封顶后的生效值）"}
+            epochs: {type: integer, description: "变体停止深度 k（min(1, 完整训练生效轮数) 机械推定，不可覆盖）"}
             dataset_knob: {type: [string, "null"], description: "恒 null：完整数据训练（兼容字段）"}
             data_value: {type: [string, number, "null"], description: "恒 null：完整数据训练（兼容字段）"}
             max_steps: {type: [integer, "null"], description: "恒 null：不做步数截断（兼容字段）"}
@@ -237,18 +211,19 @@ nodes:
         to: po_propose
       - to: po_report
 
-  # ── Agent 4: po_propose（瓶颈分析→结构提案→变体实现→时延复测内闭环；回边
-  #   重入目标）───────────────────────────────────────────────────────────────
-  #   Step0 reuse（proposals.json 存在可解析 → 跳过提案从实现续做）→ Step1
-  #   analyze.py 机械刷新瓶颈 → Step2 bottleneck-analyst（业务语义瓶颈分析，
-  #   stamp 键=base 版本标识+报告内容指纹，未变复用）→ Step3 structure-
-  #   proposer（≤3 条结构级提案：禁改训练超参 / 符合业务逻辑 / 围绕瓶颈；
-  #   机械准入三闸过滤后为 0 → exhausted=true + rationale）→ Step4 variant-
-  #   implementer 逐提案实现（DONE/skipped；每次 dispatch 后节点侧机械写
-  #   history IMPL 行）→ Step5 run_latency_recheck.sh 批量复测（真 profiler
-  #   在场时前置等基线 worker 退出；未过打回实现修 ≤2，复测前删该 vid
-  #   verdict.json）。三 subagent 失败矩阵：校验败/超配额/产物缺失 → 重派 1
-  #   次 → error 披露。status==executed ⇔ error==''。
+  # ── Agent 4: po_propose（瓶颈分析→结构提案→变体实现→时延复测→机械推进内
+  #   闭环；回边重入目标）─────────────────────────────────────────────────────
+  #   Step0 对戳+轮号（deploy --verify + round_state working；reuse guard 语义
+  #   不变）→ Step1 analyze.py 机械刷新瓶颈 → Step2 bottleneck-analyst（stamp
+  #   键=base 版本标识+报告内容指纹，未变复用）→ Step3 structure-proposer
+  #   （≤3 条结构级提案：禁改训练超参 / 符合业务逻辑 / 围绕瓶颈；输入含
+  #   accuracy_rules.json 全文 + failed_sigs 换路指令 + 恢复轮组合式提案上下
+  #   文；每条必带 predicted_acc_impact）→ Step4 variant-implementer 逐提案实
+  #   现（每次 dispatch 后节点侧机械写 history IMPL 行）→ Step5 批量复测
+  #   （判定双模：latency 态严格改进 / accuracy 态 ≤ 冻结达标线；无绝对/相对
+  #   /预测比阈值）→ Step6 机械推进（latency 态跑 advance_round.py；accuracy
+  #   态不跑——恢复轮推进在 probe 判定后由 probe 跑）→ Step7 emit（含 mode /
+  #   advanced_vid）。
   #   executed → po_probe；catch-all → po_report。
   # ───────────────────────────────────────────────────────────────────────────
   - name: po_propose
@@ -256,11 +231,11 @@ nodes:
     agent: po_propose
     output_schema:
       type: object
-      required: [status, proposals_count, exhausted, implemented, skipped, latency_pass_count, verdicts_path, proposals_path, error, generated_artifacts]
+      required: [status, proposals_count, exhausted, implemented, skipped, latency_pass_count, mode, advanced_vid, verdicts_path, proposals_path, error, generated_artifacts]
       properties:
         status: {type: string, enum: [executed, failed], description: "executed=内闭环完成（个别变体淘汰属正常判定非失败）；failed=脚本链/子代理最终失败。failed ⇔ error 非空"}
         proposals_count: {type: integer, description: "本轮机械准入后的提案数（可为 0）", minimum: 0}
-        exhausted: {type: boolean, description: "true=结构杠杆已穷尽（proposer 声明 + 机械闸过滤后为 0 双判据；exhausted_rationale 结构化落盘 proposals.json）"}
+        exhausted: {type: boolean, description: "兼容字段，恒 false（结构杠杆无穷尽退出；换路由 failed_sigs 驱动，不由本字段触发）"}
         implemented:
           type: array
           items: {type: string}
@@ -275,7 +250,9 @@ nodes:
               reason: {type: string}
               outcome: {type: string, description: "终态淘汰值（variant_broken / structural_mismatch 等），过程性失败可省略"}
           description: "被跳过/失败的提案列表（不阻断轮次）"
-        latency_pass_count: {type: integer, description: "时延复测通过数", minimum: 0}
+        latency_pass_count: {type: integer, description: "时延复测通过数（latency 态=严格改进数；accuracy 态=≤达标线幸存数）", minimum: 0}
+        mode: {type: string, enum: [latency, accuracy], description: "本轮推进阶段（经 round_state 推断）：latency=时延追击链式推进；accuracy=精度恢复轮（底座固定 + 组合式提案）"}
+        advanced_vid: {type: string, description: "本轮经机械推进成为新最优的变体 vid；空串=零推进（无候选 / 恢复轮无过线者 / 撕裂修复判等位）"}
         verdicts_path: {type: string, description: "rounds/<NNN>/verdicts.jsonl 路径；失败时空串"}
         proposals_path: {type: string, description: "rounds/<NNN>/proposals.json 路径；失败时空串"}
         error: {type: string, description: "fail loud 时根因；成功→空串（error 非空 ⇔ failed → 路由 po_report）"}
@@ -289,36 +266,42 @@ nodes:
         to: po_probe
       - to: po_report
 
-  # ── Agent 5: po_probe（GPU 串行守卫 + stop-at-k + 晋升 + 轮末推进）──────────
-  #   时延幸存者串行：GPU 串行守卫（探测 finalizer.pid 四象限：活→有界等待
-  #   / 死+done→放行 / 死+failed→error / 死+缺失→fail loud）→ 每变体：同模板
-  #   完整轮数渲染 + 影子 → detach → 有界轮询反复调 stop_at_epoch.sh 到第 k
-  #   轮组 kill → 曲线 extract（实际深度）→ compare 恒 --at-epoch k vs 基线
-  #   完整曲线 → 可寻址时第 k ckpt eval vs baseline_k_acc 双过才晋升（eval
-  #   失败重派 1 次再降级曲线单判+披露；不可寻址 → 曲线单判 + 披露）→
-  #   probe_results.jsonl + history 精度行 → 轮末原子推进（best/base/影子
-  #   替换，幂等键=轮号）。等待循环内推送 live 曲线图。
+  # ── Agent 5: po_probe（入口对戳 + 条件精度门 + 规则提取 + 恢复轮推进）──────
+  #   节点入口先跑 deploy --verify（直通轮也验戳）→ Step0 mode 分派（经
+  #   round_state 于入口时点求值）：latency → 直通 emit（不训任何变体、不等
+  #   GPU 守卫，survivors_probed=0）；accuracy → 粗训精度门——GPU 串行守卫
+  #   （finalizer.pid 四象限）→ 训练集机械判据（best.vid 无任何 probe 行=首入
+  #   只训 best.vid；已有=恢复轮训本轮全部 latency_pass 幸存者，排除已有终态
+  #   probe 行的 vid）→ stop-at-k 渲染/训练/停止 → 曲线 extract → verdict
+  #   promote（读锚预算，双门最差 gap）→ history 精度行（accuracy_pass /
+  #   accuracy_fail / probe_insufficient + gap）→ 每轮判定后 dispatch
+  #   accuracy-analyst 提取/更新规则（check 失败重派 1 次再剔除坏行继续）→
+  #   全员判定后 advance_round（恢复轮仅 accuracy_pass 推进，底座固定）→
+  #   emit（mode / accuracy_pass_vids / advanced_vid）。
+  #   executed → po_gate；catch-all → po_report。
   # ───────────────────────────────────────────────────────────────────────────
   - name: po_probe
     kind: agent
     agent: po_probe
     output_schema:
       type: object
-      required: [status, survivors_probed, promoted, best_updated, base_advanced, artifacts, assessment, max_retries_hit, healed_files]
+      required: [status, survivors_probed, mode, accuracy_pass_vids, advanced_vid, best_updated, base_advanced, artifacts, assessment, max_retries_hit, healed_files]
       properties:
-        status: {type: string, enum: [executed, failed], description: "executed=幸存者全部判定完成 + 轮末推进完成；failed → 路由 po_report"}
-        survivors_probed: {type: integer, description: "进入 probe 的变体数", minimum: 0}
-        promoted:
+        status: {type: string, enum: [executed, failed], description: "executed=（直通或判定路径）全部完成；failed → 路由 po_report"}
+        survivors_probed: {type: integer, description: "进入粗训的变体数（latency 直通轮恒 0）", minimum: 0}
+        mode: {type: string, enum: [latency, accuracy], description: "probe 入口时点的阶段：latency=直通（本轮推进已由 propose 完成）；accuracy=粗训精度门执行"}
+        accuracy_pass_vids:
           type: array
           items: {type: string}
-          description: "晋升变体 vid 列表（可为空）"
-        best_updated: {type: boolean, description: "轮末推进是否更新了全局最优"}
-        base_advanced: {type: boolean, description: "轮末推进是否已执行（幂等重入时可能已推进）"}
+          description: "本轮过精度门（accuracy_pass）的变体 vid 列表（可为空；直通轮恒空）"
+        advanced_vid: {type: string, description: "本轮经恢复轮推进成为新最优的 vid（推进发生在 accuracy 态判定后）；空串=零推进（直通轮=propose 侧已推进者的盘面重导出，无则空串）"}
+        best_updated: {type: boolean, description: "本轮推进是否更新了全局最优（直通轮按本轮 marker/direction 盘面重导出，不读旧轮值）"}
+        base_advanced: {type: boolean, description: "本轮推进序列是否已闭合（marker (round, mode) 在场；直通轮同样按盘面重导出）"}
         artifacts:
           type: array
           items: {type: string}
-          description: "关键产物路径（probe_results.jsonl / best.json 等）"
-        assessment: {type: string, description: "本轮 probe 结果与晋升情况摘要（含 monitor_failed / eval 降级披露）"}
+          description: "关键产物路径（probe_results.jsonl / best.json / direction.json 等）"
+        assessment: {type: string, description: "本轮 probe 结果摘要（含 passthrough / monitor_failed / eval 降级 / 规则提取披露）"}
         max_retries_hit: {type: boolean, description: "true=触碰重试预算上限而非正常完成"}
         healed_files:
           type: array
@@ -331,17 +314,16 @@ nodes:
       - to: po_report
 
   # ── Script 6: po_gate（纯读现算决策，零写盘）──────────────────────────────
-  #   读盘面（history 每变体末版 + best.json + 本轮 proposals.json 的 exhausted
-  #   ——不读任何上游节点 output）→ 确定性脚本出 decision：full-train / loop /
-  #   full-train-best-effort / finish-failed。脚本内轮数硬帽：轮数 ≥ max_rounds
-  #   永不 loop（回边防死循环双保险）。
-  #   loop → 回边 po_propose（DAG 显式容环）。
+  #   决策前先验部署件版本戳（不符按 finish-failed 分支披露）→ 读盘面（origin
+  #   锚 target 线 + history 任意版本行 + best.json——不读任何上游节点 output）
+  #   → 确定性脚本出 decision：full-train（best 达线且其 accuracy_pass 任意版
+  #   本行在场）/ loop（其余一切——唯一回边出口）/ full-train-best-effort /
+  #   finish-failed（轮数硬帽）。loop → 回边 po_propose（DAG 显式容环）。
   # ───────────────────────────────────────────────────────────────────────────
   - name: po_gate
     kind: script
     command: >-
       bash "$ORCA_ARTIFACTS_DIR/scripts/gate_node.sh"
-      --latency-reduction-min "{{ inputs.latency_reduction_min }}"
       --max-rounds "{{ inputs.max_rounds }}"
     parse_json: true
     timeout: 120
@@ -389,11 +371,13 @@ nodes:
   #   终态收割：emit 前读 finalizer.pid——死直过 / 活有界等 ≤60s / 到点无终态
   #   → 双组 kill（基线训练组 + finalizer 组）+ 扫 variants/*/ 在飞 pid 一并
   #   kill + 披露 "aborted at terminal"。零跨节点 output 引用：读工作区盘面
-  #   （history/best/rounds/contracts/baseline/final）判终态与失败归因 →
-  #   prof_opt_report.md + 静态图 + finalize chart（live 终稿推送 + 每轮
-  #   makespan 趋势）→ 终态 success 且 write_back=true 时终局影子 diff 写回
-  #   （新文件名 <原名>_prof_optimized、冲突不覆盖、写回前复验结构锚锁）；
-  #   no-promotion 终态零写回 + 披露。
+  #   （history/best/rounds/contracts/baseline/final/origin 锚/direction/
+  #   accuracy_rules）判终态与失败归因 → prof_opt_report.md + 静态图 +
+  #   finalize chart（live 终稿推送 + 每轮 makespan 趋势）→ 终态调
+  #   rules_pool merge（成功失败皆合并）+ 规则人类可读镜像 → 终态 success 时
+  #   终局影子 diff 写回（新文件名 <原名>_prof_optimized、冲突不覆盖、写回前
+  #   复验结构锚锁）；no-promotion 终态零写回 + 披露。报告首段披露 profiling
+  #   模式与部署件版本戳。
   # ───────────────────────────────────────────────────────────────────────────
   - name: po_report
     kind: agent

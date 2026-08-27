@@ -42,7 +42,9 @@ training template; you never hand-write training or eval logic.
   directory; the detailed procedure lives at
   `$ORCA_AGENT_RESOURCES/references/full_train_protocol.md` (read it at
   Step 1).
-- `{{ inputs.accuracy_budget }}` = final accuracy budget.
+- The final accuracy budget comes from the frozen origin anchor
+  (`base/origin_anchor.json` `accuracy_budget`) — the same immutable anchor
+  every earlier gate judged against; never a raw input here.
 - The training budget comes ONLY from `contracts.json`
   `full_train_budget` (epochs + seed) — the SAME value-level fingerprint
   the baseline trained under and every variant rendered with. Never
@@ -55,7 +57,18 @@ All path construction in helper code must use `pathlib.Path` (or
 
 ## Subagent Call Protocol
 
-This node dispatches **no subagents**. All work is done directly.
+This node dispatches ONE subagent: `accuracy-analyst`, ONCE, right after
+the terminal verdict (within budget or not — the full training is a third
+measured point, and its lessons are the most valuable a run produces). Its
+body lives at `{{ subagents_root }}/<name>.md` (inlined as an absolute path
+at render time).
+
+`Task(subagent_type=<host built-in generic type>, prompt="First fully Read {{ subagents_root }}/accuracy-analyst.md, strictly follow its Method for this task. This task's inputs: <the final probe/full-train rows + lineage change_sigs + the current $ORCA_ARTIFACTS_DIR/accuracy_rules.json>. Return in the format the md specifies. The **first line of the report** must verbatim echo the sentinel field from the frontmatter of the md you Read (format at the top of the md; don't guess, don't infer from this prompt — it must come from the file you Read).")`
+
+**Failure matrix**: sentinel mismatch or a `rules_pool.py check` failure on
+the returned rule file → re-dispatch ONCE with the failure quoted; still
+failing → drop the offending rows and disclose in `assessment` (the rules
+never block the terminal state — the report node merges whatever survived).
 
 ## Lazy Loading
 
@@ -130,6 +143,21 @@ it, extract the metric, write `final/final_acc.json` (carrying
 resolved anchor. Copy the winner's onnx to `final/model.onnx` (structure
 determines latency; the makespan is referenced, never re-measured).
 
+### Step 4b: Terminal rule extraction (after the verdict, before emitting)
+
+Dispatch `accuracy-analyst` per the protocol with the final training's
+measured outcome (final metric vs the anchor's budget, within budget or
+not) plus the winner's lineage `change_sig` and the current
+`$ORCA_ARTIFACTS_DIR/accuracy_rules.json`. Validate the returned file:
+
+```bash
+python3 "$ORCA_ARTIFACTS_DIR/scripts/rules_pool.py" check \
+  --artifacts "$ORCA_ARTIFACTS_DIR"
+```
+
+(failure matrix above). The merged mirror/pool handoff belongs to the
+report node's terminal merge — do not merge here.
+
 ### Step 5: Emit (only when complete)
 
 ```bash
@@ -156,7 +184,8 @@ empty paths.
 Emit-time completeness only (this is a resident execution node — no fix-loop
 on training outcomes): the training rc file records 0, the symmetric final
 check passed, the promised final checkpoint exists, `final/final_acc.json`
-exists, and the emit line carries all ten schema fields.
+exists, the terminal rule extraction ran (dispatch settled per its failure
+matrix), and the emit line carries all ten schema fields.
 
 ## Output
 
