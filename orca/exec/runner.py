@@ -68,8 +68,8 @@ _STDERR_MAX_BYTES = 64 * 1024
 # stdout/stderr StreamReader 单行上限。asyncio 默认 64KiB——opencode stream-json 单行
 # JSON（如 agent_message 内嵌整份生成的 train_pipeline.py / 大 tool_result）超此限即
 # 触发 ``readline()`` 抛 ``ValueError: Separator is found, but chunk is longer than
-# limit``，整 run 崩（实测 kd-nas train_script_gen 节点：读用户 train.py + 多契约后，agent
-# 输出单行 >64KiB 崩）。提到 64MiB 容纳任意单条 stream-json 行；内存按需增长，非预分配。
+# limit``，整 run 崩（实测 codegen 节点：读用户大文件 + 多契约后，agent 输出单行
+# >64KiB 崩）。提到 64MiB 容纳任意单条 stream-json 行；内存按需增长，非预分配。
 _STREAM_READ_LIMIT = 64 * 1024 * 1024
 
 

@@ -1,16 +1,14 @@
-"""test_struct_kd_p7.py —— P7 struct/kd 重设计关键不变量 smoke test。
+"""test_struct_kd_p7.py —— P7 struct 重设计关键不变量 smoke test。
 
 覆盖 code-reviewer 标出的 P7 关键契约（无端到端 workflow 执行，仅脚本 + YAML 级别）：
-- struct/kd `_device.py`：resolve_device + ort_providers（cuda/npu/cpu + NPU CANN 顺位）
+- struct `_device.py`：resolve_device + ort_providers（cuda/npu/cpu + NPU CANN 顺位）
 - viz_struct.py：Pareto 过滤 accuracy is None（FAIL_latency）行——P7 修的 y=0 根因
 - viz_struct.py：删 Round Ledger + Exploration Tree（只剩 3 图）
-- viz_kd_stage.py：final stage 全模型总表 + pareto_front + fail_status_bar（viz_kd 已删，语义 port 到 viz_kd_stage）
-- kd_common.compute_met_accuracy_absolute：绝对精度基线对比 + kind 方向（§3 迁移自 measure_student）
-- latency_onnxrt.py / export_onnx.py / profile_onnx.py / teacher_setup.py CLI：--device / --seed 等
+- latency_onnxrt.py / export_onnx.py CLI：--device / --seed 等
   / measure_baseline.py CLI：--device / --seed / --no-external-data / --strict-accuracy 全暴露
-- teacher_setup.py `_parse_accuracy`：解析失败 → (0.0, "unknown", "low")（不静默造假）
-- struct/kd workflow YAML：P7 后节点数 = 6（不是原计划 headline 的 7）
-- kd-nas.yaml candidate_eval：latency-first 顺序契约在 prompt 里（Step A→B→C，B 失败 skip C）
+- struct workflow YAML：P7 后节点数 = 6（不是原计划 headline 的 7）
+
+（kd 系 workflow 已净删除，其用例随之移除；struct 侧不变量全部保留。）
 
 不依赖 orca.chart / ts_quant / torch_npu（纯 stdlib + mock）；tars validate 在 conftest 里跑。
 """
@@ -29,7 +27,6 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 STRUCT_SCRIPTS = REPO / "workflows" / "agents" / "_struct_scripts"
-KD_SCRIPTS = REPO / "workflows" / "agents" / "_kd_scripts"
 
 
 # ───────────────────────── helpers ─────────────────────────
@@ -63,7 +60,7 @@ def _yaml_nodes(yaml_path: Path) -> list[str]:
 
 
 def _purge_device_modules():
-    """清掉 _device 缓存——quant/struct/kd 各有一份同名 _device.py，不 purge 会撞模块名。"""
+    """清掉 _device 缓存——quant/struct 各有一份同名 _device.py，不 purge 会撞模块名。"""
     for mod_name in [m for m in sys.modules if m == "_device" or m.endswith("._device")]:
         del sys.modules[mod_name]
 
@@ -113,12 +110,6 @@ class TestDevice:
         provs = ort_providers("cuda")
         assert provs[0] == "CUDAExecutionProvider"
 
-    def test_kd_copy_identical_to_struct(self):
-        # 共享单源决策已 surface：两份 _device.py 内容相同（不引跨包依赖是用户约束）
-        struct_src = (STRUCT_SCRIPTS / "_device.py").read_text(encoding="utf-8")
-        kd_src = (KD_SCRIPTS / "_device.py").read_text(encoding="utf-8")
-        assert struct_src == kd_src, "_device.py copies diverged"
-
 
 # ───────────────────────── viz_struct.py ─────────────────────────
 
@@ -165,7 +156,7 @@ class TestVizStructP7:
 
     def teardown_method(self, _):
         # 还原 orca 模块（防 mock 泄漏污染后续测试）
-        for mod_name in [m for m in sys.modules if m in ("viz_struct", "viz_kd")]:
+        for mod_name in [m for m in sys.modules if m == "viz_struct"]:
             del sys.modules[mod_name]
         if self._saved_orca is not None:
             sys.modules["orca"] = self._saved_orca
@@ -252,221 +243,13 @@ class TestVizStructP7:
         ], f"should push 4 charts (P7 三张 + P2-1 accuracy 维度); got {titles}"
 
 
-# ───────────────────────── kd_common 绝对精度基线 + 方向（§3 迁移自 measure_student）──
-
-
-class TestMeasureStudentAbsoluteBaseline:
-    """新设计：精度对比用户绝对基线，方向由 kind 决定（不再 teacher-relative dB gap）。
-
-    §3 迁移：原 ``measure_student._compute_met_accuracy_absolute`` 已 port 到
-    ``kd_common.compute_met_accuracy_absolute``（DRY 单一真相源；measure_student.py 已删）。
-    """
-
-    def test_nmse_lower_is_better_met(self):
-        sys.path.insert(0, str(KD_SCRIPTS))
-        from kd_common import compute_met_accuracy_absolute as _compute_met_accuracy_absolute
-        met, kind, conf = _compute_met_accuracy_absolute(0.02, "nmse", 0.03, "")
-        assert met is True and kind == "nmse" and conf == "high"
-
-    def test_nmse_not_met_when_above_baseline(self):
-        sys.path.insert(0, str(KD_SCRIPTS))
-        from kd_common import compute_met_accuracy_absolute as _compute_met_accuracy_absolute
-        met, kind, conf = _compute_met_accuracy_absolute(0.05, "nmse", 0.03, "")
-        assert met is False
-
-    def test_snr_higher_is_better_met(self):
-        sys.path.insert(0, str(KD_SCRIPTS))
-        from kd_common import compute_met_accuracy_absolute as _compute_met_accuracy_absolute
-        met, _, conf = _compute_met_accuracy_absolute(20.0, "snr", 18.0, "")
-        assert met is True and conf == "high"
-
-    def test_unknown_kind_never_silent_pass(self):
-        sys.path.insert(0, str(KD_SCRIPTS))
-        from kd_common import compute_met_accuracy_absolute as _compute_met_accuracy_absolute
-        met, _, conf = _compute_met_accuracy_absolute(0.02, "unknown", 0.03, "")
-        assert met is False and conf == "low"
-
-    def test_kind_override_locks_direction(self):
-        """SR3：override 锁方向；与 detected 不符 → WARN 但用 override。"""
-        sys.path.insert(0, str(KD_SCRIPTS))
-        from kd_common import compute_met_accuracy_absolute as _compute_met_accuracy_absolute
-        # detected=mse(越低越好) 但 override=snr(越高越好) → 用 snr 判定
-        met, kind, _ = _compute_met_accuracy_absolute(20.0, "mse", 18.0, "snr")
-        assert kind == "snr" and met is True
-
-
-# ───────────────────────── teacher_setup.py ─────────────────────────
-
-
-class TestTeacherSetupParse:
-    """teacher_setup.py `_parse_accuracy`：解析失败 → (0.0, unknown, low)，不静默造假。"""
-
-    def test_parse_garbage_returns_low_confidence(self):
-        sys.path.insert(0, str(KD_SCRIPTS))
-        from teacher_setup import _parse_accuracy
-        acc, kind, conf = _parse_accuracy("garbage output no metrics")
-        assert acc == 0.0
-        assert kind == "unknown"
-        assert conf == "low"
-
-    def test_parse_nmse_returns_high_confidence(self):
-        sys.path.insert(0, str(KD_SCRIPTS))
-        from teacher_setup import _parse_accuracy
-        acc, kind, conf = _parse_accuracy("epoch 10 done\nNMSE: 0.0234")
-        assert kind == "nmse"
-        assert conf == "high"
-
-    def test_parse_train_pipeline_eval_protocol(self):
-        """teacher eval 复用 train_pipeline --mode eval：解析 STUDENT_ACCURACY + _KIND 同伴行。"""
-        sys.path.insert(0, str(KD_SCRIPTS))
-        from teacher_setup import _parse_accuracy
-        # train_pipeline eval stdout（value + kind 同伴）
-        out = ("KD_PROXY_MSE: 0.01\n"
-               "STUDENT_ACCURACY: 0.0156\n"
-               "STUDENT_ACCURACY_KIND: nmse\n"
-               "MET_ACCURACY: true\n")
-        acc, kind, conf = _parse_accuracy(out)
-        assert (acc, kind, conf) == (0.0156, "nmse", "high")
-
-    def test_parse_eval_kind_invalid_falls_back_to_acc(self):
-        """STUDENT_ACCURACY_KIND 非法 → kind 回退 acc（value 仍取到，confidence high）。"""
-        sys.path.insert(0, str(KD_SCRIPTS))
-        from teacher_setup import _parse_accuracy
-        acc, kind, conf = _parse_accuracy(
-            "STUDENT_ACCURACY: 0.5\nSTUDENT_ACCURACY_KIND: wat\n"
-        )
-        assert (acc, kind, conf) == (0.5, "acc", "high")
-
-    def test_teacher_accuracy_takes_priority_over_student(self):
-        """Y3 fix：stdout 同时含 TEACHER_ACCURACY + STUDENT_ACCURACY 时取 TEACHER_。
-
-        意图：用户自写 eval_command 可能复用 train_pipeline --mode eval stdout（含
-        STUDENT_ACCURACY 协议）但额外标注 teacher 真值——TEACHER_ACCURACY 是显式真值，
-        必须优先匹配，否则会被 STUDENT_ACCURACY 遮蔽（teacher 精度被误用 student 值）。
-        """
-        sys.path.insert(0, str(KD_SCRIPTS))
-        from teacher_setup import _parse_accuracy
-        out = (
-            "STUDENT_ACCURACY: 0.95\n"
-            "STUDENT_ACCURACY_KIND: nmse\n"
-            "TEACHER_ACCURACY: 0.015\n"
-        )
-        acc, kind, conf = _parse_accuracy(out)
-        assert (acc, kind, conf) == (0.015, "acc", "high")
-
-
-# ───────────────────────── teacher_setup latency source (v4) ──────────────────
-# teacher_setup.py 的 latency 来源三分支（CONTRACTS §3）：
-#   A) --teacher_latency_us 优先（teacher-gen.output 透传，避免重复测量）
-#   B) --latency_provider fallback（向后兼容，自测 ONNX）
-#   C) 两者皆空 → fail loud（SystemExit）
-# 这三条是 v4 teacher latency 下沉到 teacher-gen 的核心契约，必须有直接测试守护。
-
-
-def _minimal_teacher_ckpt(tmp_path: Path) -> Path:
-    """造一个最小 teacher ckpt（contract .py state_dict）—— teacher_setup strict=False load。
-
-    §3 迁移：原 teacher_model.py（10 层 t1/t2 交替）已删；活跃 teacher 来自 teacher-gen 产物。
-    teacher_setup 测试只需「exposes build_model/DUMMY_INPUT 的 contract .py」+ feature_hook_names，
-    复用 receiver KB spt_alt.py（同 contract shape [1,4,48,64,1]，KD feature hooks 恒 2）。
-    """
-    import torch
-    _student_variant = REPO / "knowledge_base" / "families" / "receiver" / "spt_alt.py"
-    # spt_alt.py 依赖同目录 _model8_blocks，import 前需把 receiver dir 加入 sys.path。
-    _receiver_dir = str(_student_variant.parent)
-    if _receiver_dir not in sys.path:
-        sys.path.insert(0, _receiver_dir)
-    for m in [n for n in sys.modules if n in ("_ck_teacher", "_model8_blocks", "spt_alt")]:
-        del sys.modules[m]
-    spec = importlib.util.spec_from_file_location("_ck_teacher", str(_student_variant))
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    ckpt = tmp_path / "teacher_ckpt.pt"
-    torch.save({"state_dict": mod.build_model().state_dict()}, ckpt)
-    return ckpt
-
-
-class TestTeacherSetupLatencySource:
-    """v4：teacher_setup latency 来源三分支（--teacher_latency_us 优先 / provider fallback / fail loud）。"""
-
-    def test_latency_from_param_skips_provider(self, tmp_path):
-        """分支 A：--teacher_latency_us 7.3 + 毒化的 latency_provider → 透传 7.3，provider 不被调。
-
-        意图测试（非行为）：provider 脚本含 ``raise RuntimeError('POISON')``——若 teacher_setup
-        仍调它测 latency，会 exit!=0 + stderr 含 POISON。透传路径必须**完全跳过** provider。
-        """
-        import subprocess
-        ckpt = _minimal_teacher_ckpt(tmp_path)
-        poison = tmp_path / "_poison.py"
-        poison.write_text(
-            "def measure(onnx, device=None):\n    raise RuntimeError('POISON: provider should not be called')\n",
-            encoding="utf-8",
-        )
-        r = subprocess.run([
-            sys.executable, str(KD_SCRIPTS / "teacher_setup.py"),
-            "--teacher_model_path", str(REPO / "knowledge_base" / "families" / "receiver" / "spt_alt.py"),
-            "--teacher_ckpt", str(ckpt),
-            "--build_fn", "build_model",
-            "--dummy_input", '{"shape":[1,4,48,64,1],"dtype":"float32"}',
-            "--output_dir", str(tmp_path),
-            "--teacher_latency_us", "7.3",
-            "--latency_provider", str(poison) + "::measure",  # 给了但不应被调
-            "--device", "cpu",
-        ], capture_output=True, text=True)
-        assert r.returncode == 0, f"应 exit 0（透传 latency，不调 provider）\nstderr:\n{r.stderr}"
-        assert "TEACHER_LATENCY_US: 7.3000" in r.stdout, f"应透传 7.3：{r.stdout}"
-        assert "POISON" not in r.stderr, "provider 被调了（透传路径应完全跳过 provider）"
-
-    def test_latency_fallback_to_provider_when_param_absent(self, tmp_path):
-        """分支 B：不传 --teacher_latency_us，只给 --latency_provider → 走自测路径（向后兼容）。"""
-        import subprocess
-        ckpt = _minimal_teacher_ckpt(tmp_path)
-        stub = tmp_path / "_stub.py"
-        stub.write_text("def measure(onnx, device=None):\n    return 3.14\n", encoding="utf-8")
-        r = subprocess.run([
-            sys.executable, str(KD_SCRIPTS / "teacher_setup.py"),
-            "--teacher_model_path", str(REPO / "knowledge_base" / "families" / "receiver" / "spt_alt.py"),
-            "--teacher_ckpt", str(ckpt),
-            "--build_fn", "build_model",
-            "--dummy_input", '{"shape":[1,4,48,64,1],"dtype":"float32"}',
-            "--output_dir", str(tmp_path),
-            "--latency_provider", str(stub) + "::measure",
-            "--device", "cpu",
-        ], capture_output=True, text=True)
-        assert r.returncode == 0, f"应 exit 0（provider 自测）\nstderr:\n{r.stderr}"
-        assert "TEACHER_LATENCY_US: 3.1400" in r.stdout, f"应用 provider 测的 3.14：{r.stdout}"
-        # stderr 不应含「透传」字样（走的是自测路径）
-        assert "透传" not in r.stderr
-
-    def test_latency_fail_loud_when_neither_given(self, tmp_path):
-        """分支 C：既不传 --teacher_latency_us 也不传 --latency_provider → fail loud（exit!=0）。"""
-        import subprocess
-        ckpt = _minimal_teacher_ckpt(tmp_path)
-        r = subprocess.run([
-            sys.executable, str(KD_SCRIPTS / "teacher_setup.py"),
-            "--teacher_model_path", str(REPO / "knowledge_base" / "families" / "receiver" / "spt_alt.py"),
-            "--teacher_ckpt", str(ckpt),
-            "--build_fn", "build_model",
-            "--dummy_input", '{"shape":[1,4,48,64,1],"dtype":"float32"}',
-            "--output_dir", str(tmp_path),
-            "--device", "cpu",
-        ], capture_output=True, text=True)
-        assert r.returncode != 0, "应 fail loud（二者至少给一个）"
-        assert "二者至少给一个" in r.stderr, f"stderr 应报 fail loud 原因：{r.stderr}"
-
-
 @pytest.mark.parametrize("script_rel,args,required_flags", [
     ("_struct_scripts/latency_onnxrt.py", [], ["--device", "--seed"]),
     ("_struct_scripts/export_onnx.py", [], ["--no-external-data", "--allow-external-data", "--device", "--seed", "--build_cfg"]),
     ("_struct_scripts/measure_baseline.py", [], ["--device", "--seed"]),
-    ("_kd_scripts/profile_onnx.py", [], ["--device", "--seed"]),
-    ("_kd_scripts/teacher_setup.py", [], ["--device", "--seed", "--strict-accuracy", "--teacher_latency_us"]),
-    ("_kd_scripts/tune_latency.py", [], ["--device", "--seed", "--max_measurements"]),
-    ("_kd_scripts/gpu_probe.py", [], ["--teacher_cache", "--representative_variant", "--variants_count", "--device"]),
 ])
 def test_cli_flags_exposed(script_rel, args, required_flags):
-    """P7：所有脚本 CLI 暴露 --device / --seed（+ export 的 external-data / teacher_setup 的 strict-accuracy）。"""
+    """P7：所有脚本 CLI 暴露 --device / --seed（+ export 的 external-data）。"""
     script_path = REPO / "workflows" / "agents" / script_rel
     r = subprocess.run(
         ["python3", str(script_path), "--help"],
@@ -487,51 +270,8 @@ def test_struct_workflow_has_six_nodes():
     assert nodes == expected, f"struct nodes mismatch: {nodes}"
 
 
-@pytest.mark.skip(reason="obsolete after 2026-08-03 kd-nas serial rework: yaml drops batch gate/train/select nodes in favor of serial gen_student/distill/decide loop")
-def test_kd_workflow_has_six_nodes_flatten_first():
-    """kd workflow 7 节点 flatten→teacher_gen→train_script_gen→setup→gate→train→select
-    （flatten 入口 + teacher-gen 纯调参派生 teacher + train-script-gen 生成统一训练脚本 +
-    setup 跑 teacher 训 + gate + train + select 读 ledger 出最终报告）。"""
-    nodes = _yaml_nodes(REPO / "workflows" / "kd-nas.yaml")
-    expected = ["flatten", "teacher_gen", "train_script_gen", "setup", "gate", "train", "select"]
-    assert nodes == expected, f"kd nodes mismatch: {nodes}"
-    # entry 必须是 flatten（不再是 setup）—— 抓 yaml 顶层 `entry:` 行
-    entry_line = next(
-        (l for l in (REPO / "workflows" / "kd-nas.yaml").read_text(encoding="utf-8").splitlines()
-         if l.startswith("entry:")),
-        "",
-    )
-    assert "flatten" in entry_line, f"entry 应为 flatten，got {entry_line!r}"
 
 
-def test_kd_latency_provider_required_no_default():
-    """BLK-3/10：latency_provider 必填无默认（用户真硬件 latency 脚本）。"""
-    from orca.compile.parser import load_workflow
-    wf = load_workflow(REPO / "workflows" / "kd-nas.yaml")
-    idef = wf.inputs["latency_provider"]
-    assert idef.required is True, "latency_provider 必须 required=true"
-    assert idef.default is None, "latency_provider 必须无 default"
-
-
-@pytest.mark.skip(reason="obsolete after 2026-08-03 kd-nas serial rework: yaml drops batch gate/train/select nodes in favor of serial gen_student/distill/decide loop")
-def test_kd_no_finalize_no_proxy():
-    """重构：无 finalize 节点；无 proxy_mse / accuracy_gap_db 输入（旧搜索语义全砍）。"""
-    nodes = _yaml_nodes(REPO / "workflows" / "kd-nas.yaml")
-    assert "finalize" not in nodes, "kd-nas 不应有 finalize 节点"
-    from orca.compile.parser import load_workflow
-    wf = load_workflow(REPO / "workflows" / "kd-nas.yaml")
-    declared = set(wf.inputs.keys())
-    assert "proxy_mse" not in declared and "accuracy_gap_db" not in declared, \
-        f"旧搜索语义输入应已移除；declared={sorted(declared)}"
-
-
-def test_kd_setup_node_exposes_path_fields():
-    """重构：setup output_schema 暴露新路径字段（kd_artifacts_dir 稳定根 + ledger + checkpoints + teacher + ...）。"""
-    yaml_text = (REPO / "workflows" / "kd-nas.yaml").read_text(encoding="utf-8")
-    for field in ["kd_artifacts_dir:", "per_run_artifacts_dir:", "ledger_path:",
-                  "checkpoints_dir:", "teacher_cache:", "teacher_meta:", "kd_scripts_dir:",
-                  "baseline_latency_us:"]:
-        assert field in yaml_text, f"kd setup output_schema missing {field}"
 
 
 def test_struct_setup_node_exposes_path_fields():
@@ -562,8 +302,7 @@ def test_no_string_concat_output_dir_in_agent_md():
     )
     agent_dir = REPO / "workflows" / "agents"
     for agent_md in agent_dir.rglob("agent.md"):
-        if ("struct-" in str(agent_md) or "kd-" in str(agent_md)
-                or agent_md.parent.name == "kd-setup"):
+        if "struct-" in str(agent_md):
             text = agent_md.read_text(encoding="utf-8")
             matches = pattern.findall(text)
             assert not matches, f"{agent_md.name}: found output_dir concat pattern {matches}"
@@ -572,7 +311,7 @@ def test_no_string_concat_output_dir_in_agent_md():
 # P9b：production workflow inputs slim 后的契约守门。
 # 现有 compile validator 对「未声明 inputs.X 引用」只 warn 不 error（设计如此），
 # 故 `load_workflow` 不会捕获「移除 input 漏改 agent.md Jinja」。本测试用正则扫所有
-# production workflow + struct/kd agent.md 的 `{{ inputs.X }}` 引用，断言 X 在 declared inputs 内——
+# production workflow + struct agent.md 的 `{{ inputs.X }}` 引用，断言 X 在 declared inputs 内——
 # 未来同类 slim 改动漏改 Jinja 时，本测试当场红（render 期 StrictUndefined 才崩太晚）。
 @pytest.mark.parametrize(
     "wf_path",
@@ -594,7 +333,7 @@ def test_no_jinja_ref_to_undeclared_input(wf_path):
 
     # 关联 agent.md（workflows/agents/<wf-relevant>/*.md）；保守起见扫所有 agent.md
     # 中的「同 workflow input 引用」——按 yaml 的 agent: <name> 字段定位更准但成本高，
-    # 此处采用「扫所有 struct/kd/quant/nas agent.md，过滤掉 declared 不在当前 wf 的」。
+    # 此处采用「扫所有 struct/quant/nas agent.md，过滤掉 declared 不在当前 wf 的」。
     agent_dir = REPO / "workflows" / "agents"
     for agent_md in agent_dir.rglob("agent.md"):
         text = agent_md.read_text(encoding="utf-8")

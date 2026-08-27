@@ -169,12 +169,12 @@ def test_resolve_artifacts_dir_isolates_workflows(tmp_path: Path):
     tape_a = tmp_path / "runs" / "a.jsonl"
     tape_b = tmp_path / "runs" / "b.jsonl"
     _write_ws(tape_a, wf_name="nas-supernet", inputs={"project_root": proj})
-    _write_ws(tape_b, wf_name="kd-nas", inputs={"project_root": proj})
+    _write_ws(tape_b, wf_name="puzzle", inputs={"project_root": proj})
     path_a, scoped_a = _resolve_artifacts_dir(tape_a, run_id="a-aaa")
     path_b, scoped_b = _resolve_artifacts_dir(tape_b, run_id="b-aaa")
     assert scoped_a and scoped_b
     assert path_a == (Path(proj) / "artifacts" / "nas-supernet").resolve()
-    assert path_b == (Path(proj) / "artifacts" / "kd-nas").resolve()
+    assert path_b == (Path(proj) / "artifacts" / "puzzle").resolve()
     assert path_a != path_b
 
 

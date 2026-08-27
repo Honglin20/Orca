@@ -69,7 +69,7 @@ async def run_workflow(
         max_iter: ``--max-iter`` 覆盖（最高优先级）。
         tape_path: Tape 文件路径（测试传 tmp_path；默认 ``./runs/<run_id>.jsonl``）。
         run_id: 固定 run_id（测试用；默认 ``gen_run_id(wf.name)``）。
-        workflows_root: plan 2026-08-04 kd-nas headless fix —— workflow yaml 所在目录
+        workflows_root: workflow yaml 所在目录
             绝对路径（``load_workflow(yaml_path).parent``）。None == 不注 ``ORCA_WORKFLOWS_ROOT``
             （向后兼容；workflow 级共享资源 cwd-relative 查找的 agent 会 fail loud）。
 

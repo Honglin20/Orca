@@ -72,7 +72,7 @@ class ScriptExecutor(Executor):
         # phase-13 §2：chart ingestor sock 父目录（``runs/<run_id>.sock`` 寻址用）。
         # None == 不注 ``ORCA_CHART_SOCK`` env（向后兼容，script 端 render_chart fail loud）。
         self._runs_dir = runs_dir
-        # plan 2026-08-04 kd-nas headless fix：workflow yaml 所在目录绝对路径（cwd 无关定位
+        # workflow yaml 所在目录绝对路径（cwd 无关定位
         # workflow 级共享资源）。None == 不注（向后兼容）。与 ClaudeExecutor 对称（§11 #9）。
         self._workflows_root = workflows_root
         # 2026-08-26 in-session script 节点 fix（plan 2026-08-25 prof-opt-v4 §10）：

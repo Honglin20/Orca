@@ -114,7 +114,7 @@ def test_spawn_config_env_overlay_backward_compat_no_kwargs(monkeypatch):
     assert "ORCA_CHART_SOCK" not in cfg.env_overlay
 
 
-# ── plan 2026-08-04 kd-nas headless fix：workflows_root 注入 ────────────────
+# ── workflows_root 注入 ────────────────
 
 
 def test_spawn_config_env_overlay_injects_workflows_root(monkeypatch):
@@ -122,7 +122,7 @@ def test_spawn_config_env_overlay_injects_workflows_root(monkeypatch):
 
     意图：``tars run`` 从用户项目目录起跑时，agent CWD ≠ Orca 仓库根，``find workflows/...``
     这种 cwd-relative 查找会 fail。executor 注入 ``ORCA_WORKFLOWS_ROOT`` 让 agent.md 改读
-    ``$ORCA_WORKFLOWS_ROOT/agents/_kd_scripts`` cwd 无关地定位 workflow 级共享脚本目录。
+    ``$ORCA_WORKFLOWS_ROOT/agents/_po_scripts`` cwd 无关地定位 workflow 级共享脚本目录。
     """
     profile = _make_profile()
     node = _make_node()

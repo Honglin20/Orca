@@ -402,7 +402,7 @@ class OrcaApp(App):
     ) -> None:
         super().__init__()
         self.wf = wf
-        # plan 2026-08-04 kd-nas headless fix：workflow yaml 所在目录，透传给 Orchestrator
+        # workflow yaml 所在目录，透传给 Orchestrator
         # → executor 注入 ORCA_WORKFLOWS_ROOT env（agent.md cwd 无关定位共享资源目录）。
         self._workflows_root = workflows_root
         self._inputs = inputs or {}

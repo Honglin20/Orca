@@ -71,7 +71,7 @@
 
 判据：被引文件是否长期存在于仓库、读者能否据此定位。临时 plan / 带日期草稿 / issue 编号 = 不能定位 = 考古；真实文件章节 = 能定位 = 导航。
 
-**例外**：本规范文档自身、`docs/specs/` 下的设计日志、CHANGELOG / release note，**以及跨 agent 的契约 / 决策溯源文档（如 `workflows/agents/<wf>/CONTRACTS.md`、`workflows/agents/_kd_scripts/CONTRACTS.md`）**不受此约束（它们本就是设计日志）。
+**例外**：本规范文档自身、`docs/specs/` 下的设计日志、CHANGELOG / release note，**以及跨 agent 的契约 / 决策溯源文档（如 `workflows/<wf>/agents/<agent>/CONTRACTS.md`、`workflows/agents/_po_scripts/PROFILER_CONTRACT.md`）**不受此约束（它们本就是设计日志）。
 
 ## §9 自检清单（生成 / 改 workflow 后必跑）
 

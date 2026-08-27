@@ -12,10 +12,10 @@
 3. **产物目录注入**（P8 / plan 2026-07-21 §Phase 4-A）：``artifacts_dir`` keyword，非空 →
    注 ``ORCA_ARTIFACTS_DIR``。workflow 脚本据此定位权威产物目录（替代 workflow 自建
    ``llm_artifacts/<model>/...`` 的混乱两套 run_id）。
-4. **workflow 源根注入**（plan 2026-08-04 kd-nas headless fix）：``workflows_root`` keyword，
+4. **workflow 源根注入**：``workflows_root`` keyword，
    非空 → 注 ``ORCA_WORKFLOWS_ROOT``。agent.md 据此定位 workflow 级共享资源目录
-   （如 ``$ORCA_WORKFLOWS_ROOT/agents/_kd_scripts``），cwd 无关——``tars run`` 从用户项目
-   目录起跑时，agent CWD ≠ Orca 仓库根，``workflows/agents/_kd_scripts`` 这类 cwd-relative
+   （如 ``$ORCA_WORKFLOWS_ROOT/agents/_po_scripts``），cwd 无关——``tars run`` 从用户项目
+   目录起跑时，agent CWD ≠ Orca 仓库根，``workflows/agents/_po_scripts`` 这类 cwd-relative
    查找会失败。``workflows_root`` = workflow yaml 所在目录绝对路径（dev: ``<repo>/workflows``，
    安装态：``~/.orca/workflows``），由 ``load_workflow(yaml_path).parent`` 在 run 启动期解析。
 
@@ -67,11 +67,11 @@ def build_env_overlay(
             > ``cwd/knowledge_base``）。空串 → 不注（workflow 不需要 KB / 未解析到）；非空 → 子进程
             ``ORCA_KB_DIR``，workflow 脚本 + agent prompt 据 ``$ORCA_KB_DIR`` 定位 KB（替代裸相对
             ``knowledge_base/``，解决换项目跑找不到 KB 的可移植性问题）。
-        workflows_root: plan 2026-08-04 kd-nas headless fix —— workflow yaml 所在目录绝对路径
+        workflows_root: workflow yaml 所在目录绝对路径
             （dev: ``<repo>/workflows``；安装态：``~/.orca/workflows``）。空串 → 不注（向后兼容）；
             非空 → 子进程 ``ORCA_WORKFLOWS_ROOT``，agent.md 据此 cwd-无关地定位 workflow 级共享
-            资源目录（如 ``$ORCA_WORKFLOWS_ROOT/agents/_kd_scripts``）。替代 agent.md 各自 hardcode
-            ``workflows/agents/_kd_scripts`` 的 cwd-relative 查找（``tars run`` 从用户项目起跑时
+            资源目录（如 ``$ORCA_WORKFLOWS_ROOT/agents/_po_scripts``）。替代 agent.md 各自 hardcode
+            ``workflows/agents/_po_scripts`` 的 cwd-relative 查找（``tars run`` 从用户项目起跑时
             agent CWD ≠ Orca 仓库根，cwd-relative 会 fail）。OCP：通用 env 名，新 workflow 出现
             共享资源目录时零 executor 改动（agent.md 自己派生子路径）。
 
@@ -106,8 +106,8 @@ def build_env_overlay(
     # plan sprightly-questing-donut §1.2：KB 根目录，workflow 脚本/agent 据 $ORCA_KB_DIR 定位 KB。
     if kb_dir:
         overlay["ORCA_KB_DIR"] = kb_dir
-    # plan 2026-08-04 kd-nas headless fix：workflow 源根（yaml 所在目录），agent.md 据
-    # $ORCA_WORKFLOWS_ROOT cwd-无关定位共享资源目录（_kd_scripts / _struct_scripts / 未来 _quant_scripts）。
+    # workflow 源根（yaml 所在目录），agent.md 据
+    # $ORCA_WORKFLOWS_ROOT cwd-无关定位共享资源目录（_po_scripts / _struct_scripts / _quant_scripts）。
     if workflows_root:
         overlay["ORCA_WORKFLOWS_ROOT"] = workflows_root
     return overlay

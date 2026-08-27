@@ -52,10 +52,9 @@ def _rel(path: Path) -> str:
     except ValueError:
         return str(path)
 
-# 8 workflow → yaml 文件名（orca list 注册名与 yaml stem 一致）。
+# 7 workflow → yaml 文件名（orca list 注册名与 yaml stem 一致；kd 系已净删除）。
 WORKFLOWS: dict[str, str] = {
     "agent-struct-exploration": "agent-struct-exploration.yaml",
-    "kd-nas": "kd-nas.yaml",
     "nas-agent-pipeline": "nas-agent-pipeline.yaml",
     "nas-hp-search": "nas-hp-search.yaml",
     "quant-bit-curve": "quant-bit-curve.yaml",
@@ -65,12 +64,10 @@ WORKFLOWS: dict[str, str] = {
 }
 
 # 每个 workflow 的 [ask]/必填硬件类 input 期望（任务 §1「device/target_hardware/seed 在」）。
-# quant 系用 target_hardware；struct/kd 用 device；nas 用 target_hardware。
-# seed 除 kd-nas 外都保留（kd-nas 2026-07-31 输入瘦身：seed 下沉到下游 CLI 默认）。
+# quant 系用 target_hardware；struct 用 device；nas 用 target_hardware。
 # 这些是 P5/P6/P9 收敛后的契约（见 docs/specs/workflow-input-design-principle.md）。
 HARDWARE_INPUT_EXPECTED: dict[str, set[str]] = {
     "agent-struct-exploration": {"device", "seed"},
-    "kd-nas": {"device"},
     "nas-agent-pipeline": {"target_hardware", "seed"},
     "nas-hp-search": {"target_hardware", "seed"},
     "quant-bit-curve": {"target_hardware", "seed"},
@@ -79,7 +76,7 @@ HARDWARE_INPUT_EXPECTED: dict[str, set[str]] = {
     "quant-sensitivity": {"target_hardware", "seed"},
 }
 
-# render_chart 调用名（viz_struct/viz_kd 用别名 _orca_render_chart）。
+# render_chart 调用名（viz_struct 用别名 _orca_render_chart）。
 _RENDER_CHART_NAMES = {"render_chart", "_orca_render_chart"}
 # axis-bearing chart type：必传 x_label+y_label+caption（有轴）。
 _AXIS_BEARING_TYPES = {"line", "bar", "scatter", "heatmap", "area", "histogram", "box", "violin"}
@@ -138,9 +135,9 @@ def active_agent_names(wf_name: str) -> set[str]:
 def active_script_files(wf_name: str) -> list[Path]:
     """该 workflow active-path 的所有 ``.py`` 脚本（folder-agent scripts/ + 共享 _xxx_scripts/）。
 
-    folder-agent（如 ``ptq-sweeper/``）自带 ``scripts/``；共享脚本目录（``_kd_scripts/``
-    / ``_struct_scripts/``）在 agent.md 里被引用——这里把 agents/<active-agent>/scripts/
-    与（若 agent 是 struct/kd 系）对应共享目录一并返回。
+    folder-agent（如 ``ptq-sweeper/``）自带 ``scripts/``；共享脚本目录（如
+    ``_struct_scripts/``）在 agent.md 里被引用——这里把 agents/<active-agent>/scripts/
+    与（若 agent 是 struct 系）对应共享目录一并返回。
     """
     agents = active_agent_names(wf_name)
     files: list[Path] = []
@@ -152,15 +149,9 @@ def active_script_files(wf_name: str) -> list[Path]:
                 if py not in seen:
                     seen.add(py)
                     files.append(py)
-    # struct/kd 系共享脚本目录（agent-struct-exploration / kd-nas 专用）。
+    # struct 系共享脚本目录（agent-struct-exploration 专用）。
     if wf_name == "agent-struct-exploration":
         shared = AGENTS_DIR / "_struct_scripts"
-        for py in sorted(shared.rglob("*.py")):
-            if py not in seen:
-                seen.add(py)
-                files.append(py)
-    elif wf_name == "kd-nas":
-        shared = AGENTS_DIR / "_kd_scripts"
         for py in sorted(shared.rglob("*.py")):
             if py not in seen:
                 seen.add(py)
@@ -211,7 +202,7 @@ def check_no_undeclared_input_refs(wf_name: str) -> list[Finding]:
 
 
 def check_hardware_inputs_present(wf_name: str) -> list[Finding]:
-    """quant/nas/struct-kd 系的 device/target_hardware/seed input 必须存在。"""
+    """quant/nas/struct 系的 device/target_hardware/seed input 必须存在。"""
     wf = load_parsed(wf_name)
     actual = set((wf.inputs or {}).keys())
     expected = HARDWARE_INPUT_EXPECTED.get(wf_name, set())
@@ -429,15 +420,15 @@ def _is_legit_rand_context(func_name: str, docstring: str) -> bool:
 # ── check 7: 严禁造假 prohibition 正向存在（prompt-layer guard 契约） ─────────
 
 
-# 需含 prohibition 段落的 workflow（quant/nas/struct-kd 系——P5/P6/P7 prompt-layer guard）。
+# 需含 prohibition 段落的 workflow（quant/nas/struct 系——P5/P6/P7 prompt-layer guard）。
 _PROHIBITION_REQUIRED_WF = {
     "quant-ptq-sweep", "quant-sensitivity", "quant-qat", "quant-bit-curve",
-    "nas-agent-pipeline", "nas-hp-search", "kd-nas", "agent-struct-exploration",
+    "nas-agent-pipeline", "nas-hp-search", "agent-struct-exploration",
 }
 
 
 def check_fabrication_prohibition_present(wf_name: str) -> list[Finding]:
-    """quant/nas/struct-kd 系 **至少一个** active agent.md 含「严禁造假」prohibition。
+    """quant/nas/struct 系 **至少一个** active agent.md 含「严禁造假」prohibition。
 
     这是 P5/P6/P7 落地的 prompt-layer guard 契约。语义：workflow 级至少一个 agent（通常是
     读数据 loader / 测精度的那个）声明「绝不 torch.randn 造假 / 缺数据走哨兵」即可，不要求

@@ -230,8 +230,8 @@ class Orchestrator:
         # production 用 ``get_default_registry()``；测试 / CLI 入口可注入独立实例。
         # ``shutdown()`` 经此 registry 兜底清理未释放的子进程（signal / atexit 三处都调）。
         self._registry: ProcessRegistry = registry or get_default_registry()
-        # plan 2026-08-04 kd-nas headless fix：workflow yaml 所在目录（cwd 无关定位 workflow 级
-        # 共享资源，如 agents/_kd_scripts）。None == 不注 ORCA_WORKFLOWS_ROOT（向后兼容）。
+        # workflow yaml 所在目录（cwd 无关定位 workflow 级
+        # 共享资源，如 agents/_po_scripts）。None == 不注 ORCA_WORKFLOWS_ROOT（向后兼容）。
         # 由 RunManager / CLI 在 load_workflow(yaml_path) 时透传 yaml_path.parent。
         self._workflows_root = workflows_root
 
@@ -634,7 +634,7 @@ class Orchestrator:
         orch._agent_tools_server = None
         # phase-11-process：resume 用 default registry（同 process；signal 兜底仍生效）。
         orch._registry = get_default_registry()
-        # plan 2026-08-04 kd-nas headless fix：workflows_root 透传（resume 路径同款 cwd 无关）。
+        # workflows_root 透传（resume 路径同款 cwd 无关）。
         orch._workflows_root = workflows_root
         # resume 专用状态（run_from_state 消费）。
         orch._resume_replayed_events = 0
