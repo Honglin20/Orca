@@ -13,6 +13,12 @@
 // **m5：openWorkflow 切换时同步清空 activeAgent/fileTree/activeFile**——防闪现上一 wf
 // 的文件树（旧数据短暂出现在新 wf UI 里造成困惑）。
 //
+// **批 G（2026-08-27）**：treeScope 状态机（"workflow" | "agent"）——中栏文件树双数据源。
+// openWorkflow 成功后自动加载 wf 级全资产树（默认态）；openAgent 切 agent 树；
+// openWorkflowTree 回全部资产。openFile 按 treeScope 分流 URL（agent root vs wf root）。
+// 慢到守卫：openWorkflow 树写回查 inflightSeq + treeScope 双条件，openWorkflowTree
+// 用独立 treeSeq gate——防「用户已点 agent、慢到的 wf 树覆盖 agent 树」。
+//
 // 设计：plain zustand（无 immer），照 run-list-store.ts。模块单例 + unmount reset。
 
 import { create } from "zustand";
@@ -23,6 +29,11 @@ export interface WorkflowMeta {
   entry: string;
   inputs_count: number;
   inputs_schema: Array<{ name: string; type: string; description: string }>;
+}
+
+export interface SubagentSummary {
+  name: string;
+  description: string;
 }
 
 export interface WorkflowDetail {
@@ -37,6 +48,7 @@ export interface WorkflowDetail {
   };
   agents_referenced: string[];
   all_agents: AgentSummary[];
+  subagents: SubagentSummary[];
 }
 
 export interface AgentSummary {
@@ -54,8 +66,11 @@ export interface TreeNode {
   children: TreeNode[] | null;
 }
 
+// 批 G：wf 级树 envelope 键是 ``workflow``（agent 树是 ``agent``）——两者都只消费
+// nodes，envelope 标识键按端点各自可选。
 export interface TreeResponse {
-  agent: string;
+  agent?: string;
+  workflow?: string;
   root: string;
   nodes: TreeNode[];
 }
@@ -78,6 +93,7 @@ interface WorkflowBrowseState {
   workflowError: string | null;
 
   activeAgent: string | null;
+  treeScope: "workflow" | "agent";
   fileTree: TreeNode[] | null;
   treeLoading: boolean;
   treeError: string | null;
@@ -88,7 +104,9 @@ interface WorkflowBrowseState {
 
   loadWorkflows: () => Promise<void>;
   openWorkflow: (name: string) => Promise<void>;
+  openWorkflowTree: () => Promise<void>;
   openAgent: (agent: string) => Promise<void>;
+  openSubagent: (name: string) => void;
   openFile: (relPath: string) => Promise<void>;
   reset: () => void;
 }
@@ -113,6 +131,10 @@ async function fetchJsonOrThrow(url: string): Promise<Response> {
 // 抄 run-list-store.ts 的 inflightSeq 模式（轻量、单模块变量）。
 let inflightSeq = 0;
 
+// ── treeSeq gate（批 G：防 openWorkflowTree 并发覆盖）────────────────────────────
+// 照 inflightSeq 范式：openWorkflowTree 入口 ++treeSeq、出口比对，丢弃过期树响应。
+let treeSeq = 0;
+
 export const useWorkflowBrowseStore = create<WorkflowBrowseState>((set, get) => ({
   workflows: [],
   workflowsLoading: false,
@@ -123,6 +145,7 @@ export const useWorkflowBrowseStore = create<WorkflowBrowseState>((set, get) => 
   workflowError: null,
 
   activeAgent: null,
+  treeScope: "workflow" as const,
   fileTree: null,
   treeLoading: false,
   treeError: null,
@@ -150,12 +173,17 @@ export const useWorkflowBrowseStore = create<WorkflowBrowseState>((set, get) => 
     const mySeq = ++inflightSeq;
     // m5：进入前同步清空 activeAgent/fileTree/activeFile，防闪现上一 wf 的文件树。
     // review 闭环：同时清空 activeWorkflow——防 loading 期间左栏短暂显示上一 wf 元信息。
+    // 批 G：treeScope 复位 "workflow"（落地即全部资产视图）+ treeLoading 复位
+    // （detail 失败 early-return 时，上一 wf 在飞的树响应被 inflightSeq 丢弃后
+    // 无人再复位 treeLoading，中栏会永转 loading——review 闭环 #2）。
     set({
       workflowLoading: true,
       workflowError: null,
       activeWorkflow: null,
       activeAgent: null,
+      treeScope: "workflow",
       fileTree: null,
+      treeLoading: false,
       activeFile: null,
       fileError: null,
       treeError: null,
@@ -171,6 +199,7 @@ export const useWorkflowBrowseStore = create<WorkflowBrowseState>((set, get) => 
         entry: string;
         inputs_schema: WorkflowDetail["meta"]["inputs_schema"];
         agents_referenced: string[];
+        subagents: SubagentSummary[];
       };
       const agentsBody = (await agentsR.json()) as AgentSummary[];
       // inflightSeq gate 出口：期间用户又切到其它 wf → mySeq 已过期 → 丢弃本次响应。
@@ -185,6 +214,7 @@ export const useWorkflowBrowseStore = create<WorkflowBrowseState>((set, get) => 
           },
           agents_referenced: detailBody.agents_referenced,
           all_agents: agentsBody,
+          subagents: detailBody.subagents ?? [],
         },
         workflowLoading: false,
       });
@@ -194,14 +224,69 @@ export const useWorkflowBrowseStore = create<WorkflowBrowseState>((set, get) => 
         workflowLoading: false,
         workflowError: e instanceof Error ? e.message : String(e),
       });
+      return;
+    }
+    // 批 G：wf 级全资产树自动加载（scope="workflow" 为默认态，用户落地即见全部资产）。
+    // fail-soft 分层：树失败只写 treeError，meta/agents 照常可用。
+    set({ treeLoading: true });
+    try {
+      const treeR = await fetchJsonOrThrow(
+        `/api/workflows/${encodeURIComponent(name)}/tree`,
+      );
+      const treeBody = (await treeR.json()) as TreeResponse;
+      // 写回双守卫：期间用户切 wf（inflightSeq 过期）或已点 agent（treeScope 切走）
+      // → 丢弃，防慢到的 wf 树覆盖 agent 树。
+      if (mySeq !== inflightSeq || get().treeScope !== "workflow") return;
+      set({ fileTree: treeBody.nodes, treeLoading: false });
+    } catch (e) {
+      if (mySeq !== inflightSeq || get().treeScope !== "workflow") return;
+      set({
+        fileTree: null,
+        treeLoading: false,
+        treeError: e instanceof Error ? e.message : String(e),
+      });
+    }
+  },
+
+  openWorkflowTree: async () => {
+    // 批 G：切回 wf 级全资产树（「全部资产」入口 / openSubagent 补载共用）。
+    // activeAgent 同步清空——scope 切回 workflow 后「当前聚焦 agent」语义失效
+    // （中栏 header 回显 wf 名、agent 行取消高亮；openFile 分流不依赖 activeAgent）。
+    const wf = get().activeWorkflow;
+    if (!wf) return;
+    const myTreeSeq = ++treeSeq;
+    set({
+      treeScope: "workflow",
+      activeAgent: null,
+      activeFile: null,
+      fileError: null,
+      treeLoading: true,
+      treeError: null,
+    });
+    try {
+      const r = await fetchJsonOrThrow(
+        `/api/workflows/${encodeURIComponent(wf.meta.name)}/tree`,
+      );
+      const body = (await r.json()) as TreeResponse;
+      if (myTreeSeq !== treeSeq) return;
+      set({ fileTree: body.nodes, treeLoading: false });
+    } catch (e) {
+      if (myTreeSeq !== treeSeq) return;
+      set({
+        fileTree: null,
+        treeLoading: false,
+        treeError: e instanceof Error ? e.message : String(e),
+      });
     }
   },
 
   openAgent: async (agent: string) => {
     const wf = get().activeWorkflow;
     if (!wf) return;
+    // 批 G：treeScope 切 "agent"（openFile 分流 + openWorkflow 树写回守卫依赖）。
     set({
       activeAgent: agent,
+      treeScope: "agent",
       activeFile: null,
       fileError: null,
       treeLoading: true,
@@ -212,8 +297,12 @@ export const useWorkflowBrowseStore = create<WorkflowBrowseState>((set, get) => 
         `/api/workflows/${encodeURIComponent(wf.meta.name)}/agents/${encodeURIComponent(agent)}/tree`,
       );
       const body = (await r.json()) as TreeResponse;
+      // 批 G 对称守卫：期间用户已切回 wf scope（openWorkflowTree）→ 丢弃，
+      // 防慢到的 agent 树覆盖 wf 全资产树（与 openWorkflow 树写回守卫互为镜像）。
+      if (get().treeScope !== "agent") return;
       set({ fileTree: body.nodes, treeLoading: false });
     } catch (e) {
+      if (get().treeScope !== "agent") return;
       set({
         fileTree: null,
         treeLoading: false,
@@ -222,18 +311,47 @@ export const useWorkflowBrowseStore = create<WorkflowBrowseState>((set, get) => 
     }
   },
 
+  openSubagent: (subagent: string) => {
+    // 批 G：点 subagent 行 → wf scope 下打开 subagents/<name>.md。
+    // 树不在 wf scope 或曾加载失败（fileTree 空）→ 先补载 wf 树（fire-and-forget，
+    // openWorkflowTree 的首个 set 同步把 treeScope 置回 "workflow"，随后 openFile
+    // 即走 wf 级 URL）。
+    const s = get();
+    if (s.treeScope !== "workflow" || !s.fileTree) {
+      void s.openWorkflowTree();
+    }
+    void s.openFile(`subagents/${subagent}.md`);
+  },
+
   openFile: async (relPath: string) => {
     const wf = get().activeWorkflow;
+    if (!wf) return;
+    // 批 G：按 treeScope 分流——"agent" 走 agent resources_root，"workflow" 走 wf root
+    // （workflow.yaml / scripts / agents/_xxx_scripts 等不在任何 agent root 下）。
     const agent = get().activeAgent;
-    if (!wf || !agent) return;
+    const scopeAtRequest = get().treeScope;
+    const base =
+      scopeAtRequest === "agent" && agent
+        ? `/api/workflows/${encodeURIComponent(wf.meta.name)}/agents/${encodeURIComponent(agent)}/file`
+        : `/api/workflows/${encodeURIComponent(wf.meta.name)}/file`;
     set({ fileLoading: true, fileError: null });
     try {
       const r = await fetchJsonOrThrow(
-        `/api/workflows/${encodeURIComponent(wf.meta.name)}/agents/${encodeURIComponent(agent)}/file?path=${encodeURIComponent(relPath)}`,
+        `${base}?path=${encodeURIComponent(relPath)}`,
       );
       const body = (await r.json()) as FileResponse;
+      // scope 快照守卫（review 闭环）：期间用户已切 scope（如点 subagent 文件未达时
+      // 点 agent 行）→ 丢弃，防旧 scope 的文件在新 scope 下复活（高亮/内容错位）。
+      if (get().treeScope !== scopeAtRequest) {
+        set({ fileLoading: false });
+        return;
+      }
       set({ activeFile: body, fileLoading: false });
     } catch (e) {
+      if (get().treeScope !== scopeAtRequest) {
+        set({ fileLoading: false });
+        return;
+      }
       set({
         fileLoading: false,
         fileError: e instanceof Error ? e.message : String(e),
@@ -242,9 +360,10 @@ export const useWorkflowBrowseStore = create<WorkflowBrowseState>((set, get) => 
   },
 
   reset: () => {
-    // inflightSeq 自增让任何 inflight openWorkflow 的写回作废（防 unmount 后到达的
-    // stale 响应覆盖已清空的 store）。
+    // inflightSeq / treeSeq 自增让任何 inflight openWorkflow / openWorkflowTree 的
+    // 写回作废（防 unmount 后到达的 stale 响应覆盖已清空的 store）。
     inflightSeq += 1;
+    treeSeq += 1;
     set({
       workflows: [],
       workflowsLoading: false,
@@ -253,6 +372,7 @@ export const useWorkflowBrowseStore = create<WorkflowBrowseState>((set, get) => 
       workflowLoading: false,
       workflowError: null,
       activeAgent: null,
+      treeScope: "workflow",
       fileTree: null,
       treeLoading: false,
       treeError: null,

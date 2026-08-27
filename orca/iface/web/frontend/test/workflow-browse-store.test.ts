@@ -188,6 +188,7 @@ describe("workflow-browse-store", () => {
         meta: { name: "wf", description: "", entry: "x", inputs_schema: {} },
         agents_referenced: [],
         all_agents: [],
+        subagents: [],
       },
     });
     mockFetchRoutes([
@@ -223,6 +224,7 @@ describe("workflow-browse-store", () => {
         meta: { name: "wf", description: "", entry: "x", inputs_schema: {} },
         agents_referenced: [],
         all_agents: [],
+        subagents: [],
       },
     });
     vi.stubGlobal(
@@ -242,8 +244,11 @@ describe("workflow-browse-store", () => {
         meta: { name: "wf", description: "", entry: "x", inputs_schema: {} },
         agents_referenced: [],
         all_agents: [],
+        subagents: [],
       },
       activeAgent: "foo",
+      // 批 G：openFile 按 treeScope 分流——本用例锁 agent scope 语义（配 agent file mock）。
+      treeScope: "agent",
     });
     mockFetchRoutes([
       {
@@ -269,8 +274,10 @@ describe("workflow-browse-store", () => {
         meta: { name: "wf", description: "", entry: "x", inputs_schema: {} },
         agents_referenced: [],
         all_agents: [],
+        subagents: [],
       },
       activeAgent: "foo",
+      treeScope: "agent",
     });
     vi.stubGlobal(
       "fetch",
@@ -345,6 +352,7 @@ describe("workflow-browse-store", () => {
         meta: { name: "stale", description: "", entry: "x", inputs_schema: {} },
         agents_referenced: [],
         all_agents: [],
+        subagents: [],
       },
     });
 
@@ -390,6 +398,7 @@ describe("workflow-browse-store", () => {
         meta: { name: "x", description: "", entry: "x", inputs_schema: {} },
         agents_referenced: [],
         all_agents: [],
+        subagents: [],
       },
       activeAgent: "foo",
       fileTree: [],
@@ -402,5 +411,361 @@ describe("workflow-browse-store", () => {
     expect(s.activeAgent).toBeNull();
     expect(s.fileTree).toBeNull();
     expect(s.activeFile).toBeNull();
+  });
+
+  // ── 批 G（2026-08-27）：treeScope 状态机 + wf 级树 + openFile 分流 ──────────────
+
+  const _WF_TREE_NODES = [
+    {
+      path: "workflow.yaml",
+      name: "workflow.yaml",
+      is_dir: false,
+      size: 10,
+      children: null,
+    },
+  ];
+
+  function mockOpenWorkflowRoutes(opts?: { treeFail?: boolean }) {
+    return mockFetchRoutes([
+      {
+        match: (u) => u.endsWith("/api/workflows/wf-g"),
+        resp: async () => ({
+          name: "wf-g",
+          description: "",
+          entry: "x",
+          inputs_schema: {},
+          agents_referenced: [],
+          subagents: [{ name: "sa-a", description: "d" }],
+        }),
+      },
+      {
+        match: (u) => u.endsWith("/api/workflows/wf-g/agents"),
+        resp: async () => [],
+      },
+      {
+        match: (u) => u.endsWith("/api/workflows/wf-g/tree"),
+        ok: !opts?.treeFail,
+        status: opts?.treeFail ? 500 : 200,
+        resp: async () => ({ workflow: "wf-g", root: "/r", nodes: _WF_TREE_NODES }),
+      },
+    ]);
+  }
+
+  it("批G-1：openWorkflow 成功 → subagents 填充 + wf 树自动加载 + treeScope=workflow", async () => {
+    mockOpenWorkflowRoutes();
+    await useWorkflowBrowseStore.getState().openWorkflow("wf-g");
+    const s = useWorkflowBrowseStore.getState();
+    expect(s.activeWorkflow?.subagents).toEqual([{ name: "sa-a", description: "d" }]);
+    expect(s.treeScope).toBe("workflow");
+    // wf 级树自动加载：落地即见 workflow.yaml（全部资产默认态）
+    expect(s.fileTree?.[0]?.path).toBe("workflow.yaml");
+    expect(s.treeLoading).toBe(false);
+    expect(s.treeError).toBeNull();
+  });
+
+  it("批G-2：openWorkflow 树请求失败 → treeError 写入，activeWorkflow 照常（fail-soft 分层）", async () => {
+    const f = mockOpenWorkflowRoutes({ treeFail: true });
+    // 500 时 mockFetchRoutes 的 resp 返回 wf 树 body，但 ok:false → fetchJsonOrThrow
+    // 走 error 分支读 detail（undefined → 空串）。
+    await useWorkflowBrowseStore.getState().openWorkflow("wf-g");
+    const s = useWorkflowBrowseStore.getState();
+    expect(s.activeWorkflow?.meta.name).toBe("wf-g");
+    expect(s.activeWorkflow?.subagents).toEqual([{ name: "sa-a", description: "d" }]);
+    expect(s.fileTree).toBeNull();
+    expect(s.treeError).toMatch(/HTTP 500/);
+    expect(s.treeLoading).toBe(false);
+    // wf 树请求确实发出过（fail-soft 路径真实走到，而非路由缺失兜底）
+    const urls = f.mock.calls.map((c) => String(c[0]));
+    expect(urls.some((u) => u.endsWith("/api/workflows/wf-g/tree"))).toBe(true);
+  });
+
+  it("批G-3：openAgent → treeScope=agent；随后 openFile 走 /agents/<a>/file URL", async () => {
+    useWorkflowBrowseStore.setState({
+      activeWorkflow: {
+        meta: { name: "wf", description: "", entry: "x", inputs_schema: {} },
+        agents_referenced: [],
+        all_agents: [],
+        subagents: [],
+      },
+    });
+    const f = mockFetchRoutes([
+      {
+        match: (u) => u.includes("/agents/foo/tree"),
+        resp: async () => ({ agent: "foo", root: "/foo", nodes: [] }),
+      },
+      {
+        match: (u) => u.includes("/agents/foo/file?path=agent.md"),
+        resp: async () => ({ path: "agent.md", text: "t", ext: "md", size: 1, truncated: false }),
+      },
+    ]);
+    await useWorkflowBrowseStore.getState().openAgent("foo");
+    expect(useWorkflowBrowseStore.getState().treeScope).toBe("agent");
+    await useWorkflowBrowseStore.getState().openFile("agent.md");
+    const lastUrl = String(f.mock.calls[f.mock.calls.length - 1]?.[0]);
+    expect(lastUrl).toMatch(/\/api\/workflows\/wf\/agents\/foo\/file\?path=agent\.md$/);
+    expect(useWorkflowBrowseStore.getState().activeFile?.path).toBe("agent.md");
+  });
+
+  it("批G-4：scope=workflow 时 openFile 走 /api/workflows/<wf>/file?path= URL", async () => {
+    useWorkflowBrowseStore.setState({
+      activeWorkflow: {
+        meta: { name: "wf", description: "", entry: "x", inputs_schema: {} },
+        agents_referenced: [],
+        all_agents: [],
+        subagents: [],
+      },
+      treeScope: "workflow",
+    });
+    const f = mockFetchRoutes([
+      {
+        match: (u) => u.includes("/api/workflows/wf/file?path=scripts%2Fs.py"),
+        resp: async () => ({ path: "scripts/s.py", text: "x", ext: "py", size: 1, truncated: false }),
+      },
+    ]);
+    await useWorkflowBrowseStore.getState().openFile("scripts/s.py");
+    expect(useWorkflowBrowseStore.getState().activeFile?.path).toBe("scripts/s.py");
+    const lastUrl = String(f.mock.calls[f.mock.calls.length - 1]?.[0]);
+    expect(lastUrl).toMatch(/\/api\/workflows\/wf\/file\?path=scripts%2Fs\.py$/);
+  });
+
+  it("批G-5：openSubagent → activeFile.path=subagents/<name>.md；离开 wf scope 时补载 wf 树", async () => {
+    useWorkflowBrowseStore.setState({
+      activeWorkflow: {
+        meta: { name: "wf", description: "", entry: "x", inputs_schema: {} },
+        agents_referenced: [],
+        all_agents: [],
+        subagents: [{ name: "x", description: "" }],
+      },
+      treeScope: "agent", // 用户看过 agent → openSubagent 须先补载 wf 树
+      fileTree: null,
+    });
+    const f = mockFetchRoutes([
+      {
+        match: (u) => u.endsWith("/api/workflows/wf/tree"),
+        resp: async () => ({ workflow: "wf", root: "/r", nodes: _WF_TREE_NODES }),
+      },
+      {
+        match: (u) => u.includes("/api/workflows/wf/file?path=subagents%2Fx.md"),
+        resp: async () => ({
+          path: "subagents/x.md",
+          text: "# x",
+          ext: "md",
+          size: 3,
+          truncated: false,
+        }),
+      },
+    ]);
+    useWorkflowBrowseStore.getState().openSubagent("x");
+    // openSubagent 是 fire-and-forget（补载树 + 打开文件两个并发 async）。
+    await new Promise((r) => setTimeout(r, 0));
+    const s = useWorkflowBrowseStore.getState();
+    expect(s.activeFile?.path).toBe("subagents/x.md");
+    expect(s.treeScope).toBe("workflow");
+    const urls = f.mock.calls.map((c) => String(c[0]));
+    expect(urls.some((u) => u.endsWith("/api/workflows/wf/tree"))).toBe(true);
+  });
+
+  it("批G-6：openWorkflow 入口同步清空 + treeScope 复位 workflow（m5 扩展）", async () => {
+    useWorkflowBrowseStore.setState({
+      activeWorkflow: {
+        meta: { name: "stale", description: "", entry: "x", inputs_schema: {} },
+        agents_referenced: [],
+        all_agents: [],
+        subagents: [],
+      },
+      activeAgent: "stale-agent",
+      treeScope: "agent",
+      fileTree: [
+        { path: "stale.py", name: "stale.py", is_dir: false, size: 10, children: null },
+      ],
+    });
+    let resolveDetail!: () => void;
+    const delay = new Promise<void>((r) => {
+      resolveDetail = r;
+    });
+    mockFetchRoutes([
+      {
+        match: (u) => u.endsWith("/api/workflows/new-wf"),
+        resp: async () => {
+          await delay;
+          return {
+            name: "new-wf",
+            description: "",
+            entry: "x",
+            inputs_schema: {},
+            agents_referenced: [],
+            subagents: [],
+          };
+        },
+      },
+      {
+        match: (u) => u.endsWith("/api/workflows/new-wf/agents"),
+        resp: async () => [],
+      },
+    ]);
+    const p = useWorkflowBrowseStore.getState().openWorkflow("new-wf");
+    // 同步断言：fetch pending 时已清空 + treeScope 复位（agent 视图残留清除）。
+    expect(useWorkflowBrowseStore.getState().treeScope).toBe("workflow");
+    expect(useWorkflowBrowseStore.getState().activeAgent).toBeNull();
+    expect(useWorkflowBrowseStore.getState().fileTree).toBeNull();
+    resolveDetail();
+    await p;
+    expect(useWorkflowBrowseStore.getState().activeWorkflow?.meta.name).toBe("new-wf");
+  });
+
+  it("批G-7：reset 清 treeScope（agent → workflow）", async () => {
+    useWorkflowBrowseStore.setState({ treeScope: "agent" });
+    useWorkflowBrowseStore.getState().reset();
+    expect(useWorkflowBrowseStore.getState().treeScope).toBe("workflow");
+  });
+
+  it("批G-8：openWorkflow 树响应晚于用户 openAgent → 不覆盖 agent 树（慢到守卫）", async () => {
+    let resolveTree!: () => void;
+    const delayTree = new Promise<void>((r) => {
+      resolveTree = r;
+    });
+    mockFetchRoutes([
+      {
+        match: (u) => u.endsWith("/api/workflows/wf-s"),
+        resp: async () => ({
+          name: "wf-s",
+          description: "",
+          entry: "x",
+          inputs_schema: {},
+          agents_referenced: [],
+          subagents: [],
+        }),
+      },
+      {
+        match: (u) => u.endsWith("/api/workflows/wf-s/agents"),
+        resp: async () => [],
+      },
+      {
+        match: (u) => u.endsWith("/api/workflows/wf-s/tree"),
+        resp: async () => {
+          await delayTree; // wf 树响应慢到
+          return { workflow: "wf-s", root: "/r", nodes: _WF_TREE_NODES };
+        },
+      },
+      {
+        match: (u) => u.includes("/agents/foo/tree"),
+        resp: async () => ({
+          agent: "foo",
+          root: "/foo",
+          nodes: [
+            { path: "agent.md", name: "agent.md", is_dir: false, size: 5, children: null },
+          ],
+        }),
+      },
+    ]);
+    const p = useWorkflowBrowseStore.getState().openWorkflow("wf-s");
+    // 等 detail/agents（立即 resolve）完成、树仍 pending。
+    await new Promise((r) => setTimeout(r, 0));
+    expect(useWorkflowBrowseStore.getState().activeWorkflow?.meta.name).toBe("wf-s");
+    expect(useWorkflowBrowseStore.getState().treeLoading).toBe(true);
+    // 用户在 wf 树慢到期间点了 agent → treeScope 切 "agent"、agent 树写入。
+    await useWorkflowBrowseStore.getState().openAgent("foo");
+    expect(useWorkflowBrowseStore.getState().fileTree?.[0]?.path).toBe("agent.md");
+    // 慢到的 wf 树响应到达——treeScope 守卫应丢弃，不覆盖 agent 树。
+    resolveTree();
+    await p;
+    const s = useWorkflowBrowseStore.getState();
+    expect(
+      s.fileTree?.[0]?.path,
+      "慢到的 wf 树不应覆盖 agent 树（treeScope 双守卫）",
+    ).toBe("agent.md");
+    expect(s.treeScope).toBe("agent");
+  });
+
+  it("批G-9：openAgent 树响应晚于 openWorkflowTree → 不覆盖 wf 树（对称守卫）+ activeAgent 清空", async () => {
+    useWorkflowBrowseStore.setState({
+      activeWorkflow: {
+        meta: { name: "wf", description: "", entry: "x", inputs_schema: {} },
+        agents_referenced: [],
+        all_agents: [],
+        subagents: [],
+      },
+    });
+    let resolveAgentTree!: () => void;
+    const delayAgentTree = new Promise<void>((r) => {
+      resolveAgentTree = r;
+    });
+    mockFetchRoutes([
+      {
+        match: (u) => u.includes("/agents/foo/tree"),
+        resp: async () => {
+          await delayAgentTree; // agent 树响应慢到
+          return {
+            agent: "foo",
+            root: "/foo",
+            nodes: [
+              { path: "agent.md", name: "agent.md", is_dir: false, size: 5, children: null },
+            ],
+          };
+        },
+      },
+      {
+        match: (u) => u.endsWith("/api/workflows/wf/tree"),
+        resp: async () => ({ workflow: "wf", root: "/r", nodes: _WF_TREE_NODES }),
+      },
+    ]);
+    // 用户点 agent（树慢到）→ 立刻点「全部资产」（wf 树立即写入）。
+    const pAgent = useWorkflowBrowseStore.getState().openAgent("foo");
+    expect(useWorkflowBrowseStore.getState().activeAgent).toBe("foo");
+    const pAll = useWorkflowBrowseStore.getState().openWorkflowTree();
+    await pAll;
+    // openWorkflowTree 清 activeAgent（scope 切回 workflow，聚焦 agent 语义失效）。
+    expect(useWorkflowBrowseStore.getState().activeAgent).toBeNull();
+    expect(useWorkflowBrowseStore.getState().fileTree?.[0]?.path).toBe("workflow.yaml");
+    // 慢到的 agent 树响应到达——对称守卫应丢弃，不覆盖 wf 全资产树。
+    resolveAgentTree();
+    await pAgent;
+    expect(
+      useWorkflowBrowseStore.getState().fileTree?.[0]?.path,
+      "慢到的 agent 树不应覆盖 wf 全资产树（对称守卫）",
+    ).toBe("workflow.yaml");
+    expect(useWorkflowBrowseStore.getState().treeScope).toBe("workflow");
+  });
+
+  it("批G-10：openFile 响应晚于 scope 切换 → 旧 scope 文件不复活（scope 快照守卫）", async () => {
+    useWorkflowBrowseStore.setState({
+      activeWorkflow: {
+        meta: { name: "wf", description: "", entry: "x", inputs_schema: {} },
+        agents_referenced: [],
+        all_agents: [],
+        subagents: [{ name: "x", description: "" }],
+      },
+      treeScope: "workflow",
+      fileTree: _WF_TREE_NODES,
+    });
+    let resolveFile!: () => void;
+    const delayFile = new Promise<void>((r) => {
+      resolveFile = r;
+    });
+    mockFetchRoutes([
+      {
+        match: (u) => u.includes("/api/workflows/wf/file?path=subagents%2Fx.md"),
+        resp: async () => {
+          await delayFile; // subagent 文件响应慢到
+          return { path: "subagents/x.md", text: "# x", ext: "md", size: 3, truncated: false };
+        },
+      },
+      {
+        match: (u) => u.includes("/agents/foo/tree"),
+        resp: async () => ({ agent: "foo", root: "/foo", nodes: [] }),
+      },
+    ]);
+    // 用户点 subagent（文件慢到）→ 快速点 agent 行（scope 切 "agent"）。
+    useWorkflowBrowseStore.getState().openSubagent("x"); // fire-and-forget
+    await new Promise((r) => setTimeout(r, 0)); // 让 openFile 的 fetch 发出（挂起 delayFile）
+    await useWorkflowBrowseStore.getState().openAgent("foo");
+    expect(useWorkflowBrowseStore.getState().treeScope).toBe("agent");
+    expect(useWorkflowBrowseStore.getState().activeFile).toBeNull();
+    // 慢到的 subagent 文件响应到达——scope 快照守卫应丢弃（不在 agent scope 下复活）。
+    resolveFile();
+    await new Promise((r) => setTimeout(r, 0)); // 等响应链走完守卫判定
+    const s = useWorkflowBrowseStore.getState();
+    expect(s.activeFile, "旧 scope 的文件不应在新 scope 下复活").toBeNull();
+    expect(s.fileLoading).toBe(false);
   });
 });
