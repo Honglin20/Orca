@@ -6,19 +6,29 @@
 # verdict.json:
 #   1. two-layer declaration check (file / graph) against the CURRENT base
 #      (base shadow, base onnx);
-#   2. profile the variant onnx — TWO mutually exclusive modes:
-#        default          : re-profile inline with the pinned profiler
-#                           (the deployed placeholder estimator unless
-#                           --profiler says otherwise)
-#        --pre-profiled   : trust the four-piece ALREADY under
-#                           variants/<vid>/profile/ (mfu mode: the node
-#                           dispatched mfu-analyzer + ran mfu_adapter.py per
-#                           variant before this call). Inline profiling is
-#                           DISABLED; a variant without a four-piece is a
-#                           hard error, never an inline re-profile
-#   3. latency gate: improvement >= max(min_improvement_cycles,
-#      min_improvement_pct% x base) AND actual/predicted improvement
-#      ratio >= min_pred_actual_ratio.
+#   2. profile the variant onnx — the PROFILING mode comes from
+#      profile_mode.json (written once at entry):
+#        placeholder : re-profile inline with the pinned profiler (the
+#                      deployed placeholder estimator unless --profiler
+#                      says otherwise)
+#        mfu         : trust the four-piece ALREADY under
+#                      variants/<vid>/profile/ (the node dispatched
+#                      mfu-analyzer + ran mfu_adapter.py per variant before
+#                      this call). Inline profiling is DISABLED; a variant
+#                      without a four-piece is a hard error, never an inline
+#                      re-profile.
+#   3. latency gate (no absolute / relative / ratio thresholds — a small
+#      strictly-better step is a legitimate pass; the prediction ratio is an
+#      informational field only, never a gate):
+#        gate mode latency  (chase phase)    : pass <=> makespan < incumbent
+#                                               (incumbent = best.json
+#                                               makespan, else the origin
+#                                               anchor baseline makespan)
+#        gate mode accuracy (recovery phase) : pass <=> makespan <= the
+#                                               frozen origin anchor's
+#                                               target_cycles
+#      The gate mode comes from the shared round_state.py (single source);
+#      both anchors are read-only on disk.
 #
 # Writes variants/<vid>/verdict.json, appends rounds/<RRR>/verdicts.jsonl and
 # the L0 history row through the typed history builder. Reconciliation pass:
@@ -39,29 +49,14 @@ set -euo pipefail
 
 ART="${ORCA_ARTIFACTS_DIR:?FATAL: ORCA_ARTIFACTS_DIR not set (run_latency_recheck.sh)}"
 SCRIPTS="$ART/scripts"
-# profiler default lives HERE (an omitted --profiler must never be a hard
-# error): the deployed placeholder estimator is the default the workflow's
-# empty npu_chip (placeholder estimation mode) means
 PROFILER="$SCRIPTS/placeholder_profiler.py"
 PROFILER_SET=0
-PRE_PROFILED=0
-MIN_IMP="100"
-MIN_PCT="1"
-MIN_RATIO="0.5"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --profiler)        PROFILER="${2:?--profiler needs a value}"; PROFILER_SET=1; shift 2 ;;
-    --pre-profiled)    PRE_PROFILED=1; shift ;;
-    --min-improvement) MIN_IMP="${2:?--min-improvement needs a value}"; shift 2 ;;
-    --min-pct)         MIN_PCT="${2:?--min-pct needs a value}"; shift 2 ;;
-    --min-ratio)       MIN_RATIO="${2:?--min-ratio needs a value}"; shift 2 ;;
+    --profiler) PROFILER="${2:?--profiler needs a value}"; PROFILER_SET=1; shift 2 ;;
     *) echo "FATAL: unknown arg $1" >&2; exit 2 ;;
   esac
 done
-if [ "$PRE_PROFILED" -eq 1 ] && [ "$PROFILER_SET" -eq 1 ]; then
-  echo "FATAL: --pre-profiled and --profiler are mutually exclusive (pre-profiled mode reads the variant's existing four-piece; inline profiling is disabled)" >&2
-  exit 2
-fi
 
 # ── pinned interpreter (from contracts.json) ─────────────────────────────────
 # diff_check's graph layer needs onnx — only the interpreter pinned in
@@ -81,27 +76,43 @@ PYEOF
 PY="$(read_contract 'c["interpreter"]["sys_executable"]')"
 command -v "$PY" >/dev/null 2>&1 || [ -x "$PY" ] || {
   echo "FATAL: pinned interpreter not found: $PY" >&2; exit 2; }
-for f in diff_check.py history_lib.py emit_result.py; do
+for f in diff_check.py history_lib.py emit_result.py round_state.py; do
   [ -f "$SCRIPTS/$f" ] || { echo "FATAL: $SCRIPTS/$f not deployed — entry stage incomplete" >&2; exit 2; }
 done
-# an explicitly empty --profiler value means "the default estimator" (never a
-# hard error); in pre-profiled mode no profiler runs at all, so its presence
-# is not required either
 [ -n "$PROFILER" ] || PROFILER="$SCRIPTS/placeholder_profiler.py"
-if [ "$PRE_PROFILED" -eq 0 ] && [ ! -f "$PROFILER" ]; then
-  echo "FATAL: profiler script not found: '$PROFILER'" >&2; exit 2; fi
-for req in "$ART/base/profile/profile_summary.json" "$ART/base/model.onnx" "$ART/shadow" "$ART/rounds"; do
+for req in "$ART/base/profile/profile_summary.json" "$ART/base/model.onnx" "$ART/shadow" "$ART/rounds" "$ART/profile_mode.json" "$ART/base/origin_anchor.json"; do
   [ -e "$req" ] || { echo "FATAL: base reference missing: $req (baseline stage incomplete)" >&2; exit 2; }
 done
-# gate thresholds are validated UP FRONT: a bad --min-pct must fail loud even
-# when this invocation has zero DONE variants (no gate would ever evaluate it)
-"$PY" -c 'import sys
+
+# ── profiling mode (profile_mode.json — single source) ────────────────────────
+PROFILE_MODE="$("$PY" - "$ART/profile_mode.json" <<'PYEOF'
+import json, sys
 try:
-    ok = float(sys.argv[1]) >= 0
-except ValueError:
-    ok = False
-sys.exit(0 if ok else 1)' "$MIN_PCT" || {
-  echo "FATAL: --min-pct must be a number >= 0 (got '$MIN_PCT')" >&2; exit 2; }
+    mode = json.loads(open(sys.argv[1], encoding="utf-8").read()).get("mode")
+except Exception as exc:
+    print(f"FATAL: profile_mode.json unparseable: {exc}", file=sys.stderr); raise SystemExit(2)
+if mode not in ("placeholder", "mfu"):
+    print(f"FATAL: profile_mode.json mode must be placeholder|mfu, got {mode!r} — re-run the entry node to re-resolve the profiling mode", file=sys.stderr)
+    raise SystemExit(2)
+print(mode)
+PYEOF
+)"
+if [ "$PROFILE_MODE" = "placeholder" ] && [ ! -f "$PROFILER" ]; then
+  echo "FATAL: profiler script not found: '$PROFILER'" >&2; exit 2; fi
+if [ "$PROFILE_MODE" = "mfu" ] && [ "$PROFILER_SET" -eq 1 ]; then
+  echo "FATAL: --profiler is mutually exclusive with mfu mode (profile_mode.json) — the four-piece under variants/<vid>/profile/ is the only measurement source in this mode" >&2
+  exit 2; fi
+
+# ── gate mode + anchors (round_state.py — single source; read-only) ──────────
+GATE_JSON="$("$PY" "$SCRIPTS/round_state.py" --artifacts "$ART" mode)" || exit 2
+GATE_MODE="$("$PY" -c 'import json,sys; print(json.loads(sys.argv[1])["mode"])' "$GATE_JSON")"
+TARGET_CYCLES="$("$PY" -c 'import json,sys; print(json.loads(sys.argv[1])["target_cycles"])' "$GATE_JSON")"
+BEST_MS="$("$PY" -c 'import json,sys; print(json.loads(sys.argv[1])["best_makespan"])' "$GATE_JSON")"
+if [ "$BEST_MS" = "None" ]; then
+  INCUMBENT="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["baseline_makespan_cycles"])' "$ART/base/origin_anchor.json")"
+else
+  INCUMBENT="$BEST_MS"
+fi
 
 # ── current round + base makespan ─────────────────────────────────────────────
 ROUND="$("$PY" - "$ART/rounds" <<'PYEOF'
@@ -223,8 +234,9 @@ import json, sys
 vid, rnd, layers, predicted = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4])
 print(json.dumps({"vid": vid, "round": rnd, "structural_check": "fail",
                   "mismatch_layers": json.loads(layers), "makespan_cycles": None,
-                  "base_makespan_cycles": None, "improvement_cycles": None,
-                  "required_improvement_cycles": None, "pred_actual_ratio": None,
+                  "base_makespan_cycles": None, "incumbent_cycles": None,
+                  "improvement_cycles": None, "gate_mode": None,
+                  "pred_actual_ratio": None,
                   "latency_gate": None, "predicted_delta_cycles": predicted,
                   "outcome": "structural_mismatch"}))
 PYEOF
@@ -235,14 +247,14 @@ PYEOF
     continue
   fi
 
-  # ---- profile: inline (placeholder/custom) or the pre-profiled four-piece ----
+  # ---- profile: inline (placeholder) or the mfu four-piece ----
   var_ms=""
-  if [ "$PRE_PROFILED" -eq 1 ]; then
+  if [ "$PROFILE_MODE" = "mfu" ]; then
     # mfu mode: the four-piece was produced per-variant by the node
     # (mfu-analyzer subagent + mfu_adapter.py) BEFORE this call — never
     # re-profile inline here
     if [ ! -s "$vdir/profile/profile_summary.json" ]; then
-      echo "FATAL: pre-profiled mode: $vid has no four-piece under variants/$vid/profile/ — profile it first (dispatch mfu-analyzer + run scripts/mfu_adapter.py --profile-dir variants/$vid/profile), inline profiling is disabled in this mode" >&2
+      echo "FATAL: mfu mode: $vid has no four-piece under variants/$vid/profile/ — profile it first (dispatch mfu-analyzer + run scripts/mfu_adapter.py --profile-dir variants/$vid/profile), inline profiling is disabled in this mode" >&2
       exit 2
     fi
     var_ms="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["makespan_cycles"])' "$vdir/profile/profile_summary.json")"
@@ -259,8 +271,9 @@ ops = [l.split(":", 1)[1].strip() for l in open(sys.argv[3], encoding="utf-8")
        if l.startswith("unsupported:")]
 print(json.dumps({"vid": vid, "round": rnd, "structural_check": "pass",
                   "unsupported_ops": sorted(set(ops)), "makespan_cycles": None,
-                  "base_makespan_cycles": None, "improvement_cycles": None,
-                  "required_improvement_cycles": None, "pred_actual_ratio": None,
+                  "base_makespan_cycles": None, "incumbent_cycles": None,
+                  "improvement_cycles": None, "gate_mode": None,
+                  "pred_actual_ratio": None,
                   "latency_gate": None, "predicted_delta_cycles": predicted,
                   "outcome": "unsupported_op"}))
 PYEOF
@@ -276,49 +289,33 @@ PYEOF
     var_ms="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["makespan_cycles"])' "$vdir/profile/profile_summary.json")"
   fi
 
-  # ---- latency gate ----
-  gate_rc=0
-  gate="$("$PY" - "$BASE_MS" "$var_ms" "$predicted" "$MIN_IMP" "$MIN_PCT" "$MIN_RATIO" <<'PYEOF'
+  # ---- latency gate (mode-conditioned; informational ratio only) ----
+  verdict="$("$PY" - "$vid" "$ROUND" "$BASE_MS" "$var_ms" "$predicted" \
+      "$GATE_MODE" "$INCUMBENT" "$TARGET_CYCLES" <<'PYEOF'
 import json, sys
-base, var, pred = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
-min_imp, min_pct, min_ratio = int(sys.argv[4]), float(sys.argv[5]), float(sys.argv[6])
-if pred >= 0:
-    print(json.dumps({"error": f"predicted_delta_cycles {pred} is not negative"}))
-    sys.exit(3)
-improvement = base - var
-required = max(min_imp, int(base * min_pct / 100))
-ratio = improvement / (-pred)
-gate = "pass" if (improvement >= required and ratio >= min_ratio) else "fail"
-print(json.dumps({"improvement": improvement, "required": required,
-                  "ratio": round(ratio, 6), "latency_gate": gate}))
-PYEOF
-)" || gate_rc=$?
-if [ "$gate_rc" -ne 0 ]; then
-  echo "FATAL: gate math failed for $vid: $gate" >&2
-  exit 2
-fi
-  outcome="latency_fail"
-  if [ "$("$PY" -c 'import json,sys; print(json.loads(sys.argv[1])["latency_gate"])' "$gate")" = "pass" ]; then
-    outcome="latency_pass"
-  fi
-  verdict="$("$PY" - "$vid" "$ROUND" "$BASE_MS" "$predicted" "$gate" "$outcome" <<'PYEOF'
-import json, sys
-vid, rnd, base, predicted = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
-g, outcome = json.loads(sys.argv[5]), sys.argv[6]
+vid, rnd = sys.argv[1], int(sys.argv[2])
+base, var, pred = int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
+gate_mode, incumbent, target = sys.argv[6], int(sys.argv[7]), int(sys.argv[8])
+if gate_mode == "latency":
+    gate = "pass" if var < incumbent else "fail"
+else:  # accuracy recovery phase: the frozen line is the filter
+    gate = "pass" if var <= target else "fail"
+ratio = (base - var) / (-pred) if pred < 0 else None
+outcome = "latency_pass" if gate == "pass" else "latency_fail"
 print(json.dumps({"vid": vid, "round": rnd, "structural_check": "pass",
-                  "makespan_cycles": base - g["improvement"],
-                  "base_makespan_cycles": base,
-                  "improvement_cycles": g["improvement"],
-                  "required_improvement_cycles": g["required"],
-                  "pred_actual_ratio": g["ratio"],
-                  "latency_gate": g["latency_gate"],
-                  "predicted_delta_cycles": predicted, "outcome": outcome}))
+                  "makespan_cycles": var, "base_makespan_cycles": base,
+                  "incumbent_cycles": incumbent,
+                  "improvement_cycles": base - var, "gate_mode": gate_mode,
+                  "pred_actual_ratio": None if ratio is None else round(ratio, 6),
+                  "latency_gate": gate,
+                  "predicted_delta_cycles": pred, "outcome": outcome}))
 PYEOF
 )"
   write_verdict "$vid" "$verdict"
+  outcome="$("$PY" -c 'import json,sys; print(json.loads(sys.argv[1])["outcome"])' "$verdict")"
   NEW_COUNT=$((NEW_COUNT + 1)); record_outcome_count "$outcome"
   if [ "$outcome" = "latency_pass" ]; then PASS_COUNT=$((PASS_COUNT + 1)); fi
-  echo "verdict $vid: $outcome (makespan $var_ms vs base $BASE_MS)" >&2
+  echo "verdict $vid: $outcome (makespan $var_ms vs incumbent $INCUMBENT, gate_mode $GATE_MODE)" >&2
 done
 
 # ── reconciliation: verdict.json present but history row missing ──────────────
@@ -366,6 +363,7 @@ fi
   --field "status=executed" \
   --field "verdicts_count=$NEW_COUNT" \
   --field "latency_pass_count=$PASS_COUNT" \
+  --field "gate_mode=$GATE_MODE" \
   --field "verdicts_path=$VERDICTS" \
   --field "summary=$SUMMARY" \
   --field 'error='

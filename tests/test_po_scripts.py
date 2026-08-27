@@ -1806,6 +1806,10 @@ def _baseline_ws(tmp_path: Path, *, full_epochs: int = 2, probe_k: int = 1,
                                                                      encoding="utf-8")
     (art / "templates" / "run_eval.template.sh").write_text(
         "echo 'ckpt <<ckpt>> acc=0.9'\n", encoding="utf-8")
+    # the profiling mode the entry node resolved (placeholder by default)
+    (art / "profile_mode.json").write_text(json.dumps(
+        {"mode": "placeholder", "chip": "", "precision": None,
+         "core_num": None, "resolved_by": "fallback"}), encoding="utf-8")
     return art
 
 
@@ -2130,6 +2134,9 @@ def _mfu_baseline_ws(tmp_path: Path) -> tuple[Path, dict]:
             return self.fc2(self.act(self.fc1(x)))
 
     art = _baseline_ws(tmp_path, full_epochs=1)
+    (art / "profile_mode.json").write_text(json.dumps(
+        {"mode": "mfu", "chip": "6613", "precision": "INT8",
+         "core_num": 1, "resolved_by": "env"}), encoding="utf-8")
     shutil.copy(_SCRIPTS / "mfu_adapter.py", art / "scripts" / "mfu_adapter.py")
     model = Tiny().eval()
     torch.onnx.export(model, torch.randn(1, 32), str(art / "base" / "model.onnx"),
@@ -2146,10 +2153,6 @@ def _mfu_baseline_ws(tmp_path: Path) -> tuple[Path, dict]:
     return art, env
 
 
-_MFU_CHAIN_ARGS = ["--npu-chip", "6613", "--npu-precision", "INT8",
-                   "--npu-core-num", "1"]
-
-
 def test_baseline_chain_mfu_mode_awaits_analyzer_then_adapts(tmp_path: Path):
     """mfu mode handshake: with no raw products the chain WAITS for the
     mfu-analyzer subagent (running line telling the agent to dispatch it —
@@ -2158,7 +2161,7 @@ def test_baseline_chain_mfu_mode_awaits_analyzer_then_adapts(tmp_path: Path):
     parallel_cycles."""
     art, env = _mfu_baseline_ws(tmp_path)
     base_cmd = ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
-                "--seed", "0"] + _MFU_CHAIN_ARGS
+                "--seed", "0"]
 
     first = subprocess.run(base_cmd, capture_output=True, text=True,
                            timeout=60, env=env)
@@ -2209,7 +2212,7 @@ def test_baseline_chain_mfu_mode_report_without_raw_is_fatal_no_fallback(tmp_pat
 
     proc = subprocess.run(
         ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
-         "--seed", "0"] + _MFU_CHAIN_ARGS,
+         "--seed", "0"],
         capture_output=True, text=True, timeout=60, env=env)
     payload = json.loads(proc.stdout)
     assert payload["status"] == "failed"
@@ -2237,7 +2240,7 @@ def test_baseline_chain_mfu_adapter_failure_surfaces_in_error(tmp_path: Path):
 
     chain = subprocess.run(
         ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
-         "--seed", "0"] + _MFU_CHAIN_ARGS,
+         "--seed", "0"],
         capture_output=True, text=True, timeout=60, env=env)
     payload = json.loads(chain.stdout)
     assert payload["status"] == "failed"
@@ -2247,21 +2250,36 @@ def test_baseline_chain_mfu_adapter_failure_surfaces_in_error(tmp_path: Path):
     assert not (art / "base" / "profile" / "profile_summary.json").exists()
 
 
-def test_baseline_chain_rejects_illegal_npu_args(tmp_path: Path):
-    """The chain re-pins the profiling-mode enums the entry gate validated
-    (chip / precision / core-num) — an illegal combination fails at argument
-    parsing, before any step runs."""
+def test_baseline_chain_profile_mode_file_is_the_single_source(tmp_path: Path):
+    """The chain no longer takes profiling-mode arguments: the mode (and the
+    mfu knobs) come from profile_mode.json. A missing file or an unknown
+    mode fails at startup, before any step runs (the enum validation itself
+    lives in the entry resolver)."""
     art, env = _mfu_baseline_ws(tmp_path)
-    for extra, word in (
-            (["--npu-chip", "9900"], "--npu-chip"),
-            (["--npu-chip", "6613", "--npu-precision", "FP4"], "--npu-precision"),
-            (["--npu-chip", "1951", "--npu-core-num", "3"], "--npu-core-num")):
-        proc = subprocess.run(
-            ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
-             "--seed", "0"] + extra,
-            capture_output=True, text=True, timeout=60, env=env)
-        assert proc.returncode == 2
-        assert word in proc.stderr
+    (art / "profile_mode.json").unlink()
+    proc = subprocess.run(
+        ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
+         "--seed", "0"],
+        capture_output=True, text=True, timeout=60, env=env)
+    assert proc.returncode == 2
+    assert "profile_mode.json missing" in proc.stderr
+
+    (art / "profile_mode.json").write_text(
+        json.dumps({"mode": "quantum"}), encoding="utf-8")
+    proc2 = subprocess.run(
+        ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
+         "--seed", "0"],
+        capture_output=True, text=True, timeout=60, env=env)
+    assert proc2.returncode == 2
+    assert "placeholder|mfu" in proc2.stderr
+
+    # the retired npu arguments are now a hard usage error
+    proc3 = subprocess.run(
+        ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
+         "--seed", "0", "--npu-chip", "6613"],
+        capture_output=True, text=True, timeout=60, env=env)
+    assert proc3.returncode == 2
+    assert "--npu-chip" in proc3.stderr
 
 
 def test_check_business_logic_gate(tmp_path: Path):
@@ -2340,7 +2358,7 @@ def test_reuse_check_fresh_start_wipes_all_but_run_lock(tmp_path: Path):
     env["ORCA_ARTIFACTS_DIR"] = str(art)
     env["ORCA_RUN_ID"] = "fresh-test-run"
     proc = subprocess.run(
-        ["bash", str(_REUSE_SH), "model.py", "", "1", ""],
+        ["bash", str(_REUSE_SH), "model.py", "", "1"],
         capture_output=True, text=True, timeout=60, env=env)
 
     assert proc.returncode == 1            # NO_REUSE -> rebuild from scratch
@@ -2353,7 +2371,7 @@ def test_reuse_check_fresh_start_wipes_all_but_run_lock(tmp_path: Path):
     # chain follow-up: with fresh_start=0 the wiped workspace is a plain
     # first-run NO_REUSE (no BASELINE.lock) — the rebuild path resumes cleanly
     proc2 = subprocess.run(
-        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
         capture_output=True, text=True, timeout=60, env=env)
     assert proc2.returncode == 1
     assert "no BASELINE.lock (first run)" in proc2.stderr
@@ -2374,7 +2392,7 @@ def test_reuse_check_rejects_fresh_foreign_lock(tmp_path: Path):
     env["ORCA_ARTIFACTS_DIR"] = str(art)
     env["ORCA_RUN_ID"] = "this-run"
     proc = subprocess.run(
-        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
         capture_output=True, text=True, timeout=60, env=env)
     assert proc.returncode == 3
     assert "owned by another live run" in proc.stderr
@@ -2395,10 +2413,11 @@ def _write_baseline_lock(art: Path) -> None:
                     "ckpt_sha256": "", "py_files_sha256": py}), encoding="utf-8")
 
 
-def _reusable_ws(tmp_path: Path) -> Path:
+def _reusable_ws(tmp_path: Path, *, profile_mode: dict | None = None) -> Path:
     """Minimal workspace whose BASELINE.lock fully matches the shadow tree and
     whose reuse products are complete — the state a healthy zero-promotion
-    second run arrives at the gate with."""
+    second run arrives at the gate with (including the recorded profiling
+    mode; default = placeholder as resolved on a machine without NPU)."""
     art = tmp_path / "art"
     art.mkdir()
     (art / "shadow" / "pkg").mkdir(parents=True)
@@ -2409,14 +2428,20 @@ def _reusable_ws(tmp_path: Path) -> Path:
         json.dumps({"constructible": True, "exportable": True,
                     "pretrained_loadable": True, "definition_located": True}),
         encoding="utf-8")
+    (art / "profile_mode.json").write_text(json.dumps(
+        profile_mode or {"mode": "placeholder", "chip": "",
+                         "precision": None, "core_num": None,
+                         "resolved_by": "fallback"}), encoding="utf-8")
     _write_baseline_lock(art)
     return art
 
 
-def _reuse_env(art: Path) -> dict[str, str]:
-    env = dict(os.environ)
+def _reuse_env(art: Path, **extra: str) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("ORCA_PO_NPU")}
     env["ORCA_ARTIFACTS_DIR"] = str(art)
     env["ORCA_RUN_ID"] = "reuse-test-run"
+    env.update(extra)
     return env
 
 
@@ -2428,7 +2453,7 @@ def test_reuse_check_matching_lock_reaches_reuse(tmp_path: Path):
     be read (and matched) all the way to the reuse verdict."""
     art = _reusable_ws(tmp_path)
     proc = subprocess.run(
-        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
         capture_output=True, text=True, timeout=60, env=_reuse_env(art))
     assert proc.returncode == 0, proc.stderr
     assert "REUSE" in proc.stdout
@@ -2447,7 +2472,7 @@ def test_reuse_check_mismatch_is_promotion_history_guidance(tmp_path: Path):
     (art / "shadow" / "pkg" / "model.py").write_text(
         "# model v1 (promoted)\n", encoding="utf-8")
     proc = subprocess.run(
-        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
         capture_output=True, text=True, timeout=60, env=_reuse_env(art))
     assert proc.returncode == 3
     assert "does not match" in proc.stderr
@@ -2465,7 +2490,7 @@ def test_reuse_check_corrupt_lock_is_a_real_error(tmp_path: Path):
     art = _reusable_ws(tmp_path)
     (art / "BASELINE.lock").write_text("{not json", encoding="utf-8")
     proc = subprocess.run(
-        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
         capture_output=True, text=True, timeout=60, env=_reuse_env(art))
     assert proc.returncode == 3
     assert "unreadable/corrupt" in proc.stderr
@@ -2489,7 +2514,7 @@ def test_reuse_check_structurally_corrupt_lock_is_not_a_mismatch(
     art = _reusable_ws(tmp_path)
     (art / "BASELINE.lock").write_text(corrupt_body, encoding="utf-8")
     proc = subprocess.run(
-        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
         capture_output=True, text=True, timeout=60, env=_reuse_env(art))
     assert proc.returncode == 3
     assert "unreadable/corrupt" in proc.stderr
@@ -2508,7 +2533,7 @@ def test_reuse_check_missing_anchor_map_is_mismatch_not_corrupt(tmp_path: Path):
         json.dumps({"model_path": "model.py", "pretrained_ckpt": "",
                     "ckpt_sha256": ""}), encoding="utf-8")
     proc = subprocess.run(
-        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
         capture_output=True, text=True, timeout=60, env=_reuse_env(art))
     assert proc.returncode == 3
     assert "does not match" in proc.stderr
@@ -2516,43 +2541,107 @@ def test_reuse_check_missing_anchor_map_is_mismatch_not_corrupt(tmp_path: Path):
     assert "unreadable/corrupt" not in proc.stderr
 
 
-def test_reuse_check_npu_chip_enum_gate(tmp_path: Path):
-    """Arg 4 is the profiling-mode switch: empty (placeholder estimation) and
-    6613/1951 (mfu real evaluation) pass the gate and proceed to the normal
-    reuse logic; an illegal non-empty value fails AT STARTUP (exit 3) — a
-    typo'd chip must not surface mid-run at the profiling step. In mfu mode
-    the two consumed knobs (precision / core-num, env-passed) are gated the
-    same way."""
+def test_reuse_check_arity_rejects_fourth_positional(tmp_path: Path):
+    """The npu trio args are RETIRED: a stale 4-arg invocation (the pre-v5
+    call form) is a usage error (exit 2), never a silently-ignored extra."""
     art = _reusable_ws(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        capture_output=True, text=True, timeout=60, env=_reuse_env(art))
+    assert proc.returncode == 2
+    assert "unexpected extra argument" in proc.stderr
 
-    # legal values pass the gate and reach the normal verdicts
-    for chip in ("", "6613", "1951"):
-        proc = subprocess.run(
-            ["bash", str(_REUSE_SH), "model.py", "", "0", chip],
-            capture_output=True, text=True, timeout=60, env=_reuse_env(art))
-        assert proc.returncode == 0, (chip, proc.stderr)
 
-    # illegal value: fail loud BEFORE any lock/reuse decision
-    for chip in ("9900", "6613 ", "npu"):
-        proc = subprocess.run(
-            ["bash", str(_REUSE_SH), "model.py", "", "0", chip],
-            capture_output=True, text=True, timeout=60, env=_reuse_env(art))
-        assert proc.returncode == 3, chip
-        assert "npu_chip" in proc.stderr
-        assert "6613/1951" in proc.stderr
+def test_reuse_check_mode_consistent_reaches_reuse_untouched(tmp_path: Path):
+    """A consistent re-resolution (placeholder == placeholder) lets the reuse
+    verdict through AND never touches the recorded profile_mode.json."""
+    art = _reusable_ws(tmp_path)          # placeholder recorded, no NPU env
+    mode_file = art / "profile_mode.json"
+    before = mode_file.read_bytes()
+    stamp = mode_file.stat().st_mtime_ns
+    proc = subprocess.run(
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
+        capture_output=True, text=True, timeout=60, env=_reuse_env(art))
+    assert proc.returncode == 0, proc.stderr
+    assert "REUSE" in proc.stdout
+    assert mode_file.read_bytes() == before        # comparison never rewrites
+    assert mode_file.stat().st_mtime_ns == stamp
 
-    # mfu mode: illegal precision / core-num fail at the same gate (an env
-    # default keeps them legal when the caller does not pass them)
-    mfu_env = _reuse_env(art)
-    for key, bad, word in (("NPU_PRECISION", "FP4", "npu_precision"),
-                           ("NPU_CORE_NUM", "3", "npu_core_num")):
-        env = dict(mfu_env)
-        env[key] = bad
-        proc = subprocess.run(
-            ["bash", str(_REUSE_SH), "model.py", "", "0", "6613"],
-            capture_output=True, text=True, timeout=60, env=env)
-        assert proc.returncode == 3, (key, bad)
-        assert word in proc.stderr
+
+def test_reuse_check_mode_drift_fails_loud(tmp_path: Path):
+    """The recorded placeholder no longer matches the re-resolved mfu mode:
+    cross-run cycles comparisons are invalid — exit 2 with fresh_start
+    guidance (the check sits AFTER the lock match: first-run and
+    fresh_start paths can never reach it)."""
+    art = _reusable_ws(tmp_path)
+    env = _reuse_env(art, ORCA_PO_NPU_CHIP="6613",
+                     ORCA_PO_NPU_PRECISION="INT8", ORCA_PO_NPU_CORES="1")
+    before = (art / "profile_mode.json").read_bytes()
+    proc = subprocess.run(
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
+        capture_output=True, text=True, timeout=60, env=env)
+    assert proc.returncode == 2
+    assert "profiling-mode mismatch" in proc.stderr
+    assert "fresh_start=true" in proc.stderr
+    assert (art / "profile_mode.json").read_bytes() == before  # not overwritten
+
+
+def test_reuse_check_mode_file_missing_fails_loud(tmp_path: Path):
+    """A pre-v5 (or half-built) reusable workspace has no profile_mode.json:
+    reuse is refused with the same recovery (the check is contract behavior,
+    not a regression)."""
+    art = _reusable_ws(tmp_path)
+    (art / "profile_mode.json").unlink()
+    proc = subprocess.run(
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
+        capture_output=True, text=True, timeout=60, env=_reuse_env(art))
+    assert proc.returncode == 2
+    assert "profile_mode.json missing" in proc.stderr
+    assert "fresh_start=true" in proc.stderr
+
+
+def test_reuse_check_resolved_by_flip_is_not_drift(tmp_path: Path):
+    """Measurement-equivalent source flip: the mode was recorded via env, the
+    re-resolution comes from npu-smi, but the four compared fields are
+    identical — `resolved_by` is provenance, never drift; REUSE continues."""
+    art = _reusable_ws(tmp_path, profile_mode={
+        "mode": "mfu", "chip": "6613", "precision": "INT8", "core_num": 1,
+        "resolved_by": "env"})
+    npu_dir = tmp_path / "npu-stub"
+    npu_dir.mkdir()
+    (npu_dir / "npu-smi").write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s' '+------+------+\n"
+        "| NPU  Name  | Health |\n"
+        "+======+======+\n"
+        "| 0     6613 | OK     |\n"
+        "+------+------+\n'\n", encoding="utf-8")
+    (npu_dir / "npu-smi").chmod(0o755)
+    env = _reuse_env(art)   # NO ORCA_PO_NPU_CHIP: resolution goes via npu-smi
+    env["PATH"] = f"{npu_dir}:{env.get('PATH', '')}"
+    proc = subprocess.run(
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
+        capture_output=True, text=True, timeout=60, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert "REUSE" in proc.stdout
+    # the recorded provenance is untouched
+    assert json.loads((art / "profile_mode.json").read_text(encoding="utf-8")) \
+        ["resolved_by"] == "env"
+
+
+def test_reuse_check_no_lock_first_run_never_hits_mode_check(tmp_path: Path):
+    """The consistency check sits after the lock match: a first run (no
+    BASELINE.lock, no profile_mode.json) is a plain NO_REUSE — the mode file
+    is written later by the fresh path."""
+    art = tmp_path / "art"
+    art.mkdir()
+    (art / "shadow" / "pkg").mkdir(parents=True)
+    (art / "shadow" / "pkg" / "model.py").write_text("# m\n", encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
+        capture_output=True, text=True, timeout=60, env=_reuse_env(art))
+    assert proc.returncode == 1
+    assert "no BASELINE.lock (first run)" in proc.stderr
 
 
 # ── deploy_scripts: orphan retirement (defensive, upgrade-safe) ───────────────
@@ -3226,36 +3315,43 @@ def test_push_curves_ack_timeout_never_hangs(tmp_path: Path):
     thread.join(timeout=10)
 
 
-# ── run_latency_recheck (D-V4-10): v3.5 batch-verify semantics, zero drift ───
+# ── run_latency_recheck (v5): mode-conditioned gate, thresholds retired ──────
 
 _RECHECK_SH = _REPO / "workflows" / "prof-opt" / "agents" / "po_propose" / "scripts" / "run_latency_recheck.sh"
 
-# CALIBRATED expectations (the v3.5 reference script produced byte-identical
+# CALIBRATED expectations (the reference script produced byte-identical
 # values on this exact fixture; regenerate alongside any torch/onnx/profiler
 # upgrade): base (GELU tiny) = 712 cycles, variant (ReLU tiny) = 568.
+# Origin anchor: baseline 712, ratio 0.5 -> target 357; no best.json ->
+# latency gate mode, incumbent = 712 (the anchor baseline).
 _T8_OP_DELTA = {"Add": -1, "Div": -1, "Erf": -1, "Mul": -2, "Relu": 1}
 _T8_PREDICTED = -144
 _T8_PASS_VERDICT = {
     "vid": "r1-01", "round": 1, "structural_check": "pass",
     "makespan_cycles": 568, "base_makespan_cycles": 712,
-    "improvement_cycles": 144, "required_improvement_cycles": 100,
-    "pred_actual_ratio": 1.0, "latency_gate": "pass",
-    "predicted_delta_cycles": -144, "outcome": "latency_pass",
+    "incumbent_cycles": 712, "improvement_cycles": 144,
+    "gate_mode": "latency", "pred_actual_ratio": 1.0,
+    "latency_gate": "pass", "predicted_delta_cycles": -144,
+    "outcome": "latency_pass",
 }
 _T8_MISMATCH_VERDICT = {
     "vid": "r1-02", "round": 1, "structural_check": "fail",
     "mismatch_layers": ["graph: ops Add,Div,Erf,Mul,Relu"],
     "makespan_cycles": None, "base_makespan_cycles": None,
-    "improvement_cycles": None, "required_improvement_cycles": None,
-    "pred_actual_ratio": None, "latency_gate": None,
+    "incumbent_cycles": None, "improvement_cycles": None,
+    "gate_mode": None, "pred_actual_ratio": None, "latency_gate": None,
     "predicted_delta_cycles": -144, "outcome": "structural_mismatch",
 }
 
 
-def _recheck_workspace(tmp_path: Path) -> Path:
+def _recheck_workspace(tmp_path: Path, *, mode: str = "placeholder",
+                       best: dict | None = None,
+                       anchor_baseline: int = 712) -> Path:
     """GELU->ReLU variant fixture: one variant whose declaration matches the
     real onnx graphs (latency-pass path) and one declaring an empty op_delta
-    (graph-layer structural-mismatch path)."""
+    (graph-layer structural-mismatch path). The profiling mode comes from
+    profile_mode.json; the gate anchors from the origin anchor (+ optional
+    best.json)."""
     torch = pytest.importorskip("torch")
     pytest.importorskip("onnx")
     import placeholder_profiler  # noqa: E402
@@ -3263,8 +3359,21 @@ def _recheck_workspace(tmp_path: Path) -> Path:
     art = tmp_path / "art"
     (art / "scripts").mkdir(parents=True)
     for src in ("diff_check.py", "history_lib.py", "emit_result.py",
-                "placeholder_profiler.py"):
+                "round_state.py", "placeholder_profiler.py"):
         shutil.copy(_SCRIPTS / src, art / "scripts" / src)
+    (art / "profile_mode.json").write_text(json.dumps(
+        {"mode": "placeholder", "chip": "", "precision": None,
+         "core_num": None, "resolved_by": "fallback"} if mode == "placeholder"
+        else {"mode": "mfu", "chip": "6613", "precision": "INT8",
+              "core_num": 1, "resolved_by": "env"}), encoding="utf-8")
+    (art / "base" / "profile").mkdir(parents=True)
+    (art / "base" / "origin_anchor.json").write_text(json.dumps({
+        "baseline_makespan_cycles": anchor_baseline,
+        "latency_reduction_min": 0.5, "accuracy_budget": 0.1,
+        "target_cycles": int(anchor_baseline * 0.5) + 1,
+        "frozen_at_round": 0}), encoding="utf-8")
+    if best is not None:
+        (art / "best.json").write_text(json.dumps(best), encoding="utf-8")
 
     class Tiny(torch.nn.Module):
         def __init__(self, act):
@@ -3283,13 +3392,13 @@ def _recheck_workspace(tmp_path: Path) -> Path:
                           opset_version=17, do_constant_folding=True)
 
     torch.manual_seed(0)
-    (art / "base").mkdir()
+    (art / "base").mkdir(exist_ok=True)
     export(Tiny(torch.nn.GELU()), art / "base" / "model.onnx")
     base_ms = placeholder_profiler.profile(
         art / "base" / "model.onnx", art / "base" / "profile")["makespan_cycles"]
     # calibration guard: if the pricing ever drifts, the hardcoded verdicts
     # above are void -> fail loud with the recalibration hint
-    assert base_ms == 712, (
+    assert base_ms == anchor_baseline == 712, (
         f"calibration drift: base makespan {base_ms} != 712 — regenerate the "
         "T8 expectations (run the fixture once against the reference script)")
 
@@ -3324,16 +3433,15 @@ def _run_recheck(art: Path) -> subprocess.CompletedProcess:
     env["ORCA_ARTIFACTS_DIR"] = str(art)
     return subprocess.run(
         ["bash", str(_RECHECK_SH),
-         "--profiler", str(art / "scripts" / "placeholder_profiler.py"),
-         "--min-improvement", "100", "--min-pct", "1", "--min-ratio", "0.5"],
+         "--profiler", str(art / "scripts" / "placeholder_profiler.py")],
         capture_output=True, text=True, timeout=300, env=env)
 
 
 def test_run_latency_recheck_migration_regression(tmp_path: Path):
-    """The batch verify semantics are IDENTICAL to the reference behavior on
-    the same fixture: two-layer declaration check, re-profile, gate math
-    (144 >= max(100, 1% x 712) with ratio 1.0), typed history rows, and the
-    calibrated verdict JSONs."""
+    """The batch verify semantics on the reference fixture: two-layer
+    declaration check, re-profile, STRICT-improvement gate (568 < incumbent
+    712 — the v5 judgement has no absolute/relative/ratio thresholds), typed
+    history rows, and the calibrated verdict JSONs."""
     art = _recheck_workspace(tmp_path)
     proc = _run_recheck(art)
     assert proc.returncode == 0, proc.stderr
@@ -3341,6 +3449,7 @@ def test_run_latency_recheck_migration_regression(tmp_path: Path):
     assert out["status"] == "executed"
     assert out["verdicts_count"] == 2
     assert out["latency_pass_count"] == 1
+    assert out["gate_mode"] == "latency"
     assert out["summary"] == "2 verdicts [latency_pass=1 structural_mismatch=1]"
     assert out["verdicts_path"] == str(art / "rounds" / "001" / "verdicts.jsonl")
     assert json.loads((art / "variants" / "r1-01" / "verdict.json")
@@ -3351,7 +3460,7 @@ def test_run_latency_recheck_migration_regression(tmp_path: Path):
     latest = history_lib.read_latest(art / "history.jsonl")
     assert latest["r1-01"]["outcome"] == "latency_pass"
     assert latest["r1-01"]["makespan_cycles"] == 568
-    assert latest["r1-01"]["pred_actual_ratio"] == 1.0
+    assert latest["r1-01"]["pred_actual_ratio"] == 1.0   # informational only
     assert latest["r1-02"]["outcome"] == "structural_mismatch"
     # verdicts.jsonl is an append-only audit stream of both verdicts
     rows = [json.loads(line) for line in
@@ -3383,9 +3492,7 @@ def test_run_latency_recheck_migration_regression(tmp_path: Path):
         (art / "variants" / vid / "verdict.json").unlink()
     env = dict(os.environ)
     env["ORCA_ARTIFACTS_DIR"] = str(art)
-    proc4 = subprocess.run(["bash", str(_RECHECK_SH),
-                            "--min-improvement", "100", "--min-pct", "1",
-                            "--min-ratio", "0.5"],
+    proc4 = subprocess.run(["bash", str(_RECHECK_SH)],
                            capture_output=True, text=True, timeout=300, env=env)
     assert proc4.returncode == 0, proc4.stderr
     out4 = json.loads(proc4.stdout)
@@ -3394,6 +3501,75 @@ def test_run_latency_recheck_migration_regression(tmp_path: Path):
                       .read_text(encoding="utf-8")) == _T8_PASS_VERDICT
     assert json.loads((art / "variants" / "r1-02" / "verdict.json")
                       .read_text(encoding="utf-8")) == _T8_MISMATCH_VERDICT
+
+
+def test_run_latency_recheck_small_strict_step_passes(tmp_path: Path):
+    """v5 retired the 100-cycle / 1% / ratio thresholds: a variant only ONE
+    cycle below the incumbent is a legitimate latency_pass (the pre-v5 gate
+    rejected exactly this small-step improvement)."""
+    art = _recheck_workspace(tmp_path, mode="mfu", best={
+        "vid": "r0-99", "makespan_cycles": 711, "proxy_acc": None,
+        "round": 0, "profile_dir": "x"})    # incumbent = best.json = 711
+    import placeholder_profiler  # noqa: E402
+    vdir = art / "variants" / "r1-01"
+    placeholder_profiler.profile(vdir / "onnx" / "model.onnx", vdir / "profile")
+    summary_path = vdir / "profile" / "profile_summary.json"
+    doc = json.loads(summary_path.read_text(encoding="utf-8"))
+    doc["makespan_cycles"] = 710            # exactly ONE cycle better
+    summary_path.write_text(json.dumps(doc), encoding="utf-8")
+    env = dict(os.environ)
+    env["ORCA_ARTIFACTS_DIR"] = str(art)
+    proc = subprocess.run(["bash", str(_RECHECK_SH)], capture_output=True,
+                          text=True, timeout=300, env=env)
+    assert proc.returncode == 0, proc.stderr
+    verdict = json.loads((vdir / "verdict.json").read_text(encoding="utf-8"))
+    assert verdict["makespan_cycles"] == 710
+    assert verdict["incumbent_cycles"] == 711
+    assert verdict["outcome"] == "latency_pass"   # strict improvement is enough
+
+
+def test_run_latency_recheck_recovery_mode_uses_target_line(tmp_path: Path):
+    """Accuracy (recovery) gate mode: the frozen target line is the filter —
+    a variant ABOVE the line is eliminated even though it beats the
+    incumbent; the gate mode comes from round_state (best under the line)."""
+    art = _recheck_workspace(tmp_path, best={
+        "vid": "r0-99", "makespan_cycles": 300, "proxy_acc": 0.4,
+        "round": 0, "profile_dir": "x"})   # 300 <= 357 -> accuracy mode
+    env = dict(os.environ)
+    env["ORCA_ARTIFACTS_DIR"] = str(art)
+    proc = subprocess.run(["bash", str(_RECHECK_SH)], capture_output=True,
+                          text=True, timeout=300, env=env)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["gate_mode"] == "accuracy"
+    verdict = json.loads((art / "variants" / "r1-01" / "verdict.json")
+                         .read_text(encoding="utf-8"))
+    # 568 > target 357 -> mechanically eliminated in the recovery phase
+    assert verdict["gate_mode"] == "accuracy"
+    assert verdict["latency_gate"] == "fail"
+    assert verdict["outcome"] == "latency_fail"
+
+
+def test_run_latency_recheck_positive_prediction_is_informational(tmp_path: Path):
+    """The pre-v5 `predicted_delta_cycles >= 0` hard guard is retired: a
+    positive prediction no longer fails the run (the measured number is the
+    only judgement); the ratio field degrades to None."""
+    art = _recheck_workspace(tmp_path)
+    decl = art / "variants" / "r1-02" / "declaration.json"
+    doc = json.loads(decl.read_text(encoding="utf-8"))
+    doc["op_delta"] = _T8_OP_DELTA        # make it structurally pass
+    doc["predicted_delta_cycles"] = 10    # positive prediction
+    decl.write_text(json.dumps(doc), encoding="utf-8")
+    env = dict(os.environ)
+    env["ORCA_ARTIFACTS_DIR"] = str(art)
+    proc = subprocess.run(["bash", str(_RECHECK_SH)], capture_output=True,
+                          text=True, timeout=300, env=env)
+    assert proc.returncode == 0, proc.stderr
+    verdict = json.loads((art / "variants" / "r1-02" / "verdict.json")
+                         .read_text(encoding="utf-8"))
+    assert verdict["outcome"] == "latency_pass"
+    assert verdict["pred_actual_ratio"] is None
+    assert verdict["predicted_delta_cycles"] == 10
 
 
 def test_run_latency_recheck_reconciles_missing_history_rows(tmp_path: Path):
@@ -3418,73 +3594,74 @@ def test_run_latency_recheck_reconciles_missing_history_rows(tmp_path: Path):
     assert latest["r1-02"]["outcome"] == "structural_mismatch"
 
 
-def test_run_latency_recheck_pre_profiled_mode(tmp_path: Path):
-    """mfu mode: the recheck reads the four-piece the node produced per
-    variant (mfu-analyzer + mfu_adapter) BEFORE the call and never profiles
-    inline — the verdict must carry the PRE-PROFILED makespan verbatim (here
-    450, not the 568 an inline run would produce), so the gate math is
-    attributable to the real evaluation, not a local re-estimation."""
-    art = _recheck_workspace(tmp_path)
+def test_run_latency_recheck_mfu_mode_reads_four_piece(tmp_path: Path):
+    """mfu mode (from profile_mode.json): the recheck reads the four-piece
+    the node produced per variant (mfu-analyzer + mfu_adapter) BEFORE the
+    call and never profiles inline — the verdict must carry the four-piece
+    makespan verbatim (here 450, not the 568 an inline run would produce),
+    so the gate math is attributable to the real evaluation."""
+    art = _recheck_workspace(tmp_path, mode="mfu")
     import placeholder_profiler  # noqa: E402
 
     vdir = art / "variants" / "r1-01"
     placeholder_profiler.profile(vdir / "onnx" / "model.onnx", vdir / "profile")
     summary_path = vdir / "profile" / "profile_summary.json"
     doc = json.loads(summary_path.read_text(encoding="utf-8"))
-    doc["makespan_cycles"] = 450     # make the pre-profiled value unmistakable
+    doc["makespan_cycles"] = 450     # make the four-piece value unmistakable
     summary_path.write_text(json.dumps(doc), encoding="utf-8")
 
     env = dict(os.environ)
     env["ORCA_ARTIFACTS_DIR"] = str(art)
-    proc = subprocess.run(
-        ["bash", str(_RECHECK_SH), "--pre-profiled",
-         "--min-improvement", "100", "--min-pct", "1", "--min-ratio", "0.5"],
-        capture_output=True, text=True, timeout=300, env=env)
+    proc = subprocess.run(["bash", str(_RECHECK_SH)],
+                          capture_output=True, text=True, timeout=300, env=env)
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)
     assert out["status"] == "executed"
     assert out["verdicts_count"] == 2          # r1-02 still gets its structural verdict
     assert out["latency_pass_count"] == 1
     verdict = json.loads((vdir / "verdict.json").read_text(encoding="utf-8"))
-    assert verdict["makespan_cycles"] == 450   # the PRE-PROFILED number, verbatim
+    assert verdict["makespan_cycles"] == 450   # the four-piece number, verbatim
     assert verdict["improvement_cycles"] == 712 - 450
     assert verdict["outcome"] == "latency_pass"
-    # the skip key still applies on top of the pre-profiled mode
-    proc2 = subprocess.run(
-        ["bash", str(_RECHECK_SH), "--pre-profiled",
-         "--min-improvement", "100", "--min-pct", "1", "--min-ratio", "0.5"],
-        capture_output=True, text=True, timeout=300, env=env)
+    # the skip key still applies on top of the mfu mode
+    proc2 = subprocess.run(["bash", str(_RECHECK_SH)],
+                           capture_output=True, text=True, timeout=300, env=env)
     assert json.loads(proc2.stdout)["verdicts_count"] == 0
 
 
-def test_run_latency_recheck_pre_profiled_fail_loud_matrix(tmp_path: Path):
-    """Hard errors, never an inline fallback: a DONE variant without a
-    four-piece, and --pre-profiled combined with --profiler (mutually
-    exclusive modes)."""
-    art = _recheck_workspace(tmp_path)
+def test_run_latency_recheck_mfu_fail_loud_matrix(tmp_path: Path):
+    """Hard errors, never an inline fallback: in mfu mode a DONE variant
+    without a four-piece, and --profiler (mutually exclusive with mfu mode)."""
+    art = _recheck_workspace(tmp_path, mode="mfu")
     env = dict(os.environ)
     env["ORCA_ARTIFACTS_DIR"] = str(art)
 
     # variant without the four-piece -> rc 2 naming the variant + the remedy
-    proc = subprocess.run(
-        ["bash", str(_RECHECK_SH), "--pre-profiled",
-         "--min-improvement", "100", "--min-pct", "1", "--min-ratio", "0.5"],
-        capture_output=True, text=True, timeout=300, env=env)
+    proc = subprocess.run(["bash", str(_RECHECK_SH)],
+                          capture_output=True, text=True, timeout=300, env=env)
     assert proc.returncode == 2
-    assert "pre-profiled" in proc.stderr
+    assert "mfu mode" in proc.stderr
     assert "r1-01" in proc.stderr
     assert "inline profiling is disabled" in proc.stderr
 
     # mode conflict -> rc 2
     proc2 = subprocess.run(
-        ["bash", str(_RECHECK_SH), "--pre-profiled",
-         "--profiler", str(art / "scripts" / "placeholder_profiler.py"),
-         "--min-improvement", "100", "--min-pct", "1", "--min-ratio", "0.5"],
+        ["bash", str(_RECHECK_SH),
+         "--profiler", str(art / "scripts" / "placeholder_profiler.py")],
         capture_output=True, text=True, timeout=300, env=env)
     assert proc2.returncode == 2
     assert "mutually exclusive" in proc2.stderr
 
 
+def test_run_latency_recheck_mode_file_missing_rc2(tmp_path: Path):
+    art = _recheck_workspace(tmp_path)
+    (art / "profile_mode.json").unlink()
+    env = dict(os.environ)
+    env["ORCA_ARTIFACTS_DIR"] = str(art)
+    proc = subprocess.run(["bash", str(_RECHECK_SH)],
+                          capture_output=True, text=True, timeout=300, env=env)
+    assert proc.returncode == 2
+    assert "profile_mode.json" in proc.stderr
 # ── T12: admission clause single source (E3-07 dual pin) ──────────────────────
 
 def test_admission_clause_single_source():
@@ -3899,7 +4076,8 @@ _PREREQ_SH = (_REPO / "workflows" / "prof-opt" / "agents" / "po_propose" / "scri
               / "check_prerequisites.sh")
 _PREREQ_FILES = ("analyze.py", "predict_delta.py", "history_lib.py",
                  "experiment_ledger.py", "emit_result.py", "check_bottleneck.py",
-                 "mfu_adapter.py", "mfu_benchmark.py")
+                 "mfu_adapter.py", "mfu_benchmark.py", "round_state.py",
+                 "resolve_profile_mode.sh", "rules_pool.py")
 
 
 def _run_prereq(ws: Path):

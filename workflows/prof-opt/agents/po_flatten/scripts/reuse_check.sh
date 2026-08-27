@@ -18,28 +18,28 @@
 #   4. shadow tree + project_manifest.md + readiness/readiness.json exist and
 #      readiness is all-pass -> REUSE (skip the workflow steps).
 #
-# Also validates the profiling-mode inputs AT STARTUP: npu_chip (arg 4) —
-# empty (placeholder estimation mode) or a legal chip model (6613 / 1951,
-# mfu real-evaluation mode); when the chip selects mfu mode, NPU_PRECISION /
-# NPU_CORE_NUM (env-passed by the caller) must be legal too. An illegal value
-# fails here (exit 3) instead of surfacing mid-run when the profiling step
-# first consumes it.
+# Also re-validates the PROFILING MODE on the reuse path (only): the mode is
+# re-resolved once (read-only) and compared with the recorded
+# profile_mode.json over the measurement-config fields {mode, chip,
+# precision, core_num}. Any difference — or a missing profile_mode.json —
+# exits 2: cycles measured under a different configuration cannot be
+# compared across runs (fresh_start=true rebuilds the workspace).
 #
 # Exit codes: 0 = REUSE (skip steps)
 #             1 = NO_REUSE (run the steps; also returned after fresh-start wipe)
-#             2 = hard environment error
-#             3 = fail-loud conflict (live other run / baseline-lock mismatch /
-#                 illegal profiling-mode inputs) -> flatten_passed=false
+#             2 = hard environment error (incl. profiling-mode drift on reuse)
+#             3 = fail-loud conflict (live other run / baseline-lock
+#                 mismatch) -> flatten_passed=false
 #
-# Usage: reuse_check.sh <model_path> <pretrained_ckpt> <fresh_start:0|1> <npu_chip>
+# Usage: reuse_check.sh <model_path> <pretrained_ckpt> <fresh_start:0|1>
 #   (<pretrained_ckpt> may be empty: reference-only, recorded in the lock only
 #    when provided)
 set -euo pipefail
 
-MODEL_PATH="${1:?usage: reuse_check.sh <model_path> <pretrained_ckpt> <fresh_start:0|1> <npu_chip>}"
+MODEL_PATH="${1:?usage: reuse_check.sh <model_path> <pretrained_ckpt> <fresh_start:0|1>}"
 CKPT="${2-}"
 FRESH_START="${3:-0}"
-NPU_CHIP="${4:-}"
+[ $# -le 3 ] || { echo "FATAL: unexpected extra argument(s): $* (usage: reuse_check.sh <model_path> <pretrained_ckpt> <fresh_start:0|1>)" >&2; exit 2; }
 
 ART="${ORCA_ARTIFACTS_DIR:?FATAL: ORCA_ARTIFACTS_DIR not set (reuse_check.sh)}"
 RUN_ID="${ORCA_RUN_ID:-unknown-run}"
@@ -90,35 +90,6 @@ PY
   fi
 fi
 heartbeat
-
-# ── profiling-mode guard (pinned: mode is decided HERE, at startup) ──────────
-# empty chip = placeholder estimation mode; 6613/1951 = mfu real-evaluation
-# mode. Anything else is a typo'd input that would only blow up mid-run at the
-# profiling step — fail it now, loud and early. In mfu mode the two consumed
-# knobs are gated the same way (the chain re-pins them defensively).
-case "$NPU_CHIP" in
-  ""|6613|1951) ;;
-  *)
-    echo "FATAL: npu_chip must be empty (placeholder estimation mode) or one of 6613/1951 (mfu real-evaluation mode), got: '$NPU_CHIP'" >&2
-    exit 3
-    ;;
-esac
-if [ -n "$NPU_CHIP" ]; then
-  case "${NPU_PRECISION:-INT8}" in
-    INT8|INT16|AMP) ;;
-    *)
-      echo "FATAL: npu_precision must be INT8/INT16/AMP (mfu mode), got: '${NPU_PRECISION:-}'" >&2
-      exit 3
-      ;;
-  esac
-  case "${NPU_CORE_NUM:-1}" in
-    1|2|4) ;;
-    *)
-      echo "FATAL: npu_core_num must be 1/2/4 (mfu mode), got: '${NPU_CORE_NUM:-}'" >&2
-      exit 3
-      ;;
-  esac
-fi
 
 # ── 2. fresh start wipe ──────────────────────────────────────────────────────
 # Normalize before judging: the caller renders 1/0, but tolerate true/false/yes
@@ -226,6 +197,45 @@ if [[ "$LOCK_VERDICT" != *'"match": true'* ]]; then
   echo "FATAL: BASELINE.lock does not match current key inputs. $LOCK_VERDICT" >&2
   echo "HINT: most often this is design behavior on a workspace with a promotion history: after a round advanced, the shadow tree moved forward while BASELINE.lock still anchors the original baseline — cross-run reuse only holds for a workspace with zero promotions (or the model/ckpt/shadow anchor truly changed). Re-run with fresh_start=true to rebuild the workspace from scratch." >&2
   exit 3
+fi
+
+# ── 3b. profiling-mode consistency (reuse path only) ─────────────────────────
+# Reached only with a matching lock (first-run NO_REUSE and fresh_start wipe
+# both exited above). Re-resolve the mode READ-ONLY and compare the
+# measurement-config four-field set with the recorded profile_mode.json —
+# the existing file is never touched here. `resolved_by` is provenance only
+# and deliberately NOT compared (an env->npu-smi source flip on the same
+# hardware is a measurement-equivalent configuration, not drift).
+PO_SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/_po_scripts"
+[ -f "$PO_SCRIPTS/resolve_profile_mode.sh" ] || {
+  echo "FATAL: shared tooling not found at $PO_SCRIPTS/resolve_profile_mode.sh (expected <agents root>/_po_scripts)" >&2
+  exit 2; }
+MODE_FILE="$ART/profile_mode.json"
+if [ ! -s "$MODE_FILE" ]; then
+  echo "FATAL: profile_mode.json missing under $ART — the workspace predates mode resolution or was half-built; cycles comparisons across runs are invalid without it. Re-run with fresh_start=true to rebuild the workspace." >&2
+  exit 2
+fi
+RESOLVED_NOW="$(bash "$PO_SCRIPTS/resolve_profile_mode.sh" --stdout-only)" || {
+  echo "FATAL: profiling-mode re-resolution failed while checking reuse consistency (see stderr above)" >&2
+  exit 2; }
+MODE_OK="$(python3 - "$MODE_FILE" "$RESOLVED_NOW" <<'PY'
+import json, sys
+
+COMPARE = ("mode", "chip", "precision", "core_num")
+try:
+    recorded = json.loads(open(sys.argv[1], encoding="utf-8").read())
+    now = json.loads(sys.argv[2])
+except Exception as exc:
+    print(f"BAD:{exc}")
+    raise SystemExit(0)
+diff = {k: (recorded.get(k, "<absent>"), now.get(k, "<absent>"))
+        for k in COMPARE if recorded.get(k, "<absent>") != now.get(k, "<absent>")}
+print("OK" if not diff else f"DRIFT:{json.dumps(diff, ensure_ascii=False)}")
+PY
+)"
+if [[ "$MODE_OK" == BAD:* || "$MODE_OK" == DRIFT:* ]]; then
+  echo "FATAL: profiling-mode mismatch on workspace reuse ($MODE_OK) — cycles measured under a different configuration cannot be compared across runs; re-run with fresh_start=true to rebuild the workspace." >&2
+  exit 2
 fi
 
 # ── 4. reuse products ────────────────────────────────────────────────────────

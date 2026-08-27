@@ -9,10 +9,11 @@
 #                                 then render + run the export template ->
 #                                 base/model.onnx
 #   2 profile (dual-mode)        : four profiling artifacts -> base/profile/
-#                                 - placeholder mode (--npu-chip empty): the
-#                                   built-in estimator runs inline (unchanged)
-#                                 - mfu mode (--npu-chip 6613/1951): the raw
-#                                   evaluation products under
+#                                 (mode from profile_mode.json — resolved once
+#                                 at entry)
+#                                 - placeholder mode: the built-in estimator
+#                                   runs inline (unchanged)
+#                                 - mfu mode: the raw evaluation products under
 #                                   base/profile/<onnx_stem>/ are produced by
 #                                   the mfu-analyzer SUBAGENT (the chain never
 #                                   runs the evaluation itself), then converted
@@ -91,12 +92,12 @@
 # is never a final node output. All logs to stderr/files.
 #
 # Usage:
-#   run_baseline_chain.sh --latency-reduction-min F --seed N
-#                         [--npu-chip 6613|1951|"" --npu-precision INT8|INT16|AMP
-#                          --npu-core-num 1|2|4] [--finalizer]
-#   (--npu-chip empty = placeholder estimation mode; non-empty = mfu
-#    real-evaluation mode — precision/core-num are validated only in mfu mode)
-# Environment: ORCA_ARTIFACTS_DIR (required). The user project root comes
+#   run_baseline_chain.sh --latency-reduction-min F --seed N [--finalizer]
+# Environment: ORCA_ARTIFACTS_DIR (required). The profiling mode (placeholder
+# estimator vs mfu real evaluation) is read from $ORCA_ARTIFACTS_DIR/
+# profile_mode.json — resolved once at entry by the flatten node; a missing
+# file or an unknown mode is a hard error. The chip/precision/core_num the
+# mfu path consumes come from the same file. The user project root comes
 # ONLY from readiness/readiness.json — the engine already exports a
 # same-purpose project-root env var (it resolves to the Orca repository
 # root, NOT the user project), so reading any project-root env here would
@@ -106,14 +107,11 @@ set -uo pipefail
 ART="${ORCA_ARTIFACTS_DIR:?FATAL: ORCA_ARTIFACTS_DIR not set (run_baseline_chain.sh)}"
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
-TARGET=""; SEED="0"; NPU_CHIP=""; NPU_PRECISION="INT8"; NPU_CORE_NUM="1"; FINALIZER=""
+TARGET=""; SEED="0"; FINALIZER=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --latency-reduction-min) TARGET="${2:?}"; shift 2 ;;
     --seed)              SEED="${2:?}"; shift 2 ;;
-    --npu-chip)          NPU_CHIP="${2:?}"; shift 2 ;;
-    --npu-precision)     NPU_PRECISION="${2:?}"; shift 2 ;;
-    --npu-core-num)      NPU_CORE_NUM="${2:?}"; shift 2 ;;
     --finalizer)         FINALIZER="1"; shift ;;
     *) echo "FATAL: unknown arg $1" >&2; exit 2 ;;
   esac
@@ -121,22 +119,31 @@ done
 [ -n "$TARGET" ] || { echo "FATAL: --latency-reduction-min is required" >&2; exit 2; }
 python3 -c "import sys; r=float('$TARGET'); sys.exit(0 if 0.0 < r < 1.0 else 1)" \
   || { echo "FATAL: --latency-reduction-min must be a number in (0, 1), got '$TARGET'" >&2; exit 2; }
-# profiling mode validation (the entry reuse gate rejects the same inputs, this
-# is the defensive second pin): chip decides the mode, precision/cores are
-# consumed only in mfu mode
-case "$NPU_CHIP" in
-  ""|6613|1951) ;;
-  *) echo "FATAL: --npu-chip must be empty or 6613/1951, got '$NPU_CHIP'" >&2; exit 2 ;;
-esac
-if [ -n "$NPU_CHIP" ]; then
-  case "$NPU_PRECISION" in
-    INT8|INT16|AMP) ;;
-    *) echo "FATAL: --npu-precision must be INT8/INT16/AMP, got '$NPU_PRECISION' (mfu mode)" >&2; exit 2 ;;
-  esac
-  case "$NPU_CORE_NUM" in
-    1|2|4) ;;
-    *) echo "FATAL: --npu-core-num must be 1/2/4, got '$NPU_CORE_NUM' (mfu mode)" >&2; exit 2 ;;
-  esac
+# profiling mode (single source: profile_mode.json, resolved at entry)
+NPU_CHIP=""; NPU_PRECISION="INT8"; NPU_CORE_NUM="1"
+if [ -z "$FINALIZER" ]; then
+  MODE_DOC="$(python3 - "$ART/profile_mode.json" <<'PY'
+import json, sys
+try:
+    doc = json.loads(open(sys.argv[1], encoding="utf-8").read())
+except FileNotFoundError as exc:
+    raise SystemExit(f"FATAL: {sys.argv[1]} missing — the profiling mode is "
+                     f"resolved once at the entry node; re-run it (or "
+                     f"rebuild with fresh_start)") from exc
+mode = doc.get("mode")
+if mode not in ("placeholder", "mfu"):
+    raise SystemExit(f"FATAL: profile_mode.json mode must be "
+                     f"placeholder|mfu, got {mode!r} — re-run the entry node "
+                     f"to re-resolve the profiling mode")
+if mode == "mfu":
+    print(f"{doc.get('chip', '')} {doc.get('precision', 'INT8')} {doc.get('core_num', 1)}")
+PY
+)" || exit 2
+  if [ -n "$MODE_DOC" ]; then
+    NPU_CHIP="$(printf '%s' "$MODE_DOC" | awk '{print $1}')"
+    NPU_PRECISION="$(printf '%s' "$MODE_DOC" | awk '{print $2}')"
+    NPU_CORE_NUM="$(printf '%s' "$MODE_DOC" | awk '{print $3}')"
+  fi
 fi
 cd "$ART" || { echo "FATAL: artifacts dir unreachable: $ART" >&2; exit 2; }
 
