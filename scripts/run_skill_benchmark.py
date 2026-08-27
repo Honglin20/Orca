@@ -76,7 +76,9 @@ def run_case(case_dir: Path, run_root: Path) -> dict:
         produced_yaml = p
         break
     produced_agents = []
-    for cand in [ws / "agents", ws / "workflows" / "agents"]:
+    # 产物探测三种布局：平铺 agents/（旧）· workflows/agents/（旧共享池）· workflows/<wf>/agents/
+    # （per-wf 自包含，sorted 保稳定——多候选命中时取最后一个）。
+    for cand in [ws / "agents", ws / "workflows" / "agents", *sorted(ws.glob("workflows/*/agents"))]:
         if cand.is_dir():
             produced_agents = [str(p.relative_to(ws)) for p in cand.rglob("*") if p.is_file()]
 
