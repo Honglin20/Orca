@@ -73,7 +73,7 @@ def test_history_builder_field_sets(tmp_path: Path):
         latency_gate="pass", pred_actual_ratio=0.9, outcome="latency_pass")
     history_lib.append_probe(
         hist, "r1-01", proxy_acc=0.83,
-        promote_gate="pass", outcome="promoted",
+        promote_gate="pass", outcome="accuracy_pass", gap=0.02,
         eval_skipped_no_epoch_ckpt=False, monitor_failed=False,
         eval_acc=0.91, eval_failed=False)
 
@@ -86,8 +86,14 @@ def test_history_builder_field_sets(tmp_path: Path):
     assert [r["version"] for r in rows] == [1, 2, 3]
 
     latest = history_lib.read_latest(hist)
-    assert latest["r1-01"]["outcome"] == "promoted"
+    assert latest["r1-01"]["outcome"] == "accuracy_pass"
     assert latest["r1-01"]["makespan_cycles"] == 900  # merged snapshot carries L0 fields
+    assert latest["r1-01"]["gap"] == 0.02
+
+    # the advance marker row keeps the promoted field set (LATENCY_FIELDS)
+    advanced = history_lib.append_advanced(hist, "r1-01")
+    assert advanced["outcome"] == "advanced"
+    assert history_lib.read_latest(hist)["r1-01"]["outcome"] == "advanced"
 
 
 def test_history_builder_rejects_unknown_fields(tmp_path: Path):
@@ -127,11 +133,24 @@ def _write_sig_history(hist: Path, sig: str, outcomes: list[str],
             history_lib.append_probe(hist, vid, proxy_acc=0.4,
                                      promote_gate="fail", outcome="probe_insufficient")
         elif outcome == "promoted":
+            # v4 read-compat row: never written by v5, still dedup-blocks
             history_lib.append_latency(hist, vid, structural_check="pass",
                                        makespan_cycles=100, latency_gate="pass",
                                        pred_actual_ratio=1.0, outcome="latency_pass")
             history_lib.append_probe(hist, vid, proxy_acc=0.9,
                                      promote_gate="pass", outcome="promoted")
+        elif outcome == "advanced":
+            history_lib.append_latency(hist, vid, structural_check="pass",
+                                       makespan_cycles=100, latency_gate="pass",
+                                       pred_actual_ratio=1.0, outcome="latency_pass")
+            history_lib.append_advanced(hist, vid)
+        elif outcome in ("accuracy_pass", "accuracy_fail"):
+            history_lib.append_latency(hist, vid, structural_check="pass",
+                                       makespan_cycles=100, latency_gate="pass",
+                                       pred_actual_ratio=1.0, outcome="latency_pass")
+            history_lib.append_probe(hist, vid, proxy_acc=0.9,
+                                     promote_gate="pass" if outcome == "accuracy_pass" else "fail",
+                                     outcome=outcome, gap=0.05)
         else:  # structural_mismatch / variant_broken / unsupported_op
             if outcome in ("structural_mismatch", "variant_broken"):
                 history_lib.append_outcome(hist, vid, outcome)
@@ -142,9 +161,11 @@ def _write_sig_history(hist: Path, sig: str, outcomes: list[str],
 
 
 @pytest.mark.parametrize("outcomes,blocked", [
-    (["promoted"], True),                      # permanent: real validated winner
+    (["promoted"], True),                      # v4 read-compat: still permanent
+    (["advanced"], True),                      # permanent: a round advanced it
     (["unsupported_op"], True),                # permanent: structurally infeasible
     (["latency_pass"], False),                 # process state never blocks
+    (["accuracy_fail"], False),                # composed re-proposals use NEW sigs
     (["structural_mismatch"], False),          # joint budget allows one retry
     (["variant_broken"], False),               # the other class, same budget
     (["structural_mismatch", "variant_broken"], True),   # joint budget exhausted
@@ -2443,13 +2464,14 @@ def test_history_probe_row_optional_eval_fields(tmp_path: Path):
     hist = tmp_path / "history.jsonl"
     row = history_lib.append_probe(
         hist, "r1-01", proxy_acc=0.83, promote_gate="pass", outcome="promoted",
-        eval_skipped_no_epoch_ckpt=True, monitor_failed=False,
+        gap=0.03, eval_skipped_no_epoch_ckpt=True, monitor_failed=False,
         eval_acc=0.9, eval_failed=False)
     assert row["eval_skipped_no_epoch_ckpt"] is True
     assert row["eval_acc"] == 0.9
     stored = history_lib.read_rows(hist)[0]
     assert set(stored) >= set(history_lib.PROBE_FIELDS)
     assert stored["monitor_failed"] is False
+    assert stored["gap"] == 0.03
 
     # omitted optionals stay OUT of the row (old rows coexist harmlessly)
     hist2 = tmp_path / "h2.jsonl"

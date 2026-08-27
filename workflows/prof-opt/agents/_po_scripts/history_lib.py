@@ -10,16 +10,22 @@ Read side:
     read_rows(path)            -> all rows in append order
     read_latest(path)          -> {vid: last row}
 Dedup side (mechanical rules — no LLM judgement):
-    permanent set   = outcome in {promoted, unsupported_op}
-                      judged over ANY version row (a later row cannot resurrect
-                      a permanently-exhausted signature);
+    permanent set   = outcome in {advanced, promoted, unsupported_op}
+                      ("promoted" is kept for READ compatibility with old
+                      workspaces only — it is never written anymore); judged
+                      over ANY version row (a later row cannot resurrect a
+                      permanently-exhausted signature);
     latency_pass    is a process state and NEVER blocks;
     structural_mismatch / variant_broken share ONE joint retry budget per sig
                       (total attempts with those outcomes <= 2, i.e. <= 1 retry);
     probe_insufficient is retryable iff the proxy config (probe_epochs /
                       probe_max_steps / probe_data_value) differs from the
                       current config — the same fields the proxy budget pins.
-    v4 probe rows carry optional outcome annotations (eval_acc /
+    accuracy_fail is NOT permanent: a recovery-round composed proposal
+                      produces a NEW change_sig that exact-match dedup admits
+                      by design (the round-level rerouting signal is the
+                      failed_sigs set in direction.json, not dedup).
+    probe rows carry optional outcome annotations (eval_acc /
                       eval_failed / eval_skipped_no_epoch_ckpt /
                       monitor_failed); they never enter the config fingerprint.
 """
@@ -48,13 +54,14 @@ LATENCY_FIELDS = (
 # stays probe_epochs / probe_max_steps / probe_data_value from the IMPL row).
 PROBE_FIELDS = (
     "proxy_acc", "promote_gate", "outcome",
+    "gap",                        # worst of the curve/eval gate gaps (budget units)
     "eval_skipped_no_epoch_ckpt",  # true: no per-epoch ckpt -> curve-only judgment
     "monitor_failed",              # true: worker ran past k naturally (kill missed)
     "eval_acc",                    # eval@k metric (ckpt-addressable projects only)
     "eval_failed",                 # true: k-th ckpt eval failed to load (degraded)
 )
 
-PERMANENT_OUTCOMES = frozenset({"promoted", "unsupported_op"})
+PERMANENT_OUTCOMES = frozenset({"advanced", "promoted", "unsupported_op"})
 JOINT_RETRY_OUTCOMES = frozenset({"structural_mismatch", "variant_broken"})
 JOINT_RETRY_MAX_ATTEMPTS = 2  # first failure + at most one retry
 
@@ -158,24 +165,39 @@ def append_latency(path: str | Path, vid: str, *, structural_check: str,
     return _append(Path(path), vid, fields, LATENCY_FIELDS, "append_latency")
 
 
+def append_advanced(path: str | Path, vid: str) -> dict:
+    """Round-advance marker row (advance_round). Writes ONLY
+    outcome == "advanced" on the promoted field set — the advance is a
+    process fact, not a measurement, so there is nothing else to record."""
+    return _append(Path(path), vid, {"outcome": "advanced"},
+                   LATENCY_FIELDS, "append_advanced")
+
+
 def append_probe(path: str | Path, vid: str, *, proxy_acc: float | None,
                  promote_gate: str, outcome: str,
+                 gap: float | None = None,
                  eval_skipped_no_epoch_ckpt: bool | None = None,
                  monitor_failed: bool | None = None,
                  eval_acc: float | None = None,
                  eval_failed: bool | None = None) -> dict:
-    """Proxy row (po_probe). outcome: promoted | probe_insufficient.
+    """Proxy row (po_probe). outcome: accuracy_pass | accuracy_fail |
+    probe_insufficient.
 
-    proxy_acc is ALWAYS the training-curve metric at epoch k (the v4 probe
+    proxy_acc is ALWAYS the training-curve metric at epoch k (the probe
     comparison anchor); a checkpoint-eval metric, when the project has
-    addressable per-epoch ckpts, goes to eval_acc instead. The optional
-    annotations are written only when passed (None = omitted from the row):
-    eval_skipped_no_epoch_ckpt / monitor_failed / eval_failed explain a
-    degraded or suspicious judgment path; unknown fields still fail loud."""
+    addressable per-epoch ckpts, goes to eval_acc instead. gap = the WORST
+    of the curve/eval gate gaps in budget units (higher = further from the
+    line; pass <=> gap <= budget); None omits it (probe_insufficient rows
+    may legitimately have no gap). The optional annotations are written only
+    when passed (None = omitted from the row): eval_skipped_no_epoch_ckpt /
+    monitor_failed / eval_failed explain a degraded or suspicious judgment
+    path; unknown fields still fail loud."""
     fields: dict[str, Any] = {
         "proxy_acc": proxy_acc,
         "promote_gate": promote_gate, "outcome": outcome,
     }
+    if gap is not None:
+        fields["gap"] = gap
     if eval_skipped_no_epoch_ckpt is not None:
         fields["eval_skipped_no_epoch_ckpt"] = eval_skipped_no_epoch_ckpt
     if monitor_failed is not None:

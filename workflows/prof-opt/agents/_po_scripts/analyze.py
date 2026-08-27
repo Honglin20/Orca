@@ -13,6 +13,13 @@ other), and produces the bottleneck report consumed by proposal generation:
 
 Default output: <profile_dir>/../bottleneck_report.json (the pinned landing
 spot next to base/profile/). stdout: single-line JSON summary.
+
+--freeze-origin additionally writes <profile_dir>/../origin_anchor.json
+(the immutable dual anchor: baseline makespan + target line + accuracy
+budget), write-if-absent: an existing file with field-identical content is a
+no-op; any difference exits 2 (the anchor never drifts — changing the line
+or budget requires rebuilding the workspace). Without --freeze-origin the
+anchor file is never touched.
 """
 from __future__ import annotations
 
@@ -245,17 +252,76 @@ def analyze(profile_dir: Path) -> dict:
     }
 
 
+def freeze_origin(anchor_path: Path, baseline_makespan: int,
+                  latency_reduction_min: float, accuracy_budget: float) -> str:
+    """Write the immutable origin anchor, write-if-absent.
+
+    Returns a short status string for the stdout summary. An existing anchor
+    with field-identical content is a no-op; any difference raises
+    ContractError (the anchor is immutable by contract)."""
+    payload = {
+        "baseline_makespan_cycles": int(baseline_makespan),
+        "latency_reduction_min": float(latency_reduction_min),
+        "accuracy_budget": float(accuracy_budget),
+        "target_cycles": int(baseline_makespan * (1.0 - latency_reduction_min)) + 1,
+        "frozen_at_round": 0,
+    }
+    if anchor_path.is_file():
+        try:
+            existing = json.loads(anchor_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ContractError(
+                f"origin anchor exists but is unparseable: {anchor_path} "
+                f"({exc})") from exc
+        if existing != payload:
+            raise ContractError(
+                f"origin anchor {anchor_path} is IMMUTABLE and its content "
+                f"differs from this request (existing {existing} vs "
+                f"requested {payload}); origin 锚不可变——修改达标线/精度预算"
+                f"需 fresh_start 重建工作区")
+        return "origin_anchor: already frozen (identical), no-op"
+    anchor_path.parent.mkdir(parents=True, exist_ok=True)
+    anchor_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return f"origin_anchor: frozen at {anchor_path}"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--profile-dir", required=True)
     ap.add_argument("--out", default=None,
                     help="output path (default: <profile-dir>/../bottleneck_report.json)")
+    ap.add_argument("--freeze-origin", action="store_true",
+                    help="also write ../origin_anchor.json (write-if-absent)")
+    ap.add_argument("--latency-reduction-min", type=float, default=None,
+                    help="latency line ratio in (0, 1); required with --freeze-origin")
+    ap.add_argument("--accuracy-budget", type=float, default=None,
+                    help="accuracy budget >= 0; required with --freeze-origin")
     ns = ap.parse_args()
+
+    if ns.freeze_origin:
+        if ns.latency_reduction_min is None or ns.accuracy_budget is None:
+            print("analyze: --freeze-origin requires --latency-reduction-min "
+                  "and --accuracy-budget", file=sys.stderr)
+            return 2
+        if not 0.0 < ns.latency_reduction_min < 1.0:
+            print(f"analyze: --latency-reduction-min must be in (0, 1), got "
+                  f"{ns.latency_reduction_min}", file=sys.stderr)
+            return 2
+        if not float(ns.accuracy_budget) >= 0:
+            print(f"analyze: --accuracy-budget must be >= 0, got "
+                  f"{ns.accuracy_budget}", file=sys.stderr)
+            return 2
 
     profile_dir = Path(ns.profile_dir)
     out = Path(ns.out) if ns.out else profile_dir.parent / "bottleneck_report.json"
     try:
         report = analyze(profile_dir)
+        anchor_status = ""
+        if ns.freeze_origin:
+            anchor_status = freeze_origin(
+                profile_dir.parent / "origin_anchor.json",
+                report["makespan_cycles"],
+                ns.latency_reduction_min, ns.accuracy_budget)
     except ContractError as exc:
         print(f"analyze: contract violation: {exc}", file=sys.stderr)
         return 2
@@ -265,6 +331,7 @@ def main() -> int:
         "report": str(out.resolve()),
         "makespan_cycles": report["makespan_cycles"],
         "hot_patterns": len(report["hot_patterns"]),
+        **({"origin_anchor": anchor_status} if anchor_status else {}),
     }))
     return 0
 
