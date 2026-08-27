@@ -829,3 +829,306 @@ def test_rules_pool_merge_without_workspace_rules_skips(tmp_path):
     assert (proj / "docs" / "prof-opt" / "accuracy_rules.json").read_text(
         encoding="utf-8") == '{"sentinel": "do-not-touch"}'
     assert "workspace rules missing" in proc.stderr
+
+
+# ── §1 retirement grep (mechanical acceptance, repeatable) ───────────────────
+
+def test_retired_inputs_never_reappear_anywhere_in_workflows():
+    """The six retired inputs must not be referenced anywhere under
+    workflows/ — a single surviving {{ inputs.X }} ref crashes the render
+    with StrictUndefined."""
+    import subprocess
+    hits = subprocess.run(
+        ["grep", "-rn", "-E",
+         r"inputs\.npu_chip|inputs\.npu_precision|inputs\.npu_core_num"
+         r"|inputs\.write_back|inputs\.report_dir|inputs\.probe_epochs",
+         str(_REPO / "workflows")],
+        capture_output=True, text=True, timeout=60)
+    assert hits.returncode == 1, f"retired input references survived:\n{hits.stdout}"
+
+
+# ── smoke: the core state machine end to end on one fixture workspace ───────
+
+def _mini_profile(profile_dir: Path, makespan: int) -> None:
+    """A minimal contract-valid four-piece (two serial ops, 600 + rest)."""
+    import csv as _csv
+    ops = [
+        {"name": "a", "op_type": "MatMul", "task_id": "t0000", "pipeline": "p000",
+         "latency": 600, "depends_on": [], "output_memory": 256,
+         "output_dimensions": [1, 64], "onnx_nodes": ["/a"]},
+        {"name": "b", "op_type": "Add", "task_id": "t0001", "pipeline": "p001",
+         "latency": makespan - 600, "depends_on": ["a"], "output_memory": 256,
+         "output_dimensions": [1, 64], "onnx_nodes": ["/b"]},
+    ]
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "taskgraph.json").write_text(json.dumps(
+        {"schema_version": 1, "onnx": "smoke.onnx", "operators": ops}),
+        encoding="utf-8")
+    (profile_dir / "schedule.json").write_text(json.dumps(
+        {"schema_version": 1, "makespan_cycles": makespan, "assignments": [
+            {"task_id": "t0000", "operator": "a", "pipeline": "p000",
+             "start_cycle": 0, "end_cycle": 600},
+            {"task_id": "t0001", "operator": "b", "pipeline": "p001",
+             "start_cycle": 600, "end_cycle": makespan}]}), encoding="utf-8")
+    (profile_dir / "profile_summary.json").write_text(json.dumps(
+        {"schema_version": 1, "onnx": "smoke.onnx",
+         "makespan_cycles": makespan, "op_count": 2}), encoding="utf-8")
+    with open(profile_dir / "ops.csv", "w", newline="", encoding="utf-8") as fh:
+        w = _csv.writer(fh)
+        w.writerow(["name", "op_type", "task_id", "pipeline", "latency",
+                    "depends_on", "output_memory", "output_dimensions",
+                    "onnx_nodes"])
+        w.writerow(["a", "MatMul", "t0000", "p000", 600, "", 256, "1x64", "/a"])
+        w.writerow(["b", "Add", "t0001", "p001", makespan - 600, "a", 256,
+                    "1x64", "/b"])
+
+
+_RECHECK_SH_SMOKE = (_REPO / "workflows" / "prof-opt" / "agents" / "po_propose"
+                     / "scripts" / "run_latency_recheck.sh")
+
+
+def _smoke_workspace(tmp_path: Path) -> Path:
+    """Workspace driving the REAL script chain: deployed scripts, mfu
+    profiling mode (the recheck reads each variant's four-piece makespan —
+    the smoke's chosen numbers), a tiny inline-data base onnx, and the
+    origin anchor missing (the smoke freezes it first)."""
+    pytest.importorskip("onnx")
+    import onnx
+    from onnx import TensorProto, helper
+    art = tmp_path / "ws"
+    (art / "scripts").mkdir(parents=True)
+    for src in ("diff_check.py", "history_lib.py", "emit_result.py",
+                "round_state.py", "advance_round.py", "analyze.py"):
+        shutil.copy(_SCRIPTS / src, art / "scripts" / src)
+    (art / "contracts.json").write_text(json.dumps(
+        {"interpreter": {"sys_executable": sys.executable},
+         "eval": {"metric_direction": "higher_better"}}), encoding="utf-8")
+    (art / "profile_mode.json").write_text(json.dumps(
+        {"mode": "mfu", "chip": "6613", "precision": "INT8", "core_num": 1,
+         "resolved_by": "env"}), encoding="utf-8")
+    (art / "base" / "profile").mkdir(parents=True)
+    graph = helper.make_graph(
+        [helper.make_node("MatMul", ["x", "w"], ["h"], name="mm"),
+         helper.make_node("Add", ["h", "b"], ["y"], name="add")],
+        "smoke",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 16])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 16])],
+        [helper.make_tensor("w", TensorProto.FLOAT, [16, 16],
+                            vals=[0.0] * 256),
+         helper.make_tensor("b", TensorProto.FLOAT, [16], vals=[0.0] * 16)])
+    onnx.save(helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)]),
+              str(art / "base" / "model.onnx"))
+    _mini_profile(art / "base" / "profile", 1000)
+    (art / "shadow" / "pkg").mkdir(parents=True)
+    (art / "shadow" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (art / "shadow" / "pkg" / "model.py").write_text("# smoke base\n",
+                                                     encoding="utf-8")
+    return art
+
+
+def _smoke_variant(art: Path, vid: str, round_no: int, makespan: int,
+                   sig: str | None = None):
+    """An implemented latency-passed variant with the CHOSEN four-piece
+    makespan (mfu mode: the recheck consumes it verbatim)."""
+    vd = art / "variants" / vid
+    (vd / "onnx").mkdir(parents=True)
+    shutil.copy(art / "base" / "model.onnx", vd / "onnx" / "model.onnx")
+    (vd / "profile").mkdir(parents=True)
+    (vd / "profile" / "profile_summary.json").write_text(json.dumps(
+        {"schema_version": 1, "onnx": "smoke.onnx",
+         "makespan_cycles": makespan, "op_count": 2}), encoding="utf-8")
+    (vd / "shadow").mkdir(parents=True)
+    shutil.copytree(art / "shadow" / "pkg", vd / "shadow" / "pkg")
+    (vd / "declaration.json").write_text(json.dumps(
+        {"vid": vid, "edited_files": [], "op_delta": {},
+         "predicted_delta_cycles": -50}), encoding="utf-8")
+    (vd / "DONE").write_text("", encoding="utf-8")
+    history_lib.append_implemented(
+        art / "history.jsonl", vid, round=round_no, seq=1, parent_vid=None,
+        change_sig=sig or f"sig:{vid}", probe_epochs=1, probe_max_steps=None,
+        probe_data_value=None, target_modules=["m"],
+        predicted_delta_cycles=-50,
+        base_at_proposal={"vid": None, "makespan_cycles": 1000})
+
+
+def _smoke_recheck(art: Path) -> dict:
+    env = dict(os.environ)
+    env["ORCA_ARTIFACTS_DIR"] = str(art)
+    proc = subprocess.run(["bash", str(_RECHECK_SH_SMOKE)],
+                          capture_output=True, text=True, timeout=300, env=env)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def _smoke_advance(art: Path) -> dict:
+    proc = _run_cli([str(_SCRIPTS / "advance_round.py"),
+                     "--artifacts", str(art)])
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def _smoke_mode(art: Path) -> dict:
+    proc = _run_cli([str(_SCRIPTS / "round_state.py"),
+                     "--artifacts", str(art), "mode"])
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def _smoke_gate(art: Path, max_rounds: int) -> dict:
+    proc = _run_cli([str(_SCRIPTS / "gate_decide.py"),
+                     "--artifacts", str(art), "--max-rounds", str(max_rounds)])
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def _smoke_probe(art: Path, vid: str, curve_loss: float) -> dict:
+    """Drive the REAL promote verdict on a recorded curve comparison, then
+    append the typed probe row it justifies."""
+    (art / "variants" / vid / "metrics").mkdir(parents=True, exist_ok=True)
+    (art / "variants" / vid / "metrics" / "epoch_compare.json").write_text(
+        json.dumps({"epoch": 1, "at_epoch": 1, "baseline_metric": 0.9,
+                    "candidate_metric": 0.9 - curve_loss,
+                    "normalized_loss": curve_loss, "budget": 0.1,
+                    "metric_direction": "higher_better",
+                    "pass": curve_loss <= 0.1}), encoding="utf-8")
+    proc = _run_cli([str(_SCRIPTS / "verdict_decide.py"), "promote",
+                     "--artifacts", str(art), "--vid", vid])
+    assert proc.returncode == 0, proc.stderr
+    verdict = json.loads(proc.stdout)
+    outcome = ("accuracy_pass" if verdict["accuracy_pass"] else "accuracy_fail")
+    history_lib.append_probe(
+        art / "history.jsonl", vid, proxy_acc=0.9 - curve_loss,
+        promote_gate="pass" if verdict["accuracy_pass"] else "fail",
+        outcome=outcome, gap=verdict["gap"])
+    return verdict
+
+
+def test_po_v5_smoke_five_steps(tmp_path: Path):
+    """The core state machine, real scripts only, in the spec's order:
+    freeze -> r1 latency advance + passthrough probe + loop -> r2 flip +
+    failing first entry + recovery marker -> r3 accuracy_pass advance +
+    full-train."""
+    art = _smoke_workspace(tmp_path)
+
+    # ── 1. freeze-origin: base=1000, r=0.5, budget=0.1 -> target 501
+    freeze = _run_cli([str(_SCRIPTS / "analyze.py"),
+                       "--profile-dir", str(art / "base" / "profile"),
+                       "--freeze-origin",
+                       "--latency-reduction-min", "0.5",
+                       "--accuracy-budget", "0.1"])
+    assert freeze.returncode == 0, freeze.stderr
+    anchor = json.loads((art / "base" / "origin_anchor.json")
+                        .read_text(encoding="utf-8"))
+    assert anchor["target_cycles"] == 501
+    assert anchor["baseline_makespan_cycles"] == 1000
+
+    # ── 2. round 1 (latency): 900 < incumbent 1000 -> advance, probe
+    #    passthrough, gate loop
+    (art / "rounds" / "001").mkdir(parents=True)
+    _smoke_variant(art, "r1-01", 1, 900)
+    out = _smoke_recheck(art)
+    assert out["gate_mode"] == "latency" and out["latency_pass_count"] == 1
+    assert _smoke_mode(art)["mode"] == "latency"
+    adv1 = _smoke_advance(art)
+    assert adv1 == {"advanced": True, "round": 1, "mode": "latency",
+                    "vid": "r1-01", "improved": True, "best_updated": True,
+                    "reason": "winner advanced"}
+    best1 = json.loads((art / "best.json").read_text(encoding="utf-8"))
+    assert best1["makespan_cycles"] == 900 and best1["proxy_acc"] is None
+    assert json.loads((art / "rounds" / "001" / "direction.json")
+                      .read_text(encoding="utf-8"))["improved"] is True
+    # probe entry: still latency -> passthrough (no probe row for best.vid)
+    assert _smoke_mode(art)["mode"] == "latency"
+    gate1 = _smoke_gate(art, 100)
+    assert gate1["decision"] == "loop" and gate1["mode"] == "latency"
+
+    # ── 3. round 2: 450 < 900 AND <= 501 -> latency advance flips the
+    #    mode; the probe's FIRST entry fails the accuracy gate -> recovery
+    #    marker, failed_sigs rerouting, gate still loops
+    (art / "rounds" / "002").mkdir()
+    _smoke_variant(art, "r2-01", 2, 450, sig="reduce_layers:2")
+    out2 = _smoke_recheck(art)
+    assert out2["gate_mode"] == "latency" and out2["latency_pass_count"] == 1
+    adv2 = _smoke_advance(art)
+    assert adv2["vid"] == "r2-01"
+    assert json.loads((art / "best.json").read_text(encoding="utf-8")) \
+        ["makespan_cycles"] == 450
+    # probe entry NOW reads accuracy (450 <= 501); best.vid has no probe row
+    # -> first entry trains only best.vid; gap 0.5 > budget 0.1 -> fail
+    assert _smoke_mode(art)["mode"] == "accuracy"
+    verdict2 = _smoke_probe(art, "r2-01", curve_loss=0.5)
+    assert verdict2["accuracy_pass"] is False
+    assert verdict2["gap"] == pytest.approx(0.5)
+    adv3 = _smoke_advance(art)   # accuracy mode: no accuracy_pass candidate
+    assert adv3["advanced"] is False and adv3["mode"] == "accuracy"
+    marker = json.loads((art / ".round_advanced").read_text(encoding="utf-8"))
+    assert (marker["round"], marker["mode"], marker["improved"]) == \
+        (2, "accuracy", False)
+    d2 = json.loads((art / "rounds" / "002" / "direction.json")
+                    .read_text(encoding="utf-8"))
+    assert d2["failed_sigs"] == ["reduce_layers:2"]   # the accuracy-fail sig
+    gate2 = _smoke_gate(art, 100)
+    assert gate2["decision"] == "loop" and gate2["mode"] == "accuracy"
+
+    # ── 4. round 3 (recovery): survivor 460 <= 501 passes the gate ->
+    #    advance switches the best; gate reads the accuracy_pass ANY-version
+    #    row -> full-train
+    (art / "rounds" / "003").mkdir()
+    _smoke_variant(art, "r3-01", 3, 460, sig="compose:conv_fuse+depth_recover")
+    out3 = _smoke_recheck(art)
+    assert out3["gate_mode"] == "accuracy" and out3["latency_pass_count"] == 1
+    verdict3 = _smoke_probe(art, "r3-01", curve_loss=0.05)
+    assert verdict3["accuracy_pass"] is True
+    assert verdict3["gap"] == pytest.approx(0.05)
+    adv4 = _smoke_advance(art)
+    assert adv4["advanced"] is True and adv4["mode"] == "accuracy"
+    assert adv4["vid"] == "r3-01"
+    best4 = json.loads((art / "best.json").read_text(encoding="utf-8"))
+    assert best4["vid"] == "r3-01" and best4["makespan_cycles"] == 460
+    assert (art / "shadow" / "pkg" / "model.py").read_text(encoding="utf-8") \
+        == "# smoke base\n"    # winner's shadow replaced the global shadow
+    latest = history_lib.read_latest(art / "history.jsonl")
+    assert latest["r3-01"]["outcome"] == "advanced"
+    gate3 = _smoke_gate(art, 100)
+    assert gate3["decision"] == "full-train"   # accuracy_pass row + <= 501
+    assert gate3["mode"] == "accuracy"
+
+
+def test_po_v5_smoke_round_cap_terminals(tmp_path: Path):
+    """Step 5: at the round cap the gate exits honestly — best-effort with
+    a best on disk, finish-failed without one."""
+    art = _smoke_workspace(tmp_path)
+    freeze = _run_cli([str(_SCRIPTS / "analyze.py"),
+                       "--profile-dir", str(art / "base" / "profile"),
+                       "--freeze-origin", "--latency-reduction-min", "0.5",
+                       "--accuracy-budget", "0.1"])
+    assert freeze.returncode == 0, freeze.stderr
+    for rnd, vid, ms, sig in ((1, "r1-01", 900, "s1"),
+                              (2, "r2-01", 450, "s2"),
+                              (3, "r3-01", 460, "s3")):
+        (art / "rounds" / f"{rnd:03d}").mkdir(parents=True)
+        _smoke_variant(art, vid, rnd, ms, sig=sig)
+        assert _smoke_recheck(art)["verdicts_count"] == 1
+        _smoke_advance(art)
+        if rnd >= 2:   # mode flipped at round 2: probe judges then advances
+            _smoke_probe(art, vid, curve_loss=0.5 if rnd == 2 else 0.4)
+            _smoke_advance(art)
+    # r3's accuracy entry failed too -> no accuracy_pass anywhere; the cap
+    # at round 3 turns the existing (latency-advanced) best into best-effort
+    gate = _smoke_gate(art, 3)
+    assert gate["decision"] == "full-train-best-effort"
+    assert gate["best"]["vid"] == "r2-01"    # 450 < 460
+
+    no_best = _smoke_workspace(tmp_path / "b")
+    freeze_b = _run_cli([str(_SCRIPTS / "analyze.py"),
+                         "--profile-dir", str(no_best / "base" / "profile"),
+                         "--freeze-origin", "--latency-reduction-min", "0.5",
+                         "--accuracy-budget", "0.1"])
+    assert freeze_b.returncode == 0, freeze_b.stderr
+    (no_best / "rounds" / "001").mkdir(parents=True)
+    _smoke_variant(no_best, "r1-01", 1, 1200)   # worse than the baseline
+    assert _smoke_recheck(no_best)["latency_pass_count"] == 0
+    _smoke_advance(no_best)
+    gate_b = _smoke_gate(no_best, 1)
+    assert gate_b["decision"] == "finish-failed"
+    assert gate_b["best"] is None
