@@ -1,6 +1,6 @@
 # 数据特征 → chart_type 决策表
 
-> 输入：Step 1 Inventory 产出的数据清单（每条含 format、fields、frequency）。
+> 输入：节点产出的结构化数据清单（每条含 format、fields、frequency——来自该节点的设计信息或对其 scripts 的扫描）。
 > 输出：每条匹配 1 个合适的 chart_type + 推荐轴字段。
 
 ## 判据优先级
@@ -79,7 +79,7 @@ table（不需要颜色映射）。
 |---|---|---|
 | 存在明显的 trade-off / 帕累托前沿 | **pareto** | 前端自动算非支配前沿 + 连线 |
 | 纯散点分布 | **scatter** | `x` + `y` 两轴 |
-| 需要第三个维度（如参数量） | scatter + **`size`** | ZAxis 气泡范围 50-400，见 `reference/chart-api.md` |
+| 需要第三个维度（如参数量） | scatter + **`size`** | ZAxis 气泡范围 50-400，见 `chart-api.md` |
 | 需要按类别着色 | scatter + **hue** | 多系列散点 |
 
 **pareto 方向约定**：

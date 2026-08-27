@@ -29,7 +29,7 @@
 
 - **validate 只做一件事**：扫到 §3 表里的 pattern 时，报 warning **指给你看「这里有一处疑似残留」**。
 - validate **不裁决**：warning 不阻断、不失败、不改你的 prompt、不替你判断该不该删。
-- validate **不参与最终修改**：最终 prompt 洁不洁净、改不改，由作者按本契约（§6 受众翻转通读）决定，validate 不插手。
+- validate **不参与最终修改**：最终 prompt 洁不洁净、改不改，由作者自查（§9 步骤 1-2 deterministic）+ agent-reviewer sub-agent 通读（§8）裁决，validate 不插手。
 - validate **不完整**：它只能抓 §3 那张 deterministic pattern 表（你记得列的类别）；§4 那些靠通读兜底的类别，validate 一个都不报。
 
 一句话：**validate 是手电筒（照位置），契约是判据（定去留），通读是裁决（做决定）。** 手电筒没照到，不代表没有；手电筒照到的，也不一定真要删（见 §4 operational 串）。
@@ -48,7 +48,7 @@
 
 ## §4 禁止写进 prompt 的开发期残留（validate 不抓——受众翻转通读兜底）
 
-这些类别 deterministic 难以无歧义识别（要么误报率高，要么与合法串重叠），lint 一律不报，**全靠 §6 通读 flag**：
+这些类别 deterministic 难以无歧义识别（要么误报率高，要么与合法串重叠），lint 一律不报，**全靠 §8 通读 flag**：
 
 - **无括号 issue / 里程碑编号**（`BLK-3`、`HI-1`、`U-1`、`P5`、`SR3`、`review #7`）——不带括号的纯文本编号；lint 不抓是因为正则 `[A-Z]+-[0-9]+` 会误伤 `ResNet-50` / `ViT-14` / `GPT-4` 等合法模型名；
 - **英文迁移出处词**（`analogue of` / `leaves off` / `the KD-NAS analogue of ...`）——与中文 `迁移自` 同类，写 KD 仿制时高频出现；
@@ -116,13 +116,22 @@ workflow 的 agent prompt 永远用**泛化抽象**：
 
 grep 找你记得的（§3）；受众翻转抓你忘了的（§4）。**两者并用**才能覆盖。
 
+**执行主体**：作者自查（§9 步骤 1-2 deterministic）之外，**agent-reviewer sub-agent 独立审**
+（create-workflow skill 在 Stage 2 逐 agent 落盘后必派，派单模板见其
+`reference/solidify-validate.md` §5.1）——独立上下文不受作者盲区影响，通读法不变；
+通读裁决权归 sub-agent，作者负责闭环 findings。
+
 ## §9 执行流程 + lint 扫描范围
 
 作者建完 / 改完 workflow 后：
 
 1. 跑 `tars validate <yaml>`——看 §3 deterministic 提醒（warning 仅指位置，不裁决）；
-2. 按 §8 受众翻转通读 **agent.md body + SKILL.md + prompt-adjacent references/ prose**（见下「lint 扫描范围 ≠ 契约适用范围」）——裁决哪些真要删（catch §4 + lint 之外的残留）；
-3. warning 清零 + 通读无疑 → workflow 视为「prompt 洁净」完成。
+2. 跑 create-workflow skill 的元层脚本（`check_dev_residue.py` 宽口径表 +
+   `check_agent_md_static.py` 静态启发）——exit 1 的 findings 自改重跑；
+3. **agent-reviewer sub-agent 受众翻转通读** **agent.md body + SKILL.md +
+   prompt-adjacent references/ prose**（见下「lint 扫描范围 ≠ 契约适用范围」）——裁决哪些真要删
+   （catch §4 + lint 之外的残留）；findings 闭环（修 → 复审 → 清零或用户 waive）；
+4. warning 清零 + 通读无疑 → workflow 视为「prompt 洁净」完成。
 
 既有 workflow 残留（lint 报 warning）**不强制立即清理**——但新建 / 重构 workflow 必须 0 warning + 通读通过。
 
@@ -134,7 +143,7 @@ grep 找你记得的（§3）；受众翻转抓你忘了的（§4）。**两者�
   lint 从不扫 references/——这不代表 references/ 不受契约约束（见下）。
 - **契约适用范围**（概念，宽）——本契约管「**LLM 运行时读的指令性 prose**」，**不论文件在哪**。只要某个 LLM（主 agent 或 subagent）运行时被指示去 Read 一个文件当指令 / 指南 / checklist 用，那个文件的 prose 就必须洁净——哪怕它住在 `references/` 下。判据不是「文件在不在 references/」，而是「**它是 LLM 读的指令，还是被复制 / 改写的代码 / 数据**」。
 
-**`references/` 二分（关键——上一版契约把整条 references/ 当惰性数据豁免，是错的）**：
+**`references/` 二分（关键——references/ 并非整条豁免）**：
 
 | 子类 | 例 | 契约 |
 |---|---|---|
@@ -143,7 +152,7 @@ grep 找你记得的（§3）；受众翻转抓你忘了的（§4）。**两者�
 
 > 信号：SKILL.md / agent.md 里出现「Read `<skill_dir>/references/.../*.md` before starting this step」「Follow it」「see ... for the detailed flow」→ 该 `.md` 是 prompt-adjacent，**适用**。出现「Adapt / Use ... as an implementation example」「copy verbatim into the generated file」且后缀是 `.py`/`.yaml` → 惰性资产，**豁免**。
 
-**已知盲区**（lint 完全不检，必须靠 §6 通读——prompt-adjacent prose 也在内）：
+**已知盲区**（lint 完全不检，必须靠 §8 通读——prompt-adjacent prose 也在内）：
 - §4 全部类别（无括号 issue 编号、迁移词、SPEC/ADR 编号等）；
 - §6 测试夹具硬编码（`MNIST` / `accuracy=0.98` / `/home/me/mnist`）——deterministic 检测误报率太高，刻意不抓，通读是唯一兜底；
 - **prompt-adjacent references/ prose**（lint 不扫 references/，但这些文件 agent 运行时会读，必须人工通读洁净）——这是最易漏的盲区：作者以为「references/ 是数据」就放过，实则里面塞了 `run 6c2ebe` / `audit-found` / `ln(10)` / `MNIST` / `CONTRACTS §6` 等考古。

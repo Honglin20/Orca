@@ -7,7 +7,7 @@
   │                                                         │
   ├─ 是，且脚本有 Python 源码可改 ──> 【模式 A: inline】     │
   │                                                         │
-  ├─ 是，但脚本是外部项目（nas-agent/ts_quant）不可改         │
+  ├─ 是，但脚本属外部项目不可改（如第三方仓库的训练脚本）       │
   │       └─> 【模式 B: sidecar 轮询】                       │
   │                                                         │
   └─ 否，数据是 shell 命令跑的（bash train.sh 写 jsonl）     │
@@ -73,7 +73,7 @@ def main() -> int:
     return 0
 ```
 
-**完整例子**：`examples/inline-pattern.py`。
+**完整例子**：`../../examples/charts/inline-pattern.py`。
 
 ---
 
@@ -161,7 +161,7 @@ python3 "$ORCA_AGENT_RESOURCES/scripts/push_charts.py" --output_dir "$OUTPUT_DIR
 ```
 ```
 
-**完整例子**：`examples/sidecar-pattern.py`。
+**完整例子**：`../../examples/charts/sidecar-pattern.py`。
 
 ---
 
@@ -221,7 +221,7 @@ def main() -> int:
     return 0
 ```
 
-**完整例子**：`examples/finalize-pattern.py`。
+**完整例子**：`../../examples/charts/finalize-pattern.py`。
 
 ---
 

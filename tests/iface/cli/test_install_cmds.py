@@ -9,6 +9,8 @@
   - cc / cac / nga target：cc 家族（cc/cac）skill + nudge Stop-hook；opencode 家族（opencode/nga）skill + plugin + json。
   - project scope：``opencode.json`` 在 cwd 根 + 相对声明路径。
   - fail loud：copytree 失败 → exit 1（铁律 12）。
+  - legacy 清理：design-charts（已并入 create-workflow）/ orca / teams（已改名 tars）残留被清，
+    message 区分两种迁移语义。
   - 守门：不拷 ``benchmark/``。
   - 模板内容 = 随包模板（防 install 写错版本）。
 """
@@ -563,6 +565,59 @@ def test_install_no_benchmark(isolated_home: Path):
     runner.invoke(app, ["--target", "cc", "--scope", "user"])
     skill = isolated_home / ".claude" / "skills" / install_cmds.SKILL_NAME
     assert not (skill / "benchmark").exists(), "install 不应拷 benchmark/"
+
+
+def test_bundled_skills_swap_design_charts_for_create_workflow():
+    """随包 skill 清单：含 create-workflow（图表能力并入处），无 design-charts（已整目录删除）。"""
+    srcs = {p.name for p in install_cmds._bundled_skill_sources()}
+    assert install_cmds.SKILL_NAME in srcs, f"随包应含 {install_cmds.SKILL_NAME}"
+    assert "design-charts" not in srcs, f"design-charts 已并入 create-workflow，不应再随包: {srcs}"
+
+
+def _make_legacy_skill(cc: Path, name: str) -> Path:
+    """预置一个假 legacy skill 目录（含最小 SKILL.md），返回其路径。"""
+    legacy = cc / "skills" / name
+    legacy.mkdir(parents=True)
+    (legacy / "SKILL.md").write_text("---\ndescription: legacy\n---\n", encoding="utf-8")
+    return legacy
+
+
+def test_install_cleans_legacy_design_charts_and_renamed_entry(isolated_home: Path):
+    """legacy 清理：预置假 design-charts（并入迁移）+ 假 orca（改名迁移）目录 → install 后都被清理。
+
+    message 须区分两种迁移语义：design-charts 说「已并入 create-workflow」（它不是改名），
+    入口 skill 说「已改名 tars」（语义不变）。
+    """
+    cc = isolated_home / ".claude"
+    legacy_charts = _make_legacy_skill(cc, "design-charts")
+    legacy_orca = _make_legacy_skill(cc, "orca")
+    result = runner.invoke(app, ["--target", "cc", "--scope", "user"])
+    assert result.exit_code == 0, result.output
+    assert not legacy_charts.exists(), "legacy design-charts 目录应被清理"
+    assert not legacy_orca.exists(), "legacy orca 目录应被清理"
+    # 钉 (源目录, reason) 完整配对（防 reason 互换回归）：design-charts=并入 create-workflow，orca=改名 tars
+    assert f"{legacy_charts}（已并入 {install_cmds.SKILL_NAME}）" in result.output, (
+        "design-charts 清理 message 应与其目录同现并说明并入去向（非改名）"
+    )
+    assert f"{legacy_orca}（已改名 {install_cmds.ENTRY_SKILL_NAME}）" in result.output, (
+        "入口 skill 清理 message 应与其目录同现并保留改名语义"
+    )
+
+
+def test_install_legacy_cleanup_warns_on_rmtree_failure(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """legacy 清理 fail-soft：rmtree 抛 OSError → warn 到 stderr，install 不 fail（幂等清理非主流程）。"""
+
+    def _boom(*_a, **_k):
+        raise OSError("rmdir busy (simulated)")
+
+    legacy = _make_legacy_skill(isolated_home / ".claude", "design-charts")
+    monkeypatch.setattr(install_cmds.shutil, "rmtree", _boom)
+    result = runner.invoke(app, ["--target", "cc", "--scope", "user"])
+    assert result.exit_code == 0, result.output
+    assert "无法清理" in result.output, "rmtree 失败应 warn（不静默吞）"
+    assert legacy.exists(), "清理失败时残留目录保留（交用户处理，非半删状态）"
 
 
 # ── fail loud + 模板内容 ──────────────────────────────────────────────────────

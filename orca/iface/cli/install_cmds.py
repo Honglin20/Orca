@@ -49,7 +49,7 @@ from orca.iface.cli.skill_cmds import (
     ENTRY_SKILL_NAME,
     HOST_DOTDIR,
     SKILL_HOSTS,
-    SKILL_NAME,  # noqa: F401 —— re-export（tests 经 install_cmds.SKILL_NAME 引用）
+    SKILL_NAME,  # legacy 清理 reason 直接用；兼 re-export（tests 经 install_cmds.SKILL_NAME 引用）
     SKILL_TARGETS,
     opencode_global_root,
 )
@@ -223,6 +223,7 @@ def _install_skill(root: Path) -> list[Path]:
 
     ``shutil.copytree(dirs_exist_ok=True)`` 幂等覆盖；排除 ``benchmark/``（评测资产，
     含 expected 答案，不该进用户 skill 目录）。返落地 skill 目录列表（按 name 升序）。
+    顺带幂等清理旧名 skill 残留（改名/并入迁移，见函数尾 legacy_skills）。
     找不到随包 skill 源 → fail loud（exit 1，打包漏文件）。
     """
     srcs = _bundled_skill_sources()
@@ -239,15 +240,21 @@ def _install_skill(root: Path) -> list[Path]:
         shutil.copytree(src, dst, dirs_exist_ok=True, ignore=shutil.ignore_patterns("benchmark"))
         dsts.append(dst)
 
-    # 改名迁移清理（v5 §4.1：入口 skill teams→orca→tars）。旧入口 skill 名残留会让宿主同时
-    # 加载新旧两份入口（如 .claude/skills/orca/ + tars/）→ 模型困惑该调哪个。旧名已不是随包源
-    # （源已改名 tars）→ 残留即陈旧，幂等清理（同 ``command/orca`` 清理同 pattern，fail-soft warn）。
+    # 陈旧 skill 目录清理（改名迁移 teams→orca→tars + 并入迁移 design-charts→create-workflow）。
+    # 旧名残留会让宿主同时加载新旧两份（如 .claude/skills/orca/ + tars/）→ 模型困惑该调哪个。
+    # 旧名已不是随包源 → 残留即陈旧，幂等清理（同 ``command/orca`` 清理同 pattern，fail-soft warn）。
+    # reason 区分迁移方式：入口 skill 是改名，design-charts 是并入 create-workflow（能力合并非改名）。
     installed_names = {p.name for p in srcs}
-    for legacy in (root / "skills" / "orca", root / "skills" / "teams"):
+    legacy_skills = (
+        (root / "skills" / "orca", f"已改名 {ENTRY_SKILL_NAME}"),
+        (root / "skills" / "teams", f"已改名 {ENTRY_SKILL_NAME}"),
+        (root / "skills" / "design-charts", f"已并入 {SKILL_NAME}"),
+    )
+    for legacy, reason in legacy_skills:
         if legacy.is_dir() and legacy.name not in installed_names:
             try:
                 shutil.rmtree(legacy)
-                typer.echo(f"  ↻ 清理旧入口 skill 残留：{legacy}（已改名 {ENTRY_SKILL_NAME}）")
+                typer.echo(f"  ↻ 清理旧 skill 残留：{legacy}（{reason}）")
             except OSError as e:  # noqa: BLE001
                 typer.echo(f"  ⚠ 无法清理旧 skill 残留 {legacy}：{e}", err=True)
     return dsts

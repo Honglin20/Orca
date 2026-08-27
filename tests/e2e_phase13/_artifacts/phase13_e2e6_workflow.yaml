@@ -13,7 +13,7 @@ nodes:
       After running all three commands, reply with exactly: DONE
 
       Command (run 3 times in total, sequentially):
-        python3 /Users/mozzie/Desktop/Projects/Orca/tests/e2e_phase13/scripts/chart_demo.py
+        python3 /mnt/d/Projects/Orca/tests/e2e_phase13/scripts/chart_demo.py
     routes:
       - to: $end
 outputs:

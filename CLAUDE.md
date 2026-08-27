@@ -12,7 +12,7 @@ Orca 是对 AgentHarness（前一个 claude code 编排框架）的重写，目�
 
 **重写原则**：AgentHarness 框架问题很多，本项目一律重写而非迁移其代码；仅采纳其客观事实（如 claude -p 的真实调用协议、stream-json 行格式），这些是协议契约不是框架资产。
 
-**测试后端约定**：E2E / 集成测试固定使用 **opencode + deepseek-v4-flash**（API 已配置），不再使用 claude 作为后端测试。
+**测试后端约定**：E2E / 集成测试固定使用 **opencode + deepseek-v4-flash**（API 已配置），不再使用 claude 作为后端测试。**例外**：prof-opt workflow 的 E2E 用 **claude 后端 + tars skill**（用户 2026-08-20 拍板，WSL 内执行、`tars install --target cc`）。
 
 **E2E 测试模式 = in-session headless（重要）**：E2E 必须用 **in-session 模式**——`opencode run`（非交互/headless）起一个 opencode 会话 → 主 agent 按意图（"用 TARS 跑 X"）触发 **tars skill** → skill 编排 agent 调 **`orca` CLI**（`orca <wf> --inputs` bootstrap + `orca next --run-id --output` 逐节点）驱动 workflow，每个节点的 prompt 由主 agent 执行。**禁用 `tars run --background`** 做 E2E——那是另一入口的批处理（绕过 opencode 会话 + tars skill 编排），且不连 chart daemon（`ORCA_CHART_SOCK`）→ **无 live web 图表推送**（只落静态 fallback）。in-session 模式才连 chart daemon，能验「web 图表生成正常」。启动/推进永远走 `orca` CLI（tars skill 编排），不存在 `tars <wf> --inputs`。
 
