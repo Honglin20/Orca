@@ -18,7 +18,6 @@ import os
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -190,13 +189,12 @@ def test_analyze_without_freeze_never_touches_anchor(tmp_path):
     _write_profile_fixture(profile_dir)
     anchor = profile_dir.parent / "origin_anchor.json"
     anchor.write_text('{"sentinel": "untouched"}', encoding="utf-8")
-    stamp = (time.time(), time.time())
-    os.utime(anchor, stamp)
+    mtime_before = os.stat(anchor).st_mtime_ns
     proc = _run_cli([str(_SCRIPTS / "analyze.py"),
                      "--profile-dir", str(profile_dir)])
     assert proc.returncode == 0, proc.stderr
     assert anchor.read_text(encoding="utf-8") == '{"sentinel": "untouched"}'
-    assert os.stat(anchor).st_mtime == int(stamp[0])   # not rewritten
+    assert os.stat(anchor).st_mtime_ns == mtime_before   # not rewritten
 
 
 # ── history: advanced builder + probe gap ────────────────────────────────────
@@ -255,3 +253,15 @@ def test_history_probe_gap_written_and_omitted(tmp_path):
         hist2, "r1-02", proxy_acc=None, promote_gate="fail",
         outcome="probe_insufficient")          # gap=None -> omitted
     assert "gap" not in row2
+
+
+# ── gate CLI (v5): retired flags rejected ────────────────────────────────────
+
+def test_gate_cli_rejects_retired_flags(tmp_path):
+    art = tmp_path / "ws"
+    art.mkdir()
+    for flag in ("--latency-reduction-min", "--stall-rounds"):
+        proc = _run_cli([str(_SCRIPTS / "gate_decide.py"),
+                         "--artifacts", str(art), flag, "0.5"])
+        assert proc.returncode != 0, flag
+        assert flag in proc.stderr

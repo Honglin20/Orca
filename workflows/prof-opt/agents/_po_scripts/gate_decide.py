@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """gate_decide.py — pure-read loop/exit decision computed from the workspace.
 
-Reads (never writes): history.jsonl (latest version per vid), best.json, and
-rounds/<NNN>/proposals.json of the CURRENT round (exhausted flag comes from
-disk, not from a node output — cross-node output references across a back edge
-are unproven). Decision order is fixed (first match wins):
+Reads (never writes): history.jsonl (all version rows), best.json, and the
+frozen origin anchor (base/origin_anchor.json — the target line never
+moves). The decision order is fixed (first match wins):
 
-    full-train              best exists and best.makespan_cycles <= target
-    loop                    round < max_rounds and not exhausted and
-                            stall < stall_rounds
-    full-train-best-effort  loop conditions exhausted but a promoted best exists
-    finish-failed           no promoted best at all
+    full-train              best exists AND best.makespan_cycles <= target
+                            AND best.vid has an `accuracy_pass` row in ANY
+                            version of its history (the probe's terminal
+                            pass; the later `advanced` row does not erase it)
+    full-train-best-effort  round >= max_rounds (hard cap, never loops) and
+                            a best exists
+    finish-failed           round >= max_rounds and no best
+    loop                    everything else — the ONLY other exit; there is
+                            no wall-clock cap and no plateau early-exit (a
+                            plateau is answered by rerouting proposals, not
+                            by stopping)
 
-stall: consecutive rounds (from history) with zero promoted vids; reset to 0
-by any promoted round; initial value 0. Hard cap: round >= max_rounds can
-NEVER yield `loop` — belt-and-suspenders against an unbounded cycle.
-stdout: single-line JSON.
+Invariant (checked before deciding): round_state mode == accuracy but
+best.vid has no probe row at all -> exit 2 (mode=accuracy implies the probe
+trained best.vid at least once; a violation means the workspace is torn).
+A missing origin anchor is a hard error. stdout: single-line JSON.
 """
 from __future__ import annotations
 
@@ -25,118 +30,92 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from history_lib import read_latest  # noqa: E402
+from history_lib import read_rows  # noqa: E402
 
 
 def _current_round(rounds_dir: Path) -> int:
     if not rounds_dir.is_dir():
         return 0
-    numbers = []
-    for child in rounds_dir.iterdir():
-        if child.is_dir() and child.name.isdigit():
-            numbers.append(int(child.name))
+    numbers = [int(c.name) for c in rounds_dir.iterdir()
+               if c.is_dir() and c.name.isdigit()]
     return max(numbers) if numbers else 0
 
 
-def _round_exhausted(rounds_dir: Path, round_no: int) -> bool:
-    proposals = rounds_dir / f"{round_no:03d}" / "proposals.json"
-    if not proposals.is_file():
-        raise FileNotFoundError(
-            f"gate_decide: {proposals} missing — the gate reads the exhausted "
-            f"flag from disk; run the propose step first")
-    data = json.loads(proposals.read_text(encoding="utf-8"))
-    exhausted = data.get("exhausted")
-    if not isinstance(exhausted, bool):
-        raise ValueError(f"gate_decide: {proposals} has non-boolean 'exhausted'")
-    return exhausted
-
-
-def _stall_count(history_path: Path, round_no: int) -> int:
-    """Consecutive most-recent rounds without a promoted vid (latest-version
-    outcome). Rounds are walked in order so promotion resets the counter."""
-    latest = read_latest(history_path)
-    promoted_rounds = {row["round"] for row in latest.values()
-                       if row.get("outcome") == "promoted" and "round" in row}
-    stall = 0
-    for r in range(1, round_no + 1):
-        stall = 0 if r in promoted_rounds else stall + 1
-    return stall
-
-
-def _base_makespan(artifacts: Path) -> int:
-    """Baseline makespan from the deterministic analyze.py report on disk.
-
-    The latency target is RELATIVE (project-agnostic): the user gives a
-    reduction ratio; the absolute threshold is derived from this baseline."""
-    report = artifacts / "base" / "bottleneck_report.json"
+def _load_origin_anchor(artifacts: Path) -> dict:
+    path = artifacts / "base" / "origin_anchor.json"
     try:
-        data = json.loads(report.read_text(encoding="utf-8"))
-        return int(data["makespan_cycles"])
+        anchor = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise FileNotFoundError(
-            f"gate_decide: {report} missing — the relative latency target "
-            f"needs the baseline makespan; run the baseline chain first") from exc
-
-
-def decide(artifacts: Path, latency_reduction_min: float, max_rounds: int,
-           stall_rounds: int) -> dict:
-    if not 0.0 < latency_reduction_min < 1.0:
+            f"gate_decide: origin anchor missing: {path} (the target line is "
+            f"frozen by the baseline stage; run the baseline first)") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"gate_decide: origin anchor unparseable: {exc}") from exc
+    if not isinstance(anchor.get("target_cycles"), int):
         raise ValueError(
-            f"gate_decide: --latency-reduction-min must be in (0, 1), got "
-            f"{latency_reduction_min}")
-    rounds_dir = artifacts / "rounds"
-    round_no = _current_round(rounds_dir)
-    exhausted = _round_exhausted(rounds_dir, round_no) if round_no else False
-    stall = _stall_count(artifacts / "history.jsonl", round_no)
+            f"gate_decide: origin anchor lacks integer 'target_cycles': {anchor!r}")
+    return anchor
 
-    base_makespan = _base_makespan(artifacts)
-    target = int(base_makespan * (1.0 - latency_reduction_min)) + 1  # <= target ⇔ strictly below the line
 
-    best = None
+def decide(artifacts: Path, max_rounds: int = 100) -> dict:
+    round_no = _current_round(artifacts / "rounds")
+    anchor = _load_origin_anchor(artifacts)
+    target = anchor["target_cycles"]
+
+    best: dict | None = None
     best_path = artifacts / "best.json"
     if best_path.is_file():
-        raw = json.loads(best_path.read_text(encoding="utf-8"))
+        try:
+            raw = json.loads(best_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"gate_decide: best.json unparseable: {exc}") from exc
         best = {"vid": raw["vid"], "makespan_cycles": raw["makespan_cycles"],
                 "proxy_acc": raw.get("proxy_acc")}
 
-    if best is not None and best["makespan_cycles"] <= target:
+    rows = read_rows(artifacts / "history.jsonl")
+    rows_of_best = [r for r in rows if best is not None
+                    and r.get("vid") == best["vid"]]
+    has_accuracy_pass = any(r.get("outcome") == "accuracy_pass"
+                            for r in rows_of_best)
+    has_probe_row = any("promote_gate" in r for r in rows_of_best)
+
+    mode = ("accuracy" if best is not None
+            and best["makespan_cycles"] <= target else "latency")
+    if mode == "accuracy" and not has_probe_row:
+        raise ValueError(
+            f"gate_decide: invariant broken — mode=accuracy but best vid "
+            f"{best['vid']} has no probe row in history (the probe must have "
+            f"trained it at least once); workspace is torn, see po_report")
+
+    if (best is not None and best["makespan_cycles"] <= target
+            and has_accuracy_pass):
         decision = "full-train"
         reason = (f"best vid {best['vid']} makespan {best['makespan_cycles']} "
-                  f"<= target {target} (baseline {base_makespan} x (1 - "
-                  f"{latency_reduction_min}))")
+                  f"<= target {target} (anchor frozen at baseline "
+                  f"{anchor['baseline_makespan_cycles']}) and its accuracy "
+                  f"gate passed (accuracy_pass row in history)")
     elif round_no >= max_rounds:
-        # hard cap: never loop at/after max_rounds, whatever exhausted/stall say
+        # hard cap: never loop at/after max_rounds — the only exit besides
+        # the accuracy double-pass
         decision = "full-train-best-effort" if best is not None else "finish-failed"
         reason = f"round {round_no} >= max_rounds {max_rounds} (hard cap)"
-    elif not exhausted and stall < stall_rounds:
-        decision = "loop"
-        reason = (f"target unmet, round {round_no}/{max_rounds}, "
-                  f"exhausted={exhausted}, stall={stall}/{stall_rounds}")
-    elif best is not None:
-        decision = "full-train-best-effort"
-        why = "proposals exhausted" if exhausted else f"stall {stall} >= {stall_rounds}"
-        reason = f"{why}; promoting best vid {best['vid']} as-is"
     else:
-        decision = "finish-failed"
-        why = "proposals exhausted" if exhausted else f"stall {stall} >= {stall_rounds}"
-        reason = f"{why} and no promoted variant ever passed probe"
+        decision = "loop"
+        reason = (f"sequential gates unmet, round {round_no}/{max_rounds}, "
+                  f"mode={mode} — reroute proposals (failed_sigs), no other exit")
 
-    return {"decision": decision, "round": round_no, "stall": stall,
-            "best": best, "reason": reason}
+    return {"decision": decision, "round": round_no, "mode": mode,
+            "best": best, "target_cycles": target, "reason": reason}
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--artifacts", required=True)
-    ap.add_argument("--latency-reduction-min", type=float, required=True,
-                    help="required latency reduction ratio vs baseline, in (0, 1)")
-    ap.add_argument("--max-rounds", type=int, default=5)
-    ap.add_argument("--stall-rounds", type=int, default=2)
+    ap.add_argument("--max-rounds", type=int, default=100)
     ns = ap.parse_args()
 
     try:
-        result = decide(Path(ns.artifacts), ns.latency_reduction_min,
-                        ns.max_rounds, ns.stall_rounds)
+        result = decide(Path(ns.artifacts), ns.max_rounds)
     except (OSError, ValueError, KeyError) as exc:
         print(f"gate_decide: FAIL {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
