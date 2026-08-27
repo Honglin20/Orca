@@ -191,3 +191,5 @@ v4：每轮每变体 stop-at-k 训练 + eval。v5：**追击期零训练**（只
 ## 附 A：审查记录
 
 - **评审轮 1（2026-08-27，用户裁决）**：开放问题 #1 → 纯顺序 + proposer 精度责任 + 规则沉淀（不粗训、规则从实测提取不写死）→ 新增 D-V5-7、D-V5-2 增补；开放问题 #3 → 无兜底、100 轮硬上限、每轮必须严格改进 + 零改进轮强制换路 → 新增 D-V5-8、D-V5-3 增补；inputs 维持 8 个（不加 max_hours）。
+- **SPEC 评审轮 1 → 轮 2 前置裁决（2026-08-27，用户，修订 spec-reviewer 9 阻塞项时拍板）**：U1 恢复轮**底座固定 + 组合式提案**（不推进 fail 变体、非棘轮；仅 accuracy_pass 推进即终局）——D-V5-8 链式推进仅指时延追击期；U2 规则**双层池**（项目镜像 docs/prof-opt + 全局池 $ORCA_HOME；model_hash 同配方键控跨文件夹继承、generality 打标跨模型迁移、confirm/refute 机械计数升/隔离、full-train 后补提取）；U3 版本戳 = flatten 入口幂等重部署（含 REUSE 分支）+ 节点对戳 fail loud。
+- **SPEC errata 回填（2026-08-27，评审三轮 PASS 后）**：§2.3 比对集收窄为测量配置四字段（排除 resolved_by 溯源字段，防同硬件来源翻转伪漂移强制 wipe）；§6.1 崩溃撕裂恢复读法（marker 缺该轮该模记录 + best.round==current + 无本轮 advanced 行 → 按盘面补齐共同动作，满足 §6.2 重放收敛；良性残余子窗口披露）。均不改用户裁决，出处 planner/plan-adversary 三轮攻击验证。
