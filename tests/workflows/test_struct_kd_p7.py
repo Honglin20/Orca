@@ -331,9 +331,9 @@ def test_no_jinja_ref_to_undeclared_input(wf_path):
     ref_pattern = re.compile(r"\{\{\s*inputs\.(\w+)")
     refs = set(ref_pattern.findall(wf_path.read_text(encoding="utf-8")))
 
-    # 关联 agent.md（workflows/agents/<wf-relevant>/*.md）；保守起见扫所有 agent.md
-    # 中的「同 workflow input 引用」——按 yaml 的 agent: <name> 字段定位更准但成本高，
-    # 此处采用「扫所有 struct/quant/nas agent.md，过滤掉 declared 不在当前 wf 的」。
+    # 关联 agent.md（per-wf 布局各 ``<wf>/agents/**/agent.md``）；保守起见扫全树所有
+    # agent.md 中的「同 workflow input 引用」——按 yaml 的 agent: <name> 字段定位更准但
+    # 成本高，此处采用「全树扫 agent.md，过滤掉 declared 不在当前 wf 的」。
     agent_dir = REPO / "workflows"  # per-wf 布局：全树扫 agent.md
     for agent_md in agent_dir.rglob("agent.md"):
         text = agent_md.read_text(encoding="utf-8")

@@ -217,8 +217,9 @@ def build_router() -> APIRouter:
 def _resolve_context_for(name: str) -> ResolveContext | None:
     """按 workflow name 构造 ResolveContext（plan §ResolveContext 构造）。
 
-    ``workflow_dir`` = yaml 所在目录（即 ``workflows/``），``_search_bases`` 第一项
-    ``workflows/agents/`` 命中。``cwd`` 用 ``Path.cwd()``——与 ``parser.load_workflow``
+    ``workflow_dir`` = yaml 所在目录（per-wf 形态即 ``<wf-dir>``；旧平铺形态为
+    ``workflows/`` 根），``_search_bases`` 第一项 ``<wf-dir>/agents``（旧平铺
+    ``workflows/agents/``）命中。``cwd`` 用 ``Path.cwd()``——与 ``parser.load_workflow``
     默认行为一致，不在 route 层 monkeypatch cwd（blast radius）。
 
     找不到 workflow → None（caller 决定 404）。

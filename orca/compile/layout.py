@@ -4,12 +4,13 @@
 （根 ``*.yaml`` + 共享 ``agents/`` + ``subagents/<wf-name>/``）迁移到 per-wf 自包含
 （``<wf>/workflow.yaml + <wf>/agents/ + <wf>/subagents/ + ...``）。迁移期与向后兼容期
 **双形态并存**，本模块是双形态解析公式的唯一实现——catalog（yaml 扫描）、validator
-（subagents md 校验）、orchestrator（``RunContext.subagents_root``）三处消费方一律
-import 此处，禁止各自复制实现（DRY；plan-adversary Q10 验证点：三处必须真共享）。
+（subagents md 校验）、orchestrator（``RunContext.subagents_root``）、web routes
+（``iface/web/routes/workflows.py``）四处消费方一律 import 此处，禁止各自复制实现
+（DRY；plan-adversary Q10 验证点：必须真共享）。
 
 依赖单向：本模块属 ``orca.compile``，仅依赖 stdlib（pathlib）；被 compile 内
-（catalog / validator）与上层 run 层（orchestrator）import 合法（compile ← run），
-不依赖 run/exec/iface。
+（catalog / validator）、上层 run 层（orchestrator）与 iface 壳层（web routes）
+import 合法（compile ← run / compile ← iface）；本模块自身不 import run/exec/iface。
 """
 
 from __future__ import annotations

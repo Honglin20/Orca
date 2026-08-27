@@ -16,8 +16,9 @@
    非空 → 注 ``ORCA_WORKFLOWS_ROOT``。agent.md 据此定位 workflow 级共享资源目录
    （如 ``$ORCA_WORKFLOWS_ROOT/agents/_po_scripts``），cwd 无关——``tars run`` 从用户项目
    目录起跑时，agent CWD ≠ Orca 仓库根，``workflows/agents/_po_scripts`` 这类 cwd-relative
-   查找会失败。``workflows_root`` = workflow yaml 所在目录绝对路径（dev: ``<repo>/workflows``，
-   安装态：``~/.orca/workflows``），由 ``load_workflow(yaml_path).parent`` 在 run 启动期解析。
+   查找会失败。``workflows_root`` = workflow yaml 所在目录绝对路径（per-wf 布局 dev:
+   ``<repo>/workflows/<wf-dir>``，安装态：``~/.orca/workflows/<wf-dir>``；旧平铺形态为
+   ``workflows`` 根），由 ``load_workflow(yaml_path).parent`` 在 run 启动期解析。
 
 **为何抽出来**：原 ``orca.exec.claude.executor._build_env_overlay`` /
 ``orca.exec.validator._build_env_overlay`` / ``orca.gates.dialog._build_env_overlay`` 三处实现
@@ -68,8 +69,9 @@ def build_env_overlay(
             空串 → 不注（workflow 不需要 KB / 未解析到）；非空 → 子进程
             ``ORCA_KB_DIR``，workflow 脚本 + agent prompt 据 ``$ORCA_KB_DIR`` 定位 KB（替代裸相对
             ``knowledge_base/``，解决换项目跑找不到 KB 的可移植性问题）。
-        workflows_root: workflow yaml 所在目录绝对路径
-            （dev: ``<repo>/workflows``；安装态：``~/.orca/workflows``）。空串 → 不注（向后兼容）；
+        workflows_root: workflow yaml 所在目录绝对路径（per-wf 布局 dev:
+            ``<repo>/workflows/<wf-dir>``；安装态：``~/.orca/workflows/<wf-dir>``；旧平铺
+            形态为 ``workflows`` 根）。空串 → 不注（向后兼容）；
             非空 → 子进程 ``ORCA_WORKFLOWS_ROOT``，agent.md 据此 cwd-无关地定位 workflow 级共享
             资源目录（如 ``$ORCA_WORKFLOWS_ROOT/agents/_po_scripts``）。替代 agent.md 各自 hardcode
             ``workflows/agents/_po_scripts`` 的 cwd-relative 查找（``tars run`` 从用户项目起跑时
