@@ -158,7 +158,7 @@ nodes:
             max_steps: {type: [integer, "null"], description: "恒 null：不做步数截断（兼容字段）"}
             seed: {type: integer, description: "从头训练固定 seed"}
           additionalProperties: false
-        probe_cap_mechanism: {type: string, description: "变体截断形态描述（v4 = stop-at-k：完整轮数渲染 + 第 k 轮外部停止）；viable=false 时空串"}
+        probe_cap_mechanism: {type: string, description: "变体截断形态描述（stop-at-k：完整轮数渲染 + 第 k 轮外部停止）；viable=false 时空串"}
         exemptions:
           type: array
           items: {type: string}

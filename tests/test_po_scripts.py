@@ -583,6 +583,36 @@ def test_advance_accuracy_pass_winner_ranked_by_gap(tmp_path: Path):
         "# shadow r1-02\n"
 
 
+def test_advance_accuracy_tie_break_gap_then_makespan_then_vid(tmp_path: Path):
+    """The full accuracy ranking chain (gap -> makespan -> vid), direction
+    already normalized by the verdict layer: equal gaps fall through to the
+    smaller makespan, equal both to the vid order."""
+    art = _v5_advance_artifacts(tmp_path)
+    (art / "best.json").write_text(json.dumps(
+        {"vid": "r0-99", "makespan_cycles": 450, "proxy_acc": 0.4,
+         "round": 0, "profile_dir": "x"}), encoding="utf-8")
+    # equal gap 0.05, DIFFERENT makespans: the smaller makespan wins
+    _v5_variant(art, "r1-01", round_no=1, makespan=490, probe="accuracy_pass",
+                gap=0.05)
+    _v5_variant(art, "r1-02", round_no=1, makespan=470, probe="accuracy_pass",
+                gap=0.05, shadow_tag="r1-02")
+    out = advance(art)
+    assert out["vid"] == "r1-02"
+
+    # equal gap AND makespan: the vid order decides (no proxy_acc anywhere
+    # in the ranking — the v4 higher-proxy hardcode is gone)
+    art2 = _v5_advance_artifacts(tmp_path / "b")
+    (art2 / "best.json").write_text(json.dumps(
+        {"vid": "r0-99", "makespan_cycles": 450, "proxy_acc": 0.4,
+         "round": 0, "profile_dir": "x"}), encoding="utf-8")
+    _v5_variant(art2, "r1-02", round_no=1, makespan=470, probe="accuracy_pass",
+                gap=0.05, proxy_acc=0.99)      # HIGHER acc, loses on vid order
+    _v5_variant(art2, "r1-01", round_no=1, makespan=470, probe="accuracy_pass",
+                gap=0.05, proxy_acc=0.10, shadow_tag="r1-01")
+    out2 = advance(art2)
+    assert out2["vid"] == "r1-01"              # lexicographic, acc irrelevant
+
+
 def test_advance_accuracy_above_line_never_a_candidate(tmp_path: Path):
     art = _v5_advance_artifacts(tmp_path)
     (art / "best.json").write_text(json.dumps(

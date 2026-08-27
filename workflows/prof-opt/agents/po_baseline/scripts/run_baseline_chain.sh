@@ -326,7 +326,7 @@ TRAIN_FINAL="$TRAIN_DIR/train_final.json"
 pid_alive_owned() { # pid_alive_owned <pidfile> <expect-substr>
   # attribution check: the pid must be alive AND its /proc cmdline must
   # reference the expected artifact (a reused pid from an unrelated process
-  # must never be mistaken for our worker — D-V4-2)
+  # must never be mistaken for our worker)
   local pidfile="$1" expect="$2" pid cmd
   [ -s "$pidfile" ] || return 1
   pid="$(cat "$pidfile" 2>/dev/null || echo 0)"

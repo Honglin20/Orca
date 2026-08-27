@@ -22,7 +22,7 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ART="${ORCA_ARTIFACTS_DIR:?FATAL: ORCA_ARTIFACTS_DIR not set (deploy_scripts.sh)}"
 VERIFY=0
 [ "${1:-}" = "--verify" ] && VERIFY=1
-[ $# -eq 0 ] || [ "$VERIFY" -eq 1 ] || {
+{ [ $# -eq 0 ] || { [ "$VERIFY" -eq 1 ] && [ $# -eq 1 ]; }; } || {
   echo "FATAL: unknown argument(s): $* (only --verify is accepted)" >&2; exit 2; }
 
 # manifest over a script directory: sha256 of the sorted (name, sha256) pairs

@@ -176,7 +176,6 @@ early-stopping projects are out of scope — see `contracts.json` `reason`).
    `variants/$WINNER/onnx/model.onnx` → `final/model.onnx`
    (`base/model.onnx` is the same structure after the round-end advance;
    either source is valid — copy from the variant for a stable provenance).
-(Absorbed into step 5 above.)
 
 ## Idempotency notes
 

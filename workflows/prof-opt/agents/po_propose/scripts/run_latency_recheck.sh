@@ -114,15 +114,9 @@ else
   INCUMBENT="$BEST_MS"
 fi
 
-# ── current round + base makespan ─────────────────────────────────────────────
-ROUND="$("$PY" - "$ART/rounds" <<'PYEOF'
-import sys
-from pathlib import Path
-d = Path(sys.argv[1])
-nums = [int(c.name) for c in d.iterdir() if c.is_dir() and c.name.isdigit()]
-print(max(nums) if nums else 0)
-PYEOF
-)"
+# ── current round (single source) + base makespan ────────────────────────────
+ROUND_RAW="$("$PY" "$SCRIPTS/round_state.py" --artifacts "$ART" current)"
+ROUND="$("$PY" -c 'import json,sys; print(json.loads(sys.argv[1])["round"])' "$ROUND_RAW")"
 [ "$ROUND" -gt 0 ] || { echo "FATAL: no rounds/<NNN>/ directory — proposal stage missing" >&2; exit 2; }
 ROUND_DIR="$ART/rounds/$(printf '%03d' "$ROUND")"
 BASE_MS="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["makespan_cycles"])' "$ART/base/profile/profile_summary.json")"

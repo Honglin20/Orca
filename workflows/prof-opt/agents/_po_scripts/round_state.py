@@ -40,6 +40,14 @@ def _current_round(rounds_dir: Path) -> int:
     return max(numbers) if numbers else 0
 
 
+def current_round(artifacts: Path) -> int:
+    """Public single source: the current round number (max purely-numeric
+    directory under rounds/, 0 when none). Every consumer (propose, probe,
+    gate, advance, recheck) derives its round through this — hand-rolled
+    duplicates drift."""
+    return _current_round(artifacts / "rounds")
+
+
 def _round_dir(round_no: int) -> str | None:
     return None if round_no == 0 else f"rounds/{round_no:03d}"
 
@@ -85,6 +93,23 @@ def _mode(artifacts: Path) -> dict:
             "best_makespan": best_makespan}
 
 
+def mode_state(artifacts: Path) -> dict:
+    """Public single source for the gate phase: {"mode": latency|accuracy,
+    "target_cycles": T, "best_makespan": M|null} per the frozen anchor."""
+    return _mode(artifacts)
+
+
+def working_round(artifacts: Path) -> int:
+    """Public single source for the round a re-entered propose node works in."""
+    r = _current_round(artifacts / "rounds")
+    marker_path = artifacts / ".round_advanced"
+    if marker_path.is_file():
+        marker = _read_json(marker_path, ".round_advanced")
+        if marker.get("round") == r:
+            r = r + 1
+    return max(r, 1)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--artifacts", required=True)
@@ -93,19 +118,13 @@ def main() -> int:
     artifacts = Path(ns.artifacts)
     try:
         if ns.command == "current":
-            r = _current_round(artifacts / "rounds")
+            r = current_round(artifacts)
             result: dict = {"round": r, "round_dir": _round_dir(r)}
         elif ns.command == "working":
-            r = _current_round(artifacts / "rounds")
-            marker_path = artifacts / ".round_advanced"
-            if marker_path.is_file():
-                marker = _read_json(marker_path, ".round_advanced")
-                if marker.get("round") == r:
-                    r = r + 1
-            working = max(r, 1)
+            working = working_round(artifacts)
             result = {"round": working, "round_dir": _round_dir(working)}
         else:
-            result = _mode(artifacts)
+            result = mode_state(artifacts)
     except (OSError, ValueError, KeyError) as exc:
         print(f"round_state: FAIL {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2

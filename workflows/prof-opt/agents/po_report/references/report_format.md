@@ -55,11 +55,11 @@ Row 6b is the honest out-of-budget terminal: the full training ran and the
 final metric missed the accuracy budget — report `failed` with the gap in
 `final` and the cause in `reason` (no write-back happens on this row).
 Row 8's tiebreaker: an exhausted last round can never route back into the
-loop, so a promoted best with no full-train artifacts died on the
+loop, so an advanced best with no full-train artifacts died on the
 full-training path; a non-exhausted round could have looped, and the gate is
 the decision point that left no disk trace — state in `reason` that the two
 are indistinguishable from disk alone. Row 9 covers the honest terminal
-failure: rounds ran, nothing was ever promoted (or nothing was even
+failure: rounds ran, nothing was ever advanced (or nothing was even
 proposable), the loop ended with no winner.
 
 **Inner attribution for row 7** (within the incomplete round `R`,
@@ -127,9 +127,9 @@ verdicts").
   `rounds/<NNN>/proposals.json`.
 - `history_path`: absolute path of `history.jsonl`.
 - `write_back`: `{done, files, conflicts}` — `{false, [], []}` unless
-  section 3 ran. On terminal states with NO promoted variant (no
+  section 3 ran. On terminal states with NO advanced variant (no
   `best.json`), the zero-write-back form is the honest outcome — the
-  Write-Back section of the report states "no promoted variant — nothing to
+  Write-Back section of the report states "no advanced variant — nothing to
   write back" instead of implying a skip.
 - `charts_summary`: comma-joined chart file names, or the exact fixed string
   `none (no rounds recorded)` — no free-form wording (section 4 pins when).
@@ -256,7 +256,7 @@ statement).
 Sections: Profiling Disclosure (profile_mode.json verbatim + scripts
 .VERSION stamp) · Terminal State (status/stage/reason) · Per-Round Table
 (round,
-proposals, verdict outcome counts, promoted vids, round best makespan) ·
+proposals, verdict outcome counts, accuracy-pass vids, round best makespan) ·
 **Stop-Status Disclosure** (mechanical counts over every
 `variants/<vid>/train/stop_status.json`: `killed` vs `natural_done`, and how many
 record `monitor_failed: true` — the probe monitor's exercise disclosure) ·
@@ -284,7 +284,7 @@ a round) · Accuracy Rules (the run's rule file summary: rule count, the
 highest-confidence harmful/benign patterns, the merge outcome and the
 mirror paths) · Write-Back (written files, conflicts,
 deletions, informational skips of shadow-synthesized files; on a
-no-promotion terminal: the explicit "no promoted variant — nothing to
+no-winner terminal: the explicit "no advanced variant — nothing to
 write back" line) ·
 **Enablement Note**: written files carry NEW names — switching
 the model import to the new file name is the user's one-time action; the

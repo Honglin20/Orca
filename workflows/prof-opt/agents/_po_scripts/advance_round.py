@@ -54,17 +54,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from history_lib import append_advanced, read_latest, read_rows  # noqa: E402
+from round_state import current_round, mode_state  # noqa: E402
 
 MARKER_NAME = ".round_advanced"
 FAILED_OUTCOMES = frozenset({"latency_fail", "accuracy_fail"})
-
-
-def _max_round(rounds_dir: Path) -> int:
-    if not rounds_dir.is_dir():
-        return 0
-    numbers = [int(c.name) for c in rounds_dir.iterdir()
-               if c.is_dir() and c.name.isdigit()]
-    return max(numbers) if numbers else 0
 
 
 def _atomic_write_json(path: Path, payload: dict) -> None:
@@ -128,18 +121,6 @@ def _load_origin_anchor(artifacts: Path) -> dict:
     return anchor
 
 
-def _mode(artifacts: Path, anchor: dict) -> str:
-    best_path = artifacts / "best.json"
-    if not best_path.is_file():
-        return "latency"
-    try:
-        best = json.loads(best_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"advance_round: best.json unparseable: {exc}") from exc
-    return ("accuracy" if int(best["makespan_cycles"]) <= anchor["target_cycles"]
-            else "latency")
-
-
 def _candidates(latest: dict[str, dict], round_no: int, mode: str,
                 incumbent_makespan: int, target: int) -> list[dict]:
     rows = [row for row in latest.values() if row.get("round") == round_no]
@@ -180,14 +161,14 @@ def _advanced_this_round(history_path: Path, vid: str, round_no: int) -> bool:
 
 
 def advance(artifacts: Path) -> dict:
-    rounds_dir = artifacts / "rounds"
-    round_no = _max_round(rounds_dir)
+    round_no = current_round(artifacts)       # single source (round_state.py)
     if round_no == 0:
         raise FileNotFoundError("advance_round: no rounds/<NNN>/ directory exists yet")
 
-    anchor = _load_origin_anchor(artifacts)
-    target = anchor["target_cycles"]
-    mode = _mode(artifacts, anchor)
+    anchor = _load_origin_anchor(artifacts)   # the incumbent when no best yet
+    mode_info = mode_state(artifacts)         # single source (round_state.py)
+    mode = mode_info["mode"]
+    target = mode_info["target_cycles"]
 
     marker_path = artifacts / MARKER_NAME
     marker: dict | None = None

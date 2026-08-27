@@ -225,6 +225,8 @@ COMPARE = ("mode", "chip", "precision", "core_num")
 try:
     recorded = json.loads(open(sys.argv[1], encoding="utf-8").read())
     now = json.loads(sys.argv[2])
+    if not isinstance(recorded, dict) or not isinstance(now, dict):
+        raise ValueError("not a JSON object")
 except Exception as exc:
     print(f"BAD:{exc}")
     raise SystemExit(0)

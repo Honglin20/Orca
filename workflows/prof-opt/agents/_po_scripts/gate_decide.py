@@ -31,14 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from history_lib import read_rows  # noqa: E402
-
-
-def _current_round(rounds_dir: Path) -> int:
-    if not rounds_dir.is_dir():
-        return 0
-    numbers = [int(c.name) for c in rounds_dir.iterdir()
-               if c.is_dir() and c.name.isdigit()]
-    return max(numbers) if numbers else 0
+from round_state import current_round, mode_state  # noqa: E402
 
 
 def _load_origin_anchor(artifacts: Path) -> dict:
@@ -58,9 +51,11 @@ def _load_origin_anchor(artifacts: Path) -> dict:
 
 
 def decide(artifacts: Path, max_rounds: int = 100) -> dict:
-    round_no = _current_round(artifacts / "rounds")
+    round_no = current_round(artifacts)       # single source (round_state.py)
     anchor = _load_origin_anchor(artifacts)
-    target = anchor["target_cycles"]
+    mode_info = mode_state(artifacts)         # single source (round_state.py)
+    mode = mode_info["mode"]
+    target = mode_info["target_cycles"]
 
     best: dict | None = None
     best_path = artifacts / "best.json"
@@ -79,8 +74,6 @@ def decide(artifacts: Path, max_rounds: int = 100) -> dict:
                             for r in rows_of_best)
     has_probe_row = any("promote_gate" in r for r in rows_of_best)
 
-    mode = ("accuracy" if best is not None
-            and best["makespan_cycles"] <= target else "latency")
     if mode == "accuracy" and not has_probe_row:
         raise ValueError(
             f"gate_decide: invariant broken — mode=accuracy but best vid "
