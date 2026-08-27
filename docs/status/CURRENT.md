@@ -25,19 +25,11 @@
 
 ---
 
-## Prof-opt v5 —— SDD loop 进行中（并行，见顶部协调协议）
-
-**SPEC**：`docs/specs/prof-opt-v5-spec.md`（**PASS** 3 轮；U1/U2/U3 已裁决回填；errata 两处已回填：§2.3 比对集四字段 / §6.1 撕裂恢复读法）｜**计划**：`docs/plans/2026-08-27-prof-opt-v5-plan.md`（**READY**，adversary 3 轮 18 质疑全闭环）｜**Phase**：Phase 3 实现——**coder-agent 进行中**（SDD-ORCHESTRATOR，2026-08-27 晚 dispatch；批 D 56d0db1 落地开工；按 plan S0/C1..C7 序；外环回退 0/2）
-**竞态约束**：只写 workflows/prof-opt/ 子树 + tests/test_po_* + v5 自有文档；精确 git add；基线 7 脏文件不卷入；E2E 未过不算完成（收尾归编排者）
-**P8 裁决（v5 侧，宽读法）**：批 D 即 v5 开工门槛；v5 只写 `workflows/prof-opt/` 子树不碰迁移 E-H 触达面；撞车 fail loud 双停
-**进度（2026-08-27 晚，coder-agent）**：S0 断言过 + C1..C7 七 commit 落地（fdd7a52 脚本层 / 203fbe7 推进门控 / f7f4add 戳·模式·规则池 / 49a1d50 per-agent 读盘 / ff86ef0 workflow+prompt 契约 / 4c8c6f1 smoke 收口 / d46e9d5 内环评审修复）；内环 code-reviewer 2 轮闭环（第 1 轮 1 MAJOR+6 MINOR 全处置——round_state 单一来源收编等；第 2 轮定向复核 CLEAN，m7 显式 deferred 有 SPEC/plan 依据）；pytest 两文件 197 passed 0 failed、tars validate 零 error 零 warning、洁净元层脚本 exit 0；E2E 未跑不算完成（真机 §11.4 清单归用户，收尾归编排者）；一起竞态事故已修复（C5 首 commit 误卷迁移 loop 已 staged 的 31 个 benchmark 文件，soft reset 后精确重提交为 ff86ef0，对方磁盘内容完整保留为其未暂存改动）
-
----
-
 ## 已完成（勿重复）
 
+- prof-opt v5 时延先行顺序门控完成（2026-08-27，`fdd7a52..d46e9d5` + `b03d8fb` 共 9 commits + E2E test-agent PASS〔197 tests / validate 0/0 / 7/7 对抗 probe〕；CHANGELOG [2026-08-27] + `docs/releases/2026-08-27-prof-opt-v5-sequential-gating.md`；真机 §11.4 清单归用户）
 - create-workflow skill v2 固化（commit `a379375`，2026-08-27）
 - prof-opt v4 重构完成（2026-08-26，13 commits，CHANGELOG [2026-08-26]）
 
 ## 工作区遗留（非本任务，不动）
-- `.e2e_po/`、`.e2e_spe2e/` scratch；`docs/specs/prof-opt-v5-spec.md`（v5 loop 资产，其自行处置）；`.layout_baseline_list.txt`（本任务基线，不提交）
+- `.e2e_po/`、`.e2e_spe2e/` scratch；`.layout_baseline_list.txt`（本任务基线，不提交）

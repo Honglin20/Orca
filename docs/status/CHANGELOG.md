@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-27] feat(workflows): prof-opt v5——时延先行顺序门控重设计（commit `fdd7a52..d46e9d5` + `b03d8fb`，9 commits）
+
+真机首跑复盘驱动：inputs 14→8（npu 自动解析）；时延链式推进（严格改进即推进、追击期零训练、轮帽默认 100 无早退）→ 达线后粗训精度门 → 恢复轮底座固定+组合式提案（U1）→ 双达标 full-train；origin 双锚冻结（修晋升不重锚）；round_state 单一来源（修 gate 路径漂移温床）；精度规则双层池（model_hash 跨文件夹继承 + generality 跨模型迁移 + confirm/refute 集合计数，U2）；部署件版本戳 + 入口幂等重部署（U3）。SDD 全流程：spec 3 轮 / plan adversary 3 轮 / coder 内环 2 轮 / E2E test-agent **PASS**（197 tests + validate 0/0 + 7/7 对抗 probe）；真机 §11.4 清单归用户。详见 [release note](../releases/2026-08-27-prof-opt-v5-sequential-gating.md)。
+
 ## [2026-08-26] feat(workflows): prof-opt v4 重构——基线完整训练非阻塞 + propose 子代理内闭环 + profiling 子代理化（commit `86ccf99..9ae6438`，13 commits）
 
 10→8 节点：基线完整训练后台跑（finalizer 守护收尾曲线/双锚/终检 + GPU 串行守卫 + push_curves live 图）；po_propose 三子代理内闭环（瓶颈富化[referential]→结构级提案[业务逻辑×SOTA 禁超参 ≤3/轮]→实现+时延打回 ≤2），删 po_implement/po_verify；business-logic-analyst 五段业务逻辑文档；变体 stop-at-k（同 epochs 渲染+进程组杀+@k 对齐比较）；full_train 锚=基线终值删补训路径；D-V4-20 profiling 子代理化（profile_script_path 退役→npu 三参；mfu-analyzer 子代理[mfu_benchmark.py 文件名锁定] + mfu_adapter 确定性转换[并行 cycles→四件套]，placeholder 模式不变）。SPEC 3 轮对抗（65+ 项回卷，UD-1/2/3 拍板）+ 计划 2 轮 + 134 单测绿 + **18 份 prompt 文件逐一独立 reviewer 全 CLEAN**（verify/cleanliness/）+ E2E 2 轮真执行（mnist success 写回逐字节==winner / gate 零解堵自然过）；随任务落地 3 项引擎/skill 修复（script 节点 project-scoped artifacts、tars 逐字传递铁律、reuse_check TypeError）。mfu 模式 E2E 归属用户真机。详见 [release note](../releases/2026-08-26-prof-opt-v4-refactor.md)。
