@@ -66,7 +66,9 @@ This node dispatches **no subagents**. All work is done directly.
 Read `$ORCA_AGENT_RESOURCES/references/report_format.md` BEFORE Step 0
 begins (Step 0's terminal harvest already follows its harvest table).
 Read workspace ledger files (`history.jsonl`, `best.json`,
-`rounds/*/proposals.json`, `contracts.json`, `baseline/*`, `final/*`,
+`rounds/*/proposals.json`, `rounds/*/analysis.md` (each round's measured
+conclusions — the latency section from the propose node, the accuracy
+section from the probe node), `contracts.json`, `baseline/*`, `final/*`,
 `BASELINE.lock`) only as the format document instructs.
 
 ## Workflow

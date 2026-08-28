@@ -18,7 +18,7 @@ the training entry is contract-templated and physically outside the shadow
 closure an edit can reach, and a hyperparameter "change" produces an empty
 op delta that the strictly-negative admission gate rejects anyway.
 
-Scope of this version: six evidence-gated lever families — the three
+This catalog covers six evidence-gated lever families — the three
 conservative ones (activation replacement, normalization structure,
 zero-parameter relocation) plus capacity redistribution, projection
 factorization, and attention/score-path restructuring.
@@ -201,7 +201,8 @@ division work and shortens the chain.
 - **Export pattern per site (fused form)**: removes
   `{LayerNormalization: 1}`, inserts nothing.
 - **Accuracy risk**: medium — rank after the exact-identity entries (C2,
-  N2-exact); the probe stage exists to judge exactly this kind of change.
+  and N2 when the redundancy is exact); the probe stage exists to judge
+  exactly this kind of change.
 - **References**: normalization-free training literature (NFNet, Brock et
   al., 2021).
 

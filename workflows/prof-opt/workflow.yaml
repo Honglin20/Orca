@@ -217,12 +217,15 @@ nodes:
   #   不变）→ Step1 analyze.py 机械刷新瓶颈 → Step2 bottleneck-analyst（stamp
   #   键=base 版本标识+报告内容指纹，未变复用）→ Step3 structure-proposer
   #   （≤3 条结构级提案：禁改训练超参 / 符合业务逻辑 / 围绕瓶颈；输入含
-  #   accuracy_rules.json 全文 + failed_sigs 换路指令 + 恢复轮组合式提案上下
-  #   文；每条必带 predicted_acc_impact）→ Step4 variant-implementer 逐提案实
+  #   accuracy_rules.json 全文 + 上轮 analysis.md 结论 + failed_sigs 换路指令
+  #   + 恢复轮组合式提案上下文；每条必带 predicted_acc_impact）→ Step4
+  #   variant-implementer 逐提案实
   #   现（每次 dispatch 后节点侧机械写 history IMPL 行）→ Step5 批量复测
   #   （判定双模：latency 态严格改进 / accuracy 态 ≤ 冻结达标线；无绝对/相对
   #   /预测比阈值）→ Step6 机械推进（latency 态跑 advance_round.py；accuracy
-  #   态不跑——恢复轮推进在 probe 判定后由 probe 跑）→ Step7 emit（含 mode /
+  #   态不跑——恢复轮推进在 probe 判定后由 probe 跑）→ Step6b 轮末分析落盘
+  #   （rounds/<NNN>/analysis.md 时延节：淘汰归因/预测-实测校准/下轮方向）→
+  #   Step7 emit（含 mode /
   #   advanced_vid）。
   #   executed → po_probe；catch-all → po_report。
   # ───────────────────────────────────────────────────────────────────────────
@@ -277,6 +280,8 @@ nodes:
   #   accuracy_fail / probe_insufficient + gap）→ 每轮判定后 dispatch
   #   accuracy-analyst 提取/更新规则（check 失败重派 1 次再剔除坏行继续）→
   #   全员判定后 advance_round（恢复轮仅 accuracy_pass 推进，底座固定）→
+  #   轮末分析落盘（rounds/<RRR>/analysis.md 精度节：逐 vid 结论/误差结构诊
+  #   断/规则更新/下轮方向）→
   #   emit（mode / accuracy_pass_vids / advanced_vid）。
   #   executed → po_gate；catch-all → po_report。
   # ───────────────────────────────────────────────────────────────────────────

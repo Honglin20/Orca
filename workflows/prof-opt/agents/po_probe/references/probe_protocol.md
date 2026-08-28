@@ -201,8 +201,8 @@ payload; history is the ledger — after reconciliation they must agree.
    `eval_skipped_no_epoch_ckpt: true` in the history row (disclosed, not an
    error).
 8. **Accuracy verdict** (scripted; BOTH gates when the eval ran, curve
-   alone otherwise; the budget comes from the origin anchor — there is no
-   budget argument anymore):
+   alone otherwise; the budget comes from the origin anchor — no budget
+   argument is passed):
    ```bash
    python3 "$ORCA_ARTIFACTS_DIR/scripts/verdict_decide.py" promote \
      --artifacts "$ORCA_ARTIFACTS_DIR" --vid <VID>

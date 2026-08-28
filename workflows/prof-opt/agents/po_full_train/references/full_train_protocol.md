@@ -81,10 +81,7 @@ so the injection points at the global shadow root.
 ## Bounded polling (re-issue this short call; never sleep past the bash cap)
 
 ```bash
-cd "$ORCA_ARTIFACTS_DIR/final" && \
-if [ -f .train_rc ]; then echo "DONE rc=$(cat .train_rc)"; \
-elif kill -0 "$(cat .train_pid)" 2>/dev/null; then echo "RUNNING pid=$(cat .train_pid)"; \
-else echo "DEAD no-rc pid=$(cat .train_pid)"; fi
+python3 "$ORCA_AGENT_RESOURCES/scripts/train_state.py" "$ORCA_ARTIFACTS_DIR/final"
 ```
 
 - `RUNNING` → update the status file occasionally and poll again; if the
@@ -154,8 +151,8 @@ early-stopping projects are out of scope — see `contracts.json` `reason`).
    "full_train_budget": <verbatim from contracts.json>,
    "within_budget": <bool>, "metric_direction": "<direction>"}`.
 4. Budget judgement (scripted; anchor = the resolved `baseline_full_acc`,
-   budget = the FROZEN origin anchor's `accuracy_budget` — there is no
-   budget argument anymore). Write `final/final_acc.json` FIRST with
+   budget = the FROZEN origin anchor's `accuracy_budget`; no budget argument
+   is passed). Write `final/final_acc.json` FIRST with
    `"within_budget": null`, then:
    ```bash
    python3 "$ORCA_ARTIFACTS_DIR/scripts/verdict_decide.py" final-budget \

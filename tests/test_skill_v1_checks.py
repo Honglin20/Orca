@@ -178,6 +178,51 @@ def test_agent_static_relative_script_ref(tmp_path):
     assert "[script-ref]" in r.stdout
 
 
+def test_agent_static_artifacts_env_prefix_legal(tmp_path):
+    # deployed-workflow command form: $ORCA_ARTIFACTS_DIR/scripts/<file> is a
+    # legitimate absolute invocation, not a relative ref
+    agent_dir = _folder_agent(
+        tmp_path,
+        '```bash\npython3 "$ORCA_ARTIFACTS_DIR/scripts/x.py" --artifacts "$ORCA_ARTIFACTS_DIR"\n```\n')
+    r = _run("check_agent_md_static.py", agent_dir)
+    assert r.returncode == 0, r.stdout
+
+
+def test_agent_static_deployed_convention_prose_downgrade(tmp_path):
+    # a file using the deployed absolute form may mention deployed scripts
+    # shorthand in prose -> one aggregated warn, not per-line errors
+    body = ('```bash\npython3 "$ORCA_ARTIFACTS_DIR/scripts/x.py"\n```\n'
+            'Then inspect `scripts/helper.py` for the output shape.\n')
+    agent_dir = _folder_agent(tmp_path, body)
+    r = _run("check_agent_md_static.py", agent_dir)
+    assert r.returncode == 0, r.stdout
+    assert "[warn]" in r.stdout and "部署约定" in r.stdout
+
+
+def test_agent_static_deployed_command_position_still_error(tmp_path):
+    # the downgrade never covers command position: a bare interpreter-relative
+    # invocation fails at spawn-cwd resolution even in a deployed-convention file
+    body = ('```bash\npython3 "$ORCA_ARTIFACTS_DIR/scripts/x.py"\n```\n'
+            '```bash\npython3 scripts/bare.py\n```\n')
+    agent_dir = _folder_agent(tmp_path, body)
+    r = _run("check_agent_md_static.py", agent_dir)
+    assert r.returncode == 1
+    assert "[script-ref]" in r.stdout
+
+
+def test_agent_static_resource_script_with_artifacts_flag_not_deployed(tmp_path):
+    # coincidence trap (ns_retrain style): a resource script taking an
+    # --artifacts-dir flag is NOT the deployment convention — bare mentions
+    # in such a file stay error-level
+    body = ('```bash\npython3 "$ORCA_AGENT_RESOURCES/scripts/run.py" '
+            '--artifacts-dir "$ORCA_ARTIFACTS_DIR"\n```\n'
+            'See `scripts/other.py` for details.\n')
+    agent_dir = _folder_agent(tmp_path, body)
+    r = _run("check_agent_md_static.py", agent_dir)
+    assert r.returncode == 1
+    assert "[script-ref]" in r.stdout
+
+
 def test_agent_static_folder_agent_missing_frontmatter(tmp_path):
     agent_dir = _folder_agent(tmp_path, "跑基准评测。\n", frontmatter=None)
     r = _run("check_agent_md_static.py", agent_dir)

@@ -275,11 +275,13 @@ def dedup_state(path: str | Path, change_sig: str, probe_epochs: int,
     return {"blocked": False, "reason": "no prior terminal outcome for this sig"}
 
 
-def _nullable_int(raw: str) -> int | None:
+def nullable_int(raw: str) -> int | None:
+    """CLI-facing nullable int: ``null``/``none`` -> None (a pinned
+    "mechanism absent" value, never an unset one)."""
     return None if raw.strip().lower() in ("null", "none") else int(raw)
 
 
-def _nullable_value(raw: str):
+def nullable_value(raw: str):
     if raw.strip().lower() in ("null", "none"):
         return None
     try:
@@ -303,9 +305,9 @@ if __name__ == "__main__":
     ap.add_argument("--history", required=True)
     ap.add_argument("--sig", required=True)
     ap.add_argument("--probe-epochs", type=int, required=True)
-    ap.add_argument("--probe-max-steps", type=_nullable_int, required=True,
+    ap.add_argument("--probe-max-steps", type=nullable_int, required=True,
                     help="int, or null/none when no truncation mechanism exists")
-    ap.add_argument("--probe-data-value", type=_nullable_value, required=True,
+    ap.add_argument("--probe-data-value", type=nullable_value, required=True,
                     help="knob value, or null/none when no data knob exists")
     ns = ap.parse_args()
     print(json.dumps(dedup_state(ns.history, ns.sig, ns.probe_epochs,

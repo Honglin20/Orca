@@ -52,13 +52,25 @@ _PY_INLINE_RE = re.compile(r"python3?\s+-c")
 _PY_LOGIC_TOKENS = ("for ", "if ", "while ", "assert ")
 # body 内脚本引用（scripts/ 下 .py/.sh）；env 前缀引导的是合法绝对形态。
 _SCRIPT_REF_RE = re.compile(r"scripts/[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:py|sh)\b")
-# 合法 env 引用的引导形态（裸 / 花括号 / 各自带引号先闭的写法）。
+# 合法 env 引用的引导形态（裸 / 花括号 / 各自带引号先闭的写法）。除 folder agent
+# 自带资源外，部署型 workflow（共享脚本部署进 artifacts 后经该路径执行）的
+# $ORCA_ARTIFACTS_DIR/scripts/<file> 同为命令位合法绝对形态。
 _ENV_REF_FORMS = (
     "$ORCA_AGENT_RESOURCES",
     "${ORCA_AGENT_RESOURCES}",
     '"$ORCA_AGENT_RESOURCES"',
     '"${ORCA_AGENT_RESOURCES}"',
+    "$ORCA_ARTIFACTS_DIR",
+    "${ORCA_ARTIFACTS_DIR}",
+    '"$ORCA_ARTIFACTS_DIR"',
+    '"${ORCA_ARTIFACTS_DIR}"',
 )
+# 部署约定形态：$ORCA_ARTIFACTS_DIR 紧跟 /scripts/ 的连续绝对引用（可选引号/
+# 花括号变体）。「资源脚本 + artifacts 旗标」的同行巧合（$ORCA_AGENT_RESOURCES/
+# scripts/x.py --artifacts-dir "$ORCA_ARTIFACTS_DIR"）不得命中。
+_DEPLOYED_FORM_RE = re.compile(r"[\"']?\$\{?ORCA_ARTIFACTS_DIR\}?/scripts/")
+# 命令位判定：紧邻引用前的解释器调用前缀（bash/sh/python3 + 可选引号）。
+_CMD_PREFIX_RE = re.compile(r"(?:bash|sh|zsh|python3?)\s+[\"']?$")
 _LONG_FENCE_LINES = 8
 
 Finding = tuple[Path, int, str, str]  # (file, line, rule, excerpt)
@@ -195,14 +207,29 @@ def _check_agent(
 
     body = lines[_body_start(lines):]
     body_offset = len(lines) - len(body)
+    # 部署约定判别：body 出现过 _DEPLOYED_FORM_RE 连续绝对形态的文件按部署型
+    # workflow 处理——裸 scripts/<file> 是部署件的 prose 简写，不构成相对引用错误；
+    # 命令位裸引用（解释器前缀紧邻）仍为 error（spawn 后相对解析必炸的运行时坑）。
+    # 每文件汇总一条 warn 提示。
+    deployed = any(_DEPLOYED_FORM_RE.search(ln) for ln in body)
+    bare_mentions: list[int] = []
     for lineno, line in enumerate(body, body_offset + 1):
         for m in _SCRIPT_REF_RE.finditer(line):
             # env 引导（含引号先闭写法 ``"$ORCA_AGENT_RESOURCES"/scripts/x.py``）合法。
             if line[: m.start()].rstrip("/").endswith(_ENV_REF_FORMS):
                 continue
+            if deployed and not _CMD_PREFIX_RE.search(line[: m.start()]):
+                bare_mentions.append(lineno)
+                continue
             findings.append(
                 (md, lineno, "script-ref", f"{m.group(0)} 是相对引用——必须写 $ORCA_AGENT_RESOURCES/scripts/<file>")
             )
+    if bare_mentions:
+        findings.append(
+            (md, bare_mentions[0], "warn",
+             f"部署约定文件：{len(bare_mentions)} 处裸 scripts/<file> 提及按部署件 prose 简写处理"
+             f"（命令位仍须 env 前缀绝对形态）")
+        )
 
     _check_inline_logic(md, body, findings)
 

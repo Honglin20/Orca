@@ -171,7 +171,7 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
   --field "final_onnx=$ORCA_ARTIFACTS_DIR/final/model.onnx" \
   --field "assessment=<one line: final vs baseline anchor vs budget>" \
   --field "max_retries_hit=<true|false>" \
-  --field "healed_files=$(python3 -c "import json, pathlib; p = pathlib.Path('$ORCA_ARTIFACTS_DIR/.po_full_train_healed.txt'); print(json.dumps(p.read_text(encoding='utf-8').splitlines() if p.is_file() else []))")"
+  --field "healed_files=$(python3 "$ORCA_ARTIFACTS_DIR/scripts/healed_files.py" --path "$ORCA_ARTIFACTS_DIR/.po_full_train_healed.txt")"
 ```
 
 On determinate failure the same field set with `status=failed`, `error`

@@ -214,6 +214,17 @@ round's `direction.json`). `best_updated` / `base_advanced` /
 `advanced_vid` for your output come from its JSON combined with the marker
 state.
 
+**Round analysis (accuracy section)** — close the round with its measured
+conclusions. Write the `## accuracy` section of
+`rounds/<RRR>/analysis.md` (idempotent whole-section rewrite on re-entry;
+preserve any `## latency` section written by the propose node), bounded to
+~15 lines: one line per judged vid (gap, outcome, curve-vs-eval note), a
+short error-structure diagnosis when a variant failed the gate (what the
+curve / eval numbers suggest went wrong), the rule ids this round added or
+updated, and a next-round direction note. This file is the round's
+analysis record — the next round's proposer reads the previous round's
+copy; analysis prose lives here, never inside prompts.
+
 ### Step 4: Emit (only when complete)
 
 ```bash
@@ -225,10 +236,10 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
   --field "advanced_vid=<vid or empty string>" \
   --field "best_updated=<true|false>" \
   --field "base_advanced=<true|false>" \
-  --field 'artifacts=["probe_status.md", "rounds/<RRR>/probe_results.jsonl", "best.json", "rounds/<RRR>/direction.json"]' \
+  --field 'artifacts=["probe_status.md", "rounds/<RRR>/probe_results.jsonl", "rounds/<RRR>/analysis.md", "best.json", "rounds/<RRR>/direction.json"]' \
   --field "assessment=<one line: mode + accuracy-pass/survivor summary + monitor_failed / eval-degradation / rule-extraction disclosures + any retry budget hit>" \
   --field "max_retries_hit=<true|false>" \
-  --field "healed_files=$(python3 -c "import json, pathlib; p = pathlib.Path('$ORCA_ARTIFACTS_DIR/.po_probe_healed.txt'); print(json.dumps(p.read_text(encoding='utf-8').splitlines() if p.is_file() else []))")"
+  --field "healed_files=$(python3 "$ORCA_ARTIFACTS_DIR/scripts/healed_files.py" --path "$ORCA_ARTIFACTS_DIR/.po_probe_healed.txt")"
 ```
 
 `healed_files` is `[]` when the marker file is absent (nothing was healed —

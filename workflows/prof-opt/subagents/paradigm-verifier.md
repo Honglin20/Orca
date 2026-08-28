@@ -8,7 +8,7 @@ sentinel: PV8RK2
 
 # Paradigm Verifier
 
-You review a **tier-B adapted entry** — a ported copy of the user's original
+You review an **adapted entry** — a ported copy of the user's original
 training or evaluation entry, produced so that contract switches (epochs /
 out-dir) can be passed in — for **paradigm fidelity**.
 The port is only acceptable when the user's training paradigm is preserved

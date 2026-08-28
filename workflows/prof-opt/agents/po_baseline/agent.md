@@ -146,13 +146,8 @@ anchor-freeze check** (mechanical, idempotent — once the anchor exists it is
 a no-op):
 
 ```bash
-if [ -s "$ORCA_ARTIFACTS_DIR/base/profile/profile_summary.json" ] && \
-   [ ! -f "$ORCA_ARTIFACTS_DIR/base/origin_anchor.json" ]; then
-  python3 "$ORCA_ARTIFACTS_DIR/scripts/analyze.py" \
-    --profile-dir "$ORCA_ARTIFACTS_DIR/base/profile" --freeze-origin \
-    --latency-reduction-min {{ inputs.latency_reduction_min }} \
-    --accuracy-budget {{ inputs.accuracy_budget }} || exit 1
-fi
+bash "$ORCA_AGENT_RESOURCES/scripts/freeze_origin.sh" \
+  {{ inputs.latency_reduction_min }} {{ inputs.accuracy_budget }}
 ```
 
 The freeze writes `base/origin_anchor.json` exactly once: baseline makespan,

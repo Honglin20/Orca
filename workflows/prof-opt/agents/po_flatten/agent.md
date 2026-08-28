@@ -82,8 +82,7 @@ To invoke `<name>` (first round):
 
 **Do not** pre-read every file in the project or the deployed scripts. Read only the
 files a Step explicitly requires when that Step begins (e.g. the model entry file and
-its imported dependencies during the survey; `scripts/PROFILER_CONTRACT.md` is NOT
-needed by this node at all).
+its imported dependencies during the survey).
 
 ## Required Inputs
 
@@ -181,8 +180,8 @@ lock — it belongs to this run: preserved, never wiped, heartbeat-refreshed by
 the gate and the validation gate) and reports `NO_REUSE`; you then rebuild
 shadow / lock / manifest /
 readiness from scratch. The wipe is deliberately whole-workspace, not a pinned
-path list: leftovers from an older run (even files this version no longer knows)
-would silently false-gate the rebuild checks. The project-side rule mirror and
+path list: leftovers from an older run would silently false-gate the rebuild
+checks. The project-side rule mirror and
 the global rule pool are OUTSIDE the workspace and survive the wipe — the fresh
 path re-seeds the workspace rules from them (Step 3b). Never wipe by hand.
 
@@ -271,9 +270,8 @@ move or edit.
 4. **Enumerate `shadow_pkgs` mechanically** (never hand-maintain this list):
 
    ```bash
-   cd "$ORCA_ARTIFACTS_DIR/shadow" && for e in *; do
-     if [ -d "$e" ]; then echo "$e"; else case "$e" in *.py) echo "${e%.py}";; esac; fi
-   done | sort
+   bash "$ORCA_AGENT_RESOURCES/scripts/list_shadow_pkgs.sh" \
+     "$ORCA_ARTIFACTS_DIR/shadow"
    ```
 
 5. **Stdlib collision precheck** — a top-level shadow name that collides with the
@@ -281,20 +279,8 @@ move or edit.
    never shadows stdlib), so surface it NOW:
 
    ```bash
-   python3 - "$ORCA_ARTIFACTS_DIR/shadow" <<'PY'
-   import sys
-   from pathlib import Path
-   shadow = Path(sys.argv[1])
-   names = sorted({(p.name[:-3] if p.suffix == ".py" else p.name)
-                   for p in shadow.iterdir()})
-   clash = [n for n in names if n in sys.stdlib_module_names]
-   if clash:
-       print(f"FATAL: shadow top-level names collide with the Python standard "
-             f"library: {clash} — rename/restructure the shadow copy is NOT allowed; "
-             f"report for a manual decision", file=sys.stderr)
-       sys.exit(1)
-   print("stdlib-collision-check: ok", names)
-   PY
+   python3 "$ORCA_AGENT_RESOURCES/scripts/check_stdlib_clash.py" \
+     --shadow "$ORCA_ARTIFACTS_DIR/shadow"
    ```
 
    Collision → fail loud (`flatten_passed=false`, list the names in `error`).
@@ -302,43 +288,13 @@ move or edit.
 6. **Write `BASELINE.lock`** (the structural anchor — recomputable, deterministic):
 
    ```bash
-   python3 - <<'PY'
-   import hashlib, json, os
-   from pathlib import Path
-   art = Path(os.environ["ORCA_ARTIFACTS_DIR"])
-   shadow = art / "shadow"
-   model_path = os.environ["PO_MODEL_PATH"]
-   ckpt = Path(os.environ["PO_CKPT"]) if os.environ["PO_CKPT"] else None
-
-   def sha(p: Path) -> str:
-       h = hashlib.sha256()
-       with p.open("rb") as fh:
-           for chunk in iter(lambda: fh.read(1 << 20), b""):
-               h.update(chunk)
-       return h.hexdigest()
-
-   lock = {
-       "model_path": model_path,
-       # the pretrained checkpoint is reference-only and optional: record it
-       # (path + sha) ONLY when provided; both fields stay "" otherwise
-       "pretrained_ckpt": str(ckpt.resolve()) if ckpt else "",
-       "ckpt_sha256": sha(ckpt) if ckpt else "",
-       "py_files_sha256": {
-           str(p.relative_to(shadow)).replace("\\", "/"): sha(p)
-           for p in sorted(shadow.rglob("*.py"))
-       },
-   }
-   tmp = art / "BASELINE.lock.tmp"
-   tmp.write_text(json.dumps(lock, indent=2), encoding="utf-8")
-   os.replace(tmp, art / "BASELINE.lock")
-   print(f"BASELINE.lock written over {len(lock['py_files_sha256'])} shadow py files"
-         + (" (pretrained ckpt anchored)" if ckpt else " (no pretrained ckpt)"))
-   PY
+   python3 "$ORCA_AGENT_RESOURCES/scripts/write_baseline_lock.py" \
+     --artifacts "$ORCA_ARTIFACTS_DIR" --model-path "{{ inputs.model_path }}" \
+     --ckpt ""
    ```
 
-   (Set `PO_MODEL_PATH="{{ inputs.model_path }}"` and `PO_CKPT=""`
-   in the environment of that snippet; the empty `PO_CKPT` means no reference
-   checkpoint and the lock records the empty anchor.)
+   (No pretrained-checkpoint input exists in this workflow, so the lock
+   records the empty anchor: `pretrained_ckpt` / `ckpt_sha256` stay "".)
 
 7. **Seed the accuracy rules** (fresh path only — the REUSE branch keeps the
    workspace's existing rules):

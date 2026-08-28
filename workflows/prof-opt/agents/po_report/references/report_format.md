@@ -4,9 +4,10 @@ The report node is the single terminal reporter: every path (success and
 every failure mode) converges here. **Zero cross-node output references** —
 the terminal state is derived ONLY from the workspace on disk. Paths are
 relative to the workspace root (`$ORCA_ARTIFACTS_DIR`) unless absolute. Angle-bracket
-placeholders (`<project-root>`, `<write-back>`) are
+placeholders (`<project-root>`) are
 runtime values from your node prompt's input anchors — substitute the actual
-values.
+values. Write-back is a fixed behavior, not an input: it runs on every
+success terminal; nothing you substitute controls it.
 
 Build the report with ONE python script you write at entry:
 `$ORCA_ARTIFACTS_DIR/report_builder.py` (English identifiers, `pathlib`,
@@ -111,9 +112,7 @@ verdicts").
   value is un-anchored.
 - `pretrained_ref_acc`: number from `baseline/pretrained_ref.json` when that
   file exists and parses with a numeric `value`; null otherwise. Reference
-  only — never a gate. (No stage of this workflow currently writes that
-  file: the pretrained checkpoint is an optional non-gating input. The field
-  exists so a recorded value flows into the report; absent → null.)
+  only — never a gate.
 - `final`: `acc` from `final/final_acc.json` (0 when absent); `makespan`
   from `best.json` (referenced, never re-measured; 0 when absent);
   `gap` = anchor − final.acc for `higher_better`, final.acc − anchor for
@@ -280,7 +279,12 @@ pretrained ckpt; add a "zero-improvement rounds" count line: rounds that
 ran an advance (a `rounds/<NNN>/direction.json` exists) whose round has NO
 `advanced` history row — derive it from HISTORY rows (reading
 direction.json files alone would double-count, they are overwritten within
-a round) · Accuracy Rules (the run's rule file summary: rule count, the
+a round) · **Round Conclusions** (one line per round distilled from that
+round's `rounds/<NNN>/analysis.md` — the latency/accuracy lessons exactly as
+recorded at round end; then a two-to-three-line cross-round summary: which
+lever families delivered vs were falsified, and the predicted-vs-actual
+calibration drift; rounds whose analysis file is absent are skipped, never
+fabricated) · Accuracy Rules (the run's rule file summary: rule count, the
 highest-confidence harmful/benign patterns, the merge outcome and the
 mirror paths) · Write-Back (written files, conflicts,
 deletions, informational skips of shadow-synthesized files; on a

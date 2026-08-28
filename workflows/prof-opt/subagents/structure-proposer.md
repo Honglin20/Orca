@@ -40,13 +40,19 @@ The caller will provide:
    the workspace has them — measured accuracy lessons: `harmful` patterns
    must not be repeated, `benign` patterns are safe building blocks for
    compositions.
-5. **`<reroute>`**: the union of measured-falsified change signatures
+5. **`<prev_analysis>`**: the previous round's analysis
+   (`rounds/<previous round>/analysis.md` content) when it exists — the last
+   round's measured conclusions: what delivered vs was eliminated, the
+   predicted-vs-actual calibration note, and its next-round direction.
+   Weigh it as direct evidence when ranking and choosing directions; it is
+   absent on round 1.
+6. **`<reroute>`**: the union of measured-falsified change signatures
    (from every round's `direction.json` `failed_sigs` — latency-falsified
    AND accuracy-falsified). A new proposal must not belong to a falsified
    family. When the families feel exhausted, propose a DEEPER rewrite or a
    different operator family — there is no exhaustion exit before the round
    cap.
-6. **`<phase>`**: the current gate phase with its context —
+7. **`<phase>`**: the current gate phase with its context —
    - `latency`: chase phase, proposals pursue a strictly smaller makespan
      than the incumbent.
    - `accuracy`: recovery phase — the base is FIXED (failed variants never
@@ -101,9 +107,9 @@ The caller will provide:
    prediction above it is dropped as well.)
 4. Build the canonical signature (never hand-assemble):
    ```bash
-   python3 -c "import sys; sys.path.insert(0, '$ORCA_ARTIFACTS_DIR/scripts'); \
-   from predict_delta import build_change_sig; \
-   print(build_change_sig('<lever>', '<params from the predictor>', <sorted module list>))"
+   python3 "$ORCA_ARTIFACTS_DIR/scripts/build_sig.py" \
+     --lever '<lever>' --params '<params from the predictor>' \
+     --modules '<JSON list of the affected modules>'
    ```
 5. Dedup (mechanical):
    ```bash

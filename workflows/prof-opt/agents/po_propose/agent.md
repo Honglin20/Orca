@@ -161,7 +161,10 @@ the round number `R`, the gate mode + (recovery phase) the current worst
 accuracy gap and the `makespan ≤ target_cycles` hard constraint,
 `<levers_ref>=$ORCA_AGENT_RESOURCES/references/structural-levers.md`,
 `<rules_path>=$ORCA_ARTIFACTS_DIR/accuracy_rules.json` (the measured
-accuracy rules — pass its full content when the file exists), and the
+accuracy rules — pass its full content when the file exists), the previous
+round's analysis conclusions (`rounds/<previous round>/analysis.md` full
+content when the file exists — what delivered, what was falsified, and its
+next-direction note; omit on round 1), and the
 failed-sigs union with the instruction: these directions were falsified by
 measurement; when they feel exhausted propose a DEEPER rewrite or a
 different operator family — there is no exhaustion exit before the round
@@ -202,34 +205,26 @@ history.** After each dispatch returns:
   vid or null; `base_at_proposal` = `{"vid": <same>, "makespan_cycles":
   <report makespan>}`):
   ```bash
-  python3 -c "import sys; sys.path.insert(0, '$ORCA_ARTIFACTS_DIR/scripts'); \
-  from history_lib import append_implemented; \
-  append_implemented('$ORCA_ARTIFACTS_DIR/history.jsonl', '<VID>', \
-  round=<R>, seq=<seq>, parent_vid=<best vid or None>, change_sig='<sig>', \
-  probe_epochs=<proxy_budget.epochs from contracts.json>, \
-  probe_max_steps=<proxy_budget.max_steps from contracts.json>, \
-  probe_data_value=<proxy_budget.data_value from contracts.json>, \
-  target_modules=<declaration.target_modules>, \
-  predicted_delta_cycles=<declaration.predicted_delta_cycles>, \
-  base_at_proposal={'vid': <best vid or None>, 'makespan_cycles': <int>}, \
-  implemented=True)"
+  python3 "$ORCA_ARTIFACTS_DIR/scripts/append_impl_row.py" --vid <VID> \
+    --round <R> --seq <seq> --parent-vid <best vid or None> --change-sig '<sig>' \
+    --probe-epochs <proxy_budget.epochs from contracts.json> \
+    --probe-max-steps <proxy_budget.max_steps from contracts.json> \
+    --probe-data-value <proxy_budget.data_value from contracts.json> \
+    --target-modules '<JSON list from declaration.target_modules>' \
+    --predicted-delta-cycles <declaration.predicted_delta_cycles> \
+    --base-at-proposal '{"vid": <best vid or null>, "makespan_cycles": <int>}'
   ```
 - **Terminal skip reported** (`structural_mismatch` / `variant_broken`) →
   TWO rows, in this order (the single outcome row would lack
   `round`/`change_sig` — the dedup and the round advance read exactly those
   fields):
   ```bash
-  python3 -c "import sys; sys.path.insert(0, '$ORCA_ARTIFACTS_DIR/scripts'); \
-  from history_lib import append_implemented; \
-  append_implemented('$ORCA_ARTIFACTS_DIR/history.jsonl', '<VID>', \
-  round=<R>, seq=<seq>, parent_vid=<best vid or None>, change_sig='<sig>', \
-  probe_epochs=<...>, probe_max_steps=<...>, probe_data_value=<...>, \
-  target_modules=<...>, predicted_delta_cycles=<...>, \
-  base_at_proposal={'vid': <best vid or None>, 'makespan_cycles': <int>}, \
-  implemented=False)"
-  python3 -c "import sys; sys.path.insert(0, '$ORCA_ARTIFACTS_DIR/scripts'); \
-  from history_lib import append_outcome; \
-  append_outcome('$ORCA_ARTIFACTS_DIR/history.jsonl', '<VID>', '<outcome>')"
+  python3 "$ORCA_ARTIFACTS_DIR/scripts/append_impl_row.py" --vid <VID> \
+    --round <R> --seq <seq> --parent-vid <best vid or None> --change-sig '<sig>' \
+    --probe-epochs <...> --probe-max-steps <...> --probe-data-value <...> \
+    --target-modules '<JSON list>' --predicted-delta-cycles <...> \
+    --base-at-proposal '{"vid": <best vid or null>, "makespan_cycles": <int>}' \
+    --not-implemented --outcome <structural_mismatch|variant_broken>
   ```
   Record the vid under `skipped` (reason + outcome). A skipped proposal
   never blocks the round.
@@ -286,8 +281,8 @@ marker and no `verdict.json`:
   `failed`. (An evaluation that failed on the service side still produces a
   report — that state fails the product check exactly the same way.)
 
-Run the recheck (the judgement is fully scripted — there are NO threshold
-arguments anymore: the gate mode comes from `round_state.py`, the incumbent
+Run the recheck (the judgement is fully scripted — it takes no threshold
+arguments: the gate mode comes from `round_state.py`, the incumbent
 is `best.json`'s makespan else the origin anchor's baseline, and in the
 recovery phase the frozen `target_cycles` is the filter line; a small
 strictly-better step is a legitimate pass; the prediction ratio is an
@@ -340,6 +335,26 @@ A crash after the advance's marker write is a legal resume state: the next
 entry's `working` round moves on and the probe/gate of this round simply
 shift to the next round — never hand-repair the marker or best.json.
 
+### Step 6b: Round analysis on disk (latency section)
+
+Close the round with its measured conclusions — never leave it as bare
+verdict rows. Write the `## latency` section of
+`rounds/<RRR>/analysis.md` (idempotent whole-section rewrite on re-entry;
+preserve any `## accuracy` section written by the probe node), bounded to
+~15 lines:
+
+- admitted proposals vs eliminated, one line each (the why from the
+  verdicts / skipped rows);
+- predicted vs actual delta for every rechecked variant — the calibration
+  note (which lever family over- or under-delivered its prediction);
+- next-round direction: one or two lines of what this round's measurements
+  say to try instead.
+
+This file is the round's analysis record: the NEXT round's proposer reads
+the previous round's copy (Step 3 input); terminal reporting distills every
+round's copy into the final report. Analysis prose lives here, never inside
+prompts.
+
 ### Step 7: Emit
 
 ```bash
@@ -355,7 +370,7 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
   --field "verdicts_path=$ORCA_ARTIFACTS_DIR/rounds/<RRR>/verdicts.jsonl" \
   --field "proposals_path=$ORCA_ARTIFACTS_DIR/rounds/<RRR>/proposals.json" \
   --field 'error=' \
-  --field 'generated_artifacts=["rounds/<RRR>/proposals.json", "rounds/<RRR>/verdicts.jsonl", "rounds/<RRR>/direction.json", "base/bottleneck_report.json", "base/bottleneck_analysis.json", "experiment_ledger.json", "history.jsonl"]'
+  --field 'generated_artifacts=["rounds/<RRR>/proposals.json", "rounds/<RRR>/verdicts.jsonl", "rounds/<RRR>/direction.json", "rounds/<RRR>/analysis.md", "base/bottleneck_report.json", "base/bottleneck_analysis.json", "experiment_ledger.json", "history.jsonl"]'
 ```
 
 On failure paths the same twelve fields with `status=failed`, `error` naming

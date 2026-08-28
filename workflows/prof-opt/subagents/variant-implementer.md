@@ -83,12 +83,7 @@ The caller will provide:
    Exit 1 → **structural_mismatch path**; exit ≥2 → hard error, fail loud.
 7. **DONE marker** (only when 5-6 passed) — sha-pinned:
    ```bash
-   python3 -c "import hashlib, json, datetime; from pathlib import Path; \
-   d = Path('$ORCA_ARTIFACTS_DIR/variants/$VID'); \
-   decl = (d / 'declaration.json').read_text(encoding='utf-8'); \
-   (d / 'DONE').write_text(json.dumps({'vid': '$VID', \
-   'declaration_sha256': hashlib.sha256(decl.encode()).hexdigest(), \
-   'ts': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')}), encoding='utf-8')"
+   python3 "$ORCA_ARTIFACTS_DIR/scripts/write_done_marker.py" --vid "$VID"
    ```
 8. **Repair trace**: append one record per attempt (first pass included)
    to `variants/<VID>/repair_trace.json` (create on first write):

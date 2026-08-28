@@ -105,35 +105,13 @@ bash "$ORCA_AGENT_RESOURCES/scripts/check_contracts.sh" --reuse-check
 ### Step 1: Snapshot The Project (pre-measurement)
 
 Record the in-place state of the user project so every side effect of your dry-runs
-can be disclosed later. Run this snippet twice in this node — now as
+can be disclosed later. Run this helper twice in this node — now as
 `contract_work/snapshot_pre.json`, and again in Step 8 as
 `contract_work/snapshot_post.json`:
 
 ```bash
-SNAP_ROOT="{{ inputs.project_root }}" SNAP_OUT="$PWD/contract_work/snapshot_pre.json" \
-python3 - <<'PY'
-import hashlib, json, os
-from pathlib import Path
-root, out = Path(os.environ["SNAP_ROOT"]), Path(os.environ["SNAP_OUT"])
-
-def sha(p: Path) -> str:
-    h = hashlib.sha256()
-    with p.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-snap = {}
-for p in sorted(root.rglob("*")):
-    rel = str(p.relative_to(root)).replace("\\", "/")
-    parts = rel.split("/")
-    if not p.is_file() or parts[0] == "artifacts" or ".git" in parts or "__pycache__" in parts:
-        continue
-    snap[rel] = sha(p)
-out.parent.mkdir(parents=True, exist_ok=True)
-out.write_text(json.dumps(snap, indent=2, sort_keys=True), encoding="utf-8")
-print(f"snapshot: {len(snap)} files -> {out}")
-PY
+python3 "$ORCA_AGENT_RESOURCES/scripts/snapshot_tree.py" \
+  --root "{{ inputs.project_root }}" --out "$PWD/contract_work/snapshot_pre.json"
 ```
 
 ### Step 2: Train Contract (discovery + tier + quick-run)
@@ -268,20 +246,8 @@ PY
       `readiness/readiness.json` (same list the flatten stage pinned):
 
       ```bash
-      SHADOW_PKGS="$(python3 -c '
-import json
-from pathlib import Path
-for src, path in (("contracts.json", ("shadow", "shadow_pkgs")),
-                 ("readiness/readiness.json", ("shadow_pkgs",))):
-    p = Path(src)
-    if p.is_file():
-        d = json.loads(p.read_text(encoding="utf-8"))
-        for key in path:
-            d = d[key]
-        print(",".join(d))
-        break
-else:
-    raise SystemExit("shadow_pkgs not found in contracts.json or readiness.json")')"
+      SHADOW_PKGS="$(python3 "$ORCA_AGENT_RESOURCES/scripts/shadow_pkgs_csv.py" \
+        --artifacts "$ORCA_ARTIFACTS_DIR")"
       printf '%s\n' '<<python>> <<artifacts>>/contract_work/make_dual_ckpt.py' \
         > "$PWD/contract_work/make_dual_ckpt.template.sh"
       bash "$ORCA_ARTIFACTS_DIR/scripts/render_run.sh" \
@@ -418,20 +384,12 @@ stop at k; full_train_budget is the value-level fingerprint"}`.
 
 ### Step 8: Post-Snapshot + Exemptions
 
-Re-run the Step 1 snippet with `SNAP_OUT=contract_work/snapshot_post.json`, then:
+Re-run the Step 1 helper with `--out contract_work/snapshot_post.json`, then:
 
 ```bash
-python3 - <<'PY'
-import json
-from pathlib import Path
-pre = json.loads(Path("contract_work/snapshot_pre.json").read_text(encoding="utf-8"))
-post = json.loads(Path("contract_work/snapshot_post.json").read_text(encoding="utf-8"))
-diff = sorted(set(pre) ^ set(post)) + \
-    sorted(k for k in set(pre) & set(post) if pre[k] != post[k])
-Path("contract_work/exemptions.json").write_text(
-    json.dumps({"exemptions": diff}, indent=2), encoding="utf-8")
-print(json.dumps({"exemptions": diff}))
-PY
+python3 "$ORCA_AGENT_RESOURCES/scripts/snapshot_diff.py" \
+  --pre contract_work/snapshot_pre.json --post contract_work/snapshot_post.json \
+  --out contract_work/exemptions.json
 ```
 
 `exemptions` lists every file your measurements touched inside the user project —
@@ -498,14 +456,14 @@ evidence files (deterministic snippet or a small python script you write under
             "ckpt_output_rule": "<literal pattern under out-dir, with an {out_dir} placeholder; a trailing * glob means newest match; per-epoch addressable forms are per-epoch glob patterns>",
             "ckpt_per_epoch": true,
             "epoch_metric_extraction": {"kind": "stdout_regex", "pattern": "<named groups epoch and metric; the metric group anchored by an end-of-line/non-digit boundary>"},
-            "train_epochs_full": 100},
+            "train_epochs_full": <int>},
   "eval": {"tier": "A", "entry": "<abs>", "entry_sha256": "...",
            "flags": {"ckpt": "--ckpt"},
            "ckpt_container": "bare",
            "metric_extraction": {"kind": "stdout_regex|json", "pattern": "...", "json_pointer": "..."},
            "metric_direction": "higher_better"},
   "export": {"entry": "<abs>", "entry_sha256": "...", "generated": true, "argv_facts": "..."},
-  "full_train_budget": {"epochs": 10, "seed": 0,
+  "full_train_budget": {"epochs": <int>, "seed": 0,
                         "data": {"dataset_knob": null, "data_value": null}},
   "proxy_budget": {"epochs": 1, "dataset_knob": null, "data_value": null,
                    "max_steps": null, "seed": 0},
@@ -517,8 +475,7 @@ evidence files (deterministic snippet or a small python script you write under
 
 The `reason` admission clause is copied VERBATIM from the Admission clause
 paragraph near the top of this document (this document is its single
-source; the gate checks the constant substring, and a test pins this
-document and the gate together). (`model_facts` verbatim from
+source; the gate checks the constant substring). (`model_facts` verbatim from
 `readiness/readiness.json`; sha256 fields recomputed at assembly time via
 hashlib — the gate re-checks them.)
 
