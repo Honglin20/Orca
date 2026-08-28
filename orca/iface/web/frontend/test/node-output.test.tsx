@@ -18,6 +18,7 @@ import { buildEntries } from "@/components/conversation/entries";
 import { NodeOutputBlock } from "@/components/conversation/NodeOutputBlock";
 import { ConversationView } from "@/components/views/ConversationView";
 import type { EventType, WebEvent } from "@/types/events";
+import { resetStore as resetStoreBase } from "./_helpers";
 
 let _seq = 0;
 function ev(type: EventType, overrides: Partial<WebEvent> = {}): WebEvent {
@@ -33,31 +34,10 @@ function ev(type: EventType, overrides: Partial<WebEvent> = {}): WebEvent {
   };
 }
 
+// 字段枚举收敛到 _helpers.resetStore（计划步 0：7 处副本合一）；另重置 fixture seq。
 function resetStore() {
   _seq = 0;
-  useWorkflowStore.setState({
-    events: [],
-    nodes: {},
-    gate: null,
-    lastResolved: null,
-    workflowName: "",
-    status: "idle",
-    cost: 0,
-    workflowDef: null,
-    workflowStartedAt: null,
-    workflowElapsed: null,
-    reasoningTokens: 0,
-    lastSeqSeen: 0,
-    nodesIndex: {},
-    seenSeqs: new Set<number>(),
-    selectedNode: null,
-    selectedSession: null,
-    activeRunId: null,
-    loadStatus: "loaded",
-    loadError: null,
-    retryCount: 0,
-    historyLoadError: false,
-  });
+  resetStoreBase();
 }
 
 afterEach(() => {

@@ -14,6 +14,7 @@ import { AgentsRail } from "@/components/layout/AgentsRail";
 import { selectAgentGroups } from "@/selectors";
 import { NODE_STATUS_HEX } from "@/components/graph/constants";
 import { useWorkflowStore } from "@/stores/workflow-store";
+import { makeNodeIndex } from "./_helpers";
 import { useElapsedTickActive, __testReset } from "@/hooks/use-elapsed-tick";
 
 beforeEach(() => {
@@ -459,11 +460,11 @@ describe("AgentsRail —— P3 视觉重做（色条 / 底色 / 分组 / 折叠�
     useWorkflowStore.setState((s) => ({
       nodesIndex: {
         ...s.nodesIndex,
-        n1: {
-          sessions: ["main", "ses_aaa", "ses_bbb"],
-          sessionEventCounts: { main: 1, ses_aaa: 2, ses_bbb: 3 },
-          sessionFirstTs: { main: 1, ses_aaa: 2, ses_bbb: 3 },
-        },
+        n1: makeNodeIndex(["main", "ses_aaa", "ses_bbb"], {
+          main: 1,
+          ses_aaa: 2,
+          ses_bbb: 3,
+        }),
       },
     }));
     render(<RailRoot active={false} />);
@@ -527,11 +528,12 @@ describe("AgentsRail —— P3 视觉重做（色条 / 底色 / 分组 / 折叠�
     useWorkflowStore.setState((s) => ({
       nodesIndex: {
         ...s.nodesIndex,
-        loopA: {
-          sessions: ["main", "s1", "s2", "s3"],
-          sessionEventCounts: { main: 1, s1: 2, s2: 2, s3: 2 },
-          sessionFirstTs: { main: 1, s1: 2, s2: 3, s3: 4 },
-        },
+        loopA: makeNodeIndex(["main", "s1", "s2", "s3"], {
+          main: 1,
+          s1: 2,
+          s2: 2,
+          s3: 2,
+        }),
       },
     }));
     render(<RailRoot active={false} />);

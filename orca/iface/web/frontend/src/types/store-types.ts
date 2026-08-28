@@ -6,6 +6,7 @@
 // 铁律 2：前端无独立状态真相——所有派生形状 = ``fold(WebEvent)`` 的输出。
 
 // （events.ts 自动生成；此处不 re-export —— 任何代码用 EventType/WebEvent 一律从 events.ts import）
+import type { WebEvent } from "./events";
 
 // ── workflow 级 status（对齐 orca/schema/state.py RunState.status，加前端 "idle"）──────
 // 后端 RunStatus: queued|running|completed|failed|cancelled|blocked（projections 派生）。
@@ -113,6 +114,27 @@ export interface NodeSessionIndex {
   sessionEventCounts: Record<string, number>;
   /** 每 session 首事件 timestamp（key=sessionId；selectNodeSessions 排序 / display 用）。 */
   sessionFirstTs: Record<string, number>;
+  /**
+   * SPEC 2026-08-28 C3.1：conversation 事件引用索引（fold 派生，selectConversation /
+   * selectStreamingCursor 直读，替代每事件全量 filter 扫描）。
+   *
+   * **readonly 契约**：消费方禁止 mutate；数组内容被 immer autoFreeze 冻结，mutate 即
+   * throw（fail loud 防线；**禁止** setAutoFreeze(false) 换性能）。
+   */
+  ev: NodeEventIndex;
+}
+
+/**
+ * node 级 conversation 事件引用索引（SPEC 2026-08-28 C3.1）。
+ * refold 与 in-order 增量两路径由 indexConversationEvent 统一维护，终态一致（D7）。
+ */
+export interface NodeEventIndex {
+  /** 该 node 全部 conversation 事件引用，seq 升序（refold 按 sort 序 / 增量 in-order push）。 */
+  all: WebEvent[];
+  /** 按 session 分桶（key 含 "main" 哨兵——null session_id 归 main）。 */
+  bySession: Record<string, WebEvent[]>;
+  /** 该 node 最后一条 conversation 事件（selectStreamingCursor 用；无事件 null）。 */
+  last: WebEvent | null;
 }
 
 // ── Huge-mode server overview（SPEC web-attach §3 / M3/M4）──────────────────────────

@@ -68,8 +68,11 @@ function LogRow({
 }
 
 export function LogStream() {
-  const state = useWorkflowStore();
-  const lines = useMemo(() => selectLog(state), [state]);
+  // 订阅收窄（SPEC 2026-08-28 C4.4，取消全 store 订阅）：selectLog 的 nodeElapsed
+  // resolver 读 nodes（node_completed 摘要 elapsed 回退）——只订 events 不够，需双字段。
+  const events = useWorkflowStore((s) => s.events);
+  const nodes = useWorkflowStore((s) => s.nodes);
+  const lines = useMemo(() => selectLog._from(events, nodes), [events, nodes]);
 
   const [pinned, setPinned] = useState(true);
   // pendingJump：用户上滚时若新事件到达，记录待跳 index（按钮提示）；用户点跳最新→清。

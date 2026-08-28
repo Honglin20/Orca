@@ -60,31 +60,8 @@ function makeFakeSocket(): {
   };
 }
 
-function resetStore() {
-  useWorkflowStore.setState({
-    events: [],
-    nodes: {},
-    gate: null,
-    lastResolved: null,
-    workflowName: "",
-    status: "idle",
-    cost: 0,
-    workflowDef: null,
-    workflowStartedAt: null,
-    workflowElapsed: null,
-    reasoningTokens: 0,
-    lastSeqSeen: 0,
-    nodesIndex: {},
-    seenSeqs: new Set<number>(),
-    selectedNode: null,
-    selectedSession: null,
-    activeRunId: null,
-    loadStatus: "loaded",
-    loadError: null,
-    retryCount: 0,
-    historyLoadError: false,
-  });
-}
+// 字段枚举收敛到 _helpers.resetStore（计划步 0：7 处副本合一，防新增顶层字段漏同步）。
+import { resetStore } from "./_helpers";
 
 describe("useWebSocket — D6 resume by seq", () => {
   beforeEach(() => resetStore());

@@ -6,13 +6,16 @@
 // D2 conversation 分组键 = node；retry/foreach 多 session_id 在同 node 内合并（细分隔符）。
 // D7 seq 升序 fold：selectCharts(T)==selectCharts(sort(T))==selectCharts(reverse(T))。
 //
-// 这些 selector 输出不可变快照（每次调用新建结构），调用方应 useCallback/useMemo
-// 避免每 render 重算。
+// 这些 selector 的输出以 store 内冻结引用为主（conversation 事件数组 = nodesIndex.ev
+// 引用直返，SPEC 2026-08-28 C3.3——引用稳定，消费方 useMemo 零拷贝命中）；新建结构的
+// selector（selectLog/selectCharts）调用方应 useCallback/useMemo 避免每 render 重算。
 
 import type { WebEvent } from "@/types/events";
-import type { NodeState } from "@/types/store-types";
+import type { NodeState, NodeSessionIndex } from "@/types/store-types";
 import type { WorkflowState } from "@/stores/workflow-store";
-import { CONVERSATION_TYPES, eventMatchesNode } from "@/conversation-types";
+// CONVERSATION_TYPES / eventMatchesNode 已移到 src/conversation-types.ts（P2：workflow-store
+// 也需引用，避免 cycle）。selectConversation/selectStreamingCursor 改走 nodesIndex.ev 索引
+// 后（2026-08-28 C3.3/C3.4）本文件不再直接引用它们。
 
 // ── selectAgents：DAG nodes → AgentsRail 行模型 ─────────────────────────────────
 // P3：sessionCount（子 agent session 数，不含 "main" 哨兵）+ iteration（Loop 组迭代号）
@@ -339,12 +342,10 @@ export function selectStall(
 //
 // **null session_id → "main"**（与 nodesIndex 一致）。
 //
-// **SPEC §P2 AC#2 偏离说明**：AC#2 prose 写「selectConversation 不再全量 filter（读 nodesIndex）」，
-// 但同节接口契约 ``NodeSessionIndex`` 只存 count（无 sessionSeqs），且性能主因是 buildEntries
-// 输入缩量（4224→208）而非 selectConversation 自身。本实现遵循接口契约：selectConversation
-// 仍 filter state.events（O(N)，但 N=该 node 事件数，非全 tape），nodesIndex 只供
-// selectNodeSessions 渲染会话选择器（O(sessions)）。如真机测发现 ~208 事件 filter 仍是瓶颈，
-// 再扩 NodeSessionIndex 加 sessionSeqs（SPEC 方案 2 原始设计）。
+// **SPEC 2026-08-28 C3.3 语义等价重构**：读 store 维护的 ``nodesIndex[node].ev`` 索引
+// （refold 与 in-order 增量两路径维护，与旧 filter 同源 conversationTargetNode）——不再
+// 每事件全量 filter 扫描。"all"/缺省 → ``ev.all`` 引用直返（零拷贝）；空结果返回模块级
+// 冻结空数组 EMPTY_EVENTS（引用稳定，禁每次新建）。
 //
 // 「orphan tool_result」（无对应 call）在本 selector 不剔除——保留全部 conversation 相关
 // 事件供视图分类；orphan 判定 + 剔除在视图层 ``buildEntries`` 内做（warn + 跳过）。
@@ -353,11 +354,35 @@ export interface ConversationGroup {
   events: WebEvent[];
 }
 
+/** 模块级冻结空数组（C3.3：空结果引用稳定；消费方 mutate 即 throw，fail loud）。
+ * 类型保持 mutable WebEvent[]（与 ConversationGroup.events 形状一致）——冻结是运行时防线，
+ * Object.freeze 返回 readonly 故显式窄化。 */
+export const EMPTY_EVENTS: WebEvent[] = Object.freeze([]) as unknown as WebEvent[];
+
+/**
+ * idx 变体：从单 node 索引取 conversation 事件（ConversationView 逐字段订阅用，
+ * 不组装完整 state）。
+ *
+ * @param idx 该 node 的 NodeSessionIndex（无索引 → EMPTY_EVENTS）
+ * @param sessionId 省略 / "all" → 全聚合（ev.all 直返）；具体 → ev.bySession[sessionId]
+ */
+export function conversationEventsFromIndex(
+  idx: NodeSessionIndex | undefined,
+  sessionId?: string | "all" | null
+): WebEvent[] {
+  if (!idx) return EMPTY_EVENTS;
+  if (sessionId === undefined || sessionId === null || sessionId === "all") {
+    return idx.ev.all;
+  }
+  return idx.ev.bySession[sessionId] ?? EMPTY_EVENTS;
+}
+
 /**
  * 选择所有应进 conversation 的事件，按 node（+ 可选 session）过滤，按 seq 升序。
+ * state 版签名不变（内部委托 idx 变体，C3.3）。
  *
- * @param state 含 events + nodesIndex（sessionId 指定时仅作过滤参数，不读 nodesIndex）
- * @param nodeId 节点名（null/undefined → 空组）
+ * @param state 含 nodesIndex（store 维护的 ev 索引）
+ * @param nodeId 节点名（null/undefined → 空组 `{ node: "", events: <空> }`）
  * @param sessionId 省略 / ``"all"`` → 全 node 聚合（旧行为）；具体 sessionId → 仅该 session
  */
 export function selectConversation(
@@ -366,26 +391,12 @@ export function selectConversation(
   sessionId?: string | "all" | null
 ): ConversationGroup {
   if (nodeId === undefined || nodeId === null) {
-    return { node: "", events: [] };
+    return { node: "", events: EMPTY_EVENTS };
   }
-  // 仅取该 node 的 conversation-相关事件，按 seq 升序（state.events 已是 seq-sorted）。
-  // SPEC §5.3：foreach_* / retry_* / interrupt_* / validator_* / wait_* 在 conversation 内
-  // dim 渲染——故纳入 conversation 事件集（dim 是渲染层决定，本 selector 只输出事件流）。
-  //
-  // **workflow_failed** 特例：make_workflow_failed 在编排层把责任 node 写入 ``data.node``
-  // （top-level ``e.node`` 仍为 null，对齐 schema/event.py 注释）。SPEC §5.3 要求它进
-  // conversation 红 block —— 故同时按 top-level ``e.node`` 或 ``data.node`` 匹配。
-  // 这是 tape 字段的合法读取（不是视图层重派生），符合铁律 1。
-  const filterBySession = sessionId !== undefined && sessionId !== null && sessionId !== "all";
-  const events = state.events.filter((e) => {
-    if (!CONVERSATION_TYPES.has(e.type)) return false;
-    // workflow_failed 可能以 data.node 关联（见上方注释 + eventMatchesNode 类型守门）
-    if (!eventMatchesNode(e, nodeId)) return false;
-    if (!filterBySession) return true;
-    const eSid = e.session_id ?? "main";
-    return eSid === sessionId;
-  });
-  return { node: nodeId, events };
+  return {
+    node: nodeId,
+    events: conversationEventsFromIndex(state.nodesIndex[nodeId], sessionId),
+  };
 }
 
 // ── selectNodeSessions：从 nodesIndex 派生会话选择器行（SPEC §P2 / P0-6）──────────────
@@ -416,7 +427,16 @@ export function selectNodeSessions(
   nodeId: string | null | undefined
 ): NodeSessionRow[] {
   if (!nodeId) return [];
-  const idx = state.nodesIndex[nodeId];
+  return sessionsFromIndex(state.nodesIndex[nodeId]);
+}
+
+/**
+ * idx 变体：会话行（ConversationView 逐字段订阅用，C4.1——订阅收窄到
+ * ``s.nodesIndex[nodeId]`` 单 node 索引，selector 不再组装完整 state）。
+ */
+export function sessionsFromIndex(
+  idx: NodeSessionIndex | undefined
+): NodeSessionRow[] {
   if (!idx) return [];
   return idx.sessions.map((sid) => ({
     sessionId: sid,
@@ -424,6 +444,20 @@ export function selectNodeSessions(
     eventCount: idx.sessionEventCounts[sid] ?? 0,
     firstTs: idx.sessionFirstTs[sid] ?? 0,
   }));
+}
+
+/**
+ * idx 变体：流式光标（ConversationView 逐字段订阅用）。C3.4 语义等价：
+ * status==="running" 且该 node 最后一条 conversation 事件（ev.last，O(1)）是
+ * agent_message / agent_thinking。
+ */
+export function streamingCursorFromIndex(
+  status: WorkflowState["status"],
+  idx: NodeSessionIndex | undefined
+): boolean {
+  if (status !== "running") return false;
+  const last = idx?.ev.last;
+  return last?.type === "agent_message" || last?.type === "agent_thinking";
 }
 
 /**
@@ -436,30 +470,20 @@ export function selectNodeSessions(
  *      （隐含：其后无 ``agent_tool_call`` / ``agent_tool_result`` / ``node_completed``
  *      ——若有，那些事件 seq 更大、会出现在末尾，从而取代 message/thinking 成为 last）
  *
- * 实现只看 last event：state.events 已 seq 升序，filter 后末尾就是 max-seq 事件。
- * 若末尾是 message/thinking → 其后必无 tool/result/node_completed（它们 seq 更大但
- * 没出现，说明未发生）。
+ * 实现（C3.4 语义等价重构）：读 ``ev.last``（refold/in-order 维护，与旧倒序扫描同源）。
  */
 export function selectStreamingCursor(
   state: WorkflowState,
   nodeId: string | null | undefined
 ): boolean {
-  if (state.status !== "running") return false;
   if (!nodeId) return false;
-  const events = state.events;
-  // 从末尾向前找该 node 的最后一条 conversation 事件（O(k)，k 通常小）
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i];
-    // workflow_failed 可能以 data.node 关联（eventMatchesNode 含类型守门，DRY）
-    if (!eventMatchesNode(e, nodeId)) continue;
-    if (!CONVERSATION_TYPES.has(e.type)) continue;
-    return e.type === "agent_message" || e.type === "agent_thinking";
-  }
-  return false;
+  return streamingCursorFromIndex(state.status, state.nodesIndex[nodeId]);
 }
 
-/** 进 conversation 的事件集合（DRY：selectConversation / selectStreamingCursor / store nodesIndex 共用）。 */
-// CONVERSATION_TYPES 已移到 src/conversation-types.ts（P2：workflow-store 也需引用，避免 cycle）
+/** route_taken 已走边 key 集合（C3.6：WorkflowGraph 唯一读入口——selector 是唯一 view 输入）。 */
+export function selectTakenEdgeKeys(state: WorkflowState): Set<string> {
+  return state.takenEdgeKeys;
+}
 
 // ── selectCharts：custom(kind=chart) → ChartsView（D3 / D7）──────────────────────
 export interface ChartEntry {
@@ -500,11 +524,29 @@ function extractChartPayload(e: WebEvent): {
 export function selectCharts(state: WorkflowState): {
   groups: { group: string; entries: ChartEntry[] }[];
 } {
+  return selectChartsFrom(
+    state.events,
+    state.huge,
+    state.serverOverview,
+    state.hugeFullyLoaded
+  );
+}
+
+/**
+ * 四参变体（SPEC 2026-08-28 C4.4）：ChartRenderer 订阅收窄到
+ * events/huge/serverOverview/hugeFullyLoaded 四字段后，selector 不再组装完整 state。
+ */
+function selectChartsFrom(
+  events: WebEvent[],
+  huge: boolean,
+  serverOverview: WorkflowState["serverOverview"],
+  hugeFullyLoaded: boolean
+): { groups: { group: string; entries: ChartEntry[] }[] } {
   // SPEC web-attach §3 / M3：huge 模式 + serverOverview → 信任服务端 fold（仅 label/title/
   // chart_type 清单，无完整 payload）→ 渲染为占位 entry（点击触发 ``loadFull`` 拉真实 payload）。
   // ``loadFull`` 后 serverOverview 清，回退 client-fold（M4 可验：与展开后一致）。
-  if (state.huge && state.serverOverview && !state.hugeFullyLoaded) {
-    const entries: ChartEntry[] = state.serverOverview.charts.map((c, i) => ({
+  if (huge && serverOverview && !hugeFullyLoaded) {
+    const entries: ChartEntry[] = serverOverview.charts.map((c, i) => ({
       seq: -i - 1, // 负 seq 占位（避免与真实 seq 冲突；loadFull 后清）
       node: null,
       group: c.label || "misc",
@@ -531,7 +573,7 @@ export function selectCharts(state: WorkflowState): {
   }
   // identity → entry（同 identity upsert，后到胜）
   const byIdentity = new Map<string, ChartEntry>();
-  for (const e of state.events) {
+  for (const e of events) {
     if (e.type !== "custom") continue;
     const extracted = extractChartPayload(e);
     if (!extracted) continue;
@@ -810,21 +852,37 @@ function num(v: unknown): number {
 }
 
 export function selectLog(state: WorkflowState): LogLine[] {
+  return selectLogFrom(state.events, state.nodes);
+}
+
+/** 双参变体（SPEC 2026-08-28 C4.4）：LogStream 订阅收窄到 events + nodes 两字段。 */
+function selectLogFrom(
+  events: WebEvent[],
+  nodes: Record<string, NodeState>
+): LogLine[] {
   // SPEC §P1：filter（classifyLogLevel 非 null）+ 默认隐藏 debug 级（route_taken）。
   // 一次遍历完成 filter + map，保留可恢复 debug 的能力（setLogShowDebug）。
   // nodeElapsed resolver：store 的 D5 派生值（node_completed.ts − node_started.ts 差补），
   // 供 LogStream 摘要对 in-session 老 tape（data 无 elapsed）回退 —— 不重复 fold，单一真相。
   const out: LogLine[] = [];
-  for (const e of state.events) {
+  for (const e of events) {
     const level = classifyLogLevel(e.type);
     if (level === null) continue;
     if (level === "debug" && !showDebug) continue;
     out.push({
       seq: e.seq,
       type: e.type,
-      text: summarizeEvent(e, (node) => state.nodes[node]?.elapsed),
+      text: summarizeEvent(e, (node) => nodes[node]?.elapsed),
       level,
     });
   }
   return out;
+}
+
+// `_from` 变体挂载（C4.4 计划字面命名：state 版薄委托 + idx/字段参变体供订阅收窄的组件直调）。
+export namespace selectLog {
+  export const _from = selectLogFrom;
+}
+export namespace selectCharts {
+  export const _from = selectChartsFrom;
 }

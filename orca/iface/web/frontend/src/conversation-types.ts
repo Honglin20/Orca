@@ -62,20 +62,29 @@ export const CONVERSATION_TYPES: Set<WebEvent["type"]> = new Set([
 ]);
 
 /**
- * 判断事件是否归属某 node（DRY：selectConversation / selectStreamingCursor /
- * workflow-store.nodesIndex 三处共用）。
+ * 事件归属的目标 node（唯一化：selectConversation / selectStreamingCursor /
+ * workflow-store.nodesIndex 索引三处同源，SPEC 2026-08-28 C3.2）。
  *
  * 规则：
- *   - 一般事件：``e.node === nodeId``
- *   - **workflow_failed 特例**：top-level ``e.node`` 为 null（对齐 schema/event.py 注释），
- *     但 ``data.node`` 是责任 node → 按字符串严格匹配 ``data.node === nodeId``
- *     （类型守门防 number / 其他类型）。
+ *   - ``e.node`` 优先（顶层字段在 → 归它）；
+ *   - 否则 ``type === "workflow_failed"`` 且 ``data.node`` 为 string → ``data.node``
+ *     （top-level ``e.node`` 为 null 是后端契约——orchestrator/step 两 emit 点均不传顶层
+ *     node，已实证；类型守门防 number / 其他类型）；
+ *   - 其余 → null（workflow 级事件，不属于任何 node）。
+ *
+ * **有意收紧**旧 filter 的「e.node 与 data.node 同时存在双命中」语义（后端契约保证不发生；
+ * 双字段是理论洞，钉死测试固化：wf_failed 带 node="X" + data.node="Y" 只归 X）。
  */
-export function eventMatchesNode(e: WebEvent, nodeId: string): boolean {
-  if (e.node === nodeId) return true;
+export function conversationTargetNode(e: WebEvent): string | null {
+  if (e.node) return e.node;
   if (e.type === "workflow_failed") {
     const dn = e.data?.node;
-    return typeof dn === "string" && dn === nodeId;
+    if (typeof dn === "string") return dn;
   }
-  return false;
+  return null;
+}
+
+/** 判断事件是否归属某 node（薄封装：conversationTargetNode 严格相等）。 */
+export function eventMatchesNode(e: WebEvent, nodeId: string): boolean {
+  return conversationTargetNode(e) === nodeId;
 }

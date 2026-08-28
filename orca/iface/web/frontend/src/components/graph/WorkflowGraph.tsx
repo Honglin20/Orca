@@ -9,10 +9,11 @@
 //
 // 拓扑来源：store.workflowDef（由 workflow_started handler 从 data.topology 提取）。
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { ReactFlow, ReactFlowProvider, Background, Controls } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useWorkflowStore } from "@/stores/workflow-store";
+import { selectTakenEdgeKeys } from "@/selectors";
 import {
   applyDagreLayout,
   markTakenEdges,
@@ -45,7 +46,9 @@ const EDGE_TYPES = {
 function WorkflowGraphInner() {
   const workflowDef = useWorkflowStore((s) => s.workflowDef);
   const nodes = useWorkflowStore((s) => s.nodes);
-  const events = useWorkflowStore((s) => s.events);
+  // C3.5/C3.6（SPEC 2026-08-28）：删 s.events 订阅 + 全量扫描 useMemo → store 维护的
+  // takenEdgeKeys 派生（selector 是唯一 view 输入；Set 引用稳定，route_taken 到达才变）。
+  const takenEdgeKeys = useWorkflowStore(selectTakenEdgeKeys);
   const setSelectedNode = useWorkflowStore((s) => s.setSelectedNode);
 
   const [flowNodes, setFlowNodes] = useState<WorkflowFlowNode[]>([]);
@@ -69,19 +72,6 @@ function WorkflowGraphInner() {
   }, [nodes]);
 
   // Effect 3: route_taken 走过的边高亮（增量标记，不全量 rebuild）
-  // web-shell-v2：无 Replay，state 永远 = fold(全量 events)（SPEC §3.1）。
-  const takenEdgeKeys = useMemo(() => {
-    const keys = new Set<string>();
-    for (const e of events) {
-      if (e.type === "route_taken") {
-        const from = String(e.data?.from ?? "");
-        const to = String(e.data?.to ?? "");
-        if (from && to) keys.add(`${from}->${to}`);
-      }
-    }
-    return keys;
-  }, [events]);
-
   useEffect(() => {
     setFlowEdges((prev) => markTakenEdges(prev, takenEdgeKeys));
   }, [takenEdgeKeys]);

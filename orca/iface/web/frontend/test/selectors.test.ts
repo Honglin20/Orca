@@ -13,6 +13,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import {
   classifyLogLevel,
+  EMPTY_EVENTS,
   formatElapsed,
   selectAgents,
   selectCharts,
@@ -24,7 +25,7 @@ import {
   type LogLevel,
 } from "@/selectors";
 import type { EventType, WebEvent } from "@/types/events";
-import { ALL_EVENT_TYPES } from "./_helpers";
+import { ALL_EVENT_TYPES, resetStore as resetStoreBase } from "./_helpers";
 
 let _seq = 0;
 function ev(
@@ -43,31 +44,11 @@ function ev(
   };
 }
 
+// 字段枚举收敛到 _helpers.resetStore（SPEC 2026-08-28 计划步 0：7 处副本合一，
+// 防新增顶层字段漏同步跨测试泄漏）；本文件额外重置 fixture seq 计数器。
 function resetStore() {
   _seq = 0;
-  useWorkflowStore.setState({
-    events: [],
-    nodes: {},
-    gate: null,
-    lastResolved: null,
-    workflowName: "",
-    status: "idle",
-    cost: 0,
-    workflowDef: null,
-    workflowStartedAt: null,
-    workflowElapsed: null,
-    reasoningTokens: 0,
-    lastSeqSeen: 0,
-    nodesIndex: {},
-    seenSeqs: new Set<number>(),
-    selectedNode: null,
-    selectedSession: null,
-    activeRunId: null,
-    loadStatus: "loaded",
-    loadError: null,
-    retryCount: 0,
-    historyLoadError: false,
-  });
+  resetStoreBase();
 }
 
 /**
@@ -658,5 +639,31 @@ describe("selectors P2 — selectNodeSessions + selectConversation sessionId", (
     // 全聚合（"all"）含 workflow_failed
     const all = selectConversation(useWorkflowStore.getState(), "n", "all");
     expect(all.events.map((e) => e.type)).toContain("workflow_failed");
+  });
+
+  // ── SPEC 2026-08-28 C3.2/C3.3 钉死测试 ──
+  it("wf_failed 带 node:X + data.node:Y → 只归 X（conversationTargetNode 唯一化，禁双命中）", () => {
+    useWorkflowStore.getState().loadFromEvents([
+      ev("workflow_started", { data: { workflow_name: "w" } }),
+      ev("workflow_failed", { node: "X", data: { node: "Y", message: "boom" } }),
+    ]);
+    // 只归 X（e.node 优先）；Y 不得命中（旧 filter 的双命中语义已被有意收紧）
+    expect(selectConversation(useWorkflowStore.getState(), "X").events.map((e) => e.type)).toContain("workflow_failed");
+    expect(selectConversation(useWorkflowStore.getState(), "Y").events).toEqual([]);
+  });
+
+  it("空结果返回冻结空数组 EMPTY_EVENTS（引用稳定，禁每次新建）", () => {
+    useWorkflowStore.getState().loadFromEvents([
+      ev("workflow_started", { data: { workflow_name: "w" } }),
+    ]);
+    // 无索引 / session 无事件 / null nodeId 三种空结果同引用
+    const a = selectConversation(useWorkflowStore.getState(), "no_such_node");
+    const b = selectConversation(useWorkflowStore.getState(), "no_such_node", "all");
+    const c = selectConversation(useWorkflowStore.getState(), null);
+    expect(a.events).toBe(b.events);
+    expect(b.events).toBe(EMPTY_EVENTS);
+    expect(c.events).toBe(EMPTY_EVENTS);
+    // readonly 契约：mutate 冻结数组 → throw（fail loud）
+    expect(() => (EMPTY_EVENTS as WebEvent[]).push(ev("agent_message"))).toThrow();
   });
 });

@@ -66,6 +66,9 @@ export function RunDetailPage() {
 
   const [tab, setTab] = useState<Tab>("conversation");
   const selectedNode = useWorkflowStore((s) => s.selectedNode);
+  // C4.2（SPEC 2026-08-28）：onChartClick 经 useCallback 稳定——内联箭头会让
+  // ConversationView 全部 EntryRenderer 的 React.memo 失效（memo BLOCKER）。
+  const handleChartClick = useCallback(() => setTab("charts"), []);
 
   if (!runId) {
     return <p className="orca-text-muted p-4 text-sm">缺少 runId</p>;
@@ -127,7 +130,7 @@ export function RunDetailPage() {
                       {tab === "conversation" && (
                         <ConversationView
                           nodeId={selectedNode}
-                          onChartClick={() => setTab("charts")}
+                          onChartClick={handleChartClick}
                         />
                       )}
                       {tab === "charts" && <ChartsView />}

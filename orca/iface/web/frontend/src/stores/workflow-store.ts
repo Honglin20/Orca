@@ -31,7 +31,8 @@ import type {
   WorkflowStatus,
 } from "@/types/store-types";
 import type { WorkflowTopology } from "@/types/topology";
-import { CONVERSATION_TYPES } from "@/conversation-types";
+import { CONVERSATION_TYPES, conversationTargetNode } from "@/conversation-types";
+import { routeEdgeKey } from "@/route-edge";
 
 // SPEC audit-c B1：immer 对 Set<number> draft 的支持必须在模块加载时启用一次。
 // 否则 seenSeqs Set 的 add/has/new Set 反映不到 next state（静默失效）。
@@ -232,6 +233,12 @@ export interface WorkflowState {
    */
   nodesIndex: Record<string, NodeSessionIndex>;
   /**
+   * 派生：route_taken 已走边 key 集合（SPEC 2026-08-28 C3.5；key 走 routeEdgeKey helper）。
+   * refold / resetDerived / processEvent in-order 三路径一致维护；同 nodesIndex 模式
+   * （索引维护不进 handler 表，route_taken handler 保持 no-op）。requires enableMapSet。
+   */
+  takenEdgeKeys: Set<string>;
+  /**
    * SPEC audit-c §4.4：seq 去重 Set（O(1) 替代 events.some O(N) 扫描，INV-3 长 run 不卡）。
    * **重建收进 refold 末尾**（N1）：所有走 refold 路径（loadFromEvents / loadEarlierChunk /
    * loadFull）自动一致；in-order 增量分支显式 add。requires immer ``enableMapSet()``。
@@ -350,8 +357,8 @@ function patchNode(
   nodes[name] = cur ? { ...cur, ...patch } : { status: "pending", ...patch };
 }
 
-// ── nodesIndex 维护（SPEC §P2 / P0-6）──────────────────────────────────────────
-// 倒排索引：每 node → { sessions, sessionEventCounts, sessionFirstTs }。仅统计
+// ── nodesIndex 维护（SPEC §P2 / P0-6 + 2026-08-28 C3.1 ev 索引）──────────────────
+// 倒排索引：每 node → { sessions, sessionEventCounts, sessionFirstTs, ev }。仅统计
 // CONVERSATION_TYPES 事件（与 selectConversation 输出集对齐；过程事件 count 一致）。
 //
 // **null session_id → "main"**（SPEC §P2 接口契约）。workflow_failed 特例：top-level
@@ -370,13 +377,9 @@ function indexConversationEvent(
   index: Record<string, NodeSessionIndex>,
   event: WebEvent
 ): void {
-  // 目标 node：优先 e.node；workflow_failed 以 data.node 关联（eventMatchesNode 同语义，
-  // 但此处需取出 targetNode 字符串做索引 key，不能直接用 boolean helper）
-  let targetNode = event.node;
-  if (!targetNode && event.type === "workflow_failed") {
-    const dn = event.data?.node;
-    if (typeof dn === "string") targetNode = dn;
-  }
+  // 目标 node：conversationTargetNode 唯一化（C3.2——与 selectConversation 严格同源，
+  // e.node 优先、workflow_failed 按 data.node、双字段只归 e.node）
+  const targetNode = conversationTargetNode(event);
   if (!targetNode) return; // workflow 级无 node 事件不索引（不属于任何 agent）
   const sid = event.session_id ?? MAIN_SESSION;
   let entry = index[targetNode];
@@ -385,6 +388,7 @@ function indexConversationEvent(
       sessions: [],
       sessionEventCounts: {},
       sessionFirstTs: {},
+      ev: { all: [], bySession: {}, last: null },
     };
     index[targetNode] = entry;
   }
@@ -395,6 +399,29 @@ function indexConversationEvent(
   }
   entry.sessionEventCounts[sid] += 1;
   // firstTs 保持首次写入（refold 按 seq 升序 fold → 首次 = 最早；增量 in-order 也最早）
+
+  // C3.1 ev 索引：事件引用按 seq 升序 append（refold sort 序 / in-order 增量天然升序；
+  // out-of-order 走 refold 全量重建）。last = 最新一条。
+  entry.ev.all.push(event);
+  const bucket = entry.ev.bySession[sid];
+  if (bucket) bucket.push(event);
+  else entry.ev.bySession[sid] = [event];
+  entry.ev.last = event;
+}
+
+/**
+ * 增量维护 takenEdgeKeys（SPEC 2026-08-28 C3.5）：route_taken 事件 → 边 key 入 Set。
+ *
+ * **同 nodesIndex 模式：索引维护不进 handler 表 / FoldDraft**（route_taken handler 保持
+ * no-op）。派生语义与旧 WorkflowGraph 全量扫描逐字符等价：`String(e.data?.from ?? "")` +
+ * `String(e.data?.to ?? "")` + `from && to` 守卫（缺任一 / 非 string → 不入集合）。
+ *
+ * 幂等性靠上层 seq 去重保证（Set.add 本身幂等，畸形事件重复也不变）。
+ */
+function indexRouteEvent(taken: Set<string>, event: WebEvent): void {
+  const from = String(event.data?.from ?? "");
+  const to = String(event.data?.to ?? "");
+  if (from && to) taken.add(routeEdgeKey(from, to));
 }
 
 const eventHandlers: Record<EventType, Handler> = {
@@ -641,6 +668,7 @@ function refold(state: WorkflowState): void {
   state.reasoningTokens = 0;
   state.lastSeqSeen = 0;
   state.nodesIndex = {};
+  state.takenEdgeKeys = new Set();
   // 在 draft 上逐条 fold（events 已 sort，故按数组顺序 apply 即 seq 升序）
   for (const e of state.events) {
     foldEvent(state, e);
@@ -648,6 +676,10 @@ function refold(state: WorkflowState): void {
     // nodesIndex 维护（P0-6 四路径之一：refold 全量重建）
     if (CONVERSATION_TYPES.has(e.type)) {
       indexConversationEvent(state.nodesIndex, e);
+    }
+    // takenEdgeKeys 重建（C3.5：route_taken 不在 CONVERSATION_TYPES——独立判断，不并入上面分支）
+    if (e.type === "route_taken") {
+      indexRouteEvent(state.takenEdgeKeys, e);
     }
   }
   // SPEC audit-c N1：seenSeqs 重建收进 refold 末尾——所有走 refold 路径
@@ -671,6 +703,7 @@ function resetDerived(s: WorkflowState): void {
   s.reasoningTokens = 0;
   s.lastSeqSeen = 0;
   s.nodesIndex = {};
+  s.takenEdgeKeys = new Set();
   s.seenSeqs = new Set();
 }
 
@@ -703,8 +736,21 @@ function _refoldAndCommit(
 // 仅 ``import.meta.env.DEV`` 启用，prod no-op（N3）。
 // 语义：对同一 event 连续 apply 两次（强制绕过 seq 去重），比较前后 state 派生快照——
 // 任何派生字段变化 = handler 非幂等 = warn。**漂移 canary，非证明全幂等**（G3）。
+// C6.1①：snapshot 的 nodesIndex 是投影复制值（无 ev），非 store 原生 NodeSessionIndex。
+// 入参兼容两种来源：store 原生 state（baseline）与投影 clone（s1）——投影只读
+// sessions/sessionEventCounts/sessionFirstTs 三字段，两种输入都满足。
+type CanarySnapshotState = Omit<WorkflowState, "nodesIndex"> & {
+  nodesIndex: Record<
+    string,
+    Pick<
+      NodeSessionIndex,
+      "sessions" | "sessionEventCounts" | "sessionFirstTs"
+    >
+  >;
+};
+
 type FoldableSnapshot = Pick<
-  WorkflowState,
+  CanarySnapshotState,
   | "nodes"
   | "gate"
   | "lastResolved"
@@ -717,7 +763,7 @@ type FoldableSnapshot = Pick<
   | "reasoningTokens"
   | "lastSeqSeen"
   | "nodesIndex"
->;
+> & { nodesIndex: Record<string, Omit<NodeSessionIndex, "ev">> };
 
 export function __foldTwiceForInvariantCheck(event: WebEvent): void {
   if (!import.meta.env.DEV) return; // prod no-op（N3）
@@ -728,19 +774,22 @@ function __foldTwiceRun(event: WebEvent): void {
   // 在临时 draft state 上 apply 两次，比较快照
   const baseline = useWorkflowStore.getState();
   const before = snapshot(baseline);
-  // apply 一次（强制绕过 seq 去重——直接调 foldEvent）
-  const s1: WorkflowState = JSON.parse(JSON.stringify(baseline));
-  // 注：immer 下我们用 plain JSON clone；Set/Map 不进 handler，clone 不影响 fold 结果
+  // ②（SPEC 2026-08-28 C6.1）baseline clone 投影化：nodes 深拷贝（patchNode / foreach
+  // progress 会写穿共享引用——**禁**共享引用剥离变体，会 mutate immer 冻结的 baseline）
+  // + nodesIndex 复用①投影（不含 ev——否则 ev 引入后每事件把事件集序列化两份）。
+  // 其余顶层字段 handler 只整体赋值，spread 浅拷贝即可；seenSeqs/takenEdgeKeys（Set）
+  // 不进 handler 表，clone 不影响 fold 结果。
+  const s1: CanarySnapshotState = {
+    ...baseline,
+    nodes: JSON.parse(JSON.stringify(baseline.nodes)),
+    nodesIndex: projectNodesIndex(baseline.nodesIndex),
+  };
   foldEvent(s1 as unknown as FoldDraft, event);
-  if (CONVERSATION_TYPES.has(event.type)) {
-    indexConversationEvent(s1.nodesIndex, event);
-  }
+  // ③（C6.1）：删除两处 indexConversationEvent——其「+1 计数」非幂等属已知契约，
+  // 索引等价性由 D7 测试守护（store.test.ts C3 describe）；此处保留调用反而使负例红灯。
   const after1 = snapshot(s1);
   // apply 第二次（绕过 seq 去重）
   foldEvent(s1 as unknown as FoldDraft, event);
-  if (CONVERSATION_TYPES.has(event.type)) {
-    indexConversationEvent(s1.nodesIndex, event);
-  }
   const after2 = snapshot(s1);
   if (!shallowEqSnapshot(after1, after2)) {
     console.warn(
@@ -751,7 +800,33 @@ function __foldTwiceRun(event: WebEvent): void {
   void before; // 抑制 unused
 }
 
-function snapshot(s: WorkflowState): FoldableSnapshot {
+/**
+ * ①（SPEC 2026-08-28 C6.1）nodesIndex **投影复制值**：sessions 数组拷贝 +
+ * sessionEventCounts/sessionFirstTs 浅拷贝对象。必须复制值：snapshot 持引用时，二次
+ * apply 后的原地 mutate 型漂移结构性不可见（检测力零增益）；**投影不含 ev**
+ * （杜绝 ev.all 事件引用数组进 JSON 双快照 + 防未来接线回退，非「修复检测缺陷」）。
+ */
+function projectNodesIndex(
+  index: Record<
+    string,
+    Pick<
+      NodeSessionIndex,
+      "sessions" | "sessionEventCounts" | "sessionFirstTs"
+    >
+  >
+): Record<string, Omit<NodeSessionIndex, "ev">> {
+  const out: Record<string, Omit<NodeSessionIndex, "ev">> = {};
+  for (const [node, entry] of Object.entries(index)) {
+    out[node] = {
+      sessions: [...entry.sessions],
+      sessionEventCounts: { ...entry.sessionEventCounts },
+      sessionFirstTs: { ...entry.sessionFirstTs },
+    };
+  }
+  return out;
+}
+
+function snapshot(s: CanarySnapshotState): FoldableSnapshot {
   return {
     nodes: s.nodes,
     gate: s.gate,
@@ -764,7 +839,7 @@ function snapshot(s: WorkflowState): FoldableSnapshot {
     workflowElapsed: s.workflowElapsed,
     reasoningTokens: s.reasoningTokens,
     lastSeqSeen: s.lastSeqSeen,
-    nodesIndex: s.nodesIndex,
+    nodesIndex: projectNodesIndex(s.nodesIndex),
   };
 }
 
@@ -794,6 +869,7 @@ export const useWorkflowStore = create<WorkflowState>()(
     reasoningTokens: 0,
     lastSeqSeen: 0,
     nodesIndex: {},
+    takenEdgeKeys: new Set<string>(),
     seenSeqs: new Set<number>(),
 
     selectedNode: null,
@@ -852,6 +928,10 @@ export const useWorkflowStore = create<WorkflowState>()(
           // nodesIndex 增量 patch（P0-6 四路径之一：in-order 增量）
           if (CONVERSATION_TYPES.has(event.type)) {
             indexConversationEvent(state.nodesIndex, event);
+          }
+          // takenEdgeKeys 增量维护（C3.5：route_taken 独立判断，handler 保持 no-op）
+          if (event.type === "route_taken") {
+            indexRouteEvent(state.takenEdgeKeys, event);
           }
         } else {
           // out-of-order：插入 + sort + 全量 refold（含 nodesIndex + seenSeqs 重建）

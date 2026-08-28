@@ -38,6 +38,7 @@ function resetStoreIdle() {
     reasoningTokens: 0,
     lastSeqSeen: 0,
     nodesIndex: {},
+    takenEdgeKeys: new Set<string>(),
     seenSeqs: new Set<number>(),
     selectedNode: null,
     selectedSession: null,

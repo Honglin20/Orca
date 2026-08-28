@@ -22,19 +22,24 @@
 // 不可达——events.ts codegen + buildEntries 不会产出）→ console.warn + 渲染 UnknownEventRow
 // 兜底，**不 throw**（保渲染稳定，与 buildEntries 同哲学）。
 
-import { useMemo } from "react";
-import { List, type RowComponentProps } from "react-window";
+import { memo, useMemo, useRef } from "react";
+import {
+  List,
+  useDynamicRowHeight,
+  type RowComponentProps,
+} from "react-window";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import {
-  selectConversation,
-  selectNodeSessions,
-  selectStreamingCursor,
+  conversationEventsFromIndex,
+  sessionsFromIndex,
+  streamingCursorFromIndex,
 } from "@/selectors";
 import type { WebEvent } from "@/types/events";
 import {
   buildEntries,
   type ConvEntry,
 } from "@/components/conversation/entries";
+import { reuseEntries } from "@/components/conversation/reuse-entries";
 import { PromptRow } from "@/components/conversation/PromptRow";
 import { ThinkingBlock } from "@/components/conversation/ThinkingBlock";
 import { MessageBlock } from "@/components/conversation/MessageBlock";
@@ -52,12 +57,12 @@ import { DialogMessage } from "@/components/conversation/DialogMessage";
 import { CustomRow } from "@/components/conversation/CustomRow";
 import { UnknownEventRow } from "@/components/conversation/UnknownEventRow";
 
-/** 超过此阈值启用虚拟化（SPEC §5.3 闭 review #17：>500 条）。 */
-const VIRTUALIZATION_THRESHOLD = 500;
+/** 超过此阈值启用虚拟化（SPEC 2026-08-28 C5.1：500 → 100——固定估高失真 + ≤500 全量渲染过慢）。 */
+const VIRTUALIZATION_THRESHOLD = 100;
 
 interface ConversationViewProps {
   nodeId: string | null;
-  /** chart 引用行点击回调（切到 charts tab），由 RunDetailPage 注入。 */
+  /** chart 引用行点击回调（切到 charts tab），由 RunDetailPage 注入（useCallback 稳定，C4.2）。 */
   onChartClick?: () => void;
 }
 
@@ -65,32 +70,41 @@ export function ConversationView({
   nodeId,
   onChartClick,
 }: ConversationViewProps) {
-  // 细粒度订阅（同 AgentsRail 哲学）：selectedSession / setSelectedSession 是 stable refs，
-  // 只在用户切 session 时变。整体 state 订阅保留——selector 输入字段多（events/nodesIndex/...），
-  // 已 useMemo 缓存重计算。
-  const state = useWorkflowStore();
+  // 细粒度订阅（SPEC 2026-08-28 C4.1，取消全 store 订阅——每条 WS 事件曾触发本组件全量
+  // 重渲染 + O(N) selector 重算）。nodesIndex[nodeId]：immer copy-on-write 下兄弟 node 的
+  // 事件不改变本引用（仅 in-order 增量路径；refold 整体重建属预期）——这是收窄的核心收益。
+  // **禁止** selector 返回新建对象（zustand v5 引用不等 → 无限渲染），此处全部返回既有引用。
+  const nodeIndex = useWorkflowStore((s) => (nodeId ? s.nodesIndex[nodeId] : undefined));
+  const status = useWorkflowStore((s) => s.status);
   const selectedSession = useWorkflowStore((s) => s.selectedSession);
   const setSelectedSession = useWorkflowStore((s) => s.setSelectedSession);
+  const activeRunId = useWorkflowStore((s) => s.activeRunId);
 
-  const sessions = useMemo(
-    () => selectNodeSessions(state, nodeId),
-    [state, nodeId]
-  );
+  const sessions = useMemo(() => sessionsFromIndex(nodeIndex), [nodeIndex]);
   // 总事件数 = 各 session count 之和（用于 "All(N)" 标签 DRY，不二次 filter events）
   const totalEventCount = useMemo(
     () => sessions.reduce((sum, s) => sum + s.eventCount, 0),
     [sessions]
   );
 
-  const group = useMemo(
-    () => selectConversation(state, nodeId, selectedSession ?? undefined),
-    [state, nodeId, selectedSession]
+  const events = useMemo(
+    () => conversationEventsFromIndex(nodeIndex, selectedSession ?? undefined),
+    [nodeIndex, selectedSession]
   );
   const cursorOn = useMemo(
-    () => selectStreamingCursor(state, nodeId),
-    [state, nodeId]
+    () => streamingCursorFromIndex(status, nodeIndex),
+    [status, nodeIndex]
   );
-  const entries = useMemo(() => buildEntries(group.events), [group.events]);
+
+  // C4.3：buildEntries 产物经 reuseEntries 复用 prev entry 引用（append-only 前缀等价）
+  // → EntryRenderer memo 对未变行跳过重渲染；全复用时数组引用也稳定。
+  const prevEntriesRef = useRef<ConvEntry[]>([]);
+  const entries = useMemo(() => {
+    const built = buildEntries(events);
+    const reused = reuseEntries(prevEntriesRef.current, built, entryKey);
+    prevEntriesRef.current = reused;
+    return reused;
+  }, [events]);
 
   // ▎ 光标显示位置：仅 entries 数组中**最后一条** message/thinking entry（SPEC §5.3 闭
   // review #4：单 session 最后事件 → 单一光标；多 message 时只在末尾那一条显示）。
@@ -103,6 +117,11 @@ export function ConversationView({
     }
     return -1;
   }, [entries, cursorOn]);
+
+  // C5.2：动态行高（ResizeObserver 自动测量；key 变化清缓存 + <List key> 同 key 重挂，
+  // 防上下文切换滚动偏移残留）。hook 必须置于早 return 之前（hook 顺序不变式）。
+  const vkey = `${activeRunId ?? ""}:${nodeId ?? ""}:${selectedSession ?? ""}`;
+  const rowHeight = useDynamicRowHeight({ defaultRowHeight: 96, key: vkey });
 
   if (!nodeId) {
     return (
@@ -158,8 +177,9 @@ export function ConversationView({
         )}
         <div className="flex-1 overflow-hidden">
           <List
+            key={vkey}
             rowCount={entries.length}
-            rowHeight={(i) => estimateRowHeight(entries[i])}
+            rowHeight={rowHeight}
             rowComponent={VirtualizedRow}
             rowProps={{
               entries,
@@ -265,7 +285,10 @@ interface EntryRendererProps {
   onChartClick?: () => void;
 }
 
-export function EntryRenderer({
+/** C4.2：memo——entry/showCursor/onChartClick 引用不变 → 跳过重渲染（依赖 reuseEntries
+ * 的引用复用 + RunDetailPage 的 onChartClick useCallback；VirtualizedRow 因 index/style
+ * 每帧变**不可** memo，memo 只放本组件）。 */
+export const EntryRenderer = memo(function EntryRenderer({
   entry,
   showCursor,
   onChartClick,
@@ -330,10 +353,11 @@ export function EntryRenderer({
       return <UnknownEventRow event={fallbackEvent} />;
     }
   }
-}
+});
 
-/** entry 稳定 key：buildEntries 内 call/result 已带 seq；group 用首 pair seq。 */
-function entryKey(entry: ConvEntry, index: number): string {
+/** entry 稳定 key：buildEntries 内 call/result 已带 seq；group 用首 pair seq。
+ * 导出供 reuseEntries 单测同源复用（C4.3）。 */
+export function entryKey(entry: ConvEntry, index: number): string {
   if (entry.kind === "tool-single" || entry.kind === "tool-group") {
     const pairs = entry.kind === "tool-single" ? [entry.pair] : entry.pairs;
     const firstSeq = pairs[0]?.call?.seq ?? pairs[0]?.result?.seq;
@@ -343,38 +367,6 @@ function entryKey(entry: ConvEntry, index: number): string {
   const evt = (entry as { event?: WebEvent }).event;
   if (evt?.seq != null) return `e-${evt.seq}`;
   return `idx-${index}`;
-}
-
-/** 虚拟化行高估计（按 entry kind）。 */
-function estimateRowHeight(entry: ConvEntry): number {
-  switch (entry.kind) {
-    case "message":
-      // markdown 渲染高度变化大；保守给 160px（多数 message 单屏可见）。
-      return 160;
-    case "node-output":
-      // output 可能是 markdown（同 message）/ JSON pre，保守给 160px（同 message）。
-      return 160;
-    case "thinking":
-    case "tool-single":
-    case "tool-group":
-      return 64;
-    case "prompt":
-    case "dialog-message":
-      return 80;
-    case "node-error":
-      return 96;
-    case "node-divider":
-    case "dialog-divider":
-    case "step-marker":
-    case "status-line":
-      return 32;
-    case "chart-ref":
-    case "custom-generic":
-    case "unknown":
-      return 28;
-    default:
-      return 64;
-  }
 }
 
 // ── 虚拟化 row（react-window v2）──
