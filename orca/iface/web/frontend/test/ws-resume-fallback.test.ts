@@ -9,6 +9,7 @@ import { act, renderHook } from "@testing-library/react";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import { useWebSocket } from "@/hooks/use-websocket";
 import type { WebEvent } from "@/types/events";
+import { resetStore } from "./_helpers";
 
 interface FakeSocket {
   url: string;
@@ -56,9 +57,7 @@ function makeFakeSocket(): {
   };
 }
 
-// 字段枚举收敛到 _helpers.resetStore（计划步 0：7 处副本合一，防新增顶层字段漏同步）。
-import { resetStore } from "./_helpers";
-
+// resetStore 收敛到 _helpers（计划步 0：7 处副本合一，防新增顶层字段漏同步）。
 describe("useWebSocket — D4 resume-fallback watchdog", () => {
   beforeEach(() => resetStore());
 
