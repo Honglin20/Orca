@@ -74,6 +74,9 @@ llm_artifacts/
 _e2e_artifacts/
 _e2e_playground
 
+# per-wf 布局迁移基线清单（批 A 一次性产物，LAYOUT_MIGRATION_REPORT.md 引用其路径，不提交）
+.layout_baseline_list.txt
+
 # 演示 / 本地实验目录（不入库）
 .dsh-demo/
 data/

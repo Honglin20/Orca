@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-28] refactor(workflows): per-workflow 目录隔离——平铺+全局池 → 14 个自包含 wf 目录（commit `a7cb0a5..37b4295` 迁移链 7 commits + 收尾 commit）
+
+kd-nas 净删除（81 文件 -21690 行）；加载层双形态（`orca/compile/layout.py` 单一真相源：平铺优先 + subagents/KB per-wf 解析，旧平铺项目级用法继续可用）；workflows/ 大迁移（~69 agent 分流 + 共享副本 4 agent×2、`_quant_scripts`×4 逐文件 sha256 一致 + KB/kb_graph 收编；md 零内容改动 348 R100 + 0 M）；install per-wf 整树 sync + 旧布局 backup 四分支（凡可能含用户改动一律留档不删）；web detail subagents + tree/file 新端点 + 前端 Subagents 区/资产树（含 store 跨 wf 竞态守卫）；create-workflow skill 产出 per-wf 化（benchmark expected 重排）。E2E test-agent 真执行 **PASS**（清场 → 真实 tars install → 安装态 list/load/validate 14/14 → 单测 4279 passed 零新增 → web 六断言；验证当时唯一 MINOR 死链 monitor_real_test.sh 已修复闭环）；待用户决策项见 `LAYOUT_MIGRATION_REPORT.md`。详见 [release note](../releases/2026-08-28-workflow-per-dir-layout.md)。
+
 ## [2026-08-27] feat(workflows): prof-opt v5——时延先行顺序门控重设计（commit `fdd7a52..d46e9d5` + `b03d8fb`，9 commits）
 
 真机首跑复盘驱动：inputs 14→8（npu 自动解析）；时延链式推进（严格改进即推进、追击期零训练、轮帽默认 100 无早退）→ 达线后粗训精度门 → 恢复轮底座固定+组合式提案（U1）→ 双达标 full-train；origin 双锚冻结（修晋升不重锚）；round_state 单一来源（修 gate 路径漂移温床）；精度规则双层池（model_hash 跨文件夹继承 + generality 跨模型迁移 + confirm/refute 集合计数，U2）；部署件版本戳 + 入口幂等重部署（U3）。SDD 全流程：spec 3 轮 / plan adversary 3 轮 / coder 内环 2 轮 / E2E test-agent **PASS**（197 tests + validate 0/0 + 7/7 对抗 probe）；真机 §11.4 清单归用户。详见 [release note](../releases/2026-08-27-prof-opt-v5-sequential-gating.md)。

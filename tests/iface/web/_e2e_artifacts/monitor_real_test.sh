@@ -3,7 +3,7 @@
 # against realistic fake training scenarios. Proves the monitoring-reform contract.
 set -u
 
-MONITOR="/mnt/d/Projects/Orca/workflows/agents/ns_run_train/scripts/monitor_until_done.sh"
+MONITOR="/mnt/d/Projects/Orca/workflows/nas-supernet/agents/ns_run_train/scripts/monitor_until_done.sh"
 TMPROOT="$(mktemp -d)"
 echo "TMPROOT=$TMPROOT"
 
