@@ -25,6 +25,8 @@ from typing import TYPE_CHECKING, AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
+from starlette.responses import Response
 
 from orca.iface.web.routes import (
     build_approval_router,
@@ -47,6 +49,22 @@ logger = logging.getLogger(__name__)
 
 # phase 9b 前端构建产物目录（phase 9a 仅占位 .gitkeep）。
 _STATIC_DIR = Path(__file__).parent / "static"
+
+# SPEC 2026-08-28 C1.2：vite hashed 产物内容寻址（文件名含 hash），可 immutable 永久缓存。
+_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
+
+
+class _ImmutableStaticFiles(StaticFiles):
+    """hashed 资产 StaticFiles——响应加 immutable Cache-Control（SPEC C1.2）。
+
+    覆盖 ``file_response``（含 304 NotModifiedResponse 分支，两分支都补头）。
+    仅挂 ``/assets``（hashed 产物）；SPA fallback 的 index.html 走 no-cache（C1.3）。
+    """
+
+    def file_response(self, *args, **kwargs) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = _IMMUTABLE_CACHE_CONTROL
+        return response
 
 
 def create_app(manager: RunManager) -> FastAPI:
@@ -89,6 +107,9 @@ def create_app(manager: RunManager) -> FastAPI:
     app = FastAPI(title="orca-web", lifespan=lifespan)
     app.state.manager = manager
     app.state.approval_broker = approval_broker
+    # SPEC 2026-08-28 C1.1：全部响应（静态资产 + API JSON）gzip——客户端带
+    # Accept-Encoding: gzip 且响应体 ≥1024 字节才压缩，否则自动明文回退（中间件语义）。
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
     # ``tars close`` 的 ``/api/shutdown`` 端点经此句柄触发 ``should_exit``；run_server /
     # _serve_and_run_inprocess 创建 uvicorn.Server 后覆写为真实句柄。None = 未 wire（端点
     # 取不到时返 500 fail loud，见 attach.py::shutdown）。
@@ -120,7 +141,12 @@ def create_app(manager: RunManager) -> FastAPI:
     if _STATIC_DIR.exists():
         _assets = _STATIC_DIR / "assets"
         if _assets.exists():
-            app.mount("/assets", StaticFiles(directory=str(_assets)), name="assets")
+            # hashed 产物挂 immutable 缓存子类（SPEC C1.2）；API JSON 不经此挂载（C1.4 保持默认）。
+            app.mount(
+                "/assets",
+                _ImmutableStaticFiles(directory=str(_assets)),
+                name="assets",
+            )
 
         from fastapi.responses import FileResponse, JSONResponse
 
@@ -130,7 +156,9 @@ def create_app(manager: RunManager) -> FastAPI:
         async def _spa_fallback(full_path: str):  # noqa: ARG001
             """非 API/WS/gate 的 GET → 返回 index.html（客户端路由接管）。"""
             if _index.exists():
-                return FileResponse(str(_index))
+                # SPEC C1.3：SPA 入口 no-cache——index.html 永远取最新（新产物 hash 由
+                # index 引用；旧 tab lazy-load 旧 hash chunk 404 的恢复路径 = 刷新，见 SPEC §4）。
+                return FileResponse(str(_index), headers={"Cache-Control": "no-cache"})
             # 前端未构建：可操作提示而非裸 404。
             return JSONResponse(
                 {"detail": "frontend not built — run: cd orca/iface/web/frontend && npm run build"},
