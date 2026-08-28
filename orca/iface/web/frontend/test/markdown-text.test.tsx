@@ -71,6 +71,39 @@ describe("MarkdownText —— 组件映射 + img rewrite 集成", () => {
     expect(container.querySelector("blockquote")).not.toBeNull();
   });
 
+  // SPEC 2026-08-28 C2.4：token 级断言——仅断言 code.language-* class 存在在
+  // ignoreMissing 下 0 门语言也绿（refractor 空手高亮仍回填 class），不足为凭。
+  test("common 收录语言产出 .token.* 级元素（python / ts）", () => {
+    const md = [
+      "```python",
+      "import os",
+      "```",
+      "",
+      "```ts",
+      "const x: number = 1;",
+      "```",
+    ].join("\n");
+    const { container } = render(<MarkdownText>{md}</MarkdownText>);
+    // python：import 关键字被高亮为 token.keyword（common 36 门收录 python）
+    const py = container.querySelector("code.language-python");
+    expect(py).not.toBeNull();
+    expect(py!.querySelector(".token.keyword")).not.toBeNull();
+    // ts：const 关键字（common 36 门收录 typescript）
+    const ts = container.querySelector("code.language-ts");
+    expect(ts).not.toBeNull();
+    expect(ts!.querySelector(".token.keyword")).not.toBeNull();
+  });
+
+  test("未收录语言（tsx 不在 common 36 门）→ 原样渲染不报错（C2.1 fail-soft）", () => {
+    const md = ["```tsx", "const X = () => <div />;", "```"].join("\n");
+    const { container } = render(<MarkdownText>{md}</MarkdownText>);
+    const code = container.querySelector("code.language-tsx");
+    expect(code).not.toBeNull();
+    // ignoreMissing：不高亮 → 无 token 元素，但文本原样保留
+    expect(code!.querySelector(".token")).toBeNull();
+    expect(code!.textContent).toContain("const X = () => <div />;");
+  });
+
   test("img 相对路径 → /api/runs/<runId>/assets/<encoded>（D3 集成）", () => {
     useWorkflowStore.setState({ activeRunId: "run_xyz" });
     const md = "![alt](diagram.png)";
