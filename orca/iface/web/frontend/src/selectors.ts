@@ -13,9 +13,9 @@
 import type { WebEvent } from "@/types/events";
 import type { NodeState, NodeSessionIndex } from "@/types/store-types";
 import type { WorkflowState } from "@/stores/workflow-store";
-// CONVERSATION_TYPES / eventMatchesNode 已移到 src/conversation-types.ts（P2：workflow-store
-// 也需引用，避免 cycle）。selectConversation/selectStreamingCursor 改走 nodesIndex.ev 索引
-// 后（2026-08-28 C3.3/C3.4）本文件不再直接引用它们。
+// CONVERSATION_TYPES 已移到 src/conversation-types.ts（P2：workflow-store 也需引用，避免
+// cycle）。selectConversation/selectStreamingCursor 改走 nodesIndex.ev 索引后（2026-08-28
+// C3.3/C3.4）本文件不再直接引用它。
 
 // ── selectAgents：DAG nodes → AgentsRail 行模型 ─────────────────────────────────
 // P3：sessionCount（子 agent session 数，不含 "main" 哨兵）+ iteration（Loop 组迭代号）

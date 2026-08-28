@@ -83,8 +83,3 @@ export function conversationTargetNode(e: WebEvent): string | null {
   }
   return null;
 }
-
-/** 判断事件是否归属某 node（薄封装：conversationTargetNode 严格相等）。 */
-export function eventMatchesNode(e: WebEvent, nodeId: string): boolean {
-  return conversationTargetNode(e) === nodeId;
-}
