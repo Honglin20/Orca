@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-28] refactor(prof-opt): prompt 洁净清理 + 轮末结论闭环（commit `94378e8`）
+
+洁净审查（§9 四层 + 3 独立通读）→ 15 violations 全闭环：内联确定性代码抽脚本 ×12（行为等价 + 单测钉契约）、开发期残留清零、lint 部署约定豁免（命令位仍严查）；轮末结论闭环最小版——`rounds/<NNN>/analysis.md` 双节落盘（propose 时延/probe 精度）+ 上轮回流 proposer + 报告 Round Conclusions 节，多轮体量天然有界。code-reviewer 11 findings 全修；validate 0/0、静态/宽口径零 error、pytest 全绿。用户裁决：镜像预置规则否决（洁净原则）、E2E 由用户换 mfu-benchmark 后自跑。详见 [release note](../releases/2026-08-28-prof-opt-prompt-cleanliness-and-round-conclusions.md)。
+
 ## [2026-08-28] refactor(workflows): per-workflow 目录隔离——平铺+全局池 → 14 个自包含 wf 目录（commit `a7cb0a5..37b4295` 迁移链 7 commits + 收尾 `d780fc2`）
 
 kd-nas 净删除（81 文件 -21690 行）；加载层双形态（`orca/compile/layout.py` 单一真相源：平铺优先 + subagents/KB per-wf 解析，旧平铺项目级用法继续可用）；workflows/ 大迁移（~69 agent 分流 + 共享副本 4 agent×2、`_quant_scripts`×4 逐文件 sha256 一致 + KB/kb_graph 收编；md 零内容改动 348 R100 + 0 M）；install per-wf 整树 sync + 旧布局 backup 四分支（凡可能含用户改动一律留档不删）；web detail subagents + tree/file 新端点 + 前端 Subagents 区/资产树（含 store 跨 wf 竞态守卫）；create-workflow skill 产出 per-wf 化（benchmark expected 重排）。E2E test-agent 真执行 **PASS**（清场 → 真实 tars install → 安装态 list/load/validate 14/14 → 单测 4279 passed 零新增 → web 六断言；验证当时唯一 MINOR 死链 monitor_real_test.sh 已修复闭环）；待用户决策项见 `LAYOUT_MIGRATION_REPORT.md`。详见 [release note](../releases/2026-08-28-workflow-per-dir-layout.md)。
