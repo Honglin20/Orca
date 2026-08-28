@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-08-28] perf(web): 传输层 gzip/immutable + markdown chunk 瘦身 + 渲染订阅收窄 + 虚拟化（commit `e756b8c..b824f24`，6 commits）
+
+针对三症状（整体加载慢/查看页慢/markdown 慢）四路优化：GZip 中间件 + hashed 资产 immutable 缓存 + SPA no-cache + build 前清 assets（5.5MB→2.9MB）；prism 高亮走 `rehype-prism-plus/common` 子路径 36 门（chunk 1018KB→536KB）+ katex CSS 移出首屏；store fold 派生 `ev` 索引 + `takenEdgeKeys` + 三组件逐字段订阅 + EntryRenderer memo + reuseEntries 引用复用；行高 `useDynamicRowHeight` + 虚拟化阈值 500→100（测试先行）+ canary 投影修复。SDD-LOOP 全流程：spec 2 轮收敛（UD×2 拍板：AgentsRail 遗留 / A6 无硬 KPI）+ plan adversary 2 轮 + coder 内环 1 轮 + E2E **PASS**（vitest 590 绿 / pytest 绿 / 真实 tars serve 头实测 / 真实 chromium 冒烟零报错，A1-A6 全过，缺陷 0）。详见 [release note](../releases/2026-08-28-web-perf-optimization.md)。
+
 ## [2026-08-28] refactor(prof-opt): prompt 洁净清理 + 轮末结论闭环（commit `94378e8`）
 
 洁净审查（§9 四层 + 3 独立通读）→ 15 violations 全闭环：内联确定性代码抽脚本 ×12（行为等价 + 单测钉契约）、开发期残留清零、lint 部署约定豁免（命令位仍严查）；轮末结论闭环最小版——`rounds/<NNN>/analysis.md` 双节落盘（propose 时延/probe 精度）+ 上轮回流 proposer + 报告 Round Conclusions 节，多轮体量天然有界。code-reviewer 11 findings 全修；validate 0/0、静态/宽口径零 error、pytest 全绿。用户裁决：镜像预置规则否决（洁净原则）、E2E 由用户换 mfu-benchmark 后自跑。详见 [release note](../releases/2026-08-28-prof-opt-prompt-cleanliness-and-round-conclusions.md)。
