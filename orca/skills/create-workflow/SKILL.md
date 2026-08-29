@@ -110,10 +110,10 @@ agent.md / 新增 scripts → 同跑 V1 两脚本 + V3 审查闭环（审查不�
 
 | # | 议程 | 产出 |
 |---|---|---|
-| ① | 职责与输入/输出契约 | 一句话职责 + 上游引用形态 + `output_schema` 草案 |
+| ① | 职责与输入/输出契约 | 一句话职责 + 上游引用形态 + **薄信封** `output_schema` 草案（路由字段 + 磁盘产物路径，实质内容落文件） |
 | ② | 执行步骤分解 | 编号步骤（可机械执行的步骤在此显形） |
 | ③ | 固化分析 | 每步标 S1/S2/S3；S1 步骤定 `scripts/<file>` 名 |
-| ④ | 校验计划 | V1=脚本断言；V2=schema 字段；V3=validator criteria 或不需要 |
+| ④ | 校验计划 | V1=脚本断言；V2=schema 字段；V3=validator criteria；可机械校验的磁盘产物必须有返回前 gate 脚本 |
 | ⑤ | Tier B 推断项 | 要从用户代码推断的事实清单（缺失走哨兵，绝不造假） |
 | ⑥ | 可视化判定 | 结构化数据 + 值不值得图；需要 → 当场派 chart-designer，plan 并入 gate 2 |
 
@@ -223,6 +223,13 @@ python3 <skill_dir>/scripts/check_charts.py <workflow 目录>       # 有 chart 
 exit 0 过 / exit 1 有 findings 自改重跑 / exit 2 路径用法错。脚本规则（含豁免表与白名单
 语义）已固化在脚本内，**不在此重复**。
 
+**H10 文件优先 + 输出薄信封 + 返回前 gate**：agent 节点输出只做路由信封，实质内容落
+`$ORCA_ARTIFACTS_DIR` 文件。`output_schema` 只保留路由必需字段（如 `status`/`ok`、
+指向磁盘产物的路径、`error`、可选 `generated_artifacts`）；已经在磁盘文件里的预算/契约/
+指标/路径清单**不要**再复制进 output_schema。每个能机械校验的产物都必须有对应
+`scripts/check_*.py|sh` gate，agent 在返回成功前**先跑 gate**，`contracts.json` 这类
+关键文件不能只靠 agent 说“我填好了”。判据与模板见 `reference/solidify-validate.md` §2.5。
+
 ## input 三档（紧凑判定；细节单源 contract §6）
 
 **总纲**：inputs 只放「下游 agent 无法执行 / 会失控」的必须项。**代码里能 grep 出来的是事实
@@ -276,6 +283,7 @@ YAML 字段名、`kind`、`executor` 等是固定契约。prompt 文本、`descr
 - [ ] 每 agent：V1 两脚本 0 error；V3 findings 清零或用户显式 waive
 - [ ] `tars validate` 0 error（Stage 3 全量）；每个可达路径终止；workflow 有 `outputs`（H4）
 - [ ] 固化纪律：S1 步骤全在 `scripts/`，agent.md body 无控制流内联（check_agent_md_static 0 error）
+- [ ] 输出薄信封：agent `output_schema` 不重复磁盘产物；可机械校验产物有返回前 gate 脚本且 agent 先跑再 emit
 - [ ] chart（若有）：label/title/chart_type 字面量、label+title 全局唯一、调用 try/except 包裹，
       registry 已更新，check_charts.py 0 error
 - [ ] input 三档：每 input 归档 + 标签起头；Tier B 下沉 infer-once；Tier C 固化；有 `seed`

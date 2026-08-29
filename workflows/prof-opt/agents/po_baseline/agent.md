@@ -158,12 +158,10 @@ anchor with DIFFERENT content — the anchor is immutable; quote the stderr
 Never edit or delete the anchor by hand.
 
 stdout is ALWAYS exactly one JSON line whose field set is EXACTLY the node
-output schema (nine fields: `status` ∈ `executed | running | failed` —
-`running` is agent-internal — plus `makespan_cycles`, `base_onnx`,
-`baseline_metrics`, `business_logic_path`, `profile_dir`,
-`bottleneck_report`, `generated_artifacts`, `error`; a failing step number
-is folded into `error` as `baseline step N: ...`). Chain logs go to stderr
-and `baseline/finalizer.log` / `baseline/train.attempt<N>.log`.
+output schema (three fields: `status` ∈ `executed | running | failed` —
+`running` is agent-internal — plus `error` and `generated_artifacts`; a
+failing step number is folded into `error` as `baseline step N: ...`). Chain
+logs go to stderr and `baseline/finalizer.log` / `baseline/train.attempt<N>.log`.
 
 ### Step 2: Dispatch the analysts (mfu first when it gates the chain; business-logic in parallel with training)
 
@@ -234,7 +232,7 @@ When the chain has finished (`executed` / `failed`), your ENTIRE final reply =
 exactly one line of valid JSON (no prose, no fences).
 
 **Never paraphrase or hand-assemble the node output.** The chain's FINAL
-stdout line already IS a schema-compatible JSON object — exactly the nine
+stdout line already IS a schema-compatible JSON object — exactly the three
 schema field names, no extras (`additionalProperties: false` rejects any
 extra key): forward that line **verbatim**, byte for byte.
 
@@ -247,17 +245,10 @@ stdlib-only):
 ```bash
 "$PY" "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
   --field status=failed \
-  --field base_onnx="" \
-  --field makespan_cycles=0 \
-  --field baseline_metrics="" \
-  --field business_logic_path="" \
-  --field profile_dir="" \
-  --field bottleneck_report="" \
   --field "error=<exit code + last lines of baseline/finalizer.log>" \
   --field 'generated_artifacts=<the actual subset produced>'
 ```
 
 On the verbatim-forwarded failure line, `error` already carries
-`baseline step N: <reason + remedy>`; numeric fields reflect what exists on
-disk (`0` when a product is absent), path fields are `""` for products that
-were not produced.
+`baseline step N: <reason + remedy>`; `generated_artifacts` reflects the
+actual subset produced.

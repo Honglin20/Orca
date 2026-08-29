@@ -282,17 +282,15 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/advance_round.py" --artifacts "$ORCA_ARTIFA
   `target_cycles` advances (smallest gap wins); a round with none keeps the
   base FIXED — the failed directions land in the round's `direction.json`
   (`failed_sigs`) as the next round's rerouting signal.
-- `base_advanced` = true iff `.round_advanced` now records the current
-  round for the accuracy mode (a no-op return with a matching (round,
-  mode) marker still means the advance is in effect).
-- `best_updated` / `advanced_vid` = the corresponding fields from the
-  advance JSON.
+- `.round_advanced` and `rounds/<RRR>/direction.json` remain the on-disk
+  record of `base_advanced` / `best_updated` / `advanced_vid`; the node
+  output does not duplicate them.
 - A non-zero exit is a workspace-level failure: emit `status=failed` with
-  the cause stated in `assessment` and all count fields 0 (this node's
-  output schema has no error field — the assessment carries the cause).
+  the cause in `error`; the success-product gate is not run on that path.
 
-## Assessment marker
+## Round summary marker
 
 Keep a one-line human summary in `.po_probe_assessment.txt` (mode,
 accuracy passes, retry hits, monitor_failed and eval-degradation and
-rule-extraction disclosures). It feeds the `assessment` output field.
+rule-extraction disclosures). It is an on-disk disclosure artifact for
+debugging and the round analysis, not an output-schema field.

@@ -94,17 +94,10 @@ nodes:
     agent: po_flatten
     output_schema:
       type: object
-      required: [flatten_passed, shadow_root, shadow_pkgs, model_module, manifest_path, baseline_lock_path, error, generated_artifacts]
+      required: [flatten_passed, readiness_path, error, generated_artifacts]
       properties:
         flatten_passed: {type: boolean, description: "true=影子副本建立 + 四项就绪检查全过 + 校验门通过；false=失败 → 路由 po_report"}
-        shadow_root: {type: string, description: "影子副本根目录（$ORCA_ARTIFACTS_DIR/shadow）；失败时空串"}
-        shadow_pkgs:
-          type: array
-          items: {type: string}
-          description: "影子根下全部顶层模块/包名（机械枚举）；失败时空数组"
-        model_module: {type: string, description: "模型定义的模块限定名（如 pkg.model / model）；失败时空串"}
-        manifest_path: {type: string, description: "project_manifest.md 路径"}
-        baseline_lock_path: {type: string, description: "BASELINE.lock 路径；失败时空串"}
+        readiness_path: {type: string, description: "readiness/readiness.json 路径；失败时空串"}
         error: {type: string, description: "fail loud 时根因；成功→空串"}
         generated_artifacts:
           type: array
@@ -136,33 +129,10 @@ nodes:
     agent: po_contract
     output_schema:
       type: object
-      required: [viable, reason, contracts_path, run_probe_script, run_full_script, run_eval_script, export_script, metric_direction, train_epochs_full, proxy_budget, probe_cap_mechanism, exemptions, error, generated_artifacts]
+      required: [viable, contracts_path, error, generated_artifacts]
       properties:
         viable: {type: boolean, description: "三契约全部满足（含适配后满足）→ true；false=强耦合不可安全参数化 / 检出 early-stopping 不在范围等 → 路由 po_report"}
-        reason: {type: string, description: "三档判定与实测结论的简短证据；viable=false 时为失败归因（含准入条款句）"}
         contracts_path: {type: string, description: "contracts.json 路径；viable=false 时空串"}
-        run_probe_script: {type: string, description: "变体训练 run 模板路径（占位符 vid/epochs/out_dir + 数据旋钮值等由模板声明，下游渲染后执行——变体按完整轮数渲染、到 k 轮外部停止）；viable=false 时空串"}
-        run_full_script: {type: string, description: "完整训练 run 模板路径（基线与 winner 共用）；viable=false 时空串"}
-        run_eval_script: {type: string, description: "评估 run 模板路径（占位符 ckpt/log）；viable=false 时空串"}
-        export_script: {type: string, description: "导出 run 模板路径（占位符 out/seed）；viable=false 时空串"}
-        metric_direction: {type: string, enum: [higher_better, lower_better], description: "评估指标方向"}
-        train_epochs_full: {type: integer, description: "项目全量训练轮数（argparse 机械事实）；viable=false 时 0"}
-        proxy_budget:
-          type: object
-          description: "变体停止深度 k 的预算记录——k 纯机械推定（自动推定，不可覆盖），epoch 计数与 seed 由契约钉死，基线曲线与变体曲线在第 k 点对齐比较的唯一依据"
-          required: [epochs, dataset_knob, data_value, max_steps, seed]
-          properties:
-            epochs: {type: integer, description: "变体停止深度 k（min(1, 完整训练生效轮数) 机械推定，不可覆盖）"}
-            dataset_knob: {type: [string, "null"], description: "恒 null：完整数据训练（兼容字段）"}
-            data_value: {type: [string, number, "null"], description: "恒 null：完整数据训练（兼容字段）"}
-            max_steps: {type: [integer, "null"], description: "恒 null：不做步数截断（兼容字段）"}
-            seed: {type: integer, description: "从头训练固定 seed"}
-          additionalProperties: false
-        probe_cap_mechanism: {type: string, description: "变体截断形态描述（stop-at-k：完整轮数渲染 + 第 k 轮外部停止）；viable=false 时空串"}
-        exemptions:
-          type: array
-          items: {type: string}
-          description: "契约期干跑在用户项目内的原地副作用清单（快照 diff 得出，空=零副作用）"
         error: {type: string, description: "fail loud 时根因；成功→空串"}
         generated_artifacts:
           type: array
@@ -191,15 +161,9 @@ nodes:
     agent: po_baseline
     output_schema:
       type: object
-      required: [status, base_onnx, makespan_cycles, baseline_metrics, business_logic_path, profile_dir, bottleneck_report, error, generated_artifacts]
+      required: [status, error, generated_artifacts]
       properties:
         status: {type: string, enum: [executed, failed], description: "executed=早期链全过 + 完整训练与 finalizer 双存活确认 + business_logic.md 落盘（不含训练完成——基线非阻塞，训练由 finalizer 守护收尾）；failed=任一步最终失败 → 路由 po_report"}
-        base_onnx: {type: string, description: "base/model.onnx 路径；失败时空串"}
-        makespan_cycles: {type: integer, description: "基线 makespan（cycles）；失败时 0"}
-        baseline_metrics: {type: string, description: "基线逐 epoch 指标曲线 JSONL 路径（finalizer 增量维护——emit 时可为部分曲线，变体对比恒取第 k 点）；失败时空串"}
-        business_logic_path: {type: string, description: "baseline/business_logic.md 路径（业务逻辑五段文档——提案的结构合理性依据）；失败时空串"}
-        profile_dir: {type: string, description: "base/profile/ 路径；失败时空串"}
-        bottleneck_report: {type: string, description: "base/bottleneck_report.json 路径（机械瓶颈分析）；失败时空串"}
         error: {type: string, description: "失败时根因（含失败步编号）；成功→空串"}
         generated_artifacts:
           type: array
@@ -234,30 +198,9 @@ nodes:
     agent: po_propose
     output_schema:
       type: object
-      required: [status, proposals_count, exhausted, implemented, skipped, latency_pass_count, mode, advanced_vid, verdicts_path, proposals_path, error, generated_artifacts]
+      required: [status, error, generated_artifacts]
       properties:
         status: {type: string, enum: [executed, failed], description: "executed=内闭环完成（个别变体淘汰属正常判定非失败）；failed=脚本链/子代理最终失败。failed ⇔ error 非空"}
-        proposals_count: {type: integer, description: "本轮机械准入后的提案数（可为 0）", minimum: 0}
-        exhausted: {type: boolean, description: "兼容字段，恒 false（结构杠杆无穷尽退出；换路由 failed_sigs 驱动，不由本字段触发）"}
-        implemented:
-          type: array
-          items: {type: string}
-          description: "本轮实现完成（DONE marker 落盘）的变体 vid 列表"
-        skipped:
-          type: array
-          items:
-            type: object
-            required: [vid, reason]
-            properties:
-              vid: {type: string}
-              reason: {type: string}
-              outcome: {type: string, description: "终态淘汰值（variant_broken / structural_mismatch 等），过程性失败可省略"}
-          description: "被跳过/失败的提案列表（不阻断轮次）"
-        latency_pass_count: {type: integer, description: "时延复测通过数（latency 态=严格改进数；accuracy 态=≤达标线幸存数）", minimum: 0}
-        mode: {type: string, enum: [latency, accuracy], description: "本轮推进阶段（经 round_state 推断）：latency=时延追击链式推进；accuracy=精度恢复轮（底座固定 + 组合式提案）"}
-        advanced_vid: {type: string, description: "本轮经机械推进成为新最优的变体 vid；空串=零推进（无候选 / 恢复轮无过线者 / 撕裂修复判等位）"}
-        verdicts_path: {type: string, description: "rounds/<NNN>/verdicts.jsonl 路径；失败时空串"}
-        proposals_path: {type: string, description: "rounds/<NNN>/proposals.json 路径；失败时空串"}
         error: {type: string, description: "fail loud 时根因；成功→空串（error 非空 ⇔ failed → 路由 po_report）"}
         generated_artifacts:
           type: array
@@ -290,28 +233,14 @@ nodes:
     agent: po_probe
     output_schema:
       type: object
-      required: [status, survivors_probed, mode, accuracy_pass_vids, advanced_vid, best_updated, base_advanced, artifacts, assessment, max_retries_hit, healed_files]
+      required: [status, error, generated_artifacts]
       properties:
         status: {type: string, enum: [executed, failed], description: "executed=（直通或判定路径）全部完成；failed → 路由 po_report"}
-        survivors_probed: {type: integer, description: "进入粗训的变体数（latency 直通轮恒 0）", minimum: 0}
-        mode: {type: string, enum: [latency, accuracy], description: "probe 入口时点的阶段：latency=直通（本轮推进已由 propose 完成）；accuracy=粗训精度门执行"}
-        accuracy_pass_vids:
+        error: {type: string, description: "fail loud 时根因；成功→空串"}
+        generated_artifacts:
           type: array
           items: {type: string}
-          description: "本轮过精度门（accuracy_pass）的变体 vid 列表（可为空；直通轮恒空）"
-        advanced_vid: {type: string, description: "本轮经恢复轮推进成为新最优的 vid（推进发生在 accuracy 态判定后）；空串=零推进（直通轮=propose 侧已推进者的盘面重导出，无则空串）"}
-        best_updated: {type: boolean, description: "本轮推进是否更新了全局最优（直通轮按本轮 marker/direction 盘面重导出，不读旧轮值）"}
-        base_advanced: {type: boolean, description: "本轮推进序列是否已闭合（marker (round, mode) 在场；直通轮同样按盘面重导出）"}
-        artifacts:
-          type: array
-          items: {type: string}
-          description: "关键产物路径（probe_results.jsonl / best.json / direction.json 等）"
-        assessment: {type: string, description: "本轮 probe 结果摘要（含 passthrough / monitor_failed / eval 降级 / 规则提取披露）"}
-        max_retries_hit: {type: boolean, description: "true=触碰重试预算上限而非正常完成"}
-        healed_files:
-          type: array
-          items: {type: string}
-          description: "本次自愈修复过的文件（审计字段，可为空）"
+          description: "相对 $ORCA_ARTIFACTS_DIR 的产物路径列表"
       additionalProperties: false
     routes:
       - when: "po_probe.output.status == 'executed'"
@@ -353,21 +282,14 @@ nodes:
     agent: po_full_train
     output_schema:
       type: object
-      required: [status, final_acc, baseline_full_acc, baseline_full_acc_source, within_budget, final_ckpt, final_onnx, assessment, max_retries_hit, healed_files]
+      required: [status, error, generated_artifacts]
       properties:
-        status: {type: string, enum: [executed, failed], description: "executed=完整训练+最终评估完成（预算内与否不影响 executed，由 within_budget 表达）；failed=训练最终失败（含对称终检不符）"}
-        final_acc: {type: number, description: "最终评估指标；failed 时 0"}
-        baseline_full_acc: {type: number, description: "最终达标判定的基线锚精度（baseline/baseline_full_acc.json 的 finalizer 完整训练实测值）；failed 时 0"}
-        baseline_full_acc_source: {type: [string, "null"], enum: [baseline, null], description: "基线锚来源：baseline=finalizer 完整训练基线；failed 未解析时 null"}
-        within_budget: {type: boolean, description: "最终指标是否在精度预算内（相对基线锚）"}
-        final_ckpt: {type: string, description: "最终 ckpt 路径；failed 时空串"}
-        final_onnx: {type: string, description: "winner 结构 onnx 路径；failed 时空串"}
-        assessment: {type: string, description: "最终指标 vs 基线/预算摘要"}
-        max_retries_hit: {type: boolean, description: "true=触碰重试预算上限"}
-        healed_files:
+        status: {type: string, enum: [executed, failed], description: "executed=完整训练+最终评估完成（预算内与否记录在 final/final_acc.json 的 within_budget）；failed=训练最终失败（含对称终检不符）"}
+        error: {type: string, description: "fail loud 时根因；成功→空串"}
+        generated_artifacts:
           type: array
           items: {type: string}
-          description: "本次自愈修复过的文件（可为空）"
+          description: "相对 $ORCA_ARTIFACTS_DIR 的产物路径列表"
       additionalProperties: false
     routes:
       - to: po_report

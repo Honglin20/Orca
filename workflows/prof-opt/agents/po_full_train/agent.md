@@ -67,8 +67,9 @@ at render time).
 
 **Failure matrix**: sentinel mismatch or a `rules_pool.py check` failure on
 the returned rule file → re-dispatch ONCE with the failure quoted; still
-failing → drop the offending rows and disclose in `assessment` (the rules
-never block the terminal state — the report node merges whatever survived).
+failing → drop the offending rows and disclose in `final/train_status.md`
+(the rules never block the terminal state — the report node merges whatever
+survived).
 
 ## Lazy Loading
 
@@ -92,8 +93,9 @@ as the protocol instructs.
    root cause needs a forbidden edit), emit `status=failed` with the real
    cause — never a made-up metric.
 5. **out_of_budget is not a failure**: if the final metric misses the
-   budget, report `status=executed` with `within_budget=false` — the report
-   node states the gap honestly; no automatic re-training.
+   budget, emit `status=executed`; `within_budget` stays in
+   `final/final_acc.json` and the report node states the gap honestly; no
+   automatic re-training.
 6. Training stdout never enters your reply — only the final emit does.
 
 ## Workflow
@@ -163,29 +165,27 @@ report node's terminal merge — do not merge here.
 ```bash
 python3 "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
   --field status=executed \
-  --field "final_acc=<number from final/final_acc.json>" \
-  --field "baseline_full_acc=<number from final/final_acc.json>" \
-  --field "baseline_full_acc_source=baseline" \
-  --field "within_budget=<true|false>" \
-  --field "final_ckpt=<resolved final checkpoint path>" \
-  --field "final_onnx=$ORCA_ARTIFACTS_DIR/final/model.onnx" \
-  --field "assessment=<one line: final vs baseline anchor vs budget>" \
-  --field "max_retries_hit=<true|false>" \
-  --field "healed_files=$(python3 "$ORCA_ARTIFACTS_DIR/scripts/healed_files.py" --path "$ORCA_ARTIFACTS_DIR/.po_full_train_healed.txt")"
+  --field 'error=' \
+  --field 'generated_artifacts=["final/final_acc.json", "final/final_metrics.jsonl", "final/model.onnx", "final/train_status.md"]'
 ```
 
-On determinate failure the same field set with `status=failed`, `error`
-semantics carried in `assessment`, `final_acc=0`, `baseline_full_acc=0`,
-`baseline_full_acc_source=null`, `within_budget=false`,
-empty paths.
+On determinate failure the same three fields with `status=failed` and
+`error` carrying the cause.
 
 ## Validation
 
-Emit-time completeness only (this is a resident execution node — no fix-loop
-on training outcomes): the training rc file records 0, the symmetric final
-check passed, the promised final checkpoint exists, `final/final_acc.json`
-exists, the terminal rule extraction ran (dispatch settled per its failure
-matrix), and the emit line carries all ten schema fields.
+Run the pre-return gate before Step 5 **on the success path only**:
+
+```bash
+python3 "$ORCA_ARTIFACTS_DIR/scripts/check_full_train_emit.py" \
+  --artifacts "$ORCA_ARTIFACTS_DIR"
+```
+
+It verifies `final/final_acc.json` completeness, the promised checkpoint and
+`final/model.onnx` existence, and the budget fingerprint. This is structural
+completeness only — training outcomes are never re-judged. The failure path
+does NOT run this success-product gate: emit `status=failed` directly with
+`error`.
 
 ## Output
 

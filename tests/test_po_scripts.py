@@ -1909,6 +1909,201 @@ def test_workflow_inputs_pin_v5_eight_input_set():
     assert "{{ inputs.accuracy_budget }}" in body
 
 
+def test_po_contract_output_schema_is_thin_envelope():
+    """The contract stage's node output stays a routing envelope: contracts
+    and evidence live on disk, so output must not duplicate their fields."""
+    import yaml
+
+    wf = yaml.safe_load(
+        (_REPO / "workflows" / "prof-opt" / "workflow.yaml").read_text(
+            encoding="utf-8"))
+    node = next(n for n in wf["nodes"] if n["name"] == "po_contract")
+    schema = node["output_schema"]
+    props = set(schema["properties"])
+    assert set(schema["required"]) == props
+    assert props == {"viable", "contracts_path", "error", "generated_artifacts"}
+
+
+def test_prof_opt_execution_nodes_use_thin_output_envelopes():
+    """All execution-stage nodes follow the file-first output contract."""
+    import yaml
+
+    wf = yaml.safe_load(
+        (_REPO / "workflows" / "prof-opt" / "workflow.yaml").read_text(
+            encoding="utf-8"))
+    expected = {
+        "po_flatten": {"flatten_passed", "readiness_path", "error",
+                       "generated_artifacts"},
+        "po_baseline": {"status", "error", "generated_artifacts"},
+        "po_propose": {"status", "error", "generated_artifacts"},
+        "po_probe": {"status", "error", "generated_artifacts"},
+        "po_full_train": {"status", "error", "generated_artifacts"},
+    }
+    for node in wf["nodes"]:
+        if node["name"] not in expected:
+            continue
+        schema = node["output_schema"]
+        props = set(schema["properties"])
+        assert set(schema["required"]) == props
+        assert props == expected[node["name"]], node["name"]
+
+
+def test_check_full_train_emit_gate(tmp_path: Path):
+    """The po_full_train pre-return gate checks terminal artifacts, not
+    outcome quality."""
+    art = tmp_path / "art"
+    final = art / "final"
+    final.mkdir(parents=True)
+    budget = {"epochs": 1, "seed": 0,
+              "data": {"dataset_knob": None, "data_value": None}}
+    (art / "contracts.json").write_text(json.dumps({
+        "train": {"ckpt_output_rule": "{out_dir}/ckpt.pth"},
+        "full_train_budget": budget,
+    }), encoding="utf-8")
+    (final / "final_acc.json").write_text(json.dumps({
+        "vid": "r1-01", "final_acc": 0.9, "baseline_full_acc": 0.8,
+        "baseline_full_acc_source": "baseline",
+        "full_train_budget": budget, "within_budget": True,
+        "metric_direction": "higher_better",
+    }), encoding="utf-8")
+    (final / "model.onnx").write_bytes(b"onnx")
+    (final / "train_status.md").write_text("training\n", encoding="utf-8")
+    (final / "final_metrics.jsonl").write_text(
+        '{"epoch": 1, "metric": 0.9}\n', encoding="utf-8")
+    (final / "ckpt.pth").write_bytes(b"weights")
+
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "check_full_train_emit.py"),
+         "--artifacts", str(art)],
+        capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+
+    bad = json.loads((final / "final_acc.json").read_text(encoding="utf-8"))
+    del bad["final_acc"]
+    (final / "final_acc.json").write_text(json.dumps(bad), encoding="utf-8")
+    proc2 = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "check_full_train_emit.py"),
+         "--artifacts", str(art)],
+        capture_output=True, text=True, timeout=60)
+    assert proc2.returncode == 1
+    assert "missing final_acc" in proc2.stderr
+
+
+def test_check_propose_emit_gate(tmp_path: Path):
+    """The propose pre-return gate checks round disk closure, not verdict
+    quality."""
+    art = tmp_path / "art"
+    (art / "scripts").mkdir(parents=True)
+    shutil.copy(_SCRIPTS / "round_state.py", art / "scripts" / "round_state.py")
+    shutil.copy(_SCRIPTS / "history_lib.py", art / "scripts" / "history_lib.py")
+    (art / "base").mkdir(parents=True)
+    (art / "base" / "origin_anchor.json").write_text(
+        json.dumps({"target_cycles": 100}), encoding="utf-8")
+    rd = art / "rounds" / "001"
+    rd.mkdir(parents=True)
+    (rd / "proposals.json").write_text(json.dumps({
+        "round": 1, "exhausted": False, "filtered_count": 0,
+        "exhausted_rationale": [],
+        "proposals": [{
+            "vid": "r1-01", "change_sig": "sig",
+            "predicted_delta_cycles": -10, "edited_files": ["pkg/model.py"],
+            "target_pattern_id": "P1", "predicted_acc_impact": "low",
+            "sota_reference": "ref",
+        }],
+    }), encoding="utf-8")
+    (art / "history.jsonl").write_text(
+        '{"vid": "r1-01", "round": 1, "change_sig": "sig"}\n',
+        encoding="utf-8")
+    (rd / "verdicts.jsonl").write_text('{"vid": "r1-01"}\n', encoding="utf-8")
+    (rd / "direction.json").write_text('{}', encoding="utf-8")
+    (rd / "analysis.md").write_text("# latency\n", encoding="utf-8")
+    (art / ".round_advanced").write_text(
+        '{"round": 1, "mode": "latency"}', encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "check_propose_emit.py"),
+         "--artifacts", str(art)],
+        capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+
+    (rd / "proposals.json").unlink()
+    proc2 = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "check_propose_emit.py"),
+         "--artifacts", str(art)],
+        capture_output=True, text=True, timeout=60)
+    assert proc2.returncode == 1
+    assert "proposals.json missing" in proc2.stderr
+
+
+def test_check_probe_emit_gate_latency_passthrough(tmp_path: Path):
+    """Latency passthrough only needs the proposal node's advance marker."""
+    art = tmp_path / "art"
+    (art / "scripts").mkdir(parents=True)
+    shutil.copy(_SCRIPTS / "round_state.py", art / "scripts" / "round_state.py")
+    shutil.copy(_SCRIPTS / "history_lib.py", art / "scripts" / "history_lib.py")
+    (art / "base").mkdir(parents=True)
+    (art / "base" / "origin_anchor.json").write_text(
+        json.dumps({"target_cycles": 100}), encoding="utf-8")
+    (art / "rounds" / "001").mkdir(parents=True)
+    (art / ".round_advanced").write_text(
+        '{"round": 1, "mode": "latency"}', encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "check_probe_emit.py"),
+         "--artifacts", str(art)],
+        capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+
+    (art / ".round_advanced").write_text(
+        '{"round": 1, "mode": "accuracy"}', encoding="utf-8")
+    proc2 = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "check_probe_emit.py"),
+         "--artifacts", str(art)],
+        capture_output=True, text=True, timeout=60)
+    assert proc2.returncode == 1
+    assert "does not record (round, latency)" in proc2.stderr
+
+
+def test_check_probe_emit_gate_accuracy_first_entry(tmp_path: Path):
+    """Accuracy first entry requires the best vid to have a terminal probe
+    row in probe_results.jsonl."""
+    art = tmp_path / "art"
+    (art / "scripts").mkdir(parents=True)
+    shutil.copy(_SCRIPTS / "round_state.py", art / "scripts" / "round_state.py")
+    shutil.copy(_SCRIPTS / "history_lib.py", art / "scripts" / "history_lib.py")
+    (art / "base").mkdir(parents=True)
+    (art / "base" / "origin_anchor.json").write_text(
+        json.dumps({"target_cycles": 100}), encoding="utf-8")
+    (art / "best.json").write_text(
+        json.dumps({"vid": "r1-01", "makespan_cycles": 50}), encoding="utf-8")
+    rd = art / "rounds" / "001"
+    rd.mkdir(parents=True)
+    (art / "history.jsonl").write_text(
+        '{"vid": "r1-01", "round": 1, "outcome": "latency_pass"}\n'
+        '{"vid": "r1-01", "round": 1, "outcome": "accuracy_pass"}\n',
+        encoding="utf-8")
+    (rd / "probe_results.jsonl").write_text(
+        '{"vid": "r1-01", "outcome": "accuracy_pass"}\n', encoding="utf-8")
+    (rd / "analysis.md").write_text("# accuracy\n", encoding="utf-8")
+    (rd / "direction.json").write_text('{}', encoding="utf-8")
+    (art / ".round_advanced").write_text(
+        '{"round": 1, "mode": "accuracy"}', encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "check_probe_emit.py"),
+         "--artifacts", str(art)],
+        capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+
+    (rd / "probe_results.jsonl").write_text("", encoding="utf-8")
+    proc2 = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "check_probe_emit.py"),
+         "--artifacts", str(art)],
+        capture_output=True, text=True, timeout=60)
+    assert proc2.returncode == 1
+    assert "probe_results.jsonl missing or empty" in proc2.stderr
+
+
 def test_baseline_chain_nonblocking_emit_and_finalizer_products(tmp_path: Path):
     """executed does NOT wait for the training: the chain emits while the
     training pid is still alive and train_final is absent; the detached
@@ -1930,9 +2125,10 @@ def test_baseline_chain_nonblocking_emit_and_finalizer_products(tmp_path: Path):
     assert set(payload) == schema_fields
     assert payload["status"] == "executed"
     assert payload["error"] == ""
-    assert payload["base_onnx"].endswith("base/model.onnx")
-    assert payload["makespan_cycles"] == 500
-    assert payload["business_logic_path"].endswith("baseline/business_logic.md")
+    artifacts = payload["generated_artifacts"]
+    assert any(a.endswith("base/model.onnx") for a in artifacts)
+    assert any(a.rstrip("/").endswith("base/profile") for a in artifacts)
+    assert any(a.endswith("baseline/business_logic.md") for a in artifacts)
 
     # NON-BLOCKING PROOF: at emit time the training is still running
     train_pid = int((art / "baseline" / "train.pid").read_text(encoding="utf-8"))
@@ -2218,8 +2414,7 @@ def test_baseline_chain_mfu_mode_awaits_analyzer_then_adapts(tmp_path: Path):
                             timeout=120, env=env)
     payload2 = json.loads(second.stdout)
     assert payload2["status"] == "executed", payload2
-    assert payload2["makespan_cycles"] == parallel
-    assert payload2["profile_dir"].endswith("base/profile")
+    assert any(a.rstrip("/").endswith("base/profile") for a in payload2["generated_artifacts"])
     # analyze.py re-derived the bottleneck report from the ADAPTED four-piece
     report = json.loads((art / "base" / "bottleneck_report.json")
                         .read_text(encoding="utf-8"))

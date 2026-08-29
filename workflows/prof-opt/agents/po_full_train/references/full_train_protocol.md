@@ -10,7 +10,7 @@ use the SAME `full_train_budget` from `contracts.json`).
 ## State derivation (every entry)
 
 1. `best.json` must exist and carry a vid — a missing best on this route is
-   an immediate `status=failed` (cause in the assessment: no winner to
+   an immediate `status=failed` (cause in `error`: no winner to
    train).
 2. Read `contracts.json`: `full_train_budget` (epochs + seed — the
    effective values, never recomputed here), the pinned interpreter, the
@@ -99,9 +99,9 @@ python3 "$ORCA_AGENT_RESOURCES/scripts/train_state.py" "$ORCA_ARTIFACTS_DIR/fina
    `.po_full_train_healed.txt`, wipe the partial out-dir contents the train
    contract does not resume over, relaunch (attempt++ in the status file).
 3. Root cause needs a forbidden edit (anything outside the rendered script)
-   → stop: `status=failed` with the cause in the assessment.
-4. Retry budget: 2 failed retries → `status=failed`,
-   `max_retries_hit=true`.
+   → stop: `status=failed` with the cause in `error`.
+4. Retry budget: 2 failed retries → `status=failed`; disclose the retry
+   budget hit in `final/train_status.md`.
 
 ## Symmetric final check (after rc=0, before the evaluation)
 
@@ -118,7 +118,7 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/metric_curve.py" extract \
   --expected-epochs "<full_train_budget.epochs>"
 ```
 
-Non-zero (count mismatch / unparsable) → `status=failed`, assessment
+Non-zero (count mismatch / unparsable) → `status=failed`, `error`
 attributes the failure to the symmetric final check and quotes the
 admission clause (trainings must execute the rendered epoch count exactly;
 early-stopping projects are out of scope — see `contracts.json` `reason`).

@@ -154,16 +154,10 @@ Exit code mapping (the script logs details to stderr):
      exit → `flatten_passed=false` with the stderr in `error`.
   2. **Keep the workspace's `accuracy_rules.json` as-is** (in-run rules are
      the workspace truth; re-seeding would overwrite them — never seed here).
-  3. Re-derive the output fields mechanically from disk:
-     `shadow_root="$ORCA_ARTIFACTS_DIR/shadow"`;
-     `shadow_pkgs` = top-level entries of `shadow/` (directories by name,
-     `*.py` files without the suffix, sorted); `model_module` =
-     `{{ inputs.model_path }}` with the `.py` suffix stripped and path
-     separators replaced by `.` (package layout is preserved inside the
-     shadow, so this is the import-qualified name); `manifest_path`,
-     `baseline_lock_path` from disk. Then go straight to Output (include
-     `verify/memory_verifier_report.md` in `generated_artifacts` when that
-     file exists on disk).
+   3. Re-derive the output fields mechanically from disk:
+      `readiness_path="$ORCA_ARTIFACTS_DIR/readiness/readiness.json"`.
+      Then go straight to Output (include `verify/memory_verifier_report.md`
+      in `generated_artifacts` when that file exists on disk).
 - `1` (`NO_REUSE`) → continue with Step 1.
 - `3` (fail-loud conflict: another live run / structural anchor changed /
   unreadable-or-corrupt BASELINE.lock) → emit `flatten_passed=false` with the
@@ -472,11 +466,7 @@ byte.**
 EMIT_PY="${ORCA_PYTHON:-python3}"   # set in Step 2; python3 fallback covers the REUSE path
 OUT="$("$EMIT_PY" "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
   --field flatten_passed=true \
-  --field shadow_root="$ORCA_ARTIFACTS_DIR/shadow" \
-  --field shadow_pkgs='["<pkg1>", ...]' \
-  --field model_module="<module.dotted.name>" \
-  --field manifest_path="$ORCA_ARTIFACTS_DIR/project_manifest.md" \
-  --field baseline_lock_path="$ORCA_ARTIFACTS_DIR/BASELINE.lock" \
+  --field readiness_path="$ORCA_ARTIFACTS_DIR/readiness/readiness.json" \
   --field error="" \
   --field generated_artifacts='["project_manifest.md", ".user_pkg", "shadow/", "readiness/readiness.json", "verify/memory_verifier_report.md", ...]' \
 )"
@@ -490,7 +480,7 @@ exits 0, your final reply is `$OUT` pasted byte for byte (no reformatting, no
 re-typing, no hand-assembly). If it fails, re-run the emitter and capture again
 — never hand-patch the captured value.
 
-On fail loud, the same emitter with `flatten_passed=false`, `shadow_root=""`,
-`shadow_pkgs=[]`, `model_module=""`, `baseline_lock_path=""`, and `error` carrying
-the root cause — same capture → validate → reply procedure. `generated_artifacts`
-lists paths relative to `$ORCA_ARTIFACTS_DIR` (the actual subset produced).
+On fail loud, the same emitter with `flatten_passed=false`,
+`readiness_path=""`, and `error` carrying the root cause — same capture →
+validate → reply procedure. `generated_artifacts` lists paths relative to
+`$ORCA_ARTIFACTS_DIR` (the actual subset produced).

@@ -46,6 +46,24 @@ per-workflow 目录，见 SKILL.md「产出布局」），从 S1 往下试：
 哪个脚本、V2 是哪个 schema、V3 要不要 validator」。对象层直接用引擎字段，**不要手搓编排**
 （重试/校验逻辑写成节点链是反模式）。
 
+## 2.5 输出薄信封 / 文件优先 / 返回前 gate
+
+Agent 节点的 `output_schema` 是路由信封，不是磁盘产物的镜像。设计输出契约时按下面顺序收敛：
+
+1. **先定义磁盘产物**：把能结构化、能校验的实质内容写到 `$ORCA_ARTIFACTS_DIR`（JSON、
+   YAML、模板、报告、指标曲线等）。
+2. **再定义最小 output_schema**：只保留路由和排障必需字段。通常就是状态、产物路径、
+   `error`、可选 `generated_artifacts`。已经落在磁盘文件里的预算/契约/指标/路径清单不要重复放。
+3. **最后定 gate**：凡产物能机械校验（字段完整性、schema、数值范围、文件存在性、模板
+   token 等），落一个 `scripts/check_<product>.<py|sh>`。Agent 在返回成功前必须先跑这个
+   gate；关键文件（如契约 JSON）不能只靠 agent 声称“已填好”。
+
+判据：
+
+- 看到 output_schema 里出现和磁盘产物同义的整段对象/列表 → 减字段，改成路径引用；
+- 看到 agent.md 的 Output 段落写“我相信/我认为产物已正确” → 缺 gate，补脚本；
+- 看到同一份产物既在文件里又靠 prompt 手抄到 output_schema → 明确违反单一真相源。
+
 ## 3. 固化漏判启发式（审查 findings C 类的判据）
 
 agent.md body 里出现以下信号 = 该抽到 `scripts/` 而没抽（确定性逻辑留在了 prompt 里）：
@@ -62,10 +80,10 @@ agent.md body 里出现以下信号 = 该抽到 `scripts/` 而没抽（确定性
 
 ```markdown
 ### <agent-name>（rev N）
-① 职责与输入/输出：一句话职责；输入来自哪些上游（Jinja 引用形态）；output_schema 草案（字段 + 类型 + 约束）
+① 职责与输入/输出：一句话职责；输入来自哪些上游（Jinja 引用形态）；薄信封 output_schema 草案（路由字段 + 产物路径；实质内容落文件）
 ② 执行步骤：编号列表，每步一句话（可机械执行的步骤在这里自然显形）
 ③ 固化分析：每步标 S1/S2/S3；S1 步骤列出对应 scripts/<file>；S2 列出模板与槽位
-④ 校验计划：V1=（脚本名/断言）；V2=（schema 字段）；V3=（validator criteria 或不需要）
+④ 校验计划：V1=（脚本名/断言，含返回前 gate）；V2=（schema 字段）；V3=（validator criteria 或不需要）
 ⑤ Tier B 推断项：本节点要从用户代码推断的事实清单（缺失走 ask-user 哨兵，绝不造假）
 ⑥ 可视化判定：产出什么结构化数据 / 值不值得图 / chart plan（label/title/type/axes/理由/模式）或「不需要」
 ```

@@ -12,8 +12,8 @@ have flipped since the proposal node ran:
 
 - **latency phase** → **pass through**: no variant is trained, no GPU guard
   is awaited (the round's advance already happened inside the proposal
-  node). Emit the passthrough state honestly (`survivors_probed=0`) and
-  leave.
+  node). Leave the round's disk state as-is and emit the thin passthrough
+  output.
 - **accuracy phase** → run the coarse accuracy gate: for the mechanical
   training set (below), train each variant with EXACTLY the baseline's full
   rendered epoch count (same template, data, seed — the learning-rate
@@ -75,8 +75,8 @@ per judged round). Its body lives at `{{ subagents_root }}/<name>.md`
 **Failure matrix**: the returned first line is not the sentinel, or
 `rules_pool.py check` fails on the updated rule file → re-dispatch ONCE
 with the failure quoted. Second failure → drop the offending rule rows,
-disclose in `assessment`, and CONTINUE the round (rules are an incremental
-asset — they never block the round).
+disclose in the round analysis, and CONTINUE the round (rules are an
+incremental asset — they never block the round).
 
 ## Lazy Loading
 
@@ -137,17 +137,9 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/round_state.py" \
   --artifacts "$ORCA_ARTIFACTS_DIR" mode
 ```
 
-- `latency` → **passthrough**: skip to Step 4 with `mode=latency`,
-  `survivors_probed=0`, `assessment` noting "latency phase passthrough —
-  no accuracy training this round". For `advanced_vid` / `best_updated` /
-  `base_advanced`, re-derive from the round's own disk state: read
-  `.round_advanced` and `rounds/<RRR>/direction.json` — when the marker
-  records `(current round, latency)` take its `vid` / `improved` (the
-  advance happened in the proposal node; report it as this round's state);
-  when the marker is stale or absent (e.g. the proposal node crashed after
-  its advance, deferring the round) report the zero-advance form
-  (`advanced_vid=""`, both flags false) — never read an older round's
-  values.
+- `latency` → **passthrough**: skip to Step 4. The round's advanced vid /
+  flags are already on disk in `.round_advanced` and
+  `rounds/<RRR>/direction.json`; the pre-return gate verifies that closure.
 - `accuracy` → derive the mechanical training set and continue at Step 1.
 
 **Training set (mechanical, no timing inference):** read `best.json`'s vid
@@ -211,8 +203,8 @@ Idempotent ((round, mode) keyed). In the accuracy phase only an
 `accuracy_pass` winner at or under the frozen line advances — a round
 without one keeps the base fixed (the rerouting signal lands in the
 round's `direction.json`). `best_updated` / `base_advanced` /
-`advanced_vid` for your output come from its JSON combined with the marker
-state.
+`advanced_vid` remain on disk; the pre-return gate verifies the
+marker/analysis closure, so the node output does not need to duplicate them.
 
 **Round analysis (accuracy section)** — close the round with its measured
 conclusions. Write the `## accuracy` section of
@@ -230,32 +222,29 @@ copy; analysis prose lives here, never inside prompts.
 ```bash
 python3 "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
   --field status=executed \
-  --field "survivors_probed=<count>" \
-  --field "mode=<latency|accuracy from Step 0>" \
-  --field 'accuracy_pass_vids=["<vid>", ...]' \
-  --field "advanced_vid=<vid or empty string>" \
-  --field "best_updated=<true|false>" \
-  --field "base_advanced=<true|false>" \
-  --field 'artifacts=["probe_status.md", "rounds/<RRR>/probe_results.jsonl", "rounds/<RRR>/analysis.md", "best.json", "rounds/<RRR>/direction.json"]' \
-  --field "assessment=<one line: mode + accuracy-pass/survivor summary + monitor_failed / eval-degradation / rule-extraction disclosures + any retry budget hit>" \
-  --field "max_retries_hit=<true|false>" \
-  --field "healed_files=$(python3 "$ORCA_ARTIFACTS_DIR/scripts/healed_files.py" --path "$ORCA_ARTIFACTS_DIR/.po_probe_healed.txt")"
+  --field 'error=' \
+  --field 'generated_artifacts=["rounds/<RRR>/analysis.md", "best.json", "rounds/<RRR>/direction.json"]'
 ```
 
-`healed_files` is `[]` when the marker file is absent (nothing was healed —
-do not fabricate entries). On workspace-level breakage emit the same field
-set with `status=failed`, `survivors_probed=0`, empty `accuracy_pass_vids`,
-`advanced_vid=""`, `best_updated=false`, `base_advanced=false`, and the
-CAUSE stated in `assessment` (this node's output schema has no error field
-— the assessment carries the failure cause).
+On workspace-level breakage emit the same three fields with
+`status=failed` and `error` carrying the cause. In the accuracy phase, append
+`probe_status.md` and `rounds/<RRR>/probe_results.jsonl` to
+`generated_artifacts` when they exist; do not list latency-only or absent
+files.
 
 ## Validation
 
-Emit-time completeness only (this is a resident execution node — no fix-loop
-on probe outcomes): every vid of the derived training set has a terminal
-accuracy outcome in history (accuracy phase), the advance marker records
-the current round for the phase in play (accuracy phase), and the emit line
-carries all eleven schema fields.
+Run the pre-return gate before Step 4 **on the success path only**:
+
+```bash
+python3 "$ORCA_ARTIFACTS_DIR/scripts/check_probe_emit.py" \
+  --artifacts "$ORCA_ARTIFACTS_DIR"
+```
+
+It verifies terminal probe outcomes on disk and the phase-specific advance
+marker/analysis closure. This is structural completeness only — probe
+outcomes themselves are never re-judged. The failure path does NOT run this
+success-product gate: emit `status=failed` directly with `error`.
 
 ## Supervision points (fail loud)
 

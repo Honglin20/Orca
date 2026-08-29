@@ -293,7 +293,8 @@ bash "$ORCA_AGENT_RESOURCES/scripts/run_latency_recheck.sh"
 ```
 
 Its stdout is an INFO line (not the node output): `latency_pass_count`,
-`gate_mode`, and `summary` feed this node's fields.
+`gate_mode`, and `summary` describe the round state for the pre-return gate
+and the round analysis.
 
 **Repair loop** (≤ 2 per variant, judged from `repair_trace.json`): a
 variant whose verdict is `structural_mismatch` or `latency_fail` →
@@ -309,8 +310,8 @@ variant whose verdict is `structural_mismatch` or `latency_fail` →
    `<repair_directive>=structural:<file-layer finding>` or
    `latency:<verdict summary>`;
 3. re-run the recheck. Still failing after the quota → the variant is
-   eliminated (its verdict row already records the outcome; disclose in
-   the final `assessment`).
+    eliminated (its verdict row already records the outcome; disclose in
+    the round analysis).
 
 ### Step 6: Mechanical round advance (latency phase only)
 
@@ -360,30 +361,31 @@ prompts.
 ```bash
 python3 "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
   --field status=executed \
-  --field "proposals_count=<admitted count on disk>" \
-  --field "exhausted=false" \
-  --field 'implemented=["<vid>", ...]' \
-  --field 'skipped=[{"vid": "<vid>", "reason": "<one clause>", "outcome": "<outcome>"}]' \
-  --field "latency_pass_count=<from the last recheck stdout>" \
-  --field "mode=<gate mode from round_state>" \
-  --field "advanced_vid=<the advance JSON's vid, or empty string>" \
-  --field "verdicts_path=$ORCA_ARTIFACTS_DIR/rounds/<RRR>/verdicts.jsonl" \
-  --field "proposals_path=$ORCA_ARTIFACTS_DIR/rounds/<RRR>/proposals.json" \
   --field 'error=' \
-  --field 'generated_artifacts=["rounds/<RRR>/proposals.json", "rounds/<RRR>/verdicts.jsonl", "rounds/<RRR>/direction.json", "rounds/<RRR>/analysis.md", "base/bottleneck_report.json", "base/bottleneck_analysis.json", "experiment_ledger.json", "history.jsonl"]'
+  --field 'generated_artifacts=["rounds/<RRR>/proposals.json", "rounds/<RRR>/verdicts.jsonl", "rounds/<RRR>/analysis.md", "base/bottleneck_report.json", "base/bottleneck_analysis.json", "experiment_ledger.json", "history.jsonl"]'
 ```
 
-On failure paths the same twelve fields with `status=failed`, `error` naming
-the root cause (subagent + failure per the matrix), and honest counts from
-disk. `status == executed` ⇔ `error == ""` — never both non-empty.
+On failure paths the same three fields with `status=failed`, `error` naming
+the root cause (subagent + failure per the matrix), and honest
+`generated_artifacts` from disk. `status == executed` ⇔ `error == ""` —
+never both non-empty. In the latency phase, append
+`rounds/<RRR>/direction.json` to `generated_artifacts` when it exists.
 
 ## Validation
 
-Emit-time: `proposals.json` parses with `round == R`; every DONE vid has an
-IMPL row in history; every skipped vid has its two rows; every non-skipped
-verdict on disk is reflected in `latency_pass_count`; a zero-proposal round
-carries a non-empty `exhausted_rationale` (with `exhausted=false`); in the
-latency phase the advance marker records `(round, latency)`.
+Run the pre-return gate before Step 7 **on the success path only**:
+
+```bash
+python3 "$ORCA_ARTIFACTS_DIR/scripts/check_propose_emit.py" \
+  --artifacts "$ORCA_ARTIFACTS_DIR"
+```
+
+It verifies: `proposals.json` parses with `round == R`; every admitted vid
+has the expected history row; `verdicts.jsonl` and `analysis.md` exist; and
+in the latency phase `direction.json` and the advance marker are present.
+Fix-loop ≤ 3 iterations; exceeded → `status=failed`. The failure path does
+NOT run this success-product gate: emit `status=failed` directly with the
+root cause in `error`.
 
 ## Output
 

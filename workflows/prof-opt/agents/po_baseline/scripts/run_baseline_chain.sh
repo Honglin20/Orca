@@ -631,17 +631,6 @@ emit() { # emit <status> <error> — the stdout line is EXACTLY the node
 import json, sys
 from pathlib import Path
 art = Path(".")
-def num(path, key):
-    p = art / path
-    if not p.is_file():
-        return 0
-    try:
-        v = json.loads(p.read_text(encoding="utf-8")).get(key)
-        return v if isinstance(v, (int, float)) else 0
-    except Exception:
-        return 0
-def produced(probe, rel):  # schema: path fields are "" for products not produced
-    return str(art / rel) if (art / probe).exists() else ""
 generated = [rel for probe, rel in [
     ("base/model.onnx", "base/model.onnx"),
     ("base/profile/profile_summary.json", "base/profile/"),
@@ -659,15 +648,6 @@ generated = [rel for probe, rel in [
 ] if (art / probe).exists()]
 print(json.dumps({
     "status": sys.argv[1], "error": sys.argv[2],
-    "makespan_cycles": num("base/profile/profile_summary.json", "makespan_cycles"),
-    "base_onnx": produced("base/model.onnx", "base/model.onnx"),
-    "baseline_metrics": produced("baseline/baseline_metrics.jsonl",
-                                 "baseline/baseline_metrics.jsonl"),
-    "business_logic_path": produced("baseline/business_logic.md",
-                                    "baseline/business_logic.md"),
-    "profile_dir": produced("base/profile/profile_summary.json", "base/profile"),
-    "bottleneck_report": produced("base/bottleneck_report.json",
-                                  "base/bottleneck_report.json"),
     "generated_artifacts": generated,
 }))' "$1" "$2"
 }
