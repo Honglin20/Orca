@@ -20,7 +20,7 @@ from pathlib import Path
 
 _SCRIPT = (
     Path(__file__).resolve().parents[2]
-    / "workflows" / "agents" / "ns3_expand_supernet" / "scripts" / "check_search_space.py"
+    / "workflows" / "nas-supernet-v3" / "agents" / "ns3_expand_supernet" / "scripts" / "check_search_space.py"
 )
 
 

@@ -1,7 +1,7 @@
 """conftest.py —— tests/e2e_redesign/ 共享 fixtures。
 
 ``recent_run_cleanup``（autouse）：每测试后扫 ``runs/<wf>-*``，清近 600s mtime 的 run
-目录 + marker。**mtime 退避**确保绝不碰用户既有的活跃 run（如 kd-nas-20260720，2 天前）。
+目录 + marker。**mtime 退避**确保绝不碰用户既有的活跃 run（如两天前的历史 run）。
 """
 
 from __future__ import annotations

@@ -1,0 +1,30 @@
+name: bench_charts
+description: "基准评测 workflow：setup 聚合评测配置，bench 逐次跑评测并把 P95 latency 与 accuracy 推到 web 图表看趋势"
+entry: setup
+inputs:
+  runs:
+    type: string
+    description: "[ask] 基准评测跑几次（预算闸门，评测脚本确定性消费）。业务决策，用户必须给"
+    required: true
+  seed:
+    type: string
+    description: "[advanced] 复现种子（默认 0）。全部 workflow 必须有"
+    required: false
+    default: "0"
+nodes:
+  - name: setup
+    kind: set
+    values:
+      runs: "{{ inputs.runs }}"
+      seed: "{{ inputs.seed }}"
+    routes:
+      - to: bench
+  - name: bench
+    kind: agent
+    executor: opencode
+    model: "deepseek/deepseek-v4-flash"
+    agent: bench
+    routes:
+      - to: $end
+outputs:
+  result: "{{ bench.output }}"

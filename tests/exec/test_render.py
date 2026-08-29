@@ -247,13 +247,13 @@ def test_render_template_subagents_root_inlined_when_set():
     """
     ctx = RunContext(
         inputs={}, outputs={}, run_id="r1",
-        subagents_root="/abs/path/to/workflows/subagents/nas-supernet",
+        subagents_root="/abs/path/to/workflows/nas-supernet/subagents",
     )
     out = render_template(
         "Read {{ subagents_root }}/supernet-evaluator.md", ctx
     )
     assert out == (
-        "Read /abs/path/to/workflows/subagents/nas-supernet/supernet-evaluator.md"
+        "Read /abs/path/to/workflows/nas-supernet/subagents/supernet-evaluator.md"
     )
 
 
@@ -274,6 +274,10 @@ def test_render_template_subagents_root_referenced_but_empty_fails_loud():
     with pytest.raises(ExecError) as ei:
         render_template("Read {{ subagents_root }}/foo.md", ctx)
     assert "subagents_root" in str(ei.value)
+    # 批 C（plan 2026-08-27）：文案提示双形态位置——per-wf（与 workflow.yaml 同目录）
+    # 优先，旧平铺（workflows/subagents/<wf-name>/）并存。
+    assert "workflow.yaml 同目录" in str(ei.value)
+    assert "subagents/<wf-name>" in str(ei.value)
     assert ei.value.phase == "render"
 
 

@@ -21,7 +21,8 @@ phase 5 单轨化迁移后校验项重排（9 项：①②④⑥⑦⑧⑨⑩⑪�
 - **聚合**：9 个 `_check_*` 全部往同一个 `ValidationResult` 加，最后统一 raise，
   绝不第一个错就抛（SPEC §1 决策 1-B，LLM 生成 YAML 常多处错，一次报全）。
 - **fail loud + 精确**：每个错误指明哪个 node / parallel 组 / 哪条边 / 哪个引用错了。
-- **零反向依赖**：只依赖 `orca.schema` + jinja2（meta 解析，不 render）。
+- **零反向依赖**：只依赖 `orca.schema` + jinja2（meta 解析，不 render）+ 同包
+  `orca.compile.layout`（subagents 目录双形态定位，单一真相源）。
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from jinja2.exceptions import TemplateSyntaxError
 from jinja2.meta import find_undeclared_variables
 from jinja2.nodes import And, CondExpr, Const, Getattr, Getitem, If, Name, Test
 
+from orca.compile.layout import resolve_subagents_dir
 from orca.schema import (
     AgentNode,
     ForeachNode,
@@ -124,15 +126,17 @@ def validate_workflow(
     """全部语义校验。返回 warnings；有 errors 抛 ConfigurationError（SPEC §4）。
 
     ``workflows_root``（point-to-file subagent 协议 SPEC §3.2/§7，可选）：workflow yaml
-    所在目录。提供时，``_check_subagents_md`` 校验 ``workflows_root / "subagents" / wf.name``
-    内的子 agent md frontmatter 完整性 + body 旧协议残留。``None`` → 回退 ``wf.workflows_root``
+    所在目录。提供时，``_check_subagents_md`` 按双形态解析 subagents 目录（per-wf：
+    ``workflows_root/subagents/`` 直接含 ``*.md``；旧平铺：``workflows_root/subagents/wf.name``，
+    公式在 ``orca.compile.layout.resolve_subagents_dir`` 单一真相源），校验其中的子 agent md
+    frontmatter 完整性 + body 旧协议残留。``None`` → 回退 ``wf.workflows_root``
     （``load_workflow`` 加载期绑定，单一真源）。目录不存在时：无模板引用 ``{{ subagents_root }}``
     → 跳过（如 quant-* 无子 agent 的 workflow，SPEC §3.3 正常）；有引用 → load 期 error
     （确定性错误前移，而非 run 中途 render 才炸）。
     """
     result = ValidationResult()
     _check_workflow_name_reserved(wf, result)  # §2.2 保留字黑名单（先于一切）
-    _check_required_inputs_no_default(wf, result)  # 必填 input 不得带 default（KD-NAS latency_provider 铁律）
+    _check_required_inputs_no_default(wf, result)  # 必填 input 不得带 default（default 会静默绕过 ask）
     _check_names_unique(wf, result)            # ①（含 parallel 组名）
     _check_entry_exists(wf, result)            # ②
     _check_entry_is_node(wf, result)           # ⑬ entry 非 parallel 组
@@ -181,8 +185,8 @@ def _check_required_inputs_no_default(wf: Workflow, result: ValidationResult) ->
 
     ``InputDef.required`` 默认 True，故「带 default 但省略 required」的常见可选 input 也会
     落入此模式；为避免误伤生态里大量此类 input，本检查降为 **warning**（``tars validate`` 可见，
-    不阻断）。铁律性必填 input（如 KD-NAS 的 ``latency_provider``）的真正护栏是：
-      (a) YAML 显式 ``required: true`` 且**不给 default``（KD-NAS 已如此）；
+    不阻断）。铁律性必填 input（如 ``latency_provider`` 这类用户真硬件脚本路径）的真正护栏是：
+      (a) YAML 显式 ``required: true`` 且**不给 default``；
       (b) 运行时 ``orchestrator.py`` 必填缺失 + 无 default → fail loud。
     本 warning 只为在编译期暴露「required 却给了 default」的配置异味（BLK-10 可见性目标）。
     """
@@ -1221,18 +1225,20 @@ def _check_subagents_md(
          Read（静态可知则校验；tools=None=全开视为含 Read）。
 
     ``workflows_root=None`` 时回退 ``wf.workflows_root``（load_workflow 加载期绑定，
-    单一真源）。目录不存在时：若没有任何模板引用 ``{{ subagents_root }}`` → 跳过
-    （SPEC §3.3：无 subagents 的 workflow 正常）；若引用了 → **load 期 fail loud**
-    （确定性错误在确定性阶段暴露，而非 run 中途 render 才炸）。run 期 render 兜底
-    （``{{ subagents_root }}`` 但 ctx.subagents_root=""）保留作纵深防御（防程序化
-    构造的 wf）。
+    单一真源）。目录定位按双形态（``orca.compile.layout.resolve_subagents_dir``）：
+    per-wf 形态 subagents/ 与 workflow.yaml 同目录；旧平铺形态在
+    ``workflows_root/subagents/<wf.name>/``。双形态均未命中时：若没有任何模板引用
+    ``{{ subagents_root }}`` → 跳过（SPEC §3.3：无 subagents 的 workflow 正常）；
+    若引用了 → **load 期 fail loud**（确定性错误在确定性阶段暴露，而非 run 中途
+    render 才炸）。run 期 render 兜底（``{{ subagents_root }}`` 但
+    ctx.subagents_root=""）保留作纵深防御（防程序化构造的 wf）。
     """
     if workflows_root is None:
         workflows_root = wf.workflows_root
     if workflows_root is None or not wf.name:
         return
-    subagents_root = workflows_root / "subagents" / wf.name
-    if not subagents_root.is_dir():
+    subagents_dir = resolve_subagents_dir(workflows_root, wf.name)
+    if subagents_dir is None:
         referencing = [
             location
             for location, _self_name, text, _is_expr, _extras in _iter_templates(wf)
@@ -1240,14 +1246,15 @@ def _check_subagents_md(
         ]
         if referencing:
             result.add_error(
-                f"模板引用了 {{{{ subagents_root }}}} 但解析目录不存在："
-                f"{subagents_root}（位置：{'、'.join(referencing)}）。"
-                "子 agent body 目录缺失：dev 态请确认 workflow yaml 位于 repo "
-                "``workflows/`` 下（subagents/ 与之同级）；已安装环境请先 ``tars install`` "
-                "（部署到 ~/.orca/workflows/subagents/）。"
+                f"模板引用了 {{{{ subagents_root }}}} 但解析目录不存在（双形态均未命中："
+                f"{workflows_root / 'subagents'} 与 "
+                f"{workflows_root / 'subagents' / wf.name}；位置：{'、'.join(referencing)}）。"
+                "子 agent body 目录缺失：per-wf 形态 subagents/ 应与 workflow.yaml 同目录"
+                "（<wf-dir>/subagents/）；旧平铺形态在 workflows/subagents/<wf-name>/。"
+                "dev 态请确认 yaml 位于 workflows/ 布局内；已安装环境请先 ``tars install``。"
             )
         return
-    md_files = sorted(subagents_root.glob("*.md"))
+    md_files = sorted(subagents_dir.glob("*.md"))
     for md in md_files:
         try:
             text = md.read_text(encoding="utf-8")

@@ -19,15 +19,20 @@
 cases/<NN>-<slug>/
   case.md               # 场景 + 输入（NL / 内联素材）+ 预期不变量
   expected/
-    workflow.yaml       # 钉死的预期产物（经 tars validate）— agent-pool-only case 无此文件
-    agents/             # 预期 agent md（workflow 用 agent: 引用时必有，与 workflow.yaml 同级）
-      <name>.md
-      <name>/agent.md   # 文件夹 agent（含 scripts/ 资源）
-      <name>/scripts/...
+    <wf-name>/          # per-workflow 目录（目录名 = expected yaml 的 name 字段）
+      workflow.yaml     # 钉死的预期产物（经 tars validate）— agent-pool-only case 无此层
+      agents/           # 预期 agent md（workflow 用 agent: 引用时必有，与 workflow.yaml 同级）
+        <name>.md
+        <name>/agent.md # 文件夹 agent（含 scripts/ 资源）
+        <name>/scripts/...
 ```
 
-**校验契约**：`expected/workflow.yaml` 的目录即 workflow_dir，resolver 查 `expected/agents/`。
-故 workflow 引用 `agent: x` 时，`expected/agents/x.md`（或 `x/agent.md`）必须存在——否则 validate 红。
+**例外**：agent-pool-only case（14，无 workflow.yaml）的 `expected/agents/` 保持平铺
+（只造 agent 池，无 per-wf 目录层）。
+
+**校验契约**：`expected/<wf-name>/workflow.yaml` 的目录即 workflow_dir，resolver 查
+`expected/<wf-name>/agents/`。故 workflow 引用 `agent: x` 时，
+`expected/<wf-name>/agents/x.md`（或 `x/agent.md`）必须存在——否则 validate 红。
 
 ## 场景 → case 映射
 

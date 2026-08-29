@@ -18,7 +18,14 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-import rehypePrism from "rehype-prism-plus";
+// SPEC 2026-08-28 C2.1：**必须**走 `/common` 子路径默认导出（36 门）。禁止根路径
+// `rehype-prism-plus`（含具名 rehypePrismCommon）——根入口无条件 import "refractor/all"
+// （297 门）且 refractor 声明 sideEffects，打包器无法摇除，chunk 不瘦身。
+// 未收录语言（如 tsx）经 ignoreMissing 原样渲染（fail-soft）。
+import rehypePrism from "rehype-prism-plus/common";
+// SPEC 2026-08-28 C2.2：katex CSS 随 markdown chunk 加载（不进首屏 index chunk）。
+// 首屏直连 .md 预览存在一次性 FOUC（SPEC §1 已知项，单用户工具可接受）。
+import "katex/dist/katex.min.css";
 import { useWorkflowStore } from "@/stores/workflow-store";
 
 export interface MarkdownTextProps {

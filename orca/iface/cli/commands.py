@@ -39,7 +39,7 @@ from orca.compile import (
     load_workflow,
     load_workflow_with_warnings,
 )
-from orca.iface.cli.config import apply_kb_requirement, resolve_kb_dir
+from orca.iface.cli.config import apply_kb_requirement
 
 logger = logging.getLogger(__name__)
 

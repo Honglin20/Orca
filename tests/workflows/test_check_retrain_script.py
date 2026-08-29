@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
-_AGENT = _REPO / "workflows" / "agents" / "ns3_retrain_script"
+_AGENT = _REPO / "workflows" / "nas-supernet-v3" / "agents" / "ns3_retrain_script"
 _CHECK = _AGENT / "scripts" / "check_retrain_script.sh"
 _LAUNCHER = _AGENT / "scripts" / "check_launcher.sh"
 

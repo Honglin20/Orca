@@ -6,6 +6,8 @@
   - ``GET /api/workflows/{name}/agents`` → workflow 作用域内可发现的全部 agent（fail-soft）
   - ``GET /api/workflows/{name}/agents/{agent}/tree`` → agent 资源目录递归文件树
   - ``GET /api/workflows/{name}/agents/{agent}/file?path=<rel>`` → 单个文件文本内容
+  - ``GET /api/workflows/{name}/tree`` → workflow 目录（yaml parent）全资产递归树（批 G）
+  - ``GET /api/workflows/{name}/file?path=<rel>`` → workflow 目录下单文件文本内容（批 G）
 
 **纯只读**：本路由不做任何写入 / 执行 / 编排。仅复用 ``orca.compile`` 现成 loader +
 ``orca.schema`` 静态结构。无 manager 依赖（仿 ``routes/projects.py:17``）。
@@ -17,6 +19,7 @@ compile/schema 严禁反向 import iface.web。
   - ``/{name}`` detail：``ConfigurationError`` → 500（catalog 损坏非用户错，与 list 不一致
     须显式暴露，不能 fail-soft 假装找不到）。
   - ``/agents``：单个 agent resolve 失败 → fail-soft 进 ``missing: true``（list 完整不崩）。
+  - ``/{name}`` detail 的 ``subagents`` 键：逐文件 fail-soft（读失败 → 空描述，列表完整不崩）。
   - ``/tree`` / ``/file``：路径越界 / 大文件 / 二进制 → 4xx 显式 detail（不静默吞）。
 """
 
@@ -25,6 +28,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import yaml
 from fastapi import APIRouter, HTTPException, Query
 
 from orca.compile import ConfigurationError, catalog
@@ -34,6 +38,7 @@ from orca.compile.agents import (
     LocalPoolResolver,
     ResolveContext,
 )
+from orca.compile.layout import resolve_subagents_dir
 from orca.compile.parser import _iter_agent_nodes
 
 logger = logging.getLogger(__name__)
@@ -70,7 +75,7 @@ def build_router() -> APIRouter:
         found = catalog.find_workflow(name)
         if found is None:
             raise HTTPException(status_code=404, detail="workflow not found")
-        wf, _yaml_path = found
+        wf, yaml_path = found
 
         referenced: list[str] = []
         for node, _is_body, _parent in _iter_agent_nodes(wf):
@@ -87,6 +92,8 @@ def build_router() -> APIRouter:
             "entry": wf.entry,
             "inputs_schema": detail["inputs_schema"],
             "agents_referenced": referenced,
+            # 批 G：subagents 进 detail response（SPEC 钉死，不设独立列表端点）。
+            "subagents": _list_subagents(Path(yaml_path).parent, wf.name),
         }
 
     # ── Endpoint 3：workflow 作用域内可发现的全部 agent（fail-soft）──────────────
@@ -159,30 +166,47 @@ def build_router() -> APIRouter:
         """读文件文本（plan §M2 envelope + M6 size cap + 二进制检测）。
 
         守卫顺序：路径越界/symlink/非文件 → 404；超 1MB → 422；二进制 → 422。
+        守卫 + 读取段抽为 ``_read_text_file``（批 G：与 workflow file 端点共享，DRY）。
         """
         resources_root = _resolve_agent_root(name, agent)
-        candidate = _safe_resolve(resources_root, path)
-        if candidate is None:
-            raise HTTPException(status_code=404, detail="file not found")
+        return _read_text_file(resources_root, path)
 
-        size = candidate.stat().st_size
-        if size > _MAX_FILE_BYTES:
-            raise HTTPException(
-                status_code=422,
-                detail=f"file too large: {size} bytes (limit {_MAX_FILE_BYTES})",
-            )
-        with candidate.open("rb") as f:
-            if b"\x00" in f.read(2048):
-                raise HTTPException(status_code=422, detail="binary file")
-        text = candidate.read_text(encoding="utf-8")
-        ext = candidate.suffix.lstrip(".")
+    # ── Endpoint 6：workflow 目录全资产递归树（批 G）──────────────────────────
+    @router.get("/{name}/tree")
+    async def get_workflow_tree(name: str) -> dict:
+        """递归遍历 workflow 目录（yaml parent），返回全资产树（批 G）。
+
+        root = ``_resolve_context_for(name).workflow_dir``（yaml parent）：per-wf 形态
+        即 ``<wf-dir>``；旧平铺形态下 root 是 workflows 根本身（SPEC 公式字面，过渡期
+        可接受——测试钉死该语义防歧义）。TreeNode 与 agent tree 完全同构（复用
+        ``_build_tree``，过滤/排序规则一致）。
+        """
+        ctx = _resolve_context_for(name)
+        if ctx is None:
+            raise HTTPException(status_code=404, detail="workflow not found")
+        root = ctx.workflow_dir
         return {
-            "path": path,
-            "text": text,
-            "ext": ext,
-            "size": size,
-            "truncated": False,
+            "workflow": name,
+            "root": str(root),
+            "nodes": _build_tree(root, rel=""),
         }
+
+    # ── Endpoint 7：workflow 目录下单文件文本内容（批 G）──────────────────────
+    @router.get("/{name}/file")
+    async def get_workflow_file(
+        name: str,
+        path: str = Query(..., description="相对 workflow root 的 POSIX 路径"),
+    ) -> dict:
+        """读 workflow 目录下单文件——workflow.yaml / scripts / 共享脚本资产（批 G）。
+
+        不复用 agent file 端点：其 root 是 agent resources_root，workflow.yaml /
+        ``agents/_xxx_scripts`` 多数不在任何 agent root 下。守卫 + 读取与 agent file
+        端点共享 ``_read_text_file``（envelope 同构）。
+        """
+        ctx = _resolve_context_for(name)
+        if ctx is None:
+            raise HTTPException(status_code=404, detail="workflow not found")
+        return _read_text_file(ctx.workflow_dir, path)
 
     return router
 
@@ -193,8 +217,9 @@ def build_router() -> APIRouter:
 def _resolve_context_for(name: str) -> ResolveContext | None:
     """按 workflow name 构造 ResolveContext（plan §ResolveContext 构造）。
 
-    ``workflow_dir`` = yaml 所在目录（即 ``workflows/``），``_search_bases`` 第一项
-    ``workflows/agents/`` 命中。``cwd`` 用 ``Path.cwd()``——与 ``parser.load_workflow``
+    ``workflow_dir`` = yaml 所在目录（per-wf 形态即 ``<wf-dir>``；旧平铺形态为
+    ``workflows/`` 根），``_search_bases`` 第一项 ``<wf-dir>/agents``（旧平铺
+    ``workflows/agents/``）命中。``cwd`` 用 ``Path.cwd()``——与 ``parser.load_workflow``
     默认行为一致，不在 route 层 monkeypatch cwd（blast radius）。
 
     找不到 workflow → None（caller 决定 404）。
@@ -251,6 +276,92 @@ def _safe_resolve(root: Path, rel: str) -> Path | None:
         return candidate
     except (ValueError, OSError):
         return None
+
+
+def _read_text_file(root: Path, rel: str) -> dict:
+    """守卫 + 读取单文件文本（plan §M2 envelope + M6 size cap + 二进制检测）。
+
+    agent file 与 workflow file 两端点的共享读取函数（批 G DRY 落点）：两处同构的
+    1MB / 二进制 / 404 守卫只此一份。守卫顺序：路径越界/symlink/非文件 → 404；
+    超 1MB → 422；二进制（前 2048 字节含 ``\\x00``）→ 422。raise HTTPException
+    语义与抽前 get_agent_file 内联段逐字一致。
+    """
+    candidate = _safe_resolve(root, rel)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="file not found")
+
+    size = candidate.stat().st_size
+    if size > _MAX_FILE_BYTES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"file too large: {size} bytes (limit {_MAX_FILE_BYTES})",
+        )
+    with candidate.open("rb") as f:
+        if b"\x00" in f.read(2048):
+            raise HTTPException(status_code=422, detail="binary file")
+    text = candidate.read_text(encoding="utf-8")
+    ext = candidate.suffix.lstrip(".")
+    return {
+        "path": rel,
+        "text": text,
+        "ext": ext,
+        "size": size,
+        "truncated": False,
+    }
+
+
+def _list_subagents(wf_dir: Path, wf_name: str) -> list[dict]:
+    """列出 workflow 的 subagents（批 G：detail response 的 ``subagents`` 键）。
+
+    双形态目录解析复用 ``orca.compile.layout.resolve_subagents_dir``（单一真相源，
+    validator / orchestrator 同源——web 不得自抄公式）。逐文件 fail-soft：读失败 /
+    编码错 → ``{name: stem, description: ""}`` + warning（detail 整体不崩，仿
+    agents 列表模式）。目录缺失（双形态均未命中）→ ``[]``（无 subagents 的 wf 正常）。
+    排序：``sorted(glob("*.md"))`` 文件名字典序（稳定，golden 可测）。
+    """
+    sub_dir = resolve_subagents_dir(wf_dir, wf_name)
+    if sub_dir is None:
+        return []
+    result: list[dict] = []
+    for md in sorted(sub_dir.glob("*.md")):
+        if not md.is_file():
+            continue
+        try:
+            description = _subagent_description(md.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError) as e:
+            logger.warning(
+                "workflows/detail: subagent %s read failed (fail-soft): %s",
+                md.stem,
+                e,
+            )
+            description = ""
+        result.append({"name": md.stem, "description": description})
+    return result
+
+
+def _subagent_description(text: str) -> str:
+    """抽 subagent md frontmatter 的 ``description`` 键（宽松解析，批 G）。
+
+    不复用 ``compile.agents._parse_meta_yaml``（``AgentMeta`` 未知字段 TypeError）
+    也不复用 ``validator._parse_subagent_frontmatter``（strict 三键协议、无
+    description）——真实 subagent md 只有 subagent/version/sentinel 三键，直接复用
+    会把全部真实文件打进 fail-soft。frontmatter 未闭合 / YAMLError / 无键 / 非
+    str → ``""``（**不取 body 首行**——正文语义劫持，plan §3 批 G 钉死兜底）。
+    """
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return ""
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() != "---":
+            continue
+        try:
+            data = yaml.safe_load("\n".join(lines[1:idx]))
+        except yaml.YAMLError:
+            return ""
+        if isinstance(data, dict) and isinstance(data.get("description"), str):
+            return data["description"]
+        return ""
+    return ""  # frontmatter 未闭合
 
 
 def _build_tree(path: Path, *, rel: str) -> list[dict]:

@@ -5,6 +5,22 @@
 
 ---
 
+## [2026-08-28] perf(web): 传输层 gzip/immutable + markdown chunk 瘦身 + 渲染订阅收窄 + 虚拟化（commit `e756b8c..b824f24`，6 commits）
+
+针对三症状（整体加载慢/查看页慢/markdown 慢）四路优化：GZip 中间件 + hashed 资产 immutable 缓存 + SPA no-cache + build 前清 assets（5.5MB→2.9MB）；prism 高亮走 `rehype-prism-plus/common` 子路径 36 门（chunk 1018KB→536KB）+ katex CSS 移出首屏；store fold 派生 `ev` 索引 + `takenEdgeKeys` + 三组件逐字段订阅 + EntryRenderer memo + reuseEntries 引用复用；行高 `useDynamicRowHeight` + 虚拟化阈值 500→100（测试先行）+ canary 投影修复。SDD-LOOP 全流程：spec 2 轮收敛（UD×2 拍板：AgentsRail 遗留 / A6 无硬 KPI）+ plan adversary 2 轮 + coder 内环 1 轮 + E2E **PASS**（vitest 590 绿 / pytest 绿 / 真实 tars serve 头实测 / 真实 chromium 冒烟零报错，A1-A6 全过，缺陷 0）。详见 [release note](../releases/2026-08-28-web-perf-optimization.md)。
+
+## [2026-08-28] refactor(prof-opt): prompt 洁净清理 + 轮末结论闭环（commit `94378e8`）
+
+洁净审查（§9 四层 + 3 独立通读）→ 15 violations 全闭环：内联确定性代码抽脚本 ×12（行为等价 + 单测钉契约）、开发期残留清零、lint 部署约定豁免（命令位仍严查）；轮末结论闭环最小版——`rounds/<NNN>/analysis.md` 双节落盘（propose 时延/probe 精度）+ 上轮回流 proposer + 报告 Round Conclusions 节，多轮体量天然有界。code-reviewer 11 findings 全修；validate 0/0、静态/宽口径零 error、pytest 全绿。用户裁决：镜像预置规则否决（洁净原则）、E2E 由用户换 mfu-benchmark 后自跑。详见 [release note](../releases/2026-08-28-prof-opt-prompt-cleanliness-and-round-conclusions.md)。
+
+## [2026-08-28] refactor(workflows): per-workflow 目录隔离——平铺+全局池 → 14 个自包含 wf 目录（commit `a7cb0a5..37b4295` 迁移链 7 commits + 收尾 `d780fc2`）
+
+kd-nas 净删除（81 文件 -21690 行）；加载层双形态（`orca/compile/layout.py` 单一真相源：平铺优先 + subagents/KB per-wf 解析，旧平铺项目级用法继续可用）；workflows/ 大迁移（~69 agent 分流 + 共享副本 4 agent×2、`_quant_scripts`×4 逐文件 sha256 一致 + KB/kb_graph 收编；md 零内容改动 348 R100 + 0 M）；install per-wf 整树 sync + 旧布局 backup 四分支（凡可能含用户改动一律留档不删）；web detail subagents + tree/file 新端点 + 前端 Subagents 区/资产树（含 store 跨 wf 竞态守卫）；create-workflow skill 产出 per-wf 化（benchmark expected 重排）。E2E test-agent 真执行 **PASS**（清场 → 真实 tars install → 安装态 list/load/validate 14/14 → 单测 4279 passed 零新增 → web 六断言；验证当时唯一 MINOR 死链 monitor_real_test.sh 已修复闭环）；待用户决策项见 `LAYOUT_MIGRATION_REPORT.md`。详见 [release note](../releases/2026-08-28-workflow-per-dir-layout.md)。
+
+## [2026-08-27] feat(workflows): prof-opt v5——时延先行顺序门控重设计（commit `fdd7a52..d46e9d5` + `b03d8fb`，9 commits）
+
+真机首跑复盘驱动：inputs 14→8（npu 自动解析）；时延链式推进（严格改进即推进、追击期零训练、轮帽默认 100 无早退）→ 达线后粗训精度门 → 恢复轮底座固定+组合式提案（U1）→ 双达标 full-train；origin 双锚冻结（修晋升不重锚）；round_state 单一来源（修 gate 路径漂移温床）；精度规则双层池（model_hash 跨文件夹继承 + generality 跨模型迁移 + confirm/refute 集合计数，U2）；部署件版本戳 + 入口幂等重部署（U3）。SDD 全流程：spec 3 轮 / plan adversary 3 轮 / coder 内环 2 轮 / E2E test-agent **PASS**（197 tests + validate 0/0 + 7/7 对抗 probe）；真机 §11.4 清单归用户。详见 [release note](../releases/2026-08-27-prof-opt-v5-sequential-gating.md)。
+
 ## [2026-08-26] feat(workflows): prof-opt v4 重构——基线完整训练非阻塞 + propose 子代理内闭环 + profiling 子代理化（commit `86ccf99..9ae6438`，13 commits）
 
 10→8 节点：基线完整训练后台跑（finalizer 守护收尾曲线/双锚/终检 + GPU 串行守卫 + push_curves live 图）；po_propose 三子代理内闭环（瓶颈富化[referential]→结构级提案[业务逻辑×SOTA 禁超参 ≤3/轮]→实现+时延打回 ≤2），删 po_implement/po_verify；business-logic-analyst 五段业务逻辑文档；变体 stop-at-k（同 epochs 渲染+进程组杀+@k 对齐比较）；full_train 锚=基线终值删补训路径；D-V4-20 profiling 子代理化（profile_script_path 退役→npu 三参；mfu-analyzer 子代理[mfu_benchmark.py 文件名锁定] + mfu_adapter 确定性转换[并行 cycles→四件套]，placeholder 模式不变）。SPEC 3 轮对抗（65+ 项回卷，UD-1/2/3 拍板）+ 计划 2 轮 + 134 单测绿 + **18 份 prompt 文件逐一独立 reviewer 全 CLEAN**（verify/cleanliness/）+ E2E 2 轮真执行（mnist success 写回逐字节==winner / gate 零解堵自然过）；随任务落地 3 项引擎/skill 修复（script 节点 project-scoped artifacts、tars 逐字传递铁律、reuse_check TypeError）。mfu 模式 E2E 归属用户真机。详见 [release note](../releases/2026-08-26-prof-opt-v4-refactor.md)。

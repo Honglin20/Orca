@@ -34,8 +34,8 @@ sys.path.insert(0, str(TESTS_DIR / "e2e_puzzle"))
 import evaluator_driver as ev  # noqa: E402
 
 CASES_ROOT = TESTS_DIR / "e2e_puzzle" / "fixtures" / "evaluator_cases"
-SUBAGENTS_DIR = TESTS_DIR.parent / "workflows" / "subagents" / "puzzle"
-CATALOG_PATH = TESTS_DIR.parent / "workflows" / "agents" / "_puzzle_scripts" / "candidate_catalog.yaml"
+SUBAGENTS_DIR = TESTS_DIR.parent / "workflows" / "puzzle" / "subagents"
+CATALOG_PATH = TESTS_DIR.parent / "workflows" / "puzzle" / "agents" / "_puzzle_scripts" / "candidate_catalog.yaml"
 
 _BLOCK_MAP_CASES = [
     "01_conv_as_attention",

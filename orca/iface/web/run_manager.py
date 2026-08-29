@@ -137,7 +137,7 @@ class InProcessRunHandle(RunView):
 
     source: RunSource = field(default="in-process", init=False)
     wf: Workflow | None = None
-    # plan 2026-08-04 kd-nas headless fix：workflow yaml 所在目录，透传给 Orchestrator
+    # workflow yaml 所在目录，透传给 Orchestrator
     # → executor 注入 ORCA_WORKFLOWS_ROOT env（agent.md cwd 无关定位共享资源）。
     workflows_root: Path | None = None
     gate_handler: HumanGateHandler | None = None

@@ -12,7 +12,7 @@
 
 **side effect**：每测试创建真 orca run（marker + tape）。``conftest.recent_run_cleanup``
 （autouse）按 mtime 退避清近 600s 的 run 目录——**绝不**碰用户既有的活跃 run（如
-kd-nas-20260720，2 天前）。
+数天前的历史 run）。
 """
 
 from __future__ import annotations
@@ -35,12 +35,11 @@ SINGLE_NODE_WF = [
     "quant-qat",
     "quant-bit-curve",
 ]
-# 多节点（nas×2 / struct / kd）。
+# 多节点（nas×2 / struct）。
 MULTI_NODE_WF = [
     "nas-agent-pipeline",
     "nas-hp-search",
     "agent-struct-exploration",
-    "kd-nas",
 ]
 
 # orca 允许每 wf 仅一个活跃 run；elapsed > 此阈值的 run 视为「用户既有」（非本测试创建）——
@@ -49,7 +48,7 @@ _PREEXISTING_RUN_ELAPSED_S = 120.0
 
 
 def _skip_if_preexisting_active_run(wf_name: str) -> None:
-    """若 wf 有 elapsed > 120s 的活跃 run（用户既有，如 kd-nas-20260720），跳过测试。
+    """若 wf 有 elapsed > 120s 的活跃 run（用户既有的历史 run），跳过测试。
 
     orca ``duplicate-active-run`` 会拒新 bootstrap；我们**不能** stop 用户的 run（任务硬约束），
     故只能 skip 并在报告登记为「环境约束，非契约违例」。
@@ -127,12 +126,12 @@ def test_walk_multi_node_first_step_progresses(wf_name: str) -> None:
     assert first_step.node, f"{wf_name} 首步缺 node 名"
 
 
-# ── bootstrap 冒烟（8 workflow 全量，快） ──────────────────────────────────────
+# ── bootstrap 冒烟（全部 workflow 全量，快） ──────────────────────────────────
 
 
 @pytest.mark.parametrize("wf_name", sorted(WORKFLOWS.keys()))
 def test_bootstrap_all_workflows(wf_name: str) -> None:
-    """8 workflow 全量 bootstrap 冒烟：compile + inputs 解析 + 首节点 prompt 渲染无 Jinja 错。"""
+    """全部 workflow bootstrap 冒烟：compile + inputs 解析 + 首节点 prompt 渲染无 Jinja 错。"""
     from tests.spike_ask_user.orca_cli import stop as orca_stop
 
     _skip_if_preexisting_active_run(wf_name)

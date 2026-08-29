@@ -17,8 +17,8 @@ import sys
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[1]
-_INJECT_SRC = _REPO / "workflows" / "agents" / "_po_scripts" / "orca_inject"
-_SCRIPTS_SRC = _REPO / "workflows" / "agents" / "_po_scripts"
+_INJECT_SRC = _REPO / "workflows" / "prof-opt" / "agents" / "_po_scripts" / "orca_inject"
+_SCRIPTS_SRC = _REPO / "workflows" / "prof-opt" / "agents" / "_po_scripts"
 
 
 def _build_workspace(tmp_path: Path) -> dict[str, Path]:

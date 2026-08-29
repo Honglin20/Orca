@@ -14,6 +14,7 @@ import {
   HANDLED_EVENT_TYPES,
   useWorkflowStore,
 } from "@/stores/workflow-store";
+import { selectTakenEdgeKeys } from "@/selectors";
 import type { WebEvent } from "@/types/events";
 import {
   ALL_EVENT_TYPES,
@@ -355,35 +356,37 @@ describe("workflow-store", () => {
 //      全量 refold（P0-5 闭环）。
 //   3. **null session_id → "main"** 哨兵（SPEC §P2 接口契约）。
 //   4. **setSelectedNode 联动**：设 selectedSession = 该 node 第一个 sub session（P1-3）。
+
+// 构造 family_detect 风格 fixture：1 main（null session）+ 2 sub sessions。
+// eventCount：main=2（node_started/completed lifecycle）；subA=3；subB=2。
+// 注：timestamp 显式设为递增值（makeEvent 默认 Date.now()/1000 秒级，连续事件可能同秒）。
+// （模块级：P2 describe 与 C3 describe 共用，DRY。）
+function buildFamilyFixture(): WebEvent[] {
+  const events: WebEvent[] = [
+    // main session（null → "main"）：lifecycle
+    makeEvent("node_started", { seq: 1, node: "family_detect", session_id: null }),
+    // sub A: 3 conversation events
+    makeEvent("agent_message", { seq: 2, node: "family_detect", session_id: "ses_A", data: { text: "a1" } }),
+    makeEvent("agent_thinking", { seq: 3, node: "family_detect", session_id: "ses_A", data: { text: "a2" } }),
+    makeEvent("agent_tool_call", { seq: 4, node: "family_detect", session_id: "ses_A", data: { tool: "bash", tool_call_id: "ta" } }),
+    // sub B: 2 conversation events
+    makeEvent("agent_message", { seq: 5, node: "family_detect", session_id: "ses_B", data: { text: "b1" } }),
+    makeEvent("agent_thinking", { seq: 6, node: "family_detect", session_id: "ses_B", data: { text: "b2" } }),
+    // main 收尾
+    makeEvent("node_completed", { seq: 7, node: "family_detect", session_id: null }),
+    // 另一 node 的事件，验证索引不混淆
+    makeEvent("node_started", { seq: 8, node: "other_node", session_id: null }),
+    makeEvent("agent_message", { seq: 9, node: "other_node", session_id: "ses_C", data: { text: "c1" } }),
+    // workflow 级（无 node）事件：不应进任何 node 的索引
+    makeEvent("route_taken", { seq: 10, data: { from: "A", to: "B" } }),
+  ];
+  // 显式覆盖 timestamp 为 seq-based 单调递增（避免同秒冲突）
+  events.forEach((e, i) => { e.timestamp = 1700000000 + i; });
+  return events;
+}
+
 describe("workflow-store P2 — nodesIndex 四路径 + 增量 fold D7", () => {
   beforeEach(() => resetStore());
-
-  // 构造 family_detect 风格 fixture：1 main（null session）+ 2 sub sessions。
-  // eventCount：main=2（node_started/completed lifecycle）；subA=3；subB=2。
-  // 注：timestamp 显式设为递增值（makeEvent 默认 Date.now()/1000 秒级，连续事件可能同秒）。
-  function buildFamilyFixture(): WebEvent[] {
-    const events: WebEvent[] = [
-      // main session（null → "main"）：lifecycle
-      makeEvent("node_started", { seq: 1, node: "family_detect", session_id: null }),
-      // sub A: 3 conversation events
-      makeEvent("agent_message", { seq: 2, node: "family_detect", session_id: "ses_A", data: { text: "a1" } }),
-      makeEvent("agent_thinking", { seq: 3, node: "family_detect", session_id: "ses_A", data: { text: "a2" } }),
-      makeEvent("agent_tool_call", { seq: 4, node: "family_detect", session_id: "ses_A", data: { tool: "bash", tool_call_id: "ta" } }),
-      // sub B: 2 conversation events
-      makeEvent("agent_message", { seq: 5, node: "family_detect", session_id: "ses_B", data: { text: "b1" } }),
-      makeEvent("agent_thinking", { seq: 6, node: "family_detect", session_id: "ses_B", data: { text: "b2" } }),
-      // main 收尾
-      makeEvent("node_completed", { seq: 7, node: "family_detect", session_id: null }),
-      // 另一 node 的事件，验证索引不混淆
-      makeEvent("node_started", { seq: 8, node: "other_node", session_id: null }),
-      makeEvent("agent_message", { seq: 9, node: "other_node", session_id: "ses_C", data: { text: "c1" } }),
-      // workflow 级（无 node）事件：不应进任何 node 的索引
-      makeEvent("route_taken", { seq: 10, data: { from: "A", to: "B" } }),
-    ];
-    // 显式覆盖 timestamp 为 seq-based 单调递增（避免同秒冲突）
-    events.forEach((e, i) => { e.timestamp = 1700000000 + i; });
-    return events;
-  }
 
   // ── 1. loadFromEvents（refold）维护 nodesIndex ──
   it("loadFromEvents → refold 维护 nodesIndex（main + 多 sub + 跨 node 隔离）", () => {
@@ -511,5 +514,99 @@ describe("workflow-store P2 — nodesIndex 四路径 + 增量 fold D7", () => {
 
     useWorkflowStore.getState().setSelectedNode(null);
     expect(useWorkflowStore.getState().selectedSession).toBeNull();
+  });
+});
+
+// ── SPEC 2026-08-28 C3：ev 事件索引 + takenEdgeKeys 派生（增量 vs refold 等价 / 幂等）──
+describe("workflow-store C3 — ev 索引 + takenEdgeKeys", () => {
+  beforeEach(() => resetStore());
+
+  function familyPlusRoute(): WebEvent[] {
+    return [
+      ...buildFamilyFixture(),
+      makeEvent("route_taken", { seq: 11, data: { from: "family_detect", to: "other_node" } }),
+    ];
+  }
+
+  it("ev 索引：增量 vs refold 的 ev.all seq 序列 / bySession / ev.last 三方一致", () => {
+    const events = familyPlusRoute();
+    // Path A：in-order 增量
+    for (const e of events) useWorkflowStore.getState().processEvent(e);
+    const incFd = useWorkflowStore.getState().nodesIndex.family_detect;
+    const incSeqs = incFd.ev.all.map((e) => e.seq);
+    const incLast = incFd.ev.last?.seq;
+
+    // Path B：全量 refold
+    resetStore();
+    useWorkflowStore.getState().loadFromEvents([...events].reverse());
+    const refFd = useWorkflowStore.getState().nodesIndex.family_detect;
+
+    expect(refFd.ev.all.map((e) => e.seq)).toEqual(incSeqs); // 同集合同序（seq 升序）
+    expect(refFd.ev.bySession["ses_A"].map((e) => e.seq)).toEqual(
+      incFd.ev.bySession["ses_A"].map((e) => e.seq)
+    );
+    expect(refFd.ev.last?.seq).toEqual(incLast);
+    // bySession key 含 main 哨兵（null session_id 归 main）
+    expect(Object.keys(refFd.ev.bySession)).toEqual(["main", "ses_A", "ses_B"]);
+  });
+
+  it("D7 扩展：out-of-order（WS resume 乱序）→ refold 重建 takenEdgeKeys 与 in-order 终态一致（Set 内容比较）", () => {
+    const events = familyPlusRoute();
+    // in-order
+    for (const e of events) useWorkflowStore.getState().processEvent(e);
+    const incKeys = [...useWorkflowStore.getState().takenEdgeKeys].sort();
+
+    resetStore();
+    for (const e of [...events].reverse()) useWorkflowStore.getState().processEvent(e);
+    const oooKeys = [...useWorkflowStore.getState().takenEdgeKeys].sort();
+
+    // C3.7：Set 断言用内容比较（Set JSON 序列化为 {} 恒等，禁 JSON.stringify）
+    expect(oooKeys).toEqual(incKeys);
+    // fixture 自带 route_taken A->B（seq 10）+ 追加 family_detect->other_node（seq 11）
+    expect(useWorkflowStore.getState().takenEdgeKeys.size).toBe(2);
+    expect(useWorkflowStore.getState().takenEdgeKeys.has("family_detect->other_node")).toBe(true);
+    expect(useWorkflowStore.getState().takenEdgeKeys.has("A->B")).toBe(true);
+  });
+
+  it("route_taken 幂等：同事件 processEvent 两次 → takenEdgeKeys 不变（seenSeqs 挡重复）", () => {
+    const rt = makeEvent("route_taken", { seq: 1, data: { from: "A", to: "B" } });
+    useWorkflowStore.getState().processEvent(rt);
+    useWorkflowStore.getState().processEvent(rt);
+    expect(useWorkflowStore.getState().takenEdgeKeys.size).toBe(1);
+  });
+
+  it("in-order route_taken → selectTakenEdgeKeys 命中（selector 唯一读入口 C3.6）", () => {
+    useWorkflowStore.getState().processEvent(
+      makeEvent("route_taken", { seq: 1, data: { from: "A", to: "B" } })
+    );
+    expect(useWorkflowStore.getState().takenEdgeKeys.has("A->B")).toBe(true);
+    expect(selectTakenEdgeKeys(useWorkflowStore.getState())).toBe(
+      useWorkflowStore.getState().takenEdgeKeys
+    );
+  });
+
+  it("畸形 route_taken（缺 from/to / 非 string）不入集合（语义与旧 WorkflowGraph 扫描逐字符等价）", () => {
+    useWorkflowStore.getState().loadFromEvents([
+      makeEvent("route_taken", { seq: 1, data: { to: "B" } }), // 缺 from
+      makeEvent("route_taken", { seq: 2, data: { from: "A" } }), // 缺 to
+      makeEvent("route_taken", { seq: 3, data: { from: null, to: "B" } }), // 非 string → ""
+      makeEvent("route_taken", { seq: 4, data: {} }), // 双缺
+    ]);
+    expect(useWorkflowStore.getState().takenEdgeKeys.size).toBe(0);
+  });
+
+  it("unloadRun 清空 takenEdgeKeys 与 ev 索引", () => {
+    useWorkflowStore.getState().loadFromEvents(familyPlusRoute());
+    expect(useWorkflowStore.getState().takenEdgeKeys.size).toBe(2);
+    expect(useWorkflowStore.getState().nodesIndex.family_detect.ev.all.length).toBeGreaterThan(0);
+    useWorkflowStore.getState().unloadRun();
+    expect(useWorkflowStore.getState().takenEdgeKeys.size).toBe(0);
+    expect(useWorkflowStore.getState().nodesIndex).toEqual({});
+  });
+
+  it("ev 索引 readonly 契约：mutate 冻结数组 → throw（immer autoFreeze fail loud 防线）", () => {
+    useWorkflowStore.getState().loadFromEvents(familyPlusRoute());
+    const fd = useWorkflowStore.getState().nodesIndex.family_detect;
+    expect(() => fd.ev.all.push(makeEvent("agent_message", { seq: 99, node: "x" }))).toThrow();
   });
 });

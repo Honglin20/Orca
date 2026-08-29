@@ -85,8 +85,19 @@ function partitionCharts(
 }
 
 export function ChartRenderer({ nodeId }: ChartRendererProps) {
-  const state = useWorkflowStore();
-  const { groups } = useMemo(() => selectCharts(state), [state]);
+  // 订阅收窄（SPEC 2026-08-28 C4.4，取消全 store 订阅）。六字段清单：events/huge/
+  // serverOverview/hugeFullyLoaded 是 selectCharts 全部输入；activeRunId + loadFull
+  // 供 huge 模式 load-full 按钮（漏订 activeRunId → 按钮静默失效）。
+  const events = useWorkflowStore((s) => s.events);
+  const huge = useWorkflowStore((s) => s.huge);
+  const serverOverview = useWorkflowStore((s) => s.serverOverview);
+  const hugeFullyLoaded = useWorkflowStore((s) => s.hugeFullyLoaded);
+  const activeRunId = useWorkflowStore((s) => s.activeRunId);
+  const loadFull = useWorkflowStore((s) => s.loadFull);
+  const { groups } = useMemo(
+    () => selectCharts._from(events, huge, serverOverview, hugeFullyLoaded),
+    [events, huge, serverOverview, hugeFullyLoaded]
+  );
 
   // nodeId filter（可选）：限定到某节点
   const filtered = useMemo(() => {
@@ -119,8 +130,7 @@ export function ChartRenderer({ nodeId }: ChartRendererProps) {
   }
 
   // huge 模式（serverOverview 目录占位）→ 渲染目录 + load full 恢复入口
-  const huge = state.huge && !state.hugeFullyLoaded;
-  const loadFull = state.loadFull;
+  const isHuge = huge && !hugeFullyLoaded;
 
   return (
     <div className="space-y-4 p-3" data-testid="chart-renderer">
@@ -144,7 +154,7 @@ export function ChartRenderer({ nodeId }: ChartRendererProps) {
           </details>
         </div>
       )}
-      {huge && totalPlaceholders > 0 && (
+      {isHuge && totalPlaceholders > 0 && (
         <div
           className="border orca-border orca-bg-surface rounded p-2 text-xs orca-text-muted"
           data-testid="huge-charts-placeholder"
@@ -156,7 +166,7 @@ export function ChartRenderer({ nodeId }: ChartRendererProps) {
           <button
             type="button"
             onClick={() => {
-              if (state.activeRunId) void loadFull(state.activeRunId);
+              if (activeRunId) void loadFull(activeRunId);
             }}
             data-testid="load-full-btn"
             className="mt-1 rounded border orca-border px-2 py-0.5 orca-text-muted hover:orca-bg-surface-2"

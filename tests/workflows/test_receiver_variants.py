@@ -1,10 +1,10 @@
 """test_receiver_variants.py —— receiver KB 变体 smoke + 契约校验（无 GPU/真硬件）。
 
-对每个变体 .py：forward shape、feature_hook_names 恒 2（与 teacher 等长，回归 OFD/prepare bug）、
-KNOBS 过 kd_common.validate_variant（§3 迁移：原 pick_variant._validate_variant 已 port）、
+对每个变体 .py：forward shape、feature_hook_names 恒 2（回归 OFD/prepare bug）、
 KNOBS 最小值仍可用、逐变体特有断言。
 
-复用 test_kd_redesign.py 的 _load(path,name) + KBDIR 模式。
+（kd 系 workflow 净删除时移除了 kd_common.validate_variant 校验用例；KB 变体自身
+行为不变量全部保留。）
 """
 
 from __future__ import annotations
@@ -16,8 +16,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-KD = REPO / "workflows" / "agents" / "_kd_scripts"
-KBDIR = REPO / "knowledge_base" / "families" / "receiver"
+KBDIR = REPO / "workflows" / "agent-struct-exploration" / "knowledge_base" / "families" / "receiver"
 
 # 全部 10 个变体，回归覆盖整池（不含第二批 inception/resnext/se/dualpath）。
 VARIANTS = [
@@ -41,14 +40,7 @@ def _load_variant(name: str):
         del sys.modules[m]
     if str(KBDIR) not in sys.path:
         sys.path.insert(0, str(KBDIR))
-    if str(KD) not in sys.path:
-        sys.path.insert(0, str(KD))
     return _load(KBDIR / f"{name}.py", name)
-
-
-@pytest.fixture(scope="module")
-def kd_common():
-    return _load(KD / "kd_common.py", "_kd_common_test_rv")
 
 
 # ── 通用契约：forward shape / feature_hook 恒 2 / KNOBS 合法 / 最小值可用 ─────────
@@ -71,16 +63,6 @@ def test_variant_feature_hooks_eq_two(name):
     mod = _load_variant(name)
     hooks = mod.build_model().feature_hook_names()
     assert len(hooks) == 2, f"{name}: feature_hook_names 长度 {len(hooks)} != 2"
-
-
-@pytest.mark.parametrize("name", VARIANTS)
-def test_variant_knobs_valid(name, kd_common):
-    """KNOBS 过 kd_common.validate_variant（build_model/DUMMY_INPUT/step<0/leverage）。
-
-    §3 迁移：原 pick_variant._validate_variant 已 port 到 kd_common.validate_variant（DRY 单一真相源）。
-    """
-    mod = _load_variant(name)
-    kd_common.validate_variant(mod, str(KBDIR / f"{name}.py"))  # 不 raise 即通过
 
 
 @pytest.mark.parametrize("name", VARIANTS)

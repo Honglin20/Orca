@@ -83,9 +83,9 @@ def make_executor(
     phase-13 §11 #9（executor-agnostic）：script 与 agent 两路径对称需要 chart 路由
     （agent spawn 的 Bash 工具会再 spawn script，沿 env 链继承）。
 
-    ``workflows_root``（plan 2026-08-04 kd-nas headless fix）：**agent + script 分支对称透传**——
+    ``workflows_root``：**agent + script 分支对称透传**——
     spawn 时注入 ``ORCA_WORKFLOWS_ROOT`` env，agent.md / workflow 脚本据此 cwd 无关定位 workflow
-    级共享资源目录（如 ``$ORCA_WORKFLOWS_ROOT/agents/_kd_scripts``）。None == 不注（向后兼容）。
+    级共享资源目录（如 ``$ORCA_WORKFLOWS_ROOT/agents/_po_scripts``）。None == 不注（向后兼容）。
     orchestrator 从 ``load_workflow(yaml_path).parent`` 透传（run 启动期由 CLI / RunManager 解析）。
 
     ``artifacts_dir``（2026-08-26 in-session script fix，plan 2026-08-25 prof-opt-v4 §10）：

@@ -24,8 +24,8 @@ fail loud（铁律 4）：编排错误均 emit ``workflow_failed``（kind 取自
   - ``WorkflowTerminated``（保留独立 signal，非 ExecError 子类）→ orchestrator 翻译：
     success → workflow_completed；failed → workflow_failed{kind: business_agent}
 
-依赖单向：本模块依赖 ``orca.{schema, events, exec}`` + ``orca.run.*`` 子模块；
-是最上层消费者，不被任何模块 import。
+依赖单向：本模块依赖 ``orca.{schema, events, exec, compile}``（compile.layout，
+run → compile 合法方向）+ ``orca.run.*`` 子模块；是最上层消费者，不被任何模块 import。
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from orca.compile.layout import resolve_subagents_dir
 from orca.exec.error import ExecError
 from orca.exec.registry import ProcessRegistry, get_default_registry
 from orca.run.aggregate import GroupFailure
@@ -66,19 +67,18 @@ logger = logging.getLogger(__name__)
 def _compute_subagents_root(
     workflows_root: "Path | None", wf_name: str
 ) -> str:
-    """计算 point-to-file 协议的 ``subagents_root``（SPEC §3.2 v3 公式）。
+    """计算 point-to-file 协议的 ``subagents_root``（SPEC §3.2 双形态公式）。
 
-    解析 ``workflows_root / "subagents" / wf_name`` 为存在的目录 → 返其绝对路径字符串；
-    任一缺失（workflows_root=None / 目录不存在 / wf_name 空）→ 返空串（SPEC §3.3 默认行为，
-    如 quant-* 等无子 agent 的 workflow）。
+    双形态解析公式的实现是 ``orca.compile.layout.resolve_subagents_dir``（单一真相源，
+    与 catalog / validator 共享）：新形态 ``<yaml目录>/subagents/`` 直接含 ``*.md``；
+    旧平铺形态 ``<yaml目录>/subagents/<wf_name>/``。本函数是其 str 适配层
+    （``RunContext.subagents_root`` 字段是 str，空串 = 未解析；None → ""）。
 
     在 orchestrator 的 6 处 RunContext 构造点统一调用（SPEC §4 防漏点）。空串场景由
     render 层 fail loud 兜底（agent.md 引 ``{{ subagents_root }}`` 但值为空 → 报错）。
     """
-    if workflows_root is None or not wf_name:
-        return ""
-    p = workflows_root / "subagents" / wf_name
-    return str(p) if p.is_dir() else ""
+    p = resolve_subagents_dir(workflows_root, wf_name)
+    return str(p) if p is not None else ""
 
 
 class Orchestrator:
@@ -230,8 +230,8 @@ class Orchestrator:
         # production 用 ``get_default_registry()``；测试 / CLI 入口可注入独立实例。
         # ``shutdown()`` 经此 registry 兜底清理未释放的子进程（signal / atexit 三处都调）。
         self._registry: ProcessRegistry = registry or get_default_registry()
-        # plan 2026-08-04 kd-nas headless fix：workflow yaml 所在目录（cwd 无关定位 workflow 级
-        # 共享资源，如 agents/_kd_scripts）。None == 不注 ORCA_WORKFLOWS_ROOT（向后兼容）。
+        # workflow yaml 所在目录（cwd 无关定位 workflow 级
+        # 共享资源，如 agents/_po_scripts）。None == 不注 ORCA_WORKFLOWS_ROOT（向后兼容）。
         # 由 RunManager / CLI 在 load_workflow(yaml_path) 时透传 yaml_path.parent。
         self._workflows_root = workflows_root
 
@@ -634,7 +634,7 @@ class Orchestrator:
         orch._agent_tools_server = None
         # phase-11-process：resume 用 default registry（同 process；signal 兜底仍生效）。
         orch._registry = get_default_registry()
-        # plan 2026-08-04 kd-nas headless fix：workflows_root 透传（resume 路径同款 cwd 无关）。
+        # workflows_root 透传（resume 路径同款 cwd 无关）。
         orch._workflows_root = workflows_root
         # resume 专用状态（run_from_state 消费）。
         orch._resume_replayed_events = 0

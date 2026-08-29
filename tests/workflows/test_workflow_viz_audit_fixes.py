@@ -31,7 +31,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-_QUANT_SCRIPTS = REPO / "workflows" / "agents" / "_quant_scripts"
+_QUANT_SCRIPTS = REPO / "workflows" / "quant-ptq-sweep" / "agents" / "_quant_scripts"
 if str(_QUANT_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_QUANT_SCRIPTS))
 
@@ -177,7 +177,7 @@ class TestP12AxisDirection:
         # tail_metrics.py 顶层 ``from orca.chart import render_chart`` 会 import-error
         # 当不在 Orca runtime。用 AST 切片抽 ``_axis_direction`` 真实源码（非手抄，
         # Rule 9）。
-        path = REPO / "workflows" / "agents" / "nas-train-runner" / "scripts" / "tail_metrics.py"
+        path = REPO / "workflows" / "nas-agent-pipeline" / "agents" / "nas-train-runner" / "scripts" / "tail_metrics.py"
         helper_src = _extract_helper_src(path, ["_axis_direction"])
         ns: dict = {}
         exec(helper_src, ns)
@@ -241,7 +241,7 @@ def _load_run_bit_curve_module():
     sys.modules["orca"] = orca_stub
     sys.modules["orca.chart"] = orca_chart_stub
 
-    path = REPO / "workflows" / "agents" / "bit-curve-searcher" / "scripts" / "run_bit_curve.py"
+    path = REPO / "workflows" / "quant-bit-curve" / "agents" / "bit-curve-searcher" / "scripts" / "run_bit_curve.py"
     return _load_module(path, "run_bit_curve_under_test")
 
 

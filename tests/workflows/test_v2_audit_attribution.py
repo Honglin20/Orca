@@ -27,13 +27,12 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-AGENTS = REPO / "workflows" / "agents"
 
-NS2_EXPAND = AGENTS / "ns2_expand_supernet" / "agent.md"
-NS3_EXPAND = AGENTS / "ns3_expand_supernet" / "agent.md"
-NS1_EXPAND = AGENTS / "ns_expand_supernet" / "agent.md"
-NS2_REPORT = AGENTS / "ns2_report" / "agent.md"
-NS3_REPORT = AGENTS / "ns3_report" / "agent.md"
+NS2_EXPAND = REPO / "workflows" / "nas-supernet-v2" / "agents" / "ns2_expand_supernet" / "agent.md"
+NS3_EXPAND = REPO / "workflows" / "nas-supernet-v3" / "agents" / "ns3_expand_supernet" / "agent.md"
+NS1_EXPAND = REPO / "workflows" / "nas-supernet" / "agents" / "ns_expand_supernet" / "agent.md"
+NS2_REPORT = REPO / "workflows" / "nas-supernet-v2" / "agents" / "ns2_report" / "agent.md"
+NS3_REPORT = REPO / "workflows" / "nas-supernet-v3" / "agents" / "ns3_report" / "agent.md"
 
 MARKER = ".ns_expand_unsupported.flag"
 

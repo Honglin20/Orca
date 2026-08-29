@@ -18,9 +18,9 @@ from orca.schema import Workflow
 
 _REPO = Path(__file__).resolve().parents[2]
 _YAMLS = [
-    _REPO / "workflows" / "nas-supernet.yaml",
-    _REPO / "workflows" / "nas-supernet-v2.yaml",
-    _REPO / "workflows" / "nas-supernet-v3.yaml",
+    _REPO / "workflows" / "nas-supernet" / "workflow.yaml",
+    _REPO / "workflows" / "nas-supernet-v2" / "workflow.yaml",
+    _REPO / "workflows" / "nas-supernet-v3" / "workflow.yaml",
 ]
 
 

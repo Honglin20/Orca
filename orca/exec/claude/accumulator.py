@@ -130,8 +130,9 @@ class RunAccumulator:
         为什么不是全串接：SDD 契约声明 agent 最终消息即 result（见 failure-sentinel /
         ask-user sentinel spec —— 「返回恰好这个 JSON 作为最终消息」）。中间 ``agent_message``
         是叙述（典型如 ``"input [1,1,28,28] float32"``），全串接会让 ``result_extractor``
-        的平衡块兜底抓到中间叙述里的 ``[...]`` / ``{...}`` 字面量——KD-NAS flatten agent
-        真实命中的 P5 bug。修后只取末条：result_text 严格 = agent 最终消息，干净。
+        的平衡块兜底抓到中间叙述里的 ``[...]`` / ``{...}`` 字面量——真实命中过的 P5 bug
+        （agent 叙述里的 shape 字面量被抢成 result）。修后只取末条：result_text 严格 =
+        agent 最终消息，干净。
 
         无任何 agent_message → None（让 executor 的「无 result」错误判定生效，与其他模式一致）。
         executor 在 events 模式 EOF 后把此值赋给 ``result_text``（统一后续读路径）。

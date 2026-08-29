@@ -9,6 +9,11 @@
   - cc / cac / nga target：cc 家族（cc/cac）skill + nudge Stop-hook；opencode 家族（opencode/nga）skill + plugin + json。
   - project scope：``opencode.json`` 在 cwd 根 + 相对声明路径。
   - fail loud：copytree 失败 → exit 1（铁律 12）。
+  - legacy 清理：design-charts（已并入 create-workflow）/ orca / teams（已改名 tars）残留被清，
+    message 区分两种迁移语义。
+  - workflows 部署（per-wf 自包含布局）：源 ``workflows/<wf>/`` 整树 → ``~/.orca/workflows/<wf>/``；
+    旧平铺布局（共享 agents//subagents/ + 全局 KB + 平铺 yaml）UD-1 backup 四分支清理
+    （非随包→backup / 内容不一致→backup / 平铺 yaml→backup / 完全一致→直删）+ 无源 no-op 安全闸。
   - 守门：不拷 ``benchmark/``。
   - 模板内容 = 随包模板（防 install 写错版本）。
 """
@@ -565,6 +570,59 @@ def test_install_no_benchmark(isolated_home: Path):
     assert not (skill / "benchmark").exists(), "install 不应拷 benchmark/"
 
 
+def test_bundled_skills_swap_design_charts_for_create_workflow():
+    """随包 skill 清单：含 create-workflow（图表能力并入处），无 design-charts（已整目录删除）。"""
+    srcs = {p.name for p in install_cmds._bundled_skill_sources()}
+    assert install_cmds.SKILL_NAME in srcs, f"随包应含 {install_cmds.SKILL_NAME}"
+    assert "design-charts" not in srcs, f"design-charts 已并入 create-workflow，不应再随包: {srcs}"
+
+
+def _make_legacy_skill(cc: Path, name: str) -> Path:
+    """预置一个假 legacy skill 目录（含最小 SKILL.md），返回其路径。"""
+    legacy = cc / "skills" / name
+    legacy.mkdir(parents=True)
+    (legacy / "SKILL.md").write_text("---\ndescription: legacy\n---\n", encoding="utf-8")
+    return legacy
+
+
+def test_install_cleans_legacy_design_charts_and_renamed_entry(isolated_home: Path):
+    """legacy 清理：预置假 design-charts（并入迁移）+ 假 orca（改名迁移）目录 → install 后都被清理。
+
+    message 须区分两种迁移语义：design-charts 说「已并入 create-workflow」（它不是改名），
+    入口 skill 说「已改名 tars」（语义不变）。
+    """
+    cc = isolated_home / ".claude"
+    legacy_charts = _make_legacy_skill(cc, "design-charts")
+    legacy_orca = _make_legacy_skill(cc, "orca")
+    result = runner.invoke(app, ["--target", "cc", "--scope", "user"])
+    assert result.exit_code == 0, result.output
+    assert not legacy_charts.exists(), "legacy design-charts 目录应被清理"
+    assert not legacy_orca.exists(), "legacy orca 目录应被清理"
+    # 钉 (源目录, reason) 完整配对（防 reason 互换回归）：design-charts=并入 create-workflow，orca=改名 tars
+    assert f"{legacy_charts}（已并入 {install_cmds.SKILL_NAME}）" in result.output, (
+        "design-charts 清理 message 应与其目录同现并说明并入去向（非改名）"
+    )
+    assert f"{legacy_orca}（已改名 {install_cmds.ENTRY_SKILL_NAME}）" in result.output, (
+        "入口 skill 清理 message 应与其目录同现并保留改名语义"
+    )
+
+
+def test_install_legacy_cleanup_warns_on_rmtree_failure(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """legacy 清理 fail-soft：rmtree 抛 OSError → warn 到 stderr，install 不 fail（幂等清理非主流程）。"""
+
+    def _boom(*_a, **_k):
+        raise OSError("rmdir busy (simulated)")
+
+    legacy = _make_legacy_skill(isolated_home / ".claude", "design-charts")
+    monkeypatch.setattr(install_cmds.shutil, "rmtree", _boom)
+    result = runner.invoke(app, ["--target", "cc", "--scope", "user"])
+    assert result.exit_code == 0, result.output
+    assert "无法清理" in result.output, "rmtree 失败应 warn（不静默吞）"
+    assert legacy.exists(), "清理失败时残留目录保留（交用户处理，非半删状态）"
+
+
 # ── fail loud + 模板内容 ──────────────────────────────────────────────────────
 
 
@@ -627,8 +685,8 @@ def test_install_cmds_has_no_orca_business_logic():
     """
     src = Path(install_cmds.__file__).read_text(encoding="utf-8")
     forbidden = [
-        "from orca.run", "from orca.events", "from orca.schema",
-        "import orca.run", "import orca.events", "import orca.schema",
+        "from orca.run", "from orca.events", "from orca.schema", "from orca.compile",
+        "import orca.run", "import orca.events", "import orca.schema", "import orca.compile",
         "advance_step", "router.resolve", "replay_state", "tape.append",
         "EventBus(", "Orchestrator(",
     ]
@@ -636,177 +694,493 @@ def test_install_cmds_has_no_orca_business_logic():
         assert kw not in src, f"install_cmds 含禁词 {kw!r}（违反零业务逻辑守门）"
 
 
-def test_install_bundled_workflows_deploys_cwd_to_global(tmp_path, monkeypatch):
-    """``_install_bundled_workflows``：CWD/workflows/*.yaml + agents/ → ~/.orca/workflows。
+# ── _install_bundled_workflows（per-wf 整树 sync + 旧平铺布局 UD-1 backup 清理）──
 
-    部署 + 内容一致 + yaml 幂等（内容同跳过）+ 变更 refresh（覆盖）+ agents 池随 yaml 同步
-    （agent 解析按 <workflow_dir>/agents/ 找，不拷会 agent not found）+ 无 CWD/workflows no-op。
+
+def _make_wf_source(
+    root: Path,
+    name: str,
+    *,
+    agents: dict[str, str] | None = None,
+    subagents: list[str] | None = None,
+    knowledge_base: bool = False,
+) -> Path:
+    """造一个 per-wf 源 fixture：``workflows/<name>/{workflow.yaml, agents/*/, subagents/*.md}``。
+
+    agents 值为 agent.md 正文；knowledge_base=True 时造最小 KB 树（index.json + families/）。
+    返回该 wf 源目录（测试从源树复制预置旧布局安装态）。
     """
-    cwd = tmp_path / "proj"
-    (cwd / "workflows").mkdir(parents=True)
-    wf_src = cwd / "workflows" / "demo-wf.yaml"
-    wf_src.write_text("name: demo-wf\ndescription: test\n", encoding="utf-8")
-    agent_src = cwd / "workflows" / "agents" / "demo-agent"
-    agent_src.mkdir(parents=True)
-    (agent_src / "agent.md").write_text("# demo-agent\n", encoding="utf-8")
-    (agent_src / "__pycache__").mkdir()
-    (agent_src / "__pycache__" / "x.pyc").write_text("junk", encoding="utf-8")
+    wf = root / "workflows" / name
+    (wf / "agents").mkdir(parents=True, exist_ok=True)
+    (wf / "workflow.yaml").write_text(f"name: {name}\ndescription: test\n", encoding="utf-8")
+    for agent, body in (agents or {}).items():
+        d = wf / "agents" / agent
+        d.mkdir()
+        (d / "agent.md").write_text(body, encoding="utf-8")
+    if subagents:
+        (wf / "subagents").mkdir()
+        for md in subagents:
+            (wf / "subagents" / md).write_text(f"# {md}\n", encoding="utf-8")
+    if knowledge_base:
+        kb = wf / "knowledge_base" / "families"
+        kb.mkdir(parents=True)
+        (wf / "knowledge_base" / "index.json").write_text("{}\n", encoding="utf-8")
+        (kb / "cnn.json").write_text('{"family": "cnn"}\n', encoding="utf-8")
+    return wf
+
+
+def _sync_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, project: Path) -> Path:
+    """chdir 到 project（含 workflows/ 源）+ ``Path.home`` 注入 tmp home，返回 fake home。"""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.chdir(cwd)
-    monkeypatch.setenv("HOME", str(fake_home))  # Path.home() 走 $HOME（POSIX）
-
-    # 首次部署：yaml + agents 池都落地
-    deployed = install_cmds._install_bundled_workflows()
-    assert [p.name for p in deployed] == ["demo-wf.yaml", "agents"]
-    dst = fake_home / ".orca" / "workflows" / "demo-wf.yaml"
-    assert dst.is_file()
-    assert dst.read_text(encoding="utf-8") == wf_src.read_text(encoding="utf-8")
-    agents_dst = fake_home / ".orca" / "workflows" / "agents"
-    assert (agents_dst / "demo-agent" / "agent.md").is_file()
-    assert not (agents_dst / "demo-agent" / "__pycache__").exists()
-
-    # yaml 幂等：内容同 → 跳过（agents 树仍覆盖同步）
-    assert [p.name for p in install_cmds._install_bundled_workflows()] == ["agents"]
-
-    # 变更 → refresh（覆盖）
-    wf_src.write_text("name: demo-wf\ndescription: changed\n", encoding="utf-8")
-    deployed3 = install_cmds._install_bundled_workflows()
-    assert [p.name for p in deployed3] == ["demo-wf.yaml", "agents"]
-    assert "changed" in dst.read_text(encoding="utf-8")
-
-    # 无 CWD/workflows → no-op
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    monkeypatch.chdir(empty)
-    assert install_cmds._install_bundled_workflows() == []
-
-
-# ── _install_bundled_subagents（point-to-file v3 拓扑，SPEC §3.2 install 关系）───
-
-
-def test_install_bundled_subagents_copytree_to_global_workflows_subagents(
-    tmp_path, monkeypatch
-):
-    """``_install_bundled_subagents``：workflows/subagents/<wf>/*.md → ~/.orca/workflows/subagents/<wf>/。
-
-    覆盖意图（非仅行为）：
-      - **v3 拓扑映射**：源 ``workflows/subagents/nas-supernet/`` → 落
-        ``~/.orca/workflows/subagents/nas-supernet/``（与 agents copytree L505-517 同款不同子树，
-        SPEC §3.2 install 关系；run 期 orchestrator 解析 ``<workflows_root>/subagents/<wf>``
-        为 ``subagents_root``，agent.md ``{{ subagents_root }}/<name>.md`` render inline 绝对路径）。
-      - 5 个真实 nas-supernet subagent body 全部署（依赖完整性）。
-      - 多 workflow 子目录并发部署（OCP：加 ``workflows/subagents/<other>/`` 自动捡，零核心改动）。
-      - copytree merge 语义（``dirs_exist_ok=True``）：保用户自加的子 agent 共存；幂等可重跑。
-      - 无 CWD/workflows 或无 ``subagents/`` 子目录 → no-op（非仓库根跑 install 不报错）。
-    """
-    cwd = tmp_path / "proj"
-    sa_src = cwd / "workflows" / "subagents" / "nas-supernet"
-    sa_src.mkdir(parents=True)
-    bodies = {
-        "supernet-evaluator.md": "# Supernet Evaluator\nbody A\n",
-        "workflow-verifier.md": "# Workflow Verifier\nbody B\n",
-        "memory-verifier.md": "# Memory Verifier\nbody C\n",
-        "project-porter.md": "# Project Porter\nbody D\n",
-        "project-fidelity-verifier.md": "# Project Fidelity Verifier\nbody E\n",
-    }
-    for name, content in bodies.items():
-        (sa_src / name).write_text(content, encoding="utf-8")
-    # 第二个 workflow 的 subagent 子目录（v3 拓扑：subagents/<wf>/ 命名空间隔离）
-    other_src = cwd / "workflows" / "subagents" / "other-wf"
-    other_src.mkdir()
-    (other_src / "helper.md").write_text("# Helper\n", encoding="utf-8")
-
-    fake_home = tmp_path / "home"
-    fake_home.mkdir()
-    monkeypatch.chdir(cwd)
+    monkeypatch.chdir(project)
     monkeypatch.setattr(Path, "home", lambda: fake_home)
+    return fake_home
 
-    deployed = install_cmds._install_bundled_subagents()
-    # 5 (nas-supernet) + 1 (other-wf) = 6 文件部署
-    assert len(deployed) == 6, f"期望 6 个部署，实际 {len(deployed)}: {[p.name for p in deployed]}"
-    # v3 落点：~/.orca/workflows/subagents/nas-supernet/<name>.md
-    ns_dst = fake_home / ".orca" / "workflows" / "subagents" / "nas-supernet"
-    for name, content in bodies.items():
-        dst_file = ns_dst / name
-        assert dst_file.is_file(), f"{name} 应部署到 {dst_file}"
-        assert dst_file.read_text(encoding="utf-8") == content, f"{name} body 应逐字一致"
-    # 第二 workflow 落点：~/.orca/workflows/subagents/other-wf/helper.md
-    assert (fake_home / ".orca" / "workflows" / "subagents" / "other-wf" / "helper.md").is_file()
 
-    # 幂等：再跑 → copytree dirs_exist_ok 覆盖，返回所有 md（merge 语义，不报错）
-    deployed2 = install_cmds._install_bundled_subagents()
-    assert len(deployed2) == 6, "再跑 copytree 应继续返回全部 md（merge 覆盖语义）"
+def test_install_bundled_workflows_per_wf_sync(tmp_path, monkeypatch):
+    """部署形状：源 ``workflows/<wf>/``（含 workflow.yaml）整树 → ``~/.orca/workflows/<wf>/``。
+
+    意图（per-wf 自包含 = 源/安装态同构）：
+      - agents/subagents/knowledge_base 全随 wf 目录走（不再创建共享池目录）
+      - ``__pycache__``/``*.pyc`` 不拷；不含 workflow.yaml 的目录不捡
+      - 幂等（再跑全量覆盖同步）+ 变更 refresh + 无 CWD/workflows → 完全 no-op
+    """
+    proj = tmp_path / "proj"
+    wf1 = _make_wf_source(
+        proj, "demo-wf",
+        agents={"demo-agent": "# demo-agent\n"},
+        subagents=["workflow-verifier.md"],
+        knowledge_base=True,
+    )
+    _make_wf_source(proj, "other-wf")
+    # 干扰项：不含 workflow.yaml 的目录不捡；pycache 污染不拷
+    (proj / "workflows" / "not-a-wf").mkdir()
+    (proj / "workflows" / "not-a-wf" / "notes.md").write_text("x", encoding="utf-8")
+    pyc = wf1 / "agents" / "demo-agent" / "__pycache__"
+    pyc.mkdir()
+    (pyc / "x.pyc").write_text("junk", encoding="utf-8")
+    fake_home = _sync_env(tmp_path, monkeypatch, proj)
+
+    result = install_cmds._install_bundled_workflows()
+    assert [d.name for d in result.deployed] == ["demo-wf", "other-wf"]  # 稳定排序
+    dest = fake_home / ".orca" / "workflows"
+    assert (dest / "demo-wf" / "workflow.yaml").read_text(encoding="utf-8") == (
+        wf1 / "workflow.yaml").read_text(encoding="utf-8")
+    assert (dest / "demo-wf" / "agents" / "demo-agent" / "agent.md").is_file()
+    assert (dest / "demo-wf" / "subagents" / "workflow-verifier.md").is_file()
+    assert (dest / "demo-wf" / "knowledge_base" / "index.json").is_file()
+    assert not (dest / "demo-wf" / "agents" / "demo-agent" / "__pycache__").exists()
+    assert not (dest / "not-a-wf").exists()
+    # 新安装态无共享池目录（旧布局的 agents/subagents 落点不再创建）
+    assert not (dest / "agents").exists()
+    assert not (dest / "subagents").exists()
+
+    # 幂等：再跑形状不变
+    r2 = install_cmds._install_bundled_workflows()
+    assert [d.name for d in r2.deployed] == ["demo-wf", "other-wf"]
 
     # 变更 → refresh（覆盖后新内容可见）
-    (sa_src / "supernet-evaluator.md").write_text("# Supernet Evaluator v2\n", encoding="utf-8")
-    deployed3 = install_cmds._install_bundled_subagents()
-    assert any(
-        p.name == "supernet-evaluator.md" for p in deployed3
-    ), "变更后部署列表仍含被刷新文件"
-    assert "v2" in (ns_dst / "supernet-evaluator.md").read_text(encoding="utf-8")
+    (wf1 / "workflow.yaml").write_text("name: demo-wf\ndescription: changed\n", encoding="utf-8")
+    install_cmds._install_bundled_workflows()
+    assert "changed" in (dest / "demo-wf" / "workflow.yaml").read_text(encoding="utf-8")
 
-    # 无 CWD/workflows → no-op
+    # 无 CWD/workflows → 完全 no-op
     empty = tmp_path / "empty"
     empty.mkdir()
     monkeypatch.chdir(empty)
-    assert install_cmds._install_bundled_subagents() == []
+    assert install_cmds._install_bundled_workflows() == install_cmds.WorkflowSyncResult()
 
 
-def test_install_bundled_subagents_noop_when_workflows_exists_but_no_subagents(
-    tmp_path, monkeypatch
-):
-    """CWD/workflows 存在但无 ``subagents/`` 子目录 → no-op 返 []（OCP：subagents/ 是 opt-in）。
+def test_legacy_agents_with_user_added_entry_moved_to_backup(tmp_path, monkeypatch):
+    """清理分支①：旧 agents/ 池含非随包条目（用户自加）→ **整个目录**入 backup（UD-1 不直接删）。"""
+    proj = tmp_path / "proj"
+    src_wf = _make_wf_source(proj, "demo-wf", agents={"demo-agent": "# demo-agent\n"})
+    fake_home = _sync_env(tmp_path, monkeypatch, proj)
+    legacy = fake_home / ".orca" / "workflows" / "agents"
+    shutil.copytree(src_wf / "agents" / "demo-agent", legacy / "demo-agent")
+    (legacy / "my-agent").mkdir()
+    (legacy / "my-agent" / "agent.md").write_text("# user own\n", encoding="utf-8")
 
-    SPEC §3.3 默认行为：无 subagents 的 workflow（如 quant-*）不出现 ``workflows/subagents/``
-    目录，install 不报错也不创空落点目录。
+    result = install_cmds._install_bundled_workflows()
+    assert not legacy.exists(), "含用户内容的旧 agents/ 池不得留在原位（shadow 风险）"
+    assert len(result.backed_up) == 1
+    item = result.backed_up[0]
+    assert item.source == legacy
+    assert "非随包条目 my-agent" in item.reason
+    # 整目录 backup（含随包名条目一并移走，非半删状态）
+    assert (item.dest / "my-agent" / "agent.md").read_text(encoding="utf-8") == "# user own\n"
+    assert (item.dest / "demo-agent" / "agent.md").is_file()
+    # backup 落点：~/.orca/_legacy_layout_backup_<date>/ 下保持原相对结构
+    assert item.dest.is_relative_to(fake_home / ".orca")
+    assert item.dest.parent.parent.name.startswith("_legacy_layout_backup_")
+
+
+def test_legacy_agents_with_modified_bundled_agent_moved_to_backup(tmp_path, monkeypatch):
+    """清理分支②：随包名条目但内容被用户改过（名字级比对会误删，plan Q3）→ 整目录 backup。"""
+    proj = tmp_path / "proj"
+    src_wf = _make_wf_source(proj, "demo-wf", agents={"demo-agent": "# demo-agent\n"})
+    fake_home = _sync_env(tmp_path, monkeypatch, proj)
+    legacy = fake_home / ".orca" / "workflows" / "agents"
+    shutil.copytree(src_wf / "agents" / "demo-agent", legacy / "demo-agent")
+    (legacy / "demo-agent" / "agent.md").write_text("# demo-agent  (user edited)\n", encoding="utf-8")
+
+    result = install_cmds._install_bundled_workflows()
+    assert not legacy.exists()
+    assert len(result.backed_up) == 1
+    assert "内容与随包不一致 demo-agent" in result.backed_up[0].reason
+    assert result.removed == []
+    # 用户改过的内容在 backup 里保全
+    backed = result.backed_up[0].dest / "demo-agent" / "agent.md"
+    assert "user edited" in backed.read_text(encoding="utf-8")
+
+
+def test_legacy_shared_agent_any_match_across_wf_copies(tmp_path, monkeypatch):
+    """plan Q13b：共享 agent 随包多副本（两个 wf 各一）——installed 副本与**任一**一致即算一致。"""
+    proj = tmp_path / "proj"
+    _make_wf_source(proj, "wf-a", agents={"shared-agent": "# shared\n"})
+    _make_wf_source(proj, "wf-b", agents={"shared-agent": "# shared\n"})
+    fake_home = _sync_env(tmp_path, monkeypatch, proj)
+    legacy = fake_home / ".orca" / "workflows" / "agents" / "shared-agent"
+    legacy.mkdir(parents=True)
+    (legacy / "agent.md").write_text("# shared\n", encoding="utf-8")
+
+    result = install_cmds._install_bundled_workflows()
+    # any-match 命中任一随包副本 → 与随包完全一致 → 旧池整体直删，不 backup
+    assert result.backed_up == []
+    assert result.removed == [fake_home / ".orca" / "workflows" / "agents"]
+
+
+def test_legacy_dirs_matching_bundle_deleted_directly(tmp_path, monkeypatch):
+    """清理分支④：agents/ + subagents/ + ~/.orca/knowledge_base/ 全与随包一致 → 直接删、零 backup。"""
+    proj = tmp_path / "proj"
+    src_wf = _make_wf_source(
+        proj, "demo-wf",
+        agents={"demo-agent": "# demo-agent\n"},
+        subagents=["workflow-verifier.md"],
+        knowledge_base=True,
+    )
+    fake_home = _sync_env(tmp_path, monkeypatch, proj)
+    # 模拟旧 install 产物：共享池布局 + 全局 KB（内容从源树复制 → 与随包一致）
+    dest = fake_home / ".orca" / "workflows"
+    shutil.copytree(src_wf / "agents", dest / "agents")
+    shutil.copytree(src_wf / "subagents", dest / "subagents" / "demo-wf")
+    shutil.copytree(src_wf / "knowledge_base", fake_home / ".orca" / "knowledge_base")
+    # Q13a：安装态 pycache 污染不触发 backup（比对与部署同款 ignore，对称）
+    (dest / "agents" / "demo-agent" / "__pycache__").mkdir()
+    (dest / "agents" / "demo-agent" / "__pycache__" / "m.pyc").write_text("junk", encoding="utf-8")
+
+    result = install_cmds._install_bundled_workflows()
+    assert result.backed_up == []
+    assert sorted(result.removed) == sorted([
+        dest / "agents", dest / "subagents", fake_home / ".orca" / "knowledge_base",
+    ])
+    assert not (dest / "agents").exists() and not (dest / "subagents").exists()
+    assert not (fake_home / ".orca" / "knowledge_base").exists()
+    # 无 backup 动作 → 不落 backup 目录
+    orca_dir = fake_home / ".orca"
+    assert not any(p.name.startswith("_legacy_layout_backup_") for p in orca_dir.iterdir())
+
+
+def test_legacy_flat_yamls_backed_up_no_shadow(tmp_path, monkeypatch):
+    """清理分支③：平铺 yaml **一律**入 backup——同名（shadow 源，plan Q2）与未知（po-probe
+    尸体类）皆然；「未知」按非随包名集合轻量判定（本模块零业务逻辑，不做加载级判定）。"""
+    proj = tmp_path / "proj"
+    _make_wf_source(proj, "demo-wf")
+    fake_home = _sync_env(tmp_path, monkeypatch, proj)
+    dest = fake_home / ".orca" / "workflows"
+    dest.mkdir(parents=True)
+    (dest / "demo-wf.yaml").write_text("name: demo-wf\n", encoding="utf-8")   # 同名升级残骸
+    (dest / "po-probe.yaml").write_text("name: po-probe\n", encoding="utf-8")  # 未知尸体
+
+    result = install_cmds._install_bundled_workflows()
+    # 平铺 yaml 不留原位（catalog 平铺优先 + first-wins 会 shadow 同名 per-wf 目录）
+    assert not (dest / "demo-wf.yaml").exists()
+    assert not (dest / "po-probe.yaml").exists()
+    assert sorted(b.source.name for b in result.backed_up) == ["demo-wf.yaml", "po-probe.yaml"]
+    reasons = {b.source.name: b.reason for b in result.backed_up}
+    assert "shadow" in reasons["demo-wf.yaml"]
+    assert "非随包" in reasons["po-probe.yaml"]
+    # per-wf 新目录完好部署（未被 shadow / 未被误伤）
+    assert (dest / "demo-wf" / "workflow.yaml").is_file()
+    # backup 内按原相对结构保全（backup/workflows/<name>.yaml）
+    for b in result.backed_up:
+        assert b.dest.is_file() and b.dest.parent.name == "workflows"
+
+
+def test_legacy_subagents_user_content_moved_to_backup(tmp_path, monkeypatch):
+    """旧 ``subagents/<wf>/``：wf 名不在随包（分支①）或 md 被用户自加/改过（分支②）→ 整目录 backup。"""
+    proj = tmp_path / "proj"
+    src_wf = _make_wf_source(proj, "demo-wf", subagents=["workflow-verifier.md"])
+    fake_home = _sync_env(tmp_path, monkeypatch, proj)
+    legacy = fake_home / ".orca" / "workflows" / "subagents"
+    shutil.copytree(src_wf / "subagents", legacy / "demo-wf")
+    (legacy / "demo-wf" / "my-helper.md").write_text("# user added\n", encoding="utf-8")  # 分支②
+    (legacy / "ghost-wf").mkdir()  # 分支①：随包无 ghost-wf（如已下架的 kd-nas）
+    (legacy / "ghost-wf" / "g.md").write_text("# ghost\n", encoding="utf-8")
+
+    result = install_cmds._install_bundled_workflows()
+    assert not legacy.exists()
+    assert len(result.backed_up) == 1
+    reason = result.backed_up[0].reason
+    assert "内容与随包不一致 demo-wf" in reason and "非随包条目 ghost-wf" in reason
+    assert (result.backed_up[0].dest / "demo-wf" / "my-helper.md").is_file()
+    assert (result.backed_up[0].dest / "ghost-wf" / "g.md").is_file()
+
+
+def test_legacy_kb_user_slice_moved_to_backup(tmp_path, monkeypatch):
+    """旧 ``~/.orca/knowledge_base``：用户自加 family 切片 → 整目录 backup（SPEC 显式场景）。"""
+    proj = tmp_path / "proj"
+    src_wf = _make_wf_source(proj, "demo-wf", knowledge_base=True)
+    fake_home = _sync_env(tmp_path, monkeypatch, proj)
+    legacy_kb = fake_home / ".orca" / "knowledge_base"
+    shutil.copytree(src_wf / "knowledge_base", legacy_kb)
+    (legacy_kb / "families" / "user-slice.json").write_text('{"mine": true}\n', encoding="utf-8")
+
+    result = install_cmds._install_bundled_workflows()
+    assert not legacy_kb.exists()
+    assert len(result.backed_up) == 1
+    assert result.backed_up[0].reason == "内容与随包不一致"
+    assert (result.backed_up[0].dest / "families" / "user-slice.json").is_file()
+
+
+def test_legacy_kb_backed_up_when_bundle_has_no_kb(tmp_path, monkeypatch):
+    """随包无 knowledge_base 时旧全局 KB 在场 → backup（非随包内容，绝不盲删）。"""
+    proj = tmp_path / "proj"
+    _make_wf_source(proj, "demo-wf")  # 无 KB
+    fake_home = _sync_env(tmp_path, monkeypatch, proj)
+    legacy_kb = fake_home / ".orca" / "knowledge_base"
+    legacy_kb.mkdir(parents=True)
+    (legacy_kb / "index.json").write_text("{}\n", encoding="utf-8")
+
+    result = install_cmds._install_bundled_workflows()
+    assert not legacy_kb.exists()
+    assert result.backed_up[0].reason == "随包无对应 knowledge_base"
+    assert (result.backed_up[0].dest / "index.json").is_file()
+
+
+def test_upgrade_install_from_flat_layout(tmp_path, monkeypatch):
+    """升级安装回归（plan Q2 回归锁）：旧平铺安装态在场 → 一次 install 后 per-wf 新布局就位、
+    旧内容进 backup / 一致部分直删、无 shadow。
+
+    混合态 = 平铺 yaml + 共享 agents/（随包副本 + 用户自加）+ subagents/（纯随包）+ 全局 KB。
     """
-    cwd = tmp_path / "proj"
-    (cwd / "workflows").mkdir(parents=True)  # workflows/ 存在但无 subagents/
-    fake_home = tmp_path / "home"
-    fake_home.mkdir()
-    monkeypatch.chdir(cwd)
-    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    proj = tmp_path / "proj"
+    src_wf = _make_wf_source(
+        proj, "demo-wf",
+        agents={"demo-agent": "# demo-agent\n"},
+        subagents=["workflow-verifier.md"],
+        knowledge_base=True,
+    )
+    fake_home = _sync_env(tmp_path, monkeypatch, proj)
+    dest = fake_home / ".orca" / "workflows"
+    # —— 预置旧 install 产物（平铺布局）——
+    dest.mkdir(parents=True)
+    (dest / "demo-wf.yaml").write_text(
+        (src_wf / "workflow.yaml").read_text(encoding="utf-8"), encoding="utf-8")
+    shutil.copytree(src_wf / "agents", dest / "agents")
+    (dest / "agents" / "my-agent").mkdir()
+    (dest / "agents" / "my-agent" / "agent.md").write_text("# user own\n", encoding="utf-8")
+    shutil.copytree(src_wf / "subagents", dest / "subagents" / "demo-wf")
+    shutil.copytree(src_wf / "knowledge_base", fake_home / ".orca" / "knowledge_base")
 
-    assert install_cmds._install_bundled_subagents() == []
-    # 不创 ~/.orca/workflows/subagents 落点
-    assert not (fake_home / ".orca" / "workflows" / "subagents").exists()
+    result = install_cmds._install_bundled_workflows()
+
+    # 新布局就位：per-wf 目录树 = 源树（agents/subagents/KB 随 wf 目录走）
+    assert [d.name for d in result.deployed] == ["demo-wf"]
+    for rel in ("workflow.yaml", "agents/demo-agent/agent.md",
+                "subagents/workflow-verifier.md", "knowledge_base/index.json"):
+        assert (dest / "demo-wf" / rel).is_file(), f"per-wf 缺 {rel}"
+    # 旧内容全离场：无平铺 yaml、无共享池、无全局 KB
+    assert not (dest / "demo-wf.yaml").exists()
+    assert not (dest / "agents").exists()
+    assert not (dest / "subagents").exists()
+    assert not (fake_home / ".orca" / "knowledge_base").exists()
+    # 非随包部分（平铺 yaml / 含用户 agent 的池）进 backup；纯随包部分（subagents / 全局 KB
+    # 均为源树原样副本）走分支④直删——backup 与直删两分支同场各自正确
+    backed = {b.source.name: b for b in result.backed_up}
+    assert set(backed) == {"demo-wf.yaml", "agents"}
+    assert sorted(result.removed) == sorted(
+        [dest / "subagents", fake_home / ".orca" / "knowledge_base"]
+    )
+    assert (backed["agents"].dest / "my-agent" / "agent.md").is_file()
 
 
-def test_install_bundled_subagents_copytree_failure_fails_loud(
-    tmp_path, monkeypatch
-):
-    """copytree 整体抛 OSError → 让异常上抛（install 期 fail loud，不延迟到 run 期）。
+def test_unknown_non_yaml_content_warned_not_touched(tmp_path, monkeypatch):
+    """未知非 yaml 内容（~/.orca/workflows 下不明文件/目录）→ 只 warn 不动（未知内容只记录不删）。"""
+    proj = tmp_path / "proj"
+    _make_wf_source(proj, "demo-wf")
+    fake_home = _sync_env(tmp_path, monkeypatch, proj)
+    dest = fake_home / ".orca" / "workflows"
+    dest.mkdir(parents=True)
+    (dest / "readme.txt").write_text("mystery\n", encoding="utf-8")
+    (dest / "mystery-dir").mkdir()
+    (dest / "mystery-dir" / "x.md").write_text("x", encoding="utf-8")
 
-    与 ``_install_bundled_knowledge_base`` 同款整树原子语义（per-file fail-soft 已废——v3 拓扑
-    用 copytree，不再 per-file copy2）。run_install 捕获 OSError 计入 failed。
-    """
-    cwd = tmp_path / "proj"
-    sa_src = cwd / "workflows" / "subagents" / "nas-supernet"
-    sa_src.mkdir(parents=True)
-    (sa_src / "good-a.md").write_text("# A\n", encoding="utf-8")
-    (sa_src / "good-c.md").write_text("# C\n", encoding="utf-8")
-    fake_home = tmp_path / "home"
-    fake_home.mkdir()
-    monkeypatch.chdir(cwd)
-    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    result = install_cmds._install_bundled_workflows()
+    assert result.backed_up == [] and result.removed == []
+    assert (dest / "readme.txt").exists() and (dest / "mystery-dir").exists()
+    assert len(result.warned) == 2
+    assert all("未知内容" in w for w in result.warned)
 
-    def flaky_copytree(src, dst, **kwargs):
-        raise OSError("simulated copytree failure")
+
+def test_backup_move_failure_fails_loud(tmp_path, monkeypatch):
+    """backup 移动失败 → 清理中断 + ``failed`` 记录 "workflows"（install exit 1，fail loud）；
+    已完成的部署等部分结果**保留**在返回值（不因失败丢弃可观测性），失败现场不半删。"""
+    proj = tmp_path / "proj"
+    _make_wf_source(proj, "demo-wf")
+    fake_home = _sync_env(tmp_path, monkeypatch, proj)
+    legacy = fake_home / ".orca" / "workflows" / "agents" / "my-agent"
+    legacy.mkdir(parents=True)
+    (legacy / "agent.md").write_text("# user\n", encoding="utf-8")
+
+    def _boom(*_a, **_k):
+        raise OSError("move denied (simulated)")
+
+    monkeypatch.setattr(install_cmds.shutil, "move", _boom)
+    result = install_cmds._install_bundled_workflows()
+    assert [d.name for d in result.deployed] == ["demo-wf"]  # 部署部分结果保留
+    assert result.failed == ["workflows"]  # → run_install「部分失败」+ exit 1
+    assert legacy.is_dir()  # 未被移动的旧目录留在原位（非半删状态，下次幂等重试）
+
+
+def test_deploy_copytree_failure_warns_and_records(tmp_path, monkeypatch):
+    """部署 copytree per-wf fail-soft：warn + failed 记录该 wf，异常不上抛（其余 wf 继续）。"""
+    proj = tmp_path / "proj"
+    _make_wf_source(proj, "wf-a")
+    _make_wf_source(proj, "wf-b")
+    fake_home = _sync_env(tmp_path, monkeypatch, proj)
+
+    real_copytree = shutil.copytree  # monkeypatch 打在共享 shutil 模块上，先抓真函数防自递归
+    def flaky_copytree(src, dst, *args, **kwargs):  # *args：copytree 内部递归用位置参数自调
+        if Path(src).name == "wf-a":
+            raise OSError("simulated copytree failure")
+        return real_copytree(src, dst, *args, **kwargs)
 
     monkeypatch.setattr(install_cmds.shutil, "copytree", flaky_copytree)
 
-    with pytest.raises(OSError, match="simulated copytree failure"):
-        install_cmds._install_bundled_subagents()
+    result = install_cmds._install_bundled_workflows()
+    assert result.failed == ["workflows/wf-a"]
+    assert [d.name for d in result.deployed] == ["wf-b"]
 
 
-def test_install_bundled_subagents_noop_without_workflows_dir(tmp_path, monkeypatch):
-    """无 CWD/workflows 目录 → no-op 返回 []（非仓库根跑 install 不报错，幂等安全）。"""
+def test_no_bundled_source_never_touches_global_orca(tmp_path, monkeypatch):
+    """安全闸：无随包口径（无 workflows / 纯平铺源无 per-wf 目录）→ 完全 no-op，预置的
+    ``~/.orca`` 内容（哪怕形似旧布局）一律不动——清理只在有随包比对基准时触发。"""
     empty = tmp_path / "empty"
     empty.mkdir()
-    monkeypatch.chdir(empty)
-    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
-    assert install_cmds._install_bundled_subagents() == []
+    fake_home = _sync_env(tmp_path, monkeypatch, empty)
+    legacy_agents = fake_home / ".orca" / "workflows" / "agents" / "my-agent"
+    legacy_agents.mkdir(parents=True)
+    (legacy_agents / "agent.md").write_text("# user\n", encoding="utf-8")
+    flat = fake_home / ".orca" / "workflows" / "demo-wf.yaml"
+    flat.write_text("name: demo-wf\n", encoding="utf-8")
+
+    result = install_cmds._install_bundled_workflows()
+    assert result == install_cmds.WorkflowSyncResult()
+    assert legacy_agents.is_dir() and flat.is_file()
+
+    # 有 workflows/ 但无 */workflow.yaml（纯平铺源）→ 同样 no-op（双形态源兼容由加载层负责，
+    # install 只认 per-wf 源；绝不因「随包集合为空」把全部预置内容误判为非随包）
+    flat_src = tmp_path / "flat-proj" / "workflows"
+    flat_src.mkdir(parents=True)
+    (flat_src / "demo-wf.yaml").write_text("name: demo-wf\n", encoding="utf-8")
+    monkeypatch.chdir(flat_src.parent)
+    assert install_cmds._install_bundled_workflows() == install_cmds.WorkflowSyncResult()
+    assert legacy_agents.is_dir()
+
+
+def test_run_install_prints_per_wf_deploy_and_cleanup(tmp_path, monkeypatch):
+    """CLI 输出：per-wf 目录部署行（含资产摘要，稳定排序）+ 旧布局清理分行（备份/删除/警告）。"""
+    proj = tmp_path / "proj"
+    src_wf = _make_wf_source(
+        proj, "demo-wf",
+        agents={"demo-agent": "# a\n"},
+        subagents=["workflow-verifier.md"],
+        knowledge_base=True,
+    )
+    fake_home = _sync_env(tmp_path, monkeypatch, proj)
+    dest = fake_home / ".orca" / "workflows"
+    # 预置三类旧布局态：含用户内容的 agents/（→备份）、纯随包 subagents/（→删除）、未知文件（→警告）
+    shutil.copytree(src_wf / "agents" / "demo-agent", dest / "agents" / "demo-agent")
+    (dest / "agents" / "my-agent").mkdir(parents=True)
+    (dest / "agents" / "my-agent" / "agent.md").write_text("# user\n", encoding="utf-8")
+    shutil.copytree(src_wf / "subagents", dest / "subagents" / "demo-wf")
+    (dest / "readme.txt").write_text("mystery\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["--target", "cc", "--scope", "user"])
+    assert result.exit_code == 0, result.output
+    assert "[workflows] → ~/.orca/workflows/" in result.output
+    assert "✓ demo-wf/（agents 1 · subagents 1 · knowledge_base）" in result.output
+    assert "[旧布局清理]" in result.output
+    # 备份行（含原因）/ 删除行（一致直删）/ 警告行（未知内容只记录）三类分行齐备
+    assert "备份" in result.output and "my-agent" in result.output
+    assert "删除" in result.output and "subagents" in result.output
+    assert "未知内容" in result.output and "readme.txt" in result.output
+
+
+def test_run_install_workflow_cleanup_failure_fails_loud(tmp_path, monkeypatch):
+    """run_install 层 fail loud 链：backup 移动失败 → stderr 警告 + ``部分失败：workflows`` + exit 1。"""
+    proj = tmp_path / "proj"
+    _make_wf_source(proj, "demo-wf")
+    fake_home = _sync_env(tmp_path, monkeypatch, proj)
+    legacy = fake_home / ".orca" / "workflows" / "agents" / "my-agent"
+    legacy.mkdir(parents=True)
+    (legacy / "agent.md").write_text("# user\n", encoding="utf-8")
+
+    def _boom(*_a, **_k):
+        raise OSError("move denied (simulated)")
+
+    monkeypatch.setattr(install_cmds.shutil, "move", _boom)
+    result = runner.invoke(app, ["--target", "cc", "--scope", "user"])
+    assert result.exit_code == 1, result.output
+    assert "旧布局清理中断" in result.output
+    assert "部分失败" in result.output and "workflows" in result.output
+    # 失败现场保全：未被移动的旧目录留在原位（交用户处理，非半删状态）
+    assert legacy.is_dir()
+
+
+def test_backup_dest_collision_gets_numeric_suffix(tmp_path, monkeypatch):
+    """同日重跑 + backup 目标已存在（用户手工还原旧位）→ 数字后缀防覆盖 / 防 move-into 语义。"""
+    proj = tmp_path / "proj"
+    _make_wf_source(proj, "demo-wf")
+    fake_home = _sync_env(tmp_path, monkeypatch, proj)
+    legacy_agents = fake_home / ".orca" / "workflows" / "agents"
+    (legacy_agents / "my-agent").mkdir(parents=True)
+    (legacy_agents / "my-agent" / "agent.md").write_text("# user\n", encoding="utf-8")
+
+    r1 = install_cmds._install_bundled_workflows()
+    assert len(r1.backed_up) == 1
+    # 模拟用户把旧目录还原回原位（copy 非 move——backup 副本保留在位），同日再跑 → 目标同名碰撞
+    shutil.copytree(r1.backed_up[0].dest, legacy_agents)
+    r2 = install_cmds._install_bundled_workflows()
+    assert len(r2.backed_up) == 1
+    assert r2.backed_up[0].dest.name == "agents.1", (
+        f"碰撞目标应加数字后缀，实际：{r2.backed_up[0].dest}"
+    )
+    assert (r2.backed_up[0].dest / "my-agent" / "agent.md").is_file()
+    assert not legacy_agents.exists()
+
+
+def test_remove_legacy_dir_rmtree_failure_warns_not_fails(tmp_path, monkeypatch):
+    """分支④删除失败（rmtree OSError）→ warn 不 fail：内容与随包冗余一致非安装失败，下次幂等重试。"""
+    proj = tmp_path / "proj"
+    src_wf = _make_wf_source(proj, "demo-wf", agents={"demo-agent": "# a\n"})
+    fake_home = _sync_env(tmp_path, monkeypatch, proj)
+    legacy = fake_home / ".orca" / "workflows" / "agents"
+    shutil.copytree(src_wf / "agents", legacy)  # 纯随包 → 分支④
+    real_rmtree = shutil.rmtree
+
+    def flaky_rmtree(path, *args, **kwargs):
+        if Path(path) == legacy:
+            raise OSError("rmdir busy (simulated)")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(install_cmds.shutil, "rmtree", flaky_rmtree)
+    result = install_cmds._install_bundled_workflows()
+    assert result.backed_up == [] and result.removed == []
+    assert result.failed == []  # warn 不 fail（fail-soft 决策：冗余一致内容，非安装失败）
+    assert legacy.is_dir()  # 残留保留，交下次 install 幂等重试
 
 
 # ── PostToolUse 事后告警守卫（SPEC docs/specs/posttooluse-rogue-guard.md）─────────
@@ -1455,7 +1829,8 @@ def test_install_cmds_has_no_orca_business_logic_posttooluse():
     """SPEC §11.4 D-v7-1：install_cmds 仍零 Orca 业务逻辑（新增 PostToolUse 条目 = 纯配置合并）。"""
     src = Path(install_cmds.__file__).read_text(encoding="utf-8")
     forbidden = [
-        "from orca.run", "from orca.events", "from orca.schema",
+        "from orca.run", "from orca.events", "from orca.schema", "from orca.compile",
+        "import orca.run", "import orca.events", "import orca.schema", "import orca.compile",
         "advance_step", "router.resolve", "replay_state", "tape.append",
         "EventBus(", "Orchestrator(",
     ]

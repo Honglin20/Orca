@@ -29,12 +29,11 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-AGENTS = REPO / "workflows" / "agents"
 
 RUN_SEARCH_AGENTS = [
-    AGENTS / "ns_run_search" / "agent.md",
-    AGENTS / "ns2_run_search" / "agent.md",
-    AGENTS / "ns3_run_search" / "agent.md",
+    REPO / "workflows" / "nas-supernet" / "agents" / "ns_run_search" / "agent.md",
+    REPO / "workflows" / "nas-supernet-v2" / "agents" / "ns2_run_search" / "agent.md",
+    REPO / "workflows" / "nas-supernet-v3" / "agents" / "ns3_run_search" / "agent.md",
 ]
 
 

@@ -1,11 +1,15 @@
 // components/pages/WorkflowBrowsePage.tsx —— workflow 浏览三栏页（plan idempotent-churning-lampson）。
 //
 // 照 RunDetailPage.tsx 用 ``useParams`` + ``PanelGroup``。三栏：
-//   - 左：workflow 元信息 + 引用 agents 高亮 + 全量 agents 折叠区（missing:true 灰显）
-//   - 中：FileTree（递归文件树）
+//   - 左：workflow 元信息 + 「全部资产」入口 + 引用 agents 高亮 + Subagents 区
+//   - 中：FileTree（递归文件树；批 G 起双数据源——wf 全资产树 / 单 agent 树，treeScope 切换）
 //   - 右：.md/SKILL.md → <MarkdownText>；其它 → <CodeViewer>
 //
 // **m5**：切 workflow 时 store 同步清空 activeAgent/fileTree/activeFile（在 store action 内做）。
+//
+// **批 G（2026-08-27）**：中栏默认 wf 级全资产树（workflow.yaml/agents/subagents/
+// knowledge_base/scripts 落地即见）；点 agent 行收窄为该 agent 视图，「全部资产」入口
+// 回全树。右栏渲染门从 activeAgent 改为 activeFile（wf 级文件可预览）。
 
 import { useEffect, lazy, Suspense } from "react";
 import { useParams, useNavigate } from "react-router-dom";
@@ -26,6 +30,7 @@ export function WorkflowBrowsePage() {
     workflowLoading,
     workflowError,
     activeAgent,
+    treeScope,
     fileTree,
     treeLoading,
     treeError,
@@ -33,7 +38,9 @@ export function WorkflowBrowsePage() {
     fileLoading,
     fileError,
     openWorkflow,
+    openWorkflowTree,
     openAgent,
+    openSubagent,
     openFile,
     reset,
   } = useWorkflowBrowseStore();
@@ -123,6 +130,26 @@ export function WorkflowBrowsePage() {
                   <div className="orca-bg-surface-2 orca-text-muted orca-border border-b px-3 py-2 text-xs font-semibold uppercase tracking-wide">
                     Agents（{referencedAgents.length}）
                   </div>
+                  {/* 批 G：「全部资产」入口——回 wf 级全资产树（treeScope=workflow 时高亮） */}
+                  <ul>
+                    <li>
+                      <button
+                        type="button"
+                        onClick={() => void openWorkflowTree()}
+                        className={`flex w-full flex-col items-start px-3 py-1.5 text-left text-xs ${
+                          treeScope === "workflow"
+                            ? "orca-bg-surface-2 orca-accent orca-border-accent border-l-2"
+                            : "orca-text-muted hover:orca-bg-surface-2 border-l-2 border-transparent"
+                        }`}
+                        data-testid="asset-scope-all"
+                      >
+                        <span className="truncate font-medium">全部资产</span>
+                        <span className="orca-text-faint mt-0.5 truncate text-xs">
+                          workflow.yaml · agents · subagents · scripts
+                        </span>
+                      </button>
+                    </li>
+                  </ul>
                   <ul data-testid="agent-list">
                     {referencedAgents.length === 0 && (
                       <li
@@ -171,6 +198,49 @@ export function WorkflowBrowsePage() {
                   </ul>
                 </div>
               )}
+
+              {/* 批 G：Subagents 区（同 Agents 列表样式；后端已 fail-soft 兜底，无 missing 态） */}
+              {activeWorkflow && (
+                <div className="orca-border border-t">
+                  <div className="orca-bg-surface-2 orca-text-muted orca-border border-b px-3 py-2 text-xs font-semibold uppercase tracking-wide">
+                    Subagents（{activeWorkflow.subagents.length}）
+                  </div>
+                  <ul data-testid="subagent-list">
+                    {activeWorkflow.subagents.length === 0 && (
+                      <li
+                        className="orca-text-faint px-3 py-3 text-xs"
+                        data-testid="subagent-list-empty"
+                      >
+                        该 workflow 无 subagents
+                      </li>
+                    )}
+                    {activeWorkflow.subagents.map((sub) => {
+                      return (
+                        <li key={sub.name}>
+                          <button
+                            type="button"
+                            onClick={() => openSubagent(sub.name)}
+                            className={`flex w-full flex-col items-start px-3 py-1.5 text-left text-xs ${
+                              treeScope === "workflow" &&
+                              activeFile?.path === `subagents/${sub.name}.md`
+                                ? "orca-bg-surface-2 orca-accent orca-border-accent border-l-2"
+                                : "orca-text-muted hover:orca-bg-surface-2 border-l-2 border-transparent"
+                            }`}
+                            data-testid={`subagent-row-${sub.name}`}
+                          >
+                            <span className="truncate font-medium">{sub.name}</span>
+                            {sub.description && (
+                              <span className="orca-text-faint mt-0.5 truncate text-xs">
+                                {sub.description}
+                              </span>
+                            )}
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
             </div>
           </div>
         </Panel>
@@ -179,14 +249,18 @@ export function WorkflowBrowsePage() {
           <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-[rgb(var(--surface-2))] transition-colors group-hover:bg-[rgb(var(--accent))]" />
         </PanelResizeHandle>
 
-        {/* 中栏：文件树 */}
+        {/* 中栏：文件树（批 G：双数据源——wf 全资产树 / 单 agent 树，treeScope 切换） */}
         <Panel defaultSize={28} minSize={15}>
           <div className="orca-bg-surface orca-border flex h-full flex-col border-r">
             <div className="orca-bg-surface-2 orca-text-muted orca-border border-b px-3 py-2 text-xs font-semibold uppercase tracking-wide">
-              {activeAgent ? `Files · ${activeAgent}` : "Files"}
+              {activeAgent
+                ? `Files · ${activeAgent}`
+                : activeWorkflow
+                  ? `Files · ${activeWorkflow.meta.name}`
+                  : "Files"}
             </div>
             <div className="orca-bg-surface flex-1 overflow-y-auto">
-              {!activeAgent && (
+              {treeScope === "workflow" && !fileTree && !treeLoading && !treeError && (
                 <p
                   className="orca-text-faint px-3 py-4 text-xs"
                   data-testid="tree-empty"
@@ -194,7 +268,7 @@ export function WorkflowBrowsePage() {
                   选择左侧 agent 查看其资源目录
                 </p>
               )}
-              {activeAgent && treeLoading && (
+              {treeLoading && (
                 <div
                   className="orca-text-faint flex items-center gap-2 px-3 py-4 text-xs"
                   data-testid="tree-loading"
@@ -211,7 +285,7 @@ export function WorkflowBrowsePage() {
                   {treeError}
                 </p>
               )}
-              {activeAgent && fileTree && !treeLoading && (
+              {fileTree && !treeLoading && !treeError && (
                 <FileTree
                   nodes={fileTree}
                   selectedPath={activeFile?.path ?? null}
@@ -233,7 +307,7 @@ export function WorkflowBrowsePage() {
               {activeFile?.path ?? "Preview"}
             </div>
             <div className="flex-1 overflow-hidden">
-              {!activeAgent && (
+              {!activeFile && !fileLoading && (
                 <p
                   className="orca-text-faint px-3 py-4 text-xs"
                   data-testid="preview-empty"
@@ -249,7 +323,7 @@ export function WorkflowBrowsePage() {
                   {fileError}
                 </p>
               )}
-              {activeAgent && fileLoading && (
+              {fileLoading && (
                 <div
                   className="orca-text-faint flex items-center gap-2 px-3 py-4 text-xs"
                   data-testid="file-loading"

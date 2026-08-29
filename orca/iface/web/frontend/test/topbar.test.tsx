@@ -10,6 +10,7 @@
 
 import { describe, expect, test, afterEach, beforeEach, vi } from "vitest";
 import { act, cleanup, render, screen, fireEvent } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { TopBar } from "@/components/layout/TopBar";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import { useWsConnectionStore } from "@/hooks/ws-connection-store";
@@ -50,9 +51,15 @@ afterEach(() => {
 });
 
 // 把 TopBar 包在 useElapsedTickActive 容器里（模拟 RunDetailPage 行为）。
+// MemoryRouter：TopBar 的「返回主页」按钮用 useNavigate（0e2bc11），无 Router 上下文
+// 直接 throw——测试必须包路由容器。
 function Root({ active }: { active: boolean }) {
   useElapsedTickActive(active);
-  return <TopBar runId="abc12345" />;
+  return (
+    <MemoryRouter>
+      <TopBar runId="abc12345" />
+    </MemoryRouter>
+  );
 }
 
 describe("TopBar —— status icon 5 档（SPEC §5.1）", () => {

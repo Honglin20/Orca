@@ -97,8 +97,8 @@ class ClaudeExecutor(Executor):
         # None == 不注 ``ORCA_CHART_SOCK`` env（向后兼容，script 端 render_chart fail loud）。
         # 由 orchestrator 从 ``self.bus.tape.path.parent`` 推导传入（同 tape 父目录）。
         self._runs_dir = runs_dir
-        # plan 2026-08-04 kd-nas headless fix：workflow yaml 所在目录绝对路径，cwd 无关定位
-        # workflow 级共享资源（如 agents/_kd_scripts）。None == 不注（向后兼容）。
+        # workflow yaml 所在目录绝对路径，cwd 无关定位
+        # workflow 级共享资源（如 agents/_po_scripts）。None == 不注（向后兼容）。
         # 由 orchestrator 从 load_workflow(yaml_path).parent 透传（run 启动期解析）。
         self._workflows_root = workflows_root
 

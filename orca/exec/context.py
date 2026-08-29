@@ -65,8 +65,10 @@ class RunContext:
     dialog_history: tuple[dict[str, Any], ...] = ()
     # point-to-file subagent 协议（SPEC subagent-point-to-file-design-draft §3.2/§4）：
     # workflow 子 agent md body 所在目录的**绝对路径字符串**，由 orchestrator 在 run 期经
-    # ``workflows_root / "subagents" / wf.name`` 解析后透传到 render 层。agent.md body 用
-    # ``{{ subagents_root }}/<name>.md`` 引用，render 期被替换为绝对路径——shell 无关、cwd 无关。
+    # 双形态公式解析（``orca.compile.layout.resolve_subagents_dir``：per-wf
+    # ``<yaml目录>/subagents/`` 直接含 md；旧平铺 ``<yaml目录>/subagents/<wf.name>/``）后
+    # 透传到 render 层。agent.md body 用 ``{{ subagents_root }}/<name>.md`` 引用，render 期
+    # 被替换为绝对路径——shell 无关、cwd 无关。
     # 默认空串 = 该 workflow 无 subagents 目录（如 quant-*）；agent.md 不应在此场景引用
     # ``{{ subagents_root }}``，render 层对「引用了但值为空串」fail loud（SPEC §7 末）。
     subagents_root: str = ""

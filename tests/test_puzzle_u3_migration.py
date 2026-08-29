@@ -31,7 +31,7 @@ pytest.importorskip("yaml")
 pytest.importorskip("nas_agent")
 
 _REPO = Path(__file__).resolve().parents[1]
-_SCRIPTS_DIR = _REPO / "workflows" / "agents" / "_puzzle_scripts"
+_SCRIPTS_DIR = _REPO / "workflows" / "puzzle" / "agents" / "_puzzle_scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 sys.path.insert(0, str(_REPO / "tests"))

@@ -74,7 +74,8 @@
 
 ## 4. agent MD 格式
 
-两种形态（`AgentResolver` 发现）：
+`agents/` 与 workflow.yaml 同级、位于 workflow 自己的目录内（per-workflow 自包含布局，
+新建 workflow 的目录树见 SKILL.md「产出布局」）。两种形态（`AgentResolver` 发现）：
 - **文件 agent**：`agents/<name>.md` —— 单 md（无脚本资源时用）。
 - **文件夹 agent**：`agents/<name>/agent.md` + `agents/<name>/scripts/<file>`（有脚本资源时用）。
   spawn 时注入 `ORCA_AGENT_RESOURCES` 指向 `<name>/` 文件夹绝对路径，agent 的 Bash 工具据此引用自带脚本。
@@ -157,7 +158,7 @@ TARS skill strict 识别魔键 → 问用户 → SendMessage/Task(task_id) 恢�
 
 ### infer-once + propagate 黄金模板
 
-`workflows/agent-struct-exploration.yaml` 的 `setup` 节点：`project_root`/`build_fn`/`dummy_input`/`struct_scripts_dir` 全下沉为 output_schema 字段，下游 `{{ setup.output.X }}` 取，**不**各自重新自找（违反 DRY、自找不一致时远端崩、破坏复现）。
+`workflows/agent-struct-exploration/workflow.yaml` 的 `setup` 节点：`project_root`/`build_fn`/`dummy_input`/`struct_scripts_dir` 全下沉为 output_schema 字段，下游 `{{ setup.output.X }}` 取，**不**各自重新自找（违反 DRY、自找不一致时远端崩、破坏复现）。
 
 ### input 三档 checklist（生成/改 workflow 后必跑）
 

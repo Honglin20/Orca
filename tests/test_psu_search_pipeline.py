@@ -20,8 +20,8 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-EXAMPLES_DIR = REPO / "workflows" / "agents" / "psu_search_pipeline" / "references" / "supernet_workflow_examples"
-GENERATE_SCHEMA = REPO / "workflows" / "agents" / "psu_search_pipeline" / "scripts" / "generate_schema.py"
+EXAMPLES_DIR = REPO / "workflows" / "puzzle-supernet" / "agents" / "psu_search_pipeline" / "references" / "supernet_workflow_examples"
+GENERATE_SCHEMA = REPO / "workflows" / "puzzle-supernet" / "agents" / "psu_search_pipeline" / "scripts" / "generate_schema.py"
 sys.path.insert(0, str(REPO / "tests"))
 
 from _psu_test_fixtures import write_toy_expand_artifacts  # noqa: E402
@@ -234,7 +234,7 @@ def test_generate_schema_on_toy_supernet(tmp_path):
 # 不被 _arch_digest 消化 → 全部行被 skip → 表格 "empty data"。渲染器须支持 per-slot
 # 分支名 list（含 {"choice": name} dict entry），表格列 = slot × branch。
 
-SEARCH_TABLE = REPO / "workflows" / "agents" / "psu_run_search" / "scripts" / "search_table.py"
+SEARCH_TABLE = REPO / "workflows" / "puzzle-supernet" / "agents" / "psu_run_search" / "scripts" / "search_table.py"
 
 _CHOICE_CONFIG_YAML = """\
 objs:

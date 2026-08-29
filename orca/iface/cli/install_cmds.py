@@ -24,6 +24,11 @@ opencode 额外落 ``plugins/orca.ts`` + 合并 ``opencode.json`` 的 plugin 声
 
 四 host 行为家族内对称（CAC/NGA 真机加载是否读 ``.cac``/``.nga`` 留 §9#1 跨平台用户侧验证）。
 
+**内置 workflows 部署**（per-wf 自包含布局）：``run_install`` 尾部把 CWD/``workflows/`` 下每个含
+``workflow.yaml`` 的子目录**整树** sync 到 ``~/.orca/workflows/<wf>/``（源 = 安装态同构），并对旧
+平铺布局（共享 ``agents/`` / ``subagents/`` / ``~/.orca/knowledge_base`` / 平铺 yaml）按 UD-1
+backup 方案幂等清理（详见 ``_install_bundled_workflows``）。
+
 **架构守门**（D-v7-1 同源）：本模块零 Orca 业务逻辑——只拷文件 + 合并 JSON 顶层字段。
 不调 advance/router/replay/tape 路径，不做状态机判断。CI grep 守门。
 
@@ -34,10 +39,13 @@ opencode 额外落 ``plugins/orca.ts`` + 合并 ``opencode.json`` 的 plugin 声
 
 from __future__ import annotations
 
+import fnmatch
+import hashlib
 import json
 import os
 import shutil
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Callable
@@ -49,7 +57,7 @@ from orca.iface.cli.skill_cmds import (
     ENTRY_SKILL_NAME,
     HOST_DOTDIR,
     SKILL_HOSTS,
-    SKILL_NAME,  # noqa: F401 —— re-export（tests 经 install_cmds.SKILL_NAME 引用）
+    SKILL_NAME,  # legacy 清理 reason 直接用；兼 re-export（tests 经 install_cmds.SKILL_NAME 引用）
     SKILL_TARGETS,
     opencode_global_root,
 )
@@ -223,6 +231,7 @@ def _install_skill(root: Path) -> list[Path]:
 
     ``shutil.copytree(dirs_exist_ok=True)`` 幂等覆盖；排除 ``benchmark/``（评测资产，
     含 expected 答案，不该进用户 skill 目录）。返落地 skill 目录列表（按 name 升序）。
+    顺带幂等清理旧名 skill 残留（改名/并入迁移，见函数尾 legacy_skills）。
     找不到随包 skill 源 → fail loud（exit 1，打包漏文件）。
     """
     srcs = _bundled_skill_sources()
@@ -239,15 +248,21 @@ def _install_skill(root: Path) -> list[Path]:
         shutil.copytree(src, dst, dirs_exist_ok=True, ignore=shutil.ignore_patterns("benchmark"))
         dsts.append(dst)
 
-    # 改名迁移清理（v5 §4.1：入口 skill teams→orca→tars）。旧入口 skill 名残留会让宿主同时
-    # 加载新旧两份入口（如 .claude/skills/orca/ + tars/）→ 模型困惑该调哪个。旧名已不是随包源
-    # （源已改名 tars）→ 残留即陈旧，幂等清理（同 ``command/orca`` 清理同 pattern，fail-soft warn）。
+    # 陈旧 skill 目录清理（改名迁移 teams→orca→tars + 并入迁移 design-charts→create-workflow）。
+    # 旧名残留会让宿主同时加载新旧两份（如 .claude/skills/orca/ + tars/）→ 模型困惑该调哪个。
+    # 旧名已不是随包源 → 残留即陈旧，幂等清理（同 ``command/orca`` 清理同 pattern，fail-soft warn）。
+    # reason 区分迁移方式：入口 skill 是改名，design-charts 是并入 create-workflow（能力合并非改名）。
     installed_names = {p.name for p in srcs}
-    for legacy in (root / "skills" / "orca", root / "skills" / "teams"):
+    legacy_skills = (
+        (root / "skills" / "orca", f"已改名 {ENTRY_SKILL_NAME}"),
+        (root / "skills" / "teams", f"已改名 {ENTRY_SKILL_NAME}"),
+        (root / "skills" / "design-charts", f"已并入 {SKILL_NAME}"),
+    )
+    for legacy, reason in legacy_skills:
         if legacy.is_dir() and legacy.name not in installed_names:
             try:
                 shutil.rmtree(legacy)
-                typer.echo(f"  ↻ 清理旧入口 skill 残留：{legacy}（已改名 {ENTRY_SKILL_NAME}）")
+                typer.echo(f"  ↻ 清理旧 skill 残留：{legacy}（{reason}）")
             except OSError as e:  # noqa: BLE001
                 typer.echo(f"  ⚠ 无法清理旧 skill 残留 {legacy}：{e}", err=True)
     return dsts
@@ -526,119 +541,294 @@ def install(
         raise typer.Exit(1)
 
 
-def _install_bundled_workflows() -> list[Path]:
-    """部署当前目录 ``workflows/*.yaml`` + ``workflows/agents/`` → ``~/.orca/workflows/``。
+# ── 内置 workflows per-wf 同步 + 旧平铺布局清理（layout per-wf 改造 · SPEC 步骤 4）──
 
-    让 ``tars install`` 把仓库自带 workflow（如 ``nas-agent-pipeline``）装成**全局可见**——
-    任何项目的 ``orca list`` 都能扫到（``~/.orca/workflows`` 是 catalog 用户级扫描点），解决
-    「全新地方 ``orca list`` 空」问题。``workflows/agents/``（agent 池）必须随 yaml 同步：
-    agent 解析按 ``<workflow_dir>/agents/`` 找（``orca.compile.agents``），只拷 yaml 不拷
-    agents 会让全局 workflow 全部 resolve 失败（agent not found）。
+# copytree ignore 口径（部署不拷）与内容比对忽略口径（比对不算）的**单一真相源**——两处不对称
+# 会让真机安装态的 __pycache__ 永远触发 backup、「与随包完全一致 → 直接删」分支永不命中（Q13a）。
+_IGNORE_PATTERNS = ("__pycache__", "*.pyc")
 
-    幂等：yaml 内容相同跳过，不同覆盖；agents 树 ``copytree(dirs_exist_ok=True)`` 覆盖同步
-    （merge 语义：保用户自加的自定义 agent 共存；代价是随包已删的旧 agent 不清理——已知限制，
-    agents 目录每次 install 都计入返回值/输出）。源（CWD/workflows）保留（**复制非移动**）。
-    无 CWD/workflows 或无 *.yaml → no-op（非仓库根跑 install 不报错）。
+
+def _is_ignored_name(name: str) -> bool:
+    """名字级忽略判定，语义与 ``shutil.ignore_patterns(*_IGNORE_PATTERNS)`` 完全同源
+    （同用 fnmatch）——部署与比对两处消费同一常量，对称性由结构保证而非注释。"""
+    return any(fnmatch.fnmatch(name, pat) for pat in _IGNORE_PATTERNS)
+
+
+@dataclass(frozen=True)
+class _LegacyBackup:
+    """一条旧布局 backup 记录：源路径 → backup 落点 + 原因（CLI warn 清单逐条打印）。"""
+
+    source: Path
+    dest: Path
+    reason: str
+
+
+@dataclass
+class WorkflowSyncResult:
+    """``_install_bundled_workflows`` 结果（run_install 据此打印部署/备份/清理/警告清单）。"""
+
+    deployed: list[Path] = field(default_factory=list)          # per-wf 落地目录（按名排序）
+    backed_up: list[_LegacyBackup] = field(default_factory=list)  # 移入 backup 的旧布局路径
+    removed: list[Path] = field(default_factory=list)           # 与随包完全一致、直接删的旧目录
+    warned: list[str] = field(default_factory=list)             # 未知内容只记录不动的警告
+    failed: list[str] = field(default_factory=list)             # 部署失败单元（"workflows/<wf>"）
+
+
+def _sha256_file(p: Path) -> str:
+    h = hashlib.sha256()
+    h.update(p.read_bytes())
+    return h.hexdigest()
+
+
+def _tree_signature(root: Path) -> dict[str, str]:
+    """目录树内容签名：相对路径 → sha256（忽略 ``__pycache__``/``*.pyc``，与部署 ignore 对称）。
+
+    ``root`` 是文件 → ``{".": sha}``（统一文件/目录两形态，比对即 dict 相等；文件 vs 目录
+    同名时签名形状天然不同 → 判不一致，正确落入 backup）。
     """
-    src_dir = Path.cwd() / "workflows"
-    if not src_dir.is_dir():
-        return []
-    yamls = sorted(src_dir.glob("*.yaml"))
-    if not yamls:
-        return []
-    dest_dir = Path.home() / ".orca" / "workflows"
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    deployed: list[Path] = []
-    for src in yamls:
-        dst = dest_dir / src.name
-        try:
-            if dst.exists() and dst.read_text(encoding="utf-8") == src.read_text(encoding="utf-8"):
-                continue  # 内容同跳过（幂等）
-            shutil.copy2(src, dst)
-        except OSError as e:  # noqa: BLE001
-            typer.echo(f"  ⚠ 部署 workflow {src.name} 失败：{e}", err=True)
+    if root.is_file():
+        return {".": _sha256_file(root)}
+    sig: dict[str, str] = {}
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
             continue
-        deployed.append(dst)
+        rel = p.relative_to(root)
+        if any(_is_ignored_name(part) for part in rel.parts):
+            continue
+        sig[rel.as_posix()] = _sha256_file(p)
+    return sig
 
-    # agent 池同步（workflow yaml 的 agent 引用按 <workflow_dir>/agents/ 解析，必须一并拷）
-    agents_src = src_dir / "agents"
-    if agents_src.is_dir():
-        agents_dst = dest_dir / "agents"
+
+def _bundled_layout_maps(
+    wf_dirs: list[Path],
+) -> tuple[dict[str, list[Path]], dict[str, list[Path]], list[Path]]:
+    """随包（per-wf 源树）三类资产的候选映射——**运行时计算，禁 hardcode**（防漂移）。
+
+    - agents：agent 名 → 各 wf 源副本列表（共享 agent 多副本，比对 any-match，plan Q13b）
+    - subagents：wf 名 → 该 wf 的 ``subagents/`` 源目录（旧布局 ``subagents/<wf>`` 的映射
+      公式，plan Q13c）
+    - knowledge_base：随包 KB 源目录列表（旧 ``~/.orca/knowledge_base`` 的映射公式）
+    """
+    agents: dict[str, list[Path]] = {}
+    subagents: dict[str, list[Path]] = {}
+    kbs: list[Path] = []
+    for wf in wf_dirs:
+        agents_root = wf / "agents"
+        if agents_root.is_dir():
+            for entry in agents_root.iterdir():
+                agents.setdefault(entry.name, []).append(entry)
+        sa = wf / "subagents"
+        if sa.is_dir():
+            subagents.setdefault(wf.name, []).append(sa)
+        kb = wf / "knowledge_base"
+        if kb.is_dir():
+            kbs.append(kb)
+    return agents, subagents, kbs
+
+
+def _entry_mismatch_reasons(
+    installed: Path, candidates_of: Callable[[str], list[Path]],
+) -> list[str]:
+    """旧共享目录逐条目比对（agents/ 与 subagents/ 通用）。返回不一致原因清单（空 = 可直删）。
+
+    分支① 条目名不在随包集合（用户自加 / 已下架如 kd 系）→ 该目录整树入 backup；
+    分支② 名字随包但内容 sha256 不一致（用户自改，plan Q3）→ 同上。任一条目不一致即
+    整目录 backup（SPEC「整个目录移入」），故返回原因清单而非逐条目裁决。
+    """
+    reasons: list[str] = []
+    for entry in sorted(installed.iterdir()):
+        if _is_ignored_name(entry.name):
+            continue  # 与部署 ignore 同口径（Q13a）：垃圾不触发 backup
+        candidates = candidates_of(entry.name)
+        if not candidates:
+            reasons.append(f"非随包条目 {entry.name}")
+            continue
+        sig = _tree_signature(entry)
+        if not any(_tree_signature(c) == sig for c in candidates):
+            reasons.append(f"内容与随包不一致 {entry.name}")
+    return reasons
+
+
+def _whole_tree_matches_any(installed: Path, candidates: list[Path]) -> bool:
+    """整树 any-match（KB 用）：installed 与任一随包候选逐文件 sha256 一致。"""
+    if not candidates:
+        return False
+    sig = _tree_signature(installed)
+    return any(_tree_signature(c) == sig for c in candidates)
+
+
+def _legacy_backup_root() -> Path:
+    """backup 落点 ``~/.orca/_legacy_layout_backup_<YYYYMMDD>/``（同日重跑共用同一目录）。"""
+    return Path.home() / ".orca" / f"_legacy_layout_backup_{time.strftime('%Y%m%d')}"
+
+
+def _move_to_backup(src: Path, backup_root: Path) -> Path:
+    """把旧布局路径（目录或文件）移入 backup，保持 ``~/.orca`` 下相对结构（可按原位还原）。
+
+    移动失败 → OSError 上抛（install 期 fail loud，run_install 捕获计入 failed，plan 风险表）。
+    目标已存在（同日重跑 + 用户手工还原等边角）→ 数字后缀防覆盖 / 防 ``move`` 的
+    move-into 语义改写目录结构。
+    """
+    dst = backup_root / src.relative_to(Path.home() / ".orca")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    n = 1
+    while dst.exists():
+        dst = dst.with_name(f"{dst.name}.{n}")
+        n += 1
+    shutil.move(str(src), str(dst))
+    return dst
+
+
+def _remove_legacy_dir(path: Path, result: WorkflowSyncResult) -> None:
+    """删除与随包完全一致的旧共享目录（纯随包安装产物，SPEC：直接删）。
+
+    rmtree 失败 → warn 不 fail（内容与随包冗余一致，非安装失败；下次 install 幂等重试）。
+    """
+    try:
+        shutil.rmtree(path)
+    except OSError as e:  # noqa: BLE001
+        typer.echo(f"  ⚠ 清理旧布局目录 {path} 失败（内容与随包一致，可安全手删）：{e}", err=True)
+        return
+    result.removed.append(path)
+
+
+def _cleanup_legacy_layout(
+    wf_dirs: list[Path], dest_root: Path, result: WorkflowSyncResult,
+) -> None:
+    """旧平铺布局幂等清理（UD-1 裁决 = backup 方案）。只随 ``_install_bundled_workflows``
+    的有效部署路径触发——无随包口径时绝不判定/移动用户内容（no-op 语义的安全闸）。"""
+    orca_root = Path.home() / ".orca"
+    agents_map, sa_map, kb_candidates = _bundled_layout_maps(wf_dirs)
+    backup_root: Path | None = None  # 惰性：无 backup 动作不落 backup 目录
+
+    def _backup(src: Path, reason: str) -> None:
+        nonlocal backup_root
+        if backup_root is None:
+            backup_root = _legacy_backup_root()
+        result.backed_up.append(_LegacyBackup(src, _move_to_backup(src, backup_root), reason))
+
+    # ①② 旧共享 agents/ 池（↔ 各 wf 目录 agents/ 子树并集，any-match）
+    legacy_agents = dest_root / "agents"
+    if legacy_agents.is_dir():
+        reasons = _entry_mismatch_reasons(legacy_agents, lambda n: agents_map.get(n, []))
+        if reasons:
+            _backup(legacy_agents, "；".join(reasons))
+        else:
+            _remove_legacy_dir(legacy_agents, result)
+
+    # ①② 旧共享 subagents/<wf>/（↔ workflows/<wf>/subagents/，映射公式 Q13c）
+    legacy_sa = dest_root / "subagents"
+    if legacy_sa.is_dir():
+        reasons = _entry_mismatch_reasons(legacy_sa, lambda n: sa_map.get(n, []))
+        if reasons:
+            _backup(legacy_sa, "；".join(reasons))
+        else:
+            _remove_legacy_dir(legacy_sa, result)
+
+    # ①② 旧全局 KB（↔ workflows/<wf>/knowledge_base/ 整树 any-match）
+    legacy_kb = orca_root / "knowledge_base"
+    if legacy_kb.is_dir():
+        if _whole_tree_matches_any(legacy_kb, kb_candidates):
+            _remove_legacy_dir(legacy_kb, result)
+        else:
+            reason = "内容与随包不一致" if kb_candidates else "随包无对应 knowledge_base"
+            _backup(legacy_kb, reason)
+
+    # ③ 平铺 yaml 一律 backup + 其余未知内容只 warn（~/.orca 未知内容只记录不删）。
+    # agents/subagents 已在上面处理（backup 后已不在原位，不会被本循环重复扫到）；随包名
+    # 的**目录**是本次/上次部署的 per-wf 目录，静默跳过（同名无后缀文件仍会 warn，不漏报）。
+    bundled_names = {d.name for d in wf_dirs}
+    for entry in sorted(dest_root.iterdir()):
+        if entry.is_file() and entry.suffix == ".yaml":
+            why = (
+                "旧平铺 yaml（与随包 wf 同名，平铺优先会 shadow per-wf 目录）"
+                if entry.stem in bundled_names
+                else "旧平铺 yaml（非随包）"
+            )
+            _backup(entry, why)
+        elif not (entry.is_dir() and entry.name in bundled_names) and entry.name not in (
+            "agents", "subagents",
+        ):
+            result.warned.append(f"{entry}（未知内容，仅记录不删）")
+
+
+def _wf_asset_summary(wf_dir: Path) -> str:
+    """per-wf 部署行摘要（agents/subagents 计数 + knowledge_base 标记，CLI 单行展示）。
+
+    ``agents N`` 计 ``agents/`` 下一级条目数（含 ``_xxx_scripts`` 池——池本就在 agents/ 下，
+    展示口径如实计数）。"""
+    parts: list[str] = []
+    agents = wf_dir / "agents"
+    if agents.is_dir():
+        parts.append(f"agents {len(list(agents.iterdir()))}")
+    sa = wf_dir / "subagents"
+    if sa.is_dir():
+        parts.append(f"subagents {len(list(sa.glob('*.md')))}")
+    if (wf_dir / "knowledge_base").is_dir():
+        parts.append("knowledge_base")
+    return f"（{' · '.join(parts)}）" if parts else ""
+
+
+def _install_bundled_workflows() -> WorkflowSyncResult:
+    """部署 CWD/workflows/ 每个 per-wf 自包含目录 → ``~/.orca/workflows/<wf>/``（整树 sync）。
+
+    源 = 安装态同构：每个含 ``workflow.yaml`` 的子目录整树 ``copytree``（agents/ subagents/
+    knowledge_base/ scripts/ 随 wf 目录走），``dirs_exist_ok=True`` 幂等覆盖，忽略
+    ``__pycache__``/``*.pyc``。``~/.orca/workflows`` 是 catalog 用户级扫描点，解决「全新
+    地方 ``orca list`` 空」。无 CWD/workflows 或无 ``*/workflow.yaml`` → **完全 no-op**
+    （非仓库根跑 install 不报错，也**不触发**旧布局清理——无随包口径时绝不判定用户内容）。
+
+    旧平铺布局幂等清理（UD-1 裁决 = backup 方案）——对升级安装的旧产物：
+      - ``~/.orca/workflows/agents/``、``~/.orca/workflows/subagents/``：逐条目与随包并集
+        比对（共享 agent 与**任一**随包副本一致即算一致，any-match）——①非随包名（用户自
+        加 / 已下架）或 ②名字随包但内容 sha256 不一致（用户自改）→ **整个目录**移入
+        ``~/.orca/_legacy_layout_backup_<date>/``（不直接删）；④全部一致 → 直接删。
+      - ``~/.orca/knowledge_base/`` ↔ ``workflows/<wf>/knowledge_base/``：整树同款比对。
+      - ③ ``~/.orca/workflows/`` 平铺 yaml **一律入 backup**：与随包 wf 同名的是升级残骸
+        （catalog 平铺优先会 shadow 同名 per-wf 目录，plan Q2）；不同名的是未知尸体（如
+        po-probe.yaml）。「未知」判据按**非随包名集合**轻量实现——本模块零 Orca 业务逻辑，
+        不引 catalog/compile 做加载级判定。
+      - 其余未知内容（非 yaml 文件 / 未知目录）只 warn 不动。
+
+    部署 copytree per-wf fail-soft（warn + ``failed`` 记录，其余 wf 继续）。``dirs_exist_ok``
+    merge 语义的既有代价：随包已删的旧文件不从安装态 per-wf 目录内清理（已知限制，同旧版）。
+    清理中 backup 移动失败 → 中断清理（后续 backup 不再做，下次 install 幂等重试）+
+    ``failed`` 记录 "workflows" → install exit 1（fail loud）；**已完成的部署与 backup 部分
+    结果保留在返回值中**（用户可见，不因一句总 warning 丢失可观测性）。
+    """
+    result = WorkflowSyncResult()
+    src_root = Path.cwd() / "workflows"
+    if not src_root.is_dir():
+        return result
+    wf_dirs = sorted(
+        d for d in src_root.iterdir() if d.is_dir() and (d / "workflow.yaml").is_file()
+    )
+    if not wf_dirs:
+        return result
+    dest_root = Path.home() / ".orca" / "workflows"
+    dest_root.mkdir(parents=True, exist_ok=True)
+
+    for src in wf_dirs:
+        dst = dest_root / src.name
         try:
             shutil.copytree(
-                agents_src, agents_dst, dirs_exist_ok=True,
-                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+                src, dst, dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns(*_IGNORE_PATTERNS),
             )
-            deployed.append(agents_dst)
         except OSError as e:  # noqa: BLE001
-            typer.echo(f"  ⚠ 部署 agent 池 workflows/agents 失败：{e}", err=True)
-    return deployed
+            typer.echo(f"  ⚠ 部署 workflow 目录 {src.name} 失败：{e}", err=True)
+            result.failed.append(f"workflows/{src.name}")
+            continue
+        result.deployed.append(dst)
 
-
-def _install_bundled_knowledge_base() -> list[Path]:
-    """部署当前目录 ``knowledge_base/`` → ``~/.orca/knowledge_base/``（plan sprightly-questing-donut §1.1）。
-
-    让 ``tars install`` 把仓库自带 KB（结构搜索知识库：``index.json`` + ``common/`` + ``families/``）
-    装成**全局可见**——任何项目跑 ``agent-struct-exploration`` 都能被
-    ``orca.iface.cli.config.resolve_kb_dir`` 解析到（``~/.orca/knowledge_base`` 是隐式发现点之一），
-    解决「换项目跑 → ``knowledge_base/`` 裸相对路径找不到 → setup agent 静默继续 → kb_cache 空」
-    的可移植性缺口。
-
-    与 ``_install_bundled_workflows`` 的差别：KB 是多文件 + 子目录树（非 yaml-per-entity），故不逐文件
-    ``copy2``，直接 ``copytree(dirs_exist_ok=True)`` —— 与 agents 池同步（L457-460）完全同款 merge
-    语义（保用户/项目自加的 family 切片共存；代价是随包已删的旧切片不清理——已知限制）。源（CWD/
-    knowledge_base）保留（**复制非移动**）。无 CWD/knowledge_base → no-op（非仓库根跑 install 不报错）。
-    """
-    src_dir = Path.cwd() / "knowledge_base"
-    if not src_dir.is_dir():
-        return []
-    dest_dir = Path.home() / ".orca" / "knowledge_base"
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    # copytree 整体失败 → 让 OSError 上抛（run_install 捕获并计入 failed，install 期 fail loud，
-    # 不延迟到 run 期）。与 _install_bundled_workflows 的 per-file fail-soft 不同：KB 是整树原子语义。
-    shutil.copytree(
-        src_dir, dest_dir, dirs_exist_ok=True,
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-    )
-    return [dest_dir]
-
-
-def _install_bundled_subagents() -> list[Path]:
-    """部署 CWD/workflows/subagents/ → ~/.orca/workflows/subagents/（point-to-file 协议 v3）。
-
-    让 ``tars install`` 把仓库自带的 workflow subagent body 树（如 nas-supernet 的 5 个：
-    supernet-evaluator / workflow-verifier / memory-verifier / project-porter /
-    project-fidelity-verifier，落 ``workflows/subagents/nas-supernet/``）整树复制到
-    ``~/.orca/workflows/subagents/``。run 期 orchestrator 经
-    ``workflows_root / "subagents" / wf.name`` 解析该目录为 ``subagents_root``，agent.md
-    的 ``{{ subagents_root }}/<name>.md`` 引用在 render 期被 inline 成绝对路径——
-    **子 agent 自读 md body**（point-to-file，host 无需注册 / 不引 env var / shell 无关）。
-
-    拓扑（v3）：``workflows/subagents/<wf-name>/``。统一收纳多 workflow 的子 agent，
-    替代旧 v2 的 ``_<wf>_subagents/`` 平铺 sibling（污染 workflows/ 根目录）。OCP：
-    加新 workflow 的 subagent = 在 ``workflows/subagents/<wf-name>/`` 下加目录，零核心改动。
-
-    与 ``_install_bundled_workflows`` 的 agents 池 copytree（L505-517）**同款不同子树**：
-    ``agents/`` vs ``subagents/``，互不覆盖，**不合并**进 workflows 的 agents 同步（语义
-    正交：agents 是 compile 期 AgentResolver 解析对象；subagents 是运行时自读 body）。
-
-    幂等：``copytree(dirs_exist_ok=True)`` merge 语义——保用户/项目自加的子 agent 共存；
-    代价是随包已删的旧 subagent 不清理（已知限制，与 agents 同款）。源（CWD/workflows）
-    保留（**复制非移动**）。无 CWD/workflows 或无 subagents/ 子目录 → no-op（非仓库根跑
-    install 不报错）。copytree 整体失败 → 让 OSError 上抛（install 期 fail loud）。
-    """
-    src_root = Path.cwd() / "workflows" / "subagents"
-    if not src_root.is_dir():
-        return []
-    dest_root = Path.home() / ".orca" / "workflows" / "subagents"
-    dest_root.mkdir(parents=True, exist_ok=True)
-    # copytree 整树失败 → 让 OSError 上抛（run_install 捕获并计入 failed，install 期 fail loud）。
-    shutil.copytree(
-        src_root, dest_root, dirs_exist_ok=True,
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-    )
-    # 返回所有部署的 *.md（按 wf-name / 文件名排序，便于 CLI 输出稳定）。
-    return sorted(dest_root.rglob("*.md"))
+    try:
+        _cleanup_legacy_layout(wf_dirs, dest_root, result)
+    except OSError as e:  # noqa: BLE001
+        # backup 移动失败 → 中断清理 + fail loud（exit 1）；部分结果已累计在 result 里，
+        # run_install 照常打印（不因失败丢弃可观测性）。下次 install 幂等重试剩余项。
+        typer.echo(f"  ⚠ 旧布局清理中断（backup 移动失败）：{e}", err=True)
+        result.failed.append("workflows")
+    return result
 
 
 def run_install(target: str, scope: str) -> list[str]:
@@ -674,37 +864,29 @@ def run_install(target: str, scope: str) -> list[str]:
             typer.echo(f"  ✗ 失败：{e}", err=True)
             failed.append(hr.host)
 
-    # 部署内置 workflow（CWD/workflows → ~/.orca/workflows，全局可见；与 host 无关，跑一次）
-    deployed_wfs = _install_bundled_workflows()
-    if deployed_wfs:
-        typer.echo("\n[workflows] → ~/.orca/workflows（全局内置，orca list 可扫到）")
-        for w in deployed_wfs:
-            typer.echo(f"  ✓ {w.name}")
-
-    # 部署内置 workflow subagent（CWD/workflows/subagents/ → ~/.orca/workflows/subagents/，
-    # 全局可见；point-to-file 协议：agent.md 引用 {{ subagents_root }}/<name>.md，render 期 inline
-    # 绝对路径，子 agent 自读 body。与 workflows / KB 同级串行）
-    deployed_sa = _install_bundled_subagents()
-    if deployed_sa:
-        typer.echo(
-            "\n[subagents] → ~/.orca/workflows/subagents/（全局内置，point-to-file 子 agent 自读）"
-        )
-        for s in deployed_sa:
-            # s.parent.name = wf-name（如 "nas-supernet"）；s.name = <agent>.md
-            typer.echo(f"  ✓ {s.parent.name}/{s.name}")
-
-    # 部署内置 KB（CWD/knowledge_base → ~/.orca/knowledge_base，全局可见；与 host 无关，跑一次）
-    # plan sprightly-questing-donut §1.1：让 struct-exploration 换项目跑也能 resolve 到 KB。
+    # 部署内置 workflow + 旧平铺布局清理（CWD/workflows per-wf 整树 → ~/.orca/workflows/，
+    # 全局可见；与 host 无关，跑一次）。部署/清理的失败已在函数内部分级处理（per-wf fail-soft
+    # / 清理中断记 failed）；此处 except 只兜 mkdir 等未预期 OSError → 同样计入 failed。
     try:
-        deployed_kb = _install_bundled_knowledge_base()
-    except OSError as e:  # KB copytree 整体失败 → 计入 failed（install 期 fail loud，不延迟到 run 期）
-        typer.echo(f"  ⚠ 部署 knowledge_base 失败：{e}", err=True)
-        deployed_kb = []
-        failed.append("knowledge_base")
-    if deployed_kb:
-        typer.echo("\n[knowledge_base] → ~/.orca/knowledge_base（全局内置，struct-exploration 可移植发现）")
-        for k in deployed_kb:
-            typer.echo(f"  ✓ {k.name}")
+        sync = _install_bundled_workflows()
+    except OSError as e:
+        typer.echo(f"  ⚠ 部署/清理 workflows 失败：{e}", err=True)
+        sync = WorkflowSyncResult(failed=["workflows"])
+    failed.extend(sync.failed)
+    if sync.deployed:
+        typer.echo("\n[workflows] → ~/.orca/workflows/（per-wf 自包含目录，全局内置，orca list 可扫到）")
+        for d in sync.deployed:
+            typer.echo(f"  ✓ {d.name}/{_wf_asset_summary(d)}")
+    if sync.backed_up or sync.removed or sync.warned:
+        typer.echo(
+            "\n[旧布局清理]（UD-1 backup：非随包/被改内容不删，移入 ~/.orca/_legacy_layout_backup_<date>/）"
+        )
+        for item in sync.backed_up:
+            typer.echo(f"  ⚠ 备份 {item.source} → {item.dest}（{item.reason}）", err=True)
+        for p in sync.removed:
+            typer.echo(f"  ✓ 删除 {p}（与随包内容完全一致）")
+        for w in sync.warned:
+            typer.echo(f"  ⚠ {w}", err=True)
 
     if failed:
         typer.echo(f"\n部分失败：{', '.join(failed)}", err=True)

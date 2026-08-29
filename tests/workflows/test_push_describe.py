@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-_SCRIPT = Path(__file__).resolve().parents[2] / "workflows/agents/pytorch-model-optimizer/scripts/push_describe.py"
+_SCRIPT = Path(__file__).resolve().parents[2] / "workflows/nas-agent-pipeline/agents/pytorch-model-optimizer/scripts/push_describe.py"
 
 
 def _load_pd():
@@ -199,7 +199,12 @@ def test_transformer_emb_dims_and_head_conflict_exposed():
 def test_two_script_copies_in_sync():
     """两份 push_describe.py 必须字节一致——elastic_optimizer 副本零间接测试，靠此锁 drift。"""
     import filecmp
-    elastic = _SCRIPT.parents[2] / "elastic_optimizer" / "scripts" / "push_describe.py"
+    # per-wf 布局：两副本分属不同 wf 目录（pytorch-model-optimizer → nas-agent-pipeline，
+    # elastic_optimizer → nas-hp-search），不能再从 _SCRIPT 相对锚定推导
+    elastic = (
+        Path(__file__).resolve().parents[2]
+        / "workflows/nas-hp-search/agents/elastic_optimizer/scripts/push_describe.py"
+    )
     assert elastic.exists(), f"缺失副本：{elastic}"
     assert filecmp.cmp(_SCRIPT, elastic, shallow=False), "两份 push_describe.py drift，请同步"
 

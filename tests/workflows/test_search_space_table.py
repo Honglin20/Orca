@@ -23,7 +23,7 @@ import pytest
 
 _SCRIPT = (
     Path(__file__).resolve().parents[2]
-    / "workflows" / "agents" / "ns3_expand_supernet" / "scripts" / "search_space_table.py"
+    / "workflows" / "nas-supernet-v3" / "agents" / "ns3_expand_supernet" / "scripts" / "search_space_table.py"
 )
 
 

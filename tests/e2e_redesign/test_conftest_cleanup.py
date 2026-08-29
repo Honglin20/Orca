@@ -47,7 +47,7 @@ def test_recent_run_dir_within_window_cleaned(fake_runs_dir: Path, monkeypatch) 
 
 
 def test_old_run_dir_outside_window_preserved(fake_runs_dir: Path, monkeypatch) -> None:
-    """超窗口（>600s，如用户 2 天前的 kd-nas）的 run 目录 → **绝不删**。"""
+    """超窗口（>600s，如用户两天前的历史 run）的 run 目录 → **绝不删**。"""
     run = _make_run(fake_runs_dir, "quant-ptq-sweep-old", age_s=200000)  # ~2.3 天
     monkeypatch.setattr(cfg, "_user_protected_run_ids", lambda: set())
     cfg._cleanup_recent(time.time() - cfg._RECENCY_SEC, exclude_ids=set())

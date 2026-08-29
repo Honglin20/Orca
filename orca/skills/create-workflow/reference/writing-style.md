@@ -34,7 +34,7 @@
 ## §4 契约即护栏，不靠 LLM 自觉
 
 把关键正确性（真跑了、records≥1、达标数）做成 `output_schema` + `when` 路由的**引擎层硬检查**，
-不要写成"请 agent 务必认真"。参考 `workflows/nas-agent-pipeline.yaml` 的 `train_runner`：`search_records(integer, minimum: 1)` 强制从真文件计数输出——散文复述 / 没真跑 → `output_schema_mismatch → node_failed`。
+不要写成"请 agent 务必认真"。参考 `workflows/nas-agent-pipeline/workflow.yaml` 的 `train_runner`：`search_records(integer, minimum: 1)` 强制从真文件计数输出——散文复述 / 没真跑 → `output_schema_mismatch → node_failed`。
 
 ## §5 能力黑盒 + 复用优先
 
@@ -44,12 +44,12 @@
 ## §6 红线 > 解释
 
 不该做的事用一行「❌ 违反即失败」列出来，比三段"因为历史上……所以要避免……"有效。
-参考 `workflows/agents/nas-select/agent.md` 的「⚠ 你的唯一任务」+「🔴 铁律」结构。
+参考 `workflows/nas-agent-pipeline/agents/nas-select/agent.md` 的「⚠ 你的唯一任务」+「🔴 铁律」结构。
 
 ## §7 起手模板
 
-- 新 agent：照 `workflows/agents/nas-select/agent.md`（55 行）—— 唯一任务 → 资源锚点 → 执行命令 → 红线 → 输出格式。
-- 新 SKILL：照 `workflows/agents/nas-search-pipeline/SKILL.md` —— 产出什么 → 需要什么输入 → 分步怎么做 → 验证。
+- 新 agent：照 `workflows/nas-agent-pipeline/agents/nas-select/agent.md`（55 行）—— 唯一任务 → 资源锚点 → 执行命令 → 红线 → 输出格式。
+- 新 SKILL：照 `workflows/nas-agent-pipeline/agents/nas-search-pipeline/SKILL.md` —— 产出什么 → 需要什么输入 → 分步怎么做 → 验证。
 
 ## §8 考古 vs 导航自检（生成后必跑）
 
@@ -71,7 +71,7 @@
 
 判据：被引文件是否长期存在于仓库、读者能否据此定位。临时 plan / 带日期草稿 / issue 编号 = 不能定位 = 考古；真实文件章节 = 能定位 = 导航。
 
-**例外**：本规范文档自身、`docs/specs/` 下的设计日志、CHANGELOG / release note，**以及跨 agent 的契约 / 决策溯源文档（如 `workflows/agents/<wf>/CONTRACTS.md`、`workflows/agents/_kd_scripts/CONTRACTS.md`）**不受此约束（它们本就是设计日志）。
+**例外**：本规范文档自身、`docs/specs/` 下的设计日志、CHANGELOG / release note，**以及跨 agent 的契约 / 决策溯源文档（如 `workflows/<wf>/agents/<agent>/CONTRACTS.md`、`workflows/prof-opt/agents/_po_scripts/PROFILER_CONTRACT.md`）**不受此约束（它们本就是设计日志）。
 
 ## §9 自检清单（生成 / 改 workflow 后必跑）
 

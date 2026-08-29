@@ -1,39 +1,27 @@
 """test_po_scripts.py — unit tests for the prof-opt shared deterministic scripts.
 
-Covers: history_lib (builder field sets + R3 dedup branches + joint retry
-budget + v4 probe-row eval annotations), gate_decide (all four decisions +
-hard cap + stall reset), advance_round (r1->r2 base/shadow double replacement
-+ round-number idempotency key), analyze (fixture-driven hot patterns /
-pipeline breakdown / cost table + strict unknown-key failure), predict_delta
-(per-shape-class row pricing incl. the small-site E2E regression + params
-normalization idempotency), the placeholder profiler's delta-direction
-guarantee (minimal GELU vs ReLU export), render_run (<<k>> token chain:
---set substitution incl. special-char values, builtin/header tokens, the
-PYTHONUNBUFFERED header token, fail-loud on unreplaced tokens and
-non-identifier --set keys), the check_contracts gate (fairness-invariant
-token/budget enforcement incl. the knob/value symmetric pair),
-run_baseline_chain's step6 stale-anchor proxy-budget re-verification +
-schema-shaped stdout line (verbatim-forwardable), the po_flatten reuse gate's
-fresh_start whole-workspace wipe + two-state BASELINE.lock failure copy
-(matching lock reaches REUSE — the str.read_text regression; readable
-mismatch = promotion-history guidance pointing at fresh_start; corrupt lock =
-real error), and deploy_scripts' orphan-script
-retirement. v4 additions: gate_node syntax fix, metric_curve pinned-depth
-compare (--at-epoch + at_epoch/baseline_path outputs), stop_at_epoch
-(process-group kill at epoch k, actual-depth re-parse, idempotence, pid
-attribution, shared metric_curve parse), check_bottleneck (closed schema +
-referential order-preserving subset), push_curves (best-effort live-chart
-sidecar with 5s socket timeouts and an append-only audit log). v4
-cleanliness-fix round: verdict_decide (the promote / final-budget gates
-read only the anchors the workspace RECORDED), extract_user_pkg fail-loud
-project-root/model-path resolution, po_propose check_prerequisites.
-mfu-profiling round: mfu_adapter (raw mfu_benchmark products -> contract
-four-piece with canonical makespan = parallel_cycles, fail-loud matrix,
-idempotency, onnx override), the reuse gate's npu_chip enum, the baseline
-chain's mfu handshake (awaiting mfu-analyzer -> adapt -> executed; report
-without raw products = fatal no-fallback; illegal npu args), the recheck's
---pre-profiled mode (pre-profiled makespan verbatim, never inline), and the
-workflow input-set pin (script-path input retired, npu trio added).
+Covers: history_lib (builder field sets + dedup branches + joint retry
+budget + probe-row eval annotations with the gap field), gate_decide (the
+sequential-gate decision order + round cap + torn-workspace invariant),
+advance_round (latency/accuracy dual mode, the (round, mode) idempotency
+key, torn-write repair, direction.json failed-sigs), analyze (fixture-driven
+hot patterns / pipeline breakdown / cost table + strict unknown-key failure
++ the frozen origin anchor), predict_delta (per-shape-class row pricing
+incl. the small-site E2E regression + params normalization idempotency),
+the placeholder profiler's delta-direction guarantee, render_run (<<k>>
+token chain), check_contracts (fairness-invariant token/budget enforcement),
+run_baseline_chain (non-blocking baseline + finalizer guardian; profiling
+mode from profile_mode.json), the po_flatten reuse gate (fresh_start
+whole-workspace wipe + lock states + profiling-mode consistency), and
+deploy_scripts' orphan retirement + version stamp. Shared-layer coverage:
+metric_curve pinned-depth compare, stop_at_epoch (process-group kill at
+epoch k), check_bottleneck, push_curves, verdict_decide (anchor-budget
+promote/final-budget gates), extract_user_pkg, and po_propose
+check_prerequisites. The v5 recheck section pins the mode-conditioned gate
+(placeholder/mfu from profile_mode.json; strict-improvement vs incumbent in
+the latency phase, the frozen target line in the recovery phase). v5
+mechanics (round_state, rules_pool, resolve_profile_mode, gate_node stamp
+wiring, smoke) live in test_po_v5.py.
 """
 from __future__ import annotations
 
@@ -48,7 +36,7 @@ from pathlib import Path
 import pytest
 
 _REPO = Path(__file__).resolve().parents[1]
-_SCRIPTS = _REPO / "workflows" / "agents" / "_po_scripts"
+_SCRIPTS = _REPO / "workflows" / "prof-opt" / "agents" / "_po_scripts"
 sys.path.insert(0, str(_SCRIPTS))
 
 import history_lib  # noqa: E402
@@ -73,7 +61,7 @@ def test_history_builder_field_sets(tmp_path: Path):
         latency_gate="pass", pred_actual_ratio=0.9, outcome="latency_pass")
     history_lib.append_probe(
         hist, "r1-01", proxy_acc=0.83,
-        promote_gate="pass", outcome="promoted",
+        promote_gate="pass", outcome="accuracy_pass", gap=0.02,
         eval_skipped_no_epoch_ckpt=False, monitor_failed=False,
         eval_acc=0.91, eval_failed=False)
 
@@ -86,8 +74,14 @@ def test_history_builder_field_sets(tmp_path: Path):
     assert [r["version"] for r in rows] == [1, 2, 3]
 
     latest = history_lib.read_latest(hist)
-    assert latest["r1-01"]["outcome"] == "promoted"
+    assert latest["r1-01"]["outcome"] == "accuracy_pass"
     assert latest["r1-01"]["makespan_cycles"] == 900  # merged snapshot carries L0 fields
+    assert latest["r1-01"]["gap"] == 0.02
+
+    # the advance marker row keeps the promoted field set (LATENCY_FIELDS)
+    advanced = history_lib.append_advanced(hist, "r1-01")
+    assert advanced["outcome"] == "advanced"
+    assert history_lib.read_latest(hist)["r1-01"]["outcome"] == "advanced"
 
 
 def test_history_builder_rejects_unknown_fields(tmp_path: Path):
@@ -127,11 +121,24 @@ def _write_sig_history(hist: Path, sig: str, outcomes: list[str],
             history_lib.append_probe(hist, vid, proxy_acc=0.4,
                                      promote_gate="fail", outcome="probe_insufficient")
         elif outcome == "promoted":
+            # v4 read-compat row: never written by v5, still dedup-blocks
             history_lib.append_latency(hist, vid, structural_check="pass",
                                        makespan_cycles=100, latency_gate="pass",
                                        pred_actual_ratio=1.0, outcome="latency_pass")
             history_lib.append_probe(hist, vid, proxy_acc=0.9,
                                      promote_gate="pass", outcome="promoted")
+        elif outcome == "advanced":
+            history_lib.append_latency(hist, vid, structural_check="pass",
+                                       makespan_cycles=100, latency_gate="pass",
+                                       pred_actual_ratio=1.0, outcome="latency_pass")
+            history_lib.append_advanced(hist, vid)
+        elif outcome in ("accuracy_pass", "accuracy_fail"):
+            history_lib.append_latency(hist, vid, structural_check="pass",
+                                       makespan_cycles=100, latency_gate="pass",
+                                       pred_actual_ratio=1.0, outcome="latency_pass")
+            history_lib.append_probe(hist, vid, proxy_acc=0.9,
+                                     promote_gate="pass" if outcome == "accuracy_pass" else "fail",
+                                     outcome=outcome, gap=0.05)
         else:  # structural_mismatch / variant_broken / unsupported_op
             if outcome in ("structural_mismatch", "variant_broken"):
                 history_lib.append_outcome(hist, vid, outcome)
@@ -142,9 +149,11 @@ def _write_sig_history(hist: Path, sig: str, outcomes: list[str],
 
 
 @pytest.mark.parametrize("outcomes,blocked", [
-    (["promoted"], True),                      # permanent: real validated winner
+    (["promoted"], True),                      # v4 read-compat: still permanent
+    (["advanced"], True),                      # permanent: a round advanced it
     (["unsupported_op"], True),                # permanent: structurally infeasible
     (["latency_pass"], False),                 # process state never blocks
+    (["accuracy_fail"], False),                # composed re-proposals use NEW sigs
     (["structural_mismatch"], False),          # joint budget allows one retry
     (["variant_broken"], False),               # the other class, same budget
     (["structural_mismatch", "variant_broken"], True),   # joint budget exhausted
@@ -222,25 +231,23 @@ def test_history_cli_requires_and_passes_null_budget(tmp_path: Path):
     assert "--probe-max-steps" in missing.stderr
 
 
-# ── gate_decide ───────────────────────────────────────────────────────────────
+# ── gate_decide (v5: sequential gates, round cap only) ────────────────────────
 
-_GATE_BASE_MAKESPAN = 200  # fixture baseline; ratios below derive their
-# absolute thresholds from it (latency_reduction_min r -> target = base*(1-r))
+_GATE_BASE_MAKESPAN = 1000  # fixture baseline; anchor ratio 0.5 -> target 501
 
 
-def _gate_artifacts(tmp_path: Path, *, rounds: dict[int, bool],
-                    history_rows: list[dict], best: dict | None) -> Path:
+def _gate_artifacts(tmp_path: Path, *, rounds: list[int],
+                    history_rows: list[dict], best: dict | None,
+                    with_anchor: bool = True) -> Path:
     art = tmp_path / "gate-artifacts"
-    for rnd, exhausted in rounds.items():
-        d = art / "rounds" / f"{rnd:03d}"
-        d.mkdir(parents=True)
-        (d / "proposals.json").write_text(
-            json.dumps({"round": rnd, "exhausted": exhausted, "proposals": []}),
-            encoding="utf-8")
-    # decide() derives the absolute threshold from the baseline report on disk
-    (art / "base").mkdir(parents=True, exist_ok=True)
-    (art / "base" / "bottleneck_report.json").write_text(
-        json.dumps({"makespan_cycles": _GATE_BASE_MAKESPAN}), encoding="utf-8")
+    for rnd in rounds:
+        (art / "rounds" / f"{rnd:03d}").mkdir(parents=True)
+    if with_anchor:
+        (art / "base").mkdir(parents=True, exist_ok=True)
+        (art / "base" / "origin_anchor.json").write_text(json.dumps({
+            "baseline_makespan_cycles": _GATE_BASE_MAKESPAN,
+            "latency_reduction_min": 0.5, "accuracy_budget": 0.1,
+            "target_cycles": 501, "frozen_at_round": 0}), encoding="utf-8")
     hist = art / "history.jsonl"
     with open(hist, "w", encoding="utf-8") as fh:
         for row in history_rows:
@@ -251,103 +258,165 @@ def _gate_artifacts(tmp_path: Path, *, rounds: dict[int, bool],
     return art
 
 
-_PROMOTED_R1 = [
-    {"vid": "r1-01", "round": 1, "outcome": "promoted",
-     "makespan_cycles": 100, "proxy_acc": 0.9},
+# a fully-closed accuracy winner: latency_pass -> accuracy_pass -> advanced
+# (the ANY-version-row rule must see the accuracy_pass under the advanced)
+_ACCURACY_WINNER_R1 = [
+    {"vid": "r1-01", "round": 1, "outcome": "latency_pass",
+     "makespan_cycles": 450, "proxy_acc": 0.9, "promote_gate": "none"},
+    {"vid": "r1-01", "round": 1, "outcome": "accuracy_pass",
+     "makespan_cycles": 450, "proxy_acc": 0.9, "promote_gate": "pass",
+     "gap": 0.05},
+    {"vid": "r1-01", "round": 1, "outcome": "advanced",
+     "makespan_cycles": 450, "proxy_acc": 0.9, "promote_gate": "pass"},
 ]
-_NO_PROMO_R1 = [
-    {"vid": "r1-01", "round": 1, "outcome": "probe_insufficient"},
+_NO_PASS_R1 = [
+    {"vid": "r1-01", "round": 1, "outcome": "latency_fail",
+     "makespan_cycles": 800},
 ]
 
 
-def test_gate_full_train_on_target_met(tmp_path: Path):
-    art = _gate_artifacts(tmp_path, rounds={1: False}, history_rows=_PROMOTED_R1,
-                          best={"vid": "r1-01", "makespan_cycles": 100, "proxy_acc": 0.9})
-    out = decide(art, latency_reduction_min=0.5, max_rounds=5, stall_rounds=2)
+def test_gate_full_train_on_accuracy_pass_any_version_row(tmp_path: Path):
+    """Decision 1: best under the frozen line AND an accuracy_pass in ANY
+    version row (the advance's `advanced` row does not erase it)."""
+    art = _gate_artifacts(tmp_path, rounds=[1], history_rows=_ACCURACY_WINNER_R1,
+                          best={"vid": "r1-01", "makespan_cycles": 450,
+                                "proxy_acc": 0.9})
+    out = decide(art, max_rounds=5)
     assert out["decision"] == "full-train"
+    assert out["mode"] == "accuracy"
+    assert out["target_cycles"] == 501
     assert out["best"]["vid"] == "r1-01"
 
 
-def test_gate_loops_when_budget_remains(tmp_path: Path):
-    art = _gate_artifacts(tmp_path, rounds={1: False}, history_rows=_NO_PROMO_R1,
+def test_gate_loops_when_gates_unmet(tmp_path: Path):
+    art = _gate_artifacts(tmp_path, rounds=[1], history_rows=_NO_PASS_R1,
                           best=None)
-    out = decide(art, latency_reduction_min=0.75, max_rounds=5, stall_rounds=2)
+    out = decide(art, max_rounds=5)
     assert out["decision"] == "loop"
-    assert out["stall"] == 1
+    assert out["mode"] == "latency"
     assert out["best"] is None
 
 
-def test_gate_best_effort_when_exhausted_with_best(tmp_path: Path):
-    art = _gate_artifacts(tmp_path, rounds={1: True}, history_rows=_PROMOTED_R1,
-                          best={"vid": "r1-01", "makespan_cycles": 100, "proxy_acc": 0.9})
-    out = decide(art, latency_reduction_min=0.75, max_rounds=5, stall_rounds=2)
-    assert out["decision"] == "full-train-best-effort"
+def test_gate_loops_across_consecutive_zero_advance_rounds(tmp_path: Path):
+    """v5 has no stall/platoona exit: many zero-advance rounds still loop
+    (the plateau's answer is proposal rerouting, not stopping)."""
+    rows = [dict(_NO_PASS_R1[0], vid=f"r{r}-01", round=r)
+            for r in range(1, 6)]
+    art = _gate_artifacts(tmp_path, rounds=[1, 2, 3, 4, 5],
+                          history_rows=rows, best=None)
+    out = decide(art, max_rounds=100)
+    assert out["decision"] == "loop"
 
 
-def test_gate_finish_failed_when_no_promoted_anywhere(tmp_path: Path):
-    art = _gate_artifacts(tmp_path, rounds={1: True}, history_rows=_NO_PROMO_R1,
-                          best=None)
-    out = decide(art, latency_reduction_min=0.75, max_rounds=5, stall_rounds=2)
-    assert out["decision"] == "finish-failed"
+def test_gate_best_met_line_without_accuracy_pass_still_loops(tmp_path: Path):
+    """Under the line but the accuracy gate never passed (accuracy_fail or
+    probe pending): NOT full-train — the recovery rounds continue."""
+    rows = [dict(_ACCURACY_WINNER_R1[0]),
+            {"vid": "r1-01", "round": 1, "outcome": "accuracy_fail",
+             "makespan_cycles": 450, "proxy_acc": 0.4,
+             "promote_gate": "fail", "gap": 0.5}]
+    art = _gate_artifacts(tmp_path, rounds=[1], history_rows=rows,
+                          best={"vid": "r1-01", "makespan_cycles": 450,
+                                "proxy_acc": 0.4})
+    out = decide(art, max_rounds=5)
+    assert out["decision"] == "loop"
+    assert out["mode"] == "accuracy"
 
 
 def test_gate_hard_cap_with_best_is_best_effort(tmp_path: Path):
-    art = _gate_artifacts(tmp_path, rounds={1: False, 2: False},
-                          history_rows=_PROMOTED_R1 + [
-                              {"vid": "r2-01", "round": 2, "outcome": "probe_insufficient"}],
-                          best={"vid": "r1-01", "makespan_cycles": 100, "proxy_acc": 0.9})
-    out = decide(art, latency_reduction_min=0.75, max_rounds=2, stall_rounds=5)
+    art = _gate_artifacts(tmp_path, rounds=[1, 2], history_rows=_NO_PASS_R1,
+                          best={"vid": "r1-01", "makespan_cycles": 800,
+                                "proxy_acc": None})
+    out = decide(art, max_rounds=2)
     assert out["decision"] == "full-train-best-effort"  # cap + best present
 
 
-def test_gate_target_met_wins_over_everything(tmp_path: Path):
-    """full-train is judged FIRST: even at the round cap, a target-meeting
-    best is a clean full-train, not best-effort."""
-    art = _gate_artifacts(tmp_path, rounds={1: False, 2: False},
-                          history_rows=_PROMOTED_R1,
-                          best={"vid": "r1-01", "makespan_cycles": 100, "proxy_acc": 0.9})
-    out = decide(art, latency_reduction_min=0.5, max_rounds=2, stall_rounds=1)
+def test_gate_finish_failed_when_no_best_at_cap(tmp_path: Path):
+    art = _gate_artifacts(tmp_path, rounds=[1, 2],
+                          history_rows=_NO_PASS_R1, best=None)
+    out = decide(art, max_rounds=2)
+    assert out["decision"] == "finish-failed"
+
+
+def test_gate_accuracy_pass_wins_over_the_cap(tmp_path: Path):
+    """Decision 1 is judged FIRST: even at the round cap, an accuracy-passed
+    best under the line is a clean full-train, not best-effort."""
+    art = _gate_artifacts(tmp_path, rounds=[1, 2],
+                          history_rows=_ACCURACY_WINNER_R1,
+                          best={"vid": "r1-01", "makespan_cycles": 450,
+                                "proxy_acc": 0.9})
+    out = decide(art, max_rounds=2)
     assert out["decision"] == "full-train"
 
 
 def test_gate_hard_cap_never_loops_at_max_rounds(tmp_path: Path):
-    art = _gate_artifacts(tmp_path, rounds={1: False, 2: False},
-                          history_rows=_NO_PROMO_R1 + [
-                              {"vid": "r2-01", "round": 2, "outcome": "probe_insufficient"}],
-                          best=None)
-    out = decide(art, latency_reduction_min=0.75, max_rounds=2, stall_rounds=5)
+    art = _gate_artifacts(tmp_path, rounds=[1, 2],
+                          history_rows=_NO_PASS_R1, best=None)
+    out = decide(art, max_rounds=2)
     assert out["round"] == 2
     assert out["decision"] != "loop"
     assert out["decision"] == "finish-failed"
 
 
-def test_gate_stall_resets_on_promoted_round(tmp_path: Path):
-    rows = [
-        {"vid": "r1-01", "round": 1, "outcome": "probe_insufficient"},
-        {"vid": "r2-01", "round": 2, "outcome": "promoted",
-         "makespan_cycles": 90, "proxy_acc": 0.8},
-        {"vid": "r3-01", "round": 3, "outcome": "probe_insufficient"},
-    ]
-    art = _gate_artifacts(tmp_path, rounds={1: False, 2: False, 3: False},
-                          history_rows=rows,
-                          best={"vid": "r2-01", "makespan_cycles": 90, "proxy_acc": 0.8})
-    out = decide(art, latency_reduction_min=0.75, max_rounds=5, stall_rounds=2)
-    assert out["decision"] == "loop"
-    assert out["stall"] == 1  # r3 had no promotion, r2 reset the counter
+def test_gate_invariant_accuracy_mode_without_probe_row_rc2(tmp_path: Path):
+    """mode=accuracy but best.vid has no probe row at all: the workspace is
+    torn — exit 2, never a guessed decision."""
+    art = _gate_artifacts(tmp_path, rounds=[1], history_rows=_NO_PASS_R1,
+                          best={"vid": "r1-01", "makespan_cycles": 450,
+                                "proxy_acc": None})
+    with pytest.raises(ValueError, match="invariant"):
+        decide(art, max_rounds=5)
 
 
-def test_gate_fails_loud_without_proposals(tmp_path: Path):
+def test_gate_missing_origin_anchor_rc2(tmp_path: Path):
+    art = _gate_artifacts(tmp_path, rounds=[1], history_rows=_NO_PASS_R1,
+                          best=None, with_anchor=False)
+    with pytest.raises(FileNotFoundError, match="origin anchor"):
+        decide(art, max_rounds=5)
+
+
+def test_gate_no_longer_reads_proposals_json(tmp_path: Path):
+    """v5 gate is proposals-blind: no proposals.json anywhere is fine (the
+    reverse of the v4 fail-loud — exhausted is report material, not gate
+    input)."""
     art = tmp_path / "empty-artifacts"
     (art / "rounds" / "001").mkdir(parents=True)
-    with pytest.raises(FileNotFoundError):
-        decide(art, latency_reduction_min=0.75, max_rounds=5, stall_rounds=2)
+    (art / "base").mkdir(parents=True)
+    (art / "base" / "origin_anchor.json").write_text(json.dumps({
+        "baseline_makespan_cycles": 1000, "latency_reduction_min": 0.5,
+        "accuracy_budget": 0.1, "target_cycles": 501,
+        "frozen_at_round": 0}), encoding="utf-8")
+    out = decide(art, max_rounds=5)
+    assert out["decision"] == "loop"
 
 
-# ── advance_round ─────────────────────────────────────────────────────────────
+# ── advance_round (v5: dual-mode, (round, mode) key, torn repair) ─────────────
 
-def _variant_on_disk(art: Path, vid: str, round_no: int, makespan: int,
-                     proxy_acc: float, promoted: bool = True,
-                     shadow_tag: str | None = None):
+def _v5_advance_artifacts(tmp_path: Path, baseline: int = 1000,
+                          ratio: float = 0.5) -> Path:
+    """Workspace with an origin anchor (ratio 0.5 -> target 501) and a
+    round-1 directory; incumbent before any best = the anchor baseline."""
+    art = tmp_path / "advance-artifacts"
+    (art / "rounds" / "001").mkdir(parents=True)
+    (art / "base").mkdir(parents=True)
+    (art / "base" / "model.onnx").write_text("onnx-of-round0-base", encoding="utf-8")
+    (art / "base" / "origin_anchor.json").write_text(json.dumps({
+        "baseline_makespan_cycles": baseline, "latency_reduction_min": ratio,
+        "accuracy_budget": 0.1,
+        "target_cycles": int(baseline * (1 - ratio)) + 1,
+        "frozen_at_round": 0}), encoding="utf-8")
+    (art / "shadow" / "pkg").mkdir(parents=True)
+    (art / "shadow" / "pkg" / "model.py").write_text("# shadow round0\n", encoding="utf-8")
+    return art
+
+
+def _v5_variant(art: Path, vid: str, round_no: int, makespan: int, *,
+                probe: str | None = None, gap: float | None = None,
+                proxy_acc: float = 0.8, advanced: bool = False,
+                latency: bool = True, shadow_tag: str | None = None,
+                sig: str | None = None):
+    """On-disk variant + its history rows: implemented -> [latency_pass] ->
+    [accuracy_pass|accuracy_fail] -> [advanced]."""
     vd = art / "variants" / vid
     (vd / "onnx").mkdir(parents=True, exist_ok=True)
     (vd / "onnx" / "model.onnx").write_text(f"onnx-of-{shadow_tag or vid}", encoding="utf-8")
@@ -365,133 +434,319 @@ def _variant_on_disk(art: Path, vid: str, round_no: int, makespan: int,
     hist = art / "history.jsonl"
     history_lib.append_implemented(
         hist, vid, round=round_no, seq=1, parent_vid=None,
-        change_sig=f"sig:{vid}", probe_epochs=1, probe_max_steps=500,
+        change_sig=sig or f"sig:{vid}", probe_epochs=1, probe_max_steps=500,
         probe_data_value=None,
         target_modules=["m"], predicted_delta_cycles=-10,
         base_at_proposal={"vid": None, "makespan_cycles": 1000})
-    if promoted:
+    if latency:
         history_lib.append_latency(hist, vid, structural_check="pass",
                                    makespan_cycles=makespan, latency_gate="pass",
                                    pred_actual_ratio=1.0, outcome="latency_pass")
+    if probe == "accuracy_pass":
         history_lib.append_probe(hist, vid, proxy_acc=proxy_acc,
-                                 promote_gate="pass", outcome="promoted")
+                                 promote_gate="pass", outcome="accuracy_pass",
+                                 gap=gap if gap is not None else 0.05)
+    elif probe == "accuracy_fail":
+        history_lib.append_probe(hist, vid, proxy_acc=proxy_acc,
+                                 promote_gate="fail", outcome="accuracy_fail",
+                                 gap=gap if gap is not None else 0.5)
+    if advanced:
+        history_lib.append_advanced(hist, vid)
 
 
-def _advance_artifacts(tmp_path: Path) -> Path:
-    art = tmp_path / "advance-artifacts"
-    (art / "rounds" / "001").mkdir(parents=True)
-    # initial base + global shadow from the round-1 starting point
-    (art / "base").mkdir(parents=True)
-    (art / "base" / "model.onnx").write_text("onnx-of-round0-base", encoding="utf-8")
-    (art / "shadow" / "pkg").mkdir(parents=True)
-    (art / "shadow" / "pkg" / "model.py").write_text("# shadow round0\n", encoding="utf-8")
-    return art
+def _marker(art: Path) -> dict:
+    return json.loads((art / ".round_advanced").read_text(encoding="utf-8"))
 
 
-def test_advance_round_r1_then_r2_replaces_base_and_shadow(tmp_path: Path):
-    art = _advance_artifacts(tmp_path)
-    _variant_on_disk(art, "r1-01", round_no=1, makespan=100, proxy_acc=0.8)
+def _direction(art: Path, round_no: int) -> dict:
+    return json.loads((art / "rounds" / f"{round_no:03d}" / "direction.json")
+                      .read_text(encoding="utf-8"))
+
+
+def test_advance_latency_r1_then_r2_replaces_base_and_shadow(tmp_path: Path):
+    art = _v5_advance_artifacts(tmp_path)
+    _v5_variant(art, "r1-01", round_no=1, makespan=900)   # < incumbent 1000
 
     out1 = advance(art)
-    assert out1 == {"advanced": True, "round": 1, "vid": "r1-01",
-                    "promoted_count": 1, "best_updated": True}
+    assert out1 == {"advanced": True, "round": 1, "mode": "latency",
+                    "vid": "r1-01", "improved": True, "best_updated": True,
+                    "reason": "winner advanced"}
     assert (art / "base" / "model.onnx").read_text(encoding="utf-8") == "onnx-of-r1-01"
     assert (art / "shadow" / "pkg" / "model.py").read_text(encoding="utf-8") == "# shadow r1-01\n"
     # __pycache__ must not leak into the global shadow
     assert not (art / "shadow" / "pkg" / "__pycache__").exists()
     assert (art / "base" / "profile" / "profile_summary.json").is_file()
     best1 = json.loads((art / "best.json").read_text(encoding="utf-8"))
-    assert best1["vid"] == "r1-01" and best1["makespan_cycles"] == 100
-    assert json.loads((art / ".round_advanced").read_text(encoding="utf-8"))["round"] == 1
+    assert best1["vid"] == "r1-01" and best1["makespan_cycles"] == 900
+    assert best1["proxy_acc"] is None          # latency-mode advances carry no acc
+    assert best1["round"] == 1
+    assert _marker(art) == {"round": 1, "mode": "latency", "vid": "r1-01",
+                            "improved": True, "best_updated": True}
+    assert history_lib.read_latest(art / "history.jsonl")["r1-01"]["outcome"] == "advanced"
 
-    # idempotency key: same marker round -> pure no-op even after new history
+    # idempotency key: (round, mode) match -> pure no-op even after new history
     out_again = advance(art)
     assert out_again["advanced"] is False
 
-    # round 2 promotes something strictly better -> second replacement
+    # round 2 strictly better (above the line: latency phase) -> replacement
     (art / "rounds" / "002").mkdir()
-    _variant_on_disk(art, "r2-01", round_no=2, makespan=80, proxy_acc=0.75)
+    _v5_variant(art, "r2-01", round_no=2, makespan=700)
     out2 = advance(art)
     assert out2["advanced"] is True and out2["round"] == 2 and out2["vid"] == "r2-01"
     assert (art / "base" / "model.onnx").read_text(encoding="utf-8") == "onnx-of-r2-01"
-    assert (art / "shadow" / "pkg" / "model.py").read_text(encoding="utf-8") == "# shadow r2-01\n"
     best2 = json.loads((art / "best.json").read_text(encoding="utf-8"))
-    assert best2["vid"] == "r2-01" and best2["makespan_cycles"] == 80
+    assert best2["vid"] == "r2-01" and best2["makespan_cycles"] == 700
 
 
-def test_advance_round_stale_marker_replays(tmp_path: Path):
-    """marker.round < max round (crash between rounds) -> replay the advance."""
-    art = _advance_artifacts(tmp_path)
-    _variant_on_disk(art, "r1-01", round_no=1, makespan=100, proxy_acc=0.8)
+def test_advance_latency_small_strict_step_also_advances(tmp_path: Path):
+    """v5 retired the absolute/relative/ratio thresholds: a 50-cycle step
+    that is STRICTLY below the incumbent is a legitimate advance."""
+    art = _v5_advance_artifacts(tmp_path)
+    (art / "best.json").write_text(json.dumps(
+        {"vid": "r0-99", "makespan_cycles": 900, "proxy_acc": None,
+         "round": 0, "profile_dir": "x"}), encoding="utf-8")
+    _v5_variant(art, "r1-01", round_no=1, makespan=850)   # 50 better, strict
+    out = advance(art)
+    assert out["advanced"] is True and out["vid"] == "r1-01"
+    assert _direction(art, 1)["improved"] is True
+
+
+def test_advance_zero_improvement_marker_and_failed_sigs(tmp_path: Path):
+    """No candidate at all (no latency_pass row under the incumbent): the
+    common actions are skipped entirely — marker-only, best.json absent,
+    direction.json records the fail evidence for the next round's rerouting."""
+    art = _v5_advance_artifacts(tmp_path)
+    _v5_variant(art, "r1-01", round_no=1, makespan=900, latency=False,
+                sig="sig:worse-a")
+    _v5_variant(art, "r1-02", round_no=1, makespan=800, probe="accuracy_fail",
+                gap=0.6, sig="sig:accfail-b", shadow_tag="r1-02")
+    out = advance(art)
+    assert out["advanced"] is False and out["vid"] is None
+    assert out["improved"] is False and out["best_updated"] is False
+    assert not (art / "best.json").exists()
+    marker = _marker(art)
+    assert marker == {"round": 1, "mode": "latency", "vid": None,
+                      "improved": False, "best_updated": False}
+    d = _direction(art, 1)
+    assert d["failed_sigs"] == ["sig:accfail-b"]   # only latest-row fails count
+    assert d["improved"] is False and d["advanced_vid"] is None
+
+
+def test_advance_latency_fail_rows_feed_failed_sigs(tmp_path: Path):
+    art = _v5_advance_artifacts(tmp_path)
+    hist = art / "history.jsonl"
+    # r1-01: latest row latency_fail (worse than the anchor incumbent)
+    _v5_variant(art, "r1-01", round_no=1, makespan=1100, latency=False,
+                sig="sig:lat-fail")
+    history_lib.append_latency(hist, "r1-01", structural_check="pass",
+                               makespan_cycles=1100, latency_gate="fail",
+                               pred_actual_ratio=None, outcome="latency_fail")
+    # r1-02: accuracy_fail probe row (no best yet -> mode stays latency)
+    _v5_variant(art, "r1-02", round_no=1, makespan=800, probe="accuracy_fail",
+                gap=0.4, sig="sig:acc-fail")
+    out = advance(art)
+    assert out["advanced"] is False
+    assert _direction(art, 1)["failed_sigs"] == ["sig:acc-fail", "sig:lat-fail"]
+
+
+def test_advance_accuracy_mode_only_accuracy_pass_advances(tmp_path: Path):
+    art = _v5_advance_artifacts(tmp_path)
+    # existing best under the line -> mode accuracy (recovery phase)
+    (art / "best.json").write_text(json.dumps(
+        {"vid": "r0-99", "makespan_cycles": 450, "proxy_acc": 0.4,
+         "round": 0, "profile_dir": "x"}), encoding="utf-8")
+    # survivor within the line but FAILING the accuracy gate -> no advance
+    _v5_variant(art, "r1-01", round_no=1, makespan=460, probe="accuracy_fail",
+                gap=0.5)
+    out = advance(art)
+    assert out["advanced"] is False and out["mode"] == "accuracy"
+    assert _marker(art)["mode"] == "accuracy"
+    assert (art / "base" / "model.onnx").read_text(encoding="utf-8") == \
+        "onnx-of-round0-base"   # base fixed: no copy without accuracy_pass
+
+
+def test_advance_accuracy_pass_winner_ranked_by_gap(tmp_path: Path):
+    art = _v5_advance_artifacts(tmp_path)
+    (art / "best.json").write_text(json.dumps(
+        {"vid": "r0-99", "makespan_cycles": 450, "proxy_acc": 0.4,
+         "round": 0, "profile_dir": "x"}), encoding="utf-8")
+    _v5_variant(art, "r1-01", round_no=1, makespan=460, probe="accuracy_pass",
+                gap=0.10)
+    _v5_variant(art, "r1-02", round_no=1, makespan=480, probe="accuracy_pass",
+                gap=0.05, shadow_tag="r1-02")
+    out = advance(art)
+    assert out["advanced"] is True and out["vid"] == "r1-02"   # smallest gap
+    best = json.loads((art / "best.json").read_text(encoding="utf-8"))
+    assert best["vid"] == "r1-02" and best["proxy_acc"] == 0.8  # accuracy-mode acc kept
+    assert best["round"] == 1
+    assert (art / "shadow" / "pkg" / "model.py").read_text(encoding="utf-8") == \
+        "# shadow r1-02\n"
+
+
+def test_advance_accuracy_tie_break_gap_then_makespan_then_vid(tmp_path: Path):
+    """The full accuracy ranking chain (gap -> makespan -> vid), direction
+    already normalized by the verdict layer: equal gaps fall through to the
+    smaller makespan, equal both to the vid order."""
+    art = _v5_advance_artifacts(tmp_path)
+    (art / "best.json").write_text(json.dumps(
+        {"vid": "r0-99", "makespan_cycles": 450, "proxy_acc": 0.4,
+         "round": 0, "profile_dir": "x"}), encoding="utf-8")
+    # equal gap 0.05, DIFFERENT makespans: the smaller makespan wins
+    _v5_variant(art, "r1-01", round_no=1, makespan=490, probe="accuracy_pass",
+                gap=0.05)
+    _v5_variant(art, "r1-02", round_no=1, makespan=470, probe="accuracy_pass",
+                gap=0.05, shadow_tag="r1-02")
+    out = advance(art)
+    assert out["vid"] == "r1-02"
+
+    # equal gap AND makespan: the vid order decides (no proxy_acc anywhere
+    # in the ranking — the v4 higher-proxy hardcode is gone)
+    art2 = _v5_advance_artifacts(tmp_path / "b")
+    (art2 / "best.json").write_text(json.dumps(
+        {"vid": "r0-99", "makespan_cycles": 450, "proxy_acc": 0.4,
+         "round": 0, "profile_dir": "x"}), encoding="utf-8")
+    _v5_variant(art2, "r1-02", round_no=1, makespan=470, probe="accuracy_pass",
+                gap=0.05, proxy_acc=0.99)      # HIGHER acc, loses on vid order
+    _v5_variant(art2, "r1-01", round_no=1, makespan=470, probe="accuracy_pass",
+                gap=0.05, proxy_acc=0.10, shadow_tag="r1-01")
+    out2 = advance(art2)
+    assert out2["vid"] == "r1-01"              # lexicographic, acc irrelevant
+
+
+def test_advance_accuracy_above_line_never_a_candidate(tmp_path: Path):
+    art = _v5_advance_artifacts(tmp_path)
+    (art / "best.json").write_text(json.dumps(
+        {"vid": "r0-99", "makespan_cycles": 450, "proxy_acc": 0.4,
+         "round": 0, "profile_dir": "x"}), encoding="utf-8")
+    # accuracy_pass but makespan ABOVE target: eliminated mechanically
+    _v5_variant(art, "r1-01", round_no=1, makespan=600, probe="accuracy_pass",
+                gap=0.02)
+    out = advance(art)
+    assert out["advanced"] is False
+    assert (art / "base" / "model.onnx").read_text(encoding="utf-8") == \
+        "onnx-of-round0-base"
+
+
+def test_advance_round_mode_idempotency_key_both_modes_once(tmp_path: Path):
+    """Same round, both phases: the (round, mode) key admits one latency and
+    one accuracy advance each; the later direction.json overwrites."""
+    art = _v5_advance_artifacts(tmp_path)
+    _v5_variant(art, "r1-01", round_no=1, makespan=450)     # <= 501: flips mode
+    # first advance runs BEFORE any best exists -> latency mode (incumbent
+    # is the anchor baseline 1000)
+    out1 = advance(art)
+    assert out1["mode"] == "latency" and out1["vid"] == "r1-01"
+    # re-run: same (round, latency) -> no-op
+    assert advance(art)["advanced"] is False
+    # now best=450 <= 501 -> accuracy mode; the vid already advanced this
+    # round (benign first-entry needs its accuracy row; without one there is
+    # no candidate) -> marker-only for the accuracy key
+    _v5_variant(art, "r1-02", round_no=1, makespan=470, probe="accuracy_fail",
+                gap=0.5, shadow_tag="r1-02")
+    out2 = advance(art)
+    assert out2["mode"] == "accuracy" and out2["advanced"] is False
+    marker = _marker(art)
+    assert (marker["round"], marker["mode"]) == (1, "accuracy")
+    # the SAME-round latency+accuracy sequence each ran exactly once
+    assert _direction(art, 1)["mode"] == "accuracy"   # later write overwrote
+
+
+def test_advance_benign_first_entry_marker_only_no_recopy(tmp_path: Path):
+    """The benign first-entry: the same-round latency-advanced best.vid
+    passes the accuracy gate. Its advanced row already exists -> NO torn
+    repair, NO copy, marker-only (vid=null, improved=false)."""
+    art = _v5_advance_artifacts(tmp_path)
+    _v5_variant(art, "r1-01", round_no=1, makespan=450)
+    advance(art)   # latency advance: best=r1-01, advanced row written
+    base_after = (art / "base" / "model.onnx").read_text(encoding="utf-8")
+    # probe passes the gate on the SAME vid (first accuracy entry)
+    hist = art / "history.jsonl"
+    history_lib.append_probe(hist, "r1-01", proxy_acc=0.9,
+                             promote_gate="pass", outcome="accuracy_pass",
+                             gap=0.05)
+    out = advance(art)   # mode=accuracy, winner==incumbent
+    assert out["advanced"] is False and out["vid"] is None
+    assert out["improved"] is False
+    assert _marker(art) == {"round": 1, "mode": "accuracy", "vid": None,
+                            "improved": False, "best_updated": False}
+    # no re-copy happened (benign: the winner row was already advanced)
+    assert (art / "base" / "model.onnx").read_text(encoding="utf-8") == base_after
+
+
+def test_advance_stale_marker_replays_under_current_mode(tmp_path: Path):
+    """marker.round < current round (crash between rounds) -> replay the
+    advance under the CURRENT mode."""
+    art = _v5_advance_artifacts(tmp_path)
+    _v5_variant(art, "r1-01", round_no=1, makespan=900)
     advance(art)
     (art / "rounds" / "002").mkdir()
-    _variant_on_disk(art, "r2-01", round_no=2, makespan=70, proxy_acc=0.7)
+    _v5_variant(art, "r2-01", round_no=2, makespan=700)
     # simulate a crash AFTER history write but BEFORE marker update
-    (art / ".round_advanced").write_text(json.dumps({"round": 1, "vid": "r1-01"}),
-                                         encoding="utf-8")
+    (art / ".round_advanced").write_text(json.dumps(
+        {"round": 1, "mode": "latency", "vid": "r1-01"}), encoding="utf-8")
     out = advance(art)
     assert out["advanced"] is True and out["round"] == 2
-    assert (art / "shadow" / "pkg" / "model.py").read_text(encoding="utf-8") == "# shadow r2-01\n"
+    assert (art / "shadow" / "pkg" / "model.py").read_text(encoding="utf-8") == \
+        "# shadow r2-01\n"
 
 
-def test_advance_round_replay_converges_after_mid_sequence_crash(tmp_path: Path):
-    """The crash window the round-number key must survive: best.json already
-    written for the NEW winner but base/shadow copy not done. Replay must
-    re-derive and copy — not no-op on the equal best.json."""
-    art = _advance_artifacts(tmp_path)
-    _variant_on_disk(art, "r1-01", round_no=1, makespan=100, proxy_acc=0.8)
-    advance(art)
-    (art / "rounds" / "002").mkdir()
-    _variant_on_disk(art, "r2-01", round_no=2, makespan=80, proxy_acc=0.75)
-
-    # crash AFTER best.json write, BEFORE the copy and the marker:
-    # best.json already names r2-01 while base/shadow still hold round 1
-    (art / "best.json").write_text(json.dumps({
-        "vid": "r2-01", "makespan_cycles": 80, "proxy_acc": 0.75, "round": 2,
-        "profile_dir": "diag"}), encoding="utf-8")
-    (art / ".round_advanced").write_text(json.dumps({"round": 1, "vid": "r1-01"}),
-                                         encoding="utf-8")
+def test_advance_torn_repair_a_winner_recomputation_hits(tmp_path: Path):
+    """Torn accuracy write: best.json written for the new winner, copy and
+    advanced row missing. Recomputation re-derives the same winner -> repair
+    by best.vid (copy + append_advanced + marker)."""
+    art = _v5_advance_artifacts(tmp_path)
+    (art / "best.json").write_text(json.dumps(
+        {"vid": "r0-99", "makespan_cycles": 900, "proxy_acc": None,
+         "round": 0, "profile_dir": "x"}), encoding="utf-8")
+    _v5_variant(art, "r1-01", round_no=1, makespan=450,
+                probe="accuracy_pass", gap=0.05)
+    # crash after best.json write, before copy/advanced/marker
+    (art / "best.json").write_text(json.dumps(
+        {"vid": "r1-01", "makespan_cycles": 450, "proxy_acc": 0.8,
+         "round": 1, "profile_dir": "x"}), encoding="utf-8")
     out = advance(art)
-    assert out["advanced"] is True
-    assert out["vid"] == "r2-01"
-    assert (art / "base" / "model.onnx").read_text(encoding="utf-8") == "onnx-of-r2-01"
-    assert (art / "shadow" / "pkg" / "model.py").read_text(encoding="utf-8") == "# shadow r2-01\n"
-    # a second replay of the same round is a pure no-op again
+    assert out["advanced"] is True and out["vid"] == "r1-01"
+    assert out["reason"] == "torn write repaired"
+    assert (art / "base" / "model.onnx").read_text(encoding="utf-8") == "onnx-of-r1-01"
+    assert history_lib.read_latest(art / "history.jsonl")["r1-01"]["outcome"] == \
+        "advanced"
+    # converged: a second run is a no-op
     assert advance(art)["advanced"] is False
 
 
-def test_advance_round_tie_break_prefers_higher_proxy_acc(tmp_path: Path):
-    """Equal makespan -> the higher proxy accuracy wins the round (the v3.5
-    renamed tie-break field)."""
-    art = _advance_artifacts(tmp_path)
-    _variant_on_disk(art, "r1-01", round_no=1, makespan=100, proxy_acc=0.7)
-    _variant_on_disk(art, "r1-02", round_no=1, makespan=100, proxy_acc=0.9)
+def test_advance_torn_repair_b_latency_candidate_suppressed(tmp_path: Path):
+    """Torn LATENCY write: best.json names this round's winner; the strict
+    improvement test can never re-admit it (incumbent == winner itself), so
+    recomputation finds NO candidate — repair still completes by best.vid."""
+    art = _v5_advance_artifacts(tmp_path)
+    _v5_variant(art, "r1-01", round_no=1, makespan=700)   # above line: latency
+    # crash after best.json write, before advanced row/copy/marker
+    (art / "best.json").write_text(json.dumps(
+        {"vid": "r1-01", "makespan_cycles": 700, "proxy_acc": None,
+         "round": 1, "profile_dir": "x"}), encoding="utf-8")
     out = advance(art)
-    assert out["advanced"] is True and out["vid"] == "r1-02"
-    assert json.loads((art / "best.json").read_text(encoding="utf-8"))["proxy_acc"] == 0.9
+    assert out["advanced"] is True and out["vid"] == "r1-01"
+    assert out["reason"] == "torn write repaired"
+    assert (art / "shadow" / "pkg" / "model.py").read_text(encoding="utf-8") == \
+        "# shadow r1-01\n"
+    assert history_lib.read_latest(art / "history.jsonl")["r1-01"]["outcome"] == \
+        "advanced"
+    marker = _marker(art)
+    assert (marker["round"], marker["mode"]) == (1, "latency")
+    assert marker["improved"] is True
 
 
-def test_advance_round_worse_promotion_keeps_base(tmp_path: Path):
-    art = _advance_artifacts(tmp_path)
-    _variant_on_disk(art, "r1-01", round_no=1, makespan=100, proxy_acc=0.8)
+def test_advance_worse_promotion_keeps_base(tmp_path: Path):
+    art = _v5_advance_artifacts(tmp_path)
+    _v5_variant(art, "r1-01", round_no=1, makespan=900)
     advance(art)
     (art / "rounds" / "002").mkdir()
-    _variant_on_disk(art, "r2-01", round_no=2, makespan=120, proxy_acc=0.9)  # worse makespan
+    _v5_variant(art, "r2-01", round_no=2, makespan=950)  # worse than 900
     out = advance(art)
-    assert out["advanced"] is True and out["vid"] == "r1-01" and out["best_updated"] is False
+    assert out["advanced"] is False and out["vid"] is None
     assert (art / "base" / "model.onnx").read_text(encoding="utf-8") == "onnx-of-r1-01"
-    assert (art / "shadow" / "pkg" / "model.py").read_text(encoding="utf-8") == "# shadow r1-01\n"
-
-
-def test_advance_round_no_promotion_writes_marker(tmp_path: Path):
-    art = _advance_artifacts(tmp_path)
-    _variant_on_disk(art, "r1-01", round_no=1, makespan=100, proxy_acc=0.1,
-                     promoted=False)
-    # without a latency/probe row there is no promoted vid for round 1
-    out = advance(art)
-    assert out["advanced"] is True and out["vid"] is None and out["promoted_count"] == 0
-    assert not (art / "best.json").exists()
-    assert json.loads((art / ".round_advanced").read_text(encoding="utf-8"))["round"] == 1
+    best = json.loads((art / "best.json").read_text(encoding="utf-8"))
+    assert best["vid"] == "r1-01" and best["round"] == 1
 
 
 # ── analyze ───────────────────────────────────────────────────────────────────
@@ -1220,7 +1475,7 @@ def test_render_run_rejects_non_identifier_set_key(tmp_path: Path):
 
 # ── check_contracts gate (fairness-invariant token/budget enforcement) ───────
 
-_CONTRACTS_SH = _REPO / "workflows" / "agents" / "po_contract" / "scripts" / "check_contracts.sh"
+_CONTRACTS_SH = _REPO / "workflows" / "prof-opt" / "agents" / "po_contract" / "scripts" / "check_contracts.sh"
 
 
 def _contracts_workspace(tmp_path: Path, *, probe_body: str | None = None,
@@ -1498,7 +1753,7 @@ def test_check_contracts_reuse_rejects_pre_v4_contracts(tmp_path: Path):
 
 # ── run_baseline_chain (v4): non-blocking baseline + finalizer guardian ──────
 
-_BASELINE_SH = _REPO / "workflows" / "agents" / "po_baseline" / "scripts" / "run_baseline_chain.sh"
+_BASELINE_SH = _REPO / "workflows" / "prof-opt" / "agents" / "po_baseline" / "scripts" / "run_baseline_chain.sh"
 
 _BL_MD = ("[subagent:business-logic-analyst v1 TEST]\n## 任务语义\nclassify\n"
           "## 输入输出\nx->y\n## 架构动机\nwhy\n"
@@ -1569,6 +1824,10 @@ def _baseline_ws(tmp_path: Path, *, full_epochs: int = 2, probe_k: int = 1,
                                                                      encoding="utf-8")
     (art / "templates" / "run_eval.template.sh").write_text(
         "echo 'ckpt <<ckpt>> acc=0.9'\n", encoding="utf-8")
+    # the profiling mode the entry node resolved (placeholder by default)
+    (art / "profile_mode.json").write_text(json.dumps(
+        {"mode": "placeholder", "chip": "", "precision": None,
+         "core_num": None, "resolved_by": "fallback"}), encoding="utf-8")
     return art
 
 
@@ -1594,7 +1853,7 @@ def _train_final(art: Path) -> dict:
         encoding="utf-8"))
 
 
-# the po_baseline node output schema — DERIVED from workflows/prof-opt.yaml,
+# the po_baseline node output schema — DERIVED from workflows/prof-opt/workflow.yaml,
 # never hand-copied: the chain's stdout line is the agent's final reply
 # VERBATIM, so its field set must be EXACTLY the schema's in BOTH directions
 # (additionalProperties:false rejects extra keys; a schema edit must not
@@ -1602,7 +1861,7 @@ def _train_final(art: Path) -> dict:
 def _po_baseline_schema_fields() -> set[str]:
     import yaml
     wf = yaml.safe_load(
-        (_REPO / "workflows" / "prof-opt.yaml").read_text(encoding="utf-8"))
+        (_REPO / "workflows" / "prof-opt" / "workflow.yaml").read_text(encoding="utf-8"))
     schema = next(n for n in wf["nodes"]
                   if n["name"] == "po_baseline")["output_schema"]
     props = set(schema["properties"])
@@ -1610,33 +1869,44 @@ def _po_baseline_schema_fields() -> set[str]:
     return props
 
 
-def test_workflow_inputs_retire_script_path_add_npu_trio():
-    """The input set after the profiling re-route: the script-path input is
-    GONE (every {{ inputs.X }} reference died with it — a dangling Jinja ref
-    crashes the render), replaced by the npu trio with the pinned defaults.
-    The trio's Jinja references must exist in the agent bodies that consume
-    them (flat gate / baseline chain / propose recheck)."""
+def test_workflow_inputs_pin_v5_eight_input_set():
+    """The input set after the sequential-gating redesign: exactly 8 inputs,
+    field-for-field pinned (the retired six — npu trio / write_back /
+    report_dir / probe_epochs — must stay gone; every {{ inputs.X }} Jinja
+    reference that died with them must not reappear, a dangling ref crashes
+    the render)."""
     import yaml
     wf = yaml.safe_load(
-        (_REPO / "workflows" / "prof-opt.yaml").read_text(encoding="utf-8"))
+        (_REPO / "workflows" / "prof-opt" / "workflow.yaml").read_text(encoding="utf-8"))
     inputs = wf["inputs"]
-    assert "profile_script_path" not in inputs
-    assert len(inputs) == 14
-    assert inputs["npu_chip"]["default"] == ""
-    assert inputs["npu_precision"]["default"] == "INT8"
-    assert inputs["npu_core_num"]["default"] == 1
-
-    consumers = {
-        "po_flatten": ("npu_chip",),
-        "po_baseline": ("npu_chip", "npu_precision", "npu_core_num"),
-        "po_propose": ("npu_chip", "npu_precision", "npu_core_num"),
+    assert set(inputs) == {"project_root", "model_path", "latency_reduction_min",
+                           "accuracy_budget", "seed", "max_rounds", "fresh_start",
+                           "full_train_epoch_cap"}
+    pinned = {
+        "project_root": ("string", True, None),
+        "model_path": ("string", True, None),
+        "latency_reduction_min": ("number", True, None),
+        "accuracy_budget": ("number", True, None),
+        "seed": ("integer", False, 0),
+        "max_rounds": ("integer", False, 100),
+        "fresh_start": ("boolean", False, False),
+        "full_train_epoch_cap": ("string", False, ""),
     }
-    for agent, keys in consumers.items():
-        body = (_REPO / "workflows" / "agents" / agent / "agent.md") \
-            .read_text(encoding="utf-8")
-        for key in keys:
-            assert f"{{{{ inputs.{key} }}}}" in body, (agent, key)
-        assert "{{ inputs.profile_script_path }}" not in body, agent
+    for name, (typ, required, default) in pinned.items():
+        assert inputs[name]["type"] == typ, name
+        assert inputs[name]["required"] is required, name
+        if default is not None:
+            assert inputs[name]["default"] == default, name
+
+    for retired in ("profile_script_path", "npu_chip", "npu_precision",
+                    "npu_core_num", "write_back", "report_dir", "probe_epochs"):
+        assert retired not in inputs, retired
+
+    # the anchors the freeze consumes are referenced in the baseline body
+    body = (_REPO / "workflows" / "prof-opt" / "agents" / "po_baseline" / "agent.md") \
+        .read_text(encoding="utf-8")
+    assert "{{ inputs.latency_reduction_min }}" in body
+    assert "{{ inputs.accuracy_budget }}" in body
 
 
 def test_baseline_chain_nonblocking_emit_and_finalizer_products(tmp_path: Path):
@@ -1893,6 +2163,9 @@ def _mfu_baseline_ws(tmp_path: Path) -> tuple[Path, dict]:
             return self.fc2(self.act(self.fc1(x)))
 
     art = _baseline_ws(tmp_path, full_epochs=1)
+    (art / "profile_mode.json").write_text(json.dumps(
+        {"mode": "mfu", "chip": "6613", "precision": "INT8",
+         "core_num": 1, "resolved_by": "env"}), encoding="utf-8")
     shutil.copy(_SCRIPTS / "mfu_adapter.py", art / "scripts" / "mfu_adapter.py")
     model = Tiny().eval()
     torch.onnx.export(model, torch.randn(1, 32), str(art / "base" / "model.onnx"),
@@ -1909,10 +2182,6 @@ def _mfu_baseline_ws(tmp_path: Path) -> tuple[Path, dict]:
     return art, env
 
 
-_MFU_CHAIN_ARGS = ["--npu-chip", "6613", "--npu-precision", "INT8",
-                   "--npu-core-num", "1"]
-
-
 def test_baseline_chain_mfu_mode_awaits_analyzer_then_adapts(tmp_path: Path):
     """mfu mode handshake: with no raw products the chain WAITS for the
     mfu-analyzer subagent (running line telling the agent to dispatch it —
@@ -1921,7 +2190,7 @@ def test_baseline_chain_mfu_mode_awaits_analyzer_then_adapts(tmp_path: Path):
     parallel_cycles."""
     art, env = _mfu_baseline_ws(tmp_path)
     base_cmd = ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
-                "--seed", "0"] + _MFU_CHAIN_ARGS
+                "--seed", "0"]
 
     first = subprocess.run(base_cmd, capture_output=True, text=True,
                            timeout=60, env=env)
@@ -1972,7 +2241,7 @@ def test_baseline_chain_mfu_mode_report_without_raw_is_fatal_no_fallback(tmp_pat
 
     proc = subprocess.run(
         ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
-         "--seed", "0"] + _MFU_CHAIN_ARGS,
+         "--seed", "0"],
         capture_output=True, text=True, timeout=60, env=env)
     payload = json.loads(proc.stdout)
     assert payload["status"] == "failed"
@@ -2000,7 +2269,7 @@ def test_baseline_chain_mfu_adapter_failure_surfaces_in_error(tmp_path: Path):
 
     chain = subprocess.run(
         ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
-         "--seed", "0"] + _MFU_CHAIN_ARGS,
+         "--seed", "0"],
         capture_output=True, text=True, timeout=60, env=env)
     payload = json.loads(chain.stdout)
     assert payload["status"] == "failed"
@@ -2010,21 +2279,36 @@ def test_baseline_chain_mfu_adapter_failure_surfaces_in_error(tmp_path: Path):
     assert not (art / "base" / "profile" / "profile_summary.json").exists()
 
 
-def test_baseline_chain_rejects_illegal_npu_args(tmp_path: Path):
-    """The chain re-pins the profiling-mode enums the entry gate validated
-    (chip / precision / core-num) — an illegal combination fails at argument
-    parsing, before any step runs."""
+def test_baseline_chain_profile_mode_file_is_the_single_source(tmp_path: Path):
+    """The chain no longer takes profiling-mode arguments: the mode (and the
+    mfu knobs) come from profile_mode.json. A missing file or an unknown
+    mode fails at startup, before any step runs (the enum validation itself
+    lives in the entry resolver)."""
     art, env = _mfu_baseline_ws(tmp_path)
-    for extra, word in (
-            (["--npu-chip", "9900"], "--npu-chip"),
-            (["--npu-chip", "6613", "--npu-precision", "FP4"], "--npu-precision"),
-            (["--npu-chip", "1951", "--npu-core-num", "3"], "--npu-core-num")):
-        proc = subprocess.run(
-            ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
-             "--seed", "0"] + extra,
-            capture_output=True, text=True, timeout=60, env=env)
-        assert proc.returncode == 2
-        assert word in proc.stderr
+    (art / "profile_mode.json").unlink()
+    proc = subprocess.run(
+        ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
+         "--seed", "0"],
+        capture_output=True, text=True, timeout=60, env=env)
+    assert proc.returncode == 2
+    assert "profile_mode.json missing" in proc.stderr
+
+    (art / "profile_mode.json").write_text(
+        json.dumps({"mode": "quantum"}), encoding="utf-8")
+    proc2 = subprocess.run(
+        ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
+         "--seed", "0"],
+        capture_output=True, text=True, timeout=60, env=env)
+    assert proc2.returncode == 2
+    assert "placeholder|mfu" in proc2.stderr
+
+    # the retired npu arguments are now a hard usage error
+    proc3 = subprocess.run(
+        ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
+         "--seed", "0", "--npu-chip", "6613"],
+        capture_output=True, text=True, timeout=60, env=env)
+    assert proc3.returncode == 2
+    assert "--npu-chip" in proc3.stderr
 
 
 def test_check_business_logic_gate(tmp_path: Path):
@@ -2036,7 +2320,7 @@ def test_check_business_logic_gate(tmp_path: Path):
     doc.write_text(_BL_MD, encoding="utf-8")
     env = dict(os.environ)
     env["ORCA_ARTIFACTS_DIR"] = str(art)
-    sh = _REPO / "workflows" / "agents" / "po_baseline" / "scripts" / "check_business_logic.sh"
+    sh = _REPO / "workflows" / "prof-opt" / "agents" / "po_baseline" / "scripts" / "check_business_logic.sh"
 
     def run():
         return subprocess.run(["bash", str(sh)], capture_output=True, text=True,
@@ -2072,7 +2356,7 @@ def test_check_business_logic_gate(tmp_path: Path):
 
 # ── po_flatten reuse gate: fresh_start wipes the whole reusable workspace ─────
 
-_REUSE_SH = _REPO / "workflows" / "agents" / "po_flatten" / "scripts" / "reuse_check.sh"
+_REUSE_SH = _REPO / "workflows" / "prof-opt" / "agents" / "po_flatten" / "scripts" / "reuse_check.sh"
 
 
 def test_reuse_check_fresh_start_wipes_all_but_run_lock(tmp_path: Path):
@@ -2103,7 +2387,7 @@ def test_reuse_check_fresh_start_wipes_all_but_run_lock(tmp_path: Path):
     env["ORCA_ARTIFACTS_DIR"] = str(art)
     env["ORCA_RUN_ID"] = "fresh-test-run"
     proc = subprocess.run(
-        ["bash", str(_REUSE_SH), "model.py", "", "1", ""],
+        ["bash", str(_REUSE_SH), "model.py", "", "1"],
         capture_output=True, text=True, timeout=60, env=env)
 
     assert proc.returncode == 1            # NO_REUSE -> rebuild from scratch
@@ -2116,7 +2400,7 @@ def test_reuse_check_fresh_start_wipes_all_but_run_lock(tmp_path: Path):
     # chain follow-up: with fresh_start=0 the wiped workspace is a plain
     # first-run NO_REUSE (no BASELINE.lock) — the rebuild path resumes cleanly
     proc2 = subprocess.run(
-        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
         capture_output=True, text=True, timeout=60, env=env)
     assert proc2.returncode == 1
     assert "no BASELINE.lock (first run)" in proc2.stderr
@@ -2137,7 +2421,7 @@ def test_reuse_check_rejects_fresh_foreign_lock(tmp_path: Path):
     env["ORCA_ARTIFACTS_DIR"] = str(art)
     env["ORCA_RUN_ID"] = "this-run"
     proc = subprocess.run(
-        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
         capture_output=True, text=True, timeout=60, env=env)
     assert proc.returncode == 3
     assert "owned by another live run" in proc.stderr
@@ -2158,10 +2442,11 @@ def _write_baseline_lock(art: Path) -> None:
                     "ckpt_sha256": "", "py_files_sha256": py}), encoding="utf-8")
 
 
-def _reusable_ws(tmp_path: Path) -> Path:
+def _reusable_ws(tmp_path: Path, *, profile_mode: dict | None = None) -> Path:
     """Minimal workspace whose BASELINE.lock fully matches the shadow tree and
     whose reuse products are complete — the state a healthy zero-promotion
-    second run arrives at the gate with."""
+    second run arrives at the gate with (including the recorded profiling
+    mode; default = placeholder as resolved on a machine without NPU)."""
     art = tmp_path / "art"
     art.mkdir()
     (art / "shadow" / "pkg").mkdir(parents=True)
@@ -2172,14 +2457,20 @@ def _reusable_ws(tmp_path: Path) -> Path:
         json.dumps({"constructible": True, "exportable": True,
                     "pretrained_loadable": True, "definition_located": True}),
         encoding="utf-8")
+    (art / "profile_mode.json").write_text(json.dumps(
+        profile_mode or {"mode": "placeholder", "chip": "",
+                         "precision": None, "core_num": None,
+                         "resolved_by": "fallback"}), encoding="utf-8")
     _write_baseline_lock(art)
     return art
 
 
-def _reuse_env(art: Path) -> dict[str, str]:
-    env = dict(os.environ)
+def _reuse_env(art: Path, **extra: str) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("ORCA_PO_NPU")}
     env["ORCA_ARTIFACTS_DIR"] = str(art)
     env["ORCA_RUN_ID"] = "reuse-test-run"
+    env.update(extra)
     return env
 
 
@@ -2191,7 +2482,7 @@ def test_reuse_check_matching_lock_reaches_reuse(tmp_path: Path):
     be read (and matched) all the way to the reuse verdict."""
     art = _reusable_ws(tmp_path)
     proc = subprocess.run(
-        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
         capture_output=True, text=True, timeout=60, env=_reuse_env(art))
     assert proc.returncode == 0, proc.stderr
     assert "REUSE" in proc.stdout
@@ -2210,7 +2501,7 @@ def test_reuse_check_mismatch_is_promotion_history_guidance(tmp_path: Path):
     (art / "shadow" / "pkg" / "model.py").write_text(
         "# model v1 (promoted)\n", encoding="utf-8")
     proc = subprocess.run(
-        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
         capture_output=True, text=True, timeout=60, env=_reuse_env(art))
     assert proc.returncode == 3
     assert "does not match" in proc.stderr
@@ -2228,7 +2519,7 @@ def test_reuse_check_corrupt_lock_is_a_real_error(tmp_path: Path):
     art = _reusable_ws(tmp_path)
     (art / "BASELINE.lock").write_text("{not json", encoding="utf-8")
     proc = subprocess.run(
-        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
         capture_output=True, text=True, timeout=60, env=_reuse_env(art))
     assert proc.returncode == 3
     assert "unreadable/corrupt" in proc.stderr
@@ -2252,7 +2543,7 @@ def test_reuse_check_structurally_corrupt_lock_is_not_a_mismatch(
     art = _reusable_ws(tmp_path)
     (art / "BASELINE.lock").write_text(corrupt_body, encoding="utf-8")
     proc = subprocess.run(
-        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
         capture_output=True, text=True, timeout=60, env=_reuse_env(art))
     assert proc.returncode == 3
     assert "unreadable/corrupt" in proc.stderr
@@ -2271,7 +2562,7 @@ def test_reuse_check_missing_anchor_map_is_mismatch_not_corrupt(tmp_path: Path):
         json.dumps({"model_path": "model.py", "pretrained_ckpt": "",
                     "ckpt_sha256": ""}), encoding="utf-8")
     proc = subprocess.run(
-        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
         capture_output=True, text=True, timeout=60, env=_reuse_env(art))
     assert proc.returncode == 3
     assert "does not match" in proc.stderr
@@ -2279,43 +2570,107 @@ def test_reuse_check_missing_anchor_map_is_mismatch_not_corrupt(tmp_path: Path):
     assert "unreadable/corrupt" not in proc.stderr
 
 
-def test_reuse_check_npu_chip_enum_gate(tmp_path: Path):
-    """Arg 4 is the profiling-mode switch: empty (placeholder estimation) and
-    6613/1951 (mfu real evaluation) pass the gate and proceed to the normal
-    reuse logic; an illegal non-empty value fails AT STARTUP (exit 3) — a
-    typo'd chip must not surface mid-run at the profiling step. In mfu mode
-    the two consumed knobs (precision / core-num, env-passed) are gated the
-    same way."""
+def test_reuse_check_arity_rejects_fourth_positional(tmp_path: Path):
+    """The npu trio args are RETIRED: a stale 4-arg invocation (the pre-v5
+    call form) is a usage error (exit 2), never a silently-ignored extra."""
     art = _reusable_ws(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(_REUSE_SH), "model.py", "", "0", ""],
+        capture_output=True, text=True, timeout=60, env=_reuse_env(art))
+    assert proc.returncode == 2
+    assert "unexpected extra argument" in proc.stderr
 
-    # legal values pass the gate and reach the normal verdicts
-    for chip in ("", "6613", "1951"):
-        proc = subprocess.run(
-            ["bash", str(_REUSE_SH), "model.py", "", "0", chip],
-            capture_output=True, text=True, timeout=60, env=_reuse_env(art))
-        assert proc.returncode == 0, (chip, proc.stderr)
 
-    # illegal value: fail loud BEFORE any lock/reuse decision
-    for chip in ("9900", "6613 ", "npu"):
-        proc = subprocess.run(
-            ["bash", str(_REUSE_SH), "model.py", "", "0", chip],
-            capture_output=True, text=True, timeout=60, env=_reuse_env(art))
-        assert proc.returncode == 3, chip
-        assert "npu_chip" in proc.stderr
-        assert "6613/1951" in proc.stderr
+def test_reuse_check_mode_consistent_reaches_reuse_untouched(tmp_path: Path):
+    """A consistent re-resolution (placeholder == placeholder) lets the reuse
+    verdict through AND never touches the recorded profile_mode.json."""
+    art = _reusable_ws(tmp_path)          # placeholder recorded, no NPU env
+    mode_file = art / "profile_mode.json"
+    before = mode_file.read_bytes()
+    stamp = mode_file.stat().st_mtime_ns
+    proc = subprocess.run(
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
+        capture_output=True, text=True, timeout=60, env=_reuse_env(art))
+    assert proc.returncode == 0, proc.stderr
+    assert "REUSE" in proc.stdout
+    assert mode_file.read_bytes() == before        # comparison never rewrites
+    assert mode_file.stat().st_mtime_ns == stamp
 
-    # mfu mode: illegal precision / core-num fail at the same gate (an env
-    # default keeps them legal when the caller does not pass them)
-    mfu_env = _reuse_env(art)
-    for key, bad, word in (("NPU_PRECISION", "FP4", "npu_precision"),
-                           ("NPU_CORE_NUM", "3", "npu_core_num")):
-        env = dict(mfu_env)
-        env[key] = bad
-        proc = subprocess.run(
-            ["bash", str(_REUSE_SH), "model.py", "", "0", "6613"],
-            capture_output=True, text=True, timeout=60, env=env)
-        assert proc.returncode == 3, (key, bad)
-        assert word in proc.stderr
+
+def test_reuse_check_mode_drift_fails_loud(tmp_path: Path):
+    """The recorded placeholder no longer matches the re-resolved mfu mode:
+    cross-run cycles comparisons are invalid — exit 2 with fresh_start
+    guidance (the check sits AFTER the lock match: first-run and
+    fresh_start paths can never reach it)."""
+    art = _reusable_ws(tmp_path)
+    env = _reuse_env(art, ORCA_PO_NPU_CHIP="6613",
+                     ORCA_PO_NPU_PRECISION="INT8", ORCA_PO_NPU_CORES="1")
+    before = (art / "profile_mode.json").read_bytes()
+    proc = subprocess.run(
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
+        capture_output=True, text=True, timeout=60, env=env)
+    assert proc.returncode == 2
+    assert "profiling-mode mismatch" in proc.stderr
+    assert "fresh_start=true" in proc.stderr
+    assert (art / "profile_mode.json").read_bytes() == before  # not overwritten
+
+
+def test_reuse_check_mode_file_missing_fails_loud(tmp_path: Path):
+    """A pre-v5 (or half-built) reusable workspace has no profile_mode.json:
+    reuse is refused with the same recovery (the check is contract behavior,
+    not a regression)."""
+    art = _reusable_ws(tmp_path)
+    (art / "profile_mode.json").unlink()
+    proc = subprocess.run(
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
+        capture_output=True, text=True, timeout=60, env=_reuse_env(art))
+    assert proc.returncode == 2
+    assert "profile_mode.json missing" in proc.stderr
+    assert "fresh_start=true" in proc.stderr
+
+
+def test_reuse_check_resolved_by_flip_is_not_drift(tmp_path: Path):
+    """Measurement-equivalent source flip: the mode was recorded via env, the
+    re-resolution comes from npu-smi, but the four compared fields are
+    identical — `resolved_by` is provenance, never drift; REUSE continues."""
+    art = _reusable_ws(tmp_path, profile_mode={
+        "mode": "mfu", "chip": "6613", "precision": "INT8", "core_num": 1,
+        "resolved_by": "env"})
+    npu_dir = tmp_path / "npu-stub"
+    npu_dir.mkdir()
+    (npu_dir / "npu-smi").write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s' '+------+------+\n"
+        "| NPU  Name  | Health |\n"
+        "+======+======+\n"
+        "| 0     6613 | OK     |\n"
+        "+------+------+\n'\n", encoding="utf-8")
+    (npu_dir / "npu-smi").chmod(0o755)
+    env = _reuse_env(art)   # NO ORCA_PO_NPU_CHIP: resolution goes via npu-smi
+    env["PATH"] = f"{npu_dir}:{env.get('PATH', '')}"
+    proc = subprocess.run(
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
+        capture_output=True, text=True, timeout=60, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert "REUSE" in proc.stdout
+    # the recorded provenance is untouched
+    assert json.loads((art / "profile_mode.json").read_text(encoding="utf-8")) \
+        ["resolved_by"] == "env"
+
+
+def test_reuse_check_no_lock_first_run_never_hits_mode_check(tmp_path: Path):
+    """The consistency check sits after the lock match: a first run (no
+    BASELINE.lock, no profile_mode.json) is a plain NO_REUSE — the mode file
+    is written later by the fresh path."""
+    art = tmp_path / "art"
+    art.mkdir()
+    (art / "shadow" / "pkg").mkdir(parents=True)
+    (art / "shadow" / "pkg" / "model.py").write_text("# m\n", encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(_REUSE_SH), "model.py", "", "0"],
+        capture_output=True, text=True, timeout=60, env=_reuse_env(art))
+    assert proc.returncode == 1
+    assert "no BASELINE.lock (first run)" in proc.stderr
 
 
 # ── deploy_scripts: orphan retirement (defensive, upgrade-safe) ───────────────
@@ -2443,13 +2798,14 @@ def test_history_probe_row_optional_eval_fields(tmp_path: Path):
     hist = tmp_path / "history.jsonl"
     row = history_lib.append_probe(
         hist, "r1-01", proxy_acc=0.83, promote_gate="pass", outcome="promoted",
-        eval_skipped_no_epoch_ckpt=True, monitor_failed=False,
+        gap=0.03, eval_skipped_no_epoch_ckpt=True, monitor_failed=False,
         eval_acc=0.9, eval_failed=False)
     assert row["eval_skipped_no_epoch_ckpt"] is True
     assert row["eval_acc"] == 0.9
     stored = history_lib.read_rows(hist)[0]
     assert set(stored) >= set(history_lib.PROBE_FIELDS)
     assert stored["monitor_failed"] is False
+    assert stored["gap"] == 0.03
 
     # omitted optionals stay OUT of the row (old rows coexist harmlessly)
     hist2 = tmp_path / "h2.jsonl"
@@ -2988,36 +3344,43 @@ def test_push_curves_ack_timeout_never_hangs(tmp_path: Path):
     thread.join(timeout=10)
 
 
-# ── run_latency_recheck (D-V4-10): v3.5 batch-verify semantics, zero drift ───
+# ── run_latency_recheck (v5): mode-conditioned gate, thresholds retired ──────
 
-_RECHECK_SH = _REPO / "workflows" / "agents" / "po_propose" / "scripts" / "run_latency_recheck.sh"
+_RECHECK_SH = _REPO / "workflows" / "prof-opt" / "agents" / "po_propose" / "scripts" / "run_latency_recheck.sh"
 
-# CALIBRATED expectations (the v3.5 reference script produced byte-identical
+# CALIBRATED expectations (the reference script produced byte-identical
 # values on this exact fixture; regenerate alongside any torch/onnx/profiler
 # upgrade): base (GELU tiny) = 712 cycles, variant (ReLU tiny) = 568.
+# Origin anchor: baseline 712, ratio 0.5 -> target 357; no best.json ->
+# latency gate mode, incumbent = 712 (the anchor baseline).
 _T8_OP_DELTA = {"Add": -1, "Div": -1, "Erf": -1, "Mul": -2, "Relu": 1}
 _T8_PREDICTED = -144
 _T8_PASS_VERDICT = {
     "vid": "r1-01", "round": 1, "structural_check": "pass",
     "makespan_cycles": 568, "base_makespan_cycles": 712,
-    "improvement_cycles": 144, "required_improvement_cycles": 100,
-    "pred_actual_ratio": 1.0, "latency_gate": "pass",
-    "predicted_delta_cycles": -144, "outcome": "latency_pass",
+    "incumbent_cycles": 712, "improvement_cycles": 144,
+    "gate_mode": "latency", "pred_actual_ratio": 1.0,
+    "latency_gate": "pass", "predicted_delta_cycles": -144,
+    "outcome": "latency_pass",
 }
 _T8_MISMATCH_VERDICT = {
     "vid": "r1-02", "round": 1, "structural_check": "fail",
     "mismatch_layers": ["graph: ops Add,Div,Erf,Mul,Relu"],
     "makespan_cycles": None, "base_makespan_cycles": None,
-    "improvement_cycles": None, "required_improvement_cycles": None,
-    "pred_actual_ratio": None, "latency_gate": None,
+    "incumbent_cycles": None, "improvement_cycles": None,
+    "gate_mode": None, "pred_actual_ratio": None, "latency_gate": None,
     "predicted_delta_cycles": -144, "outcome": "structural_mismatch",
 }
 
 
-def _recheck_workspace(tmp_path: Path) -> Path:
+def _recheck_workspace(tmp_path: Path, *, mode: str = "placeholder",
+                       best: dict | None = None,
+                       anchor_baseline: int = 712) -> Path:
     """GELU->ReLU variant fixture: one variant whose declaration matches the
     real onnx graphs (latency-pass path) and one declaring an empty op_delta
-    (graph-layer structural-mismatch path)."""
+    (graph-layer structural-mismatch path). The profiling mode comes from
+    profile_mode.json; the gate anchors from the origin anchor (+ optional
+    best.json)."""
     torch = pytest.importorskip("torch")
     pytest.importorskip("onnx")
     import placeholder_profiler  # noqa: E402
@@ -3025,8 +3388,21 @@ def _recheck_workspace(tmp_path: Path) -> Path:
     art = tmp_path / "art"
     (art / "scripts").mkdir(parents=True)
     for src in ("diff_check.py", "history_lib.py", "emit_result.py",
-                "placeholder_profiler.py"):
+                "round_state.py", "placeholder_profiler.py"):
         shutil.copy(_SCRIPTS / src, art / "scripts" / src)
+    (art / "profile_mode.json").write_text(json.dumps(
+        {"mode": "placeholder", "chip": "", "precision": None,
+         "core_num": None, "resolved_by": "fallback"} if mode == "placeholder"
+        else {"mode": "mfu", "chip": "6613", "precision": "INT8",
+              "core_num": 1, "resolved_by": "env"}), encoding="utf-8")
+    (art / "base" / "profile").mkdir(parents=True)
+    (art / "base" / "origin_anchor.json").write_text(json.dumps({
+        "baseline_makespan_cycles": anchor_baseline,
+        "latency_reduction_min": 0.5, "accuracy_budget": 0.1,
+        "target_cycles": int(anchor_baseline * 0.5) + 1,
+        "frozen_at_round": 0}), encoding="utf-8")
+    if best is not None:
+        (art / "best.json").write_text(json.dumps(best), encoding="utf-8")
 
     class Tiny(torch.nn.Module):
         def __init__(self, act):
@@ -3045,13 +3421,13 @@ def _recheck_workspace(tmp_path: Path) -> Path:
                           opset_version=17, do_constant_folding=True)
 
     torch.manual_seed(0)
-    (art / "base").mkdir()
+    (art / "base").mkdir(exist_ok=True)
     export(Tiny(torch.nn.GELU()), art / "base" / "model.onnx")
     base_ms = placeholder_profiler.profile(
         art / "base" / "model.onnx", art / "base" / "profile")["makespan_cycles"]
     # calibration guard: if the pricing ever drifts, the hardcoded verdicts
     # above are void -> fail loud with the recalibration hint
-    assert base_ms == 712, (
+    assert base_ms == anchor_baseline == 712, (
         f"calibration drift: base makespan {base_ms} != 712 — regenerate the "
         "T8 expectations (run the fixture once against the reference script)")
 
@@ -3086,16 +3462,15 @@ def _run_recheck(art: Path) -> subprocess.CompletedProcess:
     env["ORCA_ARTIFACTS_DIR"] = str(art)
     return subprocess.run(
         ["bash", str(_RECHECK_SH),
-         "--profiler", str(art / "scripts" / "placeholder_profiler.py"),
-         "--min-improvement", "100", "--min-pct", "1", "--min-ratio", "0.5"],
+         "--profiler", str(art / "scripts" / "placeholder_profiler.py")],
         capture_output=True, text=True, timeout=300, env=env)
 
 
 def test_run_latency_recheck_migration_regression(tmp_path: Path):
-    """The batch verify semantics are IDENTICAL to the reference behavior on
-    the same fixture: two-layer declaration check, re-profile, gate math
-    (144 >= max(100, 1% x 712) with ratio 1.0), typed history rows, and the
-    calibrated verdict JSONs."""
+    """The batch verify semantics on the reference fixture: two-layer
+    declaration check, re-profile, STRICT-improvement gate (568 < incumbent
+    712 — the v5 judgement has no absolute/relative/ratio thresholds), typed
+    history rows, and the calibrated verdict JSONs."""
     art = _recheck_workspace(tmp_path)
     proc = _run_recheck(art)
     assert proc.returncode == 0, proc.stderr
@@ -3103,6 +3478,7 @@ def test_run_latency_recheck_migration_regression(tmp_path: Path):
     assert out["status"] == "executed"
     assert out["verdicts_count"] == 2
     assert out["latency_pass_count"] == 1
+    assert out["gate_mode"] == "latency"
     assert out["summary"] == "2 verdicts [latency_pass=1 structural_mismatch=1]"
     assert out["verdicts_path"] == str(art / "rounds" / "001" / "verdicts.jsonl")
     assert json.loads((art / "variants" / "r1-01" / "verdict.json")
@@ -3113,7 +3489,7 @@ def test_run_latency_recheck_migration_regression(tmp_path: Path):
     latest = history_lib.read_latest(art / "history.jsonl")
     assert latest["r1-01"]["outcome"] == "latency_pass"
     assert latest["r1-01"]["makespan_cycles"] == 568
-    assert latest["r1-01"]["pred_actual_ratio"] == 1.0
+    assert latest["r1-01"]["pred_actual_ratio"] == 1.0   # informational only
     assert latest["r1-02"]["outcome"] == "structural_mismatch"
     # verdicts.jsonl is an append-only audit stream of both verdicts
     rows = [json.loads(line) for line in
@@ -3145,9 +3521,7 @@ def test_run_latency_recheck_migration_regression(tmp_path: Path):
         (art / "variants" / vid / "verdict.json").unlink()
     env = dict(os.environ)
     env["ORCA_ARTIFACTS_DIR"] = str(art)
-    proc4 = subprocess.run(["bash", str(_RECHECK_SH),
-                            "--min-improvement", "100", "--min-pct", "1",
-                            "--min-ratio", "0.5"],
+    proc4 = subprocess.run(["bash", str(_RECHECK_SH)],
                            capture_output=True, text=True, timeout=300, env=env)
     assert proc4.returncode == 0, proc4.stderr
     out4 = json.loads(proc4.stdout)
@@ -3156,6 +3530,75 @@ def test_run_latency_recheck_migration_regression(tmp_path: Path):
                       .read_text(encoding="utf-8")) == _T8_PASS_VERDICT
     assert json.loads((art / "variants" / "r1-02" / "verdict.json")
                       .read_text(encoding="utf-8")) == _T8_MISMATCH_VERDICT
+
+
+def test_run_latency_recheck_small_strict_step_passes(tmp_path: Path):
+    """v5 retired the 100-cycle / 1% / ratio thresholds: a variant only ONE
+    cycle below the incumbent is a legitimate latency_pass (the pre-v5 gate
+    rejected exactly this small-step improvement)."""
+    art = _recheck_workspace(tmp_path, mode="mfu", best={
+        "vid": "r0-99", "makespan_cycles": 711, "proxy_acc": None,
+        "round": 0, "profile_dir": "x"})    # incumbent = best.json = 711
+    import placeholder_profiler  # noqa: E402
+    vdir = art / "variants" / "r1-01"
+    placeholder_profiler.profile(vdir / "onnx" / "model.onnx", vdir / "profile")
+    summary_path = vdir / "profile" / "profile_summary.json"
+    doc = json.loads(summary_path.read_text(encoding="utf-8"))
+    doc["makespan_cycles"] = 710            # exactly ONE cycle better
+    summary_path.write_text(json.dumps(doc), encoding="utf-8")
+    env = dict(os.environ)
+    env["ORCA_ARTIFACTS_DIR"] = str(art)
+    proc = subprocess.run(["bash", str(_RECHECK_SH)], capture_output=True,
+                          text=True, timeout=300, env=env)
+    assert proc.returncode == 0, proc.stderr
+    verdict = json.loads((vdir / "verdict.json").read_text(encoding="utf-8"))
+    assert verdict["makespan_cycles"] == 710
+    assert verdict["incumbent_cycles"] == 711
+    assert verdict["outcome"] == "latency_pass"   # strict improvement is enough
+
+
+def test_run_latency_recheck_recovery_mode_uses_target_line(tmp_path: Path):
+    """Accuracy (recovery) gate mode: the frozen target line is the filter —
+    a variant ABOVE the line is eliminated even though it beats the
+    incumbent; the gate mode comes from round_state (best under the line)."""
+    art = _recheck_workspace(tmp_path, best={
+        "vid": "r0-99", "makespan_cycles": 300, "proxy_acc": 0.4,
+        "round": 0, "profile_dir": "x"})   # 300 <= 357 -> accuracy mode
+    env = dict(os.environ)
+    env["ORCA_ARTIFACTS_DIR"] = str(art)
+    proc = subprocess.run(["bash", str(_RECHECK_SH)], capture_output=True,
+                          text=True, timeout=300, env=env)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["gate_mode"] == "accuracy"
+    verdict = json.loads((art / "variants" / "r1-01" / "verdict.json")
+                         .read_text(encoding="utf-8"))
+    # 568 > target 357 -> mechanically eliminated in the recovery phase
+    assert verdict["gate_mode"] == "accuracy"
+    assert verdict["latency_gate"] == "fail"
+    assert verdict["outcome"] == "latency_fail"
+
+
+def test_run_latency_recheck_positive_prediction_is_informational(tmp_path: Path):
+    """The pre-v5 `predicted_delta_cycles >= 0` hard guard is retired: a
+    positive prediction no longer fails the run (the measured number is the
+    only judgement); the ratio field degrades to None."""
+    art = _recheck_workspace(tmp_path)
+    decl = art / "variants" / "r1-02" / "declaration.json"
+    doc = json.loads(decl.read_text(encoding="utf-8"))
+    doc["op_delta"] = _T8_OP_DELTA        # make it structurally pass
+    doc["predicted_delta_cycles"] = 10    # positive prediction
+    decl.write_text(json.dumps(doc), encoding="utf-8")
+    env = dict(os.environ)
+    env["ORCA_ARTIFACTS_DIR"] = str(art)
+    proc = subprocess.run(["bash", str(_RECHECK_SH)], capture_output=True,
+                          text=True, timeout=300, env=env)
+    assert proc.returncode == 0, proc.stderr
+    verdict = json.loads((art / "variants" / "r1-02" / "verdict.json")
+                         .read_text(encoding="utf-8"))
+    assert verdict["outcome"] == "latency_pass"
+    assert verdict["pred_actual_ratio"] is None
+    assert verdict["predicted_delta_cycles"] == 10
 
 
 def test_run_latency_recheck_reconciles_missing_history_rows(tmp_path: Path):
@@ -3180,73 +3623,74 @@ def test_run_latency_recheck_reconciles_missing_history_rows(tmp_path: Path):
     assert latest["r1-02"]["outcome"] == "structural_mismatch"
 
 
-def test_run_latency_recheck_pre_profiled_mode(tmp_path: Path):
-    """mfu mode: the recheck reads the four-piece the node produced per
-    variant (mfu-analyzer + mfu_adapter) BEFORE the call and never profiles
-    inline — the verdict must carry the PRE-PROFILED makespan verbatim (here
-    450, not the 568 an inline run would produce), so the gate math is
-    attributable to the real evaluation, not a local re-estimation."""
-    art = _recheck_workspace(tmp_path)
+def test_run_latency_recheck_mfu_mode_reads_four_piece(tmp_path: Path):
+    """mfu mode (from profile_mode.json): the recheck reads the four-piece
+    the node produced per variant (mfu-analyzer + mfu_adapter) BEFORE the
+    call and never profiles inline — the verdict must carry the four-piece
+    makespan verbatim (here 450, not the 568 an inline run would produce),
+    so the gate math is attributable to the real evaluation."""
+    art = _recheck_workspace(tmp_path, mode="mfu")
     import placeholder_profiler  # noqa: E402
 
     vdir = art / "variants" / "r1-01"
     placeholder_profiler.profile(vdir / "onnx" / "model.onnx", vdir / "profile")
     summary_path = vdir / "profile" / "profile_summary.json"
     doc = json.loads(summary_path.read_text(encoding="utf-8"))
-    doc["makespan_cycles"] = 450     # make the pre-profiled value unmistakable
+    doc["makespan_cycles"] = 450     # make the four-piece value unmistakable
     summary_path.write_text(json.dumps(doc), encoding="utf-8")
 
     env = dict(os.environ)
     env["ORCA_ARTIFACTS_DIR"] = str(art)
-    proc = subprocess.run(
-        ["bash", str(_RECHECK_SH), "--pre-profiled",
-         "--min-improvement", "100", "--min-pct", "1", "--min-ratio", "0.5"],
-        capture_output=True, text=True, timeout=300, env=env)
+    proc = subprocess.run(["bash", str(_RECHECK_SH)],
+                          capture_output=True, text=True, timeout=300, env=env)
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)
     assert out["status"] == "executed"
     assert out["verdicts_count"] == 2          # r1-02 still gets its structural verdict
     assert out["latency_pass_count"] == 1
     verdict = json.loads((vdir / "verdict.json").read_text(encoding="utf-8"))
-    assert verdict["makespan_cycles"] == 450   # the PRE-PROFILED number, verbatim
+    assert verdict["makespan_cycles"] == 450   # the four-piece number, verbatim
     assert verdict["improvement_cycles"] == 712 - 450
     assert verdict["outcome"] == "latency_pass"
-    # the skip key still applies on top of the pre-profiled mode
-    proc2 = subprocess.run(
-        ["bash", str(_RECHECK_SH), "--pre-profiled",
-         "--min-improvement", "100", "--min-pct", "1", "--min-ratio", "0.5"],
-        capture_output=True, text=True, timeout=300, env=env)
+    # the skip key still applies on top of the mfu mode
+    proc2 = subprocess.run(["bash", str(_RECHECK_SH)],
+                           capture_output=True, text=True, timeout=300, env=env)
     assert json.loads(proc2.stdout)["verdicts_count"] == 0
 
 
-def test_run_latency_recheck_pre_profiled_fail_loud_matrix(tmp_path: Path):
-    """Hard errors, never an inline fallback: a DONE variant without a
-    four-piece, and --pre-profiled combined with --profiler (mutually
-    exclusive modes)."""
-    art = _recheck_workspace(tmp_path)
+def test_run_latency_recheck_mfu_fail_loud_matrix(tmp_path: Path):
+    """Hard errors, never an inline fallback: in mfu mode a DONE variant
+    without a four-piece, and --profiler (mutually exclusive with mfu mode)."""
+    art = _recheck_workspace(tmp_path, mode="mfu")
     env = dict(os.environ)
     env["ORCA_ARTIFACTS_DIR"] = str(art)
 
     # variant without the four-piece -> rc 2 naming the variant + the remedy
-    proc = subprocess.run(
-        ["bash", str(_RECHECK_SH), "--pre-profiled",
-         "--min-improvement", "100", "--min-pct", "1", "--min-ratio", "0.5"],
-        capture_output=True, text=True, timeout=300, env=env)
+    proc = subprocess.run(["bash", str(_RECHECK_SH)],
+                          capture_output=True, text=True, timeout=300, env=env)
     assert proc.returncode == 2
-    assert "pre-profiled" in proc.stderr
+    assert "mfu mode" in proc.stderr
     assert "r1-01" in proc.stderr
     assert "inline profiling is disabled" in proc.stderr
 
     # mode conflict -> rc 2
     proc2 = subprocess.run(
-        ["bash", str(_RECHECK_SH), "--pre-profiled",
-         "--profiler", str(art / "scripts" / "placeholder_profiler.py"),
-         "--min-improvement", "100", "--min-pct", "1", "--min-ratio", "0.5"],
+        ["bash", str(_RECHECK_SH),
+         "--profiler", str(art / "scripts" / "placeholder_profiler.py")],
         capture_output=True, text=True, timeout=300, env=env)
     assert proc2.returncode == 2
     assert "mutually exclusive" in proc2.stderr
 
 
+def test_run_latency_recheck_mode_file_missing_rc2(tmp_path: Path):
+    art = _recheck_workspace(tmp_path)
+    (art / "profile_mode.json").unlink()
+    env = dict(os.environ)
+    env["ORCA_ARTIFACTS_DIR"] = str(art)
+    proc = subprocess.run(["bash", str(_RECHECK_SH)],
+                          capture_output=True, text=True, timeout=300, env=env)
+    assert proc.returncode == 2
+    assert "profile_mode.json" in proc.stderr
 # ── T12: admission clause single source (E3-07 dual pin) ──────────────────────
 
 def test_admission_clause_single_source():
@@ -3256,19 +3700,19 @@ def test_admission_clause_single_source():
     editing either side alone breaks this pin (never a silent drift)."""
     import re
 
-    sh = (_REPO / "workflows" / "agents" / "po_contract" / "scripts"
+    sh = (_REPO / "workflows" / "prof-opt" / "agents" / "po_contract" / "scripts"
           / "check_contracts.sh").read_text(encoding="utf-8")
     m = re.search(r'ADMISSION_CLAUSE = "([^"]+)"', sh)
     assert m, "check_contracts.sh lost its ADMISSION_CLAUSE constant"
     clause = m.group(1)
 
-    agent_md = (_REPO / "workflows" / "agents" / "po_contract" / "agent.md"
+    agent_md = (_REPO / "workflows" / "prof-opt" / "agents" / "po_contract" / "agent.md"
                 ).read_text(encoding="utf-8")
     assert clause in agent_md, (
         f"the admission clause {clause!r} drifted: po_contract/agent.md (the "
         "canonical source) no longer contains the gate's constant verbatim")
 
-    yaml_text = (_REPO / "workflows" / "prof-opt.yaml").read_text(encoding="utf-8")
+    yaml_text = (_REPO / "workflows" / "prof-opt" / "workflow.yaml").read_text(encoding="utf-8")
     assert clause in yaml_text, (
         "the workflow description lost its one-sentence admission clause")
 
@@ -3325,7 +3769,7 @@ def test_eval_at_k_degradation_mechanics(tmp_path: Path):
     assert out_fail["pass"] is False      # same face, honest fail
 
 
-# ── verdict_decide (cleanliness round): scripted promote / final-budget gates ──
+# ── verdict_decide (v5): anchor-budget promote / final-budget gates ──────────
 
 from verdict_decide import final_budget, promote  # noqa: E402
 
@@ -3333,7 +3777,8 @@ _VERDICT_SH = _SCRIPTS / "verdict_decide.py"
 
 
 def _probe_ws(tmp_path: Path, *, compare: dict, proxy: dict | None,
-              k_acc: dict | None, direction: str = "higher_better") -> Path:
+              k_acc: dict | None, direction: str = "higher_better",
+              budget: float = 0.05) -> Path:
     art = tmp_path / "ws"
     (art / "variants" / "r1-01" / "metrics").mkdir(parents=True)
     (art / "variants" / "r1-01" / "metrics" / "epoch_compare.json").write_text(
@@ -3346,77 +3791,90 @@ def _probe_ws(tmp_path: Path, *, compare: dict, proxy: dict | None,
         (art / "baseline").mkdir(parents=True)
         (art / "baseline" / "baseline_k_acc.json").write_text(
             json.dumps(k_acc), encoding="utf-8")
+    (art / "base").mkdir(parents=True)
+    (art / "base" / "origin_anchor.json").write_text(json.dumps({
+        "baseline_makespan_cycles": 1000, "latency_reduction_min": 0.5,
+        "accuracy_budget": budget, "target_cycles": 501,
+        "frozen_at_round": 0}), encoding="utf-8")
     (art / "contracts.json").write_text(json.dumps(
         {"eval": {"metric_direction": direction}}), encoding="utf-8")
     return art
 
 
+_PASS_COMPARE = {"at_epoch": 1, "baseline_metric": 0.85,
+                 "candidate_metric": 0.84, "normalized_loss": 0.01,
+                 "budget": 0.05, "metric_direction": "higher_better",
+                 "pass": True}
+
+
 def test_verdict_promote_dual_gate_pass(tmp_path: Path):
-    """Both gates green -> promoted; the line is recomputed from the anchor
-    RECORDED in epoch_compare.json (baseline_metric), never hand-copied."""
-    art = _probe_ws(tmp_path,
-                    compare={"at_epoch": 1, "baseline_metric": 0.85,
-                             "baseline_path": "baseline/baseline_metrics.jsonl",
-                             "pass": True},
+    """Both gates green -> accuracy_pass with gap = the worst gate gap; the
+    line is recomputed from the anchor RECORDED in epoch_compare.json."""
+    art = _probe_ws(tmp_path, compare=dict(_PASS_COMPARE),
                     proxy={"vid": "r1-01", "metric_value": 0.84, "k": 1},
                     k_acc={"baseline_k_acc": 0.86, "k": 1})
-    out = promote(art, "r1-01", slack=0.05)
+    out = promote(art, "r1-01")
     assert out["curve_pass"] is True
     assert out["eval_acc"] == 0.84
     assert out["eval_pass"] is True          # 0.84 >= 0.86 - 0.05
     assert out["line"] == pytest.approx(0.80)  # 0.85 - 0.05
-    assert out["promoted"] is True
+    assert out["accuracy_pass"] is True
+    assert out["gap"] == pytest.approx(max(0.01, 0.86 - 0.84))  # worst gate
 
 
-def test_verdict_promote_eval_gate_blocks(tmp_path: Path):
+def test_verdict_promote_eval_gate_blocks_with_eval_gap(tmp_path: Path):
+    """Curve passes, eval misses: accuracy_pass=false and gap = the EVAL
+    gap (the worst gate), not the curve gap."""
     art = _probe_ws(tmp_path,
-                    compare={"at_epoch": 1, "baseline_metric": 0.85, "pass": True},
+                    compare=dict(_PASS_COMPARE, normalized_loss=0.01),
                     proxy={"vid": "r1-01", "metric_value": 0.70, "k": 1},
                     k_acc={"baseline_k_acc": 0.86, "k": 1})
-    out = promote(art, "r1-01", slack=0.05)
+    out = promote(art, "r1-01")
     assert out["curve_pass"] is True
     assert out["eval_pass"] is False           # 0.70 < 0.86-0.05
-    assert out["promoted"] is False
+    assert out["accuracy_pass"] is False
+    assert out["gap"] == pytest.approx(0.86 - 0.70)   # the eval gap dominates
 
 
-def test_verdict_promote_curve_only_when_eval_files_absent(tmp_path: Path):
-    """No proxy.json (eval never ran / degraded) and no baseline_k_acc.json
-    -> the eval gate is vacuously true; the curve alone decides."""
+def test_verdict_promote_curve_only_gap_is_curve_gap(tmp_path: Path):
+    """No proxy.json and no baseline_k_acc.json -> curve-only judgment: the
+    gap IS the curve's normalized_loss, and pass <=> gap <= budget."""
     art = _probe_ws(tmp_path,
-                    compare={"at_epoch": 1, "baseline_metric": 0.85, "pass": True},
+                    compare=dict(_PASS_COMPARE, normalized_loss=0.04),
                     proxy=None, k_acc=None)
-    out = promote(art, "r1-01", slack=0.05)
+    out = promote(art, "r1-01")
     assert out["eval_acc"] is None
     assert out["eval_pass"] is True
-    assert out["promoted"] is True
-    # curve alone failing still fails the promote
+    assert out["accuracy_pass"] is True
+    assert out["gap"] == pytest.approx(0.04)
+
     art2 = _probe_ws(tmp_path / "b",
-                     compare={"at_epoch": 1, "baseline_metric": 0.85,
-                              "pass": False}, proxy=None, k_acc=None)
-    assert promote(art2, "r1-01", slack=0.05)["promoted"] is False
+                     compare=dict(_PASS_COMPARE, normalized_loss=0.06,
+                                  **{"pass": False}),
+                     proxy=None, k_acc=None)
+    out2 = promote(art2, "r1-01")
+    assert out2["accuracy_pass"] is False
+    assert out2["gap"] == pytest.approx(0.06)   # 0.06 > 0.05 budget
 
 
 def test_verdict_promote_asymmetric_single_gate_branches(tmp_path: Path):
     """Either eval-side file alone absent -> still curve-only judgment (the
     gate needs BOTH numbers to apply); a present eval number is still
     echoed, never fabricated away."""
-    # eval present, baseline k-ckpt anchor absent
-    art = _probe_ws(tmp_path,
-                    compare={"at_epoch": 1, "baseline_metric": 0.85, "pass": True},
+    art = _probe_ws(tmp_path, compare=dict(_PASS_COMPARE),
                     proxy={"vid": "r1-01", "metric_value": 0.84, "k": 1},
                     k_acc=None)
-    out = promote(art, "r1-01", slack=0.05)
+    out = promote(art, "r1-01")
     assert out["eval_acc"] == 0.84
     assert out["eval_pass"] is True
-    assert out["promoted"] is True
-    # baseline anchor present, eval absent
-    art2 = _probe_ws(tmp_path / "b",
-                     compare={"at_epoch": 1, "baseline_metric": 0.85, "pass": True},
+    assert out["accuracy_pass"] is True
+
+    art2 = _probe_ws(tmp_path / "b", compare=dict(_PASS_COMPARE),
                      proxy=None, k_acc={"baseline_k_acc": 0.86, "k": 1})
-    out2 = promote(art2, "r1-01", slack=0.05)
+    out2 = promote(art2, "r1-01")
     assert out2["eval_acc"] is None
     assert out2["eval_pass"] is True
-    assert out2["promoted"] is True
+    assert out2["accuracy_pass"] is True
 
 
 @pytest.mark.parametrize("proxy_text,error_kw", [
@@ -3427,74 +3885,107 @@ def test_verdict_promote_fails_loud_on_present_but_malformed_eval(
         tmp_path: Path, proxy_text: str, error_kw: str):
     """A present-but-unreadable eval anchor FAILS — it must never silently
     downgrade the judgment to curve-only (the _optional_number contract)."""
-    art = _probe_ws(tmp_path,
-                    compare={"at_epoch": 1, "baseline_metric": 0.85, "pass": True},
+    art = _probe_ws(tmp_path, compare=dict(_PASS_COMPARE),
                     proxy=None, k_acc=None)
     (art / "variants" / "r1-01" / "eval").mkdir(parents=True)
     (art / "variants" / "r1-01" / "eval" / "proxy.json").write_text(
         proxy_text, encoding="utf-8")
     with pytest.raises(ValueError, match=error_kw):
-        promote(art, "r1-01", slack=0.05)
+        promote(art, "r1-01")
 
 
 def test_verdict_promote_lower_better_line_direction(tmp_path: Path):
-    art = _probe_ws(tmp_path,
-                    compare={"at_epoch": 2, "baseline_metric": 0.20, "pass": True},
+    compare = {"at_epoch": 2, "baseline_metric": 0.20,
+               "candidate_metric": 0.23, "normalized_loss": 0.03,
+               "budget": 0.05, "metric_direction": "lower_better",
+               "pass": True}
+    art = _probe_ws(tmp_path, compare=compare,
                     proxy={"vid": "r1-01", "metric_value": 0.23, "k": 2},
                     k_acc={"baseline_k_acc": 0.21, "k": 2},
                     direction="lower_better")
-    out = promote(art, "r1-01", slack=0.05)
+    out = promote(art, "r1-01")
     assert out["line"] == pytest.approx(0.25)   # b + slack for lower_better
     assert out["eval_pass"] is True             # 0.23 <= 0.21 + 0.05
-    assert out["promoted"] is True
+    assert out["accuracy_pass"] is True
+    assert out["gap"] == pytest.approx(max(0.03, 0.23 - 0.21))
 
 
 @pytest.mark.parametrize("compare,error_kw", [
-    ({"baseline_metric": 0.85}, "pass"),                       # no boolean pass
-    ({"pass": "true", "baseline_metric": 0.85}, "pass"),       # string, not bool
-    ({"pass": True}, "baseline_metric"),                       # anchor missing
+    ({"baseline_metric": 0.85, "normalized_loss": 0.01}, "pass"),
+    ({"pass": "true", "baseline_metric": 0.85, "normalized_loss": 0.01}, "pass"),
+    ({"pass": True, "normalized_loss": 0.01}, "baseline_metric"),
+    ({"pass": True, "baseline_metric": 0.85}, "normalized_loss"),
 ])
 def test_verdict_promote_fails_loud_on_malformed_compare(tmp_path: Path, compare,
                                                          error_kw):
     art = _probe_ws(tmp_path, compare=compare, proxy=None, k_acc=None)
     with pytest.raises(ValueError, match=error_kw):
-        promote(art, "r1-01", slack=0.05)
+        promote(art, "r1-01")
 
 
-def test_verdict_cli_fails_loud_missing_files_and_bad_budget(tmp_path: Path):
-    art = tmp_path / "empty-ws"
-    art.mkdir()
-    proc = subprocess.run(
+def test_verdict_promote_missing_anchor_rc2(tmp_path: Path):
+    art = _probe_ws(tmp_path, compare=dict(_PASS_COMPARE), proxy=None,
+                    k_acc=None)
+    (art / "base" / "origin_anchor.json").unlink()
+    with pytest.raises(FileNotFoundError, match="origin_anchor"):
+        promote(art, "r1-01")
+
+
+def test_verdict_cli_rejects_budget_and_reads_anchor(tmp_path: Path):
+    """The --budget flag is RETIRED on both subcommands (argparse rejects);
+    the budget comes from the origin anchor only."""
+    art = _probe_ws(tmp_path, compare=dict(_PASS_COMPARE), proxy=None,
+                    k_acc=None)
+    for sub in (["promote", "--vid", "r1-01"], ["final-budget"]):
+        proc = subprocess.run(
+            [sys.executable, str(_VERDICT_SH), *sub,
+             "--artifacts", str(art), "--budget", "0.05"],
+            capture_output=True, text=True, timeout=60)
+        assert proc.returncode != 0
+        assert "--budget" in proc.stderr
+
+    ok = subprocess.run(
         [sys.executable, str(_VERDICT_SH), "promote",
-         "--artifacts", str(art), "--vid", "r1-01", "--budget", "0.05"],
+         "--artifacts", str(art), "--vid", "r1-01"],
         capture_output=True, text=True, timeout=60)
-    assert proc.returncode == 2
-    assert "epoch_compare.json" in proc.stderr
-
-    proc_neg = subprocess.run(
-        [sys.executable, str(_VERDICT_SH), "promote",
-         "--artifacts", str(art), "--vid", "r1-01", "--budget", "-1"],
-        capture_output=True, text=True, timeout=60)
-    assert proc_neg.returncode == 2
-    assert "--budget" in proc_neg.stderr
+    assert ok.returncode == 0, ok.stderr
+    payload = json.loads(ok.stdout)
+    assert payload["accuracy_pass"] is True and payload["gap"] == 0.01
 
 
-def test_verdict_final_budget_both_directions(tmp_path: Path):
+def test_verdict_final_budget_reads_anchor_both_directions(tmp_path: Path):
     art = tmp_path / "final-ws"
     (art / "final").mkdir(parents=True)
+    (art / "base").mkdir(parents=True)
+    (art / "base" / "origin_anchor.json").write_text(json.dumps({
+        "baseline_makespan_cycles": 1000, "latency_reduction_min": 0.5,
+        "accuracy_budget": 0.05, "target_cycles": 501,
+        "frozen_at_round": 0}), encoding="utf-8")
     (art / "final" / "final_acc.json").write_text(json.dumps(
         {"vid": "r1-01", "final_acc": 0.90, "baseline_full_acc": 0.92,
          "metric_direction": "higher_better", "within_budget": None}),
         encoding="utf-8")
-    assert final_budget(art, slack=0.05) == {"within_budget": True}
-    assert final_budget(art, slack=0.01) == {"within_budget": False}
+    assert final_budget(art) == {"within_budget": True}   # 0.9 >= 0.92-0.05
+
+    (art / "final" / "final_acc.json").write_text(json.dumps(
+        {"vid": "r1-01", "final_acc": 0.90, "baseline_full_acc": 0.92,
+         "metric_direction": "higher_better", "within_budget": None},
+    ), encoding="utf-8")
+    (art / "base" / "origin_anchor.json").write_text(json.dumps({
+        "baseline_makespan_cycles": 1000, "latency_reduction_min": 0.5,
+        "accuracy_budget": 0.01, "target_cycles": 501,
+        "frozen_at_round": 0}), encoding="utf-8")
+    assert final_budget(art) == {"within_budget": False}  # 0.9 < 0.92-0.01
 
     (art / "final" / "final_acc.json").write_text(json.dumps(
         {"vid": "r1-01", "final_acc": 2.1, "baseline_full_acc": 2.0,
          "metric_direction": "lower_better", "within_budget": None}),
         encoding="utf-8")
-    assert final_budget(art, slack=0.05) == {"within_budget": False}
-    assert final_budget(art, slack=0.2) == {"within_budget": True}
+    (art / "base" / "origin_anchor.json").write_text(json.dumps({
+        "baseline_makespan_cycles": 1000, "latency_reduction_min": 0.5,
+        "accuracy_budget": 0.05, "target_cycles": 501,
+        "frozen_at_round": 0}), encoding="utf-8")
+    assert final_budget(art) == {"within_budget": False}  # 2.1 > 2.0+0.05
 
 
 def test_verdict_final_budget_cli_fails_loud_on_bad_inputs(tmp_path: Path):
@@ -3504,6 +3995,11 @@ def test_verdict_final_budget_cli_fails_loud_on_bad_inputs(tmp_path: Path):
     guessed verdict)."""
     art = tmp_path / "fw"
     (art / "final").mkdir(parents=True)
+    (art / "base").mkdir(parents=True)
+    (art / "base" / "origin_anchor.json").write_text(json.dumps({
+        "baseline_makespan_cycles": 1000, "latency_reduction_min": 0.5,
+        "accuracy_budget": 0.05, "target_cycles": 501,
+        "frozen_at_round": 0}), encoding="utf-8")
     final = art / "final" / "final_acc.json"
     base = {"vid": "r1-01", "final_acc": 0.90, "baseline_full_acc": 0.92,
             "metric_direction": "higher_better", "within_budget": None}
@@ -3511,7 +4007,7 @@ def test_verdict_final_budget_cli_fails_loud_on_bad_inputs(tmp_path: Path):
     def run_cli():
         return subprocess.run(
             [sys.executable, str(_VERDICT_SH), "final-budget",
-             "--artifacts", str(art), "--budget", "0.05"],
+             "--artifacts", str(art)],
             capture_output=True, text=True, timeout=60)
 
     final.write_text(json.dumps(dict(base, metric_direction="higher-better")),
@@ -3539,7 +4035,7 @@ def test_verdict_final_budget_cli_fails_loud_on_bad_inputs(tmp_path: Path):
 
 # ── extract_user_pkg (cleanliness round): fail-loud path resolution ───────────
 
-_EXTRACT_SH = (_REPO / "workflows" / "agents" / "po_flatten" / "scripts"
+_EXTRACT_SH = (_REPO / "workflows" / "prof-opt" / "agents" / "po_flatten" / "scripts"
                / "extract_user_pkg.sh")
 
 _ENTRY_BODY = "import os\nimport json\nfrom mymodel import layers\n"
@@ -3605,11 +4101,12 @@ def test_extract_user_pkg_empty_marker_on_zero_imports(tmp_path: Path):
 
 # ── po_propose check_prerequisites (cleanliness round) ────────────────────────
 
-_PREREQ_SH = (_REPO / "workflows" / "agents" / "po_propose" / "scripts"
+_PREREQ_SH = (_REPO / "workflows" / "prof-opt" / "agents" / "po_propose" / "scripts"
               / "check_prerequisites.sh")
 _PREREQ_FILES = ("analyze.py", "predict_delta.py", "history_lib.py",
                  "experiment_ledger.py", "emit_result.py", "check_bottleneck.py",
-                 "mfu_adapter.py", "mfu_benchmark.py")
+                 "mfu_adapter.py", "mfu_benchmark.py", "round_state.py",
+                 "resolve_profile_mode.sh", "rules_pool.py")
 
 
 def _run_prereq(ws: Path):

@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPTS = REPO / "workflows" / "agents" / "_puzzle_scripts"
+SCRIPTS = REPO / "workflows" / "puzzle" / "agents" / "_puzzle_scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import puzzle_common as pc  # noqa: E402

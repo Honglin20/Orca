@@ -8,7 +8,7 @@
     "dev": "vite",
     "gen:events": "python ../../../../scripts/gen_events_ts.py",
     "prebuild": "python ../../../../scripts/gen_events_ts.py --check",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && node scripts/clean-assets.mjs && vite build",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest"

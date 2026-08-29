@@ -26,29 +26,29 @@ WF_DIR = REPO / "workflows"
 # 任何改动这些集合的 PR 必须同时更新 docs/specs/workflow-input-design-principle.md §5 + 本表，
 # 并在 release note 说明为何调整 Tier 归类。
 EXPECTED_INPUTS = {
-    "quant-ptq-sweep.yaml": {
+    "quant-ptq-sweep/workflow.yaml": {
         "model_path",        # [ask] 模型入口（Tier A）
         "target_hardware",   # [ask] 目标硬件（Tier A）
         "seed",              # [default] 复现性种子（Tier A，默认 0）
     },
-    "quant-sensitivity.yaml": {
+    "quant-sensitivity/workflow.yaml": {
         "model_path", "target_hardware", "seed",
     },
-    "quant-qat.yaml": {
+    "quant-qat/workflow.yaml": {
         "model_path", "target_hardware", "seed",
     },
     # bit-curve 额外保留 Tier A KPI / 预算闸门（SPEC §5：accuracy_tolerance/avg_bit_budget/max_evals）。
-    "quant-bit-curve.yaml": {
+    "quant-bit-curve/workflow.yaml": {
         "model_path", "target_hardware", "seed",
         "accuracy_tolerance",  # [ask] 精度损失容忍（Pareto 选点闸门）
         "avg_bit_budget",      # [ask] 平均位宽硬上限
         "max_evals",           # [ask] 主搜索 candidate 预算
     },
     # NAS：P6 已补 4 个 KPI + 下沉 project_root；P9a 再下沉 output_dir（→ $ORCA_ARTIFACTS_DIR）。
-    "nas-agent-pipeline.yaml": {
+    "nas-agent-pipeline/workflow.yaml": {
         "model_path", "target_hardware", "latency_constraint", "max_rounds", "seed",
     },
-    "nas-hp-search.yaml": {
+    "nas-hp-search/workflow.yaml": {
         "model_path", "target_hardware", "latency_constraint", "max_rounds", "seed",
     },
 }

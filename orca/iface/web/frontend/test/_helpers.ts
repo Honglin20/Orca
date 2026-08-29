@@ -3,6 +3,7 @@
 // 提取自 store.test.ts / selectors.test.ts / ws-resume.test.ts 三份重复实现。
 
 import type { EventType, WebEvent } from "@/types/events";
+import type { NodeSessionIndex } from "@/types/store-types";
 import { useWorkflowStore } from "@/stores/workflow-store";
 
 /** 后端 EventType 全集（codegen 同步；测试 backstop）——39 个（SPEC §3.2）。 */
@@ -86,6 +87,7 @@ export function resetStore(): void {
     reasoningTokens: 0,
     lastSeqSeen: 0,
     nodesIndex: {},
+    takenEdgeKeys: new Set<string>(),
     seenSeqs: new Set<number>(),
     selectedNode: null,
     selectedSession: null,
@@ -102,4 +104,25 @@ export function resetStore(): void {
     oldestSeqInWindow: 0,
     newestSeqInWindow: 0,
   });
+}
+
+/**
+ * 构造 NodeSessionIndex（ev 空索引）——组件测试 setState 注入用（agents-rail
+ * sessionCount / iteration 用例）。NodeSessionIndex 加 ev 必填字段后（SPEC 2026-08-28
+ * C3.1），测试字面量缺 ev 会 tsc 报错——收敛到本 helper（DRY）。
+ *
+ * @param sessions session 列表（首事件 seq 升序语义）
+ * @param sessionEventCounts 每 session 事件数（缺省每 session 计 1）
+ */
+export function makeNodeIndex(
+  sessions: string[],
+  sessionEventCounts?: Record<string, number>
+): NodeSessionIndex {
+  return {
+    sessions,
+    sessionEventCounts:
+      sessionEventCounts ?? Object.fromEntries(sessions.map((s) => [s, 1])),
+    sessionFirstTs: Object.fromEntries(sessions.map((s, i) => [s, i + 1])),
+    ev: { all: [], bySession: {}, last: null },
+  };
 }

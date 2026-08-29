@@ -10,6 +10,7 @@
 import dagre from "@dagrejs/dagre";
 import type { Edge, Node } from "@xyflow/react";
 import type { NodeKind, WorkflowTopology } from "@/types/topology";
+import { routeEdgeKey } from "@/route-edge";
 import { END_NODE_ID } from "./constants";
 
 /** ReactFlow 节点 data 形状（widget 渲染读）。 */
@@ -72,7 +73,7 @@ export function findBackEdges(topology: WorkflowTopology): Set<string> {
     for (const v of adj.get(u) ?? []) {
       if (color.get(v) === GRAY) {
         // 指向栈上祖先 → 回环边
-        backEdges.add(`${u}->${v}`);
+        backEdges.add(routeEdgeKey(u, v));
       } else if (color.get(v) === WHITE) {
         visit(v, stack);
       }
@@ -125,7 +126,7 @@ export function applyDagreLayout(
 
   // 注册边（回环边反向，让 dagre 正确排名正向 DAG）
   topology.routes.forEach((r) => {
-    const key = `${r.from}->${r.to}`;
+    const key = routeEdgeKey(r.from, r.to);
     if (backEdges.has(key)) {
       g.setEdge(r.to, r.from); // 反向
     } else {
@@ -173,8 +174,7 @@ export function applyDagreLayout(
   // ── 生成 ReactFlow edges（渲染保持原方向；回环边标 animated 弧形）──
   const edges: WorkflowFlowEdge[] = [];
   topology.routes.forEach((r) => {
-    const key = `${r.from}->${r.to}`;
-    const isBack = backEdges.has(key);
+    const isBack = backEdges.has(routeEdgeKey(r.from, r.to));
     edges.push({
       id: edgeKey(r.from, r.to),
       source: r.from,
@@ -262,7 +262,7 @@ export function markTakenEdges(
 ): WorkflowFlowEdge[] {
   let changed = false;
   const next = flowEdges.map((e) => {
-    const key = `${e.source}->${e.target}`;
+    const key = routeEdgeKey(e.source, e.target);
     const taken = takenKeys.has(key);
     const prevTaken = (e.data as { taken?: boolean })?.taken ?? false;
     if (taken === prevTaken) return e;

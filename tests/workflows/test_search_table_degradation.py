@@ -18,8 +18,8 @@ from pathlib import Path
 
 import pytest
 
-_SEARCH_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "workflows" / "agents" / "ns_run_search" / "scripts"
-_RETRAIN_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "workflows" / "agents" / "ns_retrain" / "scripts"
+_SEARCH_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "workflows" / "nas-supernet" / "agents" / "ns_run_search" / "scripts"
+_RETRAIN_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "workflows" / "nas-supernet" / "agents" / "ns_retrain" / "scripts"
 
 sys.path.insert(0, str(_SEARCH_SCRIPTS_DIR))
 sys.path.insert(0, str(_RETRAIN_SCRIPTS_DIR))

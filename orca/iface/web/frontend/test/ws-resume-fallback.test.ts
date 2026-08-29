@@ -9,6 +9,7 @@ import { act, renderHook } from "@testing-library/react";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import { useWebSocket } from "@/hooks/use-websocket";
 import type { WebEvent } from "@/types/events";
+import { resetStore } from "./_helpers";
 
 interface FakeSocket {
   url: string;
@@ -56,32 +57,7 @@ function makeFakeSocket(): {
   };
 }
 
-function resetStore() {
-  useWorkflowStore.setState({
-    events: [],
-    nodes: {},
-    gate: null,
-    lastResolved: null,
-    workflowName: "",
-    status: "idle",
-    cost: 0,
-    workflowDef: null,
-    workflowStartedAt: null,
-    workflowElapsed: null,
-    reasoningTokens: 0,
-    lastSeqSeen: 0,
-    nodesIndex: {},
-    seenSeqs: new Set<number>(),
-    selectedNode: null,
-    selectedSession: null,
-    activeRunId: null,
-    loadStatus: "loaded",
-    loadError: null,
-    retryCount: 0,
-    historyLoadError: false,
-  });
-}
-
+// resetStore 收敛到 _helpers（计划步 0：7 处副本合一，防新增顶层字段漏同步）。
 describe("useWebSocket — D4 resume-fallback watchdog", () => {
   beforeEach(() => resetStore());
 
