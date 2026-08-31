@@ -31,7 +31,7 @@ MODE="${1:-gate}"
 cd "$ART" || { echo "FATAL: artifacts dir unreachable: $ART" >&2; exit 2; }
 
 python3 - "$ART" "$MODE" <<'PY'
-import hashlib, json, sys
+import hashlib, json, os, subprocess, sys, tempfile
 from pathlib import Path
 
 art = Path(sys.argv[1])
@@ -83,6 +83,7 @@ if mode != "--reuse-check":
     for section in ("train", "eval", "export"):
         if section not in c or not isinstance(c[section], dict):
             problems.append(f"contracts.json missing section '{section}'")
+    pattern = None
     if isinstance(c.get("train"), dict):
         for key in ("tier", "entry", "entry_sha256", "flags", "ckpt_output_rule",
                     "ckpt_per_epoch", "epoch_metric_extraction",
@@ -242,6 +243,62 @@ if mode != "--reuse-check":
                     problems.append(f"measured evidence not satisfied: {ev}")
             except Exception as exc:
                 problems.append(f"measured evidence unreadable: {ev}: {exc}")
+
+    # end-to-end epoch extraction: the pattern must parse the REAL 2-epoch
+    # quickrun log into exactly 2 epochs CONTIGUOUS FROM 1. The syntax /
+    # named-group / boundary checks above cannot see a 0-based epoch base - a
+    # pattern that matches "epoch 0, 1, ..." passes them but breaks every
+    # downstream consumer (metric_curve extract in the baseline finalizer,
+    # stop_at_epoch in the probe) only AFTER the full training has already
+    # run. Deterministic re-run here, never the analyst's own claim.
+    if pattern is not None:
+        qr_path = art / "contract_work" / "train_quickrun.json"
+        try:
+            qr = json.loads(qr_path.read_text(encoding="utf-8"))
+            qr_log = qr.get("train_log") if isinstance(qr, dict) else None
+        except Exception as exc:
+            problems.append(f"train_quickrun evidence unreadable for the "
+                            f"epoch-extraction check: {exc}")
+            qr_log = None
+        if not isinstance(qr_log, str) or not qr_log:
+            problems.append("contract_work/train_quickrun.json must record "
+                            "'train_log' (absolute path to the captured "
+                            "2-epoch quickrun stdout) - the gate re-runs "
+                            "metric_curve extract on it")
+        else:
+            mc = art / "scripts" / "metric_curve.py"
+            if not mc.is_file():
+                problems.append("scripts/metric_curve.py missing - the gate "
+                                "cannot verify epoch extraction end-to-end")
+            else:
+                log = Path(qr_log) if os.path.isabs(qr_log) else art / qr_log
+                fd, tmp_out = tempfile.mkstemp(
+                    prefix=".extract_check_", suffix=".jsonl",
+                    dir=str(art / "contract_work"))
+                os.close(fd)
+                try:
+                    try:
+                        proc = subprocess.run(
+                            [sys.executable, str(mc), "extract",
+                             "--log", str(log), "--pattern", pattern,
+                             "--out", tmp_out, "--expected-epochs", "2"],
+                            capture_output=True, text=True, timeout=30)
+                    except subprocess.TimeoutExpired:
+                        problems.append(
+                            "train.epoch_metric_extraction.pattern end-to-end "
+                            "extraction timed out on the quickrun log")
+                    else:
+                        if proc.returncode != 0:
+                            problems.append(
+                                "train.epoch_metric_extraction.pattern failed "
+                                "end-to-end extraction on the quickrun log "
+                                "(2 epochs, contiguous from 1): "
+                                f"{(proc.stderr or proc.stdout).strip()}")
+                finally:
+                    try:
+                        os.unlink(tmp_out)
+                    except OSError:
+                        pass
 
     # template token contract (downstream renders via render_run.sh --set ...;
     # tokens are <<k>>, never {{k}} — agent.md prompts are Jinja2-rendered).

@@ -1491,6 +1491,8 @@ def _contracts_workspace(tmp_path: Path, *, probe_body: str | None = None,
     art = tmp_path / "art"
     (art / "templates").mkdir(parents=True)
     (art / "contract_work").mkdir(parents=True)
+    (art / "scripts").mkdir(parents=True)
+    shutil.copy(_SCRIPTS / "metric_curve.py", art / "scripts" / "metric_curve.py")
 
     for name in ("train.py", "eval.py", "exporter.py"):
         (art / name).write_text("# entry\n", encoding="utf-8")
@@ -1556,8 +1558,13 @@ def _contracts_workspace(tmp_path: Path, *, probe_body: str | None = None,
         '"<<python>>" exporter.py --out <<out>> --seed <<seed>>\n', encoding="utf-8")
 
     cw = art / "contract_work"
+    (cw / "quickrun_train.log").write_text(
+        "epoch 1 metric=0.9\nepoch 2 metric=0.8\n", encoding="utf-8")
     (cw / "train_quickrun.json").write_text(
-        json.dumps({"status": "runs_minimal_budget"}), encoding="utf-8")
+        json.dumps({"status": "runs_minimal_budget",
+                    "train_log": str(cw / "quickrun_train.log"),
+                    "epoch_metric_extraction_check": "pass"}),
+        encoding="utf-8")
     (cw / "eval_dual_ckpt.json").write_text(
         json.dumps({"metric_seed0": 0.1, "metric_seed1": 0.6, "moved": True,
                     "ckpt_container": "bare"}), encoding="utf-8")
@@ -1594,6 +1601,20 @@ def test_check_contracts_gate_rejects_retired_quickrun_status(tmp_path: Path):
     proc = _run_contracts_gate(art)
     assert proc.returncode == 1
     assert "train_quickrun.json" in proc.stderr
+
+
+def test_check_contracts_gate_rejects_zero_based_epoch_sequence(tmp_path: Path):
+    """A pattern that matches the quickrun log but extracts 0-based epochs
+    (0, 1, ...) passes every syntax/boundary check yet breaks every
+    downstream consumer (metric_curve extract, stop_at_epoch) only after the
+    full baseline has already run - the gate must re-run the extraction on
+    the REAL quickrun log and fail here, at the contract stage."""
+    art = _contracts_workspace(tmp_path)
+    (art / "contract_work" / "quickrun_train.log").write_text(
+        "epoch 0 metric=0.9\nepoch 1 metric=0.8\n", encoding="utf-8")
+    proc = _run_contracts_gate(art)
+    assert proc.returncode == 1
+    assert "contiguous from 1" in proc.stderr
 
 
 def test_check_contracts_gate_enforces_token_budget_consistency(tmp_path: Path):

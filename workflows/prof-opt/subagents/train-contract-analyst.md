@@ -35,13 +35,28 @@ The caller will provide:
    - A: epochs/out-dir/seed already parameterized.
    - B: write `adapted/train_proxy_entry.py` with ONLY plumbing changes;
      if the original log omits the epoch number, add the epoch number to the
-     existing metric line here.
+     existing metric line here; if the original epoch numbering is 0-based
+     (epoch 0, 1, ...), emit `epoch + 1` on the metric line - the curve
+     contract is contiguous from 1 (verified in step 3 / by the gate).
    - C: declare non-viable in the proposal.
 3. Write `contract_work/train_quickrun.json` by running the rendered train
    template at `epochs=2`, `out_dir=contract_work/quickrun_train/`,
-   `seed=<seed>`. The evidence must include `status`, `epoch_lines_matched`,
-   `ckpt_files`, `early_stopping_check`, `out_dir_effective`, and
-   `ckpt_output_example`.
+   `seed=<seed>`, with stdout captured to
+   `contract_work/quickrun_train.log`. The evidence must include `status`,
+   `epoch_lines_matched`, `ckpt_files`, `early_stopping_check`,
+   `out_dir_effective`, `ckpt_output_example`, and `train_log` (absolute
+   path to the captured log). THEN verify the pattern end-to-end on that
+   real log - the gate re-runs this exact command, so run it yourself first:
+   `"$ORCA_ARTIFACTS_DIR/scripts/metric_curve.py" extract
+   --log contract_work/quickrun_train.log --pattern "<pattern>"
+   --expected-epochs 2` must exit 0 and parse exactly 2 epochs contiguous
+   from 1; record `epoch_metric_extraction_check: "pass"` in the evidence.
+   A 0-based sequence (0, 1) fails with "not contiguous from 1": fix the
+   adapted entry to print `epoch + 1` (or anchor the pattern on an existing
+   1-based epoch line) and re-run the quickrun before writing the proposal.
+   If tier A has a 0-based log and no 1-based epoch line to anchor, write a
+   logging-only adapted entry (record tier B); if no adaptation is possible
+   at all, declare tier C with the reason.
 4. Write `templates/run_full_finetune.template.sh` and byte-identical
    `templates/run_probe_finetune.template.sh` with tokens
    `<<python>> <<epochs>> <<out_dir>> <<seed>>` and optional `<<vid>>`.
