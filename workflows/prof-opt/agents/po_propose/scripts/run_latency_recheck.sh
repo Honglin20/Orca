@@ -31,6 +31,22 @@
 # verdict file — the per-round jsonl is an append-only audit stream and is
 # NOT re-derived by reconciliation (nothing downstream consumes it).
 #
+# Repair ledger (v6 §5.2): every latency_fail measurement appends one attempt
+# to variants/<vid>/repair_trace.json ({"vid", "repair_count", "attempts":
+# [{round, measured_makespan_cycles, target_cycles, gap_cycles, reason}]};
+# repair_count = len(attempts)). The attempt is recorded BEFORE the verdict
+# write and is NEVER value-deduplicated: the recheck's replay idempotency key
+# is verdict.json presence, so reaching the measurement step means a fresh
+# repair pass — including one whose makespan repeats the previous value (a
+# no-op repair must still consume budget, or the repair loop is unbounded).
+# The narrow crash window between record and verdict write can only
+# double-record a replayed measurement (budget consumed one notch early —
+# fail-safe); an attempt is never lost (an under-count would disable the
+# budget entirely). A vid whose repair_count is already >= 5 is TERMINAL —
+# measuring it again means the caller tried a 6th repair, which fails LOUD
+# here (rc 2, §14): the script, not the node prompt, is the repair-budget
+# backstop.
+#
 # Idempotent: a variant with an existing verdict.json is skipped (verdict.json
 # presence IS the skip key — the node deletes a rejected variant's verdict.json
 # before sending it back for repair and a fresh recheck).
@@ -141,6 +157,57 @@ print(json.dumps(layers))
 PYEOF
 }
 
+repair_guard() { # repair_guard <vid> — rc 2 when the 5-repair budget is spent (v6 §5.2/§14)
+  "$PY" - "$ART" "$1" <<'PYEOF'
+import json, sys
+from pathlib import Path
+trace = Path(sys.argv[1]) / "variants" / sys.argv[2] / "repair_trace.json"
+if not trace.is_file():
+    raise SystemExit(0)   # never failed a measurement yet: nothing to guard
+try:
+    doc = json.loads(trace.read_text(encoding="utf-8"))
+except json.JSONDecodeError as exc:
+    print(f"FATAL: {sys.argv[2]} repair_trace.json unparseable: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+count = doc.get("repair_count")
+if isinstance(count, int) and count >= 5:
+    print(f"FATAL: {sys.argv[2]} repair budget exhausted (repair_count={count} >= 5, "
+          "v6 section 5.2) — a latency_fail variant is terminal; do not delete its "
+          "verdict and re-repair", file=sys.stderr)
+    raise SystemExit(2)
+PYEOF
+}
+
+record_repair_attempt() { # record_repair_attempt <vid> <verdict-json> — one failed measurement
+  "$PY" - "$ART" "$1" "$2" <<'PYEOF'
+import json, os, sys
+from pathlib import Path
+art, vid = Path(sys.argv[1]), sys.argv[2]
+v = json.loads(sys.argv[3])
+trace = art / "variants" / vid / "repair_trace.json"
+doc = {"vid": vid, "repair_count": 0, "attempts": []}
+if trace.is_file():
+    try:
+        doc = json.loads(trace.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        print(f"FATAL: {vid} repair_trace.json unparseable: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+attempt = {"round": v["round"],
+           "measured_makespan_cycles": v["makespan_cycles"],
+           "target_cycles": v["target_cycles"],
+           "gap_cycles": v["makespan_cycles"] - v["target_cycles"],
+           "reason": "makespan > target_cycles (unified v6 gate)"}
+attempts = doc.setdefault("attempts", [])
+attempts.append(attempt)   # never value-deduplicated: see header comment
+doc["vid"] = vid
+doc["repair_count"] = len(attempts)
+tmp = trace.with_suffix(trace.suffix + f".tmp.{os.getpid()}")
+tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+               encoding="utf-8")
+os.replace(tmp, trace)
+PYEOF
+}
+
 write_verdict() { # write_verdict <vid> <verdict-json> — verdict.json + jsonl + history row
   local vid="$1" payload="$2"
   printf '%s\n' "$payload" > "$ART/variants/$vid/verdict.json"
@@ -167,6 +234,7 @@ for vdir in "$ART"/variants/*/; do
     echo "skip $vid: verdict already on disk" >&2
     continue
   fi
+  repair_guard "$vid"   # rc 2 (set -e aborts) when a 6th repair is attempted
   decl="$vdir/declaration.json"
   [ -f "$decl" ] || { echo "FATAL: $vid has DONE but no declaration.json" >&2; exit 2; }
 
@@ -292,8 +360,14 @@ print(json.dumps({"vid": vid, "round": rnd, "structural_check": "pass",
                   "predicted_delta_cycles": pred, "outcome": outcome}))
 PYEOF
 )"
-  write_verdict "$vid" "$verdict"
   outcome="$("$PY" -c 'import json,sys; print(json.loads(sys.argv[1])["outcome"])' "$verdict")"
+  if [ "$outcome" = "latency_fail" ]; then
+    # v6 §5.2 repair ledger — recorded BEFORE the verdict write (the verdict
+    # file is the replay skip key): an attempt is never lost, a crash-replay
+    # may double-record (fail-safe, consumes budget early)
+    record_repair_attempt "$vid" "$verdict"
+  fi
+  write_verdict "$vid" "$verdict"
   NEW_COUNT=$((NEW_COUNT + 1)); record_outcome_count "$outcome"
   if [ "$outcome" = "latency_pass" ]; then PASS_COUNT=$((PASS_COUNT + 1)); fi
   echo "verdict $vid: $outcome (makespan $var_ms vs target $TARGET_CYCLES)" >&2

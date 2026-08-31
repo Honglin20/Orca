@@ -85,11 +85,10 @@ The caller will provide:
    ```bash
    python3 "$ORCA_ARTIFACTS_DIR/scripts/write_done_marker.py" --vid "$VID"
    ```
-8. **Repair trace**: append one record per attempt (first pass included)
-   to `variants/<VID>/repair_trace.json` (create on first write):
-   `{"ts": "<ISO8601>", "kind": "<initial|structural|latency>", "note": "<one line>"}`
-   — the quota counters (structure repairs ≤ 2, latency repairs ≤ 2) are
-   judged from this file by the caller.
+
+**Never write `variants/<VID>/repair_trace.json`** — the latency recheck
+script owns that ledger (it records every measured failure mechanically).
+Your one-line attempt notes go in your RETURN VALUE, not in any file.
 
 ## Terminal-skip paths (no DONE)
 
@@ -107,7 +106,7 @@ your return value.
 
 ## Failure honesty
 
-- A repair pass that cannot fix the declared failure within the quota →
+- A repair pass that cannot fix the declared failure →
   report the terminal skip honestly with the remaining evidence; never
   declare DONE for an edit you could not verify.
 - Never weaken a declaration to match an accidental edit (edit the code to
@@ -122,5 +121,6 @@ The files on disk are the authoritative artifacts.
 - **Modification scope**: write only under `variants/<VID>/`. Never the
   base shadow, `contracts.json`, templates, `history.jsonl`, or anything
   under the user project.
-- One proposal per dispatch (the caller loops); the repair quotas are per
-  proposal.
+- One proposal per dispatch (the caller re-dispatches per repair pass);
+  the repair budgets are enforced by the CALLER's scripts — never try to
+  track or reset them yourself.

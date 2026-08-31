@@ -890,3 +890,350 @@ def test_deploy_covers_new_scripts_and_gate_node_roundtrip(tmp_path):
     payload = json.loads(gate.stdout)
     assert payload["decision"] == "loop" and payload["error"] == ""
     assert payload["target_cycles"] == 501 and payload["success_vids"] == []
+
+
+# ── P1: repair_trace budget boundary (4 admissible / 5 blocked / 6 rejected) ───
+
+def _seed_repair_trace(art: Path, vid: str, count: int) -> None:
+    """Hand-write a repair ledger as the recheck would have (failed
+    measurements with a distinct makespan so the fresh attempt appends)."""
+    trace = art / "variants" / vid / "repair_trace.json"
+    trace.parent.mkdir(parents=True, exist_ok=True)
+    trace.write_text(json.dumps({
+        "vid": vid, "repair_count": count,
+        "attempts": [{"round": 1, "measured_makespan_cycles": 900 + i,
+                      "target_cycles": 500, "gap_cycles": 400 + i,
+                      "reason": "makespan > target_cycles (unified v6 gate)"}
+                     for i in range(count)]}, ensure_ascii=False), encoding="utf-8")
+
+
+def test_repair_trace_four_attempts_still_admits_fifth_measurement(tmp_path):
+    art = _recheck_ws(tmp_path, target=500)
+    _recheck_variant(art, "r1-01", 600)          # above the line -> latency_fail
+    _seed_repair_trace(art, "r1-01", 4)
+    (art / "variants" / "r1-01" / "verdict.json").unlink(missing_ok=True)
+    proc = _run_recheck(art)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["latency_pass_count"] == 0
+    trace = json.loads((art / "variants" / "r1-01" / "repair_trace.json")
+                       .read_text(encoding="utf-8"))
+    assert trace["repair_count"] == 5 and len(trace["attempts"]) == 5
+    assert trace["attempts"][-1]["measured_makespan_cycles"] == 600
+    assert trace["attempts"][-1]["gap_cycles"] == 100
+    assert trace["attempts"][-1]["target_cycles"] == 500
+
+
+def test_repair_trace_fifth_failure_is_terminal_sixth_fails_loud(tmp_path):
+    art = _recheck_ws(tmp_path, target=500)
+    _recheck_variant(art, "r1-01", 600)
+    _seed_repair_trace(art, "r1-01", 5)          # the budget is already spent
+    proc = _run_recheck(art)
+    assert proc.returncode == 2                  # §5.2/§14: script backstop
+    assert "repair budget exhausted" in proc.stderr
+    # nothing was measured on the forbidden 6th attempt
+    assert not (art / "variants" / "r1-01" / "verdict.json").exists()
+    trace = json.loads((art / "variants" / "r1-01" / "repair_trace.json")
+                       .read_text(encoding="utf-8"))
+    assert trace["repair_count"] == 5            # ledger untouched by the guard
+
+    # a REPEATED measured value still consumes budget: reaching the
+    # measurement step means a fresh repair pass (the verdict file was
+    # deleted), so a no-op repair must never freeze the counter — an
+    # unbounded repair loop is exactly what the budget exists to stop
+    art2 = _recheck_ws(tmp_path / "b", target=500)
+    _recheck_variant(art2, "r1-01", 600)
+    first = _run_recheck(art2)
+    assert first.returncode == 0, first.stderr
+    trace_path = art2 / "variants" / "r1-01" / "repair_trace.json"
+    assert json.loads(trace_path.read_text(encoding="utf-8"))["repair_count"] == 1
+    (art2 / "variants" / "r1-01" / "verdict.json").unlink()
+    second = _run_recheck(art2)                  # same makespan, new pass
+    assert second.returncode == 0, second.stderr
+    replayed = json.loads(trace_path.read_text(encoding="utf-8"))
+    assert replayed["repair_count"] == 2         # no value-dedup: fail-safe
+
+
+def test_repair_trace_unparseable_and_nonlatency_failures_fail_loud(tmp_path):
+    # a hand-corrupted ledger is a hard error at BOTH the guard and the
+    # recorder — never a silently reset budget
+    art = _recheck_ws(tmp_path, target=500)
+    _recheck_variant(art, "r1-01", 600)
+    (art / "variants" / "r1-01" / "repair_trace.json").write_text(
+        "{torn", encoding="utf-8")
+    proc = _run_recheck(art)
+    assert proc.returncode == 2
+    assert "repair_trace.json unparseable" in proc.stderr
+
+    # structural failures are NOT latency repairs: no attempt is recorded
+    art2 = _recheck_ws(tmp_path / "b", target=500)
+    _recheck_variant(art2, "r1-01", 400)          # would pass the line...
+    decl = art2 / "variants" / "r1-01" / "declaration.json"
+    doc = json.loads(decl.read_text(encoding="utf-8"))
+    doc["edited_files"] = ["pkg/never_touched.py"]   # ...but the file layer
+    decl.write_text(json.dumps(doc), encoding="utf-8")  # disagrees
+    proc2 = _run_recheck(art2)
+    assert proc2.returncode == 0, proc2.stderr
+    verdict = json.loads((art2 / "variants" / "r1-01" / "verdict.json")
+                         .read_text(encoding="utf-8"))
+    assert verdict["outcome"] == "structural_mismatch"
+    assert not (art2 / "variants" / "r1-01" / "repair_trace.json").exists()
+
+
+# ── P1: check_propose_emit v6 — §5.3 gate over both ending paths ───────────────
+
+_CHECK_EMIT = _SCRIPTS / "check_propose_emit.py"
+_BL_SENTINEL = "[subagent:business-logic-analyst v1 BLA7K4]"
+_INFO_SENTINEL = "[subagent:information-analyst v1 IXA3N7]"
+_BL_SECTIONS = ("## 任务语义", "## 输入输出", "## 架构动机",
+                "## 逐模块职责与物理意义", "## 训练目标与指标方向", "## 与基线差异")
+_INFO_SECTIONS = ("## 信息核心", "## 近似与牺牲项", "## 被牺牲信息与预期精度代价")
+
+
+def _variant_doc(sentinel: str, sections: tuple[str, ...],
+                 drop: str = "", bare: bool = False) -> str:
+    lines = [sentinel]
+    for heading in sections:
+        if heading == drop:
+            continue
+        lines.append(heading)
+        if not bare:
+            lines.append(f"content for {heading}")
+    return "\n".join(lines) + "\n"
+
+
+def _emit_ws(tmp_path: Path, *, outcome: str = "latency_pass",
+             delta: int = -600) -> Path:
+    """A green single-variant round: one admitted proposal, both §4.1 analyst
+    documents + conformance, the history rows, and the round analysis."""
+    art = tmp_path / "ws"
+    (art / "scripts").mkdir(parents=True)
+    for src in ("history_lib.py", "round_state.py"):
+        shutil.copy(_SCRIPTS / src, art / "scripts" / src)
+    (art / "profile_mode.json").write_text(json.dumps(
+        {"mode": "mfu", "chip": "6613", "precision": "INT8", "core_num": 1}),
+        encoding="utf-8")
+    (art / "base" / "profile").mkdir(parents=True)
+    (art / "base" / "profile" / "profile_summary.json").write_text(json.dumps(
+        {"makespan_cycles": 1000, "op_count": 2}), encoding="utf-8")
+    _write_anchor(art, target=500)
+
+    rd = art / "rounds" / "001"
+    rd.mkdir(parents=True)
+    (rd / "proposals.json").write_text(json.dumps({
+        "round": 1, "exhausted": False, "filtered_count": 0,
+        "exhausted_rationale": [],
+        "proposals": [{"vid": "r1-01", "lever": "activation",
+                       "change_sig": "sig:r1-01", "target_modules": ["m"],
+                       "target_pattern_id": "low-mfu-matmul",
+                       "rationale": "why", "change_spec": "edit",
+                       "op_delta": {"Erf": -4, "Relu": 4},
+                       "predicted_delta_cycles": delta,
+                       "prediction_basis": "predictor",
+                       "edited_files": ["pkg/model.py"],
+                       "predicted_acc_impact": "low",
+                       "accuracy_evidence": "rule-0001",
+                       "sota_reference": "ref"}]}), encoding="utf-8")
+    (rd / "verdicts.jsonl").write_text(json.dumps(
+        {"vid": "r1-01", "round": 1, "outcome": outcome}) + "\n",
+        encoding="utf-8")
+    (rd / "analysis.md").write_text(
+        "## latency\nreached the line; calibration note; next direction\n",
+        encoding="utf-8")
+
+    vd = art / "variants" / "r1-01"
+    vd.mkdir(parents=True)
+    (vd / "business_logic.md").write_text(
+        _variant_doc(_BL_SENTINEL, _BL_SECTIONS), encoding="utf-8")
+    (vd / "information_analysis.md").write_text(
+        _variant_doc(_INFO_SENTINEL, _INFO_SECTIONS), encoding="utf-8")
+    (vd / "conformance.md").write_text(
+        f"# conformance — r1-01\n{_BL_SENTINEL} verified\n"
+        f"{_INFO_SENTINEL} verified\n## 对齐结论\naligned\n## 差异披露\nnone\n",
+        encoding="utf-8")
+
+    hist = art / "history.jsonl"
+    _impl(hist, "r1-01", "sig:r1-01")
+    if outcome == "latency_pass":
+        history_lib.append_latency(hist, "r1-01", structural_check="pass",
+                                   makespan_cycles=400, latency_gate="pass",
+                                   pred_actual_ratio=None,
+                                   outcome="latency_pass")
+    else:
+        history_lib.append_latency(hist, "r1-01", structural_check="pass",
+                                   makespan_cycles=800, latency_gate="fail",
+                                   pred_actual_ratio=None,
+                                   outcome="latency_fail")
+        (rd / "direction.json").write_text(json.dumps(
+            {"round": 1, "failed_sigs": ["sig:r1-01"]}), encoding="utf-8")
+    return art
+
+
+def _check_emit(art: Path) -> subprocess.CompletedProcess:
+    return _run_cli([sys.executable, str(_CHECK_EMIT),
+                     "--artifacts", str(art)])
+
+
+def test_emit_gate_green_on_both_ending_paths(tmp_path):
+    """The success path (latency_pass) and the honest elimination path
+    (latency_fail after repair exhaustion) both pass the §5.3 gate — and
+    neither needs the retired mode_state machinery (P0's dangling reference
+    is gone: no mode is read anywhere)."""
+    for outcome in ("latency_pass", "latency_fail"):
+        art = _emit_ws(tmp_path / outcome, outcome=outcome)
+        proc = _check_emit(art)
+        assert proc.returncode == 0, (outcome, proc.stderr)
+        assert json.loads(proc.stdout)["ok"] is True
+
+
+def test_emit_gate_rejects_multi_proposal_and_above_line_prediction(tmp_path):
+    art = _emit_ws(tmp_path / "many")
+    proposals_path = art / "rounds" / "001" / "proposals.json"
+    doc = json.loads(proposals_path.read_text(encoding="utf-8"))
+    doc["proposals"].append(dict(doc["proposals"][0], vid="r1-02",
+                                 change_sig="sig:r1-02"))
+    proposals_path.write_text(json.dumps(doc), encoding="utf-8")
+    proc = _check_emit(art)
+    assert proc.returncode == 1
+    assert "exactly ONE" in proc.stderr
+
+    # prediction above the frozen line never admits (900 > 500)
+    art2 = _emit_ws(tmp_path / "above", delta=-100)
+    proc2 = _check_emit(art2)
+    assert proc2.returncode == 1
+    assert "admission" in proc2.stderr
+
+    # exactly ON the line is admissible (inclusive boundary)
+    art3 = _emit_ws(tmp_path / "on-line", delta=-500)
+    assert _check_emit(art3).returncode == 0
+
+
+def test_emit_gate_conformance_matrix(tmp_path):
+    """§4.1 document gate: sentinel / non-empty body / conclusion section
+    missing -> intercepted; all present -> admitted."""
+    def break_doc(art: Path, name: str, content: str) -> None:
+        (art / "variants" / "r1-01" / name).write_text(content, encoding="utf-8")
+
+    # sentinel broken
+    art = _emit_ws(tmp_path / "s")
+    break_doc(art, "business_logic.md",
+              _variant_doc("wrong sentinel", _BL_SECTIONS))
+    proc = _check_emit(art)
+    assert proc.returncode == 1 and "sentinel" in proc.stderr
+
+    # body empty (sentinel only)
+    art = _emit_ws(tmp_path / "e")
+    break_doc(art, "information_analysis.md", _INFO_SENTINEL + "\n")
+    proc = _check_emit(art)
+    assert proc.returncode == 1 and "empty" in proc.stderr
+
+    # conclusion section missing (business: 与基线差异)
+    art = _emit_ws(tmp_path / "c1")
+    break_doc(art, "business_logic.md",
+              _variant_doc(_BL_SENTINEL, _BL_SECTIONS, drop="## 与基线差异"))
+    proc = _check_emit(art)
+    assert proc.returncode == 1 and "与基线差异" in proc.stderr
+
+    # conclusion section missing (information: 被牺牲信息与预期精度代价)
+    art = _emit_ws(tmp_path / "c2")
+    break_doc(art, "information_analysis.md",
+              _variant_doc(_INFO_SENTINEL, _INFO_SECTIONS,
+                           drop="## 被牺牲信息与预期精度代价"))
+    proc = _check_emit(art)
+    assert proc.returncode == 1 and "被牺牲信息与预期精度代价" in proc.stderr
+
+    # conformance.md empty / not recording both sentinels
+    art = _emit_ws(tmp_path / "cf1")
+    break_doc(art, "conformance.md", "")
+    proc = _check_emit(art)
+    assert proc.returncode == 1 and "conformance" in proc.stderr
+
+    art = _emit_ws(tmp_path / "cf2")
+    break_doc(art, "conformance.md",
+              f"# conformance\n{_BL_SENTINEL} verified\nno info record\n")
+    proc = _check_emit(art)
+    assert proc.returncode == 1 and _INFO_SENTINEL in proc.stderr
+
+
+def test_emit_gate_repair_trace_and_analysis_and_direction_rules(tmp_path):
+    # a hand-inflated 6th attempt is rejected at the gate even though the
+    # recheck guard was bypassed
+    art = _emit_ws(tmp_path / "r6", outcome="latency_fail")
+    _seed_repair_trace(art, "r1-01", 6)
+    proc = _check_emit(art)
+    assert proc.returncode == 1 and "repair budget" in proc.stderr
+
+    # count/attempts disagreement (hand edit) fails loud
+    art = _emit_ws(tmp_path / "rk", outcome="latency_fail")
+    _seed_repair_trace(art, "r1-01", 2)
+    trace_path = art / "variants" / "r1-01" / "repair_trace.json"
+    doc = json.loads(trace_path.read_text(encoding="utf-8"))
+    doc["repair_count"] = 3
+    trace_path.write_text(json.dumps(doc), encoding="utf-8")
+    proc = _check_emit(art)
+    assert proc.returncode == 1 and "len(attempts)" in proc.stderr
+
+    # the legal exhaustion (5 attempts) is admissible
+    art = _emit_ws(tmp_path / "r5", outcome="latency_fail")
+    _seed_repair_trace(art, "r1-01", 5)
+    assert _check_emit(art).returncode == 0
+
+    # analysis.md without the latency section is rejected on BOTH paths
+    for outcome in ("latency_pass", "latency_fail"):
+        art = _emit_ws(tmp_path / f"a-{outcome}", outcome=outcome)
+        (art / "rounds" / "001" / "analysis.md").write_text(
+            "## summary\nno latency section here\n", encoding="utf-8")
+        proc = _check_emit(art)
+        assert proc.returncode == 1 and "## latency" in proc.stderr
+
+    # the latency_fail path must land failed_sigs in direction.json
+    art = _emit_ws(tmp_path / "d", outcome="latency_fail")
+    (art / "rounds" / "001" / "direction.json").unlink()
+    proc = _check_emit(art)
+    assert proc.returncode == 1 and "direction.json" in proc.stderr
+
+
+def test_emit_gate_history_and_admission_input_failures(tmp_path):
+    # no history row for the round's vid -> intercepted
+    art = _emit_ws(tmp_path / "nohist")
+    (art / "history.jsonl").unlink()
+    proc = _check_emit(art)
+    assert proc.returncode == 1 and "no history row" in proc.stderr
+
+    # an impl row without a latency-stage outcome is not a legal ending
+    art2 = _emit_ws(tmp_path / "nooutcome")
+    hist = art2 / "history.jsonl"
+    hist.unlink()
+    history_lib.append_implemented(
+        hist, "r1-01", round=1, seq=1, parent_vid=None,
+        change_sig="sig:r1-01", probe_epochs=1, probe_max_steps=None,
+        probe_data_value=None, target_modules=["m"],
+        predicted_delta_cycles=-600,
+        base_at_proposal={"vid": None, "makespan_cycles": 1000})
+    proc2 = _check_emit(art2)
+    assert proc2.returncode == 1 and "legal round ending" in proc2.stderr
+
+    # the admission line needs both single sources (base summary + anchor)
+    art3 = _emit_ws(tmp_path / "noanchor")
+    (art3 / "base" / "origin_anchor.json").unlink()
+    proc3 = _check_emit(art3)
+    assert proc3.returncode == 1 and "target_cycles unavailable" in proc3.stderr
+
+
+def test_emit_gate_zero_proposal_round_is_legal(tmp_path):
+    art = _emit_ws(tmp_path / "z")
+    rd = art / "rounds" / "001"
+    shutil.rmtree(art / "variants")
+    (rd / "verdicts.jsonl").unlink()
+    (rd / "proposals.json").write_text(json.dumps({
+        "round": 1, "exhausted": False, "filtered_count": 1,
+        "exhausted_rationale": [{"lever": "activation", "direction": "x",
+                                 "why_not": "prediction above the target line"}],
+        "proposals": []}), encoding="utf-8")
+    proc = _check_emit(art)
+    assert proc.returncode == 0, proc.stderr
+
+    # but a bare zero-proposal round without rationale is rejected
+    doc = json.loads((rd / "proposals.json").read_text(encoding="utf-8"))
+    doc["exhausted_rationale"] = []
+    (rd / "proposals.json").write_text(json.dumps(doc), encoding="utf-8")
+    assert _check_emit(art).returncode == 1

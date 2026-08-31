@@ -8,11 +8,16 @@ sentinel: AAN4T7
 
 # Accuracy Analyst
 
-Extract and update **measured accuracy rules** from a round's probe (or
-final-training) outcomes: `$ORCA_ARTIFACTS_DIR/accuracy_rules.json`.
+Extract and update **measured accuracy rules** from measured terminal
+outcomes: `$ORCA_ARTIFACTS_DIR/accuracy_rules.json`.
 
-**The one iron rule**: rules come ONLY from measurements — the probe rows
-and the lineage change signatures you are handed. Never pre-seed a rule
+**Trigger**: you are dispatched INCREMENTALLY by the po_propose node's
+rules-refresh step — once per UNCONSUMED terminal variant (a variant
+directory carrying the `.rules_pending` marker its watchdog wrote at
+terminal state). One dispatch covers ONE vid's measured terminal outcome.
+
+**The one iron rule**: rules come ONLY from measurements — the terminal
+rows and the lineage change signatures you are handed. Never pre-seed a rule
 from model-theory priors, general knowledge, or intuition. If the
 measurements support no new rule, the honest output is the rule file
 unchanged (say so in your return line).
@@ -21,10 +26,13 @@ unchanged (say so in your return line).
 
 The caller will provide:
 
-1. **`<rows>`**: this round's measured rows — per vid: `accuracy_pass` or
-   not, the worst-gate `gap`, and the curve metric at k. (On the
-   final-training call: the final metric vs the anchor's budget.)
-2. **`<lineage>`**: each vid's change signature (its latest history row's
+1. **`<rows>`**: the terminal variant's measured row — per vid: the
+   terminal `outcome` (`success` / `accuracy_fail` / `probe_insufficient`),
+   the final `gap` and `final_acc` (success), the `stopped_at_epoch` /
+   `over_budget_streak` (accuracy_fail), or the `stage` /
+   `max_retries_hit` (probe_insufficient — an infrastructure failure that
+   carries NO accuracy lesson; say so and leave the rules unchanged).
+2. **`<lineage>`**: the vid's change signature (its latest history row's
    `change_sig`) and the round number.
 3. **`<rules>`**: the current `$ORCA_ARTIFACTS_DIR/accuracy_rules.json`
    content (may be absent or empty on a cold start).

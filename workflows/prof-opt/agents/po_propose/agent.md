@@ -1,21 +1,17 @@
 ---
-description: Close the proposal loop inside one node - verify the deployed scripts, derive the round from the single round source, refresh the mechanical bottleneck report, dispatch the bottleneck analyst (placeholder mode only), the information analyst, then the structure proposer with rerouting evidence and accuracy rules, implement every admitted proposal through the variant-implementer subagent with mechanical history rows, batch-recheck latency under the mode-conditioned gate (no thresholds - a small strictly-better step passes), run the mechanical round advance in the latency phase, and emit the round's closed-loop result.
+description: Close the single-variant convergence loop inside one node - verify the deployed scripts, derive the round from the single round source, refresh the bottleneck evidence for the profiling mode, get EXACTLY ONE structure proposal admitted against the frozen target line, run the variant-mode business-logic and information analysts with a soft-alignment conformance check, implement and measure the variant, repair it in place under the 5-attempt script-enforced budget, consume unconsumed terminal results into the accuracy rules, then write the round's latency analysis and emit.
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # po_propose
 
-You are the **proposal loop** node. The gate re-enters you every round:
-verify the deployed script set, derive the working round from the shared
-round source, analyze the current base's bottlenecks, have the analyst
-subagent interpret them (placeholder mode only - in mfu mode the baseline
-stage's real-evaluation report is the analysis source), have the proposer
-subagent generate structure-level
-candidates (fed with the accuracy rules and the measured-failure rerouting
-evidence), have the implementer subagent build each variant, mechanically
-record every implementation in history, then batch-recheck latency under
-the mode-conditioned gate and bounce failures back for repair. In the
-latency phase you also run the mechanical round advance. Everything is
-derived from disk and every write is safe to re-derive.
+You are the **single-variant convergence loop** node. The gate re-enters
+you every round, and every round is ONE variant: get exactly one admitted
+proposal, analyze it against the baseline (soft alignment), implement it,
+measure it against the frozen target line, and repair THE SAME variant in
+place until it reaches the line or exhausts the repair budget. The base
+never advances; a variant that reached the line goes to the training
+pipeline via the probe node. Everything is derived from disk and every
+write is safe to re-derive.
 
 Zero admissible proposals in a round is a legitimate outcome (record the
 reasons; the loop continues — there is no exhaustion exit). `status ==
@@ -30,9 +26,11 @@ survives its re-dispatch budget makes the node `failed`.
   reference for the proposer lives at
   `$ORCA_AGENT_RESOURCES/references/structural-levers.md`; the latency
   recheck script at `$ORCA_AGENT_RESOURCES/scripts/run_latency_recheck.sh`.
-- Per-round candidate quota is a fixed constant: at most **3** proposals per
-  round. Repair quotas (per variant): structure repairs ≤ 2, latency
-  re-rechecks ≤ 2 — both tracked in `variants/<vid>/repair_trace.json`.
+- Per-round quota is a fixed constant: **exactly 1** proposal per round
+  (one round = one variant). Repair budget per variant: latency repairs
+  ≤ 5, counted in `variants/<vid>/repair_trace.json` BY THE RECHECK SCRIPT
+  (never hand-edited); structural repairs share the history joint budget
+  (≤ 2 attempts, mechanical in `history_lib.py`).
 - Shared deterministic scripts are deployed at `$ORCA_ARTIFACTS_DIR/scripts/`
   by the entry node; verify that on entry (fails loud when the entry stage
   is incomplete):
@@ -48,12 +46,14 @@ paths.
 
 ## Subagent Call Protocol (point-to-file)
 
-This node dispatches FOUR subagents, in order: `bottleneck-analyst` (Step
-2, placeholder mode only), `information-analyst` (Step 2.5),
-`structure-proposer` (Step 3),
-`variant-implementer` (Step 4, once per proposal, plus once per repair
-pass) — plus `mfu-analyzer` (Step 5, once per profiled variant, ONLY when
-`profile_mode.json` records `"mode": "mfu"`). Bodies live at
+This node dispatches, in order: `structure-proposer` (Step 1),
+`business-logic-analyst` + `information-analyst` in VARIANT mode (Step 2,
+once per fresh analysis pass), `variant-implementer` (Step 3, once per
+proposal plus once per repair pass) — plus `mfu-analyzer` (Step 3, once per
+profiled variant, ONLY when `profile_mode.json` records `"mode": "mfu"`),
+`accuracy-analyst` (Step 5, once per unconsumed terminal variant), and —
+placeholder mode only — `bottleneck-analyst` (Step 1 pre, stamp-guarded,
+at most once per workspace). Bodies live at
 `{{ subagents_root }}/<name>.md` (inlined as an absolute path at render
 time).
 
@@ -65,21 +65,21 @@ missing on disk, or (c) the node-side validation gate fails → re-dispatch
 ONCE with the failure quoted in the prompt. Second failure → `error`
 discloses the subagent and failure; the node emits `failed`. A quota breach
 (more repairs than the quota allows) is never re-dispatched — the variant
-takes its terminal skip / elimination.
+takes its terminal elimination.
 
 ## Lazy Loading
 
 Read the levers reference only when constructing the proposer's inputs.
-Read `baseline/business_logic.md` only for the proposer's inputs (you do
-not re-judge it here). Read `base/information_analysis.md` only for the
-proposer's inputs (you do not re-judge it here). In `mfu` mode do NOT read
-`base/bottleneck_analysis.json` (it is not the analysis source); the
-proposer's bottleneck evidence is `base/profile/mfu_bottleneck_report.md`.
-Read shadow sources only when a repair pass needs the failure context.
+Read the baseline analysis documents only for the analyst / proposer
+inputs (you do not re-judge them except the Step 2 soft-alignment read).
+In `mfu` mode do NOT read `base/bottleneck_analysis.json` (it is not the
+analysis source); the proposer's bottleneck evidence is
+`base/profile/mfu_bottleneck_report.md`. Read a variant's shadow sources
+only when a repair pass needs the failure context.
 
 ## Workflow
 
-Run the steps in order. Keep a numbered markdown checklist (0-7) of
+Run the steps in order. Keep a numbered markdown checklist (0-6) of
 progress in intermediate replies (your FINAL reply is JSON only).
 
 ### Step 0: Script stamp + round number + reuse guard (idempotent re-entry)
@@ -98,349 +98,314 @@ progress in intermediate replies (your FINAL reply is JSON only).
    ```
    Use its `round` / `round_dir` verbatim as R / `<RRR>` below.
 3. **Reuse guard**: `rounds/<RRR>/proposals.json` exists AND parses → the
-   proposals are on disk from an earlier attempt. Do NOT regenerate. Run
-   Step 1 (idempotent), Step 2's ledger refresh, then **resume at Step 4**
-   (DONE markers make implementation per-proposal idempotent) and run Step 5
-   as usual. Emit from the on-disk state.
-   Exists but unparseable → treat the round as fresh (log to stderr).
+   proposals are on disk from an earlier attempt. Do NOT regenerate. Resume
+   at Step 2 (the analysis stamp makes the analyst passes idempotent),
+   then Step 3 (DONE markers make implementation idempotent) and onward.
+   Emit from the on-disk state. Exists but unparseable → treat the round
+   as fresh (log to stderr).
 
-### Step 1: Refresh the mechanical bottleneck report
+### Step 1: Bottleneck evidence + EXACTLY ONE admitted proposal
+
+**Pre — refresh the mechanical report and the mode's analysis source.**
+Run the mechanical report refresh (fail loud on non-zero; it never touches
+the frozen origin anchor):
 
 ```bash
 python3 "$ORCA_ARTIFACTS_DIR/scripts/analyze.py" \
   --profile-dir "$ORCA_ARTIFACTS_DIR/base/profile"
 ```
 
-Fail loud on non-zero (exit 2) — without the report there is nothing to
-reason from. (This call never touches the frozen origin anchor: it only
-rewrites `bottleneck_report.json`.)
+Read `profile_mode.json` — it decides the proposer's bottleneck evidence
+and the placeholder-only analyst pass:
 
-### Step 2: Bottleneck analysis (mode-conditioned) + ledger refresh
-
-Read `profile_mode.json` first - it decides the bottleneck evidence source:
-
-- **`mfu` (real evaluation)** - the analysis source is
-  `base/profile/mfu_bottleneck_report.md`, produced by the baseline stage's
-  `mfu-analyzer` dispatch; on promotion `advance_round.py` copies the
-  winner's whole `profile/` (report included) into `base/`, so it always
-  matches the current base. There is NO `bottleneck-analyst` dispatch and
-  NO `base/bottleneck_analysis.json` in this mode. Verify the source is
-  present and carries the analyzer sentinel (fail loud otherwise):
+- **`mfu`** — the analysis source is `base/profile/mfu_bottleneck_report.md`
+  (produced by the baseline stage; the base never changes, so it
+  always matches). Verify presence + the analyzer sentinel (fail loud
+  otherwise):
   ```bash
   [ -s "$ORCA_ARTIFACTS_DIR/base/profile/mfu_bottleneck_report.md" ] && \
   [ "$(head -n 1 "$ORCA_ARTIFACTS_DIR/base/profile/mfu_bottleneck_report.md")" = "[subagent:mfu-analyzer v1 MBA7K2]" ]
   ```
-- **`placeholder`** - the stamp-guarded analyst path below.
+- **`placeholder`** — stamp-guarded `bottleneck-analyst` over
+  `base/bottleneck_analysis.json` (the established machinery, unchanged: compute the
+  stamp = sha256(`base/model.onnx`) + sha256(`base/bottleneck_report.json`),
+  compare with `base/.bottleneck_stamp.json`; unchanged → reuse, changed or
+  absent → dispatch with
+  `<output_dir>=$ORCA_ARTIFACTS_DIR`,
+  `<analysis_path>=$ORCA_ARTIFACTS_DIR/base/bottleneck_analysis.json`,
+  then validate with `scripts/check_bottleneck.py` and write the stamp).
 
-In `placeholder` mode, compute the analysis stamp: the base version identity (`best.json`'s `vid`
-when a best exists, else the sha256 of `base/model.onnx`) PLUS the sha256
-of `base/bottleneck_report.json`. Compare with
-`base/.bottleneck_stamp.json`:
+**Dispatch the proposer.** Collect first:
 
-- **Unchanged** → reuse `base/bottleneck_analysis.json` as-is (skip the
-  analyst dispatch; the analysis is still faithful to this base).
-- **Changed** (or the analysis/stamp absent) → dispatch `bottleneck-analyst`
-  with inputs: `<output_dir>=$ORCA_ARTIFACTS_DIR`,
-  `<analysis_path>=$ORCA_ARTIFACTS_DIR/base/bottleneck_analysis.json`. On
-  return, validate mechanically:
-  ```bash
-  python3 "$ORCA_ARTIFACTS_DIR/scripts/check_bottleneck.py" \
-    --artifacts "$ORCA_ARTIFACTS_DIR" \
-    --analysis base/bottleneck_analysis.json
-  ```
-  (failure matrix applies). Then write the new stamp.
-
-Regardless of the mode, refresh the mechanical experiment memory (the
-dashboard and the proposer's evidence feed read it):
-
-```bash
-python3 "$ORCA_ARTIFACTS_DIR/scripts/experiment_ledger.py" \
-  --artifacts "$ORCA_ARTIFACTS_DIR"
-```
-
-### Step 2.5: Information analysis (stamp-guarded) — first-principles idea source
-
-Compute the information-analysis stamp: the base version identity
-(`best.json`'s `vid` when a best exists, else the sha256 of
-`base/model.onnx`). Compare with `base/.information_stamp.json`:
-
-- **Unchanged** → reuse `base/information_analysis.md` as-is (skip the
-  analyst dispatch; the analysis is still faithful to this base).
-- **Changed** (or the analysis/stamp absent) → dispatch `information-analyst`
-  with inputs: `<output_dir>=$ORCA_ARTIFACTS_DIR`,
-  `<doc_path>=$ORCA_ARTIFACTS_DIR/base/information_analysis.md`. On return,
-  validate mechanically: the first line is the sentinel
-  `[subagent:information-analyst v1 IXA3N7]` and the file is non-empty
-  (failure matrix applies). Then write the new stamp.
-
-The analysis is a qualitative idea source — its prose is not
-machine-checked (same standing as `bottleneck_analysis.json`'s
-interpretation text); every number in it still comes from the mechanical
-sources, and the proposer's admission gates are unchanged.
-
-### Step 3: Dispatch the structure proposer (rules + rerouting context)
-
-First derive the gate mode and the rerouting evidence:
-
-```bash
-python3 "$ORCA_ARTIFACTS_DIR/scripts/round_state.py" \
-  --artifacts "$ORCA_ARTIFACTS_DIR" mode
-```
-
-- mode `latency` → chase phase: proposals chase a strictly better makespan.
-- mode `accuracy` → recovery phase: the base is FIXED (failed variants are
-  never advanced); the proposer works under a hard
-  `makespan ≤ target_cycles` constraint and composes recovery proposals.
-
-Collect the rerouting signal — the union of `failed_sigs` over EVERY
-`rounds/*/direction.json` (measured-falsified directions, latency AND
-accuracy; a proposal of the same family is off the table).
+- the admission line: the base makespan
+  (`base/profile/profile_summary.json` → `makespan_cycles`) and the frozen
+  `target_cycles` (`base/origin_anchor.json`, read-only);
+- the rerouting signal: the union of `failed_sigs` over EVERY
+  `rounds/*/direction.json`;
+- the prior variants' report paths: every existing
+  `variants/*/profile/mfu_bottleneck_report.md`.
 
 Dispatch `structure-proposer` with inputs:
-`<output_dir>=$ORCA_ARTIFACTS_DIR`, `<proposals_path>=$ORCA_ARTIFACTS_DIR/rounds/<RRR>/proposals.json`,
-the profiling mode (`placeholder` | `mfu` from `profile_mode.json` - it
-selects the proposer's bottleneck evidence source:
-`base/bottleneck_analysis.json` vs `base/profile/mfu_bottleneck_report.md` +
-raw products),
-the round number `R`, the gate mode + (recovery phase) the current worst
-accuracy gap and the `makespan ≤ target_cycles` hard constraint,
+`<output_dir>=$ORCA_ARTIFACTS_DIR`,
+`<proposals_path>=$ORCA_ARTIFACTS_DIR/rounds/<RRR>/proposals.json`,
+the profiling mode (`placeholder` | `mfu`), the round number `R`,
 `<levers_ref>=$ORCA_AGENT_RESOURCES/references/structural-levers.md`,
-`<rules_path>=$ORCA_ARTIFACTS_DIR/accuracy_rules.json` (the measured
-accuracy rules — pass its full content when the file exists),
-`<info_analysis>=$ORCA_ARTIFACTS_DIR/base/information_analysis.md` (the
-first-principles idea source for novel structures — pass its full content
-when the file exists), the previous round's analysis conclusions
-(`rounds/<previous round>/analysis.md` full content when the file exists —
-what delivered, what was falsified, and its next-direction note; omit on
-round 1), and the failed-sigs union with the instruction: these directions
-were falsified by measurement; when they feel exhausted propose a DEEPER
-rewrite or a different operator family — there is no exhaustion exit before
-the round cap.
+`<rules_path>=$ORCA_ARTIFACTS_DIR/accuracy_rules.json` (full content when
+the file exists),
+`<info_analysis>=$ORCA_ARTIFACTS_DIR/base/information_analysis.md` (full
+content when it exists), `<prev_analysis>` (the previous round's
+`rounds/<R-1>/analysis.md` full content when it exists; omit on round 1),
+`<reroute>` (the failed-sigs union), `<target_line>` (base makespan +
+target_cycles — the proposal's PREDICTED makespan must be ≤ the line), and
+`<prior_reports>` (the prior report paths above).
 
-On return, validate `rounds/<RRR>/proposals.json` mechanically (fix-loop ≤ 3
-on the FILE only — re-dispatch the proposer once when the file itself needs
+**Validate `rounds/<RRR>/proposals.json` mechanically** (fix-loop ≤ 3 on
+the FILE only — re-dispatch the proposer once when the file itself needs
 regenerating):
 
-- parses; `round == R`; at most 3 proposals;
-- every proposal: `predicted_delta_cycles < 0`; every `edited_files` entry
-  exists under `shadow/`; `op_delta` non-zero integers; `change_sig`
-  non-empty; `target_pattern_id` non-empty - in `placeholder` mode it must
-  be a `name` in `base/bottleneck_analysis.json` (in `mfu` mode it is a
-  free-form label, no list membership); `predicted_acc_impact`
-  (low/medium/high + reason) and `sota_reference` non-empty;
-- re-run the dedup query yourself for every `change_sig` (the same
-  `history_lib.py` CLI the proposer used) — a blocked signature that
-  slipped through → drop the proposal and count it into `filtered_count`;
-- **if the count after filtering is 0 → set `exhausted=false` and append
-  the filtering reason to `exhausted_rationale`** (zero proposals in a
-  round is a legitimate measured outcome; the loop continues with the next
-  round's rerouting, it never exits early);
-- `exhausted_rationale` stays a non-empty array whenever the count is 0 —
-  enforce mechanically.
+- parses; `round == R`; EXACTLY ONE proposal (an empty list is legal only
+  with a non-empty `exhausted_rationale` — record it in the round analysis
+  and jump to Step 6);
+- the single proposal: vid `r{R}-01`; `predicted_delta_cycles` is an int
+  < 0 AND `base makespan + predicted_delta_cycles <= target_cycles`;
+  every `edited_files` entry exists under `shadow/`; `op_delta` non-zero
+  integers; `change_sig` non-empty; `target_pattern_id` a non-empty
+  free-form label; `predicted_acc_impact` (low/medium/high + reason) and
+  `sota_reference` non-empty;
+- re-run the dedup query yourself for the `change_sig` (the same
+  `history_lib.py` CLI the proposer used) — a blocked signature → drop the
+  proposal, count it into `filtered_count`, and treat the round as a
+  zero-proposal round (non-empty `exhausted_rationale`).
 
-### Step 4: Implement every proposal (variant-implementer + mechanical history rows)
+### Step 2: Variant business-logic / information analysis (soft alignment)
 
-For each proposal `<VID>` in file order, dispatch `variant-implementer`
-with inputs: `<output_dir>=$ORCA_ARTIFACTS_DIR`, `<proposal>=<the proposal
-object>`, `<repair_directive>=` (empty on the first pass).
+The round's single proposal is `<VID>`. Compute the analysis stamp key =
+`<VID>|<change_sig>|<repair_count>` (`repair_count` from
+`variants/<VID>/repair_trace.json`, 0 when absent). Compare with
+`variants/<VID>/.analysis_stamp.json`:
 
-**YOU (the node) own the history IMPL rows — the subagent never writes
-history.** After each dispatch returns:
+- **Match** → the documents on disk already describe this exact structure
+  state; skip the dispatches and go to the conformance read.
+- **Mismatch / absent** → dispatch BOTH analysts in variant mode:
 
-- **DONE reported** → verify `variants/<VID>/DONE` exists, then append the
-  implemented row (values from `declaration.json` + `contracts.json` +
-  `best.json` + `base/bottleneck_report.json`; `parent_vid` = best.json's
-  vid or null; `base_at_proposal` = `{"vid": <same>, "makespan_cycles":
-  <report makespan>}`):
-  ```bash
-  python3 "$ORCA_ARTIFACTS_DIR/scripts/append_impl_row.py" --vid <VID> \
-    --round <R> --seq <seq> --parent-vid <best vid or None> --change-sig '<sig>' \
-    --probe-epochs <proxy_budget.epochs from contracts.json> \
-    --probe-max-steps <proxy_budget.max_steps from contracts.json> \
-    --probe-data-value <proxy_budget.data_value from contracts.json> \
-    --target-modules '<JSON list from declaration.target_modules>' \
-    --predicted-delta-cycles <declaration.predicted_delta_cycles> \
-    --base-at-proposal '{"vid": <best vid or null>, "makespan_cycles": <int>}'
-  ```
-- **Terminal skip reported** (`structural_mismatch` / `variant_broken`) →
-  TWO rows, in this order (the single outcome row would lack
-  `round`/`change_sig` — the dedup and the round advance read exactly those
-  fields):
-  ```bash
-  python3 "$ORCA_ARTIFACTS_DIR/scripts/append_impl_row.py" --vid <VID> \
-    --round <R> --seq <seq> --parent-vid <best vid or None> --change-sig '<sig>' \
-    --probe-epochs <...> --probe-max-steps <...> --probe-data-value <...> \
-    --target-modules '<JSON list>' --predicted-delta-cycles <...> \
-    --base-at-proposal '{"vid": <best vid or null>, "makespan_cycles": <int>}' \
-    --not-implemented --outcome <structural_mismatch|variant_broken>
-  ```
-  Record the vid under `skipped` (reason + outcome). A skipped proposal
-  never blocks the round.
-- **Re-entry reconciliation**: any `variants/<VID>/DONE` whose vid has NO
-  row in `history.jsonl` → append the implemented row from its
-  `declaration.json` exactly as above (crash between marker and row; the
-  declaration carries every value the row needs).
+  - `business-logic-analyst` with `<output_dir>=$ORCA_ARTIFACTS_DIR`,
+    `<doc_path>=$ORCA_ARTIFACTS_DIR/variants/<VID>/business_logic.md`,
+    `<baseline_doc>` = the full content of
+    `baseline/business_logic.md`, and `<change_note>` = the proposal's
+    `change_sig` / `change_spec` / `rationale`.
+  - `information-analyst` with `<output_dir>=$ORCA_ARTIFACTS_DIR`,
+    `<doc_path>=$ORCA_ARTIFACTS_DIR/variants/<VID>/information_analysis.md`,
+    `<baseline_doc>` = the full content of
+    `base/information_analysis.md`, and `<change_note>` = the same
+    proposal fields.
 
-A single broken proposal is recorded and skipped; the node fails only on
-infrastructure (scripts/workspace) or the subagent failure matrix.
+**Mechanical validation** (failure matrix applies) — for each document:
+first line is its sentinel
+(`[subagent:business-logic-analyst v1 BLA7K4]` /
+`[subagent:information-analyst v1 IXA3N7]`), the body is non-empty, and
+every required section heading is present with content:
 
-### Step 5: Batch latency recheck (+ repair loop)
+- `business_logic.md`: `## 任务语义`, `## 输入输出`, `## 架构动机`,
+  `## 逐模块职责与物理意义`, `## 训练目标与指标方向`, `## 与基线差异`;
+- `information_analysis.md`: `## 信息核心`, `## 近似与牺牲项`,
+  `## 被牺牲信息与预期精度代价`.
 
-**mfu guard (real measurements)**: when `profile_mode.json` records
-`"mode": "mfu"` the recheck consumes REAL evaluation numbers — contention
-with the still-running baseline training would corrupt them. First wait for
-the baseline worker to exit: poll `baseline/train_final.json` (terminal) or
-`baseline/finalizer.pid` (dead) — bounded-wait with a status message per
-turn while it lives; only then profile/recheck. Placeholder mode
-(CPU-bound) → no wait.
+**Soft-alignment read (this is a JUDGMENT call, yours).** Read the
+two documents' conclusion sections (`## 与基线差异` and
+`## 被牺牲信息与预期精度代价`) against the baseline documents. The bar is
+deliberately soft: the variant's main content must line up with the
+baseline and make sense — differences are EXPECTED (that is what a variant
+is); only a **major semantic conflict** (the variant breaks the documented
+input/output contract or a module's documented role) or a
+**self-contradicting document** is a rejection. On rejection: re-dispatch
+the IMPLEMENTER with `<repair_directive>=analysis:<the conflict, quoted>`,
+delete `variants/<VID>/.analysis_stamp.json`, and loop back to the top of
+this step after the repair (the changed structure must be re-analyzed).
 
-**Per-variant profiling, mode from disk** — for every variant with a `DONE`
-marker and no `verdict.json`:
+**Write `variants/<VID>/conformance.md`** (you write it — never a
+subagent): a short record with (1) both sentinel lines verbatim as you
+verified them, (2) a 「与基线主要内容对齐结论」 line (aligned / conflict +
+reason), and (3) the difference disclosure the two documents themselves
+declare. NOT an item-by-item consistency checklist. Then write the stamp
+file with the current key.
 
-- **placeholder mode**: nothing to pre-do — the recheck profiles inline
-  with the deployed estimator.
-- **mfu mode**: dispatch `mfu-analyzer` per variant with inputs
-  `<onnx_path>=$ORCA_ARTIFACTS_DIR/variants/<VID>/onnx/model.onnx`,
-  `<profile_dir>=$ORCA_ARTIFACTS_DIR/variants/<VID>/profile`,
-  `<report_path>=$ORCA_ARTIFACTS_DIR/variants/<VID>/profile/mfu_bottleneck_report.md`,
-  and the `chip` / `precision` / `core_num` values read from
-  `profile_mode.json`. On return validate mechanically (at least one
-  raw-product dir — the adapter itself enforces exactly one and fails loud
-  on ambiguity — report present, sentinel first line):
+### Step 3: Implement + measure
 
-  ```bash
-  ls "$ORCA_ARTIFACTS_DIR"/variants/<VID>/profile/*/schedule_result.json >/dev/null 2>&1
-  [ -s "$ORCA_ARTIFACTS_DIR/variants/<VID>/profile/mfu_bottleneck_report.md" ]
-  [ "$(head -n 1 "$ORCA_ARTIFACTS_DIR/variants/<VID>/profile/mfu_bottleneck_report.md")" = "[subagent:mfu-analyzer v1 MBA7K2]" ]
-  ```
+1. **Implement**: dispatch `variant-implementer` with
+   `<output_dir>=$ORCA_ARTIFACTS_DIR`, `<proposal>=<the proposal object>`,
+   `<repair_directive>=` (empty on the first pass).
+2. **History IMPL row — YOU own it; the subagent never writes history.**
+   - **DONE reported** → verify `variants/<VID>/DONE` exists, then:
+     ```bash
+     python3 "$ORCA_ARTIFACTS_DIR/scripts/append_impl_row.py" --vid <VID> \
+       --round <R> --seq 1 --parent-vid None --change-sig '<sig>' \
+       --probe-epochs <proxy_budget.epochs from contracts.json> \
+       --probe-max-steps <proxy_budget.max_steps from contracts.json> \
+       --probe-data-value <proxy_budget.data_value from contracts.json> \
+       --target-modules '<JSON list from declaration.target_modules>' \
+       --predicted-delta-cycles <declaration.predicted_delta_cycles> \
+       --base-at-proposal '{"vid": null, "makespan_cycles": <base makespan>}'
+     ```
+     (the base never advances: `parent_vid` is always null and
+     `base_at_proposal.vid` is always null.)
+   - **Terminal skip reported** (`structural_mismatch` / `variant_broken`)
+     → the same command with `--not-implemented --outcome <outcome>`
+     appended; record the vid under `skipped` and jump to Step 6 (a
+     skipped round is legitimate; the loop continues).
+   - **Re-entry reconciliation**: any `variants/<VID>/DONE` whose vid has
+     NO row in `history.jsonl` → append the implemented row from its
+     `declaration.json` exactly as above.
+3. **Measure** (no resource checks — mfu evaluation is machine-independent,
+   so it never waits on or contends with training): in `mfu` mode dispatch
+   `mfu-analyzer` per variant with
+   `<onnx_path>=$ORCA_ARTIFACTS_DIR/variants/<VID>/onnx/model.onnx`,
+   `<profile_dir>=$ORCA_ARTIFACTS_DIR/variants/<VID>/profile`,
+   `<report_path>=$ORCA_ARTIFACTS_DIR/variants/<VID>/profile/mfu_bottleneck_report.md`,
+   and the `chip` / `precision` / `core_num` values from
+   `profile_mode.json`; validate (at least one raw-product
+   `schedule_result.json`, report present, sentinel
+   `[subagent:mfu-analyzer v1 MBA7K2]` first line), then run the
+   deterministic adapter (quote its stderr verbatim on failure; never
+   hand-edit raw products):
+   ```bash
+   python3 "$ORCA_ARTIFACTS_DIR/scripts/mfu_adapter.py" \
+     --profile-dir "$ORCA_ARTIFACTS_DIR/variants/<VID>/profile"
+   ```
+   Placeholder mode: nothing to pre-do (the recheck profiles inline).
+4. **Verdict** (the judgement is fully scripted — the frozen
+   `target_cycles` is the only line; the boundary is inclusive):
+   ```bash
+   bash "$ORCA_AGENT_RESOURCES/scripts/run_latency_recheck.sh"
+   ```
+   Its stdout is an INFO line (`latency_pass_count`, `summary`). The
+   script also owns the repair ledger: every `latency_fail` verdict it
+   writes appends one attempt to `variants/<VID>/repair_trace.json`
+   (`repair_count` = number of failed measurements).
 
-  then convert the raw products with the deterministic adapter (it fails
-  loud on any missing/inconsistent field — quote its stderr in `error`
-  verbatim; never hand-edit raw products):
+### Step 4: Repair inner loop (≤ 5, script-enforced)
 
-  ```bash
-  python3 "$ORCA_ARTIFACTS_DIR/scripts/mfu_adapter.py" \
-    --profile-dir "$ORCA_ARTIFACTS_DIR/variants/<VID>/profile"
-  ```
+Loop while the vid's verdict is a repairable failure:
 
-  The analyzer's failure matrix follows the uniform one: missing
-  products/sentinel → re-dispatch ONCE with the failure quoted; second
-  failure → `error` names `mfu-analyzer` for that vid; the node emits
-  `failed`. (An evaluation that failed on the service side still produces a
-  report — that state fails the product check exactly the same way.)
+- **`structural_mismatch` / `variant_broken`** (joint budget ≤ 2 attempts,
+  mechanical in the history dedup — a third attempt is blocked): delete
+  `variants/<VID>/verdict.json`, re-dispatch `variant-implementer` with
+  `<repair_directive>=structural:<file-layer finding>`, delete
+  `variants/<VID>/.analysis_stamp.json`, re-run Step 2 for the changed
+  structure, then re-run the recheck. Budget exhausted → the elimination
+  stands; disclose in the round analysis; go to Step 5.
+- **`latency_fail`** — read `variants/<VID>/repair_trace.json`
+  (`repair_count`):
+  - `repair_count < 5` → repair: delete `variants/<VID>/verdict.json`; in
+    mfu mode ALSO delete `variants/<VID>/profile/` entirely (the analyzer
+    reuses a complete result otherwise); re-dispatch
+    `variant-implementer` with `<repair_directive>` = the FULL TEXT of the
+    latest mfu report (`variants/<VID>/profile/mfu_bottleneck_report.md` —
+    in placeholder mode: the verdict summary
+    `measured vs target vs gap` instead); delete
+    `variants/<VID>/.analysis_stamp.json`; re-run Step 2 (soft-alignment
+    re-verification of the changed structure); re-dispatch `mfu-analyzer` +
+    adapter (mfu mode) and re-run the recheck.
+  - `repair_count >= 5` → TERMINAL (the 5th measurement still missed the
+    line): write the round's rerouting signal
+    `rounds/<RRR>/direction.json`
+    (`{"round": R, "failed_sigs": ["<the vid's change_sig>"]}`), and end
+    the loop — the elimination is the round's honest outcome. NEVER delete
+    the verdict or dispatch another repair: the recheck fails loud on a
+    6th attempt and the emit gate rejects it.
 
-Run the recheck (the judgement is fully scripted — it takes no threshold
-arguments: the gate mode comes from `round_state.py`, the incumbent
-is `best.json`'s makespan else the origin anchor's baseline, and in the
-recovery phase the frozen `target_cycles` is the filter line; a small
-strictly-better step is a legitimate pass; the prediction ratio is an
-informational field only):
+### Step 5: Rules incremental refresh (consume unconsumed terminals)
 
-```bash
-bash "$ORCA_AGENT_RESOURCES/scripts/run_latency_recheck.sh"
-```
+1. **Ledger bootstrap aggregate** (one bounded sweep so the shared ledger
+   reflects every shard before the rules read outcomes):
+   ```bash
+   python3 "$ORCA_ARTIFACTS_DIR/scripts/ledger_aggregate.py" \
+     --artifacts "$ORCA_ARTIFACTS_DIR"
+   ```
+2. **Scan for unconsumed terminal results**: every variant directory
+   carrying a `.rules_pending` marker (written by its watchdog at terminal
+   state). No marker anywhere → nothing to consume; continue.
+3. **Per pending vid**: dispatch `accuracy-analyst` with `<rows>` = the
+   vid's latest `history.jsonl` row (terminal `outcome` + its
+   outcome-specific fields), `<lineage>` = the row's `change_sig` + round,
+   `<rules>` = the current `accuracy_rules.json` content. Then validate:
+   ```bash
+   python3 "$ORCA_ARTIFACTS_DIR/scripts/rules_pool.py" \
+     check --artifacts "$ORCA_ARTIFACTS_DIR"
+   ```
+   Failure → re-dispatch the analyst ONCE with the schema errors quoted.
+   Still failing → drop the offending rule rows from
+   `accuracy_rules.json` (the check names them by index), disclose the
+   dropped rows in the round analysis, and continue — a bad rule row never
+   blocks the round.
+4. **Consume**: delete `variants/<VID>/.rules_pending` for every vid whose
+   result was handed to the analyst (write = watchdog terminal state,
+   clear = this step; the marker's lifecycle is single-direction).
 
-Its stdout is an INFO line (not the node output): `latency_pass_count`,
-`gate_mode`, and `summary` describe the round state for the pre-return gate
-and the round analysis.
+### Step 6: Round analysis on disk + emit
 
-**Repair loop** (≤ 2 per variant, judged from `repair_trace.json`): a
-variant whose verdict is `structural_mismatch` or `latency_fail` →
-1. **delete its verdict first** (verdict.json presence IS the recheck's
-   skip key — a fresh recheck requires a fresh verdict):
-   `rm "$ORCA_ARTIFACTS_DIR/variants/<VID>/verdict.json"`;
-   in mfu mode ALSO wipe this vid's stale profile evidence so the next pass
-   re-measures from scratch (the analyzer reuses an existing complete
-   result otherwise): delete `variants/<VID>/profile/` entirely, then
-   after the repair dispatch `mfu-analyzer` again and re-run the adapter
-   exactly as above;
-2. re-dispatch `variant-implementer` with
-   `<repair_directive>=structural:<file-layer finding>` or
-   `latency:<verdict summary>`;
-3. re-run the recheck. Still failing after the quota → the variant is
-    eliminated (its verdict row already records the outcome; disclose in
-    the round analysis).
-
-### Step 6: Mechanical round advance (latency phase only)
-
-Query the gate mode once more at THIS point:
-
-```bash
-python3 "$ORCA_ARTIFACTS_DIR/scripts/round_state.py" \
-  --artifacts "$ORCA_ARTIFACTS_DIR" mode
-```
-
-- mode `latency` → run the advance (idempotent; (round, mode) keyed; it
-  also writes the round's `direction.json` with the failed-sigs rerouting
-  signal):
-  ```bash
-  python3 "$ORCA_ARTIFACTS_DIR/scripts/advance_round.py" \
-    --artifacts "$ORCA_ARTIFACTS_DIR"
-  ```
-- mode `accuracy` → do NOT run it here: recovery-phase advancing happens
-  after the probe's accuracy judgments (the probe node runs it).
-
-A crash after the advance's marker write is a legal resume state: the next
-entry's `working` round moves on and the probe/gate of this round simply
-shift to the next round — never hand-repair the marker or best.json.
-
-### Step 6b: Round analysis on disk (latency section)
-
-Close the round with its measured conclusions — never leave it as bare
-verdict rows. Write the `## latency` section of
-`rounds/<RRR>/analysis.md` (idempotent whole-section rewrite on re-entry;
-preserve any `## accuracy` section written by the probe node), bounded to
-~15 lines:
-
-- admitted proposals vs eliminated, one line each (the why from the
-  verdicts / skipped rows);
-- predicted vs actual delta for every rechecked variant — the calibration
-  note (which lever family over- or under-delivered its prediction);
-- next-round direction: one or two lines of what this round's measurements
-  say to try instead.
-
-This file is the round's analysis record: the NEXT round's proposer reads
-the previous round's copy (Step 3 input); terminal reporting distills every
-round's copy into the final report. Analysis prose lives here, never inside
-prompts.
-
-### Step 7: Emit
-
-In `mfu` mode drop `base/bottleneck_analysis.json` from the artifact list
-(the analysis source is the baseline stage's
-`base/profile/mfu_bottleneck_report.md`, not produced here); `placeholder`
-mode keeps it.
-
-```bash
-python3 "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
-  --field status=executed \
-  --field 'error=' \
-  --field 'generated_artifacts=["rounds/<RRR>/proposals.json", "rounds/<RRR>/verdicts.jsonl", "rounds/<RRR>/analysis.md", "base/bottleneck_report.json", "base/bottleneck_analysis.json", "base/information_analysis.md", "experiment_ledger.json", "history.jsonl"]'
-```
-
-On failure paths the same three fields with `status=failed`, `error` naming
-the root cause (subagent + failure per the matrix), and honest
-`generated_artifacts` from disk. `status == executed` ⇔ `error == ""` —
-never both non-empty. In the latency phase, append
-`rounds/<RRR>/direction.json` to `generated_artifacts` when it exists.
+1. **Write the `## latency` section of `rounds/<RRR>/analysis.md`** (this
+   round, always — both ending paths; idempotent whole-section rewrite on
+   re-entry; preserve any `## accuracy` section), bounded to ~15 lines:
+   - the single proposal: admitted why (bottleneck + rule evidence), and
+     its fate — reached the line (measured vs predicted, the calibration
+     note) / eliminated (repair count, final gap to the line,
+     `failed_sigs`) / skipped (the structural reason);
+   - zero-proposal rounds: the `exhausted_rationale` directions distilled
+     to one line each;
+   - next-round direction: one or two lines of what this round's
+     measurements say to try instead.
+   This file is the round's analysis record: the NEXT round's proposer
+   reads the previous round's copy (Step 1 input); terminal reporting
+   distills every round's copy. Analysis prose lives here, never inside
+   prompts.
+2. **On the latency_pass path only** — seed the variant's ledger shard (the
+   single-writer truth source the watchdog will keep updating) and refresh
+   the derived ledger:
+   `variants/<VID>/ledger_entry.json` =
+   `{"vid", "status": "latency_pass", "epoch": null, "metric": null,
+   "gap": null, "device": null, "change_summary": <the proposal's
+   rationale, one line>, "ts": <ISO8601>}` (atomic replace via a tmp file +
+   rename), then re-run `ledger_aggregate.py`.
+3. **Rules panel snapshot** (both ending paths, after Step 5's refresh):
+   when `accuracy_rules.json` exists, copy it byte-for-byte to
+   `base/accuracy_rules_snapshot.json` (the rule panel's data source — the
+   pool file itself lives outside the artifacts whitelist).
+4. **Emit** (in `mfu` mode drop `base/bottleneck_analysis.json` from the
+   artifact list; `placeholder` mode keeps it):
+   ```bash
+   python3 "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
+     --field status=executed \
+     --field 'error=' \
+     --field 'generated_artifacts=["rounds/<RRR>/proposals.json", "rounds/<RRR>/verdicts.jsonl", "rounds/<RRR>/analysis.md", "rounds/<RRR>/direction.json", "variants/<VID>/business_logic.md", "variants/<VID>/information_analysis.md", "variants/<VID>/conformance.md", "variants/<VID>/repair_trace.json", "base/accuracy_rules_snapshot.json", "base/bottleneck_report.json", "base/bottleneck_analysis.json", "base/information_analysis.md", "experiment_ledger.json", "history.jsonl"]'
+   ```
+   List a path only when the file exists on disk (`direction.json` and
+   `repair_trace.json` exist only on their paths; drop
+   `verdicts.jsonl` / the variant docs on a zero-proposal round; drop
+   `base/bottleneck_analysis.json` in mfu mode). On failure paths the same
+   three fields with `status=failed`, `error` naming the root cause
+   (subagent + failure per the matrix), and honest `generated_artifacts`
+   from disk. `status == executed` ⇔ `error == ""` — never both non-empty.
 
 ## Validation
 
-Run the pre-return gate before Step 7 **on the success path only**:
+Run the pre-return gate before Step 6's emit **on the success path only**:
 
 ```bash
 python3 "$ORCA_ARTIFACTS_DIR/scripts/check_propose_emit.py" \
   --artifacts "$ORCA_ARTIFACTS_DIR"
 ```
 
-It verifies: `proposals.json` parses with `round == R`; every admitted vid
-has the expected history row; `verdicts.jsonl` and `analysis.md` exist; and
-in the latency phase `direction.json` and the advance marker are present.
-Fix-loop ≤ 3 iterations; exceeded → `status=failed`. The failure path does
-NOT run this success-product gate: emit `status=failed` directly with the
-root cause in `error`.
+It verifies: exactly one proposal with
+`base makespan + predicted_delta_cycles <= target_cycles`; the three
+analysis documents with valid sentinels and section headings; the vid's
+history row (latency_pass / its elimination outcome, and `direction.json`
+`failed_sigs` on the latency_fail path); `repair_trace` count ≤ 5; and
+`analysis.md` with its `## latency` section on BOTH ending paths. Fix-loop
+≤ 3 iterations; exceeded → `status=failed`. The failure path does NOT run
+this success-product gate: emit `status=failed` directly with the root
+cause in `error`.
 
 ## Output
 
-The entire final reply = the single line of JSON from Step 7. No text
+The entire final reply = the single line of JSON from Step 6. No text
 before or after.
