@@ -34,10 +34,11 @@ from typing import TYPE_CHECKING, Any, Iterator, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from orca.chart._limits import SOCK_PATH_MAX
+from orca.chart._paths import artifacts_dir_for_run, chart_sock_path
 from orca.compile import ConfigurationError, load_workflow
 from orca.iface.cli.config import apply_kb_requirement
-from orca.chart._limits import SOCK_PATH_MAX
-from orca.chart._paths import chart_sock_path
+from orca.iface.web.file_text import safe_resolve
 from orca.events.bus import EventBus
 from orca.events.chart_ingestor import chart_ingestor, make_crash_callback
 from orca.events.replay import apply_event, replay_state
@@ -290,31 +291,39 @@ class RunManager:
         - 合法且存在 → 返回 resolved absolute path
 
         单一职责：本方法只做路径解析 + 越界守卫；IO 读字节流由 routes 层 FileResponse 负责。
+        三重守卫抽为共享函数 ``file_text.safe_resolve``（web SPEC §2.2 DRY，W1-T1 等价
+        对拍单测守门）。合法与越界输入上行为与抽前逐字一致（既有 ``/assets`` 端点零变化）；
+        唯一差异是异常输入类（null byte / FS OSError）：旧版上抛 500，共享版 fail closed
+        收敛为 None → 404。
         """
         if self._runs.get(run_id) is None:
             return None
-        assets_root = (self._runs_dir / run_id / "assets").resolve()
-        decoded = rel_path.strip()
-        if not decoded:
+        return safe_resolve(self._runs_dir / run_id / "assets", rel_path)
+
+    def resolve_artifacts_root(self, run_id: str) -> Path | None:
+        """解析 run 的 artifacts 权威根（web SPEC §2.1 / 计划 S-8）。
+
+        根 = ``orca.chart._paths.artifacts_dir_for_run(runs_dir, run_id)``（共享纯函数，
+        与 exec/env 注入的 ``$ORCA_ARTIFACTS_DIR`` 同源——web SPEC §2.1 所述「run 记录
+        字段」不存在，S-8 拍板复用该函数派生，不做硬编码拼接也不加新字段）。
+        ``runs_dir`` 取该 run tape 所在目录（``artifacts_dir_for_run`` 契约：tape 文件
+        所在目录；in-process project run / attached run 与默认 ``_runs_dir`` 均覆盖），
+        tape 路径不可得时回退 ``self._runs_dir``。
+
+        - 未知 run_id → None（routes 层先 ensure_attached 再 404，web §2.1）
+        - 派生目录不存在 → None（404 fail loud，S-8 语义）
+        - 存在 → 返回未 resolve 的根目录 Path（相对路径守卫由 ``file_text.safe_resolve``
+          在读取时执行）
+        """
+        handle = self._runs.get(run_id)
+        if handle is None:
             return None
-        # 注意：``.resolve()`` 会跟随 symlink，故先在未 resolve 的路径上 check symlink
-        # （否则 ``candidate`` 已是 symlink 目标，``is_symlink()`` 必 False）。
-        unresolved = assets_root / decoded
-        if unresolved.is_symlink():
+        tp = _handle_tape_path(handle)
+        runs_dir = tp.parent if tp is not None else self._runs_dir
+        root = artifacts_dir_for_run(runs_dir, run_id)
+        if not root.is_dir():
             return None
-        candidate = unresolved.resolve()
-        try:
-            candidate.relative_to(assets_root)
-        except ValueError:
-            return None
-        # 二次 check（防御纵深：路径中某段可能是 symlink，unresolved 末端未指向但中间段是）
-        # ——此处 ``candidate`` 已 resolve，是真实物理路径；若与 unresolved 不同且非末端 symlink，
-        # 上面未 resolve 检查已拦下。再加 ``candidate.is_symlink()`` 兜底中间段 symlink。
-        if candidate.is_symlink():
-            return None
-        if not candidate.is_file():
-            return None
-        return candidate
+        return root
 
     async def start_run(
         self,

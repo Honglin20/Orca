@@ -40,11 +40,9 @@ from orca.compile.agents import (
 )
 from orca.compile.layout import resolve_subagents_dir
 from orca.compile.parser import _iter_agent_nodes
+from orca.iface.web.file_text import read_text_file
 
 logger = logging.getLogger(__name__)
-
-# 单文件大小上限（plan §M2/M6：1MB；防主线程读取 + 前端 prism 高亮卡死）。
-_MAX_FILE_BYTES = 1_000_000
 
 
 def build_router() -> APIRouter:
@@ -166,10 +164,11 @@ def build_router() -> APIRouter:
         """读文件文本（plan §M2 envelope + M6 size cap + 二进制检测）。
 
         守卫顺序：路径越界/symlink/非文件 → 404；超 1MB → 422；二进制 → 422。
-        守卫 + 读取段抽为 ``_read_text_file``（批 G：与 workflow file 端点共享，DRY）。
+        守卫 + 读取段共享 ``file_text.read_text_file``（批 G：与 workflow file 端点
+        同构 envelope，DRY；W1-T3 进一步抽到 ``iface.web.file_text`` 供 runs 路由复用）。
         """
         resources_root = _resolve_agent_root(name, agent)
-        return _read_text_file(resources_root, path)
+        return read_text_file(resources_root, path)
 
     # ── Endpoint 6：workflow 目录全资产递归树（批 G）──────────────────────────
     @router.get("/{name}/tree")
@@ -201,12 +200,12 @@ def build_router() -> APIRouter:
 
         不复用 agent file 端点：其 root 是 agent resources_root，workflow.yaml /
         ``agents/_xxx_scripts`` 多数不在任何 agent root 下。守卫 + 读取与 agent file
-        端点共享 ``_read_text_file``（envelope 同构）。
+        端点共享 ``file_text.read_text_file``（envelope 同构）。
         """
         ctx = _resolve_context_for(name)
         if ctx is None:
             raise HTTPException(status_code=404, detail="workflow not found")
-        return _read_text_file(ctx.workflow_dir, path)
+        return read_text_file(ctx.workflow_dir, path)
 
     return router
 
@@ -251,63 +250,6 @@ def _resolve_agent_root(name: str, agent: str) -> Path:
         logger.warning("workflows/tree: agent %s resolve failed: %s", agent, e)
         raise HTTPException(status_code=404, detail="agent not found") from e
     return handle.resources_root
-
-
-def _safe_resolve(root: Path, rel: str) -> Path | None:
-    """路径越界 / symlink / 非文件守卫（plan §m3 闭环，抄 ``run_manager.py:277-300``）。
-
-    整段步骤包 try/except ``(ValueError, OSError)``：null byte / 盘符 / 其它 FS 错都 → None。
-    返回 None = 拒绝（caller 404）；返回 Path = 合法且是普通文件。
-    """
-    try:
-        rel = (rel or "").strip()
-        if not rel:
-            return None
-        root = root.resolve()
-        unresolved = root / rel
-        if unresolved.is_symlink():
-            return None
-        candidate = unresolved.resolve()
-        candidate.relative_to(root)  # ValueError → 越界
-        if candidate.is_symlink():
-            return None
-        if not candidate.is_file():
-            return None
-        return candidate
-    except (ValueError, OSError):
-        return None
-
-
-def _read_text_file(root: Path, rel: str) -> dict:
-    """守卫 + 读取单文件文本（plan §M2 envelope + M6 size cap + 二进制检测）。
-
-    agent file 与 workflow file 两端点的共享读取函数（批 G DRY 落点）：两处同构的
-    1MB / 二进制 / 404 守卫只此一份。守卫顺序：路径越界/symlink/非文件 → 404；
-    超 1MB → 422；二进制（前 2048 字节含 ``\\x00``）→ 422。raise HTTPException
-    语义与抽前 get_agent_file 内联段逐字一致。
-    """
-    candidate = _safe_resolve(root, rel)
-    if candidate is None:
-        raise HTTPException(status_code=404, detail="file not found")
-
-    size = candidate.stat().st_size
-    if size > _MAX_FILE_BYTES:
-        raise HTTPException(
-            status_code=422,
-            detail=f"file too large: {size} bytes (limit {_MAX_FILE_BYTES})",
-        )
-    with candidate.open("rb") as f:
-        if b"\x00" in f.read(2048):
-            raise HTTPException(status_code=422, detail="binary file")
-    text = candidate.read_text(encoding="utf-8")
-    ext = candidate.suffix.lstrip(".")
-    return {
-        "path": rel,
-        "text": text,
-        "ext": ext,
-        "size": size,
-        "truncated": False,
-    }
 
 
 def _list_subagents(wf_dir: Path, wf_name: str) -> list[dict]:

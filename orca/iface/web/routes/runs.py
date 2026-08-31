@@ -7,10 +7,13 @@
   - ``GET /api/runs/<id>/events`` → ``list[Event]``（懒加载，唯一来源 ``tape.replay``）。
   - ``GET /api/runs/<id>/meta`` → 扩展 meta（含 huge/overview）。
   - ``GET /api/runs/<id>/assets/<path>`` → 图片资源字节流（SPEC §0 D10）。
+  - ``GET /api/runs/<id>/artifacts/file?path=<rel>`` → run 产物分析文档只读正文
+    （web SPEC §2.1，text/plain；守卫与 assets 等强度 + 1MB→413）。
   - ``DELETE /api/runs/<id>`` → 删 tape + run 目录（SPEC §13 D10/B-5/M-3）。
 
-懒挂载触发面（SPEC §13.2 I-3）：``{/meta, /events, /assets/<path>}`` 任一遇 unknown run_id
-先 ``manager.ensure_attached``（WS subscribe 在 ws_handler 内 ensure_attached）。
+懒挂载触发面（SPEC §13.2 I-3）：``{/meta, /events, /assets/<path>, /artifacts/file}``
+任一遇 unknown run_id 先 ``manager.ensure_attached``（WS subscribe 在 ws_handler 内
+ensure_attached）。
 
 依赖单向：本模块依赖 ``orca.iface.web.run_manager``（同层）+ fastapi，不含编排逻辑。
 """
@@ -20,10 +23,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
 from orca.events.replay import replay_state
+from orca.iface.web.file_text import read_text_file
 from orca.iface.web.run_manager import RunSummary
 
 if TYPE_CHECKING:
@@ -156,6 +160,38 @@ def build_router(manager: RunManager) -> APIRouter:
                 detail=f"asset not found: {asset_path}",
             )
         return FileResponse(str(candidate))
+
+    @router.get("/{run_id}/artifacts/file")
+    async def get_run_artifact_file(
+        run_id: str,
+        path: str = Query(..., description="相对 run artifacts 根的 POSIX 路径"),
+    ) -> PlainTextResponse:
+        """run 产物（``$ORCA_ARTIFACTS_DIR``）下的分析文档只读读取（web SPEC §2.1）。
+
+        前端「分析文档」面板点选清单条目后经本端点拉正文（markdown / json 原文，
+        前端按后缀渲染 markdown / 表格卡片）。
+
+        - 未知 run_id → 先 ``ensure_attached``（懒挂载）→ 仍未知 → 404
+        - artifacts 根缺失（run 无产物目录）→ 404（fail loud，S-8 语义）
+        - 守卫与 ``resolve_asset_path`` 等强度（共享 ``file_text.safe_resolve``）：
+          ``..`` / 绝对路径 / symlink（末端或中间段）→ 404；文件不存在 → 404；
+          二进制 / 非 utf-8 文本 → 422（失败路径显式）
+        - 超 1MB（与 workflows 路由共享 ``MAX_FILE_BYTES``）→ 413 fail loud
+        - **只读**：无任何写路径；响应为纯文件正文（``text/plain; charset=utf-8``），
+          不含 fs 绝对路径
+        """
+        await _ensure_attached(manager, run_id)
+        root = manager.resolve_artifacts_root(run_id)
+        if root is None:
+            raise HTTPException(
+                status_code=404, detail=f"artifacts not found: {run_id}"
+            )
+        envelope = read_text_file(
+            root, path, too_large_status=413, decode_error_status=422
+        )
+        return PlainTextResponse(
+            envelope["text"], media_type="text/plain; charset=utf-8"
+        )
 
     @router.delete("/{run_id}")
     async def delete_run(run_id: str) -> JSONResponse:
