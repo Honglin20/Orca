@@ -41,6 +41,13 @@ const ConversationView = lazy(() =>
 const ChartsView = lazy(() =>
   import("@/components/views/ChartsView").then((m) => ({ default: m.ChartsView }))
 );
+// W-P2（web SPEC §3.1）：prof-opt 分析文档面板，挂图表区上方（charts 页签内）。
+// 同 D5 策略 lazy：面板复用 MarkdownText（markdown 全家桶），不进首屏 chunk。
+const ProfOptDocsPanel = lazy(() =>
+  import("@/components/profopt/ProfOptDocsPanel").then((m) => ({
+    default: m.ProfOptDocsPanel,
+  }))
+);
 
 type Tab = "conversation" | "charts";
 
@@ -133,7 +140,15 @@ export function RunDetailPage() {
                           onChartClick={handleChartClick}
                         />
                       )}
-                      {tab === "charts" && <ChartsView />}
+                      {tab === "charts" && (
+                        <div className="flex h-full flex-col">
+                          {/* W-P2：分析文档面板（可折叠）+ 图表区（ChartsView 零改，web §4） */}
+                          <ProfOptDocsPanel runId={runId} />
+                          <div className="min-h-0 flex-1">
+                            <ChartsView />
+                          </div>
+                        </div>
+                      )}
                     </Suspense>
                   ) : (
                     <TabFallback label="加载中…" />
