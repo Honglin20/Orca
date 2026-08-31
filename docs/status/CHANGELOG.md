@@ -5,6 +5,14 @@
 
 ---
 
+## [2026-08-31] feat(prof-opt): 信息成分拆解 → 创新结构提案（commit `89ae28a`）
+
+prof-opt 新增 `information-analyst` 子代理：按 base 版本 stamp 守卫产出
+`base/information_analysis.md`（信息成分拆解 / 最小信息核心 / 冗余与可近似项 /
+创新结构方向），作为 structure-proposer 的第 5 类证据源，支持 lever 目录之外的
+创新结构（`novel:` lever 名）；全部机械准入闸门不变，`tars validate` 通过。
+详见 [release note](../releases/2026-08-31-prof-opt-information-analysis.md)。
+
 ## [2026-08-28] perf(web): 传输层 gzip/immutable + markdown chunk 瘦身 + 渲染订阅收窄 + 虚拟化（commit `e756b8c..b824f24`，6 commits）
 
 针对三症状（整体加载慢/查看页慢/markdown 慢）四路优化：GZip 中间件 + hashed 资产 immutable 缓存 + SPA no-cache + build 前清 assets（5.5MB→2.9MB）；prism 高亮走 `rehype-prism-plus/common` 子路径 36 门（chunk 1018KB→536KB）+ katex CSS 移出首屏；store fold 派生 `ev` 索引 + `takenEdgeKeys` + 三组件逐字段订阅 + EntryRenderer memo + reuseEntries 引用复用；行高 `useDynamicRowHeight` + 虚拟化阈值 500→100（测试先行）+ canary 投影修复。SDD-LOOP 全流程：spec 2 轮收敛（UD×2 拍板：AgentsRail 遗留 / A6 无硬 KPI）+ plan adversary 2 轮 + coder 内环 1 轮 + E2E **PASS**（vitest 590 绿 / pytest 绿 / 真实 tars serve 头实测 / 真实 chromium 冒烟零报错，A1-A6 全过，缺陷 0）。详见 [release note](../releases/2026-08-28-web-perf-optimization.md)。
