@@ -30,6 +30,12 @@ import history_lib  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_po_scripts import _write_profile_fixture  # noqa: E402
 
+# v6 (prof-opt-v6 P0) retired the mode/advance/dual-gate/probe-row mechanics
+# these cases pin. They are SKIPPED in place — not deleted — so the phase
+# range stays bisectable; P5-T4 reclaims or migrates them per content class.
+_RETIRED_V6 = pytest.mark.skip(
+    reason="retired in v6 (prof-opt-v6 P0), cleanup in P5")
+
 
 def _run_cli(args: list[str], env: dict | None = None,
              timeout: int = 60) -> subprocess.CompletedProcess:
@@ -70,6 +76,7 @@ def test_round_state_current_zero_pads_and_ignores_non_numeric(tmp_path):
     assert json.loads(out.stdout) == {"round": 5, "round_dir": "rounds/005"}
 
 
+@_RETIRED_V6
 def test_round_state_working_marker_linkage(tmp_path):
     art = tmp_path / "ws"
     (art / "rounds" / "001").mkdir(parents=True)
@@ -90,6 +97,7 @@ def test_round_state_working_marker_linkage(tmp_path):
         {"round": 1, "round_dir": "rounds/001"}
 
 
+@_RETIRED_V6
 def test_round_state_mode_two_states_and_missing_anchor_rc2(tmp_path):
     art = tmp_path / "ws"
     (art / "rounds" / "001").mkdir(parents=True)
@@ -199,6 +207,7 @@ def test_analyze_without_freeze_never_touches_anchor(tmp_path):
 
 # ── history: advanced builder + probe gap ────────────────────────────────────
 
+@_RETIRED_V6
 def test_history_append_advanced_writes_latency_field_set(tmp_path):
     hist = tmp_path / "history.jsonl"
     history_lib.append_implemented(
@@ -219,6 +228,7 @@ def test_history_append_advanced_writes_latency_field_set(tmp_path):
     assert latest["r1-01"]["makespan_cycles"] == 900
 
 
+@_RETIRED_V6
 def test_history_permanent_set_v5(tmp_path):
     assert history_lib.PERMANENT_OUTCOMES == \
         frozenset({"advanced", "promoted", "unsupported_op"})
@@ -240,6 +250,7 @@ def test_history_permanent_set_v5(tmp_path):
     assert state["blocked"] is False
 
 
+@_RETIRED_V6
 def test_history_probe_gap_written_and_omitted(tmp_path):
     hist = tmp_path / "history.jsonl"
     row = history_lib.append_probe(
@@ -345,6 +356,7 @@ def test_gate_node_stamp_mismatch_routes_finish_failed(tmp_path):
     assert payload["error"].startswith("deploy --verify failed")
 
 
+@_RETIRED_V6
 def test_gate_node_decision_passes_through(tmp_path):
     art = tmp_path / "art"
     art.mkdir()
@@ -1003,6 +1015,7 @@ def _smoke_probe(art: Path, vid: str, curve_loss: float) -> dict:
     return verdict
 
 
+@_RETIRED_V6
 def test_po_v5_smoke_five_steps(tmp_path: Path):
     """The core state machine, real scripts only, in the spec's order:
     freeze -> r1 latency advance + passthrough probe + loop -> r2 flip +
@@ -1094,6 +1107,7 @@ def test_po_v5_smoke_five_steps(tmp_path: Path):
     assert gate3["mode"] == "accuracy"
 
 
+@_RETIRED_V6
 def test_po_v5_smoke_round_cap_terminals(tmp_path: Path):
     """Step 5: at the round cap the gate exits honestly — best-effort with
     a best on disk, finish-failed without one."""

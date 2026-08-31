@@ -1,20 +1,27 @@
 """history_lib.py — the ONLY write path for history.jsonl (typed builders).
 
 Bare dict appends are forbidden by design: every row goes through one of the
-three per-node builders so the field sets stay pinned to the history schema.
+per-node builders so the field sets stay pinned to the history schema.
 Rows are append-only multi-version snapshots — each append writes the FULL
 merged state of a vid, so "latest version per vid" is just the last row
 with that vid.
+
+v6 row semantics (§4.3): impl / latency_pass / latency_fail / success /
+accuracy_fail / probe_insufficient. Terminal outcomes are written ONLY via
+append_terminal (the watchdog's terminal action); the v5
+append_advanced / append_probe builders and the advanced / promote_gate /
+proxy_acc fields are retired (kept on old workspace rows for READ
+compatibility only — never written anymore).
 
 Read side:
     read_rows(path)            -> all rows in append order
     read_latest(path)          -> {vid: last row}
 Dedup side (mechanical rules — no LLM judgement):
     permanent set   = outcome in {advanced, promoted, unsupported_op}
-                      ("promoted" is kept for READ compatibility with old
-                      workspaces only — it is never written anymore); judged
-                      over ANY version row (a later row cannot resurrect a
-                      permanently-exhausted signature);
+                      ("advanced"/"promoted" are kept for READ compatibility
+                      with old workspaces only — v6 never writes them);
+                      judged over ANY version row (a later row cannot
+                      resurrect a permanently-exhausted signature);
     latency_pass    is a process state and NEVER blocks;
     structural_mismatch / variant_broken share ONE joint retry budget per sig
                       (total attempts with those outcomes <= 2, i.e. <= 1 retry);
@@ -25,9 +32,8 @@ Dedup side (mechanical rules — no LLM judgement):
                       produces a NEW change_sig that exact-match dedup admits
                       by design (the round-level rerouting signal is the
                       failed_sigs set in direction.json, not dedup).
-    probe rows carry optional outcome annotations (eval_acc /
-                      eval_failed / eval_skipped_no_epoch_ckpt /
-                      monitor_failed); they never enter the config fingerprint.
+The dedup key is unchanged in v6: (vid, change_sig) over full-snapshot rows
+— repair iterations on the same vid/sig overwrite latest.
 """
 from __future__ import annotations
 
@@ -48,19 +54,22 @@ LATENCY_FIELDS = (
     "structural_check", "makespan_cycles", "latency_gate",
     "pred_actual_ratio", "outcome",
 )
-# probe-row optional annotations (v4): written only when applicable, read via
-# .get() — old rows without them coexist harmlessly. They are OUTCOME
-# annotations, deliberately NOT part of the dedup config fingerprint (which
-# stays probe_epochs / probe_max_steps / probe_data_value from the IMPL row).
-PROBE_FIELDS = (
-    "proxy_acc", "promote_gate", "outcome",
-    "gap",                        # worst of the curve/eval gate gaps (budget units)
-    "eval_skipped_no_epoch_ckpt",  # true: no per-epoch ckpt -> curve-only judgment
-    "monitor_failed",              # true: worker ran past k naturally (kill missed)
-    "eval_acc",                    # eval@k metric (ckpt-addressable projects only)
-    "eval_failed",                 # true: k-th ckpt eval failed to load (degraded)
+# terminal-row fields (v6 §4.3): the outcome-specific extras are written only
+# when passed (None = omitted from the row) — an outcome that cannot have a
+# field (e.g. latency_fail has no stopped_at_epoch) simply does not pass it.
+TERMINAL_FIELDS = (
+    "outcome",
+    "gap",                        # final direction-normalized distance (budget units)
+    "stopped_at_epoch",           # the epoch training actually stopped at (= E on success)
+    "final_acc",                  # success: the final eval metric
+    "over_budget_streak",         # accuracy_fail: the streak that fired the early stop
+    "stage",                      # probe_insufficient: train_status stage at failure
+    "max_retries_hit",            # probe_insufficient: the retry budget was exhausted
+    "measured_makespan_cycles",   # latency_fail: the last measured makespan
 )
 
+TERMINAL_OUTCOMES = frozenset(
+    {"success", "accuracy_fail", "probe_insufficient", "latency_fail"})
 PERMANENT_OUTCOMES = frozenset({"advanced", "promoted", "unsupported_op"})
 JOINT_RETRY_OUTCOMES = frozenset({"structural_mismatch", "variant_broken"})
 JOINT_RETRY_MAX_ATTEMPTS = 2  # first failure + at most one retry
@@ -165,48 +174,49 @@ def append_latency(path: str | Path, vid: str, *, structural_check: str,
     return _append(Path(path), vid, fields, LATENCY_FIELDS, "append_latency")
 
 
-def append_advanced(path: str | Path, vid: str) -> dict:
-    """Round-advance marker row (advance_round). Writes ONLY
-    outcome == "advanced" on the promoted field set — the advance is a
-    process fact, not a measurement, so there is nothing else to record."""
-    return _append(Path(path), vid, {"outcome": "advanced"},
-                   LATENCY_FIELDS, "append_advanced")
+def append_terminal(path: str | Path, vid: str, *, outcome: str,
+                    gap: float | None = None,
+                    stopped_at_epoch: int | None = None,
+                    final_acc: float | None = None,
+                    over_budget_streak: int | None = None,
+                    stage: str | None = None,
+                    max_retries_hit: bool | None = None,
+                    measured_makespan_cycles: int | None = None) -> dict:
+    """Terminal row (v6 §4.3) — the ONLY writer of terminal outcomes; the
+    watchdog's terminal action (and the report's last-resort disclosure
+    path) both go through here.
 
-
-def append_probe(path: str | Path, vid: str, *, proxy_acc: float | None,
-                 promote_gate: str, outcome: str,
-                 gap: float | None = None,
-                 eval_skipped_no_epoch_ckpt: bool | None = None,
-                 monitor_failed: bool | None = None,
-                 eval_acc: float | None = None,
-                 eval_failed: bool | None = None) -> dict:
-    """Proxy row (po_probe). outcome: accuracy_pass | accuracy_fail |
-    probe_insufficient.
-
-    proxy_acc is ALWAYS the training-curve metric at epoch k (the probe
-    comparison anchor); a checkpoint-eval metric, when the project has
-    addressable per-epoch ckpts, goes to eval_acc instead. gap = the WORST
-    of the curve/eval gate gaps in budget units (higher = further from the
-    line; pass <=> gap <= budget); None omits it (probe_insufficient rows
-    may legitimately have no gap). The optional annotations are written only
-    when passed (None = omitted from the row): eval_skipped_no_epoch_ckpt /
-    monitor_failed / eval_failed explain a degraded or suspicious judgment
-    path; unknown fields still fail loud."""
-    fields: dict[str, Any] = {
-        "proxy_acc": proxy_acc,
-        "promote_gate": promote_gate, "outcome": outcome,
-    }
+    outcome must be one of TERMINAL_OUTCOMES (success / accuracy_fail /
+    probe_insufficient / latency_fail); anything else fails loud. The
+    per-outcome extras are written only when passed (None = omitted):
+      success           gap / stopped_at_epoch (= E) / final_acc
+      accuracy_fail     gap / stopped_at_epoch / over_budget_streak
+      probe_insufficient stage / max_retries_hit
+      latency_fail      measured_makespan_cycles (gap may repeat the last
+                        recheck's gap when meaningful)
+    The dedup key (vid, change_sig) is unchanged: the row rides the vid's
+    full merged snapshot, so a repair iteration on the same vid/sig
+    overwrites latest."""
+    if outcome not in TERMINAL_OUTCOMES:
+        raise HistoryError(
+            f"append_terminal only accepts {sorted(TERMINAL_OUTCOMES)}, "
+            f"got {outcome!r}")
+    fields: dict[str, Any] = {"outcome": outcome}
     if gap is not None:
         fields["gap"] = gap
-    if eval_skipped_no_epoch_ckpt is not None:
-        fields["eval_skipped_no_epoch_ckpt"] = eval_skipped_no_epoch_ckpt
-    if monitor_failed is not None:
-        fields["monitor_failed"] = monitor_failed
-    if eval_acc is not None:
-        fields["eval_acc"] = eval_acc
-    if eval_failed is not None:
-        fields["eval_failed"] = eval_failed
-    return _append(Path(path), vid, fields, PROBE_FIELDS, "append_probe")
+    if stopped_at_epoch is not None:
+        fields["stopped_at_epoch"] = stopped_at_epoch
+    if final_acc is not None:
+        fields["final_acc"] = final_acc
+    if over_budget_streak is not None:
+        fields["over_budget_streak"] = over_budget_streak
+    if stage is not None:
+        fields["stage"] = stage
+    if max_retries_hit is not None:
+        fields["max_retries_hit"] = max_retries_hit
+    if measured_makespan_cycles is not None:
+        fields["measured_makespan_cycles"] = measured_makespan_cycles
+    return _append(Path(path), vid, fields, TERMINAL_FIELDS, "append_terminal")
 
 
 # ── read side ────────────────────────────────────────────────────────────────

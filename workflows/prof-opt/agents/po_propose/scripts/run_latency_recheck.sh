@@ -17,18 +17,12 @@
 #                      this call). Inline profiling is DISABLED; a variant
 #                      without a four-piece is a hard error, never an inline
 #                      re-profile.
-#   3. latency gate (no absolute / relative / ratio thresholds — a small
-#      strictly-better step is a legitimate pass; the prediction ratio is an
-#      informational field only, never a gate):
-#        gate mode latency  (chase phase)    : pass <=> makespan < incumbent
-#                                               (incumbent = best.json
-#                                               makespan, else the origin
-#                                               anchor baseline makespan)
-#        gate mode accuracy (recovery phase) : pass <=> makespan <= the
-#                                               frozen origin anchor's
-#                                               target_cycles
-#      The gate mode comes from the shared round_state.py (single source);
-#      both anchors are read-only on disk.
+#   3. latency gate (v6 §4.2, unified — the dual-mode chase/recovery gate is
+#      retired): pass <=> makespan <= target_cycles, where target_cycles is
+#      the frozen origin anchor's line (base/origin_anchor.json, read-only).
+#      The boundary is inclusive (== target passes). No absolute / relative
+#      / ratio thresholds; the prediction ratio is an informational field
+#      only, never a gate.
 #
 # Writes variants/<vid>/verdict.json, appends rounds/<RRR>/verdicts.jsonl and
 # the L0 history row through the typed history builder. Reconciliation pass:
@@ -103,16 +97,8 @@ if [ "$PROFILE_MODE" = "mfu" ] && [ "$PROFILER_SET" -eq 1 ]; then
   echo "FATAL: --profiler is mutually exclusive with mfu mode (profile_mode.json) — the four-piece under variants/<vid>/profile/ is the only measurement source in this mode" >&2
   exit 2; fi
 
-# ── gate mode + anchors (round_state.py — single source; read-only) ──────────
-GATE_JSON="$("$PY" "$SCRIPTS/round_state.py" --artifacts "$ART" mode)" || exit 2
-GATE_MODE="$("$PY" -c 'import json,sys; print(json.loads(sys.argv[1])["mode"])' "$GATE_JSON")"
-TARGET_CYCLES="$("$PY" -c 'import json,sys; print(json.loads(sys.argv[1])["target_cycles"])' "$GATE_JSON")"
-BEST_MS="$("$PY" -c 'import json,sys; print(json.loads(sys.argv[1])["best_makespan"])' "$GATE_JSON")"
-if [ "$BEST_MS" = "None" ]; then
-  INCUMBENT="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["baseline_makespan_cycles"])' "$ART/base/origin_anchor.json")"
-else
-  INCUMBENT="$BEST_MS"
-fi
+# ── target line (origin anchor — single source; read-only) ───────────────────
+TARGET_CYCLES="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["target_cycles"])' "$ART/base/origin_anchor.json")"
 
 # ── current round (single source) + base makespan ────────────────────────────
 ROUND_RAW="$("$PY" "$SCRIPTS/round_state.py" --artifacts "$ART" current)"
@@ -223,13 +209,15 @@ for vdir in "$ART"/variants/*/; do
   fi
 
   if [ "$structural" = "fail" ]; then
-    verdict="$("$PY" - "$vid" "$ROUND" "$mismatch_layers" "$predicted" <<'PYEOF'
+    verdict="$("$PY" - "$vid" "$ROUND" "$mismatch_layers" "$predicted" \
+        "$TARGET_CYCLES" <<'PYEOF'
 import json, sys
 vid, rnd, layers, predicted = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+target = int(sys.argv[5])
 print(json.dumps({"vid": vid, "round": rnd, "structural_check": "fail",
                   "mismatch_layers": json.loads(layers), "makespan_cycles": None,
-                  "base_makespan_cycles": None, "incumbent_cycles": None,
-                  "improvement_cycles": None, "gate_mode": None,
+                  "base_makespan_cycles": None, "target_cycles": target,
+                  "improvement_cycles": None,
                   "pred_actual_ratio": None,
                   "latency_gate": None, "predicted_delta_cycles": predicted,
                   "outcome": "structural_mismatch"}))
@@ -258,15 +246,17 @@ PYEOF
         > "$vdir/profile.stdout.json" 2> "$vdir/profile.stderr.log" || prof_rc=$?
     if [ "$prof_rc" -ne 0 ]; then
       if grep -q '^unsupported:' "$vdir/profile.stderr.log" 2>/dev/null; then
-        verdict="$("$PY" - "$vid" "$ROUND" "$vdir/profile.stderr.log" "$predicted" <<'PYEOF'
+        verdict="$("$PY" - "$vid" "$ROUND" "$vdir/profile.stderr.log" "$predicted" \
+            "$TARGET_CYCLES" <<'PYEOF'
 import json, sys
 vid, rnd, predicted = sys.argv[1], int(sys.argv[2]), int(sys.argv[4])
+target = int(sys.argv[5])
 ops = [l.split(":", 1)[1].strip() for l in open(sys.argv[3], encoding="utf-8")
        if l.startswith("unsupported:")]
 print(json.dumps({"vid": vid, "round": rnd, "structural_check": "pass",
                   "unsupported_ops": sorted(set(ops)), "makespan_cycles": None,
-                  "base_makespan_cycles": None, "incumbent_cycles": None,
-                  "improvement_cycles": None, "gate_mode": None,
+                  "base_makespan_cycles": None, "target_cycles": target,
+                  "improvement_cycles": None,
                   "pred_actual_ratio": None,
                   "latency_gate": None, "predicted_delta_cycles": predicted,
                   "outcome": "unsupported_op"}))
@@ -283,23 +273,20 @@ PYEOF
     var_ms="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["makespan_cycles"])' "$vdir/profile/profile_summary.json")"
   fi
 
-  # ---- latency gate (mode-conditioned; informational ratio only) ----
+  # ---- latency gate (unified: the frozen target line; informational ratio) ----
   verdict="$("$PY" - "$vid" "$ROUND" "$BASE_MS" "$var_ms" "$predicted" \
-      "$GATE_MODE" "$INCUMBENT" "$TARGET_CYCLES" <<'PYEOF'
+      "$TARGET_CYCLES" <<'PYEOF'
 import json, sys
 vid, rnd = sys.argv[1], int(sys.argv[2])
-base, var, pred = int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
-gate_mode, incumbent, target = sys.argv[6], int(sys.argv[7]), int(sys.argv[8])
-if gate_mode == "latency":
-    gate = "pass" if var < incumbent else "fail"
-else:  # accuracy recovery phase: the frozen line is the filter
-    gate = "pass" if var <= target else "fail"
+base, var, pred, target = (int(sys.argv[3]), int(sys.argv[4]),
+                           int(sys.argv[5]), int(sys.argv[6]))
+gate = "pass" if var <= target else "fail"   # inclusive boundary (v6 §4.2)
 ratio = (base - var) / (-pred) if pred < 0 else None
 outcome = "latency_pass" if gate == "pass" else "latency_fail"
 print(json.dumps({"vid": vid, "round": rnd, "structural_check": "pass",
                   "makespan_cycles": var, "base_makespan_cycles": base,
-                  "incumbent_cycles": incumbent,
-                  "improvement_cycles": base - var, "gate_mode": gate_mode,
+                  "target_cycles": target,
+                  "improvement_cycles": base - var,
                   "pred_actual_ratio": None if ratio is None else round(ratio, 6),
                   "latency_gate": gate,
                   "predicted_delta_cycles": pred, "outcome": outcome}))
@@ -309,7 +296,7 @@ PYEOF
   outcome="$("$PY" -c 'import json,sys; print(json.loads(sys.argv[1])["outcome"])' "$verdict")"
   NEW_COUNT=$((NEW_COUNT + 1)); record_outcome_count "$outcome"
   if [ "$outcome" = "latency_pass" ]; then PASS_COUNT=$((PASS_COUNT + 1)); fi
-  echo "verdict $vid: $outcome (makespan $var_ms vs incumbent $INCUMBENT, gate_mode $GATE_MODE)" >&2
+  echo "verdict $vid: $outcome (makespan $var_ms vs target $TARGET_CYCLES)" >&2
 done
 
 # ── reconciliation: verdict.json present but history row missing ──────────────
@@ -357,7 +344,7 @@ fi
   --field "status=executed" \
   --field "verdicts_count=$NEW_COUNT" \
   --field "latency_pass_count=$PASS_COUNT" \
-  --field "gate_mode=$GATE_MODE" \
+  --field "target_cycles=$TARGET_CYCLES" \
   --field "verdicts_path=$VERDICTS" \
   --field "summary=$SUMMARY" \
   --field 'error='

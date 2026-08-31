@@ -45,9 +45,16 @@ from gate_decide import decide  # noqa: E402
 from advance_round import advance  # noqa: E402
 from predict_delta import predict_delta  # noqa: E402
 
+# v6 (prof-opt-v6 P0) retired the advance/mode/dual-gate/probe-row mechanics.
+# Their v5 test cases are SKIPPED in place — not deleted — so the phase range
+# stays bisectable; P5-T4 reclaims or migrates them per content class.
+_RETIRED_V6 = pytest.mark.skip(
+    reason="retired in v6 (prof-opt-v6 P0), cleanup in P5")
+
 
 # ── history_lib ───────────────────────────────────────────────────────────────
 
+@_RETIRED_V6
 def test_history_builder_field_sets(tmp_path: Path):
     hist = tmp_path / "history.jsonl"
     history_lib.append_implemented(
@@ -159,6 +166,7 @@ def _write_sig_history(hist: Path, sig: str, outcomes: list[str],
     (["structural_mismatch", "variant_broken"], True),   # joint budget exhausted
     (["variant_broken", "variant_broken"], True),        # same class twice: exhausted
 ])
+@_RETIRED_V6
 def test_history_dedup_branches(tmp_path: Path, outcomes, blocked):
     hist = tmp_path / "history.jsonl"
     _write_sig_history(hist, "activation:x->y", outcomes)
@@ -166,6 +174,7 @@ def test_history_dedup_branches(tmp_path: Path, outcomes, blocked):
     assert state["blocked"] is blocked, state
 
 
+@_RETIRED_V6
 def test_history_dedup_probe_config_retry(tmp_path: Path):
     hist = tmp_path / "history.jsonl"
     _write_sig_history(hist, "norm:relax:m", ["probe_insufficient"],
@@ -181,6 +190,7 @@ def test_history_dedup_probe_config_retry(tmp_path: Path):
     assert more_data["blocked"] is False    # data-subset value change reopens it
 
 
+@_RETIRED_V6
 def test_history_dedup_null_max_steps_is_a_pinned_budget(tmp_path: Path):
     """Regression (review): a project WITHOUT a step-truncation mechanism pins
     max_steps=null. null is a budget value, not "unset" — a same-budget
@@ -196,6 +206,7 @@ def test_history_dedup_null_max_steps_is_a_pinned_budget(tmp_path: Path):
     assert got_steps["blocked"] is False  # a real budget change reopens it
 
 
+@_RETIRED_V6
 def test_history_cli_requires_and_passes_null_budget(tmp_path: Path):
     """The po_propose node drives the CLI, not the function: pin the CLI
     surface — null budgets must survive the round trip, and a missing flag
@@ -275,6 +286,7 @@ _NO_PASS_R1 = [
 ]
 
 
+@_RETIRED_V6
 def test_gate_full_train_on_accuracy_pass_any_version_row(tmp_path: Path):
     """Decision 1: best under the frozen line AND an accuracy_pass in ANY
     version row (the advance's `advanced` row does not erase it)."""
@@ -288,6 +300,7 @@ def test_gate_full_train_on_accuracy_pass_any_version_row(tmp_path: Path):
     assert out["best"]["vid"] == "r1-01"
 
 
+@_RETIRED_V6
 def test_gate_loops_when_gates_unmet(tmp_path: Path):
     art = _gate_artifacts(tmp_path, rounds=[1], history_rows=_NO_PASS_R1,
                           best=None)
@@ -308,6 +321,7 @@ def test_gate_loops_across_consecutive_zero_advance_rounds(tmp_path: Path):
     assert out["decision"] == "loop"
 
 
+@_RETIRED_V6
 def test_gate_best_met_line_without_accuracy_pass_still_loops(tmp_path: Path):
     """Under the line but the accuracy gate never passed (accuracy_fail or
     probe pending): NOT full-train — the recovery rounds continue."""
@@ -323,6 +337,7 @@ def test_gate_best_met_line_without_accuracy_pass_still_loops(tmp_path: Path):
     assert out["mode"] == "accuracy"
 
 
+@_RETIRED_V6
 def test_gate_hard_cap_with_best_is_best_effort(tmp_path: Path):
     art = _gate_artifacts(tmp_path, rounds=[1, 2], history_rows=_NO_PASS_R1,
                           best={"vid": "r1-01", "makespan_cycles": 800,
@@ -331,6 +346,7 @@ def test_gate_hard_cap_with_best_is_best_effort(tmp_path: Path):
     assert out["decision"] == "full-train-best-effort"  # cap + best present
 
 
+@_RETIRED_V6
 def test_gate_finish_failed_when_no_best_at_cap(tmp_path: Path):
     art = _gate_artifacts(tmp_path, rounds=[1, 2],
                           history_rows=_NO_PASS_R1, best=None)
@@ -338,6 +354,7 @@ def test_gate_finish_failed_when_no_best_at_cap(tmp_path: Path):
     assert out["decision"] == "finish-failed"
 
 
+@_RETIRED_V6
 def test_gate_accuracy_pass_wins_over_the_cap(tmp_path: Path):
     """Decision 1 is judged FIRST: even at the round cap, an accuracy-passed
     best under the line is a clean full-train, not best-effort."""
@@ -349,6 +366,7 @@ def test_gate_accuracy_pass_wins_over_the_cap(tmp_path: Path):
     assert out["decision"] == "full-train"
 
 
+@_RETIRED_V6
 def test_gate_hard_cap_never_loops_at_max_rounds(tmp_path: Path):
     art = _gate_artifacts(tmp_path, rounds=[1, 2],
                           history_rows=_NO_PASS_R1, best=None)
@@ -358,6 +376,7 @@ def test_gate_hard_cap_never_loops_at_max_rounds(tmp_path: Path):
     assert out["decision"] == "finish-failed"
 
 
+@_RETIRED_V6
 def test_gate_invariant_accuracy_mode_without_probe_row_rc2(tmp_path: Path):
     """mode=accuracy but best.vid has no probe row at all: the workspace is
     torn — exit 2, never a guessed decision."""
@@ -463,6 +482,7 @@ def _direction(art: Path, round_no: int) -> dict:
                       .read_text(encoding="utf-8"))
 
 
+@_RETIRED_V6
 def test_advance_latency_r1_then_r2_replaces_base_and_shadow(tmp_path: Path):
     art = _v5_advance_artifacts(tmp_path)
     _v5_variant(art, "r1-01", round_no=1, makespan=900)   # < incumbent 1000
@@ -498,6 +518,7 @@ def test_advance_latency_r1_then_r2_replaces_base_and_shadow(tmp_path: Path):
     assert best2["vid"] == "r2-01" and best2["makespan_cycles"] == 700
 
 
+@_RETIRED_V6
 def test_advance_latency_small_strict_step_also_advances(tmp_path: Path):
     """v5 retired the absolute/relative/ratio thresholds: a 50-cycle step
     that is STRICTLY below the incumbent is a legitimate advance."""
@@ -511,6 +532,7 @@ def test_advance_latency_small_strict_step_also_advances(tmp_path: Path):
     assert _direction(art, 1)["improved"] is True
 
 
+@_RETIRED_V6
 def test_advance_zero_improvement_marker_and_failed_sigs(tmp_path: Path):
     """No candidate at all (no latency_pass row under the incumbent): the
     common actions are skipped entirely — marker-only, best.json absent,
@@ -532,6 +554,7 @@ def test_advance_zero_improvement_marker_and_failed_sigs(tmp_path: Path):
     assert d["improved"] is False and d["advanced_vid"] is None
 
 
+@_RETIRED_V6
 def test_advance_latency_fail_rows_feed_failed_sigs(tmp_path: Path):
     art = _v5_advance_artifacts(tmp_path)
     hist = art / "history.jsonl"
@@ -549,6 +572,7 @@ def test_advance_latency_fail_rows_feed_failed_sigs(tmp_path: Path):
     assert _direction(art, 1)["failed_sigs"] == ["sig:acc-fail", "sig:lat-fail"]
 
 
+@_RETIRED_V6
 def test_advance_accuracy_mode_only_accuracy_pass_advances(tmp_path: Path):
     art = _v5_advance_artifacts(tmp_path)
     # existing best under the line -> mode accuracy (recovery phase)
@@ -565,6 +589,7 @@ def test_advance_accuracy_mode_only_accuracy_pass_advances(tmp_path: Path):
         "onnx-of-round0-base"   # base fixed: no copy without accuracy_pass
 
 
+@_RETIRED_V6
 def test_advance_accuracy_pass_winner_ranked_by_gap(tmp_path: Path):
     art = _v5_advance_artifacts(tmp_path)
     (art / "best.json").write_text(json.dumps(
@@ -583,6 +608,7 @@ def test_advance_accuracy_pass_winner_ranked_by_gap(tmp_path: Path):
         "# shadow r1-02\n"
 
 
+@_RETIRED_V6
 def test_advance_accuracy_tie_break_gap_then_makespan_then_vid(tmp_path: Path):
     """The full accuracy ranking chain (gap -> makespan -> vid), direction
     already normalized by the verdict layer: equal gaps fall through to the
@@ -613,6 +639,7 @@ def test_advance_accuracy_tie_break_gap_then_makespan_then_vid(tmp_path: Path):
     assert out2["vid"] == "r1-01"              # lexicographic, acc irrelevant
 
 
+@_RETIRED_V6
 def test_advance_accuracy_above_line_never_a_candidate(tmp_path: Path):
     art = _v5_advance_artifacts(tmp_path)
     (art / "best.json").write_text(json.dumps(
@@ -627,6 +654,7 @@ def test_advance_accuracy_above_line_never_a_candidate(tmp_path: Path):
         "onnx-of-round0-base"
 
 
+@_RETIRED_V6
 def test_advance_round_mode_idempotency_key_both_modes_once(tmp_path: Path):
     """Same round, both phases: the (round, mode) key admits one latency and
     one accuracy advance each; the later direction.json overwrites."""
@@ -651,6 +679,7 @@ def test_advance_round_mode_idempotency_key_both_modes_once(tmp_path: Path):
     assert _direction(art, 1)["mode"] == "accuracy"   # later write overwrote
 
 
+@_RETIRED_V6
 def test_advance_benign_first_entry_marker_only_no_recopy(tmp_path: Path):
     """The benign first-entry: the same-round latency-advanced best.vid
     passes the accuracy gate. Its advanced row already exists -> NO torn
@@ -673,6 +702,7 @@ def test_advance_benign_first_entry_marker_only_no_recopy(tmp_path: Path):
     assert (art / "base" / "model.onnx").read_text(encoding="utf-8") == base_after
 
 
+@_RETIRED_V6
 def test_advance_stale_marker_replays_under_current_mode(tmp_path: Path):
     """marker.round < current round (crash between rounds) -> replay the
     advance under the CURRENT mode."""
@@ -690,6 +720,7 @@ def test_advance_stale_marker_replays_under_current_mode(tmp_path: Path):
         "# shadow r2-01\n"
 
 
+@_RETIRED_V6
 def test_advance_torn_repair_a_winner_recomputation_hits(tmp_path: Path):
     """Torn accuracy write: best.json written for the new winner, copy and
     advanced row missing. Recomputation re-derives the same winner -> repair
@@ -714,6 +745,7 @@ def test_advance_torn_repair_a_winner_recomputation_hits(tmp_path: Path):
     assert advance(art)["advanced"] is False
 
 
+@_RETIRED_V6
 def test_advance_torn_repair_b_latency_candidate_suppressed(tmp_path: Path):
     """Torn LATENCY write: best.json names this round's winner; the strict
     improvement test can never re-admit it (incumbent == winner itself), so
@@ -736,6 +768,7 @@ def test_advance_torn_repair_b_latency_candidate_suppressed(tmp_path: Path):
     assert marker["improved"] is True
 
 
+@_RETIRED_V6
 def test_advance_worse_promotion_keeps_base(tmp_path: Path):
     art = _v5_advance_artifacts(tmp_path)
     _v5_variant(art, "r1-01", round_no=1, makespan=900)
@@ -2010,6 +2043,7 @@ def test_check_full_train_emit_gate(tmp_path: Path):
     assert "missing final_acc" in proc2.stderr
 
 
+@_RETIRED_V6
 def test_check_propose_emit_gate(tmp_path: Path):
     """The propose pre-return gate checks round disk closure, not verdict
     quality."""
@@ -2074,6 +2108,7 @@ def test_check_propose_emit_gate(tmp_path: Path):
     assert "proposals.json missing" in proc2.stderr
 
 
+@_RETIRED_V6
 def test_check_propose_emit_mfu_freeform_target(tmp_path: Path):
     """mfu mode: target_pattern_id is a free-form label and the gate never
     requires the placeholder bottleneck_analysis.json."""
@@ -2114,6 +2149,7 @@ def test_check_propose_emit_mfu_freeform_target(tmp_path: Path):
     assert proc.returncode == 0, proc.stderr
 
 
+@_RETIRED_V6
 def test_check_probe_emit_gate_latency_passthrough(tmp_path: Path):
     """Latency passthrough only needs the proposal node's advance marker."""
     art = tmp_path / "art"
@@ -2143,6 +2179,7 @@ def test_check_probe_emit_gate_latency_passthrough(tmp_path: Path):
     assert "does not record (round, latency)" in proc2.stderr
 
 
+@_RETIRED_V6
 def test_check_probe_emit_gate_accuracy_first_entry(tmp_path: Path):
     """Accuracy first entry requires the best vid to have a terminal probe
     row in probe_results.jsonl."""
@@ -3064,6 +3101,7 @@ def test_metric_curve_compare_pins_depth_and_reports_anchor(tmp_path: Path):
     assert payload["baseline_path"] == str(base)
 
 
+@_RETIRED_V6
 def test_history_probe_row_optional_eval_fields(tmp_path: Path):
     """D-V4-18: probe rows carry optional eval/monitor annotations — written
     only when passed, rejected when unknown, and NEVER part of the dedup
@@ -3740,6 +3778,7 @@ def _run_recheck(art: Path) -> subprocess.CompletedProcess:
         capture_output=True, text=True, timeout=300, env=env)
 
 
+@_RETIRED_V6
 def test_run_latency_recheck_migration_regression(tmp_path: Path):
     """The batch verify semantics on the reference fixture: two-layer
     declaration check, re-profile, STRICT-improvement gate (568 < incumbent
@@ -3806,6 +3845,7 @@ def test_run_latency_recheck_migration_regression(tmp_path: Path):
                       .read_text(encoding="utf-8")) == _T8_MISMATCH_VERDICT
 
 
+@_RETIRED_V6
 def test_run_latency_recheck_small_strict_step_passes(tmp_path: Path):
     """v5 retired the 100-cycle / 1% / ratio thresholds: a variant only ONE
     cycle below the incumbent is a legitimate latency_pass (the pre-v5 gate
@@ -3831,6 +3871,7 @@ def test_run_latency_recheck_small_strict_step_passes(tmp_path: Path):
     assert verdict["outcome"] == "latency_pass"   # strict improvement is enough
 
 
+@_RETIRED_V6
 def test_run_latency_recheck_recovery_mode_uses_target_line(tmp_path: Path):
     """Accuracy (recovery) gate mode: the frozen target line is the filter —
     a variant ABOVE the line is eliminated even though it beats the
@@ -3853,6 +3894,7 @@ def test_run_latency_recheck_recovery_mode_uses_target_line(tmp_path: Path):
     assert verdict["outcome"] == "latency_fail"
 
 
+@_RETIRED_V6
 def test_run_latency_recheck_positive_prediction_is_informational(tmp_path: Path):
     """The pre-v5 `predicted_delta_cycles >= 0` hard guard is retired: a
     positive prediction no longer fails the run (the measured number is the
@@ -3875,6 +3917,7 @@ def test_run_latency_recheck_positive_prediction_is_informational(tmp_path: Path
     assert verdict["predicted_delta_cycles"] == 10
 
 
+@_RETIRED_V6
 def test_run_latency_recheck_reconciles_missing_history_rows(tmp_path: Path):
     """Crash window between the verdict write and the history append: the
     reconciliation pass re-appends the L0 row from the verdict file."""
@@ -3897,6 +3940,7 @@ def test_run_latency_recheck_reconciles_missing_history_rows(tmp_path: Path):
     assert latest["r1-02"]["outcome"] == "structural_mismatch"
 
 
+@_RETIRED_V6
 def test_run_latency_recheck_mfu_mode_reads_four_piece(tmp_path: Path):
     """mfu mode (from profile_mode.json): the recheck reads the four-piece
     the node produced per variant (mfu-analyzer + mfu_adapter) BEFORE the
@@ -3993,6 +4037,7 @@ def test_admission_clause_single_source():
 
 # ── T14: eval@k degradation mechanics (D-V4-4 mechanical layer) ───────────────
 
+@_RETIRED_V6
 def test_eval_at_k_degradation_mechanics(tmp_path: Path):
     """An eval@k that cannot load degrades to curve-only judgment. The
     mechanical layer this test pins: the history row records the degradation
@@ -4044,8 +4089,11 @@ def test_eval_at_k_degradation_mechanics(tmp_path: Path):
 
 
 # ── verdict_decide (v5): anchor-budget promote / final-budget gates ──────────
+# v6 retired `promote` (probe k-depth gate) and moved final-budget to
+# variants/<vid>/eval/final_acc.json — the v5 cases below are skipped in
+# place (see _RETIRED_V6); v6 coverage lives in test_po_v6.py.
 
-from verdict_decide import final_budget, promote  # noqa: E402
+from verdict_decide import final_budget  # noqa: E402
 
 _VERDICT_SH = _SCRIPTS / "verdict_decide.py"
 
@@ -4081,6 +4129,7 @@ _PASS_COMPARE = {"at_epoch": 1, "baseline_metric": 0.85,
                  "pass": True}
 
 
+@_RETIRED_V6
 def test_verdict_promote_dual_gate_pass(tmp_path: Path):
     """Both gates green -> accuracy_pass with gap = the worst gate gap; the
     line is recomputed from the anchor RECORDED in epoch_compare.json."""
@@ -4096,6 +4145,7 @@ def test_verdict_promote_dual_gate_pass(tmp_path: Path):
     assert out["gap"] == pytest.approx(max(0.01, 0.86 - 0.84))  # worst gate
 
 
+@_RETIRED_V6
 def test_verdict_promote_eval_gate_blocks_with_eval_gap(tmp_path: Path):
     """Curve passes, eval misses: accuracy_pass=false and gap = the EVAL
     gap (the worst gate), not the curve gap."""
@@ -4110,6 +4160,7 @@ def test_verdict_promote_eval_gate_blocks_with_eval_gap(tmp_path: Path):
     assert out["gap"] == pytest.approx(0.86 - 0.70)   # the eval gap dominates
 
 
+@_RETIRED_V6
 def test_verdict_promote_curve_only_gap_is_curve_gap(tmp_path: Path):
     """No proxy.json and no baseline_k_acc.json -> curve-only judgment: the
     gap IS the curve's normalized_loss, and pass <=> gap <= budget."""
@@ -4131,6 +4182,7 @@ def test_verdict_promote_curve_only_gap_is_curve_gap(tmp_path: Path):
     assert out2["gap"] == pytest.approx(0.06)   # 0.06 > 0.05 budget
 
 
+@_RETIRED_V6
 def test_verdict_promote_asymmetric_single_gate_branches(tmp_path: Path):
     """Either eval-side file alone absent -> still curve-only judgment (the
     gate needs BOTH numbers to apply); a present eval number is still
@@ -4155,6 +4207,7 @@ def test_verdict_promote_asymmetric_single_gate_branches(tmp_path: Path):
     ('{"vid": "r1-01", "metric_value": "oops", "k": 1}', "metric_value"),
     ("{not json", "proxy.json"),
 ])
+@_RETIRED_V6
 def test_verdict_promote_fails_loud_on_present_but_malformed_eval(
         tmp_path: Path, proxy_text: str, error_kw: str):
     """A present-but-unreadable eval anchor FAILS — it must never silently
@@ -4168,6 +4221,7 @@ def test_verdict_promote_fails_loud_on_present_but_malformed_eval(
         promote(art, "r1-01")
 
 
+@_RETIRED_V6
 def test_verdict_promote_lower_better_line_direction(tmp_path: Path):
     compare = {"at_epoch": 2, "baseline_metric": 0.20,
                "candidate_metric": 0.23, "normalized_loss": 0.03,
@@ -4190,6 +4244,7 @@ def test_verdict_promote_lower_better_line_direction(tmp_path: Path):
     ({"pass": True, "normalized_loss": 0.01}, "baseline_metric"),
     ({"pass": True, "baseline_metric": 0.85}, "normalized_loss"),
 ])
+@_RETIRED_V6
 def test_verdict_promote_fails_loud_on_malformed_compare(tmp_path: Path, compare,
                                                          error_kw):
     art = _probe_ws(tmp_path, compare=compare, proxy=None, k_acc=None)
@@ -4197,6 +4252,7 @@ def test_verdict_promote_fails_loud_on_malformed_compare(tmp_path: Path, compare
         promote(art, "r1-01")
 
 
+@_RETIRED_V6
 def test_verdict_promote_missing_anchor_rc2(tmp_path: Path):
     art = _probe_ws(tmp_path, compare=dict(_PASS_COMPARE), proxy=None,
                     k_acc=None)
@@ -4205,6 +4261,7 @@ def test_verdict_promote_missing_anchor_rc2(tmp_path: Path):
         promote(art, "r1-01")
 
 
+@_RETIRED_V6
 def test_verdict_cli_rejects_budget_and_reads_anchor(tmp_path: Path):
     """The --budget flag is RETIRED on both subcommands (argparse rejects);
     the budget comes from the origin anchor only."""
@@ -4227,6 +4284,7 @@ def test_verdict_cli_rejects_budget_and_reads_anchor(tmp_path: Path):
     assert payload["accuracy_pass"] is True and payload["gap"] == 0.01
 
 
+@_RETIRED_V6
 def test_verdict_final_budget_reads_anchor_both_directions(tmp_path: Path):
     art = tmp_path / "final-ws"
     (art / "final").mkdir(parents=True)
@@ -4262,6 +4320,7 @@ def test_verdict_final_budget_reads_anchor_both_directions(tmp_path: Path):
     assert final_budget(art) == {"within_budget": False}  # 2.1 > 2.0+0.05
 
 
+@_RETIRED_V6
 def test_verdict_final_budget_cli_fails_loud_on_bad_inputs(tmp_path: Path):
     """The final verdict's inputs are hand-assembled by the full-train agent
     — a hyphen slip in the direction or a non-numeric metric is exactly the

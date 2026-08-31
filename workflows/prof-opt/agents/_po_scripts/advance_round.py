@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""advance_round.py — deterministic, replayable end-of-round advance.
+"""advance_round.py — RETIRED IN v6 (base never advances; deletion lands in P5).
+
+The remainder of this docstring describes the v5 semantics verbatim for
+archaeology only — nothing below runs in v6: calling advance() fails loud on
+its first retired import (round_state.mode_state / history_lib.append_advanced
+are gone from the shared libraries).
 
 Recomputes the round outcome from history.jsonl (never from node outputs) and
 applies the fixed-order atomic step sequence. The phase (latency chase vs
@@ -53,8 +58,12 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from history_lib import append_advanced, read_latest, read_rows  # noqa: E402
-from round_state import current_round, mode_state  # noqa: E402
+# RETIRED IN v6 (base never advances; this file is deleted in P5). The two
+# retired entry points below are imported LAZILY inside advance() so this
+# module stays importable for transitional tooling — calling advance() now
+# fails loud with the missing-symbol import error, which is the honest state.
+from history_lib import read_latest, read_rows  # noqa: E402
+from round_state import current_round  # noqa: E402
 
 MARKER_NAME = ".round_advanced"
 FAILED_OUTCOMES = frozenset({"latency_fail", "accuracy_fail"})
@@ -161,6 +170,10 @@ def _advanced_this_round(history_path: Path, vid: str, round_no: int) -> bool:
 
 
 def advance(artifacts: Path) -> dict:
+    # retired-in-v6 lazy imports (see the module header note)
+    from history_lib import append_advanced  # noqa: E402
+    from round_state import mode_state  # noqa: E402
+
     round_no = current_round(artifacts)       # single source (round_state.py)
     if round_no == 0:
         raise FileNotFoundError("advance_round: no rounds/<NNN>/ directory exists yet")

@@ -46,7 +46,7 @@ inputs:
     default: 0
   max_rounds:
     type: integer
-    description: "[advanced] 轮数硬帽（默认 100）。唯一循环出口之一：达到后永不回边，直接进入终态判定；无任何时间帽 / 平台早退（平台期的答案是换路径探索，不是停机）"
+    description: "[advanced] 变体轮数硬帽（默认 100；轮 = 变体）。达到后永不回边：无 success 变体时等在飞训练终态后收尾；无任何时间帽 / 平台早退（平台期的答案是换路径探索，不是停机）"
     required: false
     default: 100
   fresh_start:

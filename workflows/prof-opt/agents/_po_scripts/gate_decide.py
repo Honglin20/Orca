@@ -1,26 +1,30 @@
 #!/usr/bin/env python3
 """gate_decide.py — pure-read loop/exit decision computed from the workspace.
 
-Reads (never writes): history.jsonl (all version rows), best.json, and the
-frozen origin anchor (base/origin_anchor.json — the target line never
-moves). The decision order is fixed (first match wins):
+Reads (never writes): history.jsonl (terminal rows), round_state current
+(the single round source), and the frozen origin anchor
+(base/origin_anchor.json — the target line never moves). The decision order
+is fixed (first match wins, v6 §8.1):
 
-    full-train              best exists AND best.makespan_cycles <= target
-                            AND best.vid has an `accuracy_pass` row in ANY
-                            version of its history (the probe's terminal
-                            pass; the later `advanced` row does not erase it)
-    full-train-best-effort  round >= max_rounds (hard cap, never loops) and
-                            a best exists
-    finish-failed           round >= max_rounds and no best
-    loop                    everything else — the ONLY other exit; there is
-                            no wall-clock cap and no plateau early-exit (a
-                            plateau is answered by rerouting proposals, not
-                            by stopping)
+    report   ANY vid has a `success` row in history — the winner judgment
+             (gap-best success, ties by makespan) is po_report's job — OR
+             round >= max_rounds (hard cap, never loops; with no success the
+             in-flight trainings are awaited and harvested by po_report, not
+             killed here)
+    loop     everything else — the ONLY other exit; there is no wall-clock
+             cap and no plateau early-exit (a plateau is answered by
+             rerouting proposals, not by stopping)
 
-Invariant (checked before deciding): round_state mode == accuracy but
-best.vid has no probe row at all -> exit 2 (mode=accuracy implies the probe
-trained best.vid at least once; a violation means the workspace is torn).
-A missing origin anchor is a hard error. stdout: single-line JSON.
+Exiting never disturbs in-flight work: a success row only truncates FUTURE
+proposal rounds; trainings already released by the probe keep running and
+keep their judgment eligibility for po_report's terminal harvest (v6 §8.1).
+best.json / mode / .round_advanced are no longer read (retired in v6).
+
+stdout: single-line JSON {"decision", "round", "target_cycles",
+"success_vids", "in_flight", "reason"}; in_flight = vids with a
+latency_pass row but no terminal row (success / accuracy_fail /
+probe_insufficient / latency_fail) in ANY version. A missing origin anchor
+is a hard error.
 """
 from __future__ import annotations
 
@@ -30,8 +34,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from history_lib import read_rows  # noqa: E402
-from round_state import current_round, mode_state  # noqa: E402
+from history_lib import TERMINAL_OUTCOMES, read_rows  # noqa: E402
+from round_state import current_round  # noqa: E402
 
 
 def _load_origin_anchor(artifacts: Path) -> dict:
@@ -53,52 +57,38 @@ def _load_origin_anchor(artifacts: Path) -> dict:
 def decide(artifacts: Path, max_rounds: int = 100) -> dict:
     round_no = current_round(artifacts)       # single source (round_state.py)
     anchor = _load_origin_anchor(artifacts)
-    mode_info = mode_state(artifacts)         # single source (round_state.py)
-    mode = mode_info["mode"]
-    target = mode_info["target_cycles"]
-
-    best: dict | None = None
-    best_path = artifacts / "best.json"
-    if best_path.is_file():
-        try:
-            raw = json.loads(best_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"gate_decide: best.json unparseable: {exc}") from exc
-        best = {"vid": raw["vid"], "makespan_cycles": raw["makespan_cycles"],
-                "proxy_acc": raw.get("proxy_acc")}
+    target = anchor["target_cycles"]
 
     rows = read_rows(artifacts / "history.jsonl")
-    rows_of_best = [r for r in rows if best is not None
-                    and r.get("vid") == best["vid"]]
-    has_accuracy_pass = any(r.get("outcome") == "accuracy_pass"
-                            for r in rows_of_best)
-    has_probe_row = any("promote_gate" in r for r in rows_of_best)
+    vids_with = {row.get("vid") for row in rows
+                 if row.get("vid") and row.get("outcome") == "success"}
+    success_vids = sorted(vids_with)
+    passed_vids = {row.get("vid") for row in rows
+                   if row.get("vid") and row.get("outcome") == "latency_pass"}
+    terminal_vids = {row.get("vid") for row in rows
+                     if row.get("vid") and row.get("outcome") in TERMINAL_OUTCOMES}
+    in_flight = sorted(passed_vids - terminal_vids)
 
-    if mode == "accuracy" and not has_probe_row:
-        raise ValueError(
-            f"gate_decide: invariant broken — mode=accuracy but best vid "
-            f"{best['vid']} has no probe row in history (the probe must have "
-            f"trained it at least once); workspace is torn, see po_report")
-
-    if (best is not None and best["makespan_cycles"] <= target
-            and has_accuracy_pass):
-        decision = "full-train"
-        reason = (f"best vid {best['vid']} makespan {best['makespan_cycles']} "
-                  f"<= target {target} (anchor frozen at baseline "
-                  f"{anchor['baseline_makespan_cycles']}) and its accuracy "
-                  f"gate passed (accuracy_pass row in history)")
+    if success_vids:
+        decision = "report"
+        reason = (f"success row(s) on disk for {', '.join(success_vids)} — "
+                  f"exit to report (in-flight trainings keep running and are "
+                  f"harvested by the terminal report, never killed here)")
     elif round_no >= max_rounds:
-        # hard cap: never loop at/after max_rounds — the only exit besides
-        # the accuracy double-pass
-        decision = "full-train-best-effort" if best is not None else "finish-failed"
-        reason = f"round {round_no} >= max_rounds {max_rounds} (hard cap)"
+        # hard cap: never loop at/after max_rounds — without a success the
+        # report awaits every in-flight training's terminal state
+        decision = "report"
+        reason = (f"round {round_no} >= max_rounds {max_rounds} (hard cap, "
+                  f"never loops) — no success variant; the report awaits the "
+                  f"in-flight terminal states")
     else:
         decision = "loop"
-        reason = (f"sequential gates unmet, round {round_no}/{max_rounds}, "
-                  f"mode={mode} — reroute proposals (failed_sigs), no other exit")
+        reason = (f"no success row and round {round_no}/{max_rounds} — "
+                  f"reroute proposals (failed_sigs); no other exit")
 
-    return {"decision": decision, "round": round_no, "mode": mode,
-            "best": best, "target_cycles": target, "reason": reason}
+    return {"decision": decision, "round": round_no, "target_cycles": target,
+            "success_vids": success_vids, "in_flight": in_flight,
+            "reason": reason}
 
 
 def main() -> int:
