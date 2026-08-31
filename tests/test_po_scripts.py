@@ -1518,6 +1518,45 @@ def test_prof_opt_execution_nodes_use_thin_output_envelopes():
         assert props == expected[node["name"]], node["name"]
 
 
+def test_workflow_v6_shape_and_gate_routes_are_pinned():
+    """The v6 closure is shape-pinned, not just convention: 7 nodes, the
+    full-train node is gone, the gate routes exactly report/loop with a
+    catch-all to po_report (a finish-failed decision that matches NEITHER
+    explicit route lands there), and every node's routes stay total."""
+    import yaml
+
+    wf = yaml.safe_load(
+        (_REPO / "workflows" / "prof-opt" / "workflow.yaml").read_text(
+            encoding="utf-8"))
+    nodes = {n["name"]: n for n in wf["nodes"]}
+    assert list(nodes) == ["po_flatten", "po_contract", "po_baseline",
+                           "po_propose", "po_probe", "po_gate", "po_report"]
+    assert "po_full_train" not in nodes
+
+    gate = nodes["po_gate"]["routes"]
+    assert [(r.get("when"), r["to"]) for r in gate] == [
+        ("po_gate.output.json.decision == 'report'", "po_report"),
+        ("po_gate.output.json.decision == 'loop'", "po_propose"),
+        (None, "po_report"),
+    ]
+    # the finish-failed disclosure matches no explicit when -> catch-all
+    for decision in ("finish-failed", "full-train", "full-train-best-effort"):
+        assert not any(decision in (r.get("when") or "") for r in gate)
+
+    # every node's route set is total (last route has no when), the only
+    # back edge is the gate's loop, and every target exists
+    edges = []
+    for name, node in nodes.items():
+        routes = node["routes"]
+        assert "when" not in routes[-1], f"{name}: catch-all must be last"
+        for r in routes:
+            edges.append((name, r["to"]))
+    assert ("po_gate", "po_propose") in edges
+    assert not any(a == "po_propose" and b == "po_propose" for a, b in edges)
+    for a, b in edges:
+        assert b in nodes or b == "$end", (a, b)
+
+
 def test_baseline_chain_binds_training_to_claimed_device(tmp_path: Path):
     """The full training launches only on a ledger-claimed card (vid=baseline
     lock under devices/), the render binds it (--set device), and the
@@ -3040,24 +3079,6 @@ _RECHECK_SH = _REPO / "workflows" / "prof-opt" / "agents" / "po_propose" / "scri
 # latency gate mode, incumbent = 712 (the anchor baseline).
 _T8_OP_DELTA = {"Add": -1, "Div": -1, "Erf": -1, "Mul": -2, "Relu": 1}
 _T8_PREDICTED = -144
-_T8_PASS_VERDICT = {
-    "vid": "r1-01", "round": 1, "structural_check": "pass",
-    "makespan_cycles": 568, "base_makespan_cycles": 712,
-    "incumbent_cycles": 712, "improvement_cycles": 144,
-    "gate_mode": "latency", "pred_actual_ratio": 1.0,
-    "latency_gate": "pass", "predicted_delta_cycles": -144,
-    "outcome": "latency_pass",
-}
-_T8_MISMATCH_VERDICT = {
-    "vid": "r1-02", "round": 1, "structural_check": "fail",
-    "mismatch_layers": ["graph: ops Add,Div,Erf,Mul,Relu"],
-    "makespan_cycles": None, "base_makespan_cycles": None,
-    "incumbent_cycles": None, "improvement_cycles": None,
-    "gate_mode": None, "pred_actual_ratio": None, "latency_gate": None,
-    "predicted_delta_cycles": -144, "outcome": "structural_mismatch",
-}
-
-
 def _recheck_workspace(tmp_path: Path, *, mode: str = "placeholder",
                        best: dict | None = None,
                        anchor_baseline: int = 712) -> Path:
@@ -3140,15 +3161,6 @@ def _recheck_workspace(tmp_path: Path, *, mode: str = "placeholder",
     (art / "contracts.json").write_text(json.dumps(
         {"interpreter": {"sys_executable": sys.executable}}), encoding="utf-8")
     return art
-
-
-def _run_recheck(art: Path) -> subprocess.CompletedProcess:
-    env = dict(os.environ)
-    env["ORCA_ARTIFACTS_DIR"] = str(art)
-    return subprocess.run(
-        ["bash", str(_RECHECK_SH),
-         "--profiler", str(art / "scripts" / "placeholder_profiler.py")],
-        capture_output=True, text=True, timeout=300, env=env)
 
 
 def test_run_latency_recheck_mfu_fail_loud_matrix(tmp_path: Path):

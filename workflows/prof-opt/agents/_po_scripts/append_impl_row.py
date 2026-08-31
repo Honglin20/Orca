@@ -30,7 +30,7 @@ def main() -> int:
     ap.add_argument("--round", type=int, required=True)
     ap.add_argument("--seq", type=int, required=True)
     ap.add_argument("--parent-vid", type=nullable_value, default=None,
-                    help="best.json vid at proposal time, or null")
+                    help="lineage parent vid, or null (the base never advances)")
     ap.add_argument("--change-sig", required=True)
     ap.add_argument("--probe-epochs", type=int, required=True,
                     help="contracts.json proxy_budget.epochs")

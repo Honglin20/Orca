@@ -66,7 +66,7 @@ terminal row in ANY version makes the vid judged).
 |---|---|---|---|
 | 1 | `project_manifest.md` OR `shadow/` OR `BASELINE.lock` missing | failed | flatten |
 | 2 | `contracts.json` missing, or its recorded viability flag is false | failed | contract |
-| 3 | the baseline early chain is incomplete (`base/bottleneck_report.json` or `baseline/train.rendered.sh` missing), OR `baseline_status.md` records the chain as failed, OR `baseline/train_final.json` exists with `status: failed` | failed | baseline |
+| 3 | the baseline early chain is incomplete (`base/bottleneck_report.json` or `baseline/train.rendered.sh` missing), OR `baseline_status.md` records the chain as failed, OR `baseline/train_final.json` exists with `status: failed`, OR the finalizer is dead (attribution-checked `baseline/finalizer.pid` names no live pid) with NO `train_final.json` on disk (an externally killed guardian) | failed | baseline |
 | 4 | `rounds/` has no numeric directory | failed | propose |
 | 5 | any vid has a `success` row (after Step 0's harvest every in-flight training is terminal) | success | probe |
 | 6 | no success AND some vid's latest row is `latency_pass` while its training left NO terminal record (no terminal row, `train_status.json` missing or non-terminal, watchdog dead/absent — a torn launch, not a wait) | failed | probe |
