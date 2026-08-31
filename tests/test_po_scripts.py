@@ -2960,6 +2960,59 @@ def test_push_curves_docs_manifest_whitelist_and_columns(tmp_path: Path):
     assert docs2["data"] == docs["data"]
 
 
+def test_push_curves_w3_joint_three_charts_idempotent(tmp_path: Path):
+    """W3-T1 联调（web §6.3-1 后端侧）：一次 ``--docs`` 推送三图齐全——line
+    （§10.1 top-10）/ pareto（§10.2 全量，y=null 占位**保持 null 不伪造 0**——前端
+    W-P3 修正后按 null 剔除渲染，0 会让占位点画在 0 位）/ docs（§10.4 canonical
+    列）；同工作区二次推送三图 label+title+data 逐字一致（幂等替换契约：前端按
+    label+title 替换不复制——pareto 的幂等此前未覆盖）。"""
+    art = _po_ws(tmp_path)
+    (art / "base").mkdir()
+    (art / "base" / "origin_anchor.json").write_text(json.dumps(
+        {"baseline_makespan_cycles": 1000}), encoding="utf-8")
+    _po_variant(art, "r1-01", curve=[{"epoch": 1, "metric": 0.38}],
+                train_status={"vid": "r1-01", "stage": "done"},
+                shard={"vid": "r1-01", "status": "success", "gap": 0.02},
+                verdict={"vid": "r1-01", "makespan_cycles": 800,
+                         "outcome": "latency_pass"},
+                docs=("business_logic.md",))
+    # 达线未训: y stays null — the placeholder the front end must NOT plot at 0
+    _po_variant(art, "r2-01",
+                shard={"vid": "r2-01", "status": "latency_pass", "gap": None,
+                       "metric": None},
+                verdict={"vid": "r2-01", "makespan_cycles": 900,
+                         "outcome": "latency_pass"},
+                docs=("business_logic.md",))
+    sock = tmp_path / "chart.sock"
+    pushed_charts = []
+    for _ in range(2):
+        thread, messages = _chart_server(sock, replies=3)  # line+pareto+docs
+        proc = _push(art, sock, "--docs")
+        assert proc.returncode == 0, proc.stderr
+        thread.join(timeout=10)
+        assert len(messages) == 3
+        by_type = {m["payload"]["chart_type"]: m["payload"] for m in messages}
+        assert set(by_type) == {"line", "pareto", "table"}
+        # the three labels the front end keys its replace semantics on
+        assert by_type["line"]["label"] == "prof-opt/curves"
+        assert by_type["pareto"]["label"] == "prof-opt/pareto"
+        assert by_type["table"]["label"] == "prof-opt/docs"
+        # §10.2: the 达线未训 placeholder survives as a real null (never 0)
+        points = {row["vid"]: row for row in by_type["pareto"]["data"]}
+        assert points["r2-01"]["y"] is None
+        assert points["r1-01"]["y"] == 0.02
+        # §10.4 canonical columns carried verbatim
+        assert by_type["table"]["columns"] == ["vid", "doc", "status", "path",
+                                               "updated_at"]
+        pushed_charts.append(by_type)
+    # idempotent replace: the second push of an unchanged workspace is
+    # byte-identical on label+title+data for ALL THREE charts
+    for ctype in ("line", "pareto", "table"):
+        assert pushed_charts[1][ctype]["label"] == pushed_charts[0][ctype]["label"]
+        assert pushed_charts[1][ctype]["title"] == pushed_charts[0][ctype]["title"]
+        assert pushed_charts[1][ctype]["data"] == pushed_charts[0][ctype]["data"]
+
+
 def test_push_curves_recency_and_anchor_fallbacks(tmp_path: Path):
     """Unit pins for the deterministic fallbacks: _recency falls back to the
     curve file's mtime when the watchdog ts is absent or garbage, and

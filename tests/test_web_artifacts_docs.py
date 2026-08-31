@@ -336,6 +336,38 @@ def test_artifacts_file_too_large_413(tmp_path):
     run_async(go())
 
 
+# ── web SPEC §6.3-2（W3-T2）：端点只读——写方法在路由层即被拒 ─────────────────
+
+
+def test_artifacts_file_rejects_write_methods(tmp_path):
+    """W3-T2 只读验证：POST/PUT/PATCH/DELETE 全部 405——端点不存在任何写路径，
+    写请求连 handler 都不进（GET-only 路由），盘上文件零改动。
+
+    意图：面板 + 端点全程无写请求（web §5「只读」红线的服务侧锚点）。
+    """
+    manager = make_manager(tmp_path)
+
+    async def go():
+        rid = await _start_run(manager, tmp_path)
+        root = _make_artifacts(manager, rid)
+        before = (root / "baseline" / "business_logic.md").read_text("utf-8")
+        async with _client_factory(manager) as client:
+            for method in ("post", "put", "patch", "delete"):
+                kwargs = {} if method == "delete" else {
+                    "content": "malicious overwrite"}
+                resp = await getattr(client, method)(
+                    f"/api/runs/{rid}/artifacts/file",
+                    params={"path": "baseline/business_logic.md"},
+                    **kwargs,
+                )
+                assert resp.status_code == 405, f"{method}: {resp.status_code}"
+        assert (root / "baseline" / "business_logic.md").read_text(
+            "utf-8") == before  # 盘上零改动
+        await manager.shutdown()
+
+    run_async(go())
+
+
 # ── web SPEC §6.1-3：共享守卫与 resolve_asset_path 等价对拍（W1-T1）──────────
 
 

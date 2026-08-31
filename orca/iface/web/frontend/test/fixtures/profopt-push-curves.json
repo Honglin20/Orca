@@ -1,0 +1,442 @@
+{
+  "final": {
+    "prof-opt/curves": {
+      "chart_type": "line",
+      "color": "",
+      "data": [
+        {
+          "epoch": 1,
+          "metric": 0.4,
+          "vid": "baseline"
+        },
+        {
+          "epoch": 2,
+          "metric": 0.5,
+          "vid": "baseline"
+        },
+        {
+          "epoch": 1,
+          "metric": 0.45,
+          "vid": "r2-01"
+        },
+        {
+          "epoch": 1,
+          "metric": 0.41,
+          "vid": "r5-01"
+        },
+        {
+          "epoch": 2,
+          "metric": 0.46,
+          "vid": "r5-01"
+        },
+        {
+          "epoch": 1,
+          "metric": 0.38,
+          "vid": "r1-01"
+        },
+        {
+          "epoch": 2,
+          "metric": 0.42,
+          "vid": "r1-01"
+        }
+      ],
+      "hue": "vid",
+      "label": "prof-opt/curves",
+      "title": "prof-opt training curves (final)",
+      "value": "",
+      "x": "epoch",
+      "y": "metric"
+    },
+    "prof-opt/docs": {
+      "chart_type": "table",
+      "color": "",
+      "columns": [
+        "vid",
+        "doc",
+        "status",
+        "path",
+        "updated_at"
+      ],
+      "data": [
+        {
+          "doc": "business_logic.md",
+          "path": "baseline/business_logic.md",
+          "status": "baseline",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "baseline"
+        },
+        {
+          "doc": "information_analysis.md",
+          "path": "base/information_analysis.md",
+          "status": "baseline",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "baseline"
+        },
+        {
+          "doc": "mfu_bottleneck_report.md",
+          "path": "base/profile/mfu_bottleneck_report.md",
+          "status": "baseline",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "baseline"
+        },
+        {
+          "doc": "business_logic.md",
+          "path": "variants/r1-01/business_logic.md",
+          "status": "success",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "r1-01"
+        },
+        {
+          "doc": "information_analysis.md",
+          "path": "variants/r1-01/information_analysis.md",
+          "status": "success",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "r1-01"
+        },
+        {
+          "doc": "conformance.md",
+          "path": "variants/r1-01/conformance.md",
+          "status": "success",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "r1-01"
+        },
+        {
+          "doc": "profile/mfu_bottleneck_report.md",
+          "path": "variants/r1-01/profile/mfu_bottleneck_report.md",
+          "status": "success",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "r1-01"
+        },
+        {
+          "doc": "business_logic.md",
+          "path": "variants/r2-01/business_logic.md",
+          "status": "in-flight",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "r2-01"
+        },
+        {
+          "doc": "business_logic.md",
+          "path": "variants/r3-01/business_logic.md",
+          "status": "latency_pass",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "r3-01"
+        },
+        {
+          "doc": "conformance.md",
+          "path": "variants/r3-01/conformance.md",
+          "status": "latency_pass",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "r3-01"
+        },
+        {
+          "doc": "business_logic.md",
+          "path": "variants/r4-01/business_logic.md",
+          "status": "latency_fail",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "r4-01"
+        },
+        {
+          "doc": "business_logic.md",
+          "path": "variants/r5-01/business_logic.md",
+          "status": "success",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "r5-01"
+        },
+        {
+          "doc": "conformance.md",
+          "path": "variants/r5-01/conformance.md",
+          "status": "success",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "r5-01"
+        },
+        {
+          "doc": "analysis.md",
+          "path": "rounds/001/analysis.md",
+          "status": "final",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "round"
+        },
+        {
+          "doc": "analysis.md",
+          "path": "rounds/002/analysis.md",
+          "status": "final",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "round"
+        },
+        {
+          "doc": "analysis.md",
+          "path": "rounds/003/analysis.md",
+          "status": "final",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "round"
+        },
+        {
+          "doc": "accuracy_rules_snapshot.json",
+          "path": "base/accuracy_rules_snapshot.json",
+          "status": "snapshot",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "rules"
+        }
+      ],
+      "hue": "",
+      "label": "prof-opt/docs",
+      "title": "prof-opt analysis docs (final)",
+      "value": "",
+      "x": "",
+      "y": ""
+    },
+    "prof-opt/pareto": {
+      "caption": "y=null = no measurable outcome yet (达线未训占位, or trained but still awaiting the baseline anchor); y falls back to the latest metric while no gap exists (lower-is-better holds for gap only)",
+      "chart_type": "pareto",
+      "color": "color",
+      "data": [
+        {
+          "color": "#10b981",
+          "status": "success",
+          "vid": "r1-01",
+          "x": 20.0,
+          "y": 0.02
+        },
+        {
+          "color": "#3b82f6",
+          "status": "in-flight",
+          "vid": "r2-01",
+          "x": -20.0,
+          "y": 0.45
+        },
+        {
+          "color": "#94a3b8",
+          "status": "latency_pass",
+          "vid": "r3-01",
+          "x": 10.0,
+          "y": null
+        },
+        {
+          "color": "#f97316",
+          "status": "latency_fail",
+          "vid": "r4-01",
+          "x": -15.0,
+          "y": null
+        },
+        {
+          "color": "#10b981",
+          "status": "success",
+          "vid": "r5-01",
+          "x": 40.0,
+          "y": 0.005
+        }
+      ],
+      "hue": "",
+      "label": "prof-opt/pareto",
+      "pareto_x_direction": "max",
+      "pareto_y_direction": "min",
+      "title": "prof-opt variants pareto (final)",
+      "value": "",
+      "x": "x",
+      "x_label": "latency reduction vs baseline (%)",
+      "y": "y",
+      "y_label": "final gap / latest metric"
+    }
+  },
+  "live": {
+    "prof-opt/curves": {
+      "chart_type": "line",
+      "color": "",
+      "data": [
+        {
+          "epoch": 1,
+          "metric": 0.4,
+          "vid": "baseline"
+        },
+        {
+          "epoch": 2,
+          "metric": 0.5,
+          "vid": "baseline"
+        },
+        {
+          "epoch": 1,
+          "metric": 0.45,
+          "vid": "r2-01"
+        },
+        {
+          "epoch": 1,
+          "metric": 0.38,
+          "vid": "r1-01"
+        },
+        {
+          "epoch": 2,
+          "metric": 0.42,
+          "vid": "r1-01"
+        }
+      ],
+      "hue": "vid",
+      "label": "prof-opt/curves",
+      "title": "prof-opt training curves",
+      "value": "",
+      "x": "epoch",
+      "y": "metric"
+    },
+    "prof-opt/docs": {
+      "chart_type": "table",
+      "color": "",
+      "columns": [
+        "vid",
+        "doc",
+        "status",
+        "path",
+        "updated_at"
+      ],
+      "data": [
+        {
+          "doc": "business_logic.md",
+          "path": "baseline/business_logic.md",
+          "status": "baseline",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "baseline"
+        },
+        {
+          "doc": "information_analysis.md",
+          "path": "base/information_analysis.md",
+          "status": "baseline",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "baseline"
+        },
+        {
+          "doc": "mfu_bottleneck_report.md",
+          "path": "base/profile/mfu_bottleneck_report.md",
+          "status": "baseline",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "baseline"
+        },
+        {
+          "doc": "business_logic.md",
+          "path": "variants/r1-01/business_logic.md",
+          "status": "success",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "r1-01"
+        },
+        {
+          "doc": "information_analysis.md",
+          "path": "variants/r1-01/information_analysis.md",
+          "status": "success",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "r1-01"
+        },
+        {
+          "doc": "conformance.md",
+          "path": "variants/r1-01/conformance.md",
+          "status": "success",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "r1-01"
+        },
+        {
+          "doc": "profile/mfu_bottleneck_report.md",
+          "path": "variants/r1-01/profile/mfu_bottleneck_report.md",
+          "status": "success",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "r1-01"
+        },
+        {
+          "doc": "business_logic.md",
+          "path": "variants/r2-01/business_logic.md",
+          "status": "in-flight",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "r2-01"
+        },
+        {
+          "doc": "business_logic.md",
+          "path": "variants/r3-01/business_logic.md",
+          "status": "latency_pass",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "r3-01"
+        },
+        {
+          "doc": "conformance.md",
+          "path": "variants/r3-01/conformance.md",
+          "status": "latency_pass",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "r3-01"
+        },
+        {
+          "doc": "business_logic.md",
+          "path": "variants/r4-01/business_logic.md",
+          "status": "latency_fail",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "r4-01"
+        },
+        {
+          "doc": "analysis.md",
+          "path": "rounds/001/analysis.md",
+          "status": "final",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "round"
+        },
+        {
+          "doc": "analysis.md",
+          "path": "rounds/002/analysis.md",
+          "status": "final",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "round"
+        },
+        {
+          "doc": "accuracy_rules_snapshot.json",
+          "path": "base/accuracy_rules_snapshot.json",
+          "status": "snapshot",
+          "updated_at": "2026-08-31T17:46:02+00:00",
+          "vid": "rules"
+        }
+      ],
+      "hue": "",
+      "label": "prof-opt/docs",
+      "title": "prof-opt analysis docs",
+      "value": "",
+      "x": "",
+      "y": ""
+    },
+    "prof-opt/pareto": {
+      "caption": "y=null = no measurable outcome yet (达线未训占位, or trained but still awaiting the baseline anchor); y falls back to the latest metric while no gap exists (lower-is-better holds for gap only)",
+      "chart_type": "pareto",
+      "color": "color",
+      "data": [
+        {
+          "color": "#10b981",
+          "status": "success",
+          "vid": "r1-01",
+          "x": 20.0,
+          "y": 0.02
+        },
+        {
+          "color": "#3b82f6",
+          "status": "in-flight",
+          "vid": "r2-01",
+          "x": -20.0,
+          "y": 0.45
+        },
+        {
+          "color": "#94a3b8",
+          "status": "latency_pass",
+          "vid": "r3-01",
+          "x": 10.0,
+          "y": null
+        },
+        {
+          "color": "#f97316",
+          "status": "latency_fail",
+          "vid": "r4-01",
+          "x": -15.0,
+          "y": null
+        }
+      ],
+      "hue": "",
+      "label": "prof-opt/pareto",
+      "pareto_x_direction": "max",
+      "pareto_y_direction": "min",
+      "title": "prof-opt variants pareto",
+      "value": "",
+      "x": "x",
+      "x_label": "latency reduction vs baseline (%)",
+      "y": "y",
+      "y_label": "final gap / latest metric"
+    }
+  }
+}
