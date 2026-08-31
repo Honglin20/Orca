@@ -154,16 +154,22 @@ card + continue with the next vid.
 
 ### Step 4: Emit (executed — the training is the watchdog's business now)
 
+`device` = the idx claimed this entry (the LAST one when several vids
+launched; `null` when nothing launched). `epoch1_ok` = true iff every
+launched vid's liveness record landed (true when nothing launched):
+
 ```bash
 python3 "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
   --field status=executed \
   --field 'error=' \
+  --field device=<idx|null> \
+  --field epoch1_ok=<true|false> \
   --field 'generated_artifacts=["variants/<VID>/train/train.rendered.sh", "variants/<VID>/train/train.pid", "variants/<VID>/train/liveness.json", "variants/<VID>/metrics/metrics.jsonl", "probe_status.md"]'
 ```
 
 List a path only when the file exists on disk (drop a `probe_insufficient`
 vid's launch products; its history row is the record). On workspace-level
-breakage the same three fields with `status=failed` and `error` carrying
+breakage the same five fields with `status=failed` and `error` carrying
 the root cause. `status == executed` ⇔ `error == ""`.
 
 ## Validation

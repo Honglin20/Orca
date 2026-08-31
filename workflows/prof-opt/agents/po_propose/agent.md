@@ -379,18 +379,21 @@ Loop while the vid's verdict is a repairable failure:
    source). Best-effort by contract (no socket configured / push failure →
    exit 0, stderr note) — never a gate, never a retry loop.
 5. **Emit** (in `mfu` mode drop `base/bottleneck_analysis.json` from the
-   artifact list; `placeholder` mode keeps it):
+   artifact list; `placeholder` mode keeps it). `repair_count` = the round's
+   variant's count from `variants/<VID>/repair_trace.json` (0 on a
+   zero-proposal or structurally-skipped round — read the file, never guess):
    ```bash
    python3 "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
      --field status=executed \
      --field 'error=' \
+     --field repair_count=<N> \
      --field 'generated_artifacts=["rounds/<RRR>/proposals.json", "rounds/<RRR>/verdicts.jsonl", "rounds/<RRR>/analysis.md", "rounds/<RRR>/direction.json", "variants/<VID>/business_logic.md", "variants/<VID>/information_analysis.md", "variants/<VID>/conformance.md", "variants/<VID>/repair_trace.json", "base/accuracy_rules_snapshot.json", "base/bottleneck_report.json", "base/bottleneck_analysis.json", "base/information_analysis.md", "experiment_ledger.json", "history.jsonl"]'
    ```
    List a path only when the file exists on disk (`direction.json` and
    `repair_trace.json` exist only on their paths; drop
    `verdicts.jsonl` / the variant docs on a zero-proposal round; drop
    `base/bottleneck_analysis.json` in mfu mode). On failure paths the same
-   three fields with `status=failed`, `error` naming the root cause
+   four fields with `status=failed`, `error` naming the root cause
    (subagent + failure per the matrix), and honest `generated_artifacts`
    from disk. `status == executed` ⇔ `error == ""` — never both non-empty.
 
