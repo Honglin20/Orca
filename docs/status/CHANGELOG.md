@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-09-01] feat(prof-opt): v6 重设计——单变体收敛 + 异步训练流水线 + 流式早停 + Web 分析视图（commit `0653a47..b39c123`，14 commits）
+
+prof-opt 从 v5 双相门控重写为 v6：每轮 1 变体收敛到 target（修复内环 ≤5）+ npu/cuda 设备账本（probe 认卡启动即放行、watchdog detached 流式早停连续 10 超预算杀）+ ledger 分片聚合 + top-10/pareto/docs 清单推送 + web 只读分析文档面板（点开才渲染）；8→7 节点（po_full_train 退役）。SDD loop 全流程：SPEC 终审（3 拍板合入）+ 计划 3 轮对抗 + 8 实现批次内环全闭环 + 逻辑验证环 PASS（0 代码缺陷，po 250 passed / 0 skipped，vitest 614，tars validate 0/0）；真机 E2E 归用户。详见 [release note](../releases/2026-09-01-prof-opt-v6.md)。
+
 ## [2026-08-31] feat(prof-opt): mfu 模式瓶颈分析直接采用 mfu-analyzer 报告（commit `a1e7701`）：
 mfu 模式去掉 bottleneck-analyst 层与 top-算子限制，structure-proposer 直接通读
 `base/profile/mfu_bottleneck_report.md` 从整体测量判断瓶颈（DMA/低 MFU/内存/串行化），
