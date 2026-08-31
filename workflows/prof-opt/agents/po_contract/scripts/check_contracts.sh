@@ -305,6 +305,10 @@ if mode != "--reuse-check":
     # Required tokens mirror the Step 5 spec exactly: a template missing
     # <<seed>> would run unseeded training, missing <<python>> would dodge the
     # pinned interpreter — both must fail HERE, not silently downstream.
+    # <<device>> is required in BOTH training templates (v6 §3.2): every
+    # training render claims a card through the allocation ledger and binds
+    # it with --set device=<idx>; a template without the token silently
+    # ignores the allocated card and breaks the ledger's mutual exclusion.
     # <<ckpt>> is FORBIDDEN in the two training templates (train-from-scratch:
     # no checkpoint is ever loaded), and <<data_value>> appears in the probe
     # template IFF proxy_budget.dataset_knob was discovered (a token without a
@@ -312,9 +316,9 @@ if mode != "--reuse-check":
     # silently train on the full dataset and break the fairness invariant).
     for tname, tokens in (
         ("run_probe_finetune.template.sh",
-         ("<<python>>", "<<epochs>>", "<<out_dir>>", "<<seed>>")),
+         ("<<python>>", "<<epochs>>", "<<out_dir>>", "<<seed>>", "<<device>>")),
         ("run_full_finetune.template.sh",
-         ("<<python>>", "<<epochs>>", "<<out_dir>>", "<<seed>>")),
+         ("<<python>>", "<<epochs>>", "<<out_dir>>", "<<seed>>", "<<device>>")),
         ("run_eval.template.sh", ("<<python>>", "<<ckpt>>", "<<log>>")),
         ("export_onnx.template.sh", ("<<python>>", "<<out>>", "<<seed>>")),
     ):

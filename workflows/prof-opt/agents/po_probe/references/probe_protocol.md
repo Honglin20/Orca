@@ -1,105 +1,144 @@
 # Probe Protocol
 
-Per-survivor accuracy probe procedure (stop-at-k), executed only in the
-accuracy phase (the node prompt's Step 0 decides the phase via
-`round_state.py` — in the latency phase the node passes through without
-touching this protocol). Paths are relative to the workspace root
-(`$ORCA_ARTIFACTS_DIR`) unless absolute. `RRR` = current round zero-padded
-to 3 digits.
+Per-variant launch procedure (claim → render → detach → liveness → emit).
+Paths are relative to the workspace root (`$ORCA_ARTIFACTS_DIR`) unless
+absolute; `<VID>` = the variant being launched; every command runs with the
+workspace root as cwd.
 
-Gate parameters used here (direction-normalized by `metric_direction` from
-`contracts.json`):
+Budgets and lines used here — all read from disk, never from inputs:
 
-- stop depth `k` = `contracts.json` `proxy_budget.epochs` — read from disk.
-- full effective epochs `E` = `contracts.json` `full_train_budget.epochs`.
-- accuracy budget = `base/origin_anchor.json` `accuracy_budget` — the
-  FROZEN origin anchor; never a raw input, never recomputed here.
-- curve gate line: `baseline_curve_at_k − 1.0 × accuracy_budget` where
-  `baseline_curve_at_k` = the baseline curve's metric at epoch k (from
-  `baseline/baseline_metrics.jsonl`).
-- eval gate (only when `train.ckpt_per_epoch` is true): variant k-th ckpt
-  eval must be within the same budget of `baseline/baseline_k_acc.json`'s
-  `baseline_k_acc`.
-- `gap` = the WORST of the two gate gaps in budget units (higher = further
-  from the line); pass ⇔ gap ≤ accuracy_budget. The scripted verdict
-  computes it — never by hand.
-
-For `higher_better` metrics "worse than the line" means value < line; for
-`lower_better` it means value > line. All comparisons are computed by the
-shared verdict script reading the recorded JSON values — never by mental
-arithmetic.
-
-**Fairness invariant (iron rule)**: every training (baseline, variant,
-winner) renders the SAME template with the SAME full effective epochs,
-data, and seed — the learning-rate schedule plans over the full horizon in
-every run. A variant differs from the baseline ONLY in structure and in
-being stopped at epoch k from the outside. Never render a smaller epoch
-count, never tune a data/step cap here.
-
-## GPU serial guard (run BEFORE any variant training; re-check on entry)
-
-The baseline full training runs detached behind its finalizer. The guard
-target is `baseline/finalizer.pid` (the finalizer's lifetime ⊇ the
-training's — it survives the training's completion to finish the anchors).
-Four quadrants, act per table:
-
-| finalizer.pid state | `baseline/train_final.json` | action |
-|---|---|---|
-| alive | — | **bounded-wait**: poll again on your next turn (status message + `do not call orca next`); each individual wait call ≤ 480 s. **Stall is an error**: while the TRAINING is alive, `baseline/train.attempt<N>.log` mtime AND the curve point count BOTH frozen for ≥ 30 min → `error` route (status=failed, cause "baseline training stalled"). During the finalizer-only tail (training done), `baseline/finalizer.log` frozen for ≥ 30 min → same. |
-| dead | `status: done` | **pass** — the baseline is finalized; proceed. |
-| dead | `status: failed` | **error route**: emit `status=failed`, assessment names `train_final.stage`. |
-| dead | missing | **fail loud**: the finalizer exited without a terminal state (assessment names `baseline/finalizer.log`); never proceed on an unknown baseline. |
-
-## Training set (mechanical, no timing inference)
-
-Resolved by the NODE's Step 0 from history; restated here because re-entry
-re-derives it:
-
-- `best.json` vid has NO probe row in history (any version) → **first
-  entry**: train only that vid.
-- otherwise → **recovery round**: train the current round's survivor set =
-  latest history rows with `round == round_state current` and
-  `outcome == "latency_pass"`, excluding vids whose latest row is already a
-  terminal probe row (`accuracy_pass` / `accuracy_fail` /
-  `probe_insufficient` — all three count as already trained).
+- full effective epochs `E` and seed = `contracts.json`
+  `full_train_budget.epochs` / `.seed`. **Fairness invariant (iron rule)**:
+  the variant renders the SAME template at the SAME full budget the
+  baseline trained under — it differs from the baseline ONLY in structure.
+  Never render a smaller epoch count, never tune a data/step cap here.
+- frozen target line = `base/origin_anchor.json` `target_cycles`
+  (read-only; the boundary is inclusive).
+- training device backend + count = `train_device.json` (resolved once at
+  the entry node). Every card in use is owned by an `O_EXCL` lock under
+  `devices/`; the ledger (`scripts/device_alloc.py`) is the ONLY
+  allocation path — claim by hand is forbidden.
 
 ## State derivation (every entry, including re-entry)
 
-1. Run the GPU guard. Still waiting → status message; terminal-done →
-   continue.
-2. Confirm the training set per the rule above.
-3. Per survivor, the stage:
-   - history row already terminal (`outcome` in `accuracy_pass` /
-     `accuracy_fail` / `probe_insufficient`) → done, skip;
-   - `variants/<vid>/eval/proxy.json` exists but the history row is still
-     `latency_pass` → reconcile first (see below), then re-derive;
-   - `variants/<vid>/train/stop_status.json` exists but the history row is
-     still `latency_pass` → the training already terminated; resume at the
-     curve extraction (never re-detach);
-   - a pid file under `variants/<vid>/train/` with a live group → the step
-     is in flight: poll it with `stop_at_epoch.sh` (never re-launch);
-   - otherwise → start at the train step.
-4. Write `probe_status.md`: round, training-set list, per-vid stage,
-   in-flight pids, attempt counts, timestamp. Truncate the heal ledger
-   `.po_probe_healed.txt` on node entry (it reports THIS entry's heals only).
+1. The deploy stamp is verified by the node's Step 0.
+2. Training set: vids whose LATEST `history.jsonl` row has
+   `outcome == "latency_pass"`. Per vid, the stage:
+   - latest row already terminal (`success` / `accuracy_fail` /
+     `probe_insufficient` / `latency_fail`) → done, skip (not in the set);
+   - `variants/<VID>/train/liveness.json` exists and parses AND the launch
+     is not dead (train pid alive, or a terminal `train_status.json`
+     present) → the launch already succeeded: go straight to emit (the
+     record IS the success payload);
+   - `liveness.json` present but the training died with no terminal
+     `train_status.json` → an unjudged dead launch: run the release (the
+     card must not stay behind a dead training) and take the
+     `probe_insufficient` terminal exactly as the exhausted-retry path
+     below would — never re-detach, never straight to emit;
+   - a pid file under `variants/<VID>/train/` with a live group → the
+     launch is in flight: resume the liveness poll (never re-detach);
+   - otherwise → start at the verdict precondition.
+3. Write `probe_status.md`: training-set list, per-vid stage, live pids,
+   attempt counts, timestamp. Truncate the heal ledger
+   `.po_probe_healed.txt` on node entry (it reports THIS entry's heals
+   only).
 
-## Reconciliation (crash between result file and history row)
+## Verdict precondition (HARD — before any resource is claimed)
 
-For a survivor whose result file exists while its history row is still the
-process-state `latency_pass`: re-derive the outcome from the result file
-exactly as the stage below would have, append the history row and the
-results line, then continue with the next survivor. Result files are the
-payload; history is the ledger — after reconciliation they must agree.
+For each vid in the training set, compare mechanically:
 
-## Stop-at-k train (per survivor)
+```bash
+python3 - "$ORCA_ARTIFACTS_DIR" "<VID>" <<'PY'
+import json, sys
+from pathlib import Path
+art, vid = Path(sys.argv[1]), sys.argv[2]
+try:
+    verdict = json.loads((art / "variants" / vid / "verdict.json")
+                         .read_text(encoding="utf-8"))
+    target = json.loads((art / "base" / "origin_anchor.json")
+                        .read_text(encoding="utf-8"))["target_cycles"]
+except Exception as exc:
+    raise SystemExit(f"FATAL: {vid} verdict/anchor unreadable ({exc}) — torn "
+                     "workspace; never launch, never re-measure here")
+ms = verdict.get("makespan_cycles")
+if not isinstance(ms, int) or isinstance(ms, bool):
+    raise SystemExit(f"FATAL: {vid} verdict.json carries no makespan_cycles — "
+                     "torn workspace (propose and probe disagree)")
+if ms > target:
+    raise SystemExit(f"FATAL: {vid} makespan {ms} > frozen target {target} — "
+                     "torn workspace (the verdict changed between propose "
+                     "and probe); fail loud")
+print(json.dumps({"vid": vid, "makespan_cycles": ms,
+                  "target_cycles": target, "ok": True}))
+PY
+```
+
+A non-zero exit (or a missing verdict.json — same failure class) is a
+workspace-level failure: the node emits `status=failed` with the stderr
+quoted. No card is claimed, nothing launches.
+
+## Device claim (or park)
+
+The free set is ALWAYS computed by the ledger (complement of real backend
+occupancy UNION live locks), never by hand:
+
+```bash
+python3 "$ORCA_ARTIFACTS_DIR/scripts/device_alloc.py" free \
+  --artifacts "$ORCA_ARTIFACTS_DIR"
+```
+
+- `free: []` → **park**: final reply is a status message containing
+  `do not call orca next` (name `busy_real` / `locked` and any `recycled`
+  disclosures). ONE check per turn; the next turn re-checks. A full house
+  is a legitimate wait state — never an error, never a busy loop.
+- non-empty → claim, render, and detach chained in ONE command block (so a
+  claimed card never sits behind a dead turn). The claim is ONE
+  deterministic command (free → acquire → the acquired idx must lie inside
+  the free set — acquire is lock-scoped, real occupancy is free's half of
+  the ledger; a card outside the free set is busy-real or torn, never
+  trained on):
+
+```bash
+python3 "$ORCA_ARTIFACTS_DIR/scripts/device_alloc.py" claim \
+  --artifacts "$ORCA_ARTIFACTS_DIR" --vid <VID>
+```
+
+`"ok": false` (`no free training device` / `all devices locked`) → park
+(status message). A non-zero exit (busy-real/torn idx guard — the command
+itself releases the offending card before failing) → node `status=failed`
+with the stderr quoted.
+
+Lock ownership: the claim's owner pid is the claiming process (short-lived
+— the render needs the idx, so the claim necessarily precedes the detached
+wrapper). As soon as the training wrapper is alive you ADOPT its pid (the
+wrapper lives for the whole training):
+
+```bash
+python3 "$ORCA_ARTIFACTS_DIR/scripts/device_alloc.py" adopt \
+  --artifacts "$ORCA_ARTIFACTS_DIR" --vid <VID> --pid <train.pid content>
+```
+
+Without the adopt, the next `free` anywhere in the run would reclaim the
+lock of a live training — the ledger's mutual exclusion rests on the
+long-lived owner, never on the claim command.
+
+The release command (every failed launch path, and the probe_insufficient
+terminal — a card never outlives the vid it was claimed for):
+
+```bash
+python3 "$ORCA_ARTIFACTS_DIR/scripts/device_alloc.py" release \
+  --artifacts "$ORCA_ARTIFACTS_DIR" --idx <IDX>
+```
+
+## Render + detach
 
 1. The training template is
    `$ORCA_ARTIFACTS_DIR/templates/run_full_finetune.template.sh` (required
-   tokens: `epochs` / `out_dir` / `seed`; some templates also declare
-   `vid`). Read it once and note exactly which tokens it declares.
-2. Render at the FULL effective epochs with the VARIANT's shadow (read the
-   budget values from `contracts.json` — `full_train_budget.epochs` /
-   `.seed`):
+   tokens include `epochs` / `out_dir` / `seed` / `device`; some templates
+   also declare `vid`). Read it once and note exactly which tokens it
+   declares. Render at the FULL effective epochs with the VARIANT's shadow
+   and the CLAIMED card:
+
    ```bash
    mkdir -p "$ORCA_ARTIFACTS_DIR/variants/<VID>/train"
    bash "$ORCA_ARTIFACTS_DIR/scripts/render_run.sh" \
@@ -109,188 +148,123 @@ payload; history is the ledger — after reconciliation they must agree.
      --set "out_dir=$ORCA_ARTIFACTS_DIR/variants/<VID>/train" \
      --set "seed=<full_train_budget.seed>" \
      --set "vid=<VID>" \
+     --set "device=<IDX>" \
      --set "shadow_dir=$ORCA_ARTIFACTS_DIR/variants/<VID>/shadow" \
      --set "shadow_pkgs=$(python3 -c "import json; print(','.join(json.load(open('$ORCA_ARTIFACTS_DIR/contracts.json'))['shadow']['shadow_pkgs']))")" \
      --set "project_root=<project-root>" \
      --set "python=$(python3 -c "import json; print(json.load(open('$ORCA_ARTIFACTS_DIR/contracts.json'))['interpreter']['sys_executable'])")"
    ```
-3. **Detach** (wrapper group leader writes its OWN pid and does NOT exec —
-   pid/rc each have their own writer, so a killed group leaves rc absent):
+
+   **Render failure → release the card FIRST, then fail loud** (the error
+   names the released idx): a claimed card never outlives a failed render.
+
+2. **Detach the training wrapper** (group leader writes its OWN pid and does
+   NOT exec — pid/rc each have their own writer, so a killed group leaves
+   rc absent):
+
    ```bash
    cd "$ORCA_ARTIFACTS_DIR/variants/<VID>/train" && \
    setsid bash -c 'echo $$ > train.pid; bash train.rendered.sh > train.log 2>&1; echo $? > rc' \
      </dev/null >>wrapper.log 2>&1 &
    ```
-4. **Bounded-poll with the external stop** (interval ≤ 30 s between calls;
-   each call is ONE idempotent check — re-issue until it reports a terminal
-   state; never sleep past the single-bash cap in one call):
+
+   Then confirm the wrapper came alive (pid file + `/proc` cmdline
+   attribution, bounded wait ≤ 10 × 1s) and **adopt its pid** (the
+   device-claim section's adopt command) — the launch is not finished
+   until the claim is owned by the long-lived wrapper.
+
+3. **Detach the watchdog** (it self-writes `watchdog.pid`; its log lines
+   carry ISO8601 stamps; the card is released by its terminal action):
+
    ```bash
-   bash "$ORCA_ARTIFACTS_DIR/scripts/stop_at_epoch.sh" \
-     --log "$ORCA_ARTIFACTS_DIR/variants/<VID>/train/train.log" \
-     --contract "$ORCA_ARTIFACTS_DIR/contracts.json" \
-     --stop-epoch <k> \
-     --pid-file "$ORCA_ARTIFACTS_DIR/variants/<VID>/train/train.pid"
+   cd "$ORCA_ARTIFACTS_DIR/variants/<VID>" && \
+   setsid bash "$ORCA_ARTIFACTS_DIR/scripts/watch_variant.sh" \
+     --vid <VID> --device <IDX> </dev/null >>watchdog.log 2>&1 &
    ```
-   - `{"status": "waiting"}` → the group is alive and below k: poll again
-     on the next call (between polls, push the live curves — below). If
-     your turn tops out → status message with `do not call orca next`.
-   - `{"status": "killed", "stopped_at_epoch": N}` → terminal: the group
-     was TERM→(grace)→KILLed; `N` is the ACTUAL parsed depth (≥ k, not
-     always k — lines written before the group died count).
-   - `{"status": "natural_done", "stopped_at_epoch": N, "rc": R,
-     "monitor_failed": B}` → terminal: the worker finished on its own;
-     `monitor_failed=true` (N > k) means the kill missed — disclose it in
-     the assessment and the history row.
-   - Terminal-state priority: `stop_status.json` wins over the rc file.
-   - **Retry budget**: `rc != 0` (failed training) or the script's hard
-     errors (attribution refusal, crash scene) → read the log tail, fix
-     ONLY by re-rendering with corrected parameter values (the heal
-     whitelist), wipe the PARTIAL CHECKPOINT ARTIFACTS the train contract's
-     output rule predicts under the out-dir (never the control files
-     `train.pid` / `rc` / `train.log` / `train.rendered.sh` — a from-scratch
-     relaunch re-creates the checkpoints, the control files must survive),
-     relaunch (attempt counter in `probe_status.md`). After 2 failed
-     retries → terminal `probe_insufficient` (`proxy_acc=null`,
-     `promote_gate="fail"`, no gap), `max_retries_hit=true`, next vid.
-     Record heals under `.po_probe_healed.txt`.
-   - **While waiting**: push the live curves each poll cycle (best-effort
-     sidecar, never fatal):
-     ```bash
-     python3 "$ORCA_ARTIFACTS_DIR/scripts/push_curves.py" \
-       --artifacts "$ORCA_ARTIFACTS_DIR" || true
-     ```
-5. **Curve extraction** at the RECORDED depth (never assume k):
+
+   Confirm `watchdog.pid` appears (bounded wait ≤ 10 × 1s). The launch is
+   incomplete without its guardian.
+
+## Liveness (four conditions, bounded ≤ 15 rounds × ≤ 30 s)
+
+Per poll cycle, ALL FOUR must hold:
+
+1. `train.pid` alive AND its `/proc/<pid>/cmdline` references
+   `train.rendered.sh` (attribution — a recycled pid from an unrelated
+   process never counts);
+2. `train.log` exists and is non-empty;
+3. the epoch-1 metric line is parseable:
+
    ```bash
    python3 "$ORCA_ARTIFACTS_DIR/scripts/metric_curve.py" extract \
      --contract "$ORCA_ARTIFACTS_DIR/contracts.json" \
      --log "$ORCA_ARTIFACTS_DIR/variants/<VID>/train/train.log" \
-     --out "$ORCA_ARTIFACTS_DIR/variants/<VID>/metrics/metrics.jsonl" \
-     --expected-epochs "<stopped_at_epoch from stop_status.json>"
+     --out "$ORCA_ARTIFACTS_DIR/variants/<VID>/metrics/metrics.jsonl"
    ```
-   A missing, duplicate, or non-contiguous epoch is a hard failure — do not
-   substitute the final eval value for the curve.
-6. **Pinned-depth comparison** (always at k, against the baseline FULL
-   curve — the anchor is the file itself, recorded in the output):
-   ```bash
-   python3 "$ORCA_ARTIFACTS_DIR/scripts/metric_curve.py" compare \
-     --baseline "$ORCA_ARTIFACTS_DIR/baseline/baseline_metrics.jsonl" \
-     --candidate "$ORCA_ARTIFACTS_DIR/variants/<VID>/metrics/metrics.jsonl" \
-     --direction "<contracts.json eval.metric_direction>" \
-     --budget "<base/origin_anchor.json accuracy_budget>" \
-     --at-epoch <k>
-   ```
-   Either curve lacking epoch k fails loud (never silently compare at a
-   different depth). Persist this JSON as
-   `variants/<VID>/metrics/epoch_compare.json` — its `at_epoch` must equal
-   k, its `baseline_path` names the anchor, and its `normalized_loss` is
-   the curve gate's gap.
-7. **k-th checkpoint eval** (only when `contracts.json`
-   `train.ckpt_per_epoch` is true): resolve the k-th checkpoint from the
-   variant's train out-dir (the k-th match of `train.ckpt_output_rule` in
-   write order), render + run the eval template with `ckpt=<that path>` and
-   `log=.../variants/<VID>/eval/probe.log` (same render form as the node's
-   other eval renders), extract the metric, write
-   `variants/<VID>/eval/proxy.json`:
-   `{"vid": "<VID>", "ckpt": "<path>", "metric_value": <number>, "k": <k>}`.
-   **Eval-load failure matrix**: the eval fails to load/run → re-run it
-   ONCE (re-render, new log); still failing → **degrade to curve-only
-   judgment** with `eval_failed: true`, `eval_acc: null`, and the
-   degradation disclosed in the history row and the assessment — the probe
-   is not lost, only less strict (its gap is then the curve gap alone).
-   When `ckpt_per_epoch` is false → curve-only by design: set
-   `eval_skipped_no_epoch_ckpt: true` in the history row (disclosed, not an
-   error).
-8. **Accuracy verdict** (scripted; BOTH gates when the eval ran, curve
-   alone otherwise; the budget comes from the origin anchor — no budget
-   argument is passed):
-   ```bash
-   python3 "$ORCA_ARTIFACTS_DIR/scripts/verdict_decide.py" promote \
-     --artifacts "$ORCA_ARTIFACTS_DIR" --vid <VID>
-   ```
-   Prints `{'curve_pass', 'eval_acc', 'eval_pass', 'line',
-   'accuracy_pass', 'gap'}`: the line is recomputed from the anchor
-   RECORDED in `variants/<VID>/metrics/epoch_compare.json`
-   (`baseline_metric`) and the direction from `contracts.json` — never by
-   mental arithmetic or hand-copied values. `gap` is the WORST gate gap;
-   `accuracy_pass` ⇔ gap ≤ the frozen budget. The eval gate applies only
-   when both the variant eval (`variants/<VID>/eval/proxy.json`
-   `metric_value`) and the baseline anchor
-   (`baseline/baseline_k_acc.json` `baseline_k_acc`) exist; either absent →
-   curve-only judgment.
-   outcome = `accuracy_pass` if true else `accuracy_fail`.
 
-## History row + results line (after each terminal outcome)
+   rc 0 = at least one contiguous-from-1 epoch line parsed (epoch 1 among
+   them — the contracts pattern enforces contiguity);
+4. the four conditions held simultaneously in this cycle.
 
-```bash
-python3 -c "import sys; sys.path.insert(0, '$ORCA_ARTIFACTS_DIR/scripts'); \
-from history_lib import append_probe; \
-append_probe('$ORCA_ARTIFACTS_DIR/history.jsonl', '<VID>', \
-proxy_acc=<the CURVE metric at k — always the curve value, never the eval value>, \
-promote_gate='<pass|fail>', outcome='<accuracy_pass|accuracy_fail|probe_insufficient>', \
-gap=<the verdict's gap, or omit for probe_insufficient>, \
-eval_acc=<eval metric or None>, \
-eval_failed=<true only when the k-ckpt eval could not run>, \
-eval_skipped_no_epoch_ckpt=<true only when ckpt_per_epoch is false>, \
-monitor_failed=<true only when stop_status says so>)"
-```
+Never let one sleep approach the single-bash cap; a cycle that tops out
+your turn ends with the status message (`do not call orca next`) and the
+next turn resumes polling.
 
-(Omit the optional fields that do not apply — `None` defaults keep them out
-of the row.) Then the results line:
+**Success** → write the liveness record (atomic replace via a tmp file +
+rename): `variants/<VID>/train/liveness.json` =
+`{"vid": "<VID>", "epoch1_ok": true, "device": <IDX>, "train_pid": <pid>,
+"ts": "<ISO8601>"}`.
 
-```bash
-python3 -c "import json, pathlib; \
-p = pathlib.Path('$ORCA_ARTIFACTS_DIR/rounds/<RRR>/probe_results.jsonl'); \
-row = {'vid': '<VID>', 'proxy_acc': <curve-at-k or None>, 'eval_acc': <or None>, \
-'promote_gate': '<pass|fail>', 'outcome': '<outcome>', 'gap': <or None>, \
-'stop_status': '<killed|natural_done>', 'stopped_at_epoch': <N>, \
-'monitor_failed': <bool>}; \
-p.parent.mkdir(parents=True, exist_ok=True); \
-with p.open('a', encoding='utf-8') as f: f.write(json.dumps(row) + chr(10))"
-```
+**Bounded failure** → retry budget. The failure classes, explicitly (an
+ambiguous state is never left to improvisation):
 
-Append the results line ONLY when creating the outcome fresh (not during
-reconciliation of a line that already exists — check the file for the vid
-first).
+- 15 rounds without all four conditions holding;
+- the training crashed: `rc` file present with a non-zero value, or the
+  group dead without an rc file;
+- the training finished NATURALLY inside the window (`rc` == 0) but the
+  epoch-1 line never parsed — a fast-completing run that produced no
+  parseable curve is a failed launch for liveness purposes (disclose the
+  rc=0 + empty-curve fact in `probe_status.md`), never a silent pass.
 
-## Rule extraction (after the whole training set is terminal)
+(The remaining natural-completion case — `rc` == 0 AND the epoch-1 line
+already parsed — is a SUCCESS: the four conditions were met while the pid
+was alive; write the liveness record and continue to emit. The training's
+terminal judgment belongs to the watchdog either way.)
 
-Dispatch `accuracy-analyst` (node prompt's protocol) with: this round's
-probe rows (vid / gap / accuracy_pass / proxy_acc), each vid's lineage
-`change_sig` (its latest history row), and the current
-`$ORCA_ARTIFACTS_DIR/accuracy_rules.json`. The analyst returns an UPDATED
-rule file (same schema). Validate mechanically:
+- retry at most 2 times: read the train log tail, fix ONLY by re-rendering
+  with corrected parameter values (the heal whitelist: path/argument
+  alignment), wipe the PARTIAL CHECKPOINT artifacts the train contract's
+  `ckpt_output_rule` predicts under the out-dir (never the control files
+  `train.pid` / `rc` / `train.log` / `train.rendered.sh` — a from-scratch
+  relaunch re-creates the checkpoints, the control files must survive),
+  relaunch (attempt counter in `probe_status.md`; re-adopt the fresh
+  wrapper pid). The card STAYS claimed across retries of the same vid.
+  Record heals under `.po_probe_healed.txt`.
+- exhausted → terminal `probe_insufficient` (typed builder only) + release
+  the card + next vid:
 
-```bash
-python3 "$ORCA_ARTIFACTS_DIR/scripts/rules_pool.py" check \
-  --artifacts "$ORCA_ARTIFACTS_DIR"
-```
+  ```bash
+  python3 -c "import sys; sys.path.insert(0, '$ORCA_ARTIFACTS_DIR/scripts'); \
+  from history_lib import append_terminal; \
+  append_terminal('$ORCA_ARTIFACTS_DIR/history.jsonl', '<VID>', \
+  outcome='probe_insufficient', stage='liveness', max_retries_hit=True)"
+  python3 "$ORCA_ARTIFACTS_DIR/scripts/device_alloc.py" release \
+    --artifacts "$ORCA_ARTIFACTS_DIR" --idx <IDX>
+  ```
 
-A failed check → re-dispatch the analyst ONCE with the failing rows quoted;
-still failing → delete only the offending rows, disclose them in the
-assessment, continue (the rules are an incremental asset; a bad row never
-blocks the round).
+## Reconciliation (crash between launch state and history row)
 
-## Round-end advance (accuracy phase)
+Re-entry re-derives everything from disk (see state derivation). The only
+divergence class on this node's paths is a probe_insufficient row whose
+release never ran: a vid whose latest row is `probe_insufficient` while a
+lock naming it still exists under `devices/` → run the release once
+(idempotent) and disclose it in `probe_status.md`.
 
-After the training set is terminal AND the rule extraction is settled:
+## Emit
 
-```bash
-python3 "$ORCA_ARTIFACTS_DIR/scripts/advance_round.py" --artifacts "$ORCA_ARTIFACTS_DIR"
-```
-
-- In the accuracy phase only an `accuracy_pass` vid at or under the frozen
-  `target_cycles` advances (smallest gap wins); a round with none keeps the
-  base FIXED — the failed directions land in the round's `direction.json`
-  (`failed_sigs`) as the next round's rerouting signal.
-- `.round_advanced` and `rounds/<RRR>/direction.json` remain the on-disk
-  record of `base_advanced` / `best_updated` / `advanced_vid`; the node
-  output does not duplicate them.
-- A non-zero exit is a workspace-level failure: emit `status=failed` with
-  the cause in `error`; the success-product gate is not run on that path.
-
-## Round summary marker
-
-Keep a one-line human summary in `.po_probe_assessment.txt` (mode,
-accuracy passes, retry hits, monitor_failed and eval-degradation and
-rule-extraction disclosures). It is an on-disk disclosure artifact for
-debugging and the round analysis, not an output-schema field.
+The node's Step 4. `generated_artifacts` lists only files that exist:
+`variants/<VID>/train/train.rendered.sh`, `train.pid`,
+`liveness.json`, `variants/<VID>/metrics/metrics.jsonl`, `probe_status.md`
+(plus `variants/<VID>/watchdog.pid` / `watchdog.log` when present). A
+`probe_insufficient` vid contributes its history row only — its partial
+launch products are not listed.

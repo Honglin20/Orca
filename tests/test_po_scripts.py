@@ -1577,7 +1577,7 @@ def _contracts_workspace(tmp_path: Path, *, probe_body: str | None = None,
 
     probe = probe_body or (
         '"<<python>>" train.py --epochs <<epochs>> --out-dir <<out_dir>> '
-        '--seed <<seed>>\n')
+        '--seed <<seed>> --device <<device>>\n')
     # v4 single training pipeline: the full template defaults to the SAME
     # bytes as the probe template (the gate asserts identity)
     full = probe if full_body is None else full_body
@@ -1693,6 +1693,35 @@ def test_check_contracts_gate_enforces_token_budget_consistency(tmp_path: Path):
     proc4 = _run_contracts_gate(art4)
     assert proc4.returncode == 1
     assert "carries" in proc4.stderr and "<<max_steps>>" in proc4.stderr
+
+
+def test_check_contracts_gate_requires_device_token_in_training_templates(tmp_path: Path):
+    # a training template without <<device>> renders a card-agnostic training
+    # — the allocation ledger's mutual exclusion silently breaks (v6 §3.2)
+    art = _contracts_workspace(
+        tmp_path,
+        probe_body='"<<python>>" train.py --epochs <<epochs>> --out-dir <<out_dir>> '
+                   '--seed <<seed>>\n')
+    proc = _run_contracts_gate(art)
+    assert proc.returncode == 1
+    assert "<<device>>" in proc.stderr
+
+    # the symmetric half: the EVAL/EXPORT templates must NOT grow the token
+    # (only the two training renders bind a claimed card)
+    art2 = _contracts_workspace(tmp_path / "b")
+    tpl = art2 / "templates" / "run_eval.template.sh"
+    tpl.write_text(tpl.read_text(encoding="utf-8").rstrip("\n")
+                   + " --device <<device>>\n", encoding="utf-8")
+    assert _run_contracts_gate(art2).returncode == 0
+
+    # the full-budget training template is pinned independently (a divergent
+    # edit to its token row alone must still fail)
+    art3 = _contracts_workspace(
+        tmp_path / "c",
+        full_body='"<<python>>" train.py --epochs <<epochs>> --out-dir <<out_dir>> '
+                  '--seed <<seed>>\n')
+    proc3 = _run_contracts_gate(art3)
+    assert proc3.returncode == 1 and "<<device>>" in proc3.stderr
 
 
 def test_check_contracts_gate_forbids_ckpt_token_in_training_templates(tmp_path: Path):
@@ -1828,7 +1857,7 @@ def _baseline_ws(tmp_path: Path, *, full_epochs: int = 2, probe_k: int = 1,
     (art / "orca_inject").mkdir(parents=True)
     proj.mkdir()
     for src in ("render_run.sh", "assert_shadow.py", "metric_curve.py",
-                "push_curves.py", "analyze.py"):
+                "push_curves.py", "analyze.py", "device_alloc.py"):
         shutil.copy(_SCRIPTS / src, art / "scripts" / src)
     shutil.copy(_SCRIPTS / "orca_inject" / "header.env",
                 art / "orca_inject" / "header.env")
@@ -1882,15 +1911,42 @@ def _baseline_ws(tmp_path: Path, *, full_epochs: int = 2, probe_k: int = 1,
     (art / "profile_mode.json").write_text(json.dumps(
         {"mode": "placeholder", "chip": "", "precision": None,
          "core_num": None, "resolved_by": "fallback"}), encoding="utf-8")
+    # the training device backend the entry node resolved (synthetic card)
+    (art / "train_device.json").write_text(
+        json.dumps({"backend": "cuda", "device_count": 1,
+                    "resolved_by": "test"}), encoding="utf-8")
+    # the backend occupancy CLI the device ledger probes during claim (idle:
+    # the only busy card in these tests is the ledger's own live lock)
+    stub_dir = art / "stubbin"
+    stub_dir.mkdir()
+    (stub_dir / "nvidia-smi").write_text(
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "  -L) printf 'GPU 0: stub\\nGPU 1: stub\\n' ;;\n"
+        "  --query-gpu=*) printf '0, GPU-aa\\n1, GPU-bb\\n' ;;\n"
+        "  --query-compute-apps=*) : ;;\n"
+        "  *) exit 9 ;;\n"
+        "esac\n", encoding="utf-8")
+    (stub_dir / "nvidia-smi").chmod(0o755)
     return art
 
 
-def _run_baseline_chain(art: Path, timeout: int = 120) -> subprocess.CompletedProcess:
+def _chain_env(art: Path) -> dict:
+    """Env for direct chain invocations: artifacts root + the fixture's
+    backend-CLI stub dir in front of PATH (the device ledger's claim probes
+    real occupancy through it)."""
     env = dict(os.environ)
     env["ORCA_ARTIFACTS_DIR"] = str(art)
+    stub = art / "stubbin"
+    if stub.is_dir():
+        env["PATH"] = str(stub) + os.pathsep + env["PATH"]
+    return env
+
+
+def _run_baseline_chain(art: Path, timeout: int = 120) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5", "--seed", "0"],
-        capture_output=True, text=True, timeout=timeout, env=env)
+        capture_output=True, text=True, timeout=timeout, env=_chain_env(art))
 
 
 def _wait_for(path: Path, timeout_s: float = 40) -> bool:
@@ -2220,6 +2276,77 @@ def test_check_probe_emit_gate_accuracy_first_entry(tmp_path: Path):
     assert "probe_results.jsonl missing or empty" in proc2.stderr
 
 
+def test_baseline_chain_binds_training_to_claimed_device(tmp_path: Path):
+    """The full training launches only on a ledger-claimed card (vid=baseline
+    lock under devices/), the render binds it (--set device), and the
+    finalizer's terminal state releases the claim."""
+    art = _baseline_ws(
+        tmp_path, full_epochs=1, probe_k=1, ckpt_per_epoch=True,
+        train_body="echo device=<<device>>\n"
+                   "sleep 6\n"
+                   "echo 'epoch 1 loss=0.5'\n"
+                   "touch '<<out_dir>>/epoch_1.pth'\n")
+    proc = _run_baseline_chain(art)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["status"] == "executed"
+
+    # the render bound the training to the ledger-claimed card
+    rendered = (art / "baseline" / "train.rendered.sh").read_text(encoding="utf-8")
+    assert "device=0" in rendered
+
+    # non-blocking window: while the training runs, the claim is live
+    lock = art / "devices" / "0.lock"
+    assert lock.is_file()
+    assert json.loads(lock.read_text(encoding="utf-8"))["vid"] == "baseline"
+
+    # the finalizer's terminal state releases the claim (and the record)
+    assert _wait_for(art / "baseline" / "train_final.json")
+    assert _train_final(art)["status"] == "done"
+    deadline = time.monotonic() + 15
+    while lock.exists() and time.monotonic() < deadline:
+        time.sleep(0.5)
+    assert not lock.exists()
+    assert not (art / "baseline" / ".train_device_idx").exists()
+
+
+def test_baseline_chain_lock_survives_free_while_training(tmp_path: Path):
+    """Ledger intent (v6 §3.2): while the baseline training is alive, a
+    `device_alloc.py free` from ANY later consumer must NOT reclaim its
+    lock — the claim is adopted by the long-lived finalizer (which owns the
+    terminal release), never left bound to the short-lived chain process."""
+    art = _baseline_ws(
+        tmp_path, full_epochs=2, probe_k=1, ckpt_per_epoch=True,
+        train_body="for e in $(seq 1 <<epochs>>); do sleep 6; "
+                   'echo "epoch $e loss=0.$e"; done\n'
+                   "for e in $(seq 1 <<epochs>>); do "
+                   "touch '<<out_dir>>/epoch_'$e'.pth'; done\n")
+    proc = _run_baseline_chain(art)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["status"] == "executed"
+    lock_path = art / "devices" / "0.lock"
+    assert lock_path.is_file()
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    # ownership ladder landed on the finalizer (alive through the terminal
+    # release), not on the chain invocation that already exited
+    finalizer_pid = int((art / "baseline" / "finalizer.pid")
+                        .read_text(encoding="utf-8"))
+    assert lock["vid"] == "baseline" and lock["pid"] == finalizer_pid
+
+    # the fixture's stubbed backend CLI reports every GPU idle — the ONLY
+    # thing keeping device 0 busy is the adopted, live ledger lock
+    stub_dir = art / "stubbin"
+    env = dict(os.environ)
+    env["PATH"] = str(stub_dir) + os.pathsep + env["PATH"]
+    freeout = subprocess.run(
+        [sys.executable, str(art / "scripts" / "device_alloc.py"),
+         "free", "--artifacts", str(art)],
+        capture_output=True, text=True, timeout=60, env=env)
+    assert freeout.returncode == 0, freeout.stderr
+    doc = json.loads(freeout.stdout)
+    assert doc["recycled"] == [] and doc["free"] == [] and doc["locked"] == [0]
+    assert lock_path.is_file()   # not reclaimed under a live training
+
+
 def test_baseline_chain_nonblocking_emit_and_finalizer_products(tmp_path: Path):
     """executed does NOT wait for the training: the chain emits while the
     training pid is still alive and train_final is absent; the detached
@@ -2489,9 +2616,7 @@ def _mfu_baseline_ws(tmp_path: Path) -> tuple[Path, dict]:
         p = art / rel
         if p.is_file():
             p.unlink()
-    env = dict(os.environ)
-    env["ORCA_ARTIFACTS_DIR"] = str(art)
-    return art, env
+    return art, _chain_env(art)
 
 
 def test_baseline_chain_mfu_mode_awaits_analyzer_then_adapts(tmp_path: Path):

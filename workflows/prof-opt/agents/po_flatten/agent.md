@@ -63,6 +63,9 @@ $ORCA_ARTIFACTS_DIR/
 ├── BASELINE.lock                 # structural anchor {model_path, pretrained_ckpt,
 │                                 #   ckpt_sha256, py_files_sha256 (shadow closure)}
 ├── project_manifest.md / .user_pkg
+├── train_device.json             # training device backend resolved ONCE here
+│                                 #   {backend: npu|cuda, device_count, resolved_by}
+│                                 #   (the allocation locks live under devices/)
 ├── shadow/<top-level pkgs|modules>/   # the editable model code closure
 ├── scripts/                      # deployed shared deterministic scripts
 ├── orca_inject/                  # sitecustomize.py + header.env (import injection)
@@ -101,6 +104,15 @@ output `error` field):
   the built-in placeholder estimator runs. The result is written once to
   `$ORCA_ARTIFACTS_DIR/profile_mode.json` — every downstream profiling
   consumer reads that file, never the env.
+- The TRAINING device backend is likewise NOT an input: it is resolved once
+  at entry and written to `$ORCA_ARTIFACTS_DIR/train_device.json`. Optional
+  env `ORCA_PO_DEVICE_BACKEND` (`npu`/`cuda`, illegal values fail loud)
+  declares it explicitly; otherwise `npu-smi`, `nvidia-smi`, or
+  `torch.cuda.is_available()` auto-detect, in that order. A machine with NO
+  trainable device is a hard error (exit 2) — the placeholder estimator is
+  valid for PROFILING only; training has no placeholder backend. Downstream
+  consumers (the baseline chain and the probe node's device allocator) read
+  that file, never the env.
 - No pretrained-checkpoint input exists: training in this pipeline
   always starts from a fixed-seed random initialization; every checkpoint
   argument below is the empty string.
@@ -152,9 +164,19 @@ Exit code mapping (the script logs details to stderr):
      overwrite + version stamp refresh — a reused workspace upgrades to the
      current script set instead of running stale deployed copies). A nonzero
      exit → `flatten_passed=false` with the stderr in `error`.
-  2. **Keep the workspace's `accuracy_rules.json` as-is** (in-run rules are
+  2. **Re-verify the training-device resolution** (read-only; the recorded
+     file is the single source and is never rewritten here):
+     ```bash
+     bash "$ORCA_ARTIFACTS_DIR/scripts/resolve_train_device.sh" --stdout-only
+     ```
+     A nonzero exit (no trainable device any more, or a
+     `{backend, device_count}` drift vs the recorded `train_device.json` —
+     the workspace was resolved for different hardware) →
+     `flatten_passed=false` with the stderr in `error`; the remedy the
+     stderr names is `fresh_start=true`.
+  3. **Keep the workspace's `accuracy_rules.json` as-is** (in-run rules are
      the workspace truth; re-seeding would overwrite them — never seed here).
-   3. Re-derive the output fields mechanically from disk:
+   4. Re-derive the output fields mechanically from disk:
       `readiness_path="$ORCA_ARTIFACTS_DIR/readiness/readiness.json"`.
       Then go straight to Output (include `verify/memory_verifier_report.md`
       in `generated_artifacts` when that file exists on disk).
@@ -179,7 +201,7 @@ checks. The project-side rule mirror and
 the global rule pool are OUTSIDE the workspace and survive the wipe — the fresh
 path re-seeds the workspace rules from them (Step 3b). Never wipe by hand.
 
-### Step 1: Deploy The Shared Tooling + Resolve The Profiling Mode
+### Step 1: Deploy The Shared Tooling + Resolve The Profiling Mode And The Training Device
 
 Deploy the canonical shared scripts into the workspace (idempotent; safe to
 re-run). After this step, reference ALL shared scripts as
@@ -204,6 +226,20 @@ stdout is one JSON line (`mode` / `chip` / `precision` / `core_num` /
 `resolved_by`), written verbatim to `$ORCA_ARTIFACTS_DIR/profile_mode.json`.
 An illegal env enum or an unparseable npu-smi chip exits 2 — fail loud
 (`flatten_passed=false`), never fall back silently.
+
+Then resolve the TRAINING device backend ONCE (fresh path only — the REUSE
+branch verified it read-only in Step 0 and keeps the recorded file):
+
+```bash
+bash "$ORCA_ARTIFACTS_DIR/scripts/resolve_train_device.sh"
+```
+
+stdout is one JSON line (`backend` / `device_count` / `resolved_by`) and the
+script itself writes it to `$ORCA_ARTIFACTS_DIR/train_device.json`
+write-if-absent. Exit 2 (no trainable device on this machine / illegal env
+enum / a backend whose device count cannot be pinned) → fail loud
+(`flatten_passed=false`): there is no placeholder training backend to fall
+back to.
 
 ### Step 2: Survey The Project (manifest + user package marker + interpreter)
 
@@ -468,7 +504,7 @@ OUT="$("$EMIT_PY" "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
   --field flatten_passed=true \
   --field readiness_path="$ORCA_ARTIFACTS_DIR/readiness/readiness.json" \
   --field error="" \
-  --field generated_artifacts='["project_manifest.md", ".user_pkg", "shadow/", "readiness/readiness.json", "verify/memory_verifier_report.md", ...]' \
+  --field generated_artifacts='["project_manifest.md", ".user_pkg", "train_device.json", "shadow/", "readiness/readiness.json", "verify/memory_verifier_report.md", ...]' \
 )"
 printf '%s' "$OUT" | "$EMIT_PY" -c 'import json,sys; json.loads(sys.stdin.read())'
 ```

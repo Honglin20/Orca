@@ -1237,3 +1237,322 @@ def test_emit_gate_zero_proposal_round_is_legal(tmp_path):
     doc["exhausted_rationale"] = []
     (rd / "proposals.json").write_text(json.dumps(doc), encoding="utf-8")
     assert _check_emit(art).returncode == 1
+
+
+# ── P2: flatten→probe wiring smoke + check_probe_emit v6 (§6.2) ───────────────
+
+_PROBE_EMIT = _SCRIPTS / "check_probe_emit.py"
+_WATCH_SH = _SCRIPTS / "watch_variant.sh"
+
+
+def test_flatten_to_probe_resource_chain_smoke(tmp_path):
+    """The entry→probe resource wiring over mocked backend CLIs: the entry
+    resolver freezes train_device.json, and the probe-side ledger turns the
+    same backend facts into claim / mutual exclusion / release."""
+    idle_table = ("| NPU | Name  | Health | Process |\n"
+                  "| 0   | 910B3 | OK     | -       |\n"
+                  "| 1   | 910B3 | OK     | -       |\n")
+    art = tmp_path / "ws"
+    art.mkdir()
+    env = _stub_env(tmp_path, tools={
+        "npu-smi": f"#!{_BASH}\n"
+                   f"if [ \"${{1:-}}\" = \"-l\" ]; then printf 'Total Count : 2\\n'; "
+                   f"else printf '%s' '{idle_table}'; fi\n"})
+    env["ORCA_ARTIFACTS_DIR"] = str(art)
+
+    # flatten side: resolve once, freeze the file
+    resolved = _resolve(env)
+    assert resolved.returncode == 0, resolved.stderr
+    assert json.loads(resolved.stdout) == {"backend": "npu", "device_count": 2,
+                                           "resolved_by": "npu-smi"}
+    assert json.loads((art / "train_device.json").read_text(
+        encoding="utf-8"))["backend"] == "npu"
+
+    # probe side: claim (free -> acquire -> idx-in-free-set guard) then adopt
+    # a long-lived owner — the lock must survive free (mutual exclusion rests
+    # on the OWNER, never on the short-lived claiming command)
+    free1 = _alloc(art, "free", env=env)
+    assert free1.returncode == 0, free1.stderr
+    assert json.loads(free1.stdout)["free"] == [0, 1]
+    claimed = _alloc(art, "claim", "--vid", "r1-01", env=env)
+    assert claimed.returncode == 0, claimed.stderr
+    doc = json.loads(claimed.stdout)
+    assert doc["ok"] is True and doc["idx"] == 0
+    adopted = _alloc(art, "adopt", "--vid", "r1-01",
+                     "--pid", str(os.getpid()), env=env)
+    assert adopted.returncode == 0, adopted.stderr
+    assert json.loads(adopted.stdout) == {"adopted": True, "idx": 0,
+                                          "vid": "r1-01", "pid": os.getpid()}
+    free2 = json.loads(_alloc(art, "free", env=env).stdout)
+    assert free2["free"] == [1] and free2["locked"] == [0]
+    assert free2["recycled"] == []
+
+    # release reopens the card for the next variant
+    rel = _alloc(art, "release", "--idx", "0", env=env)
+    assert rel.returncode == 0, rel.stderr
+    assert json.loads(_alloc(art, "free", env=env).stdout)["free"] == [0, 1]
+
+
+def test_device_alloc_claim_guard_never_trains_on_busy_real(tmp_path):
+    """The claim guard: acquire is lock-scoped, so on a machine with a
+    FOREIGN (lockless) process on device 0 it would hand out idx 0 — claim
+    releases that card and fails loud instead of training on it."""
+    art = tmp_path / "ws"
+    _write_train_device(art, backend="cuda", count=2)
+    env = _stub_env(tmp_path, tools={
+        "nvidia-smi": _NVIDIA_SMI_STUB.format(bash=_BASH)})  # GPU 0 busy-real
+
+    proc = _alloc(art, "claim", "--vid", "r1-01", env=env)
+    assert proc.returncode == 2
+    assert "outside the free set" in proc.stderr
+    assert not (art / "devices" / "0.lock").exists()   # never kept
+
+    # the park state: 0 busy-real + 1 live lock -> a legitimate wait, rc 0
+    _write_lock(art, 1, "r0-01", os.getpid())
+    parked = _alloc(art, "claim", "--vid", "r1-01", env=env)
+    assert parked.returncode == 0, parked.stderr
+    payload = json.loads(parked.stdout)
+    assert payload["ok"] is False
+    assert payload["reason"] == "no free training device"
+    assert payload["busy_real"] == [0] and payload["locked"] == [1]
+
+
+def test_device_alloc_adopt_rebinds_ownership_fail_loud(tmp_path):
+    art = tmp_path / "ws"
+    _write_train_device(art, count=2)
+    dead = _dead_pid()
+    _write_lock(art, 0, "r1-01", dead)
+    holder = subprocess.Popen(["sleep", "60"],
+                              stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
+    try:
+        # a dead target pid is refused: adopting it would pin the card
+        # behind a phantom owner once the pid is recycled
+        ghost = _alloc(art, "adopt", "--vid", "r1-01", "--pid", str(dead))
+        assert ghost.returncode == 2 and "not alive" in ghost.stderr
+
+        adopted = _alloc(art, "adopt", "--vid", "r1-01", "--pid", str(holder.pid))
+        assert adopted.returncode == 0, adopted.stderr
+        lock = json.loads((art / "devices" / "0.lock").read_text(encoding="utf-8"))
+        assert lock["pid"] == holder.pid and lock["vid"] == "r1-01"
+
+        # ambiguity (two locks naming the vid) is a torn ledger, never a guess
+        _write_lock(art, 1, "r1-01", os.getpid())
+        torn = _alloc(art, "adopt", "--vid", "r1-01", "--pid", str(os.getpid()))
+        assert torn.returncode == 2 and "torn" in torn.stderr
+    finally:
+        holder.terminate()
+        holder.wait()
+
+    # nothing names the vid -> fail loud
+    art2 = tmp_path / "ws2"
+    _write_train_device(art2, count=1)
+    missing = _alloc(art2, "adopt", "--vid", "zz", "--pid", "1")
+    assert missing.returncode == 2 and "no lock" in missing.stderr
+
+
+def test_watch_variant_stub_pins_signature(tmp_path):
+    art = tmp_path / "ws"
+    art.mkdir()
+    env = dict(os.environ)
+    env["ORCA_ARTIFACTS_DIR"] = str(art)
+
+    helped = _run_cli([_BASH, str(_WATCH_SH), "--help"], env=env)
+    assert helped.returncode == 0
+    assert "--vid" in helped.stdout and "--device" in helped.stdout
+
+    missing_vid = _run_cli([_BASH, str(_WATCH_SH), "--device", "0"], env=env)
+    assert missing_vid.returncode == 2
+    bad_device = _run_cli([_BASH, str(_WATCH_SH), "--vid", "r1-01",
+                           "--device", "x"], env=env)
+    assert bad_device.returncode == 2
+
+    ok = _run_cli([_BASH, str(_WATCH_SH), "--vid", "r1-01", "--device", "0"],
+                  env=env)
+    assert ok.returncode == 0, ok.stderr
+    vdir = art / "variants" / "r1-01"
+    pid = (vdir / "watchdog.pid").read_text(encoding="utf-8").strip()
+    assert pid.isdigit()
+    log = (vdir / "watchdog.log").read_text(encoding="utf-8")
+    assert "vid=r1-01" in log and "device=0" in log
+
+
+def _probe_ws(tmp_path: Path, *, makespan: int = 400,
+              verdict: bool = True, lock_vid: str = "r1-01",
+              watchdog: bool = True,
+              liveness: dict | None = None) -> Path:
+    """A launched-variant workspace for the §6.2 gate: one latency_pass vid
+    with a verdict at/below the frozen line, a ledger lock naming it, the
+    watchdog pid file, and the liveness record."""
+    art = tmp_path / "ws"
+    (art / "scripts").mkdir(parents=True)
+    for src in ("history_lib.py", "round_state.py"):
+        shutil.copy(_SCRIPTS / src, art / "scripts" / src)
+    _write_anchor(art, target=500)
+    (art / "rounds" / "001").mkdir(parents=True)
+    hist = art / "history.jsonl"
+    _impl(hist, "r1-01", "sig:r1-01")
+    history_lib.append_latency(hist, "r1-01", structural_check="pass",
+                               makespan_cycles=makespan, latency_gate="pass",
+                               pred_actual_ratio=None, outcome="latency_pass")
+    vd = art / "variants" / "r1-01"
+    (vd / "train").mkdir(parents=True)
+    if verdict:
+        (vd / "verdict.json").write_text(json.dumps(
+            {"vid": "r1-01", "round": 1, "outcome": "latency_pass",
+             "makespan_cycles": makespan, "target_cycles": 500}),
+            encoding="utf-8")
+    _write_lock(art, 0, lock_vid, os.getpid())
+    if watchdog:
+        (vd / "watchdog.pid").write_text("4242\n", encoding="utf-8")
+    if liveness is not None:
+        record = {"vid": "r1-01", "epoch1_ok": True, "device": 0,
+                  "train_pid": 111, "ts": "2026-08-31T00:00:00+00:00"}
+        record.update(liveness)
+        (vd / "train" / "liveness.json").write_text(json.dumps(record),
+                                                    encoding="utf-8")
+    return art
+
+
+def _check_probe(art: Path) -> subprocess.CompletedProcess:
+    return _run_cli([sys.executable, str(_PROBE_EMIT),
+                     "--artifacts", str(art)])
+
+
+def _attributed_sleeper() -> subprocess.Popen:
+    """A live process whose /proc cmdline references train.rendered.sh (the
+    wrapper attribution token) — it never actually trains."""
+    return subprocess.Popen(
+        [_BASH, "-c", "while :; do sleep 30; done # train.rendered.sh"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def test_probe_emit_green_launch_state(tmp_path):
+    art = _probe_ws(tmp_path, liveness={})
+    sleeper = _attributed_sleeper()
+    try:
+        (art / "variants" / "r1-01" / "train" / "train.pid").write_text(
+            f"{sleeper.pid}\n", encoding="utf-8")
+        proc = _check_probe(art)
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads(proc.stdout) == {"ok": True, "round": 1,
+                                           "probed": ["r1-01"]}
+    finally:
+        sleeper.terminate()
+        sleeper.wait()
+
+
+def test_probe_emit_rejects_torn_verdict(tmp_path):
+    # above the frozen line -> torn workspace, never admissible
+    art = _probe_ws(tmp_path, makespan=600, liveness={})
+    (art / "variants" / "r1-01" / "train" / "train.pid").write_text(
+        f"{os.getpid()}\n", encoding="utf-8")
+    proc = _check_probe(art)
+    assert proc.returncode == 1
+    assert "torn workspace" in proc.stderr and "600" in proc.stderr
+
+    # verdict file gone entirely -> same failure class
+    art2 = _probe_ws(tmp_path / "b", verdict=False, liveness={})
+    (art2 / "variants" / "r1-01" / "train" / "train.pid").write_text(
+        f"{os.getpid()}\n", encoding="utf-8")
+    proc2 = _check_probe(art2)
+    assert proc2.returncode == 1
+    assert "verdict.json missing" in proc2.stderr
+
+
+def test_probe_emit_requires_lock_watchdog_and_liveness(tmp_path):
+    def with_pid(art: Path, pid_text: str) -> None:
+        (art / "variants" / "r1-01" / "train" / "train.pid").write_text(
+            pid_text, encoding="utf-8")
+
+    # the lock names a different vid -> unclaimed card
+    art = _probe_ws(tmp_path, lock_vid="r0-99", liveness={})
+    with_pid(art, f"{os.getpid()}\n")
+    proc = _check_probe(art)
+    assert proc.returncode == 1 and "no devices/<idx>.lock" in proc.stderr
+
+    # watchdog guardian missing
+    art2 = _probe_ws(tmp_path / "b", watchdog=False, liveness={})
+    with_pid(art2, f"{os.getpid()}\n")
+    proc2 = _check_probe(art2)
+    assert proc2.returncode == 1 and "watchdog.pid missing" in proc2.stderr
+
+    # liveness record missing (the epoch-1 proof is a hard precondition)
+    art3 = _probe_ws(tmp_path / "c")
+    with_pid(art3, f"{os.getpid()}\n")
+    proc3 = _check_probe(art3)
+    assert proc3.returncode == 1 and "liveness.json missing" in proc3.stderr
+
+    # epoch1_ok false -> the record exists but proves the wrong thing
+    art4 = _probe_ws(tmp_path / "d", liveness={"epoch1_ok": False})
+    with_pid(art4, f"{os.getpid()}\n")
+    proc4 = _check_probe(art4)
+    assert proc4.returncode == 1 and "epoch1_ok" in proc4.stderr
+
+
+def test_probe_emit_dead_pid_needs_terminal_state(tmp_path):
+    dead = _dead_pid()
+    art = _probe_ws(tmp_path, liveness={})
+    (art / "variants" / "r1-01" / "train" / "train.pid").write_text(
+        f"{dead}\n", encoding="utf-8")
+    proc = _check_probe(art)
+    assert proc.returncode == 1
+    assert "dead with no terminal" in proc.stderr
+
+    # the watchdog's terminal file (train_status.json) redeems the dead pid
+    (art / "variants" / "r1-01" / "train_status.json").write_text(
+        json.dumps({"vid": "r1-01", "stage": "done", "epoch": 10,
+                    "ts": "2026-08-31T00:00:00+00:00"}), encoding="utf-8")
+    proc2 = _check_probe(art)
+    assert proc2.returncode == 0, proc2.stderr
+    assert json.loads(proc2.stdout)["probed"] == ["r1-01"]
+
+
+def test_probe_emit_empty_training_set_and_terminal_vids_pass(tmp_path):    # a vid that already reached a terminal row is out of scope
+    art = _probe_ws(tmp_path, liveness={})
+    history_lib.append_terminal(art / "history.jsonl", "r1-01",
+                                outcome="probe_insufficient", stage="liveness",
+                                max_retries_hit=True)
+    proc = _check_probe(art)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["probed"] == []
+
+    # a workspace with no latency_pass vid at all: nothing to verify
+    art2 = _probe_ws(tmp_path / "b", liveness={})
+    (art2 / "history.jsonl").unlink()
+    proc2 = _check_probe(art2)
+    assert proc2.returncode == 0, proc2.stderr
+    assert json.loads(proc2.stdout)["probed"] == []
+
+
+def test_probe_emit_pid_attribution_and_input_failures(tmp_path):
+    # a LIVE pid whose cmdline has nothing to do with our training (pid
+    # reuse) must be rejected — never counted as our liveness
+    art = _probe_ws(tmp_path, liveness={})
+    stranger = subprocess.Popen(["sleep", "300"],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+    try:
+        (art / "variants" / "r1-01" / "train" / "train.pid").write_text(
+            f"{stranger.pid}\n", encoding="utf-8")
+        proc = _check_probe(art)
+        assert proc.returncode == 1
+        assert "pid reuse" in proc.stderr
+    finally:
+        stranger.terminate()
+        stranger.wait()
+
+    # a corrupt pid file fails loud, never guessed around
+    art2 = _probe_ws(tmp_path / "b", liveness={})
+    (art2 / "variants" / "r1-01" / "train" / "train.pid").write_text(
+        "not-a-pid\n", encoding="utf-8")
+    proc2 = _check_probe(art2)
+    assert proc2.returncode == 1 and "not an int" in proc2.stderr
+
+    # the admission line itself is unavailable (baseline stage incomplete)
+    art3 = _probe_ws(tmp_path / "c", liveness={})
+    (art3 / "base" / "origin_anchor.json").unlink()
+    (art3 / "variants" / "r1-01" / "train" / "train.pid").write_text(
+        f"{os.getpid()}\n", encoding="utf-8")
+    proc3 = _check_probe(art3)
+    assert proc3.returncode == 1 and "target_cycles unavailable" in proc3.stderr

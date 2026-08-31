@@ -27,15 +27,22 @@
 #                                       re-invoke; the placeholder estimator is
 #                                       NEVER run in mfu mode
 #   3 analyze                    : scripts/analyze.py -> base/bottleneck_report.json
-#   4 full-train launch          : render the train contract template at the
-#                                 FULL effective epochs (--out
-#                                 baseline/train.rendered.sh), wipe any partial
+#   4 full-train launch          : claim the first free training device via
+#                                 the allocation ledger (vid=baseline lock
+#                                 under devices/, backend/count from
+#                                 train_device.json), render the train
+#                                 contract template at the FULL effective
+#                                 epochs (--out baseline/train.rendered.sh,
+#                                 --set device=<idx>), wipe any partial
 #                                 out-dir (training always starts from
 #                                 scratch), detach a wrapper whose group leader
 #                                 writes its own pid/rc and does NOT exec:
 #                                   setsid bash -c 'echo $$ > train.pid;
 #                                     bash train.rendered.sh > train.attemptN.log 2>&1;
 #                                     echo $? > train.rc'
+#                                 A render failure after the claim releases
+#                                 the lock explicitly (a claimed card never
+#                                 outlives a failed launch).
 #   5 finalizer launch           : detach this script's --finalizer mode
 #                                 (setsid, baseline/finalizer.pid + .log)
 #   6 liveness confirmation      : train pid alive + finalizer pid alive +
@@ -82,6 +89,16 @@
 #                     baseline/baseline_k_acc.json {acc, k, ckpt, fingerprint}
 #     terminal mark : baseline/train_final.json {status: done, rc: 0, stage}
 #   any internal failure -> best-effort train_final{failed, rc, stage} then exit
+#
+# Every terminal write_train_final ALSO releases the baseline's device lock
+# (devices/<idx>.lock, idempotent) — the ledger claim spans exactly the
+# training's lifetime. Lock ownership ladder: the claim's placeholder owner
+# (the claiming chain invocation) is immediately ADOPTED by the detached
+# training wrapper when it comes alive, then by the finalizer (the canonical
+# owner — it outlives the training and performs the terminal release); a
+# crash relaunch re-adopts the fresh wrapper and hands ownership back to the
+# relaunching finalizer. The claim also confirms real occupancy (free ->
+# acquire -> idx-in-free-set guard inside device_alloc claim).
 #
 # rc aggregation: first failing step -> stdout JSON status "failed" with
 # "baseline step N: <reason>" folded into `error`; all done -> "executed".
@@ -164,10 +181,10 @@ except Exception as exc:
 ' "$1"
 }
 
-for f in contracts.json readiness/readiness.json \
+for f in contracts.json readiness/readiness.json train_device.json \
          templates/export_onnx.template.sh templates/run_full_finetune.template.sh \
          templates/run_eval.template.sh scripts/render_run.sh scripts/analyze.py \
-         scripts/metric_curve.py scripts/push_curves.py; do
+         scripts/metric_curve.py scripts/push_curves.py scripts/device_alloc.py; do
   [ -f "$f" ] || { echo "FATAL: upstream artifact missing: $ART/$f (contract stage incomplete)" >&2; exit 2; }
 done
 
@@ -338,11 +355,91 @@ pid_alive_owned() { # pid_alive_owned <pidfile> <expect-substr>
 
 train_attempt_log() { echo "$TRAIN_DIR/train.attempt$(cat "$TRAIN_ATTEMPTS" 2>/dev/null || echo 1).log"; }
 
-launch_full_train() { # render (idempotent) + wipe partial out-dir + detach wrapper
+# ── training-device ledger wiring ────────────────────────────────────────────
+# The baseline claims the FIRST FREE device via the run-scoped allocation
+# ledger (O_EXCL lock under devices/, vid=baseline) before its full training
+# renders; the claim binds the render (--set device=<idx>) and is released by
+# the finalizer's terminal write_train_final (idempotent). The backend/count
+# come from train_device.json — resolved once at the entry node; a missing
+# file fails loud above with the upstream-artifact check.
+DEV_IDX_FILE="$TRAIN_DIR/.train_device_idx"
+
+alloc_print_idx() { # prints the claimed device idx (stdout) or fails loud
+  # idempotent: a recorded idx whose lock still names vid=baseline is reused
+  # (the finalizer's crash relaunch must not claim a SECOND card)
+  if [ -s "$DEV_IDX_FILE" ]; then
+    local idx lock_vid
+    idx="$(cat "$DEV_IDX_FILE" 2>/dev/null || echo -1)"
+    lock_vid="$(python3 -c '
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+vid = ""
+if p.is_file():
+    try:
+        vid = json.loads(p.read_text(encoding="utf-8")).get("vid", "")
+    except Exception:
+        vid = ""
+print(vid)' "$ART/devices/$idx.lock" 2>/dev/null || echo "")"
+    if [ "$idx" -ge 0 ] 2>/dev/null && [ "$lock_vid" = "baseline" ]; then
+      printf '%s' "$idx"
+      return 0
+    fi
+  fi
+  local out ok idx
+  out="$(python3 "$ART/scripts/device_alloc.py" claim \
+      --artifacts "$ART" --vid baseline)" || {
+    echo "FATAL: device_alloc claim (vid=baseline) failed — see its stderr above" >&2
+    return 1; }
+  ok="$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("ok"))')"
+  if [ "$ok" != "True" ]; then
+    echo "FATAL: no free training device for the baseline (busy_real/locked per the claim output above; a stale dead-pid lock is reclaimed by the claim itself)" >&2
+    return 1
+  fi
+  idx="$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["idx"])')"
+  printf '%s\n' "$idx" > "$DEV_IDX_FILE"
+  echo "[chain] training device $idx claimed for vid=baseline (devices/$idx.lock)" >&2
+  printf '%s' "$idx"
+}
+
+adopt_train_device() { # adopt_train_device <owner-pid> — rebind the claim to a
+  # long-lived owner (the wrapper/guardian that just came alive); a claim
+  # whose owner is the short-lived chain process is reclaimable by free the
+  # moment this invocation exits — an adopt that fails quietly would
+  # silently revive exactly that failure mode, so it fails LOUD (rc 1)
+  local owner_pid="${1:?adopt_train_device needs an owner pid}"
+  [ -s "$DEV_IDX_FILE" ] || return 0
+  python3 "$ART/scripts/device_alloc.py" adopt \
+      --artifacts "$ART" --vid baseline --pid "$owner_pid" >/dev/null \
+    || { echo "FATAL: device lock adopt failed for vid=baseline pid=$owner_pid — the claim stays bound to the claiming process and becomes reclaimable; refusing to continue" >&2
+         return 1; }
+}
+
+release_train_device() { # idempotent terminal sweep (the finalizer's terminal
+  # action; the render-failure path in launch_full_train calls it too)
+  if [ -s "$DEV_IDX_FILE" ]; then
+    local idx
+    idx="$(cat "$DEV_IDX_FILE" 2>/dev/null || echo -1)"
+    if [ "$idx" -ge 0 ] 2>/dev/null; then
+      python3 "$ART/scripts/device_alloc.py" release \
+          --artifacts "$ART" --idx "$idx" >/dev/null \
+        || echo "WARN: device lock release failed for idx=$idx (the report sweep covers it)" >&2
+    fi
+    rm -f "$DEV_IDX_FILE"
+  fi
+}
+
+launch_full_train() { # claim device + render (idempotent) + wipe partial out-dir + detach wrapper
   mkdir -p "$TRAIN_DIR"
-  render "$ART/templates/run_full_finetune.template.sh" "$TRAIN_RENDERED" \
-    --set vid=baseline --set epochs="$FULL_EPOCHS" \
-    --set out_dir="$TRAIN_OUT" --set seed="$FULL_SEED" >&2 || return 1
+  local dev_idx
+  dev_idx="$(alloc_print_idx)" || return 1
+  if ! render "$ART/templates/run_full_finetune.template.sh" "$TRAIN_RENDERED" \
+      --set vid=baseline --set epochs="$FULL_EPOCHS" \
+      --set out_dir="$TRAIN_OUT" --set seed="$FULL_SEED" \
+      --set device="$dev_idx" >&2; then
+    release_train_device   # a claimed card never outlives a failed render
+    return 1
+  fi
   # from-scratch training: a partial out-dir from a dead attempt would leave
   # mixed-attempt checkpoints under the glob rule — wipe before every launch
   if [ -e "$TRAIN_OUT" ]; then
@@ -374,7 +471,14 @@ launch_full_train() { # render (idempotent) + wipe partial out-dir + detach wrap
   done
   { pid_alive_owned "$TRAIN_PID" "train.rendered.sh" || [ -s "$TRAIN_RC" ]; } \
     || { echo "FATAL: full-train wrapper did not come alive (see $TRAIN_DIR/wrapper.attempt${attempts}.log)" >&2; return 1; }
-  echo "[chain] full-train detached (attempt $attempts, pid $(cat "$TRAIN_PID"), epochs=$FULL_EPOCHS seed=$FULL_SEED)" >&2
+  # the wrapper owns the claim from here (long-lived for the whole training;
+  # superseded by the finalizer adopt at step 5). A FAST-finishing wrapper
+  # (rc already written — quick crash or completion) is dead by definition:
+  # ownership passes to the finalizer at step 5 instead, never a dead pid.
+  if [ -s "$TRAIN_PID" ] && [ ! -s "$TRAIN_RC" ]; then
+    adopt_train_device "$(cat "$TRAIN_PID")" || return 1
+  fi
+  echo "[chain] full-train detached (attempt $attempts, pid $(cat "$TRAIN_PID"), device=$dev_idx epochs=$FULL_EPOCHS seed=$FULL_SEED)" >&2
 }
 
 launch_finalizer() { # detach this script's --finalizer mode (own session);
@@ -390,6 +494,9 @@ launch_finalizer() { # detach this script's --finalizer mode (own session);
     sleep 0.3
   done
   pid_alive_owned "$FINALIZER_PID" "--finalizer" || { echo "FATAL: finalizer did not come alive (see $FINALIZER_LOG)" >&2; return 1; }
+  # the finalizer outlives the training AND the terminal release — it is the
+  # canonical lock owner from here on (supersedes the wrapper adopt)
+  adopt_train_device "$(cat "$FINALIZER_PID")" || return 1
   echo "[chain] finalizer detached (pid $(cat "$FINALIZER_PID"))" >&2
 }
 
@@ -452,6 +559,11 @@ with os.fdopen(fd, "w", encoding="utf-8") as fh:
 os.replace(tmp, path)
 PY
   fin_log "stage=train_final status=$1 stage_name=$3 msg=${4:-}"
+  # terminal action: the ledger claim spans exactly the training's lifetime
+  local rel_idx
+  rel_idx="$(cat "$DEV_IDX_FILE" 2>/dev/null || echo none)"
+  release_train_device
+  fin_log "stage=device_release idx=$rel_idx"
 }
 
 incremental_curve() { # full re-derive from the CURRENT attempt log; atomic
@@ -509,6 +621,15 @@ finalizer_main() {
       # sub-command output silenced: finalizer.log lines start ISO8601 only
       launch_full_train >/dev/null 2>&1 || {
         write_train_final failed null relaunch_failed; exit 0; }
+      # the relaunch re-adopted the new wrapper; take ownership back so the
+      # claim survives until THIS finalizer's terminal write. A failed adopt
+      # here is a FATAL (the claim would sit on the dying wrapper's pid) —
+      # terminal-fail the baseline rather than continue unsupervised.
+      if ! adopt_train_device "$$" >/dev/null 2>&1; then
+        fin_log "stage=relaunch_adopt verdict=failed (device lock adopt failed — the claim is stranded on the relaunched wrapper's pid)"
+        write_train_final failed null relaunch_adopt_failed
+        exit 0
+      fi
     fi
     incremental_curve
     "$PY" "$ART/scripts/push_curves.py" --artifacts "$ART" \
@@ -619,6 +740,7 @@ write_status() { # write_status <state-vector description...>
     echo "| 7 | emit gate (business_logic.md) | $7 | baseline/business_logic.md |"
     echo ""
     echo "finalizer tail: $(tail -n 2 "$FINALIZER_LOG" 2>/dev/null | tr '\n' ' ')"
+    echo "train device: $(cat "$DEV_IDX_FILE" 2>/dev/null || echo '-') (ledger claim vid=baseline)"
     echo "full_train_budget: epochs=$FULL_EPOCHS seed=$FULL_SEED; probe k=$PROBE_K; ckpt_per_epoch=$CKPT_PER_EPOCH; profile mode: ${NPU_CHIP:+mfu (chip=$NPU_CHIP precision=$NPU_PRECISION core_num=$NPU_CORE_NUM)}${NPU_CHIP:-placeholder estimator}"
   } > "$ART/baseline_status.md"
 }

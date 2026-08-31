@@ -118,7 +118,9 @@ Read nothing upfront. Invoke the chain first; read
 ### Step 0: Preconditions (fail loud, no repairs)
 
 Verify the upstream contract stage completed — all of: `contracts.json`,
-`readiness/readiness.json`, `templates/export_onnx.template.sh`,
+`readiness/readiness.json`, `train_device.json` (the training device backend
+resolved once at the entry node),
+`templates/export_onnx.template.sh`,
 `templates/run_full_finetune.template.sh`, `templates/run_eval.template.sh`,
 `scripts/render_run.sh`, `scripts/analyze.py` (the chain re-checks these and
 fails loud itself; catching it here gives a cleaner error). Anything
@@ -140,6 +142,13 @@ placeholder = estimator runs inline; mfu = analyzer handshake (see Step 2).
 In mfu mode, when the chain reports the awaiting state you may also dispatch
 `mfu-analyzer` BEFORE re-invoking the chain — both orders converge on the
 same disk state.
+
+The chain's full-train launch claims a training device FIRST through the
+allocation ledger (an `O_EXCL` lock under `devices/`, `vid=baseline`,
+backend/count from `train_device.json`), binds the render to it
+(`--set device=<idx>`), and the finalizer releases the claim at its terminal
+state. A render failure after the claim releases the lock explicitly — the
+chain owns this; never claim or release cards by hand.
 
 **After EVERY chain invocation that reports a non-failed state, run the
 anchor-freeze check** (mechanical, idempotent — once the anchor exists it is

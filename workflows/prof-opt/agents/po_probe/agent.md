@@ -1,88 +1,72 @@
 ---
-description: Conditional accuracy gate - verify the deployed scripts, derive the phase from the single round source (latency phase passes through with zero training; accuracy phase trains the survivors at the baseline's full epoch count, stops each at epoch k by process-group kill, judges both the curve and the k-th checkpoint eval against the frozen anchors, extracts accuracy rules through the accuracy-analyst subagent, and advances the round when an accuracy-pass winner emerges).
+description: Asynchronous training launcher - verify the deployed scripts and the round's latency-passing variant against the frozen target line, claim a free training device through the run-scoped allocation ledger (parking the node while every device is busy), render and detach the full-budget training wrapper plus its watchdog, prove training liveness through the epoch-1 metric line under a bounded retry budget, and emit executed WITHOUT waiting for the training (everything after launch belongs to the detached watchdog).
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # po_probe
 
 ## Your only task (read this first, it matters most)
 
-The proposal node has already reduced this round. **Your job depends on the
-phase, resolved at YOUR entry from the single round source — the mode may
-have flipped since the proposal node ran:
-
-- **latency phase** → **pass through**: no variant is trained, no GPU guard
-  is awaited (the round's advance already happened inside the proposal
-  node). Leave the round's disk state as-is and emit the thin passthrough
-  output.
-- **accuracy phase** → run the coarse accuracy gate: for the mechanical
-  training set (below), train each variant with EXACTLY the baseline's full
-  rendered epoch count (same template, data, seed — the learning-rate
-  schedule plans over the full horizon), stop it externally at epoch k,
-  parse its curve, judge at depth k against the baseline curve (plus the
-  k-th checkpoint eval when the project has per-epoch addressable
-  checkpoints — the worst of the two gate gaps must be within the FROZEN
-  accuracy budget from the origin anchor), record everything on disk, have
-  the accuracy-analyst extract/update rules from the measured outcomes,
-  and finally run the recovery advance (only an accuracy-pass winner under
-  the frozen line moves the base).**
+The proposal node closed its round with at most one variant that measured at
+or under the frozen target line. **Your job is to get that variant's
+FULL-budget training running on a claimed device — and then let go**: verify
+the verdict still holds, claim a free card through the allocation ledger,
+render + detach the training wrapper and its watchdog, prove the training is
+alive and producing metric lines, and emit. You never wait for the training
+to finish: supervision, per-epoch judgment, terminal eval, and device
+release all belong to the detached watchdog once you have launched it.
 
 You drive existing rendered templates and shared scripts; you never
 hand-write training or eval logic.
 
-**Execution model** (variant trainings are long tasks):
+**Execution model**:
 
 - Every long step runs **detached**; you supervise via **bounded polling**
   (each poll call short, well under the single-bash cap ~10min; keep issuing
   poll calls within your turn).
 - **No duplicate detach**: before launching, check the step's pid file; a
   live pid means the step is running — poll it, never launch a second copy.
-- `$ORCA_ARTIFACTS_DIR/probe_status.md` is the **cross-turn source of
-  truth** (which survivor, which stage, which attempt). Update it at every
-  stage transition.
-- If your turn tops out with work still in flight, your final reply is a
-  **status message** (not JSON) that contains the literal phrase
-  `do not call orca next` — the host then leaves this node executing and a
-  fresh sub-agent resumes from the status file. Only when every survivor of
-  the training set has a terminal accuracy outcome AND the round advance
-  (accuracy phase) has run do you emit the single-line JSON.
+- **The device ledger is the only allocation path**: no card is ever used
+  without an `O_EXCL` lock under `devices/`, and a claimed card never
+  outlives a failed launch (a render or launch failure releases it
+  explicitly).
+- While every device is busy (or liveness is still pending and your turn
+  tops out) your final reply is a **status message** (not JSON) that
+  contains the literal phrase `do not call orca next` — you check the free
+  set ONCE per turn and hand control back; you never busy-loop inside one
+  turn. A fresh turn re-derives everything from disk.
+- `$ORCA_ARTIFACTS_DIR/probe_status.md` is the **cross-turn state view**
+  (which vid, which stage, which attempt). Update it at every stage
+  transition.
 
 ## Resource Anchors (cwd-independent)
 
-- `$ORCA_ARTIFACTS_DIR` (injected by `orca spawn`) = this run's workspace.
-  **`cd "$ORCA_ARTIFACTS_DIR"` first.**
-- `$ORCA_AGENT_RESOURCES` (injected by `orca spawn`) = this agent's resources
-  directory; the detailed per-survivor procedure lives at
+- `$ORCA_ARTIFACTS_DIR` (injected by the engine) = this run's workspace.
+  **`cd "$ORCA_ARTIFACTS_DIR"` before running any command.**
+- `$ORCA_AGENT_RESOURCES` (injected by the engine) = this agent's resources
+  directory; the detailed per-variant procedure lives at
   `$ORCA_AGENT_RESOURCES/references/probe_protocol.md` (read it at Step 1).
-- The accuracy budget comes ONLY from the frozen origin anchor
-  (`base/origin_anchor.json` `accuracy_budget`) — never from a raw input,
-  never recomputed. The budgets that render trainings come ONLY from
-  `contracts.json` — `full_train_budget` (what every training renders) and
-  `proxy_budget` (the stop depth k).
+- The frozen target line comes ONLY from `base/origin_anchor.json`
+  (`target_cycles`, read-only). The training budgets come ONLY from
+  `contracts.json` (`full_train_budget` — the SAME value-level fingerprint
+  the baseline trained under). The training device backend and count come
+  ONLY from `train_device.json` (resolved once at the entry node).
 
 ## Path Handling Rules
 
 All path construction in helper code must use `pathlib.Path` (or
 `os.path.*`). Forbidden: string concatenation, f-strings, and `+` for paths.
 
-## Subagent Call Protocol (point-to-file)
+## Subagent Call Protocol
 
-This node dispatches ONE subagent: `accuracy-analyst` (accuracy phase, once
-per judged round). Its body lives at `{{ subagents_root }}/<name>.md`
-(inlined as an absolute path at render time).
-
-`Task(subagent_type=<host built-in generic type>, prompt="First fully Read {{ subagents_root }}/accuracy-analyst.md, strictly follow its Method for this task. This task's inputs: <specific inputs per the md's Inputs section>. Return in the format the md specifies. The **first line of the report** must verbatim echo the sentinel field from the frontmatter of the md you Read (format at the top of the md; don't guess, don't infer from this prompt — it must come from the file you Read).")`
-
-**Failure matrix**: the returned first line is not the sentinel, or
-`rules_pool.py check` fails on the updated rule file → re-dispatch ONCE
-with the failure quoted. Second failure → drop the offending rule rows,
-disclose in the round analysis, and CONTINUE the round (rules are an
-incremental asset — they never block the round).
+This node dispatches NO subagents. (Accuracy-rule consumption from terminal
+outcomes happens at the proposal node's entry; everything here is
+deterministic scripts plus detached processes.)
 
 ## Lazy Loading
 
-Read `$ORCA_AGENT_RESOURCES/references/probe_protocol.md` when Step 1 begins.
-Read `contracts.json`, `history.jsonl` and the run templates only as the
-protocol instructs.
+Read `$ORCA_AGENT_RESOURCES/references/probe_protocol.md` when Step 1
+begins. Read `contracts.json`, `history.jsonl`, and the run templates only
+as the protocol instructs.
 
 ## Iron rules (violation = node failure)
 
@@ -92,145 +76,95 @@ protocol instructs.
    `templates/run_full_finetune.template.sh` /
    `templates/run_eval.template.sh` /
    `templates/export_onnx.template.sh`), `contracts.json`, any variant
-   `shadow/`, or any file under `{{ inputs.project_root }}` outside
-   the workspace. Healing is limited to **re-rendering** a run script with
-   corrected parameter values (path/argument alignment) — nothing else.
-2. **No duplicate detach** (see execution model). A second training process
+   `shadow/`, or any file under the user project outside the workspace.
+   Healing is limited to **re-rendering** a run script with corrected
+   parameter values (path/argument alignment) — nothing else.
+2. **The verdict precondition is HARD**: a variant whose `verdict.json` is
+   missing, unparseable, or above the frozen line never launches. That is a
+   torn workspace (the verdict changed between the proposal node and here) —
+   fail loud, never re-measure, never proceed on a stale verdict.
+3. **No duplicate detach** (see execution model). A second training process
    on the same out-dir corrupts checkpoints.
-3. **GPU serial guard first** (accuracy phase only): before ANY variant
-   training launches, the baseline finalizer must be terminal (dead pid +
-   `train_final.json`). Never train a variant while the baseline still
-   holds the GPU. Follow the protocol's four-quadrant guard exactly — an
-   ambiguous quadrant is an error, never a guess.
-4. **At-least-once**: this node may be re-executed after an interruption.
-   Every side effect must be idempotent or guarded (the protocol pins the
-   guards: stop_status.json, eval result files, history rows, the advance
-   marker).
-5. **Fail loud, never fabricate**: a metric is only ever a number read from
-   an output file the contract describes. If it cannot be extracted, that
-   survivor's probe cannot complete — follow the protocol's retry budget,
-   then record the outcome honestly.
-6. A single survivor being unprovable never fails the node: record its
-   terminal outcome and continue. The node fails only on workspace-level
-   breakage (missing contracts, missing templates, corrupt history, a
-   broken invariant).
+4. **No orphan claims**: a device claimed for a vid that then fails to
+   launch (render failure, relaunch budget exhausted) is released before
+   you move on — never leave a lock behind a dead launch.
+5. **At-least-once**: this node may be re-executed after an interruption.
+   Every side effect is idempotent or guarded (pid files, the liveness
+   record, history rows through the typed builder only).
+6. **Fail loud, never fabricate**: no metric is ever hand-computed; a number
+   you report comes from a file the contract names.
 7. **stdout of scripts is data, not your reply**: your final reply is only
    ever the one-line JSON (complete) or the status message (incomplete).
 
 ## Workflow
 
-### Step 0: Script stamp + phase dispatch
-
-Verify the deployed script set (BEFORE the phase decision — a passthrough
-round verifies the stamp too):
+### Step 0: Script stamp + training set + verdict precondition
 
 ```bash
 bash "$ORCA_ARTIFACTS_DIR/scripts/deploy_scripts.sh" --verify
 ```
 
-Then resolve the phase AT THIS MOMENT (the mode may have flipped when the
-proposal node's advance put the best under the line — that flip makes THIS
-entry the accuracy first-entry):
+Derive the training set per the protocol's "state derivation": the vids
+whose LATEST `history.jsonl` row has `outcome == "latency_pass"` (in
+practice exactly the round's single variant; a leftover from an interrupted
+earlier probe is finished too). A vid whose latest row is already terminal
+(`success` / `accuracy_fail` / `probe_insufficient` / `latency_fail`) is
+done — not your business. Empty set → nothing to launch: skip to Step 4.
 
-```bash
-python3 "$ORCA_ARTIFACTS_DIR/scripts/round_state.py" \
-  --artifacts "$ORCA_ARTIFACTS_DIR" mode
-```
+For every vid in the set, run the protocol's verdict-precondition check
+(`verdict.json` `makespan_cycles` ≤ the frozen `target_cycles`). A missing
+file, a missing field, or an above-line makespan → **fail loud**
+(`status=failed`, `error` naming the vid and the torn-verdict diagnosis) —
+no card is claimed, nothing launches.
 
-- `latency` → **passthrough**: skip to Step 4. The round's advanced vid /
-  flags are already on disk in `.round_advanced` and
-  `rounds/<RRR>/direction.json`; the pre-return gate verifies that closure.
-- `accuracy` → derive the mechanical training set and continue at Step 1.
+### Step 1: Claim a device (or park)
 
-**Training set (mechanical, no timing inference):** read `best.json`'s vid
-and look up ALL its history rows:
+Per the protocol's device-claim section: `device_alloc.py claim --vid <VID>`
+(one deterministic command: free → acquire → the claimed idx is guaranteed
+inside the free set), then render and detach chained in the SAME command
+block so a claimed card never sits behind a dead turn.
 
-- best.vid has NO probe row at all → **first entry**: train ONLY
-  `best.vid`.
-- best.vid already has probe rows → **recovery round**: train this round's
-  survivor set — latest history rows of the CURRENT round (`round_state
-  current`) with `outcome == "latency_pass"`, EXCLUDING vids whose latest
-  row is already a terminal probe row (`accuracy_pass` / `accuracy_fail` /
-  `probe_insufficient` all count as already trained).
+- Free set empty → **park**: status message containing `do not call orca
+  next` naming the busy/locked devices; re-check once on your next turn. A
+  full house is a legitimate wait state, never an error.
+- A non-zero claim exit (busy-real or torn idx guard — the command releases
+  the offending card itself) → fail loud with the stderr quoted.
 
-### Step 1: Derive state from disk
+### Step 2: Render + detach (training wrapper + watchdog)
 
-Follow the protocol's "state derivation" section: the GPU guard quadrant
-(finalizer alive/dead × train_final present/absent — act per the quadrant
-table), the training set from Step 0, each survivor's stage
-(guard-wait / train / stop / curve / eval / done), and any in-flight step
-(live pid). Write `probe_status.md` to reflect the derived state.
+Per the protocol: render the FULL-budget template with `--set device=<idx>`
+(render failure → release the card, fail loud), detach the training wrapper
+(group leader writes its OWN pid/rc and does not exec), confirm it came
+alive and **adopt its pid** (`device_alloc.py adopt` — the claim's lock must
+be owned by the long-lived wrapper, never by the claiming command), then
+detach the watchdog (`watch_variant.sh --vid <VID> --device <idx>` — it
+self-writes `watchdog.pid`/`watchdog.log`). The launch is incomplete
+without its guardian: confirm `watchdog.pid` appears before you go on.
 
-### Step 2: Process each survivor serially (protocol section "stop-at-k train")
+### Step 3: Liveness (four conditions, bounded)
 
-Per survivor: render the train template at the FULL effective epochs with
-the variant's shadow → detach (wrapper group leader writes pid/rc) →
-bounded-poll calling `stop_at_epoch.sh` (interval ≤ 30 s) until
-`stop_status.json` lands (killed or natural_done) → curve extract at the
-recorded `stopped_at_epoch` → compare at `--at-epoch k` vs
-`baseline/baseline_metrics.jsonl` → when `train.ckpt_per_epoch` is true,
-eval the k-th checkpoint vs `baseline_k_acc` → the scripted
-`verdict_decide.py promote` (reads the FROZEN budget from the origin
-anchor; outputs `accuracy_pass` and the worst-gate `gap`) → history row
-(`accuracy_pass` / `accuracy_fail` / `probe_insufficient`, carrying `gap`)
-+ results line. Reconciliation (result file present but history row
-missing) is part of re-entry, per the protocol.
+Training pid alive with `/proc` cmdline attribution + `train.log` on disk +
+the epoch-1 metric line parseable by `metric_curve.py extract` — polled
+at most 15 rounds at most 30s apart. Success → the protocol's liveness
+record (`variants/<VID>/train/liveness.json`, atomic replace). Bounded
+failure → the retry budget (≤ 2 re-renders with corrected parameter values,
+partial checkpoint artifacts wiped per the train contract's output rule);
+exhausted → terminal `probe_insufficient` (typed history row) + release the
+card + continue with the next vid.
 
-### Step 3: Rule extraction + recovery advance
-
-**Rule extraction** — once every vid of the training set has a terminal
-accuracy outcome: dispatch `accuracy-analyst` with this round's probe rows
-(vid / gap / accuracy_pass + each vid's lineage `change_sig` from history)
-and the current `$ORCA_ARTIFACTS_DIR/accuracy_rules.json`. On return run
-the mechanical validation:
-
-```bash
-python3 "$ORCA_ARTIFACTS_DIR/scripts/rules_pool.py" check \
-  --artifacts "$ORCA_ARTIFACTS_DIR"
-```
-
-(failure matrix above: one re-dispatch, then drop the bad rows and
-disclose).
-
-**Recovery advance** — then run:
-
-```bash
-python3 "$ORCA_ARTIFACTS_DIR/scripts/advance_round.py" \
-  --artifacts "$ORCA_ARTIFACTS_DIR"
-```
-
-Idempotent ((round, mode) keyed). In the accuracy phase only an
-`accuracy_pass` winner at or under the frozen line advances — a round
-without one keeps the base fixed (the rerouting signal lands in the
-round's `direction.json`). `best_updated` / `base_advanced` /
-`advanced_vid` remain on disk; the pre-return gate verifies the
-marker/analysis closure, so the node output does not need to duplicate them.
-
-**Round analysis (accuracy section)** — close the round with its measured
-conclusions. Write the `## accuracy` section of
-`rounds/<RRR>/analysis.md` (idempotent whole-section rewrite on re-entry;
-preserve any `## latency` section written by the propose node), bounded to
-~15 lines: one line per judged vid (gap, outcome, curve-vs-eval note), a
-short error-structure diagnosis when a variant failed the gate (what the
-curve / eval numbers suggest went wrong), the rule ids this round added or
-updated, and a next-round direction note. This file is the round's
-analysis record — the next round's proposer reads the previous round's
-copy; analysis prose lives here, never inside prompts.
-
-### Step 4: Emit (only when complete)
+### Step 4: Emit (executed — the training is the watchdog's business now)
 
 ```bash
 python3 "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
   --field status=executed \
   --field 'error=' \
-  --field 'generated_artifacts=["rounds/<RRR>/analysis.md", "best.json", "rounds/<RRR>/direction.json"]'
+  --field 'generated_artifacts=["variants/<VID>/train/train.rendered.sh", "variants/<VID>/train/train.pid", "variants/<VID>/train/liveness.json", "variants/<VID>/metrics/metrics.jsonl", "probe_status.md"]'
 ```
 
-On workspace-level breakage emit the same three fields with
-`status=failed` and `error` carrying the cause. In the accuracy phase, append
-`probe_status.md` and `rounds/<RRR>/probe_results.jsonl` to
-`generated_artifacts` when they exist; do not list latency-only or absent
-files.
+List a path only when the file exists on disk (drop a `probe_insufficient`
+vid's launch products; its history row is the record). On workspace-level
+breakage the same three fields with `status=failed` and `error` carrying
+the root cause. `status == executed` ⇔ `error == ""`.
 
 ## Validation
 
@@ -241,25 +175,26 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/check_probe_emit.py" \
   --artifacts "$ORCA_ARTIFACTS_DIR"
 ```
 
-It verifies terminal probe outcomes on disk and the phase-specific advance
-marker/analysis closure. This is structural completeness only — probe
-outcomes themselves are never re-judged. The failure path does NOT run this
-success-product gate: emit `status=failed` directly with `error`.
+It verifies, per launched vid: the verdict still holds against the frozen
+line; a device lock naming the vid exists; the training pid is alive (or a
+terminal state with its terminal file is present); the watchdog pid file is
+on disk; and the liveness record exists. This is structural completeness
+only — probe outcomes themselves are never re-judged. The failure path does
+NOT run this success-product gate: emit `status=failed` directly with
+`error`.
 
 ## Supervision points (fail loud)
 
-- Never emit a metric you did not read from an output file.
+- Never launch on a verdict above the frozen line (torn workspace).
+- Never train on an unclaimed card; never keep a claimed card behind a dead
+  launch.
 - Never launch a second copy of a running step (pid guard first).
-- Never bypass the GPU guard — a variant trained concurrently with the
-  baseline is invalid data, not a faster probe.
-- Never skip the recovery advance in the accuracy phase — the gate reads
-  the round state it produces.
-- While any step is in flight and your turn tops out: status message with
-  `do not call orca next`, never a JSON.
+- While devices are busy or liveness is pending and your turn tops out:
+  status message with `do not call orca next`, never a JSON.
 
 ## Output
 
 **When complete: the entire final reply = the single line of JSON from
 Step 4** (no text before or after). **When incomplete: a status message**
-containing `do not call orca next`, the current survivor/stage, the live
-pid if any, and the log paths to watch.
+containing `do not call orca next`, the current vid/stage, the live pid if
+any, and the log paths to watch.

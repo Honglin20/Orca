@@ -31,6 +31,28 @@ Three deterministic operations over the artifacts workspace (--artifacts):
       last-resort sweep). Idempotent per v6 §7.6: an already-absent lock is
       a no-op disclosed as {"released": false}, never an error.
 
+  claim --artifacts <ws> --vid <VID>
+      The caller-side claim sequence as ONE deterministic command (never a
+      hand-rolled free+acquire in a prompt): free (recycling dead locks) ->
+      acquire -> the acquired idx MUST lie inside the free set (acquire is
+      lock-scoped; real occupancy is free's half of the ledger, so an idx
+      outside the free set is busy-real or torn — either way that card is
+      never trained on: it is released again and the claim fails loud).
+      Empty free set -> {"ok": false, "reason": "no free training device",
+      ...} (rc 0: a legitimate park state, not an error).
+
+  adopt --artifacts <ws> --vid <VID> --pid PID
+      Rebinds the lock named for VID to a long-lived owner pid (atomic
+      tmp+rename; vid/acquired_at/backend preserved). The claim necessarily
+      runs BEFORE the detached training wrapper exists (the render needs
+      the idx), so the claiming process is only a placeholder owner: the
+      caller adopts the wrapper (or guardian) pid as soon as it is alive —
+      that is what keeps the lock non-reclaimable for the training's whole
+      lifetime. Exactly one lock must name the vid; zero or several fail
+      loud. The new pid must be ALIVE (probed): adopting a dead pid would
+      pin the card behind a phantom owner once the pid is recycled and
+      reused by an unrelated process.
+
 No cross-run preemption: this ledger is run-scoped only; a device really
 held by an outside process shows up through the occupancy probe, not by
 stealing locks. All output is a single-line JSON on stdout; bad input fails
@@ -264,6 +286,70 @@ def release(artifacts: Path, idx: int) -> dict:
     return {"released": True, "idx": idx}
 
 
+def claim(artifacts: Path, vid: str) -> dict:
+    """free -> acquire -> idx-must-be-free guard, as one command. A card the
+    ledger hands out but the backend reports busy is never trained on."""
+    if not vid:
+        raise AllocError("device_alloc: --vid must be non-empty")
+    free_doc = free(artifacts)
+    payload = {"busy_real": free_doc["busy_real"],
+               "locked": free_doc["locked"],
+               "recycled": free_doc["recycled"]}
+    if not free_doc["free"]:
+        return {"ok": False, "reason": "no free training device",
+                **payload}
+    acquired = acquire(artifacts, vid)
+    if not acquired["ok"]:
+        return {"ok": False, "reason": "all devices locked", **payload}
+    if acquired["idx"] not in free_doc["free"]:
+        release(artifacts, acquired["idx"])
+        raise AllocError(
+            f"claim: acquire returned idx {acquired['idx']} outside the "
+            f"free set {free_doc['free']} — busy-real or torn ledger state, "
+            "refusing to train (the card was released again)")
+    return {"ok": True, "idx": acquired["idx"], "lock": acquired["lock"],
+            "vid": vid, "pid": acquired["pid"],
+            "acquired_at": acquired["acquired_at"],
+            "free_before": free_doc["free"], **payload}
+
+
+def adopt(artifacts: Path, vid: str, pid: int) -> dict:
+    """Rebind the vid's lock to a long-lived owner pid (atomic replace)."""
+    if not vid:
+        raise AllocError("device_alloc: --vid must be non-empty")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        raise AllocError(f"device_alloc: --pid must be a positive int, got {pid!r}")
+    if not _pid_alive(pid):
+        # a dead pid (or one about to be recycled and reused by an unrelated
+        # process) would pin the card behind a phantom owner forever
+        raise AllocError(f"adopt: target owner pid {pid} is not alive — "
+                         "adopt only a process you just launched")
+    matches: list[tuple[int, dict, Path]] = []
+    for path in sorted(_devices_dir(artifacts).glob("*.lock"),
+                       key=lambda p: p.name):
+        if not path.stem.isdigit():
+            continue
+        try:
+            lock = _read_lock(path)
+        except (AllocError, ValueError, json.JSONDecodeError, OSError):
+            continue
+        if lock.get("vid") == vid:
+            matches.append((int(path.stem), lock, path))
+    if not matches:
+        raise AllocError(f"adopt: no lock under devices/ names vid {vid!r}")
+    if len(matches) > 1:
+        idxs = [m[0] for m in matches]
+        raise AllocError(f"adopt: {len(matches)} locks name vid {vid!r} "
+                         f"(idx {idxs}) — the ledger is torn, never guess")
+    idx, lock, path = matches[0]
+    doc = dict(lock)
+    doc["pid"] = pid
+    tmp = path.with_name(path.name + f".adopt.{os.getpid()}")
+    tmp.write_text(json.dumps(doc, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    return {"adopted": True, "idx": idx, "vid": vid, "pid": pid}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="command", required=True)
@@ -285,6 +371,17 @@ def main() -> int:
         "release", help="delete one device lock (idempotent)")
     ap_release.add_argument("--artifacts", required=True)
     ap_release.add_argument("--idx", type=int, required=True)
+
+    ap_claim = sub.add_parser(
+        "claim", help="free -> acquire -> idx-in-free-set guard (one command)")
+    ap_claim.add_argument("--artifacts", required=True)
+    ap_claim.add_argument("--vid", required=True)
+
+    ap_adopt = sub.add_parser(
+        "adopt", help="rebind the vid's lock to a long-lived owner pid")
+    ap_adopt.add_argument("--artifacts", required=True)
+    ap_adopt.add_argument("--vid", required=True)
+    ap_adopt.add_argument("--pid", type=int, required=True)
     ns = ap.parse_args()
 
     try:
@@ -293,6 +390,10 @@ def main() -> int:
             result: dict = acquire(artifacts, ns.vid, ns.pid)
         elif ns.command == "free":
             result = free(artifacts)
+        elif ns.command == "claim":
+            result = claim(artifacts, ns.vid)
+        elif ns.command == "adopt":
+            result = adopt(artifacts, ns.vid, ns.pid)
         else:
             result = release(artifacts, ns.idx)
     except (AllocError, OSError, ValueError) as exc:

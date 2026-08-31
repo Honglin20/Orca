@@ -136,8 +136,15 @@ The sub-agents already wrote:
 - `templates/run_eval.template.sh`
 - `templates/export_onnx.template.sh`
 
-Verify each exists and carries the required `<<token>>` set. Do not rewrite
-them inline.
+Verify each exists and carries the required `<<token>>` set (the gate
+checks it mechanically). Both training templates must additionally carry
+`<<device>>`: every training render (the baseline chain, the probe node's
+variant launch) binds the training to a device index claimed through the
+allocation ledger via `--set device=<idx>` — the template renders it as the
+backend's device binding (e.g. `CUDA_VISIBLE_DEVICES=<idx>` on cuda, the
+NPU device index on npu). A training template missing the device token
+fails the gate: a render that silently ignores the allocated card breaks
+the device ledger's mutual exclusion. Do not rewrite the templates inline.
 
 ### Step 6: Injection Environment Disclosure
 

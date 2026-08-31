@@ -1,19 +1,39 @@
 #!/usr/bin/env python3
-"""Pre-return gate for po_probe.
+"""Pre-return gate for po_probe (v6, SPEC §6.2).
 
-Verifies terminal probe outcomes and the phase-specific disk closure before
-emit. It never re-judges a probe outcome; it only checks that the files and
-history rows required by the node contract exist and parse.
+Verifies the launch-and-release disk state before emit, for every variant
+whose LATEST history row is `latency_pass` (the training set; a vid that
+already reached a terminal row is out of scope):
+
+  1. verdict precondition: variants/<vid>/verdict.json carries
+     makespan_cycles <= the frozen target_cycles (base/origin_anchor.json).
+     A missing/above-line verdict is a torn workspace and must fail here.
+  2. device lock: a devices/<idx>.lock exists whose vid matches the vid.
+  3. training liveness: variants/<vid>/train/train.pid records a LIVE pid
+     (with /proc cmdline attribution when readable — a recycled pid never
+     counts) OR the training already reached a terminal state
+     (variants/<vid>/train_status.json stage in killed|done|failed — the
+     watchdog's product) with the terminal file on disk.
+  4. watchdog: variants/<vid>/watchdog.pid exists. While the deployed
+     watchdog is the interface stub (it exits immediately by contract), pid
+     LIVENESS is deliberately not asserted; the real watchdog restores the
+     alive check.
+  5. liveness record: variants/<vid>/train/liveness.json parses and records
+     epoch1_ok true.
+
+Structural completeness only — launch outcomes and verdicts themselves are
+never re-judged here (Step 0 already compared the verdict once; this gate
+re-asserts it end-to-end).
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
-
-TERMINAL_PROBE = {"accuracy_pass", "accuracy_fail", "probe_insufficient"}
+TERMINAL_TRAIN_STAGES = frozenset({"killed", "done", "failed"})
 
 
 def _load_json(path: Path, what: str):
@@ -23,6 +43,123 @@ def _load_json(path: Path, what: str):
         return None
     except json.JSONDecodeError as exc:
         raise ValueError(f"{what} unparseable: {path} ({exc})") from exc
+
+
+def _pid_alive(pid: int) -> bool:
+    if sys.platform == "win32":
+        # os.kill(pid, 0) on Windows TERMINATES the target — never signal a
+        # pid we are only checking. /proc (when present) is the existence
+        # probe; without it liveness cannot be disproven and counts alive.
+        proc = Path(f"/proc/{pid}")
+        return proc.exists() if proc.parent.is_dir() else True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # alive, owned by another user — still an owner
+    return True
+
+
+def _pid_attributed(pid: int, expect: str) -> bool:
+    """True when the pid's /proc cmdline references `expect`. An unreadable
+    /proc (non-POSIX host) cannot disprove attribution — count it alive; a
+    READABLE cmdline that disagrees (pid reuse) must fail."""
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return True
+    if not cmdline:
+        return True
+    return expect in cmdline.replace(b"\0", b" ").decode("utf-8", "replace")
+
+
+def _check_vid(art: Path, vid: str, target: int, problems: list[str]) -> None:
+    # 1. verdict precondition (inclusive boundary: == target holds)
+    try:
+        verdict = _load_json(art / "variants" / vid / "verdict.json",
+                             f"{vid} verdict.json")
+    except ValueError as exc:
+        problems.append(str(exc))
+        verdict = None
+    if not isinstance(verdict, dict):
+        problems.append(f"{vid} verdict.json missing or not an object — torn "
+                        "workspace (propose and probe disagree)")
+    else:
+        ms = verdict.get("makespan_cycles")
+        if not isinstance(ms, int) or isinstance(ms, bool):
+            problems.append(f"{vid} verdict.json carries no makespan_cycles — "
+                            "torn workspace")
+        elif ms > target:
+            problems.append(
+                f"{vid} makespan {ms} > frozen target {target} — torn "
+                "workspace (the verdict changed between propose and probe)")
+
+    # 2. device lock named for this vid
+    vdir = art / "variants" / vid
+    lock_hit = None
+    for lock in sorted((art / "devices").glob("*.lock")) \
+            if (art / "devices").is_dir() else []:
+        try:
+            doc = json.loads(lock.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(doc, dict) and doc.get("vid") == vid:
+            lock_hit = lock
+            break
+    if lock_hit is None:
+        problems.append(f"{vid} has no devices/<idx>.lock naming it (the "
+                        "training must run on a ledger-claimed card)")
+
+    # 3. training pid alive OR terminal state with its terminal file
+    pid_path = vdir / "train" / "train.pid"
+    pid: int | None = None
+    if not pid_path.is_file():
+        problems.append(f"{vid} train/train.pid missing (no launch state)")
+    else:
+        try:
+            pid = int(pid_path.read_text(encoding="utf-8").strip())
+        except ValueError:
+            problems.append(f"{vid} train/train.pid is not an int: "
+                            f"{pid_path.read_text(encoding='utf-8')!r}")
+    try:
+        train_status = _load_json(vdir / "train_status.json",
+                                  f"{vid} train_status.json")
+    except ValueError as exc:
+        train_status = None
+        problems.append(str(exc))
+    terminal = (isinstance(train_status, dict)
+                and train_status.get("stage") in TERMINAL_TRAIN_STAGES)
+    if pid is not None and not terminal:
+        if not _pid_alive(pid):
+            problems.append(
+                f"{vid} training pid {pid} is dead with no terminal "
+                "train_status.json (stage killed|done|failed) — an "
+                "unjudged dead launch")
+        elif not _pid_attributed(pid, "train.rendered.sh"):
+            problems.append(
+                f"{vid} training pid {pid} is alive but its cmdline does not "
+                "reference train.rendered.sh (pid reuse — not our training)")
+
+    # 4. watchdog pid file (liveness deliberately deferred: the deployed
+    #    watchdog is the interface stub and exits immediately)
+    if not (vdir / "watchdog.pid").is_file():
+        problems.append(f"{vid} watchdog.pid missing (the launch is "
+                        "incomplete without its guardian)")
+
+    # 5. liveness record
+    try:
+        liveness = _load_json(vdir / "train" / "liveness.json",
+                              f"{vid} liveness.json")
+    except ValueError as exc:
+        liveness = None
+        problems.append(str(exc))
+    if not isinstance(liveness, dict):
+        if not terminal:
+            problems.append(f"{vid} train/liveness.json missing (the epoch-1 "
+                            "liveness proof is a hard emit precondition)")
+    elif liveness.get("epoch1_ok") is not True:
+        problems.append(f"{vid} liveness.json epoch1_ok is not true")
 
 
 def main() -> int:
@@ -46,97 +183,42 @@ def main() -> int:
         return 1
 
     try:
-        mode = round_state.mode_state(art)["mode"]
         r = round_state.current_round(art)
     except Exception as exc:
-        print(f"check_probe_emit: FAIL mode/round unavailable: {exc}",
+        print(f"check_probe_emit: FAIL round unavailable: {exc}",
               file=sys.stderr)
         return 1
 
-    rd = art / f"rounds/{r:03d}"
-    if mode == "latency":
-        marker_path = art / ".round_advanced"
-        try:
-            marker = _load_json(marker_path, ".round_advanced")
-        except ValueError as exc:
-            problems.append(str(exc))
-        else:
-            if marker is None or marker.get("round") != r or marker.get("mode") != "latency":
-                problems.append(".round_advanced does not record (round, latency)")
-    else:
-        results_path = rd / "probe_results.jsonl"
-        history_path = art / "history.jsonl"
-        rows = history_lib.read_rows(history_path)
-        latest = history_lib.read_latest(history_path)
-        best = _load_json(art / "best.json", "best.json")
-        if best is None or not isinstance(best.get("vid"), str):
-            problems.append("best.json missing or lacks vid")
-        else:
-            best_vid = best["vid"]
-            best_has_prior_probe = any(
-                row.get("vid") == best_vid
-                and row.get("round") != r
-                and row.get("outcome") in TERMINAL_PROBE
-                for row in rows)
-            if not best_has_prior_probe:
-                expected_vids = {best_vid}
-            else:
-                expected_vids = {
-                    row["vid"]
-                    for row in rows
-                    if row.get("round") == r
-                    and row.get("outcome") == "latency_pass"
-                }
+    try:
+        anchor = _load_json(art / "base" / "origin_anchor.json",
+                            "base/origin_anchor.json")
+    except ValueError as exc:
+        anchor = None
+        problems.append(str(exc))
+    target = anchor.get("target_cycles") if isinstance(anchor, dict) else None
+    if not isinstance(target, int) or isinstance(target, bool):
+        problems.append("base/origin_anchor.json target_cycles unavailable "
+                        "(baseline stage incomplete)")
+        target = None
 
-            if not results_path.is_file() or results_path.stat().st_size == 0:
-                problems.append("rounds/<R>/probe_results.jsonl missing or empty")
-            else:
-                result_vids: set[str] = set()
-                try:
-                    for line_no, line in enumerate(
-                            results_path.read_text(encoding="utf-8").splitlines(), 1):
-                        if not line.strip():
-                            continue
-                        row = json.loads(line)
-                        vid = row.get("vid")
-                        outcome = row.get("outcome")
-                        if not isinstance(vid, str) or outcome not in TERMINAL_PROBE:
-                            problems.append(
-                                f"probe_results.jsonl:{line_no} missing terminal outcome")
-                            continue
-                        result_vids.add(vid)
-                        latest_row = latest.get(vid)
-                        if not latest_row or latest_row.get("outcome") not in TERMINAL_PROBE:
-                            problems.append(
-                                f"{vid} has no terminal probe row in history.jsonl")
-                except json.JSONDecodeError as exc:
-                    problems.append(f"probe_results.jsonl unparseable: {exc}")
+    try:
+        latest = history_lib.read_latest(art / "history.jsonl")
+    except Exception as exc:
+        print(f"check_probe_emit: FAIL history unreadable: {exc}",
+              file=sys.stderr)
+        return 1
+    pending = sorted(vid for vid, row in latest.items()
+                     if row.get("outcome") == "latency_pass")
 
-                missing = expected_vids - result_vids
-                if missing:
-                    problems.append(
-                        "probe_results.jsonl missing terminal rows for "
-                        f"{sorted(missing)}")
-                for vid in result_vids - expected_vids:
-                    problems.append(
-                        f"probe_results.jsonl contains unexpected vid {vid}")
+    for vid in pending:
+        if target is not None:
+            _check_vid(art, vid, target, problems)
 
-        for rel in ("analysis.md", "direction.json"):
-            path = rd / rel
-            if not path.is_file() or path.stat().st_size == 0:
-                problems.append(f"rounds/<R>/{rel} missing or empty")
-        try:
-            marker = _load_json(art / ".round_advanced", ".round_advanced")
-        except ValueError as exc:
-            problems.append(str(exc))
-        else:
-            if marker is None or marker.get("round") != r or marker.get("mode") != "accuracy":
-                problems.append(".round_advanced does not record (round, accuracy)")
     if problems:
         for p in problems:
             print(f"check_probe_emit: FAIL {p}", file=sys.stderr)
         return 1
-    print(json.dumps({"ok": True, "round": r, "mode": mode}))
+    print(json.dumps({"ok": True, "round": r, "probed": pending}))
     return 0
 
 
