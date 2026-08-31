@@ -1,5 +1,5 @@
 ---
-description: Close the proposal loop inside one node - verify the deployed scripts, derive the round from the single round source, refresh the mechanical bottleneck report, dispatch the bottleneck analyst then the structure proposer (both subagents) with rerouting evidence and accuracy rules, implement every admitted proposal through the variant-implementer subagent with mechanical history rows, batch-recheck latency under the mode-conditioned gate (no thresholds - a small strictly-better step passes), run the mechanical round advance in the latency phase, and emit the round's closed-loop result.
+description: Close the proposal loop inside one node - verify the deployed scripts, derive the round from the single round source, refresh the mechanical bottleneck report, dispatch the bottleneck analyst, the information analyst, then the structure proposer (three subagents) with rerouting evidence and accuracy rules, implement every admitted proposal through the variant-implementer subagent with mechanical history rows, batch-recheck latency under the mode-conditioned gate (no thresholds - a small strictly-better step passes), run the mechanical round advance in the latency phase, and emit the round's closed-loop result.
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # po_propose
@@ -46,11 +46,11 @@ paths.
 
 ## Subagent Call Protocol (point-to-file)
 
-This node dispatches THREE subagents, in order: `bottleneck-analyst` (Step
-2), `structure-proposer` (Step 3), `variant-implementer` (Step 4, once per
-proposal, plus once per repair pass) — plus `mfu-analyzer` (Step 5, once
-per profiled variant, ONLY when `profile_mode.json` records
-`"mode": "mfu"`). Bodies live at
+This node dispatches FOUR subagents, in order: `bottleneck-analyst` (Step
+2), `information-analyst` (Step 2.5), `structure-proposer` (Step 3),
+`variant-implementer` (Step 4, once per proposal, plus once per repair
+pass) — plus `mfu-analyzer` (Step 5, once per profiled variant, ONLY when
+`profile_mode.json` records `"mode": "mfu"`). Bodies live at
 `{{ subagents_root }}/<name>.md` (inlined as an absolute path at render
 time).
 
@@ -68,8 +68,9 @@ takes its terminal skip / elimination.
 
 Read the levers reference only when constructing the proposer's inputs.
 Read `baseline/business_logic.md` only for the proposer's inputs (you do
-not re-judge it here). Read shadow sources only when a repair pass needs
-the failure context.
+not re-judge it here). Read `base/information_analysis.md` only for the
+proposer's inputs (you do not re-judge it here). Read shadow sources only
+when a repair pass needs the failure context.
 
 ## Workflow
 
@@ -137,6 +138,26 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/experiment_ledger.py" \
   --artifacts "$ORCA_ARTIFACTS_DIR"
 ```
 
+### Step 2.5: Information analysis (stamp-guarded) — first-principles idea source
+
+Compute the information-analysis stamp: the base version identity
+(`best.json`'s `vid` when a best exists, else the sha256 of
+`base/model.onnx`). Compare with `base/.information_stamp.json`:
+
+- **Unchanged** → reuse `base/information_analysis.md` as-is (skip the
+  analyst dispatch; the analysis is still faithful to this base).
+- **Changed** (or the analysis/stamp absent) → dispatch `information-analyst`
+  with inputs: `<output_dir>=$ORCA_ARTIFACTS_DIR`,
+  `<doc_path>=$ORCA_ARTIFACTS_DIR/base/information_analysis.md`. On return,
+  validate mechanically: the first line is the sentinel
+  `[subagent:information-analyst v1 IXA3N7]` and the file is non-empty
+  (failure matrix applies). Then write the new stamp.
+
+The analysis is a qualitative idea source — its prose is not
+machine-checked (same standing as `bottleneck_analysis.json`'s
+interpretation text); every number in it still comes from the mechanical
+sources, and the proposer's admission gates are unchanged.
+
 ### Step 3: Dispatch the structure proposer (rules + rerouting context)
 
 First derive the gate mode and the rerouting evidence:
@@ -161,14 +182,16 @@ the round number `R`, the gate mode + (recovery phase) the current worst
 accuracy gap and the `makespan ≤ target_cycles` hard constraint,
 `<levers_ref>=$ORCA_AGENT_RESOURCES/references/structural-levers.md`,
 `<rules_path>=$ORCA_ARTIFACTS_DIR/accuracy_rules.json` (the measured
-accuracy rules — pass its full content when the file exists), the previous
-round's analysis conclusions (`rounds/<previous round>/analysis.md` full
-content when the file exists — what delivered, what was falsified, and its
-next-direction note; omit on round 1), and the
-failed-sigs union with the instruction: these directions were falsified by
-measurement; when they feel exhausted propose a DEEPER rewrite or a
-different operator family — there is no exhaustion exit before the round
-cap.
+accuracy rules — pass its full content when the file exists),
+`<info_analysis>=$ORCA_ARTIFACTS_DIR/base/information_analysis.md` (the
+first-principles idea source for novel structures — pass its full content
+when the file exists), the previous round's analysis conclusions
+(`rounds/<previous round>/analysis.md` full content when the file exists —
+what delivered, what was falsified, and its next-direction note; omit on
+round 1), and the failed-sigs union with the instruction: these directions
+were falsified by measurement; when they feel exhausted propose a DEEPER
+rewrite or a different operator family — there is no exhaustion exit before
+the round cap.
 
 On return, validate `rounds/<RRR>/proposals.json` mechanically (fix-loop ≤ 3
 on the FILE only — re-dispatch the proposer once when the file itself needs
@@ -362,7 +385,7 @@ prompts.
 python3 "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
   --field status=executed \
   --field 'error=' \
-  --field 'generated_artifacts=["rounds/<RRR>/proposals.json", "rounds/<RRR>/verdicts.jsonl", "rounds/<RRR>/analysis.md", "base/bottleneck_report.json", "base/bottleneck_analysis.json", "experiment_ledger.json", "history.jsonl"]'
+  --field 'generated_artifacts=["rounds/<RRR>/proposals.json", "rounds/<RRR>/verdicts.jsonl", "rounds/<RRR>/analysis.md", "base/bottleneck_report.json", "base/bottleneck_analysis.json", "base/information_analysis.md", "experiment_ledger.json", "history.jsonl"]'
 ```
 
 On failure paths the same three fields with `status=failed`, `error` naming

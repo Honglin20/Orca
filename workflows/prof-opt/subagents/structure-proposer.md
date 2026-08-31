@@ -9,13 +9,17 @@ sentinel: SPO5M2
 # Structure Proposer
 
 Propose up to **3** structure-level optimization candidates for the current
-base model: `rounds/<RRR>/proposals.json`. You reason from four evidence
+base model: `rounds/<RRR>/proposals.json`. You reason from five evidence
 sources — the business-logic document (semantics), the bottleneck analysis
-(where the cycles are), the run history (what was already tried and what
-measured outcomes it produced), and the accuracy rules (which change
+(where the cycles are), the information analysis (first-principles
+decomposition: what information each step carries and which novel
+structures could preserve it), the run history (what was already tried and
+what measured outcomes it produced), and the accuracy rules (which change
 directions measured accuracy has already falsified or cleared) — plus the
 structural-levers reference (background priors, never a checklist to grind
-through).
+through). The information analysis is the idea source for
+catalog-EXTERNAL structures; the levers reference supplies the known
+families.
 
 **Judgement responsibility**: maximize accuracy safety while reducing
 latency — never sacrifice accuracy one-sidedly for latency. Every proposal
@@ -63,6 +67,13 @@ The caller will provide:
      style changes. A composition's new change signature is not blocked by
      the history dedup even when its components' signatures are — that is
      the recovery strategy itself.
+8. **`<info_analysis>`**: the current base's information analysis
+   (`base/information_analysis.md` content) when the workspace has it — the
+   first-principles decomposition: what information each step of the model
+   carries, the minimal information core, redundancy / approximable items,
+   and novel structural directions. Use it as the idea source for
+   structures OUTSIDE the levers catalog; every direction it names is a
+   hypothesis to verify against the actual graph, not a fact.
 
 ## Hard constraints (violation = the proposal set is rejected)
 
@@ -86,6 +97,18 @@ The caller will provide:
    pattern and a falsified (failed_sigs) family are off the table for a
    plain repeat; a composition that explicitly reverts or works around
    them is the legitimate move.
+
+### Novel structures (catalog-external)
+
+When no lever entry fits a selected bottleneck, turn to `<info_analysis>`:
+a direction there that preserves the minimal information core is a
+legitimate candidate even though the catalog does not contain it. For a
+catalog-external structure set `lever` to a short descriptive name (e.g.
+`novel:bilinear-score-path`) — the signature builder treats the lever as an
+opaque string. Everything else is identical: verify the export pattern
+against the actual graph, derive the per-site op delta, price it with the
+predictor, and pass the same admission gates. The information analysis's
+claims are hypotheses — the graph is the truth.
 
 ## Method per candidate
 
@@ -120,10 +143,11 @@ The caller will provide:
    (`"blocked": true` → out, unless it is a NEW composition signature in
    the recovery phase; the probe config values come from `contracts.json`
    `proxy_budget` — read them, never guess.)
-6. Judge the accuracy risk against the rules and the levers reference,
-   assign `predicted_acc_impact` (low / medium / high + one-line reason
-   citing the rule or history evidence). Rank on the accuracy/latency risk
-   Pareto (discard dominated candidates). Assign vids `r{R}-{seq:02d}`.
+6. Judge the accuracy risk against the rules, the levers reference, and the
+   information analysis's risk reasoning, assign `predicted_acc_impact`
+   (low / medium / high + one-line reason citing the rule or history
+   evidence). Rank on the accuracy/latency risk Pareto (discard dominated
+   candidates). Assign vids `r{R}-{seq:02d}`.
 
 ## Output
 
