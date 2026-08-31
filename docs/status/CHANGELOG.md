@@ -5,6 +5,12 @@
 
 ---
 
+## [2026-08-31] feat(prof-opt): mfu 模式瓶颈分析直接采用 mfu-analyzer 报告（commit `a1e7701`）：
+mfu 模式去掉 bottleneck-analyst 层与 top-算子限制，structure-proposer 直接通读
+`base/profile/mfu_bottleneck_report.md` 从整体测量判断瓶颈（DMA/低 MFU/内存/串行化），
+`target_pattern_id` 改为自由标签；placeholder 模式链路不变，`check_propose_emit`
+按 profile 模式机械校验。详见 [release note](../releases/2026-08-31-prof-opt-mfu-bottleneck-source.md)。
+
 ## [2026-08-31] feat(prof-opt): 信息成分拆解 → 创新结构提案（commit `89ae28a`）
 
 prof-opt 新增 `information-analyst` 子代理：按 base 版本 stamp 守卫产出
