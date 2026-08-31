@@ -2,7 +2,9 @@
 """Pre-return gate for po_propose.
 
 Verifies the proposal loop closed its disk state before the node emits:
-proposals.json shape, per-vid history rows, verdict/direction/analysis files,
+proposals.json shape (mode-conditioned `target_pattern_id`: a
+`bottleneck_analysis.json` name in placeholder mode, a non-empty free-form
+label in mfu mode), per-vid history rows, verdict/direction/analysis files,
 and the latency-phase advance marker. This is structural completeness only;
 proposal quality and verdicts are not re-judged here.
 """
@@ -51,6 +53,18 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
+    profile_mode = "placeholder"
+    try:
+        pm = _load_json(art / "profile_mode.json", "profile_mode.json")
+        if pm is None:
+            problems.append("profile_mode.json missing (entry stage incomplete)")
+        elif not isinstance(pm, dict) or pm.get("mode") not in ("placeholder", "mfu"):
+            problems.append("profile_mode.json mode must be placeholder|mfu")
+        else:
+            profile_mode = pm["mode"]
+    except ValueError as exc:
+        problems.append(str(exc))
+
     rd = art / f"rounds/{r:03d}"
     try:
         proposals = _load_json(rd / "proposals.json", "proposals.json")
@@ -66,6 +80,28 @@ def main() -> int:
                 problems.append("proposals must be a list of at most 3")
             elif prop_list:
                 latest = history_lib.read_latest(art / "history.jsonl")
+                names: set[str] | None = None
+                if profile_mode == "placeholder":
+                    analysis = _load_json(
+                        art / "base" / "bottleneck_analysis.json",
+                        "bottleneck_analysis.json")
+                    if analysis is None:
+                        problems.append(
+                            "base/bottleneck_analysis.json missing "
+                            "(placeholder mode)")
+                    elif not isinstance(analysis, dict):
+                        problems.append(
+                            "base/bottleneck_analysis.json must be a JSON "
+                            "object")
+                    else:
+                        entries = analysis.get("top_bottlenecks")
+                        names = ({e.get("name") for e in entries
+                                  if isinstance(e, dict)}
+                                 if isinstance(entries, list) else set())
+                        if not names:
+                            problems.append(
+                                "base/bottleneck_analysis.json "
+                                "top_bottlenecks has no names")
                 for prop in prop_list:
                     vid = prop.get("vid")
                     if not isinstance(vid, str) or not vid:
@@ -81,6 +117,16 @@ def main() -> int:
                         problems.append(f"{vid} predicted_delta_cycles must be int < 0")
                     if not prop.get("edited_files"):
                         problems.append(f"{vid} edited_files must be non-empty")
+                    tpid = prop.get("target_pattern_id")
+                    if profile_mode == "mfu":
+                        if not isinstance(tpid, str) or not tpid.strip():
+                            problems.append(
+                                f"{vid} target_pattern_id must be non-empty "
+                                "(mfu mode)")
+                    elif names is not None and tpid not in names:
+                        problems.append(
+                            f"{vid} target_pattern_id {tpid!r} is not a name "
+                            "in base/bottleneck_analysis.json")
                     row = latest.get(vid)
                     if not row:
                         problems.append(f"{vid} has no history row")

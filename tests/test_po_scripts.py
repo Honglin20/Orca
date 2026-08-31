@@ -2020,6 +2020,72 @@ def test_check_propose_emit_gate(tmp_path: Path):
     (art / "base").mkdir(parents=True)
     (art / "base" / "origin_anchor.json").write_text(
         json.dumps({"target_cycles": 100}), encoding="utf-8")
+    (art / "profile_mode.json").write_text(
+        json.dumps({"mode": "placeholder"}), encoding="utf-8")
+    (art / "base" / "bottleneck_analysis.json").write_text(json.dumps({
+        "schema_version": 1, "base_report": "base/bottleneck_report.json",
+        "summary": "s",
+        "top_bottlenecks": [{"name": "P1", "op_type": "Erf", "cycles": 1,
+                             "analysis": "a"}]}), encoding="utf-8")
+    rd = art / "rounds" / "001"
+    rd.mkdir(parents=True)
+    proposals = {
+        "round": 1, "exhausted": False, "filtered_count": 0,
+        "exhausted_rationale": [],
+        "proposals": [{
+            "vid": "r1-01", "change_sig": "sig",
+            "predicted_delta_cycles": -10, "edited_files": ["pkg/model.py"],
+            "target_pattern_id": "P1", "predicted_acc_impact": "low",
+            "sota_reference": "ref",
+        }],
+    }
+    (rd / "proposals.json").write_text(json.dumps(proposals), encoding="utf-8")
+    (art / "history.jsonl").write_text(
+        '{"vid": "r1-01", "round": 1, "change_sig": "sig"}\n',
+        encoding="utf-8")
+    (rd / "verdicts.jsonl").write_text('{"vid": "r1-01"}\n', encoding="utf-8")
+    (rd / "direction.json").write_text('{}', encoding="utf-8")
+    (rd / "analysis.md").write_text("# latency\n", encoding="utf-8")
+    (art / ".round_advanced").write_text(
+        '{"round": 1, "mode": "latency"}', encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "check_propose_emit.py"),
+         "--artifacts", str(art)],
+        capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+
+    # placeholder mode: a target_pattern_id outside the analysis list fails
+    proposals["proposals"][0]["target_pattern_id"] = "P9"
+    (rd / "proposals.json").write_text(json.dumps(proposals), encoding="utf-8")
+    proc1b = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "check_propose_emit.py"),
+         "--artifacts", str(art)],
+        capture_output=True, text=True, timeout=60)
+    assert proc1b.returncode == 1
+    assert "not a name in base/bottleneck_analysis.json" in proc1b.stderr
+
+    (rd / "proposals.json").unlink()
+    proc2 = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "check_propose_emit.py"),
+         "--artifacts", str(art)],
+        capture_output=True, text=True, timeout=60)
+    assert proc2.returncode == 1
+    assert "proposals.json missing" in proc2.stderr
+
+
+def test_check_propose_emit_mfu_freeform_target(tmp_path: Path):
+    """mfu mode: target_pattern_id is a free-form label and the gate never
+    requires the placeholder bottleneck_analysis.json."""
+    art = tmp_path / "art"
+    (art / "scripts").mkdir(parents=True)
+    shutil.copy(_SCRIPTS / "round_state.py", art / "scripts" / "round_state.py")
+    shutil.copy(_SCRIPTS / "history_lib.py", art / "scripts" / "history_lib.py")
+    (art / "base").mkdir(parents=True)
+    (art / "base" / "origin_anchor.json").write_text(
+        json.dumps({"target_cycles": 100}), encoding="utf-8")
+    (art / "profile_mode.json").write_text(
+        json.dumps({"mode": "mfu"}), encoding="utf-8")
     rd = art / "rounds" / "001"
     rd.mkdir(parents=True)
     (rd / "proposals.json").write_text(json.dumps({
@@ -2028,7 +2094,7 @@ def test_check_propose_emit_gate(tmp_path: Path):
         "proposals": [{
             "vid": "r1-01", "change_sig": "sig",
             "predicted_delta_cycles": -10, "edited_files": ["pkg/model.py"],
-            "target_pattern_id": "P1", "predicted_acc_impact": "low",
+            "target_pattern_id": "dma-stall", "predicted_acc_impact": "low",
             "sota_reference": "ref",
         }],
     }), encoding="utf-8")
@@ -2046,14 +2112,6 @@ def test_check_propose_emit_gate(tmp_path: Path):
          "--artifacts", str(art)],
         capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr
-
-    (rd / "proposals.json").unlink()
-    proc2 = subprocess.run(
-        [sys.executable, str(_SCRIPTS / "check_propose_emit.py"),
-         "--artifacts", str(art)],
-        capture_output=True, text=True, timeout=60)
-    assert proc2.returncode == 1
-    assert "proposals.json missing" in proc2.stderr
 
 
 def test_check_probe_emit_gate_latency_passthrough(tmp_path: Path):

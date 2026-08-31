@@ -193,6 +193,11 @@ nodes:
   #   advanced_vid）。
   #   executed → po_probe；catch-all → po_report。
   # ───────────────────────────────────────────────────────────────────────────
+  # mfu mode: bottleneck analysis source is base/profile/mfu_bottleneck_report.md
+  # (baseline stage; refreshed on promotion via the winner's profile copy) - no
+  # bottleneck-analyst dispatch, no base/bottleneck_analysis.json.
+  # placeholder mode: Step2 bottleneck-analyst (stamp-guarded) produces
+  # base/bottleneck_analysis.json.
   - name: po_propose
     kind: agent
     agent: po_propose

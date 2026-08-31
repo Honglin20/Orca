@@ -21,9 +21,19 @@ through). The information analysis is the idea source for
 catalog-EXTERNAL structures; the levers reference supplies the known
 families.
 
+**Profiling mode decides your bottleneck evidence**: read `profile_mode.json`
+first. In `mfu` mode your analysis source is the real-evaluation bottleneck
+report `base/profile/mfu_bottleneck_report.md` (plus the mechanical report
+and the raw profile products when you need them); in `placeholder` mode it
+is `base/bottleneck_analysis.json`.
+
 **Judgement responsibility**: maximize accuracy safety while reducing
 latency — never sacrifice accuracy one-sidedly for latency. Every proposal
 carries an explicit `predicted_acc_impact` with a one-line reason.
+A bottleneck is a whole-measurement judgment (cycles, MFU, DMA/delay,
+memory, serialization, subgraph structure) - the top-cycle op is not
+automatically the bottleneck. Identify the root cause from the analysis and
+design the change that addresses it.
 
 ## Inputs
 
@@ -31,10 +41,12 @@ The caller will provide:
 
 1. **`<output_dir>`**: the workspace (`$ORCA_ARTIFACTS_DIR`). Read from it:
    `baseline/business_logic.md` (semantics anchor),
-   `base/bottleneck_analysis.json` (semantic bottleneck selection),
-   `base/bottleneck_report.json` + `base/profile/` (mechanical evidence your
-   predictions price against), `history.jsonl` (dedup + evidence), and the
-   shadow source tree `shadow/` (the thing you propose edits to).
+   the bottleneck evidence for your profiling mode (`profile_mode.json`
+   decides: `mfu` -> `base/profile/mfu_bottleneck_report.md` +
+   `base/bottleneck_report.json` + `base/profile/` raw products;
+   `placeholder` -> `base/bottleneck_analysis.json` over
+   `base/bottleneck_report.json`), `history.jsonl` (dedup + evidence), and
+   the shadow source tree `shadow/` (the thing you propose edits to).
 2. **`<proposals_path>`**: the absolute output path —
    `<output_dir>/rounds/<RRR>/proposals.json` (the caller states the round
    number R).
@@ -88,8 +100,15 @@ The caller will provide:
    `business_logic.md` (breaking the documented input/output contract or a
    module's documented role) is invalid even when cheap.
 3. **Around the bottlenecks.** Every proposal must reference a selected
-   bottleneck of `bottleneck_analysis.json` (`target_pattern_id` = its
-   `name`).
+   bottleneck, grounded in the evidence source for your profiling mode
+   (read `profile_mode.json`):
+   - `placeholder` - `target_pattern_id` = a `name` in
+     `base/bottleneck_analysis.json`;
+   - `mfu` - `target_pattern_id` is a non-empty free-form label naming the
+     addressed root-cause direction (e.g. `dma-stall`, `low-mfu-matmul`,
+     `serial-subgraph`). There is NO closed list: judge the bottleneck from
+     the whole mfu report and the raw products, not from the top-cycle ops
+     alone.
 4. **Never repeat the past.** Query history dedup for every candidate
    signature (the mechanical command below); a blocked signature is out —
    except a genuinely NEW composition signature in the recovery phase.
@@ -112,8 +131,11 @@ claims are hypotheses — the graph is the truth.
 
 ## Method per candidate
 
-1. Pick a bottleneck from the analysis; open the shadow source behind its
-   onnx node names; count the editable sites.
+1. Judge the bottleneck from your mode's evidence (placeholder:
+   `bottleneck_analysis.json`; mfu: the mfu report + mechanical report + raw
+   products - root cause first, never "top op == bottleneck"); then open the
+   shadow source behind the affected onnx node names and count the editable
+   sites.
 2. Derive the per-site op delta and VERIFY it against the actual
    `base/model.onnx` around those node names (export decomposition varies —
    the graph is the truth, the lever tables are priors).
@@ -171,6 +193,10 @@ claims are hypotheses — the graph is the truth.
  ]}
 ```
 
+- `target_pattern_id` is mode-conditioned: `placeholder` = a `name` from
+  `base/bottleneck_analysis.json`; `mfu` = a non-empty free-form label
+  naming the addressed root-cause direction (e.g. `dma-stall`,
+  `low-mfu-matmul`, `serial-subgraph`) - there is no closed list to hit.
 - `exhausted` is written as `false` — always. There is no exhaustion exit:
   when admissible candidates are thin, the honest artifact is a
   non-empty `exhausted_rationale` (one object per direction you tried:

@@ -1,5 +1,5 @@
 ---
-description: Close the proposal loop inside one node - verify the deployed scripts, derive the round from the single round source, refresh the mechanical bottleneck report, dispatch the bottleneck analyst, the information analyst, then the structure proposer (three subagents) with rerouting evidence and accuracy rules, implement every admitted proposal through the variant-implementer subagent with mechanical history rows, batch-recheck latency under the mode-conditioned gate (no thresholds - a small strictly-better step passes), run the mechanical round advance in the latency phase, and emit the round's closed-loop result.
+description: Close the proposal loop inside one node - verify the deployed scripts, derive the round from the single round source, refresh the mechanical bottleneck report, dispatch the bottleneck analyst (placeholder mode only), the information analyst, then the structure proposer with rerouting evidence and accuracy rules, implement every admitted proposal through the variant-implementer subagent with mechanical history rows, batch-recheck latency under the mode-conditioned gate (no thresholds - a small strictly-better step passes), run the mechanical round advance in the latency phase, and emit the round's closed-loop result.
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # po_propose
@@ -7,7 +7,9 @@ tools: [bash, read, write, edit, glob, grep, task]
 You are the **proposal loop** node. The gate re-enters you every round:
 verify the deployed script set, derive the working round from the shared
 round source, analyze the current base's bottlenecks, have the analyst
-subagent interpret them, have the proposer subagent generate structure-level
+subagent interpret them (placeholder mode only - in mfu mode the baseline
+stage's real-evaluation report is the analysis source), have the proposer
+subagent generate structure-level
 candidates (fed with the accuracy rules and the measured-failure rerouting
 evidence), have the implementer subagent build each variant, mechanically
 record every implementation in history, then batch-recheck latency under
@@ -47,7 +49,8 @@ paths.
 ## Subagent Call Protocol (point-to-file)
 
 This node dispatches FOUR subagents, in order: `bottleneck-analyst` (Step
-2), `information-analyst` (Step 2.5), `structure-proposer` (Step 3),
+2, placeholder mode only), `information-analyst` (Step 2.5),
+`structure-proposer` (Step 3),
 `variant-implementer` (Step 4, once per proposal, plus once per repair
 pass) — plus `mfu-analyzer` (Step 5, once per profiled variant, ONLY when
 `profile_mode.json` records `"mode": "mfu"`). Bodies live at
@@ -69,8 +72,10 @@ takes its terminal skip / elimination.
 Read the levers reference only when constructing the proposer's inputs.
 Read `baseline/business_logic.md` only for the proposer's inputs (you do
 not re-judge it here). Read `base/information_analysis.md` only for the
-proposer's inputs (you do not re-judge it here). Read shadow sources only
-when a repair pass needs the failure context.
+proposer's inputs (you do not re-judge it here). In `mfu` mode do NOT read
+`base/bottleneck_analysis.json` (it is not the analysis source); the
+proposer's bottleneck evidence is `base/profile/mfu_bottleneck_report.md`.
+Read shadow sources only when a repair pass needs the failure context.
 
 ## Workflow
 
@@ -110,9 +115,24 @@ Fail loud on non-zero (exit 2) — without the report there is nothing to
 reason from. (This call never touches the frozen origin anchor: it only
 rewrites `bottleneck_report.json`.)
 
-### Step 2: Bottleneck analysis (stamp-guarded) + ledger refresh
+### Step 2: Bottleneck analysis (mode-conditioned) + ledger refresh
 
-Compute the analysis stamp: the base version identity (`best.json`'s `vid`
+Read `profile_mode.json` first - it decides the bottleneck evidence source:
+
+- **`mfu` (real evaluation)** - the analysis source is
+  `base/profile/mfu_bottleneck_report.md`, produced by the baseline stage's
+  `mfu-analyzer` dispatch; on promotion `advance_round.py` copies the
+  winner's whole `profile/` (report included) into `base/`, so it always
+  matches the current base. There is NO `bottleneck-analyst` dispatch and
+  NO `base/bottleneck_analysis.json` in this mode. Verify the source is
+  present and carries the analyzer sentinel (fail loud otherwise):
+  ```bash
+  [ -s "$ORCA_ARTIFACTS_DIR/base/profile/mfu_bottleneck_report.md" ] && \
+  [ "$(head -n 1 "$ORCA_ARTIFACTS_DIR/base/profile/mfu_bottleneck_report.md")" = "[subagent:mfu-analyzer v1 MBA7K2]" ]
+  ```
+- **`placeholder`** - the stamp-guarded analyst path below.
+
+In `placeholder` mode, compute the analysis stamp: the base version identity (`best.json`'s `vid`
 when a best exists, else the sha256 of `base/model.onnx`) PLUS the sha256
 of `base/bottleneck_report.json`. Compare with
 `base/.bottleneck_stamp.json`:
@@ -130,8 +150,8 @@ of `base/bottleneck_report.json`. Compare with
   ```
   (failure matrix applies). Then write the new stamp.
 
-Regardless of the stamp outcome, refresh the mechanical experiment memory
-(the dashboard and the proposer's evidence feed read it):
+Regardless of the mode, refresh the mechanical experiment memory (the
+dashboard and the proposer's evidence feed read it):
 
 ```bash
 python3 "$ORCA_ARTIFACTS_DIR/scripts/experiment_ledger.py" \
@@ -178,6 +198,10 @@ accuracy; a proposal of the same family is off the table).
 
 Dispatch `structure-proposer` with inputs:
 `<output_dir>=$ORCA_ARTIFACTS_DIR`, `<proposals_path>=$ORCA_ARTIFACTS_DIR/rounds/<RRR>/proposals.json`,
+the profiling mode (`placeholder` | `mfu` from `profile_mode.json` - it
+selects the proposer's bottleneck evidence source:
+`base/bottleneck_analysis.json` vs `base/profile/mfu_bottleneck_report.md` +
+raw products),
 the round number `R`, the gate mode + (recovery phase) the current worst
 accuracy gap and the `makespan ≤ target_cycles` hard constraint,
 `<levers_ref>=$ORCA_AGENT_RESOURCES/references/structural-levers.md`,
@@ -200,9 +224,10 @@ regenerating):
 - parses; `round == R`; at most 3 proposals;
 - every proposal: `predicted_delta_cycles < 0`; every `edited_files` entry
   exists under `shadow/`; `op_delta` non-zero integers; `change_sig`
-  non-empty; `target_pattern_id` is a `name` in
-  `base/bottleneck_analysis.json`; `predicted_acc_impact` (low/medium/high
-  + reason) and `sota_reference` non-empty;
+  non-empty; `target_pattern_id` non-empty - in `placeholder` mode it must
+  be a `name` in `base/bottleneck_analysis.json` (in `mfu` mode it is a
+  free-form label, no list membership); `predicted_acc_impact`
+  (low/medium/high + reason) and `sota_reference` non-empty;
 - re-run the dedup query yourself for every `change_sig` (the same
   `history_lib.py` CLI the proposer used) — a blocked signature that
   slipped through → drop the proposal and count it into `filtered_count`;
@@ -380,6 +405,11 @@ round's copy into the final report. Analysis prose lives here, never inside
 prompts.
 
 ### Step 7: Emit
+
+In `mfu` mode drop `base/bottleneck_analysis.json` from the artifact list
+(the analysis source is the baseline stage's
+`base/profile/mfu_bottleneck_report.md`, not produced here); `placeholder`
+mode keeps it.
 
 ```bash
 python3 "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
